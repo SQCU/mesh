@@ -54,6 +54,37 @@ Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 > if every later step fails, the machine is still remotely recoverable.
 > Pin `MESH_REF` to a tag or SHA when you want a reproducible definition.
 
+## Node profiles
+
+Two kinds of machine live on this fabric, and conflating them destroys the alarm:
+
+| profile | meaning | absence means |
+|---|---|---|
+| `appliance` (default) | must never withdraw. Never sleeps, restarts itself, firewall off. | **incident** |
+| `portable` | a laptop that legitimately sleeps and travels. Reachable when awake. | expected |
+
+```
+sudo MESH_PROFILE=portable ./install.sh
+```
+
+A `portable` node keeps its firewall and screen lock — it leaves the room, and with
+it the physical access control that justified disarming those on an appliance. It is
+not forced awake either; a laptop held awake in a bag is a thermal problem, not a
+reliability win.
+
+The profile is carried in the node's own Bonjour announcement, so `mesh-peers` can
+tell a closed lid from a dead appliance with no central registry. This exists to
+protect the meaning of the alarm: if closing a laptop lid fired the same alarm as a
+withdrawn appliance, the alarm would be ignored within a week, and a genuinely dead
+node would go unnoticed.
+
+## Is anything missing?
+
+```
+mesh-peers        # every node announcing on the fabric right now
+mesh-status       # this node's power, lifelines, RDMA, daemons, and peers
+```
+
 ## Why sshd is enabled via launchctl
 
 The documented path is gated behind Full Disk Access, which can only be granted

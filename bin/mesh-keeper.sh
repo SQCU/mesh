@@ -5,14 +5,20 @@ LOG=/usr/local/mesh/log/keeper.log
 exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
 drift=0
-for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autorestart=1 womp=1 powermode=2; do
-  k=${kv%%=*}; want=${kv##*=}
-  have=$(pmset -g custom | awk -v k="$k" '$1==k {print $2; exit}')
-  [ -n "$have" ] || continue
-  if [ "$have" != "$want" ]; then
-    echo "[$(ts)] DRIFT $k=$have -> $want"; pmset -a "$k" "$want"; drift=1
-  fi
-done
+PROFILE=$(cat /usr/local/mesh/profile 2>/dev/null || echo appliance)
+
+# A portable node is allowed to sleep and keeps its defences; only an appliance
+# owes us continuous presence.
+if [ "$PROFILE" = appliance ]; then
+  for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autorestart=1 womp=1 powermode=2; do
+    k=${kv%%=*}; want=${kv##*=}
+    have=$(pmset -g custom | awk -v k="$k" '$1==k {print $2; exit}')
+    [ -n "$have" ] || continue
+    if [ "$have" != "$want" ]; then
+      echo "[$(ts)] DRIFT $k=$have -> $want"; pmset -a "$k" "$want"; drift=1
+    fi
+  done
+fi
 # The two lifelines. Losing either strands the node.
 if ! /usr/bin/nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1; then
   echo "[$(ts)] DRIFT sshd not listening -> re-bootstrapping"
@@ -38,8 +44,10 @@ if [ "$(systemsetup -getusingnetworktime 2>/dev/null | awk '{print $NF}')" != "O
   echo "[$(ts)] DRIFT network time off -> re-enabling"
   systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1
 fi
-# The app firewall can only ever subtract reachability. Never let it come back on.
-if [ "$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -c 'State = 1')" != "0" ]; then
+# On an appliance the firewall can only ever subtract reachability, and the room
+# is the real boundary. A portable node keeps its firewall -- it leaves the room.
+if [ "$PROFILE" = appliance ] \
+   && /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -q 'State = 1'; then
   echo "[$(ts)] DRIFT app firewall enabled itself -> disabling"
   /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off >/dev/null 2>&1; drift=1
 fi

@@ -11,6 +11,18 @@ MESH_ROOT=/usr/local/mesh
 ADMIN_USER="${MESH_USER:-${SUDO_USER:-mdot}}"
 TB_SERVICE="Thunderbolt Bridge"
 
+# Node profile. Two kinds of machine live on this fabric:
+#   appliance -- a node that must never withdraw. Absence IS an alarm. (default)
+#   portable  -- a laptop that legitimately sleeps and travels. Reachable when
+#                awake, announces itself, holds the roster -- but its absence is
+#                expected, not an incident.
+# This distinction exists to protect the alarm's meaning. If a laptop closing its
+# lid fired the same alarm as a dead appliance, the alarm would be ignored within
+# a week, and a genuinely withdrawn node would go unnoticed. Set with:
+#   sudo MESH_PROFILE=portable ./install.sh
+PROFILE="${MESH_PROFILE:-appliance}"
+case "$PROFILE" in appliance|portable) ;; *) echo "MESH_PROFILE must be appliance|portable"; exit 1;; esac
+
 [ "$(id -u)" -eq 0 ] || { echo "must run as root: sudo ./install.sh"; exit 1; }
 id "$ADMIN_USER" >/dev/null 2>&1 || { echo "no such user: $ADMIN_USER (set MESH_USER)"; exit 1; }
 echo "provisioning node for user: $ADMIN_USER   (repo: $REPO)"
@@ -29,11 +41,22 @@ ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
 ok "$MESH_ROOT populated; 'mesh-status' and 'mesh-peers' on PATH"
 
-sec "2. Power -- never sleep, always come back"
-for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
-          powernap=0 autorestart=1 womp=1 tcpkeepalive=1 ttyskeepawake=1 powermode=2; do
-  try "${kv}" pmset -a "${kv%%=*}" "${kv##*=}"
-done
+echo "$PROFILE" > "$MESH_ROOT/profile"
+
+if [ "$PROFILE" = appliance ]; then
+  sec "2. Power -- never sleep, always come back"
+  for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
+            powernap=0 autorestart=1 womp=1 tcpkeepalive=1 ttyskeepawake=1 powermode=2; do
+    try "${kv}" pmset -a "${kv%%=*}" "${kv##*=}"
+  done
+else
+  sec "2. Power -- skipped (portable profile)"
+  # A portable node is allowed to sleep; forcing a laptop to stay awake in a bag
+  # is a thermal and battery problem, not a reliability win. Keep only the pieces
+  # that make it reachable the moment it IS awake.
+  try "wake on network" pmset -a womp 1
+  try "tcp keepalive"   pmset -a tcpkeepalive 1
+fi
 
 sec "3. Boot resilience"
 try "restart on freeze"        systemsetup -setrestartfreeze on
@@ -49,13 +72,20 @@ sec "3b. Anti-withdrawal -- neutralize the defaults that make a node go quiet"
 # machine from the mesh for a reason that sounds locally sensible.
 try "network time on"      systemsetup -setusingnetworktime on
 try "auto-boot on power"   nvram auto-boot=true
-try "screensaver never"    sudo -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
-# The application firewall is disabled deliberately. It can only ever *subtract*
-# reachability, and unreachability is the threat we are defending against. The
-# security boundary for this fleet is physical access to the room, not a host
-# packet filter that might decide to stop answering.
-try "app firewall off"     /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
-try "stealth mode off"     /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off
+if [ "$PROFILE" = appliance ]; then
+  try "screensaver never"  sudo -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
+  # The application firewall is disabled deliberately. It can only ever *subtract*
+  # reachability, and unreachability is the threat. The security boundary for an
+  # appliance is physical access to the room -- not a host packet filter that might
+  # decide to stop answering.
+  try "app firewall off"   /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+  try "stealth mode off"   /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off
+else
+  # A portable node leaves the room, and with it the physical access control that
+  # justified disarming these. Do not strip a travelling machine's defences to buy
+  # availability it does not owe us.
+  echo "  --   firewall + screen lock left intact (portable leaves the security boundary)"
+fi
 
 sec "4. Remote access"
 # systemsetup -setremotelogin is gated behind Full Disk Access (TCC), which cannot
@@ -128,4 +158,10 @@ for L in io.mesh.caffeinate io.mesh.rdma-init io.mesh.keeper io.mesh.beacon; do
 done
 
 sec "9. Status"
+# ThrottleInterval means a just-bootstrapped KeepAlive daemon takes up to ~10s to
+# reappear. Wait for it rather than closing a successful run with a false alarm:
+# a provisioning tool that cries wolf trains you to ignore the alarm that matters.
+printf '  waiting for resident daemons'
+for _ in $(seq 1 20); do pgrep -qf "dns-sd -R" && break; printf '.'; sleep 1; done
+echo
 "$MESH_ROOT/bin/mesh-status.sh"

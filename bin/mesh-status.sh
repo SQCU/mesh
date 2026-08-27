@@ -19,5 +19,31 @@ b "RDMA";    echo "  rdma_ctl: $(/usr/bin/rdma_ctl status 2>&1)   nvram: $(nvram
                echo "    $d  state=$s mtu=$m"
              done
 b "THUNDERBOLT"; system_profiler SPThunderboltDataType 2>/dev/null | awk '/Device Name:|Speed:|Status:/{gsub(/^ +/,"");print "  "$0}' | head -12
-b "JOBS";    launchctl list 2>/dev/null | awk 'NR==1 || /io\.mesh/ {printf "  %s\n",$0}'
+b "DAEMONS"
+# Report LIVE state, not the last exit code. `launchctl list` shows the previous
+# run's status, so a KeepAlive daemon that correctly restarted reads as a failure
+# -- and, worse, a dead one can read as fine. Misreporting liveness is precisely
+# the false negative this fleet exists to avoid.
+#   resident = must be running right now; periodic/oneshot = loaded is correct
+for spec in io.mesh.caffeinate:resident io.mesh.beacon:resident \
+            io.mesh.keeper:periodic io.mesh.rdma-init:oneshot; do
+  L=${spec%%:*}; kind=${spec##*:}
+  info=$(launchctl print "system/$L" 2>/dev/null)
+  if [ -z "$info" ]; then printf '  %-22s %-9s \033[31mNOT LOADED\033[0m\n' "$L" "$kind"; continue; fi
+  pid=$(printf '%s' "$info" | awk -F'= ' '/^\tpid /{gsub(/ /,"",$2);print $2; exit}')
+  if [ "$kind" = resident ]; then
+    if [ -n "$pid" ]; then printf '  %-22s %-9s running  pid %s\n' "$L" "$kind" "$pid"
+    else                   printf '  %-22s %-9s \033[31mDOWN -- should be running\033[0m\n' "$L" "$kind"; fi
+  else
+    printf '  %-22s %-9s loaded%s\n' "$L" "$kind" "${pid:+, pid $pid}"
+  fi
+done
+
+b "FABRIC PEERS"
+# Absence from this list is the alarm.
+if [ -x /usr/local/mesh/bin/mesh-peers.sh ]; then
+  /usr/local/mesh/bin/mesh-peers.sh 3 2>/dev/null | sed '/^$/d'
+else
+  echo "  mesh-peers not installed"
+fi
 echo

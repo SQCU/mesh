@@ -74,6 +74,19 @@ That gap is what makes the false negative dangerous, so it is closed explicitly:
 - `io.mesh.keeper` re-asserts every invariant above once a minute and logs any drift
   it had to correct, so slow decay is visible rather than silent.
 
+### Protecting the alarm's meaning
+
+An alarm that fires on expected events is worse than no alarm, because it teaches
+people to dismiss it. So nodes declare a profile in their own announcement:
+
+- `appliance` — must never withdraw. Absence is an incident.
+- `portable` — a laptop that sleeps and travels. Absence is expected.
+
+A portable node also keeps its firewall and screen lock, because it leaves the room
+and therefore leaves the physical access control that justified disarming them. The
+availability-first argument applies to machines inside the boundary; do not strip a
+travelling machine's defences to buy availability it does not owe the mesh.
+
 Do not make the beacon quiet for any reason other than the node actually being gone.
 Do not add a "graceful degradation" path that lets a node decide to stop
 participating. There is no local condition under which withdrawing is the right call;

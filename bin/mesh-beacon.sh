@@ -10,4 +10,8 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 NAME=$(scutil --get LocalHostName 2>/dev/null || hostname -s)
 MODEL=$(sysctl -n hw.model 2>/dev/null)
 RDMA=$(rdma_ctl status 2>&1)
-exec dns-sd -R "$NAME" _meshnode._tcp local 8099 model="$MODEL" rdma="$RDMA"
+# The profile travels in the announcement so any observer can tell whether this
+# node's absence would be an incident or simply a closed lid.
+PROFILE=$(cat /usr/local/mesh/profile 2>/dev/null || echo appliance)
+exec dns-sd -R "$NAME" _meshnode._tcp local 8099 \
+  model="$MODEL" rdma="$RDMA" profile="$PROFILE"
