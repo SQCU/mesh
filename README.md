@@ -54,50 +54,6 @@ Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 > if every later step fails, the machine is still remotely recoverable.
 > Pin `MESH_REF` to a tag or SHA when you want a reproducible definition.
 
-## Node profiles
-
-Two kinds of machine live on this fabric, and conflating them destroys the alarm:
-
-| profile | meaning | absence means |
-|---|---|---|
-| `appliance` (default) | must never withdraw. Never sleeps, restarts itself, firewall off. | **incident** |
-| `portable` | a laptop that legitimately sleeps and travels. Reachable when awake. | expected |
-
-```
-sudo MESH_PROFILE=portable ./install.sh
-```
-
-A `portable` node keeps its firewall and screen lock — it leaves the room, and with
-it the physical access control that justified disarming those on an appliance. It is
-not forced awake either; a laptop held awake in a bag is a thermal problem, not a
-reliability win.
-
-The profile is carried in the node's own Bonjour announcement, so `mesh-peers` can
-tell a closed lid from a dead appliance with no central registry. This exists to
-protect the meaning of the alarm: if closing a laptop lid fired the same alarm as a
-withdrawn appliance, the alarm would be ignored within a week, and a genuinely dead
-node would go unnoticed.
-
-## Auto-login
-
-Not enabled by `install.sh`, and not required for reachability: every mesh service is
-a LaunchDaemon, so a node reboots to the login window fully reachable and beaconing.
-
-Enable it when workloads need a **user session** — Metal/GPU in some configurations,
-Docker Desktop, anything touching WindowServer. Without it those silently stop after
-the first unattended reboot while the node still looks healthy, which is the exact
-false negative this fleet cares about.
-
-```
-sudo ./enable-autologin.sh          # prompts locally; validates before writing
-sudo ./enable-autologin.sh --disable
-```
-
-It refuses to run on a `portable` node. The password is stored in `/etc/kcpassword`
-under a fixed XOR key — treat it as plaintext. That is acceptable on an appliance
-whose disk is already unencrypted and whose boundary is the room; it is not
-acceptable on a machine that leaves.
-
 ## Is anything missing?
 
 ```
@@ -141,8 +97,9 @@ advertise itself as the default route and blackhole the node's uplink.
 |---|---|
 | `install.sh` | provision/converge a node. Idempotent — re-running is the drift fix. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
-| `enable-autologin.sh` | opt-in, appliance-only. Boot into a GUI session so session-bound workloads survive a reboot. |
-| `THREAT-MODEL.md` | **read this first.** Why several settings here look wrong under a normal hardening model. |
+| `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
+| `AGENTS.md` | **the contract.** Accessibility is required; rejection filtering is banned. Read before changing anything. |
+| `THREAT-MODEL.md` | why several settings here look wrong under a normal hardening model. |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
