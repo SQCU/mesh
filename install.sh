@@ -93,22 +93,66 @@ sec "4. Remote access"
 launchctl enable system/com.openssh.sshd 2>/dev/null
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
 nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1 && ok "sshd listening" || bad "sshd"
-launchctl enable system/com.apple.screensharing 2>/dev/null
-launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null
-nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1 && ok "screen sharing listening" || bad "screen sharing"
-KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-[ -x "$KS" ] && { "$KS" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
-                  "$KS" -configure -users "$ADMIN_USER" -access -on -privs -all >/dev/null 2>&1
-                  ok "ARD enabled for $ADMIN_USER"; }
-/usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off >/dev/null 2>&1
+
+# Screen sharing is the appliance's REPLACEMENT for the keyboard and monitor we
+# want to unplug and never reattach: it is the only remote path to the handful of
+# things ssh cannot drive (a post-major-upgrade Setup Assistant pane, a TCC
+# prompt, a login window). On an appliance it is a lifeline and the keeper
+# re-asserts it.
+#
+# On a portable it is the opposite. That machine still HAS its keyboard and
+# monitor attached -- they are the reason it is portable -- so :5900 buys no
+# recoverability and only adds a listening GUI surface on a laptop that leaves
+# the room and joins untrusted networks. Same reasoning as the firewall split.
+if [ "$PROFILE" = appliance ]; then
+  launchctl enable system/com.apple.screensharing 2>/dev/null
+  launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null
+  nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1 && ok "screen sharing listening" || bad "screen sharing"
+  KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+  [ -x "$KS" ] && { "$KS" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
+                    "$KS" -configure -users "$ADMIN_USER" -access -on -privs -all >/dev/null 2>&1
+                    ok "ARD enabled for $ADMIN_USER"; }
+  /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off >/dev/null 2>&1
+else
+  echo "  --   screen sharing / ARD left untouched (portable keeps its own console)"
+fi
 
 sec "5. Pubkey roster"
 H=$(eval echo "~$ADMIN_USER")
 mkdir -p "$H/.ssh"; chmod 700 "$H/.ssh"
+# MERGE the roster in; never truncate what is already there.
+#
+# An overwrite is a withdrawal vector wearing a hardening costume. The roster is
+# a small file in a public repo, so on any node whose operator key is not yet in
+# it -- which is EVERY node the moment someone adds a machine -- a straight copy
+# revokes the only credential that currently reaches the box, and does it inside
+# the provisioning run that was supposed to make the box more reachable. That is
+# the exact failure this repo exists to prevent, and it is unrecoverable without
+# the physical visit we are trying to spend only once.
+#
+# So: roster keys are added, local keys are kept, and any local key NOT in the
+# roster is REPORTED rather than deleted. Convergence you can see beats
+# convergence that locks you out; if a key should die, take it out of the roster
+# and remove it deliberately, not as a side effect of a re-run.
+AK="$H/.ssh/authorized_keys"
 if [ -f "$REPO/keys/authorized_keys" ]; then
-  install -m 600 "$REPO/keys/authorized_keys" "$H/.ssh/authorized_keys"
+  touch "$AK"
+  # grep -c prints 0 AND exits 1 on no match; a `|| echo 0` fallback would emit
+  # the count twice on a virgin node. Let grep print its own zero.
+  before=$(grep -cve '^[[:space:]]*#' -e '^[[:space:]]*$' "$AK" 2>/dev/null)
+  TMPK=$(mktemp)
+  # Key identity is the base64 body (field 2) -- comments and options drift, and
+  # matching on the whole line would re-add a key every time its label changed.
+  cat "$AK" "$REPO/keys/authorized_keys" \
+    | awk '/^[[:space:]]*#/ || /^[[:space:]]*$/ {next} !seen[$2]++' > "$TMPK"
+  install -m 600 "$TMPK" "$AK"; rm -f "$TMPK"
   chown -R "$ADMIN_USER":staff "$H/.ssh"
-  ok "roster installed ($(grep -cv '^#\|^$' "$REPO/keys/authorized_keys") keys)"
+  after=$(grep -cve '^[[:space:]]*#' -e '^[[:space:]]*$' "$AK")
+  ok "roster merged: $before local + roster -> $after keys (nothing removed)"
+  # Surface drift instead of silently enforcing it.
+  awk 'FNR==NR{ if(!/^[[:space:]]*#/ && NF) r[$2]=1; next }
+       NF && !r[$2]{ print "  --   local key not in roster: " $3 " (" substr($2,1,16) "...)" }' \
+      "$REPO/keys/authorized_keys" "$AK"
 fi
 
 sec "6. Network -- topology-independent identity"
@@ -116,8 +160,43 @@ sec "6. Network -- topology-independent identity"
 # POSITION, not identity, and collide on replug. Bonjour + link-local re-resolve anywhere.
 try "TB Bridge auto/link-local" networksetup -setdhcp "$TB_SERVICE"
 # TB Bridge last, so a peer can never steal the default route.
-networksetup -ordernetworkservices "Ethernet" "Wi-Fi" "$TB_SERVICE" >/dev/null 2>&1 \
-  && ok "service order: TB bridge last" || bad "service order"
+#
+# Do NOT hardcode the service list. It was written from a machine that happened to
+# have a service literally named "Ethernet"; a node without one (a laptop, or any
+# Mac whose uplink is Wi-Fi) gets an argument list naming a service that does not
+# exist, networksetup rejects the whole call, and the reorder becomes a SILENT
+# no-op -- which is how a node ends up running with the fabric FIRST in service
+# order, exactly the blackhole this line was added to prevent. Hardcoding also
+# drops any service not on the list (Tailscale, iPhone USB), which is its own
+# outage. Enumerate what is present, preserve relative order, move TB last.
+reorder_tb_last(){
+  local svcs="" s
+  while IFS= read -r s; do
+    case "$s" in ""|"An asterisk"*) continue ;; esac
+    s="${s#\*}"                       # disabled services are prefixed with '*'
+    [ "$s" = "$TB_SERVICE" ] && continue
+    svcs="${svcs}${s}
+"
+  done
+  [ -n "$svcs" ] || return 1
+  local OIFS="$IFS"
+  set -f; IFS='
+'
+  set -- $svcs "$TB_SERVICE"
+  set +f; IFS="$OIFS"
+  networksetup -ordernetworkservices "$@" >/dev/null 2>&1
+}
+if networksetup -listallnetworkservices 2>/dev/null | grep -q "^\*\{0,1\}$TB_SERVICE$"; then
+  reorder_tb_last < <(networksetup -listallnetworkservices 2>/dev/null)
+  # Verify the RESULT, not the exit code: a reorder that silently did nothing is
+  # the failure mode we are fixing, so trusting $? would reproduce it.
+  last=$(networksetup -listallnetworkservices 2>/dev/null | grep -v '^An asterisk' \
+         | sed 's/^\*//' | grep -v '^$' | tail -1)
+  if [ "$last" = "$TB_SERVICE" ]; then ok "service order: '$TB_SERVICE' last (of $(networksetup -listallnetworkservices 2>/dev/null | grep -vc '^An asterisk\|^$'))"
+  else bad "service order: last is '$last', wanted '$TB_SERVICE' -- a peer could steal the default route"; fi
+else
+  echo "  --   no '$TB_SERVICE' service on this node (no fabric cable yet?)"
+fi
 ok "mesh identity: $(scutil --get LocalHostName).local"
 
 sec "7. RDMA (verify only)"

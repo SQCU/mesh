@@ -26,7 +26,11 @@ if ! /usr/bin/nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1; then
   launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1
   drift=1
 fi
-if ! /usr/bin/nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1; then
+# Screen sharing is a lifeline only on an appliance -- it is what stands in for the
+# keyboard and monitor we unplugged. A portable still has its own console, so
+# re-asserting :5900 there would forcibly reopen a GUI surface the operator turned
+# off, once a minute, forever.
+if [ "$PROFILE" = appliance ] && ! /usr/bin/nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1; then
   echo "[$(ts)] DRIFT screensharing down -> re-bootstrapping"
   launchctl enable system/com.apple.screensharing >/dev/null 2>&1
   launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1
