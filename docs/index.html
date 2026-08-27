@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="What it takes to turn a stock Apple Silicon Mac into an always-on RDMA fabric node, and precisely where a human body is still required.">
+<style>
+/* reset -- supplied by the artifact runtime upstream, explicit here */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body,h1,h2,h3,p,figure,ol,ul,pre{margin:0}
+img,svg{max-width:100%}
+button,input,select,textarea{font:inherit}
+</style>
+<title>Mesh Node Bring-Up</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#F2F5F7; --surface:#FFFFFF; --surface-2:#E9EFF2;
+  --ink:#101619; --ink-soft:#56676F; --ink-faint:#7D8F98;
+  --rule:#D3DCE1; --rule-soft:#E4EBEF;
+  --fabric:#0B7F86; --fabric-bg:#DFF0F1;
+  --gate:#A85D18; --gate-bg:#F6E9DA;
+  --alarm:#B23A2B;
+  --shadow:0 1px 2px rgba(16,22,25,.06),0 8px 24px -12px rgba(16,22,25,.18);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0B1114; --surface:#131B20; --surface-2:#1A242A;
+    --ink:#E4EBEF; --ink-soft:#93A6AF; --ink-faint:#6B7D86;
+    --rule:#243139; --rule-soft:#1C262C;
+    --fabric:#35CBD1; --fabric-bg:#0F2E30;
+    --gate:#E2984A; --gate-bg:#302213;
+    --alarm:#F2796A;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0B1114; --surface:#131B20; --surface-2:#1A242A;
+  --ink:#E4EBEF; --ink-soft:#93A6AF; --ink-faint:#6B7D86;
+  --rule:#243139; --rule-soft:#1C262C;
+  --fabric:#35CBD1; --fabric-bg:#0F2E30;
+  --gate:#E2984A; --gate-bg:#302213;
+  --alarm:#F2796A;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1000px;margin:0 auto;padding:56px 28px 96px;display:flex;flex-direction:column;gap:52px}
+h1,h2,h3{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;text-wrap:balance;margin:0;line-height:1.15}
+h1{font-size:clamp(34px,5.5vw,52px);font-weight:700;letter-spacing:-.015em}
+h2{font-size:clamp(22px,3vw,29px);font-weight:600;letter-spacing:-.01em}
+h3{font-size:18px;font-weight:600}
+p{margin:0;max-width:66ch}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.88em}
+code{background:var(--surface-2);padding:.12em .4em;border-radius:3px;color:var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);font-weight:500}
+header{display:flex;flex-direction:column;gap:16px;border-bottom:2px solid var(--ink);padding-bottom:26px}
+.sub{color:var(--ink-soft);font-size:18px;max-width:70ch}
+.meta{display:flex;flex-wrap:wrap;gap:8px 22px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-faint)}
+.meta b{color:var(--ink-soft);font-weight:500}
+section{display:flex;flex-direction:column;gap:18px}
+.lede{font-size:17px;color:var(--ink-soft)}
+
+.finding{
+  background:var(--gate-bg);border:1px solid var(--gate);border-left-width:4px;
+  border-radius:5px;padding:20px 22px;display:flex;flex-direction:column;gap:10px;
+}
+.finding .eyebrow{color:var(--gate)}
+.finding p{max-width:74ch}
+.finding pre{margin:0}
+
+pre{
+  background:var(--surface);border:1px solid var(--rule);border-radius:5px;
+  padding:14px 16px;overflow-x:auto;font-family:"IBM Plex Mono",monospace;
+  font-size:13px;line-height:1.65;color:var(--ink);margin:0;
+}
+pre .c{color:var(--ink-faint)}
+pre .g{color:var(--gate)}
+pre .f{color:var(--fabric)}
+pre .a{color:var(--alarm)}
+
+figure{margin:0;display:flex;flex-direction:column;gap:12px}
+.diagram{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:22px 20px}
+.diagram svg{display:block;min-width:760px;width:100%;height:auto}
+svg .box{fill:var(--surface-2);stroke:var(--rule)}
+svg .box-gate{fill:var(--gate-bg);stroke:var(--gate)}
+svg .box-fab{fill:var(--fabric-bg);stroke:var(--fabric)}
+svg .t{font-family:"IBM Plex Sans Condensed",sans-serif;font-weight:600;font-size:15px;fill:var(--ink)}
+svg .s{font-family:"IBM Plex Mono",monospace;font-size:11.5px;fill:var(--ink-soft)}
+svg .lab{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.13em;font-weight:500}
+svg .lab-gate{fill:var(--gate)}
+svg .lab-fab{fill:var(--fabric)}
+svg .arrow{stroke:var(--ink-faint);stroke-width:1.5;fill:none}
+figcaption{font-size:13.5px;color:var(--ink-faint);max-width:74ch}
+
+.tablewrap{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;min-width:660px;font-size:14px}
+th,td{text-align:left;padding:11px 15px;border-bottom:1px solid var(--rule-soft);vertical-align:top}
+thead th{
+  background:var(--surface-2);font-family:"IBM Plex Mono",monospace;font-size:11px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);font-weight:500;
+  border-bottom:1px solid var(--rule);
+}
+tbody tr:last-child td{border-bottom:none}
+td.cmd{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-soft);white-space:nowrap}
+.pill{
+  display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;
+  letter-spacing:.07em;text-transform:uppercase;padding:3px 8px;border-radius:3px;
+  white-space:nowrap;font-weight:500;border:1px solid;
+}
+.p-gate{background:var(--gate-bg);color:var(--gate);border-color:var(--gate)}
+.p-fab{background:var(--fabric-bg);color:var(--fabric);border-color:var(--fabric)}
+
+ol.steps{list-style:none;counter-reset:s;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+ol.steps>li{
+  counter-increment:s;display:grid;grid-template-columns:auto 1fr;gap:18px;
+  padding:18px 20px;background:var(--surface);border:1px solid var(--rule);
+  border-radius:5px;align-items:start;
+}
+ol.steps>li::before{
+  content:counter(s,decimal-leading-zero);font-family:"IBM Plex Mono",monospace;
+  font-size:13px;font-weight:600;color:var(--ink-faint);padding-top:2px;
+}
+.step-body{display:flex;flex-direction:column;gap:9px;min-width:0}
+.step-head{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline}
+.step-head h3{font-size:17px}
+.step-body p{font-size:14.5px;color:var(--ink-soft)}
+
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:18px 20px;display:flex;flex-direction:column;gap:9px}
+.card h3{font-size:16px}
+.card p{font-size:14px;color:var(--ink-soft)}
+.card.open{border-left:3px solid var(--fabric)}
+
+ul.plain{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:7px;color:var(--ink-soft);font-size:14.5px}
+ul.plain strong{color:var(--ink);font-weight:600}
+footer{border-top:1px solid var(--rule);padding-top:22px;color:var(--ink-faint);font-size:13px;font-family:"IBM Plex Mono",monospace}
+@media (prefers-reduced-motion:no-preference){a{transition:color .15s}}
+a{color:var(--fabric)}
+a:focus-visible,li:focus-visible{outline:2px solid var(--fabric);outline-offset:3px}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Provisioning graph · Apple Silicon · macOS 26.5.1</div>
+  <h1>Mesh Node Bring-Up</h1>
+  <p class="sub">What it takes to turn a stock Mac into an always-on RDMA fabric node — and precisely where a human body is still required, derived empirically from the first one.</p>
+  <div class="meta">
+    <span><b>Reference node</b> Mac16,11 · M4 Pro · 24 GB</span>
+    <span><b>Peer</b> Mac17,6 @ 80 Gb/s</span>
+    <span><b>Fabric</b> rdma_en4 PORT_ACTIVE · MTU 4096</span>
+  </div>
+</header>
+
+<section>
+  <h2>The one thing that doesn't scale</h2>
+  <p class="lede">Almost every configuration step turned out to be remotely automatable. Exactly one is not, and it defines the shape of the whole rollout.</p>
+  <div class="finding">
+    <div class="eyebrow">Hard gate · no remote path exists</div>
+    <p><strong>RDMA can only be enabled from Recovery OS.</strong> Running the tool under a booted system fails outright, and no amount of privilege changes that — it is not a permissions problem, it is a refusal:</p>
+<pre><span class="c">$</span> sudo rdma_ctl enable
+<span class="a">rdma_ctl: This tool needs to be executed from Recovery OS.</span>   <span class="c">exit=77</span>
+
+<span class="c">$</span> rdma_ctl status
+<span class="f">enabled</span>          <span class="c"># the bit itself lives in NVRAM and does persist</span></pre>
+    <p>Entering 1TR requires physically holding the power button. That is a deliberate Apple anti-tampering property, so it cannot be delegated to MDM, to a script, or to a remote console. <strong>Budget exactly one physical visit per machine, forever.</strong> The entire remaining design is about making that visit the <em>only</em> one.</p>
+  </div>
+</section>
+
+<figure>
+  <h2>Dependency graph</h2>
+  <p class="lede">Two regimes separated by a single threshold: the moment <code>sshd</code> answers, the machine never needs a keyboard again.</p>
+  <div class="diagram">
+  <svg viewBox="0 0 880 540" role="img" aria-labelledby="dgtitle">
+    <title id="dgtitle">Provisioning dependency graph: two hands-on steps feed a bootstrap threshold, after which six configuration domains are fully remote.</title>
+
+    <text x="0" y="14" class="lab lab-gate">REQUIRES A HUMAN AT THE MACHINE</text>
+    <rect x="0" y="28" width="424" height="92" rx="5" class="box-gate"/>
+    <text x="20" y="56" class="t">Setup Assistant</text>
+    <text x="20" y="78" class="s">create local admin account</text>
+    <text x="20" y="98" class="s">GUI only · or ADE/MDM enrollment</text>
+
+    <rect x="456" y="28" width="424" height="92" rx="5" class="box-gate"/>
+    <text x="476" y="56" class="t">1TR Recovery</text>
+    <text x="476" y="78" class="s">rdma_ctl enable  →  NVRAM rdma-enable=1</text>
+    <text x="476" y="98" class="s">power-button hold · no remote path</text>
+
+    <path class="arrow" d="M212 120 L212 158" marker-end="url(#ah)"/>
+    <path class="arrow" d="M668 120 L668 158" marker-end="url(#ah)"/>
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" style="fill:var(--ink-faint)"/>
+      </marker>
+    </defs>
+
+    <rect x="0" y="162" width="880" height="86" rx="5" class="box" style="stroke-width:2;stroke:var(--ink)"/>
+    <text x="20" y="188" class="lab" style="fill:var(--ink-faint)">THRESHOLD · LAST KEYSTROKE</text>
+    <text x="20" y="214" class="t">bootstrap.sh — launchctl enable com.openssh.sshd + authorized_keys</text>
+    <text x="20" y="236" class="s">needs root, NOT Full Disk Access · sidesteps TCC entirely · ~20 seconds</text>
+
+    <path class="arrow" d="M147 248 L147 288" marker-end="url(#ah)"/>
+    <path class="arrow" d="M440 248 L440 288" marker-end="url(#ah)"/>
+    <path class="arrow" d="M733 248 L733 288" marker-end="url(#ah)"/>
+
+    <text x="0" y="278" class="lab lab-fab" style="text-anchor:start">REMOTE · REPEATABLE · SCRIPTABLE</text>
+
+    <rect x="0" y="292" width="273" height="104" rx="5" class="box-fab"/>
+    <text x="18" y="318" class="t">Power policy</text>
+    <text x="18" y="340" class="s">sleep 0 · disksleep 0</text>
+    <text x="18" y="358" class="s">autorestart 1</text>
+    <text x="18" y="376" class="s">powermode 2 (high)</text>
+
+    <rect x="303" y="292" width="273" height="104" rx="5" class="box-fab"/>
+    <text x="321" y="318" class="t">Lifeline daemons</text>
+    <text x="321" y="340" class="s">caffeinate (KeepAlive)</text>
+    <text x="321" y="358" class="s">keeper watchdog @60s</text>
+    <text x="321" y="376" class="s">re-bootstraps sshd on loss</text>
+
+    <rect x="606" y="292" width="274" height="104" rx="5" class="box-fab"/>
+    <text x="624" y="318" class="t">Remote access</text>
+    <text x="624" y="340" class="s">screen sharing :5900</text>
+    <text x="624" y="358" class="s">ARD agent · full privs</text>
+    <text x="624" y="376" class="s">works at login window</text>
+
+    <rect x="0" y="412" width="273" height="104" rx="5" class="box-fab"/>
+    <text x="18" y="438" class="t">Mesh identity</text>
+    <text x="18" y="460" class="s">Bonjour .local name</text>
+    <text x="18" y="478" class="s">v4+v6 link-local, no statics</text>
+    <text x="18" y="496" class="s">TB bridge last in route order</text>
+
+    <rect x="303" y="412" width="273" height="104" rx="5" class="box-fab"/>
+    <text x="321" y="438" class="t">Job harness</text>
+    <text x="321" y="460" class="s">LaunchDaemon template</text>
+    <text x="321" y="478" class="s">KeepAlive · boot-time</text>
+    <text x="321" y="496" class="s">no login session needed</text>
+
+    <rect x="606" y="412" width="274" height="104" rx="5" class="box-fab"/>
+    <text x="624" y="438" class="t">Peer pairing</text>
+    <text x="624" y="460" class="s">pubkey roster install</text>
+    <text x="624" y="478" class="s">ff02::1 fabric discovery</text>
+    <text x="624" y="496" class="s">verify PORT_ACTIVE</text>
+  </svg>
+  </div>
+  <figcaption>The two amber boxes are the irreducible cost per machine. Everything below the threshold was executed remotely-capable on the reference node and is captured in <code>mesh-node-setup.sh</code>.</figcaption>
+</figure>
+
+<section>
+  <h2>How the bootstrap paradox breaks</h2>
+  <p class="lede">The obvious way to enable SSH is gated behind a permission you can only grant by hand. There is a second door.</p>
+  <p>macOS routes <code>systemsetup</code> through TCC, so the canonical command fails on a fresh machine even as root. But <code>launchd</code> has no such gate — bootstrapping the service directly needs only root:</p>
+<pre><span class="c"># The documented path — blocked, and unblockable without a GUI or an MDM profile:</span>
+<span class="c">$</span> sudo systemsetup -f -setremotelogin on
+<span class="a">setremotelogin: Turning Remote Login on or off requires Full Disk Access privileges.</span>
+
+<span class="c"># The path that works on a headless, never-touched machine:</span>
+<span class="c">$</span> sudo launchctl enable system/com.openssh.sshd
+<span class="c">$</span> sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist
+<span class="f">Connection to 127.0.0.1 port 22 [tcp/ssh] succeeded!</span></pre>
+  <p>This is what collapses the physical visit from "configure the whole machine" to "run one script." It also survives reboot on its own — <code>launchctl enable</code> writes through to the persistent disabled-services database, where both lifelines now read <code>false</code>.</p>
+</section>
+
+<section>
+  <h2>Constraint ledger</h2>
+  <p class="lede">Every vendor gate encountered, and whether it can be lifted without hands.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Constraint</th><th>Regime</th><th>Escape hatch</th></tr></thead>
+    <tbody>
+      <tr><td><strong>RDMA enable</strong><br><span class="mono" style="color:var(--ink-faint)">Recovery OS only, exit 77</span></td><td><span class="pill p-gate">Hands</span></td><td>None. Physical 1TR per machine. Not MDM-addressable.</td></tr>
+      <tr><td><strong>Admin account creation</strong></td><td><span class="pill p-gate">Hands</span></td><td>Automated Device Enrollment removes it at fleet scale.</td></tr>
+      <tr><td><strong>TCC / Full Disk Access</strong></td><td><span class="pill p-gate">Hands</span></td><td>MDM PPPC profile — <em>or</em> avoid needing it via <code>launchctl</code>.</td></tr>
+      <tr><td><strong>FileVault vs. unattended boot</strong></td><td><span class="pill p-gate">Hands</span></td><td>Mutually exclusive. Leave off; encrypt payloads at the application layer instead.</td></tr>
+      <tr><td><strong>Enable sshd</strong></td><td><span class="pill p-fab">Remote</span></td><td><code>launchctl bootstrap</code>, no TCC involved.</td></tr>
+      <tr><td><strong>Screen Sharing / ARD</strong></td><td><span class="pill p-fab">Remote</span></td><td>Same launchd route plus <code>kickstart</code>.</td></tr>
+      <tr><td><strong>Power &amp; restart policy</strong></td><td><span class="pill p-fab">Remote</span></td><td><code>pmset</code>, <code>systemsetup</code> once FDA exists.</td></tr>
+      <tr><td><strong>Unattended OS update reboot</strong></td><td><span class="pill p-fab">Remote</span></td><td>Disable auto-install; it is a silent downtime source.</td></tr>
+      <tr><td><strong>Addressing after a topology change</strong></td><td><span class="pill p-fab">Remote</span></td><td>Zero-touch. Link-local + Bonjour re-resolve on replug.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>Per-machine runbook</h2>
+  <p class="lede">Ordered because the ordering is load-bearing — each step unlocks the next. Target: under five minutes of hands-on time.</p>
+  <ol class="steps">
+    <li><div class="step-body">
+      <div class="step-head"><h3>Setup Assistant</h3><span class="pill p-gate">Hands</span></div>
+      <p>Create the admin account. Decline iCloud, Siri, analytics. Leave FileVault off — that choice is what makes every later reboot unattended. Confirm Activation Lock is <strong>Disabled</strong> before going further; if it is on, Recovery workflows get much worse.</p>
+    </div></li>
+    <li><div class="step-body">
+      <div class="step-head"><h3>Recovery: enable RDMA</h3><span class="pill p-gate">Hands</span></div>
+      <p>Hold the power button to reach 1TR, open Terminal, run <code>rdma_ctl enable</code>, reboot. This writes <code>rdma-enable=1</code> to NVRAM and is the only step with no remote equivalent — do it while you are already standing there.</p>
+    </div></li>
+    <li><div class="step-body">
+      <div class="step-head"><h3>Run the bootstrap</h3><span class="pill p-gate">Hands</span><span class="pill p-fab">Last touch</span></div>
+      <p>One script from USB: enable sshd via <code>launchctl</code>, drop the pubkey roster into <code>authorized_keys</code>, fetch <code>mesh-node-setup.sh</code>. Verify port 22 answers, then walk away. Nothing after this point requires the room.</p>
+    </div></li>
+    <li><div class="step-body">
+      <div class="step-head"><h3>Configure over SSH</h3><span class="pill p-fab">Remote</span></div>
+      <p>Run <code>mesh-node-setup.sh</code>: power policy, boot resilience, screen sharing, service order, watchdog and caffeinate daemons, job harness. Idempotent, so re-running it is the drift fix.</p>
+    </div></li>
+    <li><div class="step-body">
+      <div class="step-head"><h3>Join the fabric</h3><span class="pill p-fab">Remote</span></div>
+      <p>Cable it in, then discover peers with <code>ping6 -I bridge0 ff02::1</code> — every neighbour answers on link-local regardless of which port the cable landed in. Confirm a device reports <code>PORT_ACTIVE</code> and record the node in the roster.</p>
+    </div></li>
+  </ol>
+</section>
+
+<section>
+  <h2>Why there are no static addresses</h2>
+  <p class="lede">A node may be unplugged, bagged, carried to another room, and replugged into a different position in the mesh. Addressing has to survive that.</p>
+  <p>Pinning each end of a Thunderbolt link to a fixed address encodes <em>position</em>, not <em>identity</em> — two nodes that both believe they are <code>10.10.10.1</code> collide and partition the fabric the first time they meet. Identity instead travels with the machine: a stable Bonjour name, IPv4 link-local with ARP collision-probing, and an IPv6 link-local address derived from the interface MAC. All three come up automatically on whatever port the cable lands in.</p>
+<pre><span class="c">$</span> ping6 -c3 -I bridge0 ff02::1
+16 bytes from <span class="f">fe80::10a3:dac:d9ff:7c4d%bridge0</span>, time=<span class="f">0.454 ms</span>
+
+<span class="c">$</span> ping -c1 Ms-MacBook-Pro.local
+PING ms-macbook-pro.local (<span class="f">169.254.174.248</span>)   <span class="c"># resolves to the FABRIC, not Wi-Fi</span></pre>
+  <p>Bonjour independently preferred the Thunderbolt path over Wi-Fi for the peer's name — so the fast link gets used by default without any routing configuration. One rule keeps that safe: the Thunderbolt bridge stays <strong>last</strong> in service order, so a peer can never advertise itself as the default route and blackhole the node's uplink.</p>
+</section>
+
+<section>
+  <h2>Open items</h2>
+  <div class="grid2">
+    <div class="card open"><h3>Jumbo frames</h3><p>The link runs MTU 1500 while the RDMA device reports 4096. Raising it is a <em>paired</em> change — one end alone blackholes large packets, so it needs both machines in hand at once.</p></div>
+    <div class="card open"><h3>Uplink is Wi-Fi only</h3><p><code>en0</code> has no cable. For a node that must never be unreachable, wired ethernet with a DHCP reservation should carry management traffic.</p></div>
+    <div class="card open"><h3>Naming scheme</h3><p>Bonjour identity is per-node and must be unique. Two machines out of the box named <code>MacBook-Pro.local</code> will collide — decide the scheme before node three.</p></div>
+    <div class="card open"><h3>Pubkey roster</h3><p>The list of keys each node feels fondly about should be one file, version-controlled, pushed to every node — not hand-appended per machine.</p></div>
+    <div class="card open"><h3>The peer is unmanaged</h3><p>The MacBook answers SSH but has had none of this applied. It is currently a client of the mesh, not a node in it.</p></div>
+    <div class="card open"><h3>Fleet enrollment</h3><p>ADE + MDM collapses steps 1 and 3 entirely. It does <em>not</em> collapse step 2 — the Recovery visit survives any amount of fleet tooling.</p></div>
+  </div>
+</section>
+
+<footer>Derived from the bring-up of Ms-Mac-mini.local · 2026-08-27 · all commands and failures reproduced above are verbatim from that machine</footer>
+
+</div>
+</body>
+</html>

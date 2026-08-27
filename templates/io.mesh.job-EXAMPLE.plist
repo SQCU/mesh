@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Copy to /Library/LaunchDaemons/io.mesh.job-NAME.plist, edit, then:
+       sudo launchctl bootstrap system /Library/LaunchDaemons/io.mesh.job-NAME.plist
+     Runs as root at boot, no login required, restarts forever on exit. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>io.mesh.job-EXAMPLE</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/local/mesh/jobs/EXAMPLE.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Standard</string>
+  <key>StandardOutPath</key><string>/usr/local/mesh/log/job-EXAMPLE.out.log</string>
+  <key>StandardErrorPath</key><string>/usr/local/mesh/log/job-EXAMPLE.err.log</string>
+</dict></plist>

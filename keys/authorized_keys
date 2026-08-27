@@ -1,0 +1,4 @@
+# Mesh pubkey roster. Every node trusts exactly these keys.
+# Public keys only -- safe to publish. Add a line per operator/node, then
+# re-run install.sh on each node to converge.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4O4ZFhNoLfQ010NKEYaku0k0bHGIAziVPbjcAshFYe mesh:Ms-Mac-mini
