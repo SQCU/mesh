@@ -33,7 +33,7 @@ Hands-on, once, ~5 minutes:
 3. **Bootstrap** — open Terminal and run:
 
    ```
-   curl -fsSL https://raw.githubusercontent.com/OWNER/mesh/main/bootstrap.sh | sudo bash
+   curl -fsSL https://raw.githubusercontent.com/SQCU/mesh/main/bootstrap.sh | sudo bash
    ```
 
    This opens sshd *first*, then fetches and runs `install.sh`. Confirm port 22

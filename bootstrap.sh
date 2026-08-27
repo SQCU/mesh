@@ -2,12 +2,12 @@
 # bootstrap.sh -- the last thing you ever type on this machine's keyboard.
 #
 # Run during the single physical visit, AFTER enabling RDMA in Recovery:
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/mesh/main/bootstrap.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/SQCU/mesh/main/bootstrap.sh | sudo bash
 #
 # Deliberately does NOT use git: on a virgin Mac, invoking git triggers the
 # Command Line Tools GUI installer. curl + tarball has no such dependency.
 set -u
-REPO="${MESH_REPO:-OWNER/mesh}"
+REPO="${MESH_REPO:-SQCU/mesh}"
 REF="${MESH_REF:-main}"
 DEST="${MESH_DEST:-/usr/local/src/mesh}"
 
