@@ -68,7 +68,7 @@ awk 'FNR==NR{ if(!/^[[:space:]]*#/ && NF) r[$2]=1; next }
      NF && !r[$2]{ print "  --   local key not in roster: " $3 }' "$REPO/keys/authorized_keys" "$AK"
 
 sec "6. Network"
-try "TB bridge link-local" networksetup -setdhcp "$TB_SERVICE"
+try "fabric: bridge torn down, ports addressed" "$MESH_ROOT/bin/mesh-fabric-init.sh"
 oldIFS=$IFS; IFS=$'\n'
 svcs=($(networksetup -listallnetworkservices | sed '1d;s/^\*//' | grep -v "^${TB_SERVICE}$" | grep -v '^$'))
 IFS=$oldIFS
@@ -105,9 +105,10 @@ mkplist io.mesh.caffeinate "<string>/usr/bin/caffeinate</string><string>-dimsu</
 mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
+mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
-for L in io.mesh.caffeinate io.mesh.beacon io.mesh.rdma-init io.mesh.keeper; do
+for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.rdma-init io.mesh.keeper; do
   launchctl bootout system/$L >/dev/null 2>&1
   launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1 \
     && { launchctl enable system/$L >/dev/null 2>&1; ok "$L"; } || bad "$L"

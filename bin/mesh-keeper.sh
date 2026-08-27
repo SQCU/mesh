@@ -28,6 +28,7 @@ pgrep -qf "dns-sd -R" || {
   echo "[$(ts)] DRIFT ntp off"; systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1; }
 "$FW" --getglobalstate 2>/dev/null | grep -q 'State = 1' && {
   echo "[$(ts)] DRIFT firewall on"; "$FW" --setglobalstate off >/dev/null 2>&1; drift=1; }
+[ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {
   echo "[$(ts)] ALARM rdma disabled, physical Recovery OS visit required"; drift=1; }
 [ "$drift" -eq 0 ] || echo "[$(ts)] pass complete"

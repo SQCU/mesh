@@ -74,22 +74,68 @@ setremotelogin: Turning Remote Login on or off requires Full Disk Access privile
 `launchctl bootstrap` needs only root and no TCC grant, so that is what `install.sh`
 and `bootstrap.sh` use. This is the hinge the whole remote-provisioning story turns on.
 
+## The Thunderbolt bridge is torn down, not configured
+
+macOS bridges every Thunderbolt port into `bridge0` by default. `mesh-fabric-init`
+destroys it on every node, every boot, and every keeper pass. Two independent
+reasons, both measured rather than assumed:
+
+**It has no loop protection.** `ifconfig bridge0` advertises `proto stp`, but the
+bridge id is all zeros, no root is elected, and members carry only
+`<LEARNING,DISCOVER>` with no port state. STP is named, not running. Cable any ring
+and frames circulate forever. [TN3205][tn] says the same and tells you to disable
+the bridge before connecting Macs in loops. Rings are the point of this fabric: with
+three ports per machine, anything past a chain has a cycle in it.
+
+**It strips the RDMA GID table.** A bridged member interface holds no addresses of
+its own — they live on `bridge0` — and an RDMA device derives its GIDs from its
+paired IP interface. Bridged, every `rdma_enX` reports `GID[0]` alone. TN3205's own
+sample code queries GID index 1, which does not exist in that state.
+
+Apple's documented fix is not sufficient. Measured on `Mac16,11`: after
+`networksetup -setnetworkserviceenabled "Thunderbolt Bridge" off`, `bridge0` was
+still `UP`, `RUNNING`, `status: active`, with all three members attached and a live
+address-cache entry. Making the service inactive drops the IPv4 address and nothing
+else. The bridge interface itself has to be destroyed.
+
+[tn]: https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt
+
 ## Addressing
 
 No static IPs. Identity travels with the machine:
 
 - Bonjour `<LocalHostName>.local`
-- IPv4 link-local (169.254/16, ARP collision-probed)
-- IPv6 link-local (`fe80::`, derived from the interface MAC)
+- IPv6 link-local on each fabric port, EUI-64 from that port's own MAC
 
-Discover peers on the fabric regardless of which port a cable landed in:
+That link-local is *exactly* the value the paired RDMA device reports as `GID[0]`,
+so a port's IP address and its RDMA identity are the same number. Nothing depends on
+a GID index, and the address encodes node identity rather than cable position — it
+survives being unplugged and replugged into a different port on a different machine.
+
+macOS does not autoconfigure link-local on an interface with no network service, so
+`mesh-fabric-init` assigns it. It deliberately does **not** create SystemConfiguration
+services for these ports: those writes need Full Disk Access and fail headlessly with
+`Unable to access the System Configuration database`, and configd has no business
+renumbering an RDMA fabric.
+
+`net.inet6.ip6.forwarding` is on, because in a ring a node must transit for its
+neighbours. RDMA itself never routes — TN3205 is explicit that the application
+forwards — so this reaches nodes, it does not carry fabric payload.
+
+Discover neighbours on a given port:
 
 ```
-ping6 -c3 -I bridge0 ff02::1
+ping6 -c3 -I en4 ff02::1
 ```
 
-The Thunderbolt bridge is kept **last** in network service order so a peer can never
-advertise itself as the default route and blackhole the node's uplink.
+None of this state persists on its own: configd rebuilds `bridge0` on Thunderbolt
+hotplug and `ifconfig` addresses are runtime-only. So it runs at boot as
+`io.mesh.fabric` and the keeper re-asserts it every pass. A silently re-bridged node
+is one that will storm the moment the fabric grows a ring.
+
+The Thunderbolt bridge service is kept **last** in network service order for as long
+as it exists, so a peer can never advertise itself as the default route and blackhole
+the node's uplink.
 
 ## Layout
 
@@ -104,6 +150,7 @@ advertise itself as the default route and blackhole the node's uplink.
 | `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon. |
+| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding. Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
