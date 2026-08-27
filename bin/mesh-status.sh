@@ -14,7 +14,7 @@ for d in $(/usr/bin/ibv_devices 2>/dev/null | awk 'NR>2&&$1!=""{print $1}'); do
     "$(/usr/bin/ibv_devinfo -d "$d" 2>/dev/null | awk '/active_mtu:/{print $2}')"
 done
 b "THUNDERBOLT"; system_profiler SPThunderboltDataType 2>/dev/null | awk '/Device Name:|Speed:|Status:/{gsub(/^ +/,"");print "  "$0}' | head -12
-b "DAEMONS"; for spec in io.mesh.caffeinate:resident io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh.rdma-init:oneshot; do
+b "DAEMONS"; for spec in io.mesh.caffeinate:resident io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh.fabric:oneshot io.mesh.rdma-init:oneshot; do
   L=${spec%%:*}; kind=${spec##*:}
   info=$(launchctl print "system/$L" 2>/dev/null)
   pid=$(printf '%s' "$info" | awk -F'= ' '/^\tpid /{gsub(/ /,"",$2);print $2;exit}')
