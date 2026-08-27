@@ -7,6 +7,13 @@ decide on its own to stop executing.**
 Nodes are expected to be unplugged, carried to another room, and replugged into a
 different position in the mesh. Nothing here encodes cable position.
 
+**The threat is the false negative** — a node that should be working and reachable
+and silently is not, for any reason, however locally sensible. Stock macOS ships in
+exactly that vulnerable mode: it sleeps, it locks, it waits for consent, and it
+reboots itself when it judges that wise. Correcting that default is the only work
+that justifies a human being physically present. See [THREAT-MODEL.md](THREAT-MODEL.md)
+before changing settings that look wrong.
+
 ## The one step that cannot be automated
 
 `rdma_ctl enable` only runs from Recovery OS:
@@ -41,8 +48,11 @@ Hands-on, once, ~5 minutes:
 
 Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 
-> `curl | bash` means a compromise of this repo is a compromise of every node.
-> For anything beyond a lab, pin `MESH_REF` to a tag or commit SHA rather than `main`.
+> The failure to guard against here is not "the wrong code ran" — that is answered by
+> replacing the machine. It is a bootstrap that half-completes and leaves the node
+> unreachable. That is why `bootstrap.sh` opens sshd *before* it fetches anything:
+> if every later step fails, the machine is still remotely recoverable.
+> Pin `MESH_REF` to a tag or SHA when you want a reproducible definition.
 
 ## Why sshd is enabled via launchctl
 
@@ -80,8 +90,11 @@ advertise itself as the default route and blackhole the node's uplink.
 |---|---|
 | `install.sh` | provision/converge a node. Idempotent — re-running is the drift fix. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
+| `THREAT-MODEL.md` | **read this first.** Why several settings here look wrong under a normal hardening model. |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
-| `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing. |
+| `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
+| `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
+| `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |

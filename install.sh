@@ -24,8 +24,10 @@ sec "1. Layout"
 mkdir -p "$MESH_ROOT"/{bin,jobs,log,templates}
 install -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
 install -m 644 -o root -g wheel "$REPO"/templates/* "$MESH_ROOT/templates/" 2>/dev/null
-mkdir -p /usr/local/bin && ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
-ok "$MESH_ROOT populated; 'mesh-status' on PATH"
+mkdir -p /usr/local/bin
+ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
+ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
+ok "$MESH_ROOT populated; 'mesh-status' and 'mesh-peers' on PATH"
 
 sec "2. Power -- never sleep, always come back"
 for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
@@ -40,6 +42,20 @@ try "computer sleep Never"     systemsetup -setcomputersleep Never
 # An unattended OS-update reboot is a silent downtime event.
 try "no auto macOS updates"    defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false
 try "no auto update restart"   defaults write /Library/Preferences/com.apple.commerce AutoUpdateRestartRequired -bool false
+
+sec "3b. Anti-withdrawal -- neutralize the defaults that make a node go quiet"
+# A node that withdraws itself is the failure this repo exists to prevent. Every
+# line here disarms a stock macOS behaviour that can silently remove a working
+# machine from the mesh for a reason that sounds locally sensible.
+try "network time on"      systemsetup -setusingnetworktime on
+try "auto-boot on power"   nvram auto-boot=true
+try "screensaver never"    sudo -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
+# The application firewall is disabled deliberately. It can only ever *subtract*
+# reachability, and unreachability is the threat we are defending against. The
+# security boundary for this fleet is physical access to the room, not a host
+# packet filter that might decide to stop answering.
+try "app firewall off"     /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+try "stealth mode off"     /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off
 
 sec "4. Remote access"
 # systemsetup -setremotelogin is gated behind Full Disk Access (TCC), which cannot
@@ -100,7 +116,12 @@ mkplist io.mesh.caffeinate "<string>/usr/bin/caffeinate</string><string>-dimsu</
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.keeper    "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>"    "  <key>StartInterval</key><integer>60</integer>"
-for L in io.mesh.caffeinate io.mesh.rdma-init io.mesh.keeper; do
+# The beacon must never exit voluntarily -- its silence is how the mesh detects
+# that this node has withdrawn. KeepAlive makes launchd relight it immediately.
+mkplist io.mesh.beacon    "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
+  "  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>"
+for L in io.mesh.caffeinate io.mesh.rdma-init io.mesh.keeper io.mesh.beacon; do
   launchctl bootout system/$L >/dev/null 2>&1
   launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1 \
     && { launchctl enable system/$L >/dev/null 2>&1; ok "$L"; } || bad "$L"

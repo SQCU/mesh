@@ -26,6 +26,23 @@ if ! /usr/bin/nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1; then
   launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1
   drift=1
 fi
+# The beacon is how the rest of the mesh learns this node still exists. Its silence
+# is the alarm signal, so it must never be silent for a reason we could have fixed.
+if ! pgrep -qf "dns-sd -R"; then
+  echo "[$(ts)] DRIFT beacon not advertising -> restarting"
+  launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
+  drift=1
+fi
+# Clock drift breaks ssh and TLS silently, which reads as a dead node.
+if [ "$(systemsetup -getusingnetworktime 2>/dev/null | awk '{print $NF}')" != "On" ]; then
+  echo "[$(ts)] DRIFT network time off -> re-enabling"
+  systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1
+fi
+# The app firewall can only ever subtract reachability. Never let it come back on.
+if [ "$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -c 'State = 1')" != "0" ]; then
+  echo "[$(ts)] DRIFT app firewall enabled itself -> disabling"
+  /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off >/dev/null 2>&1; drift=1
+fi
 # RDMA is verify-only: enable/disable is Recovery-OS-gated, so this can never self-heal.
 if [ "$(/usr/bin/rdma_ctl status 2>&1)" != "enabled" ]; then
   echo "[$(ts)] ALARM rdma disabled - needs physical Recovery visit, not fixable remotely"
