@@ -1,6 +1,10 @@
 // mesh-flow -- see RDMA-FIRST.md
 #include "mesh-f.h"
 #include "mesh-mem.h"
+#include "mesh.h"
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <infiniband/verbs.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -26,6 +30,7 @@ static double wf_var(struct wf *w){ return w->n > 1 ? w->m2 / (w->n - 1) : 0.0; 
 static struct ibv_qp *g_qp; static struct ibv_pd *g_pd; static struct mesh_mem g_mem;
 static struct ibv_cq *g_cq; static struct ibv_context *g_ctx;
 static volatile sig_atomic_t g_stop;
+static const char *g_shm=NULL;
 static void on_sig(int s){ (void)s; g_stop = 1; }
 static void teardown(void){
   if(g_qp){ ibv_destroy_qp(g_qp); g_qp=NULL; }
@@ -33,6 +38,7 @@ static void teardown(void){
   mesh_mem_release(&g_mem);
   if(g_pd){ ibv_dealloc_pd(g_pd); g_pd=NULL; }
   if(g_ctx){ ibv_close_device(g_ctx); g_ctx=NULL; }
+  if(g_shm){ shm_unlink(g_shm); g_shm=NULL; }
 }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
@@ -67,7 +73,7 @@ static int oob(const char*host,int port,int secs){
 int main(int argc,char**argv){
   const char *dev=NULL,*peer=NULL;
   int pgsz=4096, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
-  int node_idx=0, target_idx=1, spanpg=1; unsigned route_path=0; unsigned egress=0; (void)egress;
+  int node_idx=0, target_idx=1, spanpg=1; const char *shmname="/mesh0"; double pct=0.0; unsigned route_path=0; unsigned egress=0; (void)egress;
   double tel_hz=1.0;
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-d")) dev=argv[++i];
@@ -82,6 +88,8 @@ int main(int argc,char**argv){
     else if(!strcmp(argv[i],"-D")) target_idx=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-R")) route_path=(unsigned)strtoul(argv[++i],NULL,0);
     else if(!strcmp(argv[i],"-S")) spanpg=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-s")) shmname=argv[++i];
+    else if(!strcmp(argv[i],"-M")) pct=atof(argv[++i]);
     else if(!strcmp(argv[i],"--source")) source=1;
     else peer=argv[i];
   }
@@ -103,9 +111,33 @@ int main(int argc,char**argv){
       ibv_get_device_name(d), ibv_port_state_str(pa.state)); return 2; }
   g_pd=ibv_alloc_pd(g_ctx); if(!g_pd) die("alloc_pd");
 
+  uint64_t node_ram=0; size_t nrl=sizeof node_ram;
+  sysctlbyname("hw.memsize",&node_ram,&nrl,NULL,0);
+  if(pct>0.0 && node_ram) npages=(int)((pct/100.0*(double)node_ram)/(double)pgsz);
+  if(npages<4) die("page pool too small");
+  uint32_t ring_cap=4096;
+  size_t rb=(size_t)ring_cap*sizeof(struct mesh_desc);
+  size_t hdr_end=(sizeof(struct mesh_hdr)+MESH_CL-1)/MESH_CL*MESH_CL;
+  uint64_t free_off=hdr_end, sub_off=free_off+rb, cmp_off=sub_off+rb, rel_off=cmp_off+rb;
+  size_t data_off=((rel_off+rb)+65535)/65536*65536;
   size_t span=(size_t)pgsz*npages;
-  void *mem; if(posix_memalign(&mem,getpagesize(),span)) die("memalign");
-  memset(mem,0,span);
+  size_t total=data_off+span;
+  shm_unlink(shmname);
+  int rfd=shm_open(shmname,O_CREAT|O_RDWR,0600); if(rfd<0) die("shm_open");
+  if(ftruncate(rfd,(off_t)total)) die("ftruncate");
+  void *rbase=mmap(NULL,total,PROT_READ|PROT_WRITE,MAP_SHARED,rfd,0);
+  if(rbase==MAP_FAILED) die("mmap region");
+  memset(rbase,0,hdr_end+4*rb);
+  g_shm=shmname;
+  struct mesh RG={.h=(struct mesh_hdr*)rbase,.base=(unsigned char*)rbase,.len=total,.fd=rfd};
+  RG.h->pgsz=(uint32_t)pgsz; RG.h->npages=(uint32_t)npages; RG.h->ring_cap=ring_cap;
+  RG.h->node=(uint32_t)node_idx; RG.h->data_off=data_off; RG.h->free_off=free_off;
+  RG.h->sub_off=sub_off; RG.h->cmp_off=cmp_off; RG.h->rel_off=rel_off;
+  RG.h->bytes=span; RG.h->node_ram=node_ram; RG.h->version=MESH_VERSION;
+  __sync_synchronize(); RG.h->magic=MESH_MAGIC;
+  void *mem=(char*)rbase+data_off;
+  fprintf(stderr,"region %s: %d pages x %d B = %.3f GB = %.2f%% of node\n",
+     shmname,npages,pgsz,span/1e9, node_ram?100.0*span/(double)node_ram:0.0);
   if(mesh_mem_init(&g_mem,g_pd,g_ctx,(size_t)pgsz)) die("mesh_mem_init");
   struct mesh_map map; mesh_map_open(&map,mem,span,IBV_ACCESS_LOCAL_WRITE);
   while(!mesh_map_done(&map) && mesh_map_step(&g_mem,&map,64)) ;
@@ -180,18 +212,8 @@ int main(int argc,char**argv){
   uint32_t expected=0; int have_expected=0; uint32_t retire_cur=0;
   unsigned long long gone=0, rearm=0;
   uint32_t pend[4096]; int npend=0; unsigned long long pend_drop=0;
-  enum { SPAN_MAX = 4096 };
-  int *spg = malloc(SPAN_MAX*sizeof(int)); if(!spg) die("alloc span");
-  DLTensor *iov = malloc(SPAN_MAX*sizeof *iov); if(!iov) die("alloc iov");
-  int64_t *ishape = malloc(SPAN_MAX*sizeof *ishape); if(!ishape) die("alloc shape");
-  int64_t *istride = malloc(SPAN_MAX*sizeof *istride); if(!istride) die("alloc stride");
-  for(int z=0; z<SPAN_MAX; z++){
-    iov[z].device=(DLDevice){kDLCPU,0}; iov[z].ndim=1;
-    iov[z].dtype=(DLDataType){kDLUInt,8,1};
-    iov[z].shape=&ishape[z]; iov[z].strides=&istride[z];
-    iov[z].byte_offset=0; istride[z]=1; }
-  int nspan=0; uint32_t span_seq=0, span_bytes=0; int span_open=0;
-  unsigned long long spans_done=0, span_abort=0, span_pages=0;
+  unsigned long long spans_done=0, span_abort=0, span_pages=0; (void)span_abort;
+  unsigned long long cmp_full=0, app_sent=0, app_recv=0;
   unsigned long long missing=0; uint32_t sweep_cur=0;
   uint32_t *req_at = calloc(MISSW,sizeof(uint32_t)); if(!req_at) die("alloc req_at");
   unsigned long long lat_b[7]={0}, lat_max=0, lat_sum=0, outstanding=0, out_max=0;
@@ -215,6 +237,42 @@ int main(int argc,char**argv){
       struct ibv_recv_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1},*bad;
       if(ibv_post_recv(g_qp,&wr,&bad)){ freelist[nfree++]=i; break; }
       pg[i].state=POSTED; posted++; did=1;
+    }
+
+    // APPREL -- take back pages the application has finished with
+    { struct mesh_desc dd;
+      while(!mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
+        uint32_t p=dd.page;
+        if(p<(uint32_t)npages && pg[p].held){
+          pg[p].held=0; pg[p].state=FREE; freelist[nfree++]=(int)p; did=1; } } }
+
+    // APPFREE -- lend spare pages to the application, keeping the receive
+    // pool above its target so the wire never starves behind the app
+    if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
+      while(nfree > rx_target){
+        int p=freelist[nfree-1];
+        struct mesh_desc dd={.page=(uint32_t)p,.bytes=0,.seq=0,.node=0,.flags=0};
+        if(mesh_push(&RG,&RG.h->rfree,RG.h->free_off,&dd)) break;
+        nfree--; pg[p].held=1; did=1;
+      }
+      // APPSUB -- send what the application handed over
+      struct mesh_desc dd;
+      while(sending<tx_budget && !mesh_pop(&RG,&RG.h->rsub,RG.h->sub_off,&dd)){
+        uint32_t p=dd.page; if(p>=(uint32_t)npages) continue;
+        struct wire *wh=(struct wire*)pg[p].addr;
+        wh->magic=WIRE_MAGIC; wh->path=0; wh->stream=0; wh->seq=next_seq++;
+        wh->bytes=(uint16_t)(dd.bytes>maxpay?maxpay:dd.bytes);
+        wh->src=(uint16_t)node_idx; wh->dst=dd.node;
+        wh->flags=F_FIRST|F_LAST; wh->hops=0;
+        struct ibv_sge g={(uintptr_t)pg[p].addr,(uint32_t)pgsz,pg[p].lkey};
+        struct ibv_send_wr wr={.wr_id=(uint64_t)p,.sg_list=&g,.num_sge=1,
+          .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+        pg[p].held=0;
+        if(ibv_post_send(g_qp,&wr,&bad)){ pg[p].state=FREE; freelist[nfree++]=(int)p; }
+        else { pg[p].state=SENDING; if(!pg[p].refs++) sending++; app_sent++;
+               atomic_fetch_add_explicit(&RG.h->sent,1,memory_order_relaxed); }
+        did=1;
+      }
     }
 
     
@@ -327,35 +385,23 @@ int main(int argc,char**argv){
       if(pay != h->bytes) short_pay++;
       if(h->flags & F_META) meta_seen++;
 
-      if(h->flags & F_FIRST){
-        if(span_open){ for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]); span_abort++; }
-        nspan=0; span_bytes=0; span_open=1; span_seq=h->seq;
-      }
-      if(!span_open){ FREE_PAGE(i); continue; }
-      if(h->seq != span_seq + (uint32_t)nspan){
-        for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]);
-        nspan=0; span_open=0; span_abort++; FREE_PAGE(i); continue;
-      }
-      if(nspan>=SPAN_MAX){ for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]); nspan=0; span_open=0; span_abort++; FREE_PAGE(i); continue; }
-      spg[nspan]=i; iov[nspan].data=(char*)pg[i].addr+sizeof *h; ishape[nspan]=(int64_t)pay;
-      nspan++; span_bytes+=pay;
-      if(!(h->flags & F_LAST)){ did=1; continue; }
-
-      mesh_f(iov, nspan, span_bytes, h, node_idx);
-      spans_done++; span_pages+=nspan; span_open=0;
       h->hops++;
-      for(int z=0; z<nspan; z++){
-        int p=spg[z];
-        if(h->dst==(uint16_t)node_idx || h->hops>32){ if(z==nspan-1) delivered++; FREE_PAGE(p); }
-        else {
-          struct ibv_sge g={(uintptr_t)pg[p].addr,(uint32_t)pgsz,pg[p].lkey};
-          struct ibv_send_wr wr={.wr_id=(uint64_t)p,.sg_list=&g,.num_sge=1,
-            .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-          if(ibv_post_send(g_qp,&wr,&bad)){ d_post++; FREE_PAGE(p); }
-          else { pg[p].state=SENDING; if(!pg[p].refs++) sending++; }
-        }
+      if(h->dst==(uint16_t)node_idx || h->hops>32){
+        delivered++; spans_done++; span_pages++;
+        if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
+          struct mesh_desc dd={.page=(uint32_t)i,.bytes=pay,.seq=h->seq,
+                               .node=h->src,.flags=h->flags};
+          if(mesh_push(&RG,&RG.h->rcmp,RG.h->cmp_off,&dd)){ cmp_full++; FREE_PAGE(i); }
+          else { pg[i].held=1; app_recv++;
+                 atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed); }
+        } else FREE_PAGE(i);
+      } else {
+        struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
+        struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
+          .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+        if(ibv_post_send(g_qp,&wr,&bad)){ d_post++; FREE_PAGE(i); }
+        else { pg[i].state=SENDING; if(!pg[i].refs++) sending++; }
       }
-      nspan=0;
       did=1;
     }
 
