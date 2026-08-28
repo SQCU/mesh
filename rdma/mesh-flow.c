@@ -64,7 +64,7 @@ static int oob(const char*host,int port,int secs){
 int main(int argc,char**argv){
   const char *dev=NULL,*peer=NULL;
   int pgsz=4096, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
-  int node_idx=0, target_idx=1; unsigned route_path=0; unsigned egress=0; (void)egress;
+  int node_idx=0, target_idx=1, spanpg=1; unsigned route_path=0; unsigned egress=0; (void)egress;
   double tel_hz=1.0;
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-d")) dev=argv[++i];
@@ -78,6 +78,7 @@ int main(int argc,char**argv){
     else if(!strcmp(argv[i],"-I")) node_idx=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-D")) target_idx=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-R")) route_path=(unsigned)strtoul(argv[++i],NULL,0);
+    else if(!strcmp(argv[i],"-S")) spanpg=atoi(argv[++i]);
     else if(!strcmp(argv[i],"--source")) source=1;
     else peer=argv[i];
   }
@@ -178,6 +179,11 @@ int main(int argc,char**argv){
   uint32_t expected=0; int have_expected=0; uint32_t retire_cur=0;
   unsigned long long gone=0, rearm=0;
   uint32_t pend[4096]; int npend=0; unsigned long long pend_drop=0;
+  enum { SPAN_MAX = 4096 };
+  int *spg = malloc(SPAN_MAX*sizeof(int)); if(!spg) die("alloc span");
+  struct miov *iov = malloc(SPAN_MAX*sizeof *iov); if(!iov) die("alloc iov");
+  int nspan=0; uint32_t span_seq=0, span_bytes=0; int span_open=0;
+  unsigned long long spans_done=0, span_abort=0, span_pages=0;
   unsigned long long missing=0; uint32_t sweep_cur=0;
   uint32_t *req_at = calloc(MISSW,sizeof(uint32_t)); if(!req_at) die("alloc req_at");
   unsigned long long lat_b[7]={0}, lat_max=0, lat_sum=0, outstanding=0, out_max=0;
@@ -187,7 +193,7 @@ int main(int argc,char**argv){
   uint32_t *rtq = malloc(RTQ*sizeof(uint32_t)); if(!rtq) die("alloc rtq");
   int rt_head=0, rt_n=0; unsigned long long rt_drop=0;
   unsigned long long age_b[7]={0};
-  uint32_t next_seq=0, last_seq=0; int seen_any=0;
+  uint32_t next_seq=0, last_seq=0; int seen_any=0; int spanpos=0;
   struct wf w_free={0}, w_ready={0}, w_send={0};
   double t0=now(), t_last=t0, v_last=nfree, tel_last=t0, quiet=t0;
 
@@ -232,7 +238,9 @@ int main(int argc,char**argv){
         struct wire *h=(struct wire*)pg[i].addr;
         h->magic=WIRE_MAGIC; h->path=route_path; h->stream=0; h->seq=next_seq++;
         h->bytes=(uint16_t)(pgsz-sizeof *h); h->src=(uint16_t)node_idx;
-        h->dst=(uint16_t)target_idx; h->flags=F_FIRST|F_LAST; h->hops=0;
+        h->dst=(uint16_t)target_idx; h->flags=0; if(spanpos==0) h->flags|=F_FIRST;
+        if(spanpos==spanpg-1) h->flags|=F_LAST;
+        spanpos=(spanpos+1)%spanpg; h->hops=0;
         struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
         struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
@@ -310,18 +318,36 @@ int main(int argc,char**argv){
       uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
       if(pay != h->bytes) short_pay++;
       if(h->flags & F_META) meta_seen++;
-      mesh_f((char*)pg[i].addr+sizeof *h, pay, h, node_idx);
-      h->hops++;
-      if(h->dst==(uint16_t)node_idx || h->hops>32){ delivered++; FREE_PAGE(i); }
-      else {
-        egress = h->path & HOP_MASK;
-        h->path >>= HOP_BITS;
-        struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
-        struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
-          .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-        if(ibv_post_send(g_qp,&wr,&bad)){ d_post++; FREE_PAGE(i); }
-        else { pg[i].state=SENDING; pg[i].refs=1; sending++; }
+
+      if(h->flags & F_FIRST){
+        if(span_open){ for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]); span_abort++; }
+        nspan=0; span_bytes=0; span_open=1; span_seq=h->seq;
       }
+      if(!span_open){ FREE_PAGE(i); continue; }
+      if(h->seq != span_seq + (uint32_t)nspan){
+        for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]);
+        nspan=0; span_open=0; span_abort++; FREE_PAGE(i); continue;
+      }
+      if(nspan>=SPAN_MAX){ for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]); nspan=0; span_open=0; span_abort++; FREE_PAGE(i); continue; }
+      spg[nspan]=i; iov[nspan].base=(char*)pg[i].addr+sizeof *h; iov[nspan].len=pay;
+      nspan++; span_bytes+=pay;
+      if(!(h->flags & F_LAST)){ did=1; continue; }
+
+      mesh_f(iov, nspan, span_bytes, h, node_idx);
+      spans_done++; span_pages+=nspan; span_open=0;
+      h->hops++;
+      for(int z=0; z<nspan; z++){
+        int p=spg[z];
+        if(h->dst==(uint16_t)node_idx || h->hops>32){ if(z==nspan-1) delivered++; FREE_PAGE(p); }
+        else {
+          struct ibv_sge g={(uintptr_t)pg[p].addr,(uint32_t)pgsz,pg[p].lkey};
+          struct ibv_send_wr wr={.wr_id=(uint64_t)p,.sg_list=&g,.num_sge=1,
+            .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+          if(ibv_post_send(g_qp,&wr,&bad)){ d_post++; FREE_PAGE(p); }
+          else { pg[p].state=SENDING; if(!pg[p].refs++) sending++; }
+        }
+      }
+      nspan=0;
       did=1;
     }
 

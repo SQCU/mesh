@@ -10,5 +10,6 @@ struct wire { uint32_t magic, path, stream, seq; uint16_t bytes, src, dst; uint8
 #define F_NACK  8u
 #define HOP_BITS 2u
 #define HOP_MASK 3u
-void mesh_f(void *payload, uint32_t bytes, struct wire *h, int node_idx);
+struct miov { void *base; uint32_t len; };
+void mesh_f(struct miov *iov, int niov, uint32_t bytes, struct wire *h, int node_idx);
 #endif
