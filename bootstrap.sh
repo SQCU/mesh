@@ -1,6 +1,11 @@
 #!/bin/bash
 REPO="${MESH_REPO:-SQCU/mesh}"
 REF="${MESH_REF:-main}"
+case "$REF" in
+  main) sha=$(curl -fsSL "https://api.github.com/repos/$REPO/commits/main" 2>/dev/null \
+              | awk -F'"' '/"sha"/{print $4; exit}')
+        [ -n "$sha" ] && REF="$sha" ;;
+esac
 DEST="${MESH_DEST:-/usr/local/src/mesh}"
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
 

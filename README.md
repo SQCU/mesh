@@ -154,6 +154,8 @@ the node's uplink.
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
+| `bin/mesh-nodeinfo.sh` | socket-activated node identity + topology responder on 8099. |
+| `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding. Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
@@ -213,6 +215,41 @@ RDMA itself is untouched by any of this and still never routes. TN3205 is explic
 that the application forwards across a topology. This layer exists so that nodes can
 *find and reach* each other at unlimited fleet size; the RDMA data plane rides the
 cables directly, point to point.
+
+## Names, traversal, and running things
+
+`mesh-peers` shows what the fabric is, not just which addresses exist:
+
+```
+  NODE               MODEL        CORES MEM    RDMA      ADDRESS                                VIA
+  Ms-Mac-mini        Mac16,11     12    24G    enabled   fd6d:6573:68:3af8:1a3c:9700:3034:715d  self
+```
+
+That comes from `io.mesh.nodeinfo`, a launchd socket-activated service on port 8099.
+There is no resident daemon and no language runtime: launchd accepts the connection
+and hands the socket to a shell script as stdin/stdout. Each node reports its name,
+hardware, macOS, RDMA and SDK state, every fabric port with its state, GID and the
+peer seen on it, and every route it knows.
+
+That last part is what makes the topology discoverable. Ask each node what it can see
+and you can reconstruct the whole graph — no central registry, no multicast, no
+hop limit.
+
+Running work anywhere:
+
+```
+mesh-run all      'sysctl -n hw.model'
+mesh-run others   'uptime'
+mesh-run Ms-Mac-mini 'ls /usr/local/mesh'
+```
+
+Job submission needs no new machinery. Every node already runs sshd and trusts the
+operator roster; the only missing piece was knowing which nodes exist, which the
+routing table answers.
+
+> If you write a plist to `/Library/LaunchDaemons` with `inetdCompatibility`, do not
+> also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and
+> the service answers every connection with silence while looking perfectly healthy.
 
 ## HMI epilogue
 
