@@ -173,6 +173,10 @@ RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
 this depends on the routing layer.
 
+> [RDMA-FIRST.md](RDMA-FIRST.md) is the design economics: what is cheap, what is
+> expensive, and why the usual backpressure and framing machinery is the wrong shape
+> here. Read it before designing; read RDMA-RULES.md before running.
+
 > Before writing or running anything that opens a verbs device, read
 > [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
 > badly enough to need a physical power cycle.
