@@ -59,6 +59,33 @@ against a 112 ms gigabyte), agreement per *page* is over 200% overhead. Amortize
 stream and in-channel is fine — a separate control QP keeps stream identity as the
 discriminator, so the data path still never inspects bytes.
 
+## The frame constraint (measured, and it forces the page size)
+
+TN3205 says sender and receiver must post the same number of frames. It does not say
+that **multi-frame messages are only safe at shallow pipeline depth**, which is what
+the hardware actually does:
+
+| page | frames | in flight | result |
+|---|---|---|---|
+| 64 KB | 16 | 1 | clean, 7.65 Gbit/s |
+| 64 KB | 16 | 2 | clean, 15.13 Gbit/s |
+| 64 KB | 16 | 8 | no errors, **stalls**, 0 Gbit/s |
+| 64 KB | 16 | 120 | **113k `local length error`**, receiver drops everything |
+| 8 KB | 2 | 120 | 1498 errors |
+| **4 KB** | **1** | **120** | **0 errors, 0 gaps, 31.9 Gbit/s each way** |
+
+`ibv_uc_pingpong` reaches 47 Gbit/s at 16 frames because it keeps exactly one message
+in flight. That is not a protocol we can copy: depth ≤ 2 is a handshake in all but
+name, and each round trip is 89 KB of wire.
+
+So **the page size is 4096 — one frame — and throughput scales by adding queue pairs,
+not by enlarging pages.** With `max_qp: 11` (10 usable) and 12–18 hardware threads,
+the scaling axis is parallel QPs on parallel threads, each owning its own page pool
+shared-nothing.
+
+This also retires an earlier misdiagnosis: a "2 frames hangs, 1 frame works" symptom
+was blamed on a flapping link. It was real, and it was this.
+
 ## What follows
 
 **Do not build a backpressure protocol.** The mechanism already exists, twice over. The
