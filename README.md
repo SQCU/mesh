@@ -223,6 +223,18 @@ keyboard. `networks.conf` (gitignored — it holds live credentials) seeds every
 `install.sh` copies it to `/usr/local/mesh/networks.conf`, and the keeper re-asserts
 it. Entries are only added, never removed. Format is in `networks.conf.example`.
 
+## Workload design studies
+
+`design/` holds design studies for workloads that run on the fabric. They are
+proposals with their reasoning and their adversarial critique attached, not settled
+fact, and each states plainly which of its numbers are measured and which are
+estimates.
+
+- [`design/xonotic-bot-compute.md`](design/xonotic-bot-compute.md) — a bot planner for
+  a Xonotic server split across two nodes. Chooses a mean-field congestion equilibrium
+  because it is the one formulation that does not collapse into a precomputable
+  operator, and replaces cadence-slip with admission control as the visible failure.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
