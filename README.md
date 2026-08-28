@@ -72,6 +72,11 @@ was actually asked for. Each of these is open to revisiting:
 - **The provisioning source is a public repo**, so a node reaches a consistent
   definition with no credentials.
 
+> `nc -w` does not bound the connect on macOS. Probing an unreachable node with
+> `nc -w 2` blocks for **75 seconds**; `nc -G 2 -w 2` returns immediately. Anything
+> that enumerates the fabric must use `-G`, or one dead node stalls the whole report
+> and the cost grows with the fleet.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —

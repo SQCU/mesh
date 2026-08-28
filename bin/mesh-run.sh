@@ -12,10 +12,10 @@ for a in $addrs; do
   case "$target" in
     all) ;;
     others) [ "$a" = "$self" ] && continue ;;
-    *) n=$(printf 'x' | nc -w 2 "$a" 8099 2>/dev/null | awk -F= '/^name=/{print $2;exit}')
+    *) n=$(printf 'x' | nc -G 2 -w 2 "$a" 8099 2>/dev/null | awk -F= '/^name=/{print $2;exit}')
        [ "$n" = "$target" ] || [ "$a" = "$target" ] || continue ;;
   esac
-  name=$(printf 'x' | nc -w 2 "$a" 8099 2>/dev/null | awk -F= '/^name=/{print $2;exit}')
+  name=$(printf 'x' | nc -G 2 -w 2 "$a" 8099 2>/dev/null | awk -F= '/^name=/{print $2;exit}')
   printf '\033[1m--- %s (%s)\033[0m\n' "${name:-$a}" "$a"
   if [ "$a" = "$self" ]; then bash -c "$*" || rc=$?
   else ssh -o BatchMode=yes -o ConnectTimeout=8 "$USER_NAME@$a" "$@" || rc=$?; fi

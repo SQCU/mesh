@@ -21,4 +21,21 @@ to them; where anything paraphrases these, the quote wins.
 > configuration or operation of any software in our mesh repo can demote the
 > reachability, accessibility, and workload of a node or edge between nodes
 
+Code that may never be added, and how to spot it:
+
+> are you inventing fictional reasons for machines to become solipsistic and
+> inaccessible? this is an attack surface and must be removed categorically as it
+> violates our security model.
+
+> you may *never* induce a paradox of the unpatchables *anywhere* in *any* code
+
+> index only these two choices for selection of version controlled repos in code or
+> configuration: 1:`main` 2:`{any named branch}` [...] you can *never* index by commit
+> *ever* unless you register that commit as a branch. once you do, code which indexes
+> against version control must *always* use the most up to date commit on whatever
+> branch is chosen.
+
+> if it was written by claude, it's not the threat model.
+
+
 Consequences: [AGENTS.md](AGENTS.md), [README.md](README.md).
