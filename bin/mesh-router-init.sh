@@ -21,7 +21,6 @@ ifconfig lo0 | grep -q "inet6 ${ULA} " || {
 CONF=$MESH_ROOT/babeld.conf
 { for p in $ports; do echo "interface $p"; done
   echo "redistribute local ip ${ULA}/128 eq 128 allow"
-  while read -r pu pn; do [ -n "$pu" ] && echo "redistribute ip ${pu}/128 eq 128 allow"; done < /usr/local/mesh/proxied 2>/dev/null
   echo "redistribute deny"; } > "$CONF"
 pgrep -qf "$MESH_ROOT/bin/babeld" || echo "[$(ts)] starting babeld on $(echo $ports)"
 exec "$MESH_ROOT/bin/babeld" -c "$CONF" -S "$MESH_ROOT/babel-state" -I "" -L "$LOG"
