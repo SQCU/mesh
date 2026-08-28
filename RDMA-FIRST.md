@@ -59,6 +59,40 @@ against a 112 ms gigabyte), agreement per *page* is over 200% overhead. Amortize
 stream and in-channel is fine — a separate control QP keeps stream identity as the
 discriminator, so the data path still never inspects bytes.
 
+## The queue does not enforce its own depth
+
+TN3205 says two things that only make sense together:
+
+> "Queues are sized in units of 4 KB frames… queue depths set the maximum message
+> size possible."
+
+> "The system may adjust queue depths based on hardware capabilities so be sure to
+> check final values using `ibv_query_qp`."
+
+Queue depth is a **frame budget**, and the granted value is the one that counts. On
+this hardware a request of 4095 is granted 4095, and smaller requests are rounded
+*up* (256 → 1023). So query it; do not assume it.
+
+The part the documentation does not say, measured: **`ibv_post_recv` never fails.**
+
+```
+pagesz  frames   receives accepted   frames used
+4096    1        8193                8193
+8192    2        8193                16386
+65536   16       8193                131088     ← 32x the granted 4095
+```
+
+Posting past the budget succeeds silently and corrupts later. The frame budget is a
+contract the caller must honour; the hardware will not refuse, it will misbehave.
+That is the mechanism behind the `local length error` storms at depth.
+
+So in-flight depth is not a tuning knob to be maximised. **Total posted frames must
+stay within the granted depth, enforced by us.** Obeying it is also faster: at 4 KB
+pages, dropping from a guessed 120 in flight to the computed budget of 60 took a hop
+from 31.91 to **45.81 Gbit/s each way, zero errors, zero gaps**. Trying to keep more
+outstanding than the queue allows does not pretend the link is faster; it makes it
+slower.
+
 ## The frame constraint (measured, and it forces the page size)
 
 TN3205 says sender and receiver must post the same number of frames. It does not say
@@ -72,7 +106,7 @@ the hardware actually does:
 | 64 KB | 16 | 8 | no errors, **stalls**, 0 Gbit/s |
 | 64 KB | 16 | 120 | **113k `local length error`**, receiver drops everything |
 | 8 KB | 2 | 120 | 1498 errors |
-| **4 KB** | **1** | **120** | **0 errors, 0 gaps, 31.9 Gbit/s each way** |
+| **4 KB** | **1** | **60 (granted budget)** | **0 errors, 0 gaps, 45.8 Gbit/s each way** |
 
 `ibv_uc_pingpong` reaches 47 Gbit/s at 16 frames because it keeps exactly one message
 in flight. That is not a protocol we can copy: depth ≤ 2 is a handshake in all but

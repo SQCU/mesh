@@ -78,7 +78,7 @@ static void f_touch(void *p, uint32_t n){
 
 int main(int argc,char**argv){
   const char *dev=NULL,*peer=NULL,*op="identity";
-  int pgsz=65536, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
+  int pgsz=4096, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
   double tel_hz=1.0;
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-d")) dev=argv[++i];
@@ -122,6 +122,13 @@ int main(int argc,char**argv){
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
   g_qp=ibv_create_qp(g_pd,&ia); if(!g_qp) die("create_qp");
+  /* TN3205: "The system may adjust queue depths based on hardware capabilities so be
+     sure to check final values using ibv_query_qp." Queue depth is counted in 4 KB
+     frames and bounds total posted frames -- and ibv_post_recv does NOT enforce it,
+     it accepts far past capacity and corrupts later, so we enforce it here. */
+  struct ibv_qp_attr qa; struct ibv_qp_init_attr qi;
+  if(ibv_query_qp(g_qp,&qa,IBV_QP_CAP,&qi)) die("query_qp");
+  int gr_send=qi.cap.max_send_wr, gr_recv=qi.cap.max_recv_wr;
   struct ibv_qp_attr at={.qp_state=IBV_QPS_INIT,.pkey_index=0,.port_num=1,.qp_access_flags=0};
   if(ibv_modify_qp(g_qp,&at,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)) die("INIT");
 
@@ -153,6 +160,12 @@ int main(int argc,char**argv){
       if(nfree<npages) freelist[nfree++]=(i); else fprintf(stderr,"BUG freelist overflow p%d\n",(i)); } \
     else fprintf(stderr,"BUG double free p%d\n",(i)); }while(0)
   int rx_target = npages*3/4; if(rx_target<2) rx_target=2;
+  if(rx_target*frames > gr_recv) rx_target = gr_recv/frames;
+  int tx_budget = gr_send/frames; if(tx_budget<1) tx_budget=1;
+  if(tx_budget > npages/4) tx_budget = npages/4;
+  fprintf(stderr,"caps: granted send=%d recv=%d frames (4KB units); pgsz=%d frames/pg=%d "
+                 "-> rx_target=%d (%d frames) tx_budget=%d (%d frames)\n",
+          gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0;
   uint32_t next_seq=0, last_seq=0; int seen_any=0;
   struct wf w_free={0}, w_ready={0}, w_send={0};
@@ -175,7 +188,7 @@ int main(int argc,char**argv){
 
     /* SOURCE: originate pages when we are the head of the stream. */
     if(source){
-      int cap = inflight? inflight : npages/2;
+      int cap = inflight? inflight : tx_budget;
       while(nfree>0 && sending<cap){
         int i=freelist[--nfree];
         struct wire *h=(struct wire*)pg[i].addr;
