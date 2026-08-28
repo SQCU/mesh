@@ -114,8 +114,17 @@ mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" " 
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
 for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.rdma-init io.mesh.keeper; do
   launchctl bootout system/$L >/dev/null 2>&1
-  launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1 \
-    && { launchctl enable system/$L >/dev/null 2>&1; ok "$L"; } || bad "$L"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl print system/$L >/dev/null 2>&1 || break
+    sleep 1
+  done
+  launchctl enable system/$L >/dev/null 2>&1
+  for _ in 1 2 3; do
+    launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1
+    launchctl print system/$L >/dev/null 2>&1 && break
+    sleep 2
+  done
+  launchctl print system/$L >/dev/null 2>&1 && ok "$L" || bad "$L NOT LOADED"
 done
 
 sec "9. Status"
