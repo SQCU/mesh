@@ -154,6 +154,87 @@ monotonically increasing) from one that is crashing out (free → 0, sustained
 negative). A few floats per peer per second and the whole graph knows what the whole
 graph is doing.
 
+## Software loss repair on UC (measured)
+
+RC and UD are refused by this hardware (errno 102) and `max_qp_rd_atom` is 0, so there is
+no hardware retransmit. Repair is a receiver-driven NACK over the same QP, and the
+retransmit window **is** the page pool — nothing is copied, a sent page is simply held in
+`txring` until ring position evicts it.
+
+Three things were wrong, and they compounded:
+
+**The pool was clamped to the frame budget.** `frames*npages > 4095 -> npages = 4095/frames`
+conflated two unrelated limits. The granted depth bounds *posted* frames; it says nothing
+about how many pages a process may own. `max_mr_size` (16.4 MB) bounds one MR, not the pool —
+`max_mr` is 100. With the clamp, a 4096-byte page pool could never exceed 4000 pages, so the
+retransmit window was 2992 pages no matter what the operator asked for. The pool is now
+registered as up to 64 MRs of 16.4 MB; `struct page` already carried a per-page `lkey`.
+`rx_target` and `tx_budget` are taken from a quarter of the *granted* frame budget, so posted
+frames still honour TN3205 while the pool does not.
+
+**Repair decremented an in-flight counter it never incremented.** The NACK path did
+`pg[tp].refs++` without `sending++`, but the completion path does `sending--` when refs hits
+zero. Every retransmit therefore drove `sending` one lower, permanently. Measured: `sending`
+reached **-2326** inside two seconds, `while(sending<cap)` stopped bounding anything, and the
+source ran with the entire window in flight (out_max 2992 against a `tx_budget` of 1000).
+Fixing it cut observed page loss about threefold on its own.
+
+**The window was consumed by latency, so retransmits were overwritten before the NIC read
+them.** Repair latency is not a duration, it is a distance in sequence numbers, and it is
+roughly *twice* the send-queue depth: the NACK reaches the source when the source is already
+`tx_budget` pages ahead, and the retransmit then queues behind another `tx_budget` pages
+before the NIC DMA-reads the buffer. Measured at `tx_budget` 1023: NACK lag 1411 mean / 1784
+max, repair completing at 1865 mean. Against a 2992-page window that leaves under 200 pages
+of margin, and a page evicted at that boundary is rewritten under a work request the NIC has
+not yet serviced. The symptom was retransmits failing to arrive at **40-46%** while original
+pages were lost at 0.05% — confirmed by marking retransmits and counting them at the far end
+(5976 of 11134 arrived). It is not wire loss and not burstiness: pacing repair under the same
+`sending<cap` gate as fresh data changed nothing, and a probe copy of a page that had already
+been *delivered* vanished at the same rate.
+
+So the rule is `txwin >> tx_budget`, not `txwin > 0`. Repair also became a first-class stage
+of the send loop — NACK entries land in a retransmit queue drained ahead of fresh pages under
+the same capacity gate — rather than an unbounded blast from inside the receive path.
+
+### Re-arm is measured in sequence progress, never in seconds
+
+A request can be lost, and so can its answer. Without re-arm, one lost retransmit is a
+permanently lost page — which is exactly the 23-36% residue the earlier mechanism could not
+explain. Two previous attempts re-armed on a clock (1 ms, then a 1024-page interval) and both
+failed the same way: 99.996% of named sequences were already evicted.
+
+The data plane already carries a monotonic quantity — `expected`, the receiver's sequence
+frontier. Everything is expressed against it:
+
+| quantity | value | meaning |
+|---|---|---|
+| `rearm_gap` | `tx_budget + 512` | re-request a still-missing seq once the frontier has advanced this far past its last request |
+| `horizon` | `txwin - 4096`, floored at `txwin/2` | do not name a seq older than this; the sender has evicted it |
+| `retire_at` | `horizon + 4096` | give up: clear the bit, count it `gone` |
+
+`horizon` and `retire_at` must be separate. Retiring at the request horizon throws away
+sequences whose retransmit is still in flight — measured, that alone dropped recovery to 14%.
+
+The sweep only runs when `missing` is non-zero and only scans the live window, eight bitmap
+words per iteration from a rolling cursor, so a healthy stream pays nothing. The gate is the
+same one every other stage uses: there is work, and there is capacity.
+
+### Measured, six seconds each, 4096-byte pages, identity workload
+
+| pool | lost | recovered | note |
+|---|---|---|---|
+| 4000, before | 1923 / 4243 / 4046 | 79.7% / 61.6% / 62.3% | one request per loss, no re-arm |
+| 4000, after | 1513 / 2980 / 1529 | 96.2% / 76.5% / 96.8% | window affords roughly one re-arm |
+| 16000, after | 2897 / 2664 / 1976 / 3919 / 2353 / 3075 / 3973 | **100% in all seven runs** | `gone=0`, `stale=0`, `resend_fail=0` |
+
+Throughput is unchanged to better across the change: 45-74 Gbit/s one-way, the spread being
+run-to-run variance on this link, not an effect of repair. Repair traffic at full recovery is
+under 0.1% of the link.
+
+The residue at a 4000-page pool is not a protocol failure, it is the geometry: at that size
+`rearm_gap` is a large fraction of `horizon`, so there is room for about one retry. Full
+recovery needs a pool several times the send depth, which is now expressible.
+
 ## The invariant core
 
 `mesh-flow.c` and the routing it implements **do not change for a workload.** They are

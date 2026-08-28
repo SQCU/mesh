@@ -86,8 +86,8 @@ int main(int argc,char**argv){
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL);
 
   int frames = (pgsz+4095)/4096;
-  if(frames*npages > 4095){ npages = 4095/frames; }
-  if((size_t)pgsz*npages > 0xfa0000){ npages = 0xfa0000/pgsz; }
+  size_t mrmax = (0xfa0000/(size_t)pgsz)*(size_t)pgsz;
+  if((size_t)pgsz*npages > mrmax*64){ npages = (int)(mrmax*64/(size_t)pgsz); }
   if(npages < 4) die("page pool too small; lower -P");
 
   struct ibv_device **dl=ibv_get_device_list(NULL); if(!dl) die("no rdma devices");
@@ -104,7 +104,12 @@ int main(int argc,char**argv){
   size_t span=(size_t)pgsz*npages;
   void *mem; if(posix_memalign(&mem,getpagesize(),span)) die("memalign");
   memset(mem,0,span);
-  g_mr=ibv_reg_mr(g_pd,mem,span,IBV_ACCESS_LOCAL_WRITE); if(!g_mr) die("reg_mr");
+  struct ibv_mr *mrs[64]; int nmr=0;
+  for(size_t off=0; off<span; off+=mrmax){
+    size_t len = span-off < mrmax ? span-off : mrmax;
+    mrs[nmr]=ibv_reg_mr(g_pd,(char*)mem+off,len,IBV_ACCESS_LOCAL_WRITE);
+    if(!mrs[nmr]) die("reg_mr"); nmr++; }
+  g_mr=mrs[0];
   g_cq=ibv_create_cq(g_ctx,4096,NULL,NULL,0); if(!g_cq) die("create_cq");
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
@@ -138,7 +143,8 @@ int main(int argc,char**argv){
   int *ready    = malloc(npages*sizeof(int)), nready=0, rhead=0;
   if(!pg||!freelist||!ready) die("alloc page table");
   uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
-  for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz; pg[i].lkey=g_mr->lkey;
+  for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz;
+    pg[i].lkey=mrs[((size_t)i*pgsz)/mrmax]->lkey;
     pg[i].state=FREE; freelist[nfree++]=i; }
 
   int posted=0, sending=0;
@@ -146,29 +152,41 @@ int main(int argc,char**argv){
       if(nfree<npages) freelist[nfree++]=(i); else fprintf(stderr,"BUG freelist overflow p%d\n",(i)); } \
     else fprintf(stderr,"BUG double free p%d\n",(i)); }while(0)
   int txwin=0; int *txring=NULL;
-  int rx_target = npages/4; if(rx_target<2) rx_target=2;
-  if(rx_target*frames > gr_recv) rx_target = gr_recv/frames;
-  int tx_budget = gr_send/frames; if(tx_budget<1) tx_budget=1;
-  if(tx_budget > npages/4) tx_budget = npages/4;
+  int rx_target = gr_recv/frames/4; if(rx_target > npages/4) rx_target = npages/4;
+  if(rx_target<2) rx_target=2;
+  int tx_budget = gr_send/frames/4; if(tx_budget > npages/4) tx_budget = npages/4;
+  if(tx_budget<1) tx_budget=1;
   txwin = npages - rx_target - 8; if(txwin<8) txwin=8;
   txring = malloc((size_t)txwin*sizeof(int)); if(!txring) die("alloc txring");
   for(int i=0;i<txwin;i++) txring[i]=-1;
-  if(tx_budget > txwin/2) tx_budget = txwin/2;
+  if(tx_budget > txwin/8) tx_budget = txwin/8; if(tx_budget<1) tx_budget=1;
+  enum { MISSW = 1u<<18 };
+  int horizon = txwin - 4096; if(horizon < txwin/2) horizon = txwin/2;
+  int rearm_gap = tx_budget + 512;
+  int retire_at = horizon + 4096; if(retire_at > MISSW/2) retire_at = MISSW/2;
   fprintf(stderr,"caps: granted send=%d recv=%d frames (4KB units); pgsz=%d frames/pg=%d "
                  "-> rx_target=%d (%d frames) tx_budget=%d (%d frames) txwin=%d\n",
           gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames,txwin);
+  fprintf(stderr,"repair: horizon=%d rearm_gap=%d retire_at=%d mrs=%d\n",horizon,rearm_gap,retire_at,nmr);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0, short_pay=0;
   unsigned long long delivered=0, meta_seen=0;
   unsigned long long d_wc=0, d_ring=0, d_magic=0, d_post=0, d_bounds=0, seq_lo=0;
-  unsigned long long repaired=0, nack_sent=0, nack_rx=0, resent=0, unrecovered=0;
+  unsigned long long repaired=0, nack_sent=0, nack_rx=0, resent=0;
   unsigned long long resend_fail=0, nack_entries=0, nack_stale=0;
-  enum { MISSW = 1u<<16 };
   uint64_t *miss = calloc(MISSW/64,sizeof(uint64_t));
   if(!miss) die("alloc miss bitmap");
-  uint32_t expected=0; int have_expected=0;
+  uint32_t expected=0; int have_expected=0; uint32_t retire_cur=0;
+  unsigned long long gone=0, rearm=0;
   uint32_t pend[4096]; int npend=0; unsigned long long pend_drop=0;
-  unsigned long long missing=0, rx_at_repair=0; uint32_t sweep_cur=0;
-  const unsigned long long REPAIR_EVERY=1024;
+  unsigned long long missing=0; uint32_t sweep_cur=0;
+  uint32_t *req_at = calloc(MISSW,sizeof(uint32_t)); if(!req_at) die("alloc req_at");
+  unsigned long long lat_b[7]={0}, lat_max=0, lat_sum=0, outstanding=0, out_max=0;
+  unsigned long long nlag_sum=0, nlag_max=0, nlag_n=0;
+  unsigned long long burst_b[7]={0}, burst_n=0; int posted_min=1<<30;
+  enum { RTQ = 1u<<14 };
+  uint32_t *rtq = malloc(RTQ*sizeof(uint32_t)); if(!rtq) die("alloc rtq");
+  int rt_head=0, rt_n=0; unsigned long long rt_drop=0;
+  unsigned long long age_b[7]={0};
   uint32_t next_seq=0, last_seq=0; int seen_any=0;
   struct wf w_free={0}, w_ready={0}, w_send={0};
   double t0=now(), t_last=t0, v_last=nfree, tel_last=t0, quiet=t0;
@@ -188,6 +206,20 @@ int main(int argc,char**argv){
     
     if(source){
       int cap = inflight && inflight<tx_budget ? inflight : tx_budget;
+      while(sending<cap && rt_n>0){
+        uint32_t want=rtq[rt_head]; rt_head=(rt_head+1)%RTQ; rt_n--;
+        uint32_t lg=next_seq-want; nlag_sum+=lg; nlag_n++; if(lg>nlag_max) nlag_max=lg;
+        int tp=txring[want % (uint32_t)txwin];
+        if(tp<0){ nack_stale++; continue; }
+        struct wire *th=(struct wire*)pg[tp].addr;
+        if(th->seq!=want){ nack_stale++; continue; }
+        struct ibv_sge g={(uintptr_t)pg[tp].addr,(uint32_t)pgsz,pg[tp].lkey};
+        struct ibv_send_wr wr={.wr_id=(uint64_t)tp,.sg_list=&g,.num_sge=1,
+          .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+        if(ibv_post_send(g_qp,&wr,&bad)){ resend_fail++; break; }
+        if(!pg[tp].refs++) sending++; resent++; did=1;
+        outstanding++; if(outstanding>out_max) out_max=outstanding;
+      }
       while(sending<cap){
         uint32_t slot=next_seq % (uint32_t)txwin;
         int old=txring[slot];
@@ -206,6 +238,7 @@ int main(int argc,char**argv){
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
         if(ibv_post_send(g_qp,&wr,&bad)){ freelist[nfree++]=i; next_seq--; break; }
         pg[i].state=SENDING; pg[i].refs=1; sending++; did=1;
+        outstanding++; if(outstanding>out_max) out_max=outstanding;
         txring[h->seq % (uint32_t)txwin]=i; pg[i].held=1;
       }
     }
@@ -224,11 +257,11 @@ int main(int argc,char**argv){
         if(pg[i].state==POSTED) posted--;
         FREE_PAGE(i); continue; }
       if(wc[j].opcode==IBV_WC_RECV){
-        posted--; rx++; bytes_rx+=wc[j].byte_len;
+        posted--; if(posted<posted_min) posted_min=posted; rx++; bytes_rx+=wc[j].byte_len;
         if(nready>=npages){ d_ring++; FREE_PAGE(i); continue; }
         pg[i].state=FILLED; ready[(rhead+nready)%npages]=i; nready++; did=1;
       } else {
-        tx++; bytes_tx+=pgsz;
+        tx++; bytes_tx+=pgsz; if(outstanding) outstanding--;
         if(pg[i].refs && --pg[i].refs==0){
           sending--;
           if(!pg[i].held) FREE_PAGE(i); else pg[i].state=SENDING;
@@ -247,28 +280,33 @@ int main(int argc,char**argv){
         uint32_t *rq=(uint32_t*)((char*)pg[i].addr+sizeof *h);
         uint32_t nq=h->bytes/4; if(nq>1000) nq=1000; nack_entries+=nq;
         for(uint32_t q=0;q<nq;q++){
-          uint32_t want=rq[q]; int tp=txring[want % (uint32_t)txwin];
-          if(tp<0) { nack_stale++; continue; }
-          struct wire *th=(struct wire*)pg[tp].addr;
-          if(th->seq!=want){ nack_stale++; continue; }
-          struct ibv_sge g={(uintptr_t)pg[tp].addr,(uint32_t)pgsz,pg[tp].lkey};
-          struct ibv_send_wr wr={.wr_id=(uint64_t)tp,.sg_list=&g,.num_sge=1,
-            .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-          if(!ibv_post_send(g_qp,&wr,&bad)){ pg[tp].refs++; resent++; } else resend_fail++;
+          if(rt_n>=RTQ){ rt_drop++; continue; }
+          rtq[(rt_head+rt_n)%RTQ]=rq[q]; rt_n++;
         }
         FREE_PAGE(i); continue;
       }
-      if(!have_expected){ expected=h->seq; have_expected=1; }
+      if(!have_expected){ expected=h->seq; retire_cur=h->seq; sweep_cur=h->seq; have_expected=1; }
       if(h->seq==expected) expected++;
       else if((int32_t)(h->seq-expected)>0){
+        { uint32_t bs=h->seq-expected; burst_n++;
+          burst_b[bs<2?0:bs<4?1:bs<16?2:bs<64?3:bs<256?4:bs<1024?5:6]++; }
         for(uint32_t m=expected;m!=h->seq;m++){ miss[(m%MISSW)/64] |= 1ull<<((m%MISSW)%64); drops_seen++;
+          req_at[m%MISSW]=h->seq;
           missing++; if(npend<4096) pend[npend++]=m; else pend_drop++; }
         expected=h->seq+1;
       } else {
         uint64_t *w=&miss[(h->seq%MISSW)/64]; uint64_t b=1ull<<((h->seq%MISSW)%64);
-        if(*w & b){ *w &= ~b; repaired++; if(missing) missing--; if(drops_seen) drops_seen--; } else seq_lo++;
+        if(*w & b){ *w &= ~b; repaired++; if(missing) missing--; if(drops_seen) drops_seen--;
+          uint32_t lat = expected - req_at[h->seq%MISSW];
+          if(lat>lat_max) lat_max=lat; lat_sum+=lat;
+          lat_b[lat<128?0:lat<512?1:lat<2048?2:lat<8192?3:lat<32768?4:lat<131072?5:6]++;
+        } else seq_lo++;
       }
       last_seq=h->seq; seen_any=1;
+      for(int r=0; r<128 && (uint32_t)(expected-retire_cur) > (uint32_t)retire_at; r++){
+        uint32_t z=retire_cur%MISSW; uint64_t b=1ull<<(z%64);
+        if(miss[z/64] & b){ miss[z/64] &= ~b; gone++; if(missing) missing--; }
+        retire_cur++; }
       uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
       if(pay != h->bytes) short_pay++;
       if(h->flags & F_META) meta_seen++;
@@ -288,6 +326,21 @@ int main(int argc,char**argv){
     }
 
     
+    if(missing && npend<4032 && rearm_gap < horizon){
+      uint32_t swlo = expected - (uint32_t)horizon;
+      if((uint32_t)(swlo-retire_cur) > (uint32_t)(expected-retire_cur)) swlo = retire_cur;
+      for(int sw=0; sw<8; sw++){
+        if((uint32_t)(sweep_cur-swlo) >= (uint32_t)(expected-swlo)) sweep_cur = swlo & ~63u;
+        uint32_t z=sweep_cur%MISSW; uint64_t w=miss[z/64];
+        while(w){
+          int b=__builtin_ctzll(w); w &= w-1;
+          uint32_t sq=sweep_cur+(uint32_t)b;
+          if((uint32_t)(sq-swlo) >= (uint32_t)(expected-swlo)) continue;
+          if((uint32_t)(expected-req_at[sq%MISSW]) < (uint32_t)rearm_gap) continue;
+          req_at[sq%MISSW]=expected; pend[npend++]=sq; rearm++;
+          if(npend>=4032) break; }
+        sweep_cur += 64; } }
+
     if(npend>0 && nfree>0){
       {
         int nq = npend>500?500:npend;
@@ -302,7 +355,7 @@ int main(int argc,char**argv){
         struct ibv_send_wr wr={.wr_id=(uint64_t)slot,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
         if(ibv_post_send(g_qp,&wr,&bad)){ FREE_PAGE(slot); }
-        else { pg[slot].state=SENDING; pg[slot].refs=1; sending++; nack_sent++;
+        else { pg[slot].state=SENDING; pg[slot].refs=1; sending++; nack_sent++; outstanding++;
                npend-=nq; for(int z=0;z<npend;z++) pend[z]=pend[z+nq]; }
       }
     }
@@ -312,23 +365,39 @@ int main(int argc,char**argv){
       wf_add(&w_free,nfree); wf_add(&w_ready,nready); wf_add(&w_send,sending);
       fprintf(stderr,
         "tel t=%.1f free=%d posted=%d/%d ready=%d sending=%d dV/dt=%.1f/s dV/V=%.4f "
-        "var_free=%.1f rx=%llu tx=%llu gaps=%llu clamped=%llu deliv=%llu meta=%llu sum=%d/%d\n",
+        "var_free=%.1f rx=%llu tx=%llu gaps=%llu clamped=%llu deliv=%llu meta=%llu sum=%d/%d out=%llu\n",
         t-t0, nfree, posted, rx_target, nready, sending, dv/(dt>0?dt:1),
-        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, short_pay, delivered, meta_seen, nfree+posted+nready+sending, npages);
+        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, short_pay, delivered, meta_seen, nfree+posted+nready+sending, npages, outstanding);
       t_last=t; v_last=nfree; tel_last=t;
     }
     if(!did){ if(t-quiet>tmo){ fprintf(stderr,"idle %ds\n",tmo); break; } usleep(50); }
     else quiet=t;
   }
+  for(uint32_t z=0; z<MISSW; z++) if(miss[z/64] & (1ull<<(z%64))){
+    uint32_t a = expected - req_at[z];
+    age_b[a<128?0:a<512?1:a<2048?2:a<8192?3:a<32768?4:a<131072?5:6]++; }
   double el=now()-t0;
   printf("%-6s pages=%d pgsz=%d  rx=%llu tx=%llu  %.2f Gbit/s in  %.2f Gbit/s out  gaps=%llu clamped=%llu\n"
          "       drops: wc=%llu ring=%llu magic=%llu post=%llu bounds=%llu reorder=%llu  ours=%llu\n"
        "       repair: lost=%llu repaired=%llu unrecovered=%llu nack_tx=%llu nack_rx=%llu resent=%llu\n"
-       "       nack: entries=%llu stale=%llu resend_fail=%llu pend_drop=%llu\n",
+       "       nack: entries=%llu stale=%llu resend_fail=%llu pend_drop=%llu\n"
+       "       gone=%llu rearm=%llu horizon=%d gap=%d retire_at=%d\n"
+       "       lat(seq): max=%llu mean=%.0f b<128=%llu <512=%llu <2k=%llu <8k=%llu <32k=%llu <128k=%llu ge=%llu\n"
+       "       resid age: <128=%llu <512=%llu <2k=%llu <8k=%llu <32k=%llu <128k=%llu ge=%llu  out_max=%llu\n"
+       "       nacklag: n=%llu mean=%.0f max=%llu  posted_min=%d rt_drop=%llu\n"
+       "       seqs: next_seq=%u expected=%u last=%u\n"
+       "       burst: n=%llu 1=%llu 2-3=%llu 4-15=%llu 16-63=%llu 64-255=%llu 256-1k=%llu ge1k=%llu\n",
     source?"source":"hop", npages, pgsz, rx, tx,
     bytes_rx*8/el/1e9, bytes_tx*8/el/1e9, drops_seen, short_pay,
     d_wc,d_ring,d_magic,d_post,d_bounds,seq_lo, d_wc+d_ring+d_magic+d_post+d_bounds,
     repaired+drops_seen, repaired, drops_seen, nack_sent, nack_rx, resent,
-    nack_entries, nack_stale, resend_fail, pend_drop);
+    nack_entries, nack_stale, resend_fail, pend_drop,
+    gone, rearm, horizon, rearm_gap, retire_at,
+    lat_max, repaired? (double)lat_sum/repaired : 0.0,
+    lat_b[0],lat_b[1],lat_b[2],lat_b[3],lat_b[4],lat_b[5],lat_b[6],
+    age_b[0],age_b[1],age_b[2],age_b[3],age_b[4],age_b[5],age_b[6], out_max,
+    nlag_n, nlag_n? (double)nlag_sum/nlag_n : 0.0, nlag_max, posted_min, rt_drop,
+    next_seq, expected, last_seq,
+    burst_n, burst_b[0],burst_b[1],burst_b[2],burst_b[3],burst_b[4],burst_b[5],burst_b[6]);
   return 0;
 }
