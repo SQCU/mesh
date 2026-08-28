@@ -304,15 +304,15 @@ sudo ./hmi-epilogue.sh
 MESH_HMI_SLEEP=30 MESH_HMI_DISPLAYSLEEP=10 sudo ./hmi-epilogue.sh
 ```
 
-It writes `/usr/local/mesh/hmi`, which is the only thing the keeper consults before
-re-asserting power policy and firewall state. Everything that governs *reachability*
-is untouched and still re-asserted every 60 seconds: sshd, screen sharing, the beacon,
-the Thunderbolt fabric, network time, and the RDMA alarm. Undo with
-`sudo rm /usr/local/mesh/hmi`.
+It writes `/usr/local/mesh/policy`. The keeper does not consult a flag and decide
+whether to act — it always asserts whatever that file says. `install.sh` writes the
+fleet default; the epilogue overwrites it; the keeper converges on it either way. So
+there is no branch anywhere that can skip a capability, only one policy the keeper
+always enforces. Return to fleet policy by re-running `sudo ./install.sh`.
 
-The marker is deliberately narrow. It cannot make a node unreachable — it can only
-let a laptop close its lid and keep its firewall, which is what its operator asked
-for. A machine under it still announces itself, still routes, still answers.
+Everything governing *reachability* is outside the policy file entirely and is
+asserted unconditionally every pass: sshd, screen sharing, the beacon, the Thunderbolt
+fabric, routing, network time, and the RDMA alarm.
 
 ## Reading the docs
 

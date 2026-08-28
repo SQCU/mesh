@@ -5,8 +5,7 @@ LOG=/usr/local/mesh/log/fabric.log
 ts(){ date '+%F %T'; }
 drift=0
 ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
-[ -n "$ports" ] || exit 0
-networksetup -listallnetworkservices 2>/dev/null | grep -q '^Thunderbolt Bridge$' && {
+[ -n "$ports" ] && networksetup -listallnetworkservices 2>/dev/null | grep -q '^Thunderbolt Bridge$' && {
   echo "[$(ts)] DRIFT tb bridge service enabled"
   networksetup -setnetworkserviceenabled "Thunderbolt Bridge" off >/dev/null 2>&1; drift=1; }
 for br in $(ifconfig -l | tr ' ' '\n' | grep '^bridge'); do

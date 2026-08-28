@@ -27,6 +27,9 @@ ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
 ln -sf "$MESH_ROOT/bin/mesh-run.sh"    /usr/local/bin/mesh-run
 ok "$MESH_ROOT; mesh-status and mesh-peers on PATH"
+printf 'sleep 0\ndisplaysleep 0\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
+cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
+ok "policy: fleet default (run ./hmi-epilogue.sh after this for a machine someone uses)"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MESH_ROOT/revision"
 ok "converged from branch $(awk '{print $1}' "$MESH_ROOT/revision") at $(awk '{print $2}' "$MESH_ROOT/revision")"
 
