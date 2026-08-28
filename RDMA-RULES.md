@@ -80,3 +80,24 @@ ladder is: stop launching new verbs processes, then power-cycle the machine.
 
 Which is precisely the physical visit this repo exists to avoid, so treat these
 rules as protecting the node's reachability, not as style.
+
+## Warm the neighbour cache before RTR
+
+`ibv_modify_qp(..., IBV_QPS_RTR)` fails on both peers when the IPv6 neighbour cache has no
+entry for the destination GID, even though both ports report `PORT_ACTIVE`, the cable is
+attached, and `system_profiler SPThunderboltDataType` shows the peer device. Apple's stack
+resolves the destination GID to a link address through the neighbour cache; an empty cache is
+a failed transition, not a delayed one.
+
+This happens after any replug, because the RDMA device names follow the interface and the new
+port has never done discovery. Symptoms are symmetric — both sides die at RTR — which reads
+like a bad out-of-band exchange and is not.
+
+```
+ping6 -c 2 'ff02::1%<iface>'    # populates the cache, needs no root
+ndp -an | grep <iface>          # confirm the peer appears
+```
+
+Do this before blaming the QP setup. Verify the pairing is real rather than assumed: the two
+`GID[0]` values from `ibv_devinfo -v` must be the two link-local addresses `ndp` shows on that
+interface.

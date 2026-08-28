@@ -183,7 +183,14 @@ int main(int argc,char**argv){
   uint32_t pend[4096]; int npend=0; unsigned long long pend_drop=0;
   enum { SPAN_MAX = 4096 };
   int *spg = malloc(SPAN_MAX*sizeof(int)); if(!spg) die("alloc span");
-  struct miov *iov = malloc(SPAN_MAX*sizeof *iov); if(!iov) die("alloc iov");
+  DLTensor *iov = malloc(SPAN_MAX*sizeof *iov); if(!iov) die("alloc iov");
+  int64_t *ishape = malloc(SPAN_MAX*sizeof *ishape); if(!ishape) die("alloc shape");
+  int64_t *istride = malloc(SPAN_MAX*sizeof *istride); if(!istride) die("alloc stride");
+  for(int z=0; z<SPAN_MAX; z++){
+    iov[z].device=(DLDevice){kDLCPU,0}; iov[z].ndim=1;
+    iov[z].dtype=(DLDataType){kDLUInt,8,1};
+    iov[z].shape=&ishape[z]; iov[z].strides=&istride[z];
+    iov[z].byte_offset=0; istride[z]=1; }
   int nspan=0; uint32_t span_seq=0, span_bytes=0; int span_open=0;
   unsigned long long spans_done=0, span_abort=0, span_pages=0;
   unsigned long long missing=0; uint32_t sweep_cur=0;
@@ -331,7 +338,7 @@ int main(int argc,char**argv){
         nspan=0; span_open=0; span_abort++; FREE_PAGE(i); continue;
       }
       if(nspan>=SPAN_MAX){ for(int z=0;z<nspan;z++) FREE_PAGE(spg[z]); nspan=0; span_open=0; span_abort++; FREE_PAGE(i); continue; }
-      spg[nspan]=i; iov[nspan].base=(char*)pg[i].addr+sizeof *h; iov[nspan].len=pay;
+      spg[nspan]=i; iov[nspan].data=(char*)pg[i].addr+sizeof *h; ishape[nspan]=(int64_t)pay;
       nspan++; span_bytes+=pay;
       if(!(h->flags & F_LAST)){ did=1; continue; }
 
