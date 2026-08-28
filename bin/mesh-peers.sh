@@ -1,36 +1,47 @@
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-PREFIX=fd6d:6573:68
-D=${MESH_DEADLINE:-2}
-probe(){ t=$(mktemp)
-  { printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '
-' ' ' > "$t.a"; } &
-  { printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '
-' ' ' > "$t.b"; } &
-  wait
-  i=$(cat "$t.a" 2>/dev/null); [ -n "$i" ] || i=$(cat "$t.b" 2>/dev/null)
-  rm -f "$t" "$t.a" "$t.b"; printf '%s' "$i"; }
-self=$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2;exit}')
+D=${MESH_DEADLINE:-3}
+norm(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/%<0>$//' \
+        | awk -F: 'NF>2{o="";for(i=1;i<=NF;i++){g=$i;sub(/^0+/,"",g);if(g=="")g="0";o=o (i>1?":":"") g}print o;next}{print}'; }
 ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
-nodes=$(netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" {split($1,f,"%"); print f[1]" "$NF}' | sort -u)
-mine=$(ifconfig 2>/dev/null | awk '$1=="inet6"{split($2,f,"%"); print f[1]}')
-IFS='
-'
-for e in $nodes; do
-  a=${e%% *}; via=${e##* }
-  [ "$a" = "$self" ] && via=self
-  printf 'node %s via=%s\n' "$a" "$via"
+me=$(scutil --get LocalHostName 2>/dev/null)
+B=$(mktemp); trap 'rm -f "$B" "$B".*' EXIT
+dns-sd -B _meshnode._tcp local > "$B" 2>&1 &
+sleep "$D"; kill %1 2>/dev/null; wait 2>/dev/null
+for n in $(awk '$2=="Add"{print $NF}' "$B" | sort -u); do
+  [ -n "$n" ] || continue
+  [ "$n" = "$me" ] && printf 'node %s self\n' "$n" || printf 'node %s peer\n' "$n"
+  (
+    dns-sd -t "$D" -G v4v6 "$n.local" 2>/dev/null | awk '$2=="Add"{print $6}' | sort -u > "$B.$n"
+    best=""; bestk=""
+    while read -r raw; do
+      a=$(norm "$raw")
+      case "$a" in
+        0.0.0.0|127.0.0.1|::1|fe80::1%lo0|"") continue ;;
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) k=lan ;;
+        169.254.*) k=fabric-v4ll ;;
+        fd6d:6573:68:*) k=fabric-routed ;;
+        2*:*) k=lan-v6 ;;
+        fe80:*%*) i=${a##*%}; k=skip
+                  for p in $ports; do [ "$i" = "$p" ] && k=fabric-adjacent; done ;;
+        *) k=skip ;;
+      esac
+      [ "$k" = skip ] && continue
+      printf 'path %s kind=%s addr=%s\n' "$n" "$k" "$a"
+      case "$k" in
+        lan)             [ "$bestk" = lan ] || { best=$a; bestk=lan; } ;;
+        fabric-adjacent) [ -n "$best" ] || { best=$a; bestk=$k; } ;;
+        lan-v6)          [ -n "$best" ] || { best=$a; bestk=$k; } ;;
+      esac
+    done < "$B.$n"
+    [ -n "$best" ] || exit 0
+    t=$(mktemp)
+    { printf x | nc -G 2 -w 2 "$best" 8099 2>/dev/null | tr '\n' ' ' > "$t.a"; } &
+    { printf x | nc -G 2 -w 2 "$best" 8100 2>/dev/null | tr '\n' ' ' > "$t.b"; } &
+    wait
+    i=$(cat "$t.a" 2>/dev/null); [ -n "$i" ] || i=$(cat "$t.b" 2>/dev/null)
+    rm -f "$t" "$t".*
+    [ -n "$i" ] && printf 'info %s via=%s %s\n' "$n" "$best" "$i"
+  ) &
 done
-neigh=""
-for p in $ports; do
-  for n in $(ndp -an 2>/dev/null | awk -v i="$p" '$3==i && $1 ~ /^fe80::/ && $2 != "(incomplete)"{print $1}'); do
-    b=${n%%\%*}
-    echo "$mine" | grep -qx "$b" && continue
-    printf 'neigh %s on=%s\n' "$n" "$p"
-    neigh="$neigh$n
-"
-  done
-done
-for e in $nodes; do a=${e%% *}; { i=$(probe "$a"); [ -n "$i" ] && printf 'info %s %s\n' "$a" "$i"; } & done
-for n in $neigh; do [ -n "$n" ] && { i=$(probe "$n"); [ -n "$i" ] && printf 'info %s %s\n' "$n" "$i"; } & done
 wait

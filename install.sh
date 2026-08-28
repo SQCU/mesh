@@ -137,8 +137,7 @@ cat > /Library/LaunchDaemons/io.mesh.nodeinfo.plist <<PL
   <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
   <key>Sockets</key><dict><key>Listeners</key><dict>
     <key>SockServiceName</key><string>8099</string>
-    <key>SockType</key><string>stream</string>
-    <key>SockFamily</key><string>IPv6</string></dict></dict>
+    <key>SockType</key><string>stream</string></dict></dict>
 </dict></plist>
 PL
 chmod 644 /Library/LaunchDaemons/io.mesh.nodeinfo.plist
