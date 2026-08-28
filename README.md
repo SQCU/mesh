@@ -77,6 +77,36 @@ was actually asked for. Each of these is open to revisiting:
 > that enumerates the fabric must use `-G`, or one dead node stalls the whole report
 > and the cost grows with the fleet.
 
+## Traversal is a stream, and nodes patch themselves
+
+`mesh-peers` emits facts as it learns them and never waits to prove a negative:
+
+```
+node <addr> via=<iface>     emitted from the kernel routing table, at t=0
+info <addr> name=... ...    emitted when that node answers, in arrival order
+```
+
+The `node` lines are the traversal result and they are already complete — babeld did
+that work, and reading the table costs microseconds. The `info` lines are best-effort
+enrichment that streams in unordered. A node that never answers simply has no `info`
+line; its absence is the signal, and observing it costs nothing.
+
+`MESH_DEADLINE` (default 2s) is a horizon, not a per-node timeout. It does not grow
+with the fleet: a hundred nodes still finish in one deadline, and one dead node slows
+nothing. The consumer reads a stream and deals with out-of-order arrival. There is no
+mode that buffers into an aligned table, because aligning columns means waiting for
+the slowest row, which means one unreachable node delays the report on every
+reachable one.
+
+`mesh-run` follows the same shape: every node runs in parallel and each output line is
+prefixed with its node, streaming as it arrives.
+
+**`io.mesh.update` re-converges from the branch every 15 minutes**, as root. Before
+this existed, every fix required a human at a keyboard typing `sudo` on each node —
+which does not scale and is the same shape of problem as a node that cannot be
+reached. Now a push propagates to the fleet on its own. The node follows the branch
+recorded in `/usr/local/mesh/revision`, always at that branch's newest commit.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
