@@ -9,7 +9,16 @@ int mesh_mem_init(struct mesh_mem *m, struct ibv_pd *pd,
   if(ibv_query_device(ctx,&a)) return -1;
   if(!granule) granule = 1;
   m->pd = pd;
+  // The device advertises max_mr_size = 16.384 MB. That figure is not enforced
+  // and is far too small to be usable: honouring it needs 1416 regions for a
+  // 23 GB pool against a quota of 100 per protection domain. Measured on this
+  // hardware, single regions of 0.258, 2.749 and 3.092 GB carry real traffic
+  // with corrupt=0, while 5.154 and 8.246 GB corrupt every page -- the cliff is
+  // 2^32, not the advertised value. One GiB leaves a factor of four of margin
+  // under the observed limit and needs 23 regions for the same 23 GB pool.
   m->max_mr = (size_t)a.max_mr_size;
+  if(m->max_mr < (1ull<<30)) m->max_mr = (1ull<<30);
+  if(m->max_mr > (3ull<<30)) m->max_mr = (3ull<<30);
   m->chunk  = (m->max_mr / granule) * granule;   // no object straddles a boundary
   if(m->chunk == 0) return -1;                   // device cannot hold one granule
   return 0;

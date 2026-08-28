@@ -71,28 +71,26 @@ static int oob(const char*host,int port,int secs){
 
 
 int main(int argc,char**argv){
-  const char *dev=NULL,*peer=NULL;
-  int pgsz=4096, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
+  const char *peer=NULL;
+  const int pgsz=4096; int npages=240, port=18519, tmo=30, seconds=5;
+  const int source=0, inflight=0;
   int node_idx=0, target_idx=1, spanpg=1; const char *shmname="/mesh0"; double pct=0.0; unsigned route_path=0; unsigned egress=0; (void)egress;
   double tel_hz=1.0;
+  // Only what cannot be inferred: which node this is, how much of it the mesh
+  // holds, and who to reach. Everything else is derived. There is deliberately
+  // no switch for the page size, the registration chunk, the send window or
+  // the device: each of those can produce a run that looks healthy and moves
+  // corrupt data, and an operator should not be able to select that.
   for(int i=1;i<argc;i++){
-    if(!strcmp(argv[i],"-d")) dev=argv[++i];
-    else if(!strcmp(argv[i],"-P")) pgsz=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-n")) npages=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-p")) port=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-t")) tmo=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-T")) seconds=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-H")) tel_hz=atof(argv[++i]);
-    else if(!strcmp(argv[i],"-w")) inflight=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-I")) node_idx=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-D")) target_idx=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-R")) route_path=(unsigned)strtoul(argv[++i],NULL,0);
-    else if(!strcmp(argv[i],"-S")) spanpg=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-s")) shmname=argv[++i];
+    if(!strcmp(argv[i],"-I")) node_idx=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M")) pct=atof(argv[++i]);
-    else if(!strcmp(argv[i],"--source")) source=1;
+    else if(!strcmp(argv[i],"-s")) shmname=argv[++i];
+    else if(!strcmp(argv[i],"-T")) seconds=atoi(argv[++i]);
+    else if(argv[i][0]=='-'){ fprintf(stderr,"unknown option %s\n",argv[i]); return 2; }
     else peer=argv[i];
   }
+  if(pct<=0.0) pct=25.0;
+
   atexit(teardown);
   struct sigaction sa={0}; sa.sa_handler=on_sig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL);
@@ -101,14 +99,14 @@ int main(int argc,char**argv){
   if(npages < 4) die("page pool too small; lower -P");
 
   struct ibv_device **dl=ibv_get_device_list(NULL); if(!dl) die("no rdma devices");
-  struct ibv_device *d=NULL;
-  for(int i=0;dl[i];i++) if(!dev||!strcmp(ibv_get_device_name(dl[i]),dev)){ d=dl[i]; break; }
-  if(!d) die("device not found");
-  g_ctx=ibv_open_device(d); if(!g_ctx) die("open_device");
-  struct ibv_port_attr pa; if(ibv_query_port(g_ctx,1,&pa)) die("query_port");
-  if(pa.state!=IBV_PORT_ACTIVE){
-    fprintf(stderr,"%s is %s -- no cable, or far end not RDMA-enabled\n",
-      ibv_get_device_name(d), ibv_port_state_str(pa.state)); return 2; }
+  struct ibv_device *d=NULL; struct ibv_port_attr pa;
+  for(int i=0;dl[i];i++){                        // take the link that is up
+    struct ibv_context *c=ibv_open_device(dl[i]); if(!c) continue;
+    if(!ibv_query_port(c,1,&pa) && pa.state==IBV_PORT_ACTIVE){ d=dl[i]; g_ctx=c; break; }
+    ibv_close_device(c);
+  }
+  if(!d){ fprintf(stderr,"no RDMA port is up -- no cable, or far end not RDMA-enabled\n"); return 2; }
+  fprintf(stderr,"link %s\n", ibv_get_device_name(d));
   g_pd=ibv_alloc_pd(g_ctx); if(!g_pd) die("alloc_pd");
 
   uint64_t node_ram=0; size_t nrl=sizeof node_ram;
@@ -187,13 +185,25 @@ int main(int argc,char**argv){
   int *ready    = malloc(npages*sizeof(int)), nready=0, rhead=0;
   if(!pg||!freelist||!ready) die("alloc page table");
   uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
+  int rx_pages = npages/4; if(rx_pages > 262144) rx_pages = 262144;
+  if(rx_pages < 8) rx_pages = npages;              // tiny pool: no arena
   for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz;
     pg[i].lkey=mesh_mem_lkey(&g_mem,pg[i].addr);
     if(!pg[i].lkey) die("page outside registered memory");
-    pg[i].state=FREE; freelist[nfree++]=i; }
+    pg[i].state=FREE;
+    if(i < rx_pages) freelist[nfree++]=i; }        // arena pages are the app's
 
   int posted=0, sending=0;
-  #define FREE_PAGE(i) do{ if(pg[i].held){} else if(pg[i].state!=FREE){ pg[i].state=FREE; \
+  int arena_start=rx_pages;
+  RG.h->arena_off = data_off + (uint64_t)rx_pages*(uint64_t)pgsz;
+  RG.h->arena_pages = (uint32_t)(npages - rx_pages);
+  RG.h->hdr_bytes = (uint32_t)sizeof(struct wire);
+  fprintf(stderr,"arena %u pages x %u usable B = %.3f GB (%.2f%% of node); rx pool %d pages\n",
+     RG.h->arena_pages, (unsigned)(pgsz-sizeof(struct wire)),
+     (double)RG.h->arena_pages*(pgsz-sizeof(struct wire))/1e9,
+     node_ram?100.0*(double)RG.h->arena_pages*pgsz/(double)node_ram:0.0, rx_pages);
+  #define FREE_PAGE(i) if((i)>=arena_start){ pg[i].state=FREE; } else FREE_PAGE_POOL(i)
+  #define FREE_PAGE_POOL(i) do{ if(pg[i].held){} else if(pg[i].state!=FREE){ pg[i].state=FREE; \
       if(nfree<npages) freelist[nfree++]=(i); else fprintf(stderr,"BUG freelist overflow p%d\n",(i)); } \
     else fprintf(stderr,"BUG double free p%d\n",(i)); }while(0)
   int txwin=0; int *txring=NULL;
@@ -260,7 +270,8 @@ int main(int argc,char**argv){
     // APPFREE -- lend spare pages to the application, keeping the receive
     // pool above its target so the wire never starves behind the app
     if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
-      for(int nl=0; nl<256 && nfree > rx_target; nl++){
+      // (arena pages need no lending)
+      if(0){
         int p=freelist[nfree-1];
         struct mesh_desc dd={.page=(uint32_t)p,.bytes=0,.seq=0,.node=0,.flags=0};
         if(mesh_push(&RG,&RG.h->rfree,RG.h->free_off,&dd)) break;

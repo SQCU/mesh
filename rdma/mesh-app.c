@@ -1,46 +1,47 @@
-// A mesh application. It knows about pages and nothing below them: no queue
-// pair, no memory region, no lkey, no wire header, no retransmission.
+// A mesh application, using the whole API: mesh_open, mesh_write, mesh_read.
 #include "mesh.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <sys/time.h>
 static double now(void){struct timeval t;gettimeofday(&t,NULL);return t.tv_sec+t.tv_usec/1e6;}
+
 int main(int argc,char**argv){
-  const char *name = argc>1?argv[1]:"/mesh0";
-  int dst = argc>2?atoi(argv[2]):-1;          // -1 = receive only
-  double secs = argc>3?atof(argv[3]):4.0;
-  struct mesh M;
-  for(int i=0;i<200 && mesh_attach(&M,name);i++) usleep(20000);
-  if(!M.h){ fprintf(stderr,"no bridge at %s\n",name); return 1; }
-  printf("attached %s: %u pages x %u B = %.2f%% of node, node=%u\n",
-     name, mesh_pages(&M), mesh_pagesize(&M), mesh_pct_of_node(&M), mesh_node(&M));
-  const uint32_t PAY = mesh_pagesize(&M) - 24;   // a whole page, less the header
-  unsigned long long sent=0,got=0,bad=0; double t0=now();
-  int spin=0;
-  for(;;){
-    if(++spin >= 4096){ spin=0; if(now()-t0 >= secs) break; }
-    int work=0;
-    if(dst>=0){
-      uint32_t p;
-      for(int k=0;k<256 && !mesh_acquire(&M,&p);k++){
-        unsigned char *b=(unsigned char*)mesh_page(&M,p)+24;
-        memset(b,0xA5,PAY);                        // fill the page we are paying to send
-        ((uint32_t*)b)[0]=(uint32_t)sent;
-        if(mesh_send(&M,p,PAY,(uint16_t)dst)){ mesh_release(&M,p); break; }
-        sent++; work=1;
-      }
+  double gb   = argc>1?atof(argv[1]):1.0;    // how much mesh memory to map
+  int    dst  = argc>2?atoi(argv[2]):-1;     // -1 = receive only
+  double secs = argc>3?atof(argv[3]):5.0;
+
+  size_t stride, usable;
+  void *p = mesh_open((size_t)(gb*1e9), &stride, &usable);
+  if(!p){ fprintf(stderr,"mesh_open(%.1f GB) failed\n",gb); return 1; }
+  size_t slots = (size_t)(gb*1e9)/usable;
+  printf("mapped %.2f GB: %zu slots of %zu usable bytes (stride %zu)\n",gb,slots,usable,stride);
+
+  if(dst >= 0){
+    for(size_t i=0;i<slots;i++){                       // fill it once
+      unsigned char *s=(unsigned char*)p+i*stride;
+      memset(s,0xA5,usable); ((uint32_t*)s)[0]=(uint32_t)i;
     }
-    uint32_t p,bytes; uint16_t from;
-    for(int k=0;k<256 && !mesh_poll(&M,&p,&bytes,&from);k++){
-      unsigned char *b=(unsigned char*)mesh_page(&M,p)+24;
-      if(b[4]!=0xA5 || b[bytes-1]!=0xA5) bad++;
-      got++; mesh_release(&M,p); work=1;
-    }
-    if(!work && now()-t0 >= secs) break;
+    printf("filled %.2f GB, sending to node %d\n",gb,dst);
   }
-  printf("sent=%llu received=%llu corrupt=%llu  (%.2f s)\n",sent,got,bad,now()-t0);
-  mesh_detach(&M);
+
+  unsigned long long wrote=0,got=0,bad=0; double t0=now();
+  size_t cursor=0;
+  while(now()-t0 < secs){
+    if(dst>=0){
+      if(cursor >= slots*usable) cursor=0;              // stream it repeatedly
+      size_t n = mesh_write((char*)p + (cursor/usable)*stride, slots*usable-cursor, dst);
+      cursor += n; wrote += n;
+    }
+    void *q; int from; size_t n;
+    while((n = mesh_read(&q,&from))){
+      unsigned char *b=q;
+      if(b[4]!=0xA5 || b[n-1]!=0xA5) bad++;
+      got += n;
+    }
+  }
+  double dt=now()-t0;
+  printf("wrote=%.2f GB read=%.2f GB corrupt=%llu  %.2f Gbit/s payload\n",
+     wrote/1e9, got/1e9, bad, (dst>=0?wrote:got)*8.0/dt/1e9);
   return 0;
 }
