@@ -8,6 +8,13 @@ printf 'model=%s\n' "$(sysctl -n hw.model 2>/dev/null)"
 printf 'cores=%s\n' "$(sysctl -n hw.ncpu 2>/dev/null)"
 printf 'memgb=%s\n' "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
 printf 'macos=%s\n' "$(sw_vers -productVersion 2>/dev/null)"
+lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+lanok=0; [ -n "$lan" ] && [ -n "$(ipconfig getifaddr "$lan" 2>/dev/null)" ] && lanok=1
+fabok=0
+for d in $ports; do
+  [ "$(ibv_devinfo -d "rdma_$d" 2>/dev/null | awk '/state:/{print $2}')" = PORT_ACTIVE ] && fabok=1
+done
+printf 'planes=%s lan=%s fabric=%s\n' "$((lanok+fabok))" "${lan:-none}" "$fabok"
 printf 'rdma=%s\n' "$(rdma_ctl status 2>&1)"
 printf 'sdk=%s\n' "$([ -f "$(xcrun --show-sdk-path 2>/dev/null)/usr/include/infiniband/verbs.h" ] && echo yes || echo no)"
 printf 'branch=%s\n' "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"

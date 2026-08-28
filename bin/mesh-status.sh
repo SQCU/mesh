@@ -7,6 +7,20 @@ b "REMOTE"; for p in 22:ssh 5900:screensharing; do
   nc -z -G 2 127.0.0.1 "${p%%:*}" >/dev/null 2>&1 && echo "  ${p##*:} (${p%%:*}): OPEN" || echo "  ${p##*:} (${p%%:*}): CLOSED"
 done
 b "NETWORK"; for i in en0 en1 bridge0; do echo "  $i: $(ipconfig getifaddr $i 2>/dev/null || echo '<none>')"; done
+b "PLANES"
+_lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+_lanok=0; [ -n "$_lan" ] && [ -n "$(ipconfig getifaddr "$_lan" 2>/dev/null)" ] && _lanok=1
+_fab=0
+for _d in $(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{print $1}'); do
+  [ "$(ibv_devinfo -d "$_d" 2>/dev/null | awk '/state:/{print $2}')" = PORT_ACTIVE ] && _fab=1
+done
+printf "  control (LAN): %s\n" "$([ $_lanok = 1 ] && echo "up via $_lan" || echo DOWN)"
+printf "  data (fabric): %s\n" "$([ $_fab = 1 ] && echo "up" || echo DOWN)"
+if [ $((_lanok+_fab)) -lt 2 ]; then
+  printf "  \033[31mDEGRADED: %s of 2 planes. One more failure strands this node.\033[0m\n" "$((_lanok+_fab))"
+  printf "  \033[31mRepair before running anything that can disrupt the remaining plane.\033[0m\n"
+else printf "  redundant: 2 of 2\n"; fi
+
 b "RDMA"; echo "  rdma_ctl: $(/usr/bin/rdma_ctl status 2>&1)   nvram: $(nvram rdma-enable 2>/dev/null | awk '{print $2}')"
 for d in $(/usr/bin/ibv_devices 2>/dev/null | awk 'NR>2&&$1!=""{print $1}'); do
   printf '  %-10s state=%s mtu=%s\n' "$d" \

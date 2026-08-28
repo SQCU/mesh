@@ -177,6 +177,40 @@ this depends on the routing layer.
 > [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
 > badly enough to need a physical power cycle.
 
+## Two planes, and knowing when you only have one
+
+A node is reachable over a **control plane** (LAN/Wi-Fi) and a **data plane** (the
+Thunderbolt fabric). They are independent, which is the point: either can fail without
+stranding the node.
+
+That redundancy is a *state*, not a property. It was lost silently: the venue changed,
+the mini knew one SSID and it was not the one present, so it dropped to the fabric
+alone — and the fabric is the transient plane, the one a cable or a wedged driver takes
+out. Nothing reported the degradation. Had the fabric dropped in that window the node
+would have been dark, with only a keyboard to fix it.
+
+So it is measured and reported. `mesh-status` prints it, `mesh-nodeinfo` carries
+`planes=N lan=<iface> fabric=<0|1>`, and the keeper logs `DEGRADED` every pass while
+it holds:
+
+```
+PLANES
+  control (LAN): up via en1
+  data (fabric): up
+  redundant: 2 of 2
+```
+
+**Do not run anything that can disrupt the remaining plane while degraded.** That
+includes anything opening a verbs device — see [RDMA-RULES.md](RDMA-RULES.md).
+
+### The list has to have more than one entry
+
+macOS auto-joins any known network in range, so "find an available network" needs no
+code. It needs a list, and a list of one is a venue change away from needing a
+keyboard. `networks.conf` (gitignored — it holds live credentials) seeds every node,
+`install.sh` copies it to `/usr/local/mesh/networks.conf`, and the keeper re-asserts
+it. Entries are only added, never removed. Format is in `networks.conf.example`.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
