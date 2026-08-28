@@ -35,9 +35,19 @@ struct mesh_mem {
 int  mesh_mem_init(struct mesh_mem *m, struct ibv_pd *pd,
                    struct ibv_context *ctx, size_t granule);
 
-// Registers [addr, addr+len) in full. Returns 0, or -1 having registered
-// nothing new. It does not clamp, and it does not partially succeed quietly.
-int  mesh_mem_add(struct mesh_mem *m, void *addr, size_t len, int access);
+// Mapping is a cursor, not a bulk call. A buffer is handed over once; the
+// cursor then advances as capacity allows. There is no "too large" and no
+// all-or-nothing: bytes not yet mapped are simply still in the buffer, which
+// is where they already were. Nothing is ever truncated, rejected or rolled
+// back, because none of those are ever needed -- the data is not going
+// anywhere while it waits.
+struct mesh_map { char *base; size_t len, mapped; int access; };
+
+void   mesh_map_open(struct mesh_map *it, void *addr, size_t len, int access);
+// Advance the cursor by at most `budget` chunks. Returns bytes newly mapped
+// (0 means no progress was possible this turn, which is not an error).
+size_t mesh_map_step(struct mesh_mem *m, struct mesh_map *it, int budget);
+static inline int mesh_map_done(const struct mesh_map *it){ return it->mapped >= it->len; }
 
 // Ordered lookup: the segment containing addr, or NULL. O(log nseg).
 const struct mesh_seg *mesh_mem_find(const struct mesh_mem *m, const void *addr);

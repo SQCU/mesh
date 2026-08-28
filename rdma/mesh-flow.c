@@ -107,7 +107,10 @@ int main(int argc,char**argv){
   void *mem; if(posix_memalign(&mem,getpagesize(),span)) die("memalign");
   memset(mem,0,span);
   if(mesh_mem_init(&g_mem,g_pd,g_ctx,(size_t)pgsz)) die("mesh_mem_init");
-  if(mesh_mem_add(&g_mem,mem,span,IBV_ACCESS_LOCAL_WRITE)) die("reg_mr");
+  struct mesh_map map; mesh_map_open(&map,mem,span,IBV_ACCESS_LOCAL_WRITE);
+  while(!mesh_map_done(&map) && mesh_map_step(&g_mem,&map,64)) ;
+  fprintf(stderr,"map: %.3f/%.3f GB mapped in %d MRs\n",
+          map.mapped/1e9, map.len/1e9, g_mem.nseg);
   g_cq=ibv_create_cq(g_ctx,4096,NULL,NULL,0); if(!g_cq) die("create_cq");
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
