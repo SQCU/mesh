@@ -542,7 +542,6 @@ spawnfunc(func_plc_cart)
 	}
 
 	this.effects |= EF_LOWPRECISION;
-	this.view_ofs = this.mins;
 	if(!this.speed)
 		this.speed = autocvar_g_payload_speed;
 	if(!this.radius)
@@ -558,6 +557,11 @@ spawnfunc(func_plc_cart)
 	this.dmgtime2 = time;
 
 	InitMovingBrushTrigger(this);
+	// After InitMovingBrushTrigger, not before: it sets the brush model, and
+	// mins is empty until it has. Assigning view_ofs earlier left the cart's
+	// tracked point at the entity origin regardless of its geometry, so no
+	// pusher was ever inside the push radius and the cart never moved.
+	this.view_ofs = this.mins;
 	setblocked(this, generic_plat_blocked);
 	this.reset = payload_cart_reset;
 
