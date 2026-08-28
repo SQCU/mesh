@@ -251,6 +251,46 @@ routing table answers.
 > also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and
 > the service answers every connection with silence while looking perfectly healthy.
 
+## Deployed revision, and why it is displayed
+
+`raw.githubusercontent.com` serves branch-addressed content with `cache-control:
+max-age=300`. Measured on this repo, mid-debug:
+
+```
+raw/main/bootstrap.sh    x-cache: HIT    source-age: 286     <- 286s stale, 14s from expiry
+raw/<sha>/bootstrap.sh   x-cache: MISS   source-age: 0       <- current
+```
+
+`codeload.github.com` caches independently, so the two endpoints disagree at
+different times. None of this has anything to do with the repo being public: access
+control and cache TTL are unrelated.
+
+The consequence is nasty in a system whose drift fix is "re-run install.sh". A node
+fetches `main`, gets a copy up to five minutes old, prints `OK` for every step, and
+converges on a definition you already replaced. That is silent, and it looks healthy.
+It happened here: a plist fix sat on origin while the node kept installing the
+previous one.
+
+There is no way to make the very first `curl` immune — the fix would have to live in
+the file being fetched staly. So instead the revision is recorded and shown:
+
+- `bootstrap.sh` resolves `main` to a commit sha through the API and fetches by sha,
+  which is immutable. It falls back to `main` if the API is unreachable, so an
+  offline or rate-limited node still provisions.
+- `install.sh` writes what it installed to `/usr/local/mesh/revision`.
+- `mesh-status` prints it; `mesh-nodeinfo` reports it; `mesh-peers` has a `REV`
+  column, so one glance across the fleet shows any node stuck on old code.
+
+To deploy a known revision with no cache window at all, pin it:
+
+```
+curl -fsSL https://raw.githubusercontent.com/SQCU/mesh/main/bootstrap.sh \
+  | sudo MESH_REF=<sha> bash
+```
+
+The API path costs a rate-limited request: unauthenticated GitHub allows 60/hour per
+source address, which a fleet behind one NAT can exhaust. That is why it fails soft.
+
 ## HMI epilogue
 
 Provisioning gives every node the same policy: never sleep, firewall off, no screen

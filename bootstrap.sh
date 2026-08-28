@@ -22,4 +22,4 @@ curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$REF" | tar xz -C "$DEST" -
   || { echo "    fetch failed; sshd is up, finish remotely"; exit 1; }
 
 echo "==> 3/3  provisioning"
-exec bash "$DEST/install.sh"
+MESH_REF="$REF" exec bash "$DEST/install.sh"

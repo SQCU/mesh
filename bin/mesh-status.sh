@@ -1,6 +1,6 @@
 #!/bin/bash
 b(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
-b "NODE"; echo "  $(scutil --get ComputerName) / $(scutil --get LocalHostName).local  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
+b "NODE"; printf "  revision %s\n" "$(cut -c1-12 /usr/local/mesh/revision 2>/dev/null || echo unknown)"; echo "  $(scutil --get ComputerName) / $(scutil --get LocalHostName).local  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
 b "POWER"; pmset -g custom | awk '/^ (sleep|displaysleep|disksleep|standby|autorestart|womp|powermode)/{printf "  %-22s %s\n",$1,$2}'
 b "ASSERTIONS"; pmset -g assertions | awk '/PreventUserIdleSystemSleep|PreventSystemSleep/ && NF==2 {printf "  %-30s %s\n",$1,$2}'
 b "REMOTE"; for p in 22:ssh 5900:screensharing; do

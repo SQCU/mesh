@@ -27,6 +27,9 @@ ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
 ln -sf "$MESH_ROOT/bin/mesh-run.sh"    /usr/local/bin/mesh-run
 ok "$MESH_ROOT; mesh-status and mesh-peers on PATH"
+REV="${MESH_REF:-$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)}"
+echo "$REV" > "$MESH_ROOT/revision"
+ok "revision $(cut -c1-12 "$MESH_ROOT/revision")"
 
 sec "2. Power"
 for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
