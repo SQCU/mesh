@@ -64,6 +64,31 @@ cannot pass — strictly less accessible.
 
 Illegitimate: refusing to configure auto-login because the node might travel.
 
+## Never index version control by commit
+
+Two selectors exist for fetching this repo: `main`, or a named branch. Nothing else.
+Code that indexes against version control must always take the newest commit on the
+branch it was given. If you need a specific state, register it as a branch — then it
+is both reachable and still patchable.
+
+A commit hash is a fixed point, and pinning one destroys the property everything here
+rests on: that re-running `install.sh` moves a node toward current intent. Under a
+pin, re-running moves it toward past intent, permanently, and the drift fix stops
+being a fix.
+
+Worse, the pin is self-sealing. A node pinned at commit X fetches the *bootstrap* at
+commit X too, so it can never receive the change that would unpin it. There is no
+in-band repair — only hand-editing every node, which is unbounded manual work and
+therefore does not scale. That is the paradox of the unpatchables, and it is
+forbidden anywhere, in any code.
+
+This is also a demotion under the contract above, and the worst kind: the keeper can
+turn a firewall back off, but nothing on a pinned node has the authority to unpin it.
+
+Caches and propagation delays are not a reason to reach for a hash. They resolve
+themselves; a pin does not. Trading a transient for a permanent is always the wrong
+trade, and a stale node can simply be reached and re-run.
+
 ## Fail toward access
 
 When something goes wrong, the fallback must be the *more* accessible state:

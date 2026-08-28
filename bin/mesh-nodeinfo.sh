@@ -10,7 +10,8 @@ printf 'memgb=%s\n' "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741
 printf 'macos=%s\n' "$(sw_vers -productVersion 2>/dev/null)"
 printf 'rdma=%s\n' "$(rdma_ctl status 2>&1)"
 printf 'sdk=%s\n' "$([ -f "$(xcrun --show-sdk-path 2>/dev/null)/usr/include/infiniband/verbs.h" ] && echo yes || echo no)"
-printf 'rev=%s\n' "$(cut -c1-12 /usr/local/mesh/revision 2>/dev/null || echo unknown)"
+printf 'branch=%s\n' "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"
+printf 'converged=%s\n' "$(awk '{print $2}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"
 printf 'uptime=%s\n' "$(uptime | sed 's/.*up //;s/,[^,]*users.*//' | tr -d ' ')"
 for p in $ports; do
   st=$(ibv_devinfo -d "rdma_$p" 2>/dev/null | awk '/state:/{print $2}')
