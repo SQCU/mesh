@@ -5,3 +5,6 @@ clean:
 
 mesh-app: mesh-app.c mesh-client.c mesh.h
 	cc -O2 -o $@ mesh-app.c mesh-client.c
+
+libmesh.dylib: mesh-client.c mesh.h
+	cc -O2 -dynamiclib -o $@ mesh-client.c
