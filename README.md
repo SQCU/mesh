@@ -177,31 +177,39 @@ this depends on the routing layer.
 > [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
 > badly enough to need a physical power cycle.
 
-## Two planes, and knowing when you only have one
+## Links, and knowing when you only have one
 
-A node is reachable over a **control plane** (LAN/Wi-Fi) and a **data plane** (the
-Thunderbolt fabric). They are independent, which is the point: either can fail without
-stranding the node.
+A node reaches the world over Wi-Fi/LAN and over the Thunderbolt fabric. It is
+tempting to call the first a control plane and the second a data plane. That is
+backwards, and the label hides a real dependency:
 
-That redundancy is a *state*, not a property. It was lost silently: the venue changed,
-the mini knew one SSID and it was not the one present, so it dropped to the fabric
-alone — and the fabric is the transient plane, the one a cable or a wedged driver takes
-out. Nothing reported the degradation. Had the fabric dropped in that window the node
-would have been dark, with only a keyboard to fix it.
+- **Wi-Fi is opportunistic.** Whether a network exists is a property of the room, not
+  of the node. A MacBook cannot host one for the minis, so a venue with no Wi-Fi means
+  no Wi-Fi, and nothing on the node can change that.
+- **The fabric is the dependable one.** Copper, point to point, between two machines
+  we own. It needs no infrastructure that anyone else controls.
 
-So it is measured and reported. `mesh-status` prints it, `mesh-nodeinfo` carries
-`planes=N lan=<iface> fabric=<0|1>`, and the keeper logs `DEGRADED` every pass while
-it holds:
+So the fabric can be a node's *only* link, and control has to ride it when that is the
+case — `ssh`, `mesh-peers` and `mesh-run` all work over `fabric-adjacent` link-local
+addresses for exactly this reason. Breaking the fabric is a reachability failure, not
+an inconvenience, which is why [RDMA-RULES.md](RDMA-RULES.md) is a reachability
+document.
+
+The invariant is not "every link comes back" — that cannot be promised for a network
+that may not exist. It is: **a node comes back with every link the room actually
+offers, and reports all of them**, so a drop to one is visible rather than discovered
+later:
 
 ```
-PLANES
-  control (LAN): up via en1
-  data (fabric): up
+LINKS
+  wifi/lan:  up via en1
+  fabric:    up
   redundant: 2 of 2
 ```
 
-**Do not run anything that can disrupt the remaining plane while degraded.** That
-includes anything opening a verbs device — see [RDMA-RULES.md](RDMA-RULES.md).
+`mesh-nodeinfo` carries `planes=N lan=<iface> fabric=<0|1>`, and the keeper logs
+`DEGRADED` every pass while only one remains. Do not run anything that can disrupt the
+remaining link while degraded.
 
 ### The list has to have more than one entry
 

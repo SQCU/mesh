@@ -40,6 +40,10 @@ The device has `max_qp: 11` and `max_mr: 100`. It does not take many leaks.
 - **Check the port before allocating anything.** `ibv_query_port` and refuse on
   anything but `IBV_PORT_ACTIVE`. A clear "the port is down" beats failing later at
   `alloc_pd` and blaming your own code, which is what happened here.
+- **Bound every blocking call, not just the one you remembered.** The first hardened
+  version of `mesh-hop` had a deadline on `ibv_poll_cq` and still hung forever, because
+  `accept()`, `connect()` and the out-of-band `read()` in front of it had none. A
+  program with one unbounded syscall is an unbounded program.
 - **One experiment at a time.** A sweep that launches a process per size, killing
   the previous one, is a leak amplifier.
 
