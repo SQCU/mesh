@@ -19,7 +19,7 @@ not.
 |---|---|---|---|
 | GPU cores | 40 | 16 | 2.5× |
 | dense GEMM fp32, N=4096 | **41,288 GF/s** | **5,377 GF/s** | **7.68×** |
-| same, bf16 | 44,728 GF/s | 5,827 GF/s | 7.68× |
+| same, bf16 | **59,054 GF/s** | **6,047 GF/s** | **9.77×** |
 | gain from bf16 over fp32 | +63% | +12% | — |
 | memory bandwidth (memcpy r+w) | 362 GB/s | 238 GB/s | 1.52× |
 | CPU/AMX GEMM (Accelerate) | 1,695 GF/s | — | — |
@@ -34,7 +34,7 @@ peak of 5.3–6.1 GF/s is **84–97% of theoretical**. There is no hand-tuned ke
 writing, and more importantly no skeptic can argue the single-machine baseline was
 crippled.
 
-**Stay in fp32.** bf16 widens the machine gap to 7.68× while buying the mini only 12%.
+**Stay in fp32.** bf16 widens the machine gap to 9.77× while buying the mini only 13%.
 
 **The mini must host.** If the MacBook hosts the server and the mini assists, the mesh
 buys 1.17×. Inverted — mini hosts, MacBook is the coprocessor — it is **6.96×**. That is
@@ -141,6 +141,13 @@ rather than a system to fully understand.
 
 Eighteen agents built and adversarially verified this design. Several numbers above were
 wrong and are corrected here rather than silently edited, because the *reasons* matter.
+
+**Both M5 GEMM figures were low, not just one.** The bf16 row came from the same flawed
+pass: re-measured it is **59,054 GF/s**, not 44,728. The mini was re-measured over the LAN
+plane on the same script and confirms both of its own numbers (fp32 5,343; bf16 6,047,
+against 5,827 recorded). So every error was on the fast machine and every error understated
+it. The bf16 ratio is **9.77×**, not 7.68×, which *strengthens* the "stay in fp32" call:
+bf16 buys the M5 +47% and the mini only +13%, so it buys asymmetry we do not want.
 
 **My fp32 GEMM figure for the M5 was 34% low.** I measured 27,374 GF/s using K=1024 with
 no warmup, so kernel-compile and allocation costs were averaged into the timing and a
