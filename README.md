@@ -151,11 +151,43 @@ the node's uplink.
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon. |
 | `hmi-epilogue.sh` | post-provision operator override for power + firewall on a human-used machine. Never affects reachability. |
+| `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
+| `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding. Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
+
+## Routing, and why the node list comes from the routing table
+
+With the bridge gone, each Thunderbolt port is its own point-to-point link. Bonjour
+and link-local reach exactly one cable hop, so multicast discovery stops describing
+the fabric the moment a third node exists. Anything built on `ff02::1` silently
+degrades from "the mesh" to "my neighbours" — a report that still prints a table and
+no longer means what it says.
+
+So every node takes a routable identity address and the fabric is routed:
+
+- **Identity**: a `/128` under `fd6d:6573:68::/48` on `lo0`, derived from the node's
+  `IOPlatformUUID`. On `lo0` because with no bridge there is no single segment for it
+  to live on, and it must not change when a cable moves to another port.
+- **Routing**: `babeld` on every fabric port, using the per-port link-locals as
+  next-hops. It is designed for topologies that churn, reconverges on replug with no
+  per-node configuration, and uses every link rather than blocking one the way a
+  spanning tree would — which is the whole reason to cable a ring.
+- **Enumeration**: `mesh-peers` reads the routing table. Every node babeld knows about
+  is a node, at any hop count and any fleet size, with no central registry and no
+  multicast.
+
+babeld is vendored as a prebuilt arm64 binary — see [vendor/PROVENANCE.md](vendor/PROVENANCE.md)
+for the source, hashes, and the one-line build fix. A node must never need a
+toolchain: invoking `cc` on a virgin Mac opens the Command Line Tools GUI installer.
+
+RDMA itself is untouched by any of this and still never routes. TN3205 is explicit
+that the application forwards across a topology. This layer exists so that nodes can
+*find and reach* each other at unlimited fleet size; the RDMA data plane rides the
+cables directly, point to point.
 
 ## HMI epilogue
 

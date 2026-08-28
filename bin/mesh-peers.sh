@@ -1,20 +1,15 @@
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-SECS="${1:-4}"
-TMP=$(mktemp); trap 'rm -f "$TMP" "$TMP".a' EXIT
-dns-sd -B _meshnode._tcp local >"$TMP" 2>&1 &
-P=$!
-sleep "$SECS"; kill "$P" 2>/dev/null; wait "$P" 2>/dev/null
-addr_of(){
-  dns-sd -t 2 -G v4v6 "$1.local" 2>/dev/null | awk '$2=="Add"{print $6}' >"$TMP.a"
-  grep -m1 '^169\.254\.' "$TMP.a" || grep -m1 -E '^[0-9]+\.[0-9]+\.' "$TMP.a" || grep -m1 . "$TMP.a"
-}
-printf '\n  %-26s %-40s %s\n' NODE ADDRESS STATE
+PREFIX=fd6d:6573:68
+self=$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2}')
+printf '\n  %-44s %-8s %s\n' "NODE" "STATE" "HOPS"
 n=0
-while read -r name; do
-  [ -n "$name" ] || continue
-  n=$((n+1)); a=$(addr_of "$name" | head -1)
-  printf '  %-26s %-40s %s\n' "$name" "${a:-?}" "$([ -n "$a" ] && echo up || echo UNRESOLVABLE)"
-done < <(awk '$2=="Add"{print $NF}' "$TMP" | sort -u)
-[ "$n" -gt 0 ] || printf '  \033[31mno nodes answered in %ss, the fabric is dark\033[0m\n' "$SECS"
+for a in $(netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" {print $1}' | cut -d% -f1 | sort -u); do
+  n=$((n+1))
+  if [ "$a" = "$self" ]; then printf '  %-44s %-8s %s\n' "$a" "self" "-"; continue; fi
+  if ping6 -c1 -W 1500 "$a" >/dev/null 2>&1; then st=up; else st=$'\033[33mrouted, silent\033[0m'; fi
+  hops=$(netstat -rn -f inet6 2>/dev/null | awk -v a="$a" '$1==a{print $NF; exit}')
+  printf '  %-44s %-8b %s\n' "$a" "$st" "${hops:-?}"
+done
+[ "$n" -eq 0 ] && printf '  \033[31mno nodes in the routing table -- babeld down, or no fabric cable\033[0m\n'
 echo

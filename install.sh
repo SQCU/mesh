@@ -21,6 +21,7 @@ echo "provisioning $ADMIN_USER   ($REPO)"
 sec "1. Layout"
 mkdir -p "$MESH_ROOT"/{bin,jobs,log,templates} /usr/local/bin
 install -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
+install -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babeld"
 install -m 644 -o root -g wheel "$REPO"/templates/* "$MESH_ROOT/templates/" 2>/dev/null
 ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
@@ -106,9 +107,12 @@ mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
+mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
+  "  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
-for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.rdma-init io.mesh.keeper; do
+for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.rdma-init io.mesh.keeper; do
   launchctl bootout system/$L >/dev/null 2>&1
   launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1 \
     && { launchctl enable system/$L >/dev/null 2>&1; ok "$L"; } || bad "$L"

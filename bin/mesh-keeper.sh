@@ -33,6 +33,8 @@ if [ ! -f "$HMI" ] && "$FW" --getglobalstate 2>/dev/null | grep -q 'State = 1'; 
   echo "[$(ts)] DRIFT firewall on"; "$FW" --setglobalstate off >/dev/null 2>&1; drift=1
 fi
 [ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
+pgrep -qf /usr/local/mesh/bin/babeld || {
+  echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {
   echo "[$(ts)] ALARM rdma disabled, physical Recovery OS visit required"; drift=1; }
 [ "$drift" -eq 0 ] || echo "[$(ts)] pass complete"
