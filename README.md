@@ -173,6 +173,10 @@ RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
 this depends on the routing layer.
 
+> Before writing or running anything that opens a verbs device, read
+> [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
+> badly enough to need a physical power cycle.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
