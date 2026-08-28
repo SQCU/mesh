@@ -230,10 +230,16 @@ proposals with their reasoning and their adversarial critique attached, not sett
 fact, and each states plainly which of its numbers are measured and which are
 estimates.
 
-- [`design/xonotic-bot-compute.md`](design/xonotic-bot-compute.md) — a bot planner for
-  a Xonotic server split across two nodes. Chooses a mean-field congestion equilibrium
-  because it is the one formulation that does not collapse into a precomputable
-  operator, and replaces cadence-slip with admission control as the visible failure.
+- [`design/mesh-coprocessor-demo.md`](design/mesh-coprocessor-demo.md) — **current.**
+  The mini as a tile-streaming matrix coprocessor, demonstrated through a multi-team
+  Xonotic payload match. Measured hardware, three superlinear levers, the ABI, and the
+  attacks each part of the workload survives.
+- [`design/mesh-coprocessor-demo-plain.md`](design/mesh-coprocessor-demo-plain.md) — the
+  same design at reading grade 3.7: what the linear algebra computes, and what the game
+  must show so the solver is visibly present and visibly necessary.
+- [`design/xonotic-bot-compute.md`](design/xonotic-bot-compute.md) — **superseded.** The
+  earlier mean-field study. Kept for its discard table and its adversarial critiques; its
+  throughput figures were estimates and its crossover analysis is void.
 
 ## Adding a machine to the fabric
 
