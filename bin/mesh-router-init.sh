@@ -11,6 +11,11 @@ uuid=$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print 
 h=$(printf '%s' "$uuid" | shasum -a 256 | cut -c1-20)
 g(){ printf '%x' $(( 0x${1} | 0x1000 )); }
 ULA="$PREFIX:$(g ${h:0:4}):$(g ${h:4:4}):$(g ${h:8:4}):$(g ${h:12:4}):$(g ${h:16:4})"
+for old in $(ifconfig lo0 | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2}'); do
+  [ "$old" = "$ULA" ] && continue
+  echo "[$(ts)] stale identity $old -> removed"
+  ifconfig lo0 inet6 "$old" -alias >/dev/null 2>&1
+done
 ifconfig lo0 | grep -q "inet6 ${ULA} " || {
   echo "[$(ts)] identity $ULA -> lo0"
   ifconfig lo0 inet6 "$ULA" prefixlen 128 alias >/dev/null 2>&1; }
