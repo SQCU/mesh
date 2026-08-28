@@ -154,6 +154,48 @@ monotonically increasing) from one that is crashing out (free → 0, sustained
 negative). A few floats per peer per second and the whole graph knows what the whole
 graph is doing.
 
+## Addressing and routing
+
+The wire header is 24 bytes, 0.59% of a 4096 page:
+
+```c
+struct wire { uint32_t magic, path, stream, seq; uint16_t bytes, src, dst; uint8_t flags, hops; };
+```
+
+`src` and `dst` are node indices — *this page is from node A, for node B*. There is no
+authentication and none is wanted: the topology is cables we plugged in ourselves, so
+this is a routing tag, not a credential.
+
+`flags` carries `F_META`, which is the whole of the "is this for us" question. A page
+either is graph metadata that every peer along a cycle should observe to maintain its
+world model of the entire graph and its load, or it is opaque payload that no hop may
+interpret. One bit, tested once per page, no payload dereference either way.
+
+### Routing is a compiled path, not a table
+
+`path` holds the route as **2 bits per hop** — a node has at most three fabric ports,
+so an egress port is two bits. Each hop reads the low bits, shifts right, forwards. A
+`uint32` therefore carries 16 hops:
+
+| field | hops | nodes reachable at degree 3 |
+|---|---|---|
+| `uint32 path` | 16 | 43,046,721 |
+| `uint64 path` | 32 | 1.85 × 10^15 |
+
+Per-hop cost is a mask, a shift and a store, inside the 24 bytes the header already
+occupies — no extra bandwidth, no lookup, no memory.
+
+A next-hop table would be O(N) memory per node *and* a fleet-wide agreement problem:
+2048 entries per node at 2048 nodes, a million entries and distributed consensus at a
+million. The path is computed once per stream by whatever sets the stream up, and
+after that every hop is a shift. The mesh can be arbitrarily large and the data plane
+never learns how large.
+
+Termination is `dst == node_idx`, with a hop-count ceiling so a corrupted `path` dies
+rather than circulating. Measured on two nodes: a page addressed to the peer is
+delivered and terminates there, at **69.45 Gbit/s one-way — 98% of the 70.9 Gbit/s
+ceiling**.
+
 ## The shape
 
 Agents that never wait, over one page table of refcounted pages:

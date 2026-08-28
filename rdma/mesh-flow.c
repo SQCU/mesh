@@ -1,13 +1,4 @@
-// mesh-flow: the data path.
-//
-// Three agents over one page table, none of which ever blocks or asks a question.
-//   LISSEN   keeps receives posted from the free list -- that IS the credit grant
-//   DISPATCH decides what each landed page is for; identity is a decision, not a skip
-//   YELLER   posts sends; a page frees when its refcount reaches zero
-//
-// Pages are the receive buffers. Nothing is copied. Backpressure is the free list
-// running dry, which stops receives, which stops the peer's credits. No protocol.
-// Telemetry is streamed because nothing else can tell the graph what it is doing.
+// mesh-flow -- see RDMA-FIRST.md
 #include <infiniband/verbs.h>
 #include <netdb.h>
 #include <signal.h>
@@ -20,10 +11,13 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-#define WIRE_MAGIC 0x4d534831u          /* MSH1 */
-struct wire { uint32_t magic, stream, seq, bytes; uint16_t flags, hops; uint32_t pad; };
+#define WIRE_MAGIC 0x4d534831u          
+struct wire { uint32_t magic, path, stream, seq; uint16_t bytes, src, dst; uint8_t flags, hops; };
 #define F_FIRST 1u
 #define F_LAST  2u
+#define F_META  4u
+#define HOP_BITS 2u
+#define HOP_MASK 3u
 
 enum { FREE=0, POSTED, FILLED, SENDING };
 struct page { char *addr; uint32_t lkey; uint32_t refs; uint8_t state; };
@@ -79,6 +73,7 @@ static void f_touch(void *p, uint32_t n){
 int main(int argc,char**argv){
   const char *dev=NULL,*peer=NULL,*op="identity";
   int pgsz=4096, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
+  int node_idx=0, target_idx=1; unsigned route_path=0; unsigned egress=0; (void)egress;
   double tel_hz=1.0;
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-d")) dev=argv[++i];
@@ -90,6 +85,9 @@ int main(int argc,char**argv){
     else if(!strcmp(argv[i],"-o")) op=argv[++i];
     else if(!strcmp(argv[i],"-H")) tel_hz=atof(argv[++i]);
     else if(!strcmp(argv[i],"-w")) inflight=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-I")) node_idx=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-D")) target_idx=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-R")) route_path=(unsigned)strtoul(argv[++i],NULL,0);
     else if(!strcmp(argv[i],"--source")) source=1;
     else peer=argv[i];
   }
@@ -122,10 +120,7 @@ int main(int argc,char**argv){
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
   g_qp=ibv_create_qp(g_pd,&ia); if(!g_qp) die("create_qp");
-  /* TN3205: "The system may adjust queue depths based on hardware capabilities so be
-     sure to check final values using ibv_query_qp." Queue depth is counted in 4 KB
-     frames and bounds total posted frames -- and ibv_post_recv does NOT enforce it,
-     it accepts far past capacity and corrupts later, so we enforce it here. */
+  
   struct ibv_qp_attr qa; struct ibv_qp_init_attr qi;
   if(ibv_query_qp(g_qp,&qa,IBV_QP_CAP,&qi)) die("query_qp");
   int gr_send=qi.cap.max_send_wr, gr_recv=qi.cap.max_recv_wr;
@@ -169,6 +164,7 @@ int main(int argc,char**argv){
                  "-> rx_target=%d (%d frames) tx_budget=%d (%d frames)\n",
           gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0, short_pay=0;
+  unsigned long long delivered=0, meta_seen=0;
   uint32_t next_seq=0, last_seq=0; int seen_any=0;
   struct wf w_free={0}, w_ready={0}, w_send={0};
   double t0=now(), t_last=t0, v_last=nfree, tel_last=t0, quiet=t0;
@@ -176,10 +172,7 @@ int main(int argc,char**argv){
   while(!g_stop && now()-t0 < seconds){
     int did=0;
 
-    /* LISSEN: posting a receive IS the credit grant. feed-forward, never asked for.
-       Capped at a watermark: posting every free page starves origination and
-       forwarding of buffers, which deadlocks with the pool fully committed to
-       receives that can never be answered. */
+    
     while(nfree>0 && posted<rx_target){
       int i=freelist[--nfree];
       struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
@@ -188,14 +181,15 @@ int main(int argc,char**argv){
       pg[i].state=POSTED; posted++; did=1;
     }
 
-    /* SOURCE: originate pages when we are the head of the stream. */
+    
     if(source){
       int cap = inflight && inflight<tx_budget ? inflight : tx_budget;
       while(nfree>0 && sending<cap){
         int i=freelist[--nfree];
         struct wire *h=(struct wire*)pg[i].addr;
-        h->magic=WIRE_MAGIC; h->stream=0; h->seq=next_seq++;
-        h->bytes=pgsz-sizeof *h; h->flags=F_FIRST|F_LAST; h->hops=0;
+        h->magic=WIRE_MAGIC; h->path=route_path; h->stream=0; h->seq=next_seq++;
+        h->bytes=(uint16_t)(pgsz-sizeof *h); h->src=(uint16_t)node_idx;
+        h->dst=(uint16_t)target_idx; h->flags=F_FIRST|F_LAST; h->hops=0;
         struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
         struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
@@ -204,7 +198,7 @@ int main(int argc,char**argv){
       }
     }
 
-    /* completions: never waited on, only drained. */
+    
     struct ibv_wc wc[32];
     int k=ibv_poll_cq(g_cq,32,wc);
     if(k<0) die("poll_cq");
@@ -227,7 +221,7 @@ int main(int argc,char**argv){
       }
     }
 
-    /* DISPATCH: forwarding unchanged is still a decision, made here, per page. */
+    
     while(nready>0){
       int i=ready[rhead]; rhead=(rhead+1)%npages; nready--;
       struct wire *h=(struct wire*)pg[i].addr;
@@ -236,10 +230,13 @@ int main(int argc,char**argv){
       last_seq=h->seq; seen_any=1;
       uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
       if(pay != h->bytes) short_pay++;
+      if(h->flags & F_META) meta_seen++;
       f((char*)pg[i].addr+sizeof *h, pay);
       h->hops++;
-      if(source){ FREE_PAGE(i); }   /* stream terminates here */
+      if(h->dst==(uint16_t)node_idx || h->hops>32){ delivered++; FREE_PAGE(i); }
       else {
+        egress = h->path & HOP_MASK;
+        h->path >>= HOP_BITS;
         struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
         struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
@@ -249,16 +246,16 @@ int main(int argc,char**argv){
       did=1;
     }
 
-    /* telemetry: the only way anything learns what this node is doing. */
+    
     double t=now();
     if(t-tel_last >= 1.0/tel_hz){
       double dt=t-t_last, dv=(double)nfree - v_last;
       wf_add(&w_free,nfree); wf_add(&w_ready,nready); wf_add(&w_send,sending);
       fprintf(stderr,
         "tel t=%.1f free=%d posted=%d/%d ready=%d sending=%d dV/dt=%.1f/s dV/V=%.4f "
-        "var_free=%.1f rx=%llu tx=%llu gaps=%llu clamped=%llu sum=%d/%d\n",
+        "var_free=%.1f rx=%llu tx=%llu gaps=%llu clamped=%llu deliv=%llu meta=%llu sum=%d/%d\n",
         t-t0, nfree, posted, rx_target, nready, sending, dv/(dt>0?dt:1),
-        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, short_pay, nfree+posted+nready+sending, npages);
+        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, short_pay, delivered, meta_seen, nfree+posted+nready+sending, npages);
       t_last=t; v_last=nfree; tel_last=t;
     }
     if(!did){ if(t-quiet>tmo){ fprintf(stderr,"idle %ds\n",tmo); break; } usleep(50); }
