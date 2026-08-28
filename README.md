@@ -55,6 +55,23 @@ Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 > Set `MESH_BRANCH` to fetch a branch other than `main`. Never index by commit —
 > see **Never index version control by commit** in [AGENTS.md](AGENTS.md).
 
+## What provisioning does that looks wrong
+
+Repo reasoning, not operator policy — see [THREAT-MODEL.md](THREAT-MODEL.md) for what
+was actually asked for. Each of these is open to revisiting:
+
+- **FileVault stays off.** It demands a keyboard at every boot, so a node under it
+  cannot reboot unattended. Encrypt payloads at the application layer instead,
+  whenever that is wanted — nothing here argues data at rest is unimportant.
+- **The application firewall is off**, and the keeper re-asserts that. It can only
+  subtract reachability. This is the weakest-supported item here and the first to
+  revisit if a node ever lives somewhere with less physical control.
+- **Passwordless sudo** via `/etc/sudoers.d/mesh`, `visudo -c` validated before it is
+  written. A password prompt on a keyboard-less node blocks both recovery and any
+  future agent that provisions a machine and then has to administer it.
+- **The provisioning source is a public repo**, so a node reaches a consistent
+  definition with no credentials.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
