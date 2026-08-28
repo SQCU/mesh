@@ -9,6 +9,43 @@ Mac16,11 / Mac17,6 are real; the two load-bearing GPU throughput figures are
 ESTIMATES and are flagged as such in section 9. Verify before committing.
 -->
 
+
+> ## CORRECTION (measured after this study was written)
+>
+> This document's throughput figures were estimates and the central one was wrong.
+>
+> **Measured on Mac17,6, N=4096 fp32 GEMM:**
+> - GPU (Metal via MLX, evaluated per iteration): **30,964 GFLOP/s** at K=1024
+> - CPU/AMX (Accelerate `cblas_sgemm`): **1,695 GFLOP/s** at K=1024
+>
+> The study assumed 12,950 GF/s peak and 8,500 usable, which matches neither unit, and
+> put the crossover at B=96. Against the measured GPU, one MacBook alone handles roughly
+> **238 bots at N=4096** — so the proposed B=128 is about **54% of a single machine** and
+> the split would not have been real. Section 2.2's crossover table is void.
+>
+> A benchmarking note worth keeping: MLX is lazy. A loop of `Y = A @ X` with one `mx.eval`
+> at the end materialises a *single* GEMM, and reported **207 TFLOP/s** — physically
+> impossible, and flattering rather than corrective. Evaluate inside the loop.
+>
+> **Resolution.** The scaling parameter is **bot count**, which is linear in cost and is
+> the parameter a viewer can actually see. Field resolution `N` becomes a fixed quality
+> setting, chosen once so the visible bot range brackets both crossovers:
+>
+> | N | per-bot TF/s | B for one MacBook | B for both |
+> |---|---|---|---|
+> | 4096 | 0.0859 | 238 | ~333 |
+> | **6144** | **0.1933** | **106** | **~148** |
+> | 8192 | 0.3436 | 59 | ~83 |
+>
+> **N = 6144.** A 64 → 256 bot sweep then crosses one-machine and both-machine capacity
+> on camera. The "both" column still assumes the mini at +40% of the MacBook and is
+> UNMEASURED — pending, because measuring it would perturb an RDMA loss experiment
+> running on that machine.
+>
+> Everything else in this document — the mean-field formulation, why softplus plus rank-1
+> coupling defeats the `Σγᵏ Aᵏ` collapse, the wire pattern, the discard table — stands.
+
+
 # FINAL SPECIFICATION — "SHARED FIELD" BOT PLANNER
 ### Xonotic/DarkPlaces squad brain, split across mini (M4 Pro) + MacBook (M5 Max) over TB5 RDMA
 
