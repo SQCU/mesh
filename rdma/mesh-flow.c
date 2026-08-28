@@ -2,9 +2,6 @@
 #include "mesh-f.h"
 #include "mesh-mem.h"
 #include "mesh.h"
-#ifndef MESH_PGSZ
-#define MESH_PGSZ 65536
-#endif
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -23,7 +20,7 @@
 
 
 enum { FREE=0, POSTED, FILLED, SENDING };
-struct page { char *addr; uint32_t lkey; uint32_t refs; uint8_t state, held; };
+struct page { char *addr; uint32_t refs; uint8_t state, held; };
 
 struct wf { double n, mean, m2; };
 static void wf_add(struct wf *w, double x){
@@ -75,9 +72,8 @@ static int oob(const char*host,int port,int secs){
 
 int main(int argc,char**argv){
   const char *peer=NULL;
-  const int pgsz=MESH_PGSZ; int npages=240, port=18519, tmo=30, seconds=5;
-  const int source=0, inflight=0;
-  int node_idx=0, target_idx=1, spanpg=1; const char *shmname="/mesh0"; double pct=0.0; unsigned route_path=0; unsigned egress=0; (void)egress;
+  const int pgsz=4096; int npages=240, port=18519, tmo=30, seconds=5;
+  int node_idx=0; const char *shmname="/mesh0"; double pct=0.0;
   double tel_hz=1.0;
   // Only what cannot be inferred: which node this is, how much of it the mesh
   // holds, and who to reach. Everything else is derived. There is deliberately
@@ -139,22 +135,11 @@ int main(int argc,char**argv){
   void *mem=(char*)rbase+data_off;
   fprintf(stderr,"region %s: %d pages x %d B = %.3f GB = %.2f%% of node\n",
      shmname,npages,pgsz,span/1e9, node_ram?100.0*span/(double)node_ram:0.0);
-  if(mesh_mem_init(&g_mem,g_pd,g_ctx,(size_t)pgsz)) die("mesh_mem_init");
-  struct mesh_map map; mesh_map_open(&map,mem,span,IBV_ACCESS_LOCAL_WRITE);
-  while(!mesh_map_done(&map) && mesh_map_step(&g_mem,&map,64)) ;
-  // The pool is the resident set, not the region. Pages beyond what is
-  // currently mapped are addressable but not yet backed by a frame, so they
-  // are not handed out; residency rebinds at 155 GB/s if that ever needs to
-  // change while running.
-  int resident = (int)(map.mapped/(size_t)pgsz);
-  if(resident < npages){
-    fprintf(stderr,"resident %d/%d pages (%.3f/%.3f GB, %d MRs)\n",
-            resident, npages, map.mapped/1e9, map.len/1e9, g_mem.nseg);
-    npages = resident;
-    RG.h->npages = (uint32_t)npages;
-  } else fprintf(stderr,"resident %d pages (%.3f GB, %d MRs)\n",
-                 npages, map.mapped/1e9, g_mem.nseg);
-  if(npages < 4) die("no resident pages");
+  if(mesh_mem_map(&g_mem,g_pd,mem,span,(size_t)pgsz,IBV_ACCESS_LOCAL_WRITE))
+    die("register region");
+  size_t ppc = g_mem.chunk/(size_t)pgsz;              // pages per region
+  fprintf(stderr,"registered %.3f GB in %zu regions of %.3f GB\n",
+          span/1e9, g_mem.nseg, g_mem.chunk/1e9);
   g_cq=ibv_create_cq(g_ctx,4096,NULL,NULL,0); if(!g_cq) die("create_cq");
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
@@ -193,11 +178,10 @@ int main(int argc,char**argv){
   if(rx_pages > rx_cap) rx_pages = rx_cap;
   if(rx_pages < 8) rx_pages = npages;              // tiny pool: no arena
   for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz;
-    pg[i].lkey=mesh_mem_lkey(&g_mem,pg[i].addr);
-    if(!pg[i].lkey) die("page outside registered memory");
     pg[i].state=FREE;
     if(i < rx_pages) freelist[nfree++]=i; }        // arena pages are the app's
 
+  #define PG_LKEY(i) (g_mem.mr[(size_t)(i)/ppc]->lkey)
   int posted=0, sending=0;
   int arena_start=rx_pages;
   RG.h->arena_off = data_off + (uint64_t)rx_pages*(uint64_t)pgsz;
@@ -207,8 +191,10 @@ int main(int argc,char**argv){
      RG.h->arena_pages, (unsigned)(pgsz-sizeof(struct wire)),
      (double)RG.h->arena_pages*(pgsz-sizeof(struct wire))/1e9,
      node_ram?100.0*(double)RG.h->arena_pages*pgsz/(double)node_ram:0.0, rx_pages);
-  #define FREE_PAGE(i) if((i)>=arena_start){ pg[i].state=FREE; } else FREE_PAGE_POOL(i)
-  #define FREE_PAGE_POOL(i) do{ if(pg[i].held){} else if(pg[i].state!=FREE){ pg[i].state=FREE; \
+  // A page returns to the pool unless the application owns it: statically,
+  // by living in the arena, or transiently, by having been delivered.
+  #define FREE_PAGE(i) do{ if((i)>=arena_start || pg[i].held){ pg[i].state=FREE; } \
+    else if(pg[i].state!=FREE){ pg[i].state=FREE; \
       if(nfree<npages) freelist[nfree++]=(i); else fprintf(stderr,"BUG freelist overflow p%d\n",(i)); } \
     else fprintf(stderr,"BUG double free p%d\n",(i)); }while(0)
   int txwin=0; int *txring=NULL;
@@ -227,7 +213,7 @@ int main(int argc,char**argv){
   fprintf(stderr,"caps: granted send=%d recv=%d frames (4KB units); pgsz=%d frames/pg=%d "
                  "-> rx_target=%d (%d frames) tx_budget=%d (%d frames) txwin=%d\n",
           gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames,txwin);
-  fprintf(stderr,"repair: horizon=%d rearm_gap=%d retire_at=%d mrs=%d chunk=%zu regGB=%.3f\n",horizon,rearm_gap,retire_at,g_mem.nseg,g_mem.chunk,g_mem.bytes/1e9);
+  fprintf(stderr,"repair: horizon=%d rearm_gap=%d retire_at=%d regions=%zu\n",horizon,rearm_gap,retire_at,g_mem.nseg);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0, short_pay=0;
   unsigned long long delivered=0, meta_seen=0;
   unsigned long long d_wc=0, d_ring=0, d_magic=0, d_post=0, d_bounds=0, seq_lo=0;
@@ -249,7 +235,7 @@ int main(int argc,char**argv){
   uint32_t *rtq = malloc(RTQ*sizeof(uint32_t)); if(!rtq) die("alloc rtq");
   int rt_head=0, rt_n=0; unsigned long long rt_drop=0;
   unsigned long long age_b[7]={0};
-  uint32_t next_seq=0, last_seq=0; int seen_any=0; int spanpos=0;
+  uint32_t next_seq=0, last_seq=0; int seen_any=0;
   struct wf w_free={0}, w_ready={0}, w_send={0};
   double t0=now(), t_last=t0, v_last=nfree, tel_last=t0, quiet=t0;
 
@@ -259,7 +245,7 @@ int main(int argc,char**argv){
     
     while(nfree>0 && posted<rx_target){
       int i=freelist[--nfree];
-      struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
+      struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,PG_LKEY(i)};
       struct ibv_recv_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1},*bad;
       if(ibv_post_recv(g_qp,&wr,&bad)){ freelist[nfree++]=i; break; }
       pg[i].state=POSTED; posted++; did=1;
@@ -275,13 +261,6 @@ int main(int argc,char**argv){
     // APPFREE -- lend spare pages to the application, keeping the receive
     // pool above its target so the wire never starves behind the app
     if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
-      // (arena pages need no lending)
-      if(0){
-        int p=freelist[nfree-1];
-        struct mesh_desc dd={.page=(uint32_t)p,.bytes=0,.seq=0,.node=0,.flags=0};
-        if(mesh_push(&RG,&RG.h->rfree,RG.h->free_off,&dd)) break;
-        nfree--; pg[p].held=1; did=1;
-      }
       // APPSUB -- send what the application handed over
       struct mesh_desc dd;
       for(int ns=0; ns<256 && sending<tx_budget &&
@@ -292,7 +271,7 @@ int main(int argc,char**argv){
         wh->bytes=(dd.bytes>maxpay?maxpay:dd.bytes);
         wh->src=(uint16_t)node_idx; wh->dst=dd.node;
         wh->flags=F_FIRST|F_LAST; wh->hops=0;
-        struct ibv_sge g={(uintptr_t)pg[p].addr,(uint32_t)pgsz,pg[p].lkey};
+        struct ibv_sge g={(uintptr_t)pg[p].addr,(uint32_t)pgsz,PG_LKEY(p)};
         struct ibv_send_wr wr={.wr_id=(uint64_t)p,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
         pg[p].held=0;
@@ -302,51 +281,29 @@ int main(int argc,char**argv){
         if(ibv_post_send(g_qp,&wr,&bad)){ pg[p].state=FREE; d_post++;
           if((int)p < arena_start) freelist[nfree++]=(int)p; }
         else { pg[p].state=SENDING; if(!pg[p].refs++) sending++; app_sent++;
+               txring[wh->seq % (uint32_t)txwin]=(int)p;
                atomic_fetch_add_explicit(&RG.h->sent,1,memory_order_relaxed); }
         did=1;
       }
     }
 
     
-    if(source){
-      int cap = inflight && inflight<tx_budget ? inflight : tx_budget;
-      while(sending<cap && rt_n>0){
-        uint32_t want=rtq[rt_head]; rt_head=(rt_head+1)%RTQ; rt_n--;
-        uint32_t lg=next_seq-want; nlag_sum+=lg; nlag_n++; if(lg>nlag_max) nlag_max=lg;
-        int tp=txring[want % (uint32_t)txwin];
-        if(tp<0){ nack_stale++; continue; }
-        struct wire *th=(struct wire*)pg[tp].addr;
-        if(th->seq!=want){ nack_stale++; continue; }
-        struct ibv_sge g={(uintptr_t)pg[tp].addr,(uint32_t)pgsz,pg[tp].lkey};
-        struct ibv_send_wr wr={.wr_id=(uint64_t)tp,.sg_list=&g,.num_sge=1,
-          .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-        if(ibv_post_send(g_qp,&wr,&bad)){ resend_fail++; break; }
-        if(!pg[tp].refs++) sending++; resent++; did=1;
-        outstanding++; if(outstanding>out_max) out_max=outstanding;
-      }
-      while(sending<cap){
-        uint32_t slot=next_seq % (uint32_t)txwin;
-        int old=txring[slot];
-        if(old>=0){
-          if(pg[old].refs) break;
-          txring[slot]=-1; pg[old].held=0; FREE_PAGE(old);
-        }
-        if(nfree<=0) break;
-        int i=freelist[--nfree];
-        struct wire *h=(struct wire*)pg[i].addr;
-        h->magic=WIRE_MAGIC; h->path=route_path; h->stream=0; h->seq=next_seq++;
-        h->bytes=(uint16_t)(pgsz-sizeof *h); h->src=(uint16_t)node_idx;
-        h->dst=(uint16_t)target_idx; h->flags=0; if(spanpos==0) h->flags|=F_FIRST;
-        if(spanpos==spanpg-1) h->flags|=F_LAST;
-        spanpos=(spanpos+1)%spanpg; h->hops=0;
-        struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
-        struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
-          .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-        if(ibv_post_send(g_qp,&wr,&bad)){ freelist[nfree++]=i; next_seq--; break; }
-        pg[i].state=SENDING; pg[i].refs=1; sending++; did=1;
-        outstanding++; if(outstanding>out_max) out_max=outstanding;
-        txring[h->seq % (uint32_t)txwin]=i; pg[i].held=1;
-      }
+    // REPAIR-TX -- satisfy retransmit requests. This serves every send,
+    // whatever produced it; a page is found by sequence number and re-sent
+    // from where it already is.
+    while(sending<tx_budget && rt_n>0){
+      uint32_t want=rtq[rt_head]; rt_head=(rt_head+1)%RTQ; rt_n--;
+      uint32_t lg=next_seq-want; nlag_sum+=lg; nlag_n++; if(lg>nlag_max) nlag_max=lg;
+      int tp=txring[want % (uint32_t)txwin];
+      if(tp<0){ nack_stale++; continue; }
+      struct wire *th=(struct wire*)pg[tp].addr;
+      if(th->seq!=want){ nack_stale++; continue; }   // page has been reused
+      struct ibv_sge g={(uintptr_t)pg[tp].addr,(uint32_t)pgsz,PG_LKEY(tp)};
+      struct ibv_send_wr wr={.wr_id=(uint64_t)tp,.sg_list=&g,.num_sge=1,
+        .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+      if(ibv_post_send(g_qp,&wr,&bad)){ resend_fail++; break; }
+      if(!pg[tp].refs++) sending++; resent++; did=1;
+      outstanding++; if(outstanding>out_max) out_max=outstanding;
     }
 
     
@@ -428,7 +385,7 @@ int main(int argc,char**argv){
                  atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed); }
         } else FREE_PAGE(i);
       } else {
-        struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,pg[i].lkey};
+        struct ibv_sge g={(uintptr_t)pg[i].addr,(uint32_t)pgsz,PG_LKEY(i)};
         struct ibv_send_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
         if(ibv_post_send(g_qp,&wr,&bad)){ d_post++; FREE_PAGE(i); }
@@ -463,7 +420,7 @@ int main(int argc,char**argv){
         nh->magic=WIRE_MAGIC; nh->path=0; nh->stream=0; nh->seq=0;
         nh->bytes=(uint16_t)(nq*4); nh->src=(uint16_t)node_idx; nh->dst=0;
         nh->flags=F_NACK; nh->hops=0;
-        struct ibv_sge g={(uintptr_t)pg[slot].addr,(uint32_t)pgsz,pg[slot].lkey};
+        struct ibv_sge g={(uintptr_t)pg[slot].addr,(uint32_t)pgsz,PG_LKEY(slot)};
         struct ibv_send_wr wr={.wr_id=(uint64_t)slot,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
         if(ibv_post_send(g_qp,&wr,&bad)){ FREE_PAGE(slot); }
@@ -499,7 +456,7 @@ int main(int argc,char**argv){
        "       nacklag: n=%llu mean=%.0f max=%llu  posted_min=%d rt_drop=%llu\n"
        "       seqs: next_seq=%u expected=%u last=%u\n"
        "       burst: n=%llu 1=%llu 2-3=%llu 4-15=%llu 16-63=%llu 64-255=%llu 256-1k=%llu ge1k=%llu\n",
-    source?"source":"hop", npages, pgsz, rx, tx,
+    "node", npages, pgsz, rx, tx,
     bytes_rx*8/el/1e9, bytes_tx*8/el/1e9, drops_seen, short_pay,
     d_wc,d_ring,d_magic,d_post,d_bounds,seq_lo, d_wc+d_ring+d_magic+d_post+d_bounds,
     repaired+drops_seen, repaired, drops_seen, nack_sent, nack_rx, resent,

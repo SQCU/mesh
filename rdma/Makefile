@@ -1,5 +1,5 @@
 mesh-flow: mesh-flow.c mesh-mem.c mesh-f.h mesh-mem.h mesh.h
-	cc -O2 $(EXTRA) -o $@ mesh-flow.c mesh-mem.c -lrdma
+	cc -O2 -o $@ mesh-flow.c mesh-mem.c -lrdma
 clean:
 	rm -f mesh-flow qcaps qfill
 
