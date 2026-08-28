@@ -25,6 +25,7 @@ install -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babe
 install -m 644 -o root -g wheel "$REPO"/templates/* "$MESH_ROOT/templates/" 2>/dev/null
 ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
+ln -sf "$MESH_ROOT/bin/mesh-run.sh"    /usr/local/bin/mesh-run
 ok "$MESH_ROOT; mesh-status and mesh-peers on PATH"
 
 sec "2. Power"
@@ -110,12 +111,18 @@ mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
+mkplist io.mesh.nodeinfo "<string>$MESH_ROOT/bin/mesh-nodeinfo.sh</string>" \
+  "  <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
+  <key>Sockets</key><dict><key>Listeners</key><dict>
+    <key>SockServiceName</key><string>8099</string>
+    <key>SockType</key><string>stream</string>
+    <key>SockFamily</key><string>IPv6</string></dict></dict>"
 mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
-for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.rdma-init io.mesh.keeper; do
+for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.rdma-init io.mesh.keeper; do
   launchctl bootout system/$L >/dev/null 2>&1
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     launchctl print system/$L >/dev/null 2>&1 || break

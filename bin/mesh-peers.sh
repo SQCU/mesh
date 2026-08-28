@@ -1,13 +1,18 @@
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 PREFIX=fd6d:6573:68
-printf '\n  %-44s %-10s %s\n' "NODE" "STATE" "VIA"
-n=0; peers=0
-while read -r a via; do
-  [ -n "$a" ] || continue
-  n=$((n+1))
-  if [ "$via" = lo0 ]; then printf '  %-44s %-10s %s\n' "$a" "self" "-"
-  else peers=$((peers+1)); printf '  %-44s \033[32m%-10s\033[0m %s\n' "$a" "reachable" "$via"; fi
-done < <(netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" {split($1,f,"%"); print f[1], $NF}' | sort -u)
+self=$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2;exit}')
+printf '\n  %-18s %-12s %-5s %-6s %-9s %-38s %s\n' NODE MODEL CORES MEM RDMA ADDRESS VIA
+n=0
+for e in $(netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" {split($1,f,"%"); print f[1]"|"$NF}' | sort -u); do
+  a=${e%%|*}; via=${e##*|}; n=$((n+1))
+  info=$(printf 'x' | nc -w 2 "$a" 8099 2>/dev/null)
+  g(){ printf '%s' "$info" | awk -F= -v k="$1" '$1==k{print $2;exit}'; }
+  name=$(g name); model=$(g model); cores=$(g cores); mem=$(g memgb); rd=$(g rdma)
+  [ -n "$info" ] || { name="?"; rd="unreachable"; }
+  [ "$a" = "$self" ] && via=self
+  printf '  %-18s %-12s %-5s %-6s %-9s %-38s %s\n' \
+    "${name:-?}" "${model:-?}" "${cores:-?}" "${mem:+${mem}G}" "${rd:-?}" "$a" "$via"
+done
 [ "$n" -eq 0 ] && printf '  \033[31mnothing in the routing table -- babeld down, or no fabric cable\033[0m\n'
-printf '\n  %s node(s), %s peer(s)\n\n' "$n" "$peers"
+printf '\n  %s node(s)\n\n' "$n"
