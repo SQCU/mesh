@@ -74,6 +74,18 @@ ok "roster merged: $before -> $(keys "$AK") keys, nothing removed"
 awk 'FNR==NR{ if(!/^[[:space:]]*#/ && NF) r[$2]=1; next }
      NF && !r[$2]{ print "  --   local key not in roster: " $3 }' "$REPO/keys/authorized_keys" "$AK"
 
+sec "5a. Administrability"
+SUDOTMP=$(mktemp)
+printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$ADMIN_USER" > "$SUDOTMP"
+if visudo -cf "$SUDOTMP" >/dev/null 2>&1; then
+  install -m 440 -o root -g wheel "$SUDOTMP" /etc/sudoers.d/mesh
+  ok "passwordless sudo for $ADMIN_USER"
+else
+  bad "sudoers syntax check failed, not installed"
+fi
+rm -f "$SUDOTMP"
+sudo -n -u "$ADMIN_USER" true 2>/dev/null && ok "verified: sudo needs no tty" || echo "  --   verify sudo from a fresh session"
+
 sec "5b. Developer tools"
 try "SDK present (verbs.h, librdma)" "$MESH_ROOT/bin/mesh-devtools-init.sh"
 

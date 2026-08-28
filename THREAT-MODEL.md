@@ -29,15 +29,19 @@ withdraw itself is a vulnerability.
 
 ## What is explicitly not the threat
 
-Confidentiality and integrity of an individual node are **not** primary concerns.
+The false negative is the *most important* class of compromise, not the only one.
 
-A node running the wrong code, or holding data someone else read, is resolved by
-destroying the machine and provisioning another one — the process is in `README.md`
-and costs one physical visit. That is a complete and satisfactory answer to that
-class of problem. It is *not* an answer to a machine that quietly stops working,
-because you may not find out for a long time, and the mesh degrades in the meantime.
+A node running the wrong code, or holding data someone else read, is recoverable:
+destroy the machine and provision another, which costs one physical visit. A machine
+that quietly stops working is not recoverable in the same way, because you may not
+find out for a long time and the mesh degrades meanwhile. That is a statement about
+which failure is harder to detect and undo — it is not a claim that confidentiality
+does not matter.
 
-Trading availability away to buy confidentiality is, here, a bad trade.
+Encryption is available whenever it is wanted, at the application layer, without
+kernel-level ceremony. FileVault specifically is off because it demands a keyboard at
+every boot, which is a withdrawal vector on a headless node — not because data at
+rest is considered unimportant.
 
 ## The dangerous default
 
@@ -90,15 +94,24 @@ Do not add a "graceful degradation" path that lets a node decide to stop
 participating. There is no local condition under which withdrawing is the right call;
 that judgement belongs to an operator, not to the node.
 
-## Accepted costs
+## Consequences, and where they came from
 
-Stated plainly so nobody re-litigates them later as oversights:
+Not "accepted costs" — these are live decisions, open to revisiting. Each one names
+what it actually follows from, so nobody has to guess whether it was reasoned or
+inherited.
 
-- **Disks are unencrypted at rest.** Deliberate. FileVault is incompatible with
-  unattended reboot.
-- **No host firewall.** Deliberate. The security boundary is physical access to the
-  room.
-- **Passwordless sudo for the admin user.** Deliberate. Prompting for a password is a
-  withdrawal vector on a machine with no keyboard.
-- **Provisioning source is a public repo.** Deliberate, so any node can reach a
-  consistent definition with no credentials.
+- **FileVault is off.** It requires a keyboard at every boot; a node that cannot
+  reboot unattended has withdrawn. Encrypt payloads at the application layer instead,
+  whenever that is wanted.
+- **The application firewall is off.** It can only subtract reachability, and these
+  machines sit somewhere with physical access control. This is the weakest-supported
+  item here and the first to revisit if a node ever lives somewhere less controlled.
+- **Passwordless sudo for the admin user.** A password prompt on a machine with no
+  keyboard is a withdrawal vector, and a future agent that provisions a node must be
+  able to administer it afterwards. Installed by `install.sh` via `/etc/sudoers.d/mesh`,
+  validated with `visudo -c` before writing.
+- **The provisioning source is a public repo**, so any node reaches a consistent
+  definition with no credentials.
+
+If one of these looks wrong later, that is a reason to change it, not a settled
+matter to be waved off.
