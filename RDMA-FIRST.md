@@ -11,7 +11,7 @@ not taken from a datasheet.
 | link | 8.9 GB/s each way (70.9 Gbit/s) | per port; three ports per mini |
 | round trip | ~10 µs | **89 KB of wire time**, every time you ask a question |
 | posted window | 4095 frames × 4 KB = 16.8 MB | **1.88 ms** in flight per QP — 188 round trips of slack |
-| registerable | 100 MR × 16.4 MB = 1.64 GB | **184 ms** of pool; `max_mr_size` caps one MR at 16.4 MB |
+| registerable | 100 MR/PD × 1 GiB = 100 GiB per domain | `max_mr_size` advertises 16.4 MB and is not the real limit — see below |
 | memory bandwidth | 238 GB/s mini · 362 GB/s MacBook | shared with the workload; a copy costs 2N of it |
 | scatter-gather | `max_sge: 1` | a record cannot be split across SGEs |
 | queue pairs | `max_qp: 11` (10 usable), `max_srq: 0` | no shared receive queue |
@@ -165,10 +165,18 @@ Three things were wrong, and they compounded:
 
 **The pool was clamped to the frame budget.** `frames*npages > 4095 -> npages = 4095/frames`
 conflated two unrelated limits. The granted depth bounds *posted* frames; it says nothing
-about how many pages a process may own. `max_mr_size` (16.4 MB) bounds one MR, not the pool —
+about how many pages a process may own. `max_mr_size` advertises 16.4 MB, but that figure is
+neither enforced nor usable: honouring it needs 1416 regions for a 23 GB pool against a quota
+of 100 per protection domain. Measured under real traffic with every byte checked, single
+regions of 0.258, 2.749 and 3.092 GB deliver `corrupt=0`, while 5.154 and 8.246 GB corrupt
+every page. **The real cliff is 2^32, not the advertised value**, and past it registration
+succeeds and silently returns wrong data. The bridge therefore chunks at a fixed 1 GiB, a
+factor of four inside the observed limit, which needs 23 regions for a 23 GB pool. This is
+the same failure recorded as kvcache-ai/Mooncake#2017. `max_mr_size` bounds one MR, not the
+pool —
 `max_mr` is 100. With the clamp, a 4096-byte page pool could never exceed 4000 pages, so the
 retransmit window was 2992 pages no matter what the operator asked for. The pool is now
-registered as up to 64 MRs of 16.4 MB; `struct page` already carried a per-page `lkey`.
+registered as MRs of 1 GiB; `struct page` already carried a per-page `lkey`.
 `rx_target` and `tx_budget` are taken from a quarter of the *granted* frame budget, so posted
 frames still honour TN3205 while the pool does not.
 

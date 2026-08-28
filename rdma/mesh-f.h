@@ -2,7 +2,7 @@
 #ifndef MESH_F_H
 #define MESH_F_H
 #include <stdint.h>
-struct wire { uint32_t magic, path, stream, seq; uint16_t bytes, src, dst; uint8_t flags, hops; };
+struct wire { uint32_t magic, path, stream, seq, bytes; uint16_t src, dst; uint8_t flags, hops; uint16_t pad; };
 #define WIRE_MAGIC 0x4d534831u
 #define F_FIRST 1u
 #define F_LAST  2u

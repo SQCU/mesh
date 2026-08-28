@@ -83,9 +83,11 @@ Three properties follow, none of which the current code has:
 - **Completion is a count, not a concatenation.** The stream is ready when its page count is
   met. The datum was assembled by the NIC, in place, for free.
 
-Extents will exceed `max_mr_size` (16.4 MB, so ~4000 pages). The multi-MR chunking in
-`mesh-flow.c` already handles this; an extent spans MRs and the page allocator must respect
-MR boundaries when placing.
+Extents will exceed one memory region. `mesh-mem` handles this: it chunks at a fixed 1 GiB
+and maps an address to its region by ordered lookup, so an extent spans regions and the page
+allocator respects region boundaries when placing. The 16.4 MB figure this section originally
+cited is the advertised `max_mr_size`, which turned out to be neither enforced nor usable;
+the real limit is 2^32.
 
 ## What `mesh_f` becomes
 

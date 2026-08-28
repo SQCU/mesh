@@ -2,6 +2,9 @@
 #include "mesh-f.h"
 #include "mesh-mem.h"
 #include "mesh.h"
+#ifndef MESH_PGSZ
+#define MESH_PGSZ 65536
+#endif
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -72,7 +75,7 @@ static int oob(const char*host,int port,int secs){
 
 int main(int argc,char**argv){
   const char *peer=NULL;
-  const int pgsz=4096; int npages=240, port=18519, tmo=30, seconds=5;
+  const int pgsz=MESH_PGSZ; int npages=240, port=18519, tmo=30, seconds=5;
   const int source=0, inflight=0;
   int node_idx=0, target_idx=1, spanpg=1; const char *shmname="/mesh0"; double pct=0.0; unsigned route_path=0; unsigned egress=0; (void)egress;
   double tel_hz=1.0;
@@ -185,7 +188,9 @@ int main(int argc,char**argv){
   int *ready    = malloc(npages*sizeof(int)), nready=0, rhead=0;
   if(!pg||!freelist||!ready) die("alloc page table");
   uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
-  int rx_pages = npages/4; if(rx_pages > 262144) rx_pages = 262144;
+  int rx_pages = npages/4;                       // cap the receive pool in bytes,
+  int rx_cap = (int)(1000000000ull/(unsigned)pgsz);   // not pages: 1 GB either way
+  if(rx_pages > rx_cap) rx_pages = rx_cap;
   if(rx_pages < 8) rx_pages = npages;              // tiny pool: no arena
   for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz;
     pg[i].lkey=mesh_mem_lkey(&g_mem,pg[i].addr);
@@ -207,9 +212,9 @@ int main(int argc,char**argv){
       if(nfree<npages) freelist[nfree++]=(i); else fprintf(stderr,"BUG freelist overflow p%d\n",(i)); } \
     else fprintf(stderr,"BUG double free p%d\n",(i)); }while(0)
   int txwin=0; int *txring=NULL;
-  int rx_target = gr_recv/frames/4; if(rx_target > npages/4) rx_target = npages/4;
+  int rx_target = gr_recv/frames;   if(rx_target > npages/4) rx_target = npages/4;
   if(rx_target<2) rx_target=2;
-  int tx_budget = gr_send/frames/4; if(tx_budget > npages/4) tx_budget = npages/4;
+  int tx_budget = gr_send/frames;   if(tx_budget > npages/4) tx_budget = npages/4;
   if(tx_budget<1) tx_budget=1;
   txwin = npages - rx_target - 8; if(txwin<8) txwin=8;
   txring = malloc((size_t)txwin*sizeof(int)); if(!txring) die("alloc txring");
@@ -284,14 +289,18 @@ int main(int argc,char**argv){
         uint32_t p=dd.page; if(p>=(uint32_t)npages) continue;
         struct wire *wh=(struct wire*)pg[p].addr;
         wh->magic=WIRE_MAGIC; wh->path=0; wh->stream=0; wh->seq=next_seq++;
-        wh->bytes=(uint16_t)(dd.bytes>maxpay?maxpay:dd.bytes);
+        wh->bytes=(dd.bytes>maxpay?maxpay:dd.bytes);
         wh->src=(uint16_t)node_idx; wh->dst=dd.node;
         wh->flags=F_FIRST|F_LAST; wh->hops=0;
         struct ibv_sge g={(uintptr_t)pg[p].addr,(uint32_t)pgsz,pg[p].lkey};
         struct ibv_send_wr wr={.wr_id=(uint64_t)p,.sg_list=&g,.num_sge=1,
           .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
         pg[p].held=0;
-        if(ibv_post_send(g_qp,&wr,&bad)){ pg[p].state=FREE; freelist[nfree++]=(int)p; }
+        // A failed post must not put an arena page on the free list: the page
+        // belongs to the application, and recycling it would hand app memory
+        // out as a receive buffer while the app still holds it.
+        if(ibv_post_send(g_qp,&wr,&bad)){ pg[p].state=FREE; d_post++;
+          if((int)p < arena_start) freelist[nfree++]=(int)p; }
         else { pg[p].state=SENDING; if(!pg[p].refs++) sending++; app_sent++;
                atomic_fetch_add_explicit(&RG.h->sent,1,memory_order_relaxed); }
         did=1;
