@@ -150,11 +150,35 @@ the node's uplink.
 | `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon. |
+| `hmi-epilogue.sh` | post-provision operator override for power + firewall on a human-used machine. Never affects reachability. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding. Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
+
+## HMI epilogue
+
+Provisioning gives every node the same policy: never sleep, firewall off, no screen
+lock. That is correct for a machine in a rack and wrong for one someone is typing on.
+
+`hmi-epilogue.sh` is an operator action run *after* provisioning, on a machine a human
+uses:
+
+```
+sudo ./hmi-epilogue.sh
+MESH_HMI_SLEEP=30 MESH_HMI_DISPLAYSLEEP=10 sudo ./hmi-epilogue.sh
+```
+
+It writes `/usr/local/mesh/hmi`, which is the only thing the keeper consults before
+re-asserting power policy and firewall state. Everything that governs *reachability*
+is untouched and still re-asserted every 60 seconds: sshd, screen sharing, the beacon,
+the Thunderbolt fabric, network time, and the RDMA alarm. Undo with
+`sudo rm /usr/local/mesh/hmi`.
+
+The marker is deliberately narrow. It cannot make a node unreachable — it can only
+let a laptop close its lid and keep its firewall, which is what its operator asked
+for. A machine under it still announces itself, still routes, still answers.
 
 ## Reading the docs
 
