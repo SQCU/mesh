@@ -8,6 +8,7 @@ ok(){ printf '  \033[32mOK  \033[0m %s\n' "$*"; }
 mkdir -p "$D/bin" "$A"
 install -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
 install -m 755 "$R/user/mesh-nodeinfod.py" "$D/bin/mesh-nodeinfod.py"
+install -m 755 "$R/user/mesh-update-user.sh" "$D/bin/mesh-update-user.sh"
 install -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
 install -m 755 "$R/bin/mesh-run.sh" "$D/bin/mesh-run.sh"
 ok "$D/bin populated"
@@ -29,4 +30,18 @@ launchctl bootstrap "gui/$UID" "$A/io.mesh.nodeinfo.plist" 2>/dev/null
 sleep 2
 printf x | nc -G 2 -w 2 ::1 8100 >/dev/null 2>&1 && ok "responder answering on :8100" \
   || printf '  \033[31mFAIL\033[0m responder not answering\n'
+cat > "$A/io.mesh.update.user.plist" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>io.mesh.update.user</string>
+  <key>ProgramArguments</key><array><string>$D/bin/mesh-update-user.sh</string></array>
+  <key>StartInterval</key><integer>900</integer>
+</dict></plist>
+PL
+launchctl bootout "gui/$UID/io.mesh.update.user" 2>/dev/null
+launchctl bootstrap "gui/$UID" "$A/io.mesh.update.user.plist" 2>/dev/null
+launchctl print "gui/$UID/io.mesh.update.user" >/dev/null 2>&1 \
+  && ok "self-update every 15min (user domain, no root)" \
+  || printf '  \033[31mFAIL\033[0m user updater\n'
 ok "mesh-peers: $D/bin/mesh-peers.sh"

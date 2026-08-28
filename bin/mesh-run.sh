@@ -5,9 +5,14 @@ D=${MESH_DEADLINE:-2}
 U="${MESH_SSH_USER:-$(id -un)}"
 [ "$#" -ge 2 ] || { echo "usage: mesh-run [<name>|all|others] <command...>" >&2; exit 1; }
 target=$1; shift
-probe(){ i=$(printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '\n' ' ')
-         [ -n "$i" ] || i=$(printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '\n' ' ')
-         printf '%s' "$i"; }
+probe(){ t=$(mktemp)
+  { printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '
+' ' ' > "$t.a"; } &
+  { printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '
+' ' ' > "$t.b"; } &
+  wait
+  i=$(cat "$t.a" 2>/dev/null); [ -n "$i" ] || i=$(cat "$t.b" 2>/dev/null)
+  rm -f "$t" "$t.a" "$t.b"; printf '%s' "$i"; }
 f(){ printf '%s' "$2" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
 self=$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2;exit}')
 ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')

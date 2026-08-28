@@ -32,6 +32,10 @@ pgrep -qf "dns-sd -R" || {
 [ "$(systemsetup -getusingnetworktime 2>/dev/null | awk '{print $NF}')" = On ] || {
   echo "[$(ts)] DRIFT ntp off"; systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1; }
 [ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
+if [ -x /usr/local/mesh/bin/mesh-proxy-announce.sh ] && ! /usr/local/mesh/bin/mesh-proxy-announce.sh; then
+  echo "[$(ts)] proxy set changed -> restarting router"
+  launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1
+fi
 pgrep -qf /usr/local/mesh/bin/babeld || {
   echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {

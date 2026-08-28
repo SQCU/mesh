@@ -2,9 +2,14 @@
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 PREFIX=fd6d:6573:68
 D=${MESH_DEADLINE:-2}
-probe(){ i=$(printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '\n' ' ')
-         [ -n "$i" ] || i=$(printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '\n' ' ')
-         printf '%s' "$i"; }
+probe(){ t=$(mktemp)
+  { printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '
+' ' ' > "$t.a"; } &
+  { printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '
+' ' ' > "$t.b"; } &
+  wait
+  i=$(cat "$t.a" 2>/dev/null); [ -n "$i" ] || i=$(cat "$t.b" 2>/dev/null)
+  rm -f "$t" "$t.a" "$t.b"; printf '%s' "$i"; }
 self=$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2;exit}')
 ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
 nodes=$(netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" {split($1,f,"%"); print f[1]" "$NF}' | sort -u)
