@@ -111,12 +111,20 @@ mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
-mkplist io.mesh.nodeinfo "<string>$MESH_ROOT/bin/mesh-nodeinfo.sh</string>" \
-  "  <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
+cat > /Library/LaunchDaemons/io.mesh.nodeinfo.plist <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>io.mesh.nodeinfo</string>
+  <key>ProgramArguments</key><array><string>$MESH_ROOT/bin/mesh-nodeinfo.sh</string></array>
+  <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
   <key>Sockets</key><dict><key>Listeners</key><dict>
     <key>SockServiceName</key><string>8099</string>
     <key>SockType</key><string>stream</string>
-    <key>SockFamily</key><string>IPv6</string></dict></dict>"
+    <key>SockFamily</key><string>IPv6</string></dict></dict>
+</dict></plist>
+PL
+chmod 644 /Library/LaunchDaemons/io.mesh.nodeinfo.plist
 mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
