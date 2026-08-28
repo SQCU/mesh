@@ -1,4 +1,5 @@
 // mesh-flow -- see RDMA-FIRST.md
+#include "mesh-f.h"
 #include <infiniband/verbs.h>
 #include <netdb.h>
 #include <signal.h>
@@ -11,13 +12,6 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-#define WIRE_MAGIC 0x4d534831u          
-struct wire { uint32_t magic, path, stream, seq; uint16_t bytes, src, dst; uint8_t flags, hops; };
-#define F_FIRST 1u
-#define F_LAST  2u
-#define F_META  4u
-#define HOP_BITS 2u
-#define HOP_MASK 3u
 
 enum { FREE=0, POSTED, FILLED, SENDING };
 struct page { char *addr; uint32_t lkey; uint32_t refs; uint8_t state; };
@@ -66,12 +60,9 @@ static int oob(const char*host,int port,int secs){
   setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
   setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv); return fd; }
 
-static void f_identity(void *p, uint32_t n){ (void)p; (void)n; }
-static void f_touch(void *p, uint32_t n){
-  unsigned char *b=p; for(uint32_t i=0;i<n;i++) b[i]++; }
 
 int main(int argc,char**argv){
-  const char *dev=NULL,*peer=NULL,*op="identity";
+  const char *dev=NULL,*peer=NULL;
   int pgsz=4096, npages=240, port=18519, tmo=30, seconds=5, source=0, inflight=0;
   int node_idx=0, target_idx=1; unsigned route_path=0; unsigned egress=0; (void)egress;
   double tel_hz=1.0;
@@ -82,7 +73,6 @@ int main(int argc,char**argv){
     else if(!strcmp(argv[i],"-p")) port=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-t")) tmo=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-T")) seconds=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-o")) op=argv[++i];
     else if(!strcmp(argv[i],"-H")) tel_hz=atof(argv[++i]);
     else if(!strcmp(argv[i],"-w")) inflight=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-I")) node_idx=atoi(argv[++i]);
@@ -91,7 +81,6 @@ int main(int argc,char**argv){
     else if(!strcmp(argv[i],"--source")) source=1;
     else peer=argv[i];
   }
-  void (*f)(void*,uint32_t) = strcmp(op,"touch") ? f_identity : f_touch;
   atexit(teardown);
   struct sigaction sa={0}; sa.sa_handler=on_sig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL);
@@ -231,7 +220,7 @@ int main(int argc,char**argv){
       uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
       if(pay != h->bytes) short_pay++;
       if(h->flags & F_META) meta_seen++;
-      f((char*)pg[i].addr+sizeof *h, pay);
+      mesh_f((char*)pg[i].addr+sizeof *h, pay, h, node_idx);
       h->hops++;
       if(h->dst==(uint16_t)node_idx || h->hops>32){ delivered++; FREE_PAGE(i); }
       else {

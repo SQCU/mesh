@@ -154,6 +154,33 @@ monotonically increasing) from one that is crashing out (free → 0, sustained
 negative). A few floats per peer per second and the whole graph knows what the whole
 graph is doing.
 
+## The invariant core
+
+`mesh-flow.c` and the routing it implements **do not change for a workload.** They are
+fixed against the identity function, and that is not a figure of speech: routing *is*
+the identity case, so a core that is correct for `id` is correct for every `f`.
+
+The build enforces it by file boundary:
+
+| file | may change |
+|---|---|
+| `mesh-flow.c` | no — page table, LISSEN/DISPATCH/YELLER, budget, telemetry |
+| `mesh-f.h` | no — wire header and flags |
+| `f-identity.c` | **this is the workload** |
+
+```
+make F=f-yourthing.c
+```
+
+`mesh_f(payload, bytes, h, node_idx)` receives a payload pointer, a length already
+clamped to the page, its header, and this node's index. It may read and write the
+payload in place and may rewrite header fields to redirect a page. It may not allocate,
+block, or retain the pointer past return.
+
+If a workload seems to need a change to the core, that is a sign the workload wants the
+data plane to interpret its bytes — which costs the budget in the table above and
+breaks every other workload sharing the fabric.
+
 ## Addressing and routing
 
 The wire header is 24 bytes, 0.59% of a 4096 page:
