@@ -69,3 +69,33 @@ What was actually wrong with the earlier ABI was narrower and stands corrected: 
 file-backed for want of a name, and the workload was statically linked into the transport
 through `mesh_f`. The first is replaced by POSIX shared memory. The second is replaced by the
 application being its own process.
+
+## Residency is the page table's job, and it is free
+
+An earlier draft of this file framed a dilemma: either register the whole 80% of a node at
+once, needing thousands of memory regions across dozens of protection domains, or land data
+in a small registered ring and copy it out. Both branches are wrong, and the page table the
+data plane already has is the reason.
+
+Memory regions are frames, not a static allocation of the address space. The node addresses
+its full share; the 100 MRs per protection domain are the **resident set**; the page table
+maps a mesh page to a frame or to nothing. Making a page resident is `ibv_reg_mr` over a
+different range, so the frame is rebound and **the data never moves**. That is address
+translation, not copying, and it is why the copies-per-datum rule is not threatened by a
+resident set smaller than the address space.
+
+Measured on `rdma_en2`, 16.384 MB frames, pages pre-touched:
+
+| operation | per frame | aggregate |
+|---|---|---|
+| `ibv_reg_mr` | 0.105 ms | **155 GB/s** of residency turnover |
+| `ibv_dereg_mr` | 0.002 ms | effectively free |
+
+The link moves 51.85 Gbit/s, or 6.5 GB/s. Residency rebinds **24x faster than the wire
+delivers**, so residency management cannot be the bottleneck and does not need to be
+designed around. A resident set of 1.638 GB in front of a 6.5 GB/s link is a quarter second
+of traffic, turned over at 24x the rate it drains.
+
+The MR quota therefore bounds the working set, not the addressable region. Addressable
+memory is bounded by RAM and by `vm.global_user_wire_limit` (116.8 GB here, 85% of RAM),
+both of which sit above the 80% target.
