@@ -1,0 +1,62 @@
+diff -ru a/common/gamemodes/gamemode/_mod.inc b/common/gamemodes/gamemode/_mod.inc
+--- a/common/gamemodes/gamemode/_mod.inc	2026-08-28 03:20:23
++++ b/common/gamemodes/gamemode/_mod.inc	2026-08-28 03:20:23
+@@ -15,6 +15,7 @@
+ #include <common/gamemodes/gamemode/mayhem/_mod.inc>
+ #include <common/gamemodes/gamemode/nexball/_mod.inc>
+ #include <common/gamemodes/gamemode/onslaught/_mod.inc>
++#include <common/gamemodes/gamemode/payload/_mod.inc>
+ #include <common/gamemodes/gamemode/race/_mod.inc>
+ #include <common/gamemodes/gamemode/survival/_mod.inc>
+ #include <common/gamemodes/gamemode/tdm/_mod.inc>
+diff -ru a/common/gamemodes/gamemode/_mod.qh b/common/gamemodes/gamemode/_mod.qh
+--- a/common/gamemodes/gamemode/_mod.qh	2026-08-28 03:20:23
++++ b/common/gamemodes/gamemode/_mod.qh	2026-08-28 03:20:23
+@@ -15,6 +15,7 @@
+ #include <common/gamemodes/gamemode/mayhem/_mod.qh>
+ #include <common/gamemodes/gamemode/nexball/_mod.qh>
+ #include <common/gamemodes/gamemode/onslaught/_mod.qh>
++#include <common/gamemodes/gamemode/payload/_mod.qh>
+ #include <common/gamemodes/gamemode/race/_mod.qh>
+ #include <common/gamemodes/gamemode/survival/_mod.qh>
+ #include <common/gamemodes/gamemode/tdm/_mod.qh>
+diff -ru a/common/mutators/mutator/waypoints/all.inc b/common/mutators/mutator/waypoints/all.inc
+--- a/common/mutators/mutator/waypoints/all.inc	2026-08-28 03:20:23
++++ b/common/mutators/mutator/waypoints/all.inc	2026-08-28 03:20:23
+@@ -20,6 +20,7 @@
+ REGISTER_WAYPOINT(AssaultDefend, _("Defend"), "as_defend", '1 0.5 0', 1);
+ REGISTER_WAYPOINT(AssaultDestroy, _("Destroy"), "as_destroy", '1 0.5 0', 1);
+ REGISTER_WAYPOINT(AssaultPush, _("Push"), "", '1 0.5 0', 1);
++REGISTER_WAYPOINT(PayloadCart, _("Cart"), "", '1 0.5 0', 1);
+ 
+ REGISTER_WAYPOINT(FlagCarrier, _("Flag carrier"), "", '0.8 0.8 0', 1);
+ REGISTER_WAYPOINT(FlagCarrierEnemy, _("Enemy carrier"), "flag_neutral_carrying", '1 1 1', 1);
+diff -ru a/common/scores.qh b/common/scores.qh
+--- a/common/scores.qh	2026-08-28 03:20:23
++++ b/common/scores.qh	2026-08-28 03:20:23
+@@ -38,6 +38,9 @@
+ REGISTER_SP(DOM_TAKES);
+ REGISTER_SP(DOM_TICKS);
+ 
++REGISTER_SP(PAYLOAD_PUSH);
++REGISTER_SP(PAYLOAD_BLOCK);
++
+ REGISTER_SP(FREEZETAG_REVIVALS);
+ 
+ REGISTER_SP(KEEPAWAY_BCTIME);
+diff -ru a/common/stats.qh b/common/stats.qh
+--- a/common/stats.qh	2026-08-28 03:20:23
++++ b/common/stats.qh	2026-08-28 03:20:23
+@@ -337,6 +337,12 @@
+ REGISTER_STAT(DOM_PPS_YELLOW, float)
+ REGISTER_STAT(DOM_PPS_PINK, float)
+ 
++// payload
++REGISTER_STAT(PAYLOAD_PROGRESS, float)
++REGISTER_STAT(PAYLOAD_SPEED, float)
++REGISTER_STAT(PAYLOAD_PUSH_PACKED, int)
++REGISTER_STAT(PAYLOAD_GOALS_PACKED, int)
++
+ // nexball
+ REGISTER_STAT(NB_METERSTART, float)
+ 

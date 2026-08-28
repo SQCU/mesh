@@ -1,0 +1,688 @@
+diff -ruN -x .tmp qcsrc-pristine/client/main.qc qcsrc/client/main.qc
+--- a/qcsrc/client/main.qc	2026-08-28 02:16:50
++++ b/qcsrc/client/main.qc	2026-08-28 02:20:51
+@@ -338,6 +338,7 @@
+ 			case NUM_TEAM_2:
+ 			case NUM_TEAM_3:
+ 			case NUM_TEAM_4:
++			case NUM_TEAM_5:
+ 				break;
+ 			default:
+ 				if(GetTeam(Team, false) == NULL)
+@@ -884,6 +885,7 @@
+ 					case NUM_TEAM_2: pointparticles(EFFECT_SPAWN_BLUE, this.origin, '0 0 0', 1); break;
+ 					case NUM_TEAM_3: pointparticles(EFFECT_SPAWN_YELLOW, this.origin, '0 0 0', 1); break;
+ 					case NUM_TEAM_4: pointparticles(EFFECT_SPAWN_PINK, this.origin, '0 0 0', 1); break;
++					case NUM_TEAM_5: pointparticles(EFFECT_SPAWN_GREEN, this.origin, '0 0 0', 1); break;
+ 					default: pointparticles(EFFECT_SPAWN_NEUTRAL, this.origin, '0 0 0', 1); break;
+ 				}
+ 			}
+diff -ruN -x .tmp qcsrc-pristine/common/effects/all.inc qcsrc/common/effects/all.inc
+--- a/qcsrc/common/effects/all.inc	2026-08-28 02:16:50
++++ b/qcsrc/common/effects/all.inc	2026-08-28 02:21:25
+@@ -144,6 +144,7 @@
+ EFFECT(0, SPAWNPOINT_BLUE,          "spawn_point_blue")
+ EFFECT(0, SPAWNPOINT_YELLOW,        "spawn_point_yellow")
+ EFFECT(0, SPAWNPOINT_PINK,          "spawn_point_pink")
++EFFECT(0, SPAWNPOINT_GREEN,         "spawn_point_green")
+ EFFECT(0, SPAWNPOINT_NEUTRAL,       "spawn_point_neutral")
+ entity EFFECT_SPAWNPOINT(int teamid)
+ {
+@@ -152,6 +153,7 @@
+         case NUM_TEAM_2:    return EFFECT_SPAWNPOINT_BLUE;
+         case NUM_TEAM_3:    return EFFECT_SPAWNPOINT_YELLOW;
+         case NUM_TEAM_4:    return EFFECT_SPAWNPOINT_PINK;
++        case NUM_TEAM_5:    return EFFECT_SPAWNPOINT_GREEN;
+         default:            return EFFECT_SPAWNPOINT_NEUTRAL;
+     }
+ }
+@@ -160,6 +162,7 @@
+ EFFECT(0, SPAWN_BLUE,               "spawn_event_blue")
+ EFFECT(0, SPAWN_YELLOW,             "spawn_event_yellow")
+ EFFECT(0, SPAWN_PINK,               "spawn_event_pink")
++EFFECT(0, SPAWN_GREEN,              "spawn_event_green")
+ EFFECT(0, SPAWN_NEUTRAL,            "spawn_event_neutral")
+ entity EFFECT_SPAWN(int teamid)
+ {
+@@ -168,6 +171,7 @@
+         case NUM_TEAM_2:    return EFFECT_SPAWN_BLUE;
+         case NUM_TEAM_3:    return EFFECT_SPAWN_YELLOW;
+         case NUM_TEAM_4:    return EFFECT_SPAWN_PINK;
++        case NUM_TEAM_5:    return EFFECT_SPAWN_GREEN;
+         default:            return EFFECT_SPAWN_NEUTRAL;
+     }
+ }
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/clanarena/cl_clanarena.qc qcsrc/common/gamemodes/gamemode/clanarena/cl_clanarena.qc
+--- a/qcsrc/common/gamemodes/gamemode/clanarena/cl_clanarena.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/clanarena/cl_clanarena.qc	2026-08-28 02:20:51
+@@ -27,8 +27,9 @@
+ 		case 0: stat = STAT(REDALIVE); pic = "player_red"; color = '1 0 0'; break;
+ 		case 1: stat = STAT(BLUEALIVE); pic = "player_blue"; color = '0 0 1'; break;
+ 		case 2: stat = STAT(YELLOWALIVE); pic = "player_yellow"; color = '1 1 0'; break;
+-		default:
+ 		case 3: stat = STAT(PINKALIVE); pic = "player_pink"; color = '1 0 1'; break;
++		default:
++		case 4: stat = STAT(GREENALIVE); pic = "player_green"; color = '0 1 0'; break;
+ 	}
+ 
+ 	if(mySize.x/mySize.y > aspect_ratio)
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/clanarena/sv_clanarena.qc qcsrc/common/gamemodes/gamemode/clanarena/sv_clanarena.qc
+--- a/qcsrc/common/gamemodes/gamemode/clanarena/sv_clanarena.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/clanarena/sv_clanarena.qc	2026-08-28 02:20:51
+@@ -39,6 +39,7 @@
+ 		STAT(BLUEALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(2));
+ 		STAT(YELLOWALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(3));
+ 		STAT(PINKALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(4));
++		STAT(GREENALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(5));
+ 	});
+ }
+ 
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/clanarena/sv_clanarena.qh qcsrc/common/gamemodes/gamemode/clanarena/sv_clanarena.qh
+--- a/qcsrc/common/gamemodes/gamemode/clanarena/sv_clanarena.qh	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/clanarena/sv_clanarena.qh	2026-08-28 02:20:51
+@@ -41,7 +41,7 @@
+ 		if (ca_teams < 2)
+ 			ca_teams = cvar("g_ca_teams"); // read the cvar directly as it gets written earlier in the same frame
+ 
+-		ca_teams = BITS(bound(2, ca_teams, 4));
++		ca_teams = BITS(bound(2, ca_teams, NUM_TEAMS));
+         GameRules_scoring(ca_teams, SFL_SORT_PRIO_PRIMARY, 0, {
+             field_team(ST_CA_ROUNDS, "rounds", SFL_SORT_PRIO_PRIMARY);
+         });
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/freezetag/sv_freezetag.qc qcsrc/common/gamemodes/gamemode/freezetag/sv_freezetag.qc
+--- a/qcsrc/common/gamemodes/gamemode/freezetag/sv_freezetag.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/freezetag/sv_freezetag.qc	2026-08-28 02:20:51
+@@ -44,6 +44,7 @@
+ 		STAT(BLUEALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(2));
+ 		STAT(YELLOWALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(3));
+ 		STAT(PINKALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(4));
++		STAT(GREENALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(5));
+ 	});
+ 
+ 	eliminatedPlayers.SendFlags |= 1;
+@@ -762,7 +763,7 @@
+ 	if(freezetag_teams < 2)
+ 		freezetag_teams = cvar("g_freezetag_teams"); // read the cvar directly as it gets written earlier in the same frame
+ 
+-	freezetag_teams = BITS(bound(2, freezetag_teams, 4));
++	freezetag_teams = BITS(bound(2, freezetag_teams, NUM_TEAMS));
+ 	GameRules_scoring(freezetag_teams, SFL_SORT_PRIO_PRIMARY, 0, {
+ 		field_team(ST_FT_ROUNDS, "rounds", SFL_SORT_PRIO_PRIMARY);
+ 		field(SP_FREEZETAG_REVIVALS, "revivals", 0);
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/race/sv_race.qc qcsrc/common/gamemodes/gamemode/race/sv_race.qc
+--- a/qcsrc/common/gamemodes/gamemode/race/sv_race.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/race/sv_race.qc	2026-08-28 02:20:51
+@@ -411,7 +411,7 @@
+ 	if(autocvar_g_race_teams)
+ 	{
+ 		GameRules_teams(true);
+-		race_teams = BITS(bound(2, autocvar_g_race_teams, 4));
++		race_teams = BITS(bound(2, autocvar_g_race_teams, NUM_TEAMS));
+ 	}
+ 	else
+ 		race_teams = 0;
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/tdm/sv_tdm.qc qcsrc/common/gamemodes/gamemode/tdm/sv_tdm.qc
+--- a/qcsrc/common/gamemodes/gamemode/tdm/sv_tdm.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/tdm/sv_tdm.qc	2026-08-28 02:20:51
+@@ -38,7 +38,7 @@
+ 		int numteams = autocvar_g_tdm_teams_override;
+ 		if(numteams < 2) { numteams = autocvar_g_tdm_teams; }
+ 
+-		int teams = BITS(bound(2, numteams, 4));
++		int teams = BITS(bound(2, numteams, NUM_TEAMS));
+ 		if(teams & BIT(0))
+ 			tdm_SpawnTeam("Red", NUM_TEAM_1);
+ 		if(teams & BIT(1))
+@@ -47,6 +47,8 @@
+ 			tdm_SpawnTeam("Yellow", NUM_TEAM_3);
+ 		if(teams & BIT(3))
+ 			tdm_SpawnTeam("Pink", NUM_TEAM_4);
++		if(teams & BIT(4))
++			tdm_SpawnTeam("Green", NUM_TEAM_5);
+ 	}
+ }
+ 
+diff -ruN -x .tmp qcsrc-pristine/common/gamemodes/gamemode/tmayhem/sv_tmayhem.qc qcsrc/common/gamemodes/gamemode/tmayhem/sv_tmayhem.qc
+--- a/qcsrc/common/gamemodes/gamemode/tmayhem/sv_tmayhem.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/gamemodes/gamemode/tmayhem/sv_tmayhem.qc	2026-08-28 02:20:51
+@@ -49,7 +49,7 @@
+ 		int numteams = autocvar_g_tmayhem_teams_override;
+ 		if(numteams < 2) { numteams = autocvar_g_tmayhem_teams; }
+ 
+-		int teams = BITS(bound(2, numteams, 4));
++		int teams = BITS(bound(2, numteams, NUM_TEAMS));
+ 		if(teams & BIT(0))
+ 			tmayhem_SpawnTeam("Red", NUM_TEAM_1);
+ 		if(teams & BIT(1))
+@@ -58,6 +58,8 @@
+ 			tmayhem_SpawnTeam("Yellow", NUM_TEAM_3);
+ 		if(teams & BIT(3))
+ 			tmayhem_SpawnTeam("Pink", NUM_TEAM_4);
++		if(teams & BIT(4))
++			tmayhem_SpawnTeam("Green", NUM_TEAM_5);
+ 	}
+ }
+ 
+diff -ruN -x .tmp qcsrc-pristine/common/mutators/mutator/buffs/buffs.qh qcsrc/common/mutators/mutator/buffs/buffs.qh
+--- a/qcsrc/common/mutators/mutator/buffs/buffs.qh	2026-08-28 02:16:50
++++ b/qcsrc/common/mutators/mutator/buffs/buffs.qh	2026-08-28 02:20:51
+@@ -59,7 +59,8 @@
+ 			BUFF_SPAWNFUNC(e##_team1,   b,  NUM_TEAM_1) \
+ 			BUFF_SPAWNFUNC(e##_team2,   b,  NUM_TEAM_2) \
+ 			BUFF_SPAWNFUNC(e##_team3,   b,  NUM_TEAM_3) \
+-			BUFF_SPAWNFUNC(e##_team4,   b,  NUM_TEAM_4)
++			BUFF_SPAWNFUNC(e##_team4,   b,  NUM_TEAM_4) \
++			BUFF_SPAWNFUNC(e##_team5,   b,  NUM_TEAM_5)
+ 	#define BUFF_SPAWNFUNC_Q3COMPAT(o, r) spawnfunc(o) { buff_Init_Compat(this, r); }
+ #else
+ 	#define BUFF_SPAWNFUNC(e, b, t)
+diff -ruN -x .tmp qcsrc-pristine/common/mutators/mutator/nades/nades.qc qcsrc/common/mutators/mutator/nades/nades.qc
+--- a/qcsrc/common/mutators/mutator/nades/nades.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/mutators/mutator/nades/nades.qc	2026-08-28 02:20:51
+@@ -713,6 +713,7 @@
+ 				case NUM_TEAM_2: expef = EFFECT_SPAWN_BLUE; break;
+ 				case NUM_TEAM_3: expef = EFFECT_SPAWN_YELLOW; break;
+ 				case NUM_TEAM_4: expef = EFFECT_SPAWN_PINK; break;
++				case NUM_TEAM_5: expef = EFFECT_SPAWN_GREEN; break;
+ 				default: expef = EFFECT_SPAWN_NEUTRAL; break;
+ 			}
+ 			break;
+diff -ruN -x .tmp qcsrc-pristine/common/mutators/mutator/spawn_near_teammate/sv_spawn_near_teammate.qc qcsrc/common/mutators/mutator/spawn_near_teammate/sv_spawn_near_teammate.qc
+--- a/qcsrc/common/mutators/mutator/spawn_near_teammate/sv_spawn_near_teammate.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/mutators/mutator/spawn_near_teammate/sv_spawn_near_teammate.qc	2026-08-28 02:21:25
+@@ -62,7 +62,7 @@
+ 	entity player = M_ARGV(0, entity);
+ 	entity spawn_spot = M_ARGV(1, entity);
+ 
+-	int num_red = 0, num_blue = 0, num_yellow = 0, num_pink = 0;
++	int num_red = 0, num_blue = 0, num_yellow = 0, num_pink = 0, num_green = 0;
+ 	FOREACH_CLIENT(IS_PLAYER(it),
+ 	{
+ 		switch(it.team)
+@@ -71,10 +71,11 @@
+ 			case NUM_TEAM_2: ++num_blue; break;
+ 			case NUM_TEAM_3: ++num_yellow; break;
+ 			case NUM_TEAM_4: ++num_pink; break;
++			case NUM_TEAM_5: ++num_green; break;
+ 		}
+ 	});
+ 
+-	if(num_red == 1 || num_blue == 1 || num_yellow == 1 || num_pink == 1)
++	if(num_red == 1 || num_blue == 1 || num_yellow == 1 || num_pink == 1 || num_green == 1)
+ 		return; // at least 1 team has only 1 player, let's not give the bigger team too much of an advantage!
+ 
+ 	// Note: when entering this, fixangle is already set.
+diff -ruN -x .tmp qcsrc-pristine/common/notifications/all.inc qcsrc/common/notifications/all.inc
+--- a/qcsrc/common/notifications/all.inc	2026-08-28 02:16:50
++++ b/qcsrc/common/notifications/all.inc	2026-08-28 02:18:59
+@@ -111,7 +111,8 @@
+     MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_1)), channel, volume, position) \
+     MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_2)), channel, volume, position) \
+     MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_3)), channel, volume, position) \
+-    MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_4)), channel, volume, position)
++    MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_4)), channel, volume, position) \
++    MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_5)), channel, volume, position)
+ 
+ // MSG_ANNCE_NOTIFICATIONS
+     MSG_ANNCE_NOTIF(ACHIEVEMENT_AIRSHOT,        N_GNTLOFF, "airshot",           CH_INFO, VOL_BASEVOICE, ATTEN_NONE, ANNCE_DEFTIME)
+@@ -228,7 +229,8 @@
+     MSG_INFO_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_1)), TCR(normal, type, 1), TCR(gentle, type, 1)) \
+     MSG_INFO_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_2)), TCR(normal, type, 2), TCR(gentle, type, 2)) \
+     MSG_INFO_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_3)), TCR(normal, type, 3), TCR(gentle, type, 3)) \
+-    MSG_INFO_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_4)), TCR(normal, type, 4), TCR(gentle, type, 4))
++    MSG_INFO_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_4)), TCR(normal, type, 4), TCR(gentle, type, 4)) \
++    MSG_INFO_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_5)), TCR(normal, type, 5), TCR(gentle, type, 5))
+ 
+ // MSG_INFO_NOTIFICATIONS
+     MSG_INFO_NOTIF(CHAT_DISABLED,                           N_CHATCON,  0, 0, "", "",       "",     _("^F4NOTE: ^BGChat is currently disabled on this server"), "")
+@@ -536,7 +538,8 @@
+     MSG_CENTER_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 1), TCR(gentle, type, 1)) \
+     MSG_CENTER_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 2), TCR(gentle, type, 2)) \
+     MSG_CENTER_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 3), TCR(gentle, type, 3)) \
+-    MSG_CENTER_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 4), TCR(gentle, type, 4))
++    MSG_CENTER_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 4), TCR(gentle, type, 4)) \
++    MSG_CENTER_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 5), TCR(gentle, type, 5))
+ 
+ // MSG_CENTER_NOTIFICATIONS
+     MSG_CENTER_NOTIF(ALONE,                             N_ENABLE,    0, 0, "",               CPID_Null,              "0 0",  _("^F4You are now alone!"), "")
+@@ -823,7 +826,8 @@
+     MSG_MULTI_NOTIF(prefix##_RED, defaultvalue, anncepre##_RED, infopre##_RED, centerpre##_RED) \
+     MSG_MULTI_NOTIF(prefix##_BLUE, defaultvalue, anncepre##_BLUE, infopre##_BLUE, centerpre##_BLUE) \
+     MSG_MULTI_NOTIF(prefix##_YELLOW, defaultvalue, anncepre##YELLOW, infopre##YELLOW, centerpre##YELLOW) \
+-    MSG_MULTI_NOTIF(prefix##_PINK, defaultvalue, anncepre##PINK, infopre##PINK, centerpre##PINK)
++    MSG_MULTI_NOTIF(prefix##_PINK, defaultvalue, anncepre##PINK, infopre##PINK, centerpre##PINK) \
++    MSG_MULTI_NOTIF(prefix##_GREEN, defaultvalue, anncepre##GREEN, infopre##GREEN, centerpre##GREEN)
+ 
+ // MSG_MULTI_NOTIFICATIONS
+     MSG_MULTI_NOTIF(COUNTDOWN_BEGIN,                    N_ENABLE,  ANNCE_BEGIN,    NULL,                                   CENTER_COUNTDOWN_BEGIN)
+@@ -996,7 +1000,8 @@
+     MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, challow, chtype, optiona##_RED, optionb##_RED) \
+     MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, challow, chtype, optiona##_BLUE, optionb##_BLUE) \
+     MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, challow, chtype, optiona##_YELLOW, optionb##_YELLOW) \
+-    MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, challow, chtype, optiona##_PINK, optionb##_PINK)
++    MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, challow, chtype, optiona##_PINK, optionb##_PINK) \
++    MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, challow, chtype, optiona##_GREEN, optionb##_GREEN)
+ 
+ #undef N_DISABL
+ #undef N_ENABLE
+diff -ruN -x .tmp qcsrc-pristine/common/notifications/all.qh qcsrc/common/notifications/all.qh
+--- a/qcsrc/common/notifications/all.qh	2026-08-28 02:16:50
++++ b/qcsrc/common/notifications/all.qh	2026-08-28 02:18:59
+@@ -81,7 +81,7 @@
+ USING(Notification, entity);
+ 
+ // used for notification system multi-team identifiers
+-#define APP_TEAM_NUM(num, prefix) ((num == NUM_TEAM_1) ? prefix##_RED : ((num == NUM_TEAM_2) ? prefix##_BLUE : ((num == NUM_TEAM_3) ? prefix##_YELLOW : prefix##_PINK)))
++#define APP_TEAM_NUM(num, prefix) ((num == NUM_TEAM_1) ? prefix##_RED : ((num == NUM_TEAM_2) ? prefix##_BLUE : ((num == NUM_TEAM_3) ? prefix##_YELLOW : ((num == NUM_TEAM_4) ? prefix##_PINK : prefix##_GREEN))))
+ #define APP_NUM(num, prefix) ((num) ? APP_TEAM_NUM(num, prefix) : prefix##_NEUTRAL)
+ 
+ #define EIGHT_VARS_TO_VARARGS_VARLIST \
+@@ -497,7 +497,8 @@
+ 		((f1 & BIT(0)) ? strcat(Team_ColoredFullName(NUM_TEAM_1), (f1 >> 1) ? ", " : "") : ""),
+ 		((f1 & BIT(1)) ? strcat(Team_ColoredFullName(NUM_TEAM_2), (f1 >> 2) ? ", " : "") : ""),
+ 		((f1 & BIT(2)) ? strcat(Team_ColoredFullName(NUM_TEAM_3), (f1 >> 3) ? ", " : "") : ""),
+-		((f1 & BIT(3)) ?        Team_ColoredFullName(NUM_TEAM_4)                         : "")
++		((f1 & BIT(3)) ? strcat(Team_ColoredFullName(NUM_TEAM_4), (f1 >> 4) ? ", " : "") : ""),
++		((f1 & BIT(4)) ?        Team_ColoredFullName(NUM_TEAM_5)                         : "")
+ 	);
+ }
+ 
+@@ -855,7 +856,7 @@
+ #define MSG_CHOICE_NOTIF_(teamnum, name, cvarname, defaultvalue, challow, chtype, optiona, optionb) \
+ 	REGISTER(Notifications, name, m_id, new_pure(msg_choice_notification)) { \
+ 		this.nent_choice_idx = nent_choice_count; \
+-		if (!teamnum || teamnum == NUM_TEAM_4) \
++		if (!teamnum || teamnum == NUM_TEAM_5) \
+ 			nent_choice_count++; \
+ 		Create_Notification_Entity       (this, defaultvalue, ACVNN(cvarname), MSG_CHOICE, strtoupper(#name), teamnum); \
+ 		Create_Notification_Entity_Choice(this, ACVNN(cvarname), strtoupper(#name), \
+diff -ruN -x .tmp qcsrc-pristine/common/stats.qh qcsrc/common/stats.qh
+--- a/qcsrc/common/stats.qh	2026-08-28 02:16:50
++++ b/qcsrc/common/stats.qh	2026-08-28 02:20:51
+@@ -329,6 +329,7 @@
+ REGISTER_STAT(BLUEALIVE, int)
+ REGISTER_STAT(YELLOWALIVE, int)
+ REGISTER_STAT(PINKALIVE, int)
++REGISTER_STAT(GREENALIVE, int)
+ 
+ // domination
+ REGISTER_STAT(DOM_TOTAL_PPS, float)
+@@ -336,6 +337,7 @@
+ REGISTER_STAT(DOM_PPS_BLUE, float)
+ REGISTER_STAT(DOM_PPS_YELLOW, float)
+ REGISTER_STAT(DOM_PPS_PINK, float)
++REGISTER_STAT(DOM_PPS_GREEN, float)
+ 
+ // nexball
+ REGISTER_STAT(NB_METERSTART, float)
+diff -ruN -x .tmp qcsrc-pristine/common/teams.qh qcsrc/common/teams.qh
+--- a/qcsrc/common/teams.qh	2026-08-28 02:16:50
++++ b/qcsrc/common/teams.qh	2026-08-28 02:18:23
+@@ -1,24 +1,27 @@
+ #pragma once
+ 
+-const int NUM_TEAMS = 4; ///< Number of teams in the game.
++const int NUM_TEAMS = 5; ///< Number of teams in the game.
+ 
+ #ifdef TEAMNUMBERS_THAT_ARENT_STUPID
+ const int NUM_TEAM_1 = 1; // red
+ const int NUM_TEAM_2 = 2; // blue
+ const int NUM_TEAM_3 = 3; // yellow
+ const int NUM_TEAM_4 = 4; // pink
+-const int NUM_SPECTATOR = 5;
++const int NUM_TEAM_5 = 5; // green
++const int NUM_SPECTATOR = 6;
+ #else
+ #ifdef CSQC
+ const int NUM_TEAM_1 = 4; // red
+ const int NUM_TEAM_2 = 13; // blue
+ const int NUM_TEAM_3 = 12; // yellow
+ const int NUM_TEAM_4 = 9; // pink
++const int NUM_TEAM_5 = 3; // green
+ #else
+ const int NUM_TEAM_1 = 5; // red
+ const int NUM_TEAM_2 = 14; // blue
+ const int NUM_TEAM_3 = 13; // yellow
+ const int NUM_TEAM_4 = 10; // pink
++const int NUM_TEAM_5 = 4; // green
+ #endif
+ const int NUM_SPECTATOR = 1337;
+ #endif
+@@ -27,11 +30,13 @@
+ const string COL_TEAM_2 = "^4";
+ const string COL_TEAM_3 = "^3";
+ const string COL_TEAM_4 = "^6";
++const string COL_TEAM_5 = "^2";
+ // must be #defined, const globals drop the translation attribute
+ #define NAME_TEAM_1 CTX(_("TEAM^Red"))
+ #define NAME_TEAM_2 CTX(_("TEAM^Blue"))
+ #define NAME_TEAM_3 CTX(_("TEAM^Yellow"))
+ #define NAME_TEAM_4 CTX(_("TEAM^Pink"))
++#define NAME_TEAM_5 CTX(_("TEAM^Green"))
+ #define NAME_TEAM _("Team")
+ #define NAME_NEUTRAL _("Neutral")
+ 
+@@ -40,20 +45,24 @@
+ #define KEY_TEAM_2 CTX(_("KEY^Blue"))
+ #define KEY_TEAM_3 CTX(_("KEY^Yellow"))
+ #define KEY_TEAM_4 CTX(_("KEY^Pink"))
++#define KEY_TEAM_5 CTX(_("KEY^Green"))
+ #define FLAG_TEAM_1 CTX(_("FLAG^Red"))
+ #define FLAG_TEAM_2 CTX(_("FLAG^Blue"))
+ #define FLAG_TEAM_3 CTX(_("FLAG^Yellow"))
+ #define FLAG_TEAM_4 CTX(_("FLAG^Pink"))
++#define FLAG_TEAM_5 CTX(_("FLAG^Green"))
+ #define GENERATOR_TEAM_1 CTX(_("GENERATOR^Red"))
+ #define GENERATOR_TEAM_2 CTX(_("GENERATOR^Blue"))
+ #define GENERATOR_TEAM_3 CTX(_("GENERATOR^Yellow"))
+ #define GENERATOR_TEAM_4 CTX(_("GENERATOR^Pink"))
++#define GENERATOR_TEAM_5 CTX(_("GENERATOR^Green"))
+ 
+ // used for replacement in filenames or such where the name CANNOT be allowed to be translated
+ const string STATIC_NAME_TEAM_1 = "Red";
+ const string STATIC_NAME_TEAM_2 = "Blue";
+ const string STATIC_NAME_TEAM_3 = "Yellow";
+ const string STATIC_NAME_TEAM_4 = "Pink";
++const string STATIC_NAME_TEAM_5 = "Green";
+ 
+ #ifdef CSQC
+ bool teamplay;
+@@ -68,6 +77,7 @@
+ 		case NUM_TEAM_2: return COL_TEAM_2;
+ 		case NUM_TEAM_3: return COL_TEAM_3;
+ 		case NUM_TEAM_4: return COL_TEAM_4;
++		case NUM_TEAM_5: return COL_TEAM_5;
+ 	}
+ 
+ 	return "^7";
+@@ -81,6 +91,7 @@
+ 		case NUM_TEAM_2: return '0.0625 0.0625 1'; // 0x0F0FFF
+ 		case NUM_TEAM_3: return '1 1 0.0625'; // 0xFFFF0F
+ 		case NUM_TEAM_4: return '1 0.0625 1'; // 0xFF0FFF
++		case NUM_TEAM_5: return '0.0625 1 0.0625'; // 0x0FFF0F
+ 	}
+ 
+ 	return '0 0 0';
+@@ -94,6 +105,7 @@
+ 		case NUM_TEAM_2: return NAME_TEAM_2;
+ 		case NUM_TEAM_3: return NAME_TEAM_3;
+ 		case NUM_TEAM_4: return NAME_TEAM_4;
++		case NUM_TEAM_5: return NAME_TEAM_5;
+ 	}
+ 
+ 	return NAME_NEUTRAL;
+@@ -108,6 +120,7 @@
+ 		case NUM_TEAM_2: return STATIC_NAME_TEAM_2;
+ 		case NUM_TEAM_3: return STATIC_NAME_TEAM_3;
+ 		case NUM_TEAM_4: return STATIC_NAME_TEAM_4;
++		case NUM_TEAM_5: return STATIC_NAME_TEAM_5;
+ 	}
+ 
+ 	return NAME_NEUTRAL;
+@@ -121,6 +134,7 @@
+ 		case "blue": return NUM_TEAM_2;
+ 		case "yellow": return NUM_TEAM_3;
+ 		case "pink": return NUM_TEAM_4;
++		case "green": return NUM_TEAM_5;
+ 		case "auto": return 0;
+ 	}
+ 
+@@ -138,6 +152,7 @@
+ 		case NUM_TEAM_2:
+ 		case NUM_TEAM_3:
+ 		case NUM_TEAM_4:
++		case NUM_TEAM_5:
+ 		{
+ 			return true;
+ 		}
+@@ -156,6 +171,7 @@
+ 		case 2:
+ 		case 3:
+ 		case 4:
++		case 5:
+ 		{
+ 			return true;
+ 		}
+@@ -174,6 +190,7 @@
+ 		case 2: return NUM_TEAM_2;
+ 		case 3: return NUM_TEAM_3;
+ 		case 4: return NUM_TEAM_4;
++		case 5: return NUM_TEAM_5;
+ 	}
+ 	return -1;
+ }
+@@ -189,6 +206,7 @@
+ 		case NUM_TEAM_2: return 2;
+ 		case NUM_TEAM_3: return 3;
+ 		case NUM_TEAM_4: return 4;
++		case NUM_TEAM_5: return 5;
+ 	}
+ 	return -1;
+ }
+diff -ruN -x .tmp qcsrc-pristine/common/weapons/weapon/hook.qc qcsrc/common/weapons/weapon/hook.qc
+--- a/qcsrc/common/weapons/weapon/hook.qc	2026-08-28 02:16:50
++++ b/qcsrc/common/weapons/weapon/hook.qc	2026-08-28 02:42:20
+@@ -366,6 +366,7 @@
+ 				case NUM_TEAM_2: tex = "particles/hook_blue"; rgb = '0.3 0.3 1'; break;
+ 				case NUM_TEAM_3: tex = "particles/hook_yellow"; rgb = '1 1 0.3'; break;
+ 				case NUM_TEAM_4: tex = "particles/hook_pink"; rgb = '1 0.3 1'; break;
++				case NUM_TEAM_5: tex = "particles/hook_white"; rgb = '0.3 1 0.3'; break;
+ 				default: tex = "particles/hook_white"; rgb = entcs_GetColor(this.sv_entnum - 1); break;
+ 			}
+ 			break;
+diff -ruN -x .tmp qcsrc-pristine/menu/xonotic/dialog_teamselect.qc qcsrc/menu/xonotic/dialog_teamselect.qc
+--- a/qcsrc/menu/xonotic/dialog_teamselect.qc	2026-08-28 02:16:50
++++ b/qcsrc/menu/xonotic/dialog_teamselect.qc	2026-08-28 02:20:51
+@@ -23,13 +23,14 @@
+ 	me.team2.disabled = !(teams & 2); nTeams += boolean(teams & 2);
+ 	me.team3.disabled = !(teams & 4); nTeams += boolean(teams & 4);
+ 	me.team4.disabled = !(teams & 8); nTeams += boolean(teams & 8);
++	me.team5.disabled = !(teams & 16); nTeams += boolean(teams & 16);
+ }
+ 
+ void XonoticTeamSelectDialog_fill(entity me)
+ {
+ 	entity e;
+ 	me.TR(me);
+-		me.TD(me, 2, 4, e = makeTeamButton_T(_("join 'best' team (auto-select)"), '0 0 0', "cmd selectteam auto; cmd join",
++		me.TD(me, 2, 5, e = makeTeamButton_T(_("join 'best' team (auto-select)"), '0 0 0', "cmd selectteam auto; cmd join",
+ 			_("Autoselect team (recommended)")));
+ 			e.preferredFocusPriority = 1;
+ 	me.TR(me);
+@@ -38,7 +39,8 @@
+ 		me.TD(me, 2, 1, e = me.team2 = makeTeamButton(_("blue"), '0.5 0.5 1', "cmd selectteam blue; cmd join"));
+ 		me.TD(me, 2, 1, e = me.team3 = makeTeamButton(_("yellow"), '1 1 0.5', "cmd selectteam yellow; cmd join"));
+ 		me.TD(me, 2, 1, e = me.team4 = makeTeamButton(_("pink"), '1 0.5 1', "cmd selectteam pink; cmd join"));
++		me.TD(me, 2, 1, e = me.team5 = makeTeamButton(_("green"), '0.5 1 0.5', "cmd selectteam green; cmd join"));
+ 	me.TR(me);
+ 	me.TR(me);
+-		me.TD(me, 1, 4, makeXonoticCommandButton(_("spectate"), '0 0 0', "cmd spectate", COMMANDBUTTON_CLOSE));
++		me.TD(me, 1, 5, makeXonoticCommandButton(_("spectate"), '0 0 0', "cmd spectate", COMMANDBUTTON_CLOSE));
+ }
+diff -ruN -x .tmp qcsrc-pristine/menu/xonotic/dialog_teamselect.qh qcsrc/menu/xonotic/dialog_teamselect.qh
+--- a/qcsrc/menu/xonotic/dialog_teamselect.qh	2026-08-28 02:16:50
++++ b/qcsrc/menu/xonotic/dialog_teamselect.qh	2026-08-28 02:20:51
+@@ -8,11 +8,12 @@
+ 	ATTRIB(XonoticTeamSelectDialog, color, vector, SKINCOLOR_DIALOG_TEAMSELECT);
+ 	ATTRIB(XonoticTeamSelectDialog, intendedWidth, float, 0.4);
+ 	ATTRIB(XonoticTeamSelectDialog, rows, float, 5);
+-	ATTRIB(XonoticTeamSelectDialog, columns, float, 4);
++	ATTRIB(XonoticTeamSelectDialog, columns, float, 5);
+ 	ATTRIB(XonoticTeamSelectDialog, name, string, "TeamSelect");
+ 	ATTRIB(XonoticTeamSelectDialog, team1, entity);
+ 	ATTRIB(XonoticTeamSelectDialog, team2, entity);
+ 	ATTRIB(XonoticTeamSelectDialog, team3, entity);
+ 	ATTRIB(XonoticTeamSelectDialog, team4, entity);
++	ATTRIB(XonoticTeamSelectDialog, team5, entity);
+ 	ATTRIB(XonoticTeamSelectDialog, requiresConnection, float, true);
+ ENDCLASS(XonoticTeamSelectDialog)
+diff -ruN -x .tmp qcsrc-pristine/server/client.qc qcsrc/server/client.qc
+--- a/qcsrc/server/client.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/client.qc	2026-08-28 02:20:51
+@@ -440,6 +440,7 @@
+ 				case NUM_TEAM_2: defaultmodel = autocvar_sv_defaultplayermodel_blue; defaultskin = autocvar_sv_defaultplayerskin_blue; break;
+ 				case NUM_TEAM_3: defaultmodel = autocvar_sv_defaultplayermodel_yellow; defaultskin = autocvar_sv_defaultplayerskin_yellow; break;
+ 				case NUM_TEAM_4: defaultmodel = autocvar_sv_defaultplayermodel_pink; defaultskin = autocvar_sv_defaultplayerskin_pink; break;
++				case NUM_TEAM_5: defaultmodel = autocvar_sv_defaultplayermodel_green; defaultskin = autocvar_sv_defaultplayerskin_green; break;
+ 			}
+ 		}
+ 
+@@ -476,6 +477,7 @@
+ 				case NUM_TEAM_2: defaultskin = autocvar_sv_defaultplayerskin_blue; break;
+ 				case NUM_TEAM_3: defaultskin = autocvar_sv_defaultplayerskin_yellow; break;
+ 				case NUM_TEAM_4: defaultskin = autocvar_sv_defaultplayerskin_pink; break;
++				case NUM_TEAM_5: defaultskin = autocvar_sv_defaultplayerskin_green; break;
+ 			}
+ 		}
+ 
+diff -ruN -x .tmp qcsrc-pristine/server/command/cmd.qc qcsrc/server/command/cmd.qc
+--- a/qcsrc/server/command/cmd.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/command/cmd.qc	2026-08-28 02:20:51
+@@ -597,7 +597,7 @@
+ 		{
+ 			sprint(caller, "\nUsage:^3 cmd selectteam <team>\n");
+ 			sprint(caller, "  Where <team> is the prefered team to try and join.\n");
+-			sprint(caller, "  Full list of options here: red, blue, yellow, pink, auto.\n");
++			sprint(caller, "  Full list of options here: red, blue, yellow, pink, green, auto.\n");
+ 			return;
+ 		}
+ 	}
+diff -ruN -x .tmp qcsrc-pristine/server/player.qh qcsrc/server/player.qh
+--- a/qcsrc/server/player.qh	2026-08-28 02:16:50
++++ b/qcsrc/server/player.qh	2026-08-28 02:20:51
+@@ -6,12 +6,14 @@
+ bool autocvar_sv_defaultcharacter;
+ bool autocvar_sv_defaultcharacterskin;
+ int autocvar_sv_defaultplayerskin_blue;
++int autocvar_sv_defaultplayerskin_green;
+ int autocvar_sv_defaultplayerskin_pink;
+ int autocvar_sv_defaultplayerskin_red;
+ int autocvar_sv_defaultplayerskin_yellow;
+ string autocvar_sv_defaultplayercolors;
+ string autocvar_sv_defaultplayermodel;
+ string autocvar_sv_defaultplayermodel_blue;
++string autocvar_sv_defaultplayermodel_green;
+ string autocvar_sv_defaultplayermodel_pink;
+ string autocvar_sv_defaultplayermodel_red;
+ string autocvar_sv_defaultplayermodel_yellow;
+diff -ruN -x .tmp qcsrc-pristine/server/scores.qc qcsrc/server/scores.qc
+--- a/qcsrc/server/scores.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/scores.qc	2026-08-28 02:18:59
+@@ -246,6 +246,8 @@
+ 		TeamScore_Spawn(NUM_TEAM_3, "Yellow");
+ 	if(teams & BIT(3))
+ 		TeamScore_Spawn(NUM_TEAM_4, "Pink");
++	if(teams & BIT(4))
++		TeamScore_Spawn(NUM_TEAM_5, "Green");
+ }
+ 
+ /*
+diff -ruN -x .tmp qcsrc-pristine/server/scores_rules.qc qcsrc/server/scores_rules.qc
+--- a/qcsrc/server/scores_rules.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/scores_rules.qc	2026-08-28 02:18:59
+@@ -16,7 +16,10 @@
+ 
+ int NumTeams(int teams)
+ {
+-	return boolean(teams & BIT(0)) + boolean(teams & BIT(1)) + boolean(teams & BIT(2)) + boolean(teams & BIT(3));
++	int n = 0;
++	for (int i = 0; i < NUM_TEAMS; ++i)
++		n += boolean(teams & BIT(i));
++	return n;
+ }
+ 
+ // NOTE: ST_constants may not be >= MAX_TEAMSCORE
+diff -ruN -x .tmp qcsrc-pristine/server/spawnpoints.qc qcsrc/server/spawnpoints.qc
+--- a/qcsrc/server/spawnpoints.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/spawnpoints.qc	2026-08-28 02:18:59
+@@ -207,6 +207,15 @@
+ 	spawnfunc_info_player_deathmatch(this);
+ }
+ 
++/*QUAKED spawnfunc_info_player_team5 (1 0 0) (-16 -16 -24) (16 16 24)
++Starting point for a player in team five (Green).
++Keys: "angle" viewing angle when spawning. */
++spawnfunc(info_player_team5)
++{
++	this.team = NUM_TEAM_5; // green
++	spawnfunc_info_player_deathmatch(this);
++}
++
+ // Returns:
+ //   _x: prio (-1 if unusable)
+ //   _y: weight
+diff -ruN -x .tmp qcsrc-pristine/server/teamplay.qc qcsrc/server/teamplay.qc
+--- a/qcsrc/server/teamplay.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/teamplay.qc	2026-08-28 02:20:51
+@@ -41,6 +41,7 @@
+ string autocvar_g_forced_team_blue;
+ string autocvar_g_forced_team_yellow;
+ string autocvar_g_forced_team_pink;
++string autocvar_g_forced_team_green;
+ 
+ entity g_team_entities[NUM_TEAMS]; ///< Holds global team entities.
+ 
+@@ -404,6 +405,10 @@
+ 	{
+ 		player.team_forced = 4;
+ 	}
++	else if (PlayerInList(player, autocvar_g_forced_team_green))
++	{
++		player.team_forced = 5;
++	}
+ 	else
+ 	{
+ 		switch (autocvar_g_forced_team_otherwise)
+@@ -426,6 +431,11 @@
+ 			case "pink":
+ 			{
+ 				player.team_forced = 4;
++				break;
++			}
++			case "green":
++			{
++				player.team_forced = 5;
+ 				break;
+ 			}
+ 			case "spectate":
+diff -ruN -x .tmp qcsrc-pristine/server/world.qc qcsrc/server/world.qc
+--- a/qcsrc/server/world.qc	2026-08-28 02:16:50
++++ b/qcsrc/server/world.qc	2026-08-28 02:21:25
+@@ -1587,26 +1587,22 @@
+ 	});
+ 
+ 	ClearWinners();
+-	float team1_score = Team_GetTeamScore(Team_GetTeamFromIndex(1));
+-	float team2_score = Team_GetTeamScore(Team_GetTeamFromIndex(2));
+-	float team3_score = Team_GetTeamScore(Team_GetTeamFromIndex(3));
+-	float team4_score = Team_GetTeamScore(Team_GetTeamFromIndex(4));
+-	if(team1_score + team2_score + team3_score + team4_score == 0)
++	float total_score = 0;
++	float t = 0, i;
++	for (int j = 1; j <= NUM_TEAMS; ++j)
+ 	{
++		float s = Team_GetTeamScore(Team_GetTeamFromIndex(j));
++		total_score += s;
++		if(s && !t)
++			t = j;
++	}
++	if(total_score == 0)
++	{
+ 		checkrules_equality = true;
+ 		return WINNING_YES;
+ 	}
+-	else if(team1_score + team2_score + team3_score + team4_score == 1)
++	else if(total_score == 1)
+ 	{
+-		float t, i;
+-		if(team1_score)
+-			t = 1;
+-		else if(team2_score)
+-			t = 2;
+-		else if(team3_score)
+-			t = 3;
+-		else // if(team4_score)
+-			t = 4;
+ 		entity balance = TeamBalance_CheckAllowedTeams(NULL);
+ 		for(i = 0; i < MAX_TEAMSCORE; ++i)
+ 		{

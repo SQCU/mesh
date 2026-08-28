@@ -1,0 +1,66 @@
+#pragma once
+
+#include "payload.qh"
+
+#include <common/gamemodes/sv_rules.qh>
+#include <common/mutators/base.qh>
+#include <common/teams.qh>
+#include <server/round_handler.qh>
+#include <server/scores.qh>
+
+void generic_plat_blocked(entity this, entity blocker);
+
+.float radius;
+.float height;
+
+#define autocvar_g_payload_point_limit cvar("g_payload_point_limit")
+int autocvar_g_payload_point_leadlimit;
+
+IntrusiveList g_payload_nodes;
+void payload_Initialize();
+
+REGISTER_MUTATOR(plc, false)
+{
+	MUTATOR_STATIC();
+	MUTATOR_ONADD
+	{
+		GameRules_teams(true);
+		GameRules_limit_score(autocvar_g_payload_point_limit);
+		GameRules_limit_lead(autocvar_g_payload_point_leadlimit);
+
+		payload_Initialize();
+	}
+	return 0;
+}
+
+const float ST_PAYLOAD_CAPS = 1;
+
+const int PLC_CART_TURN = BIT(0);
+const int PLC_CHECKPOINT = BIT(0);
+
+const float PLC_TICK = 0.1;
+const float PLC_CURVE_STEPS = 16;
+
+.entity plc_next;
+.entity plc_prev;
+.entity plc_curve;
+.float plc_dist;
+.float plc_s;
+.float plc_home_s;
+.string plc_start;
+.float plc_idle;
+.float plc_push_accum;
+
+.entity sprite;
+
+float payload_length;
+float payload_goal_s[NUM_TEAMS + 1];
+float payload_goal_r[NUM_TEAMS + 1];
+float payload_w[NUM_TEAMS + 1];
+float payload_n[NUM_TEAMS + 1];
+int payload_goal_mask;
+int payload_teams;
+entity payload_cart;
+
+vector payload_pos(float s);
+void payload_think(entity this);

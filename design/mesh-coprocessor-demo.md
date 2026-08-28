@@ -18,7 +18,7 @@ not.
 | | Mac17,6 (M5 Max) | Mac16,11 (M4 Pro) | ratio |
 |---|---|---|---|
 | GPU cores | 40 | 16 | 2.5× |
-| dense GEMM fp32, N=4096 | 27,374 GF/s | 5,182 GF/s | **5.28×** |
+| dense GEMM fp32, N=4096 | **41,288 GF/s** | **5,377 GF/s** | **7.68×** |
 | same, bf16 | 44,728 GF/s | 5,827 GF/s | 7.68× |
 | gain from bf16 over fp32 | +63% | +12% | — |
 | memory bandwidth (memcpy r+w) | 362 GB/s | 238 GB/s | 1.52× |
@@ -51,7 +51,7 @@ the machine gap from 5.28× to 1.52× and destroys the demo).
 
 | piece | lever | scaling | measured asymmetry | survives because |
 |---|---|---|---|---|
-| MoE routed experts | bots | linear | 2.83× | routing is data-dependent per solve; experts are independent matrices; sort→block→GEMM→scatter *is* the optimal kernel |
+| MoE routed experts | bots | linear | **4.4–8.0×** | routing is data-dependent per solve; experts are independent matrices; sort→block→GEMM→scatter *is* the optimal kernel |
 | Gram over residual basis | **R** | **quadratic** | 2.0× → **6.6×** | dense by construction, full rank, and the standard algorithm for all-pairs |
 | team count | **k** | **quadratic** | — | k(k−1)/2 pairwise couplings; R ∝ k so Gram cost ∝ k² |
 | 2:4 compaction | — | — | — | halves bytes, doubling the coprocessor frontier per interval |
@@ -135,6 +135,46 @@ coalition signal. The Gram matrix and the game mode want the same object.
 
 Bot AI to replace: `qcsrc/server/bot/default/` is 7201 lines, a module to substitute
 rather than a system to fully understand.
+
+
+## Corrections after the build workflow (2026-08-28)
+
+Eighteen agents built and adversarially verified this design. Several numbers above were
+wrong and are corrected here rather than silently edited, because the *reasons* matter.
+
+**My fp32 GEMM figure for the M5 was 34% low.** I measured 27,374 GF/s using K=1024 with
+no warmup, so kernel-compile and allocation costs were averaged into the timing and a
+small GEMM let dispatch overhead dominate. With three warmup passes and min-of-7 at
+K=8192 the M5 reaches **41,288 GF/s** and the mini **5,377 GF/s** — a **7.68× ratio, not
+5.28×**. The mini's original number was fine; only the fast machine's was wrong, which is
+the direction that made the design look *weaker* than reality. A verifier caught it
+independently at 39,660.
+
+**The MoE floor of 2.83× was an artifact of the slow dispatch and is struck.** Replacing
+the Python `.tolist()` boundary computation with on-device `argsort` + `gather_mm` gives
+verifier-measured ratios of **4.42× / 6.18× / 7.98×** at 256 / 512 / 1024 rows per expert.
+The host round trip was *costing* asymmetry, because the mini flatlines at 3.9–4.3 TF/s on
+every shape while the M5 keeps scaling.
+
+**The CPU-Cholesky trap was worse than suspected.** At R=4096 `cpu_chol` measures
+**0.85×** — the mini is fractionally *faster* than the MacBook. Block CGS2 + Newton–Schulz
+on GPU restores **6.26×**, which is 107% of the raw Gram's own 5.85%. This is the
+load-bearing fix; without it the demo inverts.
+
+**Operating envelope, measured rather than assumed.** Below `R = 2048` the orthogonalisation
+ratio falls to **1.47× — beneath the 1.52× bandwidth ratio** — with ~3× run-to-run
+instability, because ~240 MLX dispatches dominate a 0.7 ms kernel. Below 512 rows per
+expert MoE degrades similarly. **The demo must run at `R ≥ 2048` and `T·k/E ≥ 512`.**
+Outside that box the premise is not supported by any measurement.
+
+**The fabric leg is entirely unmeasured.** Every ratio here is compute-only and
+same-machine. No agent was permitted to open a verbs device, so `ibv_reg_mr` over the ABI
+region has never been called and the 8.7 GB/s / 10 µs figures have not been re-measured for
+this traffic shape. **The premise is compute-side confirmed and transport-side unproven.**
+
+**Known bug, one line.** `sv_payload.qc:545` sets `view_ofs = mins` *before*
+`InitMovingBrushTrigger` populates `mins`, so the cart's occupancy centre lands 1504 units
+off and no pusher is ever detected. The cart does not move. Fix known, not yet applied.
 
 ## Open and unmeasured
 
