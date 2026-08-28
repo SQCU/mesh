@@ -1,6 +1,7 @@
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 D=${MESH_DEADLINE:-3}
+P=${MESH_PROBE_DEADLINE:-4}
 norm(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/%<0>$//' \
         | awk -F: 'NF>2{o="";for(i=1;i<=NF;i++){g=$i;sub(/^0+/,"",g);if(g=="")g="0";o=o (i>1?":":"") g}print o;next}{print}'; }
 ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
@@ -36,12 +37,21 @@ for n in $(awk '$2=="Add"{print $NF}' "$B" | sort -u); do
     done < "$B.$n"
     [ -n "$best" ] || exit 0
     t=$(mktemp)
-    { printf x | nc -G 2 -w 2 "$best" 8099 2>/dev/null | tr '\n' ' ' > "$t.a"; } &
-    { printf x | nc -G 2 -w 2 "$best" 8100 2>/dev/null | tr '\n' ' ' > "$t.b"; } &
+    { printf x | nc -G "$P" -w "$P" "$best" 8099 2>/dev/null | tr '\n' ' ' > "$t.a"; } &
+    { printf x | nc -G "$P" -w "$P" "$best" 8100 2>/dev/null | tr '\n' ' ' > "$t.b"; } &
     wait
     i=$(cat "$t.a" 2>/dev/null); [ -n "$i" ] || i=$(cat "$t.b" 2>/dev/null)
     rm -f "$t" "$t".*
-    [ -n "$i" ] && printf 'info %s via=%s %s\n' "$n" "$best" "$i"
+    case "$i" in
+      "") : ;;
+      "mesh1 "*)
+        want=${i#mesh1 }; want=${want%% *}
+        body=${i#mesh1 * }
+        if [ "${#body}" -ge "$want" ]; then printf 'info %s via=%s %s\n' "$n" "$best" "$body"
+        else printf 'partial %s via=%s got=%s want=%s\n' "$n" "$best" "${#body}" "$want"; fi ;;
+      *"end "*|*"end") printf 'info %s via=%s %s\n' "$n" "$best" "$i" ;;
+      *) printf 'partial %s via=%s bytes=%s unframed\n' "$n" "$best" "${#i}" ;;
+    esac
   ) &
 done
 wait

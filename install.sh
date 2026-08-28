@@ -128,16 +128,20 @@ mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
+install -m 755 -o root -g wheel "$REPO"/user/mesh-nodeinfod.py "$MESH_ROOT/bin/mesh-nodeinfod.py"
+MESH_PY=$(command -v python3 || echo /usr/bin/python3)
 cat > /Library/LaunchDaemons/io.mesh.nodeinfo.plist <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>io.mesh.nodeinfo</string>
-  <key>ProgramArguments</key><array><string>$MESH_ROOT/bin/mesh-nodeinfo.sh</string></array>
-  <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
-  <key>Sockets</key><dict><key>Listeners</key><dict>
-    <key>SockServiceName</key><string>8099</string>
-    <key>SockType</key><string>stream</string></dict></dict>
+  <key>ProgramArguments</key><array><string>$MESH_PY</string><string>$MESH_ROOT/bin/mesh-nodeinfod.py</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>MESH_NODEINFO</key><string>$MESH_ROOT/bin/mesh-nodeinfo.sh</string>
+    <key>MESH_NODEINFO_PORT</key><string>8099</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
 </dict></plist>
 PL
 chmod 644 /Library/LaunchDaemons/io.mesh.nodeinfo.plist
