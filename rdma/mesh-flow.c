@@ -2,6 +2,7 @@
 #include "mesh-f.h"
 #include <infiniband/verbs.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -50,9 +51,10 @@ static int oob(const char*host,int port,int secs){
     fcntl(fd,F_SETFL,0); freeaddrinfo(r);
     setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
     setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv); return fd; }
-  h.ai_flags=AI_PASSIVE; if(getaddrinfo(NULL,p,&h,&r)) die("getaddrinfo");
-  int l=socket(r->ai_family,SOCK_STREAM,0),on=1;
+  h.ai_flags=AI_PASSIVE; h.ai_family=AF_INET6; if(getaddrinfo(NULL,p,&h,&r)) die("getaddrinfo");
+  int l=socket(r->ai_family,SOCK_STREAM,0),on=1,off=0;
   setsockopt(l,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
+  setsockopt(l,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
   if(bind(l,r->ai_addr,r->ai_addrlen)) die("bind");
   listen(l,1); freeaddrinfo(r);
   if(wait_fd(l,0,secs)<1){ close(l); die("no peer connected in time"); }
