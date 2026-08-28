@@ -152,6 +152,8 @@ int main(int argc,char**argv){
   struct page *pg = calloc(npages,sizeof *pg);
   int *freelist = malloc(npages*sizeof(int)), nfree=0;
   int *ready    = malloc(npages*sizeof(int)), nready=0, rhead=0;
+  if(!pg||!freelist||!ready) die("alloc page table");
+  uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
   for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz; pg[i].lkey=g_mr->lkey;
     pg[i].state=FREE; freelist[nfree++]=i; }
 
@@ -166,7 +168,7 @@ int main(int argc,char**argv){
   fprintf(stderr,"caps: granted send=%d recv=%d frames (4KB units); pgsz=%d frames/pg=%d "
                  "-> rx_target=%d (%d frames) tx_budget=%d (%d frames)\n",
           gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames);
-  unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0;
+  unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0, short_pay=0;
   uint32_t next_seq=0, last_seq=0; int seen_any=0;
   struct wf w_free={0}, w_ready={0}, w_send={0};
   double t0=now(), t_last=t0, v_last=nfree, tel_last=t0, quiet=t0;
@@ -188,7 +190,7 @@ int main(int argc,char**argv){
 
     /* SOURCE: originate pages when we are the head of the stream. */
     if(source){
-      int cap = inflight? inflight : tx_budget;
+      int cap = inflight && inflight<tx_budget ? inflight : tx_budget;
       while(nfree>0 && sending<cap){
         int i=freelist[--nfree];
         struct wire *h=(struct wire*)pg[i].addr;
@@ -208,6 +210,7 @@ int main(int argc,char**argv){
     if(k<0) die("poll_cq");
     for(int j=0;j<k;j++){
       int i=(int)wc[j].wr_id;
+      if(i<0 || i>=npages){ fprintf(stderr,"BUG wr_id %d out of pool\n",i); continue; }
       if(wc[j].status!=IBV_WC_SUCCESS){
         fprintf(stderr,"wc %s on page %d (state %d)\n",ibv_wc_status_str(wc[j].status),i,pg[i].state);
         if(pg[i].state==SENDING) sending--;
@@ -215,6 +218,7 @@ int main(int argc,char**argv){
         FREE_PAGE(i); continue; }
       if(wc[j].opcode==IBV_WC_RECV){
         posted--; rx++; bytes_rx+=wc[j].byte_len;
+        if(nready>=npages){ fprintf(stderr,"BUG ready ring full\n"); FREE_PAGE(i); continue; }
         pg[i].state=FILLED; ready[(rhead+nready)%npages]=i; nready++; did=1;
       } else {
         tx++; bytes_tx+=pgsz;
@@ -228,9 +232,11 @@ int main(int argc,char**argv){
       int i=ready[rhead]; rhead=(rhead+1)%npages; nready--;
       struct wire *h=(struct wire*)pg[i].addr;
       if(h->magic!=WIRE_MAGIC){ FREE_PAGE(i); continue; }
-      if(seen_any && h->seq!=last_seq+1) drops_seen += (h->seq>last_seq)? h->seq-last_seq-1 : 0;
+      if(seen_any){ uint32_t d = h->seq - last_seq; if(d>1) drops_seen += d-1; }
       last_seq=h->seq; seen_any=1;
-      f((char*)pg[i].addr+sizeof *h, h->bytes);      /* identity, deliberately */
+      uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
+      if(pay != h->bytes) short_pay++;
+      f((char*)pg[i].addr+sizeof *h, pay);
       h->hops++;
       if(source){ FREE_PAGE(i); }   /* stream terminates here */
       else {
@@ -250,17 +256,17 @@ int main(int argc,char**argv){
       wf_add(&w_free,nfree); wf_add(&w_ready,nready); wf_add(&w_send,sending);
       fprintf(stderr,
         "tel t=%.1f free=%d posted=%d/%d ready=%d sending=%d dV/dt=%.1f/s dV/V=%.4f "
-        "var_free=%.1f rx=%llu tx=%llu gaps=%llu sum=%d/%d\n",
+        "var_free=%.1f rx=%llu tx=%llu gaps=%llu clamped=%llu sum=%d/%d\n",
         t-t0, nfree, posted, rx_target, nready, sending, dv/(dt>0?dt:1),
-        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, nfree+posted+nready+sending, npages);
+        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, short_pay, nfree+posted+nready+sending, npages);
       t_last=t; v_last=nfree; tel_last=t;
     }
     if(!did){ if(t-quiet>tmo){ fprintf(stderr,"idle %ds\n",tmo); break; } usleep(50); }
     else quiet=t;
   }
   double el=now()-t0;
-  printf("%-6s pages=%d pgsz=%d  rx=%llu tx=%llu  %.2f Gbit/s in  %.2f Gbit/s out  gaps=%llu\n",
+  printf("%-6s pages=%d pgsz=%d  rx=%llu tx=%llu  %.2f Gbit/s in  %.2f Gbit/s out  gaps=%llu clamped=%llu\n",
     source?"source":"hop", npages, pgsz, rx, tx,
-    bytes_rx*8/el/1e9, bytes_tx*8/el/1e9, drops_seen);
+    bytes_rx*8/el/1e9, bytes_tx*8/el/1e9, drops_seen, short_pay);
   return 0;
 }
