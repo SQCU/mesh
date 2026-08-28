@@ -68,6 +68,9 @@ ok "roster merged: $before -> $(keys "$AK") keys, nothing removed"
 awk 'FNR==NR{ if(!/^[[:space:]]*#/ && NF) r[$2]=1; next }
      NF && !r[$2]{ print "  --   local key not in roster: " $3 }' "$REPO/keys/authorized_keys" "$AK"
 
+sec "5b. Developer tools"
+try "SDK present (verbs.h, librdma)" "$MESH_ROOT/bin/mesh-devtools-init.sh"
+
 sec "6. Network"
 try "fabric: bridge torn down, ports addressed" "$MESH_ROOT/bin/mesh-fabric-init.sh"
 oldIFS=$IFS; IFS=$'\n'

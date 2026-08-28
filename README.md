@@ -151,6 +151,7 @@ the node's uplink.
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon. |
 | `hmi-epilogue.sh` | post-provision operator override for power + firewall on a human-used machine. Never affects reachability. |
+| `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding. Idempotent; run at boot and every keeper pass. |
@@ -158,6 +159,30 @@ the node's uplink.
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
+
+## No GUI, including for the toolchain
+
+Nodes need Apple's SDK: `infiniband/verbs.h` and `librdma.tbd` ship only in the
+Command Line Tools, and TN3205 requires both to build anything against RDMA. So
+every node needs CLT, not just ones that compile the router.
+
+CLT installs headlessly. The trap is only the *implicit* path — invoking bare `cc`
+with no toolchain opens the GUI installer. The explicit path never does:
+
+```
+sudo touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+softwareupdate -l          # now lists "Command Line Tools for Xcode 26.6-26.6"
+sudo softwareupdate -i "Command Line Tools for Xcode 26.6-26.6" --verbose
+sudo rm /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+```
+
+The marker file is load-bearing, not folklore: without it `softwareupdate -l` lists
+**zero** Command Line Tools labels; with it, two. `mesh-devtools-init` does this and
+is idempotent — it exits immediately when `verbs.h` is already resolvable.
+
+Nothing else in the stack needs a toolchain either. `uv` is a prebuilt binary linking
+only system frameworks, and `uv python list` offers prebuilt CPython, so Python is
+available on a virgin node with no compiler at all.
 
 ## Routing, and why the node list comes from the routing table
 
