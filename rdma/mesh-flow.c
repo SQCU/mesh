@@ -141,8 +141,19 @@ int main(int argc,char**argv){
   if(mesh_mem_init(&g_mem,g_pd,g_ctx,(size_t)pgsz)) die("mesh_mem_init");
   struct mesh_map map; mesh_map_open(&map,mem,span,IBV_ACCESS_LOCAL_WRITE);
   while(!mesh_map_done(&map) && mesh_map_step(&g_mem,&map,64)) ;
-  fprintf(stderr,"map: %.3f/%.3f GB mapped in %d MRs\n",
-          map.mapped/1e9, map.len/1e9, g_mem.nseg);
+  // The pool is the resident set, not the region. Pages beyond what is
+  // currently mapped are addressable but not yet backed by a frame, so they
+  // are not handed out; residency rebinds at 155 GB/s if that ever needs to
+  // change while running.
+  int resident = (int)(map.mapped/(size_t)pgsz);
+  if(resident < npages){
+    fprintf(stderr,"resident %d/%d pages (%.3f/%.3f GB, %d MRs)\n",
+            resident, npages, map.mapped/1e9, map.len/1e9, g_mem.nseg);
+    npages = resident;
+    RG.h->npages = (uint32_t)npages;
+  } else fprintf(stderr,"resident %d pages (%.3f GB, %d MRs)\n",
+                 npages, map.mapped/1e9, g_mem.nseg);
+  if(npages < 4) die("no resident pages");
   g_cq=ibv_create_cq(g_ctx,4096,NULL,NULL,0); if(!g_cq) die("create_cq");
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
@@ -240,8 +251,8 @@ int main(int argc,char**argv){
     }
 
     // APPREL -- take back pages the application has finished with
-    { struct mesh_desc dd;
-      while(!mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
+    { struct mesh_desc dd; int nrel=0;
+      while(nrel++ < 256 && !mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
         uint32_t p=dd.page;
         if(p<(uint32_t)npages && pg[p].held){
           pg[p].held=0; pg[p].state=FREE; freelist[nfree++]=(int)p; did=1; } } }
@@ -249,7 +260,7 @@ int main(int argc,char**argv){
     // APPFREE -- lend spare pages to the application, keeping the receive
     // pool above its target so the wire never starves behind the app
     if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
-      while(nfree > rx_target){
+      for(int nl=0; nl<256 && nfree > rx_target; nl++){
         int p=freelist[nfree-1];
         struct mesh_desc dd={.page=(uint32_t)p,.bytes=0,.seq=0,.node=0,.flags=0};
         if(mesh_push(&RG,&RG.h->rfree,RG.h->free_off,&dd)) break;
@@ -257,7 +268,8 @@ int main(int argc,char**argv){
       }
       // APPSUB -- send what the application handed over
       struct mesh_desc dd;
-      while(sending<tx_budget && !mesh_pop(&RG,&RG.h->rsub,RG.h->sub_off,&dd)){
+      for(int ns=0; ns<256 && sending<tx_budget &&
+                    !mesh_pop(&RG,&RG.h->rsub,RG.h->sub_off,&dd); ns++){
         uint32_t p=dd.page; if(p>=(uint32_t)npages) continue;
         struct wire *wh=(struct wire*)pg[p].addr;
         wh->magic=WIRE_MAGIC; wh->path=0; wh->stream=0; wh->seq=next_seq++;

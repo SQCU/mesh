@@ -16,24 +16,29 @@ int main(int argc,char**argv){
   if(!M.h){ fprintf(stderr,"no bridge at %s\n",name); return 1; }
   printf("attached %s: %u pages x %u B = %.2f%% of node, node=%u\n",
      name, mesh_pages(&M), mesh_pagesize(&M), mesh_pct_of_node(&M), mesh_node(&M));
+  const uint32_t PAY = mesh_pagesize(&M) - 24;   // a whole page, less the header
   unsigned long long sent=0,got=0,bad=0; double t0=now();
-  while(now()-t0 < secs){
+  int spin=0;
+  for(;;){
+    if(++spin >= 4096){ spin=0; if(now()-t0 >= secs) break; }
+    int work=0;
     if(dst>=0){
       uint32_t p;
-      while(!mesh_acquire(&M,&p)){
-        unsigned char *b=mesh_page(&M,p)+24;      // payload begins after the header
-        memset(b,0xA5,256);
+      for(int k=0;k<256 && !mesh_acquire(&M,&p);k++){
+        unsigned char *b=(unsigned char*)mesh_page(&M,p)+24;
+        memset(b,0xA5,PAY);                        // fill the page we are paying to send
         ((uint32_t*)b)[0]=(uint32_t)sent;
-        if(mesh_send(&M,p,256,(uint16_t)dst)){ mesh_release(&M,p); break; }
-        if(++sent%100000==0) break;
+        if(mesh_send(&M,p,PAY,(uint16_t)dst)){ mesh_release(&M,p); break; }
+        sent++; work=1;
       }
     }
     uint32_t p,bytes; uint16_t from;
-    while(!mesh_poll(&M,&p,&bytes,&from)){
-      unsigned char *b=mesh_page(&M,p)+24;
-      if(b[4]!=0xA5||b[255]!=0xA5) bad++;
-      got++; mesh_release(&M,p);
+    for(int k=0;k<256 && !mesh_poll(&M,&p,&bytes,&from);k++){
+      unsigned char *b=(unsigned char*)mesh_page(&M,p)+24;
+      if(b[4]!=0xA5 || b[bytes-1]!=0xA5) bad++;
+      got++; mesh_release(&M,p); work=1;
     }
+    if(!work && now()-t0 >= secs) break;
   }
   printf("sent=%llu received=%llu corrupt=%llu  (%.2f s)\n",sent,got,bad,now()-t0);
   mesh_detach(&M);
