@@ -107,6 +107,44 @@ which does not scale and is the same shape of problem as a node that cannot be
 reached. Now a push propagates to the fleet on its own. The node follows the branch
 recorded in `/usr/local/mesh/revision`, always at that branch's newest commit.
 
+## Joining without root
+
+A machine can become a fully identified, relaying fabric partner with **no `sudo` at
+all**, provided the privileged parts are already in place (bridge down, ports up and
+addressed, `ip6.forwarding=1`, babeld running). Those are one-time and survive; the
+parts that change often do not need root:
+
+```
+./install-user.sh
+```
+
+It installs a node-identity responder as a **user LaunchAgent** on port 8100 and puts
+`mesh-peers` / `mesh-run` in `~/.local/mesh/bin`. Nothing touches `/usr` or `/Library`.
+
+Port 8100 rather than 8099 because a stale system `io.mesh.nodeinfo` may already hold
+8099 in the root domain. `mesh-peers` probes 8099 first and falls back to 8100, so a
+node whose system responder is broken or outdated is still fully identified by its
+userspace shim.
+
+`inetdCompatibility` does **not** work in the GUI/user domain — launchd accepts the
+connection, closes it, and never runs the program (`runs = 0`), while the socket looks
+perfectly healthy. Hence a plain listener under `KeepAlive` instead.
+
+### Discovery does not require routing
+
+`mesh-peers` also reads `ndp` for each fabric port and emits its neighbours:
+
+```
+neigh fe80::34b5:96ff:feb2:55c8%en2 on=en2
+info  fe80::34b5:96ff:feb2:55c8%en2 name=Ms-Mac-mini model=Mac16,11 ...
+```
+
+Adjacency is knowable from the kernel with no protocol involved, so a node is findable
+over a cable even if it never advertises a routable address. Relaying is independent of
+this too: babeld re-advertises *learned* routes by default — the `redistribute` filter
+only governs a node's own local routes — so a node forwards for its neighbours whether
+or not it announces itself.
+
 ## Adding a machine to the fabric
 
 Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
