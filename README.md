@@ -526,3 +526,52 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/io.mesh.job-<name>.plist
 ```
 
 Runs as root at boot with no login session. `KeepAlive` restarts it forever.
+
+## Using the mesh
+
+An application sees three functions, in `rdma/mesh.h`. Everything below a page — queue pairs,
+memory regions, lkeys, wire headers, residency, retransmission — belongs to the bridge and
+does not appear.
+
+```c
+void  *mesh_open(size_t bytes, size_t *stride, size_t *usable);
+size_t mesh_write(const void *p, size_t nbytes, int node);
+size_t mesh_read(void **p, int *from);
+```
+
+`mesh_open` maps a share of this node and returns memory. `mesh_write` hands a range to
+another node and returns how much it took, so a caller loops on the remainder; there is no
+size at which it refuses. `mesh_read` returns one arrived slot and recycles the previous one,
+which is why there is no release call.
+
+Memory comes in slots rather than one flat span because the device reports `max_sge: 1` and
+has no immediate data, so every page carries its own header contiguously. The gap is 24 bytes
+in 4096.
+
+**One thing an application must know.** `mesh_write` takes the bytes, but nothing tells you
+when a page is free again. Rotate through your arena rather than reusing the same slots; the
+head of the arena may still be in flight. Reusing it corrupted 34 of 18041 rows before this
+was understood.
+
+From Python, `rdma/mesh.py` binds the same three functions and returns numpy views of mesh
+memory, so MLX computes on pages the NIC wrote without a copy.
+
+### Running it
+
+`bin/mesh-bridge.sh` starts the bridge from `etc/bridge.conf`. The only settings are how much
+of the node the mesh holds and how much your own programs expect to use. The wire limit is
+raised to match, and startup is refused above 90% of RAM, because wiring past that can leave
+a node that cannot boot without someone physically present. Change the file and restart.
+
+The bridge itself takes only what it cannot infer: `-I` node index, `-M` share of the machine,
+`-s` region, `-T` duration, and a peer. There is no switch for the page size, the registration
+chunk, the send window or the device — each of those can select a run that looks healthy and
+moves corrupt data. Unknown options are refused, and the link is found by looking for the port
+that is up.
+
+### What runs today
+
+`rdma/mesh_coproc.py` holds a weight matrix resident on one node and applies it to rows
+streamed from the other. 54337 rows verified exactly, `wrong=0`. That path runs at
+0.12 Gbit/s, bounded by a Python loop touching one slot at a time; the C client carries
+59 Gbit/s over the same link with `corrupt=0`. Trust the correctness number, not the rate.
