@@ -52,7 +52,32 @@ Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 > replacing the machine. It is a bootstrap that half-completes and leaves the node
 > unreachable. That is why `bootstrap.sh` opens sshd *before* it fetches anything:
 > if every later step fails, the machine is still remotely recoverable.
-> Pin `MESH_REF` to a tag or SHA when you want a reproducible definition.
+> Set `MESH_BRANCH` to fetch a branch other than `main`. Never index by commit —
+> see **Never index version control by commit** in [AGENTS.md](AGENTS.md).
+
+## Adding a machine to the fabric
+
+Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
+position does not matter and nothing records it. Then verify, from either end:
+
+```
+mesh-status                     # rdma_enX PORT_ACTIVE, io.mesh.* all loaded
+mesh-peers                      # the new node appears, with a name and a VIA
+mesh-run all 'sysctl -n hw.model'
+```
+
+What each step proves, in order, so a failure tells you where to look:
+
+| check | passes when | fails if |
+|---|---|---|
+| `rdma_ctl status` = enabled | the Recovery visit happened | needs a physical 1TR visit; nothing remote fixes it |
+| some `rdma_enX` is `PORT_ACTIVE` | a cable is in, both ends RDMA-enabled | cable, or the far end never had `rdma_ctl enable` |
+| `ifconfig <port>` has an `fe80::` address | `mesh-fabric-init` ran | check `/usr/local/mesh/log/fabric.log` |
+| the peer appears in `mesh-peers` | babeld exchanged routes | check `/usr/local/mesh/log/router.log`; confirm both nodes advertise |
+| `mesh-run <name> true` succeeds | the roster reached the node | re-run `install.sh`; keys merge, they never truncate |
+
+A node that answers `mesh-peers` and `mesh-run` is administrable and workloadable.
+Nothing else is required of it.
 
 ## Is anything missing?
 
@@ -251,45 +276,28 @@ routing table answers.
 > also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and
 > the service answers every connection with silence while looking perfectly healthy.
 
-## Deployed revision, and why it is displayed
+## Which definition a node is running
 
-`raw.githubusercontent.com` serves branch-addressed content with `cache-control:
-max-age=300`. Measured on this repo, mid-debug:
+Fetching is by branch only — `main`, or whatever `MESH_BRANCH` names. Never by commit;
+the reasoning is in [AGENTS.md](AGENTS.md), and it is not negotiable because a pinned
+node cannot receive the change that would unpin it.
 
-```
-raw/main/bootstrap.sh    x-cache: HIT    source-age: 286     <- 286s stale, 14s from expiry
-raw/<sha>/bootstrap.sh   x-cache: MISS   source-age: 0       <- current
-```
+Branch-addressed content on `raw.githubusercontent.com` carries `cache-control:
+max-age=300`, so a node can briefly fetch a copy up to five minutes old. That is a
+wait, not a fault: it clears itself, and a node that needs the newest definition
+sooner can simply be reached and re-run. Do not reach for a commit hash to dodge it —
+that trades a transient for a permanent.
 
-`codeload.github.com` caches independently, so the two endpoints disagree at
-different times. None of this has anything to do with the repo being public: access
-control and cache TTL are unrelated.
-
-The consequence is nasty in a system whose drift fix is "re-run install.sh". A node
-fetches `main`, gets a copy up to five minutes old, prints `OK` for every step, and
-converges on a definition you already replaced. That is silent, and it looks healthy.
-It happened here: a plist fix sat on origin while the node kept installing the
-previous one.
-
-There is no way to make the very first `curl` immune — the fix would have to live in
-the file being fetched staly. So instead the revision is recorded and shown:
-
-- `bootstrap.sh` resolves `main` to a commit sha through the API and fetches by sha,
-  which is immutable. It falls back to `main` if the API is unreachable, so an
-  offline or rate-limited node still provisions.
-- `install.sh` writes what it installed to `/usr/local/mesh/revision`.
-- `mesh-status` prints it; `mesh-nodeinfo` reports it; `mesh-peers` has a `REV`
-  column, so one glance across the fleet shows any node stuck on old code.
-
-To deploy a known revision with no cache window at all, pin it:
+What matters is that convergence is visible rather than silent. Each node records the
+branch it converged from and when:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/SQCU/mesh/main/bootstrap.sh \
-  | sudo MESH_REF=<sha> bash
+mesh-status         branch main converged 2026-08-28T00:56:27Z
+mesh-peers          BRANCH / CONVERGED columns across the whole fabric
 ```
 
-The API path costs a rate-limited request: unauthenticated GitHub allows 60/hour per
-source address, which a fleet behind one NAT can exhaust. That is why it fails soft.
+A node that has not converged recently is the thing worth noticing, and now you can
+see it from any machine.
 
 ## HMI epilogue
 
