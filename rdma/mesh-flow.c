@@ -1,5 +1,6 @@
 // mesh-flow -- see RDMA-FIRST.md
 #include "mesh-f.h"
+#include "mesh-mem.h"
 #include <infiniband/verbs.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -22,14 +23,14 @@ static void wf_add(struct wf *w, double x){
   w->n += 1; double d = x - w->mean; w->mean += d / w->n; w->m2 += d * (x - w->mean); }
 static double wf_var(struct wf *w){ return w->n > 1 ? w->m2 / (w->n - 1) : 0.0; }
 
-static struct ibv_qp *g_qp; static struct ibv_mr *g_mr; static struct ibv_pd *g_pd;
+static struct ibv_qp *g_qp; static struct ibv_pd *g_pd; static struct mesh_mem g_mem;
 static struct ibv_cq *g_cq; static struct ibv_context *g_ctx;
 static volatile sig_atomic_t g_stop;
 static void on_sig(int s){ (void)s; g_stop = 1; }
 static void teardown(void){
   if(g_qp){ ibv_destroy_qp(g_qp); g_qp=NULL; }
   if(g_cq){ ibv_destroy_cq(g_cq); g_cq=NULL; }
-  if(g_mr){ ibv_dereg_mr(g_mr); g_mr=NULL; }
+  mesh_mem_release(&g_mem);
   if(g_pd){ ibv_dealloc_pd(g_pd); g_pd=NULL; }
   if(g_ctx){ ibv_close_device(g_ctx); g_ctx=NULL; }
 }
@@ -89,8 +90,6 @@ int main(int argc,char**argv){
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL);
 
   int frames = (pgsz+4095)/4096;
-  size_t mrmax = (0xfa0000/(size_t)pgsz)*(size_t)pgsz;
-  if((size_t)pgsz*npages > mrmax*64){ npages = (int)(mrmax*64/(size_t)pgsz); }
   if(npages < 4) die("page pool too small; lower -P");
 
   struct ibv_device **dl=ibv_get_device_list(NULL); if(!dl) die("no rdma devices");
@@ -107,12 +106,8 @@ int main(int argc,char**argv){
   size_t span=(size_t)pgsz*npages;
   void *mem; if(posix_memalign(&mem,getpagesize(),span)) die("memalign");
   memset(mem,0,span);
-  struct ibv_mr *mrs[64]; int nmr=0;
-  for(size_t off=0; off<span; off+=mrmax){
-    size_t len = span-off < mrmax ? span-off : mrmax;
-    mrs[nmr]=ibv_reg_mr(g_pd,(char*)mem+off,len,IBV_ACCESS_LOCAL_WRITE);
-    if(!mrs[nmr]) die("reg_mr"); nmr++; }
-  g_mr=mrs[0];
+  if(mesh_mem_init(&g_mem,g_pd,g_ctx,(size_t)pgsz)) die("mesh_mem_init");
+  if(mesh_mem_add(&g_mem,mem,span,IBV_ACCESS_LOCAL_WRITE)) die("reg_mr");
   g_cq=ibv_create_cq(g_ctx,4096,NULL,NULL,0); if(!g_cq) die("create_cq");
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
@@ -147,7 +142,8 @@ int main(int argc,char**argv){
   if(!pg||!freelist||!ready) die("alloc page table");
   uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
   for(int i=0;i<npages;i++){ pg[i].addr=(char*)mem+(size_t)i*pgsz;
-    pg[i].lkey=mrs[((size_t)i*pgsz)/mrmax]->lkey;
+    pg[i].lkey=mesh_mem_lkey(&g_mem,pg[i].addr);
+    if(!pg[i].lkey) die("page outside registered memory");
     pg[i].state=FREE; freelist[nfree++]=i; }
 
   int posted=0, sending=0;
@@ -170,7 +166,7 @@ int main(int argc,char**argv){
   fprintf(stderr,"caps: granted send=%d recv=%d frames (4KB units); pgsz=%d frames/pg=%d "
                  "-> rx_target=%d (%d frames) tx_budget=%d (%d frames) txwin=%d\n",
           gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames,txwin);
-  fprintf(stderr,"repair: horizon=%d rearm_gap=%d retire_at=%d mrs=%d\n",horizon,rearm_gap,retire_at,nmr);
+  fprintf(stderr,"repair: horizon=%d rearm_gap=%d retire_at=%d mrs=%d chunk=%zu regGB=%.3f\n",horizon,rearm_gap,retire_at,g_mem.nseg,g_mem.chunk,g_mem.bytes/1e9);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0, short_pay=0;
   unsigned long long delivered=0, meta_seen=0;
   unsigned long long d_wc=0, d_ring=0, d_magic=0, d_post=0, d_bounds=0, seq_lo=0;
