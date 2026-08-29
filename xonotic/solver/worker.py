@@ -39,11 +39,12 @@ def scores_mlx(X, w):
             Y[sel] = np.asarray(memoryview(Yi))
     G = mx.array(Y) @ mx.array(w["O"])
     mx.eval(G)
-    return np.asarray(memoryview(G)).astype(np.float32)
+    return np.nan_to_num(np.asarray(memoryview(G))).astype(np.float32)
 
 
 def scores_np(X, w):
-    return (np.tanh(X @ w["A"]) @ w["P"]).astype(np.float32)
+    with np.errstate(all="ignore"):
+        return np.nan_to_num(np.tanh(X @ w["A"]) @ w["P"]).astype(np.float32)
 
 
 def attach(peer):
