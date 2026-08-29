@@ -100,8 +100,11 @@ def main():
         blocks += 1
         if not a.quiet:
             hist = np.bincount(pick.astype(np.int32), minlength=TEAMS).tolist()
-            print(f"worker: req {done['req_id']} tick {done['tick']} rows {n} "
-                  f"-> node {src} chunks {took}/{chunks} picks {hist}", flush=True)
+            live = int((X[:, 1] > 0).sum())
+            back = np.bincount(np.clip(X[:, 15], 0, TEAMS - 1).astype(np.int32),
+                               minlength=TEAMS).tolist()
+            print(f"worker: req {done['req_id']} tick {done['tick']} rows {n} live {live} "
+                  f"-> node {src} chunks {took}/{chunks} picks {hist} held {back}", flush=True)
     print(f"worker: {blocks} blocks, {served} rows, short {short}, dropped {rx.dropped}", flush=True)
 
 

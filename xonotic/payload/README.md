@@ -125,6 +125,13 @@ model, and two (or three) `plc_goal`s. Drop the result in
 `<userdir>/data/maps/<name>.ent` with a `<name>.mapinfo` carrying `gametype plc`.
 `+sv_autopause 0` is required or an empty dedicated server freezes `sv.time` after ~5 s.
 
+`+bot_join_empty 1` is required or no bot ever joins. `bot_fixcount`
+(`server/bot/default/bot.qc:640`) only computes a bot target when
+`realplayers || autocvar_bot_join_empty || (currentbots > 0 && time < 5)`; on a headless
+dedicated server with no human client all three are false, so `bots = 0` and
+`bot_number` is never read. An earlier note in `../teams-k5.md` recorded this as broken
+bot spawning in the sandbox; it is the cvar, and it reproduces on stock progs too.
+
 `tools/checklaw.py <log> <start_time>` re-derives the speed law from a `plcdbg` log
 (`debug/plcdbg.patch` adds the instrumentation) and reports mismatches.
 
