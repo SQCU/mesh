@@ -460,7 +460,13 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 		navigation_routerating(this, payload_carts[c], ratingscale, 5000);
 	if(j < 1)
 		return;
-	if(payload_mesh_weights_valid(this))
+	float mp = floor(this.plc_mesh_pick);
+	entity ip = NULL;
+	if(mp >= PLC_MESH_ITEM_BASE && mp < PLC_MESH_TOTAL)
+		ip = payload_mesh_obj_ent(mp);
+	if(ip)
+		navigation_routerating(this, ip, ratingscale * 2, 3000);
+	else if(payload_mesh_weights_valid(this))
 	{
 		int cbase = PLC_MESH_OBJECTIVES * floor(bound(0, this.plc_mesh_pick,
 			payload_cart_count * PLC_MESH_OBJECTIVES - 1) / PLC_MESH_OBJECTIVES);
@@ -476,7 +482,7 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 	}
 	else
 	{
-		entity o = payload_mesh_node(payload_mesh_objective[j]);
+		entity o = payload_mesh_obj_ent(payload_mesh_objective[j]);
 		if(o)
 			navigation_routerating(this, o, ratingscale * 2, 3000);
 	}

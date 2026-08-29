@@ -2,6 +2,8 @@
 
 #include "sv_payload.qh"
 
+#include <common/items/_mod.qh>
+#include <common/mutators/mutator/powerups/_mod.qh>
 #include <common/mutators/mutator/status_effects/_mod.qh>
 #include <common/mutators/mutator/waypoints/waypointsprites.qh>
 #include <common/resources/_mod.qh>
@@ -9,6 +11,8 @@
 #include <common/weapons/_all.qh>
 #include <common/resources/sv_resources.qh>
 #include <server/bot/api.qh>
+#include <server/items/items.qh>
+#include <server/items/spawning.qh>
 #include <server/utils.qh>
 
 float(float node, float width, float maxrows) mesh_open = #644;
@@ -29,6 +33,69 @@ void payload_mesh_attach()
 		ftos((payload_mesh_h >= 0) ? mesh_stat(payload_mesh_h, PLC_MESH_STAT_PEER) : -1)));
 }
 
+float payload_mesh_item_class_rank(entity e)
+{
+	if(e.itemdef == ITEM_Strength) return 6;
+	if(e.itemdef == ITEM_Shield) return 5;
+	if(e.itemdef == ITEM_ArmorMega) return 4;
+	if(e.itemdef == ITEM_HealthMega) return 3;
+	if(e.itemdef == ITEM_ArmorBig) return 2;
+	return 0;
+}
+
+void payload_mesh_scan_items()
+{
+	payload_mesh_items_scanned = true;
+	for(int p = 0; p < PLC_MESH_ITEMS; ++p)
+	{
+		payload_mesh_items[p] = NULL;
+		payload_mesh_item_rank[p] = 0;
+		payload_mesh_item_org[p] = '0 0 0';
+		payload_mesh_item_avail[p] = 0;
+	}
+	IL_EACH(g_items, it.itemdef != NULL && !Item_IsLoot(it),
+	{
+		float r = payload_mesh_item_class_rank(it);
+		if(r > 0)
+		{
+			for(int p = 0; p < PLC_MESH_ITEMS; ++p)
+			{
+				if(r > payload_mesh_item_rank[p])
+				{
+					for(int q = PLC_MESH_ITEMS - 1; q > p; --q)
+					{
+						payload_mesh_items[q] = payload_mesh_items[q - 1];
+						payload_mesh_item_rank[q] = payload_mesh_item_rank[q - 1];
+						payload_mesh_item_org[q] = payload_mesh_item_org[q - 1];
+					}
+					payload_mesh_items[p] = it;
+					payload_mesh_item_rank[p] = r;
+					payload_mesh_item_org[p] = it.origin;
+					break;
+				}
+			}
+		}
+	});
+	float np = 0;
+	for(int p = 0; p < PLC_MESH_ITEMS; ++p)
+		if(payload_mesh_item_rank[p] > 0)
+			np += 1;
+	LOG_INFO(strcat("payload: mesh item posts ", ftos(np)));
+}
+
+entity payload_mesh_obj_ent(float idx)
+{
+	if(idx >= PLC_MESH_ITEM_BASE)
+	{
+		int p = bound(0, idx - PLC_MESH_ITEM_BASE, PLC_MESH_ITEMS - 1);
+		entity ie = payload_mesh_items[p];
+		if(payload_mesh_item_rank[p] > 0 && ie != NULL && ie.itemdef != NULL)
+			return ie;
+		return NULL;
+	}
+	return payload_mesh_node(idx);
+}
+
 void payload_mesh_mark_objectives()
 {
 	IL_EACH(g_payload_nodes, it.sprite != NULL,
@@ -39,6 +106,8 @@ void payload_mesh_mark_objectives()
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
 		if(!(payload_teams & Team_IndexToBit(j)))
+			continue;
+		if(payload_mesh_objective[j] >= PLC_MESH_ITEM_BASE)
 			continue;
 		entity n = payload_mesh_node(payload_mesh_objective[j]);
 		if(n && n.sprite)
@@ -108,6 +177,14 @@ void payload_mesh_tick(entity cart)
 		if(time >= payload_mesh_retry)
 			payload_mesh_attach();
 		return;
+	}
+	if(!payload_mesh_items_scanned)
+		payload_mesh_scan_items();
+	for(int p = 0; p < PLC_MESH_ITEMS; ++p)
+	{
+		entity ie = payload_mesh_items[p];
+		payload_mesh_item_avail[p] = (payload_mesh_item_rank[p] > 0 && ie != NULL
+			&& ie.itemdef != NULL && (ie.ItemStatus & ITS_AVAILABLE)) ? 1 : 0;
 	}
 
 	float c0p = 0, c0t = 0, c0r = 0, c1p = 0, c1t = 0, c1r = 0;
@@ -181,6 +258,46 @@ void payload_mesh_tick(entity cart)
 		it.plc_mrow_c1p = c1p;
 		it.plc_mrow_c1t = c1t;
 		it.plc_mrow_c1r = c1r;
+		it.plc_mrow_i0r = payload_mesh_item_rank[0];
+		it.plc_mrow_i0x = payload_mesh_item_org[0].x / 1024;
+		it.plc_mrow_i0y = payload_mesh_item_org[0].y / 1024;
+		it.plc_mrow_i0z = payload_mesh_item_org[0].z / 1024;
+		it.plc_mrow_i0a = payload_mesh_item_avail[0];
+		it.plc_mrow_i1r = payload_mesh_item_rank[1];
+		it.plc_mrow_i1x = payload_mesh_item_org[1].x / 1024;
+		it.plc_mrow_i1y = payload_mesh_item_org[1].y / 1024;
+		it.plc_mrow_i1z = payload_mesh_item_org[1].z / 1024;
+		it.plc_mrow_i1a = payload_mesh_item_avail[1];
+		it.plc_mrow_i2r = payload_mesh_item_rank[2];
+		it.plc_mrow_i2x = payload_mesh_item_org[2].x / 1024;
+		it.plc_mrow_i2y = payload_mesh_item_org[2].y / 1024;
+		it.plc_mrow_i2z = payload_mesh_item_org[2].z / 1024;
+		it.plc_mrow_i2a = payload_mesh_item_avail[2];
+		it.plc_mrow_i3r = payload_mesh_item_rank[3];
+		it.plc_mrow_i3x = payload_mesh_item_org[3].x / 1024;
+		it.plc_mrow_i3y = payload_mesh_item_org[3].y / 1024;
+		it.plc_mrow_i3z = payload_mesh_item_org[3].z / 1024;
+		it.plc_mrow_i3a = payload_mesh_item_avail[3];
+		it.plc_mrow_i4r = payload_mesh_item_rank[4];
+		it.plc_mrow_i4x = payload_mesh_item_org[4].x / 1024;
+		it.plc_mrow_i4y = payload_mesh_item_org[4].y / 1024;
+		it.plc_mrow_i4z = payload_mesh_item_org[4].z / 1024;
+		it.plc_mrow_i4a = payload_mesh_item_avail[4];
+		it.plc_mrow_i5r = payload_mesh_item_rank[5];
+		it.plc_mrow_i5x = payload_mesh_item_org[5].x / 1024;
+		it.plc_mrow_i5y = payload_mesh_item_org[5].y / 1024;
+		it.plc_mrow_i5z = payload_mesh_item_org[5].z / 1024;
+		it.plc_mrow_i5a = payload_mesh_item_avail[5];
+		it.plc_mrow_i6r = payload_mesh_item_rank[6];
+		it.plc_mrow_i6x = payload_mesh_item_org[6].x / 1024;
+		it.plc_mrow_i6y = payload_mesh_item_org[6].y / 1024;
+		it.plc_mrow_i6z = payload_mesh_item_org[6].z / 1024;
+		it.plc_mrow_i6a = payload_mesh_item_avail[6];
+		it.plc_mrow_i7r = payload_mesh_item_rank[7];
+		it.plc_mrow_i7x = payload_mesh_item_org[7].x / 1024;
+		it.plc_mrow_i7y = payload_mesh_item_org[7].y / 1024;
+		it.plc_mrow_i7z = payload_mesh_item_org[7].z / 1024;
+		it.plc_mrow_i7a = payload_mesh_item_avail[7];
 	});
 
 	mesh_gather(payload_mesh_h, 0, plc_mrow_id, 1, maxclients);
@@ -209,6 +326,46 @@ void payload_mesh_tick(entity cart)
 	mesh_gather(payload_mesh_h, 23, plc_mrow_c1p, 1, maxclients);
 	mesh_gather(payload_mesh_h, 24, plc_mrow_c1t, 1, maxclients);
 	mesh_gather(payload_mesh_h, 25, plc_mrow_c1r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 26, plc_mrow_i0r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 27, plc_mrow_i0x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 28, plc_mrow_i0y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 29, plc_mrow_i0z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 30, plc_mrow_i0a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 31, plc_mrow_i1r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 32, plc_mrow_i1x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 33, plc_mrow_i1y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 34, plc_mrow_i1z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 35, plc_mrow_i1a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 36, plc_mrow_i2r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 37, plc_mrow_i2x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 38, plc_mrow_i2y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 39, plc_mrow_i2z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 40, plc_mrow_i2a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 41, plc_mrow_i3r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 42, plc_mrow_i3x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 43, plc_mrow_i3y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 44, plc_mrow_i3z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 45, plc_mrow_i3a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 46, plc_mrow_i4r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 47, plc_mrow_i4x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 48, plc_mrow_i4y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 49, plc_mrow_i4z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 50, plc_mrow_i4a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 51, plc_mrow_i5r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 52, plc_mrow_i5x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 53, plc_mrow_i5y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 54, plc_mrow_i5z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 55, plc_mrow_i5a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 56, plc_mrow_i6r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 57, plc_mrow_i6x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 58, plc_mrow_i6y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 59, plc_mrow_i6z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 60, plc_mrow_i6a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 61, plc_mrow_i7r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 62, plc_mrow_i7x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 63, plc_mrow_i7y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 64, plc_mrow_i7z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 65, plc_mrow_i7a, 1, maxclients);
 
 	payload_mesh_seq += 1;
 	mesh_publish(payload_mesh_h, payload_mesh_seq, maxclients);
@@ -248,24 +405,29 @@ void payload_mesh_tick(entity cart)
 	});
 
 	int nobj = bound(1, payload_cart_count * PLC_MESH_OBJECTIVES, PLC_MESH_COMBINED);
-	for(int k = 0; k < (NUM_TEAMS + 1) * PLC_MESH_COMBINED; ++k)
+	for(int k = 0; k < (NUM_TEAMS + 1) * PLC_MESH_TOTAL; ++k)
 		payload_mesh_vote[k] = 0;
 
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
 		int j = Team_TeamToIndex(it.team);
-		int o = bound(0, floor(it.plc_mesh_pick), nobj - 1);
+		int o = floor(it.plc_mesh_pick);
+		if(!(o >= PLC_MESH_ITEM_BASE && o < PLC_MESH_TOTAL
+			&& payload_mesh_item_rank[o - PLC_MESH_ITEM_BASE] > 0))
+			o = bound(0, o, nobj - 1);
 		if(j >= 1 && j <= NUM_TEAMS)
-			payload_mesh_vote[j * PLC_MESH_COMBINED + o] += 1;
+			payload_mesh_vote[j * PLC_MESH_TOTAL + o] += 1;
 	});
 
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
 		float best = 0;
 		int pick = payload_mesh_objective[j];
-		for(int o = 0; o < nobj; ++o)
+		for(int o = 0; o < PLC_MESH_TOTAL; ++o)
 		{
-			float w = payload_mesh_vote[j * PLC_MESH_COMBINED + o];
+			if(o >= nobj && o < PLC_MESH_ITEM_BASE)
+				continue;
+			float w = payload_mesh_vote[j * PLC_MESH_TOTAL + o];
 			if(w > best)
 			{
 				best = w;

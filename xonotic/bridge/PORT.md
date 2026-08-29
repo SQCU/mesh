@@ -168,7 +168,7 @@ chunks          = ceil(rows_total / rows_per_slot)
 480 bots is 8 request chunks and 4 response chunks per tick. The cap is
 `MESH_XON_MAXCHUNK` 64 chunks, i.e. 4032 bots at width 16.
 
-### Request row, width 16 (base), 20 (dominance extension), 26 (multi-cart)
+### Request row, width 16 (base), 20 (dominance extension), 26 (multi-cart), 66 (item posts)
 
 `0` bot id, `1` team, `2` health, `3` armor, `4` ammo fraction, `5..7` origin/1024,
 `8..10` velocity/1024, `11` distance to the nearest cart, `12` progress of the
@@ -191,13 +191,55 @@ state is global, repeated per row so the request stays one rectangular gather.
 
 At width 26 a request row is 104 B, 39 rows per slot.
 
-### Objective addressing: (cart, node) as one combined index
+Width 66 appends the item-post block: the map's timed pickups as strategic
+objectives. At payload init the QC scans the spawned map items once (loot dropped
+by players excluded), keeps the 8 most valuable by class rank, and freezes their
+identity and origin for the session:
+
+| rank | classname | item |
+|---|---|---|
+| 6 | `item_strength` | strength powerup |
+| 5 | `item_shield` / `item_invincible` | shield powerup |
+| 4 | `item_armor_mega` | mega armor |
+| 3 | `item_health_mega` | mega health |
+| 2 | `item_armor_big` | big armor |
+
+Ammo, small/medium pickups, and weapons are never posts. Post p occupies columns
+`26 + 5p .. 30 + 5p`: `+0` class rank (0 = no post at this slot, and then the
+other four columns are 0), `+1..+3` origin/1024, `+4` availability this tick
+(1 = the item is on its pad, 0 = taken and waiting on respawn; the authoritative
+signal is `ItemStatus & ITS_AVAILABLE`, which `Item_Show` keeps in lockstep with
+the entity's solid/model state). Rank and origin are the once-per-session meta;
+they ride every tick anyway because the transport may drop any single slot and a
+meta block published once could be lost forever — a new block kind would also
+need an engine rebuild, since `mesh_ipc.c` frames every publish as `kind` 1.
+Repetition is the loss-tolerant spelling of "once per session". Like the cart
+state block, every item column is identical across the rows of a block.
+
+At width 66 a request row is 264 B, 15 rows per slot.
+
+### Objective addressing: (cart, node) as one combined index, item posts above it
 
 Objectives are (cart, node) pairs. `PLC_MESH_OBJECTIVES` = 5 nodes per path, so
 the combined index is `cart * 5 + node`, in `[0, k*5)`. Column 15 of the request
 and column 1 of the response both carry combined indices. The solver learns k from
 the per-cart state block: cart c exists iff the request width covers columns
 `20 + 3c .. 22 + 3c`.
+
+Item posts extend the same index space from a fixed base: post p is index
+`20 + p`, `p in [0, 8)` — the base is `PLC_MAX_CARTS * 5` = 20 regardless of how
+many carts the map actually has, so an index is stable across maps and never
+ambiguous. A response row whose column 1 is in `[20, 28)` directs that bot to the
+item post instead of a path node; the QC rates the item's location through the
+same `navigation_routerating` hook at the same 2x scale and columns 2..6 (the
+per-node weights) are ignored for that row. Column 15 of the request echoes
+whatever the bot's team majority currently holds, so it too may carry `[20, 28)`.
+
+A pick of `20 + p` where post p does not exist (rank column 0) degrades exactly
+as an out-of-range cart index always has: the QC clamps it into the cart space
+and the bot follows the per-team majority fallback. A worker that never emits an
+index >= 20 produces bit-for-bit today's behaviour — the vote table is wider but
+its item rows stay zero, and the majority scan tie-breaks identically.
 
 ### Response row, width 8
 
