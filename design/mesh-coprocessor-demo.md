@@ -185,6 +185,71 @@ this traffic shape. **The premise is compute-side confirmed and transport-side u
 `InitMovingBrushTrigger` populates `mins`, so the cart's occupancy centre lands 1504 units
 off and no pusher is ever detected. The cart does not move. Fix known, not yet applied.
 
+## What was open here, and where it was answered
+
+Every item this section listed has since been measured or built. It is kept as a pointer
+rather than deleted, because the list is a record of what was uncertain when the design was
+written.
+
+- **MoE dispatch and its 2.83x floor.** Answered in the corrections below: the floor was an
+  artefact of computing expert boundaries in Python across a host round trip. On-device
+  `argsort` plus `gather_mm` measures 4.42x, 6.18x and 7.98x.
+- **Orthogonalisation must stay on GPU.** Confirmed, and worse than suspected. `cpu_chol` at
+  R=4096 measures 0.85x, the mini fractionally faster than the MacBook. Block CGS2 with
+  Newton-Schulz restores 6.26x.
+- **Whether raising `NUM_TEAMS` stays contained.** It does. `teams-k5.patch` touches 27 files
+  and the server reaches `Server spawned.` with five teams.
+- **The ABI is designed, not built.** It is built and running. One bridge process per node
+  owning POSIX shared memory, three functions in `rdma/mesh.h`, measured at about 20 Gbit/s
+  each way simultaneously with 9.83 million slots verified per direction and none wrong. See
+  `README.md`, **Using the mesh**.
+
+## Corrections after the build workflow (2026-08-28)
+
+Eighteen agents built and adversarially verified this design. Several numbers above were
+wrong and are corrected here rather than silently edited, because the *reasons* matter.
+
+**Both M5 GEMM figures were low, not just one.** The bf16 row came from the same flawed
+pass: re-measured it is **59,054 GF/s**, not 44,728. The mini was re-measured over the LAN
+plane on the same script and confirms both of its own numbers (fp32 5,343; bf16 6,047,
+against 5,827 recorded). So every error was on the fast machine and every error understated
+it. The bf16 ratio is **9.77×**, not 7.68×, which *strengthens* the "stay in fp32" call:
+bf16 buys the M5 +47% and the mini only +13%, so it buys asymmetry we do not want.
+
+**My fp32 GEMM figure for the M5 was 34% low.** I measured 27,374 GF/s using K=1024 with
+no warmup, so kernel-compile and allocation costs were averaged into the timing and a
+small GEMM let dispatch overhead dominate. With three warmup passes and min-of-7 at
+K=8192 the M5 reaches **41,288 GF/s** and the mini **5,377 GF/s** — a **7.68× ratio, not
+5.28×**. The mini's original number was fine; only the fast machine's was wrong, which is
+the direction that made the design look *weaker* than reality. A verifier caught it
+independently at 39,660.
+
+**The MoE floor of 2.83× was an artifact of the slow dispatch and is struck.** Replacing
+the Python `.tolist()` boundary computation with on-device `argsort` + `gather_mm` gives
+verifier-measured ratios of **4.42× / 6.18× / 7.98×** at 256 / 512 / 1024 rows per expert.
+The host round trip was *costing* asymmetry, because the mini flatlines at 3.9–4.3 TF/s on
+every shape while the M5 keeps scaling.
+
+**The CPU-Cholesky trap was worse than suspected.** At R=4096 `cpu_chol` measures
+**0.85×** — the mini is fractionally *faster* than the MacBook. Block CGS2 + Newton–Schulz
+on GPU restores **6.26×**, which is 107% of the raw Gram's own 5.85%. This is the
+load-bearing fix; without it the demo inverts.
+
+**Operating envelope, measured rather than assumed.** Below `R = 2048` the orthogonalisation
+ratio falls to **1.47× — beneath the 1.52× bandwidth ratio** — with ~3× run-to-run
+instability, because ~240 MLX dispatches dominate a 0.7 ms kernel. Below 512 rows per
+expert MoE degrades similarly. **The demo must run at `R ≥ 2048` and `T·k/E ≥ 512`.**
+Outside that box the premise is not supported by any measurement.
+
+**The fabric leg is entirely unmeasured.** Every ratio here is compute-only and
+same-machine. No agent was permitted to open a verbs device, so `ibv_reg_mr` over the ABI
+region has never been called and the 8.7 GB/s / 10 µs figures have not been re-measured for
+this traffic shape. **The premise is compute-side confirmed and transport-side unproven.**
+
+**Known bug, one line.** `sv_payload.qc:545` sets `view_ofs = mins` *before*
+`InitMovingBrushTrigger` populates `mins`, so the cart's occupancy centre lands 1504 units
+off and no pusher is ever detected. The cart does not move. Fix known, not yet applied.
+
 ## Open and unmeasured
 
 - MoE dispatch computes expert boundaries in Python with a `.tolist()`. 2.83× is a
