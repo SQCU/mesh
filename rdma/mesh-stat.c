@@ -8,7 +8,7 @@
 #include <string.h>
 int main(int argc,char**argv){
   const char *name = argc>1?argv[1]:"/mesh0";
-  int fd=shm_open(name,O_RDONLY,0600);
+  int fd=shm_open(name,O_RDONLY,0666);
   if(fd<0){ printf("{\"up\":false}\n"); return 0; }
   struct stat st; fstat(fd,&st);
   void *b=mmap(NULL,sizeof(struct mesh_hdr),PROT_READ,MAP_SHARED,fd,0);

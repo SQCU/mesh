@@ -15,7 +15,7 @@ void *mesh_open(size_t bytes, size_t *stride, size_t *usable){
   if(!G.h){
     const char *name = getenv("MESH_REGION"); if(!name) name = "/mesh0";
     for(int t=0;t<500;t++){
-      int fd = shm_open(name, O_RDWR, 0600);
+      int fd = shm_open(name, O_RDWR, 0666);
       if(fd >= 0){
         struct stat st;
         if(!fstat(fd,&st) && (size_t)st.st_size > sizeof(struct mesh_hdr)){

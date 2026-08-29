@@ -110,7 +110,8 @@ int main(int argc,char**argv){
   size_t span=(size_t)pgsz*npages;
   size_t total=data_off+span;
   shm_unlink(shmname);
-  int rfd=shm_open(shmname,O_CREAT|O_RDWR,0600); if(rfd<0) die("shm_open");
+  int rfd=shm_open(shmname,O_CREAT|O_RDWR,0666); if(rfd<0) die("shm_open");
+  fchmod(rfd,0666);
   if(ftruncate(rfd,(off_t)total)) die("ftruncate");
   void *rbase=mmap(NULL,total,PROT_READ|PROT_WRITE,MAP_SHARED,rfd,0);
   if(rbase==MAP_FAILED) die("mmap region");
