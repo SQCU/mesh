@@ -145,3 +145,21 @@ Rules this adds:
 - **A guard firing 55,335 times is a guard that was ignored.** The double-free check printed
   one line per event and the flood was mistaken for noise. Count them, print the first few,
   and treat a nonzero count as a failure.
+
+## Pairing leaks a per-boot driver resource, and RTR's EFAULT is the fuel gauge
+
+`ibv_modify_qp` to RTR can fail with EFAULT while every argument is valid, the port is
+active, and the vendor's own pingpong succeeds beside it. The discriminator, found by role
+swaps and a region-size bisect: the fault tracks the amount of memory the process has
+registered. Early in a boot a 4 GB registration pairs instantly; after a few hundred
+queue-pair setup/teardown cycles on the same boot the same registration fails forever while a
+0.14 GB one pairs in seconds, and a machine that has cycled less still affords more. The
+driver appears to install per-region DMA state at pairing time from a finite per-boot pool
+that teardown does not fully return.
+
+Consequences:
+- A healing loop is itself the leak amplifier. Converge in as few pairing attempts as
+  possible; never spin QP bring-up at high frequency.
+- If RTR starts returning EFAULT with valid arguments, do not debug the arguments. Shrink
+  the region to confirm, then plan a reboot of that node to reclaim the pool.
+- Size regions with headroom for the boot's remaining budget, not the machine's RAM.
