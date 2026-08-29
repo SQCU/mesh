@@ -12,13 +12,18 @@ static struct hdr *M; static unsigned char *arena; static int held=-1;
 void *mesh_open(size_t *ns, size_t *sp, size_t *up){
   if(!M){
     const char *n=getenv("MESH_REGION"); if(!n) n=MESH_NAME;
-    int f=-1; for(int t=0;t<200 && f<0;t++){ f=shm_open(n,O_RDWR,MESH_MODE); if(f<0) usleep(10000); }
-    if(f<0) return NULL;
-    struct stat s; if(fstat(f,&s)||(size_t)s.st_size<sizeof(struct hdr)){ close(f); return NULL; }
-    void *b=mmap(NULL,(size_t)s.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,f,0);
-    if(b==MAP_FAILED){ close(f); return NULL; }
-    M=b;
-    if(M->magic!=MESH_MAGIC||M->version!=MESH_VERSION){ M=NULL; return NULL; }
+    for(int t=0;t<3000 && !M;t++){
+      int f=shm_open(n,O_RDWR,MESH_MODE);
+      if(f>=0){
+        struct stat s;
+        if(!fstat(f,&s) && (size_t)s.st_size>=sizeof(struct hdr)){
+          struct hdr *b=mmap(NULL,(size_t)s.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,f,0);
+          if(b!=MAP_FAILED){
+            if(b->magic==MESH_MAGIC && b->version==MESH_VERSION) M=b;
+            else munmap(b,(size_t)s.st_size); } }
+        if(!M) close(f); }
+      if(!M) usleep(10000); }
+    if(!M) return NULL;
     arena=mesh_data(M,M->pool);
     atomic_store_explicit(&M->client,(uint64_t)getpid(),memory_order_release); }
   if(ns) *ns=M->arena;
