@@ -277,6 +277,8 @@ void payload_think(entity this)
 	WaypointSprite_UpdateHealth(this.sprite, s_new);
 
 	FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
+
+	payload_mesh_tick(this);
 }
 
 void payload_cart_reset(entity this)
@@ -456,6 +458,9 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 		return;
 	float d = payload_goal_s[j] - payload_cart.plc_s;
 	float lead = bound(-256, d, 256);
+	entity o = payload_mesh_node(payload_mesh_objective[j]);
+	if(o)
+		navigation_routerating(this, o, ratingscale * 2, 3000);
 	IL_EACH(g_payload_nodes, true,
 	{
 		float rel = (it.plc_dist - payload_cart.plc_s) / ((lead >= 0) ? 256 : -256);
@@ -661,6 +666,8 @@ void payload_Initialize()
 {
 	g_payload = true;
 	g_payload_nodes = IL_NEW();
+	payload_mesh_h = -1;
+	payload_mesh_attach();
 
 	InitializeEntity(NULL, payload_DelayedInit, INITPRIO_GAMETYPE);
 }

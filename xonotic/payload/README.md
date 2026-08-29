@@ -127,3 +127,34 @@ model, and two (or three) `plc_goal`s. Drop the result in
 
 `tools/checklaw.py <log> <start_time>` re-derives the speed law from a `plcdbg` log
 (`debug/plcdbg.patch` adds the instrumentation) and reports mismatches.
+
+## The mesh objective hook
+
+`qcsrc/common/gamemodes/gamemode/payload/sv_payload_mesh.qc` is the SVQC side of the
+bridge described in `../bridge/PORT.md`. It declares only the six surviving builtins
+(`#644`, `#648`–`#651`, `#653`) and holds all of the fabric state the mode has.
+
+`payload_Initialize` calls `payload_mesh_attach()` once at level load, which is where
+`mesh_open(g_payload_mesh_node, 16, maxclients)` is allowed to cost 30 s. A handle of
+`-1` is not an error: `payload_mesh_tick` retries `mesh_open` every
+`g_payload_mesh_retry` seconds and the mode plays on the stock rating path meanwhile.
+
+Every `PLC_TICK` the cart's think calls `payload_mesh_tick(cart)`, which stages the
+sixteen request columns of §2 into per-client `.float` fields over client slots
+`1..maxclients` — id, team index, health, armor, ammo fraction, origin/1024,
+velocity/1024, distance to the cart, cart progress, friends and enemies inside
+`PLC_MESH_RADIUS` (from `findradius`, so the pass stays linear), and the objective the
+team is currently holding — issues sixteen `mesh_gather` calls and one `mesh_publish`,
+then `mesh_poll`s once. Nothing waits.
+
+A poll that does not advance past `payload_mesh_plan` returns immediately and every
+team keeps the objective it already had: that is the whole of §5 on this side.
+When it does advance, `mesh_scatter(h, 1, plc_mesh_pick, 1, maxclients)` writes each
+row's chosen objective onto its client, the picks are counted per team into
+`payload_mesh_vote`, and the per-team majority becomes `payload_mesh_objective[team]`.
+
+That global is the only thing the bot code reads. `havocbot_goalrating_payload` maps it
+through `payload_mesh_node(idx)` — the idx-th `plc_path` node along the track — and rates
+that node at `ratingscale * 2`, above the cart's own `ratingscale`. So the solver's pick
+outranks the cart in the goal stack and the bots of that team walk to the stretch of
+track the mini chose, which is visible in their movement, not only in a stat.

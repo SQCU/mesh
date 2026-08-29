@@ -1,0 +1,46 @@
+#pragma once
+
+#include "payload.qh"
+
+#include <common/teams.qh>
+
+const int PLC_MESH_WIDTH = 16;
+const int PLC_MESH_OBJECTIVES = 5;
+const float PLC_MESH_RADIUS = 700;
+
+const float PLC_MESH_STAT_PUBLISHED = 0;
+const float PLC_MESH_STAT_COMPLETE = 1;
+const float PLC_MESH_STAT_INFLIGHT = 2;
+const float PLC_MESH_STAT_ATTACHED = 5;
+const float PLC_MESH_STAT_DROPPED = 6;
+const float PLC_MESH_STAT_SHORT = 9;
+const float PLC_MESH_STAT_PEER = 15;
+
+.float plc_mrow_id;
+.float plc_mrow_team;
+.float plc_mrow_health;
+.float plc_mrow_armor;
+.float plc_mrow_ammo;
+.float plc_mrow_ox;
+.float plc_mrow_oy;
+.float plc_mrow_oz;
+.float plc_mrow_vx;
+.float plc_mrow_vy;
+.float plc_mrow_vz;
+.float plc_mrow_dist;
+.float plc_mrow_prog;
+.float plc_mrow_friends;
+.float plc_mrow_enemies;
+.float plc_mrow_obj;
+.float plc_mesh_pick;
+
+float payload_mesh_h;
+float payload_mesh_seq;
+float payload_mesh_plan;
+float payload_mesh_retry;
+float payload_mesh_objective[NUM_TEAMS + 1];
+float payload_mesh_vote[(NUM_TEAMS + 1) * PLC_MESH_OBJECTIVES];
+
+void payload_mesh_attach();
+void payload_mesh_tick(entity cart);
+entity payload_mesh_node(float idx);
