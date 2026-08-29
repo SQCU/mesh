@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <stdio.h>
 int main(int argc,char**argv){
-  int f=shm_open(argc>1?argv[1]:"/mesh0",O_RDONLY,0666);
+  int f=shm_open(argc>1?argv[1]:MESH_NAME,O_RDONLY,MESH_MODE);
   if(f<0){ printf("{\"up\":false}\n"); return 0; }
   struct hdr *h=mmap(NULL,sizeof *h,PROT_READ,MAP_SHARED,f,0);
   if(h==MAP_FAILED||h->magic!=MESH_MAGIC){ printf("{\"up\":false}\n"); return 0; }

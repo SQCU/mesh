@@ -46,7 +46,7 @@ static void add(struct wf *w, double x){
   w->n+=1; double d=x-w->mean; w->mean+=d/w->n; w->m2+=d*(x-w->mean); }
 
 int main(int argc,char**argv){
-  const char *peer=NULL, *name="/mesh0"; int me=0; double pct=25;
+  const char *peer=NULL, *name=MESH_NAME; int me=0; double pct=25;
   for(int i=1;i<argc;i++)
     if(!strcmp(argv[i],"-I")) me=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M")) pct=atof(argv[++i]);
@@ -68,8 +68,8 @@ int main(int argc,char**argv){
   int pool = np/4 < 244140 ? np/4 : 244140;
   size_t d0=(RINGS+3*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
   size_t span=(size_t)pg*np;
-  shm_unlink(name); int rf=shm_open(name,O_CREAT|O_RDWR,0666); if(rf<0) die("shm");
-  if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,0666);
+  shm_unlink(name); int rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
+  if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,MESH_MODE);
   void *base=mmap(NULL,d0+span,PROT_READ|PROT_WRITE,MAP_SHARED,rf,0);
   if(base==MAP_FAILED) die("mmap"); memset(base,0,d0); shm=name;
   struct mesh M={.h=base,.b=base}; struct hdr *H=M.h;
@@ -107,9 +107,9 @@ int main(int argc,char**argv){
   int *fl=malloc(pool*sizeof(int)); unsigned char *own=calloc(pool,1);
   if(!fl||!own) die("alloc");
   int n[NOWN]={0}; n[FREE]=pool; for(int i=0;i<pool;i++) fl[i]=i;
-  uint32_t pay=pg-sizeof(struct wire); int full=0;
+  int full=0;
   struct wf w[NOWN]={{0}}; double t0=now(), tel=t0;
-  #define ADDR(i) (mem+(size_t)(i)*pg)
+  #define ADDR(i) ((char*)mesh_at(&M,(uint32_t)(i)))
   #define LKEY(i) (mr[(size_t)(i)*pg/CHUNK]->lkey)
   #define MV(i,to) do{ n[own[i]]--; own[i]=(to); n[to]++; }while(0)
   #define GIVE(i)  do{ MV(i,FREE); fl[n[FREE]-1]=(i); }while(0)
@@ -122,12 +122,12 @@ int main(int argc,char**argv){
     while(n[FREE] && !full){ int i=fl[n[FREE]-1];
       if(POST(i,0)){ full=1; break; } MV(i,RECV); }
     struct desc d;
-    while(!pop(&M,&H->rel,2,&d)) if(d.page<(uint32_t)pool && own[d.page]==APP) GIVE(d.page);
+    while(!pop(&M,REL,&d)) if(d.page<(uint32_t)pool && own[d.page]==APP) GIVE(d.page);
     if(atomic_load_explicit(&H->client,memory_order_acquire))
-      while(!pop(&M,&H->sub,0,&d)){
+      while(!pop(&M,SUB,&d)){
         uint32_t p=d.page; if(p>=(uint32_t)np) continue;
         struct wire *w2=(struct wire*)ADDR(p);
-        w2->magic=MESH_MAGIC; w2->bytes=d.bytes>pay?pay:d.bytes;
+        w2->magic=WIRE_MAGIC; w2->bytes=mesh_clamp(&M,d.bytes);
         w2->src=me; w2->dst=d.node; w2->hops=0;
         if(POST(p,1)) break;
         if(p<(uint32_t)pool) MV(p,SEND);
@@ -138,11 +138,11 @@ int main(int argc,char**argv){
       if(wc[j].opcode!=IBV_WC_RECV){ if(i<pool) GIVE(i); continue; }
       full=0; if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
       struct wire *h=(struct wire*)ADDR(i);
-      if(h->magic!=MESH_MAGIC){ GIVE(i); continue; }
+      if(h->magic!=WIRE_MAGIC){ GIVE(i); continue; }
       h->hops++;
       if(h->dst!=(uint16_t)me && h->hops<=32){ if(!POST(i,1)) MV(i,SEND); else GIVE(i); continue; }
-      struct desc c={.page=(uint32_t)i,.bytes=h->bytes>pay?pay:h->bytes,.node=h->src};
-      if(!atomic_load_explicit(&H->client,memory_order_acquire) || push(&M,&H->cmp,1,&c)) GIVE(i);
+      struct desc c={.page=(uint32_t)i,.bytes=mesh_clamp(&M,h->bytes),.node=h->src};
+      if(!atomic_load_explicit(&H->client,memory_order_acquire) || push(&M,CMP,&c)) GIVE(i);
       else { MV(i,APP); atomic_fetch_add_explicit(&H->recvd,1,memory_order_relaxed); } }
     for(int s=0;s<NOWN;s++) add(&w[s],n[s]);
     double tn=now();
@@ -150,9 +150,9 @@ int main(int argc,char**argv){
       uint64_t c=atomic_load_explicit(&H->client,memory_order_acquire);
       if(c && kill((pid_t)c,0) && errno==ESRCH){
         for(int i=0;i<pool;i++) if(own[i]==APP) GIVE(i);
-        atomic_store_explicit(&H->sub.tail,H->sub.head,memory_order_release);
-        atomic_store_explicit(&H->cmp.head,H->cmp.tail,memory_order_release);
-        atomic_store_explicit(&H->rel.tail,H->rel.head,memory_order_release);
+        atomic_store_explicit(&H->r[SUB].tail,H->r[SUB].head,memory_order_release);
+        atomic_store_explicit(&H->r[CMP].head,H->r[CMP].tail,memory_order_release);
+        atomic_store_explicit(&H->r[REL].tail,H->r[REL].head,memory_order_release);
         atomic_store_explicit(&H->client,0,memory_order_release); }
       for(int s=0;s<NOWN;s++){
         atomic_store_explicit(&H->mean[s],(uint64_t)w[s].mean,memory_order_relaxed);
