@@ -74,10 +74,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     if(ctx){ ibv_close_device(ctx); ctx=0; } }
   if(dl) ibv_free_device_list(dl);
   if(!ctx){ usleep(500000); return -1; }
-  { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
-    snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
-             strncmp(dn,"rdma_",5)?dn:dn+5);
-    system(c); }
   pd=ibv_alloc_pd(ctx); if(!pd){ down_verbs(); return -1; }
   mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
@@ -85,6 +81,10 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     if(!mr[nmr++]){ down_verbs(); return -1; } }
   }
   ibv_query_port(ctx,1,&pa);
+  { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
+    snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
+             strncmp(dn,"rdma_",5)?dn:dn+5);
+    system(c); }
   cq=ibv_create_cq(ctx,4096,NULL,NULL,0); if(!cq) return -1;
   struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=1,.max_recv_sge=1}};
@@ -98,7 +98,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   if(peer) write(f,&mine,sizeof mine);
   for(size_t got=0; got<sizeof you;){
     ssize_t g=read(f,(char*)&you+got,sizeof you-got);
-    if(g<=0){ close(f); return -1; } got+=(size_t)g; }
+    if(g<=0){ close(f); fprintf(stderr,"xchg retry\n"); return -1; } got+=(size_t)g; }
   if(!peer) write(f,&mine,sizeof mine);
   close(f);
   struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
@@ -106,7 +106,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     .grh={.hop_limit=1,.sgid_index=0}}};
   memcpy(&r.ah_attr.grh.dgid,you.gid,16);
   if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN)){
-    fprintf(stderr,"rtr retry\n"); return -1; }
+    fprintf(stderr,"rtr retry errno %d\n",errno); return -1; }
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
