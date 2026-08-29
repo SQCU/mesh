@@ -640,7 +640,7 @@ class Strategy:
             if phi is not None:
                 u0 = u0 + (phi @ self.W[bucket]).astype(np.float64)[:nA]
             if self.qkv and white is not None and Vg is not None and phi is not None:
-                w2q = (white * white * phi).astype(np.float64)
+                w2q = np.nan_to_num(white * white * phi).astype(np.float64)
                 Kc = np.zeros((nA, RES), np.float64)
                 for c in range(K_CARTS):
                     ks = [Vg[(o - 1) * NINST + c] for o in present if o != j]
@@ -650,7 +650,7 @@ class Strategy:
                     ks = [Vg[(o - 1) * NINST + K_CARTS + pp] for o in present if o != j]
                     if ks:
                         Kc[nc + pp] = np.mean(ks, axis=0)
-                att = Kc @ (self.M * w2q)
+                att = np.nan_to_num(Kc @ (self.M * w2q))
                 u0 = u0 + self.qkvw * att
                 self.qkv_state[j] = (att, Kc, w2q)
             self.abucket = getattr(self, "abucket", {})
@@ -759,7 +759,7 @@ class Strategy:
                             att, Kc, w2q = self.qkv_state[j]
                             self.gqkvw[j] = self.gqkvw.get(j, 0.0) + float(gv @ att)
                             gmv = self.gM.setdefault(j, np.zeros(RES, np.float64))
-                            gmv += self.qkvw * w2q * (gv @ Kc)
+                            gmv += np.nan_to_num(self.qkvw * w2q * (gv @ Kc))
                 quota = self._quota(np.asarray(pish, np.float64)
                                     / max(1e-9, float(np.sum(pish))), len(rows))
                 if quota[ai] == 0:
