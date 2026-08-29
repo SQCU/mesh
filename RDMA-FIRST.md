@@ -402,7 +402,7 @@ owns.
 | where | what it cost |
 |---|---|
 | `rdma/mesh-flow.c`, `usleep(50)` when a poll found no completions | 50 us injected into the data plane on a link whose round trip is about 10 us. Five times the link latency, added by us, to avoid spinning. |
-| `rdma/mesh-client.c`, `usleep(20000)` in a 500-iteration attach retry | `mesh_open` blocked for up to ten seconds waiting for a bridge that might never start, and reported nothing while doing it. It now attaches or returns NULL, and the caller decides. |
+| `rdma/mesh-client.c`, `usleep(20000)` in a 500-iteration attach retry | Ten seconds of blind waiting, reporting nothing. Replaced, then partly restored: `mesh_open` now polls for the region at 10 ms for at most 2 s. Removing the wait entirely made an application started alongside its bridge fail instantly, which is a demotion under the accessibility contract; 2 s is a bounded poll period, not a stall standing in for a wait. |
 | `bin/mesh-bridge.sh`, `sleep 0.5` then `sleep 0.01` in the stop poll | Teardown measures 0.045 s. Half-second granularity reported it after 0.5 s, an eleven-fold penalty for nothing. |
 | `bin/mesh-bridge.sh`, `sleep 1` in the start poll | One-second granularity to observe a process that appears in about 45 ms. |
 
