@@ -168,7 +168,7 @@ chunks          = ceil(rows_total / rows_per_slot)
 480 bots is 8 request chunks and 4 response chunks per tick. The cap is
 `MESH_XON_MAXCHUNK` 64 chunks, i.e. 4032 bots at width 16.
 
-### Request row, width 16 (base), 20 (dominance extension), 26 (multi-cart), 66 (item posts)
+### Request row, width 16 (base), 20 (dominance extension), 32 (multi-cart), 72 (item posts)
 
 `0` bot id, `1` team, `2` health, `3` armor, `4` ammo fraction, `5..7` origin/1024,
 `8..10` velocity/1024, `11` distance to the nearest cart, `12` progress of the
@@ -180,21 +180,26 @@ active (0/1), `18` seconds since spawn, `19` reserved 0. The engine accepts any
 width up to 256 at `mesh_open` time, so widening is a QC+solver change only; the
 worker serves every width at once and reads absent columns as zero.
 
-Width 26 appends the per-cart state block for the first two carts of k-cart
-payload: `20` cart 0 progress (0..1 of its path length), `21` cart 0 controlling
-team index (1..4, 0 = uncontrolled), `22` cart 0 regression flag (1 while the cart
-is moving toward its origin), `23..25` the same three for cart 1. On a map with one
-cart, columns 23..25 are 0. A third or fourth cart appends three more columns each
-in the same order; the header's `width` field is authoritative, so the worker
-never hardcodes 26. Every column is identical across the rows of a block — cart
-state is global, repeated per row so the request stays one rectangular gather.
+Width 32 appends one per-cart state block per cart up to `PLC_MAX_CARTS` = 4:
+cart c occupies columns `20 + 3c .. 22 + 3c` — progress (0..1 of its path
+length), controlling team index (1..4, 0 = uncontrolled), regression flag
+(1 while the cart is moving toward its origin). A map with fewer carts leaves
+the higher blocks 0; the header's `width` field is authoritative, so a
+two-cart-era width of 26 still binds as two blocks. Every column is identical
+across the rows of a block — cart state is global, repeated per row so the
+request stays one rectangular gather. An earlier revision published only carts
+0 and 1, which left a four-cart corridor's banking on carts 2 and 3 invisible
+to the solver's measured reward; all four blocks are the fix.
 
-At width 26 a request row is 104 B, 39 rows per slot.
+At width 32 a request row is 128 B, 31 rows per slot.
 
-Width 66 appends the item-post block: the map's timed pickups as strategic
-objectives. At payload init the QC scans the spawned map items once (loot dropped
-by players excluded), keeps the 8 most valuable by class rank, and freezes their
-identity and origin for the session:
+Width 72 appends the item-post block after the four cart blocks: the map's
+timed pickups as strategic objectives. (Width 66 is the superseded layout that
+placed the same eight posts at column 26 over two cart blocks; the worker still
+binds it, and the header width is what tells the layouts apart.) At payload
+init the QC scans the spawned map items once (loot dropped by players
+excluded), keeps the 8 most valuable by class rank, and freezes their identity
+and origin for the session:
 
 | rank | classname | item |
 |---|---|---|
@@ -205,7 +210,7 @@ identity and origin for the session:
 | 2 | `item_armor_big` | big armor |
 
 Ammo, small/medium pickups, and weapons are never posts. Post p occupies columns
-`26 + 5p .. 30 + 5p`: `+0` class rank (0 = no post at this slot, and then the
+`32 + 5p .. 36 + 5p`: `+0` class rank (0 = no post at this slot, and then the
 other four columns are 0), `+1..+3` origin/1024, `+4` availability this tick
 (1 = the item is on its pad, 0 = taken and waiting on respawn; the authoritative
 signal is `ItemStatus & ITS_AVAILABLE`, which `Item_Show` keeps in lockstep with
@@ -216,7 +221,7 @@ need an engine rebuild, since `mesh_ipc.c` frames every publish as `kind` 1.
 Repetition is the loss-tolerant spelling of "once per session". Like the cart
 state block, every item column is identical across the rows of a block.
 
-At width 66 a request row is 264 B, 15 rows per slot.
+At width 72 a request row is 288 B, 14 rows per slot.
 
 ### Objective addressing: (cart, node) as one combined index, item posts above it
 

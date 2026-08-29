@@ -188,6 +188,7 @@ void payload_mesh_tick(entity cart)
 	}
 
 	float c0p = 0, c0t = 0, c0r = 0, c1p = 0, c1t = 0, c1r = 0;
+	float c2p = 0, c2t = 0, c2r = 0, c3p = 0, c3t = 0, c3r = 0;
 	if(payload_cart_count > 0)
 	{
 		entity ca = payload_carts[0];
@@ -201,6 +202,20 @@ void payload_mesh_tick(entity cart)
 		c1p = (cb.plc_length > 0) ? cb.plc_s / cb.plc_length : 0;
 		c1t = cb.plc_ctrl;
 		c1r = (cb.plc_speed_now < 0) ? 1 : 0;
+	}
+	if(payload_cart_count > 2)
+	{
+		entity cc = payload_carts[2];
+		c2p = (cc.plc_length > 0) ? cc.plc_s / cc.plc_length : 0;
+		c2t = cc.plc_ctrl;
+		c2r = (cc.plc_speed_now < 0) ? 1 : 0;
+	}
+	if(payload_cart_count > 3)
+	{
+		entity cd = payload_carts[3];
+		c3p = (cd.plc_length > 0) ? cd.plc_s / cd.plc_length : 0;
+		c3t = cd.plc_ctrl;
+		c3r = (cd.plc_speed_now < 0) ? 1 : 0;
 	}
 
 	FOREACH_CLIENTSLOT(true,
@@ -258,6 +273,12 @@ void payload_mesh_tick(entity cart)
 		it.plc_mrow_c1p = c1p;
 		it.plc_mrow_c1t = c1t;
 		it.plc_mrow_c1r = c1r;
+		it.plc_mrow_c2p = c2p;
+		it.plc_mrow_c2t = c2t;
+		it.plc_mrow_c2r = c2r;
+		it.plc_mrow_c3p = c3p;
+		it.plc_mrow_c3t = c3t;
+		it.plc_mrow_c3r = c3r;
 		it.plc_mrow_i0r = payload_mesh_item_rank[0];
 		it.plc_mrow_i0x = payload_mesh_item_org[0].x / 1024;
 		it.plc_mrow_i0y = payload_mesh_item_org[0].y / 1024;
@@ -326,46 +347,52 @@ void payload_mesh_tick(entity cart)
 	mesh_gather(payload_mesh_h, 23, plc_mrow_c1p, 1, maxclients);
 	mesh_gather(payload_mesh_h, 24, plc_mrow_c1t, 1, maxclients);
 	mesh_gather(payload_mesh_h, 25, plc_mrow_c1r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 26, plc_mrow_i0r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 27, plc_mrow_i0x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 28, plc_mrow_i0y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 29, plc_mrow_i0z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 30, plc_mrow_i0a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 31, plc_mrow_i1r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 32, plc_mrow_i1x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 33, plc_mrow_i1y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 34, plc_mrow_i1z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 35, plc_mrow_i1a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 36, plc_mrow_i2r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 37, plc_mrow_i2x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 38, plc_mrow_i2y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 39, plc_mrow_i2z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 40, plc_mrow_i2a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 41, plc_mrow_i3r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 42, plc_mrow_i3x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 43, plc_mrow_i3y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 44, plc_mrow_i3z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 45, plc_mrow_i3a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 46, plc_mrow_i4r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 47, plc_mrow_i4x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 48, plc_mrow_i4y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 49, plc_mrow_i4z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 50, plc_mrow_i4a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 51, plc_mrow_i5r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 52, plc_mrow_i5x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 53, plc_mrow_i5y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 54, plc_mrow_i5z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 55, plc_mrow_i5a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 56, plc_mrow_i6r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 57, plc_mrow_i6x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 58, plc_mrow_i6y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 59, plc_mrow_i6z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 60, plc_mrow_i6a, 1, maxclients);
-	mesh_gather(payload_mesh_h, 61, plc_mrow_i7r, 1, maxclients);
-	mesh_gather(payload_mesh_h, 62, plc_mrow_i7x, 1, maxclients);
-	mesh_gather(payload_mesh_h, 63, plc_mrow_i7y, 1, maxclients);
-	mesh_gather(payload_mesh_h, 64, plc_mrow_i7z, 1, maxclients);
-	mesh_gather(payload_mesh_h, 65, plc_mrow_i7a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 26, plc_mrow_c2p, 1, maxclients);
+	mesh_gather(payload_mesh_h, 27, plc_mrow_c2t, 1, maxclients);
+	mesh_gather(payload_mesh_h, 28, plc_mrow_c2r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 29, plc_mrow_c3p, 1, maxclients);
+	mesh_gather(payload_mesh_h, 30, plc_mrow_c3t, 1, maxclients);
+	mesh_gather(payload_mesh_h, 31, plc_mrow_c3r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 32, plc_mrow_i0r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 33, plc_mrow_i0x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 34, plc_mrow_i0y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 35, plc_mrow_i0z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 36, plc_mrow_i0a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 37, plc_mrow_i1r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 38, plc_mrow_i1x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 39, plc_mrow_i1y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 40, plc_mrow_i1z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 41, plc_mrow_i1a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 42, plc_mrow_i2r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 43, plc_mrow_i2x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 44, plc_mrow_i2y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 45, plc_mrow_i2z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 46, plc_mrow_i2a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 47, plc_mrow_i3r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 48, plc_mrow_i3x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 49, plc_mrow_i3y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 50, plc_mrow_i3z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 51, plc_mrow_i3a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 52, plc_mrow_i4r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 53, plc_mrow_i4x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 54, plc_mrow_i4y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 55, plc_mrow_i4z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 56, plc_mrow_i4a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 57, plc_mrow_i5r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 58, plc_mrow_i5x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 59, plc_mrow_i5y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 60, plc_mrow_i5z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 61, plc_mrow_i5a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 62, plc_mrow_i6r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 63, plc_mrow_i6x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 64, plc_mrow_i6y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 65, plc_mrow_i6z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 66, plc_mrow_i6a, 1, maxclients);
+	mesh_gather(payload_mesh_h, 67, plc_mrow_i7r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 68, plc_mrow_i7x, 1, maxclients);
+	mesh_gather(payload_mesh_h, 69, plc_mrow_i7y, 1, maxclients);
+	mesh_gather(payload_mesh_h, 70, plc_mrow_i7z, 1, maxclients);
+	mesh_gather(payload_mesh_h, 71, plc_mrow_i7a, 1, maxclients);
 
 	payload_mesh_seq += 1;
 	mesh_publish(payload_mesh_h, payload_mesh_seq, maxclients);

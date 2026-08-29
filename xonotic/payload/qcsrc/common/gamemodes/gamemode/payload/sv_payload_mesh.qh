@@ -5,13 +5,13 @@
 
 #include <common/teams.qh>
 
-const int PLC_MESH_WIDTH = 66;
+const int PLC_MESH_WIDTH = 72;
 const int PLC_MESH_OBJECTIVES = 5;
 const int PLC_MESH_COMBINED = PLC_MESH_OBJECTIVES * PLC_MAX_CARTS;
 const int PLC_MESH_ITEMS = 8;
 const int PLC_MESH_ITEM_BASE = PLC_MESH_COMBINED;
 const int PLC_MESH_TOTAL = PLC_MESH_COMBINED + PLC_MESH_ITEMS;
-const int PLC_MESH_ITEM_COL = 26;
+const int PLC_MESH_ITEM_COL = 32;
 const float PLC_MESH_RADIUS = 700;
 
 const float PLC_MESH_STAT_PUBLISHED = 0;
@@ -48,6 +48,12 @@ const float PLC_MESH_STAT_PEER = 15;
 .float plc_mrow_c1p;
 .float plc_mrow_c1t;
 .float plc_mrow_c1r;
+.float plc_mrow_c2p;
+.float plc_mrow_c2t;
+.float plc_mrow_c2r;
+.float plc_mrow_c3p;
+.float plc_mrow_c3t;
+.float plc_mrow_c3r;
 .float plc_mrow_i0r;
 .float plc_mrow_i0x;
 .float plc_mrow_i0y;
