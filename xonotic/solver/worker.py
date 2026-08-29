@@ -86,7 +86,7 @@ def main():
             continue
         n = done["rows"]
         X = rx.stage[:n]
-        G = score(X, w)
+        G = score(X / (1.0 + np.abs(X)), w)
         pick = pick_of(G, axis=1).astype(np.float32)
         out = np.zeros((n, RESP_WIDTH), np.float32)
         out[:, 0] = X[:, 0]
