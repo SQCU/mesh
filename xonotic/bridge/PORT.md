@@ -168,18 +168,34 @@ chunks          = ceil(rows_total / rows_per_slot)
 480 bots is 8 request chunks and 4 response chunks per tick. The cap is
 `MESH_XON_MAXCHUNK` 64 chunks, i.e. 4032 bots at width 16.
 
-### Request row, width 16
+### Request row, width 16 (base) or 20 (dominance extension)
 
 `0` bot id, `1` team, `2` health, `3` armor, `4` ammo fraction, `5..7` origin/1024,
 `8..10` velocity/1024, `11` distance to the payload, `12` payload progress,
 `13` friends within radius, `14` enemies within radius, `15` current objective.
 
+Width 20 appends the dominance columns: `16` weapons owned (count), `17` powerup
+active (0/1), `18` seconds since spawn, `19` reserved 0. The engine accepts any
+width up to 256 at `mesh_open` time, so widening is a QC+solver change only; the
+worker serves both widths at once and reads the extra columns as zero on a
+width-16 stream.
+
 ### Response row, width 8
 
-`0` bot id (echoed), `1` chosen objective, `2..6` per-objective score, `7` epoch.
+`0` bot id (echoed), `1` chosen objective, `2..6` per-objective weights (a
+distribution over the five objectives; a hard pick is the degenerate one-hot),
+`7` leader rank (1 = this bot leads its team, else 0).
 
-The engine has no opinion about any of it. Widths are the contract between
-`qc/` and the solver; `mesh_ipc.c` only sees `width`.
+The engine has no opinion about any of it. The request width is the contract
+between `qc/` and the solver; the response width is compiled into `mesh_ipc.c`
+as `MESH_XON_RESPWIDTH` and stays 8.
+
+### Timescales
+
+The solver emits **strategy** at the request rate (~10-20 Hz): objective
+weights, not actions. Havocbot keeps every millisecond-scale decision — aim,
+dodging, pathing, firing. The matmuls never attempt per-action control; a lost
+response therefore costs a strategy refresh, never a motor tick.
 
 ### Multi-slot publish
 
@@ -283,7 +299,11 @@ Contract:
   staging `(rows_total, width)` float32 array with
   `np.frombuffer(buf[32:32+rows*width*4].tobytes(), np.float32)`. The `.tobytes()`
   is the alignment answer from §0. Track a chunk mask per `req_id`; a `req_id` lower
-  than the newest one seen is dropped on arrival.
+  than the newest one seen is dropped on arrival — **unless the regression
+  persists**. The worker outlives server sessions, and a restarted engine begins
+  again at `req_id` 1; a bare monotonic guard cannot tell that from a replay and
+  would discard the new session forever. Three consecutive regressed chunks are
+  adopted as a new session and the reassembler resyncs to the incoming stream.
 - **Compute.** `planner/plan.py`'s `solve()` with `D = width`, `EXPERTS = 8`,
   `FF = 2048`, `TEAMS = 5`, `SEED = 20260828`: route each row to an expert by
   `argmax(X @ R)`, apply that expert grouped by expert (never gathered per row),

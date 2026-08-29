@@ -38,22 +38,37 @@ def payload(buf, h):
     return np.frombuffer(buf[HDRSZ:HDRSZ + n].tobytes(), np.float32).reshape(h["rows"], h["width"])
 
 
+REGRESS_K = 3
+
+
 class Reassembler:
+    """Reassembles chunked blocks, freshest req_id wins.
+
+    A bare monotonic guard cannot tell a replay from a server restart, and a
+    worker outlives server sessions by design. REGRESS_K consecutive chunks
+    below the high-water mark are adopted as a new session; fewer are dropped
+    as stragglers.
+    """
+
     def __init__(self, kind, width, maxrows, usable):
         self.kind, self.width = kind, width
         self.rps = rows_per_slot(usable, width)
         self.stage = np.zeros((maxrows, width), np.float32)
         self.id, self.mask, self.want, self.rows, self.tick = 0, 0, 0, 0, 0
-        self.dropped = 0
+        self.dropped, self.regress, self.resync = 0, 0, 0
 
     def feed(self, buf):
         h = parse_hdr(buf)
         if h is None or h["kind"] != self.kind or h["width"] != self.width:
             return None
         if h["req_id"] < self.id:
-            self.dropped += 1
-            return None
-        if h["req_id"] > self.id:
+            self.regress += 1
+            if self.regress < REGRESS_K:
+                self.dropped += 1
+                return None
+            self.resync += 1
+        self.regress = 0
+        if h["req_id"] != self.id:
             if self.id and self.mask != self.want:
                 self.dropped += 1
             self.id, self.mask, self.rows, self.tick = h["req_id"], 0, h["rows_total"], h["tick"]
