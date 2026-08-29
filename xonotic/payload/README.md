@@ -205,3 +205,33 @@ picks becomes `payload_mesh_objective[team]`, a combined index that
 `havocbot_goalrating_payload` maps through `payload_mesh_node()` to the chosen
 stretch of the chosen cart's track, rated above the carts themselves so the solver's
 allocation is visible in bot movement, not only in a stat.
+
+## Procgen pipeline (tools/)
+
+Two authoritative surfaces, staged from least to most authored:
+
+- `tools/mapfuse.py <seed> [maps... | /path/prefix...]` — roguelike fusion of
+  compiled BSPs. Places j sources (stock pk3 maps, or loose `.bsp/.waypoints/
+  .waypoints.cache` triples such as mapgen output, addressed by path prefix) on a
+  disjoint grid, merges every IBSP v46 lump with index fixups, and joins them with
+  synthesized connectors: at most one cart-navigable corridor per map, jump-pad
+  shafts and teleporter pairs for everything else. Emits `fused.{bsp,waypoints,
+  waypoints.cache,mapinfo,ent,pk3}`. The pk3 is what clients must mount — a client
+  without it renders the world as untextured void.
+- `tools/mapgen.py <seed> [--rooms=N] [--smoke]` — parametric map SOURCE authoring.
+  A small DSL (rooms with doorways, corridors, ledges, jump-pads, teleporters,
+  team/dm spawns, lights) emits a `.map` and compiles it with q3map2
+  (`-meta`, `-vis`, `-light -fast -samples 2 -bounce 2`) into a textured, lit,
+  vis'd BSP; generates grid waypoints+links over the authored floors, runs the
+  corridor-gated cart placer for the payload `.ent`, and packages a pk3.
+  Compiled arenas can be fed back into mapfuse as tiles by path prefix.
+
+q3map2 comes from netradiant-custom (github.com/Garux/netradiant-custom) built on
+macOS arm64 with only its q3map2 target:
+
+    brew install assimp glib libxml2 libpng jpeg-turbo
+    make OS=Darwin MACLIBDIR=/opt/homebrew/lib DEPENDENCIES_CHECK=off binaries-q3map2
+
+The threaded vis/light stages SIGBUS on arm64; mapgen pins `-threads 1` for both.
+Override paths with `Q3MAP2` and `XON_BASEPATH`. Some stock shader images are
+dds-only so q3map2 logs "Couldn't find image" — harmless for compile and runtime.
