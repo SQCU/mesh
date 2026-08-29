@@ -33,7 +33,8 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
 static void onsig(int s){ (void)s; stop=1; }
 
-struct qpi { uint64_t nonce; uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
+struct qpi { uint32_t xmagic, xsize; uint64_t nonce; uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
+#define XMAGIC 0x4d585047u
 static int dial(struct addrinfo *a){
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
   fcntl(f,F_SETFL,O_NONBLOCK);
@@ -108,13 +109,15 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS);
   union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
   uint32_t psn=lrand48()&0xffffff;
-  struct qpi mine={mynonce,qp->qp_num,psn,pa.lid},you;
+  struct qpi mine={XMAGIC,sizeof mine,mynonce,qp->qp_num,psn,pa.lid},you;
   memcpy(mine.gid,&gid,16);
   write(f,&mine,sizeof mine);
   for(size_t got=0; got<sizeof you;){
     ssize_t g=read(f,(char*)&you+got,sizeof you-got);
     if(g<=0){ close(f); fprintf(stderr,"xchg retry\n"); return -1; } got+=(size_t)g; }
   close(f);
+  if(you.xmagic!=XMAGIC || you.xsize!=sizeof you){
+    fprintf(stderr,"peer speaks a different exchange, retrying\n"); return -1; }
   if(you.nonce==mynonce){ fprintf(stderr,"self nonce, retry\n"); return -1; }
   peernonce=you.nonce;
   struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
@@ -192,8 +195,12 @@ region:
     struct ibv_send_wr s={.wr_id=(i),.sg_list=&g,.num_sge=1,.opcode=IBV_WR_SEND, \
       .send_flags=IBV_SEND_SIGNALED},*bs; ibv_post_send(qp,&s,&bs); })
 
-  int fails=0;
+  int fails=0, np0=np, served=0;
   while(!stop){
+    if(served && np!=np0){
+      munmap(base,d0+span); close(rf); free(fl); free(own);
+      fprintf(stderr,"pair died, retrying at the configured %.2f GB\n",(double)np0*pg/1e9);
+      np=np0; served=0; goto region; }
     while(!stop && verbs_up(peer,mem,span,me)){
       if(++fails>=6){
         fails=0;
@@ -205,7 +212,7 @@ region:
         fprintf(stderr,"pairing refused at floor, respawning\n");
         return 0; } }
     if(stop) break;
-    fails=0;
+    fails=0; served=1;
     n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;
     for(int i=0;i<pool;i++){
       if(own[i]==APP) n[APP]++;
