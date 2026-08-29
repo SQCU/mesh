@@ -23,7 +23,17 @@ Policies over those scores:
   trained              closed-form Stackelberg strategy, learnable only in a
                        small vector of named scalars
 
-The trained policy is analytic, never a neural controller. Per team the most
+The trained policy is analytic, never a neural controller. Above the
+per-team game, the score/tempo-dominant team commits an allocation over
+instruments - cart cells (push/suppress/escort) plus, behind --items, timed
+item-post control cells read from a draft wire extension - and each team's
+bots fill that allocation's tempered quotas by closed-form transport
+(dominance-sorted for posts, proximity-sorted for carts), so a distribution
+over instruments is expressible and everyone-on-the-leader is just its
+low-temperature corner. Item respawn phase is estimated from the
+availability bit's toggle history in the context window; holding a post
+raises a bot's resource tuple, which raises measured dominance, which can
+shift leadership - the feedback loop is the point. Per team the most
 dominant live bot (dominance measured from the resource columns, hysteresis
 against flapping) is the leader; it commits first by quantal response over
 the solve's scores plus the fictitious-play mixture measured from the context
@@ -47,6 +57,11 @@ EXT_WIDTH = 20
 K_CARTS = 2
 ROLES = ("push", "suppress", "escort")
 TEAM_HYST = 0.2
+P_MAX = 4
+NINST = K_CARTS + P_MAX
+ITEM_BASE = K_CARTS * TEAMS
+ITEM_COLS = 6
+ITEM_HORIZON = 20.0
 PUSH_RADIUS = 512.0
 HYSTERESIS = 0.15
 THETA_PATH = "~/.mesh-plc-strategy.npz"
@@ -54,7 +69,8 @@ POLICIES = {"nearest": np.argmax, "inverted": np.argmin}
 THETA = dict(log_tau_leader=0.0, log_tau_follower=0.0, commit=1.0,
              fp_leader=0.5, fp_follower=0.5, score_leader=1.0, score_follower=1.0,
              log_tau_team=0.0, suppress_appetite=0.8, lead_bias=0.8,
-             cart_inertia=0.3, gram_weight=0.5)
+             cart_inertia=0.3, gram_weight=0.5, item_appetite=0.8,
+             log_tau_portfolio=0.0)
 DOM_FORMULA = ("0.005*(health+armor) + 0.3*ammo + 0.15*weapons + 0.5*powerup"
                " - 0.5*max(0, 1 - since_spawn/10)")
 
@@ -161,7 +177,7 @@ class CtxSolver:
         self.m_dom = np.zeros(T, np.float32)
         self.m_pos = np.zeros((T, 3), np.float32)
         self.G2 = None
-        self.kappa = np.zeros((TEAMS * K_CARTS, TEAMS * K_CARTS), np.float32)
+        self.kappa = np.zeros((TEAMS * NINST, TEAMS * NINST), np.float32)
 
     def _insert(self, X, Xn):
         n = Xn.shape[0]
@@ -174,9 +190,10 @@ class CtxSolver:
             self.pos = int((self.pos + n) % self.T)
         self.C[idx] = Xn
         self.m_team[idx] = X[:, 1].astype(np.int32)
-        comb = np.clip(X[:, 15], 0, K_CARTS * TEAMS - 1).astype(np.int32)
-        self.m_obj[idx] = comb % TEAMS
-        self.m_cart[idx] = comb // TEAMS
+        comb = np.clip(X[:, 15], 0, ITEM_BASE + P_MAX - 1).astype(np.int32)
+        self.m_obj[idx] = np.where(comb < ITEM_BASE, comb % TEAMS, 0)
+        self.m_cart[idx] = np.where(comb < ITEM_BASE, comb // TEAMS,
+                                    K_CARTS + (comb - ITEM_BASE))
         self.m_dom[idx] = dominance(X)
         self.m_pos[idx] = X[:, 5:8]
         return idx
@@ -206,13 +223,13 @@ class CtxSolver:
         return out
 
     def _group_mask(self):
-        M = np.zeros((TEAMS * K_CARTS, self.T), np.float32)
+        M = np.zeros((TEAMS * NINST, self.T), np.float32)
         for j in range(1, TEAMS + 1):
-            for c in range(K_CARTS):
+            for c in range(NINST):
                 sel = (self.m_team == j) & (self.m_cart == c)
                 k = float(sel.sum())
                 if k:
-                    i = (j - 1) * K_CARTS + c
+                    i = (j - 1) * NINST + c
                     M[i, sel] = 1.0 / k
                     M[i] -= 1.0 / self.T
         return M
@@ -291,14 +308,21 @@ def softmax(z):
     return e / e.sum()
 
 
-def bind_match(X):
+def bind_match(X, items=False):
     """The PORT.md section 2 binding. The header width is authoritative:
     width >= 23 carries the per-cart state block at columns 20+3c
     (progress, controlling team, regression flag); narrower streams are the
     single-cart game read from column 12. Column 15 is the combined
     (cart*5+node) objective index everywhere, which also names each bot's
-    contested cart. Banked score is not on the wire - the meter measures it
-    from control-point crossings."""
+    contested instrument. Banked score is not on the wire - the meter
+    measures it from control-point crossings.
+
+    Item posts ride a DRAFT extension pending its PORT.md contract, gated
+    behind --items: after the cart block, each post appends six columns
+    (x/1024, y/1024, z/1024, available bit, class rank, reserved), so
+    P = (width - 26) // 6, capped at P_MAX. A post's combined objective
+    index is k*5 + p; its response weight row is the degenerate one-hot on
+    column 2. Reconcile this function when the real contract lands."""
     n, wid = X.shape
     carts = min(K_CARTS, max(1, (wid - 20) // 3)) if wid >= 23 else 1
     prog = np.zeros(K_CARTS, np.float64)
@@ -311,9 +335,58 @@ def bind_match(X):
             regress[c] = float(X[0, 22 + 3 * c])
     else:
         prog[0] = float(X[0, 12])
-    bot_cart = np.clip(X[:, 15] // TEAMS, 0, K_CARTS - 1).astype(np.int32)
+    posts = []
+    if items and wid > 26:
+        for pp in range(min(P_MAX, (wid - 26) // ITEM_COLS)):
+            b = 26 + ITEM_COLS * pp
+            posts.append(dict(pos=X[0, b:b + 3].astype(np.float64),
+                              avail=float(X[0, b + 3]) > 0.5,
+                              rank=float(X[0, b + 4])))
+    comb = np.clip(X[:, 15], 0, ITEM_BASE + P_MAX - 1).astype(np.int32)
+    bot_inst = np.where(comb < ITEM_BASE, comb // TEAMS,
+                        K_CARTS + (comb - ITEM_BASE)).astype(np.int32)
     return dict(carts=carts, prog=prog, controller=controller, regress=regress,
-                score=np.zeros(TEAMS + 1, np.float64), bot_cart=bot_cart)
+                score=np.zeros(TEAMS + 1, np.float64), posts=posts,
+                bot_cart=np.clip(bot_inst, 0, K_CARTS - 1),
+                bot_inst=np.clip(bot_inst, 0, NINST - 1))
+
+
+class ItemTracker:
+    """Fictitious play over item timers: nothing on the wire says when a
+    post respawns, so the period is the median of observed down-gaps in the
+    availability bit's toggle history, and the phase is ticks since it was
+    taken. timing() is 1 while a post is up, ramps toward 1 over the last
+    ITEM_HORIZON ticks before the estimated respawn, and sits at a small
+    prior while the period is still unobserved."""
+
+    def __init__(self):
+        self.t = 0
+        self.prev = {}
+        self.down_t = {}
+        self.gaps = {}
+        self.period = {}
+
+    def tick(self, posts):
+        self.t += 1
+        for i, post in enumerate(posts):
+            a = bool(post["avail"])
+            was = self.prev.get(i)
+            if was is True and not a:
+                self.down_t[i] = self.t
+            if was is False and a and i in self.down_t:
+                g = self.gaps.setdefault(i, [])
+                g.append(self.t - self.down_t[i])
+                del g[:-8]
+                self.period[i] = float(np.median(g))
+            self.prev[i] = a
+
+    def timing(self, i, avail):
+        if avail:
+            return 1.0
+        if i in self.period and i in self.down_t:
+            tt = max(0.0, self.period[i] - (self.t - self.down_t[i]))
+            return float(np.clip(1.0 - tt / ITEM_HORIZON, 0.0, 1.0))
+        return 0.3
 
 
 class MatchMeter:
@@ -428,6 +501,7 @@ class Strategy:
         self.alloc = {}
         self.acomps = {}
         self.prev_alloc = {}
+        self.last_quota = {}
         self.held = {}
         self.held_leader = {}
         self._reset_episode()
@@ -472,7 +546,8 @@ class Strategy:
         return best
 
     def _quantal(self, u0, comps, keys, tau_key, gacc, action=None, sample=False):
-        tau = float(np.exp(self.theta[tau_key]))
+        tau_keys = [tau_key] if isinstance(tau_key, str) else list(tau_key)
+        tau = float(np.exp(sum(self.theta[k] for k in tau_keys)))
         u = np.array(u0, np.float64)
         for k in keys:
             u = u + self.theta[k] * comps[k]
@@ -485,20 +560,26 @@ class Strategy:
         if gacc is not None:
             for k in keys:
                 gacc[k] += (comps[k][action] - float(pi @ comps[k])) / tau
-            gacc[tau_key] += -(z[action] - float(pi @ z))
+            for k in tau_keys:
+                gacc[k] += -(z[action] - float(pi @ z))
         return action, pi.astype(np.float32)
 
-    def _allocate(self, ms, kappa, present):
+    def _allocate(self, ms, kappa, present, timing, dist):
         lead_team = self._team_leader(ms, present)
         order = [lead_team] + [j for j in present if j != lead_team]
         self.alloc, self.acomps = {}, {}
-        nA = K_CARTS * len(ROLES)
+        P = len(ms.get("posts", []))
+        nc = K_CARTS * len(ROLES)
+        nA = nc + P
         for j in order:
             u0 = np.zeros(nA)
             supp = np.zeros(nA)
             leadp = np.zeros(nA)
-            prev = self.prev_alloc.get(j, np.full(nA, 1.0 / nA))
             gram = np.zeros(nA)
+            tcomp = np.zeros(nA)
+            prev = self.prev_alloc.get(j)
+            if prev is None or len(prev) != nA:
+                prev = np.full(nA, 1.0 / nA)
             for c in range(K_CARTS):
                 i = c * len(ROLES)
                 if c >= ms["carts"]:
@@ -509,22 +590,50 @@ class Strategy:
                 u0[i + 2] = 0.4 if ctl == j else 0.0
                 if ctl not in (0, j):
                     supp[i + 1] = 1.0
-                    gram[i + 1] = float(kappa[(j - 1) * K_CARTS + c,
-                                              (ctl - 1) * K_CARTS + c])
+                    gram[i + 1] = float(kappa[(j - 1) * NINST + c,
+                                              (ctl - 1) * NINST + c])
                 if j != lead_team and lead_team in self.alloc:
                     leadp[i + 1] = float(self.alloc[lead_team][i + 0])
+            for pp in range(P):
+                q = nc + pp
+                post = ms["posts"][pp]
+                u0[q] = 0.3 * float(post["rank"]) + 0.5 * float(dist[j][pp])
+                tcomp[q] = float(timing[pp])
+                gi = (j - 1) * NINST + K_CARTS + pp
+                gram[q] = max((float(kappa[gi, (o - 1) * NINST + K_CARTS + pp])
+                               for o in present if o != j), default=0.0)
+                if j != lead_team and lead_team in self.alloc:
+                    leadp[q] = float(self.alloc[lead_team][q])
             comps = dict(suppress_appetite=supp, lead_bias=leadp,
-                         cart_inertia=prev, gram_weight=gram)
+                         cart_inertia=prev, gram_weight=gram,
+                         item_appetite=tcomp)
             _, pi = self._quantal(u0, comps,
                                   ["suppress_appetite", "lead_bias",
-                                   "cart_inertia", "gram_weight"],
+                                   "cart_inertia", "gram_weight",
+                                   "item_appetite"],
                                   "log_tau_team", None)
             self.alloc[j] = pi.astype(np.float64)
             self.acomps[j] = (u0, comps)
             self.prev_alloc[j] = pi.astype(np.float64)
         return lead_team
 
-    def tick(self, X, G2, mixes, kappa, ms, boundary, sample):
+    @staticmethod
+    def _cell_inst(cell):
+        nc = K_CARTS * len(ROLES)
+        if cell < nc:
+            return cell // len(ROLES), cell % len(ROLES)
+        return K_CARTS + (cell - nc), 3
+
+    @staticmethod
+    def _quota(pi, n):
+        q = np.floor(pi * n).astype(np.int64)
+        rem = n - int(q.sum())
+        if rem > 0:
+            order = np.argsort(-(pi * n - q), kind="stable")
+            q[order[:rem]] += 1
+        return q
+
+    def tick(self, X, G2, mixes, kappa, ms, boundary, sample, itimer=None):
         n = X.shape[0]
         team = X[:, 1].astype(np.int32)
         ids = X[:, 0].astype(np.int32)
@@ -535,71 +644,125 @@ class Strategy:
         pick = np.zeros(n, np.float32)
         Wt = np.full((n, TEAMS), 1.0 / TEAMS, np.float32)
         lead = np.zeros(n, np.float32)
-        cart = np.zeros(n, np.int32)
+        inst = np.zeros(n, np.int32)
         present = sorted(set(int(t) for t in team) & set(range(1, TEAMS + 1)))
         if not present:
-            return pick, Wt, lead, cart
+            return pick, Wt, lead, inst
+        posts = ms.get("posts", [])
+        P = len(posts)
+        nc = K_CARTS * len(ROLES)
         if boundary:
-            self._allocate(ms, kappa, present)
+            timing = [itimer.timing(pp, posts[pp]["avail"]) if itimer
+                      else (1.0 if posts[pp]["avail"] else 0.3)
+                      for pp in range(P)]
+            dist = {}
+            for j in present:
+                rows = np.nonzero(team == j)[0]
+                dist[j] = [float(np.clip(
+                    1.0 - np.linalg.norm(X[rows, 5:8] - posts[pp]["pos"],
+                                         axis=1).mean() / 2.0, 0.0, 1.0))
+                    for pp in range(P)]
+            self._allocate(ms, kappa, present, timing, dist)
         nodemix = {}
         for j in present:
             others = [mixes[o]["nodes"] for o in mixes if o != j]
             nodemix[j] = (np.mean(others, axis=0) if others
                           else np.full((K_CARTS, TEAMS), 1.0 / TEAMS)).astype(np.float64)
+        akeys = ["suppress_appetite", "lead_bias", "cart_inertia",
+                 "gram_weight", "item_appetite"]
         for j in present:
             rows = np.nonzero(team == j)[0]
-            A = self.alloc.get(j)
-            if A is None:
+            if self.alloc.get(j) is None:
                 continue
             li = self._pick_leader(j, ids[rows], dom[rows])
             lrow = rows[li]
             lead[lrow] = 1.0
             gacc = self.g[j] if (boundary and sample) else None
-            u0, comps = self.acomps[j]
-            akeys = ["suppress_appetite", "lead_bias", "cart_inertia", "gram_weight"]
+            if boundary:
+                u0, comps = self.acomps[j]
+                ai, pish = self._quantal(u0, comps, akeys,
+                                         ["log_tau_team", "log_tau_portfolio"],
+                                         gacc, None, sample)
+                if gacc is not None:
+                    self.ndec[j] += 1
+                quota = self._quota(np.asarray(pish, np.float64)
+                                    / max(1e-9, float(np.sum(pish))), len(rows))
+                if quota[ai] == 0:
+                    quota[np.argmax(quota)] -= 1
+                    quota[ai] += 1
+                self.last_quota[j] = (quota.copy(), len(rows))
+                assign = {int(ids[lrow]): ai}
+                quota[ai] -= 1
+                free = [r for r in rows if r != lrow]
+                for cell in np.argsort(-pish, kind="stable"):
+                    need = int(quota[cell])
+                    if need <= 0 or not free:
+                        continue
+                    ci, role = self._cell_inst(int(cell))
+                    if role == 3:
+                        suit = [-float(dom[r]) for r in free]
+                    else:
+                        bc = np.clip(X[np.array(free), 15], 0,
+                                     ITEM_BASE + P_MAX - 1).astype(np.int32) // TEAMS
+                        suit = [float(X[r, 11]) + 800.0 * (int(bc[i2]) != ci)
+                                for i2, r in enumerate(free)]
+                    took = [free[i2] for i2 in np.argsort(suit, kind="stable")[:need]]
+                    for r in took:
+                        assign[int(ids[r])] = int(cell)
+                        free.remove(r)
+                for r in free:
+                    assign[int(ids[r])] = ai
+                for r in rows:
+                    cell = assign[int(ids[r])]
+                    ci, role = self._cell_inst(cell)
+                    self.held[int(ids[r])] = (ci, role, 0)
+            leader_hd = self.held.get(int(ids[lrow]))
             ordered = [lrow] + [r for r in rows if r != lrow]
             for r in ordered:
                 bid = int(ids[r])
-                if boundary:
-                    ai, _ = self._quantal(u0, comps, akeys, "log_tau_team",
-                                          gacc, None, sample)
-                    c, role = divmod(ai, len(ROLES))
-                else:
-                    hd = self.held.get(bid)
-                    c, role = (hd[0], hd[1]) if hd else (0, 0)
+                hd = self.held.get(bid) or (0, 0, 0)
+                ci, role = hd[0], hd[1]
+                inst[r] = ci
+                if role == 3:
+                    pp = ci - K_CARTS
+                    pick[r] = float(ITEM_BASE + pp)
+                    W = np.zeros(TEAMS, np.float32)
+                    W[0] = 1.0
+                    Wt[r] = W
+                    if boundary:
+                        self.held[bid] = (ci, role, 0)
+                    continue
                 sgn = -1.0 if role == 1 else 1.0
-                sl = sgn * Gs[r, c]
-                mnode = nodemix[j][c]
+                sl = sgn * Gs[r, ci]
+                mnode = nodemix[j][ci]
                 if r == lrow:
                     cn = dict(score_leader=sl, fp_leader=mnode)
                     a, pi = self._quantal(np.zeros(TEAMS), cn,
                                           ["score_leader", "fp_leader"],
                                           "log_tau_leader", gacc,
-                                          None if boundary else
-                                          (self.held.get(bid) or (0, 0, None))[2],
+                                          None if boundary else hd[2],
                                           sample and boundary)
                     if boundary:
-                        self.held_leader[j] = (c, a)
+                        self.held_leader[j] = (ci, a)
                 else:
-                    lc, la = self.held_leader.get(j, (c, None))
+                    lc, la = self.held_leader.get(j, (ci, None))
                     onehot = np.zeros(TEAMS)
-                    if la is not None and lc == c:
+                    if (la is not None and lc == ci and leader_hd
+                            and leader_hd[1] != 3):
                         onehot[la] = 1.0
                     cn = dict(score_follower=sl, fp_follower=mnode, commit=onehot)
                     a, pi = self._quantal(np.zeros(TEAMS), cn,
                                           ["score_follower", "fp_follower", "commit"],
                                           "log_tau_follower", gacc,
-                                          None if boundary else
-                                          (self.held.get(bid) or (0, 0, None))[2],
+                                          None if boundary else hd[2],
                                           sample and boundary)
                 if boundary:
-                    self.held[bid] = (c, role, a)
+                    self.held[bid] = (ci, role, a)
                     if gacc is not None:
                         self.ndec[j] += 1
-                pick[r] = float(a)
+                pick[r] = float(a + TEAMS * ci)
                 Wt[r] = pi
-                cart[r] = c
-        return pick, Wt, lead, cart
+        return pick, Wt, lead, inst
 
     def held_view(self, X):
         team = X[:, 1].astype(np.int32)
@@ -623,9 +786,11 @@ class Strategy:
                 self.base[j] = 0.9 * self.base[j] + 0.1 * float(R[j])
         for k in ("log_tau_leader", "log_tau_follower", "log_tau_team"):
             self.theta[k] = float(np.clip(self.theta[k], -3.0, 3.0))
+        self.theta["log_tau_portfolio"] = float(
+            np.clip(self.theta["log_tau_portfolio"], -3.0, 3.0))
         for k in ("commit", "fp_leader", "fp_follower", "score_leader",
                   "score_follower", "suppress_appetite", "lead_bias",
-                  "cart_inertia", "gram_weight"):
+                  "cart_inertia", "gram_weight", "item_appetite"):
             self.theta[k] = float(np.clip(self.theta[k], -4.0, 4.0))
         self.eps += 1
         self._reset_episode()
@@ -639,7 +804,8 @@ class Strategy:
                 f"fp_F {t['fp_follower']:.2f} score_L {t['score_leader']:.2f} "
                 f"score_F {t['score_follower']:.2f} "
                 f"supp {t['suppress_appetite']:.2f} leadbias {t['lead_bias']:.2f} "
-                f"inertia {t['cart_inertia']:.2f} gram {t['gram_weight']:.2f}")
+                f"inertia {t['cart_inertia']:.2f} gram {t['gram_weight']:.2f} "
+                f"item {t['item_appetite']:.2f} tau_P {np.exp(t['log_tau_portfolio']):.2f}")
 
     def alloc_line(self, present):
         parts = []
@@ -650,6 +816,10 @@ class Strategy:
             cs = " ".join(
                 f"c{c}[p{A[c*3]:.2f} s{A[c*3+1]:.2f} e{A[c*3+2]:.2f}]"
                 for c in range(K_CARTS))
+            nc = K_CARTS * len(ROLES)
+            if len(A) > nc:
+                cs += " " + " ".join(f"i{pp}[{A[nc+pp]:.2f}]"
+                                     for pp in range(len(A) - nc))
             mark = "*" if j == self.team_lead else " "
             parts.append(f"j{j}{mark}{cs}")
         return "  ".join(parts)
@@ -657,12 +827,15 @@ class Strategy:
 
 def gram_line(kappa, ms):
     pairs = []
-    for c in range(ms["carts"]):
+    insts = list(range(ms["carts"])) + [K_CARTS + pp
+                                         for pp in range(len(ms.get("posts", [])))]
+    for c in insts:
+        nm = f"c{c}" if c < K_CARTS else f"i{c - K_CARTS}"
         for a in range(1, TEAMS + 1):
             for b in range(a + 1, TEAMS + 1):
-                v = float(kappa[(a - 1) * K_CARTS + c, (b - 1) * K_CARTS + c])
+                v = float(kappa[(a - 1) * NINST + c, (b - 1) * NINST + c])
                 if v != 0.0:
-                    pairs.append((abs(v), f"c{c} j{a}-j{b} {v:+.2f}"))
+                    pairs.append((abs(v), f"{nm} j{a}-j{b} {v:+.2f}"))
     pairs.sort(reverse=True)
     return "gram contest: " + (" ".join(p[1] for p in pairs[:4]) if pairs else "none")
 
@@ -676,7 +849,7 @@ class SynthEnv:
     progress back toward the origin, damped by the controller's escorts. One
     bot per team carries a dominant resource tuple."""
 
-    def __init__(self, seed, teams=3, bots=6):
+    def __init__(self, seed, teams=3, bots=6, items=True):
         self.g = np.random.default_rng(seed)
         self.nteams, self.bots = teams, bots
         self.prog = np.full(K_CARTS, 0.1)
@@ -686,10 +859,22 @@ class SynthEnv:
         self.cps = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
         self.regress = np.zeros(K_CARTS, bool)
         self.held = {}
+        self.tick_n = 0
+        self.posts = [
+            dict(pos=np.array([0.8, 0.2, 0.1]), rank=2.0, period=37,
+                 avail=True, respawn=0, up_t=None),
+            dict(pos=np.array([-0.6, 0.7, 0.0]), rank=1.0, period=53,
+                 avail=True, respawn=0, up_t=None),
+            dict(pos=np.array([0.1, -0.8, 0.2]), rank=1.0, period=44,
+                 avail=True, respawn=0, up_t=None)]
+        if not items:
+            self.posts = []
+        self.boost = {}
+        self.delays = []
 
     def rows(self):
         n = self.nteams * self.bots
-        X = np.zeros((n, 26), np.float32)
+        X = np.zeros((n, 26 + ITEM_COLS * len(self.posts)), np.float32)
         X[:, 0] = np.arange(n)
         X[:, 1] = np.repeat(np.arange(1, self.nteams + 1), self.bots)
         X[:, 2] = 100.0
@@ -699,7 +884,12 @@ class SynthEnv:
         X[:, 12] = self.prog[0]
         for i in range(n):
             hd = self.held.get(i)
-            X[i, 15] = float(hd[1] * TEAMS + hd[3]) if hd else 0.0
+            if hd:
+                X[i, 15] = float(hd[1] * TEAMS + hd[3]) if hd[1] < K_CARTS \
+                    else float(ITEM_BASE + hd[1] - K_CARTS)
+                if hd[1] >= K_CARTS:
+                    X[i, 5:8] = (self.posts[hd[1] - K_CARTS]["pos"]
+                                 + self.g.standard_normal(3) * 0.05)
         for j in range(1, self.nteams + 1):
             sel = X[:, 1] == j
             X[sel, 16] = 2.0
@@ -707,14 +897,45 @@ class SynthEnv:
             first = np.nonzero(sel)[0][0]
             X[first, 16] = 7.0
             X[first, 17] = 1.0
+        for i in range(n):
+            if self.boost.get(i, -1) >= self.tick_n:
+                X[i, 16] = 7.0
+                X[i, 17] = 1.0
         for c in range(K_CARTS):
             X[:, 20 + 3 * c] = self.prog[c]
             X[:, 21 + 3 * c] = float(self.controller[c])
             X[:, 22 + 3 * c] = 1.0 if self.regress[c] else 0.0
+        for pp, post in enumerate(self.posts):
+            b = 26 + ITEM_COLS * pp
+            X[:, b:b + 3] = post["pos"].astype(np.float32)
+            X[:, b + 3] = 1.0 if post["avail"] else 0.0
+            X[:, b + 4] = post["rank"]
         return X
 
     def step(self, held):
         self.held = dict(held)
+        self.tick_n += 1
+        for pp, post in enumerate(self.posts):
+            inst = K_CARTS + pp
+            if not post["avail"]:
+                if self.tick_n >= post["respawn"]:
+                    post["avail"] = True
+                    post["up_t"] = self.tick_n
+                continue
+            if post["avail"]:
+                ctrl = np.zeros(TEAMS + 1, np.int32)
+                for b, (j, cc, r, nd) in self.held.items():
+                    if cc == inst and r == 3:
+                        ctrl[j] += 1
+                if ctrl.max() > 0:
+                    captor = int(np.argmax(ctrl))
+                    post["avail"] = False
+                    post["respawn"] = self.tick_n + post["period"]
+                    if post["up_t"] is not None:
+                        self.delays.append(self.tick_n - post["up_t"])
+                    for b, (j, cc, r, nd) in self.held.items():
+                        if cc == inst and r == 3 and j == captor:
+                            self.boost[b] = self.tick_n + 15
         for c in range(K_CARTS):
             if self.prog[c] >= 1.0:
                 self.prog[c] = 0.1
@@ -727,7 +948,7 @@ class SynthEnv:
                 if cc != c:
                     continue
                 if r == 0:
-                    pushc[j] += 1
+                    pushc[j] += 2 if self.boost.get(b, -1) >= self.tick_n else 1
                 elif r == 1 and j != self.controller[c]:
                     supp += 1
                 elif r == 2 and j == self.controller[c]:
@@ -735,7 +956,7 @@ class SynthEnv:
             if pushc.max() > 0 and pushc[self.controller[c]] < pushc.max():
                 self.controller[c] = int(np.argmax(pushc))
             ctl = int(self.controller[c])
-            d = 0.012 * max(0, pushc[ctl] - 1) - 0.008 * np.sqrt(max(0.0, supp - 0.5 * esc))
+            d = 0.02 * pushc[ctl] - 0.012 * np.sqrt(max(0.0, supp - 0.5 * esc))
             d += float(self.g.standard_normal()) * 0.001
             self.regress[c] = d < 0
             self.prog[c] = float(np.clip(self.prog[c] + d, 0.0, 1.0))
@@ -746,28 +967,34 @@ class SynthEnv:
 
 
 def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
-              strat=None, train=True, lead_bias=None):
+              strat=None, train=True, overrides=None, explore=None,
+              env_items=True):
     solver = CtxSolver(T, "mlx" if mx is not None else "np")
     if strat is None:
         strat = Strategy(theta_path, seed, lr)
     else:
         strat.rng = np.random.default_rng(seed)
-    if lead_bias is not None:
-        strat.theta["lead_bias"] = lead_bias
+    for k, v in (overrides or {}).items():
+        strat.theta[k] = v
+    sample = train if explore is None else explore
     meter = MatchMeter()
-    env = SynthEnv(seed + 1)
+    itimer = ItemTracker()
+    env = SynthEnv(seed + 1, items=env_items)
     banked, rets = [], []
-    gang_m, gang_p, conc = [], [], []
+    gang_m, gang_p, conc, spread = [], [], [], []
+    anti, waste = [], []
     for ep in range(episodes):
         for t in range(ep_ticks):
             X = env.rows()
-            ms = bind_match(X)
+            ms = bind_match(X, items=True)
+            itimer.tick(ms["posts"])
             meter.tick(X, ms)
             ms["score"] = meter.cum.copy()
             if t % hold == 0:
                 G = solver.solve(X)
                 mixes = solver.mixes()
-                strat.tick(X, solver.G2, mixes, solver.kappa, ms, True, train)
+                strat.tick(X, solver.G2, mixes, solver.kappa, ms, True, sample,
+                           itimer)
                 lt = strat.team_lead
                 lead_carts = [c for c in range(K_CARTS)
                               if ms["controller"][c] == lt]
@@ -775,16 +1002,30 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                     A = strat.alloc.get(j)
                     if A is None:
                         continue
-                    conc.append(max(float(A[c*3:(c+1)*3].sum())
-                                    for c in range(K_CARTS)))
-                    if j != lt and lead_carts:
-                        gang_p.append(sum(float(A[c*3+1]) for c in lead_carts))
-                for b, (j, c, r, nd) in strat.held_view(X).items():
+                    nc2 = K_CARTS * len(ROLES)
+                    imass = [float(A[c*3:(c+1)*3].sum()) for c in range(K_CARTS)] \
+                        + [float(v) for v in A[nc2:]]
+                    conc.append(max(imass))
+                    if j != lt and lead_carts and j in strat.last_quota:
+                        q, nb = strat.last_quota[j]
+                        gang_p.append(sum(float(q[c*3+1]) for c in lead_carts) / nb)
+                hv = strat.held_view(X)
+                per_team = {}
+                for b, (j, c, r, nd) in hv.items():
                     if j != lt and lead_carts:
                         gang_m.append(float(r == 1 and c in lead_carts))
+                    per_team.setdefault(j, set()).add((c, r))
+                for j, cells in per_team.items():
+                    spread.append(len(set(c for c, r in cells)))
+                for pp, post in enumerate(env.posts):
+                    if not post["avail"]:
+                        tt = post["respawn"] - env.tick_n
+                        m = sum(float(strat.alloc[j][K_CARTS * len(ROLES) + pp])
+                                for j in strat.alloc)
+                        (anti if tt <= ITEM_HORIZON else waste).append(m)
             else:
                 strat.tick(X, solver.G2, solver.mixes(), solver.kappa, ms,
-                           False, train)
+                           False, sample, itimer)
             env.step(strat.held_view(X))
         R, dirs, dprog, dbank, push = meter.finish()
         if train:
@@ -803,7 +1044,12 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                  pred=float(np.mean(gang_p)) if gang_p else 0.0,
                  conc=float(np.mean(conc[-max(1, len(conc)//4):])) if conc else 0.0,
                  bank_meter=float(meter.cum[1:env.nteams + 1].sum()),
-                 bank_truth=float(env.score[1:env.nteams + 1].sum()))
+                 bank_truth=float(env.score[1:env.nteams + 1].sum()),
+                 spread=float(np.mean(spread)) if spread else 0.0,
+                 delay=float(np.mean(env.delays)) if env.delays else -1.0,
+                 captures=len(env.delays),
+                 anti=float(np.mean(anti)) if anti else 0.0,
+                 waste=float(np.mean(waste)) if waste else 0.0)
     return np.array(rets), np.array(banked), strat, stats
 
 
@@ -876,6 +1122,16 @@ def check(rows):
     report("meter banks watermarked crossings", mt.cum[1] == 6.0,
            f"0.15->0.25 (+1), regress-recross (+0), ->0.99 (+3), ->1.0 (+1), "
            f"reset, ->0.25 (+1): cum {int(mt.cum[1])} == 6")
+    it = ItemTracker()
+    seq = [1, 1, 1] + [0] * 10 + [1, 1] + [0] * 10 + [1] + [0] * 7
+    for av in seq:
+        it.tick([dict(avail=bool(av))])
+    tim = it.timing(0, False)
+    report("item tracker learns the respawn period",
+           it.period.get(0) == 10.0 and abs(tim - 0.8) < 1e-9
+           and it.timing(0, True) == 1.0,
+           f"toggle history gives period {it.period.get(0)}, timing ramps to "
+           f"{tim:.2f} four ticks out, 1.0 while up")
     st2 = Strategy("", 1)
     ms0 = dict(carts=K_CARTS, prog=np.array([0.5, 0.5]),
                controller=np.array([1, 0], np.int32),
@@ -997,6 +1253,7 @@ def main():
     ap.add_argument("--train-seed", type=int, default=SEED)
     ap.add_argument("--theta", default=THETA_PATH)
     ap.add_argument("--eval", action="store_true")
+    ap.add_argument("--items", action="store_true")
     a = ap.parse_args()
 
     if a.check:
@@ -1017,28 +1274,68 @@ def main():
         print(f"synth: gang-up: P(trailing suppression on leader cart) "
               f"{stats['gang']:.3f} (closed-form prediction {stats['pred']:.3f})",
               flush=True)
-        print(f"synth: pigeonhole: mean max-cart allocation mass "
-              f"{stats['conc']:.2f} (full-cover impossible; 0.50 = even split, "
-              f"higher = commit or concede)", flush=True)
+        print(f"synth: portfolio concentration (reported): mean max instrument "
+              f"mass {stats['conc']:.2f} over the last quarter; the expressible "
+              f"range is asserted by the tau_P knob below", flush=True)
         print(f"synth: banking measured from wire crossings {stats['bank_meter']:.0f} "
               f"vs environment truth {stats['bank_truth']:.0f}", flush=True)
         ev = max(10, a.synth // 10)
         _, _, _, s_on = run_synth(ev, a.ctx, a.train_seed + 5, a.episode, a.hold,
                                   a.lr, "", log=False,
-                                  strat=Strategy("", a.train_seed + 5), train=False)
+                                  strat=Strategy("", a.train_seed + 5), train=False,
+                                  overrides={"suppress_appetite": 0.0,
+                                             "lead_bias": 2.0},
+                                  explore=True, env_items=False)
         _, _, _, s_off = run_synth(ev, a.ctx, a.train_seed + 5, a.episode, a.hold,
                                    a.lr, "", log=False,
                                    strat=Strategy("", a.train_seed + 5), train=False,
-                                   lead_bias=0.0)
+                                   overrides={"suppress_appetite": 0.0,
+                                              "lead_bias": 0.0},
+                                   explore=True, env_items=False)
         print(f"synth: counterfactual at init scalars: gang-up {s_on['gang']:.3f} "
-              f"with lead_bias {THETA['lead_bias']} vs {s_off['gang']:.3f} with "
-              f"lead_bias 0 (the commitment channel isolated)", flush=True)
+              f"with lead_bias 2 vs {s_off['gang']:.3f} with lead_bias 0, both at "
+              f"suppress_appetite 0, cart-only game - all suppression must flow "
+              f"through the committed-leader term", flush=True)
+        _, _, _, p_hi = run_synth(ev, a.ctx, a.train_seed + 9, a.episode, a.hold,
+                                  a.lr, "", log=False,
+                                  strat=Strategy("", a.train_seed + 9), train=False,
+                                  overrides={"log_tau_portfolio": 1.5}, explore=True)
+        _, _, _, p_lo = run_synth(ev, a.ctx, a.train_seed + 9, a.episode, a.hold,
+                                  a.lr, "", log=False,
+                                  strat=Strategy("", a.train_seed + 9), train=False,
+                                  overrides={"log_tau_portfolio": -2.0}, explore=True)
+        print(f"synth: portfolio concentration knob: mean instruments per team "
+              f"{p_hi['spread']:.2f} at tau_P e^1.5 vs {p_lo['spread']:.2f} at "
+              f"tau_P e^-2 (low tau_P = everyone on the leader's instrument)",
+              flush=True)
+        ton = Strategy("", a.train_seed + 13)
+        toff = Strategy("", a.train_seed + 13)
+        for k2 in strat.names:
+            ton.theta[k2] = strat.theta[k2]
+            toff.theta[k2] = strat.theta[k2]
+        _, _, _, i_on = run_synth(ev, a.ctx, a.train_seed + 13, a.episode, a.hold,
+                                  a.lr, "", log=False, strat=ton, train=False,
+                                  explore=True)
+        _, _, _, i_off = run_synth(ev, a.ctx, a.train_seed + 13, a.episode, a.hold,
+                                   a.lr, "", log=False, strat=toff, train=False,
+                                   overrides={"item_appetite": 0.0}, explore=True)
+        r_on = i_on["anti"] / (i_on["waste"] + 1e-9)
+        r_off = i_off["anti"] / (i_off["waste"] + 1e-9)
+        print(f"synth: item timing: allocation mass on a down post inside the last "
+              f"{ITEM_HORIZON:.0f} ticks before its estimated respawn vs earlier: "
+              f"{i_on['anti']:.2f}/{i_on['waste']:.2f} (ratio {r_on:.2f}) at learned "
+              f"item_appetite, {i_off['anti']:.2f}/{i_off['waste']:.2f} (ratio "
+              f"{r_off:.2f}) with item_appetite 0; {i_on['captures']}/"
+              f"{i_off['captures']} captures", flush=True)
         print(f"synth: learned scalars: {strat.table()}", flush=True)
         good = (banked[-k:].mean() > banked[:k].mean()
                 and abs(stats["gang"] - stats["pred"]) < 0.06
-                and stats["conc"] > 0.55
                 and s_on["gang"] > s_off["gang"] + 0.03
-                and abs(stats["bank_meter"] - stats["bank_truth"]) < 2.5)
+                and abs(stats["bank_meter"] - stats["bank_truth"]) < 2.5
+                and p_hi["spread"] > p_lo["spread"] + 1.0
+                and p_lo["spread"] < 2.0
+                and i_on["captures"] > 0 and i_off["captures"] > 0
+                and r_on > r_off + 0.15)
         sys.exit(0 if good else 1)
 
     trained = a.policy == "trained"
@@ -1054,19 +1351,33 @@ def main():
           f"request width from each block's header (16/20/26 all served, "
           f"combined cart*5+node objectives)", flush=True)
 
-    strat = meter = None
+    strat = meter = itimer = None
     if trained:
         strat = Strategy(a.theta, a.train_seed, a.lr)
         meter = MatchMeter()
+        itimer = ItemTracker()
         mode = "greedy eval, no updates" if a.eval else "sampling + online REINFORCE"
         print(f"worker: dominance = {DOM_FORMULA} (width-16 stream reads "
               f"weapons/powerup/since_spawn as 0)", flush=True)
         print(f"worker: allocation = inter-team Stackelberg: the score/tempo-dominant "
-              f"team (hysteresis {TEAM_HYST}) commits its (cart, role) allocation over "
-              f"push/suppress/escort first; trailing teams best-respond with lead_bias "
-              f"on its committed push mass, suppress_appetite on enemy carts, "
-              f"cart_inertia, and the window Gram's team-pair contest coupling",
+              f"team (hysteresis {TEAM_HYST}) commits its allocation over cart cells "
+              f"(push/suppress/escort) plus item-post control cells first; trailing "
+              f"teams best-respond with lead_bias on its committed mass, "
+              f"suppress_appetite on enemy carts, cart_inertia, item_appetite on "
+              f"post timing, and the window Gram's contest coupling", flush=True)
+        print(f"worker: portfolio = followers fill the tempered allocation's quotas by "
+              f"closed-form transport (suitability: dominance for posts, proximity "
+              f"for carts); low tau_P reproduces everyone-on-the-leader as one "
+              f"expressible shape among many", flush=True)
+        print(f"worker: item posts: DRAFT wire "
+              f"({'enabled' if a.items else 'off until the PORT.md contract lands'}): "
+              f"width>26 appends 6 columns per post (pos, availability bit, class "
+              f"rank, reserved); respawn phase is estimated from the availability "
+              f"bit's toggle history in the window (fictitious play over timers)",
               flush=True)
+        print(f"worker: feedback loop by design: holding a post raises that bot's "
+              f"resource tuple on later rows, which raises measured dominance, which "
+              f"shifts intra-team leadership and team strength", flush=True)
         print(f"worker: strategy = per-team Stackelberg nested inside the allocation: "
               f"most dominant bot leads node choice (hysteresis {HYSTERESIS}) by quantal "
               f"response over the solve's per-(cart,node) scores + the per-(team,cart) "
@@ -1108,14 +1419,15 @@ def main():
         n = done["rows"]
         X = rx.stage[:n]
         if trained:
-            ms = bind_match(X)
+            ms = bind_match(X, a.items)
             G = solver.solve(X)
+            itimer.tick(ms.get("posts", []))
             meter.tick(X, ms)
             ms["score"] = meter.cum.copy()
             boundary = tick_in_ep % a.hold == 0
-            pick, Wt, lead, cart = strat.tick(X, solver.G2, solver.mixes(),
-                                              solver.kappa, ms, boundary, not a.eval)
-            pick = pick + TEAMS * cart.astype(np.float32)
+            pick, Wt, lead, inst = strat.tick(X, solver.G2, solver.mixes(),
+                                              solver.kappa, ms, boundary,
+                                              not a.eval, itimer)
             tick_in_ep += 1
             if tick_in_ep >= a.episode:
                 R, dirs, dprog, dbank, push = meter.finish()
