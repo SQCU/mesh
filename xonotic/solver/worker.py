@@ -38,7 +38,7 @@ millisecond-scale motor control.
 """
 import argparse, os, sys, time
 import numpy as np
-from xonwire import (Mesh, Reassembler, TxWindow, REQ, RESP, REQ_WIDTH,
+from xonwire import (Mesh, Reassembler, TxWindow, parse_hdr, REQ, RESP, REQ_WIDTH,
                      RESP_WIDTH, TEAMS, rows_per_slot, pack_hdr, HDRSZ)
 
 SEED, EXPERTS, FF, HID = 20260828, 8, 2048, 64
