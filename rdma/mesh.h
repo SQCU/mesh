@@ -19,7 +19,14 @@
 
 // One page in flight. seq is assigned by the bridge and is only meaningful for
 // reassembling an ordering the application itself imposed.
-struct mesh_desc { uint32_t page, bytes, seq; uint16_t node, flags; };
+// What a page carries on the wire. src and dst name nodes; hops bounds a
+// forwarded page. There is nothing here for retransmission because there is no
+// retransmission: this hardware offers UC only, so the link drops what it
+// cannot deliver and the application is what notices.
+struct wire { uint32_t magic, bytes; uint16_t src, dst; uint8_t hops, pad[3]; };
+#define WIRE_MAGIC 0x4d534831u
+
+struct mesh_desc { uint32_t page, bytes; uint16_t node, pad; };
 
 // Single-producer single-consumer. Each ring has exactly one writer and one
 // reader, so neither side ever needs a lock or a compare-and-swap.
@@ -29,10 +36,9 @@ struct mesh_ring { _Alignas(MESH_CL) _Atomic uint64_t head;
 struct mesh_hdr {
   uint32_t magic, version, pgsz, npages;
   uint32_t ring_cap, node;
-  uint64_t data_off, free_off, sub_off, cmp_off, rel_off;
+  uint64_t data_off, sub_off, cmp_off, rel_off;
   uint64_t bytes, node_ram, arena_off;
   uint32_t arena_pages, hdr_bytes;
-  struct mesh_ring rfree;   // bridge -> app : pages you may use
   struct mesh_ring rsub;    // app -> bridge : send these
   struct mesh_ring rcmp;    // bridge -> app : these arrived
   struct mesh_ring rrel;    // app -> bridge : done with these

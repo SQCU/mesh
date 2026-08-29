@@ -339,3 +339,30 @@ endpoint, over the ordered page list, in place.
 Which is why a Quake match and a pipelined tensor algorithm are the same program: a
 stream of opaque bytes with a fixed destination, differing only in whether `f` at a
 hop is the identity.
+
+
+## There is no repair in the transport
+
+RDMA reliability is a property of the hardware transport, not of software above it. On a
+Reliable Connection the RNIC detects corruption with the invariant and variant CRCs carried
+in every frame and drops what fails, and it recovers loss with an ARQ pattern driven by
+packet sequence numbers, retransmitting from the sender's hardware buffer without the host
+CPU. There is no forward error correction and nothing for an application to implement.
+
+This device offers **UC only**; RC is rejected with errno 102. So the CRCs still mean a
+corrupt frame is dropped rather than delivered, and the absence of ARQ means a dropped frame
+is simply gone. The transport delivers what arrived. Anything missing is the application's to
+notice and send again, because the application is the only layer that knows what it asked
+for.
+
+An earlier version of this bridge implemented sequence tracking, a miss bitmap, NACK
+generation, a retransmit window and a sweep — a software imitation of hardware ARQ, at the
+wrong layer, without the hardware buffer that makes it work. It generated 7.3 million phantom
+gaps in five seconds on a link losing nothing, drove its own retransmit traffic from them,
+corrupted the page accounting, and ended in a kernel panic inside the vendor driver. All of
+it is deleted. The controller lost 43% of its code and gained the ability to run bidirectional
+traffic without falling over.
+
+What remains is the whole job: post receives into free pages, drain completions, hand each
+arrived page to the application or forward it, send what the application submits, and take
+back what it releases.

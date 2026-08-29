@@ -54,8 +54,7 @@ size_t mesh_write(const void *p, size_t nbytes, int node){
   size_t done = 0;
   while(done < nbytes && slot < G.h->arena_pages){
     uint32_t n = (uint32_t)(nbytes - done < g_usable ? nbytes - done : g_usable);
-    struct mesh_desc d = {.page = g_first + slot,
-                          .bytes = n, .seq = 0, .node = (uint16_t)node, .flags = 0};
+    struct mesh_desc d = {.page = g_first + slot, .bytes = n, .node = (uint16_t)node};
     if(mesh_push(&G,&G.h->rsub,G.h->sub_off,&d)) break;   // bridge is behind; come back
     done += n; slot++;
   }
