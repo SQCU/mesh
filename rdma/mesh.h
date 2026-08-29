@@ -15,7 +15,7 @@
 enum { FREE, RECV, SEND, APP, NOWN };
 enum { SUB, CMP, REL, NRING };
 struct wire { uint32_t magic, bytes; uint16_t src, dst, hops; };
-struct desc { uint32_t page, bytes, node; };
+struct desc { uint32_t page, bytes; uint16_t node; };
 struct ring { _Alignas(MESH_CL) _Atomic uint64_t head, tail; };
 struct hdr {
   uint32_t magic, version, pgsz, pool, arena, node;
@@ -27,6 +27,8 @@ struct hdr {
 struct mesh { struct hdr *h; unsigned char *b; };
 static inline unsigned char *mesh_at(struct mesh *m, uint32_t i){
   return m->b + m->h->data_off + (size_t)i * m->h->pgsz; }
+static inline unsigned char *mesh_data(struct mesh *m, uint32_t i){
+  return mesh_at(m,i) + sizeof(struct wire); }
 static inline uint32_t mesh_pay(struct mesh *m){
   return m->h->pgsz - (uint32_t)sizeof(struct wire); }
 static inline uint32_t mesh_clamp(struct mesh *m, uint32_t n){

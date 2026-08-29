@@ -605,10 +605,9 @@ There is one instrument. The bridge publishes a census of the page table and its
 the region once a second; `rdma/mesh-stat` reads it; `viz/serve.py` polls it and serves the
 viewer. Rates come from differencing `sent` and `recvd` against `uptime_ms`.
 
-Applications do not measure. `rdma/mesh-app` keeps no clock and computes no throughput; it
-reports only what it alone knows, which is whether bytes came back wrong. A second measurement
-path only disagrees with the first, and reading a rate off an application whose peer had
-silently failed to start is how several wrong numbers were reported here.
+Applications do not measure. A second measurement path only disagrees with the first, and
+reading a rate off an application whose peer had silently failed to start is how several wrong
+numbers were reported here.
 
 ### What runs today
 

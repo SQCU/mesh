@@ -72,14 +72,14 @@ int main(int argc,char**argv){
   if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,MESH_MODE);
   void *base=mmap(NULL,d0+span,PROT_READ|PROT_WRITE,MAP_SHARED,rf,0);
   if(base==MAP_FAILED) die("mmap"); memset(base,0,d0); shm=name;
-  struct mesh M={.h=base,.b=base}; struct hdr *H=M.h;
-  H->pgsz=pg; H->pool=pool; H->arena=np-pool; H->node=me; H->version=MESH_VERSION;
-  H->data_off=d0;
+  struct mesh M={.h=base,.b=base};
+  M.h->pgsz=pg; M.h->pool=pool; M.h->arena=np-pool; M.h->node=me; M.h->version=MESH_VERSION;
+  M.h->data_off=d0;
   char *mem=(char*)base+d0;
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
     if(nmr==64) die("too many regions");
     mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE); if(!mr[nmr++]) die("reg"); }
-  __sync_synchronize(); H->magic=MESH_MAGIC;
+  __sync_synchronize(); M.h->magic=MESH_MAGIC;
   fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d, %d regions\n",
           name,span/1e9,100.0*span/(double)ram,pool,nmr);
 
@@ -111,6 +111,9 @@ int main(int argc,char**argv){
   struct wf w[NOWN]={{0}}; double t0=now(), tel=t0;
   #define ADDR(i) ((char*)mesh_at(&M,(uint32_t)(i)))
   #define LKEY(i) (mr[(size_t)(i)*pg/CHUNK]->lkey)
+  #define POOL(i)  ((uint32_t)(i) < (uint32_t)pool)
+  #define VALID(i) ((uint32_t)(i) < (uint32_t)np)
+  #define BUMP(f) atomic_fetch_add_explicit(&M.h->f,1,memory_order_relaxed)
   #define MV(i,to) do{ n[own[i]]--; own[i]=(to); n[to]++; }while(0)
   #define GIVE(i)  do{ MV(i,FREE); fl[n[FREE]-1]=(i); }while(0)
   #define POST(i,op) ({ struct ibv_sge g={(uintptr_t)ADDR(i),(uint32_t)pg,LKEY(i)}; \
@@ -122,42 +125,41 @@ int main(int argc,char**argv){
     while(n[FREE] && !full){ int i=fl[n[FREE]-1];
       if(POST(i,0)){ full=1; break; } MV(i,RECV); }
     struct desc d;
-    while(!pop(&M,REL,&d)) if(d.page<(uint32_t)pool && own[d.page]==APP) GIVE(d.page);
-    if(atomic_load_explicit(&H->client,memory_order_acquire))
+    while(!pop(&M,REL,&d)) if(POOL(d.page) && own[d.page]==APP) GIVE(d.page);
+    uint64_t who=atomic_load_explicit(&M.h->client,memory_order_acquire);
+    if(who)
       while(!pop(&M,SUB,&d)){
-        uint32_t p=d.page; if(p>=(uint32_t)np) continue;
+        uint32_t p=d.page; if(!VALID(p)) continue;
         struct wire *w2=(struct wire*)ADDR(p);
         w2->magic=WIRE_MAGIC; w2->bytes=mesh_clamp(&M,d.bytes);
         w2->src=me; w2->dst=d.node; w2->hops=0;
         if(POST(p,1)) break;
-        if(p<(uint32_t)pool) MV(p,SEND);
-        atomic_fetch_add_explicit(&H->sent,1,memory_order_relaxed); }
+        if(POOL(p)) MV(p,SEND);
+        BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
-      if(i<0||i>=np) continue;
-      if(wc[j].opcode!=IBV_WC_RECV){ if(i<pool) GIVE(i); continue; }
+      if(!VALID(i)) continue;
+      if(wc[j].opcode!=IBV_WC_RECV){ if(POOL(i)) GIVE(i); continue; }
       full=0; if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
       struct wire *h=(struct wire*)ADDR(i);
       if(h->magic!=WIRE_MAGIC){ GIVE(i); continue; }
       h->hops++;
       if(h->dst!=(uint16_t)me && h->hops<=32){ if(!POST(i,1)) MV(i,SEND); else GIVE(i); continue; }
       struct desc c={.page=(uint32_t)i,.bytes=mesh_clamp(&M,h->bytes),.node=h->src};
-      if(!atomic_load_explicit(&H->client,memory_order_acquire) || push(&M,CMP,&c)) GIVE(i);
-      else { MV(i,APP); atomic_fetch_add_explicit(&H->recvd,1,memory_order_relaxed); } }
+      if(!who || push(&M,CMP,&c)) GIVE(i);
+      else { MV(i,APP); BUMP(recvd); } }
     for(int s=0;s<NOWN;s++) add(&w[s],n[s]);
     double tn=now();
     if(tn-tel>=1){
-      uint64_t c=atomic_load_explicit(&H->client,memory_order_acquire);
-      if(c && kill((pid_t)c,0) && errno==ESRCH){
+      if(who && kill((pid_t)who,0) && errno==ESRCH){
         for(int i=0;i<pool;i++) if(own[i]==APP) GIVE(i);
-        atomic_store_explicit(&H->r[SUB].tail,H->r[SUB].head,memory_order_release);
-        atomic_store_explicit(&H->r[CMP].head,H->r[CMP].tail,memory_order_release);
-        atomic_store_explicit(&H->r[REL].tail,H->r[REL].head,memory_order_release);
-        atomic_store_explicit(&H->client,0,memory_order_release); }
+        for(int k=0;k<NRING;k++)
+          atomic_store_explicit(&M.h->r[k].tail,M.h->r[k].head,memory_order_release);
+        atomic_store_explicit(&M.h->client,0,memory_order_release); }
       for(int s=0;s<NOWN;s++){
-        atomic_store_explicit(&H->mean[s],(uint64_t)w[s].mean,memory_order_relaxed);
-        atomic_store_explicit(&H->sd[s],(uint64_t)sqrt(w[s].n>1?w[s].m2/(w[s].n-1):0),memory_order_relaxed);
+        atomic_store_explicit(&M.h->mean[s],(uint64_t)w[s].mean,memory_order_relaxed);
+        atomic_store_explicit(&M.h->sd[s],(uint64_t)sqrt(w[s].n>1?w[s].m2/(w[s].n-1):0),memory_order_relaxed);
         w[s]=(struct wf){0}; }
-      atomic_store_explicit(&H->up_ms,(uint64_t)((tn-t0)*1000),memory_order_relaxed);
+      atomic_store_explicit(&M.h->up_ms,(uint64_t)((tn-t0)*1000),memory_order_relaxed);
       tel=tn; } }
   return 0; }

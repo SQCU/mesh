@@ -26,21 +26,21 @@ class Mesh:
         self.base, self.stride, self.usable = p, stride.value, usable.value
         self.slots = int(nbytes) // self.usable
 
+    def _view(self, first, n, dtype):
+        return np.ctypeslib.as_array(
+            ctypes.cast(self.base + first * self.stride,
+                        ctypes.POINTER(np.ctypeslib.as_ctypes_type(dtype))), (n,))
+
     def slot(self, i, dtype=np.float32, count=None):
         """A numpy view of one slot. No copy: this is mesh memory."""
-        n = count if count is not None else self.usable // np.dtype(dtype).itemsize
-        return np.ctypeslib.as_array(
-            ctypes.cast(self.base + i * self.stride,
-                        ctypes.POINTER(np.ctypeslib.as_ctypes_type(dtype))), (n,))
+        return self._view(i, count or self.usable // np.dtype(dtype).itemsize, dtype)
 
     def block(self, first, n):
         """A (n, usable) uint8 view of n consecutive slots. Strided, so it is
         not contiguous, but assignment into it is one vectorised copy instead
         of a Python loop per slot."""
-        raw = np.ctypeslib.as_array(
-            ctypes.cast(self.base + first * self.stride, ctypes.POINTER(ctypes.c_uint8)),
-            (n * self.stride,))
-        return raw.reshape(n, self.stride)[:, :self.usable]
+        return self._view(first, n * self.stride, np.uint8) \
+                   .reshape(n, self.stride)[:, :self.usable]
 
     def write(self, first, nslots, node):
         """Send slots [first, first+nslots). Returns slots taken; call again
