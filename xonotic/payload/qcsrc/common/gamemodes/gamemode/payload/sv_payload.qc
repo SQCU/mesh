@@ -26,8 +26,8 @@ float autocvar_g_payload_push_radius = 160;
 float autocvar_g_payload_push_height = 96;
 int autocvar_g_payload_push_cap = 3;
 float autocvar_g_payload_push_falloff = 1;
-float autocvar_g_payload_idle_time = 8;
-float autocvar_g_payload_rollback_speed = 20;
+float autocvar_g_payload_contest_speed = 24;
+float autocvar_g_payload_reverse_speed = 14;
 float autocvar_g_payload_score_rate = 0.01;
 float autocvar_g_payload_block_rate = 1;
 float autocvar_g_payload_stall_eps = 1;
@@ -134,17 +134,6 @@ void payload_occupancy(entity cart)
 		}
 		payload_w[j] = w;
 	}
-}
-
-float payload_rollback_target(entity cart)
-{
-	float best = 0;
-	IL_EACH(g_payload_nodes, it.plc_cart == cart && (it.spawnflags & PLC_CHECKPOINT),
-	{
-		if(it.plc_dist < cart.plc_s && it.plc_dist > best)
-			best = it.plc_dist;
-	});
-	return best;
 }
 
 int payload_pack_push()
@@ -269,6 +258,31 @@ void payload_bank_points(entity this, int ctrl, float s_prev, float s_new)
 	});
 }
 
+void payload_unbank_points(entity this, float s_prev, float s_new)
+{
+	// The cart retreated from s_prev down to s_new (s_new < s_prev). Every banked
+	// control point it uncrosses is freed — a retreat destroys banked position,
+	// not just tempo (design/payload-strategy-spec.md §2). Frees any team's bank,
+	// since the progress that earned it is being erased.
+	IL_EACH(g_payload_nodes, it.plc_cart == this && it.plc_dist <= s_prev && it.plc_dist > s_new,
+	{
+		if(!it.plc_banked)
+			continue;
+		int ct = it.plc_bank_team;
+		int t = Team_IndexToTeam(ct);
+		it.plc_banked = 0;
+		it.plc_bank_team = 0;
+		if(payload_round_banks[ct] > 0)
+			payload_round_banks[ct] -= 1;
+		TeamScore_AddToTeam(t, ST_PAYLOAD_POINTS, -autocvar_g_payload_point_score);
+		LOG_INFO(strcat("payload: unbank cart ", ftos(this.plc_cart_id), " team ", ftos(t),
+			" point ", ftos(it.plc_idx), " s ", ftos(it.plc_dist)));
+		payload_EventLog(strcat("unbank:", ftos(this.plc_cart_id), ":", ftos(it.plc_idx)), t);
+		if(it.sprite)
+			WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, '0.5 0.5 0.5');
+	});
+}
+
 void payload_clear_progress(entity this)
 {
 	IL_EACH(g_payload_nodes, it.plc_cart == this,
@@ -306,32 +320,58 @@ void payload_think(entity this)
 	}
 	if(tie)
 		ctrl = 0;
-	this.plc_ctrl = ctrl;
+	// --- Two-regime signed velocity ---
+	// design/payload-strategy-spec.md §2 (the game), design/cart-force-field.md
+	// (the continuous/differentiable form). plc_ctrl is the cart's *sticky color*
+	// — the team it banks for, changed only at origin; `ctrl` is this tick's
+	// instantaneous plurality.
+	int color = this.plc_ctrl;
 
-	float pplus = ctrl ? payload_w[ctrl] : 0;
-	float drag = total - pplus;
-	float v = bound(0, this.speed * pplus / (1 + drag * drag), autocvar_g_payload_max_speed);
-	float target = 0;
-	bool rolling = false;
+	// A neutral cart (fresh, or just collapsed to origin) is claimed by whoever
+	// holds the plurality now.
+	if(color == 0 && ctrl)
+		color = this.plc_ctrl = ctrl;
+
+	float wA = color ? payload_w[color] : 0;   // the color team's presence
+	float wopp = total - wA;                    // every other team present
+
+	// strongest present opposing team — the one that walks an abandoned cart home
+	int opp = 0; float oppw = 0;
+	for(int j = 1; j <= NUM_TEAMS; ++j)
+		if(j != color && payload_w[j] > oppw) { oppw = payload_w[j]; opp = j; }
+
+	float v;
+	if(color && wA > 0)
+	{
+		// Regime A — contested: bounded local tug-of-war. Backward drift is
+		// capped at contest_speed while defenders are present, so a cart being
+		// fought over stays near where the fight is; it is never driven home
+		// while its own team is still swinging.
+		v = this.speed * (wA - wopp) / (1 + wopp * wopp);
+		v = bound(-autocvar_g_payload_contest_speed, v, autocvar_g_payload_max_speed);
+	}
+	else if(color && oppw > 0)
+	{
+		// Regime B — abandoned: the color team has left; the strongest opponent
+		// walks the cart back toward origin, linear in its player count (this is
+		// capture, not contest — no quadratic damping).
+		v = -autocvar_g_payload_reverse_speed * oppw;
+		v = bound(-autocvar_g_payload_max_speed, v, 0);
+	}
+	else
+	{
+		// empty, or a colored cart with no opposition present: it waits.
+		v = 0;
+	}
 
 	if(total <= 0)
-	{
 		this.plc_idle += PLC_TICK;
-		if(this.plc_idle >= autocvar_g_payload_idle_time && this.plc_s > 0)
-		{
-			target = payload_rollback_target(this);
-			rolling = true;
-			v = -autocvar_g_payload_rollback_speed;
-		}
-	}
 	else
 		this.plc_idle = 0;
 
 	v = live ? v : 0;
 	float s_prev = this.plc_s;
 	float s_new = bound(0, this.plc_s + v * PLC_TICK, this.plc_length);
-	if(rolling)
-		s_new = max(s_new, target);
 	this.plc_s = s_new;
 	this.plc_speed_now = (s_new - s_prev) / PLC_TICK;
 
@@ -345,21 +385,24 @@ void payload_think(entity this)
 			this.angles = vectoangles(ahead);
 	}
 
-	if(ctrl && s_new > s_prev)
-		payload_bank_points(this, ctrl, s_prev, s_new);
+	if(color && s_new > s_prev)
+		payload_bank_points(this, color, s_prev, s_new);
+	if(s_new < s_prev)
+		payload_unbank_points(this, s_prev, s_new);
 	if(s_new <= 0 && s_prev > 0)
 	{
 		payload_clear_progress(this);
-		LOG_INFO(strcat("payload: cart ", ftos(this.plc_cart_id), " regressed to origin, progress cleared"));
+		this.plc_ctrl = 0;   // recolor at origin: neutral, next plurality claims it
+		LOG_INFO(strcat("payload: cart ", ftos(this.plc_cart_id), " regressed to origin, recolored neutral"));
 		payload_EventLog("origin", this.plc_cart_id);
 	}
 
-	float gain = (s_new > s_prev && ctrl && payload_n[ctrl] > 0)
-		? (s_new - s_prev) * autocvar_g_payload_score_rate / payload_n[ctrl] : 0;
+	float gain = (s_new > s_prev && color && payload_n[color] > 0)
+		? (s_new - s_prev) * autocvar_g_payload_score_rate / payload_n[color] : 0;
 	bool stalled = (total > 0) && (fabs(this.plc_speed_now) < autocvar_g_payload_stall_eps);
 	FOREACH_CLIENT(IS_PLAYER(it) && it.plc_in,
 	{
-		if(gain > 0 && it.plc_in == ctrl)
+		if(gain > 0 && it.plc_in == color)
 			GameRules_scoring_add_float2int(it, PAYLOAD_PUSH, gain, plc_push_accum, 1);
 		if(stalled)
 			GameRules_scoring_add_float2int(it, PAYLOAD_BLOCK, autocvar_g_payload_block_rate * PLC_TICK, plc_block_accum, 1);
