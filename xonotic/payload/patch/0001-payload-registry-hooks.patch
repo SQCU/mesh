@@ -57,7 +57,7 @@ diff -ru a/common/stats.qh b/common/stats.qh
  
  // domination
  REGISTER_STAT(DOM_TOTAL_PPS, float)
-@@ -336,6 +337,13 @@
+@@ -336,6 +337,14 @@
  REGISTER_STAT(DOM_PPS_BLUE, float)
  REGISTER_STAT(DOM_PPS_YELLOW, float)
  REGISTER_STAT(DOM_PPS_PINK, float)
@@ -68,6 +68,7 @@ diff -ru a/common/stats.qh b/common/stats.qh
 +REGISTER_STAT(PAYLOAD_SPEED, float)
 +REGISTER_STAT(PAYLOAD_PUSH_PACKED, int)
 +REGISTER_STAT(PAYLOAD_GOALS_PACKED, int)
++REGISTER_STAT(PAYLOAD_CARTS_STATE, int)
  
  // nexball
  REGISTER_STAT(NB_METERSTART, float)

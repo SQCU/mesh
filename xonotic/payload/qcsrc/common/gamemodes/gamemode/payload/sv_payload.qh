@@ -17,7 +17,11 @@ void generic_plat_blocked(entity this, entity blocker);
 int autocvar_g_payload_point_leadlimit;
 
 IntrusiveList g_payload_nodes;
+IntrusiveList g_payload_links;
 void payload_Initialize();
+int payload_pack_cart_state();
+void payload_update_links(entity cart);
+bool payload_link_send(entity this, entity to, int sendflags);
 
 REGISTER_MUTATOR(plc, false)
 {
@@ -38,7 +42,6 @@ const float ST_PAYLOAD_POINTS = 2;
 
 const int PLC_CART_TURN = BIT(0);
 const int PLC_CHECKPOINT = BIT(0);
-const int PLC_MAX_CARTS = 4;
 
 const float PLC_TICK = 0.1;
 const float PLC_CURVE_STEPS = 16;
@@ -48,6 +51,7 @@ const float PLC_CURVE_STEPS = 16;
 .entity plc_curve;
 .entity plc_cart;
 .entity plc_first;
+.entity plc_link;
 .float plc_dist;
 .int plc_idx;
 .int plc_banked;

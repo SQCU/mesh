@@ -1,6 +1,7 @@
 #include "sv_payload.qh"
 
 #include <common/notifications/all.qh>
+#include <common/net_linked.qh>
 #include <common/mapobjects/defs.qh>
 #include <common/mapobjects/platforms.qh>
 #include <common/mapobjects/subs.qh>
@@ -34,6 +35,7 @@ float autocvar_g_payload_point_score = 1;
 float autocvar_g_payload_capture_radius = 64;
 float autocvar_g_payload_round_timelimit = 300;
 float autocvar_g_payload_warmup = 5;
+float autocvar_g_payload_node_fade_dist = 1100;
 
 .float plc_in;
 .float plc_block_accum;
@@ -166,6 +168,60 @@ int payload_pack_carts()
 	return packed;
 }
 
+int payload_pack_cart_state()
+{
+	int packed = 0;
+	for(int c = 0; c < payload_cart_count; ++c)
+	{
+		entity cart = payload_carts[c];
+		int f = bound(0, cart.plc_ctrl, 7);
+		if(cart.plc_speed_now < -autocvar_g_payload_stall_eps)
+			f |= PLC_CS_REGRESS;
+		else if(fabs(cart.plc_speed_now) <= autocvar_g_payload_stall_eps)
+			f |= PLC_CS_STALL;
+		packed |= (f << (c * PLC_CS_BITS));
+	}
+	return packed;
+}
+
+bool payload_link_send(entity this, entity to, int sendflags)
+{
+	WriteHeader(MSG_ENTITY, ENT_CLIENT_RADARLINK);
+	WriteByte(MSG_ENTITY, sendflags);
+	if(sendflags & 1)
+		WriteVector(MSG_ENTITY, this.goalentity.origin);
+	if(sendflags & 2)
+		WriteVector(MSG_ENTITY, this.enemy.origin);
+	if(sendflags & 4)
+		WriteByte(MSG_ENTITY, this.clientcolors);
+	return true;
+}
+
+int payload_node_color(entity n)
+{
+	return n.plc_banked ? Team_IndexToTeam(n.plc_bank_team) - 1 : 0;
+}
+
+void payload_update_links(entity cart)
+{
+	int contest = cart.plc_ctrl ? Team_IndexToTeam(cart.plc_ctrl) - 1 : 0;
+	IL_EACH(g_payload_links, it.plc_cart == cart,
+	{
+		entity a = it.goalentity;
+		entity b = it.enemy;
+		int cc;
+		if(a.plc_dist <= cart.plc_s && b.plc_dist > cart.plc_s)
+			cc = contest | (contest << 4);
+		else
+			cc = payload_node_color(a) | (payload_node_color(b) << 4);
+		if(cc != it.clientcolors)
+		{
+			it.clientcolors = cc;
+			it.SendFlags |= 4;
+		}
+	});
+}
+
 void set_payload_state(entity e)
 {
 	entity c0 = (payload_cart_count > 0) ? payload_carts[0] : NULL;
@@ -173,6 +229,7 @@ void set_payload_state(entity e)
 	STAT(PAYLOAD_SPEED, e) = c0 ? c0.plc_speed_now : 0;
 	STAT(PAYLOAD_PUSH_PACKED, e) = payload_pack_push();
 	STAT(PAYLOAD_GOALS_PACKED, e) = payload_pack_carts();
+	STAT(PAYLOAD_CARTS_STATE, e) = payload_pack_cart_state();
 }
 
 void payload_bank_points(entity this, int ctrl, float s_prev, float s_new)
@@ -292,6 +349,7 @@ void payload_think(entity this)
 	});
 
 	WaypointSprite_UpdateHealth(this.sprite, s_new);
+	payload_update_links(this);
 
 	if(this.plc_cart_id == 0)
 	{
@@ -338,7 +396,9 @@ void payload_path_build(entity this)
 	while(node && guard < 4096)
 	{
 		IL_PUSH(g_payload_nodes, node);
-		WaypointSprite_SpawnFixed(WP_Waypoint, node.origin + '0 0 48', node, sprite, RADARICON_WAYPOINT);
+		float maxd = (node.spawnflags & PLC_CHECKPOINT) ? 0 : autocvar_g_payload_node_fade_dist;
+		WaypointSprite_Spawn(WP_Waypoint, 0, maxd, NULL, node.origin + '0 0 48',
+			NULL, 0, node, sprite, true, RADARICON_WAYPOINT);
 		node.plc_prev = prev;
 		node.plc_cart = this;
 		node.plc_idx = guard;
@@ -349,6 +409,14 @@ void payload_path_build(entity this)
 		{
 			d += payload_seglen(prev, node);
 			prev.plc_next = node;
+			entity lk = new(plc_link);
+			lk.goalentity = prev;
+			lk.enemy = node;
+			lk.plc_cart = this;
+			IL_PUSH(g_payload_links, lk);
+			prev.plc_link = lk;
+			Net_LinkEntity(lk, false, 0, payload_link_send);
+			lk.SendFlags = 7;
 		}
 		node.plc_dist = d;
 		entity nxt = (node.target != "") ? find(NULL, targetname, node.target) : NULL;
@@ -689,6 +757,7 @@ void payload_Initialize()
 {
 	g_payload = true;
 	g_payload_nodes = IL_NEW();
+	g_payload_links = IL_NEW();
 	payload_mesh_h = -1;
 	payload_mesh_attach();
 

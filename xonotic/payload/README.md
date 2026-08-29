@@ -139,14 +139,101 @@ the control law.
 Mirrors `dom_team`: `netname`, `cnt`. If absent, teams are spawned from
 `g_payload_default_teams` / `g_payload_teams_override` unioned with the goal teams.
 
-## HUD and sprites
+## Diegetic communication layer
 
-Cart waypoint sprites are labeled per cart ("Cart 1", "Cart 2"; carts 2+ share the
-second label). Path-node sprites recolour to the team that last banked them and reset
-on an origin wipe. The `PAYLOAD_GOALS_PACKED` stat is repurposed: 6 bits per cart id,
-`1 + floor(progress·62)` (0 = no such cart); the HUD draws cart 0 as the main bar
-(marker red-shifted while regressing, per-team push ticks at the marker) and a thin
-bar per additional cart.
+How the game shows what the carts, paths and objectives are doing. Four channels,
+chosen so one spectator reading no HUD text still gets all four theatres at once, and
+so the cost stays client-side or reuses networking that already ships.
+
+### Cart paths — map ribbon (option a/c) + active-front colour (option d)
+
+Each consecutive node pair spawns one `ENT_CLIENT_RADARLINK` entity — the same proven
+link primitive Onslaught draws its control-point graph with, so **no new netcode and
+no per-frame server cost**. The result is a team-coloured ribbon of every cart's whole
+route on the radar/minimap, which is exactly the "watch four theatres at once" view
+the owner wants. Colour is a single byte per link (`start_idx | end_idx<<4`,
+palette-index `Team-1` like Onslaught):
+
+- **banked segment** → the owning team's colour, so captured track visibly advances
+  from the origin as a coloured front;
+- **the segment the cart is on** → the controlling team's colour (white if
+  uncontested) — the contested front is the brightest thing on the path;
+- **track ahead** → white.
+
+Link colours update only when they change (`payload_update_links`, called per tick but
+sets `SendFlags` only on a real delta), so the network stays quiet on a still cart.
+
+The same link data is reused a second way, fully client-side: `Payload_Ribbon_Draw` is
+a single drawable registered into `g_drawables` that reads `g_radarlinks` and lays a
+translucent additive **3-D ground ribbon** along each segment in the world itself
+(`R_BeginPolygon(..., false)`), coloured by the same per-segment byte. Zero extra
+networking — it renders the bytes the radar already received. Gated by
+`hud_panel_modicons_payload_ribbon` (default on, width
+`..._ribbon_width`) and self-limited to payload by a staleness stamp the panel
+refreshes, so it never draws under Onslaught's links.
+
+Per-node sprites (option b) are kept but decluttered — see below — rather than made the
+primary path channel: at 4 carts × ~13 nodes a sprite per node is noise, whereas the
+ribbon reads as one continuous coloured line.
+
+### Waypoint overlays — visibility rule
+
+All nodes still exist as sprites (banking and the mesh objective marker both hang off
+`node.sprite`), but the **rule is set once at spawn, no per-tick churn**:
+
+- **checkpoint nodes** (`PLC_CHECKPOINT`) → unlimited range: the meaningful control
+  points are always visible on the skyline;
+- **plain shape/curve nodes** → `maxdistance = g_payload_node_fade_dist` (1100u): they
+  fade out at range so a distant path is a clean ribbon, not a picket fence, but resolve
+  into individual markers when you are actually working that stretch.
+
+On top of the fixed rule, the existing dynamic colouring stands: a banked node wears
+the banking team's colour, the mesh-chosen objective node per team gets
+`RADARICON_OBJECTIVE` in that team's colour, everything else stays neutral cyan. The
+"which point is contested right now" answer is carried by the ribbon's active-segment
+colour rather than by re-colouring a node every tick.
+
+### Cart state — legible per cart
+
+`PAYLOAD_CARTS_STATE` (new packed int stat, 5 bits/cart: 3 control-team index + regress
+bit + stall bit) makes every cart's controller and motion readable client-side without
+per-cart networking. `PAYLOAD_GOALS_PACKED` still carries 6-bit progress per cart
+(`1 + floor(progress·62)`, 0 = no such cart); cart 0 also has the fine
+`PAYLOAD_PROGRESS`/`PAYLOAD_SPEED` stats.
+
+The modicons panel is now a **k-cart dashboard**: one row per present cart, sized to the
+panel. Each row is a dark track, a team-coloured progress fill, a head marker at the
+cart position tinted by motion (team colour advancing, grey stalled, red regressing),
+and an advance/regress glyph at the row end. A push-contest band across the top shows
+each team's live occupancy weight (cart 0's, the only one `PAYLOAD_PUSH_PACKED`
+carries). Team colour = controlling team throughout, so the panel and the map agree.
+
+### What is client-side
+
+Everything the viewer sees per frame — the dashboard and the world ribbon — is CSQC,
+zero server cost. The only server work is spawning the link entities once and flipping a
+`SendFlags` bit when a segment's colour actually changes.
+
+## What only a live spectator run confirms
+
+Compiled clean (server + client, `-Werror -Wall`); the following are untested because
+this was a compile-only pass against a running match:
+
+- **World ribbon rendering** — that `R_BeginPolygon(..., false)` ground quads land at the
+  right height, read as a ribbon rather than z-fighting the floor, and that `+6u` is
+  enough lift on sloped/curved track. Width and lift may need tuning.
+- **Radar-link readability at 4 carts** — whether four overlapping coloured routes on the
+  minimap stay legible or need per-cart offset/thinning; and that the palette-index
+  colours match the `Team_ColorRGB` used elsewhere for every team (verified only for the
+  built 5-team palette).
+- **Active-segment colour tracking** — that the contested-front colour visibly moves with
+  the cart and doesn't lag or flicker at segment boundaries.
+- **Node fade distance** — that 1100u declutters without hiding checkpoints a spectator
+  wants; checkpoints are unlimited-range by design but the plain-node number is a guess.
+- **Dashboard layout** — row sizing at 1–4 carts inside the real modicons panel aspect,
+  and that the motion tint / glyph read at panel scale.
+- **Link lifecycle** — links persist across rounds and recolour via `payload_update_links`;
+  a live run should confirm nothing double-spawns or leaks on `map_restart`.
 
 ## Building
 
