@@ -165,10 +165,17 @@ Consequences:
 - Measured: a cable replug re-enumerates the controller and the mesh heals across it, onto a
   different physical port even, but the pool does not come back — it is host-side kext state,
   scoped to the boot.
-- Therefore the operational stance: a node never reboots for availability. Size the region
-  inside the boot's remaining budget and everything — pairing, healing, streams, workloads —
-  keeps working. A reboot only restores capacity for a larger arena, and is scheduled like
-  any capacity change, never forced by an outage.
+- The pool is spent at pairing time, so the bridge rendezvouses over TCP before touching
+  verbs at all: an attempt with no peer present costs nothing, and waiting happens at
+  exponential backoff, which is free. Only a completed rendezvous spends registration and a
+  queue pair.
+- When exhaustion is real — repeated RTR faults at the configured size after completed
+  rendezvous — the node recovers itself: it dumps state, and where the bridge runs as root it
+  schedules its own reboot with a thirty-minute cooldown. Everything returns by supervision:
+  the bridge at boot, pairing by the heal loop, clients by the generation remap. A reboot is
+  therefore just another physical event the mesh heals through, self-scheduled, never a
+  human's errand. On a node whose bridge is not root, the exhaustion is logged loudly with
+  the recommendation instead.
 - Size regions with headroom for the boot's remaining budget, not the machine's RAM.
 - Failed pairing attempts consume the pool too: a size that paired an hour ago can be
   unaffordable after a retry storm at that size. Cap retries low and shrink before retrying.

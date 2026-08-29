@@ -57,51 +57,59 @@ static void listener_up(void){
   if(bind(lsock,r->ai_addr,r->ai_addrlen)) die("listener bind");
   listen(lsock,4); fcntl(lsock,F_SETFL,O_NONBLOCK); freeaddrinfo(r); }
 
+static int backoff_n;
+static void backoff(void){
+  useconds_t us=200000u << (backoff_n<7?backoff_n:7);
+  if(us>30000000u) us=30000000u;
+  backoff_n++; usleep(us); }
+
 static int oob(const char *peer){
   int f=accept(lsock,NULL,NULL);
-  if(f>=0){ struct timeval rt={3,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
-    return f; }
-  if(!peer){ usleep(100000); return -1; }
+  if(f>=0){ struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
+    backoff_n=0; return f; }
+  if(!peer){ backoff(); return -1; }
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC},*r;
-  if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
+  if(getaddrinfo(peer,MESH_PORT,&hint,&r)){ backoff(); return -1; }
   for(int pass=0; pass<2; pass++)
     for(struct addrinfo *a=r; a; a=a->ai_next){
       if((pass==0) != (a->ai_family==AF_INET)) continue;
-      if((f=dial(a))>=0){ freeaddrinfo(r); return f; } }
-  freeaddrinfo(r); usleep(200000); return -1; }
+      if((f=dial(a))>=0){ freeaddrinfo(r); backoff_n=0;
+        struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
+        return f; } }
+  freeaddrinfo(r); backoff(); return -1; }
 
 static struct ibv_port_attr pa;
 static int verbs_up(const char *peer, char *mem, size_t span, int me){
   down_verbs();
+  int f=oob(peer); if(f<0) return -1;
   {
   struct ibv_device **dl=ibv_get_device_list(NULL);
   for(int i=0;dl&&dl[i];i++){ ctx=ibv_open_device(dl[i]);
     if(ctx && !ibv_query_port(ctx,1,&pa) && pa.state==IBV_PORT_ACTIVE) break;
     if(ctx){ ibv_close_device(ctx); ctx=0; } }
   if(dl) ibv_free_device_list(dl);
-  if(!ctx){ usleep(500000); return -1; }
-  pd=ibv_alloc_pd(ctx); if(!pd){ down_verbs(); return -1; }
+  if(!ctx){ close(f); usleep(500000); return -1; }
+  pd=ibv_alloc_pd(ctx); if(!pd){ close(f); down_verbs(); return -1; }
   mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
     mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
-    if(!mr[nmr++]){ down_verbs(); return -1; } }
+    if(!mr[nmr++]){ close(f); down_verbs(); return -1; } }
   }
   ibv_query_port(ctx,1,&pa);
   { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
     snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
              strncmp(dn,"rdma_",5)?dn:dn+5);
     system(c); }
-  cq=ibv_create_cq(ctx,4096,NULL,NULL,0); if(!cq) return -1;
+  cq=ibv_create_cq(ctx,4096,NULL,NULL,0); if(!cq){ close(f); return -1; }
   struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=1,.max_recv_sge=1}};
-  qp=ibv_create_qp(pd,&qi); if(!qp) return -1;
+  qp=ibv_create_qp(pd,&qi); if(!qp){ close(f); return -1; }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS);
   union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
   uint32_t psn=lrand48()&0xffffff;
   struct qpi mine={mynonce,qp->qp_num,psn,pa.lid},you;
   memcpy(mine.gid,&gid,16);
-  int f=oob(peer); if(f<0) return -1;
   write(f,&mine,sizeof mine);
   for(size_t got=0; got<sizeof you;){
     ssize_t g=read(f,(char*)&you+got,sizeof you-got);
@@ -184,9 +192,22 @@ int main(int argc,char**argv){
   int fails=0;
   while(!stop){
     while(!stop && verbs_up(peer,mem,span,me)){
-      if(++fails>=6){ fprintf(stderr,"pairing exhausted, respawning\n"); return 0; } }
+      if(++fails>=6){
+        int n=0; FILE *fp=fopen("/tmp/mesh-pair-exhaustion","r");
+        if(fp){ fscanf(fp,"%d",&n); fclose(fp); }
+        fp=fopen("/tmp/mesh-pair-exhaustion","w");
+        if(fp){ fprintf(fp,"%d",n+1); fclose(fp); }
+        fprintf(stderr,"pairing exhausted (%d), respawning\n",n+1);
+        if(n+1>=3 && !geteuid()){
+          struct stat cb;
+          if(stat("/usr/local/mesh/log/last-selfheal-reboot",&cb) ||
+             time(NULL)-cb.st_mtime>1800){
+            system("mkdir -p /usr/local/mesh/log; date > /usr/local/mesh/log/last-selfheal-reboot; tail -50 /tmp/io.mesh.bridge.log > /usr/local/mesh/log/exhaustion-state 2>/dev/null");
+            fprintf(stderr,"pool exhausted this boot: self-rebooting to reclaim\n");
+            system("shutdown -r now"); } }
+        return 0; } }
     if(stop) break;
-    fails=0;
+    fails=0; unlink("/tmp/mesh-pair-exhaustion");
     n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;
     for(int i=0;i<pool;i++){
       if(own[i]==APP) n[APP]++;
