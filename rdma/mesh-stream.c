@@ -13,7 +13,6 @@ int main(int argc,char**argv){
     double t0=now(); size_t s=mesh_yell(a,N,argc>2?atoi(argv[2]):1); double dt=now()-t0;
     printf("yell %.2f GB in %.2f s = %.2f GB/s\n",s/1e9,dt,s/dt/1e9);
   } else {
-    memset(a,0,N);
     double t0=now();
     size_t g=mesh_lissen(a,N);
     double dt=now()-t0;
