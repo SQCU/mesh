@@ -529,9 +529,8 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
 ## Using the mesh
 
-An application sees three functions, in `rdma/mesh.h`. Everything below a page — queue pairs,
-memory regions, lkeys, wire headers, residency, retransmission — belongs to the bridge and
-does not appear.
+The API is sealed. Three functions, in `rdma/mesh.h`, and nothing below a page appears in
+them. Changing this surface is a design event, not an edit.
 
 ```c
 void  *mesh_open(size_t bytes, size_t *stride, size_t *usable);
@@ -539,19 +538,17 @@ size_t mesh_write(const void *p, size_t nbytes, int node);
 size_t mesh_read(void **p, int *from);
 ```
 
-`mesh_open` maps a share of this node and returns memory. `mesh_write` hands a range to
-another node and returns how much it took, so a caller loops on the remainder; there is no
-size at which it refuses. `mesh_read` returns one arrived slot and recycles the previous one,
-which is why there is no release call.
+`mesh_open` maps your share of this node's arena and returns the first slot; slots are
+`stride` apart and `usable` bytes of each are yours. `mesh_write` hands slot-aligned bytes to
+another node and returns how much it took — loop on the remainder; there is no size at which
+it refuses. `mesh_read` returns one arrived slot and recycles the previous one, which is why
+there is no release call.
 
-Memory comes in slots rather than one flat span because the device reports `max_sge: 1` and
-has no immediate data, so every page carries its own header contiguously. The gap is 16 bytes
-in 4096.
-
-**One thing an application must know.** `mesh_write` takes the bytes, but nothing tells you
-when a page is free again. Rotate through your arena rather than reusing the same slots; the
-head of the arena may still be in flight. Reusing it corrupted 34 of 18041 rows before this
-was understood.
+What the transport promises, exactly: bytes that arrive are intact and whole pages; bytes
+that do not arrive are gone, and the application, which knows what it asked for, is the layer
+that asks again. Rotate through your arena rather than reusing the head — the transport does
+not say when a send has completed. The bridge accepts only arena slots from a client;
+anything else is counted as `bad` and dropped.
 
 From Python, `rdma/mesh.py` binds the same three functions and returns numpy views of mesh
 memory, so MLX computes on pages the NIC wrote without a copy.
