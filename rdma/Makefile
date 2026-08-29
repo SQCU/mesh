@@ -9,3 +9,6 @@ libmesh.dylib: mesh-client.c mesh.h
 clean:
 	rm -f $(BINS)
 .PHONY: all clean
+
+mesh-stream: mesh-stream.c mesh-client.c mesh.h
+	cc -O2 -o $@ mesh-stream.c mesh-client.c

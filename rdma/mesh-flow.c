@@ -67,7 +67,7 @@ int main(int argc,char**argv){
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<64) np=64;
   int pool = np/4 < 244140 ? np/4 : 244140;
-  size_t d0=(RINGS+3*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
+  size_t d0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
   size_t span=(size_t)pg*np;
   shm_unlink(name); int rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
   if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,MESH_MODE);
@@ -143,7 +143,10 @@ int main(int argc,char**argv){
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
       if(!VALID(i)) die("wr_id outside the pool");
-      if(wc[j].opcode!=IBV_WC_RECV){ sends--; if(POOL(i)) GIVE(i); continue; } if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
+      if(wc[j].opcode!=IBV_WC_RECV){ sends--;
+        if(POOL(i)) GIVE(i);
+        else { struct desc a={.page=(uint32_t)i}; push(M,ACK,&a); }
+        continue; } if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
       struct wire *h=(struct wire*)mesh_at(M,(uint32_t)i);
       if(h->magic!=WIRE_MAGIC){ GIVE(i); continue; }
       h->hops++;

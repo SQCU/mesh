@@ -12,9 +12,10 @@
 #define MESH_VERSION 4u
 #define MESH_CL      128
 #define MESH_RING    4096
+#define MESH_OFF     8
 #define RINGS        ((sizeof(struct hdr)+MESH_CL-1)/MESH_CL*MESH_CL)
 enum { FREE, RECV, SEND, APP, NOWN };
-enum { SUB, CMP, REL, NRING };
+enum { SUB, CMP, REL, ACK, NRING };
 struct wire { uint32_t magic, bytes; uint16_t src, dst, hops; };
 struct desc { uint32_t page, bytes; uint16_t node; };
 struct ring { _Alignas(MESH_CL) _Atomic uint64_t head, tail; };
@@ -45,7 +46,9 @@ static inline int pop(struct hdr *m, int k, struct desc *d){
   uint64_t t=atomic_load_explicit(&q->tail,memory_order_relaxed);
   if(t == atomic_load_explicit(&q->head,memory_order_acquire)) return -1;
   *d=*slot(m,k,t); atomic_store_explicit(&q->tail,t+1,memory_order_release); return 0; }
-void  *mesh_open(size_t bytes, size_t *stride, size_t *usable);
+void  *mesh_open(size_t *nslots, size_t *stride, size_t *usable);
 size_t mesh_write(const void *p, size_t nbytes, int node);
 size_t mesh_read(void **p, int *from);
+size_t mesh_yell(const void *p, size_t n, int node);
+size_t mesh_lissen(void *p, size_t n);
 #endif

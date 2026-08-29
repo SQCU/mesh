@@ -9,8 +9,7 @@ import ctypes, os, numpy as np
 
 _lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libmesh.dylib"))
 _lib.mesh_open.restype = ctypes.c_void_p
-_lib.mesh_open.argtypes = [ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t),
-                           ctypes.POINTER(ctypes.c_size_t)]
+_lib.mesh_open.argtypes = [ctypes.POINTER(ctypes.c_size_t)]*3
 _lib.mesh_write.restype = ctypes.c_size_t
 _lib.mesh_write.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
 _lib.mesh_read.restype = ctypes.c_size_t
@@ -18,13 +17,13 @@ _lib.mesh_read.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctype
 
 
 class Mesh:
-    def __init__(self, nbytes):
-        stride, usable = ctypes.c_size_t(), ctypes.c_size_t()
-        p = _lib.mesh_open(int(nbytes), ctypes.byref(stride), ctypes.byref(usable))
+    def __init__(self, nbytes=None):
+        ns, stride, usable = (ctypes.c_size_t() for _ in range(3))
+        p = _lib.mesh_open(ctypes.byref(ns), ctypes.byref(stride), ctypes.byref(usable))
         if not p:
-            raise RuntimeError("no bridge, or it is holding less than %.2f GB" % (nbytes / 1e9))
+            raise RuntimeError("no bridge")
         self.base, self.stride, self.usable = p, stride.value, usable.value
-        self.slots = int(nbytes) // self.usable
+        self.slots = ns.value if nbytes is None else min(ns.value, int(nbytes) // usable.value)
 
     def _view(self, first, n, dtype):
         return np.ctypeslib.as_array(
