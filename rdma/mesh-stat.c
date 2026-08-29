@@ -11,7 +11,7 @@ int main(int argc,char**argv){
   if(h==MAP_FAILED||h->magic!=MESH_MAGIC){ printf("{\"up\":false}\n"); return 0; }
   #define A(x) (unsigned long long)atomic_load_explicit(&h->x,memory_order_relaxed)
   printf("{\"up\":true,\"node\":%u,\"pgsz\":%u,\"pool\":%u,\"arena\":%u,"
-    "\"client\":%llu,\"sent\":%llu,\"recvd\":%llu,\"up_ms\":%llu",
-    h->node,h->pgsz,h->pool,h->arena,A(client),A(sent),A(recvd),A(up_ms));
+    "\"client\":%llu,\"sent\":%llu,\"recvd\":%llu,\"bad\":%llu,\"up_ms\":%llu",
+    h->node,h->pgsz,h->pool,h->arena,A(client),A(sent),A(recvd),A(bad),A(up_ms));
   for(int i=0;i<NOWN;i++) printf(",\"%s\":%llu,\"sd_%s\":%llu",N[i],A(mean[i]),N[i],A(sd[i]));
   printf("}\n"); return 0; }

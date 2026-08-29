@@ -7,6 +7,7 @@
 #define MESH_MAGIC   0x4d455348u
 #define WIRE_MAGIC   0x4d534831u
 #define MESH_NAME    "/mesh0"
+#define MESH_PORT    "18519"
 #define MESH_MODE    0666
 #define MESH_VERSION 3u
 #define MESH_CL      128
@@ -21,7 +22,7 @@ struct hdr {
   uint32_t magic, version, pgsz, pool, arena, node;
   uint64_t data_off;
   struct ring r[NRING];
-  _Alignas(MESH_CL) _Atomic uint64_t client, sent, recvd, up_ms;
+  _Alignas(MESH_CL) _Atomic uint64_t client, sent, recvd, bad, up_ms;
   _Alignas(MESH_CL) _Atomic uint64_t mean[NOWN], sd[NOWN];
 };
 static inline unsigned char *mesh_at(struct hdr *m, uint32_t i){

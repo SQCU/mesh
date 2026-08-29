@@ -18,10 +18,10 @@
 
 #define CHUNK (1ull<<30)
 static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *cq;
-static struct ibv_qp *qp; static struct ibv_mr *mr[64]; static int nmr;
+static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
 static void down(void){ if(qp)ibv_destroy_qp(qp); if(cq)ibv_destroy_cq(cq);
-  while(nmr) ibv_dereg_mr(mr[--nmr]); if(pd)ibv_dealloc_pd(pd);
+  while(nmr) ibv_dereg_mr(mr[--nmr]); free(mr); if(pd)ibv_dealloc_pd(pd);
   if(ctx)ibv_close_device(ctx); if(shm)shm_unlink(shm); }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
@@ -30,11 +30,11 @@ static void onsig(int s){ (void)s; stop=1; }
 struct qpi { uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
 static int oob(const char *peer){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM},*r; int f;
-  if(peer){ hint.ai_family=AF_UNSPEC; if(getaddrinfo(peer,"18519",&hint,&r)) die("addr");
+  if(peer){ hint.ai_family=AF_UNSPEC; if(getaddrinfo(peer,MESH_PORT,&hint,&r)) die("addr");
     f=socket(r->ai_family,SOCK_STREAM,0);
     if(connect(f,r->ai_addr,r->ai_addrlen)) die("connect"); freeaddrinfo(r); return f; }
   hint.ai_family=AF_INET6; hint.ai_flags=AI_PASSIVE;
-  if(getaddrinfo(NULL,"18519",&hint,&r)) die("addr");
+  if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) die("addr");
   int l=socket(r->ai_family,SOCK_STREAM,0),on=1,off=0;
   setsockopt(l,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
   setsockopt(l,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
@@ -64,7 +64,7 @@ int main(int argc,char**argv){
   pd=ibv_alloc_pd(ctx); if(!pd) die("pd");
 
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
-  const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<64) die("too small");
+  const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<64) np=64;
   int pool = np/4 < 244140 ? np/4 : 244140;
   size_t d0=(RINGS+3*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
   size_t span=(size_t)pg*np;
@@ -76,8 +76,8 @@ int main(int argc,char**argv){
   M->pgsz=pg; M->pool=pool; M->arena=np-pool; M->node=me; M->version=MESH_VERSION;
   M->data_off=d0;
   char *mem=(char*)base+d0;
+  mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
-    if(nmr==64) die("too many regions");
     mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE); if(!mr[nmr++]) die("reg"); }
   __sync_synchronize(); M->magic=MESH_MAGIC;
   fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d, %d regions\n",
@@ -128,7 +128,7 @@ int main(int argc,char**argv){
     uint64_t who=atomic_load_explicit(&M->client,memory_order_acquire);
     if(who)
       while(!pop(M,SUB,&d)){
-        uint32_t p=d.page; if(!VALID(p)) continue;
+        uint32_t p=d.page; if(!VALID(p)){ BUMP(bad); continue; }
         struct wire *w2=(struct wire*)mesh_at(M,p);
         w2->magic=WIRE_MAGIC; w2->bytes=mesh_clamp(M,d.bytes);
         w2->src=me; w2->dst=d.node; w2->hops=0;
