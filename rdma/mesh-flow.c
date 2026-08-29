@@ -21,7 +21,8 @@
 static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *cq;
 static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
-static void down_verbs(void){ if(qp){ibv_destroy_qp(qp);qp=0;} if(cq){ibv_destroy_cq(cq);cq=0;}
+static void down_pair(void){ if(qp){ibv_destroy_qp(qp);qp=0;} if(cq){ibv_destroy_cq(cq);cq=0;} }
+static void down_verbs(void){ down_pair();
   while(nmr) ibv_dereg_mr(mr[--nmr]); free(mr); mr=0;
   if(pd){ibv_dealloc_pd(pd);pd=0;} if(ctx){ibv_close_device(ctx);ctx=0;} }
 static void down(void){ down_verbs(); if(shm)shm_unlink(shm); }
@@ -49,7 +50,10 @@ static int oob(const char *peer){
 
 static struct ibv_port_attr pa;
 static int verbs_up(const char *peer, char *mem, size_t span, int me){
-  down_verbs();
+  down_pair();
+  if(ctx){ struct ibv_port_attr chk;
+    if(ibv_query_port(ctx,1,&chk) || chk.state!=IBV_PORT_ACTIVE) down_verbs(); }
+  if(!ctx){
   struct ibv_device **dl=ibv_get_device_list(NULL);
   for(int i=0;dl&&dl[i];i++){ ctx=ibv_open_device(dl[i]);
     if(ctx && !ibv_query_port(ctx,1,&pa) && pa.state==IBV_PORT_ACTIVE) break;
@@ -60,10 +64,13 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
              strncmp(dn,"rdma_",5)?dn:dn+5);
     system(c); }
-  pd=ibv_alloc_pd(ctx); if(!pd) return -1;
+  pd=ibv_alloc_pd(ctx); if(!pd){ down_verbs(); return -1; }
   mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
-    mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE); if(!mr[nmr++]) return -1; }
+    mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
+    if(!mr[nmr++]){ down_verbs(); return -1; } }
+  }
+  ibv_query_port(ctx,1,&pa);
   cq=ibv_create_cq(ctx,4096,NULL,NULL,0); if(!cq) return -1;
   struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=1,.max_recv_sge=1}};

@@ -3,6 +3,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 CONF="${MESH_CONF:-/usr/local/mesh/bridge.conf}"
+[ -f "$CONF" ] || CONF="$HOME/.mesh-bridge.conf"
 [ -f "$CONF" ] || CONF="$ROOT/etc/bridge.conf"
 LABEL=io.mesh.bridge
 BIN="$ROOT/rdma/mesh-flow"
@@ -10,7 +11,8 @@ STAT="$ROOT/rdma/mesh-stat"
 
 mesh_pct=25; app_pct=25; node=0; peer=""; region=/mesh0
 # shellcheck disable=SC1090
-[ -f "$CONF" ] && . "$CONF"
+if [ -f "$CONF" ]; then . "$CONF"; echo "mesh-bridge: conf $CONF node=$node mesh=$mesh_pct% peer=${peer:-listen}"
+else echo "mesh-bridge: NO CONF FOUND, defaults node=$node mesh=$mesh_pct% peer=${peer:-listen}" >&2; fi
 
 if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
   exec sudo -n MESH_CONF="$CONF" "$0" "$@"
