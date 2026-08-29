@@ -16,12 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #define CHUNK (1ull<<30)
 #define QD 4095
 static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *cq;
 static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
+static int lsock=-1; static uint64_t mynonce, peernonce;
 static void down_pair(void){ if(qp){ibv_destroy_qp(qp);qp=0;} if(cq){ibv_destroy_cq(cq);cq=0;} }
 static void down_verbs(void){ down_pair();
   while(nmr) ibv_dereg_mr(mr[--nmr]); free(mr); mr=0;
@@ -31,7 +33,7 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
 static void onsig(int s){ (void)s; stop=1; }
 
-struct qpi { uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
+struct qpi { uint64_t nonce; uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
 static int dial(struct addrinfo *a){
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
   fcntl(f,F_SETFL,O_NONBLOCK);
@@ -45,22 +47,28 @@ static int dial(struct addrinfo *a){
   setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
   return f; }
 
+static void listener_up(void){
+  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_INET6,.ai_flags=AI_PASSIVE},*r;
+  if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) die("listener addr");
+  lsock=socket(r->ai_family,SOCK_STREAM,0);
+  int on=1,off=0;
+  setsockopt(lsock,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
+  setsockopt(lsock,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
+  if(bind(lsock,r->ai_addr,r->ai_addrlen)) die("listener bind");
+  listen(lsock,4); fcntl(lsock,F_SETFL,O_NONBLOCK); freeaddrinfo(r); }
+
 static int oob(const char *peer){
-  struct addrinfo hint={.ai_socktype=SOCK_STREAM},*r; int f;
-  if(peer){ hint.ai_family=AF_UNSPEC;
-    if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
-    for(int pass=0; pass<2; pass++)
-      for(struct addrinfo *a=r; a; a=a->ai_next){
-        if((pass==0) != (a->ai_family==AF_INET)) continue;
-        if((f=dial(a))>=0){ freeaddrinfo(r); return f; } }
-    freeaddrinfo(r); usleep(200000); return -1; }
-  hint.ai_family=AF_INET6; hint.ai_flags=AI_PASSIVE;
-  if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) return -1;
-  int l=socket(r->ai_family,SOCK_STREAM,0),on=1,off=0;
-  setsockopt(l,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
-  setsockopt(l,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
-  if(bind(l,r->ai_addr,r->ai_addrlen)){ close(l); freeaddrinfo(r); usleep(200000); return -1; }
-  listen(l,1); freeaddrinfo(r); f=accept(l,NULL,NULL); close(l); return f; }
+  int f=accept(lsock,NULL,NULL);
+  if(f>=0){ struct timeval rt={3,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
+    return f; }
+  if(!peer){ usleep(100000); return -1; }
+  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC},*r;
+  if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
+  for(int pass=0; pass<2; pass++)
+    for(struct addrinfo *a=r; a; a=a->ai_next){
+      if((pass==0) != (a->ai_family==AF_INET)) continue;
+      if((f=dial(a))>=0){ freeaddrinfo(r); return f; } }
+  freeaddrinfo(r); usleep(200000); return -1; }
 
 static struct ibv_port_attr pa;
 static int verbs_up(const char *peer, char *mem, size_t span, int me){
@@ -90,15 +98,18 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS);
   union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
-  uint32_t psn=lrand48()&0xffffff; struct qpi mine={qp->qp_num,psn,pa.lid},you;
+  uint32_t psn=lrand48()&0xffffff;
+  struct qpi mine={mynonce,qp->qp_num,psn,pa.lid},you;
   memcpy(mine.gid,&gid,16);
-  int f=oob(peer); if(f<0){ fprintf(stderr,"oob retry\n"); return -1; }
-  if(peer) write(f,&mine,sizeof mine);
+  int f=oob(peer); if(f<0) return -1;
+  write(f,&mine,sizeof mine);
   for(size_t got=0; got<sizeof you;){
     ssize_t g=read(f,(char*)&you+got,sizeof you-got);
     if(g<=0){ close(f); fprintf(stderr,"xchg retry\n"); return -1; } got+=(size_t)g; }
-  if(!peer) write(f,&mine,sizeof mine);
   close(f);
+  if(you.nonce==mynonce || (you.nonce && you.nonce==peernonce && peernonce)){
+    fprintf(stderr,"stale nonce, retry\n"); return -1; }
+  peernonce=you.nonce;
   struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
     .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
     .grh={.hop_limit=1,.sgid_index=0}}};
@@ -111,7 +122,9 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
       system(c); }
     rc=ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
   }
-  if(rc){ fprintf(stderr,"rtr retry rc %d\n",rc); usleep(300000); return -1; }
+  if(rc){ fprintf(stderr,"rtr rc %d dlid %u dqpn %u dgid %02x%02x..%02x%02x mygid %02x%02x\n",
+      rc, you.lid, you.qpn, you.gid[0],you.gid[1],you.gid[14],you.gid[15],
+      mine.gid[0],mine.gid[15]); usleep(300000); return -1; }
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
@@ -131,6 +144,9 @@ int main(int argc,char**argv){
     else peer=argv[i];
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL);
+  srand48((long)getpid()^(long)time(NULL));
+  mynonce=((uint64_t)lrand48()<<32)^(uint64_t)lrand48(); if(!mynonce) mynonce=1;
+  listener_up();
 
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<64) np=64;
@@ -166,9 +182,12 @@ int main(int argc,char**argv){
     struct ibv_send_wr s={.wr_id=(i),.sg_list=&g,.num_sge=1,.opcode=IBV_WR_SEND, \
       .send_flags=IBV_SEND_SIGNALED},*bs; ibv_post_send(qp,&s,&bs); })
 
+  int fails=0;
   while(!stop){
-    while(!stop && verbs_up(peer,mem,span,me)){}
+    while(!stop && verbs_up(peer,mem,span,me)){
+      if(++fails>=24){ fprintf(stderr,"pairing exhausted, respawning\n"); return 0; } }
     if(stop) break;
+    fails=0;
     n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;
     for(int i=0;i<pool;i++){
       if(own[i]==APP) n[APP]++;
@@ -222,7 +241,9 @@ int main(int argc,char**argv){
         atomic_store_explicit(&M->sd[s],(uint64_t)sqrt(w[s].n>1?w[s].m2/(w[s].n-1):0),memory_order_relaxed);
         w[s]=(struct wf){0}; }
       atomic_store_explicit(&M->up_ms,(uint64_t)((tn-t0)*1000),memory_order_relaxed);
-      if(ibv_query_port(ctx,1,&pa) || pa.state!=IBV_PORT_ACTIVE) alive=0;
+      { int nf2=accept(lsock,NULL,NULL);
+        if(nf2>=0){ close(nf2); fprintf(stderr,"peer re-pairing\n"); alive=0; } }
+      if(alive && (ibv_query_port(ctx,1,&pa) || pa.state!=IBV_PORT_ACTIVE)) alive=0;
       else if(wcs==0){
         if(sends>0) dry++;
         else if(n[FREE]){ int i=fl[n[FREE]-1];
@@ -232,6 +253,6 @@ int main(int argc,char**argv){
         if(dry>=4) alive=0; }
       else dry=0;
       wcs=0;
-      if(!alive){ fprintf(stderr,"pair down, respawning\n"); stop=1; }
+      if(!alive) fprintf(stderr,"pair down\n");
       tel=tn; } } }
   return 0; }
