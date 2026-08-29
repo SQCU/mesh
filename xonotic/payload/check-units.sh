@@ -16,7 +16,7 @@ check_server="common/gamemodes/gamemode/payload/payload.qc common/gamemodes/game
 check_client="common/gamemodes/gamemode/payload/payload.qc common/gamemodes/gamemode/payload/cl_payload.qc"
 for prog in server client; do
   MODE=$prog
-  includes="-include lib/_all.inc"
+  includes="-include lib/_all.inc -include common/gamemodes/gamemode/payload/_mod.qh"
   [ -f "${prog}/_all.qh" ] && includes="${includes} -include ${prog}/_all.qh"
   eval "files=\$check_${prog}"
   for f in $files; do

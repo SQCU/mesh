@@ -30,12 +30,10 @@ float autocvar_g_payload_rollback_speed = 20;
 float autocvar_g_payload_score_rate = 0.01;
 float autocvar_g_payload_block_rate = 1;
 float autocvar_g_payload_stall_eps = 1;
+float autocvar_g_payload_point_score = 1;
+float autocvar_g_payload_capture_radius = 64;
 float autocvar_g_payload_round_timelimit = 300;
 float autocvar_g_payload_warmup = 5;
-
-entity payload_first;
-float payload_gain[NUM_TEAMS + 1];
-float payload_speed_now;
 
 .float plc_in;
 .float plc_block_accum;
@@ -67,10 +65,10 @@ float payload_seglen(entity a, entity b)
 	return d;
 }
 
-vector payload_pos(float s)
+vector payload_pos(entity cart, float s)
 {
-	s = bound(0, s, payload_length);
-	entity a = payload_first;
+	s = bound(0, s, cart.plc_length);
+	entity a = cart.plc_first;
 	if(!a)
 		return '0 0 0';
 	while(a.plc_next && a.plc_next.plc_dist <= s)
@@ -94,22 +92,6 @@ vector payload_pos(float s)
 		p = q;
 	}
 	return b.origin;
-}
-
-float payload_nearest_node_s(vector org)
-{
-	float best = 0;
-	float bestd = -1;
-	IL_EACH(g_payload_nodes, true,
-	{
-		float d = vlen(it.origin - org);
-		if(bestd < 0 || d < bestd)
-		{
-			bestd = d;
-			best = it.plc_dist;
-		}
-	});
-	return best;
 }
 
 void payload_occupancy(entity cart)
@@ -154,12 +136,10 @@ void payload_occupancy(entity cart)
 
 float payload_rollback_target(entity cart)
 {
-	float dir = (cart.plc_home_s >= cart.plc_s) ? 1 : -1;
-	float best = cart.plc_home_s;
-	IL_EACH(g_payload_nodes, it.spawnflags & PLC_CHECKPOINT,
+	float best = 0;
+	IL_EACH(g_payload_nodes, it.plc_cart == cart && (it.spawnflags & PLC_CHECKPOINT),
 	{
-		float d = (it.plc_dist - cart.plc_s) * dir;
-		if(d > 0 && d < (best - cart.plc_s) * dir)
+		if(it.plc_dist < cart.plc_s && it.plc_dist > best)
 			best = it.plc_dist;
 	});
 	return best;
@@ -176,26 +156,57 @@ int payload_pack_push()
 	return packed;
 }
 
-int payload_pack_goals()
+int payload_pack_carts()
 {
 	int packed = 0;
-	for(int j = 1; j <= NUM_TEAMS; ++j)
+	for(int c = 0; c < payload_cart_count; ++c)
 	{
-		if(!(payload_goal_mask & Team_IndexToBit(j)))
-			continue;
-		float f = (payload_length > 0) ? payload_goal_s[j] / payload_length : 0;
+		entity cart = payload_carts[c];
+		float f = (cart.plc_length > 0) ? cart.plc_s / cart.plc_length : 0;
 		int q = 1 + bound(0, floor(f * (PLC_PUSH_MASK - 1)), PLC_PUSH_MASK - 1);
-		packed |= (q << ((j - 1) * PLC_PUSH_BITS));
+		packed |= (q << (c * PLC_PUSH_BITS));
 	}
 	return packed;
 }
 
 void set_payload_state(entity e)
 {
-	STAT(PAYLOAD_PROGRESS, e) = (payload_length > 0 && payload_cart) ? payload_cart.plc_s / payload_length : 0;
-	STAT(PAYLOAD_SPEED, e) = payload_speed_now;
+	entity c0 = (payload_cart_count > 0) ? payload_carts[0] : NULL;
+	STAT(PAYLOAD_PROGRESS, e) = (c0 && c0.plc_length > 0) ? c0.plc_s / c0.plc_length : 0;
+	STAT(PAYLOAD_SPEED, e) = c0 ? c0.plc_speed_now : 0;
 	STAT(PAYLOAD_PUSH_PACKED, e) = payload_pack_push();
-	STAT(PAYLOAD_GOALS_PACKED, e) = payload_pack_goals();
+	STAT(PAYLOAD_GOALS_PACKED, e) = payload_pack_carts();
+}
+
+void payload_bank_points(entity this, int ctrl, float s_prev, float s_new)
+{
+	int bit = Team_IndexToBit(ctrl);
+	int t = Team_IndexToTeam(ctrl);
+	IL_EACH(g_payload_nodes, it.plc_cart == this && it.plc_dist > s_prev && it.plc_dist <= s_new,
+	{
+		if(it.plc_banked & bit)
+			continue;
+		it.plc_banked |= bit;
+		it.plc_bank_team = ctrl;
+		payload_round_banks[ctrl] += 1;
+		TeamScore_AddToTeam(t, ST_PAYLOAD_POINTS, autocvar_g_payload_point_score);
+		LOG_INFO(strcat("payload: bank cart ", ftos(this.plc_cart_id), " team ", ftos(t),
+			" point ", ftos(it.plc_idx), " s ", ftos(it.plc_dist)));
+		payload_EventLog(strcat("bank:", ftos(this.plc_cart_id), ":", ftos(it.plc_idx)), t);
+		if(it.sprite)
+			WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, Team_ColorRGB(t));
+	});
+}
+
+void payload_clear_progress(entity this)
+{
+	IL_EACH(g_payload_nodes, it.plc_cart == this,
+	{
+		it.plc_banked = 0;
+		it.plc_bank_team = 0;
+		if(it.sprite)
+			WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, WP_Waypoint.m_color);
+	});
 }
 
 void payload_think(entity this)
@@ -207,29 +218,38 @@ void payload_think(entity this)
 
 	payload_occupancy(this);
 
-	float pplus = 0, pminus = 0, total = 0;
+	float total = 0, best = 0;
+	int ctrl = 0;
+	bool tie = false;
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
 		total += payload_w[j];
-		if(!(payload_goal_mask & Team_IndexToBit(j)))
-			continue;
-		float d = payload_goal_s[j] - this.plc_s;
-		pplus += (d > 0) ? payload_w[j] : 0;
-		pminus += (d < 0) ? payload_w[j] : 0;
+		if(payload_w[j] > best)
+		{
+			best = payload_w[j];
+			ctrl = j;
+			tie = false;
+		}
+		else if(payload_w[j] == best && best > 0)
+			tie = true;
 	}
+	if(tie)
+		ctrl = 0;
+	this.plc_ctrl = ctrl;
 
-	float v = bound(-autocvar_g_payload_max_speed, this.speed * (pplus - pminus), autocvar_g_payload_max_speed);
-	float target = this.plc_s;
+	float pplus = ctrl ? payload_w[ctrl] : 0;
+	float v = bound(-autocvar_g_payload_max_speed, this.speed * (pplus - (total - pplus)), autocvar_g_payload_max_speed);
+	float target = 0;
 	bool rolling = false;
 
 	if(total <= 0)
 	{
 		this.plc_idle += PLC_TICK;
-		if(this.plc_idle >= autocvar_g_payload_idle_time)
+		if(this.plc_idle >= autocvar_g_payload_idle_time && this.plc_s > 0)
 		{
 			target = payload_rollback_target(this);
 			rolling = true;
-			v = ((target > this.plc_s) ? 1 : -1) * autocvar_g_payload_rollback_speed;
+			v = -autocvar_g_payload_rollback_speed;
 		}
 	}
 	else
@@ -237,63 +257,73 @@ void payload_think(entity this)
 
 	v = live ? v : 0;
 	float s_prev = this.plc_s;
-	float s_new = bound(0, this.plc_s + v * PLC_TICK, payload_length);
+	float s_new = bound(0, this.plc_s + v * PLC_TICK, this.plc_length);
 	if(rolling)
-		s_new = (target > s_prev) ? min(s_new, target) : max(s_new, target);
+		s_new = max(s_new, target);
 	this.plc_s = s_new;
-	payload_speed_now = (s_new - s_prev) / PLC_TICK;
+	this.plc_speed_now = (s_new - s_prev) / PLC_TICK;
 
-	vector want = payload_pos(s_new);
+	vector want = payload_pos(this, s_new);
 	this.velocity = (want - (this.origin + this.view_ofs)) * (1 / PLC_TICK);
 
 	if(this.spawnflags & PLC_CART_TURN)
 	{
-		vector ahead = payload_pos(min(payload_length, s_new + 16)) - payload_pos(max(0, s_new - 16));
+		vector ahead = payload_pos(this, min(this.plc_length, s_new + 16)) - payload_pos(this, max(0, s_new - 16));
 		if(vlen(ahead) > 0)
 			this.angles = vectoangles(ahead);
 	}
 
-	for(int j = 1; j <= NUM_TEAMS; ++j)
+	if(ctrl && s_new > s_prev)
+		payload_bank_points(this, ctrl, s_prev, s_new);
+	if(s_new <= 0 && s_prev > 0)
 	{
-		payload_gain[j] = 0;
-		if(!(payload_goal_mask & Team_IndexToBit(j)))
-			continue;
-		float g = (fabs(s_prev - payload_goal_s[j]) - fabs(s_new - payload_goal_s[j])) * autocvar_g_payload_score_rate;
-		if(g <= 0)
-			continue;
-		payload_gain[j] = g;
+		payload_clear_progress(this);
+		LOG_INFO(strcat("payload: cart ", ftos(this.plc_cart_id), " regressed to origin, progress cleared"));
+		payload_EventLog("origin", this.plc_cart_id);
 	}
 
-	bool stalled = (total > 0) && (fabs(payload_speed_now) < autocvar_g_payload_stall_eps);
+	float gain = (s_new > s_prev && ctrl && payload_n[ctrl] > 0)
+		? (s_new - s_prev) * autocvar_g_payload_score_rate / payload_n[ctrl] : 0;
+	bool stalled = (total > 0) && (fabs(this.plc_speed_now) < autocvar_g_payload_stall_eps);
 	FOREACH_CLIENT(IS_PLAYER(it) && it.plc_in,
 	{
-		int j = it.plc_in;
-		if(payload_gain[j] > 0)
-			GameRules_scoring_add_float2int(it, PAYLOAD_PUSH, payload_gain[j] / payload_n[j], plc_push_accum, 1);
+		if(gain > 0 && it.plc_in == ctrl)
+			GameRules_scoring_add_float2int(it, PAYLOAD_PUSH, gain, plc_push_accum, 1);
 		if(stalled)
 			GameRules_scoring_add_float2int(it, PAYLOAD_BLOCK, autocvar_g_payload_block_rate * PLC_TICK, plc_block_accum, 1);
 	});
 
 	WaypointSprite_UpdateHealth(this.sprite, s_new);
 
-	FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
+	if(this.plc_cart_id == 0)
+	{
+		FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
+	}
 
 	payload_mesh_tick(this);
 }
 
 void payload_cart_reset(entity this)
 {
-	this.plc_s = this.plc_home_s;
+	this.plc_s = 0;
 	this.plc_idle = 0;
+	this.plc_ctrl = 0;
 	this.velocity = '0 0 0';
-	payload_speed_now = 0;
-	setorigin(this, payload_pos(this.plc_s) - this.view_ofs);
+	this.plc_speed_now = 0;
+	payload_clear_progress(this);
+	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 	FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
 }
 
 void payload_path_build(entity this)
 {
-	payload_cart = this;
+	this.plc_cart_id = payload_cart_count;
+	if(payload_cart_count < PLC_MAX_CARTS)
+	{
+		payload_carts[payload_cart_count] = this;
+		++payload_cart_count;
+	}
+
 	entity first = (this.target != "") ? find(NULL, targetname, this.target) : NULL;
 	if(!first)
 	{
@@ -301,7 +331,7 @@ void payload_path_build(entity this)
 		setorigin(first, this.origin + this.view_ofs);
 		LOG_INFO("payload: func_plc_cart has no reachable plc_path, using a single node at its own origin");
 	}
-	payload_first = first;
+	this.plc_first = first;
 
 	entity prev = NULL;
 	entity node = first;
@@ -309,10 +339,12 @@ void payload_path_build(entity this)
 	int guard = 0;
 	while(node && guard < 4096)
 	{
-		++guard;
 		IL_PUSH(g_payload_nodes, node);
 		WaypointSprite_SpawnFixed(WP_Waypoint, node.origin + '0 0 48', node, sprite, RADARICON_WAYPOINT);
 		node.plc_prev = prev;
+		node.plc_cart = this;
+		node.plc_idx = guard;
+		++guard;
 		if(node.curvetarget != "")
 			node.plc_curve = find(NULL, targetname, node.curvetarget);
 		if(prev)
@@ -327,79 +359,43 @@ void payload_path_build(entity this)
 		prev = node;
 		node = nxt;
 	}
-	payload_length = d;
+	this.plc_length = d;
 
-	payload_goal_mask = 0;
-	for(int j = 0; j <= NUM_TEAMS; ++j)
-	{
-		payload_goal_s[j] = 0;
-		payload_goal_r[j] = 0;
-	}
-	for(entity g = findchain(classname, "plc_goal"); g; g = g.chain)
-	{
-		int j = Team_TeamToIndex(g.team);
-		if(j < 1)
-			continue;
-		entity n = (g.target != "") ? find(NULL, targetname, g.target) : NULL;
-		payload_goal_s[j] = n ? n.plc_dist : payload_nearest_node_s(g.origin);
-		payload_goal_r[j] = (g.radius > 0) ? g.radius : 64;
-		payload_goal_mask |= Team_IndexToBit(j);
-	}
-	payload_goal_mask &= payload_teams;
+	this.plc_s = 0;
+	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 
-	entity home = (this.plc_start != "") ? find(NULL, targetname, this.plc_start) : NULL;
-	this.plc_home_s = home ? home.plc_dist : payload_nearest_node_s(this.origin + this.view_ofs);
-	this.plc_s = this.plc_home_s;
-	setorigin(this, payload_pos(this.plc_s) - this.view_ofs);
-
-	WaypointSprite_Spawn(WP_PayloadCart, 0, 0, this, '0 0 64', NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
-	WaypointSprite_UpdateMaxHealth(this.sprite, payload_length);
+	entity wp = WP_PayloadCart2;
+	if(this.plc_cart_id == 0)
+		wp = WP_PayloadCart;
+	WaypointSprite_Spawn(wp, 0, 0, this, '0 0 64', NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
+	WaypointSprite_UpdateMaxHealth(this.sprite, this.plc_length);
 	WaypointSprite_UpdateHealth(this.sprite, this.plc_s);
 	payload_mesh_mark_objectives();
 
 	setthink(this, payload_think);
 	this.nextthink = this.ltime + PLC_TICK;
 
-	LOG_INFO(strcat("payload: ", ftos(guard), " path nodes, length ", ftos(payload_length),
-		", goal mask ", ftos(payload_goal_mask), ", home ", ftos(this.plc_home_s)));
+	LOG_INFO(strcat("payload: cart ", ftos(this.plc_cart_id), ": ", ftos(guard),
+		" path nodes, length ", ftos(this.plc_length)));
 }
 
-int payload_goal_reached_team()
+int payload_leading_team()
 {
-	if(!payload_cart)
-		return 0;
-	for(int j = 1; j <= NUM_TEAMS; ++j)
-	{
-		if(!(payload_goal_mask & Team_IndexToBit(j)))
-			continue;
-		if(fabs(payload_cart.plc_s - payload_goal_s[j]) <= payload_goal_r[j])
-			return Team_IndexToTeam(j);
-	}
-	return 0;
-}
-
-int payload_nearest_goal_team()
-{
-	if(!payload_cart)
-		return 0;
-	int best = 0;
-	float bestd = -1;
+	int bestj = 0;
+	float bestb = 0;
 	int ties = 0;
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
-		if(!(payload_goal_mask & Team_IndexToBit(j)))
-			continue;
-		float d = fabs(payload_cart.plc_s - payload_goal_s[j]);
-		if(bestd < 0 || d < bestd)
+		if(payload_round_banks[j] > bestb)
 		{
-			bestd = d;
-			best = Team_IndexToTeam(j);
+			bestb = payload_round_banks[j];
+			bestj = j;
 			ties = 1;
 		}
-		else if(d == bestd)
+		else if(payload_round_banks[j] == bestb && bestb > 0)
 			++ties;
 	}
-	return (ties == 1) ? best : 0;
+	return (bestj && ties == 1) ? Team_IndexToTeam(bestj) : 0;
 }
 
 void payload_RoundEnd(int winner_team)
@@ -426,16 +422,23 @@ bool Payload_CheckWinner()
 {
 	if(round_handler_GetEndTime() > 0 && round_handler_GetEndTime() - time <= 0)
 	{
-		payload_RoundEnd(payload_nearest_goal_team());
+		payload_RoundEnd(payload_leading_team());
 		return true;
 	}
 
-	int t = payload_goal_reached_team();
-	if(t <= 0)
-		return false;
-
-	payload_RoundEnd(t);
-	return true;
+	for(int c = 0; c < payload_cart_count; ++c)
+	{
+		entity cart = payload_carts[c];
+		if(cart.plc_ctrl && cart.plc_length > 0
+			&& cart.plc_s >= cart.plc_length - autocvar_g_payload_capture_radius)
+		{
+			int t = Team_IndexToTeam(cart.plc_ctrl);
+			LOG_INFO(strcat("payload: cart ", ftos(cart.plc_cart_id), " delivered by team ", ftos(t)));
+			payload_RoundEnd(t);
+			return true;
+		}
+	}
+	return false;
 }
 
 bool Payload_CheckPlayers()
@@ -446,25 +449,26 @@ bool Payload_CheckPlayers()
 void Payload_RoundStart()
 {
 	FOREACH_CLIENT(IS_PLAYER(it), { it.player_blocked = false; });
-	if(payload_cart)
-		payload_cart_reset(payload_cart);
+	for(int j = 0; j <= NUM_TEAMS; ++j)
+		payload_round_banks[j] = 0;
+	for(int c = 0; c < payload_cart_count; ++c)
+		payload_cart_reset(payload_carts[c]);
 }
 
 void havocbot_goalrating_payload(entity this, float ratingscale)
 {
-	if(!payload_cart)
-		return;
 	int j = Team_TeamToIndex(this.team);
-	navigation_routerating(this, payload_cart, ratingscale, 5000);
-	if(j < 1 || !(payload_goal_mask & Team_IndexToBit(j)))
+	for(int c = 0; c < payload_cart_count; ++c)
+		navigation_routerating(this, payload_carts[c], ratingscale, 5000);
+	if(j < 1)
 		return;
-	float d = payload_goal_s[j] - payload_cart.plc_s;
-	float lead = bound(-256, d, 256);
 	if(payload_mesh_weights_valid(this))
 	{
+		int cbase = PLC_MESH_OBJECTIVES * floor(bound(0, this.plc_mesh_pick,
+			payload_cart_count * PLC_MESH_OBJECTIVES - 1) / PLC_MESH_OBJECTIVES);
 		for(int o = 0; o < PLC_MESH_OBJECTIVES; ++o)
 		{
-			entity nd = payload_mesh_node(o);
+			entity nd = payload_mesh_node(cbase + o);
 			if(!nd)
 				break;
 			float wgt = payload_mesh_weight(this, o);
@@ -478,9 +482,9 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 		if(o)
 			navigation_routerating(this, o, ratingscale * 2, 3000);
 	}
-	IL_EACH(g_payload_nodes, true,
+	IL_EACH(g_payload_nodes, it.plc_cart != NULL,
 	{
-		float rel = (it.plc_dist - payload_cart.plc_s) / ((lead >= 0) ? 256 : -256);
+		float rel = (it.plc_dist - it.plc_cart.plc_s) / 256;
 		if(rel > 0 && rel < 1)
 			navigation_routerating(this, it, ratingscale * 0.5, 3000);
 	});
@@ -580,10 +584,6 @@ spawnfunc(func_plc_cart)
 	this.dmgtime2 = time;
 
 	InitMovingBrushTrigger(this);
-	// After InitMovingBrushTrigger, not before: it sets the brush model, and
-	// mins is empty until it has. Assigning view_ofs earlier left the cart's
-	// tracked point at the entity origin regardless of its geometry, so no
-	// pusher was ever inside the push radius and the cart never moved.
 	this.view_ofs = this.mins;
 	setblocked(this, generic_plat_blocked);
 	this.reset = payload_cart_reset;
@@ -629,6 +629,7 @@ void ScoreRules_payload(int teams)
 {
 	GameRules_scoring(teams, SFL_SORT_PRIO_PRIMARY, 0, {
 		field_team(ST_PAYLOAD_CAPS, "caps", SFL_SORT_PRIO_PRIMARY);
+		field_team(ST_PAYLOAD_POINTS, "points", 0);
 		field(SP_PAYLOAD_PUSH, "push", 0);
 		field(SP_PAYLOAD_BLOCK, "block", 0);
 	});
@@ -674,7 +675,7 @@ void payload_DelayedInit(entity this)
 
 	ScoreRules_payload(payload_teams);
 
-	LOG_INFO(strcat("payload: teams mask ", ftos(payload_teams)));
+	LOG_INFO(strcat("payload: teams mask ", ftos(payload_teams), ", carts ", ftos(payload_cart_count)));
 
 	round_handler_Spawn(Payload_CheckPlayers, Payload_CheckWinner, Payload_RoundStart);
 	round_handler_Init(5, autocvar_g_payload_warmup, autocvar_g_payload_round_timelimit);

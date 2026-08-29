@@ -33,7 +33,8 @@ void payload_mesh_mark_objectives()
 {
 	IL_EACH(g_payload_nodes, it.sprite != NULL,
 	{
-		WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, WP_Waypoint.m_color);
+		WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT,
+			it.plc_bank_team ? Team_ColorRGB(Team_IndexToTeam(it.plc_bank_team)) : WP_Waypoint.m_color);
 	});
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
@@ -85,14 +86,20 @@ bool payload_mesh_weights_valid(entity b)
 
 entity payload_mesh_node(float idx)
 {
-	entity a = payload_first;
-	for(float k = 0; a && k < idx && a.plc_next; ++k)
+	if(payload_cart_count < 1)
+		return NULL;
+	int c = bound(0, floor(idx / PLC_MESH_OBJECTIVES), payload_cart_count - 1);
+	entity a = payload_carts[c].plc_first;
+	float want = idx - c * PLC_MESH_OBJECTIVES;
+	for(float k = 0; a && k < want && a.plc_next; ++k)
 		a = a.plc_next;
 	return a;
 }
 
 void payload_mesh_tick(entity cart)
 {
+	if(cart.plc_cart_id != 0)
+		return;
 	if(payload_mesh_h < 0)
 	{
 		if(time >= payload_mesh_retry)
@@ -100,8 +107,21 @@ void payload_mesh_tick(entity cart)
 		return;
 	}
 
-	float prog = (payload_length > 0) ? cart.plc_s / payload_length : 0;
-	vector cpos = cart.origin + cart.view_ofs;
+	float c0p = 0, c0t = 0, c0r = 0, c1p = 0, c1t = 0, c1r = 0;
+	if(payload_cart_count > 0)
+	{
+		entity ca = payload_carts[0];
+		c0p = (ca.plc_length > 0) ? ca.plc_s / ca.plc_length : 0;
+		c0t = ca.plc_ctrl;
+		c0r = (ca.plc_speed_now < 0) ? 1 : 0;
+	}
+	if(payload_cart_count > 1)
+	{
+		entity cb = payload_carts[1];
+		c1p = (cb.plc_length > 0) ? cb.plc_s / cb.plc_length : 0;
+		c1t = cb.plc_ctrl;
+		c1r = (cb.plc_speed_now < 0) ? 1 : 0;
+	}
 
 	FOREACH_CLIENTSLOT(true,
 	{
@@ -130,8 +150,20 @@ void payload_mesh_tick(entity cart)
 		it.plc_mrow_vx = p ? it.velocity.x / 1024 : 0;
 		it.plc_mrow_vy = p ? it.velocity.y / 1024 : 0;
 		it.plc_mrow_vz = p ? it.velocity.z / 1024 : 0;
-		it.plc_mrow_dist = p ? vlen(it.origin - cpos) : 0;
-		it.plc_mrow_prog = prog;
+		float dbest = 0;
+		float pbest = 0;
+		for(int c = 0; c < payload_cart_count; ++c)
+		{
+			entity ct = payload_carts[c];
+			float dd = vlen(it.origin - (ct.origin + ct.view_ofs));
+			if(c == 0 || dd < dbest)
+			{
+				dbest = dd;
+				pbest = (ct.plc_length > 0) ? ct.plc_s / ct.plc_length : 0;
+			}
+		}
+		it.plc_mrow_dist = p ? dbest : 0;
+		it.plc_mrow_prog = pbest;
 		it.plc_mrow_friends = fr;
 		it.plc_mrow_enemies = en;
 		it.plc_mrow_obj = (j >= 1 && j <= NUM_TEAMS) ? payload_mesh_objective[j] : 0;
@@ -140,6 +172,12 @@ void payload_mesh_tick(entity cart)
 			|| StatusEffects_active(STATUSEFFECT_Shield, it))) ? 1 : 0;
 		it.plc_mrow_tss = p ? bound(0, time - it.plc_spawn_stamp, 999) : 0;
 		it.plc_mrow_pad = 0;
+		it.plc_mrow_c0p = c0p;
+		it.plc_mrow_c0t = c0t;
+		it.plc_mrow_c0r = c0r;
+		it.plc_mrow_c1p = c1p;
+		it.plc_mrow_c1t = c1t;
+		it.plc_mrow_c1r = c1r;
 	});
 
 	mesh_gather(payload_mesh_h, 0, plc_mrow_id, 1, maxclients);
@@ -162,6 +200,12 @@ void payload_mesh_tick(entity cart)
 	mesh_gather(payload_mesh_h, 17, plc_mrow_pow, 1, maxclients);
 	mesh_gather(payload_mesh_h, 18, plc_mrow_tss, 1, maxclients);
 	mesh_gather(payload_mesh_h, 19, plc_mrow_pad, 1, maxclients);
+	mesh_gather(payload_mesh_h, 20, plc_mrow_c0p, 1, maxclients);
+	mesh_gather(payload_mesh_h, 21, plc_mrow_c0t, 1, maxclients);
+	mesh_gather(payload_mesh_h, 22, plc_mrow_c0r, 1, maxclients);
+	mesh_gather(payload_mesh_h, 23, plc_mrow_c1p, 1, maxclients);
+	mesh_gather(payload_mesh_h, 24, plc_mrow_c1t, 1, maxclients);
+	mesh_gather(payload_mesh_h, 25, plc_mrow_c1r, 1, maxclients);
 
 	payload_mesh_seq += 1;
 	mesh_publish(payload_mesh_h, payload_mesh_seq, maxclients);
@@ -200,24 +244,25 @@ void payload_mesh_tick(entity cart)
 			WaypointSprite_Kill(it.wps_plcleader);
 	});
 
-	for(int k = 0; k < (NUM_TEAMS + 1) * PLC_MESH_OBJECTIVES; ++k)
+	int nobj = bound(1, payload_cart_count * PLC_MESH_OBJECTIVES, PLC_MESH_COMBINED);
+	for(int k = 0; k < (NUM_TEAMS + 1) * PLC_MESH_COMBINED; ++k)
 		payload_mesh_vote[k] = 0;
 
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
 		int j = Team_TeamToIndex(it.team);
-		int o = bound(0, floor(it.plc_mesh_pick), PLC_MESH_OBJECTIVES - 1);
+		int o = bound(0, floor(it.plc_mesh_pick), nobj - 1);
 		if(j >= 1 && j <= NUM_TEAMS)
-			payload_mesh_vote[j * PLC_MESH_OBJECTIVES + o] += 1;
+			payload_mesh_vote[j * PLC_MESH_COMBINED + o] += 1;
 	});
 
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
 		float best = 0;
 		int pick = payload_mesh_objective[j];
-		for(int o = 0; o < PLC_MESH_OBJECTIVES; ++o)
+		for(int o = 0; o < nobj; ++o)
 		{
-			float w = payload_mesh_vote[j * PLC_MESH_OBJECTIVES + o];
+			float w = payload_mesh_vote[j * PLC_MESH_COMBINED + o];
 			if(w > best)
 			{
 				best = w;

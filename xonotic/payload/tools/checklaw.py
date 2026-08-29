@@ -1,52 +1,40 @@
 import re, sys
 
-L = 5914.897461
 SPEED = 40.0
+CAP = 3
+MAXV = 200.0
 rows = []
 for line in open(sys.argv[1], errors='ignore'):
-    m = re.search(r'plcdbg t=([\d.]+) s=([\d.]+) v=(-?[\d.]+) n=(\d+),(\d+),(\d+) g=([\d.]+),([\d.]+),([\d.]+)', line)
+    m = re.search(r'plcdbg t=([\d.]+) cart=(\d+) s=([\d.]+) v=(-?[\d.]+) ctrl=(\d+)'
+                  r' n=(\d+),(\d+),(\d+),(\d+) live=(\d+)', line)
     if m:
-        g = [float(m.group(7)), float(m.group(8)), float(m.group(9))]
-        rows.append((float(m.group(1)), float(m.group(2)), float(m.group(3)),
-                     [int(m.group(4)), int(m.group(5)), int(m.group(6))], g))
-    m = re.search(r'plcdbg t=([\d.]+) s=([\d.]+) v=(-?[\d.]+) n=(\d+),(\d+) pl=', line)
-    if m:
-        rows.append((float(m.group(1)), float(m.group(2)), float(m.group(3)),
-                     [int(m.group(4)), int(m.group(5)), 0], [0.0, L, -1.0]))
+        rows.append((float(m.group(1)), int(m.group(2)), float(m.group(3)),
+                     float(m.group(4)), int(m.group(5)),
+                     [int(m.group(i)) for i in range(6, 10)], int(m.group(10))))
 
 start = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
-ok = bad = 0
-push_samples = 0
-coalition = 0
-for i in range(1, len(rows)):
-    t, s, v, n, g = rows[i]
-    if t < start:
+ok = bad = occupied = contested = regress = 0
+for t, cart, s, v, ctrl, n, live in rows:
+    if t < start or not live:
         continue
-    if sum(n) == 0:
+    w = [min(x, CAP) for x in n]
+    if sum(w) == 0:
         continue
-    push_samples += 1
-    pplus = pminus = 0.0
-    sides = set()
-    for j in range(3):
-        if g[j] < 0:
-            continue
-        w = min(n[j], 3)
-        if w == 0:
-            continue
-        d = g[j] - s
-        if d > 0:
-            pplus += w
-            sides.add(1)
-        elif d < 0:
-            pminus += w
-            sides.add(-1)
-    if len(sides) > 1:
-        coalition += 1
-    exp = max(-200.0, min(200.0, SPEED * (pplus - pminus)))
-    if abs(exp - v) < 1e-3:
+    occupied += 1
+    best = max(w)
+    exp_ctrl = w.index(best) + 1 if w.count(best) == 1 else 0
+    pplus = w[exp_ctrl - 1] if exp_ctrl else 0
+    exp = max(-MAXV, min(MAXV, SPEED * (pplus - (sum(w) - pplus))))
+    if sum(1 for x in w if x) > 1:
+        contested += 1
+    if v < 0:
+        regress += 1
+    if exp_ctrl == ctrl and abs(exp - v) < 1e-3:
         ok += 1
     else:
         bad += 1
         if bad <= 8:
-            print('MISMATCH t=%.2f s=%.1f n=%s g=%s expected v=%.1f got v=%.1f' % (t, s, n, g, exp, v))
-print('samples=%d occupied=%d law_ok=%d law_mismatch=%d two_sided=%d' % (len(rows), push_samples, ok, bad, coalition))
+            print('MISMATCH t=%.2f cart=%d s=%.1f n=%s expected ctrl=%d v=%.1f got ctrl=%d v=%.1f'
+                  % (t, cart, s, n, exp_ctrl, exp, ctrl, v))
+print('samples=%d occupied=%d law_ok=%d law_mismatch=%d contested=%d regressing=%d'
+      % (len(rows), occupied, ok, bad, contested, regress))

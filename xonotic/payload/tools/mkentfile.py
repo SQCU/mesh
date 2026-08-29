@@ -1,6 +1,8 @@
-import struct, sys, re
+import struct, sys, re, math
 
 bsp, out = sys.argv[1], sys.argv[2]
+kteams = max(2, min(5, int(sys.argv[3]))) if len(sys.argv) > 3 else 2
+kcarts = max(1, min(4, int(sys.argv[4]))) if len(sys.argv) > 4 else 2
 d = open(bsp, 'rb').read()
 assert d[:4] == b'IBSP', d[:4]
 off, ln = struct.unpack_from('<ii', d, 8)
@@ -14,7 +16,8 @@ for b in blocks:
         mclass[m.group(1)] = re.search(r'"classname"\s+"([^"]+)"', b).group(1)
 models = sorted(mclass, key=lambda s: int(s[1:]))
 visible = [m for m in models if not mclass[m].startswith('trigger_')]
-cart_model = (visible or models)[0]
+if not visible:
+    visible = models
 spawns = [b for b in blocks if 'info_player_team1' in b or 'info_player_team2' in b]
 
 
@@ -24,57 +27,53 @@ def origin(b):
 
 
 pts = [origin(b) for b in spawns if origin(b)]
-print('inline models:', models[:6], 'cart model:', cart_model, mclass[cart_model], 'team spawns:', len(pts))
+print('inline models:', models[:6], 'visible:', visible[:kcarts], 'team spawns:', len(pts))
 
-pts.sort(key=lambda p: (p[0], p[1]))
-idx = [0, len(pts) // 4, len(pts) // 2, (3 * len(pts)) // 4, len(pts) - 1]
-track = [[pts[i][0], pts[i][1], pts[i][2] + 16] for i in idx]
-
-k = max(2, min(5, int(sys.argv[3]))) if len(sys.argv) > 3 else 2
-
-chain = [('plcn%d' % i, p) for i, p in enumerate(track)]
-start = 'plcn2'
-if k == 5:
-    mid = [(track[1][a] + track[2][a]) / 2 for a in range(3)]
-    chain = chain[:2] + [('plcs', mid)] + chain[2:]
-    start = 'plcs'
-
-pos = dict(chain)
+spread = [max(p[a] for p in pts) - min(p[a] for p in pts) for a in (0, 1)]
+split_axis = 0 if spread[0] >= spread[1] else 1
+walk_axis = 1 - split_axis
+pts.sort(key=lambda p: p[split_axis])
 
 extra = []
-for i, (name, p) in enumerate(chain):
-    e = ['{', '"classname" "plc_path"', '"targetname" "%s"' % name,
-         '"origin" "%.0f %.0f %.0f"' % tuple(p)]
-    if i + 1 < len(chain):
-        e.append('"target" "%s"' % chain[i + 1][0])
-    if name == start:
-        e.append('"spawnflags" "1"')
-    e.append('}')
-    extra.append('\n'.join(e))
+tracks = []
+for c in range(kcarts):
+    lo = (len(pts) * c) // kcarts
+    hi = (len(pts) * (c + 1)) // kcarts
+    part = sorted(pts[lo:hi], key=lambda p: (p[walk_axis], p[split_axis]))
+    idx = sorted({0, len(part) // 4, len(part) // 2, (3 * len(part)) // 4, len(part) - 1})
+    while len(idx) < 5:
+        idx.append(idx[-1])
+    track = [[part[i][0], part[i][1], part[i][2] + 16] for i in idx[:5]]
+    names = ['plc%dn%d' % (c, i) for i in range(5)]
+    tracks.append((names, track))
+    for i, (name, p) in enumerate(zip(names, track)):
+        e = ['{', '"classname" "plc_path"', '"targetname" "%s"' % name,
+             '"origin" "%.0f %.0f %.0f"' % tuple(p)]
+        if i + 1 < 5:
+            e.append('"target" "%s"' % names[i + 1])
+        if i == 2:
+            e.append('"spawnflags" "1"')
+        e.append('}')
+        extra.append('\n'.join(e))
+    extra.append('\n'.join(['{', '"classname" "func_plc_cart"',
+                            '"model" "%s"' % visible[c % len(visible)],
+                            '"target" "%s"' % names[0], '"speed" "40"', '}']))
 
-extra.append('\n'.join(['{', '"classname" "func_plc_cart"',
-                        '"model" "%s"' % cart_model,
-                        '"target" "plcn0"', '"plc_start" "%s"' % start,
-                        '"speed" "40"', '}']))
-goals = [(4, 'plcn0'), (13, 'plcn4'), (12, 'plcn1'), (9, 'plcn3'), (3, 'plcn2')][:k]
-for cnt, node in goals:
+goal_cnts = [4, 13, 12, 9, 3][:kteams]
+for t, cnt in enumerate(goal_cnts):
+    names, track = tracks[t % kcarts]
     extra.append('\n'.join(['{', '"classname" "plc_goal"',
-                            '"cnt" "%d"' % cnt, '"target" "%s"' % node,
+                            '"cnt" "%d"' % cnt, '"target" "%s"' % names[4],
                             '"radius" "64"',
-                            '"origin" "%.0f %.0f %.0f"' % tuple(pos[node]),
+                            '"origin" "%.0f %.0f %.0f"' % tuple(track[4]),
                             '}']))
 
-import math
-arc = {}
-s = 0.0
-for i, (name, p) in enumerate(chain):
-    if i:
-        q = chain[i - 1][1]
-        s += math.dist(p, q)
-    arc[name] = s
-print('teams', k, 'start', start, 's=%.0f' % arc[start],
-      'goal s:', {n: round(arc[n]) for _, n in goals},
-      'min |start-goal|', round(min(abs(arc[n] - arc[start]) for _, n in goals)))
+for c, (names, track) in enumerate(tracks):
+    L = sum(math.dist(track[i], track[i + 1]) for i in range(4))
+    print('cart %d: %s -> %s length %.0f' % (c, track[0], track[4], L))
+sep = min(math.dist(pa, pb) for _, ta in tracks[:1] for pa in ta
+          for _, tb in tracks[1:] for pb in tb) if kcarts > 1 else -1
+print('teams', kteams, 'carts', kcarts, 'min inter-track node distance %.0f' % sep)
 
 open(out, 'w').write(ents.rstrip('\0') + '\n' + '\n'.join(extra) + '\n')
-print('wrote', out, 'track', track[0], '->', track[-1])
+print('wrote', out)

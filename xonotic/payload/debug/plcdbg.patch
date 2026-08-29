@@ -1,57 +1,18 @@
---- /Users/mdot/dox/mesh/.claude/worktrees/wf_ea51523a-ae6-9/xonotic/payload/qcsrc/common/gamemodes/gamemode/payload/sv_payload.qc	2026-08-28 02:54:21
-+++ /Users/mdot/dox/mesh/xonotic/payload-build/qcsrc/common/gamemodes/gamemode/payload/sv_payload.qc	2026-08-28 02:59:33
-@@ -34,6 +34,9 @@
- float autocvar_g_payload_warmup = 5;
- 
- entity payload_first;
-+float plcdbg_players, plcdbg_teamok, plcdbg_inrange, plcdbg_los;
-+float plcdbg_mind, plcdbg_minz, plcdbg_r, plcdbg_h;
-+vector plcdbg_c;
- float payload_gain[NUM_TEAMS + 1];
- float payload_speed_now;
- 
-@@ -122,20 +125,28 @@
- 		payload_w[j] = 0;
- 		payload_n[j] = 0;
- 	}
-+	plcdbg_players = 0; plcdbg_teamok = 0; plcdbg_inrange = 0; plcdbg_los = 0;
-+	plcdbg_mind = 1000000; plcdbg_minz = 1000000; plcdbg_r = r; plcdbg_h = h; plcdbg_c = c;
- 	FOREACH_CLIENT(true, { it.plc_in = 0; });
- 	FOREACH_CLIENT(IS_PLAYER(it) && !IS_DEAD(it),
- 	{
-+		plcdbg_players += 1;
-+		plcdbg_mind = min(plcdbg_mind, vlen(vec2(it.origin - c)));
-+		plcdbg_minz = min(plcdbg_minz, fabs((it.origin - c).z));
- 		int j = Team_TeamToIndex(it.team);
- 		if(j < 1)
- 			continue;
-+		plcdbg_teamok += 1;
- 		vector d = it.origin - c;
- 		if(fabs(d.z) > h)
- 			continue;
- 		if(vlen(vec2(d)) > r)
- 			continue;
-+		plcdbg_inrange += 1;
- 		traceline(it.origin + it.view_ofs, c, MOVE_NOMONSTERS, it);
- 		if(trace_fraction < 1 && trace_ent != cart)
- 			continue;
-+		plcdbg_los += 1;
- 		it.plc_in = j;
- 		payload_n[j] += 1;
- 	});
-@@ -274,6 +285,15 @@
- 		if(stalled)
+--- a/common/gamemodes/gamemode/payload/sv_payload.qc
++++ b/common/gamemodes/gamemode/payload/sv_payload.qc
+@@ -293,6 +293,15 @@
  			GameRules_scoring_add_float2int(it, PAYLOAD_BLOCK, autocvar_g_payload_block_rate * PLC_TICK, plc_block_accum, 1);
  	});
-+
+ 
 +	if(time > this.pain_finished)
 +	{
 +		this.pain_finished = time + 0.5;
-+		LOG_INFO(strcat("plcdbg t=", ftos(time), " s=", ftos(s_new), " v=", ftos(payload_speed_now),
-+			strcat(" n=", ftos(payload_n[1]), ",", ftos(payload_n[2]), ",", ftos(payload_n[3])),
-+			strcat(" g=", ftos(payload_goal_s[1]), ",", ftos(payload_goal_s[2]), ",", ftos(payload_goal_s[3])),
++		LOG_INFO(strcat("plcdbg t=", ftos(time), " cart=", ftos(this.plc_cart_id),
++			strcat(" s=", ftos(s_new), " v=", ftos(this.plc_speed_now), " ctrl=", ftos(ctrl)),
++			strcat(" n=", ftos(payload_n[1]), ",", ftos(payload_n[2]), ",", ftos(payload_n[3]), ",", ftos(payload_n[4])),
 +			strcat(" live=", ftos(live))));
 +	}
- 
++
  	WaypointSprite_UpdateHealth(this.sprite, s_new);
  
+ 	if(this.plc_cart_id == 0)
