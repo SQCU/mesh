@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdatomic.h>
 #define MESH_MAGIC   0x4d455348u
-#define WIRE_MAGIC   0x4d534831u
 #define MESH_NAME    "/mesh0"
 #define MESH_PORT    "18519"
 #define MESH_MODE    0666
@@ -16,7 +15,7 @@
 #define RINGS        ((sizeof(struct hdr)+MESH_CL-1)/MESH_CL*MESH_CL)
 enum { FREE, RECV, SEND, APP, NOWN };
 enum { SUB, CMP, REL, ACK, NRING };
-struct wire { uint32_t magic, bytes; uint16_t src, dst, hops; };
+struct wire { uint16_t src, dst, hops; };
 struct desc { uint32_t page, bytes; uint16_t node; };
 struct ring { _Alignas(MESH_CL) _Atomic uint64_t head, tail; };
 struct hdr {
@@ -32,8 +31,6 @@ static inline unsigned char *mesh_data(struct hdr *m, uint32_t i){
   return mesh_at(m,i) + sizeof(struct wire); }
 static inline uint32_t mesh_pay(struct hdr *m){
   return m->pgsz - (uint32_t)sizeof(struct wire); }
-static inline uint32_t mesh_clamp(struct hdr *m, size_t n){
-  uint32_t p=mesh_pay(m); return n>p?p:(uint32_t)n; }
 static inline struct desc *slot(struct hdr *m, int k, uint64_t i){
   return &((struct desc*)((unsigned char*)m + RINGS))[k*MESH_RING + i%MESH_RING]; }
 static inline int push(struct hdr *m, int k, const struct desc *d){

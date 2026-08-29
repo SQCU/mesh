@@ -73,7 +73,7 @@ int main(int argc,char**argv){
   shm_unlink(name); int rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
   if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,MESH_MODE);
   void *base=mmap(NULL,d0+span,PROT_READ|PROT_WRITE,MAP_SHARED,rf,0);
-  if(base==MAP_FAILED) die("mmap"); memset(base,0,d0); shm=name;
+  if(base==MAP_FAILED) die("mmap"); shm=name;
   struct hdr *M=base;
   M->pgsz=pg; M->pool=pool; M->arena=np-pool; M->node=me; M->version=MESH_VERSION;
   M->data_off=d0;
@@ -120,14 +120,15 @@ int main(int argc,char**argv){
   #define BUMP(f) atomic_fetch_add_explicit(&M->f,1,memory_order_relaxed)
   #define MV(i,to) do{ n[own[i]]--; own[i]=(to); n[to]++; }while(0)
   #define GIVE(i)  do{ MV(i,FREE); fl[n[FREE]-1]=(i); }while(0)
-  #define POST(i,op) ({ struct ibv_sge g={(uintptr_t)mesh_at(M,(uint32_t)(i)),(uint32_t)pg,LKEY(i)}; \
+  #define POST_RECV(i) ({ struct ibv_sge g={(uintptr_t)mesh_at(M,(uint32_t)(i)),(uint32_t)pg,LKEY(i)}; \
+    struct ibv_recv_wr q={.wr_id=(i),.sg_list=&g,.num_sge=1},*bq; ibv_post_recv(qp,&q,&bq); })
+  #define POST_SEND(i,len) ({ struct ibv_sge g={(uintptr_t)mesh_at(M,(uint32_t)(i)),(len),LKEY(i)}; \
     struct ibv_send_wr s={.wr_id=(i),.sg_list=&g,.num_sge=1,.opcode=IBV_WR_SEND, \
-      .send_flags=IBV_SEND_SIGNALED},*bs; struct ibv_recv_wr q={.wr_id=(i),.sg_list=&g,.num_sge=1},*bq; \
-    (op) ? ibv_post_send(qp,&s,&bs) : ibv_post_recv(qp,&q,&bq); })
+      .send_flags=IBV_SEND_SIGNALED},*bs; ibv_post_send(qp,&s,&bs); })
 
   while(!stop){
     while(n[FREE] && n[RECV]<QD){ int i=fl[n[FREE]-1];
-      if(POST(i,0)) break;
+      if(POST_RECV(i)) break;
       MV(i,RECV); }
     struct desc d;
     while(!pop(M,REL,&d)) if(POOL(d.page) && own[d.page]==APP) GIVE(d.page);
@@ -137,23 +138,25 @@ int main(int argc,char**argv){
         uint32_t p=d.page;
         if(p<(uint32_t)pool || !VALID(p)){ BUMP(bad); continue; }
         struct wire *w2=(struct wire*)mesh_at(M,p);
-        w2->magic=WIRE_MAGIC; w2->bytes=mesh_clamp(M,d.bytes);
         w2->src=me; w2->dst=d.node; w2->hops=0;
-        if(POST(p,1)){ BUMP(bad); break; }
+        uint32_t len=mesh_pay(M); if(d.bytes<len) len=d.bytes;
+        if(POST_SEND(p,(uint32_t)sizeof(struct wire)+len)){ BUMP(bad); break; }
         sends++; BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
       if(!VALID(i)) die("wr_id outside the pool");
-      if(wc[j].opcode!=IBV_WC_RECV){ sends--;
+      if(!POOL(i) || own[i]!=RECV){ sends--;
         if(POOL(i)) GIVE(i);
         else { struct desc a={.page=(uint32_t)i}; push(M,ACK,&a); }
-        continue; } if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
+        continue; }
+      if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
+      uint32_t bl=wc[j].byte_len;
+      if(bl<sizeof(struct wire)) die("runt frame");
       struct wire *h=(struct wire*)mesh_at(M,(uint32_t)i);
-      if(h->magic!=WIRE_MAGIC){ GIVE(i); continue; }
       h->hops++;
       if(h->dst!=(uint16_t)me && h->hops<=32){
-        if(sends<QD && !POST(i,1)){ sends++; MV(i,SEND); } else GIVE(i); continue; }
-      struct desc c={.page=(uint32_t)i,.bytes=mesh_clamp(M,h->bytes),.node=h->src};
+        if(sends<QD && !POST_SEND(i,bl)){ sends++; MV(i,SEND); } else GIVE(i); continue; }
+      struct desc c={.page=(uint32_t)i,.bytes=bl-(uint32_t)sizeof(struct wire),.node=h->src};
       if(!who || push(M,CMP,&c)) GIVE(i);
       else { MV(i,APP); BUMP(recvd); } }
     for(int s=0;s<NOWN;s++) add(&w[s],n[s]);

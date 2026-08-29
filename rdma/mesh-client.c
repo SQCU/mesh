@@ -34,7 +34,8 @@ size_t mesh_write(const void *p, size_t nbytes, int node){
   if(!M) return 0;
   uint32_t s=(uint32_t)(((const unsigned char*)p-arena)/M->pgsz); size_t done=0;
   while(done<nbytes && s<M->arena){
-    struct desc d={.page=M->pool+s,.bytes=mesh_clamp(M,nbytes-done),.node=(uint16_t)node};
+    uint32_t u=mesh_pay(M);
+    struct desc d={.page=M->pool+s,.bytes=nbytes-done<u?(uint32_t)(nbytes-done):u,.node=(uint16_t)node};
     if(push(M,SUB,&d)) break;
     done+=d.bytes; s++; }
   return done; }
