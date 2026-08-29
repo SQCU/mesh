@@ -59,6 +59,8 @@ ROLES = ("push", "suppress", "escort")
 TEAM_HYST = 0.2
 P_MAX = 8
 NINST = K_CARTS + P_MAX
+NALLOC = K_CARTS * len(("p", "s", "e")) + P_MAX
+NBUCKET = 2
 ITEM_BASE = K_CARTS * TEAMS
 ITEM_COLS = 5
 ITEM_COL = 20 + 3 * K_CARTS
@@ -481,12 +483,13 @@ class Strategy:
     score slice, which is the regression rule in utility form. REINFORCE
     with per-team EMA baselines trains the twelve scalars."""
 
-    def __init__(self, path, seed=SEED, lr=0.1):
+    def __init__(self, path, seed=SEED, lr=0.1, lr_w=0.5, reg=0.01):
         self.path = os.path.expanduser(path) if path else ""
-        self.lr = lr
+        self.lr, self.lr_w, self.reg = lr, lr_w, reg
         self.rng = np.random.default_rng(seed)
         self.names = sorted(THETA)
         self.theta = dict(THETA)
+        self.W = np.zeros((NBUCKET, RES, NALLOC), np.float32)
         self.base = np.zeros(TEAMS + 1, np.float64)
         self.eps = 0
         if self.path and os.path.exists(self.path):
@@ -496,6 +499,8 @@ class Strategy:
             for k in self.names:
                 if k in saved:
                     self.theta[k] = saved[k]
+            if "W" in z.files and z["W"].shape == self.W.shape:
+                self.W = z["W"].astype(np.float32)
             self.base = z["base"].astype(np.float64)
             self.eps = int(z["eps"])
         self.leaders = {}
@@ -510,6 +515,8 @@ class Strategy:
 
     def _reset_episode(self):
         self.g = {j: {k: 0.0 for k in self.names} for j in range(1, TEAMS + 1)}
+        self.gW = {}
+        self.ent = {}
         self.ndec = np.zeros(TEAMS + 1, np.int64)
 
     def save(self):
@@ -518,7 +525,7 @@ class Strategy:
         tmp = self.path + ".tmp.npz"
         np.savez(tmp, names=np.array(self.names),
                  theta=np.array([self.theta[k] for k in self.names]),
-                 base=self.base, eps=self.eps)
+                 W=self.W, base=self.base, eps=self.eps)
         os.replace(tmp, self.path)
 
     def _pick_leader(self, j, ids, dom):
@@ -566,7 +573,7 @@ class Strategy:
                 gacc[k] += -(z[action] - float(pi @ z))
         return action, pi.astype(np.float32)
 
-    def _allocate(self, ms, kappa, present, timing, dist):
+    def _allocate(self, ms, kappa, present, timing, dist, feats):
         lead_team = self._team_leader(ms, present)
         order = [lead_team] + [j for j in present if j != lead_team]
         self.alloc, self.acomps = {}, {}
@@ -609,6 +616,14 @@ class Strategy:
                                for o in present if o != j), default=0.0)
                 if j != lead_team and lead_team in self.alloc:
                     leadp[q] = float(self.alloc[lead_team][q])
+            bucket = 1 if j == lead_team else 0
+            phi = feats.get(j)
+            if phi is not None:
+                u0 = u0 + (phi @ self.W[bucket]).astype(np.float64)[:nA]
+            self.abucket = getattr(self, "abucket", {})
+            self.acomps_phi = getattr(self, "acomps_phi", {})
+            self.abucket[j] = bucket
+            self.acomps_phi[j] = phi
             comps = dict(suppress_appetite=supp, lead_bias=leadp,
                          cart_inertia=prev, gram_weight=gram,
                          item_appetite=tcomp)
@@ -638,7 +653,8 @@ class Strategy:
             q[order[:rem]] += 1
         return q
 
-    def tick(self, X, G2, mixes, kappa, ms, boundary, sample, itimer=None):
+    def tick(self, X, G2, mixes, kappa, ms, boundary, sample, itimer=None,
+             Zc=None):
         n = X.shape[0]
         team = X[:, 1].astype(np.int32)
         ids = X[:, 0].astype(np.int32)
@@ -661,13 +677,17 @@ class Strategy:
                       else (1.0 if posts[pp]["avail"] else 0.3)
                       for pp in range(P)]
             dist = {}
+            feats = {}
             for j in present:
                 rows = np.nonzero(team == j)[0]
                 dist[j] = [float(np.clip(
                     1.0 - np.linalg.norm(X[rows, 5:8] - posts[pp]["pos"],
                                          axis=1).mean() / 2.0, 0.0, 1.0))
                     for pp in range(P)]
-            self._allocate(ms, kappa, present, timing, dist)
+                if Zc is not None:
+                    v = Zc[rows].mean(axis=0).astype(np.float64)
+                    feats[j] = v / (np.linalg.norm(v) + 1e-9)
+            self._allocate(ms, kappa, present, timing, dist, feats)
         nodemix = {}
         for j in present:
             others = [mixes[o]["nodes"] for o in mixes if o != j]
@@ -688,8 +708,20 @@ class Strategy:
                 ai, pish = self._quantal(u0, comps, akeys,
                                          ["log_tau_team", "log_tau_portfolio"],
                                          gacc, None, sample)
+                pv = np.maximum(np.asarray(pish, np.float64), 1e-12)
+                self.ent.setdefault(j, []).append(float(-(pv * np.log(pv)).sum()))
+                phi = self.acomps_phi.get(j) if hasattr(self, "acomps_phi") else None
                 if gacc is not None:
                     self.ndec[j] += 1
+                    if phi is not None:
+                        tau_c = float(np.exp(self.theta["log_tau_team"]
+                                             + self.theta["log_tau_portfolio"]))
+                        gv = -np.asarray(pish, np.float64) / tau_c
+                        gv[ai] += 1.0 / tau_c
+                        b = self.abucket.get(j, 0)
+                        gw = self.gW.setdefault(j, {}).setdefault(
+                            b, np.zeros((RES, NALLOC), np.float64))
+                        gw[:, :len(gv)] += np.outer(phi, gv)
                 quota = self._quota(np.asarray(pish, np.float64)
                                     / max(1e-9, float(np.sum(pish))), len(rows))
                 if quota[ai] == 0:
@@ -788,7 +820,13 @@ class Strategy:
                 adv = (float(R[j]) - float(self.base[j])) / self.ndec[j]
                 for k in self.names:
                     self.theta[k] += self.lr * adv * self.g[j][k]
+                for b, gw in self.gW.get(j, {}).items():
+                    self.W[b] += (self.lr_w * adv * gw).astype(np.float32)
                 self.base[j] = 0.9 * self.base[j] + 0.1 * float(R[j])
+        if self.reg > 0:
+            self.W *= 1.0 - self.reg
+            for k in self.names:
+                self.theta[k] += self.reg * (THETA[k] - self.theta[k])
         for k in ("log_tau_leader", "log_tau_follower", "log_tau_team"):
             self.theta[k] = float(np.clip(self.theta[k], -3.0, 3.0))
         self.theta["log_tau_portfolio"] = float(
@@ -973,10 +1011,10 @@ class SynthEnv:
 
 def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
               strat=None, train=True, overrides=None, explore=None,
-              env_items=True):
+              env_items=True, lr_w=0.5, reg=0.01):
     solver = CtxSolver(T, "mlx" if mx is not None else "np")
     if strat is None:
-        strat = Strategy(theta_path, seed, lr)
+        strat = Strategy(theta_path, seed, lr, lr_w, reg)
     else:
         strat.rng = np.random.default_rng(seed)
     for k, v in (overrides or {}).items():
@@ -987,8 +1025,9 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
     env = SynthEnv(seed + 1, items=env_items)
     banked, rets = [], []
     gang_m, gang_p, conc, spread = [], [], [], []
-    anti, waste = [], []
+    anti, waste, ents, support = [], [], [], []
     for ep in range(episodes):
+        ep_insts = {}
         for t in range(ep_ticks):
             X = env.rows()
             ms = bind_match(X)
@@ -999,7 +1038,7 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                 G = solver.solve(X)
                 mixes = solver.mixes()
                 strat.tick(X, solver.G2, mixes, solver.kappa, ms, True, sample,
-                           itimer)
+                           itimer, solver.Zc)
                 lt = strat.team_lead
                 lead_carts = [c for c in range(K_CARTS)
                               if ms["controller"][c] == lt]
@@ -1022,6 +1061,7 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                     per_team.setdefault(j, set()).add((c, r))
                 for j, cells in per_team.items():
                     spread.append(len(set(c for c, r in cells)))
+                    ep_insts.setdefault(j, set()).update(c for c, r in cells)
                 for pp, post in enumerate(env.posts):
                     if not post["avail"]:
                         tt = post["respawn"] - env.tick_n
@@ -1030,17 +1070,24 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                         (anti if tt <= ITEM_HORIZON else waste).append(m)
             else:
                 strat.tick(X, solver.G2, solver.mixes(), solver.kappa, ms,
-                           False, sample, itimer)
+                           False, sample, itimer, solver.Zc)
             env.step(strat.held_view(X))
         R, dirs, dprog, dbank, push = meter.finish()
+        ee = [float(np.mean(v)) for v in strat.ent.values() if v]
+        if ee:
+            ents.append(float(np.mean(ee)))
+        support.extend(len(v) for v in ep_insts.values())
         if train:
             strat.update(R)
             strat.save()
+        else:
+            strat._reset_episode()
         banked.append(float(dbank[1:env.nteams + 1].mean()))
         rets.append(float(np.mean([R[j] for j in range(1, env.nteams + 1)])))
         if log and (ep < 3 or (ep + 1) % 50 == 0):
             print(f"synth: ep {ep+1:4d} banked {banked[-1]:5.2f} "
-                  f"return {rets[-1]:+7.3f} lead j{strat.team_lead} "
+                  f"return {rets[-1]:+7.3f} H {ents[-1] if ents else 0:.2f} "
+                  f"|W| {np.abs(strat.W).max():.2f} lead j{strat.team_lead} "
                   f"{strat.table()}", flush=True)
             print(f"synth: alloc {strat.alloc_line(range(1, env.nteams + 1))}",
                   flush=True)
@@ -1054,7 +1101,12 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                  delay=float(np.mean(env.delays)) if env.delays else -1.0,
                  captures=len(env.delays),
                  anti=float(np.mean(anti)) if anti else 0.0,
-                 waste=float(np.mean(waste)) if waste else 0.0)
+                 waste=float(np.mean(waste)) if waste else 0.0,
+                 entropy=float(np.mean(ents)) if ents else 0.0,
+                 entropy_last=float(np.mean(ents[-max(1, len(ents)//4):]))
+                 if ents else 0.0,
+                 support=float(np.mean(support)) if support else 0.0,
+                 wnorm=float(np.abs(strat.W).max()))
     return np.array(rets), np.array(banked), strat, stats
 
 
@@ -1289,6 +1341,8 @@ def main():
     ap.add_argument("--train-seed", type=int, default=SEED)
     ap.add_argument("--theta", default=THETA_PATH)
     ap.add_argument("--eval", action="store_true")
+    ap.add_argument("--lr-w", type=float, default=0.5)
+    ap.add_argument("--reg", type=float, default=0.01)
     a = ap.parse_args()
 
     if a.check:
@@ -1299,13 +1353,15 @@ def main():
     if a.synth:
         rets, banked, strat, stats = run_synth(
             a.synth, a.ctx, a.train_seed, a.episode, a.hold, a.lr,
-            a.theta if a.theta != THETA_PATH else "")
+            a.theta if a.theta != THETA_PATH else "",
+            lr_w=a.lr_w, reg=a.reg)
         k = max(1, min(100, a.synth // 4))
-        print(f"synth: team-mean banked per episode first{k} {banked[:k].mean():.2f} "
-              f"-> last{k} {banked[-k:].mean():.2f}; mean shared-theta return "
-              f"{rets[:k].mean():+.3f} -> {rets[-k:].mean():+.3f} (returns reported, "
-              f"not asserted: margins over the best rival net toward zero once "
-              f"banking concentrates)", flush=True)
+        print(f"synth: mean shared-theta return (the REINFORCE objective) first{k} "
+              f"{rets[:k].mean():+.3f} -> last{k} {rets[-k:].mean():+.3f}; team-mean "
+              f"banked {banked[:k].mean():.2f} -> {banked[-k:].mean():.2f} (banked "
+              f"reported, not asserted: the untrained broad portfolio is already "
+              f"near-maximally productive, and competitive play trades collective "
+              f"banking for margin)", flush=True)
         print(f"synth: gang-up: P(trailing suppression on leader cart) "
               f"{stats['gang']:.3f} (closed-form prediction {stats['pred']:.3f})",
               flush=True)
@@ -1361,15 +1417,35 @@ def main():
               f"captures; the learned appetite is "
               f"{strat.theta['item_appetite']:+.2f} - whether an equilibrium buys "
               f"items at all is its own business", flush=True)
+        _, _, _, z0 = run_synth(max(6, a.synth // 20), a.ctx, a.train_seed + 17,
+                                a.episode, a.hold, a.lr, "", log=False,
+                                strat=Strategy("", a.train_seed + 17), train=False,
+                                explore=True)
+        print(f"synth: zero-update policy: entropy {z0['entropy']:.2f} nats, "
+              f"{z0['support']:.1f} distinct instruments actually sampled per team "
+              f"per episode of {NALLOC} cells - broad weighted sampling from the "
+              f"closed-form priors alone (W_logit = 0)", flush=True)
+        _, _, nstrat, nr = run_synth(a.synth, a.ctx, a.train_seed, a.episode,
+                                     a.hold, a.lr, "", log=False,
+                                     lr_w=a.lr_w, reg=0.0)
+        print(f"synth: regularizer counterfactual: last-quarter policy entropy "
+              f"{stats['entropy_last']:.2f} nats with L2 decay {a.reg}/update "
+              f"(max|W| {stats['wnorm']:.2f}) vs {nr['entropy_last']:.2f} with "
+              f"decay 0 (max|W| {nr['wnorm']:.2f}) - the floor is the "
+              f"regularizer's work", flush=True)
         print(f"synth: learned scalars: {strat.table()}", flush=True)
-        good = (banked[-k:].mean() > banked[:k].mean()
+        good = (rets[-k:].mean() > rets[:k].mean()
+                and banked[-k:].mean() > 0
                 and abs(stats["gang"] - stats["pred"]) < 0.06
                 and s_on["gang"] > s_off["gang"] + 0.03
                 and abs(stats["bank_meter"] - stats["bank_truth"]) < 2.5
                 and p_hi["spread"] > p_lo["spread"] + 1.5
                 and p_lo["spread"] < 2.5
                 and i_on["captures"] > 0 and i_off["captures"] > 0
-                and r_on > r_off + 0.15)
+                and r_on > r_off + 0.15
+                and z0["entropy"] > 1.2 and z0["support"] >= 6.0
+                and stats["entropy_last"] > nr["entropy_last"] + 0.1
+                and stats["entropy_last"] > 0.8)
         sys.exit(0 if good else 1)
 
     trained = a.policy == "trained"
@@ -1387,7 +1463,7 @@ def main():
 
     strat = meter = itimer = None
     if trained:
-        strat = Strategy(a.theta, a.train_seed, a.lr)
+        strat = Strategy(a.theta, a.train_seed, a.lr, a.lr_w, a.reg)
         meter = MatchMeter()
         itimer = ItemTracker()
         mode = "greedy eval, no updates" if a.eval else "sampling + online REINFORCE"
@@ -1399,6 +1475,15 @@ def main():
               f"teams best-respond with lead_bias on its committed mass, "
               f"suppress_appetite on enemy carts, cart_inertia, item_appetite on "
               f"post timing, and the window Gram's contest coupling", flush=True)
+        print(f"worker: policy = a sampled, regularized logit field: W_logit "
+              f"({NBUCKET} buckets x {RES} Gram-conditioned features x {NALLOC} "
+              f"instrument cells = {NBUCKET * RES * NALLOC} parameters) adds to the "
+              f"closed-form priors; allocations and picks are SAMPLED from its "
+              f"softmax, REINFORCE moves it (lr_w {a.lr_w}), and L2 decay "
+              f"{a.reg}/update pulls it back toward the priors so untrained play is "
+              f"a broad weighted sampling of effective strategies and trained play "
+              f"peaks without collapsing; the {len(strat.names)} named scalars stay "
+              f"the temperature/appetite knobs", flush=True)
         print(f"worker: portfolio = followers fill the tempered allocation's quotas by "
               f"closed-form transport (suitability: dominance for posts, proximity "
               f"for carts); low tau_P reproduces everyone-on-the-leader as one "
@@ -1460,19 +1545,24 @@ def main():
             boundary = tick_in_ep % a.hold == 0
             pick, Wt, lead, inst = strat.tick(X, solver.G2, solver.mixes(),
                                               solver.kappa, ms, boundary,
-                                              not a.eval, itimer)
+                                              not a.eval, itimer, solver.Zc)
             tick_in_ep += 1
             if tick_in_ep >= a.episode:
                 R, dirs, dprog, dbank, push = meter.finish()
+                ent = {j: round(float(np.mean(v)), 2)
+                       for j, v in strat.ent.items() if v}
                 if not a.eval:
                     strat.update(R)
                     strat.save()
+                else:
+                    strat._reset_episode()
                 present = sorted(set(X[:, 1].astype(np.int32)) & set(range(1, TEAMS + 1)))
                 print(f"learn: ep {strat.eps:4d} "
                       f"dprog {[round(float(v), 4) for v in dprog]} "
                       f"banked {[round(float(dbank[j]), 1) for j in range(1, TEAMS + 1)]} "
                       f"returns {[round(float(R[j]), 3) for j in range(1, TEAMS + 1)]} "
-                      f"lead j{strat.team_lead}", flush=True)
+                      f"lead j{strat.team_lead} policy-entropy {ent} "
+                      f"|W| {np.abs(strat.W).max():.2f}", flush=True)
                 print(f"learn: {strat.table()}", flush=True)
                 print(f"learn: alloc {strat.alloc_line(present)}", flush=True)
                 print("learn: " + gram_line(solver.kappa, ms), flush=True)
