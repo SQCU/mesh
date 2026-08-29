@@ -577,15 +577,17 @@ holds no device, so killing it is always safe and the bridge reclaims its pages 
 second; and `mesh_yell` returns n only when the receiver has confirmed every byte, 0 when it
 cannot confirm, so it never reports delivery it did not see.
 
-Nothing blocks. A stream is a state you advance, not a call you sit in: `mesh_yell_start`
-and `mesh_lissen_start` create stream objects whose `done` count is the semaphore made
-explicit, and one nonblocking `mesh_poll` turn advances every stream a process has — any
-number of yells and lissens concurrently, tagged by stream id, which is what a node with
-several cables needs. `mesh_scatter` and `mesh_gather` start k streams over k shards of one
-buffer, which with a map on the far side is map-reduce. `mesh_yell` and `mesh_lissen` remain
-as three-line wrappers that poll a single stream to completion, for callers that want that.
-While streams are being polled the client's inbound ring carries stream-formatted pages;
-page-level `mesh_read` and streams do not interleave in one process.
+Nothing blocks and nothing is enclosed. All client state lives in a `mesh_ctx` the caller
+owns — the slot semaphore is visible arithmetic, `credit = arena − (sub − ack)` — and a
+stream is plain data: `off` is bytes offered, `done` is bytes proven, `hole` is the first
+unproven chunk. `mesh_turn(ctx, streams, k)` is one dependency-ordered pass — harvest acks,
+dispatch arrivals by stream id, emit under credit — that advances every stream the caller
+hands it, any number of yells and lissens concurrently, which is what a node with several
+cables needs; a second context is a second bridge. `mesh_scatter` and `mesh_gather` start k
+streams over k shards of one buffer, which with a map on the far side is map-reduce.
+`mesh_yell` and `mesh_lissen` remain as three-line wrappers turning a single stream to
+completion. While streams are being turned the inbound ring carries stream-formatted pages;
+page-level `mesh_read` and streams do not interleave in one context.
 
 From Python, `rdma/mesh.py` binds the page-level functions and returns numpy views of mesh
 memory, so MLX computes on pages the NIC wrote without a copy.
