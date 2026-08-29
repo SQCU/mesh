@@ -101,3 +101,47 @@ ndp -an | grep <iface>          # confirm the peer appears
 Do this before blaming the QP setup. Verify the pairing is real rather than assumed: the two
 `GID[0]` values from `ibv_devinfo -v` must be the two link-local addresses `ndp` shows on that
 interface.
+
+## A false-loss storm can panic the kernel
+
+On 2026-08-28 a MacBook Pro kernel panicked inside `com.apple.driver.AppleThunderboltRDMA`
+with an MTE tag check fault, which is the kernel catching a corrupted or freed pointer. It
+was not caused by killing anything. The link was carrying a normal bidirectional workload.
+
+What the surviving peer's log showed, in order:
+
+| symptom | value |
+|---|---|
+| sequence gaps recorded | 7,321,292 in five seconds, against 32,821 pages received |
+| double frees caught by the guard | 55,335 |
+| conservation invariant `nfree+posted+nready+sending` | fell from 125,829 to 81,691 |
+| local protection errors | 1, on a page in state POSTED |
+
+The order matters. The gaps came first, the double frees followed, the accounting drained,
+and only then did a receive buffer complete with `IBV_WC_LOC_PROT_ERR` — the hardware being
+handed a buffer whose registration or state no longer made sense. The panic followed about
+seventy seconds later.
+
+**The amplifier was an unbounded loop in the data plane**, which this document already
+forbids in another form:
+
+```c
+for(uint32_t m = expected; m != h->seq; m++) { ... }   /* runs h->seq - expected times */
+```
+
+One arriving page drove that loop as many times as the sequence number claimed had been
+missed. A gap wider than the repair bitmap cannot be repaired from anyway, so the loop was
+doing unbounded work to record something unusable, while generating retransmit requests that
+produced more traffic and more apparent loss. It is now bounded by the width of the miss
+window, and anything wider is counted as `farseq` rather than walked.
+
+Rules this adds:
+
+- **A single received page must never drive work proportional to a value it carries.** A
+  length, a count or a sequence delta on the wire is an input, and the peer that sent it may
+  be wrong. Bound every loop by a local constant, not by a remote number.
+- **A conservation invariant that drifts is an emergency, not telemetry.** `sum` fell by a
+  third of the pool in three seconds and the program kept running. It should have stopped.
+- **A guard firing 55,335 times is a guard that was ignored.** The double-free check printed
+  one line per event and the flood was mistaken for noise. Count them, print the first few,
+  and treat a nonzero count as a failure.

@@ -196,7 +196,7 @@ int main(int argc,char**argv){
   #define FREE_PAGE(i) do{ if((i)>=arena_start || pg[i].held){ pg[i].state=FREE; } \
     else if(pg[i].state!=FREE){ pg[i].state=FREE; \
       if(nfree<npages) freelist[nfree++]=(i); else fprintf(stderr,"BUG freelist overflow p%d\n",(i)); } \
-    else fprintf(stderr,"BUG double free p%d\n",(i)); }while(0)
+    else { dbl_free++; if(dbl_free<8) fprintf(stderr,"BUG double free p%d\n",(i)); } }while(0)
   int txwin=0; int *txring=NULL;
   int rx_target = gr_recv/frames;   if(rx_target > npages/4) rx_target = npages/4;
   if(rx_target<2) rx_target=2;
@@ -215,6 +215,7 @@ int main(int argc,char**argv){
           gr_send,gr_recv,pgsz,frames,rx_target,rx_target*frames,tx_budget,tx_budget*frames,txwin);
   fprintf(stderr,"repair: horizon=%d rearm_gap=%d retire_at=%d regions=%zu\n",horizon,rearm_gap,retire_at,g_mem.nseg);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0, drops_seen=0, short_pay=0;
+  unsigned long long seq_far=0, dbl_free=0;
   unsigned long long delivered=0, meta_seen=0;
   unsigned long long d_wc=0, d_ring=0, d_magic=0, d_post=0, d_bounds=0, seq_lo=0;
   unsigned long long repaired=0, nack_sent=0, nack_rx=0, resent=0;
@@ -351,9 +352,18 @@ int main(int argc,char**argv){
       if(!have_expected){ expected=h->seq; retire_cur=h->seq; sweep_cur=h->seq; have_expected=1; }
       if(h->seq==expected) expected++;
       else if((int32_t)(h->seq-expected)>0){
-        { uint32_t bs=h->seq-expected; burst_n++;
+        uint32_t bs=h->seq-expected;
+        { burst_n++;
           burst_b[bs<2?0:bs<4?1:bs<16?2:bs<64?3:bs<256?4:bs<1024?5:6]++; }
-        for(uint32_t m=expected;m!=h->seq;m++){ miss[(m%MISSW)/64] |= 1ull<<((m%MISSW)%64); drops_seen++;
+        // One arriving page must never drive an unbounded loop. A gap wider
+        // than the miss window cannot be repaired from it anyway -- the bitmap
+        // only holds MISSW sequences -- so record what is representable and
+        // count the rest as beyond repair. Before this bound, a single page
+        // could run this loop billions of times; a false-loss storm ran it
+        // 7.3 million times in five seconds and took the accounting with it.
+        if(bs > MISSW/2){ seq_far += bs; }
+        else for(uint32_t m=expected;m!=h->seq;m++){
+          miss[(m%MISSW)/64] |= 1ull<<((m%MISSW)%64); drops_seen++;
           req_at[m%MISSW]=h->seq;
           missing++; if(npend<4096) pend[npend++]=m; else pend_drop++; }
         expected=h->seq+1;
@@ -434,9 +444,9 @@ int main(int argc,char**argv){
       wf_add(&w_free,nfree); wf_add(&w_ready,nready); wf_add(&w_send,sending);
       fprintf(stderr,
         "tel t=%.1f free=%d posted=%d/%d ready=%d sending=%d dV/dt=%.1f/s dV/V=%.4f "
-        "var_free=%.1f rx=%llu tx=%llu gaps=%llu clamped=%llu deliv=%llu meta=%llu sum=%d/%d out=%llu\n",
+        "var_free=%.1f rx=%llu tx=%llu farseq=%llu dblfree=%llu gaps=%llu clamped=%llu deliv=%llu meta=%llu sum=%d/%d out=%llu\n",
         t-t0, nfree, posted, rx_target, nready, sending, dv/(dt>0?dt:1),
-        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, drops_seen, short_pay, delivered, meta_seen, nfree+posted+nready+sending, npages, outstanding);
+        nfree? dv/nfree : 0.0, wf_var(&w_free), rx, tx, seq_far, dbl_free, drops_seen, short_pay, delivered, meta_seen, nfree+posted+nready+sending, npages, outstanding);
       t_last=t; v_last=nfree; tel_last=t;
     }
     if(!did){ if(t-quiet>tmo){ fprintf(stderr,"idle %ds\n",tmo); break; } usleep(50); }
