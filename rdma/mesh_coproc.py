@@ -21,7 +21,7 @@ def weights(d):
     # Deterministic on both sides, so the driver can check the result exactly.
     return mx.array(2.0 * np.eye(d, dtype=np.float32))
 
-m = Mesh(1.0e9)
+m = Mesh(2.5e8)
 D = m.usable // 4                       # one row of float32 per slot
 print(f"{ROLE}: {m.slots} slots, {m.usable} B usable, row width D={D}", flush=True)
 
