@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #define CHUNK (1ull<<30)
+#define QD 4095
 static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *cq;
 static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
@@ -85,15 +86,18 @@ int main(int argc,char**argv){
 
   cq=ibv_create_cq(ctx,4096,NULL,NULL,0);
   struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
-    .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
+    .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=1,.max_recv_sge=1}};
   qp=ibv_create_qp(pd,&qi); if(!qp) die("qp");
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS);
   union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
   uint32_t psn=lrand48()&0xffffff; struct qpi mine={qp->qp_num,psn,pa.lid},you;
   memcpy(mine.gid,&gid,16); int f=oob(peer);
-  if(peer){ write(f,&mine,sizeof mine); read(f,&you,sizeof you); }
-  else    { read(f,&you,sizeof you); write(f,&mine,sizeof mine); }
+  if(peer) write(f,&mine,sizeof mine);
+  for(size_t got=0; got<sizeof you;){
+    ssize_t g=read(f,(char*)&you+got,sizeof you-got);
+    if(g<=0) die("oob"); got+=(size_t)g; }
+  if(!peer) write(f,&mine,sizeof mine);
   close(f);
   struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
     .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
@@ -107,7 +111,7 @@ int main(int argc,char**argv){
   int *fl=malloc(pool*sizeof(int)); unsigned char *own=calloc(pool,1);
   if(!fl||!own) die("alloc");
   int n[NOWN]={0}; n[FREE]=pool; for(int i=0;i<pool;i++) fl[i]=i;
-  int full=0;
+  int sends=0;
   struct wf w[NOWN]={{0}}; double t0=now(), tel=t0;
   #define LKEY(i) (mr[(size_t)(i)*pg/CHUNK]->lkey)
   #define POOL(i)  ((uint32_t)(i) < (uint32_t)pool)
@@ -121,29 +125,30 @@ int main(int argc,char**argv){
     (op) ? ibv_post_send(qp,&s,&bs) : ibv_post_recv(qp,&q,&bq); })
 
   while(!stop){
-    while(n[FREE] && !full){ int i=fl[n[FREE]-1];
-      if(POST(i,0)){ full=1; break; } MV(i,RECV); }
+    while(n[FREE] && n[RECV]<QD){ int i=fl[n[FREE]-1];
+      if(POST(i,0)) break;
+      MV(i,RECV); }
     struct desc d;
     while(!pop(M,REL,&d)) if(POOL(d.page) && own[d.page]==APP) GIVE(d.page);
     uint64_t who=atomic_load_explicit(&M->client,memory_order_acquire);
     if(who)
-      while(!pop(M,SUB,&d)){
-        uint32_t p=d.page; if(!VALID(p)){ BUMP(bad); continue; }
+      while(sends<QD && !pop(M,SUB,&d)){
+        uint32_t p=d.page;
+        if(p<(uint32_t)pool || !VALID(p)){ BUMP(bad); continue; }
         struct wire *w2=(struct wire*)mesh_at(M,p);
         w2->magic=WIRE_MAGIC; w2->bytes=mesh_clamp(M,d.bytes);
         w2->src=me; w2->dst=d.node; w2->hops=0;
-        if(POST(p,1)) break;
-        if(POOL(p)) MV(p,SEND);
-        BUMP(sent); }
+        if(POST(p,1)){ BUMP(bad); break; }
+        sends++; BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
       if(!VALID(i)) die("wr_id outside the pool");
-      if(wc[j].opcode!=IBV_WC_RECV){ if(POOL(i)) GIVE(i); continue; }
-      full=0; if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
+      if(wc[j].opcode!=IBV_WC_RECV){ sends--; if(POOL(i)) GIVE(i); continue; } if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
       struct wire *h=(struct wire*)mesh_at(M,(uint32_t)i);
       if(h->magic!=WIRE_MAGIC){ GIVE(i); continue; }
       h->hops++;
-      if(h->dst!=(uint16_t)me && h->hops<=32){ if(!POST(i,1)) MV(i,SEND); else GIVE(i); continue; }
+      if(h->dst!=(uint16_t)me && h->hops<=32){
+        if(sends<QD && !POST(i,1)){ sends++; MV(i,SEND); } else GIVE(i); continue; }
       struct desc c={.page=(uint32_t)i,.bytes=mesh_clamp(M,h->bytes),.node=h->src};
       if(!who || push(M,CMP,&c)) GIVE(i);
       else { MV(i,APP); BUMP(recvd); } }

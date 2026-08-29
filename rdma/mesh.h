@@ -9,7 +9,7 @@
 #define MESH_NAME    "/mesh0"
 #define MESH_PORT    "18519"
 #define MESH_MODE    0666
-#define MESH_VERSION 3u
+#define MESH_VERSION 4u
 #define MESH_CL      128
 #define MESH_RING    4096
 #define RINGS        ((sizeof(struct hdr)+MESH_CL-1)/MESH_CL*MESH_CL)

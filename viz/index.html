@@ -89,14 +89,14 @@ function hud(){
     h+=`<div class="node"><div class="name">${name}</div><table>`;
     if(!s.up){ h+=`<tr><td class="k">state</td><td class="v down">no bridge running</td></tr>`; }
     else{
-      const pool=s.pool||1, pctNode=s.node_ram?100*s.bytes/s.node_ram:0;
-      const rows=[['region',`${(s.bytes/1e9).toFixed(2)} GB  ${pctNode.toFixed(1)}% of node`],
-                  ['pages',`${fmt(s.pages)}  arena ${fmt(s.arena_pages)}  pool ${fmt(pool)}`],
-                  ['free',`${fmt(s.mean_free)} ±${s.sd_free}`],
-                  ['posted',`${fmt(s.mean_posted)} ±${s.sd_posted}`],
-                  ['forwarding',`${fmt(s.mean_sending)}`],
-                  ['with app',`${fmt(s.mean_held)} ±${s.sd_held}`],
-                  ['census',`${fmt(s.mean_free+s.mean_posted+s.mean_sending+s.mean_held)} / ${fmt(pool)}`],
+      const pool=s.pool||1;
+      const rows=[['region',`${((s.pool+s.arena)*s.pgsz/1e9).toFixed(2)} GB  pool ${fmt(pool)}  arena ${fmt(s.arena)}`],
+                  ['free',`${fmt(s.free)} ±${s.sd_free}`],
+                  ['posted',`${fmt(s.recv)} ±${s.sd_recv}`],
+                  ['forwarding',`${fmt(s.send)}`],
+                  ['with app',`${fmt(s.app)} ±${s.sd_app}`],
+                  ['census',`${fmt(s.free+s.recv+s.send+s.app)} / ${fmt(pool)}`],
+                  ['rejected',`${fmt(s.bad||0)}`],
                   ['sent/recvd',`${fmt(s.sent)} / ${fmt(s.recvd)}`],
                   ['client',s.client?`pid ${s.client}`:'none']];
       for(const [k,v] of rows) h+=`<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
@@ -114,15 +114,15 @@ function apply(){
     const n=Math.min(hs.length,t.N);
     for(let i=0;i<n;i++){
       const s=hs[hs.length-n+i], pool=Math.max(1,s.pool);
-      pos[3*i]=s.mean_free/pool; pos[3*i+1]=s.mean_posted/pool; pos[3*i+2]=s.mean_held/pool;
+      pos[3*i]=s.free/pool; pos[3*i+1]=s.recv/pool; pos[3*i+2]=s.app/pool;
     }
     t.g.setDrawRange(0,n); t.g.attributes.position.needsUpdate=true;
     t.g.computeBoundingSphere();
     const s=hs.at(-1),pool=Math.max(1,s.pool);
-    t.head.position.set(s.mean_free/pool, s.mean_posted/pool, s.mean_held/pool);
+    t.head.position.set(s.free/pool, s.recv/pool, s.app/pool);
     // the head grows with the spread inside the interval, so a pool that is
     // churning looks different from one that is merely sitting somewhere
-    const sd=Math.hypot(s.sd_free,s.sd_posted,s.sd_held)/pool;
+    const sd=Math.hypot(s.sd_free,s.sd_recv,s.sd_app)/pool;
     t.head.scale.setScalar(1+18*sd);
   }
   // one stream per source node, from its head to every other node's head,
