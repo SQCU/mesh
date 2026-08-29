@@ -4,7 +4,7 @@ import mkentfile as M
 
 MARGIN, CORW, CORH, WALL, FLOORTHK, MAXCORLEN = 2048.0, 288.0, 224.0, 32.0, 32.0, 14000.0
 LSZ = (0, 72, 16, 36, 48, 4, 4, 40, 12, 8, 44, 4, 72, 104, 49152, 8, 1)
-TRIGTEX, EMPTYTEX = ('textures/common/trigger', 0, 0x40000000), ('textures/common/empty', 0, 0)
+TRIGTEX, EMPTYTEX = ('textures/common/trigger', 0, 0x40000000), ('textures/common/caulk', 0, 0)
 
 
 def vadd(a, b):
@@ -527,9 +527,10 @@ class Fuser:
             off = offsets[m]
             for lf in src.leafs:
                 l2 = list(lf)
+                cl = lambda v: max(-1 << 30, min((1 << 30), int(v)))
                 for a in range(3):
-                    l2[2 + a] = int(l2[2 + a] + off[a])
-                    l2[5 + a] = int(l2[5 + a] + off[a])
+                    l2[2 + a] = cl(l2[2 + a] + off[a])
+                    l2[5 + a] = cl(l2[5 + a] + off[a])
                 l2[8] += lfbase[m]
                 l2[10] += lbbase[m]
                 leafs_out.append(l2)
@@ -585,9 +586,10 @@ class Fuser:
                         n2[ci] += nodebase[m]
                     else:
                         n2[ci] = -1 - ((-1 - n2[ci]) + leafbase[m])
+                cl = lambda v: max(-1 << 30, min((1 << 30), int(v)))
                 for a in range(3):
-                    n2[3 + a] = int(n2[3 + a] + off[a])
-                    n2[6 + a] = int(n2[6 + a] + off[a])
+                    n2[3 + a] = cl(n2[3 + a] + off[a])
+                    n2[6 + a] = cl(n2[6 + a] + off[a])
                 nodes_out.append(n2)
         models_out = []
         wmins = [min(srcs[m].bounds[0][a] + offsets[m][a] for m in range(j)) - CORW for a in range(3)]
@@ -738,10 +740,18 @@ def fuse(seed, names, outdir, pk3):
     os.makedirs(outdir, exist_ok=True)
     srcs = []
     for n in names:
-        data = pk3_read(pk3, 'maps/%s.bsp' % n)
-        wp = pk3_read(pk3, 'maps/%s.waypoints' % n).decode('latin-1')
-        cache = M.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
+        if '/' in n:
+            base = os.path.expanduser(n)
+            n = os.path.basename(base)
+            data = open(base + '.bsp', 'rb').read()
+            wp = open(base + '.waypoints', encoding='latin-1').read()
+            cache = open(base + '.waypoints.cache', encoding='latin-1').read()
+        else:
+            data = pk3_read(pk3, 'maps/%s.bsp' % n)
+            wp = pk3_read(pk3, 'maps/%s.waypoints' % n).decode('latin-1')
+            cache = M.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
         srcs.append(Src(n, data, wp, cache))
+        names = [x.name for x in srcs] + names[len(srcs):]
         print('src %s: bounds %s %s models=%d faces=%d brushes=%d wp=%d links=%d' %
               (n, [round(x) for x in srcs[-1].bounds[0]], [round(x) for x in srcs[-1].bounds[1]],
                len(srcs[-1].models), len(srcs[-1].faces), len(srcs[-1].brushes),
