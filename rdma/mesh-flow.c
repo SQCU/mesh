@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -31,15 +32,28 @@ static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_se
 static void onsig(int s){ (void)s; stop=1; }
 
 struct qpi { uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
+static int dial(struct addrinfo *a){
+  int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
+  fcntl(f,F_SETFL,O_NONBLOCK);
+  if(connect(f,a->ai_addr,a->ai_addrlen) && errno!=EINPROGRESS){ close(f); return -1; }
+  fd_set w; FD_ZERO(&w); FD_SET(f,&w); struct timeval tv={1,0};
+  int e=0; socklen_t el=sizeof e;
+  if(select(f+1,NULL,&w,NULL,&tv)<1 || getsockopt(f,SOL_SOCKET,SO_ERROR,&e,&el) || e){
+    close(f); return -1; }
+  fcntl(f,F_SETFL,0);
+  struct timeval rt={3,0};
+  setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
+  return f; }
+
 static int oob(const char *peer){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM},*r; int f;
   if(peer){ hint.ai_family=AF_UNSPEC;
     if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
-    f=socket(r->ai_family,SOCK_STREAM,0);
-    int ok=!connect(f,r->ai_addr,r->ai_addrlen);
-    freeaddrinfo(r);
-    if(ok) return f;
-    close(f); usleep(200000); return -1; }
+    for(int pass=0; pass<2; pass++)
+      for(struct addrinfo *a=r; a; a=a->ai_next){
+        if((pass==0) != (a->ai_family==AF_INET)) continue;
+        if((f=dial(a))>=0){ freeaddrinfo(r); return f; } }
+    freeaddrinfo(r); usleep(200000); return -1; }
   hint.ai_family=AF_INET6; hint.ai_flags=AI_PASSIVE;
   if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) return -1;
   int l=socket(r->ai_family,SOCK_STREAM,0),on=1,off=0;
