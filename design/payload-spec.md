@@ -21,8 +21,9 @@ Companion docs: `strategy-layers-and-modality.md`, `cart-force-field.md`,
 ## 0. The layers, one line each `[FIRM]`
 
 1. **Mechanics** — ground-truth dynamics: k cart lanes, control cylinders, monotone
-   score `d(score_j)/dt = sum_lanes control_j(lane)*depth(lane)`; cart position `s`
-   reverses, banked score never does.
+   score `d(score_j)/dt = sum_lanes control_j(lane)*depth(lane)`, `depth` measured
+   along each cart's **golden path** (arclength `s` in [0,L], origin->end); cart
+   position `s` reverses, banked score never does.
 2. **Featurization** — world -> vectors (section 2).
 3. **Strategy operator** — vectors -> per-bot weight velocities (section 2.3-2.6).
 4. **Control interface** — weights -> bot behavior (section 4), skill-orthogonal.
@@ -139,18 +140,25 @@ coalition) path; otherwise it passes the diversity (spread) signal. Symmetric DP
 supplies the honest one-sided signal; the head supplies the two-regime behavior. No
 nonsymmetric DPP; nothing beyond RMSNorm+SwiGLU is required.
 
-### 2.6 Multiscale overlay `[FIRM]`
+### 2.6 Nimber value and explicit backward induction `[FIRM]`
 
+The multi-cart position is Nim-structured: each cart at its depth-under-control on its
+golden path is a heap, and the combined position has a value — its nimber — that names
+the swing (which cart to attack to flip the position). The computable realization is the
+key-player solve over the coupling `kappa`:
 ```
 swing = argmax_i  intercentrality_i( (I - a*kappa)^-1 )
 ```
-gives per-node action intensities (Bonacich) and the swing/key instrument in one linear
-solve. Built at **team-scale `kappa`** it names the swing across teams/lanes; at
-**bot-scale `kappa`**, the swing within a team — same operator, nested = multiscale. It
-is a derived feature the operator may read like any other; how much it influences
-behavior is set by the learned parameters, not an architectural switch. Ontology
-discipline: "leader" is admissible ONLY as `argmax(intercentrality)`, a derived
-readout — never a primitive entity or a per-agent character.
+which also yields per-node action intensities (Bonacich), at team-scale `kappa` (swing
+across teams/lanes) and bot-scale `kappa` (swing within a team) — nested = multiscale.
+
+Strategy per step is **explicit backward induction** over this nimber-valued position —
+required, not an optional overlay. The nimber-leading team commits; trailing teams
+best-respond; the solve is backward induction over the multi-cart position. The
+REINFORCE-calibrated learned parameters (2.3-2.5) fill in the responses WITHIN that
+backward-induction structure; they do not replace it. Ontology discipline: "leader" is
+admissible only as the derived `argmax(intercentrality)` readout — never a primitive
+entity or a per-agent character.
 
 ## 3. Execution flow
 
@@ -170,7 +178,8 @@ featurize x_b, z_m ; project q_b, k_m, v_m                          (2.3)
 couple   L -> K=L(I+L)^-1 -> diag(K) ; materialize kappa            (2.4)
 mix      dw_b/dt = SwiGLU(RMSNorm([diag(K); b]))                    (2.5)
 step     w_b += (dw_b/dt) * Delta        (ONE forward-Euler flow step)
-overlay  swing = argmax intercentrality((I - a*kappa)^-1)          (2.6)
+induct   nimber value + backward induction over the multi-cart position;
+         swing = argmax intercentrality((I - a*kappa)^-1)          (2.6)
 scatter  per-bot absolute w_b (and swing) back to the engine
 ```
 
