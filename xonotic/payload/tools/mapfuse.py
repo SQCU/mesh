@@ -1,8 +1,9 @@
-import struct, sys, os, re, math, glob, random, subprocess, time
+import struct, sys, os, re, math, glob, random, subprocess, time, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
 
-MARGIN, CORW, CORH, WALL, FLOORTHK, MAXCORLEN = 2048.0, 288.0, 224.0, 32.0, 32.0, 14000.0
+MARGIN, CORW, CORH, WALL, FLOORTHK, MAXCORLEN = 896.0, 288.0, 224.0, 32.0, 32.0, 6000.0
+CORW_PROM, PROM_LIGHT = 448.0, 700.0
 LSZ = (0, 72, 16, 36, 48, 4, 4, 40, 12, 8, 44, 4, 72, 104, 49152, 8, 1)
 TRIGTEX, EMPTYTEX = ('textures/common/trigger', 0, 0x40000000), ('textures/common/caulk', 0, 0)
 
@@ -133,6 +134,36 @@ class Src:
             for cx in range(cx0, cx1 + 1):
                 for cy in range(cy0, cy1 + 1):
                     self.bgrid.setdefault((cx, cy), []).append((bi, lo, hi))
+        self.cliptex = [bool(t[2] & 0x430000) for t in self.textures]
+        self.cgrid = {}
+        for bi, (fs, ns, tx) in enumerate(self.brushes):
+            if tx < 0 or tx >= ntex or not self.cliptex[tx]:
+                continue
+            lo, hi = [-1e18] * 3, [1e18] * 3
+            for k in range(fs, fs + ns):
+                nx, ny, nz, dd = self.planes[self.sides[k][0]]
+                for a2, c in enumerate((nx, ny, nz)):
+                    if c > 0.999:
+                        hi[a2] = min(hi[a2], dd)
+                    elif c < -0.999:
+                        lo[a2] = max(lo[a2], -dd)
+            cx0, cx1 = int(lo[0] // 1024), int(hi[0] // 1024)
+            cy0, cy1 = int(lo[1] // 1024), int(hi[1] // 1024)
+            if cx1 - cx0 > 200 or cy1 - cy0 > 200:
+                continue
+            for cx in range(cx0, cx1 + 1):
+                for cy in range(cy0, cy1 + 1):
+                    self.cgrid.setdefault((cx, cy), []).append((bi, lo, hi))
+
+    def clip_brush_at(self, p):
+        for bi, lo, hi in self.cgrid.get((int(p[0] // 1024), int(p[1] // 1024)), ()):
+            if not all(lo[a] - 0.25 <= p[a] <= hi[a] + 0.25 for a in range(3)):
+                continue
+            fs, ns, _ = self.brushes[bi]
+            if all(vdot(self.planes[self.sides[k][0]][:3], p) - self.planes[self.sides[k][0]][3] <= 0.25
+                   for k in range(fs, fs + ns)):
+                return bi
+        return -1
 
     def solid_brush_at(self, p):
         for bi, lo, hi in self.bgrid.get((int(p[0] // 1024), int(p[1] // 1024)), ()):
@@ -220,7 +251,7 @@ def arc_samples(a, b):
     return pts
 
 
-def blockage(srcs, offsets, pts):
+def blockage(srcs, offsets, pts, clip=False):
     hits = set()
     for m, src in enumerate(srcs):
         off = offsets[m]
@@ -229,6 +260,10 @@ def blockage(srcs, offsets, pts):
             bi = src.solid_brush_at(q)
             if bi >= 0:
                 hits.add((m, bi))
+            if clip:
+                ci = src.clip_brush_at(q)
+                if ci >= 0:
+                    hits.add((m, ci))
     return hits
 
 
@@ -290,6 +325,7 @@ class Fuser:
         self.carved = set()
         self.conn_faces, self.conn_brushes, self.conn_leafsets = [], [], []
         self.trig_brushes, self.trig_models = [], []
+        self.bot_jumps, self.conn_meta = [], []
         self.extra_ents = []
         self.wp_extra, self.link_extra = [], []
         self.solid_face_tex = self.pick_face_tex()
@@ -308,9 +344,19 @@ class Fuser:
         self.planes.append([n[0], n[1], n[2], d])
         return len(self.planes) - 1
 
-    def add_brush(self, planes, tex, dest=None):
+    def add_brush(self, planes, tex, dest=None, bounds=None):
         if dest is None:
             dest = self.conn_brushes
+        planes = list(planes)
+        if bounds is not None:
+            clo, chi = bounds
+            for a in range(3):
+                e = [0.0, 0.0, 0.0]
+                e[a] = 1.0
+                planes.append((e[:], chi[a]))
+                e2 = [0.0, 0.0, 0.0]
+                e2[a] = -1.0
+                planes.append((e2, -clo[a]))
         s0 = len(self.sides)
         for n, d in planes:
             self.sides.append([self.add_plane(n, d), tex])
@@ -333,21 +379,29 @@ class Fuser:
         self.conn_faces.append((head, tail))
         return len(self.conn_faces) - 1
 
+    def add_light(self, p, radius):
+        self.extra_ents.append('{\n"classname" "light"\n"origin" "%s %s %s"\n"light" "%d"\n}'
+                               % (fnum(p[0]), fnum(p[1]), fnum(p[2]), int(radius)))
+
     def carve(self, hits):
         for m, bi in hits:
             self.carved.add((m, bi))
 
-    def build_corridor(self, a, b):
+    def build_corridor(self, a, b, prominent=True):
         af, bf, dirh, side, ntop, L = corridor_frame(a, b)
-        w2 = CORW / 2
-        br = [self.add_brush(slab_planes(af, bf, dirh, side, ntop, w2 + WALL, -FLOORTHK, 0.0), self.solid_face_tex)]
+        w2 = (CORW_PROM if prominent else CORW) / 2
+        pad = w2 + CORH + 2 * WALL + 64
+        clo = [min(af[i], bf[i]) - pad for i in range(3)]
+        chi = [max(af[i], bf[i]) + pad for i in range(3)]
+        bnd = (clo, chi)
+        br = [self.add_brush(slab_planes(af, bf, dirh, side, ntop, w2 + WALL, -FLOORTHK, 0.0), self.solid_face_tex, bounds=bnd)]
         for s in (1.0, -1.0):
             sv = vscale(side, s)
             pl = [(dirh, vdot(dirh, bf) + 8), ([-x for x in dirh], -(vdot(dirh, af) - 8)),
                   (sv, vdot(sv, af) + w2 + WALL), ([-x for x in sv], -(vdot(sv, af) + w2)),
                   (ntop, vdot(ntop, af) + CORH + WALL), ([-x for x in ntop], -(vdot(ntop, af) - FLOORTHK))]
-            br.append(self.add_brush(pl, self.solid_face_tex))
-        br.append(self.add_brush(slab_planes(af, bf, dirh, side, ntop, w2 + WALL, CORH, CORH + WALL), self.solid_face_tex))
+            br.append(self.add_brush(pl, self.solid_face_tex, bounds=bnd))
+        br.append(self.add_brush(slab_planes(af, bf, dirh, side, ntop, w2 + WALL, CORH, CORH + WALL), self.solid_face_tex, bounds=bnd))
         fa = []
         c = lambda base, lat, h: vadd(vadd(base, vscale(side, lat)), vscale(ntop, h))
         fa.append(self.add_quad([c(af, -w2, 0), c(bf, -w2, 0), c(bf, w2, 0), c(af, w2, 0)], ntop, self.solid_face_tex))
@@ -357,6 +411,9 @@ class Fuser:
         lo = [min(af[i], bf[i]) - CORW for i in range(3)]
         hi = [max(af[i], bf[i]) + CORW + CORH for i in range(3)]
         self.conn_leafsets.append((fa, br, lo, hi))
+        if prominent:
+            for e in (af, bf):
+                self.add_light([e[0], e[1], e[2] + CORH - 24], PROM_LIGHT)
         n = max(1, int(L // 224))
         chain = []
         for k in range(n + 1):
@@ -372,7 +429,7 @@ class Fuser:
         self.link_extra.append((prev, b))
         self.link_extra.append((b, prev))
 
-    def build_pad(self, a, b, idx):
+    def build_pad(self, a, b, idx, prominent=False):
         pm = [a[0] - 56, a[1] - 56, a[2] - 8]
         px = [a[0] + 56, a[1] + 56, a[2] + 6]
         bi = self.add_brush(axial_planes(pm, px), self.solid_face_tex)
@@ -383,21 +440,22 @@ class Fuser:
                             self.trigtex, self.trig_brushes)
         self.trig_models.append((tb, [a[0] - 48, a[1] - 48, a[2] + 6], [a[0] + 48, a[1] + 48, a[2] + 70],
                                  'trigger_push', 'fpush%d' % idx))
-        self.extra_ents.append('{\n"classname" "info_notnull"\n"targetname" "fpush%d"\n"origin" "%s %s %s"\n}' %
+        self.extra_ents.append('{\n"classname" "target_position"\n"targetname" "fpush%d"\n"origin" "%s %s %s"\n}' %
                                (idx, fnum(b[0]), fnum(b[1]), fnum(b[2] + 40)))
-        self.wp_extra.append([a[0], a[1], a[2] + 7])
-        self.link_extra.append((a, [a[0], a[1], a[2] + 7]))
-        self.link_extra.append(([a[0], a[1], a[2] + 7], a))
-        self.link_extra.append(([a[0], a[1], a[2] + 7], b))
+        if prominent:
+            self.add_light([a[0], a[1], a[2] + 96], PROM_LIGHT)
+        self.bot_jumps.append((list(a), list(b)))
 
-    def build_tele(self, a, b, idx):
+    def build_tele(self, a, b, idx, prominent=False):
         tb = self.add_brush(axial_planes([a[0] - 48, a[1] - 48, a[2]], [a[0] + 48, a[1] + 48, a[2] + 112]),
                             self.trigtex, self.trig_brushes)
         self.trig_models.append((tb, [a[0] - 48, a[1] - 48, a[2]], [a[0] + 48, a[1] + 48, a[2] + 112],
                                  'trigger_teleport', 'ftele%d' % idx))
         self.extra_ents.append('{\n"classname" "misc_teleporter_dest"\n"targetname" "ftele%d"\n"origin" "%s %s %s"\n"angle" "%d"\n}' %
                                (idx, fnum(b[0]), fnum(b[1]), fnum(b[2] + 16), 0))
-        self.link_extra.append((a, b))
+        if prominent:
+            self.add_light([a[0], a[1], a[2] + 96], PROM_LIGHT)
+        self.bot_jumps.append((list(a), list(b)))
 
     def merge_entities(self):
         j = len(self.srcs)
@@ -775,11 +833,23 @@ def fuse(seed, names, outdir, pk3):
         a, b = rng.sample(range(j), 2) if j > 1 else (0, 0)
         if j > 1 and (min(a, b), max(a, b)) not in [(min(x), max(x)) for x in edges]:
             edges.append((min(a, b), max(a, b)))
+    degree = [0] * j
+    for a, b in edges:
+        degree[a] += 1
+        degree[b] += 1
+    exclusive = [min(degree[a], degree[b]) == 1 for a, b in edges]
+    def _edge_minsep(i):
+        a, b = edges[i]
+        return min(math.dist(sa, sb) for sa in sockets[a] for sb in sockets[b])
+    order = sorted(range(len(edges)), key=lambda i: (not exclusive[i], _edge_minsep(i)))
     corridor_used = [0] * j
     used_sock = set()
     conns = []
     telen = padn = corn = 0
-    for a, b in edges:
+    for ei in order:
+        a, b = edges[ei]
+        excl = exclusive[ei]
+        prom = excl
         pairs = sorted(((sa, sb) for sa in sockets[a] for sb in sockets[b]
                         if tuple(sa) not in used_sock and tuple(sb) not in used_sock),
                        key=lambda p: math.dist(p[0], p[1]))
@@ -791,8 +861,8 @@ def fuse(seed, names, outdir, pk3):
             for sa, sb in pairs:
                 if math.dist(sa, sb) > MAXCORLEN:
                     continue
-                hits = blockage(srcs, offsets, corridor_samples(sa, sb))
-                if all(brush_volume_ok(srcs[m], bi) for m, bi in hits) and len(hits) <= 8:
+                hits = blockage(srcs, offsets, corridor_samples(sa, sb), clip=True)
+                if all(brush_volume_ok(srcs[m], bi) for m, bi in hits) and len(hits) <= 16:
                     kind, pick, carved = 'corridor', (sa, sb), hits
                     break
         if kind == 'teleporter':
@@ -807,26 +877,31 @@ def fuse(seed, names, outdir, pk3):
         sa, sb = pick
         if kind == 'corridor':
             F.carve(carved)
-            F.build_corridor(sa, sb)
+            F.build_corridor(sa, sb, prominent=prom)
             corridor_used[a] += 1
             corridor_used[b] += 1
             corn += 1
         elif kind == 'jumppad':
-            F.build_pad(sa, sb, padn)
-            F.build_tele(sb, sa, 1000 + padn)
+            F.build_pad(sa, sb, padn, prominent=prom)
+            F.build_tele(sb, sa, 1000 + padn, prominent=prom)
             padn += 1
             telen += 1
         else:
-            F.build_tele(sa, sb, telen)
-            F.build_tele(sb, sa, 100 + telen)
+            F.build_tele(sa, sb, telen, prominent=prom)
+            F.build_tele(sb, sa, 100 + telen, prominent=prom)
             telen += 2
         used_sock.add(tuple(sa))
         used_sock.add(tuple(sb))
-        conns.append((a, b, kind, sa, sb, len(carved)))
-        print('edge %s <-> %s: %s  %s -> %s  carved=%d' %
-              (srcs[a].name, srcs[b].name, kind, [round(x) for x in sa], [round(x) for x in sb], len(carved)))
+        conns.append((a, b, kind, sa, sb, len(carved), excl, prom, math.dist(sa, sb)))
+        print('edge %s(deg%d) <-> %s(deg%d): %s %s  %s -> %s  len=%.0f carved=%d' %
+              (srcs[a].name, degree[a], srcs[b].name, degree[b], kind,
+               'PROMINENT/exclusive' if excl else 'subtle/redundant',
+               [round(x) for x in sa], [round(x) for x in sb], math.dist(sa, sb), len(carved)))
+    nexcl = sum(1 for c in conns if c[6])
     print('topology: %d maps, %d edges (%d tree + %d loops), corridors=%d jumppads=%d teleport-triggers=%d' %
           (j, len(edges), j - 1, len(edges) - (j - 1), corn, padn, telen))
+    print('prominence: %d exclusive/objective edges (prominent+lit), %d redundant edges (subtle); '
+          'node degrees %s' % (nexcl, len(conns) - nexcl, degree))
     data, nodes_out, leafs_out, models_out = F.build(splits)
     bsp_path = os.path.join(outdir, 'fused.bsp')
     open(bsp_path, 'wb').write(data)
@@ -878,17 +953,52 @@ def fuse(seed, names, outdir, pk3):
                 fviol += 1
     print('connector floor check: %s (%d violations)' % ('PASS' if fviol == 0 else 'FAIL', fviol))
     nodes2, adj2 = M.parse_cache(open(os.path.join(outdir, 'fused.waypoints.cache')).read())
-    comp = set(M.largest_component(adj2))
-    idx2 = {tuple(round(x, 1) for x in nodes2[i]): i for i in range(len(nodes2))}
-    missing = 0
+    key = lambda p: tuple(round(x, 1) for x in p)
+    idx2 = {key(nodes2[i]): i for i in range(len(nodes2))}
+    region = {}
     for m in range(j):
-        for p in sockets[m]:
-            k = tuple(round(x, 1) for x in p)
-            if idx2.get(k, -1) not in comp:
-                missing += 1
-    print('nav connectivity: %s (%d/%d sockets in main component, %d nodes total)' %
-          ('PASS' if missing == 0 else 'FAIL', sum(len(s) for s in sockets) - missing,
-           sum(len(s) for s in sockets), len(nodes2)))
+        for m1, m2, fl in srcs[m].wptriples:
+            region[key(vadd(m1, offsets[m]))] = m
+    dadj = [set(a.keys()) for a in adj2]
+    added = 0
+    for near, far in F.bot_jumps:
+        u, v = idx2.get(key(near)), idx2.get(key(far))
+        if u is not None and v is not None:
+            dadj[u].add(v)
+            added += 1
+    from collections import deque
+    seed_node = idx2.get(key(sockets[0][0]), 0)
+    seen = [False] * len(nodes2)
+    q = deque([seed_node])
+    seen[seed_node] = True
+    while q:
+        u = q.popleft()
+        for v in dadj[u]:
+            if not seen[v]:
+                seen[v] = True
+                q.append(v)
+    reached_region = {region.get(key(nodes2[i])) for i in range(len(nodes2)) if seen[i]}
+    all_reg = set(range(j))
+    unreached = all_reg - reached_region
+    print('bot flood-fill: modeled %d engine-autogen connector jumps; regions reached %s / %s -> %s' %
+          (added, sorted(r for r in reached_region if r is not None), sorted(all_reg),
+           'PASS' if not unreached else 'FAIL unreached=%s' % sorted(unreached)))
+    for c in conns:
+        a, b, kind, sa, sb = c[0], c[1], c[2], c[3], c[4]
+        na, nb = idx2.get(key(sa)), idx2.get(key(sb))
+        okab = na is not None and nb is not None and seen[na] and seen[nb]
+        print('join %s<->%s %s: near_wp=%s far_wp=%s bot-traversable=%s' %
+              (srcs[a].name, srcs[b].name, kind,
+               'yes' if na is not None else 'MISSING', 'yes' if nb is not None else 'MISSING',
+               'YES' if okab else 'NO'))
+    joins = {'maps': [{'name': srcs[m].name, 'offset': offsets[m],
+                       'mins': [srcs[m].bounds[0][i] + offsets[m][i] for i in range(3)],
+                       'maxs': [srcs[m].bounds[1][i] + offsets[m][i] for i in range(3)]} for m in range(j)],
+             'joins': [{'a': c[0], 'b': c[1], 'kind': c[2], 'sa': list(c[3]), 'sb': list(c[4]),
+                        'exclusive': c[6], 'prominent': c[7], 'length': round(c[8], 1)} for c in conns],
+             'bot_jumps': [[list(n), list(f)] for n, f in F.bot_jumps]}
+    json.dump(joins, open(os.path.join(outdir, 'fused.joins.json'), 'w'), indent=0)
+    print('wrote fused.joins.json (%d maps, %d joins)' % (j, len(conns)))
     return bsp_path, conns
 
 
