@@ -38,6 +38,7 @@ float autocvar_g_payload_warmup = 5;
 float autocvar_g_payload_node_fade_dist = 1100;
 int autocvar_g_payload_pathlinks = 1;
 int autocvar_g_payload_ribbon_max = 32;
+int autocvar_g_payload_node_sprites = 0;
 
 .float plc_in;
 .float plc_block_accum;
@@ -387,6 +388,14 @@ void payload_cart_reset(entity this)
 	FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
 }
 
+void payload_node_sprite(entity node, float maxd)
+{
+	if(node.sprite)
+		return;
+	WaypointSprite_Spawn(WP_Waypoint, 0, maxd, NULL, node.origin + '0 0 48',
+		NULL, 0, node, sprite, true, RADARICON_WAYPOINT);
+}
+
 void payload_path_build(entity this)
 {
 	this.plc_cart_id = payload_cart_count;
@@ -409,12 +418,17 @@ void payload_path_build(entity this)
 	entity node = first;
 	float d = 0;
 	int guard = 0;
+	int interior = 0;
 	while(node && guard < 4096)
 	{
 		IL_PUSH(g_payload_nodes, node);
-		float maxd = (node.spawnflags & PLC_CHECKPOINT) ? 0 : autocvar_g_payload_node_fade_dist;
-		WaypointSprite_Spawn(WP_Waypoint, 0, maxd, NULL, node.origin + '0 0 48',
-			NULL, 0, node, sprite, true, RADARICON_WAYPOINT);
+		if(node.spawnflags & PLC_CHECKPOINT)
+			payload_node_sprite(node, 0);
+		else if(interior < autocvar_g_payload_node_sprites)
+		{
+			payload_node_sprite(node, autocvar_g_payload_node_fade_dist);
+			++interior;
+		}
 		node.plc_prev = prev;
 		node.plc_cart = this;
 		node.plc_idx = guard;

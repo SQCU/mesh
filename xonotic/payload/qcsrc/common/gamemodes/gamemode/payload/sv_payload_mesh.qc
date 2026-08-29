@@ -110,8 +110,11 @@ void payload_mesh_mark_objectives()
 		if(payload_mesh_objective[j] >= PLC_MESH_ITEM_BASE)
 			continue;
 		entity n = payload_mesh_node(payload_mesh_objective[j]);
-		if(n && n.sprite)
+		if(n)
+		{
+			payload_node_sprite(n, 0);
 			WaypointSprite_UpdateTeamRadar(n.sprite, RADARICON_OBJECTIVE, Team_ColorRGB(Team_IndexToTeam(j)));
+		}
 	}
 }
 

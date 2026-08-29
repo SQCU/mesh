@@ -23,6 +23,7 @@ void payload_Initialize();
 int payload_pack_cart_state();
 void payload_update_links(entity cart);
 void payload_spawn_link(entity cart, entity a, entity b);
+void payload_node_sprite(entity node, float maxd);
 bool payload_link_send(entity this, entity to, int sendflags);
 
 REGISTER_MUTATOR(plc, false)
