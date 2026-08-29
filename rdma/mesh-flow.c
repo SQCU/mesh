@@ -109,14 +109,13 @@ int main(int argc,char**argv){
   int n[NOWN]={0}; n[FREE]=pool; for(int i=0;i<pool;i++) fl[i]=i;
   int full=0;
   struct wf w[NOWN]={{0}}; double t0=now(), tel=t0;
-  #define ADDR(i) ((char*)mesh_at(M,(uint32_t)(i)))
   #define LKEY(i) (mr[(size_t)(i)*pg/CHUNK]->lkey)
   #define POOL(i)  ((uint32_t)(i) < (uint32_t)pool)
   #define VALID(i) ((uint32_t)(i) < (uint32_t)np)
   #define BUMP(f) atomic_fetch_add_explicit(&M->f,1,memory_order_relaxed)
   #define MV(i,to) do{ n[own[i]]--; own[i]=(to); n[to]++; }while(0)
   #define GIVE(i)  do{ MV(i,FREE); fl[n[FREE]-1]=(i); }while(0)
-  #define POST(i,op) ({ struct ibv_sge g={(uintptr_t)ADDR(i),(uint32_t)pg,LKEY(i)}; \
+  #define POST(i,op) ({ struct ibv_sge g={(uintptr_t)mesh_at(M,(uint32_t)(i)),(uint32_t)pg,LKEY(i)}; \
     struct ibv_send_wr s={.wr_id=(i),.sg_list=&g,.num_sge=1,.opcode=IBV_WR_SEND, \
       .send_flags=IBV_SEND_SIGNALED},*bs; struct ibv_recv_wr q={.wr_id=(i),.sg_list=&g,.num_sge=1},*bq; \
     (op) ? ibv_post_send(qp,&s,&bs) : ibv_post_recv(qp,&q,&bq); })
@@ -130,7 +129,7 @@ int main(int argc,char**argv){
     if(who)
       while(!pop(M,SUB,&d)){
         uint32_t p=d.page; if(!VALID(p)) continue;
-        struct wire *w2=(struct wire*)ADDR(p);
+        struct wire *w2=(struct wire*)mesh_at(M,p);
         w2->magic=WIRE_MAGIC; w2->bytes=mesh_clamp(M,d.bytes);
         w2->src=me; w2->dst=d.node; w2->hops=0;
         if(POST(p,1)) break;
@@ -138,10 +137,10 @@ int main(int argc,char**argv){
         BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
-      if(!VALID(i)) continue;
+      if(!VALID(i)) die("wr_id outside the pool");
       if(wc[j].opcode!=IBV_WC_RECV){ if(POOL(i)) GIVE(i); continue; }
       full=0; if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
-      struct wire *h=(struct wire*)ADDR(i);
+      struct wire *h=(struct wire*)mesh_at(M,(uint32_t)i);
       if(h->magic!=WIRE_MAGIC){ GIVE(i); continue; }
       h->hops++;
       if(h->dst!=(uint16_t)me && h->hops<=32){ if(!POST(i,1)) MV(i,SEND); else GIVE(i); continue; }

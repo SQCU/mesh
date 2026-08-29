@@ -21,16 +21,16 @@ void *mesh_open(size_t bytes, size_t *sp, size_t *up){
     if(M->magic!=MESH_MAGIC||M->version!=MESH_VERSION){ M=NULL; return NULL; }
     arena=mesh_data(M,M->pool);
     atomic_store_explicit(&M->client,(uint64_t)getpid(),memory_order_release); }
-  if(bytes > (size_t)M->arena*mesh_pay(M)) return NULL;
-  if(sp) *sp=M->pgsz; if(up) *up=mesh_pay(M);
+  uint32_t u=mesh_pay(M);
+  if(bytes > (size_t)M->arena*u) return NULL;
+  if(sp) *sp=M->pgsz; if(up) *up=u;
   return arena; }
 
 size_t mesh_write(const void *p, size_t nbytes, int node){
   if(!M) return 0;
   uint32_t s=(uint32_t)(((const unsigned char*)p-arena)/M->pgsz); size_t done=0;
   while(done<nbytes && s<M->arena){
-    uint32_t u=mesh_pay(M);
-    struct desc d={.page=M->pool+s,.bytes=(uint32_t)(nbytes-done<u?nbytes-done:u),.node=(uint16_t)node};
+    struct desc d={.page=M->pool+s,.bytes=mesh_clamp(M,nbytes-done),.node=(uint16_t)node};
     if(push(M,SUB,&d)) break;
     done+=d.bytes; s++; }
   return done; }
