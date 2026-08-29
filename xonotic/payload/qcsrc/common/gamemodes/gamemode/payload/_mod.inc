@@ -5,5 +5,4 @@
 #endif
 #ifdef SVQC
     #include <common/gamemodes/gamemode/payload/sv_payload.qc>
-    #include <common/gamemodes/gamemode/payload/sv_payload_mesh.qc>
 #endif

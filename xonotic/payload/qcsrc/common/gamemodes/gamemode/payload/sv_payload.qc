@@ -416,7 +416,6 @@ void payload_think(entity this)
 		FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
 	}
 
-	payload_mesh_tick(this);
 }
 
 void payload_cart_reset(entity this)
@@ -518,7 +517,6 @@ void payload_path_build(entity this)
 	WaypointSprite_Spawn(wp, 0, 0, this, '0 0 64', NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
 	WaypointSprite_UpdateMaxHealth(this.sprite, this.plc_length);
 	WaypointSprite_UpdateHealth(this.sprite, this.plc_s);
-	payload_mesh_mark_objectives();
 
 	setthink(this, payload_think);
 	this.nextthink = this.ltime + PLC_TICK;
@@ -605,37 +603,11 @@ void Payload_RoundStart()
 
 void havocbot_goalrating_payload(entity this, float ratingscale)
 {
-	int j = Team_TeamToIndex(this.team);
+	// Bare stub. Rates carts and near-cart nodes so bots engage the cart
+	// demonstrator. Strategy-weighted objective selection removed: there is no
+	// strategy implementation; design/payload-spec.md is the reference.
 	for(int c = 0; c < payload_cart_count; ++c)
 		navigation_routerating(this, payload_carts[c], ratingscale, 5000);
-	if(j < 1)
-		return;
-	float mp = floor(this.plc_mesh_pick);
-	entity ip = NULL;
-	if(mp >= PLC_MESH_ITEM_BASE && mp < PLC_MESH_TOTAL)
-		ip = payload_mesh_obj_ent(mp);
-	if(ip)
-		navigation_routerating(this, ip, ratingscale * 2, 3000);
-	else if(payload_mesh_weights_valid(this))
-	{
-		int cbase = PLC_MESH_OBJECTIVES * floor(bound(0, this.plc_mesh_pick,
-			payload_cart_count * PLC_MESH_OBJECTIVES - 1) / PLC_MESH_OBJECTIVES);
-		for(int o = 0; o < PLC_MESH_OBJECTIVES; ++o)
-		{
-			entity nd = payload_mesh_node(cbase + o);
-			if(!nd)
-				break;
-			float wgt = payload_mesh_weight(this, o);
-			if(wgt > 0.02)
-				navigation_routerating(this, nd, ratingscale * 2 * wgt, 3000);
-		}
-	}
-	else
-	{
-		entity o = payload_mesh_obj_ent(payload_mesh_objective[j]);
-		if(o)
-			navigation_routerating(this, o, ratingscale * 2, 3000);
-	}
 	IL_EACH(g_payload_nodes, it.plc_cart != NULL,
 	{
 		float rel = (it.plc_dist - it.plc_cart.plc_s) / 256;
@@ -704,7 +676,6 @@ MUTATOR_HOOKFUNCTION(plc, PlayerSpawn)
 	entity player = M_ARGV(0, entity);
 
 	player.player_blocked = !round_handler_IsRoundStarted();
-	player.plc_spawn_stamp = time;
 }
 
 MUTATOR_HOOKFUNCTION(plc, ClientConnect)
@@ -841,8 +812,6 @@ void payload_Initialize()
 	g_payload_nodes = IL_NEW();
 	g_payload_links = IL_NEW();
 	payload_link_count = 0;
-	payload_mesh_h = -1;
-	payload_mesh_attach();
 
 	InitializeEntity(NULL, payload_DelayedInit, INITPRIO_GAMETYPE);
 }
