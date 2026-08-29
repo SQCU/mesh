@@ -63,6 +63,7 @@ def main():
     ap.add_argument("--secs", type=float, default=0.0)
     ap.add_argument("--maxrows", type=int, default=4032)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--trace", default="")
     a = ap.parse_args()
 
     pick_of = POLICIES.get(a.policy, np.argmax)
@@ -74,6 +75,11 @@ def main():
     print(f"worker: policy={a.policy} backend={'mlx' if mx else 'numpy'} peer={a.peer} "
           f"usable={m.usable} req_rows/slot={rows_per_slot(m.usable, REQ_WIDTH)} "
           f"resp_rows/slot={rows_per_slot(m.usable, RESP_WIDTH)}", flush=True)
+
+    tr = open(a.trace, "w", buffering=1) if a.trace else None
+    if tr:
+        tr.write("req,tick,live,prog,pick0,pick1,pick2,pick3,pick4,"
+                 "held0,held1,held2,held3,held4,d1,d2,x1,x2,y1,y2\n")
 
     t0, served, blocks, short = time.time(), 0, 0, 0
     while a.secs <= 0.0 or time.time() - t0 < a.secs:
@@ -98,6 +104,15 @@ def main():
         short += took < chunks
         served += n
         blocks += 1
+        if tr:
+            hist = np.bincount(pick.astype(np.int32), minlength=TEAMS).tolist()
+            back = np.bincount(np.clip(X[:, 15], 0, TEAMS - 1).astype(np.int32),
+                               minlength=TEAMS).tolist()
+            col = lambda t, c: float(X[X[:, 1] == t, c].mean()) if (X[:, 1] == t).any() else 0.0
+            tr.write(",".join(str(v) for v in
+                     [done["req_id"], done["tick"], int((X[:, 1] > 0).sum()),
+                      float(X[0, 12])] + hist + back +
+                     [col(1, 11), col(2, 11), col(1, 5), col(2, 5), col(1, 6), col(2, 6)]) + "\n")
         if not a.quiet:
             hist = np.bincount(pick.astype(np.int32), minlength=TEAMS).tolist()
             live = int((X[:, 1] > 0).sum())
