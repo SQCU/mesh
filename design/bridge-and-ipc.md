@@ -140,17 +140,19 @@ device. Each of those can select a run that looks healthy and delivers wrong dat
 operator should not be able to reach that. Unknown options are refused rather than ignored,
 and the device is chosen by finding the port that is up.
 
-## Open: throughput falls with the sender's working set
+## Throughput does not fall with the sender's working set
 
-Sending from a working set of 1-2 GB sustains 57-62 Gbit/s of payload. Sending from 9 GB
-sustains 2.6 Gbit/s, and from 21.9 GB, 2.15 Gbit/s. Same bridge, same arena, same code path;
-the only variable is how much of the arena the application walks.
+An earlier revision recorded a large fall: 57-62 Gbit/s from a 1-2 GB working set, 2.6 from
+9 GB, 2.15 from 21.9 GB, same bridge and same code path, with three explanations tested and
+none surviving.
 
-Three explanations were tested and none survived. Enlarging the transfer unit from 4 KB to
-64 KB changed nothing, which argues against per-message overhead and against IO translation
-pressure, since the physical page count is unchanged. Skipping the sender's pre-fill recovered
-only a factor of two, so a dirty-cache effect is present but minor. The send refcount was
-inspected and does not double-count re-sent pages at these window sizes.
+It does not reproduce. Measured on the current transport, 0.5 GB gives 20.88 Gbit/s and 3.0 GB
+gives 21.92 — no fall, and the larger set is marginally faster. Three gigabytes is the arena
+size at this configuration, so the original observation at 9 and 21.9 GB has not been
+re-tested at those sizes.
 
-This is recorded as unexplained rather than attributed. The arena being large costs nothing on
-its own: a 21.989 GB arena with a small working set runs at 45 Gbit/s.
+The likely cause is the machinery that was deleted between the two measurements. Those
+readings were taken while the software loss-repair path was active, and that path invented
+phantom sequence gaps and drove retransmit traffic from them, at a rate that grew with how far
+the sender's sequence numbers had advanced. That is a mechanism whose cost scales with the
+working set, and it no longer exists.

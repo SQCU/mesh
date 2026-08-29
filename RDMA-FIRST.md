@@ -372,14 +372,23 @@ here because these count pages and there are millions of them.
 Sampling it costs something, so it is sampled, not computed on every turn of the loop. An
 earlier version ran eight Welford updates and a clock read per iteration of the data path.
 
-## Open: a dead application strands its pages
+## A dead application does not strand its pages
 
-When an application exits while pages are in its delivery ring, those pages are never
-returned. The bridge has no idea the client died, so the pool shrinks permanently by whatever
-was in flight to it — up to the ring capacity, 4096 pages, per death. The region header
-already carries `client_pid`; nothing looks at it. This is an availability defect, not a
-cosmetic one, and it is the reason a census that closes exactly is worth publishing.
+An application that exits while pages sit in its delivery ring, or that took pages and never
+released them, used to strand them permanently: the bridge forgets a delivered page by design,
+so nothing knew they existed and the pool shrank by up to the delivery ring's capacity — 4096
+pages — per death.
 
+The bridge keeps a bitmap of delivered pages, one bit each, `npages/8` bytes. On the census
+tick it checks whether the attached client still exists, and if `kill(pid, 0)` reports `ESRCH`
+it returns every marked page to the pool, resets the three ring cursors so no stale descriptor
+survives, and clears the client. The check is once a second and outside the data path.
+
+Measured: an application exiting with pages outstanding leaves `held=4055`, and one tick later
+`held=0` with the census closing exactly at 244140/244140.
+
+This is why the census is published. A conservation figure nobody reads is decoration; this
+one named a real leak and then confirmed the repair.
 
 ## Sleeps, and where they crept in
 
@@ -414,7 +423,7 @@ have to be made, and it bought a latency floor in exchange.
 
 | where | verdict |
 |---|---|
-| `bin/mesh-peers.sh`, `sleep "$D"` | The same habit. A reachability report should return as fast as discovery answers, not after a fixed deadline; this was raised once already and has not been fixed. |
+| `bin/mesh-peers.sh` | Partly fixed. The browse now ends when the reply stream goes quiet instead of after a fixed three seconds, using a 50 ms poll period. The per-node `dns-sd -t` resolve and the `nc -G` info probe still run to a deadline and dominate the wall time, so the script returns no faster than before. Saying it is fixed would be false. |
 | `bin/mesh-rdma-init.sh`, `install.sh` (three), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
 | `xonotic/bridge/solver/mesh_attach.h`, `xonotic/bridge/test/meshtest.c`, `xonotic/bridge/test/engine.sh`, `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
 | `viz/serve.py`, `time.sleep(PERIOD)` | Defensible. This is a poll period — a scheduling decision about how often to sample — not a stall standing in for a wait. |

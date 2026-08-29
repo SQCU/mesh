@@ -636,8 +636,9 @@ copy. 54,337 rows were verified exactly, `wrong=0`, at 0.12 Gbit/s — bounded b
 touching one slot at a time. **That measurement predates the transport rewrite and has not
 been repeated since**; the API it uses is unchanged, but treat the number as historical.
 
-**Known defect.** The census above closes exactly on the mini and is one page short on the
-MacBook, with 4096 pages `held`. An application that exits while pages sit in its delivery ring
-strands them: the bridge never learns the client died, so the pool shrinks permanently by up to
-the ring capacity per death. The region header carries `client_pid` and nothing looks at it.
+The census closes exactly on both nodes, including after an application dies holding pages.
+The bridge marks delivered pages in a bitmap and, on the once-a-second census tick, reclaims
+them if the client is gone. Measured: `held=4055` at the moment of death, `held=0` and
+244140/244140 one tick later.
+
 

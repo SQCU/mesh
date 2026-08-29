@@ -8,7 +8,16 @@ ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print 
 me=$(scutil --get LocalHostName 2>/dev/null)
 B=$(mktemp); trap 'rm -f "$B" "$B".*' EXIT
 dns-sd -B _meshnode._tcp local > "$B" 2>&1 &
-sleep "$D"; kill %1 2>/dev/null; wait 2>/dev/null
+last=-1; quiet=0; spent=0; step=0.05
+while :; do
+  sz=$(wc -c < "$B")
+  if [ "$sz" = "$last" ]; then quiet=$((quiet+1)); else quiet=0; last=$sz; fi
+  [ "$sz" -gt 0 ] && [ "$quiet" -ge 3 ] && break
+  spent=$(awk -v s="$spent" -v t="$step" 'BEGIN{print s+t}')
+  awk -v s="$spent" -v d="$D" 'BEGIN{exit !(s>=d)}' && break
+  sleep "$step"
+done
+kill %1 2>/dev/null; wait 2>/dev/null
 for n in $(awk '$2=="Add"{print $NF}' "$B" | sort -u); do
   [ -n "$n" ] || continue
   [ "$n" = "$me" ] && printf 'node %s self\n' "$n" || printf 'node %s peer\n' "$n"
