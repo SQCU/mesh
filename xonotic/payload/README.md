@@ -349,3 +349,38 @@ macOS arm64 with only its q3map2 target:
 The threaded vis/light stages SIGBUS on arm64; mapgen pins `-threads 1` for both.
 Override paths with `Q3MAP2` and `XON_BASEPATH`. Some stock shader images are
 dds-only so q3map2 logs "Couldn't find image" — harmless for compile and runtime.
+
+## Join quality and navigability (mapfuse + joinview)
+
+Every fused join is built to be bot-traversable and classified for prominence:
+
+- **Bot transport**: corridor joins carry a chain of walkable waypoint links in
+  the fused `.cache`. Jump-pad and teleporter joins do NOT get synthetic walk
+  links — Xonotic autogenerates their bot waypoints from the entities at map init
+  (`trigger_push` tracetosses to the real landing then `waypoint_spawnforteleporter`,
+  jumppads.qc:551; `trigger_teleport` likewise, teleporters.qc:253), so mapfuse
+  emits canonical `trigger_push`+`target_position` / `trigger_teleport`+
+  `misc_teleporter_dest` and models the resulting one-way jump in `fused.joins.json`.
+  A region flood-fill over (cache walk-links + modeled jumps) asserts all source
+  maps land in one bot-reachable component and reports per-join traversability.
+- **Prominence rule**: each map-node is classified by edge count. An edge whose
+  endpoint is a degree-1 leaf (the sole lifeline to that map/objective) is
+  EXCLUSIVE and gets the prominent template — wide mouth, light entities at both
+  ends, kept short, corridor (cart-navigable) when geometry and the one-corridor-
+  per-map budget allow, else a lit teleporter/pad. Redundant edges (both endpoints
+  degree ≥2) may be subtle. The generated classification is printed per topology.
+- **Clip carving**: corridor selection now carves stock-map PLAYERCLIP/BOTCLIP/
+  MONSTERCLIP brushes (0x430000) that cross the tube, not just solid brushes — a
+  clip brush leaves the floor walkable but physically blocks players, which
+  silently broke crossings.
+- **Sizing**: source maps pack tighter (MARGIN 896, was 2048) and the corridor
+  length cap dropped (6000, was 14000); over-long joins become short jump-pads.
+
+`tools/joinview.py <dir>` diagnoses a fused map's joins offline: it writes
+`fused.floorplan.svg` (dependency-free top-down plan — map footprints, nav graph,
+joins colored by type, prominent=thick/solid vs subtle=dashed, lights) and reports
+per edge a **contortion** score (fuzzed walk-distance / straight-line through the
+join), a **visual-occlusion** ray count (eye rays from both sides that hit solid
+before the opening), and whether the join is **clip-blocked**. Headless engine
+screenshots are not available (the dedicated server has no GL), so the egocentric
+check is the raycast probe rather than a rendered view.
