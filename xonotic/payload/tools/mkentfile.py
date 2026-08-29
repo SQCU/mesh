@@ -7,8 +7,14 @@ off, ln = struct.unpack_from('<ii', d, 8)
 ents = d[off:off + ln].split(b'\0')[0].decode('latin-1')
 
 blocks = re.findall(r'\{[^{}]*\}', ents)
-models = sorted({m for b in blocks for m in re.findall(r'"model"\s+"(\*\d+)"', b)},
-                key=lambda s: int(s[1:]))
+mclass = {}
+for b in blocks:
+    m = re.search(r'"model"\s+"(\*\d+)"', b)
+    if m:
+        mclass[m.group(1)] = re.search(r'"classname"\s+"([^"]+)"', b).group(1)
+models = sorted(mclass, key=lambda s: int(s[1:]))
+visible = [m for m in models if not mclass[m].startswith('trigger_')]
+cart_model = (visible or models)[0]
 spawns = [b for b in blocks if 'info_player_team1' in b or 'info_player_team2' in b]
 
 
@@ -18,7 +24,7 @@ def origin(b):
 
 
 pts = [origin(b) for b in spawns if origin(b)]
-print('inline models:', models[:6], 'team spawns:', len(pts))
+print('inline models:', models[:6], 'cart model:', cart_model, mclass[cart_model], 'team spawns:', len(pts))
 
 pts.sort(key=lambda p: (p[0], p[1]))
 idx = [0, len(pts) // 4, len(pts) // 2, (3 * len(pts)) // 4, len(pts) - 1]
@@ -36,7 +42,7 @@ for i, p in enumerate(track):
     extra.append('\n'.join(e))
 
 extra.append('\n'.join(['{', '"classname" "func_plc_cart"',
-                        '"model" "%s"' % models[0],
+                        '"model" "%s"' % cart_model,
                         '"target" "plcn0"', '"plc_start" "plcn2"',
                         '"speed" "40"', '}']))
 goals = [(4, 'plcn0', 0), (13, 'plcn4', 4)]

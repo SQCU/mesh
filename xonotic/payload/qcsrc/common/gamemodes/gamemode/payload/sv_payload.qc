@@ -311,6 +311,7 @@ void payload_path_build(entity this)
 	{
 		++guard;
 		IL_PUSH(g_payload_nodes, node);
+		WaypointSprite_SpawnFixed(WP_Waypoint, node.origin + '0 0 48', node, sprite, RADARICON_WAYPOINT);
 		node.plc_prev = prev;
 		if(node.curvetarget != "")
 			node.plc_curve = find(NULL, targetname, node.curvetarget);
@@ -351,9 +352,10 @@ void payload_path_build(entity this)
 	this.plc_s = this.plc_home_s;
 	setorigin(this, payload_pos(this.plc_s) - this.view_ofs);
 
-	WaypointSprite_SpawnFixed(WP_PayloadCart, '0 0 64', this, sprite, RADARICON_OBJECTIVE);
+	WaypointSprite_Spawn(WP_PayloadCart, 0, 0, this, '0 0 64', NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
 	WaypointSprite_UpdateMaxHealth(this.sprite, payload_length);
 	WaypointSprite_UpdateHealth(this.sprite, this.plc_s);
+	payload_mesh_mark_objectives();
 
 	setthink(this, payload_think);
 	this.nextthink = this.ltime + PLC_TICK;

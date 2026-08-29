@@ -2,6 +2,7 @@
 
 #include "sv_payload.qh"
 
+#include <common/mutators/mutator/waypoints/waypointsprites.qh>
 #include <common/resources/_mod.qh>
 #include <common/resources/sv_resources.qh>
 #include <server/bot/api.qh>
@@ -23,6 +24,22 @@ void payload_mesh_attach()
 	payload_mesh_h = mesh_open(autocvar_g_payload_mesh_node, PLC_MESH_WIDTH, maxclients);
 	LOG_INFO(strcat("payload: mesh handle ", ftos(payload_mesh_h), " peer ",
 		ftos((payload_mesh_h >= 0) ? mesh_stat(payload_mesh_h, PLC_MESH_STAT_PEER) : -1)));
+}
+
+void payload_mesh_mark_objectives()
+{
+	IL_EACH(g_payload_nodes, it.sprite != NULL,
+	{
+		WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, WP_Waypoint.m_color);
+	});
+	for(int j = 1; j <= NUM_TEAMS; ++j)
+	{
+		if(!(payload_teams & Team_IndexToBit(j)))
+			continue;
+		entity n = payload_mesh_node(payload_mesh_objective[j]);
+		if(n && n.sprite)
+			WaypointSprite_UpdateTeamRadar(n.sprite, RADARICON_OBJECTIVE, Team_ColorRGB(Team_IndexToTeam(j)));
+	}
 }
 
 entity payload_mesh_node(float idx)
@@ -132,4 +149,6 @@ void payload_mesh_tick(entity cart)
 		}
 		payload_mesh_objective[j] = pick;
 	}
+
+	payload_mesh_mark_objectives();
 }

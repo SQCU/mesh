@@ -42,5 +42,6 @@ float payload_mesh_objective[NUM_TEAMS + 1];
 float payload_mesh_vote[(NUM_TEAMS + 1) * PLC_MESH_OBJECTIVES];
 
 void payload_mesh_attach();
+void payload_mesh_mark_objectives();
 void payload_mesh_tick(entity cart);
 entity payload_mesh_node(float idx);
