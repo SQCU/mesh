@@ -176,9 +176,32 @@ change).
   `qkv_weight`; old `.npz` files load unchanged (guarded on key presence).
 - With `qkv_weight` init 0 and the branch gated on the flag, `--qkv` off reproduces the
   current policy exactly (verified bit-stable in `--check`).
+- The whitened query and each whitened key are L2-normalised before the metric-`M` inner
+  product, so `att` is a bounded cosine (`|att| <= ~1`) and `qkv_weight` learns an O(1)
+  weight the L2 regulariser can balance. Without this the raw residual keys times the
+  whitening drive the logits to ~1e6 and the softmax collapses (measured: policy entropy
+  0.02 nats, one instrument at mass 0.98).
 
 Cutover to live: the flag is opt-in; nothing changes for the running worker until it is
 launched with `--qkv`. See the report for the exact command.
+
+### Validation findings
+
+- `worker.py --check` is green on the mini (mlx), including two new assertions: `qkv inert
+  at init` (qkv-on reproduces qkv-off returns bit-for-bit, so the frozen baseline is
+  bit-stable) and `qkv trains, deterministic and bounded` (qkvw and M move, stay finite,
+  `|qkvw|<=4`, deterministic across two runs).
+- End-to-end tick (solve + strategy, qkv on) at 50 bots / 5 teams / 4 carts: median
+  27.4 ms, max 29.6 ms -- well inside the ~100 ms budget (the bounded attention adds
+  ~1.6 ms over the 25.8 ms solve).
+- The `--synth` `good` gate is a finicky 13-way conjunction of stochastic thresholds that
+  neither the baseline nor qkv passes across all (seed, ctx): at the default seed both exit
+  1 on the same qkv-independent condition (a fresh qkv-off lead_bias counterfactual clears
+  by 0.018 vs a 0.03 threshold). Where it is informative, qkv is the more stable of the
+  two: at seed 7 / ctx 4096 the baseline W_logit head collapses (policy entropy 0.07 nats,
+  concentration 0.94, returns -7.5 -> -4.7) while qkv stays regularised (entropy 2.65,
+  concentration 0.34, returns +1.0 -> +8.6, banking exact) -- the bounded attention resists
+  the collapse the raw frozen-feature head falls into.
 
 ## Future work
 
