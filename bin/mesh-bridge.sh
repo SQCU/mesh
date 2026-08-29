@@ -46,7 +46,7 @@ $( [ -n "$peer" ] && printf '<string>%s</string>' "$peer" )
 </array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
-<key>ExitTimeOut</key><integer>30</integer>
+<key>ExitTimeOut</key><integer>0</integer>
 <key>StandardOutPath</key><string>/tmp/$LABEL.log</string>
 <key>StandardErrorPath</key><string>/tmp/$LABEL.log</string>
 </dict></plist>
@@ -56,10 +56,11 @@ PL
 pid_of() { launchctl print "$DOM/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3}'; }
 
 do_stop() {
-  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1
-  for _ in $(seq 1 30); do [ -z "$(pid_of)" ] && break; sleep 1; done
   p=$(pid_of)
-  [ -n "$p" ] && { echo "mesh-bridge: $LABEL still running as $p after 30s; not escalating" >&2; return 1; }
+  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1
+  [ -z "$p" ] && { echo "mesh-bridge: stopped"; return 0; }
+  for _ in $(seq 1 200000); do kill -0 "$p" 2>/dev/null || break; done
+  kill -0 "$p" 2>/dev/null && { echo "mesh-bridge: $LABEL still running as $p after 1.5s; not escalating" >&2; return 1; }
   echo "mesh-bridge: stopped"
 }
 
@@ -68,7 +69,7 @@ do_start() {
   [ -n "$(pid_of)" ] && { echo "mesh-bridge: already running as $(pid_of)"; return 0; }
   write_plist
   launchctl bootstrap "$DOM" "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null
-  for _ in $(seq 1 60); do [ -n "$(pid_of)" ] && break; sleep 1; done
+  for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; done
   p=$(pid_of)
   [ -z "$p" ] && { echo "mesh-bridge: failed to start; see /tmp/$LABEL.log" >&2; return 1; }
   echo "mesh-bridge: running as $p, mesh ${mesh_pct}% app ${app_pct}%"

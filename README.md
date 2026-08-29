@@ -558,16 +558,57 @@ memory, so MLX computes on pages the NIC wrote without a copy.
 
 ### Running it
 
-`bin/mesh-bridge.sh` starts the bridge from `etc/bridge.conf`. The only settings are how much
-of the node the mesh holds and how much your own programs expect to use. The wire limit is
-raised to match, and startup is refused above 90% of RAM, because wiring past that can leave
-a node that cannot boot without someone physically present. Change the file and restart.
+```
+bin/mesh-bridge.sh start | stop | restart | status
+```
+
+It is a launchd service, like `io.mesh.beacon` and `io.mesh.router`. Settings come from
+`etc/bridge.conf`: how much of the node the mesh holds, and how much your own programs expect
+to use. The wire limit is raised to match, and startup is refused above 90% of RAM, because
+wiring past that can leave a node that cannot boot without someone physically present.
+Changing the file and restarting is the supported way to change how much of a node the mesh
+holds; nothing is tuned while it runs.
+
+Never reach for `pkill`. A process holding a verbs device does not die from SIGKILL — it sits
+in uninterruptible kernel sleep still holding the device, every other process on the machine
+loses RDMA, the ports drop with the cable attached, `shutdown` hangs, and a human has to walk
+to the machine and pull power. `stop` sends SIGTERM, waits for the teardown that releases the
+device, and reports rather than escalating. The plist sets `ExitTimeOut` to 0, which in launchd
+means infinity, so launchd will not escalate either. `bin/mesh-kill-guard.sh` enforces this;
+`AGENTS.md` describes what it covers and what it cannot.
+
+On a headless node there is no GUI launchd domain, so the script re-execs under `sudo` when it
+can. Running as root there means the region is created world-readable on purpose: a region
+only root can open is a mesh no application can attach to.
 
 The bridge itself takes only what it cannot infer: `-I` node index, `-M` share of the machine,
 `-s` region, `-T` duration, and a peer. There is no switch for the page size, the registration
 chunk, the send window or the device — each of those can select a run that looks healthy and
 moves corrupt data. Unknown options are refused, and the link is found by looking for the port
 that is up.
+
+### Building, and keeping nodes identical
+
+```
+make -C rdma all
+```
+
+One command, every binary. Converge a node with git — `git fetch && git reset --hard
+origin/main && make -C rdma all` — never by copying a hand-picked list of files. Mismatched
+binaries between two nodes are indistinguishable from a transport regression when the only
+thing you look at is throughput, and that mistake accounted for every wild number measured
+during this bridge's development.
+
+### Measuring
+
+There is one instrument. The bridge publishes a census of the page table and its variance to
+the region once a second; `rdma/mesh-stat` reads it; `viz/serve.py` polls it and serves the
+viewer. Rates come from differencing `sent` and `recvd` against `uptime_ms`.
+
+Applications do not measure. `rdma/mesh-app` keeps no clock and computes no throughput; it
+reports only what it alone knows, which is whether bytes came back wrong. A second measurement
+path only disagrees with the first, and reading a rate off an application whose peer had
+silently failed to start is how several wrong numbers were reported here.
 
 ### What runs today
 

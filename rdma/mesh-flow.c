@@ -280,7 +280,6 @@ int main(int argc,char**argv){
       i_free=(struct wf){0}; i_post=(struct wf){0}; i_send=(struct wf){0}; i_held=(struct wf){0};
       tel_last=t;
     }
-    if(!k) usleep(50);
   }
   double el=now()-t0;
   printf("node pages=%d pool=%d  rx=%llu tx=%llu  %.2f/%.2f Gbit/s in/out\n"

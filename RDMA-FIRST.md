@@ -154,121 +154,55 @@ monotonically increasing) from one that is crashing out (free → 0, sustained
 negative). A few floats per peer per second and the whole graph knows what the whole
 graph is doing.
 
-## Software loss repair on UC (measured)
+## There was software loss repair here, and it is gone
 
-RC and UD are refused by this hardware (errno 102) and `max_qp_rd_atom` is 0, so there is
-no hardware retransmit. Repair is a receiver-driven NACK over the same QP, and the
-retransmit window **is** the page pool — nothing is copied, a sent page is simply held in
-`txring` until ring position evicts it.
+An earlier version implemented receiver-driven NACKs over the same queue pair, a miss
+bitmap, a retransmit window held in the page pool, and a sweep that re-armed requests by
+sequence progress rather than by a clock. Several sections of this document used to explain
+its tuning in detail.
 
-Three things were wrong, and they compounded:
+All of it is deleted, and the reasoning that replaced it is in **There is no repair in the
+transport**, below. The short version: ARQ is a property of the RC transport, implemented in
+the NIC with packet sequence numbers and a sender-side hardware buffer. Reimplementing it in
+userspace over UC, without that buffer, produced a mechanism that invented 7.3 million
+phantom gaps in five seconds on a link losing nothing, drove its own retransmit traffic from
+them, corrupted the page accounting, and ended in a kernel panic inside the vendor driver.
 
-**The pool was clamped to the frame budget.** `frames*npages > 4095 -> npages = 4095/frames`
-conflated two unrelated limits. The granted depth bounds *posted* frames; it says nothing
-about how many pages a process may own. `max_mr_size` advertises 16.4 MB, but that figure is
-neither enforced nor usable: honouring it needs 1416 regions for a 23 GB pool against a quota
-of 100 per protection domain. Measured under real traffic with every byte checked, single
-regions of 0.258, 2.749 and 3.092 GB deliver `corrupt=0`, while 5.154 and 8.246 GB corrupt
-every page. **The real cliff is 2^32, not the advertised value**, and past it registration
-succeeds and silently returns wrong data. The bridge therefore chunks at a fixed 1 GiB, a
-factor of four inside the observed limit, which needs 23 regions for a 23 GB pool. This is
-the same failure recorded as kvcache-ai/Mooncake#2017. `max_mr_size` bounds one MR, not the
-pool —
-`max_mr` is 100. With the clamp, a 4096-byte page pool could never exceed 4000 pages, so the
-retransmit window was 2992 pages no matter what the operator asked for. The pool is now
-registered as MRs of 1 GiB; `struct page` already carried a per-page `lkey`.
-`rx_target` and `tx_budget` are taken from a quarter of the *granted* frame budget, so posted
-frames still honour TN3205 while the pool does not.
-
-**Repair decremented an in-flight counter it never incremented.** The NACK path did
-`pg[tp].refs++` without `sending++`, but the completion path does `sending--` when refs hits
-zero. Every retransmit therefore drove `sending` one lower, permanently. Measured: `sending`
-reached **-2326** inside two seconds, `while(sending<cap)` stopped bounding anything, and the
-source ran with the entire window in flight (out_max 2992 against a `tx_budget` of 1000).
-Fixing it cut observed page loss about threefold on its own.
-
-**The window was consumed by latency, so retransmits were overwritten before the NIC read
-them.** Repair latency is not a duration, it is a distance in sequence numbers, and it is
-roughly *twice* the send-queue depth: the NACK reaches the source when the source is already
-`tx_budget` pages ahead, and the retransmit then queues behind another `tx_budget` pages
-before the NIC DMA-reads the buffer. Measured at `tx_budget` 1023: NACK lag 1411 mean / 1784
-max, repair completing at 1865 mean. Against a 2992-page window that leaves under 200 pages
-of margin, and a page evicted at that boundary is rewritten under a work request the NIC has
-not yet serviced. The symptom was retransmits failing to arrive at **40-46%** while original
-pages were lost at 0.05% — confirmed by marking retransmits and counting them at the far end
-(5976 of 11134 arrived). It is not wire loss and not burstiness: pacing repair under the same
-`sending<cap` gate as fresh data changed nothing, and a probe copy of a page that had already
-been *delivered* vanished at the same rate.
-
-So the rule is `txwin >> tx_budget`, not `txwin > 0`. Repair also became a first-class stage
-of the send loop — NACK entries land in a retransmit queue drained ahead of fresh pages under
-the same capacity gate — rather than an unbounded blast from inside the receive path.
-
-### Re-arm is measured in sequence progress, never in seconds
-
-A request can be lost, and so can its answer. Without re-arm, one lost retransmit is a
-permanently lost page — which is exactly the 23-36% residue the earlier mechanism could not
-explain. Two previous attempts re-armed on a clock (1 ms, then a 1024-page interval) and both
-failed the same way: 99.996% of named sequences were already evicted.
-
-The data plane already carries a monotonic quantity — `expected`, the receiver's sequence
-frontier. Everything is expressed against it:
-
-| quantity | value | meaning |
-|---|---|---|
-| `rearm_gap` | `tx_budget + 512` | re-request a still-missing seq once the frontier has advanced this far past its last request |
-| `horizon` | `txwin - 4096`, floored at `txwin/2` | do not name a seq older than this; the sender has evicted it |
-| `retire_at` | `horizon + 4096` | give up: clear the bit, count it `gone` |
-
-`horizon` and `retire_at` must be separate. Retiring at the request horizon throws away
-sequences whose retransmit is still in flight — measured, that alone dropped recovery to 14%.
-
-The sweep only runs when `missing` is non-zero and only scans the live window, eight bitmap
-words per iteration from a rolling cursor, so a healthy stream pays nothing. The gate is the
-same one every other stage uses: there is work, and there is capacity.
-
-### Measured, six seconds each, 4096-byte pages, identity workload
-
-| pool | lost | recovered | note |
-|---|---|---|---|
-| 4000, before | 1923 / 4243 / 4046 | 79.7% / 61.6% / 62.3% | one request per loss, no re-arm |
-| 4000, after | 1513 / 2980 / 1529 | 96.2% / 76.5% / 96.8% | window affords roughly one re-arm |
-| 16000, after | 2897 / 2664 / 1976 / 3919 / 2353 / 3075 / 3973 | **100% in all seven runs** | `gone=0`, `stale=0`, `resend_fail=0` |
-
-Throughput is unchanged to better across the change: 45-74 Gbit/s one-way, the spread being
-run-to-run variance on this link, not an effect of repair. Repair traffic at full recovery is
-under 0.1% of the link.
-
-The residue at a 4000-page pool is not a protocol failure, it is the geometry: at that size
-`rearm_gap` is a large fraction of `horizon`, so there is room for about one retry. Full
-recovery needs a pool several times the send depth, which is now expressible.
+This section is kept as a marker rather than removed outright, because the tuning it once
+described was persuasive and someone will be tempted to rebuild it.
 
 ## The invariant core
 
-`mesh-flow.c` and the routing it implements **do not change for a workload.** They are
-fixed against the identity function, and that is not a figure of speech: routing *is*
-the identity case, so a core that is correct for `id` is correct for every `f`.
+`mesh-flow.c` and the routing it implements **do not change for a workload.** They are fixed
+against the identity function, and that is not a figure of speech: routing *is* the identity
+case, so a core that is correct for `id` is correct for every workload.
 
-The build enforces it by file boundary:
+An earlier version enforced that by compiling the workload into the transport —
+`make F=f-yourthing.c` linked a `mesh_f` callback into `mesh-flow`. That is deleted, and the
+reason is worth keeping. Every workload was then its own binary, which meant its own
+out-of-band socket, its own verbs device, its own queue pairs against a per-device budget of
+ten, and its own identity to the host firewall. It also inverted control: the transport called
+the application, so the application could not be a thing that already existed, like a game
+server. One bridge per node owns the queue pairs because the hardware permits nothing else.
 
-| file | may change |
-|---|---|
-| `mesh-flow.c` | no — page table, LISSEN/DISPATCH/YELLER, budget, telemetry |
-| `mesh-f.h` | no — wire header and flags |
-| `f-identity.c` | **this is the workload** |
+The boundary is now a process boundary. The bridge is one binary that never changes.
+Applications are separate processes that attach to its shared region and speak in pages
+through three functions, documented in `README.md` under **Using the mesh**. Nothing about a
+workload can reach the data plane except the bytes it puts in a page and the node it names.
+
+The loop has five stages and no others:
 
 ```
-make F=f-yourthing.c
+each turn, unconditionally:
+  LISSEN   every free page to ibv_post_recv, until the hardware declines
+  APPREL   pages the application released return to the pool
+  APPSUB   pages the application submitted go to ibv_post_send, until it declines
+  POLL     drain completions; a received page is delivered or forwarded where it lies
+  CENSUS   sample the page table; gates nothing
 ```
 
-`mesh_f(payload, bytes, h, node_idx)` receives a payload pointer, a length already
-clamped to the page, its header, and this node's index. It may read and write the
-payload in place and may rewrite header fields to redirect a page. It may not allocate,
-block, or retain the pointer past return.
-
-If a workload seems to need a change to the core, that is a sign the workload wants the
-data plane to interpret its bytes — which costs the budget in the table above and
-breaks every other workload sharing the fabric.
+There is no stage that waits, no stage gated on a computed target, and no queue whose depth
+is consulted before acting. What bounds the loop is the hardware refusing work.
 
 ## Addressing and routing
 
@@ -366,3 +300,118 @@ traffic without falling over.
 What remains is the whole job: post receives into free pages, drain completions, hand each
 arrived page to the application or forward it, send what the application submits, and take
 back what it releases.
+
+
+## Registration is arithmetic, not a lookup
+
+The region is one contiguous span cut into equal chunks, one memory region per chunk. Because
+the chunks are equal, an address maps to its region by division: `(addr - base) / chunk`.
+There is no table to search, no address that can miss, and no lookup that can fail, so no
+call site needs a branch for the case where it does.
+
+This is worth stating because the obvious reference implementations do it differently, and
+for a good reason that does not apply here. Production transfer engines register arbitrary
+user buffers at arbitrary addresses, so they keep an ordered map and find the containing
+region by `upper_bound` and a bounds check. Copying that shape into this bridge imported a
+sorted table, a binary search, a null return and a validity test at every use, to answer a
+question that division answers exactly. The chunk size is a constant, not a device query, for
+the reasons under `max_mr_size` above.
+
+Setup may fail and says so. The data path may not, and so nothing in the data path asks.
+
+## One way to give a page back
+
+A page belongs to exactly one holder. It is on the free list, with the hardware as a posted
+receive or a send in flight, with the application because it was delivered, or in the arena,
+which the application owns outright and the bridge never reclaims.
+
+There is a single operation that returns a page to the pool and it takes no decisions. A page
+the bridge does not own is never passed to it: an arena page is recognised by its index, and a
+delivered page is not tracked at all until the application returns it through the release
+ring. An earlier version had a `held` flag that meant two different things — delivered, and
+held for retransmit — which is why freeing a page needed three branches and why 55,335 double
+frees were possible in a five second run.
+
+A page's address is arithmetic and is not stored. Its state is not stored either, because the
+completion says what the page was doing.
+
+The pool invariant is `free + posted + pool-in-flight + with-app`, and it must equal the pool
+size exactly. Pool-in-flight is not the same as the send count: the send count includes arena
+pages the application owns, which are not pool pages. Conflating them produced a figure that
+only balanced when nothing happened to be in flight at the moment of sampling, and it was
+quoted as proof of correctness four times before a viewer plotted it and the error showed.
+
+## The census is not a queue depth
+
+What is published once a second is a census of the page table and its variance. It is
+deliberately not the depth of a queue at an instant.
+
+A depth read at an instant is a sample of something the program should never be waiting to
+look at. Receives go to lissen and sends go to yell the moment they exist; there is no point
+in the loop where it is correct to stop and ask how full something is, and an implementation
+that gates on a computed target rather than on the hardware refusing the work has invented a
+throttle nobody asked for. Both gates existed here and are removed: LISSEN posts every free
+page until `ibv_post_recv` declines, and the send path drains what the application submitted
+until `ibv_post_send` declines.
+
+The variance is per interval, not per run. A lifetime variance is dominated by the step from
+idle to running and reports a number that grows for reasons unrelated to what the pool is
+doing now. Each published sample describes its own second, so an evenly breathing pool reads
+near zero and a starved or flooded one does not. The estimator is Welford: one pass, constant
+memory, and it does not lose the variance to cancellation once the mean is large, which it is
+here because these count pages and there are millions of them.
+
+Sampling it costs something, so it is sampled, not computed on every turn of the loop. An
+earlier version ran eight Welford updates and a clock read per iteration of the data path.
+
+## Open: a dead application strands its pages
+
+When an application exits while pages are in its delivery ring, those pages are never
+returned. The bridge has no idea the client died, so the pool shrinks permanently by whatever
+was in flight to it — up to the ring capacity, 4096 pages, per death. The region header
+already carries `client_pid`; nothing looks at it. This is an availability defect, not a
+cosmetic one, and it is the reason a census that closes exactly is worth publishing.
+
+
+## Sleeps, and where they crept in
+
+A sleep in a data path is a latency injection with a number attached, and a sleep in a poll
+loop is a wait for a condition dressed up as a wait for a clock. Neither is a schedule; both
+are a missing primitive being papered over. This is an audit of every one in code this repo
+owns.
+
+**Deleted.**
+
+| where | what it cost |
+|---|---|
+| `rdma/mesh-flow.c`, `usleep(50)` when a poll found no completions | 50 us injected into the data plane on a link whose round trip is about 10 us. Five times the link latency, added by us, to avoid spinning. |
+| `rdma/mesh-client.c`, `usleep(20000)` in a 500-iteration attach retry | `mesh_open` blocked for up to ten seconds waiting for a bridge that might never start, and reported nothing while doing it. It now attaches or returns NULL, and the caller decides. |
+| `bin/mesh-bridge.sh`, `sleep 0.5` then `sleep 0.01` in the stop poll | Teardown measures 0.045 s. Half-second granularity reported it after 0.5 s, an eleven-fold penalty for nothing. |
+| `bin/mesh-bridge.sh`, `sleep 1` in the start poll | One-second granularity to observe a process that appears in about 45 ms. |
+
+The replacement in the shell is a bounded spin on `kill -0`, which is a shell builtin and forks
+nothing. `stop` now returns in 0.042 s.
+
+**Why the data-path one existed, since the reason is not embarrassing and the fix is not
+obvious.** The loop has two event sources: the completion queue, and the application's
+submission ring. Verbs offers a real blocking wait for the first — `ibv_create_comp_channel`,
+`ibv_req_notify_cq`, `ibv_get_cq_event` all exist on this platform. The second is shared
+memory and has no descriptor to wait on, so no primitive waits on both. Blocking on the
+completion queue alone would stall an application's first submission indefinitely. The correct
+resolution for a kernel-bypass data plane is to spin, which is what such transports do by
+design and why they are given a core. Sleeping was a way of pretending the choice did not
+have to be made, and it bought a latency floor in exchange.
+
+**Still present, with a verdict.**
+
+| where | verdict |
+|---|---|
+| `bin/mesh-peers.sh`, `sleep "$D"` | The same habit. A reachability report should return as fast as discovery answers, not after a fixed deadline; this was raised once already and has not been fixed. |
+| `bin/mesh-rdma-init.sh`, `install.sh` (three), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
+| `xonotic/bridge/solver/mesh_attach.h`, `xonotic/bridge/test/meshtest.c`, `xonotic/bridge/test/engine.sh`, `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
+| `viz/serve.py`, `time.sleep(PERIOD)` | Defensible. This is a poll period — a scheduling decision about how often to sample — not a stall standing in for a wait. |
+| `bench/orth.py`, `time.sleep(...)` | Defensible. Thermal duty cycling in a benchmark, deliberate. |
+| `xonotic/darkplaces-work/**` | Vendored upstream. Not ours to clean. |
+
+`pmset sleep 0` and the `displaysleep`/`disksleep` keys in `install.sh` and `hmi-epilogue.sh`
+are power policy, not delays, and are unrelated.

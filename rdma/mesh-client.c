@@ -14,25 +14,19 @@ static int g_held = -1;
 void *mesh_open(size_t bytes, size_t *stride, size_t *usable){
   if(!G.h){
     const char *name = getenv("MESH_REGION"); if(!name) name = "/mesh0";
-    for(int t=0;t<500;t++){
-      int fd = shm_open(name, O_RDWR, 0666);
-      if(fd >= 0){
-        struct stat st;
-        if(!fstat(fd,&st) && (size_t)st.st_size > sizeof(struct mesh_hdr)){
-          void *b = mmap(NULL,(size_t)st.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-          if(b != MAP_FAILED){
-            struct mesh_hdr *h = (struct mesh_hdr*)b;
-            if(h->magic==MESH_MAGIC && h->version==MESH_VERSION && h->arena_pages){
-              G.h=h; G.base=(unsigned char*)b; G.len=(size_t)st.st_size; G.fd=fd;
-              break;
-            }
-            munmap(b,(size_t)st.st_size);
-          }
-        }
-        close(fd);
+    int fd = shm_open(name, O_RDWR, 0666);
+    if(fd < 0) return NULL;
+    struct stat st;
+    if(!fstat(fd,&st) && (size_t)st.st_size > sizeof(struct mesh_hdr)){
+      void *b = mmap(NULL,(size_t)st.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+      if(b != MAP_FAILED){
+        struct mesh_hdr *h = (struct mesh_hdr*)b;
+        if(h->magic==MESH_MAGIC && h->version==MESH_VERSION && h->arena_pages){
+          G.h=h; G.base=(unsigned char*)b; G.len=(size_t)st.st_size; G.fd=fd;
+        } else munmap(b,(size_t)st.st_size);
       }
-      usleep(20000);
     }
+    if(!G.h){ close(fd); return NULL; }
     if(!G.h) return NULL;
     g_hdr    = G.h->hdr_bytes;
     g_stride = G.h->pgsz;
