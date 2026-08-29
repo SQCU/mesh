@@ -109,25 +109,110 @@ def kcenter(adj, k):
     return chosen, dmap
 
 
-def snap5(nodes, pathnodes):
-    if len(pathnodes) < 2:
-        p = list(nodes[pathnodes[0]])
-        return [p[:] for _ in range(5)]
+WB, WXY, WZ, WHEEL = 1.0, 0.3, 1.0, 42.0
+
+
+def make_floor_tracer(d):
+    def lump(i):
+        return struct.unpack_from('<ii', d, 8 + i * 8)
+    to, tl = lump(1)
+    po, pl = lump(2)
+    bo, bl = lump(8)
+    so, sl = lump(9)
+    ntex = tl // 72
+    solid = [bool(struct.unpack_from('<i', d, to + i * 72 + 68)[0] & 1) for i in range(ntex)]
+    planes = [struct.unpack_from('<4f', d, po + i * 16) for i in range(pl // 16)]
+    brushes = []
+    for i in range(bl // 12):
+        fs, ns, tex = struct.unpack_from('<iii', d, bo + i * 12)
+        if 0 <= tex < ntex and solid[tex]:
+            brushes.append([planes[struct.unpack_from('<ii', d, so + (fs + k) * 8)[0]] for k in range(ns)])
+    if not brushes:
+        return None
+
+    def trace(x, y, zh):
+        oz = zh + 64
+        best = None
+        for sides in brushes:
+            tmin, tmax, ok = -1e18, 1e18, True
+            for nx, ny, nz, pdst in sides:
+                denom = -nz
+                num = pdst - (nx * x + ny * y + nz * oz)
+                if denom > 1e-9:
+                    tmax = min(tmax, num / denom)
+                elif denom < -1e-9:
+                    tmin = max(tmin, num / denom)
+                elif num < 0:
+                    ok = False
+                    break
+            if not ok or tmin > tmax or tmax < 0:
+                continue
+            fz = oz - (tmin if tmin > 0 else 0)
+            if fz <= zh + 8 and (best is None or fz > best):
+                best = fz
+        return best
+    return trace
+
+
+def resample_path(poly, sp):
     cum = [0.0]
-    for i in range(1, len(pathnodes)):
-        cum.append(cum[-1] + math.dist(nodes[pathnodes[i - 1]], nodes[pathnodes[i]]))
+    for i in range(1, len(poly)):
+        cum.append(cum[-1] + math.dist(poly[i - 1], poly[i]))
     total = cum[-1]
+    m = max(2, int(round(total / sp)))
     out = []
-    for kk in range(5):
-        t = total * kk / 4
-        j = min(range(len(cum)), key=lambda x: abs(cum[x] - t))
-        out.append(list(nodes[pathnodes[j]]))
+    for k in range(m + 1):
+        t = total * k / m
+        j = 0
+        while j < len(cum) - 1 and cum[j + 1] < t:
+            j += 1
+        if j >= len(poly) - 1:
+            out.append(poly[-1][:])
+            continue
+        segl = cum[j + 1] - cum[j]
+        f = (t - cum[j]) / segl if segl > 0 else 0.0
+        out.append([poly[j][a] + (poly[j + 1][a] - poly[j][a]) * f for a in range(3)])
     return out
 
 
-def nav_tracks(nodes, adj, dmap, origins, kcarts):
+def bending_energy(P):
+    return sum(sum((P[i - 1][a] - 2 * P[i][a] + P[i + 1][a]) ** 2 for a in range(3))
+               for i in range(1, len(P) - 1))
+
+
+def smooth_curve(P, xy0, z0, iters=80):
+    m = len(P) - 1
+    Q = [r[:] for r in P]
+    c = lambda i: 0 if i < 0 else (m if i > m else i)
+    for _ in range(iters):
+        for i in range(1, m):
+            for a in range(2):
+                nb = 4 * (Q[c(i - 1)][a] + Q[c(i + 1)][a]) - Q[c(i - 2)][a] - Q[c(i + 2)][a]
+                Q[i][a] = (WB * nb + WXY * xy0[i][a]) / (6 * WB + WXY)
+            nb = 4 * (Q[c(i - 1)][2] + Q[c(i + 1)][2]) - Q[c(i - 2)][2] - Q[c(i + 2)][2]
+            Q[i][2] = (WB * nb + WZ * z0[i]) / (6 * WB + WZ)
+    return Q
+
+
+def snap_curve(P, n):
+    if len(P) < 2:
+        return [P[0][:] for _ in range(n)]
+    cum = [0.0]
+    for i in range(1, len(P)):
+        cum.append(cum[-1] + math.dist(P[i - 1], P[i]))
+    total = cum[-1]
+    out = []
+    for k in range(n):
+        t = total * k / (n - 1)
+        j = min(range(len(cum)), key=lambda x: abs(cum[x] - t))
+        out.append(P[j][:])
+    return out
+
+
+def nav_tracks(nodes, adj, dmap, origins, kcarts, tracer):
     used = set()
     tracks = []
+    st = {'e0': 0.0, 'e1': 0.0, 'mxy': 0.0, 'mz': 0.0, 'bsp': 0, 'nav': 0}
     for c in range(kcarts):
         src = origins[c]
         goal, gd = None, -1.0
@@ -145,9 +230,28 @@ def nav_tracks(nodes, adj, dmap, origins, kcarts):
             p.append(u)
             u = prev[u]
         p = p[::-1] if len(p) > 1 else [src]
-        pts = snap5(nodes, p)
-        tracks.append([[q[0], q[1], q[2] + 16] for q in pts])
-    return tracks
+        poly = [list(nodes[i]) for i in p]
+        R = resample_path(poly, 64.0)
+        xy0 = [(r[0], r[1]) for r in R]
+        z0 = []
+        for r in R:
+            fz = tracer(r[0], r[1], r[2]) if tracer else None
+            if fz is not None and r[2] - 80 <= fz <= r[2] + 16:
+                z0.append(fz)
+                st['bsp'] += 1
+            else:
+                z0.append(r[2] - 26)
+                st['nav'] += 1
+        z0[0] = R[0][2] - 26
+        z0[-1] = R[-1][2] - 26
+        P0 = [[xy0[i][0], xy0[i][1], z0[i]] for i in range(len(R))]
+        Q = smooth_curve(P0, xy0, z0)
+        st['e0'] += bending_energy(P0)
+        st['e1'] += bending_energy(Q)
+        st['mxy'] = max(st['mxy'], max(math.dist((Q[i][0], Q[i][1]), xy0[i]) for i in range(len(Q))))
+        st['mz'] = max(st['mz'], max(abs(Q[i][2] - z0[i]) for i in range(len(Q))))
+        tracks.append([[q[0], q[1], q[2] + WHEEL] for q in snap_curve(Q, 5)])
+    return tracks, st
 
 
 def spawn_tracks(pts, kcarts):
@@ -167,7 +271,7 @@ def spawn_tracks(pts, kcarts):
     return tracks
 
 
-def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg=''):
+def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
     text = load_cache(mapname, bsp, pk3arg)
     if not text:
         print('nav: no waypoints for %s, FALLBACK to spawn-origin method' % mapname)
@@ -192,7 +296,16 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg=''):
                    tuple(round(x) for x in nodes[origins[j]]), wd, ed, wd / ed if ed else 0))
     print('nav: pairwise walk min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
           (min(ws), sum(ws) / len(ws), max(ws), max(ws) / min(ws) if min(ws) else 0))
-    return nav_tracks(nodes, adj, dmap, origins, kcarts), (nodes, adj, dmap, origins)
+    try:
+        tracer = make_floor_tracer(d if d is not None else open(bsp, 'rb').read())
+    except Exception:
+        tracer = None
+    tracks, st = nav_tracks(nodes, adj, dmap, origins, kcarts, tracer)
+    print('nav: terrain %s BSP-floors=%d nav-z-interp=%d wheel_offset=%.0f weights bend=%.1f xy=%.2f z=%.2f' %
+          ('BSP-trace' if tracer else 'nav-z-interp(no BSP)', st['bsp'], st['nav'], WHEEL, WB, WXY, WZ))
+    print('nav: curvature %.0f->%.0f (%.1f%%) maxXYdev=%.1f maxZdev=%.1f' %
+          (st['e0'], st['e1'], 100 * st['e1'] / st['e0'] if st['e0'] else 0, st['mxy'], st['mz']))
+    return tracks, (nodes, adj, dmap, origins)
 
 
 def emit(bsp, out, kteams, kcarts, pk3arg=''):
@@ -218,7 +331,7 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
     pts = [origin(b) for b in spawns if origin(b)]
     print('inline models:', models[:6], 'visible:', visible[:kcarts], 'team spawns:', len(pts))
 
-    tracks, _ = build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg)
+    tracks, _ = build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg, d)
 
     extra = []
     named = []
