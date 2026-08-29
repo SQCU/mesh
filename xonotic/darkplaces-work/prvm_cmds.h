@@ -453,13 +453,11 @@ void VM_whichpack (prvm_prog_t *prog);
 void VM_etof (prvm_prog_t *prog);
 void VM_uri_get (prvm_prog_t *prog);
 void VM_mesh_open(prvm_prog_t *prog);
-void VM_mesh_close(prvm_prog_t *prog);
-void VM_mesh_set(prvm_prog_t *prog);
-void VM_mesh_get(prvm_prog_t *prog);
 void VM_mesh_gather(prvm_prog_t *prog);
 void VM_mesh_scatter(prvm_prog_t *prog);
 void VM_mesh_publish(prvm_prog_t *prog);
 void VM_mesh_poll(prvm_prog_t *prog);
+void VM_mesh_stat(prvm_prog_t *prog);
 void VM_netaddress_resolve (prvm_prog_t *prog);
 
 void VM_tokenize_console (prvm_prog_t *prog);

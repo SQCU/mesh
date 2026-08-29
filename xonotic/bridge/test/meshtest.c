@@ -1,202 +1,115 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <spawn.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include "../solver/mesh_attach.h"
+#define MESH_XON_CORE_ONLY
+#include "../engine/mesh_ipc.c"
 
-extern char **environ;
-
-typedef struct host_s
+static void fillrows(meshxhandle_t *m, uint32_t nrows, uint32_t tick)
 {
-	mesh_hdr_t *hdr;
-	float *req;
-	float *resp;
-	uint64_t seq;
-	uint64_t delivered;
-	uint64_t misses;
-}
-host_t;
-
-static void host_publish(host_t *H)
-{
-	H->seq++;
-	mesh_put_req(H->hdr, H->seq, H->req);
+	uint32_t r, c;
+	for (r = 0; r < nrows; r++)
+		for (c = 0; c < m->width; c++)
+			m->req[(size_t)r * m->width + c] = (float)((r * 16u + c + tick) % 997u) - 498.0f;
 }
 
-static void host_poll(host_t *H)
+static size_t mkresp(unsigned char *p, uint32_t req_id, uint32_t tick, uint32_t rows_total, uint32_t chunk, uint32_t chunks, uint32_t rows, uint32_t resprows)
 {
-	H->delivered = mesh_get_resp(H->hdr, H->delivered, H->resp, &H->misses);
-}
-
-static int cmpd(const void *a, const void *b)
-{
-	double x = *(const double *)a, y = *(const double *)b;
-	return (x > y) - (x < y);
-}
-
-static double pct(double *v, int n, double p)
-{
-	int i = (int)(p * (n - 1) + 0.5);
-	return v[i < 0 ? 0 : (i >= n ? n - 1 : i)];
-}
-
-static void fillreq(float *r, uint32_t n, uint64_t seq)
-{
+	meshxwire_t w;
 	uint32_t i;
-	for (i = 0; i < n; i++)
-		r[i] = (float)((seq * 1103515245u + i * 12345u) % 1000u) - 500.0f;
-	r[0] = 0.0f;
-	r[1] = 0.0f;
-	r[2] = 1.0f;
-	r[3] = 2.0f;
-	r[4] = -0.0f;
-	r[5] = 65536.0f;
-	if (n > 6)
-		r[n - 1] = 0.0f;
+	float *v = (float *)(p + MESH_XON_HDRBYTES);
+
+	w.magic = MESH_XON_MAGIC;
+	w.version = MESH_XON_VERSION;
+	w.kind = MESH_XON_RESP;
+	w.req_id = req_id;
+	w.tick = tick;
+	w.width = MESH_XON_RESPWIDTH;
+	w.rows = (uint16_t)rows;
+	w.chunk = (uint16_t)chunk;
+	w.chunks = (uint16_t)chunks;
+	w.rows_total = rows_total;
+	w.flags = 0;
+	memcpy(p, &w, MESH_XON_HDRBYTES);
+	for (i = 0; i < rows * MESH_XON_RESPWIDTH; i++)
+		v[i] = (float)(chunk * resprows * MESH_XON_RESPWIDTH + i);
+	return MESH_XON_HDRBYTES + (size_t)rows * MESH_XON_RESPWIDTH * sizeof(float);
 }
 
-static int verify(const float *in, const float *out, uint32_t nreq, uint32_t nresp)
+static int reassembly(meshxhandle_t *m, uint32_t nrows)
 {
-	uint32_t i;
-	for (i = 0; i < nresp; i++)
-		if (out[i] != in[i % nreq] * 2.0f + 1.0f)
-			return (int)i + 1;
-	return 0;
-}
+	static unsigned char slotbuf[8192];
+	uint32_t chunks = (nrows + m->resprows - 1) / m->resprows;
+	uint32_t id = m->req_id + 1000;
+	uint32_t c, rows;
+	int bad = 0;
+	size_t b;
 
-static int nulhazard(const float *v, uint32_t n)
-{
-	const unsigned char *b = (const unsigned char *)v;
-	size_t total = (size_t)n * sizeof(float), i;
-	for (i = 0; i < total; i++)
-		if (!b[i])
-			return (int)i;
-	return -1;
+	for (c = chunks; c-- > 0;)
+	{
+		rows = nrows - c * m->resprows < m->resprows ? nrows - c * m->resprows : m->resprows;
+		b = mkresp(slotbuf, id, 77, nrows, c, chunks, rows, m->resprows);
+		meshx_slot(m, slotbuf, b);
+		if (c)
+			meshx_slot(m, slotbuf, b);
+	}
+	bad += m->done_id != id;
+	bad += m->done_rows != nrows;
+	bad += m->done_tick != 77;
+	for (c = 0; c < nrows * MESH_XON_RESPWIDTH; c++)
+		if (m->resp[c] != (float)c)
+		{
+			bad++;
+			break;
+		}
+	b = mkresp(slotbuf, id - 1, 5, nrows, 0, chunks, m->resprows, m->resprows);
+	bad += meshx_slot(m, slotbuf, b) != 0;
+	b = mkresp(slotbuf, id + 1, 9, nrows, 0, chunks, m->resprows, m->resprows);
+	meshx_slot(m, slotbuf, b);
+	bad += m->done_id != id;
+	slotbuf[0] = 0;
+	bad += meshx_slot(m, slotbuf, b) != 0;
+	printf("reassembly %s: %u chunks out of order, duplicate chunks ignored, stale req dropped, incomplete not rendered, bad magic rejected, dropped %u\n",
+		bad ? "FAIL" : "ok", chunks, m->dropped);
+	return bad;
 }
 
 int main(int argc, char **argv)
 {
-	const char *name = argc > 1 ? argv[1] : "/mesh_bridge_test";
-	uint32_t nfloats = argc > 2 ? (uint32_t)atoi(argv[2]) : 4096;
-	int ticks = argc > 3 ? atoi(argv[3]) : 600;
-	double hz = argc > 4 ? atof(argv[4]) : 60.0;
-	double work_us = argc > 5 ? atof(argv[5]) : 0.0;
-	const char *solverpath = argc > 6 ? argv[6] : "./fakesolver";
-	int blocking = argc > 7 ? atoi(argv[7]) : 0;
-	double waitcap_us = argc > 8 ? atof(argv[8]) : 4000.0;
+	int node = argc > 1 ? atoi(argv[1]) : 1;
+	uint32_t width = argc > 2 ? (uint32_t)atoi(argv[2]) : 16;
+	uint32_t nrows = argc > 3 ? (uint32_t)atoi(argv[3]) : 480;
+	int ticks = argc > 4 ? atoi(argv[4]) : 8;
+	int passes = argc > 5 ? atoi(argv[5]) : 200;
+	meshxhandle_t *m;
+	uint32_t last = 0;
+	int h, t, p;
 
-	host_t H;
-	size_t bytes;
-	double *tpub, *bridge_us, *rt_us;
-	uint64_t *seq_at_tick;
-	int t, nrt = 0, bad = 0, err;
-	double t0, t1, tick_dt, start, next, wall;
-	pid_t pid;
-	char *sargv[5];
-	char rf[32], wu[32];
-	uint64_t delivered_before;
-
-	shm_unlink(name);
-	H.hdr = mesh_create(name, nfloats, nfloats, &bytes);
-	if (!H.hdr)
+	h = meshx_open(node, width, nrows);
+	if (h < 0)
 	{
-		fprintf(stderr, "mesh_create failed\n");
-		return 1;
+		printf("mesh_open failed: bridge down or arena unavailable\n");
+		return 0;
 	}
-	H.req = (float *)calloc(nfloats + 1, sizeof(float));
-	H.resp = (float *)calloc(nfloats + 1, sizeof(float));
-	H.seq = H.delivered = H.misses = 0;
+	m = meshx_get(h);
+	printf("attached handle %d node %d arena %zu slots stride %zu usable %zu\n", h, node, meshx_nslots, meshx_stride, meshx_usable);
+	printf("width %u maxrows %u reqrows/slot %u resprows/slot %u chunks %u\n",
+		m->width, m->maxrows, m->reqrows, m->resprows, (m->maxrows + m->reqrows - 1) / m->reqrows);
 
-	err = nulhazard(H.req, nfloats);
-	printf("region %s  %u floats each way  %zu bytes  depth %u\n", name, nfloats, bytes, MESH_DEPTH);
-	printf("nul-hazard: first zero byte in a zeroed fp32 request at offset %d of %zu -> any strlen-based builtin would move %d of %zu bytes\n",
-		err, (size_t)nfloats * 4, err, (size_t)nfloats * 4);
-
-	snprintf(rf, sizeof(rf), "%.3f", getenv("MESH_SOLVER_RUNFOR") ? atof(getenv("MESH_SOLVER_RUNFOR")) : ticks / hz + 10.0);
-	snprintf(wu, sizeof(wu), "%.3f", work_us);
-	sargv[0] = (char *)solverpath;
-	sargv[1] = (char *)name;
-	sargv[2] = rf;
-	sargv[3] = wu;
-	sargv[4] = NULL;
-	if (posix_spawn(&pid, solverpath, NULL, NULL, sargv, environ) != 0)
-	{
-		fprintf(stderr, "spawn %s failed\n", solverpath);
-		return 1;
-	}
-
-	tpub = (double *)calloc(ticks + 2, sizeof(double));
-	bridge_us = (double *)calloc(ticks + 2, sizeof(double));
-	rt_us = (double *)calloc(ticks + 2, sizeof(double));
-	seq_at_tick = (uint64_t *)calloc(ticks + 2, sizeof(uint64_t));
-
-	next = mesh_now() + 10.0;
-	fillreq(H.req, nfloats, 1);
-	host_publish(&H);
-	while (!atomic_load_explicit(&H.hdr->solver_alive, memory_order_relaxed) && mesh_now() < next)
-		usleep(200);
-	H.delivered = atomic_load_explicit(&H.hdr->resp_seq, memory_order_acquire);
-
-	tick_dt = 1.0 / hz;
-	start = mesh_now();
-	next = start;
 	for (t = 0; t < ticks; t++)
 	{
-		while (mesh_now() < next)
-			;
-		next += tick_dt;
-
-		t0 = mesh_now();
-		fillreq(H.req, nfloats, H.seq + 1);
-		host_publish(&H);
-		tpub[H.seq % (ticks + 2)] = t0;
-		delivered_before = H.delivered;
-		host_poll(&H);
-		if (blocking)
-		{
-			double cap = t0 + waitcap_us * 1e-6;
-			while (H.delivered < H.seq && mesh_now() < cap)
-				host_poll(&H);
-		}
-		t1 = mesh_now();
-		bridge_us[t] = (t1 - t0) * 1e6;
-		seq_at_tick[t] = H.delivered;
-
-		if (H.delivered > delivered_before)
-		{
-			rt_us[nrt++] = (t1 - tpub[H.delivered % (ticks + 2)]) * 1e6;
-			fillreq(H.req, nfloats, H.delivered);
-			err = verify(H.req, H.resp, nfloats, nfloats);
-			bad += err != 0;
-		}
+		fillrows(m, nrows, (uint32_t)t);
+		if (!meshx_publish(m, (uint32_t)t, nrows))
+			printf("tick %d published nothing\n", t);
+		last = meshx_poll(m);
 	}
-	wall = mesh_now() - start;
+	for (p = 0; p < passes; p++)
+	{
+		last = meshx_poll(m);
+		usleep(1000);
+	}
 
-	kill(pid, SIGTERM);
-	waitpid(pid, NULL, 0);
-
-	qsort(bridge_us, ticks, sizeof(double), cmpd);
-	qsort(rt_us, nrt, sizeof(double), cmpd);
-
-	printf("ticks %d at %.1f Hz over %.3f s  published %llu  delivered %llu  responses seen %d  mismatches %d  seqlock retries %llu\n",
-		ticks, hz, wall, (unsigned long long)H.seq, (unsigned long long)H.delivered, nrt, bad, (unsigned long long)H.misses);
-	printf("mode                      %s\n", blocking ? "in-frame blocking (mesh_wait)" : "pipelined (publish+poll, never blocks)");
-	printf("in-frame bridge cost us   med %.2f  p90 %.2f  p99 %.2f  max %.2f\n",
-		pct(bridge_us, ticks, 0.5), pct(bridge_us, ticks, 0.9), pct(bridge_us, ticks, 0.99), bridge_us[ticks - 1]);
-	if (nrt)
-		printf("publish->deliver us       med %.2f  p90 %.2f  p99 %.2f  max %.2f\n",
-			pct(rt_us, nrt, 0.5), pct(rt_us, nrt, 0.9), pct(rt_us, nrt, 0.99), rt_us[nrt - 1]);
-	printf("payload throughput        %.1f MB/s both ways at this rate (%llu round trips / %.3f s, %zu B each way)\n",
-		2.0 * (double)nrt * nfloats * 4.0 / wall / 1e6, (unsigned long long)nrt, wall, (size_t)nfloats * 4);
-
-	free(tpub);
-	free(bridge_us);
-	free(rt_us);
-	free(seq_at_tick);
-	munmap(H.hdr, bytes);
-	shm_unlink(name);
-	return bad != 0;
+	printf("published %u complete %u inflight %u dropped %u shortwrites %u respchunks %u lastcompletetick %u\n",
+		(unsigned)meshx_stat(m, 0), (unsigned)meshx_stat(m, 1), (unsigned)meshx_stat(m, 2),
+		(unsigned)meshx_stat(m, 6), (unsigned)meshx_stat(m, 9), (unsigned)meshx_stat(m, 11), (unsigned)meshx_stat(m, 12));
+	printf("last complete req_id %u rows %u attached %u peer %u\n",
+		last, (unsigned)meshx_stat(m, 10), (unsigned)meshx_stat(m, 5), (unsigned)meshx_stat(m, 15));
+	return reassembly(m, nrows) ? 1 : 0;
 }

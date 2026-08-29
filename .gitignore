@@ -7,3 +7,4 @@ rdma/qcaps
 rdma/qfill
 .claude/*
 !.claude/settings.json
+xonotic/bridge/test/meshtest

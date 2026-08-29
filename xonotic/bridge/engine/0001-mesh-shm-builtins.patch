@@ -1,65 +1,61 @@
---- a/prvm_cmds.c	2016-03-04 15:01:22
-+++ b/prvm_cmds.c	2026-08-28 02:35:18
+--- a/prvm_cmds.c	2016-03-04 23:01:22
++++ b/prvm_cmds.c	2026-08-28 20:29:58
 @@ -7364,3 +7364,5 @@
  	if (prog->explicit_profile[prog->xstatement]++ == 0 && (prvm_coverage.integer & 2))
  		PRVM_ExplicitCoverageEvent(prog, prog->xfunction, prog->xstatement);
  }
 +
 +#include "mesh_ipc.c"
---- a/prvm_cmds.h	2015-11-24 07:37:34
-+++ b/prvm_cmds.h	2026-08-28 02:27:41
-@@ -452,6 +452,16 @@
+--- a/prvm_cmds.h	2015-11-24 15:37:34
++++ b/prvm_cmds.h	2026-08-28 20:29:58
+@@ -452,6 +452,12 @@
  
  void VM_etof (prvm_prog_t *prog);
  void VM_uri_get (prvm_prog_t *prog);
 +void VM_mesh_open(prvm_prog_t *prog);
-+void VM_mesh_close(prvm_prog_t *prog);
-+void VM_mesh_set(prvm_prog_t *prog);
-+void VM_mesh_get(prvm_prog_t *prog);
 +void VM_mesh_gather(prvm_prog_t *prog);
 +void VM_mesh_scatter(prvm_prog_t *prog);
 +void VM_mesh_publish(prvm_prog_t *prog);
 +void VM_mesh_poll(prvm_prog_t *prog);
-+void VM_mesh_wait(prvm_prog_t *prog);
 +void VM_mesh_stat(prvm_prog_t *prog);
  void VM_netaddress_resolve (prvm_prog_t *prog);
  
  void VM_tokenize_console (prvm_prog_t *prog);
---- a/svvm_cmds.c	2021-03-17 09:46:38
-+++ b/svvm_cmds.c	2026-08-28 02:27:41
+--- a/svvm_cmds.c	2021-03-17 16:46:38
++++ b/svvm_cmds.c	2026-08-28 20:29:58
 @@ -3837,6 +3837,16 @@
  NULL,							// #641
  VM_coverage,						// #642
  NULL,							// #643
 +VM_mesh_open,					// #644
-+VM_mesh_close,					// #645
-+VM_mesh_set,					// #646
-+VM_mesh_get,					// #647
++NULL,							// #645
++NULL,							// #646
++NULL,							// #647
 +VM_mesh_gather,					// #648
 +VM_mesh_scatter,					// #649
 +VM_mesh_publish,					// #650
 +VM_mesh_poll,					// #651
-+VM_mesh_wait,					// #652
++NULL,							// #652
 +VM_mesh_stat,					// #653
  };
  
  const int vm_sv_numbuiltins = sizeof(vm_sv_builtins) / sizeof(prvm_builtin_t);
---- a/clvm_cmds.c	2021-03-17 09:46:38
-+++ b/clvm_cmds.c	2026-08-28 02:27:41
+--- a/clvm_cmds.c	2021-03-17 16:46:38
++++ b/clvm_cmds.c	2026-08-28 20:29:58
 @@ -4934,6 +4934,17 @@
  VM_CL_V_CalcRefdef,					// #640 void(entity e) V_CalcRefdef (DP_CSQC_V_CALCREFDEF)
  NULL,							// #641
  VM_coverage,						// #642
 +NULL,							// #643
 +VM_mesh_open,					// #644
-+VM_mesh_close,					// #645
-+VM_mesh_set,					// #646
-+VM_mesh_get,					// #647
++NULL,							// #645
++NULL,							// #646
++NULL,							// #647
 +VM_mesh_gather,					// #648
 +VM_mesh_scatter,					// #649
 +VM_mesh_publish,					// #650
 +VM_mesh_poll,					// #651
-+VM_mesh_wait,					// #652
++NULL,							// #652
 +VM_mesh_stat,					// #653
  NULL
  };

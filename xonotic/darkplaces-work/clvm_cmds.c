@@ -4934,6 +4934,17 @@ VM_digest_hex,						// #639
 VM_CL_V_CalcRefdef,					// #640 void(entity e) V_CalcRefdef (DP_CSQC_V_CALCREFDEF)
 NULL,							// #641
 VM_coverage,						// #642
+NULL,							// #643
+VM_mesh_open,					// #644
+NULL,							// #645
+NULL,							// #646
+NULL,							// #647
+VM_mesh_gather,					// #648
+VM_mesh_scatter,					// #649
+VM_mesh_publish,					// #650
+VM_mesh_poll,					// #651
+NULL,							// #652
+VM_mesh_stat,					// #653
 NULL
 };
 

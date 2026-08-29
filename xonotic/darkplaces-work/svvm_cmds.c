@@ -3838,13 +3838,15 @@ NULL,							// #641
 VM_coverage,						// #642
 NULL,							// #643
 VM_mesh_open,					// #644
-VM_mesh_close,					// #645
-VM_mesh_set,					// #646
-VM_mesh_get,					// #647
+NULL,							// #645
+NULL,							// #646
+NULL,							// #647
 VM_mesh_gather,					// #648
-VM_mesh_scatter,				// #649
-VM_mesh_publish,				// #650
+VM_mesh_scatter,					// #649
+VM_mesh_publish,					// #650
 VM_mesh_poll,					// #651
+NULL,							// #652
+VM_mesh_stat,					// #653
 };
 
 const int vm_sv_numbuiltins = sizeof(vm_sv_builtins) / sizeof(prvm_builtin_t);
