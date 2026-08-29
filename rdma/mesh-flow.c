@@ -64,10 +64,8 @@ static int oob(const char *peer){
 
 static struct ibv_port_attr pa;
 static int verbs_up(const char *peer, char *mem, size_t span, int me){
-  down_pair();
-  if(ctx){ struct ibv_port_attr chk;
-    if(ibv_query_port(ctx,1,&chk) || chk.state!=IBV_PORT_ACTIVE) down_verbs(); }
-  if(!ctx){
+  down_verbs();
+  {
   struct ibv_device **dl=ibv_get_device_list(NULL);
   for(int i=0;dl&&dl[i];i++){ ctx=ibv_open_device(dl[i]);
     if(ctx && !ibv_query_port(ctx,1,&pa) && pa.state==IBV_PORT_ACTIVE) break;
