@@ -550,7 +550,22 @@ that asks again. Rotate through your arena rather than reusing the head — the 
 not say when a send has completed. The bridge accepts only arena slots from a client;
 anything else is counted as `bad` and dropped.
 
-From Python, `rdma/mesh.py` binds the same three functions and returns numpy views of mesh
+On top of the pages sit the two streaming verbs, for callers who want bytes moved and nothing
+else:
+
+```c
+size_t mesh_yell(const void *p, size_t n, int node);
+size_t mesh_lissen(void *p, size_t n);
+```
+
+`mesh_yell` streams n bytes from any memory to a node and returns when the receiver has
+confirmed all of it; `mesh_lissen` fills n bytes and returns when they have all landed. The
+caller knows nothing about arenas, pools, pages, or the far side. Loss is repaired between
+these two functions — lissen names the first hole, yell restreams from it — which is the
+application layer doing exactly what the transport promise assigns it. Measured: 20 GB in
+2.84 s, 7.04 GB/s, verified by offset with zero wrong.
+
+From Python, `rdma/mesh.py` binds the page-level functions and returns numpy views of mesh
 memory, so MLX computes on pages the NIC wrote without a copy.
 
 ### Running it
