@@ -146,39 +146,25 @@ Rules this adds:
   one line per event and the flood was mistaken for noise. Count them, print the first few,
   and treat a nonzero count as a failure.
 
-## Pairing leaks a per-boot driver resource, and RTR's EFAULT is the fuel gauge
+## A period of RTR faults, and what it actually taught
 
-`ibv_modify_qp` to RTR can fail with EFAULT while every argument is valid, the port is
-active, and the vendor's own pingpong succeeds beside it. The discriminator, found by role
-swaps and a region-size bisect: the fault tracks the amount of memory the process has
-registered. Early in a boot a 4 GB registration pairs instantly; after a few hundred
-queue-pair setup/teardown cycles on the same boot the same registration fails forever while a
-0.14 GB one pairs in seconds, and a machine that has cycled less still affords more. The
-driver appears to install per-region DMA state at pairing time from a finite per-boot pool
-that teardown does not fully return.
+For several hours RTR returned EFAULT for large registrations while small ones paired, and a
+per-boot driver pool being drained by pairing cycles was recorded here as a finding. It was
+not one. The pairing code changed twenty-five times inside the evidentiary window, including
+a change to the exchanged descriptor's size, so mixed-revision nodes were pairing on garbage
+address vectors -- which produces exactly EFAULT at RTR. The node with more pairing cycles
+afforded larger regions than the node with fewer, which no pool theory survives, and once
+both nodes ran the same binary with a versioned exchange, the full configured size paired on
+the first attempt.
 
-Consequences:
-- A healing loop is itself the leak amplifier. Converge in as few pairing attempts as
-  possible; never spin QP bring-up at high frequency.
-- If RTR starts returning EFAULT with valid arguments, do not debug the arguments. Shrink
-  the region to confirm the diagnosis.
-- Measured: a cable replug re-enumerates the controller and the mesh heals across it, onto a
-  different physical port even, but the pool does not come back — it is host-side kext state,
-  scoped to the boot.
-- The pool is spent at pairing time, so the bridge rendezvouses over TCP before touching
-  verbs at all: an attempt with no peer present costs nothing, and waiting happens at
-  exponential backoff, which is free. Only a completed rendezvous spends registration and a
-  queue pair.
-- The fault is a budget signal, not an error, and the configured region size is a request,
-  not a requirement. When RTR faults persist at a size after completed rendezvous, the bridge
-  halves the region and re-pairs, down to a floor that has always afforded pairing, and the
-  census reports the size actually achieved. A node with a drained boot pairs smaller and
-  stays up; clients ride the change through the generation remap; nothing restarts but the
-  pairing itself, and nothing ever reboots. An operator who wants the full arena back
-  schedules a reboot as a capacity change on their own clock — the mesh never demands one,
-  and no code in this repo may ever initiate one. An earlier revision made the bridge
-  self-reboot the machine on exhaustion; that was an availability inversion under the
-  contract and it is deleted.
-- Size regions with headroom for the boot's remaining budget, not the machine's RAM.
-- Failed pairing attempts consume the pool too: a size that paired an hour ago can be
-  unaffordable after a retry storm at that size. Cap retries low and shrink before retrying.
+What stands:
+
+- **The exchange must refuse a peer speaking a different revision.** Two nodes converging
+  through git are still briefly mixed during every deploy, and an unversioned struct made
+  that window pair on garbage. The exchange now carries a magic and its own size.
+- **When hardware refuses a size, degrade transiently and never settle.** The bridge halves
+  and re-pairs so the node stays reachable, and returns to the configured size on the next
+  heal. Settled shrinkage is the solipsistic withdrawal the threat model forbids.
+- **A finding assembled while the instrument is being rewritten is a suspicion.** Twenty-five
+  revisions of the pairing path during the measurement window meant every data point came
+  from a different program. Freeze the instrument, then measure.
