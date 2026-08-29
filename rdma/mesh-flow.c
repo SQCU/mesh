@@ -21,9 +21,10 @@
 static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *cq;
 static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
-static void down(void){ if(qp)ibv_destroy_qp(qp); if(cq)ibv_destroy_cq(cq);
-  while(nmr) ibv_dereg_mr(mr[--nmr]); free(mr); if(pd)ibv_dealloc_pd(pd);
-  if(ctx)ibv_close_device(ctx); if(shm)shm_unlink(shm); }
+static void down_verbs(void){ if(qp){ibv_destroy_qp(qp);qp=0;} if(cq){ibv_destroy_cq(cq);cq=0;}
+  while(nmr) ibv_dereg_mr(mr[--nmr]); free(mr); mr=0;
+  if(pd){ibv_dealloc_pd(pd);pd=0;} if(ctx){ibv_close_device(ctx);ctx=0;} }
+static void down(void){ down_verbs(); if(shm)shm_unlink(shm); }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
 static void onsig(int s){ (void)s; stop=1; }
@@ -31,17 +32,60 @@ static void onsig(int s){ (void)s; stop=1; }
 struct qpi { uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
 static int oob(const char *peer){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM},*r; int f;
-  if(peer){ hint.ai_family=AF_UNSPEC; if(getaddrinfo(peer,MESH_PORT,&hint,&r)) die("addr");
-    for(;;){ f=socket(r->ai_family,SOCK_STREAM,0);
-      if(!connect(f,r->ai_addr,r->ai_addrlen)){ freeaddrinfo(r); return f; }
-      close(f); usleep(200000); } }
+  if(peer){ hint.ai_family=AF_UNSPEC;
+    if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
+    f=socket(r->ai_family,SOCK_STREAM,0);
+    int ok=!connect(f,r->ai_addr,r->ai_addrlen);
+    freeaddrinfo(r);
+    if(ok) return f;
+    close(f); usleep(200000); return -1; }
   hint.ai_family=AF_INET6; hint.ai_flags=AI_PASSIVE;
-  if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) die("addr");
+  if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) return -1;
   int l=socket(r->ai_family,SOCK_STREAM,0),on=1,off=0;
   setsockopt(l,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
   setsockopt(l,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
-  if(bind(l,r->ai_addr,r->ai_addrlen)) die("bind");
+  if(bind(l,r->ai_addr,r->ai_addrlen)){ close(l); freeaddrinfo(r); usleep(200000); return -1; }
   listen(l,1); freeaddrinfo(r); f=accept(l,NULL,NULL); close(l); return f; }
+
+static struct ibv_port_attr pa;
+static int verbs_up(const char *peer, char *mem, size_t span, int me){
+  down_verbs();
+  struct ibv_device **dl=ibv_get_device_list(NULL);
+  for(int i=0;dl&&dl[i];i++){ ctx=ibv_open_device(dl[i]);
+    if(ctx && !ibv_query_port(ctx,1,&pa) && pa.state==IBV_PORT_ACTIVE) break;
+    if(ctx){ ibv_close_device(ctx); ctx=0; } }
+  if(dl) ibv_free_device_list(dl);
+  if(!ctx){ usleep(500000); return -1; }
+  pd=ibv_alloc_pd(ctx); if(!pd) return -1;
+  mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
+  for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
+    mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE); if(!mr[nmr++]) return -1; }
+  cq=ibv_create_cq(ctx,4096,NULL,NULL,0); if(!cq) return -1;
+  struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
+    .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=1,.max_recv_sge=1}};
+  qp=ibv_create_qp(pd,&qi); if(!qp) return -1;
+  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+  ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS);
+  union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
+  uint32_t psn=lrand48()&0xffffff; struct qpi mine={qp->qp_num,psn,pa.lid},you;
+  memcpy(mine.gid,&gid,16);
+  int f=oob(peer); if(f<0) return -1;
+  if(peer) write(f,&mine,sizeof mine);
+  for(size_t got=0; got<sizeof you;){
+    ssize_t g=read(f,(char*)&you+got,sizeof you-got);
+    if(g<=0){ close(f); return -1; } got+=(size_t)g; }
+  if(!peer) write(f,&mine,sizeof mine);
+  close(f);
+  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
+    .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
+    .grh={.hop_limit=1,.sgid_index=0}}};
+  memcpy(&r.ah_attr.grh.dgid,you.gid,16);
+  if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))
+    return -1;
+  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
+  ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
+  fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
+  return 0; }
 
 struct wf { double n, mean, m2; };
 static void add(struct wf *w, double x){
@@ -58,13 +102,6 @@ int main(int argc,char**argv){
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL);
 
-  struct ibv_device **dl=ibv_get_device_list(NULL); struct ibv_port_attr pa;
-  for(int i=0;dl&&dl[i];i++){ ctx=ibv_open_device(dl[i]);
-    if(ctx && !ibv_query_port(ctx,1,&pa) && pa.state==IBV_PORT_ACTIVE) break;
-    if(ctx){ ibv_close_device(ctx); ctx=NULL; } }
-  if(!ctx) die("no RDMA port is up");
-  pd=ibv_alloc_pd(ctx); if(!pd) die("pd");
-
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<64) np=64;
   int pool = np/4 < 244140 ? np/4 : 244140;
@@ -78,36 +115,9 @@ int main(int argc,char**argv){
   M->pgsz=pg; M->pool=pool; M->arena=np-pool; M->node=me; M->version=MESH_VERSION;
   M->data_off=d0;
   char *mem=(char*)base+d0;
-  mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
-  for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
-    mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE); if(!mr[nmr++]) die("reg"); }
   __sync_synchronize(); M->magic=MESH_MAGIC;
-  fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d, %d regions\n",
-          name,span/1e9,100.0*span/(double)ram,pool,nmr);
-
-  cq=ibv_create_cq(ctx,4096,NULL,NULL,0);
-  struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
-    .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=1,.max_recv_sge=1}};
-  qp=ibv_create_qp(pd,&qi); if(!qp) die("qp");
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS);
-  union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
-  uint32_t psn=lrand48()&0xffffff; struct qpi mine={qp->qp_num,psn,pa.lid},you;
-  memcpy(mine.gid,&gid,16); int f=oob(peer);
-  if(peer) write(f,&mine,sizeof mine);
-  for(size_t got=0; got<sizeof you;){
-    ssize_t g=read(f,(char*)&you+got,sizeof you-got);
-    if(g<=0) die("oob"); got+=(size_t)g; }
-  if(!peer) write(f,&mine,sizeof mine);
-  close(f);
-  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
-    .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
-    .grh={.hop_limit=1,.sgid_index=0}}};
-  memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-  if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))
-    die("RTR");
-  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
-  ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
+  fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d\n",
+          name,span/1e9,100.0*span/(double)ram,pool);
 
   int *fl=malloc(pool*sizeof(int)); unsigned char *own=calloc(pool,1);
   if(!fl||!own) die("alloc");
@@ -127,6 +137,14 @@ int main(int argc,char**argv){
       .send_flags=IBV_SEND_SIGNALED},*bs; ibv_post_send(qp,&s,&bs); })
 
   while(!stop){
+    while(!stop && verbs_up(peer,mem,span,me)){}
+    if(stop) break;
+    n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;
+    for(int i=0;i<pool;i++){
+      if(own[i]==APP) n[APP]++;
+      else { own[i]=FREE; n[FREE]++; fl[nf++]=i; } }
+    sends=0; int alive=1, dry=0; uint64_t wcs=0;
+    while(!stop && alive){
     while(n[FREE] && n[RECV]<QD){ int i=fl[n[FREE]-1];
       if(POST_RECV(i)) break;
       MV(i,RECV); }
@@ -143,6 +161,7 @@ int main(int argc,char**argv){
         if(POST_SEND(p,(uint32_t)sizeof(struct wire)+len)){ BUMP(bad); break; }
         sends++; BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
+    wcs+=(uint64_t)(k>0?k:0);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
       if(!VALID(i)) die("wr_id outside the pool");
       if(!POOL(i) || own[i]!=RECV){ sends--;
@@ -153,6 +172,7 @@ int main(int argc,char**argv){
       uint32_t bl=wc[j].byte_len;
       if(bl<sizeof(struct wire)) die("runt frame");
       struct wire *h=(struct wire*)mesh_at(M,(uint32_t)i);
+      if(h->dst==0xffff){ GIVE(i); continue; }
       h->hops++;
       if(h->dst!=(uint16_t)me && h->hops<=32){
         if(sends<QD && !POST_SEND(i,bl)){ sends++; MV(i,SEND); } else GIVE(i); continue; }
@@ -172,5 +192,16 @@ int main(int argc,char**argv){
         atomic_store_explicit(&M->sd[s],(uint64_t)sqrt(w[s].n>1?w[s].m2/(w[s].n-1):0),memory_order_relaxed);
         w[s]=(struct wf){0}; }
       atomic_store_explicit(&M->up_ms,(uint64_t)((tn-t0)*1000),memory_order_relaxed);
-      tel=tn; } }
+      if(ibv_query_port(ctx,1,&pa) || pa.state!=IBV_PORT_ACTIVE) alive=0;
+      else if(wcs==0){
+        if(sends>0) dry++;
+        else if(n[FREE]){ int i=fl[n[FREE]-1];
+          struct wire *pr=(struct wire*)mesh_at(M,(uint32_t)i);
+          pr->src=(uint16_t)me; pr->dst=0xffff; pr->hops=0;
+          if(!POST_SEND(i,(uint32_t)sizeof(struct wire))){ MV(i,SEND); sends++; } }
+        if(dry>=4) alive=0; }
+      else dry=0;
+      wcs=0;
+      if(!alive) fprintf(stderr,"pair down\n");
+      tel=tn; } } }
   return 0; }
