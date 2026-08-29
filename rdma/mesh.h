@@ -24,24 +24,23 @@ struct hdr {
   _Alignas(MESH_CL) _Atomic uint64_t client, sent, recvd, up_ms;
   _Alignas(MESH_CL) _Atomic uint64_t mean[NOWN], sd[NOWN];
 };
-struct mesh { struct hdr *h; unsigned char *b; };
-static inline unsigned char *mesh_at(struct mesh *m, uint32_t i){
-  return m->b + m->h->data_off + (size_t)i * m->h->pgsz; }
-static inline unsigned char *mesh_data(struct mesh *m, uint32_t i){
+static inline unsigned char *mesh_at(struct hdr *m, uint32_t i){
+  return (unsigned char*)m + m->data_off + (size_t)i * m->pgsz; }
+static inline unsigned char *mesh_data(struct hdr *m, uint32_t i){
   return mesh_at(m,i) + sizeof(struct wire); }
-static inline uint32_t mesh_pay(struct mesh *m){
-  return m->h->pgsz - (uint32_t)sizeof(struct wire); }
-static inline uint32_t mesh_clamp(struct mesh *m, uint32_t n){
+static inline uint32_t mesh_pay(struct hdr *m){
+  return m->pgsz - (uint32_t)sizeof(struct wire); }
+static inline uint32_t mesh_clamp(struct hdr *m, uint32_t n){
   uint32_t p=mesh_pay(m); return n>p?p:n; }
-static inline struct desc *slot(struct mesh *m, int k, uint64_t i){
-  return &((struct desc*)(m->b + RINGS))[k*MESH_RING + i%MESH_RING]; }
-static inline int push(struct mesh *m, int k, const struct desc *d){
-  struct ring *q=&m->h->r[k];
+static inline struct desc *slot(struct hdr *m, int k, uint64_t i){
+  return &((struct desc*)((unsigned char*)m + RINGS))[k*MESH_RING + i%MESH_RING]; }
+static inline int push(struct hdr *m, int k, const struct desc *d){
+  struct ring *q=&m->r[k];
   uint64_t h=atomic_load_explicit(&q->head,memory_order_relaxed);
   if(h - atomic_load_explicit(&q->tail,memory_order_acquire) >= MESH_RING) return -1;
   *slot(m,k,h)=*d; atomic_store_explicit(&q->head,h+1,memory_order_release); return 0; }
-static inline int pop(struct mesh *m, int k, struct desc *d){
-  struct ring *q=&m->h->r[k];
+static inline int pop(struct hdr *m, int k, struct desc *d){
+  struct ring *q=&m->r[k];
   uint64_t t=atomic_load_explicit(&q->tail,memory_order_relaxed);
   if(t == atomic_load_explicit(&q->head,memory_order_acquire)) return -1;
   *d=*slot(m,k,t); atomic_store_explicit(&q->tail,t+1,memory_order_release); return 0; }
