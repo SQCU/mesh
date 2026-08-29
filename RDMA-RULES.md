@@ -169,13 +169,16 @@ Consequences:
   verbs at all: an attempt with no peer present costs nothing, and waiting happens at
   exponential backoff, which is free. Only a completed rendezvous spends registration and a
   queue pair.
-- When exhaustion is real — repeated RTR faults at the configured size after completed
-  rendezvous — the node recovers itself: it dumps state, and where the bridge runs as root it
-  schedules its own reboot with a thirty-minute cooldown. Everything returns by supervision:
-  the bridge at boot, pairing by the heal loop, clients by the generation remap. A reboot is
-  therefore just another physical event the mesh heals through, self-scheduled, never a
-  human's errand. On a node whose bridge is not root, the exhaustion is logged loudly with
-  the recommendation instead.
+- The fault is a budget signal, not an error, and the configured region size is a request,
+  not a requirement. When RTR faults persist at a size after completed rendezvous, the bridge
+  halves the region and re-pairs, down to a floor that has always afforded pairing, and the
+  census reports the size actually achieved. A node with a drained boot pairs smaller and
+  stays up; clients ride the change through the generation remap; nothing restarts but the
+  pairing itself, and nothing ever reboots. An operator who wants the full arena back
+  schedules a reboot as a capacity change on their own clock — the mesh never demands one,
+  and no code in this repo may ever initiate one. An earlier revision made the bridge
+  self-reboot the machine on exhaustion; that was an availability inversion under the
+  contract and it is deleted.
 - Size regions with headroom for the boot's remaining budget, not the machine's RAM.
 - Failed pairing attempts consume the pool too: a size that paired an hour ago can be
   unaffordable after a retry storm at that size. Cap retries low and shrink before retrying.

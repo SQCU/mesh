@@ -156,23 +156,26 @@ int main(int argc,char**argv){
   listener_up();
 
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
-  const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<64) np=64;
-  int pool = np/4 < 244140 ? np/4 : 244140;
+  const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<16384) np=16384;
   size_t d0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
-  size_t span=(size_t)pg*np;
-  shm_unlink(name); int rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
+  int pool; size_t span; int rf; void *base; struct hdr *M; char *mem;
+  int *fl; unsigned char *own;
+region:
+  pool = np/4 < 244140 ? np/4 : 244140;
+  span=(size_t)pg*np;
+  shm_unlink(name); rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
   if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,MESH_MODE);
-  void *base=mmap(NULL,d0+span,PROT_READ|PROT_WRITE,MAP_SHARED,rf,0);
+  base=mmap(NULL,d0+span,PROT_READ|PROT_WRITE,MAP_SHARED,rf,0);
   if(base==MAP_FAILED) die("mmap"); shm=name;
-  struct hdr *M=base;
+  M=base;
   M->pgsz=pg; M->pool=pool; M->arena=np-pool; M->node=me; M->version=MESH_VERSION;
   M->data_off=d0;
-  char *mem=(char*)base+d0;
+  mem=(char*)base+d0;
   __sync_synchronize(); M->magic=MESH_MAGIC;
   fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d\n",
           name,span/1e9,100.0*span/(double)ram,pool);
 
-  int *fl=malloc(pool*sizeof(int)); unsigned char *own=calloc(pool,1);
+  fl=malloc(pool*sizeof(int)); own=calloc(pool,1);
   if(!fl||!own) die("alloc");
   int n[NOWN]={0}; n[FREE]=pool; for(int i=0;i<pool;i++) fl[i]=i;
   int sends=0;
@@ -193,21 +196,16 @@ int main(int argc,char**argv){
   while(!stop){
     while(!stop && verbs_up(peer,mem,span,me)){
       if(++fails>=6){
-        int n=0; FILE *fp=fopen("/tmp/mesh-pair-exhaustion","r");
-        if(fp){ fscanf(fp,"%d",&n); fclose(fp); }
-        fp=fopen("/tmp/mesh-pair-exhaustion","w");
-        if(fp){ fprintf(fp,"%d",n+1); fclose(fp); }
-        fprintf(stderr,"pairing exhausted (%d), respawning\n",n+1);
-        if(n+1>=3 && !geteuid()){
-          struct stat cb;
-          if(stat("/usr/local/mesh/log/last-selfheal-reboot",&cb) ||
-             time(NULL)-cb.st_mtime>1800){
-            system("mkdir -p /usr/local/mesh/log; date > /usr/local/mesh/log/last-selfheal-reboot; tail -50 /tmp/io.mesh.bridge.log > /usr/local/mesh/log/exhaustion-state 2>/dev/null");
-            fprintf(stderr,"pool exhausted this boot: self-rebooting to reclaim\n");
-            system("shutdown -r now"); } }
+        fails=0;
+        if(np>16384){
+          munmap(base,d0+span); close(rf); free(fl); free(own);
+          fprintf(stderr,"pairing refused at %.2f GB, degrading\n",span/1e9);
+          np/=2; if(np<16384) np=16384;
+          goto region; }
+        fprintf(stderr,"pairing refused at floor, respawning\n");
         return 0; } }
     if(stop) break;
-    fails=0; unlink("/tmp/mesh-pair-exhaustion");
+    fails=0;
     n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;
     for(int i=0;i<pool;i++){
       if(own[i]==APP) n[APP]++;
