@@ -230,8 +230,18 @@ their semantics are defined by this spec.
    the stealth mechanic live, and the only path by which enemy positions enter the
    system. Foundational, not a patch.
 
-## 5. Not yet reached
+## 5. Training and selection `[FIRM]`
 
-Implementation-level choices the transcript has not taken up: DPP sampling vs greedy-MAP
-selection, and the outer training objective (DPP-likelihood vs reward policy-gradient)
-from the lit review. Pending, not forks awaiting a verdict.
+Both were decided from the outset and restated repeatedly; neither is a fork.
+
+- **Selection is sampling, not MAP.** The policy is a weighted sampling over strategies,
+  L1/L2-regularized toward logit 0 so that untrained it is a broad weighted sampling of
+  effective strategies and with training it peaks without collapsing to "only some
+  actions happening". Greedy/MAP selection is excluded by that requirement.
+- **The outer objective is REINFORCE** over match outcomes (many winning and losing
+  bots across many matches = the calibration signal), with the L2-toward-zero penalty.
+  Not a DPP-likelihood objective: there are no target selections to fit, only reward.
+
+This is the standing commitment — minimal feature engineering, maximal weight on the
+learned parameters, and only ever the mechanism that works. Decisions are derived from
+it, not reopened as forks.
