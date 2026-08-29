@@ -56,6 +56,10 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     if(ctx){ ibv_close_device(ctx); ctx=0; } }
   if(dl) ibv_free_device_list(dl);
   if(!ctx){ usleep(500000); return -1; }
+  { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
+    snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
+             strncmp(dn,"rdma_",5)?dn:dn+5);
+    system(c); }
   pd=ibv_alloc_pd(ctx); if(!pd) return -1;
   mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
@@ -69,7 +73,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   union ibv_gid gid; ibv_query_gid(ctx,1,0,&gid);
   uint32_t psn=lrand48()&0xffffff; struct qpi mine={qp->qp_num,psn,pa.lid},you;
   memcpy(mine.gid,&gid,16);
-  int f=oob(peer); if(f<0) return -1;
+  int f=oob(peer); if(f<0){ fprintf(stderr,"oob retry\n"); return -1; }
   if(peer) write(f,&mine,sizeof mine);
   for(size_t got=0; got<sizeof you;){
     ssize_t g=read(f,(char*)&you+got,sizeof you-got);
@@ -80,8 +84,8 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
     .grh={.hop_limit=1,.sgid_index=0}}};
   memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-  if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))
-    return -1;
+  if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN)){
+    fprintf(stderr,"rtr retry\n"); return -1; }
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
