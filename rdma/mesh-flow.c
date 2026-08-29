@@ -175,7 +175,7 @@ int main(int argc,char**argv){
     struct ibv_send_wr _w={.wr_id=(uint64_t)(i),.sg_list=&_g,.num_sge=1, \
       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*_b; \
     ibv_post_send(g_qp,&_w,&_b); })
-  int posted=0, sending=0;
+  int posted=0, sending=0, rq_full=0;
 
   int send_arena=0, app_held=0;
   int arena_start=rx_pages;
@@ -196,11 +196,11 @@ int main(int argc,char**argv){
 
   while(!g_stop && (seconds<=0 || now()-t0 < seconds)){
 
-    while(nfree>0){
+    while(nfree>0 && !rq_full){
       int i=freelist[--nfree];
       struct ibv_sge g={(uintptr_t)PAGE(i),(uint32_t)pgsz,PG_LKEY(i)};
       struct ibv_recv_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1},*bad;
-      if(ibv_post_recv(g_qp,&wr,&bad)){ freelist[nfree++]=i; break; }
+      if(ibv_post_recv(g_qp,&wr,&bad)){ freelist[nfree++]=i; rq_full=1; break; }
       posted++;
     }
 
@@ -236,7 +236,7 @@ int main(int argc,char**argv){
         PUT(i); continue; }
       if(wc[j].opcode==IBV_WC_RECV){
 
-        posted--; rx++; bytes_rx+=wc[j].byte_len;        struct wire *h=(struct wire*)PAGE(i);
+        posted--; rq_full=0; rx++; bytes_rx+=wc[j].byte_len;        struct wire *h=(struct wire*)PAGE(i);
         if(h->magic!=WIRE_MAGIC){ dropped++; PUT(i); continue; }
         uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
         h->hops++;
