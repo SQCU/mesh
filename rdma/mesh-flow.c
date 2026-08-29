@@ -16,6 +16,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <signal.h>
+#include <errno.h>
 #include <math.h>
 
 static struct ibv_qp *g_qp; static struct ibv_pd *g_pd; static struct mesh_mem g_mem;
@@ -158,6 +160,7 @@ int main(int argc,char**argv){
   char *mem_c = (char*)mem;
   #define PAGE(i) (mem_c + (size_t)(i)*(size_t)pgsz)
   int *freelist = malloc(npages*sizeof(int)), nfree=0;
+  unsigned char *heldmap = calloc(((size_t)npages+7)/8,1);
   if(!freelist) die("alloc freelist");
   uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
   int rx_pages = npages/4;
@@ -186,7 +189,7 @@ int main(int argc,char**argv){
      node_ram?100.0*(double)RG.h->arena_pages*pgsz/(double)node_ram:0.0, rx_pages);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0;
   unsigned long long delivered=0, cmp_full=0, app_sent=0;
-  unsigned long long dropped=0;
+  unsigned long long dropped=0, reaped=0;
   struct wf w_free={0}, w_post={0}, w_send={0}, w_held={0};
   struct wf i_free={0}, i_post={0}, i_send={0}, i_held={0};
   double t0=now(), tel_last=t0;
@@ -204,7 +207,8 @@ int main(int argc,char**argv){
     { struct mesh_desc dd;
       while(!mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
         uint32_t p=dd.page;
-        if(p < (uint32_t)arena_start){ PUT(p); app_held--; } } }
+        if(p < (uint32_t)arena_start && (heldmap[p>>3]>>(p&7)&1)){
+          heldmap[p>>3] &= (unsigned char)~(1u<<(p&7)); PUT(p); app_held--; } } }
 
     if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
       struct mesh_desc dd;
@@ -242,7 +246,8 @@ int main(int argc,char**argv){
             struct mesh_desc dd={.page=(uint32_t)i,.bytes=pay,.node=h->src};
 
             if(mesh_push(&RG,&RG.h->rcmp,RG.h->cmp_off,&dd)){ cmp_full++; PUT(i); }
-            else { app_held++; atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed); }
+            else { heldmap[i>>3] |= (unsigned char)(1u<<(i&7)); app_held++;
+                   atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed); }
           } else PUT(i);
         } else {
           if(POST_SEND(i)){ dropped++; PUT(i); }
@@ -267,6 +272,17 @@ int main(int argc,char**argv){
         i_send.mean, i_held.mean, sqrt(wf_var(&i_held)),
         rx, tx, nfree+posted+pool_fly+app_held, arena_start);
 
+      uint64_t cp = atomic_load_explicit(&RG.h->client_pid,memory_order_acquire);
+      if(cp && kill((pid_t)cp,0) && errno==ESRCH){
+        for(int z=0; z<arena_start; z++)
+          if(heldmap[z>>3]>>(z&7)&1){ heldmap[z>>3] &= (unsigned char)~(1u<<(z&7)); PUT(z); }
+        app_held=0;
+        atomic_store_explicit(&RG.h->rsub.tail,atomic_load_explicit(&RG.h->rsub.head,memory_order_acquire),memory_order_release);
+        atomic_store_explicit(&RG.h->rcmp.head,atomic_load_explicit(&RG.h->rcmp.tail,memory_order_acquire),memory_order_release);
+        atomic_store_explicit(&RG.h->rrel.tail,atomic_load_explicit(&RG.h->rrel.head,memory_order_acquire),memory_order_release);
+        atomic_store_explicit(&RG.h->client_pid,0,memory_order_release);
+        reaped++;
+      }
       atomic_store_explicit(&RG.h->occ_pool,(uint64_t)arena_start,memory_order_relaxed);
       atomic_store_explicit(&RG.h->sd_free,(uint64_t)sqrt(wf_var(&i_free)),memory_order_relaxed);
       atomic_store_explicit(&RG.h->sd_posted,(uint64_t)sqrt(wf_var(&i_post)),memory_order_relaxed);
@@ -284,10 +300,10 @@ int main(int argc,char**argv){
   double el=now()-t0;
   printf("node pages=%d pool=%d  rx=%llu tx=%llu  %.2f/%.2f Gbit/s in/out\n"
          "     occupancy free %.0f+-%.0f  posted %.0f+-%.0f  sending %.0f+-%.0f\n"
-         "     delivered=%llu sent=%llu dropped=%llu cmp_full=%llu  pool %d/%d\n",
+         "     delivered=%llu sent=%llu dropped=%llu cmp_full=%llu reaped=%llu  pool %d/%d\n",
     npages, arena_start, rx, tx, bytes_rx*8/el/1e9, bytes_tx*8/el/1e9,
     w_free.mean, sqrt(wf_var(&w_free)), w_post.mean, sqrt(wf_var(&w_post)),
     w_send.mean, sqrt(wf_var(&w_send)),
-    delivered, app_sent, dropped, cmp_full, nfree+posted+(sending-send_arena)+app_held, arena_start);
+    delivered, app_sent, dropped, cmp_full, reaped, nfree+posted+(sending-send_arena)+app_held, arena_start);
   return 0;
 }
