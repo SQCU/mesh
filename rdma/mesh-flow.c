@@ -232,6 +232,6 @@ int main(int argc,char**argv){
         if(dry>=4) alive=0; }
       else dry=0;
       wcs=0;
-      if(!alive) fprintf(stderr,"pair down\n");
+      if(!alive){ fprintf(stderr,"pair down, respawning\n"); stop=1; }
       tel=tn; } } }
   return 0; }
