@@ -184,7 +184,7 @@ int main(int argc,char**argv){
   int fails=0;
   while(!stop){
     while(!stop && verbs_up(peer,mem,span,me)){
-      if(++fails>=24){ fprintf(stderr,"pairing exhausted, respawning\n"); return 0; } }
+      if(++fails>=6){ fprintf(stderr,"pairing exhausted, respawning\n"); return 0; } }
     if(stop) break;
     fails=0;
     n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;

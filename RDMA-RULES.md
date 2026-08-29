@@ -163,3 +163,5 @@ Consequences:
 - If RTR starts returning EFAULT with valid arguments, do not debug the arguments. Shrink
   the region to confirm, then plan a reboot of that node to reclaim the pool.
 - Size regions with headroom for the boot's remaining budget, not the machine's RAM.
+- Failed pairing attempts consume the pool too: a size that paired an hour ago can be
+  unaffordable after a retry storm at that size. Cap retries low and shrink before retrying.
