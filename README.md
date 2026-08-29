@@ -545,7 +545,7 @@ size at which it refuses. `mesh_read` returns one arrived slot and recycles the 
 which is why there is no release call.
 
 Memory comes in slots rather than one flat span because the device reports `max_sge: 1` and
-has no immediate data, so every page carries its own header contiguously. The gap is 24 bytes
+has no immediate data, so every page carries its own header contiguously. The gap is 16 bytes
 in 4096.
 
 **One thing an application must know.** `mesh_write` takes the bytes, but nothing tells you

@@ -1,5 +1,24 @@
 # The ABI is the boundary, and streams are the unit
 
+**Status: the diagnosis landed, the proposed interface did not.** Read the two error sections
+below — they are still accurate and are why the current design looks the way it does. Then
+stop, because everything after **The rule** describes an interface that was never built and in
+part cannot be.
+
+What actually landed instead: the workload is no longer linked into the transport, but the
+boundary is a process boundary rather than a richer callback — one bridge binary, applications
+as separate processes attaching to POSIX shared memory, speaking through three functions
+(`README.md`, **Using the mesh**). Spans are gone entirely rather than being replaced by
+streams: delivery is per page, and an application that wants an ordering imposes it in its own
+payload. `mesh_f` does not become anything; it is deleted. `mesh_abi`, `SPAN_MAX`, `F_FIRST`
+and `F_META` no longer exist.
+
+The placement idea in **Streams, not spans** — pre-posting receives at the destination offset
+so arrival is placement and nothing is reassembled — was not built and is blocked by hardware:
+`max_sge` is 1 and there is no immediate data, so every page must carry its own header
+contiguously, which is why memory is handed to applications in slots rather than as one flat
+span.
+
 Written after two design errors were caught in review. Both are recorded because both were
 mine and both were defended before they were fixed.
 

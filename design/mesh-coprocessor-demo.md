@@ -92,7 +92,9 @@ reach rather than on throughput.
 
 ## The ABI
 
-Today the workload is a C symbol resolved at static link (`make F=f-yourthing.c`). That
+When this was written the workload was a C symbol resolved at static link
+(`make F=f-yourthing.c`). That is deleted; a workload is now a separate process attaching to
+the bridge's shared region. The reasoning below still holds, and that
 is the wrong boundary, and three independent arguments give the same replacement.
 
 - **Functor law.** `F(id) = id` only holds if the transport genuinely cannot inspect the

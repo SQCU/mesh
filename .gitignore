@@ -5,4 +5,5 @@ rdma/mesh-flow
 rdma/mesh-hop
 rdma/qcaps
 rdma/qfill
-.claude/
+.claude/*
+!.claude/settings.json

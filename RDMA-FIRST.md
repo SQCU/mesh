@@ -206,20 +206,28 @@ is consulted before acting. What bounds the loop is the hardware refusing work.
 
 ## Addressing and routing
 
-The wire header is 24 bytes, 0.59% of a 4096 page:
+The wire header is 16 bytes, 0.39% of a 4096 page, leaving 4080 usable:
 
 ```c
-struct wire { uint32_t magic, path, stream, seq; uint16_t bytes, src, dst; uint8_t flags, hops; };
+struct wire { uint32_t magic, bytes; uint16_t src, dst; uint8_t hops, pad[3]; };
 ```
 
 `src` and `dst` are node indices — *this page is from node A, for node B*. There is no
-authentication and none is wanted: the topology is cables we plugged in ourselves, so
-this is a routing tag, not a credential.
+authentication and none is wanted: the topology is cables we plugged in ourselves, so this is
+a routing tag, not a credential. `hops` bounds a forwarded page. `bytes` is the payload length,
+clamped to the page on receipt.
 
-`flags` carries `F_META`, which is the whole of the "is this for us" question. A page
-either is graph metadata that every peer along a cycle should observe to maintain its
-world model of the entire graph and its load, or it is opaque payload that no hop may
-interpret. One bit, tested once per page, no payload dereference either way.
+It was 24 bytes, then briefly 28 when `bytes` was widened, and carried `path`, `stream`, `seq`
+and a `flags` byte with
+`F_FIRST`/`F_LAST`/`F_META`/`F_NACK`. Every one of those served span reassembly, sequence
+tracking or the NACK protocol, and all three are gone; nothing read them. A field on the wire
+that no receiver reads is not free — it is payload the application does not get, on every page
+forever, plus a thing the next reader has to work out is vestigial.
+
+An earlier revision of this section described `F_META` as "the whole of the is-this-for-us
+question", distinguishing graph metadata every peer should observe from opaque payload no hop
+may interpret. That distinction was never implemented, and the bit it depended on no longer
+exists. The question is answered by `dst` alone.
 
 ### Routing is a compiled path, not a table
 
@@ -232,7 +240,7 @@ so an egress port is two bits. Each hop reads the low bits, shifts right, forwar
 | `uint32 path` | 16 | 43,046,721 |
 | `uint64 path` | 32 | 1.85 × 10^15 |
 
-Per-hop cost is a mask, a shift and a store, inside the 24 bytes the header already
+Per-hop cost is a mask, a shift and a store, inside the bytes the header already
 occupies — no extra bandwidth, no lookup, no memory.
 
 A next-hop table would be O(N) memory per node *and* a fleet-wide agreement problem:
