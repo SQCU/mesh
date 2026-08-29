@@ -30,30 +30,51 @@ pts.sort(key=lambda p: (p[0], p[1]))
 idx = [0, len(pts) // 4, len(pts) // 2, (3 * len(pts)) // 4, len(pts) - 1]
 track = [[pts[i][0], pts[i][1], pts[i][2] + 16] for i in idx]
 
+k = max(2, min(5, int(sys.argv[3]))) if len(sys.argv) > 3 else 2
+
+chain = [('plcn%d' % i, p) for i, p in enumerate(track)]
+start = 'plcn2'
+if k == 5:
+    mid = [(track[1][a] + track[2][a]) / 2 for a in range(3)]
+    chain = chain[:2] + [('plcs', mid)] + chain[2:]
+    start = 'plcs'
+
+pos = dict(chain)
+
 extra = []
-for i, p in enumerate(track):
-    e = ['{', '"classname" "plc_path"', '"targetname" "plcn%d"' % i,
+for i, (name, p) in enumerate(chain):
+    e = ['{', '"classname" "plc_path"', '"targetname" "%s"' % name,
          '"origin" "%.0f %.0f %.0f"' % tuple(p)]
-    if i + 1 < len(track):
-        e.append('"target" "plcn%d"' % (i + 1))
-    if i == 2:
+    if i + 1 < len(chain):
+        e.append('"target" "%s"' % chain[i + 1][0])
+    if name == start:
         e.append('"spawnflags" "1"')
     e.append('}')
     extra.append('\n'.join(e))
 
 extra.append('\n'.join(['{', '"classname" "func_plc_cart"',
                         '"model" "%s"' % cart_model,
-                        '"target" "plcn0"', '"plc_start" "plcn2"',
+                        '"target" "plcn0"', '"plc_start" "%s"' % start,
                         '"speed" "40"', '}']))
-goals = [(4, 'plcn0', 0), (13, 'plcn4', 4)]
-if len(sys.argv) > 3 and sys.argv[3] == '3':
-    goals.append((12, 'plcn1', 1))
-for cnt, node, ti in goals:
+goals = [(4, 'plcn0'), (13, 'plcn4'), (12, 'plcn1'), (9, 'plcn3'), (3, 'plcn2')][:k]
+for cnt, node in goals:
     extra.append('\n'.join(['{', '"classname" "plc_goal"',
                             '"cnt" "%d"' % cnt, '"target" "%s"' % node,
                             '"radius" "64"',
-                            '"origin" "%.0f %.0f %.0f"' % tuple(track[ti]),
+                            '"origin" "%.0f %.0f %.0f"' % tuple(pos[node]),
                             '}']))
+
+import math
+arc = {}
+s = 0.0
+for i, (name, p) in enumerate(chain):
+    if i:
+        q = chain[i - 1][1]
+        s += math.dist(p, q)
+    arc[name] = s
+print('teams', k, 'start', start, 's=%.0f' % arc[start],
+      'goal s:', {n: round(arc[n]) for _, n in goals},
+      'min |start-goal|', round(min(abs(arc[n] - arc[start]) for _, n in goals)))
 
 open(out, 'w').write(ents.rstrip('\0') + '\n' + '\n'.join(extra) + '\n')
 print('wrote', out, 'track', track[0], '->', track[-1])

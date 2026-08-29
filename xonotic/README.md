@@ -61,3 +61,47 @@ sequence, `payload_mesh_tick` returns early, and the last-known objectives stand
   the 10 Hz publish rate holds only while the box keeps up.
 - **Plan staleness is not measured.** Request and response counts match 1:1, so at
   most one plan is in flight, but the age of the applied plan was never timed.
+
+## Scaling to 48 bots on 5 teams
+
+The QC glue carries no row cap of its own: `sv_payload_mesh.qc` gathers, publishes
+and scatters `maxclients` rows every tick, and the engine chunks a block across
+slots (63 request rows per slot at width 16, 126 response rows at width 8, up to
+64 chunks = 4032 rows). `worker.py` reassembles by chunk mask with `--maxrows 4032`.
+The row count is set entirely by `maxplayers` at launch. At `maxplayers 64` a
+request is 2 slots and a response 1 slot per 0.1 s tick.
+
+`tools/mkentfile.py <bsp> <out.ent> [teams]` now takes a team count of 2..5. Goals
+land on distinct track nodes (red plcn0, blue plcn4, yellow plcn1, pink plcn3,
+green plcn2); at 5 teams a start node `plcs` is spliced into the middle of the
+track so no goal sits inside the cart's 64-unit capture radius at round start
+(measured minimum start-to-goal arclength on runningmanctf: 1977 units). Teams
+3..5 have no `info_player_teamN` spawns on runningmanctf and fall back to the 26
+`info_player_deathmatch` spawns via `server/spawnpoints.qc`; teams 1..2 keep their
+8 team spawns each. Five `plc_goal`s alone drive `payload_teams` to mask 31, no
+override cvar needed.
+
+```
+mkdir -p /tmp/xonrun48/data/maps
+unzip -p ~/dox/xonotic/Xonotic/data/xonotic-20230620-maps.pk3 maps/runningmanctf.bsp \
+  > /tmp/xonrun48/runningmanctf.bsp
+python3 ~/dox/mesh/xonotic/payload/tools/mkentfile.py \
+  /tmp/xonrun48/runningmanctf.bsp /tmp/xonrun48/data/maps/runningmanctf.ent 5
+~/dox/xonotic/build-engine/darkplaces-dedicated -xonotic \
+  -basedir ~/dox/xonotic/Xonotic -userdir /tmp/xonrun48 \
+  +developer 0 +sv_public 0 +port 26012 +sv_autopause 0 \
+  +g_payload 1 +g_payload_round_timelimit 600 +timelimit 30 \
+  +maxplayers 64 +bot_join_empty 1 +bot_number 48 +skill 5 +g_warmup 0 \
+  +map runningmanctf
+```
+
+The loose userdir `.ent` overrides the pk3's 2-team copy, so the shared pk3 keeps
+the verified A/B demo unchanged. Expected in the log: `payload: teams mask 31` and
+48 bots split roughly 9-10 per team by TeamBalance.
+
+Engine headroom: `MAX_SCOREBOARD` 255 and `MAX_EDICTS` 32768 clear 64 players with
+room; `maxplayers` is clamped only at 255. The honest ceiling is CPU, not a
+constant: sim rate already droops under load at 8 bots (above), and havocbot cost
+grows linearly in bots times goal-stack size. 48 at skill 5 is configured and
+compile-verified here, not throughput-verified; if the tick rate sags, `skill` and
+`bot_number` are the levers, not the bridge.
