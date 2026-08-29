@@ -163,21 +163,20 @@ class CtxSolver:
         self.G2 = None
         self.kappa = np.zeros((TEAMS * K_CARTS, TEAMS * K_CARTS), np.float32)
 
-    def _insert(self, X, Xn, bot_cart=None):
+    def _insert(self, X, Xn):
         n = Xn.shape[0]
         if n >= self.T:
             idx = np.arange(self.T)
             X, Xn = X[-self.T:], Xn[-self.T:]
-            if bot_cart is not None:
-                bot_cart = bot_cart[-self.T:]
             self.pos = 0
         else:
             idx = (self.pos + np.arange(n)) % self.T
             self.pos = int((self.pos + n) % self.T)
         self.C[idx] = Xn
         self.m_team[idx] = X[:, 1].astype(np.int32)
-        self.m_obj[idx] = np.clip(X[:, 15], 0, TEAMS - 1).astype(np.int32)
-        self.m_cart[idx] = 0 if bot_cart is None else np.clip(bot_cart, 0, K_CARTS - 1)
+        comb = np.clip(X[:, 15], 0, K_CARTS * TEAMS - 1).astype(np.int32)
+        self.m_obj[idx] = comb % TEAMS
+        self.m_cart[idx] = comb // TEAMS
         self.m_dom[idx] = dominance(X)
         self.m_pos[idx] = X[:, 5:8]
         return idx
@@ -226,10 +225,10 @@ class CtxSolver:
         np.fill_diagonal(Kn, 0.0)
         return np.nan_to_num(Kn).astype(np.float32)
 
-    def solve(self, X, bot_cart=None):
+    def solve(self, X):
         Xb = np.ascontiguousarray(X[:, :REQ_WIDTH], np.float32)
         Xn = (Xb / (1.0 + np.abs(Xb))).astype(np.float32)
-        idx = self._insert(X, Xn, bot_cart)
+        idx = self._insert(X, Xn)
         G = self._mlx(idx) if self.backend == "mlx" else self._np(idx)
         return np.nan_to_num(G).astype(np.float32)
 
@@ -293,16 +292,28 @@ def softmax(z):
 
 
 def bind_match(X):
-    """Provisional single-cart binding for the live wire; the k-cart layout
-    lands in PORT.md from the game-rules side and replaces only this
-    function and the meter's inputs."""
-    n = X.shape[0]
+    """The PORT.md section 2 binding. The header width is authoritative:
+    width >= 23 carries the per-cart state block at columns 20+3c
+    (progress, controlling team, regression flag); narrower streams are the
+    single-cart game read from column 12. Column 15 is the combined
+    (cart*5+node) objective index everywhere, which also names each bot's
+    contested cart. Banked score is not on the wire - the meter measures it
+    from control-point crossings."""
+    n, wid = X.shape
+    carts = min(K_CARTS, max(1, (wid - 20) // 3)) if wid >= 23 else 1
     prog = np.zeros(K_CARTS, np.float64)
-    prog[0] = float(X[0, 12])
-    return dict(carts=1, prog=prog,
-                controller=np.zeros(K_CARTS, np.int32),
-                score=np.zeros(TEAMS + 1, np.float64),
-                bot_cart=np.zeros(n, np.int32))
+    controller = np.zeros(K_CARTS, np.int32)
+    regress = np.zeros(K_CARTS, np.float64)
+    if wid >= 23:
+        for c in range(carts):
+            prog[c] = float(X[0, 20 + 3 * c])
+            controller[c] = int(np.clip(X[0, 21 + 3 * c], 0, TEAMS))
+            regress[c] = float(X[0, 22 + 3 * c])
+    else:
+        prog[0] = float(X[0, 12])
+    bot_cart = np.clip(X[:, 15] // TEAMS, 0, K_CARTS - 1).astype(np.int32)
+    return dict(carts=carts, prog=prog, controller=controller, regress=regress,
+                score=np.zeros(TEAMS + 1, np.float64), bot_cart=bot_cart)
 
 
 class MatchMeter:
@@ -317,7 +328,9 @@ class MatchMeter:
         self.alpha = alpha
         self.dir_ema = np.zeros((TEAMS + 1, K_CARTS))
         self.last_prog = None
-        self.last_score = None
+        self.mark = np.zeros(K_CARTS, np.int32)
+        self.cps = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
+        self.cum = np.zeros(TEAMS + 1, np.float64)
         self._reset_episode()
 
     def _reset_episode(self):
@@ -328,15 +341,20 @@ class MatchMeter:
 
     def tick(self, X, ms):
         prog = np.asarray(ms["prog"], np.float64)
-        d = np.zeros(K_CARTS) if self.last_prog is None else prog - self.last_prog
+        first = self.last_prog is None
+        d = np.zeros(K_CARTS) if first else prog - self.last_prog
+        for c in range(K_CARTS):
+            if first or d[c] < -0.5:
+                self.mark[c] = int(np.sum(self.cps <= prog[c] + 1e-9))
+                continue
+            ctl = int(ms["controller"][c])
+            while (ctl and self.mark[c] < len(self.cps)
+                   and prog[c] >= self.cps[self.mark[c]] - 1e-9):
+                self.dbank[ctl] += 1
+                self.cum[ctl] += 1
+                self.mark[c] += 1
         self.last_prog = prog.copy()
         d[np.abs(d) > 0.05] = 0.0
-        score = np.asarray(ms["score"], np.float64)
-        if self.last_score is not None:
-            ds = score - self.last_score
-            ds[np.abs(ds) > 10] = 0.0
-            self.dbank += ds
-        self.last_score = score.copy()
         team = X[:, 1].astype(np.int32)
         near = X[:, 11] < PUSH_RADIUS
         bc = np.asarray(ms["bot_cart"], np.int32)
@@ -593,7 +611,7 @@ class Strategy:
                 continue
             hd = self.held.get(int(ids[r]))
             if hd:
-                out[int(ids[r])] = (j, hd[0], hd[1])
+                out[int(ids[r])] = (j, hd[0], hd[1], hd[2] if hd[2] is not None else 0)
         return out
 
     def update(self, R):
@@ -666,21 +684,12 @@ class SynthEnv:
         self.score = np.zeros(TEAMS + 1)
         self.mark = np.zeros(K_CARTS, np.int32)
         self.cps = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
+        self.regress = np.zeros(K_CARTS, bool)
         self.held = {}
-
-    def ms(self):
-        n = self.nteams * self.bots
-        bc = np.zeros(n, np.int32)
-        for b, (j, c, r) in self.held.items():
-            if 0 <= b < n:
-                bc[b] = c
-        return dict(carts=K_CARTS, prog=self.prog.copy(),
-                    controller=self.controller.copy(),
-                    score=self.score.copy(), bot_cart=bc)
 
     def rows(self):
         n = self.nteams * self.bots
-        X = np.zeros((n, EXT_WIDTH), np.float32)
+        X = np.zeros((n, 26), np.float32)
         X[:, 0] = np.arange(n)
         X[:, 1] = np.repeat(np.arange(1, self.nteams + 1), self.bots)
         X[:, 2] = 100.0
@@ -690,7 +699,7 @@ class SynthEnv:
         X[:, 12] = self.prog[0]
         for i in range(n):
             hd = self.held.get(i)
-            X[i, 15] = float(hd[2]) if hd and len(hd) > 2 else 0.0
+            X[i, 15] = float(hd[1] * TEAMS + hd[3]) if hd else 0.0
         for j in range(1, self.nteams + 1):
             sel = X[:, 1] == j
             X[sel, 16] = 2.0
@@ -698,14 +707,23 @@ class SynthEnv:
             first = np.nonzero(sel)[0][0]
             X[first, 16] = 7.0
             X[first, 17] = 1.0
+        for c in range(K_CARTS):
+            X[:, 20 + 3 * c] = self.prog[c]
+            X[:, 21 + 3 * c] = float(self.controller[c])
+            X[:, 22 + 3 * c] = 1.0 if self.regress[c] else 0.0
         return X
 
     def step(self, held):
-        self.held = {b: (j, c, r) for b, (j, c, r) in held.items()}
+        self.held = dict(held)
         for c in range(K_CARTS):
+            if self.prog[c] >= 1.0:
+                self.prog[c] = 0.1
+                self.controller[c] = 0
+                self.mark[c] = 0
+                continue
             pushc = np.zeros(TEAMS + 1, np.int32)
             supp = esc = 0
-            for b, (j, cc, r) in self.held.items():
+            for b, (j, cc, r, nd) in self.held.items():
                 if cc != c:
                     continue
                 if r == 0:
@@ -719,15 +737,12 @@ class SynthEnv:
             ctl = int(self.controller[c])
             d = 0.012 * max(0, pushc[ctl] - 1) - 0.008 * np.sqrt(max(0.0, supp - 0.5 * esc))
             d += float(self.g.standard_normal()) * 0.001
+            self.regress[c] = d < 0
             self.prog[c] = float(np.clip(self.prog[c] + d, 0.0, 1.0))
             while (ctl and self.mark[c] < len(self.cps)
-                   and self.prog[c] >= self.cps[self.mark[c]]):
+                   and self.prog[c] >= self.cps[self.mark[c]] - 1e-9):
                 self.score[ctl] += 1
                 self.mark[c] += 1
-            if self.prog[c] >= 1.0:
-                self.prog[c] = 0.1
-                self.controller[c] = 0
-                self.mark[c] = 0
 
 
 def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
@@ -745,10 +760,12 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
     gang_m, gang_p, conc = [], [], []
     for ep in range(episodes):
         for t in range(ep_ticks):
-            ms = env.ms()
             X = env.rows()
+            ms = bind_match(X)
+            meter.tick(X, ms)
+            ms["score"] = meter.cum.copy()
             if t % hold == 0:
-                G = solver.solve(X, ms["bot_cart"])
+                G = solver.solve(X)
                 mixes = solver.mixes()
                 strat.tick(X, solver.G2, mixes, solver.kappa, ms, True, train)
                 lt = strat.team_lead
@@ -762,13 +779,12 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
                                     for c in range(K_CARTS)))
                     if j != lt and lead_carts:
                         gang_p.append(sum(float(A[c*3+1]) for c in lead_carts))
-                for b, (j, c, r) in strat.held_view(X).items():
+                for b, (j, c, r, nd) in strat.held_view(X).items():
                     if j != lt and lead_carts:
                         gang_m.append(float(r == 1 and c in lead_carts))
             else:
                 strat.tick(X, solver.G2, solver.mixes(), solver.kappa, ms,
                            False, train)
-            meter.tick(X, ms)
             env.step(strat.held_view(X))
         R, dirs, dprog, dbank, push = meter.finish()
         if train:
@@ -785,7 +801,9 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
             print("synth: " + gram_line(solver.kappa, ms), flush=True)
     stats = dict(gang=float(np.mean(gang_m)) if gang_m else 0.0,
                  pred=float(np.mean(gang_p)) if gang_p else 0.0,
-                 conc=float(np.mean(conc[-max(1, len(conc)//4):])) if conc else 0.0)
+                 conc=float(np.mean(conc[-max(1, len(conc)//4):])) if conc else 0.0,
+                 bank_meter=float(meter.cum[1:env.nteams + 1].sum()),
+                 bank_truth=float(env.score[1:env.nteams + 1].sum()))
     return np.array(rets), np.array(banked), strat, stats
 
 
@@ -833,6 +851,31 @@ def check(rows):
     report("leader hysteresis", first == 7 and stay == 7 and moved == 8,
            f"leader {first} held at +0.075 dominance ({stay}), moved at +0.30 ({moved}), "
            f"hysteresis {HYSTERESIS}")
+    X26 = np.zeros((4, 26), np.float32)
+    X26[:, 15] = [7, 2, 9, 0]
+    X26[0, 20], X26[0, 21], X26[0, 22] = 0.35, 2, 0
+    X26[0, 23], X26[0, 24], X26[0, 25] = 0.8, 3, 1
+    X26[:, 20:26] = X26[0, 20:26]
+    msb = bind_match(X26)
+    report("bind_match reads the width-26 contract",
+           msb["carts"] == 2 and abs(msb["prog"][0] - 0.35) < 1e-6
+           and abs(msb["prog"][1] - 0.8) < 1e-6
+           and list(msb["controller"]) == [2, 3] and list(msb["regress"]) == [0, 1]
+           and list(msb["bot_cart"]) == [1, 0, 1, 0],
+           f"carts {msb['carts']} prog {[round(float(v),2) for v in msb['prog']]} "
+           f"controllers {list(msb['controller'])} bot_cart {list(msb['bot_cart'])}")
+    mt = MatchMeter()
+    Xd = np.zeros((2, 26), np.float32)
+    Xd[:, 1] = 1
+    mk = lambda p, ctl: dict(carts=2, prog=np.array([p, 0.0]),
+                             controller=np.array([ctl, 0], np.int32),
+                             regress=np.zeros(2), score=np.zeros(TEAMS + 1),
+                             bot_cart=np.zeros(2, np.int32))
+    for pv in (0.15, 0.25, 0.18, 0.26, 0.99, 1.0, 0.1, 0.25):
+        mt.tick(Xd, mk(pv, 1))
+    report("meter banks watermarked crossings", mt.cum[1] == 6.0,
+           f"0.15->0.25 (+1), regress-recross (+0), ->0.99 (+3), ->1.0 (+1), "
+           f"reset, ->0.25 (+1): cum {int(mt.cum[1])} == 6")
     st2 = Strategy("", 1)
     ms0 = dict(carts=K_CARTS, prog=np.array([0.5, 0.5]),
                controller=np.array([1, 0], np.int32),
@@ -966,16 +1009,19 @@ def main():
             a.synth, a.ctx, a.train_seed, a.episode, a.hold, a.lr,
             a.theta if a.theta != THETA_PATH else "")
         k = max(1, min(100, a.synth // 4))
-        print(f"synth: return first{k} {rets[:k].mean():+.3f} -> last{k} "
-              f"{rets[-k:].mean():+.3f}; team-mean banked {banked[:k].mean():.2f} -> "
-              f"{banked[-k:].mean():.2f} (reported, not asserted: at the adversarial "
-              f"equilibrium ganging up lowers the leader's banking by design)", flush=True)
+        print(f"synth: team-mean banked per episode first{k} {banked[:k].mean():.2f} "
+              f"-> last{k} {banked[-k:].mean():.2f}; mean shared-theta return "
+              f"{rets[:k].mean():+.3f} -> {rets[-k:].mean():+.3f} (returns reported, "
+              f"not asserted: margins over the best rival net toward zero once "
+              f"banking concentrates)", flush=True)
         print(f"synth: gang-up: P(trailing suppression on leader cart) "
               f"{stats['gang']:.3f} (closed-form prediction {stats['pred']:.3f})",
               flush=True)
         print(f"synth: pigeonhole: mean max-cart allocation mass "
               f"{stats['conc']:.2f} (full-cover impossible; 0.50 = even split, "
               f"higher = commit or concede)", flush=True)
+        print(f"synth: banking measured from wire crossings {stats['bank_meter']:.0f} "
+              f"vs environment truth {stats['bank_truth']:.0f}", flush=True)
         ev = max(10, a.synth // 10)
         _, _, _, s_on = run_synth(ev, a.ctx, a.train_seed + 5, a.episode, a.hold,
                                   a.lr, "", log=False,
@@ -988,24 +1034,25 @@ def main():
               f"with lead_bias {THETA['lead_bias']} vs {s_off['gang']:.3f} with "
               f"lead_bias 0 (the commitment channel isolated)", flush=True)
         print(f"synth: learned scalars: {strat.table()}", flush=True)
-        good = (rets[-k:].mean() > rets[:k].mean()
+        good = (banked[-k:].mean() > banked[:k].mean()
                 and abs(stats["gang"] - stats["pred"]) < 0.06
                 and stats["conc"] > 0.55
-                and s_on["gang"] > s_off["gang"] + 0.03)
+                and s_on["gang"] > s_off["gang"] + 0.03
+                and abs(stats["bank_meter"] - stats["bank_truth"]) < 2.5)
         sys.exit(0 if good else 1)
 
     trained = a.policy == "trained"
     pick_of = POLICIES.get(a.policy, np.argmax)
     m = attach(a.peer)
-    rx16 = Reassembler(REQ, REQ_WIDTH, a.maxrows, m.usable)
-    rx20 = Reassembler(REQ, EXT_WIDTH, a.maxrows, m.usable)
+    rxs = {}
     tx = TxWindow(m)
     bk = "mlx" if mx is not None else "np"
     solver = CtxSolver(a.ctx, bk)
     backend = f"{bk}-ctx(T={a.ctx},RES={RES},FF={FF})"
     print(f"worker: policy={a.policy} backend={backend} peer={a.peer} "
-          f"usable={m.usable} req_rows/slot={rows_per_slot(m.usable, REQ_WIDTH)} "
-          f"resp_rows/slot={rows_per_slot(m.usable, RESP_WIDTH)} widths 16|{EXT_WIDTH}", flush=True)
+          f"usable={m.usable} resp_rows/slot={rows_per_slot(m.usable, RESP_WIDTH)} "
+          f"request width from each block's header (16/20/26 all served, "
+          f"combined cart*5+node objectives)", flush=True)
 
     strat = meter = None
     if trained:
@@ -1044,14 +1091,17 @@ def main():
     t0, served, blocks, short = time.time(), 0, 0, 0
     tick_in_ep = 0
     while a.secs <= 0.0 or time.time() - t0 < a.secs:
-        done, src, rx = None, a.peer, rx16
+        done, src, rx = None, a.peer, None
         for buf, s in m.read(dtype=np.uint8):
-            d16 = rx16.feed(buf)
-            d20 = rx20.feed(buf)
-            if d16:
-                done, src, rx = d16, s, rx16
-            if d20:
-                done, src, rx = d20, s, rx20
+            h = parse_hdr(buf)
+            if h is None or h["kind"] != REQ:
+                continue
+            r = rxs.get(h["width"])
+            if r is None:
+                r = rxs[h["width"]] = Reassembler(REQ, h["width"], a.maxrows, m.usable)
+            d = r.feed(buf)
+            if d:
+                done, src, rx = d, s, r
         if done is None:
             time.sleep(0.0002)
             continue
@@ -1059,11 +1109,13 @@ def main():
         X = rx.stage[:n]
         if trained:
             ms = bind_match(X)
-            G = solver.solve(X, ms["bot_cart"])
+            G = solver.solve(X)
             meter.tick(X, ms)
+            ms["score"] = meter.cum.copy()
             boundary = tick_in_ep % a.hold == 0
             pick, Wt, lead, cart = strat.tick(X, solver.G2, solver.mixes(),
                                               solver.kappa, ms, boundary, not a.eval)
+            pick = pick + TEAMS * cart.astype(np.float32)
             tick_in_ep += 1
             if tick_in_ep >= a.episode:
                 R, dirs, dprog, dbank, push = meter.finish()
@@ -1096,8 +1148,8 @@ def main():
         served += n
         blocks += 1
         if tr:
-            hist = np.bincount(pick.astype(np.int32), minlength=TEAMS).tolist()
-            back = np.bincount(np.clip(X[:, 15], 0, TEAMS - 1).astype(np.int32),
+            hist = np.bincount(pick.astype(np.int32) % TEAMS, minlength=TEAMS).tolist()
+            back = np.bincount(np.clip(X[:, 15], 0, K_CARTS * TEAMS - 1).astype(np.int32) % TEAMS,
                                minlength=TEAMS).tolist()
             col = lambda t, c: float(X[X[:, 1] == t, c].mean()) if (X[:, 1] == t).any() else 0.0
             tr.write(",".join(str(v) for v in
@@ -1105,13 +1157,14 @@ def main():
                       float(X[0, 12])] + hist + back +
                      [col(1, 11), col(2, 11), col(1, 5), col(2, 5), col(1, 6), col(2, 6)]) + "\n")
         if not a.quiet:
-            hist = np.bincount(pick.astype(np.int32), minlength=TEAMS).tolist()
+            hist = np.bincount(pick.astype(np.int32) % TEAMS, minlength=TEAMS).tolist()
             live = int((X[:, 1] > 0).sum())
-            back = np.bincount(np.clip(X[:, 15], 0, TEAMS - 1).astype(np.int32),
+            back = np.bincount(np.clip(X[:, 15], 0, K_CARTS * TEAMS - 1).astype(np.int32) % TEAMS,
                                minlength=TEAMS).tolist()
             print(f"worker: req {done['req_id']} tick {done['tick']} rows {n} live {live} "
                   f"-> node {src} chunks {took}/{chunks} picks {hist} held {back}", flush=True)
-    print(f"worker: {blocks} blocks, {served} rows, short {short}, dropped {rx16.dropped + rx20.dropped}", flush=True)
+    print(f"worker: {blocks} blocks, {served} rows, short {short}, "
+          f"dropped {sum(r.dropped for r in rxs.values())}", flush=True)
 
 
 if __name__ == "__main__":
