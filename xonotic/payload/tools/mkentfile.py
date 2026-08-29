@@ -685,6 +685,274 @@ def validate_chain(bsp, cor, track, exempt):
     return va, vb, vc, vx, ns
 
 
+DANGLE_MIN, OVERLAP_MAX, PEN0 = 320.0, 0.3, 8.0
+
+
+def prune_network(adj_ok):
+    keep = set(largest_component(adj_ok))
+    total = len(keep)
+
+    def deg(u):
+        return sum(1 for v in adj_ok[u] if v in keep)
+
+    pruned = 0
+    changed = True
+    while changed:
+        changed = False
+        for u in list(keep):
+            if u not in keep or deg(u) != 1:
+                continue
+            chain = [u]
+            L = 0.0
+            prev, cur = -1, u
+            while True:
+                nxt = [v for v in adj_ok[cur] if v in keep and v != prev]
+                if not nxt:
+                    break
+                L += adj_ok[cur][nxt[0]]
+                prev, cur = cur, nxt[0]
+                if deg(cur) != 2:
+                    break
+                chain.append(cur)
+            if L < DANGLE_MIN and deg(cur) > 2:
+                keep -= set(chain)
+                pruned += len(chain)
+                changed = True
+    interior = [u for u in keep if deg(u) >= 2]
+    bf = (sum(deg(u) for u in interior) / len(interior) - 1.0) if interior else 0.0
+    return keep, bf, pruned, total
+
+
+def subgraph(adj_ok, keep):
+    return [{v: w for v, w in a.items() if u in keep and v in keep} for u, a in enumerate(adj_ok)]
+
+
+def extract_path(prev, src, goal):
+    p, u = [], goal
+    while u != -1:
+        p.append(u)
+        u = prev[u]
+    return p[::-1] if len(p) > 1 and p[-1] != p[0] else [src]
+
+
+def plan_spans(nodes, adj, adj_ok, bad, kcarts, keep):
+    adjn = subgraph(adj_ok, keep)
+    comp = sorted(keep)
+    ncand = min(max(3, 2 * kcarts), len(comp))
+    if ncand < 2:
+        only = comp[0] if comp else 0
+        return [[only]] * kcarts, [[]] * kcarts, [[]] * kcarts, [[0.0] * kcarts for _ in range(kcarts)], [only] * kcarts
+    cands, dmapc = kcenter(adjn, ncand, comp)
+    order = sorted(((dmapc[a][b], a, b) for i, a in enumerate(cands) for b in cands[i + 1:]
+                    if dmapc[a][b] < math.inf), reverse=True)
+
+    def greedy(rows):
+        out, used = [], set()
+        for d, a, b in rows:
+            if a not in used and b not in used:
+                out.append((a, b))
+                used |= {a, b}
+            if len(out) == kcarts:
+                return out
+        for d, a, b in rows:
+            if len(out) == kcarts:
+                break
+            if (a, b) not in out:
+                out.append((a, b))
+        i = 0
+        while len(out) < kcarts and rows:
+            out.append(rows[i % len(rows)][1:])
+            i += 1
+        return out
+
+    pairings = [greedy(order)]
+    if len(order) > 1:
+        pairings.append(greedy(order[1:] + order[:1]))
+    p0 = pairings[0]
+    if len(p0) >= 2:
+        pairings.append([(p0[i][0], p0[(i + 1) % len(p0)][1]) for i in range(len(p0))])
+    seen = set()
+    pairings = [pr for pr in pairings if not (tuple(pr) in seen or seen.add(tuple(pr)))]
+    best = None
+    for pairs in pairings:
+        P = PEN0
+        for _ in range(3):
+            npen = [0] * len(nodes)
+            paths, segbads, adms = [], [], []
+            for a, b in pairs:
+                adjp = [{v: w * (1 + P * (npen[u] + npen[v]) / 2) for v, w in adjn[u].items()}
+                        for u in range(len(nodes))]
+                D, prev = dijkstra(adjp, a)
+                admitted = []
+                if D[b] == math.inf:
+                    adjf = [dict(x) for x in adj]
+                    for (uu, vv) in bad:
+                        adjf[uu][vv] *= BADMULT
+                        adjf[vv][uu] *= BADMULT
+                    for u in range(len(nodes)):
+                        for v in adjf[u]:
+                            adjf[u][v] *= (1 + P * (npen[u] + npen[v]) / 2)
+                    D, prev = dijkstra(adjf, a)
+                p = extract_path(prev, a, b)
+                sb = []
+                for i in range(1, len(p)):
+                    e = (min(p[i - 1], p[i]), max(p[i - 1], p[i]))
+                    sb.append(e in bad)
+                    if e in bad:
+                        admitted.append((e[0], e[1], bad[e]))
+                for n in p:
+                    npen[n] += 1
+                paths.append(p)
+                segbads.append(sb)
+                adms.append(admitted)
+            ov = [[0.0] * kcarts for _ in range(kcarts)]
+            mx = 0.0
+            for i in range(kcarts):
+                for j in range(i + 1, kcarts):
+                    si, sj = set(paths[i]), set(paths[j])
+                    f = len(si & sj) / max(1, min(len(si), len(sj)))
+                    ov[i][j] = ov[j][i] = f
+                    mx = max(mx, f)
+            if best is None or mx < best[0]:
+                best = (mx, paths, segbads, adms, ov)
+            if mx <= OVERLAP_MAX:
+                break
+            P *= 8
+        if best[0] <= OVERLAP_MAX:
+            break
+    mx, paths, segbads, adms, ov = best
+
+    def omat(ps):
+        m = [[0.0] * kcarts for _ in range(kcarts)]
+        top = 0.0
+        for i in range(kcarts):
+            for j in range(i + 1, kcarts):
+                si, sj = set(ps[i]), set(ps[j])
+                f = len(si & sj) / max(1, min(len(si), len(sj)))
+                m[i][j] = m[j][i] = f
+                top = max(top, f)
+        return m, top
+
+    for _ in range(3 * kcarts):
+        if mx <= OVERLAP_MAX:
+            break
+        wi, wj = max(((i, j) for i in range(kcarts) for j in range(i + 1, kcarts)),
+                     key=lambda t: ov[t[0]][t[1]])
+        improved = False
+        for ri, oth in ((wi, wj), (wj, wi)):
+            for mode in (0, 1):
+                if mode == 0:
+                    blocked = set(paths[oth][1:-1])
+                else:
+                    blocked = set(paths[ri]) & set(paths[oth])
+                blocked -= {paths[ri][0], paths[ri][-1]}
+                adjb = [{v: w for v, w in adjn[u].items() if u not in blocked and v not in blocked}
+                        for u in range(len(nodes))]
+                D, prev = dijkstra(adjb, paths[ri][0])
+                if D[paths[ri][-1]] == math.inf:
+                    continue
+                np_ = extract_path(prev, paths[ri][0], paths[ri][-1])
+                cand = paths[:ri] + [np_] + paths[ri + 1:]
+                nov, nmx = omat(cand)
+                if nmx < mx:
+                    paths, ov, mx = cand, nov, nmx
+                    segbads[ri] = [
+                        (min(np_[i - 1], np_[i]), max(np_[i - 1], np_[i])) in bad
+                        for i in range(1, len(np_))]
+                    adms[ri] = []
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            ri, oth = (wi, wj) if len(paths[wi]) <= len(paths[wj]) else (wj, wi)
+            pen = [0] * len(nodes)
+            for k2 in range(kcarts):
+                if k2 != ri:
+                    for n in paths[k2]:
+                        pen[n] += 1
+            adjb = [{v: w * (1 + 32 * (pen[u] + pen[v]) / 2) for v, w in adjn[u].items()}
+                    for u in range(len(nodes))]
+            bestalt = None
+            dcache = {}
+            for d, a2, b2 in order:
+                if a2 not in dcache:
+                    dcache[a2] = dijkstra(adjb, a2)
+                D, prev = dcache[a2]
+                if D[b2] == math.inf:
+                    continue
+                np_ = extract_path(prev, a2, b2)
+                cand = paths[:ri] + [np_] + paths[ri + 1:]
+                nov, nmx = omat(cand)
+                if nmx < mx and (bestalt is None or nmx < bestalt[0]):
+                    bestalt = (nmx, np_, nov)
+            if bestalt is None:
+                break
+            nmx, np_, nov = bestalt
+            paths = paths[:ri] + [np_] + paths[ri + 1:]
+            ov, mx = nov, nmx
+            segbads[ri] = [(min(np_[i - 1], np_[i]), max(np_[i - 1], np_[i])) in bad
+                           for i in range(1, len(np_))]
+            adms[ri] = []
+    return paths, segbads, adms, ov, None
+
+
+def flow_assign(nodes, paths, segbads, adj_ok):
+    k = len(paths)
+    segsets = []
+    for p in paths:
+        segs = []
+        for i in range(1, len(p)):
+            a, b = nodes[p[i - 1]], nodes[p[i]]
+            L = math.dist(a, b)
+            if L < 1:
+                continue
+            segs.append((tuple((a[t] + b[t]) / 2 for t in range(3)),
+                         tuple((b[t] - a[t]) / L for t in range(3))))
+        segsets.append(segs)
+    rad = 2 * PUSH_R
+
+    def score(flips):
+        num = den = 0.0
+        for i in range(k):
+            for j in range(i + 1, k):
+                fi = -1.0 if flips >> i & 1 else 1.0
+                fj = -1.0 if flips >> j & 1 else 1.0
+                for mi, ti in segsets[i]:
+                    for mj, tj in segsets[j]:
+                        d = math.dist(mi, mj)
+                        if d <= rad:
+                            w = 1 - d / rad
+                            num += w * fi * fj * sum(ti[t] * tj[t] for t in range(3))
+                            den += w
+        return num / den if den else 0.0
+
+    dm = {}
+
+    def spread(flips):
+        orgs = [paths[i][-1] if flips >> i & 1 else paths[i][0] for i in range(k)]
+        for o in set(orgs):
+            if o not in dm:
+                dm[o] = dijkstra(adj_ok, o)[0]
+        ds = [dm[orgs[i]][orgs[j]] for i in range(k) for j in range(i + 1, k) if orgs[i] != orgs[j]]
+        ds = [d for d in ds if d < math.inf]
+        return min(ds) if ds else 0.0
+
+    scored = sorted((round(score(f), 3), -spread(f), f) for f in range(1 << k))
+    chosen = scored[0]
+    worst = scored[-1][0]
+    flips = chosen[2]
+    out_paths, out_segbads = [], []
+    for i in range(k):
+        if flips >> i & 1:
+            out_paths.append(paths[i][::-1])
+            out_segbads.append(segbads[i][::-1])
+        else:
+            out_paths.append(paths[i])
+            out_segbads.append(segbads[i])
+    return out_paths, out_segbads, chosen[0], worst, -chosen[1]
+
+
 def botwalk_chain(bsp, poly, segbad):
     track = [[poly[0][0], poly[0][1], poly[0][2] + 16]]
     exempt = []
@@ -708,28 +976,22 @@ def botwalk_chain(bsp, poly, segbad):
     return track, exempt
 
 
-def nav_tracks(nodes, adj, dmap, origins, kcarts, bsp, cor, bad):
+def nav_tracks(nodes, adj, kcarts, bsp, cor, bad):
     adj_ok = [{v: w for v, w in a.items()
                if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
-    used = set()
-    tracks, exempts, alladm = [], [], []
-    st = {'e0': 0.0, 'e1': 0.0}
+    keep, bf, pruned, total = prune_network(adj_ok)
+    st = {'e0': 0.0, 'e1': 0.0, 'bf': bf, 'pruned': pruned, 'net': len(keep), 'tot': total}
+    paths, segbads, adms, ov, _ = plan_spans(nodes, adj, adj_ok, bad, kcarts, keep)
+    paths, segbads, align, worst, spr = flow_assign(nodes, paths, segbads, adj_ok)
+    st['ov'] = ov
+    st['align'] = align
+    st['worst'] = worst
+    tracks, exempts = [], []
     for c in range(kcarts):
-        src = origins[c]
-        goal, gd = None, -1.0
-        for o in origins:
-            if o == src or o in used:
-                continue
-            if dmap[o][src] > gd:
-                gd, goal = dmap[o][src], o
-        if goal is None:
-            goal = max(range(len(nodes)), key=lambda i: dmap[src][i] if dmap[src][i] < math.inf else -1)
-        used.add(goal)
-        p, segbad, admitted = route(adj, adj_ok, bad, src, goal)
-        alladm.append(admitted)
-        poly = [list(nodes[i]) for i in p]
+        poly = [list(nodes[i]) for i in paths[c]]
+        segbad = segbads[c]
         if bsp is None or cor is None or len(poly) < 2:
-            track = [[q[0], q[1], q[2] + 16] for q in poly] or [[nodes[src][0], nodes[src][1], nodes[src][2] + 16]]
+            track = [[q[0], q[1], q[2] + 16] for q in poly] or [[0.0, 0.0, 0.0]]
             while len(track) < 2:
                 track.append(track[0][:])
             tracks.append(track)
@@ -748,7 +1010,7 @@ def nav_tracks(nodes, adj, dmap, origins, kcarts, bsp, cor, bad):
             st['bw'] = st.get('bw', 0) + 1
         tracks.append(track)
         exempts.append(exempt)
-    return tracks, exempts, alladm, st
+    return tracks, exempts, adms, paths, st
 
 
 def spawn_tracks(pts, kcarts):
@@ -796,28 +1058,36 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
     cor = Corridor(standable_set(nodes, adj, bad, gen)) if B else None
     if cor:
         print('nav: corridor standable=%d push_radius=%.0f push_height=%.0f' % (len(cor.pts), PUSH_R, PUSH_H))
-    adj_ok = [{v: w for v, w in a.items()
-               if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
-    comp_ok = largest_component(adj_ok)
-    cand_k = max(3, kcarts)
-    if len(comp_ok) >= cand_k:
-        origins, dmap = kcenter(adj_ok, cand_k, comp_ok)
-    else:
-        origins, dmap = kcenter(adj, cand_k)
-    print('nav: candidate_origins=%d on %s subgraph (ok_component=%d/%d)' %
-          (len(origins), 'CART_OK' if len(comp_ok) >= cand_k else 'FULL', len(comp_ok), len(nodes)))
+    tracks, exempts, alladm, paths, st = nav_tracks(nodes, adj, kcarts, B, cor, bad)
+    print('nav: network kept=%d/%d pruned_dangles=%d branching=%.2f target=1.5 %s' %
+          (st['net'], st['tot'], st['pruned'], st['bf'], 'OK' if st['bf'] >= 1.5 else 'BELOW'))
+    ov = st['ov']
+    mx = max((ov[i][j] for i in range(kcarts) for j in range(i + 1, kcarts)), default=0.0)
+    for i in range(kcarts):
+        for j in range(i + 1, kcarts):
+            print('nav: overlap %d-%d %.2f' % (i, j, ov[i][j]))
+    print('nav: overlap_max=%.2f bound=%.2f %s' % (mx, OVERLAP_MAX, 'HELD' if mx <= OVERLAP_MAX else 'EXCEEDED'))
+    print('nav: flow_alignment chosen=%.3f worst=%.3f' % (st['align'], st['worst']))
+    origins = [p[0] for p in paths]
+    adj_ok2 = [{v: w for v, w in a.items()
+                if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
+    dmo = {o: dijkstra(adj_ok2, o)[0] for o in set(origins)}
     ws = []
     for i in range(len(origins)):
         for j in range(i + 1, len(origins)):
-            wd = dmap[origins[i]][origins[j]]
+            if origins[i] == origins[j]:
+                continue
+            wd = dmo[origins[i]][origins[j]]
             ed = math.dist(nodes[origins[i]], nodes[origins[j]])
-            ws.append(wd)
+            if wd < math.inf:
+                ws.append(wd)
             print('nav: origin %d %s <-> origin %d %s  walk=%.0f  euclid=%.0f  ratio=%.2f' %
                   (i, tuple(round(x) for x in nodes[origins[i]]), j,
-                   tuple(round(x) for x in nodes[origins[j]]), wd, ed, wd / ed if ed else 0))
-    print('nav: pairwise walk min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
-          (min(ws), sum(ws) / len(ws), max(ws), max(ws) / min(ws) if min(ws) else 0))
-    tracks, exempts, alladm, st = nav_tracks(nodes, adj, dmap, origins, kcarts, B, cor, bad)
+                   tuple(round(x) for x in nodes[origins[j]]),
+                   wd if wd < math.inf else -1, ed, wd / ed if ed and wd < math.inf else 0))
+    if ws:
+        print('nav: pairwise walk min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
+              (min(ws), sum(ws) / len(ws), max(ws), max(ws) / min(ws) if min(ws) else 0))
     nadm = sum(len(a) for a in alladm)
     for c, a in enumerate(alladm):
         if a:
@@ -836,7 +1106,7 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
               (ns, va, vb, vc, exs, vx, 'PASS' if va == 0 and vb == 0 and vc == 0 else 'FAILED'))
     else:
         print('nav: validation skipped (no BSP geometry)')
-    return tracks, (nodes, adj, dmap, origins)
+    return tracks, (nodes, adj, paths)
 
 
 def emit(bsp, out, kteams, kcarts, pk3arg=''):

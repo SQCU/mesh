@@ -40,26 +40,34 @@ for name in names:
     mb = g(r'bad=(\d+) \(gen=(\d+) flag=(\d+) trig=(\d+) solid=(\d+) fly=(\d+) nofloor=(\d+)\)')
     ma = g(r'admitted_total=(\d+)')
     mv = g(r'validation samples=(\d+) solid_viol=(\d+) float_viol=(\d+) corridor_viol=(\d+) exempt_segs=(\d+) exempt_corridor_viol=(\d+) (\w+)')
-    mw = g(r'walk min=(\d+)')
+    mn = g(r'branching=([\d.]+) target=1.5 (\w+)')
+    mo = g(r'overlap_max=([\d.]+) bound=[\d.]+ (\w+)')
+    mfl = g(r'flow_alignment chosen=(-?[\d.]+) worst=(-?[\d.]+)')
     mf = g(r'FALLBACK')
     if mf or not mb or not mv:
         failed.append((name, 'fallback or missing stats'))
         print('%-24s FALLBACK/PARTIAL' % name)
         continue
     adm = int(ma.group(1)) if ma else 0
-    row = (name, mb.group(1), mb.group(2), mb.group(3), mb.group(4),
-           mb.group(5), mb.group(6), mb.group(7), adm,
-           mv.group(1), mv.group(2), mv.group(3), mv.group(4), mv.group(6), mv.group(7))
+    row = (name, mb.group(1), adm,
+           mn.group(1) if mn else '-', mn.group(2) if mn else '-',
+           mo.group(1) if mo else '-', mo.group(2) if mo else '-',
+           mfl.group(1) if mfl else '-', mfl.group(2) if mfl else '-',
+           mv.group(2), mv.group(3), mv.group(4), mv.group(6), mv.group(7))
     rows.append(row)
     ok = mv.group(7) == 'PASS'
     if adm:
         admitted_maps.append(name)
     if ok and not adm:
         clean.append(name)
-    print('%-24s bad=%-4s (gen=%-3s flag=%-2s trig=%-2s sol=%-3s fly=%-3s nf=%-2s) adm=%-2d samp=%-5s viol s/f/c=%s/%s/%s exC=%s %s' % row)
+    print('%-24s bad=%-4s adm=%-2d bf=%-5s %-5s ovmax=%-4s %-8s align=%-7s worst=%-6s viol s/f/c=%s/%s/%s exC=%s %s' % row)
 
 print('zero-violation clean maps, no admitted edges (%d): %s' % (len(clean), ' '.join(clean)))
 print('maps needing admitted bad edges (%d): %s' % (len(admitted_maps), ' '.join(admitted_maps) or 'none'))
 print('failed (%d): %s' % (len(failed), failed or 'none'))
-bad_valid = [r[0] for r in rows if r[10] != '0' or r[11] != '0' or r[12] != '0']
+bad_valid = [r[0] for r in rows if r[9] != '0' or r[10] != '0' or r[11] != '0']
+low_bf = [r[0] for r in rows if r[4] == 'BELOW']
+ov_exc = [r[0] for r in rows if r[6] == 'EXCEEDED']
+print('maps below branching 1.5 (%d): %s' % (len(low_bf), ' '.join(low_bf) or 'none'))
+print('maps exceeding overlap 0.3 (%d): %s' % (len(ov_exc), ' '.join(ov_exc) or 'none'))
 print('maps with validation violations (%d): %s' % (len(bad_valid), ' '.join(bad_valid) or 'none'))
