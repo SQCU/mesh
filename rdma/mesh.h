@@ -11,7 +11,7 @@
 #define MESH_VERSION 4u
 #define MESH_CL      128
 #define MESH_RING    4096
-#define MESH_OFF     8
+#define MESH_OFF     16
 #define RINGS        ((sizeof(struct hdr)+MESH_CL-1)/MESH_CL*MESH_CL)
 enum { FREE, RECV, SEND, APP, NOWN };
 enum { SUB, CMP, REL, ACK, NRING };
@@ -43,9 +43,19 @@ static inline int pop(struct hdr *m, int k, struct desc *d){
   uint64_t t=atomic_load_explicit(&q->tail,memory_order_relaxed);
   if(t == atomic_load_explicit(&q->head,memory_order_acquire)) return -1;
   *d=*slot(m,k,t); atomic_store_explicit(&q->tail,t+1,memory_order_release); return 0; }
+struct shdr { uint64_t off; uint32_t sid, k; };
+enum { K_DATA, K_FIN, K_REQ, K_OK };
+enum { MS_RUN, MS_DONE, MS_FAIL };
+struct mstream { char *buf; const char *src; size_t n, off, done, nb, hole;
+                 unsigned char *seen; uint32_t sid; int node, rx, st; long quiet; };
 void  *mesh_open(size_t *nslots, size_t *stride, size_t *usable);
 size_t mesh_write(const void *p, size_t nbytes, int node);
 size_t mesh_read(void **p, int *from);
+void   mesh_yell_start(struct mstream *s, const void *p, size_t n, int node, uint32_t sid);
+int    mesh_lissen_start(struct mstream *s, void *p, size_t n, uint32_t sid);
+int    mesh_poll(struct mstream **v, int k);
+int    mesh_scatter(struct mstream *ss, const void *p, size_t n, const int *nodes, int k, uint32_t sid0);
+int    mesh_gather(struct mstream *ss, void *p, size_t n, int k, uint32_t sid0);
 size_t mesh_yell(const void *p, size_t n, int node);
 size_t mesh_lissen(void *p, size_t n);
 #endif

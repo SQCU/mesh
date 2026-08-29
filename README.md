@@ -577,10 +577,15 @@ holds no device, so killing it is always safe and the bridge reclaims its pages 
 second; and `mesh_yell` returns n only when the receiver has confirmed every byte, 0 when it
 cannot confirm, so it never reports delivery it did not see.
 
-Two constraints, by design rather than accident. `mesh_lissen` blocks until its n bytes have
-landed — if the sender never finishes, it waits forever, and the remedy is to kill it, which
-is safe. And the streaming verbs own the client's inbound ring while they run: one process
-streams or does page-level I/O at a time, not both interleaved.
+Nothing blocks. A stream is a state you advance, not a call you sit in: `mesh_yell_start`
+and `mesh_lissen_start` create stream objects whose `done` count is the semaphore made
+explicit, and one nonblocking `mesh_poll` turn advances every stream a process has — any
+number of yells and lissens concurrently, tagged by stream id, which is what a node with
+several cables needs. `mesh_scatter` and `mesh_gather` start k streams over k shards of one
+buffer, which with a map on the far side is map-reduce. `mesh_yell` and `mesh_lissen` remain
+as three-line wrappers that poll a single stream to completion, for callers that want that.
+While streams are being polled the client's inbound ring carries stream-formatted pages;
+page-level `mesh_read` and streams do not interleave in one process.
 
 From Python, `rdma/mesh.py` binds the page-level functions and returns numpy views of mesh
 memory, so MLX computes on pages the NIC wrote without a copy.
