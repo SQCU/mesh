@@ -32,8 +32,9 @@ struct qpi { uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
 static int oob(const char *peer){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM},*r; int f;
   if(peer){ hint.ai_family=AF_UNSPEC; if(getaddrinfo(peer,MESH_PORT,&hint,&r)) die("addr");
-    f=socket(r->ai_family,SOCK_STREAM,0);
-    if(connect(f,r->ai_addr,r->ai_addrlen)) die("connect"); freeaddrinfo(r); return f; }
+    for(;;){ f=socket(r->ai_family,SOCK_STREAM,0);
+      if(!connect(f,r->ai_addr,r->ai_addrlen)){ freeaddrinfo(r); return f; }
+      close(f); usleep(200000); } }
   hint.ai_family=AF_INET6; hint.ai_flags=AI_PASSIVE;
   if(getaddrinfo(NULL,MESH_PORT,&hint,&r)) die("addr");
   int l=socket(r->ai_family,SOCK_STREAM,0),on=1,off=0;
