@@ -105,6 +105,7 @@ int mesh_turn(struct mesh_ctx *c, struct mstream **v, int k){
   for(int i=0;i<k;i++){
     struct mstream *s=v[i];
     if(s->rx || s->st!=MS_RUN){ ndone += s->st==MS_DONE; continue; }
+    size_t was=s->off;
     unsigned char *q;
     while(s->off<s->n && (q=credit(c))){
       uint32_t len = s->n-s->off<u ? (uint32_t)(s->n-s->off) : u;
@@ -112,9 +113,10 @@ int mesh_turn(struct mesh_ctx *c, struct mstream **v, int k){
       memcpy(q+MESH_OFF,s->src+s->off,len);
       if(cwrite(c,q,MESH_OFF+len,s->node)!=MESH_OFF+len) break;
       c->sub++; s->off+=len; }
-    if(s->off>=s->n && ++s->quiet%FINQ==1){
+    if(s->off>was) s->quiet=0;
+    else if(++s->quiet%FINQ==1){
       if(s->quiet/FINQ>FAILN) s->st=MS_FAIL;
-      else ctl(c,s->node,s->sid,K_FIN,s->n); } }
+      else if(s->off>=s->n) ctl(c,s->node,s->sid,K_FIN,s->n); } }
   return ndone; }
 
 int mesh_scatter(struct mesh_ctx *c, struct mstream *ss, const void *p, size_t n,
