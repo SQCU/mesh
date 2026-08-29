@@ -528,6 +528,8 @@ class Fuser:
             for lf in src.leafs:
                 l2 = list(lf)
                 cl = lambda v: max(-1 << 30, min((1 << 30), int(v)))
+                l2[0] = 0 if l2[0] >= 0 else -1
+                l2[1] = 0
                 for a in range(3):
                     l2[2 + a] = cl(l2[2 + a] + off[a])
                     l2[5 + a] = cl(l2[5 + a] + off[a])
