@@ -1,7 +1,12 @@
+BINS = mesh-flow mesh-stat mesh-app libmesh.dylib
+
+all: $(BINS)
+
 mesh-flow: mesh-flow.c mesh-mem.c mesh-mem.h mesh.h
 	cc -O2 -o $@ mesh-flow.c mesh-mem.c -lrdma
-clean:
-	rm -f mesh-flow qcaps qfill
+
+mesh-stat: mesh-stat.c mesh.h
+	cc -O2 -o $@ mesh-stat.c
 
 mesh-app: mesh-app.c mesh-client.c mesh.h
 	cc -O2 -o $@ mesh-app.c mesh-client.c
@@ -9,5 +14,7 @@ mesh-app: mesh-app.c mesh-client.c mesh.h
 libmesh.dylib: mesh-client.c mesh.h
 	cc -O2 -dynamiclib -o $@ mesh-client.c
 
-mesh-stat: mesh-stat.c mesh.h
-	cc -O2 -o $@ mesh-stat.c
+clean:
+	rm -f $(BINS)
+
+.PHONY: all clean

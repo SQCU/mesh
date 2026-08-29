@@ -12,7 +12,7 @@
  #foot{position:fixed;bottom:0;left:0;padding:12px 16px;color:var(--dim);pointer-events:none}
 </style></head><body>
 <canvas id="c"></canvas><div id="hud"></div>
-<div id="foot">axes: free / posted / sending, each normalised by pool size &middot; trail is the last 600 samples &middot; particles are measured page throughput</div>
+<div id="foot">axes: free / posted / with-app, interval means normalised by pool size &middot; head size is the spread within the interval &middot; trail is the last 600 samples &middot; each stream runs between two nodes\u2019 real positions, sized by that node\u2019s measured page delta</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
 <script>
 const S = {nodes:{}, period:2};
@@ -27,12 +27,13 @@ addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProje
 const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)),
   new THREE.LineBasicMaterial({color:0x1b2430}));
 box.position.set(.5,.5,.5); scene.add(box);
-for(const [d,col] of [[[1,0,0],0xff6b6b],[[0,1,0],0x6bff9e],[[0,0,1],0x6bb6ff]]){
+for(const [d,col] of [[[1,0,0],0xff6b6b],[[0,1,0],0x6bff9e],[[0,0,1],0x6bb6ff]]){ // free, posted, with-app
   const g=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(...d)]);
   scene.add(new THREE.Line(g,new THREE.LineBasicMaterial({color:col})));
 }
 
-const COL = {mbp:0x7fd4ff, mini:0xffb454};
+const PALETTE=[0x7fd4ff,0xffb454,0x9effa0,0xff8fd0,0xc4a6ff];
+const COL={}; const colorOf=n=>COL[n]??(COL[n]=PALETTE[Object.keys(COL).length%PALETTE.length]);
 const tracks = {};
 function track(name){
   if(tracks[name]) return tracks[name];
@@ -40,39 +41,45 @@ function track(name){
   const g=new THREE.BufferGeometry();
   g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(N*3),3));
   g.setDrawRange(0,0);
-  const line=new THREE.Line(g,new THREE.LineBasicMaterial({color:COL[name]||0xffffff,transparent:true,opacity:.55}));
+  const line=new THREE.Line(g,new THREE.LineBasicMaterial({color:colorOf(name),transparent:true,opacity:.55}));
   const head=new THREE.Mesh(new THREE.SphereGeometry(.018,16,16),
-                            new THREE.MeshBasicMaterial({color:COL[name]||0xffffff}));
+                            new THREE.MeshBasicMaterial({color:colorOf(name)}));
   scene.add(line); scene.add(head);
   return tracks[name]={line,head,g,N};
 }
 
-// particles: one per unit of measured throughput, drifting between the nodes.
-// count is set from real page counters; motion is cosmetic, quantity is not.
+// One stream per ordered pair of nodes. Endpoints are the two nodes' actual
+// phase-space positions, so if a node moves in the cube its traffic moves with
+// it. Count is that source node's measured page delta. Nothing here is placed
+// at a constant.
 const PN=20000;
-const pg=new THREE.BufferGeometry();
-const ppos=new Float32Array(PN*3), pseed=new Float32Array(PN);
-for(let i=0;i<PN;i++){ pseed[i]=Math.random(); ppos[3*i]=ppos[3*i+1]=ppos[3*i+2]=0; }
-pg.setAttribute('position',new THREE.BufferAttribute(ppos,3));
-pg.setAttribute('seed',new THREE.BufferAttribute(pseed,1));
-pg.setDrawRange(0,0);
-const pmat=new THREE.ShaderMaterial({
-  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
-  uniforms:{uT:{value:0}},
-  vertexShader:`attribute float seed; uniform float uT; varying float vA;
-    void main(){
-      float p = fract(seed*7.13 + uT*0.35);
-      vec3 a = vec3(0.05,0.9,0.05), b = vec3(0.95,0.1,0.95);
-      vec3 pos = mix(a,b,p);
-      pos += 0.16*vec3(sin(seed*31.0+uT), cos(seed*17.0+uT*1.3), sin(seed*11.0+uT*0.7))*sin(p*3.14159);
-      vA = sin(p*3.14159);
-      gl_Position = projectionMatrix*modelViewMatrix*vec4(pos,1.0);
-      gl_PointSize = 2.0 + 2.0*vA;
-    }`,
-  fragmentShader:`varying float vA;
-    void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard;
-      gl_FragColor=vec4(0.55,0.85,1.0,vA*0.5); }`});
-scene.add(new THREE.Points(pg,pmat));
+function stream(){
+  const g=new THREE.BufferGeometry();
+  const seed=new Float32Array(PN);
+  for(let i=0;i<PN;i++) seed[i]=Math.random();
+  g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(PN*3),3));
+  g.setAttribute('seed',new THREE.BufferAttribute(seed,1));
+  g.setDrawRange(0,0);
+  const m=new THREE.ShaderMaterial({
+    transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+    uniforms:{uT:{value:0},uA:{value:new THREE.Vector3()},uB:{value:new THREE.Vector3()},
+              uC:{value:new THREE.Color(0x7fd4ff)}},
+    vertexShader:`attribute float seed; uniform float uT; uniform vec3 uA,uB; varying float vA;
+      void main(){
+        float p = fract(seed*7.13 + uT*0.35);
+        vec3 pos = mix(uA,uB,p);
+        vec3 n = normalize(cross(uB-uA, vec3(0.0,1.0,0.0))+vec3(1e-4));
+        pos += n * 0.09 * sin(p*3.14159) * sin(seed*29.0);
+        pos.y += 0.10*sin(p*3.14159);
+        vA = sin(p*3.14159);
+        gl_Position = projectionMatrix*modelViewMatrix*vec4(pos,1.0);
+        gl_PointSize = 1.5 + 2.5*vA; }`,
+    fragmentShader:`varying float vA; uniform vec3 uC;
+      void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard;
+        gl_FragColor=vec4(uC, vA*0.55); }`});
+  const pts=new THREE.Points(g,m); scene.add(pts); return {g,m};
+}
+const streams={};
 
 const fmt=n=>n>=1e9?(n/1e9).toFixed(2)+'G':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':''+n;
 function hud(){
@@ -85,12 +92,11 @@ function hud(){
       const pool=s.pool||1, pctNode=s.node_ram?100*s.bytes/s.node_ram:0;
       const rows=[['region',`${(s.bytes/1e9).toFixed(2)} GB  ${pctNode.toFixed(1)}% of node`],
                   ['pages',`${fmt(s.pages)}  arena ${fmt(s.arena_pages)}  pool ${fmt(pool)}`],
-                  ['free',`${fmt(s.free)} ±${s.sd_free}`],
-                  ['posted',`${fmt(s.posted)} ±${s.sd_posted}`],
-                  ['sending',`${fmt(s.sending)} ±${s.sd_sending}`],
-                  ['with app',`${fmt(s.held||0)}`],
-                  ['accounted',`${fmt(s.free+s.posted+s.sending+(s.held||0))} / ${fmt(pool)}`
-                     + (s.free+s.posted+s.sending+(s.held||0)===pool?'  closed':'  <span class="down">LEAK</span>')],
+                  ['free',`${fmt(s.mean_free)} ±${s.sd_free}`],
+                  ['posted',`${fmt(s.mean_posted)} ±${s.sd_posted}`],
+                  ['forwarding',`${fmt(s.mean_sending)}`],
+                  ['with app',`${fmt(s.mean_held)} ±${s.sd_held}`],
+                  ['census',`${fmt(s.mean_free+s.mean_posted+s.mean_sending+s.mean_held)} / ${fmt(pool)}`],
                   ['sent/recvd',`${fmt(s.sent)} / ${fmt(s.recvd)}`],
                   ['client',s.client?`pid ${s.client}`:'none']];
       for(const [k,v] of rows) h+=`<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
@@ -108,17 +114,32 @@ function apply(){
     const n=Math.min(hs.length,t.N);
     for(let i=0;i<n;i++){
       const s=hs[hs.length-n+i], pool=Math.max(1,s.pool);
-      pos[3*i]=s.free/pool; pos[3*i+1]=s.posted/pool; pos[3*i+2]=s.sending/pool;
+      pos[3*i]=s.mean_free/pool; pos[3*i+1]=s.mean_posted/pool; pos[3*i+2]=s.mean_held/pool;
     }
     t.g.setDrawRange(0,n); t.g.attributes.position.needsUpdate=true;
     t.g.computeBoundingSphere();
     const s=hs.at(-1),pool=Math.max(1,s.pool);
-    t.head.position.set(s.free/pool,s.posted/pool,s.sending/pool);
+    t.head.position.set(s.mean_free/pool, s.mean_posted/pool, s.mean_held/pool);
+    // the head grows with the spread inside the interval, so a pool that is
+    // churning looks different from one that is merely sitting somewhere
+    const sd=Math.hypot(s.sd_free,s.sd_posted,s.sd_held)/pool;
+    t.head.scale.setScalar(1+18*sd);
   }
-  // particle count follows measured throughput since the previous sample
-  let total=0; for(const name of Object.keys(S.nodes)){ const s=S.nodes[name].at(-1); if(s&&s.up) total+=s.sent+s.recvd; }
-  const d=Math.max(0,total-lastTotal); lastTotal=total;
-  pg.setDrawRange(0,Math.min(PN,Math.round(d/500)));
+  // one stream per source node, from its head to every other node's head,
+  // sized by that node's own measured page delta since the previous sample
+  const names=Object.keys(S.nodes).filter(n=>tracks[n]);
+  for(const src of names) for(const dst of names){
+    if(src===dst) continue;
+    const key=src+'>'+dst;
+    if(!streams[key]) streams[key]=stream();
+    const st=streams[key], hs=S.nodes[src].filter(x=>x.up);
+    if(hs.length<2){ st.g.setDrawRange(0,0); continue; }
+    const d=Math.max(0,hs.at(-1).sent-hs.at(-2).sent);
+    st.m.uniforms.uA.value.copy(tracks[src].head.position);
+    st.m.uniforms.uB.value.copy(tracks[dst].head.position);
+    st.m.uniforms.uC.value.setHex(colorOf(src));
+    st.g.setDrawRange(0,Math.min(PN,Math.round(d/200)));
+  }
   hud();
 }
 
@@ -132,5 +153,7 @@ poll();
 let th=0;
 (function loop(t){ requestAnimationFrame(loop);
   th=t*0.0002; cam.position.set(0.5+2.0*Math.cos(th),1.35,0.5+2.0*Math.sin(th));
-  cam.lookAt(0.4,0.35,0.4); pmat.uniforms.uT.value=t*0.001; R.render(scene,cam); })(0);
+  cam.lookAt(0.4,0.35,0.4);
+  for(const k in streams) streams[k].m.uniforms.uT.value=t*0.001;
+  R.render(scene,cam); })(0);
 </script></body></html>

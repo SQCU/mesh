@@ -1,5 +1,4 @@
 // Read one node's live region and print it as JSON. Read-only: it attaches to
-// the same shared memory the bridge publishes and touches nothing else.
 #include "mesh.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -20,12 +19,15 @@ int main(int argc,char**argv){
   printf("{\"up\":true,\"node\":%u,\"pgsz\":%u,\"pages\":%u,\"arena_pages\":%u,"
          "\"bytes\":%llu,\"node_ram\":%llu,\"client\":%llu,"
          "\"sent\":%llu,\"recvd\":%llu,\"uptime_ms\":%llu,"
-         "\"free\":%llu,\"posted\":%llu,\"sending\":%llu,\"pool\":%llu,\"held\":%llu,"
-         "\"sd_free\":%llu,\"sd_posted\":%llu,\"sd_sending\":%llu}\n",
+         "\"pool\":%llu,"
+         "\"sd_free\":%llu,\"sd_posted\":%llu,\"sd_sending\":%llu,"
+         "\"mean_free\":%llu,\"mean_posted\":%llu,\"mean_sending\":%llu,"
+         "\"mean_held\":%llu,\"sd_held\":%llu}\n",
     h->node,h->pgsz,h->npages,h->arena_pages,
     (unsigned long long)h->bytes,(unsigned long long)h->node_ram,A(client_pid),
     A(sent),A(recvd),A(uptime_ms),
-    A(occ_free),A(occ_posted),A(occ_sending),A(occ_pool),A(occ_held),
-    A(sd_free),A(sd_posted),A(sd_sending));
+    A(occ_pool),
+    A(sd_free),A(sd_posted),A(sd_sending),
+    A(mean_free),A(mean_posted),A(mean_sending),A(mean_held),A(sd_held));
   munmap(b,sizeof *h); close(fd); return 0;
 }

@@ -18,8 +18,6 @@
 #include <sys/time.h>
 #include <math.h>
 
-
-
 static struct ibv_qp *g_qp; static struct ibv_pd *g_pd; static struct mesh_mem g_mem;
 static struct ibv_cq *g_cq; static struct ibv_context *g_ctx;
 static volatile sig_atomic_t g_stop;
@@ -34,9 +32,7 @@ static void teardown(void){
   if(g_shm){ shm_unlink(g_shm); g_shm=NULL; }
 }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
-// Welford. One pass, constant memory, and it does not lose the variance to
-// cancellation the way sum-of-squares does once the mean is large -- which it
-// is here, since these count pages and there are millions of them.
+
 struct wf { double n, mean, m2; };
 static void wf_add(struct wf *w, double x){
   w->n += 1; double d = x - w->mean; w->mean += d / w->n; w->m2 += d * (x - w->mean); }
@@ -70,16 +66,11 @@ static int oob(const char*host,int port,int secs){
   setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
   setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof tv); return fd; }
 
-
 int main(int argc,char**argv){
   const char *peer=NULL;
-  const int pgsz=4096, port=18519, tmo=30; int npages=240, seconds=5;
+  const int pgsz=4096, port=18519, tmo=30; int npages=240, seconds=0;
   int node_idx=0; const char *shmname="/mesh0"; double pct=0.0;
-  // Only what cannot be inferred: which node this is, how much of it the mesh
-  // holds, and who to reach. Everything else is derived. There is deliberately
-  // no switch for the page size, the registration chunk, the send window or
-  // the device: each of those can produce a run that looks healthy and moves
-  // corrupt data, and an operator should not be able to select that.
+
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-I")) node_idx=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M")) pct=atof(argv[++i]);
@@ -94,12 +85,11 @@ int main(int argc,char**argv){
   struct sigaction sa={0}; sa.sa_handler=on_sig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL);
 
-  int frames = (pgsz+4095)/4096;
   if(npages < 4) die("page pool too small; lower -P");
 
   struct ibv_device **dl=ibv_get_device_list(NULL); if(!dl) die("no rdma devices");
   struct ibv_device *d=NULL; struct ibv_port_attr pa;
-  for(int i=0;dl[i];i++){                        // take the link that is up
+  for(int i=0;dl[i];i++){
     struct ibv_context *c=ibv_open_device(dl[i]); if(!c) continue;
     if(!ibv_query_port(c,1,&pa) && pa.state==IBV_PORT_ACTIVE){ d=dl[i]; g_ctx=c; break; }
     ibv_close_device(c);
@@ -136,17 +126,14 @@ int main(int argc,char**argv){
 
   if(mesh_mem_map(&g_mem,g_pd,mem,span,(size_t)pgsz,IBV_ACCESS_LOCAL_WRITE))
     die("register region");
-  size_t ppc = g_mem.chunk/(size_t)pgsz;              // pages per region
+  size_t ppc = g_mem.chunk/(size_t)pgsz;
   fprintf(stderr,"region %s: %.3f GB (%.2f%% of node) in %zu regions\n",
      shmname, span/1e9, node_ram?100.0*span/(double)node_ram:0.0, g_mem.nseg);
   g_cq=ibv_create_cq(g_ctx,4096,NULL,NULL,0); if(!g_cq) die("create_cq");
   struct ibv_qp_init_attr ia={.send_cq=g_cq,.recv_cq=g_cq,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=4095,.max_recv_wr=4095,.max_send_sge=1,.max_recv_sge=1}};
   g_qp=ibv_create_qp(g_pd,&ia); if(!g_qp) die("create_qp");
-  
-  struct ibv_qp_attr qa; struct ibv_qp_init_attr qi;
-  if(ibv_query_qp(g_qp,&qa,IBV_QP_CAP,&qi)) die("query_qp");
-  int gr_send=qi.cap.max_send_wr, gr_recv=qi.cap.max_recv_wr;
+
   struct ibv_qp_attr at={.qp_state=IBV_QPS_INIT,.pkey_index=0,.port_num=1,.qp_access_flags=0};
   if(ibv_modify_qp(g_qp,&at,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)) die("INIT");
 
@@ -167,57 +154,45 @@ int main(int argc,char**argv){
   struct ibv_qp_attr st={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   if(ibv_modify_qp(g_qp,&st,IBV_QP_STATE|IBV_QP_SQ_PSN)) die("RTS");
 
-  // A page's address is arithmetic, not a stored field, and its state is not
-  // stored at all: the completion says what the page was doing.
   char *mem_c = (char*)mem;
   #define PAGE(i) (mem_c + (size_t)(i)*(size_t)pgsz)
   int *freelist = malloc(npages*sizeof(int)), nfree=0;
   if(!freelist) die("alloc freelist");
   uint32_t maxpay = (uint32_t)pgsz - (uint32_t)sizeof(struct wire);
-  int rx_pages = npages/4;                       // cap the receive pool in bytes,
-  int rx_cap = (int)(1000000000ull/(unsigned)pgsz);   // not pages: 1 GB either way
+  int rx_pages = npages/4;
+  int rx_cap = (int)(1000000000ull/(unsigned)pgsz);
   if(rx_pages > rx_cap) rx_pages = rx_cap;
-  if(rx_pages < 8) rx_pages = npages;              // tiny pool: no arena
-  for(int i=0;i<rx_pages;i++) freelist[nfree++]=i;   // arena pages are the app's
+  if(rx_pages < 8) rx_pages = npages;
+  for(int i=0;i<rx_pages;i++) freelist[nfree++]=i;
 
   #define PG_LKEY(i) (g_mem.mr[(size_t)(i)/ppc]->lkey)
-  // Every send is this. There is one way to put a page on the wire.
+
   #define POST_SEND(i) ({ struct ibv_sge _g={(uintptr_t)PAGE(i),(uint32_t)pgsz,PG_LKEY(i)}; \
     struct ibv_send_wr _w={.wr_id=(uint64_t)(i),.sg_list=&_g,.num_sge=1, \
       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*_b; \
     ibv_post_send(g_qp,&_w,&_b); })
   int posted=0, sending=0;
-  // sending counts every page on the wire, because that is what the send
-  // budget gates. The pool invariant needs only the pool's share of it, plus
-  // the pages the application is holding.
+
   int send_arena=0, app_held=0;
   int arena_start=rx_pages;
   RG.h->arena_off = data_off + (uint64_t)rx_pages*(uint64_t)pgsz;
   RG.h->arena_pages = (uint32_t)(npages - rx_pages);
   RG.h->hdr_bytes = (uint32_t)sizeof(struct wire);
 
-  // One way to give a page back. A page the bridge does not own -- an arena
-  // page, or one handed to the application -- is simply never passed here.
   #define PUT(i) do{ freelist[nfree++]=(i); }while(0)
-  int rx_target = gr_recv/frames;   if(rx_target > npages/4) rx_target = npages/4;
-  if(rx_target<2) rx_target=2;
-  int tx_budget = gr_send/frames;   if(tx_budget > npages/4) tx_budget = npages/4;
-  if(tx_budget<1) tx_budget=1;
-  fprintf(stderr,"arena %u pages = %.3f GB (%.2f%% of node); pool %d; rx/tx %d/%d\n",
+  fprintf(stderr,"arena %u pages = %.3f GB (%.2f%% of node); pool %d\n",
      RG.h->arena_pages, (double)RG.h->arena_pages*(pgsz-sizeof(struct wire))/1e9,
-     node_ram?100.0*(double)RG.h->arena_pages*pgsz/(double)node_ram:0.0,
-     rx_pages, rx_target, tx_budget);
+     node_ram?100.0*(double)RG.h->arena_pages*pgsz/(double)node_ram:0.0, rx_pages);
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0;
   unsigned long long delivered=0, cmp_full=0, app_sent=0;
   unsigned long long dropped=0;
-  struct wf w_free={0}, w_post={0}, w_send={0};   // whole run
-  struct wf i_free={0}, i_post={0}, i_send={0};   // this interval
+  struct wf w_free={0}, w_post={0}, w_send={0}, w_held={0};
+  struct wf i_free={0}, i_post={0}, i_send={0}, i_held={0};
   double t0=now(), tel_last=t0;
 
-  while(!g_stop && now()-t0 < seconds){
+  while(!g_stop && (seconds<=0 || now()-t0 < seconds)){
 
-    
-    while(nfree>0 && posted<rx_target){
+    while(nfree>0){
       int i=freelist[--nfree];
       struct ibv_sge g={(uintptr_t)PAGE(i),(uint32_t)pgsz,PG_LKEY(i)};
       struct ibv_recv_wr wr={.wr_id=(uint64_t)i,.sg_list=&g,.num_sge=1},*bad;
@@ -225,30 +200,25 @@ int main(int argc,char**argv){
       posted++;
     }
 
-    // APPREL -- take back pages the application has finished with
-    { struct mesh_desc dd; int nrel=0;
-      while(nrel++ < 256 && !mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
+    { struct mesh_desc dd;
+      while(!mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
         uint32_t p=dd.page;
         if(p < (uint32_t)arena_start){ PUT(p); app_held--; } } }
 
-    // APPSUB -- send what the application handed over
     if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
       struct mesh_desc dd;
-      for(int ns=0; ns<256 && sending<tx_budget &&
-                    !mesh_pop(&RG,&RG.h->rsub,RG.h->sub_off,&dd); ns++){
+      while(!mesh_pop(&RG,&RG.h->rsub,RG.h->sub_off,&dd)){
         uint32_t p=dd.page; if(p>=(uint32_t)npages) continue;
         struct wire *wh=(struct wire*)PAGE(p);
         wh->magic=WIRE_MAGIC; wh->bytes=(dd.bytes>maxpay?maxpay:dd.bytes);
         wh->src=(uint16_t)node_idx; wh->dst=dd.node; wh->hops=0;
-        // A failed post must not put an arena page on the free list; it is
-        // the application's page, not the pool's.
-        if(POST_SEND(p)) dropped++;
+
+        if(POST_SEND(p)){ dropped++; break; }
         else { sending++; send_arena++; app_sent++;
                atomic_fetch_add_explicit(&RG.h->sent,1,memory_order_relaxed); }
       }
     }
 
-    
     struct ibv_wc wc[32];
     int k=ibv_poll_cq(g_cq,32,wc);
     if(k<0) die("poll_cq");
@@ -260,8 +230,7 @@ int main(int argc,char**argv){
         if(wc[j].opcode==IBV_WC_RECV) posted--; else sending--;
         PUT(i); continue; }
       if(wc[j].opcode==IBV_WC_RECV){
-        // A received page is handled here, where it already is. There is no
-        // second queue: the completion is the delivery.
+
         posted--; rx++; bytes_rx+=wc[j].byte_len;        struct wire *h=(struct wire*)PAGE(i);
         if(h->magic!=WIRE_MAGIC){ dropped++; PUT(i); continue; }
         uint32_t pay = h->bytes > maxpay ? maxpay : h->bytes;
@@ -270,8 +239,7 @@ int main(int argc,char**argv){
           delivered++;
           if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
             struct mesh_desc dd={.page=(uint32_t)i,.bytes=pay,.node=h->src};
-            // Handed to the application. The bridge stops tracking it; it comes
-            // back through the release ring or not at all.
+
             if(mesh_push(&RG,&RG.h->rcmp,RG.h->cmp_off,&dd)){ cmp_full++; PUT(i); }
             else { app_held++; atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed); }
           } else PUT(i);
@@ -281,38 +249,37 @@ int main(int argc,char**argv){
         }
       } else {
         tx++; bytes_tx+=pgsz; sending--;
-        // A forwarded page came from the pool and returns to it. A page the
-        // application sent is the application's, and the bridge forgets it.
+
         if(i < arena_start) PUT(i); else send_arena--;
       }
     }
 
-    wf_add(&w_free,nfree); wf_add(&w_post,posted); wf_add(&w_send,sending);
-    wf_add(&i_free,nfree); wf_add(&i_post,posted); wf_add(&i_send,sending);
+    int pool_fly = sending - send_arena;
+    wf_add(&w_free,nfree); wf_add(&w_post,posted); wf_add(&w_send,pool_fly); wf_add(&w_held,app_held);
+    wf_add(&i_free,nfree); wf_add(&i_post,posted); wf_add(&i_send,pool_fly); wf_add(&i_held,app_held);
     double t=now();
     if(t-tel_last >= 1.0){
-      // sd/mean on the three occupancies: a pool breathing evenly reads near
-      // zero, one being starved or flooded does not.
-      fprintf(stderr,"t=%.0f free=%d+-%.0f posted=%d+-%.0f sending=%d+-%.0f "
+
+      fprintf(stderr,"t=%.0f free=%.0f+-%.0f posted=%.0f+-%.0f fly=%.0f held=%.0f+-%.0f "
                      "rx=%llu tx=%llu pool=%d/%d\n",
-        t-t0, nfree, sqrt(wf_var(&i_free)), posted, sqrt(wf_var(&i_post)),
-        sending, sqrt(wf_var(&i_send)), rx, tx, nfree+posted+(sending-send_arena)+app_held, arena_start);
-      // Each line describes its own second. A lifetime variance here would be
-      // dominated by the step from idle to running and would say nothing about
-      // how the pool is behaving now.
-      atomic_store_explicit(&RG.h->occ_free,(uint64_t)nfree,memory_order_relaxed);
-      atomic_store_explicit(&RG.h->occ_posted,(uint64_t)posted,memory_order_relaxed);
-      atomic_store_explicit(&RG.h->occ_sending,(uint64_t)(sending-send_arena),memory_order_relaxed);
-      atomic_store_explicit(&RG.h->occ_held,(uint64_t)app_held,memory_order_relaxed);
+        t-t0, i_free.mean, sqrt(wf_var(&i_free)), i_post.mean, sqrt(wf_var(&i_post)),
+        i_send.mean, i_held.mean, sqrt(wf_var(&i_held)),
+        rx, tx, nfree+posted+pool_fly+app_held, arena_start);
+
       atomic_store_explicit(&RG.h->occ_pool,(uint64_t)arena_start,memory_order_relaxed);
       atomic_store_explicit(&RG.h->sd_free,(uint64_t)sqrt(wf_var(&i_free)),memory_order_relaxed);
       atomic_store_explicit(&RG.h->sd_posted,(uint64_t)sqrt(wf_var(&i_post)),memory_order_relaxed);
       atomic_store_explicit(&RG.h->sd_sending,(uint64_t)sqrt(wf_var(&i_send)),memory_order_relaxed);
+      atomic_store_explicit(&RG.h->mean_free,(uint64_t)i_free.mean,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->mean_posted,(uint64_t)i_post.mean,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->mean_sending,(uint64_t)i_send.mean,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->mean_held,(uint64_t)i_held.mean,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->sd_held,(uint64_t)sqrt(wf_var(&i_held)),memory_order_relaxed);
       atomic_store_explicit(&RG.h->uptime_ms,(uint64_t)((t-t0)*1000),memory_order_relaxed);
-      i_free=(struct wf){0}; i_post=(struct wf){0}; i_send=(struct wf){0};
+      i_free=(struct wf){0}; i_post=(struct wf){0}; i_send=(struct wf){0}; i_held=(struct wf){0};
       tel_last=t;
     }
-    if(!k) usleep(50);            // nothing completed; do not spin
+    if(!k) usleep(50);
   }
   double el=now()-t0;
   printf("node pages=%d pool=%d  rx=%llu tx=%llu  %.2f/%.2f Gbit/s in/out\n"

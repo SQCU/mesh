@@ -9,9 +9,9 @@ int mesh_mem_map(struct mesh_mem *m, struct ibv_pd *pd,
   m->pd    = pd;
   m->base  = (char*)base;
   m->len   = len;
-  m->chunk = (MESH_CHUNK / granule) * granule;      // nothing straddles a boundary
+  m->chunk = (MESH_CHUNK / granule) * granule;
   if(!m->chunk) return -1;
-  m->nseg  = (len + m->chunk - 1) / m->chunk;       // known before registering
+  m->nseg  = (len + m->chunk - 1) / m->chunk;
   m->mr    = calloc(m->nseg, sizeof *m->mr);
   if(!m->mr) return -1;
   for(size_t i = 0; i < m->nseg; i++){

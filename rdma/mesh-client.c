@@ -7,9 +7,9 @@
 #include <stdlib.h>
 
 static struct mesh G;
-static unsigned char *g_arena;      // first slot's payload
+static unsigned char *g_arena;
 static uint32_t g_stride, g_usable, g_hdr, g_first;
-static int g_held = -1;             // slot handed out by the last mesh_read
+static int g_held = -1;
 
 void *mesh_open(size_t bytes, size_t *stride, size_t *usable){
   if(!G.h){
@@ -55,7 +55,7 @@ size_t mesh_write(const void *p, size_t nbytes, int node){
   while(done < nbytes && slot < G.h->arena_pages){
     uint32_t n = (uint32_t)(nbytes - done < g_usable ? nbytes - done : g_usable);
     struct mesh_desc d = {.page = g_first + slot, .bytes = n, .node = (uint16_t)node};
-    if(mesh_push(&G,&G.h->rsub,G.h->sub_off,&d)) break;   // bridge is behind; come back
+    if(mesh_push(&G,&G.h->rsub,G.h->sub_off,&d)) break;
     done += n; slot++;
   }
   return done;
@@ -63,7 +63,7 @@ size_t mesh_write(const void *p, size_t nbytes, int node){
 
 size_t mesh_read(void **p, int *from){
   if(!G.h) return 0;
-  if(g_held >= 0){                                   // return the previous slot
+  if(g_held >= 0){
     struct mesh_desc r = {.page=(uint32_t)g_held};
     while(mesh_push(&G,&G.h->rrel,G.h->rel_off,&r)) ;
     g_held = -1;
