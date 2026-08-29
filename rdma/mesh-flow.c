@@ -105,8 +105,15 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
     .grh={.hop_limit=1,.sgid_index=0}}};
   memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-  if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN)){
-    fprintf(stderr,"rtr retry errno %d\n",errno); return -1; }
+  int rc=ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
+  if(rc){
+    { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
+      snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
+               strncmp(dn,"rdma_",5)?dn:dn+5);
+      system(c); }
+    rc=ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
+  }
+  if(rc){ fprintf(stderr,"rtr retry rc %d\n",rc); usleep(300000); return -1; }
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
