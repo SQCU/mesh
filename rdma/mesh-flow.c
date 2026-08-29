@@ -107,8 +107,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     ssize_t g=read(f,(char*)&you+got,sizeof you-got);
     if(g<=0){ close(f); fprintf(stderr,"xchg retry\n"); return -1; } got+=(size_t)g; }
   close(f);
-  if(you.nonce==mynonce || (you.nonce && you.nonce==peernonce && peernonce)){
-    fprintf(stderr,"stale nonce, retry\n"); return -1; }
+  if(you.nonce==mynonce){ fprintf(stderr,"self nonce, retry\n"); return -1; }
   peernonce=you.nonce;
   struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
     .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
