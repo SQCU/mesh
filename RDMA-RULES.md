@@ -161,7 +161,14 @@ Consequences:
 - A healing loop is itself the leak amplifier. Converge in as few pairing attempts as
   possible; never spin QP bring-up at high frequency.
 - If RTR starts returning EFAULT with valid arguments, do not debug the arguments. Shrink
-  the region to confirm, then plan a reboot of that node to reclaim the pool.
+  the region to confirm the diagnosis.
+- Measured: a cable replug re-enumerates the controller and the mesh heals across it, onto a
+  different physical port even, but the pool does not come back — it is host-side kext state,
+  scoped to the boot.
+- Therefore the operational stance: a node never reboots for availability. Size the region
+  inside the boot's remaining budget and everything — pairing, healing, streams, workloads —
+  keeps working. A reboot only restores capacity for a larger arena, and is scheduled like
+  any capacity change, never forced by an outage.
 - Size regions with headroom for the boot's remaining budget, not the machine's RAM.
 - Failed pairing attempts consume the pool too: a size that paired an hour ago can be
   unaffordable after a retry storm at that size. Cap retries low and shrink before retrying.
