@@ -90,7 +90,10 @@ entity payload_mesh_node(float idx)
 		return NULL;
 	int c = bound(0, floor(idx / PLC_MESH_OBJECTIVES), payload_cart_count - 1);
 	entity a = payload_carts[c].plc_first;
-	float want = idx - c * PLC_MESH_OBJECTIVES;
+	float nn = 0;
+	for(entity t = a; t; t = t.plc_next)
+		nn += 1;
+	float want = rint((idx - c * PLC_MESH_OBJECTIVES) * (nn - 1) / (PLC_MESH_OBJECTIVES - 1));
 	for(float k = 0; a && k < want && a.plc_next; ++k)
 		a = a.plc_next;
 	return a;

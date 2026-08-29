@@ -112,6 +112,80 @@ def kcenter(adj, k):
 WB, WXY, WZ, WHEEL = 1.0, 0.3, 1.0, 42.0
 
 
+NN = 12
+
+def make_clip(d):
+    try:
+        def lump(i):
+            off, ln = struct.unpack_from('<ii', d, 8 + i * 8)
+            return off, ln
+        to, tl = lump(1); po, pl = lump(2); bo, bl = lump(8); so, sl = lump(9)
+        ntex = tl // 72
+        solid = [struct.unpack_from('<i', d, to + i * 72 + 68)[0] & 1 for i in range(ntex)]
+        planes = [struct.unpack_from('<4f', d, po + i * 16) for i in range(pl // 16)]
+        brushes = [struct.unpack_from('<3i', d, bo + i * 12) for i in range(bl // 12)]
+        sides = [struct.unpack_from('<2i', d, so + i * 8) for i in range(sl // 8)]
+    except Exception:
+        return lambda p: False
+    def inside(p):
+        for fs, ns, tx in brushes:
+            if tx < 0 or tx >= ntex or not solid[tx]:
+                continue
+            ok = True
+            for k in range(fs, fs + ns):
+                pli, _ = sides[k]
+                nx, ny, nz, dd = planes[pli]
+                if p[0] * nx + p[1] * ny + p[2] * nz - dd > 0.25:
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
+    return inside
+
+def clear_project(Q, A, inside):
+    n = 0
+    for i in range(len(Q)):
+        if not inside(tuple(Q[i])):
+            continue
+        a = list(A[i])
+        g = 0
+        while inside(tuple(a)) and g < 8:
+            a[2] += 12
+            g += 1
+        lo, hi = 0.0, 1.0
+        for _ in range(24):
+            mid = (lo + hi) / 2
+            m = tuple(Q[i][k] + (a[k] - Q[i][k]) * mid for k in range(3))
+            if inside(m):
+                lo = mid
+            else:
+                hi = mid
+        f = min(1.0, hi + 0.05)
+        Q[i] = [Q[i][k] + (a[k] - Q[i][k]) * f for k in range(3)]
+        n += 1
+    return n
+
+def chord_ok(Q, i, j, inside):
+    a, b = Q[i], Q[j]
+    for k in range(i + 1, j):
+        f = (k - i) / (j - i)
+        m = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
+        if inside(m) or math.dist(m, Q[k]) > 40:
+            return False
+    return True
+
+def adaptive_nodes(Q, inside):
+    idx = [0]
+    i = 0
+    while i < len(Q) - 1:
+        j = len(Q) - 1
+        while j > i + 1 and not chord_ok(Q, i, j, inside):
+            j -= 1
+        idx.append(j)
+        i = j
+    return [Q[k] for k in idx]
+
 def make_floor_tracer(d):
     def lump(i):
         return struct.unpack_from('<ii', d, 8 + i * 8)
@@ -209,7 +283,7 @@ def snap_curve(P, n):
     return out
 
 
-def nav_tracks(nodes, adj, dmap, origins, kcarts, tracer):
+def nav_tracks(nodes, adj, dmap, origins, kcarts, tracer, clip):
     used = set()
     tracks = []
     st = {'e0': 0.0, 'e1': 0.0, 'mxy': 0.0, 'mz': 0.0, 'bsp': 0, 'nav': 0}
@@ -250,7 +324,16 @@ def nav_tracks(nodes, adj, dmap, origins, kcarts, tracer):
         st['e1'] += bending_energy(Q)
         st['mxy'] = max(st['mxy'], max(math.dist((Q[i][0], Q[i][1]), xy0[i]) for i in range(len(Q))))
         st['mz'] = max(st['mz'], max(abs(Q[i][2] - z0[i]) for i in range(len(Q))))
-        tracks.append([[q[0], q[1], q[2] + WHEEL] for q in snap_curve(Q, 5)])
+        track = [[q[0], q[1], q[2] - 26 + WHEEL] for q in poly]
+        emb = sum(1 for q in track if clip(tuple(q)))
+        if emb:
+            print('nav: %d waypoint nodes read embedded, nudging up' % emb)
+            for q in track:
+                g = 0
+                while clip(tuple(q)) and g < 6:
+                    q[2] += 12
+                    g += 1
+        tracks.append(track)
     return tracks, st
 
 
@@ -300,7 +383,7 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
         tracer = make_floor_tracer(d if d is not None else open(bsp, 'rb').read())
     except Exception:
         tracer = None
-    tracks, st = nav_tracks(nodes, adj, dmap, origins, kcarts, tracer)
+    tracks, st = nav_tracks(nodes, adj, dmap, origins, kcarts, tracer, make_clip(d) if d else (lambda p: False))
     print('nav: terrain %s BSP-floors=%d nav-z-interp=%d wheel_offset=%.0f weights bend=%.1f xy=%.2f z=%.2f' %
           ('BSP-trace' if tracer else 'nav-z-interp(no BSP)', st['bsp'], st['nav'], WHEEL, WB, WXY, WZ))
     print('nav: curvature %.0f->%.0f (%.1f%%) maxXYdev=%.1f maxZdev=%.1f' %
@@ -337,14 +420,15 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
     named = []
     for c in range(kcarts):
         track = tracks[c]
-        names = ['plc%dn%d' % (c, i) for i in range(5)]
+        NC = len(track)
+        names = ['plc%dn%d' % (c, i) for i in range(NC)]
         named.append((names, track))
         for i, (name, p) in enumerate(zip(names, track)):
             e = ['{', '"classname" "plc_path"', '"targetname" "%s"' % name,
                  '"origin" "%.0f %.0f %.0f"' % tuple(p)]
-            if i + 1 < 5:
+            if i + 1 < NC:
                 e.append('"target" "%s"' % names[i + 1])
-            if i == 2:
+            if 0 < i < NC - 1:
                 e.append('"spawnflags" "1"')
             e.append('}')
             extra.append('\n'.join(e))
@@ -356,14 +440,14 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
     for t, cnt in enumerate(goal_cnts):
         names, track = named[t % kcarts]
         extra.append('\n'.join(['{', '"classname" "plc_goal"',
-                                '"cnt" "%d"' % cnt, '"target" "%s"' % names[4],
+                                '"cnt" "%d"' % cnt, '"target" "%s"' % names[-1],
                                 '"radius" "64"',
-                                '"origin" "%.0f %.0f %.0f"' % tuple(track[4]),
+                                '"origin" "%.0f %.0f %.0f"' % tuple(track[-1]),
                                 '}']))
 
     for c, (names, track) in enumerate(named):
-        L = sum(math.dist(track[i], track[i + 1]) for i in range(4))
-        print('cart %d: %s -> %s length %.0f' % (c, track[0], track[4], L))
+        L = sum(math.dist(track[i], track[i + 1]) for i in range(len(track) - 1))
+        print('cart %d: %s -> %s length %.0f nodes %d' % (c, track[0], track[-1], L, len(track)))
     sep = min(math.dist(pa, pb) for _, ta in named[:1] for pa in ta
               for _, tb in named[1:] for pb in tb) if kcarts > 1 else -1
     print('teams', kteams, 'carts', kcarts, 'min inter-track node distance %.0f' % sep)

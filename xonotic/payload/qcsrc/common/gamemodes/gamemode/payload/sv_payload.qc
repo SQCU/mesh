@@ -115,9 +115,6 @@ void payload_occupancy(entity cart)
 			continue;
 		if(vlen(vec2(d)) > r)
 			continue;
-		traceline(it.origin + it.view_ofs, c, MOVE_NOMONSTERS, it);
-		if(trace_fraction < 1 && trace_ent != cart)
-			continue;
 		it.plc_in = j;
 		payload_n[j] += 1;
 	});
@@ -238,7 +235,8 @@ void payload_think(entity this)
 	this.plc_ctrl = ctrl;
 
 	float pplus = ctrl ? payload_w[ctrl] : 0;
-	float v = bound(-autocvar_g_payload_max_speed, this.speed * (pplus - (total - pplus)), autocvar_g_payload_max_speed);
+	float drag = total - pplus;
+	float v = bound(0, this.speed * pplus / (1 + drag * drag), autocvar_g_payload_max_speed);
 	float target = 0;
 	bool rolling = false;
 
