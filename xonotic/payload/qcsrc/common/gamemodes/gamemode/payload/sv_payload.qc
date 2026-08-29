@@ -460,9 +460,24 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 		return;
 	float d = payload_goal_s[j] - payload_cart.plc_s;
 	float lead = bound(-256, d, 256);
-	entity o = payload_mesh_node(payload_mesh_objective[j]);
-	if(o)
-		navigation_routerating(this, o, ratingscale * 2, 3000);
+	if(payload_mesh_weights_valid(this))
+	{
+		for(int o = 0; o < PLC_MESH_OBJECTIVES; ++o)
+		{
+			entity nd = payload_mesh_node(o);
+			if(!nd)
+				break;
+			float wgt = payload_mesh_weight(this, o);
+			if(wgt > 0.02)
+				navigation_routerating(this, nd, ratingscale * 2 * wgt, 3000);
+		}
+	}
+	else
+	{
+		entity o = payload_mesh_node(payload_mesh_objective[j]);
+		if(o)
+			navigation_routerating(this, o, ratingscale * 2, 3000);
+	}
 	IL_EACH(g_payload_nodes, true,
 	{
 		float rel = (it.plc_dist - payload_cart.plc_s) / ((lead >= 0) ? 256 : -256);
@@ -531,6 +546,7 @@ MUTATOR_HOOKFUNCTION(plc, PlayerSpawn)
 	entity player = M_ARGV(0, entity);
 
 	player.player_blocked = !round_handler_IsRoundStarted();
+	player.plc_spawn_stamp = time;
 }
 
 MUTATOR_HOOKFUNCTION(plc, ClientConnect)

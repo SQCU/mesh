@@ -2,8 +2,11 @@
 
 #include "sv_payload.qh"
 
+#include <common/mutators/mutator/status_effects/_mod.qh>
 #include <common/mutators/mutator/waypoints/waypointsprites.qh>
 #include <common/resources/_mod.qh>
+#include <common/stats.qh>
+#include <common/weapons/_all.qh>
 #include <common/resources/sv_resources.qh>
 #include <server/bot/api.qh>
 #include <server/utils.qh>
@@ -40,6 +43,44 @@ void payload_mesh_mark_objectives()
 		if(n && n.sprite)
 			WaypointSprite_UpdateTeamRadar(n.sprite, RADARICON_OBJECTIVE, Team_ColorRGB(Team_IndexToTeam(j)));
 	}
+}
+
+float payload_mesh_weapons(entity e)
+{
+	float n = 0;
+	FOREACH(Weapons, it != WEP_Null, {
+		if(STAT(WEAPONS, e) & (it.m_wepset))
+			n += 1;
+	});
+	return n;
+}
+
+float payload_mesh_weight(entity b, int o)
+{
+	float c, v;
+	switch(o)
+	{
+		case 0: c = b.plc_mesh_w0; v = b.plc_mesh_v0; break;
+		case 1: c = b.plc_mesh_w1; v = b.plc_mesh_v1; break;
+		case 2: c = b.plc_mesh_w2; v = b.plc_mesh_v2; break;
+		case 3: c = b.plc_mesh_w3; v = b.plc_mesh_v3; break;
+		case 4: c = b.plc_mesh_w4; v = b.plc_mesh_v4; break;
+		default: return 0;
+	}
+	float lt = (payload_mesh_plan_span > 0)
+		? bound(0, (time - payload_mesh_plan_time) / payload_mesh_plan_span, 1) : 1;
+	return v + (c - v) * lt;
+}
+
+bool payload_mesh_weights_valid(entity b)
+{
+	float s = b.plc_mesh_w0 + b.plc_mesh_w1 + b.plc_mesh_w2 + b.plc_mesh_w3 + b.plc_mesh_w4;
+	if(s < 0.5 || s > 1.5)
+		return false;
+	if(b.plc_mesh_w0 < -0.01 || b.plc_mesh_w1 < -0.01 || b.plc_mesh_w2 < -0.01
+		|| b.plc_mesh_w3 < -0.01 || b.plc_mesh_w4 < -0.01)
+		return false;
+	return true;
 }
 
 entity payload_mesh_node(float idx)
@@ -94,6 +135,11 @@ void payload_mesh_tick(entity cart)
 		it.plc_mrow_friends = fr;
 		it.plc_mrow_enemies = en;
 		it.plc_mrow_obj = (j >= 1 && j <= NUM_TEAMS) ? payload_mesh_objective[j] : 0;
+		it.plc_mrow_weps = p ? payload_mesh_weapons(it) : 0;
+		it.plc_mrow_pow = (p && (StatusEffects_active(STATUSEFFECT_Strength, it)
+			|| StatusEffects_active(STATUSEFFECT_Shield, it))) ? 1 : 0;
+		it.plc_mrow_tss = p ? bound(0, time - it.plc_spawn_stamp, 999) : 0;
+		it.plc_mrow_pad = 0;
 	});
 
 	mesh_gather(payload_mesh_h, 0, plc_mrow_id, 1, maxclients);
@@ -112,6 +158,10 @@ void payload_mesh_tick(entity cart)
 	mesh_gather(payload_mesh_h, 13, plc_mrow_friends, 1, maxclients);
 	mesh_gather(payload_mesh_h, 14, plc_mrow_enemies, 1, maxclients);
 	mesh_gather(payload_mesh_h, 15, plc_mrow_obj, 1, maxclients);
+	mesh_gather(payload_mesh_h, 16, plc_mrow_weps, 1, maxclients);
+	mesh_gather(payload_mesh_h, 17, plc_mrow_pow, 1, maxclients);
+	mesh_gather(payload_mesh_h, 18, plc_mrow_tss, 1, maxclients);
+	mesh_gather(payload_mesh_h, 19, plc_mrow_pad, 1, maxclients);
 
 	payload_mesh_seq += 1;
 	mesh_publish(payload_mesh_h, payload_mesh_seq, maxclients);
@@ -121,7 +171,34 @@ void payload_mesh_tick(entity cart)
 		return;
 	payload_mesh_plan = done;
 
+	FOREACH_CLIENTSLOT(true,
+	{
+		it.plc_mesh_v0 = payload_mesh_weight(it, 0);
+		it.plc_mesh_v1 = payload_mesh_weight(it, 1);
+		it.plc_mesh_v2 = payload_mesh_weight(it, 2);
+		it.plc_mesh_v3 = payload_mesh_weight(it, 3);
+		it.plc_mesh_v4 = payload_mesh_weight(it, 4);
+	});
+	payload_mesh_plan_span = bound(0.05, time - payload_mesh_plan_time, 1.0);
+	payload_mesh_plan_time = time;
+
 	mesh_scatter(payload_mesh_h, 1, plc_mesh_pick, 1, maxclients);
+	mesh_scatter(payload_mesh_h, 2, plc_mesh_w0, 1, maxclients);
+	mesh_scatter(payload_mesh_h, 3, plc_mesh_w1, 1, maxclients);
+	mesh_scatter(payload_mesh_h, 4, plc_mesh_w2, 1, maxclients);
+	mesh_scatter(payload_mesh_h, 5, plc_mesh_w3, 1, maxclients);
+	mesh_scatter(payload_mesh_h, 6, plc_mesh_w4, 1, maxclients);
+	mesh_scatter(payload_mesh_h, 7, plc_mesh_lead, 1, maxclients);
+
+	FOREACH_CLIENT(IS_PLAYER(it),
+	{
+		bool lead = (it.plc_mesh_lead > 0.5 && it.plc_mesh_lead < 1.5);
+		if(lead && !it.wps_plcleader)
+			WaypointSprite_Spawn(WP_PayloadLeader, 0, 0, it, '0 0 64', NULL,
+				it.team, it, wps_plcleader, true, RADARICON_FLAG);
+		if(!lead && it.wps_plcleader)
+			WaypointSprite_Kill(it.wps_plcleader);
+	});
 
 	for(int k = 0; k < (NUM_TEAMS + 1) * PLC_MESH_OBJECTIVES; ++k)
 		payload_mesh_vote[k] = 0;
