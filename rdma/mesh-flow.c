@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <math.h>
 
 
 
@@ -33,6 +34,14 @@ static void teardown(void){
   if(g_shm){ shm_unlink(g_shm); g_shm=NULL; }
 }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
+// Welford. One pass, constant memory, and it does not lose the variance to
+// cancellation the way sum-of-squares does once the mean is large -- which it
+// is here, since these count pages and there are millions of them.
+struct wf { double n, mean, m2; };
+static void wf_add(struct wf *w, double x){
+  w->n += 1; double d = x - w->mean; w->mean += d / w->n; w->m2 += d * (x - w->mean); }
+static double wf_var(const struct wf *w){ return w->n > 1 ? w->m2 / (w->n - 1) : 0.0; }
+
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
 
 struct qpi { uint32_t qpn,psn; uint16_t lid; uint8_t gid[16]; };
@@ -178,6 +187,10 @@ int main(int argc,char**argv){
       .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*_b; \
     ibv_post_send(g_qp,&_w,&_b); })
   int posted=0, sending=0;
+  // sending counts every page on the wire, because that is what the send
+  // budget gates. The pool invariant needs only the pool's share of it, plus
+  // the pages the application is holding.
+  int send_arena=0, app_held=0;
   int arena_start=rx_pages;
   RG.h->arena_off = data_off + (uint64_t)rx_pages*(uint64_t)pgsz;
   RG.h->arena_pages = (uint32_t)(npages - rx_pages);
@@ -197,6 +210,8 @@ int main(int argc,char**argv){
   unsigned long long rx=0, tx=0, bytes_rx=0, bytes_tx=0;
   unsigned long long delivered=0, cmp_full=0, app_sent=0;
   unsigned long long dropped=0;
+  struct wf w_free={0}, w_post={0}, w_send={0};   // whole run
+  struct wf i_free={0}, i_post={0}, i_send={0};   // this interval
   double t0=now(), tel_last=t0;
 
   while(!g_stop && now()-t0 < seconds){
@@ -214,7 +229,7 @@ int main(int argc,char**argv){
     { struct mesh_desc dd; int nrel=0;
       while(nrel++ < 256 && !mesh_pop(&RG,&RG.h->rrel,RG.h->rel_off,&dd)){
         uint32_t p=dd.page;
-        if(p < (uint32_t)arena_start){ PUT(p); } } }
+        if(p < (uint32_t)arena_start){ PUT(p); app_held--; } } }
 
     // APPSUB -- send what the application handed over
     if(atomic_load_explicit(&RG.h->client_pid,memory_order_acquire)){
@@ -228,7 +243,7 @@ int main(int argc,char**argv){
         // A failed post must not put an arena page on the free list; it is
         // the application's page, not the pool's.
         if(POST_SEND(p)) dropped++;
-        else { sending++; app_sent++;
+        else { sending++; send_arena++; app_sent++;
                atomic_fetch_add_explicit(&RG.h->sent,1,memory_order_relaxed); }
       }
     }
@@ -258,7 +273,7 @@ int main(int argc,char**argv){
             // Handed to the application. The bridge stops tracking it; it comes
             // back through the release ring or not at all.
             if(mesh_push(&RG,&RG.h->rcmp,RG.h->cmp_off,&dd)){ cmp_full++; PUT(i); }
-            else atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed);
+            else { app_held++; atomic_fetch_add_explicit(&RG.h->recvd,1,memory_order_relaxed); }
           } else PUT(i);
         } else {
           if(POST_SEND(i)){ dropped++; PUT(i); }
@@ -268,22 +283,44 @@ int main(int argc,char**argv){
         tx++; bytes_tx+=pgsz; sending--;
         // A forwarded page came from the pool and returns to it. A page the
         // application sent is the application's, and the bridge forgets it.
-        if(i < arena_start) PUT(i);
+        if(i < arena_start) PUT(i); else send_arena--;
       }
     }
 
+    wf_add(&w_free,nfree); wf_add(&w_post,posted); wf_add(&w_send,sending);
+    wf_add(&i_free,nfree); wf_add(&i_post,posted); wf_add(&i_send,sending);
     double t=now();
     if(t-tel_last >= 1.0){
-      fprintf(stderr,"t=%.0f free=%d posted=%d sending=%d rx=%llu tx=%llu pool=%d/%d\n",
-        t-t0, nfree, posted, sending, rx, tx, nfree+posted+sending, arena_start);
+      // sd/mean on the three occupancies: a pool breathing evenly reads near
+      // zero, one being starved or flooded does not.
+      fprintf(stderr,"t=%.0f free=%d+-%.0f posted=%d+-%.0f sending=%d+-%.0f "
+                     "rx=%llu tx=%llu pool=%d/%d\n",
+        t-t0, nfree, sqrt(wf_var(&i_free)), posted, sqrt(wf_var(&i_post)),
+        sending, sqrt(wf_var(&i_send)), rx, tx, nfree+posted+(sending-send_arena)+app_held, arena_start);
+      // Each line describes its own second. A lifetime variance here would be
+      // dominated by the step from idle to running and would say nothing about
+      // how the pool is behaving now.
+      atomic_store_explicit(&RG.h->occ_free,(uint64_t)nfree,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->occ_posted,(uint64_t)posted,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->occ_sending,(uint64_t)(sending-send_arena),memory_order_relaxed);
+      atomic_store_explicit(&RG.h->occ_held,(uint64_t)app_held,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->occ_pool,(uint64_t)arena_start,memory_order_relaxed);
+      atomic_store_explicit(&RG.h->sd_free,(uint64_t)sqrt(wf_var(&i_free)),memory_order_relaxed);
+      atomic_store_explicit(&RG.h->sd_posted,(uint64_t)sqrt(wf_var(&i_post)),memory_order_relaxed);
+      atomic_store_explicit(&RG.h->sd_sending,(uint64_t)sqrt(wf_var(&i_send)),memory_order_relaxed);
+      atomic_store_explicit(&RG.h->uptime_ms,(uint64_t)((t-t0)*1000),memory_order_relaxed);
+      i_free=(struct wf){0}; i_post=(struct wf){0}; i_send=(struct wf){0};
       tel_last=t;
     }
     if(!k) usleep(50);            // nothing completed; do not spin
   }
   double el=now()-t0;
   printf("node pages=%d pool=%d  rx=%llu tx=%llu  %.2f/%.2f Gbit/s in/out\n"
+         "     occupancy free %.0f+-%.0f  posted %.0f+-%.0f  sending %.0f+-%.0f\n"
          "     delivered=%llu sent=%llu dropped=%llu cmp_full=%llu  pool %d/%d\n",
     npages, arena_start, rx, tx, bytes_rx*8/el/1e9, bytes_tx*8/el/1e9,
-    delivered, app_sent, dropped, cmp_full, nfree+posted+sending, arena_start);
+    w_free.mean, sqrt(wf_var(&w_free)), w_post.mean, sqrt(wf_var(&w_post)),
+    w_send.mean, sqrt(wf_var(&w_send)),
+    delivered, app_sent, dropped, cmp_full, nfree+posted+(sending-send_arena)+app_held, arena_start);
   return 0;
 }

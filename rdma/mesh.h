@@ -44,6 +44,10 @@ struct mesh_hdr {
   struct mesh_ring rrel;    // app -> bridge : done with these
   _Alignas(MESH_CL) _Atomic uint64_t client_pid;
   _Alignas(MESH_CL) _Atomic uint64_t sent, recvd, lost, unrecovered;
+  // Pool occupancy, published once a second so anything may read it without
+  // touching the data path. These are counts of pages, not estimates.
+  _Alignas(MESH_CL) _Atomic uint64_t occ_free, occ_posted, occ_sending, occ_pool, occ_held;
+  _Alignas(MESH_CL) _Atomic uint64_t sd_free, sd_posted, sd_sending, uptime_ms;
 };
 
 struct mesh { struct mesh_hdr *h; unsigned char *base; size_t len; int fd; };

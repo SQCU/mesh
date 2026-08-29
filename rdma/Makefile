@@ -8,3 +8,6 @@ mesh-app: mesh-app.c mesh-client.c mesh.h
 
 libmesh.dylib: mesh-client.c mesh.h
 	cc -O2 -dynamiclib -o $@ mesh-client.c
+
+mesh-stat: mesh-stat.c mesh.h
+	cc -O2 -o $@ mesh-stat.c
