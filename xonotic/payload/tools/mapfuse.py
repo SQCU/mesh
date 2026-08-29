@@ -921,5 +921,11 @@ if __name__ == '__main__':
     bsp_path, conns = fuse(seed, names, outdir, pk3)
     ent_path = os.path.join(outdir, 'fused.ent')
     M.emit(bsp_path, ent_path, 5, 3, pk3)
+    import zipfile
+    pk3out = os.path.join(outdir, 'fused.pk3')
+    with zipfile.ZipFile(pk3out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for f in ('fused.bsp', 'fused.waypoints', 'fused.waypoints.cache', 'fused.mapinfo', 'fused.ent'):
+            z.write(os.path.join(outdir, f), 'maps/' + f)
+    print('wrote %s (mount in client/server data dir to resolve maps/fused.*)' % pk3out)
     if '--smoke' in flags:
         smoke(outdir)
