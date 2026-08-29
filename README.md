@@ -612,7 +612,32 @@ silently failed to start is how several wrong numbers were reported here.
 
 ### What runs today
 
+Two bridges over one Thunderbolt link, both started by `bin/mesh-bridge.sh`, both converged to
+the same commit by git. A load generator on each node sending to the other at the same time:
+
+```
+9,828,683 and 9,830,729 slots verified   wrong 0
+mbp   out 20.13  in 20.14 Gbit/s
+mini  out 26.56  in 21.48 Gbit/s
+```
+
+Rates are differenced from the region census, not timed by the applications. The asymmetry is
+real and unexplained: the mini reports sending more than the MacBook reports receiving over
+the same interval, which is either a sampling artefact of two clocks a second apart or
+something worth chasing.
+
+Removing the 50 us idle sleep from the data plane did **not** change these numbers. It was a
+latency floor, not a bandwidth limit, and it is worth being clear that deleting it bought
+responsiveness rather than throughput.
+
 `rdma/mesh_coproc.py` holds a weight matrix resident on one node and applies it to rows
-streamed from the other. 54337 rows verified exactly, `wrong=0`. That path runs at
-0.12 Gbit/s, bounded by a Python loop touching one slot at a time; the C client carries
-59 Gbit/s over the same link with `corrupt=0`. Trust the correctness number, not the rate.
+streamed from the other, using `rdma/mesh.py` so MLX computes on pages the NIC wrote without a
+copy. 54,337 rows were verified exactly, `wrong=0`, at 0.12 Gbit/s — bounded by a Python loop
+touching one slot at a time. **That measurement predates the transport rewrite and has not
+been repeated since**; the API it uses is unchanged, but treat the number as historical.
+
+**Known defect.** The census above closes exactly on the mini and is one page short on the
+MacBook, with 4096 pages `held`. An application that exits while pages sit in its delivery ring
+strands them: the bridge never learns the client died, so the pool shrinks permanently by up to
+the ring capacity per death. The region header carries `client_pid` and nothing looks at it.
+
