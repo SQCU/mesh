@@ -30,8 +30,6 @@ float autocvar_g_payload_rollback_speed = 20;
 float autocvar_g_payload_score_rate = 0.01;
 float autocvar_g_payload_block_rate = 1;
 float autocvar_g_payload_stall_eps = 1;
-float autocvar_g_payload_stuck_time = 12;
-.float plc_stuck;
 float autocvar_g_payload_point_score = 1;
 float autocvar_g_payload_capture_radius = 64;
 float autocvar_g_payload_round_timelimit = 300;
@@ -285,29 +283,6 @@ void payload_think(entity this)
 	float gain = (s_new > s_prev && ctrl && payload_n[ctrl] > 0)
 		? (s_new - s_prev) * autocvar_g_payload_score_rate / payload_n[ctrl] : 0;
 	bool stalled = (total > 0) && (fabs(this.plc_speed_now) < autocvar_g_payload_stall_eps);
-	if(ctrl && payload_n[ctrl] > 0 && fabs(this.plc_speed_now) < autocvar_g_payload_stall_eps)
-	{
-		this.plc_stuck += PLC_TICK;
-		if(this.plc_stuck >= autocvar_g_payload_stuck_time)
-		{
-			float bestd = -1, bests = this.plc_s;
-			IL_EACH(g_payload_nodes, it.plc_cart == this,
-			{
-				if(it.plc_dist > this.plc_s + 8 && (bestd < 0 || it.plc_dist < bestd))
-				{
-					bestd = it.plc_dist;
-					bests = it.plc_dist;
-				}
-			});
-			this.plc_s = bests;
-			setorigin(this, payload_pos(this, this.plc_s) - this.view_ofs);
-			this.plc_stuck = 0;
-			LOG_INFO(strcat("payload: cart ", ftos(this.plc_cart_id), " unstuck to s ", ftos(bests)));
-			payload_EventLog("unstick", this.plc_cart_id);
-		}
-	}
-	else
-		this.plc_stuck = 0;
 	FOREACH_CLIENT(IS_PLAYER(it) && it.plc_in,
 	{
 		if(gain > 0 && it.plc_in == ctrl)
