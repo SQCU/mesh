@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-static struct hdr *M; static unsigned char *arena; static int held=-1;
+static struct hdr *M; static unsigned char *arena; static int last=-1;
 
 void *mesh_open(size_t *ns, size_t *sp, size_t *up){
   if(!M){
@@ -41,11 +41,11 @@ size_t mesh_write(const void *p, size_t nbytes, int node){
 
 size_t mesh_read(void **p, int *from){
   if(!M) return 0;
-  if(held>=0){ struct desc r={.page=(uint32_t)held};
+  if(last>=0){ struct desc r={.page=(uint32_t)last};
     while(push(M,REL,&r)){}
-    held=-1; }
+    last=-1; }
   struct desc d; if(pop(M,CMP,&d)) return 0;
-  held=(int)d.page;
+  last=(int)d.page;
   if(p) *p=mesh_data(M,d.page);
   if(from) *from=d.node;
   return d.bytes; }
@@ -88,7 +88,7 @@ size_t mesh_yell(const void *p, size_t n, int node){
       uint64_t k=*(uint64_t*)q & ~CTL, a=((uint64_t*)q)[1];
       if(k==OKK) return n;
       if(k==REQK){ range(p,a,n,node); round=-1; break; } } }
-  return n; }
+  return 0; }
 
 size_t mesh_lissen(void *dst, size_t n){
   if(!mesh_open(0,0,0)) return 0;

@@ -563,7 +563,24 @@ confirmed all of it; `mesh_lissen` fills n bytes and returns when they have all 
 caller knows nothing about arenas, pools, pages, or the far side. Loss is repaired between
 these two functions — lissen names the first hole, yell restreams from it — which is the
 application layer doing exactly what the transport promise assigns it. Measured: 20 GB in
-2.84 s, 7.04 GB/s, verified by offset with zero wrong.
+2.84 s, 7.04 GB/s, verified by offset with zero wrong, including the repair of 63,150 slots
+dropped by a receiver underrun.
+
+This is the second loss-repair mechanism this repo has had, so the risk trade is stated
+rather than assumed. The first lived inside the transport, shared state with the page table,
+and ran loops sized by numbers the peer sent; it mended a recoverable 1.3% loss and
+introduced phantom-loss storms, page-table corruption, three bridge segfaults and a kernel
+panic. This one lives in two client functions, holds only private state — a bitmap and two
+counters — never touches a verbs object, and every loop is bounded by the caller's own
+request. Its worst failure is a stuck or lying client process, and both are handled: a client
+holds no device, so killing it is always safe and the bridge reclaims its pages within a
+second; and `mesh_yell` returns n only when the receiver has confirmed every byte, 0 when it
+cannot confirm, so it never reports delivery it did not see.
+
+Two constraints, by design rather than accident. `mesh_lissen` blocks until its n bytes have
+landed — if the sender never finishes, it waits forever, and the remedy is to kill it, which
+is safe. And the streaming verbs own the client's inbound ring while they run: one process
+streams or does page-level I/O at a time, not both interleaved.
 
 From Python, `rdma/mesh.py` binds the page-level functions and returns numpy views of mesh
 memory, so MLX computes on pages the NIC wrote without a copy.
