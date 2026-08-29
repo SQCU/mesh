@@ -208,6 +208,33 @@ and an advance/regress glyph at the row end. A push-contest band across the top 
 each team's live occupancy weight (cart 0's, the only one `PAYLOAD_PUSH_PACKED`
 carries). Team colour = controlling team throughout, so the panel and the map agree.
 
+### Path-link entity budget (why carts are bounded)
+
+The minimap ribbon and the world ribbon both read `ENT_CLIENT_RADARLINK` entities,
+which are **always-sent** (`Net_LinkEntity(..., docull=false)`) — every one competes
+with player entities for the client's per-snapshot entity budget. `payload_path_build`
+runs for *every* `func_plc_cart`, and a fused mega-map carries one cart per fused tile,
+so an unbounded "one link per node-pair" would emit hundreds of always-sent entities
+and silently starve player CSQCModels out of the snapshot (players simulate and bank
+server-side but never draw client-side, with no VM error — the links win the budget,
+the players lose it). That was the player-render regression in 2d35b07.
+
+The fix bounds the footprint: each cart's path is **subsampled to at most
+`PLC_RIBBON_SEG` (4) straight segments**, and the whole map is capped at
+`g_payload_ribbon_max` (32) link entities total; `g_payload_pathlinks 0` disables path
+links entirely. Both are live cvars — no rebuild needed to retune on a bigger fused map.
+The ribbon is coarser than one-link-per-node (straight hops between sampled nodes rather
+than following every curve), which is the deliberate trade for keeping players on screen.
+
+### Showing the minimap as a spectator
+
+The radar/minimap panel is **off by default** in the shipped HUD (`hud_panel_radar 0`),
+so an observer sees the world ribbons but not the minimap ribbons — this is panel
+visibility, not a data failure (the `RADARLINK` entities do arrive; the world ribbon is
+drawn from them). To show it: set `hud_panel_radar 2` (small radar, forced on even outside teamplay; `1`
+also suffices since payload is teamplay). The maximized overview map is the `radar` /
+`clickradar` client command (`HUD_Radar_Show_Maximized`), bindable to a key.
+
 ### What is client-side
 
 Everything the viewer sees per frame — the dashboard and the world ribbon — is CSQC,

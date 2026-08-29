@@ -18,9 +18,11 @@ int autocvar_g_payload_point_leadlimit;
 
 IntrusiveList g_payload_nodes;
 IntrusiveList g_payload_links;
+int payload_link_count;
 void payload_Initialize();
 int payload_pack_cart_state();
 void payload_update_links(entity cart);
+void payload_spawn_link(entity cart, entity a, entity b);
 bool payload_link_send(entity this, entity to, int sendflags);
 
 REGISTER_MUTATOR(plc, false)
@@ -51,7 +53,6 @@ const float PLC_CURVE_STEPS = 16;
 .entity plc_curve;
 .entity plc_cart;
 .entity plc_first;
-.entity plc_link;
 .float plc_dist;
 .int plc_idx;
 .int plc_banked;

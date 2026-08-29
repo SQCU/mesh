@@ -4,6 +4,7 @@
 #include <common/teams.qh>
 
 const int PLC_MAX_CARTS = 4;
+const int PLC_RIBBON_SEG = 4;
 
 const int PLC_PUSH_BITS = 6;
 const int PLC_PUSH_MASK = 63;

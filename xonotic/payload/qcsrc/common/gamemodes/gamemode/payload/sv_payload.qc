@@ -36,6 +36,8 @@ float autocvar_g_payload_capture_radius = 64;
 float autocvar_g_payload_round_timelimit = 300;
 float autocvar_g_payload_warmup = 5;
 float autocvar_g_payload_node_fade_dist = 1100;
+int autocvar_g_payload_pathlinks = 1;
+int autocvar_g_payload_ribbon_max = 32;
 
 .float plc_in;
 .float plc_block_accum;
@@ -182,6 +184,20 @@ int payload_pack_cart_state()
 		packed |= (f << (c * PLC_CS_BITS));
 	}
 	return packed;
+}
+
+void payload_spawn_link(entity cart, entity a, entity b)
+{
+	if(payload_link_count >= autocvar_g_payload_ribbon_max)
+		return;
+	entity lk = new(plc_link);
+	lk.goalentity = a;
+	lk.enemy = b;
+	lk.plc_cart = cart;
+	IL_PUSH(g_payload_links, lk);
+	++payload_link_count;
+	Net_LinkEntity(lk, false, 0, payload_link_send);
+	lk.SendFlags = 7;
 }
 
 bool payload_link_send(entity this, entity to, int sendflags)
@@ -409,14 +425,6 @@ void payload_path_build(entity this)
 		{
 			d += payload_seglen(prev, node);
 			prev.plc_next = node;
-			entity lk = new(plc_link);
-			lk.goalentity = prev;
-			lk.enemy = node;
-			lk.plc_cart = this;
-			IL_PUSH(g_payload_links, lk);
-			prev.plc_link = lk;
-			Net_LinkEntity(lk, false, 0, payload_link_send);
-			lk.SendFlags = 7;
 		}
 		node.plc_dist = d;
 		entity nxt = (node.target != "") ? find(NULL, targetname, node.target) : NULL;
@@ -426,6 +434,23 @@ void payload_path_build(entity this)
 		node = nxt;
 	}
 	this.plc_length = d;
+
+	if(autocvar_g_payload_pathlinks && guard > 1)
+	{
+		int stride = max(1, floor((guard - 1) / PLC_RIBBON_SEG));
+		entity samp = first;
+		int lastk = 0, kk = 0;
+		for(entity nd = first.plc_next; nd; nd = nd.plc_next)
+		{
+			++kk;
+			if(kk - lastk >= stride || nd.plc_next == NULL)
+			{
+				payload_spawn_link(this, samp, nd);
+				samp = nd;
+				lastk = kk;
+			}
+		}
+	}
 
 	this.plc_s = 0;
 	setorigin(this, payload_pos(this, 0) - this.view_ofs);
@@ -758,6 +783,7 @@ void payload_Initialize()
 	g_payload = true;
 	g_payload_nodes = IL_NEW();
 	g_payload_links = IL_NEW();
+	payload_link_count = 0;
 	payload_mesh_h = -1;
 	payload_mesh_attach();
 
