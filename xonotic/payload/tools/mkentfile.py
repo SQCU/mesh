@@ -1,5 +1,8 @@
 import struct, sys, re, math, os, glob, subprocess, heapq
 
+BADMULT, CLEAR_TARGET, CLEAR_CAP, WB, WMED, WFLOOR, WHEEL = 8.0, 64.0, 256.0, 1.0, 0.3, 1.0, 42.0
+OUTER, INNER, FLOAT_LIM, EPS, CELL = 3, 30, 96.0, 0.25, 512.0
+
 
 def load_cache(mapname, bsp, pk3arg, depth=0):
     cands = []
@@ -90,8 +93,9 @@ def largest_component(adj):
     return best
 
 
-def kcenter(adj, k):
-    comp = largest_component(adj)
+def kcenter(adj, k, comp=None):
+    if comp is None:
+        comp = largest_component(adj)
     d0, _ = dijkstra(adj, comp[0])
     a = max(comp, key=lambda i: d0[i])
     da, _ = dijkstra(adj, a)
@@ -109,109 +113,72 @@ def kcenter(adj, k):
     return chosen, dmap
 
 
-WB, WXY, WZ, WHEEL = 1.0, 0.3, 1.0, 42.0
-
-
-NN = 12
-
-def make_clip(d):
-    try:
+class Bsp:
+    def __init__(self, d):
         def lump(i):
-            off, ln = struct.unpack_from('<ii', d, 8 + i * 8)
-            return off, ln
-        to, tl = lump(1); po, pl = lump(2); bo, bl = lump(8); so, sl = lump(9)
+            return struct.unpack_from('<ii', d, 8 + i * 8)
+        to, tl = lump(1)
+        po, pl = lump(2)
+        bo, bl = lump(8)
+        so, sl = lump(9)
         ntex = tl // 72
         solid = [struct.unpack_from('<i', d, to + i * 72 + 68)[0] & 1 for i in range(ntex)]
         planes = [struct.unpack_from('<4f', d, po + i * 16) for i in range(pl // 16)]
-        brushes = [struct.unpack_from('<3i', d, bo + i * 12) for i in range(bl // 12)]
         sides = [struct.unpack_from('<2i', d, so + i * 8) for i in range(sl // 8)]
-    except Exception:
-        return lambda p: False
-    def inside(p):
-        for fs, ns, tx in brushes:
+        self.brushes, self.aabbs = [], []
+        for i in range(bl // 12):
+            fs, ns, tx = struct.unpack_from('<iii', d, bo + i * 12)
             if tx < 0 or tx >= ntex or not solid[tx]:
                 continue
+            bp = [planes[sides[k][0]] for k in range(fs, fs + ns)]
+            lo = [-1e18] * 3
+            hi = [1e18] * 3
+            for nx, ny, nz, dd in bp:
+                for a, c in enumerate((nx, ny, nz)):
+                    if c > 0.999:
+                        hi[a] = min(hi[a], dd)
+                    elif c < -0.999:
+                        lo[a] = max(lo[a], -dd)
+            self.brushes.append(bp)
+            self.aabbs.append((lo, hi))
+        self.grid = {}
+        for bi, (lo, hi) in enumerate(self.aabbs):
+            x0, x1 = int(math.floor(lo[0] / CELL)), int(math.floor(hi[0] / CELL))
+            y0, y1 = int(math.floor(lo[1] / CELL)), int(math.floor(hi[1] / CELL))
+            for cx in range(x0, x1 + 1):
+                for cy in range(y0, y1 + 1):
+                    self.grid.setdefault((cx, cy), []).append(bi)
+
+    def cell(self, x, y):
+        return self.grid.get((int(math.floor(x / CELL)), int(math.floor(y / CELL))), ())
+
+    def inside(self, p):
+        x, y, z = p
+        for bi in self.cell(x, y):
+            lo, hi = self.aabbs[bi]
+            if not (lo[0] - EPS <= x <= hi[0] + EPS and lo[1] - EPS <= y <= hi[1] + EPS
+                    and lo[2] - EPS <= z <= hi[2] + EPS):
+                continue
             ok = True
-            for k in range(fs, fs + ns):
-                pli, _ = sides[k]
-                nx, ny, nz, dd = planes[pli]
-                if p[0] * nx + p[1] * ny + p[2] * nz - dd > 0.25:
+            for nx, ny, nz, dd in self.brushes[bi]:
+                if x * nx + y * ny + z * nz - dd > EPS:
                     ok = False
                     break
             if ok:
                 return True
         return False
-    return inside
 
-def clear_project(Q, A, inside):
-    n = 0
-    for i in range(len(Q)):
-        if not inside(tuple(Q[i])):
-            continue
-        a = list(A[i])
-        g = 0
-        while inside(tuple(a)) and g < 8:
-            a[2] += 12
-            g += 1
-        lo, hi = 0.0, 1.0
-        for _ in range(24):
-            mid = (lo + hi) / 2
-            m = tuple(Q[i][k] + (a[k] - Q[i][k]) * mid for k in range(3))
-            if inside(m):
-                lo = mid
-            else:
-                hi = mid
-        f = min(1.0, hi + 0.05)
-        Q[i] = [Q[i][k] + (a[k] - Q[i][k]) * f for k in range(3)]
-        n += 1
-    return n
-
-def chord_ok(Q, i, j, inside):
-    a, b = Q[i], Q[j]
-    for k in range(i + 1, j):
-        f = (k - i) / (j - i)
-        m = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
-        if inside(m) or math.dist(m, Q[k]) > 40:
-            return False
-    return True
-
-def adaptive_nodes(Q, inside):
-    idx = [0]
-    i = 0
-    while i < len(Q) - 1:
-        j = len(Q) - 1
-        while j > i + 1 and not chord_ok(Q, i, j, inside):
-            j -= 1
-        idx.append(j)
-        i = j
-    return [Q[k] for k in idx]
-
-def make_floor_tracer(d):
-    def lump(i):
-        return struct.unpack_from('<ii', d, 8 + i * 8)
-    to, tl = lump(1)
-    po, pl = lump(2)
-    bo, bl = lump(8)
-    so, sl = lump(9)
-    ntex = tl // 72
-    solid = [bool(struct.unpack_from('<i', d, to + i * 72 + 68)[0] & 1) for i in range(ntex)]
-    planes = [struct.unpack_from('<4f', d, po + i * 16) for i in range(pl // 16)]
-    brushes = []
-    for i in range(bl // 12):
-        fs, ns, tex = struct.unpack_from('<iii', d, bo + i * 12)
-        if 0 <= tex < ntex and solid[tex]:
-            brushes.append([planes[struct.unpack_from('<ii', d, so + (fs + k) * 8)[0]] for k in range(ns)])
-    if not brushes:
-        return None
-
-    def trace(x, y, zh):
+    def floor(self, x, y, zh):
         oz = zh + 64
         best = None
-        for sides in brushes:
+        for bi in self.cell(x, y):
+            lo, hi = self.aabbs[bi]
+            if not (lo[0] <= x <= hi[0] and lo[1] <= y <= hi[1]) or lo[2] > oz:
+                continue
             tmin, tmax, ok = -1e18, 1e18, True
-            for nx, ny, nz, pdst in sides:
+            for nx, ny, nz, dd in self.brushes[bi]:
                 denom = -nz
-                num = pdst - (nx * x + ny * y + nz * oz)
+                num = dd - (nx * x + ny * y + nz * oz)
                 if denom > 1e-9:
                     tmax = min(tmax, num / denom)
                 elif denom < -1e-9:
@@ -225,28 +192,112 @@ def make_floor_tracer(d):
             if fz <= zh + 8 and (best is None or fz > best):
                 best = fz
         return best
-    return trace
+
+    def clearance(self, x, y, z):
+        dmin, away = CLEAR_CAP, None
+        for k in range(8):
+            ang = k * math.pi / 4
+            dx, dy = math.cos(ang), math.sin(ang)
+            t = 24.0
+            hitd = None
+            while t <= CLEAR_CAP:
+                if self.inside((x + dx * t, y + dy * t, z)):
+                    lo2, hi2 = t - 24.0, t
+                    for _ in range(6):
+                        mid = (lo2 + hi2) / 2
+                        if self.inside((x + dx * mid, y + dy * mid, z)):
+                            hi2 = mid
+                        else:
+                            lo2 = mid
+                    hitd = lo2
+                    break
+                t += 24.0
+            if hitd is not None and hitd < dmin:
+                dmin, away = hitd, (-dx, -dy)
+        return dmin, away
 
 
-def resample_path(poly, sp):
+def seg_bad(bsp, pa, pb):
+    L = math.dist(pa, pb)
+    n = max(2, int(math.ceil(L / 32.0)))
+    consec = 0
+    sawfloor = False
+    for k in range(n + 1):
+        f = k / n
+        p = tuple(pa[t] + f * (pb[t] - pa[t]) for t in range(3))
+        if bsp.inside(p):
+            return 'solid'
+        fz = bsp.floor(p[0], p[1], p[2])
+        if fz is None:
+            consec += 1
+        else:
+            sawfloor = True
+            if p[2] - fz > FLOAT_LIM:
+                consec += 1
+            else:
+                consec = 0
+        if consec >= 2:
+            return 'fly'
+    if not sawfloor:
+        return 'nofloor'
+    return None
+
+
+def classify_edges(nodes, adj, bsp):
+    bad = {}
+    for u in range(len(adj)):
+        for v in adj[u]:
+            if v <= u:
+                continue
+            pa = (nodes[u][0], nodes[u][1], nodes[u][2] + 16)
+            pb = (nodes[v][0], nodes[v][1], nodes[v][2] + 16)
+            r = seg_bad(bsp, pa, pb)
+            if r:
+                bad[(u, v)] = r
+    return bad
+
+
+def route(adj, adj_ok, bad, src, goal):
+    D, prev = dijkstra(adj_ok, src)
+    admitted = []
+    if D[goal] == math.inf:
+        adj_adm = [dict(a) for a in adj]
+        for (u, v) in bad:
+            adj_adm[u][v] *= BADMULT
+            adj_adm[v][u] *= BADMULT
+        D, prev = dijkstra(adj_adm, src)
+    p, u = [], goal
+    while u != -1:
+        p.append(u)
+        u = prev[u]
+    p = p[::-1] if len(p) > 1 else [src]
+    segbad = []
+    for i in range(1, len(p)):
+        e = (min(p[i - 1], p[i]), max(p[i - 1], p[i]))
+        segbad.append(e in bad)
+        if e in bad:
+            admitted.append((e[0], e[1], bad[e]))
+    return p, segbad, admitted
+
+
+def resample_marked(poly, segbad, sp):
     cum = [0.0]
     for i in range(1, len(poly)):
         cum.append(cum[-1] + math.dist(poly[i - 1], poly[i]))
     total = cum[-1]
     m = max(2, int(round(total / sp)))
-    out = []
+    pts, mark = [], []
     for k in range(m + 1):
         t = total * k / m
         j = 0
         while j < len(cum) - 1 and cum[j + 1] < t:
             j += 1
-        if j >= len(poly) - 1:
-            out.append(poly[-1][:])
-            continue
+        j = min(j, len(poly) - 2)
         segl = cum[j + 1] - cum[j]
         f = (t - cum[j]) / segl if segl > 0 else 0.0
-        out.append([poly[j][a] + (poly[j + 1][a] - poly[j][a]) * f for a in range(3)])
-    return out
+        pts.append([poly[j][a] + (poly[j + 1][a] - poly[j][a]) * f for a in range(3)])
+        mark.append(segbad[j] if segbad else False)
+    return pts, mark
 
 
 def bending_energy(P):
@@ -254,39 +305,136 @@ def bending_energy(P):
                for i in range(1, len(P) - 1))
 
 
-def smooth_curve(P, xy0, z0, iters=80):
-    m = len(P) - 1
-    Q = [r[:] for r in P]
+def medial_smooth(bsp, R, mark):
+    m = len(R) - 1
+    zf = []
+    for r in R:
+        fz = bsp.floor(r[0], r[1], r[2]) if bsp else None
+        zf.append(fz if fz is not None and r[2] - 80 <= fz <= r[2] + 16 else r[2] - 26)
+    Q = [[R[i][0], R[i][1], zf[i] + WHEEL] for i in range(m + 1)]
+    Q[0][2] = R[0][2] + 16
+    Q[-1][2] = R[-1][2] + 16
+    A = [[q[0], q[1]] for q in Q]
     c = lambda i: 0 if i < 0 else (m if i > m else i)
-    for _ in range(iters):
+    for _ in range(OUTER):
         for i in range(1, m):
-            for a in range(2):
-                nb = 4 * (Q[c(i - 1)][a] + Q[c(i + 1)][a]) - Q[c(i - 2)][a] - Q[c(i + 2)][a]
-                Q[i][a] = (WB * nb + WXY * xy0[i][a]) / (6 * WB + WXY)
-            nb = 4 * (Q[c(i - 1)][2] + Q[c(i + 1)][2]) - Q[c(i - 2)][2] - Q[c(i + 2)][2]
-            Q[i][2] = (WB * nb + WZ * z0[i]) / (6 * WB + WZ)
-    return Q
+            dmin, away = bsp.clearance(Q[i][0], Q[i][1], Q[i][2]) if bsp else (CLEAR_CAP, None)
+            if away and dmin < CLEAR_TARGET:
+                push = min(CLEAR_TARGET - dmin, 24.0)
+                A[i] = [Q[i][0] + away[0] * push, Q[i][1] + away[1] * push]
+            else:
+                A[i] = [Q[i][0], Q[i][1]]
+            fz = bsp.floor(Q[i][0], Q[i][1], Q[i][2]) if bsp else None
+            if fz is not None and Q[i][2] - 80 <= fz + WHEEL <= Q[i][2] + 80:
+                zf[i] = fz
+        for _ in range(INNER):
+            for i in range(1, m):
+                for a in range(2):
+                    nb = 4 * (Q[c(i - 1)][a] + Q[c(i + 1)][a]) - Q[c(i - 2)][a] - Q[c(i + 2)][a]
+                    Q[i][a] = (WB * nb + WMED * A[i][a]) / (6 * WB + WMED)
+                nb = 4 * (Q[c(i - 1)][2] + Q[c(i + 1)][2]) - Q[c(i - 2)][2] - Q[c(i + 2)][2]
+                Q[i][2] = (WB * nb + WFLOOR * (zf[i] + WHEEL)) / (6 * WB + WFLOOR)
+    return Q, zf
 
 
-def snap_curve(P, n):
-    if len(P) < 2:
-        return [P[0][:] for _ in range(n)]
-    cum = [0.0]
-    for i in range(1, len(P)):
-        cum.append(cum[-1] + math.dist(P[i - 1], P[i]))
-    total = cum[-1]
-    out = []
-    for k in range(n):
-        t = total * k / (n - 1)
-        j = min(range(len(cum)), key=lambda x: abs(cum[x] - t))
-        out.append(P[j][:])
-    return out
+def chord_clean(bsp, a, b, exempt):
+    L = math.dist(a, b)
+    n = max(1, int(math.ceil(L / 32.0)))
+    for k in range(n + 1):
+        f = k / n
+        p = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
+        if bsp.inside(p):
+            return False
+        if not exempt:
+            fz = bsp.floor(p[0], p[1], p[2])
+            if fz is None or p[2] - fz > FLOAT_LIM:
+                return False
+    return True
 
 
-def nav_tracks(nodes, adj, dmap, origins, kcarts, tracer, clip):
+def adaptive_nodes(bsp, Q, mark):
+    idx = [0]
+    i = 0
+    while i < len(Q) - 1:
+        j = len(Q) - 1
+        while j > i + 1:
+            ex = any(mark[i:j + 1])
+            dev = all(math.dist(Q[k], [Q[i][t] + (k - i) / (j - i) * (Q[j][t] - Q[i][t])
+                                       for t in range(3)]) <= 40 for k in range(i + 1, j))
+            if dev and chord_clean(bsp, Q[i], Q[j], ex):
+                break
+            j -= 1
+        idx.append(j)
+        i = j
+    track = [Q[k][:] for k in idx]
+    exempt = [any(mark[idx[s]:idx[s + 1] + 1]) for s in range(len(idx) - 1)]
+    return track, exempt
+
+
+def validate_chain(bsp, track, exempt):
+    va, vb, ns = 0, 0, 0
+    for s in range(len(track) - 1):
+        a, b = track[s], track[s + 1]
+        L = math.dist(a, b)
+        n = max(1, int(math.ceil(L / 48.0)))
+        for k in range(n + 1):
+            f = k / n
+            p = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
+            ns += 1
+            if bsp.inside(p):
+                va += 1
+            elif not exempt[s]:
+                fz = bsp.floor(p[0], p[1], p[2])
+                if fz is None or p[2] - fz > FLOAT_LIM:
+                    vb += 1
+    return va, vb, ns
+
+
+def repair_chain(bsp, track, exempt):
+    for _ in range(6):
+        fixed = False
+        s = 0
+        while s < len(track) - 1:
+            a, b = track[s], track[s + 1]
+            L = math.dist(a, b)
+            n = max(1, int(math.ceil(L / 48.0)))
+            ins = None
+            for k in range(1, n):
+                f = k / n
+                p = [a[t] + f * (b[t] - a[t]) for t in range(3)]
+                if bsp.inside(tuple(p)):
+                    g = 0
+                    while bsp.inside(tuple(p)) and g < 12:
+                        p[2] += 12
+                        g += 1
+                    ins = p
+                    break
+                if not exempt[s]:
+                    fz = bsp.floor(p[0], p[1], p[2])
+                    if fz is not None and p[2] - fz > FLOAT_LIM:
+                        ins = [p[0], p[1], fz + WHEEL]
+                        break
+            if ins is not None:
+                track.insert(s + 1, ins)
+                exempt.insert(s, exempt[s])
+                fixed = True
+            s += 1
+        if not fixed:
+            break
+    for q in track:
+        g = 0
+        while bsp.inside(tuple(q)) and g < 12:
+            q[2] += 12
+            g += 1
+    return track, exempt
+
+
+def nav_tracks(nodes, adj, dmap, origins, kcarts, bsp, bad):
+    adj_ok = [{v: w for v, w in a.items()
+               if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
     used = set()
-    tracks = []
-    st = {'e0': 0.0, 'e1': 0.0, 'mxy': 0.0, 'mz': 0.0, 'bsp': 0, 'nav': 0}
+    tracks, exempts, alladm = [], [], []
+    st = {'e0': 0.0, 'e1': 0.0}
     for c in range(kcarts):
         src = origins[c]
         goal, gd = None, -1.0
@@ -298,43 +446,25 @@ def nav_tracks(nodes, adj, dmap, origins, kcarts, tracer, clip):
         if goal is None:
             goal = max(range(len(nodes)), key=lambda i: dmap[src][i] if dmap[src][i] < math.inf else -1)
         used.add(goal)
-        _, prev = dijkstra(adj, src)
-        p, u = [], goal
-        while u != -1:
-            p.append(u)
-            u = prev[u]
-        p = p[::-1] if len(p) > 1 else [src]
+        p, segbad, admitted = route(adj, adj_ok, bad, src, goal)
+        alladm.append(admitted)
         poly = [list(nodes[i]) for i in p]
-        R = resample_path(poly, 64.0)
-        xy0 = [(r[0], r[1]) for r in R]
-        z0 = []
-        for r in R:
-            fz = tracer(r[0], r[1], r[2]) if tracer else None
-            if fz is not None and r[2] - 80 <= fz <= r[2] + 16:
-                z0.append(fz)
-                st['bsp'] += 1
-            else:
-                z0.append(r[2] - 26)
-                st['nav'] += 1
-        z0[0] = R[0][2] - 26
-        z0[-1] = R[-1][2] - 26
-        P0 = [[xy0[i][0], xy0[i][1], z0[i]] for i in range(len(R))]
-        Q = smooth_curve(P0, xy0, z0)
-        st['e0'] += bending_energy(P0)
+        if bsp is None or len(poly) < 2:
+            track = [[q[0], q[1], q[2] + 16] for q in poly] or [[nodes[src][0], nodes[src][1], nodes[src][2] + 16]]
+            while len(track) < 2:
+                track.append(track[0][:])
+            tracks.append(track)
+            exempts.append([True] * (len(track) - 1))
+            continue
+        R, mark = resample_marked(poly, segbad, 64.0)
+        st['e0'] += bending_energy([[r[0], r[1], r[2] + 16] for r in R])
+        Q, zf = medial_smooth(bsp, R, mark)
         st['e1'] += bending_energy(Q)
-        st['mxy'] = max(st['mxy'], max(math.dist((Q[i][0], Q[i][1]), xy0[i]) for i in range(len(Q))))
-        st['mz'] = max(st['mz'], max(abs(Q[i][2] - z0[i]) for i in range(len(Q))))
-        track = [[q[0], q[1], q[2] - 26 + WHEEL] for q in poly]
-        emb = sum(1 for q in track if clip(tuple(q)))
-        if emb:
-            print('nav: %d waypoint nodes read embedded, nudging up' % emb)
-            for q in track:
-                g = 0
-                while clip(tuple(q)) and g < 6:
-                    q[2] += 12
-                    g += 1
+        track, exempt = adaptive_nodes(bsp, Q, mark)
+        track, exempt = repair_chain(bsp, track, exempt)
         tracks.append(track)
-    return tracks, st
+        exempts.append(exempt)
+    return tracks, exempts, alladm, st
 
 
 def spawn_tracks(pts, kcarts):
@@ -363,31 +493,59 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
     if not nodes or not largest_component(adj):
         print('nav: degenerate graph for %s (%d nodes), FALLBACK to spawn-origin method' % (mapname, len(nodes)))
         return spawn_tracks(pts, kcarts), None
+    try:
+        B = Bsp(d if d is not None else open(bsp, 'rb').read())
+    except Exception:
+        B = None
+    bad = classify_edges(nodes, adj, B) if B else {}
+    ne = sum(len(a) for a in adj) // 2
+    rs = {'solid': 0, 'fly': 0, 'nofloor': 0}
+    for r in bad.values():
+        rs[r] += 1
+    print('nav: %s waypoints=%d links=%d bad=%d (solid=%d fly=%d nofloor=%d)' %
+          (mapname, len(nodes), ne, len(bad), rs['solid'], rs['fly'], rs['nofloor']))
+    adj_ok = [{v: w for v, w in a.items()
+               if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
+    comp_ok = largest_component(adj_ok)
     cand_k = max(3, kcarts)
-    origins, dmap = kcenter(adj, cand_k)
-    print('nav: %s waypoints=%d links=%d candidate_origins=%d' %
-          (mapname, len(nodes), sum(len(a) for a in adj) // 2, len(origins)))
-    ws, es = [], []
+    if len(comp_ok) >= cand_k:
+        origins, dmap = kcenter(adj_ok, cand_k, comp_ok)
+    else:
+        origins, dmap = kcenter(adj, cand_k)
+    print('nav: candidate_origins=%d on %s subgraph (ok_component=%d/%d)' %
+          (len(origins), 'CART_OK' if len(comp_ok) >= cand_k else 'FULL', len(comp_ok), len(nodes)))
+    ws = []
     for i in range(len(origins)):
         for j in range(i + 1, len(origins)):
             wd = dmap[origins[i]][origins[j]]
             ed = math.dist(nodes[origins[i]], nodes[origins[j]])
             ws.append(wd)
-            es.append(ed)
             print('nav: origin %d %s <-> origin %d %s  walk=%.0f  euclid=%.0f  ratio=%.2f' %
                   (i, tuple(round(x) for x in nodes[origins[i]]), j,
                    tuple(round(x) for x in nodes[origins[j]]), wd, ed, wd / ed if ed else 0))
     print('nav: pairwise walk min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
           (min(ws), sum(ws) / len(ws), max(ws), max(ws) / min(ws) if min(ws) else 0))
-    try:
-        tracer = make_floor_tracer(d if d is not None else open(bsp, 'rb').read())
-    except Exception:
-        tracer = None
-    tracks, st = nav_tracks(nodes, adj, dmap, origins, kcarts, tracer, make_clip(d) if d else (lambda p: False))
-    print('nav: terrain %s BSP-floors=%d nav-z-interp=%d wheel_offset=%.0f weights bend=%.1f xy=%.2f z=%.2f' %
-          ('BSP-trace' if tracer else 'nav-z-interp(no BSP)', st['bsp'], st['nav'], WHEEL, WB, WXY, WZ))
-    print('nav: curvature %.0f->%.0f (%.1f%%) maxXYdev=%.1f maxZdev=%.1f' %
-          (st['e0'], st['e1'], 100 * st['e1'] / st['e0'] if st['e0'] else 0, st['mxy'], st['mz']))
+    tracks, exempts, alladm, st = nav_tracks(nodes, adj, dmap, origins, kcarts, B, bad)
+    nadm = sum(len(a) for a in alladm)
+    for c, a in enumerate(alladm):
+        if a:
+            print('nav: cart %d admitted %d bad edges: %s' % (c, len(a), a))
+    print('nav: admitted_total=%d weights bend=%.1f w_med=%.2f w_floor=%.2f target=%.0f cap=%.0f outer=%d inner=%d badmult=%.0f' %
+          (nadm, WB, WMED, WFLOOR, CLEAR_TARGET, CLEAR_CAP, OUTER, INNER, BADMULT))
+    print('nav: curvature %.0f->%.0f (%.1f%%)' %
+          (st['e0'], st['e1'], 100 * st['e1'] / st['e0'] if st['e0'] else 0))
+    if B:
+        va, vb, ns = 0, 0, 0
+        for track, exempt in zip(tracks, exempts):
+            a, b2, n2 = validate_chain(B, track, exempt)
+            va += a
+            vb += b2
+            ns += n2
+        exs = sum(sum(1 for e in ex if e) for ex in exempts)
+        print('nav: validation samples=%d solid_viol=%d float_viol=%d exempt_segs=%d %s' %
+              (ns, va, vb, exs, 'PASS' if va == 0 and vb == 0 else 'FAILED'))
+    else:
+        print('nav: validation skipped (no BSP geometry)')
     return tracks, (nodes, adj, dmap, origins)
 
 
@@ -404,7 +562,7 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
         if m:
             mclass[m.group(1)] = re.search(r'"classname"\s+"([^"]+)"', b).group(1)
     models = sorted(mclass, key=lambda s: int(s[1:]))
-    visible = [m for m in models if not mclass[m].startswith('trigger_')] or models
+    visible = [m for m in models if not mclass[m].startswith('trigger_')] or models or ['*1']
     spawns = [b for b in blocks if 'info_player_team1' in b or 'info_player_team2' in b]
 
     def origin(b):
