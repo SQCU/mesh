@@ -1,0 +1,273 @@
+{
+  "setup": {
+    "k": 3,
+    "j": 3,
+    "l": 6,
+    "L": 8,
+    "team_of": [
+      0,
+      1,
+      2,
+      0,
+      1,
+      2
+    ],
+    "focus_team": 0,
+    "protocol": "rivals idle (abandon); team0's two players suppress the chosen non-own cart",
+    "instrument_labels": [
+      [
+        "push_cart",
+        0
+      ],
+      [
+        "push_cart",
+        1
+      ],
+      [
+        "push_cart",
+        2
+      ],
+      [
+        "suppress_cart",
+        0
+      ],
+      [
+        "suppress_cart",
+        1
+      ],
+      [
+        "suppress_cart",
+        2
+      ],
+      [
+        "idle",
+        -1
+      ]
+    ]
+  },
+  "states": {
+    "A": {
+      "pos": [
+        2,
+        1,
+        3
+      ],
+      "control": [
+        0,
+        1,
+        2
+      ],
+      "nimbers": {
+        "0": 2,
+        "1": 1,
+        "2": 3
+      },
+      "PW": 2,
+      "SUCC": [
+        [
+          2,
+          0
+        ]
+      ],
+      "own_view_team0": {
+        "agg": [
+          0.25,
+          0.25,
+          0.0,
+          0.3333333432674408,
+          0.3333333432674408
+        ],
+        "cart_desc": [
+          [
+            1.0,
+            0.25
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ],
+        "own_carts": [
+          0
+        ]
+      }
+    },
+    "B": {
+      "pos": [
+        2,
+        3,
+        1
+      ],
+      "control": [
+        0,
+        1,
+        2
+      ],
+      "nimbers": {
+        "0": 2,
+        "1": 3,
+        "2": 1
+      },
+      "PW": 1,
+      "SUCC": [
+        [
+          1,
+          0
+        ]
+      ],
+      "own_view_team0": {
+        "agg": [
+          0.25,
+          0.25,
+          0.0,
+          0.3333333432674408,
+          0.3333333432674408
+        ],
+        "cart_desc": [
+          [
+            1.0,
+            0.25
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ],
+        "own_carts": [
+          0
+        ]
+      }
+    }
+  },
+  "own_view_identical": true,
+  "team_only_instrument_distribution": {
+    "A": [
+      0.5557,
+      0.0,
+      0.0,
+      0.0,
+      0.0935,
+      0.0935,
+      0.2573
+    ],
+    "B": [
+      0.5557,
+      0.0,
+      0.0,
+      0.0,
+      0.0935,
+      0.0935,
+      0.2573
+    ],
+    "identical": true
+  },
+  "all_to_all_actions": {
+    "greedy_deny_reference_team0": {
+      "A": [
+        [
+          "suppress_cart",
+          2
+        ],
+        [
+          "suppress_cart",
+          2
+        ]
+      ],
+      "B": [
+        [
+          "suppress_cart",
+          1
+        ],
+        [
+          "suppress_cart",
+          1
+        ]
+      ]
+    },
+    "trained_estimator_team0_argmax": {
+      "A": [
+        [
+          "suppress_cart",
+          2
+        ],
+        [
+          "suppress_cart",
+          2
+        ]
+      ],
+      "B": [
+        [
+          "suppress_cart",
+          1
+        ],
+        [
+          "suppress_cart",
+          1
+        ]
+      ]
+    },
+    "estimator_checkpoint": "loaded 27/27 tensors from policy_online_v3.npz",
+    "estimator_loaded": true,
+    "estimator_differs_A_vs_B": true,
+    "greedy_differs_A_vs_B": true
+  },
+  "correct_target_cart": {
+    "A": 2,
+    "B": 1
+  },
+  "one_step_outcomes": {
+    "A": {
+      "suppress_cart1": {
+        "pw_before": 2,
+        "pw_after": 2,
+        "denied_projected_winner": 0,
+        "team0_shaped_reward": 0.062418746747512514
+      },
+      "suppress_cart2": {
+        "pw_before": 2,
+        "pw_after": null,
+        "denied_projected_winner": 1,
+        "team0_shaped_reward": 0.062418746747512514
+      }
+    },
+    "B": {
+      "suppress_cart1": {
+        "pw_before": 1,
+        "pw_after": null,
+        "denied_projected_winner": 1,
+        "team0_shaped_reward": 0.062418746747512514
+      },
+      "suppress_cart2": {
+        "pw_before": 1,
+        "pw_after": 1,
+        "denied_projected_winner": 0,
+        "team0_shaped_reward": 0.062418746747512514
+      }
+    }
+  },
+  "forced_regret": {
+    "blind_fixed_target": {
+      "fixed_target_cart1": {
+        "denials_out_of_2": 1,
+        "denial_failures_out_of_2": 1
+      },
+      "fixed_target_cart2": {
+        "denials_out_of_2": 1,
+        "denial_failures_out_of_2": 1
+      }
+    },
+    "all_to_all_denials_out_of_2": 2,
+    "team_only_forced_denial_failures_out_of_2": 1,
+    "team_only_min_failure_rate": 0.5,
+    "all_to_all_failure_rate": 0.0,
+    "note": "The team-only policy emits one distribution for both aliased states, so it denies the projected winner in at most one of the two; the all-to-all policy denies in both. The shaped scalar reward is partition-symmetric (it scores aggregate rival strength, not rival identity), so the aliasing cost is carried by the PW-denial objective (spec \u00a75), not the shaping term."
+  }
+}

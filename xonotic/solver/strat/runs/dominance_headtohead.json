@@ -1,0 +1,512 @@
+{
+  "config": {
+    "n_games": 60,
+    "n_steps": 20,
+    "train_shapes": [
+      [
+        2,
+        3,
+        4
+      ],
+      [
+        3,
+        3,
+        6
+      ],
+      [
+        3,
+        4,
+        6
+      ],
+      [
+        4,
+        4,
+        8
+      ]
+    ],
+    "heldout_shapes": [
+      [
+        3,
+        5,
+        7
+      ],
+      [
+        4,
+        6,
+        9
+      ],
+      [
+        5,
+        4,
+        10
+      ]
+    ],
+    "opponent": "greedy_deny (all-to-all reference) controls every non-focus team",
+    "estimator_checkpoint": "loaded 27/27 tensors from policy_online_v3.npz",
+    "dims": [
+      "terminal_win",
+      "pw_control_fraction",
+      "retention",
+      "acquisition"
+    ]
+  },
+  "per_shape": [
+    {
+      "shape": [
+        2,
+        3,
+        4
+      ],
+      "heldout": false,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.6166666666666667,
+        "baseline_mean": 0.1,
+        "delta": 0.5166666666666667,
+        "per_game_estimator_wins": 32,
+        "per_game_ties": 27,
+        "per_game_baseline_wins": 1,
+        "wilson95_estimator_geq_baseline": [
+          0.9114466177322051,
+          0.9970519161391262
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.5308333333333333,
+        "baseline_mean": 0.065,
+        "delta": 0.46583333333333327,
+        "per_game_estimator_wins": 59,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 1,
+        "wilson95_estimator_geq_baseline": [
+          0.9114466177322051,
+          0.9970519161391262
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.41301948051948045,
+        "baseline_mean": 0.07712301587301587,
+        "delta": 0.3358964646464646,
+        "per_game_estimator_wins": 55,
+        "per_game_ties": 1,
+        "per_game_baseline_wins": 4,
+        "wilson95_estimator_geq_baseline": [
+          0.8407442010623228,
+          0.973771725856802
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.6789814814814815,
+        "baseline_mean": 0.06402864879645066,
+        "delta": 0.6149528326850309,
+        "per_game_estimator_wins": 59,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 1,
+        "wilson95_estimator_geq_baseline": [
+          0.9114466177322051,
+          0.9970519161391262
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.13973579252991017,
+      "alias_cumulative_objective_cost_mean": -0.7477368355236024,
+      "alias_loser_steps_total": 188,
+      "alias_mis_target_steps_total": 96,
+      "estimator_dominates_all_dims": true,
+      "estimator_strict_on_some_dim": true
+    },
+    {
+      "shape": [
+        3,
+        3,
+        6
+      ],
+      "heldout": false,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.9,
+        "baseline_mean": 0.0,
+        "delta": 0.9,
+        "per_game_estimator_wins": 54,
+        "per_game_ties": 6,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.09499999999999997,
+        "baseline_mean": 0.0,
+        "delta": 0.09499999999999997,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.0,
+        "delta": 0.0,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 60,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.1,
+        "baseline_mean": 0.0,
+        "delta": 0.1,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.17620104182023683,
+      "alias_cumulative_objective_cost_mean": -0.08349609197538267,
+      "alias_loser_steps_total": 1055,
+      "alias_mis_target_steps_total": 182,
+      "estimator_dominates_all_dims": true,
+      "estimator_strict_on_some_dim": true
+    },
+    {
+      "shape": [
+        3,
+        4,
+        6
+      ],
+      "heldout": false,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.7833333333333333,
+        "baseline_mean": 0.016666666666666666,
+        "delta": 0.7666666666666666,
+        "per_game_estimator_wins": 47,
+        "per_game_ties": 12,
+        "per_game_baseline_wins": 1,
+        "wilson95_estimator_geq_baseline": [
+          0.9114466177322051,
+          0.9970519161391262
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.6425000000000001,
+        "baseline_mean": 0.07083333333333333,
+        "delta": 0.5716666666666668,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.6354426129426131,
+        "baseline_mean": 0.1563888888888889,
+        "delta": 0.47905372405372415,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.6656944444444445,
+        "baseline_mean": 0.05120262871230363,
+        "delta": 0.6144918157321408,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.2426362526362527,
+      "alias_cumulative_objective_cost_mean": -0.25325006626607566,
+      "alias_loser_steps_total": 763,
+      "alias_mis_target_steps_total": 183,
+      "estimator_dominates_all_dims": true,
+      "estimator_strict_on_some_dim": true
+    },
+    {
+      "shape": [
+        4,
+        4,
+        8
+      ],
+      "heldout": false,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.0,
+        "delta": 0.0,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 60,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.04999999999999998,
+        "baseline_mean": 0.0,
+        "delta": 0.04999999999999998,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.0,
+        "delta": 0.0,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 60,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.05263157894736843,
+        "baseline_mean": 0.0,
+        "delta": 0.05263157894736843,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.37791670761872,
+      "alias_cumulative_objective_cost_mean": -0.2629837313487796,
+      "alias_loser_steps_total": 1082,
+      "alias_mis_target_steps_total": 402,
+      "estimator_dominates_all_dims": true,
+      "estimator_strict_on_some_dim": true
+    },
+    {
+      "shape": [
+        3,
+        5,
+        7
+      ],
+      "heldout": true,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.7333333333333333,
+        "baseline_mean": 0.0,
+        "delta": 0.7333333333333333,
+        "per_game_estimator_wins": 44,
+        "per_game_ties": 16,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.6925000000000002,
+        "baseline_mean": 0.10083333333333334,
+        "delta": 0.5916666666666669,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.8187423687423686,
+        "baseline_mean": 0.1583333333333333,
+        "delta": 0.6604090354090353,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.4621031746031746,
+        "baseline_mean": 0.08479675495929365,
+        "delta": 0.377306419643881,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.35330036385183444,
+      "alias_cumulative_objective_cost_mean": 0.47539102958658586,
+      "alias_loser_steps_total": 858,
+      "alias_mis_target_steps_total": 293,
+      "estimator_dominates_all_dims": true,
+      "estimator_strict_on_some_dim": true
+    },
+    {
+      "shape": [
+        4,
+        6,
+        9
+      ],
+      "heldout": true,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.016666666666666666,
+        "delta": -0.016666666666666666,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 59,
+        "per_game_baseline_wins": 1,
+        "wilson95_estimator_geq_baseline": [
+          0.9114466177322051,
+          0.9970519161391262
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.04999999999999998,
+        "baseline_mean": 0.04166666666666667,
+        "delta": 0.00833333333333331,
+        "per_game_estimator_wins": 38,
+        "per_game_ties": 3,
+        "per_game_baseline_wins": 19,
+        "wilson95_estimator_geq_baseline": [
+          0.5576599505698345,
+          0.7869429415882567
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.14555555555555555,
+        "delta": -0.14555555555555555,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 42,
+        "per_game_baseline_wins": 18,
+        "wilson95_estimator_geq_baseline": [
+          0.5749105303360957,
+          0.801019897472731
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.05263157894736843,
+        "baseline_mean": 0.02788456025685128,
+        "delta": 0.024747018690517153,
+        "per_game_estimator_wins": 39,
+        "per_game_ties": 2,
+        "per_game_baseline_wins": 19,
+        "wilson95_estimator_geq_baseline": [
+          0.5576599505698345,
+          0.7869429415882567
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.6694156986804045,
+      "alias_cumulative_objective_cost_mean": -0.4365363627595487,
+      "alias_loser_steps_total": 880,
+      "alias_mis_target_steps_total": 584,
+      "estimator_dominates_all_dims": false,
+      "estimator_strict_on_some_dim": true
+    },
+    {
+      "shape": [
+        5,
+        4,
+        10
+      ],
+      "heldout": true,
+      "n_games": 60,
+      "terminal_win": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.0,
+        "delta": 0.0,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 60,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "pw_control_fraction": {
+        "estimator_mean": 0.05416666666666666,
+        "baseline_mean": 0.0,
+        "delta": 0.05416666666666666,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "retention": {
+        "estimator_mean": 0.0,
+        "baseline_mean": 0.0,
+        "delta": 0.0,
+        "per_game_estimator_wins": 0,
+        "per_game_ties": 60,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "acquisition": {
+        "estimator_mean": 0.05750487329434698,
+        "baseline_mean": 0.0,
+        "delta": 0.05750487329434698,
+        "per_game_estimator_wins": 60,
+        "per_game_ties": 0,
+        "per_game_baseline_wins": 0,
+        "wilson95_estimator_geq_baseline": [
+          0.9398260695220669,
+          0.9999999999999999
+        ]
+      },
+      "alias_mis_target_rate_mean": 0.3533098985208118,
+      "alias_cumulative_objective_cost_mean": -0.16686565840682585,
+      "alias_loser_steps_total": 1116,
+      "alias_mis_target_steps_total": 383,
+      "estimator_dominates_all_dims": true,
+      "estimator_strict_on_some_dim": true
+    }
+  ],
+  "verdict": {
+    "shapes_with_strict_pareto_dominance": 6,
+    "shapes_total": 7,
+    "dim_win_shape_counts": {
+      "terminal_win": 4,
+      "pw_control_fraction": 7,
+      "retention": 3,
+      "acquisition": 7
+    },
+    "dim_lose_shape_counts": {
+      "terminal_win": 1,
+      "pw_control_fraction": 0,
+      "retention": 1,
+      "acquisition": 0
+    }
+  }
+}
