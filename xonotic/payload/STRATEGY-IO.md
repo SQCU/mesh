@@ -1,8 +1,8 @@
 # Strategy I/O — the server-def boundary between Xonotic and the mesh
 
 This document specifies the **exact** server-side I/O the strategy stack needs: the
-hooks it attaches to, the mesh column layout it reads and writes, and what is already
-exposed versus what is `[BUILD]`. It is the contract for the three flows the strategy
+hooks it attaches to, the mesh column layout it reads and writes, and the implemented
+boundary. It is the contract for the three flows the strategy
 operator requires:
 
 1. **cartstate + global feature rows** emitted up to the mesh every strategy step
@@ -17,9 +17,8 @@ Authorities (where doc and code disagree, the doc is intent): `design/payload-sp
 computed features, §4 computed/learned/frozen boundary), `design/playerbot-interface.md`
 (the levers, file:line), `design/dpp-mixing-and-overlay.md` (§4 cadence = step size).
 
-Nothing here modifies the working cart mechanic. The scaffolding
-(`sv_payload_strategy_io.qh` / `.qc`, `tools/strategy_io_schema.py`) is additive and
-name-spaced; `sv_payload.qc` is untouched.
+Nothing here modifies the working cart mechanic. The strategy I/O is additive and
+name-spaced; `sv_payload.qc` supplies the strategy-step, rater, spawn, and death hooks.
 
 ---
 
@@ -37,12 +36,12 @@ name-spaced; `sv_payload.qc` is untouched.
   and the lead-cart strategy gate `if (plc_cart_id == 0)` inside `payload_think`
   (`sv_payload.qc:414`). Cartstate fields (`plc_s`, `plc_length`, `plc_ctrl`,
   `plc_speed_now`, `plc_idle`, `sv_payload.qh`) all exist.
-- **`[BUILD]` is:** filling and gathering the three request streams; the perception gate;
-  the 8-column scatter apply; the strategy-weighted rater; and the hunt/explore/spawn/
-  commit primitives. The scaffolding files stub every one with cited TODOs.
-- **The one honest gap is perception.** Today nothing gates item/enemy visibility per
-  bot; the observation buffer must be fed only by what a bot passed all three gates on
-  (`payload-spec §2.2.1`; `playerbot-interface §8`). This is foundational, not a patch.
+- **The strategy path is implemented.** It fills and gathers all three request streams,
+  applies the 8-column scatter, and consumes cart, item, rival, cell, commitment, and
+  spawn instruments through real game hooks.
+- **Perception is gated.** Item and enemy events enter only after range, PVS, and LOS
+  checks. The responder deduplicates the ring, contracts stale observations toward
+  priors, and constructs the live V-cell graph from observed motion.
 
 ---
 
@@ -54,7 +53,7 @@ The strategy step reuses the **existing** lead-cart gate — no new think loop i
 payload_think (sv_payload.qc:297)             // per game tick, ~PLC_TICK = 0.1s
   ...
   if (this.plc_cart_id == 0) {                // sv_payload.qc:414  (already the strategy gate)
-      // [BUILD] throttle to PLC_STRAT_TICK and call:
+      // throttle to PLC_STRAT_TICK and call:
       payload_strategy_step(this);            // gather up, scatter down (one mesh exchange)
   }
 ```
@@ -125,7 +124,7 @@ Game-1, closed-form, ¬learned, and are **not** emitted here.
 | 7 | PROGRESS | monotone banked score for this cart's lane |
 | 8-11 | reserved | — |
 
-### 2.C Perception event ring — edge-triggered rows (width 6, 256 rows) — **`[BUILD]`**
+### 2.C Perception event ring — edge-triggered rows (width 6, 256 rows)
 
 The **only** producer of enemy/item rows and the **only** path by which enemy positions
 enter the system (`payload-spec §2.2.1`). Produced by `payload_perceive` under the
@@ -143,7 +142,7 @@ interface doc flagged as the riskiest gap (`playerbot-interface §6, §8`).
 
 ---
 
-## 3. The perception gate (`payload_perceive`) — foundational `[BUILD]`
+## 3. The perception gate (`payload_perceive`)
 
 Per bot, per strategy step. An event is deposited into the per-team ring **only** when
 all three gates pass (`payload-spec §2.2.1`). All three are necessary; the 2-cell cap
@@ -176,10 +175,10 @@ Each column is a `navigation_routerating` bias.
 | 0 | TARGET | `plc_str_target` | packed committed target id (§5) |
 | 1 | GAIN | `plc_str_gain` | base rating amplitude `f` for that target |
 | 2 | LANE | `plc_str_lane` | arclength fraction [0,1] along the chosen cart (push vs suppress-position) |
-| 3 | HUNT | `plc_str_hunt` | weight rating the observed rival subject `[BUILD #1]` |
-| 4 | EXPLORE | `plc_str_explore` | weight rating waypoints near a seen cell `[BUILD #2]` |
-| 5 | COMMIT | `plc_str_commit` | travel-commitment horizon → `bot_strategytime` (`navigation.qc:51`) `[BUILD #4]` |
-| 6 | SPAWN | `plc_str_spawn` | spawn-timing hold → `respawn_time` (`client.qc:1341`) `[BUILD #3]` |
+| 3 | HUNT | `plc_str_hunt` | weight rating the observed rival subject |
+| 4 | EXPLORE | `plc_str_explore` | weight rating waypoints whose hashed V-cell equals the selected cell |
+| 5 | COMMIT | `plc_str_commit` | travel-commitment horizon → `bot_strategytime` (`navigation.qc:51`) |
+| 6 | SPAWN | `plc_str_spawn` | spawn-timing delta applied after death by `PlayerPreThink` |
 | 7 | LEAD | `plc_str_lead` | swing/leader **readout** flag (intercentrality argmax; `dpp §3` ontology discipline — a derived readout, never a primitive entity) |
 
 Why a packed target + weights rather than a full per-instrument vector: 8 columns cannot
@@ -198,18 +197,18 @@ One scalar selects the committed instrument's target. Bases are pinned in
 (`encode_target`/`decode_target`, round-trip-tested):
 
 ```
-cart  k :  0 + k          (PLC_TGT_CART_BASE)
-item  p :  100 + p        (PLC_TGT_ITEM_BASE)
-rival r :  300 + r        (PLC_TGT_RIVAL_BASE)
-cell  c :  500 + c        (PLC_TGT_CELL_BASE)
+cart  k :       0 + k     (PLC_TGT_CART_BASE)
+item  p :   65536 + p     (PLC_TGT_ITEM_BASE)
+rival r :  131072 + r     (PLC_TGT_RIVAL_BASE)
+cell  c :   196608 + c     (PLC_TGT_CELL_BASE)
 ```
 
-`havocbot_goalrating_strategy` (scaffolding `.qc`) dispatches on the band and issues the
+`havocbot_goalrating_strategy` dispatches on the band and issues the
 matching `navigation_routerating` call.
 
 ---
 
-## 6. Wiring: `[BUILD]` vs already-exposed
+## 6. Wiring
 
 | piece | status | where |
 |-------|--------|-------|
@@ -221,25 +220,19 @@ matching `navigation_routerating` call.
 | cartstate fields (`plc_s`/`plc_length`/`plc_ctrl`/`plc_speed_now`/`plc_idle`) | **exposed** | `sv_payload.qh` |
 | `bot_strategytime` (travel commit) | **exposed** | `navigation.qc:19,51` |
 | `respawn_time`/`respawn_flags` (spawn timing) | **exposed** | `client.qc:1341,2154` |
-| gather fills + `mesh_gather` for schemas A/B/C | **`[BUILD]`** | `payload_strategy_gather` |
-| perception gate + event ring | **`[BUILD]` foundational** | `payload_perceive` |
-| 8-col `mesh_scatter` apply | **`[BUILD]`** | `payload_strategy_scatter` |
-| strategy-weighted rater | **`[BUILD]`** | `havocbot_goalrating_strategy` |
-| hunt / explore / spawn / commit primitives | **`[BUILD]`** | rater TODOs (must-build 1-4) |
-| V-cell segmentation | **`[BUILD]`** | `payload_str_cell_of` (coarse-hash stub) |
+| gather fills + `mesh_gather` for schemas A/B/C | **implemented** | `payload_strategy_gather` |
+| perception gate + event ring | **implemented** | `payload_perceive` |
+| 8-col `mesh_scatter` apply | **implemented** | `payload_strategy_scatter` |
+| strategy-weighted rater | **implemented** | `havocbot_goalrating_strategy` |
+| hunt / explore / spawn / commit primitives | **implemented** | strategy rater plus payload death/pre-think hooks |
+| V-cell segmentation | **implemented, coarse** | `payload_str_cell_of` |
 
-**Three-edit activation (all `[BUILD]`, none applied here — they touch generated /
-shipping files this task must not modify):**
-
-1. `_mod.inc` (generated): add `#include ".../sv_payload_strategy_io.qc"` under `SVQC`.
-2. `payload_think` (`sv_payload.qc:414`): inside the existing `plc_cart_id == 0` block,
-   throttle to `PLC_STRAT_TICK` and call `payload_strategy_step(this)`.
-3. `havocbot_role_payload` (`sv_payload.qc:627`): swap the rater call
-   `havocbot_goalrating_payload(this, 20000)` → `havocbot_goalrating_strategy(this, 20000)`
-   (leave the shipping function in place as the mesh-down fallback path).
-
-The rater applies COMMIT after `navigation_goalrating_end` and SPAWN at respawn
-calculation — both noted inline in the scaffolding.
+`_mod.inc` includes the strategy implementation under SVQC. `payload_think` invokes
+the throttled exchange at the lead-cart gate, `havocbot_goalrating_payload` adds the
+strategy rater, `PlayerSpawn` records time-since-spawn, `PlayerDies` opens the timing
+window, and `PlayerPreThink` applies later strategy deltas once rather than extending
+the timer every frame. A clean overlay of the stock Xonotic source compiles both SVQC
+and CSQC with these hooks.
 
 ---
 
@@ -266,8 +259,8 @@ calculation — both noted inline in the scaffolding.
 
 | file | role |
 |------|------|
-| `qcsrc/.../payload/sv_payload_strategy_io.qh` | scaffolding: fields, 4 column schemas, target bases, prototypes |
-| `qcsrc/.../payload/sv_payload_strategy_io.qc` | scaffolding: attach/gather/scatter/perceive/rater/step stubs, cited TODOs |
+| `qcsrc/.../payload/sv_payload_strategy_io.qh` | fields, 4 column schemas, target bases, prototypes |
+| `qcsrc/.../payload/sv_payload_strategy_io.qc` | attach/gather/scatter/perception/rater/step implementation |
 | `tools/strategy_io_schema.py` | canonical column contract + deterministic PW/SUCC/target-codec (numpy), self-tested |
 | `STRATEGY-IO.md` | this document |
 

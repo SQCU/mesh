@@ -14,7 +14,7 @@ enabled on the mesh peer:
 
 ```
 cd ~/mesh/xonotic
-python -m solver.strat.strat_responder --train --secs 600 \
+python3 -m solver.strat.strat_responder --train --secs 600 \
   --off-policy-players 2
 ```
 
@@ -40,7 +40,7 @@ Generate a reproducible mixed-count schedule and execute it:
 
 ```
 cd ~/dox/mesh/xonotic
-python -m solver.strat.curriculum --generate 96 --seed 20260830 \
+python3 -m solver.strat.curriculum --generate 96 --seed 20260830 \
   --maps runningmanctf,dance --team-counts 2,3,4,5 \
   --players-per-team 2,4,8 --cart-counts 1,2,3,4 \
   --skills 2,5,8 --perturbations baseline,fast,slow,volatile \
@@ -61,6 +61,16 @@ telemetry record reports the bot/human counts actually observed rather than trea
 the requested controller mixture as evidence. Generated schedules can vary human
 counts with `--human-counts`; `--human-client-command` launches one command per such
 participant and expands `{port}`, `{map}`, `{seed}`, `{match}`, and `{client}` tokens.
+
+Summarize one or more realized telemetry streams with:
+
+```
+python3 -m solver.strat.metrics solver/strat/runs/curriculum-20260830/*/telemetry.jsonl
+```
+
+The summary separates winner-retention and loser-acquisition trials and aggregates
+importance weights, W/L losses, dynamics error, ensemble disagreement, local-control
+singular values, credited horizon, controller class, and behavior-policy class.
 
 - engine bridge: `bridge/PORT.md`, `bridge/engine/mesh_ipc.c`, `bridge/qc/`
 - game code: `payload/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.{qc,qh}`

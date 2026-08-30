@@ -190,6 +190,8 @@ const float PLC_TGT_CELL_BASE  = 196608;
 .float plc_ev_f_value;
 .float plc_ev_f_time;
 .float plc_str_spawn_stamp2;   // spawn-time cache staged for TSS (own field; no hook needed)
+.float plc_str_death_stamp;
+.float plc_str_spawn_applied;
 
 // ---- prototypes (all [BUILD]; bodies in sv_payload_strategy_io.qc) ----------
 void  payload_strategy_attach();                                  // lazy mesh_open of the 4 handles

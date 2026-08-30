@@ -307,7 +307,8 @@ class Curriculum:
         ]
         checkpoint_in = cfg.get("checkpoint", self.previous_checkpoint)
         if checkpoint_in:
-            responder += ["--checkpoint", os.path.abspath(os.path.expanduser(checkpoint_in))]
+            checkpoint_in = os.path.abspath(os.path.expanduser(checkpoint_in))
+            responder += ["--checkpoint", checkpoint_in, "--resume-checkpoint", checkpoint_in]
         responder += command(cfg.get("responder_args"))
         context = {"port": port, "map": cfg["map"], "seed": cfg["seed"], "match": cfg["id"]}
         clients = [client_command(item, context, index) for index, item in enumerate(cfg.get("client_commands", []))]

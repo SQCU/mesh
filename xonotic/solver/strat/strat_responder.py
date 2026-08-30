@@ -113,6 +113,7 @@ def main():
     ap.add_argument("--save-every", type=int, default=100)
     ap.add_argument("--checkpoint", default=CKPT)
     ap.add_argument("--online-checkpoint", default=ONLINE_CKPT)
+    ap.add_argument("--resume-checkpoint")
     ap.add_argument("--telemetry", default=TELEM)
     ap.add_argument("--seed", type=int, default=20260829)
     args = ap.parse_args()
@@ -128,6 +129,7 @@ def main():
     empirical_game = EmpiricalTransitionGraph(())
     rng = np.random.default_rng(args.seed)
     learner = None
+    last_saved_update = 0
     previous = None
     previous_game_state = None
     previous_game_teams = ()
@@ -214,6 +216,9 @@ def main():
                     sim = CartSim(k, j, l, team_of=team_of, L=L_LEVELS, seed=args.seed)
                     cartstate, depth_frac = build_cartstate(cart_rows, k)
                     game_state = (
+                        map_key,
+                        belief_episode,
+                        k,
                         tuple(np.floor(cartstate.pos).astype(np.int64).tolist()),
                         tuple(cartstate.control.tolist()),
                     )
@@ -248,9 +253,14 @@ def main():
                     online_metrics = None
                     if carry_key is not None and carry_key != batch_key:
                         if learner is not None and previous is not None:
-                            online_metrics = learner.observe(
-                                previous, previous["state"], cartstate, terminal=True
-                            )
+                            if carry_key[0] == key:
+                                online_metrics = learner.observe(
+                                    previous, previous["state"], cartstate, terminal=True
+                                )
+                            else:
+                                online_metrics = learner.flush(
+                                    previous["state"], previous["cartstate"], terminal=True
+                                )
                         previous = None
                     carry_key = batch_key
                     w_in = weights_from_table(batch, weight_table)
@@ -265,15 +275,25 @@ def main():
                                 est,
                                 learning_rate=args.learning_rate,
                                 checkpoint=args.online_checkpoint,
+                                load_checkpoint=args.resume_checkpoint or args.checkpoint,
                             )
                         if previous is not None:
                             online_metrics = learner.observe(previous, state, cartstate)
-                            stats["updates"] = learner.updates
-                            if args.save_every > 0 and learner.updates % args.save_every == 0:
-                                learner.save()
+                        stats["updates"] = learner.updates
+                        if (
+                            args.save_every > 0
+                            and learner.updates > last_saved_update
+                            and learner.updates % args.save_every == 0
+                        ):
+                            learner.save()
+                            last_saved_update = learner.updates
 
                     game_value = empirical_game.evaluate(game_state)
-                    if previous_game_state is not None and previous_game_state != game_state:
+                    if (
+                        previous_game_state is not None
+                        and previous_game_state[:3] == game_state[:3]
+                        and previous_game_state != game_state
+                    ):
                         for team in sorted(set(previous_game_teams)):
                             empirical_game.observe(previous_game_state, game_state, int(team))
                         game_value = empirical_game.evaluate(previous_game_state)

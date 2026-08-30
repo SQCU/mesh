@@ -19,6 +19,7 @@ class LiveBelief:
         self.now = 0.0
         self.wall = time.monotonic()
         self.cells = {}
+        self.cell_teams = {}
         self.edges = set()
         self.player_cells = {}
         self.signatures = set()
@@ -34,6 +35,7 @@ class LiveBelief:
         self.now = 0.0
         self.wall = time.monotonic()
         self.cells.clear()
+        self.cell_teams.clear()
         self.edges.clear()
         self.player_cells.clear()
         self.signatures.clear()
@@ -102,10 +104,12 @@ class LiveBelief:
         gy = int(np.floor(float(y) * 4.0))
         return (gx * 131 + gy) & 1023
 
-    def _put_cell(self, cell, position):
+    def _put_cell(self, cell, position, team=None):
         position = np.asarray(position, dtype=np.float64)[:2]
         old = self.cells.get(cell)
         self.cells[cell] = position if old is None else 0.8 * old + 0.2 * position
+        if team is not None:
+            self.cell_teams.setdefault(int(cell), set()).add(int(team))
 
     def _link(self, left, right):
         if left != right:
@@ -126,13 +130,13 @@ class LiveBelief:
             if previous is not None:
                 self._link(previous, cell)
             self.player_cells[participant] = cell
-            player_positions.setdefault(cell, []).append(position)
+            player_positions.setdefault((cell, team), []).append(position)
             record = (participant, team, cell, position)
             players.append(record)
             by_id[participant] = record
             by_team.setdefault(team, []).append(record)
-        for cell, positions in player_positions.items():
-            self._put_cell(cell, np.mean(positions, axis=0))
+        for (cell, team), positions in player_positions.items():
+            self._put_cell(cell, np.mean(positions, axis=0), team)
         event_positions = {}
         for team in self.buffer.teams():
             observers = by_team.get(int(team), [])
@@ -147,12 +151,12 @@ class LiveBelief:
                     position = np.mean(list(self.cells.values()), axis=0)
                 else:
                     position = np.zeros(2, dtype=np.float64)
-                event_positions.setdefault(int(event.cell), []).append(position)
+                event_positions.setdefault((int(event.cell), int(team)), []).append(position)
                 if observers:
                     nearest = min(observers, key=lambda record: np.linalg.norm(record[3] - position))
                     self._link(int(event.cell), nearest[2])
-        for cell, positions in event_positions.items():
-            self._put_cell(cell, np.mean(positions, axis=0))
+        for (cell, team), positions in event_positions.items():
+            self._put_cell(cell, np.mean(positions, axis=0), team)
         return players
 
     def _vcmap(self):
@@ -325,6 +329,7 @@ class LiveBelief:
                 int(cell), (float(position[0]), float(position[1]), 0.0),
                 1.0, 1.0 / (1.0 + sum(cell in edge for edge in self.edges)),
                 float(sum(cell in edge for edge in self.edges)),
+                tuple(sorted(self.cell_teams.get(int(cell), ()))),
             )
             for cell, position in sorted(self.cells.items())
         ]

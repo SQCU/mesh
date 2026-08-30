@@ -690,6 +690,29 @@ MUTATOR_HOOKFUNCTION(plc, PlayerSpawn)
 	entity player = M_ARGV(0, entity);
 
 	player.player_blocked = !round_handler_IsRoundStarted();
+	player.plc_str_spawn_stamp = time;
+	player.plc_str_spawn_stamp2 = time;
+	player.plc_str_death_stamp = 0;
+	player.plc_str_spawn_applied = 0;
+}
+
+MUTATOR_HOOKFUNCTION(plc, PlayerDies)
+{
+	entity player = M_ARGV(2, entity);
+	player.plc_str_death_stamp = time;
+	player.plc_str_spawn_applied = 0;
+}
+
+MUTATOR_HOOKFUNCTION(plc, PlayerPreThink)
+{
+	entity player = M_ARGV(0, entity);
+	if(player.plc_str_death_stamp > 0 && player.plc_str_spawn != player.plc_str_spawn_applied)
+	{
+		float delta = player.plc_str_spawn - player.plc_str_spawn_applied;
+		player.respawn_time = max(time, player.respawn_time + delta);
+		player.respawn_time_max = max(player.respawn_time, player.respawn_time_max + delta);
+		player.plc_str_spawn_applied = player.plc_str_spawn;
+	}
 }
 
 MUTATOR_HOOKFUNCTION(plc, ClientConnect)

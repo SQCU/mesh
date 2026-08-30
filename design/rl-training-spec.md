@@ -202,16 +202,21 @@ disagreement, local action-Jacobian rank/smallest singular value, and direct rea
 tests around sampled states. A full-rank learned Jacobian alone is not evidence that the
 real game is locally controllable.
 
-## 7. Open / build
+## 7. Implemented / open
 
 - `[OPEN]` the calibrated hierarchy score `H`, retention margin, credit horizon, `gamma`,
   and loss coefficients.
-- `[BUILD]` real perception-gated observations and histories from Game 2.
-- `[BUILD]` perturbation suites and held-out count/map evaluation.
-- `[BUILD]` a match supervisor that samples and records the server curriculum across
-  maps, rosters, carts, controllers, skills, and seeds.
+- `[DONE]` real perception-gated observations, persistent per-team histories, temporal
+  contraction, and a live V-cell graph from Game 2.
+- `[DONE]` a match supervisor that samples and records maps, rosters, carts,
+  controllers, skills, seeds, perturbations, held-out tuples, and checkpoint lineage.
+- `[OPEN]` execute the perturbation and held-out schedules at sufficient scale to fill
+  the outcome acceptance matrix.
 - `[BUILD]` a visible human strategy channel or an inverse classifier that identifies
   the discrete strategy realized by human movement.
-- `[BUILD]` empirical validation or replacement of the candidate nimber evaluator.
-- `[BUILD]` turn model uncertainty into bounded probes and use the learned local inverse
-  as an action-to-target proposal inside `W` and `L`.
+- `[DONE]` exact mex/XOR evaluation for complete impartial graphs and an empirical
+  option graph that keeps incomplete, cyclic, or partizan values explicitly unresolved.
+- `[OPEN]` acquire enough real transitions to validate or replace the candidate cart
+  nimber evaluator.
+- `[DONE]` bounded ensemble-disagreement probes and local action-to-target proposals
+  refine W/L actions after the dynamics learner has observed transitions.

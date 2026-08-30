@@ -150,6 +150,10 @@ def _relation(actor: Participant, inst: Instrument) -> tuple[np.ndarray, bool]:
         actor.time_since_spawn, inst.value, inst.available, inst.uncertainty,
     ), dtype=np.float32)
     eligible = seen and (inst.kind != InstrumentKind.HUNT_RIVAL or not same_team)
+    if actor.alive < 0.5:
+        eligible = eligible and inst.kind in (InstrumentKind.SPAWN_TIMING, InstrumentKind.IDLE)
+    else:
+        eligible = eligible and inst.kind != InstrumentKind.SPAWN_TIMING
     return row, eligible
 
 

@@ -49,12 +49,23 @@ def policy_forward(
     team_index = mx.array(np.asarray(state.team_of, dtype=np.int32))
     q_context = q + q_team[team_index]
     appetite = mx.logaddexp(q_context @ keys.T, mx.zeros((q.shape[0], keys.shape[0])))
-    quality = mx.mean(appetite, axis=0)
-    diag_k = mx.stop_gradient(dpp_marginals(quality, keys))
-    dw_dt = est.head(diag_k, appetite, relation)
-    w_next = integrate_weights(w, dw_dt, est.delta)
+    eligible = None
     if state.eligible is not None:
         eligible = mx.stop_gradient(mx.array(np.asarray(state.eligible, dtype=bool)))
+        appetite = mx.where(eligible, appetite, mx.zeros_like(appetite))
+    team_diag = []
+    for team in range(len(state.teams)):
+        team_rows = team_index == team
+        denominator = mx.maximum(mx.sum(team_rows), 1)
+        quality = mx.sum(appetite * team_rows[:, None], axis=0) / denominator
+        if eligible is not None:
+            available = mx.any(eligible & team_rows[:, None], axis=0)
+            quality = mx.where(available, quality, mx.zeros_like(quality))
+        team_diag.append(dpp_marginals(quality, keys))
+    diag_k = mx.stop_gradient(mx.stack(team_diag)[team_index])
+    dw_dt = est.head(diag_k, appetite, relation)
+    w_next = integrate_weights(w, dw_dt, est.delta)
+    if eligible is not None:
         w_next = mx.where(eligible, w_next, mx.full_like(w_next, -1e9))
     if action is None:
         action = mx.random.categorical(w_next / est.temperature, axis=-1, key=key)

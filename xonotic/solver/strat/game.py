@@ -131,20 +131,17 @@ def projected_winner(carts: Iterable, teams: Optional[Iterable] = None):
 
     Closed-form over cartstate (`rl-training-spec.md` §1). Compute each team's nimber
     (``team_nimbers``) and return the team holding the largest *live* (nonzero) nimber;
-    ties break to the lowest team id (deterministic, via the sorted roster). Returns
-    ``None`` when every team's nimber is 0 -- no team holds a live path-to-victory
-    threat (e.g. the spec's two-carts-at-d:1 position, ``1 XOR 1 = 0``, for that team).
+    A strict maximum is required. Returns ``None`` when every team's nimber is 0 or
+    several teams tie for the largest live nimber, because no unique team then holds
+    the path-to-victory position.
 
     This is a FEATURE the policy and value read; it is not learned and carries no
     gradient (spec §2.1: ``PW`` is ``stopgrad``).
     """
     nimbers = team_nimbers(carts, teams)
-    best_team, best = None, 0
-    for t in _teams_of(as_carts(carts), teams):  # iterate in deterministic order
-        n = nimbers.get(t, 0)
-        if n > best:
-            best, best_team = n, t
-    return best_team
+    best = max(nimbers.values(), default=0)
+    leaders = [team for team, value in nimbers.items() if value == best]
+    return leaders[0] if best > 0 and len(leaders) == 1 else None
 
 
 def _leader_deepest_cart(carts: list, leader) -> Optional[int]:

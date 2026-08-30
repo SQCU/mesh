@@ -145,12 +145,23 @@ class StrategyEstimator:
         q_context = q + q_team[team_index]
         scores = q_context @ keys.T
         appetite = mx.logaddexp(scores, mx.zeros_like(scores))
-        quality = mx.mean(appetite, axis=0)
-        diag_k = mx.stop_gradient(dpp_marginals(quality, keys))
-        dw_dt = self.head(diag_k, appetite, relation)
-        w_next = integrate_weights(w, dw_dt, self.delta)
+        eligible = None
         if state.eligible is not None:
             eligible = mx.stop_gradient(mx.array(np.asarray(state.eligible, dtype=bool)))
+            appetite = mx.where(eligible, appetite, mx.zeros_like(appetite))
+        team_diag = []
+        for team in range(len(state.teams)):
+            team_rows = team_index == team
+            denominator = mx.maximum(mx.sum(team_rows), 1)
+            quality = mx.sum(appetite * team_rows[:, None], axis=0) / denominator
+            if eligible is not None:
+                available = mx.any(eligible & team_rows[:, None], axis=0)
+                quality = mx.where(available, quality, mx.zeros_like(quality))
+            team_diag.append(dpp_marginals(quality, keys))
+        diag_k = mx.stop_gradient(mx.stack(team_diag)[team_index])
+        dw_dt = self.head(diag_k, appetite, relation)
+        w_next = integrate_weights(w, dw_dt, self.delta)
+        if eligible is not None:
             w_next = mx.where(eligible, w_next, mx.full_like(w_next, -1e9))
         key = None
         if self._seed is not None:

@@ -22,6 +22,7 @@ class OnlineLearner:
         importance_clip: float = 2.0,
         dynamics=None,
         checkpoint=None,
+        load_checkpoint=None,
         credit_horizon: int = 5,
     ):
         self.estimator = estimator
@@ -39,9 +40,10 @@ class OnlineLearner:
         self.credit_horizon = max(1, int(credit_horizon))
         self.pending = []
         self.loaded = False
-        if checkpoint is not None and os.path.exists(checkpoint):
+        source = load_checkpoint or checkpoint
+        if source is not None and os.path.exists(source):
             try:
-                self.bundle.load_weights(checkpoint)
+                self.bundle.load_weights(source)
                 self.loaded = True
             except Exception as exc:
                 print(f"[online] checkpoint load failed ({exc}); continuing from policy state", flush=True)

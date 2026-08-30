@@ -62,7 +62,7 @@ class MixingHead(nn.Module):
         appetite: mx.array,
         relation: mx.array | None = None,
     ) -> mx.array:
-        diag = mx.broadcast_to(diag_k[None, :], appetite.shape)
+        diag = mx.broadcast_to(diag_k[None, :], appetite.shape) if diag_k.ndim == 1 else diag_k
         if relation is None:
             relation = mx.zeros((*appetite.shape, 16), dtype=appetite.dtype)
         mean_appetite = mx.broadcast_to(
@@ -71,7 +71,9 @@ class MixingHead(nn.Module):
         max_appetite = mx.broadcast_to(
             mx.max(appetite, axis=-1, keepdims=True), appetite.shape
         )
-        mean_diag = mx.broadcast_to(mx.mean(diag_k), appetite.shape)
+        mean_diag = mx.broadcast_to(
+            mx.mean(diag, axis=-1, keepdims=True), appetite.shape
+        )
         return mx.concatenate(
             [
                 diag[..., None],
