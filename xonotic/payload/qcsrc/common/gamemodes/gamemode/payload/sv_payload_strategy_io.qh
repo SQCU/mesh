@@ -1,0 +1,155 @@
+#pragma once
+// =============================================================================
+//  sv_payload_strategy_io.qh  —  SCAFFOLDING  [BUILD]
+// -----------------------------------------------------------------------------
+//  Server-side I/O contract for the strategy stack. This header declares the
+//  fields, the mesh column schema, and the function prototypes that carry:
+//    (1) cartstate + global feature ROWS up to the mesh   (payload-spec §2.1, §3.2)
+//    (2) perception-gated observation events up to the mesh (payload-spec §2.2)
+//    (3) per-player instrument weights back down as routerating biases
+//        (playerbot-interface §2.3-2.4; payload-spec §4)
+//
+//  THIS FILE IS NON-DESTRUCTIVE SCAFFOLDING. It is NOT #included by the
+//  generated _mod.inc and it does NOT touch the working cart mechanic in
+//  sv_payload.qc. Nothing here is wired into the live rater yet — wiring is the
+//  [BUILD] step documented in STRATEGY-IO.md. Symbols are name-spaced `plc_str_`
+//  / `payload_strategy_` so they never collide with the shipping `plc_*` set.
+//
+//  Determinism boundary (rl-training-spec §4): everything on THIS side of the
+//  wire is stopgrad. QC emits raw cartstate and raw perception; PW/SUCC, the
+//  belief, the DPP/mixing head, and the value head are computed on the mesh. QC
+//  never learns and never sees a gradient.
+// =============================================================================
+
+// ---- cadence ---------------------------------------------------------------
+// The strategy step is driven from the lead cart's think, reusing the EXISTING
+// plc_cart_id == 0 gate (sv_payload.qc:414). PLC_STRAT_TICK is the emit cadence
+// = the forward-Euler step size Delta (dpp-mixing-and-overlay §4): a stability
+// parameter, not a scheduling knob. Multiple of PLC_TICK (0.1s).
+const float PLC_STRAT_TICK   = 0.2;   // 5 Hz strategy step (within spec 1-10 Hz)
+
+// ---- mesh geometry ---------------------------------------------------------
+// mesh_open(node, width, maxrows). Request arena carries `width` floats/row;
+// the RESPONSE arena is fixed at 8 floats/row by the engine
+// (MESH_XON_RESPWIDTH, bridge/engine/mesh_ipc.c:15). The scatter schema below
+// therefore has EXACTLY 8 columns — a hard substrate constraint, not a choice.
+const float PLC_STR_NODE     = 0;     // logical coprocessor node id
+const float PLC_STR_RESP_W   = 8;     // fixed engine response width
+
+// Three request (gather) handles, one response (scatter) handle. Distinct
+// handles keep per-player rows, cartstate rows, and event-ring rows from
+// sharing a column axis. Engine allows up to MESH_XON_HANDLES (4).
+const float PLC_STR_OBS_W    = 40;    // per-player observation row width
+const float PLC_STR_CART_W   = 12;    // cartstate row width (GUARANTEED emit)
+const float PLC_STR_EVT_W    = 6;     // perception-event ring row width
+const float PLC_STR_EVT_ROWS = 256;   // event ring capacity
+
+// =============================================================================
+//  GATHER SCHEMA A — per-player observation row x_b   (payload-spec §2.1)
+//  One row per client edict. Own, known self-state only (health/armor/pos/vel/
+//  weapons/ammo/powerup/tss + nearest-cart geometry). NOT enemy/item truth —
+//  that enters ONLY through the perception event ring (schema C).
+// =============================================================================
+const float PLC_OBS_ID        = 0;    // client entnum
+const float PLC_OBS_TEAM      = 1;    // team index (A_team selector)
+const float PLC_OBS_HEALTH    = 2;
+const float PLC_OBS_ARMOR     = 3;
+const float PLC_OBS_AMMO      = 4;    // summed pools / 100
+const float PLC_OBS_POS_X     = 5;    // origin / 1024
+const float PLC_OBS_POS_Y     = 6;
+const float PLC_OBS_POS_Z     = 7;
+const float PLC_OBS_VEL_X     = 8;    // velocity / 1024
+const float PLC_OBS_VEL_Y     = 9;
+const float PLC_OBS_VEL_Z     = 10;
+const float PLC_OBS_WEAPONS   = 11;   // weapons bitfield (float-encoded)
+const float PLC_OBS_POWER     = 12;   // powerup timer remaining
+const float PLC_OBS_TSS       = 13;   // time-since-spawn (spawn-state observable)
+const float PLC_OBS_CELL      = 14;   // resolved V-cell id of the bot (payload-spec §2.2.2)
+const float PLC_OBS_NCART     = 15;   // nearest-cart index
+const float PLC_OBS_NCART_D   = 16;   // nearest-cart distance / 1024
+const float PLC_OBS_ALIVE     = 17;   // 1 alive, 0 dead (drives spawn scatter)
+// 18..39 reserved for x_b growth; zero-filled.
+
+// =============================================================================
+//  GATHER SCHEMA B — cartstate row s   (rl-training-spec §1; GUARANTEED)
+//  One row per cart edict (payload_carts[0..payload_cart_count-1]). This is the
+//  guaranteed member of the global feature vector. PW(s) and SUCC(s) are
+//  COMPUTED from these rows on the mesh — NOT emitted here (they are Game-1,
+//  closed-form, ¬learned). Emitting depth+control is sufficient and required.
+// =============================================================================
+const float PLC_CS_ID        = 0;     // cart id
+const float PLC_CS_DEPTH     = 1;     // plc_s / plc_length  (arclength fraction, golden path)
+const float PLC_CS_LENGTH    = 2;     // plc_length (raw, for de-norm)
+const float PLC_CS_CTRL      = 3;     // controlling team index (0 = uncontrolled)
+const float PLC_CS_SPEED     = 4;     // plc_speed_now (signed; <0 = regressing)
+const float PLC_CS_IDLE      = 5;     // plc_idle (rollback timer)
+const float PLC_CS_BANKMASK  = 6;     // banked-team bitmask since last origin touch
+const float PLC_CS_PROGRESS  = 7;     // monotone banked score for this cart's lane
+// 8..11 reserved.
+
+// =============================================================================
+//  GATHER SCHEMA C — perception event ring   (payload-spec §2.2.1; [BUILD])
+//  Edge-triggered rows deposited by payload_perceive(). Nothing enters that no
+//  bot passed the frustum + LOS + 2-V-cell gate on. This is the ONLY path by
+//  which enemy positions and item (un)availability reach the mesh. Replaces the
+//  omniscient ITS_AVAILABLE / findradius feeds the interface doc flagged as the
+//  riskiest gap.
+// =============================================================================
+const float PLC_EVT_CELL     = 0;     // V-cell id where the event was seen
+const float PLC_EVT_KIND     = 1;     // 0=item_gone 1=item_here 2=enemy_here 3=rival_here
+const float PLC_EVT_TEAM     = 2;     // observing team (per-team buffer key)
+const float PLC_EVT_SUBJECT  = 3;     // item post p / rival entnum r (instrument target id)
+const float PLC_EVT_VALUE    = 4;     // kind-specific payload (respawn-phase est, threat)
+const float PLC_EVT_TIME     = 5;     // observation timestamp (temporal contraction, §2.2.3)
+
+// =============================================================================
+//  SCATTER SCHEMA — per-player instrument weights  (EXACTLY 8 cols)
+//  Absolute, mesh-integrated weight state w_b (payload-spec §3.2: the engine
+//  reads the integrated absolute weight, never integrates). Each column is a
+//  routerating bias consumed by havocbot_goalrating_strategy(). Column meanings
+//  are pinned; the mesh must write them in this order.
+// =============================================================================
+const float PLC_SC_TARGET    = 0;     // packed committed target id (see encode() in STRATEGY-IO.md)
+const float PLC_SC_GAIN       = 1;    // base rating amplitude f for the committed target
+const float PLC_SC_LANE       = 2;    // arclength fraction [0,1] along chosen cart (push vs suppress-position)
+const float PLC_SC_HUNT       = 3;    // hunt-rival weight (rates the observed rival subject)
+const float PLC_SC_EXPLORE    = 4;    // explore-cell weight (rates waypoints near a seen cell)
+const float PLC_SC_COMMIT     = 5;    // travel-commitment horizon -> bot_strategytime (navigation.qc:51)
+const float PLC_SC_SPAWN      = 6;    // spawn-timing bias -> respawn_time hold (client.qc:1341)
+const float PLC_SC_LEAD       = 7;    // swing/leader readout flag (intercentrality argmax; readout ONLY)
+
+// Target encoding bases for PLC_SC_TARGET (kept in one place; mirrored in the
+// Python schema so both sides agree). cart k in [0, CART_BASE+k); item post p
+// at ITEM_BASE+p; rival r at RIVAL_BASE+r; cell c at CELL_BASE+c.
+const float PLC_TGT_CART_BASE  = 0;
+const float PLC_TGT_ITEM_BASE  = 100;
+const float PLC_TGT_RIVAL_BASE = 300;
+const float PLC_TGT_CELL_BASE  = 500;
+
+// ---- scaffolding fields (name-spaced; never collide with plc_*) ------------
+// Observation / state (gathered):
+.float plc_str_cell;        // resolved V-cell id (perception pass output)
+.float plc_str_tss;         // time-since-spawn cache
+.float plc_str_spawn_stamp; // set on PlayerSpawn hook (mesh sees spawn state)
+// Scatter targets (mesh writes these; rater reads them):
+.float plc_str_target;
+.float plc_str_gain;
+.float plc_str_lane;
+.float plc_str_hunt;
+.float plc_str_explore;
+.float plc_str_commit;
+.float plc_str_spawn;
+.float plc_str_lead;
+// Temporal smoothing of the previous plan's scattered weights (cosmetic lerp
+// only — NOT the flow integration, which lives on the mesh; payload-spec §3.1):
+.float plc_str_gain_prev;
+.float plc_str_lane_prev;
+
+// ---- prototypes (all [BUILD]; bodies in sv_payload_strategy_io.qc) ----------
+void  payload_strategy_attach();                                  // lazy mesh_open of the 4 handles
+void  payload_strategy_gather(float nclients);                    // fill + gather schema A, B, C
+void  payload_strategy_scatter(float nclients);                   // poll + scatter schema (8 cols) down
+void  payload_perceive(entity bot);                               // frustum+LOS+2cell gate -> event ring
+float payload_str_cell_of(vector org);                            // V-cell id for an origin
+void  havocbot_goalrating_strategy(entity this, float ratingscale); // strategy-weighted rater (additive)
+void  payload_strategy_step(entity leadcart);                     // one strategy step (call from lead think)

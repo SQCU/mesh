@@ -1,5 +1,20 @@
 # Strategy vectors, the Gram, and a real QKV over them
 
+> **SUPERSEDED — historical audit, do not build from this.** This document is an audit
+> of `xonotic/solver/worker.py`, which **has since been deleted**. Every `worker.py`
+> and `worker.py:NNN` reference below points at source that no longer exists; treat the
+> line numbers as archaeology, not as live citations. The committed successor to its
+> architectural proposal (§4: the DPP/Gram mixing head and the "separated named Gram
+> object") is `dpp-mixing-and-overlay.md` — which retracts the determinant-as-signal
+> framing this doc leans on in favor of the marginal-inclusion vector `diag(K)`, fixes
+> the head at RMSNorm→SwiGLU, and pins "leader/swing" to the intercentrality readout.
+> The authoritative training semantics (reward/value/advantage/policy-gradient, the two
+> games, what is computed vs learned vs frozen) are in `rl-training-spec.md`. Where this
+> audit and either successor disagree, the successors are intent and this doc is only a
+> record of the deleted worker's reservoir/random-feature state. Retained for the
+> reasoning trail that motivated the QKV/whitening/contest-operator design, not as a
+> spec and not as a reference to any current code.
+
 This answers four questions the owner put to the solver's strategic core, with exact
 references into `xonotic/solver/worker.py`, and proposes an architecture that gives the
 solve a genuine query/key/value structure over strategy vectors, makes the query/value

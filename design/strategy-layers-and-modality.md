@@ -161,8 +161,12 @@ it is the lever the control interface exposes.
 
 ## 5. Open hypotheses — NOT decided  [OPEN]
 
-Everything in this section is named but undecided. It may change entirely. It is
-recorded so the intent is legible, not because it is committed.
+Most items here are named but undecided; they may change entirely, and are recorded so
+the intent is legible, not because they are committed. **Two items — (d) reference
+values and the Nim entry — have since been RESOLVED** by the authoritative specs
+(`rl-training-spec.md`, `dpp-mixing-and-overlay.md`, `payload-spec.md`) and are marked
+`[FIRM]` inline below rather than moved, so the reasoning trail stays intact. The
+remaining items ((a), (b), (c)) are still open.
 
 **(a) Stackelberg as LEARNED, not hand-declared.**  [OPEN]  Leadership/backward-
 induction may enter, but as a LEARNED READOUT rather than a hand-coded game tree:
@@ -185,14 +189,43 @@ REPRESENTABLE; push ALL evaluation into learned parameters calibrated by many ma
 The hand-built part supplies a basis in which the phenomena can be expressed; it does
 not score them.
 
-**(d) Minimap horizon and reference values.**  [OPEN]  Two things remain under review:
-the minimap horizon (a fixed scalar vs a learned quantity), and whether the system ever
-computes a Grundy / key-player REFERENCE value at all or leaves that entirely to
-REINFORCE.
+**(d) Minimap horizon and reference values — RESOLVED.**  [FIRM]  Both items once
+listed here are now settled:
+- *Does the system compute a Grundy / key-player REFERENCE value?* YES, over the
+  reductions where it is closed-form. The projected winner `PW` and its succession
+  `SUCC` are the COMPUTED nim-sum and its backward induction over the CARTSTATE game
+  (see the Nim entry below and `rl-training-spec.md` §1), and the key-player SWING is
+  the closed-form intercentrality readout over the coupling `kappa`
+  (`dpp-mixing-and-overlay.md` §3). What is left to REINFORCE is the learned VALUE of
+  the full partizan position, not these computed features.
+- *The minimap horizon* is set by the §2 V-cell construction (fuse navigable cells
+  until the belief support lands in the [~5%, ~15%] band); per `payload-spec.md` §2.2
+  there is no fixed-vs-learned fork to decide.
 
-**Nim, as an analogy (not a claim of equivalence).**  [OPEN, analogy only]  Nim guides
-intuition: you throw your team at a lane to REVERSE a leader's advantage, the position
-value is only APPROXIMABLE, and that very ambiguity — the fact that the position value
-cannot be read off cheaply — is the reason the solve is heavy. This is an ANALOGY. It is
-not a claim that the game is exactly a Nim variant or that a Grundy value exists in
-closed form.
+**Nim — RESOLVED into two games (was: "[OPEN], analogy only").**  [FIRM, per
+`rl-training-spec.md` §0–§1, §4 and `payload-spec.md` §2.6]  The earlier "analogy only,
+no Grundy in closed form" framing conflated two games and is now settled by SPLITTING
+them. This is the honest reconciliation of the apparent contradiction between this
+entry and `payload-spec.md` §2.6, which names a nimber value for the multi-cart
+position:
+
+- **The full game is partizan / scoring.** With presence, control cylinders, item
+  economies, and the frozen-FPS realization all live, the full position has **no
+  closed-form Grundy value** — its value is LEARNED (the per-player value head,
+  `rl-training-spec.md` §2). This is the sense in which the old entry was right: "the
+  position value cannot be read off cheaply, which is why the solve is heavy."
+- **The CARTSTATE game is the tractable reduction.** Restricted to cart
+  depths-under-control as heaps, the position admits a nimber-preserving reduction
+  (the FUN2022 nimber-preserving-reduction result). Over THAT reduction the projected
+  winner `PW` — the nim-sum "who wins if nothing else moves" (one cart at depth 2 beats
+  two carts at depth 1, since 1⊕1 = 0) — and its succession `SUCC` — backward induction
+  over successive decrements of the leader's carts — are **COMPUTED in closed form**,
+  deterministic, NOT learned. This is exactly the nimber value `payload-spec.md` §2.6
+  names, and the same `PW`/`SUCC` that `rl-training-spec.md` §1 defines as computed
+  Game-1 features.
+
+So Nim is neither "mere analogy" nor "the whole game is a Nim variant": the cartstate
+reduction IS a computed nim-sum (Game 1, deterministic), while the FULL game's value is
+learned (Game 2's frozen-FPS realization is what the policy must actually achieve).
+`PW`/`SUCC` are FEATURES the learned value and policy read; they are stopgrad, never
+themselves learned (`rl-training-spec.md` §1, §4).

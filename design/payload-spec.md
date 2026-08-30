@@ -143,22 +143,25 @@ nonsymmetric DPP; nothing beyond RMSNorm+SwiGLU is required.
 ### 2.6 Nimber value and explicit backward induction `[FIRM]`
 
 The multi-cart position is Nim-structured: each cart at its depth-under-control on its
-golden path is a heap, and the combined position has a value — its nimber — that names
-the swing (which cart to attack to flip the position). The computable realization is the
-key-player solve over the coupling `kappa`:
-```
-swing = argmax_i  intercentrality_i( (I - a*kappa)^-1 )
-```
-which also yields per-node action intensities (Bonacich), at team-scale `kappa` (swing
-across teams/lanes) and bot-scale `kappa` (swing within a team) — nested = multiscale.
+golden path is a heap. The projected winner `PW(s)` is **computed deterministically as
+the nim-sum over cartstate** — per-team XOR of controlled cart depths; the team holding
+the largest live nimber wins all-else-equal (one cart at d:2 beats two carts at d:1,
+since 1 XOR 1 = 0). It is closed-form over cartstate (Game 1) — NOT a learned quantity
+and NOT a centrality heuristic. See `rl-training-spec.md` §1 and
+`xonotic/solver/strat/game.py`. (Earlier drafts computed a `argmax intercentrality((I -
+a*kappa)^-1)` "swing" over a learned coupling and called it the nimber; that was a
+relabel of a centrality heuristic and is retracted — the nimber is the nim-sum above.)
 
-Strategy per step is **explicit backward induction** over this nimber-valued position —
-required, not an optional overlay. The nimber-leading team commits; trailing teams
-best-respond; the solve is backward induction over the multi-cart position. The
-REINFORCE-calibrated learned parameters (2.3-2.5) fill in the responses WITHIN that
-backward-induction structure; they do not replace it. Ontology discipline: "leader" is
-admissible only as the derived `argmax(intercentrality)` readout — never a primitive
-entity or a per-agent character.
+`SUCC(s)` is **explicit backward induction** over that nimber-valued position: recompute
+`PW` under successive decrements of the current leader's carts, yielding the ordered
+succession `[(team, marginal_denial_value)]`. Required, not an optional overlay: it folds
+the whole succession into one immediate-frame allocation so the policy is anticipatory
+and time-smooth (gang the leader only to its marginal need, pre-empt the next-in-line,
+loot for power) instead of reacting to each flip after it has happened. `PW`/`SUCC` are
+stopgrad FEATURES the policy and value read; they are never learned. What is learned is
+only the Game-2 realization — whether an allocation can actually decrement the leader
+through the frozen FPS. Ontology discipline: "leader" is admissible only as the derived
+`PW(s)`/succession readout — never a primitive entity or a per-agent character.
 
 ## 3. Execution flow
 

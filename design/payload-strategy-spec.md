@@ -1,5 +1,16 @@
 # The payload game, as a strategy object
 
+> **Correction (banking model).** An earlier version of this document taught
+> "un-banking" — that a cart retreating past a banked control point *destroys* that
+> bank. **That model is retracted.** Cart POSITION reverses; banked SCORE is monotone
+> and never un-banks. What makes this a game rather than a race is not a reversible
+> banked asset but the **relative objective**: take the path-to-victory away from
+> whoever holds it and acquire it. The authoritative statements are
+> `rl-training-spec.md` (§2 reward/advantage, §5 why the simpler rewards fail) and
+> `payload-spec.md` (§0 monotone-score layer); `strategy-layers-and-modality.md` §1
+> records the same retraction. The passages below (§1, §2, §6) have been rewritten to
+> that corrected model.
+
 This recovers what the k-cart payload mode *is* — the objective, the reversible
 push/pull on each cart, the all-to-all computation that scales with teams x players
 x carts, and how that maps onto classical game theory and non-neural RL. It is the
@@ -18,23 +29,31 @@ occupancy law uses). Control is a function of bodies in a place, recomputed ever
 tick — it is not owned, it is contested continuously.
 
 A team **banks** a control point by being in control as the cart crosses that point
-*moving forward*. Banking scores. A round is won by delivering a cart to its end
-(`s -> L` under control) or, at timeout, by most points banked.
+*moving forward*. Banking scores, and **banked score is monotone — it never un-banks**
+(retracting the earlier "reversible banks" model; see the correction note at the head
+of this doc and `strategy-layers-and-modality.md` §1). A round is won by delivering a
+cart to its end (`s -> L` under control) or, at timeout, by the relative outcome the
+reward encodes (`rl-training-spec.md` §2, §5) — not by a raw count of banked points.
 
 Two things make this a game rather than a race, and both were missing from the
 drag-only law that this document corrects:
 
-- **Progress is reversible.** A cart under opposing plurality moves **backward**,
-  `s` decreasing toward its origin.
-- **Banks are reversible.** When the cart retreats past a banked point, that bank is
-  **lost** — the point returns to un-banked and is available to whoever banks it
-  next. A team's accumulated position is an asset another team can destroy, not
-  merely stall.
+- **Cart POSITION is reversible.** A cart under opposing plurality moves **backward**,
+  `s` decreasing toward its origin. What reverses is the cart's place on its path, not
+  any score already banked.
+- **The objective is RELATIVE, not an accumulable asset.** The strategic quantity is
+  not "how many points have I banked" — that is the monotone-progress reward
+  `rl-training-spec.md` §5 rejects as a *race*. It is possession of the
+  **path-to-victory**: deny it to whoever currently holds it and acquire it. A lead is
+  contestable because position reverses and control is recomputed every tick, not
+  because banked score can be destroyed.
 
-Origins and iterative waypoints exist *because* of reversibility. Without reversal,
+Origins and iterative waypoints exist *because* position reverses. Without reversal,
 an origin is just a start line and waypoints are just a progress bar. With reversal,
 the origin is the sink a losing cart falls back to, the waypoints are the ladder a
-bank climbs and a counterattack knocks it down, and `s` is the tug-of-war rope.
+push climbs and a counterattack drives back down, and `s` is the tug-of-war rope. The
+denial a counterattack achieves is over *position and control of the path-to-victory*,
+not over already-banked score.
 
 ## 2. The push/pull law — two regimes, distinguished by presence
 
@@ -62,24 +81,28 @@ B's player count** (no quadratic — this is capture, not contest):
 ```
 v = -reverse_speed * w_B         // B = strongest present opposing team
 ```
-The cart retreats, un-banking A's control points as `s` crosses them downward, until
-`s = 0`. At origin the cart **recolors** to `B` and its banks are freed; from there B
-advances it under Regime A. You cannot steal a cart mid-track and turn it your way —
-you must first push it all the way home, erasing the enemy's work, which is what makes
-a deep push a real asset and abandonment a real risk.
+The cart retreats as `s` crosses control points downward, until `s = 0`. At origin the
+cart **recolors** to `B` (a POSITION/control property, sticky until origin); banked
+score is untouched — retreat reverses the cart's place on the path, not any score
+already accrued. From there B advances it under Regime A. You cannot steal a cart
+mid-track and turn it your way — you must first push its POSITION all the way home,
+which is what makes a deep push a real *positional* asset (it holds the
+path-to-victory) and abandonment a real risk (it cedes that path), independent of the
+monotone score line.
 
 This separation is the point the drag-only law missed: reversal is triggered by the
 color team's **absence**, not by its **disadvantage**. Presence keeps the fight local
 (A); absence surrenders the cart to a linear walk home (B).
 
 `s(t+dt) = clamp(s + v*dt, 0, L)`. Crossing a control point upward while controlling
-banks it; crossing a banked point downward un-banks it. Delivery is `s = L` under
-control; origin collapse is `s = 0`, which frees every bank on that path.
+banks its score (monotone; a downward crossing does NOT un-bank it — the earlier
+un-banking clause is retracted). Delivery is `s = L` under control; origin collapse is
+`s = 0`, which recolors the cart and resets its POSITION, not the banked score.
 
 This one law produces the whole strategic surface: a lead is defensible only by
-sustained presence, a counterattack is a real instrument (it destroys banked
-position, not just tempo), and a team must choose per tick whether to push its cart,
-suppress an opponent's, or bank-and-hold.
+sustained presence, a counterattack is a real instrument (it reverses the leader's
+POSITION and denies the path-to-victory, not just tempo), and a team must choose per
+tick whether to push its cart, suppress an opponent's, or hold the line.
 
 ## 3. Why the computation is all-to-all, unavoidable, and scales
 
@@ -132,8 +155,9 @@ theory, computed exactly rather than approximated by a black box.
   the first moments of the context window. This is the classical belief dynamic, and
   its fixed points are the correlated/Nash-like equilibria the match settles toward.
 - **A positional/differential game on `s`.** The reversible push/pull is a tug-of-war
-  over each cart's scalar `s` — a positional game whose value is contested at every
-  control point, with pursuit-evasion flavor (defend the bank line vs drive it back).
+  over each cart's scalar `s` (position, not banked score) — a positional game whose
+  value is contested at every control point, with pursuit-evasion flavor (defend the
+  control line vs drive it back).
 - **Coalition formation.** At `j >= 3` the trailing teams' best response to a leader
   is to gang up on the leader's cart — a coalition that the Gram's off-diagonal
   contest blocks make visible and that the allocation head acts on. The pigeonhole
@@ -184,8 +208,10 @@ Each tool we built exists to make one of the above real rather than aspirational
 ## 6. The immediate correction
 
 The current velocity law floors `v` at zero (`bound(0, ...)`), so opposition stalls
-but cannot reverse and banks are never lost. Per section 2 the law must be signed
-(`bound(-max, ..., +max)`), and banking must un-bank on downward crossings. That
-change restores the reversible tug-of-war this document defines as the game, and it
-is the mechanic the team- and player-level policies in sections 3-4 are computed to
+but the cart's POSITION cannot reverse. Per section 2 the law must be signed
+(`bound(-max, ..., +max)`) so position is a reversible tug-of-war. Banked score stays
+monotone — a downward crossing reverses position, it does NOT un-bank score (the
+earlier "banking must un-bank" instruction is retracted; see the head-of-doc
+correction and `strategy-layers-and-modality.md` §1). That signed-velocity change is
+the mechanic the team- and player-level policies in sections 3-4 are computed to
 steer. It is implemented as the companion change to this spec.
