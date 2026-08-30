@@ -248,8 +248,8 @@ class QKVProjector(_ModuleBase):  # type: ignore[misc]
         spatialised world it has observed. beta_b is the sole spatial-mixing product in
         the system (§2.2), so this concat is where geometry enters the query.
         """
-        x = mx.asarray(x)
-        beta = mx.asarray(beta)
+        x = mx.array(x)
+        beta = mx.array(beta)
         if x.shape[0] != beta.shape[0]:
             raise ValueError(
                 f"x and beta must share the player axis: {x.shape[0]} vs {beta.shape[0]}"
@@ -265,7 +265,7 @@ class QKVProjector(_ModuleBase):  # type: ignore[misc]
         Returns: K: (j, d) — one key row per instrument, sharing width ``d`` with Q so
                  the coupling stage's query.key inner product is defined.
         """
-        z = mx.asarray(z)
+        z = mx.array(z)
         return z @ self.W_k.T                            # (j, d)
 
     def value(self, z):
@@ -274,7 +274,7 @@ class QKVProjector(_ModuleBase):  # type: ignore[misc]
         Args:  z: (j, d_z) per-instrument descriptor rows.
         Returns: V: (j, d_v) — the behavioural payload of committing to each instrument.
         """
-        z = mx.asarray(z)
+        z = mx.array(z)
         return z @ self.W_v.T                            # (j, d_v)
 
     # ------------------------------------------------------------------ combined

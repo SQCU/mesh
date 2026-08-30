@@ -5,4 +5,5 @@
 #endif
 #ifdef SVQC
     #include <common/gamemodes/gamemode/payload/sv_payload.qc>
+    #include <common/gamemodes/gamemode/payload/sv_payload_strategy_io.qc>
 #endif

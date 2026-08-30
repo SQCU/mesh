@@ -1,0 +1,61 @@
+{"kind": "nim_invariant", "data": {"nim_sum([1,1])": 0, "nim_sum([2])": 2, "PW_one_d2_beats_two_d1": "R"}}
+{"kind": "random", "step": 0, "pw": 2, "mono": 0.0, "banked": [0.0, 0.0, 0.0], "vel": [-0.1, -0.2, 0.0]}
+{"kind": "random", "step": 1, "pw": 1, "mono": 0.0, "banked": [0.0, 0.0, 0.0], "vel": [-0.1, 1.0, -0.5]}
+{"kind": "random", "step": 2, "pw": 1, "mono": 0.0, "banked": [0.0, 0.0, 0.0], "vel": [-0.2, -0.2, -1.0]}
+{"kind": "random", "step": 3, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [1.0, 1.0, 0.0]}
+{"kind": "random", "step": 4, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.5, -1.0, -1.5]}
+{"kind": "random", "step": 5, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.2, -0.2, -0.5]}
+{"kind": "random", "step": 6, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.2, 0.0, 0.0]}
+{"kind": "random", "step": 7, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [0.5, 0.0, -0.18]}
+{"kind": "random", "step": 8, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.15, 1.0, 0.5]}
+{"kind": "random", "step": 9, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.2, -1.0, -1.5]}
+{"kind": "random", "step": 10, "pw": 1, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.15, -1.0, -1.5]}
+{"kind": "random", "step": 11, "pw": null, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-1.5, -0.5, 0.5]}
+{"kind": "random", "step": 12, "pw": null, "mono": 1.0, "banked": [0.0, 1.0, 0.0], "vel": [-0.2, -1.0, -1.5]}
+{"kind": "random", "step": 13, "pw": 1, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [1.0, 0.5, -1.0]}
+{"kind": "random", "step": 14, "pw": 1, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [0.2, 0.0, -0.2]}
+{"kind": "random", "step": 15, "pw": 1, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [0.0, 0.0, 0.0]}
+{"kind": "random", "step": 16, "pw": 1, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.2, -0.1, -0.5]}
+{"kind": "random", "step": 17, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.2, 0.0, -0.2]}
+{"kind": "random", "step": 18, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-1.0, -0.2, 0.0]}
+{"kind": "random", "step": 19, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.2, 0.0, 0.0]}
+{"kind": "random", "step": 20, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.1, 0.2, 0.0]}
+{"kind": "random", "step": 21, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.12, -0.5, 0.5]}
+{"kind": "random", "step": 22, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [0.0, 0.0, -0.2]}
+{"kind": "random", "step": 23, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.2, -0.5, -0.12]}
+{"kind": "random", "step": 24, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.5, -0.1, 0.0]}
+{"kind": "random", "step": 25, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [0.2, 0.0, 0.5]}
+{"kind": "random", "step": 26, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.5, 0.0, -0.12]}
+{"kind": "random", "step": 27, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.2, 0.0, 0.0]}
+{"kind": "random", "step": 28, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-1.5, 0.0, -1.0]}
+{"kind": "random", "step": 29, "pw": null, "mono": 2.0, "banked": [0.0, 2.0, 0.0], "vel": [-0.5, 0.0, -0.12]}
+{"kind": "greedy_deny", "step": 0, "pw_before": 2, "pw_after": 1, "succ": [[1, 0], [2, 1], [0, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 1, "pw_before": 1, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 2, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 3, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 4, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 5, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 6, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 7, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 8, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 9, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 10, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 11, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 12, "pw_before": 2, "pw_after": 2, "succ": [[2, 0], [0, 1], [1, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 13, "pw_before": 2, "pw_after": 0, "succ": [[0, 0], [1, 1], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 14, "pw_before": 0, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 15, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 16, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 17, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 18, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 19, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 20, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 21, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 22, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 23, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 24, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 25, "pw_before": 1, "pw_after": 1, "succ": [[1, 0], [2, 1]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 26, "pw_before": 1, "pw_after": 2, "succ": [[2, 0]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 27, "pw_before": 2, "pw_after": 2, "succ": [[2, 0]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 28, "pw_before": 2, "pw_after": 2, "succ": [[2, 0]], "mono": 0.0}
+{"kind": "greedy_deny", "step": 29, "pw_before": 2, "pw_after": 2, "succ": [[2, 0]], "mono": 0.0}

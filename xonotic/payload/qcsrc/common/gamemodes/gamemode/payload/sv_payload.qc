@@ -414,6 +414,15 @@ void payload_think(entity this)
 	if(this.plc_cart_id == 0)
 	{
 		FOREACH_CLIENT(IS_REAL_CLIENT(it), { set_payload_state(it); });
+
+		// Strategy step: gather cartstate + observations + perception up to the
+		// mesh and pull the plan down, throttled to PLC_STRAT_TICK (the forward-
+		// Euler step size). Reuses this lead-cart gate; adds no new think loop.
+		if(time >= plc_str_next_step)
+		{
+			plc_str_next_step = time + PLC_STRAT_TICK;
+			payload_strategy_step(this);
+		}
 	}
 
 }
@@ -614,6 +623,11 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 		if(rel > 0 && rel < 1)
 			navigation_routerating(this, it, ratingscale * 0.5, 3000);
 	});
+
+	// Apply the mesh-scattered per-player instrument weights as additive
+	// routerating biases (STRATEGY-IO.md flow 3). The cart demonstrator ratings
+	// above are untouched; strategy only ADDS biases on top.
+	havocbot_goalrating_strategy(this, ratingscale);
 }
 
 void havocbot_role_payload(entity this)

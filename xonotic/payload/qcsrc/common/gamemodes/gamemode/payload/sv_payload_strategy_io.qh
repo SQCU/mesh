@@ -1,4 +1,5 @@
 #pragma once
+#include "mesh_ipc.qh"   // mesh IPC builtins (#644..#653)
 // =============================================================================
 //  sv_payload_strategy_io.qh  —  SCAFFOLDING  [BUILD]
 // -----------------------------------------------------------------------------
@@ -27,13 +28,14 @@
 // = the forward-Euler step size Delta (dpp-mixing-and-overlay §4): a stability
 // parameter, not a scheduling knob. Multiple of PLC_TICK (0.1s).
 const float PLC_STRAT_TICK   = 0.2;   // 5 Hz strategy step (within spec 1-10 Hz)
+float plc_str_next_step;      // next wall-clock time the throttled strategy step may run
 
 // ---- mesh geometry ---------------------------------------------------------
 // mesh_open(node, width, maxrows). Request arena carries `width` floats/row;
 // the RESPONSE arena is fixed at 8 floats/row by the engine
 // (MESH_XON_RESPWIDTH, bridge/engine/mesh_ipc.c:15). The scatter schema below
 // therefore has EXACTLY 8 columns — a hard substrate constraint, not a choice.
-const float PLC_STR_NODE     = 0;     // logical coprocessor node id
+const float PLC_STR_NODE     = 1;     // logical coprocessor node id
 const float PLC_STR_RESP_W   = 8;     // fixed engine response width
 
 // Three request (gather) handles, one response (scatter) handle. Distinct
@@ -144,6 +146,49 @@ const float PLC_TGT_CELL_BASE  = 500;
 // only — NOT the flow integration, which lives on the mesh; payload-spec §3.1):
 .float plc_str_gain_prev;
 .float plc_str_lane_prev;
+
+// ---- gather staging (scratch .float columns; mesh_gather reads FIELDS) --------
+// mesh_gather(h,col,.float fld,first,count) reads a real .float field off each
+// edict. Computed/quantized observation values are staged into these per-column
+// scratch fields in payload_strategy_gather(), then gathered one column at a time.
+// Cartstate columns (staged on each cart edict, schema B):
+.float plc_cs_f_id;
+.float plc_cs_f_depth;
+.float plc_cs_f_length;
+.float plc_cs_f_ctrl;
+.float plc_cs_f_speed;
+.float plc_cs_f_idle;
+.float plc_cs_f_bankmask;
+.float plc_cs_f_progress;
+// Per-player observation columns (staged on each client edict, schema A):
+.float plc_ob_f_id;
+.float plc_ob_f_team;
+.float plc_ob_f_health;
+.float plc_ob_f_armor;
+.float plc_ob_f_ammo;
+.float plc_ob_f_px;
+.float plc_ob_f_py;
+.float plc_ob_f_pz;
+.float plc_ob_f_vx;
+.float plc_ob_f_vy;
+.float plc_ob_f_vz;
+.float plc_ob_f_weapons;
+.float plc_ob_f_power;
+.float plc_ob_f_tss;
+.float plc_ob_f_cell;
+.float plc_ob_f_ncart;
+.float plc_ob_f_ncartd;
+.float plc_ob_f_alive;
+// Perception event-ring columns (staged on the contiguous event-carrier pool,
+// schema C). The pool is a block of PLC_STR_EVT_ROWS edicts spawned back-to-back
+// in payload_strategy_attach() so mesh_gather can sweep it as one edict range.
+.float plc_ev_f_cell;
+.float plc_ev_f_kind;
+.float plc_ev_f_team;
+.float plc_ev_f_subject;
+.float plc_ev_f_value;
+.float plc_ev_f_time;
+.float plc_str_spawn_stamp2;   // spawn-time cache staged for TSS (own field; no hook needed)
 
 // ---- prototypes (all [BUILD]; bodies in sv_payload_strategy_io.qc) ----------
 void  payload_strategy_attach();                                  // lazy mesh_open of the 4 handles

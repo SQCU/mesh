@@ -9,3 +9,4 @@ rdma/qfill
 !.claude/settings.json
 xonotic/bridge/test/meshtest
 __pycache__/
+xonotic/payload-build/run*/
