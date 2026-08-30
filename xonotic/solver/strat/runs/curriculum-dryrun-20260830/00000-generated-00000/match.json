@@ -1,0 +1,209 @@
+{
+  "artifacts": {
+    "checkpoint_in": null,
+    "checkpoint_out": {
+      "exists": false,
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/checkpoint.npz"
+    },
+    "entity": {
+      "exists": false,
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir/data/maps/runningmanctf.ent"
+    },
+    "mapinfo": {
+      "exists": false,
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir/data/maps/runningmanctf.mapinfo"
+    },
+    "responder_log": {
+      "exists": false,
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/responder.log"
+    },
+    "server_log": {
+      "exists": false,
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/server.log"
+    },
+    "telemetry": {
+      "exists": false,
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/telemetry.jsonl"
+    }
+  },
+  "commands": {
+    "clients": [],
+    "responder": [
+      "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "-m",
+      "solver.strat.strat_responder",
+      "--train",
+      "--secs",
+      "120.0",
+      "--peer-node",
+      "0",
+      "--off-policy-players",
+      "1",
+      "--learning-rate",
+      "0.0003",
+      "--save-every",
+      "100",
+      "--online-checkpoint",
+      "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/checkpoint.npz",
+      "--telemetry",
+      "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/telemetry.jsonl",
+      "--seed",
+      "480741499"
+    ],
+    "server": [
+      "/Users/mdot/dox/xonotic/build-engine/darkplaces-dedicated",
+      "-xonotic",
+      "-basedir",
+      "/Users/mdot/dox/xonotic/Xonotic",
+      "-userdir",
+      "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir",
+      "+developer",
+      "0",
+      "+sv_public",
+      "0",
+      "+port",
+      "26100",
+      "+sv_autopause",
+      "0",
+      "+g_payload",
+      "1",
+      "+g_payload_round_timelimit",
+      "120.0",
+      "+timelimit",
+      "2",
+      "+maxplayers",
+      "16",
+      "+bot_join_empty",
+      "1",
+      "+bot_number",
+      "6",
+      "+skill",
+      "2.0",
+      "+g_warmup",
+      "0",
+      "+map",
+      "runningmanctf"
+    ]
+  },
+  "configuration": {
+    "carts": 2,
+    "client_commands": [],
+    "controllers": {
+      "bot": 6,
+      "external": 0,
+      "human": 0
+    },
+    "duration": 120.0,
+    "id": "generated-00000",
+    "map": "runningmanctf",
+    "off_policy_players": 1,
+    "ordinal": 0,
+    "perturbation": "baseline",
+    "players_per_team": [
+      2,
+      2,
+      2
+    ],
+    "seed": 480741499,
+    "skill": 2.0,
+    "split": "train",
+    "teams": 3
+  },
+  "ended": "2026-08-30T22:32:00.755695+00:00",
+  "entity": {
+    "command": [
+      "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "/Users/mdot/dox/mesh/xonotic/payload/tools/mkentfile.py",
+      "<resolved-bsp>",
+      "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir/data/maps/runningmanctf.ent",
+      "3",
+      "2"
+    ],
+    "entity": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir/data/maps/runningmanctf.ent",
+    "mapinfo": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir/data/maps/runningmanctf.mapinfo",
+    "status": "planned",
+    "userdir": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir"
+  },
+  "execution": {
+    "clients": [],
+    "responder": {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "-m",
+        "solver.strat.strat_responder",
+        "--train",
+        "--secs",
+        "120.0",
+        "--peer-node",
+        "0",
+        "--off-policy-players",
+        "1",
+        "--learning-rate",
+        "0.0003",
+        "--save-every",
+        "100",
+        "--online-checkpoint",
+        "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/checkpoint.npz",
+        "--telemetry",
+        "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/telemetry.jsonl",
+        "--seed",
+        "480741499"
+      ],
+      "launched": false
+    },
+    "server": {
+      "command": [
+        "/Users/mdot/dox/xonotic/build-engine/darkplaces-dedicated",
+        "-xonotic",
+        "-basedir",
+        "/Users/mdot/dox/xonotic/Xonotic",
+        "-userdir",
+        "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/curriculum-dryrun-20260830/00000-generated-00000/userdir",
+        "+developer",
+        "0",
+        "+sv_public",
+        "0",
+        "+port",
+        "26100",
+        "+sv_autopause",
+        "0",
+        "+g_payload",
+        "1",
+        "+g_payload_round_timelimit",
+        "120.0",
+        "+timelimit",
+        "2",
+        "+maxplayers",
+        "16",
+        "+bot_join_empty",
+        "1",
+        "+bot_number",
+        "6",
+        "+skill",
+        "2.0",
+        "+g_warmup",
+        "0",
+        "+map",
+        "runningmanctf"
+      ],
+      "launched": false
+    },
+    "status": "dry_run"
+  },
+  "id": "generated-00000",
+  "mismatches": [],
+  "ordinal": 0,
+  "perturbation": {
+    "cvars": {},
+    "name": "baseline"
+  },
+  "port": 26100,
+  "realized": {
+    "configurations": [],
+    "controllers": {},
+    "lines": 0
+  },
+  "split": "train",
+  "started": "2026-08-30T22:32:00.755239+00:00",
+  "status": "dry_run"
+}
