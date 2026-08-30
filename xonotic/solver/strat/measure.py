@@ -320,13 +320,19 @@ def reduce_online_log(path):
                 continue
             env = env or row.get("environment")
             n += 1
+            # Metrics may be flat (online_bootstrap_run format) or nested under
+            # "update" (the strat_responder Game-2 server format). Read both.
+            metric_src = dict(row)
+            nested = row.get("update")
+            if isinstance(nested, dict):
+                metric_src = {**metric_src, **nested}
             for key in ("loss", "loss_pg", "loss_w", "loss_l", "loss_dynamics"):
-                if key in row:
-                    losses.setdefault(key, []).append(float(row[key]))
-            if "importance_mean" in row:
-                ratios.append(float(row["importance_mean"]))
-            if "local_control_sigma_min" in row:
-                sigma.append(float(row["local_control_sigma_min"]))
+                if key in metric_src and metric_src[key] is not None:
+                    losses.setdefault(key, []).append(float(metric_src[key]))
+            if metric_src.get("importance_mean") is not None:
+                ratios.append(float(metric_src["importance_mean"]))
+            if metric_src.get("local_control_sigma_min") is not None:
+                sigma.append(float(metric_src["local_control_sigma_min"]))
     reduce = lambda xs: {
         "first": round(xs[0], 6), "last": round(xs[-1], 6),
         "mean": round(float(np.mean(xs)), 6), "min": round(float(np.min(xs)), 6),
@@ -388,8 +394,18 @@ def main():
         "checkpoint_load": loaded,
         "online_log_reduction": reduce_online_log(args.online_log),
         "environment_note": (
-            "closed-loop rollouts run in CartSim (bootstrap env, spec 0.1); "
-            "Game-2 server acceptance is [BUILD-DATA], blocked on the mesh fabric."
+            "online_log_reduction below is REAL Game-2 server telemetry "
+            "(environment=game2_server): a live darkplaces cartserver on node0 "
+            "over the RDMA mesh, strat_responder --train + OnlineLearner on node1. "
+            "The winner_retention / loser_acquisition / terminal_outcome / "
+            "dynamics_acceptance batteries below are CLOSED-LOOP PROBES run in "
+            "CartSim (bootstrap env, spec 0.1) and are tagged environment=cartsim; "
+            "they are NOT Game-2 acceptance. The spec-6 acceptance matrix "
+            "(winner-retention under CONTROLLED rival perturbation, time-to-recovery "
+            "after a forced demotion, loser-acquisition, terminal outcome, and the "
+            "same on held-out counts/maps) on the SERVER is [BUILD-DATA]: this short "
+            "run did not execute the server-side perturbation and held-out schedules "
+            "(spec-7 [OPEN]) at the scale needed to populate that matrix."
         ),
         "seen_shapes": battery(train_shapes, "seen"),
         "heldout_shapes": battery(heldout_shapes, "heldout"),

@@ -162,7 +162,7 @@ class StrategyEstimator:
         dw_dt = self.head(diag_k, appetite, relation)
         w_next = integrate_weights(w, dw_dt, self.delta)
         if eligible is not None:
-            w_next = mx.where(eligible, w_next, mx.full_like(w_next, -1e9))
+            w_next = mx.where(eligible, w_next, mx.full(w_next.shape, -1e9))
         key = None
         if self._seed is not None:
             key = mx.random.key(self._seed + self._rng_counter)

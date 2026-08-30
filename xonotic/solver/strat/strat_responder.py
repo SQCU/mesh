@@ -110,13 +110,36 @@ def main():
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--off-policy-players", type=int, default=0)
     ap.add_argument("--learning-rate", type=float, default=3e-4)
-    ap.add_argument("--save-every", type=int, default=100)
+    ap.add_argument("--save-every", type=int, default=25)
+    ap.add_argument("--save-secs", type=float, default=30.0)
     ap.add_argument("--checkpoint", default=CKPT)
     ap.add_argument("--online-checkpoint", default=ONLINE_CKPT)
     ap.add_argument("--resume-checkpoint")
     ap.add_argument("--telemetry", default=TELEM)
+    ap.add_argument("--environment", default="game2_server")
+    ap.add_argument("--append-telemetry", action="store_true")
     ap.add_argument("--seed", type=int, default=20260829)
     args = ap.parse_args()
+
+    # Resumable run-state (RNG + telemetry cursor) co-located with the online
+    # checkpoint. Written atomically on every checkpoint save; restored on resume.
+    runstate_path = (args.online_checkpoint or CKPT) + ".runstate.json"
+
+    def save_runstate(rng, resp_id, nt_written, updates):
+        try:
+            tmp = runstate_path + ".new"
+            with open(tmp, "w") as fh:
+                json.dump({
+                    "rng": rng.bit_generator.state,
+                    "resp_id": int(resp_id),
+                    "nt_written": int(nt_written),
+                    "updates": int(updates),
+                    "environment": args.environment,
+                    "wrote_at": time.time(),
+                }, fh)
+            os.replace(tmp, runstate_path)
+        except Exception as exc:
+            print(f"[responder] runstate save failed: {exc}", flush=True)
 
     m = Mesh()
     print(f"[responder] mesh attached slots={m.slots} usable={m.usable}", flush=True)
@@ -141,12 +164,26 @@ def main():
     last_evt = None
     belief_depths = None
     belief_episode = 0
-    os.makedirs(os.path.dirname(args.telemetry) or ".", exist_ok=True)
-    telem = open(args.telemetry, "w")
     nt_written = 0
+    resumed_runstate = False
+    if args.append_telemetry and os.path.exists(runstate_path):
+        try:
+            with open(runstate_path) as fh:
+                rs = json.load(fh)
+            rng.bit_generator.state = rs["rng"]
+            resp_id = int(rs.get("resp_id", 0))
+            nt_written = int(rs.get("nt_written", 0))
+            resumed_runstate = True
+            print(f"[responder] resumed runstate: resp_id={resp_id} nt_written={nt_written} "
+                  f"updates={rs.get('updates')}", flush=True)
+        except Exception as exc:
+            print(f"[responder] runstate restore failed: {exc}; fresh RNG/cursor", flush=True)
+    os.makedirs(os.path.dirname(args.telemetry) or ".", exist_ok=True)
+    telem = open(args.telemetry, "a" if args.append_telemetry else "w")
     stats = dict(slots=0, obs=0, cart=0, evt=0, resp=0, updates=0)
     t0 = time.time()
     last_report = t0
+    last_save_time = t0
 
     try:
         while time.time() - t0 < args.secs:
@@ -280,13 +317,21 @@ def main():
                         if previous is not None:
                             online_metrics = learner.observe(previous, state, cartstate)
                         stats["updates"] = learner.updates
-                        if (
+                        due_updates = (
                             args.save_every > 0
                             and learner.updates > last_saved_update
                             and learner.updates % args.save_every == 0
-                        ):
+                        )
+                        due_time = (
+                            args.save_secs > 0
+                            and learner.updates > last_saved_update
+                            and time.time() - last_save_time >= args.save_secs
+                        )
+                        if due_updates or due_time:
                             learner.save()
+                            save_runstate(rng, resp_id, nt_written, learner.updates)
                             last_saved_update = learner.updates
+                            last_save_time = time.time()
 
                     game_value = empirical_game.evaluate(game_state)
                     if (
@@ -378,8 +423,10 @@ def main():
                     previous_game_state = game_state
                     previous_game_teams = teams_present.copy()
                     line = dict(
+                        environment=args.environment,
                         t=round(time.time() - t0, 3),
                         mode="online_train" if args.train else "inference",
+                        updates=learner.updates if learner is not None else 0,
                         resp_id=resp_id, req_tick=int(ch["tick"]), obs_tick=int(oh["tick"]),
                         k=k, j=j, l=l, trained=bool(trained or args.train),
                         off_policy_players=n_off_policy,
@@ -435,6 +482,7 @@ def main():
             if previous is not None:
                 learner.flush(previous["state"], previous["cartstate"], terminal=True)
             learner.save()
+            save_runstate(rng, resp_id, nt_written, learner.updates)
         telem.close()
     print(f"[responder] DONE stats={stats} telem_lines={nt_written}", flush=True)
 

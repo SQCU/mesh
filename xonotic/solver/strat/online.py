@@ -6,7 +6,7 @@ import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten
+from mlx.utils import tree_flatten, tree_unflatten
 
 from .dynamics import LocalDynamics, action_rows, state_rows
 from .train import policy_forward, role_rewards
@@ -40,13 +40,49 @@ class OnlineLearner:
         self.credit_horizon = max(1, int(credit_horizon))
         self.pending = []
         self.loaded = False
+        self.loaded_optimizer = False
         source = load_checkpoint or checkpoint
         if source is not None and os.path.exists(source):
+            self._load_full(source)
+
+    def _load_full(self, source):
+        """Restore a full resumable checkpoint: weights + optimizer moments +
+        update counter. Backward-compatible with weight-only npz checkpoints."""
+        try:
+            data = np.load(source, allow_pickle=False)
+        except Exception as exc:
+            print(f"[online] checkpoint load failed ({exc}); continuing from policy state", flush=True)
+            return
+        keys = list(data.files)
+        weight_items = [
+            (k, mx.array(data[k])) for k in keys
+            if not k.startswith("__opt__") and k != "__updates__"
+        ]
+        try:
+            self.bundle.load_weights(weight_items, strict=False)
+            self.loaded = True
+        except Exception as exc:
+            print(f"[online] weight restore failed ({exc}); continuing from policy state", flush=True)
+        if "__updates__" in keys:
             try:
-                self.bundle.load_weights(source)
-                self.loaded = True
+                self.updates = int(np.asarray(data["__updates__"]))
+            except Exception:
+                pass
+        opt_items = [
+            (k[len("__opt__"):], mx.array(data[k])) for k in keys if k.startswith("__opt__")
+        ]
+        if opt_items:
+            try:
+                self.optimizer.init(self.bundle.trainable_parameters())
+                self.optimizer.state = tree_unflatten(opt_items)
+                self.loaded_optimizer = True
             except Exception as exc:
-                print(f"[online] checkpoint load failed ({exc}); continuing from policy state", flush=True)
+                print(f"[online] optimizer restore skipped ({exc}); moments will re-warm", flush=True)
+        print(
+            f"[online] resumed from {os.path.basename(source)}: "
+            f"weights={self.loaded} optimizer={self.loaded_optimizer} updates={self.updates}",
+            flush=True,
+        )
 
     def update(
         self,
@@ -206,6 +242,12 @@ class OnlineLearner:
             return
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
         temporary = target + ".new.npz"
-        flat = dict(tree_flatten(self.bundle.parameters()))
-        np.savez(temporary, **{name: np.asarray(value) for name, value in flat.items()})
+        payload = {name: np.asarray(value) for name, value in tree_flatten(self.bundle.parameters())}
+        for name, value in tree_flatten(self.optimizer.state):
+            try:
+                payload["__opt__" + name] = np.asarray(value)
+            except Exception:
+                pass
+        payload["__updates__"] = np.asarray(int(self.updates))
+        np.savez(temporary, **payload)
         os.replace(temporary, target)

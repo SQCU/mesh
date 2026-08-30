@@ -1,0 +1,583 @@
+{
+  "checkpoint_load": {
+    "checkpoint": "/Users/mdot/mesh/xonotic/solver/strat/runs/game2_online.npz",
+    "exists": true,
+    "matched": 27,
+    "wanted": 27,
+    "missing": [],
+    "loaded": true
+  },
+  "online_log_reduction": {
+    "exists": true,
+    "path": "/Users/mdot/mesh/xonotic/solver/strat/runs/game2_train.jsonl",
+    "environment": "game2_server",
+    "update_lines": 228,
+    "losses": {
+      "loss": {
+        "first": 511363638099968.0,
+        "last": 732716119097344.0,
+        "mean": 629202716667743.2,
+        "min": 511363638099968.0,
+        "max": 732716119097344.0
+      },
+      "loss_pg": {
+        "first": 0.586676,
+        "last": 0.002762,
+        "mean": 0.00365,
+        "min": -0.522806,
+        "max": 0.586676
+      },
+      "loss_w": {
+        "first": 0.903721,
+        "last": 0.0,
+        "mean": 0.13799,
+        "min": 0.0,
+        "max": 1.805798
+      },
+      "loss_l": {
+        "first": 0.005839,
+        "last": 8.3e-05,
+        "mean": 0.00172,
+        "min": 0.0,
+        "max": 0.063155
+      },
+      "loss_dynamics": {
+        "first": 16585.613281,
+        "last": 5.319681,
+        "mean": 742.280974,
+        "min": 1.8588,
+        "max": 16585.613281
+      }
+    },
+    "importance_ratio": {
+      "first": 1.0,
+      "last": 1.0,
+      "mean": 0.999991,
+      "min": 0.998334,
+      "max": 1.000908
+    },
+    "local_control_sigma_min": {
+      "first": 1.431412,
+      "last": 0.655304,
+      "mean": 0.875583,
+      "min": 0.654644,
+      "max": 1.431412
+    }
+  },
+  "environment_note": "online_log_reduction below is REAL Game-2 server telemetry (environment=game2_server): a live darkplaces cartserver on node0 over the RDMA mesh, strat_responder --train + OnlineLearner on node1. The winner_retention / loser_acquisition / terminal_outcome / dynamics_acceptance batteries below are CLOSED-LOOP PROBES run in CartSim (bootstrap env, spec 0.1) and are tagged environment=cartsim; they are NOT Game-2 acceptance. The spec-6 acceptance matrix (winner-retention under CONTROLLED rival perturbation, time-to-recovery after a forced demotion, loser-acquisition, terminal outcome, and the same on held-out counts/maps) on the SERVER is [BUILD-DATA]: this short run did not execute the server-side perturbation and held-out schedules (spec-7 [OPEN]) at the scale needed to populate that matrix.",
+  "seen_shapes": [
+    {
+      "shape": [
+        2,
+        3,
+        4
+      ],
+      "winner_retention": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          3,
+          4
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 0.95,
+        "retention_prob": 0.55,
+        "time_to_recovery_mean": 5.091,
+        "time_to_recovery_median": 4.0,
+        "recovered_trials": 11,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "checkpoint"
+      },
+      "winner_retention_random_baseline": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          3,
+          4
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 0.7,
+        "retention_prob": 0.55,
+        "time_to_recovery_mean": 4.182,
+        "time_to_recovery_median": 3.0,
+        "recovered_trials": 11,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "random_baseline"
+      },
+      "loser_acquisition": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          3,
+          4
+        ],
+        "trials_valid": 20,
+        "acquisition_prob": 0.7,
+        "horizon": 12
+      },
+      "terminal_outcome": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          3,
+          4
+        ],
+        "initial_winner_retained_frac": 0.0,
+        "terminal_pw_hist": {
+          "-1": 4,
+          "0": 10,
+          "1": 6
+        },
+        "horizon": 12
+      },
+      "dynamics_acceptance": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          3,
+          4
+        ],
+        "samples": 16,
+        "one_step_error_mean": 0.611463,
+        "one_step_error_p90": 1.100412,
+        "ensemble_disagreement_mean": 1.876325,
+        "disagreement_error_calibration_r": 0.0794,
+        "jacobian_sigma_min_mean": 0.692426,
+        "jacobian_rank_mean": 8.0,
+        "jacobian_rank_full_frac": 1.0,
+        "reachability_restore_frac": 0.3125,
+        "reachability_states": 16
+      }
+    },
+    {
+      "shape": [
+        2,
+        2,
+        4
+      ],
+      "winner_retention": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          2,
+          4
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.1,
+        "time_to_recovery_mean": 9.0,
+        "time_to_recovery_median": 9.0,
+        "recovered_trials": 2,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "checkpoint"
+      },
+      "winner_retention_random_baseline": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          2,
+          4
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.15,
+        "time_to_recovery_mean": 7.0,
+        "time_to_recovery_median": 6.0,
+        "recovered_trials": 3,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "random_baseline"
+      },
+      "loser_acquisition": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          2,
+          4
+        ],
+        "trials_valid": 20,
+        "acquisition_prob": 0.3,
+        "horizon": 12
+      },
+      "terminal_outcome": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          2,
+          4
+        ],
+        "initial_winner_retained_frac": 0.4,
+        "terminal_pw_hist": {
+          "-1": 7,
+          "0": 5,
+          "1": 8
+        },
+        "horizon": 12
+      },
+      "dynamics_acceptance": {
+        "environment": "cartsim",
+        "shape": [
+          2,
+          2,
+          4
+        ],
+        "samples": 16,
+        "one_step_error_mean": 0.547893,
+        "one_step_error_p90": 0.863785,
+        "ensemble_disagreement_mean": 1.820111,
+        "disagreement_error_calibration_r": -0.2222,
+        "jacobian_sigma_min_mean": 0.688356,
+        "jacobian_rank_mean": 8.0,
+        "jacobian_rank_full_frac": 1.0,
+        "reachability_restore_frac": 0.5625,
+        "reachability_states": 16
+      }
+    },
+    {
+      "shape": [
+        3,
+        4,
+        7
+      ],
+      "winner_retention": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.5,
+        "time_to_recovery_mean": 8.7,
+        "time_to_recovery_median": 9.0,
+        "recovered_trials": 10,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "checkpoint"
+      },
+      "winner_retention_random_baseline": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.55,
+        "time_to_recovery_mean": 5.727,
+        "time_to_recovery_median": 6.0,
+        "recovered_trials": 11,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "random_baseline"
+      },
+      "loser_acquisition": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "trials_valid": 20,
+        "acquisition_prob": 0.4,
+        "horizon": 12
+      },
+      "terminal_outcome": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "initial_winner_retained_frac": 0.75,
+        "terminal_pw_hist": {
+          "-1": 4,
+          "0": 15,
+          "2": 1
+        },
+        "horizon": 12
+      },
+      "dynamics_acceptance": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "samples": 16,
+        "one_step_error_mean": 0.473479,
+        "one_step_error_p90": 0.689674,
+        "ensemble_disagreement_mean": 2.020791,
+        "disagreement_error_calibration_r": -0.1418,
+        "jacobian_sigma_min_mean": 0.676313,
+        "jacobian_rank_mean": 8.0,
+        "jacobian_rank_full_frac": 1.0,
+        "reachability_restore_frac": 0.5625,
+        "reachability_states": 16
+      }
+    }
+  ],
+  "heldout_shapes": [
+    {
+      "shape": [
+        3,
+        4,
+        7
+      ],
+      "winner_retention": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.5,
+        "time_to_recovery_mean": 8.7,
+        "time_to_recovery_median": 9.0,
+        "recovered_trials": 10,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "checkpoint"
+      },
+      "winner_retention_random_baseline": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.55,
+        "time_to_recovery_mean": 5.727,
+        "time_to_recovery_median": 6.0,
+        "recovered_trials": 11,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "random_baseline"
+      },
+      "loser_acquisition": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "trials_valid": 20,
+        "acquisition_prob": 0.4,
+        "horizon": 12
+      },
+      "terminal_outcome": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "initial_winner_retained_frac": 0.75,
+        "terminal_pw_hist": {
+          "-1": 4,
+          "0": 15,
+          "2": 1
+        },
+        "horizon": 12
+      },
+      "dynamics_acceptance": {
+        "environment": "cartsim",
+        "shape": [
+          3,
+          4,
+          7
+        ],
+        "samples": 16,
+        "one_step_error_mean": 0.434716,
+        "one_step_error_p90": 0.589444,
+        "ensemble_disagreement_mean": 2.074054,
+        "disagreement_error_calibration_r": -0.2274,
+        "jacobian_sigma_min_mean": 0.676313,
+        "jacobian_rank_mean": 8.0,
+        "jacobian_rank_full_frac": 1.0,
+        "reachability_restore_frac": 0.5625,
+        "reachability_states": 16
+      }
+    },
+    {
+      "shape": [
+        4,
+        6,
+        9
+      ],
+      "winner_retention": {
+        "environment": "cartsim",
+        "shape": [
+          4,
+          6,
+          9
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.15,
+        "time_to_recovery_mean": 9.0,
+        "time_to_recovery_median": 9.0,
+        "recovered_trials": 3,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "checkpoint"
+      },
+      "winner_retention_random_baseline": {
+        "environment": "cartsim",
+        "shape": [
+          4,
+          6,
+          9
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.05,
+        "time_to_recovery_mean": 11.0,
+        "time_to_recovery_median": 11.0,
+        "recovered_trials": 1,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "random_baseline"
+      },
+      "loser_acquisition": {
+        "environment": "cartsim",
+        "shape": [
+          4,
+          6,
+          9
+        ],
+        "trials_valid": 20,
+        "acquisition_prob": 0.25,
+        "horizon": 12
+      },
+      "terminal_outcome": {
+        "environment": "cartsim",
+        "shape": [
+          4,
+          6,
+          9
+        ],
+        "initial_winner_retained_frac": 0.0,
+        "terminal_pw_hist": {
+          "-1": 4,
+          "0": 12,
+          "1": 2,
+          "3": 2
+        },
+        "horizon": 12
+      },
+      "dynamics_acceptance": {
+        "environment": "cartsim",
+        "shape": [
+          4,
+          6,
+          9
+        ],
+        "samples": 16,
+        "one_step_error_mean": 0.467284,
+        "one_step_error_p90": 0.549134,
+        "ensemble_disagreement_mean": 2.378377,
+        "disagreement_error_calibration_r": -0.6101,
+        "jacobian_sigma_min_mean": 0.669987,
+        "jacobian_rank_mean": 8.0,
+        "jacobian_rank_full_frac": 1.0,
+        "reachability_restore_frac": 0.375,
+        "reachability_states": 16
+      }
+    },
+    {
+      "shape": [
+        5,
+        7,
+        11
+      ],
+      "winner_retention": {
+        "environment": "cartsim",
+        "shape": [
+          5,
+          7,
+          11
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.0,
+        "time_to_recovery_mean": null,
+        "time_to_recovery_median": null,
+        "recovered_trials": 0,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "checkpoint"
+      },
+      "winner_retention_random_baseline": {
+        "environment": "cartsim",
+        "shape": [
+          5,
+          7,
+          11
+        ],
+        "trials_valid": 20,
+        "perturbation_flipped_pw_frac": 1.0,
+        "retention_prob": 0.05,
+        "time_to_recovery_mean": 8.0,
+        "time_to_recovery_median": 8.0,
+        "recovered_trials": 1,
+        "horizon": 12,
+        "magnitude": 2.0,
+        "policy": "random_baseline"
+      },
+      "loser_acquisition": {
+        "environment": "cartsim",
+        "shape": [
+          5,
+          7,
+          11
+        ],
+        "trials_valid": 20,
+        "acquisition_prob": 0.1,
+        "horizon": 12
+      },
+      "terminal_outcome": {
+        "environment": "cartsim",
+        "shape": [
+          5,
+          7,
+          11
+        ],
+        "initial_winner_retained_frac": 0.5,
+        "terminal_pw_hist": {
+          "0": 10,
+          "1": 9,
+          "4": 1
+        },
+        "horizon": 12
+      },
+      "dynamics_acceptance": {
+        "environment": "cartsim",
+        "shape": [
+          5,
+          7,
+          11
+        ],
+        "samples": 16,
+        "one_step_error_mean": 0.468984,
+        "one_step_error_p90": 0.52187,
+        "ensemble_disagreement_mean": 2.545414,
+        "disagreement_error_calibration_r": 0.1424,
+        "jacobian_sigma_min_mean": 0.680259,
+        "jacobian_rank_mean": 8.0,
+        "jacobian_rank_full_frac": 1.0,
+        "reachability_restore_frac": 0.3125,
+        "reachability_states": 16
+      }
+    }
+  ]
+}

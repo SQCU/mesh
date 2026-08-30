@@ -66,7 +66,7 @@ def policy_forward(
     dw_dt = est.head(diag_k, appetite, relation)
     w_next = integrate_weights(w, dw_dt, est.delta)
     if eligible is not None:
-        w_next = mx.where(eligible, w_next, mx.full_like(w_next, -1e9))
+        w_next = mx.where(eligible, w_next, mx.full(w_next.shape, -1e9))
     if action is None:
         action = mx.random.categorical(w_next / est.temperature, axis=-1, key=key)
     logpi = strategy_log_prob(w_next, action, est.temperature)
