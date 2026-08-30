@@ -1,17 +1,77 @@
 # xonotic on the sealed mesh
 
-A Xonotic payload-mode dedicated server on node 0 (MBP) publishes one 16-column row
-per client slot every `PLC_TICK` (0.1 s) across the RDMA fabric. Node 1 (mini) scores
-the rows and returns one objective index per row. The engine takes a per-team majority
-of those indices into `payload_mesh_objective[team]`, and `havocbot_goalrating_payload`
-rates the corresponding payload node at `ratingscale * 2` for every bot on that team.
+A Xonotic payload-mode dedicated server publishes 40-column participant rows,
+12-column cart rows, and 6-column perception events across the RDMA fabric. The mesh
+responder returns an 8-column strategy assignment for every client row. Bot rows enact
+it as additive havocbot navigation ratings; human rows retain the assignment as an
+advisory signal.
+
+## Online policy training
+
+The real training environment is the dedicated server. Run the server with a sampled
+map/roster/cart/controller configuration and run the strategy responder with training
+enabled on the mesh peer:
+
+```
+cd ~/mesh/xonotic
+python -m solver.strat.strat_responder --train --secs 600 \
+  --off-policy-players 2
+```
+
+Each server transition updates the asymmetric winner/loser critics, the shared policy,
+and the local dynamics ensemble before the next response is emitted. The off-policy
+count may be any value from zero through the number of active participants; those rows
+receive uniform exploratory assignments and carry their behavior log-probabilities in
+telemetry. Bot and human rows are both represented. Bots enact the assignment through
+the havocbot rater; a human row is an advisory assignment until a player-facing channel
+or realized-action classifier is added. `solver.strat.train` uses CartSim only for
+bootstrap pretraining and smoke tests.
+
+The match curriculum is a distribution over actual server launches: map, team count,
+players per team, controller mixture, cart-bearing entity overlay, skill, seed,
+perturbation regime, and off-policy participant count. `solver.strat.curriculum`
+extracts each BSP, generates that match's exact team/cart entity overlay, launches the
+dedicated server and training responder, asks the server to `quit` over stdin, and
+continues after a failed match. Every match directory contains the commands, UTC
+timestamps, return codes, entity hashes, logs, telemetry summary, and checkpoint
+lineage in `match.json`; the run-wide record is `matches.jsonl`.
+
+Generate a reproducible mixed-count schedule and execute it:
+
+```
+cd ~/dox/mesh/xonotic
+python -m solver.strat.curriculum --generate 96 --seed 20260830 \
+  --maps runningmanctf,dance --team-counts 2,3,4,5 \
+  --players-per-team 2,4,8 --cart-counts 1,2,3,4 \
+  --skills 2,5,8 --perturbations baseline,fast,slow,volatile \
+  --off-policy-counts 0,1,2,4 --human-counts 0 --heldout-fraction 0.2 \
+  --duration 600 --run-dir solver/strat/runs/curriculum-20260830
+```
+
+The same command with `--dry-run` resolves and records the complete schedule and
+commands without requiring Xonotic, MLX, or RDMA. JSON and JSONL manifests are also
+accepted with `--manifest`. A JSON manifest may contain `defaults`, `matches`, and
+`heldout`; each match accepts `map`, `bsp` or `entity_file`, `teams`, scalar or list
+`players_per_team`, `carts`, `controllers`, `skill`, `duration`, `seed`,
+`perturbation`, `server_cvars`, `server_args`, `client_commands`, and
+`off_policy_players`. Held-out matches traverse the same `--train` responder path
+with learning rate zero and never advance the training checkpoint lineage. Optional
+`client_commands` are launched as argv without a shell for externally controlled participants; the
+telemetry record reports the bot/human counts actually observed rather than treating
+the requested controller mixture as evidence. Generated schedules can vary human
+counts with `--human-counts`; `--human-client-command` launches one command per such
+participant and expands `{port}`, `{map}`, `{seed}`, `{match}`, and `{client}` tokens.
 
 - engine bridge: `bridge/PORT.md`, `bridge/engine/mesh_ipc.c`, `bridge/qc/`
-- game code: `payload/qcsrc/common/gamemodes/gamemode/payload/sv_payload_mesh.{qc,qh}`
-- solver: `solver/worker.py`, `solver/xonwire.py`
+- game code: `payload/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.{qc,qh}`
+- solver: `solver/strat/strat_responder.py`, `solver/xonwire.py`
 - build tree (not in this repo): `~/dox/xonotic/build-engine`, `~/dox/xonotic/build-qc`
 
-## What runs
+## Historical transport validation
+
+The following measurements belong to the superseded 16-column A/B worker. They
+validate the engine/mesh causal path, not the current learned responder or its training
+objective.
 
 Verified 2026-08-28 on the live pair, four 150 s matches plus one kill test, bridges
 never restarted (`up_ms` monotonic 2141 s -> 3131 s, PIDs 97484 / 74614 unchanged).
@@ -43,7 +103,7 @@ at full rate for the remaining 90 s (`sent` 255301 -> 256214, `recvd` frozen at 
 kept simulating, logged no error, and exited 0 on `quit`. `mesh_poll` returns no new
 sequence, `payload_mesh_tick` returns early, and the last-known objectives stand.
 
-## What does not run
+## Historical run limitations
 
 - **The MoE path never executes.** `mlx` does not import in `~/.venv-mesh` on the mini,
   so `scores_mlx` (8 experts, FF 2048) is dead and every number above comes from

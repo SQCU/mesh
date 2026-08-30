@@ -1,51 +1,3 @@
-"""The strategy estimator: one forward pass composing qkv -> DPP diag(K) -> head -> value.
-
-This is the assembled learned strategy operator of ``design/payload-spec.md`` §2 and
-``design/rl-training-spec.md`` §0-§4 — the single shared-weight policy ``W_all`` plus the
-value stack. It threads the committed pipeline end to end for one strategy step:
-
-    q_b,k_m,v_m = QKV( x_b, beta_b, z_m )              (qkv.py; payload-spec §2.3)
-    scores      = Q @ K^T                              player x instrument affinity (§2.4)
-    b           = softplus(scores)                     per-player appetite (DPP quality)
-    diag(K)     = DPP marginal inclusion of (q_i, K)   (dpp.py; §2.4, repulsion-only)
-    dw/dt       = SwiGLU(RMSNorm([diag(K); b]))        (head.py; §2.5 velocity)
-    w'          = w + dw/dt * Delta                    forward-Euler replicator (§3.2)
-    a, logpi    = categorical-sample(w')               (head.py; §5 sampling NOT argmax)
-    V_phi       = ValueHead([Q; b; dw/dt; SUCC])       (value.py; §2.1 per-player R^l)
-
-Everything fed IN is a STOPGRAD feature (``rl-training-spec`` §2.1 / §4): the featurization
-``x_b`` / ``beta_b`` (``featurize.py`` belief, numpy) and the closed-form Game-1
-``PW`` / ``SUCC`` (``game.py``, numpy) enter detached — the REINFORCE gradient flows only
-into ``W_all`` (the qkv projections + the mixing head) and the value/aux heads. The
-``SUCC`` anticipatory feature is folded into the value head's final intermediate exactly
-as ``value.py`` documents (``rl-training-spec`` §2.2: value "inputs superset ``SUCC`` =>
-anticipatory").
-
-Learned (mlx) vs computed (numpy). The learned surface — ``QKVProjector``, ``MixingHead``,
-``StrategyValue`` — is mlx (Apple; the mini). The feature glue (``StrategyState`` and
-``state_from_cartsim``) is pure numpy so it is importable and exercisable without mlx on
-any host; only :meth:`StrategyEstimator.forward` needs mlx. The module therefore imports
-mlx **lazily**: constructing / running the estimator requires mlx, but importing the
-module and building states does not.
-
-``forward(state) -> (action, logpi, value, dw_dt)`` is the required public entry. Extra
-diagnostics from the same pass (the integrated logits ``w'``, ``diag(K)``, the auxiliary
-value ``Vtilde``, the raw appetite ``b``) are stashed on ``estimator.last`` for the
-training loop / logging without widening the 4-tuple.
-
-Spec: ``payload-spec.md`` §2.3-§2.5, §3.2, §5 ; ``dpp-mixing-and-overlay.md`` §2, §4 ;
-      ``rl-training-spec.md`` §0-§4 ; companion sibling modules ``qkv`` / ``dpp`` /
-      ``head`` / ``value`` / ``game`` / ``featurize`` / ``cartsim``.
-
-Public surface
---------------
-- ``StrategyState``          : dataclass — the per-step stopgrad features (numpy).
-- ``ForwardResult``          : namedtuple bundling every output of one pass.
-- ``StrategyEstimator``      : the composed operator; ``forward`` + ``learned_params``.
-- ``StrategyEstimator.for_cartsim`` : build one sized to a :class:`cartsim.CartSim`.
-- ``state_from_cartsim``     : featurize a ``CartSim`` cartstate -> ``StrategyState`` (numpy).
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -53,114 +5,67 @@ from typing import NamedTuple, Optional, Sequence
 
 import numpy as np
 
-from .game import succ_feature
+from .game import succession, team_nimbers
 from .qkv import QKVProjector, QKVShapes, team_pool
 
-# mlx is imported lazily inside the methods that need it (constructing the learned
-# modules / running forward), so this module stays importable on an mlx-less host for
-# the numpy feature glue (StrategyState, state_from_cartsim).
-_mx = None
-
-
-def _mlx():
-    """Import mlx on demand; raise a clear error on a host without it (e.g. node 0)."""
-    global _mx
-    if _mx is None:
-        try:
-            import mlx.core as mx  # type: ignore
-        except ImportError as e:  # pragma: no cover - host-dependent
-            raise RuntimeError(
-                "estimator.forward / StrategyEstimator need mlx (the learned surface). "
-                "Run it on the Apple host that has mlx (the Mac mini, ~/.venv-mesh). The "
-                "numpy feature glue (StrategyState, state_from_cartsim) works without mlx."
-            ) from e
-        _mx = mx
-    return _mx
-
+X_WIDTH = 16
+BELIEF_WIDTH = 8
+INSTRUMENT_WIDTH = 16
+RELATION_WIDTH = 16
+HIERARCHY_WIDTH = 8
 
 __all__ = [
     "StrategyState",
     "ForwardResult",
     "StrategyEstimator",
     "state_from_cartsim",
+    "state_with_observations",
+    "state_with_instruments",
+    "X_WIDTH",
+    "BELIEF_WIDTH",
+    "INSTRUMENT_WIDTH",
+    "HIERARCHY_WIDTH",
+    "RELATION_WIDTH",
 ]
+
+
+def _mlx():
+    try:
+        import mlx.core as mx
+    except ImportError as exc:
+        raise RuntimeError("StrategyEstimator.forward requires mlx") from exc
+    return mx
 
 
 @dataclass
 class StrategyState:
-    """One strategy step's STOPGRAD features (numpy) — the input to :meth:`forward`.
-
-    All fields are computed / detached w.r.t. the policy gradient (``rl-training-spec``
-    §2.1 / §4): ``x`` / ``beta`` come from the deterministic featurization (``featurize``),
-    ``z`` are the instrument descriptors, ``carts`` / ``teams`` feed the closed-form Game-1
-    ``PW`` / ``SUCC`` (``game``), and ``w`` is the current integrated strategy weight state
-    (the logits ``dw/dt`` is added to). Shapes follow ``qkv.QKVShapes``.
-
-    Fields
-    ------
-    x        : (l, d_x)     per-player engine feature rows ``x_b`` (payload-spec §2.1).
-    beta     : (l, d_beta)  per-player egocentric belief rows ``beta_b`` (§2.2).
-    z        : (M, d_z)     per-instrument descriptor rows ``z_m`` (§2.1).
-    w        : (l, M)       current per-player integrated strategy weights = logits.
-    carts    : list         cartstate carts for ``PW`` / ``SUCC`` (game.Cart or pairs).
-    teams    : sequence     explicit team roster (aligns succ_feature across calls).
-    team_of  : (l,) int     player -> team map (for the A_team pooling activation).
-    """
-
     x: np.ndarray
     beta: np.ndarray
     z: np.ndarray
+    relation: np.ndarray
+    hierarchy: np.ndarray
+    winner_mask: np.ndarray
     w: np.ndarray
     carts: list
     teams: Sequence
     team_of: Sequence[int]
+    eligible: Optional[np.ndarray] = None
 
 
 class ForwardResult(NamedTuple):
-    """Everything one :meth:`StrategyEstimator.forward` pass produces.
-
-    The first four fields are the required ``forward`` return; the rest are diagnostics
-    from the same pass (also stashed on ``estimator.last``).
-    """
-
-    action: object      # (l,) int   sampled instrument per player (payload-spec §5)
-    logpi: object       # (l,)       log pi(a|.) of the sampled action (REINFORCE, §2.1)
-    value: object       # (l, l)     per-player value VECTOR V_phi in R^l (rl-training §2.1)
-    dw_dt: object       # (l, M)     per-player strategy velocity (§2.5)
-    w_next: object      # (l, M)     integrated logits w + dw/dt * Delta (§3.2)
-    diag_k: object      # (M,)       DPP marginal inclusion vector (§2.4)
-    appetite: object    # (l, M)     per-player appetite b = softplus(Q@K^T)
-    vtilde: object      # (l, l)     auxiliary value from the query (rl-training §2.1)
-    q_team: object      # (k, d)     per-team pooled query activation A_team (§0)
+    action: object
+    logpi: object
+    value: object
+    dw_dt: object
+    w_next: object
+    diag_k: object
+    appetite: object
+    winner_value: object
+    loser_value: object
+    q_team: object
 
 
 class StrategyEstimator:
-    """The composed strategy operator: qkv -> DPP diag(K) -> RMSNorm/SwiGLU head -> value.
-
-    Bundles the four learned sub-modules into one shared-weight policy ``W_all`` plus the
-    value stack (``rl-training-spec`` §0 / §4). One :meth:`forward` is one strategy step:
-    it projects the query/keys/values, forms the player x instrument appetite, folds it
-    through the honest repulsion-only DPP marginal ``diag(K)``, gates that into a per-player
-    velocity ``dw/dt``, integrates the strategy weights one forward-Euler step, samples the
-    instrument (NOT argmax) with its log-prob, and reads the per-player value vector off the
-    final intermediate (with ``SUCC`` folded in for anticipation).
-
-    Parameters
-    ----------
-    shapes : QKVShapes
-        The step dimensions (``k`` teams, ``M`` instruments, ``l`` players, feature/proj
-        widths). ``j_instruments`` is the instrument count ``M``.
-    delta : float
-        Forward-Euler step ``Delta`` for ``w += dw/dt * Delta`` (dpp-mixing §4; a STABILITY
-        parameter, not a scheduling knob).
-    temperature : float
-        Sampling temperature for the categorical selection (head.sample_strategy; §5).
-    hidden : int, optional
-        Mixing-head SwiGLU hidden width (defaults to ``4*M``).
-    seed : int, optional
-        Seeds the qkv/head/value parameter init and the sampling RNG (reproducible).
-    """
-
     def __init__(
         self,
         shapes: QKVShapes,
@@ -171,37 +76,25 @@ class StrategyEstimator:
         seed: Optional[int] = None,
     ) -> None:
         mx = _mlx()
-        from .head import MixingHead        # local import: mlx-dependent
+        from .head import MixingHead
         from .value import StrategyValue
 
         self.shapes = shapes
         self.delta = float(delta)
         self.temperature = float(temperature)
         self.k = shapes.k_teams
-        self.M = shapes.j_instruments       # instrument count
+        self.M = shapes.j_instruments
         self.l = shapes.l_players
         self._seed = seed
         self._rng_counter = 0
-
         if seed is not None:
             mx.random.seed(seed)
-
-        # --- learned surface ------------------------------------------------
         self.qkv = QKVProjector(shapes, seed=seed)
-        self.head = MixingHead(self.M, hidden=hidden)
-
-        # SUCC feature width = 2*k + 1 (game.succ_feature layout), folded into the value
-        # head's final intermediate to make V anticipatory (rl-training §2.2).
-        self.succ_dim = 2 * self.k + 1
-        # final intermediate per player = [ Q (d) ; appetite b (M) ; dw/dt (M) ; SUCC (2k+1) ]
-        self.d_intermediate = shapes.d + self.M + self.M + self.succ_dim
-        self.value = StrategyValue(
-            d_intermediate=self.d_intermediate, d_query=shapes.d, l=self.l
-        )
-
+        self.head = MixingHead(hidden=hidden)
+        self.d_intermediate = 2 * shapes.d + 4 + HIERARCHY_WIDTH
+        self.value = StrategyValue(self.d_intermediate)
         self.last: Optional[ForwardResult] = None
 
-    # ------------------------------------------------------------- constructor
     @classmethod
     def for_cartsim(
         cls,
@@ -214,99 +107,84 @@ class StrategyEstimator:
         hidden: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> "StrategyEstimator":
-        """Build an estimator sized to a :class:`cartsim.CartSim` (matching feature widths).
-
-        Uses the same feature layout as :func:`state_from_cartsim`: ``d_x = k + 3``,
-        ``d_beta = 2*j``, ``d_z = 4 + k``, ``M = 2*j + 1``. ``d`` / ``d_v`` are the
-        query/key and value projection widths (free choices; dpp-mixing marks them
-        non-fixed).
-        """
-        k, j = sim.k, sim.j
         shapes = QKVShapes(
-            k_teams=k,
-            j_instruments=sim.M,   # instrument count 2j+1
+            k_teams=sim.k,
+            j_instruments=sim.M,
             l_players=sim.l,
-            d_x=k + 3,
-            d_beta=2 * j,
-            d_z=4 + k,
+            d_x=X_WIDTH,
+            d_beta=BELIEF_WIDTH,
+            d_z=INSTRUMENT_WIDTH,
             d=d,
             d_v=d_v,
         )
-        return cls(shapes, delta=delta, temperature=temperature, hidden=hidden, seed=seed)
+        return cls(
+            shapes,
+            delta=delta,
+            temperature=temperature,
+            hidden=hidden,
+            seed=seed,
+        )
 
-    # ------------------------------------------------------------------ forward
     def forward(self, state: StrategyState) -> ForwardResult:
-        """One strategy step: features -> (action, logpi, value, dw_dt) (+ diagnostics).
-
-        Returns a :class:`ForwardResult`; the first four fields ``(action, logpi, value,
-        dw_dt)`` are the required ``forward`` outputs (unpack them directly, or read the
-        named fields). All inputs are wrapped in ``stop_gradient`` so the policy gradient
-        touches only the learned weights (``rl-training-spec`` §2.1 / §4).
-        """
         mx = _mlx()
         from .dpp import dpp_marginals
         from .head import integrate_weights, sample_strategy
-        from . import head as head_mod
+        from .value import select_role_value
 
-        # --- stopgrad features (rl-training §2.1/§4) ---
         x = mx.stop_gradient(mx.array(np.asarray(state.x, dtype=np.float32)))
         beta = mx.stop_gradient(mx.array(np.asarray(state.beta, dtype=np.float32)))
         z = mx.stop_gradient(mx.array(np.asarray(state.z, dtype=np.float32)))
+        relation = mx.stop_gradient(mx.array(np.asarray(state.relation, dtype=np.float32)))
+        hierarchy = mx.stop_gradient(mx.array(np.asarray(state.hierarchy, dtype=np.float32)))
+        winner_mask = mx.stop_gradient(mx.array(np.asarray(state.winner_mask, dtype=bool)))
         w = mx.stop_gradient(mx.array(np.asarray(state.w, dtype=np.float32)))
-
-        # --- qkv projections (payload-spec §2.3) ---
-        Q = self.qkv.query(x, beta)          # (l, d)  = per-player activation A_player
-        K = self.qkv.key(z)                  # (M, d)
-        V = self.qkv.value(z)                # (M, d_v)  (behavioural value; carried for parity)
-        Q_team = team_pool(Q, list(state.team_of), self.k)   # (k, d) = A_team activation
-
-        # --- player x instrument appetite (the coupling; §2.4) ---
-        scores = Q @ K.T                     # (l, M)
-        appetite = mx.logaddexp(scores, mx.zeros_like(scores))   # softplus -> b >= 0
-
-        # --- DPP marginal inclusion diag(K), repulsion-only (dpp.py; §2.4) ---
-        # per-instrument quality q_i = mean appetite over players; diversity feats = keys K.
-        quality = mx.mean(appetite, axis=0)  # (M,)
-        diag_k = dpp_marginals(quality, K)   # (M,)  in [0,1]
-        diag_k = mx.stop_gradient(diag_k)    # enters the head as a detached feature (§2.1)
-
-        # --- mixing head: velocity dw/dt (head.py; §2.5) ---
-        dw_dt = self.head(diag_k, appetite)  # (l, M)
-
-        # --- forward-Euler replicator step -> logits (§3.2) ---
-        w_next = integrate_weights(w, dw_dt, self.delta)   # (l, M)
-
-        # --- weighted sampling (NOT argmax; §5) + log-prob (REINFORCE; §2.1) ---
+        q = self.qkv.query(x, beta)
+        keys = self.qkv.key(z)
+        q_team = team_pool(q, list(state.team_of), len(state.teams))
+        team_index = mx.array(np.asarray(state.team_of, dtype=np.int32))
+        q_context = q + q_team[team_index]
+        scores = q_context @ keys.T
+        appetite = mx.logaddexp(scores, mx.zeros_like(scores))
+        quality = mx.mean(appetite, axis=0)
+        diag_k = mx.stop_gradient(dpp_marginals(quality, keys))
+        dw_dt = self.head(diag_k, appetite, relation)
+        w_next = integrate_weights(w, dw_dt, self.delta)
+        if state.eligible is not None:
+            eligible = mx.stop_gradient(mx.array(np.asarray(state.eligible, dtype=bool)))
+            w_next = mx.where(eligible, w_next, mx.full_like(w_next, -1e9))
         key = None
         if self._seed is not None:
             key = mx.random.key(self._seed + self._rng_counter)
             self._rng_counter += 1
-        action, logpi = sample_strategy(w_next, temperature=self.temperature, key=key)
-
-        # --- value: final intermediate with SUCC folded in (value.py; §2.1/§2.2) ---
-        succ_np = succ_feature(state.carts, teams=state.teams).astype(np.float32)  # (2k+1,)
-        succ = mx.stop_gradient(mx.array(succ_np))
-        succ_rows = mx.broadcast_to(succ[None, :], (self.l, self.succ_dim))
-        final_intermediate = mx.concatenate([Q, appetite, dw_dt, succ_rows], axis=1)  # (l, d_int)
-        V_phi, Vtilde = self.value(final_intermediate, Q)   # (l, l), (l, l)
-
+        action, logpi = sample_strategy(w_next, self.temperature, key)
+        stats = mx.concatenate(
+            [
+                mx.mean(appetite, axis=1, keepdims=True),
+                mx.max(appetite, axis=1, keepdims=True),
+                mx.mean(dw_dt, axis=1, keepdims=True),
+                mx.max(dw_dt, axis=1, keepdims=True),
+            ],
+            axis=1,
+        )
+        rows = mx.concatenate([q, q_team[team_index], stats, hierarchy], axis=1)
+        winner_value, loser_value = self.value(rows)
+        value = select_role_value(winner_value, loser_value, winner_mask)
         result = ForwardResult(
-            action=action, logpi=logpi, value=V_phi, dw_dt=dw_dt,
-            w_next=w_next, diag_k=diag_k, appetite=appetite, vtilde=Vtilde,
-            q_team=Q_team,
+            action,
+            logpi,
+            value,
+            dw_dt,
+            w_next,
+            diag_k,
+            appetite,
+            winner_value,
+            loser_value,
+            q_team,
         )
         self.last = result
         return result
 
-    # --------------------------------------------------------------- params
     def learned_params(self) -> dict:
-        """The trainable leaves: qkv (``W_all`` projections) + head + value/aux heads.
-
-        The REINFORCE policy gradient (``rl-training-spec`` §3 ``L_pg``) updates the qkv +
-        head weights; the value regression / aux imitation (``L_v`` / ``L_aux``) update the
-        value heads. Returned as a nested dict for the optimizer and for save/load; the
-        stopgrad features are not here (they never learn).
-        """
         return {
             "qkv": self.qkv.learned_params(),
             "head": self.head.parameters(),
@@ -314,76 +192,174 @@ class StrategyEstimator:
         }
 
 
-# --------------------------------------------------------------------------- #
-# Feature glue (numpy): CartSim cartstate -> StrategyState. Pure / mlx-free so it
-# is exercisable on any host; this is the featurize/game read the estimator sits on.
-# --------------------------------------------------------------------------- #
+def _hierarchy_rows(carts, teams, team_of, L):
+    nimbers = team_nimbers(carts, teams)
+    order = succession(carts, teams)
+    denial = {team: value for team, value in order}
+    winner = order[0][0] if order else None
+    scale = float(max(1, max(nimbers.values(), default=0), L))
+    total_depth = float(max(1, sum(cart.depth for cart in carts)))
+    rows = np.zeros((len(team_of), HIERARCHY_WIDTH), dtype=np.float32)
+    masks = np.zeros(len(team_of), dtype=bool)
+    for p, team in enumerate(team_of):
+        own = float(nimbers.get(team, 0))
+        rivals = [float(nimbers.get(other, 0)) for other in teams if other != team]
+        rival_max = max(rivals, default=0.0)
+        rival_mean = sum(rivals) / max(1, len(rivals))
+        below = sum(own > rival for rival in rivals)
+        above = sum(own < rival for rival in rivals)
+        rows[p] = (
+            own / scale,
+            rival_max / scale,
+            rival_mean / scale,
+            (own - rival_mean) / scale,
+            (below - above) / max(1, len(rivals)),
+            float(team == winner),
+            float(denial.get(team, 0)) / total_depth,
+            1.0 / max(1, len(teams)),
+        )
+        masks[p] = team == winner
+    return rows, masks
+
 
 def state_from_cartsim(sim, cstate, *, w: Optional[np.ndarray] = None) -> StrategyState:
-    """Featurize a :class:`cartsim.CartSim` cartstate into a :class:`StrategyState` (numpy).
+    from .cartsim import decode_instrument, to_carts
 
-    Builds the stopgrad feature rows the estimator consumes, in the layout
-    :meth:`StrategyEstimator.for_cartsim` sizes to:
-
-      * ``x`` (l, k+3): per player [ team one-hot(k), own-cart depth/L, own banked/L,
-        is-projected-winner ] — the bot's OWN known state (payload-spec §2.1).
-      * ``beta`` (l, 2j): observed per-cart [ depth/L, color/k ] — a right-sized egocentric
-        belief stand-in (the full V-cell pipeline is ``featurize.belief``; §2.2).
-      * ``z`` (M, 4+k): per instrument [ kind one-hot(3), target depth/L, target color
-        one-hot(k) ] (idle -> zeros) — the per-instrument descriptor ``z_m`` (§2.1).
-      * ``carts`` / ``teams``: the cartstate carts + roster for the closed-form ``PW``/``SUCC``.
-      * ``w`` (l, M): the current integrated strategy weights (defaults to zeros = the
-        untrained broad-sampling start, payload-spec §5).
-
-    All numpy / detached; nothing here learns (``rl-training-spec`` §4).
-    """
-    from .cartsim import to_carts, decode_instrument
-
-    k, j, l, M, L = sim.k, sim.j, sim.l, sim.M, sim.L
-    Lf = float(max(L, 1))
-    pos = cstate.pos
-    control = cstate.control
-    banked = cstate.banked
+    k, j, l, M = sim.k, sim.j, sim.l, sim.M
+    teams = list(range(k))
+    team_of = np.asarray(sim.team_of, dtype=np.int64)
     carts = to_carts(cstate)
-    pw = sim.projected_winner(cstate)
-
-    # x_b (l, k+3)
-    x = np.zeros((l, k + 3), dtype=np.float32)
-    for p in range(l):
-        team = int(sim.team_of[p])
-        x[p, team] = 1.0
-        own = [c for c in range(j) if int(control[c]) == team]
-        own_depth = max((float(pos[c]) for c in own), default=0.0)
-        x[p, k + 0] = own_depth / Lf
-        x[p, k + 1] = float(banked[team]) / Lf
-        x[p, k + 2] = 1.0 if (pw is not None and team == pw) else 0.0
-
-    # beta_b (l, 2j): observed cart depths + colors (same for all players here — the
-    # right-sized belief stand-in; per-player occlusion gating is featurize.belief).
-    beta_row = np.zeros(2 * j, dtype=np.float32)
-    for c in range(j):
-        beta_row[2 * c] = float(pos[c]) / Lf
-        beta_row[2 * c + 1] = float(control[c]) / float(max(k, 1))
-    beta = np.tile(beta_row, (l, 1)).astype(np.float32)
-
-    # z_m (M, 4+k)
-    z = np.zeros((M, 4 + k), dtype=np.float32)
-    kind_idx = {"push_cart": 0, "suppress_cart": 1, "idle": 2}
+    nimbers = team_nimbers(carts, teams)
+    winner = sim.projected_winner(cstate)
+    Lf = float(max(1, sim.L))
+    x = np.zeros((l, X_WIDTH), dtype=np.float32)
+    beta = np.zeros((l, BELIEF_WIDTH), dtype=np.float32)
+    z = np.zeros((M, INSTRUMENT_WIDTH), dtype=np.float32)
+    relation = np.zeros((l, M, RELATION_WIDTH), dtype=np.float32)
+    team_sizes = np.bincount(team_of, minlength=k)
+    for p, team in enumerate(team_of):
+        owned = [c for c in range(j) if int(cstate.control[c]) == team]
+        own_depths = [float(cstate.pos[c]) for c in owned]
+        rivals = [float(v) for other, v in nimbers.items() if other != team]
+        x[p] = (
+            max(own_depths, default=0.0) / Lf,
+            sum(own_depths) / max(1, len(own_depths)) / Lf,
+            float(cstate.banked[team]) / max(1.0, Lf * j),
+            float(team == winner),
+            float(nimbers.get(int(team), 0)) / Lf,
+            max(rivals, default=0.0) / Lf,
+            float(team_sizes[team]) / max(1, l),
+            1.0 / max(1, k),
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+        )
+        cart_rows = np.zeros((j, 4), dtype=np.float32)
+        for c in range(j):
+            control = int(cstate.control[c])
+            cart_rows[c] = (
+                float(cstate.pos[c]) / Lf,
+                float(control == team),
+                float(control >= 0 and control != team),
+                float(control < 0),
+            )
+        beta[p] = np.concatenate([cart_rows.mean(axis=0), cart_rows.max(axis=0)])
     for m in range(M):
         kind, cart = decode_instrument(m, j)
-        z[m, kind_idx[kind]] = 1.0
+        kind_index = 0 if kind == "push_cart" else 1 if kind == "suppress_cart" else 7
+        z[m, kind_index] = 1.0
+        z[m, 8] = 1.0
+        z[m, 13] = 1.0
         if cart >= 0:
-            z[m, 3] = float(pos[cart]) / Lf
-            col = int(control[cart])
-            if col >= 0:
-                z[m, 4 + col] = 1.0
-
+            progress = float(cstate.pos[cart]) / Lf
+            z[m, 9] = 1.0 - progress if kind == "push_cart" else progress
+            z[m, 10] = progress
+            z[m, 15] = float(cstate.control[cart] >= 0)
+        for p, team in enumerate(team_of):
+            control = int(cstate.control[cart]) if cart >= 0 else -1
+            relation[p, m, 0] = float(control == team)
+            relation[p, m, 1] = float(control >= 0 and control != team)
+            relation[p, m, 2] = 1.0
+            relation[p, m, 8] = 1.0
+            relation[p, m, 9] = 1.0
+            relation[p, m, 13] = float(cstate.pos[cart]) / Lf if cart >= 0 else 0.0
+            relation[p, m, 14] = 1.0
+    hierarchy, winner_mask = _hierarchy_rows(carts, teams, team_of, sim.L)
     if w is None:
         w = np.zeros((l, M), dtype=np.float32)
     else:
         w = np.asarray(w, dtype=np.float32).reshape(l, M)
-
     return StrategyState(
-        x=x, beta=beta, z=z, w=w, carts=carts,
-        teams=list(range(k)), team_of=list(np.asarray(sim.team_of).tolist()),
+        x,
+        beta,
+        z,
+        relation,
+        hierarchy,
+        winner_mask,
+        w,
+        carts,
+        teams,
+        team_of.tolist(),
+    )
+
+
+def state_with_observations(state: StrategyState, rows, columns) -> StrategyState:
+    rows = np.asarray(rows, dtype=np.float32)
+    x = state.x.copy()
+    velocity = np.sqrt(
+        np.square(rows[:, columns["VEL_X"]])
+        + np.square(rows[:, columns["VEL_Y"]])
+        + np.square(rows[:, columns["VEL_Z"]])
+    )
+    x[:, 8:] = np.stack(
+        [
+            rows[:, columns["HEALTH"]] / 100.0,
+            rows[:, columns["ARMOR"]] / 100.0,
+            rows[:, columns["AMMO"]],
+            velocity,
+            rows[:, columns["POWER"]] / 30.0,
+            rows[:, columns["TSS"]] / 30.0,
+            rows[:, columns["ALIVE"]],
+            rows[:, columns["CONTROL"]],
+        ],
+        axis=1,
+    )
+    return StrategyState(
+        x,
+        state.beta,
+        state.z,
+        state.relation,
+        state.hierarchy,
+        state.winner_mask,
+        state.w,
+        state.carts,
+        state.teams,
+        state.team_of,
+        state.eligible,
+    )
+
+
+def state_with_instruments(state: StrategyState, batch, w=None) -> StrategyState:
+    players = state.x.shape[0]
+    instruments = batch.descriptors.shape[0]
+    weights = np.zeros((players, instruments), dtype=np.float32) if w is None else np.asarray(
+        w, dtype=np.float32
+    ).reshape(players, instruments)
+    return StrategyState(
+        state.x,
+        state.beta,
+        np.asarray(batch.descriptors, dtype=np.float32),
+        np.asarray(batch.relations, dtype=np.float32),
+        state.hierarchy,
+        state.winner_mask,
+        weights,
+        state.carts,
+        state.teams,
+        state.team_of,
+        np.asarray(batch.eligible, dtype=bool),
     )

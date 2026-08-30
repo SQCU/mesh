@@ -6,7 +6,7 @@
 > and never un-banks. What makes this a game rather than a race is not a reversible
 > banked asset but the **relative objective**: take the path-to-victory away from
 > whoever holds it and acquire it. The authoritative statements are
-> `rl-training-spec.md` (§2 reward/advantage, §5 why the simpler rewards fail) and
+> `rl-training-spec.md` (§2 asymmetric W/L objectives, §3 policy gradient) and
 > `payload-spec.md` (§0 monotone-score layer); `strategy-layers-and-modality.md` §1
 > records the same retraction. The passages below (§1, §2, §6) have been rewritten to
 > that corrected model.
@@ -33,7 +33,7 @@ A team **banks** a control point by being in control as the cart crosses that po
 (retracting the earlier "reversible banks" model; see the correction note at the head
 of this doc and `strategy-layers-and-modality.md` §1). A round is won by delivering a
 cart to its end (`s -> L` under control) or, at timeout, by the relative outcome the
-reward encodes (`rl-training-spec.md` §2, §5) — not by a raw count of banked points.
+role objective encodes (`rl-training-spec.md` §2) — not by a raw count of banked points.
 
 Two things make this a game rather than a race, and both were missing from the
 drag-only law that this document corrects:

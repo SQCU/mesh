@@ -224,6 +224,7 @@ void payload_strategy_gather(float nclients)
 		it.plc_ob_f_ncart   = nci;
 		it.plc_ob_f_ncartd  = ncd / 1024;
 		it.plc_ob_f_alive   = IS_DEAD(it) ? 0 : 1;
+		it.plc_ob_f_control = IS_BOT_CLIENT(it) ? 1 : 0;
 	});
 	mesh_gather(plc_str_h_obs, PLC_OBS_ID,      plc_ob_f_id,      1, nclients);
 	mesh_gather(plc_str_h_obs, PLC_OBS_TEAM,    plc_ob_f_team,    1, nclients);
@@ -243,6 +244,7 @@ void payload_strategy_gather(float nclients)
 	mesh_gather(plc_str_h_obs, PLC_OBS_NCART,   plc_ob_f_ncart,   1, nclients);
 	mesh_gather(plc_str_h_obs, PLC_OBS_NCART_D, plc_ob_f_ncartd,  1, nclients);
 	mesh_gather(plc_str_h_obs, PLC_OBS_ALIVE,   plc_ob_f_alive,   1, nclients);
+	mesh_gather(plc_str_h_obs, PLC_OBS_CONTROL, plc_ob_f_control, 1, nclients);
 
 	// (C) perception ring — rows already deposited this step by payload_perceive.
 	float ebase = etof(plc_str_evt_pool[0]);
@@ -343,7 +345,11 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 	// at the bot's vicinity — a real routerating pass, not a no-op.
 	else if (tgt >= PLC_TGT_CELL_BASE && this.plc_str_explore != 0)
 	{
-		havocbot_goalrating_waypoints(this, ratingscale * this.plc_str_explore, this.origin, 3000);
+		float cell = tgt - PLC_TGT_CELL_BASE;
+		IL_EACH(g_waypoints, payload_str_cell_of(it.origin) == cell,
+		{
+			navigation_routerating(this, it, ratingscale * this.plc_str_explore, 3000);
+		});
 	}
 
 	// travel commitment (must-build #4): hold the strategy token this long so a
@@ -351,9 +357,6 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 	if (this.plc_str_commit > 0)
 		this.bot_strategytime = max(this.bot_strategytime, time + this.plc_str_commit);
 
-	// SPAWN (must-build #3) and LEAD (readout) are consumed by the respawn path
-	// and the mesh readout respectively; both live in .plc_str_spawn/.plc_str_lead
-	// and are not routerating biases, so they are not applied here.
 }
 
 // ---------------------------------------------------------------------------

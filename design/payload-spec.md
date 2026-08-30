@@ -6,10 +6,9 @@ learned linear algebra, and — the part that decides whether any of this matter
 the computed output causally changes what bots do. Where this document and the code
 disagree, this document states the intent and the code is the bug.
 
-**There is no current strategy implementation.** Source that resembles strategy
-computation is disregarded babble; the spec, the linear-algebra terms, and the
-transcript are the only reference. The RDMA scatter/gather builtins are real substrate;
-their *use* by any existing strategy code is not.
+The strategy implementation is an experimental realization of this specification, not
+evidence that its learned policy, cartspace evaluator, or dynamics assumptions are
+correct. The RDMA scatter/gather builtins are real substrate.
 
 Modality is tracked with `[FIRM]` (decided), `[BUILD]` (required engine work that does
 not yet exist). `[OPEN]` is used only where the transcript genuinely has not yet chosen.
@@ -131,26 +130,29 @@ materialized for the overlay (2.6).
 
 ### 2.5 Mixing head -> weight velocity `[FIRM]`
 
+`dw_{b,m}/dt` is a shared scalar head applied pointwise to each player/instrument edge.
+Its fixed-width input contains `diag(K)_m`, appetite `b_{b,m}`, invariant reductions of
+the player's whole appetite row and the global DPP signal, and the relation of
+instrument `m` to player `b`'s team:
+
 ```
-dw_b/dt = SwiGLU( RMSNorm( [ diag(K) ; b ] ) )
+dw_{b,m}/dt = SharedSwiGLU(RMSNorm(edge_{b,m}, reduce_m(edge_b)))
 ```
 `b` = per-instrument appetite/quality. The **SwiGLU gate is the regime switch**: high
 *shared* appetite concentrated on one instrument opens the concentration (pile-on /
 coalition) path; otherwise it passes the diversity (spread) signal. Symmetric DPP
 supplies the honest one-sided signal; the head supplies the two-regime behavior. No
-nonsymmetric DPP; nothing beyond RMSNorm+SwiGLU is required.
+nonsymmetric DPP is required. A dense `2M -> M` head is forbidden because it binds the
+checkpoint to one instrument/cart count.
 
 ### 2.6 Nimber value and explicit backward induction `[FIRM]`
 
-The multi-cart position is Nim-structured: each cart at its depth-under-control on its
-golden path is a heap. The projected winner `PW(s)` is **computed deterministically as
-the nim-sum over cartstate** — per-team XOR of controlled cart depths; the team holding
-the largest live nimber wins all-else-equal (one cart at d:2 beats two carts at d:1,
-since 1 XOR 1 = 0). It is closed-form over cartstate (Game 1) — NOT a learned quantity
-and NOT a centrality heuristic. See `rl-training-spec.md` §1 and
-`xonotic/solver/strat/game.py`. (Earlier drafts computed a `argmax intercentrality((I -
-a*kappa)^-1)` "swing" over a learned coupling and called it the nimber; that was a
-relabel of a centrality heuristic and is retracted — the nimber is the nim-sum above.)
+The current Game-1 candidate treats each cart at its depth-under-control as a heap and
+computes `PW(s)` from the per-team XOR of those depths. One cart at d:2 therefore outranks
+two at d:1 because `1 XOR 1 = 0`. This is a deterministic feature of the candidate
+abstraction, not proof that the partizan FPS position has that Grundy value. The action
+sequence that realizes a heap move and the correct hierarchy labels are not known a
+priori; observed transitions and outcomes must validate or replace this evaluator.
 
 `SUCC(s)` is **explicit backward induction** over that nimber-valued position: recompute
 `PW` under successive decrements of the current leader's carts, yielding the ordered
@@ -158,9 +160,9 @@ succession `[(team, marginal_denial_value)]`. Required, not an optional overlay:
 the whole succession into one immediate-frame allocation so the policy is anticipatory
 and time-smooth (gang the leader only to its marginal need, pre-empt the next-in-line,
 loot for power) instead of reacting to each flip after it has happened. `PW`/`SUCC` are
-stopgrad FEATURES the policy and value read; they are never learned. What is learned is
-only the Game-2 realization — whether an allocation can actually decrement the leader
-through the frozen FPS. Ontology discipline: "leader" is admissible only as the derived
+stopgrad state features the policy and critics read. A local action-linear dynamics
+ensemble learns the Game-2 realization — whether and how an allocation changes the
+hierarchy through the FPS — from observed transitions. Ontology discipline: "leader" is admissible only as the derived
 `PW(s)`/succession readout — never a primitive entity or a per-agent character.
 
 ## 3. Execution flow
@@ -179,10 +181,12 @@ gather   per-bot observation + state rows from the engine
 rebuild  observation buffer -> V-cells -> belief beta_b            (2.2, online)
 featurize x_b, z_m ; project q_b, k_m, v_m                          (2.3)
 couple   L -> K=L(I+L)^-1 -> diag(K) ; materialize kappa            (2.4)
-mix      dw_b/dt = SwiGLU(RMSNorm([diag(K); b]))                    (2.5)
+mix      shared edge head -> dw_{b,m}/dt                            (2.5)
 step     w_b += (dw_b/dt) * Delta        (ONE forward-Euler flow step)
 induct   nimber value + backward induction over the multi-cart position;
          swing = argmax intercentrality((I - a*kappa)^-1)          (2.6)
+estimate update local action-linear dynamics from observed (s,a,s')
+evaluate W on winner rows; L on loser rows; probe uncertain reachable moves
 scatter  per-bot absolute w_b (and swing) back to the engine
 ```
 
@@ -250,8 +254,10 @@ Both were decided from the outset and restated repeatedly; neither is a fork.
   L1/L2-regularized toward logit 0 so that untrained it is a broad weighted sampling of
   effective strategies and with training it peaks without collapsing to "only some
   actions happening". Greedy/MAP selection is excluded by that requirement.
-- **The outer objective is REINFORCE** over match outcomes (many winning and losing
-  bots across many matches = the calibration signal), with the L2-toward-zero penalty.
+- **The outer objective is REINFORCE** with asymmetric role values. `W` learns to preserve
+  the winning region against rival perturbations; `L` learns to promote its team and
+  demote every rival until acquisition, after which `W` applies. Many winning and losing
+  bots across many counts and matches provide the calibration signal.
   Not a DPP-likelihood objective: there are no target selections to fit, only reward.
 
 This is the standing commitment — minimal feature engineering, maximal weight on the

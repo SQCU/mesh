@@ -14,11 +14,13 @@ Docs: `rl` = rl-training-spec.md · `pay` = payload-spec.md · `dpp` = dpp-mixin
 | Concept | Defining section (authoritative) | Restated / used in |
 |---|---|---|
 | **Two games** (Game-1 computed cartstate PW/SUCC · Game-2 frozen/stopgrad FPS C-prog + adapter) | `rl §0`, `rl §4` `[FIRM]` | `pay §0` (mechanics vs control) |
-| **Reward** `R_u∈R^l` per-player VECTOR, RELATIVE (deny+acquire PW-slot); raw expr `[OPEN]` | `rl §2.1` / `rl §2.2` (code=∅) | `pss §5`, `pay §5` (REINFORCE over outcomes) |
-| **Value** `V_φ(s,b,SUCC)∈R^l` per-player linproj + aux `Ṽ` | `rl §2.1` / `rl §2.2` `[OPEN]` | (contrast: `sl §1` layer-3 "value-function-**LIKE**" operator ≠ `V_φ`) |
-| **Advantage** `Â=R+γV(s')−V(s)`, potential/TD, telescopes cycles→0 (anti-bistability) | `rl §2.1` / `rl §2.2` `[FIRM]`/`[OPEN]` | `rl §5` (why not simpler rewards) |
-| **Policy gradient** `∇θJ=E[Σ Â⊙∇θ logπ]`, `θ=W_all` only | `rl §2.1` / `rl §2.2`; loss `rl §3` | `pay §5`, `pss §5` (REINFORCE, L2→0) |
-| **Stopgrad boundary** computed {s,b,PW,SUCC} + FPS C-prog frozen; learned {W_all, value head, Ṽ, adapter} | `rl §4` `[FIRM]` | `pay` intro, `sl §1` (RDMA demonstrator ≠ spec) |
+| **Winner reward/value W** preserve the path-to-victory region against rival perturbations; not progress/speed | `rl §2` `[FIRM]` | `rl §5` (state-targeting/disturbance control) |
+| **Loser reward/value L** promote self and demote every rival until acquisition; not the symmetric dual of W | `rl §2` `[FIRM]` | `rl §3` (role-gated actor critic) |
+| **Advantage** `A=r_role+γV_role(s')−V_role(s)`; TD baseline, not a shaping theorem | `rl §3` `[FIRM]` | `rl §6` (separate W/L regression) |
+| **Policy gradient** `∇θJ=E[Σ A∇θ logπ]`, one shared `θ` across all counts | `rl §3` | `pay §5`, `pss §5` (REINFORCE, L2→0) |
+| **Learned dynamics** local action-linear ensemble over reduced state/action rows; probing + reachability diagnostics | `rl §1`, `rl §5` `[FIRM]/[BUILD]` | Brown–Papadimitriou–Roughgarden control connection |
+| **Count invariance** pointwise row encoders + invariant reductions + shared scalar action/value heads | `rl §4` `[FIRM]` | trained/held-out count distribution in `rl §6` |
+| **Stopgrad boundary** observed features and empirical transitions are data; policy, W/L, adapter, and dynamics estimator learn | `rl §1`, `rl §3` `[FIRM]` | `pay` intro |
 | **PW** projected winner = nim-sum over cartstate | `rl §1` `[FIRM]` | `pay §2.6` (nimber), `qkv §0` |
 | **SUCC** backward induction over cart-decrements → ordered marginal-denial | `rl §1` `[FIRM]` | `pay §2.6` (explicit backward induction) |
 | **Belief** `β_b` egocentric, occlusion-gated (frustum+LOS+2-Vcell), per-bot not per-team | `pay §2.2` `[FIRM][BUILD]` | `sl §2`, `rl §1` (b) |
@@ -59,8 +61,8 @@ Docs: `rl` = rl-training-spec.md · `pay` = payload-spec.md · `dpp` = dpp-mixin
 
 4. **"Value" term overload (terminology hazard, not a hard contradiction).**
    `sl §1` layer-3 is a "value-function-**LIKE**" operator (explicitly *not* a solved
-   value function); `rl §2.1` defines `V_φ` as an actual learned value head regressed to
-   return. Distinct objects sharing the word "value"; downstream code must not conflate.
+   value function); `rl §2` defines the asymmetric `W` and `L` return estimators.
+   Distinct objects sharing the word "value"; downstream code must not conflate.
 
 5. **Observation source — doc intent vs current code (doc/code gap, noted for completeness).**
    `pay §2.2` and `pbi §0`,`§2.2` both intend perception-gated observations (frustum+LOS+

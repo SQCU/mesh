@@ -210,22 +210,21 @@ entry and `payload-spec.md` §2.6, which names a nimber value for the multi-cart
 position:
 
 - **The full game is partizan / scoring.** With presence, control cylinders, item
-  economies, and the frozen-FPS realization all live, the full position has **no
-  closed-form Grundy value** — its value is LEARNED (the per-player value head,
+  economies, and the FPS realization all live, the full position has **no established
+  closed-form Grundy value** — its asymmetric W/L values and local dynamics are learned,
   `rl-training-spec.md` §2). This is the sense in which the old entry was right: "the
   position value cannot be read off cheaply, which is why the solve is heavy."
-- **The CARTSTATE game is the tractable reduction.** Restricted to cart
-  depths-under-control as heaps, the position admits a nimber-preserving reduction
-  (the FUN2022 nimber-preserving-reduction result). Over THAT reduction the projected
+- **The CARTSTATE game is the candidate tractable reduction.** Restricted to cart
+  depths-under-control as heaps, the current implementation hypothesizes a
+  nimber-preserving reduction. Over that candidate reduction the projected
   winner `PW` — the nim-sum "who wins if nothing else moves" (one cart at depth 2 beats
   two carts at depth 1, since 1⊕1 = 0) — and its succession `SUCC` — backward induction
   over successive decrements of the leader's carts — are **COMPUTED in closed form**,
-  deterministic, NOT learned. This is exactly the nimber value `payload-spec.md` §2.6
-  names, and the same `PW`/`SUCC` that `rl-training-spec.md` §1 defines as computed
-  Game-1 features.
+  deterministic state features. The FPS transitions that realize its moves are learned,
+  and observed outcomes must validate or replace the reduction.
 
 So Nim is neither "mere analogy" nor "the whole game is a Nim variant": the cartstate
-reduction IS a computed nim-sum (Game 1, deterministic), while the FULL game's value is
-learned (Game 2's frozen-FPS realization is what the policy must actually achieve).
-`PW`/`SUCC` are FEATURES the learned value and policy read; they are stopgrad, never
-themselves learned (`rl-training-spec.md` §1, §4).
+reduction is currently evaluated as a computed nim-sum, while the full game's W/L values
+and Game-2 realization are learned. `PW`/`SUCC` are candidate state features the critics
+and policy read; their correctness is an empirical modeling question
+(`rl-training-spec.md` §1).

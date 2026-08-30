@@ -96,7 +96,15 @@ The bot's **own, known** state only (`payload-spec §2.1`). Enemy and item truth
 | 15 | NCART | nearest-cart index |
 | 16 | NCART_D | nearest-cart distance / 1024 |
 | 17 | ALIVE | 1 alive / 0 dead (drives the spawn scatter) |
-| 18-39 | reserved | zero-filled `x_b` growth |
+| 18 | CONTROL | 1 bot / 0 human; strategy assignments exist for both |
+| 19-39 | reserved | zero-filled `x_b` growth |
+
+The responder filters empty client slots but does not filter by `CONTROL`. Bot and
+human rows enter the same shared policy. `CONTROL` identifies the realized controller
+for off-policy telemetry; the policy does not withhold an assignment from either
+class. The havocbot rater enacts bot assignments. A human assignment is presently an
+internal advisory signal until a HUD channel or inverse realized-action classifier is
+built.
 
 ### 2.B Cartstate `s` — one row per cart edict (width 12) — **GUARANTEED**
 
@@ -239,9 +247,11 @@ calculation — both noted inline in the scaffolding.
 
 - **Determinism boundary** (`rl-training-spec §4`). Everything on the QC side of the wire
   is **stopgrad**: QC emits raw cartstate and raw perception and never sees a gradient.
-  `PW`/`SUCC`/the belief/V-cells are computed deterministically (numpy/plain python —
-  `tools/strategy_io_schema.py`); the DPP marginal-inclusion signal, the RMSNorm→SwiGLU
-  mixing head, and the value head are learned on the mesh (mlx, separate module). This
+  `PW`/`SUCC`/the belief/V-cells are state features computed after observation
+  (numpy/plain python — `tools/strategy_io_schema.py`); the DPP signal, shared edge
+  mixing head, asymmetric `W`/`L` critics, and local dynamics ensemble are learned on the mesh.
+  The policy/critic gradient does not flow into QC; transition prediction is supervised
+  by later QC observations. This
   file's Python imports **no** mlx and stays test-light by design.
 - **Skill-orthogonality** (`playerbot-interface §4`). Every scattered column becomes a
   `navigation_routerating` base-rating bias and **nothing else**. The rater never writes

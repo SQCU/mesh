@@ -34,7 +34,7 @@ MAX_CARTS = 4
 # ---- gather schema A: per-player observation x_b ---------------------------
 OBS = dict(ID=0, TEAM=1, HEALTH=2, ARMOR=3, AMMO=4, POS_X=5, POS_Y=6, POS_Z=7,
            VEL_X=8, VEL_Y=9, VEL_Z=10, WEAPONS=11, POWER=12, TSS=13, CELL=14,
-           NCART=15, NCART_D=16, ALIVE=17)
+           NCART=15, NCART_D=16, ALIVE=17, CONTROL=18)
 
 # ---- gather schema B: cartstate s (GUARANTEED; PW/SUCC computed from this) --
 CS = dict(ID=0, DEPTH=1, LENGTH=2, CTRL=3, SPEED=4, IDLE=5, BANKMASK=6, PROGRESS=7)
@@ -48,9 +48,9 @@ SC = dict(TARGET=0, GAIN=1, LANE=2, HUNT=3, EXPLORE=4, COMMIT=5, SPAWN=6, LEAD=7
 
 # ---- PLC_SC_TARGET encoding bases (mirror the QH constants) -----------------
 TGT_CART_BASE = 0
-TGT_ITEM_BASE = 100
-TGT_RIVAL_BASE = 300
-TGT_CELL_BASE = 500
+TGT_ITEM_BASE = 65536
+TGT_RIVAL_BASE = 131072
+TGT_CELL_BASE = 196608
 
 
 def encode_target(kind: str, index: int) -> int:
@@ -184,7 +184,7 @@ def _selftest() -> None:
     assert max(EVT.values()) < EVT_WIDTH
     assert sorted(SC.values()) == list(range(8))
     # target codec round-trips across every band
-    for kind, idx in [("cart", 3), ("item", 7), ("rival", 12), ("cell", 40)]:
+    for kind, idx in [("cart", 3), ("item", 32767), ("rival", 32767), ("cell", 65535)]:
         assert decode_target(encode_target(kind, idx)) == (kind, idx)
     # PW: one cart at depth 2 beats two carts at depth 1 (1 XOR 1 == 0), §1
     two_deep = [CartState(0, 2 / 7, 1)]                       # team 1, heap 2

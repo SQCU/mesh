@@ -70,7 +70,7 @@ const float PLC_OBS_CELL      = 14;   // resolved V-cell id of the bot (payload-
 const float PLC_OBS_NCART     = 15;   // nearest-cart index
 const float PLC_OBS_NCART_D   = 16;   // nearest-cart distance / 1024
 const float PLC_OBS_ALIVE     = 17;   // 1 alive, 0 dead (drives spawn scatter)
-// 18..39 reserved for x_b growth; zero-filled.
+const float PLC_OBS_CONTROL   = 18;
 
 // =============================================================================
 //  GATHER SCHEMA B — cartstate row s   (rl-training-spec §1; GUARANTEED)
@@ -124,9 +124,9 @@ const float PLC_SC_LEAD       = 7;    // swing/leader readout flag (intercentral
 // Python schema so both sides agree). cart k in [0, CART_BASE+k); item post p
 // at ITEM_BASE+p; rival r at RIVAL_BASE+r; cell c at CELL_BASE+c.
 const float PLC_TGT_CART_BASE  = 0;
-const float PLC_TGT_ITEM_BASE  = 100;
-const float PLC_TGT_RIVAL_BASE = 300;
-const float PLC_TGT_CELL_BASE  = 500;
+const float PLC_TGT_ITEM_BASE  = 65536;
+const float PLC_TGT_RIVAL_BASE = 131072;
+const float PLC_TGT_CELL_BASE  = 196608;
 
 // ---- scaffolding fields (name-spaced; never collide with plc_*) ------------
 // Observation / state (gathered):
@@ -179,6 +179,7 @@ const float PLC_TGT_CELL_BASE  = 500;
 .float plc_ob_f_ncart;
 .float plc_ob_f_ncartd;
 .float plc_ob_f_alive;
+.float plc_ob_f_control;
 // Perception event-ring columns (staged on the contiguous event-carrier pool,
 // schema C). The pool is a block of PLC_STR_EVT_ROWS edicts spawned back-to-back
 // in payload_strategy_attach() so mesh_gather can sweep it as one edict range.
