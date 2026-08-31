@@ -927,6 +927,24 @@ def emit(bsp, out, kteams, kcarts, pk3arg='', ns=None):
                                 '"model" "%s"' % visible[c % len(visible)],
                                 '"target" "%s"' % names[0], '"speed" "40"', '}']))
 
+    # `plc_goal "cnt"` is a TEAM INDEX MINUS ONE, not a team id. sv_payload.qc:821
+    #     this.team = Team_IndexToTeam(this.cnt + 1);
+    # and teams.qh:185 maps index 1..5 -> NUM_TEAM_1..5 = 5, 14, 13, 10, 4
+    # (red, blue, yellow, pink, GREEN). So `cnt = t` for t in 0..kteams-1 is the
+    # encoding, it reaches green at t=4, and it imposes no ceiling here.
+    #
+    # I got this wrong three times and each time by not reading this consumer.
+    # (1) deleted the old `[4, 13, 12, 9, 3]` table as "magic", emitting values
+    # that resolved to no team; (2) "restored" it as a FOUR-entry list plus an
+    # error above four teams, claiming stock Xonotic has no fifth team -- made
+    # up: NUM_TEAMS is 5 and a green cart lane is visible in the running game;
+    # (3) tried to restore the five-entry table, which would have SCRAMBLED the
+    # lanes -- [4,13,12,9,3] is dom's raw-team-id convention, and this gamemode
+    # does its own index->id mapping. The table was never right for this caller.
+    #
+    # The real limit is Team_IndexToTeam returning -1 above index 5, i.e. in
+    # teams.qh, extensible by adding NUM_TEAM_6.. and cases -- which is what the
+    # earlier 8-team prototypes did. It is not a barrier and not enforced here.
     for t in range(kteams):
         names, track = named[t % kcarts]
         extra.append('\n'.join(['{', '"classname" "plc_goal"',
