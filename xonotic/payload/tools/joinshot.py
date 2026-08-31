@@ -73,6 +73,29 @@ def cameras_for_join(idx, jn):
 
 
 
+
+
+def cameras_for_portal(idx, pt):
+    """Two frames of one CUT DOORWAY -- the actual deliverable of a geometry edit.
+
+    A join sightline shot from inside the connector shows the connector, not the edit.
+    These stand back inside the host map looking at the new opening in its own wall, and
+    then outside the wall looking back at it, which is where a hole reads as a hole and a
+    doorway reads as a doorway."""
+    node, mouth = pt['node'], pt['mouth']
+    ax, sgn = pt['axis'], pt['sgn']
+    d = [0.0, 0.0, 0.0]
+    d[ax] = sgn
+    tag = 'p%02d_%s_%s' % (idx, pt['name'][:12], pt['kind'])
+    # inside the map, backed off the wall, looking at the new doorway
+    ea = [node[0] - d[0] * 240.0, node[1] - d[1] * 240.0, node[2] + EYE]
+    aa = [mouth[0], mouth[1], mouth[2] + 72.0]
+    yield ('%s_in' % tag, ea, vectoangles_view(aa[0] - ea[0], aa[1] - ea[1], aa[2] - ea[2]))
+    # outside the wall, looking back at the opening in the level's own facade
+    eb = [mouth[0] + d[0] * 264.0, mouth[1] + d[1] * 264.0, mouth[2] + EYE]
+    ab = [node[0], node[1], node[2] + 72.0]
+    yield ('%s_out' % tag, eb, vectoangles_view(ab[0] - eb[0], ab[1] - eb[1], ab[2] - eb[2]))
+
 # ---------------------------------------------------------------------------
 # Region vantage cameras + the VOID AUDIT.
 #
@@ -345,6 +368,8 @@ def main():
                     help='also render outward from each fused region\'s own vantage waypoints')
     ap.add_argument('--only-regions', action='store_true', help='skip the join cameras')
     ap.add_argument('--overview', action='store_true', help='add top-down overview cameras')
+    ap.add_argument('--no-doors', action='store_true',
+                    help='skip the cut-doorway cameras (inside/outside each new opening)')
     ap.add_argument('--limit', type=int, default=0, help='cap the number of frames')
     ap.add_argument('--audit-only', action='store_true',
                     help='do not run the engine; just grade PNGs already in --out')
@@ -360,6 +385,10 @@ def main():
     if not args.only_regions:
         for i, jn in enumerate(joins['joins']):
             for name, eye, ang in cameras_for_join(i, jn):
+                cams.append((name, eye, ang)); shots.append(name)
+    if not args.no_doors:
+        for i, pt in enumerate(joins.get('portals', [])):
+            for name, eye, ang in cameras_for_portal(i, pt):
                 cams.append((name, eye, ang)); shots.append(name)
     if args.regions:
         for i, mp in enumerate(joins['maps']):

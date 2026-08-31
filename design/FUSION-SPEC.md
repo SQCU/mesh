@@ -195,6 +195,9 @@ present in the on-disk jsonl):
 
 ## 4. LEVEL 3 — what the implementation does (code and artifacts, not quotes)
 
+> **§4.1 (fixed lattice), §4.3 (refusal-based budget) and §6.3 are superseded by §7.**
+> The joins are no longer tubes between intact maps: the maps' own geometry is edited.
+
 This section is **not** normative and is **not** quoted from the user. It block
 quotes real code in `xonotic/payload/tools/` and real generated artifacts.
 
@@ -420,6 +423,10 @@ increase in the distance a strategy has to commit to.
 
 ### 6.3 Where the cart-navigability budget still fails, honestly
 
+> **SUPERSEDED by §7.5.** The refusal described below is deleted; the budget now holds
+> at full pool with zero refusals and zero dropped edges. Kept for the record.
+
+
 At 8 tiles the budget holds outright (`9/9 joins cart-navigable, max=0 non-cart per
 tile, HELD`). At 22 and 39 tiles it is violated on a handful of tiles
 (4 edges at 39 tiles). The cause is measured, not guessed: a corridor is refused when
@@ -562,3 +569,241 @@ the first version of the audit could not read a single engine frame.
 22- and 39-tile worlds are proven only through the real dedicated server (§6.1), not
 through a client render; a 166 MB BSP under DPSOFTRAST was not attempted on a shared
 machine.
+
+---
+
+## 7. LEVEL 3 (second pass) — the joins are now CUT INTO THE MAPS
+
+Not normative. This section supersedes §4.1's fixed grid, §4.3's refusal-based
+budget and §6.3's honest failure. It block quotes real code and real run output.
+
+The controlling re-statement of the requirement (owner, this session, relayed
+verbatim by the coordinating agent):
+
+> i think the constraint was simpler: pick a list of maps that seem well suited to
+> having geometry edited to make them diegetically connect to other neighboring maps
+> by litearlly changing their geometry to have doors, galleries, passageways, etc.,
+> which either continue or newly appear in existing maps in plausible spots. then
+> solve a 3d bin packing problem, evne poorly, where 'bridge maps' (more than 3
+> connection sites) are joined by procedural geometry to 'stub maps' (fewer than 3,
+> more than 1 connection sites).
+
+Everything below follows that sentence clause by clause.
+
+### 7.1 "maps that seem well suited to having geometry edited" — a measured criterion
+
+`mapfuse.map_sites()` looks for the places a door could honestly be cut. From each
+node of a map's largest **bot-reachable, stand-on-able** waypoint component that is
+extreme in one of the four cardinal directions, it marches a ray outward
+(`ray_runs`, the same exact-plane solid predicate the carver uses) and requires:
+
+* the first solid is **24–640 u** away — a wall at the walkable frontier, not a
+  tunnel through the middle of the level;
+* that solid is **8–384 u thick** — a wall panel, not bedrock or a terrain skirt;
+* nothing else within 224 u behind it — one facade, not stacked scenery;
+* an oriented door-sized volume of **standing room in front of it** (`free_slab`);
+* **open space on the far side** for the connector to meet.
+
+Two consequences are worth stating because they are the criterion doing its job:
+
+* A map whose shell is patch-mesh curvature rather than brushwork yields **no ray
+  hits at all** and is scored 0 — `dance`'s east frontier has no brush between
+  x=1872 and x=3072. That is not a bug to route around; a curved patch shell is
+  exactly a map whose geometry cannot honestly be edited into a doorway.
+* A site is classed **`continue`** when the standing room in front of the wall is
+  narrow (a passage or alcove running into it) or the nav node is a graph dead-end —
+  the opening then continues a feature the level already has, which is the most
+  diegetic edit available. Otherwise it is a **`newcut`** on a broad exterior-reading
+  wall, and gets the jamb/header architrave so it reads as deliberate.
+
+### 7.2 The taxonomy is counted, not assumed
+
+```python
+def classify(nsites):
+    if nsites > 3:  return 'bridge'
+    if nsites > 1:  return 'stub'
+    return 'unsuitable'
+```
+
+Over the whole 29-map navigable pool (real run, seed 1):
+
+```
+selection: REJECTED 1 map(s) with fewer than 2 connection sites: nexballarena(1)
+selection: 29 maps kept -- 25 BRIDGE maps (>3 connection sites), 4 STUB maps (2-3 sites); 1 rejected
+```
+
+Per-map site counts and classes are printed for every candidate and stored in
+`fused.metrics.json` under `selection`.
+
+### 7.3 "solve a 3d bin packing problem, evne poorly"
+
+Taken literally. `pack_offsets` is a shelf pack: a lattice column is only as wide as
+the widest hull in it, a row only as deep, and a **level only as tall** — the pack is
+three-dimensional, `levels=2` by default above 12 tiles. Cells are ranked by how many
+lattice neighbours they have, tiles by how many connection sites they have, and the
+two rankings are zipped: bridge maps land in the cells with the most adjacencies, stub
+maps in corners. Non-overlap is structural (each hull is clamped inside its own slot),
+and `split_tree()` reads the BSP router's binary partition straight off the pack —
+including on Z, which the old fixed 2-D grid could not express.
+
+Each tile is anchored on its **walkable** centre in x/y and on its walkable **median
+floor** in z, not on its bounding box: a stock map's playable floor can sit hundreds
+of units inside a hull padded out by sky and terrain, and packing the hull is what
+produced kilometre corridors.
+
+The one search that survives is the cheap one that pays: after the joins and their
+site pairs are chosen, each tile's real-valued offset is coordinate-descended inside
+its own slot against the sum of door-to-door gaps.
+
+```
+pack: 4x4x2 lattice, 29 cells for 29 tiles; cell adjacency [2, 3, 4, 5]
+placement: door-gap objective over 28 planned joins 190995 -> 117234 (38.6% shorter)
+```
+
+### 7.4 The edit itself — `Fuser.cut_portal`
+
+This is the part that did not exist before. For each end of each join:
+
+1. **`split_brushes`** subtracts an axis-aligned, door-sized aperture box from every
+   source brush occupying it, replacing each with up to six convex remainders (itself
+   intersected with each half-space outside the box). The wall stays exactly where it
+   was and exactly as thick as it was, minus a doorway. This is not the old carve,
+   which switched a whole brush's contents to empty and dissolved a wall panel.
+2. **`clip_faces`** cuts the aperture out of the rendered surfaces too: a wall face
+   square to the door axis is dropped and re-issued as the up-to-four rectangles that
+   survive the cut, **keeping its own texture**, so the wall around the new doorway is
+   still the level's own wall.
+3. The **reveal** (the four surfaces of the cut through the wall's thickness) is
+   surfaced in the wall's own texture, and a threshold slab is laid so the opening
+   never gives onto a drop.
+4. A **jamb/header architrave** is set into the outer face — this is what makes the
+   result read as architecture rather than damage.
+5. Waypoints are chained from the map's own nav node, through the opening, to the
+   outer mouth, so a bot walks the door.
+
+At full pool:
+
+```
+GEOMETRY EDIT: cut 56 doorways (46 continuing an existing passage, 10 new openings on
+an exterior wall); split 444 source brushes into 825 convex remainders; re-cut 417
+wall surfaces into 479 clipped surfaces; wall thickness cut through: min=8 median=64 max=256
+```
+
+### 7.5 The refusal is deleted
+
+`MAXCORLEN` and `if math.dist(sa, sb) > MAXCORLEN: continue` are **gone from the
+file**. There is no length test anywhere in the join loop, no dropped edge and no
+budget violation: the openings are cut where the pack wants them and the connector is
+generated to fit whatever gap is left. Small solids in the connector's way are carved;
+anything too big to carve is split around the tube by the same edit the doorway uses.
+
+|  | before (§6.1, 39 tiles) | now (29 tiles, all suitable stock maps + 1 hub) |
+|---|---|---|
+| cart-navigable joins | 26/40 | **28/36** |
+| non-cart joins per tile | max **3** (budget 1) — VIOLATED on 4 edges | max **1** — **HELD** |
+| edges dropped | 8 | **0** |
+| joins refused for length | yes (`cap 6000`) | **0 — no cap exists** |
+| corridor length | median 4791, max 5938 (clipped by the cap) | min 32, p25 1223, median **3295**, p75 7196, max 10491 |
+
+The corridor distribution is the honest trade: with the cap deleted nothing is
+refused, so the joins that the cap used to hide now appear in the tail. The median is
+still **31% shorter** than the capped run's, because the doors are cut at the walkable
+frontier facing the neighbour instead of tunnelling from a socket deep inside the map.
+
+### 7.6 Two loader defects found and fixed on the way
+
+Both were found by watching RSS on a shared machine, not by reading code.
+
+* `Src.__init__` called `mkentfile.Bsp(data)` and never used the result. That helper
+  grids every brush AABB with an unguarded `range()` over cell indices, so one brush
+  bounded only by oblique planes — stock `catharsis` has twelve — expands to a
+  ~1e15-iteration loop. The loader ate **75 GB of RSS** and never returned. The call
+  is deleted; loading `catharsis` now takes 0.8 s and 0.7 GB.
+* The same defect then hit the fused artifact from the other side, in the entity pass,
+  taking it past **33 GB**. `Fuser.axialize()` re-emits the eighteen offending stock
+  brushes (catharsis 12, xoylent 3, finalrage 3) inside six axial clamp planes at
+  their tile's hull plus 4096 u of slop — far outside any playable space, so the
+  brush's shape is untouched and its AABB is finite for every consumer. The fused
+  world's peak is back inside the machine's budget.
+
+### 7.7 A second engine ceiling, found by booting the thing
+
+The entity budget of §6.7 lifted the runaway limit at *worldspawn*. Editing the maps
+moved the ceiling: a fused world now carries connector and doorway waypoints on top of
+29 stock waypoint sets, and stock `waypoint_loadall` spawns each saved waypoint through
+`waypoint_get`, which linear-scans the waypoints already spawned and `boxesoverlap`-tests
+each one — O(n²) inside one server frame. Measured, on a real boot of the 29-tile world:
+
+```
+d : boxesoverlap : statement 7
+m3 : waypoint_get : statement 21
+m3 : waypoint_spawn : statement 9
+m3 : waypoint_loadall : statement 218
+   : bot_serverframe : statement 220
+Quake Error: Host_Error: server runaway loop counter hit limit of 10000000 jumps
+```
+
+So the saved waypoint count gets the same treatment the entity count got — a hard
+budget (`--wpcap`, default 600) spent where it buys the most navigation. Connector and
+doorway waypoints are mandatory (they are the only nodes that carry a bot between
+tiles), portal pads are anchored so they can never be decimated, each tile's stationary
+waypoints are farthest-point decimated to its share of what is left, and **the link
+graph is contracted onto the survivors** rather than shredded — every dropped node's
+links are re-attached to its nearest surviving neighbour, so reachability is preserved.
+The flood-fill and the walking-distance solve are then run on the contracted graph, and
+both still pass at 100 % coverage.
+
+The number is empirical. 900 cleared `waypoint_loadall` and then blew the same ceiling
+one layer up, in `navigation_markroutes -> navigation_markroutes_nearestwaypoints`,
+which walks the whole `g_waypoints` list inside its own per-waypoint loop — O(n²) again,
+per bot, per goal rating, and mkentfile's 175 trigger waypoints count towards n too.
+600 clears both.
+
+### 7.8 Evidence
+
+**Full pool, 29 tiles** (`mapfuse.py 1 --bridges=1`, seed 1, one real run):
+
+```
+selection: REJECTED 1 map(s) with fewer than 2 connection sites: nexballarena(1)
+selection: 29 maps kept -- 25 BRIDGE maps (>3 connection sites), 4 STUB maps (2-3 sites); 1 rejected
+pack: 4x4x2 lattice, 29 cells for 29 tiles; cell adjacency [2, 3, 4, 5]
+topology: 36 joins over 29 tiles (8 vertical level-to-level), 1 component(s)
+placement: door-gap objective over 28 planned joins 190995 -> 117234 (38.6% shorter)
+GEOMETRY EDIT: cut 56 doorways (46 continuing an existing passage, 10 new openings on an
+  exterior wall); split 444 source brushes into 825 convex remainders; re-cut 417 wall
+  surfaces into 479 clipped surfaces; wall thickness cut through: min=8 median=64 max=256
+well-formedness: re-emitted 18 source brush(es) with no derivable axial AABB
+corridor length: n=28 min=32 p25=1223 median=3295 p75=7196 max=10491 (NO length cap exists)
+cart-navigability: 28/36 joins cart-navigable (door+corridor); non-cart joins per tile
+  max=1 (budget 1) -> HELD; joins refused: 0; joins dropped: 0
+waypoint budget 600: 3325 source + 433 connector waypoints -> 613 written
+parse-back: OK
+connector clearance check (exact planes, un-carved source solids): PASS (0 obstructed samples)
+bot flood-fill: regions reached 29 / 29 -> PASS
+navmesh: region<->region WALKING distance median=38621u diameter=86823u unreachable_pairs=0
+connectivity: 1 component(s) [29]; hop-diameter=9
+wrote fused.bsp (166 MB) / fused.pk3 (48 MB)
+```
+
+**Real boot** — stock `darkplaces-dedicated`, port 26071, `+g_payload 1 +bot_number 8`:
+
+```
+payload: cart 0: 485 path nodes, length 10997.6
+payload: cart 1: 383 path nodes, length 8786.1
+payload: cart 2: 425 path nodes, length 9666.1
+[BOT]Resurrection is now playing on the RED team      ... 8 bots over 5 teams
+[BOT]Dominator picked up Strength
+```
+
+Zero `runaway loop counter` errors, server alive and playing through the soak. Four
+`relocate_spawnpoint: could not get out of solid` object errors remain — stock spawn
+points inside newly adjacent geometry; non-fatal, and reported.
+
+**Renders of the edits** (`joinshot.py`, 8-tile fusion, DPSOFTRAST, 480x300): 42/42
+frames captured, **void audit PASS**, including a new camera pair per cut doorway —
+one standing back inside the host map looking at the new opening in its own wall, one
+outside the wall looking back at it. `p04_erbium_continue_in` shows a framed doorway cut
+into erbium's stone wall with the connector visible beyond; `p11_geoplanetary_newcut_in`
+shows a new opening with its jamb/header architrave in geoplanetary's exterior facade;
+`p01_silentsiege_continue_out` shows the same doorway from the connector side.
+Frames in `/private/tmp/fz8/shots/`.
