@@ -1,0 +1,9 @@
+title aptest
+description Procedurally generated helical tunnel.
+author spiralgen
+cdtrack 2
+has weapons
+gametype dm
+gametype tdm
+gametype lms
+gametype ka

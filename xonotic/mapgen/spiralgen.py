@@ -114,7 +114,7 @@ def coplanar(a, b, c, d, eps=0.01):
     return L > 1e-9 and abs(vdot(n, vsub(d, a))) / L < eps
 
 
-def strip(ring_lo, ring_hi, offset_fn, tex_cap, tex_side, detail=False):
+def strip(ring_lo, ring_hi, offset_fn, tex_cap, tex_side, detail=False, skip=()):
     """Quad strip between two vertex rings.
 
     A planar quad becomes one 6-sided brush; a non-planar one (which is what a
@@ -124,6 +124,8 @@ def strip(ring_lo, ring_hi, offset_fn, tex_cap, tex_side, detail=False):
     """
     out = []
     for i in range(len(ring_lo) - 1):
+        if i in skip:            # an APERTURE: this segment of shell is simply absent
+            continue
         p00, p01 = ring_lo[i], ring_lo[i + 1]
         p10, p11 = ring_hi[i], ring_hi[i + 1]
         v = offset_fn(i)
@@ -154,6 +156,25 @@ class Spiral:
         u = (math.cos(th), math.sin(th), 0.0)               # outward radial
         c = (r * u[0], r * u[1], z)
         return c, u
+
+    def aperture_spans(self, n):
+        """Segment ranges where the OUTER shell is absent -- the connection sites.
+
+        An aperture is a parameter of the sweep, not a volume carved out of a
+        compiled artifact afterwards (design/MAPGEN-ROADMAP.md stage 2). Because
+        it is chosen here, its facing, its free volume and the vantage points
+        looking through it are all known by construction -- there is nothing to
+        recover later by ray marching, and nothing that can disagree with the
+        geometry, because it IS the geometry.
+        """
+        k = int(self.a.apertures)
+        if k <= 0:
+            return []
+        w = max(1, int(self.a.aperture_segments))
+        lo, hi = 2, n - 2 - w                      # never on an end cap
+        if hi <= lo:
+            return []
+        return [(lo + int((hi - lo) * (j + 0.5) / k), w) for j in range(k)]
 
     def build(self):
         a = self.a
@@ -197,7 +218,40 @@ class Spiral:
         brushes += strip(wb, wt, lambda i: vmul(radials[i], -T), TEXW, CAULK)
         wb = [vadd(p, (0, 0, -OV)) for p in ob]
         wt = [vadd(p, (0, 0, OV)) for p in ot]
-        brushes += strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK)
+        spans = self.aperture_spans(n)
+        holes = set(i for s0, w in spans for i in range(s0, s0 + w))
+        brushes += strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK, skip=holes)
+
+        # Each aperture gets a PLUG built from the identical strip, kept in a
+        # separate list. Standalone the plug ships and the shell is sealed; a join
+        # drops the plug and mates a connector to the mouth. Same geometry either
+        # way, so a joined map cannot differ from the one that was validated.
+        self.plugs = [strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK,
+                            skip=set(range(n - 1)) - set(range(s0, s0 + w)))
+                      for s0, w in spans]
+        self.apertures = []
+        for j, (s0, w) in enumerate(spans):
+            mid = s0 + w // 2
+            c, u = centers[mid], radials[mid]
+            mouth = vadd(c, vmul(u, hw + T))            # centre of the opening
+            self.apertures.append({
+                'id': j,
+                'origin': [round(v, 2) for v in mouth],
+                'normal': [round(v, 4) for v in u],     # outward, into free space
+                'width': round(vlen(vsub(centers[s0 + w], centers[s0])), 2),
+                'height': round(a.height, 2),
+                'segments': [s0, s0 + w],
+                # vantages: eye inside looking out, and outside looking in. These
+                # are what joinshot turns into info_autoscreenshot entities.
+                'vantages': [
+                    {'origin': [round(v, 2) for v in vadd(vadd(c, vmul(u, -hw * 0.5)), (0, 0, 40.0))],
+                     'angles': [0.0, round(math.degrees(math.atan2(u[1], u[0])) % 360.0, 2), 0.0],
+                     'side': 'in'},
+                    {'origin': [round(v, 2) for v in vadd(vadd(mouth, vmul(u, 160.0)), (0, 0, 40.0))],
+                     'angles': [0.0, round((math.degrees(math.atan2(-u[1], -u[0]))) % 360.0, 2), 0.0],
+                     'side': 'out'},
+                ],
+            })
 
         # end caps seal the tube; without these the map leaks at both mouths
         for idx, sgn in ((0, -1), (n - 1, +1)):
@@ -317,7 +371,26 @@ def write_map(path, brushes, ents, args):
         f.write('\n'.join(L))
 
 
-def main():
+def randomize(a):
+    """Draw shape parameters from the seed. ONE definition: main() and e2e.py both
+    call this, so a sweep actually varies the geometry. It previously lived inside
+    main(), which meant any other caller silently got eight identical maps."""
+    if not a.randomize:
+        return a
+    r = random.Random(a.seed)
+    a.turns = round(r.uniform(3, 12), 1)
+    a.radius = r.choice([640, 768, 1024, 1280, 1536])
+    a.rise = r.choice([512, 640, 768, 896, 1024])
+    a.width = r.choice([256, 320, 384, 448])
+    a.height = r.choice([224, 256, 320])
+    a.radius_growth = r.choice([0, 0, 0, 64, -48])
+    a.handed = r.choice([1, -1])
+    a.wobble = r.choice([0.0, 0.0, 0.05, 0.1])
+    a.segments = r.choice([24, 32, 48])
+    return a
+
+
+def build_parser():
     p = argparse.ArgumentParser(description='Procedural helical-tunnel map generator for Xonotic.')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--name', default='spiral')
@@ -333,6 +406,12 @@ def main():
     p.add_argument('--handed', type=int, default=1, choices=[1, -1], help='1=ccw, -1=cw')
     p.add_argument('--wobble', type=float, default=0.0, help='radial wobble amplitude (0..0.3)')
     p.add_argument('--wobble-freq', type=float, default=3.0)
+    p.add_argument('--apertures', type=int, default=0,
+                   help='connection sites: gaps in the outer shell that let this map '
+                        'socket into others. Each ships PLUGGED so the map still seals '
+                        'standalone; a join drops the plug (MAPGEN-ROADMAP stage 2)')
+    p.add_argument('--aperture-segments', type=int, default=2,
+                   help='width of each aperture, in sweep segments')
     p.add_argument('--spawns', type=int, default=8)
     p.add_argument('--lights', type=int, default=24)
     p.add_argument('--items', type=int, default=10)
@@ -350,26 +429,34 @@ def main():
     p.add_argument('--tex-ceil', default='exx/base/base_metal03')
     p.add_argument('--randomize', action='store_true',
                    help='draw the shape parameters from the seed instead of the flags')
+    return p
+
+
+def main():
+    p = build_parser()
     a = p.parse_args()
 
-    if a.randomize:
-        r = random.Random(a.seed)
-        a.turns = round(r.uniform(3, 12), 1)
-        a.radius = r.choice([640, 768, 1024, 1280, 1536])
-        a.rise = r.choice([512, 640, 768, 896, 1024])
-        a.width = r.choice([256, 320, 384, 448])
-        a.height = r.choice([224, 256, 320])
-        a.radius_growth = r.choice([0, 0, 0, 64, -48])
-        a.handed = r.choice([1, -1])
-        a.wobble = r.choice([0.0, 0.0, 0.05, 0.1])
-        a.segments = r.choice([24, 32, 48])
+    a = randomize(a)
 
     s = Spiral(a)
     brushes, centers, radials = s.build()
     ents = s.entities(centers, radials)
     os.makedirs(a.out, exist_ok=True)
+    # plugs ship with the standalone map, so what compiles here is what a join
+    # mates to, minus the plug it removes.
+    plugged = brushes + [b for plug in getattr(s, 'plugs', []) for b in plug]
     mp = os.path.join(a.out, a.name + '.map')
-    write_map(mp, brushes, ents, a)
+    write_map(mp, plugged, ents, a)
+    aps = getattr(s, 'apertures', [])
+    if aps:
+        # The contract tools/joinshot.py, joinview.py, fusecheck.py and
+        # fusegraph.py read. Written by the generator because every field is a
+        # property of the sweep -- not recovered from a compiled artifact.
+        joins = {'tiles': [{'name': a.name, 'offset': [0, 0, 0], 'apertures': aps}],
+                 'joins': [], 'generator': 'spiralgen', 'seed': a.seed}
+        with open(os.path.join(a.out, a.name + '.joins.json'), 'w') as fh:
+            json.dump(joins, fh, indent=1)
+        print('apertures: %d (plugged), joins.json written' % len(aps))
     write_svg(os.path.join(a.out, a.name + '.svg'), centers, a)
     nwp = write_waypoints(os.path.join(a.out, a.name + '.waypoints'), centers, a.waypoint_spacing)
 
