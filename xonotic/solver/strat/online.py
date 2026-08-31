@@ -31,6 +31,7 @@ class OnlineLearner:
         self.dynamics = dynamics or LocalDynamics()
         self.bundle = nn.Module()
         self.bundle.qkv = estimator.qkv
+        self.bundle.encoder = estimator.encoder
         self.bundle.head = estimator.head
         self.bundle.value = estimator.value
         self.bundle.dynamics = self.dynamics

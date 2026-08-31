@@ -43,33 +43,10 @@ from .baseline_teamonly import TeamOnlyBaseline, own_team_view
 RUNS = os.path.join(os.path.dirname(__file__), "runs")
 
 
-# --------------------------------------------------------------------------- #
-# reward / objective helpers (numpy replicas of train.hierarchy_scores /
-# role_rewards so this file does not need to import the mlx trainer for scoring)
-# --------------------------------------------------------------------------- #
-def hierarchy_scores(sim, state):
-    nb = team_nimbers(to_carts(state), range(sim.k))
-    v = np.array([nb.get(t, 0) for t in range(sim.k)], dtype=np.float64)
-    sc = float(max(1.0, v.max(initial=0.0), sim.L))
-    out = np.zeros(sim.k)
-    for t in range(sim.k):
-        r = np.delete(v, t)
-        out[t] = np.tanh((v[t] - r.mean() if len(r) else v[t]) / sc)
-    return out
-
-
-def role_rewards(sim, before, after, mw=0.1):
-    pb = sim.projected_winner(before)
-    pa = sim.projected_winner(after)
-    hb = hierarchy_scores(sim, before)
-    ha = hierarchy_scores(sim, after)
-    tr = np.zeros(sim.k)
-    for t in range(sim.k):
-        if t == pb:
-            tr[t] = (1.0 if pa == t else -1.0) + mw * (ha[t] - hb[t])
-        else:
-            tr[t] = ha[t] - hb[t] + (1.0 if pa == t else 0.0)
-    return tr
+# reward / objective helpers: the ONE canonical team-level definitions live in
+# train.py (was a numpy replica here). `role_rewards` here returns the per-TEAM vector
+# (callers read team 0 as [0]); train.role_rewards expands the same thing per player.
+from .train import hierarchy_scores, team_role_rewards as role_rewards
 
 
 def leader_deepest_cart(sim, state, leader):
@@ -95,6 +72,7 @@ def load_estimator(sim, checkpoint, seed=0):
     est = StrategyEstimator.for_cartsim(sim, seed=seed)
     bundle = nn.Module()
     bundle.qkv = est.qkv
+    bundle.encoder = est.encoder
     bundle.head = est.head
     bundle.value = est.value
     bundle.dynamics = LocalDynamics()

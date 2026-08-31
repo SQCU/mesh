@@ -36,53 +36,19 @@ def policy_forward(
     action: Optional[mx.array] = None,
     key: Optional[mx.array] = None,
 ):
-    x = mx.stop_gradient(mx.array(state.x))
-    beta = mx.stop_gradient(mx.array(state.beta))
-    z = mx.stop_gradient(mx.array(state.z))
-    relation = mx.stop_gradient(mx.array(state.relation))
-    hierarchy = mx.stop_gradient(mx.array(state.hierarchy))
-    winner_mask = mx.stop_gradient(mx.array(state.winner_mask))
-    w = mx.stop_gradient(mx.array(w_in))
-    q = est.qkv.query(x, beta)
-    keys = est.qkv.key(z)
-    q_team = team_pool(q, state.team_of, len(state.teams))
-    team_index = mx.array(np.asarray(state.team_of, dtype=np.int32))
-    q_context = q + q_team[team_index]
-    appetite = mx.logaddexp(q_context @ keys.T, mx.zeros((q.shape[0], keys.shape[0])))
-    eligible = None
-    if state.eligible is not None:
-        eligible = mx.stop_gradient(mx.array(np.asarray(state.eligible, dtype=bool)))
-        appetite = mx.where(eligible, appetite, mx.zeros_like(appetite))
-    team_diag = []
-    for team in range(len(state.teams)):
-        team_rows = team_index == team
-        denominator = mx.maximum(mx.sum(team_rows), 1)
-        quality = mx.sum(appetite * team_rows[:, None], axis=0) / denominator
-        if eligible is not None:
-            available = mx.any(eligible & team_rows[:, None], axis=0)
-            quality = mx.where(available, quality, mx.zeros_like(quality))
-        team_diag.append(dpp_marginals(quality, keys))
-    diag_k = mx.stop_gradient(mx.stack(team_diag)[team_index])
-    dw_dt = est.head(diag_k, appetite, relation)
-    w_next = integrate_weights(w, dw_dt, est.delta)
-    if eligible is not None:
-        w_next = mx.where(eligible, w_next, mx.full(w_next.shape, -1e9))
-    if action is None:
-        action = mx.random.categorical(w_next / est.temperature, axis=-1, key=key)
-    logpi = strategy_log_prob(w_next, action, est.temperature)
-    stats = mx.concatenate(
-        [
-            mx.mean(appetite, axis=1, keepdims=True),
-            mx.max(appetite, axis=1, keepdims=True),
-            mx.mean(dw_dt, axis=1, keepdims=True),
-            mx.max(dw_dt, axis=1, keepdims=True),
-        ],
-        axis=1,
+    """Thin wrapper over the single canonical estimator.strategy_forward (no re-inlined
+    copy of the forward pass — it lived here and in estimator.forward; now one definition)."""
+    from .estimator import strategy_forward
+
+    out = strategy_forward(est, state, w_in, action=action, key=key)
+    return (
+        out["w_next"],
+        out["action"],
+        out["logpi"],
+        out["value"],
+        out["winner_value"],
+        out["loser_value"],
     )
-    rows = mx.concatenate([q, q_team[team_index], stats, hierarchy], axis=1)
-    winner_value, loser_value = est.value(rows)
-    value = select_role_value(winner_value, loser_value, winner_mask)
-    return w_next, action, logpi, value, winner_value, loser_value
 
 
 def hierarchy_scores(sim: CartSim, state) -> np.ndarray:
@@ -98,12 +64,15 @@ def hierarchy_scores(sim: CartSim, state) -> np.ndarray:
     return scores
 
 
-def role_rewards(
+def team_role_rewards(
     sim: CartSim,
     before,
     after,
     margin_weight: float = 0.1,
 ) -> np.ndarray:
+    """Per-TEAM asymmetric role reward (rl-training-spec §2), length k. The single
+    canonical definition — train.role_rewards expands it per-player; dominance_driver /
+    anticipatory_measure read team 0 directly (was inlined as a numpy replica there)."""
     pw_before = sim.projected_winner(before)
     pw_after = sim.projected_winner(after)
     h_before = hierarchy_scores(sim, before)
@@ -118,7 +87,19 @@ def role_rewards(
         else:
             acquired = 1.0 if pw_after == team else 0.0
             team_reward[team] = h_after[team] - h_before[team] + acquired
-    return team_reward[np.asarray(sim.team_of, dtype=np.int64)]
+    return team_reward
+
+
+def role_rewards(
+    sim: CartSim,
+    before,
+    after,
+    margin_weight: float = 0.1,
+) -> np.ndarray:
+    """Per-PLAYER role reward: the canonical team reward projected through team_of."""
+    return team_role_rewards(sim, before, after, margin_weight)[
+        np.asarray(sim.team_of, dtype=np.int64)
+    ]
 
 
 def collect_rollout(
@@ -252,6 +233,7 @@ def train(
     dynamics = LocalDynamics()
     bundle = nn.Module()
     bundle.qkv = est.qkv
+    bundle.encoder = est.encoder
     bundle.head = est.head
     bundle.value = est.value
     bundle.dynamics = dynamics

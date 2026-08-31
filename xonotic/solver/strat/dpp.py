@@ -31,17 +31,14 @@ doc calls `b` when concatenated for the head) and `phi_i` is its (normalized)
 diversity feature / key. `S` is a similarity Gram in [-1, 1] on unit rows; `L` is
 PSD by construction.
 
-Where this sits in the gradient graph. `diag(K)` is a FORWARD signal / feature
-into the learned mixing head; per `rl-training-spec.md` the head weights `W_all`
-are the only thing the policy gradient updates, and the features it reads --
-`(s, b, PW, SUCC)` and, here, `diag(K)` -- are STOPGRAD. So this marginal does
-NOT need to be autodiff-differentiable w.r.t. `L`: it enters the head detached.
-What trains `L` is a separate object, the DPP likelihood's gradient on the
-determinant (doc section 2: "The determinant remains the object whose gradient
-trains `L`; it is not the per-step message to the head."), not this per-step
-`diag(K)`. The module is written in mlx (Apple, matching the mini) so the signal
-stays on-device alongside the rest of the strategy operator; the eigh / inverse
-forward is exact regardless of whether the installed mlx implements their vjp.
+Where this sits in the gradient graph. `diag(K)` is a per-instrument feature into
+the learned mixing head. The estimator calls `dpp_marginals(..., method="inverse_diff")`
+(-> `marginal_inclusion_diff`), which returns K = I-(I+L)^-1 with an ANALYTIC custom
+vjp (this mlx build ships no Inverse/Eigh vjp), and does NOT stop_gradient the result
+— so the REINFORCE reward gradient flows back through `diag(K)` into the quality /
+appetite that builds `L`, shaping the coupling. The `eigh` and plain `inverse` paths
+are retained for diagnostics/spectrum (not differentiable here). The module is mlx so
+the signal stays on-device.
 
 Numerical stability
 -------------------
@@ -80,6 +77,7 @@ __all__ = [
     "marginal_kernel",
     "marginal_inclusion",
     "dpp_marginals",
+    "marginal_inclusion_diff",
 ]
 
 # Default jitter added to L's diagonal before an eigendecomposition, in units
@@ -240,6 +238,54 @@ def marginal_inclusion(
     raise ValueError(f"method must be 'eigh' or 'inverse'; got {method!r}")
 
 
+def _prep_sym(L, jitter: float):
+    """Symmetrize L and add detached scale-aware jitter (differentiable matmuls only)."""
+    Lm = _as_f32(L)
+    Lm = 0.5 * (Lm + Lm.T)
+    n = Lm.shape[0]
+    eye = mx.eye(n, dtype=mx.float32)
+    if jitter and jitter > 0.0:
+        scale = mx.maximum(mx.mean(mx.diagonal(Lm)), mx.array(1.0, dtype=mx.float32))
+        Lm = Lm + (jitter * mx.stop_gradient(scale)) * eye
+    return Lm, eye
+
+
+@mx.custom_function
+def _inv_diag_marginal(Lm: mx.array) -> mx.array:
+    """diag(K) = 1 - diag((I+Lm)^-1) with an analytic vjp (mlx has no Inverse vjp).
+
+    Lm must already be symmetric (+jitter). Forward uses the exact inverse; the custom
+    vjp supplies the gradient so the reward can shape the DPP coupling through `Lm`.
+    """
+    n = Lm.shape[0]
+    eye = mx.eye(n, dtype=Lm.dtype)
+    B = mx.linalg.inv(eye + Lm, stream=mx.cpu)
+    return mx.clip(1.0 - mx.diagonal(B), 0.0, 1.0)
+
+
+@_inv_diag_marginal.vjp
+def _inv_diag_marginal_vjp(primals, cotangent, output):
+    # diag_K_i = 1 - B_ii, B = (I+Lm)^-1. For Y=inv(X): Xbar = -Y^T Ybar Y^T.
+    # Bbar = -diag(c) => Lmbar = B diag(c) B (B symmetric here).
+    Lm = primals[0] if isinstance(primals, (tuple, list)) else primals
+    n = Lm.shape[0]
+    eye = mx.eye(n, dtype=Lm.dtype)
+    B = mx.linalg.inv(eye + Lm, stream=mx.cpu)
+    c = cotangent
+    return B @ (c[:, None] * B)
+
+
+def marginal_inclusion_diff(L, jitter: float = _DEFAULT_JITTER) -> mx.array:
+    """Differentiable per-instrument `diag(K)` (K = I-(I+L)^-1) via the custom-vjp core.
+
+    Same value as `marginal_inclusion(L, method="inverse")` but autodiff-differentiable
+    w.r.t. `L` (hence w.r.t. the appetite/quality that builds `L`) in an mlx that ships no
+    Inverse/Eigh vjp. This is the path the estimator uses so the DPP is not stop_gradient'd.
+    """
+    Lm, _ = _prep_sym(L, jitter)
+    return _inv_diag_marginal(Lm)
+
+
 def marginal_kernel(L, jitter: float = _DEFAULT_JITTER) -> mx.array:
     """Full marginal kernel  `K = L (I + L)^-1`  (symmetric).
 
@@ -279,6 +325,10 @@ def dpp_marginals(
     eigenvalues : (N,) mlx.array, only if return_spectrum=True (method="eigh").
     """
     L = build_L(quality, features, normalize=normalize)
+    if method == "inverse_diff":
+        if return_spectrum:
+            raise ValueError("return_spectrum requires method='eigh'")
+        return marginal_inclusion_diff(L, jitter=jitter)
     return marginal_inclusion(
         L, method=method, jitter=jitter, return_spectrum=return_spectrum
     )

@@ -195,28 +195,28 @@
     "trained_estimator_team0_argmax": {
       "A": [
         [
-          "suppress_cart",
-          2
+          "push_cart",
+          0
         ],
         [
-          "suppress_cart",
-          2
+          "push_cart",
+          0
         ]
       ],
       "B": [
         [
-          "suppress_cart",
-          1
+          "push_cart",
+          0
         ],
         [
-          "suppress_cart",
-          1
+          "push_cart",
+          0
         ]
       ]
     },
-    "estimator_checkpoint": "loaded 27/27 tensors from policy_online_v3.npz",
+    "estimator_checkpoint": "loaded 39/39 tensors from policy_online_v3.npz",
     "estimator_loaded": true,
-    "estimator_differs_A_vs_B": true,
+    "estimator_differs_A_vs_B": false,
     "greedy_differs_A_vs_B": true
   },
   "correct_target_cart": {
@@ -229,13 +229,13 @@
         "pw_before": 2,
         "pw_after": 2,
         "denied_projected_winner": 0,
-        "team0_shaped_reward": 0.062418746747512514
+        "team0_shaped_reward": 0.06241874769330025
       },
       "suppress_cart2": {
         "pw_before": 2,
         "pw_after": null,
         "denied_projected_winner": 1,
-        "team0_shaped_reward": 0.062418746747512514
+        "team0_shaped_reward": 0.06241874769330025
       }
     },
     "B": {
@@ -243,13 +243,13 @@
         "pw_before": 1,
         "pw_after": null,
         "denied_projected_winner": 1,
-        "team0_shaped_reward": 0.062418746747512514
+        "team0_shaped_reward": 0.06241874769330025
       },
       "suppress_cart2": {
         "pw_before": 1,
         "pw_after": 1,
         "denied_projected_winner": 0,
-        "team0_shaped_reward": 0.062418746747512514
+        "team0_shaped_reward": 0.06241874769330025
       }
     }
   },

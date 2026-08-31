@@ -1,0 +1,117 @@
+{
+  "config": {
+    "n_games": 40,
+    "n_steps": 24,
+    "lead": 1.0,
+    "checkpoint": "loaded 39/39 tensors from policy_online_v3.npz",
+    "note": "same weights; anticipatory adds lead*dw/dt (oracle RD z=\u222bp+p) to the sampling score. Positive delta_cumulative_reward => anticipatory dominates; negative delta_lag => less score-vs-payoff phase lag."
+  },
+  "per_shape": [
+    {
+      "shape": [
+        2,
+        3,
+        4
+      ],
+      "standard": {
+        "cumulative_reward": 16.040165690518915,
+        "pw_control_fraction": 0.6885416666666667,
+        "score_payoff_lag": 4.675
+      },
+      "anticipatory": {
+        "cumulative_reward": 20.01476979851723,
+        "pw_control_fraction": 0.8447916666666668,
+        "score_payoff_lag": 1.575
+      },
+      "delta_cumulative_reward": 3.9746041079983137,
+      "delta_pw_control": 0.1562500000000001,
+      "delta_lag": -3.0999999999999996
+    },
+    {
+      "shape": [
+        3,
+        4,
+        6
+      ],
+      "standard": {
+        "cumulative_reward": 8.601970186643303,
+        "pw_control_fraction": 0.4552083333333333,
+        "score_payoff_lag": 2.675
+      },
+      "anticipatory": {
+        "cumulative_reward": 12.6517333060503,
+        "pw_control_fraction": 0.6135416666666667,
+        "score_payoff_lag": 0.15
+      },
+      "delta_cumulative_reward": 4.049763119406997,
+      "delta_pw_control": 0.15833333333333333,
+      "delta_lag": -2.525
+    },
+    {
+      "shape": [
+        4,
+        4,
+        8
+      ],
+      "standard": {
+        "cumulative_reward": 0.2477165948599577,
+        "pw_control_fraction": 0.0010416666666666667,
+        "score_payoff_lag": 5.0
+      },
+      "anticipatory": {
+        "cumulative_reward": 0.24771659411489963,
+        "pw_control_fraction": 0.0010416666666666667,
+        "score_payoff_lag": 0.075
+      },
+      "delta_cumulative_reward": -7.450580707946131e-10,
+      "delta_pw_control": 0.0,
+      "delta_lag": -4.925
+    },
+    {
+      "shape": [
+        3,
+        5,
+        7
+      ],
+      "standard": {
+        "cumulative_reward": 7.510731762833894,
+        "pw_control_fraction": 0.38541666666666663,
+        "score_payoff_lag": 1.175
+      },
+      "anticipatory": {
+        "cumulative_reward": 7.529868872649968,
+        "pw_control_fraction": 0.421875,
+        "score_payoff_lag": 0.525
+      },
+      "delta_cumulative_reward": 0.019137109816074194,
+      "delta_pw_control": 0.03645833333333337,
+      "delta_lag": -0.65
+    },
+    {
+      "shape": [
+        4,
+        6,
+        9
+      ],
+      "standard": {
+        "cumulative_reward": 5.613049315288663,
+        "pw_control_fraction": 0.2875,
+        "score_payoff_lag": 3.475
+      },
+      "anticipatory": {
+        "cumulative_reward": 5.98945113234222,
+        "pw_control_fraction": 0.30520833333333336,
+        "score_payoff_lag": 2.725
+      },
+      "delta_cumulative_reward": 0.3764018170535568,
+      "delta_pw_control": 0.01770833333333338,
+      "delta_lag": -0.75
+    }
+  ],
+  "summary": {
+    "shapes_anticipatory_reward_ge_standard": 5,
+    "shapes_total": 5,
+    "mean_delta_cumulative_reward": 1.683981230705977,
+    "mean_delta_lag": -2.39
+  }
+}
