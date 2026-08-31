@@ -165,6 +165,53 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 
 ---
 
+## Work order — the discrete list (opened 2026-08-31)
+
+Ordering is forced by R19/R20: the input is rank-4 with per-player state zeroed and
+the belief map-reduce is a constant-Φ substitute, so **widening the operator before
+feeding it buys nothing.** Feed it, then widen it, then show it.
+
+**Track 1 — model core** (`solver/strat`: estimator, qkv, head, value, relattn,
+featurize, live_belief, dpp, online, train, strat_responder)
+1. E9 — wire full per-player resource state (health/armor/ammo/weapon-bitmask/pos/
+   vel/dist-to-cart) into `x` on the live path; report real input rank before/after.
+2. E11/E3 — restore canonical `featurize.py` (705 lines at HEAD), delete the inlined
+   substitute in `live_belief.py:162-273`, route the live path through the canonical
+   functions, enforce the 5–15% receptive-field bound.
+3. C1/C2 — delete the softmax-attention operator; implement the all-to-all **Gram**
+   + SwiGLU at **IR ≥128d**, differentiable end-to-end, count-invariant, O(n²), with
+   the Gram output landing IN the IR the probes consume.
+4. C12/D2 — value heads become actual **linear** probes on the final IR (still two
+   asymmetric role-gated heads, still per-row scalar).
+5. D7 — delete `CartSim` and every importer.
+6. D12 — architecture fingerprint in checkpoints; loud refusal instead of silent
+   `strict=False` partial loads.
+
+**Track 2 — engine data path + world** (QC strategy IO, tools, game_value,
+curriculum, instruments)
+7. E9/E10 (engine half) — find where per-player values are lost between
+   `payload_strategy_gather` and the responder; fix the schema/staging; LOG per-player
+   rows + `z` descriptors + relation rows. Rebuild `progs.dat` clean.
+8. B11 — make the CGT evaluator resolve on real cartstates (228/228 currently
+   `unresolved`), keeping partizan honesty; report resolve rate before/after.
+9. G9 — curriculum must be able to select the fused megamap (`locate_asset` globs
+   `data/*maps*.pk3`, missing `zzzz-fused.pk3`).
+10. G10 — distribute cart origins ACROSS fused regions so cart CHOICE imposes
+    traversal (all 68 cart nodes currently in one region); re-verify by union-find.
+11. F4 — make travel-commitment a real per-assignment quantity (written on 1/3150).
+
+**Track 3 — the demonstration** (`solver/strat/joracle`, `web`)
+12. Live telemetry side-channel: per tick publish cartstate/PW/SUCC, hierarchy,
+    per-player assignments, and the internals — IR rows, W/L outputs, advantage,
+    `diag(K)` — showing absences rather than faking them.
+13. **The j-oracle viewer, continuous**: behavior (cart tug, PW timeline with flips,
+    cross-team focus matrix) beside internals (rolling linear probes on the live IR
+    **with the random-projection and shuffled-label controls displayed**, plus IR
+    effective rank and width) — so an R19-class pathology is visible at a glance.
+14. Demo wiring: one command brings up a real cartserver (free port), the mlx
+    responder on the mini, and the viewer; the **on-device Xonotic client connects to
+    that same server**; the viewer survives a server restart and reattaches.
+
 ## Record (append-only)
 
 ### R1 — 2026-08 — A1–A5, I7: unattended → full
