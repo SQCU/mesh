@@ -201,3 +201,47 @@ now folded into the render brief:
 Cart state to read rather than re-derive: `plc_s`/`plc_length`, `plc_ctrl`, per-team
 cylinder presence — all live server-side and already networked in packed form
 (`STAT(PAYLOAD_*)`, RADARLINK `clientcolors`).
+
+## Scale: 2–6 maps sampled, NOT one 29-tile glue-up (owner, this session)
+
+> it is worth noting that nobody asked for all 29 maps to be glued together into a
+> single configuration, instead of multiple maps (probably 2-6) being joined together
+> by combinatorially wide interfaces letting maps 'slot' into each other, with some
+> maps needing more modifications to add enough 'slots' for players and carts to travel
+> through multiple maps for Rather Large Objective Based Games. why samples of 2-6 glued
+> togehter? a combinatoric argument that the policy optimziation problem being solved
+> isn't 'stale' or only particular to xonotic or xonotic's mapset, somehow.
+
+The combinatorics, computed:
+
+    choose 2 of 29:     406        choose 5 of 29: 118,755
+    choose 3 of 29:   3,654        choose 6 of 29: 475,020
+    choose 4 of 29:  23,751        TOTAL 2..6:     621,586 subsets
+    the single 29-tile world:            1 configuration
+
+times slot-assignment / topology variants per subset (12 chain orderings at k=4 alone),
+times seeds, times team/player/cart counts. **A single maximal glue-up is a training
+distribution of cardinality one** — it defeats the reason the fusion exists.
+
+This is the answer to the standing question of whether the policy optimization is stale
+or Xonotic-specific: a policy that holds across ~10^5–10^6 sampled topologies has
+demonstrated generality; a policy trained on one 166 MB artifact has demonstrated
+nothing, unfalsifiably. It is also the only real fix for the measured data-bound limit
+in R24/R25 (62 telemetry lines, one `(k,j,l)` shape, one map, decodability collapsing
+under training) — more ticks on one world cannot supply it; more worlds can.
+
+**Slot augmentation is a per-map geometry task.** Where a map has too few connection
+sites to sit mid-chain it gets more cut, using the doorway machinery already built. The
+bridge (>3 sites) / stub (2–3) taxonomy is the right classification; its job is to
+assemble many small worlds, not one big one.
+
+### The scaling work was self-inflicted
+
+Nearly every engineering pathology of this session was a consequence of the maximal
+configuration nobody requested: the `prvm_runaway` worldspawn ceiling and its entity
+budget; the second O(n²) `waypoint_get`/`boxesoverlap` runaway and `--wpcap`; the
+166 MB BSP; 200,946 faces / 634 live shaders / 14 sky shaders / 49 texture sets; a 73 s
+build at 5.35 GB peak RSS; and the fill/culling catastrophe that made all of it
+unrenderable. At 2–6 tiles these largely evaporate. Budgets are to be derived at the
+real target scale, and any budget not needed there is to be deleted rather than kept
+tuned.
