@@ -77,7 +77,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] B2 Golden path = arclength carrier of a heap's magnitude (NOT a bot route) (R12)
 - [x] B3 Two-regime velocity law: contested-local vs abandoned-linear-reversal (R2)
 - [x] B4 Monotone score — position reverses, score does not (R3)
-- [~] B5 Relative deny/acquire objective, not race/entry/level (R3, R8)
+- [x] B5 Relative deny/acquire objective, not race/entry/level (R3, R8, R32)
 - [x] B6 Continuous & differentiable cart force field (soft membership/vitality/gate) (R2)
 - [x] B7 Cylinder occupancy is the law; no LOS gate; no unstick hack (R2)
 - [x] B8 Closed-form `PW`/`SUCC`/`N_i` — nim-sum now DERIVED by backward induction, not asserted (R6, R25)
@@ -100,15 +100,15 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] C12 Value heads are LINEAR probes on the IR (R24)
 
 ### D. Reward / value / advantage / training
-- [x] D1 `W` and `L` are asymmetric REWARD DEFINITIONS, not duals, not control signals (R8)
+- [x] D1 `W` and `L` are asymmetric REWARD DEFINITIONS, not duals, not control signals (R8, R32)
 - [x] D2 Value estimators are LINEAR PROBES on the final IR (R24)
-- [x] D3 Policy parameters optimized to increase advantage (R8)
+- [x] D3 Policy parameters optimized to increase role-selected advantage (R8, R32)
 - [x] D4 NOT reward=score, NOT whole-game RLVR (degenerate: cannot notice being ganged) (R8)
-- [x] D5 Per-row scalar critic outputs; never an `l`-wide vector (R8)
+- [x] D5 Shared `128→1` W/L probes yield `l` row scalars; never one global scalar or `l` outputs per row (R8, R32)
 - [x] D6 Training IS the Xonotic server process (real Game-2 transitions) (R9)
 - [x] D7 **CartSim deleted** — no fake re-simulation anywhere (R24)
 - [x] D8 Curriculum over maps / team counts / player counts / cart counts (R25)
-- [x] D9 Interruptible & resumable — proven by hard kill + resume, twice, early (R9)
+- [x] D9 Interruptible & resumable — handled stop restores weights, optimizer, counters, and replay (R9, R32)
 - [ ] D10 Acceptance matrix on the SERVER: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
 - [x] D12 Checkpoint/architecture integrity — fingerprint + strict load, legacy ckpt refused (R24)
@@ -1017,3 +1017,85 @@ world renders non-black" and "the waypoint graph is one component" — and may n
 cited as evidence that geometry is correct, nor gate any spawn / cart-node / doorway /
 connector decision. G12 and G13 therefore go to `[ ]`: they are not partially-done, they
 are to be rebuilt on the oracle.
+
+### R32 — 2026-08-30 — B5 full; D1, D3, D5, D9 made literal
+`E:code`+`E:run` The user-specified loser objective is now the executable objective,
+not a signed hierarchy proxy. For `k` teams, player/team incidence
+`P∈{0,1}^{l×k}`, team nimbers `n`, winner one-hot `q`, loser mask `u=1-q`, and
+`C_ij=1[n_i>n_j]`, `runtime.py` computes
+
+    rho = (I-diag(q)) C u + (k-1)q
+    rW  = -q ⊙ (1-q')
+    rL  = (1-q) ⊙ 1[rho' > rho]
+
+and lifts the disjoint team events to player rows with `P`. Thus W's sparse event is
+only loss of the current winning path; the optimal W estimator predicts its discounted
+negative incidence before role exit; winning rows optimize the shared policy toward
+positive W advantage, preserving or restoring robustness without a speed objective.
+L's sparse event is only an upward loser-rank flip; the optimal L estimator predicts
+the discounted count of those events before role exit; losing rows optimize the shared
+policy toward positive L advantage, approaching successive rank boundaries and finally
+acquiring the winning path. Holding and falling have zero immediate L reward, but a
+successor farther from the next upward event has lower learned value and therefore
+negative TD advantage.
+
+The final IR is `H∈R^{l×128}`. Two independent shared `128→1` probes produce
+`vW,vL∈R^l`. The actor receives `AW+AL∈R^l`, with W and L bootstrapping only their own
+successor head; a role change terminates the old return. This is neither one global
+scalar broadcast across contradictory teams nor an `l`-output head attached to every
+row.
+
+Real-server evidence, recomputed by the current runtime over 1,800 rows from
+`mesh-mini:/tmp/mesh-joracle/output/live.jsonl`: 1,783 actual consecutive transitions,
+shapes `(k,j,l)=(4,3,12),(4,3,13),(4,4,12),(4,4,13)`, reward support exactly
+`{-1,0,+1}`, 18 upward-L team events, 10 W-loss team events, and identical event values
+for every teammate row. Examples include an unchanged winner with a loser moving
+`rho:[0,3,0,0]→[2,3,0,0]` and receiving `+1`, and a winner loss with all of that
+winner's rows receiving `-1`.
+
+Live deployment exposed a separate resumability defect: the learner wrote
+`--online-checkpoint` but defaulted its read source to `--checkpoint`, so an absent
+inference checkpoint restarted learning at zero. The read and write source are now the
+same online checkpoint unless `--resume-checkpoint` explicitly overrides it. After a
+handled SIGTERM, the RDMA-attached responder restored architecture `c592fbe875fb7914`,
+weights, optimizer, update 2,085, all 1,261 replay transitions (106.1 MB), then advanced
+to update 2,105. PID 33201 remains the live `joracle_demo` responder.
+
+### R32 — 2026-08-31 — target scale is l≈256 / 8 teams; every measurement so far was on a degenerate instance
+`E:proof`+`E:code` Owner:
+
+> dont undershoot om player or team count. lets assume we wat mechancis and gameplay
+> system scales which tidily scale to ~256 playerbots and 5+ teams at a time (why was
+> all of this stuff adding multiple objectives then introducing 'strategy layers' that
+> only make sense in terms of bulk allocation of walls of healthpoints and spawns in
+> effectively rts-attack-move commands?)
+
+**The strategy layer is bulk RTS-style allocation, and it is degenerate below that
+scale.** At l=12: "allocate 3 bodies to cart 2" is trivially enumerable; DPP diversity
+over 5 carts + posts + rivals has nothing to spread; W/L asymmetry, succession, denial
+and coalition-vs-spread are indistinguishable from noise; and the W role's "hold the
+region, restore margin under perturbation" has no mass to hold a line with. So every
+measurement this session — the j-space collapse, "trained ≈ random-init", the 574-state
+horizon — was taken on **a different, easier game**, not on a small sample of this one.
+
+Serialization at the real target (14 GB, l=256, 8 teams, j=5):
+
+    m=64  (aggregated/RTS)   derived 1.13 MB ->     12,699 states  | raw 28.30 KB ->   518,787   (41x)
+    m=512 (per-rival)        derived 8.59 MB ->      1,668 states  | raw 28.30 KB ->   518,787  (311x)
+    relation block alone = 89–93% of every derived transition
+    raw @ float16            14.15 KB       ->  1,037,574 states
+
+Raw is **O(l)**, derived is **O(l·m)**, so the storage error of R23/R24 grows with
+exactly the scale the design targets — at l=256 the derived format leaves the learner
+1,668 states, i.e. no memory. Deep serialization survives easily in the raw format:
+~519k states fp32 (144 h at 1 Hz, 29 h at 5 Hz) or ~1.04M at fp16.
+
+Two design consequences, both free:
+- **Per-rival instruments are the wrong shape at this scale**, not merely expensive: you
+  do not issue 255 individual hunt orders, you attack-move a mass at a region or a cart.
+  Aggregated/RTS instruments (m≈64: mass-to-cart-k, suppress-cart-k, hold/contest-region,
+  explore-region, spawn-wave, travel-commit) are 8x cheaper to store AND the correct
+  semantics.
+- **The belief pipeline already scales right** and needs no change: precompute
+  `Phi*f_c` once over the V-cells (O(C·rank)), then O(horizon) per bot readout — it is
+  map-size-bound, not player-bound, so 256 bots is 256 cheap readouts.
