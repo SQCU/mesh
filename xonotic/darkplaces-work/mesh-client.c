@@ -12,10 +12,13 @@
 
 static struct mesh_ctx CTX0={.last=-1};
 
+static const char *rname(const char *name){
+  if(!name) name=getenv("MESH_REGION");
+  return name?name:MESH_NAME; }
+
 int mesh_attach(struct mesh_ctx *c, const char *name){
   if(c->M) return 0;
-  if(!name) name=getenv("MESH_REGION");
-  if(!name) name=MESH_NAME;
+  name=rname(name);
   for(int t=0;t<3000 && !c->M;t++){
     int f=shm_open(name,O_RDWR,MESH_MODE);
     if(f>=0){
@@ -23,14 +26,46 @@ int mesh_attach(struct mesh_ctx *c, const char *name){
       if(!fstat(f,&s) && (size_t)s.st_size>=sizeof(struct hdr)){
         struct hdr *b=mmap(NULL,(size_t)s.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,f,0);
         if(b!=MAP_FAILED){
-          if(b->magic==MESH_MAGIC && b->version==MESH_VERSION) c->M=b;
+          if(b->magic==MESH_MAGIC && b->version==MESH_VERSION){
+            c->M=b; c->len=(size_t)s.st_size; c->ino=(uint64_t)s.st_ino; }
           else munmap(b,(size_t)s.st_size); } }
-      if(!c->M) close(f); }
+      close(f); }
     if(!c->M) usleep(10000); }
   if(!c->M) return -1;
-  c->arena=mesh_data(c->M,c->M->pool); c->last=-1; c->sub=c->ack=0;
+  c->arena=mesh_data(c->M,c->M->pool); c->last=-1; c->sub=c->ack=0; c->idle=0;
   atomic_store_explicit(&c->M->client,(uint64_t)getpid(),memory_order_release);
   return 0; }
+
+static int stale(struct mesh_ctx *c){
+  struct stat s; int f=shm_open(rname(0),O_RDWR,MESH_MODE);
+  if(f<0) return 0;
+  int gone = !fstat(f,&s) && (uint64_t)s.st_ino!=c->ino;
+  close(f); return gone; }
+
+static void mesh_retire(struct mesh_ctx *c, struct mstream **v, int k){
+  for(int i=0;i<k;i++){ struct mstream *s=v[i];
+    if(s->st==MS_RUN) s->st=MS_FAIL;
+    free(s->seen); s->seen=0; }
+  munmap(c->M,c->len); c->M=0; c->arena=0; }
+
+static void reattach(struct mesh_ctx *c, struct mstream **v, int k){
+  struct stat s; int f=shm_open(rname(0),O_RDWR,MESH_MODE);
+  if(f<0) return;
+  if(fstat(f,&s) || (size_t)s.st_size!=c->len){ close(f); mesh_retire(c,v,k); return; }
+  struct hdr *t=mmap(NULL,c->len,PROT_READ|PROT_WRITE,MAP_SHARED,f,0);
+  if(t==MAP_FAILED){ close(f); return; }
+  int ready = t->magic==MESH_MAGIC && t->version==MESH_VERSION;
+  munmap(t,c->len);
+  if(!ready){ close(f); return; }
+  struct hdr *b=mmap(c->M,c->len,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,f,0);
+  close(f);
+  if(b==MAP_FAILED){ c->M=0; c->arena=0; return; }
+  for(int i=0;i<k;i++){ struct mstream *s=v[i];
+    if(s->st==MS_RUN) s->st=MS_FAIL;
+    free(s->seen); s->seen=0; }
+  c->M=b; c->arena=mesh_data(b,b->pool);
+  c->ino=(uint64_t)s.st_ino; c->sub=c->ack=0; c->last=-1;
+  atomic_store_explicit(&b->client,(uint64_t)getpid(),memory_order_release); }
 
 static size_t cwrite(struct mesh_ctx *c, const void *p, size_t nbytes, int node){
   struct hdr *M=c->M;
@@ -78,12 +113,16 @@ int mesh_lissen_start(struct mesh_ctx *c, struct mstream *s,
 
 int mesh_turn(struct mesh_ctx *c, struct mstream **v, int k){
   if(mesh_attach(c,0)) return 0;
+  if(++c->idle >= 600){
+    c->idle=0;
+    if(stale(c)){ reattach(c,v,k); return 0; } }
   uint32_t u=mesh_pay(c->M)-MESH_OFF;
   struct desc da;
-  while(!pop(c->M,ACK,&da)) c->ack++;
+  while(!pop(c->M,ACK,&da)){ c->ack++; c->idle=0; }
   for(;;){
     void *q; int from; size_t b=cread(c,&q,&from);
     if(b<MESH_OFF) break;
+    c->idle=0;
     struct shdr sh; memcpy(&sh,q,MESH_OFF);
     struct mstream *s=0;
     for(int i=0;i<k;i++)
@@ -100,7 +139,8 @@ int mesh_turn(struct mesh_ctx *c, struct mstream **v, int k){
       else { while(s->hole<s->nb && (s->seen[s->hole>>3]>>(s->hole&7)&1)) s->hole++;
              ctl(c,from,s->sid,K_REQ,s->hole*(uint64_t)u); } }
     else if(sh.k==K_REQ){ if(sh.off<s->n){ s->off=sh.off; s->st=MS_RUN; s->quiet=0; } }
-    else if(sh.k==K_OK){ s->done=s->n; s->st=MS_DONE; } }
+    else if(sh.k==K_OK){ s->done=s->n; s->st=MS_DONE; }
+    if(s->st!=MS_RUN && s->seen){ free(s->seen); s->seen=0; } }
   int ndone=0;
   for(int i=0;i<k;i++){
     struct mstream *s=v[i];
@@ -112,7 +152,7 @@ int mesh_turn(struct mesh_ctx *c, struct mstream **v, int k){
       struct shdr sh={s->off,s->sid,K_DATA}; memcpy(q,&sh,MESH_OFF);
       memcpy(q+MESH_OFF,s->src+s->off,len);
       if(cwrite(c,q,MESH_OFF+len,s->node)!=MESH_OFF+len) break;
-      c->sub++; s->off+=len; }
+      c->sub++; s->off+=len; c->idle=0; }
     if(s->off>was) s->quiet=0;
     else if(++s->quiet%FINQ==1){
       if(s->quiet/FINQ>FAILN) s->st=MS_FAIL;
@@ -145,7 +185,12 @@ size_t mesh_write(const void *p, size_t nbytes, int node){
 
 size_t mesh_read(void **p, int *from){
   if(mesh_attach(&CTX0,0)) return 0;
-  return cread(&CTX0,p,from); }
+  size_t b=cread(&CTX0,p,from);
+  if(b) CTX0.idle=0;
+  else if(++CTX0.idle >= 600){
+    CTX0.idle=0;
+    if(stale(&CTX0)) reattach(&CTX0,0,0); }
+  return b; }
 
 size_t mesh_yell(const void *p, size_t n, int node){
   struct mstream s, *v=&s; mesh_yell_start(&CTX0,&s,p,n,node,0);
