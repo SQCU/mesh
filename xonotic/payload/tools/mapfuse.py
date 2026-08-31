@@ -262,6 +262,28 @@ def corridor_volume(a, b, w2, lo=0.0, hi=None):
 
 
 
+def _spans_volume(pts, min_extent):
+    """Do these points span three dimensions with real extent?"""
+    Q = np.asarray(pts) - np.asarray(pts[0])
+    if np.linalg.matrix_rank(Q, tol=1e-6) < 3:
+        return False
+    return float(np.max(Q) - np.min(Q)) >= min_extent
+
+
+def _bounds_planes(bnd):
+    """The six axial clamp planes `add_brush` appends for a `bounds=` argument."""
+    clo, chi = bnd
+    out = []
+    for a in range(3):
+        e = [0.0, 0.0, 0.0]
+        e[a] = 1.0
+        out.append((e[:], chi[a]))
+        e2 = [0.0, 0.0, 0.0]
+        e2[a] = -1.0
+        out.append((e2, -clo[a]))
+    return out
+
+
 def _convex_nonempty(planes, eps=0.5, min_extent=1.0):
     """Is the convex volume {x : n.x <= d for every (n,d)} non-empty with real extent?
 
@@ -283,6 +305,20 @@ def _convex_nonempty(planes, eps=0.5, min_extent=1.0):
     P = [(np.asarray(n, dtype=float), float(d)) for n, d in planes]
     if len(P) < 4:
         return False
+    # FAST REJECT, and note carefully which direction it runs in.
+    # The AABB from interval propagation CONTAINS the volume, so an empty or
+    # sub-extent box proves the volume is empty -- sound.  The converse would not
+    # be: a non-empty box proves nothing, which is exactly the error this function
+    # was written to remove.  So the box may only ever REJECT here; anything it
+    # admits still goes through exact vertex enumeration below.  That keeps the
+    # test exact while skipping ~50x the work on the pieces that are obviously
+    # empty (on k6 that was 28 305 of them).
+    H = np.array([[n[0], n[1], n[2], d] for n, d in P], dtype=np.float64)
+    lo, hi = bounds_of(H, np.array([-131072.0] * 3), np.array([131072.0] * 3))
+    if np.any(~np.isfinite(lo)) or np.any(~np.isfinite(hi)):
+        pass                        # unbounded on some axis: fall through, decide exactly
+    elif np.any(hi - lo < min_extent):
+        return False
     pts = []
     for i in range(len(P)):
         for j in range(i + 1, len(P)):
@@ -296,12 +332,18 @@ def _convex_nonempty(planes, eps=0.5, min_extent=1.0):
                     continue
                 if all(float(np.dot(n, x)) <= d + eps for n, d in P):
                     pts.append(x)
+                    # EARLY EXIT: adding more vertices can only raise the rank and
+                    # widen the extent, so once four affinely independent ones with
+                    # real extent exist the answer is already True and the rest of
+                    # the triples cannot change it.  Checked at powers of two only
+                    # -- testing on every point cost more in rank checks than the
+                    # enumeration it saved (measured 1.84 ms/call vs 1.61 plain).
+                    if len(pts) >= 4 and (len(pts) & (len(pts) - 1)) == 0 \
+                            and _spans_volume(pts, min_extent):
+                        return True
     if len(pts) < 4:
         return False
-    Q = np.asarray(pts) - np.asarray(pts[0])
-    if np.linalg.matrix_rank(Q, tol=1e-6) < 3:
-        return False
-    return float(np.max(Q) - np.min(Q)) >= min_extent
+    return _spans_volume(pts, min_extent)
 
 
 class Fuser:
@@ -533,8 +575,25 @@ class Fuser:
                 # The remainder is the brush, OUTSIDE this region face, and INSIDE
                 # every face already accounted for. Test that exact volume rather
                 # than a bounding-box projection of one of its planes.
+                # CHEAP SOUND REJECT, before the exact test.
+                # If the brush's own AABB lies entirely inside this face, then so
+                # does the brush, so `brush AND outside-this-face` is empty and the
+                # remainder cannot exist.  Box contains brush, so this direction is
+                # sound; the opposite direction is the bug being fixed and is never
+                # used.  Without it the exact test runs once per candidate brush per
+                # region face per slab per tile, which is where the carve's time goes.
+                hi_v = (sum(n[a] * (wbhi[a] if n[a] > 0 else wblo[a]) for a in range(3)))
+                if hi_v <= dd:
+                    acc.append((list(n), dd))
+                    continue
                 piece = wp + [([-x for x in n], -dd)] + list(acc)
-                if _convex_nonempty(piece):
+                # Test the volume add_brush will ACTUALLY emit, clamp planes
+                # included.  Without them a brush bounded only by oblique planes
+                # -- exactly the case axialize() exists for -- is an unbounded
+                # region, has fewer than four plane-triple vertices, and a
+                # legitimate remainder gets dropped, leaving a hole in a wall.
+                # Verified: an open wedge tests empty alone and non-empty clamped.
+                if _convex_nonempty(piece + _bounds_planes(bnd)):
                     self.add_brush(piece, tex, bounds=bnd, subset=True)
                     made += 1
                 acc.append((list(n), dd))
@@ -1973,27 +2032,30 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
         # corridor.  Nothing is sampled here and nothing is dissolved: every
         # obstruction found is SPLIT around the tube, which keeps the wall.
         w2 = (CORW_PROM if prom else CORW) / 2.0
+        # CARVE EACH BRUSH ONCE, AGAINST THE WHOLE TUBE.
+        # This used to walk the corridor in 512-unit slabs and call split_brushes
+        # per slab.  The slab AABBs overlap, so a wall crossing ten of them was
+        # carved ten times -- each time from the ORIGINAL planes, so each pass
+        # emitted its own full set of up-to-six remainders on top of the last.
+        # That is where k=6's 129 323 solid brushes came from, and it is why the
+        # exact emptiness guard looked unaffordable: the guard was being asked the
+        # same question ten times over.  The tube is a single convex region, so one
+        # carve per brush is both cheaper and more correct -- no duplicate,
+        # overlapping remainders.  Slabs survive only as a way to FIND candidates.
         nsplit_here = 0
-        nslab = 0
-        L_ = math.dist(ma, mb)
-        nseg = max(1, int(math.ceil(L_ / 512.0)))
-        for k in range(nseg):
-            f0, f1 = k / float(nseg), (k + 1) / float(nseg)
-            p0 = [ma[i] + f0 * (mb[i] - ma[i]) for i in range(3)]
-            p1 = [ma[i] + f1 * (mb[i] - ma[i]) for i in range(3)]
-            H_ = corridor_volume(p0, p1, w2 + WALL, -FLOORTHK - WALL, CORH + WALL)
-            slo, shi = bounds_of(H_, F.wns.world_lo - 4096.0, F.wns.world_hi + 4096.0)
-            nslab += 1
-            for m2 in range(T):
-                blo = [srcs[m2].bounds[0][i] + offsets[m2][i] for i in range(3)]
-                bhi = [srcs[m2].bounds[1][i] + offsets[m2][i] for i in range(3)]
-                if any(slo[i] > bhi[i] or shi[i] < blo[i] for i in range(3)):
-                    continue
-                reg = [([float(H_[q, 0]), float(H_[q, 1]), float(H_[q, 2])], float(H_[q, 3]))
-                       for q in range(len(H_))]
-                nb2, np2 = F.split_brushes(m2, [float(x) for x in slo],
-                                           [float(x) for x in shi], region=reg)
-                nsplit_here += nb2
+        H_full = corridor_volume(ma, mb, w2 + WALL, -FLOORTHK - WALL, CORH + WALL)
+        flo, fhi = bounds_of(H_full, F.wns.world_lo - 4096.0, F.wns.world_hi + 4096.0)
+        reg = [([float(H_full[q, 0]), float(H_full[q, 1]), float(H_full[q, 2])],
+                float(H_full[q, 3])) for q in range(len(H_full))]
+        for m2 in range(T):
+            blo = [srcs[m2].bounds[0][i] + offsets[m2][i] for i in range(3)]
+            bhi = [srcs[m2].bounds[1][i] + offsets[m2][i] for i in range(3)]
+            if any(flo[i] > bhi[i] or fhi[i] < blo[i] for i in range(3)):
+                continue
+            nb2, np2 = F.split_brushes(m2, [float(x) for x in flo],
+                                       [float(x) for x in fhi], region=reg)
+            nsplit_here += nb2
+        nslab = 1
         F.ns_add.append(corridor_volume(ma, mb, w2 - 1.0, 0.5, CORH - 1.0))
         for mth, dr in ((ma, sites_of[a][ia]), (mb, sites_of[b][ib])):
             F.ns_add.append(box_H([mth[0] - 88, mth[1] - 88, mth[2] - 4],

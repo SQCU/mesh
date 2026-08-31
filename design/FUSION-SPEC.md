@@ -1133,7 +1133,27 @@ Survives: the shipped n=604 set ran a 300 s and then a **600 s clean soak** at
 B=12, 12 bots connected, no runaway; the seed-7 rebuild at n=685 held 10 min 29 s
 the same way.
 
-Does not play: `navigation_unstuck` fires **12 099 times per 60 s at n=604/B=12,
+Does not play, and the sharpest measure of it is not a combat count at all.
+`navigation_goalrating_start` returns immediately when the bot is already flagged
+stuck (`navigation.qc:1832`, `if(this.aistatus & AI_STATUS_STUCK) return;`),
+before it ever reaches `navigation_markroutes`.  So the ratio
+markroutes/goalrating_start IS the fraction of goal-planning attempts that
+actually happen:
+
+| world | decimation | proceed | **aborted STUCK** |
+|---|---|---|---|
+| k=2 (2 tiles) | 0 % | 256/293 = 87 % | 13 % |
+| k=6 (6 tiles) | 0 % | 137/163 = 84 % | 16 % |
+| 29-tile shipped (n=604) | 96 % | 26/189 = 14 % | **86 %** |
+| 29-tile n=1100 | 67 % | 24/165 = 15 % | **85 %** |
+
+**On the 29-tile world 86 % of every bot's attempts to pick a goal are discarded
+because it is already stuck.**  That is the boots-versus-plays gap as a direct
+measurement at the decision point, and unlike a frag count it cannot be gamed by
+a bad grep — which, given that a bad grep is exactly what inflated this
+section's first draft, is the reason it leads.
+
+The rate measurements agree.  `navigation_unstuck` fires **12 099 times per 60 s at n=604/B=12,
 burning 71.9M statements** — about 17 unstuck calls per bot per second,
 continuously (exact `prvm_profile` deltas over a bracketed live window, not an
 estimate).  At n=1100 it is 11 815 / 70.2M, so it is the megamap and not an
@@ -1155,12 +1175,30 @@ the expensive search branch.  At the 2-6 tile target NOTHING is decimated:
 | k=4 | 210 | **0** | — |
 | k=6 | 740 | **0** | — |
 
-Five times the activity at k=2, on a graph the budget never had to cut.  This is
-the sharpest argument yet that 29 tiles is the wrong unit: the cap that keeps the
-server alive there is the same cap that starves its navigation.  It is NOT yet
-established that bots play *well* at 2-6 tiles — 4.2 events/min for 12 bots is
-better, not proven good, and the unstuck rate at target scale has not been
-profiled.
+Measured at target scale rather than inferred (120 s settle, 60 s bracketed
+window, B=12, fresh userdir per run, both maps verified distinct on every
+counter):
+
+| world | src wp | used | decim | unstuck calls / 60 s | statements | stmt/call | frags/180 s |
+|---|---|---|---|---|---|---|---|
+| k=2 | 268 | 268 | 0 % | 1 266 | 0.80M | 630 | 130 |
+| k=6 | 816 | 816 | 0 % | 3 011 | 2.61M | 867 | 21 |
+| 29-tile | 3325 | 604 | 96 % | 12 099 | 71.9M | 5 946 | 4 |
+| 29-tile | 3325 | 1100 | 67 % | 11 815 | 70.2M | 5 945 | 2 |
+
+The 29-tile world is **9.6x k=2 in call rate and 90x in statements** — the calls
+are also ~9x more expensive each, so both frequency and severity.  Decimation is
+not a coincidence.
+
+**But it is not the only driver, and the second one is mine.**  k=6 decimates
+NOTHING and is still 2.4x k=2's unstuck rate.  The reason is a defect in the fuse
+geometry path: k=6 shipped **56 632 `Collision_ValidateBrush` errors** — 28 311
+of each of two messages in a single 180 s run, i.e. the engine revalidating
+broken brushes every frame.  Counted directly in the BSP: **28 305 of k=6's
+129 323 solid brushes had a crossed AABB** (k=2 had 0, which is why k=2 is
+clean).  So the honest statement is: **decimation is the dominant driver at 29
+tiles, with a second, independent tile-count term visible at k=6** — and that
+second term was a bug, diagnosed in §8.11 below.
 
 **The entity budget is not the binding constraint.**  At n=604/B=12, with the
 `.ent` taken from the installed pk3 rather than from a mismatched artifact:
@@ -1468,3 +1506,86 @@ Two earlier soak attempts died early and neither was the map: the first was a
 the first still held the port and the userdir.  A soak run must own a fresh
 userdir, a unique `-sessionid` and a verified-free port, and must be held inside
 one call — otherwise the number measures the harness, not the world.
+
+### 8.11 A defect the profiling exposed: degenerate brushes from the oblique carve
+
+Profiling at target scale turned up something no boot test had: k=6 emitted
+**56 632 `Collision_ValidateBrush` errors** in a 180 s run — 28 311 each of
+"brush with no points!" and "all points lie on all planes (degenerate, no brush
+volume!)". That cadence is the engine revalidating broken brushes every frame,
+not a one-time load complaint. Counted straight out of the BSP: **28 305 of
+k=6's 129 323 solid brushes have a crossed AABB**; k=2 has 0.
+
+The cause is in `Fuser.split_brushes`, and it is mine. When the corridor carve
+was generalised from an axis-aligned aperture box to the tube's own OBLIQUE
+half-spaces (§8.5), the emptiness guard was not generalised with it. It asked
+whether the brush's BOUNDING BOX reached past the current region plane. Two
+separate errors in one line:
+
+* the bounding box is not the brush — exact only when every plane is
+  axis-aligned, so the moment the region went oblique this became a superset
+  test and empty remainders shipped as brushes; and
+* it tested only the middle term. A remainder is
+  `brush AND outside-this-face AND inside-every-previously-accounted-face`, and
+  `acc` was ignored, so even the axial case could emit empty pieces.
+
+The replacement is exact: enumerate the plane triples, keep the points satisfying
+every half-space, and require four affinely independent ones with real extent.
+Three refinements were needed on top of the first version:
+
+1. **Test what is actually emitted.** `add_brush` appends six clamp planes for
+   its `bounds=` argument, and the test omitted them. A brush bounded only by
+   oblique planes — exactly the case `axialize()` exists for — is then an
+   UNBOUNDED region with fewer than four plane-triple vertices, so a legitimate
+   remainder is dropped and a hole is left in a wall. Verified on an open wedge:
+   empty when tested alone, non-empty when tested clamped.
+2. **A one-sided AABB fast reject.** The interval-propagated box CONTAINS the
+   volume, so an empty box PROVES the volume empty; the converse proves nothing
+   and is the very error being removed. The box may therefore only REJECT, and
+   anything it admits still goes through exact enumeration. 3.2 ms -> 0.035 ms on
+   the empty pieces, which are the common case.
+3. **Early exit at powers of two.** More vertices can only raise the rank, so the
+   answer is settled once four independent ones exist. Checking on every point
+   cost more in rank tests than it saved (1.84 ms vs 1.61); checking at 4, 8,
+   16... keeps the safety net for free.
+
+**This is the third instance of one failure family in this codebase**, and it is
+worth naming as such: approximate a convex volume by its AABB, then decide
+something with the approximation. The other two were `mkentfile.Bsp` deriving an
+AABB from oblique planes (the ~1e15-iteration, 75 GB indexing loop) and
+`solid_brush_at` point-sampling occupancy. Any AABB standing in for a convex
+volume in this toolchain should be treated as suspect until its direction is
+checked — containment is sound for proving emptiness and unsound for proving
+anything else.
+
+**A second bug the first one was hiding.** With the exact guard in place the carve
+became unaffordably slow, and the reason was not the guard. `split_brushes` was
+called once per 512-unit corridor SLAB, and the slab bounding boxes overlap, so a
+wall crossing ten of them was carved ten times — each pass working from the
+ORIGINAL brush planes and emitting its own full set of up-to-six remainders on
+top of the previous pass's. The exact test was simply being asked the same
+question ten times over. The tube is a single convex region, so it is now carved
+ONCE per brush; slabs survive only as a way to find candidates. Measured on k=6:
+
+| | solid brushes | degenerate | BSP | fuse |
+|---|---|---|---|---|
+| before | 129 323 | **28 305 (21.9 %)** | 89.5 MB | 79.1 s |
+| after | 61 191 | **0** | 55.2 MB | 101.8 s |
+
+`GEOMETRY EDIT` now reports 98 source brushes split into **165** convex
+remainders. Verified by `fusecheck` against the rebuilt artifacts that nothing
+was lost: 54 spawnpoints with 0 in solid / 0 box-does-not-fit / 0 without floor,
+**10/10** doorways traversable, **0/5** corridors with any uncovered interior
+(0 u^3), 243 cart nodes with 0 illegal placements — every figure identical to the
+pre-fix build. So 28 305 degenerate and 68 132 duplicate brushes were removed,
+the BSP shrank 38 %, and no verified property changed. The exactness costs 29 %
+of fuse time, not the 30x an early measurement suggested; that measurement was an
+artifact of my own background jobs restarting one another.
+
+Two lessons worth keeping. First, the duplicate-carve bug had been shipping since
+the oblique carve landed and no boot test could see it — it took profiling at
+target scale to surface, and then only as a symptom (56 632 per-frame engine
+warnings) whose cause was two levels down. Second, a correctness fix that looks
+unaffordable is worth one round of asking WHY before it is weakened: here the
+guard was innocent and the real defect was a 10x redundancy that had been
+inflating every brush count in this document.
