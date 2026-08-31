@@ -13,6 +13,7 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 
 from .cast_header import Wally, Widths, elle
+from .replay import Replay
 from .strategy import strategy, dynamics
 from .replay_store import RawReplayBuffer
 from .runtime import role_rewards
@@ -69,7 +70,7 @@ class CheckpointArchitectureMismatch(RuntimeError):
 class OnlineLearner:
     def __init__(
         self,
-        estimator,
+        wally,
         *,
         learning_rate: float = 3e-4,
         gamma: float = 0.95,
@@ -86,12 +87,10 @@ class OnlineLearner:
         replay_steps: int = 4,
         seed: int = 20260831,
     ):
-        self.estimator = estimator
+        self.wally = wally
         self.gamma = float(gamma)
         self.importance_clip = float(importance_clip)
-        self.dynamics = dynamics or LocalDynamics()
-        self.bundle = nn.Module()
-        self.bundle.dynamics = self.dynamics
+        self.bundle = wally
         self.optimizer = optim.AdamW(learning_rate=learning_rate, weight_decay=1e-4)
         self.checkpoint = checkpoint
         self.updates = 0
@@ -226,43 +225,65 @@ class OnlineLearner:
         }
 
     def _item_loss(self, item):
-        state, next_state = item["state"], item["next_state"]
+        """One transition's loss. Every learned quantity comes from strategy();
+        there is no second forward pass anywhere in the program (CAST project law:
+        two copies make exp(logpi_target - logpi_behavior) meaningless silently).
+        """
         actions_mx = mx.array(item["actions"])
         behavior_logp_mx = mx.array(item["behavior_logp"])
-        dynamics_state_rows = state_rows(state)
+        reward = mx.array(item["reward"])
+        winner_mask = mx.array(item["winner_mask"]).astype(mx.bool_)
+        next_winner_mask = mx.array(item["next_winner_mask"]).astype(mx.bool_)
+
         current = strategy(self.wally, *item["chorus_in"])
         following = strategy(self.wally, *item["chorus_out"])
-        dynamics_state = mx.stop_gradient(mx.array(dynamics_state_rows))
-        dynamics_action = mx.stop_gradient(mx.array(action_rows(state, item["actions"])))
-        target_delta = mx.stop_gradient(mx.array(item["target_delta"]))
-        reward = mx.array(item["reward"])
-        winner_mask = mx.array(state.winner_mask).astype(mx.bool_)
-        next_winner_mask = mx.array(next_state.winner_mask).astype(mx.bool_)
+
+        # log pi of the action actually taken, from the composer's own logits.
+        logp_all = current.logits - mx.logsumexp(current.logits, axis=-1, keepdims=True)
+        logpi = mx.take_along_axis(logp_all, actions_mx[:, None], axis=-1)[:, 0]
+
+        # Role gating: WINNIE for rows whose team holds the path, LOU otherwise.
+        value = mx.where(winner_mask, current.value_winnie, current.value_lou)
         bootstrap = mx.where(
             winner_mask,
-            mx.where(next_winner_mask, following["winner_value"], 0.0),
-            mx.where(next_winner_mask, 0.0, following["loser_value"]),
+            mx.where(next_winner_mask, following.value_winnie, 0.0),
+            mx.where(next_winner_mask, 0.0, following.value_lou),
         )
         target = reward + item["discount"] * mx.stop_gradient(bootstrap)
-        error = target - current["value"]
+        error = target - value
+
         ratio = mx.stop_gradient(mx.minimum(
-            mx.exp(current["logpi"] - behavior_logp_mx), self.importance_clip))
+            mx.exp(logpi - behavior_logp_mx), self.importance_clip))
         self._ratio_sink.append(ratio)
-        actor = -mx.mean(mx.stop_gradient(ratio * error) * current["logpi"])
+        actor = -mx.mean(mx.stop_gradient(ratio * error) * logpi)
+
         winner_weight = winner_mask.astype(mx.float32) * ratio
         loser_weight = (~winner_mask).astype(mx.float32) * ratio
-        winner_loss = mx.sum(mx.square(current["winner_value"] - target) * winner_weight) / mx.maximum(mx.sum(winner_weight), 1.0)
-        loser_loss = mx.sum(mx.square(current["loser_value"] - target) * loser_weight) / mx.maximum(mx.sum(loser_weight), 1.0)
-        dynamics_mean, dynamics_first, dynamics_second = self.dynamics(dynamics_state, dynamics_action)
-        dynamics_value = 0.5 * (
-            mx.mean(mx.square(dynamics_first - target_delta))
-            + mx.mean(mx.square(dynamics_second - target_delta))
+        winner_loss = mx.sum(mx.square(current.value_winnie - target) * winner_weight) / mx.maximum(mx.sum(winner_weight), 1.0)
+        loser_loss = mx.sum(mx.square(current.value_lou - target) * loser_weight) / mx.maximum(mx.sum(loser_weight), 1.0)
+
+        # VERA_WINNIE / VERA_LOU: the auxiliary probes on the QUERY, regressed
+        # toward Winnie and Lou. Two, because two values are estimated.
+        aux = 0.5 * (
+            mx.mean(mx.square(current.aux_winnie - mx.stop_gradient(current.value_winnie)))
+            + mx.mean(mx.square(current.aux_lou - mx.stop_gradient(current.value_lou)))
         )
-        dynamics_uncertainty = mx.mean(mx.square(dynamics_first - dynamics_second))
-        dynamics_error = mx.mean(mx.square(dynamics_mean - target_delta))
-        regularization = mx.mean(mx.square(current["w_next"]))
+
+        # DINA, through the one definition in cast_header.
+        y = mx.stop_gradient(mx.array(item["dyn_y"]))
+        u = mx.stop_gradient(mx.array(item["dyn_u"]))
+        target_delta = mx.stop_gradient(mx.array(item["target_delta"]))
+        predicted = dynamics(self.wally, y, u)
+        dynamics_value = mx.mean(mx.square(predicted - target_delta))
+        dynamics_error = dynamics_value
+
+        # ELLE: the L2-toward-zero pull on the logits, so untrained is broad
+        # weighted sampling and trained peaks without collapsing.
+        regularization = elle(current.logits)
+
         total = (actor + 0.5 * winner_loss + 0.5 * loser_loss
-                 + 0.25 * dynamics_value + 1e-3 * regularization)
+                 + 0.25 * aux + 0.25 * dynamics_value + 1e-3 * regularization)
+
         advantage = mx.mean(mx.stop_gradient(error))
         weighted_advantage = mx.mean(mx.stop_gradient(ratio * error))
         winner_count = mx.sum(winner_mask.astype(mx.float32))
@@ -273,7 +294,7 @@ class OnlineLearner:
         loser_reward = mx.sum(reward * (~winner_mask)) / mx.maximum(loser_count, 1.0)
         role_change = mx.mean((winner_mask != next_winner_mask).astype(mx.float32))
         return total, mx.stack([actor, winner_loss, loser_loss, dynamics_value,
-                                regularization, mx.mean(ratio), dynamics_uncertainty,
+                                regularization, mx.mean(ratio), aux,
                                 dynamics_error, advantage, weighted_advantage,
                                 winner_advantage, loser_advantage, winner_reward,
                                 loser_reward, winner_count, loser_count, role_change])
@@ -309,7 +330,7 @@ class OnlineLearner:
         mx.eval(self.bundle.parameters(), self.optimizer.state, total, parts)
         self.updates += 1
         self.gradient_steps += 1
-        rows = state_rows(items[-1]["state"])
+        rows = np.asarray(items[-1]["dyn_y"])
         matrices = np.asarray(self.dynamics.local_matrix(mx.array(rows)))
         singular = [np.linalg.svd(matrix, compute_uv=False).min() for matrix in matrices]
         names = ("loss_pg", "loss_w", "loss_l", "loss_dynamics", "loss_reg",
