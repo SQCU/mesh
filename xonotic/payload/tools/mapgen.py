@@ -1,7 +1,7 @@
 import struct, sys, os, re, math, glob, random, subprocess, time, zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
-from mapfuse import fnum, vstr, check_bsp, vadd, vsub, vdot, vscale, vnorm, vcross
+from placement import fnum, vstr, check_bsp, vadd, vsub, vdot, vscale, vnorm, vcross
 
 Q3MAP2 = os.environ.get('Q3MAP2', os.path.expanduser('~/dox/xonotic/netradiant-custom/install/q3map2'))
 BASEPATH = os.environ.get('XON_BASEPATH', os.path.expanduser('~/dox/xonotic/Xonotic'))
