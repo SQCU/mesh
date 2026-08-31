@@ -115,15 +115,16 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 
 ### E. Observation / featurization (the map-reduce)
 - [x] E1 Perception-gated observation: frustum + LOS + 2-V-cell cap (emergent stealth) (R5)
-- [~] E2 Per-team observation buffer of contextual events (not ground truth) (R5)
-- [~] E3 V-cell segmentation; fuse navigable cells to a 5–15% receptive field (—, under discovery)
-- [~] E4 Temporal contraction toward an uninformative prior (—, under discovery)
-- [~] E5 Bounded-support spatial mask (parallel, not recurrent) (—, under discovery)
+- [~] E2 Per-team observation buffer of contextual events — live but sparse (R20)
+- [ ] E3 V-cell segmentation; fuse navigable cells to a 5–15% receptive field (ZEROED — bound computed nowhere, R20)
+- [~] E4 Temporal contraction toward an uninformative prior (inlined, hardcoded `T`) (R20)
+- [~] E5 Bounded-support spatial mask (inlined, hardcoded radius 2.0) (R20)
 - [ ] E6 Low-rank egocentric integration is the ONLY spatial mixing operator — **and is actually called on the live path** (R11: `featurize` pipeline reported dead, re-inlined in `live_belief`)
 - [x] E7 Belief is per-bot; there is no "team belief" (R4)
 - [x] E8 Enemy positions featurized ONLY through observation (R5)
 - [ ] E9 **Full per-player resource state (health/armor/ammo/weapons/pos) actually ENTERS the matmul input** — the headline "learned filter over full game state" (ZEROED, R19)
 - [ ] E10 Per-player observation rows, instrument descriptors `z` and relation rows are LOGGED on real runs (ZEROED, R19)
+- [ ] E11 The canonical `featurize.py` belief pipeline body exists and is the one that runs (truncated 705→27 lines) (ZEROED, R20)
 
 ### F. Playerbot interface (the WHAT/HOW boundary)
 - [x] F1 matmul decides WHAT; stock navmesh decides HOW (R12)
@@ -135,13 +136,15 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 
 ### G. World / maps
 - [x] G1 Procedural multi-map fusion produces megamaps (R15)
-- [~] G2 Megamaps actually USED by the training/live server (—, under discovery)
-- [~] G3 Bots traverse long distances between fused regions (commitment cost) (—, under discovery)
+- [x] G2 Megamaps actually USED by the training/live server (R20)
+- [~] G3 Bots traverse long distances between fused regions — spawn→cart only, not cart→cart (R20)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
 - [~] G6 Entity budget at scale — no invisible bots at high player counts (R16)
 - [~] G7 Diegetic communication of cart paths/state (R16)
 - [x] G8 Headless client renderer for join inspection (real offscreen renders) (R15)
+- [ ] G9 The curriculum can actually SELECT the fused map (`locate_asset` glob misses `zzzz-fused.pk3`) (R20)
+- [ ] G10 Cart origins distributed ACROSS fused regions so cart CHOICE imposes traversal (all 68 nodes in one region) (R20)
 
 ### H. Multipolar dynamics — description & demonstration
 - [ ] H1 Resource-domination logging (alive count, health/armor pools, consumption vigor) (—)
@@ -370,3 +373,66 @@ guarantee is *value-relevant directions, not arbitrary semantics*. "Who holds a
 rocket launcher" fails twice over: it is zeroed out of `x`, and `role_rewards` is
 computed purely from cart nimbers and PW transitions, so weapon state has **no
 gradient path to the loss at all**.
+
+### R20 — 2026-08-31 — G2 → full; G3, E2, E4, E5 substantiated; E3, E11, G9, G10 zeroed
+`E:run`+`E:code` The megamap / observation map-reduce audit
+(`design/megamap-observation-status.md`, 600 lines, every line reference verified).
+
+**G2 full.** The megamap is what actually runs: `zzzz-fused.pk3` (16,417,377 B) is
+mounted in `Xonotic/data/`, and the Game-2 cartserver log line 103 reads
+`Loaded maps/fused.ent`, then `cart 0: 30 path nodes, length 10920.210938`. A
+separate 14 MB server log shows 244 match starts alternating `fused` /
+`runningmanctf`, 50 bots on 5 teams, carts banking to `s 3480.6`.
+
+**G9 zeroed.** `curriculum.py:94`/`:529` default to `runningmanctf`, and
+`locate_asset` (`:228-236`) globs only `data/*maps*.pk3` — which
+`zzzz-fused.pk3` does not match. The curriculum literally cannot select the fused
+map; the megamap runs by launch config, not by curriculum.
+
+**G3 partial, G10 zeroed.** Union-find over the 960 entity origins in the deployed
+`fused.ent` (700-unit XY link) recovers exactly 3 disjoint regions:
+`size=611 plc_nodes=0 spawns=17`, `size=282 plc_nodes=68 spawns=12`,
+`size=67 plc_nodes=0 spawns=12`. **All 68 cart-path nodes sit in ONE region while
+29 of 41 spawns are in the other two.** Spawn→nearest-cart-node distance: min 156,
+median 5195, max 9857; 26/41 spawns exceed 4000 units. So spawning imposes a join
+traversal, but choosing cart A over cart B does not — the megamap only half-creates
+the strategic commitment cost.
+
+**F4 substantiated at `[~]`.** The plumbing is real —
+`SC["COMMIT"]=5` → `mesh_scatter(..., PLC_SC_COMMIT, ...)`
+(`sv_payload_strategy_io.qc:232`) →
+`this.bot_strategytime = max(this.bot_strategytime, time + this.plc_str_commit)`
+(`:276`) — but `instruments.py:258-260` writes `COMMIT` only on the
+`TRAVEL_COMMITMENT` branch, and the real run shows 3150 assignments distributed
+`explore_cell 1346, push_cart 1224, contest_post 400, hunt_rival 156,
+spawn_timing 20, suppress_cart 3, travel_commitment 1` — i.e. **`commit>0` on 1 row
+of 3150 (0.03%)**. Plumbed, effectively unused.
+
+**E3 zeroed; E4/E5 partial; E6 corroborated; E11 zeroed.** `live_belief.py:162-273`
+re-inlines all four belief stages and *that copy is on the live path*
+(`strat_responder.py:14,165,264,265` → `estimator.py:141` → `qkv.py:43`,
+`concatenate((x, beta)) @ W_q.T`). The inlined substitute uses
+`support_radius=2.0`, `areas=np.ones(n)`, `T=self.decay`, a **constant-literal Φ**
+(`:240-249`) and an extra `weights/total` normalization the spec formula does not
+have; **the 5–15% receptive-field bound is computed nowhere** (E3). Meanwhile the
+canonical `featurize.py` has been truncated in the worktree from **705 lines at
+HEAD** (`segment_vcells:216`, `temporal_contraction:473`,
+`egocentric_integration:525`, `beliefs_for_bots:562`, `receptive_fraction:189`) to
+**27 lines** (stage-4 `spatial_mask` only); a repo-wide grep for `egocentric` now
+hits only a docstring in `joinshot.py` (E11).
+
+The audit's own risk verdict, recorded verbatim as the reason E-group states move:
+
+> **#5, the observation map-reduce.** It is the only one where the file that *is*
+> the spec was deleted from the worktree while an unreviewed hand-inlined
+> substitute — constant Φ, hardcoded T and radius, different normalization, no
+> receptive-field bound — runs in its place, and the swap is invisible from
+> outside because `beta` still flows into `qkv.query`. Nothing errors; the
+> `[FIRM]` formula simply is not the one being computed.
+
+**E2 partial.** The QC gate is genuinely all three conditions
+(`sv_payload_strategy_io.qc:82-104`), and real belief rows grew cells 12→80,
+edges 1→103, teams 1→5, `invalid 0`; but over 228 ticks / 18.4 s / 12 bots the
+aggregate is `deposited 32, accepted 1096, duplicates 6430` — live but sparse.
+Defect for I5: the Python mirror `buffers.py:49-51` is dead because
+`live_belief.py:93-94` passes `True, True, 0.0` as literals.
