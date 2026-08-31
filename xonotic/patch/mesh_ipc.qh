@@ -1,8 +1,0 @@
-float(string name, float nfloats) mesh_open = #644;
-void(float h) mesh_close = #645;
-void(float h, float i, float v) mesh_set = #646;
-float(float h, float i) mesh_get = #647;
-void(float h, float dst, .float fld, float firstedict, float numedicts) mesh_gather = #648;
-void(float h, float src, .float fld, float firstedict, float numedicts) mesh_scatter = #649;
-float(float h) mesh_publish = #650;
-float(float h) mesh_poll = #651;
