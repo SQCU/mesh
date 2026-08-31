@@ -1099,3 +1099,41 @@ Two design consequences, both free:
 - **The belief pipeline already scales right** and needs no change: precompute
   `Phi*f_c` once over the V-cells (O(C·rank)), then O(horizon) per bot readout — it is
   map-size-bound, not player-bound, so 256 bots is 256 cheap readouts.
+
+### R33 — 2026-08-31 — correction to R32: the action space is fine; the DENSE PAIR TENSOR is not
+`E:proof` Owner:
+
+> "m=512 per-rival instruments is the wrong shape at 256 players," are you over-reaching
+> or resorting to some kind of idiolect? what does this mean? each playerbot still
+> nevertheless needs an action vector...?
+
+Over-reach, corrected. R32 claimed per-rival instruments are "the wrong shape". That
+conflated two different things:
+
+1. **The per-player action space.** Every playerbot needs an action vector and it may
+   legitimately address a specific rival — "hunt rival r" is a real affordance (the QC
+   routerates a specific rival entity), and choosing *which* enemy to focus (the
+   winningest rival in your way) is precisely the strategic content the design exists to
+   produce. Nothing about 256 players removes that.
+2. **The dense `(l, m, 16)` relation tensor.** THIS is the defect: at l=256, m=512 it is
+   8.59 MB per transition, 93% of the stored state, and dense over pairs that are mostly
+   meaningless — a bot on the far side of the map carries a relation row for hunting a
+   rival it has never observed and cannot reach.
+
+The repair is representational and preserves the action space entirely: either
+**candidate sets** (each bot's live instrument list is the carts, the posts, and the
+rivals in its observed neighborhood — a property the perception-gated observation buffer
+already computes — giving `(l, m_eff, 16)` with `m_eff` in the dozens), or a **factored
+head** (a distribution over ~8 instrument TYPES plus a pointer/attention over candidate
+targets, storing `(l, types)` + candidate features instead of a flat 512-way categorical).
+
+Also struck: R32's implication that "attack-move a mass" means aggregated instruments.
+That phrase describes what the **team-scale allocation emits** (bulk allocation of health
+and spawn mass across objectives); it is not a restriction on an individual bot's action
+vector. A team-level allocation resolves *down* to individual bots targeting individual
+rivals. Collapsing those two levels into one claim produced jargon standing in for an
+argument.
+
+R32's other findings stand unchanged: the l≈256 / 8-team target, the O(l) vs O(l·m)
+storage asymmetry, that prior measurements were taken on a degenerate instance, and that
+the belief pipeline already scales correctly.
