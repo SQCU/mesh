@@ -6,6 +6,13 @@ from typing import Sequence
 
 import numpy as np
 
+# The schema is the single canonical engine<->solver contract; it lives beside the QC
+# it mirrors (xonotic/payload/tools/strategy_io_schema.py). Resolve it on sys.path
+# rather than duplicating it here.
+import sys as _sys, pathlib as _pathlib
+_TOOLS = _pathlib.Path(__file__).resolve().parents[2] / "payload" / "tools"
+if str(_TOOLS) not in _sys.path:
+    _sys.path.insert(0, str(_TOOLS))
 from strategy_io_schema import SC, encode_target
 
 
