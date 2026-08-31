@@ -86,9 +86,9 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] B11 The CGT evaluator actually RESOLVES on real server states (228/228 `unresolved`) (R19)
 
 ### C. The strategy operator (the linear algebra)
-- [ ] C1 **Gram + SwiGLU, NOT softmax attention** (REGRESSED — shipped softmax) (R11)
-- [ ] C2 **Wide IR ≥128d** (present: ~16d) (R11)
-- [~] C3 Irreducibly all-to-all O(n²) learned coupling landing IN the IR (R10, R11)
+- [x] C1 **Gram + SwiGLU, NOT softmax attention** (R24)
+- [x] C2 **Wide IR ≥128d** (R24)
+- [x] C3 Irreducibly all-to-all O(n²) learned coupling landing IN the IR (R24)
 - [x] C4 DPP `diag(K)` marginal-inclusion signal, differentiable (custom vjp) (R10)
 - [x] C5 Velocity on an integrated weight state (replicator), not instantaneous decisions (R7)
 - [x] C6 Anticipatory (predictive) update, not a plain integrator (R10)
@@ -96,36 +96,36 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] C8 Categorical sampling + L2-toward-logit-0 (not MAP) (R7)
 - [x] C9 Query = learned projection of [engine state ; belief] (R10)
 - [x] C10 Per-instrument learned behavioral value `v_m` wired into the mix (R10)
-- [ ] C11 **j-space** — value probes ground the semantics of random-init projections (ZEROED, R19)
-- [ ] C12 Value heads are LINEAR probes on the IR (present: an MLP `Linear→silu→Linear`) (ZEROED, R19)
+- [~] C11 **j-space** — trained IR now beats random-init/random-projection, but collapses with training; data-bound (R24)
+- [x] C12 Value heads are LINEAR probes on the IR (R24)
 
 ### D. Reward / value / advantage / training
 - [x] D1 `W` and `L` are asymmetric REWARD DEFINITIONS, not duals, not control signals (R8)
-- [ ] D2 Value estimators are LINEAR PROBES on the final IR (ZEROED, R19)
+- [x] D2 Value estimators are LINEAR PROBES on the final IR (R24)
 - [x] D3 Policy parameters optimized to increase advantage (R8)
 - [x] D4 NOT reward=score, NOT whole-game RLVR (degenerate: cannot notice being ganged) (R8)
 - [x] D5 Per-row scalar critic outputs; never an `l`-wide vector (R8)
 - [x] D6 Training IS the Xonotic server process (real Game-2 transitions) (R9)
-- [ ] D7 **CartSim deleted** — no fake re-simulation anywhere (still present) (R13)
+- [x] D7 **CartSim deleted** — no fake re-simulation anywhere (R24)
 - [~] D8 Curriculum over maps / team counts / player counts / cart counts (R9)
 - [x] D9 Interruptible & resumable — proven by hard kill + resume, twice, early (R9)
 - [ ] D10 Acceptance matrix on the SERVER: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
-- [ ] D12 Checkpoint/architecture integrity — no silent `strict=False` resume across shape changes (R19)
-- [ ] D13 **A replay buffer of hundreds–thousands of featurized states, reused across the training losses** (present: a 5-step credit queue, each state used once) (ZEROED, R23)
+- [x] D12 Checkpoint/architecture integrity — fingerprint + strict load, legacy ckpt refused (R24)
+- [x] D13 **Replay buffer of hundreds–thousands of featurized states, reused across the losses** (R24)
 
 ### E. Observation / featurization (the map-reduce)
 - [x] E1 Perception-gated observation: frustum + LOS + 2-V-cell cap (emergent stealth) (R5)
 - [~] E2 Per-team observation buffer of contextual events — live but sparse (R20)
-- [ ] E3 V-cell segmentation; fuse navigable cells to a 5–15% receptive field (ZEROED — bound computed nowhere, R20)
-- [~] E4 Temporal contraction toward an uninformative prior (inlined, hardcoded `T`) (R20)
-- [~] E5 Bounded-support spatial mask (inlined, hardcoded radius 2.0) (R20)
-- [ ] E6 Low-rank egocentric integration is the ONLY spatial mixing operator — **and is actually called on the live path** (R11: `featurize` pipeline reported dead, re-inlined in `live_belief`)
+- [x] E3 V-cell segmentation to a 5–15% receptive field — MEASURED, radius is an output (R24)
+- [x] E4 Temporal contraction toward an uninformative prior (canonical) (R24)
+- [x] E5 Bounded-support spatial mask (canonical, radius solved) (R24)
+- [x] E6 Low-rank egocentric integration is the ONLY spatial mixer AND is called on the live path (R24)
 - [x] E7 Belief is per-bot; there is no "team belief" (R4)
 - [x] E8 Enemy positions featurized ONLY through observation (R5)
-- [ ] E9 **Full per-player resource state (health/armor/ammo/weapons/pos) actually ENTERS the matmul input** — the headline "learned filter over full game state" (ZEROED, R19)
+- [x] E9 **Full per-player resource state ENTERS the matmul** — input rank 4 → 33 (R24)
 - [ ] E10 Per-player observation rows, instrument descriptors `z` and relation rows are LOGGED on real runs (ZEROED, R19)
-- [ ] E11 The canonical `featurize.py` belief pipeline body exists and is the one that runs (truncated 705→27 lines) (ZEROED, R20)
+- [x] E11 The canonical `featurize.py` belief pipeline exists and is the one that runs (R24)
 
 ### F. Playerbot interface (the WHAT/HOW boundary)
 - [x] F1 matmul decides WHAT; stock navmesh decides HOW (R12)
@@ -166,7 +166,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] I6 No fake re-simulation anywhere (D7 outstanding) (R13)
 - [x] I7 Private SQCU repo; never push upstream (R1)
 - [x] I8 Services interruptible & resumable by construction, proven by crashing early (R9)
-- [ ] I9 **The learner and supervisor are SERVICES, not batch jobs** — ongoing restarts are correct; an unexplained permanent stop is not (ZEROED, R21)
+- [~] I9 **Learner and supervisor are SERVICES** — learner done; supervisor pending, and it still passes the deleted `--secs` (R24)
 
 ---
 
@@ -608,3 +608,65 @@ a ring buffer of hundreds–thousands; sample minibatches per update with multip
 passes; evict oldest so the buffer tracks the current policy; keep the existing
 clipped ratio as the sole off-policy mechanism; include the buffer in the atomic
 checkpoint/resume state (R9). Dispatched to the model-core owner.
+
+### R24 — 2026-08-31 — C1,C2,C3,C12,D2,D7,D12,D13,E3,E4,E5,E6,E9,E11 → full; C11 → partial; I9 partial
+`E:run`+`E:code` Commit `1d34864`. The R19/R20 wounds closed in the forced order —
+feed the operator before widening it — verified against a real `cross_rdma_live`
+Game-2 run (62 telemetry lines, 744 player-rows), all work done in a scratch copy on
+the mini; nothing on port 26012 touched.
+
+**E9.** All 19 OBS columns arrive; 17 populate `x` (`X_WIDTH=48`, incl. a 24-bit
+weapon expansion). **Input rank 4 → 26 (`x` alone), 33 with `beta`.** 9 distinct
+weapon bits observed, mean 3.15 weapons/player — "who is holding what" is in the
+matmul. Only `POWER` is zero, and genuinely so (nobody held Strength that run), not a
+wiring gap. The headline SPEC §3 requirement is implemented.
+
+**E11/E3/E4/E5/E6.** `featurize.py` restored 27 → 614 lines; the inlined substitute
+at `live_belief.py:162-273` (constant Φ, radius 2.0, extra normalization) deleted;
+`LiveBelief` is now an adapter onto the canonical stages. **E3 measured for the first
+time on real geometry: support radius 0.0 → 0.641 — an OUTPUT of a bisection, not a
+constant — with the all-cell median receptive fraction inside [5%,15%] on 62/62
+ticks.** Full pipeline over 62 ticks in 0.61 s, so it is affordable at live cadence.
+
+**C1/C2/C3.** `gram.py`: `G = (ZA)(ZA)ᵀ/d + E·w_rel` — `Z M Zᵀ` with a learned PSD
+metric plus an additive bilinear relation term. No softmax anywhere; `relattn.py`
+deleted; `GramSwiGLU` raises below 128d. The Gram lands IN the IR (perturbing
+`w_metric` moves it by 3.02, `w_rel` by 2.67) and the reward gradient reaches it.
+Count-invariance across 62 real states × 51 instrument counts and n∈{2,3,5,8,12}:
+shapes and object identity constant. Renormalizing by `d` instead of `√d` was
+required — at 128d the old scaling overflowed the DPP inverse (`LU factorization
+failed 257`) on real rows.
+
+**C12/D2.** `RoleValueHead` is `nn.Linear(width, 1)` — actual linear probes.
+
+**D12.** Architecture fingerprint + `strict=True`; the 16d-era `policy_online_v3.npz`
+is REFUSED with both parameter lists printed. The hardcoded 14-leaf loader is gone.
+
+**D13.** Ring buffer (2048 transitions / 256 MB, oldest-out); `flush()` pushes the
+credited segment then takes `replay_steps` sampled steps; off-policy correction is
+the pre-existing clipped ratio. Measured: **gradient steps/transition 1.000 → 5.000,
+mean age of sampled transitions 0 → 91, held-out critic MSE 0.01254 → 0.01066
+(−15%)**. Atomic checkpoint 257 MB in 0.34 s, resume 2.75 s with buffer restored.
+
+**I9 (learner half).** `--secs` and the deadline loop deleted outright; the loop runs
+until SIGINT/SIGTERM/SIGHUP and drains into the final flush + checkpoint.
+
+**Defect fixed.** `strat_responder` set `previous = None` whenever the instrument
+batch changed, so on runs where the instrument set turns over every tick the learner
+saw **zero** transitions.
+
+**C11 → `[~]`, honestly.** R19's headline is gone: trained and random-init no longer
+agree, and at 1 epoch the trained IR beats random-init on 9/11 targets and beats a
+128d random projection on `cart_depth_total`, `kind`, `team` and `weapon_bit` —
+weapon identity decodes better from the trained IR (0.910) than from a random
+projection of the inputs (0.843), which was impossible when the field was zeroed. But
+it is not a clean win: decodability **degrades monotonically with training** (speed
+r² → −0.98 at 11400 updates) as the IR collapses onto the value-relevant subspace —
+R19's analytic caveat, now measured as a curve. The binding constraint is **data**
+(62 lines, one `(k,j,l)` shape), not the architecture.
+
+**Open hand-off (I9 supervisor half).** `curriculum.py:343` still passes
+`--train --secs <duration>` and will now `SystemExit(2)`; `xonotic/README.md:17` has
+the same stale invocation. Also reported: the OBS/EVT schema carries `CELL` but no
+waypoint-link table, so V-cell stage 2 unions observed cell transitions with a 2-NN
+stand-in rather than literally fusing contiguous *navigable* paths.
