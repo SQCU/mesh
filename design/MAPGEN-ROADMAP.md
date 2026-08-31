@@ -104,3 +104,59 @@ problems, and an agent facing a conjunction it cannot win honestly reaches for a
 a tuned constant, or a refusal. The generator is the counter-example — narrow scope,
 honest scope, correct by construction, and it *also* fixed the toolchain the coupled work
 depends on.
+
+## Stage 2b — region transitions are tweened, not avoided (owner, this session)
+
+Measured from the shipped 29-tile BSP: **14 distinct sky shaders**
+(`skies/{calm_sea, distant_sunset, exosystem2, exosystem2_high_elevation,
+extragalactic_asteroids, extragalactic_planets_intensity_256, heaven,
+polluted_earth, purple_nebulae}` plus per-map skies from `glowplant`, `implosion`,
+`space-elevator`, `warfare`, `xoylent`) and **49 texture sets** across 652 shader refs
+(634 actually referenced by faces). Lateral movement changes which are active.
+
+An earlier note here proposed designing so that sky-bearing volumes are never
+co-visible. **That is superseded.** The owner:
+
+> lets handle this by simply telling the agent working on this to handle an expanded
+> requirement to make procedural tweening for skyboxes and distant lod geometry as
+> players switch which area they're in. any compute shader the agent can come up with
+> is probably fine, but you could use 5 different compute shaders within the same map
+> for different intra-map-region transitions
+
+So the inherited variety is the *material*, not the defect: a region change should
+**tween** — sky and distant LOD silhouette cross-fading as the player traverses an
+aperture — so the transition reads as travel between worlds. Per-transition variety is
+explicitly wanted (~5 distinct treatments within one map), keyed to the transition type:
+a corridor join, a teleporter join and a vertical shaft need not blend the same way.
+
+Constraints carried with it:
+- **Composes with VIS; does not replace it.** Real visdata is what stops all 14 skies
+  and 200,946 faces being candidates every frame; tweening over an unculled world
+  increases fill cost. VIS first, then tween between what VIS makes distinct.
+- **Mechanism is latitude, not licence.** DarkPlaces is idTech3-derived; a compute-shader
+  pipeline may not exist. Build on what the engine actually offers (Q3 `.shader`
+  multi-stage blending with distance/portal-driven alpha, the DarkPlaces GLSL path,
+  CSQC-driven blend parameters) and report honestly if a desired effect is unreachable.
+- **Evidence is a rendered mid-blend frame**, not a description.
+
+### Why this section exists at all: the rendering failure it comes from
+
+The same BSP inspection that produced these counts also explains the owner's report of
+"incredibly bad occlusion, texturing, and draw call latency", and the observation that
+panning the camera at one spawnpoint retextures the whole scene with no movement:
+
+    Visdata      len = 0            <- no PVS whatsoever
+    Lightvols    len = 0            <- no light grid
+    Lightmaps    len = 49152        <- ONE 128x128 lightmap for a 166 MB world
+    LEAFS        67416 leafs, distinct cluster indices = 2 -> {-1 solid, 0}
+    FACES        200946   (187338 reference lightmap 0; 11449 LIGHTMAP_BY_VERTEX; 2159 none)
+    SHADERS      652 refs, 634 referenced by faces, across 49 texture sets
+
+Face→texture indices are all in range, so this is not static corruption. With empty
+visdata the visible set is the entire world, so 634 shaders are live at once and the
+texture cache thrashes as the frustum sweeps — the "retexture on yaw" is the *visible
+set* changing, not the position. Occlusion, draw calls, and the retexturing are one
+bug with three faces, and its cause is that `mapfuse` wrote BSP lumps directly and
+therefore had to synthesize the tree, VIS and lightmaps itself — faking the lightmap
+grey and shipping empty visdata — compounded by an earlier deliberate single-cluster
+PVS collapse of mine, introduced to stop `sv_cullentities` dropping bots.
