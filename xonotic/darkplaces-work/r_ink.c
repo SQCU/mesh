@@ -11,7 +11,7 @@ cvar_t r_ink_roughness = {CVAR_SAVE, "r_ink_roughness", "0.14", "roughness a ful
 cvar_t r_ink_tint = {CVAR_SAVE, "r_ink_tint", "0.85", "how far a fully inked surface's albedo moves toward the ink colour"};
 cvar_t r_ink_f0 = {CVAR_SAVE, "r_ink_f0", "0.09", "normal-incidence reflectance of the ink film (0.05 rubber, 0.09 wet)"};
 cvar_t r_ink_intensity = {CVAR_SAVE, "r_ink_intensity", "1", "global multiplier on accumulated coverage"};
-cvar_t r_ink_noisescale = {CVAR_SAVE, "r_ink_noisescale", "34", "splatter cell frequency across the ink volume"};
+cvar_t r_ink_noisescale = {CVAR_SAVE, "r_ink_noisescale", "170", "splatter cell frequency across the ink volume"};
 cvar_t r_ink_noiseedge = {CVAR_SAVE, "r_ink_noiseedge", "0.22", "softness of the splatter edge (0 = hard cut)"};
 cvar_t r_ink_skytint = {CVAR_SAVE, "r_ink_skytint", "1", "let accumulated ink tint the sky as well as the world"};
 
@@ -87,7 +87,7 @@ static void R_Ink_Fill_f(void)
 		VectorSet(color, atof(Cmd_Argv(1)), atof(Cmd_Argv(2)), atof(Cmd_Argv(3)));
 	amount = Cmd_Argc() >= 5 ? atof(Cmd_Argv(4)) : 1.0f;
 	for (i = 0; i < 3; i++)
-		cb[i] = (unsigned char)bound(0, (int)(color[i] * amount * 255.0f + 0.5f), 255);
+		cb[i] = (unsigned char)bound(0, (int)(bound(0.0f, color[i], 1.0f) * amount * 255.0f + 0.5f), 255);
 	for (i = 0; i < r_ink_state.numtexels; i++)
 	{
 		unsigned char *px = r_ink_state.pixels + i * 4;
@@ -201,7 +201,7 @@ void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float am
 {
 	int i, x, y, z, lo[3], hi[3], stridey, stridez;
 	float r2, ir2, cx, cy, cz, dx, dy, dz, w, sa, oa;
-	unsigned char cb[3];
+	float cf[3];
 
 	if (!r_ink_state.enabled || radius <= 0.0f || amount <= 0.0f)
 		return;
@@ -217,7 +217,7 @@ void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float am
 	}
 
 	for (i = 0; i < 3; i++)
-		cb[i] = (unsigned char)bound(0, (int)(color[i] * 255.0f + 0.5f), 255);
+		cf[i] = bound(0.0f, color[i], 1.0f);
 	r2 = radius * radius;
 	ir2 = 1.0f / r2;
 	amount = bound(0.0f, amount, 1.0f);
@@ -255,10 +255,11 @@ void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float am
 				// covers an earlier one, and repeated passes saturate toward opaque
 				px = r_ink_state.pixels + (z * stridez + y * stridey + x) * 4;
 				oa = px[3] * (1.0f / 255.0f);
+				// BGRA in memory; every term here is 0..1 and is scaled to bytes once
 				sa = w;
-				px[0] = (unsigned char)bound(0, (int)((cb[2] * sa + px[0] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
-				px[1] = (unsigned char)bound(0, (int)((cb[1] * sa + px[1] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
-				px[2] = (unsigned char)bound(0, (int)((cb[0] * sa + px[2] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
+				px[0] = (unsigned char)bound(0, (int)((cf[2] * sa + px[0] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
+				px[1] = (unsigned char)bound(0, (int)((cf[1] * sa + px[1] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
+				px[2] = (unsigned char)bound(0, (int)((cf[0] * sa + px[2] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
 				px[3] = (unsigned char)bound(0, (int)((sa + oa * (1.0f - sa)) * 255.0f + 0.5f), 255);
 				r_ink_state.texelswritten++;
 			}

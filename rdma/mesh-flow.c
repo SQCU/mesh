@@ -257,10 +257,12 @@ region:
     double tn=now();
     if(tn-tel>=1){
       if(who && kill((pid_t)who,0) && errno==ESRCH){
-        for(int i=0;i<pool;i++) if(own[i]==APP) GIVE(i);
-        for(int k=0;k<NRING;k++)
-          atomic_store_explicit(&M->r[k].tail,M->r[k].head,memory_order_release);
-        atomic_store_explicit(&M->client,0,memory_order_release); }
+        uint64_t old=who;
+        if(atomic_compare_exchange_strong_explicit(&M->client,&old,0,
+              memory_order_acq_rel,memory_order_acquire)){
+          for(int i=0;i<pool;i++) if(own[i]==APP) GIVE(i);
+          for(int k=0;k<NRING;k++)
+            atomic_store_explicit(&M->r[k].tail,M->r[k].head,memory_order_release); } }
       for(int s=0;s<NOWN;s++){
         atomic_store_explicit(&M->mean[s],(uint64_t)w[s].mean,memory_order_relaxed);
         atomic_store_explicit(&M->sd[s],(uint64_t)sqrt(w[s].n>1?w[s].m2/(w[s].n-1):0),memory_order_relaxed);

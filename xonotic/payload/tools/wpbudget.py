@@ -773,6 +773,7 @@ def main():
     if a.mode == "profile":
         recs = []
         for b in [int(x) for x in a.bs.split(",")]:
+            eb = None
             if a.mappk3:
                 src = Path(a.mappk3)
                 tag = (a.tag or "prof") + f"-b{b}"

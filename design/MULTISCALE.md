@@ -1,11 +1,11 @@
-# MULTISCALE.md — two nested subgames, one closed-form price, a statewise policy
+# MULTISCALE.md — two nested subgames, two value estimators, a statewise policy
 
 This document fixes the single most load-bearing idea in the project and the one agents
 keep dissolving into an ML default: **the problem is multiscale.** There are two
-subgames at two scopes; only one of them is closed-form-interpretable; and we use that
-one to *price every state* of the other. Nothing here is sequential, stateful, or
-recurrent. We are not learning to *play through time* — we are learning to **price all
-states along a game history** and act statewise.
+subgames at two scopes; only one of them is closed-form-interpretable; and its sparse
+role rewards train two value estimators over the other. The learned operator is
+feed-forward and acts statewise; training observes real transitions without putting
+recurrence into the policy.
 
 ## 1. The two subgames (two scopes)
 
@@ -60,16 +60,16 @@ We do **not** price states with the score, and we do **not** train on the termin
   **formally unable to notice it is being ganged up on** — the identity of who is
   ganging whom is a function of *all teams'* cartstates (the hierarchy/succession), and
   the win-scalar does not carry it. RLVR also replaces an available analytic quantity
-  with a high-variance sparse-reward estimator: we can compute the advantage in closed
-  form, so we do not need to bootstrap it from a terminal outcome.
+  with a single terminal scalar that discards the role transition where the useful
+  training event occurred.
 
-The multiscale structure is exactly what lets us avoid both: **price subgame A in
-closed form, and use that price on subgame B.**
+The multiscale structure is exactly what lets us avoid both: **derive separate sparse
+W/L rewards from subgame A and learn their values over subgame B.**
 
-## 3. The closed-form price (the tractability trick)
+## 3. The two role values
 
-We cannot price B. We *can* price A. So the pipeline computes a per-state price from A
-and hands it to the policy acting in B.
+The cart projection supplies the current role and the sparse events that ground two
+different value estimators over the full Xonotic state.
 
 1. **Semantics** — from cartstate, closed-form: `PW`, `SUCC`, `N_i`. Who is the
    projected winner and what is the succession if the leader is denied.
@@ -79,46 +79,35 @@ and hands it to the policy acting in B.
    > cyclic positions are kept explicitly unresolved. The cart path is the Generalized
    > Geography carrier of each heap's magnitude.
 
-2. **Price** — a per-team **advantage** from convex/control-theoretic tools, asymmetric
-   by role: `W` for a team that holds the path (preserve the winning region, restore its
-   margin under perturbation); `L` for a team that does not (climb the hierarchy, deny
-   the leader, acquire). This is a control signal, not a bootstrapped reward.
-   > "No-regret learning dynamics ensure that a learner asymptotically achieves an
-   > average reward no worse than that of any fixed strategy. **This no-regret guarantee
-   > does not determine the value of the asymptotic average reward.**" — Abdelraouf &
-   > Shamma, *Can a Learner Regret Using a No-Regret Algorithm?* (arXiv:2603.03173).
-   >
-   > "We cast the global comparison … as an optimal-control problem and show that **the
-   > minimal cumulative reward gap is zero**, thereby establishing global uniform
-   > dominance of anticipatory replicator dynamics … for arbitrary payoff trajectories."
-   > — ibid., §VIII-C.
+2. **Estimate** — `W` learns the return of the sparse event in which the current winner
+   loses its path. `L` learns the return of sparse upward flips in rank among losers;
+   holding or losing rank has zero immediate reward, and acquisition is the final upward
+   flip. They are separate linear probes on the final IR, not symmetric duals and not a
+   separate hand-built controller. A W return never bootstraps from L, and an L return
+   never bootstraps from W; changing role terminates the old role's return.
 
-   The `W` objective *is* that paper's control picture: hold a target region and keep
-   reachability margin so adversarial disturbances (the ganging) can be corrected. The
-   "who is the key player to deny" readout is the network-games intercentrality of
-   Ballester–Calvó-Armengol–Zenou — a closed form over the same coupling.
-
-3. **Act** — the price is the learning signal for a policy that acts through the **full
-   B abstraction**: which resources to dominate (health/ammo/guns), which rival to
+3. **Act** — the role-selected temporal-difference advantage is the learning signal for
+   a policy that acts through the **full B abstraction**: which resources to dominate
+   (health/ammo/guns), which rival to
    focus, which cart to push — to *prevent perturbation of the winning state*. The
    policy is a **learned filter on full resource state**: e.g. whether a bot holding a
    rocket launcher should run at the cart (spend the resource lead) or at more health/
-   ammo (extend it), *and* which cart — a decision the closed-form price makes
-   learnable without ever pricing B directly.
+   ammo (extend it), *and* which cart.
+
+The locally action-linear dynamics ensemble estimates unknown action effects and can
+guide exploration. It does not redefine either value estimator or replace their
+rewards.
 
 ## 4. Statewise, not sequential — no recurrence
 
-There is **no sequential or stateful learned model, and no recurrence.** The hard
-sequential reasoning (succession, backward induction) is *closed-form per state* in
-subgame A, so the learned part never has to unroll time.
+There is **no recurrent policy or recurrent value model.** The hard succession and
+backward-induction features are closed-form per state in subgame A. Real transitions,
+replay, and temporal-difference returns train feed-forward estimators without an RNN.
 
-- A "game history" is a **bag of priced states**, not a sequence to recur over. Each
-  observed state is priced by the closed-form A-solver; the policy learns from the
-  set.
+- A game history supplies transitions and role rewards; replay does not impose a
+  recurrent architecture.
 - The policy is a **statewise map** `state → per-player action distribution`, trained to
-  act well given the per-state price. We interpret **entire multiplayer games
-  state-by-state** and use closed-form solvers to get strong strategies — precisely
-  because the closed form removes the need to learn temporal credit assignment.
+  act well given the role-selected value and advantage.
 
 This is why the learned operator is **shallow-and-wide (a big Gram + SwiGLU), not a deep
 multi-head-attention-resnet and not an RNN.** Depth/recurrence would only be forced if
@@ -139,13 +128,13 @@ flowchart TD
   X -- "featurize (per-player rows: resources, belief)" --> F["feature rows R0 = W_q[x ; belief]"]
 
   C -- "closed-form nim / Sprague-Grundy" --> PW["PW, SUCC, N_i  (who is winning; succession)"]
-  PW -- "convex / control-theoretic (W preserve+margin, L climb+deny)" --> ADV["per-team role price: advantage A_W / A_L"]
+  PW -- "asymmetric sparse role rewards" --> VAL["linear W and L value probes"]
 
   F -- "big all-to-all Gram over ALL player rows (O(n^2), mesh-saturating)" --> G["coupled rows R'"]
   PW -. "closed-form succession as a feature, not learned" .-> G
   G -- "SwiGLU + value heads" --> POL["statewise policy: per-player instrument weights"]
 
-  ADV == "per-STATE price = learning signal (NOT reward=score, NOT RLVR=win)" ==> POL
+  VAL == "role-selected TD advantage" ==> POL
 
   POL -- "target weights -> stock navmesh + point-and-shoot" --> ACT["actions in s_B: push cart / grab health-ammo-gun / focus key rival"]
   ACT -- "changes s_B (fast), and occasionally flips s_A (slow)" --> X
@@ -156,9 +145,9 @@ Text form of the same graph:
 ```
  full Xonotic state s_B ──coarse-grain──► cartstate s_A ──nim/SG──► PW,SUCC,N_i
         │                                                              │
-        │                                              convex/control  ▼
-        │                                            role price: A_W / A_L (per state)
-        │                                                              │  (learning signal)
+        │                                              sparse rewards  ▼
+        │                                                   W head / L head
+        │                                              selected advantage
         └──featurize──► player rows ──BIG GRAM (all-to-all, O(n^2))──► R' ─SwiGLU/value─► statewise policy
                                             ▲ (SUCC as feature)                 │
                                             └── closed-form, not learned        ▼
@@ -169,9 +158,10 @@ Text form of the same graph:
 
 ## 6. What this forbids
 
-- No pricing of subgame B directly (intractable) — price A, apply on B.
+- No analytic pricing of subgame B directly — learn W/L values over its state from the
+  sparse cart-subgame events.
 - No `reward = score`, no whole-game RLVR — both degenerate (§2).
-- No recurrence, no sequential learned state machine — statewise pricing only (§4).
+- No recurrent learned state machine — feed-forward values and policy (§4).
 - No deep attention/resnet in the learned operator — the depth is closed-form in A; the
   learned part is one big Gram + SwiGLU (§4, and the expressivity note in the strategy
   spec).

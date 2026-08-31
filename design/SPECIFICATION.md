@@ -172,6 +172,28 @@ caches rather than specifications.
 > if we wrote our linear algebra correctly we should not need to 'test' our code on
 > fake resimulations of a videogame that is itself a literal simulation. like, ever.
 
+## 14. W and L stay separate through reward, value, and policy advantage
+
+User, 2026-08-30, this session:
+
+> there are two value estimators: W-heads and L-heads. W-heads have one sparse reward
+> they learn to estimate. L-heads have another sparse reward they learn to estimate.
+> winning teams are always policy optimized from the W-value. non-winning teams are
+> always policy optimized from the L-value.
+
+## 15. L reward is the positive loser-rank-flip event
+
+User, 2026-08-30, this session:
+
+> the L-sparse-reward comesf rom first knowing what the loser hierarchy is, and
+> produces sparse reward events for those teams who increase their rank-among-losers,
+> null otherwise (losing rank is null, gaining rank is positive, holding rank is null).
+> this, if strictly implemented and actually done right instead of wrong, would train a
+> value head to estimate states which are closer and closer to a rank flip, and assign
+> higher relative advantage to the teams that are closer to flipping cartstate ranks
+> relative to other teams, meaning that losers about to lose even harder get even more
+> relative negative advantage compared to losers who are increasing rank...
+
 ---
 
 ## Provenance law (carried from the agentfile / vine-polycompiler stratagem)
@@ -187,7 +209,7 @@ caches rather than specifications.
 >    is not only epistemologically certain to not be from the user, it is also
 >    epistemologically certain to be a lie.
 
-Consequence: everything normative in this project's docs must reduce to a §1–§13
+Consequence: everything normative in this project's docs must reduce to a §1–§15
 quote above, or to code/algebra/proof. Papers (Abdelraouf–Shamma, Burke–Ferland–
 Teng, Ballester) are **level-3 support**, admissible only as verbatim quotes of
 their text, and are **never** the spec — a doc that cites a paper as the spec (e.g.

@@ -382,7 +382,12 @@ pages — per death.
 The bridge keeps a bitmap of delivered pages, one bit each, `npages/8` bytes. On the census
 tick it checks whether the attached client still exists, and if `kill(pid, 0)` reports `ESRCH`
 it returns every marked page to the pool, resets the three ring cursors so no stale descriptor
-survives, and clears the client. The check is once a second and outside the data path.
+survives, and clears the client. Clearing is a compare-exchange against the dead PID. A
+replacement application may register between the census's PID load and its liveness check;
+the compare-exchange then fails and preserves the replacement instead of silently detaching
+it. This race was observed by restarting the cross-RDMA Xonotic strategy responder: the first
+replacement attached but received zero frames, while a later replacement worked. The check is
+once a second and outside the data path.
 
 Measured: an application exiting with pages outstanding leaves `held=4055`, and one tick later
 `held=0` with the census closing exactly at 244140/244140.
