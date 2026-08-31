@@ -1175,30 +1175,50 @@ the expensive search branch.  At the 2-6 tile target NOTHING is decimated:
 | k=4 | 210 | **0** | — |
 | k=6 | 740 | **0** | — |
 
+**The combat column is DENSITY-CONFOUNDED across scales and must not be read as a
+navigation metric.**  k=6 is a 57.9 MB world against k=2's 11.3 MB with the same
+12 bots, so encounters are rarer by construction: k=6 logs 41 frags to k=2's 130
+while being healthier than k=2 on every direct navigation measure.  World volume,
+not navigability, dominates that number.  It is kept here only because the
+29-tile figure is a within-world before/after against its own corrected count,
+which is a valid comparison; the cross-scale rows are not, and the per-decision
+`markroutes/goalrating_start` ratio above is the metric that survives because it
+is scale-free.
+
 Measured at target scale rather than inferred (120 s settle, 60 s bracketed
-window, B=12, fresh userdir per run, both maps verified distinct on every
+window, B=12, fresh userdir per run, every map verified distinct on every
 counter):
 
-| world | src wp | used | decim | unstuck calls / 60 s | statements | stmt/call | frags/180 s |
-|---|---|---|---|---|---|---|---|
-| k=2 | 268 | 268 | 0 % | 1 266 | 0.80M | 630 | 130 |
-| k=6 | 816 | 816 | 0 % | 3 011 | 2.61M | 867 | 21 |
-| 29-tile | 3325 | 604 | 96 % | 12 099 | 71.9M | 5 946 | 4 |
-| 29-tile | 3325 | 1100 | 67 % | 11 815 | 70.2M | 5 945 | 2 |
+| world | src wp | used | decim | unstuck / 60 s | statements | **stmt/call** | markroutes/goalrating | **% proceed** |
+|---|---|---|---|---|---|---|---|---|
+| k=2 | 268 | 268 | 0 % | 1 266 | 0.80M | 630 | 256/293 | **87 %** |
+| k=6 | 816 | 816 | 0 % | **612** | 0.55M | 897 | 193/198 | **97 %** |
+| 29-tile | 3325 | 604 | 96 % | 12 099 | 71.94M | 5 946 | 26/189 | **14 %** |
+| 29-tile | 3325 | 1100 | 67 % | 11 815 | 70.24M | 5 945 | 24/165 | **15 %** |
 
-The 29-tile world is **9.6x k=2 in call rate and 90x in statements** — the calls
-are also ~9x more expensive each, so both frequency and severity.  Decimation is
-not a coincidence.
+**Decimation is the SOLE identified driver.**  An earlier draft of this section
+claimed a second, independent tile-count term, on the evidence that k=6 was 2.4x
+k=2's unstuck rate at 0 % decimation.  That was wrong, and it was wrong because
+of a defect of mine: k=6 was then carrying 28 305 degenerate brushes (§8.11).
+Re-profiled after the fix, k=6's unstuck rate fell **3 011 -> 612, a drop of
+80 %, landing at 48 % of k=2's**, and its goal-planning proceed rate rose to
+97 % — the best of any world measured, k=2 included.  There is no positive
+tile-count penalty detectable at k=6 at all.  The honest claim is now simpler and
+stronger than the one it replaces: **0 %-decimated worlds proceed on 87-97 % of
+goal-planning attempts; the 96 %-decimated 29-tile world proceeds on 14 %.**
+Nothing else in the measured set moves that number.
 
-**But it is not the only driver, and the second one is mine.**  k=6 decimates
-NOTHING and is still 2.4x k=2's unstuck rate.  The reason is a defect in the fuse
-geometry path: k=6 shipped **56 632 `Collision_ValidateBrush` errors** — 28 311
-of each of two messages in a single 180 s run, i.e. the engine revalidating
-broken brushes every frame.  Counted directly in the BSP: **28 305 of k=6's
-129 323 solid brushes had a crossed AABB** (k=2 had 0, which is why k=2 is
-clean).  So the honest statement is: **decimation is the dominant driver at 29
-tiles, with a second, independent tile-count term visible at k=6** — and that
-second term was a bug, diagnosed in §8.11 below.
+**Severity is a decimation effect too, and it is the larger half.**  Cost per
+unstuck call is 630 / 897 / 5 946 statements at k=2 / k=6 / 29-tile: the 29-tile
+world is ~7x more expensive PER CALL on top of being ~10-20x more frequent, and
+that product is the 90x statement gap.  A sparser graph makes each unstuck search
+longer — the same mechanism as the NULL-`fixed_source_waypoint` branch above, not
+an independent finding.
+
+(Stated conservatively: the 612 figure is one 60 s window and carries the same
+roster-dependent variance as the markroutes edge.  The direction is 5x and far
+too large to be noise, but this is recorded as "no tile-count penalty is
+detectable at k=6", not as the positive claim "6 tiles beats 2 tiles".)
 
 **The entity budget is not the binding constraint.**  At n=604/B=12, with the
 `.ent` taken from the installed pk3 rather than from a mismatched artifact:
@@ -1326,14 +1346,21 @@ Nothing can be culled, so every face is submitted every frame: that is one fact
 with two symptoms (occlusion and draw-call latency). The single-cluster collapse
 made it deliberate and it cannot be undone without real VIS to replace it.
 
-The proposed fix — emit `.map` source and let q3map2 compute tree, VIS, lightmaps
-and collision — is right in principle and is what `mapgen.py` already does for
-procedural tiles. For the FUSED world it additionally requires decompiling 29
-stock BSPs to brush source, and the measured cost of that is in the table above:
-**13 091 patch faces** carry no brush representation at all and would be lost,
-and brush-face texture alignment is not recoverable from a BSP (the lump stores
-surface UVs, not the face texdefs q3map2 needs). That is a real obstacle, not a
-scheduling one, and it should be decided before the work starts.
+The fix — emit `.map` source and let q3map2 compute tree, VIS, lightmaps and
+collision — is right, and it is DONE; see §8.12.
+
+**The obstacle this section originally claimed does not exist, and the claim was
+wrong.**  It said the route was blocked for the fused world because 13 091 patch
+faces have no brush representation and would be lost, and because brush-face
+texture alignment is not recoverable from a BSP.  Both are false: q3map2
+decompiles its own format.  `-convert -format map_220 -readbsp` returns
+Valve-220 source with explicit texture AXES — alignment is exact, not defaulted —
+and real `patchDef2` blocks.  Verified on trident: **599 brushes -> 599 brushes,
+177 patch faces -> 177 patchDefs, 97 entities**, and the recompiled source yields
+484 clusters / 30 920 bytes visdata / 56 749 light-grid entries against the stock
+map's 489 / 31 240 / 56 749.  I asserted a blocking obstacle without testing the
+tool that removes it, and that assertion would have deferred the single most
+valuable fix in this document.
 
 **Skybox / distant-LOD tweening.** Not implemented. What the engine actually
 offers, checked in this DarkPlaces tree rather than assumed:
@@ -1558,6 +1585,13 @@ volume in this toolchain should be treated as suspect until its direction is
 checked — containment is sound for proving emptiness and unsound for proving
 anything else.
 
+**Confirmed by re-profiling after the fix:** k=6's `navigation_unstuck` rate fell
+**3 011 -> 612 per 60 s (-80 %)** and its goal-planning proceed rate rose
+**84 % -> 97 %**, on a rebuilt pk3 logging 3 `Collision_ValidateBrush` lines in a
+whole run against 56 632 before.  So the degenerate brushes were not a cosmetic
+warning: they were degrading bot navigation measurably, and they were the entire
+content of what §8.6 had briefly attributed to tile count.
+
 **A second bug the first one was hiding.** With the exact guard in place the carve
 became unaffordably slow, and the reason was not the guard. `split_brushes` was
 called once per 512-unit corridor SLAB, and the slab bounding boxes overlap, so a
@@ -1589,3 +1623,56 @@ warnings) whose cause was two levels down. Second, a correctness fix that looks
 unaffordable is worth one round of asking WHY before it is weakened: here the
 guard was innocent and the real defect was a 10x redundancy that had been
 inflating every brush count in this document.
+
+### 8.12 The lump writer is replaced: real VIS, lighting and light grid
+
+`mapsrc.py` assembles a fused world as q3map2 `.map` SOURCE and compiles it,
+instead of writing BSP lumps. Three stages, each verified before the next:
+
+**1. Stock BSP -> source, losslessly.** `q3map2 -convert -format map_220
+-readbsp` (trident): 599 brushes -> 599, 177 patch faces -> 177 `patchDef2`, 97
+entities. Recompiled it gives 484 clusters / 30 920 visdata / 56 749 lightvols
+against stock's 489 / 31 240 / 56 749.
+
+**2. A parser that is provably lossless.** `parse_map` -> `write_map` ->
+q3map2 reproduces the direct compile EXACTLY: 599 brushes, 1623 faces, 484
+clusters, 30 920 visdata on both paths. Two structural traps were found by
+testing rather than by reading: `patchDef2` carries an inner brace block, and its
+dimension line `( 9 3 0 0 0 )` is a 5-tuple indistinguishable from a control
+point, so a naive rewrite corrupts it. Patches are therefore preserved VERBATIM
+and only lines holding nested tuples are translated.
+
+**3. Placement, including texture alignment.** In Valve 220,
+`u = (P . axis_u)/scale_u + shift_u`, so translating geometry by `t` requires
+`shift_u' = shift_u - (axis_u . t)/scale_u`. Getting that wrong is invisible in
+geometry and glaring in game, so it lives in `Face.translate` and nowhere else.
+
+**Result, k=2 (implosion + warfare) at the same pack offsets as the lump build:**
+
+| | visdata | lightvols | lightmaps | clusters | faces | shaders | size | server RSS |
+|---|---|---|---|---|---|---|---|---|
+| lump writer | **0** | **0** | 49 152 (one grey block) | **2** | 17 748 | 96 | 10.8 MB | 2.0 GB |
+| via q3map2 | **1 315 400** | **136 620** | **5 308 416** | **3 225** | 16 415 | 92 | 16.7 MB | **792 MB** |
+
+Compile: meta 3 s + vis 43 s + light 47 s = **93 s**, leak-free, 10 722
+worldspawn brushes and 822 patches from two tiles. VIS reports **average clusters
+visible 530.58, 16.46 % of total** — i.e. the renderer can now discard 83.5 % of
+the world from a typical viewpoint, where before it could discard none.
+
+**Real boot:** dedicated server, fresh userdir, `-sessionid`, verified-free port
+26170, `+bot_number 12 +skill 5`, held 180 s in-process: **alive at 180 s, 12
+bots connected and fighting, runaway=0, OBJECT ERROR=0,
+`Collision_ValidateBrush`=0**, 58 combat events, resident set **792 MB against
+the lump build's 2.0 GB**.
+
+**What is NOT yet done here, stated plainly.** This assembles and compiles the
+TILES at their packed offsets; it does not yet cut the doorways or emit the
+connector into `.map` source, so the two tiles are separate sealed hulls in one
+world and a bot cannot cross between them. The 58 combat events are therefore
+NOT comparable to the lump build's 14 — the topology differs, and per §8.6 that
+count is confounded anyway. What is established is placement, lossless source
+round-trip, texture-correct translation, a leak-free compile with full VIS and
+lighting, and a clean 12-bot boot. The carve and connector emission are the
+remaining work, and they are the part that must not leak: a corridor whose ends
+do not mate flush with the cut apertures opens the sealed hull to the void and
+q3map2 will refuse to run VIS at all.
