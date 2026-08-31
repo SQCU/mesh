@@ -1676,3 +1676,322 @@ lighting, and a clean 12-bot boot. The carve and connector emission are the
 remaining work, and they are the part that must not leak: a corridor whose ends
 do not mate flush with the cut apertures opens the sealed hull to the void and
 q3map2 will refuse to run VIS at all.
+
+### 8.13 The cut moves into source — proven, and one honest failure
+
+The framing correction is right: `q3map2` is a functor from source to compiled
+and `-convert -readbsp` is a section of it, so cutting a doorway as an
+endomorphism on BSP means re-deriving by hand everything the functor produces.
+That is why the lump writer shipped `Visdata len = 0`. `mapsrc.py` (~400 lines)
+moves the cut into source.
+
+**What is proven.**
+
+* Decompile is lossless (trident): 599 brushes -> 599, 177 patch faces -> 177
+  `patchDef2`, 97 entities; recompiled it yields 484 clusters / 30 920 visdata /
+  56 749 lightvols against stock's 489 / 31 240 / 56 749.
+* The parser is byte-equivalent: `parse -> write -> compile` reproduces the
+  direct compile exactly (599 brushes, 1623 faces, 484 clusters, 30 920 visdata).
+* Source CSG is volumetrically correct: subtracting an interior box from a box
+  gives 6 pieces, and over 20 000 random points **0** remain covered inside the
+  cut and **0** holes appear outside it.
+* Placement is texture-correct: Valve 220 needs
+  `shift' = shift - (axis . t)/scale`, applied in `Face.translate` alone.
+* k=2 placement compiles with real VIS and lighting, and boots clean:
+
+| k=2 | visdata | lightvols | lightmaps | clusters | server RSS |
+|---|---|---|---|---|---|
+| lump writer | **0** | **0** | 49 152 grey | **2** | 2.0 GB |
+| via q3map2 | **1 315 400** | **136 620** | **5 308 416** | **3 225** | **792 MB** |
+
+  93 s compile, leak-free; VIS reports **average clusters visible 16.46 %**, so
+  83.5 % of the world is now cullable where none was before. 180 s boot, 12 bots,
+  runaway=0, OBJECT ERROR=0, `Collision_ValidateBrush`=0.
+
+**Two bugs found by testing, not reading.** `box_brush` had four of six faces
+wound inside-out, so the connector tube was not solid at all and failed to seal —
+surfacing as a leak reported against an unrelated entity 1400 units away. And the
+connector requires cutting the whole CHANNEL through the tiles, not just the two
+aperture boxes: implosion ends at x=1752 and warfare starts at x=1816, so the
+tube's interior ran through ~1200 units of uncut geometry.
+
+**The honest failure: the join is sealed but NOT traversable.** The joined k=2
+world compiles leak-free (3 238 clusters, 16.54 % average visible, 54 lightmaps,
+87 s) and holds a 180 s / 12-bot boot with 102 combat events. But checking the
+SHIPPED BSP rather than trusting the compile:
+
+* a player box fits at only **7 of 29** points along the channel centreline,
+  blocked from x=1820 onward;
+* every free cell in the compiled world lies in **x -4584..1752 — implosion
+  only**;
+* the world model bbox is implosion's bbox, while warfare's brushes sit in the
+  lump OUTSIDE it.
+
+q3map2 filled warfare as "outside". So the leak-free result was in part sealing a
+world that had already lost a tile, and requirement 4 — bots crossing between
+tiles — is **not met**. The 102 combat events are implosion-internal.
+
+**Why warfare fills is not yet established.** The obvious hypothesis, that its
+sealing brushes come back as `detail` (which does not seal), is NOT supported:
+trident round-trips perfectly at 89 % detail faces while warfare fails at 38 %.
+So per-map decompilation fidelity varies for a reason still unidentified, and
+that is the next thing to measure — not more connector geometry.
+
+**Therefore the deletions are NOT performed.** `split_brushes`, `clip_faces`,
+`_convex_nonempty`, the lump writer and the single-cluster PVS collapse all
+remain. Deleting them now would leave the project with no path that produces a
+joined, traversable world: the BSP path makes one that is traversable but
+unrenderable, and the source path makes one that is renderable but not yet
+joined. Deleting the working half before the replacement is complete is how a
+project ends up with zero working paths rather than one. They should be deleted
+in the same change that first produces a traversable q3map2-compiled join, and
+that change is one diagnosis away.
+
+### 8.13a MERGE INVARIANT: no per-tile `common/lightgrid` brush may survive
+
+**A `common/lightgrid` brush CLIPS the compiled world to its own volume.  In a
+merged world every one of them must be dropped.**
+
+This is an invariant, not a workaround, and it fails silently and totally:
+implosion's lightgrid brush, once offset, spans exactly
+`[-4584,-3031,-590]..[1752,2857,1394]`, which is precisely the world-model bbox
+of every failing compile.  The other tile's brushes are still in the brush lump;
+its VOLUME is culled, q3map2 reports NO leak, and the map boots.  A tile
+disappears and nothing in the build log says so.  Anything that reintroduces a
+per-tile lightgrid brush loses a tile again, so the drop belongs in the
+placement step, unconditionally, for every tile.
+
+If a merged world wants a light grid it needs ONE brush spanning the fused
+bounds, authored after placement -- never the inherited per-tile boxes.
+
+The drop is therefore UNCONDITIONAL in `mapsrc.place_tile`, which is the single
+entry point for putting a map into a fused world.  Anything that places a tile by
+another route reintroduces the failure, so there should not be another route.
+
+### 8.14 One authored primitive, and the acceptance test
+
+**Consolidation.** `mapsrc.box_brush`/`tube` and `spiralgen.Brush`/`tri_prism`/
+`quad_prism` were two implementations of one insight, and their docstrings said
+the same sentence twice — spiralgen's "point winding is never trusted: normals
+are derived and then flipped to point away from the brush centroid", and
+mapsrc's, written only after a hand-ordered winding shipped four of six faces
+inside-out, "the winding is verified directly rather than trusted". Deriving the
+sign numerically is correct for any convex solid, so the general primitive
+absorbs the axis-aligned special case; `box_brush` and `tube` are deleted.
+
+The interface question was real: **spiralgen emitted the standard Quake face
+format** (`tex 0 0 0 sx sy flags`), not Valve 220, and a `.map` is one format
+throughout. Since the placed tiles are Valve 220, the primitive emits Valve 220,
+and the per-face texture-axis choice (by the normal's dominant axis, so no face
+gets a degenerate projection) now lives in `Brush.to_faces` once instead of at
+each call site.
+
+**The connector is a swept prism**, authored sealed: floor, ceiling and two walls
+offset along their own normals by `overlap * thickness` (default 2.0, per
+spiralgen — exact abutment leaves sub-unit slivers q3map2 reports as leaks). Its
+cross-section IS the aperture, so the opening is a parameter of the sweep.
+
+**`fused.joins.json` is emitted by the generator**, by construction rather than
+by archaeology. Contract taken from the four consumers rather than assumed:
+`maps[]` with `name/mins/maxs/bridge/degree/vantages`, `joins[]` with
+`a/b/kind/sa/sb/length/exclusive/prominent/cart_navigable`, `portals[]` with
+`tile/name/kind/axis/sgn/node/mouth/aperture`, and `bot_jumps`. Vantages are
+verified through `negspace.standing_point` — the same single definition of
+solidity, not a second one.
+
+**A merge rule found the hard way.** A per-tile `common/lightgrid` brush CLIPS
+the compiled world to its own volume. implosion's, once offset, is exactly
+`[-4584,-3031,-590]..[1752,2857,1394]` — precisely the model bbox every failing
+compile produced, with warfare's brushes present in the lump but culled from the
+world. Any merged world must drop them. This cost several cycles chasing
+"warfare's decompile fidelity", which was never the problem: warfare round-trips
+alone at 1366 clusters against stock's 1362.
+
+**Acceptance, k=2 (implosion + warfare):**
+
+| check | result |
+|---|---|
+| compile | leak-free, 124 s (meta+vis+light) |
+| visdata / lightvols / lightmaps | 1.3 MB / 387 600 / 5.4 MB |
+| clusters | **3 236** (lump writer: 2) |
+| average clusters visible | **16.43 %** — 83.6 % of the world cullable |
+| `fused.joins.json` | emitted: 2 maps (3 vantages each), 1 join, 2 portals |
+| **player box along the channel** | **35/35 points, 0 gaps — CONTINUOUS** |
+| **bots cross** | one navmesh component over both tiles (159 + 64 nodes); crossing path **6 waypoints, 1891 u, 6/6 admit a player box** |
+| 12-bot boot, 180 s | alive, runaway=0, OBJECT ERROR=2, `Collision_ValidateBrush`=**0**, 141 combat events |
+
+The connector waypoints are authored from the sweep too: reusing the previous
+build's waypoints put only 3 of 8 crossing nodes in free space, because they were
+laid for a 192x208 corridor and the sealed sweep is 128x112.
+
+**Not met: joinshot frames.** 0 of 6 captured. The client launches, takes a
+320x200 video mode and loads `maps/joinshotmap.bsp`, but never connects — the log
+ends in `Can't "join", not connected` and the step config sits at
+`// waiting for spawn`, so no frame is ever rendered and `screenshot` writes
+nothing. Two spawnpoints do still trip `relocate_spawnpoint` on this map, which
+a dedicated server survives and a listen server may not, but that is a
+hypothesis, not a diagnosis — I did not isolate it. Relocating those spawns is
+NOT the fix: `standing_point` legitimately found free space at z=-305, far below
+the play area, and a spawn moved there opened the hull. Dropping them is safe;
+testing `fits()` against a leaked BSP is not, because an unsealed compile skips
+fill-outside and the void then reads as free.
+
+
+### 8.15 joinshot: three stacked causes, and the frames
+
+The 0/6 capture was never one bug.  Peeling them in order:
+
+1. **Video.** The documented mechanism (`SDL_VIDEODRIVER=dummy` + `vid_soft 1`
+   -> DPSOFTRAST) cannot work with this build: the software surface in
+   `vid_sdl.c` is SDL 1.2 API against a binary linking SDL 2.32.70, and the dummy
+   driver has no GL to fall back to.  Fixed upstream in `bf36ab5` by taking a
+   real driver and a small window.
+2. **Wrong client.** joinshot launched the stock 2023 `Xonotic.app` binary, but
+   the basedir carries the project's `zzz-mesh-payload.pk3`, whose csprogs calls
+   builtins that binary lacks:
+   `Host_Error: No such builtin #656 in client; ... outdated engine build`.
+   It rendered fine and died on connect -- the SAME symptom as the dead video
+   path, from an unrelated cause.  Now prefers `darkplaces-work/darkplaces-sdl`,
+   overridable with `JOINSHOT_CLIENT`.
+3. **Wrong game.** That binary is generic DarkPlaces and boots `id1` without
+   `-xonotic`; the stock one defaults to Xonotic.  Added.
+4. **Wrong format.** This build has no PNG writer, so `scr_screenshot_png 1`
+   silently emits TGA -- 320x200x24 is 192 018 bytes EVERY time, content
+   independent, which both broke the void audit ("not a png") and made file size
+   meaningless as a black-frame signal.  Frames are now transcoded to real PNG.
+
+**Result: 6/6 frames, void audit PASS, 0 void/missing** -- both ways through the
+join and both ways through each of the two cut doorways:
+
+| frame | void | levels | size |
+|---|---|---|---|
+| j00_corridor_a_through | 0.49 | 13 | 43.0 KB |
+| j00_corridor_b_through | 0.18 | 18 | 54.7 KB |
+| p00_implosion_continue_in | 0.35 | 52 | 76.5 KB |
+| p00_implosion_continue_out | 0.89 | 43 | 34.2 KB |
+| p01_warfare_continue_in | 0.48 | 54 | 73.7 KB |
+| p01_warfare_continue_out | 0.77 | 43 | 45.3 KB |
+
+Against the committed samples' 77-87 KB: the two portal-interior frames land in
+band (76.5, 73.7).  The corridor frames were 16.5 and 38.5 KB while the connector
+was `common/caulk`; giving it real textures (`exx/floor-tread01`,
+`exx/base-crete03`, `exx/base-metal04`) took them to 54.7 and 43.0.  They remain
+below band because a swept box corridor genuinely has less to look at than a
+stock map's interior -- that is a content observation, not a rendering failure,
+and the void audit grades them 0.18/0.49 with 13-18 distinct levels.
+
+### 8.16 One oracle: `negspace` survives, `mapgen/oracle.py` retires
+
+Both answer solid_at / fits / floor_under / clearance / standable / trace.  They
+differ in method and in player model, and each was better at one:
+
+* **Method.** `mapgen/oracle.py` marches (`step=8.0` for trace, `step=4.0` plus
+  bisection for floor).  `negspace` is closed form -- a segment's intersection
+  with a convex cell is an interval, so there is no step size to quantise and
+  nothing to bisect away.  NAV-SPEC 10 is explicit that a point-sampled
+  is-this-solid check is a symptom of a missing stage, and soundness is measured:
+  0 false-free over ~26 000 sampled points on dance and warfare.
+* **Player model.** `mapgen/oracle.py` was better, and materially: it rests the
+  box on the MAX floor over nine footprint offsets, where `negspace` probed only
+  the centre.  Probing the centre reports a floor the box would intersect
+  wherever ground rises under a corner -- 36 % of a walkable helical corridor
+  condemned in the sibling's measurement.
+
+**Keep `negspace`, port the player model.**  Exactness cannot be retrofitted onto
+a marching oracle without rewriting it into `negspace`; the nine-point footprint
+is thirty lines and moves.  It is now in `negspace.floor_under(footprint=...)`,
+used by `standable` and `standing_point`, and `clearance` grows the BODY rather
+than reporting a displacement (which is 0 for any already-legal point and so
+useless as a room measure): 64 u in the 128-wide corridor, 325 u in implosion's
+open interior.
+
+The cost of the choice, stated: `negspace` reads the COMPILED bsp, so a
+source-side pre-check now needs a compile (124 s at k=2).  If pre-compile
+validation becomes load-bearing, the fix is to build the cell complex from
+authored source brushes in `negspace` -- not to reintroduce a second, sampled
+oracle.
+
+
+### 8.17 One oracle, two entry points -- and four bugs the fold exposed
+
+`mapgen/oracle.py` is DELETED.  `negspace` gained a SOURCE entry point
+(`from_brushes`) beside its compiled one, so `solid(p) == ns.cell_at(p) < 0`
+stays the only law and a generator validating what it just authored uses the same
+definition the fuser applies to what shipped.
+
+The two entry points differ only in representation, and deliberately:
+
+* **compiled** -- the BSP hands over bounded convex regions (leaves), so the free
+  volume is materialised as convex cells;
+* **source** -- there is no tree, and decomposing free space out of a grid is the
+  wrong shape (a 512-unit box over a spiral corridor meets dozens of brushes and
+  the convex subtraction explodes), so the SOLID brushes are kept and the law is
+  answered directly.  Every derived query is exact ray/box arithmetic against
+  them: a ray's intersection with a convex brush is an interval, a box test is
+  the engine's own plane-offset construction.
+
+**The pre-compile path is load-bearing, measured:** validating the assembled k=2
+source takes **1.4 s** and catches exactly the **2** spawnpoints that the engine
+otherwise reports as `relocate_spawnpoint` OBJECT ERRORs -- against **108 s** to
+compile first and find out.  After filtering, the 12-bot boot logs
+**OBJECT ERROR = 0**.
+
+Folding it exposed four bugs in code I had just written, each found by
+DIFFERENTIAL TESTING against the oracle being retired rather than by reading:
+
+1. **Brush bounds by interval propagation silently dropped brushes.**  Propagation
+   cannot bound an oblique prism, and the front end skipped what it could not
+   bound -- which was every plug brush, so sealed mouths read as open.  An
+   authored brush carries its polygons; its AABB is the range of those points.
+2. **Ray enter/leave branches inverted** relative to the (validated) compiled
+   path, so every downward ray reported the whole drop as free and nothing was
+   ever standable.
+3. **Box expansion sign inverted.**  The plane-offset test SHRANK each brush
+   instead of expanding it, so a box centred on a point the module itself called
+   solid still "fitted" -- a contradiction inside one module.
+4. **Orientation rule applied to the wrong input kind.**  A `Brush` holds real
+   polygons, so outward is resolved against the vertex centroid; a parsed `.map`
+   `Face` holds three PLANE-DEFINING points that are not vertices, whose centroid
+   is meaningless.  Using the centroid rule on parsed faces made single points
+   test inside 50-90 brushes of thousands of units each, and reported 16 of 23
+   stock spawnpoints as buried when the compiled world had 5.
+
+A fifth difference was not a bug but a missing model: source has no contents
+lump, so the compiled path's `contents & MASK_PLAYERSOLID` needed a name-based
+counterpart (`NONSOLID_SHADERS`).  `common/hint`, `skip`, `weapclip`, `botclip`,
+`donotenter`, `nodrawnonsolid` do not stop a player; `caulk`, `clip` and `nodraw`
+do and must keep blocking.
+
+**Agreement, measured.**  On spiral seeds 5/11/23, against the retired oracle:
+`solid_at` disagrees on **9 of 20 000** uniform random points, all in the
+0.10-0.25 unit band at brush surfaces where the two tolerances differ (ref
+`EPS=0.1`, negspace `tol=0.25`), and the direction is uniform -- **9 ref-free /
+negspace-solid, 0 the reverse**, so negspace is strictly the more conservative,
+which refuses a marginal placement rather than admitting a bad one.
+`floor_under` agrees 193/193 on both seeds.  `standable` differs by 2/193 because
+negspace models the TRUE Xonotic hull (32x32x**69**, mins -24 / maxs +45) where
+the oracle used a symmetric 32x32x48.  `e2e.py` passes on seeds 5, 11, 23 and 37
+with apertures, including the sightline and mouth-seal tests.
+
+**One semantic difference to know:** the compiled path sees what q3map2 SEALED
+(fill-outside makes the void solid), the source path cannot.  So a spawn outside
+the hull reads solid on the compiled side and free on the source side.  Neither
+is wrong; they are answering about different worlds, and the compiled answer is
+the one that ships.
+
+### 8.18 Two corrections to how this work is judged
+
+**File size cannot grade a frame on this engine.**  The acceptance criterion
+"sized like the committed samples, 77-87 KB" could not have distinguished a black
+frame from a good one: this build has no PNG writer, so `scr_screenshot_png 1`
+emits TGA, and 320x200x24 TGA is **192 018 bytes every single time**, content
+independent.  The void-fraction plus distinct-level audit is the measurement that
+works, and it should replace file size wherever the docs still cite it.  Current
+frames: 6/6, audit PASS, void 0.18-0.89, levels 13-54.
+
+**Any tool that launches a client must use the PROJECT build.**  joinshot reached
+`Xonotic.app/Contents/MacOS/xonotic-osx-sdl-bin` -- a fourth binary outside the
+tree -- while the basedir carries the project's `zzz-mesh-payload.pk3`, whose
+csprogs calls builtins that binary lacks (`No such builtin #656`).  It rendered,
+then died on connect, which is indistinguishable from a join bug.  Checking which
+binaries EXIST is not enough; what matters is which one a tool actually launches.

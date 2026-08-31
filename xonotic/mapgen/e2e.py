@@ -16,7 +16,14 @@ What it measures, all on the ASSEMBLED WORLD rather than on a proxy:
 """
 import argparse, sys, math
 import spiralgen as SG
-from oracle import Oracle
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', 'payload', 'tools'))
+# ONE definition of solidity.  `negspace.from_brushes` is the SOURCE entry point
+# of the same object the fuser uses on compiled worlds, so a generated map and a
+# shipped one are judged by the same law.  `oracle.py` was a second exact
+# implementation of it and is deleted.
+from negspace import from_brushes as Oracle
 
 
 def run(args):

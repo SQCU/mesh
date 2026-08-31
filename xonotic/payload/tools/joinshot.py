@@ -241,6 +241,50 @@ def frame_stats(path, dark=18, hud_rows=0.12):
     return dict(void=void / max(1, tot), levels=len(lum), w=w, h=h)
 
 
+
+def _tga_to_png(path):
+    """Transcode an uncompressed TGA in place to a real PNG.
+
+    This engine build has no PNG writer, so `scr_screenshot_png 1` silently
+    falls back to TGA -- 320x200x24 comes out as exactly 192 018 bytes every
+    time, content-independent, which is why the void audit read them as
+    UNREADABLE and why a raw TGA's SIZE says nothing about whether the frame is
+    black.  Re-encoding restores both the audit and the size signal."""
+    import struct as _s
+    import zlib as _z
+    d = open(path, 'rb').read()
+    if d[:4] == b'\x89PNG':
+        return False
+    if len(d) < 18 or d[2] != 2:
+        return False                      # not an uncompressed truecolour TGA
+    idlen = d[0]
+    w, h = _s.unpack_from('<HH', d, 12)
+    bpp = d[16]
+    desc = d[17]
+    B = bpp // 8
+    px = d[18 + idlen:]
+    rows = []
+    for y in range(h):
+        sy = y if (desc & 0x20) else (h - 1 - y)      # TGA is bottom-up by default
+        o = sy * w * B
+        row = bytearray(b'\x00')
+        for x in range(w):
+            b_, g_, r_ = px[o + x * B], px[o + x * B + 1], px[o + x * B + 2]
+            row += bytes((r_, g_, b_))
+        rows.append(bytes(row))
+    raw = b''.join(rows)
+
+    def chunk(tag, data):
+        c = _s.pack('>I', len(data)) + tag + data
+        return c + _s.pack('>I', _z.crc32(tag + data) & 0xffffffff)
+    png = (b'\x89PNG\r\n\x1a\n'
+           + chunk(b'IHDR', _s.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+           + chunk(b'IDAT', _z.compress(raw, 9))
+           + chunk(b'IEND', b''))
+    open(path, 'wb').write(png)
+    return True
+
+
 def void_audit(outdir, shots, void_max=0.90, levels_min=6):
     """Grade every captured frame.  A frame that is almost entirely near-black with
     almost no distinct luma levels is a VOID frame: the camera stood on real
@@ -404,11 +448,29 @@ def main():
     print('%d joins, %d regions -> %d camera frames' %
           (len(joins['joins']), len(joins['maps']), len(cams)))
     if args.audit_only:
+        for _n in shots:
+            _p = os.path.join(out, _n + '.png')
+            if os.path.exists(_p):
+                _tga_to_png(_p)
         return 0 if void_audit(out, shots) else 2
 
-    bin_ = os.path.join(args.xonotic, 'Xonotic.app/Contents/MacOS/xonotic-osx-sdl-bin')
+    # CLIENT BINARY.  The basedir carries the project's own zzz-mesh-payload.pk3,
+    # whose csprogs.dat is built against the TREE's engine and calls builtins the
+    # stock 2023 Xonotic client does not have.  Using the stock binary therefore
+    # loads the map, renders fine, and then dies on connect with
+    #   Host_Error: No such builtin #656 in client; ... outdated engine build
+    # which presents as "never spawned" and zero frames -- the same symptom the
+    # dead dummy+soft video path produced, from a completely different cause.
+    # darkplaces-work/darkplaces-sdl is the tree's renderer; prefer it.
+    bin_ = os.environ.get('JOINSHOT_CLIENT') or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        '..', '..', 'darkplaces-work', 'darkplaces-sdl')
+    bin_ = os.path.normpath(bin_)
+    if not os.path.exists(bin_):
+        bin_ = os.path.join(args.xonotic, 'Xonotic.app/Contents/MacOS/xonotic-osx-sdl-bin')
     if not os.path.exists(bin_):
         sys.exit('client binary not found: %s' % bin_)
+    print('client: %s' % bin_)
 
     rundir = tempfile.mkdtemp(prefix='joinshot_')
     os.makedirs(os.path.join(rundir, 'data', 'maps'), exist_ok=True)
@@ -456,7 +518,9 @@ def main():
     # ("Video Mode: window 320x200x32"), renders through normal GL, and needs no
     # interaction -- so that is the path used. Set JOINSHOT_SOFT=1 to force the
     # old dummy+soft path if a build ever supports it again.
-    cmd = [bin_, '-basedir', args.xonotic, '-userdir', rundir, '-nosound', '-noconfig',
+    # -xonotic selects the game: the stock Xonotic.app binary defaults to it, the
+    # tree's generic darkplaces-sdl boots `id1` without it and never loads the mod.
+    cmd = [bin_, '-xonotic', '-basedir', args.xonotic, '-userdir', rundir, '-nosound', '-noconfig',
            '+vid_width', str(args.width), '+vid_height', str(args.height),
            '+vid_fullscreen', '0',
            '+cl_curl_enabled', '0', '+sv_public', '0', '+exec', 'joinshot.cfg']
@@ -530,7 +594,10 @@ def main():
             if os.path.exists(cand):
                 src = cand; break
         if src:
-            shutil.copy(src, os.path.join(out, name + '.png')); found += 1
+            dst = os.path.join(out, name + '.png')
+            shutil.copy(src, dst)
+            _tga_to_png(dst)          # this build writes TGA even with scr_screenshot_png 1
+            found += 1
         else:
             print('  MISSING frame: %s' % name)
     print('captured %d/%d frames -> %s' % (found, len(shots), out))

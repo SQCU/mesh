@@ -116,7 +116,15 @@ def ent_blocks(outdir):
 
 
 def main(outdir):
-    ns = NS.load_saved(os.path.join(outdir, 'fused.negspace.npz'))
+    # The lump writer used to emit fused.negspace.npz alongside the bsp because
+    # its bsp could not express the assembled free volume (connector leaves hung
+    # off a degenerate router chain).  A q3map2-compiled world has no such gap:
+    # the bsp IS the assembled world, so the complex is read straight from it.
+    npz = os.path.join(outdir, 'fused.negspace.npz')
+    if os.path.exists(npz):
+        ns = NS.load_saved(npz)
+    else:
+        ns = NS.NegSpace(os.path.join(outdir, 'fused.bsp'))
     J = json.load(open(os.path.join(outdir, 'fused.joins.json')))
     print('fusecheck: %s' % outdir)
     print('free volume: %d convex cells, world %s .. %s'

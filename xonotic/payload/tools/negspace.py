@@ -702,10 +702,41 @@ class NegSpace(object):
         k = (int(math.floor(p[0] / c)), int(math.floor(p[1] / c)), int(math.floor(p[2] / c)))
         return self.grid.get(k)
 
+    def _solid_cands(self, lo, hi):
+        """Solid brushes whose AABB meets [lo,hi] (source representation)."""
+        c = self.gridcell
+        out = []
+        seen = set()
+        for x in range(int(math.floor(lo[0] / c)), int(math.floor(hi[0] / c)) + 1):
+            for y in range(int(math.floor(lo[1] / c)), int(math.floor(hi[1] / c)) + 1):
+                for z in range(int(math.floor(lo[2] / c)), int(math.floor(hi[2] / c)) + 1):
+                    for i in self.sgrid.get((x, y, z), ()):
+                        if i not in seen:
+                            seen.add(i)
+                            out.append(i)
+        for i in self.sgrid.get('big', ()):
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+
     def cell_at(self, p, tol=0.25):
         """Index of the free cell containing p, or -1.
 
         THE definition of solidity: `solid(p) == cell_at(p) < 0`."""
+        if getattr(self, 'solids', None) is not None:
+            # SOURCE representation: free is "inside no solid brush".
+            px = np.array([float(p[0]), float(p[1]), float(p[2])])
+            for i in self._solid_cands(px - 0.5, px + 0.5):
+                H, blo, bhi = self.solids[i]
+                if np.any(px < blo - tol) or np.any(px > bhi + tol):
+                    continue
+                # Generous toward SOLID by `tol`, matching the convention the
+                # rest of the toolchain uses: a marginal point is called solid,
+                # which refuses a placement rather than admitting a bad one.
+                if (H[:, :3] @ px - H[:, 3]).max() <= tol:
+                    return -1
+            return 0
         cand = self._cands(p)
         if cand is None:
             return -1
@@ -751,9 +782,41 @@ class NegSpace(object):
                 return True
         return not pieces
 
+    def _fits_source(self, p, mins, maxs, tol=0.03125):
+        """Box at p free of every solid brush (source representation).
+
+        Uses the plane-offset construction the ENGINE uses for a box trace: each
+        brush plane is pushed out by the box's support along that normal, and the
+        box centre is tested as a point.  Conservative at edges in the safe
+        direction (it may call a marginal placement blocked), and it is the same
+        arithmetic DarkPlaces applies, so a `fits` answer here is the answer the
+        server would give."""
+        px = np.array([float(p[0]), float(p[1]), float(p[2])])
+        mn = np.asarray(mins, dtype=float)
+        mx = np.asarray(maxs, dtype=float)
+        blo = px + mn
+        bhi = px + mx
+        for i in self._solid_cands(blo, bhi):
+            H, slo, shi = self.solids[i]
+            if np.any(bhi <= slo) or np.any(blo >= shi):
+                continue
+            n = H[:, :3]
+            # Push each plane OUT by the box's support along that normal, which
+            # for interior `n.x <= d` means picking the MIN corner where n>0:
+            #   dist = d - n.off,  off = (n>0 ? mins : maxs)
+            # Choosing the max corner instead shrinks the brush, and a box
+            # centred on a point the module itself called solid then "fitted".
+            off = np.where(n > 0, mn, mx)
+            dist = H[:, 3] - (off * n).sum(axis=1)
+            if (n @ px - dist).max() <= -tol:
+                return False
+        return True
+
     def fits(self, p, mins=PL_MIN, maxs=PL_MAX):
         """Is the whole box placed at p inside free space?  Exact, and true across
         cell boundaries -- a box spanning an open portal fits."""
+        if getattr(self, 'solids', None) is not None:
+            return self._fits_source(p, mins, maxs)
         lo = (p[0] + mins[0] + 0.03, p[1] + mins[1] + 0.03, p[2] + mins[2] + 0.03)
         hi = (p[0] + maxs[0] - 0.03, p[1] + maxs[1] - 0.03, p[2] + maxs[2] - 0.03)
         if np.any(np.asarray(hi) <= np.asarray(lo)):
@@ -794,12 +857,84 @@ class NegSpace(object):
         return cand[m]
 
     # ---------------------------------------------------------------- segment
+    def _segment_intervals_source(self, a, b, mins=None, maxs=None):
+        """Free parametric intervals of [a,b], from the SOLID brushes.
+
+        A ray's intersection with a convex brush is a closed interval (slab
+        clipping), so the solid runs are exact; the free runs are their
+        complement.  No step size anywhere -- which is the whole reason the
+        marched version disagreed with the closed-form one on points that were
+        never navigable."""
+        A = np.asarray(a, dtype=float)
+        B = np.asarray(b, dtype=float)
+        blo = np.minimum(A, B)
+        bhi = np.maximum(A, B)
+        if mins is not None:
+            blo = blo + np.asarray(mins, dtype=float)
+            bhi = bhi + np.asarray(maxs, dtype=float)
+        solid = []
+        for i in self._solid_cands(blo, bhi):
+            H, slo, shi = self.solids[i]
+            if np.any(bhi <= slo) or np.any(blo >= shi):
+                continue
+            n = H[:, :3]
+            if mins is None:
+                dist = H[:, 3]
+            else:
+                off = np.where(n > 0, np.asarray(mins, dtype=float),
+                               np.asarray(maxs, dtype=float))
+                dist = H[:, 3] - (off * n).sum(axis=1)
+            da = n @ A - dist
+            db = n @ B - dist
+            t0, t1, ok = 0.0, 1.0, True
+            for k in range(len(H)):
+                x, y = da[k], db[k]
+                if x > 0 and y > 0:
+                    ok = False
+                    break
+                if x <= 0 and y <= 0:
+                    continue
+                t = x / (x - y)
+                # x > 0 means the ray STARTS outside this half-space and crosses
+                # in: that is an ENTRY, so it raises the near bound.  Having these
+                # two branches the wrong way round made every downward ray report
+                # the whole drop as free, so nothing was ever standable.
+                if x > y:
+                    t0 = max(t0, t)
+                else:
+                    t1 = min(t1, t)
+                if t0 > t1:
+                    ok = False
+                    break
+            if ok and t1 > t0:
+                solid.append((t0, t1))
+        if not solid:
+            return [(0.0, 1.0)]
+        solid.sort()
+        merged = [list(solid[0])]
+        for s0, e0 in solid[1:]:
+            if s0 <= merged[-1][1] + 1e-9:
+                merged[-1][1] = max(merged[-1][1], e0)
+            else:
+                merged.append([s0, e0])
+        free = []
+        t = 0.0
+        for s0, e0 in merged:
+            if s0 > t + 1e-9:
+                free.append((t, s0))
+            t = max(t, e0)
+        if t < 1.0 - 1e-9:
+            free.append((t, 1.0))
+        return free
+
     def segment_intervals(self, a, b, mins=None, maxs=None):
         """EXACT parametric intervals of [a,b] that lie inside free cells.
 
         Convex cell ∩ segment is a closed interval computed in closed form, so
         this is the whole answer, not a sampling of it.  Returns a merged,
         sorted list of (t0,t1)."""
+        if getattr(self, 'solids', None) is not None:
+            return self._segment_intervals_source(a, b, mins, maxs)
         a = np.asarray(a, dtype=np.float64)
         b = np.asarray(b, dtype=np.float64)
         dv = b - a
@@ -945,25 +1080,104 @@ class NegSpace(object):
         return [float(x) for x in best], bestd
 
     # ------------------------------------------------------------------ floor
-    def floor_under(self, p, maxdrop=512.0):
-        """Origin Z at which a body dropped from p comes to rest on the free
-        volume's own lower boundary, or None.  Read off the exact free run below
-        p -- there is no trace and no step size."""
-        a = (float(p[0]), float(p[1]), float(p[2]))
-        b = (a[0], a[1], a[2] - maxdrop)
-        iv = self.segment_intervals(a, b)
-        run = None
-        for s, e in iv:
-            if s <= 1e-6:
-                run = (s, e)
-                break
-        if run is None:
-            return None
-        if run[1] >= 1.0 - 1e-9:
-            return None                     # nothing below within maxdrop: a shaft
-        return float(a[2] - run[1] * maxdrop)
+    def floor_under(self, p, maxdrop=512.0, footprint=None):
+        """Z at which a body dropped from p comes to rest, or None.
+
+        Read off the exact free run below p -- closed form, no march and no step
+        size, so there is no quantisation to bisect away.
+
+        `footprint` makes this a BOX question rather than a point question: a
+        standing player rests on the HIGHEST surface any part of its footprint
+        touches, so the floor is taken as the max over the nine offsets (centre,
+        four corners, four edge midpoints).  Probing only the centre reports a
+        floor the box would intersect wherever the ground rises under one
+        corner, which condemns walkable ground as unstandable -- measured at 36%
+        of a walkable helical corridor in the sibling generator's oracle, which
+        is where this model comes from.
+        """
+        offs = [(0.0, 0.0)]
+        if footprint:
+            hx, hy = footprint
+            offs += [(sx * hx, sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+            offs += [(sx * hx, 0.0) for sx in (-1, 1)] + [(0.0, sy * hy) for sy in (-1, 1)]
+        best = None
+        for dx, dy in offs:
+            a = (float(p[0]) + dx, float(p[1]) + dy, float(p[2]))
+            b = (a[0], a[1], a[2] - maxdrop)
+            run = None
+            for s0, e0 in self.segment_intervals(a, b):
+                if s0 <= 1e-6:
+                    run = (s0, e0)
+                    break
+            if run is None or run[1] >= 1.0 - 1e-9:
+                continue                     # nothing under this offset
+            z = float(a[2] - run[1] * maxdrop)
+            if best is None or z > best:
+                best = z                     # rest on the HIGHEST ground touched
+        return best
 
     RELOC = None
+
+    def solid_at(self, p):
+        """THE definition of solidity.  `solid_at(p) == cell_at(p) < 0`."""
+        return self.cell_at(p) < 0
+
+    def standable(self, p, mins=PL_MIN, maxs=PL_MAX, hover=64.0, lift=2.0):
+        """Can a player STAND at p: floor under the whole FOOTPRINT, head room
+        above it, and the box itself free.
+
+        The box rests on the highest surface its footprint touches (see
+        `floor_under`), and only the volume ABOVE that rest height is required to
+        be free -- testing a box centred at an arbitrary probe height instead is
+        what condemns walkable ground."""
+        fz = self.floor_under(p, hover, footprint=(abs(mins[0]), abs(mins[1])))
+        if fz is None:
+            return False
+        return self.fits([p[0], p[1], fz - mins[2] + lift], mins, maxs)
+
+    def clearance(self, p, cap=512.0, mins=PL_MIN, maxs=PL_MAX, tol=1.0):
+        """How much room is there at p: the largest lateral half-extent, up to
+        `cap`, at which the player-height box still fits.
+
+        NOT the distance to the nearest legal placement -- that is `project`, and
+        it is 0 for any point that is already legal, which makes it useless as a
+        room measure.  This grows the body instead of moving it, so an open hall
+        and a body-width corridor give different answers."""
+        h0, h1 = abs(mins[0]), abs(maxs[0])
+        if not self.fits(p, mins, maxs):
+            return 0.0
+        lo, hi = max(h0, h1), float(cap)
+        if self.fits(p, (-hi, -hi, mins[2]), (hi, hi, maxs[2])):
+            return float(cap)
+        for _ in range(12):
+            if hi - lo <= tol:
+                break
+            mid = 0.5 * (lo + hi)
+            if self.fits(p, (-mid, -mid, mins[2]), (mid, mid, maxs[2])):
+                lo = mid
+            else:
+                hi = mid
+        return float(lo)
+
+    def trace_fraction(self, a, b, mins=None, maxs=None):
+        """Fraction of [a,b] traversable before the first obstruction (1.0 clear).
+        Closed form from the segment's free intervals -- no step size."""
+        gaps = self.segment_gaps(a, b, mins, maxs)
+        return 1.0 if not gaps else float(gaps[0][0])
+
+    def trace(self, a, b, mins=None, maxs=None):
+        """First solid POINT along a->b, or None if the line is clear.
+
+        This is the sightline contract the generator's e2e uses (`hit is None`
+        means clear).  Exact: the first gap in the segment's free intervals is
+        where solidity begins, so unlike a stepped march it cannot skip a thin
+        obstruction between samples."""
+        f = self.trace_fraction(a, b, mins, maxs)
+        if f >= 1.0:
+            return None
+        return (a[0] + f * (b[0] - a[0]),
+                a[1] + f * (b[1] - a[1]),
+                a[2] + f * (b[2] - a[2]))
 
     def standing_point(self, p, mins=PL_MIN, maxs=PL_MAX, maxdrop=512.0,
                        lift=(1.0, 4.0, 12.0, 26.0), search=192.0):
@@ -1003,7 +1217,7 @@ class NegSpace(object):
         q, _ = self.project(p, None, None, radius=self.gridcell * 2)
         if q is None:
             return None
-        fz = self.floor_under(q, maxdrop)
+        fz = self.floor_under(q, maxdrop, footprint=(abs(mins[0]), abs(mins[1])))
         if fz is None:
             return None
         for dz in lift:
@@ -1246,6 +1460,222 @@ def unpack(t):
     ns.portals = None
     ns.adj = None
     ns._finish()
+    return ns
+
+
+
+# ---------------------------------------------------------------------------
+# SOURCE-BRUSH FRONT END
+# ---------------------------------------------------------------------------
+# One definition of solidity, two entry points.  `NegSpace(bsp)` reads a COMPILED
+# world; `from_brushes()` reads AUTHORED SOURCE, before any compile exists.  Both
+# produce the same object -- convex free cells with `solid(p) == cell_at(p) < 0`
+# -- so a generator validating what it just authored and a fuser validating what
+# shipped are answering with the same law rather than with two oracles that
+# agree until they do not.
+#
+# The pre-compile path is load-bearing: catching a bad seed costs a fraction of a
+# second here against ~124 s to compile it first, and a sweep pays that per seed.
+#
+# METHOD.  A compiled world hands us bounded convex regions for free (the BSP
+# leaves).  Authored source has no tree, so the bounding regions come from a
+# uniform grid: free space is the union over grid boxes of (box MINUS the solid
+# brushes overlapping it), each decomposed convexly by the same `subtract` the
+# leaf path uses.  That is exact -- a grid box is a bounded convex region like a
+# leaf, and nothing about the decomposition depends on where the box came from.
+
+
+# Source has no contents lump, only shader names, so the compiled path's
+# `contents & MASK_PLAYERSOLID` filter has a name-based counterpart here.  These
+# are the `common/` tool shaders that do NOT stop a player: compile hints, vis
+# helpers, and clips aimed at other entity classes.  Omitting this made every
+# tool brush solid and reported 16 of 23 stock spawnpoints as buried, against 5
+# in the compiled world -- a generator that trusted it would delete good spawns.
+# `common/caulk`, `common/clip` and `common/nodraw` are NOT here: they are solid
+# to a player and must keep blocking.
+NONSOLID_SHADERS = frozenset((
+    'common/hint', 'common/skip', 'common/areaportal', 'common/nodrawnonsolid',
+    'common/origin', 'common/lightgrid', 'common/trigger', 'common/weapclip',
+    'common/monsterclip', 'common/botclip', 'common/donotenter',
+    'common/clusterportal', 'common/antiportal', 'common/full_clip',
+))
+
+
+def brush_is_solid(br, nonsolid=NONSOLID_SHADERS):
+    """Does this authored brush stop a PLAYER?  Name-based mirror of the
+    compiled path's contents mask.  A brush is judged by the shaders on its
+    faces; a tool brush is uniformly one shader."""
+    faces = getattr(br, 'faces', None)
+    if faces is not None:
+        texs = {f[1] for f in faces}
+    elif br and hasattr(br[0], 'p'):
+        texs = {f.tex for f in br}
+    else:
+        return True
+    texs = {t.split('textures/')[-1] for t in texs}
+    if not texs:
+        return True
+    return not texs.issubset(nonsolid)
+
+
+def brush_points(br, off=(0.0, 0.0, 0.0)):
+    """Every vertex of an authored brush, placed at `off`.
+
+    An authored brush carries its polygons, so its AABB is exactly the range of
+    those points.  Deriving it by interval propagation instead is not merely
+    looser -- propagation cannot bound an oblique prism at all, and a front end
+    that skipped what it could not bound silently DROPPED every plug brush,
+    reporting sealed mouths as open."""
+    faces = getattr(br, 'faces', None)
+    if faces is not None:
+        polys = [list(f[0]) for f in faces]
+    elif br and hasattr(br[0], 'p'):
+        polys = [list(f.p) for f in br]
+    else:
+        return []
+    return [[p[i] + off[i] for i in range(3)] for poly in polys for p in poly]
+
+
+def brush_planes(br, off=(0.0, 0.0, 0.0)):
+    """Outward half-spaces (n.p <= d) of an authored brush, placed at `off`.
+
+    TWO input kinds, and they need DIFFERENT orientation rules:
+
+    * a `Brush` (spiralgen/mapsrc) holds real POLYGONS, so the outward direction
+      is resolved numerically against the vertex centroid -- correct for any
+      convex solid and not dependent on winding discipline;
+    * a list of parsed `.map` `Face`s holds three PLANE-DEFINING points per face,
+      which are NOT the brush's vertices.  Their centroid is meaningless and can
+      sit outside the brush, so the centroid rule flips faces at random.  The
+      .map convention already fixes orientation -- (p1-p0)x(p2-p0) points INTO
+      the brush -- so the outward plane is simply its negation.
+
+    Using the centroid rule on parsed faces made single points test "inside" 50-90
+    brushes of thousands of units each, and reported 16 of 23 stock spawnpoints
+    as buried when the compiled world had 5."""
+    if isinstance(br, np.ndarray):
+        H = br.astype(np.float64)
+        return [((float(H[i, 0]), float(H[i, 1]), float(H[i, 2])),
+                 float(H[i, 3] + H[i, 0] * off[0] + H[i, 1] * off[1] + H[i, 2] * off[2]))
+                for i in range(len(H))]
+    faces = getattr(br, 'faces', None)
+    if faces is None and br and hasattr(br[0], 'p'):
+        out = []
+        for f in br:                              # parsed .map faces
+            p0, p1, p2 = [np.asarray(x, dtype=float) for x in f.p]
+            n = np.cross(p1 - p0, p2 - p0)
+            L = float(np.linalg.norm(n))
+            if L < 1e-9:
+                continue
+            n = -n / L                            # inward -> outward
+            d = float(n @ p0)
+            out.append(((float(n[0]), float(n[1]), float(n[2])),
+                        d + n[0] * off[0] + n[1] * off[1] + n[2] * off[2]))
+        return out
+    if faces is not None:
+        polys = [list(f[0]) for f in faces]
+    else:
+        return [((n[0], n[1], n[2]),
+                 d + n[0] * off[0] + n[1] * off[1] + n[2] * off[2]) for n, d in br]
+    pts = [p for poly in polys for p in poly]
+    if not pts:
+        return []
+    c = [sum(p[i] for p in pts) / float(len(pts)) for i in range(3)]
+    out = []
+    for poly in polys:
+        a, b, cc = poly[0], poly[1], poly[2]
+        u = [b[i] - a[i] for i in range(3)]
+        v = [cc[i] - a[i] for i in range(3)]
+        n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+        L = math.sqrt(sum(x * x for x in n))
+        if L < 1e-9:
+            continue
+        n = [x / L for x in n]
+        d = sum(n[i] * a[i] for i in range(3))
+        if sum(n[i] * c[i] for i in range(3)) > d:        # flip to face outward
+            n = [-x for x in n]
+            d = -d
+        out.append(((n[0], n[1], n[2]),
+                    d + n[0] * off[0] + n[1] * off[1] + n[2] * off[2]))
+    return out
+
+
+def from_brushes(tiles, cell=512.0, pad=64.0, mask=MASK_PLAYERSOLID, verbose=False):
+    """Build a NegSpace from AUTHORED SOURCE brushes.
+
+    `tiles` is [(brushes, offset)] exactly as placement decides, so one call
+    serves a single generated tile and a placed fusion alike.
+
+    REPRESENTATION.  The compiled path materialises the free volume as convex
+    cells, because a BSP hands it bounded convex regions for free.  Authored
+    source has no tree, and decomposing free space out of a grid is the wrong
+    shape -- a 512-unit box over a spiral corridor overlaps dozens of brushes and
+    the convex subtraction explodes.  So this path keeps the SOLID brushes and
+    answers the law directly: `solid_at(p)` is "p is inside some brush", which is
+    exact, and every other query is derived from exact ray/box arithmetic against
+    those same brushes.  One definition, two exact implementations -- not two
+    definitions -- and they can be checked against each other, which is the point
+    of having one law rather than one data structure."""
+    solids = []
+    lo = [1e30] * 3
+    hi = [-1e30] * 3
+    for brushes, off in tiles:
+        for br in brushes:
+            if not brush_is_solid(br):
+                continue
+            pl = brush_planes(br, off)
+            if len(pl) < 4:
+                continue
+            H = np.array([[n[0], n[1], n[2], d] for n, d in pl], dtype=np.float64)
+            pts = [] if (getattr(br, 'faces', None) is None and br
+                         and hasattr(br[0], 'p')) else brush_points(br, off)
+            if pts:
+                P = np.asarray(pts, dtype=np.float64)
+                blo, bhi = P.min(axis=0), P.max(axis=0)
+            else:
+                blo, bhi = bounds_of(H, np.array([-131072.0] * 3),
+                                     np.array([131072.0] * 3))
+                if not (np.all(np.isfinite(blo)) and np.all(np.isfinite(bhi))):
+                    continue
+            solids.append((H, blo, bhi))
+            for a2 in range(3):
+                lo[a2] = min(lo[a2], float(blo[a2]))
+                hi[a2] = max(hi[a2], float(bhi[a2]))
+    ns = NegSpace.__new__(NegSpace)
+    ns.mask = mask
+    ns.gridcell = float(cell)
+    ns.cells = []
+    ns.cell_leaf = []
+    ns.cell_tile = []
+    ns.n_open_leaves = ns.n_solid_leaves = ns.n_detail_splits = ns.dropped_leaves = 0
+    ns.portals = None
+    ns.adj = None
+    ns.lo = np.zeros((0, 3))
+    ns.hi = np.zeros((0, 3))
+    ns.grid = {}
+    ns.solids = solids
+    if not solids:
+        ns.world_lo = np.array([-pad] * 3)
+        ns.world_hi = np.array([pad] * 3)
+        ns.sgrid = {}
+        return ns
+    ns.world_lo = np.array([lo[a2] - pad for a2 in range(3)])
+    ns.world_hi = np.array([hi[a2] + pad for a2 in range(3)])
+    g = {}
+    for i, (H, blo, bhi) in enumerate(solids):
+        c0 = np.floor(blo / cell).astype(np.int64)
+        c1 = np.floor(bhi / cell).astype(np.int64)
+        if np.prod(c1 - c0 + 1) > 20000:
+            g.setdefault('big', []).append(i)
+            continue
+        for x in range(c0[0], c1[0] + 1):
+            for y in range(c0[1], c1[1] + 1):
+                for z in range(c0[2], c1[2] + 1):
+                    g.setdefault((x, y, z), []).append(i)
+    ns.sgrid = g
+    if verbose:
+        print('negspace(source): %d solid brushes, world %s..%s'
+              % (len(solids), [int(x) for x in ns.world_lo], [int(x) for x in ns.world_hi]))
     return ns
 
 

@@ -39,9 +39,11 @@ points translate directly.  Getting this wrong is invisible in geometry and
 obvious in game, so it is done here once rather than per caller.
 """
 
+import math
 import os
 import re
 import subprocess
+import numpy as np
 import sys
 
 Q3MAP2 = os.path.expanduser('~/dox/xonotic/netradiant-custom/install/q3map2.arm64')
@@ -230,32 +232,268 @@ def parse_map(path):
     return ents
 
 
-def box_brush(lo, hi, tex, sx=0.5, sy=0.5):
-    """An axis-aligned solid box as six Valve-220 faces."""
-    fs = []
-    axes = [([0.0, 1.0, 0.0], [0.0, 0.0, -1.0]),
-            ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
-            ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0])]
-    defs = [(0, hi[0], 1), (0, lo[0], -1), (1, hi[1], 1), (1, lo[1], -1),
-            (2, hi[2], 1), (2, lo[2], -1)]
-    for ax, val, sgn in defs:
-        u, v = (1, 2) if ax == 0 else ((0, 2) if ax == 1 else (0, 1))
-        p = []
-        for du, dv in ((0, 0), (1, 0), (1, 1)) if sgn > 0 else ((0, 0), (0, 1), (1, 1)):
-            q = [0.0, 0.0, 0.0]
-            q[ax] = val
-            q[u] = hi[u] if du else lo[u]
-            q[v] = hi[v] if dv else lo[v]
-            p.append(q)
-        f = Face()
-        f.p = p
-        f.tex = tex
-        f.ua, f.va = list(axes[ax][0]), list(axes[ax][1])
-        f.us = f.vs = 0.0
-        f.rot, f.sx, f.sy = 0.0, sx, sy
-        f.tail = ''
-        fs.append(f)
-    return fs
+
+# ---------------------------------------------------------------------------
+# CSG IN SOURCE.  The aperture cut belongs here, not on compiled lumps.
+# ---------------------------------------------------------------------------
+# q3map2 is a functor from .map source to BSP, and `-convert -readbsp` is a
+# section of it, so the source category is always reachable.  Cutting a doorway
+# as an endomorphism on BSP means re-deriving by hand everything the functor
+# produces -- tree, PVS, lightmaps, light grid -- which is exactly why the lump
+# writer shipped `Visdata len = 0` and one grey lightmap.  Expressed here, the
+# compiler owns those steps, and two whole classes of defect become
+# INEXPRESSIBLE: a degenerate collision brush and a duplicate carve are things
+# you can only produce by hand-authoring compiled geometry.
+#
+# PLANE CONVENTION, measured not assumed: in Quake .map the three face points
+# are ordered so (p1-p0) x (p2-p0) points INTO the brush.  Verified on
+# decompiled trident -- for all 10 faces of brush 0 the centroid satisfies
+# n.c > d.  So a face's OUTWARD half-space is (-n, -d).
+
+
+def face_plane(f):
+    """Outward plane (N, D) of a face: brush interior satisfies N.p <= D."""
+    p0, p1, p2 = [np.asarray(x, dtype=float) for x in f.p]
+    n = np.cross(p1 - p0, p2 - p0)
+    ln = np.linalg.norm(n)
+    if ln < 1e-9:
+        return None, None
+    n = n / ln
+    return -n, float(-(n @ p0))
+
+
+def make_face(N, D, proto):
+    """A face with outward plane (N, D), borrowing `proto`'s texture and axes.
+
+    Valve-220 texture axes are world-space, so a cut surface inheriting the
+    wall's axes lines up with the wall it was cut from."""
+    N = np.asarray(N, dtype=float)
+    N = N / (np.linalg.norm(N) or 1.0)
+    o = N * D
+    a = np.array([1.0, 0.0, 0.0]) if abs(N[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(N, a)
+    u /= (np.linalg.norm(u) or 1.0)
+    v = np.cross(N, u)
+    f = Face()
+    # cross(v, u) = -N, i.e. inward, which is the .map convention
+    f.p = [[float(x) for x in o], [float(x) for x in (o + v * 64.0)],
+           [float(x) for x in (o + u * 64.0)]]
+    f.tex = proto.tex
+    f.ua, f.us = list(proto.ua), proto.us
+    f.va, f.vs = list(proto.va), proto.vs
+    f.rot, f.sx, f.sy = proto.rot, proto.sx, proto.sy
+    f.tail = proto.tail
+    return f
+
+
+def brush_bounds(faces, lo0=-131072.0, hi0=131072.0):
+    """AABB of a brush from its own outward planes (interval propagation)."""
+    from negspace import bounds_of
+    rows = []
+    for f in faces:
+        N, D = face_plane(f)
+        if N is not None:
+            rows.append([N[0], N[1], N[2], D])
+    if not rows:
+        return None, None
+    return bounds_of(np.array(rows, dtype=float),
+                     np.array([lo0] * 3), np.array([hi0] * 3))
+
+
+def subtract_box(faces, lo, hi):
+    r"""brush \ axis-aligned box, as convex remainder brushes.
+
+    For each box half-space h_q emit (brush AND outside-h_q AND inside
+    h_0..h_{q-1}); every piece is convex and their union is exactly the brush
+    minus the box.  Empty pieces are dropped on AABB alone, which is SOUND
+    because the box contains the piece; the converse is never used.  A sliver
+    that slips through is q3map2's problem now, not a degenerate collision
+    brush, because q3map2 recomputes the hull."""
+    blo, bhi = brush_bounds(faces)
+    if blo is None:
+        return [faces]
+    if any(blo[i] >= hi[i] or bhi[i] <= lo[i] for i in range(3)):
+        return [faces]
+    proto = faces[0]
+    planes = []
+    for a in range(3):
+        e = [0.0, 0.0, 0.0]
+        e[a] = 1.0
+        planes.append((e[:], hi[a]))
+        e2 = [0.0, 0.0, 0.0]
+        e2[a] = -1.0
+        planes.append((e2, -lo[a]))
+    out, acc = [], []
+    for N, D in planes:
+        piece = list(faces) + [make_face([-N[0], -N[1], -N[2]], -D, proto)]
+        piece += [make_face(An, Ad, proto) for An, Ad in acc]
+        plo, phi = brush_bounds(piece)
+        if plo is not None and all(phi[i] - plo[i] > 0.5 for i in range(3)):
+            out.append(piece)
+        acc.append((N, D))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# THE AUTHORED-SOLID PRIMITIVE.  One definition.
+# ---------------------------------------------------------------------------
+# This replaces both `box_brush`/`tube` (here) and `Brush`/`tri_prism`/
+# `quad_prism` (spiralgen).  They were two implementations of one insight, and
+# their docstrings say the same sentence twice --
+#   spiralgen: "Point winding is never trusted: normals are derived and then
+#              flipped to point away from the brush centroid"
+#   mapsrc:    "the winding is verified directly ... rather than trusted"
+# -- the second written only after a hand-ordered winding shipped four of six
+# faces inside-out, so a connector tube was not solid and the leak was reported
+# against an unrelated entity 1400 units away.  Deriving the sign numerically
+# is correct for ANY convex solid, so the general primitive absorbs the
+# axis-aligned special case rather than sitting beside it.
+#
+# TEXTURE AXES: spiralgen emitted the standard Quake face format
+# (`tex 0 0 0 sx sy flags`), which cannot appear in a Valve-220 file, and a .map
+# is one format throughout.  Since the decompiled tiles are Valve 220, the
+# primitive emits Valve 220, and the per-face axis choice lives here once
+# instead of at each call site.
+
+
+def _valve_axes(n):
+    """Texture axes for a face normal: the two world axes most perpendicular to
+    it.  Choosing by the normal's dominant axis is what stops a face getting a
+    degenerate (zero-area) texture projection."""
+    ax = max(range(3), key=lambda i: abs(n[i]))
+    if ax == 0:
+        return [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]
+    if ax == 1:
+        return [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]
+    return [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]
+
+
+class Brush(object):
+    """A convex solid held as faces; winding resolved numerically on emit."""
+
+    def __init__(self, detail=False):
+        self.faces = []
+        self.detail = detail
+
+    def add_face(self, pts, tex):
+        self.faces.append(([list(p) for p in pts], tex))
+        return self
+
+    def centroid(self):
+        allp = [p for pts, _ in self.faces for p in pts]
+        n = float(len(allp))
+        return [sum(p[i] for p in allp) / n for i in range(3)]
+
+    def to_faces(self, scale=0.5):
+        c = np.asarray(self.centroid(), dtype=float)
+        out = []
+        for pts, tex in self.faces:
+            p0, p1, p2 = [np.asarray(pts[i], dtype=float) for i in (0, 1, 2)]
+            n = np.cross(p2 - p0, p1 - p0)
+            ln = np.linalg.norm(n)
+            if ln < 1e-9:
+                continue                                  # degenerate, drop it
+            n = n / ln
+            if float(n @ (c - p0)) > 0:                   # points inward: flip
+                p1, p2 = p2, p1
+                n = -n
+            f = Face()
+            f.p = [[float(x) for x in p0], [float(x) for x in p1], [float(x) for x in p2]]
+            f.tex = tex
+            f.ua, f.va = _valve_axes(n)
+            f.us = f.vs = 0.0
+            f.rot = 0.0
+            f.sx = f.sy = scale
+            f.tail = ' %d 0 0' % (134217728 if self.detail else 0)
+            out.append(f)
+        return out
+
+
+def _v(a, b=None):
+    return np.asarray(a, dtype=float) if b is None else np.asarray(b, dtype=float) - np.asarray(a, dtype=float)
+
+
+def tri_prism(a, b, c, v, tex_cap, tex_side, detail=False):
+    """Triangle (a,b,c) extruded by v -> convex 5-sided brush.  Convex for any
+    non-degenerate triangle and any non-parallel v, which is why this is the
+    only primitive an authored connector needs."""
+    if np.linalg.norm(np.cross(_v(a, b), _v(a, c))) < 1e-6:
+        return None
+    a2, b2, c2 = [list(np.asarray(p, float) + np.asarray(v, float)) for p in (a, b, c)]
+    br = Brush(detail)
+    br.add_face([a, b, c], tex_cap)
+    br.add_face([a2, b2, c2], tex_cap)
+    br.add_face([a, b, b2, a2], tex_side)
+    br.add_face([b, c, c2, b2], tex_side)
+    br.add_face([c, a, a2, c2], tex_side)
+    return br
+
+
+def quad_prism(a, b, c, d, v, tex_cap, tex_side, detail=False):
+    """Planar quad extruded by v -> convex 6-sided brush."""
+    a2, b2, c2, d2 = [list(np.asarray(p, float) + np.asarray(v, float)) for p in (a, b, c, d)]
+    br = Brush(detail)
+    br.add_face([a, b, c, d], tex_cap)
+    br.add_face([a2, b2, c2, d2], tex_cap)
+    for (p, q, p2, q2) in ((a, b, a2, b2), (b, c, b2, c2), (c, d, c2, d2), (d, a, d2, a2)):
+        br.add_face([p, q, q2, p2], tex_side)
+    return br
+
+
+def connector(a, b, width, height, thickness=32.0, overlap=2.0,
+              tex_floor='common/caulk', tex_wall='common/caulk',
+              tex_ceil='common/caulk'):
+    """A swept prism corridor from mouth `a` to mouth `b`, authored SEALED.
+
+    `a` and `b` are the floor-centre points of the two mouths.  The swept
+    cross-section IS the aperture: width x height, which is the parameter the
+    caller also cuts through the tile shell, so the opening is a parameter of
+    the sweep rather than something discovered afterwards.
+
+    Shell pieces are offset along their own normal by `overlap * thickness` so
+    they OVERLAP rather than abut.  Exact abutment leaves sub-unit slivers that
+    q3map2 reports as leaks, which is why spiralgen defaults this to >= 2.
+
+    The ends are deliberately open: they are the doorways."""
+    A = np.asarray(a, dtype=float)
+    B = np.asarray(b, dtype=float)
+    d = B - A
+    L = float(np.linalg.norm(d))
+    if L < 1.0:
+        return []
+    dirh = d / L
+    up = np.array([0.0, 0.0, 1.0])
+    side = np.cross(dirh, up)
+    if np.linalg.norm(side) < 1e-6:
+        side = np.array([1.0, 0.0, 0.0])
+    side = side / np.linalg.norm(side)
+    hw = width / 2.0
+    T = thickness
+    OV = T * overlap
+    out = []
+    # extend the sweep INTO both mouths so the shell overlaps the tile hull
+    A2 = A - dirh * OV
+    B2 = B + dirh * OV
+
+    def quad(off_lo, off_hi):
+        return [list(A2 + off_lo), list(B2 + off_lo), list(B2 + off_hi), list(A2 + off_hi)]
+
+    # floor and ceiling: full width plus the wall footprint, extruded outward
+    f_lo, f_hi = side * -(hw + T), side * (hw + T)
+    out.append(quad_prism(*quad(f_lo, f_hi), v=list(up * -T),
+                          tex_cap=tex_floor, tex_side=tex_floor))
+    out.append(quad_prism(*[list(np.asarray(p) + up * height) for p in quad(f_lo, f_hi)],
+                          v=list(up * T), tex_cap=tex_ceil, tex_side=tex_ceil))
+    # side walls: full height including the floor/ceiling corners
+    for sgn in (-1.0, 1.0):
+        base = side * (sgn * hw)
+        q = [list(np.asarray(p) - up * OV) for p in quad(base, base)]
+        q = [q[0], q[1],
+             list(np.asarray(q[1]) + up * (height + 2 * OV)),
+             list(np.asarray(q[0]) + up * (height + 2 * OV))]
+        out.append(quad_prism(*q, v=list(side * (sgn * T)),
+                              tex_cap=tex_wall, tex_side=tex_wall))
+    return [b for b in out if b is not None]
 
 
 def write_map(path, ents):
@@ -299,6 +537,100 @@ def compile_map(mappath, workdir, vis=True, light=True, extra=()):
                            capture_output=True, text=True)
         logs['light'] = r.stdout + r.stderr
     return True, leaked, logs
+
+
+
+# ---------------------------------------------------------------------------
+# THE GENERATOR'S OWN RECORD OF WHAT IT BUILT
+# ---------------------------------------------------------------------------
+# `fused.joins.json` is read by joinshot, joinview, fusecheck and fusegraph.  It
+# used to be written by mapfuse's `fuse()`, which recovered these fields by
+# archaeology on geometry it had already cut.  Authored, every one of them is an
+# INPUT to the sweep rather than a measurement of its aftermath: an aperture's
+# two sides, its facing, and the points that look through it are parameters, so
+# this record is exact by construction instead of approximate by recovery.
+
+
+
+# shaders that must NEVER survive a merge, dropped unconditionally at placement
+MERGE_DROP_SHADERS = frozenset(('common/lightgrid',))
+
+
+def place_tile(bsp, off, workdir, name=None, keep_classes=None):
+    """Decompile one tile and PLACE it: the single entry point for putting a map
+    into a fused world.
+
+    The `common/lightgrid` drop lives here, unconditionally, because it is a
+    MERGE INVARIANT and its failure is silent: a lightgrid brush clips the
+    compiled world to its own volume, so the first tile's box culls every other
+    tile -- brushes still in the lump, no leak reported, map boots, one tile
+    simply gone.  Anything that places a tile by another route reintroduces that,
+    so there should not be another route.
+
+    Returns (world_brushes, patches, entities, n_dropped)."""
+    name = name or os.path.splitext(os.path.basename(bsp))[0]
+    ents = parse_map(decompile(bsp, workdir, name))
+    keep_classes = keep_classes or (lambda cn: cn == 'light' or cn.startswith(
+        ('info_player', 'item_', 'weapon_')))
+    brushes, patches, out, ndrop = [], [], [], 0
+    for i, e in enumerate(ents):
+        e.translate(off)
+        if i == 0:
+            for b in e.brushes:
+                if any(f.tex in MERGE_DROP_SHADERS for f in b):
+                    ndrop += 1
+                    continue
+                brushes.append(b)
+            patches += e.patches
+        elif keep_classes(e.get('classname')):
+            out.append(e)
+    return brushes, patches, out, ndrop
+
+
+def joins_record(tiles, joins, portals, bot_jumps=(), vantages_per_tile=None):
+    """Build the `fused.joins.json` structure.
+
+    tiles    -- [{'name', 'mins', 'maxs', 'bridge', 'degree'}]
+    joins    -- [{'a','b','kind','sa','sb','exclusive','prominent'}] (length derived)
+    portals  -- [{'tile','name','kind','axis','sgn','node','mouth','aperture'}]
+    """
+    out_tiles = []
+    for i, t in enumerate(tiles):
+        v = (vantages_per_tile or {}).get(i, [])
+        out_tiles.append({'name': t['name'],
+                          'mins': [float(x) for x in t['mins']],
+                          'maxs': [float(x) for x in t['maxs']],
+                          'bridge': bool(t.get('bridge', False)),
+                          'degree': int(t.get('degree', 0)),
+                          'vantages': [[float(c) for c in p] for p in v]})
+    out_joins = []
+    for j in joins:
+        sa = [float(x) for x in j['sa']]
+        sb = [float(x) for x in j['sb']]
+        out_joins.append({'a': int(j['a']), 'b': int(j['b']), 'kind': j['kind'],
+                          'sa': sa, 'sb': sb,
+                          'length': round(float(math.dist(sa, sb)), 1),
+                          'exclusive': bool(j.get('exclusive', True)),
+                          'prominent': bool(j.get('prominent', True)),
+                          'cart_navigable': j['kind'] == 'corridor'})
+    out_portals = []
+    for p in portals:
+        out_portals.append({'tile': int(p['tile']), 'name': p['name'],
+                            'kind': p.get('kind', 'continue'),
+                            'axis': int(p['axis']), 'sgn': float(p['sgn']),
+                            'node': [float(x) for x in p['node']],
+                            'mouth': [float(x) for x in p['mouth']],
+                            'aperture': [[float(x) for x in p['aperture'][0]],
+                                         [float(x) for x in p['aperture'][1]]]})
+    return {'maps': out_tiles, 'joins': out_joins, 'portals': out_portals,
+            'bot_jumps': [[[float(x) for x in n], [float(x) for x in f]]
+                          for n, f in bot_jumps]}
+
+
+def write_joins_json(path, rec):
+    import json as _json
+    _json.dump(rec, open(path, 'w'), indent=0)
+    return path
 
 
 if __name__ == '__main__':
