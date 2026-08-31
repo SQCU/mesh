@@ -1,7 +1,4 @@
 #pragma once
-// mesh IPC builtins — canonical copy of bridge/qc/mesh_ipc.qh, vendored into the
-// payload gamemode so the strategy module compiles as part of SVQC. Numbers match
-// bridge/engine/mesh_ipc.c (#644..#653). Guarded so a double-include is inert.
 float(float node, float width, float maxrows) mesh_open = #644;
 void(float h, float col, .float fld, float firstedict, float numedicts) mesh_gather = #648;
 void(float h, float col, .float fld, float firstedict, float numedicts) mesh_scatter = #649;

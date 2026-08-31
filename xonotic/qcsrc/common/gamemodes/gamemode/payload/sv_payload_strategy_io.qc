@@ -9,7 +9,6 @@ float plc_str_req_seq  = 0;
 float plc_str_resp_seq = 0;
 
 entity plc_str_evt_pool[PLC_STR_EVT_ROWS];
-entity plc_str_cart_pool[PLC_MAX_CARTS];
 float  plc_str_evt_w = 0;
 float  plc_str_evt_base = 0;
 float  plc_str_cart_base = 0;
@@ -19,8 +18,7 @@ float plc_str_last_kind[NUM_TEAMS + 1];
 float plc_str_last_subj[NUM_TEAMS + 1];
 
 // mesh_gather(h, col, .field, firstedict, count) reads `count` CONSECUTIVE
-// edicts (bridge/engine/mesh_ipc.c:305-306:
-//     m->req[row*width+col] = prog->edictsfields[(first+row)*stride + fld]).
+// edicts.
 // A staging pool is therefore only a valid gather source if its edict numbers
 // are consecutive. spawn() gives no such guarantee: PRVM_ED_Alloc
 // (darkplaces prvm_edict.c:267) scans from `reserved_edicts+1` upward and
@@ -41,9 +39,7 @@ float payload_str_pool_run(float want, float is_cart)
 		tries += 1;
 		if (have > 0 && etof(e) != prev + 1)
 			have = 0;
-		if (is_cart)
-			plc_str_cart_pool[have] = e;
-		else
+		if (!is_cart)
 			plc_str_evt_pool[have] = e;
 		prev = etof(e);
 		have += 1;
@@ -54,7 +50,7 @@ float payload_str_pool_run(float want, float is_cart)
 			ftos(want), "-edict strategy pool in ", ftos(tries), " spawns"));
 		return 0;
 	}
-	return etof(is_cart ? plc_str_cart_pool[0] : plc_str_evt_pool[0]);
+	return prev - want + 1;
 }
 
 void payload_strategy_attach()
@@ -62,7 +58,7 @@ void payload_strategy_attach()
 	if (plc_str_h_obs < 0)
 		plc_str_h_obs  = mesh_open(PLC_STR_NODE, PLC_STR_OBS_W,  maxclients);
 	if (plc_str_h_cart < 0)
-		plc_str_h_cart = mesh_open(PLC_STR_NODE, PLC_STR_CART_W, PLC_MAX_CARTS);
+		plc_str_h_cart = mesh_open(PLC_STR_NODE, PLC_STR_CART_W, payload_cart_count);
 	if (plc_str_h_evt < 0)
 		plc_str_h_evt  = mesh_open(PLC_STR_NODE, PLC_STR_EVT_W,  PLC_STR_EVT_ROWS);
 	if (plc_str_h_sc < 0)
@@ -71,21 +67,22 @@ void payload_strategy_attach()
 	if (!plc_str_evt_pool[0])
 	{
 		plc_str_evt_base  = payload_str_pool_run(PLC_STR_EVT_ROWS, 0);
-		plc_str_cart_base = payload_str_pool_run(PLC_MAX_CARTS, 1);
 		// Contiguity is the gather precondition; state it as a measurement, not
 		// as a comment. Both runs are re-verified here against the live edict
 		// numbers so a real run's log carries the proof.
-		float okc = 1, oke = 1;
+		float oke = 1;
 		for (int i = 0; i < PLC_STR_EVT_ROWS; ++i)
 			if (etof(plc_str_evt_pool[i]) != plc_str_evt_base + i) oke = 0;
-		for (int i = 0; i < PLC_MAX_CARTS; ++i)
-			if (etof(plc_str_cart_pool[i]) != plc_str_cart_base + i) okc = 0;
 		// One sprintf, not a strcat chain: DP's VM_strcat takes at most 8
 		// arguments and silently drops the rest.
 		LOG_INFO(sprintf("payload: [PLCPOOL] evt_base %d rows %d contiguous %d",
 			plc_str_evt_base, PLC_STR_EVT_ROWS, oke));
+	}
+	if (!plc_str_cart_base && payload_cart_count > 0)
+	{
+		plc_str_cart_base = payload_str_pool_run(payload_cart_count, 1);
 		LOG_INFO(sprintf("payload: [PLCPOOL] cart_base %d rows %d contiguous %d obs_base 1 rows %d",
-			plc_str_cart_base, PLC_MAX_CARTS, okc, maxclients));
+			plc_str_cart_base, payload_cart_count, boolean(plc_str_cart_base), maxclients));
 	}
 }
 
@@ -183,7 +180,7 @@ void payload_strategy_log(float nclients)
 
 	for (int c = 0; c < payload_cart_count; ++c)
 	{
-		entity row = plc_str_cart_pool[c];
+		entity row = ftoe(plc_str_cart_base + c);
 		// At most 7 values per sprintf: the QuakeC calling convention carries
 		// MAX_PARMS = 8 (darkplaces pr_comp.h:143) and the format string is
 		// one of them, so an 8th value is silently dropped.
@@ -293,29 +290,30 @@ void payload_emit_cell_links()
 
 void payload_strategy_gather(float nclients)
 {
-	for (int c = 0; c < payload_cart_count; ++c)
+	int c = 0;
+	IL_EACH(g_payload_carts, true,
 	{
-		entity cart = payload_carts[c];
-		entity row = plc_str_cart_pool[c];
-		row.plc_cs_f_id       = cart.plc_cart_id;
-		row.plc_cs_f_depth    = (cart.plc_length > 0) ? cart.plc_s / cart.plc_length : 0;
-		row.plc_cs_f_length   = cart.plc_length;
-		row.plc_cs_f_ctrl     = cart.plc_ctrl;
-		row.plc_cs_f_speed    = cart.plc_speed_now;
-		row.plc_cs_f_idle     = cart.plc_idle;
-		row.plc_cs_f_bankmask = cart.plc_bank_team;
-		row.plc_cs_f_progress = cart.plc_banked;
+		entity row = ftoe(plc_str_cart_base + c);
+		row.plc_cs_f_id       = it.plc_cart_id;
+		row.plc_cs_f_depth    = (it.plc_length > 0) ? it.plc_s / it.plc_length : 0;
+		row.plc_cs_f_length   = it.plc_length;
+		row.plc_cs_f_ctrl     = it.plc_ctrl;
+		row.plc_cs_f_speed    = it.plc_speed_now;
+		row.plc_cs_f_idle     = it.plc_idle;
+		row.plc_cs_f_bankmask = it.plc_bank_team;
+		row.plc_cs_f_progress = it.plc_banked;
 		// Cart world origin, same 1/1024 scaling as the per-player position
 		// columns. Without it no consumer can price the travel a cart
 		// assignment costs (AGENDA F4).
 		// A cart is a brush model: sv_payload.qc sets `view_ofs = mins` and
 		// parks it at `payload_pos(...) - view_ofs`, so its WORLD position on
 		// the golden path is origin + view_ofs, not origin.
-		vector cpos = cart.origin + cart.view_ofs;
+		vector cpos = it.origin + it.view_ofs;
 		row.plc_cs_f_px      = cpos.x / 1024;
 		row.plc_cs_f_py      = cpos.y / 1024;
 		row.plc_cs_f_pz      = cpos.z / 1024;
-	}
+		c += 1;
+	});
 	if (payload_cart_count > 0)
 	{
 		float cbase = plc_str_cart_base;
@@ -335,14 +333,15 @@ void payload_strategy_gather(float nclients)
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
 		float nci = -1; float ncd = 999999999;
-		for (int c = 0; c < payload_cart_count; ++c)
+		entity player = it;
+		IL_EACH(g_payload_carts, true,
 		{
 			// Same brush-model correction: comparing a player's origin to a
 			// cart's UNOFFSET origin made the nearest-cart columns wrong by
 			// the cart brush's mins on every row of every run so far.
-			float d = vlen((payload_carts[c].origin + payload_carts[c].view_ofs) - it.origin);
-			if (d < ncd) { ncd = d; nci = c; }
-		}
+			float d = vlen((it.origin + it.view_ofs) - player.origin);
+			if (d < ncd) { ncd = d; nci = it.plc_cart_id; }
+		});
 		float ammo = GetResource(it, RES_SHELLS) + GetResource(it, RES_BULLETS)
 		           + GetResource(it, RES_ROCKETS) + GetResource(it, RES_CELLS)
 		           + GetResource(it, RES_PLASMA)  + GetResource(it, RES_FUEL);
@@ -443,9 +442,10 @@ float payload_strategy_entity_target(entity e)
 {
 	if (!e)
 		return -1;
-	for (int c = 0; c < payload_cart_count; ++c)
-		if (e == payload_carts[c])
-			return PLC_TGT_CART_BASE + payload_carts[c].plc_cart_id;
+	IL_EACH(g_payload_carts, e == it,
+	{
+		return PLC_TGT_CART_BASE + it.plc_cart_id;
+	});
 	if (IS_PLAYER(e))
 		return PLC_TGT_RIVAL_BASE + etof(e);
 	if (e.bot_pickup)
@@ -465,10 +465,11 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 	if (tgt >= PLC_TGT_CART_BASE && tgt < PLC_TGT_ITEM_BASE)
 	{
 		float k = tgt - PLC_TGT_CART_BASE;
-		if (k >= 0 && k < payload_cart_count && gain != 0)
+		entity cart = payload_cart_by_id(k);
+		if (cart && gain != 0)
 		{
 			this.plc_str_resolved = 1;
-			navigation_routerating(this, payload_carts[k], ratingscale * gain, 5000);
+			navigation_routerating(this, cart, ratingscale * gain, 5000);
 		}
 	}
 	else if (tgt >= PLC_TGT_ITEM_BASE && tgt < PLC_TGT_RIVAL_BASE)

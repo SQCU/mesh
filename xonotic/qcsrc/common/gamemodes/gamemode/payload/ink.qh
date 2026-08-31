@@ -26,3 +26,4 @@ float(float sel) ink_stat = #656;
 #define INK_TINT_B      14
 #define INK_COVERAGE    15
 #endif
+

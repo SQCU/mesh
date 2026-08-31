@@ -6,3 +6,4 @@
 // The payload cart is rendered as an instance of the same body.
 void Artifact_Setup();
 #endif
+

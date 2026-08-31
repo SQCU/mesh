@@ -89,28 +89,59 @@ class Oracle:
             t += step
         return cap
 
-    def floor_under(self, p, cap=512.0, step=4.0, tol=0.25):
-        """Z of the floor SURFACE below p, or None.
+    def _ray_brush(self, o, d, br):
+        """Exact entry/exit parameters of ray o+t*d through one convex brush.
 
-        The coarse march finds a solid sample, then bisects to the surface. A
-        quantized answer is not good enough: the caller rests a player box on
-        this value, and a coarse hit lies up to `step` BELOW the true surface, so
-        the box gets placed intersecting the floor and the point is reported
-        unstandable. That alone condemned 38% of a walkable corridor.
+        Slab method over the brush's own halfspaces -- no marching. A convex
+        polytope is the intersection of its planes, so the ray's intersection
+        with it is a single interval, computed in closed form.
         """
-        t = 0.0
-        while t < cap:
-            if self.solid_at((p[0], p[1], p[2] - t)):
-                lo, hi = t, max(0.0, t - step)      # solid at lo, free at hi
-                while lo - hi > tol:
-                    mid = 0.5 * (lo + hi)
-                    if self.solid_at((p[0], p[1], p[2] - mid)):
-                        lo = mid
-                    else:
-                        hi = mid
-                return p[2] - lo
-            t += step
-        return None
+        pl, lo, hi = br
+        t0, t1 = -1e30, 1e30
+        for n, dd in pl:
+            den = n[0]*d[0] + n[1]*d[1] + n[2]*d[2]
+            num = dd - (n[0]*o[0] + n[1]*o[1] + n[2]*o[2])
+            if abs(den) < 1e-12:
+                if num < 0.0:
+                    return None          # parallel and outside this slab
+                continue
+            t = num / den
+            if den > 0.0:
+                t1 = min(t1, t)
+            else:
+                t0 = max(t0, t)
+            if t0 > t1:
+                return None
+        return (t0, t1)
+
+    def floor_under(self, p, cap=512.0):
+        """Z of the floor surface below p, or None. EXACT -- no sampling.
+
+        Intersects the downward ray with every brush in closed form and takes the
+        nearest entry. The first version marched at step=4 and then bisected: even
+        with the bisection that is a sampled answer, and NAV-SPEC section 10 makes
+        sampling the disqualifier for an oracle, because a sample can miss and the
+        caller cannot tell a miss from free space. It also had a real failure mode
+        before the bisection was added -- returning a hit up to a full step BELOW
+        the true surface, which rested the player box inside the floor and
+        condemned 38% of a walkable corridor.
+        """
+        o, d = (p[0], p[1], p[2]), (0.0, 0.0, -1.0)
+        best = None
+        for br in self.brushes:
+            _, lo, hi = br
+            if p[0] < lo[0] - EPS or p[0] > hi[0] + EPS: continue
+            if p[1] < lo[1] - EPS or p[1] > hi[1] + EPS: continue
+            r = self._ray_brush(o, d, br)
+            if r is None:
+                continue
+            t0, t1 = r
+            t = t0 if t0 > 1e-6 else (t1 if t1 > 1e-6 else None)
+            if t is None or t > cap:
+                continue
+            if best is None or t < best:
+                best = t
+        return None if best is None else p[2] - best
 
     def standable(self, p, hover=64.0, half=(16.0, 16.0, 24.0), lift=2.0):
         """Can a player STAND at p: floor under the whole footprint, and head room.

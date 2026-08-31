@@ -485,3 +485,4 @@ STATIC_INIT_LATE(payload_artifact)
 {
 	Artifact_Setup();
 }
+

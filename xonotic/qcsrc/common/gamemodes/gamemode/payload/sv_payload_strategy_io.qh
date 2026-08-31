@@ -156,3 +156,4 @@ void payload_emit_cell_links();
 float payload_str_cell_of(vector org);
 void havocbot_goalrating_strategy(entity this, float ratingscale);
 void payload_strategy_step(entity leadcart);
+
