@@ -20,6 +20,7 @@ launch() {
   nohup "$BIN" -basedir "$BASE" -userdir "$USERDIR" \
         +vid_fullscreen 0 +connect "$ADDR" >> "$LOG" 2>&1 &
   echo $! > "$STATE"
+  LAUNCH_AT=$(date +%s)
   log_evt "client_start pid=$(cat "$STATE") addr=$ADDR"
 }
 
@@ -29,6 +30,14 @@ while :; do
   if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
     log_evt "client_absent reason=process_gone -> relaunch"
     launch
+  elif [ -z "$(grep -ciE 'connected|entered the game' "$LOG" 2>/dev/null | grep -v '^0$')" ] \
+       && [ "$(( $(date +%s) - $(stat -f %m "$LOG" 2>/dev/null || echo 0) ))" -lt 3600 ] \
+       && [ "$(( $(date +%s) - ${LAUNCH_AT:-0} ))" -gt 45 ]; then
+    # Launched but never attached: the client comes up at a menu when the server
+    # was down at launch time, and never retries on its own. Nothing in its log
+    # says "timed out" because it never had a connection to lose.
+    log_evt "client_never_attached reason=no_connect_within_45s -> relaunch"
+    kill "$pid" 2>/dev/null; sleep 2; launch
   elif tail -4 "$LOG" 2>/dev/null | grep -qiE 'connection timed out|disconnected|host_error'; then
     log_evt "client_dropped reason=$(tail -4 "$LOG" | grep -ioE 'connection timed out|disconnected|host_error' | tail -1) -> relaunch"
     kill "$pid" 2>/dev/null; sleep 2; launch

@@ -136,7 +136,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] F6 Affordance QUALITY — does the policy actually aim `hunt` at the winningest rival? (—)
 
 ### G. World / maps
-- [x] G1 Procedural multi-map fusion produces megamaps — 29 tiles boot, void audit PASS (R28)
+- [~] G1 Procedural multi-map fusion produces megamaps — builds and boots, but crashes at runtime above ~8 bots (R29)
 - [x] G2 Megamaps actually USED by the training/live server (R20)
 - [x] G3 Bots traverse long distances between fused regions — now cart↔cart, not just spawn→cart (R25)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
@@ -163,7 +163,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] I1 SPEC is a verbatim user-quote index under the provenance law (R17)
 - [x] I2 AGENDA checklist + append-only Record (this file) (R17)
 - [x] I3 No unit tests; evidence is artifacts/proofs/real runs (R13)
-- [ ] I10 **uv manages every Python environment; no system-python venvs, no dependency excuses** (R27)
+- [~] I10 **uv manages every Python environment** — env created and demo.sh switched, but the RUNNING responders are still system-python 3.9 (R29)
 - [x] I4 No stubs, no pseudodocumentation claiming false completeness (R10, R12)
 - [~] I5 No repeated inlining — one canonical definition per algorithm (R10, R11)
 - [~] I6 No fake re-simulation anywhere (D7 outstanding) (R13)
@@ -891,3 +891,46 @@ graph **contracted onto the survivors** so reachability is preserved (flood-fill
 Honest remainder: render evidence is at 8 tiles (the 29-tile world is proven by the
 real boot); four `relocate_spawnpoint … could not get out of solid` object errors
 remain, non-fatal.
+
+### R29 — 2026-08-31 — G1 → partial; I10 → partial (deploying found what building did not)
+`E:run` Deployed the 29-tile geometry-edited megamap to the live demo
+(`/tmp/fzfull/data/maps/fused.pk3`, 48.4 MB → `Xonotic/data/zzzz-fused.pk3`) and
+cycled the server. Three things came out of it, none visible from the build.
+
+**The client supervisor worked unattended** — the mechanism H6 exists for, proving
+itself on a real restart:
+
+    2026-08-31T04:40:17Z client_dropped reason=Connection timed out -> relaunch
+    2026-08-31T04:40:19Z client_start pid=35332 addr=127.0.0.1:26042
+
+**G1 → `[~]`: the megamap crashes the server at RUNTIME above ~8 bots.** The map
+loads correctly — `Loaded maps/fused.ent`, carts pathed at **485/383/425 nodes**
+(the old 3-map fusion was 30/22/16) — bots join, gameplay runs, and then:
+
+    Quake Error: Host_Error: server runaway loop counter hit limit of 10000000 jumps
+
+This is the SAME ceiling for the third time in a third place. R28 lifted it at
+worldspawn (entity budget) and added a waypoint budget for the O(n²)
+`waypoint_get`/`boxesoverlap` scan, and the fusion agent's own boot passed — **with 8
+bots**. The demo runs **12**, and the deployed map carries **613 waypoints against a
+600 cap**. So the ceiling is bot-count sensitive and the budget was tuned to the bot
+count the agent chose rather than the one the demo uses. Relaunched at 6 bots and it
+survives with zero runaway errors. Recovery route: tighten `--wpcap` for the
+full-pool map and boot-test at the demo's actual bot count, not a convenient one.
+
+**I10 → `[~]`: the uv switch is committed but not deployed.** The responders actually
+running on the mini are still executing under system Python:
+
+    /Library/Developer/CommandLineTools/.../Python3.framework/Versions/3.9/... -m solver.strat.strat_responder
+
+`demo.sh` was switched to `~/.venv-mesh-uv`, but the already-running responders predate
+the edit and nothing restarted them. The environment is created and verified; the
+running system does not reflect it. Same error class as the rest of this stretch —
+reporting a change instead of verifying the live system reflects it.
+
+**Supervisor gap found and closed.** After the crash-and-relaunch the client came up
+while the server was down, sat at a menu, and was never noticed: the supervisor
+detected `process_gone` and `connection timed out` but not *launched-but-never-
+attached* — nothing in the log says "timed out" when there was never a connection to
+lose. Added a `client_never_attached` check (no connect confirmation within 45 s of
+launch → relaunch).

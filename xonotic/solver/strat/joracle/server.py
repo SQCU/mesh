@@ -74,6 +74,7 @@ def series_row(frame):
         "updates": frame.get("updates"),
         "PW": frame.get("PW"),
         "SUCC": frame.get("SUCC"),
+        "loser_ranks": frame.get("loser_ranks"),
         "depth": [c.get("depth") for c in carts],
         "ctrl": [c.get("ctrl") for c in carts],
         "speed": [c.get("speed") for c in carts],
@@ -86,6 +87,10 @@ def series_row(frame):
         "loss": (frame.get("update") or {}).get("loss"),
         "loss_pg": (frame.get("update") or {}).get("loss_pg"),
         "advantage": (frame.get("update") or {}).get("advantage"),
+        "advantage_w": (frame.get("update") or {}).get("advantage_w"),
+        "advantage_l": (frame.get("update") or {}).get("advantage_l"),
+        "reward_w": (frame.get("update") or {}).get("reward_w"),
+        "reward_l": (frame.get("update") or {}).get("reward_l"),
         "winner_value_mean": _mean((frame.get("model") or {}).get("winner_value")),
         "loser_value_mean": _mean((frame.get("model") or {}).get("loser_value")),
     }
