@@ -702,19 +702,59 @@ void payload_lane_resample(entity cart)
 	payload_path_configure(cart, payload_lane_sample(), false);
 }
 
+// ONE definition of what a cart IS. Both entries -- the synthesised lane and the
+// map-authored entity -- call this; neither configures a cart itself.
+//
+// They had drifted into two: the synthesised path set SOLID_BBOX with a literal
+// setsize and unconditional defaults, the authored path called
+// InitMovingBrushTrigger with `if(!field)` defaults and a damage block the other
+// lacked entirely. So a cart's mass, its push cylinder and its ability to squish
+// depended on which entry made it, and only one entry had ever been read when
+// reasoning about cart behaviour -- while, because g_payload_lane_synthesis
+// defaults to 1, the OTHER one is the entry that actually runs.
+//
+// The bbox/brush branch stays, because a brush model genuinely needs different
+// engine setup, but it lives HERE, once, instead of at each call site.
+void payload_cart_configure(entity cart)
+{
+	cart.effects |= EF_LOWPRECISION;
+	if(!cart.speed)
+		cart.speed = autocvar_g_payload_speed;
+	if(!cart.radius)
+		cart.radius = autocvar_g_payload_push_radius;
+	if(!cart.height)
+		cart.height = autocvar_g_payload_push_height;
+	if(cart.dmg && !cart.dmgtime)
+		cart.dmgtime = 0.25;
+	if(cart.dmg && cart.message == "")
+		cart.message = " was squished";
+	if(cart.dmg && cart.message2 == "")
+		cart.message2 = "was squished by";
+	cart.dmgtime2 = time;
+
+	if(cart.model == "")
+	{
+		// No brush model: the cart IS the size contract. This is the live case
+		// under lane synthesis, and it is why the cart has no server-side
+		// geometry beyond this hull -- what a player sees is the CSQC knot tube
+		// drawn by Artifact_DrawTube (cl_artifact.qc), which is a separate
+		// object. Keeping the hull here is what keeps the two agreeing.
+		cart.solid = SOLID_BBOX;
+		set_movetype(cart, MOVETYPE_PUSH);
+		setsize(cart, PLC_CART_MIN, PLC_CART_MAX);
+	}
+	else
+		InitMovingBrushTrigger(cart);
+	cart.view_ofs = cart.mins;
+	setblocked(cart, generic_plat_blocked);
+	cart.reset = payload_cart_reset;
+}
+
 void payload_lane_create()
 {
 	entity cart = new_pure(func_plc_cart);
 	cart.plc_generated = true;
-	cart.effects |= EF_LOWPRECISION;
-	cart.speed = autocvar_g_payload_speed;
-	cart.radius = autocvar_g_payload_push_radius;
-	cart.height = autocvar_g_payload_push_height;
-	cart.solid = SOLID_BBOX;
-	set_movetype(cart, MOVETYPE_PUSH);
-	setsize(cart, PLC_CART_MIN, PLC_CART_MAX);
-	setblocked(cart, generic_plat_blocked);
-	cart.reset = payload_cart_reset;
+	payload_cart_configure(cart);
 	payload_path_configure(cart, payload_lane_sample(), true);
 }
 
@@ -927,26 +967,7 @@ spawnfunc(func_plc_cart)
 		return;
 	}
 
-	this.effects |= EF_LOWPRECISION;
-	if(!this.speed)
-		this.speed = autocvar_g_payload_speed;
-	if(!this.radius)
-		this.radius = autocvar_g_payload_push_radius;
-	if(!this.height)
-		this.height = autocvar_g_payload_push_height;
-	if(this.dmg && !this.dmgtime)
-		this.dmgtime = 0.25;
-	if(this.dmg && this.message == "")
-		this.message = " was squished";
-	if(this.dmg && this.message2 == "")
-		this.message2 = "was squished by";
-	this.dmgtime2 = time;
-
-	InitMovingBrushTrigger(this);
-	this.view_ofs = this.mins;
-	setblocked(this, generic_plat_blocked);
-	this.reset = payload_cart_reset;
-
+	payload_cart_configure(this);
 	InitializeEntity(this, payload_path_build, INITPRIO_FINDTARGET);
 }
 
