@@ -22,8 +22,10 @@ The only small widths in the program are the raw input widths the engine hands u
 COUNT INVARIANCE. No shape below mentions k (teams), j (carts) or l (players).
 Adding a team, cart or player adds ROWS, never columns.
 
-DROPPED FROM THE CAST, permanently: NORM (RMSNorm). There is no normalisation
-parameter in the strategy program.
+NORM IS NOT A CAST MEMBER. RMSNorm is applied where the spec calls for it, but it
+holds NO LEARNED PARAMETERS -- it is the parameter-free ``x * rsqrt(mean(x*x) + eps)``,
+with no learned gain vector. It therefore has no entry in the cast: the cast names
+parameter groups, and a parameterless operation owns none.
 
 VERA IS TWO. Wherever a value is estimated there are two values to estimate, so
 the auxiliary probe is VERA_WINNIE and VERA_LOU, never one Vera.
@@ -123,7 +125,8 @@ class Wally(nn.Module):
 
         # GIA / UMA / DOV -- the SwiGLU trio, on the IR. Gia is the regime switch
         # (diversify vs pile-on); Dov emits dw/dt, one scalar per instrument row.
-        # There is NO norm: NORM is dropped from the cast forever.
+        # RMSNorm is applied to the input inside gia_uma_dov, PARAMETER-FREE:
+        # there is no learned gain, so no cast member.
         # nn.Linear(d_ir, h, bias=False)              weight (h, d_ir)
         # nn.Linear(d_ir, h, bias=False)              weight (h, d_ir)
         # nn.Linear(h, 1, bias=False)                 weight (1, h)
@@ -235,11 +238,12 @@ def gia_uma_dov(wally: Wally, ir: mx.array) -> mx.array:
         ``nn.Linear(h, 1,  bias=False)``   (Dov, down)   weight ``(1, h)``
     in  ``(l, m, d_ir)``   out ``(l, m)``  -- one velocity per instrument row.
 
-    There is NO normalisation here: NORM is dropped from the cast forever.
-    Gia is the regime switch -- she opens the concentrate path on high shared
+    RMSNorm is applied to the input, PARAMETER-FREE (no learned gain vector), so
+    it contributes no cast member. Gia is the regime switch -- she opens the concentrate path on high shared
     appetite and otherwise passes the diversify signal.
     """
-    return (nn.silu(wally.gia(ir)) * wally.uma(ir)) @ wally.dov.weight.T[..., 0]
+    normed = ir * mx.rsqrt(mx.mean(ir * ir, axis=-1, keepdims=True) + 1e-6)
+    return (nn.silu(wally.gia(normed)) * wally.uma(normed)) @ wally.dov.weight.T[..., 0]
 
 
 def winnie(wally: Wally, ir: mx.array) -> mx.array:

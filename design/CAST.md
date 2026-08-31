@@ -167,8 +167,10 @@ names.
   Verified: no `nn.`, no `mx.zeros/ones/full/random`, no literal tensor construction.
 
 Amendments made by this instruction:
-- **NORM is dropped from the cast forever.** There is no normalisation parameter; the
-  SwiGLU head reads the IR directly.
+- **NORM is not a cast member: RMSNorm holds no learned parameters.** The operation is
+  still applied where the spec calls for it — the parameter-free
+  `x * rsqrt(mean(x²) + eps)` — but it has no learned gain vector, so it names no
+  parameter group. The cast lists parameter groups; a parameterless operation owns none.
 - **VERA is two** — `VERA_WINNIE` and `VERA_LOU` — because wherever a value is estimated
   there are two values to estimate.
 - **PHIL is learned**, not part of the computed chorus. A constant-literal Φ was one of
