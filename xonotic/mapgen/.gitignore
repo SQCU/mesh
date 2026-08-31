@@ -1,0 +1,4 @@
+# generator OUTPUT, reproducible from spiralgen.py + a seed. Never tracked:
+# committing it invites reading a stale artifact as evidence about current code.
+fs/
+build/
