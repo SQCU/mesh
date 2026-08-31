@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # shipped one are judged by the same law.  `oracle.py` was a second exact
 # implementation of it and is deleted.
 from negspace import from_brushes as Oracle
+import nav as NAV
 
 
 def run(args):
@@ -38,10 +39,25 @@ def run(args):
     print('brushes %d  apertures %d  plug brushes %d'
           % (len(brushes), len(aps), sum(len(p) for p in plugs)))
 
-    # 1. NAVIGABILITY, on the world.
-    ok = sum(1 for c in centers if open_world.standable((c[0], c[1], c[2] + 26.0)))
-    frac = ok / float(len(centers))
-    print('navigable centerline: %d/%d = %.1f%%' % (ok, len(centers), 100 * frac))
+    # 1. NAVIGABILITY, composed -- not a raycast, and not inlined here.
+    # nav.route sweeps a real player-shaped collider along every consecutive
+    # pair and reports WHICH mode carried each edge; nav.occupancy asks which
+    # BODIES can stand at each point. "94% navigable" hides whether a route
+    # walks or needs a jump every third step, and hides a corridor that fits a
+    # player but not the cart -- which is navigable and still fails the game.
+    # stand the body on the floor rather than guessing an eye height: the hull
+    # is asymmetric, so a standing centre is floor - mins.z.
+    eye = [g for g in (NAV.ground(open_world, NAV.STAND, (c[0], c[1], c[2] + 40.0))
+                       for c in centers) if g is not None]
+    edges = NAV.route(open_world, eye, NAV.STAND)
+    carried = [m for _, m in edges if m]
+    by_mode = {m: carried.count(m) for m in set(carried)}
+    frac = len(carried) / float(max(1, len(edges)))
+    print('navigable edges: %d/%d = %.1f%%  by mode %s'
+          % (len(carried), len(edges), 100 * frac, by_mode))
+    occ = NAV.occupancy(open_world, eye)
+    for name, hits in occ.items():
+        print('  body %-6s stands at %d/%d' % (name, sum(hits), len(hits)))
 
     # 2/3. APERTURE open vs plugged, at the mouth itself.
     nopen = nseal = 0
@@ -57,6 +73,18 @@ def run(args):
         print('  aperture %d  mouth free unplugged=%s  sealed when plugged=%s'
               % (a['id'], o, not s))
     # 4. SIGHTLINE through each mouth, the frame joinshot shoots.
+    # a sightline is a visibility question and stays a ray; whether a PLAYER can
+    # pass through the mouth is a swept-collider question and is asked as one.
+    npass = 0
+    for a in aps:
+        vin = [v for v in a['vantages'] if v['side'] == 'in'][0]['origin']
+        vout = [v for v in a['vantages'] if v['side'] == 'out'][0]['origin']
+        thru = NAV.traversable(open_world, NAV.STAND, tuple(vin), tuple(vout))
+        shut = NAV.traversable(seal_world, NAV.STAND, tuple(vin), tuple(vout))
+        npass += (thru is not None and shut is None)
+        print('  aperture %d  body passes unplugged=%s (%s)  blocked plugged=%s'
+              % (a['id'], thru is not None, thru, shut is None))
+
     nsight = 0
     for a in aps:
         vin = [v for v in a['vantages'] if v['side'] == 'in'][0]['origin']
@@ -72,6 +100,7 @@ def run(args):
     if aps and nopen != len(aps): bad.append('%d/%d mouths not free' % (nopen, len(aps)))
     if aps and nseal != len(aps): bad.append('%d/%d mouths not sealed by plug' % (nseal, len(aps)))
     if aps and nsight != len(aps): bad.append('%d/%d sightlines wrong' % (nsight, len(aps)))
+    if aps and npass != len(aps): bad.append('%d/%d bodies cannot pass' % (npass, len(aps)))
     print(('FAIL: ' + '; '.join(bad)) if bad else 'PASS')
     return 1 if bad else 0
 
