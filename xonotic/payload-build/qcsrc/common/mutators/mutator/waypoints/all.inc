@@ -21,6 +21,8 @@ REGISTER_WAYPOINT(AssaultDefend, _("Defend"), "as_defend", '1 0.5 0', 1);
 REGISTER_WAYPOINT(AssaultDestroy, _("Destroy"), "as_destroy", '1 0.5 0', 1);
 REGISTER_WAYPOINT(AssaultPush, _("Push"), "", '1 0.5 0', 1);
 REGISTER_WAYPOINT(PayloadCart, _("Cart"), "", '1 0.5 0', 1);
+REGISTER_WAYPOINT(PayloadCart2, _("Cart 2"), "", '0.4 0.8 1', 1);
+REGISTER_WAYPOINT(PayloadLeader, _("Leader"), "", '1 0.85 0.2', 1);
 
 REGISTER_WAYPOINT(FlagCarrier, _("Flag carrier"), "", '0.8 0.8 0', 1);
 REGISTER_WAYPOINT(FlagCarrierEnemy, _("Enemy carrier"), "flag_neutral_carrying", '1 1 1', 1);

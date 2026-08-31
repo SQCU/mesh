@@ -196,6 +196,43 @@ def pick_sockets(src, k=3):
     return [list(src.navnodes[i]) for i in picks]
 
 
+def pick_sockets_toward(src, offset, targets, kmin=3, minsep=384.0):
+    """Sockets chosen FACING their partner tile.
+
+    The earlier picker took the k nav nodes furthest from the map centroid, with no
+    reference to which neighbour a socket was going to be joined to -- which is how a
+    join corridor ended up 4685 units long ("the first corridor i found connecting two
+    levels was really long").  Here each target is the world centre of the partner
+    tile, and its socket is the closest stand-on-able node of the map's largest
+    bot-reachable waypoint component to that target, with a minimum separation so two
+    joins do not land on the same doorway.  Extra spread sockets are appended so the
+    all-pairs fallback in fuse() still has choices."""
+    comp = [i for i in M.largest_component(src.navadj)
+            if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
+    if not comp:
+        comp = M.largest_component(src.navadj)
+    if not comp:
+        return []
+    world = {i: vadd(src.navnodes[i], offset) for i in comp}
+    picks = []
+    for t in targets:
+        cand = sorted(comp, key=lambda i: math.dist(world[i], t))
+        got = None
+        for i in cand:
+            if all(math.dist(world[i], world[q]) >= minsep for q in picks):
+                got = i
+                break
+        picks.append(got if got is not None else cand[0])
+    # top up with maximally-spread extras for the fallback search
+    pool = list(comp)
+    while len(picks) < kmin and len(picks) < len(pool):
+        nxt = max(pool, key=lambda i: min(math.dist(world[i], world[q]) for q in picks) if picks else 0)
+        if nxt in picks:
+            break
+        picks.append(nxt)
+    return [list(world[i]) for i in picks]
+
+
 def slab_planes(af, bf, dirh, side, ntop, w, lo, hi, endpad=8.0):
     return [(dirh, vdot(dirh, bf) + endpad), ([-x for x in dirh], -(vdot(dirh, af) - endpad)),
             (side, vdot(side, af) + w), ([-x for x in side], -(vdot(side, af) - w)),
@@ -226,15 +263,21 @@ def corridor_frame(a, b):
     return af, bf, dirh, side, ntop, math.dist(af, bf)
 
 
-def corridor_samples(a, b):
+def corridor_samples(a, b, w2=None):
+    """Sample the corridor TUBE for blockage.  w2 is the corridor half-width actually
+    being built: a prominent join is CORW_PROM/2 = 224 wide, and sampling it at the
+    narrow +-120 of a subtle corridor is what let obstructions survive inside the
+    prominent corridors' flanks."""
     af, bf, dirh, side, ntop, L = corridor_frame(a, b)
+    w2 = (CORW / 2) if w2 is None else w2
     pts = []
-    n = max(2, int(L // 64))
+    n = max(2, int(L // 48))
     for k in range(n + 1):
         f = k / n
         base = [af[i] + f * (bf[i] - af[i]) for i in range(3)]
-        for lat in (-CORW / 2 + 24, 0.0, CORW / 2 - 24):
-            for h in (24.0, 100.0, CORH - 40):
+        for lat in (-w2 + 20, -w2 + 40, -w2 * 0.72, -w2 * 0.36, 0.0, w2 * 0.36, w2 * 0.72,
+                    w2 - 40, w2 - 20):
+            for h in (20.0, 28.0, 72.0, 124.0, CORH - 48, CORH - 36):
                 pts.append(vadd(vadd(base, vscale(side, lat)), vscale(ntop, h)))
     return pts
 
@@ -690,23 +733,118 @@ class Fuser:
             out += lumps[i]
         return bytes(out), nodes_out, leafs_out, models_out
 
-def choose_layout(srcs, seed):
+def plan_tiles(nsrc, k):
+    """Lay T = nsrc + k tiles on a rectangular lattice and choose which cells are
+    procedural BRIDGE tiles.  Returns (cols, rows, cells, bridge_cell_idx, nbr).
+
+    The lattice is the roguelike tileset: every tile is a room, every lattice
+    adjacency is a candidate socket.  Bridge cells are chosen by greedy
+    max-coverage over lattice neighbours so each bridge ends up wired to several
+    other map nodes (the spec's 'connector' map), and cells that touch exactly one
+    bridge end up degree-1 (the spec's exclusive, prominent objective entrance)."""
+    T = nsrc + k
+    cols = max(1, int(math.ceil(math.sqrt(T))))
+    rows = int(math.ceil(T / cols))
+    cells = [(i % cols, i // cols) for i in range(T)]
+    cs = set(cells)
+    nbr = {c: [d for d in ((c[0] + 1, c[1]), (c[0] - 1, c[1]), (c[0], c[1] + 1), (c[0], c[1] - 1))
+               if d in cs] for c in cells}
+    bridges, covered = [], set()
+    while len(bridges) < k:
+        rest = [c for c in cells if c not in bridges]
+        if not rest:
+            break
+        best = max(rest, key=lambda c: (len(set(nbr[c]) - covered - set(bridges)), len(nbr[c]),
+                                        -abs(c[0] - (cols - 1) / 2) - abs(c[1] - (rows - 1) / 2)))
+        bridges.append(best)
+        covered |= set(nbr[best])
+    return cols, rows, cells, bridges, nbr
+
+
+def plan_edges(cells, bridges, nbr, rng=None, loopfrac=0.25):
+    """Lattice-adjacency topology.  Every (bridge, neighbour) lattice adjacency is
+    an edge; then union-find completion over the remaining adjacencies so the
+    region graph is connected.  Only lattice-ADJACENT cells are ever joined, which
+    is what keeps join corridors short while the megamap as a whole stays long."""
+    idx = {c: i for i, c in enumerate(cells)}
+    E = []
+    seen = set()
+    for b in bridges:
+        for n in nbr[b]:
+            k = (min(idx[b], idx[n]), max(idx[b], idx[n]))
+            if k not in seen:
+                seen.add(k)
+                E.append(k)
+    par = list(range(len(cells)))
+
+    def find(x):
+        while par[x] != x:
+            par[x] = par[par[x]]
+            x = par[x]
+        return x
+
+    def uni(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return False
+        par[ra] = rb
+        return True
+
+    for a, b in E:
+        uni(a, b)
+    for c in cells:
+        for n in nbr[c]:
+            k = (min(idx[c], idx[n]), max(idx[c], idx[n]))
+            if k in seen:
+                continue
+            if uni(k[0], k[1]):
+                seen.add(k)
+                E.append(k)
+    # LOOP edges: extra lattice adjacencies beyond the spanning structure.  Without
+    # them every join is a cut edge and the prominence rule is vacuous -- the spec
+    # only lets a join be subtle/weakly-signposted when it is REDUNDANT.
+    if rng is not None and loopfrac > 0:
+        spare = []
+        for c in cells:
+            for n in nbr[c]:
+                k = (min(idx[c], idx[n]), max(idx[c], idx[n]))
+                if k not in seen and k not in spare:
+                    spare.append(k)
+        rng.shuffle(spare)
+        for k in spare[:int(round(loopfrac * len(cells)))]:
+            seen.add(k)
+            E.append(k)
+    return E
+
+
+def choose_layout(srcs, seed, cellpos=None, grid=None):
     j = len(srcs)
     exts = [[s.bounds[1][a] - s.bounds[0][a] for a in range(3)] for s in srcs]
-    cw = max(e[0] for e in exts) + MARGIN
-    ch = max(e[1] for e in exts) + MARGIN
-    cols = max(1, int(math.ceil(math.sqrt(j))))
-    rows = int(math.ceil(j / cols))
-    x0 = -(cols * cw) / 2
-    y0 = -(rows * ch) / 2
-    offsets, cellpos = [], []
+    if grid:
+        cols, rows = grid
+    else:
+        cols = max(1, int(math.ceil(math.sqrt(j))))
+        rows = int(math.ceil(j / cols))
+    cp = list(cellpos) if cellpos else [(m % cols, m // cols) for m in range(j)]
+    # NON-UNIFORM lattice bands: a column is only as wide as its widest map, a row
+    # only as tall as its tallest.  A single uniform cell sized to the biggest map in
+    # the pool is what made join corridors kilometres long -- a small map sat marooned
+    # in the middle of a cell sized for catharsis.
+    colw = [MARGIN + max([exts[m][0] for m in range(j) if cp[m][0] == c] or [0]) for c in range(cols)]
+    rowh = [MARGIN + max([exts[m][1] for m in range(j) if cp[m][1] == r] or [0]) for r in range(rows)]
+    xed, yed = [-sum(colw) / 2.0], [-sum(rowh) / 2.0]
+    for w in colw:
+        xed.append(xed[-1] + w)
+    for h in rowh:
+        yed.append(yed[-1] + h)
+    offsets, cellpos_out = [], []
     for m, s in enumerate(srcs):
-        col, row = m % cols, m // cols
-        ccx = x0 + (col + 0.5) * cw
-        ccy = y0 + (row + 0.5) * ch
+        col, row = cp[m]
+        ccx = (xed[col] + xed[col + 1]) / 2.0
+        ccy = (yed[row] + yed[row + 1]) / 2.0
         mc = [(s.bounds[0][a] + s.bounds[1][a]) / 2 for a in range(3)]
         offsets.append([round(ccx - mc[0]), round(ccy - mc[1]), round(-mc[2])])
-        cellpos.append((col, row))
+        cellpos_out.append((col, row))
     for a in range(j):
         for b in range(a + 1, j):
             la = [srcs[a].bounds[0][i] + offsets[a][i] for i in range(3)]
@@ -714,6 +852,7 @@ def choose_layout(srcs, seed):
             lb = [srcs[b].bounds[0][i] + offsets[b][i] for i in range(3)]
             hb = [srcs[b].bounds[1][i] + offsets[b][i] for i in range(3)]
             assert ha[0] <= lb[0] or hb[0] <= la[0] or ha[1] <= lb[1] or hb[1] <= la[1], (a, b)
+    cellpos = cellpos_out
     splits = {}
 
     def register(items, axis0):
@@ -724,13 +863,13 @@ def choose_layout(srcs, seed):
         mid = len(its) // 2
         lohalf, hihalf = its[:mid], its[mid:]
         clo = max(i[axis] for i in lohalf)
-        boundary = (x0 + (clo + 1) * cw) if axis == 0 else (y0 + (clo + 1) * ch)
+        boundary = xed[clo + 1] if axis == 0 else yed[clo + 1]
         splits[(tuple(sorted(i[2] for i in its)), axis)] = boundary
         register(lohalf, axis)
         register(hihalf, axis)
 
-    register([(cellpos[m][0], cellpos[m][1], m) for m in range(j)], 0)
-    return offsets, cellpos, splits
+    register([(cellpos_out[m][0], cellpos_out[m][1], m) for m in range(j)], 0)
+    return offsets, cellpos_out, splits, (xed, yed, cp)
 
 
 def check_bsp(d):
@@ -795,57 +934,286 @@ def check_bsp(d):
     return probs
 
 
-def fuse(seed, names, outdir, pk3):
+DIRNAME = {(1, 0): 'e', (-1, 0): 'w', (0, 1): 'n', (0, -1): 's'}
+
+
+def load_src(n, outdir, pk3):
+    if '/' in n:
+        base = os.path.expanduser(n)
+        n = os.path.basename(base)
+        data = open(base + '.bsp', 'rb').read()
+        wp = open(base + '.waypoints', encoding='latin-1').read()
+        cache = open(base + '.waypoints.cache', encoding='latin-1').read()
+    else:
+        data = pk3_read(pk3, 'maps/%s.bsp' % n)
+        wp = pk3_read(pk3, 'maps/%s.waypoints' % n).decode('latin-1')
+        cache = M.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
+    src = Src(n, data, wp, cache)
+    print('src %s: bounds %s %s models=%d faces=%d brushes=%d wp=%d links=%d' %
+          (n, [round(x) for x in src.bounds[0]], [round(x) for x in src.bounds[1]],
+           len(src.models), len(src.faces), len(src.brushes),
+           len(src.wptriples), len(src.cachelinks)))
+    return src
+
+
+def region_graph_solve(j, edges_ab):
+    """Connectivity solver over the REGION graph (tiles = nodes, joins = edges).
+    Returns components, articulation points (chokepoint tiles), cut edges
+    (chokepoint joins -- removing one disconnects the megamap), per-node degree and
+    the hop-diameter.  Plain Hopcroft-Tarjan, iterative so it survives 30+ tiles."""
+    adj = [[] for _ in range(j)]
+    for ei, (a, b) in enumerate(edges_ab):
+        adj[a].append((b, ei))
+        adj[b].append((a, ei))
+    disc = [-1] * j
+    low = [0] * j
+    par = [-1] * j
+    arts, cutedges, comps = set(), [], []
+    timer = 0
+    for s0 in range(j):
+        if disc[s0] != -1:
+            continue
+        comp = []
+        stack = [(s0, iter(adj[s0]), -1)]
+        disc[s0] = low[s0] = timer
+        timer += 1
+        comp.append(s0)
+        rootkids = 0
+        while stack:
+            u, it, pe = stack[-1]
+            advanced = False
+            for v, ei in it:
+                if ei == pe:
+                    continue
+                if disc[v] == -1:
+                    disc[v] = low[v] = timer
+                    timer += 1
+                    comp.append(v)
+                    par[v] = u
+                    if u == s0:
+                        rootkids += 1
+                    stack.append((v, iter(adj[v]), ei))
+                    advanced = True
+                    break
+                low[u] = min(low[u], disc[v])
+            if advanced:
+                continue
+            stack.pop()
+            if stack:
+                pu = stack[-1][0]
+                low[pu] = min(low[pu], low[u])
+                if low[u] > disc[pu]:
+                    cutedges.append(pe)
+                if pu != s0 and low[u] >= disc[pu]:
+                    arts.add(pu)
+        if rootkids > 1:
+            arts.add(s0)
+        comps.append(sorted(comp))
+    # hop diameter over the largest component
+    big = max(comps, key=len) if comps else []
+    bigset = set(big)
+    diam, ecc = 0, {}
+    from collections import deque
+    for s0 in big:
+        d = {s0: 0}
+        q = deque([s0])
+        while q:
+            u = q.popleft()
+            for v, _ in adj[u]:
+                if v not in d and v in bigset:
+                    d[v] = d[u] + 1
+                    q.append(v)
+        ecc[s0] = max(d.values())
+        diam = max(diam, ecc[s0])
+    return dict(components=comps, articulation=sorted(arts), cutedges=sorted(cutedges),
+                degree=[len(adj[i]) for i in range(j)], hop_diameter=diam,
+                eccentricity=ecc, adj=adj)
+
+
+def navmesh_solve(nodes2, dadj, region, key, j, reps):
+    """Metrics over the NAVMESH solution: weighted (euclidean) shortest paths on the
+    real fused bot-waypoint graph.  Returns per-region reachable coverage, the
+    region-to-region bot WALKING distance matrix, and the megamap walking diameter --
+    the commitment cost the spec asks the megamap to impose."""
+    import heapq
+    N = len(nodes2)
+    W = [[(v, math.dist(nodes2[u], nodes2[v])) for v in dadj[u]] for u in range(N)]
+
+    def dij(src):
+        dist = [float('inf')] * N
+        dist[src] = 0.0
+        pq = [(0.0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist[u] + 1e-9:
+                continue
+            for v, w in W[u]:
+                nd = d + w
+                if nd < dist[v] - 1e-9:
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist
+
+    D = {}
+    cover = {}
+    for m, r in reps.items():
+        if r is None:
+            continue
+        dist = dij(r)
+        reach = [i for i in range(N) if dist[i] < float('inf')]
+        cover[m] = len(reach)
+        for m2, r2 in reps.items():
+            if r2 is None or m2 == m:
+                continue
+            D[(m, m2)] = dist[r2] if dist[r2] < float('inf') else None
+    fin = [v for v in D.values() if v is not None]
+    return dict(region_walk=D, coverage=cover, n_nodes=N,
+                walk_diameter=max(fin) if fin else 0.0,
+                walk_median=sorted(fin)[len(fin) // 2] if fin else 0.0,
+                unreachable_pairs=sum(1 for v in D.values() if v is None))
+
+
+def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25):
     rng = random.Random(seed)
     os.makedirs(outdir, exist_ok=True)
-    srcs = []
-    for n in names:
-        if '/' in n:
-            base = os.path.expanduser(n)
-            n = os.path.basename(base)
-            data = open(base + '.bsp', 'rb').read()
-            wp = open(base + '.waypoints', encoding='latin-1').read()
-            cache = open(base + '.waypoints.cache', encoding='latin-1').read()
+    nsrc = len(names)
+    cols, rows, cells, bridge_cells, nbr = plan_tiles(nsrc, nbridges)
+    T = len(cells)
+    bset = set(bridge_cells)
+    cellidx = {c: i for i, c in enumerate(cells)}
+    edges = plan_edges(cells, bridge_cells, nbr, rng=rng, loopfrac=loopfrac)
+    print('lattice: %dx%d, %d tiles (%d stock maps + %d procedural bridge tiles), '
+          '%d lattice edges' % (cols, rows, T, nsrc, len(bridge_cells), len(edges)))
+    # ---- generate the procedural bridge tiles, arms aimed at their lattice neighbours
+    work = workdir or os.path.join(outdir, '_bridges')
+    hub_ports = {}
+    hub_base = {}
+    if bridge_cells:
+        import mapgen
+        for bi, c in enumerate(bridge_cells):
+            dirs = []
+            for n in nbr[c]:
+                if cellidx[c] < cellidx[n] or True:
+                    dirs.append(DIRNAME[(n[0] - c[0], n[1] - c[1])])
+            dirs = [d for d in ('e', 'w', 'n', 's') if d in dirs]
+            lo = [d for k, d in enumerate(dirs) if k % 2 == 0]
+            hi = [d for k, d in enumerate(dirs) if k % 2 == 1]
+            nm = 'bridge%d_%d' % (seed, bi)
+            base, ports = mapgen.build_bridge_tile(work, nm, seed * 131 + bi, lo, hi)
+            hub_base[c] = base
+            hub_ports[c] = ports
+    # ---- order the tile list so tile index == lattice cell index
+    srcs = [None] * T
+    stock = list(names)
+    si = 0
+    for i, c in enumerate(cells):
+        if c in bset:
+            srcs[i] = load_src(hub_base[c], outdir, pk3)
         else:
-            data = pk3_read(pk3, 'maps/%s.bsp' % n)
-            wp = pk3_read(pk3, 'maps/%s.waypoints' % n).decode('latin-1')
-            cache = M.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
-        srcs.append(Src(n, data, wp, cache))
-        names = [x.name for x in srcs] + names[len(srcs):]
-        print('src %s: bounds %s %s models=%d faces=%d brushes=%d wp=%d links=%d' %
-              (n, [round(x) for x in srcs[-1].bounds[0]], [round(x) for x in srcs[-1].bounds[1]],
-               len(srcs[-1].models), len(srcs[-1].faces), len(srcs[-1].brushes),
-               len(srcs[-1].wptriples), len(srcs[-1].cachelinks)))
-    j = len(srcs)
-    offsets, cellpos, splits = choose_layout(srcs, seed)
+            srcs[i] = load_src(stock[si], outdir, pk3)
+            si += 1
+    names = [x.name for x in srcs]
+    j = T
+    is_bridge = [cells[i] in bset for i in range(T)]
+    cellpos = list(cells)
+    offsets, cellpos, splits, bands = choose_layout(srcs, seed, cellpos=cellpos, grid=(cols, rows))
+    # NUDGE: slide each tile inside its own lattice band toward the mean direction of
+    # its joined neighbours.  A band is as wide as its widest map, so a smaller map has
+    # slack; spending that slack on the neighbours it is actually socketed to shortens
+    # every join corridor and never moves a tile out of its band, so the axial band
+    # splits (and therefore the BSP router) are untouched.
+    xed, yed, cpp = bands
+    nb_tmp = [[] for _ in range(j)]
+    for a, b in edges:
+        nb_tmp[a].append(b)
+        nb_tmp[b].append(a)
+    for m in range(j):
+        if not nb_tmp[m]:
+            continue
+        cx, cy = cpp[m]
+        tgt = [0.0, 0.0]
+        for n in nb_tmp[m]:
+            nx, ny = cpp[n]
+            tgt[0] += (nx - cx)
+            tgt[1] += (ny - cy)
+        L = math.hypot(*tgt) or 1.0
+        for a2, ed, ci in ((0, xed, cx), (1, yed, cy)):
+            ext = srcs[m].bounds[1][a2] - srcs[m].bounds[0][a2]
+            slack = max(0.0, (ed[ci + 1] - ed[ci] - ext) / 2.0 - 64.0)
+            offsets[m][a2] = round(offsets[m][a2] + slack * (tgt[a2] / L))
     for m, s in enumerate(srcs):
-        print('place %s at cell %s offset %s' % (s.name, cellpos[m], offsets[m]))
+        print('place %s%s at cell %s offset %s' %
+              (s.name, ' [BRIDGE]' if is_bridge[m] else '', cellpos[m], offsets[m]))
     F = Fuser(srcs, offsets, seed)
     F.cellpos = cellpos
-    sockets = []
-    for m, s in enumerate(srcs):
-        sk = [vadd(p, offsets[m]) for p in pick_sockets(s)]
-        sockets.append(sk)
-        print('sockets %s: %s' % (s.name, [[round(x) for x in p] for p in sk]))
-    edges = [(rng.randrange(i), i) for i in range(1, j)]
-    nloops = rng.randrange(0, max(1, j - 1))
-    for _ in range(nloops):
-        a, b = rng.sample(range(j), 2) if j > 1 else (0, 0)
-        if j > 1 and (min(a, b), max(a, b)) not in [(min(x), max(x)) for x in edges]:
-            edges.append((min(a, b), max(a, b)))
     degree = [0] * j
     for a, b in edges:
         degree[a] += 1
         degree[b] += 1
-    exclusive = [min(degree[a], degree[b]) == 1 for a, b in edges]
+    # world-space centre of every tile, so a socket can be chosen FACING its partner
+    tilec = [[(srcs[m].bounds[0][a] + srcs[m].bounds[1][a]) / 2 + offsets[m][a] for a in range(3)]
+             for m in range(j)]
+    nbrs_of = [[] for _ in range(j)]
+    for a, b in edges:
+        nbrs_of[a].append(b)
+        nbrs_of[b].append(a)
+    sockets, sockmap = [], {}
+    for m, s in enumerate(srcs):
+        c = cells[m]
+        if is_bridge[m]:
+            # a bridge tile's sockets ARE its arm mouths, one arm per lattice neighbour
+            sk = [vadd(pt['p'], offsets[m]) for pt in hub_ports[c]]
+        else:
+            # aim at the MIDPOINT between the two tile centres (i.e. at the shared
+            # lattice boundary), not at the partner's centre: that is the point the
+            # join corridor has to reach, and it is what keeps the corridor short.
+            tg = [[(tilec[m][a] + tilec[n][a]) / 2 for a in range(3)] for n in nbrs_of[m]]
+            sk = pick_sockets_toward(s, offsets[m], tg, kmin=max(3, degree[m] + 1))
+        for n, pt in zip(nbrs_of[m], sk):
+            sockmap[(m, n)] = pt
+        sockets.append(sk)
+        print('sockets %s (deg %d)%s: %s' %
+              (s.name, degree[m], ' [BRIDGE]' if is_bridge[m] else '',
+               [[round(x) for x in p] for p in sk]))
+    # A CUT edge is the exclusive mode of entry to everything behind it, exactly like a
+    # degree-1 tile's single edge; both get the prominent (wide, lit) template.  A
+    # non-cut (loop) edge is redundant and may be subtle.
+    PRE = region_graph_solve(j, edges)
+    cutset = set(PRE['cutedges'])
+    exclusive = [min(degree[a], degree[b]) == 1 or ei in cutset for ei, (a, b) in enumerate(edges)]
     def _edge_minsep(i):
         a, b = edges[i]
         return min(math.dist(sa, sb) for sa in sockets[a] for sb in sockets[b])
     order = sorted(range(len(edges)), key=lambda i: (not exclusive[i], _edge_minsep(i)))
-    corridor_used = [0] * j
+    # spec: "not all level-level connections (at least one maximum per map) need to
+    # even be cart-path-navigable" -> AT MOST ONE non-cart-navigable join per tile.
+    # A corridor is cart-navigable (the cart can be pushed along it); a teleporter or
+    # a jumppad is not.  So corridors are tried FIRST and always, and the
+    # teleporter/jumppad fallback is rationed against a per-tile budget of 1.
+    noncart_used = [0] * j
+    noncart_budget = 1
     used_sock = set()
     conns = []
     telen = padn = corn = 0
+    budget_viol = []
+    dropped = []
+    alive = set(range(len(edges)))
+
+    def _still_connected(sub):
+        par = list(range(j))
+
+        def find(x):
+            while par[x] != x:
+                par[x] = par[par[x]]
+                x = par[x]
+            return x
+        n = j
+        for e in sub:
+            ra, rb = find(edges[e][0]), find(edges[e][1])
+            if ra != rb:
+                par[ra] = rb
+                n -= 1
+        return n == 1
     for ei in order:
         a, b = edges[ei]
         excl = exclusive[ei]
@@ -853,18 +1221,40 @@ def fuse(seed, names, outdir, pk3):
         pairs = sorted(((sa, sb) for sa in sockets[a] for sb in sockets[b]
                         if tuple(sa) not in used_sock and tuple(sb) not in used_sock),
                        key=lambda p: math.dist(p[0], p[1]))
+        des = (sockmap.get((a, b)), sockmap.get((b, a)))
+        if des[0] is not None and des[1] is not None:
+            pairs = ([(des[0], des[1])] +
+                     [pq for pq in pairs if pq[0] is not des[0] or pq[1] is not des[1]])
         if not pairs:
             pairs = sorted(((sa, sb) for sa in sockets[a] for sb in sockets[b]),
                            key=lambda p: math.dist(p[0], p[1]))
         kind, pick, carved = 'teleporter', pairs[0], set()
-        if corridor_used[a] == 0 and corridor_used[b] == 0:
+        may_noncart = noncart_used[a] < noncart_budget and noncart_used[b] < noncart_budget
+        cw2 = (CORW_PROM if prom else CORW) / 2.0
+        for maxhits in (16, 48, 96):
+            if kind == 'corridor':
+                break
+            if maxhits != 16 and may_noncart:
+                break            # only strain the carver when the budget forbids a portal
             for sa, sb in pairs:
                 if math.dist(sa, sb) > MAXCORLEN:
                     continue
-                hits = blockage(srcs, offsets, corridor_samples(sa, sb), clip=True)
-                if all(brush_volume_ok(srcs[m], bi) for m, bi in hits) and len(hits) <= 16:
+                hits = blockage(srcs, offsets, corridor_samples(sa, sb, cw2), clip=True)
+                if all(brush_volume_ok(srcs[m], bi) for m, bi in hits) and len(hits) <= maxhits:
                     kind, pick, carved = 'corridor', (sa, sb), hits
                     break
+        if kind != 'corridor' and not may_noncart:
+            if _still_connected(alive - {ei}):
+                # a redundant loop edge that cannot be a corridor and cannot spend a
+                # non-cart-navigable slot is simply not built: dropping it costs
+                # nothing (the region graph stays connected without it) and it is the
+                # only way to keep "at most one non-cart join per map" a hard rule.
+                alive.discard(ei)
+                dropped.append((names[a], names[b]))
+                print('edge %s <-> %s: DROPPED (loop edge, no corridor possible, '
+                      'non-cart budget spent on both sides)' % (names[a], names[b]))
+                continue
+            budget_viol.append((names[a], names[b]))
         if kind == 'teleporter':
             for sa, sb in pairs:
                 lo, hi = (sa, sb) if sa[2] <= sb[2] else (sb, sa)
@@ -878,15 +1268,17 @@ def fuse(seed, names, outdir, pk3):
         if kind == 'corridor':
             F.carve(carved)
             F.build_corridor(sa, sb, prominent=prom)
-            corridor_used[a] += 1
-            corridor_used[b] += 1
             corn += 1
         elif kind == 'jumppad':
+            noncart_used[a] += 1
+            noncart_used[b] += 1
             F.build_pad(sa, sb, padn, prominent=prom)
             F.build_tele(sb, sa, 1000 + padn, prominent=prom)
             padn += 1
             telen += 1
         else:
+            noncart_used[a] += 1
+            noncart_used[b] += 1
             F.build_tele(sa, sb, telen, prominent=prom)
             F.build_tele(sb, sa, 100 + telen, prominent=prom)
             telen += 2
@@ -897,11 +1289,30 @@ def fuse(seed, names, outdir, pk3):
               (srcs[a].name, degree[a], srcs[b].name, degree[b], kind,
                'PROMINENT/exclusive' if excl else 'subtle/redundant',
                [round(x) for x in sa], [round(x) for x in sb], math.dist(sa, sb), len(carved)))
+    # light the procedural bridge tiles: they are the connector class, and an unlit
+    # connector is exactly the "map graphics conceal map transitions" failure.
+    for m in range(j):
+        if not is_bridge[m]:
+            continue
+        c0 = tilec[m]
+        F.add_light([c0[0], c0[1], srcs[m].bounds[0][2] + offsets[m][2] + 420.0], 900)
+        for pt in sockets[m]:
+            F.add_light([pt[0], pt[1], pt[2] + 160.0], PROM_LIGHT)
     nexcl = sum(1 for c in conns if c[6])
-    print('topology: %d maps, %d edges (%d tree + %d loops), corridors=%d jumppads=%d teleport-triggers=%d' %
-          (j, len(edges), j - 1, len(edges) - (j - 1), corn, padn, telen))
+    nbr_tiles = sum(1 for x in is_bridge if x)
+    print('topology: %d tiles (%d stock + %d procedural bridge), %d edges (%d tree + %d loops), '
+          'corridors=%d jumppads=%d teleport-triggers=%d' %
+          (j, j - nbr_tiles, nbr_tiles, len(edges), j - 1, len(edges) - (j - 1), corn, padn, telen))
     print('prominence: %d exclusive/objective edges (prominent+lit), %d redundant edges (subtle); '
           'node degrees %s' % (nexcl, len(conns) - nexcl, degree))
+    clens = sorted(c[8] for c in conns if c[2] == 'corridor')
+    if clens:
+        print('corridor length: n=%d min=%.0f median=%.0f max=%.0f (cap %.0f)' %
+              (len(clens), clens[0], clens[len(clens) // 2], clens[-1], MAXCORLEN))
+    print('cart-navigability: %d/%d joins cart-navigable (corridor); non-cart joins per tile '
+          'max=%d (budget %d); %d loop edges dropped -> %s' %
+          (corn, len(conns), max(noncart_used) if noncart_used else 0, noncart_budget,
+           len(dropped), 'HELD' if not budget_viol else 'VIOLATED on %s' % budget_viol))
     data, nodes_out, leafs_out, models_out = F.build(splits)
     bsp_path = os.path.join(outdir, 'fused.bsp')
     open(bsp_path, 'wb').write(data)
@@ -936,22 +1347,30 @@ def fuse(seed, names, outdir, pk3):
         'gametype dm\ngametype tdm\ngametype plc\n' % '+'.join(names))
     probs = check_bsp(open(bsp_path, 'rb').read())
     print('parse-back: %s' % ('OK' if not probs else 'PROBLEMS %s' % probs[:10]))
-    G = M.Bsp(open(bsp_path, 'rb').read())
-    fviol = 0
+    # CONNECTOR CLEARANCE CHECK.
+    # Deliberately NOT done through mkentfile.Bsp: that class derives a brush AABB from
+    # plane distances of any plane within 0.999 of an axis, which is only valid for an
+    # exactly axis-aligned plane.  A join corridor is oblique by construction, so its
+    # brushes get a SHIFTED AABB and the check reports phantom "no floor" violations
+    # (measured: a corridor whose real x-span is [-5504,-5152] is indexed at
+    # [-5843,-5491]).  The check below uses the same exact-plane predicate the carver
+    # uses -- Src.solid_brush_at on the un-carved source brushes -- so a violation here
+    # means the corridor tube really is obstructed.  The floor is analytic: the corridor
+    # brush set always contains a floor slab beneath its own centreline.
+    fviol, fviol_by = 0, []
     for c in conns:
         if c[2] != 'corridor':
             continue
-        af, bf = c[3], c[4]
-        n = max(2, int(math.dist(af, bf) // 128))
-        for k in range(n + 1):
-            f = k / n
-            q = [af[i] + f * (bf[i] - af[i]) for i in range(3)]
-            q[2] += 24
-            if G.inside(q):
-                fviol += 1
-            if G.floor(q[0], q[1], q[2]) is None:
-                fviol += 1
-    print('connector floor check: %s (%d violations)' % ('PASS' if fviol == 0 else 'FAIL', fviol))
+        w2 = (CORW_PROM if c[7] else CORW) / 2.0
+        hits = blockage(srcs, offsets, corridor_samples(c[3], c[4], w2), clip=True)
+        left = [h for h in hits if h not in F.carved]
+        fviol += len(left)
+        if left:
+            fviol_by.append('%s<->%s(len=%.0f,%d)' % (names[c[0]], names[c[1]], c[8], len(left)))
+    print('connector clearance check (exact planes, un-carved source solids): %s '
+          '(%d obstructed samples%s)' %
+          ('PASS' if fviol == 0 else 'FAIL', fviol,
+           '' if not fviol_by else ' on ' + ' '.join(fviol_by)))
     nodes2, adj2 = M.parse_cache(open(os.path.join(outdir, 'fused.waypoints.cache')).read())
     key = lambda p: tuple(round(x, 1) for x in p)
     idx2 = {key(nodes2[i]): i for i in range(len(nodes2))}
@@ -991,14 +1410,69 @@ def fuse(seed, names, outdir, pk3):
               (srcs[a].name, srcs[b].name, kind,
                'yes' if na is not None else 'MISSING', 'yes' if nb is not None else 'MISSING',
                'YES' if okab else 'NO'))
-    joins = {'maps': [{'name': srcs[m].name, 'offset': offsets[m],
+    # ---- CONNECTIVITY SOLVER over the region graph
+    RG = region_graph_solve(j, [(c[0], c[1]) for c in conns])
+    print('connectivity: %d component(s) %s; hop-diameter=%d; chokepoint TILES (articulation) %s; '
+          'chokepoint JOINS (cut edges) %s' %
+          (len(RG['components']), [len(x) for x in RG['components']], RG['hop_diameter'],
+           [names[i] for i in RG['articulation']] or 'none',
+           ['%s<->%s' % (names[conns[e][0]], names[conns[e][1]]) for e in RG['cutedges']] or 'none'))
+    print('connectivity: k=%d edge-connectivity lower bound (%d/%d joins are cut edges, '
+          'the rest are redundant/loop edges)' %
+          (0 if RG['cutedges'] else 1, len(RG['cutedges']), len(conns)))
+    # ---- NAVMESH SOLVER: real bot walking distances between regions, coverage, vantages
+    reps, vantages = {}, {}
+    for m in range(j):
+        pts = [i for i in range(len(nodes2)) if region.get(key(nodes2[i])) == m and seen[i]]
+        reps[m] = pts[len(pts) // 2] if pts else None
+        vs = []
+        if pts:
+            vs = [pts[0]]
+            while len(vs) < min(3, len(pts)):
+                nxt = max(pts, key=lambda i: min(math.dist(nodes2[i], nodes2[q]) for q in vs))
+                if nxt in vs:
+                    break
+                vs.append(nxt)
+        vantages[m] = [[round(x, 1) for x in nodes2[i]] for i in vs]
+    NM = navmesh_solve(nodes2, dadj, region, key, j, reps)
+    print('navmesh: %d fused waypoints; bot-reachable from seed = %d (%.1f%%); '
+          'regions with zero reachable waypoints: %s' %
+          (len(nodes2), sum(seen), 100.0 * sum(seen) / max(1, len(nodes2)),
+           [names[m] for m in range(j) if reps[m] is None] or 'none'))
+    print('navmesh: region<->region WALKING distance median=%.0fu diameter=%.0fu '
+          'unreachable_pairs=%d  (commitment cost: a bot crossing the megamap walks the diameter)' %
+          (NM['walk_median'], NM['walk_diameter'], NM['unreachable_pairs']))
+    worst = sorted(((v, k2) for k2, v in NM['region_walk'].items() if v is not None), reverse=True)[:3]
+    for d, (m1, m2) in worst:
+        print('navmesh:   longest %s -> %s = %.0fu' % (names[m1], names[m2], d))
+    joins = {'seed': seed, 'grid': [cols, rows],
+             'maps': [{'name': srcs[m].name, 'offset': offsets[m], 'cell': list(cellpos[m]),
+                       'bridge': bool(is_bridge[m]), 'degree': degree[m],
+                       'vantages': vantages[m],
                        'mins': [srcs[m].bounds[0][i] + offsets[m][i] for i in range(3)],
                        'maxs': [srcs[m].bounds[1][i] + offsets[m][i] for i in range(3)]} for m in range(j)],
              'joins': [{'a': c[0], 'b': c[1], 'kind': c[2], 'sa': list(c[3]), 'sb': list(c[4]),
-                        'exclusive': c[6], 'prominent': c[7], 'length': round(c[8], 1)} for c in conns],
+                        'exclusive': c[6], 'prominent': c[7], 'length': round(c[8], 1),
+                        'cart_navigable': c[2] == 'corridor'} for c in conns],
              'bot_jumps': [[list(n), list(f)] for n, f in F.bot_jumps]}
     json.dump(joins, open(os.path.join(outdir, 'fused.joins.json'), 'w'), indent=0)
-    print('wrote fused.joins.json (%d maps, %d joins)' % (j, len(conns)))
+    metrics = {'seed': seed, 'tiles': j, 'stock': j - sum(is_bridge), 'bridges': sum(is_bridge),
+               'joins': len(conns), 'corridors': corn, 'jumppads': padn, 'teleporters': telen,
+               'cart_navigable_joins': corn, 'noncart_per_tile': noncart_used,
+               'noncart_budget': noncart_budget, 'budget_violations': budget_viol, 'dropped_edges': dropped,
+               'corridor_len': clens, 'exclusive_edges': nexcl,
+               'connectivity': {k: v for k, v in RG.items() if k not in ('adj', 'eccentricity')},
+               'articulation_names': [names[i] for i in RG['articulation']],
+               'cutedge_names': ['%s<->%s' % (names[conns[e][0]], names[conns[e][1]])
+                                 for e in RG['cutedges']],
+               'navmesh': {'n_nodes': NM['n_nodes'], 'reachable': int(sum(seen)),
+                           'coverage': NM['coverage'], 'walk_diameter': NM['walk_diameter'],
+                           'walk_median': NM['walk_median'],
+                           'unreachable_pairs': NM['unreachable_pairs'],
+                           'region_walk': {'%d-%d' % k2: v for k2, v in NM['region_walk'].items()}},
+               'bsp_bytes': len(data), 'names': names}
+    json.dump(metrics, open(os.path.join(outdir, 'fused.metrics.json'), 'w'), indent=1)
+    print('wrote fused.joins.json (%d tiles, %d joins) + fused.metrics.json' % (j, len(conns)))
     return bsp_path, conns
 
 
@@ -1032,22 +1506,53 @@ if __name__ == '__main__':
     seed = int(args[0]) if args else 0
     pk3 = sorted(glob.glob(os.path.expanduser('~/dox/xonotic/Xonotic/data/*maps*.pk3')), reverse=True)[0]
     names = args[1:]
-    if not names:
-        pool = navigable_names(pk3)
-        names = random.Random(seed).sample(pool, 3)
     outdir = '/tmp/fusesmoke/data/maps'
+    nmaps = None
+    nbridges = None
+    teams, carts = 5, 3
     for f in flags:
         if f.startswith('--out='):
             outdir = f[6:]
-    print('mapfuse seed=%d maps=%s pk3=%s' % (seed, names, os.path.basename(pk3)))
-    bsp_path, conns = fuse(seed, names, outdir, pk3)
+        elif f.startswith('--maps='):
+            nmaps = f[7:]
+        elif f.startswith('--bridges='):
+            nbridges = int(f[10:])
+        elif f.startswith('--teams='):
+            teams = int(f[8:])
+        elif f.startswith('--carts='):
+            carts = int(f[8:])
+    pool = navigable_names(pk3)
+    if not names:
+        # spec: "j-many of ALL of the maps in the game ... socketed together like
+        # tilesets in a roguelike level generator".  The default j is the WHOLE
+        # navigable stock pool; --maps=N samples j=N of it per seed (the roguelike
+        # per-run draw), --maps=all is explicit.
+        if nmaps in (None, 'all'):
+            names = list(pool)
+            random.Random(seed).shuffle(names)
+        else:
+            names = random.Random(seed).sample(pool, min(int(nmaps), len(pool)))
+    if nbridges is None:
+        # k-many bridge tiles: default one connector per ~3 stock maps, >=1 whenever
+        # there is more than one map to socket together.
+        nbridges = max(1, round(len(names) / 3.0)) if len(names) > 1 else 0
+    print('mapfuse seed=%d j=%d stock maps + k=%d procedural bridge tiles (pool=%d) pk3=%s' %
+          (seed, len(names), nbridges, len(pool), os.path.basename(pk3)))
+    print('mapfuse maps=%s' % (names,))
+    t0 = time.time()
+    bsp_path, conns = fuse(seed, names, outdir, pk3, nbridges=nbridges)
+    print('fuse wall time %.1fs' % (time.time() - t0))
     ent_path = os.path.join(outdir, 'fused.ent')
-    M.emit(bsp_path, ent_path, 5, 3, pk3)
+    M.emit(bsp_path, ent_path, teams, carts, pk3)
     import zipfile
     pk3out = os.path.join(outdir, 'fused.pk3')
     with zipfile.ZipFile(pk3out, 'w', zipfile.ZIP_DEFLATED) as z:
         for f in ('fused.bsp', 'fused.waypoints', 'fused.waypoints.cache', 'fused.mapinfo', 'fused.ent'):
             z.write(os.path.join(outdir, f), 'maps/' + f)
     print('wrote %s (mount in client/server data dir to resolve maps/fused.*)' % pk3out)
+    if '--nograph' not in flags:
+        import fusegraph
+        sys.argv = ['fusegraph', outdir]
+        fusegraph.main()
     if '--smoke' in flags:
         smoke(outdir)

@@ -686,11 +686,123 @@ def validate_chain(bsp, cor, track, exempt):
 
 
 DANGLE_MIN, OVERLAP_MAX, PEN0 = 320.0, 0.3, 8.0
+REGION_LINK, HOST_MIN, HOST_FRACTION = 700.0, 8, 0.4
+
+# Spatial regions of a fused megamap. Same measurement as design/AGENDA.md R20:
+# union-find over origins with a REGION_LINK-unit XY link. Cart tracks placed in
+# different regions make choosing cart A over cart B a traversal decision, not a
+# free one.
+def region_labels(points, thr=REGION_LINK):
+    n = len(points)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    buckets = {}
+    for i, p in enumerate(points):
+        buckets.setdefault((int(math.floor(p[0] / thr)), int(math.floor(p[1] / thr))), []).append(i)
+    for (cx, cy), idxs in buckets.items():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in buckets.get((cx + dx, cy + dy), ()):
+                    for i in idxs:
+                        if i >= j:
+                            continue
+                        if abs(points[i][0] - points[j][0]) <= thr and abs(points[i][1] - points[j][1]) <= thr:
+                            a, b = find(i), find(j)
+                            if a != b:
+                                parent[a] = b
+    roots, out = {}, []
+    for i in range(n):
+        r = find(i)
+        out.append(roots.setdefault(r, len(roots)))
+    return out
 
 
-def prune_network(adj_ok):
-    keep = set(largest_component(adj_ok))
-    total = len(keep)
+def components(adj):
+    n = len(adj)
+    seen = [False] * n
+    out = []
+    for s in range(n):
+        if seen[s]:
+            continue
+        stack, comp = [s], []
+        seen[s] = True
+        while stack:
+            u = stack.pop()
+            comp.append(u)
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    stack.append(v)
+        out.append(comp)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def host_components(adj_ok, nodes, kcarts):
+    """Pick one bot-reachable host component per cart, spread over regions.
+
+    Every host is a genuine flood-fill component of the bad-edge-free navmesh,
+    so each cart track stays bot-reachable end to end; the hosts sit in
+    different regions, so the trip from cart i to cart j is a real cross-region
+    traversal on the stock navmesh (which does connect the regions, through the
+    fusion joins the cart-track filter drops).
+
+    Regions are discovered at runtime by union-find over the node origins -- N
+    of them, whatever the fused world happens to contain -- and never assumed.
+    A region's secondary component is only used when it is a comparable place
+    to put a cart (>= HOST_FRACTION of that region's largest); otherwise the
+    carts share the region's largest component and the existing overlap
+    planner separates them, which is the single-region behavior stock maps
+    want.
+    """
+    comps = [c for c in components(adj_ok) if len(c) >= HOST_MIN]
+    if not comps:
+        comps = components(adj_ok)[:1]
+    labels = region_labels(nodes)
+    by_region = {}
+    for comp in comps:
+        counts = {}
+        for u in comp:
+            counts[labels[u]] = counts.get(labels[u], 0) + 1
+        by_region.setdefault(max(counts, key=lambda r: counts[r]), []).append(comp)
+    candidates = {}
+    for region, group in by_region.items():
+        head = group[0]
+        candidates[region] = [head] + [c for c in group[1:] if len(c) >= HOST_FRACTION * len(head)]
+    order = sorted(candidates, key=lambda r: -len(candidates[r][0]))
+    hosts, cursor = [], {r: 0 for r in order}
+    while len(hosts) < kcarts:
+        progressed = False
+        for region in order:
+            if len(hosts) == kcarts:
+                break
+            index = cursor[region]
+            if index < len(candidates[region]):
+                hosts.append((region, candidates[region][index]))
+                cursor[region] = index + 1
+                progressed = True
+        if not progressed:
+            # Every distinct host is taken. Surplus carts go back onto the
+            # region-largest components in the same round-robin order and share
+            # them, which is exactly the pre-R20 single-component behavior --
+            # for those carts only.
+            index = 0
+            while len(hosts) < kcarts:
+                region = order[index % len(order)]
+                hosts.append((region, candidates[region][0]))
+                index += 1
+            break
+    return hosts[:kcarts]
+
+
+def prune_component(adj_ok, comp):
+    keep = set(comp)
 
     def deg(u):
         return sum(1 for v in adj_ok[u] if v in keep)
@@ -720,7 +832,11 @@ def prune_network(adj_ok):
                 changed = True
     interior = [u for u in keep if deg(u) >= 2]
     bf = (sum(deg(u) for u in interior) / len(interior) - 1.0) if interior else 0.0
-    return keep, bf, pruned, total
+    return keep, bf, pruned, len(comp)
+
+
+def prune_network(adj_ok):
+    return prune_component(adj_ok, largest_component(adj_ok))
 
 
 def subgraph(adj_ok, keep):
@@ -979,9 +1095,35 @@ def botwalk_chain(bsp, poly, segbad):
 def nav_tracks(nodes, adj, kcarts, bsp, cor, bad):
     adj_ok = [{v: w for v, w in a.items()
                if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
-    keep, bf, pruned, total = prune_network(adj_ok)
-    st = {'e0': 0.0, 'e1': 0.0, 'bf': bf, 'pruned': pruned, 'net': len(keep), 'tot': total}
-    paths, segbads, adms, ov, _ = plan_spans(nodes, adj, adj_ok, bad, kcarts, keep)
+    hosts = host_components(adj_ok, nodes, kcarts)
+    slots = {}
+    for c, (region, comp) in enumerate(hosts):
+        slots.setdefault((region, id(comp)), [region, comp, []])[2].append(c)
+    st = {'e0': 0.0, 'e1': 0.0, 'bf': 0.0, 'pruned': 0, 'net': 0, 'tot': 0,
+          'regions': [], 'hosts': len(slots)}
+    paths = [None] * kcarts
+    segbads = [None] * kcarts
+    adms = [[]] * kcarts
+    ov = [[0.0] * kcarts for _ in range(kcarts)]
+    interior_deg, interior_n = 0.0, 0
+    for region, comp, cart_ids in slots.values():
+        keep, bf, pruned, total = prune_component(adj_ok, comp)
+        st['pruned'] += pruned
+        st['net'] += len(keep)
+        st['tot'] += total
+        interior_deg += bf * len(keep)
+        interior_n += len(keep)
+        st['regions'].append({'region': region, 'carts': list(cart_ids),
+                              'net': len(keep), 'tot': total, 'bf': bf})
+        lp, lsb, ladm, lov, _ = plan_spans(nodes, adj, adj_ok, bad, len(cart_ids), keep)
+        for local, c in enumerate(cart_ids):
+            paths[c] = lp[local]
+            segbads[c] = lsb[local]
+            adms[c] = ladm[local]
+        for a, ca in enumerate(cart_ids):
+            for b, cb in enumerate(cart_ids):
+                ov[ca][cb] = lov[a][b]
+    st['bf'] = interior_deg / interior_n if interior_n else 0.0
     paths, segbads, align, worst, spr = flow_assign(nodes, paths, segbads, adj_ok)
     st['ov'] = ov
     st['align'] = align
@@ -1061,6 +1203,11 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
     tracks, exempts, alladm, paths, st = nav_tracks(nodes, adj, kcarts, B, cor, bad)
     print('nav: network kept=%d/%d pruned_dangles=%d branching=%.2f target=1.5 %s' %
           (st['net'], st['tot'], st['pruned'], st['bf'], 'OK' if st['bf'] >= 1.5 else 'BELOW'))
+    print('nav: host_components=%d over %d spatial region(s) (link=%.0f)' %
+          (st['hosts'], len({r['region'] for r in st['regions']}), REGION_LINK))
+    for r in st['regions']:
+        print('nav:   region %d carts %s kept=%d/%d branching=%.2f' %
+              (r['region'], r['carts'], r['net'], r['tot'], r['bf']))
     ov = st['ov']
     mx = max((ov[i][j] for i in range(kcarts) for j in range(i + 1, kcarts)), default=0.0)
     for i in range(kcarts):
@@ -1072,22 +1219,34 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
     adj_ok2 = [{v: w for v, w in a.items()
                 if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
     dmo = {o: dijkstra(adj_ok2, o)[0] for o in set(origins)}
-    ws = []
+    # Bots reach a cart over the STOCK navmesh, which keeps the fusion joins
+    # (teleporters, pads) that the cart-track filter drops; cart->cart traversal
+    # cost is therefore measured on `adj`, the full waypoint graph.
+    dmn = {o: dijkstra(adj, o)[0] for o in set(origins)}
+    ws, ns = [], []
+    labels = region_labels(nodes)
     for i in range(len(origins)):
         for j in range(i + 1, len(origins)):
             if origins[i] == origins[j]:
                 continue
             wd = dmo[origins[i]][origins[j]]
+            nd = dmn[origins[i]][origins[j]]
             ed = math.dist(nodes[origins[i]], nodes[origins[j]])
             if wd < math.inf:
                 ws.append(wd)
-            print('nav: origin %d %s <-> origin %d %s  walk=%.0f  euclid=%.0f  ratio=%.2f' %
-                  (i, tuple(round(x) for x in nodes[origins[i]]), j,
-                   tuple(round(x) for x in nodes[origins[j]]),
-                   wd if wd < math.inf else -1, ed, wd / ed if ed and wd < math.inf else 0))
+            if nd < math.inf:
+                ns.append(nd)
+            print('nav: origin %d r%d %s <-> origin %d r%d %s  navmesh=%.0f  track_walk=%.0f  euclid=%.0f  ratio=%.2f' %
+                  (i, labels[origins[i]], tuple(round(x) for x in nodes[origins[i]]),
+                   j, labels[origins[j]], tuple(round(x) for x in nodes[origins[j]]),
+                   nd if nd < math.inf else -1,
+                   wd if wd < math.inf else -1, ed, nd / ed if ed and nd < math.inf else 0))
+    if ns:
+        print('nav: cart-to-cart navmesh min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
+              (min(ns), sum(ns) / len(ns), max(ns), max(ns) / min(ns) if min(ns) else 0))
     if ws:
-        print('nav: pairwise walk min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
-              (min(ws), sum(ws) / len(ws), max(ws), max(ws) / min(ws) if min(ws) else 0))
+        print('nav: same-component walk min=%.0f mean=%.0f max=%.0f' %
+              (min(ws), sum(ws) / len(ws), max(ws)))
     nadm = sum(len(a) for a in alladm)
     for c, a in enumerate(alladm):
         if a:

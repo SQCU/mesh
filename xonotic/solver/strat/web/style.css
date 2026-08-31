@@ -159,3 +159,6 @@ footer {
   border-top: 1px solid var(--line); padding-top: 10px;
 }
 footer code { color: var(--muted); }
+
+tr.degenerate td { opacity: .55; }
+tr.degenerate td.num { text-decoration: line-through; }

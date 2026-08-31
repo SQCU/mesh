@@ -1,46 +1,62 @@
-// =============================================================================
-//  sv_payload_strategy_io.qc  —  ACTIVE server I/O for the strategy stack
-// -----------------------------------------------------------------------------
-//  Real wiring of the STRATEGY-IO.md contract. Three flows:
-//    (1) cartstate (GUARANTEED) + per-player observation rows gathered up to the
-//        mesh every PLC_STRAT_TICK  (schemas B and A);
-//    (2) perception-gated event rows (frustum + LOS + 2-cell), the ONLY producer
-//        of enemy/item rows — never an omniscient findradius feed (schema C);
-//    (3) the 8-column scatter pulled back down and applied as navigation_
-//        routerating biases in havocbot_goalrating_strategy().
-//
-//  Determinism boundary (rl-training-spec §4): QC stages RAW numbers and reads an
-//  already-integrated absolute weight. It never integrates and never learns.
-//
-//  AGENTS.md: no rejection filtering. The perception gate is a GAME rule
-//  (occlusion), expressed by what a bot can see — not a capability refusal. Dead
-//  bots have no viewpoint (a physics fact, early return), and a missing plan is
-//  HELD (last absolute weight), never demoted to a no-mesh fallback.
-// =============================================================================
 
 #include "sv_payload_strategy_io.qh"
 
-float plc_str_h_obs  = -1;   // gather handle A (per-player)
-float plc_str_h_cart = -1;   // gather handle B (cartstate, GUARANTEED)
-float plc_str_h_evt  = -1;   // gather handle C (perception ring)
-float plc_str_h_sc   = -1;   // scatter handle (8-col responses)
-float plc_str_seq    = 0;    // last completed plan sequence from mesh_poll
+float plc_str_h_obs  = -1;
+float plc_str_h_cart = -1;
+float plc_str_h_evt  = -1;
+float plc_str_h_sc   = -1;
+float plc_str_req_seq  = 0;
+float plc_str_resp_seq = 0;
 
-// Perception event-carrier pool: a contiguous block of edicts spawned back-to-
-// back in attach() so mesh_gather can sweep it as one [firstedict,count] range.
 entity plc_str_evt_pool[PLC_STR_EVT_ROWS];
-float  plc_str_evt_w = 0;    // ring write cursor
+entity plc_str_cart_pool[PLC_MAX_CARTS];
+float  plc_str_evt_w = 0;
+float  plc_str_evt_base = 0;
+float  plc_str_cart_base = 0;
 
-// Per-team last-stamp for edge-triggered deposits (index by team, 0..NUM_TEAMS).
 float plc_str_last_cell[NUM_TEAMS + 1];
 float plc_str_last_kind[NUM_TEAMS + 1];
 float plc_str_last_subj[NUM_TEAMS + 1];
 
-// ---------------------------------------------------------------------------
-//  payload_strategy_attach — lazy open of the four handles + event pool.
-//  Retry-until-attached: if the coprocessor is not up yet we simply try again
-//  next step (a hold, not a demotion). No no-mesh fallback branch exists.
-// ---------------------------------------------------------------------------
+// mesh_gather(h, col, .field, firstedict, count) reads `count` CONSECUTIVE
+// edicts (bridge/engine/mesh_ipc.c:305-306:
+//     m->req[row*width+col] = prog->edictsfields[(first+row)*stride + fld]).
+// A staging pool is therefore only a valid gather source if its edict numbers
+// are consecutive. spawn() gives no such guarantee: PRVM_ED_Alloc
+// (darkplaces prvm_edict.c:267) scans from `reserved_edicts+1` upward and
+// returns the FIRST reusable free slot, so a burst of spawn() calls after map
+// load lands in whatever holes the map's self-removing entities left behind.
+// This builds the run explicitly: keep spawning and restart the run whenever
+// the edict number is not prev+1. Free holes are finite, so once they are
+// consumed PRVM_ED_Alloc appends and the run completes. Rejected edicts are
+// simply never removed, so they can never be recycled underneath the pool.
+float payload_str_pool_run(float want, float is_cart)
+{
+	float have = 0;
+	float prev = 0;
+	float tries = 0;
+	while (have < want && tries < 8192)
+	{
+		entity e = spawn();
+		tries += 1;
+		if (have > 0 && etof(e) != prev + 1)
+			have = 0;
+		if (is_cart)
+			plc_str_cart_pool[have] = e;
+		else
+			plc_str_evt_pool[have] = e;
+		prev = etof(e);
+		have += 1;
+	}
+	if (have < want)
+	{
+		LOG_INFO(strcat("payload: FAILED to allocate a contiguous ",
+			ftos(want), "-edict strategy pool in ", ftos(tries), " spawns"));
+		return 0;
+	}
+	return etof(is_cart ? plc_str_cart_pool[0] : plc_str_evt_pool[0]);
+}
+
 void payload_strategy_attach()
 {
 	if (plc_str_h_obs < 0)
@@ -54,19 +70,25 @@ void payload_strategy_attach()
 
 	if (!plc_str_evt_pool[0])
 	{
-		// Spawn the ring as one contiguous edict block, nothing in between, so
-		// etof(pool[0]) + i addresses row i for the whole gather sweep.
+		plc_str_evt_base  = payload_str_pool_run(PLC_STR_EVT_ROWS, 0);
+		plc_str_cart_base = payload_str_pool_run(PLC_MAX_CARTS, 1);
+		// Contiguity is the gather precondition; state it as a measurement, not
+		// as a comment. Both runs are re-verified here against the live edict
+		// numbers so a real run's log carries the proof.
+		float okc = 1, oke = 1;
 		for (int i = 0; i < PLC_STR_EVT_ROWS; ++i)
-			plc_str_evt_pool[i] = spawn();
+			if (etof(plc_str_evt_pool[i]) != plc_str_evt_base + i) oke = 0;
+		for (int i = 0; i < PLC_MAX_CARTS; ++i)
+			if (etof(plc_str_cart_pool[i]) != plc_str_cart_base + i) okc = 0;
+		// One sprintf, not a strcat chain: DP's VM_strcat takes at most 8
+		// arguments and silently drops the rest.
+		LOG_INFO(sprintf("payload: [PLCPOOL] evt_base %d rows %d contiguous %d",
+			plc_str_evt_base, PLC_STR_EVT_ROWS, oke));
+		LOG_INFO(sprintf("payload: [PLCPOOL] cart_base %d rows %d contiguous %d obs_base 1 rows %d",
+			plc_str_cart_base, PLC_MAX_CARTS, okc, maxclients));
 	}
 }
 
-// ---------------------------------------------------------------------------
-//  payload_str_cell_of — V-cell id for a world origin (payload-spec §2.2.2).
-//  Coarse 256u grid hash: a stable id per grid square. The 2-cell range gate
-//  (payload_str_within2) works directly on grid coordinates, so the id here is
-//  only a stamp for edge-trigger dedup and the observation CELL column.
-// ---------------------------------------------------------------------------
 float payload_str_cell_of(vector org)
 {
 	float gx = floor(org.x / 256);
@@ -74,7 +96,6 @@ float payload_str_cell_of(vector org)
 	return (gx * 131 + gy) & 1023;
 }
 
-// Gate 3 (range): both origins within 2 grid cells (Chebyshev) on the 256u grid.
 float payload_str_within2(vector a, vector b)
 {
 	float dx = fabs(floor(a.x / 256) - floor(b.x / 256));
@@ -82,9 +103,6 @@ float payload_str_within2(vector a, vector b)
 	return (max(dx, dy) <= 2);
 }
 
-// Deposit one edge-triggered event into the per-team ring. Only fires when the
-// (cell,kind,subject) triple differs from this team's last stamp, so the ring
-// carries events, not a per-tick dump.
 void payload_str_deposit(float cell, float kind, float team, float subject, float value)
 {
 	float ti = team;
@@ -93,7 +111,7 @@ void payload_str_deposit(float cell, float kind, float team, float subject, floa
 
 	if (cell == plc_str_last_cell[ti] && kind == plc_str_last_kind[ti]
 	    && subject == plc_str_last_subj[ti])
-		return;   // same event as last stamp — not an edge
+		return;
 
 	plc_str_last_cell[ti] = cell;
 	plc_str_last_kind[ti] = kind;
@@ -112,38 +130,29 @@ void payload_str_deposit(float cell, float kind, float team, float subject, floa
 		plc_str_evt_w = 0;
 }
 
-// ---------------------------------------------------------------------------
-//  payload_perceive — the frustum + LOS + 2-V-cell perception gate.
-//  For one bot, scan enemy players and pickup items; deposit an edge-triggered
-//  event ONLY when all three gates pass. This is the ONLY producer of enemy/item
-//  rows — there is no omniscient feed anywhere in this path. Stealth is emergent:
-//  an unobserved body or pickup is simply absent from the ring.
-// ---------------------------------------------------------------------------
 void payload_perceive(entity bot)
 {
 	if (IS_DEAD(bot))
-		return;   // dead bots have no viewpoint — a physics fact, not a refusal
+		return;
 
 	vector eye = bot.origin + bot.view_ofs;
 	float bcell = payload_str_cell_of(bot.origin);
 	bot.plc_str_cell = bcell;
 	float myteam = Team_TeamToIndex(bot.team);
 
-	// Enemy players → rival_here (kind 3). Featurized ONLY here.
 	FOREACH_CLIENT(IS_PLAYER(it) && it != bot && !IS_DEAD(it) && DIFF_TEAM(it, bot),
 	{
-		if (!payload_str_within2(bot.origin, it.origin))   // gate 3: range
+		if (!payload_str_within2(bot.origin, it.origin))
 			continue;
-		if (!checkpvs(eye, it))                            // gate 1: frustum+PVS
+		if (!checkpvs(eye, it))
 			continue;
-		traceline(eye, it.origin, MOVE_NOMONSTERS, bot);   // gate 2: line of sight
+		traceline(eye, it.origin, MOVE_NOMONSTERS, bot);
 		if (trace_fraction < 1)
 			continue;
 		payload_str_deposit(payload_str_cell_of(it.origin), 3, myteam,
 			etof(it), GetResource(it, RES_HEALTH));
 	});
 
-	// Pickup items → item_here (kind 1) / item_gone (kind 0).
 	IL_EACH(g_items, it.bot_pickup,
 	{
 		vector o = (it.absmin + it.absmax) * 0.5;
@@ -160,29 +169,152 @@ void payload_perceive(entity bot)
 	});
 }
 
-// ---------------------------------------------------------------------------
-//  payload_strategy_gather — stage per-edict scratch columns, then gather A,B,C.
-//  Cartstate (schema B) is staged and published UNCONDITIONALLY every step: it
-//  is the guaranteed global feature (rl-training-spec §1).
-// ---------------------------------------------------------------------------
+// Log the EXACT rows the mesh is about to carry, read back off the staged
+// fields rather than recomputed, so the log IS the gather source. One line per
+// row; tools/measure.py parses these into the per-player observation table
+// (AGENDA E9/E10) and reconstructs the instrument descriptors z and the
+// relation rows from them. Gated on g_payload_strategy_log because it is one
+// line per player per strategy tick.
+void payload_strategy_log(float nclients)
+{
+	LOG_INFO(strcat("[PLCPUB] ", ftos(plc_str_req_seq), " ", ftos(time),
+		" carts ", ftos(payload_cart_count), " clients ", ftos(nclients),
+		" evtrows ", ftos(PLC_STR_EVT_ROWS)));
+
+	for (int c = 0; c < payload_cart_count; ++c)
+	{
+		entity row = plc_str_cart_pool[c];
+		// At most 7 values per sprintf: the QuakeC calling convention carries
+		// MAX_PARMS = 8 (darkplaces pr_comp.h:143) and the format string is
+		// one of them, so an 8th value is silently dropped.
+		LOG_INFO(strcat(
+			sprintf("[PLCCART] %d %d %g %g %g", plc_str_req_seq, c,
+				row.plc_cs_f_id, row.plc_cs_f_depth, row.plc_cs_f_length),
+			sprintf(" %g %g %g %g %g",
+				row.plc_cs_f_ctrl, row.plc_cs_f_speed, row.plc_cs_f_idle,
+				row.plc_cs_f_bankmask, row.plc_cs_f_progress),
+			sprintf(" %g %g %g",
+				row.plc_cs_f_px, row.plc_cs_f_py, row.plc_cs_f_pz)));
+	}
+
+	FOREACH_CLIENT(IS_PLAYER(it),
+	{
+		string a = sprintf("[PLCOBS] %d %d %g %g %g", plc_str_req_seq, etof(it),
+			it.plc_ob_f_id, it.plc_ob_f_team, it.plc_ob_f_health);
+		string b = sprintf(" %g %g %g %g %g %g",
+			it.plc_ob_f_armor, it.plc_ob_f_ammo, it.plc_ob_f_px,
+			it.plc_ob_f_py, it.plc_ob_f_pz, it.plc_ob_f_vx);
+		string c2 = sprintf(" %g %g %g %g %g %g",
+			it.plc_ob_f_vy, it.plc_ob_f_vz, it.plc_ob_f_weapons,
+			it.plc_ob_f_power, it.plc_ob_f_tss, it.plc_ob_f_cell);
+		string d = sprintf(" %g %g %g %g",
+			it.plc_ob_f_ncart, it.plc_ob_f_ncartd,
+			it.plc_ob_f_alive, it.plc_ob_f_control);
+		LOG_INFO(strcat(a, b, c2, d));
+	});
+
+	for (int r = 0; r < PLC_STR_EVT_ROWS; ++r)
+	{
+		entity e = plc_str_evt_pool[r];
+		if (e.plc_ev_f_time == 0 && e.plc_ev_f_kind == 0 && e.plc_ev_f_subject == 0)
+			continue;
+		LOG_INFO(strcat(
+			sprintf("[PLCEVT] %d %d %g %g %g", plc_str_req_seq, r,
+				e.plc_ev_f_cell, e.plc_ev_f_kind, e.plc_ev_f_team),
+			sprintf(" %g %g %g", e.plc_ev_f_subject, e.plc_ev_f_value,
+				e.plc_ev_f_time)));
+	}
+}
+
+float plc_str_link_cursor = 0;
+float plc_str_link_pass = 0;
+float plc_str_link_rows = 0;
+
+// Stream the map's V-cell adjacency onto the perception ring: for each stock
+// waypoint, every outgoing link whose endpoint hashes to a DIFFERENT V-cell is
+// one navigable cell->cell edge. `waypoint_get_link` reads the stock nav graph
+// (server/bot/default/waypoints.qh:28), so this reports the engine's own
+// navigability and introduces no second navigation definition (SPEC 12).
+//
+// The sweep never latches "done": g_waypoints is still filling during the first
+// seconds of a match (a one-shot pass caught 33 of 469 waypoints on a real
+// fused run), and a map can gain waypoints later. It keeps cycling instead, at
+// a rate low enough that link rows never crowd the perception events out of the
+// 256-row ring.
+void payload_emit_cell_links()
+{
+	float index = 0;
+	float processed = 0;
+	float total = 0;
+	IL_EACH(g_waypoints, true,
+	{
+		total += 1;
+		if (index >= plc_str_link_cursor && processed < PLC_STR_LINKS_PER_STEP)
+		{
+			float ca = payload_str_cell_of(it.origin);
+			for (int j = 0; j < 32; ++j)
+			{
+				entity link = waypoint_get_link(it, j);
+				if (!link)
+					continue;
+				float cb = payload_str_cell_of(link.origin);
+				if (cb == ca)
+					continue;
+				entity row = plc_str_evt_pool[plc_str_evt_w];
+				row.plc_ev_f_cell    = ca;
+				row.plc_ev_f_kind    = PLC_EVT_KIND_CELL_LINK;
+				row.plc_ev_f_team    = 0;
+				row.plc_ev_f_subject = cb;
+				row.plc_ev_f_value   = vlen(link.origin - it.origin) / 1024;
+				row.plc_ev_f_time    = time;
+				plc_str_evt_w += 1;
+				if (plc_str_evt_w >= PLC_STR_EVT_ROWS)
+					plc_str_evt_w = 0;
+				plc_str_link_rows += 1;
+			}
+			processed += 1;
+		}
+		index += 1;
+	});
+
+	plc_str_link_cursor += processed;
+	if (plc_str_link_cursor >= total)
+	{
+		plc_str_link_cursor = 0;
+		plc_str_link_pass += 1;
+		LOG_INFO(sprintf("payload: [PLCLINK] pass %d over %d waypoints, %d cell-link rows emitted",
+			plc_str_link_pass, total, plc_str_link_rows));
+	}
+}
+
 void payload_strategy_gather(float nclients)
 {
-	// (B) cartstate rows — GUARANTEED. Stage every cart edict.
 	for (int c = 0; c < payload_cart_count; ++c)
 	{
 		entity cart = payload_carts[c];
-		cart.plc_cs_f_id       = cart.plc_cart_id;
-		cart.plc_cs_f_depth    = (cart.plc_length > 0) ? cart.plc_s / cart.plc_length : 0;
-		cart.plc_cs_f_length   = cart.plc_length;
-		cart.plc_cs_f_ctrl     = cart.plc_ctrl;
-		cart.plc_cs_f_speed    = cart.plc_speed_now;
-		cart.plc_cs_f_idle     = cart.plc_idle;
-		cart.plc_cs_f_bankmask = cart.plc_bank_team;
-		cart.plc_cs_f_progress = cart.plc_banked;
+		entity row = plc_str_cart_pool[c];
+		row.plc_cs_f_id       = cart.plc_cart_id;
+		row.plc_cs_f_depth    = (cart.plc_length > 0) ? cart.plc_s / cart.plc_length : 0;
+		row.plc_cs_f_length   = cart.plc_length;
+		row.plc_cs_f_ctrl     = cart.plc_ctrl;
+		row.plc_cs_f_speed    = cart.plc_speed_now;
+		row.plc_cs_f_idle     = cart.plc_idle;
+		row.plc_cs_f_bankmask = cart.plc_bank_team;
+		row.plc_cs_f_progress = cart.plc_banked;
+		// Cart world origin, same 1/1024 scaling as the per-player position
+		// columns. Without it no consumer can price the travel a cart
+		// assignment costs (AGENDA F4).
+		// A cart is a brush model: sv_payload.qc sets `view_ofs = mins` and
+		// parks it at `payload_pos(...) - view_ofs`, so its WORLD position on
+		// the golden path is origin + view_ofs, not origin.
+		vector cpos = cart.origin + cart.view_ofs;
+		row.plc_cs_f_px      = cpos.x / 1024;
+		row.plc_cs_f_py      = cpos.y / 1024;
+		row.plc_cs_f_pz      = cpos.z / 1024;
 	}
 	if (payload_cart_count > 0)
 	{
-		float cbase = etof(payload_carts[0]);
+		float cbase = plc_str_cart_base;
 		mesh_gather(plc_str_h_cart, PLC_CS_ID,       plc_cs_f_id,       cbase, payload_cart_count);
 		mesh_gather(plc_str_h_cart, PLC_CS_DEPTH,    plc_cs_f_depth,    cbase, payload_cart_count);
 		mesh_gather(plc_str_h_cart, PLC_CS_LENGTH,   plc_cs_f_length,   cbase, payload_cart_count);
@@ -191,15 +323,20 @@ void payload_strategy_gather(float nclients)
 		mesh_gather(plc_str_h_cart, PLC_CS_IDLE,     plc_cs_f_idle,     cbase, payload_cart_count);
 		mesh_gather(plc_str_h_cart, PLC_CS_BANKMASK, plc_cs_f_bankmask, cbase, payload_cart_count);
 		mesh_gather(plc_str_h_cart, PLC_CS_PROGRESS, plc_cs_f_progress, cbase, payload_cart_count);
+		mesh_gather(plc_str_h_cart, PLC_CS_POS_X,    plc_cs_f_px,       cbase, payload_cart_count);
+		mesh_gather(plc_str_h_cart, PLC_CS_POS_Y,    plc_cs_f_py,       cbase, payload_cart_count);
+		mesh_gather(plc_str_h_cart, PLC_CS_POS_Z,    plc_cs_f_pz,       cbase, payload_cart_count);
 	}
 
-	// (A) per-player observation rows x_b — own, known self-state only.
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
 		float nci = -1; float ncd = 999999999;
 		for (int c = 0; c < payload_cart_count; ++c)
 		{
-			float d = vlen(payload_carts[c].origin - it.origin);
+			// Same brush-model correction: comparing a player's origin to a
+			// cart's UNOFFSET origin made the nearest-cart columns wrong by
+			// the cart brush's mins on every row of every run so far.
+			float d = vlen((payload_carts[c].origin + payload_carts[c].view_ofs) - it.origin);
 			if (d < ncd) { ncd = d; nci = c; }
 		}
 		float ammo = GetResource(it, RES_SHELLS) + GetResource(it, RES_BULLETS)
@@ -246,8 +383,7 @@ void payload_strategy_gather(float nclients)
 	mesh_gather(plc_str_h_obs, PLC_OBS_ALIVE,   plc_ob_f_alive,   1, nclients);
 	mesh_gather(plc_str_h_obs, PLC_OBS_CONTROL, plc_ob_f_control, 1, nclients);
 
-	// (C) perception ring — rows already deposited this step by payload_perceive.
-	float ebase = etof(plc_str_evt_pool[0]);
+	float ebase = plc_str_evt_base;
 	mesh_gather(plc_str_h_evt, PLC_EVT_CELL,    plc_ev_f_cell,    ebase, PLC_STR_EVT_ROWS);
 	mesh_gather(plc_str_h_evt, PLC_EVT_KIND,    plc_ev_f_kind,    ebase, PLC_STR_EVT_ROWS);
 	mesh_gather(plc_str_h_evt, PLC_EVT_TEAM,    plc_ev_f_team,    ebase, PLC_STR_EVT_ROWS);
@@ -255,22 +391,21 @@ void payload_strategy_gather(float nclients)
 	mesh_gather(plc_str_h_evt, PLC_EVT_VALUE,   plc_ev_f_value,   ebase, PLC_STR_EVT_ROWS);
 	mesh_gather(plc_str_h_evt, PLC_EVT_TIME,    plc_ev_f_time,    ebase, PLC_STR_EVT_ROWS);
 
-	mesh_publish(plc_str_h_cart, plc_str_seq, payload_cart_count);
-	mesh_publish(plc_str_h_obs,  plc_str_seq, nclients);
-	mesh_publish(plc_str_h_evt,  plc_str_seq, PLC_STR_EVT_ROWS);
+	plc_str_req_seq += 1;
+	if (autocvar_g_payload_strategy_log)
+		payload_strategy_log(nclients);
+
+	mesh_publish(plc_str_h_cart, plc_str_req_seq, payload_cart_count);
+	mesh_publish(plc_str_h_obs,  plc_str_req_seq, nclients);
+	mesh_publish(plc_str_h_evt,  plc_str_req_seq, PLC_STR_EVT_ROWS);
 }
 
-// ---------------------------------------------------------------------------
-//  payload_strategy_scatter — pull the latest completed plan down (8 cols).
-//  The response columns are the absolute, mesh-integrated w_b. QC never
-//  integrates (payload-spec §3.2). A missing newer plan is HELD, not demoted.
-// ---------------------------------------------------------------------------
 void payload_strategy_scatter(float nclients)
 {
 	float seq = mesh_poll(plc_str_h_sc);
-	if (seq <= plc_str_seq)
-		return;   // no newer plan yet — hold last absolute w_b (a hold)
-	plc_str_seq = seq;
+	if (seq <= plc_str_resp_seq)
+		return;
+	plc_str_resp_seq = seq;
 
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
@@ -288,38 +423,17 @@ void payload_strategy_scatter(float nclients)
 	mesh_scatter(plc_str_h_sc, PLC_SC_LEAD,    plc_str_lead,    1, nclients);
 }
 
-// ---------------------------------------------------------------------------
-//  havocbot_goalrating_strategy — THIN TRANSLATOR: matmul target-weights become
-//  navigation_routerating biases on REAL entities and nothing else. It decides
-//  NOTHING (the committed target is a mesh output it reads) and computes NO
-//  navigation (no node-finding, no path geometry, no "which point on the path").
-//  Each objective in the vocabulary maps to one stock-navigable target entity:
-//    push/suppress cart k -> the cart entity        (occupancy law resolves push/suppress)
-//    contest item post p  -> the item entity
-//    hunt rival r         -> the rival player entity
-//    explore/gather cell c-> stock waypoint entities in the cell
-//  Every output is a navigation_routerating base-rating bias — the single lever
-//  (navigation.qc:1220). It NEVER writes skill/bot_*aim* fields, so skill-
-//  orthogonality holds by construction (playerbot-interface §4).
-// ---------------------------------------------------------------------------
 void havocbot_goalrating_strategy(entity this, float ratingscale)
 {
 	float tgt  = this.plc_str_target;
 	float gain = this.plc_str_gain;
 
-	// push / suppress cart k: ONE routerating on the real CART entity. Push vs
-	// suppress is NOT re-encoded here — it is resolved downstream by the cylinder
-	// occupancy law (payload_occupancy, sv_payload.qc:102; design/cart-force-field.md):
-	// a body present in the cart's cylinder pushes or contests by presence. The
-	// adapter only says "want this cart, this much"; stock navigation finds the
-	// route to it via the waypoint navmesh (navigation.qc:1220, moving-goal path).
 	if (tgt >= PLC_TGT_CART_BASE && tgt < PLC_TGT_ITEM_BASE)
 	{
 		float k = tgt - PLC_TGT_CART_BASE;
 		if (k >= 0 && k < payload_cart_count && gain != 0)
 			navigation_routerating(this, payload_carts[k], ratingscale * gain, 5000);
 	}
-	// contest item post p: subject was written as etof(item); resolve it back.
 	else if (tgt >= PLC_TGT_ITEM_BASE && tgt < PLC_TGT_RIVAL_BASE)
 	{
 		float subj = tgt - PLC_TGT_ITEM_BASE;
@@ -329,7 +443,6 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 			break;
 		});
 	}
-	// hunt rival r (must-build #1): single-target rate of the observed rival.
 	else if (tgt >= PLC_TGT_RIVAL_BASE && tgt < PLC_TGT_CELL_BASE)
 	{
 		float subj = tgt - PLC_TGT_RIVAL_BASE;
@@ -339,10 +452,6 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 			break;
 		});
 	}
-	// explore / grab at cell c (must-build #2): routerating the STOCK waypoint
-	// entities whose hashed V-cell matches the selected cell. These are ordinary
-	// g_waypoints navmesh nodes, not a project-specific path — the adapter names
-	// target entities and stock navigation computes the route.
 	else if (tgt >= PLC_TGT_CELL_BASE && this.plc_str_explore != 0)
 	{
 		float cell = tgt - PLC_TGT_CELL_BASE;
@@ -352,25 +461,18 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 		});
 	}
 
-	// travel commitment (must-build #4): hold the strategy token this long so a
-	// committed instrument is not re-diced every tick (navigation.qc:51 pattern).
 	if (this.plc_str_commit > 0)
 		this.bot_strategytime = max(this.bot_strategytime, time + this.plc_str_commit);
 
 }
 
-// ---------------------------------------------------------------------------
-//  payload_strategy_step — one strategy step. Called from the EXISTING lead-cart
-//  gate in payload_think (if plc_cart_id == 0), throttled to PLC_STRAT_TICK.
-// ---------------------------------------------------------------------------
 void payload_strategy_step(entity leadcart)
 {
 	payload_strategy_attach();
 
 	float nclients = maxclients;
+	payload_emit_cell_links();
 	FOREACH_CLIENT(IS_PLAYER(it), { payload_perceive(it); });
 	payload_strategy_gather(nclients);
 	payload_strategy_scatter(nclients);
-	// The rater (havocbot_goalrating_strategy) runs later, per bot, when each bot
-	// holds the strategy token in havocbot_ai — reading the freshly scattered w_b.
 }

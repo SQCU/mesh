@@ -191,6 +191,125 @@ class Gen:
         print('nav: %d waypoints %d links' % (len(seen), len(cl) - 2))
 
 
+
+# ---------------------------------------------------------------------------
+# Procedural BRIDGE TILE  (the "k-many bridge maps" of the fusion spec)
+#
+# A bridge tile is a small procedurally generated map whose only purpose is to be
+# socketed to several other maps at once -- the 'connector' map of the spec, the
+# thing that is allowed to have subtle/weakly-signposted edges *because* it has
+# multiple edges to multiple other map nodes.  It is real q3map2-compiled brush
+# geometry, not a corridor slab: a two-tier hub chamber with cardinal arms.
+#
+#   * up to 4 arms on the ground tier   (z = 0)
+#   * up to 4 arms on the gallery tier  (z = TIER) reached by jumppads, and a
+#     teleporter back down -- the commanded use of jumppad + portal + verticality
+#   * every arm ends in a thin caulk PLUG brush so q3map2 sees a sealed hull; the
+#     plug is small enough (<< 640^3) that mapfuse's corridor carver removes it
+#     when it punches the join corridor through.
+#
+# Returns (Gen, ports) where ports is a list of dicts:
+#     {'p': [x,y,z] floor point just inside the arm mouth, 'dir': [dx,dy,0],
+#      'tier': 0|1, 'name': 'e0'|...}
+# ---------------------------------------------------------------------------
+DIRS = {'e': (1, 0), 'w': (-1, 0), 'n': (0, 1), 's': (0, -1)}
+HUBW, ARMW, ARMH, ARML, TIER, PLUGT = 1024.0, 288.0, 224.0, 640.0, 320.0, 32.0
+
+
+def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
+    """arms_lo / arms_hi: iterables of 'e','w','n','s' -- which cardinal arms to
+    cut on the ground tier and on the gallery tier."""
+    rng = random.Random(seed)
+    g = Gen(seed, name)
+    h = HUBW / 2.0
+    hub_h = TIER + 320.0
+    arms_lo = list(arms_lo) + list(arms_hi)      # all ports on the ground tier:
+    arms_hi = []                                 # a port must be cart-navigable
+    doors_lo = {d: (0.0, ARMW) for d in arms_lo}
+    g.room(0.0, 0.0, 0.0, HUBW, HUBW, hub_h, doors_lo)
+    ports = []
+
+    def arm(d, z, tier):
+        dx, dy = DIRS[d]
+        axis = 0 if dx else 1
+        c0 = h if (dx > 0 or dy > 0) else -(h + ARML)
+        c1 = c0 + ARML
+        g.corridor(axis, c0, c1, 0.0, z, ARMW, ARMH)
+        # end plug: sealed for q3map2, small enough for mapfuse to carve
+        far = c1 if (dx > 0 or dy > 0) else c0
+        sgn = 1 if (dx > 0 or dy > 0) else -1
+        lo = [0.0] * 3
+        hi = [0.0] * 3
+        for a in range(3):
+            if a == axis:
+                lo[a], hi[a] = (far, far + PLUGT) if sgn > 0 else (far - PLUGT, far)
+            elif a == 2:
+                lo[a], hi[a] = z - THK, z + ARMH + THK
+            else:
+                lo[a], hi[a] = -ARMW / 2 - THK, ARMW / 2 + THK
+        g.box(lo, hi, TEX['caulk'])
+        px = (far - sgn * 96.0) if axis == 0 else 0.0
+        py = (far - sgn * 96.0) if axis == 1 else 0.0
+        p = [round(px, 1), round(py, 1), z]
+        g.wps.append(p)
+        ports.append({'p': p, 'dir': [float(dx), float(dy), 0.0], 'tier': tier, 'name': d + str(tier)})
+
+    for d in arms_lo:
+        arm(d, 0.0, 0)
+    # VERTICALITY: a gallery ring ledge above the hub floor, reached by a jumppad and
+    # left by a teleporter -- "ways to use the portal and jump pad and verticality".
+    # It is an interior feature, never a port, so every port stays cart-navigable.
+    gw = 288.0
+    g.ledge(-h, -h, h, -h + gw, TIER)
+    g.ledge(-h, h - gw, h, h, TIER)
+    g.ledge(-h, -h + gw, -h + gw, h - gw, TIER)
+    g.ledge(h - gw, -h + gw, h, h - gw, TIER)
+    padat = [0.0, -(h - 200.0), 0.0]
+    land = [0.0, h - gw / 2, TIER]
+    g.jumppad(padat, land, 0)
+    g.teleporter(land, [0.0, -(h - 400.0), 0.0], 90, 0)
+    g.spawn('info_player_deathmatch', [0.0, 0.0, 0.0], rng.randrange(360))
+    g.gen_nav()
+    # gen_nav only grid-links coplanar floors; snap the jumppad/teleporter links onto
+    # the nearest REAL generated waypoint so the gallery is genuinely reachable in the
+    # fused waypoint cache rather than dangling on a synthetic endpoint.
+    wpset = {tuple(w) for w in g.wps}
+
+    def snap(q):
+        if tuple(q) in wpset:
+            return list(q)
+        cand = [w for w in g.wps if abs(w[2] - q[2]) < 1.0] or g.wps
+        return list(min(cand, key=lambda w: math.dist(w, q)))
+    g.links = [(snap(a), snap(b), o) for a, b, o in g.links]
+    # a port must be a REAL node of the tile's waypoint graph, otherwise mapfuse
+    # sockets the join corridor onto a point no bot can stand on or route through.
+    linked = set()
+    for a, b, o in g.links:
+        linked.add(tuple(a)); linked.add(tuple(b))
+    for pt in ports:
+        cand = [w for w in g.wps if tuple(w) in linked and abs(w[2] - pt['p'][2]) < 1.0]
+        if cand:
+            pt['p'] = list(min(cand, key=lambda w: math.dist(w, pt['p'])))
+    return g, ports
+
+
+def build_bridge_tile(outdir, name, seed, arms_lo, arms_hi):
+    """Emit + q3map2-compile a bridge tile and its nav files into outdir.
+    Returns (basepath_without_ext, ports)."""
+    os.makedirs(outdir, exist_ok=True)
+    g, ports = bridge_tile(seed, arms_lo, arms_hi, name)
+    mappath = os.path.join(outdir, name + '.map')
+    g.emit_map(mappath)
+    compile_map(mappath)
+    g.write_nav(outdir, name)
+    base = os.path.join(outdir, name)
+    probs = check_bsp(open(base + '.bsp', 'rb').read())
+    print('bridge %s: parse-back %s  ports=%s' %
+          (name, 'OK' if not probs else 'PROBLEMS %s' % probs[:5],
+           [p['name'] for p in ports]))
+    return base, ports
+
+
 def compile_map(mappath, verbose=False):
     env = dict(os.environ)
     for stage in (['-meta'], ['-vis', '-threads', '1'], ['-light', '-threads', '1', '-fast', '-samples', '2', '-bounce', '2']):

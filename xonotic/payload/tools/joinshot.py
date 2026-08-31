@@ -72,6 +72,182 @@ def cameras_for_join(idx, jn):
         yield ('%s_b_landing' % tag, eb, vectoangles_view(ab[0]-eb[0], ab[1]-eb[1], ab[2]-eb[2]))
 
 
+
+# ---------------------------------------------------------------------------
+# Region vantage cameras + the VOID AUDIT.
+#
+# Rendering only the joins was not sufficient evidence that a fusion works: a live
+# client showed a world that was "almost entirely black void ... a single small
+# isolated island of structures", and every offline number (3 maps, 3 joins,
+# flood-fill OK) had passed.  A join camera stands INSIDE a corridor, where the
+# corridor's own four walls fill the frame, so a region that renders as nothing is
+# invisible to it.  The region cameras below stand on real bot-reachable waypoints
+# inside each fused region and look outward on four yaws; the audit then measures
+# how much of each frame is void.  A region that renders black from its own floor is
+# the exact failure in that screenshot, and it now fails offline.
+# ---------------------------------------------------------------------------
+
+def cameras_for_region(idx, mp):
+    """Yield cameras standing on this region's own vantage waypoints."""
+    name = ''.join(ch if ch.isalnum() else '_' for ch in mp.get('name', 'r%d' % idx))
+    for vi, v in enumerate(mp.get('vantages', [])[:2]):
+        for yi, yaw in enumerate((0.0, 90.0, 180.0, 270.0)):
+            yield ('r%02d_%s_v%d_y%d' % (idx, name, vi, int(yaw)),
+                   [v[0], v[1], v[2] + EYE], (0.0, yaw, 0.0))
+
+
+def cameras_overview(joins):
+    """One high camera per region looking down, plus one over the whole megamap."""
+    mins = [min(m['mins'][a] for m in joins['maps']) for a in range(3)]
+    maxs = [max(m['maxs'][a] for m in joins['maps']) for a in range(3)]
+    cx, cy = (mins[0] + maxs[0]) / 2, (mins[1] + maxs[1]) / 2
+    yield ('ov_world', [cx, cy, maxs[2] + 512.0], (89.0, 0.0, 0.0))
+    for i, m in enumerate(joins['maps']):
+        mx = (m['mins'][0] + m['maxs'][0]) / 2
+        my = (m['mins'][1] + m['maxs'][1]) / 2
+        yield ('ov%02d' % i, [mx, my, m['maxs'][2] + 256.0], (89.0, 0.0, 0.0))
+
+
+def _defilter(raw, pos, pw, ph, nch):
+    """De-filter one PNG pixel block; returns (bytes, new_pos)."""
+    stride = pw * nch
+    out = bytearray(ph * stride)
+    prev = bytearray(stride)
+    for y in range(ph):
+        ft = raw[pos]
+        pos += 1
+        line = bytearray(raw[pos:pos + stride])
+        pos += stride
+        if ft == 1:
+            for x in range(nch, stride):
+                line[x] = (line[x] + line[x - nch]) & 255
+        elif ft == 2:
+            for x in range(stride):
+                line[x] = (line[x] + prev[x]) & 255
+        elif ft == 3:
+            for x in range(stride):
+                aa = line[x - nch] if x >= nch else 0
+                line[x] = (line[x] + ((aa + prev[x]) >> 1)) & 255
+        elif ft == 4:
+            for x in range(stride):
+                aa = line[x - nch] if x >= nch else 0
+                bb = prev[x]
+                cc = prev[x - nch] if x >= nch else 0
+                pp = aa + bb - cc
+                pa, pb, pc = abs(pp - aa), abs(pp - bb), abs(pp - cc)
+                pr = aa if (pa <= pb and pa <= pc) else (bb if pb <= pc else cc)
+                line[x] = (line[x] + pr) & 255
+        out[y * stride:(y + 1) * stride] = line
+        prev = line
+    return out, pos
+
+
+ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+         (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
+
+
+def read_png_rgb(path):
+    """Minimal PNG reader: 8-bit gray/RGB/RGBA, both non-interlaced and Adam7.
+    There is no PIL on this box, and DarkPlaces writes INTERLACED PNGs -- which is
+    why the first version of this audit could not read a single engine frame."""
+    import zlib as _z
+    d = open(path, 'rb').read()
+    if d[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError('not a png')
+    i, idat, w = 8, b'', None
+    while i < len(d):
+        ln = struct.unpack_from('>I', d, i)[0]
+        typ = d[i + 4:i + 8]
+        body = d[i + 8:i + 8 + ln]
+        if typ == b'IHDR':
+            w, h, depth, ctype = struct.unpack_from('>IIBB', body, 0)[:4]
+            inter = body[12]
+        elif typ == b'IDAT':
+            idat += body
+        elif typ == b'IEND':
+            break
+        i += 12 + ln
+    if w is None or depth != 8:
+        raise ValueError('unsupported png (depth=%s)' % depth)
+    nch = {0: 1, 2: 3, 4: 2, 6: 4}[ctype]
+    raw = _z.decompress(idat)
+    if not inter:
+        out, _ = _defilter(raw, 0, w, h, nch)
+        return w, h, nch, bytes(out)
+    full = bytearray(w * h * nch)
+    pos = 0
+    for x0, y0, dx, dy in ADAM7:
+        pw = (w - x0 + dx - 1) // dx
+        ph = (h - y0 + dy - 1) // dy
+        if pw <= 0 or ph <= 0:
+            continue
+        blk, pos = _defilter(raw, pos, pw, ph, nch)
+        for py in range(ph):
+            ry = y0 + py * dy
+            src = py * pw * nch
+            for px in range(pw):
+                rx = x0 + px * dx
+                o = (ry * w + rx) * nch
+                full[o:o + nch] = blk[src + px * nch:src + (px + 1) * nch]
+    return w, h, nch, bytes(full)
+
+
+def frame_stats(path, dark=18, hud_rows=0.12):
+    """Fraction of VOID (near-black) pixels and the distinct-luma count of a frame.
+    The bottom hud_rows of the frame are skipped (residual HUD/console text)."""
+    w, h, nch, px = read_png_rgb(path)
+    y1 = int(h * (1.0 - hud_rows))
+    void = 0
+    tot = 0
+    lum = set()
+    for y in range(y1):
+        base = y * w * nch
+        for x in range(0, w, 2):
+            o = base + x * nch
+            if nch >= 3:
+                r, g, b = px[o], px[o + 1], px[o + 2]
+            else:
+                r = g = b = px[o]
+            L = (r * 299 + g * 587 + b * 114) // 1000
+            tot += 1
+            lum.add(L >> 2)
+            if L <= dark:
+                void += 1
+    return dict(void=void / max(1, tot), levels=len(lum), w=w, h=h)
+
+
+def void_audit(outdir, shots, void_max=0.90, levels_min=6):
+    """Grade every captured frame.  A frame that is almost entirely near-black with
+    almost no distinct luma levels is a VOID frame: the camera stood on real
+    walkable geometry and the engine drew nothing."""
+    rows, bad = [], []
+    for name in shots:
+        fp = os.path.join(outdir, name + '.png')
+        if not os.path.exists(fp):
+            rows.append((name, None))
+            bad.append((name, 'MISSING'))
+            continue
+        try:
+            st = frame_stats(fp)
+        except Exception as e:
+            rows.append((name, None))
+            bad.append((name, 'UNREADABLE %s' % e))
+            continue
+        rows.append((name, st))
+        if st['void'] >= void_max and st['levels'] <= levels_min:
+            bad.append((name, 'VOID void=%.2f levels=%d' % (st['void'], st['levels'])))
+    print('void audit: %d frames graded, %d void/missing' % (len(rows), len(bad)))
+    for name, st in rows:
+        if st:
+            print('  %-40s void=%.2f levels=%3d %dx%d' % (name, st['void'], st['levels'],
+                                                          st['w'], st['h']))
+    for name, why in bad:
+        print('  VOID-AUDIT FAIL: %s -- %s' % (name, why))
+    json.dump({n: st for n, st in rows}, open(os.path.join(outdir, 'voidaudit.json'), 'w'), indent=1)
+    print('void audit: %s (wrote voidaudit.json)' % ('PASS' if not bad else 'FAIL'))
+    return not bad
+
+
 def read_base_ent(mapdir):
     """The authoritative entity list for the fused map lives in the pk3's
     maps/fused.ent (mapfuse writes it there).  Fall back to the bsp lump 0."""
@@ -165,6 +341,14 @@ def main():
     ap.add_argument('--step', type=float, default=2.6, help='seconds between shots')
     ap.add_argument('--xonotic', default=os.path.expanduser('~/dox/xonotic/Xonotic'))
     ap.add_argument('--keep', action='store_true', help='keep the temp run dir')
+    ap.add_argument('--regions', action='store_true',
+                    help='also render outward from each fused region\'s own vantage waypoints')
+    ap.add_argument('--only-regions', action='store_true', help='skip the join cameras')
+    ap.add_argument('--overview', action='store_true', help='add top-down overview cameras')
+    ap.add_argument('--limit', type=int, default=0, help='cap the number of frames')
+    ap.add_argument('--audit-only', action='store_true',
+                    help='do not run the engine; just grade PNGs already in --out')
+    ap.add_argument('--no-audit', action='store_true')
     args = ap.parse_args()
 
     mapdir = os.path.abspath(args.mapdir)
@@ -173,10 +357,23 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     cams, shots = [], []
-    for i, jn in enumerate(joins['joins']):
-        for name, eye, ang in cameras_for_join(i, jn):
+    if not args.only_regions:
+        for i, jn in enumerate(joins['joins']):
+            for name, eye, ang in cameras_for_join(i, jn):
+                cams.append((name, eye, ang)); shots.append(name)
+    if args.regions:
+        for i, mp in enumerate(joins['maps']):
+            for name, eye, ang in cameras_for_region(i, mp):
+                cams.append((name, eye, ang)); shots.append(name)
+    if args.overview:
+        for name, eye, ang in cameras_overview(joins):
             cams.append((name, eye, ang)); shots.append(name)
-    print('%d joins -> %d camera frames' % (len(joins['joins']), len(cams)))
+    if args.limit:
+        cams, shots = cams[:args.limit], shots[:args.limit]
+    print('%d joins, %d regions -> %d camera frames' %
+          (len(joins['joins']), len(joins['maps']), len(cams)))
+    if args.audit_only:
+        return 0 if void_audit(out, shots) else 2
 
     bin_ = os.path.join(args.xonotic, 'Xonotic.app/Contents/MacOS/xonotic-osx-sdl-bin')
     if not os.path.exists(bin_):
@@ -283,11 +480,14 @@ def main():
         else:
             print('  MISSING frame: %s' % name)
     print('captured %d/%d frames -> %s' % (found, len(shots), out))
+    ok = True
+    if not args.no_audit:
+        ok = void_audit(out, shots)
     if not args.keep:
         shutil.rmtree(rundir, ignore_errors=True)
     else:
         print('run dir kept: %s (log: %s)' % (rundir, log))
-    return 0 if found else 1
+    return 0 if (found and ok) else 1
 
 
 if __name__ == '__main__':

@@ -262,7 +262,7 @@ void payload_unbank_points(entity this, float s_prev, float s_new)
 {
 	// The cart retreated from s_prev down to s_new (s_new < s_prev). Every banked
 	// control point it uncrosses is freed — a retreat destroys banked position,
-	// not just tempo (design/payload-strategy-spec.md §2). Frees any team's bank,
+	// not just tempo. Frees any team's bank,
 	// since the progress that earned it is being erased.
 	IL_EACH(g_payload_nodes, it.plc_cart == this && it.plc_dist <= s_prev && it.plc_dist > s_new,
 	{
@@ -321,8 +321,7 @@ void payload_think(entity this)
 	if(tie)
 		ctrl = 0;
 	// --- Two-regime signed velocity ---
-	// design/payload-strategy-spec.md §2 (the game), design/cart-force-field.md
-	// (the continuous/differentiable form). plc_ctrl is the cart's *sticky color*
+	// plc_ctrl is the cart's *sticky color*
 	// — the team it banks for, changed only at origin; `ctrl` is this tick's
 	// instantaneous plurality.
 	int color = this.plc_ctrl;
@@ -616,7 +615,6 @@ void havocbot_goalrating_payload(entity this, float ratingscale)
 	// navigation computes HOW to reach a cart (moving-goal path over the waypoint
 	// navmesh, navigation.qc:1220). We do NOT route bots along plc_path nodes: the
 	// plc_path chain is the cart's own movement/banking graph, not a bot nav graph.
-	// design/payload-spec.md is the reference.
 	for(int c = 0; c < payload_cart_count; ++c)
 		navigation_routerating(this, payload_carts[c], ratingscale, 5000);
 

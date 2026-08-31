@@ -534,6 +534,10 @@ class Curriculum:
         if self.args.startup_secs > 0:
             time.sleep(self.args.startup_secs)
         responder = self.launch("responder", commands["responder"], os.path.join(directory, "responder.log"), self.args.responder_cwd or ROOT)
+        self.event("learner_start", match=cfg["id"], ordinal=cfg["ordinal"],
+                   reason="match start", launched=responder.get("launched"),
+                   log=responder.get("log"), checkpoint_in=commands["checkpoint_in"],
+                   checkpoint_out=commands["checkpoint_out"])
         clients = [self.launch(f"client-{i}", cmd, os.path.join(directory, f"client-{i}.log"), ROOT) for i, cmd in enumerate(commands["clients"])]
         # A match has a duration; the LEARNER does not. If the responder exits
         # inside the match window -- crash, OOM, anything -- it is relaunched
@@ -563,6 +567,15 @@ class Curriculum:
                              "launched": responder.get("launched"),
                              "log": responder.get("log")})
         self.stop(server)
+        # SIGTERM, never argument-expiry and never kill -9: the responder's own
+        # drain-and-checkpoint path has to run. The learner is per match because
+        # `EstCache` pins the estimator to the FIRST (k, j, l) it sees, so a
+        # process spanning matches of different team/cart counts would silently
+        # keep the first shape; the atomic checkpoint is what carries state
+        # across the boundary instead.
+        self.event("learner_stop", match=cfg["id"], ordinal=cfg["ordinal"],
+                   reason="match duration reached", signal="SIGTERM",
+                   checkpoint_out=commands["checkpoint_out"])
         self.terminate(responder)
         for client in clients:
             self.stop(client)

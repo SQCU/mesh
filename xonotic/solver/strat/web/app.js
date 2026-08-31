@@ -291,9 +291,10 @@ function renderProbe(report) {
   }
   const rows = [];
   const push = (r) => {
-    const beat = r.delta_vs_randproj !== null && r.delta_vs_randproj > 0.05 && !r.tautological;
-    rows.push(`<tr class="${r.tautological ? 'tautological' : ''}" title="${r.note.replace(/"/g, '')}">
-      <td>${r.target}</td>
+    const beat = r.control_ok && r.delta_vs_randproj !== null && r.delta_vs_randproj > 0.05 && !r.tautological;
+    const bad = r.delta_vs_randproj !== null && !r.control_ok;
+    rows.push(`<tr class="${r.tautological ? 'tautological' : ''}${bad ? ' degenerate' : ''}" title="${r.note.replace(/"/g, '')}">
+      <td>${r.target}${bad ? ' <span class="crit">control failed</span>' : ''}</td>
       ${cell(r.ir, beat)}${cell(r.randproj)}${cell(r.shuffled)}${cell(r.raw_x)}
       <td class="num ${beat ? 'beat' : 'nobeat'}">${r.delta_vs_randproj === null ? '—' : r.delta_vs_randproj.toFixed(4)}</td>
       <td class="num dimmed">${r.n_finite === undefined ? '' : r.n_finite}</td>
@@ -309,10 +310,14 @@ function renderProbe(report) {
   const klass = v.shuffled_label_control_passes ? (v.n_beats ? 'ok' : 'crit') : 'crit';
   $('verdict').innerHTML =
     `<span class="${klass}">${v.reading}</span>` +
+    (v.degenerate_targets && v.degenerate_targets.length
+      ? `<br><span class="warn">${v.degenerate_targets.length}/${v.scored_targets} targets failed their own shuffled-label control and are not read: ${v.degenerate_targets.join(', ')}</span>`
+      : '') +
     (v.beats_random_projection.length
       ? ' &nbsp;<span class="dimmed">(' + v.beats_random_projection.map((b) => `${b.target} +${b.delta}`).join(', ') + ')</span>'
       : '') +
-    `<br><span class="dimmed">shuffled-label control ${v.shuffled_label_control_passes ? 'passes (probes are honest)' : 'FAILS — nothing on this page is admissible'}</span>`;
+    `<br><span class="dimmed">shuffled-label control: worst |R&#178;| ${v.worst_shuffled_r2}; ` +
+    `${v.shuffled_label_control_passes ? 'most targets at chance — those probes are honest' : 'too many targets degenerate on this window'}</span>`;
   const m = report.method;
   $('method').innerHTML =
     `${m.estimator} · split ${m.split} · train ${m.train_rows} / test ${m.test_rows} rows<br>` +

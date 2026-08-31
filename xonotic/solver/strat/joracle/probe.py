@@ -242,7 +242,7 @@ class RollingProbe:
     """Accumulates live player-rows and recomputes the probe table in a thread."""
 
     def __init__(self, *, max_rows=4000, min_rows=120, min_ticks=8, interval=4.0, seed=SPLIT_SEED,
-                 rows_per_feature=8.0):
+                 rows_per_feature=16.0):
         self.max_rows = int(max_rows)
         self.min_rows = int(min_rows)
         self.min_ticks = int(min_ticks)
@@ -388,6 +388,13 @@ class RollingProbe:
                 round(row["ir"] - row["randproj"], 4)
                 if row["ir"] is not None and row["randproj"] is not None else None
             )
+            # Per-target honesty.  A shuffled-label R^2 must land NEAR ZERO; a
+            # large value in either direction means the ridge fit is degenerate
+            # for THIS target (tick-level targets are the usual cause: all rows
+            # in a tick share the value, so the effective sample is the tick
+            # count, not the row count) and the target's other columns say
+            # nothing.
+            row["control_ok"] = row["shuffled"] is not None and abs(row["shuffled"]) <= 0.10
             regression.append(row)
 
         classification = []
@@ -408,6 +415,9 @@ class RollingProbe:
                 row["delta_vs_randproj"] = round(row["ir"]["acc"] - row["randproj"]["acc"], 4)
             else:
                 row["delta_vs_randproj"] = None
+            row["control_ok"] = bool(
+                row["shuffled"] and row["shuffled"]["acc"] <= row["shuffled"]["majority"] + 0.10
+            )
             classification.append(row)
 
         verdict = self._verdict(regression, classification)
@@ -439,50 +449,49 @@ class RollingProbe:
     # -- readings ------------------------------------------------------------
     @staticmethod
     def _verdict(regression, classification):
-        """Does the IR beat the random-projection control anywhere non-tautological?"""
-        beats, considered = [], 0
-        for row in regression:
-            if row["tautological"] or row["delta_vs_randproj"] is None:
+        """Does the IR beat the random-projection control anywhere non-tautological?
+
+        Only targets whose OWN shuffled-label control landed at chance are
+        counted; a target the ridge fit degenerately is reported as degenerate
+        rather than being read either way.
+        """
+        beats, considered, degenerate = [], 0, []
+        scored = 0
+        for row in list(regression) + list(classification):
+            if row["delta_vs_randproj"] is None:
+                continue
+            scored += 1
+            if not row["control_ok"]:
+                degenerate.append(row["target"])
+                continue
+            if row["tautological"]:
                 continue
             considered += 1
             if row["delta_vs_randproj"] > 0.05:
                 beats.append({"target": row["target"], "delta": row["delta_vs_randproj"]})
-        for row in classification:
-            if row["tautological"] or row["delta_vs_randproj"] is None:
-                continue
-            considered += 1
-            if row["delta_vs_randproj"] > 0.05:
-                beats.append({"target": row["target"], "delta": row["delta_vs_randproj"]})
-        # The shuffled control must land NEAR ZERO, not merely below zero: a
-        # large negative R^2 on permuted labels means the fit is degenerate
-        # (more features than the split can support) and the IR column is not
-        # measuring anything either.
-        honest = True
-        worst_shuffled = 0.0
+        worst = 0.0
         for row in regression:
             if row["shuffled"] is not None:
-                worst_shuffled = max(worst_shuffled, abs(row["shuffled"]))
-                if abs(row["shuffled"]) > 0.10:
-                    honest = False
-        for row in classification:
-            if row["shuffled"] and row["ir"] and row["shuffled"]["acc"] > row["shuffled"]["majority"] + 0.10:
-                honest = False
+                worst = max(worst, abs(row["shuffled"]))
+        honest = scored > 0 and len(degenerate) <= 0.3 * scored
+        if considered == 0:
+            reading = ("no non-tautological target has an admissible control on this window "
+                       "-- accumulate more ticks before reading anything here")
+        elif beats:
+            reading = (f"IR beats the random-projection control on {len(beats)}/{considered} "
+                       "non-tautological targets with admissible controls")
+        else:
+            reading = ("IR beats the random-projection control NOWHERE non-tautological "
+                       "-- this is the R19 condition")
         return {
             "non_tautological_targets": considered,
             "beats_random_projection": beats,
             "n_beats": len(beats),
+            "degenerate_targets": degenerate,
+            "scored_targets": scored,
             "shuffled_label_control_passes": honest,
-            "worst_shuffled_r2": round(worst_shuffled, 4),
-            "reading": (
-                "shuffled-label control is NOT at chance (worst |R2| "
-                f"{worst_shuffled:.2f}) -- the fit is degenerate and no score here is admissible"
-                if not honest else
-                ("IR beats the random-projection control on "
-                 f"{len(beats)}/{considered} non-tautological targets"
-                 if beats else
-                 "IR beats the random-projection control NOWHERE non-tautological "
-                 "-- this is the R19 condition")
-            ),
+            "worst_shuffled_r2": round(worst, 4),
+            "reading": reading,
         }
 
     @staticmethod
@@ -527,7 +536,11 @@ class RollingProbe:
             if not verdict["shuffled_label_control_passes"]:
                 alarms.append({
                     "id": "probe-dishonest", "severity": "critical",
-                    "text": "shuffled-label control is NOT at chance; the probe is overfitting and no score here is admissible",
+                    "text": (f"{len(verdict['degenerate_targets'])} of {verdict['scored_targets']} targets "
+                             f"failed their own shuffled-label control (worst |R2| "
+                             f"{verdict['worst_shuffled_r2']}): the ridge fit is degenerate on this window "
+                             f"and those columns are not admissible -- "
+                             + ", ".join(verdict["degenerate_targets"][:8])),
                 })
             elif verdict["n_beats"] == 0 and verdict["non_tautological_targets"] > 0:
                 alarms.append({
