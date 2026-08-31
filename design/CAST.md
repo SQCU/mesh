@@ -81,3 +81,67 @@ define the action set; features pre-answer the question. Masks stay.
 - "Bea is inlined twice" — `live_belief` re-implementing `featurize` (was true; fixed in R24).
 - "Xan was zeroed" — the per-player state never reached the matmul (R19; corrected by R25 to a logging failure).
 - "Dee is stop-gradient'd" — the coupling can't be shaped by reward (was true; fixed in R10).
+
+---
+
+## Tensor shapes, and the ≥128 rule
+
+> i want you to name the parameters in the spec and to describe their tensor shape,
+> which will be a minimum of 128 for at least one 'side' of a matrix for many matrices,
+> but still be variable beyond 128...
+
+**Given widths** — set by the engine and the game, small, not ours to inflate:
+`d_x` raw per-player engine row · `d_z` per-instrument descriptor · `d_c` per-cell slot.
+
+**Learned widths** — every one **≥128, free above**; these are the knobs:
+`d_β` belief · `d` query/key space · `d_v` behavioural value · `d_ir` the IR ·
+`h` SwiGLU hidden (conventionally ≈ 8/3·d) · `r` Graham's metric rank (≤ d) ·
+`d_y`, `d_u` Dina's reduced state / action widths.
+
+| name | tensor | shape | the ≥128 side |
+|---|---|---|---|
+| **PHIL** `Φ` | belief projection | `(d_β, d_c)` | `d_β` |
+| **QUINN** `W_q` | query | `(d, d_x + d_β)` | `d`, and `d_β` within the input |
+| **KAY** `W_k` | key | `(d, d_z)` | `d` |
+| **VAL** `W_v` | behavioural value | `(d_v, d_z)` | `d_v` |
+| **GRAHAM** `A` | metric factor, `M = AAᵀ ∈ (d,d)` | `(d, r)` | `d`; `r` free ≤ `d` |
+| **REX** | pair bilinear form (low-rank) | `(d, r_e)` | `d` |
+| **NORM** | RMSNorm gain | `(d_ir,)` | `d_ir` |
+| **GIA** `w_gate` | SwiGLU gate | `(d_ir, h)` | both |
+| **UMA** `w_up` | SwiGLU up | `(d_ir, h)` | both |
+| **DOV** `w_down` | SwiGLU down → `dw/dt` | `(h, 1)` per instrument row | `h` |
+| **WINNIE** `W_φ` | preservation probe | `(d_ir, 1)` | `d_ir` |
+| **LOU** `L_ψ` | acquisition probe | `(d_ir, 1)` | `d_ir` |
+| **VERA** `Ṽ` | aux probe on the query | `(d, 1)` | `d` |
+| **DINA** | `b(y)`, `A(y)` | `(d_y,)`, `(d_y, d_u)` | both |
+
+The rule, once: **every matrix has at least one learned side ≥128, and the only small
+numbers in the cast are the raw input widths the engine hands us.** A 16, a 21 or a 32
+anywhere else is a bottleneck strangling the gradient.
+
+Per-pair quantities are **computed, never stored**: `Quinn·Kay` is the per-(player,
+instrument) score, a dot product of two ≥128d learned vectors. Storing an
+`(l, m, small)` hand-authored row instead is both the §7 feature-engineering violation
+and the reason a transition costs 374 KB.
+
+## Where the code diverges (level-3, measured)
+
+    d = 16          (IR was later widened to 128; d itself was not)
+    d_β = 8         RELATION_WIDTH = 16     EDGE_WIDTH = 12    HIERARCHY_WIDTH = 8
+    head.py:51  self.in_dim = 5 + RELATION_WIDTH   -> 21
+    head.py:52  self.hidden = 32
+    head.py:97  rms_norm(self.features(diag_k, appetite, relation), ...)
+
+**The policy head is `21 → 32 → out`, fed by `diag_k`, `appetite` and the hand-authored
+relation row — the Gram-IR never reaches it.** `IR_WIDTH = 128` feeds only Winnie and
+Lou. So Graham's output never touches an action; the 128-wide learned representation is
+a side-channel the critics read while the behaviour is decided by 21 hand-made numbers.
+
+That is SPEC §7 failing precisely where it points:
+
+> if we're spending flops on a gram matrix that gram matrix better fucking end up in
+> the IR consumed by subsequent probes
+
+It reaches the probes. It does not reach the policy. This is not a narrow
+implementation of the algorithm — it is a different algorithm wearing its variable
+names.
