@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "payload", "tools"))
 from solver.xonwire import Mesh, Reassembler, TxWindow, parse_hdr, REQ, RESP
 from solver.strat.estimator import StrategyEstimator, state_from_runtime
 from solver.strat.game import succession
+from solver.strat.game_value import evaluate_cartstate
 from solver.strat.instruments import CartTarget, Participant, build_instruments, decode_allocations, update_weight_table, weights_from_table
 from solver.strat.live_belief import LiveBelief
 from solver.strat.runtime import CartSnapshot, GameContext, carts as game_carts, winner
@@ -104,15 +105,67 @@ def load_ckpt_into(est, path):
 
 
 class EstCache:
+    """The ONE estimator a persistent learner uses across differently-shaped matches.
+
+    The previous version returned ``self.est`` on the first call and ignored
+    ``(k, j, l)`` forever after, so a learner that spanned matches of different
+    team / cart / player counts would silently keep the first match's shape --
+    which is why the learner had to be restarted per match.
+
+    The estimator is genuinely shape-agnostic: no learned parameter's shape
+    depends on ``k``, ``j`` or ``l``. ``QKVProjector`` is ``W_q (d, X_WIDTH +
+    BELIEF_WIDTH)`` and ``W_k (d, INSTRUMENT_WIDTH)``; ``GramSwiGLU`` is sized
+    by ``d`` alone; ``MixingHead.in_dim`` is the fixed 21-feature row; the value
+    probes are ``Linear(d, 1)``. ``k``/``j``/``l`` enter only the *data* (row
+    counts), never a weight. So the right fix is not a per-shape cache -- that
+    would forget the learner at every roster change -- it is to keep one
+    estimator and PROVE the claim at every new shape.
+
+    The proof is executed, not asserted: on each newly seen ``(k, j, l)`` a
+    throwaway estimator is constructed at that shape and its
+    ``architecture_spec`` (the sorted ``[name, shape]`` list of every parameter
+    leaf, the same function the checkpoint fingerprint of R24 hashes) is
+    compared leaf-for-leaf against the live one. Equal -> the shared estimator
+    is reused and the shape is recorded. Different -> a loud
+    ``CheckpointArchitectureMismatch``, never a silent wrong shape.
+    """
+
     def __init__(self, checkpoint, allow_mismatch=False):
         self.est = None
         self.trained = False
         self.checkpoint = checkpoint
         self.allow_mismatch = bool(allow_mismatch)
+        self.shapes_seen = []          # every (k, j, l) this estimator has served
+        self.architecture = None       # fingerprint of the shared parameter tree
+
+    def _verify_shape_agnostic(self, k, j, l):
+        """Construct at (k, j, l) and require an identical parameter tree. Loud on failure."""
+        from solver.strat.online import CheckpointArchitectureMismatch, architecture_spec
+
+        probe = StrategyEstimator.for_runtime(k, l, seed=20260829)
+        live_spec = architecture_spec(estimator_bundle(self.est))
+        probe_spec = architecture_spec(estimator_bundle(probe))
+        if probe_spec != live_spec:
+            differing = [pair for pair in probe_spec if pair not in live_spec]
+            raise CheckpointArchitectureMismatch(
+                f"the estimator is NOT shape-agnostic: built at k={k} j={j} l={l} it has a "
+                f"different parameter tree than the shared one built at "
+                f"{self.shapes_seen[0]}.\n  differing leaves: {differing}\n"
+                f"  shared tree: {live_spec}"
+            )
 
     def get(self, k, j, l):
+        shape = (int(k), int(j), int(l))
         if self.est is not None:
+            if shape not in self.shapes_seen:
+                self._verify_shape_agnostic(*shape)
+                self.shapes_seen.append(shape)
+                print(f"[responder] shared estimator now also serving k={k} j={j} l={l} "
+                      f"(parameter tree verified identical; shapes so far "
+                      f"{self.shapes_seen})", flush=True)
             return self.est, self.trained
+        from solver.strat.online import architecture_fingerprint
+
         est = StrategyEstimator.for_runtime(k, l, seed=20260829)
         loaded = []
         if os.path.exists(self.checkpoint):
@@ -125,8 +178,11 @@ class EstCache:
             else:
                 loaded = load_ckpt_into(est, self.checkpoint)
         self.est, self.trained = est, bool(loaded)
+        self.shapes_seen.append(shape)
+        self.architecture = architecture_fingerprint(estimator_bundle(est))
         print(
-            f"[responder] shared estimator initialized at k={k} j={j} l={l} loaded={len(loaded)}",
+            f"[responder] shared estimator initialized at k={k} j={j} l={l} "
+            f"loaded={len(loaded)} arch={self.architecture}",
             flush=True,
         )
         return self.est, self.trained
@@ -241,6 +297,8 @@ def main():
     os.makedirs(os.path.dirname(args.telemetry) or ".", exist_ok=True)
     telem = open(args.telemetry, "a" if args.append_telemetry else "w")
     stats = dict(slots=0, obs=0, cart=0, evt=0, resp=0, updates=0)
+    cgt_kinds = {}      # CGT resolution tally, so PW/nimber resolution is visible live
+    cgt_nimbers = {}
     t0 = time.time()
     last_report = t0
     last_save_time = t0
@@ -371,6 +429,19 @@ def main():
                     # in THIS state's instrument basis.
                     segment_break = carry_key is not None and carry_key != batch_key
                     carry_key = batch_key
+                    # A change of INSTRUMENT set is representable (the weight
+                    # state is re-derived in the new basis below) and its
+                    # transition is kept -- that was the R24 fix. A change of
+                    # ROSTER is not: every per-player array (hierarchy, actions,
+                    # w, winner_mask) is indexed by player, so `previous -> state`
+                    # across a different player set is not a transition of the
+                    # same object at all, and forming one used to reach numpy as
+                    # `operands could not be broadcast together with shapes
+                    # (12,8) (5,8)`. The pending segment is closed against the
+                    # last state in the OLD roster and the new roster starts a
+                    # fresh one.
+                    roster_break = (previous is not None
+                                    and previous["state"].x.shape[0] != l)
                     w_in = weights_from_table(batch, weight_table)
                     state = state_from_runtime(context, cartstate, rows, OBS, beta, batch, w=w_in)
                     if args.train:
@@ -391,6 +462,14 @@ def main():
                                 replay_steps=args.replay_steps,
                                 seed=args.seed,
                             )
+                        if previous is not None and roster_break:
+                            learner.flush(previous["state"], previous["snapshot"],
+                                          terminal=True)
+                            print(f"[responder] roster change "
+                                  f"{previous['state'].x.shape[0]} -> {l} players: "
+                                  f"credit segment closed, no cross-roster transition",
+                                  flush=True)
+                            previous = None
                         if previous is not None:
                             if segment_break:
                                 # close the pending segment against the LAST
@@ -454,6 +533,34 @@ def main():
                     projected = winner(context, cartstate)
                     pw = 0 if projected is None else projected + 1
                     succ = [(team + 1, denial) for team, denial in succession(game_carts(cartstate), context.teams)]
+                    # The CGT value of the cart subgame, priced every tick by the
+                    # CLOSED-FORM cart option graph (R25: a neutral cart is
+                    # impartial and its Grundy value is derived by backward
+                    # induction; a controlled cart is partizan and gets no
+                    # nimber).  The responder had stopped logging this entirely,
+                    # so the 0/228 -> 228/228 resolution was invisible in the
+                    # live stream.  `state` keeps the (map_key, episode, k,
+                    # depths, controls) shape `measure.py cgt` reads back.
+                    cart_depths = tuple(int(round(float(value))) for value in cartstate.pos)
+                    cart_controls = tuple(int(value) for value in cartstate.control)
+                    cart_value = evaluate_cartstate(
+                        list(cart_depths), list(cart_controls), list(context.teams), L_LEVELS
+                    )
+                    game_value = dict(
+                        kind=cart_value.kind,
+                        nimber=None if cart_value.nimber is None else int(cart_value.nimber),
+                        reason=cart_value.reason,
+                        state=[list(map_key), belief_episode, int(k), list(cart_depths),
+                               list(cart_controls)],
+                        mobility={str(role): int(rv.mobility)
+                                  for role, rv in cart_value.role_values.items()},
+                        complete=all(rv.complete for rv in cart_value.role_values.values())
+                                 if cart_value.role_values else True,
+                    )
+                    cgt_kinds[cart_value.kind] = cgt_kinds.get(cart_value.kind, 0) + 1
+                    if cart_value.nimber is not None:
+                        key = int(cart_value.nimber)
+                        cgt_nimbers[key] = cgt_nimbers.get(key, 0) + 1
                     response = np.zeros((len(obs_rows), RESP_W), dtype=np.float32)
                     intensities = np.clip(
                         1.0 + w_next[np.arange(l), actions], 0.1, 3.0
@@ -548,6 +655,7 @@ def main():
                             for c in range(j)
                         ],
                         PW=int(pw), SUCC=[[int(a), round(float(b), 4)] for a, b in succ],
+                        game_value=game_value,
                         belief=dict(
                             reset=belief_reset, event_tick=event_tick,
                             deposited=deposited, **belief_diag,
@@ -570,7 +678,8 @@ def main():
             if time.time() - last_report >= 5:
                 print(
                     f"[responder] {int(time.time() - t0)}s stats={stats} "
-                    f"telem_lines={nt_written} resp_id={resp_id}",
+                    f"telem_lines={nt_written} resp_id={resp_id} "
+                    f"cgt={cgt_kinds} nimbers={cgt_nimbers}",
                     flush=True,
                 )
                 last_report = time.time()

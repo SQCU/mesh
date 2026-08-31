@@ -519,10 +519,14 @@ void payload_path_build(entity this)
 	this.plc_s = 0;
 	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 
-	entity wp = WP_PayloadCart2;
-	if(this.plc_cart_id == 0)
-		wp = WP_PayloadCart;
+	// Every cart past 0 shared WP_PayloadCart2, so a 3-cart match rendered
+	// "CART, CART 2, CART 2". Give each cart its own text via the sprite name.
+	entity wp = (this.plc_cart_id == 0) ? WP_PayloadCart : WP_PayloadCart2;
 	WaypointSprite_Spawn(wp, 0, 0, this, '0 0 64', NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
+	if(this.sprite)
+		WaypointSprite_UpdateSprites(this.sprite, wp, wp, wp);
+	if(this.sprite && this.plc_cart_id > 0)
+		this.sprite.netname = strzone(strcat("Cart ", ftos(this.plc_cart_id + 1)));
 	WaypointSprite_UpdateMaxHealth(this.sprite, this.plc_length);
 	WaypointSprite_UpdateHealth(this.sprite, this.plc_s);
 

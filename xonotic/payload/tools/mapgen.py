@@ -6,7 +6,7 @@ from mapfuse import fnum, vstr, check_bsp, vadd, vsub, vdot, vscale, vnorm, vcro
 Q3MAP2 = os.environ.get('Q3MAP2', os.path.expanduser('~/dox/xonotic/netradiant-custom/install/q3map2'))
 BASEPATH = os.environ.get('XON_BASEPATH', os.path.expanduser('~/dox/xonotic/Xonotic'))
 TEX = dict(floor='exx/floor-tread01', wall='exx/wall-bigrib02', ceil='exx/panel-metalbig04',
-           trim='exx/trim-01', pad='exx/floor-clang01', light='trak5x/light/light_light3a',
+           trim='exx/trim-01', pad='exx/floor-clang01', light='exx/light-panel01',
            caulk='common/caulk', trigger='common/trigger')
 THK, DOORH, GRID = 32.0, 192.0, 176.0
 
@@ -228,6 +228,11 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
     doors_lo = {d: (0.0, ARMW) for d in arms_lo}
     g.room(0.0, 0.0, 0.0, HUBW, HUBW, hub_h, doors_lo)
     ports = []
+    # bright light-panel bands around the hub at eye height.  The fused BSP carries a
+    # flat grey lightmap, so a connector reads as "bright" only through its diffuse
+    # surfaces -- and the spec wants a connector to be noticeable, not concealed.
+    for bx in ((-h, -h, h, -h + 8), (-h, h - 8, h, h), (-h, -h, -h + 8, h), (h - 8, -h, h, h)):
+        g.box([bx[0], bx[1], 120.0], [bx[2], bx[3], 168.0], TEX['light'])
 
     def arm(d, z, tier):
         dx, dy = DIRS[d]

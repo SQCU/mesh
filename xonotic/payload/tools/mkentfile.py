@@ -227,7 +227,16 @@ class Bsp:
             lo = [-1e18] * 3
             hi = [1e18] * 3
             for nx, ny, nz, dd in bp:
-                for a, c in enumerate((nx, ny, nz)):
+                n = (nx, ny, nz)
+                # An AABB bound is only valid for a plane that is axis-aligned on ALL
+                # three components: for an oblique plane `dd` is not an axis bound, and
+                # using it indexes the brush at the wrong coordinates (a corridor whose
+                # real x-span is [-5504,-5152] was indexed at [-5843,-5491], producing
+                # phantom "no floor" violations along a clear corridor).
+                for a, c in enumerate(n):
+                    others = max(abs(n[b]) for b in range(3) if b != a)
+                    if others > 1e-4:
+                        continue
                     if c > 0.999:
                         hi[a] = min(hi[a], dd)
                     elif c < -0.999:
@@ -1305,7 +1314,7 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
                  '"origin" "%.0f %.0f %.0f"' % tuple(p)]
             if i + 1 < NC:
                 e.append('"target" "%s"' % names[i + 1])
-            if 0 < i < NC - 1:
+            if 0 < i < NC - 1 and i % max(1, NC // 4) == 0:  # every Nth interior node only: an unconditional checkpoint spawns a WaypointSprite per node (sv_payload.qc:475) -> unreadable label stack
                 e.append('"spawnflags" "1"')
             e.append('}')
             extra.append('\n'.join(e))

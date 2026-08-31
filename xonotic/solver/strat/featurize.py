@@ -51,13 +51,16 @@ _BAND_HI = 0.15
 # --------------------------------------------------------------------------- #
 
 def _knn_adjacency(positions: np.ndarray, k: int) -> list:
-    """Symmetric k-nearest-neighbour navigable adjacency (a stand-in for real nav edges).
+    """Symmetric k-nearest-neighbour adjacency -- the LAST-RESORT graph, not the real one.
 
-    The real navigable graph is map data (waypoint links; engine ``[BUILD]``); when the
-    caller does not supply ``adjacency`` this derives a deterministic symmetric kNN graph
-    over node positions so the pipeline is exercisable on synthetic input. Preferring an
-    explicit ``adjacency`` is the intended path (payload-spec §2.2.2 fuses *navigable*
-    paths, which only the map knows).
+    The real navigable graph is map data and it is now streamed: the engine walks
+    ``g_waypoints`` and emits every stock ``waypoint_get_link`` whose endpoint hashes to
+    a different V-cell as a ``PLC_EVT_KIND_CELL_LINK`` (kind 4) perception row, with the
+    link's own length. ``live_belief.LiveBelief`` collects those and passes them here as
+    ``adjacency`` + ``edge_lengths``, which is the payload-spec §2.2.2 "fuse contiguous
+    navigable paths". This kNN construction is reached only when a caller supplies no
+    adjacency at all -- e.g. the first ticks of a match, before the engine's link sweep
+    has produced any rows.
     """
     n = len(positions)
     k = max(1, min(k, n - 1))
@@ -178,6 +181,7 @@ def segment_vcells(
     band=(_BAND_LO, _BAND_HI),
     knn: int = 6,
     sliver_floor_frac: float = 0.25,
+    edge_lengths: Optional[Mapping] = None,
 ) -> VCellMap:
     """**Stage 2** -- Voronoi over item/waypoint nodes, fuse navigable cells, set horizon.
 
@@ -190,8 +194,9 @@ def segment_vcells(
 
     Construction (deterministic):
       1. Each item/waypoint node seeds one Voronoi atom cell.
-      2. Build the navigable graph: ``adjacency`` if given (preferred -- real waypoint
-         links), else a symmetric kNN stand-in (:func:`_knn_adjacency`).
+      2. Build the navigable graph: ``adjacency`` if given (the real waypoint links,
+         streamed as kind-4 perception rows), else a symmetric kNN fallback
+         (:func:`_knn_adjacency`).
       3. **Fuse** contiguous navigable atoms whose area is a *sliver* (below
          ``sliver_floor_frac * band_hi`` of map area) into their smallest navigable
          neighbour, never letting a fused cell exceed ``band_hi`` of map area -- so no
@@ -209,6 +214,12 @@ def segment_vcells(
     node_positions : ``(N, dim)`` item/waypoint node coordinates.
     adjacency      : optional per-node iterable of neighbour node indices (navigable
                      links). If ``None``, a symmetric kNN graph is derived.
+    edge_lengths   : optional ``{(i, j): length}`` over NODE index pairs (order
+                     irrelevant) giving the real traversal length of a navigable
+                     link -- the engine's own ``waypoint_get_link`` length, streamed
+                     as ``PLC_EVT_KIND_CELL_LINK``. Where a fused cell pair has a
+                     supplied length the graph edge uses it (shortest constituent
+                     link); where it does not, the centroid distance is used.
     map_area       : total map area; defaults to ``sum(cell_areas)`` or ``N`` (unit atoms).
     cell_areas     : optional per-node atom area; defaults to uniform ``map_area / N``.
     band           : ``(lo, hi)`` receptive-field fraction band; default ``(0.05, 0.15)``.
@@ -302,21 +313,34 @@ def segment_vcells(
     centroids /= np.maximum(counts[:, None], 1.0)
 
     # --- step 4: fused navigable graph + all-pairs graph distance. ---
-    edges = [list() for _ in range(C)]
-    seen_pair = set()
+    # A fused cell pair may be joined by several node-level links; the traversal
+    # cost between the two cells is the SHORTEST of them. Real link lengths win
+    # over the centroid-distance fallback, which only stands in for edges whose
+    # length the map never supplied (an observed cell transition, say).
+    lengths = {}
+    if edge_lengths:
+        for (a, b), value in edge_lengths.items():
+            a, b = int(a), int(b)
+            if not (0 <= a < n and 0 <= b < n):
+                continue
+            lengths[(min(a, b), max(a, b))] = float(value)
+    pair_weight = {}
     for i in range(n):
-        ci = node_cell[i]
+        ci = int(node_cell[i])
         for j in adj[i]:
-            cj = node_cell[j]
+            cj = int(node_cell[j])
             if ci == cj:
                 continue
             key = (min(ci, cj), max(ci, cj))
-            if key in seen_pair:
-                continue
-            seen_pair.add(key)
-            w = float(np.linalg.norm(centroids[ci] - centroids[cj]))
-            edges[ci].append((cj, w))
-            edges[cj].append((ci, w))
+            supplied = lengths.get((min(i, int(j)), max(i, int(j))))
+            w = (float(supplied) if supplied is not None
+                 else float(np.linalg.norm(centroids[ci] - centroids[cj])))
+            if key not in pair_weight or w < pair_weight[key]:
+                pair_weight[key] = w
+    edges = [list() for _ in range(C)]
+    for (ci, cj), w in pair_weight.items():
+        edges[ci].append((cj, w))
+        edges[cj].append((ci, w))
     graph_dist = _dijkstra_all_pairs(C, edges)
 
     # --- step 5: set the horizon R so median receptive fraction lands in band. ---

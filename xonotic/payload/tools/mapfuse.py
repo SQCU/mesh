@@ -1,3 +1,23 @@
+"""mapfuse.py -- procedural megamap fusion for the Xonotic payload demo.
+
+Glues j stock Xonotic maps together with k PROCEDURALLY GENERATED bridge tiles,
+socketed on a lattice like tilesets in a roguelike level generator.  See
+design/FUSION-SPEC.md for the commanded requirement (verbatim) and the gap table.
+
+  mapfuse.py <seed> [map ...] [flags]
+
+    --maps=N | --maps=all   how many stock maps to draw from the navigable pool
+                            (default: all of them, shuffled by seed)
+    --bridges=K             how many procedural bridge tiles (default: j/3, min 1)
+    --teams=T --carts=C     passed to mkentfile.emit (default 5 teams, 3 carts)
+    --out=DIR               output dir (default /tmp/fusesmoke/data/maps)
+    --nograph               skip the fusegraph.py solver/viewer pass
+    --smoke                 boot the dedicated server on the fused map afterwards
+
+Outputs fused.bsp / .pk3 / .ent / .waypoints(.cache) / .mapinfo / .joins.json /
+.metrics.json, plus (unless --nograph) fused.graph.svg, fused.navmesh.svg and
+fused.connectivity.json from fusegraph.py.
+"""
 import struct, sys, os, re, math, glob, random, subprocess, time, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
@@ -371,6 +391,13 @@ class Fuser:
         self.bot_jumps, self.conn_meta = [], []
         self.extra_ents = []
         self.wp_extra, self.link_extra = [], []
+        self.dropped_spawns = 0
+        self.dropped_spawns_budget = 0
+        self.spawn_cap = 10
+        self.ent_budget = 1800
+        self.ent_dropped = {}
+        self.ent_short = 0
+        self.ent_orphans = 0
         self.solid_face_tex = self.pick_face_tex()
 
     def pick_face_tex(self):
@@ -512,6 +539,7 @@ class Fuser:
             self.modelmap.append(mm)
         self.trigmodel0 = nsub
         blocks_out = []
+        spawn_pending = []
         tkeys = ('target', 'target2', 'target3', 'target4', 'killtarget', 'targetname')
         for m, src in enumerate(self.srcs):
             off = self.offsets[m]
@@ -533,6 +561,25 @@ class Fuser:
                     v = [float(x) for x in mo.group(1).split()]
                     return '"origin" "%s %s %s"' % (fnum(v[0] + off[0]), fnum(v[1] + off[1]), fnum(v[2] + off[2]))
 
+                if cn.startswith('info_player_'):
+                    # A spawnpoint that lands in solid makes stock Xonotic run its
+                    # expanding relocate_spawnpoint search; at megamap scale that
+                    # search is what trips "server runaway loop counter hit limit of
+                    # 10000000 jumps" before the match ever starts.  Drop such
+                    # spawnpoints here instead: the fused world has hundreds left.
+                    mo = re.search(r'"origin"\s+"([-\d.eE+ ]+)"', b)
+                    if mo:
+                        o = [float(x) for x in mo.group(1).split()]
+                        bad = False
+                        for dz in (2.0, 24.0, 48.0):
+                            if src.solid_brush_at([o[0], o[1], o[2] + dz]) >= 0:
+                                bad = True
+                                break
+                        if bad:
+                            self.dropped_spawns += 1
+                            continue
+                        spawn_pending.append((m, o, b, cn))
+                        continue
                 b = re.sub(r'"origin"\s+"([-\d.eE+ ]+)"', fixorigin, b)
                 b = re.sub(r'"model"\s+"\*(\d+)"',
                            lambda mo: '"model" "*%d"' % self.modelmap[m][int(mo.group(1))], b)
@@ -540,11 +587,138 @@ class Fuser:
                     b = re.sub(r'"%s"\s+"([^"]+)"' % k,
                                lambda mo, k=k: '"%s" "m%d_%s"' % (k, m, mo.group(1)), b)
                 blocks_out.append(b)
+        # SPAWNPOINT BUDGET.  Merging every source map's full spawnpoint set gives a
+        # megamap over a thousand info_player_* entities.  Stock Xonotic's
+        # IntrusiveList primitives (IL_CONTAINS / IL_REMOVE_RAW / il_links_flds##GETFP)
+        # are linear scans, and spawnfunc-time churn over that many entities trips
+        # "server runaway loop counter hit limit of 10000000 jumps" during
+        # __spawnfunc_worldspawn, before the match starts.  Measured on a 22-tile
+        # fusion: il_links_flds##GETFP alone burned 16.1M of the 10M-statement budget.
+        # Keep a spatially spread subset per tile instead; every region stays spawnable.
+        kept = []
+        for m in range(j):
+            mine = [t for t in spawn_pending if t[0] == m]
+            if len(mine) <= self.spawn_cap:
+                kept += mine
+                continue
+            picks = [mine[0]]
+            while len(picks) < self.spawn_cap:
+                nxt = max(mine, key=lambda t: min(math.dist(t[1], q[1]) for q in picks))
+                if nxt in picks:
+                    break
+                picks.append(nxt)
+            kept += picks
+            self.dropped_spawns_budget += len(mine) - len(picks)
+        for m, o, b, cn in kept:
+            off2 = self.offsets[m]
+            b = re.sub(r'"origin"\s+"([-\d.eE+ ]+)"',
+                       lambda mo, off2=off2: '"origin" "%s %s %s"' % tuple(
+                           fnum(float(x) + off2[i]) for i, x in enumerate(mo.group(1).split())), b)
+            for k in tkeys:
+                b = re.sub(r'"%s"\s+"([^"]+)"' % k,
+                           lambda mo, k=k, m=m: '"%s" "m%d_%s"' % (k, m, mo.group(1)), b)
+            blocks_out.append(b)
         for i, (tb, mins, maxs, cls, tgt) in enumerate(self.trig_models):
             blocks_out.append('{\n"classname" "%s"\n"model" "*%d"\n"target" "%s"\n}' %
                               (cls, self.trigmodel0 + i, tgt))
         blocks_out += self.extra_ents
+        blocks_out = self.entity_budget(blocks_out)
         return '\n'.join(blocks_out) + '\n'
+
+    # order in which merged source entities are given up when the fused world exceeds
+    # the entity budget.  Never includes target_*/info_null/trigger_*/teleport/spawn
+    # entities: those are referenced by name or are load-bearing for navigation.
+    DROP_ORDER = ('light', 'dom_team', 'dom_controlpoint', 'trigger_race_checkpoint',
+                  'info_player_race', 'target_speaker', 'func_pointparticles',
+                  'misc_gamemodel', 'misc_breakablemodel', 'misc_models',
+                  'item_armor_small', 'item_health_small', 'item_shells',
+                  'item_bullets', 'item_rockets', 'item_cells', 'item_health_medium',
+                  'item_armor_medium')
+    # classes that exist only to be pointed at; once nothing points at them they are
+    # dead weight and each one still costs a spawnfunc at worldspawn
+    TARGET_ONLY = ('target_position', 'info_null', 'misc_teleporter_dest',
+                   'target_location', 'target_speaker')
+
+    def entity_budget(self, blocks):
+        """Hold the fused world under a spawn-time entity budget.
+
+        This DarkPlaces build has no prvm_runawaycheck cvar; the 10,000,000-jump
+        limit is compiled in, and stock Xonotic's IntrusiveList primitives are linear
+        scans, so worldspawn's spawnfunc chain over a megamap's merged entity set
+        aborts the server with "server runaway loop counter hit limit of 10000000
+        jumps" before the match starts.  Measured: 1805 entities (8 tiles) boots;
+        5780 entities (22 tiles) does not, with il_links_flds##GETFP alone burning
+        16.1M statements.  Source `light` entities go first: mapfuse flattens the
+        lightmap lump to a single grey block, so not one of them affects the fused
+        world's appearance."""
+        if self.ent_budget <= 0:
+            self.ent_dropped = {}
+            return blocks
+        # orphan sweep first, and again after the class drops: removing a referrer
+        # orphans its target, and an orphaned target_position is pure spawn cost
+        blocks = self.sweep_orphans(blocks)
+        if len(blocks) <= self.ent_budget:
+            self.ent_dropped = {}
+            return blocks
+        cls = []
+        for b in blocks:
+            mo = re.search(r'"classname"\s+"([^"]+)"', b)
+            cls.append(mo.group(1) if mo else '')
+        # never drop anything another entity points at by name, or the engine logs
+        # "follow: could not find target/killtarget" and the reference is dead
+        named = set()
+        for b in blocks:
+            for k in ('target', 'target2', 'target3', 'target4', 'killtarget'):
+                for mo in re.finditer(r'"%s"\s+"([^"]+)"' % k, b):
+                    named.add(mo.group(1))
+        protected = set()
+        for i, b in enumerate(blocks):
+            mo = re.search(r'"targetname"\s+"([^"]+)"', b)
+            if mo and mo.group(1) in named:
+                protected.add(i)
+        keep = [True] * len(blocks)
+        dropped = {}
+        need = len(blocks) - self.ent_budget
+        for c in self.DROP_ORDER:
+            if need <= 0:
+                break
+            idxs = [i for i in range(len(blocks)) if cls[i] == c and keep[i] and i not in protected]
+            take = min(len(idxs), need)
+            # thin evenly rather than lopping off one end, so no region is stripped bare
+            if take >= len(idxs):
+                gone = idxs
+            else:
+                step = len(idxs) / float(take)
+                gone = [idxs[int(k * step)] for k in range(take)]
+            for i in gone:
+                keep[i] = False
+            dropped[c] = len(gone)
+            need -= len(gone)
+        self.ent_dropped = dropped
+        out = self.sweep_orphans([b for i, b in enumerate(blocks) if keep[i]])
+        self.ent_short = max(0, len(out) - self.ent_budget)
+        return out
+
+    def sweep_orphans(self, blocks):
+        for _ in range(4):
+            named = set()
+            for b in blocks:
+                for k in ('target', 'target2', 'target3', 'target4', 'killtarget'):
+                    for mo in re.finditer(r'"%s"\s+"([^"]+)"' % k, b):
+                        named.add(mo.group(1))
+            out = []
+            for b in blocks:
+                mo = re.search(r'"classname"\s+"([^"]+)"', b)
+                c = mo.group(1) if mo else ''
+                tn = re.search(r'"targetname"\s+"([^"]+)"', b)
+                if c in self.TARGET_ONLY and (not tn or tn.group(1) not in named):
+                    self.ent_orphans += 1
+                    continue
+                out.append(b)
+            if len(out) == len(blocks):
+                break
+            blocks = out
+        return blocks
 
     def build(self, routersplits):
         srcs, offsets = self.srcs, self.offsets
@@ -1314,6 +1488,13 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25):
           (corn, len(conns), max(noncart_used) if noncart_used else 0, noncart_budget,
            len(dropped), 'HELD' if not budget_viol else 'VIOLATED on %s' % budget_viol))
     data, nodes_out, leafs_out, models_out = F.build(splits)
+    print('entity budget %d: swept %d orphaned target-only entities; dropped %s%s' %
+          (F.ent_budget, F.ent_orphans, F.ent_dropped or 'nothing (under budget)',
+           '' if not F.ent_short else '  STILL %d OVER BUDGET' % F.ent_short))
+    print('entities: dropped %d source spawnpoints in solid, %d over the per-tile '
+          'spawn budget of %d (stock IntrusiveList ops are linear; an unbudgeted '
+          'megamap spawn set trips the engine 10M-statement runaway at worldspawn)'
+          % (F.dropped_spawns, F.dropped_spawns_budget, F.spawn_cap))
     bsp_path = os.path.join(outdir, 'fused.bsp')
     open(bsp_path, 'wb').write(data)
     print('wrote %s (%d bytes, %d nodes %d leafs %d models)' %

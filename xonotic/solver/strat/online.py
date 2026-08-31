@@ -285,6 +285,19 @@ class OnlineLearner:
         it came from and the buffer stores only arrays.
         """
         target_state = dynamics_next_state or next_state
+        # Every array below is indexed BY PLAYER, so a transition whose endpoints
+        # have different player counts is not a transition of the same object.
+        # Caught here with the two shapes named, instead of surfacing four frames
+        # away as a numpy broadcast error on `hierarchy`. Callers close the credit
+        # segment at a roster change rather than crediting across it.
+        players = np.asarray(state.hierarchy).shape[0]
+        for name, other in (("next_state", next_state), ("dynamics target", target_state)):
+            if np.asarray(other.hierarchy).shape[0] != players:
+                raise ValueError(
+                    f"cross-roster transition: state has {players} players, {name} has "
+                    f"{np.asarray(other.hierarchy).shape[0]}. A roster change must close "
+                    f"the credit segment, not be credited across."
+                )
         reward = (role_rewards(context, snapshot, next_snapshot)
                   if reward_override is None else np.asarray(reward_override))
         return {

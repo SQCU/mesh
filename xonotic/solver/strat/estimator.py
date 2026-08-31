@@ -98,6 +98,19 @@ class StrategyEstimator:
         seed: Optional[int] = None,
         **kwargs,
     ):
+        """Build the operator for a match with ``k`` teams and ``l`` players.
+
+        ``k`` and ``l`` are DESCRIPTIVE: they are recorded on ``QKVShapes`` and
+        used nowhere else. No learned parameter's shape depends on them --
+        ``W_q`` is ``(d, X_WIDTH + BELIEF_WIDTH)``, ``W_k`` is ``(d,
+        INSTRUMENT_WIDTH)``, ``GramSwiGLU`` is sized by ``d``,
+        ``MixingHead.in_dim`` is the fixed 21-feature row and the value probes
+        are ``Linear(d, 1)``. Team / cart / player counts enter only as ROW
+        COUNTS of the data. That is what lets ONE estimator (and one learner)
+        span matches of different shape; `strat_responder.EstCache` re-proves it
+        by comparing parameter trees at every newly seen ``(k, j, l)`` rather
+        than taking this docstring's word for it.
+        """
         return cls(
             QKVShapes(k, 1, l, X_WIDTH, BELIEF_WIDTH, INSTRUMENT_WIDTH, d),
             seed=seed,

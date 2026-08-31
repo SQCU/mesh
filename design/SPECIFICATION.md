@@ -9,8 +9,9 @@ with a quote here, the quote governs.
 
 Source: raw transcript `~/.claude-personal/projects/-Users-mdot/d3ad4328-…jsonl`
 (session prefix `d3ad4328`). Quotes copied verbatim (user typos preserved). This
-file and `AGENDA.md` are the recoverable project state; transcripts/memory/config
-are caches.
+quote index preserves the requested behavior. `rl-training-spec.md` maps it to
+current executable code and checks; transcripts, memory, and generated run files are
+caches rather than specifications.
 
 ## 1. The task — a combinatorial-game-theory solver, not a bot router
 

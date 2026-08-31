@@ -179,7 +179,15 @@ case "${1:-up}" in
     push_runtime
     start_server
     sleep 3
-    start_responder
+    if [ "${JORACLE_SKIP_RESPONDER:-0}" = 1 ]; then
+      # A responder is already serving the mesh from the mini (someone else's
+      # long-running service).  The mini's bridge also has a single client slot,
+      # so starting a second responder would take the mesh from theirs.  Skip it
+      # and let the running one answer this server.
+      say "JORACLE_SKIP_RESPONDER=1: leaving the responder on $MINI alone"
+    else
+      start_responder
+    fi
     start_viewer
     banner
     ;;

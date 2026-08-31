@@ -176,4 +176,4 @@ Text form of the same graph:
   learned part is one big Gram + SwiGLU (§4, and the expressivity note in the strategy
   spec).
 - No fake re-simulation of the game to train against — B is already the simulation;
-  train on it or prove the price. (This is why `CartSim` is deleted.)
+  train on it or prove the price. Synthetic re-simulation is not Game-2 evidence.
