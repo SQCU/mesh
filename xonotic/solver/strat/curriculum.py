@@ -15,6 +15,89 @@ PERTURBATIONS = {
 }
 
 
+# A fused megamap is a first-class curriculum map. It is recognised, not
+# hardcoded: any map whose mapinfo carries the fusion author/description the
+# fusion tool writes, or that ships a `<name>.joins.json`, is a megamap
+# wherever it lives (loose under data/maps or inside ANY pk3 on the data path,
+# including `zzzz-fused.pk3`). AGENDA G9.
+MEGAMAP_MARKERS = ("mapfuse", "procedurally fused")
+
+
+def _mapinfo_is_megamap(text):
+    lowered = text.lower()
+    return any(marker in lowered for marker in MEGAMAP_MARKERS)
+
+
+def discover_maps(basedir):
+    """Every selectable map on the data path, split into megamaps and the rest."""
+    maps, megamaps, joins = {}, set(), set()
+    loose = os.path.join(basedir, "data", "maps")
+    sources = []
+    if os.path.isdir(loose):
+        for name in sorted(os.listdir(loose)):
+            sources.append(("file", os.path.join(loose, name), name))
+    for archive in sorted(glob.glob(os.path.join(basedir, "data", "*.pk3")), reverse=True):
+        try:
+            with zipfile.ZipFile(archive) as bundle:
+                for member in bundle.namelist():
+                    if member.startswith("maps/") and member.count("/") == 1:
+                        sources.append(("zip", (archive, member), os.path.basename(member)))
+        except (zipfile.BadZipFile, OSError):
+            continue
+    texts = {}
+    for kind, where, name in sources:
+        stem, ext = os.path.splitext(name)
+        if ext == ".bsp":
+            maps.setdefault(stem, (kind, where))
+        elif ext == ".json" and stem.endswith(".joins"):
+            joins.add(stem[: -len(".joins")])
+        elif ext == ".mapinfo" and stem not in texts:
+            try:
+                if kind == "file":
+                    with open(where, errors="replace") as handle:
+                        texts[stem] = handle.read()
+                else:
+                    with zipfile.ZipFile(where[0]) as bundle:
+                        texts[stem] = bundle.read(where[1]).decode("utf-8", "replace")
+            except (zipfile.BadZipFile, OSError, KeyError):
+                continue
+    for stem in maps:
+        if stem in joins or _mapinfo_is_megamap(texts.get(stem, "")):
+            megamaps.add(stem)
+    return {
+        "maps": sorted(maps),
+        "megamaps": sorted(megamaps),
+        "stock": sorted(set(maps) - megamaps),
+    }
+
+
+def resolve_maps(spec, basedir):
+    """Expand a --maps spec. `auto` and `megamaps` resolve against the data path.
+
+    `auto` puts every discovered megamap FIRST and keeps a stock fallback, so a
+    curriculum run selects the fused world by default instead of only ever
+    reaching it through a hand-written launch config.
+    """
+    requested = csv(spec)
+    if not any(token in ("auto", "megamaps") for token in requested):
+        return requested
+    found = discover_maps(basedir)
+    out = []
+    for token in requested:
+        if token == "megamaps":
+            out.extend(found["megamaps"])
+        elif token == "auto":
+            out.extend(found["megamaps"])
+            out.extend(name for name in ("runningmanctf",) if name in found["maps"])
+        elif token not in out:
+            out.append(token)
+    deduped = []
+    for name in out:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped or ["runningmanctf"]
+
+
 def utcnow():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -91,7 +174,7 @@ def generated_schedule(count, seed, maps, teams, players, carts, skills, perturb
 def normalize(item, index, defaults):
     cfg = merge(defaults, item)
     cfg["id"] = str(cfg.get("id", f"match-{index:05d}"))
-    cfg["map"] = str(cfg.get("map", "runningmanctf"))
+    cfg["map"] = str(cfg.get("map", defaults.get("map", "runningmanctf")))
     cfg["teams"] = int(cfg.get("teams", 2))
     cfg["carts"] = int(cfg.get("carts", 2))
     ppt = cfg.get("players_per_team", 2)
@@ -195,24 +278,58 @@ class Curriculum:
         self.responder_prefix = command(args.responder_command) or [args.python, "-m", "solver.strat.strat_responder"]
         self.basedir = os.path.abspath(os.path.expanduser(args.basedir))
         self.entity_tool = os.path.abspath(os.path.expanduser(args.entity_tool))
+        self.server_host = args.server_host
+        self.remote_engine = os.path.expanduser(args.remote_engine or args.engine)
+        self.remote_basedir = os.path.expanduser(args.remote_basedir or args.basedir)
+        self.remote_run_root = os.path.expanduser(args.remote_run_root)
+        self.progs = os.path.abspath(os.path.expanduser(args.progs))
+        self.csprogs = os.path.abspath(os.path.expanduser(args.csprogs))
+        self.build_command = command(args.build_command)
         self.previous_checkpoint = os.path.abspath(os.path.expanduser(args.checkpoint)) if args.checkpoint else None
         os.makedirs(self.run_dir, exist_ok=True)
         self.index_path = os.path.join(self.run_dir, "matches.jsonl")
+        self.event_path = os.path.join(self.run_dir, "supervisor.jsonl")
+        self.maps = resolve_maps(args.maps, self.basedir)
+        self.build = self.build_gamecode()
+
+    def build_gamecode(self):
+        record = {"command": self.build_command}
+        if self.args.dry_run:
+            return record | {"status": "planned"}
+        started = utcnow()
+        try:
+            result = subprocess.run(self.build_command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            return record | {"status": "ready" if result.returncode == 0 else "failed", "returncode": result.returncode,
+                             "output": result.stdout, "started": started, "ended": utcnow()}
+        except Exception as exc:
+            return record | {"status": "failed", "error": f"{type(exc).__name__}: {exc}",
+                             "started": started, "ended": utcnow()}
 
     def match_dir(self, cfg):
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in cfg["id"])
         return os.path.join(self.run_dir, f"{cfg['ordinal']:05d}-{safe}")
 
+    def archives(self):
+        # EVERY pk3 on the data path, not just the ones whose filename happens
+        # to contain "maps". The deployed megamap ships as `zzzz-fused.pk3`,
+        # which the old `*maps*.pk3` glob could never match, so the curriculum
+        # was structurally unable to select the fused map (AGENDA G9).
+        # Reverse-sorted, which is also the engine's own precedence: a `zzzz-`
+        # pk3 overrides the stock content it is named to sit after.
+        return sorted(glob.glob(os.path.join(self.basedir, "data", "*.pk3")), reverse=True)
+
     def locate_asset(self, mapname, suffix):
         loose = os.path.join(self.basedir, "data", "maps", mapname + suffix)
         if os.path.exists(loose):
             return ("file", loose)
-        archives = sorted(glob.glob(os.path.join(self.basedir, "data", "*maps*.pk3")), reverse=True)
         member = "maps/" + mapname + suffix
-        for archive in archives:
-            with zipfile.ZipFile(archive) as bundle:
-                if member in bundle.namelist():
-                    return ("zip", archive, member)
+        for archive in self.archives():
+            try:
+                with zipfile.ZipFile(archive) as bundle:
+                    if member in bundle.namelist():
+                        return ("zip", archive, member)
+            except (zipfile.BadZipFile, OSError):
+                continue
         return None
 
     def extract_asset(self, found, destination):
@@ -227,14 +344,22 @@ class Curriculum:
         userdir = os.path.join(directory, "userdir")
         maps_dir = os.path.join(userdir, "data", "maps")
         os.makedirs(maps_dir, exist_ok=True)
+        data_dir = os.path.join(userdir, "data")
         ent = os.path.join(maps_dir, cfg["map"] + ".ent")
         mapinfo = os.path.join(maps_dir, cfg["map"] + ".mapinfo")
         record = {"userdir": userdir, "entity": ent, "mapinfo": mapinfo}
         if self.args.dry_run:
             record["status"] = "planned"
             record["command"] = [self.args.python, self.entity_tool, "<resolved-bsp>", ent, str(cfg["teams"]), str(cfg["carts"])]
+            record["gamecode"] = {"progs": self.progs, "csprogs": self.csprogs}
             return record
         try:
+            shutil.copyfile(self.progs, os.path.join(data_dir, "progs.dat"))
+            shutil.copyfile(self.csprogs, os.path.join(data_dir, "csprogs.dat"))
+            record["gamecode"] = {
+                "progs": artifact(os.path.join(data_dir, "progs.dat")),
+                "csprogs": artifact(os.path.join(data_dir, "csprogs.dat")),
+            }
             source_ent = cfg.get("entity_file")
             if source_ent:
                 shutil.copyfile(os.path.abspath(os.path.expanduser(source_ent)), ent)
@@ -284,8 +409,21 @@ class Curriculum:
         players = max(sum(cfg["players_per_team"]), sum(cfg["controllers"].values()))
         maxplayers = int(cfg.get("maxplayers", max(16, players)))
         perturbation, cvars = self.perturbation(cfg)
-        server = self.server_prefix + [
-            "-xonotic", "-basedir", self.basedir, "-userdir", entity["userdir"],
+        stage = []
+        server_prefix = self.server_prefix
+        basedir = self.basedir
+        userdir = entity["userdir"]
+        if self.server_host:
+            remote_directory = os.path.join(self.remote_run_root, os.path.basename(self.run_dir), os.path.basename(directory))
+            userdir = os.path.join(remote_directory, "userdir")
+            basedir = self.remote_basedir
+            server_prefix = ["ssh", self.server_host, "--", self.remote_engine]
+            stage = [
+                ["ssh", self.server_host, "--", "mkdir", "-p", remote_directory],
+                ["scp", "-r", entity["userdir"], f"{self.server_host}:{remote_directory}/"],
+            ]
+        server = server_prefix + [
+            "-xonotic", "-basedir", basedir, "-userdir", userdir,
             "+developer", "0", "+sv_public", "0", "+port", str(port),
             "+sv_autopause", "0", "+g_payload", "1",
             "+g_payload_round_timelimit", str(cfg["duration"]),
@@ -298,7 +436,7 @@ class Curriculum:
         checkpoint_out = os.path.join(directory, "checkpoint.npz")
         learning_rate = 0.0 if cfg["split"] == "heldout" else float(cfg.get("learning_rate", self.args.learning_rate))
         responder = self.responder_prefix + [
-            "--train", "--secs", str(cfg["duration"]),
+            "--train",
             "--peer-node", str(cfg.get("peer_node", self.args.peer_node)),
             "--off-policy-players", str(cfg["off_policy_players"]),
             "--learning-rate", str(learning_rate), "--save-every", str(self.args.save_every),
@@ -314,6 +452,7 @@ class Curriculum:
         clients = [client_command(item, context, index) for index, item in enumerate(cfg.get("client_commands", []))]
         return {
             "server": server,
+            "stage": stage,
             "responder": responder,
             "clients": clients,
             "telemetry": telemetry,
@@ -343,6 +482,15 @@ class Curriculum:
             except Exception as exc:
                 launched["quit_error"] = f"{type(exc).__name__}: {exc}"
 
+    def terminate(self, launched):
+        proc = launched.get("process")
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                launched["term_sent"] = True
+            except Exception as exc:
+                launched["term_error"] = f"{type(exc).__name__}: {exc}"
+
     def finish(self, launched, deadline):
         proc = launched.get("process")
         if proc is not None:
@@ -366,29 +514,68 @@ class Curriculum:
     def execute(self, cfg, commands, directory):
         if self.args.dry_run:
             return {
+                "stage": [{"command": cmd, "launched": False} for cmd in commands["stage"]],
                 "server": {"command": commands["server"], "launched": False},
                 "responder": {"command": commands["responder"], "launched": False},
                 "clients": [{"command": cmd, "launched": False} for cmd in commands["clients"]],
                 "status": "dry_run",
             }
+        stage = []
+        for cmd in commands["stage"]:
+            started = utcnow()
+            try:
+                result = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                stage.append({"command": cmd, "returncode": result.returncode, "output": result.stdout,
+                              "started": started, "ended": utcnow()})
+            except Exception as exc:
+                stage.append({"command": cmd, "returncode": None, "error": f"{type(exc).__name__}: {exc}",
+                              "started": started, "ended": utcnow()})
         server = self.launch("server", commands["server"], os.path.join(directory, "server.log"), self.args.server_cwd or ROOT)
         if self.args.startup_secs > 0:
             time.sleep(self.args.startup_secs)
         responder = self.launch("responder", commands["responder"], os.path.join(directory, "responder.log"), self.args.responder_cwd or ROOT)
         clients = [self.launch(f"client-{i}", cmd, os.path.join(directory, f"client-{i}.log"), ROOT) for i, cmd in enumerate(commands["clients"])]
+        # A match has a duration; the LEARNER does not. If the responder exits
+        # inside the match window -- crash, OOM, anything -- it is relaunched
+        # and the reason is written to the event stream, because the owner's
+        # rule is that a restart is correct and an unexplained stop is the
+        # defect. Restarting is cheap: the responder resumes from its own
+        # atomic checkpoint (AGENDA D9/R9).
+        restarts = []
+        retired = []
         deadline = time.monotonic() + cfg["duration"]
         while time.monotonic() < deadline:
-            time.sleep(min(0.1, deadline - time.monotonic()))
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+            proc = responder.get("process")
+            if proc is None or proc.poll() is None:
+                continue
+            reason = f"responder exited with returncode {proc.poll()}"
+            self.event("learner_restart", match=cfg["id"], ordinal=cfg["ordinal"],
+                       reason=reason, log=responder.get("log"))
+            retired.append(self.finish(responder, time.monotonic()))
+            index = len(restarts)
+            responder = self.launch(
+                "responder", commands["responder"],
+                os.path.join(directory, f"responder.restart{index}.log"),
+                self.args.responder_cwd or ROOT,
+            )
+            restarts.append({"reason": reason, "at": utcnow(),
+                             "launched": responder.get("launched"),
+                             "log": responder.get("log")})
         self.stop(server)
+        self.terminate(responder)
         for client in clients:
             self.stop(client)
         grace = time.monotonic() + self.args.quit_grace
         results = {
+            "stage": stage,
             "server": self.finish(server, grace),
             "responder": self.finish(responder, grace),
+            "responder_restarts": restarts,
+            "responder_retired": retired,
             "clients": [self.finish(client, grace) for client in clients],
         }
-        codes = [results["server"].get("returncode"), results["responder"].get("returncode")] + [item.get("returncode") for item in results["clients"]]
+        codes = [item.get("returncode") for item in stage] + [results["server"].get("returncode")] + [item.get("returncode") for item in results["clients"]]
         results["status"] = "complete" if all(code == 0 for code in codes) else "failed"
         return results
 
@@ -404,6 +591,8 @@ class Curriculum:
         mismatches = []
         if not self.args.dry_run and entity.get("status") != "ready":
             mismatches.append("entity overlay was not realized")
+        if not self.args.dry_run and self.build.get("status") != "ready":
+            mismatches.append("payload gamecode build failed")
         if not self.args.dry_run and realized["lines"] == 0:
             mismatches.append("no live responder telemetry was observed")
         actual = realized.get("last_configuration")
@@ -422,8 +611,8 @@ class Curriculum:
         record = {
             "id": cfg["id"], "ordinal": cfg["ordinal"], "split": cfg["split"],
             "started": started, "ended": utcnow(), "status": status,
-            "configuration": cfg, "entity": entity,
-            "commands": {key: commands[key] for key in ("server", "responder", "clients")},
+            "configuration": cfg, "build": self.build, "entity": entity,
+            "commands": {key: commands[key] for key in ("stage", "server", "responder", "clients")},
             "execution": execution,
             "realized": realized, "mismatches": mismatches,
             "artifacts": {
@@ -447,20 +636,79 @@ class Curriculum:
         print(json.dumps({"id": cfg["id"], "status": record["status"], "record": record_path}), flush=True)
         return record
 
-    def run(self, schedule):
+    def event(self, kind, **fields):
+        """Append one supervisor event. Every transition and every restart is
+        written here, so a restart is always EXPLAINED and a stop is visible."""
+        row = {"event": kind, "at": utcnow(), **fields}
+        try:
+            with open(self.event_path, "a") as handle:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+        except OSError:
+            pass
+        print(json.dumps(row, sort_keys=True), flush=True)
+
+    def serve(self, make_schedule):
+        """The supervisor is a SERVICE and has exactly one lifetime: it runs
+        until it is signalled or killed.
+
+        A match ending is correct -- the next one starts, which is also how the
+        resumability contract gets exercised. Running out of scheduled work is
+        NOT a reason to stop: the schedule is regenerated and the service
+        continues. There is no finite mode; a supervisor that returns is the
+        defect that left a dedicated server up with no learner attached.
+        """
+        cycle = 0
+        ordinal = 0
+        defaults = {"duration": self.args.duration, "seed": self.args.seed,
+                    "map": self.maps[0] if self.maps else "runningmanctf"}
+        self.event("supervisor_start", run_dir=self.run_dir, maps=self.maps,
+                   build=self.build.get("status"))
+        while True:
+            schedule = make_schedule(cycle)
+            self.event("cycle_start", cycle=cycle, matches=len(schedule),
+                       first_ordinal=ordinal)
+            for item in schedule:
+                try:
+                    cfg = normalize(item, ordinal, defaults)
+                    cfg["ordinal"] = ordinal
+                    cfg["cycle"] = cycle
+                    record = self.run_match(cfg)
+                    self.event("match_end", cycle=cycle, ordinal=ordinal,
+                               id=record["id"], status=record["status"],
+                               split=record["split"],
+                               map=cfg["map"],
+                               telemetry_lines=record.get("realized", {}).get("lines"),
+                               restarts=len(record.get("execution", {}).get("responder_restarts", [])))
+                except Exception as exc:
+                    fallback = item if isinstance(item, dict) else {"input": item}
+                    record = {"id": str(fallback.get("id", f"match-{ordinal:05d}")),
+                              "ordinal": ordinal, "cycle": cycle, "started": utcnow(),
+                              "ended": utcnow(), "status": "failed",
+                              "configuration": fallback,
+                              "error": f"{type(exc).__name__}: {exc}"}
+                    with open(self.index_path, "a") as handle:
+                        handle.write(json.dumps(record, sort_keys=True) + "\n")
+                    # A failed match is a match transition, not a stop.
+                    self.event("match_failed", cycle=cycle, ordinal=ordinal,
+                               id=record["id"], reason=record["error"])
+                ordinal += 1
+            self.event("cycle_end", cycle=cycle, next_ordinal=ordinal)
+            cycle += 1
+
+    def plan(self, schedule):
+        """Write the planned commands for a schedule WITHOUT launching anything.
+
+        This is a planning verb, not a run mode: it starts no server and no
+        learner, so it cannot leave either one orphaned. `serve` is the only
+        path that launches processes and it never returns.
+        """
         records = []
+        defaults = {"duration": self.args.duration, "seed": self.args.seed,
+                    "map": self.maps[0] if self.maps else "runningmanctf"}
         for index, item in enumerate(schedule):
-            try:
-                cfg = normalize(item, index, {"duration": self.args.duration, "seed": self.args.seed})
-                cfg["ordinal"] = index
-                records.append(self.run_match(cfg))
-            except Exception as exc:
-                fallback = item if isinstance(item, dict) else {"input": item}
-                record = {"id": str(fallback.get("id", f"match-{index:05d}")), "ordinal": index, "started": utcnow(), "ended": utcnow(), "status": "failed", "configuration": fallback, "error": f"{type(exc).__name__}: {exc}"}
-                with open(self.index_path, "a") as handle:
-                    handle.write(json.dumps(record, sort_keys=True) + "\n")
-                records.append(record)
-                print(json.dumps({"id": record["id"], "status": "failed", "error": record["error"]}), flush=True)
+            cfg = normalize(item, index, defaults)
+            cfg["ordinal"] = index
+            records.append(self.run_match(cfg))
         return records
 
 
@@ -469,7 +717,7 @@ def parser():
     ap.add_argument("--manifest")
     ap.add_argument("--generate", type=int, default=0)
     ap.add_argument("--seed", type=int, default=20260830)
-    ap.add_argument("--maps", default="runningmanctf")
+    ap.add_argument("--maps", default="auto")
     ap.add_argument("--team-counts", default="2,3,4,5")
     ap.add_argument("--players-per-team", default="2,4,8")
     ap.add_argument("--cart-counts", default="1,2,3,4")
@@ -485,11 +733,18 @@ def parser():
     ap.add_argument("--engine", default=os.path.expanduser("~/dox/xonotic/build-engine/darkplaces-dedicated"))
     ap.add_argument("--basedir", default=os.path.expanduser("~/dox/xonotic/Xonotic"))
     ap.add_argument("--server-command")
+    ap.add_argument("--server-host")
+    ap.add_argument("--remote-engine")
+    ap.add_argument("--remote-basedir")
+    ap.add_argument("--remote-run-root", default="/tmp/mesh-xonotic-curriculum")
     ap.add_argument("--responder-command")
     ap.add_argument("--server-cwd")
     ap.add_argument("--responder-cwd")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--entity-tool", default=os.path.join(ROOT, "payload", "tools", "mkentfile.py"))
+    ap.add_argument("--build-command", default=os.path.join(ROOT, "payload", "build.sh"))
+    ap.add_argument("--progs", default=os.path.join(ROOT, "payload-build", "progs.dat"))
+    ap.add_argument("--csprogs", default=os.path.join(ROOT, "payload-build", "csprogs.dat"))
     ap.add_argument("--checkpoint")
     ap.add_argument("--learning-rate", type=float, default=3e-4)
     ap.add_argument("--save-every", type=int, default=100)
@@ -502,18 +757,28 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if args.manifest:
-        schedule = load_manifest(args.manifest)
-    else:
-        count = args.generate or 1
-        schedule = generated_schedule(
-            count, args.seed, csv(args.maps), csv(args.team_counts, int),
-            csv(args.players_per_team, int), csv(args.cart_counts, int),
-            csv(args.skills, float), csv(args.perturbations),
-            csv(args.off_policy_counts, int), args.heldout_fraction,
-            csv(args.human_counts, int), args.human_client_command,
+    supervisor = Curriculum(args)
+    maps = supervisor.maps
+
+    def make_schedule(cycle):
+        if args.manifest:
+            return load_manifest(args.manifest)
+        # Each cycle re-samples the space with a fresh seed, so an exhausted
+        # schedule is simply the boundary between two cycles rather than the
+        # end of the service. The held-out split is re-drawn per cycle from the
+        # same product space, so heldout matches keep appearing forever.
+        return generated_schedule(
+            args.generate or 1, args.seed + cycle, maps,
+            csv(args.team_counts, int), csv(args.players_per_team, int),
+            csv(args.cart_counts, int), csv(args.skills, float),
+            csv(args.perturbations), csv(args.off_policy_counts, int),
+            args.heldout_fraction, csv(args.human_counts, int),
+            args.human_client_command,
         )
-    return Curriculum(args).run(schedule)
+
+    if args.dry_run:
+        return supervisor.plan(make_schedule(0))
+    supervisor.serve(make_schedule)
 
 
 if __name__ == "__main__":

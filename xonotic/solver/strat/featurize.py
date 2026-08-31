@@ -1,88 +1,45 @@
-"""Belief pipeline + global feature assembly (the ONLY spatial mixing operator).
+"""Belief pipeline — the canonical, and only, definition of stages 2-5.
 
-This module is the deterministic featurization of `design/payload-spec.md` §2.2
-("Observation buffer -> belief") together with the global-feature assembly that
-feeds the learned query ``q_b = W_q [x_b ; beta_b]`` of §2.3. It is **computed,
-deterministic, numpy/plain-python** -- it is the ``b`` (belief) half of the
-computed features ``(s, b, PW, SUCC)`` that `design/rl-training-spec.md` §4 lists
-as "computed (deterministic)" and §2.1 marks ``stopgrad`` into the policy
-gradient. Nothing here differentiates; the learned surface (``W_q``/``W_k``/``W_v``,
-the DPP head, the value head -- mlx) reads ``beta_b`` and ``s`` already detached.
+This is the deterministic featurization the strategy operator's ``beta`` half is
+computed by.  It is plain numpy: nothing here differentiates.  Its input is the
+per-team **observation buffer** (frustum + LOS + 2-V-cell gated in the engine),
+never omniscient world state, so enemy positions reach the operator only as
+events spatialized here.
 
-The pipeline runs under INCOMPLETE INFORMATION (payload-spec §2.2 opening: "reason
-under incomplete information rather than off omniscient world state ... everything
-spatial enters here"). Its input is the per-team **observation buffer** -- the
-timestamped contextual events some bot actually saw (frustum + LOS + 2-V-cell gated;
-that gate is engine ``[BUILD]`` per §2.2.1 / §4.5, upstream of this file) -- NOT
-omniscient world state. Enemy positions reach the strategy operator ONLY as observed
-events spatialized here (§2.2.1: "Enemy positions are featurized ONLY through here").
+The four committed stages, in order:
 
-The four committed stages (payload-spec §2.2), in order:
+  2. **V-cell segmentation** — Voronoi atoms over item/waypoint nodes, fuse
+     contiguous *navigable* atoms, then SET the support radius so the median
+     receptive field lands in the ``[5%, 15%]`` band of map area.  The horizon
+     is an output of this construction, not a tuned constant.
+     -> :func:`segment_vcells` -> :class:`VCellMap` (:meth:`receptive_fraction`
+     is the two-sided quantity the band is checked against).
+  3. **Temporal contraction** — ``f^eff = rho f^obs + (1-rho) f^prior``,
+     ``rho = exp(-dt/T)``.  -> :func:`temporal_contraction`.
+  4. **Spatial mask** — bounded-support graph-distance kernel
+     ``g(dist_graph(c(b), .))``.  -> :meth:`VCellMap.spatial_mask`.
+  5. **Egocentric integration** — ``beta_b = sum_c g_c * Phi f_c^eff``, the ONLY
+     spatial mixing operator in the system.  -> :func:`egocentric_integration`,
+     :func:`belief`, :func:`beliefs_for_bots`.
 
-  2. **V-cell segmentation** -- Voronoi cells over item/waypoint nodes, fuse
-     contiguous *navigable* paths until the stage-4 distance-decay mask bounds each
-     bot's receptive field two-sided to ``[~5%, ~15%]`` of map area. The horizon is
-     NOT a free parameter -- it is set by this construction (§2.2: "The horizon is
-     not a parameter choice ... there is no fixed-vs-learned fork").
-     -> :func:`segment_vcells` returning a :class:`VCellMap`.
-  3. **Temporal contraction** -- ``f_c^eff = rho(dt)*f_c^obs + (1-rho(dt))*f_c^prior``,
-     ``rho(dt) = exp(-dt/T)``. Stale observations relax to an uninformative prior:
-     the buffer forgets. -> :func:`temporal_contraction`.
-  4. **Spatial mask** -- a bounded-support graph-distance kernel
-     ``g(dist_graph(c(b), c))`` weights cells by navigable graph distance from the
-     bot's cell; its support radius IS the horizon / context mask. A parallel
-     operation, not a recurrence. -> :meth:`VCellMap.spatial_mask`.
-  5. **Egocentric low-rank integration** --
-     ``beta_b = sum_c g(dist_graph(c(b), c)) * Phi * f_c^eff`` (``Phi`` low-rank).
-     Precompute ``Phi * f_c^eff`` once over the map = ``O(C*rank)``, then
-     ``O(horizon)`` per bot -> scales with MAP SIZE, not player count (§2.2.5). Two
-     bots in the same cell with the same observations get the same ``beta_b`` because
-     their inputs are identical; there is no "team belief" object.
-     -> :func:`egocentric_integration`, and the end-to-end :func:`belief`.
+There is exactly one implementation of each stage and it lives here;
+``live_belief.LiveBelief`` is an ADAPTER that folds the live event buffer into
+observation rows and then calls these functions.  Nothing may re-inline them.
 
-This stage-5 integration is the system's ONLY spatial mixing operator (§2.2: "We
-never introduced attention or any other spatial mixer"); its kernel ``g`` plays the
-role softmax attention would. ``x_b`` is the bot's OWN known state; ``beta_b`` is the
-observed, occlusion-gated, spatialized world around it.
-
-Global feature assembly (payload-spec §2.3, rl-training-spec §1). :func:`assemble_features`
-concatenates ``[x_b ; beta_b ; s ; PW/SUCC feature]`` into the vector the learned query
-projects, and **guarantees cartstate ``s`` is a member** -- rl-training-spec §1: "``s`` =
-cartstate ... a **guaranteed member of the global feature vector** (if the emit path
-doesn't guarantee it, that is a ``[BUILD]`` bug)". Here that guarantee is enforced: ``s``
-is required and always included, with a named slice, and its absence raises rather than
-silently dropping. ``s`` enters detached (stopgrad); the PW/SUCC feature comes from the
-sibling deterministic Game-1 module :mod:`game` (also numpy).
-
-Spec: `payload-spec.md` §2.2 (belief pipeline: V-cells, temporal, spatial, egocentric),
-      §2.3 (query inputs ``[x_b ; beta_b]``); `rl-training-spec.md` §1 (``s`` guaranteed
-      member; ``b`` computed), §2.1/§2.2 (``b`` is stopgrad), §4 (computed vs learned).
-
-Public surface
---------------
-- ``VCellMap``               : the segmented map -- centroids, areas, navigable graph,
-                               graph-distance matrix, chosen bounded-support horizon.
-- ``segment_vcells``         : stage 2 -- Voronoi + navigable fusion, horizon set to band.
-- ``build_cell_slots``       : fold per-team observation rows -> per-cell ``f_c^obs`` +
-                               last-observed times (incomplete-information buffer).
-- ``temporal_contraction``   : stage 3 -- ``f^eff = rho*f^obs + (1-rho)*f^prior``.
-- ``egocentric_integration`` : stage 5 -- ``beta_b = sum_c g * Phi * f_c^eff``.
-- ``belief``                 : stages 3-5 end-to-end for one bot -> ``beta_b``.
-- ``beliefs_for_bots``       : team-buffer precompute (``Phi*f^eff`` once) + per-bot betas.
-- ``cartstate_vector``       : deterministic numeric encoding of cartstate ``s``.
-- ``assemble_features``      : global feature vector; ``s`` a GUARANTEED member.
-- ``GlobalFeatures``         : the assembled vector plus its named slices.
+``PHI`` and ``UNINFORMATIVE_PRIOR`` are the canonical stage-5 projection and
+stage-3 prior; ``PHI`` is a fixed (BELIEF_RANK, SLOT_DIM) read-out matrix — with
+SLOT_DIM = 7 its rank is at most 7, it is not a rank reduction, it is the fixed
+slot->belief read-out the operator's ``d_beta`` expects.
 """
-
 from __future__ import annotations
 
 import heapq
-from collections import namedtuple
+
 from typing import Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 
-from .game import as_carts, succ_feature
+
 
 # Default band on the receptive-field fraction of map area (payload-spec §2.2.2).
 _BAND_LO = 0.05
@@ -363,19 +320,30 @@ def segment_vcells(
     graph_dist = _dijkstra_all_pairs(C, edges)
 
     # --- step 5: set the horizon R so median receptive fraction lands in band. ---
-    finite = graph_dist[np.isfinite(graph_dist)]
-    candidates = np.unique(finite)
-    support_radius = candidates[-1] if candidates.size else 0.0
-    for R in candidates:
-        within = graph_dist <= R + 1e-9
-        # per-cell fraction of map area within support R
-        fracs = (within * areas[None, :]).sum(axis=1) / map_area
-        med = float(np.median(fracs))
-        if med >= lo:
-            support_radius = float(R)
-            break
+    # median_frac(R) is nondecreasing in R (widening the support can only add
+    # cells), so the smallest admissible R is found by bisection over the
+    # distinct finite graph distances instead of a linear scan -- same answer,
+    # O(log|candidates|) mask evaluations, which is what makes stage 2
+    # affordable at live cadence.
+    candidates = np.unique(graph_dist[np.isfinite(graph_dist)])
+    if candidates.size == 0:
+        support_radius = 0.0
     else:
-        support_radius = float(candidates[-1]) if candidates.size else 0.0
+        def _median_frac(R):
+            within = graph_dist <= R + 1e-9
+            return float(np.median((within * areas[None, :]).sum(axis=1) / map_area))
+
+        if _median_frac(float(candidates[-1])) < lo:
+            support_radius = float(candidates[-1])
+        else:
+            low, high = 0, candidates.size - 1
+            while low < high:
+                mid = (low + high) // 2
+                if _median_frac(float(candidates[mid])) >= lo:
+                    high = mid
+                else:
+                    low = mid + 1
+            support_radius = float(candidates[low])
 
     return VCellMap(centroids, areas, map_area, graph_dist, support_radius,
                     pos, node_cell, band=(lo, hi))
@@ -537,8 +505,8 @@ def egocentric_integration(vcmap: VCellMap, cell_idx: int, f_eff, Phi=None) -> n
     f_eff = np.asarray(f_eff, dtype=np.float64)
     Phi = _resolve_phi(Phi, f_eff.shape[1])
     g = vcmap.spatial_mask(cell_idx)                 # (C,)
-    projected = f_eff @ Phi.T                          # (C, rank)  = Phi * f_c^eff per cell
-    return g @ projected                               # (rank,)
+    projected = np.einsum("ij,kj->ik", f_eff, Phi)
+    return np.sum(g[:, None] * projected, axis=0)
 
 
 def belief(rows, vcmap: VCellMap, bot_position_or_cell, Phi=None, now: float = 0.0,
@@ -576,130 +544,71 @@ def beliefs_for_bots(rows, vcmap: VCellMap, bot_positions_or_cells, Phi=None,
     f_obs, obs_time, seen = build_cell_slots(rows, vcmap, now)
     f_eff = temporal_contraction(f_obs, obs_time, now, T, f_prior=f_prior, seen=seen)
     Phi = _resolve_phi(Phi, f_eff.shape[1])
-    projected = f_eff @ Phi.T                          # (C, rank) -- precomputed once
+    projected = np.einsum("ij,kj->ik", f_eff, Phi)
     out = []
     for b in bot_positions_or_cells:
         cell = b if isinstance(b, (int, np.integer)) else vcmap.assign_cell(b)
         g = vcmap.spatial_mask(int(cell))
-        out.append(g @ projected)
+        out.append(np.sum(g[:, None] * projected, axis=0))
     return np.asarray(out, dtype=np.float64) if out else np.zeros((0, projected.shape[1]))
 
-
 # --------------------------------------------------------------------------- #
-# Cartstate s encoding + global feature assembly (s is a GUARANTEED member).
+# Canonical stage-3 prior and stage-5 read-out (one definition, used by everyone)
 # --------------------------------------------------------------------------- #
 
-def cartstate_vector(carts, teams: Optional[Iterable] = None) -> np.ndarray:
-    """Deterministic numeric encoding of cartstate ``s`` (cart depths + control).
+# Uninformative prior a never-observed / fully-forgotten cell relaxes to.
+# Ordering matches SLOT_FIELDS: item_type, respawn_phase, standability,
+# lane_membership, last_threat, observed_enemy, seen.  "Uninformative" = the
+# item is as likely present as absent, the cell is assumed standable, and no
+# threat / enemy / observation is asserted.
+UNINFORMATIVE_PRIOR = np.asarray((0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0), dtype=np.float64)
 
-    ``s`` is the cartstate of rl-training-spec §1 -- "cart depths + control". This encodes
-    each cart as ``[depth, control_id_or_-1]`` in a stable order, flattened, so ``s`` is a
-    fixed, deterministic vector that :func:`assemble_features` can guarantee into the
-    global feature vector. Control ids are mapped to their index in the sorted team roster
-    (``-1`` for uncontrolled); depths are the integer depth-under-control. Uses
-    :func:`game.as_carts` so the cart normalization matches the Game-1 module exactly.
+# The fixed stage-5 read-out Phi (BELIEF_RANK, SLOT_DIM).  Its rank is at most
+# SLOT_DIM = 7; it is the fixed slot -> belief read-out whose width the strategy
+# operator's d_beta expects, NOT a rank reduction.
+PHI = np.asarray([
+    (1,  0, 0, 0, 0, 0, 0),   # item availability
+    (0,  1, 0, 0, 0, 0, 0),   # respawn phase
+    (0,  0, 0, 0, 1, 0, 0),   # last threat
+    (0,  0, 0, 0, 0, 1, 0),   # observed enemy presence
+    (0,  0, 0, 0, 0, 0, 1),   # seen / not seen (the incomplete-information gate)
+    (0,  0, 1, 0, 0, 0, 0),   # standability
+    (1, -1, 0, 0, 0, 0, 0),   # availability net of respawn wait
+    (0,  0, 0, 0, 1, 1, 0),   # threat + presence (danger)
+], dtype=np.float64)
+BELIEF_RANK = PHI.shape[0]
 
-    Returns a ``float32`` vector of length ``2 * len(carts)`` (``[d0, ctrl0, d1, ctrl1, ...]``).
+
+def receptive_report(vcmap: VCellMap, cells=None) -> dict:
+    """Measure the stage-2 receptive-field band on a concrete VCellMap.
+
+    Returns the min / median / max of :meth:`VCellMap.receptive_fraction` over
+    ``cells`` (default: every cell), the band, and whether the MEDIAN lands
+    inside it.  This is the quantity stage 2 targets; without it the ``[5%,15%]``
+    bound is an unchecked claim.
     """
-    cs = as_carts(carts)
-    # deterministic control->index over the sorted roster (mirrors game._teams_of order)
-    seen = {c.control for c in cs if c.control is not None}
-    if teams is not None:
-        seen |= set(teams)
-    roster = sorted(seen, key=lambda t: (0, t) if isinstance(t, (int, float)) else (1, str(t)))
-    index = {t: i for i, t in enumerate(roster)}
-    out = np.empty(2 * len(cs), dtype=np.float32)
-    for i, c in enumerate(cs):
-        out[2 * i] = float(c.depth)
-        out[2 * i + 1] = float(index[c.control]) if c.control is not None else -1.0
-    return out
+    idx = range(vcmap.n_cells) if cells is None else [int(c) for c in cells]
+    fr = np.asarray([vcmap.receptive_fraction(int(c)) for c in idx], dtype=np.float64)
+    if fr.size == 0:
+        return {"n": 0, "median": 0.0, "min": 0.0, "max": 0.0,
+                "band": list(vcmap.band), "in_band": False,
+                "support_radius": vcmap.support_radius, "n_cells": vcmap.n_cells}
+    lo, hi = vcmap.band
+    med = float(np.median(fr))
+    return {
+        "n": int(fr.size),
+        "median": round(med, 6),
+        "min": round(float(fr.min()), 6),
+        "max": round(float(fr.max()), 6),
+        "band": [float(lo), float(hi)],
+        "in_band": bool(lo - 1e-9 <= med <= hi + 1e-9),
+        "support_radius": round(float(vcmap.support_radius), 6),
+        "n_cells": int(vcmap.n_cells),
+    }
 
 
-# The assembled global feature vector + its named slices (payload-spec §2.3 query input).
-GlobalFeatures = namedtuple("GlobalFeatures", ("vector", "slices", "names"))
-
-
-def assemble_features(x_b, beta_b, cartstate, teams: Optional[Iterable] = None,
-                      instruments=None, succ=None, extra=None) -> GlobalFeatures:
-    """Assemble the global feature vector; **cartstate ``s`` is a GUARANTEED member**.
-
-    Builds the vector the learned query projects, ``q_b = W_q [x_b ; beta_b]``
-    (payload-spec §2.3), extended with the computed Game-1 features so the estimator's
-    intermediate carries them: the concatenation, in order, of
-
-        [ x_b ; beta_b ; s ; succ_feature(s) ; instruments? ; extra? ]
-
-    where ``x_b`` is the bot's OWN known engine state (§2.1), ``beta_b`` the egocentric
-    belief (this module, stages 3-5), ``s`` the cartstate (:func:`cartstate_vector`), and
-    ``succ_feature`` the deterministic PW/SUCC anticipatory feature from the sibling
-    Game-1 module :mod:`game`. All are computed / ``stopgrad`` (rl-training-spec §2.1);
-    only the downstream projections learn.
-
-    **The guarantee.** rl-training-spec §1: ``s`` "is a **guaranteed member of the global
-    feature vector** (if the emit path doesn't guarantee it, that is a ``[BUILD]`` bug)".
-    Here it is enforced structurally: ``cartstate`` is REQUIRED, always occupies the named
-    ``"s"`` slice, and a missing/empty cartstate raises ``ValueError`` rather than
-    silently dropping ``s``. The returned ``slices`` maps each block name to its
-    ``slice`` in ``vector`` so callers (and tests) can assert ``"s"`` membership.
-
-    Parameters
-    ----------
-    x_b        : the bot's own engine state vector (``(d_x,)``); may be empty.
-    beta_b     : the egocentric belief ``(rank,)`` from :func:`belief`.
-    cartstate  : the cartstate ``s`` -- carts sequence, or a pre-encoded ``s`` vector.
-                 REQUIRED and non-empty (the guarantee).
-    teams      : optional explicit team roster (passed to the cartstate/succ encoders).
-    instruments: optional ``(M, d_z)`` or flat per-instrument descriptor block to append.
-    succ       : optional precomputed succession (else derived from ``cartstate`` carts).
-    extra      : optional extra flat feature block to append.
-
-    Returns a :class:`GlobalFeatures` ``(vector, slices, names)``.
-    """
-    # --- cartstate s: required, encoded, and guaranteed into the vector. ---
-    if cartstate is None:
-        raise ValueError("cartstate s is a GUARANTEED member of the feature vector "
-                         "(rl-training-spec §1); it must be provided, not None")
-    arr = np.asarray(cartstate)
-    if arr.dtype != object and arr.ndim == 1 and arr.size > 0 and np.issubdtype(arr.dtype, np.number):
-        s_vec = arr.astype(np.float32)          # already a pre-encoded s vector
-        carts = None
-    else:
-        carts = list(cartstate)
-        s_vec = cartstate_vector(carts, teams=teams)
-    if s_vec.size == 0:
-        raise ValueError("cartstate s encoded to an empty vector; s must be a nonempty "
-                         "member of the global feature vector (rl-training-spec §1)")
-
-    blocks = []
-    names = []
-    slices = {}
-    cursor = 0
-
-    def _add(name, block):
-        nonlocal cursor
-        v = np.asarray(block, dtype=np.float32).reshape(-1)
-        blocks.append(v)
-        slices[name] = slice(cursor, cursor + v.size)
-        names.append(name)
-        cursor += v.size
-
-    _add("x_b", np.asarray(x_b, dtype=np.float32).reshape(-1) if x_b is not None else np.zeros(0, np.float32))
-    _add("beta_b", np.asarray(beta_b, dtype=np.float32).reshape(-1) if beta_b is not None else np.zeros(0, np.float32))
-    _add("s", s_vec)  # <-- the guaranteed member
-
-    # deterministic PW/SUCC anticipatory feature (only when carts, not a raw s vector)
-    if carts is not None:
-        _add("succ", succ_feature(carts, teams=teams, succ=succ))
-
-    if instruments is not None:
-        _add("instruments", np.asarray(instruments, dtype=np.float32).reshape(-1))
-    if extra is not None:
-        _add("extra", np.asarray(extra, dtype=np.float32).reshape(-1))
-
-    vector = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
-
-    # Enforce the guarantee: s must be present and nonempty in the assembled vector.
-    if "s" not in slices or (slices["s"].stop - slices["s"].start) == 0:
-        raise AssertionError("cartstate s missing from the global feature vector "
-                             "(rl-training-spec §1 [BUILD] bug)")
-    return GlobalFeatures(vector=vector, slices=slices, names=tuple(names))
+__all__ = [
+    "SLOT_FIELDS", "SLOT_DIM", "PHI", "BELIEF_RANK", "UNINFORMATIVE_PRIOR",
+    "VCellMap", "segment_vcells", "build_cell_slots", "temporal_contraction",
+    "egocentric_integration", "belief", "beliefs_for_bots", "receptive_report",
+]

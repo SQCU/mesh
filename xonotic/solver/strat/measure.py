@@ -1,419 +1,306 @@
-"""rl-training-spec.md 6 acceptance suite -- REAL measurements on real artifacts.
+"""Measurements over REAL run artifacts.
 
-metrics.py is only a telemetry log-reducer. This module implements the 6 contract
-as functions that (a) load a real trained checkpoint, (b) run CONTROLLED
-perturbation / recovery / acquisition / terminal experiments in closed loop, and
-(c) run the dynamics-acceptance diagnostics -- held-out one-step error, ensemble
-disagreement calibration, action-Jacobian rank / smallest singular value, and a
-direct reachability test. It also reduces the online_train.jsonl importance-ratio
-and loss telemetry produced alongside the checkpoint.
+Every number this module produces comes from a real Xonotic server's own log or
+from a real responder telemetry file. Nothing here simulates the game (SPEC 13),
+and there are no tests -- these are measurements.
 
-The 6 contract is explicit that a single fixed-shape self-play win-rate curve does
-NOT satisfy it. This suite therefore measures the perturbation/recovery/acquisition
-battery AND repeats every policy metric on HELD-OUT count/map shapes the checkpoint
-was never trained on.
+Three subcommands:
 
-ENVIRONMENT HONESTY: the closed-loop rollouts here execute in CartSim, the spec's
-declared bootstrap/unit environment (0.1), because the Game-2 server transition
-path is blocked on this host (see the run report). Every reported block carries
-"environment":"cartsim" and server-only measurements are marked "[BUILD-DATA]".
-The numbers below are real measurements of the real checkpoint's closed-loop
-behaviour in that environment, not Game-2 acceptance.
+  rows      Parse a server log's `[PLCOBS]` / `[PLCCART]` / `[PLCEVT]` lines --
+            written by `payload_strategy_log` in sv_payload_strategy_io.qc, read
+            back off the very fields `mesh_gather` sweeps -- into one JSONL
+            record per strategy tick, with the per-player observation rows, the
+            instrument descriptors `z` and the relation rows reconstructed for
+            it. AGENDA E9/E10: the j-space probe needs `z` and the relation rows
+            and neither was ever logged.
+
+  cgt       Resolve rate of the closed-form cart-subgame evaluator over a real
+            telemetry file's `game_value.state` positions. AGENDA B11.
+
+  commit    Distribution of the travel-commitment horizon actually written into
+            the COMPLETE column, over a real run. AGENDA F4.
 """
+
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
+import sys
 
 import numpy as np
-import mlx.core as mx
-import mlx.nn as nn
 
-from .cartsim import CartSim, greedy_deny_policy, random_policy
-from .dynamics import LocalDynamics, action_rows, state_rows
-from .estimator import StrategyEstimator, state_from_cartsim
-from .train import hierarchy_scores, policy_forward, role_rewards
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", ".."))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "payload", "tools"))
+
+from strategy_io_schema import CS, EVT, OBS, SC  # noqa: E402
+
+# Column order the QC logger emits, verbatim from payload_strategy_log().
+OBS_LOG_COLUMNS = ("ID", "TEAM", "HEALTH", "ARMOR", "AMMO", "POS_X", "POS_Y", "POS_Z",
+                   "VEL_X", "VEL_Y", "VEL_Z", "WEAPONS", "POWER", "TSS", "CELL",
+                   "NCART", "NCART_D", "ALIVE", "CONTROL")
+CART_LOG_COLUMNS = ("ID", "DEPTH", "LENGTH", "CTRL", "SPEED", "IDLE", "BANKMASK",
+                    "PROGRESS", "POS_X", "POS_Y", "POS_Z")
+EVT_LOG_COLUMNS = ("CELL", "KIND", "TEAM", "SUBJECT", "VALUE", "TIME")
+L_LEVELS = 8
 
 
-# --------------------------------------------------------------------------- IO
-def load_bundle(checkpoint, ref_shape, L, seed):
-    """Reconstruct estimator + local dynamics and load a real OnlineLearner npz.
+def _floats(parts):
+    return [float(value) for value in parts]
 
-    Weights (W_q/W_k/W_v, head, value, dynamics) are count-invariant (4), so an
-    estimator built at any reference shape evaluates every count/map shape.
+
+def parse_server_log(path):
+    """Group a server log's staged rows by publish sequence.
+
+    Yields dicts {seq, obs: ndarray(l, OBS_WIDTH), cart: ndarray(j, CART_WIDTH),
+    evt: ndarray(n, EVT_WIDTH), edicts: [...]} in sequence order.
     """
-    sim = CartSim(*ref_shape, L=L, seed=seed)
-    est = StrategyEstimator.for_cartsim(sim, seed=seed)
-    dynamics = LocalDynamics()
-    bundle = nn.Module()
-    bundle.qkv = est.qkv
-    bundle.head = est.head
-    bundle.value = est.value
-    bundle.dynamics = dynamics
-    loaded = {"checkpoint": checkpoint, "exists": os.path.exists(checkpoint)}
-    if loaded["exists"]:
-        data = np.load(checkpoint, allow_pickle=True)
-        want = {name for name, _ in _flatten(bundle.parameters())}
-        items = [(name, mx.array(data[name])) for name in data.files if name in want]
-        loaded["matched"] = len(items)
-        loaded["wanted"] = len(want)
-        loaded["missing"] = sorted(want - {n for n, _ in items})
-        try:
-            bundle.load_weights(items, strict=False)
-            loaded["loaded"] = True
-        except Exception as exc:  # noqa: BLE001
-            loaded["loaded"] = False
-            loaded["error"] = f"{type(exc).__name__}: {exc}"
-    return est, dynamics, loaded
+    from strategy_io_schema import CART_WIDTH, EVT_WIDTH, OBS_WIDTH
 
-
-def _flatten(tree, prefix=""):
+    ticks = collections.OrderedDict()
+    pool = None
+    with open(path, errors="replace") as handle:
+        for line in handle:
+            if "[PLCPOOL]" in line:
+                pool = (pool or []) + [line.strip()]
+                continue
+            index = line.find("[PLC")
+            if index < 0:
+                continue
+            parts = line[index:].split()
+            tag = parts[0]
+            if tag not in ("[PLCOBS]", "[PLCCART]", "[PLCEVT]", "[PLCPUB]"):
+                continue
+            if tag == "[PLCPUB]":
+                continue
+            try:
+                seq = int(float(parts[1]))
+                key = int(float(parts[2]))
+                values = _floats(parts[3:])
+            except ValueError:
+                continue
+            tick = ticks.setdefault(seq, {"seq": seq, "obs": [], "cart": [], "evt": [], "edicts": []})
+            if tag == "[PLCOBS]" and len(values) >= len(OBS_LOG_COLUMNS):
+                row = np.zeros(OBS_WIDTH, dtype=np.float32)
+                for name, value in zip(OBS_LOG_COLUMNS, values):
+                    row[OBS[name]] = value
+                tick["obs"].append(row)
+                tick["edicts"].append(key)
+            elif tag == "[PLCCART]" and len(values) >= 8:
+                row = np.zeros(CART_WIDTH, dtype=np.float32)
+                for name, value in zip(CART_LOG_COLUMNS, values):
+                    row[CS[name]] = value
+                tick["cart"].append((key, row))
+            elif tag == "[PLCEVT]" and len(values) >= len(EVT_LOG_COLUMNS):
+                row = np.zeros(EVT_WIDTH, dtype=np.float32)
+                for name, value in zip(EVT_LOG_COLUMNS, values):
+                    row[EVT[name]] = value
+                tick["evt"].append(row)
     out = []
-    if isinstance(tree, dict):
-        for key, value in tree.items():
-            out.extend(_flatten(value, f"{prefix}{key}."))
-    elif isinstance(tree, (list, tuple)):
-        for idx, value in enumerate(tree):
-            out.extend(_flatten(value, f"{prefix}{idx}."))
-    else:
-        out.append((prefix.rstrip("."), tree))
-    return out
+    for seq, tick in ticks.items():
+        carts = [row for _, row in sorted(tick["cart"], key=lambda item: item[0])]
+        out.append({
+            "seq": seq,
+            "obs": np.stack(tick["obs"]) if tick["obs"] else np.zeros((0, OBS_WIDTH), dtype=np.float32),
+            "cart": np.stack(carts) if carts else np.zeros((0, CART_WIDTH), dtype=np.float32),
+            "evt": np.stack(tick["evt"]) if tick["evt"] else np.zeros((0, EVT_WIDTH), dtype=np.float32),
+            "edicts": tick["edicts"],
+        })
+    return out, (pool or [])
 
 
-def policy_step(est, sim, cstate, w, rng):
-    """One shared-policy closed-loop step. Returns (next_cstate, w_next)."""
-    features = state_from_cartsim(sim, cstate, w=w)
-    key = mx.random.key(int(rng.integers(0, 2**31 - 1)))
-    w_next, action, _, _, _, _ = policy_forward(est, features, w, key=key)
-    action = np.asarray(action).astype(np.int64)
-    nxt, _ = sim.step(cstate, action)
-    return nxt, np.asarray(w_next).astype(np.float32)
+def _batch_for(tick, belief=None):
+    """Rebuild the instrument batch the operator would see for one tick.
 
-
-def reach_decisive_state(sim, est, rng, warmup):
-    """Roll the policy a few steps to a state with a well-defined PW winner."""
-    cstate = sim.reset()
-    w = np.zeros((sim.l, sim.M), dtype=np.float32)
-    for _ in range(warmup):
-        pw = sim.projected_winner(cstate)
-        if pw is not None and pw >= 0:
-            break
-        cstate, w = policy_step(est, sim, cstate, w, rng)
-    return cstate, w
-
-
-# ---------------------------------------------------- controlled perturbation
-def perturb_winner_region(sim, cstate, winner, magnitude, rng):
-    """Inject a controlled rival perturbation into the WINNER's cartstate region.
-
-    A rival seizes the winner's strongest cart and drives it back by `magnitude`
-    control points -- exactly the disturbance W must be able to correct (2/5).
-    Returns (perturbed_state, rival) or (None, None) if the winner holds no cart.
+    Uses the same constructors the live responder uses, so `z` and the relation
+    rows written here are the ones the model consumes, not a paraphrase.
     """
-    owned = [c for c in range(sim.j) if int(cstate.control[c]) == winner]
-    if not owned:
-        return None, None
-    target = max(owned, key=lambda c: cstate.pos[c])
-    rivals = [t for t in range(sim.k) if t != winner]
-    rival = int(rng.choice(rivals))
-    s = cstate.copy()
-    s.control[target] = rival
-    s.pos[target] = float(np.clip(cstate.pos[target] - magnitude, 0.0, sim.L))
-    if s.highwater is not None:
-        s.highwater[target] = int(np.floor(s.pos[target]))
-    return s, rival
+    from solver.strat.instruments import CartTarget, Participant, build_instruments
+    from solver.strat.live_belief import LiveBelief
+
+    rows = tick["obs"]
+    active = np.flatnonzero(np.asarray(rows[:, OBS["TEAM"]], dtype=np.int64) >= 1)
+    rows = rows[active]
+    if not len(rows):
+        return None, rows
+    participants = [
+        Participant(
+            int(rows[p, OBS["ID"]]), int(rows[p, OBS["TEAM"]]),
+            int(round(rows[p, OBS["CELL"]])),
+            tuple(float(v) for v in rows[p, OBS["POS_X"]:OBS["POS_Z"] + 1]),
+            float(rows[p, OBS["ALIVE"]]),
+            float(rows[p, OBS["HEALTH"]]) / 100.0,
+            float(rows[p, OBS["ARMOR"]]) / 100.0,
+            float(rows[p, OBS["AMMO"]]),
+            float(rows[p, OBS["TSS"]]),
+        )
+        for p in range(len(rows))
+    ]
+    carts = [
+        CartTarget(
+            int(round(row[CS["ID"]])), int(round(row[CS["CTRL"]])),
+            float(row[CS["DEPTH"]]), float(row[CS["SPEED"]]), float(row[CS["PROGRESS"]]),
+            (float(row[CS["POS_X"]]), float(row[CS["POS_Y"]]), float(row[CS["POS_Z"]])),
+        )
+        for row in tick["cart"]
+    ]
+    if belief is None:
+        belief = LiveBelief()
+    if len(tick["evt"]):
+        belief.ingest(tick["evt"], EVT)
+    # `beliefs` is what populates the per-cell positions the item/rival/cell
+    # targets are placed at; skipping it leaves every non-cart target at the
+    # world origin.
+    belief.beliefs(rows, OBS)
+    items, rivals, cells = belief.instrument_targets(rows, OBS)
+    return build_instruments(participants, carts, items, rivals, cells), rows
 
 
-def winner_retention(est, shape, L, seed, trials, warmup, horizon, magnitude,
-                     baseline=False):
-    """P(PW restored to the pre-perturbation winner) within `horizon` steps, and
-    time-to-recovery. Optionally run a random-policy baseline for contrast."""
-    rng = np.random.default_rng(seed)
-    restored, recover_times, valid = 0, [], 0
-    immediate_flips = 0
-    for trial in range(trials):
-        sim = CartSim(*shape, L=L, seed=seed + 7919 * trial)
-        cstate, w = reach_decisive_state(sim, est, rng, warmup)
-        w0 = sim.projected_winner(cstate)
-        if w0 is None or w0 < 0:
-            continue
-        perturbed, rival = perturb_winner_region(sim, cstate, w0, magnitude, rng)
-        if perturbed is None:
-            continue
-        valid += 1
-        immediate_flips += int(sim.projected_winner(perturbed) != w0)
-        cs = perturbed
-        w = np.zeros((sim.l, sim.M), dtype=np.float32)
-        recovered_at = None
-        for step in range(horizon):
-            if baseline:
-                action = random_policy(sim, cs, rng)
-                cs, _ = sim.step(cs, np.asarray(action, dtype=np.int64))
-            else:
-                cs, w = policy_step(est, sim, cs, w, rng)
-            if sim.projected_winner(cs) == w0 and recovered_at is None:
-                recovered_at = step + 1
-        if recovered_at is not None:
-            restored += 1
-            recover_times.append(recovered_at)
-    return {
-        "environment": "cartsim",
-        "shape": list(shape),
-        "trials_valid": valid,
-        "perturbation_flipped_pw_frac": round(immediate_flips / max(1, valid), 4),
-        "retention_prob": round(restored / max(1, valid), 4),
-        "time_to_recovery_mean": round(float(np.mean(recover_times)), 3) if recover_times else None,
-        "time_to_recovery_median": float(np.median(recover_times)) if recover_times else None,
-        "recovered_trials": len(recover_times),
-        "horizon": horizon,
-        "magnitude": magnitude,
-        "policy": "random_baseline" if baseline else "checkpoint",
-    }
+def cmd_rows(args):
+    from solver.strat.live_belief import LiveBelief
 
-
-def loser_acquisition(est, shape, L, seed, trials, warmup, horizon):
-    """P(a non-winner team acquires PW) within horizon -- state-acquisition (2)."""
-    rng = np.random.default_rng(seed + 101)
-    acquired, valid = 0, 0
-    for trial in range(trials):
-        sim = CartSim(*shape, L=L, seed=seed + 5003 * trial + 11)
-        cstate, w = reach_decisive_state(sim, est, rng, warmup)
-        w0 = sim.projected_winner(cstate)
-        if w0 is None or w0 < 0:
-            continue
-        losers = [t for t in range(sim.k) if t != w0]
-        if not losers:
-            continue
-        target = int(rng.choice(losers))
-        valid += 1
-        cs = cstate
-        acquired_here = 0
-        for _ in range(horizon):
-            cs, w = policy_step(est, sim, cs, w, rng)
-            if sim.projected_winner(cs) == target:
-                acquired_here = 1
-                break
-        acquired += acquired_here
-    return {
-        "environment": "cartsim",
-        "shape": list(shape),
-        "trials_valid": valid,
-        "acquisition_prob": round(acquired / max(1, valid), 4),
-        "horizon": horizon,
-    }
-
-
-def terminal_outcome(est, shape, L, seed, trials, horizon):
-    """Terminal PW distribution / initial-winner retention over a full horizon."""
-    rng = np.random.default_rng(seed + 202)
-    kept, valid = 0, 0
-    terminal_pw = []
-    for trial in range(trials):
-        sim = CartSim(*shape, L=L, seed=seed + 6151 * trial + 3)
-        cstate = sim.reset()
-        w = np.zeros((sim.l, sim.M), dtype=np.float32)
-        w0 = sim.projected_winner(cstate)
-        for _ in range(horizon):
-            cstate, w = policy_step(est, sim, cstate, w, rng)
-        wt = sim.projected_winner(cstate)
-        terminal_pw.append(int(wt) if wt is not None else -1)
-        if w0 is not None and w0 >= 0:
-            valid += 1
-            kept += int(wt == w0)
-    return {
-        "environment": "cartsim",
-        "shape": list(shape),
-        "initial_winner_retained_frac": round(kept / max(1, valid), 4),
-        "terminal_pw_hist": {str(v): terminal_pw.count(v) for v in sorted(set(terminal_pw))},
-        "horizon": horizon,
-    }
-
-
-# ------------------------------------------------------- dynamics acceptance
-def dynamics_acceptance(est, dynamics, shape, L, seed, samples, warmup):
-    """Held-out one-step error, ensemble-disagreement calibration, Jacobian
-    rank / smallest singular value, and a direct reachability test (5/6)."""
-    rng = np.random.default_rng(seed + 303)
-    errors, disagreements = [], []
-    sigma_mins, ranks = [], []
-    reach_hits, reach_total = 0, 0
-    for trial in range(samples):
-        sim = CartSim(*shape, L=L, seed=seed + 977 * trial + 5)
-        cstate, w = reach_decisive_state(sim, est, rng, warmup)
-        state = state_from_cartsim(sim, cstate, w=w)
-        result = est.forward(state)
-        actions = np.asarray(result.action, dtype=np.int64).reshape(sim.l)
-        next_cstate, _ = sim.step(cstate, actions)
-        next_state = state_from_cartsim(sim, next_cstate, w=np.asarray(result.w_next))
-        # ground-truth reduced-state transition
-        target_delta = (next_state.hierarchy - state.hierarchy).astype(np.float32)
-        srows = mx.array(state_rows(state))
-        arows = mx.array(action_rows(state, actions))
-        mean, first, second = dynamics(srows, arows)
-        mean_np = np.asarray(mean)
-        one_step = float(np.mean(np.square(mean_np - target_delta)))
-        disagree = float(np.mean(np.square(np.asarray(first) - np.asarray(second))))
-        errors.append(one_step)
-        disagreements.append(disagree)
-        # local action-Jacobian rank / smallest singular value per player
-        matrices = np.asarray(dynamics.local_matrix(srows))
-        for mat in matrices:
-            sv = np.linalg.svd(mat, compute_uv=False)
-            sigma_mins.append(float(sv.min()))
-            ranks.append(int(np.sum(sv > 1e-6 * sv.max())))
-        # direct reachability: does SOME single-player action deviation actually
-        # move the winner's hierarchy score up (restore direction), and does the
-        # model's local matrix predict a reachable delta in that direction?
-        winners = np.flatnonzero(state.winner_mask)
-        if len(winners):
-            wp = int(winners[0])
-            reach_total += 1
-            best_actual = -1e9
-            for a in range(sim.M):
-                joint = actions.copy()
-                joint[wp] = a
-                cand, _ = sim.step(cstate, joint)
-                cand_state = state_from_cartsim(sim, cand, w=w)
-                d = float(cand_state.hierarchy[wp, 3] - state.hierarchy[wp, 3])
-                best_actual = max(best_actual, d)
-            if best_actual > 1e-4:
-                reach_hits += 1
-    errors = np.asarray(errors)
-    disagreements = np.asarray(disagreements)
-    # calibration: correlation between predicted disagreement and realised error
-    if len(errors) > 2 and np.std(disagreements) > 0 and np.std(errors) > 0:
-        calibration = float(np.corrcoef(disagreements, errors)[0, 1])
-    else:
-        calibration = None
-    return {
-        "environment": "cartsim",
-        "shape": list(shape),
-        "samples": int(len(errors)),
-        "one_step_error_mean": round(float(errors.mean()), 6) if len(errors) else None,
-        "one_step_error_p90": round(float(np.percentile(errors, 90)), 6) if len(errors) else None,
-        "ensemble_disagreement_mean": round(float(disagreements.mean()), 6) if len(disagreements) else None,
-        "disagreement_error_calibration_r": round(calibration, 4) if calibration is not None else None,
-        "jacobian_sigma_min_mean": round(float(np.mean(sigma_mins)), 6) if sigma_mins else None,
-        "jacobian_rank_mean": round(float(np.mean(ranks)), 3) if ranks else None,
-        "jacobian_rank_full_frac": round(float(np.mean([r == 8 for r in ranks])), 4) if ranks else None,
-        "reachability_restore_frac": round(reach_hits / max(1, reach_total), 4),
-        "reachability_states": reach_total,
-    }
-
-
-# ------------------------------------------------------- online-log reduction
-def reduce_online_log(path):
-    if not os.path.exists(path):
-        return {"exists": False, "path": path, "note": "[BUILD-DATA] no online_train.jsonl"}
-    losses = {}
-    ratios, sigma, n = [], [], 0
-    env = None
-    with open(path) as handle:
-        for raw in handle:
-            raw = raw.strip()
-            if not raw:
-                continue
-            row = json.loads(raw)
-            if "_meta" in row:
-                env = row["_meta"].get("environment")
-                continue
-            env = env or row.get("environment")
-            n += 1
-            # Metrics may be flat (online_bootstrap_run format) or nested under
-            # "update" (the strat_responder Game-2 server format). Read both.
-            metric_src = dict(row)
-            nested = row.get("update")
-            if isinstance(nested, dict):
-                metric_src = {**metric_src, **nested}
-            for key in ("loss", "loss_pg", "loss_w", "loss_l", "loss_dynamics"):
-                if key in metric_src and metric_src[key] is not None:
-                    losses.setdefault(key, []).append(float(metric_src[key]))
-            if metric_src.get("importance_mean") is not None:
-                ratios.append(float(metric_src["importance_mean"]))
-            if metric_src.get("local_control_sigma_min") is not None:
-                sigma.append(float(metric_src["local_control_sigma_min"]))
-    reduce = lambda xs: {
-        "first": round(xs[0], 6), "last": round(xs[-1], 6),
-        "mean": round(float(np.mean(xs)), 6), "min": round(float(np.min(xs)), 6),
-        "max": round(float(np.max(xs)), 6),
-    } if xs else None
-    return {
-        "exists": True, "path": path, "environment": env, "update_lines": n,
-        "losses": {key: reduce(vals) for key, vals in losses.items()},
-        "importance_ratio": reduce(ratios),
-        "local_control_sigma_min": reduce(sigma),
-    }
-
-
-# ------------------------------------------------------------------- driver
-def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default=os.path.join(here, "runs", "policy_online_v3.npz"))
-    ap.add_argument("--online-log", default=os.path.join(here, "runs", "online_train.jsonl"))
-    ap.add_argument("--out", default=os.path.join(here, "runs", "acceptance_measure.json"))
-    ap.add_argument("--L", type=int, default=6)
-    ap.add_argument("--seed", type=int, default=20260830)
-    ap.add_argument("--trials", type=int, default=40)
-    ap.add_argument("--warmup", type=int, default=6)
-    ap.add_argument("--horizon", type=int, default=12)
-    ap.add_argument("--magnitude", type=float, default=2.0)
-    ap.add_argument("--samples", type=int, default=24)
-    # trained (seen) vs held-out (never trained) shapes -- mirror train.py
-    ap.add_argument("--train-shapes", default="2,3,4;2,2,4;3,4,7")
-    ap.add_argument("--heldout-shapes", default="3,4,7;4,6,9;5,7,11")
-    args = ap.parse_args()
-
-    train_shapes = [tuple(int(v) for v in g.split(",")) for g in args.train_shapes.split(";")]
-    heldout_shapes = [tuple(int(v) for v in g.split(",")) for g in args.heldout_shapes.split(";")]
-
-    est, dynamics, loaded = load_bundle(args.checkpoint, train_shapes[0], args.L, args.seed)
-
-    def battery(shapes, tag):
-        out = []
-        for shape in shapes:
-            out.append({
-                "shape": list(shape),
-                "winner_retention": winner_retention(
-                    est, shape, args.L, args.seed, args.trials, args.warmup,
-                    args.horizon, args.magnitude),
-                "winner_retention_random_baseline": winner_retention(
-                    est, shape, args.L, args.seed, args.trials, args.warmup,
-                    args.horizon, args.magnitude, baseline=True),
-                "loser_acquisition": loser_acquisition(
-                    est, shape, args.L, args.seed, args.trials, args.warmup, args.horizon),
-                "terminal_outcome": terminal_outcome(
-                    est, shape, args.L, args.seed, args.trials, args.horizon),
-                "dynamics_acceptance": dynamics_acceptance(
-                    est, dynamics, shape, args.L, args.seed, args.samples, args.warmup),
-            })
-        return out
-
-    report = {
-        "checkpoint_load": loaded,
-        "online_log_reduction": reduce_online_log(args.online_log),
-        "environment_note": (
-            "online_log_reduction below is REAL Game-2 server telemetry "
-            "(environment=game2_server): a live darkplaces cartserver on node0 "
-            "over the RDMA mesh, strat_responder --train + OnlineLearner on node1. "
-            "The winner_retention / loser_acquisition / terminal_outcome / "
-            "dynamics_acceptance batteries below are CLOSED-LOOP PROBES run in "
-            "CartSim (bootstrap env, spec 0.1) and are tagged environment=cartsim; "
-            "they are NOT Game-2 acceptance. The spec-6 acceptance matrix "
-            "(winner-retention under CONTROLLED rival perturbation, time-to-recovery "
-            "after a forced demotion, loser-acquisition, terminal outcome, and the "
-            "same on held-out counts/maps) on the SERVER is [BUILD-DATA]: this short "
-            "run did not execute the server-side perturbation and held-out schedules "
-            "(spec-7 [OPEN]) at the scale needed to populate that matrix."
-        ),
-        "seen_shapes": battery(train_shapes, "seen"),
-        "heldout_shapes": battery(heldout_shapes, "heldout"),
-    }
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    ticks, pool = parse_server_log(args.log)
+    belief = LiveBelief()
+    written = 0
+    nonzero = collections.Counter()
     with open(args.out, "w") as handle:
-        handle.write(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report, indent=2))
+        for tick in ticks:
+            if not len(tick["obs"]) or not len(tick["cart"]):
+                continue
+            batch, rows = _batch_for(tick, belief)
+            if batch is None:
+                continue
+            for name in OBS_LOG_COLUMNS:
+                if np.any(np.abs(rows[:, OBS[name]]) > 0):
+                    nonzero[name] += 1
+            handle.write(json.dumps({
+                "seq": tick["seq"],
+                "obs_columns": list(OBS_LOG_COLUMNS),
+                "obs": np.round(rows[:, [OBS[name] for name in OBS_LOG_COLUMNS]], 6).tolist(),
+                "cart_columns": list(CART_LOG_COLUMNS),
+                "cart": np.round(tick["cart"][:, [CS[name] for name in CART_LOG_COLUMNS]], 6).tolist(),
+                "evt": np.round(tick["evt"], 6).tolist(),
+                "instrument_kinds": [inst.kind.value for inst in batch.instruments],
+                "instrument_subjects": [int(inst.subject) for inst in batch.instruments],
+                "z": np.round(batch.descriptors, 6).tolist(),
+                "relation": np.round(batch.relations, 6).tolist(),
+                "eligible": batch.eligible.astype(int).tolist(),
+            }) + "\n")
+            written += 1
+    summary = {
+        "log": os.path.abspath(args.log),
+        "out": os.path.abspath(args.out),
+        "pool": pool,
+        "ticks_logged": len(ticks),
+        "ticks_written": written,
+        "player_rows": int(sum(len(tick["obs"]) for tick in ticks)),
+        "ticks_with_a_nonzero_value_per_observation_column": dict(sorted(nonzero.items())),
+    }
+    print(json.dumps(summary, indent=2))
+
+
+def cmd_cgt(args):
+    from solver.strat.game_value import EmpiricalTransitionGraph, evaluate_cartstate
+
+    logged = collections.Counter()
+    closed = collections.Counter()
+    nimbers = collections.Counter()
+    total = 0
+    with open(args.telemetry) as handle:
+        for raw in handle:
+            try:
+                line = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            value = line.get("game_value")
+            if not value:
+                continue
+            total += 1
+            logged[(value.get("kind"), value.get("reason"))] += 1
+            _, _, k, depths, controls = value["state"]
+            result = evaluate_cartstate(depths, controls, list(range(int(k))), args.levels)
+            closed[result.kind] += 1
+            if result.kind == "impartial":
+                nimbers[result.nimber] += 1
+    del EmpiricalTransitionGraph
+    print(json.dumps({
+        "telemetry": os.path.abspath(args.telemetry),
+        "lines_with_a_cart_game_value": total,
+        "as_logged": {f"{kind}:{reason}": count for (kind, reason), count in logged.items()},
+        "closed_form": dict(closed),
+        "closed_form_nimbers": {str(key): value for key, value in nimbers.items()},
+        "resolved_before": total - logged.get(("unresolved", "incomplete option graph"), 0),
+        "resolved_after": sum(count for kind, count in closed.items() if kind != "unresolved"),
+    }, indent=2))
+
+
+def cmd_commit(args):
+    from solver.strat.instruments import decode_allocations
+
+    from solver.strat.live_belief import LiveBelief
+
+    ticks, _ = parse_server_log(args.log)
+    belief = LiveBelief()
+    values = []
+    by_kind = collections.defaultdict(list)
+    rng = np.random.default_rng(args.seed)
+    for tick in ticks:
+        if not len(tick["obs"]) or not len(tick["cart"]):
+            continue
+        batch, rows = _batch_for(tick, belief)
+        if batch is None:
+            continue
+        count = len(batch.participants)
+        actions = np.array([rng.choice(np.flatnonzero(batch.eligible[p])) for p in range(count)])
+        out = decode_allocations(batch, actions, intensity=np.ones(count),
+                                 commitments=np.ones(count), spawn_delays=np.ones(count))
+        for p, action in enumerate(actions):
+            value = float(out[p, SC["COMMIT"]])
+            values.append(value)
+            by_kind[batch.instruments[int(action)].kind.value].append(value)
+    array = np.asarray(values, dtype=np.float64)
+    print(json.dumps({
+        "log": os.path.abspath(args.log),
+        "assignments": int(array.size),
+        "commit_nonzero": int(np.count_nonzero(array)),
+        "commit_nonzero_fraction": round(float(np.count_nonzero(array) / max(1, array.size)), 6),
+        "seconds": {
+            "min": round(float(array.min()), 4) if array.size else None,
+            "median": round(float(np.median(array)), 4) if array.size else None,
+            "mean": round(float(array.mean()), 4) if array.size else None,
+            "max": round(float(array.max()), 4) if array.size else None,
+        },
+        "by_instrument_kind": {
+            kind: {"n": len(items), "nonzero": int(np.count_nonzero(items)),
+                   "median_seconds": round(float(np.median(items)), 4)}
+            for kind, items in sorted(by_kind.items())
+        },
+    }, indent=2))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    rows = sub.add_parser("rows", help="server log -> observation/z/relation JSONL")
+    rows.add_argument("log")
+    rows.add_argument("--out", required=True)
+    rows.set_defaults(func=cmd_rows)
+
+    cgt = sub.add_parser("cgt", help="cart-subgame resolve rate over real telemetry")
+    cgt.add_argument("telemetry")
+    cgt.add_argument("--levels", type=int, default=L_LEVELS)
+    cgt.set_defaults(func=cmd_cgt)
+
+    commit = sub.add_parser("commit", help="travel-commitment horizon over a real run")
+    commit.add_argument("log")
+    commit.add_argument("--seed", type=int, default=20260831)
+    commit.set_defaults(func=cmd_commit)
+
+    args = ap.parse_args(argv)
+    return args.func(args)
 
 
 if __name__ == "__main__":

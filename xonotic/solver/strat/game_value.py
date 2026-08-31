@@ -232,9 +232,43 @@ def belief_nimber_distribution(
     return NimberBelief(dict(sorted(distribution.items())), max(0.0, 1.0 - known))
 
 
+def parse_cartstate(state: State):
+    """Recover (depths, controls, teams) from a responder cartstate key.
+
+    The responder keys the cart subgame by
+        (map_key, episode, k, depth_levels, controls)
+    (`strat_responder.py`, the `game_state` tuple). Anything that does not have
+    that shape is not a cartstate and gets no closed form.
+    """
+    if not isinstance(state, tuple) or len(state) != 5:
+        return None
+    _, _, k, depths, controls = state
+    if not isinstance(k, int) or not isinstance(depths, (tuple, list)) or not isinstance(controls, (tuple, list)):
+        return None
+    if len(depths) != len(controls):
+        return None
+    try:
+        depths = [int(value) for value in depths]
+        controls = [int(value) for value in controls]
+    except (TypeError, ValueError):
+        return None
+    return depths, controls, list(range(max(1, k)))
+
+
 class EmpiricalTransitionGraph:
-    def __init__(self, roles: Iterable[Role]) -> None:
+    """Options learned by watching real transitions.
+
+    A watched graph is incomplete until every reachable state has been marked
+    complete, which for the cart subgame only happens when a cart is delivered.
+    Where the position is a cartstate the option graph does not have to be
+    watched at all -- `evaluate_cartstate` writes it down in closed form -- so
+    that is what `evaluate` falls back to instead of reporting "incomplete
+    option graph" for the whole match (AGENDA B11).
+    """
+
+    def __init__(self, roles: Iterable[Role], cart_levels: int = 8) -> None:
         self.roles = _ordered(roles)
+        self.cart_levels = int(cart_levels)
         self._counts: dict[State, dict[Role, Counter]] = defaultdict(lambda: defaultdict(Counter))
         self._complete: set[tuple[State, Role]] = set()
 
@@ -264,7 +298,125 @@ class EmpiricalTransitionGraph:
         return FiniteGameGraph(options, self.roles, self._complete)
 
     def evaluate(self, state: State) -> GameValue:
-        return self.snapshot().evaluate(state)
+        value = self.snapshot().evaluate(state)
+        if value.kind != "unresolved":
+            return value
+        parsed = parse_cartstate(state)
+        if parsed is None:
+            return value
+        depths, controls, teams = parsed
+        closed = evaluate_cartstate(depths, controls, teams, self.cart_levels)
+        return GameValue(closed.kind, closed.nimber, closed.role_values,
+                         closed.reason or "closed-form cart option graph")
+
+
+
+# =============================================================================
+#  The cart subgame's option graph, in closed form.
+# -----------------------------------------------------------------------------
+#  AGENDA B11. `EmpiricalTransitionGraph` learns options by WATCHING transitions,
+#  so `FiniteGameGraph.evaluate` can only ever say "incomplete option graph"
+#  until `observe_terminal` has been called on every reachable state. On the real
+#  Game-2 run no cart was ever delivered, `mark_complete` was therefore never
+#  reached, and the CGT value came back
+#      {"kind": "unresolved", "nimber": null, "reason": "incomplete option graph"}
+#  on 228 of 228 lines. Nothing was wrong with the evaluator: it was being asked
+#  to price a graph that had no edges.
+#
+#  The cart subgame does not need to be observed. SPEC 1 calls it
+#      "a nim-like counting-game-over-payload-carts"
+#  and its options follow from the cart rules, so they are enumerated here and
+#  every state is complete by construction.
+#
+#  ONE CART = ONE COMPONENT of a disjunctive sum. Its position is the number of
+#  levels still to be covered, r = levels - depth, floored by the cart's banked
+#  point (score is monotone: sv_payload.qc banks and never un-banks).
+#
+#    * A NEUTRAL cart (no controlling team) is IMPARTIAL: the cylinder occupancy
+#      law (sv_payload.qc `payload_occupancy`) lets any team present move it, so
+#      every role has the same options -- reduce r to any smaller value. That is
+#      a Nim heap, and backward induction over mex reproduces Grundy(r) = r, so
+#      the nim-sum in game.py is derived here rather than asserted.
+#
+#    * A CONTROLLED cart is PARTIZAN and gets NO nimber. Regime A/B of the cart
+#      velocity law (AGENDA R2) gives the controlling team and its opponents
+#      genuinely different moves: the color team advances the cart, an opponent
+#      reverses it toward the origin, where it recolors neutral (sv_payload.qc
+#      "regressed to origin, recolored neutral"). Left and Right options differ,
+#      a Grundy value does not exist, and none is invented (AGENDA B10).
+#
+#  So the sum resolves to an exact nimber exactly when every cart is neutral,
+#  and to an explicit "partizan" otherwise. Neither answer is "incomplete".
+# =============================================================================
+
+NEUTRAL = None
+
+
+def _neutral_cart_graph(levels: int) -> FiniteGameGraph:
+    # Impartial: one role, options of r are every strictly smaller position.
+    return FiniteGameGraph.impartial({r: tuple(range(r)) for r in range(levels + 1)})
+
+
+def _controlled_cart_graph(levels: int, holder: Role, teams: Sequence[Role]) -> FiniteGameGraph:
+    # Partizan: the holder advances (r decreases toward delivery), everyone else
+    # reverses (r increases back toward the origin). Positions are r = levels - depth.
+    roles = tuple(teams) or (holder,)
+    options: dict[State, dict[Role, tuple[State, ...]]] = {}
+    for r in range(levels + 1):
+        by_role: dict[Role, tuple[State, ...]] = {}
+        for role in roles:
+            if role == holder:
+                by_role[role] = tuple(range(r))
+            else:
+                by_role[role] = tuple(range(r + 1, levels + 1))
+        options[r] = by_role
+    return FiniteGameGraph.partizan(options, roles)
+
+
+def cart_components(
+    depths: Sequence[int],
+    controls: Sequence[Role],
+    teams: Sequence[Role],
+    levels: int,
+    floors: Sequence[int] | None = None,
+) -> tuple[list[FiniteGameGraph], list[State]]:
+    """Closed-form option graphs and positions for one cartstate.
+
+    `controls[c]` is the controlling team, or None / a negative index for a
+    neutral cart (the engine writes 0 for uncontrolled, the responder maps it to
+    -1). `floors[c]` is the cart's banked level, which its position can never
+    fall back below.
+    """
+    graphs, states = [], []
+    floors = list(floors) if floors is not None else [0] * len(depths)
+    for index, depth in enumerate(depths):
+        holder = controls[index] if index < len(controls) else NEUTRAL
+        if holder is not None and not isinstance(holder, str) and holder < 0:
+            holder = NEUTRAL
+        floor = max(0, min(int(floors[index]), levels))
+        span = max(0, levels - floor)
+        position = max(0, min(int(depth) - floor, span))
+        remaining = span - position
+        if holder is NEUTRAL:
+            graphs.append(_neutral_cart_graph(span))
+        else:
+            graphs.append(_controlled_cart_graph(span, holder, teams))
+        states.append(remaining)
+    return graphs, states
+
+
+def evaluate_cartstate(
+    depths: Sequence[int],
+    controls: Sequence[Role],
+    teams: Sequence[Role],
+    levels: int,
+    floors: Sequence[int] | None = None,
+) -> GameValue:
+    """Price a real server cartstate as a disjunctive sum of cart components."""
+    if not list(depths):
+        return GameValue("impartial", 0, {})
+    graphs, states = cart_components(depths, controls, teams, levels, floors)
+    return disjunctive_sum_value(graphs, states)
 
 
 __all__ = [
@@ -275,6 +427,9 @@ __all__ = [
     "NimberBelief",
     "RoleValue",
     "belief_nimber_distribution",
+    "cart_components",
+    "parse_cartstate",
+    "evaluate_cartstate",
     "disjunctive_sum_options",
     "disjunctive_sum_value",
     "mex",

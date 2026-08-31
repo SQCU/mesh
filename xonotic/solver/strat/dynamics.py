@@ -4,9 +4,9 @@ import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
 
-from .estimator import HIERARCHY_WIDTH
+from .estimator import BELIEF_WIDTH, HIERARCHY_WIDTH, X_WIDTH
 
-STATE_WIDTH = 32
+STATE_WIDTH = X_WIDTH + BELIEF_WIDTH + HIERARCHY_WIDTH
 ACTION_WIDTH = 96
 
 __all__ = [

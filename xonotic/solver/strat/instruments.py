@@ -209,6 +209,46 @@ def build_instruments(
     return InstrumentBatch(actors, refs, descriptors, relations, eligible)
 
 
+# Travel commitment (AGENDA F4). `COMMIT` reaches the engine as
+#     this.bot_strategytime = max(this.bot_strategytime, time + this.plc_str_commit)
+# (sv_payload_strategy_io.qc), i.e. SECONDS for which the bot holds its current
+# objective instead of re-diceing it. It was previously written only by the
+# TRAVEL_COMMITMENT instrument, so on the real Game-2 run it was nonzero on 1 of
+# 3150 assignments and `bot_strategytime` was effectively never driven. It is a
+# property of an ASSIGNMENT, not of one instrument: committing to a target means
+# committing to the trip to it, so every objective carries the horizon its own
+# travel implies.
+#
+# Positions are engine units / 1024 (the OBS/CS position columns), and a Xonotic
+# player runs at roughly 400 u/s, so one normalized unit of separation is about
+# 1024/400 seconds of travel.
+COMMIT_SECONDS_PER_UNIT = 1024.0 / 400.0
+COMMIT_BASE_SECONDS = 0.6
+COMMIT_MIN_SECONDS = 0.25
+COMMIT_MAX_SECONDS = 30.0
+_DISTANCE = RELATION_FIELDS.index("distance")
+# Instruments that must never pin bot_strategytime: IDLE holds no objective, and
+# SPAWN_TIMING is only eligible for a dead actor, who is not travelling.
+NO_COMMIT_KINDS = (InstrumentKind.IDLE, InstrumentKind.SPAWN_TIMING)
+
+
+def travel_horizon(batch: "InstrumentBatch", participant: int, action: int, scale: float = 1.0) -> float:
+    """Seconds an actor should hold this assignment, from the trip it implies.
+
+    The separation is read out of the relation row the operator itself consumes,
+    so the horizon and the model input cannot disagree. A target that carries no
+    position (an instrument with no world location, e.g. the placeholder rows)
+    contributes no travel and falls back to the base horizon.
+    """
+    instrument = batch.instruments[int(action)]
+    if instrument.kind in NO_COMMIT_KINDS:
+        return 0.0
+    located = any(abs(value) > 0.0 for value in instrument.position)
+    travel = float(batch.relations[participant, int(action), _DISTANCE]) if located else 0.0
+    seconds = float(scale) * (COMMIT_BASE_SECONDS + travel * COMMIT_SECONDS_PER_UNIT)
+    return float(np.clip(seconds, COMMIT_MIN_SECONDS, COMMIT_MAX_SECONDS))
+
+
 def _values(value, count: int, default: float, dtype=np.float32) -> np.ndarray:
     source = default if value is None else value
     return np.array(np.broadcast_to(np.asarray(source, dtype=dtype), (count,)), copy=True)
@@ -236,6 +276,12 @@ def decode_allocations(
     for p, action in enumerate(chosen):
         inst = batch.instruments[int(action)]
         actor = batch.participants[p]
+        # Every assignment carries its travel-commitment horizon, whatever the
+        # objective is; `commitments` is the policy's scalar on that horizon,
+        # not the horizon itself.
+        out[p, SC["COMMIT"]] = travel_horizon(
+            batch, p, int(action), 1.0 if np.isnan(commit[p]) else float(commit[p])
+        )
         if inst.kind in (InstrumentKind.PUSH_CART, InstrumentKind.SUPPRESS_CART):
             out[p, SC["TARGET"]] = encode_target("cart", inst.subject)
             out[p, SC["GAIN"]] = gain[p]
@@ -256,8 +302,11 @@ def decode_allocations(
             out[p, SC["TARGET"]] = encode_target("cell", max(0, actor.cell))
             out[p, SC["SPAWN"]] = max(0.0, 1.0 if np.isnan(spawn[p]) else spawn[p])
         elif inst.kind == InstrumentKind.TRAVEL_COMMITMENT:
+            # Still an instrument in its own right -- "hold position and commit,
+            # pick up no other objective" -- but no longer the only writer of
+            # COMMIT; its horizon comes from the same formula as every other
+            # assignment.
             out[p, SC["TARGET"]] = encode_target("cell", max(0, actor.cell))
-            out[p, SC["COMMIT"]] = max(0.0, 1.0 if np.isnan(commit[p]) else commit[p])
     return out
 
 

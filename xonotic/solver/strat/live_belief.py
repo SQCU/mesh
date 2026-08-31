@@ -1,3 +1,16 @@
+"""Live adapter between the mesh event/observation stream and the belief stages.
+
+This file owns NO belief algebra. It maintains the V-cell dictionary, the
+observed navigable edges and the per-team observation buffer from the live
+mesh rows, folds them into observation rows, and then calls the canonical
+stages in :mod:`featurize` — ``segment_vcells`` (stage 2, which is what SETS
+the horizon), ``build_cell_slots`` + ``temporal_contraction`` (stage 3) and
+``beliefs_for_bots`` (stages 4-5). It previously re-implemented all four
+stages inline with a constant-literal Phi, a hardcoded support radius of 2.0
+and a normalization the formula does not have, while the canonical module sat
+unused; that copy is deleted.
+"""
+
 from __future__ import annotations
 
 import time
@@ -6,7 +19,18 @@ from collections import deque
 import numpy as np
 
 from .buffers import EventKind, Observation, ObservationBuffer
-from .featurize import SLOT_DIM, VCellMap
+from .featurize import (
+    BELIEF_RANK,
+    PHI,
+    SLOT_DIM,
+    UNINFORMATIVE_PRIOR,
+    beliefs_for_bots,
+    receptive_report,
+    segment_vcells,
+)
+
+# The two-sided receptive-field band stage 2 sizes the horizon to.
+BELIEF_BAND = (0.05, 0.15)
 
 
 class LiveBelief:
@@ -160,6 +184,23 @@ class LiveBelief:
         return players
 
     def _vcmap(self):
+        """Stage 2, via the CANONICAL :func:`featurize.segment_vcells`.
+
+        Nodes are the V-cells discovered so far; the navigable adjacency is the
+        set of transitions actually observed (a player moved cell i -> cell j,
+        or an event was linked to its nearest observer's cell), unioned with a
+        2-nearest-neighbour stand-in so isolated cells are not stranded at
+        infinite graph distance.
+
+        BLOCKER (engine side, not ours): the mesh OBS/EVT schema carries a
+        ``CELL`` id but no waypoint-link table, so the real navigable graph is
+        not available here and the kNN union is a stand-in.  Supplying real
+        waypoint links would make this exactly the spec's "fuse contiguous
+        navigable paths".
+
+        The support radius is NOT set here -- ``segment_vcells`` sets it from
+        the 5-15% receptive-field band.
+        """
         ids = sorted(self.cells)
         if not ids:
             self.cells[0] = np.zeros(2, dtype=np.float64)
@@ -178,20 +219,18 @@ class LiveBelief:
                 for j in np.argsort(d2[i], kind="stable")[1:min(n, 3)]:
                     adjacency[i].add(int(j))
                     adjacency[int(j)].add(i)
-        distance = np.full((n, n), np.inf, dtype=np.float64)
-        np.fill_diagonal(distance, 0.0)
-        for i, neighbors in enumerate(adjacency):
-            for j in neighbors:
-                distance[i, j] = 1.0
-        for mid in range(n):
-            distance = np.minimum(distance, distance[:, mid, None] + distance[None, mid, :])
-        vcmap = VCellMap(positions, np.ones(n), float(n), distance, 2.0,
-                         positions, np.arange(n), band=(0.0, 1.0))
+        vcmap = segment_vcells(positions, adjacency=[sorted(a) for a in adjacency],
+                               band=BELIEF_BAND)
         return ids, index, vcmap
 
-    def _team_features(self, team, ids, index, now):
-        features = np.zeros((len(ids), SLOT_DIM), dtype=np.float64)
-        times = np.full((len(ids), SLOT_DIM), -np.inf, dtype=np.float64)
+    def _slot_rows(self, team, index, vcmap):
+        """Fold this TEAM's observation buffer into stage-2/3 observation rows.
+
+        One row per observed V-cell, carrying the merged ``SLOT_FIELDS`` vector
+        and the latest timestamp seen in that cell.  This is ingest only -- the
+        forgetting (stage 3), the mask (stage 4) and the integration (stage 5)
+        are the canonical :mod:`featurize` functions, called by :meth:`beliefs`.
+        """
         item_latest = {}
         enemy_latest = {}
         for event in self.buffer.events(team):
@@ -199,6 +238,15 @@ class LiveBelief:
                 item_latest[event.subject] = event
             else:
                 enemy_latest[(event.subject, event.cell)] = event
+        slots = {}
+        stamps = {}
+
+        def _slot(cell):
+            if cell not in slots:
+                slots[cell] = np.zeros(SLOT_DIM, dtype=np.float64)
+                stamps[cell] = -np.inf
+            return slots[cell]
+
         by_cell_items = {}
         by_cell_enemies = {}
         for event in item_latest.values():
@@ -208,46 +256,26 @@ class LiveBelief:
         for cell, events in by_cell_items.items():
             if cell not in index:
                 continue
-            i = index[cell]
-            stamp = max(float(event.t) for event in events)
-            available = np.mean([event.kind == EventKind.ITEM_SPAWN for event in events])
+            slot = _slot(cell)
             phases = [max(0.0, float((event.payload or {}).get("value", 0.0)))
                       for event in events if event.kind == EventKind.ITEM_DESPAWN]
-            features[i, 0] = available
-            features[i, 1] = max(phases, default=0.0) / (10.0 + max(phases, default=0.0))
-            features[i, 2] = 1.0
-            features[i, 6] = 1.0
-            times[i, (0, 1, 2, 6)] = stamp
+            slot[0] = float(np.mean([event.kind == EventKind.ITEM_SPAWN for event in events]))
+            slot[1] = max(phases, default=0.0) / (10.0 + max(phases, default=0.0))
+            slot[2] = 1.0
+            stamps[cell] = max(stamps[cell], max(float(event.t) for event in events))
         for cell, events in by_cell_enemies.items():
             if cell not in index:
                 continue
-            i = index[cell]
-            stamp = max(float(event.t) for event in events)
+            slot = _slot(cell)
             threat = max(float((event.payload or {}).get("value", 0.0)) for event in events)
-            features[i, 2] = 1.0
-            features[i, 4] = np.tanh(max(0.0, threat) / 100.0)
-            features[i, 5] = 1.0 - np.exp(-len(events))
-            features[i, 6] = 1.0
-            times[i, (2, 4, 5, 6)] = stamp
-        prior = np.asarray((0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0), dtype=np.float64)
-        observed = np.isfinite(times)
-        age = np.maximum(0.0, float(now) - np.where(observed, times, float(now)))
-        rho = np.where(observed, np.exp(-age / self.decay), 0.0)
-        return rho * features + (1.0 - rho) * prior[None]
-
-    @staticmethod
-    def _project(features):
-        phi = np.asarray([
-            (1, 0, 0, 0, 0, 0, 0),
-            (0, 1, 0, 0, 0, 0, 0),
-            (0, 0, 0, 0, 1, 0, 0),
-            (0, 0, 0, 0, 0, 1, 0),
-            (0, 0, 0, 0, 0, 0, 1),
-            (0, 0, 1, 0, 0, 0, 0),
-            (1, -1, 0, 0, 0, 0, 0),
-            (0, 0, 0, 0, 1, 1, 0),
-        ], dtype=np.float64)
-        return features @ phi.T
+            slot[2] = 1.0
+            slot[4] = float(np.tanh(max(0.0, threat) / 100.0))
+            slot[5] = 1.0 - float(np.exp(-len(events)))
+            stamps[cell] = max(stamps[cell], max(float(event.t) for event in events))
+        return [
+            {"cell": int(vcmap.node_cell[index[cell]]), "time": stamps[cell], "slot": slot}
+            for cell, slot in slots.items()
+        ]
 
     def beliefs(self, rows, columns, now=None):
         wall = time.monotonic()
@@ -258,19 +286,28 @@ class LiveBelief:
         self.wall = wall
         players = self._update_cells(rows, columns)
         ids, index, vcmap = self._vcmap()
-        team_projection = {}
-        out = np.zeros((len(players), 8), dtype=np.float32)
+        out = np.zeros((len(players), BELIEF_RANK), dtype=np.float32)
+        by_team = {}
         for p, (_, team, cell, _) in enumerate(players):
-            if team not in team_projection:
-                team_projection[team] = self._project(
-                    self._team_features(team, ids, index, self.now)
-                )
-            weights = vcmap.spatial_mask(index[cell])
-            total = float(weights.sum())
-            if total <= 0:
-                weights[index[cell]] = 1.0
-                total = 1.0
-            out[p] = ((weights / total) @ team_projection[team]).astype(np.float32)
+            by_team.setdefault(team, []).append((p, int(vcmap.node_cell[index[cell]])))
+        for team, members in by_team.items():
+            betas = beliefs_for_bots(
+                self._slot_rows(team, index, vcmap), vcmap,
+                [cell for _, cell in members],
+                Phi=PHI, now=self.now, T=self.decay, f_prior=UNINFORMATIVE_PRIOR,
+            )
+            for (p, _), beta in zip(members, betas):
+                out[p] = beta.astype(np.float32)
+        # E3: the band is the target of the stage-2 construction, which sizes
+        # the horizon against EVERY cell, so that is the population it is
+        # checked on. The realized distribution over the cells bots actually
+        # occupy is reported alongside it -- it is a consequence, not the knob.
+        occupied = sorted({cell for members in by_team.values() for _, cell in members})
+        band = receptive_report(vcmap)
+        band["occupied"] = {
+            key: receptive_report(vcmap, cells=occupied)[key]
+            for key in ("n", "median", "min", "max")
+        }
         diagnostics = {
             "cells": len(ids),
             "edges": len(self.edges),
@@ -280,6 +317,7 @@ class LiveBelief:
             "invalid": self.invalid,
             "teams": len(self.buffer.teams()),
             "mean_norm": round(float(np.linalg.norm(out, axis=1).mean()), 6) if len(out) else 0.0,
+            "receptive": band,
         }
         return out, diagnostics
 

@@ -1,178 +1,273 @@
-"""j-space linear-probe measurement on REAL Game-2 server rows. No simulation."""
-from __future__ import annotations
-import json, os, sys
-import numpy as np
-sys.path.insert(0, os.path.expanduser("~/dox/mesh/xonotic/solver"))
-sys.path.insert(0, os.path.expanduser("~/dox/mesh/xonotic"))
-import mlx.core as mx, mlx.nn as nn
-from mlx.utils import tree_flatten
-from strat.qkv import QKVProjector, QKVShapes, team_pool
-from strat.relattn import RelationalEncoder, edge_features
-from strat.value import StrategyValue
-from strat.estimator import _hierarchy_rows, X_WIDTH, BELIEF_WIDTH, HIERARCHY_WIDTH
-from strat.game import team_nimbers, Cart
+"""j-space linear-probe measurement on REAL server rows. No simulation.
 
-RUNS = os.path.expanduser("~/dox/mesh/xonotic/solver/strat/runs")
-lines = [json.loads(l) for l in open(os.path.join(RUNS, "game2_train.jsonl")) if l.strip()]
-CKPT = os.path.join(RUNS, "policy_online_v3.npz")
+Asks one question: does the TRAINED IR carry linearly decodable game semantics
+that a random-initialized encoder and a random projection of the same inputs do
+not? Controls: random-init encoder (same architecture, untrained), a random
+projection of the raw inputs to the same width, the raw inputs themselves, and
+shuffled labels (which must fail, or the probes are lying).
+
+Provenance: one real cross-RDMA Game-2 run's telemetry, which logs the model's
+OWN input `x`, its belief `beta`, its instrument descriptors `z`, its hierarchy
+rows and its IR. Nothing here is simulated.
+"""
+from __future__ import annotations
+import argparse, json, os, sys
+import numpy as np
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--telemetry", required=True)
+ap.add_argument("--root", default=os.path.expanduser("~/dox/mesh/xonotic"))
+ap.add_argument("--epochs", default="1,4,12",
+                help="comma-separated training budgets; the IR is probed at each")
+ap.add_argument("--out", required=True)
+args = ap.parse_args()
+sys.path.insert(0, args.root)
+sys.path.insert(0, os.path.join(args.root, "payload", "tools"))
+
+import mlx.core as mx
+from solver.strat.estimator import StrategyEstimator, StrategyState, strategy_forward, IR_WIDTH
+from solver.strat.online import OnlineLearner, architecture_fingerprint
+from solver.strat.runtime import CartSnapshot, GameContext
+from solver.strat.game import team_nimbers, Cart
+
+L_LEVELS = 8
+lines = [json.loads(l) for l in open(args.telemetry) if l.strip()]
+# The responder logs the full model arrays only on sampled ticks; the probe
+# needs the model's own input, so unsampled lines are not usable here.
+_total = len(lines)
+lines = [l for l in lines if "x" in l.get("model", {})]
+if not lines:
+    raise SystemExit(f"{args.telemetry}: none of {_total} lines carry the model arrays "
+                     "(--model-sample-every produced no sampled ticks)")
+if len(lines) < _total:
+    print(f"[data] {len(lines)}/{_total} telemetry lines carry the model arrays", flush=True)
 KINDS = sorted({a["kind"] for r in lines for a in r["assignments"]})
 kix = {k: i for i, k in enumerate(KINDS)}
 
-records = []
-for li, r in enumerate(lines):
-    A = sorted(r["assignments"], key=lambda a: a["row"])
-    k = int(r["k"]); L = len(A)
-    if L == 0: continue
+
+def rebuild(line):
+    m, k = line["model"], int(line["k"])
+    A = sorted(line["assignments"], key=lambda a: a["row"])
     team_of = [min(max(int(a["team"]) - 1, 0), k - 1) for a in A]
-    teams = list(range(k))
-    depth = np.array([float(c["depth"]) for c in r["carts"]])
-    ctrl = np.array([int(c["ctrl"]) for c in r["carts"]])
-    control = np.where(ctrl > 0, ctrl - 1, -1)
-    Lf = 8.0
-    carts = [Cart(None if c < 0 else int(c), int(np.floor(d * Lf))) for d, c in zip(depth, control)]
-    nimbers = team_nimbers(carts, teams)
-    hier, wmask = _hierarchy_rows(carts, teams, team_of, L)
-    winner = int(np.argmax(hier[:, 5])) if hier[:, 5].any() else None
-    winner_team = team_of[winner] if winner is not None else None
-    sizes = np.bincount(np.asarray(team_of), minlength=k)
-    x = np.zeros((L, X_WIDTH), dtype=np.float32)
-    for p, t in enumerate(team_of):
-        own_d = [depth[c] * Lf for c in range(len(carts)) if control[c] == t]
-        riv = [float(v) for o, v in nimbers.items() if o != t]
-        x[p] = (max(own_d, default=0.0)/Lf, (sum(own_d)/max(1,len(own_d)))/Lf,
-                0.0,                                  # banked: NOT LOGGED
-                float(t == winner_team),
-                float(nimbers.get(t,0))/Lf, max(riv, default=0.0)/Lf,
-                float(sizes[t])/max(1,L), 1.0/max(1,k),
-                0,0,0,0,0,0,0,0)                      # x[8:16] health/armor/ammo/speed/power/tss/alive/control: NOT LOGGED
-    beta = np.zeros((L, BELIEF_WIDTH), dtype=np.float32)
-    E = edge_features(team_of, hier, wmask)
-    succ = {int(t): float(v) for t, v in r.get("SUCC", [])}
-    gv = r.get("game_value"); gv = float(gv) if isinstance(gv,(int,float)) else np.nan
-    meta = dict(
-        line=np.full(L, li), team=np.asarray(team_of),
-        own_nimber=np.array([float(nimbers.get(t,0)) for t in team_of]),
-        max_rival=np.array([max([float(nimbers[o]) for o in teams if o!=t], default=0.0) for t in team_of]),
-        hier_margin=hier[:,3].astype(float), is_pw=hier[:,5].astype(float),
-        pw_team=np.full(L, -1 if winner_team is None else winner_team),
-        cart_depth_total=np.full(L, float(depth.sum())), cart0_depth=np.full(L, float(depth[0])),
-        n_controlled=np.full(L, float((control>=0).sum())),
-        succ_denial=np.array([succ.get(t+1, succ.get(t,0.0)) for t in team_of]),
-        kind=np.array([kix[a["kind"]] for a in A]),
-        gain=np.array([float(a["gain"]) for a in A]), lane=np.array([float(a["lane"]) for a in A]),
-        logp=np.array([float(a["target_logp"]) for a in A]), game_value=np.full(L, gv),
+    hier = np.asarray(m["hierarchy"], dtype=np.float32)
+    score = np.asarray(m["score"], dtype=np.float32)
+    x = np.asarray(m["x"], dtype=np.float32)
+    z = np.asarray(m["z"], dtype=np.float32)
+    depth = np.array([float(c["depth"]) for c in line["carts"]])
+    ctrl = np.array([int(c["ctrl"]) for c in line["carts"]], dtype=np.int64)
+    control = np.where(ctrl >= 1, ctrl - 1, -1)
+    snap = CartSnapshot(pos=np.clip(depth, 0, 1) * L_LEVELS, control=control,
+                        banked=np.zeros(k), levels=L_LEVELS)
+    ctx = GameContext(tuple(range(k)), tuple(team_of), L_LEVELS)
+    state = StrategyState(
+        x, np.asarray(m["beta"], dtype=np.float32), z,
+        # E10 GAP: per-(player, instrument) relation rows are not in telemetry;
+        # they feed the mixing head only, never the IR probed here.
+        np.zeros((x.shape[0], z.shape[0], 16), dtype=np.float32),
+        hier, hier[:, 5] > 0.5, np.asarray(m["w"], dtype=np.float32),
+        None, ctx.teams, ctx.team_of, score > -1e8,
     )
-    records.append((x, beta, E, team_of, k, hier, meta))
-print("[data] lines=%d rows=%d kinds=%s" % (len(records), sum(len(m['team']) for *_,m in records), KINDS))
+    carts = [Cart(None if c < 0 else int(c), int(np.floor(d))) for d, c in zip(snap.pos, control)]
+    nim = team_nimbers(carts, ctx.teams)
+    succ = {int(t): float(v) for t, v in line.get("SUCC", [])}
+    n = len(team_of)
+    weapons = x[:, 24:48]
+    wvar = weapons.var(0)
+    wbit = int(np.argmax(wvar))
+    meta = dict(
+        line=np.full(n, line["resp_id"]), team=np.asarray(team_of, float),
+        own_nimber=np.array([float(nim.get(t, 0)) for t in team_of]),
+        max_rival=np.array([max([float(nim[o]) for o in ctx.teams if o != t], default=0.0) for t in team_of]),
+        hier_margin=hier[:, 3].astype(float), is_pw=hier[:, 5].astype(float),
+        pw_team=np.full(n, float(np.argmax(hier[:, 5])) if hier[:, 5].any() else -1.0),
+        cart_depth_total=np.full(n, float(depth.sum())), cart0_depth=np.full(n, float(depth[0])),
+        n_controlled=np.full(n, float((control >= 0).sum())),
+        succ_denial=np.array([succ.get(t + 1, succ.get(t, 0.0)) for t in team_of]),
+        kind=np.array([float(kix[a["kind"]]) for a in A]),
+        gain=np.array([float(a["gain"]) for a in A]),
+        lane=np.array([float(a["lane"]) for a in A]),
+        logp=np.array([float(a["target_logp"]) for a in A]),
+        # --- E9 targets: the per-player resource state that used to be zeroed ---
+        health=x[:, 8].astype(float), armor=x[:, 9].astype(float), ammo=x[:, 10].astype(float),
+        speed=np.linalg.norm(x[:, 14:17], axis=1).astype(float),
+        dist_to_cart=x[:, 22].astype(float),
+        n_weapons=weapons.sum(1).astype(float),
+        weapon_bit=weapons[:, wbit].astype(float),
+    )
+    actions = np.asarray([int(a["action"]) for a in A], dtype=np.int32)
+    blogp = np.asarray([float(a["behavior_logp"]) for a in A], dtype=np.float32)
+    return dict(state=state, context=ctx, snapshot=snap, actions=actions,
+                behavior_logp=blogp, meta=meta, k=k, l=n)
 
-D = 16
-def build(seed, load=False):
-    mx.random.seed(seed)
-    sh = QKVShapes(k_teams=5, j_instruments=3, l_players=12, d_x=X_WIDTH, d_beta=BELIEF_WIDTH,
-                   d_z=16, d=D, d_v=16) if len(QKVShapes.__dataclass_fields__)>7 else None
-    if sh is None:
-        sh = QKVShapes(5, 3, 12, X_WIDTH, BELIEF_WIDTH, 16, D)
-    b = nn.Module(); b.qkv = QKVProjector(sh, seed=seed); b.encoder = RelationalEncoder(D)
-    b.value = StrategyValue(2*D+4+HIERARCHY_WIDTH+16)
-    info = {"matched": [], "mismatched": []}
-    if load:
-        data = np.load(CKPT, allow_pickle=False)
-        flat = dict(tree_flatten(b.parameters()))
-        w = []
-        for key in data.files:
-            if key.startswith("__"): continue
-            if key in flat and tuple(flat[key].shape) == data[key].shape:
-                info["matched"].append(key); w.append((key, mx.array(data[key])))
-            else:
-                info["mismatched"].append([key, list(data[key].shape), list(flat[key].shape) if key in flat else None])
-        b.load_weights(w, strict=False)
-    return b, info
 
-def feats(b):
-    Rp_all, VR_all = [], []
-    for x, beta, E, team_of, k, hier, _ in records:
-        R0 = b.qkv.query(mx.array(x), mx.array(beta))
-        Rp = b.encoder(R0, mx.array(E))
-        tc = team_pool(Rp, list(team_of), k)
-        ti = mx.array(np.asarray(team_of, dtype=np.int32))
-        Rp_np = np.asarray(Rp, dtype=np.float64)
-        Rp_all.append(Rp_np)
-        VR_all.append(np.c_[Rp_np, np.asarray(tc, dtype=np.float64)[np.asarray(team_of)], hier.astype(np.float64)])
-    return np.concatenate(Rp_all,0), np.concatenate(VR_all,0)
+recs = [rebuild(l) for l in lines]
+META = {key: np.concatenate([r["meta"][key] for r in recs]) for key in recs[0]["meta"]}
+RAW = np.concatenate([np.c_[r["state"].x, r["state"].beta] for r in recs], 0).astype(np.float64)
+print(f"[data] lines={len(recs)} rows={RAW.shape[0]} raw_dims={RAW.shape[1]} kinds={KINDS}")
 
-META = {kk: np.concatenate([m[kk] for *_, m in records]) for kk in records[0][6]}
-RAW = np.concatenate([np.c_[x, b] for x, b, *_ in records], 0).astype(np.float64)
+
+def new_estimator(seed):
+    return StrategyEstimator.for_runtime(recs[0]["k"], recs[0]["l"], seed=seed)
+
+
+def ir_of(est):
+    return np.concatenate(
+        [np.asarray(strategy_forward(est, r["state"], r["state"].w)["ir"], dtype=np.float64)
+         for r in recs], 0)
+
+
+def train(est, epochs, learner=None):
+    """Drive the SHIPPED loop (observe/flush + replay ring), not a bespoke one."""
+    learner = learner or OnlineLearner(est, checkpoint=None, learning_rate=3e-4)
+    history = []
+    for epoch in range(epochs):
+        previous = None
+        for cur in recs:
+            m_cur = cur["state"].z.shape[0]
+            if previous is not None:
+                seg_break = previous["m"] != m_cur
+                if seg_break:
+                    learner.flush(previous["state"], previous["snapshot"], terminal=True)
+                previous["w_out"] = cur["state"].w
+                got = learner.observe(previous, cur["state"], cur["snapshot"],
+                                      terminal=seg_break)
+                if got:
+                    history.append(got["loss"])
+            previous = dict(context=cur["context"], state=cur["state"],
+                            snapshot=cur["snapshot"], cartstate=cur["snapshot"],
+                            w_in=cur["state"].w, w_out=cur["state"].w,
+                            actions=cur["actions"], behavior_logp=cur["behavior_logp"],
+                            m=m_cur)
+        got = learner.flush(previous["state"], previous["snapshot"], terminal=True)
+        if got:
+            history.append(got["loss"])
+        print(f"   epoch {epoch}: updates={learner.updates} steps/transition="
+              f"{learner.gradient_steps / max(1, learner.transitions):.2f} "
+              f"replay={len(learner.replay)} loss={np.mean(history[-len(recs):]):.5f}", flush=True)
+    return learner, history
+
 
 rng = np.random.default_rng(0)
 lids = np.unique(META["line"]); perm = rng.permutation(lids)
-trs = set(perm[:int(0.6*len(perm))].tolist())
+trs = set(perm[:int(0.6 * len(perm))].tolist())
 tr = np.array([l in trs for l in META["line"]]); te = ~tr
 
+
 def r2(F, y, lam=1e-3):
-    ok = np.isfinite(y); a, bm = tr & ok, te & ok
-    if a.sum()<10 or bm.sum()<10 or np.std(y[bm])<1e-9: return None
-    A=np.c_[F[a],np.ones(a.sum())]; B=np.c_[F[bm],np.ones(bm.sum())]
-    mu,sd=A[:,:-1].mean(0),A[:,:-1].std(0)+1e-8
-    A[:,:-1]=(A[:,:-1]-mu)/sd; B[:,:-1]=(B[:,:-1]-mu)/sd
-    w=np.linalg.solve(A.T@A+lam*np.eye(A.shape[1]),A.T@y[a])
-    return float(round(1.0-np.sum((y[bm]-B@w)**2)/np.sum((y[bm]-y[bm].mean())**2),4))
+    ok = np.isfinite(y); a, b = tr & ok, te & ok
+    if a.sum() < 10 or b.sum() < 10 or np.std(y[b]) < 1e-9: return None
+    A = np.c_[F[a], np.ones(a.sum())]; B = np.c_[F[b], np.ones(b.sum())]
+    mu, sd = A[:, :-1].mean(0), A[:, :-1].std(0)
+    sd = np.where(sd < 1e-8, 1.0, sd)   # a train-constant column carries no signal;
+    A[:, :-1] = (A[:, :-1] - mu) / sd   # scaling it by 1/eps only manufactures inf
+    B[:, :-1] = (B[:, :-1] - mu) / sd
+    w = np.linalg.solve(A.T @ A + lam * np.eye(A.shape[1]), A.T @ y[a])
+    return float(round(1.0 - np.sum((y[b] - B @ w) ** 2) / np.sum((y[b] - y[b].mean()) ** 2), 4))
+
 
 def acc(F, y, lam=1e-3):
-    cls=np.unique(y[tr])
-    if len(cls)<2: return None
-    A=np.c_[F[tr],np.ones(tr.sum())]; B=np.c_[F[te],np.ones(te.sum())]
-    mu,sd=A[:,:-1].mean(0),A[:,:-1].std(0)+1e-8
-    A[:,:-1]=(A[:,:-1]-mu)/sd; B[:,:-1]=(B[:,:-1]-mu)/sd
-    Y=(y[tr][:,None]==cls[None,:]).astype(float)
-    W=np.linalg.solve(A.T@A+lam*np.eye(A.shape[1]),A.T@Y)
-    pred=cls[np.argmax(B@W,1)]
-    c=np.array([(y[te]==v).sum() for v in np.unique(y[te])],float)
-    return {"acc":round(float(np.mean(pred==y[te])),4),"majority":round(float(c.max()/c.sum()),4),"n_classes":int(len(cls))}
+    y = y.astype(int)
+    cls = np.unique(y[tr])
+    if len(cls) < 2: return None
+    A = np.c_[F[tr], np.ones(tr.sum())]; B = np.c_[F[te], np.ones(te.sum())]
+    mu, sd = A[:, :-1].mean(0), A[:, :-1].std(0)
+    sd = np.where(sd < 1e-8, 1.0, sd)
+    A[:, :-1] = (A[:, :-1] - mu) / sd
+    B[:, :-1] = (B[:, :-1] - mu) / sd
+    Y = (y[tr][:, None] == cls[None, :]).astype(float)
+    W = np.linalg.solve(A.T @ A + lam * np.eye(A.shape[1]), A.T @ Y)
+    pred = cls[np.argmax(B @ W, 1)]
+    c = np.array([(y[te] == v).sum() for v in np.unique(y[te])], float)
+    return {"acc": round(float(np.mean(pred == y[te])), 4),
+            "majority": round(float(c.max() / c.sum()), 4), "n_classes": int(len(cls))}
 
-REG=["own_nimber","max_rival","hier_margin","cart_depth_total","cart0_depth","n_controlled","succ_denial","gain","lane","logp","game_value"]
-CLS=["is_pw","kind","pw_team","team"]
+
+REG = ["own_nimber", "max_rival", "hier_margin", "cart_depth_total", "cart0_depth",
+       "n_controlled", "succ_denial", "gain", "lane", "logp",
+       "health", "armor", "ammo", "speed", "dist_to_cart", "n_weapons"]
+CLS = ["is_pw", "kind", "pw_team", "team", "weapon_bit"]
+
+
 def score(F, shuffled=False):
-    out={}
+    out = {}
     for t in REG:
-        y=META[t].astype(float).copy()
+        y = META[t].astype(float).copy()
         if shuffled: rng.shuffle(y)
-        out[t]={"r2":r2(F,y)}
+        out[t] = {"r2": r2(F, y)}
     for t in CLS:
-        y=META[t].astype(int).copy()
+        y = META[t].astype(float).copy()
         if shuffled: rng.shuffle(y)
-        out[t]=acc(F,y)
+        out[t] = acc(F, y)
     return out
 
-b_ck, info = build(0, load=True)
-b_r0, _ = build(0); b_r1, _ = build(7)
-Rp_ck, VR_ck = feats(b_ck); Rp_r0, VR_r0 = feats(b_r0); Rp_r1, VR_r1 = feats(b_r1)
-P16 = RAW @ (rng.standard_normal((RAW.shape[1],16))/np.sqrt(RAW.shape[1]))
-P40 = RAW @ (rng.standard_normal((RAW.shape[1],40))/np.sqrt(RAW.shape[1]))
 
-def rank(M): return int(np.linalg.matrix_rank(M-M.mean(0), tol=1e-6))
+budgets = [int(e) for e in str(args.epochs).split(",") if e.strip()]
+print(f"[train] replaying the REAL transitions through the shipped loop; budgets={budgets}",
+      flush=True)
+est_t = new_estimator(0)
+learner, history = None, []
+sweep = {}
+done = 0
+for budget in budgets:
+    learner, extra = train(est_t, budget - done, learner=learner)
+    history += extra
+    done = budget
+    sweep[f"IR_trained_{budget}ep"] = {
+        "updates": learner.updates,
+        "steps_per_transition": round(learner.gradient_steps / max(1, learner.transitions), 3),
+        "loss": round(float(np.mean(history[-len(recs):])), 5),
+        "ir": ir_of(est_t),
+    }
+IR_T = sweep[f"IR_trained_{budgets[-1]}ep"]["ir"]
+IR_R = ir_of(new_estimator(0))
+IR_R7 = ir_of(new_estimator(7))
+P = RAW @ (rng.standard_normal((RAW.shape[1], IR_WIDTH)) / np.sqrt(RAW.shape[1]))
+
+
+def rank(M): return int(np.linalg.matrix_rank(M - M.mean(0), tol=1e-6))
+
+
 out = {
- "provenance": {"log":"runs/game2_train.jsonl","n_lines":len(lines),"n_player_rows":int(len(META["team"])),
-   "checkpoint":"runs/policy_online_v3.npz","simulation_used":False,
-   "code_tree":"mesh-mini ~/dox/mesh (checkpoint-era arch: relattn RelationalEncoder, X_WIDTH=16)",
-   "split":"by line, 60/40, seed 0", "train_rows":int(tr.sum()), "test_rows":int(te.sum())},
- "ir_width": {"row_width_d_trained": D, "value_head_input_width": 2*D+4+HIERARCHY_WIDTH+16,
-   "value_row_dims_probed_here": VR_ck.shape[1],
-   "omitted_value_row_dims": ["stats(4)","behavior_mix(16) - both need instrument descriptors z, NOT LOGGED"],
-   "spec_requirement": ">=128d", "local_rewrite_IR_WIDTH": 128, "local_rewrite_has_checkpoint": False},
- "checkpoint_compat": {"matched": info["matched"], "mismatched": info["mismatched"]},
- "unavailable_targets": ["health","armor","ammo","weapon bitmask / rocket-launcher held","position","velocity",
-   "distance-to-nearest-cart","per-player belief beta","instrument descriptors z","player-instrument relation rows","banked depth"],
- "zeroed_input_dims": "x[2] (banked) and x[8:16] (health,armor,ammo,speed,power,tss,alive,control) and beta[0:8] are zero - absent from the real log",
- "ranks": {"Rp_trained":rank(Rp_ck),"Rp_random":rank(Rp_r0),"value_rows_trained":rank(VR_ck),"raw_inputs":rank(RAW),"n_rows":int(RAW.shape[0])},
- "probes": {
-   "Rp_trained_ckpt": score(Rp_ck), "Rp_random_init_s0": score(Rp_r0), "Rp_random_init_s7": score(Rp_r1),
-   "value_rows_trained_ckpt": score(VR_ck), "value_rows_random_init": score(VR_r0),
-   "control_randproj_16d": score(P16), "control_randproj_40d": score(P40),
-   "control_shuffled_labels_Rp_trained": score(Rp_ck, shuffled=True),
-   "reference_raw_inputs_24d": score(RAW),
- },
+    "provenance": {
+        "telemetry": os.path.basename(args.telemetry), "n_lines": len(recs),
+        "n_player_rows": int(RAW.shape[0]), "simulation_used": False,
+        "environment": sorted({l.get("environment") for l in lines}),
+        "training": f"replay of the real logged transitions through the shipped "
+                    f"observe/flush loop; budgets={budgets} epochs, "
+                    f"{learner.updates} updates at the deepest",
+        "architecture": architecture_fingerprint(learner.bundle),
+        "replay": {"size": len(learner.replay), "capacity": learner.replay.capacity,
+                   "mb": round(learner.replay.nbytes / (1 << 20), 2),
+                   "transitions": learner.transitions,
+                   "gradient_steps": learner.gradient_steps,
+                   "steps_per_transition": round(
+                       learner.gradient_steps / max(1, learner.transitions), 3)},
+        "split": "by telemetry line, 60/40, seed 0",
+        "train_rows": int(tr.sum()), "test_rows": int(te.sum()),
+    },
+    "ir_width": {"d": IR_WIDTH, "spec_requirement": ">=128d"},
+    "ranks": {"raw_inputs": rank(RAW), "raw_dims": int(RAW.shape[1]),
+              "x_only": rank(RAW[:, :48]), "IR_trained": rank(IR_T),
+              "IR_random_init": rank(IR_R), "n_rows": int(RAW.shape[0])},
+    "ir_scale": {"trained_absmax": round(float(np.abs(IR_T).max()), 4),
+                 "trained_std": round(float(IR_T.std()), 4),
+                 "random_init_absmax": round(float(np.abs(IR_R).max()), 4)},
+    "loss": {"first": round(float(np.mean(history[:len(recs)])), 5),
+             "last": round(float(np.mean(history[-len(recs):])), 5)},
+    "training_budget_sweep": {
+        name: {"updates": v["updates"], "steps_per_transition": v["steps_per_transition"],
+               "loss": v["loss"], "probes": score(v["ir"])}
+        for name, v in sweep.items()
+    },
+    "probes": {
+        "IR_trained": score(IR_T),
+        "IR_random_init_s0": score(IR_R),
+        "IR_random_init_s7": score(IR_R7),
+        "control_randproj_128d": score(P),
+        "control_shuffled_labels_IR_trained": score(IR_T, shuffled=True),
+        "reference_raw_inputs": score(RAW),
+    },
 }
-dest=os.path.join(RUNS,"jspace_probe.json")
-json.dump(out, open(dest,"w"), indent=2)
-print(json.dumps(out, indent=2))
-print("WROTE", dest)
+json.dump(out, open(args.out, "w"), indent=2)
+print(json.dumps({k: out[k] for k in ("provenance", "ranks", "loss")}, indent=2))
+print("WROTE", args.out)
