@@ -83,6 +83,10 @@ MASK_BOTSOLID = MASK_PLAYERSOLID | CONTENTS_MONSTERCLIP | CONTENTS_BOTCLIP
 PL_MIN = (-16.0, -16.0, -24.0)
 PL_MAX = (16.0, 16.0, 45.0)
 # the payload cart hull that mkentfile lays track for
+# Must equal PLC_CART_MIN/PLC_CART_MAX in qcsrc/.../payload/payload.qh. The engine
+# spawns that hull; validating clearance for any other one certifies a cart that
+# does not exist. These disagreed (z=56 here, z=40 there) until the QC gained a
+# single constant.
 CART_MIN = (-32.0, -32.0, -24.0)
 CART_MAX = (32.0, 32.0, 56.0)
 
