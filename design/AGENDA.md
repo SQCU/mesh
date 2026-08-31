@@ -157,12 +157,13 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] H3 Cross-team focus/attrition matrix — is damage concentrated on the key rival? (—)
 - [ ] H4 Multipolar dynamics visualizer (tug trajectories, PW timeline, focus matrix) (—)
 - [~] H5 Web view of the run (three.js phase space + live mesh table) (R16)
-- [ ] H6 **A supervised demonstration server+client pair that outlives any agent** (ZEROED, R26)
+- [~] H6 **A supervised demonstration server+client pair that outlives any agent** — client supervised; server still agent-owned (R27)
 
 ### I. Method / process laws
 - [x] I1 SPEC is a verbatim user-quote index under the provenance law (R17)
 - [x] I2 AGENDA checklist + append-only Record (this file) (R17)
 - [x] I3 No unit tests; evidence is artifacts/proofs/real runs (R13)
+- [ ] I10 **uv manages every Python environment; no system-python venvs, no dependency excuses** (R27)
 - [x] I4 No stubs, no pseudodocumentation claiming false completeness (R10, R12)
 - [~] I5 No repeated inlining — one canonical definition per algorithm (R10, R11)
 - [~] I6 No fake re-simulation anywhere (D7 outstanding) (R13)
@@ -792,3 +793,38 @@ throwaway) is structurally incompatible with a demo that outlives the agent. Res
 port churn with no owner — 26012 → 26031 → 26032 → 26042 — and a client that died and
 was never restarted. Recovery route: the demo pair must be a supervised service, and
 the client attach must be part of bring-up rather than a printed instruction.
+
+### R27 — 2026-08-31 — I10 opened; H6 → partial (uv, and the client is supervised)
+`E:run` Two corrections, both mine.
+
+**I10 — I fixed code to accommodate a broken environment.** I reported that
+`game_value.py`'s `zip(..., strict=True)` (Python 3.10+) was a blocker because "the
+mini has exactly one interpreter, Python 3.9.6", and removed the `strict=True`. That
+was an excuse based on a dependency. The owner's standing rule is uv for all Python
+environment management, and **uv was already installed on the mini** at
+`~/.local/bin/uv` (v0.12.6) — it simply is not on the non-interactive ssh PATH, and
+`~/.venv-mesh` had been built on Apple CommandLineTools Python 3.9.6:
+
+    home = /Library/Developer/CommandLineTools/usr/bin
+    version = 3.9.6
+
+Fixed properly: `uv venv --python 3.12 ~/.venv-mesh-uv` + `uv pip install mlx numpy`
+→ **Python 3.12.14, mlx 0.32.2, numpy 2.5.2**, GPU matmul verified, `zip(strict=)`
+available. Every launch path in `joracle/demo.sh` switched off the system-python venv
+onto the uv env. The rule going forward: an environment limitation is a thing to fix,
+never a constraint to code around.
+
+**H6 → `[~]` — the client is now supervised.** Observed live: the client connected,
+joined YELLOW, played (frag messages in its log), then `Connection timed out` — because
+the server pid changed underneath it (25358 → 78386). Per the owner's rule a server
+restart is *correct*; a client left unattached across one is the defect.
+`joracle/client-keep.sh` now relaunches the client whenever its process is gone or its
+log shows a timeout/disconnect, truncating the log per launch so a stale match cannot
+re-fire, and appending every event with its reason to `/tmp/xonclient-keep.events`:
+
+    2026-08-31T03:48:53Z supervisor_start addr=127.0.0.1:26042
+    2026-08-31T03:48:53Z client_absent reason=process_gone -> relaunch
+    2026-08-31T03:48:53Z client_start pid=6220 addr=127.0.0.1:26042
+
+Still `[~]`: the *server* remains owned by whichever agent brought it up, so the pair
+outlives a client crash but not the agent. The server half needs the same treatment.
