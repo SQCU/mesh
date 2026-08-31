@@ -160,3 +160,44 @@ bug with three faces, and its cause is that `mapfuse` wrote BSP lumps directly a
 therefore had to synthesize the tree, VIS and lightmaps itself — faking the lightmap
 grey and shipping empty visdata — compounded by an earlier deliberate single-cluster
 PVS collapse of mine, introduced to stop `sv_cullentities` dropping bots.
+
+## The traversing-object niche (owner, this session)
+
+> so this world-traversing object which is paired with some supermassive skybox level
+> object and visual effect has a niche which is missing something like it...?
+
+It does, and the missing occupant is **the payload cart**. Verified in code, the cart is
+not merely un-modelled — it is *borrowed*:
+
+    mkentfile.py:881  visible = [m for m in models if not mclass[m].startswith('trigger_')] or models or ['*1']
+    mkentfile.py:910  '"model" "%s"' % visible[c % len(visible)]
+
+Each cart is assigned a **random brush model scavenged from the source map** — whatever
+`func_door` / `func_wall` / platform happened to exist, indexed by cart number. Hence no
+consistent silhouette, no size contract (a big door makes a big cart), the `view_ofs =
+mins` offset that made every nearest-cart column wrong, and no team colour: control
+state currently appears only on a HUD sprite and an untextured additive ribbon
+(`cl_payload.qc:38`, `R_BeginPolygon("", DRAWFLAG_ADDITIVE, false)`).
+
+The niche both objects occupy: *traverses the world, must be legible from anywhere, has
+a skybox-scale counterpart, changes the world's appearance as it passes.* Consequences
+now folded into the render brief:
+
+- **Cart as a procedural traversing body**, tinted by controlling team, emissive keyed
+  to control state (grey uncontrolled, team colour under plurality, streaked when
+  contested), with a consistent bounding size.
+- **Ink is cart territory.** Advancing under control lays that team's ink; contested
+  lays muddied colour; being driven home has the deposited ink overpainted by the team
+  pushing it back. This writes depth / control / contest / reversal onto the world
+  surface, answering the standing requirement *"how should cart paths be diegetically
+  communicated?"* without a HUD overlay — the world becomes the readout. The neutral
+  match-long rubberier/wetter/off-color drift composes with it rather than competing
+  for the same channel.
+- **Skybox counterpart solves megamap legibility.** With a ~152,281-unit walking
+  diameter you cannot see across the world; a supermassive per-cart sky presence
+  (which cart, where, whose colour, how deep) is what makes it comprehensible, and it
+  is the same skybox-scale rendering the artifact already requires.
+
+Cart state to read rather than re-derive: `plc_s`/`plc_length`, `plc_ctrl`, per-team
+cylinder presence — all live server-side and already networked in packed form
+(`STAT(PAYLOAD_*)`, RADARLINK `clientcolors`).
