@@ -136,14 +136,14 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] F6 Affordance QUALITY — does the policy actually aim `hunt` at the winningest rival? (—)
 
 ### G. World / maps
-- [ ] G1 Procedural multi-map fusion produces megamaps (ZEROED — client render shows void, R22)
+- [x] G1 Procedural multi-map fusion produces megamaps — 29 tiles boot, void audit PASS (R28)
 - [x] G2 Megamaps actually USED by the training/live server (R20)
 - [x] G3 Bots traverse long distances between fused regions — now cart↔cart, not just spawn→cart (R25)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
-- [ ] G11 Procedural geometry exists at all (owner: "total absence") (R22)
-- [ ] G12 Connectivity solvers + metrics over connectivity AND navmesh solutions (R22)
-- [ ] G13 Viewers/visualizers for connectivity + navmesh that would CATCH a broken fusion offline (R22)
-- [ ] G14 **Placement is an optimized place-and-route (QAP + routing), not index-order grid + length refusal** (ZEROED, R26)
+- [x] G11 Procedural geometry — 56 doorways CUT into stock map brushwork (R28)
+- [x] G12 Connectivity solvers + metrics over connectivity and navmesh solutions (R28)
+- [x] G13 Viewers that CATCH a broken fusion offline — per-doorway renders + void audit (R28)
+- [x] G14 **Placement is real: suitability selection + bridge/stub taxonomy + 3D bin pack + geometry edit; refusal deleted** (R28)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
 - [~] G6 Entity budget at scale — no invisible bots at high player counts; waypoint-sprite spam REGRESSED in live client (R22)
 - [~] G7 Diegetic communication of cart paths/state — duplicate "CART 2" labels observed (R22)
@@ -828,3 +828,66 @@ re-fire, and appending every event with its reason to `/tmp/xonclient-keep.event
 
 Still `[~]`: the *server* remains owned by whichever agent brought it up, so the pair
 outlives a client crash but not the agent. The server half needs the same treatment.
+
+### R28 — 2026-08-31 — G1, G11, G12, G13, G14 → full (the geometry edit)
+`E:run` Commit `f1cd522`, built to the owner's re-statement of the constraint:
+
+> pick a list of maps that seem well suited to having geometry edited to make them
+> diegetically connect to other neighboring maps by litearlly changing their geometry
+> to have doors, galleries, passageways, etc., which either continue or newly appear
+> in existing maps in plausible spots. then solve a 3d bin packing problem, evne
+> poorly, where 'bridge maps' (more than 3 connection sites) are joined by procedural
+> geometry to 'stub maps' (fewer than 3, more than 1 connection sites).
+
+**Selection + taxonomy.** A ray marches from each cardinal-extreme node of a map's
+largest bot-reachable stand-on-able waypoint component through the carver's own
+exact-plane solid predicate. A site requires first solid 24–640u out, 8–384u thick
+(a wall *panel*, not bedrock), nothing within 224u behind, door-sized standing room in
+front, open space beyond — classed `continue` (narrow standing room / nav dead-end)
+or `newcut` (broad exterior-reading wall, gets an architrave). It rejects honestly:
+`dance`'s shell is patch-mesh curvature with no brush between x=1872 and x=3072, so it
+yields no ray hits. Over all 29 navigable stock maps: **25 BRIDGE (>3 sites), 4 STUB
+(2–3), 1 rejected** (`nexballarena`, 1 site).
+
+**The geometry edit — the deliverable.** 56 doorways cut: **46 continuing an existing
+passage, 10 new openings on exterior walls**; 444 source brushes split into 825 convex
+remainders (the wall stays where it was, as thick as it was, minus a door); 417 wall
+surfaces re-cut into 479 clipped surfaces carrying their own texture; reveal surfaced,
+threshold laid, jamb/header architrave into the outer face; waypoints chained through.
+Wall thickness cut through: min 8 / median 64 / max 256.
+
+**Pack, kept simple as instructed.** Shelf pack with real Z levels (4×4×2 lattice, 29
+cells for 29 tiles); cells ranked by lattice-neighbour count and tiles by site count so
+bridges land in high-adjacency cells and stubs in corners; tiles anchored on their
+WALKABLE centre and median floor, not their bbox.
+
+**Refusal deleted.** `grep -c MAXCORLEN mapfuse.py` → 0. Against the 39-tile
+cap-clipped build: cart-navigable joins 26/40 → **28/36**; non-cart joins per tile
+max 3 (VIOLATED on 4 edges) → **max 1 (HELD)**; edges dropped/refused **8 → 0**;
+corridor median 4791 → **3295** (31% shorter) with the long tail now visible rather
+than capped. Placement door-gap objective 190995 → 117234 (38.6%).
+
+**Evidence.** Per-doorway camera pairs (inside looking at the new opening in the host
+map's own wall; outside looking back at the facade): **42/42 frames, void audit PASS** —
+`p04_erbium_continue_in.png`, `p11_geoplanetary_newcut_in.png`,
+`p01_silentsiege_continue_out.png` read as architecture. Real boot: stock
+`darkplaces-dedicated` on port 26071, 29 tiles / 166 MB BSP, 3 carts pathed
+(485/383/425 nodes), 8 bots over 5 teams, live gameplay, **zero runaway errors**;
+flood-fill 29/29, 1 component, hop-diameter 9, walking diameter 86823u.
+
+**Three defects found by watching RSS and by booting.** (1) `Src.__init__` called
+`mkentfile.Bsp(data)` and never used the result; that helper grids brush AABBs with an
+unguarded `range()`, so one brush bounded only by oblique planes (stock `catharsis` has
+twelve) becomes a ~1e15-iteration loop — the loader ate **75 GB RSS** and never
+returned. Call deleted; catharsis loads in 0.8 s / 0.7 GB. (2) The same defect from the
+entity side (**33 GB**): `axialize()` re-emits the 18 offending stock brushes inside
+axial clamp planes at hull+4096 — shape untouched, AABB finite; peak build RSS back to
+~6.8 GB. (3) A **second runaway ceiling** visible only by booting: stock
+`waypoint_loadall → waypoint_get → boxesoverlap` is O(n²) per frame and at 900
+waypoints climbs into `navigation_markroutes_nearestwaypoints`. A waypoint budget
+(`--wpcap`, default 600) shaped like the proven entity budget fixes it, with the link
+graph **contracted onto the survivors** so reachability is preserved (flood-fill 100%).
+
+Honest remainder: render evidence is at 8 tiles (the 29-tile world is proven by the
+real boot); four `relocate_spawnpoint … could not get out of solid` object errors
+remain, non-fatal.
