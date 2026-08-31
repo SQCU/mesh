@@ -640,8 +640,11 @@ void havocbot_role_payload(entity this)
 		havocbot_goalrating_items(this, 10000, this.origin, 8000);
 		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);
 		navigation_goalrating_end(this);
-
+		this.plc_str_goal_entity = navigation_bestgoal;
+		this.plc_str_goal_target = payload_strategy_entity_target(navigation_bestgoal);
 		navigation_goalrating_timeout_set(this);
+		if(this.plc_str_commit > 0)
+			navigation_goalrating_timeout_extend_if_needed(this, this.plc_str_commit);
 	}
 }
 

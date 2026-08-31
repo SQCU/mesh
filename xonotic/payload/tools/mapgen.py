@@ -430,17 +430,22 @@ if __name__ == '__main__':
     probs = check_bsp(open(bsp, 'rb').read())
     print('parse-back: %s' % ('OK' if not probs else 'PROBLEMS %s' % probs[:8]))
     g.write_nav(outdir, mapname)
-    B = M.Bsp(open(bsp, 'rb').read())
-    tb = M.trigger_boxes(open(bsp, 'rb').read())
+    # The generated tile's own waypoints must stand in its COMPUTED free volume.
+    # `mkentfile.Bsp` is deleted; this is the one definition of solidity.
+    import negspace as _NS
+    _d = open(bsp, 'rb').read()
+    gns = _NS.NegSpace(_d, mask=_NS.MASK_PLAYERSOLID)
+    tb = M.trigger_boxes(_d)
     intrig = lambda q: any(all(lo[k] - 1 <= q[k] <= hi[k] + 1 for k in range(3)) for lo, hi in tb)
     viol = sum(1 for p in g.wps
-               if (B.inside((p[0], p[1], p[2] + 24)) and not intrig((p[0], p[1], p[2] + 24)))
-               or B.floor(p[0], p[1], p[2] + 24) is None)
-    print('wp standable check: %s (%d/%d violations)' % ('PASS' if viol == 0 else 'FAIL', viol, len(g.wps)))
+               if not intrig((p[0], p[1], p[2] + 24))
+               and gns.standing_point([p[0], p[1], p[2] + 24]) is None)
+    print('wp standable check (computed free volume): %s (%d/%d violations)'
+          % ('PASS' if viol == 0 else 'FAIL', viol, len(g.wps)))
     open(os.path.join(outdir, mapname + '.mapinfo'), 'w').write(
         'title GenArena %d\ndescription parametric payload arena\nauthor mapgen\n'
         'gametype dm\ngametype tdm\ngametype plc\n' % seed)
-    M.emit(bsp, os.path.join(outdir, mapname + '.ent'), 5, 3, '')
+    M.emit(bsp, os.path.join(outdir, mapname + '.ent'), 5, 3, '', ns=gns)
     with zipfile.ZipFile(os.path.join(outdir, mapname + '.pk3'), 'w', zipfile.ZIP_DEFLATED) as z:
         for ext in ('.bsp', '.waypoints', '.waypoints.cache', '.mapinfo', '.ent'):
             z.write(os.path.join(outdir, mapname + ext), 'maps/' + mapname + ext)

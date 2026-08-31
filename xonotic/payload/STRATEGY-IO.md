@@ -40,8 +40,11 @@ which is why the per-player gather passes `firstedict = 1`.
 
 Participant rows have width 40. Columns 0–18 are ID, team, health, armor, ammo,
 position XYZ, velocity XYZ, weapon bitset, powerup time, time since spawn, V-cell,
-nearest cart, nearest-cart distance, alive, and bot/human control. The remaining
-columns are zero. Positions and velocities are engine units / 1024.
+nearest cart, nearest-cart distance, alive, and bot/human control. Columns 19–24 are
+the applied packed target, whether it resolved, the stock goal's packed target, live
+distance to that goal, whether it matches the applied target, and whether the bot has
+reached it. The remaining columns are zero. Positions, velocities, and goal distance
+are engine units / 1024.
 
 Cart rows have width 12:
 
@@ -72,14 +75,14 @@ timestamp. Item and rival instruments enter through this gated event path.
 
 ## Responses
 
-Every participant receives exactly eight floats: packed target, gain, lane, hunt,
-explore, commitment, spawn timing, and lead readout. Packed target ranges are cart
+Every participant receives exactly four floats: packed target, gain, commitment, and
+spawn timing. Packed target ranges are cart
 `0+id`, item `65536+id`, rival `131072+id`, and cell `196608+id`. The QuakeC adapter
 turns these into additive stock `navigation_routerating` calls; it does not compute
 paths or replace havocbot navigation.
 
-`COMMIT` is seconds, applied as
-`this.bot_strategytime = max(this.bot_strategytime, time + this.plc_str_commit)`.
+`COMMIT` is seconds, applied after the stock navigation timeout through
+`navigation_goalrating_timeout_extend_if_needed`.
 It is a property of an assignment, not of one instrument: committing to a target
 is committing to the trip to it, so `instruments.travel_horizon` gives every
 objective the horizon its own travel implies (`IDLE` and `SPAWN_TIMING` excepted —

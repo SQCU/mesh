@@ -519,7 +519,29 @@ def temporal_contraction(f_obs, obs_time, now: float, T: float,
 # lane_membership, last_threat, observed_enemy, seen.  "Uninformative" = the
 # item is as likely present as absent, the cell is assumed standable, and no
 # threat / enemy / observation is asserted.
-UNINFORMATIVE_PRIOR = np.asarray((0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0), dtype=np.float64)
+def _uninformative_prior() -> np.ndarray:
+    """RHO's target: what a cell means once its observation has decayed away.
+
+    Derived from SLOT_FIELDS rather than injected as a literal 7-vector. Each
+    field states its own uninformative value, so adding a slot field cannot
+    silently inherit someone else's constant.
+    """
+    prior = {
+        "item_type": 0.0,        # no item known
+        "respawn_phase": 0.5,    # phase unknown -> the midpoint carries no claim
+        "standability": 0.5,     # navigability unknown
+        "lane_membership": 0.0,  # no lane known
+        "last_threat": 0.0,      # no threat observed
+        "observed_enemy": 0.0,   # no enemy observed
+        "seen": 0.0,             # the gate: nothing was ever deposited here
+    }
+    missing = set(SLOT_FIELDS) - set(prior)
+    if missing:
+        raise ValueError(f"SLOT_FIELDS {sorted(missing)} have no uninformative value")
+    return np.asarray([prior[name] for name in SLOT_FIELDS], dtype=np.float64)
+
+
+UNINFORMATIVE_PRIOR = _uninformative_prior()
 
 # The fixed stage-5 read-out Phi (BELIEF_RANK, SLOT_DIM).  Its rank is at most
 # SLOT_DIM = 7; it is the fixed slot -> belief read-out whose width the strategy

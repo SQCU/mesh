@@ -204,10 +204,17 @@ typedef enum shaderpermutation_e
 	SHADERPERMUTATION_DEPTHRGB = 1<<28, ///< read/write depth values in RGB color coded format for older hardware without depth samplers
 	SHADERPERMUTATION_ALPHAGEN_VERTEX = 1<<29, ///< alphaGen vertex
 	SHADERPERMUTATION_SKELETAL = 1<<30, ///< (skeletal models) use skeletal matrices to deform vertices (gpu-skinning)
-	SHADERPERMUTATION_OCCLUDE = 1<<31, ///< use occlusion buffer for corona
-	SHADERPERMUTATION_COUNT = 32 ///< size of shaderpermutationinfo array
+	SHADERPERMUTATION_OCCLUDE = 0x80000000u ///< use occlusion buffer for corona
 }
 shaderpermutation_t;
+
+// Permutation bits past 31 do not fit the enum above (which is int-typed on every
+// compiler we build with, so 1<<31 would sign-extend into a dpuint64 and light up
+// every high bit).  OCCLUDE is spelled 0x80000000u for the same reason.  The
+// permutation word itself has always been dpuint64, so bits 32+ just work.
+#define SHADERPERMUTATION_PBR (1ull<<32) ///< metallic-roughness BRDF (GGX) instead of Blinn-Phong
+#define SHADERPERMUTATION_INK (1ull<<33) ///< sample the accumulated world ink volume
+#define SHADERPERMUTATION_COUNT 34 ///< size of shaderpermutationinfo array
 
 typedef enum DPSOFTRAST_UNIFORM_e
 {

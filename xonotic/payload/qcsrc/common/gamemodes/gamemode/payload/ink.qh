@@ -1,0 +1,21 @@
+#pragma once
+// World ink volume builtins, implemented in darkplaces-work/{r_ink.c,clvm_cmds.c}.
+// Numbers follow the mesh IPC block (#644..#653); #654 onward were free.
+#ifdef CSQC
+void(vector origin, float radius, vector color, float amount) ink_splat = #654;
+void() ink_clear = #655;
+float(float sel) ink_stat = #656;
+
+#define INK_ACTIVE      0
+#define INK_RES_X       1
+#define INK_RES_Y       2
+#define INK_RES_Z       3
+#define INK_VOXELSIZE   4
+#define INK_SPLATS      5
+#define INK_MINS_X      6
+#define INK_MINS_Y      7
+#define INK_MINS_Z      8
+#define INK_SIZE_X      9
+#define INK_SIZE_Y      10
+#define INK_SIZE_Z      11
+#endif

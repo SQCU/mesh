@@ -195,6 +195,8 @@ cvar_t r_glsl_offsetmapping_scale = {CVAR_SAVE, "r_glsl_offsetmapping_scale", "0
 cvar_t r_glsl_offsetmapping_lod = {CVAR_SAVE, "r_glsl_offsetmapping_lod", "0", "apply distance-based level-of-detail correction to number of offsetmappig steps, effectively making it render faster on large open-area maps"};
 cvar_t r_glsl_offsetmapping_lod_distance = {CVAR_SAVE, "r_glsl_offsetmapping_lod_distance", "32", "first LOD level distance, second level (-50% steps) is 2x of this, third (33%) - 3x etc."};
 cvar_t r_glsl_postprocess = {CVAR_SAVE, "r_glsl_postprocess", "0", "use a GLSL postprocessing shader"};
+cvar_t r_pbr = {CVAR_SAVE, "r_pbr", "1", "use a normalized metallic-roughness (GGX) BRDF for specular instead of unnormalized Blinn-Phong; existing gloss maps become the dielectric F0 and the gloss exponent becomes roughness"};
+cvar_t r_pbr_specularscale = {CVAR_SAVE, "r_pbr_specularscale", "1", "gain on the normalized specular lobe; content authored against the old unnormalized lobe may want less than 1"};
 cvar_t r_glsl_postprocess_uservec1 = {CVAR_SAVE, "r_glsl_postprocess_uservec1", "0 0 0 0", "a 4-component vector to pass as uservec1 to the postprocessing shader (only useful if default.glsl has been customized)"};
 cvar_t r_glsl_postprocess_uservec2 = {CVAR_SAVE, "r_glsl_postprocess_uservec2", "0 0 0 0", "a 4-component vector to pass as uservec2 to the postprocessing shader (only useful if default.glsl has been customized)"};
 cvar_t r_glsl_postprocess_uservec3 = {CVAR_SAVE, "r_glsl_postprocess_uservec3", "0 0 0 0", "a 4-component vector to pass as uservec3 to the postprocessing shader (only useful if default.glsl has been customized)"};
@@ -280,6 +282,7 @@ svbsp_t r_svbsp;
 int r_uniformbufferalignment = 32; // dynamically updated to match GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
 
 rtexture_t *r_texture_blanknormalmap;
+rtexture_t *r_texture_neutralpbr;
 rtexture_t *r_texture_white;
 rtexture_t *r_texture_grey128;
 rtexture_t *r_texture_black;
@@ -399,6 +402,17 @@ static void R_BuildBlankTextures(void)
 	data[2] = 255;
 	data[3] = 255;
 	r_texture_white = R_LoadTexture2D(r_main_texturepool, "blankwhite", 1, 1, data, TEXTYPE_BGRA, TEXF_PERSISTENT, -1, NULL);
+	// neutral metallic-roughness (ORM) sample for materials with no _pbr map:
+	// occlusion 1, roughness 1 (the material exponent alone decides), metallic 0.
+	data[2] = 255; // r: ambient occlusion
+	data[1] = 255; // g: roughness
+	data[0] = 0;   // b: metallic
+	data[3] = 255;
+	r_texture_neutralpbr = R_LoadTexture2D(r_main_texturepool, "neutralpbr", 1, 1, data, TEXTYPE_BGRA, TEXF_PERSISTENT, -1, NULL);
+	data[0] = 255;
+	data[1] = 255;
+	data[2] = 255;
+	data[3] = 255;
 	data[0] = 128;
 	data[1] = 128;
 	data[2] = 128;
@@ -702,7 +716,9 @@ shaderpermutationinfo_t shaderpermutationinfo[SHADERPERMUTATION_COUNT] =
 	{"#define USEDEPTHRGB\n", " depthrgb"},
 	{"#define USEALPHAGENVERTEX\n", " alphagenvertex"},
 	{"#define USESKELETAL\n", " skeletal"},
-	{"#define USEOCCLUDE\n", " occlude"}
+	{"#define USEOCCLUDE\n", " occlude"},
+	{"#define USEPBR\n", " pbr"},
+	{"#define USEINK\n", " ink"}
 };
 
 // NOTE: MUST MATCH ORDER OF SHADERMODE_* ENUMS!
@@ -792,6 +808,8 @@ typedef struct r_glsl_permutation_s
 	int tex_Texture_ReflectMask;
 	int tex_Texture_ReflectCube;
 	int tex_Texture_BounceGrid;
+	int tex_Texture_Pbr;
+	int tex_Texture_InkVolume;
 	/// locations of detected uniforms in program object, or -1 if not found
 	int loc_Texture_First;
 	int loc_Texture_Second;
@@ -822,6 +840,13 @@ typedef struct r_glsl_permutation_s
 	int loc_Texture_ReflectMask;
 	int loc_Texture_ReflectCube;
 	int loc_Texture_BounceGrid;
+	int loc_Texture_Pbr;
+	int loc_Texture_InkVolume;
+	int loc_PbrParams;
+	int loc_InkMatrix;
+	int loc_InkNormalBias;
+	int loc_InkParams;
+	int loc_InkNoise;
 	int loc_Alpha;
 	int loc_BloomBlur_Parameters;
 	int loc_ClientTime;
@@ -1090,9 +1115,9 @@ static void R_GLSL_CompilePermutation(r_glsl_permutation_t *p, unsigned int mode
 	int vertstrings_count = 0;
 	int geomstrings_count = 0;
 	int fragstrings_count = 0;
-	const char *vertstrings_list[32+5+SHADERSTATICPARMS_COUNT+1];
-	const char *geomstrings_list[32+5+SHADERSTATICPARMS_COUNT+1];
-	const char *fragstrings_list[32+5+SHADERSTATICPARMS_COUNT+1];
+	const char *vertstrings_list[SHADERPERMUTATION_COUNT+5+SHADERSTATICPARMS_COUNT+1];
+	const char *geomstrings_list[SHADERPERMUTATION_COUNT+5+SHADERSTATICPARMS_COUNT+1];
+	const char *fragstrings_list[SHADERPERMUTATION_COUNT+5+SHADERSTATICPARMS_COUNT+1];
 
 	if (p->compiled)
 		return;
@@ -1250,6 +1275,13 @@ static void R_GLSL_CompilePermutation(r_glsl_permutation_t *p, unsigned int mode
 		p->loc_Texture_ReflectMask        = qglGetUniformLocation(p->program, "Texture_ReflectMask");
 		p->loc_Texture_ReflectCube        = qglGetUniformLocation(p->program, "Texture_ReflectCube");
 		p->loc_Texture_BounceGrid         = qglGetUniformLocation(p->program, "Texture_BounceGrid");
+		p->loc_Texture_Pbr                = qglGetUniformLocation(p->program, "Texture_Pbr");
+		p->loc_Texture_InkVolume          = qglGetUniformLocation(p->program, "Texture_InkVolume");
+		p->loc_PbrParams                  = qglGetUniformLocation(p->program, "PbrParams");
+		p->loc_InkMatrix                  = qglGetUniformLocation(p->program, "InkMatrix");
+		p->loc_InkNormalBias              = qglGetUniformLocation(p->program, "InkNormalBias");
+		p->loc_InkParams                  = qglGetUniformLocation(p->program, "InkParams");
+		p->loc_InkNoise                   = qglGetUniformLocation(p->program, "InkNoise");
 		p->loc_Alpha                      = qglGetUniformLocation(p->program, "Alpha");
 		p->loc_BloomBlur_Parameters       = qglGetUniformLocation(p->program, "BloomBlur_Parameters");
 		p->loc_ClientTime                 = qglGetUniformLocation(p->program, "ClientTime");
@@ -1337,6 +1369,8 @@ static void R_GLSL_CompilePermutation(r_glsl_permutation_t *p, unsigned int mode
 		p->tex_Texture_ReflectMask = -1;
 		p->tex_Texture_ReflectCube = -1;
 		p->tex_Texture_BounceGrid = -1;
+		p->tex_Texture_Pbr = -1;
+		p->tex_Texture_InkVolume = -1;
 		// bind the texture samplers in use
 		sampler = 0;
 		if (p->loc_Texture_First           >= 0) {p->tex_Texture_First            = sampler;qglUniform1i(p->loc_Texture_First           , sampler);sampler++;}
@@ -1368,6 +1402,8 @@ static void R_GLSL_CompilePermutation(r_glsl_permutation_t *p, unsigned int mode
 		if (p->loc_Texture_ReflectMask     >= 0) {p->tex_Texture_ReflectMask      = sampler;qglUniform1i(p->loc_Texture_ReflectMask     , sampler);sampler++;}
 		if (p->loc_Texture_ReflectCube     >= 0) {p->tex_Texture_ReflectCube      = sampler;qglUniform1i(p->loc_Texture_ReflectCube     , sampler);sampler++;}
 		if (p->loc_Texture_BounceGrid      >= 0) {p->tex_Texture_BounceGrid       = sampler;qglUniform1i(p->loc_Texture_BounceGrid      , sampler);sampler++;}
+		if (p->loc_Texture_Pbr             >= 0) {p->tex_Texture_Pbr              = sampler;qglUniform1i(p->loc_Texture_Pbr            , sampler);sampler++;}
+		if (p->loc_Texture_InkVolume       >= 0) {p->tex_Texture_InkVolume        = sampler;qglUniform1i(p->loc_Texture_InkVolume      , sampler);sampler++;}
 		// get the uniform block indices so we can bind them
 #ifndef USE_GLES2 /* FIXME: GLES3 only */
 		if (vid.support.arb_uniform_buffer_object)
@@ -1735,9 +1771,9 @@ static void R_HLSL_CompilePermutation(r_hlsl_permutation_t *p, unsigned int mode
 	int vertstrings_count = 0;
 	int geomstrings_count = 0;
 	int fragstrings_count = 0;
-	const char *vertstrings_list[32+5+SHADERSTATICPARMS_COUNT+1];
-	const char *geomstrings_list[32+5+SHADERSTATICPARMS_COUNT+1];
-	const char *fragstrings_list[32+5+SHADERSTATICPARMS_COUNT+1];
+	const char *vertstrings_list[SHADERPERMUTATION_COUNT+5+SHADERSTATICPARMS_COUNT+1];
+	const char *geomstrings_list[SHADERPERMUTATION_COUNT+5+SHADERSTATICPARMS_COUNT+1];
+	const char *fragstrings_list[SHADERPERMUTATION_COUNT+5+SHADERSTATICPARMS_COUNT+1];
 
 	if (p->compiled)
 		return;
@@ -2385,6 +2421,8 @@ void R_SetupShader_Surface(const float rtlightambient[3], const float rtlightdif
 			if (r_shadow_bouncegrid_state.directional)
 				permutation |= SHADERPERMUTATION_BOUNCEGRIDDIRECTIONAL;
 		}
+		if (r_ink_state.enabled)
+			permutation |= SHADERPERMUTATION_INK;
 		GL_BlendFunc(t->currentlayers[0].blendfunc1, t->currentlayers[0].blendfunc2);
 		blendfuncflags = R_BlendFuncFlags(t->currentlayers[0].blendfunc1, t->currentlayers[0].blendfunc2);
 		// when using alphatocoverage, we don't need alphakill
@@ -2482,6 +2520,8 @@ void R_SetupShader_Surface(const float rtlightambient[3], const float rtlightdif
 			if (r_shadow_bouncegrid_state.directional)
 				permutation |= SHADERPERMUTATION_BOUNCEGRIDDIRECTIONAL;
 		}
+		if (r_ink_state.enabled)
+			permutation |= SHADERPERMUTATION_INK;
 		GL_BlendFunc(t->currentlayers[0].blendfunc1, t->currentlayers[0].blendfunc2);
 		blendfuncflags = R_BlendFuncFlags(t->currentlayers[0].blendfunc1, t->currentlayers[0].blendfunc2);
 		// when using alphatocoverage, we don't need alphakill
@@ -2496,6 +2536,10 @@ void R_SetupShader_Surface(const float rtlightambient[3], const float rtlightdif
 				GL_AlphaToCoverage(false);
 		}
 	}
+	// PBR only changes the specular lobe, so it rides on SPECULAR - a surface with
+	// no specular contribution compiles exactly the permutation it always did.
+	if (r_pbr.integer && (permutation & SHADERPERMUTATION_SPECULAR))
+		permutation |= SHADERPERMUTATION_PBR;
 	if(!(blendfuncflags & BLENDFUNC_ALLOWS_ANYFOG))
 		permutation &= ~(SHADERPERMUTATION_FOGHEIGHTTEXTURE | SHADERPERMUTATION_FOGOUTSIDE | SHADERPERMUTATION_FOGINSIDE);
 	if(blendfuncflags & BLENDFUNC_ALLOWS_FOG_HACKALPHA)
@@ -2790,6 +2834,13 @@ void R_SetupShader_Surface(const float rtlightambient[3], const float rtlightdif
 		if (r_glsl_permutation->loc_ScreenToDepth >= 0) qglUniform2f(r_glsl_permutation->loc_ScreenToDepth, r_refdef.view.viewport.screentodepth[0], r_refdef.view.viewport.screentodepth[1]);
 		if (r_glsl_permutation->loc_PixelToScreenTexCoord >= 0) qglUniform2f(r_glsl_permutation->loc_PixelToScreenTexCoord, 1.0f/vid.width, 1.0f/vid.height);
 		if (r_glsl_permutation->loc_BounceGridMatrix >= 0) {Matrix4x4_Concat(&tempmatrix, &r_shadow_bouncegrid_state.matrix, &rsurface.matrix);Matrix4x4_ToArrayFloatGL(&tempmatrix, m16f);qglUniformMatrix4fv(r_glsl_permutation->loc_BounceGridMatrix, 1, false, m16f);}
+		if (r_glsl_permutation->loc_PbrParams >= 0) qglUniform4f(r_glsl_permutation->loc_PbrParams, t->pbrroughnessmod, t->pbrmetallicmod, r_pbr_specularscale.value, 0.0f);
+		// model space -> ink volume space, exactly the bouncegrid construction
+		if (r_glsl_permutation->loc_InkMatrix >= 0) {Matrix4x4_Concat(&tempmatrix, &r_ink_state.matrix, &rsurface.matrix);Matrix4x4_ToArrayFloatGL(&tempmatrix, m16f);qglUniformMatrix4fv(r_glsl_permutation->loc_InkMatrix, 1, false, m16f);}
+		// bias is authored in voxels; convert to world units here so the shader is one madd
+		if (r_glsl_permutation->loc_InkNormalBias >= 0) qglUniform1f(r_glsl_permutation->loc_InkNormalBias, r_ink_normalbias.value * r_ink_state.spacing[0]);
+		if (r_glsl_permutation->loc_InkParams >= 0) qglUniform4f(r_glsl_permutation->loc_InkParams, r_ink_roughness.value, r_ink_tint.value, r_ink_f0.value, r_ink_intensity.value);
+		if (r_glsl_permutation->loc_InkNoise >= 0) qglUniform2f(r_glsl_permutation->loc_InkNoise, r_ink_noisescale.value, r_ink_noiseedge.value);
 		if (r_glsl_permutation->loc_BounceGridIntensity >= 0) qglUniform1f(r_glsl_permutation->loc_BounceGridIntensity, r_shadow_bouncegrid_state.intensity*r_refdef.view.colorscale);
 
 		if (r_glsl_permutation->tex_Texture_First           >= 0) R_Mesh_TexBind(r_glsl_permutation->tex_Texture_First            , r_texture_white                                     );
@@ -2835,6 +2886,8 @@ void R_SetupShader_Surface(const float rtlightambient[3], const float rtlightdif
 			}
 		}
 		if (r_glsl_permutation->tex_Texture_BounceGrid  >= 0) R_Mesh_TexBind(r_glsl_permutation->tex_Texture_BounceGrid, r_shadow_bouncegrid_state.texture);
+		if (r_glsl_permutation->tex_Texture_Pbr         >= 0) R_Mesh_TexBind(r_glsl_permutation->tex_Texture_Pbr, t->pbrtexture ? t->pbrtexture : r_texture_neutralpbr);
+		if (r_glsl_permutation->tex_Texture_InkVolume   >= 0) R_Mesh_TexBind(r_glsl_permutation->tex_Texture_InkVolume, r_ink_state.texture);
 		CHECKGLERROR
 		break;
 	case RENDERPATH_GL11:
@@ -3327,6 +3380,7 @@ skinframe_t *R_SkinFrame_LoadExternal(const char *name, int textureflags, qboole
 	skinframe->glow = NULL;
 	skinframe->fog = NULL;
 	skinframe->reflect = NULL;
+	skinframe->pbr = NULL;
 	skinframe->hasalpha = false;
 	// we could store the q2animname here too
 
@@ -3390,6 +3444,8 @@ skinframe_t *R_SkinFrame_LoadExternal(const char *name, int textureflags, qboole
 		skinframe->pants = R_LoadTextureDDSFile(r_main_texturepool, va(vabuf, sizeof(vabuf), "dds/%s_pants.dds", skinframe->basename), vid.sRGB3D, textureflags, NULL, NULL, mymiplevel, true);
 		skinframe->shirt = R_LoadTextureDDSFile(r_main_texturepool, va(vabuf, sizeof(vabuf), "dds/%s_shirt.dds", skinframe->basename), vid.sRGB3D, textureflags, NULL, NULL, mymiplevel, true);
 		skinframe->reflect = R_LoadTextureDDSFile(r_main_texturepool, va(vabuf, sizeof(vabuf), "dds/%s_reflect.dds", skinframe->basename), vid.sRGB3D, textureflags, NULL, NULL, mymiplevel, true);
+		// ORM data is linear, never sRGB
+		skinframe->pbr = R_LoadTextureDDSFile(r_main_texturepool, va(vabuf, sizeof(vabuf), "dds/%s_pbr.dds", skinframe->basename), false, textureflags, NULL, NULL, mymiplevel, true);
 	}
 
 	// _norm is the name used by tenebrae and has been adopted as standard
@@ -3485,6 +3541,17 @@ skinframe_t *R_SkinFrame_LoadExternal(const char *name, int textureflags, qboole
 		pixels = NULL;
 	}
 
+	// metallic-roughness ORM map: r = ambient occlusion, g = roughness, b = metallic.
+	// Always linear - this is material data, not colour, so it must not go through
+	// the sRGB decode that base/gloss/glow get.
+	mymiplevel = savemiplevel;
+	if (skinframe->pbr == NULL && (pixels = loadimagepixelsbgra(va(vabuf, sizeof(vabuf), "%s_pbr", skinframe->basename), false, false, false, &mymiplevel)))
+	{
+		skinframe->pbr = R_LoadTexture2D (r_main_texturepool, va(vabuf, sizeof(vabuf), "%s_pbr", skinframe->basename), image_width, image_height, pixels, TEXTYPE_BGRA, textureflags & (gl_texturecompression_color.integer && gl_texturecompression.integer ? ~0 : ~TEXF_COMPRESS), mymiplevel, NULL);
+		Mem_Free(pixels);
+		pixels = NULL;
+	}
+
 	if (basepixels)
 		Mem_Free(basepixels);
 
@@ -3517,6 +3584,7 @@ skinframe_t *R_SkinFrame_LoadInternalBGRA(const char *name, int textureflags, co
 	skinframe->glow = NULL;
 	skinframe->fog = NULL;
 	skinframe->reflect = NULL;
+	skinframe->pbr = NULL;
 	skinframe->hasalpha = false;
 
 	// if no data was provided, then clearly the caller wanted to get a blank skinframe
@@ -3587,6 +3655,7 @@ skinframe_t *R_SkinFrame_LoadInternalQuake(const char *name, int textureflags, i
 	skinframe->glow = NULL;
 	skinframe->fog = NULL;
 	skinframe->reflect = NULL;
+	skinframe->pbr = NULL;
 	skinframe->hasalpha = false;
 
 	// if no data was provided, then clearly the caller wanted to get a blank skinframe
@@ -3720,6 +3789,7 @@ skinframe_t *R_SkinFrame_LoadInternal8bit(const char *name, int textureflags, co
 	skinframe->glow = NULL;
 	skinframe->fog = NULL;
 	skinframe->reflect = NULL;
+	skinframe->pbr = NULL;
 	skinframe->hasalpha = false;
 
 	// if no data was provided, then clearly the caller wanted to get a blank skinframe
@@ -3768,6 +3838,7 @@ skinframe_t *R_SkinFrame_LoadMissing(void)
 	skinframe->glow = NULL;
 	skinframe->fog = NULL;
 	skinframe->reflect = NULL;
+	skinframe->pbr = NULL;
 	skinframe->hasalpha = false;
 
 	skinframe->avgcolor[0] = rand() / RAND_MAX;
@@ -3953,6 +4024,7 @@ static void gl_main_start(void)
 {
 	loadingscreentexture = NULL;
 	r_texture_blanknormalmap = NULL;
+	r_texture_neutralpbr = NULL;
 	r_texture_white = NULL;
 	r_texture_grey128 = NULL;
 	r_texture_black = NULL;
@@ -4124,6 +4196,7 @@ static void gl_main_shutdown(void)
 	R_FreeTexturePool(&r_main_texturepool);
 	loadingscreentexture = NULL;
 	r_texture_blanknormalmap = NULL;
+	r_texture_neutralpbr = NULL;
 	r_texture_white = NULL;
 	r_texture_grey128 = NULL;
 	r_texture_black = NULL;
@@ -4302,6 +4375,8 @@ void GL_Main_Init(void)
 	Cvar_RegisterVariable(&r_glsl_offsetmapping_lod);
 	Cvar_RegisterVariable(&r_glsl_offsetmapping_lod_distance);
 	Cvar_RegisterVariable(&r_glsl_postprocess);
+	Cvar_RegisterVariable(&r_pbr);
+	Cvar_RegisterVariable(&r_pbr_specularscale);
 	Cvar_RegisterVariable(&r_glsl_postprocess_uservec1);
 	Cvar_RegisterVariable(&r_glsl_postprocess_uservec2);
 	Cvar_RegisterVariable(&r_glsl_postprocess_uservec3);
@@ -4381,6 +4456,7 @@ void Render_Init(void)
 	Font_Init();
 	GL_Draw_Init();
 	R_Shadow_Init();
+	R_Ink_Init();
 	R_Sky_Init();
 	GL_Surf_Init();
 	Sbar_Init();
@@ -7174,6 +7250,7 @@ void R_RenderView(void)
 		R_TimeReport("animcache");
 
 	R_Shadow_UpdateBounceGridTexture();
+	R_Ink_Frame();
 	if (r_timereport_active && r_shadow_bouncegrid.integer)
 		R_TimeReport("bouncegrid");
 
@@ -8269,6 +8346,7 @@ texture_t *R_GetCurrentTexture(texture_t *t)
 	t->glowtexture = t->currentskinframe->glow;
 	t->fogtexture = t->currentskinframe->fog;
 	t->reflectmasktexture = t->currentskinframe->reflect;
+	t->pbrtexture = t->currentskinframe->pbr ? t->currentskinframe->pbr : r_texture_neutralpbr;
 	if (t->backgroundshaderpass)
 	{
 		for (i = 0, tcmod = t->backgroundshaderpass->tcmods; i < Q3MAXTCMODS && tcmod->tcmod; i++, tcmod++)
@@ -12454,6 +12532,8 @@ void R_DrawCustomSurface(skinframe_t *skinframe, const matrix4x4_t *texmatrix, i
 	texture.offsetscale = 1;
 	texture.specularscalemod = 1;
 	texture.specularpowermod = 1;
+	texture.pbrroughnessmod = 1;
+	texture.pbrmetallicmod = 0;
 	texture.transparentsort = TRANSPARENTSORT_DISTANCE;
 
 	R_DrawCustomSurface_Texture(&texture, texmatrix, materialflags, firstvertex, numvertices, firsttriangle, numtriangles, writedepth, prepass);

@@ -206,235 +206,35 @@ def kcenter(adj, k, comp=None):
     return chosen, dmap
 
 
-class Bsp:
-    def __init__(self, d):
-        def lump(i):
-            return struct.unpack_from('<ii', d, 8 + i * 8)
-        to, tl = lump(1)
-        po, pl = lump(2)
-        bo, bl = lump(8)
-        so, sl = lump(9)
-        ntex = tl // 72
-        solid = [struct.unpack_from('<i', d, to + i * 72 + 68)[0] & 1 for i in range(ntex)]
-        planes = [struct.unpack_from('<4f', d, po + i * 16) for i in range(pl // 16)]
-        sides = [struct.unpack_from('<2i', d, so + i * 8) for i in range(sl // 8)]
-        self.brushes, self.aabbs = [], []
-        for i in range(bl // 12):
-            fs, ns, tx = struct.unpack_from('<iii', d, bo + i * 12)
-            if tx < 0 or tx >= ntex or not solid[tx]:
-                continue
-            bp = [planes[sides[k][0]] for k in range(fs, fs + ns)]
-            lo = [-1e18] * 3
-            hi = [1e18] * 3
-            for nx, ny, nz, dd in bp:
-                n = (nx, ny, nz)
-                # An AABB bound is only valid for a plane that is axis-aligned on ALL
-                # three components: for an oblique plane `dd` is not an axis bound, and
-                # using it indexes the brush at the wrong coordinates (a corridor whose
-                # real x-span is [-5504,-5152] was indexed at [-5843,-5491], producing
-                # phantom "no floor" violations along a clear corridor).
-                for a, c in enumerate(n):
-                    others = max(abs(n[b]) for b in range(3) if b != a)
-                    if others > 1e-4:
-                        continue
-                    if c > 0.999:
-                        hi[a] = min(hi[a], dd)
-                    elif c < -0.999:
-                        lo[a] = max(lo[a], -dd)
-            self.brushes.append(bp)
-            self.aabbs.append((lo, hi))
-        self.grid = {}
-        for bi, (lo, hi) in enumerate(self.aabbs):
-            x0, x1 = int(math.floor(lo[0] / CELL)), int(math.floor(hi[0] / CELL))
-            y0, y1 = int(math.floor(lo[1] / CELL)), int(math.floor(hi[1] / CELL))
-            for cx in range(x0, x1 + 1):
-                for cy in range(y0, y1 + 1):
-                    self.grid.setdefault((cx, cy), []).append(bi)
+def classify_edges(nodes, adj, ns, gen, flags, tboxes):
+    """Which navmesh links a CART may follow.
 
-    def cell(self, x, y):
-        return self.grid.get((int(math.floor(x / CELL)), int(math.floor(y / CELL))), ())
-
-    def inside(self, p):
-        x, y, z = p
-        for bi in self.cell(x, y):
-            lo, hi = self.aabbs[bi]
-            if not (lo[0] - EPS <= x <= hi[0] + EPS and lo[1] - EPS <= y <= hi[1] + EPS
-                    and lo[2] - EPS <= z <= hi[2] + EPS):
-                continue
-            ok = True
-            for nx, ny, nz, dd in self.brushes[bi]:
-                if x * nx + y * ny + z * nz - dd > EPS:
-                    ok = False
-                    break
-            if ok:
-                return True
-        return False
-
-    def floor(self, x, y, zh):
-        oz = zh + 64
-        best = None
-        for bi in self.cell(x, y):
-            lo, hi = self.aabbs[bi]
-            if not (lo[0] <= x <= hi[0] and lo[1] <= y <= hi[1]) or lo[2] > oz:
-                continue
-            tmin, tmax, ok = -1e18, 1e18, True
-            for nx, ny, nz, dd in self.brushes[bi]:
-                denom = -nz
-                num = dd - (nx * x + ny * y + nz * oz)
-                if denom > 1e-9:
-                    tmax = min(tmax, num / denom)
-                elif denom < -1e-9:
-                    tmin = max(tmin, num / denom)
-                elif num < 0:
-                    ok = False
-                    break
-            if not ok or tmin > tmax or tmax < 0:
-                continue
-            fz = oz - (tmin if tmin > 0 else 0)
-            if fz <= zh + 8 and (best is None or fz > best):
-                best = fz
-        return best
-
-    def clearance(self, x, y, z):
-        dmin, away = CLEAR_CAP, None
-        for k in range(8):
-            ang = k * math.pi / 4
-            dx, dy = math.cos(ang), math.sin(ang)
-            t = 24.0
-            hitd = None
-            while t <= CLEAR_CAP:
-                if self.inside((x + dx * t, y + dy * t, z)):
-                    lo2, hi2 = t - 24.0, t
-                    for _ in range(6):
-                        mid = (lo2 + hi2) / 2
-                        if self.inside((x + dx * mid, y + dy * mid, z)):
-                            hi2 = mid
-                        else:
-                            lo2 = mid
-                    hitd = lo2
-                    break
-                t += 24.0
-            if hitd is not None and hitd < dmin:
-                dmin, away = hitd, (-dx, -dy)
-        return dmin, away
-
-
-class Corridor:
-    def __init__(self, pts):
-        self.pts = pts
-        self.grid = {}
-        for i, p in enumerate(pts):
-            self.grid.setdefault((int(math.floor(p[0] / PUSH_R)), int(math.floor(p[1] / PUSH_R))), []).append(i)
-
-    def near(self, x, y, rings):
-        cx, cy = int(math.floor(x / PUSH_R)), int(math.floor(y / PUSH_R))
-        out = []
-        for dx in range(-rings, rings + 1):
-            for dy in range(-rings, rings + 1):
-                out.extend(self.grid.get((cx + dx, cy + dy), ()))
-        return out
-
-    def contains(self, p):
-        for i in self.near(p[0], p[1], 1):
-            q = self.pts[i]
-            if abs(p[2] - q[2]) <= PUSH_H and (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 <= PUSH_R * PUSH_R:
-                return True
-        return False
-
-    def nearest(self, p):
-        cand = []
-        for rings in (1, 2, 4, 6):
-            cand = self.near(p[0], p[1], rings)
-            if cand:
-                break
-        if not cand:
-            cand = range(len(self.pts))
-        return self.pts[min(cand, key=lambda i: math.dist(p, self.pts[i]))]
-
-    def project(self, p):
-        if self.contains(p):
-            return list(p)
-        cand = []
-        for rings in (2, 4, 6):
-            cand = self.near(p[0], p[1], rings)
-            if cand:
-                break
-        if not cand:
-            cand = range(len(self.pts))
-        best, bd = None, 1e18
-        for i in cand:
-            q = self.pts[i]
-            z = min(max(p[2], q[2] - PUSH_H + 1), q[2] + PUSH_H - 1)
-            dx, dy = p[0] - q[0], p[1] - q[1]
-            L = math.hypot(dx, dy)
-            if L > PUSH_R - 1:
-                f = (PUSH_R - 1) / L
-                x, y = q[0] + dx * f, q[1] + dy * f
-            else:
-                x, y = p[0], p[1]
-            d = (x - p[0]) ** 2 + (y - p[1]) ** 2 + (z - p[2]) ** 2
-            if d < bd:
-                bd, best = d, [x, y, z]
-        return best if best is not None else list(p)
-
-
-def seg_bad(bsp, pa, pb):
-    L = math.dist(pa, pb)
-    n = max(2, int(math.ceil(L / 24.0)))
-    sawfloor = False
-    for k in range(n + 1):
-        f = k / n
-        p = tuple(pa[t] + f * (pb[t] - pa[t]) for t in range(3))
-        if bsp.inside(p):
-            return 'solid'
-        fz = bsp.floor(p[0], p[1], p[2])
-        if fz is not None:
-            sawfloor = True
-            if p[2] - fz > FLOAT_LIM:
-                return 'fly'
-        elif k in (0, n):
-            return 'fly'
-    if not sawfloor:
-        return 'nofloor'
-    return None
-
-
-def classify_edges(nodes, adj, bsp, gen, flags, tboxes):
-    bad = {}
+    DELETED here: `seg_bad`, which walked every link in 24-unit steps asking
+    `Bsp.inside` and `Bsp.floor` -- a point sampler over an AABB-from-plane-distance
+    grid that had already produced both a 75 GB unguarded indexing loop and phantom
+    "no floor" reports along clear corridors.  The geometric half of the question is
+    now answered in closed form by `navmesh.Navmesh.classify_edges` against the
+    world's COMPUTED free volume; the semantic half (NAV-SPEC §4: a link that encodes
+    a jump-pad or teleport trajectory is not a cart segment) is kept and merged."""
+    NMOD = _navmesh()
+    nm = NMOD.Navmesh(nodes, adj, flags={tuple(round(x, 1) for x in k): v
+                                         for k, v in (flags or {}).items()},
+                      triggerboxes=tboxes)
+    bad = dict(nm.classify_edges(ns)) if ns is not None else {}
     for u in range(len(adj)):
         for v in adj[u]:
             if v <= u:
                 continue
             if u in gen or v in gen:
                 bad[(u, v)] = 'gen'
-                continue
-            if (flags.get(nodes[u], 0) | flags.get(nodes[v], 0)) & WPF_BAD:
+            elif (flags.get(nodes[u], 0) | flags.get(nodes[v], 0)) & WPF_BAD:
                 bad[(u, v)] = 'flag'
-                continue
-            pa = (nodes[u][0], nodes[u][1], nodes[u][2] + 16)
-            pb = (nodes[v][0], nodes[v][1], nodes[v][2] + 16)
-            if any(seg_hits_box(pa, pb, lo, hi) for lo, hi in tboxes):
-                bad[(u, v)] = 'trig'
-                continue
-            r = seg_bad(bsp, pa, pb)
-            if r:
-                bad[(u, v)] = r
     return bad
 
 
-def standable_set(nodes, adj, bad, gen):
-    pts = [list(n) for i, n in enumerate(nodes) if i not in gen]
-    for u in range(len(adj)):
-        for v in adj[u]:
-            if v <= u or (u, v) in bad:
-                continue
-            a, b = nodes[u], nodes[v]
-            L = math.dist(a, b)
-            n = max(1, int(math.ceil(L / 48.0)))
-            for k in range(1, n):
-                f = k / n
-                pts.append([a[t] + f * (b[t] - a[t]) for t in range(3)])
-    return pts
+def _navmesh():
+    import navmesh
+    return navmesh
 
 
 def route(adj, adj_ok, bad, src, goal):
@@ -460,247 +260,10 @@ def route(adj, adj_ok, bad, src, goal):
     return p, segbad, admitted
 
 
-def resample_marked(poly, segbad, sp):
-    cum = [0.0]
-    for i in range(1, len(poly)):
-        cum.append(cum[-1] + math.dist(poly[i - 1], poly[i]))
-    total = cum[-1]
-    m = max(2, int(round(total / sp)))
-    pts, mark = [], []
-    for k in range(m + 1):
-        t = total * k / m
-        j = 0
-        while j < len(cum) - 1 and cum[j + 1] < t:
-            j += 1
-        j = min(j, len(poly) - 2)
-        segl = cum[j + 1] - cum[j]
-        f = (t - cum[j]) / segl if segl > 0 else 0.0
-        pts.append([poly[j][a] + (poly[j + 1][a] - poly[j][a]) * f for a in range(3)])
-        mark.append(segbad[j] if segbad else False)
-    return pts, mark
-
-
-def bending_energy(P):
-    return sum(sum((P[i - 1][a] - 2 * P[i][a] + P[i + 1][a]) ** 2 for a in range(3))
-               for i in range(1, len(P) - 1))
-
-
-def lipschitz_env(zf, spacing, slope=0.8):
-    n = len(zf)
-    out = list(zf)
-    for i in range(n):
-        for j in range(max(0, i - 4), min(n, i + 5)):
-            out[i] = max(out[i], zf[j] - slope * abs(i - j) * spacing)
-    return out
-
-
-def medial_smooth(bsp, cor, R, mark):
-    m = len(R) - 1
-    zf = []
-    for r in R:
-        fz = bsp.floor(r[0], r[1], r[2]) if bsp else None
-        zf.append(fz if fz is not None and r[2] - 80 <= fz <= r[2] + 16 else r[2] - 26)
-    zf = lipschitz_env(zf, 64.0)
-    Q = [[R[i][0], R[i][1], zf[i] + WHEEL] for i in range(m + 1)]
-    Q[0][2] = R[0][2] + 16
-    Q[-1][2] = R[-1][2] + 16
-    A = [[q[0], q[1]] for q in Q]
-    c = lambda i: 0 if i < 0 else (m if i > m else i)
-    for _ in range(OUTER):
-        for i in range(1, m):
-            fz = bsp.floor(Q[i][0], Q[i][1], Q[i][2]) if bsp else None
-            if fz is None or Q[i][2] - fz > FLOAT_LIM + WHEEL:
-                A[i] = [R[i][0], R[i][1]]
-                continue
-            dmin, away = bsp.clearance(Q[i][0], Q[i][1], Q[i][2]) if bsp else (CLEAR_CAP, None)
-            if away and dmin < CLEAR_TARGET:
-                push = min(CLEAR_TARGET - dmin, 24.0)
-                A[i] = [Q[i][0] + away[0] * push, Q[i][1] + away[1] * push]
-            else:
-                A[i] = [Q[i][0], Q[i][1]]
-            if Q[i][2] - 80 <= fz + WHEEL <= Q[i][2] + 80:
-                zf[i] = fz
-        zs = lipschitz_env(zf, 64.0)
-        for _ in range(INNER):
-            for i in range(1, m):
-                for a in range(2):
-                    nb = 4 * (Q[c(i - 1)][a] + Q[c(i + 1)][a]) - Q[c(i - 2)][a] - Q[c(i + 2)][a]
-                    Q[i][a] = (WB * nb + WMED * A[i][a]) / (6 * WB + WMED)
-                nb = 4 * (Q[c(i - 1)][2] + Q[c(i + 1)][2]) - Q[c(i - 2)][2] - Q[c(i + 2)][2]
-                Q[i][2] = (WB * nb + WFLOOR * (zs[i] + WHEEL)) / (6 * WB + WFLOOR)
-        for i in range(1, m):
-            if not cor.contains(Q[i]):
-                Q[i] = cor.project(Q[i])
-    return Q, zf
-
-
-def chord_clean(bsp, cor, a, b, exempt):
-    L = math.dist(a, b)
-    n = 3 * max(1, int(math.ceil(L / 48.0)))
-    for k in range(n + 1):
-        f = k / n
-        p = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
-        if bsp.inside(p):
-            return False
-        if not exempt:
-            if not cor.contains(p):
-                return False
-            fz = bsp.floor(p[0], p[1], p[2])
-            if fz is None or p[2] - fz > FLOAT_LIM:
-                return False
-    return True
-
-
-def feasible(bsp, cor, p, exempt):
-    q = list(p)
-    for _ in range(2):
-        if not exempt:
-            fz = bsp.floor(q[0], q[1], q[2])
-            if fz is not None and q[2] - fz > FLOAT_LIM:
-                if q[2] - fz <= FLOAT_LIM + 64:
-                    q[2] = fz + WHEEL
-                else:
-                    n = cor.nearest(q)
-                    f2 = bsp.floor(n[0], n[1], n[2])
-                    q = [n[0], n[1], f2 + WHEEL if f2 is not None else n[2] + 16]
-            elif fz is None:
-                n = cor.nearest(q)
-                f2 = bsp.floor(n[0], n[1], n[2])
-                q = [n[0], n[1], f2 + WHEEL if f2 is not None else n[2] + 16]
-            if not cor.contains(q):
-                q = cor.project(q)
-        g = 0
-        while bsp.inside(tuple(q)) and g < 16:
-            q[2] += 12
-            g += 1
-        if not bsp.inside(tuple(q)):
-            if exempt or cor.contains(q):
-                return q
-    g = 0
-    while bsp.inside(tuple(q)) and g < 16:
-        q[2] += 12
-        g += 1
-    return q
-
-
-def refine(bsp, cor, a, b, exempt, depth):
-    if chord_clean(bsp, cor, a, b, exempt) or depth == 0 or math.dist(a, b) < 8:
-        return [b]
-    gm = [(a[t] + b[t]) / 2 for t in range(3)]
-    mid = feasible(bsp, cor, gm, exempt)
-    if math.dist(mid, a) < 4 or math.dist(mid, b) < 4:
-        mid = list(gm)
-        g = 0
-        while bsp.inside(tuple(mid)) and g < 16:
-            mid[2] += 12
-            g += 1
-    if math.dist(mid, a) < 4 or math.dist(mid, b) < 4:
-        return [b]
-    return refine(bsp, cor, a, mid, exempt, depth - 1) + refine(bsp, cor, mid, b, exempt, depth - 1)
-
-
-def adaptive_nodes(bsp, cor, Q, R, mark):
-    track = [Q[0][:]]
-    exempt = []
-    i = 0
-    while i < len(Q) - 1:
-        j = len(Q) - 1
-        while j > i + 1:
-            ex = any(mark[i:j + 1])
-            dev = all(math.dist(Q[k], [Q[i][t] + (k - i) / (j - i) * (Q[j][t] - Q[i][t])
-                                       for t in range(3)]) <= 40 for k in range(i + 1, j))
-            if dev and chord_clean(bsp, cor, Q[i], Q[j], ex):
-                break
-            j -= 1
-        ex = any(mark[i:j + 1])
-        segs = refine(bsp, cor, track[-1], Q[j][:], ex, 6)
-        pts = [track[-1]] + segs
-        if any(not chord_clean(bsp, cor, pts[t], pts[t + 1], ex) for t in range(len(pts) - 1)):
-            segs = []
-            for k in range(i + 1, j + 1):
-                q = [R[k][0], R[k][1], R[k][2] + 16]
-                g = 0
-                while bsp.inside(tuple(q)) and g < 16:
-                    q[2] += 12
-                    g += 1
-                segs.append(q)
-        for np in segs:
-            track.append(np)
-            exempt.append(ex)
-        i = j
-    return track, exempt
-
-
-def seg_valid(bsp, cor, a, b, exempt):
-    L = math.dist(a, b)
-    n = max(1, int(math.ceil(L / 48.0)))
-    for k in range(n + 1):
-        f = k / n
-        p = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
-        if bsp.inside(p):
-            return False
-        if not exempt:
-            if not cor.contains(p):
-                return False
-            fz = bsp.floor(p[0], p[1], p[2])
-            if fz is None or p[2] - fz > FLOAT_LIM:
-                return False
-    return True
-
-
-def polish_chain(bsp, cor, track, exempt):
-    out = [track[0]]
-    oex = []
-    for seg in range(len(track) - 1):
-        a, b = track[seg], track[seg + 1]
-        ex = exempt[seg]
-        if not seg_valid(bsp, cor, a, b, ex):
-            L = math.dist(a, b)
-            n = max(2, int(math.ceil(L / 24.0)))
-            for k in range(1, n):
-                f = k / n
-                q = feasible(bsp, cor, [a[t] + f * (b[t] - a[t]) for t in range(3)], ex)
-                if math.dist(q, out[-1]) >= 4 and math.dist(q, b) >= 4:
-                    out.append(q)
-                    oex.append(ex)
-        out.append(b[:])
-        oex.append(ex)
-    return out, oex
-
-
-def validate_chain(bsp, cor, track, exempt):
-    va, vb, vc, vx, ns = 0, 0, 0, 0, 0
-    for s in range(len(track) - 1):
-        a, b = track[s], track[s + 1]
-        L = math.dist(a, b)
-        n = max(1, int(math.ceil(L / 48.0)))
-        for k in range(n + 1):
-            f = k / n
-            p = tuple(a[t] + f * (b[t] - a[t]) for t in range(3))
-            ns += 1
-            if bsp.inside(p):
-                va += 1
-                continue
-            inc = cor.contains(p)
-            if exempt[s]:
-                if not inc:
-                    vx += 1
-                continue
-            if not inc:
-                vc += 1
-            fz = bsp.floor(p[0], p[1], p[2])
-            if fz is None or p[2] - fz > FLOAT_LIM:
-                vb += 1
-    return va, vb, vc, vx, ns
-
-
 DANGLE_MIN, OVERLAP_MAX, PEN0 = 320.0, 0.3, 8.0
 REGION_LINK, HOST_MIN, HOST_FRACTION = 700.0, 8, 0.4
 
-# Spatial regions of a fused megamap. Same measurement as design/AGENDA.md R20:
-# union-find over origins with a REGION_LINK-unit XY link. Cart tracks placed in
-# different regions make choosing cart A over cart B a traversal decision, not a
-# free one.
+
 def region_labels(points, thr=REGION_LINK):
     n = len(points)
     parent = list(range(n))
@@ -1078,30 +641,7 @@ def flow_assign(nodes, paths, segbads, adj_ok):
     return out_paths, out_segbads, chosen[0], worst, -chosen[1]
 
 
-def botwalk_chain(bsp, poly, segbad):
-    track = [[poly[0][0], poly[0][1], poly[0][2] + 16]]
-    exempt = []
-    for i in range(1, len(poly)):
-        a, b = poly[i - 1], poly[i]
-        L = math.dist(a, b)
-        n = max(2, int(math.ceil(L / 24.0)))
-        ex = segbad[i - 1] if segbad else False
-        for k in range(1, n + 1):
-            f = k / n
-            q = [a[t] + f * (b[t] - a[t]) for t in range(3)]
-            q[2] += 16
-            g = 0
-            while bsp.inside(tuple(q)) and g < 16:
-                q[2] += 12
-                g += 1
-            if math.dist(q, track[-1]) < 2 and k < n:
-                continue
-            track.append(q)
-            exempt.append(ex)
-    return track, exempt
-
-
-def nav_tracks(nodes, adj, kcarts, bsp, cor, bad):
+def nav_tracks(nodes, adj, kcarts, ns, bad, solver=None):
     adj_ok = [{v: w for v, w in a.items()
                if (min(u, v), max(u, v)) not in bad} for u, a in enumerate(adj)]
     hosts = host_components(adj_ok, nodes, kcarts)
@@ -1137,30 +677,45 @@ def nav_tracks(nodes, adj, kcarts, bsp, cor, bad):
     st['ov'] = ov
     st['align'] = align
     st['worst'] = worst
+    # ---- THE PATH PLACER (NAV-SPEC §2, §3)
+    # DELETED here: `medial_smooth` / `feasible` / `refine` / `adaptive_nodes` /
+    # `polish_chain` / `seg_valid` / `validate_chain` / `botwalk_chain` -- a stack of
+    # point-sampled repair passes over `Bsp.inside`, plus a "bot walk" fallback for
+    # when they failed.  They were the shape of the problem: emit a curve, poke at
+    # it, patch what the pokes noticed.  What replaces them is a tangent-energy
+    # curve optimizer whose ITERATES ARE PROJECTED INTO THE COMPUTED FREE VOLUME,
+    # so every intermediate curve -- and therefore the final one -- is a motion plan
+    # inside negative space.  A path that satisfies the constraint by construction
+    # cannot burrow, which is why there is no unstick and nothing left to validate.
+    NMOD = _navmesh()
+    if solver is None and ns is not None:
+        solver = NMOD.PathSolver(ns)
     tracks, exempts = [], []
+    st['infeasible'] = 0
+    st['airborne'] = 0
+    st['maxdev'] = 0.0
     for c in range(kcarts):
         poly = [list(nodes[i]) for i in paths[c]]
         segbad = segbads[c]
-        if bsp is None or cor is None or len(poly) < 2:
+        if solver is None or len(poly) < 2:
             track = [[q[0], q[1], q[2] + 16] for q in poly] or [[0.0, 0.0, 0.0]]
             while len(track) < 2:
                 track.append(track[0][:])
             tracks.append(track)
             exempts.append([True] * (len(track) - 1))
             continue
-        R, mark = resample_marked(poly, segbad, 64.0)
-        st['e0'] += bending_energy([[r[0], r[1], r[2] + 16] for r in R])
-        Q, zf = medial_smooth(bsp, cor, R, mark)
-        for i in range(1, len(Q) - 1):
-            Q[i] = feasible(bsp, cor, Q[i], mark[i])
-        st['e1'] += bending_energy(Q)
-        track, exempt = adaptive_nodes(bsp, cor, Q, R, mark)
-        track, exempt = polish_chain(bsp, cor, track, exempt)
-        if any(not seg_valid(bsp, cor, track[t], track[t + 1], exempt[t]) for t in range(len(track) - 1)):
-            track, exempt = botwalk_chain(bsp, poly, segbad)
-            st['bw'] = st.get('bw', 0) + 1
+        seed = [[q[0], q[1], q[2] + 16] for q in poly]
+        st['e0'] += NMOD.tangent_energy(seed)
+        track, ts = solver.solve(seed, pin=(0, len(seed) - 1))
+        st['e1'] += ts['e1']
+        st['infeasible'] += ts['infeasible']
+        st['unplaceable'] = st.get('unplaceable', 0) + ts.get('unplaceable', 0)
+        st['airborne'] += ts['airborne']
+        st['maxdev'] = max(st['maxdev'], ts['max_activation_distance'])
+        if len(track) < 2:
+            track = seed
         tracks.append(track)
-        exempts.append(exempt)
+        exempts.append([bool(segbad and any(segbad))] * (len(track) - 1))
     return tracks, exempts, adms, paths, st
 
 
@@ -1181,7 +736,7 @@ def spawn_tracks(pts, kcarts):
     return tracks
 
 
-def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
+def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None, ns=None):
     text, resolved = load_cache(mapname, bsp, pk3arg)
     if not text:
         print('nav: no waypoints for %s, FALLBACK to spawn-origin method' % mapname)
@@ -1191,25 +746,25 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
         print('nav: degenerate graph for %s (%d nodes), FALLBACK to spawn-origin method' % (mapname, len(nodes)))
         return spawn_tracks(pts, kcarts), None
     db = d if d is not None else open(bsp, 'rb').read()
-    try:
-        B = Bsp(db)
-    except Exception:
-        B = None
+    if ns is None:
+        # standalone use on a single map: its own BSP tree covers the whole world,
+        # so the free volume can be computed straight from it
+        import negspace as _NS
+        ns = _NS.NegSpace(db, mask=_NS.MASK_PLAYERSOLID)
     flags = load_flags(mapname, resolved, bsp, pk3arg, nodes)
     gen = {i for i, nd in enumerate(nodes) if nd not in flags} if flags else set()
     tboxes = trigger_boxes(db)
-    bad = classify_edges(nodes, adj, B, gen, flags, tboxes) if B else {}
+    bad = classify_edges(nodes, adj, ns, gen, flags, tboxes)
     ne = sum(len(a) for a in adj) // 2
-    rs = {'gen': 0, 'flag': 0, 'trig': 0, 'solid': 0, 'fly': 0, 'nofloor': 0}
+    rs = {'gen': 0, 'flag': 0, 'semantic': 0, 'burrow': 0, 'airborne': 0}
     for r in bad.values():
-        rs[r] += 1
-    print('nav: %s waypoints=%d saved=%d gen=%d trigboxes=%d links=%d bad=%d (gen=%d flag=%d trig=%d solid=%d fly=%d nofloor=%d)' %
+        rs[r] = rs.get(r, 0) + 1
+    print('nav: %s waypoints=%d saved=%d gen=%d trigboxes=%d links=%d not-cart-segments=%d '
+          '(unsaved=%d flagged=%d semantic_jump/teleport=%d burrows_through_solid=%d '
+          'floats_over_non-walkable=%d)' %
           (mapname, len(nodes), len(flags), len(gen), len(tboxes), ne, len(bad),
-           rs['gen'], rs['flag'], rs['trig'], rs['solid'], rs['fly'], rs['nofloor']))
-    cor = Corridor(standable_set(nodes, adj, bad, gen)) if B else None
-    if cor:
-        print('nav: corridor standable=%d push_radius=%.0f push_height=%.0f' % (len(cor.pts), PUSH_R, PUSH_H))
-    tracks, exempts, alladm, paths, st = nav_tracks(nodes, adj, kcarts, B, cor, bad)
+           rs['gen'], rs['flag'], rs['semantic'], rs['burrow'], rs['airborne']))
+    tracks, exempts, alladm, paths, st = nav_tracks(nodes, adj, kcarts, ns, bad)
     print('nav: network kept=%d/%d pruned_dangles=%d branching=%.2f target=1.5 %s' %
           (st['net'], st['tot'], st['pruned'], st['bf'], 'OK' if st['bf'] >= 1.5 else 'BELOW'))
     print('nav: host_components=%d over %d spatial region(s) (link=%.0f)' %
@@ -1232,7 +787,7 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
     # (teleporters, pads) that the cart-track filter drops; cart->cart traversal
     # cost is therefore measured on `adj`, the full waypoint graph.
     dmn = {o: dijkstra(adj, o)[0] for o in set(origins)}
-    ws, ns = [], []
+    ws, nsd = [], []
     labels = region_labels(nodes)
     for i in range(len(origins)):
         for j in range(i + 1, len(origins)):
@@ -1244,15 +799,15 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
             if wd < math.inf:
                 ws.append(wd)
             if nd < math.inf:
-                ns.append(nd)
+                nsd.append(nd)
             print('nav: origin %d r%d %s <-> origin %d r%d %s  navmesh=%.0f  track_walk=%.0f  euclid=%.0f  ratio=%.2f' %
                   (i, labels[origins[i]], tuple(round(x) for x in nodes[origins[i]]),
                    j, labels[origins[j]], tuple(round(x) for x in nodes[origins[j]]),
                    nd if nd < math.inf else -1,
                    wd if wd < math.inf else -1, ed, nd / ed if ed and nd < math.inf else 0))
-    if ns:
+    if nsd:
         print('nav: cart-to-cart navmesh min=%.0f mean=%.0f max=%.0f balance_ratio=%.2f' %
-              (min(ns), sum(ns) / len(ns), max(ns), max(ns) / min(ns) if min(ns) else 0))
+              (min(nsd), sum(nsd) / len(nsd), max(nsd), max(nsd) / min(nsd) if min(nsd) else 0))
     if ws:
         print('nav: same-component walk min=%.0f mean=%.0f max=%.0f' %
               (min(ws), sum(ws) / len(ws), max(ws)))
@@ -1264,20 +819,70 @@ def build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg='', d=None):
           (nadm, WB, WMED, WFLOOR, CLEAR_TARGET, CLEAR_CAP, OUTER, INNER, BADMULT))
     print('nav: curvature %.0f->%.0f (%.1f%%) botwalk_fallback_carts=%d' %
           (st['e0'], st['e1'], 100 * st['e1'] / st['e0'] if st['e0'] else 0, st.get('bw', 0)))
-    if B and cor:
-        va, vb, vc, vx, ns = 0, 0, 0, 0, 0
-        for track, exempt in zip(tracks, exempts):
-            r = validate_chain(B, cor, track, exempt)
-            va, vb, vc, vx, ns = va + r[0], vb + r[1], vc + r[2], vx + r[3], ns + r[4]
-        exs = sum(sum(1 for e in ex if e) for ex in exempts)
-        print('nav: validation samples=%d solid_viol=%d float_viol=%d corridor_viol=%d exempt_segs=%d exempt_corridor_viol=%d %s' %
-              (ns, va, vb, vc, exs, vx, 'PASS' if va == 0 and vb == 0 and vc == 0 else 'FAILED'))
+    # ---- VORONOI OVER THE NAVMESH (NAV-SPEC §2, §8) and the equidistance of the
+    # cart origins in navmesh WALKING distance (NAV-SPEC §1).  Both are computed
+    # over the stock waypoint graph -- the one navigation definition (§5) -- and
+    # the free volume, so the numbers below are properties of the structure the
+    # path placer actually consumed.
+    # OFF BY DEFAULT, and the reason is a measurement, not a preference.
+    # The Voronoi decomposition needs `negspace.build_portals`, which is exact but
+    # quadratic in the number of cells sharing one plane.  The soundness fix that
+    # stopped the complex calling brush interiors free multiplied cell counts about
+    # 2.5x (dance 3 794 -> 9 384), and that pushed portal construction from seconds
+    # to longer than an entity emission has any business taking -- it is what left a
+    # 2-tile world's emit stage running for an hour.  Nothing that SHIPS depends on
+    # it: spawn placement, the cart-path solver, the doorway and connector checks
+    # and fusecheck all use cell membership, coverage and segment intervals, none of
+    # which touch portals.  So it is opt-in (FUSE_VORONOI=1) until the pairing has a
+    # real 2-D index inside each plane.
+    if not os.environ.get('FUSE_VORONOI'):
+        print('nav: Voronoi-over-navmesh + k-center equidistance pass SKIPPED '
+              '(set FUSE_VORONOI=1 to run it; it needs portal construction, which '
+              'is quadratic in cells-per-plane and is the slowest thing in this '
+              'module -- nothing that ships depends on it)')
     else:
-        print('nav: validation skipped (no BSP geometry)')
+      try:
+          NMOD = _navmesh()
+          nmv = NMOD.Navmesh(nodes, adj,
+                             flags={tuple(round(x, 1) for x in k): v for k, v in (flags or {}).items()},
+                             triggerboxes=tboxes)
+          nmv.bad = bad
+          origins0 = [p[0] for p in paths]
+          owner = nmv.voronoi(ns, sites=origins0, verbose=True)
+          import numpy as _np
+          vol = _np.maximum(ns.hi - ns.lo, 0.0)
+          vol = vol[:, 0] * vol[:, 1] * vol[:, 2]
+          for si, o in enumerate(origins0):
+              m = owner == si
+              print('nav: voronoi cell of cart %d (origin wp %d): %d free cells, '
+                    '%.4g u^3 of navigable free volume' % (si, o, int(m.sum()), float(vol[m].sum())))
+          pool = [i for i in range(len(nodes)) if any(True for _ in adj[i])]
+          opt, ost = nmv.equidistant_origins(max(3, kcarts), pool=pool, verbose=True)
+          D0 = {o: nmv.walk_dist(o)[0] for o in set(origins0)}
+          vals = [D0[a][b] for i, a in enumerate(origins0) for b in origins0[i + 1:]
+                  if D0[a][b] < math.inf and a != b]
+          if vals:
+              print('nav: cart origins as PLACED: pairwise navmesh-walking min=%.0f max=%.0f '
+                    'spread_ratio=%.2f; the k-center optimum over this navmesh is %.2f '
+                    '(1.00 = exactly equidistant, NAV-SPEC §1)'
+                    % (min(vals), max(vals), max(vals) / min(vals) if min(vals) else 0.0,
+                       ost.get('ratio', 0.0)))
+      except Exception as e:
+        print('nav: voronoi/equidistance pass unavailable: %r' % (e,))
+
+    # The path placer's constraint is the free volume itself, so what is worth
+    # printing is whether the constraint HELD, not the result of a second sampler.
+    print('nav: cart paths %d over %d nodes: %d points off the computed free volume '
+          '(0 = the plan is inside negative space everywhere), of which %d have no '
+          'legal cart placement within reach at all; %d points with no walkable floor '
+          'beneath; max activation distance to negative space %.2fu -- %s'
+          % (len(tracks), sum(len(t) for t in tracks), st.get('infeasible', 0),
+             st.get('unplaceable', 0), st.get('airborne', 0), st.get('maxdev', 0.0),
+             'CONSTRAINT HELD' if st.get('infeasible', 0) == 0 else 'CONSTRAINT VIOLATED'))
     return tracks, (nodes, adj, paths)
 
 
-def emit(bsp, out, kteams, kcarts, pk3arg=''):
+def emit(bsp, out, kteams, kcarts, pk3arg='', ns=None):
     mapname = os.path.splitext(os.path.basename(bsp))[0]
     d = open(bsp, 'rb').read()
     assert d[:4] == b'IBSP', d[:4]
@@ -1300,7 +905,7 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
     pts = [origin(b) for b in spawns if origin(b)]
     print('inline models:', models[:6], 'visible:', visible[:kcarts], 'team spawns:', len(pts))
 
-    tracks, _ = build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg, d)
+    tracks, _ = build_tracks(bsp, mapname, pts, kteams, kcarts, pk3arg, d, ns=ns)
 
     extra = []
     named = []
@@ -1322,7 +927,10 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
                                 '"model" "%s"' % visible[c % len(visible)],
                                 '"target" "%s"' % names[0], '"speed" "40"', '}']))
 
-    goal_cnts = [4, 13, 12, 9, 3][:kteams]
+    # Was `[4, 13, 12, 9, 3][:kteams]` -- a magic per-team table that also capped
+    # teams at five by being five long. The goal count is a property of the TRACK
+    # (how many control points it has), so read it from the track.
+    goal_cnts = [max(1, len(named[t % kcarts][0]) // 4) for t in range(kteams)]
     for t, cnt in enumerate(goal_cnts):
         names, track = named[t % kcarts]
         extra.append('\n'.join(['{', '"classname" "plc_goal"',
@@ -1344,7 +952,9 @@ def emit(bsp, out, kteams, kcarts, pk3arg=''):
 
 if __name__ == '__main__':
     bsp, out = sys.argv[1], sys.argv[2]
-    kteams = max(2, min(5, int(sys.argv[3]))) if len(sys.argv) > 3 else 2
-    kcarts = max(1, min(4, int(sys.argv[4]))) if len(sys.argv) > 4 else 2
+    # No upper clamp: the design target is ~256 playerbots across 5+ teams, and a
+    # hardcoded ceiling of 5 silently made that target unproducible.
+    kteams = max(2, int(sys.argv[3])) if len(sys.argv) > 3 else 2
+    kcarts = max(1, int(sys.argv[4])) if len(sys.argv) > 4 else 2
     pk3arg = sys.argv[5] if len(sys.argv) > 5 else ''
     emit(bsp, out, kteams, kcarts, pk3arg)

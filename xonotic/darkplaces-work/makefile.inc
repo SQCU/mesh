@@ -145,6 +145,7 @@ OBJ_COMMON= \
 	r_lightning.o \
 	r_modules.o \
 	r_shadow.o \
+	r_ink.o \
 	r_sky.o \
 	r_sprites.o \
 	sbar.o \

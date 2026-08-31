@@ -102,7 +102,15 @@ def contortion(nodes, dadj, sa, sb, k=6):
     return min(ratios), sum(ratios) / len(ratios), max(ratios), len(ratios)
 
 
-def occlusion_probe(bsp, clipgrid, sa, sb):
+def sightline(ns, clipgrid, sa, sb):
+    """Is the join's straight line actually OPEN, and is it clip-blocked?
+
+    DELETED here: `occlusion_probe`, which stepped 24 units at a time along nine
+    rays asking `mkentfile.Bsp.inside` -- a point sampler over an
+    AABB-from-plane-distance grid, i.e. exactly the class of proxy this toolchain
+    no longer contains.  A segment's intersection with a convex free cell is an
+    interval, so the OPEN part of each ray is computed in closed form and what is
+    reported is the fraction of the line that is genuinely open, in units."""
     mid = [(sa[i] + sb[i]) / 2 for i in range(3)]
     d = [sb[i] - sa[i] for i in range(3)]
     L = math.hypot(d[0], d[1]) or 1.0
@@ -114,16 +122,9 @@ def occlusion_probe(bsp, clipgrid, sa, sb):
         for lat in (-64, 0, 64):
             tgt = [mid[0] + perp[0] * lat, mid[1] + perp[1] * lat, mid[2] + 40]
             samples += 1
-            n = max(2, int(math.dist(eye, tgt) // 24))
-            for t in range(1, n):
-                f = t / n
-                q = (eye[0] + (tgt[0] - eye[0]) * f, eye[1] + (tgt[1] - eye[1]) * f,
-                     eye[2] + (tgt[2] - eye[2]) * f)
-                if bsp.inside(q):
-                    occluded += 1
-                    break
+            if ns.segment_gaps(eye, tgt):
+                occluded += 1
     clipblocked = 0
-    n = max(2, int(math.dist(sa, sb) // 24))
     pa = (sa[0], sa[1], sa[2] + 32)
     pb = (sb[0], sb[1], sb[2] + 32)
     for lo, hi in clipgrid:
@@ -187,7 +188,13 @@ def analyze(outdir):
     d = open(os.path.join(outdir, 'fused.bsp'), 'rb').read()
     joins = json.load(open(os.path.join(outdir, 'fused.joins.json')))
     nodes, adj = M.parse_cache(open(os.path.join(outdir, 'fused.waypoints.cache')).read())
-    bsp = M.Bsp(d)
+    import negspace as NS
+    nspath = os.path.join(outdir, 'fused.negspace.npz')
+    if os.path.exists(nspath):
+        ns = NS.load_saved(nspath)
+    else:
+        # a single map's own tree does cover its whole world, so this is exact there
+        ns = NS.NegSpace(d, mask=NS.MASK_PLAYERSOLID)
     clip = clip_brushes(d)
     dadj, idx = build_dir_adj(nodes, adj, joins.get('bot_jumps', []))
     names = [m['name'] for m in joins['maps']]
@@ -207,19 +214,19 @@ def analyze(outdir):
     print('wrote %s (%d maps, %d nav nodes, %d joins, %d lights, %d clip brushes)'
           % (svg, len(names), len(nodes), len(joins['joins']), len(lights), len(clip)))
     def dest_ok(p):
-        q = (p[0], p[1], p[2] + 24)
-        return (not bsp.inside(q)) and bsp.floor(p[0], p[1], p[2] + 24) is not None
+        # standable in the ASSEMBLED world's computed free volume
+        return ns.standing_point([p[0], p[1], p[2] + 24]) is not None
     print('per-edge diagnostics (contortion = walk/straight-line, fuzzed over nearest entry/exit waypoints;')
     print('clip/occlusion along the straight line gate CORRIDORS only -- teleport/pad transport is instant/ballistic,')
     print('so for those the meaningful check is whether both endpoints are clear & standable):')
     for jn in joins['joins']:
         sa, sb = jn['sa'], jn['sb']
         ct = contortion(nodes, dadj, sa, sb)
-        occ, nsmp, clipn = occlusion_probe(bsp, clip, sa, sb)
+        occ, nsmp, clipn = sightline(ns, clip, sa, sb)
         ctstr = ('min=%.2f mean=%.2f max=%.2f (n=%d)' % ct) if ct else 'UNREACHABLE'
         tag = ' [EXCL/prominent]' if jn['exclusive'] else ' [redundant]'
         if jn['kind'] == 'corridor':
-            phys = 'clip-blocked=%s | passage-occlusion %d/%d rays' % ('YES(%d)' % clipn if clipn else 'no', occ, nsmp)
+            phys = 'clip-blocked=%s | sightlines blocked %d/%d (exact free-volume intervals)' % ('YES(%d)' % clipn if clipn else 'no', occ, nsmp)
         else:
             phys = 'endpoints-clear=%s (near=%s far=%s) | straight-line clip/occ n/a (instant transport)' % (
                 'YES' if dest_ok(sa) and dest_ok(sb) else 'NO',

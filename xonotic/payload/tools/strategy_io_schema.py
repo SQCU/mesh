@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-RESP_WIDTH = 8
+RESP_WIDTH = 4
 OBS_WIDTH = 40
 CART_WIDTH = 12
 EVT_WIDTH = 6
@@ -9,7 +9,9 @@ MAX_CARTS = 4
 
 OBS = dict(ID=0, TEAM=1, HEALTH=2, ARMOR=3, AMMO=4, POS_X=5, POS_Y=6, POS_Z=7,
            VEL_X=8, VEL_Y=9, VEL_Z=10, WEAPONS=11, POWER=12, TSS=13, CELL=14,
-           NCART=15, NCART_D=16, ALIVE=17, CONTROL=18)
+           NCART=15, NCART_D=16, ALIVE=17, CONTROL=18, APPLIED_TARGET=19,
+           TARGET_RESOLVED=20, GOAL_TARGET=21, GOAL_DISTANCE=22, GOAL_MATCH=23,
+           TARGET_TOUCH=24)
 CS = dict(ID=0, DEPTH=1, LENGTH=2, CTRL=3, SPEED=4, IDLE=5, BANKMASK=6, PROGRESS=7,
           POS_X=8, POS_Y=9, POS_Z=10)
 EVT = dict(CELL=0, KIND=1, TEAM=2, SUBJECT=3, VALUE=4, TIME=5)
@@ -18,7 +20,7 @@ EVT_KIND = dict(ITEM_GONE=0, ITEM_HERE=1, ENEMY_HERE=2, RIVAL_HERE=3,
                 # CELL is the source cell, SUBJECT the destination, VALUE the
                 # link length / 1024. Map geometry, not perception.
                 CELL_LINK=4)
-SC = dict(TARGET=0, GAIN=1, LANE=2, HUNT=3, EXPLORE=4, COMMIT=5, SPAWN=6, LEAD=7)
+SC = dict(TARGET=0, GAIN=1, COMMIT=2, SPAWN=3)
 
 TGT_CART_BASE = 0
 TGT_ITEM_BASE = 65536

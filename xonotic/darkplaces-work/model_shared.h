@@ -54,6 +54,7 @@ typedef struct skinframe_s
 	rtexture_t *glow; // glow only (fullbrights)
 	rtexture_t *fog; // alpha of the base texture (if not opaque)
 	rtexture_t *reflect; // colored mask for cubemap reflections
+	rtexture_t *pbr; // glTF-style ORM: r=ambient occlusion g=roughness b=metallic
 	// accounting data for hash searches:
 	// the compare variables are used to identify internal skins from certain
 	// model formats
@@ -502,6 +503,10 @@ typedef struct q3shaderinfo_s
 	float specularscalemod;
 	float specularpowermod;
 
+	// metallic-roughness
+	float pbrroughnessmod;
+	float pbrmetallicmod;
+
 	// rtlighting ambient addition
 	float rtlightambient;
 #define Q3SHADERINFO_COMPARE_END rtlightambient
@@ -610,6 +615,7 @@ typedef struct texture_s
 	rtexture_t *fogtexture; // alpha of the base texture (if not opaque)
 	rtexture_t *reflectmasktexture; // mask for fake reflections
 	rtexture_t *reflectcubetexture; // fake reflections cubemap
+	rtexture_t *pbrtexture; // metallic-roughness ORM map (r_texture_neutralpbr when absent)
 	rtexture_t *backgroundbasetexture; // original texture without pants/shirt/glow
 	rtexture_t *backgroundnmaptexture; // normalmap (bumpmap for dot3)
 	rtexture_t *backgroundglosstexture; // glossmap (for dot3)
@@ -682,6 +688,10 @@ typedef struct texture_s
 	// gloss
 	float specularscalemod;
 	float specularpowermod;
+
+	// metallic-roughness (dpRoughness / dpMetallic); multiply the ORM map channels
+	float pbrroughnessmod;
+	float pbrmetallicmod;
 
 	// diffuse and ambient
 	float rtlightambient;

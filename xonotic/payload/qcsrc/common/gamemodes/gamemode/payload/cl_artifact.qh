@@ -1,0 +1,8 @@
+#pragma once
+#ifdef CSQC
+// The traversing paint artifact: a knot curve embedded in R^5, rotated by SO(5)
+// plane rotations, projected down to R^3 for the client view, swept into a tube,
+// drifting across the level and dropping ink globs on the world and the sky.
+// The payload cart is rendered as an instance of the same body.
+void Artifact_Setup();
+#endif

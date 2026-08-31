@@ -46,7 +46,6 @@ const float ST_PAYLOAD_POINTS = 2;
 const int PLC_CART_TURN = BIT(0);
 const int PLC_CHECKPOINT = BIT(0);
 
-const float PLC_TICK = 0.1;
 const float PLC_CURVE_STEPS = 16;
 
 .entity plc_next;

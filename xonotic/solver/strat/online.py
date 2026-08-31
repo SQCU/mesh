@@ -13,6 +13,20 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 
 from .cast_header import Wally, Widths, elle
+# The loss coefficients, named once and in one place. `rl-training-spec.md §6`
+# gives the shape L = L_pg + c_W L_W + c_L L_L + c_D L_dyn + c_reg L_reg; these
+# are those c's. They are listed as [OPEN] in the spec, so they are a tunable
+# table rather than a derivation — but they are a TABLE, not five floats sprayed
+# through an expression where nobody can find or vary them.
+LOSS_WEIGHTS = {
+    "actor":  1.0,    # L_pg, the policy gradient itself
+    "winnie": 0.5,    # c_W -- WINNIE's masked regression
+    "lou":    0.5,    # c_L -- LOU's masked regression
+    "vera":   0.25,   # VERA_WINNIE + VERA_LOU, the auxiliary pair
+    "dina":   0.25,   # c_D -- the dynamics ensemble
+    "elle":   1e-3,   # c_reg -- ELLE's pull toward logit 0
+}
+
 from .replay import Replay
 from .strategy import strategy, dynamics, logp_of
 from .replay_store import RawReplayBuffer
@@ -264,7 +278,7 @@ class OnlineLearner:
 
         # VERA_WINNIE / VERA_LOU: the auxiliary probes on the QUERY, regressed
         # toward Winnie and Lou. Two, because two values are estimated.
-        aux = 0.5 * (
+        aux = 0.5 * (  # the two Veras contribute equally; see LOSS_WEIGHTS["vera"]
             mx.mean(mx.square(current.aux_winnie - mx.stop_gradient(current.value_winnie)))
             + mx.mean(mx.square(current.aux_lou - mx.stop_gradient(current.value_lou)))
         )
@@ -281,8 +295,14 @@ class OnlineLearner:
         # weighted sampling and trained peaks without collapsing.
         regularization = elle(current.logits)
 
-        total = (actor + 0.5 * winner_loss + 0.5 * loser_loss
-                 + 0.25 * aux + 0.25 * dynamics_value + 1e-3 * regularization)
+        total = (
+            LOSS_WEIGHTS["actor"] * actor
+            + LOSS_WEIGHTS["winnie"] * winner_loss
+            + LOSS_WEIGHTS["lou"] * loser_loss
+            + LOSS_WEIGHTS["vera"] * aux
+            + LOSS_WEIGHTS["dina"] * dynamics_value
+            + LOSS_WEIGHTS["elle"] * regularization
+        )
 
         advantage = mx.mean(mx.stop_gradient(error))
         weighted_advantage = mx.mean(mx.stop_gradient(ratio * error))

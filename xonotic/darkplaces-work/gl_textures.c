@@ -1182,8 +1182,8 @@ static void R_UploadPartialTexture(gltexture_t *glt, const unsigned char *data, 
 	if (data == NULL)
 		Sys_Error("R_UploadPartialTexture \"%s\": partial update with NULL pixels", glt->identifier);
 
-	if (glt->texturetype != GLTEXTURETYPE_2D)
-		Sys_Error("R_UploadPartialTexture \"%s\": partial update of type other than 2D", glt->identifier);
+	if (glt->texturetype != GLTEXTURETYPE_2D && glt->texturetype != GLTEXTURETYPE_3D)
+		Sys_Error("R_UploadPartialTexture \"%s\": partial update of type other than 2D or 3D", glt->identifier);
 
 	if (glt->textype->textype == TEXTYPE_PALETTE)
 		Sys_Error("R_UploadPartialTexture \"%s\": partial update of paletted texture", glt->identifier);
@@ -1191,7 +1191,7 @@ static void R_UploadPartialTexture(gltexture_t *glt, const unsigned char *data, 
 	if (glt->flags & (TEXF_MIPMAP | TEXF_PICMIP))
 		Sys_Error("R_UploadPartialTexture \"%s\": partial update not supported with MIPMAP or PICMIP flags", glt->identifier);
 
-	if (glt->inputwidth != glt->tilewidth || glt->inputheight != glt->tileheight || glt->tiledepth != 1)
+	if (glt->inputwidth != glt->tilewidth || glt->inputheight != glt->tileheight || (glt->texturetype == GLTEXTURETYPE_2D && glt->tiledepth != 1) || (glt->texturetype == GLTEXTURETYPE_3D && glt->inputdepth != glt->tiledepth))
 		Sys_Error("R_UploadPartialTexture \"%s\": partial update not supported with stretched or special textures", glt->identifier);
 
 	// update a portion of the image
@@ -1210,7 +1210,16 @@ static void R_UploadPartialTexture(gltexture_t *glt, const unsigned char *data, 
 			GL_ActiveTexture(0);
 			oldbindtexnum = R_Mesh_TexBound(0, gltexturetypeenums[glt->texturetype]);
 			qglBindTexture(gltexturetypeenums[glt->texturetype], glt->texnum);CHECKGLERROR
-			qglTexSubImage2D(GL_TEXTURE_2D, 0, fragx, fragy, fragwidth, fragheight, glt->glformat, glt->gltype, data);CHECKGLERROR
+			// `data` is a contiguous fragwidth*fragheight(*fragdepth) block, not a
+			// window into the full image - the caller packs it.
+			if (glt->texturetype == GLTEXTURETYPE_3D)
+			{
+				qglTexSubImage3D(GL_TEXTURE_3D, 0, fragx, fragy, fragz, fragwidth, fragheight, fragdepth, glt->glformat, glt->gltype, data);CHECKGLERROR
+			}
+			else
+			{
+				qglTexSubImage2D(GL_TEXTURE_2D, 0, fragx, fragy, fragwidth, fragheight, glt->glformat, glt->gltype, data);CHECKGLERROR
+			}
 			qglBindTexture(gltexturetypeenums[glt->texturetype], oldbindtexnum);CHECKGLERROR
 		}
 		break;

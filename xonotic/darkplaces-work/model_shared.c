@@ -1755,6 +1755,8 @@ void Mod_LoadQ3Shaders(void)
 			shader.transparentsort = TRANSPARENTSORT_DISTANCE;
 			shader.specularscalemod = 1;
 			shader.specularpowermod = 1;
+			shader.pbrroughnessmod = 1;
+			shader.pbrmetallicmod = 0;
 			shader.rtlightambient = 0;
 			// WHEN ADDING DEFAULTS HERE, REMEMBER TO PUT DEFAULTS IN ALL LOADERS
 			// JUST GREP FOR "specularscalemod = 1".
@@ -2314,6 +2316,14 @@ void Mod_LoadQ3Shaders(void)
 				{
 					shader.rtlightambient = atof(parameter[1]);
 				}
+				else if (!strcasecmp(parameter[0], "dproughness") && numparameters >= 2)
+				{
+					shader.pbrroughnessmod = atof(parameter[1]);
+				}
+				else if (!strcasecmp(parameter[0], "dpmetallic") && numparameters >= 2)
+				{
+					shader.pbrmetallicmod = atof(parameter[1]);
+				}
 				else if (!strcasecmp(parameter[0], "dpoffsetmapping") && numparameters >= 2)
 				{
 					if (!strcasecmp(parameter[1], "disable") || !strcasecmp(parameter[1], "none") || !strcasecmp(parameter[1], "off"))
@@ -2483,7 +2493,9 @@ qboolean Mod_LoadTextureFromQ3Shader(texture_t *texture, const char *name, qbool
 	texture->offsetscale = 1;
 	texture->offsetbias = 0;
 	texture->specularscalemod = 1;
-	texture->specularpowermod = 1; 
+	texture->specularpowermod = 1;
+	texture->pbrroughnessmod = 1;
+	texture->pbrmetallicmod = 0; 
 	texture->rtlightambient = 0;
 	texture->transparentsort = TRANSPARENTSORT_DISTANCE;
 	// WHEN ADDING DEFAULTS HERE, REMEMBER TO PUT DEFAULTS IN ALL LOADERS
@@ -2682,6 +2694,8 @@ nothing                GL_ZERO GL_ONE
 		texture->offsetbias = shader->offsetbias;
 		texture->specularscalemod = shader->specularscalemod;
 		texture->specularpowermod = shader->specularpowermod;
+		texture->pbrroughnessmod = shader->pbrroughnessmod;
+		texture->pbrmetallicmod = shader->pbrmetallicmod;
 		texture->rtlightambient = shader->rtlightambient;
 		if (shader->dpreflectcube[0])
 			texture->reflectcubetexture = R_GetCubemap(shader->dpreflectcube);
@@ -2851,6 +2865,8 @@ void Mod_LoadCustomMaterial(texture_t *texture, const char *name, int superconte
 	texture->offsetbias = 0;
 	texture->specularscalemod = 1;
 	texture->specularpowermod = 1;
+	texture->pbrroughnessmod = 1;
+	texture->pbrmetallicmod = 0;
 	texture->rtlightambient = 0;
 	texture->transparentsort = TRANSPARENTSORT_DISTANCE;
 	// WHEN ADDING DEFAULTS HERE, REMEMBER TO PUT DEFAULTS IN ALL LOADERS

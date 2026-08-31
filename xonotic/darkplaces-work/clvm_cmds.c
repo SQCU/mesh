@@ -4286,6 +4286,10 @@ static void VM_CL_V_CalcRefdef(prvm_prog_t *prog)
 // "^.*//:Wh{\#:d*}:Wh{.*}" with "\2 = \1;"
 // "\n\n+" with "\n\n"
 
+static void VM_CL_ink_splat(prvm_prog_t *prog);
+static void VM_CL_ink_clear(prvm_prog_t *prog);
+static void VM_CL_ink_stat(prvm_prog_t *prog);
+
 prvm_builtin_t vm_cl_builtins[] = {
 NULL,							// #0 NULL function (not callable) (QUAKE)
 VM_CL_makevectors,				// #1 void(vector ang) makevectors (QUAKE)
@@ -4945,10 +4949,58 @@ VM_mesh_publish,					// #650
 VM_mesh_poll,					// #651
 NULL,							// #652
 VM_mesh_stat,					// #653
+VM_CL_ink_splat,				// #654 void(vector origin, float radius, vector color, float amount) ink_splat
+VM_CL_ink_clear,				// #655 void() ink_clear
+VM_CL_ink_stat,					// #656 float(float sel) ink_stat
 NULL
 };
 
 const int vm_cl_numbuiltins = sizeof(vm_cl_builtins) / sizeof(prvm_builtin_t);
+
+//====================================================================
+// world ink volume (see r_ink.c)
+//====================================================================
+
+// #654 void(vector origin, float radius, vector color, float amount) ink_splat
+static void VM_CL_ink_splat(prvm_prog_t *prog)
+{
+	vec3_t origin, color;
+	VM_SAFEPARMCOUNT(4, VM_CL_ink_splat);
+	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), origin);
+	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), color);
+	R_Ink_Splat(origin, PRVM_G_FLOAT(OFS_PARM1), color, PRVM_G_FLOAT(OFS_PARM3));
+}
+
+// #655 void() ink_clear
+static void VM_CL_ink_clear(prvm_prog_t *prog)
+{
+	VM_SAFEPARMCOUNT(0, VM_CL_ink_clear);
+	R_Ink_Clear();
+}
+
+// #656 float(float sel) ink_stat
+// 0 active, 1..3 resolution xyz, 4 world units per voxel, 5 splats accepted,
+// 6..8 volume mins xyz, 9..11 volume size xyz  (the volume covers the world model
+// bounds, so this is also how CSQC learns the extent of the level)
+static void VM_CL_ink_stat(prvm_prog_t *prog)
+{
+	int sel;
+	VM_SAFEPARMCOUNT(1, VM_CL_ink_stat);
+	sel = (int)PRVM_G_FLOAT(OFS_PARM0);
+	PRVM_G_FLOAT(OFS_RETURN) = 0;
+	if (!r_ink_state.enabled)
+		return;
+	switch (sel)
+	{
+	case 0: PRVM_G_FLOAT(OFS_RETURN) = 1; break;
+	case 1: case 2: case 3: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.resolution[sel - 1]; break;
+	case 4: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.spacing[0]; break;
+	case 5: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.splatstotal; break;
+	case 6: case 7: case 8: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.mins[sel - 6]; break;
+	case 9: case 10: case 11: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.size[sel - 9]; break;
+	default: break;
+	}
+}
 
 void VM_Polygons_Reset(prvm_prog_t *prog)
 {

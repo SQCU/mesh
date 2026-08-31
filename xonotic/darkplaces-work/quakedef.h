@@ -393,6 +393,7 @@ extern char engineversion[128];
 #include "world.h"
 #include "client.h"
 #include "render.h"
+#include "r_ink.h"
 #include "progs.h"
 #include "progsvm.h"
 #include "server.h"

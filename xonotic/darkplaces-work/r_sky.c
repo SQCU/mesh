@@ -302,10 +302,30 @@ static const unsigned short skyboxelement3s[6*2*3] =
 	20, 22, 23
 };
 
+/// Globs the artifact drops on the skybox stain it too: the accumulated mean ink
+/// colour modulates the sky entity's vertex colour.  One lerp per frame.
+static void R_Sky_InkTint(vec3_t out)
+{
+	vec3_t tint;
+	float coverage, k;
+	VectorSet(out, 1.0f, 1.0f, 1.0f);
+	if (!r_ink_skytint.value)
+		return;
+	R_Ink_GlobalTint(tint, &coverage);
+	k = bound(0.0f, coverage * r_ink_skytint.value, 1.0f);
+	if (k <= 0.0f)
+		return;
+	out[0] = 1.0f + (tint[0] - 1.0f) * k;
+	out[1] = 1.0f + (tint[1] - 1.0f) * k;
+	out[2] = 1.0f + (tint[2] - 1.0f) * k;
+}
+
 static void R_SkyBox(void)
 {
 	int i;
-	RSurf_ActiveCustomEntity(&skymatrix, &skyinversematrix, 0, 0, 1, 1, 1, 1, 6*4, skyboxvertex3f, skyboxtexcoord2f, NULL, NULL, NULL, NULL, 6*2, skyboxelement3i, skyboxelement3s, false, false);
+	vec3_t inktint;
+	R_Sky_InkTint(inktint);
+	RSurf_ActiveCustomEntity(&skymatrix, &skyinversematrix, 0, 0, inktint[0], inktint[1], inktint[2], 1, 6*4, skyboxvertex3f, skyboxtexcoord2f, NULL, NULL, NULL, NULL, 6*2, skyboxelement3i, skyboxelement3s, false, false);
 	for (i = 0;i < 6;i++)
 		if(skyboxskinframe[i])
 			R_DrawCustomSurface(skyboxskinframe[i], &identitymatrix, MATERIALFLAG_SKY | MATERIALFLAG_FULLBRIGHT | MATERIALFLAG_NOCULLFACE | MATERIALFLAG_NODEPTHTEST, i*4, 4, i*2, 2, false, false);
@@ -378,6 +398,7 @@ static void R_SkySphere(void)
 	double speedscale;
 	static qboolean skysphereinitialized = false;
 	matrix4x4_t scroll1matrix, scroll2matrix;
+	vec3_t inktint;
 	if (!skysphereinitialized)
 	{
 		skysphereinitialized = true;
@@ -395,7 +416,8 @@ static void R_SkySphere(void)
 	speedscale -= floor(speedscale);
 	Matrix4x4_CreateTranslate(&scroll2matrix, speedscale, speedscale, 0);
 
-	RSurf_ActiveCustomEntity(&skymatrix, &skyinversematrix, 0, 0, 1, 1, 1, 1, skysphere_numverts, skysphere_vertex3f, skysphere_texcoord2f, NULL, NULL, NULL, NULL, skysphere_numtriangles, skysphere_element3i, skysphere_element3s, false, false);
+	R_Sky_InkTint(inktint);
+	RSurf_ActiveCustomEntity(&skymatrix, &skyinversematrix, 0, 0, inktint[0], inktint[1], inktint[2], 1, skysphere_numverts, skysphere_vertex3f, skysphere_texcoord2f, NULL, NULL, NULL, NULL, skysphere_numtriangles, skysphere_element3i, skysphere_element3s, false, false);
 	R_DrawCustomSurface(r_refdef.scene.worldmodel->brush.solidskyskinframe, &scroll1matrix, MATERIALFLAG_SKY | MATERIALFLAG_FULLBRIGHT | MATERIALFLAG_NOCULLFACE | MATERIALFLAG_NODEPTHTEST                                            , 0, skysphere_numverts, 0, skysphere_numtriangles, false, false);
 	R_DrawCustomSurface(r_refdef.scene.worldmodel->brush.alphaskyskinframe, &scroll2matrix, MATERIALFLAG_SKY | MATERIALFLAG_FULLBRIGHT | MATERIALFLAG_NOCULLFACE | MATERIALFLAG_NODEPTHTEST | MATERIALFLAG_ALPHA | MATERIALFLAG_BLENDED, 0, skysphere_numverts, 0, skysphere_numtriangles, false, false);
 }

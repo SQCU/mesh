@@ -1755,6 +1755,8 @@ static void Mod_Q1BSP_LoadTextures(sizebuf_t *sb)
 		tx->offsetbias = 0;
 		tx->specularscalemod = 1;
 		tx->specularpowermod = 1;
+		tx->pbrroughnessmod = 1;
+		tx->pbrmetallicmod = 0;
 		tx->transparentsort = TRANSPARENTSORT_DISTANCE;
 		// WHEN ADDING DEFAULTS HERE, REMEMBER TO PUT DEFAULTS IN ALL LOADERS
 		// JUST GREP FOR "specularscalemod = 1".

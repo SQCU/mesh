@@ -732,6 +732,14 @@ static dllfunction_t multitexturefuncs[] =
 	{NULL, NULL}
 };
 
+static dllfunction_t texture3dcorefuncs[] =
+{
+	{"glTexImage3D", (void **) &qglTexImage3D},
+	{"glTexSubImage3D", (void **) &qglTexSubImage3D},
+	{"glCopyTexSubImage3D", (void **) &qglCopyTexSubImage3D},
+	{NULL, NULL}
+};
+
 static dllfunction_t texture3dextfuncs[] =
 {
 	{"glTexImage3DEXT", (void **) &qglTexImage3D},
@@ -1075,7 +1083,11 @@ void VID_CheckExtensions(void)
 
 	vid.support.ext_packed_depth_stencil = GL_CheckExtension("GL_EXT_packed_depth_stencil", NULL, "-nopackeddepthstencil", false);
 	vid.support.ext_stencil_two_side = GL_CheckExtension("GL_EXT_stencil_two_side", stenciltwosidefuncs, "-nostenciltwoside", false);
-	vid.support.ext_texture_3d = GL_CheckExtension("GL_EXT_texture3D", texture3dextfuncs, "-notexture3d", false);
+	// 3D textures have been core since OpenGL 1.2.  Drivers that ship them only as
+	// core - Apple's GL 2.1 among them - advertise no GL_EXT_texture3D and export no
+	// EXT-suffixed entrypoints, so check core first and keep the extension as the
+	// fallback for pre-1.2 drivers.
+	vid.support.ext_texture_3d = GL_CheckExtension("1.2", texture3dcorefuncs, "-notexture3d", true) || GL_CheckExtension("GL_EXT_texture3D", texture3dextfuncs, "-notexture3d", false);
 	vid.support.ext_texture_compression_s3tc = GL_CheckExtension("GL_EXT_texture_compression_s3tc", NULL, "-nos3tc", false);
 	vid.support.ext_texture_edge_clamp = GL_CheckExtension("GL_EXT_texture_edge_clamp", NULL, "-noedgeclamp", false) || GL_CheckExtension("GL_SGIS_texture_edge_clamp", NULL, "-noedgeclamp", false);
 	vid.support.ext_texture_filter_anisotropic = GL_CheckExtension("GL_EXT_texture_filter_anisotropic", NULL, "-noanisotropy", false);

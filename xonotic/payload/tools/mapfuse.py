@@ -22,6 +22,8 @@ import struct, sys, os, re, math, glob, random, subprocess, time, json
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
+import negspace as NS
+from negspace import box_H, subtract, bounds_of
 
 MARGIN, CORW, CORH, WALL, FLOORTHK = 896.0, 288.0, 224.0, 32.0, 32.0
 # CORR_SOFT is a SOFT budget used by the placement objective, not a refusal.  There is
@@ -84,7 +86,7 @@ def navigable_names(pk3):
 
 
 class Src:
-    def __init__(self, name, data, wptext, cachetext):
+    def __init__(self, name, data, wptext, cachetext, with_ns=True):
         self.name, self.data = name, data
         assert data[:4] == b'IBSP' and struct.unpack_from('<i', data, 4)[0] == 46, name
         L = lambda i: struct.unpack_from('<ii', data, 8 + i * 8)
@@ -138,71 +140,49 @@ class Src:
         self.navnodes, self.navadj = M.parse_cache(cachetext)
         self.wpset = {tuple(round(x, 1) for x in m1) for m1, m2, fl in self.wptriples
                       if m1 == m2 and not fl & M.WPF_BAD}
-        # NOTE: no M.Bsp(data) here.  That helper grids every brush AABB with an
-        # unguarded range() over cell indices, so one brush bounded only by oblique
-        # planes (catharsis has them) expands to a ~1e15-cell loop: the loader ate
-        # 75 GB of RSS and never returned.  Nothing in this file used the object.
-        ntex = len(self.textures)
+        # DELETED with this rewrite: `bgrid`/`cgrid` and `solid_brush_at`/
+        # `clip_brush_at`.  They answered "is this SOURCE point inside a SOURCE
+        # brush" and their answers were then used to decide things about the
+        # ASSEMBLED world -- before packing, before Z stacking, before the doorway
+        # cuts split the brushwork and before a single connector brush existed.
+        # That is the defect this file was rewritten to remove, not to improve.
+        # The one definition of solidity now lives in negspace.NegSpace and is
+        # COMPUTED (the BSP's own partition of space), not sampled.
         self.solidtex = [t[2] & 1 == 1 for t in self.textures]
-        self.bgrid = {}
-        for bi, (fs, ns, tx) in enumerate(self.brushes):
-            if tx < 0 or tx >= ntex or not self.solidtex[tx]:
-                continue
-            lo, hi = [-1e18] * 3, [1e18] * 3
-            for k in range(fs, fs + ns):
-                nx, ny, nz, dd = self.planes[self.sides[k][0]]
-                for a2, c in enumerate((nx, ny, nz)):
-                    if c > 0.999:
-                        hi[a2] = min(hi[a2], dd)
-                    elif c < -0.999:
-                        lo[a2] = max(lo[a2], -dd)
-            cx0, cx1 = int(lo[0] // 1024), int(hi[0] // 1024)
-            cy0, cy1 = int(lo[1] // 1024), int(hi[1] // 1024)
-            if cx1 - cx0 > 200 or cy1 - cy0 > 200:
-                continue
-            for cx in range(cx0, cx1 + 1):
-                for cy in range(cy0, cy1 + 1):
-                    self.bgrid.setdefault((cx, cy), []).append((bi, lo, hi))
         self.cliptex = [bool(t[2] & 0x430000) for t in self.textures]
-        self.cgrid = {}
-        for bi, (fs, ns, tx) in enumerate(self.brushes):
-            if tx < 0 or tx >= ntex or not self.cliptex[tx]:
-                continue
-            lo, hi = [-1e18] * 3, [1e18] * 3
-            for k in range(fs, fs + ns):
-                nx, ny, nz, dd = self.planes[self.sides[k][0]]
-                for a2, c in enumerate((nx, ny, nz)):
-                    if c > 0.999:
-                        hi[a2] = min(hi[a2], dd)
-                    elif c < -0.999:
-                        lo[a2] = max(lo[a2], -dd)
-            cx0, cx1 = int(lo[0] // 1024), int(hi[0] // 1024)
-            cy0, cy1 = int(lo[1] // 1024), int(hi[1] // 1024)
-            if cx1 - cx0 > 200 or cy1 - cy0 > 200:
-                continue
-            for cx in range(cx0, cx1 + 1):
-                for cy in range(cy0, cy1 + 1):
-                    self.cgrid.setdefault((cx, cy), []).append((bi, lo, hi))
+        self.ns = NS.NegSpace(data, mask=NS.MASK_PLAYERSOLID) if with_ns else None
+        self._ebrush = None
 
-    def clip_brush_at(self, p):
-        for bi, lo, hi in self.cgrid.get((int(p[0] // 1024), int(p[1] // 1024)), ()):
-            if not all(lo[a] - 0.25 <= p[a] <= hi[a] + 0.25 for a in range(3)):
-                continue
-            fs, ns, _ = self.brushes[bi]
-            if all(vdot(self.planes[self.sides[k][0]][:3], p) - self.planes[self.sides[k][0]][3] <= 0.25
-                   for k in range(fs, fs + ns)):
-                return bi
-        return -1
+    def edit_index(self):
+        """Which BRUSHES lie in a box -- an index for the geometry EDITOR, not an
+        answer about occupancy.
 
-    def solid_brush_at(self, p):
-        for bi, lo, hi in self.bgrid.get((int(p[0] // 1024), int(p[1] // 1024)), ()):
-            if not all(lo[a] - 0.25 <= p[a] <= hi[a] + 0.25 for a in range(3)):
+        `split_brushes` has to know which source brushes to cut; that is a
+        different question from "is this point solid", and it is the only reason
+        an AABB per brush is wanted here.  The bounds come from `negspace`'s
+        interval propagation, which is exact and finite for an entirely oblique
+        brush -- the strict axis test the deleted `bgrid` used returned +-1e18 for
+        those and then gridded them with an unguarded range(), a ~1e15-iteration
+        loop that ate 75 GB."""
+        if self._ebrush is not None:
+            return self._ebrush
+        lo0 = np.array(self.bounds[0], dtype=np.float64) - 4096.0
+        hi0 = np.array(self.bounds[1], dtype=np.float64) + 4096.0
+        grid = {}
+        ntex = len(self.textures)
+        for bi, (fs, ns2, tx) in enumerate(self.brushes):
+            if tx < 0 or tx >= ntex or not (self.solidtex[tx] or self.cliptex[tx]):
                 continue
-            fs, ns, _ = self.brushes[bi]
-            if all(vdot(self.planes[self.sides[k][0]][:3], p) - self.planes[self.sides[k][0]][3] <= 0.25
-                   for k in range(fs, fs + ns)):
-                return bi
-        return -1
+            if ns2 <= 0 or fs < 0 or fs + ns2 > len(self.sides):
+                continue
+            H = np.array([self.planes[self.sides[k][0]] for k in range(fs, fs + ns2)],
+                         dtype=np.float64)
+            blo, bhi = NS.bounds_of(H, lo0, hi0)
+            for cx in range(int(blo[0] // 1024), int(bhi[0] // 1024) + 1):
+                for cy in range(int(blo[1] // 1024), int(bhi[1] // 1024) + 1):
+                    grid.setdefault((cx, cy), []).append((bi, list(blo), list(bhi)))
+        self._ebrush = grid
+        return grid
 
 
 def slab_planes(af, bf, dirh, side, ntop, w, lo, hi, endpad=8.0):
@@ -235,67 +215,50 @@ def corridor_frame(a, b):
     return af, bf, dirh, side, ntop, math.dist(af, bf)
 
 
-def corridor_samples(a, b, w2=None):
-    """Sample the corridor TUBE for blockage.  w2 is the corridor half-width actually
-    being built: a prominent join is CORW_PROM/2 = 224 wide, and sampling it at the
-    narrow +-120 of a subtle corridor is what let obstructions survive inside the
-    prominent corridors' flanks."""
+def tube_gaps(ns, a, b, w2, lo, hi, seg=512.0, cap=64):
+    """The parts of a corridor tube that are NOT free volume, as convex pieces.
+
+    The tube is cut into slabs along its own axis first.  Not for accuracy -- the
+    subtraction is exact either way -- but because subtracting every free cell in
+    a 14 000-unit corridor's bounding box from one convex region is quadratic in
+    a way that a per-slab pass is not: each slab meets only the cells it actually
+    crosses."""
+    L = math.dist(a, b)
+    n = max(1, int(math.ceil(L / seg)))
+    out = []
+    for k in range(n):
+        f0, f1 = k / float(n), (k + 1) / float(n)
+        p0 = [a[i] + f0 * (b[i] - a[i]) for i in range(3)]
+        p1 = [a[i] + f1 * (b[i] - a[i]) for i in range(3)]
+        H = corridor_volume(p0, p1, w2, lo, hi)
+        slo, shi = bounds_of(H, ns.world_lo - 4096.0, ns.world_hi + 4096.0)
+        pieces = [H]
+        for ci in ns._cells_in_box(slo, shi):
+            pieces, over = subtract(pieces, ns.cells[ci], slo, shi, cap=cap,
+                                    exact_empty=False, minext=1.0)
+            if not pieces:
+                break
+            if over:
+                pieces = [H]        # too finely divided to decompose: report the slab
+                break
+        out += pieces
+    return out
+
+
+def corridor_volume(a, b, w2, lo=0.0, hi=None):
+    """The corridor tube's INTERIOR as a convex region (half-spaces n.p <= d).
+
+    The connector's free volume is a computed object handed to the negative-space
+    complex, not a cloud of sample points.  DELETED here: `corridor_samples`,
+    which laid 9x6 probe points per 48 units of tube and asked
+    `Src.solid_brush_at` about each one; `arc_samples`, which did the same along a
+    ballistic arc; and `blockage`, which ran that point cloud over every tile.  A
+    sampled tube can only ever miss what falls between its samples.  What is not
+    covered by free cells is now computed in closed form instead."""
+    hi = CORH if hi is None else hi
     af, bf, dirh, side, ntop, L = corridor_frame(a, b)
-    w2 = (CORW / 2) if w2 is None else w2
-    pts = []
-    n = max(2, int(L // 48))
-    for k in range(n + 1):
-        f = k / n
-        base = [af[i] + f * (bf[i] - af[i]) for i in range(3)]
-        for lat in (-w2 + 20, -w2 + 40, -w2 * 0.72, -w2 * 0.36, 0.0, w2 * 0.36, w2 * 0.72,
-                    w2 - 40, w2 - 20):
-            for h in (20.0, 28.0, 72.0, 124.0, CORH - 48, CORH - 36):
-                pts.append(vadd(vadd(base, vscale(side, lat)), vscale(ntop, h)))
-    return pts
-
-
-def arc_samples(a, b):
-    apex = max(a[2], b[2]) + 160.0
-    pts = []
-    for k in range(1, 32):
-        f = k / 32.0
-        x = a[0] + f * (b[0] - a[0])
-        y = a[1] + f * (b[1] - a[1])
-        z = (1 - f) * a[2] + f * b[2] + (apex - (1 - f) * a[2] - f * b[2]) * 4 * f * (1 - f)
-        pts.append([x, y, z + 24])
-    return pts
-
-
-def blockage(srcs, offsets, pts, clip=False):
-    hits = set()
-    for m, src in enumerate(srcs):
-        off = offsets[m]
-        for p in pts:
-            q = vsub(p, off)
-            bi = src.solid_brush_at(q)
-            if bi >= 0:
-                hits.add((m, bi))
-            if clip:
-                ci = src.clip_brush_at(q)
-                if ci >= 0:
-                    hits.add((m, ci))
-    return hits
-
-
-def brush_volume_ok(src, bi):
-    lo, hi = [-65536.0] * 3, [65536.0] * 3
-    fs, ns, _ = src.brushes[bi]
-    for k in range(fs, fs + ns):
-        nx, ny, nz, dd = src.planes[src.sides[k][0]]
-        for a, c in enumerate((nx, ny, nz)):
-            if c > 0.999:
-                hi[a] = min(hi[a], dd)
-            elif c < -0.999:
-                lo[a] = max(lo[a], -dd)
-    v = 1.0
-    for a in range(3):
-        v *= max(1.0, hi[a] - lo[a])
-    return v <= 640 ** 3
+    pl = slab_planes(af, bf, dirh, side, ntop, w2, lo, hi, endpad=0.0)
+    return np.array([[n[0], n[1], n[2], d] for n, d in pl], dtype=np.float64)
 
 
 class Fuser:
@@ -339,6 +302,14 @@ class Fuser:
                 self.sides.append([pi + self.planebase[m], self.texmap[m][ti]])
         self.carved = set()
         self.dropped_faces = set()
+        # the world's COMPUTED free volume, and the edits this fusion makes to it
+        self.wns = None
+        self.ns_add, self.ns_remove = [], []
+        self.spawn_placed = 0
+        self.spawn_srcspace_bad = 0
+        self.spawn_relocated = 0
+        self.spawn_unplaceable = 0
+        self.spawn_reloc_dist = []
         self.portals = []
         self.conn_faces, self.conn_brushes, self.conn_leafsets = [], [], []
         self.trig_brushes, self.trig_models = [], []
@@ -348,7 +319,25 @@ class Fuser:
         self.dropped_spawns = 0
         self.dropped_spawns_budget = 0
         self.spawn_cap = 10
-        self.ent_budget = 1800
+        # DERIVED, not tuned.  Measured at n=604 waypoints / 12 bots, .ent taken
+        # from the installed pk3: 2400 ok, 2872 ok (the shipped set), 3200 ok,
+        # 3400 RUNAWAY at 6.0 s, 3600 and 4000 likewise.  Ceiling is between 3200
+        # and 3400 -- a 6% bracket, against the waypoint ceiling's 33% one.
+        # The mechanism is InitializeEntity (server/world.qc), a
+        # linear-scan sorted-list insert called once per deferring map entity
+        # inside the single worldspawn spawn loop -- O(N^2) in ONE entry point
+        # (1547 calls / 8.43M self statements at N=3600), so unlike the waypoint
+        # ceilings this one genuinely IS shared across the whole map and does not
+        # depend on bot count.  3000 sits below the highest verified-passing rung
+        # rather than at it, because a single 300 s pass at the edge is not
+        # evidence of margin (the waypoint cap's 900 rung, by contrast, passed
+        # five times across B=2..24).  Note the headroom here (3400/3000 = 1.13x)
+        # is DELIBERATELY tighter than the waypoint cap's (1200/900 = 1.33x):
+        # this failure is deterministic and finely bracketed, whereas the waypoint
+        # failure has a stochastic roster-dependent term and needs to stand clear
+        # of a distribution.  ent 2900 restores parity if that is judged wrong, at
+        # a cost of ~270 entities.  The old 1800 was ~1.8x conservative.
+        self.ent_budget = 3000
         self.ent_dropped = {}
         self.ent_short = 0
         self.ent_orphans = 0
@@ -368,7 +357,22 @@ class Fuser:
         self.planes.append([n[0], n[1], n[2], d])
         return len(self.planes) - 1
 
-    def add_brush(self, planes, tex, dest=None, bounds=None):
+    def add_brush(self, planes, tex, dest=None, bounds=None, subset=False):
+        """Create one convex solid, and TELL THE FREE VOLUME about it.
+
+        Registering the removal here rather than at each call site is what makes
+        the invariant hold: geometry and free space are edited in the same
+        operation, at the single place where solid geometry comes into
+        existence.  Doing it per call site is how two spawnpoints ended up inside
+        generator-added brushes that the complex had never heard of -- the
+        engine's `relocate_spawnpoint` found them and the structure did not.
+
+        `subset=True` marks a solid that is contained in one that already exists:
+        a remainder from splitting a brush, or a brush re-emitted with finite
+        clamp planes.  Those occupy volume the complex already calls solid, so
+        subtracting them is a no-op -- and registering them anyway is not free,
+        because a remainder carrying its source brush's fall-back clamp box makes
+        the edit pass scan the whole world for cells to cut."""
         if dest is None:
             dest = self.conn_brushes
         planes = list(planes)
@@ -381,6 +385,10 @@ class Fuser:
                 e2 = [0.0, 0.0, 0.0]
                 e2[a] = -1.0
                 planes.append((e2, -clo[a]))
+        if (dest is self.conn_brushes and not subset
+                and tex != self.trigtex and tex != self.emptytex):
+            self.ns_remove.append(np.array([[n[0], n[1], n[2], d] for n, d in planes],
+                                           dtype=np.float64))
         s0 = len(self.sides)
         for n, d in planes:
             self.sides.append([self.add_plane(n, d), tex])
@@ -407,10 +415,6 @@ class Fuser:
         self.extra_ents.append('{\n"classname" "light"\n"origin" "%s %s %s"\n"light" "%d"\n}'
                                % (fnum(p[0]), fnum(p[1]), fnum(p[2]), int(radius)))
 
-    def carve(self, hits):
-        for m, bi in hits:
-            self.carved.add((m, bi))
-
     def add_box(self, lo, hi, tex, faces=True):
         """A solid axis-aligned box with all six surfaces rendered.  The frame pieces
         of a cut doorway are built from these."""
@@ -426,7 +430,7 @@ class Fuser:
         self.conn_leafsets.append((fs, [bi], [x - 8 for x in lo], [x + 8 for x in hi]))
         return bi
 
-    def split_brushes(self, m, alo, ahi):
+    def split_brushes(self, m, alo, ahi, region=None):
         """LITERALLY EDIT THE MAP: subtract an axis-aligned aperture box from every
         source brush of tile m that occupies it.
 
@@ -441,13 +445,24 @@ class Fuser:
         llo = [alo[a] - off[a] for a in range(3)]
         lhi = [ahi[a] - off[a] for a in range(3)]
         cand = {}
-        for grid in (src.bgrid, src.cgrid):
+        for grid in (src.edit_index(),):
             for cx in range(int(llo[0] // 1024), int(lhi[0] // 1024) + 1):
                 for cy in range(int(llo[1] // 1024), int(lhi[1] // 1024) + 1):
                     for bi, blo, bhi in grid.get((cx, cy), ()):
                         if all(blo[a] < lhi[a] and bhi[a] > llo[a] for a in range(3)):
                             cand[bi] = (blo, bhi)
         made = 0
+        # `region` is the convex volume being subtracted.  For a doorway that is
+        # the axial aperture box; for a corridor it is the TUBE'S OWN oblique
+        # half-spaces, so an oblique connector no longer removes the axis-aligned
+        # bounding box of itself from the level's brushwork.
+        region = list(region) if region else [(e, v) for e, v in
+                                              ((( [1.0, 0.0, 0.0], ahi[0])),
+                                               (([-1.0, 0.0, 0.0], -alo[0])),
+                                               (([0.0, 1.0, 0.0], ahi[1])),
+                                               (([0.0, -1.0, 0.0], -alo[1])),
+                                               (([0.0, 0.0, 1.0], ahi[2])),
+                                               (([0.0, 0.0, -1.0], -alo[2])))]
         for bi, (blo, bhi) in cand.items():
             fs, ns, tx = src.brushes[bi]
             wp = []
@@ -467,17 +482,20 @@ class Fuser:
             wbhi = [bhi[a] + off[a] if fin(bhi[a]) else src.bounds[1][a] + off[a] + 4096.0
                     for a in range(3)]
             bnd = (wblo, wbhi)
-            for a in range(3):
-                e = [0.0, 0.0, 0.0]
-                e[a] = 1.0
-                if alo[a] - wblo[a] > 1.0:                      # remainder BELOW the aperture
-                    self.add_brush(wp + [(e[:], alo[a])], tex, bounds=bnd)
+            acc = []
+            for n, dd in region:
+                # remainder OUTSIDE this face of the region, and inside all the
+                # faces already accounted for: convex by construction, and the
+                # union of them is exactly (brush minus region)
+                lowv = min(sum(n[a] * (wblo[a] if n[a] > 0 else wbhi[a]) for a in range(3)),
+                           sum(n[a] * (wbhi[a] if n[a] > 0 else wblo[a]) for a in range(3)))
+                highv = max(sum(n[a] * (wblo[a] if n[a] > 0 else wbhi[a]) for a in range(3)),
+                            sum(n[a] * (wbhi[a] if n[a] > 0 else wblo[a]) for a in range(3)))
+                if highv - dd > 1.0:
+                    self.add_brush(wp + [([-x for x in n], -dd)] + list(acc), tex,
+                                   bounds=bnd, subset=True)
                     made += 1
-                if wbhi[a] - ahi[a] > 1.0:                      # remainder ABOVE the aperture
-                    e2 = [0.0, 0.0, 0.0]
-                    e2[a] = -1.0
-                    self.add_brush(wp + [(e2, -ahi[a])], tex, bounds=bnd)
-                    made += 1
+                acc.append((list(n), dd))
             self.carved.add((m, bi))
         return len(cand), made
 
@@ -577,6 +595,9 @@ class Fuser:
         tlo, thi = list(alo), list(ahi)
         tlo[2], thi[2] = alo[2] - 24.0, alo[2]
         self.add_box(tlo, thi, tex)
+        # the aperture itself is now FREE volume: the wall was split around it
+        self.ns_add.append(box_H([alo[0] + 1, alo[1] + 1, alo[2] + 1],
+                                 [ahi[0] - 1, ahi[1] - 1, ahi[2] - 1]))
         # ARCHITRAVE: two jambs and a header set into the OUTER face of the wall.  This
         # is what makes the opening read as architecture instead of damage.
         oface = ahi[axis] if sgn > 0 else alo[axis]
@@ -650,7 +671,7 @@ class Fuser:
                       for k in range(fs, fs + ns)]
                 clo = [src.bounds[0][a] + off[a] - 4096.0 for a in range(3)]
                 chi = [src.bounds[1][a] + off[a] + 4096.0 for a in range(3)]
-                self.add_brush(wp, self.texmap[m][tx], bounds=(clo, chi))
+                self.add_brush(wp, self.texmap[m][tx], bounds=(clo, chi), subset=True)
                 self.carved.add((m, bi))
                 n += 1
         return n
@@ -662,14 +683,16 @@ class Fuser:
         clo = [min(af[i], bf[i]) - pad for i in range(3)]
         chi = [max(af[i], bf[i]) + pad for i in range(3)]
         bnd = (clo, chi)
-        br = [self.add_brush(slab_planes(af, bf, dirh, side, ntop, w2 + WALL, -FLOORTHK, 0.0), self.solid_face_tex, bounds=bnd)]
+        floorpl = slab_planes(af, bf, dirh, side, ntop, w2 + WALL, -FLOORTHK, 0.0)
+        br = [self.add_brush(floorpl, self.solid_face_tex, bounds=bnd)]
         for s in (1.0, -1.0):
             sv = vscale(side, s)
             pl = [(dirh, vdot(dirh, bf) + 8), ([-x for x in dirh], -(vdot(dirh, af) - 8)),
                   (sv, vdot(sv, af) + w2 + WALL), ([-x for x in sv], -(vdot(sv, af) + w2)),
                   (ntop, vdot(ntop, af) + CORH + WALL), ([-x for x in ntop], -(vdot(ntop, af) - FLOORTHK))]
             br.append(self.add_brush(pl, self.solid_face_tex, bounds=bnd))
-        br.append(self.add_brush(slab_planes(af, bf, dirh, side, ntop, w2 + WALL, CORH, CORH + WALL), self.solid_face_tex, bounds=bnd))
+        ceilpl = slab_planes(af, bf, dirh, side, ntop, w2 + WALL, CORH, CORH + WALL)
+        br.append(self.add_brush(ceilpl, self.solid_face_tex, bounds=bnd))
         fa = []
         c = lambda base, lat, h: vadd(vadd(base, vscale(side, lat)), vscale(ntop, h))
         fa.append(self.add_quad([c(af, -w2, 0), c(bf, -w2, 0), c(bf, w2, 0), c(af, w2, 0)], ntop, self.solid_face_tex))
@@ -760,23 +783,40 @@ class Fuser:
                     return '"origin" "%s %s %s"' % (fnum(v[0] + off[0]), fnum(v[1] + off[1]), fnum(v[2] + off[2]))
 
                 if cn.startswith('info_player_'):
-                    # A spawnpoint that lands in solid makes stock Xonotic run its
-                    # expanding relocate_spawnpoint search; at megamap scale that
-                    # search is what trips "server runaway loop counter hit limit of
-                    # 10000000 jumps" before the match ever starts.  Drop such
-                    # spawnpoints here instead: the fused world has hundreds left.
+                    # SPAWNPOINTS ARE PLACED, NOT TESTED.
+                    # The old code asked `src.solid_brush_at([x,y,z+dz])` for three
+                    # dz straight up -- the SOURCE map's brushes at SOURCE
+                    # coordinates -- and dropped the spawn if any hit.  The spawn's
+                    # real position is o+off in the ASSEMBLED world, after the 3-D
+                    # pack (Z levels included), after the doorway cuts split the
+                    # brushwork, and alongside connector floor/wall slabs that did
+                    # not exist when that question was asked.  So it shipped
+                    # spawnpoints buried in solid and the running engine was the
+                    # first thing to notice.
+                    # Here the origin is CONSTRUCTED as a standing placement inside
+                    # the world's computed free volume: a point at which the whole
+                    # player box is covered by free cells and which has the free
+                    # volume's own floor beneath it.  "In solid" is not a state this
+                    # can produce, so there is nothing left to test afterwards.
                     mo = re.search(r'"origin"\s+"([-\d.eE+ ]+)"', b)
                     if mo:
                         o = [float(x) for x in mo.group(1).split()]
-                        bad = False
-                        for dz in (2.0, 24.0, 48.0):
-                            if src.solid_brush_at([o[0], o[1], o[2] + dz]) >= 0:
-                                bad = True
-                                break
-                        if bad:
-                            self.dropped_spawns += 1
+                        w = [o[i] + off[i] for i in range(3)]
+                        # what the deleted source-space test would have answered,
+                        # kept only so the report can say what it MISSED
+                        self.spawn_srcspace_bad += any(
+                            src.ns.cell_at([o[0], o[1], o[2] + dz]) < 0
+                            for dz in (2.0, 24.0, 48.0))
+                        r = self.wns.standing_point(w) if self.wns is not None else w
+                        if r is None:
+                            self.spawn_unplaceable += 1
                             continue
-                        spawn_pending.append((m, o, b, cn))
+                        dd = math.dist(r, w)
+                        if dd > 0.5:
+                            self.spawn_relocated += 1
+                            self.spawn_reloc_dist.append(dd)
+                        self.spawn_placed += 1
+                        spawn_pending.append((m, r, b, cn))
                         continue
                 b = re.sub(r'"origin"\s+"([-\d.eE+ ]+)"', fixorigin, b)
                 b = re.sub(r'"model"\s+"\*(\d+)"',
@@ -808,10 +848,9 @@ class Fuser:
             kept += picks
             self.dropped_spawns_budget += len(mine) - len(picks)
         for m, o, b, cn in kept:
-            off2 = self.offsets[m]
+            # `o` is already the WORLD-space standing placement computed above
             b = re.sub(r'"origin"\s+"([-\d.eE+ ]+)"',
-                       lambda mo, off2=off2: '"origin" "%s %s %s"' % tuple(
-                           fnum(float(x) + off2[i]) for i, x in enumerate(mo.group(1).split())), b)
+                       lambda mo, o=o: '"origin" "%s %s %s"' % (fnum(o[0]), fnum(o[1]), fnum(o[2])), b)
             for k in tkeys:
                 b = re.sub(r'"%s"\s+"([^"]+)"' % k,
                            lambda mo, k=k, m=m: '"%s" "m%d_%s"' % (k, m, mo.group(1)), b)
@@ -1126,116 +1165,136 @@ DOOR_W, DOOR_H, DOOR_SILL = 192.0, 208.0, 4.0
 SITE_DIRS = [(1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, -1.0, 0.0)]
 
 
-def ray_runs(src, p0, d, maxt=1600.0, step=8.0):
-    """March a ray through one source map and return the solid/empty run structure as
-    [(t_enter, t_exit), ...] of SOLID spans.  Uses the same exact-plane predicate the
-    carver uses, so a span here is a span the player really cannot walk through."""
-    runs, inside, t0 = [], False, 0.0
+def solid_runs(ns, p0, d, maxt=1100.0):
+    """The SOLID spans along a ray, computed exactly from the free-space complex.
+
+    Replaces `ray_runs`, which marched the ray in 8-unit steps asking
+    `Src.solid_brush_at` at each step, and `free_slab`, which did the same over a
+    3-D lattice of probe points.  A segment's intersection with a convex cell is
+    a closed-form interval, so the free spans -- and therefore the solid spans
+    between them -- are the whole answer rather than a sample of it, and a wall
+    thinner than the old step size can no longer be missed."""
+    p1 = [p0[i] + d[i] * maxt for i in range(3)]
+    iv = ns.segment_intervals(p0, p1)
+    runs = []
     t = 0.0
-    while t <= maxt:
-        q = [p0[0] + d[0] * t, p0[1] + d[1] * t, p0[2] + d[2] * t]
-        s = src.solid_brush_at(q) >= 0
-        if s and not inside:
-            inside, t0 = True, t
-        elif not s and inside:
-            runs.append((t0, t))
-            inside = False
-        t += step
-    if inside:
-        runs.append((t0, maxt))
+    for s0, s1 in iv:
+        if s0 > t + 1e-9:
+            runs.append((t * maxt, s0 * maxt))
+        t = max(t, s1)
+    if t < 1.0 - 1e-9:
+        runs.append((t * maxt, maxt))
     return runs
 
 
-def free_slab(src, base, d, side, t0, t1, zlo, zhi, halfw, step=48.0):
-    """Is the ORIENTED slab (t along d, +-halfw along side, z in [zlo,zhi]) free of
-    solid?  Oriented rather than axis-aligned because a connection site can face a
-    diagonal and an AABB test would sample the wall itself and report a false block."""
-    ts = [t0 + i * step for i in range(int((t1 - t0) / step) + 1)] or [t0]
-    if ts[-1] < t1:
-        ts.append(t1)
-    ss = [-halfw, 0.0, halfw] if halfw > 1 else [0.0]
-    zs = [zlo + i * step for i in range(int((zhi - zlo) / step) + 1)] or [zlo]
-    if zs[-1] < zhi:
-        zs.append(zhi)
-    for t in ts:
-        for u in ss:
-            for z in zs:
-                q = [base[0] + d[0] * t + side[0] * u, base[1] + d[1] * t + side[1] * u, z]
-                if src.solid_brush_at(q) >= 0:
-                    return False
-    return True
-
-
-def probe_site(src, node, d, deg):
-    """Is `node`, looking outward along `d`, a place a door could be cut?
-
-    Wants: a wall that starts close to the standing surface, is THIN enough to be a
-    wall panel rather than bedrock, has head- and shoulder-room on the inside so the
-    opening is a doorway and not a crawl, and has open space on the far side for the
-    procedural connector to meet.  A map whose shell is patch-mesh curvature rather
-    than brushwork produces no sites at all here, and that is the point: it is not a
-    map whose geometry can honestly be edited to grow a door."""
-    eye = [node[0], node[1], node[2] + DOOR_H * 0.5]
-    runs = ray_runs(src, eye, d)
-    if not runs:
-        return None                       # nothing to cut through: not a wall at all
-    t_in, t_out = runs[0]
-    if t_in > 640.0 or t_in < 24.0:
-        return None                       # too far from the walkable frontier / on top of it
-    thick = t_out - t_in
-    if thick > 384.0 or thick < 8.0:
-        return None                       # bedrock, terrain skirt, or a paper sliver
-    if len(runs) > 1 and runs[1][0] - t_out < 224.0:
-        return None                       # a double wall / stacked scenery, not an exterior face
-    side = [-d[1], d[0], 0.0]
-    zlo, zhi = node[2] + DOOR_SILL + 12, node[2] + DOOR_H - 12
-    hw = DOOR_W / 2 - 24
-    if not free_slab(src, node, d, side, 24.0, max(24.0, t_in - 16.0), zlo, zhi, hw):
-        return None                       # no room to stand in front of the new opening
-    if not free_slab(src, node, d, side, t_out + 32.0, t_out + 160.0, zlo, zhi, hw):
-        return None                       # nothing on the far side for a connector to meet
-    # SCORE.  A nav dead-end is the strongest diegetic signal there is: a passage that
-    # already stops at this wall reads as something that was meant to continue, so
-    # continuing it invents nothing.  After that: thin wall panels (cheap and plausible
-    # to open) and walls close to the walkable frontier (a door, not a tunnel).
-    # CONTINUE vs NEWCUT is decided by the shape of the space in front of the wall: if
-    # the standing room is narrow (a passage or an alcove running into this wall) the
-    # opening CONTINUES a feature the level already has, which is the most diegetic
-    # edit available.  If the wall face is broad and open, it is a new opening on an
-    # exterior-reading wall, which needs a frame to look deliberate.
-    narrow = not free_slab(src, node, d, side, 24.0, max(24.0, t_in - 16.0), zlo, zhi, 288.0)
-    cont = narrow or deg <= 2
-    score = ((1.5 if narrow else 0.0) + (0.5 if deg <= 3 else 0.0) +
-             max(0.0, (384.0 - thick) / 384.0) + max(0.0, (640.0 - t_in) / 640.0))
-    return {'p': [float(x) for x in node], 'dir': list(d), 't_in': t_in, 't_out': t_out,
-            'thick': thick, 'deg': deg, 'narrow': narrow,
-            'kind': 'continue' if cont else 'newcut', 'score': round(score, 3)}
-
-
 def map_sites(src, maxsites=12, minsep=1024.0):
-    """All plausible connection sites on one map, best first."""
+    """All plausible connection sites on one map, best first -- read off the map's
+    COMPUTED negative space, not probed for.
+
+    A connection site is a BOUNDARY FACE of the free volume: a wall panel that
+    (a) is big enough to hold a door-sized aperture, checked as exact containment
+    of the door rectangle inside the face's own cross-section polygon; (b) has a
+    solid run of wall-panel thickness behind it, computed from the free-space
+    complex in closed form; (c) has free volume on the far side for the connector
+    to meet, checked as exact coverage of the connector's approach box by free
+    cells; and (d) stands in a cell the stock navmesh actually reaches, so a bot
+    can get to the door.  `probe_site`'s ray march, `ray_runs` and `free_slab`
+    are deleted: they were a sampled approximation of exactly this."""
     got = getattr(src, '_sites', None)
     if got is not None:
         return got
+    ns = src.ns
     comp = [i for i in M.largest_component(src.navadj)
             if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
     if not comp:
         comp = M.largest_component(src.navadj)
+    navcells = set()
+    for i in comp:
+        for dz in (0.0, 16.0, 32.0):
+            c = ns.cell_at([src.navnodes[i][0], src.navnodes[i][1], src.navnodes[i][2] + dz])
+            if c >= 0:
+                navcells.add(c)
     cand = []
     for d in SITE_DIRS:
+        axis = 0 if abs(d[0]) > 0.5 else 1
+        U = 1 - axis
         pr = sorted(comp, key=lambda i: -(src.navnodes[i][0] * d[0] + src.navnodes[i][1] * d[1]))
-        for i in pr[:max(28, len(pr) // 14)]:
-            s = probe_site(src, src.navnodes[i], d, len(src.navadj[i]))
-            if s:
-                s['node'] = i
-                cand.append(s)
-    cand.sort(key=lambda s: -s['score'])
+        for i in pr[:max(48, len(pr) // 8)]:
+            node = [float(x) for x in src.navnodes[i]]
+            eye = [node[0], node[1], node[2] + DOOR_H * 0.5]
+            runs = solid_runs(ns, eye, d)
+            if not runs:
+                continue
+            t_in, t_out = runs[0]
+            if t_in > 640.0 or t_in < 24.0:
+                continue
+            thick = t_out - t_in
+            if thick > 384.0 or thick < 8.0:
+                continue
+            if len(runs) > 1 and runs[1][0] - t_out < 224.0:
+                continue               # a double wall / stacked scenery
+            # THE WALL, STRUCTURALLY.
+            # A connection site is a place where two free regions are SEPARATED by
+            # a thin barrier.  All three parts of that are statements about volume,
+            # so all three are answered as exact coverage of a box by the computed
+            # free cells -- never by probes:
+            #   * a player-sized free approach standing against the inner face,
+            #   * a player-sized free landing on the far side for the connector,
+            #   * and NO already-open route between them across the door's own
+            #     footprint (otherwise there is nothing to cut and the "door"
+            #     would be a hole in mid-air).
+            zlo, zhi = node[2] + 4.0, node[2] + 72.0
+            lo = [0.0, 0.0, zlo]
+            hi = [0.0, 0.0, zhi]
+            lo[U] = node[U] - (DOOR_W / 2 - 16)
+            hi[U] = node[U] + (DOOR_W / 2 - 16)
+            a0 = node[axis] + d[axis] * 24.0
+            a1 = node[axis] + d[axis] * max(24.0, t_in - 3.0)
+            alo, ahi = list(lo), list(hi)
+            alo[axis], ahi[axis] = min(a0, a1), max(a0, a1)
+            if ahi[axis] - alo[axis] < 2.0 or not ns.covered(box_H(alo, ahi)):
+                continue                   # no room to stand in front of the opening
+            f0 = node[axis] + d[axis] * (t_out + 32.0)
+            f1 = node[axis] + d[axis] * (t_out + 160.0)
+            flo, fhi = list(lo), list(hi)
+            flo[axis], fhi[axis] = min(f0, f1), max(f0, f1)
+            if not ns.covered(box_H(flo, fhi)):
+                continue                   # nothing on the far side to meet
+            tlo, thi = list(lo), list(hi)
+            tlo[axis], thi[axis] = min(a0, f1), max(a0, f1)
+            if ns.covered(box_H(tlo, thi)):
+                continue                   # already open: there is no wall to cut
+            cell = -1
+            for back in (2.0, 8.0, 20.0, 40.0):
+                q = [eye[0] + d[0] * (t_in - back), eye[1] + d[1] * (t_in - back), eye[2]]
+                cell = ns.cell_at(q)
+                if cell >= 0:
+                    break
+            if cell < 0:
+                continue
+            ext = ns.hi[cell] - ns.lo[cell]
+            narrow = ext[U] < 576.0
+            deg = len(src.navadj[i])
+            cont = narrow or deg <= 2
+            far = [node[0] + d[0] * (t_out + 96.0), node[1] + d[1] * (t_out + 96.0), node[2]]
+            fc = ns.cell_at(far)
+            exterior = fc < 0 or fc not in navcells
+            score = ((1.5 if narrow else 0.0) + (0.5 if deg <= 3 else 0.0) +
+                     (0.75 if exterior else 0.0) +
+                     max(0.0, (384.0 - thick) / 384.0) +
+                     max(0.0, (640.0 - t_in) / 640.0))
+            cand.append({'p': node, 'dir': list(d), 't_in': t_in, 't_out': t_out,
+                         'thick': thick, 'deg': deg, 'narrow': narrow,
+                         'cell': cell, 'exterior': exterior,
+                         'node': i, 'kind': 'continue' if cont else 'newcut',
+                         'score': round(score, 3)})
+    cand.sort(key=lambda s2: -s2['score'])
     sites = []
-    for s in cand:
-        if all(math.dist(s['p'], t['p']) >= minsep or
-               vdot(s['dir'], t['dir']) < 0.3 and math.dist(s['p'], t['p']) >= minsep / 2
+    for s2 in cand:
+        if all(math.dist(s2['p'], t['p']) >= minsep or
+               vdot(s2['dir'], t['dir']) < 0.3 and math.dist(s2['p'], t['p']) >= minsep / 2
                for t in sites):
-            sites.append(s)
+            sites.append(s2)
         if len(sites) >= maxsites:
             break
     src._sites = sites
@@ -1435,7 +1494,7 @@ def check_bsp(d):
 DIRNAME = {(1, 0): 'e', (-1, 0): 'w', (0, 1): 'n', (0, -1): 's'}
 
 
-def load_src(n, outdir, pk3):
+def load_src(n, outdir, pk3, with_ns=True, quiet=False):
     if '/' in n:
         base = os.path.expanduser(n)
         n = os.path.basename(base)
@@ -1446,12 +1505,30 @@ def load_src(n, outdir, pk3):
         data = pk3_read(pk3, 'maps/%s.bsp' % n)
         wp = pk3_read(pk3, 'maps/%s.waypoints' % n).decode('latin-1')
         cache = M.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
-    src = Src(n, data, wp, cache)
-    print('src %s: bounds %s %s models=%d faces=%d brushes=%d wp=%d links=%d' %
-          (n, [round(x) for x in src.bounds[0]], [round(x) for x in src.bounds[1]],
-           len(src.models), len(src.faces), len(src.brushes),
-           len(src.wptriples), len(src.cachelinks)))
+    src = Src(n, data, wp, cache, with_ns=with_ns)
+    if not quiet:
+        print('src %s: bounds %s %s models=%d faces=%d brushes=%d wp=%d links=%d' %
+              (n, [round(x) for x in src.bounds[0]], [round(x) for x in src.bounds[1]],
+               len(src.models), len(src.faces), len(src.brushes),
+               len(src.wptriples), len(src.cachelinks)))
     return src
+
+
+def _survey_worker(arg):
+    """Compute one candidate map's free volume and its connection sites.
+
+    The survey is the expensive half of a fusion (an exact convex decomposition
+    per map, then a structural site solve on top of it) and it is per-map
+    independent, so it is run across processes.  Nothing about the result depends
+    on the order or on the other maps."""
+    name, outdir, pk3 = arg
+    try:
+        src = load_src(name, outdir, pk3, quiet=True)
+        st = map_sites(src)
+        return (name, st, NS.pack(src.ns), None)
+    except Exception as e:
+        import traceback
+        return (name, None, None, traceback.format_exc())
 
 
 def region_graph_solve(j, edges_ab):
@@ -1572,7 +1649,7 @@ def navmesh_solve(nodes2, dadj, region, key, j, reps):
 
 
 def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, levels=None,
-         wpcap=600):
+         wpcap=900):
     """Select maps that can be EDITED to connect, pack them in 3D, cut the openings,
     and join the openings with procedural geometry."""
     rng = random.Random(seed)
@@ -1591,15 +1668,37 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
             genned.append(base)
     # ---- 2. SURVEY every candidate for connection sites, then SELECT by suitability
     srcs, sites_of, cls_of, rejected = [], [], [], []
-    for n in list(names) + genned:
-        src = load_src(n, outdir, pk3)
-        st = map_sites(src)
+    allnames = list(names) + genned
+    surveyed = {}
+    nproc = max(1, min(8, (os.cpu_count() or 4) - 2, len(allnames)))
+    if nproc > 1:
+        import concurrent.futures as _cf
+        print('survey: computing free volume + connection sites for %d candidate maps '
+              'across %d processes' % (len(allnames), nproc))
+        t_s = time.time()
+        with _cf.ProcessPoolExecutor(max_workers=nproc) as ex:
+            for nm, st, pk, err in ex.map(_survey_worker,
+                                          [(n, outdir, pk3) for n in allnames]):
+                if err:
+                    print('survey: %s FAILED\n%s' % (nm, err))
+                    continue
+                surveyed[nm] = (st, pk)
+        print('survey: %d/%d maps surveyed in %.0fs' % (len(surveyed), len(allnames),
+                                                        time.time() - t_s))
+    for n in allnames:
+        src = load_src(n, outdir, pk3, with_ns=(n not in surveyed))
+        if n in surveyed:
+            st, pk = surveyed[n]
+            src.ns = NS.unpack(pk)
+            src._sites = st
+        else:
+            st = map_sites(src)
         cl = classify(len(st))
-        ncont = sum(1 for s in st if s['kind'] == 'continue')
+        ncont = sum(1 for s2 in st if s2['kind'] == 'continue')
         print('sites %-18s %-10s n=%2d (continue=%d newcut=%d) dirs=%s thick=%s' %
               (src.name, cl.upper(), len(st), ncont, len(st) - ncont,
-               ''.join(sorted({DIRNAME[(int(s['dir'][0]), int(s['dir'][1]))] for s in st})),
-               [int(s['thick']) for s in st[:6]]))
+               ''.join(sorted({DIRNAME[(int(s2['dir'][0]), int(s2['dir'][1]))] for s2 in st})),
+               [int(s2['thick']) for s2 in st[:6]]))
         if cl == 'unsuitable':
             rejected.append((src.name, len(st)))
             continue
@@ -1773,6 +1872,17 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
           'coordinate descent inside each tile\'s packed slot, non-overlap held by the slot bounds'
           % (len(sel), g0, gapsum(), 100.0 * (g0 - gapsum()) / max(1.0, g0)))
     F = Fuser(srcs, offsets, seed)
+    # THE ASSEMBLED WORLD'S FREE VOLUME.  Each tile's complex is computed once from
+    # its own BSP and then rigidly PLACED (n.p <= d  ->  n.p <= d + n.t), which is
+    # exact for a translation, so the structure survives the 3-D pack and the Z
+    # stacking without being recomputed or re-approximated.
+    t_ns = time.time()
+    F.wns = NS.NegSpace.union([srcs[m].ns.translated(offsets[m]) for m in range(T)])
+    print('free volume: %d convex cells over %d placed tiles (%d open BSP leaves, '
+          '%d detail-brush subtractions) in %.1fs -- this is the one definition of '
+          'solidity in this toolchain'
+          % (len(F.wns.cells), T, F.wns.n_open_leaves, F.wns.n_detail_splits,
+             time.time() - t_ns))
     for m, s2 in enumerate(srcs):
         print('place %-18s %-6s cell %s offset %s' %
               (s2.name, cls_of[m], cells[m], offsets[m]))
@@ -1811,30 +1921,58 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
         pa_, pb_ = F.portals[-2], F.portals[-1]
         cutlog.append((srcs[a].name, sites_of[a][ia], pa_))
         cutlog.append((srcs[b].name, sites_of[b][ib], pb_))
-        # procedural connector between the two new doorways.  Small solids in the way are
-        # carved; anything too big to carve is SPLIT around the tube, the same edit the
-        # doorway itself uses -- so the connector is built either way.
+        # PROCEDURAL CONNECTOR, DERIVED FROM THE SOLVED STRUCTURE.
+        # The tube's interior is a convex region; the parts of it NOT covered by
+        # the world's computed free cells are exactly the solid that has to be
+        # opened, and they come out as convex pieces in closed form.  The old
+        # path sampled ~9x6 probe points per 48 units of tube through
+        # `Src.solid_brush_at` on SOURCE coordinates and carved whatever the
+        # probes happened to hit; anything between two probes survived inside the
+        # corridor.  Nothing is sampled here and nothing is dissolved: every
+        # obstruction found is SPLIT around the tube, which keeps the wall.
         w2 = (CORW_PROM if prom else CORW) / 2.0
-        pts = corridor_samples(ma, mb, w2)
-        hits = blockage(srcs, offsets, pts, clip=True)
-        small = {h for h in hits if brush_volume_ok(srcs[h[0]], h[1])}
-        F.carve(small)
-        big = hits - small
-        for m2, bi in big:
-            lo = [min(ma[i], mb[i]) - w2 - WALL for i in range(3)]
-            hi = [max(ma[i], mb[i]) + w2 + WALL for i in range(3)]
-            lo[2], hi[2] = min(ma[2], mb[2]) - FLOORTHK, max(ma[2], mb[2]) + CORH + WALL
-            F.split_brushes(m2, lo, hi)
+        nsplit_here = 0
+        nslab = 0
+        L_ = math.dist(ma, mb)
+        nseg = max(1, int(math.ceil(L_ / 512.0)))
+        for k in range(nseg):
+            f0, f1 = k / float(nseg), (k + 1) / float(nseg)
+            p0 = [ma[i] + f0 * (mb[i] - ma[i]) for i in range(3)]
+            p1 = [ma[i] + f1 * (mb[i] - ma[i]) for i in range(3)]
+            H_ = corridor_volume(p0, p1, w2 + WALL, -FLOORTHK - WALL, CORH + WALL)
+            slo, shi = bounds_of(H_, F.wns.world_lo - 4096.0, F.wns.world_hi + 4096.0)
+            nslab += 1
+            for m2 in range(T):
+                blo = [srcs[m2].bounds[0][i] + offsets[m2][i] for i in range(3)]
+                bhi = [srcs[m2].bounds[1][i] + offsets[m2][i] for i in range(3)]
+                if any(slo[i] > bhi[i] or shi[i] < blo[i] for i in range(3)):
+                    continue
+                reg = [([float(H_[q, 0]), float(H_[q, 1]), float(H_[q, 2])], float(H_[q, 3]))
+                       for q in range(len(H_))]
+                nb2, np2 = F.split_brushes(m2, [float(x) for x in slo],
+                                           [float(x) for x in shi], region=reg)
+                nsplit_here += nb2
+        F.ns_add.append(corridor_volume(ma, mb, w2 - 1.0, 0.5, CORH - 1.0))
+        for mth, dr in ((ma, sites_of[a][ia]), (mb, sites_of[b][ib])):
+            F.ns_add.append(box_H([mth[0] - 88, mth[1] - 88, mth[2] - 4],
+                                [mth[0] + 88, mth[1] + 88, mth[2] + DOOR_H - 16]))
         F.build_corridor(ma, mb, prominent=prom)
         corn += 1
-        conns.append((a, b, 'corridor', ma, mb, len(hits), exclusive[ei], prom, math.dist(ma, mb)))
-        print('join %-16s <-> %-16s corridor %s  %s(%s,%s) -> %s(%s,%s)  len=%.0f carved=%d split=%d'
+        conns.append((a, b, 'corridor', ma, mb, nsplit_here, exclusive[ei], prom, math.dist(ma, mb)))
+        print('join %-16s <-> %-16s corridor %s  %s(%s,%s) -> %s(%s,%s)  len=%.0f solid_pieces_in_tube=%d brushes_split=%d'
               % (srcs[a].name, srcs[b].name, 'PROMINENT' if prom else 'subtle',
                  [round(x) for x in ma], sites_of[a][ia]['kind'],
                  DIRNAME[(int(sites_of[a][ia]['dir'][0]), int(sites_of[a][ia]['dir'][1]))],
                  [round(x) for x in mb], sites_of[b][ib]['kind'],
                  DIRNAME[(int(sites_of[b][ib]['dir'][0]), int(sites_of[b][ib]['dir'][1]))],
-                 math.dist(ma, mb), len(small), len(big)))
+                 math.dist(ma, mb), nslab, nsplit_here))
+    t_ed = time.time()
+    nrec, nadd = F.wns.edit(add=F.ns_add, remove=F.ns_remove)
+    print('free volume: fusion edits applied in %.1fs -- %d free cells re-cut around '
+          '%d new procedural solids (corridor slabs, thresholds, jambs, headers), '
+          '%d opened regions added (%d cut apertures + %d corridor interiors/throats); '
+          '%d cells total' % (time.time() - t_ed, nrec, len(F.ns_remove), nadd,
+                              len(F.portals), nadd - len(F.portals), len(F.wns.cells)))
     j = T
     names = [s.name for s in srcs]
     is_bridge = [c == 'bridge' for c in cls_of]
@@ -1888,37 +2026,62 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
     print('entity budget %d: swept %d orphaned target-only entities; dropped %s%s' %
           (F.ent_budget, F.ent_orphans, F.ent_dropped or 'nothing (under budget)',
            '' if not F.ent_short else '  STILL %d OVER BUDGET' % F.ent_short))
-    print('entities: dropped %d source spawnpoints in solid, %d over the per-tile '
-          'spawn budget of %d (stock IntrusiveList ops are linear; an unbudgeted '
-          'megamap spawn set trips the engine 10M-statement runaway at worldspawn)'
-          % (F.dropped_spawns, F.dropped_spawns_budget, F.spawn_cap))
+    nsp = F.spawn_placed
+    rd = sorted(F.spawn_reloc_dist)
+    print('spawnpoints: %d PLACED in the assembled world\'s computed free volume '
+          '(%d needed relocating from where the source map put them: median %.0fu '
+          'max %.0fu), %d had no standing placement anywhere near their origin and '
+          'are not shipped, %d over the per-tile spawn budget of %d.  ZERO can be in '
+          'solid: the origin is constructed as a member of the free volume, so that '
+          'state is not representable.'
+          % (nsp, F.spawn_relocated, rd[len(rd) // 2] if rd else 0.0, rd[-1] if rd else 0.0,
+             F.spawn_unplaceable, F.dropped_spawns_budget, F.spawn_cap))
+    print('spawnpoints: the DELETED source-space test (src.solid_brush_at at SOURCE '
+          'coordinates, three points straight up) condemns %d of the %d source '
+          'spawnpoints; the world-space placement finds %d that do not stand where '
+          'the source map put them and %d with no standing placement at all.  The '
+          'two disagree because they are questions about different worlds: the old '
+          'one was asked before the pack, before the Z stacking, before the doorway '
+          'cuts split the brushwork and before a single connector slab existed.'
+          % (F.spawn_srcspace_bad, nsp + F.spawn_unplaceable,
+             F.spawn_relocated, F.spawn_unplaceable))
     bsp_path = os.path.join(outdir, 'fused.bsp')
     open(bsp_path, 'wb').write(data)
+    nspath = NS.save(F.wns, os.path.join(outdir, 'fused.negspace.npz'))
+    print('wrote %s (%d convex free cells) -- the assembled world\'s free volume, '
+          'which fused.bsp alone cannot express: mapfuse attaches connector leaves '
+          'under a degenerate router chain and the engine only reaches them because '
+          'DarkPlaces collides against a BIH over brushes, not the tree'
+          % (nspath, len(F.wns.cells)))
     print('wrote %s (%d bytes, %d nodes %d leafs %d models)' %
           (bsp_path, len(data), len(nodes_out), len(leafs_out), len(models_out)))
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
-    # ---- WAYPOINT BUDGET.
-    # Stock `waypoint_loadall` spawns each saved waypoint through `waypoint_get`, which
-    # linear-scans the waypoints already spawned and boxesoverlap-tests each one.  That
-    # is O(n^2) inside a single server frame, and the compiled-in 10,000,000-jump
-    # runaway limit therefore caps a fused world's SAVED waypoint count -- not its
-    # entity count, which the separate entity budget already handles.  Measured: 3973
-    # saved waypoints across 29 tiles killed the boot in `waypoint_loadall` at
-    # `waypoint_spawn -> waypoint_get -> boxesoverlap`.  So the same treatment the
-    # entity ceiling got: a hard budget, spent where it buys the most navigation.
-    # The number is empirical, not theoretical.  900 saved waypoints cleared
-    # waypoint_loadall but then blew the same 10M ceiling one layer up, inside
-    # navigation_markroutes -> navigation_markroutes_nearestwaypoints, which walks the
-    # whole g_waypoints IntrusiveList inside its own per-waypoint loop -- O(n^2) again,
-    # per bot, per goal rating, and the fused world's 175 trigger waypoints count too.
-    # 600 clears both.
-    #   * every connector waypoint (corridor chain, doorway chain) is MANDATORY -- they
-    #     are the only nodes that carry a bot from one tile to another;
-    #   * every non-stationary waypoint (jump/teleport link boxes) is kept, they are few;
-    #   * each tile's stationary waypoints are farthest-point decimated to its share of
-    #     what is left, seeded from the nodes nearest that tile's own doorways;
-    #   * the link graph is CONTRACTED onto the survivors, so reachability is preserved
-    #     rather than shredded.
+    # ---- WAYPOINT BUDGET, DERIVED FROM MEASUREMENT (see design/FUSION-SPEC.md 8.6).
+    # Measured on the real dedicated server against this megamap, holding each run
+    # 300 s: n = 300/450/604/750/900 all boot and survive at 12 bots; n = 1200
+    # runs away after 30 s inside navigation_markroutes_nearestwaypoints ->
+    # tracewalk; n = 1600 runs away after 7 s, before the match starts, inside
+    # waypoint_loadall -> waypoint_spawn -> waypoint_get.  Two ceilings:
+    #   * LOAD time, O(n^2): waypoint_get linear-scans g_waypoints with
+    #     boxesoverlap (waypoints.qc:418); measured calls ~= 1.08 n^2.  Between
+    #     1200 and 1600.
+    #   * AI time, O(n) per roll with a huge constant: the expanding search at
+    #     navigation.qc:1119 walks the whole list up to ~66 times with a tracewalk
+    #     per candidate.  Between 1100 and 1200 at 12 bots -- the binding one.
+    # At the MARGINAL n=1200 the failure is not even monotonic in bot count
+    # (B=2 ok, B=12 runaway twice, B=24 ok): it is a per-bot, position-dependent
+    # event, and the roster is deterministic for a given bot_number, so an unlucky
+    # bot lands in the same unlucky place every time.  That is the reason the cap
+    # is 900 and not 1100: it has to sit clear of a stochastic edge, not on it.
+    # Also: every rung above n=604 was SYNTHESIZED by subdividing existing links at
+    # their midpoints (the shipped set has only 604), so the 1100-1200 ceiling is
+    # measured on a synthesized graph and a real 1100-waypoint set could sit
+    # differently.  900 is below that uncertainty too.
+    # BOT COUNT DOES NOT ENTER.  jumpcount is per PRVM_ExecuteProgram call
+    # (prvm_exec.c:789) and the failing entry point is per-client SV_PlayerPhysics
+    # (sv_user.c:383), so every bot has its own 10M budget; and the goal search is
+    # serialised to one bot per frame by the strategy token (bot.qc:789-810).
+    # Measured flat at B = 2, 8, 12, 16, 24.  So the cap is a property of n alone.
     conn_wp = [list(p) for p in F.wp_extra]
     fixed = {vstr(p) for p in conn_wp}
     per_tile = []
@@ -2011,30 +2174,37 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
         'gametype dm\ngametype tdm\ngametype plc\n' % '+'.join(names))
     probs = check_bsp(open(bsp_path, 'rb').read())
     print('parse-back: %s' % ('OK' if not probs else 'PROBLEMS %s' % probs[:10]))
-    # CONNECTOR CLEARANCE CHECK.
-    # Deliberately NOT done through mkentfile.Bsp: that class derives a brush AABB from
-    # plane distances of any plane within 0.999 of an axis, which is only valid for an
-    # exactly axis-aligned plane.  A join corridor is oblique by construction, so its
-    # brushes get a SHIFTED AABB and the check reports phantom "no floor" violations
-    # (measured: a corridor whose real x-span is [-5504,-5152] is indexed at
-    # [-5843,-5491]).  The check below uses the same exact-plane predicate the carver
-    # uses -- Src.solid_brush_at on the un-carved source brushes -- so a violation here
-    # means the corridor tube really is obstructed.  The floor is analytic: the corridor
-    # brush set always contains a floor slab beneath its own centreline.
-    fviol, fviol_by = 0, []
+    # CONNECTOR CLEARANCE, BY CONSTRUCTION AND THEN CONFIRMED STRUCTURALLY.
+    # DELETED here: the old check, which re-ran `corridor_samples` (a 9x6 probe
+    # lattice per 48 units of tube) through `Src.solid_brush_at` against the
+    # UN-CARVED source brushes and counted "obstructed samples".  It could only
+    # ever see what a probe landed on, it asked about source geometry rather than
+    # the assembled world, and it had to special-case its own carve set to avoid
+    # reporting the holes it had just made.  The tube's interior is now REGISTERED
+    # as free volume when the corridor is generated; what follows re-derives the
+    # uncovered part of every tube from the edited complex in closed form, so a
+    # non-zero number here is real solid inside a corridor, measured in cubic
+    # units, not in probes.
+    fviol, fvol, fviol_by = 0, 0.0, []
     for c in conns:
         if c[2] != 'corridor':
             continue
         w2 = (CORW_PROM if c[7] else CORW) / 2.0
-        hits = blockage(srcs, offsets, corridor_samples(c[3], c[4], w2), clip=True)
-        left = [h for h in hits if h not in F.carved]
-        fviol += len(left)
-        if left:
-            fviol_by.append('%s<->%s(len=%.0f,%d)' % (names[c[0]], names[c[1]], c[8], len(left)))
-    print('connector clearance check (exact planes, un-carved source solids): %s '
-          '(%d obstructed samples%s)' %
-          ('PASS' if fviol == 0 else 'FAIL', fviol,
-           '' if not fviol_by else ' on ' + ' '.join(fviol_by)))
+        pieces = tube_gaps(F.wns, c[3], c[4], w2 - 8.0, 8.0, CORH - 16.0, seg=768.0, cap=32)
+        vol = 0.0
+        for G in pieces:
+            glo, ghi = bounds_of(G, F.wns.world_lo - 4096.0, F.wns.world_hi + 4096.0)
+            e = np.maximum(ghi - glo, 0.0)
+            vol += float(e[0] * e[1] * e[2])
+        if vol > 1.0:
+            fviol += 1
+            fvol += vol
+            fviol_by.append('%s<->%s(len=%.0f,%.3gu^3)' % (names[c[0]], names[c[1]], c[8], vol))
+    print('connector clearance (exact: corridor interior MINUS the assembled free '
+          'volume, closed form): %s -- %d/%d corridors have any uncovered interior, '
+          'total %.4g u^3%s'
+          % ('PASS' if fviol == 0 else 'FAIL', fviol, corn, fvol,
+             '' if not fviol_by else ' on ' + ' '.join(fviol_by[:6])))
     nodes2, adj2 = M.parse_cache(open(os.path.join(outdir, 'fused.waypoints.cache')).read())
     key = lambda p: tuple(round(x, 1) for x in p)
     idx2 = {key(nodes2[i]): i for i in range(len(nodes2))}
@@ -2074,6 +2244,40 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
               (srcs[a].name, srcs[b].name, kind,
                'yes' if na is not None else 'MISSING', 'yes' if nb is not None else 'MISSING',
                'YES' if okab else 'NO'))
+    # ---- DOORWAY TRAVERSABILITY, STRUCTURALLY.
+    # A doorway works because the aperture is REGISTERED as free volume joining the
+    # cell inside the tile to the cell outside it; what is checked here is that the
+    # player body actually fits through the whole approach->aperture->mouth run, and
+    # it is checked as exact coverage of that run's swept volume by free cells, not
+    # by a render and not by a probe.
+    dok, dbad = 0, []
+    for p2 in F.portals:
+        alo, ahi = p2['aperture']
+        ax, sg = p2['axis'], p2['sgn']
+        mth = p2['mouth']
+        inner = list(mth)
+        inner[ax] = (alo[ax] + ahi[ax]) / 2.0
+        back = list(inner)
+        back[ax] = (alo[ax] if sg > 0 else ahi[ax]) - sg * 96.0
+        run = [back, inner, mth]
+        ok = True
+        for k in range(len(run) - 1):
+            lo2 = [min(run[k][i], run[k + 1][i]) - (16.0 if i < 2 else 0.0) for i in range(3)]
+            hi2 = [max(run[k][i], run[k + 1][i]) + (16.0 if i < 2 else 0.0) for i in range(3)]
+            lo2[2] = alo[2] + 2.0
+            hi2[2] = min(ahi[2] - 2.0, alo[2] + 2.0 + 69.0)
+            if hi2[2] - lo2[2] < 60.0 or not F.wns.covered(box_H(lo2, hi2)):
+                ok = False
+                break
+        if ok:
+            dok += 1
+        else:
+            dbad.append(names[p2['tile']])
+    print('doorways: %d/%d cut apertures admit a player-sized body end to end '
+          '(approach -> aperture -> connector mouth), checked as exact coverage of '
+          'the swept volume by the assembled free cells%s'
+          % (dok, len(F.portals), '' if not dbad else '; not traversable on ' + ', '.join(dbad[:8])))
+
     # ---- CONNECTIVITY SOLVER over the region graph
     RG = region_graph_solve(j, [(c[0], c[1]) for c in conns])
     print('connectivity: %d component(s) %s; hop-diameter=%d; chokepoint TILES (articulation) %s; '
@@ -2156,7 +2360,7 @@ def fuse(seed, names, outdir, pk3, nbridges=0, workdir=None, loopfrac=0.25, leve
                                  'door_gap_before': round(g0), 'door_gap_after': round(gapsum())}}
     json.dump(metrics, open(os.path.join(outdir, 'fused.metrics.json'), 'w'), indent=1)
     print('wrote fused.joins.json (%d tiles, %d joins) + fused.metrics.json' % (j, len(conns)))
-    return bsp_path, conns
+    return bsp_path, conns, F.wns
 
 
 def smoke(outdir):
@@ -2194,7 +2398,7 @@ if __name__ == '__main__':
     nbridges = None
     teams, carts = 5, 3
     levels = None
-    wpcap = 600
+    wpcap = 900
     for f in flags:
         if f.startswith('--out='):
             outdir = f[6:]
@@ -2231,10 +2435,10 @@ if __name__ == '__main__':
           (seed, len(names), nbridges, len(pool), levels or 'auto', os.path.basename(pk3)))
     print('mapfuse maps=%s' % (names,))
     t0 = time.time()
-    bsp_path, conns = fuse(seed, names, outdir, pk3, nbridges=nbridges, levels=levels, wpcap=wpcap)
+    bsp_path, conns, FUSED_NS = fuse(seed, names, outdir, pk3, nbridges=nbridges, levels=levels, wpcap=wpcap)
     print('fuse wall time %.1fs' % (time.time() - t0))
     ent_path = os.path.join(outdir, 'fused.ent')
-    M.emit(bsp_path, ent_path, teams, carts, pk3)
+    M.emit(bsp_path, ent_path, teams, carts, pk3, ns=FUSED_NS)
     import zipfile
     pk3out = os.path.join(outdir, 'fused.pk3')
     with zipfile.ZipFile(pk3out, 'w', zipfile.ZIP_DEFLATED) as z:

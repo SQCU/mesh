@@ -15,6 +15,9 @@ const int PLC_CS_MASK = 31;
 const int PLC_CS_REGRESS = 8;
 const int PLC_CS_STALL = 16;
 
+// cart simulation tick; shared so the client can lay cart ink on the same cadence
+const float PLC_TICK = 0.1;
+
 float payload_unpack_push(int packed, int idx);
 int payload_unpack_cart_state(int packed, int c);
 

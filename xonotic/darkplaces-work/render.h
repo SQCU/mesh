@@ -238,6 +238,13 @@ extern cvar_t r_test;
 #include "gl_backend.h"
 
 extern rtexture_t *r_texture_blanknormalmap;
+extern rtexture_t *r_texture_neutralpbr;
+
+extern cvar_t r_pbr;
+extern cvar_t r_pbr_specularscale;
+
+extern cvar_t r_pbr;
+extern cvar_t r_pbr_specularscale;
 extern rtexture_t *r_texture_white;
 extern rtexture_t *r_texture_grey128;
 extern rtexture_t *r_texture_black;
