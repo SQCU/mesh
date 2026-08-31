@@ -1228,10 +1228,16 @@ needs `-xonotic`; and the build has no PNG writer, so screenshots were TGA.
 - *Which binaries EXIST is not which binary RAN.* Checking the tree found one
   client; joinshot was launching a fourth outside it. Any tool launching a client
   must use the project build.
-- *A sample can miss, and did.* A marched floor query differed from the closed-form
-  one on real seeds (203/207 vs 205/207; 338/341 vs 339/341) — those points were
-  never navigable. NAV-SPEC §10's sampling disqualifier is a measurement, not a
-  preference.
+- *RETRACTED: "a sample can miss, and did."* I reported a marched floor query
+  differing from a closed-form one (203/207 vs 205/207; 338/341 vs 339/341) as
+  evidence that the samples missed real points. It was the reverse. `negspace`,
+  an independent exact implementation, returns 205/207 and 339/341 — agreeing
+  with the MARCH. My closed-form ray was the outlier and had a seam bug: a ray
+  cast exactly along the shared face of two abutting brushes passes between them.
+  NAV-SPEC §10's sampling disqualifier may still be right, but this was not
+  evidence for it; it was my own defect, cited against the tool that was correct.
+  The general lesson is the one that keeps recurring here — two implementations
+  agreeing against a third is evidence about the third.
 - *Fix the defect BEFORE the fold, then fold against a live reference.* Differential
   testing against the oracle being retired caught four bugs in the replacement,
   including interval-propagation bounds that silently dropped every plug brush
@@ -1241,3 +1247,10 @@ needs `-xonotic`; and the build has no PNG writer, so screenshots were TGA.
 - *A leak-free compile proves nothing about tiles.* The lightgrid failure reports no
   leak at all.
 - *The player hull is 32x32x69*, not a symmetric 32x32x48.
+- *An exact test can thread a seam.* Aperture vantages were aimed at ring
+  VERTICES, which are the boundary between two strip segments, so a radial ray
+  ran along the shared face of two abutting plug brushes and passed through a
+  sealed wall — seed 23 reported its mouth correctly sealed while the sightline
+  through it stayed clear. Aim at segment centres. Sampling hid this; exactness
+  exposed it, which is the honest argument for exactness rather than the
+  retracted one above.

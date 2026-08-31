@@ -231,8 +231,18 @@ class Spiral:
                       for s0, w in spans]
         self.apertures = []
         for j, (s0, w) in enumerate(spans):
+            # Aim at the CENTRE of a segment, not at a ring vertex. centers[i] is
+            # the boundary between strip segments i-1 and i, so a purely radial
+            # ray cast there runs exactly along the shared face of two abutting
+            # brushes -- and an exact solidity test can pass straight through
+            # that seam. It did: seed 23 aperture 3 reported its mouth correctly
+            # sealed while the sightline through it stayed clear, because the
+            # ray threaded the crack between the two plug brushes rather than
+            # missing the plug. Sampling hid this; exactness exposed it.
             mid = s0 + w // 2
-            c, u = centers[mid], radials[mid]
+            nxt = min(mid + 1, len(centers) - 1)
+            c = tuple(0.5 * (centers[mid][k] + centers[nxt][k]) for k in range(3))
+            u = vnorm(tuple(0.5 * (radials[mid][k] + radials[nxt][k]) for k in range(3)))
             mouth = vadd(c, vmul(u, hw + T))            # centre of the opening
             self.apertures.append({
                 'id': j,
