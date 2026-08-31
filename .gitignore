@@ -33,3 +33,6 @@ xonotic/payload-build/
 xonotic/render/*-home/
 # Stock Quake data + its compiled progs, for the qcbench fixture.
 xonotic/qcbench/id1/
+# qpp preprocessor spill. Appears when qcsrc's Makefile is run without WORKDIR,
+# i.e. when someone bypasses xonotic/payload/build.sh.
+xonotic/.tmp/
