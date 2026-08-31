@@ -1254,3 +1254,50 @@ needs `-xonotic`; and the build has no PNG writer, so screenshots were TGA.
   through it stayed clear. Aim at segment centres. Sampling hid this; exactness
   exposed it, which is the honest argument for exactness rather than the
   retracted one above.
+
+### R36 — 2026-08-31 — the built artifacts are PROGRAMS; inventory before deletion
+
+The server is a VM and `progs.dat` is the program: statements, globals, a string
+table, a field/stat layout. Five of them existed, unversioned, with no recorded
+order of supersession — so "which program is running" had no answer, and a
+session was spent attributing behaviour to source the running build did not
+contain.
+
+**A built .dat has no diff to merge, but it IS a distinct program.** It is
+dominated by weight by globals, constants and the field/stat layout, not by
+statements, so two builds that differ disagree about DATA — including STAT
+indices and field offsets. A server `progs.dat` from one build with a client
+`csprogs.dat` from another reads a *different stat slot*, silently, with no error
+on either side. Hence the build SET is the artifact (`set_id` over all three
+outputs), not three files. And a .dat built from uncommitted source that has
+since changed cannot be regenerated at all: it can be measured and never rebuilt.
+
+**Inventory before deletion, via symbol tables** (`tools/qcdump.py` reads the
+function and globaldef name tables straight out of the .dat — mtimes and sizes
+prove nothing):
+
+| build | functions | has that current lacks |
+|---|---|---|
+| build-qc 08-30 | 13,622 | `payload_carts##GET/SET`, `plc_str_cart_pool##GET/SET` |
+| plc-home 02:06 | 13,489 | the same four |
+| deployed 10:57 | 13,643 | **none** |
+| current 11:53 | 13,644 | — |
+
+Resolved, each one:
+* `payload_carts##GET/SET` — an older *declaration form*. The list survives as the
+  plain global `g_payload_carts`, used in eight places. Not a lost feature.
+* `plc_str_cart_pool[4]` — a STATIC four-slot array, replaced by
+  `plc_str_cart_base = payload_str_pool_run(payload_cart_count, 1)`, sized to the
+  actual cart count. The old program capped carts at four; the new one is
+  count-invariant, which the spec requires.
+* `plc_str_last_cell/kind/subj` grew 5 → 6 slots in current — the team/lane
+  count generalisation.
+
+So the chain is a clean supersession, build-qc → plc-home → deployed → current,
+each strictly adding, and nothing needs porting forward before the old ones go.
+
+**Method note.** I deleted `render/plc-home/data/*.dat` BEFORE running this
+inventory, on the grounds that nothing referenced it — which is an argument about
+callers, not about contents. It was recoverable from git and turned out to carry
+nothing unique, but that was luck. Read a program's symbols before deleting it;
+"nothing imports it" does not mean "it does nothing".
