@@ -927,10 +927,25 @@ def emit(bsp, out, kteams, kcarts, pk3arg='', ns=None):
                                 '"model" "%s"' % visible[c % len(visible)],
                                 '"target" "%s"' % names[0], '"speed" "40"', '}']))
 
-    # Was `[4, 13, 12, 9, 3][:kteams]` -- a magic per-team table that also capped
-    # teams at five by being five long. The goal count is a property of the TRACK
-    # (how many control points it has), so read it from the track.
-    goal_cnts = [max(1, len(named[t % kcarts][0]) // 4) for t in range(kteams)]
+    # `plc_goal "cnt"` carries a TEAM IDENTITY in Xonotic's dom_team convention:
+    # cnt = team_id - 1, with team ids 5/14/13/10 for red/blue/yellow/pink. The
+    # original `[4, 13, 12, 9, 3]` was therefore NOT a magic table — 4/13/12/9 IS
+    # that encoding, and removing it as "arbitrary" emitted values like 32 and 25
+    # that resolve to no team at all, so the generated .ent had to be hand-patched
+    # to run. Derive the encoding instead of either hardcoding or inventing it.
+    #
+    # NOTE the real ceiling this exposes: stock Xonotic defines four teams, so a
+    # fifth team has no id to encode. The 5th entry of the old table (3) was
+    # already meaningless. Raising the team count past four needs engine support,
+    # not a longer list here.
+    TEAM_IDS = (5, 14, 13, 10)  # red, blue, yellow, pink
+    if kteams > len(TEAM_IDS):
+        raise SystemExit(
+            f"kteams={kteams} exceeds the {len(TEAM_IDS)} teams stock Xonotic "
+            f"defines (ids {TEAM_IDS}); a fifth team needs engine support, and "
+            f"emitting an unencodable cnt silently produces goals owned by nobody."
+        )
+    goal_cnts = [TEAM_IDS[t] - 1 for t in range(kteams)]
     for t, cnt in enumerate(goal_cnts):
         names, track = named[t % kcarts]
         extra.append('\n'.join(['{', '"classname" "plc_goal"',
