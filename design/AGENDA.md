@@ -162,6 +162,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] I6 No fake re-simulation anywhere (D7 outstanding) (R13)
 - [x] I7 Private SQCU repo; never push upstream (R1)
 - [x] I8 Services interruptible & resumable by construction, proven by crashing early (R9)
+- [ ] I9 **The learner and supervisor are SERVICES, not batch jobs** — ongoing restarts are correct; an unexplained permanent stop is not (ZEROED, R21)
 
 ---
 
@@ -483,3 +484,34 @@ edges 1→103, teams 1→5, `invalid 0`; but over 228 ticks / 18.4 s / 12 bots t
 aggregate is `deposited 32, accepted 1096, duplicates 6430` — live but sparse.
 Defect for I5: the Python mirror `buffers.py:49-51` is dead because
 `live_belief.py:93-94` passes `True, True, 0.0` as literals.
+
+### R21 — 2026-08-31 — I9 opened (self-terminating learner, finite supervisor)
+`E:code` Diagnosis of why the live run stopped. Not a crash and not a restart cycle:
+the learner has a **wall-clock suicide** and nothing is a service.
+
+    strat_responder.py:124   ap.add_argument("--secs", type=float, default=90.0)
+    strat_responder.py:202   while time.time() - t0 < args.secs:
+
+Attribution by `git blame`: the `--secs` deadline entered in **`de18d7a`**
+(2026-08-29 19:28, my dispatched agent's one-shot demo runner) and hardened into the
+learner's main loop in **`f238c4d`**. It was a demo script's bounded run that became
+the learner's lifetime. **I introduced this fragility.**
+
+The would-be restarter is also finite — `curriculum.py:507` is
+`for index, item in enumerate(schedule):` inside `run(schedule)`, i.e. a batch job
+that returns when the schedule is exhausted. So: the learner exits on a timer, the
+batch supervisor exits on a finite list, and the dedicated server is left up with no
+learner attached — which is the observed state (server PID 73488 on 26031 alive,
+`live.jsonl` last write 19:29, no `strat_responder` on the mini).
+
+The distinction this frontier encodes, per the user this session: **restarting a
+server/match repeatedly is correct and desirable** (it is how the resumability
+contract of R9 is exercised); a learner or server that stops permanently for no
+stated reason is a defect. Per-match duration is legitimate — it belongs to the
+MATCH, not to the learner's lifetime.
+
+Recovery route: `--secs` defaults to unbounded (run until signalled); the supervisor
+becomes a persistent loop that keeps starting matches and relaunches the learner if
+it dies, leaning on the already-proven atomic checkpoint/resume (R9).
+Also removed `xonotic/solver/strat/test_runtime.py` (untracked, added this session,
+violates the standing no-tests directive).
