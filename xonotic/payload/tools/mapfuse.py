@@ -261,6 +261,49 @@ def corridor_volume(a, b, w2, lo=0.0, hi=None):
     return np.array([[n[0], n[1], n[2], d] for n, d in pl], dtype=np.float64)
 
 
+
+def _convex_nonempty(planes, eps=0.5, min_extent=1.0):
+    """Is the convex volume {x : n.x <= d for every (n,d)} non-empty with real extent?
+
+    Exact vertex enumeration: a bounded convex polyhedron's vertices are
+    intersections of plane triples, so the volume is non-empty iff some triple's
+    solution satisfies EVERY half-space, and it has volume iff four such points
+    are affinely independent.
+
+    This replaces an AABB-projection guard that asked only whether the brush's
+    BOUNDING BOX reached past the current region plane. That test is exact only
+    when every plane is axis-aligned; generalizing the subtracted region to
+    oblique half-spaces silently turned it into a superset test, so remainders
+    that are actually empty were emitted as degenerate brushes. It also ignored
+    the already-accounted faces, so even axial cases could emit empty pieces.
+    Same failure family as deriving an AABB from oblique planes (the 75 GB
+    unguarded-range loop) and as point-sampling solidity: approximate the convex
+    volume, then decide something with the approximation.
+    """
+    P = [(np.asarray(n, dtype=float), float(d)) for n, d in planes]
+    if len(P) < 4:
+        return False
+    pts = []
+    for i in range(len(P)):
+        for j in range(i + 1, len(P)):
+            for k in range(j + 1, len(P)):
+                A = np.array([P[i][0], P[j][0], P[k][0]])
+                if abs(np.linalg.det(A)) < 1e-9:
+                    continue
+                try:
+                    x = np.linalg.solve(A, np.array([P[i][1], P[j][1], P[k][1]]))
+                except np.linalg.LinAlgError:
+                    continue
+                if all(float(np.dot(n, x)) <= d + eps for n, d in P):
+                    pts.append(x)
+    if len(pts) < 4:
+        return False
+    Q = np.asarray(pts) - np.asarray(pts[0])
+    if np.linalg.matrix_rank(Q, tol=1e-6) < 3:
+        return False
+    return float(np.max(Q) - np.min(Q)) >= min_extent
+
+
 class Fuser:
     def __init__(self, srcs, offsets, seed):
         self.srcs, self.offsets, self.rng = srcs, offsets, random.Random(seed)
@@ -487,13 +530,12 @@ class Fuser:
                 # remainder OUTSIDE this face of the region, and inside all the
                 # faces already accounted for: convex by construction, and the
                 # union of them is exactly (brush minus region)
-                lowv = min(sum(n[a] * (wblo[a] if n[a] > 0 else wbhi[a]) for a in range(3)),
-                           sum(n[a] * (wbhi[a] if n[a] > 0 else wblo[a]) for a in range(3)))
-                highv = max(sum(n[a] * (wblo[a] if n[a] > 0 else wbhi[a]) for a in range(3)),
-                            sum(n[a] * (wbhi[a] if n[a] > 0 else wblo[a]) for a in range(3)))
-                if highv - dd > 1.0:
-                    self.add_brush(wp + [([-x for x in n], -dd)] + list(acc), tex,
-                                   bounds=bnd, subset=True)
+                # The remainder is the brush, OUTSIDE this region face, and INSIDE
+                # every face already accounted for. Test that exact volume rather
+                # than a bounding-box projection of one of its planes.
+                piece = wp + [([-x for x in n], -dd)] + list(acc)
+                if _convex_nonempty(piece):
+                    self.add_brush(piece, tex, bounds=bnd, subset=True)
                     made += 1
                 acc.append((list(n), dd))
             self.carved.add((m, bi))
