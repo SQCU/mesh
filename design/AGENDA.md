@@ -510,8 +510,18 @@ contract of R9 is exercised); a learner or server that stops permanently for no
 stated reason is a defect. Per-match duration is legitimate — it belongs to the
 MATCH, not to the learner's lifetime.
 
-Recovery route: `--secs` defaults to unbounded (run until signalled); the supervisor
-becomes a persistent loop that keeps starting matches and relaunches the learner if
-it dies, leaning on the already-proven atomic checkpoint/resume (R9).
+Recovery route, corrected by the owner the same session — **delete the incorrect
+branch entirely**, do not park it behind a flag:
+
+> delete incorrect branches entirely
+
+`--secs` and the deadline loop are DELETED from `strat_responder.py` (not defaulted
+to unbounded, not kept as an opt-in bounded mode); the finite-schedule termination
+and any `--once`/`--n-matches` equivalent are DELETED from `curriculum.py`. Exactly
+one lifetime path remains on each side: run until signalled. The supervisor keeps
+starting matches, relaunches the learner if it dies, and logs every restart with its
+reason, leaning on the already-proven atomic checkpoint/resume (R9). A wrong
+alternative is removed from prod, harness and docs in the same change — a flagged
+dead branch is the same fragility with a switch on it.
 Also removed `xonotic/solver/strat/test_runtime.py` (untracked, added this session,
 violates the standing no-tests directive).
