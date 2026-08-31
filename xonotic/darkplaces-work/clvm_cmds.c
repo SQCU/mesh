@@ -4981,10 +4981,18 @@ static void VM_CL_ink_clear(prvm_prog_t *prog)
 // #656 float(float sel) ink_stat
 // 0 active, 1..3 resolution xyz, 4 world units per voxel, 5 splats accepted,
 // 6..8 volume mins xyz, 9..11 volume size xyz  (the volume covers the world model
-// bounds, so this is also how CSQC learns the extent of the level)
+// bounds, so this is also how CSQC learns the extent of the level),
+// 12..14 mean accumulated ink colour, 15 mean coverage.
+//
+// 12..15 are the same cached pair R_Sky_InkTint uses to tint the sky, exposed
+// rather than recomputed: they let the client's neutral drift deposit the colour
+// the world already carries instead of asserting a colour of its own, which is
+// what keeps the drift and the team-coloured cart ink out of each other's way.
 static void VM_CL_ink_stat(prvm_prog_t *prog)
 {
 	int sel;
+	vec3_t tint;
+	float coverage;
 	VM_SAFEPARMCOUNT(1, VM_CL_ink_stat);
 	sel = (int)PRVM_G_FLOAT(OFS_PARM0);
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
@@ -4992,6 +5000,14 @@ static void VM_CL_ink_stat(prvm_prog_t *prog)
 		return;
 	switch (sel)
 	{
+	case 12: case 13: case 14:
+		R_Ink_GlobalTint(tint, &coverage);
+		PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)tint[sel - 12];
+		break;
+	case 15:
+		R_Ink_GlobalTint(tint, &coverage);
+		PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)coverage;
+		break;
 	case 0: PRVM_G_FLOAT(OFS_RETURN) = 1; break;
 	case 1: case 2: case 3: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.resolution[sel - 1]; break;
 	case 4: PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t)r_ink_state.spacing[0]; break;

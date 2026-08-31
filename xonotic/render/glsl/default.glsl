@@ -68,7 +68,14 @@
 	myhalf3 pbr_speccolor = pbr_F; \
 	myhalf3 pbr_kd = myhalf3(1.0) - pbr_F;
 # define SPECULARCOLOR pbr_speccolor
-# define DIFFUSEALBEDO (diffusetex * pbr_kd)
+// pbr_kd is declared by SHADESPECULAR, so it only exists in permutations that
+// actually run it; without a specular term there is no Fresnel to take energy
+// out of the diffuse lobe and the stock albedo is already the right answer.
+# ifdef USESPECULAR
+#  define DIFFUSEALBEDO (diffusetex * pbr_kd)
+# else
+#  define DIFFUSEALBEDO diffusetex
+# endif
 #else
 # define SPECULARCOLOR glosstex.rgb
 # define DIFFUSEALBEDO diffusetex
@@ -1633,9 +1640,16 @@ void main(void)
 #ifdef USEDIFFUSE
 	myhalf3 lightnormal = cast_myhalf3(normalize(LightVector));
 SHADEDIFFUSE
+#ifdef USESPECULAR
+// SHADESPECULAR is what declares the PBR Fresnel split that DIFFUSEALBEDO and
+// SPECULARCOLOR expand to, so it has to run BEFORE the diffuse term is written -
+// exactly as it already does in the SHADING block further down.  With it after,
+// the lightsource+pbr permutation failed to compile ("undeclared identifier
+// pbr_kd") and every dynamic light fell back to the fixed-function path.
+SHADESPECULAR(SpecularPower * glosstex.a)
+#endif
 	color.rgb = DIFFUSEALBEDO * AMBIENTCOLOR + DIFFUSEALBEDO * (diffuse * Color_Diffuse);
 #ifdef USESPECULAR
-SHADESPECULAR(SpecularPower * glosstex.a)
 	color.rgb += SPECULARCOLOR * (specular * Color_Specular);
 #endif
 #else

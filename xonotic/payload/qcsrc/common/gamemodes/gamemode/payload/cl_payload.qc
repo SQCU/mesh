@@ -33,8 +33,8 @@ void Payload_Ribbon_Draw(entity this)
 		if(vlen(dir) < 1)
 			continue;
 		vector perp = normalize(vec2(-dir.y, dir.x)) * hw;
-		vector c0 = colormapPaletteColor(it.team & 0x0F, false);
-		vector c1 = colormapPaletteColor((it.team & 0xF0) / 0x10, false);
+		vector c0 = payload_link_color(it.team & 0x0F);
+		vector c1 = payload_link_color((it.team & 0xF0) / 0x10);
 		R_BeginPolygon("", DRAWFLAG_ADDITIVE, false);
 		R_PolygonVertex(a - perp, '0 0 0', c0, 0.28);
 		R_PolygonVertex(a + perp, '1 0 0', c0, 0.28);
@@ -59,15 +59,13 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	mod_active = 1;
 	Payload_Ribbon_Setup();
 
-	int carts = STAT(PAYLOAD_GOALS_PACKED);
-	int cstate = STAT(PAYLOAD_CARTS_STATE);
-	int push = STAT(PAYLOAD_PUSH_PACKED);
-	float c0prog = bound(0, STAT(PAYLOAD_PROGRESS), 1);
-
 	int n = 0;
 	for(int c = 0; c < PLC_MAX_CARTS; ++c)
-		if((carts >> (c * PLC_PUSH_BITS)) & PLC_PUSH_MASK)
+	{
+		payload_cart_read(c);
+		if(plc_r_present)
 			++n;
+	}
 	if(n < 1)
 		n = 1;
 
@@ -76,6 +74,7 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	float rowh = rowarea / n;
 	float barh = rowh * 0.5;
 
+	int push = payload_cart_push_packed(0);
 	for(int j = 1; j <= NUM_TEAMS; ++j)
 	{
 		float w = payload_unpack_push(push, j);
@@ -88,18 +87,15 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	int slot = 0;
 	for(int c = 0; c < PLC_MAX_CARTS; ++c)
 	{
-		int q = (carts >> (c * PLC_PUSH_BITS)) & PLC_PUSH_MASK;
-		if(!q && !(n == 1 && c == 0))
+		payload_cart_read(c);
+		if(!plc_r_present && !(n == 1 && c == 0))
 			continue;
 
-		float f = (c == 0) ? c0prog : (q > 0 ? (q - 1) / (PLC_PUSH_MASK - 1) : 0);
-		int st = payload_unpack_cart_state(cstate, c);
-		int ctrl = st & 7;
-		bool regress = boolean(st & PLC_CS_REGRESS);
-		bool stall = boolean(st & PLC_CS_STALL);
-
-		vector teamcol = ctrl ? Team_ColorRGB(Team_IndexToTeam(ctrl)) : '0.55 0.55 0.55';
-		vector motcol = regress ? '1 0.3 0.2' : (stall ? '0.6 0.6 0.6' : teamcol);
+		// every colour on this row is the colour the same cart wears in the world
+		float f = plc_r_frac;
+		bool regress = plc_r_regress, stall = plc_r_stall;
+		vector teamcol = plc_r_color;
+		vector motcol = plc_r_color2;
 
 		vector rp = myPos + vec2(0, pipband + slot * rowh + (rowh - barh) * 0.5);
 		vector rs = vec2(mySize.x, barh);
@@ -108,14 +104,19 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 		if(f > 0)
 			drawfill(rp, vec2(f * rs.x, rs.y), teamcol, panel_fg_alpha * 0.45, DRAWFLAG_ADDITIVE);
 
+		// the head marker carries the contesting colour and the same emissive
+		// strength the world body uses, so a stalled or uncontrolled cart reads
+		// dim on the panel exactly as it does in the level
 		float hx = rp.x + bound(barh * 0.25, f * rs.x, rs.x - barh * 0.25);
 		drawfill(vec2(hx - barh * 0.22, rp.y - barh * 0.15), vec2(barh * 0.44, barh * 1.3),
-			motcol, panel_fg_alpha, DRAWFLAG_NORMAL);
+			motcol, panel_fg_alpha * plc_r_glow, DRAWFLAG_NORMAL);
 
 		float gy = rp.y + barh * 0.5 - barh * 0.18;
 		vector gc = myPos + vec2(mySize.x - barh * 0.4, gy);
 		if(regress)
-			drawfill(gc, vec2(barh * 0.36, barh * 0.36), '1 0.3 0.2', panel_fg_alpha, DRAWFLAG_ADDITIVE);
+			// a regressing cart's glyph wears the colour of the team driving it
+			// home - the same colour that team is overpainting the track with
+			drawfill(gc, vec2(barh * 0.36, barh * 0.36), plc_r_inkcolor, panel_fg_alpha, DRAWFLAG_ADDITIVE);
 		else if(!stall)
 			drawfill(gc, vec2(barh * 0.36, barh * 0.36), teamcol, panel_fg_alpha, DRAWFLAG_ADDITIVE);
 
@@ -123,6 +124,9 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	}
 
 	if(autocvar_hud_panel_modicons_payload_layout)
-		drawstring_aspect(myPos, strcat(ftos(floor(c0prog * 100 + 0.5)), "%"),
+	{
+		payload_cart_read(0);
+		drawstring_aspect(myPos, strcat(ftos(floor(plc_r_frac * 100 + 0.5)), "%"),
 			vec2(mySize.x * 0.22, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+	}
 }

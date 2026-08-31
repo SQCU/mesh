@@ -31,14 +31,21 @@ float autocvar_cl_artifact_sides = 6;
 float autocvar_cl_artifact_scale = 110;
 float autocvar_cl_artifact_tube = 13;
 float autocvar_cl_artifact_speed = 0.11;
-float autocvar_cl_artifact_glob_interval = 0.35;
-float autocvar_cl_artifact_glob_radius = 190;
-float autocvar_cl_artifact_glob_amount = 0.5;
+float autocvar_cl_artifact_glob_interval = 0.20;
+float autocvar_cl_artifact_glob_radius = 420;
+// the drift is a low-amplitude wash: it saturates coverage without seizing hue
+float autocvar_cl_artifact_glob_amount = 0.14;
+// the carts are the opposite - a narrow, decisive, high-amplitude write
+float autocvar_cl_artifact_cart_ink_radius = 220;
+float autocvar_cl_artifact_cart_ink_amount = 0.55;
 float autocvar_cl_artifact_glob_reach = 4096;
 float autocvar_cl_artifact_catchup = 3000;
 float autocvar_cl_artifact_sky = 1;
 float autocvar_cl_artifact_sky_distance = 26000;
-float autocvar_cl_artifact_sky_scale = 62;
+float autocvar_cl_artifact_sky_scale = 26;
+// the sky body's tube is thickened relative to its curve so it reads as a solid
+// volume at 26,000 units rather than as wireframe
+float autocvar_cl_artifact_sky_thickness = 2.6;
 float autocvar_cl_artifact_alpha = 0.62;
 float autocvar_cl_artifact_drift = 1;
 
@@ -159,10 +166,14 @@ vector Artifact_Origin(float t)
 
 // Emit the projected knot as a tube.  `origin` places it, `scale` sizes the
 // curve, `radius` the tube, `phase` drives the SO(5) rotation, `col` tints it,
-// `band` (0..1) is a bright travelling marker used to show a cart's progress
-// along its path (negative disables it).
+// `col2` is the contesting colour and `contest` (0..1) how strongly it is
+// claimed - when it is nonzero the two colours alternate along a helical stripe
+// so a contested cart reads as visibly streaked in a still frame rather than as
+// a flicker.  `band` (0..1) is a bright travelling marker used to show a cart's
+// progress along its path (negative disables it).
 void Artifact_DrawTube(vector origin, float scale, float radius, float phase,
-                       vector col, float alpha, float band, int segments, int sides)
+                       vector col, vector col2, float contest,
+                       float alpha, float band, int segments, int sides)
 {
 	vector prev = '0 0 0', prevu = '0 0 0', prevr = '0 0 0';
 	float i, j, tau = 2 * M_PI;
@@ -201,7 +212,8 @@ void Artifact_DrawTube(vector origin, float scale, float radius, float phase,
 				vector o1 = prevr * cos(a1) + prevu * sin(a1);
 				vector n0 = rt * cos(a0) + up * sin(a0);
 				vector n1 = rt * cos(a1) + up * sin(a1);
-				vector ca = col, cb = col;
+				vector base = (contest > 0 && ((j + i) & 1)) ? (col * (1 - contest) + col2 * contest) : col;
+				vector ca = base, cb = base;
 
 				// a bright band travelling along the tube reads as "how far"
 				if (band >= 0)
@@ -209,7 +221,7 @@ void Artifact_DrawTube(vector origin, float scale, float radius, float phase,
 					float du = fabs(u - band);
 					du = min(du, 1 - du);
 					float k = max(0, 1 - du * 8);
-					ca = col + (('1 1 1' - col) * k);
+					ca = base + (('1 1 1' - base) * k);
 					cb = ca;
 				}
 
@@ -236,6 +248,24 @@ void Artifact_DrawTube(vector origin, float scale, float radius, float phase,
 // (position, tick) pairs is identical on every client - the accumulated ink is
 // consistent without replicating splats.
 float art_lastglob = -1;
+
+// The drift and the carts write the SAME voxels, so they have to mean different
+// things in them or one erases the other.  The volume already separates them:
+// coverage (alpha) drives how wet and rubbery a surface is, colour (rgb) drives
+// what it is tinted.  The carts own colour - they deposit saturated team paint
+// at a high rate along a track.  The drift owns coverage: it deposits at a low
+// per-glob amount over a wide radius, and its colour is the mean colour the
+// world ALREADY carries (ink_stat's cached global tint, the same pair the engine
+// tints the sky with), pulled toward the sour green only as far as the world is
+// still unpainted.  So the drift wets everything and repaints nothing: it makes
+// the world rubberier and off-colour without arguing with a team about whose
+// territory a corridor is.
+vector Artifact_DriftColor()
+{
+	float cov = bound(0, ink_stat(INK_COVERAGE), 1);
+	vector mean = vec3(ink_stat(INK_TINT_R), ink_stat(INK_TINT_G), ink_stat(INK_TINT_B));
+	return autocvar_cl_artifact_color * (1 - cov) + mean * cov;
+}
 
 void Artifact_DropGlob(float tick, vector col, float amount)
 {
@@ -280,8 +310,9 @@ void Artifact_DropGlobs()
 		if (now - first > autocvar_cl_artifact_catchup)
 			first = now - autocvar_cl_artifact_catchup;
 	}
+	vector col = Artifact_DriftColor();
 	for (float k = first; k <= now; ++k)
-		Artifact_DropGlob(k, autocvar_cl_artifact_color, autocvar_cl_artifact_glob_amount);
+		Artifact_DropGlob(k, col, autocvar_cl_artifact_glob_amount);
 	art_lastglob = now;
 }
 
@@ -289,135 +320,60 @@ void Artifact_DropGlobs()
 // Carts, rendered as instances of the same body
 // ---------------------------------------------------------------------------
 
-// The cart's position along its path comes from the radar-link polyline that the
-// payload gamemode already networks: each link's .origin is its start node and
-// .velocity its end node.  Walking that polyline with the cart's arclength
-// fraction reproduces the cart's world position without a second source of truth.
-float art_pathlen;
-float art_pathvalid;
-
-float Artifact_PathLength()
-{
-	float total = 0;
-	IL_EACH(g_radarlinks, true, { total += vlen(it.velocity - it.origin); });
-	return total;
-}
-
-vector Artifact_PathPoint(float frac)
-{
-	float want, acc = 0;
-	vector best = '0 0 0';
-	bool found = false;
-	if (art_pathlen <= 0)
-		return '0 0 0';
-	want = bound(0, frac, 1) * art_pathlen;
-	IL_EACH(g_radarlinks, !found,
-	{
-		float l = vlen(it.velocity - it.origin);
-		if (acc + l >= want)
-		{
-			best = it.origin + (it.velocity - it.origin) * ((l > 0) ? (want - acc) / l : 0);
-			found = true;
-		}
-		else
-		{
-			acc += l;
-			best = it.velocity;
-		}
-	});
-	return best;
-}
-
-// Colour a cart by its control state.  Grey when nobody holds it, the team colour
-// under a plurality, and a streak between the two strongest teams when the
-// activation cylinder is contested.
-vector Artifact_CartColor(int ctrl, int push, bool regress, float streakphase)
-{
-	int j, bestj = 0, secondj = 0;
-	float best = 0, second = 0;
-	vector a, b;
-
-	for (j = 1; j <= NUM_TEAMS; ++j)
-	{
-		float w = payload_unpack_push(push, j);
-		if (w > best) { second = best; secondj = bestj; best = w; bestj = j; }
-		else if (w > second) { second = w; secondj = j; }
-	}
-
-	if (!ctrl && !bestj)
-		return '0.55 0.55 0.55';
-
-	a = ctrl ? Team_ColorRGB(Team_IndexToTeam(ctrl)) : Team_ColorRGB(Team_IndexToTeam(bestj));
-	if (second <= 0 || !secondj)
-		return regress ? (a * 0.5 + '0.5 0.15 0.1') : a;
-
-	// contested: alternate between the two claimants so it reads as streaked
-	b = Team_ColorRGB(Team_IndexToTeam(secondj));
-	return (sin(streakphase * 9) > 0) ? a : b;
-}
+// A cart's world position is NOT re-derived here.  An earlier revision walked the
+// radar-link polyline with the cart's arclength fraction, which is wrong twice
+// over: g_radarlinks holds every cart's links in one undifferentiated list, and
+// those links are subsampled to at most PLC_RIBBON_SEG straight hops, so the
+// reconstructed point left the track on every curve.  The cart's exact origin is
+// already networked - payload_cart_read() reads it off the cart's own
+// waypointsprite - so this file only draws it.
 
 float art_cart_lastink = -1;
 
 void Artifact_DrawCarts(float phase)
 {
-	int carts = STAT(PAYLOAD_GOALS_PACKED);
-	int cstate = STAT(PAYLOAD_CARTS_STATE);
-	int push = STAT(PAYLOAD_PUSH_PACKED);
-	float lead = bound(0, STAT(PAYLOAD_PROGRESS), 1);
 	float inktick = floor(time / PLC_TICK);
 	bool doink = (inktick != art_cart_lastink);
 
-	if (!art_pathvalid)
-	{
-		art_pathlen = Artifact_PathLength();
-		art_pathvalid = (art_pathlen > 0);
-		if (!art_pathvalid)
-			return;
-	}
-
 	for (int c = 0; c < PLC_MAX_CARTS; ++c)
 	{
-		int q = (carts >> (c * PLC_PUSH_BITS)) & PLC_PUSH_MASK;
-		if (!q)
+		payload_cart_read(c);
+		if (!plc_r_present || !plc_r_haveorigin)
 			continue;
 
-		// Cart 0's arclength arrives as a full-precision float; the others are the
-		// 6-bit field, which is all that is currently networked.
-		float f = (c == 0) ? lead : ((q - 1) / (PLC_PUSH_MASK - 1));
-		int st = payload_unpack_cart_state(cstate, c);
-		int ctrl = st & 7;
-		bool regress = boolean(st & PLC_CS_REGRESS);
-		bool stall = boolean(st & PLC_CS_STALL);
-		vector pos = Artifact_PathPoint(f);
-		vector col = Artifact_CartColor(ctrl, push, regress, time + c);
-
-		if (pos == '0 0 0')
-			continue;
-
-		// the body itself, sized consistently regardless of what brush model the
-		// map happened to hand the cart
+		vector pos = plc_r_origin;
+		float glow = autocvar_cl_artifact_alpha * plc_r_glow;
+		// The body.  Same curve, same SO(5) rotation, same sweep as the drifting
+		// artifact - a cart IS one of these, only smaller, tinted by who holds it
+		// and pinned to a track instead of drifting.  Its size comes from cvars,
+		// not from whatever brush the source map handed the cart, so every cart on
+		// every fused tile has the same silhouette and the same bounds.
 		Artifact_DrawTube(pos + '0 0 40', autocvar_cl_artifact_scale * 0.42,
-			autocvar_cl_artifact_tube * 0.8, phase * 1.7 + c * 2.0, col,
-			(stall ? autocvar_cl_artifact_alpha * 0.6 : autocvar_cl_artifact_alpha),
+			autocvar_cl_artifact_tube * 0.8, phase * 1.7 + c * 2.0,
+			plc_r_color, plc_r_color2, plc_r_contest, glow,
 			-1, autocvar_cl_artifact_segments * 0.6, autocvar_cl_artifact_sides);
 
-		// Ink is cart territory: an advancing cart lays its controller's colour
-		// along the path it has just covered, a contested cart lays the streak, and
-		// a cart driven back gets overpainted by whoever is pushing it home.
+		// Ink is cart territory.  An advancing cart lays its controller's colour
+		// on the ground it has just covered; a contested cart lays the muddied
+		// blend of the two claimants; a cart being driven back has its own paint
+		// overpainted by the team pushing it home (payload_cart_read resolves
+		// which of those plc_r_inkcolor is).  Laid on the cart's own PLC_TICK, so
+		// the paint advances at exactly the rate the cart's control law runs at.
 		if (doink)
 		{
 			vector inkat = pos;
 			traceline(pos + '0 0 40', pos - '0 0 512', MOVE_WORLDONLY, NULL);
 			if (trace_fraction < 1)
 				inkat = trace_endpos + trace_plane_normal * 8;
-			ink_splat(inkat, autocvar_cl_artifact_glob_radius * 0.8, col,
-				(stall ? 0.05 : 0.30));
+			ink_splat(inkat, autocvar_cl_artifact_cart_ink_radius, plc_r_inkcolor,
+				autocvar_cl_artifact_cart_ink_amount * (plc_r_stall ? 0.2 : 1));
 		}
 
-		// Supermassive sky counterpart: on a world you cannot see across, this is
-		// how a cart stays legible.  It sits far enough out to read as sky, so it
-		// is occluded by level geometry exactly where the sky would be, and the
-		// travelling band shows how deep along its path the cart is.
+		// Supermassive sky counterpart.  The fused world is ~152,000 units across;
+		// nobody can see the far theatre, so each cart also hangs against the sky
+		// in the direction it actually lies, wearing its control colour and its
+		// contest streak, with the travelling band showing how deep along its path
+		// it is.  Whose cart, where, what state and how far - without a HUD.
 		if (autocvar_cl_artifact_sky)
 		{
 			vector dir = pos - view_origin;
@@ -425,13 +381,15 @@ void Artifact_DrawCarts(float phase)
 			if (vlen(dir) < 1)
 				dir = '1 0 0';
 			dir = normalize(dir);
+			// each cart gets its own elevation band so k carts read as k bodies
+			// rather than as one tangle in the same patch of sky
 			vector skyat = view_origin + dir * autocvar_cl_artifact_sky_distance
-				+ '0 0 1' * (autocvar_cl_artifact_sky_distance * 0.42);
+				+ '0 0 1' * (autocvar_cl_artifact_sky_distance * (0.30 + 0.14 * c));
 			Artifact_DrawTube(skyat,
 				autocvar_cl_artifact_scale * autocvar_cl_artifact_sky_scale,
-				autocvar_cl_artifact_tube * autocvar_cl_artifact_sky_scale * 0.9,
-				phase * 0.55 + c * 2.0, col, autocvar_cl_artifact_alpha * 0.8,
-				f, autocvar_cl_artifact_segments * 0.5, 4);
+				autocvar_cl_artifact_tube * autocvar_cl_artifact_sky_scale * autocvar_cl_artifact_sky_thickness,
+				phase * 0.55 + c * 2.0, plc_r_color, plc_r_color2, plc_r_contest,
+				glow * 0.8, plc_r_frac, autocvar_cl_artifact_segments * 0.5, 6);
 		}
 	}
 
@@ -483,8 +441,9 @@ void Artifact_Draw(entity this)
 	if (autocvar_cl_artifact_drift)
 	{
 		vector at = Artifact_Origin(time);
+		vector dcol = Artifact_DriftColor();
 		Artifact_DrawTube(at, autocvar_cl_artifact_scale, autocvar_cl_artifact_tube,
-			phase, autocvar_cl_artifact_color, autocvar_cl_artifact_alpha, -1,
+			phase, dcol, dcol, 0, autocvar_cl_artifact_alpha, -1,
 			autocvar_cl_artifact_segments, autocvar_cl_artifact_sides);
 
 		// the same body, supermassive, dropped against the sky
@@ -498,10 +457,10 @@ void Artifact_Draw(entity this)
 			Artifact_DrawTube(view_origin + dir * autocvar_cl_artifact_sky_distance
 					+ '0 0 1' * (autocvar_cl_artifact_sky_distance * 0.5),
 				autocvar_cl_artifact_scale * autocvar_cl_artifact_sky_scale,
-				autocvar_cl_artifact_tube * autocvar_cl_artifact_sky_scale,
-				phase * 0.4, autocvar_cl_artifact_color,
+				autocvar_cl_artifact_tube * autocvar_cl_artifact_sky_scale * autocvar_cl_artifact_sky_thickness,
+				phase * 0.4, dcol, dcol, 0,
 				autocvar_cl_artifact_alpha * 0.75, -1,
-				autocvar_cl_artifact_segments * 0.5, 4);
+				autocvar_cl_artifact_segments * 0.5, 6);
 		}
 
 		Artifact_DropGlobs();

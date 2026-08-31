@@ -278,6 +278,8 @@ qboolean OGG_OpenLibrary (void)
 		"libvorbis.dll",
 		"vorbis.dll",
 #elif defined(MACOSX)
+		"/opt/homebrew/lib/libvorbis.dylib",
+		"/usr/local/lib/libvorbis.dylib",
 		"libvorbis.dylib",
 #else
 		"libvorbis.so.0",
@@ -292,6 +294,8 @@ qboolean OGG_OpenLibrary (void)
 		"libvorbisfile.dll",
 		"vorbisfile.dll",
 #elif defined(MACOSX)
+		"/opt/homebrew/lib/libvorbisfile.dylib",
+		"/usr/local/lib/libvorbisfile.dylib",
 		"libvorbisfile.dylib",
 #else
 		"libvorbisfile.so.3",

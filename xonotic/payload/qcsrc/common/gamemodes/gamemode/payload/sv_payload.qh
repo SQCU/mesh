@@ -60,6 +60,7 @@ const float PLC_CURVE_STEPS = 16;
 .float plc_s;
 .float plc_length;
 .int plc_cart_id;
+.int plc_push_packed;   ///< this cart's own per-team occupancy weights, packed as PAYLOAD_PUSH_PACKED*
 .int plc_ctrl;
 .float plc_speed_now;
 .float plc_idle;

@@ -37,6 +37,7 @@ float autocvar_g_payload_round_timelimit = 300;
 float autocvar_g_payload_warmup = 5;
 float autocvar_g_payload_node_fade_dist = 1100;
 int autocvar_g_payload_pathlinks = 1;
+bool autocvar_g_payload_cart_procedural = true;
 int autocvar_g_payload_ribbon_max = 32;
 int autocvar_g_payload_node_sprites = 0;
 
@@ -228,12 +229,24 @@ void payload_update_links(entity cart)
 	});
 }
 
+int payload_cart_push_stat(int c)
+{
+	return (c >= 0 && c < payload_cart_count) ? payload_carts[c].plc_push_packed : 0;
+}
+
 void set_payload_state(entity e)
 {
 	entity c0 = (payload_cart_count > 0) ? payload_carts[0] : NULL;
 	STAT(PAYLOAD_PROGRESS, e) = (c0 && c0.plc_length > 0) ? c0.plc_s / c0.plc_length : 0;
 	STAT(PAYLOAD_SPEED, e) = c0 ? c0.plc_speed_now : 0;
-	STAT(PAYLOAD_PUSH_PACKED, e) = payload_pack_push();
+	// Occupancy is per cart: payload_w[] is recomputed inside each cart's own
+	// think, so each cart packs its own weights there and this only forwards
+	// them.  Without this, every cart but the lead one was drawn with cart 0's
+	// contest and could never read as contested on its own.
+	STAT(PAYLOAD_PUSH_PACKED,  e) = payload_cart_push_stat(0);
+	STAT(PAYLOAD_PUSH_PACKED1, e) = payload_cart_push_stat(1);
+	STAT(PAYLOAD_PUSH_PACKED2, e) = payload_cart_push_stat(2);
+	STAT(PAYLOAD_PUSH_PACKED3, e) = payload_cart_push_stat(3);
 	STAT(PAYLOAD_GOALS_PACKED, e) = payload_pack_carts();
 	STAT(PAYLOAD_CARTS_STATE, e) = payload_pack_cart_state();
 }
@@ -407,6 +420,7 @@ void payload_think(entity this)
 			GameRules_scoring_add_float2int(it, PAYLOAD_BLOCK, autocvar_g_payload_block_rate * PLC_TICK, plc_block_accum, 1);
 	});
 
+	this.plc_push_packed = payload_pack_push();
 	WaypointSprite_UpdateHealth(this.sprite, s_new);
 	payload_update_links(this);
 
@@ -472,9 +486,7 @@ void payload_path_build(entity this)
 	while(node && guard < 4096)
 	{
 		IL_PUSH(g_payload_nodes, node);
-		if(node.spawnflags & PLC_CHECKPOINT)
-			payload_node_sprite(node, 0);
-		else if(interior < autocvar_g_payload_node_sprites)
+		if(interior < autocvar_g_payload_node_sprites)
 		{
 			payload_node_sprite(node, autocvar_g_payload_node_fade_dist);
 			++interior;
@@ -521,12 +533,38 @@ void payload_path_build(entity this)
 
 	// Every cart past 0 shared WP_PayloadCart2, so a 3-cart match rendered
 	// "CART, CART 2, CART 2". Give each cart its own text via the sprite name.
-	entity wp = (this.plc_cart_id == 0) ? WP_PayloadCart : WP_PayloadCart2;
-	WaypointSprite_Spawn(wp, 0, 0, this, '0 0 64', NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
+	entity wp = WP_PayloadCart;
+	switch(this.plc_cart_id)
+	{
+		case 1: wp = WP_PayloadCart2; break;
+		case 2: wp = WP_PayloadCart3; break;
+		case 3: wp = WP_PayloadCart4; break;
+	}
+	// The sprite offset is measured from the cart's ORIGIN, but the point the
+	// control law tracks - and the point the client's cart body and cart ink want -
+	// is origin + view_ofs (view_ofs is the brush mins; a scavenged brush can put
+	// those hundreds of units apart).  Folding view_ofs into the sprite offset
+	// makes the sprite's networked origin exactly trackpoint + PLC_SPRITE_OFS, so
+	// the client recovers the tracked point by subtracting a constant it shares.
+	WaypointSprite_Spawn(wp, 0, 0, this, this.view_ofs + PLC_SPRITE_OFS, NULL, 0, this, sprite, true, RADARICON_OBJECTIVE);
+	// The sprite is spawned with ref = this cart, so its networked origin tracks
+	// the cart every server frame.  wp_extra is the sprite's spare byte; putting
+	// the cart id in it is the whole of the client's cart-identity channel - the
+	// client reads position and identity off a sprite that already ships, and
+	// control state off the stats that already ship.  No new entity, no new
+	// packing, no second source of truth.
+	if(this.sprite)
+		this.sprite.wp_extra = this.plc_cart_id;
+
+	// A cart has no model of its own: mkentfile assigns it whichever inline brush
+	// the source map happened to leave visible, so "the cart" is some door from
+	// warfare with no silhouette, no size and no team colour.  Hide that brush and
+	// let the procedural body in cl_artifact.qc be the cart.  The brush stays
+	// solid: it is still what pushes, blocks and crushes.
+	if(autocvar_g_payload_cart_procedural)
+		this.alpha = -1;
 	if(this.sprite)
 		WaypointSprite_UpdateSprites(this.sprite, wp, wp, wp);
-	if(this.sprite && this.plc_cart_id > 0)
-		this.sprite.netname = strzone(strcat("Cart ", ftos(this.plc_cart_id + 1)));
 	WaypointSprite_UpdateMaxHealth(this.sprite, this.plc_length);
 	WaypointSprite_UpdateHealth(this.sprite, this.plc_s);
 
@@ -653,6 +691,7 @@ MUTATOR_HOOKFUNCTION(plc, HavocBot_ChooseRole)
 	entity bot = M_ARGV(0, entity);
 
 	bot.havocbot_role = havocbot_role_payload;
+	navigation_goalrating_timeout_extend_if_needed(bot, min(1.5, 0.05 * etof(bot)));
 	return true;
 }
 

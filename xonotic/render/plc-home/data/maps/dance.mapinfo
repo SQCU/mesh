@@ -1,0 +1,8 @@
+title Dance
+description payload test override
+author FruitieX
+cdtrack 10
+size -2200 -2656 -1280 2208 2656 512
+has weapons
+gametype plc
+gametype ctf
