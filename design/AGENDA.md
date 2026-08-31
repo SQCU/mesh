@@ -1137,3 +1137,43 @@ argument.
 R32's other findings stand unchanged: the l≈256 / 8-team target, the O(l) vs O(l·m)
 storage asymmetry, that prior measurements were taken on a degenerate instance, and that
 the belief pipeline already scales correctly.
+
+### R34 — 2026-08-31 — decimation, not tile count, is what breaks bot navigation
+`E:run` Re-profile of the rebuilt k6 after the duplicate-carve repair (`1313194`).
+The fix did not merely shrink the tile-count penalty — **it inverted it.**
+
+    world                        unstuck    stmt   stmt/call  %proceed
+    k2  (2 tiles, 268wp, 0% dec)   1,266   0.80M      630       87%
+    k6  OLD (816wp, 28,305 degen)  3,011   2.61M      867       84%
+    k6  NEW (816wp, 0 degen)         612   0.55M      897       97%
+    29-tile shipped (96% dec)     12,099  71.94M    5,946       14%
+    29-tile n=1100  (67% dec)     11,815  70.24M    5,945       15%
+
+k6's unstuck rate fell 80% and landed at **48% of k2's**, with the best
+goal-planning proceed rate of any world measured. Essentially all of the apparent
+tile-count penalty was the duplicate-carve defect, so the "second independent
+term" previously written into FUSION-SPEC §8.6 is retired: at 0% decimation, six
+tiles is not worse than two, and **waypoint decimation is the sole identified
+driver**. The clean contrast is 87–97% proceed at 0% decimation against 14% at 96%.
+
+Severity is a decimation effect too, and the larger half: 630 / 897 / 5,946
+statements per unstuck call means the 29-tile world is ~7x costlier per call *on
+top of* being ~10–20x more frequent — that product is the 90x statement gap.
+
+**This indicts the waypoint budget itself.** `--wpcap` was added to survive the
+O(n²) `waypoint_get`/`boxesoverlap` runaway ceiling at 29 tiles (R28), and at 96%
+decimation it takes bot goal-planning from ~90% to 14% proceed. The budget was a
+consequence of a scale nobody asked for, and it was actively destroying
+navigation. At the 2–6 tile target (R32) no decimation is needed at all — which
+is the second time the maximal-configuration choice turned out to be the cause of
+the machinery built to survive it.
+
+Two honest limits recorded by the measuring agent, unprompted:
+- It **withdrew one of its own columns**: frag counts do not survive cross-scale
+  comparison (k6-new 41 frags vs k2's 130 while healthier on every direct
+  navigation metric — a 57.9 MB world versus 11.3 MB with the same 12 bots, i.e.
+  bot density, not navigation). The unstuck ratio is per-decision and scale-free,
+  which is why it survives where frags do not.
+- 612 is a single 60 s window carrying roster variance. "No detectable positive
+  term at k=6" is what the data supports; "six tiles beats two" would need a
+  second window.
