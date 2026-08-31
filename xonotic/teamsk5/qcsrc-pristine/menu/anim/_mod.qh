@@ -1,5 +1,0 @@
-// generated file; do not modify
-#include <menu/anim/animation.qh>
-#include <menu/anim/animhost.qh>
-#include <menu/anim/easing.qh>
-#include <menu/anim/keyframe.qh>

@@ -1,3 +1,0 @@
-#dissalow trailing whitespace
-*.c     whitespace=-trailing-space
-*.h     whitespace=-trailing-space

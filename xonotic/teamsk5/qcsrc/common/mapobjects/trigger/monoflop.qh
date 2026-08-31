@@ -1,4 +1,0 @@
-#pragma once
-
-
-const int MONOFLOP_FIXED = BIT(0);

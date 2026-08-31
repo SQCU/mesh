@@ -1,5 +1,0 @@
-// generated file; do not modify
-#include <server/bot/api.qc>
-
-#include <server/bot/default/_mod.inc>
-#include <server/bot/null/_mod.inc>

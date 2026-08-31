@@ -1,5 +1,0 @@
-#pragma once
-
-#ifdef SVQC
-int autocvar_sv_itemstime;
-#endif

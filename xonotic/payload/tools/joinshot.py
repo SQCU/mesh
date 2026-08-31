@@ -3,12 +3,14 @@
 
 Where joinview.py only *probes* joins with a raycast (the dedicated server has no
 GL context and cannot render), joinshot drives the real Xonotic/DarkPlaces client
-in its built-in software rasterizer (DPSOFTRAST) under a windowless SDL video
-driver, so it produces actual rendered PNG frames of what a player sees crossing
-each level<->level join.
+and produces actual rendered PNG frames of what a player sees crossing each
+level<->level join.
 
 Mechanism (all stock engine, no engine/qc edits):
-  * SDL_VIDEODRIVER=dummy + `vid_soft 1`  -> DarkPlaces Software Rasterizer, no window.
+  * A small real GL window (320x200 by default), no interaction required. The
+    dummy SDL driver + `vid_soft 1` path this tool was written around does NOT
+    work with this build -- see the RENDER PATH note in main(); it fails at video
+    init, before any map loads, which is why its symptom looked like a join bug.
   * For each join we emit an `info_autoscreenshot` entity (origin + view angles) into
     an override `maps/<map>.ent`. Xonotic's stock `impulse 143` cheat teleports a
     noclipping player onto the next such entity (setting its view angles) and deletes
@@ -435,10 +437,33 @@ def main():
 
     log = os.path.join(rundir, 'run.log')
     hard = int(args.settle + shot_budget + 30)
+    # RENDER PATH. The documented mechanism -- SDL_VIDEODRIVER=dummy + `vid_soft 1`
+    # -> DPSOFTRAST -- does not work with this engine build, and fails before any
+    # map is loaded, so its symptom ("client loads the map, then never connects,
+    # 0 frames") pointed at spawns and joins rather than at video:
+    #
+    #   Unable to load GL driver "(null)": No dynamic OpenGL support in current
+    #   SDL video driver (dummy)
+    #   Quake Error: Video modes failed
+    #
+    # The software surface in vid_sdl.c is SDL 1.2 API (SDL_CreateRGBSurface +
+    # SDL_SetAlpha, vid_sdl.c:1161) while the binary links SDL 2.32.70, so under
+    # SDL2 `vid_soft` has no surface path at all; and the dummy driver has no GL
+    # to fall back to. Both halves have to be wrong at once for this to fail, and
+    # they are.
+    #
+    # A real video driver with a small window DOES get a context
+    # ("Video Mode: window 320x200x32"), renders through normal GL, and needs no
+    # interaction -- so that is the path used. Set JOINSHOT_SOFT=1 to force the
+    # old dummy+soft path if a build ever supports it again.
     cmd = [bin_, '-basedir', args.xonotic, '-userdir', rundir, '-nosound', '-noconfig',
-           '+vid_soft', '1', '+vid_fullscreen', '0',
+           '+vid_width', str(args.width), '+vid_height', str(args.height),
+           '+vid_fullscreen', '0',
            '+cl_curl_enabled', '0', '+sv_public', '0', '+exec', 'joinshot.cfg']
-    env = dict(os.environ, SDL_VIDEODRIVER='dummy')
+    env = dict(os.environ)
+    if os.environ.get('JOINSHOT_SOFT') == '1':
+        cmd[6:6] = ['+vid_soft', '1']
+        env['SDL_VIDEODRIVER'] = 'dummy'
     print('booting client (software rasterizer, windowless); waiting for spawn...')
     t0 = time.time()
     lf = open(log, 'w')

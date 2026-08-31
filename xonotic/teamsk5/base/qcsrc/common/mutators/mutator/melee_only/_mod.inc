@@ -1,4 +1,0 @@
-// generated file; do not modify
-#ifdef SVQC
-    #include <common/mutators/mutator/melee_only/sv_melee_only.qc>
-#endif

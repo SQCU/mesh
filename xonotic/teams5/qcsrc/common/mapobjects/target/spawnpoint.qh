@@ -1,5 +1,0 @@
-#pragma once
-
-#ifdef SVQC
-.entity spawnpoint_targ;
-#endif

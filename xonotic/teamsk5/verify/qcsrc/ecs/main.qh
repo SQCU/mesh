@@ -1,5 +1,0 @@
-#pragma once
-
-#include "lib.qh"
-
-void systems_update();
