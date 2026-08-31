@@ -83,6 +83,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] B8 Closed-form `PW`/`SUCC`/`N_i` (nim-sum + backward induction) over cartstate (R6)
 - [x] B9 Backward induction explicit, not allusive/optional (R6)
 - [x] B10 Partizan honesty — impartial ⇒ exact nim-sum; else explicitly unresolved (R6)
+- [ ] B11 The CGT evaluator actually RESOLVES on real server states (228/228 `unresolved`) (R19)
 
 ### C. The strategy operator (the linear algebra)
 - [ ] C1 **Gram + SwiGLU, NOT softmax attention** (REGRESSED — shipped softmax) (R11)
@@ -95,11 +96,12 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] C8 Categorical sampling + L2-toward-logit-0 (not MAP) (R7)
 - [x] C9 Query = learned projection of [engine state ; belief] (R10)
 - [x] C10 Per-instrument learned behavioral value `v_m` wired into the mix (R10)
-- [ ] C11 **j-space** — value probes ground the semantics of random-init projections (—, under discovery)
+- [ ] C11 **j-space** — value probes ground the semantics of random-init projections (ZEROED, R19)
+- [ ] C12 Value heads are LINEAR probes on the IR (present: an MLP `Linear→silu→Linear`) (ZEROED, R19)
 
 ### D. Reward / value / advantage / training
 - [x] D1 `W` and `L` are asymmetric REWARD DEFINITIONS, not duals, not control signals (R8)
-- [~] D2 Value estimators are LINEAR PROBES on the final IR (R8; probe quality undiscovered)
+- [ ] D2 Value estimators are LINEAR PROBES on the final IR (ZEROED, R19)
 - [x] D3 Policy parameters optimized to increase advantage (R8)
 - [x] D4 NOT reward=score, NOT whole-game RLVR (degenerate: cannot notice being ganged) (R8)
 - [x] D5 Per-row scalar critic outputs; never an `l`-wide vector (R8)
@@ -109,6 +111,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] D9 Interruptible & resumable — proven by hard kill + resume, twice, early (R9)
 - [ ] D10 Acceptance matrix on the SERVER: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
+- [ ] D12 Checkpoint/architecture integrity — no silent `strict=False` resume across shape changes (R19)
 
 ### E. Observation / featurization (the map-reduce)
 - [x] E1 Perception-gated observation: frustum + LOS + 2-V-cell cap (emergent stealth) (R5)
@@ -119,6 +122,8 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] E6 Low-rank egocentric integration is the ONLY spatial mixing operator — **and is actually called on the live path** (R11: `featurize` pipeline reported dead, re-inlined in `live_belief`)
 - [x] E7 Belief is per-bot; there is no "team belief" (R4)
 - [x] E8 Enemy positions featurized ONLY through observation (R5)
+- [ ] E9 **Full per-player resource state (health/armor/ammo/weapons/pos) actually ENTERS the matmul input** — the headline "learned filter over full game state" (ZEROED, R19)
+- [ ] E10 Per-player observation rows, instrument descriptors `z` and relation rows are LOGGED on real runs (ZEROED, R19)
 
 ### F. Playerbot interface (the WHAT/HOW boundary)
 - [x] F1 matmul decides WHAT; stock navmesh decides HOW (R12)
@@ -314,3 +319,54 @@ obligation and not a transition: they stand at their present marks until a
 measurement is appended. Two discoveries are in flight — a linear-probe
 measurement of the IR (C11) and a per-subcomponent status audit of megamap use,
 long-distance traversal and the observation map-reduce (G2, G3, E3–E5).
+
+### R19 — 2026-08-31 — C11, D2 → zeroed; C12, B11, E9, E10, D12 opened
+`E:run` The j-space measurement (`runs/jspace_probe.json`, `design/jspace-probe.md`),
+228 real Game-2 lines / 3150 player-rows, ridge probes, 60/40 split, no CartSim.
+
+Verdict **NO — there is no semantically-rich j-space.** The shuffled-label control
+passes everywhere (the probes are honest), but **nothing beats the
+random-projection control on any non-tautological target**, and where the IR does
+beat raw inputs the trained and random-init encoders agree to three decimals:
+
+    n_controlled   Rp trained 0.9563 | random-init 0.9566 | rand-proj 0.6788
+    gain           Rp trained 0.2878 | random-init 0.2864 | rand-proj 0.0815
+    logp           Rp trained 0.1243 | random-init 0.1238 | rand-proj 0.0048
+    instr. kind    acc .6135          | .6150             | .5751  (maj .416)
+
+i.e. the separation is the encoder's nonlinearity, not learned semantics.
+Trained-vs-random differs only in rank (14 vs 9) over an input matrix of **rank 4**.
+
+Root cause, and the session's most consequential finding: **the per-player resource
+state never entered the matmul.** `game2_train.jsonl` logs no per-player observation
+rows — health, armor, ammo, weapon bitmask ("holds rocket launcher"), position,
+velocity, distance-to-cart and `beta` were all **zero in the model's own input on
+this run**. So SPEC §3 —
+
+> the POLICY is integrating FULL RELEVANT GAME STATE FEATURES like THE HEALTH OF
+> ALL PLAYERBOTS AND THEIR AMMO COUNTS AND GUNS
+
+— is not merely unmeasured, it is **unwired** (E9 zeroed). Instrument descriptors
+`z` and relation rows are also unlogged, leaving 20 of 60 value-row dims
+unreconstructible (E10 zeroed). Width is NOT the limiter: a rank-4 input does not
+fill 16d, let alone 128d — so C2 must be fixed *with* E9, not instead of it.
+
+D2/C12 zeroed against SPEC §5 ("value estimators trained as linear probes upon the
+final IR"): `RoleValueHead` is `Linear(60→32)→silu→Linear(32→1)`, an MLP.
+
+B11 opened: `game_value` returned `{"kind":"unresolved","nimber":null,"reason":
+"incomplete option graph"}` on **228/228** lines — the CGT value never resolved
+during the real run.
+
+D12 opened: every checkpoint on disk is architecture-stale w.r.t. the local tree
+(GramSwiGLU/`X_WIDTH=48`/`d=128` locally vs `relattn`/`d=16` on the mini), and
+`OnlineLearner._load_full` uses `load_weights(..., strict=False)` — a 128d rewrite
+would **silently** "resume" from a 16d checkpoint restoring almost nothing.
+
+Analytic answer to "can the linear algebra be right and the j-space still be poor?"
+**Yes.** The value loss is one scalar per player per head, so it constrains at most
+two directions; nothing in the objective rewards decodability of anything else. The
+guarantee is *value-relevant directions, not arbitrary semantics*. "Who holds a
+rocket launcher" fails twice over: it is zeroed out of `x`, and `role_rewards` is
+computed purely from cart nimbers and PW transitions, so weapon state has **no
+gradient path to the loss at all**.

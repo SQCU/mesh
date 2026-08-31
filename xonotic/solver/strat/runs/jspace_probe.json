@@ -1,0 +1,693 @@
+{
+  "provenance": {
+    "log": "runs/game2_train.jsonl",
+    "n_lines": 228,
+    "n_player_rows": 3150,
+    "checkpoint": "runs/policy_online_v3.npz",
+    "simulation_used": false,
+    "code_tree": "mesh-mini ~/dox/mesh (checkpoint-era arch: relattn RelationalEncoder, X_WIDTH=16)",
+    "split": "by line, 60/40, seed 0",
+    "train_rows": 1872,
+    "test_rows": 1278
+  },
+  "ir_width": {
+    "row_width_d_trained": 16,
+    "value_head_input_width": 60,
+    "value_row_dims_probed_here": 40,
+    "omitted_value_row_dims": [
+      "stats(4)",
+      "behavior_mix(16) - both need instrument descriptors z, NOT LOGGED"
+    ],
+    "spec_requirement": ">=128d",
+    "local_rewrite_IR_WIDTH": 128,
+    "local_rewrite_has_checkpoint": false
+  },
+  "checkpoint_compat": {
+    "matched": [
+      "qkv.W_q",
+      "qkv.W_k",
+      "qkv.W_v",
+      "encoder.layers.0.w_q",
+      "encoder.layers.0.w_k",
+      "encoder.layers.0.w_v",
+      "encoder.layers.0.w_o",
+      "encoder.layers.0.rel_up",
+      "encoder.layers.0.rel_down",
+      "encoder.layers.1.w_q",
+      "encoder.layers.1.w_k",
+      "encoder.layers.1.w_v",
+      "encoder.layers.1.w_o",
+      "encoder.layers.1.rel_up",
+      "encoder.layers.1.rel_down",
+      "value.winner.up.weight",
+      "value.winner.up.bias",
+      "value.winner.down.weight",
+      "value.winner.down.bias",
+      "value.loser.up.weight",
+      "value.loser.up.bias",
+      "value.loser.down.weight",
+      "value.loser.down.bias"
+    ],
+    "mismatched": [
+      [
+        "head.norm_weight",
+        [
+          21
+        ],
+        null
+      ],
+      [
+        "head.w_gate",
+        [
+          21,
+          32
+        ],
+        null
+      ],
+      [
+        "head.w_up",
+        [
+          21,
+          32
+        ],
+        null
+      ],
+      [
+        "head.w_down",
+        [
+          32,
+          1
+        ],
+        null
+      ],
+      [
+        "dynamics.first.state_up.weight",
+        [
+          32,
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.first.state_up.bias",
+        [
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.first.drift.weight",
+        [
+          8,
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.first.drift.bias",
+        [
+          8
+        ],
+        null
+      ],
+      [
+        "dynamics.first.matrix.weight",
+        [
+          768,
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.first.matrix.bias",
+        [
+          768
+        ],
+        null
+      ],
+      [
+        "dynamics.second.state_up.weight",
+        [
+          32,
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.second.state_up.bias",
+        [
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.second.drift.weight",
+        [
+          8,
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.second.drift.bias",
+        [
+          8
+        ],
+        null
+      ],
+      [
+        "dynamics.second.matrix.weight",
+        [
+          768,
+          32
+        ],
+        null
+      ],
+      [
+        "dynamics.second.matrix.bias",
+        [
+          768
+        ],
+        null
+      ]
+    ]
+  },
+  "unavailable_targets": [
+    "health",
+    "armor",
+    "ammo",
+    "weapon bitmask / rocket-launcher held",
+    "position",
+    "velocity",
+    "distance-to-nearest-cart",
+    "per-player belief beta",
+    "instrument descriptors z",
+    "player-instrument relation rows",
+    "banked depth"
+  ],
+  "zeroed_input_dims": "x[2] (banked) and x[8:16] (health,armor,ammo,speed,power,tss,alive,control) and beta[0:8] are zero - absent from the real log",
+  "ranks": {
+    "Rp_trained": 14,
+    "Rp_random": 9,
+    "value_rows_trained": 17,
+    "raw_inputs": 4,
+    "n_rows": 3150
+  },
+  "probes": {
+    "Rp_trained_ckpt": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 1.0
+      },
+      "cart0_depth": {
+        "r2": 1.0
+      },
+      "n_controlled": {
+        "r2": 0.9563
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.2878
+      },
+      "lane": {
+        "r2": 0.2126
+      },
+      "logp": {
+        "r2": 0.1243
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.6135,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "Rp_random_init_s0": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 1.0
+      },
+      "cart0_depth": {
+        "r2": 1.0
+      },
+      "n_controlled": {
+        "r2": 0.9566
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.2864
+      },
+      "lane": {
+        "r2": 0.2126
+      },
+      "logp": {
+        "r2": 0.1238
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.615,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "Rp_random_init_s7": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 1.0
+      },
+      "cart0_depth": {
+        "r2": 1.0
+      },
+      "n_controlled": {
+        "r2": 0.9566
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.2878
+      },
+      "lane": {
+        "r2": 0.2126
+      },
+      "logp": {
+        "r2": 0.1249
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.615,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "value_rows_trained_ckpt": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 1.0
+      },
+      "cart0_depth": {
+        "r2": 1.0
+      },
+      "n_controlled": {
+        "r2": 0.9563
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.288
+      },
+      "lane": {
+        "r2": 0.2126
+      },
+      "logp": {
+        "r2": 0.1248
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.615,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "value_rows_random_init": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 1.0
+      },
+      "cart0_depth": {
+        "r2": 1.0
+      },
+      "n_controlled": {
+        "r2": 0.9566
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.2872
+      },
+      "lane": {
+        "r2": 0.2126
+      },
+      "logp": {
+        "r2": 0.1242
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.6135,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "control_randproj_16d": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 0.9955
+      },
+      "cart0_depth": {
+        "r2": 0.9955
+      },
+      "n_controlled": {
+        "r2": 0.6788
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.0815
+      },
+      "lane": {
+        "r2": 0.1668
+      },
+      "logp": {
+        "r2": 0.0048
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.5751,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "control_randproj_40d": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 0.9955
+      },
+      "cart0_depth": {
+        "r2": 0.9955
+      },
+      "n_controlled": {
+        "r2": 0.6788
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.0815
+      },
+      "lane": {
+        "r2": 0.1668
+      },
+      "logp": {
+        "r2": 0.0048
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.5751,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    },
+    "control_shuffled_labels_Rp_trained": {
+      "own_nimber": {
+        "r2": -0.0099
+      },
+      "max_rival": {
+        "r2": -0.0011
+      },
+      "hier_margin": {
+        "r2": -0.0098
+      },
+      "cart_depth_total": {
+        "r2": -0.0052
+      },
+      "cart0_depth": {
+        "r2": -0.0041
+      },
+      "n_controlled": {
+        "r2": -0.0025
+      },
+      "succ_denial": {
+        "r2": -0.0063
+      },
+      "gain": {
+        "r2": -0.0006
+      },
+      "lane": {
+        "r2": -0.0057
+      },
+      "logp": {
+        "r2": -0.001
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 0.9515,
+        "majority": 0.9515,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.4139,
+        "majority": 0.4311,
+        "n_classes": 6
+      },
+      "pw_team": {
+        "acc": 0.8036,
+        "majority": 0.8036,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.2347,
+        "majority": 0.234,
+        "n_classes": 5
+      }
+    },
+    "reference_raw_inputs_24d": {
+      "own_nimber": {
+        "r2": 1.0
+      },
+      "max_rival": {
+        "r2": 1.0
+      },
+      "hier_margin": {
+        "r2": 1.0
+      },
+      "cart_depth_total": {
+        "r2": 0.9955
+      },
+      "cart0_depth": {
+        "r2": 0.9955
+      },
+      "n_controlled": {
+        "r2": 0.6788
+      },
+      "succ_denial": {
+        "r2": 1.0
+      },
+      "gain": {
+        "r2": 0.0815
+      },
+      "lane": {
+        "r2": 0.1668
+      },
+      "logp": {
+        "r2": 0.0048
+      },
+      "game_value": {
+        "r2": null
+      },
+      "is_pw": {
+        "acc": 1.0,
+        "majority": 0.9484,
+        "n_classes": 2
+      },
+      "kind": {
+        "acc": 0.5751,
+        "majority": 0.4163,
+        "n_classes": 7
+      },
+      "pw_team": {
+        "acc": 1.0,
+        "majority": 0.7934,
+        "n_classes": 2
+      },
+      "team": {
+        "acc": 0.471,
+        "majority": 0.2387,
+        "n_classes": 5
+      }
+    }
+  }
+}
