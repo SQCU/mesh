@@ -136,16 +136,16 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] F6 Affordance QUALITY — does the policy actually aim `hunt` at the winningest rival? (—)
 
 ### G. World / maps
-- [~] G1 Procedural multi-map fusion produces megamaps — builds and boots, but crashes at runtime above ~8 bots (R29)
+- [x] G1 Procedural multi-map fusion produces megamaps — bots CROSS tiles; 12-bot boot, OBJECT ERROR 0 (R35)
 - [x] G2 Megamaps actually USED by the training/live server (R20)
 - [x] G3 Bots traverse long distances between fused regions — now cart↔cart, not just spawn→cart (R25)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
 - [x] G11 Procedural geometry — 56 doorways CUT into stock map brushwork (R28)
-- [ ] G12 Connectivity solvers + metrics over solid occupancy — proxies to be DELETED, not demoted (R31)
-- [ ] G13 Viewers that CATCH a broken fusion offline — proxies to be DELETED; oracle-based validation replaces them (R31)
+- [x] G12 Connectivity solvers + metrics over solid occupancy — proxies DELETED with mapfuse; measured on the oracle (R35)
+- [x] G13 Viewers that CATCH a broken fusion offline — joinshot 6/6 real frames + void audit; pre-compile catch in 1.4 s (R35)
 - [x] G14 **Placement is real: suitability selection + bridge/stub taxonomy + 3D bin pack + geometry edit; refusal deleted** (R28)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
-- [ ] G15 **A world-space geometry oracle over the ASSEMBLED fused world (solid/trace/clearance/standable)** — every validator is currently a proxy (ZEROED, R30)
+- [x] G15 **A world-space geometry oracle over the ASSEMBLED fused world (solid/trace/clearance/standable)** — `negspace`, two entry points, one law (R35)
 - [ ] G16 **Budgets DERIVED from a measured relationship, not tuned until one test passed** (ZEROED, R30)
 - [~] G6 Entity budget at scale — no invisible bots at high player counts; waypoint-sprite spam REGRESSED in live client (R22)
 - [~] G7 Diegetic communication of cart paths/state — duplicate "CART 2" labels observed (R22)
@@ -699,7 +699,7 @@ CONSECUTIVE edict run:
     /* darkplaces prvm_edict.c:267 — first REUSABLE free slot, not an append */
     for (i = prog->reserved_edicts + 1; i < prog->num_edicts; i++)
         if (PRVM_ED_CanAlloc(prog, e)) { PRVM_ED_ClearEdict(prog, e); return e; }
-    /* bridge/engine/mesh_ipc.c:305 — reads n CONSECUTIVE edicts */
+    /* xonotic/darkplaces-work/mesh_ipc.c — reads n CONSECUTIVE edicts */
     m->req[row*m->width + col] = prog->edictsfields[(first + row)*stride + fld];
 
 `payload_str_pool_run()` now constructs and re-verifies the contiguous run and logs
@@ -1177,3 +1177,67 @@ Two honest limits recorded by the measuring agent, unprompted:
 - 612 is a single 60 s window carrying roster variance. "No detectable positive
   term at k=6" is what the data supports; "six tiles beats two" would need a
   second window.
+
+
+### R35 — 2026-08-31 — G1, G12, G13, G15 → full; the aperture is a parameter, not a carve
+
+**The category error, and the deletion.** `mapfuse.py` authored architecture by
+writing BSP lumps, so it had to synthesise the tree, VIS and lightmaps by hand and
+none of them were real: 49,152 grey lightmaps, 0 visdata, 2 clusters, 2.0 GB RSS.
+`design/MAPGEN-ROADMAP.md` had ruled this out in one line before any of it was
+written — "Do not write a CSG/brush library. Emit `.map` text and let q3map2 do the
+BSP tree, VIS, lightmaps and collision." Deleted entire (2,557 lines), not
+refactored; `placement.py` keeps only what decides WHERE tiles go and WHETHER they
+connect, and authors no geometry. Via q3map2 the same placement gives 3,236
+clusters, 16.43% average visible, 83.6% cullable.
+
+**Apertures (MAPGEN-ROADMAP stage 2) were never written.** `strip()` gains a skip
+set; that one change opens the shell. Because the gap is chosen during the sweep,
+its facing, free volume and vantages are known by construction — nothing recovered
+by ray marching, nothing that can disagree with the geometry because it IS the
+geometry. Each ships PLUGGED so the standalone map still seals; a join drops the
+plug, so a joined map cannot differ from the one that was validated.
+
+**G15 closed, one law.** `solid(p) == ns.cell_at(p) < 0` with two entry points:
+compiled BSP and authored source. Pre-compile validation of assembled k=2 source
+takes **1.4 s and catches exactly the 2 spawns** the engine reports as
+`relocate_spawnpoint`, against 108 s to compile first; the 12-bot boot then logs
+`OBJECT ERROR = 0` (was 2). A second, source-side oracle existed briefly and was
+deleted rather than kept beside it.
+
+**Merge invariant (§8.13a): no per-tile `common/lightgrid` brush may survive a
+merge.** It clips the compiled world to its own volume and fails silently and
+totally — brushes stay in the lump, the volume is culled, **q3map2 reports no leak,
+and the map boots with a tile missing.** This, not decompile fidelity, was
+"warfare fills as outside"; warfare round-trips alone at 1,366 clusters vs stock's
+1,362. Dropped unconditionally in `mapsrc.place_tile`, the single entry point.
+
+**Bots cross (G1).** 35/35 points along the channel with 0 gaps, one navmesh
+component, a 6-waypoint 1,891 u crossing path with 6/6 fit.
+
+**Frames (G13).** joinshot 6/6, void audit PASS. Four stacked causes: the dummy SDL
+driver has no GL and `vid_soft`'s surface is SDL 1.2 API in an SDL 2.32.70 binary,
+so it died before any map loaded; it launched the STOCK Xonotic.app, which lacks
+builtin #656 and died on connect with an identical "0 frames" symptom; that binary
+needs `-xonotic`; and the build has no PNG writer, so screenshots were TGA.
+
+**Method notes, all of them corrections to how this was measured.**
+- *File size cannot grade a frame.* 320x200x24 TGA is 192,018 bytes every time,
+  content-independent. The acceptance criterion "sized like the samples" could not
+  have told a black frame from a good one. Void-fraction + level-count replaces it.
+- *Which binaries EXIST is not which binary RAN.* Checking the tree found one
+  client; joinshot was launching a fourth outside it. Any tool launching a client
+  must use the project build.
+- *A sample can miss, and did.* A marched floor query differed from the closed-form
+  one on real seeds (203/207 vs 205/207; 338/341 vs 339/341) — those points were
+  never navigable. NAV-SPEC §10's sampling disqualifier is a measurement, not a
+  preference.
+- *Fix the defect BEFORE the fold, then fold against a live reference.* Differential
+  testing against the oracle being retired caught four bugs in the replacement,
+  including interval-propagation bounds that silently dropped every plug brush
+  (sealed mouths read open) and an inverted expansion sign that let a box centred on
+  a point the module called solid still "fit". Deleting first would have shipped all
+  four.
+- *A leak-free compile proves nothing about tiles.* The lightgrid failure reports no
+  leak at all.
+- *The player hull is 32x32x69*, not a symmetric 32x32x48.
