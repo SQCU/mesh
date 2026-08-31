@@ -135,13 +135,16 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] F6 Affordance QUALITY — does the policy actually aim `hunt` at the winningest rival? (—)
 
 ### G. World / maps
-- [x] G1 Procedural multi-map fusion produces megamaps (R15)
+- [ ] G1 Procedural multi-map fusion produces megamaps (ZEROED — client render shows void, R22)
 - [x] G2 Megamaps actually USED by the training/live server (R20)
 - [~] G3 Bots traverse long distances between fused regions — spawn→cart only, not cart→cart (R20)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
+- [ ] G11 Procedural geometry exists at all (owner: "total absence") (R22)
+- [ ] G12 Connectivity solvers + metrics over connectivity AND navmesh solutions (R22)
+- [ ] G13 Viewers/visualizers for connectivity + navmesh that would CATCH a broken fusion offline (R22)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
-- [~] G6 Entity budget at scale — no invisible bots at high player counts (R16)
-- [~] G7 Diegetic communication of cart paths/state (R16)
+- [~] G6 Entity budget at scale — no invisible bots at high player counts; waypoint-sprite spam REGRESSED in live client (R22)
+- [~] G7 Diegetic communication of cart paths/state — duplicate "CART 2" labels observed (R22)
 - [x] G8 Headless client renderer for join inspection (real offscreen renders) (R15)
 - [ ] G9 The curriculum can actually SELECT the fused map (`locate_asset` glob misses `zzzz-fused.pk3`) (R20)
 - [ ] G10 Cart origins distributed ACROSS fused regions so cart CHOICE imposes traversal (all 68 nodes in one region) (R20)
@@ -525,3 +528,33 @@ alternative is removed from prod, harness and docs in the same change — a flag
 dead branch is the same fragility with a switch on it.
 Also removed `xonotic/solver/strat/test_runtime.py` (untracked, added this session,
 violates the standing no-tests directive).
+
+### R22 — 2026-08-31 — G1 zeroed; G11, G12, G13 opened; G6, G7 defects recorded
+`E:run` A real in-client screenshot of the fused map on a live server (observer,
+bots playing, clock 16:12) supplied by the owner, plus their statement:
+
+> the map fusion code was also clearly unfinished and didn't satisfy any written
+> constraint in a few obvious ways, incl. missing viewers, msising client renderers,
+> missing features related to geometry fusion, total absence of procedural geometry,
+> and no connectivity solvers or trivial visualizers or metrics over connectivity and
+> navmesh solutions
+
+What the frame shows: the world is **almost entirely black void**, with a single
+small isolated island of structures floating in an orange-skied rectangle — not a
+coherent fused megamap; **dozens of overlapping `WAYPOINT` sprite labels** stacked
+into an unreadable cluster; and **two separate markers both labelled `CART 2`** plus
+one `CART`.
+
+This retracts R15's `[x]` on G1. R15 graded fusion complete from OFFLINE artifacts
+(BSP/pk3 byte sizes, "3 maps, 3 joins", a flood-fill boolean) — none of which
+observed whether the fused world *renders as a world*. That is the AGENDA form's own
+failure mode stated in reverse: a checkmark was moved by an artifact that did not
+measure the requirement. The evidence standard is unchanged, but the admissible
+artifact for "fusion works" now must include a real render.
+
+G11 opened (procedural geometry absent — `mapgen.py`'s parametric q3map2 pipeline is
+not producing geometry in the shipped fusion). G12 opened (connectivity solvers and
+quantitative metrics over connectivity and navmesh solutions, not a flood-fill
+boolean). G13 opened (viewers/visualizers that would have caught this offline).
+G6 regressed in evidence: the node-sprite bound of R16 is not in effect on this run.
+G7 defect: duplicate cart labelling.
