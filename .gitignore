@@ -21,3 +21,15 @@ xonotic/progs.dat
 xonotic/csprogs.dat
 xonotic/menu.dat
 xonotic/*.lno
+
+# BUILT PROGRAMS ARE NOT SOURCE. One writer (xonotic/payload/build.sh), one
+# destination (xonotic/payload-build), never committed. Tracking a build output
+# is what let five progs.dat coexist and made stale ones look authoritative to
+# the next reader -- see design/AGENDA.md R36.
+xonotic/payload-build/
+# Captured runtime home directories. A client's userdir (client.db, server.db,
+# darkplaces_history.txt, demos) is a RECORDING of a run, not a component of the
+# program; committing one makes a past execution look like a buildable variant.
+xonotic/render/*-home/
+# Stock Quake data + its compiled progs, for the qcbench fixture.
+xonotic/qcbench/id1/
