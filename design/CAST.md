@@ -31,11 +31,11 @@ rows of Wally light up for whom.
 | **VAL** | `W_v` | `(d_v, d_z)` | the per-instrument *behavioural* value: what pursuing this instrument implies, mixed by the allocation. |
 | **GRAHAM** | `A`, with `M = AAᵀ` | `(d, d)` | the learned PSD metric of the Gram, `G = Z M Zᵀ`. The all-to-all coupling. If Graham gets no gradient, there is no learned coupling and the mesh is decoration. |
 | **REX** | `w_rel` | `(d_edge,)` | the additive bilinear pair term, `G = ZMZᵀ + E·w_rel`. **Currently fed hand-authored edge rows — that is the §7 violation.** Rex should be reading learned content, not my guesses. |
-| **NORM** | RMSNorm weight | `(in_dim,)` | scales the head's input. |
 | **GIA / UMA / DOV** | `w_gate` / `w_up` / `w_down` | `(in,h)`, `(in,h)`, `(h,out)` | the SwiGLU trio. **Gia is the regime switch** — she decides diversify-vs-pile-on from the DPP signal and shared appetite. Dov emits `dw/dt`. |
 | **WINNIE** | `W_φ` | `(d_ir, 1)` | the **preservation** value probe. Linear, on the final IR. Trained only on rows whose team holds the path. |
 | **LOU** | `L_ψ` | `(d_ir, 1)` | the **acquisition** value probe. Linear, on the final IR. Trained only on rows whose team does not. Not Winnie's sign-flip — different target, deliberately. |
-| **VERA** | `Ṽ` | `(d_q, 1)` | the auxiliary probe on the query, regressed toward Winnie/Lou. Grounds the early projection. |
+| **VERA_WINNIE** | `Ṽ_φ` | `(d, 1)` | auxiliary probe on the query, regressed toward Winnie. |
+| **VERA_LOU** | `Ṽ_ψ` | `(d, 1)` | auxiliary probe on the query, regressed toward Lou. Wherever a value is estimated there are TWO values to estimate, so Vera is always a pair. |
 | **DINA** | `b_η(y)`, `A_η(y)` | `(S,)`, `(S, A)` | the action-linear dynamics ensemble, `Δy = b(y) + A(y)u`. The only per-state operator in the cast. |
 | **TAU** | `τ` | scalar | sampling temperature. Selection is weighted sampling, never argmax. |
 | **ELLE** | L2-toward-0 | scalar | pulls logits to zero so untrained is broad sampling and trained peaks without collapsing. |
@@ -49,7 +49,6 @@ The spec licenses exactly three computed things. Everything else must be learned
 | **XAN** | `x_b` | given | raw per-player engine state: position, velocity, health, armor, weapons bitmask, ammo, powerups, team. The engine's own rows. |
 | **ZED** | `z_m` | given | the per-instrument descriptor. |
 | **BEA** | `β_b` | `payload-spec §2.2` | the belief — the *only* spatial mixing operator in the system. Built by three helpers below. |
-| **PHIL** | `Φ` | §2.2 | the low-rank cell projection inside Bea. |
 | **RHO** | `ρ(Δt)` | §2.2 | temporal contraction toward an uninformative prior — the buffer forgetting. |
 | **GIGI** | `g(dist)` | §2.2 | the bounded-support spatial mask; her support radius is an **output** of the fuse-to-5–15% construction, never a constant. |
 | **PIA** | `PW(s)` | `rl-training-spec §1` | the projected winner, nim-sum over cartstate. Closed-form. |
@@ -100,19 +99,19 @@ define the action set; features pre-answer the question. Masks stay.
 
 | name | tensor | shape | the ≥128 side |
 |---|---|---|---|
-| **PHIL** `Φ` | belief projection | `(d_β, d_c)` | `d_β` |
+| **PHIL** `Φ` | belief projection (LEARNED — a constant Φ was a defect) | `(d_β, d_c)` | `d_β` |
 | **QUINN** `W_q` | query | `(d, d_x + d_β)` | `d`, and `d_β` within the input |
 | **KAY** `W_k` | key | `(d, d_z)` | `d` |
 | **VAL** `W_v` | behavioural value | `(d_v, d_z)` | `d_v` |
 | **GRAHAM** `A` | metric factor, `M = AAᵀ ∈ (d,d)` | `(d, r)` | `d`; `r` free ≤ `d` |
 | **REX** | pair bilinear form (low-rank) | `(d, r_e)` | `d` |
-| **NORM** | RMSNorm gain | `(d_ir,)` | `d_ir` |
 | **GIA** `w_gate` | SwiGLU gate | `(d_ir, h)` | both |
 | **UMA** `w_up` | SwiGLU up | `(d_ir, h)` | both |
 | **DOV** `w_down` | SwiGLU down → `dw/dt` | `(h, 1)` per instrument row | `h` |
 | **WINNIE** `W_φ` | preservation probe | `(d_ir, 1)` | `d_ir` |
 | **LOU** `L_ψ` | acquisition probe | `(d_ir, 1)` | `d_ir` |
-| **VERA** `Ṽ` | aux probe on the query | `(d, 1)` | `d` |
+| **VERA_WINNIE** `Ṽ_φ` | aux probe on the query → Winnie | `(d, 1)` | `d` |
+| **VERA_LOU** `Ṽ_ψ` | aux probe on the query → Lou | `(d, 1)` | `d` |
 | **DINA** | `b(y)`, `A(y)` | `(d_y,)`, `(d_y, d_u)` | both |
 
 The rule, once: **every matrix has at least one learned side ≥128, and the only small
@@ -145,3 +144,33 @@ That is SPEC §7 failing precisely where it points:
 It reaches the probes. It does not reach the policy. This is not a narrow
 implementation of the algorithm — it is a different algorithm wearing its variable
 names.
+
+---
+
+## Implementation: one header, one composer
+
+> we should be able to describe every single function of learned parameters in the
+> strategy program in terms of pytorch dot nn notation. we should be able to say which
+> 'cast' member they are. we should be able to say their shape. all of this can be said
+> en-comment over where a function over parameters is defined. we can then import only
+> functions from the cast_header pyfile into whatever context these are computed. we do
+> not need to and will not be 'reusing' existing code. we are replacing the existing
+> code with a header of castfunctions and a caller which composes them and introduces
+> no parameters, creates no tensors, does nothing at all but compose imported functions
+> actually.
+
+- **`xonotic/solver/strat/cast_header.py`** — the ONLY place a parameter exists. Every
+  function carries, en-comment, its cast member, its `torch.nn` notation and its shape.
+  `Widths` **raises** if any learned side is below 128.
+- **`xonotic/solver/strat/strategy.py`** — the composer. Imports only cast functions;
+  declares no parameter, fabricates no tensor, re-implements nothing, holds no state.
+  Verified: no `nn.`, no `mx.zeros/ones/full/random`, no literal tensor construction.
+
+Amendments made by this instruction:
+- **NORM is dropped from the cast forever.** There is no normalisation parameter; the
+  SwiGLU head reads the IR directly.
+- **VERA is two** — `VERA_WINNIE` and `VERA_LOU` — because wherever a value is estimated
+  there are two values to estimate.
+- **PHIL is learned**, not part of the computed chorus. A constant-literal Φ was one of
+  the defects found in the belief pipeline (R24), and a fixed Φ is exactly the narrow
+  hand-authored bottleneck §7 forbids.
