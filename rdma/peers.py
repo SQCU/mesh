@@ -145,6 +145,44 @@ def resolve(pattern: str, port: int = 22, timeout: float = 3.0) -> str | None:
     return None
 
 
+def ssh_argv(pattern: str, *command: str, identity: str | None = None,
+             timeout: float = 3.0) -> list[str] | None:
+    """argv for ssh'ing to a node, addressed by identity. None if no live edge.
+
+    The host key is pinned to the NODE NAME via HostKeyAlias, not to the address.
+    A fabric edge is link-local (169.254/16) and therefore ephemeral, so writing
+    it into known_hosts memoizes something that is not a fact about the node --
+    which this repo had done five times before anyone noticed, and which I did
+    once more today with StrictHostKeyChecking=accept-new. Pinning the alias
+    means the trust survives re-addressing and the file never accumulates dead
+    addresses.
+
+    There is deliberately no ~/.ssh/config Host alias in this path. That file is
+    a memoized resolution table; its entry for this node pointed at a subnet the
+    machine had left, and every consumer inherited the error.
+    """
+    node = None
+    pat = pattern.lower().replace("mesh-", "")
+    for n in discover(timeout):
+        if not n.is_self and pat in n.name.lower().replace("-", ""):
+            node = n
+            break
+    if node is None:
+        return None
+    for _kind, addr in node.ranked():
+        if reachable(addr, 22, timeout=2.0):
+            # accept-new applies to the ALIAS, so known_hosts accumulates node
+            # NAMES -- stable, one entry per node for its lifetime -- instead of
+            # a new line every time a link-local edge is renumbered.
+            argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
+                    "-o", f"HostKeyAlias={node.name}",
+                    "-o", "StrictHostKeyChecking=accept-new"]
+            if identity:
+                argv += ["-i", identity, "-o", "IdentitiesOnly=yes"]
+            return argv + [addr, *command]
+    return None
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
