@@ -80,10 +80,10 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] B5 Relative deny/acquire objective, not race/entry/level (R3, R8)
 - [x] B6 Continuous & differentiable cart force field (soft membership/vitality/gate) (R2)
 - [x] B7 Cylinder occupancy is the law; no LOS gate; no unstick hack (R2)
-- [x] B8 Closed-form `PW`/`SUCC`/`N_i` (nim-sum + backward induction) over cartstate (R6)
+- [x] B8 Closed-form `PW`/`SUCC`/`N_i` — nim-sum now DERIVED by backward induction, not asserted (R6, R25)
 - [x] B9 Backward induction explicit, not allusive/optional (R6)
 - [x] B10 Partizan honesty — impartial ⇒ exact nim-sum; else explicitly unresolved (R6)
-- [ ] B11 The CGT evaluator actually RESOLVES on real server states (228/228 `unresolved`) (R19)
+- [x] B11 The CGT evaluator RESOLVES on real server states — 0/228 → 228/228 (R25)
 
 ### C. The strategy operator (the linear algebra)
 - [x] C1 **Gram + SwiGLU, NOT softmax attention** (R24)
@@ -107,7 +107,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] D5 Per-row scalar critic outputs; never an `l`-wide vector (R8)
 - [x] D6 Training IS the Xonotic server process (real Game-2 transitions) (R9)
 - [x] D7 **CartSim deleted** — no fake re-simulation anywhere (R24)
-- [~] D8 Curriculum over maps / team counts / player counts / cart counts (R9)
+- [x] D8 Curriculum over maps / team counts / player counts / cart counts (R25)
 - [x] D9 Interruptible & resumable — proven by hard kill + resume, twice, early (R9)
 - [ ] D10 Acceptance matrix on the SERVER: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
@@ -124,21 +124,21 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] E7 Belief is per-bot; there is no "team belief" (R4)
 - [x] E8 Enemy positions featurized ONLY through observation (R5)
 - [x] E9 **Full per-player resource state ENTERS the matmul** — input rank 4 → 33 (R24)
-- [ ] E10 Per-player observation rows, instrument descriptors `z` and relation rows are LOGGED on real runs (ZEROED, R19)
+- [x] E10 Per-player rows, `z` descriptors and relation rows are LOGGED on real runs (R25)
 - [x] E11 The canonical `featurize.py` belief pipeline exists and is the one that runs (R24)
 
 ### F. Playerbot interface (the WHAT/HOW boundary)
 - [x] F1 matmul decides WHAT; stock navmesh decides HOW (R12)
 - [x] F2 Skill-orthogonal — never touches aim/dodge (R12)
 - [~] F3 Objective vocabulary → stock target entities (explore, gather, crush-weak, duel-strong, push/suppress, hunt) (R12)
-- [~] F4 Spawn-timing and travel-commitment as real instruments (R12)
+- [x] F4 Spawn-timing and travel-commitment as real instruments — commit nonzero 0.03% → 96.79% (R25)
 - [x] F5 No policy in QC; no second navigation definition (R12)
 - [ ] F6 Affordance QUALITY — does the policy actually aim `hunt` at the winningest rival? (—)
 
 ### G. World / maps
 - [ ] G1 Procedural multi-map fusion produces megamaps (ZEROED — client render shows void, R22)
 - [x] G2 Megamaps actually USED by the training/live server (R20)
-- [~] G3 Bots traverse long distances between fused regions — spawn→cart only, not cart→cart (R20)
+- [x] G3 Bots traverse long distances between fused regions — now cart↔cart, not just spawn→cart (R25)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
 - [ ] G11 Procedural geometry exists at all (owner: "total absence") (R22)
 - [ ] G12 Connectivity solvers + metrics over connectivity AND navmesh solutions (R22)
@@ -147,8 +147,8 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] G6 Entity budget at scale — no invisible bots at high player counts; waypoint-sprite spam REGRESSED in live client (R22)
 - [~] G7 Diegetic communication of cart paths/state — duplicate "CART 2" labels observed (R22)
 - [x] G8 Headless client renderer for join inspection (real offscreen renders) (R15)
-- [ ] G9 The curriculum can actually SELECT the fused map (`locate_asset` glob misses `zzzz-fused.pk3`) (R20)
-- [ ] G10 Cart origins distributed ACROSS fused regions so cart CHOICE imposes traversal (all 68 nodes in one region) (R20)
+- [x] G9 The curriculum can SELECT the fused megamap; megamaps recognised, not hardcoded (R25)
+- [x] G10 Cart origins distributed ACROSS fused regions — cart↔cart traversal 6679 → 24475 (R25)
 
 ### H. Multipolar dynamics — description & demonstration
 - [ ] H1 Resource-domination logging (alive count, health/armor pools, consumption vigor) (—)
@@ -166,7 +166,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [~] I6 No fake re-simulation anywhere (D7 outstanding) (R13)
 - [x] I7 Private SQCU repo; never push upstream (R1)
 - [x] I8 Services interruptible & resumable by construction, proven by crashing early (R9)
-- [~] I9 **Learner and supervisor are SERVICES** — learner done; supervisor pending, and it still passes the deleted `--secs` (R24)
+- [x] I9 **Learner and supervisor are SERVICES** — `run(schedule)` deleted, `serve()` never returns, restarts logged (R25)
 
 ---
 
@@ -670,3 +670,85 @@ R19's analytic caveat, now measured as a curve. The binding constraint is **data
 the same stale invocation. Also reported: the OBS/EVT schema carries `CELL` but no
 waypoint-link table, so V-cell stage 2 unions observed cell transitions with a 2-NN
 stand-in rather than literally fusing contiguous *navigable* paths.
+
+### R25 — 2026-08-31 — R19 PARTLY CORRECTED; B11, E10, G3, G9, G10, F4, D8, I9 → full
+`E:run`+`E:code` Commit `b7f6759`. Engine data path, CGT, and world commitment cost.
+
+**Correction to R19 — the record must carry this.** R19 concluded that per-player
+resource state "never entered the matmul". That inference was **wrong**. The run-era
+responder did call `state_with_observations(...)`; what actually happened is that the
+j-space probe *reconstructed* `x` from the telemetry log, and
+`runs/jspace_probe.py:47` hardcoded `0,0,0,0,0,0,0,0  # x[8:16] health/armor/ammo/...:
+NOT LOGGED`. **The rank-4 input was an artifact of the reconstruction, not the model's
+input.** E9 was a LOGGING failure (E10), not a wiring failure. R19's other findings —
+trained≈random-init, the MLP-not-probe deviation, the 228/228 `unresolved` CGT, the
+`strict=False` hazard — stand. R19 is left unedited per the append-only rule; this
+entry supersedes its E9 claim.
+
+**What was really lost: the CART rows.** In all 228 real lines carts 1–2 read
+`id 0, depth 0, length 0.0` while the same run's engine log says
+`cart 1: 22 path nodes, length 8269.58` / `cart 2: 16 path nodes, length 5786.72`.
+The gather assumed `payload_carts[0]` (and later `plc_str_cart_pool[0]`) began a
+CONSECUTIVE edict run:
+
+    /* darkplaces prvm_edict.c:267 — first REUSABLE free slot, not an append */
+    for (i = prog->reserved_edicts + 1; i < prog->num_edicts; i++)
+        if (PRVM_ED_CanAlloc(prog, e)) { PRVM_ED_ClearEdict(prog, e); return e; }
+    /* bridge/engine/mesh_ipc.c:305 — reads n CONSECUTIVE edicts */
+    m->req[row*m->width + col] = prog->edictsfields[(first + row)*stride + fld];
+
+`payload_str_pool_run()` now constructs and re-verifies the contiguous run and logs
+the proof: `[PLCPOOL] evt_base 5227 rows 256 contiguous 1 / cart_base 5483 rows 4
+contiguous 1`. **Second real defect:** a cart is a brush model (`view_ofs = mins`,
+`sv_payload.qc:743`), so its world position is `origin + view_ofs`; `NCART`/`NCART_D`
+compared against the UNOFFSET origin — **every nearest-cart column of every run so far
+was wrong** by the brush `mins`. Fixed; cart world position added to the cart columns.
+Two silent truncations from `MAX_PARMS = 8` in `strcat`/`sprintf` also found and fixed.
+
+**B11 → full: 0/228 → 228/228.** The run used `EmpiricalTransitionGraph`, which marks
+options complete only via `observe_terminal` — i.e. only on delivery. No cart was
+delivered in 18.4 s, so it was pricing a graph with no edges (worsened by the zeroed
+cart rows). A closed-form cart option graph was added: a **neutral** cart is impartial
+(cylinder occupancy lets any team move it) and backward induction **derives** its
+Grundy value as `r = levels − depth`, so `game.py`'s nim-sum is now *proved rather than
+asserted*; a **controlled** cart is partizan (Regime A/B give holder and opponents
+different moves) and gets **no nimber**. Real result on the 228 lines:
+`{"impartial": 147, "partizan": 81}`, `nimbers {8: 147}` — the 81 partizan lines are
+exactly those with a controlled cart. No nimber is faked.
+
+**G9/G10/G3.** `locate_asset` globs all `data/*.pk3`; megamaps are *recognised* (fusion
+marker or `joins.json`), never hardcoded; `--maps auto` → `['fused','runningmanctf']`
+with the held-out split intact. `host_components()` discovers N regions at runtime by
+union-find and round-robins carts across them. Per-region `plc_nodes` **0/68/0 →
+13/30/17**; cart↔cart traversal **0↔1 6679 → 24475**, **0↔2 7330 → 27370**;
+spawn→nearest-cart median **5195 → 357**, `>4000u` **26/41 → 0/41**. The commitment
+cost moved from *joining the game* to *choosing a cart* — precisely R20's complaint.
+Reported honestly: curvature on fused k=3 rises to 168% (hard constraints still
+`solid_viol 0 float_viol 0 corridor_viol 0 PASS`).
+
+**F4 → full.** `travel_horizon()` gives every assignment its own horizon:
+`commit_nonzero 11527/11909 = 96.79%` (was `1/3150 = 0.03%`), the 382 zeros being
+exactly IDLE + SPAWN_TIMING.
+
+**I9 → full.** `run(schedule)` deleted; `Curriculum.serve()` never returns (an
+exhausted schedule regenerates with `seed + cycle`), the learner is relaunched on exit,
+and every transition is logged to `supervisor.jsonl`. No `--once`/`--n-matches` added.
+
+**E10 → full.** `payload_strategy_log()` emits `[PLCPUB]/[PLCCART]/[PLCOBS]/[PLCEVT]`
+read back off the staged fields, so the log *is* the gather source. Real coverage over
+993 ticks / 11,909 player-rows: ID/TEAM/HEALTH/AMMO/POS/WEAPONS/CELL/NCART/NCART_D/
+TSS/ALIVE/CONTROL 993/993; ARMOR 913/993 and VEL 918/993, genuinely zero when nobody
+has armor or everyone is standing. Each record carries `z` (25×16) and `relation`
+(5×25×16) built by the same `build_instruments` the live operator calls.
+
+**Waypoint links.** New `PLC_EVT_KIND_CELL_LINK = 4` streams the stock nav graph's cell
+adjacency onto the perception ring (`waypoint_get_link`), so V-cell stage 2 can fuse
+truly *navigable* paths instead of a 2-NN stand-in. It cycles rather than latching
+(a one-shot pass caught 33 of 469 waypoints because `g_waypoints` fills late):
+`[PLCLINK] pass 1 over 467 waypoints, 3681 cell-link rows emitted`.
+
+Open, routed to the model-core side: `EstCache.get` ignores `(k, j, l)` so a learner
+spanning differently-shaped matches would silently keep the first shape (this is why
+the learner is currently per-match); `featurize`'s V-cell stage 2 must consume kind 4
+instead of the 2-NN stand-in; and `strat_responder` no longer logs `game_value` at all,
+so the newly-resolving CGT is not yet visible in telemetry.
