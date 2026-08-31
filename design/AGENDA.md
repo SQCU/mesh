@@ -143,6 +143,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] G11 Procedural geometry exists at all (owner: "total absence") (R22)
 - [ ] G12 Connectivity solvers + metrics over connectivity AND navmesh solutions (R22)
 - [ ] G13 Viewers/visualizers for connectivity + navmesh that would CATCH a broken fusion offline (R22)
+- [ ] G14 **Placement is an optimized place-and-route (QAP + routing), not index-order grid + length refusal** (ZEROED, R26)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
 - [~] G6 Entity budget at scale — no invisible bots at high player counts; waypoint-sprite spam REGRESSED in live client (R22)
 - [~] G7 Diegetic communication of cart paths/state — duplicate "CART 2" labels observed (R22)
@@ -156,6 +157,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] H3 Cross-team focus/attrition matrix — is damage concentrated on the key rival? (—)
 - [ ] H4 Multipolar dynamics visualizer (tug trajectories, PW timeline, focus matrix) (—)
 - [~] H5 Web view of the run (three.js phase space + live mesh table) (R16)
+- [ ] H6 **A supervised demonstration server+client pair that outlives any agent** (ZEROED, R26)
 
 ### I. Method / process laws
 - [x] I1 SPEC is a verbatim user-quote index under the provenance law (R17)
@@ -752,3 +754,41 @@ spanning differently-shaped matches would silently keep the first shape (this is
 the learner is currently per-match); `featurize`'s V-cell stage 2 must consume kind 4
 instead of the 2-NN stand-in; and `strat_responder` no longer logs `game_value` at all,
 so the newly-resolving CGT is not yet visible in telemetry.
+
+### R26 — 2026-08-31 — G14, H6 opened (one specification error at two layers)
+`E:code` Two findings with the same root: I specified the ARTIFACT instead of the
+OUTCOME, so agents delivered evidence rather than a working system.
+
+**G14 — the fusion layout solves the wrong problem.** `mapfuse.py` assigns maps to
+lattice cells in INDEX ORDER (`cp = [(m % cols, m // cols) for m in range(j)]`), sizes
+non-uniform bands to the widest map per column, centers each map in its cell, nudges a
+tile only WITHIN its own band, and REFUSES a join past a constant
+(`MAXCORLEN = 6000.0`, line 25; `if math.dist(sa, sb) > MAXCORLEN` ~line 1414). A grep
+for anneal/optimi/cost/objective/swap/permut over the file finds **no placement search
+and no cost function at all**. So the fused world is maps floating in a void in index
+order, joined by straight tubes.
+
+The assigned problem is **place-and-route**, NP-hard on two axes: cell assignment is a
+**Quadratic Assignment Problem** (which map where, minimizing socket-to-socket cost
+under the adjacency graph), and placement is irregular-volume floorplanning (a map's
+WALKABLE interior sits at an arbitrary offset from its bounding box — exactly why wide
+stock maps produced kilometre corridors). The unstated-because-obvious procedural
+insight: **the bridge maps absorb the residual mismatch** — you generate geometry to
+span whatever gap placement leaves, you never refuse. The spec's own toolkit names
+"portal and jump pad and verticality", and **a teleporter has no length constraint**,
+so `MAXCORLEN`-as-refusal is self-inflicted: the catalogue already contains an
+unbounded-length connector and the code declines to use it. R25's "honest gap" framing
+(4 of 40 joins violating the one-non-navigable-join-per-map budget) was therefore
+wrong — that is not a gap, it is the wrong solution shape reporting its own constant
+as a property of the world.
+
+**H6 — nobody owns the demonstration.** Every agent brief was written as verification:
+"bring up a server, capture telemetry, TERM cleanly". A server plus logs proves a
+claim; a connected client is only needed for a human to SEE it. Track 3's brief said
+"Document the exact client connect command" — the connect was specified to be
+*documented*, not *made*. Agents complied exactly. Compounding: agents are headless so
+a GUI client is outside their evidence loop, and TERM-on-exit (correct hygiene for a
+throwaway) is structurally incompatible with a demo that outlives the agent. Result is
+port churn with no owner — 26012 → 26031 → 26032 → 26042 — and a client that died and
+was never restarted. Recovery route: the demo pair must be a supervised service, and
+the client attach must be part of bring-up rather than a printed instruction.
