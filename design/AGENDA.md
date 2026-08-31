@@ -141,8 +141,8 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] G3 Bots traverse long distances between fused regions — now cart↔cart, not just spawn→cart (R25)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
 - [x] G11 Procedural geometry — 56 doorways CUT into stock map brushwork (R28)
-- [~] G12 Connectivity solvers + metrics — graph/topology only; no solid-occupancy measurement (R30)
-- [~] G13 Viewers that CATCH a broken fusion offline — renders/void-audit exist, but they are PROXIES; no world-space geometry oracle (R30)
+- [ ] G12 Connectivity solvers + metrics over solid occupancy — proxies to be DELETED, not demoted (R31)
+- [ ] G13 Viewers that CATCH a broken fusion offline — proxies to be DELETED; oracle-based validation replaces them (R31)
 - [x] G14 **Placement is real: suitability selection + bridge/stub taxonomy + 3D bin pack + geometry edit; refusal deleted** (R28)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
 - [ ] G15 **A world-space geometry oracle over the ASSEMBLED fused world (solid/trace/clearance/standable)** — every validator is currently a proxy (ZEROED, R30)
@@ -991,3 +991,29 @@ the supervisor into a relaunch thrash loop that leaked three client processes.
 Rewritten: relaunch on never-attached only when there is BOTH no connection AND a log
 that has stopped growing for 120 s, and `launch()` now kills any prior client so
 orphans cannot accumulate.
+
+### R31 — 2026-08-31 — proxies are DELETED, not demoted
+`E:none` (instruction) Owner:
+
+> delete proxies instead of apologizing for them
+
+R30 named the proxy pattern and demoted G12/G13 to `[~]`. That was still the wrong
+disposition, and it repeats a ruling already made this session ("delete incorrect
+branches entirely"): a stand-in kept beside the correct mechanism is the same defect
+with a label on it, and something trusts it again later. My oracle brief compounded it
+by saying "keep the existing render/void audit and flood-fill, but they are now
+secondary".
+
+Corrected instruction to the oracle work: **delete** the source-space in-solid spawn
+check and `solid_brush_at` if it has no legitimate source-space caller left; delete any
+bounding-box stand-in consulted about the assembled world, including
+`mkentfile.Bsp`'s AABB-from-plane-distance grid wherever fusion touches it (it produced
+both the 75 GB unguarded-`range()` loop and phantom "no floor" violations on clear
+corridors); delete hand-rolled corridor tube sampling in favour of oracle
+`trace`/`clearance`. **Exactly one definition of solidity may exist afterwards.**
+
+The render/void audit and the flood-fill survive only under their true names — "the
+world renders non-black" and "the waypoint graph is one component" — and may not be
+cited as evidence that geometry is correct, nor gate any spawn / cart-node / doorway /
+connector decision. G12 and G13 therefore go to `[ ]`: they are not partially-done, they
+are to be rebuilt on the oracle.
