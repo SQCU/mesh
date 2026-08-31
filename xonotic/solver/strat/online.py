@@ -323,14 +323,20 @@ class OnlineLearner:
         dynamics_action = mx.stop_gradient(mx.array(action_rows(state, item["actions"])))
         target_delta = mx.stop_gradient(mx.array(item["target_delta"]))
         reward = mx.array(item["reward"])
-        target = reward + item["discount"] * mx.stop_gradient(following["value"])
+        winner_mask = mx.array(state.winner_mask).astype(mx.bool_)
+        next_winner_mask = mx.array(next_state.winner_mask).astype(mx.bool_)
+        bootstrap = mx.where(
+            winner_mask,
+            mx.where(next_winner_mask, following["winner_value"], 0.0),
+            mx.where(next_winner_mask, 0.0, following["loser_value"]),
+        )
+        target = reward + item["discount"] * mx.stop_gradient(bootstrap)
         error = target - current["value"]
         ratio = mx.stop_gradient(mx.minimum(
             mx.exp(current["logpi"] - behavior_logp_mx), self.importance_clip))
         actor = -mx.mean(mx.stop_gradient(ratio * error) * current["logpi"])
-        winner_mask = mx.array(state.winner_mask).astype(mx.float32)
-        winner_weight = winner_mask * ratio
-        loser_weight = (1.0 - winner_mask) * ratio
+        winner_weight = winner_mask.astype(mx.float32) * ratio
+        loser_weight = (~winner_mask).astype(mx.float32) * ratio
         winner_loss = mx.sum(mx.square(current["winner_value"] - target) * winner_weight) / mx.maximum(mx.sum(winner_weight), 1.0)
         loser_loss = mx.sum(mx.square(current["loser_value"] - target) * loser_weight) / mx.maximum(mx.sum(loser_weight), 1.0)
         dynamics_mean, dynamics_first, dynamics_second = self.dynamics(dynamics_state, dynamics_action)
@@ -343,9 +349,16 @@ class OnlineLearner:
         regularization = mx.mean(mx.square(current["w_next"]))
         total = (actor + 0.5 * winner_loss + 0.5 * loser_loss
                  + 0.25 * dynamics_value + 1e-3 * regularization)
+        # The ADVANTAGE is what the policy gradient is actually multiplied by
+        # (SPEC 5: "the POLICY has its PARAMETERS changed by OPTIMIZATION to
+        # increase ADVANTAGE"). It was computed here and thrown away, so D3 was
+        # unobservable in the live stream; it is reported now, both raw and as
+        # the importance-weighted quantity the actor loss really uses.
+        advantage = mx.mean(mx.stop_gradient(error))
+        weighted_advantage = mx.mean(mx.stop_gradient(ratio * error))
         return total, mx.stack([actor, winner_loss, loser_loss, dynamics_value,
                                 regularization, mx.mean(ratio), dynamics_uncertainty,
-                                dynamics_error])
+                                dynamics_error, advantage, weighted_advantage])
 
     def learn(self, items):
         """ONE gradient step on a minibatch of transitions.
@@ -372,7 +385,8 @@ class OnlineLearner:
         matrices = np.asarray(self.dynamics.local_matrix(mx.array(rows)))
         singular = [np.linalg.svd(matrix, compute_uv=False).min() for matrix in matrices]
         names = ("loss_pg", "loss_w", "loss_l", "loss_dynamics", "loss_reg",
-                 "importance_mean", "model_uncertainty", "model_one_step_error")
+                 "importance_mean", "model_uncertainty", "model_one_step_error",
+                 "advantage", "advantage_importance_weighted")
         parts = np.asarray(parts)
         metrics = {name: float(parts[i]) for i, name in enumerate(names)}
         metrics.update(

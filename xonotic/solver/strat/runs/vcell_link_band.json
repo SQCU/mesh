@@ -1,0 +1,37 @@
+{
+  "log": "/tmp/claude-501/-Users-mdot/d3ad4328-26f8-44b9-a10d-b1c11e13f095/scratchpad/run_links.log",
+  "kind4_navigable_links": {
+    "ticks": 513,
+    "seconds": 10.28,
+    "in_band": 512,
+    "in_band_frac": 0.9981,
+    "median_min": 0.025,
+    "median_median": 0.05136,
+    "median_max": 0.08,
+    "cells_first": 25,
+    "cells_last": 334,
+    "radius_first": 0.916457,
+    "radius_last": 0.944707,
+    "nav_links": 1547,
+    "nav_link_rows": 8048,
+    "observed_edges": 7108,
+    "link_source": "waypoint_links"
+  },
+  "old_2nn_standin": {
+    "ticks": 513,
+    "seconds": 51.76,
+    "in_band": 512,
+    "in_band_frac": 0.9981,
+    "median_min": 0.05,
+    "median_median": 0.053333,
+    "median_max": 0.181818,
+    "cells_first": 11,
+    "cells_last": 254,
+    "radius_first": 0.0,
+    "radius_last": 0.563793,
+    "nav_links": 0,
+    "nav_link_rows": 0,
+    "observed_edges": 7108,
+    "link_source": "observed+knn_fallback"
+  }
+}

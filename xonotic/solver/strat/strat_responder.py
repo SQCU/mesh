@@ -582,6 +582,14 @@ def main():
                         "ir": array(result.ir, np.float32),
                         "gram": array(result.gram, np.float32),
                         "score": array(result.score, np.float32),
+                        # C4 (the DPP marginal-inclusion signal) and C5 (the
+                        # velocity on the integrated weight state) were computed
+                        # every tick and then dropped on the floor, so two
+                        # requirements the AGENDA marks complete were invisible
+                        # in the live stream. They are published now.
+                        "diag_k": array(result.diag_k, np.float32),
+                        "appetite": array(result.appetite, np.float32),
+                        "dw_dt": array(result.dw_dt, np.float32),
                         "winner_value": array(result.winner_value, np.float32),
                         "loser_value": array(result.loser_value, np.float32),
                     }
@@ -598,7 +606,8 @@ def main():
                     sampled = args.model_sample_every > 0 and (resp_id + 1) % args.model_sample_every == 0
                     model["sampled"] = sampled
                     if sampled:
-                        for name in ("x", "beta", "z", "relation", "hierarchy", "w", "ir", "gram", "score"):
+                        for name in ("x", "beta", "z", "relation", "hierarchy", "w", "ir",
+                                     "gram", "score", "diag_k", "appetite", "dw_dt"):
                             model[name] = np.round(model_arrays[name], 5).tolist()
                     assignments = []
                     strategy_focus = np.zeros((k, k), dtype=np.int64)

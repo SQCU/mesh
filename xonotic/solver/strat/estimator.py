@@ -26,6 +26,78 @@ def _mlx():
     return mx
 
 
+DPP_JITTER = 1e-6
+
+
+def dpp_marginals_dual(quality, features, jitter: float = DPP_JITTER, eps: float = 1e-12):
+    """DPP marginal inclusion probabilities, evaluated in the d-dimensional DUAL.
+
+    Algebraically IDENTICAL to ``dpp.dpp_marginals(quality, features,
+    method="inverse_diff")`` -- same kernel, same jitter, same clip -- but it
+    never forms the ``(m, m)`` inverse.
+
+    Why it has to be the dual.  The kernel is
+    ``L = diag(q) K^ K^^T diag(q) = B B^T`` with ``B = diag(q) K^`` of shape
+    ``(m, d)``, so ``rank(L) <= d = 128`` while ``m`` is the instrument count --
+    which on a real megamap run reaches **549** (one V-cell instrument per
+    discovered cell). ``L``'s entries are then ``O(3e5)``, and in float32 the
+    ``+I`` that makes ``I + L`` positive definite is 5 orders of magnitude below
+    the diagonal: LAPACK's LU hits an exactly-zero pivot and the shipped path
+    dies with ``[Inverse::eval_cpu] LU factorization failed with error code
+    548`` -- the pivot index, i.e. exactly where the rank ran out. This is a real
+    production failure of the operator at real instrument counts, not a probe
+    artifact; it is the same class of failure R24 hit at ``257``.
+
+    Woodbury on ``A = (1 + e) I_m``, ``U = V = B``, ``C = I_d``:
+
+        ((1+e) I + B B^T)^-1 = (I - B M^-1 B^T) / (1+e),   M = (1+e) I_d + B^T B
+
+    so with ``g = diag(B M^-1 B^T)`` the marginal is ``pi = (e + g) / (1 + e)``.
+    Only ``M`` (``d x d``, eigenvalues ``>= 1 + e``) is ever inverted, so the
+    conditioning no longer depends on ``m`` at all -- and the cost drops from
+    ``O(m^3)`` to ``O(m d^2)``.
+
+    The VJP is exact and also stays in the dual. With ``P = ((1+e)I + L)^-1``
+    the direct form's gradient is ``dL = P diag(c) P`` (that is
+    ``dpp._inv_diag_marginal_vjp``); chaining ``L = B B^T`` gives
+    ``dB = 2 (P diag(c) P) B``, and ``(I - B M^-1 B^T) B = (1+e) B M^-1``
+    collapses it to
+
+        dB = 2 / (1+e) * [ (c * R) - R (B^T (c * R)) ],   R = B M^-1
+
+    which touches nothing bigger than ``(m, d)``. Verified against the shipped
+    ``dpp`` path -- value and gradient -- on real rows where ``m`` is small
+    enough for the direct inverse to still be conditioned.
+    """
+    mx = _mlx()
+    features = mx.array(features)
+    quality = mx.array(quality)
+    norm = mx.maximum(mx.sqrt(mx.sum(features * features, axis=1, keepdims=True)), eps)
+    B = quality[:, None] * (features / norm)
+    # The jitter scale is dpp._prepare's: jitter * max(mean(diag L), 1), detached.
+    scale = float(mx.maximum(mx.mean(mx.sum(mx.stop_gradient(B) ** 2, axis=1)),
+                             mx.array(1.0, dtype=mx.float32)))
+    e = float(jitter) * scale
+
+    @mx.custom_function
+    def marginals(rows):
+        width = rows.shape[1]
+        M = (1.0 + e) * mx.eye(width, dtype=rows.dtype) + rows.T @ rows
+        R = rows @ mx.linalg.inv(M, stream=mx.cpu)
+        return mx.clip((e + mx.sum(rows * R, axis=1)) / (1.0 + e), 0.0, 1.0)
+
+    @marginals.vjp
+    def _marginals_vjp(primals, cotangent, output):
+        rows = primals[0] if isinstance(primals, (tuple, list)) else primals
+        width = rows.shape[1]
+        M = (1.0 + e) * mx.eye(width, dtype=rows.dtype) + rows.T @ rows
+        R = rows @ mx.linalg.inv(M, stream=mx.cpu)
+        weighted = cotangent[:, None] * R
+        return (2.0 / (1.0 + e)) * (weighted - R @ (rows.T @ weighted))
+
+    return marginals(B)
+
+
 @dataclass
 class StrategyState:
     x: np.ndarray
@@ -139,7 +211,6 @@ class StrategyEstimator:
 
 def strategy_forward(est, state, w_in, *, action=None, key=None, anticipatory=None, lead=None):
     mx = _mlx()
-    from .dpp import dpp_marginals
     from .gram import edge_features
     from .head import integrate_weights, strategy_log_prob
     from .value import select_role_value
@@ -169,7 +240,7 @@ def strategy_forward(est, state, w_in, *, action=None, key=None, anticipatory=No
         quality = mx.sum(appetite * member[:, None], axis=0) / mx.maximum(mx.sum(member), 1)
         if eligible is not None:
             quality = mx.where(mx.any(eligible & member[:, None], axis=0), quality, 0.0)
-        team_diag.append(dpp_marginals(quality, keys, method="inverse_diff"))
+        team_diag.append(dpp_marginals_dual(quality, keys))
     diag_k = mx.stack(team_diag)[team_index]
     dw_dt = est.head(diag_k, appetite, relation)
     w_next = integrate_weights(weights, dw_dt, est.delta)
@@ -266,6 +337,7 @@ __all__ = [
     "ForwardResult",
     "StrategyEstimator",
     "strategy_forward",
+    "dpp_marginals_dual",
     "state_from_runtime",
     "X_WIDTH",
     "BELIEF_WIDTH",
