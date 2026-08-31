@@ -93,6 +93,8 @@ td:first-child, th:first-child { text-align: left; }
 tbody tr:nth-child(even) { background: rgba(255,255,255,.018); }
 tbody tr:hover { background: rgba(79,209,197,.06); }
 .scroll { overflow: auto; max-height: 320px; }
+.scroll-x { overflow-x: auto; }
+.scroll-x table { min-width: 640px; }
 .num { font-variant-numeric: tabular-nums; }
 
 .muted { color: var(--muted); }
@@ -132,7 +134,7 @@ td.nobeat { color: var(--dim); }
 
 /* ---------- key/value strips ---------- */
 
-.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 14px; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px 14px; }
 .kv div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted var(--line); padding-bottom: 2px; }
 .kv span:first-child { color: var(--muted); }
 .kv span:last-child { font-variant-numeric: tabular-nums; }

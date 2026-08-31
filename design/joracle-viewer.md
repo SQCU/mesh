@@ -5,6 +5,9 @@ verdict written down. This document specifies the **continuous** version of that
 measurement, wired to a real Xonotic match while it is being played, next to the
 behavior the same policy is producing.
 
+A captured frame of it running against a real match is committed next to the page
+at `xonotic/solver/strat/web/joracle-live.png`.
+
 Everything here lives in `xonotic/solver/strat/joracle/` (the tap and the server)
 and `xonotic/solver/strat/web/` (the page). Nothing in those directories writes
 to the game, the responder, the mesh, or a checkpoint. The tap is a `tail -F` on
@@ -32,6 +35,11 @@ That brings up all three pieces:
 | Xonotic dedicated cartserver | this Mac, `udp/26042` | `darkplaces-dedicated`, payload gamemode, 12 playerbots, map `fused`, strategy I/O over the mesh |
 | mlx strategy responder | `mesh-mini`, `~/.venv-mesh` | `solver.strat.strat_responder --train`, one strategy tick per server request |
 | j-oracle viewer | this Mac, `http://127.0.0.1:8795` | this package |
+
+`demo.sh up` also accepts `JORACLE_SKIP_RESPONDER=1`, which brings up the server
+and the viewer but leaves an already-running responder on the mini alone — the
+mini's bridge also has a single client slot, so a second responder would take the
+mesh from the first.
 
 and prints:
 
@@ -217,7 +225,46 @@ numbers are there even when no alarm fires.
 
 ---
 
-## 5. Hooks needed from files this package does not own
+## 5. What the live stream actually carried (2026-08-31, real run)
+
+Real cartserver on `udp/26042`, map `fused`, 12 playerbots, 4 teams, responder on
+`mesh-mini`; captured page: `xonotic/solver/strat/web/joracle-live.png`.
+Field audit at the moment of capture:
+
+**Present and nonzero:** `PW`, `SUCC`, `carts`, `resources`, `strategy_focus`,
+`assignments`, `belief`, `instrument_counts`, and — the whole internals block —
+`model.x` (12x48), `model.beta` (12x8), `model.z` (279x16), `model.hierarchy`,
+`model.w` (12x279), `model.ir` (12x128), `model.gram` (12x12), `model.score`,
+`model.winner_value`, `model.loser_value`, `model.relation` (12x279x16).
+
+**Absent:** `model.diag_k`, `model.appetite`, `model.dw_dt`, `update.advantage`,
+`game_value`. (`update` itself is absent on ticks where the online learner did
+not flush a credit window — that is per-tick, not a wiring gap, and the page says
+so by re-auditing every tick.)
+
+**All-zero:** one `x` block, `powerup` (`x[17:18]`) — no powerup was held during
+the capture.
+
+**The R19 pathology does not recur on this run**, and that is the headline the
+viewer exists to make checkable at a glance:
+
+| R19 (2026-08-31, `game2_train.jsonl`) | live now |
+|---|---|
+| rank of the model input = **4** | rank(`x`) = **27** over 3312 rows |
+| per-player health/armor/ammo/weapons **zeroed** | 13 of 14 `x` blocks carry signal; 9 of 24 weapon bits set |
+| IR width 16 (spec >=128) | IR width **128**, effective rank 42.7 |
+| value heads were an MLP | `value.RoleValueHead` is `nn.Linear(width,1)` — a linear probe |
+| nothing beat the random-projection control | `winner_value` +0.534, `loser_value` +0.663, `team` +0.098 |
+
+The shuffled-label control passed everywhere on that window (worst \|R^2\| 0.098),
+so those three are real separations rather than a degenerate fit. They are also
+modest: the two large ones are the IR predicting its own value heads' outputs,
+and every tautological target still ties or loses to the random projection. The
+page states exactly that and does not round it up into a claim of a j-space.
+
+---
+
+## 6. Hooks needed from files this package does not own
 
 Consumed defensively — the page shows each as `absent` with the owning producer
 named — but each is one line in a sibling-owned file.
@@ -245,19 +292,34 @@ named — but each is one line in a sibling-owned file.
    quantity SPEC §5 says optimization exists to increase — is computed inside and
    discarded. Add its mean to the returned `metrics` dict as `"advantage"`.
 
-3. **The CGT game value on the live line.**
-   AGENDA B11 is open (`228/228` `unresolved`). Whatever `game_value.py` returns
-   for the tick's cartstate, emitted as `game_value` on the telemetry line, makes
-   B11 continuously observable instead of only auditable after the fact. The
-   viewer already reads `frame["game_value"]` and reports `absent — B11
-   unresolved` when it is not there.
+3. **The CGT game value on the live line — already added, but it does not run.**
+   `strat_responder.py` now calls `evaluate_cartstate` and emits `game_value`.
+   On `mesh-mini` that call raises on the first tick:
+
+   ```
+   File ".../solver/strat/game_value.py", line 185, in disjunctive_sum_value
+     values = [graph.evaluate(state) for graph, state in zip(graphs, states, strict=True)]
+   TypeError: zip() takes no keyword arguments
+   ```
+
+   `zip(..., strict=True)` is Python 3.10+. `mesh-mini` has exactly one
+   interpreter, `~/.venv-mesh/bin/python` = **Python 3.9.6**, and there is no
+   other python3 on that machine. So the current tree **cannot run the responder
+   on the mini at all** — it dies before writing a single telemetry line. The
+   one-line fix is to zip without `strict` (and assert the lengths above it if
+   the check matters). Until then the live demo has to run a pinned earlier copy
+   of the responder tree, and `game_value` stays `absent` in the stream, so B11
+   remains unobservable live.
 
 4. *(not a hook, a note)* `--model-sample-every 1` is an existing responder flag
-   and the demo passes it. No change required.
+   and the demo passes it. No change required. It matters more than it looks: at
+   the default of 10 the probe window fills ten times slower, which at a 128-wide
+   IR is the difference between two minutes and an hour before any score is
+   admissible.
 
 ---
 
-## 6. Rules this package keeps
+## 7. Rules this package keeps
 
 * No unit tests, and no simulator: `joracle/` imports `numpy` and the standard
   library, and nothing else from the project. `cartsim` is not imported anywhere

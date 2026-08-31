@@ -170,7 +170,7 @@ def disjunctive_sum_options(
 ) -> tuple[tuple[State, ...], ...]:
     states = tuple(states)
     moves = []
-    for index, (graph, state) in enumerate(zip(graphs, states, strict=True)):
+    for index, (graph, state) in enumerate(zip(graphs, states)):
         for option in graph.options(state, role):
             successor = list(states)
             successor[index] = option
@@ -182,7 +182,7 @@ def disjunctive_sum_value(
     graphs: Sequence[FiniteGameGraph],
     states: Sequence[State],
 ) -> GameValue:
-    values = [graph.evaluate(state) for graph, state in zip(graphs, states, strict=True)]
+    values = [graph.evaluate(state) for graph, state in zip(graphs, states)]
     if all(value.kind == "impartial" for value in values):
         return GameValue("impartial", reduce(xor, (value.nimber for value in values), 0), {})
     roles = _ordered(role for graph in graphs for role in graph.roles)
@@ -190,7 +190,7 @@ def disjunctive_sum_value(
         role: RoleValue(
             len(disjunctive_sum_options(graphs, states, role)),
             disjunctive_sum_options(graphs, states, role),
-            all(graph.options_complete(state, role) for graph, state in zip(graphs, states, strict=True) if role in graph.roles),
+            all(graph.options_complete(state, role) for graph, state in zip(graphs, states) if role in graph.roles),
         )
         for role in roles
     }
@@ -213,7 +213,7 @@ def belief_nimber_distribution(
     beliefs: Sequence[ComponentBelief | Mapping[State, float]],
 ) -> NimberBelief:
     distribution = {0: 1.0}
-    for graph, source in zip(graphs, beliefs, strict=True):
+    for graph, source in zip(graphs, beliefs):
         belief = _coerce_belief(source)
         component: dict[int, float] = defaultdict(float)
         allowed = max(0.0, 1.0 - max(0.0, float(belief.unknown_probability)))
