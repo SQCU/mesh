@@ -26,8 +26,12 @@ log_age()   { echo $(( $(date +%s) - $(stat -f %m "$LOG" 2>/dev/null || date +%s
 
 launch() {
   # never leave an orphan behind
-  old=$(cat "$STATE" 2>/dev/null); [ -n "$old" ] && kill "$old" 2>/dev/null
-  pkill -f 'xonotic-osx-sdl-bin' 2>/dev/null; sleep 1
+  # Kill ONLY the client this supervisor started. NEVER a broad pkill: a
+  # pattern kill takes down every Xonotic client on the machine, including one
+  # the human launched by hand, which presents as "the client crashes on
+  # launch" and is indistinguishable from a real crash.
+  old=$(cat "$STATE" 2>/dev/null)
+  if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then kill "$old" 2>/dev/null; sleep 1; fi
   : > "$LOG"
   nohup "$BIN" -basedir "$BASE" -userdir "$USERDIR" \
         +vid_fullscreen 0 +connect "$ADDR" >> "$LOG" 2>&1 &
