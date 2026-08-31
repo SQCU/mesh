@@ -50,7 +50,7 @@ from .cast_header import (
     winnie,
 )
 
-__all__ = ["Strategy", "strategy", "dynamics"]
+__all__ = ["Strategy", "strategy", "dynamics", "log_probs", "logp_of", "act", "integrate"]
 
 
 class Strategy(NamedTuple):
@@ -137,3 +137,40 @@ def dynamics(wally: Wally, y: mx.array, u: mx.array) -> mx.array:
     return dina_drift(wally, y) + mx.squeeze(
         dina_matrix(wally, y) @ u[..., None], axis=-1
     )
+
+
+# --------------------------------------------------------------------------
+# Policy read-out. ONE definition, used by the responder to ACT and by the
+# learner to EVALUATE. Two copies would make exp(logpi_target - logpi_behavior)
+# compare numbers produced by different code, which is the failure the project
+# law exists to prevent (see design/CAST.md).
+# --------------------------------------------------------------------------
+
+
+def log_probs(out: Strategy) -> mx.array:
+    """Normalised log-probabilities over instruments.  ``(l, m)``"""
+    return out.logits - mx.logsumexp(out.logits, axis=-1, keepdims=True)
+
+
+def logp_of(out: Strategy, actions: mx.array) -> mx.array:
+    """log pi of actions already taken — the LEARNER's read-out.  ``(l,)``"""
+    return mx.take_along_axis(log_probs(out), actions[:, None], axis=-1)[:, 0]
+
+
+def act(out: Strategy, key: mx.array) -> tuple[mx.array, mx.array]:
+    """Sample actions and return their log pi — the RESPONDER's read-out.
+
+    Weighted sampling, never argmax (SPEC §10). Returns ``(actions, logp)`` from
+    the SAME log_probs the learner will later evaluate.
+    """
+    actions = mx.random.categorical(out.logits, key=key)
+    return actions, logp_of(out, actions)
+
+
+def integrate(w: mx.array, dw_dt: mx.array, delta: float) -> mx.array:
+    """The replicator step, ``w <- w + (dw/dt)*delta``. ONE definition.
+
+    `delta` is the strategy cadence, and therefore the forward-Euler step size
+    and a stability parameter — not a free scheduling knob.
+    """
+    return w + dw_dt * delta

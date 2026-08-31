@@ -14,7 +14,7 @@ from mlx.utils import tree_flatten, tree_unflatten
 
 from .cast_header import Wally, Widths, elle
 from .replay import Replay
-from .strategy import strategy, dynamics
+from .strategy import strategy, dynamics, logp_of
 from .replay_store import RawReplayBuffer
 from .runtime import role_rewards
 
@@ -238,9 +238,9 @@ class OnlineLearner:
         current = strategy(self.wally, *item["chorus_in"])
         following = strategy(self.wally, *item["chorus_out"])
 
-        # log pi of the action actually taken, from the composer's own logits.
-        logp_all = current.logits - mx.logsumexp(current.logits, axis=-1, keepdims=True)
-        logpi = mx.take_along_axis(logp_all, actions_mx[:, None], axis=-1)[:, 0]
+        # log pi of the action taken — the SAME read-out the responder sampled
+        # with. One definition, so the importance ratio compares like with like.
+        logpi = logp_of(current, actions_mx)
 
         # Role gating: WINNIE for rows whose team holds the path, LOU otherwise.
         value = mx.where(winner_mask, current.value_winnie, current.value_lou)

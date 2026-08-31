@@ -569,7 +569,7 @@ class Curriculum:
         self.stop(server)
         # SIGTERM, never argument-expiry and never kill -9: the responder's own
         # drain-and-checkpoint path has to run. The learner is per match because
-        # `EstCache` pins the estimator to the FIRST (k, j, l) it sees, so a
+        # (Historical: an EstCache pinned the estimator to the FIRST (k, j, l)
         # process spanning matches of different team/cart counts would silently
         # keep the first shape; the atomic checkpoint is what carries state
         # across the boundary instead.

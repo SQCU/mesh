@@ -1,0 +1,238 @@
+{
+ "ticks": 150,
+ "belief_ms_per_tick": 126.10539334729158,
+ "build_instruments_ms_per_tick": 24.03867951206242,
+ "shape_hist": {},
+ "per_shape": {
+  "largest_l/l=256 j=7 m=423 c=225/float32": {
+   "raw_breakdown": {
+    "obs_int (l,12) int32": 12288,
+    "obs_float (l,13) float32": 13312,
+    "cart (j,12) float32": 336,
+    "actions (l,) int32": 1024,
+    "behavior_logp (l,) float32": 1024,
+    "reward (l,) float32": 1024,
+    "header": 64
+   },
+   "raw_total_bytes": 29072,
+   "r24_cached_breakdown": {
+    "relation (l,m,20) f32": 8663040,
+    "z (m,16) f32": 27072,
+    "w (l,m) f32": 433152,
+    "eligible (l,m) bool": 108288,
+    "x (l,48) f32": 49152,
+    "beta (l,8) f32": 8192,
+    "hierarchy (l,8) f32": 8192,
+    "winner_mask (l,) bool": 256
+   },
+   "r24_two_states_bytes": 18597760,
+   "chorus_breakdown": {
+    "xan (l,25) f32": 25600,
+    "zed (m,16) f32": 27072,
+    "cell_slots (c,7) f32": 6300,
+    "gigi (l,c) f32": 230400,
+    "dee (m,) f32": 1692,
+    "semantics (l,8) f32": 8192,
+    "mask (l,m) bool": 108288
+   },
+   "chorus_total_bytes": 407544,
+   "capacity_raw": {
+    "256 MB": 9233,
+    "1 GB": 36933,
+    "14 GB": 517074
+   },
+   "capacity_r24": {
+    "256 MB": 14,
+    "1 GB": 57,
+    "14 GB": 808
+   },
+   "capacity_chorus": {
+    "256 MB": 658,
+    "1 GB": 2634,
+    "14 GB": 36885
+   },
+   "ratio_r24_over_raw": 639.7,
+   "ratio_chorus_over_raw": 14.0
+  },
+  "largest_l/l=256 j=7 m=423 c=225/float16": {
+   "raw_breakdown": {
+    "obs_int (l,12) int32": 12288,
+    "obs_float (l,13) float16": 6656,
+    "cart (j,12) float32": 336,
+    "actions (l,) int32": 1024,
+    "behavior_logp (l,) float32": 1024,
+    "reward (l,) float32": 1024,
+    "header": 64
+   },
+   "raw_total_bytes": 22416,
+   "r24_cached_breakdown": {
+    "relation (l,m,20) f32": 8663040,
+    "z (m,16) f32": 27072,
+    "w (l,m) f32": 433152,
+    "eligible (l,m) bool": 108288,
+    "x (l,48) f32": 49152,
+    "beta (l,8) f32": 8192,
+    "hierarchy (l,8) f32": 8192,
+    "winner_mask (l,) bool": 256
+   },
+   "r24_two_states_bytes": 18597760,
+   "chorus_breakdown": {
+    "xan (l,25) f32": 25600,
+    "zed (m,16) f32": 27072,
+    "cell_slots (c,7) f32": 6300,
+    "gigi (l,c) f32": 230400,
+    "dee (m,) f32": 1692,
+    "semantics (l,8) f32": 8192,
+    "mask (l,m) bool": 108288
+   },
+   "chorus_total_bytes": 407544,
+   "capacity_raw": {
+    "256 MB": 11975,
+    "1 GB": 47900,
+    "14 GB": 670609
+   },
+   "capacity_r24": {
+    "256 MB": 14,
+    "1 GB": 57,
+    "14 GB": 808
+   },
+   "capacity_chorus": {
+    "256 MB": 658,
+    "1 GB": 2634,
+    "14 GB": 36885
+   },
+   "ratio_r24_over_raw": 829.7,
+   "ratio_chorus_over_raw": 18.2
+  },
+  "last/l=128 j=3 m=1121 c=683/float32": {
+   "raw_breakdown": {
+    "obs_int (l,12) int32": 6144,
+    "obs_float (l,13) float32": 6656,
+    "cart (j,12) float32": 144,
+    "actions (l,) int32": 512,
+    "behavior_logp (l,) float32": 512,
+    "reward (l,) float32": 512,
+    "header": 64
+   },
+   "raw_total_bytes": 14544,
+   "r24_cached_breakdown": {
+    "relation (l,m,20) f32": 11479040,
+    "z (m,16) f32": 71744,
+    "w (l,m) f32": 573952,
+    "eligible (l,m) bool": 143488,
+    "x (l,48) f32": 24576,
+    "beta (l,8) f32": 4096,
+    "hierarchy (l,8) f32": 4096,
+    "winner_mask (l,) bool": 128
+   },
+   "r24_two_states_bytes": 24603776,
+   "chorus_breakdown": {
+    "xan (l,25) f32": 12800,
+    "zed (m,16) f32": 71744,
+    "cell_slots (c,7) f32": 19124,
+    "gigi (l,c) f32": 349696,
+    "dee (m,) f32": 4484,
+    "semantics (l,8) f32": 4096,
+    "mask (l,m) bool": 143488
+   },
+   "chorus_total_bytes": 605432,
+   "capacity_raw": {
+    "256 MB": 18456,
+    "1 GB": 73827,
+    "14 GB": 1033579
+   },
+   "capacity_r24": {
+    "256 MB": 10,
+    "1 GB": 43,
+    "14 GB": 610
+   },
+   "capacity_chorus": {
+    "256 MB": 443,
+    "1 GB": 1773,
+    "14 GB": 24829
+   },
+   "ratio_r24_over_raw": 1691.7,
+   "ratio_chorus_over_raw": 41.6
+  },
+  "last/l=128 j=3 m=1121 c=683/float16": {
+   "raw_breakdown": {
+    "obs_int (l,12) int32": 6144,
+    "obs_float (l,13) float16": 3328,
+    "cart (j,12) float32": 144,
+    "actions (l,) int32": 512,
+    "behavior_logp (l,) float32": 512,
+    "reward (l,) float32": 512,
+    "header": 64
+   },
+   "raw_total_bytes": 11216,
+   "r24_cached_breakdown": {
+    "relation (l,m,20) f32": 11479040,
+    "z (m,16) f32": 71744,
+    "w (l,m) f32": 573952,
+    "eligible (l,m) bool": 143488,
+    "x (l,48) f32": 24576,
+    "beta (l,8) f32": 4096,
+    "hierarchy (l,8) f32": 4096,
+    "winner_mask (l,) bool": 128
+   },
+   "r24_two_states_bytes": 24603776,
+   "chorus_breakdown": {
+    "xan (l,25) f32": 12800,
+    "zed (m,16) f32": 71744,
+    "cell_slots (c,7) f32": 19124,
+    "gigi (l,c) f32": 349696,
+    "dee (m,) f32": 4484,
+    "semantics (l,8) f32": 4096,
+    "mask (l,m) bool": 143488
+   },
+   "chorus_total_bytes": 605432,
+   "capacity_raw": {
+    "256 MB": 23933,
+    "1 GB": 95733,
+    "14 GB": 1340262
+   },
+   "capacity_r24": {
+    "256 MB": 10,
+    "1 GB": 43,
+    "14 GB": 610
+   },
+   "capacity_chorus": {
+    "256 MB": 443,
+    "1 GB": 1773,
+    "14 GB": 24829
+   },
+   "ratio_r24_over_raw": 2193.6,
+   "ratio_chorus_over_raw": 54.0
+  }
+ },
+ "l_values": [
+  128,
+  256
+ ],
+ "m_values": [
+  423,
+  1121
+ ],
+ "c_values": [
+  225,
+  683
+ ],
+ "density": {
+  "ticks": 40,
+  "gigi_receptive_fraction_median": [
+   0.0021,
+   0.0027,
+   0.0044
+  ],
+  "mask_eligible_density": [
+   0.2831,
+   0.3388,
+   0.3626
+  ]
+ },
+ "source": {
+  "capture": "real payload server, runningmanctf, k=4 teams, j=3-7 carts, 128 bots, g_payload_strategy_log 1 ([PLCOBS]/[PLCCART]/[PLCEVT] rows), port 26160, MESH_REGION=/plcnull so no frame reached the shared /mesh0 fabric",
+  "capture_log": "scratchpad/run1/capture.log (raw engine rows, 2026-08-31)",
+  "note": "open-loop: responses were not fed back, because the /mesh0 node-1 client slot is held by another agent's live responder (single client per region)"
+ }
+}

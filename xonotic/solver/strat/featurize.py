@@ -1,4 +1,10 @@
-"""Belief pipeline — the canonical, and only, definition of stages 2-5.
+"""Belief pipeline — V-cell segmentation, RHO's contraction, GIGI's mask.
+
+The belief INTEGRATION is NOT here: ``gigi @ phil(wally, cell_slots)`` in
+strategy.py is the one definition. A constant PHI and a second integration used
+to live in this file and are deleted — a fixed Phi is exactly the narrow
+hand-authored bottleneck SPEC §7 forbids, and PHIL is a learned cast member.
+This module produces ``cell_slots`` and ``gigi`` for the composer and stops.
 
 This is the deterministic featurization the strategy operator's ``beta`` half is
 computed by.  It is plain numpy: nothing here differentiates.  Its input is the
@@ -504,78 +510,6 @@ def temporal_contraction(f_obs, obs_time, now: float, T: float,
 # Stage 5: egocentric low-rank integration (the ONLY spatial mixing operator).
 # --------------------------------------------------------------------------- #
 
-def _resolve_phi(Phi, F: int) -> np.ndarray:
-    """Return the low-rank projection matrix ``Phi`` ``(rank, F)``; default identity passthrough."""
-    if Phi is None:
-        return np.eye(F, dtype=np.float64)
-    Phi = np.asarray(Phi, dtype=np.float64)
-    if Phi.ndim != 2 or Phi.shape[1] != F:
-        raise ValueError(f"Phi must be (rank, {F})")
-    return Phi
-
-
-def egocentric_integration(vcmap: VCellMap, cell_idx: int, f_eff, Phi=None) -> np.ndarray:
-    """**Stage 5** -- ``beta_b = sum_c g(dist_graph(c(b), c)) * Phi * f_c^eff``.
-
-    payload-spec §2.2.5, the system's ONLY spatial mixing operator. The bounded-support
-    graph-distance mask ``g`` (stage 4) is the egocentric weighting; ``Phi`` is the fixed
-    low-rank projection. Computed as ``beta_b = (g @ (f_eff @ Phi.T))`` -- equivalently
-    ``Phi @ (sum_c g_c f_c^eff)`` -- so the ``Phi * f_c^eff`` term precomputes once over
-    the map (see :func:`beliefs_for_bots`) and only the ``g``-weighted sum is per-bot.
-
-    Two bots in the same cell with the same ``f_eff`` get the same ``beta_b`` (identical
-    inputs; there is no team-belief object). Returns ``beta_b`` ``(rank,)``.
-    """
-    f_eff = np.asarray(f_eff, dtype=np.float64)
-    Phi = _resolve_phi(Phi, f_eff.shape[1])
-    g = vcmap.spatial_mask(cell_idx)                 # (C,)
-    projected = np.einsum("ij,kj->ik", f_eff, Phi)
-    return np.sum(g[:, None] * projected, axis=0)
-
-
-def belief(rows, vcmap: VCellMap, bot_position_or_cell, Phi=None, now: float = 0.0,
-           T: float = 1.0, f_prior=None) -> np.ndarray:
-    """End-to-end stages 3-5 for ONE bot: observation buffer -> ``beta_b``.
-
-    Composes :func:`build_cell_slots` (ingest the per-team buffer),
-    :func:`temporal_contraction` (stage 3), and :func:`egocentric_integration`
-    (stages 4-5) for a single bot at ``bot_position_or_cell`` (a world position, resolved
-    via ``vcmap.assign_cell``, or an int cell id). Returns the egocentric belief
-    ``beta_b`` ``(rank,)`` (payload-spec §2.2). ``T`` is the stage-3 forgetting constant;
-    ``f_prior`` the uninformative prior (default zeros).
-    """
-    f_obs, obs_time, seen = build_cell_slots(rows, vcmap, now)
-    f_eff = temporal_contraction(f_obs, obs_time, now, T, f_prior=f_prior, seen=seen)
-    cell = bot_position_or_cell if isinstance(bot_position_or_cell, (int, np.integer)) \
-        else vcmap.assign_cell(bot_position_or_cell)
-    return egocentric_integration(vcmap, int(cell), f_eff, Phi=Phi)
-
-
-def beliefs_for_bots(rows, vcmap: VCellMap, bot_positions_or_cells, Phi=None,
-                     now: float = 0.0, T: float = 1.0, f_prior=None) -> np.ndarray:
-    """Team-buffer belief for many bots: precompute ``Phi * f_c^eff`` once, then per-bot.
-
-    The scaling claim of payload-spec §2.2.5 made explicit: ingest + stage-3 contraction +
-    the ``Phi * f_c^eff`` projection are computed ONCE over the ``C`` cells
-    (``O(C*rank)``), then each bot is only a ``g``-weighted sum over its bounded-support
-    horizon (``O(horizon)``) -- so cost scales with **map size, not player count**. All
-    bots read the same per-team buffer, so two bots in the same cell get identical
-    ``beta_b`` (no team-belief object; §2.2.5).
-
-    ``bot_positions_or_cells`` : iterable of world positions and/or int cell ids.
-    Returns ``betas`` ``(B, rank)`` in input order.
-    """
-    f_obs, obs_time, seen = build_cell_slots(rows, vcmap, now)
-    f_eff = temporal_contraction(f_obs, obs_time, now, T, f_prior=f_prior, seen=seen)
-    Phi = _resolve_phi(Phi, f_eff.shape[1])
-    projected = np.einsum("ij,kj->ik", f_eff, Phi)
-    out = []
-    for b in bot_positions_or_cells:
-        cell = b if isinstance(b, (int, np.integer)) else vcmap.assign_cell(b)
-        g = vcmap.spatial_mask(int(cell))
-        out.append(np.sum(g[:, None] * projected, axis=0))
-    return np.asarray(out, dtype=np.float64) if out else np.zeros((0, projected.shape[1]))
-
 # --------------------------------------------------------------------------- #
 # Canonical stage-3 prior and stage-5 read-out (one definition, used by everyone)
 # --------------------------------------------------------------------------- #
@@ -600,7 +534,6 @@ PHI = np.asarray([
     (1, -1, 0, 0, 0, 0, 0),   # availability net of respawn wait
     (0,  0, 0, 0, 1, 1, 0),   # threat + presence (danger)
 ], dtype=np.float64)
-BELIEF_RANK = PHI.shape[0]
 
 
 def receptive_report(vcmap: VCellMap, cells=None) -> dict:

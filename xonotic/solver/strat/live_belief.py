@@ -20,22 +20,21 @@ import numpy as np
 
 from .buffers import EventKind, Observation, ObservationBuffer
 from .featurize import (
-    BELIEF_RANK,
-    PHI,
     SLOT_DIM,
     UNINFORMATIVE_PRIOR,
-    beliefs_for_bots,
+    build_cell_slots,
     receptive_report,
     segment_vcells,
+    temporal_contraction,
 )
 
 # The two-sided receptive-field band stage 2 sizes the horizon to.
 BELIEF_BAND = (0.05, 0.15)
 
-# `strategy_io_schema.EVT_KIND["CELL_LINK"]`: cell -> cell navigable adjacency
-# read off the stock waypoint graph. Mirrored here (not imported) because this
-# package must not depend on the payload tools path being importable.
-EVT_KIND_CELL_LINK = 4
+# cell -> cell navigable adjacency read off the stock waypoint graph. Imported,
+# never mirrored: a duplicated constant is a duplicated definition, and the two
+# copies drift the moment the engine schema changes.
+from .instruments import EVT_KIND_CELL_LINK
 
 
 class LiveBelief:
@@ -416,50 +415,19 @@ class LiveBelief:
             for cell, slot in slots.items()
         ]
 
-    def beliefs(self, rows, columns, now=None):
-        wall = time.monotonic()
-        if now is None:
-            self.now += max(0.0, wall - self.wall)
-        else:
-            self.now = max(self.now, float(now))
-        self.wall = wall
-        players = self._update_cells(rows, columns)
-        ids, index, vcmap = self._vcmap()
-        out = np.zeros((len(players), BELIEF_RANK), dtype=np.float32)
-        by_team = {}
-        for p, (_, team, cell, _) in enumerate(players):
-            by_team.setdefault(team, []).append((p, int(vcmap.node_cell[index[cell]])))
-        for team, members in by_team.items():
-            betas = beliefs_for_bots(
-                self._slot_rows(team, index, vcmap), vcmap,
-                [cell for _, cell in members],
-                Phi=PHI, now=self.now, T=self.decay, f_prior=UNINFORMATIVE_PRIOR,
-            )
-            for (p, _), beta in zip(members, betas):
-                out[p] = beta.astype(np.float32)
-        # E3: the band is the target of the stage-2 construction, which sizes
-        # the horizon against EVERY cell, so that is the population it is
-        # checked on. The realized distribution over the cells bots actually
-        # occupy is reported alongside it -- it is a consequence, not the knob.
-        occupied = sorted({cell for members in by_team.values() for _, cell in members})
-        band = receptive_report(vcmap)
-        band["occupied"] = {
-            key: receptive_report(vcmap, cells=occupied)[key]
-            for key in ("n", "median", "min", "max")
-        }
-        diagnostics = {
-            "cells": len(ids),
-            "edges": len(self.edges),
-            "events": len(self.buffer),
-            "accepted": self.accepted,
-            "duplicates": self.duplicates,
-            "invalid": self.invalid,
-            "teams": len(self.buffer.teams()),
-            **self.link_diagnostics,
-            "mean_norm": round(float(np.linalg.norm(out, axis=1).mean()), 6) if len(out) else 0.0,
-            "receptive": band,
-        }
-        return out, diagnostics
+    def chorus(self, rows, columns, now=None):
+        """Produce (cell_slots, gigi) for the composer. NOT the belief itself.
+
+        The integration is `gigi @ phil(wally, cell_slots)` in strategy.py, once.
+        This returns RHO-contracted slots and GIGI's bounded mask and stops there.
+        """
+        vcmap = self._vcmap()
+        slots, obs_time = build_cell_slots(rows, vcmap, self.now if now is None else now)
+        f_eff = temporal_contraction(slots, obs_time, self.now if now is None else now,
+                                     self.decay, UNINFORMATIVE_PRIOR)
+        gigi = np.stack([vcmap.spatial_mask(c) for c in self._player_cells(rows, columns)])
+        return f_eff, gigi
+
 
     def instrument_targets(self, rows, columns):
         from .instruments import CellTarget, ItemTarget, RivalTarget

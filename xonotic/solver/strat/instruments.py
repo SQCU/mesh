@@ -35,13 +35,10 @@ DESCRIPTOR_FIELDS = (
     "available", "urgency", "progress", "motion", "uncertainty",
     "visible", "temporal", "value",
 )
-RELATION_FIELDS = (
-    "same_team", "opposing_team", "observed", "same_cell",
-    "dx", "dy", "dz", "distance", "actor_alive", "actor_health",
-    "actor_armor", "actor_ammo", "actor_tss", "target_value",
-    "target_available", "target_uncertainty", "target_winner",
-    "target_rank", "target_nimber", "target_denial",
-)
+# The engine's event-kind for cell->cell navigable adjacency. Single home; the
+# QC side is `strategy_io_schema.EVT_KIND["CELL_LINK"]`.
+EVT_KIND_CELL_LINK = 4
+
 DESCRIPTOR_WIDTH = len(DESCRIPTOR_FIELDS)
 
 
@@ -249,7 +246,6 @@ COMMIT_SECONDS_PER_UNIT = 1024.0 / 400.0
 COMMIT_BASE_SECONDS = 0.6
 COMMIT_MIN_SECONDS = 0.25
 COMMIT_MAX_SECONDS = 30.0
-_DISTANCE = RELATION_FIELDS.index("distance")
 # Instruments that must never pin bot_strategytime: IDLE holds no objective, and
 # SPAWN_TIMING is only eligible for a dead actor, who is not travelling.
 NO_COMMIT_KINDS = (InstrumentKind.IDLE, InstrumentKind.SPAWN_TIMING)
@@ -267,7 +263,13 @@ def travel_horizon(batch: "InstrumentBatch", participant: int, action: int, scal
     if instrument.kind in NO_COMMIT_KINDS:
         return 0.0
     located = any(abs(value) > 0.0 for value in instrument.position)
-    travel = float(batch.relations[participant, int(action), _DISTANCE]) if located else 0.0
+    # Distance on demand from the two positions. The (l, m, 20) relation tensor
+    # this used to index cost 11.5 MB and 24 ms EVERY TICK and was read by
+    # nothing else -- strategy.py never touched it.
+    travel = float(np.linalg.norm(
+        np.asarray(inst.position, dtype=np.float32)
+        - np.asarray(actor.position, dtype=np.float32)
+    )) if located else 0.0
     seconds = float(scale) * (COMMIT_BASE_SECONDS + travel * COMMIT_SECONDS_PER_UNIT)
     return float(np.clip(seconds, COMMIT_MIN_SECONDS, COMMIT_MAX_SECONDS))
 

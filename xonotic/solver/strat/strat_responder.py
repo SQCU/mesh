@@ -7,9 +7,10 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "rdma"))
 sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "payload", "tools"))
 
+from solver.strat.cast_header import Wally, Widths
+from solver.strat.inputs import assemble
+from solver.strat.strategy import strategy, act, logp_of, integrate
 from solver.xonwire import Mesh, Reassembler, TxWindow, parse_hdr, REQ, RESP
-from solver.strat.estimator import StrategyEstimator
-from solver.strat.replay_store import featurize_tick, L_LEVELS
 from solver.strat.game_value import evaluate_cartstate
 from solver.strat.instruments import decode_allocations, update_weight_table
 from solver.strat.live_belief import LiveBelief
@@ -103,88 +104,16 @@ def load_ckpt_into(est, path):
     return [name for name, _ in weights]
 
 
-class EstCache:
-    """The ONE estimator a persistent learner uses across differently-shaped matches.
-
-    The previous version returned ``self.est`` on the first call and ignored
-    ``(k, j, l)`` forever after, so a learner that spanned matches of different
-    team / cart / player counts would silently keep the first match's shape --
-    which is why the learner had to be restarted per match.
-
-    The estimator is genuinely shape-agnostic: no learned parameter's shape
-    depends on ``k``, ``j`` or ``l``. ``QKVProjector`` is ``W_q (d, X_WIDTH +
-    BELIEF_WIDTH)`` and ``W_k (d, INSTRUMENT_WIDTH)``; ``GramSwiGLU`` is sized
-    by ``d`` alone; ``MixingHead.in_dim`` is derived from the relation schema; the value
-    probes are ``Linear(d, 1)``. ``k``/``j``/``l`` enter only the *data* (row
-    counts), never a weight. So the right fix is not a per-shape cache -- that
-    would forget the learner at every roster change -- it is to keep one
-    estimator and PROVE the claim at every new shape.
-
-    The proof is executed, not asserted: on each newly seen ``(k, j, l)`` a
-    throwaway estimator is constructed at that shape and its
-    ``architecture_spec`` (the sorted ``[name, shape]`` list of every parameter
-    leaf, the same function the checkpoint fingerprint of R24 hashes) is
-    compared leaf-for-leaf against the live one. Equal -> the shared estimator
-    is reused and the shape is recorded. Different -> a loud
-    ``CheckpointArchitectureMismatch``, never a silent wrong shape.
+def load_wally(checkpoint, widths, allow_mismatch=False):
+    """WALLY, loaded once. No cache keyed on (k, j, l): no parameter shape
+    depends on team, cart or player count, so one Wally serves every shape —
+    an EstCache pinning the first shape it saw was a bug, not a feature.
     """
+    wally = Wally(widths)
+    if checkpoint and os.path.exists(checkpoint):
+        wally.load_weights(checkpoint, strict=not allow_mismatch)
+    return wally
 
-    def __init__(self, checkpoint, allow_mismatch=False):
-        self.est = None
-        self.trained = False
-        self.checkpoint = checkpoint
-        self.allow_mismatch = bool(allow_mismatch)
-        self.shapes_seen = []          # every (k, j, l) this estimator has served
-        self.architecture = None       # fingerprint of the shared parameter tree
-
-    def _verify_shape_agnostic(self, k, j, l):
-        """Construct at (k, j, l) and require an identical parameter tree. Loud on failure."""
-        from solver.strat.online import CheckpointArchitectureMismatch, architecture_spec
-
-        probe = StrategyEstimator.for_runtime(k, l, seed=20260829)
-        live_spec = architecture_spec(estimator_bundle(self.est))
-        probe_spec = architecture_spec(estimator_bundle(probe))
-        if probe_spec != live_spec:
-            differing = [pair for pair in probe_spec if pair not in live_spec]
-            raise CheckpointArchitectureMismatch(
-                f"the estimator is NOT shape-agnostic: built at k={k} j={j} l={l} it has a "
-                f"different parameter tree than the shared one built at "
-                f"{self.shapes_seen[0]}.\n  differing leaves: {differing}\n"
-                f"  shared tree: {live_spec}"
-            )
-
-    def get(self, k, j, l):
-        shape = (int(k), int(j), int(l))
-        if self.est is not None:
-            if shape not in self.shapes_seen:
-                self._verify_shape_agnostic(*shape)
-                self.shapes_seen.append(shape)
-                print(f"[responder] shared estimator now also serving k={k} j={j} l={l} "
-                      f"(parameter tree verified identical; shapes so far "
-                      f"{self.shapes_seen})", flush=True)
-            return self.est, self.trained
-        from solver.strat.online import architecture_fingerprint
-
-        est = StrategyEstimator.for_runtime(k, l, seed=20260829)
-        loaded = []
-        if os.path.exists(self.checkpoint):
-            if self.allow_mismatch:
-                try:
-                    loaded = load_ckpt_into(est, self.checkpoint)
-                except Exception as exc:
-                    print(f"[responder] ARCHITECTURE MISMATCH -- running an initialized "
-                          f"policy instead:\n{exc}", flush=True)
-            else:
-                loaded = load_ckpt_into(est, self.checkpoint)
-        self.est, self.trained = est, bool(loaded)
-        self.shapes_seen.append(shape)
-        self.architecture = architecture_fingerprint(estimator_bundle(est))
-        print(
-            f"[responder] shared estimator initialized at k={k} j={j} l={l} "
-            f"loaded={len(loaded)} arch={self.architecture}",
-            flush=True,
-        )
-        return self.est, self.trained
 
 
 def array(value, dtype=None):
@@ -255,7 +184,6 @@ def main():
     ra_cart = Reassembler(REQ, CART_W, 4096, m.usable)
     ra_evt = Reassembler(REQ, EVT_W, 4096, m.usable)
     tx = TxWindow(m)
-    est_cache = EstCache(args.checkpoint, allow_mismatch=args.allow_arch_mismatch)
     live_belief = LiveBelief()
     rng = np.random.default_rng(args.seed)
     learner = None
@@ -353,7 +281,7 @@ def main():
                     j = cart_rows.shape[0]
                     l = len(active)
                     team_of = (teams_present - 1).clip(0, k - 1).tolist()
-                    est, trained = est_cache.get(k, j, l)
+                    trained = True
                     key = (k, j, tuple(participant_ids.tolist()), tuple(team_of))
                     map_key = tuple(
                         (int(round(cart_rows[c, CS["ID"]])),
@@ -482,17 +410,17 @@ def main():
                             last_saved_update = learner.updates
                             last_save_time = time.time()
 
-                    result = est.forward(state)
-                    actions = array(result.action, np.int64).reshape(l)
-                    w_next = array(result.w_next, np.float32).reshape(l, len(batch.instruments))
-                    dynamics_guidance = None
-                    if learner is not None and learner.updates:
-                        from solver.strat.dynamics import guided_actions
+                    # ONE forward: the composer. ONE sampling read-out: act().
+                    # The responder does not implement a policy of its own — a
+                    # second copy would make the learner's importance ratio
+                    # compare log-probs produced by different code.
+                    chorus = assemble(rows, batch, cell_slots, gigi, dee, semantics)
+                    out = strategy(wally, *(mx.array(a) for a in chorus))
+                    key, subkey = mx.random.split(key)
+                    actions_mx, logp_mx = act(out, subkey)
+                    actions = array(actions_mx, np.int64).reshape(l)
+                    w_next = array(integrate(mx.array(w_in), out.dw_dt, delta), np.float32)
 
-                        actions, dynamics_guidance = guided_actions(
-                            learner.dynamics, state, array(result.score, np.float32), actions,
-                            temperature=est.temperature,
-                        )
                     n_off_policy = min(max(0, args.off_policy_players), l)
                     off_policy = np.zeros(l, dtype=bool)
                     if n_off_policy:
@@ -501,15 +429,15 @@ def main():
                             eligible_actions = np.flatnonzero(batch.eligible[player])
                             actions[player] = rng.choice(eligible_actions)
                         off_policy[chosen] = True
-                    import mlx.core as mx
-                    from solver.strat.head import strategy_log_prob
+                        actions_mx = mx.array(actions)
+                        logp_mx = logp_of(out, actions_mx)
 
-                    target_logp = array(
-                        strategy_log_prob(result.score, mx.array(actions), est.temperature),
-                        np.float32,
-                    )
-                    behavior_logp = target_logp.copy()
+                    # The behaviour log-prob is the policy's own read-out, except
+                    # on rows deliberately driven off-policy, which were drawn
+                    # uniformly over the eligible set.
+                    behavior_logp = array(logp_mx, np.float32)
                     behavior_logp[off_policy] = -np.log(np.maximum(1, batch.eligible[off_policy].sum(axis=1)))
+                    target_logp = behavior_logp
                     weight_table = update_weight_table(batch, w_next, weight_table)
                     pw = 0 if projected is None else projected + 1
                     succ = [(team + 1, amount) for team, amount in succ_raw]
