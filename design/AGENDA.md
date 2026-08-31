@@ -141,10 +141,12 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] G3 Bots traverse long distances between fused regions — now cart↔cart, not just spawn→cart (R25)
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
 - [x] G11 Procedural geometry — 56 doorways CUT into stock map brushwork (R28)
-- [x] G12 Connectivity solvers + metrics over connectivity and navmesh solutions (R28)
-- [x] G13 Viewers that CATCH a broken fusion offline — per-doorway renders + void audit (R28)
+- [~] G12 Connectivity solvers + metrics — graph/topology only; no solid-occupancy measurement (R30)
+- [~] G13 Viewers that CATCH a broken fusion offline — renders/void-audit exist, but they are PROXIES; no world-space geometry oracle (R30)
 - [x] G14 **Placement is real: suitability selection + bridge/stub taxonomy + 3D bin pack + geometry edit; refusal deleted** (R28)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
+- [ ] G15 **A world-space geometry oracle over the ASSEMBLED fused world (solid/trace/clearance/standable)** — every validator is currently a proxy (ZEROED, R30)
+- [ ] G16 **Budgets DERIVED from a measured relationship, not tuned until one test passed** (ZEROED, R30)
 - [~] G6 Entity budget at scale — no invisible bots at high player counts; waypoint-sprite spam REGRESSED in live client (R22)
 - [~] G7 Diegetic communication of cart paths/state — duplicate "CART 2" labels observed (R22)
 - [x] G8 Headless client renderer for join inspection (real offscreen renders) (R15)
@@ -934,3 +936,58 @@ detected `process_gone` and `connection timed out` but not *launched-but-never-
 attached* — nothing in the log says "timed out" when there was never a connection to
 lose. Added a `client_never_attached` check (no connect confirmation within 45 s of
 launch → relaunch).
+
+### R30 — 2026-08-31 — G15, G16 opened; G12, G13 demoted (the proxy pattern, named)
+`E:run`+`E:code` The megamap's runtime assertion cascade, and the accountability for it.
+
+Observed on the live server:
+
+    SVQC OBJECT ERROR in relocate_spawnpoint: could not get out of solid at all!
+    NOTE: Spawnpoint at '8202.0 -11548.0 4342.0' needs to be moved out of solid
+    --- CUT HERE ---
+    assertion failed: `!IL_CONTAINS(this, it)`
+    VM_remove: tried to remove the null entity or a reserved entity!
+
+Spawnpoints ship buried in solid; stock Xonotic's relocate search fails, its error
+path double-inserts into an IntrusiveList, and the assert cascades. The in-solid drop
+(`mapfuse.py:763-779`) tests
+
+    src.solid_brush_at([o[0], o[1], o[2] + dz])
+
+— the SOURCE map's predicate at SOURCE coordinates, sampling three points straight up.
+The spawn's real position is `o + off` in the FUSED world, after tile packing (now
+with Z-level stacking), after the doorway cuts split brushwork, beside connector
+geometry. Both failing spawns are at extreme Z (4342, −3287), consistent with the
+stacked levels.
+
+**G15 — the missing tool, and the pattern it names.** EVERY fusion validator works on
+a proxy rather than on the assembled geometry: `solid_brush_at` is source-space; the
+void audit answers "is the screen black"; the flood-fill answers waypoint-graph
+connectivity; joinview measures path length; fusegraph measures abstract topology.
+**Nothing can answer "is this point, in the assembled fused world, inside geometry?"**
+So G12 and G13 are demoted to `[~]`: they measure real things, but not the thing that
+fails. The oracle (`solid_at`/`trace`/`clearance`/`standable` over the assembled world,
+one shared definition, correct across offsets and Z levels) should have been built
+first, with spawn, cart-path and doorway validation rebuilt on top of it.
+
+**G16 — every limit was set to whatever made the current test pass:** the waypoint cap
+(600) tuned against an 8-bot boot while the demo runs 12 and the map shipped 613
+waypoints; the entity budget tuned until worldspawn stopped tripping; `MAXCORLEN 6000`
+invented so a hard case could be refused; cell assignment left in index order because
+nothing forced a placement solve. Budgets must be derived from the measured
+relationship (the stock waypoint scan is O(n²) per frame and scales with bot count)
+with the bot count an explicit input, and boot-tested at the count the demo uses.
+
+**Accountability.** These were my briefs. I asked for evidence that a thing RAN and
+never for a tool that understands what was BUILT, then accepted those proxies and moved
+checkmarks with them twice — R15 graded fusion `[x]` on BSP byte sizes and a flood-fill
+boolean; R28 graded five frontiers full on renders plus one 8-bot boot. The AGENDA's own
+reading rule (*checkmarks come from artifacts*) requires the artifact to measure the
+requirement, and it did not.
+
+**Self-inflicted incident, recorded.** The `client_never_attached` check I added in R29
+fired on a 45 s timer while the client was still precaching the 166 MB megamap, turning
+the supervisor into a relaunch thrash loop that leaked three client processes.
+Rewritten: relaunch on never-attached only when there is BOTH no connection AND a log
+that has stopped growing for 120 s, and `launch()` now kills any prior client so
+orphans cannot accumulate.
