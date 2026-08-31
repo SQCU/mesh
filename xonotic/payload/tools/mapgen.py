@@ -387,7 +387,7 @@ def ring_arena(seed, nrooms):
 
 def smoke(outdir, mapname):
     log = os.path.join(outdir, 'smoke.log')
-    cmd = [os.path.expanduser('~/dox/xonotic/build-engine/darkplaces-dedicated'), '-xonotic',
+    cmd = [os.path.expanduser('~/dox/mesh/xonotic/darkplaces-work/darkplaces-dedicated'), '-xonotic',
            '-basedir', BASEPATH, '-userdir', os.path.dirname(os.path.dirname(outdir)),
            '+port', '26013', '+sv_public', '0', '+g_payload', '0',
            '+bot_number', '2', '+skill', '1', '+map', mapname]

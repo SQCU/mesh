@@ -33,7 +33,7 @@ from pathlib import Path
 # fixed locations
 # ---------------------------------------------------------------------------
 
-ENGINE = Path("/Users/mdot/dox/xonotic/build-engine/darkplaces-dedicated")
+ENGINE = Path("/Users/mdot/dox/mesh/xonotic/darkplaces-work/darkplaces-dedicated")
 BASEDIR = Path("/Users/mdot/dox/xonotic/Xonotic")
 SRC_MAPS = Path("/Users/mdot/dox/xonotic/fusebuild/prev/data/maps")
 OUTDIR = Path("/Users/mdot/dox/xonotic/fusebuild/budget")

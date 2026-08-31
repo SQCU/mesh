@@ -74,9 +74,7 @@ def discover_maps(basedir):
 def resolve_maps(spec, basedir):
     """Expand a --maps spec. `auto` and `megamaps` resolve against the data path.
 
-    `auto` puts every discovered megamap FIRST and keeps a stock fallback, so a
-    curriculum run selects the fused world by default instead of only ever
-    reaching it through a hand-written launch config.
+    `auto` includes every discovered map and puts megamaps first.
     """
     requested = csv(spec)
     if not any(token in ("auto", "megamaps") for token in requested):
@@ -88,14 +86,14 @@ def resolve_maps(spec, basedir):
             out.extend(found["megamaps"])
         elif token == "auto":
             out.extend(found["megamaps"])
-            out.extend(name for name in ("runningmanctf",) if name in found["maps"])
+            out.extend(name for name in found["maps"] if name not in found["megamaps"])
         elif token not in out:
             out.append(token)
     deduped = []
     for name in out:
         if name not in deduped:
             deduped.append(name)
-    return deduped or ["runningmanctf"]
+    return deduped
 
 
 def utcnow():
@@ -743,7 +741,7 @@ def parser():
     ap.add_argument("--duration", type=float, default=600)
     ap.add_argument("--run-dir", default=os.path.join(ROOT, "solver", "strat", "runs", "curriculum"))
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--engine", default=os.path.expanduser("~/dox/xonotic/build-engine/darkplaces-dedicated"))
+    ap.add_argument("--engine", default=os.path.expanduser("~/dox/mesh/xonotic/darkplaces-work/darkplaces-dedicated"))
     ap.add_argument("--basedir", default=os.path.expanduser("~/dox/xonotic/Xonotic"))
     ap.add_argument("--server-command")
     ap.add_argument("--server-host")
