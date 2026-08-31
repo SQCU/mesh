@@ -9,7 +9,14 @@ REPO=$(cd -- "$XONOTIC/.." && pwd)
 PORT=${JORACLE_PORT:-26042}
 VIEWER_PORT=${JORACLE_VIEWER_PORT:-8795}
 RUNDIR=${JORACLE_RUNDIR:-/tmp/mesh-joracle}
-MINI=${JORACLE_MINI:-mesh-mini}
+# Resolve the peer by IDENTITY at use time, not by a string baked into
+# ~/.ssh/config. That config said 192.168.1.183 -- a subnet this machine has not
+# been on for some time -- so every run reported "mesh-mini unreachable" while
+# the node was up on 10.0.0.165 and on the fabric at 169.254.225.22. One stale
+# string took out the responder, the telemetry viewer, and the conclusion that
+# any of it worked. rdma/peers.py asks the fabric instead.
+MINI=${JORACLE_MINI:-$(python3 "$REPO/rdma/peers.py" mesh-mini 2>/dev/null)}
+[ -n "$MINI" ] || MINI=mesh-mini   # no live edge: fall through and fail loudly
 MINI_RUN=${JORACLE_MINI_RUNDIR:-/tmp/mesh-joracle}
 MINI_PY=${JORACLE_MINI_PYTHON:-\$HOME/.venv-mesh-uv/bin/python}
 ENGINE=${JORACLE_ENGINE:-$XONOTIC/darkplaces-work/darkplaces-dedicated}
