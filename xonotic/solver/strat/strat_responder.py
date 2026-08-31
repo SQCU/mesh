@@ -8,19 +8,18 @@ sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "payload", "tools"))
 
 from solver.xonwire import Mesh, Reassembler, TxWindow, parse_hdr, REQ, RESP
-from solver.strat.estimator import StrategyEstimator, state_from_runtime
-from solver.strat.game import succession
+from solver.strat.estimator import StrategyEstimator
+from solver.strat.replay_store import featurize_tick, L_LEVELS
 from solver.strat.game_value import evaluate_cartstate
-from solver.strat.instruments import CartTarget, Participant, build_instruments, decode_allocations, update_weight_table, weights_from_table
+from solver.strat.instruments import decode_allocations, update_weight_table
 from solver.strat.live_belief import LiveBelief
-from solver.strat.runtime import CartSnapshot, GameContext, carts as game_carts, winner
-from strategy_io_schema import OBS, CS, EVT, SC
+from solver.strat.runtime import loser_ranks
+from strategy_io_schema import OBS, CS, EVT, SC, decode_target
 
-OBS_W, CART_W, EVT_W, RESP_W = 40, 12, 6, 8
+OBS_W, CART_W, EVT_W, RESP_W = 40, 12, 6, len(SC)
 CKPT = os.path.join(_HERE, "runs", "policy_ckpt_v3.npz")
 ONLINE_CKPT = os.path.join(_HERE, "runs", "policy_online_v3.npz")
 TELEM = os.path.join(_HERE, "runs", "cartserver_telemetry.jsonl")
-L_LEVELS = 8
 
 
 def team_resources(rows, teams):
@@ -115,7 +114,7 @@ class EstCache:
     The estimator is genuinely shape-agnostic: no learned parameter's shape
     depends on ``k``, ``j`` or ``l``. ``QKVProjector`` is ``W_q (d, X_WIDTH +
     BELIEF_WIDTH)`` and ``W_k (d, INSTRUMENT_WIDTH)``; ``GramSwiGLU`` is sized
-    by ``d`` alone; ``MixingHead.in_dim`` is the fixed 21-feature row; the value
+    by ``d`` alone; ``MixingHead.in_dim`` is derived from the relation schema; the value
     probes are ``Linear(d, 1)``. ``k``/``j``/``l`` enter only the *data* (row
     counts), never a weight. So the right fix is not a per-shape cache -- that
     would forget the learner at every roster change -- it is to keep one
@@ -188,22 +187,6 @@ class EstCache:
         return self.est, self.trained
 
 
-def build_cartstate(cart_rows, k):
-    j = cart_rows.shape[0]
-    pos = np.zeros(j)
-    control = np.full(j, -1, dtype=np.int64)
-    for c in range(j):
-        pos[c] = np.clip(float(cart_rows[c, CS["DEPTH"]]), 0, 1) * L_LEVELS
-        ctrl = int(round(cart_rows[c, CS["CTRL"]]))
-        control[c] = ctrl - 1 if ctrl >= 1 else -1
-    return CartSnapshot(
-        pos=pos,
-        control=control,
-        banked=np.zeros(k),
-        levels=L_LEVELS,
-    )
-
-
 def array(value, dtype=None):
     out = np.asarray(value)
     return out.astype(dtype) if dtype is not None else out
@@ -225,8 +208,15 @@ def main():
     ap.add_argument("--append-telemetry", action="store_true")
     ap.add_argument("--model-sample-every", type=int, default=10)
     ap.add_argument("--seed", type=int, default=20260829)
-    ap.add_argument("--replay-capacity", type=int, default=2048,
-                    help="transitions kept in the replay ring (oldest evicted first)")
+    ap.add_argument("--replay-capacity", type=int, default=200000,
+                    help="transitions kept in the replay ring (oldest evicted first); "
+                         "the ring stores RAW rows, so the memory budget is the real bound")
+    ap.add_argument("--replay-precision", default="float32",
+                    choices=("float32", "float16"),
+                    help="storage precision for the CONTINUOUS raw columns, beta and the "
+                         "integrated weight state. The integer-coded OBS columns (weapon "
+                         "bitmask, packed targets, edict ids) are kept exact in int32 "
+                         "either way -- float16 cannot represent them.")
     ap.add_argument("--replay-memory-mb", type=float, default=256.0,
                     help="memory ceiling for the replay ring; evicts oldest when exceeded")
     ap.add_argument("--replay-batch", type=int, default=8,
@@ -388,32 +378,19 @@ def main():
                         event_tick = int(eh["tick"])
                         deposited = live_belief.ingest(event_rows, EVT)
                     beta, belief_diag = live_belief.beliefs(rows, OBS)
-                    cartstate = build_cartstate(cart_rows, k)
-                    context = GameContext(tuple(range(k)), tuple(team_of), L_LEVELS)
-                    participants = [
-                        Participant(
-                            int(participant_ids[p]), int(teams_present[p]),
-                            int(round(rows[p, OBS["CELL"]])),
-                            tuple(float(v) for v in rows[p, OBS["POS_X"]:OBS["POS_Z"] + 1]),
-                            float(rows[p, OBS["ALIVE"]]),
-                            float(rows[p, OBS["HEALTH"]]) / 100.0,
-                            float(rows[p, OBS["ARMOR"]]) / 100.0,
-                            float(rows[p, OBS["AMMO"]]),
-                            float(rows[p, OBS["TSS"]]),
-                        )
-                        for p in range(l)
-                    ]
-                    carts = [
-                        CartTarget(
-                            int(round(cart_rows[c, CS["ID"]])), int(round(cart_rows[c, CS["CTRL"]])),
-                            float(cart_rows[c, CS["DEPTH"]]),
-                            float(cart_rows[c, CS["SPEED"]]),
-                            float(cart_rows[c, CS["PROGRESS"]]),
-                        )
-                        for c in range(j)
-                    ]
-                    items, rivals, cells = live_belief.instrument_targets(rows, OBS)
-                    batch = build_instruments(participants, carts, items, rivals, cells)
+                    targets = live_belief.instrument_targets(rows, OBS)
+                    # ONE featurization path.  `featurize_tick` is the same
+                    # function the replay ring calls when a stored tick is
+                    # sampled, so a replayed state is identical to this one by
+                    # construction rather than by inspection.  Inlining a
+                    # second copy of it here is the failure this project has
+                    # already hit twice (R24 deleted one from `live_belief`).
+                    tick = featurize_tick(rows, cart_rows, targets, beta, k=k,
+                                          weight_table=weight_table)
+                    context, cartstate, batch, state = (
+                        tick.context, tick.cartstate, tick.batch, tick.state)
+                    projected, succ_raw = tick.projected, tick.succession
+                    w_in = np.asarray(state.w, dtype=np.float32)
                     batch_key = (
                         key,
                         tuple((instrument.kind.value, instrument.subject) for instrument in batch.instruments),
@@ -440,10 +417,8 @@ def main():
                     # (12,8) (5,8)`. The pending segment is closed against the
                     # last state in the OLD roster and the new roster starts a
                     # fresh one.
-                    roster_break = (previous is not None
-                                    and previous["state"].x.shape[0] != l)
-                    w_in = weights_from_table(batch, weight_table)
-                    state = state_from_runtime(context, cartstate, rows, OBS, beta, batch, w=w_in)
+                    roster_break = (previous is not None and previous["players"] != l)
+                    frame = None
                     if args.train:
                         if learner is None:
                             from solver.strat.online import OnlineLearner
@@ -452,21 +427,31 @@ def main():
                                 est,
                                 learning_rate=args.learning_rate,
                                 checkpoint=args.online_checkpoint,
-                                load_checkpoint=args.resume_checkpoint or args.checkpoint,
+                                load_checkpoint=args.resume_checkpoint or args.online_checkpoint,
                                 on_architecture_mismatch=(
                                     "reinit" if args.allow_arch_mismatch else "refuse"
                                 ),
                                 replay_capacity=args.replay_capacity,
                                 replay_memory_mb=args.replay_memory_mb,
+                                replay_precision=args.replay_precision,
                                 replay_batch=args.replay_batch,
                                 replay_steps=args.replay_steps,
                                 seed=args.seed,
                             )
+                        # The tick's MINIMAL SUFFICIENT STATE enters the ring:
+                        # the raw OBS rows, the raw cart rows, the belief
+                        # read-out, the integrated weight state and the
+                        # belief-derived instrument targets (content-interned).
+                        # `x`, `hierarchy`, `winner_mask`, `z`, `relation` and
+                        # `eligible` are NOT stored -- they are rebuilt by
+                        # `featurize_tick`, the call three blocks above.
+                        frame = learner.replay.frame(
+                            rows, cart_rows, beta, w_in, targets, k, featurized=tick)
                         if previous is not None and roster_break:
-                            learner.flush(previous["state"], previous["snapshot"],
+                            learner.flush(previous["frame"], previous["snapshot"],
                                           terminal=True)
                             print(f"[responder] roster change "
-                                  f"{previous['state'].x.shape[0]} -> {l} players: "
+                                  f"{previous['players']} -> {l} players: "
                                   f"credit segment closed, no cross-roster transition",
                                   flush=True)
                             previous = None
@@ -475,14 +460,10 @@ def main():
                                 # close the pending segment against the LAST
                                 # state written in the old instrument basis,
                                 # before anything in the new basis is credited
-                                learner.flush(previous["state"], previous["snapshot"],
+                                learner.flush(previous["frame"], previous["snapshot"],
                                               terminal=True)
-                            # the successor's weight state, in the successor's
-                            # own instrument basis — so a change of instrument
-                            # count is representable instead of discarded
-                            previous["w_out"] = w_in.copy()
                             online_metrics = learner.observe(
-                                previous, state, cartstate, terminal=segment_break
+                                previous, frame, cartstate, terminal=segment_break
                             )
                         stats["updates"] = learner.updates
                         due_updates = (
@@ -530,9 +511,8 @@ def main():
                     behavior_logp = target_logp.copy()
                     behavior_logp[off_policy] = -np.log(np.maximum(1, batch.eligible[off_policy].sum(axis=1)))
                     weight_table = update_weight_table(batch, w_next, weight_table)
-                    projected = winner(context, cartstate)
                     pw = 0 if projected is None else projected + 1
-                    succ = [(team + 1, denial) for team, denial in succession(game_carts(cartstate), context.teams)]
+                    succ = [(team + 1, amount) for team, amount in succ_raw]
                     # The CGT value of the cart subgame, priced every tick by the
                     # CLOSED-FORM cart option graph (R25: a neutral cart is
                     # impartial and its Grundy value is derived by backward
@@ -569,7 +549,6 @@ def main():
                         batch, actions, intensity=intensities,
                         commitments=np.clip(intensities, 0.25, 3.0),
                         spawn_delays=np.clip(intensities, 0.0, 3.0),
-                        lead=teams_present == pw,
                     )
                     response[active] = local_response
                     model_arrays = {
@@ -618,7 +597,14 @@ def main():
                         kind = instrument.kind.value
                         target = float(local_response[local, SC["TARGET"]])
                         gain = float(local_response[local, SC["GAIN"]])
-                        lane = float(local_response[local, SC["LANE"]])
+                        applied_target = int(round(rows[local, OBS["APPLIED_TARGET"]]))
+                        goal_target = int(round(rows[local, OBS["GOAL_TARGET"]]))
+                        applied_kind, applied_subject = (
+                            decode_target(applied_target) if applied_target >= 0 else (None, None)
+                        )
+                        goal_kind, goal_subject = (
+                            decode_target(goal_target) if goal_target >= 0 else (None, None)
+                        )
                         if instrument.team > 0 and instrument.team != team:
                             strategy_focus[team - 1, instrument.team - 1] += 1
                         assignments.append(
@@ -627,9 +613,21 @@ def main():
                                 controller="bot" if rows[local, OBS["CONTROL"]] >= 0.5 else "human",
                                 behavior="uniform" if off_policy[local] else "policy",
                                 action=action, kind=kind, subject=int(instrument.subject), target=target,
-                                gain=round(gain, 4), lane=round(lane, 4),
+                                gain=round(gain, 4),
                                 commit=round(float(local_response[local, SC["COMMIT"]]), 4),
                                 spawn=round(float(local_response[local, SC["SPAWN"]]), 4),
+                                target_winner=round(float(instrument.target_winner), 4),
+                                target_rank=round(float(instrument.target_rank), 4),
+                                target_nimber=round(float(instrument.target_nimber), 4),
+                                target_denial=round(float(instrument.target_denial), 4),
+                                applied_target=applied_target,
+                                applied_kind=applied_kind, applied_subject=applied_subject,
+                                target_resolved=bool(rows[local, OBS["TARGET_RESOLVED"]] >= 0.5),
+                                goal_target=goal_target,
+                                goal_kind=goal_kind, goal_subject=goal_subject,
+                                goal_distance=round(float(rows[local, OBS["GOAL_DISTANCE"]]), 4),
+                                goal_match=bool(rows[local, OBS["GOAL_MATCH"]] >= 0.5),
+                                target_touch=bool(rows[local, OBS["TARGET_TOUCH"]] >= 0.5),
                                 target_logp=round(float(target_logp[local]), 6),
                                 behavior_logp=round(float(behavior_logp[local]), 6),
                             )
@@ -637,9 +635,12 @@ def main():
                     resp_id += 1
                     tx.send(RESP, ch["req_id"], ch["tick"], response, args.peer_node)
                     stats["resp"] += 1
+                    # The live objects the CREDIT queue needs (reward is
+                    # resolved at collection time) plus the ring's frame id.
+                    # No featurized array is carried: the ring holds rows.
                     previous = dict(
-                        context=context, state=state, snapshot=cartstate, cartstate=cartstate, w_in=w_in.copy(),
-                        w_out=w_next.copy(), actions=actions.copy(),
+                        context=context, snapshot=cartstate, cartstate=cartstate,
+                        frame=frame, players=l, actions=actions.copy(),
                         behavior_logp=behavior_logp.copy(),
                         teams_present=teams_present.copy(),
                     )
@@ -664,6 +665,7 @@ def main():
                             for c in range(j)
                         ],
                         PW=int(pw), SUCC=[[int(a), round(float(b), 4)] for a, b in succ],
+                        loser_ranks=loser_ranks(context, cartstate).tolist(),
                         game_value=game_value,
                         belief=dict(
                             reset=belief_reset, event_tick=event_tick,
@@ -694,8 +696,8 @@ def main():
                 last_report = time.time()
     finally:
         if learner is not None:
-            if previous is not None:
-                learner.flush(previous["state"], previous["cartstate"], terminal=True)
+            if previous is not None and previous.get("frame") is not None:
+                learner.flush(previous["frame"], previous["cartstate"], terminal=True)
             learner.save()
             save_runstate(rng, resp_id, nt_written, learner.updates)
         telem.close()

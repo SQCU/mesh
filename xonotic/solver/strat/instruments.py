@@ -39,10 +39,10 @@ RELATION_FIELDS = (
     "same_team", "opposing_team", "observed", "same_cell",
     "dx", "dy", "dz", "distance", "actor_alive", "actor_health",
     "actor_armor", "actor_ammo", "actor_tss", "target_value",
-    "target_available", "target_uncertainty",
+    "target_available", "target_uncertainty", "target_winner",
+    "target_rank", "target_nimber", "target_denial",
 )
 DESCRIPTOR_WIDTH = len(DESCRIPTOR_FIELDS)
-RELATION_WIDTH = len(RELATION_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,10 @@ class Instrument:
     visible: float = 1.0
     temporal: float = 0.0
     value: float = 0.0
+    target_winner: float = 0.0
+    target_rank: float = 0.0
+    target_nimber: float = 0.0
+    target_denial: float = 0.0
     observed_by: tuple[int, ...] = ()
 
 
@@ -124,7 +128,6 @@ class InstrumentBatch:
     participants: tuple[Participant, ...]
     instruments: tuple[Instrument, ...]
     descriptors: np.ndarray
-    relations: np.ndarray
     eligible: np.ndarray
 
     def index(self, kind: InstrumentKind | str, subject: int | None = None) -> int:
@@ -144,24 +147,30 @@ def _descriptor(inst: Instrument) -> np.ndarray:
     return row
 
 
-def _relation(actor: Participant, inst: Instrument) -> tuple[np.ndarray, bool]:
+def _eligible(actor: Participant, inst: Instrument) -> bool:
+    """MASK -- which actions EXIST for this actor. A game RULE, not a hint.
+
+    The hand-authored 20-column relation row that used to live here is deleted:
+    it violated SPEC §7 (it fed the solver `target_nimber`, `target_denial`,
+    `target_winner`, `target_rank` — the very conclusions the learned operator
+    exists to produce — plus a copy of the actor's own state per instrument).
+    Whatever is worth knowing about an (actor, instrument) pair is learned:
+    the score is ``quinn(...) @ kay(...).T``, computed, never stored.
+    """
     seen = not inst.observed_by or actor.team in inst.observed_by
     known_team = inst.team > 0
     same_team = known_team and actor.team == inst.team
     opposing = known_team and actor.team != inst.team
-    same_cell = inst.cell >= 0 and actor.cell == inst.cell
-    delta = np.asarray(inst.position, dtype=np.float32) - np.asarray(actor.position, dtype=np.float32)
-    row = np.asarray((
-        same_team, opposing, seen, same_cell, delta[0], delta[1], delta[2],
-        np.linalg.norm(delta), actor.alive, actor.health, actor.armor, actor.ammo,
-        actor.time_since_spawn, inst.value, inst.available, inst.uncertainty,
-    ), dtype=np.float32)
     eligible = seen and (inst.kind != InstrumentKind.HUNT_RIVAL or not same_team)
+    if inst.kind == InstrumentKind.PUSH_CART:
+        eligible = eligible and not opposing
+    if inst.kind == InstrumentKind.SUPPRESS_CART:
+        eligible = eligible and opposing
     if actor.alive < 0.5:
         eligible = eligible and inst.kind in (InstrumentKind.SPAWN_TIMING, InstrumentKind.IDLE)
     else:
         eligible = eligible and inst.kind != InstrumentKind.SPAWN_TIMING
-    return row, eligible
+    return eligible
 
 
 def build_instruments(
@@ -170,13 +179,18 @@ def build_instruments(
     items: Sequence[ItemTarget] = (),
     rivals: Sequence[RivalTarget] = (),
     cells: Sequence[CellTarget] = (),
+    team_roles=None,
 ) -> InstrumentBatch:
     actors = tuple(participants)
+    roles = {} if team_roles is None else team_roles
     instruments: list[Instrument] = []
     for cart in carts:
+        role = roles.get(cart.control_team, (0.0, 0.0, 0.0, 0.0))
         base = dict(
             subject=cart.cart_id, team=cart.control_team, position=cart.position,
             progress=cart.depth, motion=cart.speed, value=cart.progress,
+            target_winner=role[0], target_rank=role[1],
+            target_nimber=role[2], target_denial=role[3],
         )
         instruments.append(Instrument(InstrumentKind.PUSH_CART, urgency=1.0 - cart.depth, **base))
         instruments.append(Instrument(InstrumentKind.SUPPRESS_CART, urgency=cart.depth, **base))
@@ -188,11 +202,14 @@ def build_instruments(
             value=item.value, observed_by=item.observed_by,
         ))
     for rival in rivals:
+        role = roles.get(rival.team, (0.0, 0.0, 0.0, 0.0))
         instruments.append(Instrument(
             InstrumentKind.HUNT_RIVAL, rival.rival_id, team=rival.team,
             cell=rival.cell, position=rival.position, urgency=rival.threat,
             uncertainty=rival.uncertainty, visible=1.0, temporal=rival.age,
             value=rival.threat, observed_by=rival.observed_by,
+            target_winner=role[0], target_rank=role[1],
+            target_nimber=role[2], target_denial=role[3],
         ))
     for cell in cells:
         instruments.append(Instrument(
@@ -208,12 +225,11 @@ def build_instruments(
     ))
     refs = tuple(instruments)
     descriptors = np.stack([_descriptor(inst) for inst in refs])
-    relations = np.empty((len(actors), len(refs), RELATION_WIDTH), dtype=np.float32)
     eligible = np.empty((len(actors), len(refs)), dtype=bool)
     for p, actor in enumerate(actors):
         for m, inst in enumerate(refs):
-            relations[p, m], eligible[p, m] = _relation(actor, inst)
-    return InstrumentBatch(actors, refs, descriptors, relations, eligible)
+            eligible[p, m] = _eligible(actor, inst)
+    return InstrumentBatch(actors, refs, descriptors, eligible)
 
 
 # Travel commitment (AGENDA F4). `COMMIT` reaches the engine as
@@ -265,21 +281,17 @@ def decode_allocations(
     batch: InstrumentBatch,
     actions=None,
     intensity=None,
-    lanes=None,
     commitments=None,
     spawn_delays=None,
-    lead=None,
 ) -> np.ndarray:
     count = len(batch.participants)
     idle = batch.index(InstrumentKind.IDLE)
     chosen = _values(actions, count, idle, np.int64) % len(batch.instruments)
     gain = np.maximum(0.0, _values(intensity, count, 1.0))
-    lane = _values(lanes, count, np.nan)
     commit = _values(commitments, count, np.nan)
     spawn = _values(spawn_delays, count, np.nan)
-    leaders = _values(lead, count, 0.0)
     out = np.zeros((count, len(SC)), dtype=np.float32)
-    out[:, SC["LEAD"]] = leaders
+    out[:, SC["TARGET"]] = -1
     for p, action in enumerate(chosen):
         inst = batch.instruments[int(action)]
         actor = batch.participants[p]
@@ -292,21 +304,16 @@ def decode_allocations(
         if inst.kind in (InstrumentKind.PUSH_CART, InstrumentKind.SUPPRESS_CART):
             out[p, SC["TARGET"]] = encode_target("cart", inst.subject)
             out[p, SC["GAIN"]] = gain[p]
-            default_lane = inst.progress if inst.kind == InstrumentKind.PUSH_CART else min(1.0, inst.progress + 0.15)
-            out[p, SC["LANE"]] = np.clip(default_lane if np.isnan(lane[p]) else lane[p], 0.0, 1.0)
         elif inst.kind == InstrumentKind.CONTEST_POST:
             out[p, SC["TARGET"]] = encode_target("item", inst.subject)
             out[p, SC["GAIN"]] = gain[p]
         elif inst.kind == InstrumentKind.HUNT_RIVAL:
             out[p, SC["TARGET"]] = encode_target("rival", inst.subject)
             out[p, SC["GAIN"]] = gain[p]
-            out[p, SC["HUNT"]] = gain[p]
         elif inst.kind == InstrumentKind.EXPLORE_CELL:
             out[p, SC["TARGET"]] = encode_target("cell", inst.subject)
             out[p, SC["GAIN"]] = gain[p]
-            out[p, SC["EXPLORE"]] = gain[p]
         elif inst.kind == InstrumentKind.SPAWN_TIMING:
-            out[p, SC["TARGET"]] = encode_target("cell", max(0, actor.cell))
             out[p, SC["SPAWN"]] = max(0.0, 1.0 if np.isnan(spawn[p]) else spawn[p])
         elif inst.kind == InstrumentKind.TRAVEL_COMMITMENT:
             # Still an instrument in its own right -- "hold position and commit,
@@ -314,6 +321,7 @@ def decode_allocations(
             # COMMIT; its horizon comes from the same formula as every other
             # assignment.
             out[p, SC["TARGET"]] = encode_target("cell", max(0, actor.cell))
+            out[p, SC["GAIN"]] = gain[p]
     return out
 
 

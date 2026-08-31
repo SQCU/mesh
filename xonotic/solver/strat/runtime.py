@@ -44,6 +44,23 @@ def hierarchy(context: GameContext, snapshot: CartSnapshot) -> np.ndarray:
     return out
 
 
+def loser_ranks(context: GameContext, snapshot: CartSnapshot) -> np.ndarray:
+    cart_rows = carts(snapshot)
+    values = team_nimbers(cart_rows, context.teams)
+    current = projected_winner(cart_rows, context.teams)
+    teams = np.asarray(context.teams, dtype=np.int64)
+    scores = np.asarray([values[team] for team in context.teams], dtype=np.int64)
+    current_mask = np.asarray([team == current for team in context.teams], dtype=bool)
+    loser_mask = ~current_mask
+    ordered_ranks = np.sum(
+        (scores[:, None] > scores[None, :]) & loser_mask[None, :], axis=1
+    ).astype(np.int64)
+    ordered_ranks = np.where(current_mask, int(np.sum(loser_mask)), ordered_ranks)
+    ranks = np.zeros(len(context.teams), dtype=np.int64)
+    ranks[teams] = ordered_ranks
+    return ranks
+
+
 def hierarchy_rows(context: GameContext, snapshot: CartSnapshot):
     cart_rows = carts(snapshot)
     nimbers = team_nimbers(cart_rows, context.teams)
@@ -75,13 +92,14 @@ def hierarchy_rows(context: GameContext, snapshot: CartSnapshot):
 def role_rewards(context: GameContext, before: CartSnapshot, after: CartSnapshot) -> np.ndarray:
     before_winner = winner(context, before)
     after_winner = winner(context, after)
-    before_hierarchy = hierarchy(context, before)
-    after_hierarchy = hierarchy(context, after)
-    team_rewards = np.zeros(len(context.teams), dtype=np.float32)
-    for team in context.teams:
-        if team == before_winner:
-            team_rewards[team] = -float(after_winner != team)
-        else:
-            team_rewards[team] = after_hierarchy[team] - before_hierarchy[team]
-            team_rewards[team] += float(after_winner == team and before_winner != team)
+    before_ranks = loser_ranks(context, before)
+    after_ranks = loser_ranks(context, after)
+    teams = np.asarray(context.teams, dtype=np.int64)
+    winner_mask = teams == before_winner
+    rank_flip = after_ranks[teams] > before_ranks[teams]
+    team_rewards = np.where(
+        winner_mask,
+        -float(after_winner != before_winner),
+        rank_flip.astype(np.float32),
+    ).astype(np.float32)
     return team_rewards[np.asarray(context.team_of, dtype=np.int64)]

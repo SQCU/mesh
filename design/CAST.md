@@ -176,3 +176,37 @@ Amendments made by this instruction:
 - **PHIL is learned**, not part of the computed chorus. A constant-literal Φ was one of
   the defects found in the belief pipeline (R24), and a fixed Φ is exactly the narrow
   hand-authored bottleneck §7 forbids.
+
+---
+
+## PROJECT LAW — no duplication, no inlining, forever
+
+> duplicated and inlined code is forbidden in projects which use policy gradient
+> methods. modular nd central code only, forever.
+
+This is not a style rule, and the reason is specific to policy gradients: the update
+is weighted by `exp(logπ_target − logπ_behavior)`. If the sampling-time forward and the
+training-time forward are two pieces of code, the two log-probs come from two functions
+that can silently drift apart, and the importance ratio — and therefore the gradient —
+becomes meaningless **with no error raised**. Duplication in a PG project is a
+correctness failure that reports success.
+
+Every duplication found in this repo did exactly that:
+- `live_belief` re-inlined `featurize`'s belief pipeline (constant Φ, hardcoded radius,
+  an extra normalisation) while the canonical functions sat dead — R20.
+- the forward pass was inlined in both `estimator` and `train` — R10.
+- `role_rewards` / `hierarchy_scores` were duplicated in `train` and
+  `dominance_driver` — R10.
+- `buffers.py`'s perception gate was dead because `live_belief` passed `True, True, 0.0`
+  as literals — R20.
+
+**Enforcement is structural, not vigilance:**
+- `cast_header.py` — the only place a parameter exists. One definition per cast member.
+- `strategy.py` — the only composition. It declares no parameter, fabricates no tensor,
+  re-implements nothing, holds no state.
+- `inputs.py` — assembles the computed chorus and contains no arithmetic beyond
+  `asarray`; the moment it computes a feature it has become the thing §7 forbids.
+- Everything else imports these. A second definition of any of them is a defect on
+  sight, not a candidate to be compared against the first.
+
+There are no variant implementations of the strategy program. There is one.

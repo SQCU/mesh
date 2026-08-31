@@ -250,10 +250,12 @@ function renderHierarchy(latest) {
 function renderAssignments(internals) {
   const body = $('assign').querySelector('tbody');
   const rows = (internals && internals.assignments) || [];
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="13" class="absentval">assignments absent from this frame</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="21" class="absentval">assignments absent from this frame</td></tr>'; return; }
   const diag = internals.diag_k;
   body.innerHTML = rows.map((a, i) => {
     const dk = diag && diag[i] ? diag[i][a.action] : null;
+    const applied = `${a.applied_kind || '?'}:${a.applied_subject}`;
+    const goal = `${a.goal_kind || '?'}:${a.goal_subject}`;
     return `<tr>
       <td class="num">${a.edict}</td>
       <td style="color:${TEAM[a.team % TEAM.length]}">t${a.team}</td>
@@ -263,9 +265,18 @@ function renderAssignments(internals) {
       <td class="num">${a.subject}</td>
       <td class="num">${a.target}</td>
       <td class="num">${num(a.gain)}</td>
-      <td class="num">${num(a.lane)}</td>
       <td class="num">${num(a.commit)}</td>
       <td class="num">${num(a.spawn)}</td>
+      <td class="num">${num(a.target_winner, 0)}</td>
+      <td class="num">${num(a.target_rank)}</td>
+      <td class="num">${num(a.target_nimber)}</td>
+      <td class="num">${num(a.target_denial)}</td>
+      <td>${applied}</td>
+      <td class="${a.target_resolved ? 'ok' : 'crit'}">${a.target_resolved ? 'resolved' : 'unresolved'}</td>
+      <td>${goal}</td>
+      <td class="${a.goal_match ? 'ok' : 'dimmed'}">${a.goal_match ? 'match' : 'other'}</td>
+      <td class="num">${num(a.goal_distance)}</td>
+      <td class="${a.target_touch ? 'ok' : 'dimmed'}">${a.target_touch ? 'touch' : '·'}</td>
       <td class="num">${num(a.target_logp)}</td>
       <td class="num">${dk === null || dk === undefined ? '<span class="absentval">absent</span>' : num(dk, 4)}</td>
     </tr>`;

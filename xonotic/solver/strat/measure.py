@@ -40,7 +40,9 @@ from strategy_io_schema import CS, EVT, OBS, SC  # noqa: E402
 # Column order the QC logger emits, verbatim from payload_strategy_log().
 OBS_LOG_COLUMNS = ("ID", "TEAM", "HEALTH", "ARMOR", "AMMO", "POS_X", "POS_Y", "POS_Z",
                    "VEL_X", "VEL_Y", "VEL_Z", "WEAPONS", "POWER", "TSS", "CELL",
-                   "NCART", "NCART_D", "ALIVE", "CONTROL")
+                   "NCART", "NCART_D", "ALIVE", "CONTROL", "APPLIED_TARGET",
+                   "TARGET_RESOLVED", "GOAL_TARGET", "GOAL_DISTANCE", "GOAL_MATCH",
+                   "TARGET_TOUCH")
 CART_LOG_COLUMNS = ("ID", "DEPTH", "LENGTH", "CTRL", "SPEED", "IDLE", "BANKMASK",
                     "PROGRESS", "POS_X", "POS_Y", "POS_Z")
 EVT_LOG_COLUMNS = ("CELL", "KIND", "TEAM", "SUBJECT", "VALUE", "TIME")
