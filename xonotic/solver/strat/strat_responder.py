@@ -14,7 +14,12 @@ from solver.xonwire import Mesh, Reassembler, TxWindow, parse_hdr, REQ, RESP
 from solver.strat.game_value import evaluate_cartstate
 from solver.strat.instruments import decode_allocations, update_weight_table
 from solver.strat.live_belief import LiveBelief
-from solver.strat.runtime import loser_ranks
+from solver.strat.runtime import loser_ranks, hierarchy_rows
+from solver.strat.dpp import build_L, marginal_inclusion
+
+# The strategy cadence: the interval the engine ticks the strategy I/O at, and
+# therefore the forward-Euler step of the replicator update. One name, one place.
+PLC_STRAT_TICK = 0.2
 from strategy_io_schema import OBS, CS, EVT, SC, decode_target
 
 OBS_W, CART_W, EVT_W, RESP_W = 40, 12, 6, len(SC)
@@ -305,7 +310,11 @@ def main():
                         last_evt = None
                         event_tick = int(eh["tick"])
                         deposited = live_belief.ingest(event_rows, EVT)
-                    beta, belief_diag = live_belief.beliefs(rows, OBS)
+                    # The composer integrates the belief itself as
+                    # `gigi @ phil(wally, cell_slots)`; live_belief supplies the
+                    # two arrays and stops (one definition, R24/CAST law).
+                    cell_slots, gigi = live_belief.chorus(rows, OBS)
+                    belief_diag = live_belief.diagnostics() if hasattr(live_belief, "diagnostics") else {}
                     targets = live_belief.instrument_targets(rows, OBS)
                     # ONE featurization path.  `featurize_tick` is the same
                     # function the replay ring calls when a stored tick is
@@ -414,12 +423,29 @@ def main():
                     # The responder does not implement a policy of its own — a
                     # second copy would make the learner's importance ratio
                     # compare log-probs produced by different code.
+                    # DEE -- the DPP marginal inclusion over instrument keys.
+                    keys = mx.array(np.asarray(batch.descriptors, dtype=np.float32))
+                    quality = mx.ones((keys.shape[0],), dtype=mx.float32)
+                    dee = np.asarray(
+                        marginal_inclusion(build_L(quality, keys), method="inverse_diff"),
+                        dtype=np.float32,
+                    )
+                    # PIA / SUE / NIM -- the closed-form cartstate semantics, read
+                    # as their own input rather than smuggled into XAN (the defect
+                    # that killed estimator.state_from_runtime).
+                    semantics = np.asarray(
+                        hierarchy_rows(episode_context, cartstate), dtype=np.float32
+                    )
                     chorus = assemble(rows, batch, cell_slots, gigi, dee, semantics)
                     out = strategy(wally, *(mx.array(a) for a in chorus))
                     key, subkey = mx.random.split(key)
                     actions_mx, logp_mx = act(out, subkey)
                     actions = array(actions_mx, np.int64).reshape(l)
-                    w_next = array(integrate(mx.array(w_in), out.dw_dt, delta), np.float32)
+                    # delta IS the strategy cadence, and therefore the
+                    # forward-Euler step size and a stability parameter.
+                    w_next = array(
+                        integrate(mx.array(w_in), out.dw_dt, PLC_STRAT_TICK), np.float32
+                    )
 
                     n_off_policy = min(max(0, args.off_policy_players), l)
                     off_policy = np.zeros(l, dtype=bool)
