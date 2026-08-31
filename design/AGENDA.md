@@ -112,6 +112,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] D10 Acceptance matrix on the SERVER: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
 - [ ] D12 Checkpoint/architecture integrity — no silent `strict=False` resume across shape changes (R19)
+- [ ] D13 **A replay buffer of hundreds–thousands of featurized states, reused across the training losses** (present: a 5-step credit queue, each state used once) (ZEROED, R23)
 
 ### E. Observation / featurization (the map-reduce)
 - [x] E1 Perception-gated observation: frustum + LOS + 2-V-cell cap (emergent stealth) (R5)
@@ -558,3 +559,52 @@ quantitative metrics over connectivity and navmesh solutions, not a flood-fill
 boolean). G13 opened (viewers/visualizers that would have caught this offline).
 G6 regressed in evidence: the node-sprite bound of R16 is not in effect on this run.
 G7 defect: duplicate cart labelling.
+
+### R23 — 2026-08-31 — D13 opened (no replay buffer; every state used once)
+`E:code` Owner's question about what is buffered for training, answered from the code.
+
+There is **no replay buffer in the package** — `grep -rniE 'class .*replay|replay_buffer'`
+returns nothing. What exists is a short CREDIT queue:
+
+    online.py:61    credit_horizon: int = 5
+    online.py:197   self.pending.append({ "previous": ..., "reward": ..., ... })
+    online.py:204   return self.flush(...) if terminal or changed or len(self.pending) >= self.credit_horizon else None
+    online.py:211   for start, item in enumerate(self.pending):   # one update() per item
+    online.py:225   self.pending.clear()
+
+`flush()` computes the discounted MC return from each start index, takes **one
+gradient step per pending item**, then clears. So every featurized state is consumed
+exactly once, with residency <= 5 transitions — frequently fewer, because a cart
+signature change forces an early flush. The 82 updates of the 2026-08-30 live run
+were 82 states, each seen once.
+
+The pending entry already carries the correct replay tuple (`context, state,
+snapshot, w_in, w_out, actions, behavior_logp`, assembled at
+`strat_responder.py:502-504`), and the correction that LICENSES reuse is already
+implemented and running:
+
+    online.py:165   ratio = mx.stop_gradient(mx.minimum(mx.exp(current["logpi"] - behavior_logp_mx), self.importance_clip))
+    online.py:166   actor = -mx.mean(mx.stop_gradient(ratio * error) * current["logpi"])
+    online.py:169-170  winner_weight = winner_mask * ratio ; loser_weight = loser_mask * ratio
+
+i.e. participant-local clipped importance weighting on the actor and both critic
+heads. The staleness correction exists; nothing is ever allowed to become stale.
+
+Requirement, quoted:
+
+> presumably we have a buffer of hundreds to thousands of featurized game states we
+> can repeatedly run through our training losses; whether the states are stale or not
+> does not actually matter as much as it might sound, so long as the buffer is
+> refilled with fresher states eventually
+
+Cost of the present shape: real Game-2 transitions are the expensive resource (the
+reason the mesh exists) and each buys exactly one gradient step; consecutive strategy
+ticks are near-identical so updates are correlated and high-variance; and the value
+heads/probes, which need many states to fit, are fitted 5-at-a-time on a streaming
+window.
+
+Recovery route: push completed transitions (with their already-computed returns) into
+a ring buffer of hundreds–thousands; sample minibatches per update with multiple
+passes; evict oldest so the buffer tracks the current policy; keep the existing
+clipped ratio as the sole off-policy mechanism; include the buffer in the atomic
+checkpoint/resume state (R9). Dispatched to the model-core owner.
