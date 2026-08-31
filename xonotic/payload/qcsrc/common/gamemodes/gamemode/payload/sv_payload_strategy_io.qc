@@ -289,36 +289,35 @@ void payload_strategy_scatter(float nclients)
 }
 
 // ---------------------------------------------------------------------------
-//  havocbot_goalrating_strategy — scattered weights become behavior.
-//  ADDITIVE rater: every output is a navigation_routerating base-rating bias —
-//  the single lever (navigation.qc:1220). It NEVER writes skill/bot_*aim* fields,
-//  so skill-orthogonality holds by construction (playerbot-interface §4).
+//  havocbot_goalrating_strategy — THIN TRANSLATOR: matmul target-weights become
+//  navigation_routerating biases on REAL entities and nothing else. It decides
+//  NOTHING (the committed target is a mesh output it reads) and computes NO
+//  navigation (no node-finding, no path geometry, no "which point on the path").
+//  Each objective in the vocabulary maps to one stock-navigable target entity:
+//    push/suppress cart k -> the cart entity        (occupancy law resolves push/suppress)
+//    contest item post p  -> the item entity
+//    hunt rival r         -> the rival player entity
+//    explore/gather cell c-> stock waypoint entities in the cell
+//  Every output is a navigation_routerating base-rating bias — the single lever
+//  (navigation.qc:1220). It NEVER writes skill/bot_*aim* fields, so skill-
+//  orthogonality holds by construction (playerbot-interface §4).
 // ---------------------------------------------------------------------------
 void havocbot_goalrating_strategy(entity this, float ratingscale)
 {
 	float tgt  = this.plc_str_target;
 	float gain = this.plc_str_gain;
 
-	// push / suppress cart k: the committed cart gets the gain, and the golden-
-	// path node nearest the lane fraction gets a spread bias (ahead == suppress).
+	// push / suppress cart k: ONE routerating on the real CART entity. Push vs
+	// suppress is NOT re-encoded here — it is resolved downstream by the cylinder
+	// occupancy law (payload_occupancy, sv_payload.qc:102; design/cart-force-field.md):
+	// a body present in the cart's cylinder pushes or contests by presence. The
+	// adapter only says "want this cart, this much"; stock navigation finds the
+	// route to it via the waypoint navmesh (navigation.qc:1220, moving-goal path).
 	if (tgt >= PLC_TGT_CART_BASE && tgt < PLC_TGT_ITEM_BASE)
 	{
 		float k = tgt - PLC_TGT_CART_BASE;
 		if (k >= 0 && k < payload_cart_count && gain != 0)
-		{
-			entity cart = payload_carts[k];
-			navigation_routerating(this, cart, ratingscale * gain, 5000);
-
-			float want = this.plc_str_lane * cart.plc_length;
-			entity bestnode = NULL; float bestd = 999999999;
-			IL_EACH(g_payload_nodes, it.plc_cart == cart,
-			{
-				float d = fabs(it.plc_dist - want);
-				if (d < bestd) { bestd = d; bestnode = it; }
-			});
-			if (bestnode)
-				navigation_routerating(this, bestnode, ratingscale * gain, 3000);
-		}
+			navigation_routerating(this, payload_carts[k], ratingscale * gain, 5000);
 	}
 	// contest item post p: subject was written as etof(item); resolve it back.
 	else if (tgt >= PLC_TGT_ITEM_BASE && tgt < PLC_TGT_RIVAL_BASE)
@@ -340,9 +339,10 @@ void havocbot_goalrating_strategy(entity this, float ratingscale)
 			break;
 		});
 	}
-	// explore / grab at cell c (must-build #2): bias waypoint-seeking by the
-	// explore weight. Cell→origin is coarse (hashed id), so the spread is seeded
-	// at the bot's vicinity — a real routerating pass, not a no-op.
+	// explore / grab at cell c (must-build #2): routerating the STOCK waypoint
+	// entities whose hashed V-cell matches the selected cell. These are ordinary
+	// g_waypoints navmesh nodes, not a project-specific path — the adapter names
+	// target entities and stock navigation computes the route.
 	else if (tgt >= PLC_TGT_CELL_BASE && this.plc_str_explore != 0)
 	{
 		float cell = tgt - PLC_TGT_CELL_BASE;

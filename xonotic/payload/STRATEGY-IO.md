@@ -174,7 +174,7 @@ Each column is a `navigation_routerating` bias.
 |-----|------|-------|---------|
 | 0 | TARGET | `plc_str_target` | packed committed target id (§5) |
 | 1 | GAIN | `plc_str_gain` | base rating amplitude `f` for that target |
-| 2 | LANE | `plc_str_lane` | arclength fraction [0,1] along the chosen cart (push vs suppress-position) |
+| 2 | LANE | `plc_str_lane` | arclength-fraction **readout** [0,1]; **not** consumed as navigation — push vs suppress is resolved by the cart's cylinder occupancy law (`payload_occupancy`), not by routing a lane node |
 | 3 | HUNT | `plc_str_hunt` | weight rating the observed rival subject |
 | 4 | EXPLORE | `plc_str_explore` | weight rating waypoints whose hashed V-cell equals the selected cell |
 | 5 | COMMIT | `plc_str_commit` | travel-commitment horizon → `bot_strategytime` (`navigation.qc:51`) |
@@ -205,6 +205,41 @@ cell  c :   196608 + c     (PLC_TGT_CELL_BASE)
 
 `havocbot_goalrating_strategy` dispatches on the band and issues the
 matching `navigation_routerating` call.
+
+### 5.1 Objective vocabulary → target entity (the thin-translator contract)
+
+The adapter is a **pure translator**. It decides nothing and computes no navigation
+(no node-finding, no lane geometry, no "which point on the path" — stock navigation
+owns HOW). Each objective the matmul can commit to maps to exactly one
+`navigation_routerating` call on a **real, stock-navigable entity**, with the weight
+the mesh scattered:
+
+| objective (matmul) | target band | routed entity | weight | rangebias |
+|--------------------|-------------|---------------|--------|-----------|
+| push / suppress cart k | `CART_BASE+k` | `payload_carts[k]` (the cart entity) | `GAIN` | 5000 |
+| contest / gather item post p | `ITEM_BASE+p` | the `g_items` entity `etof==p` | `GAIN` | 3000 |
+| crush weak / duel strong / hunt rival r | `RIVAL_BASE+r` | the enemy player entity `etof==r` | `HUNT` | 5000 |
+| explore / gather cell c | `CELL_BASE+c` | stock `g_waypoints` in cell c | `EXPLORE` | 3000 |
+
+- **push vs suppress is not re-encoded by the adapter.** Both are the same
+  routerating on the same cart entity; whether a present body pushes or contests is
+  resolved by the cylinder occupancy law (`payload_occupancy`, `sv_payload.qc`;
+  `design/cart-force-field.md`), which the adapter must not duplicate. `LANE` is a
+  readout column only.
+- **crush-weak / duel-strong / hunt-rival** are one primitive: routerating a rival
+  player entity. Which rival (weak vs strong) is the mesh's target choice (`r`), not a
+  QC decision.
+- **explore / gather resources** route stock waypoint / item entities in the target
+  cell — never a computed path. The cell→entity step is a filter over the stock
+  navmesh, not a project nav graph.
+- `COMMIT` extends `bot_strategytime` (the stock travel-commitment lever,
+  `navigation.qc:51`) so a committed instrument is not re-diced every tick. `SPAWN`
+  biases `respawn_time` in `PlayerPreThink`. `LEAD`/`LANE` are readouts. None of these
+  is navigation.
+
+The **cart demonstrator** (`havocbot_goalrating_payload`) likewise rates only the cart
+**entities** — it no longer routes bots along `plc_path` nodes. The `plc_path` chain is
+the cart's own movement/banking graph, not a bot navigation graph.
 
 ---
 

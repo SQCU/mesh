@@ -612,17 +612,13 @@ void Payload_RoundStart()
 
 void havocbot_goalrating_payload(entity this, float ratingscale)
 {
-	// Bare stub. Rates carts and near-cart nodes so bots engage the cart
-	// demonstrator. Strategy-weighted objective selection removed: there is no
-	// strategy implementation; design/payload-spec.md is the reference.
+	// Base demonstrator: rate the real CART entities so bots engage them. Stock
+	// navigation computes HOW to reach a cart (moving-goal path over the waypoint
+	// navmesh, navigation.qc:1220). We do NOT route bots along plc_path nodes: the
+	// plc_path chain is the cart's own movement/banking graph, not a bot nav graph.
+	// design/payload-spec.md is the reference.
 	for(int c = 0; c < payload_cart_count; ++c)
 		navigation_routerating(this, payload_carts[c], ratingscale, 5000);
-	IL_EACH(g_payload_nodes, it.plc_cart != NULL,
-	{
-		float rel = (it.plc_dist - it.plc_cart.plc_s) / 256;
-		if(rel > 0 && rel < 1)
-			navigation_routerating(this, it, ratingscale * 0.5, 3000);
-	});
 
 	// Apply the mesh-scattered per-player instrument weights as additive
 	// routerating biases (STRATEGY-IO.md flow 3). The cart demonstrator ratings

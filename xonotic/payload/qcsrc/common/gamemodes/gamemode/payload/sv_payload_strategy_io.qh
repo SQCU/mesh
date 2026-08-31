@@ -1,7 +1,7 @@
 #pragma once
 #include "mesh_ipc.qh"   // mesh IPC builtins (#644..#653)
 // =============================================================================
-//  sv_payload_strategy_io.qh  —  SCAFFOLDING  [BUILD]
+//  sv_payload_strategy_io.qh  —  strategy I/O contract
 // -----------------------------------------------------------------------------
 //  Server-side I/O contract for the strategy stack. This header declares the
 //  fields, the mesh column schema, and the function prototypes that carry:
@@ -10,11 +10,11 @@
 //    (3) per-player instrument weights back down as routerating biases
 //        (playerbot-interface §2.3-2.4; payload-spec §4)
 //
-//  THIS FILE IS NON-DESTRUCTIVE SCAFFOLDING. It is NOT #included by the
-//  generated _mod.inc and it does NOT touch the working cart mechanic in
-//  sv_payload.qc. Nothing here is wired into the live rater yet — wiring is the
-//  [BUILD] step documented in STRATEGY-IO.md. Symbols are name-spaced `plc_str_`
-//  / `payload_strategy_` so they never collide with the shipping `plc_*` set.
+//  This unit IS #included by _mod.inc (SVQC) and its rater is wired into the live
+//  payload role via havocbot_goalrating_payload (sv_payload.qc). It ADDS strategy
+//  routerating biases on top of the cart demonstrator; it does not modify the cart
+//  mechanic. Symbols are name-spaced `plc_str_` / `payload_strategy_` so they never
+//  collide with the shipping `plc_*` set.
 //
 //  Determinism boundary (rl-training-spec §4): everything on THIS side of the
 //  wire is stopgrad. QC emits raw cartstate and raw perception; PW/SUCC, the
@@ -113,7 +113,7 @@ const float PLC_EVT_TIME     = 5;     // observation timestamp (temporal contrac
 // =============================================================================
 const float PLC_SC_TARGET    = 0;     // packed committed target id (see encode() in STRATEGY-IO.md)
 const float PLC_SC_GAIN       = 1;    // base rating amplitude f for the committed target
-const float PLC_SC_LANE       = 2;    // arclength fraction [0,1] along chosen cart (push vs suppress-position)
+const float PLC_SC_LANE       = 2;    // arclength-fraction READOUT [0,1]; NOT consumed as navigation — push vs suppress is resolved by the cylinder occupancy law, not by routing a lane node
 const float PLC_SC_HUNT       = 3;    // hunt-rival weight (rates the observed rival subject)
 const float PLC_SC_EXPLORE    = 4;    // explore-cell weight (rates waypoints near a seen cell)
 const float PLC_SC_COMMIT     = 5;    // travel-commitment horizon -> bot_strategytime (navigation.qc:51)
