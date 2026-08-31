@@ -124,3 +124,14 @@ REGISTER_GAMETYPE(PAYLOAD, NEW(Payload));
 // anyway, because g_payload_lane_synthesis defaults to 1 and spawnfunc deletes it.
 #define PLC_CART_MIN '-32 -32 -24'
 #define PLC_CART_MAX '32 32 56'
+
+// MOVETYPE_PUSH requires a model. DarkPlaces rejects a pusher with modelindex 0
+// outright -- `_Movetype_Physics_Push: entity #N has an invalid modelindex 0` --
+// and never simulates its motion, so a modelless cart cannot move no matter what
+// the push law computes. The synthesised cart had no setmodel anywhere in the
+// gamemode, so every cart hit this, every tick.
+//
+// The cart a player SEES is the projected 5D knot drawn client-side by
+// Artifact_DrawTube (cl_artifact.qc:351). This model exists only to give the
+// server a valid modelindex and is drawn nowhere.
+#define PLC_CART_MODEL "models/marker.md3"

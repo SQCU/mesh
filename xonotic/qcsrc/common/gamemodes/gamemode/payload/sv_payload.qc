@@ -739,6 +739,12 @@ void payload_cart_configure(entity cart)
 		// geometry beyond this hull -- what a player sees is the CSQC knot tube
 		// drawn by Artifact_DrawTube (cl_artifact.qc), which is a separate
 		// object. Keeping the hull here is what keeps the two agreeing.
+		// A model FIRST: MOVETYPE_PUSH is refused without one (see
+		// PLC_CART_MODEL). setsize afterwards, so the size contract wins over
+		// whatever bounds the model carries.
+		precache_model(PLC_CART_MODEL);
+		_setmodel(cart, PLC_CART_MODEL);
+		cart.effects |= EF_NODRAW;
 		cart.solid = SOLID_BBOX;
 		set_movetype(cart, MOVETYPE_PUSH);
 		setsize(cart, PLC_CART_MIN, PLC_CART_MAX);
