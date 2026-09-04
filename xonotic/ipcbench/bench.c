@@ -46,13 +46,11 @@ int main(void){
  for(int i=0;i<NF;i++)out[i]=i*0.5f;
  double *s=malloc(sizeof(double)*ITER);
 
- /* 1. unix socket stream */
  {int sv[2];socketpair(AF_UNIX,SOCK_STREAM,0,sv);pthread_t t;pthread_create(&t,0,sockserver,&sv[1]);
   for(int i=0;i<50;i++){wrall(sv[0],out,NB);rdall(sv[0],in,NB);}
   for(int i=0;i<ITER;i++){double t0=now();wrall(sv[0],out,NB);rdall(sv[0],in,NB);s[i]=now()-t0;}
   report("unix socketpair 16KiB RT",s,ITER);close(sv[0]);pthread_join(t,0);close(sv[1]);}
 
- /* 1b. real AF_UNIX path socket, separate process */
  {const char*p="/tmp/meshbench.sock";unlink(p);
   int ls=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un un={0};un.sun_family=AF_UNIX;strcpy(un.sun_path,p);
   bind(ls,(struct sockaddr*)&un,sizeof un);listen(ls,1);
@@ -64,7 +62,6 @@ int main(void){
   for(int i=0;i<ITER;i++){double t0=now();wrall(c,out,NB);rdall(c,in,NB);s[i]=now()-t0;}
   report("AF_UNIX 2-process 16KiB RT",s,ITER);close(c);close(ls);unlink(p);}
 
- /* 2. shared memory spin */
  {int fd=shm_open("/meshbenchshm",O_CREAT|O_RDWR,0600);ftruncate(fd,sizeof(struct shmring));
   ring=mmap(0,sizeof(struct shmring),PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   memset(ring,0,sizeof *ring);pthread_t t;pthread_create(&t,0,shmserver,0);
@@ -78,7 +75,6 @@ int main(void){
   report("shm mmap spin 16KiB RT",s,ITER);shmrun=0;seq++;atomic_store_explicit(&ring->req,seq,memory_order_release);pthread_join(t,0);
   shm_unlink("/meshbenchshm");}
 
- /* 2b. shm non-blocking poll: cost of publish+check only (what a game frame actually pays) */
  {int fd=shm_open("/meshbenchshm2",O_CREAT|O_RDWR,0600);ftruncate(fd,sizeof(struct shmring));
   struct shmring*r2=mmap(0,sizeof(struct shmring),PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);memset(r2,0,sizeof*r2);
   unsigned seq=0;
@@ -88,7 +84,6 @@ int main(void){
    s[i]=now()-t0;}
   report("shm publish+poll (nonblocking)",s,ITER);shm_unlink("/meshbenchshm2");}
 
- /* 3. file via write+rename+read */
  {int n=200;
   for(int i=0;i<n;i++){double t0=now();
    int fd=open("/tmp/meshbench.tmp",O_CREAT|O_WRONLY|O_TRUNC,0600);wrall(fd,out,NB);close(fd);
@@ -97,7 +92,6 @@ int main(void){
    s[i]=now()-t0;}
   report("file write+rename+read 16KiB",s,n);unlink("/tmp/meshbench.dat");}
 
- /* 4. ascii cost that every string-based path pays */
  {char*buf=malloc(NF*16);int n=500;
   for(int i=0;i<n;i++){double t0=now();int o=0;
    for(int j=0;j<NF;j++)o+=snprintf(buf+o,16,"%.6g ",out[j]);

@@ -29,9 +29,6 @@ void KeyBinds_BuildList()
 	#define KEYBIND_EMPTY_LINE() KEYBIND_DEF("", "")
 	#define KEYBIND_HEADER(str) KEYBIND_DEF("", str)
 
-	// Special keybinds can't be edited or selected
-	// If a special keybind description matches the previous one
-	// then it's considered as an alternative keybind of the previous one
 	#define KEYBIND_IS_SPECIAL(func) (substring(func, 0 ,1) == "*")
 	#define KEYBIND_SPECIAL_DEF(key, desc) KEYBIND_DEF(strcat("*", key), desc)
 
@@ -104,8 +101,7 @@ void KeyBinds_BuildList()
 
 	KEYBIND_HEADER(_("Client"));
 	KEYBIND_DEF("+show_info"                            , _("server info"));
-	// display the hardcoded shortcut to open the console as it works for all
-	// non-English keyboard layouts, unlike default keys (` and ~)
+
 	KEYBIND_DEF("toggleconsole"                         , _("enter console"));
 		string console_shortcut = strcat(translate_key("SHIFT"), "+", translate_key("ESCAPE"));
 		KEYBIND_SPECIAL_DEF(console_shortcut            , _("enter console"));
@@ -151,8 +147,8 @@ entity makeXonoticKeyBinder()
 void replace_bind(string from, string to)
 {
 	int n, j;
-	float k; // not sure if float or int
-	n = tokenize(findkeysforcommand(from, 0)); // uses '...' strings
+	float k;
+	n = tokenize(findkeysforcommand(from, 0));
 	for(j = 0; j < n; ++j)
 	{
 		k = stof(argv(j));
@@ -167,7 +163,6 @@ void XonoticKeyBinder_configureXonoticKeyBinder(entity me)
 	me.configureXonoticListBox(me);
 	me.nItems = 0;
 
-	// TEMP: Xonotic 0.1 to later
 	replace_bind("impulse 1", "weapon_group_1");
 	replace_bind("impulse 2", "weapon_group_2");
 	replace_bind("impulse 3", "weapon_group_3");
@@ -182,7 +177,7 @@ void XonoticKeyBinder_configureXonoticKeyBinder(entity me)
 void XonoticKeyBinder_loadKeyBinds(entity me)
 {
 	bool force_initial_selection = false;
-	if(KeyBinds_Count < 0) // me.handle not loaded yet?
+	if(KeyBinds_Count < 0)
 		force_initial_selection = true;
 	KeyBinds_BuildList();
 	me.nItems = KeyBinds_Count;
@@ -213,7 +208,7 @@ void KeyBinder_Bind_Change(entity btn, entity me)
 	if(func == "" || KEYBIND_IS_SPECIAL(func))
 		return;
 
-	me.setSelected(me, me.selectedItem); // make it visible if it's hidden
+	me.setSelected(me, me.selectedItem);
 	me.keyGrabButton.forcePressed = 1;
 	me.clearButton.disabled = 1;
 	keyGrabber = me;
@@ -229,7 +224,6 @@ void XonoticKeyBinder_keyGrabbed(entity me, int key, bool ascii)
 	if(key == K_ESCAPE)
 		return;
 
-	// forbid these keys from being bound in the menu
 	if(key == K_CAPSLOCK || key == K_NUMLOCK)
 	{
 		KeyBinder_Bind_Change(me, me);
@@ -240,7 +234,7 @@ void XonoticKeyBinder_keyGrabbed(entity me, int key, bool ascii)
 	if(func == "" || KEYBIND_IS_SPECIAL(func))
 		return;
 
-	n = tokenize(findkeysforcommand(func, 0)); // uses '...' strings
+	n = tokenize(findkeysforcommand(func, 0));
 	nvalid = 0;
 	for(j = 0; j < n; ++j)
 	{
@@ -255,14 +249,14 @@ void XonoticKeyBinder_keyGrabbed(entity me, int key, bool ascii)
 			k = stof(argv(j));
 			if(k != -1)
 			{
-				// bind to empty cmd instead of using unbind so it gets saved in config and overrides any default binds
+
 				localcmd("\nbind \"", keynumtostring(k), "\" \"", KEY_NOT_BOUND_CMD, "\"\n");
 			}
 		}
 	}
 	m_play_click_sound(MENU_SOUND_SELECT);
 	localcmd("\nbind \"", keynumtostring(key), "\" \"", func, "\"\n");
-	localcmd("-zoom\n"); // to make sure we aren't in togglezoom'd state
+	localcmd("-zoom\n");
 	cvar_set("_hud_showbinds_reload", "1");
 }
 void XonoticKeyBinder_destroy(entity me)
@@ -291,7 +285,6 @@ void XonoticKeyBinder_editUserbind(entity me, string theName, string theCommandP
 		return;
 	descr = substring(descr, 1, strlen(descr) - 1);
 
-	// Hooray! It IS a user bind!
 	cvar_set(strcat(descr, "_description"), theName);
 	cvar_set(strcat(descr, "_press"), theCommandPress);
 	cvar_set(strcat(descr, "_release"), theCommandRelease);
@@ -309,10 +302,9 @@ void KeyBinder_Bind_Edit(entity btn, entity me)
 	if(substring(descr, 0, 1) != "$")
 		return;
 
-	me.setSelected(me, me.selectedItem); // make it visible if it's hidden
+	me.setSelected(me, me.selectedItem);
 	descr = substring(descr, 1, strlen(descr) - 1);
 
-	// Hooray! It IS a user bind!
 	me.userbindEditDialog.loadUserBind(me.userbindEditDialog, cvar_string(strcat(descr, "_description")), cvar_string(strcat(descr, "_press")), cvar_string(strcat(descr, "_release")));
 
 	DialogOpenButton_Click(btn, me.userbindEditDialog);
@@ -325,27 +317,27 @@ void KeyBinder_Bind_Clear(entity btn, entity me)
 	if(func == "" || KEYBIND_IS_SPECIAL(func))
 		return;
 
-	me.setSelected(me, me.selectedItem); // make it visible if it's hidden
+	me.setSelected(me, me.selectedItem);
 
-	n = tokenize(findkeysforcommand(func, 0)); // uses '...' strings
+	n = tokenize(findkeysforcommand(func, 0));
 	for(j = 0; j < n; ++j)
 	{
 		k = stof(argv(j));
 		if(k != -1)
 		{
-			// bind to empty cmd instead of using unbind so it gets saved in config and overrides any default binds
+
 			localcmd("\nbind \"", keynumtostring(k), "\" \"", KEY_NOT_BOUND_CMD, "\"\n");
 		}
 	}
 	m_play_click_sound(MENU_SOUND_CLEAR);
-	localcmd("-zoom\n"); // to make sure we aren't in togglezoom'd state
+	localcmd("-zoom\n");
 	cvar_set("_hud_showbinds_reload", "1");
 }
 void KeyBinder_Bind_Reset_All(entity btn, entity me)
 {
 	localcmd("unbindall\n");
 	localcmd("exec binds-xonotic.cfg\n");
-	localcmd("-zoom\n"); // to make sure we aren't in togglezoom'd state
+	localcmd("-zoom\n");
 	cvar_set("_hud_showbinds_reload", "1");
 	me.close(me);
 }
@@ -355,7 +347,7 @@ void XonoticKeyBinder_doubleClickListBoxItem(entity me, float i, vector where)
 }
 void XonoticKeyBinder_setSelected(entity me, int i)
 {
-	// handling of "unselectable" items
+
 	i = floor(0.5 + bound(0, i, me.nItems - 1));
 	if (KEYBIND_IS_SPECIAL(KeyBinds_Functions[i]))
 	{
@@ -363,7 +355,7 @@ void XonoticKeyBinder_setSelected(entity me, int i)
 			SUPER(XonoticKeyBinder).setSelected(me, i - 1);
 		return;
 	}
-	if(me.pressed == 0 || me.pressed == 1) // keyboard or scrolling - skip unselectable items
+	if(me.pressed == 0 || me.pressed == 1)
 	{
 		if(i > me.previouslySelected)
 		{
@@ -375,7 +367,7 @@ void XonoticKeyBinder_setSelected(entity me, int i)
 		while((i < me.nItems - 1) && (KeyBinds_Functions[i] == ""))
 			++i;
 	}
-	if(me.pressed == 3) // released the mouse - fall back to last valid item
+	if(me.pressed == 3)
 	{
 		if(KeyBinds_Functions[i] == "")
 			i = me.previouslySelected;
@@ -469,7 +461,7 @@ void XonoticKeyBinder_drawListBoxItem(entity me, int i, vector absSize, bool isS
 	else
 	{
 		bool joy_active = cvar("joy_active");
-		int n = tokenize(findkeysforcommand(func, 0)); // uses '...' strings
+		int n = tokenize(findkeysforcommand(func, 0));
 		for(int j = 0; j < n; ++j)
 		{
 			float k = stof(argv(j));

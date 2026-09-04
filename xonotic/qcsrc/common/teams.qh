@@ -1,59 +1,70 @@
 #pragma once
 
-const int NUM_TEAMS = 4; ///< Number of teams in the game.
+const int NUM_TEAMS = 256;
 
-#ifdef TEAMNUMBERS_THAT_ARENT_STUPID
-const int NUM_TEAM_1 = 1; // red
-const int NUM_TEAM_2 = 2; // blue
-const int NUM_TEAM_3 = 3; // yellow
-const int NUM_TEAM_4 = 4; // pink
-const int NUM_SPECTATOR = 5;
-#else
-#ifdef CSQC
-const int NUM_TEAM_1 = 4; // red
-const int NUM_TEAM_2 = 13; // blue
-const int NUM_TEAM_3 = 12; // yellow
-const int NUM_TEAM_4 = 9; // pink
-#else
-const int NUM_TEAM_1 = 5; // red
-const int NUM_TEAM_2 = 14; // blue
-const int NUM_TEAM_3 = 13; // yellow
-const int NUM_TEAM_4 = 10; // pink
-#endif
-const int NUM_SPECTATOR = 1337;
-#endif
+const int NUM_TEAM_1 = 1;
+const int NUM_TEAM_2 = 2;
+const int NUM_TEAM_3 = 3;
+const int NUM_TEAM_4 = 4;
+const int NUM_TEAM_5 = 5;
+const int NUM_TEAM_6 = 6;
+const int NUM_TEAM_7 = 7;
+const int NUM_TEAM_8 = 8;
+const int NUM_SPECTATOR = 257;
 
 const string COL_TEAM_1 = "^1";
 const string COL_TEAM_2 = "^4";
 const string COL_TEAM_3 = "^3";
 const string COL_TEAM_4 = "^6";
-// must be #defined, const globals drop the translation attribute
+const string COL_TEAM_5 = "^2";
+const string COL_TEAM_6 = "^xF80";
+const string COL_TEAM_7 = "^5";
+const string COL_TEAM_8 = "^7";
+
 #define NAME_TEAM_1 CTX(_("TEAM^Red"))
 #define NAME_TEAM_2 CTX(_("TEAM^Blue"))
 #define NAME_TEAM_3 CTX(_("TEAM^Yellow"))
 #define NAME_TEAM_4 CTX(_("TEAM^Pink"))
+#define NAME_TEAM_5 CTX(_("TEAM^Green"))
+#define NAME_TEAM_6 CTX(_("TEAM^Orange"))
+#define NAME_TEAM_7 CTX(_("TEAM^Cyan"))
+#define NAME_TEAM_8 CTX(_("TEAM^White"))
 #define NAME_TEAM _("Team")
 #define NAME_NEUTRAL _("Neutral")
 
-// items colors, so they are handled properly in languages which decline things with grammatical gender
 #define KEY_TEAM_1 CTX(_("KEY^Red"))
 #define KEY_TEAM_2 CTX(_("KEY^Blue"))
 #define KEY_TEAM_3 CTX(_("KEY^Yellow"))
 #define KEY_TEAM_4 CTX(_("KEY^Pink"))
+#define KEY_TEAM_5 CTX(_("KEY^Green"))
+#define KEY_TEAM_6 CTX(_("KEY^Orange"))
+#define KEY_TEAM_7 CTX(_("KEY^Cyan"))
+#define KEY_TEAM_8 CTX(_("KEY^White"))
 #define FLAG_TEAM_1 CTX(_("FLAG^Red"))
 #define FLAG_TEAM_2 CTX(_("FLAG^Blue"))
 #define FLAG_TEAM_3 CTX(_("FLAG^Yellow"))
 #define FLAG_TEAM_4 CTX(_("FLAG^Pink"))
+#define FLAG_TEAM_5 CTX(_("FLAG^Green"))
+#define FLAG_TEAM_6 CTX(_("FLAG^Orange"))
+#define FLAG_TEAM_7 CTX(_("FLAG^Cyan"))
+#define FLAG_TEAM_8 CTX(_("FLAG^White"))
 #define GENERATOR_TEAM_1 CTX(_("GENERATOR^Red"))
 #define GENERATOR_TEAM_2 CTX(_("GENERATOR^Blue"))
 #define GENERATOR_TEAM_3 CTX(_("GENERATOR^Yellow"))
 #define GENERATOR_TEAM_4 CTX(_("GENERATOR^Pink"))
+#define GENERATOR_TEAM_5 CTX(_("GENERATOR^Green"))
+#define GENERATOR_TEAM_6 CTX(_("GENERATOR^Orange"))
+#define GENERATOR_TEAM_7 CTX(_("GENERATOR^Cyan"))
+#define GENERATOR_TEAM_8 CTX(_("GENERATOR^White"))
 
-// used for replacement in filenames or such where the name CANNOT be allowed to be translated
 const string STATIC_NAME_TEAM_1 = "Red";
 const string STATIC_NAME_TEAM_2 = "Blue";
 const string STATIC_NAME_TEAM_3 = "Yellow";
 const string STATIC_NAME_TEAM_4 = "Pink";
+const string STATIC_NAME_TEAM_5 = "Green";
+const string STATIC_NAME_TEAM_6 = "Orange";
+const string STATIC_NAME_TEAM_7 = "Cyan";
+const string STATIC_NAME_TEAM_8 = "White";
 
 #ifdef CSQC
 bool teamplay;
@@ -68,8 +79,14 @@ string Team_ColorCode(int teamid)
 		case NUM_TEAM_2: return COL_TEAM_2;
 		case NUM_TEAM_3: return COL_TEAM_3;
 		case NUM_TEAM_4: return COL_TEAM_4;
+		case NUM_TEAM_5: return COL_TEAM_5;
+		case NUM_TEAM_6: return COL_TEAM_6;
+		case NUM_TEAM_7: return COL_TEAM_7;
+		case NUM_TEAM_8: return COL_TEAM_8;
 	}
 
+	if(teamid >= 1 && teamid <= NUM_TEAMS)
+		return Team_ColorCode((teamid - 1) % 8 + 1);
 	return "^7";
 }
 
@@ -77,12 +94,21 @@ vector Team_ColorRGB(int teamid)
 {
 	switch(teamid)
 	{
-		case NUM_TEAM_1: return '1 0.0625 0.0625'; // 0xFF0F0F
-		case NUM_TEAM_2: return '0.0625 0.0625 1'; // 0x0F0FFF
-		case NUM_TEAM_3: return '1 1 0.0625'; // 0xFFFF0F
-		case NUM_TEAM_4: return '1 0.0625 1'; // 0xFF0FFF
+		case NUM_TEAM_1: return '1 0.0625 0.0625';
+		case NUM_TEAM_2: return '0.0625 0.0625 1';
+		case NUM_TEAM_3: return '1 1 0.0625';
+		case NUM_TEAM_4: return '1 0.0625 1';
+		case NUM_TEAM_5: return '0.0625 1 0.0625';
+		case NUM_TEAM_6: return '1 0.5 0.0625';
+		case NUM_TEAM_7: return '0.0625 1 1';
+		case NUM_TEAM_8: return '0.75 0.75 0.75';
 	}
 
+	if(teamid >= 1 && teamid <= NUM_TEAMS)
+	{
+		float a = 6.28318530718 * (teamid - 1) / NUM_TEAMS;
+		return '0.55 0.55 0.55' + 0.45 * vec3(cos(a), cos(a - 2.09439510239), cos(a + 2.09439510239));
+	}
 	return '0 0 0';
 }
 
@@ -94,12 +120,15 @@ string Team_ColorName(int teamid)
 		case NUM_TEAM_2: return NAME_TEAM_2;
 		case NUM_TEAM_3: return NAME_TEAM_3;
 		case NUM_TEAM_4: return NAME_TEAM_4;
+		case NUM_TEAM_5: return NAME_TEAM_5;
+		case NUM_TEAM_6: return NAME_TEAM_6;
+		case NUM_TEAM_7: return NAME_TEAM_7;
+		case NUM_TEAM_8: return NAME_TEAM_8;
 	}
 
-	return NAME_NEUTRAL;
+	return teamid >= 1 && teamid <= NUM_TEAMS ? strcat(NAME_TEAM, " ", ftos(teamid)) : NAME_NEUTRAL;
 }
 
-// used for replacement in filenames or such where the name CANNOT be allowed to be translated
 string Static_Team_ColorName(int teamid)
 {
 	switch(teamid)
@@ -108,9 +137,13 @@ string Static_Team_ColorName(int teamid)
 		case NUM_TEAM_2: return STATIC_NAME_TEAM_2;
 		case NUM_TEAM_3: return STATIC_NAME_TEAM_3;
 		case NUM_TEAM_4: return STATIC_NAME_TEAM_4;
+		case NUM_TEAM_5: return STATIC_NAME_TEAM_5;
+		case NUM_TEAM_6: return STATIC_NAME_TEAM_6;
+		case NUM_TEAM_7: return STATIC_NAME_TEAM_7;
+		case NUM_TEAM_8: return STATIC_NAME_TEAM_8;
 	}
 
-	return NAME_NEUTRAL;
+	return teamid >= 1 && teamid <= NUM_TEAMS ? strcat("Team", ftos(teamid)) : NAME_NEUTRAL;
 }
 
 float Team_ColorToTeam(string team_color)
@@ -121,108 +154,45 @@ float Team_ColorToTeam(string team_color)
 		case "blue": return NUM_TEAM_2;
 		case "yellow": return NUM_TEAM_3;
 		case "pink": return NUM_TEAM_4;
+		case "green": return NUM_TEAM_5;
+		case "orange": return NUM_TEAM_6;
+		case "cyan": return NUM_TEAM_7;
+		case "white": return NUM_TEAM_8;
 		case "auto": return 0;
 	}
 
-	return -1;
+	int parsed = stof(team_color);
+	if(substring(strtolower(team_color), 0, 4) == "team")
+		parsed = stof(substring(team_color, 4, -1));
+	return parsed >= 1 && parsed <= NUM_TEAMS ? parsed : -1;
 }
 
-/// \brief Returns whether team value is valid.
-/// \param[in] team_num Team to check.
-/// \return True if team is valid, false otherwise.
 bool Team_IsValidTeam(int team_num)
 {
-	switch (team_num)
-	{
-		case NUM_TEAM_1:
-		case NUM_TEAM_2:
-		case NUM_TEAM_3:
-		case NUM_TEAM_4:
-		{
-			return true;
-		}
-	}
-	return false;
+	return team_num >= 1 && team_num <= NUM_TEAMS;
 }
 
-/// \brief Returns whether the team index is valid.
-/// \param[in] index Team index to check.
-/// \return True if team index is valid, false otherwise.
 bool Team_IsValidIndex(int index)
 {
-	switch (index)
-	{
-		case 1:
-		case 2:
-		case 3:
-		case 4:
-		{
-			return true;
-		}
-	}
-	return false;
+	return index >= 1 && index <= NUM_TEAMS;
 }
 
-/// \brief Converts team index into team value.
-/// \param[in] index Team index to convert.
-/// \return Team value.
 int Team_IndexToTeam(int index)
 {
-	switch (index)
-	{
-		case 1: return NUM_TEAM_1;
-		case 2: return NUM_TEAM_2;
-		case 3: return NUM_TEAM_3;
-		case 4: return NUM_TEAM_4;
-	}
-	return -1;
+	return Team_IsValidIndex(index) ? index : -1;
 }
 
-/// \brief Converts team value into team index.
-/// \param[in] team_num Team value to convert.
-/// \return Team index.
 int Team_TeamToIndex(int team_num)
 {
-	switch (team_num)
-	{
-		case NUM_TEAM_1: return 1;
-		case NUM_TEAM_2: return 2;
-		case NUM_TEAM_3: return 3;
-		case NUM_TEAM_4: return 4;
-	}
-	return -1;
+	return Team_IsValidTeam(team_num) ? team_num : -1;
 }
 
-/// \brief Converts team value into bit value that is used in team bitmasks.
-/// \param[in] team_num Team value to convert.
-/// \return Team bit.
-int Team_TeamToBit(int team_num)
-{
-	if (!Team_IsValidTeam(team_num))
-	{
-		return 0;
-	}
-	return BIT(Team_TeamToIndex(team_num) - 1);
-}
-
-/// \brief Converts team index into bit value that is used in team bitmasks.
-/// \param[in] index Team index to convert.
-/// \return Team bit.
-int Team_IndexToBit(int index)
-{
-	return BIT(index - 1);
-}
-
-
-// legacy aliases for shitty code
 #define TeamByColor(teamid) (Team_TeamToIndex(teamid) - 1)
 #define ColorByTeam(number) Team_IndexToTeam(number + 1)
 
-// useful aliases
 #define Team_ColorName_Lower(teamid) strtolower(Team_ColorName(teamid))
 #define Team_ColorName_Upper(teamid) strtoupper(Team_ColorName(teamid))
 
-// used for replacement in filenames or such where the name CANNOT be allowed to be translated
 #define Static_Team_ColorName_Lower(teamid) strtolower(Static_Team_ColorName(teamid))
 #define Static_Team_ColorName_Upper(teamid) strtoupper(Static_Team_ColorName(teamid))
 
@@ -232,9 +202,7 @@ int Team_IndexToBit(int index)
 #define Team_IndexToFullName(index) Team_FullName(Team_IndexToTeam(index))
 #define Team_IndexToColoredFullName(index) Team_ColoredFullName(Team_IndexToTeam(index))
 
-// replace these flags in a string with the strings provided
 #define TCR(input,type,team) strreplace("^TC", COL_TEAM_##team, strreplace("^TT", strtoupper(type##_TEAM_##team), input))
 
-// safe team comparisons
 #define SAME_TEAM(a,b) (teamplay ? (a.team == b.team) : (a == b))
 #define DIFF_TEAM(a,b) (teamplay ? (a.team != b.team) : (a != b))

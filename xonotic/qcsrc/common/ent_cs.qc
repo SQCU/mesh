@@ -18,7 +18,6 @@ REGISTRY_CHECK(EntCSProps)
 REGISTRY_DEFINE_GET(EntCSProps, NULL)
 STATIC_INIT(EntCSProps_renumber) { FOREACH(EntCSProps, true, it.m_id = i); }
 
-// these entcs_props ids need to be referenced directly
 int ENTCS_PROP_ENTNUM_id = 0;
 int ENTCS_PROP_ORIGIN_id = 0;
 int ENTCS_PROP_HEALTH_id = 0;
@@ -32,7 +31,7 @@ STATIC_INIT(EntCSProps_setglobalids)
 }
 
 #ifdef SVQC
-// Force an origin update, for player sounds
+
 void entcs_force_origin(entity player)
 {
 	CS(player).entcs.m_forceupdate = BIT(ENTCS_PROP_ORIGIN_id);
@@ -104,12 +103,11 @@ void entcs_force_origin(entity player)
 	var = x; \
 MACRO_END
 
-/** the engine player name strings are mutable! */
 #define ENTCS_SET_MUTABLE_STRING(var, x) MACRO_BEGIN \
 	strcpy(var, x); \
 MACRO_END
 
-ENTCS_PROP(ENTNUM, false, sv_entnum, sv_entnum, ENTCS_SET_NORMAL, {}, {}) /* sentinel */
+ENTCS_PROP(ENTNUM, false, sv_entnum, sv_entnum, ENTCS_SET_NORMAL, {}, {})
 
 ENTCS_PROP(ORIGIN, false, origin, origin, ENTCS_SET_NORMAL,
 	{ WriteVector(chan, ent.origin); },
@@ -121,7 +119,6 @@ ENTCS_PROP_CODED(ANGLES, false, angles_y, angles_y, ENTCS_SET_NORMAL, DEC_FACTOR
 	{ vector v = '0 0 0'; v.y = ReadByte() * DEC_FACTOR; ent.angles = v; })
 #undef DEC_FACTOR
 
-// FIXME: use a better scale?
 #define DEC_FACTOR 10
 ENTCS_PROP_RESOURCE(HEALTH, false, RES_HEALTH, ENTCS_SET_NORMAL, DEC_FACTOR,
 	{ WriteByte(chan, bound(0, GetResource(ent, RES_HEALTH) / DEC_FACTOR, 255)); },
@@ -148,11 +145,14 @@ ENTCS_PROP(CLIENTCOLORS, true, clientcolors, clientcolors, ENTCS_SET_NORMAL,
 	{ WriteByte(chan, ent.clientcolors); },
 	{ ent.colormap = ReadByte(); })
 
+ENTCS_PROP(TEAM, true, team, team, ENTCS_SET_NORMAL,
+	{ WriteShort(chan, ent.team); },
+	{ ent.team = ReadShort(); })
+
 ENTCS_PROP(FRAGS, true, frags, frags, ENTCS_SET_NORMAL,
 	{ WriteShort(chan, ent.frags); },
 	{ ent.frags = ReadShort(); })
 
-// use sv_solid to avoid changing solidity state of entcs entities
 ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 	{ WriteByte(chan, ent.sv_solid); },
 	{ ent.sv_solid = ReadByte(); })
@@ -182,7 +182,7 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 	bool _entcs_send(entity this, entity to, int sf, int chan)
 	{
 		entity player = this.owner;
-		sf |= BIT(ENTCS_PROP_ENTNUM_id); // assume private
+		sf |= BIT(ENTCS_PROP_ENTNUM_id);
 		do {
 			if (IS_PLAYER(player))
 			{
@@ -190,7 +190,7 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 				if (SAME_TEAM(to, player)) break;
 				if (!(IS_PLAYER(to) || INGAME(to))) break;
 			}
-			sf &= ENTCS_PUBLICMASK; // no private updates
+			sf &= ENTCS_PUBLICMASK;
 		} while (0);
 
 		sf |= this.m_forceupdate;
@@ -215,7 +215,7 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 
 	void entcs_think(entity this)
 	{
-		this.nextthink = time + 0.033333333333;  // TODO: increase this to like 0.15 once the client can do smoothing
+		this.nextthink = time + 0.033333333333;
 		entity player = this.owner;
 		FOREACH(EntCSProps, it.m_check(this, player),
 		{
@@ -225,18 +225,13 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 
 		if (intermission_running)
 		{
-			// health is set to special values after the game ends, ignore any change
+
 			this.SendFlags &= ~BIT(ENTCS_PROP_HEALTH_id);
 		}
 
-		// always send origin of players even if they stand still otherwise
-		// if a teammate isn't in my pvs and their health (or view angle or name
-		// etc...) changes then their tag disappears
 		if (IS_PLAYER(this.owner))
 			this.SendFlags |= BIT(ENTCS_PROP_ORIGIN_id);
 
-		// not needed, origin is just data to be sent
-		//setorigin(this, this.origin); // relink
 	}
 
 	void entcs_attach(entity player)
@@ -246,7 +241,7 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 		setthink(e, entcs_think);
 		e.nextthink = time;
 		Net_LinkEntity(e, false, 0, entcs_send);
-		// NOTE: the following code block has been disabled as a workaround for https://gitlab.com/xonotic/xonotic-data.pk3dir/-/issues/1824
+
 #if 0
 		if (!IS_REAL_CLIENT(player)) return;
 		FOREACH_CLIENT(true, {
@@ -282,18 +277,17 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 		entity e = CSQCModel_server2csqc(this.sv_entnum);
 		if (e == NULL)
 		{
-			// player model is NOT in client's PVS
+
 			InterpolateOrigin_Do(this);
 			this.has_origin = this.has_sv_origin;
 			return;
 		}
 		this.has_origin = true;
-		// when a player model is in client's PVS we use its origin directly
-		// (entcs networked origin is overriden)
+
 		this.origin = e.origin;
 		InterpolateOrigin_Reset(this);
 		setorigin(this, this.origin);
-		// `cl_forceplayermodels 1` sounds will be wrong until the player has been in the PVS, but so be it
+
 		if (this.model != e.model)
 		{
 			strcpy(this.model, e.model);
@@ -307,17 +301,17 @@ ENTCS_PROP(SOLID, true, sv_solid, solid, ENTCS_SET_NORMAL,
 		if (e == NULL)
 		{
 			if (!this)
-				// initial = temp
+
 				e = new_pure(ENT_CLIENT_ENTCS);
 			else
-				// initial = linked
+
 				e = this;
 			setthink(e, entcs_think);
 			entcs_receiver(n, e);
 		}
 		else if (e != this && this)
 		{
-			// upgrade to linked
+
 			delete(e);
 			e = this;
 			setthink(e, entcs_think);

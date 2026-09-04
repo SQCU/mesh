@@ -2,11 +2,9 @@
 
 #include <client/draw.qh>
 
-// Engine info (#13)
-
 void HUD_EngineInfo_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 }
 
 float prevfps;
@@ -14,8 +12,8 @@ float prevfps_time;
 int framecounter;
 
 float frametimeavg;
-float frametimeavg1; // 1 frame ago
-float frametimeavg2; // 2 frames ago
+float frametimeavg1;
+float frametimeavg2;
 float autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage;
 float autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage_new_weight;
 float autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage_instantupdate_change_threshold;
@@ -46,17 +44,17 @@ void HUD_EngineInfo()
 	if(autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage)
 	{
 		float currentframetime = currentTime - prevfps_time;
-		frametimeavg = (frametimeavg + frametimeavg1 + frametimeavg2 + currentframetime)/4; // average three frametimes into framecounter for slightly more stable fps readings :P
+		frametimeavg = (frametimeavg + frametimeavg1 + frametimeavg2 + currentframetime)/4;
 		frametimeavg2 = frametimeavg1;
 		frametimeavg1 = frametimeavg;
 
 		float weight;
 		weight = autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage_new_weight;
-		if(currentframetime > 0.0001) // filter out insane values which sometimes seem to occur and throw off the average? If you are getting 10,000 fps or more, then you don't need a framerate counter.
+		if(currentframetime > 0.0001)
 		{
-			if(fabs(prevfps - (1/frametimeavg)) > prevfps * autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage_instantupdate_change_threshold) // if there was a big jump in fps, just force prevfps at current (1/currentframetime) to make big updates instant
+			if(fabs(prevfps - (1/frametimeavg)) > prevfps * autocvar_hud_panel_engineinfo_framecounter_exponentialmovingaverage_instantupdate_change_threshold)
 				prevfps = (1/currentframetime);
-			prevfps = (1 - weight) * prevfps + weight * (1/frametimeavg); // framecounter just used so there's no need for a new variable, think of it as "frametime average"
+			prevfps = (1 - weight) * prevfps + weight * (1/frametimeavg);
 		}
 		prevfps_time = currentTime;
 	}

@@ -1,322 +1,242 @@
-"""CAST_HEADER — every learned parameter of the strategy program, defined once.
-
-This file is the ONLY place in the strategy program where a parameter exists.
-Every function below owns cast members (see ``design/CAST.md``); every function
-elsewhere composes these and owns nothing.
-
-Each definition carries, en-comment:
-  * the cast member(s) it holds,
-  * the ``torch.nn`` notation for the function, and
-  * the tensor shape.
-
-The implementation is mlx (that is what runs on the mini); the ``nn`` notation in
-the comments is the lingua franca for what the function IS.
-
-WIDTH RULE (SPEC §8). Every learned side is >= 128 and free above:
-    d_beta, d, d_v, d_ir, h, r, r_e, d_y, d_u   -- knobs with a 128 floor
-The only small widths in the program are the raw input widths the engine hands us:
-    d_x   raw per-player engine row
-    d_z   per-instrument descriptor
-    d_c   per-cell slot vector
-
-COUNT INVARIANCE. No shape below mentions k (teams), j (carts) or l (players).
-Adding a team, cart or player adds ROWS, never columns.
-
-NORM IS NOT A CAST MEMBER. RMSNorm is applied where the spec calls for it, but it
-holds NO LEARNED PARAMETERS -- it is the parameter-free ``x * rsqrt(mean(x*x) + eps)``,
-with no learned gain vector. It therefore has no entry in the cast: the cast names
-parameter groups, and a parameterless operation owns none.
-
-VERA IS TWO. Wherever a value is estimated there are two values to estimate, so
-the auxiliary probe is VERA_WINNIE and VERA_LOU, never one Vera.
-"""
-
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import mlx.core as mx
 import mlx.nn as nn
 
+from .matmul import (
+    expert_matrix_multiply,
+    linear,
+    matrix_multiply,
+    matrix_multiply_transpose_left,
+    matrix_multiply_transpose_right,
+)
+
 __all__ = [
-    "Widths", "Wally",
+    "Widths", "Wally", "parameter_seed",
     "phil", "quinn", "kay", "val",
-    "graham", "rex",
-    "gia_uma_dov",
+    "ir_query", "ir_value", "dina_state", "dina_action", "dina_readout", "dee",
+    "team_gram_matrix", "rival_gram_matrix", "participant_gram_matrix",
+    "scale_project", "scale_route", "scale_moe", "scale_back", "scale_probe", "scale_fuse",
+    "gia_uma_dov", "actuator",
     "winnie", "lou", "vera_winnie", "vera_lou",
     "dina_drift", "dina_matrix",
     "tau", "elle",
 ]
 
-MIN_LEARNED_WIDTH = 128
-
+def parameter_seed(seed, namespace):
+    return int.from_bytes(
+        hashlib.sha256(f"{int(seed)}:{namespace}".encode()).digest()[:4], "little",
+    )
 
 @dataclass(frozen=True)
 class Widths:
-    """The knobs. Learned widths carry a 128 floor; given widths are the engine's."""
+    d_x: int
+    d_z: int
+    d_c: int
+    d_sem: int = 8
 
-    # given by the engine / the game -- small, not ours to inflate
-    d_x: int          # raw per-player engine row
-    d_z: int          # per-instrument descriptor
-    d_c: int          # per-cell slot vector
-
-    # learned -- every one >= 128, free above
-    d_beta: int = 128  # belief
-    d: int = 128       # query / key space
-    d_v: int = 128     # behavioural value
-    d_ir: int = 128    # the IR
-    h: int = 341      # SwiGLU hidden, conventionally ~ 8/3 * d
-    r: int = 128       # Graham's metric rank (<= d)
-    r_e: int = 128     # Rex's pair-form rank
-    d_y: int = 128     # Dina's reduced state
-    d_u: int = 128     # Dina's reduced action
-
-    def __post_init__(self) -> None:
-        for name in ("d_beta", "d", "d_v", "d_ir", "h", "r", "r_e", "d_y", "d_u"):
-            got = getattr(self, name)
-            if got < MIN_LEARNED_WIDTH:
-                raise ValueError(
-                    f"{name}={got} is below the learned-width floor "
-                    f"{MIN_LEARNED_WIDTH}: a narrow learned side strangles the "
-                    f"gradient (SPEC §8)."
-                )
-        if self.r > self.d:
-            raise ValueError(f"Graham's rank r={self.r} must be <= d={self.d}.")
-
+    d_beta: int = 128
+    d: int = 128
+    d_v: int = 128
+    d_ir: int = 128
+    h: int = 341
+    r: int = 128
+    r_e: int = 128
+    d_y: int = 128
+    d_u: int = 128
+    d_scale: int = 128
+    scale_h: int = 341
+    scale_experts: int = 8
+    scale_topk: int = 2
 
 class Wally(nn.Module):
-    """WALLY -- ``W_all``, the one shared weight set.
-
-    One Wally for the whole match, all teams, all players. Teams and players are
-    not separate learners: ADA (``A_team``) and PIP (``A_player``) are activation
-    ROWS that select into Wally, and carry no weights of their own.
-    """
-
     def __init__(self, w: Widths):
         super().__init__()
         self.w = w
 
-        # PHIL -- Φ, the low-rank cell projection inside the belief.
-        # nn.Linear(d_c, d_beta, bias=False)          weight (d_beta, d_c)
         self.phil = nn.Linear(w.d_c, w.d_beta, bias=False)
 
-        # QUINN -- W_q. The only place XAN (raw self-state) and BEA (belief) meet.
-        # nn.Linear(d_x + d_beta, d, bias=False)      weight (d, d_x + d_beta)
-        self.quinn = nn.Linear(w.d_x + w.d_beta, w.d, bias=False)
+        self.quinn = nn.Linear(w.d_x + w.d_beta + w.d_sem, w.d, bias=False)
 
-        # KAY -- W_k. Quinn·Kay IS the per-(player, instrument) score: a dot
-        # product of two >=128d learned vectors, COMPUTED, never stored.
-        # nn.Linear(d_z, d, bias=False)               weight (d, d_z)
         self.kay = nn.Linear(w.d_z, w.d, bias=False)
 
-        # VAL -- W_v, the per-instrument behavioural value.
-        # nn.Linear(d_z, d_v, bias=False)             weight (d_v, d_z)
         self.val = nn.Linear(w.d_z, w.d_v, bias=False)
+        self.ir_query = nn.Linear(w.d, w.d_ir, bias=False)
+        self.ir_value = nn.Linear(w.d_v, w.d_ir, bias=False)
+        self.dina_state = nn.Linear(w.d, w.d_y, bias=False)
+        self.dina_action = nn.Linear(w.d_ir, w.d_u, bias=False)
+        self.dina_readout = nn.Linear(w.d_y, w.d, bias=False)
 
-        # GRAHAM -- A, the metric factor of the Gram: M = A Aᵀ, G = Z M Zᵀ.
-        # The all-to-all coupling. No gradient to Graham => the mesh is decoration.
-        # nn.Linear(d, r, bias=False)                 weight (r, d)
-        self.graham = nn.Linear(w.d, w.r, bias=False)
+        self.team_metric = nn.Linear(w.d, w.r, bias=False)
 
-        # REX -- the additive pair form, low-rank, reading LEARNED row content.
-        # It must never be fed hand-authored edge rows (SPEC §7).
-        # nn.Linear(d, r_e, bias=False)               weight (r_e, d)
-        self.rex = nn.Linear(w.d, w.r_e, bias=False)
+        self.rival_metric = nn.Linear(w.d, w.r_e, bias=False)
 
-        # GIA / UMA / DOV -- the SwiGLU trio, on the IR. Gia is the regime switch
-        # (diversify vs pile-on); Dov emits dw/dt, one scalar per instrument row.
-        # RMSNorm is applied to the input inside gia_uma_dov, PARAMETER-FREE:
-        # there is no learned gain, so no cast member.
-        # nn.Linear(d_ir, h, bias=False)              weight (h, d_ir)
-        # nn.Linear(d_ir, h, bias=False)              weight (h, d_ir)
-        # nn.Linear(h, 1, bias=False)                 weight (1, h)
         self.gia = nn.Linear(w.d_ir, w.h, bias=False)
         self.uma = nn.Linear(w.d_ir, w.h, bias=False)
         self.dov = nn.Linear(w.h, 1, bias=False)
+        self.actuator = nn.Linear(w.d_ir, 6, bias=False)
 
-        # WINNIE -- the PRESERVATION value probe. Linear, on the final IR.
-        # nn.Linear(d_ir, 1, bias=False)              weight (1, d_ir)
         self.winnie = nn.Linear(w.d_ir, 1, bias=False)
 
-        # LOU -- the ACQUISITION value probe. Linear, on the final IR. Not
-        # Winnie's sign-flip: a different target, deliberately.
-        # nn.Linear(d_ir, 1, bias=False)              weight (1, d_ir)
         self.lou = nn.Linear(w.d_ir, 1, bias=False)
 
-        # VERA_WINNIE / VERA_LOU -- the auxiliary probes on the QUERY, regressed
-        # toward Winnie and Lou respectively. Two, because wherever a value is
-        # estimated there are two values to estimate.
-        # nn.Linear(d, 1, bias=False)                 weight (1, d)   [each]
         self.vera_winnie = nn.Linear(w.d, 1, bias=False)
         self.vera_lou = nn.Linear(w.d, 1, bias=False)
 
-        # DINA -- the action-linear dynamics ensemble, Δy = b(y) + A(y)·u.
-        # The only per-state operator in the cast.
-        # nn.Linear(d_y, d_y, bias=False)             weight (d_y, d_y)
-        # nn.Linear(d_y, d_y * d_u, bias=False)       weight (d_y*d_u, d_y)
-        self.dina_drift = nn.Linear(w.d_y, w.d_y, bias=False)
-        self.dina_matrix = nn.Linear(w.d_y, w.d_y * w.d_u, bias=False)
+        self.dina_drift_first = nn.Linear(w.d_y, w.d_y, bias=False)
+        self.dina_matrix_first = nn.Linear(w.d_y, w.d_y * w.d_u, bias=False)
+        self.dina_drift_second = nn.Linear(w.d_y, w.d_y, bias=False)
+        self.dina_matrix_second = nn.Linear(w.d_y, w.d_y * w.d_u, bias=False)
+        self.scale_in = nn.Linear(w.d_ir, w.d_scale, bias=False)
+        self.scale_router = nn.Linear(w.d_scale, w.scale_experts, bias=False)
+        self.scale_w1 = mx.random.normal((w.scale_experts, w.d_scale, w.scale_h)) / (w.d_scale ** 0.5)
+        self.scale_w2 = mx.random.normal((w.scale_experts, w.scale_h, w.d_scale)) / (w.scale_h ** 0.5)
+        self.scale_out = nn.Linear(w.d_scale, w.d_ir, bias=False)
+        self.scale_probe = mx.random.normal((w.d_scale,)) / (w.d_scale ** 0.5)
 
-        # TAU -- sampling temperature. Selection is weighted sampling, never argmax.
-        # a learned scalar                            shape ()
         self.tau_raw = mx.zeros(())
 
-
-# --------------------------------------------------------------------------
-# The cast functions. Every one owns parameters; nothing else in the program
-# may. A caller imports these and composes them.
-# --------------------------------------------------------------------------
-
-
 def phil(wally: Wally, cell_slots: mx.array) -> mx.array:
-    """PHIL -- Φ. Project per-cell slot vectors into the belief space.
+    return linear(wally.phil, cell_slots)
 
-    nn: ``nn.Linear(d_c, d_beta, bias=False)``      weight ``(d_beta, d_c)``
-    in  ``(..., d_c)``   out ``(..., d_beta)``
-    """
-    return wally.phil(cell_slots)
+def norm(rows: mx.array) -> mx.array:
+    return rows * mx.rsqrt(mx.mean(mx.square(rows), axis=-1, keepdims=True) + 1e-6)
 
-
-def quinn(wally: Wally, xan: mx.array, bea: mx.array) -> mx.array:
-    """QUINN -- W_q. Per-player query from raw self-state and belief.
-
-    nn: ``nn.Linear(d_x + d_beta, d, bias=False)``  weight ``(d, d_x + d_beta)``
-    in  ``(l, d_x)``, ``(l, d_beta)``   out ``(l, d)``
-    """
-    return wally.quinn(mx.concatenate([xan, bea], axis=-1))
-
+def quinn(wally: Wally, xan: mx.array, bea: mx.array, semantics: mx.array) -> mx.array:
+    return linear(wally.quinn, mx.concatenate([xan, bea, semantics], axis=-1))
 
 def kay(wally: Wally, zed: mx.array) -> mx.array:
-    """KAY -- W_k. Per-instrument key.
-
-    nn: ``nn.Linear(d_z, d, bias=False)``           weight ``(d, d_z)``
-    in  ``(m, d_z)``   out ``(m, d)``
-
-    The per-(player, instrument) score is ``quinn(...) @ kay(...).T`` -- computed
-    on demand, never materialised as a stored pair tensor.
-    """
-    return wally.kay(zed)
-
+    return linear(wally.kay, zed)
 
 def val(wally: Wally, zed: mx.array) -> mx.array:
-    """VAL -- W_v. Per-instrument behavioural value.
+    return linear(wally.val, zed)
 
-    nn: ``nn.Linear(d_z, d_v, bias=False)``         weight ``(d_v, d_z)``
-    in  ``(m, d_z)``   out ``(m, d_v)``
-    """
-    return wally.val(zed)
+def ir_query(wally: Wally, query: mx.array) -> mx.array:
+    return linear(wally.ir_query, query)
 
+def ir_value(wally: Wally, value: mx.array) -> mx.array:
+    return linear(wally.ir_value, value)
 
-def graham(wally: Wally, rows: mx.array) -> mx.array:
-    """GRAHAM -- A, giving the Gram ``G = Z M Zᵀ`` with ``M = A Aᵀ``.
+def dina_state(wally: Wally, query: mx.array) -> mx.array:
+    return linear(wally.dina_state, query)
 
-    nn: ``nn.Linear(d, r, bias=False)``             weight ``(r, d)``
-    in  ``(n, d)``   out ``(n, n)``  -- the all-to-all coupling, O(n²) by nature.
-    """
-    projected = wally.graham(rows)                       # (n, r)
-    return projected @ projected.T / (wally.w.r ** 0.5)  # (n, n)
+def dina_action(wally: Wally, ir: mx.array) -> mx.array:
+    return linear(wally.dina_action, ir)
 
+def dina_readout(wally: Wally, state: mx.array) -> mx.array:
+    return linear(wally.dina_readout, state)
 
-def rex(wally: Wally, rows: mx.array) -> mx.array:
-    """REX -- the additive pair form, from LEARNED row content only.
+def dee(quality: mx.array, keys: mx.array) -> mx.array:
+    from .dpp import dpp_marginals
 
-    nn: ``nn.Linear(d, r_e, bias=False)``           weight ``(r_e, d)``
-    in  ``(n, d)``   out ``(n, n)``
+    return dpp_marginals(quality, keys)
 
-    SPEC §7: Rex must never be fed hand-authored edge features. Any pairwise
-    fact worth having is to be learned from the rows, not written by hand.
-    """
-    projected = wally.rex(rows)                          # (n, r_e)
-    return projected @ projected.T / (wally.w.r_e ** 0.5)
+def team_gram_matrix(wally: Wally, rows: mx.array) -> mx.array:
+    projected = linear(wally.team_metric, rows)
+    return matrix_multiply_transpose_right(projected, projected) / (wally.w.r ** 0.5)
 
+def rival_gram_matrix(wally: Wally, rows: mx.array) -> mx.array:
+    projected = linear(wally.rival_metric, rows)
+    return matrix_multiply_transpose_right(projected, projected) / (wally.w.r_e ** 0.5)
+
+def participant_gram_matrix(wally: Wally, rows: mx.array, team_ids: mx.array) -> mx.array:
+    same_team = team_ids[:, None] == team_ids[None, :]
+    return rival_gram_matrix(wally, rows) + same_team * team_gram_matrix(wally, rows)
 
 def gia_uma_dov(wally: Wally, ir: mx.array) -> mx.array:
-    """GIA / UMA / DOV -- the SwiGLU head on the IR, emitting ``dw/dt``.
-
-    nn: ``nn.Linear(d_ir, h, bias=False)`` (Gia, gate)   weight ``(h, d_ir)``
-        ``nn.Linear(d_ir, h, bias=False)`` (Uma, up)     weight ``(h, d_ir)``
-        ``nn.Linear(h, 1,  bias=False)``   (Dov, down)   weight ``(1, h)``
-    in  ``(l, m, d_ir)``   out ``(l, m)``  -- one velocity per instrument row.
-
-    RMSNorm is applied to the input, PARAMETER-FREE (no learned gain vector), so
-    it contributes no cast member. Gia is the regime switch -- she opens the concentrate path on high shared
-    appetite and otherwise passes the diversify signal.
-    """
     normed = ir * mx.rsqrt(mx.mean(ir * ir, axis=-1, keepdims=True) + 1e-6)
-    return (nn.silu(wally.gia(normed)) * wally.uma(normed)) @ wally.dov.weight.T[..., 0]
+    gated = nn.silu(linear(wally.gia, normed)) * linear(wally.uma, normed)
+    return linear(wally.dov, gated)[..., 0]
 
+def actuator(wally: Wally, ir: mx.array) -> mx.array:
+    return linear(wally.actuator, ir)
+
+def scale_project(wally: Wally, rows: mx.array) -> mx.array:
+    return linear(wally.scale_in, rows)
+
+def scale_route(wally: Wally, rows: mx.array) -> tuple[mx.array, mx.array]:
+    scores = linear(wally.scale_router, rows)
+    topk = wally.w.scale_topk
+    experts = mx.stop_gradient(mx.argpartition(-scores, topk - 1, axis=-1)[:, :topk])
+    gates = mx.take_along_axis(mx.softmax(scores, axis=-1), experts, axis=-1)
+    return experts, gates / mx.sum(gates, axis=-1, keepdims=True)
+
+def scale_moe(wally: Wally, rows: mx.array, experts: mx.array, gates: mx.array) -> mx.array:
+    topk = experts.shape[-1]
+    flat_experts = experts.reshape(-1)
+    order = mx.argsort(flat_experts)
+    selected = mx.take(flat_experts, order)
+    tokens = order // topk
+    routed = mx.take(rows, tokens, axis=0)
+    hidden = nn.silu(expert_matrix_multiply(routed, wally.scale_w1, selected))
+    values = expert_matrix_multiply(hidden, wally.scale_w2, selected)
+    weights = mx.take(gates.reshape(-1), order)
+    return mx.zeros_like(rows).at[tokens].add(values * weights[:, None])
+
+def scale_back(wally: Wally, rows: mx.array) -> mx.array:
+    return linear(wally.scale_out, rows)
+
+def scale_probe(wally: Wally) -> mx.array:
+    return wally.scale_probe
+
+def scale_fuse(wally: Wally, ir: mx.array, execute_remote=True,
+               residual_fusion_scale=None) -> tuple[mx.array, mx.array, mx.array]:
+    residual_fusion_scale = float(
+        getattr(wally, "residual_fusion_scale", 1.0)
+        if residual_fusion_scale is None else residual_fusion_scale
+    )
+    executor = getattr(wally, "scale_executor", None) if execute_remote else None
+    if executor is not None:
+        remote = executor(ir, residual_fusion_scale)
+        if remote is not None:
+            return remote[0] * residual_fusion_scale, remote[1], remote[2]
+    shape = ir.shape
+    flat = ir.reshape(-1, wally.w.d_ir)
+    physical = int(flat.shape[0])
+    rows = norm(scale_project(wally, flat))
+    experts, gates = scale_route(wally, rows)
+    residual = norm(rows + scale_moe(wally, rows, experts, gates))
+    gram = matrix_multiply_transpose_left(residual, residual) / physical
+    context = matrix_multiply(mx.tanh(gram), scale_probe(wally)[:, None])[:, 0]
+    delta = scale_back(wally, norm(residual * context[None, :])).reshape(shape)
+    delta = delta * residual_fusion_scale
+    stats = mx.stack([
+        mx.min(gram),
+        mx.max(gram),
+        mx.sum(mx.isfinite(gram)).astype(gram.dtype),
+    ])
+    load = mx.zeros((wally.w.scale_experts,), dtype=ir.dtype).at[
+        experts.reshape(-1)
+    ].add(mx.ones(experts.shape, dtype=ir.dtype).reshape(-1))
+    return delta, stats, load
 
 def winnie(wally: Wally, ir: mx.array) -> mx.array:
-    """WINNIE -- the PRESERVATION value, a linear probe on the final IR.
-
-    nn: ``nn.Linear(d_ir, 1, bias=False)``          weight ``(1, d_ir)``
-    in  ``(..., d_ir)``   out ``(...,)``  -- one scalar per activation row.
-    """
-    return wally.winnie(ir)[..., 0]
-
+    return linear(wally.winnie, ir)[..., 0]
 
 def lou(wally: Wally, ir: mx.array) -> mx.array:
-    """LOU -- the ACQUISITION value, a linear probe on the final IR.
-
-    nn: ``nn.Linear(d_ir, 1, bias=False)``          weight ``(1, d_ir)``
-    in  ``(..., d_ir)``   out ``(...,)``  -- one scalar per activation row.
-    """
-    return wally.lou(ir)[..., 0]
-
+    return linear(wally.lou, ir)[..., 0]
 
 def vera_winnie(wally: Wally, query: mx.array) -> mx.array:
-    """VERA_WINNIE -- auxiliary probe on the QUERY, regressed toward Winnie.
-
-    nn: ``nn.Linear(d, 1, bias=False)``             weight ``(1, d)``
-    in  ``(l, d)``   out ``(l,)``
-    """
-    return wally.vera_winnie(query)[..., 0]
-
+    return linear(wally.vera_winnie, query)[..., 0]
 
 def vera_lou(wally: Wally, query: mx.array) -> mx.array:
-    """VERA_LOU -- auxiliary probe on the QUERY, regressed toward Lou.
-
-    nn: ``nn.Linear(d, 1, bias=False)``             weight ``(1, d)``
-    in  ``(l, d)``   out ``(l,)``
-
-    Wherever a value is estimated there are two values to estimate; the auxiliary
-    probe is therefore a pair, never a single Vera.
-    """
-    return wally.vera_lou(query)[..., 0]
-
+    return linear(wally.vera_lou, query)[..., 0]
 
 def dina_drift(wally: Wally, y: mx.array) -> mx.array:
-    """DINA (drift) -- ``b(y)`` of ``Δy = b(y) + A(y)·u``.
-
-    nn: ``nn.Linear(d_y, d_y, bias=False)``         weight ``(d_y, d_y)``
-    in  ``(..., d_y)``   out ``(..., d_y)``
-    """
-    return wally.dina_drift(y)
-
+    return linear(wally.dina_drift_first, y), linear(wally.dina_drift_second, y)
 
 def dina_matrix(wally: Wally, y: mx.array) -> mx.array:
-    """DINA (matrix) -- ``A(y)`` of ``Δy = b(y) + A(y)·u``, the per-state operator.
-
-    nn: ``nn.Linear(d_y, d_y * d_u, bias=False)``   weight ``(d_y*d_u, d_y)``
-    in  ``(..., d_y)``   out ``(..., d_y, d_u)``
-    """
-    flat = wally.dina_matrix(y)
-    return flat.reshape(*flat.shape[:-1], wally.w.d_y, wally.w.d_u)
-
+    first = linear(wally.dina_matrix_first, y)
+    second = linear(wally.dina_matrix_second, y)
+    shape = (*first.shape[:-1], wally.w.d_y, wally.w.d_u)
+    return first.reshape(*shape), second.reshape(*shape)
 
 def tau(wally: Wally) -> mx.array:
-    """TAU -- sampling temperature, strictly positive. Sampling, never argmax.
+    return mx.exp(mx.clip(wally.tau_raw, -3.0, 3.0))
 
-    a learned scalar                                shape ``()``
-    """
-    return mx.exp(wally.tau_raw)
-
-
-def elle(logits: mx.array) -> mx.array:
-    """ELLE -- the L2-toward-zero pull on the logits.
-
-    Not a parameter: a penalty over the policy's own output, so that untrained is
-    broad weighted sampling and trained peaks without collapsing to one action.
-    in  ``(l, m)``   out ``()``
-    """
-    return mx.mean(logits * logits)
+def elle(logits: mx.array, measure: mx.array) -> mx.array:
+    finite = mx.where(measure > 0, logits, 0)
+    return mx.sum(finite * finite * measure) / mx.maximum(mx.sum(measure), 1)

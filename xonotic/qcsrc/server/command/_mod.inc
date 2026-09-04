@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <server/command/banning.qc>
 #include <server/command/cmd.qc>
 #ifdef SVQC

@@ -4,8 +4,7 @@
 	var = x; \
 MACRO_END
 
-// #define PROP(public, fld, set, sv, cl)
-#define WEPENT_NETPROPS(PROP) PROP(false, sv_entnum, WEPENT_SET_NORMAL, {}, {}) /* sentinel */ \
+#define WEPENT_NETPROPS(PROP) PROP(false, sv_entnum, WEPENT_SET_NORMAL, {}, {})                \
 	PROP(false, m_switchweapon, WEPENT_SET_NORMAL, \
 	{ WriteByte(chan, this.m_switchweapon.m_id); }, \
 	{ (viewmodels[this.m_wepent_slot]).switchweapon = REGISTRY_GET(Weapons, ReadByte()); }) \
@@ -78,7 +77,6 @@ MACRO_END
 	{ WriteShort(chan, this.skin); }, \
 	{ (viewmodels[this.m_wepent_slot]).m_skin = ReadShort(); }) \
     \
-	/**/
 
 #ifdef SVQC
 
@@ -162,7 +160,7 @@ MACRO_END
 		e.owner = wep;
 		setthink(e, wepent_think);
 		e.nextthink = time;
-		//e.drawonlytoclient = wep.owner;
+
 		setcefc(e, wepent_customize);
 		Net_LinkEntity(e, false, 0, wepent_send);
 	}

@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "observed_at": 1788460198.2484312,
+  "workload": "q3map2 fused light",
+  "fabric": {
+    "connected": [
+      "Ms-MacBook-Pro",
+      "Ms-Mac-mini"
+    ],
+    "reachable": [
+      "Ms-MacBook-Pro",
+      "Ms-Mac-mini"
+    ],
+    "active": [
+      "Ms-MacBook-Pro",
+      "Ms-Mac-mini"
+    ],
+    "stale": [],
+    "capacity": {
+      "gpu_fp32_gflops": 46665.0,
+      "cpu_gflops": 5183.27664,
+      "fp32_gflops": 51848.27664,
+      "memory_gbs": 600.0,
+      "gpu_node_mass": 2,
+      "cpu_node_mass": 2,
+      "fp32_node_mass": 2,
+      "memory_node_mass": 2
+    },
+    "estimates": {
+      "fp32": {
+        "lower_gflops": 0.0,
+        "upper_gflops": 6723.714417777777,
+        "nodes": 2
+      },
+      "memory": {
+        "lower_gbs": 8.997292999999999,
+        "upper_gbs": 56.997293,
+        "nodes": 2
+      },
+      "workload_memory": {
+        "lower_gbs": null,
+        "upper_gbs": null,
+        "nodes": 0
+      }
+    }
+  },
+  "nodes": {
+    "mbp": {
+      "name": "Ms-MacBook-Pro",
+      "model": "Mac17,6",
+      "cpu_pct": 20.37037037037037,
+      "gpu_pct": 7,
+      "memory_lower_gbs": 8.981864,
+      "memory_upper_gbs": 40.981864
+    },
+    "mini": {
+      "name": "Ms-Mac-mini",
+      "model": "Mac16,11",
+      "cpu_pct": 100.0,
+      "clusters": {
+        "E-Cluster": {
+          "frequency_mhz": 2592.0,
+          "active_pct": 100.0
+        },
+        "P0-Cluster": {
+          "frequency_mhz": 3721.0,
+          "active_pct": 100.0
+        },
+        "P1-Cluster": {
+          "frequency_mhz": 3676.0,
+          "active_pct": 100.0
+        }
+      },
+      "power_w": 43.484,
+      "thermal": "Nominal",
+      "memory_lower_gbs": 0.015429,
+      "memory_upper_gbs": 16.015429,
+      "producer": {
+        "name": "mapfuse",
+        "labels": {
+          "environment": "mapfuse-7",
+          "host_role": "map-builder"
+        },
+        "elapsed_s": 433.9014857080183,
+        "operations": {
+          "input_bytes": 109827783,
+          "stage": "q3map2-resume",
+          "terminal": false
+        }
+      }
+    }
+  }
+}

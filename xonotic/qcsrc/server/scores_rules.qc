@@ -7,21 +7,25 @@
 #include <server/scores.qh>
 #include <server/teamplay.qh>
 
-int ScoreRules_teams;
+int ScoreRules_team_count;
 
 bool IsTeamAvailable(int team_num)
 {
-	return boolean(ScoreRules_teams & Team_TeamToBit(team_num));
+	return TeamScore_IsAvailable(team_num);
 }
 
-int NumTeams(int teams)
+int LegacyTeamBitCount(int team_bits)
 {
-	return boolean(teams & BIT(0)) + boolean(teams & BIT(1)) + boolean(teams & BIT(2)) + boolean(teams & BIT(3));
+	int n = 0;
+	while(team_bits)
+	{
+		n += team_bits & 1;
+		team_bits >>= 1;
+	}
+	return n;
 }
 
-// NOTE: ST_constants may not be >= MAX_TEAMSCORE
-// scores that should be in all modes:
-void ScoreRules_basics(int teams, float sprio, float stprio, float score_enabled)
+void ScoreRules_basics(int team_count, float sprio, float stprio, float score_enabled)
 {
 	FOREACH(Scores, true, {
 		ScoreInfo_SetLabel_PlayerScore(it, "", 0);
@@ -29,8 +33,8 @@ void ScoreRules_basics(int teams, float sprio, float stprio, float score_enabled
 	for(int i = 0; i < MAX_TEAMSCORE; ++i)
 		ScoreInfo_SetLabel_TeamScore(i, "", 0);
 
-	ScoreRules_teams = teams;
-	AVAILABLE_TEAMS = NumTeams(teams);
+	ScoreRules_team_count = team_count;
+	AVAILABLE_TEAMS = team_count;
 
 	if(score_enabled)
 		ScoreInfo_SetLabel_TeamScore(ST_SCORE, "score", stprio);
@@ -66,17 +70,26 @@ void ScoreRules_basics(int teams, float sprio, float stprio, float score_enabled
 
 void ScoreRules_basics_end()
 {
-	ScoreInfo_Init(ScoreRules_teams);
+	ScoreInfo_InitCount(ScoreRules_team_count);
+}
+
+void ScoreInfo_InitTeamRows(entity balance)
+{
+	ScoreInfo_Init();
+	for(int i = 1; i <= NUM_TEAMS; ++i)
+		if(TeamBalance_IsTeamAllowed(balance, i))
+			TeamScore_Spawn(Team_IndexToTeam(i), Static_Team_ColorName(Team_IndexToTeam(i)));
 }
 
 void ScoreRules_generic()
 {
-	int teams = 0;
-	if (teamplay)
+	bool has_teams = teamplay;
+	GameRules_scoring(0, SFL_SORT_PRIO_PRIMARY, SFL_SORT_PRIO_PRIMARY, {});
+	if(has_teams)
 	{
 		entity balance = TeamBalance_CheckAllowedTeams(NULL);
-		teams = TeamBalance_GetAllowedTeams(balance);
+		ScoreInfo_InitTeamRows(balance);
+		teamplay = TeamBalance_GetAllowedTeamCount(balance);
 		TeamBalance_Destroy(balance);
 	}
-	GameRules_scoring(teams, SFL_SORT_PRIO_PRIMARY, SFL_SORT_PRIO_PRIMARY, {});
 }

@@ -70,5 +70,4 @@ private:
     std::vector<ast_expression*> m_generated;
 };
 
-
 #endif

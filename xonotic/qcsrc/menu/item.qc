@@ -5,7 +5,7 @@
 
 	METHOD(MenuItem, destroy, void(MenuItem this))
 	{
-		// free memory associated with this
+
 	}
 
 	METHOD(MenuItem, relinquishFocus, void(MenuItem this))
@@ -28,7 +28,6 @@
 		vector rgb = '1 0 1';
 		float a = fabs(autocvar_menu_showboxes);
 
-		// don't draw containers and border images
 		if (this.instanceOfContainer || this.instanceOfBorderImage)
 		{
 			rgb = '0 0 0';
@@ -36,7 +35,7 @@
 		}
 
 		#if 0
-			// hack to detect multi drawing
+
 			float r = random() * 3;
 			if (r >= 2) rgb = '1 0 0';
 			else if (r >= 1) rgb = '0 1 0';
@@ -61,32 +60,32 @@
 
 	METHOD(MenuItem, keyDown, float(MenuItem this, float scan, float ascii, float shift))
 	{
-		return 0;  // unhandled
+		return 0;
 	}
 
 	METHOD(MenuItem, keyUp, float(MenuItem this, float scan, float ascii, float shift))
 	{
-		return 0;  // unhandled
+		return 0;
 	}
 
 	METHOD(MenuItem, mouseMove, float(MenuItem this, vector pos))
 	{
-		return 0;  // unhandled
+		return 0;
 	}
 
 	METHOD(MenuItem, mousePress, bool(MenuItem this, vector pos))
 	{
-		return false;  // unhandled
+		return false;
 	}
 
 	METHOD(MenuItem, mouseDrag, float(MenuItem this, vector pos))
 	{
-		return 0;  // unhandled
+		return 0;
 	}
 
 	METHOD(MenuItem, mouseRelease, float(MenuItem this, vector pos))
 	{
-		return 0;  // unhandled
+		return 0;
 	}
 
     void m_play_focus_sound();

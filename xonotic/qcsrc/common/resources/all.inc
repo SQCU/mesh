@@ -17,9 +17,6 @@ CLASS(AmmoResource, Resource)
 #endif
 ENDCLASS(AmmoResource)
 
-// NOTE: ammo resource registration order should match ammo (item) registration order
-// see REGISTER_ITEM calls order
-
 REGISTER_RESOURCE(SHELLS, NEW(AmmoResource)) {
 	this.netname = "shells";
 #ifdef GAMEQC
@@ -50,7 +47,7 @@ REGISTER_RESOURCE(PLASMA, NEW(AmmoResource)) {
 	this.m_field = ammo_plasma;
 #endif
 #ifdef CSQC
-	this.m_hidden = true; // WIP ammo type
+	this.m_hidden = true;
 #endif
 }
 REGISTER_RESOURCE(FUEL, NEW(AmmoResource)) {
@@ -59,6 +56,6 @@ REGISTER_RESOURCE(FUEL, NEW(AmmoResource)) {
 	this.m_field = ammo_fuel;
 #endif
 #ifdef CSQC
-	this.m_hidden = true; // displayed in a separate panel
+	this.m_hidden = true;
 #endif
 }

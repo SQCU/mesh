@@ -1,93 +1,63 @@
-"""placement.py -- WHERE tiles go and WHETHER they connect. Authors no geometry.
-
-Lifted out of the deleted mapfuse.py, which tried to author architecture by writing
-BSP lumps directly. design/MAPGEN-ROADMAP.md rules that out in one line -- "Do not
-write a CSG/brush library. Emit `.map` text and let q3map2 do the BSP tree, VIS,
-lightmaps and collision" -- and names the lump path "a dead end for authoring new
-architecture, because you'd have to synthesize the tree, lightmaps and vis yourself
-(it currently fakes the lightmap lump grey and ships empty visdata)". It did exactly
-that: 49,152 grey lightmaps, 0 visdata, 2 clusters, 2.0 GB of server RSS.
-
-So the CSG half is gone, not refactored: split_brushes, clip_faces, cut_portal,
-add_brush/add_quad/add_box/add_plane, _convex_nonempty, _bounds_planes, _spans_volume,
-slab_planes, axial_planes, corridor_frame, tube_gaps, corridor_volume, build_corridor,
-build_pad, build_tele, axialize, the Fuser class and the lump writer. An aperture is a
-parameter of a sweep (MAPGEN-ROADMAP stage 2), not a volume carved out of a compiled
-artifact and then re-derived. Carving it there forced re-deriving the tree, VIS and
-lightmaps by hand, which is why none of them were real.
-
-What survives decides placement and connectivity and never touches a plane:
-
-    Src / pk3_read / navigable_names   read a tile and its waypoints
-    map_sites / solid_runs             candidate connection sites on a tile
-    classify                           bridge (>3 sites) vs stub (2-3)
-    pack_offsets                       3D bin packing of tiles into cells
-    split_tree                         the placement tree
-    walk_sample / walk_extent          reachable-volume sampling
-    region_graph_solve / navmesh_solve connectivity over the placement
-    check_bsp                          validation of a COMPILED result
-
-These are inputs to the source emitter. Geometry is authored there, by construction,
-and compiled by q3map2 -- so VIS, lightmaps and collision are real because they were
-never faked.
-"""
-
-import struct, sys, os, re, math, glob, random, subprocess, time, json
+import struct, sys, os, math, subprocess, time
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
 import negspace as NS
-from negspace import box_H, subtract, bounds_of
+from negspace import box_H
 
 MARGIN, CORW, CORH, WALL, FLOORTHK = 896.0, 288.0, 224.0, 32.0, 32.0
-# CORR_SOFT is a SOFT budget used by the placement objective, not a refusal.  There is
-# no maximum connector length anywhere in this file: a join that the placement leaves
-# long is still built, as a parametrically generated span (see Fuser.build_span).
+PORTAL_QUANTUM = 4.0
+DOOR_W = math.ceil((max(NS.CART_RIDER_MAX[0] - NS.CART_RIDER_MIN[0],
+                        NS.CART_RIDER_MAX[1] - NS.CART_RIDER_MIN[1]) + NS.EPS)
+                   / PORTAL_QUANTUM) * PORTAL_QUANTUM
+DOOR_H = math.ceil((NS.CART_RIDER_MAX[2] - NS.CART_RIDER_MIN[2] + NS.EPS)
+                   / PORTAL_QUANTUM) * PORTAL_QUANTUM
+DOOR_SILL = math.floor(NS.CART_RIDER_MIN[2] / PORTAL_QUANTUM) * PORTAL_QUANTUM
+SITE_DIRS = ((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
+             (0.0, 1.0, 0.0), (0.0, -1.0, 0.0))
+WAYPOINT_GENERATED = 1 << 23
+WAYPOINT_SERIALIZATION_QUANTUM = 0.1
+
 CORR_SOFT, CORR_PEN = 2600.0, 3.0
 SPAN_SEG, SPAN_CLEAR = 1600.0, 384.0
 CORW_PROM, PROM_LIGHT = 448.0, 700.0
 LSZ = (0, 72, 16, 36, 48, 4, 4, 40, 12, 8, 44, 4, 72, 104, 49152, 8, 1)
 TRIGTEX, EMPTYTEX = ('textures/common/trigger', 0, 0x40000000), ('textures/common/caulk', 0, 0)
 
-
 def vadd(a, b):
     return [a[i] + b[i] for i in range(3)]
-
 
 def vsub(a, b):
     return [a[i] - b[i] for i in range(3)]
 
-
 def vdot(a, b):
     return sum(a[i] * b[i] for i in range(3))
 
-
 def vscale(a, s):
     return [a[i] * s for i in range(3)]
-
 
 def vnorm(a):
     L = math.sqrt(vdot(a, a)) or 1.0
     return [x / L for x in a]
 
+def portal_coordinate(value, lo, hi):
+    lower = math.ceil(lo / PORTAL_QUANTUM) * PORTAL_QUANTUM
+    upper = math.floor(hi / PORTAL_QUANTUM) * PORTAL_QUANTUM
+    return min(max(round(value / PORTAL_QUANTUM) * PORTAL_QUANTUM, lower), upper)
 
 def vcross(a, b):
     return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-
 
 def fnum(x):
     s = '%.1f' % x
     return s[:-2] if s.endswith('.0') else s
 
-
 def vstr(v):
     return "'%s %s %s'" % (fnum(v[0]), fnum(v[1]), fnum(v[2]))
-
 
 def pk3_read(pk3, path):
     r = subprocess.run(['unzip', '-p', pk3, path], capture_output=True)
     return r.stdout if r.returncode == 0 else b''
-
 
 def navigable_names(pk3):
     out = subprocess.run(['unzip', '-l', pk3], capture_output=True, text=True).stdout
@@ -98,11 +68,155 @@ def navigable_names(pk3):
             names.add(os.path.basename(f)[:-len('.waypoints')])
     return sorted(names)
 
+def parse_waypoint_relation(wptext, cachetext):
+    wptriples = []
+    lines = [line.rstrip('\r') for line in wptext.splitlines()]
+    index = 0
+    while index < len(lines) and lines[index].startswith('//'):
+        index += 1
+    while index + 3 <= len(lines):
+        try:
+            left = [float(value) for value in lines[index].strip().strip("'").split()]
+            right = [float(value) for value in lines[index + 1].strip().strip("'").split()]
+            flags = int(float(lines[index + 2].strip()))
+        except (ValueError, IndexError):
+            break
+        wptriples.append((left, right, flags))
+        index += 3
+    cachelinks = []
+    for line in cachetext.splitlines():
+        line = line.strip()
+        if not line or line.startswith('//'):
+            continue
+        parts = line.split('*')
+        if len(parts) == 2 and parts[0].strip():
+            left = [float(value) for value in parts[0].strip().strip("'").split()]
+            right = [float(value) for value in parts[1].strip().strip("'").split()]
+            cachelinks.append((left, right))
+    return wptriples, cachelinks
+
+def reconcile_waypoint_relation(ns, source_wptriples, cachelinks):
+    key = lambda point: tuple(round(value, 1) for value in point)
+    waypoint_mins = (NS.PL_MIN[0] - 1.0, NS.PL_MIN[1] - 1.0, NS.PL_MIN[2])
+    waypoint_maxs = (NS.PL_MAX[0] + 1.0, NS.PL_MAX[1] + 1.0, NS.PL_MAX[2])
+    source_definitions = {
+        key([(m1[axis] + m2[axis]) / 2.0 for axis in range(3)])
+        for m1, m2, _ in source_wptriples
+    }
+    implicit_definitions = {
+        key(point) for edge in cachelinks for point in edge
+        if key(point) not in source_definitions
+    }
+    coordinate_map = {}
+    displacement = {}
+    fixed_definitions = {}
+    projection_sources = {}
+    for m1, m2, _ in source_wptriples:
+        center = [(m1[axis] + m2[axis]) / 2.0 for axis in range(3)]
+        identity = key(center)
+        if m1 == m2:
+            projection_sources.setdefault(identity, center)
+        else:
+            fixed_definitions[identity] = center
+    for identity in implicit_definitions:
+        projection_sources.setdefault(identity, identity)
+    projection_sources = {
+        identity: point for identity, point in projection_sources.items()
+        if identity not in fixed_definitions
+    }
+    coordinate_map.update(fixed_definitions)
+    for identity in fixed_definitions:
+        displacement[identity] = 0.0
+    identities = sorted(projection_sources)
+    points = np.asarray([projection_sources[identity] for identity in identities], dtype=np.float64)
+    if ns is None:
+        projected = points.copy()
+        distances = np.zeros(len(points), dtype=np.float64)
+        projection_measures = {
+            'input_point_mass': len(points),
+            'input_penetration_point_mass': 0,
+            'input_penetration_pair_mass': 0,
+            'projection_sweep_mass': 0,
+            'candidate_pair_mass': 0,
+            'plane_evaluation_mass': 0,
+            'directional_null_pair_mass': 0,
+            'world_boundary_reconciliation_mass': 0,
+            'residual_penetration_point_mass': 0,
+        }
+    else:
+        projected, distances, projection_measures = ns.project_many(
+            points, waypoint_mins, waypoint_maxs,
+            tolerance=WAYPOINT_SERIALIZATION_QUANTUM,
+        )
+    for index, identity in enumerate(identities):
+        coordinate_map[identity] = [
+            round(value / WAYPOINT_SERIALIZATION_QUANTUM)
+            * WAYPOINT_SERIALIZATION_QUANTUM for value in projected[index]
+        ]
+        displacement[identity] = float(distances[index])
+
+    def reconcile(point):
+        return coordinate_map[key(point)]
+
+    wptriples = []
+    for m1, m2, flags in source_wptriples:
+        center = [(m1[axis] + m2[axis]) / 2.0 for axis in range(3)]
+        if m1 == m2:
+            realized = reconcile(center)
+            wptriples.append((realized, realized, flags))
+        else:
+            wptriples.append((m1, m2, flags))
+    for identity in sorted(implicit_definitions):
+        realized = reconcile(identity)
+        wptriples.append((realized, realized, WAYPOINT_GENERATED))
+    realized_cachelinks = [(reconcile(a), reconcile(b)) for a, b in cachelinks]
+    wpdefinitions = {
+        key([(m1[axis] + m2[axis]) / 2.0 for axis in range(3)])
+        for m1, m2, _ in wptriples
+    }
+    measures = {
+        'waypoint_outside_negative_space_mass': projection_measures[
+            'input_penetration_point_mass'
+        ],
+        'waypoint_projection_unresolved_mass': projection_measures[
+            'residual_penetration_point_mass'
+        ],
+        'waypoint_displaced_mass': sum(value > 0.0 for value in displacement.values()),
+        'waypoint_displacement_integral': sum(displacement.values()),
+        'waypoint_displacement_square_integral': sum(
+            value * value for value in displacement.values()
+        ),
+        'waypoint_displacement_maximum': max(displacement.values(), default=0.0),
+        'cache_endpoint_outside_definition_mass': len(implicit_definitions),
+        'cache_link_outside_definition_mass': 0,
+        'waypoint_projection_measures': projection_measures,
+    }
+    return wptriples, realized_cachelinks, wpdefinitions, measures
+
+def realize_waypoint_files(path, ns):
+    with open(path + '.waypoints', encoding='latin-1') as handle:
+        wptext = handle.read()
+    with open(path + '.waypoints.cache', encoding='latin-1') as handle:
+        cachetext = handle.read()
+    wptriples, cachelinks = parse_waypoint_relation(wptext, cachetext)
+    wptriples, cachelinks, _, measures = reconcile_waypoint_relation(
+        ns, wptriples, cachelinks,
+    )
+    stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    rows = ['//WAYPOINT_VERSION 1.04', '//WAYPOINT_SYMMETRY 0', '//WAYPOINT_TIME ' + stamp]
+    links = ['//WAYPOINT_VERSION 1.04', '//WAYPOINT_TIME ' + stamp]
+    for left, right, flags in wptriples:
+        rows.extend((vstr(left), vstr(right), str(int(flags))))
+    links.extend(vstr(left) + '*' + vstr(right) for left, right in cachelinks)
+    with open(path + '.waypoints', 'w') as handle:
+        handle.write('\n'.join(rows) + '\n')
+    with open(path + '.waypoints.cache', 'w') as handle:
+        handle.write('\n'.join(links) + '\n')
+    return len(wptriples), len(cachelinks), measures
 
 class Src:
     def __init__(self, name, data, wptext, cachetext, with_ns=True):
         self.name, self.data = name, data
-        assert data[:4] == b'IBSP' and struct.unpack_from('<i', data, 4)[0] == 46, name
         L = lambda i: struct.unpack_from('<ii', data, 8 + i * 8)
         raw = {}
         for i in range(17):
@@ -127,57 +241,23 @@ class Src:
                       for i in range(0, len(raw[13]), 104)]
         self.lightmaps = raw[14]
         self.bounds = (self.models[0][0:3], self.models[0][3:6])
-        self.wptriples = []
-        lines = [l.rstrip('\r') for l in wptext.splitlines()]
-        i = 0
-        while i < len(lines) and lines[i].startswith('//'):
-            i += 1
-        while i + 3 <= len(lines):
-            try:
-                m1 = [float(x) for x in lines[i].strip().strip("'").split()]
-                m2 = [float(x) for x in lines[i + 1].strip().strip("'").split()]
-                fl = int(float(lines[i + 2].strip()))
-            except (ValueError, IndexError):
-                break
-            self.wptriples.append((m1, m2, fl))
-            i += 3
-        self.cachelinks = []
-        for l in cachetext.splitlines():
-            l = l.strip()
-            if not l or l.startswith('//'):
-                continue
-            p = l.split('*')
-            if len(p) == 2 and p[0].strip():
-                a = [float(x) for x in p[0].strip().strip("'").split()]
-                b = [float(x) for x in p[1].strip().strip("'").split()]
-                self.cachelinks.append((a, b))
-        self.navnodes, self.navadj = M.parse_cache(cachetext)
+        self.ns = NS.from_bsp(data, mask=NS.MASK_PLAYERSOLID) if with_ns else None
+        source_wptriples, cachelinks = parse_waypoint_relation(wptext, cachetext)
+        self.wptriples, self.cachelinks, self.wpdefinitions, measures = (
+            reconcile_waypoint_relation(self.ns, source_wptriples, cachelinks)
+        )
+        for name, value in measures.items():
+            setattr(self, name, value)
+        closed_cache = '\n'.join(vstr(a) + '*' + vstr(b) for a, b in self.cachelinks)
+        self.navnodes, self.navadj = M.parse_cache(closed_cache)
         self.wpset = {tuple(round(x, 1) for x in m1) for m1, m2, fl in self.wptriples
                       if m1 == m2 and not fl & M.WPF_BAD}
-        # DELETED with this rewrite: `bgrid`/`cgrid` and `solid_brush_at`/
-        # `clip_brush_at`.  They answered "is this SOURCE point inside a SOURCE
-        # brush" and their answers were then used to decide things about the
-        # ASSEMBLED world -- before packing, before Z stacking, before the doorway
-        # cuts split the brushwork and before a single connector brush existed.
-        # That is the defect this file was rewritten to remove, not to improve.
-        # The one definition of solidity now lives in negspace.NegSpace and is
-        # COMPUTED (the BSP's own partition of space), not sampled.
+
         self.solidtex = [t[2] & 1 == 1 for t in self.textures]
         self.cliptex = [bool(t[2] & 0x430000) for t in self.textures]
-        self.ns = NS.NegSpace(data, mask=NS.MASK_PLAYERSOLID) if with_ns else None
         self._ebrush = None
 
     def edit_index(self):
-        """Which BRUSHES lie in a box -- an index for the geometry EDITOR, not an
-        answer about occupancy.
-
-        `split_brushes` has to know which source brushes to cut; that is a
-        different question from "is this point solid", and it is the only reason
-        an AABB per brush is wanted here.  The bounds come from `negspace`'s
-        interval propagation, which is exact and finite for an entirely oblique
-        brush -- the strict axis test the deleted `bgrid` used returned +-1e18 for
-        those and then gridded them with an unguarded range(), a ~1e15-iteration
-        loop that ate 75 GB."""
         if self._ebrush is not None:
             return self._ebrush
         lo0 = np.array(self.bounds[0], dtype=np.float64) - 4096.0
@@ -198,16 +278,7 @@ class Src:
         self._ebrush = grid
         return grid
 
-
 def solid_runs(ns, p0, d, maxt=1100.0):
-    """The SOLID spans along a ray, computed exactly from the free-space complex.
-
-    Replaces `ray_runs`, which marched the ray in 8-unit steps asking
-    `Src.solid_brush_at` at each step, and `free_slab`, which did the same over a
-    3-D lattice of probe points.  A segment's intersection with a convex cell is
-    a closed-form interval, so the free spans -- and therefore the solid spans
-    between them -- are the whole answer rather than a sample of it, and a wall
-    thinner than the old step size can no longer be missed."""
     p1 = [p0[i] + d[i] * maxt for i in range(3)]
     iv = ns.segment_intervals(p0, p1)
     runs = []
@@ -220,20 +291,42 @@ def solid_runs(ns, p0, d, maxt=1100.0):
         runs.append((t * maxt, maxt))
     return runs
 
+def portal_support(ns, node, d, t_in, t_out):
+    axis = 0 if abs(d[0]) > 0.5 else 1
+    other = 1 - axis
+    sign = 1.0 if d[axis] > 0 else -1.0
+    axial = sorted((node[axis] + sign * (t_in + 1.0),
+                    node[axis] + sign * (t_out - 1.0)))
+    half_width = DOOR_W / 2.0
+    outside = half_width + WALL
+    clearance = WALL / 4.0
+    floor = node[2] + DOOR_SILL
+    ceiling = floor + DOOR_H
+    spans = (
+        (node[other] - outside, node[other] - half_width - clearance,
+         floor - WALL, ceiling + WALL),
+        (node[other] + half_width + clearance, node[other] + outside,
+         floor - WALL, ceiling + WALL),
+        (node[other] - outside, node[other] + outside,
+         floor - WALL, floor - clearance),
+        (node[other] - outside, node[other] + outside,
+         ceiling + clearance, ceiling + WALL),
+    )
+    residual = 0
+    solids = 0
+    for lateral_lo, lateral_hi, zlo, zhi in spans:
+        lo = [0.0, 0.0, zlo]
+        hi = [0.0, 0.0, zhi]
+        lo[axis], hi[axis] = axial
+        lo[other], hi[other] = lateral_lo, lateral_hi
+        measure = ns.solid_incidence(box_H(lo, hi), np.asarray(lo), np.asarray(hi))
+        residual += 1 - measure['incidence_mass']
+        solids += measure['source_solid_candidate_mass']
+    return {'support_domain_atom_mass': len(spans),
+            'support_residual_atom_mass': residual,
+            'support_source_solid_candidate_mass': solids}
 
 def map_sites(src, maxsites=12, minsep=1024.0):
-    """All plausible connection sites on one map, best first -- read off the map's
-    COMPUTED negative space, not probed for.
-
-    A connection site is a BOUNDARY FACE of the free volume: a wall panel that
-    (a) is big enough to hold a door-sized aperture, checked as exact containment
-    of the door rectangle inside the face's own cross-section polygon; (b) has a
-    solid run of wall-panel thickness behind it, computed from the free-space
-    complex in closed form; (c) has free volume on the far side for the connector
-    to meet, checked as exact coverage of the connector's approach box by free
-    cells; and (d) stands in a cell the stock navmesh actually reaches, so a bot
-    can get to the door.  `probe_site`'s ray march, `ray_runs` and `free_slab`
-    are deleted: they were a sampled approximation of exactly this."""
     got = getattr(src, '_sites', None)
     if got is not None:
         return got
@@ -242,20 +335,14 @@ def map_sites(src, maxsites=12, minsep=1024.0):
             if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
     if not comp:
         comp = M.largest_component(src.navadj)
-    navcells = set()
-    for i in comp:
-        for dz in (0.0, 16.0, 32.0):
-            c = ns.cell_at([src.navnodes[i][0], src.navnodes[i][1], src.navnodes[i][2] + dz])
-            if c >= 0:
-                navcells.add(c)
     cand = []
     for d in SITE_DIRS:
         axis = 0 if abs(d[0]) > 0.5 else 1
         U = 1 - axis
         pr = sorted(comp, key=lambda i: -(src.navnodes[i][0] * d[0] + src.navnodes[i][1] * d[1]))
-        for i in pr[:max(48, len(pr) // 8)]:
+        for i in pr:
             node = [float(x) for x in src.navnodes[i]]
-            eye = [node[0], node[1], node[2] + DOOR_H * 0.5]
+            eye = [node[0], node[1], node[2] + DOOR_SILL + DOOR_H * 0.5]
             runs = solid_runs(ns, eye, d)
             if not runs:
                 continue
@@ -266,38 +353,36 @@ def map_sites(src, maxsites=12, minsep=1024.0):
             if thick > 384.0 or thick < 8.0:
                 continue
             if len(runs) > 1 and runs[1][0] - t_out < 224.0:
-                continue               # a double wall / stacked scenery
-            # THE WALL, STRUCTURALLY.
-            # A connection site is a place where two free regions are SEPARATED by
-            # a thin barrier.  All three parts of that are statements about volume,
-            # so all three are answered as exact coverage of a box by the computed
-            # free cells -- never by probes:
-            #   * a player-sized free approach standing against the inner face,
-            #   * a player-sized free landing on the far side for the connector,
-            #   * and NO already-open route between them across the door's own
-            #     footprint (otherwise there is nothing to cut and the "door"
-            #     would be a hole in mid-air).
-            zlo, zhi = node[2] + 4.0, node[2] + 72.0
+                continue
+
+            zlo = node[2] + DOOR_SILL
+            zhi = zlo + DOOR_H
             lo = [0.0, 0.0, zlo]
             hi = [0.0, 0.0, zhi]
-            lo[U] = node[U] - (DOOR_W / 2 - 16)
-            hi[U] = node[U] + (DOOR_W / 2 - 16)
-            a0 = node[axis] + d[axis] * 24.0
-            a1 = node[axis] + d[axis] * max(24.0, t_in - 3.0)
-            alo, ahi = list(lo), list(hi)
-            alo[axis], ahi[axis] = min(a0, a1), max(a0, a1)
-            if ahi[axis] - alo[axis] < 2.0 or not ns.covered(box_H(alo, ahi)):
-                continue                   # no room to stand in front of the opening
-            f0 = node[axis] + d[axis] * (t_out + 32.0)
-            f1 = node[axis] + d[axis] * (t_out + 160.0)
-            flo, fhi = list(lo), list(hi)
-            flo[axis], fhi[axis] = min(f0, f1), max(f0, f1)
-            if not ns.covered(box_H(flo, fhi)):
-                continue                   # nothing on the far side to meet
-            tlo, thi = list(lo), list(hi)
-            tlo[axis], thi[axis] = min(a0, f1), max(a0, f1)
-            if ns.covered(box_H(tlo, thi)):
-                continue                   # already open: there is no wall to cut
+            lo[U] = node[U] - DOOR_W / 2.0
+            hi[U] = node[U] + DOOR_W / 2.0
+            leading = (NS.CART_RIDER_MAX[axis] if d[axis] > 0
+                       else -NS.CART_RIDER_MIN[axis])
+            approach = [node[value] + d[value] * max(0.0, t_in - leading - 3.0)
+                        for value in range(3)]
+            if (not ns.fits(node, NS.CART_RIDER_MIN, NS.CART_RIDER_MAX)
+                    or not ns.segment_free(
+                        node, approach, NS.CART_RIDER_MIN, NS.CART_RIDER_MAX)):
+                continue
+            exit_t = ((src.bounds[1][axis] - node[axis]) * d[axis]
+                      if d[axis] > 0 else (src.bounds[0][axis] - node[axis]) * d[axis])
+            if exit_t < t_out:
+                continue
+            if exit_t - 1.0 >= t_out + 5.0:
+                f0 = node[axis] + d[axis] * (t_out + 3.0)
+                f1 = node[axis] + d[axis] * (exit_t - 1.0)
+                flo, fhi = list(lo), list(hi)
+                flo[axis], fhi[axis] = min(f0, f1), max(f0, f1)
+                if not ns.covered(box_H(flo, fhi), flo, fhi):
+                    continue
+            support = portal_support(ns, node, d, t_in, t_out)
+            if support['support_residual_atom_mass']:
+                continue
             cell = -1
             for back in (2.0, 8.0, 20.0, 40.0):
                 q = [eye[0] + d[0] * (t_in - back), eye[1] + d[1] * (t_in - back), eye[2]]
@@ -306,22 +391,18 @@ def map_sites(src, maxsites=12, minsep=1024.0):
                     break
             if cell < 0:
                 continue
-            ext = ns.hi[cell] - ns.lo[cell]
-            narrow = ext[U] < 576.0
+            narrow = ns.clearance(node, cap=576.0, mins=NS.PL_MIN, maxs=NS.PL_MAX) < 288.0
             deg = len(src.navadj[i])
             cont = narrow or deg <= 2
-            far = [node[0] + d[0] * (t_out + 96.0), node[1] + d[1] * (t_out + 96.0), node[2]]
-            fc = ns.cell_at(far)
-            exterior = fc < 0 or fc not in navcells
             score = ((1.5 if narrow else 0.0) + (0.5 if deg <= 3 else 0.0) +
-                     (0.75 if exterior else 0.0) +
                      max(0.0, (384.0 - thick) / 384.0) +
                      max(0.0, (640.0 - t_in) / 640.0))
             cand.append({'p': node, 'dir': list(d), 't_in': t_in, 't_out': t_out,
+                         't_exit': exit_t,
                          'thick': thick, 'deg': deg, 'narrow': narrow,
-                         'cell': cell, 'exterior': exterior,
+                         'cell': cell,
                          'node': i, 'kind': 'continue' if cont else 'newcut',
-                         'score': round(score, 3)})
+                         'score': round(score, 3), **support})
     cand.sort(key=lambda s2: -s2['score'])
     sites = []
     for s2 in cand:
@@ -334,17 +415,7 @@ def map_sites(src, maxsites=12, minsep=1024.0):
     src._sites = sites
     return sites
 
-
-def walk_sample(src, cap=128):
-    """A strided, maximally-spread subsample of the tile's WALKABLE interior.
-
-    The placement objective must measure the distance that actually matters -- the
-    gap between the two tiles' reachable nav geometry -- not the gap between their
-    bounding boxes.  Those are wildly different: a stock Xonotic map's playable floor
-    can sit hundreds of units inside a bbox padded by sky, terrain skirts and
-    out-of-bounds scenery, which is exactly how a lattice packed on bounding boxes
-    produced kilometre corridors.  Points are the stand-on-able nodes of the map's
-    largest bot-reachable waypoint component, in LOCAL coordinates."""
+def walk_nodes(src):
     got = getattr(src, '_walk', None)
     if got is not None:
         return got
@@ -355,28 +426,14 @@ def walk_sample(src, cap=128):
     if not comp:
         comp = list(range(len(src.navnodes)))
     P = [list(src.navnodes[i]) for i in comp]
-    if len(P) > cap:
-        # farthest-point subsample: keeps the extremes (the parts of the walkable set
-        # that face a neighbour tile) instead of an arbitrary stride
-        A = np.asarray(P, dtype=float)
-        pick = [int(np.argmax(A[:, 0] + A[:, 1]))]
-        d = np.linalg.norm(A - A[pick[0]], axis=1)
-        while len(pick) < cap:
-            i = int(np.argmax(d))
-            pick.append(i)
-            d = np.minimum(d, np.linalg.norm(A - A[i], axis=1))
-        P = [P[i] for i in pick]
     src._walk = np.asarray(P, dtype=float)
     return src._walk
 
-
 def walk_extent(src):
-    """(mins, maxs) of the WALKABLE set -- the box the placement should pack, as
-    opposed to src.bounds which is the whole BSP hull."""
     got = getattr(src, '_walkext', None)
     if got is not None:
         return got
-    W = walk_sample(src)
+    W = walk_nodes(src)
     if len(W) == 0:
         got = (list(src.bounds[0]), list(src.bounds[1]))
     else:
@@ -384,27 +441,7 @@ def walk_extent(src):
     src._walkext = got
     return got
 
-
-# ---------------------------------------------------------------------------
-# 3D BIN PACKING + the bridge/stub taxonomy
-# ---------------------------------------------------------------------------
-def classify(nsites):
-    """The taxonomy is counted off the connection sites a map actually has:
-    a BRIDGE map has more than 3, a STUB map has fewer than 3 and more than 1, and a
-    map with 0 or 1 site cannot be socketed at all and is not used."""
-    if nsites > 3:
-        return 'bridge'
-    if nsites > 1:
-        return 'stub'
-    return 'unsuitable'
-
-
 def pack_offsets(srcs, cells, cols, rows, levels):
-    """Shelf sizing for the packed lattice: a column is only as wide as the widest hull
-    in it, a row only as deep as the deepest, a level only as tall as the tallest.  Each
-    tile is then anchored on its WALKABLE centre in x/y and on its walkable median floor
-    in z, so what ends up near a cell boundary is the part of the map a player can stand
-    on -- not a bounding box padded out by sky and terrain skirt."""
     j = len(srcs)
     hull = [[s.bounds[1][a] - s.bounds[0][a] for a in range(3)] for s in srcs]
     colw = [MARGIN + max([hull[m][0] for m in range(j) if cells[m][0] == c] or [0]) for c in range(cols)]
@@ -421,7 +458,7 @@ def pack_offsets(srcs, cells, cols, rows, levels):
     for m, s in enumerate(srcs):
         c, r, z = cells[m]
         wlo, whi = walk_extent(s)
-        W = walk_sample(s)
+        W = walk_nodes(s)
         medz = float(np.median(W[:, 2])) if len(W) else (s.bounds[0][2] + s.bounds[1][2]) / 2
         off = [(xed[c] + xed[c + 1]) / 2.0 - (wlo[0] + whi[0]) / 2.0,
                (yed[r] + yed[r + 1]) / 2.0 - (wlo[1] + whi[1]) / 2.0,
@@ -432,18 +469,13 @@ def pack_offsets(srcs, cells, cols, rows, levels):
             hi = ed[ci + 1] - 32.0 - s.bounds[1][a]
             if lo > hi:
                 lo = hi = (ed[ci] + ed[ci + 1]) / 2.0 - (s.bounds[0][a] + s.bounds[1][a]) / 2.0
-            off[a] = min(max(off[a], lo), hi)
+            off[a] = portal_coordinate(off[a], lo, hi)
             sl.append((lo, hi))
         offsets.append(off)
         slack.append(sl)
     return offsets, (xed, yed, zed), slack
 
-
 def split_tree(items, eds):
-    """Guillotine partition of the packed cells into the binary tree the BSP router
-    needs.  The pack is axis-separable by construction (levels, then rows, then columns),
-    so the tree falls straight out of it -- including on Z, which the old 2D fixed grid
-    could not express."""
     if len(items) == 1:
         return ('leaf', items[0][3])
     best = None
@@ -461,7 +493,6 @@ def split_tree(items, eds):
         return ('leaf', items[0][3])
     axis, mid, lo, hi = best
     return ('node', axis, eds[axis][mid], split_tree(lo, eds), split_tree(hi, eds))
-
 
 def check_bsp(d):
     probs = []
@@ -524,9 +555,7 @@ def check_bsp(d):
                 probs.append('node %d bad child %d' % (k, c))
     return probs
 
-
 DIRNAME = {(1, 0): 'e', (-1, 0): 'w', (0, 1): 'n', (0, -1): 's'}
-
 
 def load_src(n, outdir, pk3, with_ns=True, quiet=False):
     if '/' in n:
@@ -547,29 +576,7 @@ def load_src(n, outdir, pk3, with_ns=True, quiet=False):
                len(src.wptriples), len(src.cachelinks)))
     return src
 
-
-def _survey_worker(arg):
-    """Compute one candidate map's free volume and its connection sites.
-
-    The survey is the expensive half of a fusion (an exact convex decomposition
-    per map, then a structural site solve on top of it) and it is per-map
-    independent, so it is run across processes.  Nothing about the result depends
-    on the order or on the other maps."""
-    name, outdir, pk3 = arg
-    try:
-        src = load_src(name, outdir, pk3, quiet=True)
-        st = map_sites(src)
-        return (name, st, NS.pack(src.ns), None)
-    except Exception as e:
-        import traceback
-        return (name, None, None, traceback.format_exc())
-
-
 def region_graph_solve(j, edges_ab):
-    """Connectivity solver over the REGION graph (tiles = nodes, joins = edges).
-    Returns components, articulation points (chokepoint tiles), cut edges
-    (chokepoint joins -- removing one disconnects the megamap), per-node degree and
-    the hop-diameter.  Plain Hopcroft-Tarjan, iterative so it survives 30+ tiles."""
     adj = [[] for _ in range(j)]
     for ei, (a, b) in enumerate(edges_ab):
         adj[a].append((b, ei))
@@ -618,7 +625,7 @@ def region_graph_solve(j, edges_ab):
         if rootkids > 1:
             arts.add(s0)
         comps.append(sorted(comp))
-    # hop diameter over the largest component
+
     big = max(comps, key=len) if comps else []
     bigset = set(big)
     diam, ecc = 0, {}
@@ -638,12 +645,7 @@ def region_graph_solve(j, edges_ab):
                 degree=[len(adj[i]) for i in range(j)], hop_diameter=diam,
                 eccentricity=ecc, adj=adj)
 
-
 def navmesh_solve(nodes2, dadj, region, key, j, reps):
-    """Metrics over the NAVMESH solution: weighted (euclidean) shortest paths on the
-    real fused bot-waypoint graph.  Returns per-region reachable coverage, the
-    region-to-region bot WALKING distance matrix, and the megamap walking diameter --
-    the commitment cost the spec asks the megamap to impose."""
     import heapq
     N = len(nodes2)
     W = [[(v, math.dist(nodes2[u], nodes2[v])) for v in dadj[u]] for u in range(N)]
@@ -680,5 +682,3 @@ def navmesh_solve(nodes2, dadj, region, key, j, reps):
                 walk_diameter=max(fin) if fin else 0.0,
                 walk_median=sorted(fin)[len(fin) // 2] if fin else 0.0,
                 unreachable_pairs=sum(1 for v in D.values() if v is None))
-
-

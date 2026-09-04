@@ -87,6 +87,15 @@ joins.
 The same Voronoi-over-navmesh structure serves both the cart-path placer (§2) and the
 belief map-reduce — fusing along *navigable* adjacency, not geometric proximity.
 
+The serialized stock-compatible waypoint relation is reconciled as specified by
+`GEOMETRY-RECONCILIATION.md`. Authored coordinates retain stable identities; cache-implied
+vertices are materialized; and every cache endpoint is transduced through the same
+source-to-realized coordinate map. The stock bot loader, computed metric graph, and fused
+serializer therefore see the same vertices and edges. Degenerate waypoints are projected
+onto the player-hull erosion of the compiled brush-and-patch collision domain rather than
+removed. Nondegenerate trigger boxes retain their authored volume. Input collision mass,
+displacement moments, and unresolved projection mass remain distinct measures.
+
 ## 9. Inspection tooling
 
 > also you might need to make a 3d viewer or renderer tool which renders the floorplans
@@ -99,20 +108,21 @@ belief map-reduce — fusing along *navigable* adjacency, not geometric proximit
 
 ```
 map BSP
-  └─► COMPUTE navmesh                                (§1; stock-compatible, §5)
-        └─► Voronoi cells over the navmesh           (§2, §8)
-              ├─► classify edges: cart-traversable?  (§2 edge validity, §4 semantic)
-              ├─► fuse contiguous NAVIGABLE cells    (§8)
-              ├─► k-center origins, equidistant in
-              │   navmesh-walking-distance (>=3)     (§1)
-              └─► tangent-energy curve optimization
-                    placing cart paths, subject to:
-                      · not intersecting terrain     (§2)
-                      · not floating in non-walking-
-                        navigable air                (§2)
-                      · every path point within
-                        activation distance of
-                        negative space               (§3)  ← by construction
+  ├─► COMPUTE stock navmesh metric graph             (§1; stock-compatible, §5)
+  │     └─► shortest-path Voronoi cells              (§2, §8)
+  │           ├─► fuse contiguous NAVIGABLE cells    (§8)
+  │           └─► k-center origins, equidistant in
+  │               navmesh-walking-distance (>=3)     (§1)
+  └─► compiled solid half-space domain
+        ├─► classify edges: cart-traversable?        (§2 edge validity, §4 semantic)
+        └─► tangent-energy curve optimization
+              placing cart paths, subject to:
+                · not intersecting terrain           (§2)
+                · not floating in non-walking-
+                  navigable air                      (§2)
+                · every path point within
+                  activation distance of
+                  negative space                     (§3)  ← by construction
 ```
 
 Validation is therefore **by construction and by structural predicate**: a path emitted

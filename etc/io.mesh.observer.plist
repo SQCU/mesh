@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.mesh.observer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/mesh/bin/mesh-python</string>
+    <string>/usr/local/mesh/viz/serve.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/usr/local/mesh</string>
+  <key>UserName</key>
+  <string>__MESH_USER__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__MESH_HOME__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/usr/local/mesh/log/io.mesh.observer.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/mesh/log/io.mesh.observer.err.log</string>
+</dict>
+</plist>

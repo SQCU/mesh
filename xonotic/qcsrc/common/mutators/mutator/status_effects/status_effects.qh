@@ -9,18 +9,17 @@ REGISTER_MUTATOR(status_effects, true);
 #include "all.qh"
 
 #ifdef GAMEQC
-/** Entity statuseffects */
+
 .StatusEffects statuseffects;
-/** Player statuseffects storage (holds previous state) */
+
 .StatusEffects statuseffects_store;
 
 REGISTER_NET_LINKED(ENT_CLIENT_STATUSEFFECTS)
 
-const int StatusEffects_groups_minor = 8; // must be a multiple of 8 (one byte) to optimize bandwidth usage
-const int StatusEffects_groups_major = 4; // must be >= ceil(REGISTRY_COUNT(StatusEffect) / StatusEffects_groups_minor)
+const int StatusEffects_groups_minor = 8;
+const int StatusEffects_groups_major = 4;
 #endif
 
-// no need to perform these checks on both server and client
 #ifdef CSQC
 STATIC_INIT(StatusEffects)
 {
@@ -131,7 +130,7 @@ bool StatusEffects_Send(StatusEffects this, Client to, int sf)
 
 bool StatusEffects_customize(entity this, entity client)
 {
-    // sends to spectators too!
+
     return (client.statuseffects == this);
 }
 
@@ -147,16 +146,14 @@ void StatusEffects_new(entity this)
     }
 }
 void StatusEffects_delete(entity e) { delete(e.statuseffects); e.statuseffects = NULL; }
-// may be called on non-player entities, should be harmless!
+
 void StatusEffects_update(entity e) { e.statuseffects.SendFlags = 0xFFFFFF; }
 
-// this clears the storage entity instead of the statuseffects object, useful for map resets and such
 void StatusEffects_clearall(entity store)
 {
     if(!store)
-        return; // safety net
-    // NOTE: you will need to perform StatusEffects_update after this to update the storage entity
-    // (unless store is the storage entity)
+        return;
+
     FOREACH(StatusEffect, true, {
         store.statuseffect_time[it.m_id] = 0;
         store.statuseffect_flags[it.m_id] = 0;
@@ -166,11 +163,9 @@ void StatusEffects_clearall(entity store)
 void StatusEffectsStorage_attach(entity e) { e.statuseffects_store = NEW(StatusEffects); e.statuseffects_store.drawonlytoclient = e; }
 void StatusEffectsStorage_delete(entity e) { delete(e.statuseffects_store); e.statuseffects_store = NULL; }
 
-// called when an entity is deleted with delete() / remove()
-// or when a player disconnects
 void ONREMOVE(entity this)
 {
-    // remove statuseffects object attached to 'this'
+
     if(this.statuseffects && this.statuseffects.owner == this)
         StatusEffects_delete(this);
 }
@@ -179,24 +174,16 @@ void ONREMOVE(entity this)
 #ifdef GAMEQC
 bool StatusEffects_active(StatusEffects this, entity actor);
 
-// runs every SV_StartFrame on the server
-// called by HUD_Powerups_add on the client
 void StatusEffects_tick(entity actor);
 
-// accesses the status effect timer, returns 0 if the entity has no statuseffects object
-// pass g_statuseffects as the actor on client side
-// pass the entity with a .statuseffects on server side
 float StatusEffects_gettime(StatusEffects this, entity actor);
 #endif
 #ifdef SVQC
-// call when applying the effect to an entity
+
 void StatusEffects_apply(StatusEffects this, entity actor, float eff_time, int eff_flags);
 
-// copies all the status effect fields to the specified storage entity
-// does not perform an update
 void StatusEffects_copy(StatusEffects this, entity store, float time_offset);
 
-// call when removing the effect
 void StatusEffects_remove(StatusEffects this, entity actor, int removal_type);
 
 void StatusEffects_removeall(entity actor, int removal_type);

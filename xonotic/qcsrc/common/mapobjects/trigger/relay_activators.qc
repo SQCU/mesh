@@ -12,7 +12,7 @@ void relay_activators_use(entity this, entity actor, entity trigger)
 			trg.setactive(trg, this.cnt);
 		else
 		{
-			//bprint("Not using setactive\n");
+
 			generic_setactive(trg, this.cnt);
 		}
 	}
@@ -20,7 +20,7 @@ void relay_activators_use(entity this, entity actor, entity trigger)
 
 void relay_activators_init(entity this)
 {
-	this.reset = relay_activators_init; // doubles as a reset function
+	this.reset = relay_activators_init;
 	this.active = ACTIVE_ACTIVE;
 	this.use = relay_activators_use;
 }

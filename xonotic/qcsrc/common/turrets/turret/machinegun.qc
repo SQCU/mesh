@@ -13,4 +13,4 @@ METHOD(MachineGunTurret, tr_setup, void(MachineGunTurret this, entity it))
     it.turret_flags |= TUR_FLAG_HITSCAN;
 }
 
-#endif // SVQC
+#endif

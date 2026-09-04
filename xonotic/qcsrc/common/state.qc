@@ -22,11 +22,11 @@ void PlayerState_attach(entity this)
 void PlayerState_detach(entity this)
 {
     PlayerState ps = PS(this);
-	if (!ps) return;  // initial connect
+	if (!ps) return;
 	PS(this) = NULL;
-    Inventory_clear(this.inventory_store); // no need to network updates, as there is no inventory attached
+    Inventory_clear(this.inventory_store);
 
-	if (ps.m_client != this) return;  // don't own state, spectator
+	if (ps.m_client != this) return;
 	ps.ps_push(ps, this);
     Inventory_delete(ps);
 
@@ -46,8 +46,6 @@ void bot_clientconnect(entity this);
 void ClientState_attach(entity this)
 {
 	this._cs = NEW(ClientState, this);
-
-	// TODO: fold all of these into ClientState
 
 	DecodeLevelParms(this);
 
@@ -72,9 +70,9 @@ void PlayerScore_Detach(entity this);
 
 void ClientState_detach(entity this)
 {
-    GetCvars(this, CS_CVAR(this), -1);  // free cvars TODO: is this still needed now that it's stored on the clientstate entity?
-    accuracy_free(this); // TODO: needs to be before CS() is deleted!
-    PlayerScore_Detach(this); // what ^they^ said
+    GetCvars(this, CS_CVAR(this), -1);
+    accuracy_free(this);
+    PlayerScore_Detach(this);
     W_HitPlotClose(this);
     ClientData_Detach(this);
     entcs_detach(this);

@@ -8,16 +8,9 @@
 #include <server/intermission.qh>
 #include <server/world.qh>
 
-// campaign cvars:
-//   _campaign_index: index of CURRENT map
-//   _campaign_name: name of the current campaign
-//   g_campaign(name)_index: index of current LAST map (saved)
-//   g_campaign_skill: bot skill offset
-
 float campaign_level;
 float campaign_won;
 string campaign_index_var;
-//float checkrules_equality;
 
 float CampaignBailout(string s)
 {
@@ -99,7 +92,7 @@ void CampaignPreInit()
 
 void CampaignPostInit()
 {
-	// now some sanity checks
+
 	if(Campaign_Invalid())
 		return;
 	if(autocvar__campaign_testrun)
@@ -110,7 +103,7 @@ void CampaignPostInit()
 	}
 	else
 	{
-		// "default" uses implicit values, "" or "0" means no limit
+
 		tokenizebyseparator(campaign_fraglimit[0], "+");
 		if(argv(0) != "default") {
 			cvar_set("fraglimit", argv(0));
@@ -133,7 +126,6 @@ void CampaignSaveCvar(string cvarname, float value)
 
 	registercvar(cvarname, ftos(value));
 	cvar_set(cvarname, ftos(value));
-	// note: cvarname must be remembered
 
 	fh = fopen("campaign.cfg", FILE_READ);
 	contents = "";
@@ -189,30 +181,30 @@ void CampaignPreIntermission()
 	}
 	else if(won == 1 && lost == 0 && checkrules_equality == 0)
 	{
-		if(autocvar_timelimit != 0 && autocvar_fraglimit != 0 && time > autocvar_timelimit * 60) // checks if the timelimit has expired.
+		if(autocvar_timelimit != 0 && autocvar_fraglimit != 0 && time > autocvar_timelimit * 60)
 		{
 			campaign_won = 0;
 			bprint("Time's up! The current level has been LOST.\n");
-			// sound!
+
 		}
 		else
 		{
 			campaign_won = 1;
 			bprint("The current level has been WON.\n");
-			// sound!
+
 		}
 	}
 	else if(autocvar_timelimit != 0 && time > autocvar_timelimit * 60)
 	{
 		campaign_won = 0;
 		bprint("Time's up! The current level has been LOST.\n");
-		// sound!
+
 	}
 	else
 	{
 		campaign_won = 0;
 		bprint("The current level has been LOST.\n");
-		// sound!
+
 	}
 
 	if(campaign_won && cheatcount_total == 0 && !autocvar__campaign_testrun)
@@ -221,15 +213,15 @@ void CampaignPreIntermission()
 		{
 			if(campaign_entries < 2)
 			{
-				// I have won
+
 				savevar = strcat("g_campaign", campaign_name, "_won");
 				CampaignSaveCvar(savevar, 1);
-				// advance level (for menu to show it right)
+
 				CampaignSaveCvar(campaign_index_var, campaign_level + 1);
 			}
 			else
 			{
-				// advance level
+
 				CampaignSaveCvar(campaign_index_var, campaign_level + 1);
 			}
 		}
@@ -238,11 +230,10 @@ void CampaignPreIntermission()
 
 void CampaignPostIntermission()
 {
-	// NOTE: campaign_won is 0 or 1, that is, points to the next level
 
 	if(campaign_won && campaign_entries < 2)
 	{
-		// last map won!
+
 		LOG_DEBUG("^2test run: campaign looks GOOD");
 		localcmd("togglemenu 1\n");
 		CampaignFile_Unload();
@@ -256,8 +247,6 @@ void CampaignPostIntermission()
 	campaign_name = "";
 }
 
-
-
 void CampaignLevelWarp(float n)
 {
 	if(n < 0)
@@ -270,4 +259,3 @@ void CampaignLevelWarp(float n)
 		error("Sorry, cheater. You are NOT WELCOME.");
 	CampaignFile_Unload();
 }
-

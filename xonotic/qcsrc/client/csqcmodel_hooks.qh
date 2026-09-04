@@ -19,7 +19,6 @@ float autocvar_cl_deathglow_min = 0.5;
 float autocvar_cl_jetpack_attenuation = 2;
 float autocvar_r_hdr_glowintensity;
 
-// FEATURE: EF_NODRAW workalike
 const int EF_BRIGHTFIELD       = BIT(0);
 const int EF_BRIGHTLIGHT       = BIT(2);
 const int EF_DIMLIGHT          = BIT(3);
@@ -29,20 +28,20 @@ const int EF_DYNAMICMODELLIGHT = BIT(17);
 const int EF_RESTARTANIM_BIT   = BIT(20);
 const int EF_TELEPORT_BIT      = BIT(21);
 
-const int MF_ROCKET  =  BIT(0);  // leave a trail
-const int MF_GRENADE =  BIT(1);  // leave a trail
-const int MF_GIB     =  BIT(2);  // leave a trail
-const int MF_ROTATE  =  BIT(3);  // rotate (bonus items)
-const int MF_TRACER  =  BIT(4);  // green split trail
-const int MF_ZOMGIB  =  BIT(5);  // small blood trail
-const int MF_TRACER2 =  BIT(6);  // orange split trail
-const int MF_TRACER3 =  BIT(7);  // purple trail
+const int MF_ROCKET  =  BIT(0);
+const int MF_GRENADE =  BIT(1);
+const int MF_GIB     =  BIT(2);
+const int MF_ROTATE  =  BIT(3);
+const int MF_TRACER  =  BIT(4);
+const int MF_ZOMGIB  =  BIT(5);
+const int MF_TRACER2 =  BIT(6);
+const int MF_TRACER3 =  BIT(7);
 
 .int csqcmodel_effects;
 .int csqcmodel_modelflags;
 .int csqcmodel_traileffect;
 
-.bool csqcmodel_isdead; // used by shownames and miscfunctions (entcs_IsDead) to know when a player is dead
+.bool csqcmodel_isdead;
 
 .int isplayermodel;
 

@@ -23,7 +23,6 @@ string GetMapname()
 float Map_Count, Map_Current;
 string Map_Current_Name;
 
-// NOTE: this now expects the map list to be already tokenized and the count in Map_Count
 int GetMaplistPosition()
 {
 	string map = GetMapname();
@@ -46,7 +45,6 @@ int GetMaplistPosition()
 			return pos;
 	}
 
-	// resume normal maplist rotation if current map is not in g_maplist
 	return idx;
 }
 
@@ -70,19 +68,17 @@ bool MapHasRightSize(string map)
 	if(autocvar_g_maplist_ignore_sizes)
 		return true;
 
-	// open map size restriction file
 	if(!MapReadSizes(map))
-		return true; // map has no size restrictions
+		return true;
 
 	string checksize_msg = strcat("MapHasRightSize ", map);
 	int player_limit = ((autocvar_g_maplist_sizes_count_maxplayers) ? GetPlayerLimit() : 0);
-	int pcount = ((player_limit > 0) ? min(player_count, player_limit) : player_count); // bind it to the player limit so that forced spectators don't influence the limits
+	int pcount = ((player_limit > 0) ? min(player_count, player_limit) : player_count);
 
 	if(!autocvar_g_maplist_sizes_count_bots)
 		pcount -= currentbots;
 	pcount -= rint(cvar("g_maplist_sizes_specparty") * pcount);
 
-	// ensure small maps can be selected when pcount is low
 	if(map_minplayers <= (_MapInfo_GetTeamPlayBool(MapInfo_CurrentGametype()) ? 4 : 2))
 		map_minplayers = 0;
 
@@ -161,10 +157,7 @@ void Map_Goto(float reinit)
 	MapInfo_LoadMap(getmapname_stored, reinit);
 }
 
-// return codes of map selectors:
-//   -1 = temporary failure (that is, try some method that is guaranteed to succeed)
-//   -2 = permanent failure
-float MaplistMethod_Iterate() // usual method
+float MaplistMethod_Iterate()
 {
 	float pass, i;
 
@@ -183,7 +176,7 @@ float MaplistMethod_Iterate() // usual method
 	return -1;
 }
 
-float MaplistMethod_Repeat() // fallback method
+float MaplistMethod_Repeat()
 {
 	LOG_TRACE("Trying MaplistMethod_Repeat");
 
@@ -192,7 +185,7 @@ float MaplistMethod_Repeat() // fallback method
 	return -2;
 }
 
-float MaplistMethod_Random() // random map selection
+float MaplistMethod_Random()
 {
 	float i, imax;
 
@@ -203,16 +196,14 @@ float MaplistMethod_Random() // random map selection
 	for(i = 0; i <= imax; ++i)
 	{
 		float mapindex;
-		mapindex = (Map_Current + floor(random() * (Map_Count - 1) + 1)) % Map_Count; // any OTHER map
+		mapindex = (Map_Current + floor(random() * (Map_Count - 1) + 1)) % Map_Count;
 		if(Map_Check(mapindex, 1))
 			return mapindex;
 	}
 	return -1;
 }
 
-// the exponent sets a bias on the map selection:
-// the higher the exponent, the less likely "shortly repeated" same maps are
-float MaplistMethod_Shuffle(float exponent) // more clever shuffling
+float MaplistMethod_Shuffle(float exponent)
 {
 	float i, j, imax, insertpos;
 
@@ -224,23 +215,21 @@ float MaplistMethod_Shuffle(float exponent) // more clever shuffling
 	{
 		string newlist;
 
-		// now reinsert this at another position
-		insertpos = (random() ** (1 / exponent));       // ]0, 1]
-		insertpos = insertpos * (Map_Count - 1);       // ]0, Map_Count - 1]
-		insertpos = ceil(insertpos) + 1;               // {2, 3, 4, ..., Map_Count}
+		insertpos = (random() ** (1 / exponent));
+		insertpos = insertpos * (Map_Count - 1);
+		insertpos = ceil(insertpos) + 1;
 		LOG_TRACE("SHUFFLE: insert pos = ", ftos(insertpos));
 
-		// insert the current map there
 		newlist = "";
-		for(j = 1; j < insertpos; ) // i == 1: no loop, will be inserted as first; however, i == 1 has been excluded above
+		for(j = 1; j < insertpos; )
 		{
 			if (j + 2 < insertpos)
 				newlist = strcat(newlist, " ", argv(j++), " ", argv(j++), " ", argv(j++));
 			else
 				newlist = strcat(newlist, " ", argv(j++));
 		}
-		newlist = strcat(newlist, " ", argv(0));       // now insert the just selected map
-		for(j = insertpos; j < Map_Count; ) // i == Map_Count: no loop, has just been inserted as last
+		newlist = strcat(newlist, " ", argv(0));
+		for(j = insertpos; j < Map_Count; )
 		{
 			if (j + 2 < Map_Count)
 				newlist = strcat(newlist, " ", argv(j++), " ", argv(j++), " ", argv(j++));
@@ -251,8 +240,7 @@ float MaplistMethod_Shuffle(float exponent) // more clever shuffling
 		cvar_set("g_maplist", newlist);
 		Map_Count = tokenizebyseparator(autocvar_g_maplist, " ");
 
-		// NOTE: the selected map has just been inserted at (insertpos-1)th position
-		Map_Current = insertpos - 1; // this is not really valid, but this way the fallback has a chance of working
+		Map_Current = insertpos - 1;
 		if(Map_Check(Map_Current, 1))
 			return Map_Current;
 	}
@@ -286,9 +274,8 @@ void Maplist_Init()
 		error("empty maplist, cannot select a new map");
 	Map_Current = bound(0, GetMaplistPosition(), Map_Count - 1);
 
-	strcpy(Map_Current_Name, argv(Map_Current)); // will be automatically freed on exit thanks to DP
-	// this may or may not be correct, but who cares, in the worst case a map
-	// isn't chosen in the first pass that should have been
+	strcpy(Map_Current_Name, argv(Map_Current));
+
 }
 
 string GetNextMap()
@@ -342,7 +329,7 @@ float DoNextMapOverride(float reinit)
 		alreadychangedlevel = true;
 		return true;
 	}
-	if (!reinit && autocvar_samelevel) // if samelevel is set, stay on same level
+	if (!reinit && autocvar_samelevel)
 	{
 		localcmd("restart\n");
 		alreadychangedlevel = true;
@@ -382,9 +369,7 @@ float DoNextMapOverride(float reinit)
 
 void GotoNextMap(float reinit)
 {
-	//string nextmap;
-	//float n, nummaps;
-	//string s;
+
 	if (alreadychangedlevel)
 		return;
 	alreadychangedlevel = true;
@@ -422,14 +407,6 @@ string GotoMap(string m)
 		return "Map switch will happen after scoreboard.";
 }
 
-
-/*
-============
-IntermissionThink
-
-When the player presses attack or jump, change to the next level
-============
-*/
 .float autoscreenshot;
 void IntermissionThink(entity this)
 {
@@ -444,7 +421,7 @@ void IntermissionThink(entity this)
 		this.autoscreenshot = -1;
 		if(IS_REAL_CLIENT(this))
 		{
-			string num = strftime_s(); // strftime(false, "%s") isn't reliable, see strftime_s description
+			string num = strftime_s();
 			stuffcmd(this, sprintf("\nscreenshot screenshots/autoscreenshot/%s-%s.jpg; "
 				"echo \"^5A screenshot has been taken at request of the server.\"\n", GetMapname(), num));
 		}
@@ -463,10 +440,10 @@ void IntermissionThink(entity this)
 
 void FixIntermissionClient(entity e)
 {
-	if(!e.autoscreenshot) // initial call
+	if(!e.autoscreenshot)
 	{
-		e.autoscreenshot = time + 0.8;	// used for autoscreenshot
-		SetResourceExplicit(e, RES_HEALTH, -2342); // health in the first intermission phase
+		e.autoscreenshot = time + 0.8;
+		SetResourceExplicit(e, RES_HEALTH, -2342);
 		for (int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 		{
 			.entity weaponentity = weaponentities[slot];

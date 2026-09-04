@@ -8,7 +8,7 @@ REGISTER_MUTATOR(vampire, expr_evaluate(autocvar_g_vampire) && !MUTATOR_IS_ENABL
 
 MUTATOR_HOOKFUNCTION(vampire, PlayerDamage_SplitHealthArmor)
 {
-	// NOTE: vampire buff PlayerDamage_SplitHealthArmor code is similar
+
 	entity frag_attacker = M_ARGV(1, entity);
 	entity frag_target = M_ARGV(2, entity);
 	float health_take = bound(0, M_ARGV(4, float), GetResource(frag_target, RES_HEALTH));

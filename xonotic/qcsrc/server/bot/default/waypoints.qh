@@ -9,26 +9,19 @@ vector autocvar_g_waypointeditor_symmetrical_origin;
 int autocvar_g_waypointeditor_symmetrical_order;
 vector autocvar_g_waypointeditor_symmetrical_axis;
 
-// increase by 0.01 when changes require only waypoint relinking
-// increase by 1 when changes require to manually edit waypoints
-// max 2 decimal places, always specified
 const float WAYPOINT_VERSION = 1.04;
 float waypoint_version_loaded;
 string waypoint_time;
 
-// fields you can query using prvm_global server to get some statistics about waypoint linking culling
 float relink_total, relink_walkculled, relink_pvsculled, relink_lengthculled;
 
 float botframe_waypointeditorlightningtime;
 float botframe_loadedforcedlinks;
 float botframe_cachedwaypointlinks;
 
-// waypoint wp links to waypoint wp.wpXX (OUTGOING link)
-// links are sorted by their cost (wpXXmincost)
 .entity wp00, wp01, wp02, wp03, wp04, wp05, wp06, wp07, wp08, wp09, wp10, wp11, wp12, wp13, wp14, wp15;
 .entity wp16, wp17, wp18, wp19, wp20, wp21, wp22, wp23, wp24, wp25, wp26, wp27, wp28, wp29, wp30, wp31;
 
-// used by jumppads to store original destination wp, used in case it gets changed in the editor
 .entity wp00_original;
 
 .float wp00mincost, wp01mincost, wp02mincost, wp03mincost, wp04mincost, wp05mincost, wp06mincost, wp07mincost;
@@ -36,9 +29,6 @@ float botframe_cachedwaypointlinks;
 .float wp16mincost, wp17mincost, wp18mincost, wp19mincost, wp20mincost, wp21mincost, wp22mincost, wp23mincost;
 .float wp24mincost, wp25mincost, wp26mincost, wp27mincost, wp28mincost, wp29mincost, wp30mincost, wp31mincost;
 
-// hardwired links are saved to the .wpXX fields among normal links
-// AND to the supporting .wphwXX fields to allow identifying them precisely
-// these links are not sorted, unlike normal links
 .entity wphw00, wphw01, wphw02, wphw03, wphw04, wphw05, wphw06, wphw07;
 
 .float wpcost;
@@ -49,13 +39,8 @@ float botframe_cachedwaypointlinks;
 
 .vector wpnearestpoint;
 
-// holds reference to the support waypoint, if any
 .entity goalentity;
 #define SUPPORT_WP goalentity
-
-/*
- * Functions
- */
 
 spawnfunc(waypoint);
 

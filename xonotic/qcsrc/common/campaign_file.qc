@@ -7,10 +7,6 @@
 	#include <common/campaign_common.qh>
 #endif
 
-// CampaignFileLoad(offset, n)
-// - Loads campaign level data (up to n entries starting at offset)
-//   into the globals
-// - Returns the number of entries successfully read
 float CampaignFile_Load(int offset, float n)
 {
 	float fh;
@@ -34,18 +30,18 @@ float CampaignFile_Load(int offset, float n)
 		for(lineno = 0; (l = fgets(fh)); )
 		{
 			if(strlen(l) == 0)
-				continue; // empty line
+				continue;
 			if(substring(l, 0, 11) == "//campaign:")
 				campaign_title = substring(l, 11, strlen(l) - 11);
 			if(substring(l, 0, 2) == "//")
-				continue; // comment
+				continue;
 			if(substring(l, 0, 12) == "\"//campaign:")
 				campaign_title = substring(l, 12, strlen(l) - 13);
 			if(substring(l, 0, 3) == "\"//")
-				continue; // comment
+				continue;
 			if(lineno >= offset)
 			{
-				entlen = tokenize(l); // using insane tokenizer for CSV
+				entlen = tokenize(l);
 
 #define CAMPAIGN_GETARG \
 	a = argv(++i); \
@@ -54,7 +50,7 @@ float CampaignFile_Load(int offset, float n)
 	else \
 		++i
 
-				i = -1; // starts at -1 so I don't need postincrement; that is, i points to BEFORE the current arg!
+				i = -1;
 				CAMPAIGN_GETARG; campaign_gametype[campaign_entries] = strzone(a);
 				CAMPAIGN_GETARG; campaign_mapname[campaign_entries] = strzone(a);
 				CAMPAIGN_GETARG; campaign_bots[campaign_entries] = stof(a);

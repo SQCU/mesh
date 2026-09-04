@@ -44,7 +44,7 @@ void XonoticPlayList_addToPlayList(entity me, string track)
 	for(i = 0; i < me.nItems; ++i)
 	{
 		if(argv(i) == track)
-			return; // track is already in playlist
+			return;
 	}
 	cvar_set("music_playlist_list0", strcat(cvar_string("music_playlist_list0"), " ", track));
 }
@@ -65,7 +65,7 @@ void XonoticPlayList_removeSelectedFromPlayList(entity me)
 			if(cvar("music_playlist_index") == 0 || cvar("music_playlist_index") == 999)
 			{
 				if(cvar("music_playlist_current0") == i)
-					cpt = true; // current playing track (we can't start next track here because startSound calls tokenize_console)
+					cpt = true;
 				else if(cvar("music_playlist_current0") > i)
 					cvar_set("music_playlist_current0", ftos(cvar("music_playlist_current0") - 1));
 			}
@@ -73,8 +73,7 @@ void XonoticPlayList_removeSelectedFromPlayList(entity me)
 		}
 		s = strcat(s, " ", argv(i));
 	}
-	// we must stop the current playing track if it has been removed
-	// otherwise pause/play button will resume from another track
+
 	if(s == "")
 	{
 		cvar_set("music_playlist_list0", "");
@@ -83,7 +82,7 @@ void XonoticPlayList_removeSelectedFromPlayList(entity me)
 	}
 	else
 	{
-		cvar_set("music_playlist_list0", substring(s, 1, strlen(s))); // remove initial space
+		cvar_set("music_playlist_list0", substring(s, 1, strlen(s)));
 		if(cpt)
 			me.startSound(me, 0);
 	}
@@ -107,7 +106,7 @@ float XonoticPlayList_mouseDrag(entity me, vector pos)
 	i = me.selectedItem;
 	f = SUPER(XonoticPlayList).mouseDrag(me, pos);
 
-	if(me.pressed != 1) // don't change priority if the person is just scrolling
+	if(me.pressed != 1)
 	{
 		if(me.selectedItem != i)
 		{
@@ -147,7 +146,7 @@ void XonoticPlayList_drawListBoxItem(entity me, int i, vector absSize, bool isSe
 	if(i == me.playingTrack)
 	{
 		float f = cvar("music_playlist_sampleposition0");
-		// display Play symbol: Unicode char U+25B6: Black Right-Pointing Triangle
+
 		if(f <= 0 || (((time * 2) & 1) && f > 0))
 			draw_Text(me.realUpperMargin * eY + (me.columnNumberOrigin + me.columnNumberSize) * eX, "\xE2\x96\xB6", me.realFontSize, '1 1 1', SKINALPHA_TEXT, 0);
 	}
@@ -161,8 +160,7 @@ void XonoticPlayList_drawListBoxItem(entity me, int i, vector absSize, bool isSe
 
 void XonoticPlayList_stopSound(entity me)
 {
-	// STOP: list 0 is disabled by setting the index to -1
-	// we set sampleposition0 to 0 to forget the position that the engine saves in this frame (for this reason we need to wait a frame)
+
 	if(cvar("music_playlist_index") == 0 || cvar("music_playlist_index") == 999)
 	{
 		cvar_set("music_playlist_index", "-1");
@@ -191,19 +189,16 @@ void XonoticPlayList_startSound(entity me, float offset)
 	else
 	{
 		f = me.selectedItem;
-		// if it was paused then resume
+
 		if(f == cvar("music_playlist_current0"))
 		if(cvar("music_playlist_index") == 999)
 		{
 			me.resumeSound(me);
 			return;
 		}
-		// if it was not paused then proceed with restart
+
 	}
 
-	// START: list 0 is disabled by setting the index to 999
-	// we set current0 to the selected track and sampleposition0 to 0 to forget the position that the engine saves in this frame (for this reason we need to wait a frame)
-	// then we switch back to list 0
 	cvar_set("music_playlist_index", "999");
 	cvar_set("music_playlist_current0", ftos(f));
 	localcmd("\nwait; music_playlist_sampleposition0 0; wait; music_playlist_index 0\n");
@@ -226,15 +221,13 @@ void NextSound_Click(entity btn, entity me)
 
 void XonoticPlayList_resumeSound(entity me)
 {
-	// RESUME: list 0 is enabled by setting the index to 0
-	// (we reset sampleposition0 to 0 to mark the track as in playing back state)
+
 	if(cvar("music_playlist_index") == 999)
 		localcmd("\nmusic_playlist_index 0; wait; music_playlist_sampleposition0 0\n");
 }
 void XonoticPlayList_pauseSound(entity me)
 {
-	// PAUSE: list 0 is disabled by setting the index to 999
-	// (we know the track is paused because the engine sets sampleposition0 to remember current position)
+
 	if(cvar("music_playlist_index") == 0)
 		localcmd("\nmusic_playlist_index 999\n");
 	else me.resumeSound(me);

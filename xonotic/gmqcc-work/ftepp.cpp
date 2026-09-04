@@ -16,12 +16,12 @@ struct ppcondition {
 struct pptoken {
     int token;
     char *value;
-    /* a copy from the lexer */
+
     union {
         vec3_t v;
         int i;
         double f;
-        int t; /* type */
+        int t;
     } constval;
 };
 
@@ -29,7 +29,7 @@ struct ppmacro {
     lex_ctx_t ctx;
     char *name;
     char **params;
-    /* yes we need an extra flag since `#define FOO x` is not the same as `#define FOO() x` */
+
     bool has_params;
     bool variadic;
     pptoken **output;
@@ -41,7 +41,7 @@ struct ftepp_t {
     unsigned int errors;
     bool output_on;
     ppcondition *conditions;
-    ht macros;  /* hashtable<string, ppmacro*> */
+    ht macros;
     char *output_string;
     char *itemname;
     char *includename;
@@ -50,7 +50,6 @@ struct ftepp_t {
     uint32_t predef_randval;
 };
 
-/* __DATE__ */
 static char *ftepp_predef_date(ftepp_t *context) {
     const struct tm *itime = nullptr;
     char            *value = (char*)mem_a(82);
@@ -65,7 +64,6 @@ static char *ftepp_predef_date(ftepp_t *context) {
     return value;
 }
 
-/* __TIME__ */
 static char *ftepp_predef_time(ftepp_t *context) {
     const struct tm *itime = nullptr;
     char            *value = (char*)mem_a(82);
@@ -80,28 +78,27 @@ static char *ftepp_predef_time(ftepp_t *context) {
     return value;
 }
 
-/* __LINE__ */
 static char *ftepp_predef_line(ftepp_t *context) {
     char *value;
 
     util_asprintf(&value, "%d", (int)context->lex->line);
     return value;
 }
-/* __FILE__ */
+
 static char *ftepp_predef_file(ftepp_t *context) {
-    size_t length = strlen(context->lex->name) + 3; /* two quotes and a terminator */
+    size_t length = strlen(context->lex->name) + 3;
     char  *value  = (char*)mem_a(length);
 
     util_snprintf(value, length, "\"%s\"", context->lex->name);
     return value;
 }
-/* __COUNTER_LAST__ */
+
 static char *ftepp_predef_counterlast(ftepp_t *context) {
     char *value;
     util_asprintf(&value, "%u", context->predef_countval);
     return value;
 }
-/* __COUNTER__ */
+
 static char *ftepp_predef_counter(ftepp_t *context) {
     char *value;
 
@@ -110,7 +107,7 @@ static char *ftepp_predef_counter(ftepp_t *context) {
 
     return value;
 }
-/* __RANDOM__ */
+
 static char *ftepp_predef_random(ftepp_t *context) {
     char *value;
 
@@ -118,14 +115,14 @@ static char *ftepp_predef_random(ftepp_t *context) {
     util_asprintf(&value, "%u", context->predef_randval);
     return value;
 }
-/* __RANDOM_LAST__ */
+
 static char *ftepp_predef_randomlast(ftepp_t *context) {
     char *value;
 
     util_asprintf(&value, "%u", context->predef_randval);
     return value;
 }
-/* __TIMESTAMP__ */
+
 static char *ftepp_predef_timestamp(ftepp_t *context) {
     struct stat finfo;
     const char *find;
@@ -163,7 +160,7 @@ static const ftepp_predef_t ftepp_predefs[] = {
 };
 
 static GMQCC_INLINE size_t ftepp_predef_index(const char *name) {
-    /* no hashtable here, we simply check for one to exist the naive way */
+
     size_t i;
     for(i = 1; i < GMQCC_ARRAY_COUNT(ftepp_predefs) + 1; i++)
         if (!strcmp(ftepp_predefs[i-1].name, name))
@@ -176,7 +173,6 @@ bool ftepp_predef_exists(const char *name) {
     return ftepp_predef_index(name) != 0;
 }
 
-/* singleton because we're allowed */
 static GMQCC_INLINE char *(*ftepp_predef(const char *name))(ftepp_t *context) {
     size_t i = ftepp_predef_index(name);
     return (i != 0) ? ftepp_predefs[i-1].func : nullptr;
@@ -327,7 +323,6 @@ static GMQCC_INLINE int ftepp_next(ftepp_t *ftepp)
     return (ftepp->token = lex_do(ftepp->lex));
 }
 
-/* Important: this does not skip newlines! */
 static bool ftepp_skipspace(ftepp_t *ftepp)
 {
     if (ftepp->token != TOKEN_WHITE)
@@ -340,7 +335,6 @@ static bool ftepp_skipspace(ftepp_t *ftepp)
     return true;
 }
 
-/* this one skips EOLs as well */
 static bool ftepp_skipallwhite(ftepp_t *ftepp)
 {
     if (ftepp->token != TOKEN_WHITE && ftepp->token != TOKEN_EOL)
@@ -355,9 +349,6 @@ static bool ftepp_skipallwhite(ftepp_t *ftepp)
     return true;
 }
 
-/**
- * The huge macro parsing code...
- */
 static bool ftepp_define_params(ftepp_t *ftepp, ppmacro *macro)
 {
     do {
@@ -393,7 +384,7 @@ static bool ftepp_define_params(ftepp_t *ftepp, ppmacro *macro)
         return false;
     }
     ftepp_next(ftepp);
-    /* skipspace happens in ftepp_define */
+
     return true;
 }
 
@@ -423,10 +414,6 @@ static bool ftepp_define_body(ftepp_t *ftepp, ppmacro *macro)
                         return false;
                     }
 
-                    /*
-                     * mark it as an array to be handled later as such and not
-                     * as traditional __VA_ARGS__
-                     */
                     ftepp->token = TOKEN_VA_ARGS_ARRAY;
                     ptok = pptoken_make(ftepp);
                     ptok->constval.i = index;
@@ -455,7 +442,7 @@ static bool ftepp_define_body(ftepp_t *ftepp, ppmacro *macro)
             ftepp_next(ftepp);
         }
     }
-    /* recursive expansion can cause EOFs here */
+
     if (ftepp->token != TOKEN_EOL && ftepp->token != TOKEN_EOF) {
         ftepp_error(ftepp, "unexpected junk after macro or unexpected end of file");
         return false;
@@ -464,20 +451,20 @@ static bool ftepp_define_body(ftepp_t *ftepp, ppmacro *macro)
 }
 
 static const char *ftepp_math_constants[][2] = {
-    { "M_E",        "2.7182818284590452354"  }, /* e          */
-    { "M_LOG2E",    "1.4426950408889634074"  }, /* log_2 e    */
-    { "M_LOG10E",   "0.43429448190325182765" }, /* log_10 e   */
-    { "M_LN2",      "0.69314718055994530942" }, /* log_e 2    */
-    { "M_LN10",     "2.30258509299404568402" }, /* log_e 10   */
-    { "M_PI",       "3.14159265358979323846" }, /* pi         */
-    { "M_PI_2",     "1.57079632679489661923" }, /* pi/2       */
-    { "M_PI_4",     "0.78539816339744830962" }, /* pi/4       */
-    { "M_1_PI",     "0.31830988618379067154" }, /* 1/pi       */
-    { "M_2_PI",     "0.63661977236758134308" }, /* 2/pi       */
-    { "M_2_SQRTPI", "1.12837916709551257390" }, /* 2/sqrt(pi) */
-    { "M_SQRT2",    "1.41421356237309504880" }, /* sqrt(2)    */
-    { "M_SQRT1_2",  "0.70710678118654752440" }, /* 1/sqrt(2)  */
-    { "M_TAU",      "6.28318530717958647692" }  /* pi*2       */
+    { "M_E",        "2.7182818284590452354"  },
+    { "M_LOG2E",    "1.4426950408889634074"  },
+    { "M_LOG10E",   "0.43429448190325182765" },
+    { "M_LN2",      "0.69314718055994530942" },
+    { "M_LN10",     "2.30258509299404568402" },
+    { "M_PI",       "3.14159265358979323846" },
+    { "M_PI_2",     "1.57079632679489661923" },
+    { "M_PI_4",     "0.78539816339744830962" },
+    { "M_1_PI",     "0.31830988618379067154" },
+    { "M_2_PI",     "0.63661977236758134308" },
+    { "M_2_SQRTPI", "1.12837916709551257390" },
+    { "M_SQRT2",    "1.41421356237309504880" },
+    { "M_SQRT1_2",  "0.70710678118654752440" },
+    { "M_TAU",      "6.28318530717958647692" }
 };
 
 static bool ftepp_define(ftepp_t *ftepp)
@@ -507,7 +494,7 @@ static bool ftepp_define(ftepp_t *ftepp)
             macro = ftepp_macro_find(ftepp, ftepp_tokval(ftepp));
 
             if (OPTS_FLAG(FTEPP_MATHDEFS)) {
-                /* user defined ones take precedence */
+
                 if (macro && mathconstant) {
                     ftepp_macro_delete(ftepp, ftepp_tokval(ftepp));
                     macro = nullptr;
@@ -557,14 +544,6 @@ static bool ftepp_define(ftepp_t *ftepp)
     return true;
 }
 
-/**
- * When a macro is used we have to handle parameters as well
- * as special-concatenation via ## or stringification via #
- *
- * Note: parenthesis can nest, so FOO((a),b) is valid, but only
- * this kind of parens. Curly braces or [] don't count towards the
- * paren-level.
- */
 struct macroparam {
     pptoken **tokens;
 };
@@ -577,7 +556,6 @@ static void macroparam_clean(macroparam *self)
     vec_free(self->tokens);
 }
 
-/* need to leave the last token up */
 static bool ftepp_macro_call_params(ftepp_t *ftepp, macroparam **out_params)
 {
     macroparam *params = nullptr;
@@ -653,10 +631,7 @@ static void ftepp_stringify_token(ftepp_t *ftepp, pptoken *token)
         case TOKEN_STRINGCONST:
             ch = token->value;
             while (*ch) {
-                /* in preprocessor mode strings already are string,
-                 * so we don't get actual newline bytes here.
-                 * Still need to escape backslashes and quotes.
-                 */
+
                 switch (*ch) {
                     case '\\': ftepp_out(ftepp, "\\\\", false); break;
                     case '"':  ftepp_out(ftepp, "\\\"", false); break;
@@ -668,9 +643,7 @@ static void ftepp_stringify_token(ftepp_t *ftepp, pptoken *token)
                 ++ch;
             }
             break;
-        /*case TOKEN_WHITE:
-            ftepp_out(ftepp, " ", false);
-            break;*/
+
         case TOKEN_EOL:
             ftepp_out(ftepp, "\\n", false);
             break;
@@ -743,7 +716,6 @@ static bool ftepp_macro_expand(ftepp_t *ftepp, ppmacro *macro, macroparam *param
     else
         varargs = 0;
 
-    /* really ... */
     if (!vec_size(macro->output))
         return true;
 
@@ -797,7 +769,7 @@ static bool ftepp_macro_expand(ftepp_t *ftepp, ppmacro *macro, macroparam *param
                 if (o + 1 < vec_size(macro->output)) {
                     nextok = macro->output[o+1]->token;
                     if (nextok == '#') {
-                        /* raw concatenation */
+
                         ++o;
                         strip = true;
                         break;
@@ -832,10 +804,7 @@ static bool ftepp_macro_expand(ftepp_t *ftepp, ppmacro *macro, macroparam *param
         }
     }
     vec_push(ftepp->output_string, 0);
-    /* Now run the preprocessor recursively on this string buffer */
-    /*
-    printf("__________\n%s\n=========\n", ftepp->output_string);
-    */
+
     inlex = lex_open_string(ftepp->output_string, vec_size(ftepp->output_string)-1, ftepp->lex->name);
     if (!inlex) {
         ftepp_error(ftepp, "internal error: failed to instantiate lexer");
@@ -939,22 +908,6 @@ cleanup:
     return retval;
 }
 
-/**
- * #if - the FTEQCC way:
- *    defined(FOO) => true if FOO was #defined regardless of parameters or contents
- *    <numbers>    => True if the number is not 0
- *    !<factor>    => True if the factor yields false
- *    !!<factor>   => ERROR on 2 or more unary nots
- *    <macro>      => becomes the macro's FIRST token regardless of parameters
- *    <e> && <e>   => True if both expressions are true
- *    <e> || <e>   => True if either expression is true
- *    <string>     => False
- *    <ident>      => False (remember for macros the <macro> rule applies instead)
- * Unary + and - are weird and wrong in fteqcc so we don't allow them
- * parenthesis in expressions are allowed
- * parameter lists on macros are errors
- * No mathematical calculations are executed
- */
 static bool ftepp_if_expr(ftepp_t *ftepp, bool *out, double *value_out);
 static bool ftepp_if_op(ftepp_t *ftepp)
 {
@@ -1028,7 +981,7 @@ static bool ftepp_if_value(ftepp_t *ftepp, bool *out, double *value_out)
                 *out = false;
                 *value_out = 0;
             } else {
-                /* This does not expand recursively! */
+
                 switch (macro->output[0]->token) {
                     case TOKEN_INTCONST:
                         *value_out = macro->output[0]->constval.i;
@@ -1082,15 +1035,6 @@ static bool ftepp_if_value(ftepp_t *ftepp, bool *out, double *value_out)
     return true;
 }
 
-/*
-static bool ftepp_if_nextvalue(ftepp_t *ftepp, bool *out, double *value_out)
-{
-    if (!ftepp_next(ftepp))
-        return false;
-    return ftepp_if_value(ftepp, out, value_out);
-}
-*/
-
 static bool ftepp_if_expr(ftepp_t *ftepp, bool *out, double *value_out)
 {
     if (!ftepp_if_value(ftepp, out, value_out))
@@ -1102,7 +1046,6 @@ static bool ftepp_if_expr(ftepp_t *ftepp, bool *out, double *value_out)
     if (ftepp->token == ')' || ftepp->token != TOKEN_OPERATOR)
         return true;
 
-    /* FTEQCC is all right-associative and no precedence here */
     if (!strcmp(ftepp_tokval(ftepp), "&&") ||
         !strcmp(ftepp_tokval(ftepp), "||"))
     {
@@ -1185,9 +1128,6 @@ static bool ftepp_if(ftepp_t *ftepp, ppcondition *cond)
     return true;
 }
 
-/**
- * ifdef is rather simple
- */
 static bool ftepp_ifdef(ftepp_t *ftepp, ppcondition *cond)
 {
     ppmacro *macro;
@@ -1210,19 +1150,11 @@ static bool ftepp_ifdef(ftepp_t *ftepp, ppcondition *cond)
     (void)ftepp_next(ftepp);
     if (!ftepp_skipspace(ftepp))
         return false;
-    /* relaxing this condition
-    if (ftepp->token != TOKEN_EOL && ftepp->token != TOKEN_EOF) {
-        ftepp_error(ftepp, "stray tokens after #ifdef");
-        return false;
-    }
-    */
+
     cond->on = !!macro;
     return true;
 }
 
-/**
- * undef is also simple
- */
 static bool ftepp_undef(ftepp_t *ftepp)
 {
     (void)ftepp_next(ftepp);
@@ -1245,18 +1177,10 @@ static bool ftepp_undef(ftepp_t *ftepp)
     (void)ftepp_next(ftepp);
     if (!ftepp_skipspace(ftepp))
         return false;
-    /* relaxing this condition
-    if (ftepp->token != TOKEN_EOL && ftepp->token != TOKEN_EOF) {
-        ftepp_error(ftepp, "stray tokens after #ifdef");
-        return false;
-    }
-    */
+
     return true;
 }
 
-/* Special unescape-string function which skips a leading quote
- * and stops at a quote, not just at \0
- */
 static void unescape(const char *str, char *out) {
     ++str;
     while (*str && *str != '"') {
@@ -1333,7 +1257,6 @@ static bool ftepp_directive_warning(ftepp_t *ftepp) {
     if (!ftepp_skipspace(ftepp))
         return false;
 
-    /* handle the odd non string constant case so it works like C */
     if (ftepp->token != TOKEN_STRINGCONST) {
         bool  store   = false;
         vec_append(message, 8, "#warning");
@@ -1364,7 +1287,6 @@ static void ftepp_directive_error(ftepp_t *ftepp) {
     if (!ftepp_skipspace(ftepp))
         return;
 
-    /* handle the odd non string constant case so it works like C */
     if (ftepp->token != TOKEN_STRINGCONST) {
         vec_append(message, 6, "#error");
         ftepp_next(ftepp);
@@ -1392,7 +1314,6 @@ static void ftepp_directive_message(ftepp_t *ftepp) {
     if (!ftepp_skipspace(ftepp))
         return;
 
-    /* handle the odd non string constant case so it works like C */
     if (ftepp->token != TOKEN_STRINGCONST) {
         vec_append(message, 8, "#message");
         ftepp_next(ftepp);
@@ -1414,11 +1335,6 @@ static void ftepp_directive_message(ftepp_t *ftepp) {
     con_cprintmsg(ftepp->lex->tok.ctx, LVL_MSG, "message",  ftepp_tokval(ftepp));
 }
 
-/**
- * Include a file.
- * FIXME: do we need/want a -I option?
- * FIXME: what about when dealing with files in subdirectories coming from a progs.src?
- */
 static bool ftepp_include(ftepp_t *ftepp)
 {
     lex_file *old_lexer = ftepp->lex;
@@ -1448,7 +1364,7 @@ static bool ftepp_include(ftepp_t *ftepp)
                 return false;
             }
         } else if (OPTS_FLAG(FTEPP_PREDEFS)) {
-            /* Well it could be a predefine like __LINE__ */
+
             char *(*predef)(ftepp_t*) = ftepp_predef(ftepp_tokval(ftepp));
             if (predef) {
                 parsename = predef(ftepp);
@@ -1510,7 +1426,6 @@ static bool ftepp_include(ftepp_t *ftepp)
     util_snprintf(lineno, sizeof(lineno), ")\n#pragma line(%lu)\n", (unsigned long)(ctx.line+1));
     ftepp_out(ftepp, lineno, false);
 
-    /* skip the line */
     (void)ftepp_next(ftepp);
     if (!ftepp_skipspace(ftepp))
         return false;
@@ -1523,7 +1438,6 @@ static bool ftepp_include(ftepp_t *ftepp)
     return true;
 }
 
-/* Basic structure handlers */
 static bool ftepp_else_allowed(ftepp_t *ftepp)
 {
     if (!vec_size(ftepp->conditions)) {
@@ -1680,7 +1594,7 @@ static bool ftepp_hash(ftepp_t *ftepp)
                     break;
                 }
             }
-            /* break; never reached */
+
         default:
             ftepp_error(ftepp, "unexpected preprocessor token: `%s`", ftepp_tokval(ftepp));
             return false;
@@ -1691,7 +1605,6 @@ static bool ftepp_hash(ftepp_t *ftepp)
             ftepp_error(ftepp, "missing newline at end of file", ftepp_tokval(ftepp));
             return false;
 
-        /* Builtins! Don't forget the builtins! */
         case TOKEN_INTCONST:
         case TOKEN_FLOATCONST:
             ftepp_out(ftepp, "#", false);
@@ -1707,7 +1620,6 @@ static bool ftepp_preprocess(ftepp_t *ftepp)
     ppmacro *macro;
     bool     newline = true;
 
-    /* predef stuff */
     char    *expand  = nullptr;
 
     ftepp->lex->flags.preprocessing = true;
@@ -1723,7 +1635,7 @@ static bool ftepp_preprocess(ftepp_t *ftepp)
             case TOKEN_KEYWORD:
             case TOKEN_IDENT:
             case TOKEN_TYPENAME:
-                /* is it a predef? */
+
                 if (OPTS_FLAG(FTEPP_PREDEFS)) {
                     char *(*predef)(ftepp_t*) = ftepp_predef(ftepp_tokval(ftepp));
                     if (predef) {
@@ -1771,7 +1683,7 @@ static bool ftepp_preprocess(ftepp_t *ftepp)
                 ftepp_next(ftepp);
                 break;
             case TOKEN_WHITE:
-                /* same as default but don't set newline=false */
+
                 ftepp_out(ftepp, ftepp_tokval(ftepp), true);
                 ftepp_next(ftepp);
                 break;
@@ -1783,16 +1695,12 @@ static bool ftepp_preprocess(ftepp_t *ftepp)
         }
     } while (!ftepp->errors && ftepp->token < TOKEN_EOF);
 
-    /* force a 0 at the end but don't count it as added to the output */
     vec_push(ftepp->output_string, 0);
     vec_shrinkby(ftepp->output_string, 1);
 
     return (ftepp->token == TOKEN_EOF);
 }
 
-/* Like in parser.c - files keep the previous state so we have one global
- * preprocessor. Except here we will want to warn about dangling #ifs.
- */
 static bool ftepp_preprocess_done(ftepp_t *ftepp)
 {
     bool retval = true;
@@ -1835,11 +1743,9 @@ bool ftepp_preprocess_string(ftepp_t *ftepp, const char *name, const char *str)
     return ftepp_preprocess_done(ftepp);
 }
 
-
 void ftepp_add_macro(ftepp_t *ftepp, const char *name, const char *value) {
     char *create = nullptr;
 
-    /* use saner path for empty macros */
     if (!value) {
         ftepp_add_define(ftepp, "__builtin__", name);
         return;
@@ -1869,11 +1775,10 @@ ftepp_t *ftepp_create()
     memset(minor, 0, sizeof(minor));
     memset(major, 0, sizeof(major));
 
-    /* set the right macro based on the selected standard */
     ftepp_add_define(ftepp, nullptr, "GMQCC");
     if (OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_FTEQCC) {
         ftepp_add_define(ftepp, nullptr, "__STD_FTEQCC__");
-        /* 1.00 */
+
         major[0] = '"';
         major[1] = '1';
         major[2] = '"';
@@ -1891,7 +1796,7 @@ ftepp_t *ftepp_create()
         util_snprintf(minor, 32, "\"%d\"", GMQCC_VERSION_MINOR);
     } else if (OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_QCC) {
         ftepp_add_define(ftepp, nullptr, "__STD_QCC__");
-        /* 1.0 */
+
         major[0] = '"';
         major[1] = '1';
         major[2] = '"';
@@ -1904,13 +1809,8 @@ ftepp_t *ftepp_create()
     ftepp_add_macro(ftepp, "__STD_VERSION_MINOR__", minor);
     ftepp_add_macro(ftepp, "__STD_VERSION_MAJOR__", major);
 
-    /*
-     * We're going to just make __NULL__ nil, which works for 60% of the
-     * cases of __NULL_ for fteqcc.
-     */
     ftepp_add_macro(ftepp, "__NULL__", "nil");
 
-    /* add all the math constants if they can be */
     if (OPTS_FLAG(FTEPP_MATHDEFS)) {
         for (i = 0; i < GMQCC_ARRAY_COUNT(ftepp_math_constants); i++)
             if (!ftepp_macro_find(ftepp, ftepp_math_constants[i][0]))

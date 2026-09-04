@@ -2,16 +2,12 @@
 
 #ifdef SVQC
 
-// enable to debug melee range
-//#define SHOTGUN_MELEEDEBUG
-
 void W_Shotgun_Attack(Weapon thiswep, entity actor, .entity weaponentity, float isprimary, float ammocount, float damage, float bullets, float spread, float solidpenetration, float force, entity bullet_trail_effect)
 {
 	W_DecreaseAmmo(thiswep, actor, ammocount, weaponentity);
 
 	W_SetupShot(actor, weaponentity, true, 5, SND_SHOTGUN_FIRE, ((isprimary) ? CH_WEAPON_A : CH_WEAPON_SINGLE), damage * bullets, thiswep.m_id);
 
-	// TRICK: do the antilag outside the regular fireBullet function, so it isn't performed unnecessarily on every single bullet!
 	float lag = antilag_getlag(actor);
 	if(lag && bullets > 0)
 		antilag_takeback_all(actor, lag);
@@ -24,11 +20,10 @@ void W_Shotgun_Attack(Weapon thiswep, entity actor, .entity weaponentity, float 
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir);
 
-	// casing code
 	if(autocvar_g_casings >= 1)
 	{
-		makevectors(actor.v_angle); // for some reason, this is lost
-		//for(int sc = 0;sc < WEP_CVAR_PRI(shotgun, ammo);sc = sc + 1)
+		makevectors(actor.v_angle);
+
 			SpawnCasing(((random() * 50 + 50) * v_right) - (v_forward * (random() * 25 + 25)) - ((random() * 5 - 30) * v_up), vectoangles(v_forward), 1, actor, weaponentity);
 	}
 }
@@ -37,32 +32,29 @@ void W_Shotgun_Attack(Weapon thiswep, entity actor, .entity weaponentity, float 
 .entity swing_alreadyhit;
 void W_Shotgun_Melee_Think(entity this)
 {
-	// declarations
+
 	float i, f, swing, swing_factor, swing_damage, meleetime, is_player;
 	entity target_victim;
 	vector targpos;
 
-	if(!this.cnt) // set start time of melee
+	if(!this.cnt)
 	{
 		this.cnt = time;
 		W_PlayStrengthSound(this.realowner);
 	}
 
-	makevectors(this.realowner.v_angle); // update values for v_* vectors
+	makevectors(this.realowner.v_angle);
 
-	// calculate swing percentage based on time
 	meleetime = WEP_CVAR_SEC(shotgun, melee_time) * W_WeaponRateFactor(this.realowner);
 	swing = bound(0, (this.cnt + meleetime - time) / meleetime, 10);
 	f = ((1 - swing) * WEP_CVAR_SEC(shotgun, melee_traces));
 
-	// check to see if we can still continue, otherwise give up now
 	if(IS_DEAD(this.realowner) && WEP_CVAR_SEC(shotgun, melee_no_doubleslap))
 	{
 		delete(this);
 		return;
 	}
 
-	// if okay, perform the traces needed for this frame
 	for(i=this.swing_prev; i < f; ++i)
 	{
 		swing_factor = ((1 - (i / WEP_CVAR_SEC(shotgun, melee_traces))) * 2 - 1);
@@ -74,7 +66,6 @@ void W_Shotgun_Melee_Think(entity this)
 
 		WarpZone_traceline_antilag(this.realowner, this.realowner.origin + this.realowner.view_ofs, targpos, false, this.realowner, ((IS_CLIENT(this.realowner)) ? ANTILAG_LATENCY(this.realowner) : 0));
 
-		// draw lightning beams for debugging
 	#ifdef SHOTGUN_MELEEDEBUG
 		te_lightning2(NULL, targpos, this.realowner.origin + this.realowner.view_ofs + v_forward * 5 - v_up * 5);
 		te_customflash(targpos, 40,  2, '1 1 1');
@@ -82,19 +73,17 @@ void W_Shotgun_Melee_Think(entity this)
 
 		is_player = (IS_PLAYER(trace_ent) || trace_ent.classname == "body" || IS_MONSTER(trace_ent));
 
-		if((trace_fraction < 1) // if trace is good, apply the damage and remove this
+		if((trace_fraction < 1)
 			&& (trace_ent.takedamage != DAMAGE_NO)
 			&& (trace_ent != this.swing_alreadyhit)
 			&& (is_player || WEP_CVAR_SEC(shotgun, melee_nonplayerdamage)))
 		{
-			target_victim = trace_ent; // so it persists through other calls
+			target_victim = trace_ent;
 
-			if(is_player) // this allows us to be able to nerf the non-player damage done in e.g. assault or onslaught.
+			if(is_player)
 				swing_damage = (WEP_CVAR_SEC(shotgun, damage) * min(1, swing_factor + 1));
 			else
 				swing_damage = (WEP_CVAR_SEC(shotgun, melee_nonplayerdamage) * min(1, swing_factor + 1));
-
-			//print(strcat(this.realowner.netname, " hitting ", target_victim.netname, " with ", strcat(ftos(swing_damage), " damage (factor: ", ftos(swing_factor), ") at "), ftos(time), " seconds.\n"));
 
 			Damage(target_victim, this.realowner, this.realowner,
 				swing_damage, WEP_SHOTGUN.m_id | HITTYPE_SECONDARY, this.weaponentity_fld,
@@ -103,15 +92,14 @@ void W_Shotgun_Melee_Think(entity this)
 
 			if(accuracy_isgooddamage(this.realowner, target_victim)) { accuracy_add(this.realowner, WEP_SHOTGUN, 0, swing_damage); }
 
-			// draw large red flash for debugging
 		#ifdef SHOTGUN_MELEEDEBUG
 			te_customflash(targpos, 200, 2, '15 0 0');
 		#endif
 
-			if(WEP_CVAR_SEC(shotgun, melee_multihit)) // allow multiple hits with one swing, but not against the same player twice.
+			if(WEP_CVAR_SEC(shotgun, melee_multihit))
 			{
 				this.swing_alreadyhit = target_victim;
-				continue; // move along to next trace
+				continue;
 			}
 			else
 			{
@@ -123,13 +111,13 @@ void W_Shotgun_Melee_Think(entity this)
 
 	if(time >= this.cnt + meleetime)
 	{
-		// melee is finished
+
 		delete(this);
 		return;
 	}
 	else
 	{
-		// set up next frame
+
 		this.swing_prev = i;
 		this.nextthink = time;
 	}
@@ -148,7 +136,6 @@ void W_Shotgun_Attack2(Weapon thiswep, entity actor, .entity weaponentity, int f
 	W_SetupShot_Range(actor, weaponentity, true, 0, SND_Null, 0, WEP_CVAR_SEC(shotgun, damage), WEP_CVAR_SEC(shotgun, melee_range), WEP_SHOTGUN.m_id | HITTYPE_SECONDARY);
 }
 
-// alternate secondary weapon frames
 void W_Shotgun_Attack3_Frame2(Weapon thiswep, entity actor, .entity weaponentity, int fire)
 {
 	if (!thiswep.wr_checkammo2(thiswep, actor, weaponentity))
@@ -159,7 +146,7 @@ void W_Shotgun_Attack3_Frame2(Weapon thiswep, entity actor, .entity weaponentity
 		return;
 	}
 
-	sound(actor, CH_WEAPON_SINGLE, SND_Null, VOL_BASE, ATTN_NORM); // kill previous sound
+	sound(actor, CH_WEAPON_SINGLE, SND_Null, VOL_BASE, ATTN_NORM);
 	W_Shotgun_Attack(thiswep, actor, weaponentity, true,
 		WEP_CVAR_PRI(shotgun, ammo),
 		WEP_CVAR_PRI(shotgun, damage),
@@ -167,7 +154,7 @@ void W_Shotgun_Attack3_Frame2(Weapon thiswep, entity actor, .entity weaponentity
 		WEP_CVAR_PRI(shotgun, spread),
 		WEP_CVAR_PRI(shotgun, solidpenetration),
 		WEP_CVAR_PRI(shotgun, force),
-		EFFECT_BULLET_WEAK); // actually is secondary, but we trick the last shot into playing full reload sound
+		EFFECT_BULLET_WEAK);
 	weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, WEP_CVAR_SEC(shotgun, alt_animtime), w_ready);
 }
 void W_Shotgun_Attack3_Frame1(Weapon thiswep, entity actor, .entity weaponentity, int fire)
@@ -203,7 +190,7 @@ METHOD(Shotgun, wr_aim, void(entity thiswep, entity actor, .entity weaponentity)
 
 METHOD(Shotgun, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    // force reload weapon when clip is empty or insufficent
+
     if(WEP_CVAR(shotgun, reload_ammo) && actor.(weaponentity).clip_load < WEP_CVAR_PRI(shotgun, ammo))
     {
         if(actor.(weaponentity).clip_load >= 0 && GetResource(actor, thiswep.ammo_type) > 0)
@@ -213,11 +200,11 @@ METHOD(Shotgun, wr_think, void(entity thiswep, entity actor, .entity weaponentit
         }
     }
 
-    if(actor.(weaponentity).clip_load >= 0) // we are not currently reloading
+    if(actor.(weaponentity).clip_load >= 0)
     {
         if(fire & 1)
         {
-            if(time >= actor.(weaponentity).shotgun_primarytime) // handle refire separately so the secondary can be fired straight after a primary
+            if(time >= actor.(weaponentity).shotgun_primarytime)
             {
                 if(weapon_prepareattack(thiswep, actor, weaponentity, false, WEP_CVAR_PRI(shotgun, animtime)))
                 {
@@ -237,7 +224,7 @@ METHOD(Shotgun, wr_think, void(entity thiswep, entity actor, .entity weaponentit
         }
         else if((fire & 2) && WEP_CVAR(shotgun, secondary) == 2)
         {
-            if(time >= actor.(weaponentity).shotgun_primarytime) // handle refire separately so the secondary can be fired straight after a primary
+            if(time >= actor.(weaponentity).shotgun_primarytime)
             {
                 if(weapon_prepareattack(thiswep, actor, weaponentity, false, WEP_CVAR_SEC(shotgun, alt_animtime)))
                 {
@@ -257,13 +244,12 @@ METHOD(Shotgun, wr_think, void(entity thiswep, entity actor, .entity weaponentit
         }
     }
 
-    if(actor.(weaponentity).clip_load >= 0) // we are not currently reloading
+    if(actor.(weaponentity).clip_load >= 0)
     if(WEP_CVAR(shotgun, secondary) == 1)
     if(((fire & 1) && !IS_BOT_CLIENT(actor) && GetResource(actor, thiswep.ammo_type) <= 0 && actor.(weaponentity).clip_load == 0 && !(actor.items & IT_UNLIMITED_AMMO)) || (fire & 2))
     if(weapon_prepareattack(thiswep, actor, weaponentity, true, WEP_CVAR_SEC(shotgun, refire)))
     {
-        // melee attack
-        // attempt forcing playback of the anim by switching to another anim (that we never play) here...
+
         weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, 0, W_Shotgun_Attack2);
     }
 }
@@ -277,19 +263,19 @@ METHOD(Shotgun, wr_checkammo2, bool(entity thiswep, entity actor, .entity weapon
 {
     switch(WEP_CVAR(shotgun, secondary))
     {
-        case 1: return true; // melee does not use ammo
-        case 2: // secondary triple shot
+        case 1: return true;
+        case 2:
         {
             float ammo_amount = GetResource(actor, thiswep.ammo_type) >= WEP_CVAR_PRI(shotgun, ammo);
             ammo_amount += actor.(weaponentity).(weapon_load[thiswep.m_id]) >= WEP_CVAR_PRI(shotgun, ammo);
             return ammo_amount;
         }
-        default: return false; // secondary unavailable
+        default: return false;
     }
 }
 METHOD(Shotgun, wr_reload, void(entity thiswep, entity actor, .entity weaponentity))
 {
-    W_Reload(actor, weaponentity, WEP_CVAR_PRI(shotgun, ammo), SND_RELOAD); // WEAPONTODO
+    W_Reload(actor, weaponentity, WEP_CVAR_PRI(shotgun, ammo), SND_RELOAD);
 }
 METHOD(Shotgun, wr_suicidemessage, Notification(entity thiswep))
 {

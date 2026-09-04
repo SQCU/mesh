@@ -15,7 +15,7 @@ const float BUFMODELS_SKIN = 3;
 const float BUFMODELS_DESC = 4;
 const float BUFMODELS_COUNT = 5;
 
-#define XONVOTE186 1 // (nyov) removal of model text description
+#define XONVOTE186 1
 
 void XonoticPlayerModelSelector_configureXonoticPlayerModelSelector(entity me)
 {
@@ -34,7 +34,7 @@ void XonoticPlayerModelSelector_loadModels(entity me)
 	float sortbuf = buf_create();
 	for(i = 0; i < search_getsize(glob); ++i)
 	{
-		// select model #i!
+
 		fn = search_getfilename(glob, i);
 		if(!get_model_parameters(fn, -1))
 			continue;
@@ -77,8 +77,8 @@ void XonoticPlayerModelSelector_loadModels(entity me)
 	}
 	buf_del(sortbuf);
 	get_model_parameters(string_null, 0);
-	me.loadCvars(me); // this will select the initial model, depending on the current cvars
-	me.go(me, 0); // this will set the vars for the selected model
+	me.loadCvars(me);
+	me.go(me, 0);
 }
 
 void XonoticPlayerModelSelector_destroy(entity me)
@@ -104,7 +104,7 @@ void XonoticPlayerModelSelector_loadCvars(entity me)
 		if(bufstr_get(me.bufModels, BUFMODELS_COUNT*i+BUFMODELS_SKIN) == skin)
 			break;
 	}
-	if(i >= me.numModels) // fail
+	if(i >= me.numModels)
 		i = 0;
 	me.idxModels = i;
 }
@@ -113,14 +113,12 @@ void XonoticPlayerModelSelector_go(entity me, float d)
 {
 	me.idxModels = mod(me.idxModels + d + me.numModels, me.numModels);
 
-	// select model #i!
 	strcpy(me.currentModelTitle, bufstr_get(me.bufModels, BUFMODELS_COUNT*me.idxModels+BUFMODELS_TITLE));
 	strcpy(me.currentModelImage, bufstr_get(me.bufModels, BUFMODELS_COUNT*me.idxModels+BUFMODELS_IMAGE));
 	me.currentSkin = stof(bufstr_get(me.bufModels, BUFMODELS_COUNT*me.idxModels+BUFMODELS_SKIN));
 	strcpy(me.currentModel, bufstr_get(me.bufModels, BUFMODELS_COUNT*me.idxModels+BUFMODELS_MODEL));
 	strcpy(me.currentModelDescription, bufstr_get(me.bufModels, BUFMODELS_COUNT*me.idxModels+BUFMODELS_DESC));
 
-	// fix the image
 	if(draw_PictureSize(me.currentModelImage) == '0 0 0')
 		me.src = "nopreview_player";
 	else
@@ -146,7 +144,7 @@ void PlayerModelSelector_Prev_Click(entity btn, entity me)
 
 void XonoticPlayerModelSelector_saveCvars(entity me)
 {
-	// we can't immediately apply here because of flood control
+
 	cvar_set("_cl_playermodel", me.currentModel);
 	cvar_set("_cl_playerskin", ftos(me.currentSkin));
 }
@@ -163,11 +161,10 @@ void XonoticPlayerModelSelector_draw(entity me)
 	}
 
 	SUPER(XonoticPlayerModelSelector).draw(me);
-	// draw text on the image, handle \n in the description
 
 	draw_beginBoldFont();
 
-#if XONVOTE186 // (nyov) lower name display looks better when there is no description text
+#if XONVOTE186
 	draw_CenterText('0.5 0.8 0', me.currentModelTitle, me.realFontSize * (me.titleFontSize / me.fontSize), SKINCOLOR_MODELTITLE, SKINALPHA_MODELTITLE, false);
 #else
 	draw_CenterText('0.5 0 0', me.currentModelTitle, me.realFontSize * (me.titleFontSize / me.fontSize), SKINCOLOR_MODELTITLE, SKINALPHA_MODELTITLE, false);
@@ -192,7 +189,7 @@ void XonoticPlayerModelSelector_resizeNotify(entity me, vector relOrigin, vector
 
 void XonoticPlayerModelSelector_showNotify(entity me)
 {
-	// Reinitialize self.
+
 	me.destroy(me);
 	me.loadModels(me);
 }

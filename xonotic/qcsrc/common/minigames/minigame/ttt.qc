@@ -1,31 +1,29 @@
 #include "ttt.qh"
 REGISTER_MINIGAME(ttt, _("Tic Tac Toe"));
 
-const int TTT_TURN_PLACE = 0x0100; // player has to place a piece on the board
-const int TTT_TURN_WIN   = 0x0200; // player has won
-const int TTT_TURN_DRAW  = 0x0400; // no moves are possible
-const int TTT_TURN_NEXT  = 0x0800; // a player wants to start a new match
-const int TTT_TURN_TYPE  = 0x0f00; // turn type mask
+const int TTT_TURN_PLACE = 0x0100;
+const int TTT_TURN_WIN   = 0x0200;
+const int TTT_TURN_DRAW  = 0x0400;
+const int TTT_TURN_NEXT  = 0x0800;
+const int TTT_TURN_TYPE  = 0x0f00;
 
 const int TTT_TURN_TEAM1 = 0x0001;
 const int TTT_TURN_TEAM2 = 0x0002;
-const int TTT_TURN_TEAM  = 0x000f; // turn team mask
+const int TTT_TURN_TEAM  = 0x000f;
 
-// send flags
-const int TTT_SF_PLAYERSCORE  = MINIG_SF_CUSTOM;   // send minigame_player scores (won matches)
-const int TTT_SF_SINGLEPLAYER = MINIG_SF_CUSTOM<<1;// send minigame.ttt_ai
+const int TTT_SF_PLAYERSCORE  = MINIG_SF_CUSTOM;
+const int TTT_SF_SINGLEPLAYER = MINIG_SF_CUSTOM<<1;
 
-const int TTT_SPECTATOR_TEAM = 255; // must be above max teams and equal to or below 255
+const int TTT_SPECTATOR_TEAM = 255;
 
 const int TTT_LET_CNT = 3;
 const int TTT_NUM_CNT = 3;
 const int TTT_TILE_SIZE = 3;
 
-.int ttt_npieces; // (minigame) number of pieces on the board (simplifies checking a draw)
-.int ttt_nexteam; // (minigame) next team (used to change the starting team on following matches)
-.int ttt_ai;      // (minigame) when non-zero, singleplayer vs AI
+.int ttt_npieces;
+.int ttt_nexteam;
+.int ttt_ai;
 
-// find tic tac toe piece given its tile name
 entity ttt_find_piece(entity minig, string tile)
 {
 	entity e = NULL;
@@ -35,7 +33,6 @@ entity ttt_find_piece(entity minig, string tile)
 	return NULL;
 }
 
-// Checks if the given piece completes a row
 bool ttt_winning_piece(entity piece)
 {
 	int number = minigame_tile_number(piece.netname);
@@ -66,7 +63,6 @@ bool ttt_winning_piece(entity piece)
 	return false;
 }
 
-// check if the tile name is valid (3x3 grid)
 bool ttt_valid_tile(string tile)
 {
 	if ( !tile )
@@ -76,7 +72,6 @@ bool ttt_valid_tile(string tile)
 	return 0 <= number && number < TTT_NUM_CNT && 0 <= letter && letter < TTT_LET_CNT;
 }
 
-// make a move
 void ttt_move(entity minigame, entity player, string pos )
 {
 	if ( minigame.minigame_flags & TTT_TURN_PLACE )
@@ -106,11 +101,10 @@ void ttt_move(entity minigame, entity player, string pos )
 	}
 }
 
-// request a new match
 void ttt_next_match(entity minigame, entity player)
 {
 #ifdef SVQC
-	// on multiplayer matches, wait for both players to agree
+
 	if ( minigame.minigame_flags & (TTT_TURN_WIN|TTT_TURN_DRAW) )
 	{
 		minigame.minigame_flags = TTT_TURN_NEXT | player.team;
@@ -132,8 +126,6 @@ void ttt_next_match(entity minigame, entity player)
 
 #ifdef SVQC
 
-
-// required function, handle server side events
 int ttt_server_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -158,18 +150,14 @@ int ttt_server_event(entity minigame, string event, ...)
 		{
 			int pl_num = minigame_count_players(minigame);
 
-			// Don't allow joining a single player match
 			if ( (minigame.ttt_ai) && pl_num > 0 )
 				return false;
 
-			// Don't allow more than 2 players
 			if(pl_num >= 2) { return TTT_SPECTATOR_TEAM; }
 
-			// Get the right team
 			if(minigame.minigame_players)
 				return minigame_next_team(minigame.minigame_players.team, 2);
 
-			// Team 1 by default
 			return 1;
 		}
 		case "cmd":
@@ -220,15 +208,13 @@ int ttt_server_event(entity minigame, string event, ...)
 	return false;
 }
 
-
 #elif defined(CSQC)
 
-string ttt_curr_pos; // identifier of the tile under the mouse
-vector ttt_boardpos; // HUD board position
-vector ttt_boardsize;// HUD board size
-.int ttt_checkwin; // Used to optimize checks to display a win
+string ttt_curr_pos;
+vector ttt_boardpos;
+vector ttt_boardsize;
+.int ttt_checkwin;
 
-// Required function, draw the game board
 void ttt_hud_board(vector pos, vector mySize)
 {
 	minigame_hud_fitsqare(pos, mySize);
@@ -279,8 +265,6 @@ void ttt_hud_board(vector pos, vector mySize)
 	}
 }
 
-
-// Required function, draw the game status panel
 void ttt_hud_status(vector pos, vector mySize)
 {
 	HUD_Panel_DrawBg();
@@ -322,7 +306,6 @@ void ttt_hud_status(vector pos, vector mySize)
 	}
 }
 
-// Turn a set of flags into a help message
 string ttt_turn_to_string(int turnflags)
 {
 	if(minigame_self.team == TTT_SPECTATOR_TEAM)
@@ -333,8 +316,7 @@ string ttt_turn_to_string(int turnflags)
 
 	if ( turnflags & TTT_TURN_WIN )
 	{
-		// translator-friendly messages composed of 2 existing messages
-		// TODO: proper "you win" banner instead of hijacking the help message
+
 		if ( (turnflags & TTT_TURN_TEAM) != minigame_self.team )
 			return strcat(_("You lost the game!"), "\n", _("Select \"^1Next Match^7\" on the menu for a rematch!"));
 		return strcat(_("You win!"), "\n", _("Select \"^1Next Match^7\" on the menu to start a new match!"));
@@ -366,7 +348,6 @@ const int TTT_AI_POSFLAG_C1 = 0x0040;
 const int TTT_AI_POSFLAG_C2 = 0x0080;
 const int TTT_AI_POSFLAG_C3 = 0x0100;
 
-// convert a flag to a position
 string ttt_ai_piece_flag2pos(int pieceflag)
 {
 	switch(pieceflag)
@@ -402,7 +383,6 @@ bool ttt_ai_checkmask(int piecemask, int checkflags)
 	return checkflags && (piecemask & checkflags) == checkflags;
 }
 
-// get the third flag if the mask matches two of them
 int ttt_ai_1of3(int piecemask, int flag1, int flag2, int flag3)
 {
 	if ( ttt_ai_checkmask(piecemask,flag1|flag2|flag3) )
@@ -420,7 +400,6 @@ int ttt_ai_1of3(int piecemask, int flag1, int flag2, int flag3)
 	return 0;
 }
 
-// Select a random flag in the mask
 int ttt_ai_random(int piecemask)
 {
 	if ( !piecemask )
@@ -442,7 +421,6 @@ int ttt_ai_random(int piecemask)
 	return RandomSelection_chosen_float;
 }
 
-// Block/complete a 3 i na row
 int ttt_ai_block3 ( int piecemask, int piecemask_free )
 {
 	int r = 0;
@@ -460,27 +438,22 @@ int ttt_ai_block3 ( int piecemask, int piecemask_free )
 	return ttt_ai_random(r);
 }
 
-// Simple AI
-// 1) tries to win the game if possible
-// 2) tries to block the opponent if they have 2 in a row
-// 3) places a piece randomly
 string ttt_ai_choose_simple(int piecemask_self, int piecemask_opponent, int piecemask_free )
 {
 	int move = 0;
 
 	LOG_TRACE("TTT AI: checking winning move");
 	if (( move = ttt_ai_block3(piecemask_self,piecemask_free) ))
-		return ttt_ai_piece_flag2pos(move); // place winning move
+		return ttt_ai_piece_flag2pos(move);
 
 	LOG_TRACE("TTT AI: checking opponent's winning move");
 	if (( move = ttt_ai_block3(piecemask_opponent,piecemask_free) ))
-		return ttt_ai_piece_flag2pos(move); // block opponent
+		return ttt_ai_piece_flag2pos(move);
 
 	LOG_TRACE("TTT AI: random move");
 	return ttt_ai_piece_flag2pos(ttt_ai_random(piecemask_free));
 }
 
-// AI move (if it's AI's turn)
 void ttt_aimove(entity minigame)
 {
 	if ( minigame.minigame_flags == (TTT_TURN_PLACE|minigame.ttt_ai) )
@@ -490,17 +463,6 @@ void ttt_aimove(entity minigame)
 			if ( aiplayer.classname == "minigame_player" && !aiplayer.minigame_playerslot )
 				break;
 
-		/*
-		 * Build bit masks for the board pieces
-		 * .---.---.---.
-		 * | 4 | 32|256| 3
-		 * |---+---+---|
-		 * | 2 | 16|128| 2
-		 * |---+---+---|
-		 * | 1 | 8 | 64| 1
-		 * '---'---'---'
-		 *   A   B   C
-		 */
 		int piecemask_self = 0;
 		int piecemask_opponent = 0;
 		int piecemask_free = 0;
@@ -525,7 +487,6 @@ void ttt_aimove(entity minigame)
 			}
 		}
 
-		// TODO multiple AI difficulties
 		LOG_TRACE(sprintf("TTT AI: self: %x opponent: %x free: %x",
 				piecemask_self, piecemask_opponent, piecemask_free));
 		pos = ttt_ai_choose_simple(piecemask_self, piecemask_opponent, piecemask_free);
@@ -538,7 +499,6 @@ void ttt_aimove(entity minigame)
 	strcpy(minigame.message, ttt_turn_to_string(minigame.minigame_flags));
 }
 
-// Make the correct move
 void ttt_make_move(entity minigame)
 {
 	if ( minigame.minigame_flags == (TTT_TURN_PLACE|minigame_self.team) )
@@ -561,7 +521,6 @@ void ttt_set_curr_pos(string s)
 	ttt_curr_pos = s;
 }
 
-// Required function, handle client events
 int ttt_client_event(entity minigame, string event, ...)
 {
 	switch(event)

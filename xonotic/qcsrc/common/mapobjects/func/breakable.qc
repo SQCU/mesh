@@ -24,30 +24,11 @@
 .float debrisdamageforcescale;
 .float debrisskin;
 
-.string mdl_dead; // or "" to hide when broken
-.string debris; // space separated list of debris models
-// other fields:
-//   mdl = particle effect name
-//   count = particle effect multiplier
-//   targetname = target to trigger to unbreak the model
-//   target = targets to trigger when broken
-//   health = amount of damage it can take
-//   spawnflags:
-//     START_DISABLED: needs to be triggered to activate
-//     BREAKABLE_INDICATE_DAMAGE: indicate damage
-//     BREAKABLE_NODAMAGE: don't take direct damage (needs to be triggered to 'explode', then triggered again to restore)
-//     NOSPLASH: don't take splash damage
-// notes:
-//   for mdl_dead to work, origin must be set (using a common/origin brush).
-//   Otherwise mdl_dead will be displayed at the map origin, and nobody would
-//   want that!
+.string mdl_dead;
+.string debris;
 
 void func_breakable_damage(entity this, entity inflictor, entity attacker, float damage, int deathtype, .entity weaponentity, vector hitloc, vector force);
 
-//
-// func_breakable
-// - basically func_assault_destructible for general gameplay use
-//
 void LaunchDebris (entity this, string debrisname, vector force)
 {
 	entity dbr = new(debris);
@@ -58,12 +39,12 @@ void LaunchDebris (entity this, string debrisname, vector force)
 	setorigin(dbr, org);
 	_setmodel (dbr, debrisname );
 	dbr.skin = this.debrisskin;
-	dbr.colormap = this.colormap; // inherit team colors
-	dbr.owner = this; // do not be affected by our own explosion
+	dbr.colormap = this.colormap;
+	dbr.owner = this;
 	set_movetype(dbr, this.debrismovetype);
 	dbr.solid = this.debrissolid;
-	if(dbr.solid != SOLID_BSP) // SOLID_BSP has exact collision, MAYBE this works? TODO check this out
-		setsize(dbr, '0 0 0', '0 0 0'); // needed for performance, until engine can deal better with it
+	if(dbr.solid != SOLID_BSP)
+		setsize(dbr, '0 0 0', '0 0 0');
 	dbr.velocity_x = this.debrisvelocity.x + this.debrisvelocityjitter.x * crandom();
 	dbr.velocity_y = this.debrisvelocity.y + this.debrisvelocityjitter.y * crandom();
 	dbr.velocity_z = this.debrisvelocity.z + this.debrisvelocityjitter.z * crandom();
@@ -96,18 +77,18 @@ void func_breakable_look_destroyed(entity this)
 {
 	float floorZ;
 
-	if(this.solid == SOLID_BSP) // in case a misc_follow moved me, save the current origin first
+	if(this.solid == SOLID_BSP)
 		this.dropped_origin = this.origin;
 
-	this.solid = SOLID_NOT; // before setorigin/_setmodel to prevent area grid linking
+	this.solid = SOLID_NOT;
 
 	if(this.mdl_dead == "")
 	{
-		setorigin (this, this.origin); // unlink
+		setorigin (this, this.origin);
 		this.effects |= EF_NODRAW;
 	}
 	else {
-		if (this.origin == '0 0 0')	{	// probably no origin brush, so don't spawn in the middle of the map..
+		if (this.origin == '0 0 0')	{
 			floorZ = this.absmin.z;
 			setorigin(this, ((this.absmax + this.absmin) * 0.5));
 			this.origin_z = floorZ;
@@ -120,13 +101,13 @@ void func_breakable_look_destroyed(entity this)
 
 void func_breakable_look_restore(entity this)
 {
-	this.solid = SOLID_BSP; // before _setmodel/setorigin to ensure area grid linking
+	this.solid = SOLID_BSP;
 
 	_setmodel(this, this.mdl);
 	ApplyMinMaxScaleAngles(this);
 	this.effects &= ~EF_NODRAW;
 
-	if(this.mdl_dead != "") // only do this if we use mdl_dead, to behave better with misc_follow
+	if(this.mdl_dead != "")
 		setorigin(this, this.dropped_origin);
 }
 
@@ -175,9 +156,9 @@ void func_breakable_behave_restore(entity this)
 		this.event_damage = func_breakable_damage;
 	}
 	if(this.spawnflags & BREAKABLE_NODAMAGE)
-		this.use = func_breakable_destroy; // don't need to set it usually, as .use isn't reset
+		this.use = func_breakable_destroy;
 	this.state = STATE_ALIVE;
-	//this.nextthink = 0; // cancel auto respawn
+
 	setthink(this, func_breakable_think);
 	this.nextthink = time + 0.1;
 	func_breakable_colormod(this);
@@ -208,29 +189,28 @@ void func_breakable_restore(entity this, entity actor, entity trigger)
 
 void func_breakable_restore_self(entity this)
 {
-	// TODO: use a clipgroup for all func_breakables so they don't collide with eachother
+
 	float oldhit = this.dphitcontentsmask;
-	this.dphitcontentsmask = DPCONTENTS_BODY; // we really only care about when players are standing inside, obey the mapper in other cases!
+	this.dphitcontentsmask = DPCONTENTS_BODY;
 	tracebox(this.origin, this.mins, this.maxs, this.origin, MOVE_NORMAL, this);
 	this.dphitcontentsmask = oldhit;
 	if(trace_startsolid || trace_fraction < 1)
 	{
-		this.nextthink = time + 5; // retry every 5 seconds until the area becomes clear
+		this.nextthink = time + 5;
 		return;
 	}
 	func_breakable_restore(this, NULL, NULL);
 }
 
-vector debrisforce; // global, set before calling this
+vector debrisforce;
 void func_breakable_destroy(entity this, entity actor, entity trigger)
 {
 	float n, i;
 	string oldmsg;
 
 	entity act = this.owner;
-	this.owner = NULL; // set by W_PrepareExplosionByDamage
+	this.owner = NULL;
 
-	// now throw around the debris
 	n = tokenize_console(this.debris);
 	for(i = 0; i < n; ++i)
 		LaunchDebris(this, argv(i), debrisforce);
@@ -243,7 +223,7 @@ void func_breakable_destroy(entity this, entity actor, entity trigger)
 	if(this.dmg)
 		RadiusDamage(this, act, this.dmg, this.dmg_edge, this.dmg_radius, this, NULL, this.dmg_force, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, NULL);
 
-	if(this.cnt) // TODO
+	if(this.cnt)
 		__pointparticles(this.cnt, this.absmin * 0.5 + this.absmax * 0.5, '0 0 0', this.count);
 
 	if(this.respawntime)
@@ -290,14 +270,12 @@ void func_breakable_damage(entity this, entity inflictor, entity attacker, float
 		this.takedamage = DAMAGE_NO;
 		this.event_damage = func_null;
 
-		if(IS_CLIENT(attacker)) //&& this.classname == "func_assault_destructible")
+		if(IS_CLIENT(attacker))
 		{
 			this.owner = attacker;
 			this.realowner = attacker;
 		}
 
-		// do not explode NOW but in the NEXT FRAME!
-		// because recursive calls to RadiusDamage are not allowed
 		this.nextthink = time;
 		CSQCMODEL_AUTOUPDATE(this);
 		setthink(this, func_breakable_destroy_self);
@@ -321,7 +299,6 @@ void func_breakable_setup(entity this)
 		SetResourceExplicit(this, RES_HEALTH, 100);
 	this.max_health = GetResource(this, RES_HEALTH);
 
-	// yes, I know, MOVETYPE_NONE is not available here, not that one would want it here anyway
 	if(!this.debrismovetype) this.debrismovetype = MOVETYPE_BOUNCE;
 	if(!this.debrissolid) this.debrissolid = SOLID_NOT;
 	if(this.debrisvelocity == '0 0 0') this.debrisvelocity = '0 0 140';
@@ -360,7 +337,6 @@ void func_breakable_setup(entity this)
 		this.monster_attack = false;
 	}
 
-	// precache all the models
 	if (this.mdl_dead)
 		precache_model(this.mdl_dead);
 	n = tokenize_console(this.debris);
@@ -387,9 +363,7 @@ void func_breakable_setup(entity this)
 	CSQCMODEL_AUTOINIT(this);
 }
 
-// for use in maps with a "model" key set
 spawnfunc(misc_breakablemodel) { func_breakable_setup(this); }
 
-// destructible walls that can be used to trigger target_objective_decrease
 spawnfunc(func_breakable) { func_breakable_setup(this); }
 #endif

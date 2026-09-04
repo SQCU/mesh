@@ -23,7 +23,7 @@ void CvarList_Load(entity me, string filter)
 	if(me.handle < 0)
 		return;
 
-	buf_cvarlist(me.handle, filter, "_"); // cvars starting with "_" are excluded
+	buf_cvarlist(me.handle, filter, "_");
 	me.nItems = buf_getsize(me.handle);
 	if(autocvar_menu_cvarlist_onlymodified)
 	{
@@ -42,7 +42,7 @@ void CvarList_Load(entity me, string filter)
 void XonoticCvarList_showNotify(entity me)
 {
 	bool force_initial_selection = false;
-	if(me.handle >= 0 && me.nItems <= 0) // me.handle not loaded yet?
+	if(me.handle >= 0 && me.nItems <= 0)
 		force_initial_selection = true;
 	CvarList_Load(me, me.controlledTextbox.text);
 	if(force_initial_selection)
@@ -75,7 +75,7 @@ float XonoticCvarList_updateCvarType(entity me)
 	}
 	else if(strhasword(autocvar_menu_reverted_nonsaved_cvars, me.cvarName))
 	{
-		// Currently claims to be saved, but won't be on next startup.
+
 		me.cvarType = strcat(me.cvarType, ", ", _("will not be saved"));
 		needsForcing = 1;
 	}
@@ -116,7 +116,6 @@ void XonoticCvarList_setSelected(entity me, float i)
 	float needsForcing = me.updateCvarType(me);
 	me.cvarDefaultBox.setText(me.cvarDefaultBox, me.cvarDefault);
 
-	// this one can handle tempstrings
 	s = cvar_string(me.cvarName);
 	me.cvarNeedsForcing = 0;
 	me.cvarValueBox.setText(me.cvarValueBox, s);

@@ -1,9 +1,5 @@
 #ifndef THREAD_H
 
-// enable Sys_PrintfToTerminal calls on nearly every threading call
-//#define THREADDEBUG
-//#define THREADDISABLE
-// use recursive mutex (non-posix) extensions in thread_pthread
 #define THREADRECURSIVE
 
 #define Thread_CreateMutex()              (_Thread_CreateMutex(__FILE__, __LINE__))

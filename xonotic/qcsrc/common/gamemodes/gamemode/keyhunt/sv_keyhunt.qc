@@ -25,12 +25,7 @@ int autocvar_g_balance_keyhunt_score_destroyed_ownfactor;
 int autocvar_g_balance_keyhunt_score_push;
 float autocvar_g_balance_keyhunt_throwvelocity;
 
-//int autocvar_g_keyhunt_teams;
 int autocvar_g_keyhunt_teams_override;
-
-// #define KH_PLAYER_USE_ATTACHMENT
-// TODO? no model exists for this
-// #define KH_PLAYER_USE_CARRIEDMODEL
 
 #ifdef KH_PLAYER_USE_ATTACHMENT
 const vector KH_PLAYER_ATTACHMENT_DIST_ROTATED = '0 -4 0';
@@ -51,13 +46,7 @@ const float KH_KEY_BRIGHTNESS = 2;
 
 bool kh_no_radar_circles;
 
-// kh_state
-//     bits  0- 4: team of key 1, or 0 for no such key, or 30 for dropped, or 31 for self
-//     bits  5- 9: team of key 2, or 0 for no such key, or 30 for dropped, or 31 for self
-//     bits 10-14: team of key 3, or 0 for no such key, or 30 for dropped, or 31 for self
-//     bits 15-19: team of key 4, or 0 for no such key, or 30 for dropped, or 31 for self
-.float siren_time;  //  time delay the siren
-//.float stuff_time;  //  time delay to stuffcmd a cvar
+.float siren_time;
 
 int kh_Team_ByID(int t)
 {
@@ -69,11 +58,11 @@ int kh_Team_ByID(int t)
 }
 
 entity kh_controller;
-//bool kh_tracking_enabled;
+
 int kh_teams;
 int kh_interferemsg_team;
 float kh_interferemsg_time;
-.entity kh_next, kh_prev; // linked list
+.entity kh_next, kh_prev;
 .float kh_droptime;
 .int kh_dropperteam;
 .entity kh_previous_owner;
@@ -86,7 +75,7 @@ int kh_Key_AllOwnedByWhichTeam();
 const int ST_KH_CAPS = 1;
 void kh_ScoreRules(int teams)
 {
-	GameRules_scoring(teams, SFL_SORT_PRIO_PRIMARY, SFL_SORT_PRIO_PRIMARY, {
+	GameRules_scoring(LegacyTeamBitCount(teams), SFL_SORT_PRIO_PRIMARY, SFL_SORT_PRIO_PRIMARY, {
         field_team(ST_KH_CAPS, "caps", SFL_SORT_PRIO_SECONDARY);
         field(SP_KH_CAPS, "caps", SFL_SORT_PRIO_SECONDARY);
         field(SP_KH_PUSHES, "pushes", 0);
@@ -97,7 +86,7 @@ void kh_ScoreRules(int teams)
 	});
 }
 
-bool kh_KeyCarrier_waypointsprite_visible_for_player(entity this, entity player, entity view)  // runs all the time
+bool kh_KeyCarrier_waypointsprite_visible_for_player(entity this, entity player, entity view)
 {
 	if(!IS_PLAYER(view) || DIFF_TEAM(this, view))
 		if(!kh_tracking_enabled)
@@ -114,7 +103,7 @@ bool kh_Key_waypointsprite_visible_for_player(entity this, entity player, entity
 		return true;
 	if(!this.owner.owner)
 		return true;
-	return false;  // draw only when key is not owned
+	return false;
 }
 
 void kh_update_state()
@@ -138,22 +127,19 @@ void kh_update_state()
 		if(key.owner)
 			STAT(OBJECTIVE_STATUS, key.owner) |= (32 ** key.count) * 31;
 	}
-	//print(ftos((nextent(NULL)).kh_state), "\n");
+
 }
 
-
-
-
 var kh_Think_t kh_Controller_Thinkfunc;
-void kh_Controller_SetThink(float t, kh_Think_t func)  // runs occasionaly
+void kh_Controller_SetThink(float t, kh_Think_t func)
 {
 	kh_Controller_Thinkfunc = func;
 	kh_controller.cnt = ceil(t);
 	if(t == 0)
-		kh_controller.nextthink = time; // force
+		kh_controller.nextthink = time;
 }
 void kh_WaitForPlayers();
-void kh_Controller_Think(entity this)  // called a lot
+void kh_Controller_Think(entity this)
 {
 	if(game_stopped)
 		return;
@@ -170,9 +156,7 @@ void kh_Controller_Think(entity this)  // called a lot
 	this.nextthink = time + 1;
 }
 
-// frags f: take from cvar * f
-// frags 0: no frags
-void kh_Scores_Event(entity player, entity key, string what, float frags_player, float frags_owner)  // update the score when a key is captured
+void kh_Scores_Event(entity player, entity key, string what, float frags_player, float frags_owner)
 {
 	string s;
 	if(game_stopped)
@@ -184,7 +168,7 @@ void kh_Scores_Event(entity player, entity key, string what, float frags_player,
 	if(key && key.owner && frags_owner)
 		UpdateFrags(key.owner, frags_owner);
 
-	if(!autocvar_sv_eventlog)  //output extra info to the console or text file
+	if(!autocvar_sv_eventlog)
 		return;
 
 	s = strcat(":keyhunt:", what, ":", ftos(player.playerid), ":", ftos(frags_player));
@@ -202,7 +186,7 @@ void kh_Scores_Event(entity player, entity key, string what, float frags_player,
 	GameLogEcho(s);
 }
 
-vector kh_AttachedOrigin(entity e)  // runs when a team captures the flag, it can run 2 or 3 times.
+vector kh_AttachedOrigin(entity e)
 {
 	if(e.tag_entity)
 	{
@@ -213,9 +197,9 @@ vector kh_AttachedOrigin(entity e)  // runs when a team captures the flag, it ca
 		return e.origin;
 }
 
-void kh_Key_Attach(entity key)  // runs when a player picks up a key and several times when a key is assigned to a player at the start of a round
+void kh_Key_Attach(entity key)
 {
-	key.solid = SOLID_NOT; // before setorigin to prevent area grid linking
+	key.solid = SOLID_NOT;
 #ifdef KH_PLAYER_USE_ATTACHMENT
 	entity first = key.owner.kh_next;
 	if(key == first)
@@ -243,7 +227,7 @@ void kh_Key_Attach(entity key)  // runs when a player picks up a key and several
 	}
 #else
 	setattachment(key, key.owner, "");
-	setorigin(key, '0 0 1' * KH_KEY_ZSHIFT);  // fixing x, y in think
+	setorigin(key, '0 0 1' * KH_KEY_ZSHIFT);
 	key.angles_y -= key.owner.angles.y;
 #endif
 	key.flags = 0;
@@ -258,9 +242,9 @@ void kh_Key_Attach(entity key)  // runs when a player picks up a key and several
 	navigation_dynamicgoal_unset(key);
 }
 
-void kh_Key_Detach(entity key) // runs every time a key is dropped or lost. Runs several times times when all the keys are captured
+void kh_Key_Detach(entity key)
 {
-	key.solid = SOLID_TRIGGER; // before setorigin to ensure area grid linking
+	key.solid = SOLID_TRIGGER;
 #ifdef KH_PLAYER_USE_ATTACHMENT
 	entity first = key.owner.kh_next;
 	if(key == first)
@@ -278,7 +262,7 @@ void kh_Key_Detach(entity key) // runs every time a key is dropped or lost. Runs
 			setattachment(key.kh_next, key.kh_prev, "");
 		setorigin(first, first.origin + 0.5 * KH_PLAYER_ATTACHMENT_DIST);
 	}
-	// in any case:
+
 	setattachment(key, NULL, "");
 	setorigin(key, key.owner.origin + '0 0 1' * (STAT(PL_MIN, key.owner).z - KH_KEY_MIN_z));
 	key.angles = key.owner.angles;
@@ -294,14 +278,14 @@ void kh_Key_Detach(entity key) // runs every time a key is dropped or lost. Runs
 	key.pain_finished = time + autocvar_g_balance_keyhunt_delay_return;
 	key.damageforcescale = autocvar_g_balance_keyhunt_damageforcescale;
 	key.takedamage = DAMAGE_YES;
-	// let key.team stay
+
 	key.modelindex = kh_key_dropped;
 	navigation_dynamicgoal_set(key, key.owner);
 	key.kh_previous_owner = key.owner;
 	key.kh_previous_owner_playerid = key.owner.playerid;
 }
 
-void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is picked up or assigned. Runs prior to kh_key_attach
+void kh_Key_AssignTo(entity key, entity player)
 {
 	if(key.owner == player)
 		return;
@@ -312,7 +296,6 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 	{
 		kh_Key_Detach(key);
 
-		// remove from linked list
 		if(key.kh_next)
 			key.kh_next.kh_prev = key.kh_prev;
 		key.kh_prev.kh_next = key.kh_next;
@@ -321,7 +304,7 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 
 		if(key.owner.kh_next == NULL)
 		{
-			// No longer a key carrier
+
 			if(!kh_no_radar_circles)
 				WaypointSprite_Ping(key.owner.waypointsprite_attachedforcarrier);
 			WaypointSprite_DetachCarrier(key.owner);
@@ -332,7 +315,7 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 
 	if(player)
 	{
-		// insert into linked list
+
 		key.kh_next = player.kh_next;
 		key.kh_prev = player;
 		player.kh_next = key;
@@ -343,7 +326,7 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 
 		if(key.kh_next == NULL)
 		{
-			// player is now a key carrier
+
 			entity wp = WaypointSprite_AttachCarrier(WP_Null, player, RADARICON_FLAGCARRIER);
 			wp.colormod = colormapPaletteColor(player.team - 1, 0);
 			player.waypointsprite_attachedforcarrier.waypointsprite_visible_for_player = kh_KeyCarrier_waypointsprite_visible_for_player;
@@ -361,7 +344,6 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 		}
 	}
 
-	// moved that here, also update if there's no player
 	kh_update_state();
 
 	key.pusher = NULL;
@@ -375,7 +357,6 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 			kh_interferemsg_time = time + 0.2;
 			kh_interferemsg_team = player.team;
 
-			// audit all key carrier sprites, update them to "Run here"
 			FOR_EACH_KH_KEY(k)
 			{
 				if (!k.owner) continue;
@@ -390,7 +371,6 @@ void kh_Key_AssignTo(entity key, entity player)  // runs every time a key is pic
 		{
 			kh_interferemsg_time = 0;
 
-			// audit all key carrier sprites, update them to "Key Carrier"
 			FOR_EACH_KH_KEY(k)
 			{
 				if (!k.owner) continue;
@@ -420,7 +400,7 @@ void kh_Key_Damage(entity this, entity inflictor, entity attacker, float damage,
 			this.team = attacker.team;
 }
 
-void kh_Key_Collect(entity key, entity player)  //a player picks up a dropped key
+void kh_Key_Collect(entity key, entity player)
 {
 	sound(player, CH_TRIGGER, SND_KH_COLLECT, VOL_BASE, ATTEN_NORM);
 
@@ -433,15 +413,15 @@ void kh_Key_Collect(entity key, entity player)  //a player picks up a dropped ke
 	int realteam = kh_Team_ByID(key.count);
 	Send_Notification(NOTIF_ALL, NULL, MSG_INFO, APP_TEAM_NUM(realteam, INFO_KEYHUNT_PICKUP), player.netname);
 
-	kh_Key_AssignTo(key, player); // this also updates .kh_state
+	kh_Key_AssignTo(key, player);
 }
 
-void kh_Key_Touch(entity this, entity toucher)  // runs many, many times when a key has been dropped and can be picked up
+void kh_Key_Touch(entity this, entity toucher)
 {
 	if(game_stopped)
 		return;
 
-	if(this.owner) // already carried
+	if(this.owner)
 		return;
 
 	if(ITEM_TOUCH_NEEDKILL())
@@ -456,20 +436,19 @@ void kh_Key_Touch(entity this, entity toucher)  // runs many, many times when a 
 		return;
 	if(toucher == this.enemy)
 		if(time < this.kh_droptime + autocvar_g_balance_keyhunt_delay_collect)
-			return;  // you just dropped it!
+			return;
 	kh_Key_Collect(this, toucher);
 }
 
-void kh_Key_Remove(entity key)  // runs after when all the keys have been collected or when a key has been dropped for more than X seconds
+void kh_Key_Remove(entity key)
 {
 	entity o = key.owner;
 	kh_Key_AssignTo(key, NULL);
-	if(o) // it was attached
+	if(o)
 		WaypointSprite_Kill(key.waypointsprite_attachedforcarrier);
-	else // it was dropped
+	else
 		WaypointSprite_DetachCarrier(key);
 
-	// remove key from key list
 	if (kh_worldkeylist == key)
 		kh_worldkeylist = kh_worldkeylist.kh_worldkeynext;
 	else
@@ -491,9 +470,9 @@ void kh_Key_Remove(entity key)  // runs after when all the keys have been collec
 	kh_update_state();
 }
 
-void kh_FinishRound()  // runs when a team captures the keys
+void kh_FinishRound()
 {
-	// prepare next round
+
 	kh_interferemsg_time = 0;
 	entity key;
 
@@ -508,14 +487,13 @@ void kh_FinishRound()  // runs when a team captures the keys
 
 void nades_GiveBonus(entity player, float score);
 
-void kh_WinnerTeam(int winner_team)  // runs when a team wins
+void kh_WinnerTeam(int winner_team)
 {
-	// all key carriers get some points
+
 	entity key;
-	float score = (NumTeams(kh_teams) - 1) * autocvar_g_balance_keyhunt_score_capture;
-	DistributeEvenly_Init(score, NumTeams(kh_teams));
-	// twice the score for 3 team games, three times the score for 4 team games!
-	// note: for a win by destroying the key, this should NOT be applied
+	float score = (LegacyTeamBitCount(kh_teams) - 1) * autocvar_g_balance_keyhunt_score_capture;
+	DistributeEvenly_Init(score, LegacyTeamBitCount(kh_teams));
+
 	FOR_EACH_KH_KEY(key)
 	{
 		float f = DistributeEvenly_Get(1);
@@ -543,14 +521,12 @@ void kh_WinnerTeam(int winner_team)  // runs when a team wins
 	FOR_EACH_KH_KEY(key)
 	{
 		vector thisorigin = kh_AttachedOrigin(key);
-		//dprint("Key origin: ", vtos(thisorigin), "\n");
+
 		midpoint += thisorigin;
 
 		if(!first)
 		{
-			// TODO: this effect has been replaced due to a possible crash it causes
-			// see https://gitlab.com/xonotic/darkplaces/issues/123
-			//te_lightning2(NULL, lastorigin, thisorigin);
+
 			Send_Effect(EFFECT_TR_NEXUIZPLASMA, lastorigin, thisorigin, 1);
 		}
 		lastorigin = thisorigin;
@@ -558,19 +534,19 @@ void kh_WinnerTeam(int winner_team)  // runs when a team wins
 			firstorigin = thisorigin;
 		first = false;
 	}
-	if(NumTeams(kh_teams) > 2)
+	if(LegacyTeamBitCount(kh_teams) > 2)
 	{
-		//te_lightning2(NULL, lastorigin, firstorigin); // TODO see above
+
 		Send_Effect(EFFECT_TR_NEXUIZPLASMA, lastorigin, firstorigin, 1);
 	}
-	midpoint = midpoint * (1 / NumTeams(kh_teams));
-	te_customflash(midpoint, 1000, 1, Team_ColorRGB(winner_team) * 0.5 + '0.5 0.5 0.5');  // make the color >=0.5 in each component
+	midpoint = midpoint * (1 / LegacyTeamBitCount(kh_teams));
+	te_customflash(midpoint, 1000, 1, Team_ColorRGB(winner_team) * 0.5 + '0.5 0.5 0.5');
 
 	play2all(SND(KH_CAPTURE));
 	kh_FinishRound();
 }
 
-void kh_LoserTeam(int loser_team, entity lostkey)  // runs when a player pushes a flag carrier off the map
+void kh_LoserTeam(int loser_team, entity lostkey)
 {
 	float f;
 	entity attacker = NULL;
@@ -583,10 +559,10 @@ void kh_LoserTeam(int loser_team, entity lostkey)  // runs when a player pushes 
 	{
 		if(lostkey.kh_previous_owner)
 			kh_Scores_Event(lostkey.kh_previous_owner, NULL, "pushed", 0, -autocvar_g_balance_keyhunt_score_push);
-			// don't actually GIVE them the -nn points, just log
+
 		kh_Scores_Event(attacker, NULL, "push", autocvar_g_balance_keyhunt_score_push, 0);
 		GameRules_scoring_add(attacker, KH_PUSHES, 1);
-		//centerprint(attacker, "Your push is the best!"); // does this really need to exist?
+
 	}
 	else
 	{
@@ -603,7 +579,6 @@ void kh_LoserTeam(int loser_team, entity lostkey)  // runs when a player pushes 
 
 		if(lostkey.kh_previous_owner)
 			kh_Scores_Event(lostkey.kh_previous_owner, NULL, "destroyed", 0, -autocvar_g_balance_keyhunt_score_destroyed);
-			// don't actually GIVE them the -nn points, just log
 
 		if(lostkey.kh_previous_owner.playerid == lostkey.kh_previous_owner_playerid)
 			GameRules_scoring_add(lostkey.kh_previous_owner, KH_DESTROYS, 1);
@@ -619,12 +594,11 @@ void kh_LoserTeam(int loser_team, entity lostkey)  // runs when a player pushes 
 
 		int fragsleft = DistributeEvenly_Get(players);
 
-		// Now distribute these among all other teams...
-		int j = NumTeams(kh_teams) - 1;
-		for(int i = 0; i < NumTeams(kh_teams); ++i)
+		int j = LegacyTeamBitCount(kh_teams) - 1;
+		for(int i = 0; i < LegacyTeamBitCount(kh_teams); ++i)
 		{
 			int thisteam = kh_Team_ByID(i);
-			if(thisteam == loser_team) // bad boy, no cookie - this WILL happen
+			if(thisteam == loser_team)
 				continue;
 
 			players = 0;
@@ -656,7 +630,7 @@ void kh_LoserTeam(int loser_team, entity lostkey)  // runs when a player pushes 
 	kh_FinishRound();
 }
 
-void kh_Key_Think(entity this)  // runs all the time
+void kh_Key_Think(entity this)
 {
 	if(game_stopped)
 		return;
@@ -669,7 +643,6 @@ void kh_Key_Think(entity this)  // runs all the time
 #endif
 	}
 
-	// if in nodrop or time over, end the round
 	if(!this.owner)
 		if(time > this.pain_finished)
 			kh_LoserTeam(this.team, this);
@@ -679,8 +652,8 @@ void kh_Key_Think(entity this)  // runs all the time
 	{
 		if(this.siren_time < time)
 		{
-			sound(this.owner, CH_TRIGGER, SND_KH_ALARM, VOL_BASE, ATTEN_NORM);  // play a simple alarm
-			this.siren_time = time + 2.5;  // repeat every 2.5 seconds
+			sound(this.owner, CH_TRIGGER, SND_KH_ALARM, VOL_BASE, ATTEN_NORM);
+			this.siren_time = time + 2.5;
 		}
 
 		entity key;
@@ -717,7 +690,7 @@ void key_reset(entity this)
 	kh_Key_Remove(this);
 }
 
-void kh_Key_Spawn(entity initial_owner, float _angle, float i)  // runs every time a new flag is created, ie after all the keys have been collected
+void kh_Key_Spawn(entity initial_owner, float _angle, float i)
 {
 	entity key = new(item_kh_key);
 	key.count = i;
@@ -758,7 +731,6 @@ void kh_Key_Spawn(entity initial_owner, float _angle, float i)  // runs every ti
 			break;
 	}
 
-	// link into key list
 	key.kh_worldkeynext = kh_worldkeylist;
 	kh_worldkeylist = key;
 
@@ -770,12 +742,11 @@ void kh_Key_Spawn(entity initial_owner, float _angle, float i)  // runs every ti
 	kh_Key_AssignTo(key, initial_owner);
 }
 
-// -1 when no team completely owns all keys yet
-int kh_Key_AllOwnedByWhichTeam()  // constantly called. check to see if all the keys are owned by the same team
+int kh_Key_AllOwnedByWhichTeam()
 {
 	entity key;
 	int teem = -1;
-	int keys = NumTeams(kh_teams);
+	int keys = LegacyTeamBitCount(kh_teams);
 	FOR_EACH_KH_KEY(key)
 	{
 		if(!key.owner)
@@ -793,7 +764,7 @@ int kh_Key_AllOwnedByWhichTeam()  // constantly called. check to see if all the 
 
 void kh_Key_DropOne(entity key)
 {
-	// prevent collecting this one for some time
+
 	entity player = key.owner;
 
 	key.kh_droptime = time;
@@ -814,7 +785,7 @@ void kh_Key_DropOne(entity key)
 	sound(player, CH_TRIGGER, SND_KH_DROP, VOL_BASE, ATTEN_NORM);
 }
 
-void kh_Key_DropAll(entity player, float suicide) // runs whenever a player dies
+void kh_Key_DropAll(entity player, float suicide)
 {
 	if(player.kh_next)
 	{
@@ -845,7 +816,7 @@ void kh_Key_DropAll(entity player, float suicide) // runs whenever a player dies
 int kh_GetMissingTeams()
 {
 	int missing_teams = 0;
-	for(int i = 0; i < NumTeams(kh_teams); ++i)
+	for(int i = 0; i < LegacyTeamBitCount(kh_teams); ++i)
 	{
 		int teem = kh_Team_ByID(i);
 		int players = 0;
@@ -859,7 +830,7 @@ int kh_GetMissingTeams()
 	return missing_teams;
 }
 
-void kh_WaitForPlayers()  // delay start of the round until enough players are present
+void kh_WaitForPlayers()
 {
 	static int prev_missing_teams_mask;
 	if(time < game_starttime)
@@ -900,7 +871,7 @@ void kh_WaitForPlayers()  // delay start of the round until enough players are p
 	}
 }
 
-void kh_EnableTrackingDevice()  // runs after each round
+void kh_EnableTrackingDevice()
 {
 	Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_KEYHUNT);
 	Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_KEYHUNT_OTHER);
@@ -908,7 +879,7 @@ void kh_EnableTrackingDevice()  // runs after each round
 	kh_tracking_enabled = true;
 }
 
-void kh_StartRound()  // runs at the start of each round
+void kh_StartRound()
 {
 	if(time < game_starttime)
 	{
@@ -925,7 +896,7 @@ void kh_StartRound()  // runs at the start of each round
 	Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_KEYHUNT);
 	Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_KEYHUNT_OTHER);
 
-	for(int i = 0; i < NumTeams(kh_teams); ++i)
+	for(int i = 0; i < LegacyTeamBitCount(kh_teams); ++i)
 	{
 		int teem = kh_Team_ByID(i);
 		int players = 0;
@@ -938,7 +909,7 @@ void kh_StartRound()  // runs at the start of each round
 					my_player = it;
 			}
 		});
-		kh_Key_Spawn(my_player, 360 * i / NumTeams(kh_teams), i);
+		kh_Key_Spawn(my_player, 360 * i / LegacyTeamBitCount(kh_teams), i);
 	}
 
 	kh_tracking_enabled = false;
@@ -946,7 +917,7 @@ void kh_StartRound()  // runs at the start of each round
 	kh_Controller_SetThink(autocvar_g_balance_keyhunt_delay_tracking, kh_EnableTrackingDevice);
 }
 
-float kh_HandleFrags(entity attacker, entity targ, float f)  // adds to the player score
+float kh_HandleFrags(entity attacker, entity targ, float f)
 {
 	if(attacker == targ)
 		return f;
@@ -964,22 +935,21 @@ float kh_HandleFrags(entity attacker, entity targ, float f)  // adds to the play
 		{
 			kh_Scores_Event(attacker, targ.kh_next, "carrierfrag", autocvar_g_balance_keyhunt_score_carrierfrag-1, 0);
 			GameRules_scoring_add(attacker, KH_KCKILLS, 1);
-			// the frag gets added later
+
 		}
 	}
 
 	return f;
 }
 
-void kh_Initialize()  // sets up th KH environment
+void kh_Initialize()
 {
-	// setup variables
+
 	kh_teams = autocvar_g_keyhunt_teams_override;
 	if(kh_teams < 2)
-		kh_teams = cvar("g_keyhunt_teams"); // read the cvar directly as it gets written earlier in the same frame
+		kh_teams = cvar("g_keyhunt_teams");
 	kh_teams = BITS(bound(2, kh_teams, 4));
 
-	// use a temp entity to avoid linking kh_controller to the world with setmodel
 	entity tmp_ent = spawn();
 	setmodel(tmp_ent, MDL_KH_KEY);
 	kh_key_dropped = tmp_ent.modelindex;
@@ -993,7 +963,6 @@ void kh_Initialize()  // sets up th KH environment
 
 	delete(tmp_ent);
 
-	// make a KH entity for controlling the game
 	kh_controller = new_pure(kh_controller);
 	setthink(kh_controller, kh_Controller_Think);
 	kh_Controller_SetThink(0, kh_WaitForPlayers);
@@ -1003,19 +972,16 @@ void kh_Initialize()  // sets up th KH environment
 
 void kh_finalize()
 {
-	// to be called before intermission
+
 	kh_FinishRound();
 	delete(kh_controller);
 	kh_controller = NULL;
 }
 
-// legacy bot role
-
 void(entity this) havocbot_role_kh_carrier;
 void(entity this) havocbot_role_kh_defense;
 void(entity this) havocbot_role_kh_offense;
 void(entity this) havocbot_role_kh_freelancer;
-
 
 void havocbot_goalrating_kh(entity this, float ratingscale_team, float ratingscale_dropped, float ratingscale_enemy)
 {
@@ -1026,13 +992,12 @@ void havocbot_goalrating_kh(entity this, float ratingscale_team, float ratingsca
 			continue;
 		if(!kh_tracking_enabled)
 		{
-			// if it's carried by our team we know about it
-			// otherwise we have to see it to know about it
+
 			if(!head.owner || head.team != this.team)
 			{
 				traceline(this.origin + this.view_ofs, head.origin, MOVE_NOMONSTERS, this);
 				if (trace_fraction < 1 && trace_ent != head)
-					continue; // skip what I can't see
+					continue;
 			}
 		}
 		if(!head.owner)
@@ -1064,9 +1029,9 @@ void havocbot_role_kh_carrier(entity this)
 		navigation_goalrating_start(this);
 
 		if(kh_Key_AllOwnedByWhichTeam() == this.team)
-			havocbot_goalrating_kh(this, 10, 0.1, 0.05); // bring home
+			havocbot_goalrating_kh(this, 10, 0.1, 0.05);
 		else
-			havocbot_goalrating_kh(this, 4, 4, 0.5); // play defensively
+			havocbot_goalrating_kh(this, 4, 4, 0.5);
 
 		navigation_goalrating_end(this);
 
@@ -1104,11 +1069,11 @@ void havocbot_role_kh_defense(entity this)
 
 		key_owner_team = kh_Key_AllOwnedByWhichTeam();
 		if(key_owner_team == this.team)
-			havocbot_goalrating_kh(this, 10, 0.1, 0.05); // defend key carriers
+			havocbot_goalrating_kh(this, 10, 0.1, 0.05);
 		else if(key_owner_team == -1)
-			havocbot_goalrating_kh(this, 4, 1, 0.05); // play defensively
+			havocbot_goalrating_kh(this, 4, 1, 0.05);
 		else
-			havocbot_goalrating_kh(this, 0.1, 0.1, 5); // ATTACK ANYWAY
+			havocbot_goalrating_kh(this, 0.1, 0.1, 5);
 
 		navigation_goalrating_end(this);
 
@@ -1147,11 +1112,11 @@ void havocbot_role_kh_offense(entity this)
 
 		key_owner_team = kh_Key_AllOwnedByWhichTeam();
 		if(key_owner_team == this.team)
-			havocbot_goalrating_kh(this, 10, 0.1, 0.05); // defend anyway
+			havocbot_goalrating_kh(this, 10, 0.1, 0.05);
 		else if(key_owner_team == -1)
-			havocbot_goalrating_kh(this, 0.1, 1, 2); // play offensively
+			havocbot_goalrating_kh(this, 0.1, 1, 2);
 		else
-			havocbot_goalrating_kh(this, 0.1, 0.1, 5); // ATTACK! EMERGENCY!
+			havocbot_goalrating_kh(this, 0.1, 0.1, 5);
 
 		navigation_goalrating_end(this);
 
@@ -1196,20 +1161,17 @@ void havocbot_role_kh_freelancer(entity this)
 
 		int key_owner_team = kh_Key_AllOwnedByWhichTeam();
 		if(key_owner_team == this.team)
-			havocbot_goalrating_kh(this, 10, 0.1, 0.05); // defend anyway
+			havocbot_goalrating_kh(this, 10, 0.1, 0.05);
 		else if(key_owner_team == -1)
-			havocbot_goalrating_kh(this, 1, 10, 2); // prefer dropped keys
+			havocbot_goalrating_kh(this, 1, 10, 2);
 		else
-			havocbot_goalrating_kh(this, 0.1, 0.1, 5); // ATTACK ANYWAY
+			havocbot_goalrating_kh(this, 0.1, 0.1, 5);
 
 		navigation_goalrating_end(this);
 
 		navigation_goalrating_timeout_set(this);
 	}
 }
-
-
-// register this as a mutator
 
 MUTATOR_HOOKFUNCTION(kh, ClientDisconnect)
 {
@@ -1253,7 +1215,10 @@ MUTATOR_HOOKFUNCTION(kh, MatchEnd)
 
 MUTATOR_HOOKFUNCTION(kh, TeamBalance_CheckAllowedTeams, CBC_ORDER_EXCLUSIVE)
 {
-	M_ARGV(0, float) = kh_teams;
+	entity balance = M_ARGV(0, entity);
+	for(int i = 1; i <= 4; ++i)
+		if(kh_teams & BIT(i - 1))
+			TeamBalance_AllowTeam(balance, i);
 	return true;
 }
 
@@ -1294,7 +1259,7 @@ MUTATOR_HOOKFUNCTION(kh, LogDeath_AppendItemCodes)
 {
 	entity player = M_ARGV(0, entity);
 	if(player.kh_next)
-		M_ARGV(1, string) = strcat(M_ARGV(1, string), "K"); // item codes
+		M_ARGV(1, string) = strcat(M_ARGV(1, string), "K");
 }
 
 MUTATOR_HOOKFUNCTION(kh, DropSpecialItems)
@@ -1306,5 +1271,5 @@ MUTATOR_HOOKFUNCTION(kh, DropSpecialItems)
 
 MUTATOR_HOOKFUNCTION(kh, reset_map_global)
 {
-	kh_WaitForPlayers(); // takes care of killing the "missing teams" message
+	kh_WaitForPlayers();
 }

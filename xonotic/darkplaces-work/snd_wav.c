@@ -1,31 +1,8 @@
-/*
-	Copyright (C) 1996-1997 Id Software, Inc.
-
-	This program is free software; you can redistribute it and/or
-	modify it under the terms of the GNU General Public License
-	as published by the Free Software Foundation; either version 2
-	of the License, or (at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-	See the GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to:
-
-		Free Software Foundation, Inc.
-		59 Temple Place - Suite 330
-		Boston, MA  02111-1307, USA
-
-*/
 
 
 #include "quakedef.h"
 #include "snd_main.h"
 #include "snd_wav.h"
-
 
 typedef struct wavinfo_s
 {
@@ -34,16 +11,14 @@ typedef struct wavinfo_s
 	int		channels;
 	int		loopstart;
 	int		samples;
-	int		dataofs;		// chunk starts this many bytes from file start
+	int		dataofs;
 } wavinfo_t;
-
 
 static unsigned char *data_p;
 static unsigned char *iff_end;
 static unsigned char *last_chunk;
 static unsigned char *iff_data;
 static int iff_chunk_len;
-
 
 static short GetLittleShort(void)
 {
@@ -72,7 +47,7 @@ static void FindNextChunk(const char *name)
 		data_p=last_chunk;
 
 		if (data_p >= iff_end)
-		{	// didn't find the chunk
+		{
 			data_p = NULL;
 			return;
 		}
@@ -86,7 +61,7 @@ static void FindNextChunk(const char *name)
 		}
 		if (data_p + iff_chunk_len > iff_end)
 		{
-			// truncated chunk!
+
 			data_p = NULL;
 			return;
 		}
@@ -103,31 +78,6 @@ static void FindChunk(const char *name)
 	FindNextChunk (name);
 }
 
-
-/*
-static void DumpChunks(void)
-{
-	char str[5];
-
-	str[4] = 0;
-	data_p=iff_data;
-	do
-	{
-		memcpy (str, data_p, 4);
-		data_p += 4;
-		iff_chunk_len = GetLittleLong();
-		Con_Printf("0x%x : %s (%d)\n", (int)(data_p - 4), str, iff_chunk_len);
-		data_p += (iff_chunk_len + 1) & ~1;
-	} while (data_p < iff_end);
-}
-*/
-
-
-/*
-============
-GetWavinfo
-============
-*/
 static wavinfo_t GetWavinfo (char *name, unsigned char *wav, int wavlength)
 {
 	wavinfo_t info;
@@ -143,7 +93,6 @@ static wavinfo_t GetWavinfo (char *name, unsigned char *wav, int wavlength)
 	iff_data = wav;
 	iff_end = wav + wavlength;
 
-	// find "RIFF" chunk
 	FindChunk("RIFF");
 	if (!(data_p && !strncmp((const char *)data_p+8, "WAVE", 4)))
 	{
@@ -151,9 +100,7 @@ static wavinfo_t GetWavinfo (char *name, unsigned char *wav, int wavlength)
 		return info;
 	}
 
-	// get "fmt " chunk
 	iff_data = data_p + 12;
-	//DumpChunks ();
 
 	FindChunk("fmt ");
 	if (!data_p)
@@ -174,21 +121,19 @@ static wavinfo_t GetWavinfo (char *name, unsigned char *wav, int wavlength)
 	data_p += 4+2;
 	info.width = GetLittleShort() / 8;
 
-	// get cue chunk
 	FindChunk("cue ");
 	if (data_p)
 	{
 		data_p += 32;
 		info.loopstart = GetLittleLong();
 
-		// if the next chunk is a LIST chunk, look for a cue length marker
 		FindNextChunk ("LIST");
 		if (data_p)
 		{
 			if (!strncmp ((const char *)data_p + 28, "mark", 4))
-			{	// this is not a proper parse, but it works with cooledit...
+			{
 				data_p += 24;
-				i = GetLittleLong ();	// samples in loop
+				i = GetLittleLong ();
 				info.samples = info.loopstart + i;
 			}
 		}
@@ -196,7 +141,6 @@ static wavinfo_t GetWavinfo (char *name, unsigned char *wav, int wavlength)
 	else
 		info.loopstart = -1;
 
-	// find data chunk
 	FindChunk("data");
 	if (!data_p)
 	{
@@ -223,12 +167,6 @@ static wavinfo_t GetWavinfo (char *name, unsigned char *wav, int wavlength)
 	return info;
 }
 
-
-/*
-====================
-WAV_GetSamplesFloat
-====================
-*/
 static void WAV_GetSamplesFloat(channel_t *ch, sfx_t *sfx, int firstsampleframe, int numsampleframes, float *outsamplesfloat)
 {
 	int i, len = numsampleframes * sfx->format.channels;
@@ -246,25 +184,14 @@ static void WAV_GetSamplesFloat(channel_t *ch, sfx_t *sfx, int firstsampleframe,
 	}
 }
 
-/*
-====================
-WAV_FreeSfx
-====================
-*/
 static void WAV_FreeSfx(sfx_t *sfx)
 {
-	// free the loaded sound data
+
 	Mem_Free(sfx->fetcher_data);
 }
 
 const snd_fetcher_t wav_fetcher = { WAV_GetSamplesFloat, NULL, WAV_FreeSfx };
 
-
-/*
-==============
-S_LoadWavFile
-==============
-*/
 qboolean S_LoadWavFile (const char *filename, sfx_t *sfx)
 {
 	fs_offset_t filesize;
@@ -274,16 +201,13 @@ qboolean S_LoadWavFile (const char *filename, sfx_t *sfx)
 	const unsigned char *inb;
 	unsigned char *outb;
 
-	// Already loaded?
 	if (sfx->fetcher != NULL)
 		return true;
 
-	// Load the file
 	data = FS_LoadFile(filename, snd_mempool, false, &filesize);
 	if (!data)
 		return false;
 
-	// Don't try to load it if it's not a WAV file
 	if (memcmp (data, "RIFF", 4) || memcmp (data + 8, "WAVE", 4))
 	{
 		Mem_Free(data);
@@ -294,14 +218,12 @@ qboolean S_LoadWavFile (const char *filename, sfx_t *sfx)
 		Con_Printf ("Loading WAV file \"%s\"\n", filename);
 
 	info = GetWavinfo (sfx->name, data, (int)filesize);
-	if (info.channels < 1 || info.channels > 2)  // Stereo sounds are allowed (intended for music)
+	if (info.channels < 1 || info.channels > 2)
 	{
 		Con_Printf("%s has an unsupported number of channels (%i)\n",sfx->name, info.channels);
 		Mem_Free(data);
 		return false;
 	}
-	//if (info.channels == 2)
-	//	Log_Printf("stereosounds.log", "%s\n", sfx->name);
 
 	sfx->format.speed = info.rate;
 	sfx->format.width = info.width;
@@ -317,7 +239,7 @@ qboolean S_LoadWavFile (const char *filename, sfx_t *sfx)
 	{
 		if (mem_bigendian)
 		{
-			// we have to byteswap the data at load (better than doing it while mixing)
+
 			for (i = 0;i < len;i += 2)
 			{
 				outb[i] = inb[i+1];
@@ -326,13 +248,13 @@ qboolean S_LoadWavFile (const char *filename, sfx_t *sfx)
 		}
 		else
 		{
-			// we can just copy it straight
+
 			memcpy(outb, inb, len);
 		}
 	}
 	else
 	{
-		// convert unsigned byte sound data to signed bytes for quicker mixing
+
 		for (i = 0;i < len;i++)
 			outb[i] = inb[i] - 0x80;
 	}

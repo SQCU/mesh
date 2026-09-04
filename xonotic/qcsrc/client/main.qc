@@ -33,14 +33,7 @@
 #include <lib/csqcmodel/interpolate.qh>
 #include <lib/warpzone/client.qh>
 
-// --------------------------------------------------------------------------
-// BEGIN REQUIRED CSQC FUNCTIONS
-//include "main.qh"
-
 #define DP_CSQC_ENTITY_REMOVE_IS_B0RKED
-
-// CSQC_Init : Called every time the CSQC code is initialized (essentially at map load)
-// Useful for precaching things
 
 void CSQC_Init()
 {
@@ -58,7 +51,6 @@ void CSQC_Init()
 		maxclients = i;
 	}
 
-	// needs to be done so early because of the constants they create
 	static_init();
 	static_init_late();
 	static_init_precache();
@@ -68,10 +60,6 @@ void CSQC_Init()
 	ClientProgsDB = db_load("client.db");
 
 	draw_endBoldFont();
-
-	//registercommand("hud_configure");
-	//registercommand("hud_save");
-	//registercommand("menu_action");
 
 	ConsoleCommand_macro_init();
 
@@ -102,7 +90,7 @@ void CSQC_Init()
 
 	if (cvar_type("_scoreboard_team_selection_available") & CVAR_TYPEFLAG_EXISTS)
 		cvar_settemp("_scoreboard_team_selection_available", "1");
-	cvar_set("_scoreboard_team_selection", "0"); // in case it has been left set to 1
+	cvar_set("_scoreboard_team_selection", "0");
 
 	gametype = NULL;
 
@@ -113,31 +101,29 @@ void CSQC_Init()
 	teams = Sort_Spawn();
 	players = Sort_Spawn();
 
-	GetTeam(NUM_SPECTATOR, true); // add specs first
+	GetTeam(NUM_SPECTATOR, true);
 
 	for (int w = 0; w <= WEP_LAST - WEP_FIRST; ++w)
 		weapon_accuracy[w] = -1;
 
-	// precaches
-
 	if(autocvar_cl_reticle)
 	{
 		precache_pic("gfx/reticle_normal");
-		// weapon reticles are precached in weapon files
+
 	}
 
 	{
-		get_mi_min_max_texcoords(1); // try the CLEVER way first
+		get_mi_min_max_texcoords(1);
 		minimapname = strcat("gfx/", mi_shortname, "_radar");
 
 		if (precache_pic(minimapname) == "")
 		{
-			// but maybe we have a non-clever minimap
+
 			minimapname = strcat("gfx/", mi_shortname, "_mini");
 			if (precache_pic(minimapname) == "")
-				minimapname = ""; // FAIL
+				minimapname = "";
 			else
-				get_mi_min_max_texcoords(0); // load new texcoords
+				get_mi_min_max_texcoords(0);
 		}
 
 		mi_center = (mi_min + mi_max) * 0.5;
@@ -149,7 +135,6 @@ void CSQC_Init()
 	LoadMenuSkinValues();
 }
 
-// CSQC_Shutdown : Called every time the CSQC code is shutdown (changing maps, quitting, etc)
 void Shutdown()
 {
 	WarpZone_Shutdown();
@@ -167,14 +152,13 @@ void Shutdown()
 	if(camera_active)
 		cvar_set("chase_active",ftos(chase_active_backup));
 
-	// unset the event chasecam's chase_active
 	if(autocvar_chase_active < 0)
 		cvar_set("chase_active", "0");
 
 	if (autocvar_r_drawviewmodel < 0)
 		cvar_set("r_drawviewmodel", "0");
 
-	cvar_set("slowmo", cvar_defstring("slowmo")); // reset it back to 'default'
+	cvar_set("slowmo", cvar_defstring("slowmo"));
 
 	if (!isdemo())
 	{
@@ -184,10 +168,9 @@ void Shutdown()
 		{
 			int gamecount = cvar("cl_matchcount");
 			localcmd("\ncl_hook_gameend\n");
-			// NOTE: using localcmd here to ensure it's executed AFTER cl_hook_gameend
-			// earlier versions of the game abuse the hook to set this cvar
+
 			localcmd(strcat("cl_matchcount ", itos(gamecount + 1), "\n"));
-			//cvar_set("cl_matchcount", itos(gamecount + 1));
+
 		}
 	}
 
@@ -311,7 +294,7 @@ void RemoveTeam(entity Team)
 entity GetTeam(int Team, bool add)
 {
 	TC(int, Team); TC(bool, add);
-	int num = (Team == NUM_SPECTATOR) ? 16 : Team;
+	int num = Team;
 	if(teamslots[num])
 		return teamslots[num];
 	if (!add)
@@ -327,7 +310,7 @@ entity GetTeam(int Team, bool add)
 bool SetTeam(entity o, int Team)
 {
 	TC(int, Team);
-	//devassert_once(Team);
+
 	entity tm;
 	if(teamplay)
 	{
@@ -338,6 +321,10 @@ bool SetTeam(entity o, int Team)
 			case NUM_TEAM_2:
 			case NUM_TEAM_3:
 			case NUM_TEAM_4:
+				case NUM_TEAM_5:
+				case NUM_TEAM_6:
+				case NUM_TEAM_7:
+				case NUM_TEAM_8:
 				break;
 			default:
 				if(GetTeam(Team, false) == NULL)
@@ -364,7 +351,7 @@ bool SetTeam(entity o, int Team)
 				break;
 		}
 	}
-	if(Team == -1) // leave
+	if(Team == -1)
 	{
 		if(o.has_team)
 		{
@@ -408,18 +395,18 @@ void Playerchecker_Think(entity this)
 		{
 			if(e.sort_prev)
 			{
-				// player disconnected
+
 				SetTeam(e, -1);
 				RemovePlayer(e);
 				e.sort_prev = NULL;
-				//e.gotscores = 0;
+
 			}
 		}
 		else
 		{
 			if (!e.sort_prev)
 			{
-				// player connected
+
 				if (!e)
 				{
 					playerslots[i] = e = new_pure(playerslot);
@@ -428,9 +415,9 @@ void Playerchecker_Think(entity this)
 				e.ping = 0;
 				e.ping_packetloss = 0;
 				e.ping_movementloss = 0;
-				//e.gotscores = 0; // we might already have the scores...
+
 				int t = entcs_GetScoreTeam(i);
-				if (t) SetTeam(e, t); // will not hurt; later updates come with Scoreboard_UpdatePlayerTeams
+				if (t) SetTeam(e, t);
 				RegisterPlayer(e);
 				Scoreboard_UpdatePlayerPos(e);
 			}
@@ -447,7 +434,6 @@ void PostInit()
 
 	TrueAim_Init();
 
-	// this can't be called in CSQC_Init as it'd send cvars too early
 	ReplicateVars_Start();
 
 	postinit = true;
@@ -466,13 +452,6 @@ void Release_Common_Keys()
 	localcmd("-moveright\n");
 }
 
-// CSQC_InputEvent : Used to perform actions based on any key pressed, key released and mouse on the client.
-// Return value should be 1 if CSQC handled the input, otherwise return 0 to have the input passed to the engine.
-// All keys are in ascii.
-// bInputType = 0 is key pressed, 1 is key released, 2 and 3 are mouse input.
-// In the case of keyboard input, nPrimary is the ascii code, and nSecondary is 0.
-// In the case of mouse input, nPrimary is xdelta, nSecondary is ydelta.
-// In the case of mouse input after a setcursormode(1) call, nPrimary is xpos, nSecondary is ypos.
 float CSQC_InputEvent(int bInputType, float nPrimary, float nSecondary)
 {
 	TC(int, bInputType);
@@ -502,7 +481,6 @@ float CSQC_InputEvent(int bInputType, float nPrimary, float nSecondary)
 	if(bInputType == 3 || bInputType == 2)
 		return false;
 
-	// at this point bInputType can only be 0 or 1 (key pressed or released)
 	bool key_pressed = (bInputType == 0);
 
 	if(key_pressed) {
@@ -518,7 +496,6 @@ float CSQC_InputEvent(int bInputType, float nPrimary, float nSecondary)
 		if(nPrimary == K_TAB) hudShiftState -= (hudShiftState & S_TAB);
 	}
 
-	// NOTE: Shift-Escape must be filtered out because it's the hardcoded console shortcut
 	if (nPrimary == K_ESCAPE && !(hudShiftState & S_SHIFT) && key_pressed)
 	{
 		if (hudShiftState & S_TAB)
@@ -536,11 +513,6 @@ float CSQC_InputEvent(int bInputType, float nPrimary, float nSecondary)
 	return false;
 }
 
-// END REQUIRED CSQC FUNCTIONS
-// --------------------------------------------------------------------------
-
-// --------------------------------------------------------------------------
-// BEGIN OPTIONAL CSQC FUNCTIONS
 .int survival_status;
 void Ent_RemovePlayerScore(entity this)
 {
@@ -548,12 +520,12 @@ void Ent_RemovePlayerScore(entity this)
 		SetTeam(this.owner, -1);
 		this.owner.gotscores = 0;
 		FOREACH(Scores, true, {
-			this.owner.(scores(it)) = 0; // clear all scores
+			this.owner.(scores(it)) = 0;
 		});
 		this.owner.ready = 0;
 		this.owner.eliminated = 0;
 		this.owner.colormap = 0;
-		// TODO add a hook to reset this Survival field
+
 		this.owner.survival_status = 0;
 	}
 }
@@ -563,15 +535,13 @@ NET_HANDLE(ENT_CLIENT_SCORES, bool isnew)
 	make_pure(this);
 	entity o;
 
-	// damnit -.- don't want to go change every single .sv_entnum in hud.qc AGAIN
-	// (no I've never heard of M-x replace-string, sed, or anything like that)
-	bool isNew = !this.owner; // workaround for DP bug
-	int n = ReadByte()-1;
+	bool isNew = !this.owner;
+	int n = ReadShort() - 1;
 
 #ifdef DP_CSQC_ENTITY_REMOVE_IS_B0RKED
 	if(!isNew && n != this.sv_entnum)
 	{
-		//print("A CSQC entity changed its owner!\n");
+
 		LOG_INFOF("A CSQC entity changed its owner! (edict: %d, classname: %s)", etof(this), this.classname);
 		isNew = true;
 		Ent_Remove(this);
@@ -589,10 +559,6 @@ NET_HANDLE(ENT_CLIENT_SCORES, bool isnew)
 	o.sv_entnum = this.sv_entnum;
 	o.gotscores = 1;
 
-	//if (!o.sort_prev)
-	//	RegisterPlayer(o);
-	//playerchecker will do this for us later, if it has not already done so
-
 	int sf = ReadShort();
 	int lf = ReadShort();
 	FOREACH(Scores, true, {
@@ -609,7 +575,7 @@ NET_HANDLE(ENT_CLIENT_SCORES, bool isnew)
 	return = true;
 
 	if(o.sort_prev)
-		Scoreboard_UpdatePlayerPos(o); // if not registered, we cannot do this yet!
+		Scoreboard_UpdatePlayerPos(o);
 
 	this.entremove = Ent_RemovePlayerScore;
 }
@@ -619,8 +585,8 @@ NET_HANDLE(ENT_CLIENT_TEAMSCORES, bool isnew)
 	make_pure(this);
 	int i;
 
-	this.team = ReadByte();
-	entity o = this.owner = GetTeam(this.team, true); // these team numbers can always be trusted
+	this.team = ReadShort();
+	entity o = this.owner = GetTeam(this.team, true);
 
 #if MAX_TEAMSCORE <= 8
 	int sf = ReadByte();
@@ -656,7 +622,7 @@ NET_HANDLE(ENT_CLIENT_CLIENTDATA, bool isnew)
 	{
 		newspectatee_status = ReadByte();
 		if(newspectatee_status == player_localnum + 1)
-			newspectatee_status = -1; // observing
+			newspectatee_status = -1;
 	}
 	else
 		newspectatee_status = 0;
@@ -671,7 +637,7 @@ NET_HANDLE(ENT_CLIENT_CLIENTDATA, bool isnew)
 		float i, slot;
 
 		for(i = 0; i < MAX_SPECTATORS; ++i)
-			spectatorlist[i] = 0; // reset list first
+			spectatorlist[i] = 0;
 
 		int limit = min(num_spectators, MAX_SPECTATORS);
 		for(i = 0; i < limit; ++i)
@@ -683,7 +649,7 @@ NET_HANDLE(ENT_CLIENT_CLIENTDATA, bool isnew)
 	else
 	{
 		for(int j = 0; j < MAX_SPECTATORS; ++j)
-			spectatorlist[j] = 0; // reset list if showspectators has been turned off
+			spectatorlist[j] = 0;
 		num_spectators = 0;
 	}
 
@@ -691,7 +657,7 @@ NET_HANDLE(ENT_CLIENT_CLIENTDATA, bool isnew)
 
 	if(newspectatee_status != spectatee_status)
 	{
-		// clear race stuff
+
 		race_laptime = 0;
 		race_checkpointtime = 0;
 		hud_dynamic_shake_factor = -1;
@@ -699,23 +665,22 @@ NET_HANDLE(ENT_CLIENT_CLIENTDATA, bool isnew)
 	}
 	if (autocvar_hud_panel_healtharmor_progressbar_gfx)
 	{
-		if ( (spectatee_status == -1 && newspectatee_status > 0) //before observing, now spectating
-		  || (spectatee_status > 0 && newspectatee_status > 0 && spectatee_status != newspectatee_status) //changed spectated player
+		if ( (spectatee_status == -1 && newspectatee_status > 0)
+		  || (spectatee_status > 0 && newspectatee_status > 0 && spectatee_status != newspectatee_status)
 		)
 			prev_p_health = -1;
-		else if(spectatee_status && !newspectatee_status) //before observing/spectating, now playing
+		else if(spectatee_status && !newspectatee_status)
 			prev_health = -1;
 	}
 	spectatee_status = newspectatee_status;
 
-	// we could get rid of spectatee_status, and derive it from player_localentnum and player_localnum
 }
 
 NET_HANDLE(ENT_CLIENT_NAGGER, bool isnew)
 {
 	make_pure(this);
 
-	int nags = ReadByte(); // NAGS NAGS NAGS NAGS NAGS NAGS NADZ NAGS NAGS NAGS
+	int nags = ReadByte();
 
 	if(!(nags & BIT(2)))
 	{
@@ -807,7 +772,7 @@ NET_HANDLE(ENT_CLIENT_ACCURACY, bool isnew)
 			if (b == 0)
 				weapon_accuracy[w] = -1;
 			else if (b == 255)
-				weapon_accuracy[w] = 1.0; // no better error handling yet, sorry
+				weapon_accuracy[w] = 1.0;
 			else
 				weapon_accuracy[w] = (b - 1.0) / 100.0;
 		}
@@ -831,42 +796,24 @@ void Spawn_Draw(entity this)
 
 NET_HANDLE(ENT_CLIENT_SPAWNPOINT, bool is_new)
 {
-	float teamnum = (ReadByte() - 1);
+	float teamnum = (ReadShort() - 1);
 	vector spn_origin = ReadVector();
 
 	this.team = (teamnum + 1);
 
-	//if(is_new)
-	//{
 		this.origin = spn_origin;
 		setsize(this, PL_MIN_CONST, PL_MAX_CONST);
-		//droptofloor();
 
-		/*if(autocvar_cl_spawn_point_model) // needs a model first
-		{
-			this.mdl = "models/spawnpoint.md3";
-			this.colormod = Team_ColorRGB(teamnum);
-			precache_model(this.mdl);
-			setmodel(this, this.mdl);
-			this.drawmask = MASK_NORMAL;
-			//this.move_movetype = MOVETYPE_NOCLIP;
-			//this.draw = Spawn_Draw;
-			IL_PUSH(g_drawables, this);
-		}*/
 		this.draw = Spawn_Draw;
 		if (is_new) IL_PUSH(g_drawables, this);
-	//}
 
-	//printf("Ent_ReadSpawnPoint(is_new = %d); origin = %s, team = %d, effect = %d\n", is_new, vtos(this.origin), teamnum, this.cnt);
 	return true;
 }
 
 NET_HANDLE(ENT_CLIENT_SPAWNEVENT, bool is_new)
 {
-	// If entnum is 0, ONLY do the local spawn actions
-	// this way the server can disable the sending of
-	// spawn origin or such to clients if wanted.
-	float entnum = ReadByte();
+
+	float entnum = ReadShort();
 
 	if(entnum)
 	{
@@ -884,6 +831,7 @@ NET_HANDLE(ENT_CLIENT_SPAWNEVENT, bool is_new)
 					case NUM_TEAM_2: pointparticles(EFFECT_SPAWN_BLUE, this.origin, '0 0 0', 1); break;
 					case NUM_TEAM_3: pointparticles(EFFECT_SPAWN_YELLOW, this.origin, '0 0 0', 1); break;
 					case NUM_TEAM_4: pointparticles(EFFECT_SPAWN_PINK, this.origin, '0 0 0', 1); break;
+					case NUM_TEAM_5: pointparticles(EFFECT_SPAWN_GREEN, this.origin, '0 0 0', 1); break;
 					default: pointparticles(EFFECT_SPAWN_NEUTRAL, this.origin, '0 0 0', 1); break;
 				}
 			}
@@ -895,7 +843,6 @@ NET_HANDLE(ENT_CLIENT_SPAWNEVENT, bool is_new)
 	}
 	return = true;
 
-	// local spawn actions
 	if(is_new && (!entnum || (entnum == player_localentnum)))
 	{
 		if(autocvar_cl_spawnzoom && !autocvar_cl_lockview)
@@ -911,17 +858,14 @@ NET_HANDLE(ENT_CLIENT_SPAWNEVENT, bool is_new)
 		}
 		HUD_Radar_Hide_Maximized();
 	}
-	//printf("Ent_ReadSpawnEvent(is_new = %d); origin = %s, entnum = %d, localentnum = %d\n", is_new, vtos(this.origin), entnum, player_localentnum);
+
 }
 
-// CSQC_Ent_Update : Called every frame that the server has indicated an update to the SSQC / CSQC entity has occured.
-// The parameter isnew reflects if the entity is "new" to the client, meaning it just came into the client's PVS.
 void CSQC_Ent_Update(entity this, bool isnew)
 {
 	this.sourceLoc = __FILE__":"STR(__LINE__);
 	int t = ReadByte();
 
-	// set up the "time" global for received entities to be correct for interpolation purposes
 	float savetime = time;
 	if(servertime)
 	{
@@ -972,9 +916,6 @@ void CSQC_Ent_Update(entity this, bool isnew)
 	}
 }
 
-// Destructor, but does NOT deallocate the entity by calling remove(). Also
-// used when an entity changes its type. For an entity that someone interacts
-// with others, make sure it can no longer do so.
 void Ent_Remove(entity this)
 {
 	if(this.entremove) this.entremove(this);
@@ -995,9 +936,9 @@ void Ent_Remove(entity this)
 	this.classname = "";
 	this.draw = func_null;
 	this.entremove = func_null;
-	// TODO possibly set more stuff to defaults
+
 }
-// CSQC_Ent_Remove : Called when the server requests a SSQC / CSQC entity to be removed.  Essentially call remove(this) as well.
+
 void CSQC_Ent_Remove(entity this)
 {
 	if (autocvar_developer_csqcentities) LOG_INFOF("CSQC_Ent_Remove() with this=%i {.entnum=%d, .enttype=%d}", this, this.entnum, this.enttype);
@@ -1019,32 +960,28 @@ void Gamemode_Init()
 		calledhooks |= HOOK_START;
 	}
 }
-// CSQC_Parse_StuffCmd : Provides the stuffcmd string in the first parameter that the server provided.  To execute standard behavior, simply execute localcmd with the string.
+
 void CSQC_Parse_StuffCmd(string strMessage)
 {
 	if (autocvar_developer_csqcentities) LOG_INFOF("CSQC_Parse_StuffCmd(\"%s\")", strMessage);
 	localcmd(strMessage);
 }
-// CSQC_Parse_Print : Provides the print string in the first parameter that the server provided.  To execute standard behavior, simply execute print with the string.
+
 void CSQC_Parse_Print(string strMessage)
 {
 	if (autocvar_developer_csqcentities) LOG_INFOF("CSQC_Parse_Print(\"%s\")", strMessage);
 	print(ColorTranslateRGB(strMessage));
 }
 
-// CSQC_Parse_CenterPrint : Provides the centerprint_AddStandard string in the first parameter that the server provided.
 void CSQC_Parse_CenterPrint(string strMessage)
 {
 	if (autocvar_developer_csqcentities) LOG_INFOF("CSQC_Parse_CenterPrint(\"%s\")", strMessage);
 	centerprint_AddStandard(strMessage);
 }
 
-// CSQC_Parse_TempEntity : Handles all temporary entity network data in the CSQC layer.
-// You must ALWAYS first acquire the temporary ID, which is sent as a byte.
-// Return value should be 1 if CSQC handled the temporary entity, otherwise return 0 to have the engine process the event.
 bool CSQC_Parse_TempEntity()
 {
-	// Acquire TE ID
+
 	int nTEID = ReadByte();
 
 	FOREACH(TempEntities, it.m_id == nTEID, {
@@ -1056,7 +993,6 @@ bool CSQC_Parse_TempEntity()
 	if (autocvar_developer_csqcentities)
 		LOG_INFOF("CSQC_Parse_TempEntity() with nTEID=%d", nTEID);
 
-	// No special logic for this temporary entity; return 0 so the engine can handle it
 	return false;
 }
 
@@ -1095,7 +1031,7 @@ NET_HANDLE(ENT_CLIENT_SCORES_INFO, bool isnew)
 
 NET_HANDLE(ENT_CLIENT_INIT, bool isnew)
 {
-	nb_pb_period = ReadByte() / 32; //Accuracy of 1/32th
+	nb_pb_period = ReadByte() / 32;
 
 	hook_shotorigin[0] = decompressShotOrigin(ReadInt24_t());
 	hook_shotorigin[1] = decompressShotOrigin(ReadInt24_t());
@@ -1131,7 +1067,7 @@ float GetSpeedUnitFactor(int speed_unit)
 		case 2: return 0.0254;
 		case 3: return 0.0254 * 3.6;
 		case 4: return 0.0254 * 3.6 * 0.6213711922;
-		case 5: return 0.0254 * 1.943844492; // 1 m/s = 1.943844492 knots, because 1 knot = 1.852 km/h
+		case 5: return 0.0254 * 1.943844492;
 	}
 }
 
@@ -1139,7 +1075,7 @@ string GetSpeedUnit(int speed_unit)
 {
 	switch(speed_unit)
 	{
-		// translator-friendly strings without the initial space
+
 		default:
 		case 1: return strcat(" ", _("qu/s"));
 		case 2: return strcat(" ", _("m/s"));
@@ -1175,7 +1111,7 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 			if(race_checkpoint == 0 || race_checkpoint == 254)
 			{
 				race_penaltyaccumulator = 0;
-				race_laptime = time; // valid
+				race_laptime = time;
 			}
 			break;
 
@@ -1187,12 +1123,12 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 		case RACE_NET_CHECKPOINT_NEXT_SPEC_QUALIFYING:
 			race_laptime = ReadCoord();
 			race_checkpointtime = -99999;
-			// fall through
+
 		case RACE_NET_CHECKPOINT_NEXT_QUALIFYING:
 			race_nextcheckpoint = ReadByte();
 
 			race_nextbesttime = ReadInt24_t();
-			if(b != RACE_NET_CHECKPOINT_NEXT_SPEC_QUALIFYING) // not while spectating (matches server)
+			if(b != RACE_NET_CHECKPOINT_NEXT_SPEC_QUALIFYING)
 				race_mybesttime = ReadInt24_t();
 			string newname = ReadString();
 			if(autocvar_cl_race_cptimes_onlyself && b != RACE_NET_CHECKPOINT_NEXT_SPEC_QUALIFYING)
@@ -1212,11 +1148,11 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 			race_mycheckpointlapsdelta = ReadByte();
 			if(race_mycheckpointlapsdelta >= 128)
 				race_mycheckpointlapsdelta -= 256;
-			int who = ReadByte();
+			int who = ReadShort();
 			if(who)
 				strcpy(race_mycheckpointenemy, entcs_GetName(who - 1));
 			else
-				strcpy(race_mycheckpointenemy, ""); // TODO: maybe string_null works fine here?
+				strcpy(race_mycheckpointenemy, "");
 			break;
 
 		case RACE_NET_CHECKPOINT_HIT_RACE_BY_OPPONENT:
@@ -1226,11 +1162,11 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 			race_othercheckpointlapsdelta = ReadByte();
 			if(race_othercheckpointlapsdelta >= 128)
 				race_othercheckpointlapsdelta -= 256;
-			int what = ReadByte();
+			int what = ReadShort();
 			if(what)
 				strcpy(race_othercheckpointenemy, entcs_GetName(what - 1));
 			else
-				strcpy(race_othercheckpointenemy, ""); // TODO: maybe string_null works fine here?
+				strcpy(race_othercheckpointenemy, "");
 			break;
 
 		case RACE_NET_PENALTY_RACE:
@@ -1265,7 +1201,6 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 			prevpos = ReadShort();
 			del = ReadShort();
 
-			// move other rankings out of the way
 			int i;
 			if (prevpos) {
 				int m = min(prevpos, RANKINGS_DISPLAY_CNT);
@@ -1273,9 +1208,9 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 					grecordtime[i] = grecordtime[i-1];
 					strcpy(grecordholder[i], grecordholder[i-1]);
 				}
-			} else if (del) { // a record has been deleted by the admin
+			} else if (del) {
 				for (i=pos-1; i<= RANKINGS_DISPLAY_CNT-1; ++i) {
-					if (i == RANKINGS_DISPLAY_CNT-1) { // clear out last record
+					if (i == RANKINGS_DISPLAY_CNT-1) {
 						grecordtime[i] = 0;
 						strfree(grecordholder[i]);
 					}
@@ -1284,7 +1219,7 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 						strcpy(grecordholder[i], grecordholder[i+1]);
 					}
 				}
-			} else { // player has no ranked record yet
+			} else {
 				for (i=RANKINGS_DISPLAY_CNT-1;i>pos-1;--i) {
 					grecordtime[i] = grecordtime[i-1];
 					strcpy(grecordholder[i], grecordholder[i-1]);
@@ -1292,12 +1227,11 @@ NET_HANDLE(TE_CSQC_RACE, bool isNew)
 			}
 
 			if (grecordtime[RANKINGS_DISPLAY_CNT]) {
-				// kick off the player who fell from the last displayed position
+
 				grecordtime[RANKINGS_DISPLAY_CNT] = 0;
 				strfree(grecordholder[RANKINGS_DISPLAY_CNT]);
 			}
 
-			// store new ranking
 			strcpy(grecordholder[pos-1], ReadString());
 			grecordtime[pos-1] = ReadInt24_t();
 			if(strdecolorize(grecordholder[pos-1]) == strdecolorize(entcs_GetName(player_localnum)))
@@ -1338,7 +1272,7 @@ NET_HANDLE(TE_CSQC_WEAPONCOMPLAIN, bool isNew)
 	return = true;
 
 	complain_weapon_time = time;
-	weapontime = time; // ping the weapon panel
+	weapontime = time;
 
 	switch(complain_weapon_type)
 	{
@@ -1360,8 +1294,8 @@ string translate_weaponarena(string s)
 	if (s == "All Available Weapons Arena") return _("All Available Weapons Arena");
 	if (s == "Most Weapons Arena") return _("Most Weapons Arena");
 	if (s == "Most Available Weapons Arena") return _("Most Available Weapons Arena");
-	if (s == "Dev All Weapons Arena") return s; // development option, do not translate
-	if (s == "Dev All Available Weapons Arena") return s; // development option, do not translate
+	if (s == "Dev All Weapons Arena") return s;
+	if (s == "Dev All Available Weapons Arena") return s;
 	if (s == "No Weapons Arena") return _("No Weapons Arena");
 
 	int n = tokenizebyseparator(s, " & ");
@@ -1403,9 +1337,7 @@ bool net_handle_ServerWelcome()
 	if (campaign)
 	{
 		int campaign_level = ReadByte();
-		// Menu can't build the whole campaign message because it lacks getcommandkey and CCR
-		// so we build part of the message here and let the menu insert the level description
-		// (that client doesn't know) by replacing the keyword _LEVEL_DESC
+
 		string key = getcommandkey(_("jump"), "+jump");
 		string msg = strcat(
 			CCR("^F1"), sprintf(_("Level %d:"), campaign_level),
@@ -1438,7 +1370,7 @@ bool net_handle_ServerWelcome()
 		msg = strcat(msg, mi_shortname, "\n");
 	else
 	{
-		int i = strstrofs(world.message, " by ", 0); // matches _MapInfo_Generate()
+		int i = strstrofs(world.message, " by ", 0);
 		string longname = i >= 0 ? substring(world.message, 0, i) : world.message;
 		msg = strcat(msg, (strcasecmp(longname, mi_shortname) ? strcat(mi_shortname, " ^7// ^2") : ""), longname, "\n");
 	}
@@ -1465,13 +1397,13 @@ bool net_handle_ServerWelcome()
 	string mutator_msg = "";
 	MUTATOR_CALLHOOK(BuildGameplayTipsString, mutator_msg);
 	mutator_msg = M_ARGV(0, string);
-	msg = strcat(msg, mutator_msg); // trust that the mutator will do proper formatting
+	msg = strcat(msg, mutator_msg);
 
 	if (motd != "")
 		msg = strcat(msg, "\n^9↓ ", _("Server's message"), " ↓\n", motd);
 
 	strcpy(welcome_msg, msg);
-	welcome_msg_menu_check_maxtime = time + 1; // wait for menu to load before showing the welcome dialog
+	welcome_msg_menu_check_maxtime = time + 1;
 	return true;
 }
 
@@ -1480,7 +1412,6 @@ void Welcome_Message_Show_Try()
 	if (!welcome_msg_menu_check_maxtime)
 		return;
 
-	// if want dialog check if menu is initialized but for a short time
 	if (cvar("_menu_initialized") == 2 || time > welcome_msg_menu_check_maxtime)
 	{
 		if (cvar("_menu_welcome_dialog_available"))
@@ -1493,16 +1424,14 @@ void Welcome_Message_Show_Try()
 			{
 				if (cvar("_menu_cmd_closemenu_available"))
 				{
-					// initialize the dialog without opening it
+
 					localcmd("\nmenu_cmd closemenu Welcome ", welcomedialog_args, "\n");
 				}
 				else
 				{
-					// legacy code for clients with old menus
-					// since togglemenu 0 doesn't close the dialog but only hides it,
-					// playing back a demo the Welcome dialog will pop up on the first ESC press
+
 					localcmd("\nmenu_cmd directmenu Welcome ", welcomedialog_args, "\n");
-					// close it after it's been initialized so it can still be opened manually
+
 					localcmd("\ntogglemenu 0\n");
 				}
 			}
@@ -1532,7 +1461,7 @@ string _getcommandkey(string cmd_name, string command, bool forcename)
 	if (keys == "")
 	{
 		bool joy_active = cvar("joy_active");
-		n = tokenize(findkeysforcommand(command, 0)); // uses '...' strings
+		n = tokenize(findkeysforcommand(command, 0));
 		for(j = 0; j < n; ++j)
 		{
 			k = stof(argv(j));
@@ -1572,21 +1501,20 @@ string _getcommandkey(string cmd_name, string command, bool forcename)
 		return keys;
 }
 
-/** engine callback */
 void URI_Get_Callback(int id, int status, string data)
 {
 	TC(int, id); TC(int, status);
 	if(url_URI_Get_Callback(id, status, data))
 	{
-		// handled
+
 	}
 	else if (id == URI_GET_DISCARD)
 	{
-		// discard
+
 	}
 	else if (id >= URI_GET_CURL && id <= URI_GET_CURL_END)
 	{
-		// sv_cmd curl
+
 		Curl_URI_Get_Callback(id, status, data);
 	}
 	else

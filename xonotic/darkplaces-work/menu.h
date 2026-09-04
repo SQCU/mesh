@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #ifndef MENU_H
 #define MENU_H
@@ -52,27 +34,6 @@ extern enum m_state_e m_state;
 extern char m_return_reason[128];
 void M_Update_Return_Reason(const char *s);
 
-/*
-// hard-coded menus
-//
-void M_Init (void);
-void M_KeyEvent (int key);
-void M_Draw (void);
-void M_ToggleMenu (int mode);
-
-//
-// menu prog menu
-//
-void MP_Init (void);
-void MP_KeyEvent (int key);
-void MP_Draw (void);
-void MP_ToggleMenu (int mode);
-void MP_Shutdown (void);*/
-
-//
-// menu router
-//
-
 void MR_Init_Commands (void);
 void MR_Init (void);
 void MR_Restart (void);
@@ -88,7 +49,7 @@ typedef struct video_resolution_s
 	const char *type;
 	int width, height;
 	int conwidth, conheight;
-	double pixelheight; ///< pixel aspect
+	double pixelheight;
 }
 video_resolution_t;
 extern video_resolution_t *video_resolutions;
@@ -96,4 +57,3 @@ extern int video_resolutions_count;
 extern video_resolution_t video_resolutions_hardcoded[];
 extern int video_resolutions_hardcoded_count;
 #endif
-

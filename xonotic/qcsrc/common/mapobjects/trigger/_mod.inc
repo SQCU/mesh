@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/mapobjects/trigger/counter.qc>
 #include <common/mapobjects/trigger/delay.qc>
 #include <common/mapobjects/trigger/disablerelay.qc>

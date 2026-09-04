@@ -68,7 +68,6 @@ string autocvar_g_nades_pokenade_monster_type;
 float autocvar_g_nades_pokenade_monster_lifetime;
 #endif
 
-// use slots 70-100
 const int PROJECTILE_NADE = 71;
 const int PROJECTILE_NADE_BURN = 72;
 const int PROJECTILE_NADE_NAPALM = 73;
@@ -150,29 +149,24 @@ REPLICATE_INIT(string, cvar_cl_pokenade_type);
 
 bool orb_send(entity this, entity to, int sf);
 
-// Remove nades that are being thrown
 void nades_Clear(entity player);
 
-// Give a bonus grenade to a player
 void nades_GiveBonus(entity player, float score);
 
-/**
- * called to adjust nade damage and force on hit
- */
 #define EV_Nade_Damage(i, o) \
-    /** nade */   i(entity, MUTATOR_ARGV_0_entity) \
- 	/** weapon */ i(entity, MUTATOR_ARGV_1_entity) \
-    /** force */  i(vector, MUTATOR_ARGV_2_vector) \
-    /**/          o(vector, MUTATOR_ARGV_2_vector) \
- 	/** damage */ i(float,  MUTATOR_ARGV_3_float) \
-    /**/          o(float,  MUTATOR_ARGV_3_float) \
-    /**/
+                  i(entity, MUTATOR_ARGV_0_entity) \
+	              i(entity, MUTATOR_ARGV_1_entity) \
+                  i(vector, MUTATOR_ARGV_2_vector) \
+                  o(vector, MUTATOR_ARGV_2_vector) \
+	              i(float,  MUTATOR_ARGV_3_float) \
+                  o(float,  MUTATOR_ARGV_3_float) \
+
 MUTATOR_HOOKABLE(Nade_Damage, EV_Nade_Damage);
 
 #endif
 
 #ifdef CSQC
-bool Projectile_isnade(int proj); // TODO: remove
+bool Projectile_isnade(int proj);
 
-void DrawAmmoNades(vector myPos, vector mySize, bool draw_expanding, float expand_time); // TODO: mutator
+void DrawAmmoNades(vector myPos, vector mySize, bool draw_expanding, float expand_time);
 #endif

@@ -17,7 +17,7 @@ void XonoticWeaponsList_configureXonoticWeaponsList(entity me)
 }
 void XonoticWeaponsList_draw(entity me)
 {
-	// read in cvar?
+
 	string s, t;
 	s = W_NumberWeaponOrder(cvar_string("cl_weaponpriority"));
 	t = W_FixWeaponOrder(s, 1);
@@ -55,7 +55,7 @@ float XonoticWeaponsList_mouseDrag(entity me, vector pos)
 	int i = me.selectedItem;
 	float f = SUPER(XonoticWeaponsList).mouseDrag(me, pos);
 
-	if(me.pressed != 1) // don't change priority if the person is just scrolling
+	if(me.pressed != 1)
 	{
 		if(me.selectedItem != i)
 		{
@@ -107,12 +107,12 @@ void XonoticWeaponsList_drawListBoxItem(entity me, int i, vector absSize, bool i
 
 float XonoticWeaponsList_keyDown(entity me, float scan, float ascii, float shift)
 {
-	if(ascii == 43) // +
+	if(ascii == 43)
 	{
 		WeaponsList_MoveUp_Click(NULL, me);
 		return 1;
 	}
-	else if(ascii == 45) // -
+	else if(ascii == 45)
 	{
 		WeaponsList_MoveDown_Click(NULL, me);
 		return 1;

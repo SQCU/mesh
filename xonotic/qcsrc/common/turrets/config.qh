@@ -1,9 +1,6 @@
 #pragma once
 
 #ifdef SVQC
-// ==========================
-//  Balance Config Generator
-// ==========================
 
 void Dump_Turret_Settings();
 float tur_config_file;

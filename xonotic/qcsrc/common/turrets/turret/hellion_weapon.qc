@@ -51,20 +51,16 @@ void turret_hellion_missile_think(entity this)
     if(this.max_health < time)
         turret_projectile_explode(this);
 
-    // Enemy dead? just keep on the current heading then.
     if ((this.enemy == NULL) || (IS_DEAD(this.enemy)))
     {
 
-        // Make sure we dont return to tracking a respawned player
         this.enemy = NULL;
 
-        // Turn model
         this.angles = vectoangles(this.velocity);
 
         if(vdist(this.origin - this.owner.origin, >, (this.owner.shot_radius * 5)))
             turret_projectile_explode(this);
 
-        // Accelerate
         this.velocity = olddir * min(vlen(this.velocity) * (autocvar_g_turrets_unit_hellion_shot_speed_gain), (autocvar_g_turrets_unit_hellion_shot_speed_max));
 
         UpdateCSQCProjectile(this);
@@ -72,26 +68,20 @@ void turret_hellion_missile_think(entity this)
         return;
     }
 
-    // Enemy in range?
     if(vdist(this.origin - this.enemy.origin, <, this.owner.shot_radius * 0.2))
         turret_projectile_explode(this);
 
-    // Predict enemy position
     itime = vlen(this.enemy.origin - this.origin) / vlen(this.velocity);
     pre_pos = this.enemy.origin + this.enemy.velocity * itime;
 
     pre_pos = (pre_pos + this.enemy.origin) * 0.5;
 
-    // Find out the direction to that place
     newdir = normalize(pre_pos - this.origin);
 
-    // Turn
     newdir = normalize(olddir + newdir * 0.35);
 
-    // Turn model
     this.angles = vectoangles(this.velocity);
 
-    // Accelerate
     this.velocity = newdir * min(vlen(this.velocity) * (autocvar_g_turrets_unit_hellion_shot_speed_gain), (autocvar_g_turrets_unit_hellion_shot_speed_max));
 
     if (itime < 0.05)

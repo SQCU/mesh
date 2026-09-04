@@ -50,7 +50,7 @@ void generator_draw(entity this)
 
 	if(GetResource(this, RES_HEALTH) > 0)
 	{
-		// damaged fx (less probable the more damaged is the generator)
+
 		if(random() < 0.9 - GetResource(this, RES_HEALTH) / this.max_health)
 		if(random() < 0.01)
 		{
@@ -71,38 +71,32 @@ void generator_draw(entity this)
 	vector org;
 	int i;
 
-	// White shockwave
 	if(this.count==40||this.count==20)
 	{
 		sound(this, CH_TRIGGER, SND_ONS_SHOCKWAVE, VOL_BASE, ATTEN_NORM);
 		pointparticles(EFFECT_ELECTRO_COMBO, this.origin, '0 0 0', 6);
 	}
 
-	// rays
 	if(random() > 0.25)
 	{
 		ons_generator_ray_spawn(this.origin);
 	}
 
-	// Spawn fire balls
 	for(i=0;i < 10;++i)
 	{
 		org = this.origin + randompos('-30 -30 -30' * i + '0 0 -20', '30 30 30' * i + '0 0 20');
 		pointparticles(EFFECT_ONS_GENERATOR_GIB, org, '0 0 0', 1);
 	}
 
-	// Short explosion sound + small explosion
 	if(random() < 0.25)
 	{
 		te_explosion(this.origin);
 		sound(this, CH_TRIGGER, SND_GRENADE_IMPACT, VOL_BASE, ATTEN_NORM);
 	}
 
-	// Particles
 	org = this.origin + randompos(this.mins + '8 8 8', this.maxs + '-8 -8 -8');
 	pointparticles(EFFECT_ONS_GENERATOR_EXPLODE, org, '0 0 0', 1);
 
-	// Final explosion
 	if(this.count==1)
 	{
 		org = this.origin;
@@ -157,7 +151,7 @@ void generator_construct(entity this, bool isnew)
 
 	setorigin(this, this.origin);
 	setmodel(this, MDL_ONS_GEN);
-	this.solid			= SOLID_BBOX; // before setsize to ensure area grid linking
+	this.solid			= SOLID_BBOX;
 	setsize(this, GENERATOR_MIN, GENERATOR_MAX);
 
 	set_movetype(this, MOVETYPE_NOCLIP);
@@ -198,7 +192,7 @@ NET_HANDLE(ENT_CLIENT_GENERATOR, bool isnew)
 		SetResourceExplicit(this, RES_HEALTH, ReadByte());
 		this.max_health = ReadByte();
 		this.count = ReadByte();
-		this.team = ReadByte();
+		this.team = ReadShort();
 
 		if(!this.count)
 			this.count = 40;
@@ -210,7 +204,7 @@ NET_HANDLE(ENT_CLIENT_GENERATOR, bool isnew)
 	if(sf & GSF_STATUS)
 	{
 		int _tmp;
-		_tmp = ReadByte();
+		_tmp = ReadShort();
 		if(_tmp != this.team)
 		{
 			this.team = _tmp;

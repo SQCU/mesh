@@ -15,7 +15,7 @@ def moe(X):
     outs = []
     for k in range(TOPK):
         e = idx[:,k]
-        order = mx.argsort(e)                  # sort tokens by expert -> contiguous blocks
+        order = mx.argsort(e)
         es = e[order]
         xs = X[order]
         mx.eval(es)
@@ -29,10 +29,10 @@ def moe(X):
         for ei in range(E):
             a,b = bounds[ei], bounds[ei+1]
             if b<=a: continue
-            h = mx.maximum(xs[a:b] @ W1[ei], 0.0)   # gathered block -> dense GEMM
+            h = mx.maximum(xs[a:b] @ W1[ei], 0.0)
             parts.append((order[a:b], h @ W2[ei]))
         o = mx.zeros_like(X)
-        for sel, val in parts: o[sel] = val         # scatter back
+        for sel, val in parts: o[sel] = val
         outs.append(o)
     return outs[0] + outs[1] if TOPK==2 else outs[0]
 

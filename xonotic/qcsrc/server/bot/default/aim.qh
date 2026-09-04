@@ -1,7 +1,4 @@
 #pragma once
-/*
- * Globals and Fields
- */
 
 entity tracetossent;
 entity tracetossfaketarget;
@@ -25,11 +22,6 @@ vector shotdir;
 .vector bot_4th_order_aimfilter;
 .vector bot_5th_order_aimfilter;
 .vector bot_olddesiredang;
-
-
-/*
- * Functions
- */
 
 float bot_shouldattack(entity this, entity targ);
 void bot_aimdir(entity this, vector v, float maxfiredeviation);

@@ -16,7 +16,6 @@ entity spawnmonster (entity e, string monster, Monster monster_id, entity spawne
 	e.spawnflags = MONSTERFLAG_SPAWNED;
 
 	if(!respwn) { e.spawnflags |= MONSTERFLAG_NORESPAWN; }
-	//if(invincible) { e.spawnflags |= MONSTERFLAG_INVINCIBLE; }
 
 	setorigin(e, orig);
 	bool allow_any = boolean(monster == "anyrandom");
@@ -39,7 +38,7 @@ entity spawnmonster (entity e, string monster, Monster monster_id, entity spawne
 			if(it.netname == monster)
 			{
 				found = true;
-				monster_id = it; // we have the monster, old monster id is no longer required
+				monster_id = it;
 				break;
 			}
 		});
@@ -49,11 +48,11 @@ entity spawnmonster (entity e, string monster, Monster monster_id, entity spawne
 			if(removeifinvalid)
 			{
 				delete(e);
-				return NULL; // no good
+				return NULL;
 			}
 			else
 			{
-				// select a random valid monster type if no valid monster was provided
+
 				return spawnmonster(e, "random", MON_Null, spawnedby, own, orig, respwn, removeifinvalid, moveflag);
 			}
 		}
@@ -67,19 +66,18 @@ entity spawnmonster (entity e, string monster, Monster monster_id, entity spawne
 	if(IS_PLAYER(spawnedby))
 	{
 		if(teamplay && autocvar_g_monsters_teams)
-			e.team = spawnedby.team; // colors handled in spawn code
+			e.team = spawnedby.team;
 
 		if(autocvar_g_monsters_owners)
-			e.monster_follow = own; // using .owner makes the monster non-solid for its master
+			e.monster_follow = own;
 
 		e.angles_y = spawnedby.angles_y;
 	}
 
-	// Monster_Spawn checks if monster is valid
 	if(!Monster_Spawn(e, false, monster_id))
 	{
 		delete(e);
-		return NULL; // remove even if told not to, as we didn't spawn any kind of monster
+		return NULL;
 	}
 
 	return e;

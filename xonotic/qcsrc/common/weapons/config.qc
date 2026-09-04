@@ -7,10 +7,6 @@
 	#include <common/weapons/all.qh>
 #endif
 
-// ==========================
-//  Balance Config Generator
-// ==========================
-
 void W_Config_Queue(string setting)
 {
 	if (WEP_CONFIG_COUNT <= MAX_CONFIG_SETTINGS - 1)
@@ -36,13 +32,12 @@ void Dump_Weapon_Settings()
 	#define WEP_CONFIG_WRITETOFILE(str) write_String_To_File(wep_config_file, str, wep_config_alsoprint)
 	FOREACH(Weapons, it != WEP_Null, {
 		if(it.spawnflags & WEP_FLAG_SPECIALATTACK)
-			continue; // never include the attacks
-		// step 1: clear the queue
+			continue;
+
 		WEP_CONFIG_COUNT = 0;
 		for (int x = 0; x < MAX_CONFIG_SETTINGS; ++x)
 			config_queue[x] = string_null;
 
-		// step 2: build new queue
 		it.wr_config(it);
 
 		if (WEP_CONFIG_COUNT > MAX_CONFIG_SETTINGS - 1)
@@ -51,10 +46,8 @@ void Dump_Weapon_Settings()
 			break;
 		}
 
-		// step 3: sort queue
 		heapsort(WEP_CONFIG_COUNT, W_Config_Queue_Swap, W_Config_Queue_Compare, NULL);
 
-		// step 4: write queue
 		WEP_CONFIG_WRITETOFILE(sprintf(
 			"// {{{ #%d: %s%s\n",
 			wepcount,
@@ -65,7 +58,6 @@ void Dump_Weapon_Settings()
 			WEP_CONFIG_WRITETOFILE(config_queue[x]);
 		WEP_CONFIG_WRITETOFILE("// }}}\n");
 
-		// step 5: debug info
 		LOG_INFOF("#%d: %s: %d settings...", i, it.m_name, WEP_CONFIG_COUNT);
 		totalweapons += 1;
 		totalsettings += WEP_CONFIG_COUNT;
@@ -73,11 +65,9 @@ void Dump_Weapon_Settings()
 	});
 	#undef WEP_CONFIG_WRITETOFILE
 
-	// extra information
 	if (WEP_CONFIG_COUNT <= MAX_CONFIG_SETTINGS - 1)
 		LOG_INFOF("Totals: %d weapons, %d settings", totalweapons, totalsettings);
 
-	// clear queue now that we're finished
 	WEP_CONFIG_COUNT = 0;
 	for (int x = 0; x < MAX_CONFIG_SETTINGS; ++x)
 		config_queue[x] = string_null;

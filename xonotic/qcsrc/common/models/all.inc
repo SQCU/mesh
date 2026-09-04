@@ -1,5 +1,4 @@
-// Global list of models
-// TODO: remove uses of _setmodel
+
 
 string W_Model(string w_mdl);
 
@@ -90,11 +89,10 @@ MODEL(PROJECTILE_HAGAR_BOUNCING,        "models/hagarmissile.mdl");
 
 MODEL(PROJECTILE_ARC_BOLT,              "models/ebomb.mdl");
 
-// napalm grenade
 MODEL(PROJECTILE_NAPALM_FOUNTAIN,       "null");
-// fireball primary
+
 MODEL(PROJECTILE_FIREBALL,              "null");
-// fireball secondary
+
 MODEL(PROJECTILE_FIREMINE,              "null");
 
 MODEL(PROJECTILE_TAG,                   "models/laser.mdl");

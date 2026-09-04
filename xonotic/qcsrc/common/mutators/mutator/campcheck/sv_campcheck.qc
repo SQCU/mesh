@@ -41,10 +41,10 @@ MUTATOR_HOOKFUNCTION(campcheck, PlayerPreThink)
 	if(!game_stopped && !warmup_stage && time >= game_starttime)
 	if(IS_PLAYER(player) && !IS_DEAD(player) && !STAT(FROZEN, player))
 	if(autocvar_g_campcheck_typecheck || !PHYS_INPUT_BUTTON_CHAT(player))
-	if(IS_REAL_CLIENT(player)) // only apply to real clients (bots may "camp" due to missing waypoints in the map, but that's no reason to constantly kill them, clones can't move)
+	if(IS_REAL_CLIENT(player))
 	if(!weaponLocked(player))
 	{
-		// calculate player movement (in 2 dimensions only, so jumping on one spot doesn't count as movement)
+
 		vector dist = vec2(player.campcheck_prevorigin - player.origin);
 		player.campcheck_traveled_distance += fabs(vlen(dist));
 
@@ -75,7 +75,7 @@ MUTATOR_HOOKFUNCTION(campcheck, PlayerPreThink)
 	}
 
 	if(!checked)
-		player.campcheck_nextcheck = time + autocvar_g_campcheck_interval; // one of the above checks failed, so keep the timer up to date
+		player.campcheck_nextcheck = time + autocvar_g_campcheck_interval;
 
 	player.campcheck_prevorigin = player.origin;
 }

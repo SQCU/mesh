@@ -10,7 +10,7 @@
 
 	#include "p99.qh"
 	#define OVERLOAD(F, ...) P99_IF_EMPTY(__VA_ARGS__)(P99_PASTE2(F, _00)())(P99_PASTE3(F, _, P00_NARG(__VA_ARGS__))(__VA_ARGS__))
-	/** for use within macros */
+
 	#define OVERLOAD_(F, ...) P99_IF_EMPTY(__VA_ARGS__)(P99_PASTE2(F, _00)())(P99_PASTE3(F, _, P00_NARG(__VA_ARGS__))(__VA_ARGS__))
 	#define OVERLOAD__(F, ...) P99_IF_EMPTY(__VA_ARGS__)(P99_PASTE2(F, _00)())(P99_PASTE3(F, _, P00_NARG(__VA_ARGS__))(__VA_ARGS__))
 #else
@@ -28,7 +28,7 @@
 	#define etof(e) num_for_edict(e)
 	#define ftoe(i) edict_num(i)
 #elif defined(MENUQC)
-	// already defined
+
 #endif
 
 #define GET(name) name##get
@@ -36,7 +36,6 @@
 #define PROPERTY(type, name) type name; GETTER(type, name)
 #define LAMBDA(...) { __VA_ARGS__; }
 
-// With block may not contain continue or break
 #define WITH(type, name, value, block) \
 	MACRO_BEGIN \
 		type __with_save = (name); \

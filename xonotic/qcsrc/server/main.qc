@@ -32,13 +32,7 @@ void dropclient_do(entity this)
 		dropclient(this.owner);
 	delete(this);
 }
-/**
- * Schedules dropclient for a player and returns true;
- * if dropclient is already scheduled (for that player) it does nothing and returns false.
- *
- * NOTE: this function exists only to allow sending a message to the kicked player with
- * Send_Notification, which doesn't work if called together with dropclient
- */
+
 bool dropclient_schedule(entity this)
 {
 	bool scheduled = false;
@@ -47,7 +41,7 @@ bool dropclient_schedule(entity this)
 		if(it.owner == this)
 		{
 			scheduled = true;
-			break; // can't use return here, compiler shows a warning
+			break;
 		}
 	});
 	if (scheduled)
@@ -110,7 +104,7 @@ void CreatureFrame_hotliquids(entity this)
 
 void CreatureFrame_Liquids(entity this)
 {
-	if (this.watertype <= CONTENT_WATER && this.waterlevel > 0) // workaround a retarded bug made by id software :P (yes, it's that old of a bug)
+	if (this.watertype <= CONTENT_WATER && this.waterlevel > 0)
 	{
 		if (!(this.flags & FL_INWATER))
 		{
@@ -124,7 +118,7 @@ void CreatureFrame_Liquids(entity this)
 	{
 		if (this.flags & FL_INWATER)
 		{
-			// play leave water sound
+
 			this.flags &= ~FL_INWATER;
 			this.contents_damagetime = 0;
 		}
@@ -134,11 +128,10 @@ void CreatureFrame_Liquids(entity this)
 void CreatureFrame_FallDamage(entity this)
 {
 	if(IS_VEHICLE(this) || (this.flags & FL_PROJECTILE))
-		return; // vehicles and projectiles don't receive fall damage
+		return;
 	if(!(this.velocity || this.oldvelocity))
-		return; // if the entity hasn't moved and isn't moving, then don't do anything
+		return;
 
-	// check for falling damage
 	bool have_hook = false;
 	for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 	{
@@ -151,7 +144,7 @@ void CreatureFrame_FallDamage(entity this)
 	}
 	if(!have_hook)
 	{
-		float dm; // dm is the velocity DECREASE. Velocity INCREASE should never cause a sound or any damage.
+		float dm;
 		if(autocvar_g_balance_falldamage_onlyvertical)
 			dm = fabs(this.oldvelocity.z) - vlen(this.velocity);
 		else
@@ -231,8 +224,7 @@ void make_safe_for_remove(entity e)
         {
             if ((ent == e) || ((ent.classname == "initialize_entity") && (ent.enemy == e)))
             {
-                //print("make_safe_for_remove: getting rid of initializer ", etos(ent), "\n");
-                // skip it in linked list
+
                 if (prev)
                 {
                     prev.initialize_entity_next = ent.initialize_entity_next;
@@ -273,28 +265,20 @@ void remove_safely(entity e)
     builtin_remove(e);
 }
 
-/*
-=============
-StartFrame
-
-Called before each frame by the server
-=============
-*/
-
 bool game_delay_last;
 
 void systems_update();
 void sys_phys_update(entity this, float dt);
 void StartFrame()
 {
-    // TODO: if move is more than 50ms, split it into two moves (this matches QWSV behavior and the client prediction)
-    IL_EACH(g_players, IS_FAKE_CLIENT(it), sys_phys_update(it, frametime));
+	bot_controller_batch_run();
+	IL_EACH(g_players, IS_FAKE_CLIENT(it), sys_phys_update(it, frametime));
     IL_EACH(g_players, IS_FAKE_CLIENT(it), PlayerPreThink(it));
 
 	execute_next_frame();
 	if (autocvar_sv_autopause && !server_is_dedicated) Pause_TryPause();
 
-	delete_fn = remove_unsafely; // not during spawning!
+	delete_fn = remove_unsafely;
 	serverprevtime = servertime;
 	servertime = time;
 	serverframetime = frametime;
@@ -331,12 +315,11 @@ void StartFrame()
 	WarpZone_StartFrame();
 
 	sys_frametime = autocvar_sys_ticrate * autocvar_slowmo;
-	if (sys_frametime <= 0) sys_frametime = 1.0 / 60.0; // somewhat safe fallback
+	if (sys_frametime <= 0) sys_frametime = 1.0 / 60.0;
 
-	if (timeout_status == TIMEOUT_LEADTIME) // just before the timeout (when timeout_status will be TIMEOUT_ACTIVE)
-		orig_slowmo = autocvar_slowmo; // slowmo will be restored after the timeout
+	if (timeout_status == TIMEOUT_LEADTIME)
+		orig_slowmo = autocvar_slowmo;
 
-	// detect when the pre-game countdown (if any) has ended and the game has started
 	bool game_delay = (time < game_starttime);
 	if (autocvar_sv_eventlog && game_delay_last && !game_delay)
 		GameLogEcho(":startdelay_ended");
@@ -390,7 +373,6 @@ void SV_OnEntityPreSpawnFunction(entity this)
 		IL_PUSH(g_monster_targets, this);
     }
 
-	// support special -1 and -2 angle from radiant
 	if (this.angles == '0 -1 0') {
 		this.angles = '-90 0 0';
 	} else if (this.angles == '0 -2 0') {
@@ -412,50 +394,32 @@ void SV_OnEntityPreSpawnFunction(entity this)
 }
 
 string GetField_fullspawndata(entity e, string f, ...)
-/* Retrieves the value of a map entity field from fullspawndata
- * This bypasses field value changes made by the engine,
- * eg string-to-float and escape sequence substitution.
- *
- * Avoids the need to declare fields just to read them once :)
- *
- * Returns the last instance of the field to match DarkPlaces behaviour.
- * Path support: converts \ to / and tests the file if a third (bool, true) arg is passed.
- * Returns string_null if the entity does not have the field, or the file is not in the VFS.
- *
- * FIXME: entities with //comments are not supported.
- */
+
 {
 	string v = string_null;
 
 	if (!e.fullspawndata)
 	{
-		//LOG_WARNF("^1EDICT %s (classname %s) has no fullspawndata, engine lacks support?", ftos(num_for_edict(e)), e.classname);
+
 		return v;
 	}
 
 	if (strstrofs(e.fullspawndata, "//", 0) >= 0)
 	{
-		// tokenize and tokenize_console return early if "//" is reached,
-		// which can leave an odd number of tokens and break key:value pairing.
+
 		LOG_WARNF("^1EDICT %s fullspawndata contains unsupported //comment^7%s", ftos(num_for_edict(e)), e.fullspawndata);
 		return v;
 	}
 
-	//print(sprintf("%s(EDICT %s, FIELD %s)\n", __FUNC__, ftos(num_for_edict(e)), f));
-	//print(strcat("FULLSPAWNDATA:", e.fullspawndata, "\n"));
-
-	// tokenize treats \ as an escape, but tokenize_console returns the required literal
 	for (int t = tokenize_console(e.fullspawndata) - 3; t > 0; t -= 2)
 	{
-		//print(sprintf("\tTOKEN %s:%s\t%s:%s\n", ftos(t), ftos(t + 1), argv(t), argv(t + 1)));
+
 		if (argv(t) == f)
 		{
 			v = argv(t + 1);
 			break;
 		}
 	}
-
-	//print(strcat("RESULT: ", v, "\n\n"));
 
 	if (v && ...(0, bool) == true)
 	{
@@ -469,40 +433,39 @@ string GetField_fullspawndata(entity e, string f, ...)
 
 void WarpZone_PostInitialize_Callback()
 {
-	// create waypoint links for warpzones
+
 	entity tracetest_ent = spawn();
 	setsize(tracetest_ent, PL_MIN_CONST, PL_MAX_CONST);
 	tracetest_ent.dphitcontentsmask = DPCONTENTS_SOLID | DPCONTENTS_BODY | DPCONTENTS_PLAYERCLIP | DPCONTENTS_BOTCLIP;
-	//for(entity e = warpzone_first; e; e = e.warpzone_next)
+
 	for(entity e = NULL; (e = find(e, classname, "trigger_warpzone")); )
 		waypoint_spawnforteleporter_wz(e, tracetest_ent);
 	delete(tracetest_ent);
 }
 
-/** engine callback */
 void URI_Get_Callback(float id, float status, string data)
 {
 	if(url_URI_Get_Callback(id, status, data))
 	{
-		// handled
+
 	}
 	else if (id == URI_GET_DISCARD)
 	{
-		// discard
+
 	}
 	else if (id >= URI_GET_CURL && id <= URI_GET_CURL_END)
 	{
-		// sv_cmd curl
+
 		Curl_URI_Get_Callback(id, status, data);
 	}
 	else if (id >= URI_GET_IPBAN && id <= URI_GET_IPBAN_END)
 	{
-		// online ban list
+
 		OnlineBanList_URI_Get_Callback(id, status, data);
 	}
 	else if (MUTATOR_CALLHOOK(URI_GetCallback, id, status, data))
 	{
-		// handled by a mutator
+
 	}
 	else
 	{
@@ -510,13 +473,6 @@ void URI_Get_Callback(float id, float status, string data)
 	}
 }
 
-/*
-==================
-main
-
-unused but required by the engine
-==================
-*/
 void main ()
 {
 

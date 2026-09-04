@@ -1,15 +1,3 @@
-"""Follow a responder telemetry JSONL, locally or over ssh, forever.
-
-The follower is a supervised subprocess (`tail -n +1 -F <path>`), so it
-reattaches by itself when the file is rotated, truncated, deleted and recreated,
-or when the whole match is restarted underneath it.  That is the resumability
-contract: the viewer outlives the server.
-
-Source syntax:
-    /abs/path/live.jsonl            local file
-    mesh-mini:/tmp/.../live.jsonl   remote file over ssh
-"""
-
 from __future__ import annotations
 
 import json
@@ -20,9 +8,7 @@ import threading
 import time
 from collections import deque
 
-
 def split_source(source: str):
-    """-> (host or None, path).  A leading '/' always means local."""
     if source.startswith("/") or source.startswith("."):
         return None, source
     if ":" in source:
@@ -31,32 +17,28 @@ def split_source(source: str):
             return host, path
     return None, source
 
-
-def follow_argv(source: str):
+def follow_argv(source: str, host_key_alias=None, lines=900):
     host, path = split_source(source)
-    remote = f"tail -n +1 -F {shlex.quote(path)} 2>/dev/null"
+    remote = f"tail -n {max(1, int(lines))} -F {shlex.quote(path)} 2>/dev/null"
     if host is None:
         return ["/bin/sh", "-c", remote]
-    return [
+    argv = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
         "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
-        host, remote,
     ]
-
+    if host_key_alias:
+        argv += ["-o", f"HostName={host}", "-o", f"HostKeyAlias={host_key_alias}",
+                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+    return argv + [host_key_alias or host, remote]
 
 class TelemetryFollower:
-    """Background thread pushing parsed telemetry dicts into a ring buffer.
-
-    `on_frame` is called for every parsed dict, in the follower thread, before
-    the frame enters the ring.  Exceptions from it are recorded, never raised:
-    a bad consumer must not take the tap down.
-    """
-
-    def __init__(self, source: str, *, capacity: int = 900, on_frame=None, retry: float = 2.0):
+    def __init__(self, source: str, *, capacity: int = 900, on_frame=None,
+                 retry: float = 2.0, host_key_alias=None):
         self.source = source
         self.capacity = int(capacity)
         self.on_frame = on_frame
         self.retry = float(retry)
+        self.host_key_alias = host_key_alias
         self.frames = deque(maxlen=self.capacity)
         self.lock = threading.Lock()
         self.state = "starting"
@@ -68,13 +50,12 @@ class TelemetryFollower:
         self.consumer_errors = 0
         self.last_frame_at = None
         self.last_error = None
-        self.epochs = 0            # how many times the tail subprocess respawned
-        self.resp_id_resets = 0    # how many times resp_id went backwards = server restart
+        self.epochs = 0
+        self.resp_id_resets = 0
         self._last_resp_id = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="joracle-follow", daemon=True)
 
-    # -- lifecycle -----------------------------------------------------------
     def start(self):
         self._thread.start()
         return self
@@ -82,18 +63,17 @@ class TelemetryFollower:
     def stop(self):
         self._stop.set()
 
-    # -- reader --------------------------------------------------------------
     def _run(self):
         while not self._stop.is_set():
             self.attempts += 1
             self.epochs += 1
-            argv = follow_argv(self.source)
+            argv = follow_argv(self.source, self.host_key_alias, self.capacity)
             try:
                 proc = subprocess.Popen(
                     argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, bufsize=1,
                 )
-            except Exception as exc:                     # ssh missing, path bad
+            except Exception as exc:
                 self._fail(f"spawn failed: {exc}")
                 self._sleep_retry()
                 continue
@@ -108,12 +88,19 @@ class TelemetryFollower:
             except Exception as exc:
                 self._fail(f"read failed: {exc}")
             finally:
+                detached = True
                 try:
                     proc.terminate()
                     stderr = proc.communicate(timeout=3)[1]
-                except Exception:
+                except subprocess.TimeoutExpired:
                     stderr = ""
-                    proc.kill()
+                    detached = False
+                    self._fail(f"detach pending: pid {proc.pid} did not exit after TERM")
+                except Exception as exc:
+                    stderr = ""
+                    self._fail(f"detach failed: {type(exc).__name__}: {exc}")
+            if not detached:
+                break
             if self._stop.is_set():
                 break
             self.state = "reattaching"
@@ -162,7 +149,6 @@ class TelemetryFollower:
             self.frames.append(frame)
         self.last_frame_at = frame["_seen_at"]
 
-    # -- readers -------------------------------------------------------------
     def snapshot(self, limit=None):
         with self.lock:
             frames = list(self.frames)
@@ -190,6 +176,5 @@ class TelemetryFollower:
             "seconds_since_frame": None if self.last_frame_at is None else round(now - self.last_frame_at, 2),
             "last_error": self.last_error,
         }
-
 
 __all__ = ["TelemetryFollower", "follow_argv", "split_source"]

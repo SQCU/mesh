@@ -6,11 +6,11 @@ METHOD(Speed, m_remove, void(StatusEffects this, entity actor, int removal_type)
     bool wasactive = (actor.statuseffects && (actor.statuseffects.statuseffect_flags[this.m_id] & STATUSEFFECT_FLAG_ACTIVE));
     if(removal_type == STATUSEFFECT_REMOVE_TIMEOUT && wasactive && IS_PLAYER(actor))
     {
-        //Send_Notification(NOTIF_ALL, NULL, MSG_INFO, INFO_POWERDOWN_SPEED, actor.netname);
+
         Send_Notification(NOTIF_ONE, actor, MSG_CENTER, CENTER_POWERDOWN_SPEED);
     }
     if(wasactive)
-        stopsound(actor, CH_TRIGGER_SINGLE); // get rid of the pickup sound
+        stopsound(actor, CH_TRIGGER_SINGLE);
     SUPER(Speed).m_remove(this, actor, removal_type);
 }
 METHOD(Speed, m_apply, void(StatusEffects this, entity actor, float eff_time, float eff_flags))

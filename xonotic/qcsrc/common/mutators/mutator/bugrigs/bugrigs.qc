@@ -1,6 +1,6 @@
 #include "bugrigs.qh"
 
-#ifdef SVQC // NOTE: disabled on the client side until prediction can be fixed!
+#ifdef SVQC
 
 #ifdef GAMEQC
 
@@ -8,7 +8,6 @@
 	#include <server/antilag.qh>
 #endif
 #include <common/physics/player.qh>
-
 
 #if defined(SVQC)
 void bugrigs_SetVars();
@@ -24,7 +23,6 @@ REGISTER_MUTATOR(bugrigs, cvar("g_bugrigs"))
 #elif defined(CSQC)
 REGISTER_MUTATOR(bugrigs, true);
 #endif
-
 
 #if 0
 #define PHYS_BUGRIGS(s)                        STAT(BUGRIGS, s)
@@ -103,8 +101,6 @@ float racecar_angle(float forward, float down)
 
 void RaceCarPhysics(entity this, float dt)
 {
-	// using this move type for "big rigs"
-	// the engine does not push the entity!
 
 	vector rigvel;
 
@@ -116,8 +112,7 @@ void RaceCarPhysics(entity this, float dt)
 	{
 		if (accel < 0)
 		{
-			// back accel is DIGITAL
-			// to prevent speedhack
+
 			if (accel < -0.5)
 				accel = -1;
 			else
@@ -127,16 +122,14 @@ void RaceCarPhysics(entity this, float dt)
 
 	this.angles_x = 0;
 	this.angles_z = 0;
-	makevectors(this.angles); // new forward direction!
+	makevectors(this.angles);
 
 	if (IS_ONGROUND(this) || PHYS_BUGRIGS_AIR_STEERING(this))
 	{
 		float myspeed = this.velocity * v_forward;
 		float upspeed = this.velocity * v_up;
 
-		// responsiveness factor for steering and acceleration
 		float f = 1 / (1 + ((max(-myspeed, myspeed) / PHYS_BUGRIGS_SPEED_REF(this)) ** PHYS_BUGRIGS_SPEED_POW(this)));
-		//MAXIMA: f(v) := 1 / (1 + (v / PHYS_BUGRIGS_SPEED_REF(this)) ^ PHYS_BUGRIGS_SPEED_POW(this));
 
 		float steerfactor;
 		if (myspeed < 0 && PHYS_BUGRIGS_REVERSE_SPINNING(this))
@@ -149,7 +142,6 @@ void RaceCarPhysics(entity this, float dt)
 			accelfactor = PHYS_BUGRIGS_ACCEL(this);
 		else
 			accelfactor = f * PHYS_BUGRIGS_ACCEL(this);
-		//MAXIMA: accel(v) := f(v) * PHYS_BUGRIGS_ACCEL(this);
 
 		if (accel < 0)
 		{
@@ -177,11 +169,9 @@ void RaceCarPhysics(entity this, float dt)
 					myspeed = min(0, myspeed + dt * (PHYS_BUGRIGS_FRICTION_FLOOR(this) + PHYS_BUGRIGS_FRICTION_BRAKE(this) * accel));
 			}
 		}
-		// terminal velocity = velocity at which 50 == accelfactor, that is, 1549 units/sec
-		//MAXIMA: friction(v) := PHYS_BUGRIGS_FRICTION_FLOOR(this);
 
-		this.angles_y += steer * dt * steerfactor; // apply steering
-		makevectors(this.angles); // new forward direction!
+		this.angles_y += steer * dt * steerfactor;
+		makevectors(this.angles);
 
 		myspeed += accel * accelfactor * dt;
 
@@ -191,26 +181,22 @@ void RaceCarPhysics(entity this, float dt)
 	{
 		float myspeed = vlen(this.velocity);
 
-		// responsiveness factor for steering and acceleration
 		float f = 1 / (1 + (max(0, myspeed / PHYS_BUGRIGS_SPEED_REF(this)) ** PHYS_BUGRIGS_SPEED_POW(this)));
 		float steerfactor = -myspeed * f;
-		this.angles_y += steer * dt * steerfactor; // apply steering
+		this.angles_y += steer * dt * steerfactor;
 
 		rigvel = this.velocity;
-		makevectors(this.angles); // new forward direction!
+		makevectors(this.angles);
 	}
 
 	rigvel *= max(0, 1 - vlen(rigvel) * PHYS_BUGRIGS_FRICTION_AIR(this) * dt);
-	//MAXIMA: airfriction(v) := v * v * PHYS_BUGRIGS_FRICTION_AIR(this);
-	//MAXIMA: total_acceleration(v) := accel(v) - friction(v) - airfriction(v);
-	//MAXIMA: solve(total_acceleration(v) = 0, v);
 
 	if (PHYS_BUGRIGS_PLANAR_MOVEMENT(this))
 	{
 		vector rigvel_xy, neworigin, up;
 		float mt;
 
-		rigvel_z -= dt * PHYS_GRAVITY(this); // 4x gravity plays better
+		rigvel_z -= dt * PHYS_GRAVITY(this);
 		rigvel_xy = vec2(rigvel);
 
 		if (PHYS_BUGRIGS_CAR_JUMPING(this))
@@ -221,11 +207,8 @@ void RaceCarPhysics(entity this, float dt)
 		tracebox(this.origin, this.mins, this.maxs, this.origin + '0 0 1024', mt, this);
 		up = trace_endpos - this.origin;
 
-		// BUG RIGS: align the move to the surface instead of doing collision testing
-		// can we move?
 		tracebox(trace_endpos, this.mins, this.maxs, trace_endpos + rigvel_xy * dt, mt, this);
 
-		// align to surface
 		tracebox(trace_endpos, this.mins, this.maxs, trace_endpos - up + '0 0 1' * rigvel_z * dt, mt, this);
 
 		if (trace_fraction < 0.5)
@@ -238,7 +221,7 @@ void RaceCarPhysics(entity this, float dt)
 
 		if (trace_fraction < 1)
 		{
-			// now set angles_x so that the car points parallel to the surface
+
 			this.angles = vectoangles(
 					'1 0 0' * v_forward.x * trace_plane_normal.z
 					+
@@ -250,7 +233,7 @@ void RaceCarPhysics(entity this, float dt)
 		}
 		else
 		{
-			// now set angles_x so that the car points forward, but is tilted in velocity direction
+
 			UNSET_ONGROUND(this);
 		}
 
@@ -259,7 +242,7 @@ void RaceCarPhysics(entity this, float dt)
 	}
 	else
 	{
-		rigvel_z -= dt * PHYS_GRAVITY(this); // 4x gravity plays better
+		rigvel_z -= dt * PHYS_GRAVITY(this);
 		this.velocity = rigvel;
 		set_movetype(this, MOVETYPE_FLY);
 	}
@@ -289,7 +272,6 @@ void RaceCarPhysics(entity this, float dt)
 		this.angles_z = racecar_angle(-vel_local.y, vel_local.z);
 	}
 
-	// smooth the angles
 	vector vf1, vu1, smoothangles;
 	makevectors(this.angles);
 	float f = bound(0, dt * PHYS_BUGRIGS_ANGLE_SMOOTHING(this), 1);

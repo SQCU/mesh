@@ -10,51 +10,47 @@
 		Con_Printf("sent entity update of size %u for %d classname %s flags %d\n", (msg->cursize - entityprofiling_startsize), num, PRVM_serveredictstring(edict, classname) ? PRVM_GetString(prog, PRVM_serveredictstring(edict, classname)) : "(no classname)", flags); \
 	}
 
-// CSQC entity scope values. Bitflags!
-#define SCOPE_WANTREMOVE 1        // Set if a remove has been scheduled. Never set together with WANTUPDATE.
-#define SCOPE_WANTUPDATE 2        // Set if an update has been scheduled.
+#define SCOPE_WANTREMOVE 1
+#define SCOPE_WANTUPDATE 2
 #define SCOPE_WANTSEND (SCOPE_WANTREMOVE | SCOPE_WANTUPDATE)
-#define SCOPE_EXISTED_ONCE 4      // Set if the entity once existed. All these get resent on a full loss.
-#define SCOPE_ASSUMED_EXISTING 8  // Set if the entity is currently assumed existing and therefore needs removes.
+#define SCOPE_EXISTED_ONCE 4
+#define SCOPE_ASSUMED_EXISTING 8
 
-// this is 88 bytes (must match entity_state_t in protocol.h)
 entity_state_t defaultstate =
 {
-	// ! means this is not sent to client
-	0,//double time; // ! time this state was built (used on client for interpolation)
-	{0,0,0},//float netcenter[3]; // ! for network prioritization, this is the center of the bounding box (which may differ from the origin)
-	{0,0,0},//float origin[3];
-	{0,0,0},//float angles[3];
-	0,//int effects;
-	0,//unsigned int customizeentityforclient; // !
-	0,//unsigned short number; // entity number this state is for
-	0,//unsigned short modelindex;
-	0,//unsigned short frame;
-	0,//unsigned short tagentity;
-	0,//unsigned short specialvisibilityradius; // ! larger if it has effects/light
-	0,//unsigned short viewmodelforclient; // !
-	0,//unsigned short exteriormodelforclient; // ! not shown if first person viewing from this entity, shown in all other cases
-	0,//unsigned short nodrawtoclient; // !
-	0,//unsigned short drawonlytoclient; // !
-	0,//unsigned short traileffectnum;
-	{0,0,0,0},//unsigned short light[4]; // color*256 (0.00 to 255.996), and radius*1
-	ACTIVE_NOT,//unsigned char active; // true if a valid state
-	0,//unsigned char lightstyle;
-	0,//unsigned char lightpflags;
-	0,//unsigned char colormap;
-	0,//unsigned char skin; // also chooses cubemap for rtlights if lightpflags & LIGHTPFLAGS_FULLDYNAMIC
-	255,//unsigned char alpha;
-	16,//unsigned char scale;
-	0,//unsigned char glowsize;
-	254,//unsigned char glowcolor;
-	0,//unsigned char flags;
-	0,//unsigned char internaleffects; // INTEF_FLAG1QW and so on
-	0,//unsigned char tagindex;
-	{32, 32, 32},//unsigned char colormod[3];
-	{32, 32, 32},//unsigned char glowmod[3];
-};
 
-// LordHavoc: I own protocol ranges 96, 97, 3500-3599
+	0,
+	{0,0,0},
+	{0,0,0},
+	{0,0,0},
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	0,
+	{0,0,0,0},
+	ACTIVE_NOT,
+	0,
+	0,
+	0,
+	0,
+	255,
+	16,
+	0,
+	254,
+	0,
+	0,
+	0,
+	{32, 32, 32},
+	{32, 32, 32},
+};
 
 struct protocolversioninfo_s
 {
@@ -165,9 +161,6 @@ void EntityFrameQuake_ReadEntity(int bits)
 
 	ent = cl.entities + num;
 
-	// note: this inherits the 'active' state of the baseline chosen
-	// (state_baseline is always active, state_current may not be active if
-	// the entity was missing in the last frame)
 	if (bits & U_DELTA)
 		s = ent->state_current;
 	else
@@ -212,10 +205,9 @@ void EntityFrameQuake_ReadEntity(int bits)
 	if (bits & U_VIEWMODEL)	s.flags |= RENDER_VIEWMODEL;
 	if (bits & U_EXTERIORMODEL)	s.flags |= RENDER_EXTERIORMODEL;
 
-	// LordHavoc: to allow playback of the Nehahra movie
 	if (cls.protocol == PROTOCOL_NEHAHRAMOVIE && (bits & U_EXTEND1))
 	{
-		// LordHavoc: evil format
+
 		int i = (int)MSG_ReadFloat(&cl_message);
 		int j = (int)(MSG_ReadFloat(&cl_message) * 255.0f);
 		if (i == 2)
@@ -271,15 +263,10 @@ void EntityFrameQuake_ISeeDeadEntities(void)
 	}
 }
 
-// NOTE: this only works with DP5 protocol and upwards. For lower protocols
-// (including QUAKE), no packet loss handling for CSQC is done, which makes
-// CSQC basically useless.
-// Always use the DP5 protocol, or a higher one, when using CSQC entities.
 static void EntityFrameCSQC_LostAllFrames(client_t *client)
 {
 	prvm_prog_t *prog = SVVM_prog;
-	// mark ALL csqc entities as requiring a FULL resend!
-	// I know this is a bad workaround, but better than nothing.
+
 	int i, n;
 	prvm_edict_t *ed;
 
@@ -289,32 +276,31 @@ static void EntityFrameCSQC_LostAllFrames(client_t *client)
 		if(client->csqcentityscope[i] & SCOPE_EXISTED_ONCE)
 		{
 			ed = prog->edicts + i;
-			client->csqcentitysendflags[i] |= 0xFFFFFF;  // FULL RESEND. We can't clear SCOPE_ASSUMED_EXISTING yet as this would cancel removes on a rejected send attempt.
-			if (!PRVM_serveredictfunction(ed, SendEntity))  // If it was ever sent to that client as a CSQC entity...
-				client->csqcentityscope[i] |= SCOPE_ASSUMED_EXISTING;  // FORCE REMOVE.
+			client->csqcentitysendflags[i] |= 0xFFFFFF;
+			if (!PRVM_serveredictfunction(ed, SendEntity))
+				client->csqcentityscope[i] |= SCOPE_ASSUMED_EXISTING;
 		}
 	}
 }
 void EntityFrameCSQC_LostFrame(client_t *client, int framenum)
 {
-	// marks a frame as lost
+
 	int i, j;
 	qboolean valid;
 	int ringfirst, ringlast;
-	static int recoversendflags[MAX_EDICTS]; // client only
+	static int recoversendflags[MAX_EDICTS];
 	csqcentityframedb_t *d;
 
 	if(client->csqcentityframe_lastreset < 0)
 		return;
 	if(framenum < client->csqcentityframe_lastreset)
-		return; // no action required, as we resent that data anyway
+		return;
 
-	// is our frame out of history?
-	ringfirst = client->csqcentityframehistory_next; // oldest entry
-	ringlast = (ringfirst + NUM_CSQCENTITYDB_FRAMES - 1) % NUM_CSQCENTITYDB_FRAMES; // most recently added entry
+	ringfirst = client->csqcentityframehistory_next;
+	ringlast = (ringfirst + NUM_CSQCENTITYDB_FRAMES - 1) % NUM_CSQCENTITYDB_FRAMES;
 
 	valid = false;
-	
+
 	for(j = 0; j < NUM_CSQCENTITYDB_FRAMES; ++j)
 	{
 		d = &client->csqcentityframehistory[(ringfirst + j) % NUM_CSQCENTITYDB_FRAMES];
@@ -327,14 +313,14 @@ void EntityFrameCSQC_LostFrame(client_t *client, int framenum)
 	}
 	if(j == NUM_CSQCENTITYDB_FRAMES)
 	{
-		if(valid) // got beaten, i.e. there is a frame < framenum
+		if(valid)
 		{
-			// a non-csqc frame got lost... great
+
 			return;
 		}
 		else
 		{
-			// a too old frame got lost... sorry, cannot handle this
+
 			Con_DPrintf("CSQC entity DB: lost a frame too early to do any handling (resending ALL)...\n");
 			Con_DPrintf("Lost frame = %d\n", framenum);
 			Con_DPrintf("Entity DB = %d to %d\n", client->csqcentityframehistory[ringfirst].framenum, client->csqcentityframehistory[ringlast].framenum);
@@ -344,12 +330,10 @@ void EntityFrameCSQC_LostFrame(client_t *client, int framenum)
 		return;
 	}
 
-	// so j is the frame that got lost
-	// ringlast is the frame that we have to go to
 	ringfirst = (ringfirst + j) % NUM_CSQCENTITYDB_FRAMES;
 	if(ringlast < ringfirst)
 		ringlast += NUM_CSQCENTITYDB_FRAMES;
-	
+
 	memset(recoversendflags, 0, sizeof(recoversendflags));
 
 	for(j = ringfirst; j <= ringlast; ++j)
@@ -357,40 +341,40 @@ void EntityFrameCSQC_LostFrame(client_t *client, int framenum)
 		d = &client->csqcentityframehistory[j % NUM_CSQCENTITYDB_FRAMES];
 		if(d->framenum < 0)
 		{
-			// deleted frame
+
 		}
 		else if(d->framenum < framenum)
 		{
-			// a frame in the past... should never happen
+
 			Con_Printf("CSQC entity DB encountered a frame from the past when recovering from PL...?\n");
 		}
 		else if(d->framenum == framenum)
 		{
-			// handling the actually lost frame now
+
 			for(i = 0; i < d->num; ++i)
 			{
 				int sf = d->sendflags[i];
 				int ent = d->entno[i];
-				if(sf < 0) // remove
-					recoversendflags[ent] |= -1; // all bits, including sign
+				if(sf < 0)
+					recoversendflags[ent] |= -1;
 				else if(sf > 0)
 					recoversendflags[ent] |= sf;
 			}
 		}
 		else
 		{
-			// handling the frames that followed it now
+
 			for(i = 0; i < d->num; ++i)
 			{
 				int sf = d->sendflags[i];
 				int ent = d->entno[i];
-				if(sf < 0) // remove
+				if(sf < 0)
 				{
-					recoversendflags[ent] = 0; // no need to update, we got a more recent remove (and will fix it THEN)
-					break; // no flags left to remove...
+					recoversendflags[ent] = 0;
+					break;
 				}
 				else if(sf > 0)
-					recoversendflags[ent] &= ~sf; // no need to update these bits, we already got them later
+					recoversendflags[ent] &= ~sf;
 			}
 		}
 	}
@@ -398,14 +382,14 @@ void EntityFrameCSQC_LostFrame(client_t *client, int framenum)
 	for(i = 0; i < client->csqcnumedicts; ++i)
 	{
 		if(recoversendflags[i] < 0)
-			client->csqcentityscope[i] |= SCOPE_ASSUMED_EXISTING;  // FORCE REMOVE.
+			client->csqcentityscope[i] |= SCOPE_ASSUMED_EXISTING;
 		else
 			client->csqcentitysendflags[i] |= recoversendflags[i];
 	}
 }
 static int EntityFrameCSQC_AllocFrame(client_t *client, int framenum)
 {
-	int ringfirst = client->csqcentityframehistory_next; // oldest entry
+	int ringfirst = client->csqcentityframehistory_next;
 	client->csqcentityframehistory_next += 1;
 	client->csqcentityframehistory_next %= NUM_CSQCENTITYDB_FRAMES;
 	client->csqcentityframehistory[ringfirst].framenum = framenum;
@@ -414,8 +398,8 @@ static int EntityFrameCSQC_AllocFrame(client_t *client, int framenum)
 }
 static void EntityFrameCSQC_DeallocFrame(client_t *client, int framenum)
 {
-	int ringfirst = client->csqcentityframehistory_next; // oldest entry
-	int ringlast = (ringfirst + NUM_CSQCENTITYDB_FRAMES - 1) % NUM_CSQCENTITYDB_FRAMES; // most recently added entry
+	int ringfirst = client->csqcentityframehistory_next;
+	int ringlast = (ringfirst + NUM_CSQCENTITYDB_FRAMES - 1) % NUM_CSQCENTITYDB_FRAMES;
 	if(framenum == client->csqcentityframehistory[ringlast].framenum)
 	{
 		client->csqcentityframehistory[ringlast].framenum = -1;
@@ -426,9 +410,6 @@ static void EntityFrameCSQC_DeallocFrame(client_t *client, int framenum)
 		Con_Printf("Trying to dealloc the wrong entity frame\n");
 }
 
-//[515]: we use only one array per-client for SendEntity feature
-// TODO: add some handling for entity send priorities, to better deal with huge
-// amounts of csqc networked entities
 qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers, const unsigned short *numbers, int framenum)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -443,10 +424,8 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 	if(client->csqcentityframe_lastreset < 0)
 		client->csqcentityframe_lastreset = framenum;
 
-	maxsize -= 24; // always fit in an empty svc_entities message (for packet loss detection!)
+	maxsize -= 24;
 
-	// make sure there is enough room to store the svc_csqcentities byte,
-	// the terminator (0x0000) and at least one entity update
 	if (msg->cursize + 32 >= maxsize)
 		return false;
 
@@ -485,8 +464,6 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 		client->csqcentitysendflags[number] = 0xFFFFFF;
 	}
 
-	// now try to emit the entity updates
-	// (FIXME: prioritize by distance?)
 	end = client->csqcnumedicts;
 	for (number = 1;number < end;number++)
 	{
@@ -495,22 +472,20 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 		if(db->num >= NUM_CSQCENTITIES_PER_FRAME)
 			break;
 		ed = prog->edicts + number;
-		if (client->csqcentityscope[number] & SCOPE_WANTREMOVE)  // Also implies ASSUMED_EXISTING.
+		if (client->csqcentityscope[number] & SCOPE_WANTREMOVE)
 		{
-			// A removal. SendFlags have no power here.
-			// write a remove message
-			// first write the message identifier if needed
+
 			if(!sectionstarted)
 			{
 				sectionstarted = 1;
 				MSG_WriteByte(msg, svc_csqcentities);
 			}
-			// write the remove message
+
 			{
 				ENTITYSIZEPROFILING_START(msg, number, 0);
 				MSG_WriteShort(msg, (unsigned short)number | 0x8000);
 				client->csqcentityscope[number] &= ~(SCOPE_WANTSEND | SCOPE_ASSUMED_EXISTING);
-				client->csqcentitysendflags[number] = 0xFFFFFF; // resend completely if it becomes active again
+				client->csqcentitysendflags[number] = 0xFFFFFF;
 				db->entno[db->num] = number;
 				db->sendflags[db->num] = -1;
 				db->num += 1;
@@ -521,19 +496,17 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 		}
 		else
 		{
-			// save the cursize value in case we overflow and have to rollback
+
 			int oldcursize = msg->cursize;
 
-			// An update.
 			sendflags = client->csqcentitysendflags[number];
-			// Nothing to send? FINE.
+
 			if (!sendflags)
 				continue;
-			// If it's a new entity, always assume sendflags 0xFFFFFF.
+
 			if (!(client->csqcentityscope[number] & SCOPE_ASSUMED_EXISTING))
 				sendflags = 0xFFFFFF;
 
-			// write an update
 			if (PRVM_serveredictfunction(ed, SendEntity))
 			{
 				if(!sectionstarted)
@@ -550,8 +523,7 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 					msg->allowoverflow = false;
 					if(!PRVM_G_FLOAT(OFS_RETURN))
 					{
-						// Send rejected by CSQC. This means we want to remove it.
-						// CSQC requests we remove this one.
+
 						if (client->csqcentityscope[number] & SCOPE_ASSUMED_EXISTING)
 						{
 							msg->cursize = oldcursize2;
@@ -562,8 +534,7 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 							db->entno[db->num] = number;
 							db->sendflags[db->num] = -1;
 							db->num += 1;
-							// and take note that we have begun the svc_csqcentities
-							// section of the packet
+
 							sectionstarted = 1;
 							ENTITYSIZEPROFILING_END(msg, number, 0);
 							if (msg->cursize + 17 >= maxsize)
@@ -571,7 +542,7 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 						}
 						else
 						{
-							// Nothing to do. Just don't do it again.
+
 							msg->cursize = oldcursize;
 							msg->overflowed = false;
 							client->csqcentityscope[number] &= ~SCOPE_WANTSEND;
@@ -581,15 +552,14 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 					}
 					else if(PRVM_G_FLOAT(OFS_RETURN) && msg->cursize + 2 <= maxsize)
 					{
-						// an update has been successfully written
+
 						client->csqcentitysendflags[number] = 0;
 						db->entno[db->num] = number;
 						db->sendflags[db->num] = sendflags;
 						db->num += 1;
 						client->csqcentityscope[number] &= ~SCOPE_WANTSEND;
 						client->csqcentityscope[number] |= SCOPE_EXISTED_ONCE | SCOPE_ASSUMED_EXISTING;
-						// and take note that we have begun the svc_csqcentities
-						// section of the packet
+
 						sectionstarted = 1;
 						ENTITYSIZEPROFILING_END(msg, number, sendflags);
 						if (msg->cursize + 17 >= maxsize)
@@ -598,31 +568,28 @@ qboolean EntityFrameCSQC_WriteFrame (sizebuf_t *msg, int maxsize, int numnumbers
 					}
 				}
 			}
-			// self.SendEntity returned false (or does not exist) or the
-			// update was too big for this packet - rollback the buffer to its
-			// state before the writes occurred, we'll try again next frame
+
 			msg->cursize = oldcursize;
 			msg->overflowed = false;
 		}
 	}
 	if (sectionstarted)
 	{
-		// write index 0 to end the update (0 is never used by real entities)
+
 		MSG_WriteShort(msg, 0);
 	}
 
 	if(db->num == 0)
-		// if no single ent got added, remove the frame from the DB again, to allow
-		// for a larger history
+
 		EntityFrameCSQC_DeallocFrame(client, framenum);
-	
+
 	return sectionstarted;
 }
 
 void Protocol_UpdateClientStats(const int *stats)
 {
 	int i;
-	// update the stats array and set deltabits for any changed stats
+
 	for (i = 0;i < MAX_CL_STATS;i++)
 	{
 		if (host_client->stats[i] != stats[i])
@@ -633,22 +600,15 @@ void Protocol_UpdateClientStats(const int *stats)
 	}
 }
 
-// only a few stats are within the 32 stat limit of Quake, and most of them
-// are sent every frame in svc_clientdata messages, so we only send the
-// remaining ones here
 static const int sendquakestats[] =
 {
-// quake did not send these secrets/monsters stats in this way, but doing so
-// allows a mod to increase STAT_TOTALMONSTERS during the game, and ensures
-// that STAT_SECRETS and STAT_MONSTERS are always correct (even if a client
-// didn't receive an svc_foundsecret or svc_killedmonster), which may be most
-// valuable if randomly seeking around in a demo
-STAT_TOTALSECRETS, // never changes during game
-STAT_TOTALMONSTERS, // changes in some mods
-STAT_SECRETS, // this makes svc_foundsecret unnecessary
-STAT_MONSTERS, // this makes svc_killedmonster unnecessary
-STAT_VIEWHEIGHT, // sent just for FTEQW clients
-STAT_VIEWZOOM, // this rarely changes
+
+STAT_TOTALSECRETS,
+STAT_TOTALMONSTERS,
+STAT_SECRETS,
+STAT_MONSTERS,
+STAT_VIEWHEIGHT,
+STAT_VIEWZOOM,
 -1,
 };
 
@@ -657,19 +617,15 @@ void Protocol_WriteStatsReliable(void)
 	int i, j;
 	if (!host_client->netconnection)
 		return;
-	// detect changes in stats and write reliable messages
-	// this only deals with 32 stats because the older protocols which use
-	// this function can only cope with 32 stats,
-	// they also do not support svc_updatestatubyte which was introduced in
-	// DP6 protocol (except for QW)
+
 	for (j = 0;sendquakestats[j] >= 0;j++)
 	{
 		i = sendquakestats[j];
-		// check if this bit is set
+
 		if (host_client->statsdeltabits[i >> 3] & (1 << (i & 7)))
 		{
 			host_client->statsdeltabits[i >> 3] -= (1 << (i & 7));
-			// send the stat as a byte if possible
+
 			if (sv.protocol == PROTOCOL_QUAKEWORLD)
 			{
 				if (host_client->stats[i] >= 0 && host_client->stats[i] < 256)
@@ -687,8 +643,7 @@ void Protocol_WriteStatsReliable(void)
 			}
 			else
 			{
-				// this could make use of svc_updatestatubyte in DP6 and later
-				// protocols but those protocols do not use this function
+
 				MSG_WriteByte(&host_client->netconnection->message, svc_updatestat);
 				MSG_WriteByte(&host_client->netconnection->message, i);
 				MSG_WriteLong(&host_client->netconnection->message, host_client->stats[i]);
@@ -696,7 +651,6 @@ void Protocol_WriteStatsReliable(void)
 		}
 	}
 }
-
 
 qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates, const entity_state_t **states)
 {
@@ -708,7 +662,6 @@ qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates,
 	unsigned char data[128];
 	qboolean success = false;
 
-	// prepare the buffer
 	memset(&buf, 0, sizeof(buf));
 	buf.data = data;
 	buf.maxsize = sizeof(data);
@@ -719,10 +672,8 @@ qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates,
 		if(PRVM_serveredictfunction((&prog->edicts[s->number]), SendEntity))
 			continue;
 
-		// prepare the buffer
 		SZ_Clear(&buf);
 
-// send an update
 		bits = 0;
 		if (s->number >= 256)
 			bits |= U_LONGENTITY;
@@ -735,7 +686,6 @@ qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates,
 		if (s->flags & RENDER_EXTERIORMODEL)
 			bits |= U_EXTERIORMODEL;
 
-		// LordHavoc: old stuff, but rewritten to have more exact tolerances
 		baseline = prog->edicts[s->number].priv.server->baseline;
 		if (baseline.origin[0] != s->origin[0])
 			bits |= U_ORIGIN1;
@@ -782,14 +732,12 @@ qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates,
 		if (!VectorCompare(baseline.colormod, s->colormod))
 			bits |= U_COLORMOD;
 
-		// if extensions are disabled, clear the relevant update flags
 		if (sv.protocol == PROTOCOL_QUAKE || sv.protocol == PROTOCOL_NEHAHRAMOVIE)
 			bits &= 0x7FFF;
 		if (sv.protocol == PROTOCOL_NEHAHRAMOVIE)
 			if (s->alpha != 255 || s->effects & EF_FULLBRIGHT)
 				bits |= U_EXTEND1;
 
-		// write the message
 		if (bits >= 16777216)
 			bits |= U_EXTEND2;
 		if (bits >= 65536)
@@ -837,29 +785,27 @@ qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates,
 			if (bits & U_FRAME2)		MSG_WriteByte(&buf, s->frame >> 8);
 			if (bits & U_MODEL2)		MSG_WriteByte(&buf, s->modelindex >> 8);
 
-			// the nasty protocol
 			if ((bits & U_EXTEND1) && sv.protocol == PROTOCOL_NEHAHRAMOVIE)
 			{
 				if (s->effects & EF_FULLBRIGHT)
 				{
-					MSG_WriteFloat(&buf, 2); // QSG protocol version
-					MSG_WriteFloat(&buf, s->alpha <= 0 ? 0 : (s->alpha >= 255 ? 1 : s->alpha * (1.0f / 255.0f))); // alpha
-					MSG_WriteFloat(&buf, 1); // fullbright
+					MSG_WriteFloat(&buf, 2);
+					MSG_WriteFloat(&buf, s->alpha <= 0 ? 0 : (s->alpha >= 255 ? 1 : s->alpha * (1.0f / 255.0f)));
+					MSG_WriteFloat(&buf, 1);
 				}
 				else
 				{
-					MSG_WriteFloat(&buf, 1); // QSG protocol version
-					MSG_WriteFloat(&buf, s->alpha <= 0 ? 0 : (s->alpha >= 255 ? 1 : s->alpha * (1.0f / 255.0f))); // alpha
+					MSG_WriteFloat(&buf, 1);
+					MSG_WriteFloat(&buf, s->alpha <= 0 ? 0 : (s->alpha >= 255 ? 1 : s->alpha * (1.0f / 255.0f)));
 				}
 			}
 
-			// if the commit is full, we're done this frame
 			if (msg->cursize + buf.cursize > maxsize)
 			{
-				// next frame we will continue where we left off
+
 				break;
 			}
-			// write the message to the packet
+
 			SZ_Write(msg, buf.data, buf.cursize);
 			success = true;
 			ENTITYSIZEPROFILING_END(msg, s->number, bits);
@@ -871,7 +817,7 @@ qboolean EntityFrameQuake_WriteFrame(sizebuf_t *msg, int maxsize, int numstates,
 int EntityState_DeltaBits(const entity_state_t *o, const entity_state_t *n)
 {
 	unsigned int bits;
-	// if o is not active, delta from default
+
 	if (o->active != ACTIVE_NETWORK)
 		o = &defaultstate;
 	bits = 0;
@@ -962,7 +908,7 @@ void EntityState_WriteFields(const entity_state_t *ent, sizebuf_t *msg, unsigned
 	}
 	else
 	{
-		// LordHavoc: have to write flags first, as they can modify protocol
+
 		if (bits & E_FLAGS)
 			MSG_WriteByte(msg, ent->flags);
 		if (ent->flags & RENDER_LOWPRECISION)
@@ -1053,10 +999,10 @@ void EntityState_WriteUpdate(const entity_state_t *ent, sizebuf_t *msg, const en
 	unsigned int bits;
 	if (ent->active == ACTIVE_NETWORK)
 	{
-		// entity is active, check for changes from the delta
+
 		if ((bits = EntityState_DeltaBits(delta, ent)))
 		{
-			// write the update number, bits, and fields
+
 			ENTITYSIZEPROFILING_START(msg, ent->number, bits);
 			MSG_WriteShort(msg, ent->number);
 			EntityState_WriteExtendBits(msg, bits);
@@ -1066,10 +1012,10 @@ void EntityState_WriteUpdate(const entity_state_t *ent, sizebuf_t *msg, const en
 	}
 	else
 	{
-		// entity is inactive, check if the delta was active
+
 		if (delta->active == ACTIVE_NETWORK)
 		{
-			// write the remove number
+
 			ENTITYSIZEPROFILING_START(msg, ent->number, 0);
 			MSG_WriteShort(msg, ent->number | 0x8000);
 			ENTITYSIZEPROFILING_END(msg, ent->number, 0);
@@ -1240,40 +1186,35 @@ void EntityState_ReadFields(entity_state_t *e, unsigned int bits)
 	}
 }
 
-// (client and server) allocates a new empty database
 entityframe_database_t *EntityFrame_AllocDatabase(mempool_t *mempool)
 {
 	return (entityframe_database_t *)Mem_Alloc(mempool, sizeof(entityframe_database_t));
 }
 
-// (client and server) frees the database
 void EntityFrame_FreeDatabase(entityframe_database_t *d)
 {
 	Mem_Free(d);
 }
 
-// (server) clears the database to contain no frames (thus delta compression compresses against nothing)
 void EntityFrame_ClearDatabase(entityframe_database_t *d)
 {
 	memset(d, 0, sizeof(*d));
 }
 
-// (server and client) removes frames older than 'frame' from database
 void EntityFrame_AckFrame(entityframe_database_t *d, int frame)
 {
 	int i;
 	d->ackframenum = frame;
 	for (i = 0;i < d->numframes && d->frames[i].framenum < frame;i++);
-	// ignore outdated frame acks (out of order packets)
+
 	if (i == 0)
 		return;
 	d->numframes -= i;
-	// if some queue is left, slide it down to beginning of array
+
 	if (d->numframes)
 		memmove(&d->frames[0], &d->frames[i], sizeof(d->frames[0]) * d->numframes);
 }
 
-// (server) clears frame, to prepare for adding entities
 void EntityFrame_Clear(entity_frame_t *f, vec3_t eye, int framenum)
 {
 	f->time = 0;
@@ -1285,7 +1226,6 @@ void EntityFrame_Clear(entity_frame_t *f, vec3_t eye, int framenum)
 		VectorCopy(eye, f->eye);
 }
 
-// (server and client) reads a frame from the database
 void EntityFrame_FetchFrame(entityframe_database_t *d, int framenum, entity_frame_t *f)
 {
 	int i, n;
@@ -1305,7 +1245,6 @@ void EntityFrame_FetchFrame(entityframe_database_t *d, int framenum, entity_fram
 	}
 }
 
-// (client) adds a entity_frame to the database, for future reference
 void EntityFrame_AddFrame_Client(entityframe_database_t *d, vec3_t eye, int framenum, int numentities, const entity_state_t *entitydata)
 {
 	int n, e;
@@ -1313,13 +1252,12 @@ void EntityFrame_AddFrame_Client(entityframe_database_t *d, vec3_t eye, int fram
 
 	VectorCopy(eye, d->eye);
 
-	// figure out how many entity slots are used already
 	if (d->numframes)
 	{
 		n = d->frames[d->numframes - 1].endentity - d->frames[0].firstentity;
 		if (n + numentities > MAX_ENTITY_DATABASE || d->numframes >= MAX_ENTITY_HISTORY)
 		{
-			// ran out of room, dump database
+
 			EntityFrame_ClearDatabase(d);
 		}
 	}
@@ -1327,7 +1265,7 @@ void EntityFrame_AddFrame_Client(entityframe_database_t *d, vec3_t eye, int fram
 	info = &d->frames[d->numframes];
 	info->framenum = framenum;
 	e = -1000;
-	// make sure we check the newly added frame as well, but we haven't incremented numframes yet
+
 	for (n = 0;n <= d->numframes;n++)
 	{
 		if (e >= d->frames[n].framenum)
@@ -1340,7 +1278,7 @@ void EntityFrame_AddFrame_Client(entityframe_database_t *d, vec3_t eye, int fram
 		}
 		e = d->frames[n].framenum;
 	}
-	// if database still has frames after that...
+
 	if (d->numframes)
 		info->firstentity = d->frames[d->numframes - 1].endentity;
 	else
@@ -1357,7 +1295,6 @@ void EntityFrame_AddFrame_Client(entityframe_database_t *d, vec3_t eye, int fram
 		memcpy(d->entitydata, entitydata + e, sizeof(entity_state_t) * (numentities - e));
 }
 
-// (server) adds a entity_frame to the database, for future reference
 void EntityFrame_AddFrame_Server(entityframe_database_t *d, vec3_t eye, int framenum, int numentities, const entity_state_t **entitydata)
 {
 	int n, e;
@@ -1365,13 +1302,12 @@ void EntityFrame_AddFrame_Server(entityframe_database_t *d, vec3_t eye, int fram
 
 	VectorCopy(eye, d->eye);
 
-	// figure out how many entity slots are used already
 	if (d->numframes)
 	{
 		n = d->frames[d->numframes - 1].endentity - d->frames[0].firstentity;
 		if (n + numentities > MAX_ENTITY_DATABASE || d->numframes >= MAX_ENTITY_HISTORY)
 		{
-			// ran out of room, dump database
+
 			EntityFrame_ClearDatabase(d);
 		}
 	}
@@ -1379,7 +1315,7 @@ void EntityFrame_AddFrame_Server(entityframe_database_t *d, vec3_t eye, int fram
 	info = &d->frames[d->numframes];
 	info->framenum = framenum;
 	e = -1000;
-	// make sure we check the newly added frame as well, but we haven't incremented numframes yet
+
 	for (n = 0;n <= d->numframes;n++)
 	{
 		if (e >= d->frames[n].framenum)
@@ -1392,7 +1328,7 @@ void EntityFrame_AddFrame_Server(entityframe_database_t *d, vec3_t eye, int fram
 		}
 		e = d->frames[n].framenum;
 	}
-	// if database still has frames after that...
+
 	if (d->numframes)
 		info->firstentity = d->frames[d->numframes - 1].endentity;
 	else
@@ -1409,7 +1345,6 @@ void EntityFrame_AddFrame_Server(entityframe_database_t *d, vec3_t eye, int fram
 		memcpy(d->entitydata, entitydata + e, sizeof(entity_state_t) * (numentities - e));
 }
 
-// (server) writes a frame to network stream
 qboolean EntityFrame_WriteFrame(sizebuf_t *msg, int maxsize, entityframe_database_t *d, int numstates, const entity_state_t **states, int viewentnum)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -1452,26 +1387,26 @@ qboolean EntityFrame_WriteFrame(sizebuf_t *msg, int maxsize, entityframe_databas
 			continue;
 		for (;onum < o->numentities && o->entitydata[onum].number < number;onum++)
 		{
-			// write remove message
+
 			MSG_WriteShort(msg, o->entitydata[onum].number | 0x8000);
 		}
 		if (onum < o->numentities && (o->entitydata[onum].number == number))
 		{
-			// delta from previous frame
+
 			delta = o->entitydata + onum;
-			// advance to next entity in delta frame
+
 			onum++;
 		}
 		else
 		{
-			// delta from defaults
+
 			delta = &defaultstate;
 		}
 		EntityState_WriteUpdate(ent, msg, delta);
 	}
 	for (;onum < o->numentities;onum++)
 	{
-		// write remove message
+
 		MSG_WriteShort(msg, o->entitydata[onum].number | 0x8000);
 	}
 	MSG_WriteShort(msg, 0xFFFF);
@@ -1479,7 +1414,6 @@ qboolean EntityFrame_WriteFrame(sizebuf_t *msg, int maxsize, entityframe_databas
 	return true;
 }
 
-// (client) reads a frame from network stream
 void EntityFrame_CL_ReadFrame(void)
 {
 	int i, number, removed;
@@ -1495,7 +1429,6 @@ void EntityFrame_CL_ReadFrame(void)
 
 	EntityFrame_Clear(f, NULL, -1);
 
-	// read the frame header info
 	f->time = cl.mtime[0];
 	number = MSG_ReadLong(&cl_message);
 	f->framenum = MSG_ReadLong(&cl_message);
@@ -1507,7 +1440,7 @@ void EntityFrame_CL_ReadFrame(void)
 	EntityFrame_FetchFrame(d, number, delta);
 	old = delta->entitydata;
 	oldend = old + delta->numentities;
-	// read entities until we hit the magic 0xFFFF end tag
+
 	while ((number = (unsigned short) MSG_ReadShort(&cl_message)) != 0xFFFF && !cl_message.badread)
 	{
 		if (cl_message.badread)
@@ -1517,7 +1450,6 @@ void EntityFrame_CL_ReadFrame(void)
 		if (number >= MAX_EDICTS)
 			Host_Error("EntityFrame_Read: number (%i) >= MAX_EDICTS (%i)", number, MAX_EDICTS);
 
-		// seek to entity, while copying any skipped entities (assume unchanged)
 		while (old < oldend && old->number < number)
 		{
 			if (f->numentities >= MAX_ENTITY_DATABASE)
@@ -1537,17 +1469,16 @@ void EntityFrame_CL_ReadFrame(void)
 			if (f->numentities >= MAX_ENTITY_DATABASE)
 				Host_Error("EntityFrame_Read: entity list too big");
 
-			// reserve this slot
 			e = f->entitydata + f->numentities++;
 
 			if (old < oldend && old->number == number)
 			{
-				// delta from old entity
+
 				*e = *old++;
 			}
 			else
 			{
-				// delta from defaults
+
 				*e = defaultstate;
 			}
 
@@ -1587,12 +1518,12 @@ void EntityFrame_CL_ReadFrame(void)
 		}
 		if (number >= cl.num_entities)
 			break;
-		// update the entity
+
 		ent = &cl.entities[number];
 		ent->state_previous = ent->state_current;
 		ent->state_current = f->entitydata[i];
 		CL_MoveLerpEntityStates(ent);
-		// the entity lives again...
+
 		cl.entities_active[number] = true;
 		number++;
 	}
@@ -1606,8 +1537,6 @@ void EntityFrame_CL_ReadFrame(void)
 	}
 }
 
-
-// (client) returns the frame number of the most recent frame recieved
 int EntityFrame_MostRecentlyRecievedFrameNum(entityframe_database_t *d)
 {
 	if (d->numframes)
@@ -1615,11 +1544,6 @@ int EntityFrame_MostRecentlyRecievedFrameNum(entityframe_database_t *d)
 	else
 		return -1;
 }
-
-
-
-
-
 
 entity_state_t *EntityFrame4_GetReferenceEntity(entityframe4_database_t *d, int number)
 {
@@ -1634,7 +1558,7 @@ entity_state_t *EntityFrame4_GetReferenceEntity(entityframe4_database_t *d, int 
 			memcpy(d->referenceentity, oldentity, oldmax * sizeof(*d->referenceentity));
 			Mem_Free(oldentity);
 		}
-		// clear the newly created entities
+
 		for (;oldmax < d->maxreferenceentities;oldmax++)
 		{
 			d->referenceentity[oldmax] = defaultstate;
@@ -1646,7 +1570,7 @@ entity_state_t *EntityFrame4_GetReferenceEntity(entityframe4_database_t *d, int 
 
 void EntityFrame4_AddCommitEntity(entityframe4_database_t *d, const entity_state_t *s)
 {
-	// resize commit's entity list if full
+
 	if (d->currentcommit->maxentities <= d->currentcommit->numentities)
 	{
 		entity_state_t *oldentity = d->currentcommit->entity;
@@ -1697,13 +1621,13 @@ int EntityFrame4_AckFrame(entityframe4_database_t *d, int framenum, int servermo
 	entity_database4_commit_t *commit;
 	if (framenum == -1)
 	{
-		// reset reference, but leave commits alone
+
 		d->referenceframenum = -1;
 		for (i = 0;i < d->maxreferenceentities;i++)
 			d->referenceentity[i] = defaultstate;
-		// if this is the server, remove commits
-			for (i = 0, commit = d->commit;i < MAX_ENTITY_HISTORY;i++, commit++)
-				commit->numentities = 0;
+
+		for (i = 0, commit = d->commit;i < MAX_ENTITY_HISTORY;i++, commit++)
+			commit->numentities = 0;
 		found = true;
 	}
 	else if (d->referenceframenum == framenum)
@@ -1761,12 +1685,12 @@ void EntityFrame4_CL_ReadFrame(void)
 	if (!cl.entitydatabase4)
 		cl.entitydatabase4 = EntityFrame4_AllocDatabase(cls.levelmempool);
 	d = cl.entitydatabase4;
-	// read the number of the frame this refers to
+
 	referenceframenum = MSG_ReadLong(&cl_message);
-	// read the number of this frame
+
 	framenum = MSG_ReadLong(&cl_message);
 	CL_NewFrameReceived(framenum);
-	// read the start number
+
 	enumber = (unsigned short) MSG_ReadShort(&cl_message);
 	if (developer_networkentities.integer >= 10)
 	{
@@ -1799,29 +1723,27 @@ void EntityFrame4_CL_ReadFrame(void)
 	done = false;
 	while (!done && !cl_message.badread)
 	{
-		// read the number of the modified entity
-		// (gaps will be copied unmodified)
+
 		n = (unsigned short)MSG_ReadShort(&cl_message);
 		if (n == 0x8000)
 		{
-			// no more entities in this update, but we still need to copy the
-			// rest of the reference entities (final gap)
+
 			done = true;
-			// read end of range number, then process normally
+
 			n = (unsigned short)MSG_ReadShort(&cl_message);
 		}
-		// high bit means it's a remove message
+
 		cnumber = n & 0x7FFF;
-		// if this is a live entity we may need to expand the array
+
 		if (cl.num_entities <= cnumber && !(n & 0x8000))
 		{
 			cl.num_entities = cnumber + 1;
 			if (cnumber >= cl.max_entities)
 				CL_ExpandEntities(cnumber);
 		}
-		// add one (the changed one) if not done
+
 		stopnumber = cnumber + !done;
-		// process entities in range from the last one to the changed one
+
 		for (;enumber < stopnumber;enumber++)
 		{
 			if (skip || enumber >= cl.num_entities)
@@ -1833,24 +1755,24 @@ void EntityFrame4_CL_ReadFrame(void)
 				}
 				continue;
 			}
-			// slide the current into the previous slot
+
 			cl.entities[enumber].state_previous = cl.entities[enumber].state_current;
-			// copy a new current from reference database
+
 			cl.entities[enumber].state_current = *EntityFrame4_GetReferenceEntity(d, enumber);
 			s = &cl.entities[enumber].state_current;
-			// if this is the one to modify, read more data...
+
 			if (enumber == cnumber)
 			{
 				if (n & 0x8000)
 				{
-					// simply removed
+
 					if (developer_networkentities.integer >= 2)
 						Con_Printf("entity %i: remove\n", enumber);
 					*s = defaultstate;
 				}
 				else
 				{
-					// read the changes
+
 					if (developer_networkentities.integer >= 2)
 						Con_Printf("entity %i: update\n", enumber);
 					s->active = ACTIVE_NETWORK;
@@ -1859,19 +1781,19 @@ void EntityFrame4_CL_ReadFrame(void)
 			}
 			else if (developer_networkentities.integer >= 4)
 				Con_Printf("entity %i: copy\n", enumber);
-			// set the cl.entities_active flag
+
 			cl.entities_active[enumber] = (s->active == ACTIVE_NETWORK);
-			// set the update time
+
 			s->time = cl.mtime[0];
-			// fix the number (it gets wiped occasionally by copying from defaultstate)
+
 			s->number = enumber;
-			// check if we need to update the lerp stuff
+
 			if (s->active == ACTIVE_NETWORK)
 				CL_MoveLerpEntityStates(&cl.entities[enumber]);
-			// add this to the commit entry whether it is modified or not
+
 			if (d->currentcommit)
 				EntityFrame4_AddCommitEntity(d, &cl.entities[enumber].state_current);
-			// print extra messages if desired
+
 			if (developer_networkentities.integer >= 2 && cl.entities[enumber].state_current.active != cl.entities[enumber].state_previous.active)
 			{
 				if (cl.entities[enumber].state_current.active == ACTIVE_NETWORK)
@@ -1895,11 +1817,9 @@ qboolean EntityFrame4_WriteFrame(sizebuf_t *msg, int maxsize, entityframe4_datab
 	sizebuf_t buf;
 	unsigned char data[128];
 
-	// if there isn't enough space to accomplish anything, skip it
 	if (msg->cursize + 24 > maxsize)
 		return false;
 
-	// prepare the buffer
 	memset(&buf, 0, sizeof(buf));
 	buf.data = data;
 	buf.maxsize = sizeof(data);
@@ -1907,12 +1827,11 @@ qboolean EntityFrame4_WriteFrame(sizebuf_t *msg, int maxsize, entityframe4_datab
 	for (i = 0;i < MAX_ENTITY_HISTORY;i++)
 		if (!d->commit[i].numentities)
 			break;
-	// if commit buffer full, just don't bother writing an update this frame
+
 	if (i == MAX_ENTITY_HISTORY)
 		return false;
 	d->currentcommit = d->commit + i;
 
-	// this state's number gets played around with later
 	inactiveentitystate = defaultstate;
 
 	d->currentcommit->numentities = 0;
@@ -1933,25 +1852,23 @@ qboolean EntityFrame4_WriteFrame(sizebuf_t *msg, int maxsize, entityframe4_datab
 	else
 		startnumber = bound(1, d->currententitynumber, prog->max_edicts - 1);
 	MSG_WriteShort(msg, startnumber);
-	// reset currententitynumber so if the loop does not break it we will
-	// start at beginning next frame (if it does break, it will set it)
+
 	d->currententitynumber = 1;
 	for (i = 0, n = startnumber;n < prog->max_edicts;n++)
 	{
 		if (PRVM_serveredictfunction((&prog->edicts[n]), SendEntity))
 			continue;
-		// find the old state to delta from
+
 		e = EntityFrame4_GetReferenceEntity(d, n);
-		// prepare the buffer
+
 		SZ_Clear(&buf);
-		// entity exists, build an update (if empty there is no change)
-		// find the state in the list
+
 		for (;i < numstates && states[i]->number < n;i++);
-		// make the message
+
 		s = states[i];
 		if (s->number == n)
 		{
-			// build the update
+
 			EntityState_WriteUpdate(s, &buf, e);
 		}
 		else
@@ -1960,39 +1877,35 @@ qboolean EntityFrame4_WriteFrame(sizebuf_t *msg, int maxsize, entityframe4_datab
 			s = &inactiveentitystate;
 			if (e->active == ACTIVE_NETWORK)
 			{
-				// entity used to exist but doesn't anymore, send remove
+
 				MSG_WriteShort(&buf, n | 0x8000);
 			}
 		}
-		// if the commit is full, we're done this frame
+
 		if (msg->cursize + buf.cursize > maxsize - 4)
 		{
-			// next frame we will continue where we left off
+
 			break;
 		}
-		// add the entity to the commit
+
 		EntityFrame4_AddCommitEntity(d, s);
-		// if the message is empty, skip out now
+
 		if (buf.cursize)
 		{
-			// write the message to the packet
+
 			SZ_Write(msg, buf.data, buf.cursize);
 		}
 	}
 	d->currententitynumber = n;
 
-	// remove world message (invalid, and thus a good terminator)
 	MSG_WriteShort(msg, 0x8000);
-	// write the number of the end entity
+
 	MSG_WriteShort(msg, d->currententitynumber);
-	// just to be sure
+
 	d->currentcommit = NULL;
 
 	return true;
 }
-
-
-
 
 entityframe5_database_t *EntityFrame5_AllocDatabase(mempool_t *pool)
 {
@@ -2007,8 +1920,7 @@ entityframe5_database_t *EntityFrame5_AllocDatabase(mempool_t *pool)
 
 void EntityFrame5_FreeDatabase(entityframe5_database_t *d)
 {
-	// all the [maxedicts] memory is allocated at once, so there's only one
-	// thing to free
+
 	if (d->maxedicts)
 		Mem_Free(d->deltabits);
 	Mem_Free(d);
@@ -2039,7 +1951,7 @@ static void EntityFrame5_ExpandEdicts(entityframe5_database_t *d, int newmax)
 			memcpy(d->updateframenum, oldupdateframenum, oldmaxedicts * sizeof(int));
 			memcpy(d->states, oldstates, oldmaxedicts * sizeof(entity_state_t));
 			memcpy(d->visiblebits, oldvisiblebits, (oldmaxedicts+7)/8 * sizeof(unsigned char));
-			// the previous buffers were a single allocation, so just one free
+
 			Mem_Free(olddeltabits);
 		}
 	}
@@ -2048,25 +1960,25 @@ static void EntityFrame5_ExpandEdicts(entityframe5_database_t *d, int newmax)
 static int EntityState5_Priority(entityframe5_database_t *d, int stateindex)
 {
 	int limit, priority;
-	entity_state_t *s = NULL; // hush compiler warning by initializing this
-	// if it is the player, update urgently
+	entity_state_t *s = NULL;
+
 	if (stateindex == d->viewentnum)
 		return ENTITYFRAME5_PRIORITYLEVELS - 1;
-	// priority increases each frame no matter what happens
+
 	priority = d->priorities[stateindex] + 1;
-	// players get an extra priority boost
+
 	if (stateindex <= svs.maxclients)
 		priority++;
-	// remove dead entities very quickly because they are just 2 bytes
+
 	if (d->states[stateindex].active != ACTIVE_NETWORK)
 	{
 		priority++;
 		return bound(1, priority, ENTITYFRAME5_PRIORITYLEVELS - 1);
 	}
-	// certain changes are more noticable than others
+
 	if (d->deltabits[stateindex] & (E5_FULLUPDATE | E5_ATTACHMENT | E5_MODEL | E5_FLAGS | E5_COLORMAP))
 		priority++;
-	// find the root entity this one is attached to, and judge relevance by it
+
 	for (limit = 0;limit < 256;limit++)
 	{
 		s = d->states + stateindex;
@@ -2081,8 +1993,7 @@ static int EntityState5_Priority(entityframe5_database_t *d, int stateindex)
 	}
 	if (limit >= 256)
 		Con_DPrintf("Protocol: Runaway loop recursing tagentity links on entity %i\n", stateindex);
-	// now that we have the parent entity we can make some decisions based on
-	// distance from the player
+
 	if (VectorDistance(d->states[d->viewentnum].netcenter, s->netcenter) < 1024.0f)
 		priority++;
 	return bound(1, priority, ENTITYFRAME5_PRIORITYLEVELS - 1);
@@ -2090,20 +2001,19 @@ static int EntityState5_Priority(entityframe5_database_t *d, int stateindex)
 
 static double anim_reducetime(double t, double frameduration, double maxtime)
 {
-	if(t < 0) // clamp to non-negative
+	if(t < 0)
 		return 0;
-	if(t <= maxtime) // time can be represented normally
+	if(t <= maxtime)
 		return t;
-	if(frameduration == 0) // don't like dividing by zero
+	if(frameduration == 0)
 		return t;
-	if(maxtime <= 2 * frameduration) // if two frames don't fit, we better not do this
+	if(maxtime <= 2 * frameduration)
 		return t;
 	t -= frameduration * ceil((t - maxtime) / frameduration);
-	// now maxtime - frameduration < t <= maxtime
+
 	return t;
 }
 
-// see VM_SV_frameduration
 static double anim_frameduration(dp_model_t *model, int framenum)
 {
 	if (!model || !model->animscenes || framenum < 0 || framenum >= model->numframes)
@@ -2117,7 +2027,6 @@ void EntityState5_WriteUpdate(int number, const entity_state_t *s, int changedbi
 {
 	prvm_prog_t *prog = SVVM_prog;
 	unsigned int bits = 0;
-	//dp_model_t *model;
 
 	if (s->active != ACTIVE_NETWORK)
 	{
@@ -2132,17 +2041,9 @@ void EntityState5_WriteUpdate(int number, const entity_state_t *s, int changedbi
 
 		bits = changedbits;
 		if ((bits & E5_ORIGIN) && (!(s->flags & RENDER_LOWPRECISION) || s->exteriormodelforclient || s->tagentity || s->viewmodelforclient || (s->number >= 1 && s->number <= svs.maxclients) || s->origin[0] <= -4096.0625 || s->origin[0] >= 4095.9375 || s->origin[1] <= -4096.0625 || s->origin[1] >= 4095.9375 || s->origin[2] <= -4096.0625 || s->origin[2] >= 4095.9375))
-		// maybe also add: ((model = SV_GetModelByIndex(s->modelindex)) != NULL && model->name[0] == '*')
+
 			bits |= E5_ORIGIN32;
-			// possible values:
-			//   negative origin:
-			//     (int)(f * 8 - 0.5) >= -32768
-			//          (f * 8 - 0.5) >  -32769
-			//           f            >  -4096.0625
-			//   positive origin:
-			//     (int)(f * 8 + 0.5) <=  32767
-			//          (f * 8 + 0.5) <   32768
-			//           f * 8 + 0.5) <   4095.9375
+
 		if ((bits & E5_ANGLES) && !(s->flags & RENDER_LOWPRECISION))
 			bits |= E5_ANGLES16;
 		if ((bits & E5_MODEL) && s->modelindex >= 256)
@@ -2565,7 +2466,6 @@ static void EntityState5_ReadUpdate(entity_state_t *s, int number)
 	if (bits & E5_TRAILEFFECTNUM)
 		s->traileffectnum = (unsigned short) MSG_ReadShort(&cl_message);
 
-
 	bytes = cl_message.readcount - startoffset;
 	if (developer_networkentities.integer >= 2)
 	{
@@ -2701,50 +2601,49 @@ void EntityFrame5_CL_ReadFrame(void)
 	int n, enumber, framenum;
 	entity_t *ent;
 	entity_state_t *s;
-	// read the number of this frame to echo back in next input packet
+
 	framenum = MSG_ReadLong(&cl_message);
 	CL_NewFrameReceived(framenum);
 	if (cls.protocol != PROTOCOL_QUAKE && cls.protocol != PROTOCOL_QUAKEDP && cls.protocol != PROTOCOL_NEHAHRAMOVIE && cls.protocol != PROTOCOL_DARKPLACES1 && cls.protocol != PROTOCOL_DARKPLACES2 && cls.protocol != PROTOCOL_DARKPLACES3 && cls.protocol != PROTOCOL_DARKPLACES4 && cls.protocol != PROTOCOL_DARKPLACES5 && cls.protocol != PROTOCOL_DARKPLACES6)
 		cls.servermovesequence = MSG_ReadLong(&cl_message);
-	// read entity numbers until we find a 0x8000
-	// (which would be remove world entity, but is actually a terminator)
+
 	while ((n = (unsigned short)MSG_ReadShort(&cl_message)) != 0x8000 && !cl_message.badread)
 	{
-		// get the entity number
+
 		enumber = n & 0x7FFF;
-		// we may need to expand the array
+
 		if (cl.num_entities <= enumber)
 		{
 			cl.num_entities = enumber + 1;
 			if (enumber >= cl.max_entities)
 				CL_ExpandEntities(enumber);
 		}
-		// look up the entity
+
 		ent = cl.entities + enumber;
-		// slide the current into the previous slot
+
 		ent->state_previous = ent->state_current;
-		// read the update
+
 		s = &ent->state_current;
 		if (n & 0x8000)
 		{
-			// remove entity
+
 			*s = defaultstate;
 		}
 		else
 		{
-			// update entity
+
 			EntityState5_ReadUpdate(s, enumber);
 		}
-		// set the cl.entities_active flag
+
 		cl.entities_active[enumber] = (s->active == ACTIVE_NETWORK);
-		// set the update time
+
 		s->time = cl.mtime[0];
-		// fix the number (it gets wiped occasionally by copying from defaultstate)
+
 		s->number = enumber;
-		// check if we need to update the lerp stuff
+
 		if (s->active == ACTIVE_NETWORK)
 			CL_MoveLerpEntityStates(&cl.entities[enumber]);
-		// print extra messages if desired
+
 		if (developer_networkentities.integer >= 2 && cl.entities[enumber].state_current.active != cl.entities[enumber].state_previous.active)
 		{
 			if (cl.entities[enumber].state_current.active == ACTIVE_NETWORK)
@@ -2809,7 +2708,7 @@ void EntityFrame5_LostFrame(entityframe5_database_t *d, int framenum)
 		if(bits)
 		{
 			d->deltabits[i] |= bits;
-			// if it was a very important update, set priority higher
+
 			if (bits & (E5_FULLUPDATE | E5_ATTACHMENT | E5_MODEL | E5_COLORMAP))
 				d->priorities[i] = max(d->priorities[i], 4);
 			else
@@ -2819,14 +2718,13 @@ void EntityFrame5_LostFrame(entityframe5_database_t *d, int framenum)
 
 	for (l = 0;l < (MAX_CL_STATS+7)/8;l++)
 		host_client->statsdeltabits[l] |= statsdeltabits[l];
-		// no need to mask out the already-set bits here, as we do not
-		// do that priorities stuff
+
 }
 
 void EntityFrame5_AckFrame(entityframe5_database_t *d, int framenum)
 {
 	int i;
-	// scan for packets made obsolete by this ack and delete them
+
 	for (i = 0;i < ENTITYFRAME5_MAXPACKETLOGS;i++)
 		if (d->packetlog[i].packetnumber <= framenum)
 			d->packetlog[i].packetnumber = 0;
@@ -2847,8 +2745,6 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 	framenum = d->latestframenum + 1;
 	d->viewentnum = viewentnum;
 
-	// if packet log is full, mark all frames as lost, this will cause
-	// it to send the lost data again
 	for (packetlognumber = 0;packetlognumber < ENTITYFRAME5_MAXPACKETLOGS;packetlognumber++)
 		if (d->packetlog[packetlognumber].packetnumber == 0)
 			break;
@@ -2859,37 +2755,33 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 		packetlognumber = 0;
 	}
 
-	// prepare the buffer
 	memset(&buf, 0, sizeof(buf));
 	buf.data = data;
 	buf.maxsize = sizeof(data);
 
-	// detect changes in states
 	num = 1;
 	for (i = 0;i < numstates;i++)
 	{
 		n = states[i];
-		// mark gaps in entity numbering as removed entities
+
 		for (;num < n->number;num++)
 		{
-			// if the entity used to exist, clear it
+
 			if (CHECKPVSBIT(d->visiblebits, num))
 			{
 				CLEARPVSBIT(d->visiblebits, num);
 				d->deltabits[num] = E5_FULLUPDATE;
-				d->priorities[num] = max(d->priorities[num], 8); // removal is cheap
+				d->priorities[num] = max(d->priorities[num], 8);
 				d->states[num] = defaultstate;
 				d->states[num].number = num;
 			}
 		}
-		// update the entity state data
+
 		if (!CHECKPVSBIT(d->visiblebits, num))
 		{
-			// entity just spawned in, don't let it completely hog priority
-			// because of being ancient on the first frame
+
 			d->updateframenum[num] = framenum;
-			// initial priority is a bit high to make projectiles send on the
-			// first frame, among other things
+
 			d->priorities[num] = max(d->priorities[num], 4);
 		}
 		SETPVSBIT(d->visiblebits, num);
@@ -2897,28 +2789,25 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 		d->priorities[num] = max(d->priorities[num], 1);
 		d->states[num] = *n;
 		d->states[num].number = num;
-		// advance to next entity so the next iteration doesn't immediately remove it
+
 		num++;
 	}
-	// all remaining entities are dead
+
 	for (;num < d->maxedicts;num++)
 	{
 		if (CHECKPVSBIT(d->visiblebits, num))
 		{
 			CLEARPVSBIT(d->visiblebits, num);
 			d->deltabits[num] = E5_FULLUPDATE;
-			d->priorities[num] = max(d->priorities[num], 8); // removal is cheap
+			d->priorities[num] = max(d->priorities[num], 8);
 			d->states[num] = defaultstate;
 			d->states[num].number = num;
 		}
 	}
 
-	// if there isn't at least enough room for an empty svc_entities,
-	// don't bother trying...
 	if (buf.cursize + 11 > buf.maxsize)
 		return false;
 
-	// build lists of entities by priority level
 	memset(d->prioritychaincounts, 0, sizeof(d->prioritychaincounts));
 	l = 0;
 	for (num = 0;num < d->maxedicts;num++)
@@ -2940,7 +2829,7 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 	}
 
 	packetlog = NULL;
-	// write stat updates
+
 	if (sv.protocol != PROTOCOL_QUAKE && sv.protocol != PROTOCOL_QUAKEDP && sv.protocol != PROTOCOL_NEHAHRAMOVIE && sv.protocol != PROTOCOL_NEHAHRABJP && sv.protocol != PROTOCOL_NEHAHRABJP2 && sv.protocol != PROTOCOL_NEHAHRABJP3 && sv.protocol != PROTOCOL_DARKPLACES1 && sv.protocol != PROTOCOL_DARKPLACES2 && sv.protocol != PROTOCOL_DARKPLACES3 && sv.protocol != PROTOCOL_DARKPLACES4 && sv.protocol != PROTOCOL_DARKPLACES5)
 	{
 		for (i = 0;i < MAX_CL_STATS && msg->cursize + 6 + 11 <= maxsize;i++)
@@ -2948,7 +2837,7 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 			if (host_client->statsdeltabits[i>>3] & (1<<(i&7)))
 			{
 				host_client->statsdeltabits[i>>3] &= ~(1<<(i&7));
-				// add packetlog entry now that we have something for it
+
 				if (!packetlog)
 				{
 					packetlog = d->packetlog + packetlognumber;
@@ -2975,11 +2864,9 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 		}
 	}
 
-	// only send empty svc_entities frame if needed
 	if(!l && !need_empty)
 		return false;
 
-	// add packetlog entry now that we have something for it
 	if (!packetlog)
 	{
 		packetlog = d->packetlog + packetlognumber;
@@ -2988,7 +2875,6 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 		memset(packetlog->statsdeltabits, 0, sizeof(packetlog->statsdeltabits));
 	}
 
-	// write state updates
 	if (developer_networkentities.integer >= 10)
 		Con_Printf("send: svc_entities %i\n", framenum);
 	d->latestframenum = framenum;
@@ -3006,18 +2892,18 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 				d->deltabits[num] = E5_FULLUPDATE | EntityState5_DeltaBits(&defaultstate, n);
 			buf.cursize = 0;
 			EntityState5_WriteUpdate(num, n, d->deltabits[num], &buf);
-			// if the entity won't fit, try the next one
+
 			if (msg->cursize + buf.cursize + 2 > maxsize)
 				continue;
-			// write entity to the packet
+
 			SZ_Write(msg, buf.data, buf.cursize);
-			// mark age on entity for prioritization
+
 			d->updateframenum[num] = framenum;
-			// log entity so deltabits can be restored later if lost
+
 			packetlog->states[packetlog->numstates].number = num;
 			packetlog->states[packetlog->numstates].bits = d->deltabits[num];
 			packetlog->numstates++;
-			// clear deltabits and priority so it won't be sent again
+
 			d->deltabits[num] = 0;
 			d->priorities[num] = 0;
 		}
@@ -3026,7 +2912,6 @@ qboolean EntityFrame5_WriteFrame(sizebuf_t *msg, int maxsize, entityframe5_datab
 
 	return true;
 }
-
 
 static void QW_TranslateEffects(entity_state_t *s, int qweffects)
 {
@@ -3038,7 +2923,7 @@ static void QW_TranslateEffects(entity_state_t *s, int qweffects)
 		s->effects |= EF_MUZZLEFLASH;
 	if (qweffects & QW_EF_FLAG1)
 	{
-		// mimic FTEQW's interpretation of EF_FLAG1 as EF_NODRAW on non-player entities
+
 		if (s->number > cl.maxclients)
 			s->effects |= EF_NODRAW;
 		else
@@ -3046,7 +2931,7 @@ static void QW_TranslateEffects(entity_state_t *s, int qweffects)
 	}
 	if (qweffects & QW_EF_FLAG2)
 	{
-		// mimic FTEQW's interpretation of EF_FLAG2 as EF_ADDITIVE on non-player entities
+
 		if (s->number > cl.maxclients)
 			s->effects |= EF_ADDITIVE;
 		else
@@ -3076,15 +2961,13 @@ void EntityStateQW_ReadPlayerUpdate(void)
 	int playerflags;
 	int bits;
 	entity_state_t *s;
-	// look up the entity
+
 	entity_t *ent = cl.entities + enumber;
 	vec3_t viewangles;
 	vec3_t velocity;
 
-	// slide the current state into the previous
 	ent->state_previous = ent->state_current;
 
-	// read the update
 	s = &ent->state_current;
 	*s = defaultstate;
 	s->active = ACTIVE_NETWORK;
@@ -3099,10 +2982,7 @@ void EntityStateQW_ReadPlayerUpdate(void)
 
 	if (playerflags & QW_PF_MSEC)
 	{
-		// time difference between last update this player sent to the server,
-		// and last input we sent to the server (this packet is in response to
-		// our input, so msec is how long ago the last update of this player
-		// entity occurred, compared to our input being received)
+
 		msec = MSG_ReadByte(&cl_message);
 	}
 	else
@@ -3111,22 +2991,22 @@ void EntityStateQW_ReadPlayerUpdate(void)
 	{
 		bits = MSG_ReadByte(&cl_message);
 		if (bits & QW_CM_ANGLE1)
-			viewangles[0] = MSG_ReadAngle16i(&cl_message); // cmd->angles[0]
+			viewangles[0] = MSG_ReadAngle16i(&cl_message);
 		if (bits & QW_CM_ANGLE2)
-			viewangles[1] = MSG_ReadAngle16i(&cl_message); // cmd->angles[1]
+			viewangles[1] = MSG_ReadAngle16i(&cl_message);
 		if (bits & QW_CM_ANGLE3)
-			viewangles[2] = MSG_ReadAngle16i(&cl_message); // cmd->angles[2]
+			viewangles[2] = MSG_ReadAngle16i(&cl_message);
 		if (bits & QW_CM_FORWARD)
-			MSG_ReadShort(&cl_message); // cmd->forwardmove
+			MSG_ReadShort(&cl_message);
 		if (bits & QW_CM_SIDE)
-			MSG_ReadShort(&cl_message); // cmd->sidemove
+			MSG_ReadShort(&cl_message);
 		if (bits & QW_CM_UP)
-			MSG_ReadShort(&cl_message); // cmd->upmove
+			MSG_ReadShort(&cl_message);
 		if (bits & QW_CM_BUTTONS)
-			(void) MSG_ReadByte(&cl_message); // cmd->buttons
+			(void) MSG_ReadByte(&cl_message);
 		if (bits & QW_CM_IMPULSE)
-			(void) MSG_ReadByte(&cl_message); // cmd->impulse
-		(void) MSG_ReadByte(&cl_message); // cmd->msec
+			(void) MSG_ReadByte(&cl_message);
+		(void) MSG_ReadByte(&cl_message);
 	}
 	if (playerflags & QW_PF_VELOCITY1)
 		velocity[0] = MSG_ReadShort(&cl_message);
@@ -3149,17 +3029,15 @@ void EntityStateQW_ReadPlayerUpdate(void)
 
 	if (enumber == cl.playerentity)
 	{
-		// if this is an update on our player, update the angles
+
 		VectorCopy(cl.viewangles, viewangles);
 	}
 
-	// calculate the entity angles from the viewangles
 	s->angles[0] = viewangles[0] * -0.0333;
 	s->angles[1] = viewangles[1];
 	s->angles[2] = 0;
 	s->angles[2] = V_CalcRoll(s->angles, velocity)*4;
 
-	// if this is an update on our player, update interpolation state
 	if (enumber == cl.playerentity)
 	{
 		VectorCopy (cl.mpunchangle[0], cl.mpunchangle[1]);
@@ -3189,11 +3067,10 @@ void EntityStateQW_ReadPlayerUpdate(void)
 			cl.stats[STAT_VIEWHEIGHT] = 22;
 	}
 
-	// set the cl.entities_active flag
 	cl.entities_active[enumber] = (s->active == ACTIVE_NETWORK);
-	// set the update time
-	s->time = cl.mtime[0] - msec * 0.001; // qw has no clock
-	// check if we need to update the lerp stuff
+
+	s->time = cl.mtime[0] - msec * 0.001;
+
 	if (s->active == ACTIVE_NETWORK)
 		CL_MoveLerpEntityStates(&cl.entities[enumber]);
 }
@@ -3206,8 +3083,6 @@ static void EntityStateQW_ReadEntityUpdate(entity_state_t *s, int bits)
 	bits &= ~511;
 	if (bits & QW_U_MOREBITS)
 		bits |= MSG_ReadByte(&cl_message);
-
-	// store the QW_U_SOLID bit here?
 
 	if (bits & QW_U_MODEL)
 		s->modelindex = MSG_ReadByte(&cl_message);
@@ -3287,11 +3162,6 @@ void EntityFrameQW_CL_ReadFrame(qboolean delta)
 		cl.entitydatabaseqw = EntityFrameQW_AllocDatabase(cls.levelmempool);
 	d = cl.entitydatabaseqw;
 
-	// there is no cls.netcon in demos, so this reading code can't access
-	// cls.netcon-> at all...  so cls.qw_incoming_sequence and
-	// cls.qw_outgoing_sequence are updated every time the corresponding
-	// cls.netcon->qw. variables are updated
-	// read the number of this frame to echo back in next input packet
 	cl.qw_validsequence = cls.qw_incoming_sequence;
 	newsnapindex = cl.qw_validsequence & QW_UPDATE_MASK;
 	newsnap = d->snapshot + newsnapindex;
@@ -3308,7 +3178,7 @@ void EntityFrameQW_CL_ReadFrame(qboolean delta)
 			if (cls.qw_outgoing_sequence - oldsnapindex >= QW_UPDATE_BACKUP-1)
 			{
 				Con_DPrintf("delta update too old\n");
-				newsnap->invalid = invalid = true; // too old
+				newsnap->invalid = invalid = true;
 				delta = false;
 			}
 			oldsnap = d->snapshot + (oldsnapindex & QW_UPDATE_MASK);
@@ -3317,28 +3187,24 @@ void EntityFrameQW_CL_ReadFrame(qboolean delta)
 			delta = false;
 	}
 
-	// if we can't decode this frame properly, report that to the server
 	if (invalid)
 		cl.qw_validsequence = 0;
 
-	// read entity numbers until we find a 0x0000
-	// (which would be an empty update on world entity, but is actually a terminator)
 	newsnap->num_entities = 0;
 	oldindex = 0;
 	for (;;)
 	{
 		int word = (unsigned short)MSG_ReadShort(&cl_message);
 		if (cl_message.badread)
-			return; // just return, the main parser will print an error
+			return;
 		newnum = word == 0 ? 512 : (word & 511);
 		oldnum = delta ? (oldindex >= oldsnap->num_entities ? 9999 : oldsnap->entities[oldindex].number) : 9999;
 
-		// copy unmodified oldsnap entities
-		while (newnum > oldnum) // delta only
+		while (newnum > oldnum)
 		{
 			if (developer_networkentities.integer >= 2)
 				Con_Printf("copy %i\n", oldnum);
-			// copy one of the old entities
+
 			if (newsnap->num_entities >= QW_MAX_PACKET_ENTITIES)
 				Host_Error("EntityFrameQW_CL_ReadFrame: newsnap->num_entities == MAX_PACKETENTITIES");
 			newsnap->entities[newsnap->num_entities] = oldsnap->entities[oldindex++];
@@ -3380,7 +3246,6 @@ void EntityFrameQW_CL_ReadFrame(qboolean delta)
 			oldindex++;
 	}
 
-	// expand cl.num_entities to include every entity we've seen this game
 	newnum = newsnap->num_entities ? newsnap->entities[newsnap->num_entities - 1].number : 1;
 	if (cl.num_entities <= newnum)
 	{
@@ -3389,12 +3254,11 @@ void EntityFrameQW_CL_ReadFrame(qboolean delta)
 			CL_ExpandEntities(newnum);
 	}
 
-	// now update the non-player entities from the snapshot states
 	number = cl.maxclients + 1;
 	for (newindex = 0;;newindex++)
 	{
 		newnum = newindex >= newsnap->num_entities ? cl.num_entities : newsnap->entities[newindex].number;
-		// kill any missing entities
+
 		for (;number < newnum;number++)
 		{
 			if (cl.entities_active[number])
@@ -3405,13 +3269,13 @@ void EntityFrameQW_CL_ReadFrame(qboolean delta)
 		}
 		if (number >= cl.num_entities)
 			break;
-		// update the entity
+
 		ent = &cl.entities[number];
 		ent->state_previous = ent->state_current;
 		ent->state_current = newsnap->entities[newindex];
 		ent->state_current.time = cl.mtime[0];
 		CL_MoveLerpEntityStates(ent);
-		// the entity lives again...
+
 		cl.entities_active[number] = true;
 		number++;
 	}

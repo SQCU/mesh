@@ -1,11 +1,9 @@
 #include "urllib.qh"
 
-// files
 .float url_fh;
 const float URL_FH_CURL = -1;
 const float URL_FH_STDOUT = -2;
 
-// URLs
 .string url_url;
 .string url_content_type;
 .string url_verb;
@@ -17,7 +15,6 @@ const float URL_FH_STDOUT = -2;
 .url_ready_func url_ready;
 .entity url_ready_pass;
 
-// for multi handles
 .int url_attempt;
 .int url_mode;
 
@@ -39,15 +36,13 @@ float url_URI_Get_Callback(int id, float status, string data)
 		return 0;
 	}
 
-	// whatever happens, we will remove the URL from the list of IDs
 	url_fromid[id] = NULL;
 
-	// if we get here, we MUST have both buffers cleared
 	if (e.url_rbuf != -1 || e.url_wbuf != -1 || e.url_fh != URL_FH_CURL) error("url_URI_Get_Callback: not a request waiting for data");
 
 	if (status == 0)
 	{
-		// WE GOT DATA!
+
 		float n, i;
 		n = tokenizebyseparator(data, "\n");
 		e.url_rbuf = buf_create();
@@ -75,7 +70,7 @@ float url_URI_Get_Callback(int id, float status, string data)
 	}
 	else
 	{
-		// an ERROR
+
 		e.url_ready(e, e.url_ready_pass, -fabs(status));
 		strfree(e.url_url);
 		delete(e);
@@ -94,10 +89,7 @@ void url_single_fopen(string url, int mode, url_ready_func rdy, entity pass)
 		{
 			case FILE_WRITE:
 			case FILE_APPEND:
-				// collect data to a stringbuffer for a POST request
-				// attempts to close will result in a reading handle
 
-				// create a writing end that does nothing yet
 				e = new_pure(url_single_fopen_file);
 				e.url_url = strzone(url);
 				e.url_content_type = "text/plain";
@@ -120,9 +112,7 @@ void url_single_fopen(string url, int mode, url_ready_func rdy, entity pass)
 				break;
 
 			case FILE_READ:
-				// read data only
 
-				// get slot for HTTP request
 				for (i = autocvar__urllib_nextslot; i < NUM_URL_ID; ++i)
 					if (url_fromid[i] == NULL) break;
 				if (i >= NUM_URL_ID)
@@ -137,7 +127,6 @@ void url_single_fopen(string url, int mode, url_ready_func rdy, entity pass)
 					}
 				}
 
-				// GET the data
 				if (!crypto_uri_postbuf(url, i + MIN_URL_ID, string_null, string_null, -1, 0))
 				{
 					LOG_INFO("url_single_fopen: failure in crypto_uri_postbuf");
@@ -145,9 +134,6 @@ void url_single_fopen(string url, int mode, url_ready_func rdy, entity pass)
 					return;
 				}
 
-				// Make a dummy handle object (no buffers at
-				// all). Wait for data to come from the
-				// server, then call the callback
 				e = new_pure(url_single_fopen_file);
 				e.url_url = strzone(url);
 				e.url_fh = URL_FH_CURL;
@@ -158,7 +144,6 @@ void url_single_fopen(string url, int mode, url_ready_func rdy, entity pass)
 				e.url_id = i;
 				url_fromid[i] = e;
 
-				// make sure this slot won't be reused quickly even on map change
 				cvar_set("_urllib_nextslot", ftos((i + 1) % NUM_URL_ID));
 				break;
 		}
@@ -202,7 +187,6 @@ void url_single_fopen(string url, int mode, url_ready_func rdy, entity pass)
 	}
 }
 
-// close a file
 ERASEABLE
 void url_fclose(entity e)
 {
@@ -210,16 +194,13 @@ void url_fclose(entity e)
 
 	if (e.url_fh == URL_FH_CURL)
 	{
-		if (e.url_rbuf == -1 || e.url_wbuf != -1)     // not(post GET/POST request)
-			if (e.url_rbuf != -1 || e.url_wbuf == -1) // not(pre POST request)
+		if (e.url_rbuf == -1 || e.url_wbuf != -1)
+			if (e.url_rbuf != -1 || e.url_wbuf == -1)
 				error("url_fclose: not closable in current state");
 
-		// closing an URL!
 		if (e.url_wbuf >= 0)
 		{
-			// we are closing the write end (HTTP POST request)
 
-			// get slot for HTTP request
 			for (i = autocvar__urllib_nextslot; i < NUM_URL_ID; ++i)
 				if (url_fromid[i] == NULL) break;
 			if (i >= NUM_URL_ID)
@@ -237,7 +218,6 @@ void url_fclose(entity e)
 				}
 			}
 
-			// POST the data
 			if (!crypto_uri_postbuf(e.url_url, i + MIN_URL_ID, e.url_content_type, e.url_verb, e.url_wbuf, 0))
 			{
 				LOG_INFO("url_fclose: failure in crypto_uri_postbuf");
@@ -248,20 +228,16 @@ void url_fclose(entity e)
 				return;
 			}
 
-			// delete write end. File handle is now in unusable
-			// state. Wait for data to come from the server, then
-			// call the callback
 			buf_del(e.url_wbuf);
 			e.url_wbuf = -1;
 			e.url_id = i;
 			url_fromid[i] = e;
 
-			// make sure this slot won't be reused quickly even on map change
 			cvar_set("_urllib_nextslot", ftos((i + 1) % NUM_URL_ID));
 		}
 		else
 		{
-			// we have READ all data, just close
+
 			e.url_ready(e, e.url_ready_pass, URL_READY_CLOSED);
 			buf_del(e.url_rbuf);
 			strfree(e.url_url);
@@ -270,26 +246,25 @@ void url_fclose(entity e)
 	}
 	else if (e.url_fh == URL_FH_STDOUT)
 	{
-		e.url_ready(e, e.url_ready_pass, URL_READY_CLOSED);  // closing creates no reading handle
+		e.url_ready(e, e.url_ready_pass, URL_READY_CLOSED);
 		delete(e);
 	}
 	else
 	{
-		// file
+
 		fclose(e.url_fh);
-		e.url_ready(e, e.url_ready_pass, URL_READY_CLOSED);  // closing creates no reading handle
+		e.url_ready(e, e.url_ready_pass, URL_READY_CLOSED);
 		delete(e);
 	}
 }
 
-// with \n (blame FRIK_FILE)
 ERASEABLE
 string url_fgets(entity e)
 {
 	if (e.url_fh == URL_FH_CURL)
 	{
 		if (e.url_rbuf == -1) error("url_fgets: not readable in current state");
-		// curl
+
 		string s;
 		s = bufstr_get(e.url_rbuf, e.url_rbufpos);
 		e.url_rbufpos += 1;
@@ -297,47 +272,45 @@ string url_fgets(entity e)
 	}
 	else if (e.url_fh == URL_FH_STDOUT)
 	{
-		// stdout
+
 		return string_null;
 	}
 	else
 	{
-		// file
+
 		return fgets(e.url_fh);
 	}
 }
 
-// without \n (blame FRIK_FILE)
 ERASEABLE
 void url_fputs(entity e, string s)
 {
 	if (e.url_fh == URL_FH_CURL)
 	{
 		if (e.url_wbuf == -1) error("url_fputs: not writable in current state");
-		// curl
+
 		bufstr_set(e.url_wbuf, e.url_wbufpos, s);
 		e.url_wbufpos += 1;
 	}
 	else if (e.url_fh == URL_FH_STDOUT)
 	{
-		// stdout
+
 		print(s);
 	}
 	else
 	{
-		// file
+
 		fputs(e.url_fh, s);
 	}
 }
 
-// multi URL object, tries URLs separated by space in sequence
 ERASEABLE
 void url_multi_ready(entity fh, entity me, float status)
 {
 	float n;
 	if (status == URL_READY_ERROR || status < 0)
 	{
-		if (status == -422)  // Unprocessable Entity
+		if (status == -422)
 		{
 			LOG_INFO("uri_multi_ready: got HTTP error 422, data is in unusable format - not continuing");
 			me.url_ready(fh, me.url_ready_pass, status);

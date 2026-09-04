@@ -112,7 +112,7 @@ MACRO_END
 void calc_followmodel_ofs(entity view)
 {
 	if(cl_followmodel_time == time)
-		return; // cl_followmodel_ofs already calculated for this frame
+		return;
 
 	float frac;
 	vector gunorg = '0 0 0';
@@ -141,8 +141,6 @@ void calc_followmodel_ofs(entity view)
 
 	gunorg *= -autocvar_cl_followmodel_speed * 0.042;
 
-	// perform highpass/lowpass on the adjustment vectors (turning velocity into acceleration!)
-	// trick: we must do the lowpass LAST, so the lowpass vector IS the final vector!
 	frac = avg_factor(autocvar_cl_followmodel_highpass);
 	highpass3(gunorg, frac, gunorg_adjustment_highpass, gunorg);
 	frac = avg_factor(autocvar_cl_followmodel_lowpass);
@@ -175,7 +173,6 @@ vector leanmodel_ofs(entity view)
 	if (view.csqcmodel_teleported)
 		gunangles_prev = view_angles;
 
-	// in the highpass, we _store_ the DIFFERENCE to the actual view angles...
 	gunangles_highpass += gunangles_prev;
 	PITCH(gunangles_highpass) += 360 * floor((PITCH(view_angles) - PITCH(gunangles_highpass)) / 360 + 0.5);
 	YAW(gunangles_highpass) += 360 * floor((YAW(view_angles) - YAW(gunangles_highpass)) / 360 + 0.5);
@@ -188,13 +185,12 @@ vector leanmodel_ofs(entity view)
 	PITCH(gunangles) *= -autocvar_cl_leanmodel_speed;
 	YAW(gunangles) *= -autocvar_cl_leanmodel_speed;
 
-	// we assume here: PITCH = 0, YAW = 1, ROLL = 2
 	frac = avg_factor(autocvar_cl_leanmodel_highpass);
 	highpass2(gunangles, frac, gunangles_adjustment_highpass, gunangles);
 	frac = avg_factor(autocvar_cl_leanmodel_lowpass);
 	lowpass2(gunangles, frac, gunangles_adjustment_lowpass, gunangles);
 
-	gunangles.x = -gunangles.x; // pitch was inverted, now that actually matters
+	gunangles.x = -gunangles.x;
 
 	return gunangles;
 }
@@ -206,17 +202,15 @@ vector bobmodel_ofs(entity view)
 	static float hitgroundtime;
 	if (clonground)
 	{
-		float f = time; // cl.movecmd[0].time
+		float f = time;
 		if (!oldonground)
 			hitgroundtime = f;
 	}
 	oldonground = clonground;
 
-	// calculate for swinging gun model
-	// the gun bobs when running on the ground, but doesn't bob when you're in the air.
 	vector gunorg = '0 0 0';
 	static float bobmodel_scale = 0;
-	static float time_ofs = 0; // makes the effect always restart in the same way
+	static float time_ofs = 0;
 	if (clonground)
 	{
 		if (time - hitgroundtime > 0.05)
@@ -254,17 +248,6 @@ void viewmodel_animate(entity this)
 	if (autocvar_cl_leanmodel)
 		this.angles += leanmodel_ofs(view);
 
-	// vertical view bobbing code
-	// TODO: cl_bob
-
-	// horizontal view bobbing code
-	// TODO: cl_bob2
-
-	// fall bobbing code
-	// causes the view to swing down and back up when touching the ground
-	// TODO: cl_bobfall
-
-	// gun model bobbing code
 	if (autocvar_cl_bobmodel)
 		this.origin += bobmodel_ofs(view);
 }
@@ -288,13 +271,13 @@ void viewmodel_draw(entity this)
 	entity me = CSQCModel_server2csqc(player_localentnum - 1);
 	int fx = ((me.csqcmodel_effects & EFMASK_CHEAP)
 		| EF_NODEPTHTEST)
-		&~ (EF_FULLBRIGHT); // can mask team color, so get rid of it
+		&~ (EF_FULLBRIGHT);
 	for (entity e = this; e; e = e.weaponchild)
 	{
 		e.drawmask = mask;
 		e.alpha = a;
 		e.skin = wepskin;
-		e.colormap = 256 + c;  // colormap == 0 is black, c == 0 is white
+		e.colormap = 256 + c;
 		e.glowmod = g;
 		e.csqcmodel_effects = fx;
 		CSQCModel_Effects_Apply(e);
@@ -306,7 +289,7 @@ void viewmodel_draw(entity this)
 		if(newname)
 			name = newname;
 		bool swap = name != this.name_last;
-		// if (swap)
+
 		{
 			this.name_last = name;
 			CL_WeaponEntity_SetModel(this, name, swap);
@@ -316,7 +299,7 @@ void viewmodel_draw(entity this)
 		if ((!this.animstate_override && !this.animstate_looping) || time > this.animstate_endtime)
 			anim_set(this, this.anim_idle, true, false, false);
 	}
-	float f = 0; // 0..1; 0: fully active
+	float f = 0;
 	float rate = STAT(WEAPONRATEFACTOR);
 	float eta = rate ? ((this.weapon_nextthink - time) / rate) : 0;
 	if (eta <= 0) f = this.weapon_eta_last;
@@ -391,14 +374,14 @@ void fpscounter_update()
 
 		int channel = MSG_C2S;
 		WriteHeader(channel, fpsreport);
-		WriteShort(channel, bound(0, rint(fps), 32767)); // prevent insane fps values
+		WriteShort(channel, bound(0, rint(fps), 32767));
 	}
 }
 
 STATIC_INIT(fpscounter_init)
 {
 	float currentTime = gettime(GETTIME_FRAMESTART);
-	showfps_prevfps_time = currentTime; // we must initialize it to avoid an instant low frame sending
+	showfps_prevfps_time = currentTime;
 }
 
 float avgspeed;
@@ -428,7 +411,7 @@ vector GetCurrentFov(float fov)
 			Weapon wep = wepent.activeweapon;
 			if(wep != WEP_Null && wep.wr_zoomdir)
 			{
-				bool do_zoom = wep.wr_zoomdir(wep); // TODO: merge this with wr_zoom?
+				bool do_zoom = wep.wr_zoomdir(wep);
 				zoomdir += do_zoom;
 			}
 		}
@@ -442,7 +425,7 @@ vector GetCurrentFov(float fov)
 			else
 				zoomdir = 1;
 		}
-		// fteqcc failed twice here already, don't optimize this
+
 	}
 
 	if(zoomdir) { zoomin_effect = 0; }
@@ -465,7 +448,7 @@ vector GetCurrentFov(float fov)
 	}
 	else
 	{
-		if(zoomspeed < 0) // instant zoom
+		if(zoomspeed < 0)
 		{
 			if(zoomdir)
 				current_viewzoom = 1 / zoomfactor;
@@ -493,7 +476,7 @@ vector GetCurrentFov(float fov)
 	else
 		setsensitivityscale(1);
 
-	if(autocvar_cl_velocityzoom_enabled && autocvar_cl_velocityzoom_type && !autocvar_cl_lockview) // _type = 0 disables velocity zoom too
+	if(autocvar_cl_velocityzoom_enabled && autocvar_cl_velocityzoom_type && !autocvar_cl_lockview)
 	{
 		if (intermission || (spectatee_status > 0 && STAT(CAMERA_SPECTATOR) == 2))
 			curspeed = 0;
@@ -513,11 +496,10 @@ vector GetCurrentFov(float fov)
 			}
 		}
 
-		velocityzoom = bound(0, drawframetime / max(0.000000001, autocvar_cl_velocityzoom_time), 1); // speed at which the zoom adapts to player velocity
+		velocityzoom = bound(0, drawframetime / max(0.000000001, autocvar_cl_velocityzoom_time), 1);
 		avgspeed = avgspeed * (1 - velocityzoom) + (curspeed / autocvar_cl_velocityzoom_speed) * velocityzoom;
 		velocityzoom = exp(float2range11(avgspeed * -autocvar_cl_velocityzoom_factor / 1) * 1);
 
-		//print(ftos(avgspeed), " avgspeed, ", ftos(curspeed), " curspeed, ", ftos(velocityzoom), " return\n"); // for debugging
 	}
 	else
 		velocityzoom = 1;
@@ -550,8 +532,6 @@ vector GetOrthoviewFOV(vector ov_worldmin, vector ov_worldmax, vector ov_mid, ve
 	fovy = atan2(height/2, distance_to_middle_of_world) / M_PI * 360.0;
 	return '1 0 0' * fovx + '0 1 0' * fovy;
 }
-
-// this function must match W_SetupShot!
 
 bool minigame_wasactive;
 
@@ -596,7 +576,7 @@ int WantEventchase(entity this, bool want_vehiclechase)
 		{
 			if(autocvar_cl_eventchase_death == 2)
 			{
-				// don't stop eventchase once it's started (even if velocity changes afterwards)
+
 				if(this.velocity == '0 0 0' || eventchase_running)
 					return 1;
 			}
@@ -607,7 +587,7 @@ int WantEventchase(entity this, bool want_vehiclechase)
 			if (time <= spectatee_status_changed_time + min(3, autocvar_cl_eventchase_spectated_change_time))
 				return 1;
 			else if (eventchase_running)
-				return -1; // disable chase_active while eventchase is still enabled so to avoid a glicth
+				return -1;
 		}
 	}
 	return 0;
@@ -615,8 +595,8 @@ int WantEventchase(entity this, bool want_vehiclechase)
 
 void View_EventChase(entity this)
 {
-	// event chase camera
-	if(autocvar_chase_active <= 0) // greater than 0 means it's enabled manually, and this code is skipped
+
+	if(autocvar_chase_active <= 0)
 	{
 		if(STAT(CAMERA_SPECTATOR))
 		{
@@ -649,7 +629,7 @@ void View_EventChase(entity this)
 				Vehicle info = REGISTRY_GET(Vehicles, hud);
 				vehicle_viewdist = info.height;
 				vehicle_viewofs = info.view_ofs;
-				if(vehicle_viewdist < 0) // when set below 0, this vehicle doesn't use third person view (gunner slots)
+				if(vehicle_viewdist < 0)
 					vehicle_chase = false;
 			}
 			else
@@ -671,12 +651,10 @@ void View_EventChase(entity this)
 			}
 			eventchase_running = true;
 
-			// make special vector since we can't use view_origin (It is one frame old as of this code, it gets set later with the results this code makes.)
 			vector current_view_origin = (csqcplayer ? csqcplayer.origin : pmove_org);
 			if (custom_eventchase)
 				current_view_origin = current_view_origin_override;
 
-			// detect maximum viewoffset and use it
 			vector view_offset = autocvar_cl_eventchase_viewoffset;
 			if(vehicle_chase)
 			{
@@ -695,12 +673,8 @@ void View_EventChase(entity this)
 				else { current_view_origin.z += max(0, (trace_endpos.z - current_view_origin.z) - autocvar_cl_eventchase_maxs.z); }
 			}
 
-			// We must enable chase_active to get a third person view (weapon viewmodel hidden and own player model showing).
-			// Ideally, there should be another way to enable third person cameras, such as through setproperty()
-			// -1 enables chase_active while marking it as set by this code, and not by the user (which would be 1)
 			if(!autocvar_chase_active) { cvar_set("chase_active", "-1"); }
 
-			// make the camera smooth back
 			float chase_distance = autocvar_cl_eventchase_distance;
 			if(vehicle_chase)
 			{
@@ -713,7 +687,7 @@ void View_EventChase(entity this)
 				chase_distance = chase_distance_override;
 
 			if(autocvar_cl_eventchase_speed && eventchase_current_distance < chase_distance)
-				eventchase_current_distance += autocvar_cl_eventchase_speed * (chase_distance - eventchase_current_distance) * frametime; // slow down the further we get
+				eventchase_current_distance += autocvar_cl_eventchase_speed * (chase_distance - eventchase_current_distance) * frametime;
 			else if(eventchase_current_distance != chase_distance)
 				eventchase_current_distance = chase_distance;
 
@@ -723,7 +697,6 @@ void View_EventChase(entity this)
 			vector eventchase_target_origin = (current_view_origin - (forward * eventchase_current_distance));
 			WarpZone_TraceBox(current_view_origin, autocvar_cl_eventchase_mins, autocvar_cl_eventchase_maxs, eventchase_target_origin, MOVE_WORLDONLY, this);
 
-			// If the boxtrace fails, revert back to line tracing.
 			if(!this.viewloc)
 			if(trace_startsolid)
 			{
@@ -737,15 +710,14 @@ void View_EventChase(entity this)
 				setproperty(VF_ANGLES, WarpZone_TransformVAngles(WarpZone_trace_transform, view_angles));
 		}
 
-		if (eventchase <= 0 && autocvar_chase_active < 0) // time to disable chase_active if it was set by this code
+		if (eventchase <= 0 && autocvar_chase_active < 0)
 		{
 			eventchase_running = false;
 			cvar_set("chase_active", "0");
-			eventchase_current_distance = 0; // start from 0 next time
+			eventchase_current_distance = 0;
 		}
 	}
-	// workaround for camera stuck between player's legs when using chase_active 1
-	// because the engine stops updating the chase_active camera when the game ends
+
 	else if(intermission)
 	{
 		cvar_settemp("chase_active", "-1");
@@ -757,7 +729,7 @@ vector damage_blurpostprocess, content_blurpostprocess;
 
 void UpdateDamage()
 {
-	// accumulate damage with each stat update
+
 	static float damage_total_prev = 0;
 	float damage_total = STAT(HITSOUND_DAMAGE_DEALT_TOTAL);
 	float unaccounted_damage_new = COMPARE_INCREASING(damage_total, damage_total_prev);
@@ -768,11 +740,10 @@ void UpdateDamage()
 	if (damage_dealt_time != damage_dealt_time_prev)
 	{
 		unaccounted_damage += unaccounted_damage_new;
-		//LOG_TRACE("dmg total: ", ftos(unaccounted_damage), " (+", ftos(unaccounted_damage_new), ")");
+
 	}
 	damage_dealt_time_prev = damage_dealt_time;
 
-	// prevent hitsound when switching spectatee
 	static float spectatee_status_prev = 0;
 	if (spectatee_status != spectatee_status_prev)
 		unaccounted_damage = 0;
@@ -781,7 +752,6 @@ void UpdateDamage()
 
 void HitSound()
 {
-	// varying sound pitch
 
 	bool have_arc = false;
 	for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
@@ -793,7 +763,7 @@ void HitSound()
 	}
 
 	static float hitsound_time_prev = 0;
-	// HACK: the only way to get the arc to sound consistent with pitch shift is to ignore cl_hitsound_antispam_time
+
 	bool arc_hack = have_arc && autocvar_cl_hitsound >= 2;
 	if (arc_hack || COMPARE_INCREASING(time, hitsound_time_prev) > autocvar_cl_hitsound_antispam_time)
 	{
@@ -802,25 +772,19 @@ void HitSound()
 			float pitch_shift = 1;
 			if (autocvar_cl_hitsound == 2 || autocvar_cl_hitsound == 3)
 			{
-				// customizable gradient function that crosses (0,a), (c,1) and asymptotically approaches b
+
 				float a = autocvar_cl_hitsound_max_pitch;
 				float b = autocvar_cl_hitsound_min_pitch;
 				float c = autocvar_cl_hitsound_nom_damage;
 				float d = unaccounted_damage;
 				pitch_shift = (b*d*(a-1) + a*c*(1-b)) / (d*(a-1) + c*(1-b));
 
-				// if pitch shift is reversed, mirror in (max-min)/2 + min
 				if (autocvar_cl_hitsound == 3)
 				{
 					float mirror_value = (a-b)/2 + b;
 					pitch_shift = mirror_value + (mirror_value - pitch_shift);
 				}
 			}
-
-			//LOG_TRACE("dmg total (dmg): ", ftos(unaccounted_damage), " , pitch shift: ", ftos(pitch_shift));
-
-			// todo: avoid very long and very short sounds from wave stretching using different sound files? seems unnecessary
-			// todo: normalize sound pressure levels? seems unnecessary
 
 			sound7(NULL, CH_INFO, SND(HIT), VOL_BASE, ATTN_NONE, pitch_shift * 100, 0);
 		}
@@ -847,10 +811,7 @@ void HitSound()
 
 void HUD_Draw(entity this)
 {
-	// if we don't know gametype and scores yet avoid drawing the scoreboard
-	// also in the very first frames, player state may be inconsistent so avoid drawing the hud at all
-	// e.g. since initial player's health is 0 hud would display the hud_damage effect,
-	// cl_deathscoreboard would show the scoreboard and so on
+
 	if(!gametype)
 		return;
 
@@ -876,7 +837,7 @@ void HUD_Draw(entity this)
 	HUD_Scale_Enable();
 	if(!intermission)
 	{
-		if(STAT(NADE_TIMER) && autocvar_cl_nade_timer) // give nade top priority, as it's a matter of life and death
+		if(STAT(NADE_TIMER) && autocvar_cl_nade_timer)
 		{
 			vector col = '0.25 0.90 1' + vec3(STAT(NADE_TIMER), -STAT(NADE_TIMER), -STAT(NADE_TIMER));
 			DrawCircleClippedPic(vec2(0.5 * vid_conwidth, 0.6 * vid_conheight), 0.1 * vid_conheight, "gfx/crosshair_ring", STAT(NADE_TIMER), col, autocvar_hud_colorflash_alpha, DRAWFLAG_ADDITIVE);
@@ -907,7 +868,6 @@ void HUD_Draw(entity this)
 		}
 	}
 
-	// crosshair goes VERY LAST
 	UpdateDamage();
 	HUD_Crosshair(this);
 	HitSound();
@@ -917,15 +877,12 @@ void HUD_Draw(entity this)
 void ViewLocation_Mouse()
 {
 	if(spectatee_status)
-		return; // don't draw it as spectator!
+		return;
 
 	viewloc_mousepos += getmousepos() * autocvar_menu_mouse_speed;
 	viewloc_mousepos.x = bound(0, viewloc_mousepos.x, vid_conwidth);
 	viewloc_mousepos.y = bound(0, viewloc_mousepos.y, vid_conheight);
 
-	//float cursor_alpha = 1 - autocvar__menu_alpha;
-	//cursor_type = CURSOR_NORMAL;
-	//draw_cursor(viewloc_mousepos, '0.5 0.5 0', "/cursor_move", '1 1 1', cursor_alpha);
 }
 
 void HUD_Cursor_Show()
@@ -949,15 +906,13 @@ void HUD_Mouse(entity player)
 	if(!cursor_active)
 	{
 		if(player.viewloc && (player.viewloc.spawnflags & VIEWLOC_FREEAIM))
-			ViewLocation_Mouse(); // NOTE: doesn't use cursormode
+			ViewLocation_Mouse();
 		return;
 	}
 
-	if (cursor_active == -1) // starting to display the cursor
+	if (cursor_active == -1)
 	{
-		// since HUD_Mouse is called by CSQC_UpdateView before CSQC_InputEvent,
-		// in the first frame mousepos is the mouse position of the last time
-		// the cursor was displayed, thus we ignore it to avoid a glictch
+
 		cursor_active = 1;
 		return;
 	}
@@ -988,7 +943,6 @@ void View_NightVision()
 	if(!(autocvar_r_fakelight >= 2 || autocvar_r_fullbright) || (serverflags & SERVERFLAG_ALLOW_FULLBRIGHT))
 		return;
 
-	// apply night vision effect
 	vector tc_00, tc_01, tc_10, tc_11;
 	vector rgb = '0 0 0';
 	float a;
@@ -1002,16 +956,14 @@ void View_NightVision()
 		nightvision_noise2 = new(nightvision_noise2);
 	}
 
-	// color tint in yellow
 	drawfill('0 0 0', autocvar_vid_conwidth * '1 0 0' + autocvar_vid_conheight * '0 1 0', '0.5 1 0.3', 1, DRAWFLAG_MODULATE);
 
-	// draw BG
 	a = Noise_Pink(nightvision_noise, frametime * 1.5) * 0.05 + 0.15;
 	rgb = '1 1 1';
 	tc_00 = '0 0 0' + '0.2 0 0' * sin(time * 0.3) + '0 0.3 0' * cos(time * 0.7);
 	tc_01 = '0 2.25 0' + '0.6 0 0' * cos(time * 1.2) - '0 0.3 0' * sin(time * 2.2);
 	tc_10 = '1.5 0 0' - '0.2 0 0' * sin(time * 0.5) + '0 0.5 0' * cos(time * 1.7);
-	//tc_11 = '1 1 0' + '0.6 0 0' * sin(time * 0.6) + '0 0.3 0' * cos(time * 0.1);
+
 	tc_11 = tc_01 + tc_10 - tc_00;
 	R_BeginPolygon("gfx/nightvision-bg", DRAWFLAG_ADDITIVE, true);
 	R_PolygonVertex('0 0 0', tc_00, rgb, a);
@@ -1020,7 +972,6 @@ void View_NightVision()
 	R_PolygonVertex(autocvar_vid_conheight * '0 1 0', tc_01, rgb, a);
 	R_EndPolygon();
 
-	// draw FG
 	a = Noise_Pink(nightvision_noise2, frametime * 0.1) * 0.05 + 0.12;
 	rgb = '0.3 0.6 0.4' + '0.1 0.4 0.2' * Noise_White(nightvision_noise2, frametime);
 	tc_00 = '0 0 0' + '1 0 0' * Noise_White(nightvision_noise2, frametime) + '0 1 0' * Noise_White(nightvision_noise2, frametime);
@@ -1035,14 +986,11 @@ void View_NightVision()
 	R_EndPolygon();
 }
 
-// visual overlay while in liquids
-// provides some effects to the postprocessing function
 void HUD_Contents()
 {
 	if(!autocvar_hud_contents || MUTATOR_CALLHOOK(HUD_Contents))
 		return;
 
-	// improved polyblend
 	float contentalpha_temp, incontent, liquidalpha, contentfadetime;
 	vector liquidcolor;
 
@@ -1073,8 +1021,8 @@ void HUD_Contents()
 			break;
 	}
 
-	if(incontent) // fade in/out at different speeds so you can do e.g. instant fade when entering water and slow when leaving it.
-	{ // also lets delcare previous values for blending properties, this way it isn't reset until after you have entered a different content
+	if(incontent)
+	{
 		contentfadetime = autocvar_hud_contents_fadeintime;
 		liquidalpha_prev = liquidalpha;
 		liquidcolor_prev = liquidcolor;
@@ -1105,8 +1053,6 @@ void HUD_Contents()
 	}
 }
 
-// visual pain effects on the screen
-// provides some effects to the postprocessing function
 void HUD_Damage()
 {
 	if(!autocvar_hud_damage || STAT(FROZEN))
@@ -1121,9 +1067,8 @@ void HUD_Damage()
 	float myhealth_flash_temp;
 	myhealth = STAT(HEALTH);
 
-	// fade out
 	myhealth_flash = max(0, myhealth_flash - autocvar_hud_damage_fade_rate * frametime);
-	// add new damage
+
 	myhealth_flash = bound(0, myhealth_flash + dmg_take * autocvar_hud_damage_factor, autocvar_hud_damage_maxalpha);
 
 	float pain_threshold, pain_threshold_lower, pain_threshold_lower_health;
@@ -1142,32 +1087,28 @@ void HUD_Damage()
 	{
 		if(myhealth >= 1)
 		{
-			myhealth_flash = 0; // just spawned, clear the flash immediately
+			myhealth_flash = 0;
 			myhealth_flash_temp = 0;
 		}
 		else
 		{
-			myhealth_flash += autocvar_hud_damage_fade_rate * frametime; // dead
+			myhealth_flash += autocvar_hud_damage_fade_rate * frametime;
 		}
 	}
 
 	if(spectatee_status == -1 || intermission)
 	{
-		myhealth_flash = 0; // observing, or match ended
+		myhealth_flash = 0;
 		myhealth_flash_temp = 0;
 	}
 
 	myhealth_prev = myhealth;
 
-	// IDEA: change damage color/picture based on player model for robot/alien species?
-	// pro: matches model better
-	// contra: it's not red because blood is red, but because red is an alarming color, so red should stay
-	// maybe different reddish pics?
 	if(autocvar_cl_gentle_damage || autocvar_cl_gentle)
 	{
 		if(autocvar_cl_gentle_damage == 2)
 		{
-			if(myhealth_flash < pain_threshold) // only randomize when the flash is gone
+			if(myhealth_flash < pain_threshold)
 				myhealth_gentlergb = randomvec();
 		}
 		else
@@ -1179,7 +1120,7 @@ void HUD_Damage()
 	else if(myhealth_flash_temp > 0)
 		drawpic(splash_pos, "gfx/blood", splash_size, stov(autocvar_hud_damage_color), bound(0, myhealth_flash_temp, 1) * autocvar_hud_damage, DRAWFLAG_NORMAL);
 
-	if(autocvar_hud_postprocessing) // we still need to set this anyway even when chase_active is set, this way it doesn't get stuck on.
+	if(autocvar_hud_postprocessing)
 	{
 		if(autocvar_hud_damage_blur && myhealth_flash_temp)
 		{
@@ -1200,32 +1141,30 @@ void View_PostProcessing()
 {
 	float e1 = (autocvar_hud_postprocessing_maxbluralpha != 0);
 	float e2 = (autocvar_hud_powerup != 0);
-	if(autocvar_hud_postprocessing && (e1 || e2)) // TODO: Remove this code and re-do the postprocess handling in the engine, where it properly belongs.
+	if(autocvar_hud_postprocessing && (e1 || e2))
 	{
-		// enable or disable rendering types if they are used or not
+
 		if(cvar("r_glsl_postprocess_uservec1_enable") != e1) { cvar_set("r_glsl_postprocess_uservec1_enable", ftos(e1)); }
 		if(cvar("r_glsl_postprocess_uservec2_enable") != e2) { cvar_set("r_glsl_postprocess_uservec2_enable", ftos(e2)); }
 
-		// blur postprocess handling done first (used by hud_damage and hud_contents)
 		if((damage_blurpostprocess.x || content_blurpostprocess.x))
 		{
 			float blurradius = bound(0, damage_blurpostprocess.y + content_blurpostprocess.y, autocvar_hud_postprocessing_maxblurradius);
 			float bluralpha = bound(0, damage_blurpostprocess.z + content_blurpostprocess.z, autocvar_hud_postprocessing_maxbluralpha);
-			if(blurradius != old_blurradius || bluralpha != old_bluralpha) // reduce cvar_set spam as much as possible
+			if(blurradius != old_blurradius || bluralpha != old_bluralpha)
 			{
 				cvar_set("r_glsl_postprocess_uservec1", strcat(ftos(blurradius), " ", ftos(bluralpha), " 0 0"));
 				old_blurradius = blurradius;
 				old_bluralpha = bluralpha;
 			}
 		}
-		else if(cvar_string("r_glsl_postprocess_uservec1") != "0 0 0 0") // reduce cvar_set spam as much as possible
+		else if(cvar_string("r_glsl_postprocess_uservec1") != "0 0 0 0")
 		{
 			cvar_set("r_glsl_postprocess_uservec1", "0 0 0 0");
 			old_blurradius = 0;
 			old_bluralpha = 0;
 		}
 
-		// edge detection postprocess handling done second (used by hud_powerup)
 		float sharpen_intensity = 0;
 		FOREACH(StatusEffect, it.instanceOfPowerups,
 		{
@@ -1234,17 +1173,17 @@ void View_PostProcessing()
 				sharpen_intensity += powerup_finished;
 		});
 
-		sharpen_intensity = bound(0, ((STAT(HEALTH) > 0) ? sharpen_intensity : 0), 5); // Check to see if player is alive (if not, set 0) - also bound to fade out starting at 5 seconds.
+		sharpen_intensity = bound(0, ((STAT(HEALTH) > 0) ? sharpen_intensity : 0), 5);
 
 		if(autocvar_hud_powerup && sharpen_intensity > 0)
 		{
-			if(sharpen_intensity != old_sharpen_intensity) // reduce cvar_set spam as much as possible
+			if(sharpen_intensity != old_sharpen_intensity)
 			{
 				cvar_set("r_glsl_postprocess_uservec2", strcat(ftos((sharpen_intensity / 5) * autocvar_hud_powerup), " ", ftos(-sharpen_intensity * autocvar_hud_powerup), " 0 0"));
 				old_sharpen_intensity = sharpen_intensity;
 			}
 		}
-		else if(cvar_string("r_glsl_postprocess_uservec2") != "0 0 0 0") // reduce cvar_set spam as much as possible
+		else if(cvar_string("r_glsl_postprocess_uservec2") != "0 0 0 0")
 		{
 			cvar_set("r_glsl_postprocess_uservec2", "0 0 0 0");
 			old_sharpen_intensity = 0;
@@ -1271,8 +1210,6 @@ void View_Lock()
 	)
 		lock_type = 1;
 
-	// lock_type 1: lock origin and angles
-	// lock_type 2: lock only origin
 	if(lock_type >= 1)
 		setproperty(VF_ORIGIN, freeze_org);
 	else
@@ -1285,7 +1222,7 @@ void View_Lock()
 
 void View_DemoCamera()
 {
-	if(camera_active) // Camera for demo playback
+	if(camera_active)
 	{
 		if(autocvar_camera_enable)
 			CSQC_Demo_Camera();
@@ -1304,7 +1241,7 @@ void View_DemoCamera()
 		if(autocvar_camera_enable && isdemo())
 #endif
 		{
-			// Enable required Darkplaces cvars
+
 			chase_active_backup = autocvar_chase_active;
 			cvar_set("chase_active", "2");
 			cvar_set("cl_demo_mousegrab", "1");
@@ -1338,10 +1275,9 @@ void View_CheckButtonStatus()
 {
 	float is_dead = (STAT(HEALTH) <= 0);
 
-	// FIXME do we need this hack?
 	if(isdemo())
 	{
-		// in demos, input_buttons do not work
+
 		button_zoom = (autocvar__togglezoom == "-");
 	}
 	else if(button_zoom
@@ -1349,7 +1285,7 @@ void View_CheckButtonStatus()
 		&& (spectatee_status >= 0)
 		&& (is_dead || intermission))
 	{
-		// no zoom while dead or in intermission please
+
 		localcmd("-zoom\n");
 		button_zoom = false;
 	}
@@ -1518,7 +1454,7 @@ void View_UpdateFov()
 	if(autocvar_cl_orthoview)
 		fov = GetOrthoviewFOV(ov_worldmin, ov_worldmax, ov_mid, ov_org);
 	else if(csqcplayer.viewloc)
-		fov = GetViewLocationFOV(110); // enforce 110 fov, so things don't look odd
+		fov = GetViewLocationFOV(110);
 	else
 		fov = GetCurrentFov(autocvar_fov);
 
@@ -1540,7 +1476,7 @@ void CSQC_UpdateView(entity this, float w, float h)
 
 	HUD_Scale_Disable();
 
-	if(autocvar__hud_showbinds_reload) // menu can set this one
+	if(autocvar__hud_showbinds_reload)
 	{
 		db_close(binddb);
 		binddb = db_create();
@@ -1564,10 +1500,7 @@ void CSQC_UpdateView(entity this, float w, float h)
 
 	if (autocvar_chase_active)
 	{
-		// in first person view if r_drawviewmodel is off weapon isn't visible
-		// and server doesn't throw any casing
-		// switching to 3rd person view r_drawviewmodel is set to -1 to let know the server casings
-		// can be thrown for self since own weapon model is visible
+
 		if (autocvar_r_drawviewmodel == 0 && STAT(HEALTH) > 0)
 			cvar_set("r_drawviewmodel", "-1");
 	}
@@ -1581,34 +1514,29 @@ void CSQC_UpdateView(entity this, float w, float h)
 
 	CSQCPlayer_SetCamera();
 
-	if(player_localentnum <= maxclients) // is it a client?
+	if(player_localentnum <= maxclients)
 		current_player = player_localentnum - 1;
-	else // then player_localentnum is the vehicle I'm driving
+	else
 		current_player = player_localnum;
 	myteam = entcs_GetTeam(current_player);
 
 	entity local_player = ((csqcplayer) ? csqcplayer : CSQCModel_server2csqc(player_localentnum - 1));
 	if(!local_player)
-		local_player = this; // fall back!
+		local_player = this;
 
 	View_EventChase(local_player);
 
-	// do lockview after event chase camera so that it still applies whenever necessary.
 	View_Lock();
 
 	WarpZone_FixView();
-	//WarpZone_FixPMove();
 
 	View_Ortho();
 
-	// run viewmodel_draw before updating view_angles to the angles calculated by WarpZone_FixView
-	// viewmodel_draw needs to use the view_angles set by the engine on every CSQC_UpdateView call
 	if(autocvar_r_drawviewmodel)
 		for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 			if(viewmodels[slot].activeweapon)
 				viewmodel_draw(viewmodels[slot]);
 
-	// Render the Scene
 	view_origin = getpropertyvec(VF_ORIGIN);
 	view_angles = getpropertyvec(VF_ANGLES);
 	MAKE_VECTORS(view_angles, view_forward, view_right, view_up);
@@ -1622,14 +1550,11 @@ void CSQC_UpdateView(entity this, float w, float h)
 	fpscounter_update();
 
 	if(drawtime == 0)
-		drawframetime = 0.01666667; // when we don't know fps yet, we assume 60fps
+		drawframetime = 0.01666667;
 	else
 		drawframetime = bound(0.000001, time - drawtime, 1);
 	drawtime = time;
 
-	// watch for gametype changes here...
-	// in ParseStuffCMD the cmd isn't executed yet :/
-	// might even be better to add the gametype to TE_CSQC_INIT...?
 	if(!postinit)
 		PostInit();
 
@@ -1647,10 +1572,9 @@ void CSQC_UpdateView(entity this, float w, float h)
 		{
 			int gamecount = cvar("cl_matchcount");
 			localcmd("\ncl_hook_gameend\n");
-			// NOTE: using localcmd here to ensure it's executed AFTER cl_hook_gameend
-			// earlier versions of the game abuse the hook to set this cvar
+
 			localcmd(strcat("cl_matchcount ", itos(gamecount + 1), "\n"));
-			//cvar_set("cl_matchcount", itos(gamecount + 1));
+
 			calledhooks |= HOOK_END;
 		}
 	}
@@ -1663,18 +1587,14 @@ void CSQC_UpdateView(entity this, float w, float h)
 
 	ColorTranslateMode = autocvar_cl_stripcolorcodes;
 
-	// ALWAYS Clear Current Scene First
 	clearscene();
 
 	setproperty(VF_ORIGIN, view_origin);
 	setproperty(VF_ANGLES, view_angles);
 
-	// FIXME engine bug? VF_SIZE and VF_MIN are not restored to sensible values by this
 	setproperty(VF_SIZE, vf_size);
 	setproperty(VF_MIN, vf_min);
 
-	// Assign Standard Viewflags
-	// Draw the World (and sky)
 	setproperty(VF_DRAWWORLD, 1);
 
 	vid_conwidth = autocvar_vid_conwidth;
@@ -1685,15 +1605,13 @@ void CSQC_UpdateView(entity this, float w, float h)
 
 	View_DemoCamera();
 
-	setproperty(VF_DRAWCROSSHAIR, 0); // hide engine crosshair
-	setproperty(VF_DRAWENGINESBAR, 0); // hide engine status bar
+	setproperty(VF_DRAWCROSSHAIR, 0);
+	setproperty(VF_DRAWENGINESBAR, 0);
 
 	IL_EACH(g_drawables, it.draw, it.draw(it));
 
-	addentities(MASK_NORMAL | MASK_ENGINE | MASK_ENGINEVIEWMODELS); // TODO: .health is used in cl_deathfade (a feature we have turned off currently)
+	addentities(MASK_NORMAL | MASK_ENGINE | MASK_ENGINEVIEWMODELS);
 	renderscene();
-
-	// Now the the scene has been rendered, begin with the 2D drawing functions
 
 	View_NightVision();
 	DrawReticle(local_player);
@@ -1701,7 +1619,6 @@ void CSQC_UpdateView(entity this, float w, float h)
 	HUD_Damage();
 	View_PostProcessing();
 
-	// draw 2D entities
 	IL_EACH(g_drawables_2d, it.draw2d, it.draw2d(it));
 	Draw_ShowNames_All();
 #if ENABLE_DEBUGDRAW
@@ -1715,7 +1632,7 @@ void CSQC_UpdateView(entity this, float w, float h)
 	}
 	scoreboard_active = Scoreboard_WouldDraw();
 
-	HUD_Draw(this); // this parameter for deep vehicle function
+	HUD_Draw(this);
 
 	if(NextFrameCommand)
 	{
@@ -1729,15 +1646,12 @@ void CSQC_UpdateView(entity this, float w, float h)
 	unpause_update();
 	Net_Flush();
 
-	// let's reset the view back to normal for the end
 	setproperty(VF_MIN, '0 0 0');
 	setproperty(VF_SIZE, '1 0 0' * w + '0 1 0' * h);
 
 	IL_ENDFRAME();
 }
 
-
-// following vectors must be global to allow seamless switching between camera modes
 vector camera_offset, current_camera_offset, mouse_angles, current_angles, current_origin, current_position;
 void CSQC_Demo_Camera()
 {
@@ -1758,7 +1672,6 @@ void CSQC_Demo_Camera()
 		camera_mode = CAMERA_CHASE;
 	}
 
-	// Camera angles
 	if( camera_roll )
 		mouse_angles.z += camera_roll * autocvar_camera_speed_roll;
 
@@ -1791,16 +1704,12 @@ void CSQC_Demo_Camera()
 	attenuation = 1 / max(1, attenuation);
 	current_angles += (mouse_angles - current_angles) * attenuation;
 
-	// limit current pitch angle to sane values
 	if (current_angles.x < -90) current_angles.x = -90;
 	if (current_angles.x > 90 ) current_angles.x = 90;
 
-	// limit mouse and current yaw angles to standard values simultaneously so that the difference
-	// between these angles is not altered
 	while (current_angles.y < -180 && mouse_angles.y < -180) {current_angles.y += 360; mouse_angles.y += 360;}
 	while (current_angles.y > 180  && mouse_angles.y > 180 ) {current_angles.y -= 360; mouse_angles.y -= 360;}
 
-	// Camera position
 	tmp = '0 0 0';
 	dimensions = 0;
 
@@ -1840,7 +1749,6 @@ void CSQC_Demo_Camera()
 
 	current_camera_offset += (camera_offset - current_camera_offset) * attenuation;
 
-	// Camera modes
 	if( autocvar_camera_free )
 	{
 		if ( camera_mode == CAMERA_CHASE )

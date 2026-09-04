@@ -8,7 +8,7 @@ bool autocvar_bot_sound_monopoly;
 .entity realowner;
 bool sound_allowed(int to, entity e)
 {
-	if(!e) return true; // save on a few checks
+	if(!e) return true;
 	for ( ; ; )
 	{
 		if (e.classname == "body") e = e.enemy;
@@ -16,15 +16,14 @@ bool sound_allowed(int to, entity e)
 		else if (e.owner && e.owner != e) e = e.owner;
 		else break;
 	}
-	// sounds to self may always pass
+
 	if (to == MSG_ONE && e == msg_entity) return true;
-	// sounds by players can be removed
+
 	if (autocvar_bot_sound_monopoly && IS_REAL_CLIENT(e)) return false;
-	// anything else may pass
+
 	return true;
 }
 
-/** hack: string precache_sound(string s) = #19; */
 int precache_sound_index(string s) = #19;
 
 const int SVC_SOUND = 6;
@@ -109,8 +108,8 @@ void stopsoundto(int _dest, entity e, int chan)
 void stopsound(entity e, int chan)
 {
 	if (!sound_allowed(MSG_BROADCAST, e)) return;
-	stopsoundto(MSG_BROADCAST, e, chan); // unreliable, gets there fast
-	stopsoundto(MSG_ALL, e, chan);       // in case of packet loss
+	stopsoundto(MSG_BROADCAST, e, chan);
+	stopsoundto(MSG_ALL, e, chan);
 }
 
 void play2(entity e, string filename)
@@ -120,7 +119,7 @@ void play2(entity e, string filename)
 }
 
 .float spamtime;
-/** use this one if you might be causing spam (e.g. from touch functions that might get called more than once per frame) */
+
 float spamsound(entity e, int chan, Sound samp, float vol, float _atten)
 {
 	if (!sound_allowed(MSG_BROADCAST, e)) return false;

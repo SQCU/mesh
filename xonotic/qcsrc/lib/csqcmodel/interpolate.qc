@@ -1,27 +1,7 @@
-/*
- * Copyright (c) 2011 Rudolf Polzer
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- */
+
+
 #include "interpolate.qh"
 
-// 1 = old, 2 = new
 .vector iorigin1, iorigin2;
 .vector ivelocity1, ivelocity2;
 .vector iforward1, iforward2;
@@ -104,15 +84,15 @@ void InterpolateOrigin_Note(entity this)
 	if (this.iflags & IFLAG_TELEPORTED)
 	{
 		this.iflags &= ~IFLAG_TELEPORTED;
-		this.itime1 = this.itime2 = time;  // don't lerp
+		this.itime1 = this.itime2 = time;
 	}
 	else if (vdist(this.iorigin2 - this.iorigin1, >, 1000))
 	{
-		this.itime1 = this.itime2 = time;  // don't lerp
+		this.itime1 = this.itime2 = time;
 	}
 	else if ((this.iflags & IFLAG_VELOCITY) && vdist(this.ivelocity2 - this.ivelocity1, >, 1000))
 	{
-		this.itime1 = this.itime2 = time;  // don't lerp
+		this.itime1 = this.itime2 = time;
 	}
 	else if (dt >= 0.2)
 	{
@@ -125,7 +105,6 @@ void InterpolateOrigin_Note(entity this)
 	}
 }
 
-/** set origin based on iorigin1 (old pos), iorigin2 (desired pos), and time */
 void InterpolateOrigin_Do(entity this)
 {
 	if (this.itime1 && this.itime2 && this.itime1 != this.itime2)
@@ -155,7 +134,6 @@ void InterpolateOrigin_Do(entity this)
 	}
 }
 
-/** snap origin to iorigin2 (actual origin) */
 void InterpolateOrigin_Undo(entity this)
 {
 	if (this.iflags & IFLAG_ORIGIN) setorigin(this, this.iorigin2);

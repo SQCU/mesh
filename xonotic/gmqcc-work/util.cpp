@@ -22,10 +22,6 @@ const char *util_instr_str[VINSTR_END] = {
     "BITAND",     "BITOR"
 };
 
-/*
- * only required if big endian .. otherwise no need to swap
- * data.
- */
 #if PLATFORM_BYTE_ORDER == GMQCC_BYTE_ORDER_BIG || PLATFORM_BYTE_ORDER == -1
     static GMQCC_INLINE void util_swap16(uint16_t *d, size_t l) {
         while (l--) {
@@ -41,9 +37,6 @@ const char *util_instr_str[VINSTR_END] = {
         }
     }
 
-    /* Some strange system doesn't like constants that big, AND doesn't recognize an ULL suffix
-     * so let's go the safe way
-     */
     static GMQCC_INLINE void util_swap64(uint32_t *d, size_t l) {
         while (l--) {
             uint64_t v;
@@ -55,13 +48,13 @@ const char *util_instr_str[VINSTR_END] = {
 #endif
 
 void util_endianswap(void *_data, size_t count, unsigned int typesize) {
-#   if PLATFORM_BYTE_ORDER == -1 /* runtime check */
+#   if PLATFORM_BYTE_ORDER == -1
     if (*((char*)&typesize))
         return;
 #else
 
 #   if PLATFORM_BYTE_ORDER == GMQCC_BYTE_ORDER_LITTLE
-        /* prevent unused warnings */
+
         (void) _data;
         (void) count;
         (void) typesize;
@@ -81,7 +74,7 @@ void util_endianswap(void *_data, size_t count, unsigned int typesize) {
 
             default:
                 con_err ("util_endianswap: I don't know how to swap a %u byte structure!\n", typesize);
-                exit(EXIT_FAILURE); /* please blow the fuck up! */
+                exit(EXIT_FAILURE);
         }
 #   endif
 #endif
@@ -131,7 +124,7 @@ void util_swap_functions(std::vector<prog_section_function_t> &functions) {
         util_endianswap(&it.name,         1, sizeof(it.name));
         util_endianswap(&it.file,         1, sizeof(it.file));
         util_endianswap(&it.nargs,        1, sizeof(it.nargs));
-        /* Don't swap argsize[] - it's just a byte array, which Quake uses only as such. */
+
     }
 }
 
@@ -139,30 +132,6 @@ void util_swap_globals(std::vector<int32_t> &globals) {
     util_endianswap(&globals[0], globals.size(), sizeof(int32_t));
 }
 
-/*
-* Based On:
-*   Slicing-by-8 algorithms by Michael E.
-*       Kounavis and Frank L. Berry from Intel Corp.
-*       http://www.intel.com/technology/comms/perfnet/download/CRC_generators.pdf
-*
-*   This code was made to be slightly less confusing with macros, which
-*   I suppose is somewhat ironic.
-*
-*   The code had to be changed for non reflected on the output register
-*   since that's the method Quake uses.
-*
-*   The code also had to be changed for CRC16, which is slightly harder
-*   since the CRC32 method in the original Intel paper used a different
-*   bit order convention.
-*
-* Notes about the table:
-*   - It's exactly 4K in size
-*   - 64 elements fit in a cache line
-*   - can do 8 iterations unrolled 8 times for free
-*   - The first 256 elements of the table are standard CRC16 table
-*
-* Table can be generated with the following utility:
-*/
 #if 0
 #include <stdio.h>
 #include <stdint.h>
@@ -195,13 +164,6 @@ int main(void) {
     return 0;
 }
 #endif
-/*
- * Non-Reflective version is present as well as a reference.
- *
- * TODO:
- *  combine the crc16 into u32s and mask off low high for byte order
- *  to make the arrays smaller.
- */
 
 static const uint16_t util_crc16_table[8][256] = {{
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
@@ -469,15 +431,12 @@ static const uint16_t util_crc16_table[8][256] = {{
     0x5357, 0x1484, 0xDCF1, 0x9B22, 0x5C3A, 0x1BE9, 0xD39C, 0x944F
 }};
 
-/* Non - Reflected */
 uint16_t util_crc16(uint16_t current, const char *GMQCC_RESTRICT k, size_t len) {
     uint16_t h = current;
 
-    /* don't load twice */
     const uint8_t *GMQCC_RESTRICT data = (const uint8_t *GMQCC_RESTRICT)k;
     size_t n;
 
-    /* deal with the first bytes as bytes until we reach an 8 byte boundary */
     while (len & 7) {
         h = (uint16_t)(h << 8) ^ (*util_crc16_table)[(h >> 8) ^ *data++];
         --len;
@@ -502,17 +461,12 @@ uint16_t util_crc16(uint16_t current, const char *GMQCC_RESTRICT k, size_t len) 
     #undef SELECT_BULK
     #undef SELECT_DATA
 
-    /* deal with the rest with the byte method */
     for (n = len & 7; n; --n)
         h = (uint16_t)(h << 8) ^ (*util_crc16_table)[(h >> 8) ^ *data++];
 
     return h;
 }
 
-/*
- * modifier is the match to make and the transposition from it, while add is the upper-value that determines the
- * transposition from uppercase to lower case.
- */
 static size_t util_strtransform(const char *in, char *out, size_t outsz, const char *mod, int add) {
     size_t sz = 1;
     for (; *in && sz < outsz; ++in, ++out, ++sz) {
@@ -675,10 +629,6 @@ bool util_isatty(FILE *file) {
 }
 #endif
 
-/*
- * A small noncryptographic PRNG based on:
- * http://burtleburtle.net/bob/rand/smallprng.html
- */
 static uint32_t util_rand_state[4] = {
     0xF1EA5EED, 0x00000000,
     0x00000000, 0x00000000
@@ -724,4 +674,3 @@ size_t hash(const char *string) {
     hash += hash << 15;
     return hash;
 }
-

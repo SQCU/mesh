@@ -86,7 +86,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] B11 The CGT evaluator RESOLVES on real server states — 0/228 → 228/228 (R25)
 
 ### C. The strategy operator (the linear algebra)
-- [x] C1 **Gram + SwiGLU, NOT softmax attention** (R24)
+- [x] C1 **Gram-matrix fusion + SwiGLU, NOT softmax attention** (R24)
 - [x] C2 **Wide IR ≥128d** (R24)
 - [x] C3 Irreducibly all-to-all O(n²) learned coupling landing IN the IR (R24)
 - [x] C4 DPP `diag(K)` marginal-inclusion signal, differentiable (custom vjp) (R10)
@@ -109,9 +109,9 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] D7 **CartSim deleted** — no fake re-simulation anywhere (R24)
 - [x] D8 Curriculum over maps / team counts / player counts / cart counts (R25)
 - [x] D9 Interruptible & resumable — handled stop restores weights, optimizer, counters, and replay (R9, R32)
-- [ ] D10 Acceptance matrix on the SERVER: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
+- [ ] D10 Server transition measure matrix: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
-- [x] D12 Checkpoint/architecture integrity — fingerprint + strict load, legacy ckpt refused (R24)
+- [x] D12 Checkpoint/architecture integrity — fingerprint + strict load, mismatch loudly reinitializes a complete model (R24)
 - [x] D13 **Replay buffer of hundreds–thousands of featurized states, reused across the losses** (R24)
 
 ### E. Observation / featurization (the map-reduce)
@@ -124,7 +124,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] E7 Belief is per-bot; there is no "team belief" (R4)
 - [x] E8 Enemy positions featurized ONLY through observation (R5)
 - [x] E9 **Full per-player resource state ENTERS the matmul** — input rank 4 → 33 (R24)
-- [x] E10 Per-player rows, `z` descriptors and relation rows are LOGGED on real runs (R25)
+- [x] E10 Per-player rows, `z` descriptors, hierarchy, eligibility and integrated weights are LOGGED on real runs (R25)
 - [x] E11 The canonical `featurize.py` belief pipeline exists and is the one that runs (R24)
 
 ### F. Playerbot interface (the WHAT/HOW boundary)
@@ -142,7 +142,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] G4 Prominence rule: exclusive objective entrances conspicuous; connectors may be subtle (R15)
 - [x] G11 Procedural geometry — 56 doorways CUT into stock map brushwork (R28)
 - [x] G12 Connectivity solvers + metrics over solid occupancy — proxies DELETED with mapfuse; measured on the oracle (R35)
-- [x] G13 Viewers that CATCH a broken fusion offline — joinshot 6/6 real frames + void audit; pre-compile catch in 1.4 s (R35)
+- [x] G13 Offline rendered-fusion measures — joinshot 6/6 real frames + frame visual distributions; pre-compile geometry measurement in 1.4 s (R35)
 - [x] G14 **Placement is real: suitability selection + bridge/stub taxonomy + 3D bin pack + geometry edit; refusal deleted** (R28)
 - [x] G5 Stock-navmesh compliance; no project-specific bot nav graph (R12)
 - [x] G15 **A world-space geometry oracle over the ASSEMBLED fused world (solid/trace/clearance/standable)** — `negspace`, two entry points, one law (R35)
@@ -188,14 +188,14 @@ featurize, live_belief, dpp, online, train, strat_responder)
 2. E11/E3 — restore canonical `featurize.py` (705 lines at HEAD), delete the inlined
    substitute in `live_belief.py:162-273`, route the live path through the canonical
    functions, enforce the 5–15% receptive-field bound.
-3. C1/C2 — delete the softmax-attention operator; implement the all-to-all **Gram**
+3. C1/C2 — delete the softmax-attention operator; implement the all-to-all **Gram-matrix fusion**
    + SwiGLU at **IR ≥128d**, differentiable end-to-end, count-invariant, O(n²), with
-   the Gram output landing IN the IR the probes consume.
+   the matrix-fused coupling output landing IN the IR the probes consume.
 4. C12/D2 — value heads become actual **linear** probes on the final IR (still two
    asymmetric role-gated heads, still per-row scalar).
 5. D7 — delete `CartSim` and every importer.
-6. D12 — architecture fingerprint in checkpoints; loud refusal instead of silent
-   `strict=False` partial loads.
+6. D12 — architecture fingerprint in checkpoints; loud complete reinitialization
+   instead of silent `strict=False` partial loads.
 
 **Track 2 — engine data path + world** (QC strategy IO, tools, game_value,
 curriculum, instruments)
@@ -259,11 +259,11 @@ edge-triggered events into a contiguous event-carrier pool. No omniscient
 real event volume on a live match is not yet quoted.
 
 ### R6 — 2026-08-30 — B8, B9, B10: partial → full
-`E:code` `xonotic/solver/strat/game.py` + `game_value.py`: `nim_sum` XOR-reduce,
+`E:code` `xonotic/solver/strat/game_value.py`: impartial-component XOR reduction,
 `team_nimbers`, `projected_winner` (PW), `succession` (SUCC by repeated
-decrement of the leader's deepest cart). `game_value.evaluate` returns
-`"partizan"` / `"unresolved"` where a Grundy value does not exist. Verified on
-this host: `nim_sum([1,1]) = 0`, one d:2 cart beats two d:1 carts.
+decrement of the leader's deepest cart). `GameValue.nimber` is null for partizan
+or incompletely enumerated reachable options. Verified on
+this host: the XOR of `[1, 1]` is zero, while one depth-two cart beats two depth-one carts.
 
 ### R7 — 2026-08-30 — C5 full; C8 partial
 `E:code` `head.py` emits `dw/dt`; the weight state is integrated at the strategy
@@ -310,7 +310,7 @@ the differentiability, count-invariance and wiring facts are `E:code` and stand.
 > sure a gram matrix and a swiglu were described earlier
 
 `relattn.py` (commit `97c4bf5`) computes `A = softmax(QKᵀ/√d + φ_rel(E))` — a
-softmax-attention operator, not a Gram. It was introduced by the coordinator's
+softmax-attention operator, not a Gram matrix. It was introduced by the coordinator's
 prompt, not by the SPEC. C1 zeroed. SPEC §8 also:
 
 > how wide did you think the hidden states were supposed to be for this? under
@@ -319,7 +319,7 @@ prompt, not by the SPEC. C1 zeroed. SPEC §8 also:
 Present width is `d_row ≈ 16`, so C2 zeroed and A6 (SoC saturation) is blocked
 behind it. E6 zeroed: `live_belief.py` re-implements `featurize.py`'s belief
 pipeline inline, leaving `featurize.egocentric_integration` / `temporal_contraction`
-/ `belief` dead — reported, not collapsed. Recovery route: implement the Gram +
+/ `belief` dead — reported, not collapsed. Recovery route: implement the Gram-matrix fusion +
 SwiGLU at ≥128d and route the live path through the canonical featurizer.
 
 ### R12 — 2026-08-30 — B2, F1, F2, F5, G5 full; F3, F4 partial; I4
@@ -343,7 +343,7 @@ CartSim-derived numbers in commits `de18d7a`, `a9a24fe`, `97c4bf5` are hereby
 marked INADMISSIBLE as evidence. D7 (delete CartSim) is unattended.
 
 ### R14 — 2026-08-31 — A6 → partial
-`E:proof` The compute-shape argument: a Gram over all player rows is a large
+`E:proof` The compute-shape argument: a Gram matrix over all player rows is a large
 bandwidth-bound matmul, the shape that saturates a mesh of M-series SoCs; a deep
 serial stack is latency-bound and cannot. At the present IR width (~16d) the op
 is far too small to saturate anything, so A6 cannot exceed `[~]` until C2 lands.
@@ -381,10 +381,11 @@ measurement of the IR (C11) and a per-subcomponent status audit of megamap use,
 long-distance traversal and the observation map-reduce (G2, G3, E3–E5).
 
 ### R19 — 2026-08-31 — C11, D2 → zeroed; C12, B11, E9, E10, D12 opened
-`E:run` The j-space measurement (`runs/jspace_probe.json`, `design/jspace-probe.md`),
-228 real Game-2 lines / 3150 player-rows, ridge probes, 60/40 split, no CartSim.
+`E:run` The retired pre-contract j-space snapshot, summarized in the revision record
+and superseded by `design/jspace-probe.md`, used 228 real Game-2 lines / 3150
+player-rows, ridge probes, a 60/40 split, and no CartSim.
 
-Verdict **NO — there is no semantically-rich j-space.** The shuffled-label control
+The measured induced-coordinate mass was **zero**. The shuffled-label control
 passes everywhere (the probes are honest), but **nothing beats the
 random-projection control on any non-tautological target**, and where the IR does
 beat raw inputs the trained and random-init encoders agree to three decimals:
@@ -419,7 +420,7 @@ B11 opened: `game_value` returned `{"kind":"unresolved","nimber":null,"reason":
 during the real run.
 
 D12 opened: every checkpoint on disk is architecture-stale w.r.t. the local tree
-(GramSwiGLU/`X_WIDTH=48`/`d=128` locally vs `relattn`/`d=16` on the mini), and
+(MatrixFusionSwiGLU/`X_WIDTH=48`/`d=128` locally vs `relattn`/`d=16` on the mini), and
 `OnlineLearner._load_full` uses `load_weights(..., strict=False)` — a 128d rewrite
 would **silently** "resume" from a 16d checkpoint restoring almost nothing.
 
@@ -478,7 +479,7 @@ HEAD** (`segment_vcells:216`, `temporal_contraction:473`,
 **27 lines** (stage-4 `spatial_mask` only); a repo-wide grep for `egocentric` now
 hits only a docstring in `joinshot.py` (E11).
 
-The audit's own risk verdict, recorded verbatim as the reason E-group states move:
+The audit's own risk measures, recorded verbatim as the reason E-group states move:
 
 > **#5, the observation map-reduce.** It is the only one where the file that *is*
 > the spec was deleted from the worktree while an unreviewed hand-inlined
@@ -633,10 +634,11 @@ time on real geometry: support radius 0.0 → 0.641 — an OUTPUT of a bisection
 constant — with the all-cell median receptive fraction inside [5%,15%] on 62/62
 ticks.** Full pipeline over 62 ticks in 0.61 s, so it is affordable at live cadence.
 
-**C1/C2/C3.** `gram.py`: `G = (ZA)(ZA)ᵀ/d + E·w_rel` — `Z M Zᵀ` with a learned PSD
-metric plus an additive bilinear relation term. No softmax anywhere; `relattn.py`
-deleted; `GramSwiGLU` raises below 128d. The Gram lands IN the IR (perturbing
-`w_metric` moves it by 3.02, `w_rel` by 2.67) and the reward gradient reaches it.
+**C1/C2/C3.** The superseding matrix-fusion operator constructs an exact participant
+Gram matrix from the direct sum of rival-projection rows and team-one-hot tensor
+team-projection rows. Thus `C = G_rival + same_team * G_team`; no hand-authored relation
+term or softmax remains. The coupling matrix lands in the IR and the reward gradient
+reaches both learned metric factors.
 Count-invariance across 62 real states × 51 instrument counts and n∈{2,3,5,8,12}:
 shapes and object identity constant. Renormalizing by `d` instead of `√d` was
 required — at 128d the old scaling overflowed the DPP inverse (`LU factorization
@@ -683,8 +685,8 @@ stand-in rather than literally fusing contiguous *navigable* paths.
 resource state "never entered the matmul". That inference was **wrong**. The run-era
 responder did call `state_with_observations(...)`; what actually happened is that the
 j-space probe *reconstructed* `x` from the telemetry log, and
-`runs/jspace_probe.py:47` hardcoded `0,0,0,0,0,0,0,0  # x[8:16] health/armor/ammo/...:
-NOT LOGGED`. **The rank-4 input was an artifact of the reconstruction, not the model's
+the retired probe hardcoded zeros for the unlogged health, armor, ammunition, and
+related coordinates. **The rank-4 input was an artifact of the reconstruction, not the model's
 input.** E9 was a LOGGING failure (E10), not a wiring failure. R19's other findings —
 trained≈random-init, the MLP-not-probe deviation, the 228/228 `unresolved` CGT, the
 `strict=False` hazard — stand. R19 is left unedited per the append-only rule; this
@@ -715,7 +717,7 @@ options complete only via `observe_terminal` — i.e. only on delivery. No cart 
 delivered in 18.4 s, so it was pricing a graph with no edges (worsened by the zeroed
 cart rows). A closed-form cart option graph was added: a **neutral** cart is impartial
 (cylinder occupancy lets any team move it) and backward induction **derives** its
-Grundy value as `r = levels − depth`, so `game.py`'s nim-sum is now *proved rather than
+Grundy value as `r = levels − depth`, so `game_value.py`'s XOR reduction is now *proved rather than
 asserted*; a **controlled** cart is partizan (Regime A/B give holder and opponents
 different moves) and gets **no nimber**. Real result on the 228 lines:
 `{"impartial": 147, "partizan": 81}`, `nimbers {8: 147}` — the 81 partizan lines are
@@ -805,12 +807,12 @@ mini has exactly one interpreter, Python 3.9.6", and removed the `strict=True`. 
 was an excuse based on a dependency. The owner's standing rule is uv for all Python
 environment management, and **uv was already installed on the mini** at
 `~/.local/bin/uv` (v0.12.6) — it simply is not on the non-interactive ssh PATH, and
-`~/.venv-mesh` had been built on Apple CommandLineTools Python 3.9.6:
+The legacy environment had been built on Apple CommandLineTools Python 3.9.6:
 
     home = /Library/Developer/CommandLineTools/usr/bin
     version = 3.9.6
 
-Fixed properly: `uv venv --python 3.12 ~/.venv-mesh-uv` + `uv pip install mlx numpy`
+Superseded by the locked `/usr/local/mesh/.venv` runtime realized by `install.sh`.
 → **Python 3.12.14, mlx 0.32.2, numpy 2.5.2**, GPU matmul verified, `zip(strict=)`
 available. Every launch path in `joracle/demo.sh` switched off the system-python venv
 onto the uv env. The rule going forward: an environment limitation is a thing to fix,
@@ -870,7 +872,7 @@ corridor median 4791 → **3295** (31% shorter) with the long tail now visible r
 than capped. Placement door-gap objective 190995 → 117234 (38.6%).
 
 **Evidence.** Per-doorway camera pairs (inside looking at the new opening in the host
-map's own wall; outside looking back at the facade): **42/42 frames, void audit PASS** —
+map's own wall; outside looking back at the facade): **42/42 frames observed, zero missing** —
 `p04_erbium_continue_in.png`, `p11_geoplanetary_newcut_in.png`,
 `p01_silentsiege_continue_out.png` read as architecture. Real boot: stock
 `darkplaces-dedicated` on port 26071, 29 tiles / 166 MB BSP, 3 carts pathed
@@ -925,7 +927,7 @@ running on the mini are still executing under system Python:
 
     /Library/Developer/CommandLineTools/.../Python3.framework/Versions/3.9/... -m solver.strat.strat_responder
 
-`demo.sh` was switched to `~/.venv-mesh-uv`, but the already-running responders predate
+`demo.sh` was switched to `mesh-python`, but the already-running responders predate
 the edit and nothing restarted them. The environment is created and verified; the
 running system does not reflect it. Same error class as the rest of this stretch —
 reporting a change instead of verifying the live system reflects it.
@@ -962,7 +964,7 @@ stacked levels.
 
 **G15 — the missing tool, and the pattern it names.** EVERY fusion validator works on
 a proxy rather than on the assembled geometry: `solid_brush_at` is source-space; the
-void audit answers "is the screen black"; the flood-fill answers waypoint-graph
+frame void-fraction distribution measures how black the screen is; the flood-fill reports waypoint-graph
 connectivity; joinview measures path length; fusegraph measures abstract topology.
 **Nothing can answer "is this point, in the assembled fused world, inside geometry?"**
 So G12 and G13 are demoted to `[~]`: they measure real things, but not the thing that
@@ -1001,7 +1003,7 @@ R30 named the proxy pattern and demoted G12/G13 to `[~]`. That was still the wro
 disposition, and it repeats a ruling already made this session ("delete incorrect
 branches entirely"): a stand-in kept beside the correct mechanism is the same defect
 with a label on it, and something trusts it again later. My oracle brief compounded it
-by saying "keep the existing render/void audit and flood-fill, but they are now
+by saying "keep the existing frame measures and flood-fill, but they are now
 secondary".
 
 Corrected instruction to the oracle work: **delete** the source-space in-solid spawn
@@ -1012,8 +1014,8 @@ both the 75 GB unguarded-`range()` loop and phantom "no floor" violations on cle
 corridors); delete hand-rolled corridor tube sampling in favour of oracle
 `trace`/`clearance`. **Exactly one definition of solidity may exist afterwards.**
 
-The render/void audit and the flood-fill survive only under their true names — "the
-world renders non-black" and "the waypoint graph is one component" — and may not be
+The render distributions and the graph component measure survive only under their true names —
+"frame void fraction and color-level count" and "waypoint-graph component mass" — and may not be
 cited as evidence that geometry is correct, nor gate any spawn / cart-node / doorway /
 connector decision. G12 and G13 therefore go to `[ ]`: they are not partially-done, they
 are to be rebuilt on the oracle.
@@ -1215,7 +1217,7 @@ and the map boots with a tile missing.** This, not decompile fidelity, was
 **Bots cross (G1).** 35/35 points along the channel with 0 gaps, one navmesh
 component, a 6-waypoint 1,891 u crossing path with 6/6 fit.
 
-**Frames (G13).** joinshot 6/6, void audit PASS. Four stacked causes: the dummy SDL
+**Frames (G13).** joinshot observed 6/6 frames with zero missing or unreadable. Four stacked causes: the dummy SDL
 driver has no GL and `vid_soft`'s surface is SDL 1.2 API in an SDL 2.32.70 binary,
 so it died before any map loaded; it launched the STOCK Xonotic.app, which lacks
 builtin #656 and died on connect with an identical "0 frames" symptom; that binary
@@ -1223,7 +1225,7 @@ needs `-xonotic`; and the build has no PNG writer, so screenshots were TGA.
 
 **Method notes, all of them corrections to how this was measured.**
 - *File size cannot grade a frame.* 320x200x24 TGA is 192,018 bytes every time,
-  content-independent. The acceptance criterion "sized like the samples" could not
+  content-independent. The coordinate "sized like the samples" could not
   have told a black frame from a good one. Void-fraction + level-count replaces it.
 - *Which binaries EXIST is not which binary RAN.* Checking the tree found one
   client; joinshot was launching a fourth outside it. Any tool launching a client
@@ -1301,3 +1303,186 @@ inventory, on the grounds that nothing referenced it — which is an argument ab
 callers, not about contents. It was recoverable from git and turned out to carry
 nothing unique, but that was luck. Read a program's symbols before deleting it;
 "nothing imports it" does not mean "it does nothing".
+
+### R37 — 2026-09-01 — the native bot tick has an active V-cell plan; all 30 cart maps pass
+
+The strategy response decoder has an atomic typed commit, but the matrix-fusion/MoE strategy is
+a global computation and is not a causal player scheduler. An earlier worktree-only
+Python `VCellPlan` merely permuted completed response rows and inverted the permutation;
+it never established the tick-loop requirement. Its absence from live use was evidence
+of unfinished integration, not evidence that the requirement should be deleted.
+
+The active implementation now lives at the engine boundary that owns bot controller
+updates. `StartFrame` opens one batch and advances `bot_think` for every bot before
+DarkPlaces invokes the per-client `SV_PlayerPhysics` callbacks. Native `VCellPlan`
+derives three-dimensional cells and a causal radius from live hull dimensions, speed,
+and frame time, and compacts the occupied color waves. The radius covers the two-sided
+controller-output horizon; perception does not expand it to a map-scale enemy-search
+radius. Every world-aware bot decision runs once under ordinary ordered QuakeC semantics
+and deposits a complete row when its pure keyboard transform is due. Fourteen input
+coordinates per row scatter into the native structure-of-arrays working sets and nine
+output coordinates per row stable-gather at the barriers. The transform uses
+compiler-selected SIMD with no fixed row ceiling or invented lane width. Shared player
+physics and combat remain after the controller barriers in `StartFrame`.
+
+This completes the player/controller scatter-gather boundary without pretending the QC VM
+itself is multithreaded or that copying its float fields rolls back RNG, traces, entity
+allocation, and world links. `[VCELLMERGE]` exposes input coordinates, output coordinates,
+and row-buffer bytes; `[BOTWARP]`, `[VCELL]`, and `[BOTQC]`
+expose working sets, barriers, rows, SIMD rows, and scalar fallback mass. Native release
+and QC builds establish the composed interface; live measures establish its realized
+population and cost.
+
+The corrected live 16-bot measurement formed 12 working sets over 16 occupied cells,
+reached a three-row working set, and derived a two-cell causal radius from a 69-unit cell
+extent. Once controller staging was active, 13 rows entered the vector kernel and its
+cumulative staged mass reached 392 while scalar and fallback mass remained zero. That
+earlier actor/client-only transaction copied 7,533,008 bytes but did not capture the
+engine-owned state needed for a valid transaction, so the row-buffer measurement
+supersedes its coordinate and byte totals. The earlier 145-cell radius was the
+enemy-detection distance mistakenly
+used as a same-tick write horizon; it is no longer part of the scheduler interface.
+
+The fused-map failure was not bad geometry. The negative-space cache retained convex
+free cells but discarded the compiled BSP's blocking-brush index. Point traces remained
+right, while swept cart hulls were incorrectly required to fit within one arbitrary BSP
+leaf; fusion repartitions those leaves, so valid source paths became false “burrows.”
+The cache now persists and restores the engine-equivalent blocker index. A swept query
+over 150–180k free-cell rows fell to roughly 0.2–0.3 ms against nearby solid brushes,
+and all nine transformed segments of the four accepted runningmanctf tracks agree
+between source and fused coordinates.
+
+The real fused measurement artifact now reports 8 teams, 4 carts, grounded path lengths
+1,105 / 1,246 / 1,246 / 752, four distinct origins separated by 4,371 units, zero
+head-on flow, and 240 unbiased generic spawns with 560 units minimum cart clearance.
+Together with the prior artifacts, 30/30 selectable maps report `advanceable`,
+`winnable`, `spawn_unbiased`, and `headon_free` true.
+
+The existing live 26042 process supplies the gameplay-scale evidence that was previously
+missing. Its current process has run for nearly three hours with 255 bots plus the
+observer, 256 configured teams, 32 carts all reporting support, and no `Host_Error`,
+SVQC object error, or network-buffer overflow in that process. All 256 team indices were
+exercised in two map windows; four completed matches were won by teams 220, 99, 97, and
+145. Eight map windows account for at least 9,017 simulated seconds over 10,656 wall
+seconds (84.6%) while one host core stays approximately 97% occupied. This proves the
+gameplay/protocol/spawn/cart scale, while also measuring the remaining serial-controller
+cost rather than hiding it.
+
+This closes static map validity and functional approximately-256-player gameplay. It
+does not close the causal strategy study: that live process has no responder and no
+`[PLCBARRIER]` commits. Realized matrix-fusion-vs-FFN-vs-linear-vs-default behavior/Elo evidence
+and a measured two-host run proving the remote expert is both executed and required for
+the planning deadline remain outstanding while the Mini is partitioned.
+
+### R38 — 2026-09-01 — metrics replace the removed harnesses; population sampling becomes hardware-driven
+
+All repository test programs, fixtures, embedded QC cases, compiler suites, build
+targets, cached bytecode, and generated test maps are deleted. Runtime measurements,
+held-out policy study records, map state measurements, health endpoints, and
+telemetry remain because they report the behavior of the shipped system rather than a
+parallel harness.
+
+The strategy curriculum no longer allocates `maxplayers` from the initial roster. It
+reads the engine's compiled `MAX_SCOREBOARD`, starts at one live participant quantum per
+team, doubles only to find a hardware boundary, and bisects the observed interval. Each
+point comes from the existing in-memory telemetry publishers on every meshed node. A
+point has a complete distance coordinate when every node publishes deadline-bearing
+work; the target center minimizes squared distance to minimum-node roofline saturation,
+the MacBook whole-machine bandwidth envelope around 50 percent, deadline load, and role
+mass. Runtime population changes happen through `sv_cmd setbots`
+while the server is running, so later human or bot connections are not excluded
+by the initial process command.
+
+Team and cart lists now seed only the first cycle. Each later cycle takes the
+minimum-distance whole-mesh observation and samples half/center/double neighborhoods
+around its team and cart counts, bounded by the compiled `NUM_TEAMS` and
+`PLC_MAX_CARTS`. The player seed becomes the measured admitted count per team. Thus all
+three axes move around measured hardware pressure rather than returning forever to a
+number written before the run.
+
+The distributed evaluator previously labeled the Mini responder
+`joracle_distributed_evaluation` while its MacBook expert silently published
+`game2_server`, and the expert published no deadline. The whole-mesh reporter could
+therefore never join the two halves into one complete-coordinate observation. Both halves now use
+one launch identity and the shared strategy cadence supplies both deadline records.
+
+At closure time both nodes are connected, reachable, and sampled by the 8787 reporter,
+with no unavailable telemetry node. No strategy producer is running, so achieved
+workload FLOP/byte rates correctly remain unavailable rather than being inferred from
+unrelated host activity. The next release evidence is the adaptive distributed run and
+the mirrored matrix-fusion/FFN/linear/default perturbation study; no fixed roster result can close
+either obligation.
+
+### R39 — 2026-09-01 — the strategy study exposes surrogate mass directly
+
+Distributed scale is now a match-owned service rather than an undocumented prerequisite.
+The curriculum starts the expert on the game host before the server, stages the current
+solver and RDMA runtime when that host is remote, keeps its checkpoint identity aligned
+with the responder, records its artifacts and health, and visibly restarts it after an
+exit. Node routing reverses automatically when the game host is remote. A held-out matrix-fusion
+record retains the local-fallback call mass, executed rank, top-k MoE row mass, padded
+physical row mass, and the distinct host identities from the whole-mesh 8787 artifact.
+No record is removed from the study for any value of those coordinates.
+
+The hardware necessity claim is measured rather than inferred from model size. At a
+sparse live cadence, after the game response has already been returned, the responder
+runs the same rows and checkpoint through the local scale operator, compares its output
+to the remote output with a tolerance derived from float32 epsilon and the learned
+widths, and substitutes that measured duration for all remote calls in the measured
+plan. The report retains distributed deadline slack and observed all-local-substitution
+slack as separate signed measures.
+
+The causal study now schedules every mirrored base-arm pair and reports the adjacent
+matrix-fusion/FFN, FFN/linear, and linear/default score differences with realized attack, damage,
+and competition-utility lifts under every perturbation family. It also schedules a
+same-checkpoint participant-fusion and residual-fusion interventions whose only behavioral changes are independently zeroed
+participant and residual-feature Gram-matrix contributions. Its realized outcomes and the
+same aggression/robustness measurements remain parallel coordinates.
+
+Map measurement schema 7 emits shared team incidence, finite-route mass, median and
+first-claim ratios, per-spawn ratios, cart-origin clearance,
+spawn-approach-plus-cart traversal distributions, rider-gap mass, per-cart path atoms,
+and per-team objective incidence. Fast, slow, and
+volatile perturbations now vary spawn-wave cadence, population-derived respawn regimes,
+and pusher dropoff as well as cart dynamics, so robustness is not a synonym for surviving
+one ruleset.
+
+Both nodes are currently live in the reporter, but the MacBook is simultaneously carrying
+multiple unrelated 90–136% CPU jobs, 44% GPU residency, and desktop/audio work. No release
+workload was launched into that condition. Until live producers exist, R39 is an
+implementation closure and the distributed empirical sample mass remains zero rather
+than being manufactured from static checks.
+
+### R40 — 2026-09-01 — one distributed release owner, self-realizing remote game host
+
+`evaluate-distributed.sh` no longer stages checkpoints and independently launches an
+expert and a responder without a game. It resolves the live Mini address and execs the
+curriculum, which is now the only owner of build, map catalog, game, expert, responder,
+population sampling, training, mirrored study, artifacts, and restart transitions.
+
+The remote boundary accepts one SSH command and uses it uniformly for process control,
+rsync, game launch, expert launch, and TERM. The Mini needs no pre-existing checkout:
+each match moves its remote runtime toward current intent by incrementally staging the
+dedicated engine, complete local Xonotic data path, match userdir, solver, payload schema,
+RDMA client runtime, and any active matrix-fusion checkpoint. Nothing is indexed by commit.
+
+The expert relay's Unix socket is fixed by the engine, so its ownership is fixed too.
+One stable PID file now spans match directories. Before each launch and after each match,
+the curriculum verifies that PID's command, sends TERM, and waits for the worker's normal
+teardown. A supervisor crash can therefore leave recoverable state, not a worker that
+permanently occupies the socket outside the next supervisor's accounting.
+
+The capacity reader now treats the compiled `MAX_SCOREBOARD`, `NUM_TEAMS`, and
+`PLC_MAX_CARTS` values as ceilings instead of taking the maximum of those values and a
+requested roster. `auto` discovers the 30 engine-selectable maps; `_hudsetup` remains
+explicitly runnable but its authored `forbidden` and `noautomaplist` declarations no
+longer inject it into payload calibration or held-out study. The estimator's baseline
+kind and descriptor widths now come from the canonical instrument schema rather than a
+duplicated action-count literal.
+
+At this closure the 8787 fabric record contains both nodes, no stale or unavailable
+node, zero strategy producers, and zero claimed strategy rows. The MacBook remains busy
+with unrelated transformer, WebKit GPU, bridge, and window-server work; the Mini reports
+one fully occupied performance cluster. The distributed release has therefore not been
+started into the user's audio/render deadline. Its empirical workload mass remains the
+next state transition, not a static claim.

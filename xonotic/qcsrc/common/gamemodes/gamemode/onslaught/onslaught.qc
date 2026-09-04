@@ -17,7 +17,7 @@ NET_HANDLE(ENT_ONSCAMERA, bool isnew)
 	this.angles = ReadAngleVector();
 
 	this.drawmask  = MASK_NORMAL;
-	setmodel(this, MDL_Null); // give it a size for clientcamera
+	setmodel(this, MDL_Null);
 	setsize(this, '-1 -1 -1', '1 1 1');
 
 	generator_camera = this;
@@ -42,7 +42,7 @@ MUTATOR_HOOKFUNCTION(cl_ons, WantEventchase)
 			break;
 		});
 		if(!gen)
-			ons_roundlost = false; // don't enforce the 3rd person camera if there is no dead generator to show
+			ons_roundlost = false;
 	}
 
 	if(ons_roundlost)

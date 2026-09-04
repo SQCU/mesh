@@ -4,21 +4,19 @@
 #include <client/draw.qh>
 #include <client/view.qh>
 
-// Timer (#5)
-
 void HUD_Timer_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 }
 
 vector HUD_Timer_Color(float timeleft)
 {
 	if(timeleft <= 60)
-		return '1 0 0'; // red
+		return '1 0 0';
 	else if(timeleft <= 300)
-		return '1 1 0'; // yellow
+		return '1 1 0';
 	else
-		return '1 1 1'; // white
+		return '1 1 1';
 }
 
 float HUD_Timer_TimeElapsed(float curtime, float starttime)
@@ -71,45 +69,36 @@ void HUD_Timer()
 	vector subtimer_color = '1 1 1';
 	bool swap = (autocvar_hud_panel_timer_secondary == 2 && STAT(ROUNDSTARTTIME));
 
-	// Use real or frozen time and get the time limit
 	curtime = (intermission_time ? intermission_time : time);
 	timelimit = (warmup_stage ? STAT(WARMUP_TIMELIMIT) : STAT(TIMELIMIT) * 60);
 
-	// Calculate time left
 	timeleft = HUD_Timer_TimeLeft(curtime, STAT(GAMESTARTTIME), timelimit);
 
-	// Timer color
 	if(!intermission_time && !warmup_stage && timelimit > 0)
 		timer_color = HUD_Timer_Color(timeleft);
 
-	// Timer text
 	if (autocvar_hud_panel_timer_increment || timelimit <= 0)
 		timer = HUD_Timer_TimeElapsed(curtime, STAT(GAMESTARTTIME));
 	else
 		timer = timeleft;
 
-	// Secondary timer for round-based game modes
 	if(STAT(ROUNDSTARTTIME) && autocvar_hud_panel_timer_secondary)
 	{
 		if(STAT(ROUNDSTARTTIME) == -1) {
-			// Round can't start
+
 			subtimer_str = "--:--";
 			subtimer_color = '1 0 0';
 		} else {
 			float round_curtime, round_timelimit, round_timeleft;
 
-			// Use real or frozen time and get the time limit
 			round_curtime = (game_stopped_time ? game_stopped_time : time);
 			round_timelimit = STAT(ROUND_TIMELIMIT);
 
-			// Calculate time left
 			round_timeleft = HUD_Timer_TimeLeft(round_curtime, STAT(ROUNDSTARTTIME), round_timelimit);
 
-			// Subtimer color
 			if(!intermission_time && round_timelimit > 0)
 				subtimer_color = HUD_Timer_Color(round_timeleft);
 
-			// Subtimer text
 			if (autocvar_hud_panel_timer_increment || round_timelimit <= 0)
 				subtimer_str = seconds_tostring(HUD_Timer_TimeElapsed(round_curtime, STAT(ROUNDSTARTTIME)));
 			else
@@ -117,7 +106,6 @@ void HUD_Timer()
 		}
 	}
 
-	// Subtext
 	int overtimes = STAT(OVERTIMES);
 
 	if(warmup_stage || autocvar__hud_configure)
@@ -126,7 +114,7 @@ void HUD_Timer()
 			subtext = _("Warmup");
 		else
 		{
-			Scoreboard_UpdatePlayerTeams(); // ensure numplayers is current
+			Scoreboard_UpdatePlayerTeams();
 			if (srv_minplayers - numplayers > 0)
 				subtext = _("Warmup: too few players");
 			else

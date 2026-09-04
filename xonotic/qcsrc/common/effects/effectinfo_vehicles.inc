@@ -41,7 +41,7 @@ SUB(spiderbot_minigun_muzzleflash) {
     MY(velocityjitter) = '150.0 150.0 150.0';
     MY(velocitymultiplier) = 0.350000;
 }
-// fire
+
 SUB(spiderbot_minigun_muzzleflash) {
     MY(airfriction) = 12;
     MY(alpha_min) = 256;
@@ -104,7 +104,7 @@ SUB(spiderbot_minigun_impact) {
     MY(tex_max) = 65;
     MY(type) = "static";
 }
-// fire
+
 SUB(spiderbot_minigun_impact) {
     MY(airfriction) = 6;
     MY(alpha_min) = 256;
@@ -128,7 +128,7 @@ SUB(spiderbot_minigun_impact) {
     MY(velocityjitter) = '250.0 250.0 150.0';
     MY(velocitymultiplier) = 0.200000;
 }
-// smoke
+
 SUB(spiderbot_minigun_impact) {
     MY(airfriction) = 10;
     MY(alpha_min) = 50;
@@ -148,7 +148,7 @@ SUB(spiderbot_minigun_impact) {
     MY(velocityjitter) = '100.0 100.0 250.0';
     MY(velocitymultiplier) = 0.490000;
 }
-// smoke 2
+
 SUB(spiderbot_minigun_impact) {
     MY(airfriction) = 6;
     MY(alpha_min) = 25;
@@ -167,7 +167,7 @@ SUB(spiderbot_minigun_impact) {
     MY(velocityjitter) = '250.0 250.0 150.0';
     MY(velocitymultiplier) = 0.200000;
 }
-// debris
+
 SUB(spiderbot_minigun_impact) {
     MY(airfriction) = 0.400000;
     MY(alpha_min) = 644;
@@ -192,7 +192,7 @@ SUB(spiderbot_minigun_impact) {
     MY(velocityjitter) = '124.0 124.0 224.0';
     MY(velocitymultiplier) = 0.150000;
 }
-// decal
+
 SUB(spiderbot_minigun_impact) {
     MY(alpha_min) = 256;
     MY(alpha_max) = 256;
@@ -222,7 +222,7 @@ SUB(spiderbot_rocket_explode) {
     MY(tex_max) = 16;
     MY(type) = "decal";
 }
-// shockwave
+
 SUB(spiderbot_rocket_explode) {
     MY(alpha_min) = 56;
     MY(alpha_max) = 56;
@@ -237,7 +237,7 @@ SUB(spiderbot_rocket_explode) {
     MY(tex_max) = 33;
     MY(type) = "static";
 }
-// glow
+
 SUB(spiderbot_rocket_explode) {
     MY(alpha_min) = 156;
     MY(alpha_max) = 156;
@@ -252,7 +252,7 @@ SUB(spiderbot_rocket_explode) {
     MY(tex_max) = 64;
     MY(type) = "static";
 }
-// fire effect
+
 SUB(spiderbot_rocket_explode) {
     MY(airfriction) = 8;
     MY(alpha_min) = 200;
@@ -276,7 +276,7 @@ SUB(spiderbot_rocket_explode) {
     MY(type) = "static";
     MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// fire effect 2
+
 SUB(spiderbot_rocket_explode) {
     MY(airfriction) = -2;
     MY(alpha_min) = 200;
@@ -300,7 +300,7 @@ SUB(spiderbot_rocket_explode) {
     MY(type) = "spark";
     MY(velocityjitter) = '412.0 412.0 412.0';
 }
-// fire rays
+
 SUB(spiderbot_rocket_explode) {
     MY(airfriction) = -3;
     MY(alpha_min) = 200;
@@ -321,7 +321,7 @@ SUB(spiderbot_rocket_explode) {
     MY(type) = "spark";
     MY(velocityjitter) = '712.0 712.0 712.0';
 }
-// smoke
+
 SUB(spiderbot_rocket_explode) {
     MY(airfriction) = 3;
     MY(alpha_min) = 300;
@@ -343,7 +343,7 @@ SUB(spiderbot_rocket_explode) {
     MY(type) = "alphastatic";
     MY(velocityjitter) = '200.0 200.0 200.0';
 }
-// smoke2
+
 SUB(spiderbot_rocket_explode) {
     MY(airfriction) = 2;
     MY(alpha_min) = 300;
@@ -366,7 +366,7 @@ SUB(spiderbot_rocket_explode) {
     MY(type) = "alphastatic";
     MY(velocityjitter) = '200.0 200.0 200.0';
 }
-// underwater bubbles
+
 SUB(spiderbot_rocket_explode) {
     MY(alpha_min) = 128;
     MY(alpha_max) = 256;
@@ -386,7 +386,7 @@ SUB(spiderbot_rocket_explode) {
     MY(underwater) = true;
     MY(velocityjitter) = '144.0 144.0 144.0';
 }
-// underwatershockwave
+
 SUB(spiderbot_rocket_explode) {
     MY(alpha_min) = 40;
     MY(alpha_max) = 40;
@@ -444,7 +444,7 @@ SUB(spiderbot_rocket_thrust) {
 }
 
 DEF(spiderbot_rocket_launch);
-// long lasting smoke
+
 SUB(spiderbot_rocket_launch) {
     MY(airfriction) = 0.300000;
     MY(alpha_min) = 100;
@@ -463,7 +463,7 @@ SUB(spiderbot_rocket_launch) {
     MY(velocityjitter) = '60.0 60.0 60.0';
     MY(velocitymultiplier) = -0.100000;
 }
-// fast smoke
+
 SUB(spiderbot_rocket_launch) {
     MY(airfriction) = 0.300000;
     MY(alpha_min) = 100;
@@ -481,7 +481,7 @@ SUB(spiderbot_rocket_launch) {
     MY(type) = "smoke";
     MY(velocityjitter) = '160.0 160.0 60.0';
 }
-// fire
+
 SUB(spiderbot_rocket_launch) {
     MY(airfriction) = 0.300000;
     MY(alpha_min) = 200;
@@ -501,7 +501,7 @@ SUB(spiderbot_rocket_launch) {
     MY(velocityjitter) = '60.0 60.0 60.0';
     MY(velocitymultiplier) = 0.500000;
 }
-// sparks
+
 SUB(spiderbot_rocket_launch) {
     MY(alpha_min) = 200;
     MY(alpha_max) = 256;
@@ -640,7 +640,7 @@ SUB(wakizashi_rocket_explode) {
     MY(tex_max) = 16;
     MY(type) = "decal";
 }
-// shockwave
+
 SUB(wakizashi_rocket_explode) {
     MY(alpha_min) = 56;
     MY(alpha_max) = 56;
@@ -655,7 +655,7 @@ SUB(wakizashi_rocket_explode) {
     MY(tex_max) = 33;
     MY(type) = "static";
 }
-// glow
+
 SUB(wakizashi_rocket_explode) {
     MY(alpha_min) = 156;
     MY(alpha_max) = 156;
@@ -670,7 +670,7 @@ SUB(wakizashi_rocket_explode) {
     MY(tex_max) = 64;
     MY(type) = "static";
 }
-// fire effect
+
 SUB(wakizashi_rocket_explode) {
     MY(airfriction) = 2;
     MY(alpha_min) = 200;
@@ -694,7 +694,7 @@ SUB(wakizashi_rocket_explode) {
     MY(type) = "static";
     MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// fire rays
+
 SUB(wakizashi_rocket_explode) {
     MY(airfriction) = -3;
     MY(alpha_min) = 200;
@@ -715,7 +715,7 @@ SUB(wakizashi_rocket_explode) {
     MY(type) = "spark";
     MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// smoke
+
 SUB(wakizashi_rocket_explode) {
     MY(airfriction) = 3;
     MY(alpha_min) = 300;
@@ -737,7 +737,7 @@ SUB(wakizashi_rocket_explode) {
     MY(type) = "alphastatic";
     MY(velocityjitter) = '200.0 200.0 200.0';
 }
-// bouncing sparks
+
 SUB(wakizashi_rocket_explode) {
     MY(airfriction) = 1;
     MY(alpha_min) = 644;
@@ -758,7 +758,7 @@ SUB(wakizashi_rocket_explode) {
     MY(velocityjitter) = '524.0 524.0 524.0';
     MY(velocityoffset) = '0.0 0.0 170.0';
 }
-// underwater bubbles
+
 SUB(wakizashi_rocket_explode) {
     MY(alpha_min) = 128;
     MY(alpha_max) = 256;
@@ -778,7 +778,7 @@ SUB(wakizashi_rocket_explode) {
     MY(underwater) = true;
     MY(velocityjitter) = '144.0 144.0 144.0';
 }
-// underwatershockwave
+
 SUB(wakizashi_rocket_explode) {
     MY(alpha_min) = 40;
     MY(alpha_max) = 40;
@@ -832,7 +832,7 @@ SUB(wakizashi_rocket_thrust) {
 }
 
 DEF(wakizashi_rocket_launch);
-// long lasting smoke
+
 SUB(wakizashi_rocket_launch) {
     MY(airfriction) = 0.300000;
     MY(alpha_min) = 100;
@@ -850,7 +850,7 @@ SUB(wakizashi_rocket_launch) {
     MY(velocityjitter) = '160.0 160.0 60.0';
     MY(velocitymultiplier) = -0.100000;
 }
-// fast smoke
+
 SUB(wakizashi_rocket_launch) {
     MY(airfriction) = 0.300000;
     MY(alpha_min) = 100;
@@ -868,7 +868,7 @@ SUB(wakizashi_rocket_launch) {
     MY(velocityjitter) = '160.0 160.0 60.0';
     MY(velocitymultiplier) = 0.400000;
 }
-//sparks
+
 SUB(wakizashi_rocket_launch) {
     MY(alpha_min) = 200;
     MY(alpha_max) = 256;
@@ -911,7 +911,7 @@ SUB(wakizashi_booster_smoke) {
 }
 
 DEF(raptor_cannon_impact);
-// decal
+
 SUB(raptor_cannon_impact) {
     MY(alpha_min) = 256;
     MY(alpha_max) = 256;
@@ -925,7 +925,7 @@ SUB(raptor_cannon_impact) {
     MY(tex_max) = 47;
     MY(type) = "decal";
 }
-// spark
+
 SUB(raptor_cannon_impact) {
     MY(airfriction) = 0.200000;
     MY(alpha_min) = 644;
@@ -945,7 +945,7 @@ SUB(raptor_cannon_impact) {
     MY(velocityjitter) = '124.0 124.0 524.0';
     MY(velocityoffset) = '0.0 0.0 150.0';
 }
-// smoke
+
 SUB(raptor_cannon_impact) {
     MY(airfriction) = 2;
     MY(alpha_min) = 428;
@@ -964,7 +964,7 @@ SUB(raptor_cannon_impact) {
     MY(velocityjitter) = '200.0 200.0 300.0';
     MY(velocityoffset) = '0.0 0.0 340.0';
 }
-// fire
+
 SUB(raptor_cannon_impact) {
     MY(airfriction) = 8;
     MY(alpha_min) = 200;
@@ -1030,7 +1030,7 @@ SUB(raptor_cannon_muzzleflash) {
 }
 
 DEF(raptor_bomb_impact);
-// decal
+
 SUB(raptor_bomb_impact) {
     MY(alpha_min) = 256;
     MY(alpha_max) = 256;
@@ -1044,7 +1044,7 @@ SUB(raptor_bomb_impact) {
     MY(tex_max) = 16;
     MY(type) = "decal";
 }
-// spark vertical
+
 SUB(raptor_bomb_impact) {
     MY(alpha_min) = 300;
     MY(alpha_max) = 300;
@@ -1062,7 +1062,7 @@ SUB(raptor_bomb_impact) {
     MY(type) = "spark";
     MY(velocityjitter) = '40.0 40.0 120.0';
 }
-// fire
+
 SUB(raptor_bomb_impact) {
     MY(airfriction) = 2;
     MY(alpha_min) = 300;
@@ -1080,7 +1080,7 @@ SUB(raptor_bomb_impact) {
     MY(type) = "static";
     MY(velocityjitter) = '950.0 950.0 0.0';
 }
-// smoke
+
 SUB(raptor_bomb_impact) {
     MY(alpha_min) = 428;
     MY(alpha_max) = 428;
@@ -1100,7 +1100,7 @@ SUB(raptor_bomb_impact) {
     MY(velocityjitter) = '200.0 200.0 280.0';
     MY(velocityoffset) = '0.0 0.0 280.0';
 }
-// smoke 2
+
 SUB(raptor_bomb_impact) {
     MY(airfriction) = 0.600000;
     MY(alpha_min) = 328;
@@ -1122,7 +1122,7 @@ SUB(raptor_bomb_impact) {
     MY(velocityjitter) = '200.0 200.0 300.0';
     MY(velocityoffset) = '0.0 0.0 580.0';
 }
-// sparks
+
 SUB(raptor_bomb_impact) {
     MY(airfriction) = 0.300000;
     MY(alpha_min) = 644;

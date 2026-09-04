@@ -2,14 +2,10 @@
 
 #include "macro.qh"
 
-// Transition from global 'self' to local 'this'
-
-// Step 1: auto oldself
 #if 1
     #define SELFPARAM() noref const entity this = self
 #endif
 
-// Step 2: const self
 #if 1
     #define self (RVALUE, self)
     ALIAS("self") entity __self;
@@ -17,7 +13,6 @@
     #define WITHSELF(value, block) WITH(entity, __self, value, (RVALUE, block))
 #endif
 
-// Step 3: propagate SELFPARAM()
 #if 1
     #undef self
     #define self (this, self)
@@ -26,23 +21,19 @@
     #define ENGINE_EVENT() const entity this = __self
 #endif
 
-// Step 4: kill unstructured setself
 #if 1
     #undef setself
 #endif
 
-// Step 5: this should work
 #if 1
     #undef self
     #define self (RVALUE, this)
 #endif
 
-// Step 6: remove SELFPARAM, add parameters
 #if 1
     #undef SELFPARAM
 #endif
 
-// Step 7: remove WITHSELF, no replacement
 #if 1
     #undef WITHSELF
     #define WITHSELF(value, block) block
@@ -92,7 +83,6 @@ SELFWRAP(customizeentityforclient, bool, (), (entity this, entity client), (this
 SELFWRAP(camera_transform, vector, (vector org, vector ang), (entity this, vector org, vector ang), (this, org, ang))
 #define setcamera_transform(e, f) SELFWRAP_SET(camera_transform, e, f)
 
-/** return false to remove from the client */
 SELFWRAP(SendEntity, bool, (entity to, int sendflags), (entity this, entity to, int sendflags), (this, to, sendflags))
 #define setSendEntity(e, f) SELFWRAP_SET(SendEntity, e, f)
 #define getSendEntity(e) SELFWRAP_GET(SendEntity, e)

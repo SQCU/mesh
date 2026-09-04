@@ -10,14 +10,14 @@ const float DMO_PLAY = 1;
 const float DMO_TIME = 2;
 void DemoConfirm_Check_Gamestatus(entity btn, entity me)
 {
-	if(!(gamestatus & (GAME_CONNECTED | GAME_ISSERVER)) || isdemo()) // we're not in a match, lets watch the demo
+	if(!(gamestatus & (GAME_CONNECTED | GAME_ISSERVER)) || isdemo())
 	{
 		if(btn.democlicktype == DMO_PLAY)
 			{ demolist.startDemo(demolist); }
 		else if(btn.democlicktype == DMO_TIME)
 			{ demolist.timeDemo(demolist); }
 	}
-	else // already in a match, player has to confirm
+	else
 	{
 		if(btn.democlicktype == DMO_PLAY)
 			{ DialogOpenButton_Click(btn, main.demostartconfirmDialog); }
@@ -58,9 +58,9 @@ void XonoticDemoBrowserTab_fill(entity me)
 			_("Benchmark how fast your computer can run the highlighted demo")));
 			e.democlicktype = DMO_TIME;
 			e.onClick = DemoConfirm_Check_Gamestatus;
-			e.onClickEntity = me; // demolist is global anyway
+			e.onClickEntity = me;
 		me.TD(me, 1, me.columns / 2, e = makeXonoticButton(ZCTX(_("DEMO^Play")), '0 0 0'));
 			e.democlicktype = DMO_PLAY;
 			e.onClick = DemoConfirm_Check_Gamestatus;
-			e.onClickEntity = me; // demolist is global anyway
+			e.onClickEntity = me;
 }

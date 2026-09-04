@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// conproc.c
 
 #include "quakedef.h"
 
@@ -42,12 +23,10 @@ BOOL WriteText (LPCTSTR szText);
 int CharToCode (int c);
 BOOL SetConsoleCXCY(HANDLE hStdout, int cx, int cy);
 
-
 void InitConProc (HANDLE hFile, HANDLE heventParent, HANDLE heventChild)
 {
 	DWORD	dwID;
 
-// ignore if we don't have all the events.
 	if (!hFile || !heventParent || !heventChild)
 		return;
 
@@ -55,7 +34,6 @@ void InitConProc (HANDLE hFile, HANDLE heventParent, HANDLE heventChild)
 	heventParentSend = heventParent;
 	heventChildSend = heventChild;
 
-// so we'll know when to go away.
 	heventDone = CreateEvent (NULL, false, false, NULL);
 
 	if (!heventDone)
@@ -76,14 +54,11 @@ void InitConProc (HANDLE hFile, HANDLE heventParent, HANDLE heventChild)
 		return;
 	}
 
-// save off the input/output handles.
 	hStdout = GetStdHandle (STD_OUTPUT_HANDLE);
 	hStdin = GetStdHandle (STD_INPUT_HANDLE);
 
-// force 80 character width, at least 25 character height
 	SetConsoleCXCY (hStdout, 80, 25);
 }
-
 
 void DeinitConProc (void)
 {
@@ -91,14 +66,13 @@ void DeinitConProc (void)
 		SetEvent (heventDone);
 }
 
-
 DWORD RequestProc (DWORD dwNichts)
 {
 	int		*pBuffer;
 	DWORD	dwRet;
 	HANDLE	heventWait[2];
 	int		iBeginLine, iEndLine;
-	
+
 	heventWait[0] = heventParentSend;
 	heventWait[1] = heventDone;
 
@@ -106,13 +80,11 @@ DWORD RequestProc (DWORD dwNichts)
 	{
 		dwRet = WaitForMultipleObjects (2, heventWait, false, INFINITE);
 
-	// heventDone fired, so we're exiting.
-		if (dwRet == WAIT_OBJECT_0 + 1)	
+		if (dwRet == WAIT_OBJECT_0 + 1)
 			break;
 
 		pBuffer = (int *) GetMappedBuffer (hfileBuffer);
-		
-	// hfileBuffer is invalid.  Just leave.
+
 		if (!pBuffer)
 		{
 			Con_Print("Invalid hfileBuffer\n");
@@ -122,26 +94,25 @@ DWORD RequestProc (DWORD dwNichts)
 		switch (pBuffer[0])
 		{
 			case CCOM_WRITE_TEXT:
-			// Param1 : Text
+
 				pBuffer[0] = WriteText ((LPCTSTR) (pBuffer + 1));
 				break;
 
 			case CCOM_GET_TEXT:
-			// Param1 : Begin line
-			// Param2 : End line
+
 				iBeginLine = pBuffer[1];
 				iEndLine = pBuffer[2];
-				pBuffer[0] = ReadText ((LPTSTR) (pBuffer + 1), iBeginLine, 
+				pBuffer[0] = ReadText ((LPTSTR) (pBuffer + 1), iBeginLine,
 									   iEndLine);
 				break;
 
 			case CCOM_GET_SCR_LINES:
-			// No params
+
 				pBuffer[0] = GetScreenBufferLines (&pBuffer[1]);
 				break;
 
 			case CCOM_SET_SCR_LINES:
-			// Param1 : Number of lines
+
 				pBuffer[0] = SetScreenBufferLines (pBuffer[1]);
 				break;
 		}
@@ -153,7 +124,6 @@ DWORD RequestProc (DWORD dwNichts)
 	return 0;
 }
 
-
 LPVOID GetMappedBuffer (HANDLE hfileBuffer)
 {
 	LPVOID pBuffer;
@@ -164,33 +134,29 @@ LPVOID GetMappedBuffer (HANDLE hfileBuffer)
 	return pBuffer;
 }
 
-
 void ReleaseMappedBuffer (LPVOID pBuffer)
 {
 	UnmapViewOfFile (pBuffer);
 }
 
-
 BOOL GetScreenBufferLines (int *piLines)
 {
-	CONSOLE_SCREEN_BUFFER_INFO	info;							  
+	CONSOLE_SCREEN_BUFFER_INFO	info;
 	BOOL						bRet;
 
 	bRet = GetConsoleScreenBufferInfo (hStdout, &info);
-		
+
 	if (bRet)
 		*piLines = info.dwSize.Y;
 
 	return bRet;
 }
 
-
 BOOL SetScreenBufferLines (int iLines)
 {
 
 	return SetConsoleCXCY (hStdout, 80, iLines);
 }
-
 
 BOOL ReadText (LPTSTR pszText, int iBeginLine, int iEndLine)
 {
@@ -208,13 +174,11 @@ BOOL ReadText (LPTSTR pszText, int iBeginLine, int iEndLine)
 		coord,
 		&dwRead);
 
-	// Make sure it's null terminated.
 	if (bRet)
 		pszText[dwRead] = '\0';
 
 	return bRet;
 }
-
 
 BOOL WriteText (LPCTSTR szText)
 {
@@ -226,7 +190,7 @@ BOOL WriteText (LPCTSTR szText)
 
 	while (*sz)
 	{
-	// 13 is the code for a carriage return (\n) instead of 10.
+
 		if (*sz == 10)
 			*sz = 13;
 
@@ -239,7 +203,7 @@ BOOL WriteText (LPCTSTR szText)
 		rec.Event.KeyEvent.wVirtualScanCode = CharToCode (*sz);
 		rec.Event.KeyEvent.uChar.AsciiChar = *sz;
 		rec.Event.KeyEvent.uChar.UnicodeChar = *sz;
-		rec.Event.KeyEvent.dwControlKeyState = isupper(*sz) ? 0x80 : 0x0; 
+		rec.Event.KeyEvent.dwControlKeyState = isupper(*sz) ? 0x80 : 0x0;
 
 		WriteConsoleInput(
 			hStdin,
@@ -261,11 +225,10 @@ BOOL WriteText (LPCTSTR szText)
 	return true;
 }
 
-
 int CharToCode (int c)
 {
 	char upper;
-		
+
 	upper = toupper(c);
 
 	switch (c)
@@ -278,7 +241,7 @@ int CharToCode (int c)
 	}
 
 	if (isalpha(c))
-		return (30 + upper - 65); 
+		return (30 + upper - 65);
 
 	if (isdigit(c))
 		return (1 + upper - 47);
@@ -286,12 +249,11 @@ int CharToCode (int c)
 	return c;
 }
 
-
 BOOL SetConsoleCXCY(HANDLE hStdout, int cx, int cy)
 {
 	CONSOLE_SCREEN_BUFFER_INFO	info;
 	COORD						coordMax;
- 
+
 	coordMax = GetLargestConsoleWindowSize(hStdout);
 
 	if (cy > coordMax.Y)
@@ -299,67 +261,64 @@ BOOL SetConsoleCXCY(HANDLE hStdout, int cx, int cy)
 
 	if (cx > coordMax.X)
 		cx = coordMax.X;
- 
+
 	if (!GetConsoleScreenBufferInfo(hStdout, &info))
 		return false;
- 
-// height
-    info.srWindow.Left = 0;         
-    info.srWindow.Right = info.dwSize.X - 1;                
+
+    info.srWindow.Left = 0;
+    info.srWindow.Right = info.dwSize.X - 1;
     info.srWindow.Top = 0;
-    info.srWindow.Bottom = cy - 1;          
- 
+    info.srWindow.Bottom = cy - 1;
+
 	if (cy < info.dwSize.Y)
 	{
 		if (!SetConsoleWindowInfo(hStdout, true, &info.srWindow))
 			return false;
- 
+
 		info.dwSize.Y = cy;
- 
+
 		if (!SetConsoleScreenBufferSize(hStdout, info.dwSize))
 			return false;
     }
     else if (cy > info.dwSize.Y)
     {
 		info.dwSize.Y = cy;
- 
+
 		if (!SetConsoleScreenBufferSize(hStdout, info.dwSize))
 			return false;
- 
+
 		if (!SetConsoleWindowInfo(hStdout, true, &info.srWindow))
 			return false;
     }
- 
+
 	if (!GetConsoleScreenBufferInfo(hStdout, &info))
 		return false;
- 
-// width
-	info.srWindow.Left = 0;         
+
+	info.srWindow.Left = 0;
 	info.srWindow.Right = cx - 1;
 	info.srWindow.Top = 0;
-	info.srWindow.Bottom = info.dwSize.Y - 1;               
- 
+	info.srWindow.Bottom = info.dwSize.Y - 1;
+
 	if (cx < info.dwSize.X)
 	{
 		if (!SetConsoleWindowInfo(hStdout, true, &info.srWindow))
 			return false;
- 
+
 		info.dwSize.X = cx;
-    
+
 		if (!SetConsoleScreenBufferSize(hStdout, info.dwSize))
 			return false;
 	}
 	else if (cx > info.dwSize.X)
 	{
 		info.dwSize.X = cx;
- 
+
 		if (!SetConsoleScreenBufferSize(hStdout, info.dwSize))
 			return false;
- 
+
 		if (!SetConsoleWindowInfo(hStdout, true, &info.srWindow))
 			return false;
 	}
- 
+
 	return true;
 }
-     

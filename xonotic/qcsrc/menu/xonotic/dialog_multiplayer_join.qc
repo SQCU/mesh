@@ -32,7 +32,7 @@ void XonoticServerListTab_fill(entity me)
 		me.TD(me, 1, 0.8, e = makeXonoticCheckBox(0, "menu_slist_categories", ZCTX(_("SRVS^Categories"))));
 			e.onClickEntity = slist;
 			e.onClick = ServerList_Categories_Click;
-		/* FILTER CONTROLS */
+
 		me.TD(me, 1, 0.5, e = makeXonoticTextLabel(1, _("Filter:")));
 		me.TD(me, 1, 2, e = makeXonoticInputBox(0, string_null));
 			e.onChange = ServerList_Filter_Change;
@@ -54,7 +54,7 @@ void XonoticServerListTab_fill(entity me)
 			slist.filterShowLaggy = e.checked;
 			e.onClickEntity = slist;
 			e.onClick = ServerList_ShowLaggy_Click;
-		/* END FILTER CONTROLS */
+
 		me.TDempty(me, 0.1);
 		me.TD(me, 1, 0.8, e = makeXonoticButton_T(_("Refresh"), '0 0 0', _("Reload the server list")));
 			e.onClick = XonoticServerListTab_refresh;

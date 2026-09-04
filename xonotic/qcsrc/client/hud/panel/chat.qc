@@ -2,11 +2,9 @@
 
 #include <client/draw.qh>
 
-// Chat (#12)
-
 void HUD_Chat_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 }
 
 float chat_maximized_scroll_ofs;
@@ -26,7 +24,6 @@ float HUD_Panel_Chat_InputEvent(float bInputType, float nPrimary, float nSeconda
 	if(bInputType == 2)
 		return false;
 
-	// at this point bInputType can only be 0 or 1 (key pressed or released)
 	bool key_pressed = (bInputType == 0);
 
 	if(nPrimary == K_MWHEELUP)
@@ -88,7 +85,7 @@ void HUD_Chat()
 		{
 			if(chat_panel_modified)
 			{
-				panel.update_time = time; // forces reload of panel attributes
+				panel.update_time = time;
 				chat_panel_modified = false;
 			}
 			if (time > chat_maximized_reset_scroll_time)
@@ -102,18 +99,17 @@ void HUD_Chat()
 
 	if(intermission == 2)
 	{
-		// reserve some more space to the mapvote panel
-		// by resizing and moving chat panel to the bottom
+
 		panel_size.y = min(panel_size.y, vid_conheight * 0.2);
 		panel_pos.y = vid_conheight - panel_size.y - panel_bg_border * 2;
 		chat_posy = panel_pos.y;
 		chat_sizey = panel_size.y;
 	}
-	if(autocvar__con_chat_maximized && !autocvar__hud_configure) // draw at full screen height if maximized
+	if(autocvar__con_chat_maximized && !autocvar__hud_configure)
 	{
 		panel_pos.y = panel_bg_border;
 		panel_size.y = vid_conheight - panel_bg_border * 2;
-		if(panel.current_panel_bg == "0") // force a border when maximized
+		if(panel.current_panel_bg == "0")
 		{
 			string panel_bg;
 			panel_bg = strcat(hud_skin_path, "/border_default");
@@ -130,7 +126,6 @@ void HUD_Chat()
 	pos = panel_pos;
 	mySize = panel_size;
 
-	// chat messages don't scale properly since they are displayed directly by the engine
 	HUD_Scale_Disable();
 	HUD_Panel_DrawBg();
 
@@ -143,15 +138,11 @@ void HUD_Chat()
 	if (!autocvar_con_chatrect)
 		cvar_set("con_chatrect", "1");
 
-	// can't use a name ending with _x, _y and _z for a float autocvar as for autocvar specs
-	// it prevents ambiguity with component names of vector autocvars
 	if (cvar_string("con_chatrect_x") != ftos(pos.x / vid_conwidth))
 		cvar_set("con_chatrect_x", ftos(pos.x / vid_conwidth));
 	if (cvar_string("con_chatrect_y") != ftos(pos.y / vid_conheight))
 		cvar_set("con_chatrect_y", ftos(pos.y / vid_conheight));
-	// can't use direct comparison here, it would always returns true even if
-	// both arguments are equal because con_chatwidth is saved with cvar_set
-	//if (autocvar_con_chatwidth != mySize.x / vid_conwidth)
+
 	if (fabs(autocvar_con_chatwidth - mySize.x / vid_conwidth) > 0.00001)
 		cvar_set("con_chatwidth", ftos(mySize.x / vid_conwidth));
 	if (autocvar_con_chat != floor(mySize.y / autocvar_con_chatsize - 0.5))
@@ -161,11 +152,11 @@ void HUD_Chat()
 	{
 		vector chatsize = '1 1 0' * autocvar_con_chatsize;
 		if (cvar_string("con_chatrect_x") != "9001")
-			cvar_set("con_chatrect_x", "9001"); // over 9000, we'll fake it instead for more control over alpha and such
+			cvar_set("con_chatrect_x", "9001");
 		string str = textShortenToWidth(_("^3Player^7: This is the chat area."), mySize.x, chatsize, stringwidth_colors);
 		for(int i = 0; i < autocvar_con_chat; ++i)
 		{
-			// engine displays chat text at full alpha
+
 			drawcolorcodedstring(pos, str, chatsize, 1, DRAWFLAG_NORMAL);
 			pos.y += chatsize.y;
 		}

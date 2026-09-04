@@ -162,9 +162,10 @@ What stands:
 - **The exchange must refuse a peer speaking a different revision.** Two nodes converging
   through git are still briefly mixed during every deploy, and an unversioned struct made
   that window pair on garbage. The exchange now carries a magic and its own size.
-- **When hardware refuses a size, degrade transiently and never settle.** The bridge halves
-  and re-pairs so the node stays reachable, and returns to the configured size on the next
-  heal. Settled shrinkage is the solipsistic withdrawal the threat model forbids.
+- **When hardware refuses a configured size, retain that size and keep pairing.** Reducing
+  the registered region makes the node reachable with less workload capacity, which is an
+  outage under `AGENTS.md` even when the reduction is temporary. The bridge retries with
+  bounded backoff while keeping its configured shared-memory and registration extent.
 - **A finding assembled while the instrument is being rewritten is a suspicion.** Twenty-five
   revisions of the pairing path during the measurement window meant every data point came
   from a different program. Freeze the instrument, then measure.

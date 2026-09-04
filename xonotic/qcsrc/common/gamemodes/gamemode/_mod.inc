@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 
 #include <common/gamemodes/gamemode/assault/_mod.inc>
 #include <common/gamemodes/gamemode/clanarena/_mod.inc>

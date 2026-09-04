@@ -6,8 +6,6 @@ void W_MineLayer_Stick(entity this, entity to)
 {
 	spamsound(this, CH_SHOTS, SND_MINE_STICK, VOL_BASE, ATTN_NORM);
 
-	// in order for mines to face properly when sticking to the ground, they must be a server side entity rather than a csqc projectile
-
 	entity newmine = spawn();
 	IL_PUSH(g_mines, newmine);
 	newmine.weaponentity_fld = this.weaponentity_fld;
@@ -21,7 +19,7 @@ void W_MineLayer_Stick(entity this, entity to)
 	setorigin(newmine, this.origin);
 	setmodel(newmine, MDL_MINELAYER_MINE);
 	setsize(newmine, '-4 -4 -4', '4 4 4');
-	newmine.angles = vectoangles(-trace_plane_normal); // face against the surface
+	newmine.angles = vectoangles(-trace_plane_normal);
 
 	newmine.movedir = -trace_plane_normal;
 
@@ -33,7 +31,7 @@ void W_MineLayer_Stick(entity this, entity to)
 	newmine.damagedbycontents = true;
 	IL_PUSH(g_damagedbycontents, newmine);
 
-	set_movetype(newmine, MOVETYPE_NONE); // lock the mine in place
+	set_movetype(newmine, MOVETYPE_NONE);
 	newmine.projectiledeathtype = this.projectiledeathtype;
 
 	newmine.mine_time = this.mine_time;
@@ -92,7 +90,7 @@ void W_MineLayer_DoRemoteExplode(entity this)
 	this.takedamage = DAMAGE_NO;
 
 	if(this.move_movetype == MOVETYPE_NONE || this.move_movetype == MOVETYPE_FOLLOW)
-		this.velocity = this.movedir; // .velocity must be != '0 0 0' for particle fx and decal to work
+		this.velocity = this.movedir;
 
 	RadiusDamage(this, this.realowner, WEP_CVAR(minelayer, remote_damage), WEP_CVAR(minelayer, remote_edgedamage), WEP_CVAR(minelayer, remote_radius),
 						NULL, NULL, WEP_CVAR(minelayer, remote_force), this.projectiledeathtype | HITTYPE_BOUNCE, this.weaponentity_fld, NULL);
@@ -116,8 +114,8 @@ void W_MineLayer_RemoteExplode(entity this)
 {
 	if(!IS_DEAD(this.realowner))
 		if((this.spawnshieldtime >= 0)
-			? (time >= this.spawnshieldtime) // timer
-			: (vdist(NearestPointOnBox(this.realowner, this.origin) - this.origin, >, WEP_CVAR(minelayer, remote_radius))) // safety device
+			? (time >= this.spawnshieldtime)
+			: (vdist(NearestPointOnBox(this.realowner, this.origin) - this.origin, >, WEP_CVAR(minelayer, remote_radius)))
 		)
 		{
 			W_MineLayer_DoRemoteExplode(this);
@@ -126,7 +124,7 @@ void W_MineLayer_RemoteExplode(entity this)
 
 void W_MineLayer_ProximityExplode(entity this)
 {
-	// make sure no friend is in the mine's radius. If there is any, explosion is delayed until they're at a safe distance
+
 	if(WEP_CVAR(minelayer, protection) && this.mine_explodeanyway == 0)
 	{
 		entity head;
@@ -169,18 +167,14 @@ void W_MineLayer_Think(entity this)
 		}
 	}
 
-	// our lifetime has expired, it's time to die - mine_time just allows us to play a sound for this
-	// TODO: replace this mine_trigger.wav sound with a real countdown
 	if((time > this.cnt) && (!this.mine_time) && (this.cnt > 0))
 	{
 		if(WEP_CVAR(minelayer, lifetime_countdown) > 0)
 			spamsound(this, CH_SHOTS, SND_MINE_TRIGGER, VOL_BASE, ATTN_NORM);
 		this.mine_time = time + WEP_CVAR(minelayer, lifetime_countdown);
-		this.mine_explodeanyway = 1; // make the mine super aggressive -- Samual: Rather, make it not care if a team mate is near.
+		this.mine_explodeanyway = 1;
 	}
 
-	// a player's mines shall explode if they disconnect or die
-	// TODO: Do this on team change too -- Samual: But isn't a player killed when they switch teams?
 	if(!IS_PLAYER(this.realowner) || IS_DEAD(this.realowner) || STAT(FROZEN, this.realowner))
 	{
 		this.projectiledeathtype |= HITTYPE_BOUNCE;
@@ -188,12 +182,11 @@ void W_MineLayer_Think(entity this)
 		return;
 	}
 
-	// set the mine for detonation when a foe gets close enough
 	head = findradius(this.origin, WEP_CVAR(minelayer, proximityradius));
 	while(head)
 	{
 		if(IS_PLAYER(head) && !IS_DEAD(head) && !STAT(FROZEN, head) && !IS_INDEPENDENT_PLAYER(head))
-		if(head != this.realowner && DIFF_TEAM(head, this.realowner)) // don't trigger for team mates
+		if(head != this.realowner && DIFF_TEAM(head, this.realowner))
 		if(!this.mine_time)
 		{
 			spamsound(this, CH_SHOTS, SND_MINE_TRIGGER, VOL_BASE, ATTN_NORM);
@@ -202,14 +195,12 @@ void W_MineLayer_Think(entity this)
 		head = head.chain;
 	}
 
-	// explode if it's time to
 	if(this.mine_time && time >= this.mine_time)
 	{
 		W_MineLayer_ProximityExplode(this);
 		return;
 	}
 
-	// remote detonation
 	.entity weaponentity = this.weaponentity_fld;
 	if(this.realowner.(weaponentity).m_weapon == WEP_MINE_LAYER)
 	if(!IS_DEAD(this.realowner))
@@ -220,14 +211,13 @@ void W_MineLayer_Think(entity this)
 void W_MineLayer_Touch(entity this, entity toucher)
 {
 	if(this.move_movetype == MOVETYPE_NONE || this.move_movetype == MOVETYPE_FOLLOW)
-		return; // we're already a stuck mine, why do we get called? TODO does this even happen?
+		return;
 
 	PROJECTILE_TOUCH(this, toucher);
 
 	if((toucher && IS_PLAYER(toucher) && !IS_DEAD(toucher)) || toucher.owner == this.owner)
 	{
-		// hit a player or other mine
-		// don't stick
+
 	}
 	else
 	{
@@ -243,7 +233,7 @@ void W_MineLayer_Damage(entity this, entity inflictor, entity attacker, float da
 	float is_from_enemy = (inflictor.realowner != this.realowner);
 
 	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, (is_from_enemy ? 1 : -1)))
-		return; // g_projectiles_damage says to halt
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 	this.angles = vectoangles(this.velocity);
@@ -254,13 +244,13 @@ void W_MineLayer_Damage(entity this, entity inflictor, entity attacker, float da
 
 void W_MineLayer_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 {
-	// scan how many mines we placed, and return if we reached our limit
+
 	if(WEP_CVAR(minelayer, limit))
 	{
 		int minecount = W_MineLayer_Count(actor, weaponentity);
 		if(minecount >= WEP_CVAR(minelayer, limit))
 		{
-			// the refire delay keeps this message from being spammed
+
 			Send_Notification(NOTIF_ONE, actor, MSG_MULTI, WEAPON_MINELAYER_LIMIT, WEP_CVAR(minelayer, limit));
 			play2(actor, SND(UNAVAILABLE));
 			return;
@@ -282,7 +272,7 @@ void W_MineLayer_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 		mine.spawnshieldtime = -1;
 	mine.classname = "mine";
 	mine.bot_dodge = true;
-	mine.bot_dodgerating = WEP_CVAR(minelayer, damage) * 2; // * 2 because it can detonate inflight which makes it even more dangerous
+	mine.bot_dodgerating = WEP_CVAR(minelayer, damage) * 2;
 
 	mine.takedamage = DAMAGE_YES;
 	mine.damageforcescale = WEP_CVAR(minelayer, damageforcescale);
@@ -295,9 +285,9 @@ void W_MineLayer_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 	PROJECTILE_MAKETRIGGER(mine);
 	mine.projectiledeathtype = thiswep.m_id;
 	mine.weaponentity_fld = weaponentity;
-	setsize(mine, '-4 -4 -4', '4 4 4'); // give it some size so it can be shot
+	setsize(mine, '-4 -4 -4', '4 4 4');
 
-	setorigin(mine, w_shotorg - v_forward * 4); // move it back so it hits the wall at the right point
+	setorigin(mine, w_shotorg - v_forward * 4);
 	W_SetupProjVelocity_Basic(mine, WEP_CVAR(minelayer, speed), 0);
 	mine.angles = vectoangles(mine.velocity);
 
@@ -313,8 +303,6 @@ void W_MineLayer_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 	if(mine.cnt > 0) { mine.cnt += time; }
 
 	CSQCProjectile(mine, true, PROJECTILE_MINE, true);
-
-	// common properties
 
 	MUTATOR_CALLHOOK(EditProjectile, actor, mine);
 }
@@ -341,15 +329,15 @@ bool W_MineLayer_PlacedMines(entity this, .entity weaponentity, bool detonate)
 
 METHOD(MineLayer, wr_aim, void(entity thiswep, entity actor, .entity weaponentity))
 {
-    // aim and decide to fire if appropriate
+
     int minecount = W_MineLayer_Count(actor, weaponentity);
     if(minecount >= WEP_CVAR(minelayer, limit))
         PHYS_INPUT_BUTTON_ATCK(actor) = false;
     else
         PHYS_INPUT_BUTTON_ATCK(actor) = bot_aim(actor, weaponentity, WEP_CVAR(minelayer, speed), 0, WEP_CVAR(minelayer, lifetime), false, false);
-    if(skill >= 2) // skill 0 and 1 bots won't detonate mines!
+    if(skill >= 2)
     {
-        // decide whether to detonate mines
+
         float edgedamage, coredamage, edgeradius, recipricoledgeradius;
         float selfdamage, teamdamage, enemydamage;
         edgedamage = WEP_CVAR(minelayer, edgedamage);
@@ -367,7 +355,7 @@ METHOD(MineLayer, wr_aim, void(entity thiswep, entity actor, .entity weaponentit
         	{
         		float d = vlen(it.origin + (it.mins + it.maxs) * 0.5 - mine.origin);
         		d = bound(0, edgedamage + (coredamage - edgedamage) * sqrt(1 - d * recipricoledgeradius), 10000);
-                // count potential damage according to type of target
+
                 if(it == actor)
                     selfdamage = selfdamage + d;
                 else if(SAME_TEAM(it, actor))
@@ -387,7 +375,7 @@ METHOD(MineLayer, wr_aim, void(entity thiswep, entity actor, .entity weaponentit
         makevectors(actor.v_angle);
         IL_EACH(g_mines, it.realowner == actor,
         {
-            if(skill > 9) // normal players only do this for the target they are tracking
+            if(skill > 9)
             {
 	            entity mine = it;
 	            IL_EACH(g_bot_targets, it.bot_attack,
@@ -399,8 +387,7 @@ METHOD(MineLayer, wr_aim, void(entity thiswep, entity actor, .entity weaponentit
 	        }
 	        else
 	        {
-                //As the distance gets larger, a correct detonation gets near imposible
-                //Bots are assumed to use the mine spawnfunc_light to see if the mine gets near a player
+
                 if((v_forward * normalize(it.origin - actor.enemy.origin) < 0.1)
                 	&& IS_PLAYER(actor.enemy)
                 	&& (desirabledamage >= 0.1 * coredamage)
@@ -413,14 +400,11 @@ METHOD(MineLayer, wr_aim, void(entity thiswep, entity actor, .entity weaponentit
 	        }
         });
 
-        // if we would be doing at X percent of the core damage, detonate it
-        // but don't fire a new shot at the same time!
-        if(desirabledamage >= 0.75 * coredamage) //this should do group damage in rare fortunate events
+        if(desirabledamage >= 0.75 * coredamage)
             PHYS_INPUT_BUTTON_ATCK2(actor) = true;
         if((skill > 6.5) && (selfdamage > GetResource(actor, RES_HEALTH)))
             PHYS_INPUT_BUTTON_ATCK2(actor) = false;
-        //if(PHYS_INPUT_BUTTON_ATCK2(actor) == true)
-        //	dprint(ftos(desirabledamage),"\n");
+
         if(PHYS_INPUT_BUTTON_ATCK2(actor)) PHYS_INPUT_BUTTON_ATCK(actor) = false;
     }
 }
@@ -428,9 +412,9 @@ METHOD(MineLayer, wr_think, void(entity thiswep, entity actor, .entity weaponent
 {
 	actor.(weaponentity).minelayer_mines = W_MineLayer_Count(actor, weaponentity);
 
-    if(autocvar_g_balance_minelayer_reload_ammo && actor.(weaponentity).clip_load < WEP_CVAR(minelayer, ammo)) // forced reload
+    if(autocvar_g_balance_minelayer_reload_ammo && actor.(weaponentity).clip_load < WEP_CVAR(minelayer, ammo))
     {
-        // not if we're holding the minelayer without enough ammo, but can detonate existing mines
+
         if(!(W_MineLayer_PlacedMines(actor, weaponentity, false) && GetResource(actor, thiswep.ammo_type) < WEP_CVAR(minelayer, ammo))) {
             thiswep.wr_reload(thiswep, actor, weaponentity);
         }
@@ -452,14 +436,11 @@ METHOD(MineLayer, wr_think, void(entity thiswep, entity actor, .entity weaponent
 }
 METHOD(MineLayer, wr_checkammo1, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    // actually do // don't switch while placing a mine
-    //if(ATTACK_FINISHED(actor, weaponentity) <= time || PS(actor).m_weapon != WEP_MINE_LAYER)
-    //{
+
         float ammo_amount = GetResource(actor, thiswep.ammo_type) >= WEP_CVAR(minelayer, ammo);
         ammo_amount += actor.(weaponentity).(weapon_load[thiswep.m_id]) >= WEP_CVAR(minelayer, ammo);
         return ammo_amount;
-    //}
-    //return true;
+
 }
 METHOD(MineLayer, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {

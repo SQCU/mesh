@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/gamemodes/gamemode/tka/tka.qc>
 #ifdef CSQC
     #include <common/gamemodes/gamemode/tka/cl_tka.qc>

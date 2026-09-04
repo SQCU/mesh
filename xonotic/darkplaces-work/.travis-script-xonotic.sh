@@ -7,11 +7,11 @@ openssl aes-256-cbc -K $encrypted_eeb6f7a14a8e_key -iv $encrypted_eeb6f7a14a8e_i
 set -x
 
 chmod 0600 id_rsa-xonotic
-# ssh-keygen -y -f id_rsa-xonotic
+
 
 export USRLOCAL="$PWD"/usrlocal
 
-rev=`git rev-parse HEAD`
+rev=`git symbolic-ref --short HEAD 2>/dev/null || printf main`
 
 sftp -oStrictHostKeyChecking=no -i id_rsa-xonotic -P 2222 -b - autobuild-bin-uploader@beta.xonotic.org <<EOF || true
 mkdir ${rev}
@@ -57,8 +57,8 @@ for os in "$@"; do
       ;;
     win32)
       chroot=
-      # Need to use -mstackrealign as nothing guarantees that callbacks from
-      # other Win32 DLLs - including SDL2 - retain 16 bytes alignment.
+
+
       makeflags='STRIP=:
         D3D=1
         DP_MAKE_TARGET=mingw
@@ -110,7 +110,7 @@ for os in "$@"; do
       ;;
   esac
 
-  # Condense whitespace in makeflags.
+
   makeflags=$(
     printf "%s\n" "$makeflags" | tr '\n' ' '
   )

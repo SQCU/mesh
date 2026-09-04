@@ -15,9 +15,6 @@ ENDCLASS(LinkedList)
 
 #define LL_EMPTY(ll) (ll.ll_head == NULL)
 
-/**
- * Push to tail
- */
 entity LL_PUSH(LinkedList this, entity e)
 {
 	assert(this);
@@ -28,9 +25,6 @@ entity LL_PUSH(LinkedList this, entity e)
 	return e;
 }
 
-/**
- * Pop from tail
- */
 entity LL_POP(LinkedList this)
 {
 	assert(this);

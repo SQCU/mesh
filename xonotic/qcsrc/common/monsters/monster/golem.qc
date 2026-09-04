@@ -18,7 +18,7 @@ float autocvar_g_monster_golem_speed_stop;
 float autocvar_g_monster_golem_speed_run;
 float autocvar_g_monster_golem_speed_walk;
 
-.float golem_lastattack; // delay attacks separately
+.float golem_lastattack;
 
 void M_Golem_Attack_Smash(entity this)
 {
@@ -31,7 +31,7 @@ void M_Golem_Attack_Smash(entity this)
 	entity dmgent = spawn();
 	dmgent.owner = dmgent.realowner = this;
 	setorigin(dmgent, loc);
-	RadiusDamage (dmgent, this, (autocvar_g_monster_golem_attack_smash_damage) * MONSTER_SKILLMOD(this), (autocvar_g_monster_golem_attack_smash_damage * 0.5) * MONSTER_SKILLMOD(this), 
+	RadiusDamage (dmgent, this, (autocvar_g_monster_golem_attack_smash_damage) * MONSTER_SKILLMOD(this), (autocvar_g_monster_golem_attack_smash_damage * 0.5) * MONSTER_SKILLMOD(this),
 					autocvar_g_monster_golem_attack_smash_range, this, NULL, autocvar_g_monster_golem_attack_smash_force, DEATH_MONSTER_GOLEM_SMASH.m_id, DMG_NOWEP, NULL);
 	delete(dmgent);
 }
@@ -79,8 +79,8 @@ void M_Golem_Attack_Lightning_Damage(entity this, entity inflictor, entity attac
 	if (GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	if (!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1)) // no exceptions
-		return; // g_projectiles_damage says to halt
+	if (!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 
@@ -156,7 +156,7 @@ bool M_Golem_Attack(int attack_type, entity actor, entity targ, .entity weaponen
 			setanim(actor, ((random() >= 0.5) ? actor.anim_melee2 : actor.anim_melee3), false, true, true);
 			int swing_cnt = bound(1, floor(random() * 4), 3);
 			Monster_Delay(actor, swing_cnt, 0.5, M_Golem_Attack_Swing);
-			actor.anim_finished = actor.attack_finished_single[0] = time + (0.5 * swing_cnt); // set this for the delay
+			actor.anim_finished = actor.attack_finished_single[0] = time + (0.5 * swing_cnt);
 			return true;
 		}
 		case MONSTER_ATTACK_RANGED:
@@ -175,14 +175,14 @@ bool M_Golem_Attack(int attack_type, entity actor, entity targ, .entity weaponen
 				else
 					actor.anim_finished = time + 1.2;
 				actor.attack_finished_single[0] = actor.anim_finished + 0.2;
-				actor.state = MONSTER_ATTACK_MELEE; // kinda a melee attack
+				actor.state = MONSTER_ATTACK_MELEE;
 				actor.golem_lastattack = time + 3 + random() * 1.5;
 				return true;
 			}
-			else if(randomness <= 0.1 && vdist(actor.enemy.origin - actor.origin, >=, autocvar_g_monster_golem_attack_smash_range * 1.5)) // small chance, don't want this spammed
+			else if(randomness <= 0.1 && vdist(actor.enemy.origin - actor.origin, >=, autocvar_g_monster_golem_attack_smash_range * 1.5))
 			{
 				setanim(actor, actor.anim_melee2, true, true, false);
-				actor.state = MONSTER_ATTACK_MELEE; // maybe we should rename this to something more general
+				actor.state = MONSTER_ATTACK_MELEE;
 				actor.attack_finished_single[0] = time + 1.1;
 				actor.anim_finished = 1.1;
 				actor.golem_lastattack = time + 3 + random() * 1.5;
@@ -198,9 +198,9 @@ bool M_Golem_Attack(int attack_type, entity actor, entity targ, .entity weaponen
 }
 
 spawnfunc(monster_golem) { Monster_Spawn(this, true, MON_GOLEM); }
-// compatibility
+
 spawnfunc(monster_shambler) { spawnfunc_monster_golem(this); }
-#endif // SVQC
+#endif
 
 #ifdef SVQC
 METHOD(Golem, mr_think, bool(Golem this, entity actor))
@@ -232,28 +232,19 @@ METHOD(Golem, mr_anim, bool(Golem this, entity actor))
     actor.anim_idle = animfixfps(actor, '0 1 1', none);
     actor.anim_walk = animfixfps(actor, '1 1 1', none);
     actor.anim_run = animfixfps(actor, '2 1 1', none);
-    //actor.anim_melee1 = animfixfps(actor, '3 1 5', none); // analyze models and set framerate
-    actor.anim_melee2 = animfixfps(actor, '4 1 5', none); // analyze models and set framerate
-    actor.anim_melee3 = animfixfps(actor, '5 1 5', none); // analyze models and set framerate
-    //actor.anim_melee4 = animfixfps(actor, '6 1 5', none); // analyze models and set framerate
-    actor.anim_melee1 = animfixfps(actor, '6 1 5', none); // analyze models and set framerate
-    actor.anim_pain1 = animfixfps(actor, '7 1 2', none); // 0.5 seconds
-    actor.anim_pain2 = animfixfps(actor, '8 1 2', none); // 0.5 seconds
-    //actor.anim_pain3 = animfixfps(actor, '9 1 2', none); // 0.5 seconds
-    //actor.anim_pain4 = animfixfps(actor, '10 1 2', none); // 0.5 seconds
-    //actor.anim_pain5 = animfixfps(actor, '11 1 2', none); // 0.5 seconds
-    actor.anim_spawn = animfixfps(actor, '12 1 5', none); // analyze models and set framerate
-    actor.anim_die1 = animfixfps(actor, '13 1 0.5', none); // 2 seconds
-    //actor.anim_dead = animfixfps(actor, '14 1 0.5', none); // 2 seconds
-    actor.anim_die2 = animfixfps(actor, '15 1 0.5', none); // 2 seconds
-    // dead2 16
-    //actor.anim_dieback = animfixfps(actor, '16 1 0.5', none); // 2 seconds
-    //actor.anim_deadback = animfixfps(actor, '17 1 0.5', none); // 2 seconds
-    //actor.anim_dead2 = animfixfps(actor, '18 1 0.5', none); // 2 seconds
-    //actor.anim_dead3 = animfixfps(actor, '19 1 0.5', none); // 2 seconds
-    //actor.anim_dead4 = animfixfps(actor, '20 1 0.5', none); // 2 seconds
-    //actor.anim_dead5 = animfixfps(actor, '21 1 0.5', none); // 2 seconds
-    //actor.anim_dead6 = animfixfps(actor, '22 1 0.5', none); // 2 seconds
+
+    actor.anim_melee2 = animfixfps(actor, '4 1 5', none);
+    actor.anim_melee3 = animfixfps(actor, '5 1 5', none);
+
+    actor.anim_melee1 = animfixfps(actor, '6 1 5', none);
+    actor.anim_pain1 = animfixfps(actor, '7 1 2', none);
+    actor.anim_pain2 = animfixfps(actor, '8 1 2', none);
+
+    actor.anim_spawn = animfixfps(actor, '12 1 5', none);
+    actor.anim_die1 = animfixfps(actor, '13 1 0.5', none);
+
+    actor.anim_die2 = animfixfps(actor, '15 1 0.5', none);
+
     return true;
 }
 #endif
@@ -270,7 +261,7 @@ METHOD(Golem, mr_setup, bool(Golem this, entity actor))
     if(!actor.damageforcescale) { actor.damageforcescale = (autocvar_g_monster_golem_damageforcescale); }
 
     actor.monster_loot = ITEM_HealthMega;
-    actor.weapon = WEP_ELECTRO.m_id; // matches attacks better than WEP_VORTEX
+    actor.weapon = WEP_ELECTRO.m_id;
 
     setanim(actor, actor.anim_spawn, false, true, true);
     actor.spawn_time = actor.animstate_endtime;

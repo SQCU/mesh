@@ -4,13 +4,12 @@ REGISTER_NET_LINKED(ENT_CLIENT_LADDER)
 void func_ladder_think(entity this)
 {
 #ifdef CSQC
-	// TODO: check if this is what is causing the glitchiness when switching between them
+
 	float dt = time - this.move_time;
 	this.move_time = time;
 	if(dt <= 0) { return; }
 #endif
 
-	// set myself as current ladders where possible
 	IL_EACH(g_ladderents, it.ladder_entity == this,
 	{
 		it.ladder_entity = NULL;
@@ -21,14 +20,14 @@ void func_ladder_think(entity this)
 	{
 		vector emin = it.absmin;
 		vector emax = it.absmax;
-		if(this.solid == SOLID_BSP || (IS_CSQC && this.solid == SOLID_TRIGGER)) // CSQC doesn't expand properly
+		if(this.solid == SOLID_BSP || (IS_CSQC && this.solid == SOLID_TRIGGER))
 		{
 			emin -= '1 1 1';
 			emax += '1 1 1';
 		}
-		if(boxesoverlap(emin, emax, this.absmin, this.absmax)) // quick
+		if(boxesoverlap(emin, emax, this.absmin, this.absmax))
 		{
-			if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it)) // accurate
+			if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it))
 			{
 				if(!it.ladder_entity)
 					IL_PUSH(g_ladderents, it);
@@ -59,7 +58,7 @@ bool func_ladder_send(entity this, entity to, int sf)
 void func_ladder_link(entity this)
 {
 	trigger_link(this, func_ladder_send);
-	//this.model = "null";
+
 }
 
 void func_ladder_init(entity this)
@@ -93,13 +92,13 @@ void func_ladder_init(entity this)
 				if(this.absmax.x - this.absmin.x > PL_MAX_CONST.x - PL_MIN_CONST.x
 					&& this.absmax.y - this.absmin.y < this.absmax.x - this.absmin.x)
 				{
-					// move top on one side
+
 					top_max.y = top_min.y = this.absmin.y + (PL_MAX_CONST.y - PL_MIN_CONST.y) * 0.75;
 				}
 				else if(this.absmax.y - this.absmin.y > PL_MAX_CONST.y - PL_MIN_CONST.y
 					&& this.absmax.x - this.absmin.x < this.absmax.y - this.absmin.y)
 				{
-					// move top on one side
+
 					top_max.x = top_min.x = this.absmin.x + (PL_MAX_CONST.x - PL_MIN_CONST.x) * 0.75;
 				}
 				tracebox(top_max, PL_MIN_CONST, PL_MAX_CONST, top_min, MOVE_NOMONSTERS, tracetest_ent);
@@ -108,13 +107,13 @@ void func_ladder_init(entity this)
 					if(this.absmax.x - this.absmin.x > PL_MAX_CONST.x - PL_MIN_CONST.x
 						&& this.absmax.y - this.absmin.y < this.absmax.x - this.absmin.x)
 					{
-						// alternatively on the other side
+
 						top_max.y = top_min.y = this.absmax.y - (PL_MAX_CONST.y - PL_MIN_CONST.y) * 0.75;
 					}
 					else if(this.absmax.y - this.absmin.y > PL_MAX_CONST.y - PL_MIN_CONST.y
 						&& this.absmax.x - this.absmin.x < this.absmax.y - this.absmin.y)
 					{
-						// alternatively on the other side
+
 						top_max.x = top_min.x = this.absmax.x - (PL_MAX_CONST.x - PL_MIN_CONST.x) * 0.75;
 					}
 					tracebox(top_max, PL_MIN_CONST, PL_MAX_CONST, top_min, MOVE_NOMONSTERS, tracetest_ent);
@@ -128,7 +127,7 @@ void func_ladder_init(entity this)
 		return;
 	}
 
-	this.bot_pickup = true; // allow bots to make use of this ladder
+	this.bot_pickup = true;
 	float cost = waypoint_getlinearcost(trace_endpos.z - this.absmin.z);
 	top_min = trace_endpos;
 	waypoint_spawnforteleporter_boxes(this, WAYPOINTFLAG_LADDER, this.absmin, this.absmax, top_min, top_min, cost);
@@ -136,7 +135,7 @@ void func_ladder_init(entity this)
 
 spawnfunc(func_ladder)
 {
-	IL_PUSH(g_ladders, this); // TODO: also func_water? bots currently loop through func_ladder only
+	IL_PUSH(g_ladders, this);
 
 	func_ladder_init(this);
 }
@@ -178,7 +177,6 @@ NET_HANDLE(ENT_CLIENT_LADDER, bool isnew)
 	this.move_time = time;
 	this.entremove = func_ladder_remove;
 
-	// NOTE: CSQC's version of setorigin doesn't expand
 	this.absmin -= '1 1 1';
 	this.absmax += '1 1 1';
 

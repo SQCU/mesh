@@ -32,13 +32,10 @@ bool write_damagetext(entity this, entity client, int sf)
     )) return false;
 
     WriteHeader(MSG_ENTITY, damagetext);
-    WriteByte(MSG_ENTITY, etof(hit));
+    WriteShort(MSG_ENTITY, etof(hit));
     WriteInt24_t(MSG_ENTITY, deathtype);
     WriteByte(MSG_ENTITY, flags);
 
-    // we need to send a few decimal places to minimize errors when accumulating damage
-    // sending them multiplied saves bandwidth compared to using WriteCoord,
-    // however if the multiplied damage would be too much for (signed) short, we send an int24
     if (flags & DTFLAG_BIG_HEALTH) WriteInt24_t(MSG_ENTITY, health * DAMAGETEXT_PRECISION_MULTIPLIER);
     else WriteShort(MSG_ENTITY, health * DAMAGETEXT_PRECISION_MULTIPLIER);
     if (!(flags & DTFLAG_NO_ARMOR))
@@ -63,7 +60,7 @@ MUTATOR_HOOKFUNCTION(damagetext, PlayerDamaged) {
     int deathtype = M_ARGV(5, int);
     float potential_damage = M_ARGV(6, float);
     if(DEATH_WEAPONOF(deathtype) == WEP_VAPORIZER) return;
-    if(deathtype == DEATH_FIRE.m_id || deathtype == DEATH_BUFF.m_id) return; // TODO: exclude damage over time and thorn effects
+    if(deathtype == DEATH_FIRE.m_id || deathtype == DEATH_BUFF.m_id) return;
 
     int flags = 0;
     if (SAME_TEAM(hit, attacker)) flags |= DTFLAG_SAMETEAM;
@@ -83,7 +80,7 @@ MUTATOR_HOOKFUNCTION(damagetext, PlayerDamaged) {
     net_text.dent_net_potential = potential_damage;
 
     setthink(net_text, SUB_Remove);
-    net_text.nextthink = (time > 10) ? (time + 0.5) : 10; // allow a buffer from start time for clients to load in
+    net_text.nextthink = (time > 10) ? (time + 0.5) : 10;
 
     Net_LinkEntity(net_text, false, 0, write_damagetext);
 }

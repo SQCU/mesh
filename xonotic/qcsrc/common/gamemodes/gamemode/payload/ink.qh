@@ -1,6 +1,5 @@
 #pragma once
-// World ink volume builtins, implemented in darkplaces-work/{r_ink.c,clvm_cmds.c}.
-// Numbers follow the mesh IPC block (#644..#653); #654 onward were free.
+
 #ifdef CSQC
 void(vector origin, float radius, vector color, float amount) ink_splat = #654;
 void() ink_clear = #655;
@@ -18,12 +17,9 @@ float(float sel) ink_stat = #656;
 #define INK_SIZE_X      9
 #define INK_SIZE_Y      10
 #define INK_SIZE_Z      11
-// mean accumulated colour and coverage over the whole volume - the same cached
-// pair the engine tints the sky with.  The neutral drift deposits THIS rather
-// than a colour of its own (see cl_artifact.qc, Artifact_DriftColor).
+
 #define INK_TINT_R      12
 #define INK_TINT_G      13
 #define INK_TINT_B      14
 #define INK_COVERAGE    15
 #endif
-

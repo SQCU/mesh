@@ -26,7 +26,6 @@ void GameType_ConfigureSliders(entity me, string pLabel, float pMin, float pMax,
 	e.disabled = l.disabled = !pCvar;
 	l.setText(l, pLabel);
 
-	// clear old values
 	for(i = 0; i < e.nValues; ++i);
 	{
 		strfree(e.(valueStrings[i]));
@@ -36,19 +35,18 @@ void GameType_ConfigureSliders(entity me, string pLabel, float pMin, float pMax,
 
 	if(pCvar != "")
 	{
-		// set new values
+
 		e.addValue(e, strzone(_("Default")), strzone("-1"));
 		for(i = pMin; i <= pMax; i += pStep) { e.addValue(e, strzone(ftos(i)), strzone(ftos(i))); }
 		e.addValue(e, strzone(_("Unlimited")), strzone("0"));
 	}
 	e.configureXonoticTextSliderValues(e);
 
-
 	entity t = me.sliderTeams;
 	entity tl = me.labelTeams;
 	t.configureXonoticTextSlider(t, tCvar, string_null);
 	tl.disabled = t.disabled = !tCvar;
-	t.nValues = (tCvar == "") ? 0 : 4; // instead of clearing / readding the very same values
+	t.nValues = (tCvar == "") ? 0 : 4;
 	t.configureXonoticTextSliderValues(t);
 }
 
@@ -69,8 +67,6 @@ entity makeXonoticServerCreateTab()
 void XonoticServerCreateTab_fill(entity me)
 {
 	entity e, e0;
-
-	// the left half begins here
 
 	me.gotoRC(me, 0.5, 0);
 		me.TD(me, 1, 3, makeXonoticHeaderLabel(_("Gametype")));
@@ -148,13 +144,11 @@ void XonoticServerCreateTab_fill(entity me)
 		me.TD(me, 1, 3, e0 = makeXonoticTextLabel(0.5, string_null));
 			e0.textEntity = main.mutatorsDialog;
 			e0.allowCut = 1;
-			//e0.allowWrap = 1;
+
 			setDependent(e0, "g_campaign", 0, 0);
 
-	// mapListBox is in the right column but the ref is needed for mutators dialog here
 	me.mapListBox = makeXonoticMapList();
-	// here we use the following line instead of me.TR(me) for better visual spacing;
-	// this decision was made in this poll: http://forums.xonotic.org/showthread.php?tid=5445
+
 	me.gotoRC(me, me.rows - 2.5, 0);
 		me.TDempty(me, 0.5);
 		me.TD(me, 1, 2, e = makeXonoticButton_T(_("Mutators..."), '0 0 0',
@@ -164,18 +158,16 @@ void XonoticServerCreateTab_fill(entity me)
 			main.mutatorsDialog.refilterEntity = me.mapListBox;
 			setDependent(e, "g_campaign", 0, 0);
 
-	// The right half begins here
-
 	me.gotoRC(me, 0.5, 3.2); me.setFirstColumn(me, me.currentColumn);
-		// the maplistbox
+
 		me.TD(me, 1, 3, e = makeXonoticHeaderLabel(_("Maplist")));
 			makeCallback(e, me.mapListBox, me.mapListBox.refilterCallback);
 	me.TR(me);
-		// we use 5.8 here to visually match the bottom line of the component on the left (Bot Skill)
+
 		me.TD(me, me.rows - 6.8, 3, me.mapListBox);
 
 	me.gotoRC(me, me.rows - 4.5, me.firstColumn);
-		// string filter label and box
+
 		me.TD(me, 1, 0.35, e = makeXonoticTextLabel(1, _("Filter:")));
 		me.mapListBox.stringFilterBox = makeXonoticInputBox_T(0, string_null,
 			_("Click here or Ctrl-F to provide a keyword to narrow down the map list. Ctrl-Delete to clear; Enter when done."));
@@ -185,7 +177,7 @@ void XonoticServerCreateTab_fill(entity me)
 			e.onChangeEntity = me.mapListBox;
 
 	me.gotoRC(me, me.rows - 3.5, me.firstColumn);
-		// the selection buttons
+
 		me.TDempty(me, 0.2);
 		me.TD(me, 1, 1.3, e = makeXonoticButton_T(_("Add shown"), '0 0 0',
 			_("Add the maps shown in the list to your selection")));
@@ -206,7 +198,6 @@ void XonoticServerCreateTab_fill(entity me)
 			e.onClick = MapList_Remove_All;
 			e.onClickEntity = me.mapListBox;
 
-	// bottom row
 	me.gotoRC(me, me.rows - 1, 0);
 		me.TDempty(me, me.columns * 1/12);
 		me.TD(me, 1, me.columns * 5/12, e = makeXonoticLeaveMatchButton('0 0 0', 0));

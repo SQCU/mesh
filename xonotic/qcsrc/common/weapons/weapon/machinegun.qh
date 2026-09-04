@@ -1,24 +1,24 @@
 #pragma once
 
 CLASS(MachineGun, Weapon)
-/* spawnfunc */ ATTRIB(MachineGun, m_canonical_spawnfunc, string, "weapon_machinegun");
-/* ammotype  */ ATTRIB(MachineGun, ammo_type, Resource, RES_BULLETS);
-/* impulse   */ ATTRIB(MachineGun, impulse, int, 3);
-/* flags     */ ATTRIB(MachineGun, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_TYPE_HITSCAN | WEP_FLAG_PENETRATEWALLS | WEP_FLAG_BLEED);
-/* rating    */ ATTRIB(MachineGun, bot_pickupbasevalue, float, 7000);
-/* color     */ ATTRIB(MachineGun, wpcolor, vector, '1 1 0');
-/* modelname */ ATTRIB(MachineGun, mdl, string, "uzi");
+                ATTRIB(MachineGun, m_canonical_spawnfunc, string, "weapon_machinegun");
+                ATTRIB(MachineGun, ammo_type, Resource, RES_BULLETS);
+                ATTRIB(MachineGun, impulse, int, 3);
+                ATTRIB(MachineGun, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_TYPE_HITSCAN | WEP_FLAG_PENETRATEWALLS | WEP_FLAG_BLEED);
+                ATTRIB(MachineGun, bot_pickupbasevalue, float, 7000);
+                ATTRIB(MachineGun, wpcolor, vector, '1 1 0');
+                ATTRIB(MachineGun, mdl, string, "uzi");
 #ifdef GAMEQC
-/* model     */ ATTRIB(MachineGun, m_model, Model, MDL_MACHINEGUN_ITEM);
-/* flash mdl */ ATTRIB(MachineGun, m_muzzlemodel, Model, MDL_MACHINEGUN_MUZZLEFLASH);
-/* flash eff */ ATTRIB(MachineGun, m_muzzleeffect, entity, EFFECT_MACHINEGUN_MUZZLEFLASH);
+                ATTRIB(MachineGun, m_model, Model, MDL_MACHINEGUN_ITEM);
+                ATTRIB(MachineGun, m_muzzlemodel, Model, MDL_MACHINEGUN_MUZZLEFLASH);
+                ATTRIB(MachineGun, m_muzzleeffect, entity, EFFECT_MACHINEGUN_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(MachineGun, w_crosshair, string, "gfx/crosshairuzi");
-/* crosshair */ ATTRIB(MachineGun, w_crosshair_size, float, 0.6);
-/* wepimg    */ ATTRIB(MachineGun, model2, string, "weaponuzi");
-/* refname   */ ATTRIB(MachineGun, netname, string, "machinegun");
-/* wepname   */ ATTRIB(MachineGun, m_name, string, _("MachineGun"));
-/* legacy    */ ATTRIB(MachineGun, m_deprecated_netname, string, "uzi");
+                ATTRIB(MachineGun, w_crosshair, string, "gfx/crosshairuzi");
+                ATTRIB(MachineGun, w_crosshair_size, float, 0.6);
+                ATTRIB(MachineGun, model2, string, "weaponuzi");
+                ATTRIB(MachineGun, netname, string, "machinegun");
+                ATTRIB(MachineGun, m_name, string, _("MachineGun"));
+                ATTRIB(MachineGun, m_deprecated_netname, string, "uzi");
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

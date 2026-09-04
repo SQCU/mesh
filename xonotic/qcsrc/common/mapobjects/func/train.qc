@@ -10,7 +10,6 @@ void train_wait(entity this)
 	SUB_UseTargets(this.enemy, NULL, NULL);
 	this.enemy = NULL;
 
-	// if turning is enabled, the train will turn toward the next point while waiting
 	if(this.platmovetype_turn && !this.train_wait_turning)
 	{
 		entity targ, cp;
@@ -21,16 +20,16 @@ void train_wait(entity this)
 		else
 			cp = NULL;
 
-		if(cp) // bezier curves movement
-			ang = cp.origin - (this.origin - this.view_ofs); // use the origin of the control point of the next path_corner
-		else // linear movement
-			ang = targ.origin - (this.origin - this.view_ofs); // use the origin of the next path_corner
+		if(cp)
+			ang = cp.origin - (this.origin - this.view_ofs);
+		else
+			ang = targ.origin - (this.origin - this.view_ofs);
 		ang = vectoangles(ang);
-		ang_x = -ang_x; // flip up / down orientation
+		ang_x = -ang_x;
 
-		if(this.wait > 0) // slow turning
+		if(this.wait > 0)
 			SUB_CalcAngleMove(this, ang, TSPEED_TIME, this.ltime - time + this.wait, train_wait);
-		else // instant turning
+		else
 			SUB_CalcAngleMove(this, ang, TSPEED_TIME, 0.0000001, train_wait);
 		this.train_wait_turning = true;
 		return;
@@ -38,7 +37,7 @@ void train_wait(entity this)
 
 #ifdef SVQC
 	if(this.noise != "")
-		stopsoundto(MSG_BROADCAST, this, CH_TRIGGER_SINGLE); // send this as unreliable only, as the train will resume operation shortly anyway
+		stopsoundto(MSG_BROADCAST, this, CH_TRIGGER_SINGLE);
 #endif
 
 #ifdef SVQC
@@ -51,7 +50,7 @@ void train_wait(entity this)
 	}
 	else
 #endif
-	     if(this.wait < 0 || this.train_wait_turning) // no waiting or we already waited while turning
+	     if(this.wait < 0 || this.train_wait_turning)
 	{
 		this.train_wait_turning = false;
 		train_next(this);
@@ -95,8 +94,8 @@ void train_next(entity this)
 	{
 		if(targ.curvetarget)
 		{
-			cp = find(NULL, targetname, targ.curvetarget); // get its second target (the control point)
-			cp_org = cp.origin - this.view_ofs; // no control point found, assume a straight line to the destination
+			cp = find(NULL, targetname, targ.curvetarget);
+			cp_org = cp.origin - this.view_ofs;
 		}
 	}
 	if (this.target == "")
@@ -107,13 +106,13 @@ void train_next(entity this)
 
 	if(targ.platmovetype)
 	{
-		// this path_corner contains a movetype overrider, apply it
+
 		this.platmovetype_start = targ.platmovetype_start;
 		this.platmovetype_end = targ.platmovetype_end;
 	}
 	else
 	{
-		// this path_corner doesn't contain a movetype overrider, use the train's defaults
+
 		this.platmovetype_start = this.platmovetype_start_default;
 		this.platmovetype_end = this.platmovetype_end_default;
 	}
@@ -178,7 +177,7 @@ float train_send(entity this, entity to, float sf)
 
 	if(sf & SF_TRIGGER_RESET)
 	{
-		// used on client
+
 	}
 
 	return true;
@@ -186,14 +185,14 @@ float train_send(entity this, entity to, float sf)
 
 void train_link(entity this)
 {
-	//Net_LinkEntity(this, 0, false, train_send);
+
 }
 
 void train_use(entity this, entity actor, entity trigger)
 {
 	this.nextthink = this.ltime + 1;
 	setthink(this, train_next);
-	this.use = func_null; // not again, next target can set it again if needed
+	this.use = func_null;
 	if(trigger.target2 && trigger.target2 != "")
 		this.future_target = find(NULL, targetname, trigger.target2);
 }
@@ -203,7 +202,7 @@ void func_train_find(entity this)
 	entity targ = train_next_find(this);
 	this.target = targ.target;
 	this.target_random = targ.target_random;
-	// save the future target for later
+
 	this.future_target = train_next_find(targ);
 	if (this.target == "")
 		objerror(this, "func_train_find: no next target");
@@ -220,11 +219,6 @@ void func_train_find(entity this)
 
 #endif
 
-/*QUAKED spawnfunc_func_train (0 .5 .8) ?
-Ridable platform, targets spawnfunc_path_corner path to follow.
-speed : speed the train moves (can be overridden by each spawnfunc_path_corner)
-target : targetname of first spawnfunc_path_corner (starts here)
-*/
 #ifdef SVQC
 spawnfunc(func_train)
 {
@@ -246,12 +240,11 @@ spawnfunc(func_train)
 	if (this.spawnflags & TRAIN_TURN)
 	{
 		this.platmovetype_turn = true;
-		this.view_ofs = '0 0 0'; // don't offset a rotating train, origin works differently now
+		this.view_ofs = '0 0 0';
 	}
 	else
 		this.view_ofs = this.mins;
 
-	// wait for targets to spawn
 	InitializeEntity(this, func_train_find, INITPRIO_FINDTARGET);
 
 	setblocked(this, generic_plat_blocked);
@@ -268,12 +261,11 @@ spawnfunc(func_train)
 	this.platmovetype_start_default = this.platmovetype_start;
 	this.platmovetype_end_default = this.platmovetype_end;
 
-	// TODO make a reset function for this one
 }
 #elif defined(CSQC)
 void train_draw(entity this)
 {
-	//Movetype_Physics_NoMatchServer();
+
 	Movetype_Physics_MatchServer(this, autocvar_cl_projectiles_sloppy);
 }
 
@@ -326,10 +318,6 @@ NET_HANDLE(ENT_CLIENT_TRAIN, bool isnew)
 			this.platmovetype_end_default = this.platmovetype_end;
 		}
 
-		// everything is set up by the time the train is linked, we shouldn't need this
-		//func_train_find();
-
-		// but we will need these
 		train_next(this);
 
 		set_movetype(this, MOVETYPE_PUSH);
@@ -338,7 +326,7 @@ NET_HANDLE(ENT_CLIENT_TRAIN, bool isnew)
 
 	if(sf & SF_TRIGGER_RESET)
 	{
-		// TODO: make a reset function for trains
+
 	}
 
 	return true;

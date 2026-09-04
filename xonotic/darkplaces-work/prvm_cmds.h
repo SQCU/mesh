@@ -2,195 +2,6 @@
 #ifndef PRVM_CMDS_H
 #define PRVM_CMDS_H
 
-// AK
-// Basically every vm builtin cmd should be in here.
-// All 3 builtin and extension lists can be found here
-// cause large (I think they will) parts are from pr_cmds the same copyright like in pr_cmds
-// also applies here
-
-
-/*
-============================================================================
-common cmd list:
-=================
-
-		checkextension(string)
-		error(...[string])
-		objerror(...[string)
-		print(...[strings])
-		bprint(...[string])
-		sprint(float clientnum,...[string])
-		centerprint(...[string])
-vector	normalize(vector)
-float	vlen(vector)
-float	vectoyaw(vector)
-vector	vectoangles(vector)
-float	random()
-		cmd(string)
-		float cvar (string)
-		cvar_set (string,string)
-		dprint(...[string])
-string	ftos(float)
-float	fabs(float)
-string	vtos(vector)
-string	etos(entity)
-float	stof(...[string])
-entity	spawn()
-		remove(entity e)
-entity	find(entity start, .string field, string match)
-
-entity	findfloat(entity start, .float field, float match)
-entity	findentity(entity start, .entity field, entity match)
-
-entity	findchain(.string field, string match)
-
-entity	findchainfloat(.string field, float match)
-entity	findchainentity(.string field, entity match)
-
-string	precache_file(string)
-string	precache_sound (string sample)
-		coredump()
-		traceon()
-		traceoff()
-		eprint(entity e)
-float	rint(float)
-float	floor(float)
-float	ceil(float)
-entity	nextent(entity)
-float	sin(float)
-float	cos(float)
-float	sqrt(float)
-vector	randomvec()
-float	registercvar (string name, string value, float flags)
-float	min(float a, float b, ...[float])
-float	max(float a, float b, ...[float])
-float	bound(float min, float value, float max)
-float	pow(float a, float b)
-		copyentity(entity src, entity dst)
-float	fopen(string filename, float mode)
-		fclose(float fhandle)
-string	fgets(float fhandle)
-		fputs(float fhandle, string s)
-float	strlen(string s)
-string	strcat(string,string,...[string])
-string	substring(string s, float start, float length)
-vector	stov(string s)
-string	strzone(string s)
-		strunzone(string s)
-float	tokenize(string s)
-string	argv(float n)
-float	isserver()
-float	clientcount()
-float	clientstate()
-		clientcommand(float client, string s) (for client and menu)
-		changelevel(string map)
-		localsound(string sample)
-vector	getmousepos()
-float	gettime()
-		loadfromdata(string data)
-		loadfromfile(string file)
-		parseentitydata(entity ent, string data)
-float	mod(float val, float m)
-const string	cvar_string (string)
-float	cvar_type (string)
-		crash()
-		stackdump()
-
-float	search_begin(string pattern, float caseinsensitive, float quiet)
-void	search_end(float handle)
-float	search_getsize(float handle)
-string	search_getfilename(float handle, float num)
-
-string	chr(float ascii)
-
-float	itof(intt ent)
-entity	ftoe(float num)
-
--------will be removed soon----------
-float	altstr_count(string)
-string	altstr_prepare(string)
-string	altstr_get(string,float)
-string	altstr_set(string altstr, float num, string set)
-string	altstr_ins(string altstr, float num, string set)
---------------------------------------
-
-entity	findflags(entity start, .float field, float match)
-entity	findchainflags(.float field, float match)
-
-const string	VM_cvar_defstring (string)
-
-perhaps only : Menu : WriteMsg
-===============================
-
-		WriteByte(float data, float dest, float desto)
-		WriteChar(float data, float dest, float desto)
-		WriteShort(float data, float dest, float desto)
-		WriteLong(float data, float dest, float desto)
-		WriteAngle(float data, float dest, float desto)
-		WriteCoord(float data, float dest, float desto)
-		WriteString(string data, float dest, float desto)
-		WriteEntity(entity data, float dest, float desto)
-
-Client & Menu : draw functions & video functions (& gecko functions)
-===================================================
-
-float	iscachedpic(string pic)
-string	precache_pic(string pic)
-		freepic(string s)
-float	drawcharacter(vector position, float character, vector scale, vector rgb, float alpha, float flag)
-float	drawstring(vector position, string text, vector scale, vector rgb, float alpha, float flag)
-float	drawcolorcodedstring(vector position, string text, vector scale, float alpha, float flag)
-float	stringwidth(string text, float handleColors)
-float	drawpic(vector position, string pic, vector size, vector rgb, float alpha, float flag)
-float	drawsubpic(vector position, vector size, string pic, vector srcPos, vector srcSize, vector rgb, float alpha, float flag)
-float	drawfill(vector position, vector size, vector rgb, float alpha, float flag)
-		drawsetcliparea(float x, float y, float width, float height)
-		drawresetcliparea()
-vector	getimagesize(string pic)
-
-float	cin_open(string file, string name)
-void	cin_close(string name)
-void	cin_setstate(string name, float type)
-float	cin_getstate(string name)
-void	cin_restart(string name)
-
-float[bool] gecko_create( string name )
-void gecko_destroy( string name )
-void gecko_navigate( string name, string URI )
-float[bool] gecko_keyevent( string name, float key, float eventtype ) 
-void gecko_mousemove( string name, float x, float y )
-
-==============================================================================
-menu cmd list:
-===============
-
-		setkeydest(float dest)
-float	getkeydest()
-		setmousetarget(float target)
-float	getmousetarget()
-
-		callfunction(...,string function_name)
-		writetofile(float fhandle, entity ent)
-float	isfunction(string function_name)
-vector	getresolution(float number)
-string	keynumtostring(float keynum)
-string	findkeysforcommand(string command)
-float	getserverliststat(float type)
-string	getserverliststring(float fld, float hostnr)
-
-float	stringtokeynum(string key)
-
-		resetserverlistmasks()
-		setserverlistmaskstring(float mask, float fld, string str)
-		setserverlistmasknumber(float mask, float fld, float num, float op)
-		resortserverlist()
-		setserverlistsort(float field, float descending)
-		refreshserverlist()
-float	getserverlistnumber(float fld, float hostnr)
-float	getserverlistindexforkey(string key)
-		addwantedserverlistkey(string key)
-*/
-
 #include "quakedef.h"
 #include "progdefs.h"
 #include "progsvm.h"
@@ -198,9 +9,6 @@ float	getserverlistindexforkey(string key)
 #include "mprogdefs.h"
 
 #include "cl_video.h"
-
-//============================================================================
-// nice helper macros
 
 #ifndef VM_NOPARMCHECK
 #define VM_SAFEPARMCOUNTRANGE(p1,p2,f)	if(prog->argc < p1 || prog->argc > p2) prog->error_cmd(#f " wrong parameter count %i (" #p1 " to " #p2 " expected ) !", prog->argc)
@@ -214,10 +22,8 @@ float	getserverlistindexforkey(string key)
 
 #define VM_STRINGTEMP_LENGTH MAX_INPUTLINE
 
-// init code
 void PR_Cmd_Init(void);
 
-// general functions
 void VM_CheckEmptyString (prvm_prog_t *prog, const char *s);
 void VM_VarString(prvm_prog_t *prog, int first, char *out, int outlength);
 prvm_stringbuffer_t *BufStr_FindCreateReplace (prvm_prog_t *prog, int bufindex, int flags, const char *format);
@@ -225,7 +31,6 @@ void BufStr_Set(prvm_prog_t *prog, prvm_stringbuffer_t *stringbuffer, int strind
 void BufStr_Del(prvm_prog_t *prog, prvm_stringbuffer_t *stringbuffer);
 void BufStr_Flush(prvm_prog_t *prog);
 
-// builtins
 void VM_checkextension (prvm_prog_t *prog);
 void VM_error (prvm_prog_t *prog);
 void VM_objerror (prvm_prog_t *prog);
@@ -268,7 +73,7 @@ void VM_precache_sound (prvm_prog_t *prog);
 void VM_coredump (prvm_prog_t *prog);
 
 void VM_stackdump (prvm_prog_t *prog);
-void VM_crash(prvm_prog_t *prog); // REMOVE IT
+void VM_crash(prvm_prog_t *prog);
 void VM_traceon (prvm_prog_t *prog);
 void VM_traceoff (prvm_prog_t *prog);
 void VM_eprint (prvm_prog_t *prog);
@@ -301,7 +106,7 @@ void VM_fopen(prvm_prog_t *prog);
 void VM_fclose(prvm_prog_t *prog);
 void VM_fgets(prvm_prog_t *prog);
 void VM_fputs(prvm_prog_t *prog);
-void VM_writetofile(prvm_prog_t *prog); // only used by menu
+void VM_writetofile(prvm_prog_t *prog);
 
 void VM_strlen(prvm_prog_t *prog);
 void VM_strcat(prvm_prog_t *prog);
@@ -310,18 +115,16 @@ void VM_stov(prvm_prog_t *prog);
 void VM_strzone(prvm_prog_t *prog);
 void VM_strunzone(prvm_prog_t *prog);
 
-// KrimZon - DP_QC_ENTITYDATA
 void VM_numentityfields(prvm_prog_t *prog);
 void VM_entityfieldname(prvm_prog_t *prog);
 void VM_entityfieldtype(prvm_prog_t *prog);
 void VM_getentityfieldstring(prvm_prog_t *prog);
 void VM_putentityfieldstring(prvm_prog_t *prog);
 
-// DRESK - String Length (not counting color codes)
 void VM_strlennocol(prvm_prog_t *prog);
-// DRESK - Decolorized String
+
 void VM_strdecolorize(prvm_prog_t *prog);
-// DRESK - String Uppercase and Lowercase Support
+
 void VM_strtolower(prvm_prog_t *prog);
 void VM_strtoupper(prvm_prog_t *prog);
 
@@ -334,7 +137,7 @@ void VM_argv (prvm_prog_t *prog);
 void VM_isserver(prvm_prog_t *prog);
 void VM_clientcount(prvm_prog_t *prog);
 void VM_clientstate(prvm_prog_t *prog);
-// not used at the moment -> not included in the common list
+
 void VM_getostype(prvm_prog_t *prog);
 void VM_getmousepos(prvm_prog_t *prog);
 void VM_gettime(prvm_prog_t *prog);
@@ -458,6 +261,11 @@ void VM_mesh_scatter(prvm_prog_t *prog);
 void VM_mesh_publish(prvm_prog_t *prog);
 void VM_mesh_poll(prvm_prog_t *prog);
 void VM_mesh_stat(prvm_prog_t *prog);
+void VM_mesh_gather_rows(prvm_prog_t *prog);
+void VM_mesh_scatter_rows(prvm_prog_t *prog);
+void VM_mesh_gather_list(prvm_prog_t *prog);
+void VM_bot_controller_batch(prvm_prog_t *prog);
+void VM_bot_controller_stat(prvm_prog_t *prog);
 void VM_netaddress_resolve (prvm_prog_t *prog);
 
 void VM_tokenize_console (prvm_prog_t *prog);
@@ -470,7 +278,6 @@ void VM_cvar_description(prvm_prog_t *prog);
 void VM_CL_getextresponse (prvm_prog_t *prog);
 void VM_SV_getextresponse (prvm_prog_t *prog);
 
-// Common functions between menu.dat and clsprogs
 void VM_CL_isdemo (prvm_prog_t *prog);
 void VM_CL_videoplaying (prvm_prog_t *prog);
 
@@ -489,7 +296,6 @@ void VM_getsurfaceclippedpoint(prvm_prog_t *prog);
 void VM_getsurfacenumtriangles(prvm_prog_t *prog);
 void VM_getsurfacetriangle(prvm_prog_t *prog);
 
-// physics builtins
 void VM_physics_enable(prvm_prog_t *prog);
 void VM_physics_addforce(prvm_prog_t *prog);
 void VM_physics_addtorque(prvm_prog_t *prog);

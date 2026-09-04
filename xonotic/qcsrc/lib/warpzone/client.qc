@@ -11,13 +11,13 @@ void WarpZone_Fade_PreDraw(entity this)
 {
 	vector org;
 	org = getpropertyvec(VF_ORIGIN);
-	if(!checkpvs(org, this)) // this makes sense as long as we don't support recursive warpzones
+	if(!checkpvs(org, this))
 		this.alpha = 0;
 	else if(this.warpzone_fadestart)
 		this.alpha = bound(0, (this.warpzone_fadeend - vlen(org - this.origin - 0.5 * (this.mins + this.maxs))) / (this.warpzone_fadeend - this.warpzone_fadestart), 1);
 	else
 		this.alpha = 1;
-	//printf("%v <-> %v\n", view_origin, this.origin + 0.5 * (this.mins + this.maxs));
+
 	if(this.alpha <= 0)
 		this.drawmask = 0;
 	else
@@ -29,8 +29,8 @@ NET_HANDLE(ENT_CLIENT_WARPZONE, bool isnew)
 {
 	if(!warpzone_warpzones_exist)
 	{
-		cvar_settemp("r_water", "1"); // HACK for DarkPlaces: always enable reflections when a map has warpzones
-		cvar_settemp("r_water_resolutionmultiplier", "1"); // HACK for DarkPlaces: enforce full quality so entities can be seen clearly through warpzones
+		cvar_settemp("r_water", "1");
+		cvar_settemp("r_water_resolutionmultiplier", "1");
 	}
 	warpzone_warpzones_exist = 1;
 	if (!this.enemy)
@@ -70,19 +70,13 @@ NET_HANDLE(ENT_CLIENT_WARPZONE, bool isnew)
 		this.warpzone_fadeend = 0;
 	}
 
-	// common stuff
 	WarpZone_SetUp(this, this.enemy.oldorigin, this.enemy.avelocity, this.oldorigin, this.avelocity);
 
-	// link me
-	//setmodel(this, this.model);
 	setorigin(this, this.origin);
 	setsize(this, this.mins, this.maxs);
 
-	// how to draw
-	// engine currently wants this
 	setpredraw(this, WarpZone_Fade_PreDraw);
 
-	//settouch(this, WarpZone_Touch);
 	return true;
 }
 
@@ -90,8 +84,8 @@ NET_HANDLE(ENT_CLIENT_WARPZONE_CAMERA, bool isnew)
 {
 	if(!warpzone_cameras_exist)
 	{
-		cvar_settemp("r_water", "1"); // HACK for DarkPlaces: always enable reflections when a map has cameras
-		cvar_settemp("r_water_resolutionmultiplier", "1"); // HACK for DarkPlaces: enforce full quality so entities can be seen clearly through warpzones
+		cvar_settemp("r_water", "1");
+		cvar_settemp("r_water_resolutionmultiplier", "1");
 	}
 	warpzone_cameras_exist = 1;
 	this.classname = "func_warpzone_camera";
@@ -121,19 +115,13 @@ NET_HANDLE(ENT_CLIENT_WARPZONE_CAMERA, bool isnew)
 		this.warpzone_fadeend = 0;
 	}
 
-	// common stuff
 	WarpZone_Camera_SetUp(this, this.oldorigin, this.avelocity);
 
-	// engine currently wants this
 	this.drawmask = MASK_NORMAL;
 
-	// link me
-	//setmodel(this, this.model);
 	setorigin(this, this.origin);
 	setsize(this, this.mins, this.maxs);
 
-	// how to draw
-	// engine currently wants this
 	setpredraw(this, WarpZone_Fade_PreDraw);
 	return true;
 }
@@ -149,7 +137,7 @@ NET_HANDLE(ENT_CLIENT_WARPZONE_TELEPORTED, bool isnew)
 	setproperty(VF_CL_VIEWANGLES, WarpZone_TransformVAngles(this, getpropertyvec(VF_CL_VIEWANGLES)));
 	if(checkextension("DP_CSQC_ROTATEMOVES"))
 		CL_RotateMoves(v);
-		//CL_RotateMoves('0 90 0');
+
 }
 
 float warpzone_fixingview;
@@ -195,7 +183,7 @@ vector WarpZone_FixNearClip(vector o, vector c0, vector c1, vector c2, vector c3
 	{
 		if(WarpZone_PlaneDist(e, o) < 0)
 			return '0 0 0';
-			// can't really be, though, but if it is, this is not my warpzone, but a random different one in the same mins/maxs
+
 		pd = min(
 				WarpZone_PlaneDist(e, c0),
 				WarpZone_PlaneDist(e, c1),
@@ -247,7 +235,7 @@ void WarpZone_FixView()
 	if (STAT(HEALTH) > 0 || STAT(HEALTH) == -666 || STAT(HEALTH) == -2342)
 	{
 		f = 0;
-		// reset roll when passing through a warpzone that change player's roll angle
+
 		if(autocvar_cl_rollkillspeed)
 			f = max(0, (1 - frametime * autocvar_cl_rollkillspeed));
 		if(rollkill)
@@ -256,7 +244,7 @@ void WarpZone_FixView()
 	else
 	{
 		f = 1;
-		// roll the view when killed (v_deathtilt)
+
 		if(autocvar_cl_rollkillspeed)
 		{
 			rollkill += frametime * autocvar_cl_rollkillspeed;

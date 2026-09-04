@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/mutators/mutator/status_effects/all.qc>
 #include <common/mutators/mutator/status_effects/status_effects.qc>
 #ifdef CSQC

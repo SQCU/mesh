@@ -23,7 +23,7 @@ const float SSF_VERBOSE = 2;
 const float SSF_ITEMMSG = 4;
 .float superspec_flags;
 
-.string superspec_itemfilter; //"classname1 classname2 ..."
+.string superspec_itemfilter;
 
 bool superspec_Spectate(entity this, entity targ)
 {
@@ -155,7 +155,7 @@ MUTATOR_HOOKFUNCTION(superspec, SV_ParseClientCommand)
     var = strcat(var, ((flag & test) ? "^2[ON]  ^7" : "^1[OFF] ^7")); \
     var = strcat(var, text," ^7(^3 ", long, "^7 | ^3", short, " ^7)\n")
 
-	if(MUTATOR_RETURNVALUE) // command was already handled?
+	if(MUTATOR_RETURNVALUE)
 		return;
 
 	entity player = M_ARGV(0, entity);
@@ -194,7 +194,6 @@ MUTATOR_HOOKFUNCTION(superspec, SV_ParseClientCommand)
 			string _msg = "";
 			for(i = 0; i < l; ++i)
 				_msg = strcat(_msg, "^3#", ftos(i), " ^7", argv(i), "\n");
-				//_msg = sprintf("^3#%d^7 %s\n%s", i, _msg, argv(i));
 
 			_msg = strcat(_msg,"\n");
 
@@ -267,8 +266,6 @@ MUTATOR_HOOKFUNCTION(superspec, SV_ParseClientCommand)
 
 		return true;
 	}
-
-/////////////////////
 
 	if(cmd_name == "autospec")
 	{
@@ -346,7 +343,7 @@ MUTATOR_HOOKFUNCTION(superspec, SV_ParseClientCommand)
 
 	if(cmd_name == "followpowerup")
 	{
-		// TODO: somehow cheaply loop through all held powerups
+
 		FOREACH_CLIENT(IS_PLAYER(it) && (StatusEffects_active(STATUSEFFECT_Strength, it) || StatusEffects_active(STATUSEFFECT_Shield, it)), { return superspec_Spectate(player, it); });
 
 		superspec_msg("", "", player, "No active powerup\n", 1);

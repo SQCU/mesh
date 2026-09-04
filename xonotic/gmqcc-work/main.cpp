@@ -5,9 +5,6 @@
 #include "lexer.h"
 #include "parser.h"
 
-/* TODO: cleanup this whole file .. it's a fuckign mess */
-
-/* set by the standard */
 const oper_info *operators = nullptr;
 size_t operator_count = 0;
 static bool opts_output_wasset = false;
@@ -66,7 +63,6 @@ static int usage(void) {
     return -1;
 }
 
-/* command line parsing */
 static bool options_witharg(int *argc_, char ***argv_, char **out) {
     int  argc   = *argc_;
     char **argv = *argv_;
@@ -75,8 +71,8 @@ static bool options_witharg(int *argc_, char ***argv_, char **out) {
         *out = argv[0]+2;
         return true;
     }
-    /* eat up the next */
-    if (argc < 2) /* no parameter was provided */
+
+    if (argc < 2)
         return false;
 
     *out = argv[1];
@@ -94,17 +90,15 @@ static bool options_long_witharg_all(const char *optname, int *argc_, char ***ar
     if (strncmp(argv[0]+ds, optname, len))
         return false;
 
-    /* it's --optname, check how the parameter is supplied */
     if (argv[0][ds+len] == '=') {
-        /* using --opt=param */
+
         *out = argv[0]+ds+len+1;
         return true;
     }
 
-    if (!split || argc < ds) /* no parameter was provided, or only single-arg form accepted */
+    if (!split || argc < ds)
         return false;
 
-    /* using --opt param */
     *out = argv[1];
     --*argc_;
     ++*argv_;
@@ -132,7 +126,7 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
         --argc;
 
         if (argv[0][0] == '-') {
-            /* All gcc-type long options */
+
             if (options_long_gcc("std", &argc, &argv, &argarg)) {
                 if (!strcmp(argarg, "gmqcc") || !strcmp(argarg, "default")) {
 
@@ -150,8 +144,6 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
                     opts_set(opts.werror, WARN_MISSING_RETURN_VALUES,   true);
                     opts_set(opts.flags,  EXPRESSIONS_FOR_BUILTINS,     true);
                     opts_set(opts.warn,   WARN_BREAKDEF,                true);
-
-
 
                     OPTS_OPTION_U32(OPTION_STANDARD) = COMPILER_GMQCC;
 
@@ -206,7 +198,6 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
                 continue;
             }
 
-            /* show defaults (like pathscale) */
             if (!strcmp(argv[0]+1, "show-defaults")) {
                 for (itr = 0; itr < COUNT_FLAGS; ++itr) {
                     if (!OPTS_FLAG(itr))
@@ -251,11 +242,10 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
             }
 
             switch (argv[0][1]) {
-                /* -h, show usage but exit with 0 */
+
                 case 'h':
                     usage();
                     exit(0);
-                    /* break; never reached because of exit(0) */
 
                 case 'v':
                     version();
@@ -263,10 +253,9 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
 
                 case 'E':
                     OPTS_OPTION_BOOL(OPTION_PP_ONLY) = true;
-                    opts_set(opts.flags, FTEPP_PREDEFS, true); /* predefs on for -E */
+                    opts_set(opts.flags, FTEPP_PREDEFS, true);
                     break;
 
-                /* debug turns on -flno */
                 case 'g':
                     opts_setflag("LNO", true);
                     OPTS_OPTION_BOOL(OPTION_G) = true;
@@ -286,14 +275,13 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
                         macro.name  = util_strdup(argv[0]+2);
                         macro.value = nullptr;
                     } else {
-                        *argarg='\0'; /* terminate for name */
+                        *argarg='\0';
                         macro.name  = util_strdup(argv[0]+2);
                         macro.value = util_strdup(argarg+1);
                     }
                     vec_push(ppems, macro);
                     break;
 
-                /* handle all -fflags */
                 case 'f':
                     util_strtocmd(argv[0]+2, argv[0]+2, strlen(argv[0]+2)+1);
                     if (!strcmp(argv[0]+2, "HELP") || *(argv[0]+2) == '?') {
@@ -401,7 +389,7 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
                         else if (!strcmp(argarg, "ALL"))
                             opts_setoptimlevel(OPTS_OPTION_U32(OPTION_O) = 9999);
                         else if (!strncmp(argarg, "NO_", 3)) {
-                            /* constant folding cannot be turned off for obvious reasons */
+
                             if (!strcmp(argarg, "NO_CONST_FOLD") || !opts_setoptim(argarg+3, false)) {
                                 con_out("unknown optimization: %s\n", argarg+3);
                                 return false;
@@ -442,11 +430,11 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
 
                 case '-':
                     if (!argv[0][2]) {
-                        /* anything following -- is considered a non-option argument */
+
                         argend = true;
                         break;
                     }
-            /* All long options without arguments */
+
                     else if (!strcmp(argv[0]+2, "help")) {
                         usage();
                         exit(0);
@@ -464,7 +452,7 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
                         break;
                     }
                     else {
-            /* All long options with arguments */
+
                         if (options_long_witharg("output", &argc, &argv, &argarg)) {
                             OPTS_OPTION_STR(OPTION_OUTPUT) = argarg;
                             opts_output_wasset = true;
@@ -482,7 +470,7 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
         }
         else
         {
-            /* it's a QC filename */
+
             item.filename = argv[0];
             item.type     = TYPE_QC;
             vec_push(items, item);
@@ -492,7 +480,6 @@ static bool options_parse(int argc, char **argv, bool *has_progs_src) {
     return true;
 }
 
-/* returns the line number, or -1 on error */
 static bool progs_nextline(char **out, size_t *alen, FILE *src) {
     int    len;
     char  *line;
@@ -504,13 +491,12 @@ static bool progs_nextline(char **out, size_t *alen, FILE *src) {
     if (len == -1)
         return false;
 
-    /* start at first non-blank */
     for (start = line; util_isspace(*start); ++start) {}
-    /* end at the first non-blank */
+
     for (end = start; *end && !util_isspace(*end);  ++end)   {}
 
     *out = line;
-    /* move the actual filename to the beginning */
+
     while (start != end) {
         *line++ = *start++;
     }
@@ -542,7 +528,6 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    /* the standard decides which set of operators to use */
     if (OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_GMQCC) {
         operators      = c_operators;
         operator_count = GMQCC_ARRAY_COUNT(c_operators);
@@ -555,7 +540,7 @@ int main(int argc, char **argv) {
     }
 
     if (operators == fte_operators) {
-        /* fix ternary? */
+
         if (OPTS_FLAG(CORRECT_TERNARY)) {
             oper_info *newops;
             if (operators[operator_count-2].id != opid1(',') ||
@@ -615,13 +600,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* add macros */
     if (OPTS_OPTION_BOOL(OPTION_PP_ONLY) || OPTS_FLAG(FTEPP)) {
         for (itr = 0; itr < vec_size(ppems); itr++) {
             ftepp_add_macro(ftepp, ppems[itr].name, ppems[itr].value);
             mem_d(ppems[itr].name);
 
-            /* can be null */
             if (ppems[itr].value)
                 mem_d(ppems[itr].value);
         }
@@ -756,7 +739,6 @@ cleanup:
     if (!OPTS_OPTION_BOOL(OPTION_PP_ONLY))
         delete parser;
 
-    /* free allocated option strings */
     for (itr = 0; itr < OPTION_COUNT; itr++)
         if (OPTS_OPTION_DUPED(itr))
             mem_d(OPTS_OPTION_STR(itr));

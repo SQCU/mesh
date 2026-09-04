@@ -8,11 +8,9 @@
 #include <common/mutators/mutator/waypoints/all.qh>
 #include <common/resources/cl_resources.qh>
 
-// Radar (#6)
-
 void HUD_Radar_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_radar_foreground_alpha");
 	HUD_Write_Cvar("hud_panel_radar_rotation");
 	HUD_Write_Cvar("hud_panel_radar_zoommode");
@@ -54,7 +52,6 @@ void HUD_Radar_Hide_Maximized()
 	HUD_Radar_Show_Maximized(false,false);
 }
 
-
 float HUD_Radar_InputEvent(int bInputType, float nPrimary, float nSecondary)
 {
 	TC(int, bInputType);
@@ -71,7 +68,6 @@ float HUD_Radar_InputEvent(int bInputType, float nPrimary, float nSecondary)
 	if (bInputType == 2)
 		return false;
 
-	// at this point bInputType can only be 0 or 1 (key pressed or released)
 	bool key_pressed = (bInputType == 0);
 
 	if(nPrimary == K_MOUSE1)
@@ -94,9 +90,9 @@ float HUD_Radar_InputEvent(int bInputType, float nPrimary, float nSecondary)
 	}
 	else
 	{
-		// allow console/use binds to work without hiding the map
+
 		string con_keys = strcat(findkeysforcommand("toggleconsole", 0), " ", findkeysforcommand("+use", 0)) ;
-		int keys = tokenize(con_keys); // findkeysforcommand returns data for this
+		int keys = tokenize(con_keys);
 		int i;
 		for (i = 0; i < keys; ++i)
 		{
@@ -106,7 +102,7 @@ float HUD_Radar_InputEvent(int bInputType, float nPrimary, float nSecondary)
 
 		if ( STAT(HEALTH) <= 0 )
 		{
-			// Show scoreboard
+
 			con_keys = findkeysforcommand("+showscores", 0);
 			keys = tokenize(con_keys);
 			for (i = 0; i < keys; ++i)
@@ -141,7 +137,6 @@ void HUD_Radar_Mouse()
 	panel = HUD_PANEL(RADAR);
 	HUD_Panel_LoadCvars();
 
-
 	panel_size = autocvar_hud_panel_radar_maximized_size;
 	panel_size_x = bound(0.2, panel_size_x, 1) * vid_conwidth;
 	panel_size_y = bound(0.2, panel_size_y, 1) * vid_conheight;
@@ -150,7 +145,7 @@ void HUD_Radar_Mouse()
 
 	if(mouseClicked & S_MOUSE1)
 	{
-		// click outside
+
 		if ( mousepos_x < panel_pos_x || mousepos_x > panel_pos_x + panel_size_x ||
 			 mousepos_y < panel_pos_y || mousepos_y > panel_pos_y + panel_size_y )
 		{
@@ -197,7 +192,7 @@ void HUD_Radar()
 			if (autocvar_hud_panel_radar != 2 && !teamplay) return;
 			if(radar_panel_modified)
 			{
-				panel.update_time = time; // forces reload of panel attributes
+				panel.update_time = time;
 				radar_panel_modified = false;
 			}
 		}
@@ -219,9 +214,9 @@ void HUD_Radar()
 		panel_pos.y = (vid_conheight - panel_size.y) / 2;
 
 		string panel_bg;
-		panel_bg = strcat(hud_skin_path, "/border_default"); // always use the default border when maximized
+		panel_bg = strcat(hud_skin_path, "/border_default");
 		if(precache_pic(panel_bg) == "")
-			panel_bg = "gfx/hud/default/border_default"; // fallback
+			panel_bg = "gfx/hud/default/border_default";
 		if(!radar_panel_modified && panel_bg != panel.current_panel_bg)
 			radar_panel_modified = true;
 		strcpy(panel.current_panel_bg, panel_bg);
@@ -265,12 +260,11 @@ void HUD_Radar()
 	scale2d = vlen_maxnorm2d(mi_picmax - mi_picmin);
 	teamradar_size2d = HUD_Scale(mySize);
 
-	teamradar_extraclip_mins = teamradar_extraclip_maxs = '0 0 0'; // we always center
+	teamradar_extraclip_mins = teamradar_extraclip_maxs = '0 0 0';
 
-	// pixels per world qu to match the teamradar_size2d_x range in the longest dimension
 	if((hud_panel_radar_rotation == 0 && !hud_panel_radar_maximized) || (hud_panel_radar_maximized_rotation == 0 && hud_panel_radar_maximized))
 	{
-		// max-min distance must fit the radar in any rotation
+
 		bigsize = vlen_minnorm2d(teamradar_size2d) * scale2d / (1.05 * vlen(vec2(mi_scale)));
 	}
 	else
@@ -284,7 +278,6 @@ void HUD_Radar()
 		span.x = max(c0_x, c1_x, c2_x, c3_x) - min(c0_x, c1_x, c2_x, c3_x);
 		span.y = max(c0_y, c1_y, c2_y, c3_y) - min(c0_y, c1_y, c2_y, c3_y);
 
-		// max-min distance must fit the radar in x=x, y=y
 		bigsize = min(
 			teamradar_size2d.x * scale2d / (1.05 * span.x),
 			teamradar_size2d.y * scale2d / (1.05 * span.y)
@@ -304,7 +297,7 @@ void HUD_Radar()
 
 	IL_EACH(g_radarlinks, true, draw_teamradar_link(it.origin, it.velocity, it.team));
 
-	bool mutator_returnvalue = MUTATOR_CALLHOOK(TeamRadar_Draw); // TODO: allow players to show on the radar as well!
+	bool mutator_returnvalue = MUTATOR_CALLHOOK(TeamRadar_Draw);
 
 	IL_EACH(g_radaricons, it.teamradar_icon, {
 		if ( hud_panel_radar_mouse )

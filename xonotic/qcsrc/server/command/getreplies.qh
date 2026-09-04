@@ -1,19 +1,12 @@
 #pragma once
 
-// ======================================================
-//  Declarations for reply messages, re-worked by Samual
-//  Last updated: December 30th, 2011
-// ======================================================
-
-// ladder bullshit todo
 const int LADDER_FIRSTPOINT = 100;
-#define LADDER_CNT 10       // position X still gives LADDER_FIRSTPOINT/X points
-const int LADDER_SIZE = 30; // ladder shows the top X players
+#define LADDER_CNT 10
+const int LADDER_SIZE = 30;
 
 string top_uids[LADDER_SIZE];
 float top_scores[LADDER_SIZE];
 
-// allow functions to be used in other code like world.qc and race.qc
 string getrecords(float page);
 string getrankings();
 string getladder();

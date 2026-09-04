@@ -20,7 +20,7 @@ vector teamradar_texcoord_to_2dcoord(vector in)
 	in -= teamradar_origin3d_in_texcoord;
 
 	out = Rotate(in, teamradar_angle * DEG2RAD);
-	out.y = - out.y; // screen space is reversed
+	out.y = - out.y;
 
 	out = out * teamradar_size;
 	if(v_flipped)
@@ -28,7 +28,6 @@ vector teamradar_texcoord_to_2dcoord(vector in)
 	out += teamradar_origin2d;
 	return out;
 }
-
 
 vector teamradar_2dcoord_to_texcoord(vector in)
 {
@@ -40,7 +39,7 @@ vector teamradar_2dcoord_to_texcoord(vector in)
 		out_x = -out_x;
 	out = out / teamradar_size;
 
-	out_y = - out_y; // screen space is reversed
+	out_y = - out_y;
 	out = Rotate(out, -teamradar_angle * DEG2RAD);
 
 	out += teamradar_origin3d_in_texcoord;
@@ -97,7 +96,7 @@ void draw_teamradar_player(vector coord3d, vector pangles, vector rgb)
 	{
 		forward.x = -forward.x;
 		right.x = -right.x;
-		up.x = -up.x; // TODO: unused!
+		up.x = -up.x;
 	}
 	forward.z = 0;
 	forward = normalize(forward);
@@ -185,15 +184,11 @@ void teamradar_loadcvars()
 	hud_panel_radar_maximized_rotation = autocvar_hud_panel_radar_maximized_rotation;
 	hud_panel_radar_maximized_zoommode = autocvar_hud_panel_radar_maximized_zoommode;
 
-	// others default to 0
-	// match this to default hud cfg file!
 	if(!hud_panel_radar_scale) hud_panel_radar_scale = 4096;
 	if(!hud_panel_radar_foreground_alpha) hud_panel_radar_foreground_alpha = 0.8 * panel_fg_alpha;
 	if(!hud_panel_radar_size.x) hud_panel_radar_size.x = 128;
 	if(!hud_panel_radar_size.y) hud_panel_radar_size.y = hud_panel_radar_size.x;
 }
-
-// radar links
 
 NET_HANDLE(ENT_CLIENT_RADARLINK, bool isnew)
 {

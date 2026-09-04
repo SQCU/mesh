@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 
@@ -35,7 +17,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "cdaudio.h"
 
-
 #ifndef __FreeBSD__
 # define DEFAULT_CD_DEVICE _PATH_DEV "cd0"
 #else
@@ -44,7 +25,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 static int cdfile = -1;
 static char cd_dev[64] = DEFAULT_CD_DEVICE;
-
 
 void CDAudio_SysEject (void)
 {
@@ -55,7 +35,6 @@ void CDAudio_SysEject (void)
 	if (ioctl(cdfile, CDIOCEJECT) == -1)
 		Con_Print("ioctl CDIOCEJECT failed\n");
 }
-
 
 void CDAudio_SysCloseDoor (void)
 {
@@ -89,7 +68,6 @@ int CDAudio_SysGetAudioDiskInfo (void)
 	return tochdr.ending_track;
 }
 
-
 float CDAudio_SysGetVolume (void)
 {
 	struct ioc_vol vol;
@@ -106,7 +84,6 @@ float CDAudio_SysGetVolume (void)
 	return (vol.vol[0] + vol.vol[1]) / 2.0f / 255.0f;
 }
 
-
 void CDAudio_SysSetVolume (float volume)
 {
 	struct ioc_vol vol;
@@ -121,7 +98,6 @@ void CDAudio_SysSetVolume (float volume)
 		Con_Printf ("ioctl CDIOCSETVOL failed\n");
 }
 
-
 int CDAudio_SysPlay (int track)
 {
 	struct ioc_read_toc_entry rte;
@@ -131,7 +107,6 @@ int CDAudio_SysPlay (int track)
 	if (cdfile == -1)
 		return -1;
 
-	// don't try to play a non-audio track
 	rte.address_format = CD_MSF_FORMAT;
 	rte.starting_track = track;
 	rte.data_len = sizeof(entry);
@@ -141,7 +116,7 @@ int CDAudio_SysPlay (int track)
 		Con_Print("ioctl CDIOREADTOCENTRYS failed\n");
 		return -1;
 	}
-	if (entry.control & 4)  // if it's a data track
+	if (entry.control & 4)
 	{
 		Con_Printf("CDAudio: track %i is not audio\n", track);
 		return -1;
@@ -169,7 +144,6 @@ int CDAudio_SysPlay (int track)
 
 	return 0;
 }
-
 
 int CDAudio_SysStop (void)
 {
@@ -200,7 +174,6 @@ int CDAudio_SysPause (void)
 	return 0;
 }
 
-
 int CDAudio_SysResume (void)
 {
 	if (cdfile == -1)
@@ -220,7 +193,7 @@ int CDAudio_SysUpdate (void)
 
 	if (cdPlaying && lastchk < time(NULL))
 	{
-		lastchk = time(NULL) + 2; //two seconds between chks
+		lastchk = time(NULL) + 2;
 
 		bzero(&subchnl, sizeof(subchnl));
 		subchnl.data = &data;
@@ -252,7 +225,6 @@ void CDAudio_SysInit (void)
 {
 	int i;
 
-// COMMANDLINEOPTION: BSD Sound: -cddev <devicepath> chooses which CD drive to use
 	if ((i = COM_CheckParm("-cddev")) != 0 && i < com_argc - 1)
 		strlcpy(cd_dev, com_argv[i + 1], sizeof(cd_dev));
 }

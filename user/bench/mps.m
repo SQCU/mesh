@@ -7,7 +7,7 @@ int main(int argc,char**argv){@autoreleasepool{
  id<MTLDevice> dev=MTLCreateSystemDefaultDevice();
  id<MTLCommandQueue> q=[dev newCommandQueue];
  NSLog(@"device %@ unified=%d maxbuf=%.1fGB",dev.name,(int)dev.hasUnifiedMemory,dev.maxBufferLength/1e9);
- int N=4096; int Ks[]={1,4,16,32,64,128,256,512,1024,4096}; 
+ int N=4096; int Ks[]={1,4,16,32,64,128,256,512,1024,4096};
  for(int t32=0;t32<2;t32++){
   MPSDataType dt = t32? MPSDataTypeFloat32 : MPSDataTypeFloat16;
   int es = t32?4:2;

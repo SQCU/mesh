@@ -22,7 +22,7 @@ bool buffs_BuffModel_Customize(entity this, entity client)
 
 	if(player == myowner)
 	{
-		// somewhat hide the model, but keep the glow
+
 		this.effects = 0;
 		this.alpha = -1;
 	}
@@ -40,7 +40,7 @@ void buffs_BuffModel_Think(entity this)
 	entity player = this.owner;
 	if(player.alpha < 0 || player.buff_model != this)
 	{
-		if(player) // remnant from ChatBubbleThink, same question... WHY?!
+		if(player)
 			player.buff_model = NULL;
 		delete(this);
 		return;
@@ -60,7 +60,7 @@ void buffs_BuffModel_Think(entity this)
 
 	this.effects = player.effects;
 	this.effects |= EF_LOWPRECISION;
-	this.effects = this.effects & EFMASK_CHEAP; // eat performance
+	this.effects = this.effects & EFMASK_CHEAP;
 
 	this.alpha = player.alpha;
 }
@@ -93,7 +93,7 @@ void buffs_BuffModel_Update(entity this)
 {
 	if (this.alpha < 0)
 		return;
-	// spawn a buff model entity if needed
+
 	if (!this.buff_model)
 		buffs_BuffModel_Spawn(this);
 }
@@ -105,18 +105,17 @@ void buff_Effect(entity player, string eff)
 	if(time >= player.buff_effect_delay)
 	{
 		Send_Effect_(eff, player.origin + ((player.mins + player.maxs) * 0.5), '0 0 0', 1);
-		player.buff_effect_delay = time + 0.05; // prevent spam
+		player.buff_effect_delay = time + 0.05;
 	}
 }
 
-// buff item
 bool buff_Waypoint_visible_for_player(entity this, entity player, entity view)
 {
 	if(!this.owner.buff_active && !this.owner.buff_activetime || !this.owner.buffdef)
 		return false;
 
-	entity heldbuff = buff_FirstFromFlags(view); // TODO: cache this information so it isn't performing a loop every frame
-	if (heldbuff) 
+	entity heldbuff = buff_FirstFromFlags(view);
+	if (heldbuff)
 	{
 		return CS_CVAR(view).cvar_cl_buffs_autoreplace == false || heldbuff != this.owner.buffdef;
 	}
@@ -167,7 +166,7 @@ void buff_Respawn(entity this)
 
 	tracebox(this.origin, this.mins * 1.5, this.maxs * 1.5, this.origin, MOVE_NOMONSTERS, this);
 
-	setorigin(this, trace_endpos); // attempt to unstick
+	setorigin(this, trace_endpos);
 
 	set_movetype(this, MOVETYPE_TOSS);
 
@@ -181,7 +180,7 @@ void buff_Respawn(entity this)
 
 	WaypointSprite_Ping(this.buff_waypoint);
 
-	sound(this, CH_TRIGGER, SND_KA_RESPAWN, VOL_BASE, ATTEN_NONE); // ATTEN_NONE (it's a sound intended to be heard anywhere)
+	sound(this, CH_TRIGGER, SND_KA_RESPAWN, VOL_BASE, ATTEN_NONE);
 }
 
 void buff_Touch(entity this, entity toucher)
@@ -202,16 +201,16 @@ void buff_Touch(entity this, entity toucher)
 	toucher = M_ARGV(1, entity);
 
 	if(!IS_PLAYER(toucher))
-		return; // incase mutator changed toucher
+		return;
 
 	if((this.team_forced && toucher.team != this.team_forced)
 	|| (STAT(FROZEN, toucher))
 	|| (toucher.vehicle)
-	|| (!this.buffdef) // TODO: error out or maybe reset type if this occurs?
+	|| (!this.buffdef)
 	|| (time < toucher.buff_shield)
 	)
 	{
-		// can't touch this
+
 		return;
 	}
 
@@ -222,15 +221,14 @@ void buff_Touch(entity this, entity toucher)
 	{
 		if (CS_CVAR(toucher).cvar_cl_buffs_autoreplace && heldbuff != thebuff)
 		{
-			// TODO: lost-gained notification for this case
+
 			int buffid = heldbuff.m_id;
 			Send_Notification(NOTIF_ONE, toucher, MSG_INFO, INFO_ITEM_BUFF_LOST, toucher.netname, buffid);
 			if(!IS_INDEPENDENT_PLAYER(toucher))
 				Send_Notification(NOTIF_ALL_EXCEPT, toucher, MSG_INFO, INFO_ITEM_BUFF_LOST, toucher.netname, buffid);
 
-			//sound(toucher, CH_TRIGGER, SND_BUFF_LOST, VOL_BASE, ATTN_NORM);
 		}
-		else { return; } // do nothing
+		else { return; }
 	}
 
 	this.owner = toucher;
@@ -245,11 +243,11 @@ void buff_Touch(entity this, entity toucher)
 	float oldtime = StatusEffects_gettime(thebuff, toucher);
 	float bufftime = ((this.buffs_finished) ? this.buffs_finished : thebuff.m_time(thebuff));
 
-	buff_RemoveAll(toucher, STATUSEFFECT_REMOVE_NORMAL); // remove previous buffs so that a new one may be added
+	buff_RemoveAll(toucher, STATUSEFFECT_REMOVE_NORMAL);
 	if(bufftime)
 		StatusEffects_apply(thebuff, toucher, min(time + bufftime, max(oldtime, time) + bufftime), 0);
 	else
-		StatusEffects_apply(thebuff, toucher, time + 999, 0); // HACK: zero timer means "infinite"!
+		StatusEffects_apply(thebuff, toucher, time + 999, 0);
 
 	STAT(LAST_PICKUP, toucher) = time;
 }
@@ -272,14 +270,14 @@ void buff_NewType(entity ent)
 	RandomSelection_Init();
 	FOREACH(StatusEffect, it.instanceOfBuff && buff_Available(it),
 	{
-		// if it's already been chosen, give it a lower priority
-		float myseencount = (it.buff_seencount > 0) ? it.buff_seencount : 1; // no division by zero please!
+
+		float myseencount = (it.buff_seencount > 0) ? it.buff_seencount : 1;
 		RandomSelection_AddEnt(it, max(0.2, 1 / myseencount), 1);
 	});
 	entity newbuff = RandomSelection_chosen_ent;
 	if(!newbuff)
 		return;
-	newbuff.buff_seencount += 1; // lower chances of seeing this buff again soon
+	newbuff.buff_seencount += 1;
 	ent.buffdef = newbuff;
 }
 
@@ -318,7 +316,7 @@ void buff_Think(entity this)
 
 		if(this.buff_waypoint)
 		{
-			//WaypointSprite_Disown(this.buff_waypoint, 1);
+
 			WaypointSprite_Kill(this.buff_waypoint);
 			buff_Waypoint_Spawn(this);
 			if(this.buff_activetime)
@@ -373,7 +371,7 @@ void buff_Think(entity this)
 	}
 
 	this.nextthink = time;
-	//this.angles_y = time * 110.1;
+
 }
 
 void buff_Waypoint_Reset(entity this)
@@ -450,7 +448,7 @@ void buff_Init(entity this)
 	this.effects = EF_FULLBRIGHT | EF_STARDUST | EF_NOSHADOW;
 	this.dphitcontentsmask = DPCONTENTS_SOLID | DPCONTENTS_BODY;
 	setcefc(this, buff_Customize);
-	//this.gravity = 100;
+
 	this.color = buff.m_color;
 	this.glowmod = buff.m_color;
 	buff_SetCooldown(this, autocvar_g_buffs_cooldown_activate + max(0, game_starttime - time));
@@ -459,13 +457,13 @@ void buff_Init(entity this)
 	this.dtor = buff_Delete;
 
 	if(!this.buffs_finished)
-		this.buffs_finished = this.count; // legacy support
+		this.buffs_finished = this.count;
 
 	if(this.spawnflags & 1)
 		this.noalign = true;
 
 	if(this.noalign)
-		set_movetype(this, MOVETYPE_NONE); // reset by random location
+		set_movetype(this, MOVETYPE_NONE);
 
 	if(cvar("g_buffs_random_location") || (this.spawnflags & 64))
 		buff_Respawn(this);
@@ -512,7 +510,7 @@ float buff_Inferno_CalculateTime(float damg, float offset_x, float offset_y, flo
 METHOD(Buff, m_apply, void(StatusEffects this, entity actor, float eff_time, float eff_flags))
 {
     if(IS_PLAYER(actor))
-    	actor.effects |= EF_NOSHADOW; // does not play well with buff icon
+	actor.effects |= EF_NOSHADOW;
     SUPER(Buff).m_apply(this, actor, eff_time, eff_flags);
 }
 METHOD(Buff, m_remove, void(StatusEffects this, entity actor, int removal_type))
@@ -523,12 +521,12 @@ METHOD(Buff, m_remove, void(StatusEffects this, entity actor, int removal_type))
 		int buffid = this.m_id;
 		if(removal_type == STATUSEFFECT_REMOVE_TIMEOUT)
 		{
-			Send_Notification(NOTIF_ONE, actor, MSG_MULTI, ITEM_BUFF_DROP, buffid); // TODO: special timeout message?
+			Send_Notification(NOTIF_ONE, actor, MSG_MULTI, ITEM_BUFF_DROP, buffid);
 			sound(actor, CH_TRIGGER, SND_BUFF_LOST, VOL_BASE, ATTN_NORM);
 		}
 		else if(removal_type == STATUSEFFECT_REMOVE_NORMAL && !IS_INDEPENDENT_PLAYER(actor))
 			Send_Notification(NOTIF_ALL_EXCEPT, actor, MSG_INFO, INFO_ITEM_BUFF_LOST, actor.netname, buffid);
-		actor.buff_shield = time + max(0, autocvar_g_buffs_pickup_delay); // always put in a delay, even if small
+		actor.buff_shield = time + max(0, autocvar_g_buffs_pickup_delay);
 	}
 	if(IS_PLAYER(actor))
 		actor.effects &= ~EF_NOSHADOW;
@@ -591,7 +589,6 @@ METHOD(AmmoBuff, m_tick, void(StatusEffects this, entity actor))
 	SUPER(AmmoBuff).m_tick(this, actor);
 }
 
-
 METHOD(FlightBuff, m_apply, void(StatusEffects this, entity actor, float eff_time, float eff_flags))
 {
     bool wasactive = (actor.statuseffects && (actor.statuseffects.statuseffect_flags[this.m_id] & STATUSEFFECT_FLAG_ACTIVE));
@@ -637,7 +634,6 @@ METHOD(MagnetBuff, m_tick, void(StatusEffects this, entity actor))
 	SUPER(MagnetBuff).m_tick(this, actor);
 }
 
-// mutator hooks
 MUTATOR_HOOKFUNCTION(buffs, Damage_Calculate)
 {
 	entity frag_attacker = M_ARGV(1, entity);
@@ -701,7 +697,7 @@ MUTATOR_HOOKFUNCTION(buffs, Damage_Calculate)
 		if(frag_deathtype == DEATH_FIRE.m_id)
 			frag_damage = 0;
 		if(frag_deathtype == DEATH_LAVA.m_id)
-			frag_damage *= 0.5; // TODO: cvarize?
+			frag_damage *= 0.5;
 	}
 
 	if(StatusEffects_active(BUFF_LUCK, frag_attacker))
@@ -729,7 +725,7 @@ MUTATOR_HOOKFUNCTION(buffs, Damage_Calculate)
 
 MUTATOR_HOOKFUNCTION(buffs, PlayerDamage_SplitHealthArmor)
 {
-	// NOTE: vampire PlayerDamage_SplitHealthArmor code is similar
+
 	entity frag_attacker = M_ARGV(1, entity);
 	entity frag_target = M_ARGV(2, entity);
 	if(!StatusEffects_active(BUFF_VAMPIRE, frag_attacker))
@@ -746,7 +742,6 @@ MUTATOR_HOOKFUNCTION(buffs, PlayerDamage_SplitHealthArmor)
 MUTATOR_HOOKFUNCTION(buffs, PlayerPhysics_UpdateStats)
 {
 	entity player = M_ARGV(0, entity);
-	// these automatically reset, no need to worry
 
 	if(StatusEffects_active(STATUSEFFECT_Stunned, player))
 		STAT(MOVEVARS_HIGHSPEED, player) *= autocvar_g_buffs_disability_speed;
@@ -755,7 +750,6 @@ MUTATOR_HOOKFUNCTION(buffs, PlayerPhysics_UpdateStats)
 MUTATOR_HOOKFUNCTION(buffs, PlayerPhysics)
 {
 	entity player = M_ARGV(0, entity);
-	// these automatically reset, no need to worry
 
 	if(StatusEffects_active(BUFF_JUMP, player))
 		STAT(MOVEVARS_JUMPVELOCITY, player) = autocvar_g_buffs_jump_height;
@@ -767,8 +761,8 @@ MUTATOR_HOOKFUNCTION(buffs, MonsterMove)
 
 	if(StatusEffects_active(STATUSEFFECT_Stunned, mon))
 	{
-		M_ARGV(1, float) *= autocvar_g_buffs_disability_speed; // run speed
-		M_ARGV(2, float) *= autocvar_g_buffs_disability_speed; // walk speed
+		M_ARGV(1, float) *= autocvar_g_buffs_disability_speed;
+		M_ARGV(2, float) *= autocvar_g_buffs_disability_speed;
 	}
 }
 
@@ -828,7 +822,7 @@ MUTATOR_HOOKFUNCTION(buffs, ForbidThrowCurrentWeapon)
 
 			Drop_Special_Items(closest);
 
-			MUTATOR_CALLHOOK(PortalTeleport, player); // initiate flag dropper
+			MUTATOR_CALLHOOK(PortalTeleport, player);
 
 			setorigin(player, their_org);
 			setorigin(closest, my_org);
@@ -854,7 +848,6 @@ MUTATOR_HOOKFUNCTION(buffs, ForbidThrowCurrentWeapon)
 			player.oldorigin = their_org;
 			player.oldvelocity = their_vel;
 
-			// set pusher so player gets the kill if they fall into void
 			closest.pusher = player;
 			closest.pushltime = time + autocvar_g_maxpushtime;
 			closest.istypefrag = PHYS_INPUT_BUTTON_CHAT(closest);
@@ -865,7 +858,6 @@ MUTATOR_HOOKFUNCTION(buffs, ForbidThrowCurrentWeapon)
 			sound(player, CH_TRIGGER, SND_KA_RESPAWN, VOL_BASE, ATTEN_NORM);
 			sound(closest, CH_TRIGGER, SND_KA_RESPAWN, VOL_BASE, ATTEN_NORM);
 
-			// TODO: add a counter to handle how many times one can teleport, and a delay to prevent spam
 			buff_RemoveAll(player, STATUSEFFECT_REMOVE_NORMAL);
 			return true;
 		}
@@ -884,7 +876,7 @@ MUTATOR_HOOKFUNCTION(buffs, ClientDisconnect) { entity player = M_ARGV(0, entity
 MUTATOR_HOOKFUNCTION(buffs, FilterItem)
 {
 	if(autocvar_g_buffs < 0)
-		return false; // no auto replacing of entities in this mode
+		return false;
 
 	entity item = M_ARGV(0, entity);
 
@@ -926,7 +918,6 @@ MUTATOR_HOOKFUNCTION(buffs, PlayerPreThink)
 
 	if(game_stopped || IS_DEAD(player) || !IS_PLAYER(player)) return;
 
-	// NOTE: this is kept here to ensure crouches are picked up each player movement frame
 	if(StatusEffects_active(BUFF_FLIGHT, player))
 	{
 		if(!PHYS_INPUT_BUTTON_CROUCH(player))
@@ -948,15 +939,15 @@ MUTATOR_HOOKFUNCTION(buffs, PlayerRegen)
 
 	if(StatusEffects_active(BUFF_MEDIC, player))
 	{
-		M_ARGV(3, float) = autocvar_g_buffs_medic_rot; // rot_mod
-		M_ARGV(4, float) = M_ARGV(1, float) = autocvar_g_buffs_medic_max; // limit_mod = max_mod
-		M_ARGV(2, float) = autocvar_g_buffs_medic_regen; // regen_mod
+		M_ARGV(3, float) = autocvar_g_buffs_medic_rot;
+		M_ARGV(4, float) = M_ARGV(1, float) = autocvar_g_buffs_medic_max;
+		M_ARGV(2, float) = autocvar_g_buffs_medic_regen;
 	}
 }
 
 MUTATOR_HOOKFUNCTION(buffs, BuildMutatorsString)
 {
-	if(autocvar_g_buffs > 0) // only report as a mutator if they're enabled
+	if(autocvar_g_buffs > 0)
 		M_ARGV(0, string) = strcat(M_ARGV(0, string), ":Buffs");
 }
 
@@ -975,8 +966,8 @@ void buffs_DelayedInit(entity this)
 		for(i = 0; i < autocvar_g_buffs_spawn_count; ++i)
 		{
 			entity e = spawn();
-			e.spawnflags |= 64; // always randomize
-			e.velocity = randomvec() * 250; // this gets reset anyway if random location works
+			e.spawnflags |= 64;
+			e.velocity = randomvec() * 250;
 			buff_Init(e);
 		}
 	}
@@ -984,7 +975,7 @@ void buffs_DelayedInit(entity this)
 
 void buffs_Initialize()
 {
-	// if buffs are above 0, allow random spawning
+
 	if(autocvar_g_buffs > 0 && autocvar_g_buffs_spawn_count > 0)
 		InitializeEntity(NULL, buffs_DelayedInit, INITPRIO_FINDTARGET);
 }

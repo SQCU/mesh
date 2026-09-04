@@ -1,9 +1,9 @@
 #include "voicescript.qh"
 #ifdef SVQC
-.entity voicescript; // attached voice script
-.float voicescript_index; // index of next voice, or -1 to use the randomized ones
-.float voicescript_nextthink; // time to play next voice
-.float voicescript_voiceend; // time when this voice ends
+.entity voicescript;
+.float voicescript_index;
+.float voicescript_nextthink;
+.float voicescript_voiceend;
 
 void target_voicescript_clear(entity pl)
 {
@@ -39,7 +39,7 @@ void target_voicescript_next(entity pl)
 	{
 		if(time >= pl.voicescript_nextthink)
 		{
-			// get the next voice...
+
 			n = tokenize_console(vs.message);
 
 			if(pl.voicescript_index < vs.cnt)
@@ -68,7 +68,7 @@ void target_voicescript_next(entity pl)
 			}
 			else
 			{
-				pl.voicescript = NULL; // stop trying then
+				pl.voicescript = NULL;
 			}
 		}
 	}
@@ -76,13 +76,6 @@ void target_voicescript_next(entity pl)
 
 spawnfunc(target_voicescript)
 {
-	// netname: directory of the sound files
-	// message: list of "sound file" duration "sound file" duration, a *, and again a list
-	//          foo1 4.1 foo2 4.0 foo3 -3.1 * fool1 1.1 fool2 7.1 fool3 9.1 fool4 3.7
-	//          Here, a - in front of the duration means that no delay is to be
-	//          added after this message
-	// wait: average time between messages
-	// delay: initial delay before the first message
 
 	float i, n;
 	this.use = target_voicescript_use;

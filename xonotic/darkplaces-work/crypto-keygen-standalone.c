@@ -13,7 +13,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-// BEGIN stuff shared with crypto.c
 #define FOURCC_D0PK (('d' << 0) | ('0' << 8) | ('p' << 16) | ('k' << 24))
 #define FOURCC_D0SK (('d' << 0) | ('0' << 8) | ('s' << 16) | ('k' << 24))
 #define FOURCC_D0PI (('d' << 0) | ('0' << 8) | ('p' << 16) | ('i' << 24))
@@ -219,13 +218,7 @@ void print_generated(int signo)
 		generated = 0;
 	}
 	fprintf(stderr, "Generated: %.0f (about %.0f, %.1f/s, about %.2f hours for %.0f)\n",
-		// nasty and dishonest hack:
-		// we are adjusting the values "back", so the total count is
-		// divided by guessfactor (as the check function is called
-		// guessfactor as often as it would be if no fastreject were
-		// done)
-		// so the values indicate the relative speed of fastreject vs
-		// normal!
+
 		(generated + generated_offset) / guessfactor,
 		(generated + generated_offset) * ntasks / guessfactor,
 		(generated + generated_offset) * ntasks / (guessfactor * seconds),
@@ -311,27 +304,27 @@ int main(int argc, char **argv)
 			case 'b':
 				bits = atoi(optarg);
 				break;
-			case 'p': // d0pk = <pubkey> <modulus>
+			case 'p':
 				pubkeyfile = optarg;
 				mask |= 1;
 				break;
-			case 'P': // d0sk = <privkey> <modulus>
+			case 'P':
 				privkeyfile = optarg;
 				mask |= 2;
 				break;
-			case 'i': // d0pi = <pubid>
+			case 'i':
 				pubidfile = optarg;
 				mask |= 4;
 				break;
-			case 'I': // d0si = <privid>
+			case 'I':
 				prividfile = optarg;
 				mask |= 8;
 				break;
-			case 'j': // d0iq = <req>
+			case 'j':
 				idreqfile = optarg;
 				mask |= 0x10;
 				break;
-			case 'J': // d0ir = <resp>
+			case 'J':
 				idresfile = optarg;
 				mask |= 0x20;
 				break;
@@ -352,7 +345,7 @@ int main(int argc, char **argv)
 				prefixlen = strlen(prefix);
 				break;
 			case '0':
-				// test mode
+
 				mask |= 0x200;
 				break;
 			case 'd':
@@ -375,15 +368,13 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// fastreject is a slight slowdown when rejecting nothing at all
 	if(!infix && !prefixlen)
 		do_fastreject = 0;
 
 	guesscount = pow(64.0, prefixlen);
 	if(infix)
 		guesscount /= (1 - pow(1 - pow(1/64.0, strlen(infix)), 44 - prefixlen - strlen(infix)));
-	// 44 chars; prefix is assumed to not match the infix (although it theoretically could)
-	// 43'th char however is always '=' and does not count
+
 	if(ignorecase)
 	{
 		if(infix)
@@ -397,9 +388,9 @@ int main(int argc, char **argv)
 
 	if(do_fastreject)
 	{
-		// fastreject: reject function gets called about log(2^bits) times more often
+
 		guessfactor = bits * log(2) / 2;
-		// so guess function gets called guesscount * guessfactor times, and it tests as many valid keys as guesscount
+
 	}
 
 	if(mask & 1)
@@ -500,9 +491,9 @@ int main(int argc, char **argv)
 
 	switch(mask)
 	{
-		// modes of operation:
+
 		case 0x40:
-			//   nothing -> private key file (incl modulus), print fingerprint
+
 			generated = 0;
 			generated_offset = 0;
 			seconds = 0;
@@ -514,7 +505,7 @@ int main(int argc, char **argv)
 			}
 			else
 			{
-				guessfactor = 1; // no fastreject here
+				guessfactor = 1;
 				do
 				{
 					CHECK(d0_blind_id_generate_private_key(ctx, bits));
@@ -533,7 +524,7 @@ int main(int argc, char **argv)
 			lumps2file(outfile, FOURCC_D0SK, lumps, lumpsize, 2, 1);
 			break;
 		case 0x42:
-			//   private key file -> public key file (incl modulus)
+
 			lumps[0] = lumps_w0;
 			lumpsize[0] = sizeof(lumps_w0);
 			lumps[1] = lumps_w1;
@@ -543,13 +534,13 @@ int main(int argc, char **argv)
 			lumps2file(outfile, FOURCC_D0PK, lumps, lumpsize, 2, 0);
 			break;
 		case 0x41:
-			//   public key file -> unsigned private ID file
+
 			generated = 0;
 			generated_offset = 0;
 			seconds = 0;
 			signal(SIGALRM, print_generated);
 			alarm(1);
-			guessfactor = 1; // no fastreject here
+			guessfactor = 1;
 			do
 			{
 				CHECK(d0_blind_id_generate_private_id_start(ctx));
@@ -563,7 +554,7 @@ int main(int argc, char **argv)
 			lumps2file(outfile, FOURCC_D0SI, lumps, lumpsize, 1, 1);
 			break;
 		case 0xC9:
-			//   public key file, unsigned private ID file -> ID request file and camouflage file
+
 			lumps[0] = lumps_w0;
 			lumpsize[0] = sizeof(lumps_w0);
 			CHECK(d0_blind_id_generate_private_id_request(ctx, lumps_w0, &lumpsize[0]));
@@ -573,18 +564,18 @@ int main(int argc, char **argv)
 			lumps2file(outfile2, FOURCC_D0IC, lumps, lumpsize, 1, 1);
 			break;
 		case 0x52:
-			//   private key file, ID request file -> ID response file
+
 			lumps2file(outfile, FOURCC_D0IR, lumps+1, lumpsize+1, 1, 0);
 			break;
 		case 0x169:
-			//   public key file, ID response file, private ID file -> signed private ID file
+
 			lumps[0] = lumps_w0;
 			lumpsize[0] = sizeof(lumps_w0);
 			CHECK(d0_blind_id_write_private_id(ctx, lumps_w0, &lumpsize[0]));
 			lumps2file(outfile, FOURCC_D0SI, lumps, lumpsize, 1, 1);
 			break;
 		case 0x4A:
-			//   private key file, private ID file -> signed private ID file
+
 			{
 				char buf[65536]; size_t bufsize;
 				char buf2[65536]; size_t buf2size;
@@ -608,7 +599,7 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 0x48:
-			//   private ID file -> public ID file
+
 			lumps[0] = lumps_w0;
 			lumpsize[0] = sizeof(lumps_w0);
 			CHECK(d0_blind_id_write_public_id(ctx, lumps_w0, &lumpsize[0]));
@@ -616,25 +607,25 @@ int main(int argc, char **argv)
 			break;
 		case 0x01:
 		case 0x02:
-			//   public/private key file -> fingerprint
+
 			CHECK(d0_blind_id_fingerprint64_public_key(ctx, fp64, &fp64size));
 			printf("%.*s\n", (int)fp64size, fp64);
 			break;
 		case 0x05:
 		case 0x09:
-			//   public/private ID file -> fingerprint
+
 			CHECK(d0_blind_id_fingerprint64_public_id(ctx, fp64, &fp64size));
 			printf("%.*s\n", (int)fp64size, fp64);
 			break;
 		case 0x449:
-			//   public key, private ID, data -> signed data
+
 			databufsize_out = databufsize_in + 8192;
 			databuf_out = malloc(databufsize_out);
 			CHECK(d0_blind_id_sign_with_private_id_sign(ctx, 1, 0, databuf_in, databufsize_in, databuf_out, &databufsize_out));
 			buf2file(outfile, databuf_out, databufsize_out);
 			break;
 		case 0x489:
-			//   public key, private ID, data -> signature
+
 			databufsize_out = databufsize_in + 8192;
 			databuf_out = malloc(databufsize_out);
 			CHECK(d0_blind_id_sign_with_private_id_sign_detached(ctx, 1, 0, databuf_in, databufsize_in, databuf_out, &databufsize_out));
@@ -642,7 +633,7 @@ int main(int argc, char **argv)
 			break;
 		case 0x841:
 		case 0x8C1:
-			//   public key, signed data -> data, optional public ID
+
 			{
 				D0_BOOL status;
 				databufsize_out = databufsize_sig;
@@ -667,7 +658,7 @@ int main(int argc, char **argv)
 			break;
 		case 0xC01:
 		case 0xC81:
-			//   public key, signature, signed data -> optional public ID
+
 			{
 				D0_BOOL status;
 				CHECK(d0_blind_id_sign_with_private_id_verify_detached(ctx, 1, 0, databuf_sig, databufsize_sig, databuf_in, databufsize_in, &status));
@@ -687,32 +678,9 @@ int main(int argc, char **argv)
 				}
 			}
 			break;
-/*
-		case 0x09:
-			//   public key, private ID file -> test whether key is properly signed
-			{
-				char buf[65536]; size_t bufsize;
-				char buf2[65536]; size_t buf2size;
-				D0_BOOL status;
-				d0_blind_id_t *ctx2 = d0_blind_id_new();
-				CHECK(d0_blind_id_copy(ctx2, ctx));
-				bufsize = sizeof(buf);
-				CHECK(d0_blind_id_authenticate_with_private_id_start(ctx, 1, 1, "hello world", 11, buf, &bufsize));
-				buf2size = sizeof(buf2);
-				CHECK(d0_blind_id_authenticate_with_private_id_challenge(ctx2, 1, 1, buf, bufsize, buf2, &buf2size, &status));
-				bufsize = sizeof(buf);
-				CHECK(d0_blind_id_authenticate_with_private_id_response(ctx, buf2, buf2size, buf, &bufsize));
-				buf2size = sizeof(buf2);
-				CHECK(d0_blind_id_authenticate_with_private_id_verify(ctx2, buf, bufsize, buf2, &buf2size, &status));
-				if(status)
-					printf("OK\n");
-				else
-					printf("EPIC FAIL\n");
-			}
-			break;
-*/
+
 		case 0x209:
-			// protocol client
+
 			{
 				char hexbuf[131073];
 				const char hex[] = "0123456789abcdef";
@@ -735,7 +703,7 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 0x201:
-			// protocol server
+
 			{
 				char hexbuf[131073];
 				const char hex[] = "0123456789abcdef";

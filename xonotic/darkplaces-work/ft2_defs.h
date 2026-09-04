@@ -1,5 +1,4 @@
-/* FreeType 2 definitions from the freetype header mostly.
- */
+
 
 #ifndef FT2_DEFS_H_H__
 #define FT2_DEFS_H_H__
@@ -41,7 +40,6 @@ typedef struct FT_GlyphSlotRec_*  FT_GlyphSlot;
 typedef struct FT_SubGlyphRec_*  FT_SubGlyph;
 typedef struct FT_Slot_InternalRec_* FT_Slot_Internal;
 
-// Taken from the freetype headers:
 typedef signed long FT_Pos;
 typedef struct FT_Vector_
 {
@@ -64,7 +62,7 @@ typedef enum  FT_Pixel_Mode_
 	FT_PIXEL_MODE_GRAY4,
 	FT_PIXEL_MODE_LCD,
 	FT_PIXEL_MODE_LCD_V,
-	FT_PIXEL_MODE_MAX      /* do not remove */
+	FT_PIXEL_MODE_MAX
 } FT_Pixel_Mode;
 typedef enum  FT_Render_Mode_
 {
@@ -97,14 +95,14 @@ typedef struct  FT_Bitmap_
 
 typedef struct  FT_Outline_
 {
-	short       n_contours;      /* number of contours in glyph        */
-	short       n_points;        /* number of points in the glyph      */
+	short       n_contours;
+	short       n_points;
 
-	FT_Vector*  points;          /* the outline's points               */
-	char*       tags;            /* the points flags                   */
-	short*      contours;        /* the contour end points             */
+	FT_Vector*  points;
+	char*       tags;
+	short*      contours;
 
-	int         flags;           /* outline masks                      */
+	int         flags;
 } FT_Outline;
 
 #define FT_OUTLINE_NONE             0x0
@@ -132,8 +130,8 @@ typedef struct  FT_Outline_
 #define FT_CURVE_TAG_CONIC        0
 #define FT_CURVE_TAG_CUBIC        2
 
-#define FT_CURVE_TAG_TOUCH_X      8  /* reserved for the TrueType hinter */
-#define FT_CURVE_TAG_TOUCH_Y     16  /* reserved for the TrueType hinter */
+#define FT_CURVE_TAG_TOUCH_X      8
+#define FT_CURVE_TAG_TOUCH_Y     16
 
 #define FT_CURVE_TAG_TOUCH_BOTH  ( FT_CURVE_TAG_TOUCH_X | \
                                    FT_CURVE_TAG_TOUCH_Y )
@@ -184,7 +182,7 @@ typedef struct  FT_Outline_Funcs_
                     ( (unsigned long)_x2 << 16 ) | \
                     ( (unsigned long)_x3 << 8  ) | \
                       (unsigned long)_x4         )
-#endif /* FT_IMAGE_TAG */
+#endif
 
 typedef enum  FT_Glyph_Format_
 {
@@ -304,7 +302,6 @@ typedef enum  FT_Encoding_
 	FT_ENC_TAG( FT_ENCODING_WANSUNG, 'w', 'a', 'n', 's' ),
 	FT_ENC_TAG( FT_ENCODING_JOHAB,   'j', 'o', 'h', 'a' ),
 
-	/* for backwards compatibility */
 	FT_ENCODING_MS_SJIS    = FT_ENCODING_SJIS,
 	FT_ENCODING_MS_GB2312  = FT_ENCODING_GB2312,
 	FT_ENCODING_MS_BIG5    = FT_ENCODING_BIG5,
@@ -365,23 +362,23 @@ typedef struct  FT_Generic_
 
 typedef struct  FT_Size_Metrics_
 {
-	FT_UShort  x_ppem;      /* horizontal pixels per EM               */
-	FT_UShort  y_ppem;      /* vertical pixels per EM                 */
+	FT_UShort  x_ppem;
+	FT_UShort  y_ppem;
 
-	FT_Fixed   x_scale;     /* scaling values used to convert font    */
-	FT_Fixed   y_scale;     /* units to 26.6 fractional pixels        */
+	FT_Fixed   x_scale;
+	FT_Fixed   y_scale;
 
-	FT_Pos     ascender;    /* ascender in 26.6 frac. pixels          */
-	FT_Pos     descender;   /* descender in 26.6 frac. pixels         */
-	FT_Pos     height;      /* text height in 26.6 frac. pixels       */
-	FT_Pos     max_advance; /* max horizontal advance, in 26.6 pixels */
+	FT_Pos     ascender;
+	FT_Pos     descender;
+	FT_Pos     height;
+	FT_Pos     max_advance;
 } FT_Size_Metrics;
 
 typedef struct  FT_SizeRec_
 {
-	FT_Face           face;      /* parent face object              */
-	FT_Generic        generic;   /* generic pointer for client uses */
-	FT_Size_Metrics   metrics;   /* size metrics                    */
+	FT_Face           face;
+	FT_Generic        generic;
+	FT_Size_Metrics   metrics;
 	FT_Size_Internal  internal;
 } FT_SizeRec;
 
@@ -406,9 +403,6 @@ typedef struct  FT_FaceRec_
 
 	FT_Generic        generic;
 
-	/*# The following member variables (down to `underline_thickness') */
-	/*# are only relevant to scalable outlines; cf. @FT_Bitmap_Size    */
-	/*# for bitmap fonts.                                              */
 	FT_BBox           bbox;
 
 	FT_UShort         units_per_EM;
@@ -426,18 +420,6 @@ typedef struct  FT_FaceRec_
 	FT_Size           size;
 	FT_CharMap        charmap;
 
-	/* ft2 private
-	FT_Driver         driver;
-	FT_Memory         memory;
-	FT_Stream         stream;
-
-	FT_ListRec        sizes_list;
-
-	FT_Generic        autohint;
-	void*             extensions;
-
-	FT_Face_Internal  internal;
-	*/
 } FT_FaceRec;
 
 typedef struct  FT_GlyphSlotRec_
@@ -445,7 +427,7 @@ typedef struct  FT_GlyphSlotRec_
 	FT_Library        library;
 	FT_Face           face;
 	FT_GlyphSlot      next;
-	FT_UInt           reserved;       /* retained for binary compatibility */
+	FT_UInt           reserved;
 	FT_Generic        generic;
 
 	FT_Glyph_Metrics  metrics;
@@ -497,4 +479,4 @@ typedef enum  FT_Kerning_Mode_
 	FT_KERNING_UNSCALED
 } FT_Kerning_Mode;
 
-#endif // FT2_DEFS_H_H__
+#endif

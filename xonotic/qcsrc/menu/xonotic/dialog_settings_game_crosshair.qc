@@ -25,15 +25,13 @@ void XonoticGameCrosshairSettingsTab_fill(entity me)
 {
 	entity e;
 
-	// crosshair_enabled: 0 = no crosshair options, 1 = no crosshair selection, but everything else enabled, 2 = all crosshair options enabled
-	// FIXME: In the future, perhaps make one global crosshair_type cvar which has 0 for disabled, 1 for custom, 2 for per weapon, etc?
-	me.TR(me); //me.gotoRC(me, 0, 3.2); me.setFirstColumn(me, me.currentColumn);
+	me.TR(me);
 		me.TD(me, 1, 1, e = makeXonoticRadioButton(3, "crosshair_enabled", "0", _("No crosshair")));
-	//me.TR(me);
+
 		me.TD(me, 1, 1, e = makeXonoticRadioButton_T(3, "crosshair_per_weapon", string_null, _("Per weapon"),
 			_("Set a different crosshair for each weapon, good if you play without weapon models")));
 		makeMulti(e, "crosshair_enabled");
-	//me.TR(me);
+
 		me.TD(me, 1, 1, e = makeXonoticRadioButton(3, "crosshair_enabled", "2", _("Custom")));
 	me.TR(me);
 		me.TDempty(me, 0.1);

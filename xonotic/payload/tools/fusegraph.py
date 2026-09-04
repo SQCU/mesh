@@ -1,43 +1,10 @@
-#!/usr/bin/env python3
-"""fusegraph.py -- connectivity solvers, navmesh metrics and trivial visualizers
-for a fused megamap.
-
-Offline stats of the form "3 maps, 3 joins, flood-fill OK" were not sufficient
-evidence that a fusion works.  This tool answers the harder questions, over the
-REAL artifacts (fused.joins.json + fused.waypoints.cache + fused.bsp), and draws
-them:
-
-  SOLVERS (region graph: tiles = nodes, joins = edges)
-    * connected components
-    * articulation points  -> chokepoint TILES
-    * cut edges            -> chokepoint JOINS (lose one and the megamap splits)
-    * 2-edge-connected blocks, hop diameter, degree distribution
-
-  SOLVERS (navmesh: the real fused bot-waypoint graph)
-    * weighted (euclidean) Dijkstra between region representatives
-    * per-region bot-reachable coverage, region<->region walking distance matrix,
-      the megamap WALKING DIAMETER (the commitment cost a strategy has to pay)
-    * join BETWEENNESS: the fraction of region-pair shortest bot paths that use
-      each join -- the quantitative version of "chokepoint"
-    * detour ratio per join: bot walking distance vs straight-line distance
-
-  VIEWERS (SVG, no dependencies)
-    * fused.graph.svg    -- the region graph: tiles sized by waypoint count, joins
-      coloured by kind, thickened by betweenness, dashed when subtle, red when a
-      cut edge; bridge tiles drawn as diamonds
-    * fused.navmesh.svg  -- the real fused waypoint graph in plan view, coloured by
-      region, with the join sockets and the megamap diameter path drawn on top
-
-Usage:  fusegraph.py <fused_map_dir> [--out DIR]
-"""
+#!/usr/bin/env mesh-python
 import os, sys, json, math, heapq, argparse
 from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
 
-
-# --------------------------------------------------------------------------- io
 def load(mapdir):
     J = json.load(open(os.path.join(mapdir, 'fused.joins.json')))
     cache = os.path.join(mapdir, 'fused.waypoints.cache')
@@ -51,10 +18,7 @@ def load(mapdir):
             dadj[u].add(v)
     return J, nodes, dadj, idx, key
 
-
 def region_of(J, nodes):
-    """Assign every fused waypoint to the tile whose world AABB contains it; points
-    in a connector fall to the nearest tile centre."""
     boxes = [(m['mins'], m['maxs']) for m in J['maps']]
     cent = [[(m['mins'][a] + m['maxs'][a]) / 2 for a in range(3)] for m in J['maps']]
     reg = []
@@ -69,8 +33,6 @@ def region_of(J, nodes):
         reg.append(r)
     return reg
 
-
-# ---------------------------------------------------------------- region solver
 def region_solve(n, edges):
     adj = [[] for _ in range(n)]
     for ei, (a, b) in enumerate(edges):
@@ -127,7 +89,7 @@ def region_solve(n, edges):
                     d[v] = d[u] + 1
                     q.append(v)
         diam = max(diam, max(d.values()))
-    # 2-edge-connected blocks: components after deleting the cut edges
+
     cutset = set(cuts)
     par = list(range(n))
 
@@ -149,8 +111,6 @@ def region_solve(n, edges):
                 degree=[len(adj[i]) for i in range(n)], hop_diameter=diam,
                 blocks=sorted(blocks.values(), key=len, reverse=True))
 
-
-# --------------------------------------------------------------- navmesh solver
 def dijkstra(W, src):
     dist = [float('inf')] * len(W)
     prev = [-1] * len(W)
@@ -168,11 +128,10 @@ def dijkstra(W, src):
                 heapq.heappush(pq, (nd, v))
     return dist, prev
 
-
 def navmesh_metrics(J, nodes, dadj, idx, key, reg):
     W = [[(v, math.dist(nodes[u], nodes[v])) for v in dadj[u]] for u in range(len(nodes))]
     n = len(J['maps'])
-    # a representative node per region: the reachable node nearest the region centroid
+
     reps = {}
     for m in range(n):
         pts = [i for i in range(len(nodes)) if reg[i] == m]
@@ -182,7 +141,7 @@ def navmesh_metrics(J, nodes, dadj, idx, key, reg):
         cx = sum(nodes[i][0] for i in pts) / len(pts)
         cy = sum(nodes[i][1] for i in pts) / len(pts)
         reps[m] = min(pts, key=lambda i: math.hypot(nodes[i][0] - cx, nodes[i][1] - cy))
-    # socket node ids per join, for betweenness
+
     sock = []
     for jn in J['joins']:
         sock.append((idx.get(key(jn['sa'])), idx.get(key(jn['sb']))))
@@ -197,7 +156,7 @@ def navmesh_metrics(J, nodes, dadj, idx, key, reg):
             if r2 is None or m2 == m:
                 continue
             D[(m, m2)] = dist[r2] if dist[r2] < float('inf') else None
-    # betweenness of each join over region-pair shortest paths
+
     use = [0] * len(J['joins'])
     pairs = 0
     for (m, m2), d in D.items():
@@ -221,13 +180,10 @@ def navmesh_metrics(J, nodes, dadj, idx, key, reg):
                 walk_median=sorted(fin)[len(fin) // 2] if fin else 0.0,
                 unreachable=sum(1 for v in D.values() if v is None), W=W)
 
-
-# --------------------------------------------------------------------- viewers
 def col(i):
     p = ['#4f8fd6', '#e0803a', '#5aa469', '#c05a6e', '#8a6fbf', '#9c7b5a',
          '#cf74b4', '#7f7f7f', '#b7b24a', '#4bb0c0']
     return p[i % len(p)]
-
 
 def svg_graph(path, J, RG, NM):
     maps, joins = J['maps'], J['joins']
@@ -298,7 +254,6 @@ def svg_graph(path, J, RG, NM):
     open(path, 'w').write('\n'.join(out))
     return path
 
-
 def svg_navmesh(path, J, nodes, dadj, reg, NM):
     W, H, PADP = 1500, 1100, 40
     xs = [p[0] for p in nodes]
@@ -325,7 +280,7 @@ def svg_navmesh(path, J, nodes, dadj, reg, NM):
                        'stroke-width="0.6" opacity="0.55"/>' %
                        (px(nodes[u][0]), py(nodes[u][1]), px(nodes[v][0]), py(nodes[v][1]),
                         col(reg[u])))
-    # the megamap diameter path, drawn on top
+
     best = None
     for (m, m2), d in NM['walk'].items():
         if d is not None and (best is None or d > best[0]):
@@ -354,8 +309,6 @@ def svg_navmesh(path, J, nodes, dadj, reg, NM):
     open(path, 'w').write('\n'.join(out))
     return path
 
-
-# ------------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mapdir')
@@ -395,7 +348,7 @@ def main():
         print('  %-14s<->%-14s %-11s len=%6.0f cart=%-5s prominent=%-5s cut=%-5s '
               'betweenness=%.2f' %
               (names[jn['a']], names[jn['b']], jn['kind'], jn['length'],
-               jn.get('cart_navigable', jn['kind'] == 'corridor'), jn.get('prominent'),
+               jn['cart_navigable'], jn['prominent'],
                ji in set(RG['cutedges']), NM['betweenness'][ji]))
     g1 = svg_graph(os.path.join(out, 'fused.graph.svg'), J, RG, NM)
     g2 = svg_navmesh(os.path.join(out, 'fused.navmesh.svg'), J, nodes, dadj, reg, NM)
@@ -407,8 +360,8 @@ def main():
                        'coverage': NM['coverage'], 'region_nodes': NM['region_nodes'],
                        'walk': {'%d-%d' % k: v for k, v in NM['walk'].items()}},
            'joins': [{'a': names[j['a']], 'b': names[j['b']], 'kind': j['kind'],
-                      'length': j['length'], 'prominent': j.get('prominent'),
-                      'cart_navigable': j.get('cart_navigable', j['kind'] == 'corridor'),
+                      'length': j['length'], 'prominent': j['prominent'],
+                      'cart_navigable': j['cart_navigable'],
                       'cut_edge': ji in set(RG['cutedges']),
                       'betweenness': NM['betweenness'][ji]}
                      for ji, j in enumerate(J['joins'])]}
@@ -418,7 +371,6 @@ def main():
     print('wrote %s' % g2)
     print('wrote %s' % rp)
     return 0
-
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -3,18 +3,16 @@
 #include <client/draw.qh>
 #include <common/ent_cs.qh>
 
-// Info messages (#14)
-
 void HUD_InfoMessages_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_infomessages_flip");
 }
 
 float autocvar_hud_panel_infomessages_group0 = 1;
 float autocvar_hud_panel_infomessages_group_fadetime = 0.4;
 float autocvar_hud_panel_infomessages_group_time = 6;
-const int IMG_COUNT = 1; // number of InfoMessage Groups
+const int IMG_COUNT = 1;
 float img_fade[IMG_COUNT];
 int img_cur_msg[IMG_COUNT];
 float img_time[IMG_COUNT];
@@ -134,7 +132,7 @@ void HUD_InfoMessages()
 
 		if (time < STAT(GAMESTARTTIME))
 		{
-			//we need to ceil, otherwise the countdown would be off by .5 when using round()
+
 			float countdown = ceil(STAT(GAMESTARTTIME) - time);
 			s = sprintf(_("^1Game starts in ^3%d^1 seconds"), countdown);
 			InfoMessage(s);
@@ -153,7 +151,7 @@ void HUD_InfoMessages()
 			int players_needed = 0;
 			if(STAT(WARMUP_TIMELIMIT) <= 0 && srv_minplayers)
 			{
-				Scoreboard_UpdatePlayerTeams(); // ensure numplayers is current
+				Scoreboard_UpdatePlayerTeams();
 				players_needed = srv_minplayers - numplayers;
 			}
 
@@ -208,10 +206,10 @@ void HUD_InfoMessages()
 
 		if(autocvar_cl_showspectators)
 		if(num_spectators)
-		//if(spectatee_status != -1)
+
 		{
 			s = ((spectatee_status) ? _("^1Spectating this player:") : _("^1Spectating you:"));
-			// InfoMessage(s)
+
 			int limit = min(num_spectators, MAX_SPECTATORS);
 			for(int i = 0; i < limit; ++i)
 			{

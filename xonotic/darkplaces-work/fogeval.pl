@@ -1,7 +1,7 @@
 use strict;
 use warnings;
 
-# generates the blendfunc flags function in gl_rmain.c
+
 
 my %blendfuncs =
 (
@@ -43,9 +43,9 @@ sub isfogfriendly($$$$$)
 	my $fogamount = rand;
 	my $fogcolor = rand;
 
-	# compare:
-	# 1. blend(fog(s), sa, fog(d), da)
-	# 2. fog(blend(s, sa, d, da))
+
+
+
 
 	my ($out1, $out1a) = evalblend $fs, $fd, $s + ((defined $foghack ? $foghack eq 'ALPHA' ? $fogcolor*$sa : $foghack : $fogcolor) - $s) * $fogamount, $sa, $d + ($fogcolor - $d) * $fogamount, $da;
 	my ($out2, $out2a) = evalblend $fs, $fd, $s, $sa, $d, $da;
@@ -68,16 +68,16 @@ sub decide(&)
 			++$good if $r;
 			++$bad if not $r;
 		}
-		#print STDERR "decide: $good vs $bad\n";
+
 		return 1 if $good > $bad + 150;
 		return 0 if $bad > $good + 150;
 		warn "No clear decision, continuing to test ($good : $bad)";
 	}
 }
 
-#die isfogfriendly $blendfuncs{GL_ONE}, $blendfuncs{GL_ONE}, 1, 0, 0;
-# out1 = 0 + fog($d)
-# out2 = fog(1 + $d)
+
+
+
 
 sub willitblend($$)
 {
@@ -90,7 +90,7 @@ sub willitblend($$)
 			{
 				if(!decide { isinvariant($fs, $fd, 0, $sa); })
 				{
-					return 0; # no colormod possible
+					return 0;
 				}
 			}
 		}
@@ -125,7 +125,7 @@ for my $s(sort keys %blendfuncs)
 {
 	for my $d(sort keys %blendfuncs)
 	{
-		#print STDERR "$s $d\n";
+
 		if(!willitblend $blendfuncs{$s}, $blendfuncs{$d})
 		{
 			print "\tif(src == $s && dst == $d) r &= ~BLENDFUNC_ALLOWS_COLORMOD;\n";

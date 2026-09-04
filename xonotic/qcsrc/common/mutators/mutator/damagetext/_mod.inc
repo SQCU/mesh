@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/mutators/mutator/damagetext/damagetext.qc>
 #ifdef CSQC
     #include <common/mutators/mutator/damagetext/cl_damagetext.qc>

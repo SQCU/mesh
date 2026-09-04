@@ -44,22 +44,11 @@ void multivibrator_toggle(entity this, entity actor, entity trigger)
 void multivibrator_reset(entity this)
 {
 	if(!(this.spawnflags & START_ENABLED))
-		this.nextthink = 0; // wait for a trigger event
+		this.nextthink = 0;
 	else
 		this.nextthink = max(1, time);
 }
 
-/*QUAKED trigger_multivibrator (.5 .5 .5) (-8 -8 -8) (8 8 8) START_ENABLED
-"Multivibrator" trigger gate... repeatedly sends trigger events. When triggered, turns on or off.
--------- KEYS --------
-target: trigger all entities with this targetname when it goes off
-targetname: name that identifies this entity so it can be triggered; when off, it always uses the OFF state
-phase: offset of the timing
-wait: "on" cycle time (default: 1)
-respawntime: "off" cycle time (default: same as wait)
--------- SPAWNFLAGS --------
-START_ENABLED: assume it is already turned on (when targeted)
-*/
 spawnfunc(trigger_multivibrator)
 {
 	if(!this.wait)

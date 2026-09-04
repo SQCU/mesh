@@ -27,12 +27,12 @@ void round_handler_Think(entity this)
 	if (this.wait)
 	{
 		this.wait = false;
-		this.cnt = this.count + 1;  // init countdown
+		this.cnt = this.count + 1;
 		round_starttime = time + this.count;
 		reset_map(false);
 	}
 
-	if (this.cnt > 0)  // countdown running
+	if (this.cnt > 0)
 	{
 		if (this.canRoundStart() && !(autocvar_g_campaign && !campaign_bots_may_start))
 		{
@@ -55,21 +55,21 @@ void round_handler_Think(entity this)
 		else
 		{
 			round_handler_Reset(0);
-			round_starttime = -1; // can't start
+			round_starttime = -1;
 		}
-		this.nextthink = time + 1;  // canRoundStart every second
+		this.nextthink = time + 1;
 	}
 	else
 	{
 		if (this.canRoundEnd())
 		{
-			// schedule a new round
+
 			this.wait = true;
 			this.nextthink = time + this.delay;
 		}
 		else
 		{
-			this.nextthink = time;  // canRoundEnd every frame
+			this.nextthink = time;
 		}
 	}
 }
@@ -84,8 +84,6 @@ void round_handler_Init(float the_delay, float the_count, float the_round_timeli
 	round_limit = the_round_timelimit;
 }
 
-// NOTE: this is only needed because if round_handler spawns at time 1
-// game_starttime isn't initialized yet
 void round_handler_FirstThink(entity this)
 {
 	round_starttime = max(time, game_starttime) + this.count;

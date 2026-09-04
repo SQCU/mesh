@@ -1,22 +1,3 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 
 #include "quakedef.h"
@@ -41,17 +22,6 @@ wadstate_t;
 
 static wadstate_t wad;
 
-/*
-==================
-W_CleanupName
-
-Lowercases name and pads with spaces and a terminating 0 to the length of
-lumpinfo_t->name.
-Used so lumpname lookups can proceed rapidly by comparing 4 chars at a time
-Space padding is so names can be printed nicely in tables.
-Can safely be performed in place.
-==================
-*/
 static void W_CleanupName (const char *in, char *out)
 {
 	int		i;
@@ -88,11 +58,11 @@ void W_UnloadAll(void)
 {
 	unsigned int i;
 	mwad_t *w;
-	// free gfx.wad if it is loaded
+
 	if (wad.gfx_base)
 		Mem_Free(wad.gfx_base);
 	wad.gfx_base = NULL;
-	// close all hlwad files and free their lumps data
+
 	for (i = 0;i < Mem_ExpandableArray_IndexRange(&wad.hlwads);i++)
 	{
 		w = (mwad_t *) Mem_ExpandableArray_RecordAtIndex(&wad.hlwads, i);
@@ -105,9 +75,9 @@ void W_UnloadAll(void)
 			Mem_Free(w->lumps);
 		w->lumps = NULL;
 	}
-	// free the hlwads array
+
 	Mem_ExpandableArray_FreeArray(&wad.hlwads);
-	// clear all state
+
 	memset(&wad, 0, sizeof(wad));
 }
 
@@ -139,7 +109,6 @@ unsigned char *W_GetLumpName(const char *name)
 				infotableofs = LittleLong(header->infotableofs);
 				wad.gfx.lumps = (lumpinfo_t *)(wad.gfx_base + infotableofs);
 
-				// byteswap the gfx.wad lumps in place
 				W_SwapLumps(wad.gfx.numlumps, wad.gfx.lumps);
 			}
 		}
@@ -151,11 +120,6 @@ unsigned char *W_GetLumpName(const char *name)
 	return NULL;
 }
 
-/*
-====================
-W_LoadTextureWadFile
-====================
-*/
 void W_LoadTextureWadFile (char *filename, int complain)
 {
 	wadinfo_t		header;
@@ -214,7 +178,6 @@ void W_LoadTextureWadFile (char *filename, int complain)
 
 	W_SwapLumps(w->numlumps, w->lumps);
 
-	// leaves the file open
 }
 
 unsigned char *W_ConvertWAD3TextureBGRA(sizebuf_t *sb)
@@ -229,12 +192,11 @@ unsigned char *W_ConvertWAD3TextureBGRA(sizebuf_t *sb)
 	image_width = MSG_ReadLittleLong(sb);
 	image_height = MSG_ReadLittleLong(sb);
 	mipoffset[0] = MSG_ReadLittleLong(sb);
-	mipoffset[1] = MSG_ReadLittleLong(sb); // should be mipoffset[0] + image_width*image_height
-	mipoffset[2] = MSG_ReadLittleLong(sb); // should be mipoffset[1] + image_width*image_height/4
-	mipoffset[3] = MSG_ReadLittleLong(sb); // should be mipoffset[2] + image_width*image_height/16
+	mipoffset[1] = MSG_ReadLittleLong(sb);
+	mipoffset[2] = MSG_ReadLittleLong(sb);
+	mipoffset[3] = MSG_ReadLittleLong(sb);
 	pal = sb->data + mipoffset[3] + (image_width / 8 * image_height / 8) + 2;
 
-	// bail if any data looks wrong
 	if (image_width < 0
 	 || image_width > 4096
 	 || image_height < 0
@@ -289,7 +251,7 @@ unsigned char *W_GetTextureBGRA(char *name)
 			continue;
 		for (i = 0;i < (unsigned int)w->numlumps;i++)
 		{
-			if (!strcmp(texname, w->lumps[i].name)) // found it
+			if (!strcmp(texname, w->lumps[i].name))
 			{
 				if (FS_Seek(w->file, w->lumps[i].filepos, SEEK_SET))
 				{Con_Print("W_GetTexture: corrupt WAD3 file\n");return NULL;}
@@ -309,4 +271,3 @@ unsigned char *W_GetTextureBGRA(char *name)
 	image_width = image_height = 0;
 	return NULL;
 }
-

@@ -1,25 +1,25 @@
 #pragma once
 
 CLASS(Vaporizer, Weapon)
-/* spawnfunc */ ATTRIB(Vaporizer, m_canonical_spawnfunc, string, "weapon_vaporizer");
-/* ammotype  */ ATTRIB(Vaporizer, ammo_type, Resource, RES_CELLS);
-/* impulse   */ ATTRIB(Vaporizer, impulse, int, 7);
-/* flags     */ ATTRIB(Vaporizer, spawnflags, int, WEP_FLAG_RELOADABLE | WEP_FLAG_CANCLIMB | WEP_FLAG_SUPERWEAPON | WEP_TYPE_HITSCAN | WEP_FLAG_NODUAL);
-/* rating    */ ATTRIB(Vaporizer, bot_pickupbasevalue, float, 10000);
-/* color     */ ATTRIB(Vaporizer, wpcolor, vector, '0.5 1 1');
-/* modelname */ ATTRIB(Vaporizer, mdl, string, "minstanex");
+                ATTRIB(Vaporizer, m_canonical_spawnfunc, string, "weapon_vaporizer");
+                ATTRIB(Vaporizer, ammo_type, Resource, RES_CELLS);
+                ATTRIB(Vaporizer, impulse, int, 7);
+                ATTRIB(Vaporizer, spawnflags, int, WEP_FLAG_RELOADABLE | WEP_FLAG_CANCLIMB | WEP_FLAG_SUPERWEAPON | WEP_TYPE_HITSCAN | WEP_FLAG_NODUAL);
+                ATTRIB(Vaporizer, bot_pickupbasevalue, float, 10000);
+                ATTRIB(Vaporizer, wpcolor, vector, '0.5 1 1');
+                ATTRIB(Vaporizer, mdl, string, "minstanex");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Vaporizer, m_model, Model, MDL_VAPORIZER_ITEM);
-/* flash mdl */ ATTRIB(Vaporizer, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Vaporizer, m_muzzleeffect, entity, EFFECT_VORTEX_MUZZLEFLASH);
+                ATTRIB(Vaporizer, m_model, Model, MDL_VAPORIZER_ITEM);
+                ATTRIB(Vaporizer, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Vaporizer, m_muzzleeffect, entity, EFFECT_VORTEX_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Vaporizer, w_crosshair, string, "gfx/crosshairminstanex");
-/* crosshair */ ATTRIB(Vaporizer, w_crosshair_size, float, 0.6);
-/* reticle   */ ATTRIB(Vaporizer, w_reticle, string, "gfx/reticle_nex");
-/* wepimg    */ ATTRIB(Vaporizer, model2, string, "weaponminstanex");
-/* refname   */ ATTRIB(Vaporizer, netname, string, "vaporizer");
-/* wepname   */ ATTRIB(Vaporizer, m_name, string, _("Vaporizer"));
-/* legacy    */ ATTRIB(Vaporizer, m_deprecated_netname, string, "minstanex");
+                ATTRIB(Vaporizer, w_crosshair, string, "gfx/crosshairminstanex");
+                ATTRIB(Vaporizer, w_crosshair_size, float, 0.6);
+                ATTRIB(Vaporizer, w_reticle, string, "gfx/reticle_nex");
+                ATTRIB(Vaporizer, model2, string, "weaponminstanex");
+                ATTRIB(Vaporizer, netname, string, "vaporizer");
+                ATTRIB(Vaporizer, m_name, string, _("Vaporizer"));
+                ATTRIB(Vaporizer, m_deprecated_netname, string, "minstanex");
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

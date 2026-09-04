@@ -30,9 +30,9 @@ CLASS(XonoticServerList, XonoticListBox)
 	ATTRIB(XonoticServerList, columnTypeSize, float, 0);
 	ATTRIB(XonoticServerList, columnPlayersOrigin, float, 0);
 	ATTRIB(XonoticServerList, columnPlayersSize, float, 0);
-	ATTRIB(XonoticServerList, lockedSelectedItem, bool, true); // initially keep selected the first item of the list to avoid unwanted scrolling
+	ATTRIB(XonoticServerList, lockedSelectedItem, bool, true);
 
-	ATTRIB(XonoticServerList, selectedServer, string); // to restore selected server when needed
+	ATTRIB(XonoticServerList, selectedServer, string);
 	METHOD(XonoticServerList, setSelected, void(entity, float));
 	METHOD(XonoticServerList, setSortOrder, void(entity, float, float));
 	ATTRIB(XonoticServerList, filterShowEmpty, float, 1);
@@ -43,7 +43,7 @@ CLASS(XonoticServerList, XonoticListBox)
 	ATTRIB(XonoticServerList, ipAddressBox, entity);
 	ATTRIB(XonoticServerList, favoriteButton, entity);
 	ATTRIB(XonoticServerList, nextRefreshTime, float, 0);
-	METHOD(XonoticServerList, refreshServerList, void(entity, float));  // refresh mode: REFRESHSERVERLIST_*
+	METHOD(XonoticServerList, refreshServerList, void(entity, float));
 	ATTRIB(XonoticServerList, needsRefresh, float, 1);
 	METHOD(XonoticServerList, focusEnter, void(entity));
 	METHOD(XonoticServerList, positionSortButton, void(entity, entity, float, float, string, void(entity, entity)));
@@ -83,7 +83,6 @@ void ServerList_Update_favoriteButton(entity btn, entity me);
 void ServerList_Favorite_Click(entity btn, entity me);
 void ServerList_Info_Click(entity btn, entity me);
 
-// server cache fields
 #define SLIST_FIELDS \
 	SLIST_FIELD(CNAME,       "cname") \
 	SLIST_FIELD(PING,        "ping") \
@@ -117,12 +116,11 @@ float autocvar_menu_slist_recommendations_minfreeslots;
 float autocvar_menu_slist_recommendations_minhumans;
 float autocvar_menu_slist_recommendations_purethreshold;
 
-const float REFRESHSERVERLIST_RESORT = 0;    // sort the server list again to update for changes to e.g. favorite status, categories
-const float REFRESHSERVERLIST_REFILTER = 1;  // ..., also update filter and sort criteria
-const float REFRESHSERVERLIST_ASK = 2;       // ..., also suggest querying servers now
-const float REFRESHSERVERLIST_RESET = 3;     // ..., also clear the list first
+const float REFRESHSERVERLIST_RESORT = 0;
+const float REFRESHSERVERLIST_REFILTER = 1;
+const float REFRESHSERVERLIST_ASK = 2;
+const float REFRESHSERVERLIST_RESET = 3;
 
-// function declarations
 float IsServerInList(string list, string srv);
 
 entity RetrieveCategoryEnt(float catnum);
@@ -130,8 +128,6 @@ entity RetrieveCategoryEnt(float catnum);
 float CategoryOverride(float cat);
 float m_gethostcachecategory(float entry);
 
-
-// fields for category entities
 const int MAX_CATEGORIES = 9;
 const int CATEGORY_FIRST = 1;
 entity categories[MAX_CATEGORIES];
@@ -143,7 +139,6 @@ int category_ent_count;
 .float cat_enoverride;
 .float cat_dioverride;
 
-// fields for drawing categories
 int category_name[MAX_CATEGORIES];
 int category_item[MAX_CATEGORIES];
 int category_draw_count;

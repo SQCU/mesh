@@ -57,14 +57,11 @@ int d3d_filter_mipmix = D3DTEXF_LINEAR;
 int d3d_filter_nomip = false;
 #endif
 
-
 static mempool_t *texturemempool;
 static memexpandablearray_t texturearray;
 
-// note: this must not conflict with TEXF_ flags in r_textures.h
-// bitmask for mismatch checking
 #define GLTEXF_IMPORTANTBITS (0)
-// dynamic texture (treat texnum == 0 differently)
+
 #define GLTEXF_DYNAMIC		0x00080000
 
 typedef struct textypeinfo_s
@@ -82,12 +79,9 @@ textypeinfo_t;
 
 #ifdef USE_GLES2
 
-// we use these internally even if we never deliver such data to the driver
 #define GL_BGR					0x80E0
 #define GL_BGRA					0x80E1
 
-// framebuffer texture formats
-// GLES2 devices rarely support depth textures, so we actually use a renderbuffer there
 static textypeinfo_t textype_shadowmap16_comp            = {"shadowmap16_comp",         TEXTYPE_SHADOWMAP16_COMP     ,  2,  2,  2.0f, GL_DEPTH_COMPONENT16              , GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT};
 static textypeinfo_t textype_shadowmap16_raw             = {"shadowmap16_raw",          TEXTYPE_SHADOWMAP16_RAW      ,  2,  2,  2.0f, GL_DEPTH_COMPONENT16              , GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT};
 static textypeinfo_t textype_shadowmap24_comp            = {"shadowmap24_comp",         TEXTYPE_SHADOWMAP24_COMP     ,  2,  2,  2.0f, GL_DEPTH_COMPONENT16              , GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT};
@@ -99,7 +93,6 @@ static textypeinfo_t textype_colorbuffer                 = {"colorbuffer",      
 static textypeinfo_t textype_colorbuffer16f              = {"colorbuffer16f",           TEXTYPE_COLORBUFFER16F       ,  2,  2,  2.0f, GL_RGBA16F                        , GL_RGBA           , GL_HALF_FLOAT_ARB};
 static textypeinfo_t textype_colorbuffer32f              = {"colorbuffer32f",           TEXTYPE_COLORBUFFER32F       ,  2,  2,  2.0f, GL_RGBA32F                        , GL_RGBA           , GL_FLOAT};
 
-// image formats:
 static textypeinfo_t textype_alpha                       = {"alpha",                    TEXTYPE_ALPHA         ,  1,  4,  4.0f, GL_ALPHA                              , GL_ALPHA          , GL_UNSIGNED_BYTE };
 static textypeinfo_t textype_palette                     = {"palette",                  TEXTYPE_PALETTE       ,  1,  4,  4.0f, GL_RGBA                               , GL_BGRA           , GL_UNSIGNED_BYTE };
 static textypeinfo_t textype_palette_alpha               = {"palette_alpha",            TEXTYPE_PALETTE       ,  1,  4,  4.0f, GL_RGBA                               , GL_BGRA           , GL_UNSIGNED_BYTE };
@@ -111,7 +104,7 @@ static textypeinfo_t textype_bgra_alpha                  = {"bgra_alpha",       
 static textypeinfo_t textype_etc1                        = {"etc1",                     TEXTYPE_ETC1          ,  1,  3,  0.5f, GL_ETC1_RGB8_OES                         , 0                 , 0                };
 #endif
 #else
-// framebuffer texture formats
+
 static textypeinfo_t textype_shadowmap16_comp            = {"shadowmap16_comp",         TEXTYPE_SHADOWMAP16_COMP     ,  2,  2,  2.0f, GL_DEPTH_COMPONENT16_ARB          , GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT};
 static textypeinfo_t textype_shadowmap16_raw             = {"shadowmap16_raw",          TEXTYPE_SHADOWMAP16_RAW      ,  2,  2,  2.0f, GL_DEPTH_COMPONENT16_ARB          , GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT};
 static textypeinfo_t textype_shadowmap24_comp            = {"shadowmap24_comp",         TEXTYPE_SHADOWMAP24_COMP     ,  4,  4,  4.0f, GL_DEPTH_COMPONENT24_ARB          , GL_DEPTH_COMPONENT, GL_UNSIGNED_INT  };
@@ -123,7 +116,6 @@ static textypeinfo_t textype_colorbuffer                 = {"colorbuffer",      
 static textypeinfo_t textype_colorbuffer16f              = {"colorbuffer16f",           TEXTYPE_COLORBUFFER16F       ,  8,  8,  8.0f, GL_RGBA16F_ARB                        , GL_RGBA           , GL_HALF_FLOAT_ARB};
 static textypeinfo_t textype_colorbuffer32f              = {"colorbuffer32f",           TEXTYPE_COLORBUFFER32F       , 16, 16, 16.0f, GL_RGBA32F_ARB                        , GL_RGBA           , GL_FLOAT         };
 
-// image formats:
 static textypeinfo_t textype_alpha                       = {"alpha",                    TEXTYPE_ALPHA         ,  1,  4,  4.0f, GL_ALPHA                              , GL_ALPHA          , GL_UNSIGNED_BYTE };
 static textypeinfo_t textype_palette                     = {"palette",                  TEXTYPE_PALETTE       ,  1,  4,  4.0f, GL_RGB                                , GL_BGRA           , GL_UNSIGNED_BYTE };
 static textypeinfo_t textype_palette_alpha               = {"palette_alpha",            TEXTYPE_PALETTE       ,  1,  4,  4.0f, GL_RGBA                               , GL_BGRA           , GL_UNSIGNED_BYTE };
@@ -180,14 +172,13 @@ static int cubemapside[6] =
 
 typedef struct gltexture_s
 {
-	// this portion of the struct is exposed to the R_GetTexture macro for
-	// speed reasons, must be identical in rtexture_t!
-	int texnum; // GL texture slot number
-	int renderbuffernum; // GL renderbuffer slot number
-	qboolean dirty; // indicates that R_RealGetTexture should be called
-	qboolean glisdepthstencil; // indicates that FBO attachment has to be GL_DEPTH_STENCIL_ATTACHMENT
-	int gltexturetypeenum; // used by R_Mesh_TexBind
-	// d3d stuff the backend needs
+
+	int texnum;
+	int renderbuffernum;
+	qboolean dirty;
+	qboolean glisdepthstencil;
+	int gltexturetypeenum;
+
 	void *d3dtexture;
 	void *d3dsurface;
 #ifdef SUPPORTD3D
@@ -207,53 +198,46 @@ typedef struct gltexture_s
 	int d3dmaxmiplevel;
 #endif
 
-	// dynamic texture stuff [11/22/2007 Black]
 	updatecallback_t updatecallback;
 	void *updatecallback_data;
-	// --- [11/22/2007 Black]
 
-	// stores backup copy of texture for deferred texture updates (gl_nopartialtextureupdates cvar)
 	unsigned char *bufferpixels;
 	qboolean buffermodified;
 
-	// pointer to texturepool (check this to see if the texture is allocated)
 	struct gltexturepool_s *pool;
-	// pointer to next texture in texturepool chain
+
 	struct gltexture_s *chain;
-	// name of the texture (this might be removed someday), no duplicates
+
 	char identifier[MAX_QPATH + 32];
-	// original data size in *inputtexels
+
 	int inputwidth, inputheight, inputdepth;
-	// copy of the original texture(s) supplied to the upload function, for
-	// delayed uploads (non-precached)
+
 	unsigned char *inputtexels;
-	// original data size in *inputtexels
+
 	int inputdatasize;
-	// flags supplied to the LoadTexture function
-	// (might be altered to remove TEXF_ALPHA), and GLTEXF_ private flags
+
 	int flags;
-	// picmip level
+
 	int miplevel;
-	// pointer to one of the textype_ structs
+
 	textypeinfo_t *textype;
-	// one of the GLTEXTURETYPE_ values
+
 	int texturetype;
-	// palette if the texture is TEXTYPE_PALETTE
+
 	const unsigned int *palette;
-	// actual stored texture size after gl_picmip and gl_max_size are applied
-	// (power of 2 if vid.support.arb_texture_non_power_of_two is not supported)
+
 	int tilewidth, tileheight, tiledepth;
-	// 1 or 6 depending on texturetype
+
 	int sides;
-	// how many mipmap levels in this texture
+
 	int miplevels;
-	// bytes per pixel
+
 	int bytesperpixel;
-	// GL_RGB or GL_RGBA or GL_DEPTH_COMPONENT
+
 	int glformat;
-	// 3 or 4
+
 	int glinternalformat;
-	// GL_UNSIGNED_BYTE or GL_UNSIGNED_INT or GL_UNSIGNED_SHORT or GL_FLOAT
+
 	int gltype;
 }
 gltexture_t;
@@ -330,17 +314,15 @@ static textypeinfo_t *R_GetTexTypeInfo(textype_t textype, int flags)
 	return NULL;
 }
 
-// dynamic texture code [11/22/2007 Black]
 void R_MarkDirtyTexture(rtexture_t *rt) {
 	gltexture_t *glt = (gltexture_t*) rt;
 	if( !glt ) {
 		return;
 	}
 
-	// dont do anything if the texture is already dirty (and make sure this *is* a dynamic texture after all!)
 	if (glt->flags & GLTEXF_DYNAMIC)
 	{
-		// mark it as dirty, so R_RealGetTexture gets called
+
 		glt->dirty = true;
 	}
 }
@@ -470,7 +452,6 @@ void R_FreeTexturePool(rtexturepool_t **rtexturepool)
 	Mem_Free(pool);
 }
 
-
 typedef struct glmode_s
 {
 	const char *name;
@@ -553,15 +534,14 @@ static void GL_TextureMode_f (void)
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		// change all the existing mipmap texture objects
-		// FIXME: force renderer(/client/something?) restart instead?
+
 		CHECKGLERROR
 		GL_ActiveTexture(0);
 		for (pool = gltexturepoolchain;pool;pool = pool->next)
 		{
 			for (glt = pool->gltchain;glt;glt = glt->chain)
 			{
-				// only update already uploaded images
+
 				if (glt->texnum && (gl_filter_force || !(glt->flags & (TEXF_FORCENEAREST | TEXF_FORCELINEAR))))
 				{
 					oldbindtexnum = R_Mesh_TexBound(0, gltexturetypeenums[glt->texturetype]);
@@ -595,7 +575,7 @@ static void GL_TextureMode_f (void)
 		{
 			for (glt = pool->gltchain;glt;glt = glt->chain)
 			{
-				// only update already uploaded images
+
 				if (glt->d3dtexture && !glt->d3dsurface && (gl_filter_force || !(glt->flags & (TEXF_FORCENEAREST | TEXF_FORCELINEAR))))
 				{
 					if (glt->flags & TEXF_MIPMAP)
@@ -624,7 +604,7 @@ static void GL_TextureMode_f (void)
 		Con_DPrintf("FIXME D3D11 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 		break;
 	case RENDERPATH_SOFT:
-		// change all the existing texture objects
+
 		for (pool = gltexturepoolchain;pool;pool = pool->next)
 			for (glt = pool->gltchain;glt;glt = glt->chain)
 				if (glt->texnum && (gl_filter_force || !(glt->flags & (TEXF_FORCENEAREST | TEXF_FORCELINEAR))))
@@ -685,7 +665,7 @@ static void GL_Texture_CalcImageSize(int texturetype, int flags, int miplevel, i
 		break;
 	case RENDERPATH_D3D9:
 #if 0
-		// for some reason the REF rasterizer (and hence the PIX debugger) does not like small textures...
+
 		if (texturetype == GLTEXTURETYPE_2D)
 		{
 			width2 = max(width2, 2);
@@ -712,7 +692,6 @@ static void GL_Texture_CalcImageSize(int texturetype, int flags, int miplevel, i
 	if (outmiplevels)
 		*outmiplevels = miplevels;
 }
-
 
 static int R_CalcTexelDataSize (gltexture_t *glt)
 {
@@ -800,7 +779,7 @@ static void r_textures_start(void)
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		// LordHavoc: allow any alignment
+
 		CHECKGLERROR
 		qglPixelStorei(GL_UNPACK_ALIGNMENT, 1);CHECKGLERROR
 		qglPixelStorei(GL_PACK_ALIGNMENT, 1);CHECKGLERROR
@@ -820,7 +799,6 @@ static void r_textures_start(void)
 	texturemempool = Mem_AllocPool("texture management", 0, NULL);
 	Mem_ExpandableArray_NewArray(&texturearray, texturemempool, sizeof(gltexture_t), 512);
 
-	// Disable JPEG screenshots if the DLL isn't loaded
 	if (! JPEG_OpenLibrary ())
 		Cvar_SetValueQuick (&scr_screenshot_jpeg, 0);
 	if (! PNG_OpenLibrary ())
@@ -957,7 +935,6 @@ static void r_textures_devicerestored(void)
 	}
 }
 
-
 void R_Textures_Init (void)
 {
 	Cmd_AddCommand("gl_texturemode", &GL_TextureMode_f, "set texture filtering mode (GL_NEAREST, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR, etc); an additional argument 'force' forces the texture mode even in cases where it may not be appropriate");
@@ -999,10 +976,6 @@ void R_Textures_Frame (void)
 	static qboolean first_time_aniso = true;
 #endif
 
-	// could do procedural texture animation here, if we keep track of which
-	// textures were accessed this frame...
-
-	// free the resize buffers
 	resizebuffersize = 0;
 	if (resizebuffer)
 	{
@@ -1033,7 +1006,7 @@ void R_Textures_Frame (void)
 		case RENDERPATH_GL20:
 		case RENDERPATH_GLES1:
 		case RENDERPATH_GLES2:
-			// ignore the first difference, any textures loaded by now probably had the same aniso value
+
 			if (first_time_aniso)
 			{
 				first_time_aniso = false;
@@ -1045,7 +1018,7 @@ void R_Textures_Frame (void)
 			{
 				for (glt = pool->gltchain;glt;glt = glt->chain)
 				{
-					// only update already uploaded images
+
 					if (glt->texnum && (glt->flags & TEXF_MIPMAP) == TEXF_MIPMAP)
 					{
 						oldbindtexnum = R_Mesh_TexBound(0, gltexturetypeenums[glt->texturetype]);
@@ -1194,8 +1167,6 @@ static void R_UploadPartialTexture(gltexture_t *glt, const unsigned char *data, 
 	if (glt->inputwidth != glt->tilewidth || glt->inputheight != glt->tileheight || (glt->texturetype == GLTEXTURETYPE_2D && glt->tiledepth != 1) || (glt->texturetype == GLTEXTURETYPE_3D && glt->inputdepth != glt->tiledepth))
 		Sys_Error("R_UploadPartialTexture \"%s\": partial update not supported with stretched or special textures", glt->identifier);
 
-	// update a portion of the image
-
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -1206,12 +1177,11 @@ static void R_UploadPartialTexture(gltexture_t *glt, const unsigned char *data, 
 		{
 			int oldbindtexnum;
 			CHECKGLERROR
-			// we need to restore the texture binding after finishing the upload
+
 			GL_ActiveTexture(0);
 			oldbindtexnum = R_Mesh_TexBound(0, gltexturetypeenums[glt->texturetype]);
 			qglBindTexture(gltexturetypeenums[glt->texturetype], glt->texnum);CHECKGLERROR
-			// `data` is a contiguous fragwidth*fragheight(*fragdepth) block, not a
-			// window into the full image - the caller packs it.
+
 			if (glt->texturetype == GLTEXTURETYPE_3D)
 			{
 				qglTexSubImage3D(GL_TEXTURE_3D, 0, fragx, fragy, fragz, fragwidth, fragheight, fragdepth, glt->glformat, glt->gltype, data);CHECKGLERROR
@@ -1262,13 +1232,9 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 	const unsigned char *prevbuffer;
 	prevbuffer = data;
 
-	// error out if a stretch is needed on special texture types
 	if (glt->texturetype != GLTEXTURETYPE_2D && (glt->tilewidth != glt->inputwidth || glt->tileheight != glt->inputheight || glt->tiledepth != glt->inputdepth))
 		Sys_Error("R_UploadFullTexture \"%s\": stretch uploads allowed only on 2D textures\n", glt->identifier);
 
-	// when picmip or maxsize is applied, we scale up to a power of 2 multiple
-	// of the target size and then use the mipmap reduction function to get
-	// high quality supersampled results
 	for (width  = glt->tilewidth;width  < glt->inputwidth ;width  <<= 1);
 	for (height = glt->tileheight;height < glt->inputheight;height <<= 1);
 	for (depth  = glt->tiledepth;depth  < glt->inputdepth ;depth  <<= 1);
@@ -1278,22 +1244,20 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 		width = glt->tilewidth;
 		height = glt->tileheight;
 		depth = glt->tiledepth;
-//		R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
-//		memset(resizebuffer, 0, width * height * depth * glt->sides * glt->bytesperpixel);
-//		prevbuffer = resizebuffer;
+
 	}
 	else
 	{
 		if (glt->textype->textype == TEXTYPE_PALETTE)
 		{
-			// promote paletted to BGRA, so we only have to worry about BGRA in the rest of this code
+
 			R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
 			Image_Copy8bitBGRA(prevbuffer, colorconvertbuffer, glt->inputwidth * glt->inputheight * glt->inputdepth * glt->sides, glt->palette);
 			prevbuffer = colorconvertbuffer;
 		}
 		if (glt->flags & TEXF_RGBMULTIPLYBYALPHA)
 		{
-			// multiply RGB channels by A channel before uploading
+
 			int alpha;
 			R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
 			for (i = 0;i < glt->inputwidth*glt->inputheight*glt->inputdepth*4;i += 4)
@@ -1306,14 +1270,14 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 			}
 			prevbuffer = colorconvertbuffer;
 		}
-		// scale up to a power of 2 size (if appropriate)
+
 		if (glt->inputwidth != width || glt->inputheight != height || glt->inputdepth != depth)
 		{
 			R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
 			Image_Resample32(prevbuffer, glt->inputwidth, glt->inputheight, glt->inputdepth, resizebuffer, width, height, depth, r_lerpimages.integer);
 			prevbuffer = resizebuffer;
 		}
-		// apply mipmap reduction algorithm to get down to picmip/max_size
+
 		while (width > glt->tilewidth || height > glt->tileheight || depth > glt->tiledepth)
 		{
 			R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
@@ -1322,7 +1286,6 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 		}
 	}
 
-	// do the appropriate upload type...
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -1330,11 +1293,10 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		if (glt->texnum) // not renderbuffers
+		if (glt->texnum)
 		{
 			CHECKGLERROR
 
-			// we need to restore the texture binding after finishing the upload
 			GL_ActiveTexture(0);
 			oldbindtexnum = R_Mesh_TexBound(0, gltexturetypeenums[glt->texturetype]);
 			qglBindTexture(gltexturetypeenums[glt->texturetype], glt->texnum);CHECKGLERROR
@@ -1382,8 +1344,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 #endif
 				break;
 			case GLTEXTURETYPE_CUBEMAP:
-				// convert and upload each side in turn,
-				// from a continuous block of input texels
+
 				texturebuffer = (unsigned char *)prevbuffer;
 				for (i = 0;i < 6;i++)
 				{
@@ -1395,7 +1356,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 						Image_Resample32(prevbuffer, glt->inputwidth, glt->inputheight, glt->inputdepth, resizebuffer, width, height, depth, r_lerpimages.integer);
 						prevbuffer = resizebuffer;
 					}
-					// picmip/max_size
+
 					while (width > glt->tilewidth || height > glt->tileheight || depth > glt->tiledepth)
 					{
 						R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
@@ -1458,7 +1419,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 			case GLTEXTURETYPE_3D:
 				if (IDirect3DVolumeTexture9_LockBox((IDirect3DVolumeTexture9*)glt->d3dtexture, mip, &d3dlockedbox, NULL, 0) == D3D_OK && d3dlockedbox.pBits)
 				{
-					// we are not honoring the RowPitch or SlicePitch, hopefully this works with all sizes
+
 					memcpy(d3dlockedbox.pBits, prevbuffer, width*height*depth*glt->bytesperpixel);
 					IDirect3DVolumeTexture9_UnlockBox((IDirect3DVolumeTexture9*)glt->d3dtexture, mip);
 				}
@@ -1472,7 +1433,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 						prevbuffer = resizebuffer;
 						if (IDirect3DVolumeTexture9_LockBox((IDirect3DVolumeTexture9*)glt->d3dtexture, mip, &d3dlockedbox, NULL, 0) == D3D_OK && d3dlockedbox.pBits)
 						{
-							// we are not honoring the RowPitch or SlicePitch, hopefully this works with all sizes
+
 							memcpy(d3dlockedbox.pBits, prevbuffer, width*height*depth*glt->bytesperpixel);
 							IDirect3DVolumeTexture9_UnlockBox((IDirect3DVolumeTexture9*)glt->d3dtexture, mip);
 						}
@@ -1481,8 +1442,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 				}
 				break;
 			case GLTEXTURETYPE_CUBEMAP:
-				// convert and upload each side in turn,
-				// from a continuous block of input texels
+
 				texturebuffer = (unsigned char *)prevbuffer;
 				for (i = 0;i < 6;i++)
 				{
@@ -1494,7 +1454,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 						Image_Resample32(prevbuffer, glt->inputwidth, glt->inputheight, glt->inputdepth, resizebuffer, width, height, depth, r_lerpimages.integer);
 						prevbuffer = resizebuffer;
 					}
-					// picmip/max_size
+
 					while (width > glt->tilewidth || height > glt->tileheight || depth > glt->tiledepth)
 					{
 						R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
@@ -1590,9 +1550,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 			if (glt->inputwidth != width || glt->inputheight != height || glt->inputdepth != depth)
 			{
 				unsigned char *combinedbuffer = (unsigned char *)Mem_Alloc(tempmempool, glt->tilewidth*glt->tileheight*glt->tiledepth*glt->sides*glt->bytesperpixel);
-				// convert and upload each side in turn,
-				// from a continuous block of input texels
-				// copy the results into combinedbuffer
+
 				texturebuffer = (unsigned char *)prevbuffer;
 				for (i = 0;i < 6;i++)
 				{
@@ -1604,7 +1562,7 @@ static void R_UploadFullTexture(gltexture_t *glt, const unsigned char *data)
 						Image_Resample32(prevbuffer, glt->inputwidth, glt->inputheight, glt->inputdepth, resizebuffer, width, height, depth, r_lerpimages.integer);
 						prevbuffer = resizebuffer;
 					}
-					// picmip/max_size
+
 					while (width > glt->tilewidth || height > glt->tileheight || depth > glt->tiledepth)
 					{
 						R_MakeResizeBufferBigger(width * height * depth * glt->sides * glt->bytesperpixel);
@@ -1644,7 +1602,6 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 	if (cls.state == ca_dedicated)
 		return NULL;
 
-	// see if we need to swap red and blue (BGRA <-> RGBA conversion)
 	if (textype == TEXTYPE_PALETTE && vid.forcetextype == TEXTYPE_RGBA)
 	{
 		int numpixels = width * height * depth * sides;
@@ -1677,7 +1634,7 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 	}
 	if (swaprb)
 	{
-		// swap bytes
+
 		static int rgbaswapindices[4] = {2, 1, 0, 3};
 		size = width * height * depth * sides * 4;
 		temppixels = (unsigned char *)Mem_Alloc(tempmempool, size);
@@ -1686,7 +1643,6 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 		data = temppixels;
 	}
 
-	// if sRGB texture formats are not supported, convert input to linear and upload as normal types
 	if (!vid.support.ext_texture_srgb)
 	{
 		qboolean convertsRGB = false;
@@ -1696,7 +1652,7 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 		case TEXTYPE_SRGB_DXT1A:   textype = TEXTYPE_DXT1A  ;convertsRGB = true;break;
 		case TEXTYPE_SRGB_DXT3:    textype = TEXTYPE_DXT3   ;convertsRGB = true;break;
 		case TEXTYPE_SRGB_DXT5:    textype = TEXTYPE_DXT5   ;convertsRGB = true;break;
-		case TEXTYPE_SRGB_PALETTE: textype = TEXTYPE_PALETTE;/*convertsRGB = true;*/break;
+		case TEXTYPE_SRGB_PALETTE: textype = TEXTYPE_PALETTE;                       break;
 		case TEXTYPE_SRGB_RGBA:    textype = TEXTYPE_RGBA   ;convertsRGB = true;break;
 		case TEXTYPE_SRGB_BGRA:    textype = TEXTYPE_BGRA   ;convertsRGB = true;break;
 		default:
@@ -1734,7 +1690,6 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 		return NULL;
 	}
 
-	// clear the alpha flag if the texture has no transparent pixels
 	switch(textype)
 	{
 	case TEXTYPE_PALETTE:
@@ -1819,7 +1774,7 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 	glt->inputheight = height;
 	glt->inputdepth = depth;
 	glt->flags = flags;
-	glt->miplevel = (miplevel < 0) ? R_PicmipForFlags(flags) : miplevel; // note: if miplevel is -1, we know the texture is in original size and we can picmip it normally
+	glt->miplevel = (miplevel < 0) ? R_PicmipForFlags(flags) : miplevel;
 	glt->textype = texinfo;
 	glt->texturetype = texturetype;
 	glt->inputdatasize = size;
@@ -1833,14 +1788,12 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 	glt->dirty = false;
 	glt->glisdepthstencil = false;
 	glt->gltexturetypeenum = gltexturetypeenums[glt->texturetype];
-	// init the dynamic texture attributes, too [11/22/2007 Black]
+
 	glt->updatecallback = NULL;
 	glt->updatecallback_data = NULL;
 
 	GL_Texture_CalcImageSize(glt->texturetype, glt->flags, glt->miplevel, glt->inputwidth, glt->inputheight, glt->inputdepth, &glt->tilewidth, &glt->tileheight, &glt->tiledepth, &glt->miplevels);
 
-	// upload the texture
-	// data may be NULL (blank texture for dynamic rendering)
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -1939,13 +1892,8 @@ static rtexture_t *R_SetupTexture(rtexturepool_t *rtexturepool, const char *iden
 	if ((glt->flags & TEXF_ALLOWUPDATES) && gl_nopartialtextureupdates.integer)
 		glt->bufferpixels = (unsigned char *)Mem_Alloc(texturemempool, glt->tilewidth*glt->tileheight*glt->tiledepth*glt->sides*glt->bytesperpixel);
 
-	// free any temporary processing buffer we allocated...
 	if (temppixels)
 		Mem_Free(temppixels);
-
-	// texture converting and uploading can take a while, so make sure we're sending keepalives
-	// FIXME: this causes rendering during R_Shadow_DrawLights
-//	CL_KeepaliveMessage(false);
 
 	return (rtexture_t *)glt;
 }
@@ -2005,14 +1953,12 @@ rtexture_t *R_LoadTextureRenderBuffer(rtexturepool_t *rtexturepool, const char *
 	glt->dirty = false;
 	glt->glisdepthstencil = textype == TEXTYPE_DEPTHBUFFER24STENCIL8;
 	glt->gltexturetypeenum = GL_TEXTURE_2D;
-	// init the dynamic texture attributes, too [11/22/2007 Black]
+
 	glt->updatecallback = NULL;
 	glt->updatecallback_data = NULL;
 
 	GL_Texture_CalcImageSize(glt->texturetype, glt->flags, glt->miplevel, glt->inputwidth, glt->inputheight, glt->inputdepth, &glt->tilewidth, &glt->tileheight, &glt->tiledepth, &glt->miplevels);
 
-	// upload the texture
-	// data may be NULL (blank texture for dynamic rendering)
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -2024,7 +1970,7 @@ rtexture_t *R_LoadTextureRenderBuffer(rtexturepool_t *rtexturepool, const char *
 		qglGenRenderbuffers(1, (GLuint *)&glt->renderbuffernum);CHECKGLERROR
 		qglBindRenderbuffer(GL_RENDERBUFFER, glt->renderbuffernum);CHECKGLERROR
 		qglRenderbufferStorage(GL_RENDERBUFFER, glt->glinternalformat, glt->tilewidth, glt->tileheight);CHECKGLERROR
-		// note we can query the renderbuffer for info with glGetRenderbufferParameteriv for GL_WIDTH, GL_HEIGHt, GL_RED_SIZE, GL_GREEN_SIZE, GL_BLUE_SIZE, GL_GL_ALPHA_SIZE, GL_DEPTH_SIZE, GL_STENCIL_SIZE, GL_INTERNAL_FORMAT
+
 		qglBindRenderbuffer(GL_RENDERBUFFER, 0);CHECKGLERROR
 		break;
 	case RENDERPATH_D3D9:
@@ -2090,7 +2036,7 @@ rtexture_t *R_LoadTextureRenderBuffer(rtexturepool_t *rtexturepool, const char *
 int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipuncompressed, qboolean hasalpha)
 {
 #ifdef USE_GLES2
-	return -1; // unsupported on this platform
+	return -1;
 #else
 	gltexture_t *glt = (gltexture_t *)rt;
 	unsigned char *dds;
@@ -2109,9 +2055,9 @@ int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipunco
 	GLint internalformat;
 	const char *ddsfourcc;
 	if (!rt)
-		return -1; // NULL pointer
+		return -1;
 	if (!strcmp(gl_version, "2.0.5885 WinXP Release"))
-		return -2; // broken driver - crashes on reading internal format
+		return -2;
 	if (!qglGetTexLevelParameteriv)
 		return -2;
 	GL_ActiveTexture(0);
@@ -2126,7 +2072,7 @@ int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipunco
 	case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: ddsfourcc = "DXT3";bytesperblock = 16;break;
 	case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: ddsfourcc = "DXT5";bytesperblock = 16;break;
 	}
-	// if premultiplied alpha, say so in the DDS file
+
 	if(glt->flags & TEXF_RGBMULTIPLYBYALPHA)
 	{
 		switch(internalformat)
@@ -2136,7 +2082,7 @@ int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipunco
 		}
 	}
 	if (!bytesperblock && skipuncompressed)
-		return -3; // skipped
+		return -3;
 	memset(mipinfo, 0, sizeof(mipinfo));
 	mipinfo[0][0] = glt->tilewidth;
 	mipinfo[0][1] = glt->tileheight;
@@ -2164,39 +2110,39 @@ int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipunco
 	dds = (unsigned char *)Mem_Alloc(tempmempool, ddssize);
 	if (!dds)
 		return -4;
-	dds_caps1 = 0x1000; // DDSCAPS_TEXTURE
+	dds_caps1 = 0x1000;
 	dds_caps2 = 0;
 	if (bytesperblock)
 	{
-		dds_flags = 0x81007; // DDSD_CAPS | DDSD_PIXELFORMAT | DDSD_WIDTH | DDSD_HEIGHT | DDSD_LINEARSIZE
-		dds_format_flags = 0x4; // DDPF_FOURCC
+		dds_flags = 0x81007;
+		dds_format_flags = 0x4;
 	}
 	else
 	{
-		dds_flags = 0x100F; // DDSD_CAPS | DDSD_PIXELFORMAT | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH
-		dds_format_flags = 0x40; // DDPF_RGB
+		dds_flags = 0x100F;
+		dds_format_flags = 0x40;
 	}
 	if (mipmaps)
 	{
-		dds_flags |= 0x20000; // DDSD_MIPMAPCOUNT
-		dds_caps1 |= 0x400008; // DDSCAPS_MIPMAP | DDSCAPS_COMPLEX
+		dds_flags |= 0x20000;
+		dds_caps1 |= 0x400008;
 	}
 	if(hasalpha)
-		dds_format_flags |= 0x1; // DDPF_ALPHAPIXELS
+		dds_format_flags |= 0x1;
 	memcpy(dds, "DDS ", 4);
-	StoreLittleLong(dds+4, 124); // http://msdn.microsoft.com/en-us/library/bb943982%28v=vs.85%29.aspx says so
+	StoreLittleLong(dds+4, 124);
 	StoreLittleLong(dds+8, dds_flags);
-	StoreLittleLong(dds+12, mipinfo[0][1]); // height
-	StoreLittleLong(dds+16, mipinfo[0][0]); // width
-	StoreLittleLong(dds+24, 0); // depth
-	StoreLittleLong(dds+28, mipmaps); // mipmaps
-	StoreLittleLong(dds+76, 32); // format size
+	StoreLittleLong(dds+12, mipinfo[0][1]);
+	StoreLittleLong(dds+16, mipinfo[0][0]);
+	StoreLittleLong(dds+24, 0);
+	StoreLittleLong(dds+28, mipmaps);
+	StoreLittleLong(dds+76, 32);
 	StoreLittleLong(dds+80, dds_format_flags);
 	StoreLittleLong(dds+108, dds_caps1);
 	StoreLittleLong(dds+112, dds_caps2);
 	if (bytesperblock)
 	{
-		StoreLittleLong(dds+20, mipinfo[0][2]); // linear size
+		StoreLittleLong(dds+20, mipinfo[0][2]);
 		memcpy(dds+84, ddsfourcc, 4);
 		for (mip = 0;mip < mipmaps;mip++)
 		{
@@ -2205,9 +2151,9 @@ int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipunco
 	}
 	else
 	{
-		StoreLittleLong(dds+20, mipinfo[0][0]*bytesperpixel); // pitch
-		StoreLittleLong(dds+88, bytesperpixel*8); // bits per pixel
-		dds[94] = dds[97] = dds[100] = dds[107] = 255; // bgra byte order masks
+		StoreLittleLong(dds+20, mipinfo[0][0]*bytesperpixel);
+		StoreLittleLong(dds+88, bytesperpixel*8);
+		dds[94] = dds[97] = dds[100] = dds[107] = 255;
 		for (mip = 0;mip < mipmaps;mip++)
 		{
 			qglGetTexImage(gltexturetypeenums[glt->texturetype], mip, GL_BGRA, GL_UNSIGNED_BYTE, dds + mipinfo[mip][3]);CHECKGLERROR
@@ -2221,14 +2167,14 @@ int R_SaveTextureDDSFile(rtexture_t *rt, const char *filename, qboolean skipunco
 }
 
 #ifdef __ANDROID__
-// ELUAN: FIXME: separate this code
+
 #include "ktx10/include/ktx.h"
 #endif
 
-rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filename, qboolean srgb, int flags, qboolean *hasalphaflag, float *avgcolor, int miplevel, qboolean optionaltexture) // DDS textures are opaque, so miplevel isn't a pointer but just seen as a hint
+rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filename, qboolean srgb, int flags, qboolean *hasalphaflag, float *avgcolor, int miplevel, qboolean optionaltexture)
 {
 	int i, size, dds_format_flags, dds_miplevels, dds_width, dds_height;
-	//int dds_flags;
+
 	textype_t textype;
 	int bytesperblock, bytesperpixel;
 	int mipcomplete;
@@ -2246,7 +2192,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	unsigned int ddssize;
 	qboolean force_swdecode, npothack;
 #ifdef __ANDROID__
-	// ELUAN: FIXME: separate this code
+
 	char vabuf[1024];
 	char vabuf2[1024];
 	int strsize;
@@ -2257,20 +2203,19 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		return NULL;
 
 #ifdef __ANDROID__
-	// ELUAN: FIXME: separate this code
+
 	if (vid.renderpath != RENDERPATH_GLES2)
 	{
 		Con_DPrintf("KTX texture format is only supported on the GLES2 renderpath\n");
 		return NULL;
 	}
 
-	// some textures are specified with extensions, so it becomes .tga.dds
 	FS_StripExtension (filename, vabuf2, sizeof(vabuf2));
 	FS_StripExtension (vabuf2, vabuf, sizeof(vabuf));
 	FS_DefaultExtension (vabuf, ".ktx", sizeof(vabuf));
 	strsize = strlen(vabuf);
 	if (strsize > 5)
-	for (i = 0; i <= strsize - 4; i++) // copy null termination
+	for (i = 0; i <= strsize - 4; i++)
 		vabuf[i] = vabuf[i + 4];
 
 	Con_DPrintf("Loading %s...\n", vabuf);
@@ -2280,7 +2225,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	if (!dds)
 	{
 		Con_DPrintf("Not found!\n");
-		return NULL; // not found
+		return NULL;
 	}
 	Con_DPrintf("Found!\n");
 
@@ -2298,45 +2243,32 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 
 		glt = (gltexture_t *)Mem_ExpandableArray_AllocRecord(&texturearray);
 
-		// texture uploading can take a while, so make sure we're sending keepalives
 		CL_KeepaliveMessage(false);
 
-		// create the texture object
 		CHECKGLERROR
 		GL_ActiveTexture(0);
 		oldbindtexnum = R_Mesh_TexBound(0, gltexturetypeenums[GLTEXTURETYPE_2D]);
 		qglGenTextures(1, (GLuint *)&glt->texnum);CHECKGLERROR
 		qglBindTexture(gltexturetypeenums[GLTEXTURETYPE_2D], glt->texnum);CHECKGLERROR
 
-		// upload the texture
-		// we need to restore the texture binding after finishing the upload
-
-		// NOTE: some drivers fail with ETC1 NPOT (only PowerVR?). This may make the driver crash later.
 		ktxerror = ktxLoadTextureM(dds, ddssize, &glt->texnum, &target, &sizes, &isMipmapped, &glerror,
-								0, NULL);// can't CHECKGLERROR, the lib catches it
+								0, NULL);
 
-		// FIXME: delete texture if we fail here
 		if (target != GL_TEXTURE_2D)
 		{
 			qglBindTexture(gltexturetypeenums[glt->texturetype], oldbindtexnum);CHECKGLERROR
 			Mem_Free(dds);
 			Con_DPrintf("%s target != GL_TEXTURE_2D, target == %x\n", vabuf, target);
-			return NULL; // FIXME: delete the texture from memory
+			return NULL;
 		}
 
 		if (KTX_SUCCESS == ktxerror)
 		{
 			textype = TEXTYPE_ETC1;
-			flags &= ~TEXF_COMPRESS; // don't let the textype be wrong
+			flags &= ~TEXF_COMPRESS;
 
-			// return whether this texture is transparent
 			if (hasalphaflag)
 				*hasalphaflag = (flags & TEXF_ALPHA) != 0;
-
-			// TODO: apply gl_picmip
-			// TODO: avgcolor
-			// TODO: srgb
-			// TODO: only load mipmaps if requested
 
 			if (isMipmapped)
 				flags |= TEXF_MIPMAP;
@@ -2365,17 +2297,10 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 			glt->tilewidth = sizes.width;
 			glt->tileheight = sizes.height;
 			glt->tiledepth = 1;
-			glt->miplevels = isMipmapped ? 1 : 0; // FIXME
+			glt->miplevels = isMipmapped ? 1 : 0;
 
-				// after upload we have to set some parameters...
 #ifdef GL_TEXTURE_MAX_LEVEL
-			/* FIXME
-				if (dds_miplevels >= 1 && !mipcomplete)
-				{
-					// need to set GL_TEXTURE_MAX_LEVEL
-					qglTexParameteri(gltexturetypeenums[glt->texturetype], GL_TEXTURE_MAX_LEVEL, dds_miplevels - 1);CHECKGLERROR
-				}
-			*/
+
 #endif
 				GL_SetupTextureParameters(glt->flags, glt->textype->textype, glt->texturetype);
 
@@ -2391,7 +2316,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 			return NULL;
 		}
 	}
-#endif // __ANDROID__
+#endif
 
 	dds = FS_LoadFile(filename, tempmempool, true, &ddsfilesize);
 	ddssize = ddsfilesize;
@@ -2400,7 +2325,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	{
 		if (r_texture_dds_load_logfailure.integer && (r_texture_dds_load_logfailure.integer >= 2 || !optionaltexture))
 			Log_Printf("ddstexturefailures.log", "%s\n", filename);
-		return NULL; // not found
+		return NULL;
 	}
 
 	if (ddsfilesize <= 128 || memcmp(dds, "DDS ", 4) || ddssize < (unsigned int)BuffLittleLong(dds+4) || BuffLittleLong(dds+76) != 32)
@@ -2410,7 +2335,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		return NULL;
 	}
 
-	//dds_flags = BuffLittleLong(dds+8);
 	dds_format_flags = BuffLittleLong(dds+80);
 	dds_miplevels = (BuffLittleLong(dds+108) & 0x400000) ? BuffLittleLong(dds+28) : 1;
 	dds_width = BuffLittleLong(dds+16);
@@ -2418,15 +2342,14 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	ddspixels = dds + 128;
 
 	if(r_texture_dds_load_alphamode.integer == 0)
-		if(!(dds_format_flags & 0x1)) // DDPF_ALPHAPIXELS
+		if(!(dds_format_flags & 0x1))
 			flags &= ~TEXF_ALPHA;
 
-	//flags &= ~TEXF_ALPHA; // disabled, as we DISABLE TEXF_ALPHA in the alpha detection, not enable it!
 	if ((dds_format_flags & 0x40) && BuffLittleLong(dds+88) == 32)
 	{
-		// very sloppy BGRA 32bit identification
+
 		textype = TEXTYPE_BGRA;
-		flags &= ~TEXF_COMPRESS; // don't let the textype be wrong
+		flags &= ~TEXF_COMPRESS;
 		bytesperblock = 0;
 		bytesperpixel = 4;
 		size = INTOVERFLOW_MUL(INTOVERFLOW_MUL(dds_width, dds_height), bytesperpixel);
@@ -2438,7 +2361,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		}
 		if((r_texture_dds_load_alphamode.integer == 1) && (flags & TEXF_ALPHA))
 		{
-			// check alpha
+
 			for (i = 3;i < size;i += 4)
 				if (ddspixels[i] < 255)
 					break;
@@ -2448,13 +2371,11 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	}
 	else if (!memcmp(dds+84, "DXT1", 4))
 	{
-		// we need to find out if this is DXT1 (opaque) or DXT1A (transparent)
-		// LordHavoc: it is my belief that this does not infringe on the
-		// patent because it is not decoding pixels...
+
 		textype = TEXTYPE_DXT1;
 		bytesperblock = 8;
 		bytesperpixel = 0;
-		//size = ((dds_width+3)/4)*((dds_height+3)/4)*bytesperblock;
+
 		size = INTOVERFLOW_MUL(INTOVERFLOW_MUL(INTOVERFLOW_DIV(INTOVERFLOW_ADD(dds_width, 3), 4), INTOVERFLOW_DIV(INTOVERFLOW_ADD(dds_height, 3), 4)), bytesperblock);
 		if(INTOVERFLOW_ADD(128, size) > INTOVERFLOW_NORMALIZE(ddsfilesize))
 		{
@@ -2466,14 +2387,14 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		{
 			if (r_texture_dds_load_alphamode.integer == 1)
 			{
-				// check alpha
+
 				for (i = 0;i < size;i += bytesperblock)
 					if (ddspixels[i+0] + ddspixels[i+1] * 256 <= ddspixels[i+2] + ddspixels[i+3] * 256)
 					{
-						// NOTE: this assumes sizeof(unsigned int) == 4
+
 						unsigned int data = * (unsigned int *) &(ddspixels[i+4]);
-						// check if data, in base 4, contains a digit 3 (DXT1: transparent pixel)
-						if(data & (data<<1) & 0xAAAAAAAA)//rgh
+
+						if(data & (data<<1) & 0xAAAAAAAA)
 							break;
 					}
 				if (i < size)
@@ -2515,7 +2436,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 			Con_Printf("^1%s: invalid DXT3 DDS image\n", filename);
 			return NULL;
 		}
-		// we currently always assume alpha
+
 	}
 	else if (!memcmp(dds+84, "DXT5", 4) || !memcmp(dds+84, "DXT4", 4))
 	{
@@ -2543,7 +2464,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 			Con_Printf("^1%s: invalid DXT5 DDS image\n", filename);
 			return NULL;
 		}
-		// we currently always assume alpha
+
 	}
 	else
 	{
@@ -2552,7 +2473,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		return NULL;
 	}
 
-	// when requesting a non-alpha texture and we have DXT3/5, convert to DXT1
 	if(!(flags & TEXF_ALPHA) && (textype == TEXTYPE_DXT3 || textype == TEXTYPE_DXT5))
 	{
 		textype = TEXTYPE_DXT1;
@@ -2565,7 +2485,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	}
 
 	force_swdecode = false;
-	npothack = 
+	npothack =
 		(!vid.support.arb_texture_non_power_of_two &&
 			(
 				(dds_width & (dds_width - 1))
@@ -2584,7 +2504,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		{
 			if(r_texture_dds_swdecode.integer < 1)
 			{
-				// unsupported
+
 				Mem_Free(dds);
 				return NULL;
 			}
@@ -2592,21 +2512,18 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		}
 	}
 
-	// return whether this texture is transparent
 	if (hasalphaflag)
 		*hasalphaflag = (flags & TEXF_ALPHA) != 0;
 
-	// if we SW decode, choose 2 sizes bigger
 	if(force_swdecode)
 	{
-		// this is quarter res, so do not scale down more than we have to
+
 		miplevel -= 2;
 
 		if(miplevel < 0)
 			Con_DPrintf("WARNING: fake software decoding of compressed texture %s degraded quality\n", filename);
 	}
 
-	// this is where we apply gl_picmip
 	mippixels_start = ddspixels;
 	mipwidth = dds_width;
 	mipheight = dds_height;
@@ -2615,7 +2532,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		if (mipwidth <= 1 && mipheight <= 1)
 			break;
 		mipsize = bytesperblock ? ((mipwidth+3)/4)*((mipheight+3)/4)*bytesperblock : mipwidth*mipheight*bytesperpixel;
-		mippixels_start += mipsize; // just skip
+		mippixels_start += mipsize;
 		--dds_miplevels;
 		--miplevel;
 		if (mipwidth > 1)
@@ -2626,9 +2543,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 	mipsize_total = ddssize - 128 - (mippixels_start - ddspixels);
 	mipsize = bytesperblock ? ((mipwidth+3)/4)*((mipheight+3)/4)*bytesperblock : mipwidth*mipheight*bytesperpixel;
 
-	// from here on, we do not need the ddspixels and ddssize any more (apart from the statistics entry in glt)
-
-	// fake decode S3TC if needed
 	if(force_swdecode)
 	{
 		int mipsize_new = mipsize_total / bytesperblock * 4;
@@ -2661,7 +2575,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		bytesperblock = 0;
 		bytesperpixel = 4;
 
-		// as each block becomes a pixel, we must use pixel count for this
 		mipwidth = (mipwidth + 3) / 4;
 		mipheight = (mipheight + 3) / 4;
 		mipsize = bytesperpixel * mipwidth * mipheight;
@@ -2669,10 +2582,8 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		mipsize_total = mipsize_new;
 	}
 
-	// start mip counting
 	mippixels = mippixels_start;
 
-	// calculate average color if requested
 	if (avgcolor)
 	{
 		float f;
@@ -2724,7 +2635,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		}
 	}
 
-	// if we want sRGB, convert now
 	if(srgb)
 	{
 		if (vid.support.ext_texture_srgb)
@@ -2756,20 +2666,20 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 						r = ((c0 >> 11) & 0x1F);
 						g = ((c0 >>  5) & 0x3F);
 						b = ((c0      ) & 0x1F);
-						r = floor(Image_LinearFloatFromsRGB(r * (255.0f / 31.0f)) * 31.0f + 0.5f); // these multiplications here get combined with multiplications in Image_LinearFloatFromsRGB
-						g = floor(Image_LinearFloatFromsRGB(g * (255.0f / 63.0f)) * 63.0f + 0.5f); // these multiplications here get combined with multiplications in Image_LinearFloatFromsRGB
-						b = floor(Image_LinearFloatFromsRGB(b * (255.0f / 31.0f)) * 31.0f + 0.5f); // these multiplications here get combined with multiplications in Image_LinearFloatFromsRGB
+						r = floor(Image_LinearFloatFromsRGB(r * (255.0f / 31.0f)) * 31.0f + 0.5f);
+						g = floor(Image_LinearFloatFromsRGB(g * (255.0f / 63.0f)) * 63.0f + 0.5f);
+						b = floor(Image_LinearFloatFromsRGB(b * (255.0f / 31.0f)) * 31.0f + 0.5f);
 						c0new = (r << 11) | (g << 5) | b;
 						c1 = mippixels_start[i+2] + 256*mippixels_start[i+3];
 						r = ((c1 >> 11) & 0x1F);
 						g = ((c1 >>  5) & 0x3F);
 						b = ((c1      ) & 0x1F);
-						r = floor(Image_LinearFloatFromsRGB(r * (255.0f / 31.0f)) * 31.0f + 0.5f); // these multiplications here get combined with multiplications in Image_LinearFloatFromsRGB
-						g = floor(Image_LinearFloatFromsRGB(g * (255.0f / 63.0f)) * 63.0f + 0.5f); // these multiplications here get combined with multiplications in Image_LinearFloatFromsRGB
-						b = floor(Image_LinearFloatFromsRGB(b * (255.0f / 31.0f)) * 31.0f + 0.5f); // these multiplications here get combined with multiplications in Image_LinearFloatFromsRGB
+						r = floor(Image_LinearFloatFromsRGB(r * (255.0f / 31.0f)) * 31.0f + 0.5f);
+						g = floor(Image_LinearFloatFromsRGB(g * (255.0f / 63.0f)) * 63.0f + 0.5f);
+						b = floor(Image_LinearFloatFromsRGB(b * (255.0f / 31.0f)) * 31.0f + 0.5f);
 						c1new = (r << 11) | (g << 5) | b;
-						// swap the colors if needed to fix order
-						if(c0 > c1) // thirds
+
+						if(c0 > c1)
 						{
 							if(c0new < c1new)
 							{
@@ -2790,7 +2700,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 								mippixels_start[i+7] = 0x00;
 							}
 						}
-						else // half + transparent
+						else
 						{
 							if(c0new > c1new)
 							{
@@ -2819,7 +2729,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		}
 	}
 
-	// when not requesting mipmaps, do not load them
 	if(!(flags & TEXF_MIPMAP))
 		dds_miplevels = 0;
 
@@ -2859,10 +2768,8 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		for (glt->tileheight = 1;glt->tileheight < mipheight;glt->tileheight <<= 1);
 	}
 
-	// texture uploading can take a while, so make sure we're sending keepalives
 	CL_KeepaliveMessage(false);
 
-	// create the texture object
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -2907,11 +2814,9 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 		break;
 	}
 
-	// upload the texture
-	// we need to restore the texture binding after finishing the upload
 	mipcomplete = false;
 
-	for (mip = 0;mip <= dds_miplevels;mip++) // <= to include the not-counted "largest" miplevel
+	for (mip = 0;mip <= dds_miplevels;mip++)
 	{
 		unsigned char *upload_mippixels = mippixels;
 		int upload_mipwidth = mipwidth;
@@ -2924,9 +2829,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 			upload_mipwidth = (glt->tilewidth >> mip);
 			upload_mipheight = (glt->tileheight >> mip);
 			if(upload_mipwidth != mipwidth || upload_mipheight != mipheight)
-			// I _think_ they always mismatch, but I was too lazy
-			// to properly check, and this test here is really
-			// harmless
+
 			{
 				upload_mippixels = (unsigned char *) Mem_Alloc(tempmempool, 4 * upload_mipwidth * upload_mipheight);
 				Image_Resample32(mippixels, mipwidth, mipheight, 1, upload_mippixels, upload_mipwidth, upload_mipheight, 1, r_lerpimages.integer);
@@ -2972,7 +2875,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 				Con_DPrintf("FIXME SOFT %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 			else
 				DPSOFTRAST_Texture_UpdateFull(glt->texnum, upload_mippixels);
-			// DPSOFTRAST calculates its own mipmaps
+
 			mip = dds_miplevels;
 			break;
 		}
@@ -2990,7 +2893,6 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 			mipheight >>= 1;
 	}
 
-	// after upload we have to set some parameters...
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -3001,7 +2903,7 @@ rtexture_t *R_LoadTextureDDSFile(rtexturepool_t *rtexturepool, const char *filen
 #ifdef GL_TEXTURE_MAX_LEVEL
 		if (dds_miplevels >= 1 && !mipcomplete)
 		{
-			// need to set GL_TEXTURE_MAX_LEVEL
+
 			qglTexParameteri(gltexturetypeenums[glt->texturetype], GL_TEXTURE_MAX_LEVEL, dds_miplevels - 1);CHECKGLERROR
 		}
 #endif
@@ -3093,7 +2995,7 @@ void R_UpdateTexture(rtexture_t *rt, const unsigned char *data, int x, int y, in
 		Con_DPrintf("R_UpdateTexture: texture %p \"%s\" in pool %p has not been uploaded yet\n", (void *)glt, glt->identifier, (void *)glt->pool);
 		return;
 	}
-	// update part of the texture
+
 	if (glt->bufferpixels)
 	{
 		int j;

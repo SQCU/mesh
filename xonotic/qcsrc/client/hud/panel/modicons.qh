@@ -4,4 +4,4 @@
 bool autocvar_hud_panel_modicons;
 bool autocvar_hud_panel_modicons_dynamichud     = true;
 
-bool mod_active; // is there any active mod icon?
+bool mod_active;

@@ -4,11 +4,9 @@
 #include <client/hud/panel/scoreboard.qh>
 #include <client/view.qh>
 
-// Notifications (#4)
-
 void HUD_Notify_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_notify_flip");
 	HUD_Write_Cvar("hud_panel_notify_fontsize");
 	HUD_Write_Cvar("hud_panel_notify_time");
@@ -27,7 +25,6 @@ void HUD_Notify_Push(string icon, string attacker, string victim)
 	if (notify_index == -1)
 		notify_index = NOTIFY_MAX_ENTRIES-1;
 
-	// Free old strings
 	if (notify_attackers[notify_index])
 		strunzone(notify_attackers[notify_index]);
 
@@ -37,7 +34,6 @@ void HUD_Notify_Push(string icon, string attacker, string victim)
 	if (notify_icons[notify_index])
 		strunzone(notify_icons[notify_index]);
 
-	// Allocate new strings
 	if (victim != "")
 	{
 		notify_attackers[notify_index] = strzone(attacker);
@@ -45,9 +41,7 @@ void HUD_Notify_Push(string icon, string attacker, string victim)
 	}
 	else
 	{
-		// In case of a notification without a victim, the attacker
-		// is displayed on the victim's side. Instead of special
-		// treatment later on, we can simply switch them here.
+
 		notify_attackers[notify_index] = string_null;
 		notify_victims[notify_index] = strzone(attacker);
 	}
@@ -67,11 +61,11 @@ void HUD_Notify()
 	{
 		float minalpha = 1;
 		if (notify_count == 0)
-			minalpha = 0; // hide if empty
+			minalpha = 0;
 		else if (boxesoverlap(panel_pos, panel_pos + panel_size,
 			eX * scoreboard_left + eY * scoreboard_top, eX * scoreboard_right + eY * scoreboard_bottom))
 		{
-			minalpha = 0.5; // transparent if it may overlap the scoreboard
+			minalpha = 0.5;
 		}
 		float f = max(minalpha, (1 - scoreboard_fade_alpha));
 		if (f <= 0)
@@ -100,7 +94,7 @@ void HUD_Notify()
 	}
 
 	float fade_start = max(0, autocvar_hud_panel_notify_time);
-	if (intermission) // fade out in half the time
+	if (intermission)
 		fade_start -= (time - intermission_time);
 	float fade_time = max(0, autocvar_hud_panel_notify_fadetime);
 	float icon_aspect = max(1, autocvar_hud_panel_notify_icon_aspect);
@@ -125,14 +119,14 @@ void HUD_Notify()
 
 	if (autocvar_hud_panel_notify_flip)
 	{
-		// Order items from the top down
+
 		i = 0;
 		step = +1;
 		limit = entry_count;
 	}
 	else
 	{
-		// Order items from the bottom up
+
 		i = entry_count - 1;
 		step = -1;
 		limit = -1;

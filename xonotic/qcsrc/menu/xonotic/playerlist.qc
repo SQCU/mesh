@@ -25,7 +25,7 @@ void XonoticPlayerList_setPlayerList(entity me, string plist)
 	me.nItems = tokenizebyseparator(plist, "\n");
 	for(i = 0; i < me.nItems; ++i)
 	{
-		bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_NAME, argv(i)); // -666 100 "^4Nex ^2Player"
+		bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_NAME, argv(i));
 	}
 
 	for(i = 0; i < me.nItems; ++i)
@@ -35,17 +35,17 @@ void XonoticPlayerList_setPlayerList(entity me, string plist)
 
 		if(n == PLAYERPARM_COUNT)
 		{
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_SCORE, argv(0)); // -666
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_PING,  argv(1)); // 100
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_TEAM,  argv(2)); // 0 for spec, else 1, 2, 3, 4
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_NAME,  argv(3)); // ^4Nex ^2Player
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_SCORE, argv(0));
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_PING,  argv(1));
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_TEAM,  argv(2));
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_NAME,  argv(3));
 		}
 		else
 		{
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_SCORE, argv(0)); // -666
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_PING,  argv(1)); // 100
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_SCORE, argv(0));
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_PING,  argv(1));
 			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_TEAM,  "-1");
-			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_NAME,  argv(2)); // ^4Nex ^2Player
+			bufstr_set(buf, i * PLAYERPARM_COUNT + PLAYERPARM_NAME,  argv(2));
 		}
 	}
 	me.playerList = buf;
@@ -67,7 +67,6 @@ void XonoticPlayerList_resizeNotify(entity me, vector relOrigin, vector relSize,
 	me.realFontSize.x = me.fontSize / me.itemAbsSize.x;
 	me.realUpperMargin = 0.5 * (1 - me.realFontSize.y);
 
-	// this list does 1 char left and right margin
 	me.columnScoreSize = 5 * me.realFontSize.x;
 	me.columnNameSize = 1 - 3 * me.realFontSize.x - me.columnScoreSize;
 

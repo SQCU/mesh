@@ -2,7 +2,7 @@
 
 #ifdef SVQC
 
-.float m_chainsaw_damage; // accumulated damage of the missile as it passes trough enemies
+.float m_chainsaw_damage;
 
 void W_OverkillRocketPropelledChainsaw_Explode(entity this, entity directhitentity)
 {
@@ -12,8 +12,7 @@ void W_OverkillRocketPropelledChainsaw_Explode(entity this, entity directhitenti
 	float explosion_damage = RadiusDamage(this, this.realowner, WEP_CVAR_PRI(okrpc, damage), WEP_CVAR_PRI(okrpc, edgedamage), WEP_CVAR_PRI(okrpc, radius), NULL, NULL, WEP_CVAR_PRI(okrpc, force), this.projectiledeathtype, this.weaponentity_fld, directhitentity);
 	if (explosion_damage > 0 && this.m_chainsaw_damage > 0)
 	{
-		// if chainsaw hit something, it removed fired damage (so that direct hit is 100%)
-		// now that we also damaged something by explosion we'd go over 100% so let's add the fired damage back
+
 		accuracy_add(this.realowner, DEATH_WEAPONOF(this.projectiledeathtype), WEP_CVAR(okrpc, damage), 0);
 	}
 
@@ -39,8 +38,8 @@ void W_OverkillRocketPropelledChainsaw_Damage(entity this, entity inflictor, ent
 	if (GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	if (!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1)) // no exceptions
-		return; // g_projectiles_damage says to halt
+	if (!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 
@@ -65,10 +64,9 @@ void W_OverkillRocketPropelledChainsaw_Think(entity this)
 	{
 		if (accuracy_isgooddamage(this.realowner, trace_ent))
 		{
-			if (this.m_chainsaw_damage == 0) // first hit
+			if (this.m_chainsaw_damage == 0)
 			{
-				// The fired damage of the explosion is already counted in the statistics (when launching the chainsaw).
-				// We remove it here so that a direct hit that passes through and doesn't damage anything by the explosion later is still 100%.
+
 				float fired_damage = WEP_CVAR_PRI(okrpc, damage2) - WEP_CVAR_PRI(okrpc, damage);
 				float hit_damage = WEP_CVAR_PRI(okrpc, damage2);
 				accuracy_add(this.realowner, DEATH_WEAPONOF(this.projectiledeathtype), fired_damage, hit_damage);
@@ -86,7 +84,7 @@ void W_OverkillRocketPropelledChainsaw_Think(entity this)
 
 void W_OverkillRocketPropelledChainsaw_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 {
-	entity missile = spawn(); //WarpZone_RefSys_SpawnSameRefSys(actor);
+	entity missile = spawn();
 
 	W_DecreaseAmmo(thiswep, actor, WEP_CVAR_PRI(okrpc, ammo), weaponentity);
 	W_SetupShot_ProjectileSize(actor, weaponentity, '-3 -3 -3', '3 3 3', false, 5, SND_ROCKET_FIRE, CH_WEAPON_A, WEP_CVAR_PRI(okrpc, damage), thiswep.m_id);
@@ -107,9 +105,9 @@ void W_OverkillRocketPropelledChainsaw_Attack(Weapon thiswep, entity actor, .ent
 
 	missile.projectiledeathtype = thiswep.m_id;
 	missile.weaponentity_fld = weaponentity;
-	setsize (missile, '-3 -3 -3', '3 3 3'); // give it some size so it can be shot
+	setsize (missile, '-3 -3 -3', '3 3 3');
 
-	setorigin(missile, w_shotorg - v_forward * 3); // move it back so it hits the wall at the right point
+	setorigin(missile, w_shotorg - v_forward * 3);
 	W_SetupProjVelocity_Basic(missile, WEP_CVAR_PRI(okrpc, speed), 0);
 
 	settouch(missile, W_OverkillRocketPropelledChainsaw_Touch);
@@ -137,14 +135,14 @@ METHOD(OverkillRocketPropelledChainsaw, wr_think, void(entity thiswep, entity ac
 {
 	if ((WEP_CVAR_SEC(okrpc, refire_type) == 1) && (fire & 2) && (time >= actor.jump_interval))
 	{
-		// Secondary uses it's own refire timer if refire_type is 1.
+
 		actor.jump_interval = time + WEP_CVAR_SEC(okrpc, refire) * W_WeaponRateFactor(actor);
 		makevectors(actor.v_angle);
 		W_Blaster_Attack(actor, weaponentity, WEP_BLASTER.m_id | HITTYPE_SECONDARY);
 		if ((actor.(weaponentity).wframe == WFRAME_IDLE) ||
 			(actor.(weaponentity).wframe == WFRAME_FIRE2))
 		{
-			// Set secondary fire animation.
+
 			actor.(weaponentity).wframe = WFRAME_FIRE2;
 			FOREACH_CLIENT(true, LAMBDA(
 				if (it == actor || (IS_SPEC(it) && it.enemy == actor))
@@ -157,11 +155,11 @@ METHOD(OverkillRocketPropelledChainsaw, wr_think, void(entity thiswep, entity ac
 	}
 	if (WEP_CVAR(okrpc, reload_ammo) && actor.(weaponentity).clip_load < WEP_CVAR_PRI(okrpc, ammo))
 	{
-		// Forced reload
+
 		thiswep.wr_reload(thiswep, actor, weaponentity);
 		return;
 	}
-	if (fire & 1) // Primary attack
+	if (fire & 1)
 	{
 		if (!weapon_prepareattack(thiswep, actor, weaponentity, false, WEP_CVAR_PRI(okrpc, refire)))
 		{
@@ -171,7 +169,7 @@ METHOD(OverkillRocketPropelledChainsaw, wr_think, void(entity thiswep, entity ac
 		weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, WEP_CVAR_PRI(okrpc, animtime), w_ready);
 		return;
 	}
-	if ((fire & 2) && (WEP_CVAR_SEC(okrpc, refire_type) == 0)) // Secondary attack
+	if ((fire & 2) && (WEP_CVAR_SEC(okrpc, refire_type) == 0))
 	{
 		if (!weapon_prepareattack(thiswep, actor, weaponentity, false, WEP_CVAR_SEC(okrpc, refire)))
 		{

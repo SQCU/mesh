@@ -112,5 +112,5 @@ survive in a corner; it does not obstruct the geometry the frames are for.
   frame will show that wall — which is exactly the kind of thing this tool exists to
   surface.
 * **A human still has to look.** The tool cannot tell you whether a crossing "reads"
-  as navigable — that judgement (how contorted / occluded / cluttered each join is)
+  as navigable — that estimate (how contorted / occluded / cluttered each join is)
   is the point, and it is made by eye from the frames.

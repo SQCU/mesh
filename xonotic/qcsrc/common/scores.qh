@@ -5,22 +5,13 @@
 #define REGISTER_SP(id) REGISTER(Scores, SP, id, m_id, new_pure(PlayerScoreField))
 REGISTRY(Scores, MAX_SCORE);
 REGISTER_REGISTRY(Scores)
-// do not sort alphabetically, player sort priority is based on score registration order
-//REGISTRY_SORT(Scores);
+
 REGISTRY_CHECK(Scores);
 
 REGISTRY_DEFINE_GET(Scores, NULL)
 STATIC_INIT(Scores_renumber) { FOREACH(Scores, true, it.m_id = i); }
 
-/*
- * Score indices
- */
 #ifdef GAMEQC
-// networked fields
-// NOTE: score registration order is used as player sort priority (after primary and secondary)
-
-// TODO: move gamemode scores to gamemode files
-// TODO: allow gamemodes to fully customize player sorting priority, even the common ones
 
 REGISTER_SP(RACE_LAPS);
 REGISTER_SP(RACE_TIME);
@@ -80,10 +71,9 @@ REGISTER_SP(DMGTAKEN);
 
 REGISTER_SP(ROUNDS_PL);
 
-REGISTER_SP(ELO); // not sortable
-REGISTER_SP(FPS); // not sortable
+REGISTER_SP(ELO);
+REGISTER_SP(FPS);
 
-// fields not networked via the score system
 REGISTER_SP(END);
 
 REGISTER_SP(PING);
@@ -91,48 +81,25 @@ REGISTER_SP(PL);
 REGISTER_SP(NAME);
 REGISTER_SP(SEPARATOR);
 
-REGISTER_SP(KDRATIO); // kills / deaths
-REGISTER_SP(SUM); // kills - deaths
-REGISTER_SP(FRAGS); // kills - suicides
+REGISTER_SP(KDRATIO);
+REGISTER_SP(SUM);
+REGISTER_SP(FRAGS);
 #endif
 
-
-// the stuff you don't need to see
-
-/**
- * Lower scores are better (e.g. suicides)
- */
 const int SFL_LOWER_IS_BETTER = BIT(0);
 
-/**
- * Don't show zero values as scores
- */
 const int SFL_HIDE_ZERO = BIT(1);
 
-/**
- * Allow a column to be hidden (do not automatically add it even if it is a sorting key)
- */
 const int SFL_ALLOW_HIDE = BIT(4);
 
-/**
- * Display as a rank (with st, nd, rd, th suffix)
- */
 const int SFL_RANK = BIT(5);
 
-/**
- * Display as mm:ss.s, value is stored as 10ths of a second (AND 0 is the worst possible value!)
- */
 const int SFL_TIME = BIT(6);
 
-const int SFL_NOT_SORTABLE = BIT(7); // don't sort by this field
+const int SFL_NOT_SORTABLE = BIT(7);
 
-// not an extra constant yet
 #define SFL_ZERO_IS_WORST SFL_TIME
 
-/**
- * Scoring priority (NOTE: PRIMARY is used for fraglimit)
- * NOTE: SFL_SORT_PRIO_SECONDARY value must be lower than SFL_SORT_PRIO_PRIMARY's
- */
 const int SFL_SORT_PRIO_SECONDARY = BIT(2);
 const int SFL_SORT_PRIO_PRIMARY = BIT(3);
 const int SFL_SORT_PRIO_MASK = SFL_SORT_PRIO_PRIMARY | SFL_SORT_PRIO_SECONDARY;

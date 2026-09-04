@@ -17,8 +17,7 @@ void XonoticStatsList_configureXonoticStatsList(entity me)
 
 string XonoticStatsList_convertDate(string input)
 {
-	// 2013-12-21
-	// 0123456789
+
 	if(strlen(input) != 10)
 		return input;
 
@@ -38,14 +37,12 @@ string XonoticStatsList_convertDate(string input)
 		case 10: monthname = _("October");    break;
 		case 11: monthname = _("November");   break;
 		case 12: monthname = _("December");   break;
-		default: return input; // failed, why?
+		default: return input;
 	}
 
-	// without no-c-format this string looks messed up in Transifex since only %d is a valid c placeholder
-	/* xgettext:no-c-format */
 	string date = ZCTX(_("DATE^%m %d, %Y"));
 	date = strreplace("%Y", substring(input, 0, 4), date);
-	date = strreplace("%d", ftos(stof(substring(input, 8, 2))), date); // ftos-stof removes leading 0
+	date = strreplace("%d", ftos(stof(substring(input, 8, 2))), date);
 	date = strreplace("%m", monthname, date);
 	return date;
 }
@@ -53,15 +50,13 @@ string XonoticStatsList_convertDate(string input)
 void XonoticStatsList_getStats(entity me)
 {
 	LOG_TRACE("XonoticStatsList_getStats() at time: ", ftos(time));
-	// delete the old buffer if it exists
+
 	if(me.listStats >= 0)
 		buf_del(me.listStats);
 
-	// create the new buffer if we have a stats buffer
 	if(PS_D_IN_DB >= 0)
 		me.listStats = buf_create();
 
-	// now confirmation, if we didn't create a buffer then just return now
 	if(me.listStats < 0)
 	{
 		me.nItems = 0;
@@ -71,7 +66,7 @@ void XonoticStatsList_getStats(entity me)
 	float order = 0;
 	string e = "", en = "", data = "";
 
-	string outstr = ""; // NOTE: out string MUST use underscores for spaces here, we'll replace them later
+	string outstr = "";
 	string orderstr = "";
 
 	float out_total_matches = -1;
@@ -88,7 +83,6 @@ void XonoticStatsList_getStats(entity me)
 		orderstr = "";
 		data = db_get(PS_D_IN_DB, sprintf("#%s", e));
 
-		// non-gamemode specific stuff
 		switch(e)
 		{
 			case "overall/joined_dt":
@@ -149,7 +143,7 @@ void XonoticStatsList_getStats(entity me)
 		{
 			bufstr_add(me.listStats, sprintf("003%s\n%d", _("Matches:"), out_total_matches), true);
 
-			if(out_total_matches > 0) // don't show extra info if there are no matches played
+			if(out_total_matches > 0)
 			{
 				out_total_losses = max(0, (out_total_matches - out_total_wins));
 				bufstr_add(me.listStats, sprintf("003%s\n%d/%d", _("Wins/Losses:"), out_total_wins, out_total_losses), true);
@@ -166,7 +160,6 @@ void XonoticStatsList_getStats(entity me)
 		{
 			bufstr_add(me.listStats, sprintf("005%s\n%d/%d", _("Kills/Deaths:"), out_total_kills, out_total_deaths), true);
 
-			// if there are no deaths, just show kill count
 			if(out_total_deaths == 0)
 				out_total_deaths = 1;
 
@@ -177,7 +170,6 @@ void XonoticStatsList_getStats(entity me)
 			continue;
 		}
 
-		// game mode specific stuff
 		if(order > 0)
 		{
 			orderstr = sprintf("%03d", order);
@@ -191,7 +183,6 @@ void XonoticStatsList_getStats(entity me)
 
 			string event = substring(e, (dividerpos + 1), strlen(e) - (dividerpos + 1));
 
-			// if we are ranked, read these sets of possible options
 			if(stof(db_get(PS_D_IN_DB, sprintf("#%s/rank", gametype))))
 			{
 				switch(event)
@@ -233,11 +224,11 @@ void XonoticStatsList_getStats(entity me)
 					}
 					#endif
 
-					default: continue; // nothing to see here
+					default: continue;
 				}
 
 				outstr = strcat(strtoupper(gametype), " ", outstr);
-				// now set up order for sorting later
+
 				orderstr = sprintf("%2.2s%d", gametype, order);
 			}
 			else if(event == "matches")
@@ -246,7 +237,6 @@ void XonoticStatsList_getStats(entity me)
 				outstr = strcat(strtoupper(gametype), " ", outstr);
 				data = sprintf(_("%d (unranked)"), stof(data));
 
-				// unranked game modes ALWAYS get put last
 				orderstr = "zzz";
 			}
 			else { continue; }
@@ -279,9 +269,9 @@ void XonoticStatsList_resizeNotify(entity me, vector relOrigin, vector relSize, 
 
 #if 0
 	me.columnNameOrigin = me.realFontSize.x;
-	me.columnNameSize = 0.5 - me.realFontSize.x; // end halfway at maximum length
+	me.columnNameSize = 0.5 - me.realFontSize.x;
 	me.columnDataOrigin = me.columnNameOrigin + me.columnNameSize;
-	me.columnDataSize = 1 - me.columnNameSize - me.realFontSize.x; // fill the rest of the control
+	me.columnDataSize = 1 - me.columnNameSize - me.realFontSize.x;
 #else
 	me.columnNameOrigin = me.realFontSize.x;
 	me.columnNameSize = 1 - 2 * me.realFontSize.x;
@@ -315,14 +305,14 @@ void XonoticStatsList_showNotify(entity me)
 
 void XonoticStatsList_doubleClickListBoxItem(entity me, float i, vector where)
 {
-	//DemoConfirm_ListClick_Check_Gamestatus(me);
+
 }
 
 float XonoticStatsList_keyDown(entity me, float scan, float ascii, float shift)
 {
 	if(scan == K_ENTER || scan == K_KP_ENTER)
 	{
-		//DemoConfirm_ListClick_Check_Gamestatus(me);
+
 		return 1;
 	}
 	else

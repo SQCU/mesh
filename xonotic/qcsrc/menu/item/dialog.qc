@@ -72,7 +72,7 @@
 			me.addItem(me, me.frame, '0 0 0', '1 1 0', 1);
 		}
 
-		if (!me.titleFontSize) me.titleHeight = 0;  // no title bar
+		if (!me.titleFontSize) me.titleHeight = 0;
 
 		absWidth = me.intendedWidth * conwidth;
 		absHeight = me.borderLines * me.titleHeight + me.marginTop + me.rows * me.rowHeight + (me.rows - 1) * me.rowSpacing + me.marginBottom;
@@ -97,7 +97,7 @@
 			closebutton.onClick = Dialog_Close;
 			closebutton.onClickEntity = me;
 			closebutton.srcMulti = 0;
-			me.addItem(me, closebutton, '0 0 0', '1 1 0', 1);  // put it as LAST
+			me.addItem(me, closebutton, '0 0 0', '1 1 0', 1);
 		}
 	}
 

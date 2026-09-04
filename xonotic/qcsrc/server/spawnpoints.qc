@@ -23,7 +23,7 @@ bool SpawnPoint_Send(entity this, entity to, int sf)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_SPAWNPOINT);
 
-	WriteByte(MSG_ENTITY, this.team);
+	WriteShort(MSG_ENTITY, this.team);
 	WriteVector(MSG_ENTITY, this.origin);
 
 	return true;
@@ -37,18 +37,23 @@ bool SpawnEvent_Send(entity this, entity to, int sf)
 
 	if(autocvar_g_spawn_alloweffects)
 	{
-		WriteByte(MSG_ENTITY, etof(this.owner));
+		WriteShort(MSG_ENTITY, etof(this.owner));
 		WriteVector(MSG_ENTITY, this.owner.origin);
 		send = true;
 	}
 	else if((to == this.owner) || (IS_SPEC(to) && (to.enemy == this.owner)) )
 	{
-		WriteByte(MSG_ENTITY, 0);
+		WriteShort(MSG_ENTITY, 0);
 		send = true;
 	}
 	else { send = false; }
 
 	return send;
+}
+
+bool Spawn_HasTeamSpawn(int team_num)
+{
+	return team_num >= 0 && team_num <= NUM_TEAMS && have_team_spawns_for_team[team_num];
 }
 
 .vector spawnpoint_prevorigin;
@@ -69,30 +74,27 @@ void spawnpoint_use(entity this, entity actor, entity trigger)
 	{
 		this.team = actor.team;
 		some_spawn_has_been_used = true;
-		this.SendFlags |= 1; // update team on the client side
+		this.SendFlags |= 1;
 	}
-	//LOG_INFO("spawnpoint was used!\n");
+
 }
 
 void spawnpoint_reset(entity this)
 {
-	this.SendFlags |= 1; // update team since it was restored during reset
+	this.SendFlags |= 1;
 }
 
 void link_spawnpoint(entity this)
 {
-	bool anypoint = (autocvar_g_spawn_useallspawns || (teamplay && have_team_spawns <= 0)); // TODO: check if available teams is equal to spawnpoints available
+	bool anypoint = (autocvar_g_spawn_useallspawns || (teamplay && have_team_spawns <= 0));
 
-	// Don't show team spawns in non-team matches,
-	// and don't show non-team spawns in team matches.
-	// (Unless useallspawns is activated)
 	if(anypoint || !((teamplay && !Team_IsValidTeam(this.team)) || (!teamplay && Team_IsValidTeam(this.team))))
 		Net_LinkEntity(this, false, 0, SpawnPoint_Send);
 }
 
 void relocate_spawnpoint(entity this)
 {
-    // nudge off the floor
+
     setorigin(this, this.origin + '0 0 1');
 
     tracebox(this.origin, PL_MIN_CONST, PL_MAX_CONST, this.origin, true, this);
@@ -126,8 +128,8 @@ void relocate_spawnpoint(entity this)
 
     this.use = spawnpoint_use;
     setthink(this, spawnpoint_think);
-    this.nextthink = time + 0.5 + random() * 2; // shouldn't need it for a little second
-    this.reset2 = spawnpoint_reset; // restores team, allows re-sending the spawnpoint
+    this.nextthink = time + 0.5 + random() * 2;
+    this.reset2 = spawnpoint_reset;
     this.team_saved = this.team;
     IL_PUSH(g_saved_team, this);
     if (!this.cnt)
@@ -136,11 +138,11 @@ void relocate_spawnpoint(entity this)
     if (have_team_spawns != 0)
         if (this.team)
             have_team_spawns = 1;
-    have_team_spawns_forteams |= BIT(this.team);
+    have_team_spawns_for_team[Team_IsValidTeam(this.team) ? this.team : 0] = true;
 
     if (autocvar_r_showbboxes)
     {
-        // show where spawnpoints point at too
+
         vector forward, right, up;
         MAKE_VECTORS(this.angles, forward, right, up);
         entity e = new(info_player_foo);
@@ -149,7 +151,6 @@ void relocate_spawnpoint(entity this)
         e.solid = SOLID_TRIGGER;
     }
 
-    // network it after all spawnpoints are setup, so that we can check if team spawnpoints are used
 	InitializeEntity(this, link_spawnpoint, INITPRIO_FINDTARGET);
 }
 
@@ -169,50 +170,57 @@ spawnfunc(info_player_deathmatch)
 	relocate_spawnpoint(this);
 }
 
-/*QUAKED spawnfunc_info_player_team1 (1 0 0) (-16 -16 -24) (16 16 24)
-Starting point for a player in team one (Red).
-Keys: "angle" viewing angle when spawning. */
 spawnfunc(info_player_team1)
 {
-	this.team = NUM_TEAM_1; // red
+	this.team = NUM_TEAM_1;
 	spawnfunc_info_player_deathmatch(this);
 }
 
-
-/*QUAKED spawnfunc_info_player_team2 (1 0 0) (-16 -16 -24) (16 16 24)
-Starting point for a player in team two (Blue).
-Keys: "angle" viewing angle when spawning. */
 spawnfunc(info_player_team2)
 {
-	this.team = NUM_TEAM_2; // blue
+	this.team = NUM_TEAM_2;
 	spawnfunc_info_player_deathmatch(this);
 }
 
-/*QUAKED spawnfunc_info_player_team3 (1 0 0) (-16 -16 -24) (16 16 24)
-Starting point for a player in team three (Yellow).
-Keys: "angle" viewing angle when spawning. */
 spawnfunc(info_player_team3)
 {
-	this.team = NUM_TEAM_3; // yellow
+	this.team = NUM_TEAM_3;
 	spawnfunc_info_player_deathmatch(this);
 }
 
-
-/*QUAKED spawnfunc_info_player_team4 (1 0 0) (-16 -16 -24) (16 16 24)
-Starting point for a player in team four (Purple).
-Keys: "angle" viewing angle when spawning. */
 spawnfunc(info_player_team4)
 {
-	this.team = NUM_TEAM_4; // purple
+	this.team = NUM_TEAM_4;
 	spawnfunc_info_player_deathmatch(this);
 }
 
-// Returns:
-//   _x: prio (-1 if unusable)
-//   _y: weight
+spawnfunc(info_player_team5)
+{
+	this.team = NUM_TEAM_5;
+	spawnfunc_info_player_deathmatch(this);
+}
+
+spawnfunc(info_player_team6)
+{
+	this.team = NUM_TEAM_6;
+	spawnfunc_info_player_deathmatch(this);
+}
+
+spawnfunc(info_player_team7)
+{
+	this.team = NUM_TEAM_7;
+	spawnfunc_info_player_deathmatch(this);
+}
+
+spawnfunc(info_player_team8)
+{
+	this.team = NUM_TEAM_8;
+	spawnfunc_info_player_deathmatch(this);
+}
+
 vector Spawn_Score(entity this, entity spot, float mindist, float teamcheck, bool targetcheck)
 {
-	// filter out spots for the wrong team
+
 	if(teamcheck >= 0)
 		if(spot.team != teamcheck)
 			return '-1 0 0';
@@ -244,7 +252,6 @@ vector Spawn_Score(entity this, entity spot, float mindist, float teamcheck, boo
 
 	vector spawn_score = prio * '1 0 0' + shortest * '0 1 0';
 
-	// filter out spots for assault
 	if(spot.target && spot.target != "" && targetcheck)
 	{
 		int found = 0;
@@ -289,7 +296,7 @@ entity Spawn_FilterOutBadSpots(entity this, entity firstspot, float mindist, flo
 
 	for(spot = firstspot; spot; spot = spot.chain)
 	{
-		if(spot.spawnpoint_score.x >= 0) // spawning allowed here
+		if(spot.spawnpoint_score.x >= 0)
 		{
 			if(spotlistend)
 				spotlistend.chain = spot;
@@ -306,8 +313,7 @@ entity Spawn_FilterOutBadSpots(entity this, entity firstspot, float mindist, flo
 
 entity Spawn_WeightedPoint(entity firstspot, float lower, float upper, float exponent)
 {
-	// weight of a point: bound(lower, mindisttoplayer, upper)^exponent
-	// multiplied by spot.cnt (useful if you distribute many spawnpoints in a small area)
+
 	entity spot;
 
 	RandomSelection_Init();
@@ -317,13 +323,156 @@ entity Spawn_WeightedPoint(entity firstspot, float lower, float upper, float exp
 	return RandomSelection_chosen_ent;
 }
 
-/*
-=============
-SelectSpawnPoint
+int Spawn_PointCount(entity firstspot)
+{
+	int count = 0;
+	for(entity spot = firstspot; spot; spot = spot.chain)
+		++count;
+	return count;
+}
 
-Finds a point to respawn
-=============
-*/
+int Spawn_SwizzlePlayerCount()
+{
+	int count = 0;
+	FOREACH_CLIENT(IS_PLAYER(it) && Team_IsValidTeam(it.team), { ++count; });
+	return max(1, count);
+}
+
+int Spawn_SwizzleTeamOrdinal(entity player)
+{
+	int ordinal = 0;
+	FOREACH_CLIENT(IS_PLAYER(it) && it.team == player.team,
+	{
+		if(etof(it) < etof(player))
+			++ordinal;
+	});
+	return ordinal;
+}
+
+int Spawn_SwizzleTicket(entity player)
+{
+	int playerteam = Team_TeamToIndex(player.team);
+	int playerordinal = Spawn_SwizzleTeamOrdinal(player);
+	int ticket = 0;
+	FOREACH_CLIENT(IS_PLAYER(it) && Team_IsValidTeam(it.team),
+	{
+		int ordinal = Spawn_SwizzleTeamOrdinal(it);
+		int candidate_team = Team_TeamToIndex(it.team);
+		if(ordinal < playerordinal || (ordinal == playerordinal && candidate_team < playerteam))
+			++ticket;
+	});
+	return ticket;
+}
+
+int Spawn_SwizzleSlots(int spots)
+{
+	int configured = floor(autocvar_g_spawn_swizzle_slots);
+	return configured > 0 ? min(max(1, spots), configured) : max(1, spots);
+}
+
+float Spawn_SwizzleStep()
+{
+	return max(sys_frametime, autocvar_g_spawn_swizzle_step);
+}
+
+bool Spawn_SwizzleReserved(entity player, float scheduled, int lane)
+{
+	bool reserved = false;
+	FOREACH_CLIENT(it != player && it.spawn_swizzle_active && it.spawn_swizzle_actual_time < 0,
+	{
+		if(fabs(it.spawn_swizzle_scheduled_time - scheduled) < 0.001
+			&& floor(it.spawn_swizzle_lane) == lane)
+			reserved = true;
+	});
+	return reserved;
+}
+
+float Spawn_SwizzleTime(entity player, float earliest)
+{
+	player.spawn_swizzle_active = 0;
+	if(!autocvar_g_spawn_swizzle || !Team_IsValidTeam(player.team))
+		return earliest;
+	int spots = 0;
+	IL_EACH(g_spawnpoints, true, { ++spots; });
+	spots = max(1, spots);
+	int players = Spawn_SwizzlePlayerCount();
+	int slots = Spawn_SwizzleSlots(spots);
+	float step = Spawn_SwizzleStep();
+	int cohorts = max(1, ceil(players / slots));
+	int ticket = Spawn_SwizzleTicket(player);
+	int cohort = floor(ticket / slots);
+	float cycle = cohorts * step;
+	int generation = max(0, ceil((earliest - cohort * step) / cycle));
+	float scheduled = generation * cycle + cohort * step;
+	int lane = ticket % slots;
+	while(Spawn_SwizzleReserved(player, scheduled, lane))
+	{
+		++cohort;
+		if(cohort >= cohorts)
+		{
+			cohort = 0;
+			++generation;
+		}
+		scheduled = generation * cycle + cohort * step;
+	}
+	player.spawn_swizzle_active = 1;
+	player.spawn_swizzle_epoch += 1;
+	player.spawn_swizzle_player_count = players;
+	player.spawn_swizzle_spot_count = spots;
+	player.spawn_swizzle_slot_count = slots;
+	player.spawn_swizzle_ticket = ticket;
+	player.spawn_swizzle_cohort = cohort;
+	player.spawn_swizzle_cohort_count = cohorts;
+	player.spawn_swizzle_generation = generation;
+	player.spawn_swizzle_scheduled_time = scheduled;
+	player.spawn_swizzle_actual_time = -1;
+	player.spawn_swizzle_lane = lane;
+	player.spawn_swizzle_spot = -1;
+	LOG_INFOF("[SPAWNSWIZZLE] team=%d players=%d spots=%d slots=%d ticket=%d cohort=%d cohorts=%d generation=%d scheduled=%.3f delay=%.3f\n",
+		Team_TeamToIndex(player.team), players, spots, slots, ticket, cohort,
+		cohorts, generation, scheduled, scheduled - time);
+	return scheduled;
+}
+
+entity Spawn_SwizzledPoint(entity firstspot, entity player)
+{
+	int count = Spawn_PointCount(firstspot);
+	if(!count)
+		return NULL;
+	if(!player.spawn_swizzle_active)
+	{
+		int players = Spawn_SwizzlePlayerCount();
+		int slots = Spawn_SwizzleSlots(count);
+		int ticket = Spawn_SwizzleTicket(player);
+		player.spawn_swizzle_active = 1;
+		player.spawn_swizzle_epoch += 1;
+		player.spawn_swizzle_player_count = players;
+		player.spawn_swizzle_spot_count = count;
+		player.spawn_swizzle_slot_count = slots;
+		player.spawn_swizzle_ticket = ticket;
+		player.spawn_swizzle_cohort = floor(ticket / slots);
+		player.spawn_swizzle_cohort_count = max(1, ceil(players / slots));
+		player.spawn_swizzle_generation = floor(time / (player.spawn_swizzle_cohort_count * Spawn_SwizzleStep()));
+		player.spawn_swizzle_scheduled_time = time;
+		player.spawn_swizzle_lane = ticket % slots;
+	}
+	int slots = min(count, max(1, floor(player.spawn_swizzle_slot_count)));
+	int generation = floor(player.spawn_swizzle_generation);
+	int ticket = floor(player.spawn_swizzle_ticket);
+	int lane = floor(player.spawn_swizzle_lane) % slots;
+	int slot = (generation + lane) % count;
+	int selected = slot;
+	entity spot = firstspot;
+	while(slot-- > 0 && spot.chain)
+		spot = spot.chain;
+	player.spawn_swizzle_actual_time = time;
+	player.spawn_swizzle_lane = lane;
+	player.spawn_swizzle_spot = etof(spot);
+	LOG_INFOF("[SPAWNSWIZZLE] team=%d ticket=%d lane=%d generation=%d slot=%d spots=%d slots=%d\n",
+		Team_TeamToIndex(player.team), ticket, lane, generation, selected, count, slots);
+	return spot;
+}
+
 bool testspawn_checked;
 entity testspawn_point;
 entity SelectSpawnPoint(entity this, bool anypoint)
@@ -343,33 +492,28 @@ entity SelectSpawnPoint(entity this, bool anypoint)
 	if(this.spawnpoint_targ)
 		return this.spawnpoint_targ;
 
-	if(anypoint || autocvar_g_spawn_useallspawns)
+	if(anypoint || autocvar_g_spawn_useallspawns || autocvar_g_spawn_swizzle)
 		teamcheck = -1;
 	else if(have_team_spawns > 0)
 	{
-		if(!(have_team_spawns_forteams & BIT(this.team)))
+		if(!Spawn_HasTeamSpawn(this.team))
 		{
-			// we request a spawn for a team, and we have team
-			// spawns, but that team has no spawns?
-			if(have_team_spawns_forteams & BIT(0))
-				// try noteam spawns
+
+			if(Spawn_HasTeamSpawn(0))
+
 				teamcheck = 0;
 			else
-				// if not, any spawn has to do
+
 				teamcheck = -1;
 		}
 		else
-			teamcheck = this.team; // MUST be team
+			teamcheck = this.team;
 	}
-	else if(have_team_spawns == 0 && (have_team_spawns_forteams & BIT(0)))
-		teamcheck = 0; // MUST be noteam
+	else if(have_team_spawns == 0 && Spawn_HasTeamSpawn(0))
+		teamcheck = 0;
 	else
 		teamcheck = -1;
-		// if we get here, we either require team spawns but have none, or we require non-team spawns and have none; use any spawn then
 
-
-	// get the entire list of spots
-	//entity firstspot = findchain(classname, "info_player_deathmatch");
 	entity firstspot = IL_FIRST(g_spawnpoints);
 	entity prev = NULL;
 	IL_EACH(g_spawnpoints, true,
@@ -379,18 +523,20 @@ entity SelectSpawnPoint(entity this, bool anypoint)
 		it.chain = NULL;
 		prev = it;
 	});
-	// filter out the bad ones
-	// (note this returns the original list if none survived)
+
 	if(anypoint)
 	{
 		spot = Spawn_WeightedPoint(firstspot, 1, 1, 1);
+	}
+	else if(autocvar_g_spawn_swizzle && Team_IsValidTeam(this.team))
+	{
+		firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, -1, true);
+		spot = Spawn_SwizzledPoint(firstspot, this);
 	}
 	else
 	{
 		firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, teamcheck, true);
 
-		// emergency fallback! double check without targets
-		// fixes some crashes with improperly repacked maps
 		if(!firstspot)
 		{
 			firstspot = IL_FIRST(g_spawnpoints);
@@ -405,13 +551,10 @@ entity SelectSpawnPoint(entity this, bool anypoint)
 			firstspot = Spawn_FilterOutBadSpots(this, firstspot, 100, teamcheck, false);
 		}
 
-		// there is 50/50 chance of choosing a random spot or the furthest spot
-		// (this means that roughly every other spawn will be furthest, so you
-		// usually won't get fragged at spawn twice in a row)
 		if (random() > autocvar_g_spawn_furthest)
 			spot = Spawn_WeightedPoint(firstspot, 1, 1, 1);
 		else
-			spot = Spawn_WeightedPoint(firstspot, 1, 5000, 5); // chooses a far far away spawnpoint
+			spot = Spawn_WeightedPoint(firstspot, 1, 5000, 5);
 	}
 
 	if (!spot)
@@ -421,7 +564,7 @@ entity SelectSpawnPoint(entity this, bool anypoint)
 		else
 		{
 			if(some_spawn_has_been_used)
-				return NULL; // team can't spawn any more, because of actions of other team
+				return NULL;
 			else
 				error("Cannot find a spawn point - please fix the map!");
 		}

@@ -8,7 +8,6 @@
 #include <server/weapons/weaponsystem.qh>
 #include <server/world.qh>
 
-// Generic aiming
 vector turret_aim_generic(entity this)
 {
 
@@ -22,13 +21,11 @@ vector turret_aim_generic(entity this)
 
 	mintime = max(this.attack_finished_single[0] - time,0) + sys_frametime;
 
-	// Baseline
 	pre_pos = real_origin(this.enemy);
 
-	// Lead?
 	if (this.aim_flags & TFL_AIM_LEAD)
 	{
-		if (this.aim_flags & TFL_AIM_SHOTTIMECOMPENSATE)	   // Need to conpensate for shot traveltime
+		if (this.aim_flags & TFL_AIM_SHOTTIMECOMPENSATE)
 		{
 			prep = pre_pos;
 
@@ -58,7 +55,7 @@ vector turret_aim_generic(entity this)
 
 	if(this.aim_flags & TFL_AIM_SPLASH)
 	{
-		//tracebox(pre_pos + '0 0 32',this.enemy.mins,this.enemy.maxs,pre_pos -'0 0 64',MOVE_WORLDONLY,this.enemy);
+
 		traceline(pre_pos + '0 0 32',pre_pos -'0 0 64',MOVE_WORLDONLY,this.enemy);
 		if(trace_fraction != 1.0)
 			pre_pos = trace_endpos;
@@ -69,7 +66,7 @@ vector turret_aim_generic(entity this)
 
 float turret_targetscore_support(entity _turret,entity _target)
 {
-	float score;		// Total score
+	float score;
 	float s_score = 0, d_score;
 
 	if (_turret.enemy == _target) s_score = 1;
@@ -82,18 +79,15 @@ float turret_targetscore_support(entity _turret,entity _target)
 	return score;
 }
 
-/*
-* Generic bias aware score system.
-*/
 float turret_targetscore_generic(entity _turret, entity _target)
 {
-	float d_dist;	   // Defendmode Distance
-	float score;		// Total score
-	float d_score;	  // Distance score
-	float a_score;	  // Angular score
-	float m_score = 0;  // missile score
-	float p_score = 0;  // player score
-	float ikr;		  // ideal kill range
+	float d_dist;
+	float score;
+	float d_score;
+	float a_score;
+	float m_score = 0;
+	float p_score = 0;
+	float ikr;
 
 	if (_turret.tur_defend)
 	{
@@ -103,7 +97,7 @@ float turret_targetscore_generic(entity _turret, entity _target)
 	}
 	else
 	{
-		// Make a normlized value base on the targets distance from our optimal killzone
+
 		ikr = _turret.target_range_optimal;
 		d_score = min(ikr, tvt_dist) / max(ikr, tvt_dist);
 	}
@@ -128,7 +122,7 @@ float turret_targetscore_generic(entity _turret, entity _target)
 
 	if(vdist((_turret.tur_shotorg - real_origin(_target)), >, _turret.target_range))
 	{
-		//dprint("Wtf?\n");
+
 		score *= 0.001;
 	}
 
@@ -139,10 +133,6 @@ float turret_targetscore_generic(entity _turret, entity _target)
 	sd = ftos(d_score);
 	d_score *= _turret.target_select_rangebias;
 	sdt = ftos(d_score);
-
-	//sv = ftos(v_score);
-	//v_score *= _turret.target_select_samebias;
-	//svt = ftos(v_score);
 
 	sa = ftos(a_score);
 	a_score *= _turret.target_select_anglebias;
@@ -155,7 +145,6 @@ float turret_targetscore_generic(entity _turret, entity _target)
 	sp = ftos(p_score);
 	p_score *= _turret.target_select_playerbias;
 	spt = ftos(p_score);
-
 
 	ss = ftos(score);
 	bprint("^3Target scores^7 \[  ",_turret.netname, "  \] ^3for^7 \[  ", _target.netname,"  \]\n");
@@ -170,7 +159,6 @@ float turret_targetscore_generic(entity _turret, entity _target)
 	return score;
 }
 
-// Generic damage handling
 void turret_hide(entity this)
 {
 	this.effects   |= EF_NODRAW;
@@ -183,7 +171,6 @@ void turret_die(entity this)
 	this.deadflag		  = DEAD_DEAD;
 	this.tur_head.deadflag = this.deadflag;
 
-// Unsolidify and hide real parts
 	this.solid			 = SOLID_NOT;
 	this.tur_head.solid	 = this.solid;
 
@@ -193,13 +180,10 @@ void turret_die(entity this)
 
 	SetResourceExplicit(this, RES_HEALTH, 0);
 
-// Go boom
-	//RadiusDamage (this,this, min(this.ammo,50),min(this.ammo,50) * 0.25,250,NULL,min(this.ammo,50)*5,DEATH_TURRET,NULL);
-
 	Turret tur = get_turretinfo(this.m_id);
 	if(this.damage_flags & TFL_DMG_DEATH_NORESPAWN)
 	{
-		// do a simple explosion effect here, since CSQC can't do it on a to-be-removed entity
+
 		sound(this, CH_SHOTS, SND_ROCKET_IMPACT, VOL_BASE, ATTEN_NORM);
 		Send_Effect(EFFECT_ROCKET_EXPLODE, this.origin, '0 0 0', 1);
 
@@ -210,7 +194,7 @@ void turret_die(entity this)
 	}
 	else
 	{
-		// Setup respawn
+
 		this.SendFlags	  |= TNSF_STATUS;
 		this.nextthink	 = time + 0.2;
 		setthink(this, turret_hide);
@@ -221,11 +205,10 @@ void turret_die(entity this)
 
 void turret_damage(entity this, entity inflictor, entity attacker, float damage, int deathtype, .entity weaponentity, vector hitloc, vector vforce)
 {
-	// Enough already!
+
 	if(this.deadflag == DEAD_DEAD)
 		return;
 
-	// Inactive turrets take no damage. (hm..)
 	if(!this.active)
 		return;
 
@@ -239,7 +222,6 @@ void turret_damage(entity this, entity inflictor, entity attacker, float damage,
 
 	TakeResource(this, RES_HEALTH, damage);
 
-	// thorw head slightly off aim when hit?
 	if (this.damage_flags & TFL_DMG_HEADSHAKE)
 	{
 		this.tur_head.angles_x = this.tur_head.angles_x + (-0.5 + random()) * damage;
@@ -279,8 +261,7 @@ bool turret_heal(entity targ, entity inflictor, float amount, float limit)
 void turret_think(entity this);
 void turret_respawn(entity this)
 {
-	// Make sure all parts belong to the same team since
-	// this function doubles as "teamchange" function.
+
 	this.tur_head.team 	= this.team;
 	this.effects			   &= ~EF_NODRAW;
 	this.deadflag				= DEAD_NO;
@@ -305,11 +286,9 @@ void turret_respawn(entity this)
 	Turret tur = get_turretinfo(this.m_id);
 	tur.tr_setup(tur, this);
 
-	setorigin(this, this.origin); // make sure it's linked to the area grid
+	setorigin(this, this.origin);
 }
 
-
-// Main functions
 .float clientframe;
 void turrets_setframe(entity this, float _frame, float client_only)
 {
@@ -368,7 +347,7 @@ bool turret_send(entity this, entity to, float sf)
 
 	if(sf & TNSF_STATUS)
 	{
-		WriteByte(MSG_ENTITY, this.team);
+		WriteShort(MSG_ENTITY, this.team);
 
 		if(GetResource(this, RES_HEALTH) <= 0)
 			WriteByte(MSG_ENTITY, 0);
@@ -451,7 +430,7 @@ void turret_projectile_damage(entity this, entity inflictor, entity attacker, fl
 {
 	this.velocity  += vforce;
 	TakeResource(this, RES_HEALTH, damage);
-	//this.realowner = attacker; // Dont change realowner, it does not make much sense for turrets
+
 	if(GetResource(this, RES_HEALTH) <= 0)
 		W_PrepareExplosionByDamage(this, this.owner, turret_projectile_explode);
 }
@@ -494,10 +473,6 @@ entity turret_projectile(entity actor, Sound _snd, float _size, float _health, f
 	return proj;
 }
 
-/**
-** updates enemy distances, predicted impact point/time
-** and updated aim<->predict impact distance.
-**/
 void turret_do_updates(entity t_turret)
 {
 	vector enemy_pos = real_origin(t_turret.enemy);
@@ -508,19 +483,6 @@ void turret_do_updates(entity t_turret)
 	t_turret.tur_dist_enemy = vlen(t_turret.tur_shotorg - enemy_pos);
 	t_turret.tur_dist_aimpos = vlen(t_turret.tur_shotorg - t_turret.tur_aimpos);
 
-	/*if((t_turret.firecheck_flags & TFL_FIRECHECK_VERIFIED) && (t_turret.enemy))
-	{
-		oldpos = t_turret.enemy.origin;
-		setorigin(t_turret.enemy, t_turret.tur_aimpos);
-		tracebox(t_turret.tur_shotorg, '-1 -1 -1', '1 1 1', t_turret.tur_shotorg + (t_turret.tur_shotdir_updated * t_turret.tur_dist_aimpos), MOVE_NORMAL,t_turret);
-		setorigin(t_turret.enemy, oldpos);
-
-		if(trace_ent == t_turret.enemy)
-			t_turret.tur_dist_impact_to_aimpos = 0;
-		else
-			t_turret.tur_dist_impact_to_aimpos = vlen(trace_endpos - t_turret.tur_aimpos);
-	}
-	else*/
 		tracebox(t_turret.tur_shotorg, '-1 -1 -1','1 1 1', t_turret.tur_shotorg + (t_turret.tur_shotdir_updated * t_turret.tur_dist_aimpos), MOVE_NORMAL,t_turret);
 
 	t_turret.tur_dist_impact_to_aimpos = vlen(trace_endpos - t_turret.tur_aimpos) - (vlen(t_turret.enemy.maxs - t_turret.enemy.mins) * 0.5);
@@ -528,15 +490,11 @@ void turret_do_updates(entity t_turret)
 	t_turret.tur_impacttime			= vlen(t_turret.tur_shotorg - trace_endpos) / t_turret.shot_speed;
 }
 
-/**
-** Handles head rotation according to
-** the units .track_type and .track_flags
-**/
 .float turret_framecounter;
 void turret_track(entity this)
 {
-	vector target_angle; // This is where we want to aim
-	vector move_angle;   // This is where we can aim
+	vector target_angle;
+	vector move_angle;
 	float f_tmp;
 	vector v1, v2;
 	v1 = this.tur_head.angles;
@@ -562,17 +520,13 @@ void turret_track(entity this)
 	this.tur_head.angles_x = anglemods(this.tur_head.angles_x);
 	this.tur_head.angles_y = anglemods(this.tur_head.angles_y);
 
-	// Find the diffrence between where we currently aim and where we want to aim
-	//move_angle = target_angle - (this.angles + this.tur_head.angles);
-	//move_angle = shortangle_vxy(move_angle,(this.angles + this.tur_head.angles));
-
 	move_angle = AnglesTransform_ToAngles(AnglesTransform_LeftDivide(AnglesTransform_FromAngles(this.angles), AnglesTransform_FromAngles(target_angle))) - this.tur_head.angles;
 	move_angle = shortangle_vxy(move_angle, this.tur_head.angles);
 
 	switch(this.track_type)
 	{
 		case TFL_TRACKTYPE_STEPMOTOR:
-			f_tmp = this.aim_speed * this.ticrate; // dgr/sec -> dgr/tic
+			f_tmp = this.aim_speed * this.ticrate;
 			if (this.track_flags & TFL_TRACK_PITCH)
 			{
 				this.tur_head.angles_x += bound(-f_tmp,move_angle_x, f_tmp);
@@ -593,13 +547,12 @@ void turret_track(entity this)
 					this.tur_head.angles_y = this.aim_maxrot;
 			}
 
-			// CSQC
 			this.SendFlags  |= TNSF_ANG;
 
 			return;
 
 		case TFL_TRACKTYPE_FLUIDINERTIA:
-			f_tmp = this.aim_speed * this.ticrate; // dgr/sec -> dgr/tic
+			f_tmp = this.aim_speed * this.ticrate;
 			move_angle_x = bound(-this.aim_speed, move_angle_x * this.track_accel_pitch * f_tmp, this.aim_speed);
 			move_angle_y = bound(-this.aim_speed, move_angle_y * this.track_accel_rot * f_tmp, this.aim_speed);
 			move_angle = (this.tur_head.avelocity * this.track_blendrate) + (move_angle * (1 - this.track_blendrate));
@@ -613,7 +566,6 @@ void turret_track(entity this)
 			break;
 	}
 
-	//  pitch
 	if (this.track_flags & TFL_TRACK_PITCH)
 	{
 		this.tur_head.avelocity_x = move_angle_x;
@@ -634,7 +586,6 @@ void turret_track(entity this)
 		}
 	}
 
-	//  rot
 	if (this.track_flags & TFL_TRACK_ROTATE)
 	{
 		this.tur_head.avelocity_y = move_angle_y;
@@ -658,7 +609,6 @@ void turret_track(entity this)
 
 	this.SendFlags  |= TNSF_AVEL;
 
-	// Force a angle update every 10'th frame
 	this.turret_framecounter += 1;
 	if(this.turret_framecounter >= 10)
 	{
@@ -667,30 +617,9 @@ void turret_track(entity this)
 	}
 }
 
-/*
- + TFL_TARGETSELECT_NO
- + TFL_TARGETSELECT_LOS
- + TFL_TARGETSELECT_PLAYERS
- + TFL_TARGETSELECT_MISSILES
- + TFL_TARGETSELECT_VEHICLES
- - TFL_TARGETSELECT_TRIGGERTARGET
- + TFL_TARGETSELECT_ANGLELIMITS
- + TFL_TARGETSELECT_RANGELIMITS
- + TFL_TARGETSELECT_TEAMCHECK
- - TFL_TARGETSELECT_NOBUILTIN
- + TFL_TARGETSELECT_OWNTEAM
-*/
-
-/**
-** Evaluate a entity for target valitity based on validate_flags
-** NOTE: the caller must check takedamage before calling this, to inline this check.
-**/
 float turret_validate_target(entity e_turret, entity e_target, float validate_flags)
 {
 	vector v_tmp;
-
-	//if(!validate_flags & TFL_TARGETSELECT_NOBUILTIN)
-	//	return -0.5;
 
 	if(!e_target)
 		return -2;
@@ -710,24 +639,20 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 	if (validate_flags & TFL_TARGETSELECT_NO)
 		return -4;
 
-	// If only this was used more..
 	if (e_target.flags & FL_NOTARGET)
 		return -5;
 
-	// Cant touch this
 	if (GetResource(e_target, RES_HEALTH) <= 0)
 		return -6;
 	else if (STAT(FROZEN, e_target))
 		return -6;
 
-	// vehicle
 	if(IS_VEHICLE(e_target))
 	{
 		if ((validate_flags & TFL_TARGETSELECT_VEHICLES) && !e_target.owner)
 			return -7;
 	}
 
-	// player
 	if (IS_CLIENT(e_target))
 	{
 		if(!(validate_flags & TFL_TARGETSELECT_PLAYERS))
@@ -737,13 +662,11 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 			return -8;
 	}
 
-	// enemy turrets
 	if(validate_flags & TFL_TARGETSELECT_NOTURRETS)
 	if(e_target.owner.tur_head == e_target)
-	if(e_target.team != e_turret.team) // Dont break support units.
+	if(e_target.team != e_turret.team)
 		return -9;
 
-	// Missile
 	if (e_target.flags & FL_PROJECTILE)
 	if(!(validate_flags & TFL_TARGETSELECT_MISSILES))
 		return -10;
@@ -752,7 +675,6 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 	if(!(e_target.flags & FL_PROJECTILE))
 		return -10.5;
 
-	// Team check
 	if (validate_flags & TFL_TARGETSELECT_TEAMCHECK)
 	{
 		if (validate_flags & TFL_TARGETSELECT_OWNTEAM)
@@ -764,7 +686,7 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 				return -12;
 
 			if (e_turret.team != e_target.aiment.team)
-				return -12; // portals
+				return -12;
 		}
 		else
 		{
@@ -775,11 +697,10 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 				return -14;
 
 			if (e_turret.team == e_target.aiment.team)
-				return -14; // portals
+				return -14;
 		}
 	}
 
-	// Range limits?
 	tvt_dist = vlen(e_turret.origin - real_origin(e_target));
 	if (validate_flags & TFL_TARGETSELECT_RANGELIMITS)
 	{
@@ -790,18 +711,9 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 			return -16;
 	}
 
-	// Can we even aim this thing?
 	tvt_thadv = angleofs3(e_turret.tur_head.origin, e_turret.angles + e_turret.tur_head.angles, e_target.origin);
 	tvt_tadv = shortangle_vxy(angleofs(e_turret, e_target), e_turret.angles);
 	tvt_thadf = vlen(tvt_thadv);
-
-	/*
-	if(validate_flags & TFL_TARGETSELECT_FOV)
-	{
-		if(e_turret.target_select_fov < tvt_thadf)
-			return -21;
-	}
-	*/
 
 	if (validate_flags & TFL_TARGETSELECT_ANGLELIMITS)
 	{
@@ -812,7 +724,6 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 			return -18;
 	}
 
-	// Line of sight?
 	if (validate_flags & TFL_TARGETSELECT_LOS)
 	{
 		v_tmp = real_origin(e_target) + ((e_target.mins + e_target.maxs) * 0.5);
@@ -826,11 +737,6 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 	if (e_target.classname == "grapplinghook")
 		return -20;
 
-	/*
-	if (e_target.classname == "func_button")
-		return -21;
-	*/
-
 #ifdef TURRET_DEBUG_TARGETSELECT
 	LOG_TRACE("Target:",e_target.netname," is a valid target for ",e_turret.netname);
 #endif
@@ -840,10 +746,10 @@ float turret_validate_target(entity e_turret, entity e_target, float validate_fl
 
 entity turret_select_target(entity this)
 {
-	entity e;		// target looper entity
-	float  score;	// target looper entity score
-	entity e_enemy;  // currently best scoreing target
-	float  m_score;  // currently best scoreing target's score
+	entity e;
+	float  score;
+	entity e_enemy;
+	float  m_score;
 
 	m_score = 0;
 	if(this.enemy && this.enemy.takedamage && turret_validate_target(this,this.enemy,this.target_validate_flags) > 0)
@@ -856,7 +762,6 @@ entity turret_select_target(entity this)
 
 	e = findradius(this.origin, this.target_range);
 
-	// Nothing to aim at?
 	if (!e)
 		return NULL;
 
@@ -865,7 +770,7 @@ entity turret_select_target(entity this)
 		if(e.takedamage)
 		{
 			float f = turret_validate_target(this, e, this.target_select_flags);
-			//dprint("F is: ", ftos(f), "\n");
+
 			if ( f > 0)
 			{
 				score = this.turret_score_target(this,e);
@@ -882,64 +787,35 @@ entity turret_select_target(entity this)
 	return e_enemy;
 }
 
-
-/*
- + = implemented
- - = not implemented
-
- + TFL_FIRECHECK_NO
- + TFL_FIRECHECK_WORLD
- + TFL_FIRECHECK_DEAD
- + TFL_FIRECHECK_DISTANCES
- - TFL_FIRECHECK_LOS
- + TFL_FIRECHECK_AIMDIST
- + TFL_FIRECHECK_REALDIST
- - TFL_FIRECHECK_ANGLEDIST
- - TFL_FIRECHECK_TEAMCECK
- + TFL_FIRECHECK_AFF
- + TFL_FIRECHECK_AMMO_OWN
- + TFL_FIRECHECK_AMMO_OTHER
- + TFL_FIRECHECK_REFIRE
-*/
-
-/**
-** Preforms pre-fire checks based on the uints firecheck_flags
-**/
 bool turret_firecheck(entity this)
 {
-	// This one just dont care =)
+
 	if (this.firecheck_flags & TFL_FIRECHECK_NO)
 		return true;
 
 	if (this.enemy == NULL)
 		return false;
 
-	// Ready?
 	if (this.firecheck_flags & TFL_FIRECHECK_REFIRE)
 		if (this.attack_finished_single[0] > time) return false;
 
-	// Special case: volly fire turret that has to fire a full volly if a shot was fired.
 	if (this.shoot_flags & TFL_SHOOT_VOLLYALWAYS)
 		if (this.volly_counter != this.shot_volly)
 			if(this.ammo >= this.shot_dmg)
 				return true;
 
-	// Lack of zombies makes shooting dead things unnecessary :P
 	if (this.firecheck_flags & TFL_FIRECHECK_DEAD)
 		if (IS_DEAD(this.enemy))
 			return false;
 
-	// Own ammo?
 	if (this.firecheck_flags & TFL_FIRECHECK_AMMO_OWN)
 		if (this.ammo < this.shot_dmg)
 			return false;
 
-	// Other's ammo? (support-supply units)
 	if (this.firecheck_flags & TFL_FIRECHECK_AMMO_OTHER)
 		if (this.enemy.ammo >= this.enemy.ammo_max)
 			return false;
 
-	// Target of opertunity?
 	if(turret_validate_target(this, this.tur_impactent, this.target_validate_flags) > 0)
 	{
 		this.enemy = this.tur_impactent;
@@ -948,34 +824,27 @@ bool turret_firecheck(entity this)
 
 	if (this.firecheck_flags & TFL_FIRECHECK_DISTANCES)
 	{
-		// To close?
+
 		if (this.tur_dist_aimpos < this.target_range_min)
 		{
 			if(turret_validate_target(this, this.tur_impactent, this.target_validate_flags) > 0)
-				return true; // Target of opertunity?
+				return true;
 			return false;
 		}
 	}
 
-	// Try to avoid FF?
 	if (this.firecheck_flags & TFL_FIRECHECK_AFF)
 		if (this.tur_impactent.team == this.team)
 			return false;
 
-	// aim<->predicted impact
 	if (this.firecheck_flags & TFL_FIRECHECK_AIMDIST)
 		if (this.tur_dist_impact_to_aimpos > this.aim_firetolerance_dist)
 			return false;
 
-	// Volly status
 	if (this.shot_volly > 1)
 		if (this.volly_counter == this.shot_volly)
 			if (this.ammo < (this.shot_dmg * this.shot_volly))
 				return false;
-
-	/*if(this.firecheck_flags & TFL_FIRECHECK_VERIFIED)
-		if(this.tur_impactent != this.enemy)
-			return false;*/
 
 	return true;
 }
@@ -1034,24 +903,19 @@ void turret_think(entity this)
 	}
 #endif
 
-	// Handle ammo
 	if (!(this.spawnflags & TSF_NO_AMMO_REGEN))
 	if (this.ammo < this.ammo_max)
 		this.ammo = min(this.ammo + this.ammo_recharge, this.ammo_max);
 
-	// Inactive turrets needs to run the think loop,
-	// So they can handle animation and wake up if need be.
 	if(!this.active)
 	{
 		turret_track(this);
 		return;
 	}
 
-	// This is typicaly used for zaping every target in range
-	// turret_fusionreactor uses this to recharge friendlys.
 	if (this.shoot_flags & TFL_SHOOT_HITALLVALID)
 	{
-		// Do a this.turret_fire for every valid target.
+
 		entity e = findradius(this.origin,this.target_range);
 		while (e)
 		{
@@ -1074,39 +938,33 @@ void turret_think(entity this)
 	}
 	else if(this.shoot_flags & TFL_SHOOT_CUSTOM)
 	{
-		// This one is doing something.. oddball. assume its handles what needs to be handled.
 
-		// Predict?
 		if(!(this.aim_flags & TFL_AIM_NO))
 			this.tur_aimpos = turret_aim_generic(this);
 
-		// Turn & pitch?
 		if(!(this.track_flags & TFL_TRACK_NO))
 			turret_track(this);
 
 		turret_do_updates(this);
 
-		// Fire?
 		if (turret_checkfire(this))
 			turret_fire(this);
 	}
 	else
 	{
-		// Special case for volly always. if it fired once it must compleate the volly.
+
 		if(this.shoot_flags & TFL_SHOOT_VOLLYALWAYS)
 			if(this.volly_counter != this.shot_volly)
 			{
-				// Predict or whatnot
+
 				if(!(this.aim_flags & TFL_AIM_NO))
 					this.tur_aimpos = turret_aim_generic(this);
 
-				// Turn & pitch
 				if(!(this.track_flags & TFL_TRACK_NO))
 					turret_track(this);
 
 				turret_do_updates(this);
 
-				// Fire!
 				if (turret_checkfire(this))
 					turret_fire(this);
 
@@ -1116,14 +974,10 @@ void turret_think(entity this)
 				return;
 			}
 
-		// Check if we have a vailid enemy, and try to find one if we dont.
-
-		// g_turrets_targetscan_maxdelay forces a target re-scan at least this often
 		float do_target_scan = 0;
 		if((this.target_select_time + autocvar_g_turrets_targetscan_maxdelay) < time)
 			do_target_scan = 1;
 
-		// Old target (if any) invalid?
 		if(this.target_validate_time < time)
 		if (turret_validate_target(this, this.enemy, this.target_validate_flags) <= 0)
 		{
@@ -1132,7 +986,6 @@ void turret_think(entity this)
 			do_target_scan = 1;
 		}
 
-		// But never more often then g_turrets_targetscan_mindelay!
 		if (this.target_select_time + autocvar_g_turrets_targetscan_mindelay > time)
 			do_target_scan = 0;
 
@@ -1142,33 +995,28 @@ void turret_think(entity this)
 			this.target_select_time = time;
 		}
 
-		// No target, just go to idle, do any custom stuff and bail.
 		if (this.enemy == NULL)
 		{
-			// Turn & pitch
+
 			if(!(this.track_flags & TFL_TRACK_NO))
 				turret_track(this);
 
 			Turret tur = get_turretinfo(this.m_id);
 			tur.tr_think(tur, this);
 
-			// And bail.
 			return;
 		}
 		else
-			this.lip = time + autocvar_g_turrets_aimidle_delay; // Keep track of the last time we had a target.
+			this.lip = time + autocvar_g_turrets_aimidle_delay;
 
-		// Predict?
 		if(!(this.aim_flags & TFL_AIM_NO))
 			this.tur_aimpos = turret_aim_generic(this);
 
-		// Turn & pitch?
 		if(!(this.track_flags & TFL_TRACK_NO))
 			turret_track(this);
 
 		turret_do_updates(this);
 
-		// Fire?
 		if (turret_checkfire(this))
 			turret_fire(this);
 	}
@@ -1177,10 +1025,6 @@ void turret_think(entity this)
 	tur.tr_think(tur, this);
 }
 
-/*
-	When .used a turret switch team to activator.team.
-	If activator is NULL, the turret go inactive.
-*/
 void turret_use(entity this, entity actor, entity trigger)
 {
 	LOG_TRACE("Turret ",this.netname, " used by ", actor.classname);
@@ -1265,7 +1109,7 @@ void turret_findtarget(entity this)
 
 	entity targ = find(NULL, targetname, this.target);
 	if(targ.classname == "turret_checkpoint")
-		return; // turrets don't defend checkpoints?
+		return;
 
 	if (!targ)
 	{
@@ -1288,9 +1132,8 @@ bool turret_initialize(entity this, Turret tur)
 		return false;
 
 	if(tur.m_id == 0)
-		return false; // invalid turret
+		return false;
 
-	// if tur_head exists, we can assume this turret re-spawned
 	if(!this.tur_head) {
 		tur.tr_precache(tur);
 		IL_PUSH(g_turrets, this);
@@ -1320,8 +1163,6 @@ bool turret_initialize(entity this, Turret tur)
 
 	if(this.track_type != TFL_TRACKTYPE_STEPMOTOR)
 	{
-		// Fluid / Ineria mode. Looks mutch nicer.
-		// Can reduce aim preformance alot, needs a bit diffrent aimspeed
 
 		this.aim_speed = bound(0.1, ((!this.aim_speed) ? 180 : this.aim_speed), 1000);
 
@@ -1391,7 +1232,7 @@ bool turret_initialize(entity this, Turret tur)
 	this.tur_head.solid			= SOLID_NOT;
 	set_movetype(this.tur_head, this.move_movetype);
 
-	this.weaponentities[0] = this; // lol
+	this.weaponentities[0] = this;
 
 	if(!this.tur_defend && this.target != "")
 		InitializeEntity(this, turret_findtarget, INITPRIO_FINDTARGET);

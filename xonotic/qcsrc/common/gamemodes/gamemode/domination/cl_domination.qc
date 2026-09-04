@@ -41,17 +41,16 @@ void DrawDomItem(vector myPos, vector mySize, float aspect_ratio, int layout, in
 		mySize.y = i;
 	}
 
-	if (layout) // show text too
+	if (layout)
 	{
-		//draw the text
-		color *= 0.5 + pps_ratio * (1 - 0.5); // half saturated color at min, full saturated at max
-		if (layout == 2) // average pps
+
+		color *= 0.5 + pps_ratio * (1 - 0.5);
+		if (layout == 2)
 			drawstring_aspect(myPos + eX * mySize.y, ftos_decimals(stat, 2), vec2((2/3) * mySize.x, mySize.y), color, panel_fg_alpha, DRAWFLAG_NORMAL);
-		else // percentage of average pps
+		else
 			drawstring_aspect(myPos + eX * mySize.y, strcat( ftos(floor(pps_ratio*100 + 0.5)), "%" ), vec2((2/3) * mySize.x, mySize.y), color, panel_fg_alpha, DRAWFLAG_NORMAL);
 	}
 
-	//draw the icon
 	drawpic_aspect_skin(myPos, pic, '1 1 0' * mySize.y, '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 	if (stat > 0)
 	{
@@ -63,7 +62,7 @@ void DrawDomItem(vector myPos, vector mySize, float aspect_ratio, int layout, in
 
 void HUD_Mod_Dom(vector myPos, vector mySize)
 {
-	mod_active = 1; // required in each mod function that always shows something
+	mod_active = 1;
 
 	int layout = autocvar_hud_panel_modicons_dom_layout;
 	int rows, columns;

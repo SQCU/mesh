@@ -1,13 +1,11 @@
 #include "cl_damagetext.qh"
 
-// no translatable cvar description please
 AUTOCVAR_SAVE(cl_damagetext,                        bool,   true,       "Draw damage dealt where you hit the enemy");
 AUTOCVAR_SAVE(cl_damagetext_format,                 string, "-{total}", "How to format the damage text. {health}, {armor}, {total}, {potential}: full damage not capped to target's health, {potential_health}: health damage not capped to target's health");
 AUTOCVAR_SAVE(cl_damagetext_format_verbose,         bool,   false,      "{health} shows {potential_health} too when they differ; {total} shows {potential} too when they differ");
 AUTOCVAR_SAVE(cl_damagetext_format_hide_redundant,  bool,   false,      "hide {armor} if 0; hide {potential} and {potential_health} when same as actual");
 STATIC_INIT(DamageText_LegacyFormat) {
-    // damagetext used to be off by default and the cvar got saved in people's configs along with the old format
-    // enable damagetext while updating the format for a one time effect
+
     if (strstrofs(autocvar_cl_damagetext_format, "{", 0) < 0) {
         localcmd("\nseta cl_damagetext 1\n");
         localcmd("\nseta cl_damagetext_format -{total}\n");
@@ -62,7 +60,7 @@ CLASS(DamageText, Object)
 
     void DamageText_draw2d(DamageText this) {
         float since_hit = time - this.hit_time;
-        // can't use `dt = hit_time - prev_update_time` because shrinking wouldn't be linear
+
         float size = this.m_size - since_hit * this.m_shrink_rate * this.m_size;
         float alpha_ = this.alpha - since_hit * this.fade_rate;
         if (alpha_ <= 0 || size <= 0) {
@@ -153,8 +151,6 @@ CLASS(DamageText, Object)
                 : sprintf("%d (%d)", total, potential)
             ), s);
 
-        // futureproofing: remove any remaining (unknown) format strings in case we add new ones in the future
-        // so players can use them on new servers and still have working damagetext on old ones
         while (true) {
             int opening_pos = strstrofs(s, "{", 0);
             if (opening_pos == -1) break;
@@ -192,7 +188,7 @@ CLASS(DamageText, Object)
     DESTRUCTOR(DamageText) {
         strfree(this.text);
         if (this == DamageText_screen_first) {
-            // start from 0 offset again, hopefully, others (if any) will have faded away by now
+
             DamageText_screen_first = NULL;
             DamageText_screen_count = 0;
         }
@@ -200,14 +196,14 @@ CLASS(DamageText, Object)
 ENDCLASS(DamageText)
 
 float current_alpha(entity damage_text) {
-    // alpha doesn't change - actual alpha is always calculated from the initial value
+
     return damage_text.alpha - (time - damage_text.hit_time) * damage_text.fade_rate;
 }
 
 NET_HANDLE(damagetext, bool isNew)
 {
     make_pure(this);
-    int server_entity_index = ReadByte();
+    int server_entity_index = ReadShort();
     int deathtype = ReadInt24_t();
     int flags = ReadByte();
     bool friendlyfire = flags & DTFLAG_SAMETEAM;
@@ -239,11 +235,10 @@ NET_HANDLE(damagetext, bool isNew)
     bool prefer_2d = spectatee_status != -1 && autocvar_cl_damagetext_2d && (too_close || prefer_in_view);
 
     if (can_use_3d && !prefer_2d) {
-        // world coords
-        // 1 as min because shotgun sends damagetext per pellet (see https://gitlab.com/xonotic/xonotic-data.pk3dir/issues/1994).
+
         for (entity e = findradius(entcs.origin, max(autocvar_cl_damagetext_accumulate_range, 1)); e; e = e.chain) {
             if (e.instanceOfDamageText
-                && !e.m_screen_coords // we're using origin for both world coords and screen coords so avoid mismatches
+                && !e.m_screen_coords
                 && e.m_group == server_entity_index
                 && current_alpha(e) > autocvar_cl_damagetext_accumulate_alpha_rel * autocvar_cl_damagetext_alpha_start) {
                 DamageText_update(e, entcs.origin, e.m_healthdamage + health, e.m_armordamage + armor, e.m_potential_damage + potential_damage, deathtype);
@@ -252,14 +247,13 @@ NET_HANDLE(damagetext, bool isNew)
         }
         make_impure(NEW(DamageText, server_entity_index, entcs.origin, false, health, armor, potential_damage, deathtype, friendlyfire));
     } else if (autocvar_cl_damagetext_2d && spectatee_status != -1) {
-        // screen coords only
+
         vector screen_pos = vec2(vid_conwidth * autocvar_cl_damagetext_2d_pos.x, vid_conheight * autocvar_cl_damagetext_2d_pos.y);
         IL_EACH(g_drawables_2d, it.instanceOfDamageText && it.m_screen_coords && it.m_group == server_entity_index, {
             DamageText_update(it, screen_pos, it.m_healthdamage + health, it.m_armordamage + armor, it.m_potential_damage + potential_damage, deathtype);
             return;
         });
 
-        // when hitting multiple enemies, dmgtext would overlap
         if (DamageText_screen_first == NULL) {
             DamageText dt = NEW(DamageText, server_entity_index, screen_pos, true, health, armor, potential_damage, deathtype, friendlyfire);
             make_impure(dt);

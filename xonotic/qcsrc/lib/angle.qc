@@ -1,14 +1,7 @@
 .vector origin;
 
-// angles of the player's model (as opposed to their view which uses `.vector v_angle;`) in degrees
-// x is pitch: positive means up (unlike .v_angle), usually is 0
-// y is yaw: between -180 and 180, increases when turning left
-// z is roll: positive means tilted clockwise, usually is 0
 .vector angles;
 
-/*
-* Return a angle within +/- 360.
-*/
 ERASEABLE
 float anglemods(float v)
 {
@@ -22,9 +15,6 @@ float anglemods(float v)
 		return v;
 }
 
-/*
-* Return the short angle
-*/
 ERASEABLE
 float shortangle_f(float ang1, float ang2)
 {
@@ -64,10 +54,6 @@ vector shortangle_vxy(vector ang1, vector ang2)
 
 	return vtmp;
 }
-
-/*
-* Return the angle offset between angle ang and angle of the vector from->to
-*/
 
 ERASEABLE
 vector angleofs3(vector from, vector ang, vector to)

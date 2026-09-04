@@ -1,8 +1,5 @@
 'use strict';
 
-/* j-oracle viewer — hand-rolled, zero dependencies, no CDN.
-   Everything here is a read of /api/*; nothing is written back. */
-
 const TEAM = ['#6b7684', '#e5484d', '#3b82f6', '#eab308', '#d946ef', '#22c55e', '#f97316'];
 const CART = ['#4fd1c5', '#f0b429', '#d946ef', '#57d38c', '#f2555a', '#8b9dff'];
 const $ = (id) => document.getElementById(id);
@@ -10,14 +7,9 @@ const $ = (id) => document.getElementById(id);
 let LIVE = null;
 let ORACLE = null;
 
-/* ---------------------------------------------------------------- canvas */
-
 function fit(canvas, cssHeight) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.parentElement.clientWidth;
-  /* The intended CSS height is remembered on first sight: after the first
-     resize canvas.height holds device pixels, and reading it back each frame
-     would double the element on every repaint. */
   if (!canvas.dataset.h) canvas.dataset.h = String(cssHeight || canvas.height);
   const h = Number(canvas.dataset.h);
   canvas.width = Math.max(1, Math.round(w * dpr));
@@ -53,8 +45,6 @@ function noData(canvas, message) {
   ctx.fillText(message, 8, h / 2);
 }
 
-/* -------------------------------------------------------------- behavior */
-
 function drawDepth(series) {
   const canvas = $('depth');
   if (!series.length) return noData(canvas, 'no telemetry frames yet');
@@ -66,11 +56,10 @@ function drawDepth(series) {
   const px = (i) => pad.l + (w - pad.l - pad.r) * (series.length < 2 ? 0 : i / (series.length - 1));
   const py = (v) => pad.t + (h - pad.t - pad.b) * (1 - Math.max(0, Math.min(1, v)));
 
-  /* control bands: a strip per cart, coloured by the controlling team */
   const bandH = 4, bandTop = h - pad.b + 3;
   for (let c = 0; c < j; c++) {
     for (let i = 0; i < series.length; i++) {
-      const ctrl = (series[i].ctrl || [])[c];
+      const ctrl = (series[i].control_team || [])[c];
       if (ctrl === undefined || ctrl === null) continue;
       ctx.fillStyle = ctrl > 0 ? TEAM[ctrl % TEAM.length] : '#232c36';
       const x0 = px(i), x1 = i + 1 < series.length ? px(i + 1) : x0 + 2;
@@ -89,7 +78,6 @@ function drawDepth(series) {
     });
     ctx.stroke();
   }
-  /* epoch boundaries — where the responder or the server restarted */
   ctx.strokeStyle = '#5c1f22';
   ctx.setLineDash([3, 3]);
   for (let i = 1; i < series.length; i++) {
@@ -159,8 +147,6 @@ function drawFocus(focus, k) {
     : 'zero cross-team assignments this tick — nobody is being hunted or suppressed';
 }
 
-/* ------------------------------------------------------------- heatmaps */
-
 function heatmap(canvas, matrix, opts) {
   opts = opts || {};
   if (!matrix || !matrix.length) return noData(canvas, opts.empty || 'absent from this frame');
@@ -179,7 +165,6 @@ function heatmap(canvas, matrix, opts) {
       const v = matrix[r][c];
       const t = v === null || v === undefined ? 0 : Math.max(-1, Math.min(1, v / span));
       const i = 4 * (y * img.width + x);
-      /* diverging: teal negative, amber positive, near-black at zero */
       img.data[i]     = t > 0 ? 20 + 220 * t : 12 + 60 * -t;
       img.data[i + 1] = t > 0 ? 20 + 160 * t : 20 + 190 * -t;
       img.data[i + 2] = t > 0 ? 26 + 40 * t : 30 + 180 * -t;
@@ -200,7 +185,7 @@ function heatmap(canvas, matrix, opts) {
 
 function drawSpectrum(spectrum) {
   const canvas = $('spectrum');
-  if (!spectrum || !spectrum.length) return noData(canvas, 'IR absent — no spectrum');
+  if (!spectrum || !spectrum.length) return noData(canvas, 'J absent — no spectrum');
   const { ctx, w, h } = fit(canvas);
   const pad = { l: 4, r: 4, t: 6, b: 12 };
   const n = spectrum.length;
@@ -216,8 +201,6 @@ function drawSpectrum(spectrum) {
   ctx.fillText(`${n} leading singular values`, 4, h - 2);
 }
 
-/* ---------------------------------------------------------------- tables */
-
 function num(v, digits) {
   if (v === null || v === undefined || Number.isNaN(v)) return '<span class="absentval">absent</span>';
   return typeof v === 'number' ? v.toFixed(digits === undefined ? 3 : digits) : String(v);
@@ -228,7 +211,7 @@ function renderHierarchy(latest) {
   if (!latest) { body.innerHTML = '<tr><td colspan="9" class="dimmed">no frame</td></tr>'; return; }
   const succ = {};
   (latest.SUCC || []).forEach(([team, denial]) => { succ[team] = denial; });
-  const carts = latest.ctrl || [];
+  const carts = latest.control_team || [];
   const rows = (latest.resources || []).map((r) => {
     const controlled = carts.filter((c) => c === r.team).length;
     const pw = latest.PW === r.team;
@@ -237,8 +220,8 @@ function renderHierarchy(latest) {
       <td class="num">${r.alive}/${r.players}</td>
       <td class="num">${num(r.health, 0)}</td>
       <td class="num">${num(r.armor, 0)}</td>
-      <td class="num">${num(r.ammo, 1)}</td>
-      <td class="num">${r.weapon_slots}</td>
+      <td class="num">${Object.entries(r.ammo || {}).map(([k, v]) => `${k}:${num(v, 0)}`).join(' ')}</td>
+      <td class="num">${Object.entries(r.weapon_words || {}).map(([k, v]) => `${k}:0x${Number(v).toString(16)}`).join(' ')}</td>
       <td class="num">${controlled}</td>
       <td class="num">${succ[r.team] === undefined ? '<span class="dimmed">—</span>' : num(succ[r.team], 3)}</td>
       <td>${pw ? '<span class="ok">PW</span>' : '<span class="dimmed">·</span>'}</td>
@@ -253,7 +236,8 @@ function renderAssignments(internals) {
   if (!rows.length) { body.innerHTML = '<tr><td colspan="21" class="absentval">assignments absent from this frame</td></tr>'; return; }
   const diag = internals.diag_k;
   body.innerHTML = rows.map((a, i) => {
-    const dk = diag && diag[i] ? diag[i][a.action] : null;
+    const diagRow = diag && Array.isArray(diag[i]) ? diag[i] : diag;
+    const dk = diagRow && diagRow[a.action] !== undefined ? diagRow[a.action] : null;
     const applied = `${a.applied_kind || '?'}:${a.applied_subject}`;
     const goal = `${a.goal_kind || '?'}:${a.goal_subject}`;
     return `<tr>
@@ -272,90 +256,122 @@ function renderAssignments(internals) {
       <td class="num">${num(a.target_nimber)}</td>
       <td class="num">${num(a.target_denial)}</td>
       <td>${applied}</td>
-      <td class="${a.target_resolved ? 'ok' : 'crit'}">${a.target_resolved ? 'resolved' : 'unresolved'}</td>
+      <td class="num">${Number(Boolean(a.target_resolved))}</td>
       <td>${goal}</td>
-      <td class="${a.goal_match ? 'ok' : 'dimmed'}">${a.goal_match ? 'match' : 'other'}</td>
+      <td class="num">${Number(Boolean(a.goal_match))}</td>
       <td class="num">${num(a.goal_distance)}</td>
-      <td class="${a.target_touch ? 'ok' : 'dimmed'}">${a.target_touch ? 'touch' : '·'}</td>
+      <td class="num">${Number(Boolean(a.target_touch))}</td>
       <td class="num">${num(a.target_logp)}</td>
       <td class="num">${dk === null || dk === undefined ? '<span class="absentval">absent</span>' : num(dk, 4)}</td>
     </tr>`;
   }).join('');
 }
 
-function cell(value, best) {
-  if (value === null || value === undefined) return '<td class="dimmed">—</td>';
-  if (typeof value === 'object') {
-    const v = `${value.acc.toFixed(3)}<span class="dimmed"> / maj ${value.majority.toFixed(3)}</span>`;
-    return `<td class="num ${best ? 'beat' : ''}">${v}</td>`;
+function renderJMeasures(report) {
+  const lens = report && report.j_lens;
+  const oracle = report && report.j_oracle;
+  const lensBody = $('jlens').querySelector('tbody');
+  const oracleBody = $('joracle').querySelector('tbody');
+  const matrixFusionBody = $('matrixfusionintervention').querySelector('tbody');
+  if (!lens) {
+    lensBody.innerHTML = '<tr><td colspan="4" class="dimmed">no composer rows</td></tr>';
+    $('jlensmeta').textContent = '— mass 0';
+  } else {
+    const coordinateStratum = [...(lens.coordinate_strata || [])].reverse().find(stratum =>
+      JSON.stringify(stratum.input_labels || []) === JSON.stringify(lens.input_labels || [])
+    ) || {};
+    const featureProjection = coordinateStratum.j_to_source_feature_affine_projection || {};
+    const coordinates = (coordinateStratum.input_labels || lens.input_labels || []).map((name, index) => {
+      const covariance = (coordinateStratum.cross_covariance || lens.cross_covariance || [])[index] || [];
+      const norm = Math.sqrt(covariance.reduce((sum, value) => sum + value * value, 0));
+      return `<tr><td>${name}</td><td class="num">${num((coordinateStratum.input_variance || lens.input_variance || [])[index], 6)}</td><td class="num">${num(norm, 6)}</td><td class="num">${num((featureProjection.residual_mean_square || [])[index], 6)}</td></tr>`;
+    });
+    const stateStratum = [...((oracle && oracle.source_state_strata) || [])].reverse()[0] || {};
+    const stateProjection = stateStratum.j_to_authoritative_state_affine_projection || {};
+    const states = (stateStratum.state_labels || []).map((name, index) => {
+      const covariance = (stateStratum.state_j_covariance || [])[index] || [];
+      const norm = Math.sqrt(covariance.reduce((sum, value) => sum + value * value, 0));
+      return `<tr><td>state.${name}</td><td class="num">${num((stateStratum.state_variance || [])[index], 6)}</td><td class="num">${num(norm, 6)}</td><td class="num">${num((stateProjection.residual_mean_square || [])[index], 6)}</td></tr>`;
+    });
+    const families = Object.entries(lens.composer_measures || {}).map(([name, measure]) =>
+      `<tr class="dimmed"><td>composer.${name} <span class="dimmed">mass ${measure.mass}</span></td><td class="num">${num(measure.variance, 6)}</td><td class="num">—</td><td class="num">—</td></tr>`
+    );
+    lensBody.innerHTML = [...coordinates, ...states, ...families].join('');
+    const window = report.observation_window || {};
+    $('jlensmeta').textContent = `— mass ${lens.mass}, ${(coordinateStratum.input_labels || []).length} feature + ${(stateStratum.state_labels || []).length} state coordinates × ${lens.j_integral.length} J coordinates; retained ${window.retained_coordinate_row_mass || lens.mass}/${window.ingested_coordinate_row_mass || lens.mass}`;
   }
-  return `<td class="num ${best ? 'beat' : ''}">${value.toFixed(4)}</td>`;
-}
-
-function renderProbe(report) {
-  const body = $('probe').querySelector('tbody');
-  if (!report || !report.available) {
-    body.innerHTML = `<tr><td colspan="7" class="dimmed">${(report && report.reason) || 'no probe yet'}</td></tr>`;
-    $('probemeta').textContent = '— ' + ((report && report.reason) || 'accumulating');
-    $('verdict').textContent = '';
-    return;
+  const matrixFusion = lens && lens.matrix_fusion_intervention;
+  if (!matrixFusion) {
+    matrixFusionBody.innerHTML = '<tr><td colspan="5" class="dimmed">no paired matrix-fusion frames</td></tr>';
+    $('matrixfusionmeta').textContent = '— frame mass 0';
+  } else {
+    matrixFusionBody.innerHTML = Object.entries(matrixFusion.measures || {}).map(([name, measure]) =>
+      `<tr><td>${name}</td><td class="num">${measure.mass}</td><td class="num">${num(measure.integral, 6)}</td><td class="num">${num(measure.mean, 6)}</td><td class="num">${num(measure.variance, 6)}</td></tr>`
+    ).join('');
+    $('matrixfusionmeta').textContent = `— ${matrixFusion.left} − ${matrixFusion.right}, ${matrixFusion.frame_mass} identical-state frames`;
   }
-  const rows = [];
-  const push = (r) => {
-    const beat = r.control_ok && r.delta_vs_randproj !== null && r.delta_vs_randproj > 0.05 && !r.tautological;
-    const bad = r.delta_vs_randproj !== null && !r.control_ok;
-    rows.push(`<tr class="${r.tautological ? 'tautological' : ''}${bad ? ' degenerate' : ''}" title="${r.note.replace(/"/g, '')}">
-      <td>${r.target}${bad ? ' <span class="crit">control failed</span>' : ''}</td>
-      ${cell(r.ir, beat)}${cell(r.randproj)}${cell(r.shuffled)}${cell(r.raw_x)}
-      <td class="num ${beat ? 'beat' : 'nobeat'}">${r.delta_vs_randproj === null ? '—' : r.delta_vs_randproj.toFixed(4)}</td>
-      <td class="num dimmed">${r.n_finite === undefined ? '' : r.n_finite}</td>
-    </tr>`);
-  };
-  rows.push('<tr><td colspan="7" class="dimmed" style="padding-top:8px">regression &nbsp;—&nbsp; R&#178; on the held-out ticks</td></tr>');
-  report.regression.forEach(push);
-  rows.push('<tr><td colspan="7" class="dimmed" style="padding-top:8px">classification &nbsp;—&nbsp; accuracy / majority baseline</td></tr>');
-  report.classification.forEach(push);
-  body.innerHTML = rows.join('');
-
-  const v = report.verdict;
-  const klass = v.shuffled_label_control_passes ? (v.n_beats ? 'ok' : 'crit') : 'crit';
-  $('verdict').innerHTML =
-    `<span class="${klass}">${v.reading}</span>` +
-    (v.degenerate_targets && v.degenerate_targets.length
-      ? `<br><span class="warn">${v.degenerate_targets.length}/${v.scored_targets} targets failed their own shuffled-label control and are not read: ${v.degenerate_targets.join(', ')}</span>`
-      : '') +
-    (v.beats_random_projection.length
-      ? ' &nbsp;<span class="dimmed">(' + v.beats_random_projection.map((b) => `${b.target} +${b.delta}`).join(', ') + ')</span>'
-      : '') +
-    `<br><span class="dimmed">shuffled-label control: worst |R&#178;| ${v.worst_shuffled_r2}; ` +
-    `${v.shuffled_label_control_passes ? 'most targets at chance — those probes are honest' : 'too many targets degenerate on this window'}</span>`;
-  const m = report.method;
-  $('method').innerHTML =
-    `${m.estimator} · split ${m.split} · train ${m.train_rows} / test ${m.test_rows} rows<br>` +
-    `<span class="warn">control not measured here:</span> ${m.control_not_available}`;
-  $('probemeta').textContent = `— ${report.geometry.rows} rows over ${report.geometry.ticks} ticks`;
+  if (!oracle) {
+    oracleBody.innerHTML = '<tr><td colspan="7" class="dimmed">no joined outcomes</td></tr>';
+    $('joraclemeta').textContent = '— mass 0';
+  } else {
+    const oracleResiduals = new Map();
+    for (const stratum of oracle.outcome_affine_projection_strata || []) {
+      const projection = stratum.j_to_outcome_affine_projection || {};
+      (stratum.outcome_labels || []).forEach((name, index) =>
+        oracleResiduals.set(`${stratum.policy_arm}.${stratum.channel}.${name}`, (projection.residual_mean_square || [])[index])
+      );
+    }
+    for (const stratum of oracle.state_delta_affine_projection_strata || []) {
+      const projection = stratum.j_to_state_delta_affine_projection || {};
+      (stratum.state_labels || []).forEach((name, index) =>
+        oracleResiduals.set(`${stratum.policy_arm}.Δstate.${stratum.channel}.${name}`, (projection.residual_mean_square || [])[index])
+      );
+    }
+    const armMeasures = Object.entries(oracle.policy_arm_measures || {}).flatMap(([arm, armMeasure]) => [
+      ...Object.entries(armMeasure.outcome_measures || {}).map(([name, measure]) => [`${arm}.${name}`, measure]),
+      ...Object.entries(armMeasure.state_delta_measures || {}).map(([name, measure]) => [`${arm}.Δstate.${name}`, measure]),
+    ]);
+    const measures = [
+      ...Object.entries(oracle.outcome_measures || {}),
+      ...Object.entries(oracle.state_delta_measures || {}).map(([name, measure]) => [`Δstate.${name}`, measure]),
+      ...armMeasures,
+    ];
+    const successorStratum = [...(oracle.successor_state_strata || [])].reverse()[0] || {};
+    const successorProjection = successorStratum.j_to_authoritative_successor_state_affine_projection || {};
+    const successorRows = (successorStratum.state_labels || []).map((name, index) => {
+      const covariance = (successorStratum.state_j_covariance || [])[index] || [];
+      const norm = Math.sqrt(covariance.reduce((sum, value) => sum + value * value, 0));
+      return `<tr><td>S′.${successorStratum.channel}.${name}</td><td class="num">${successorStratum.mass}</td><td class="num">${num((successorStratum.state_integral || [])[index], 6)}</td><td class="num">${num((successorStratum.state_mean || [])[index], 6)}</td><td class="num">${num((successorStratum.state_variance || [])[index], 6)}</td><td class="num">${num(norm, 6)}</td><td class="num">${num((successorProjection.residual_mean_square || [])[index], 6)}</td></tr>`;
+    });
+    const measureRows = measures.map(([name, measure]) => {
+      const norm = Math.sqrt((measure.j_covariance || []).reduce((sum, value) => sum + value * value, 0));
+      return `<tr><td>${name}</td><td class="num">${measure.mass}</td><td class="num">${num(measure.integral, 6)}</td><td class="num">${num(measure.mean, 6)}</td><td class="num">${num(measure.variance, 6)}</td><td class="num">${num(norm, 6)}</td><td class="num">${num(oracleResiduals.get(name), 6)}</td></tr>`;
+    });
+    oracleBody.innerHTML = [...successorRows, ...measureRows].join('') || '<tr><td colspan="7" class="dimmed">no joined outcomes</td></tr>';
+    const referenceMass = Object.entries(oracle.state_reference_measures || {}).map(([name, measure]) => `${name} ${measure.joined_mass}/${measure.mass}`).join(', ');
+    $('joraclemeta').textContent = `— ${referenceMass || `delivered ${oracle.delivery_joined_mass}/${oracle.delivery_mass}`}, successor states ${oracle.successor_state_atom_mass || 0}, active-route outcomes ${oracle.applied_joined_mass}/${oracle.applied_mass}, events ${oracle.event_joined_mass || 0}/${oracle.event_mass || 0}, categorical transition atoms ${oracle.state_categorical_transition_atom_mass || 0} over ${oracle.state_categorical_transition_coordinates || 0} source→target coordinates`;
+  }
 }
 
 function renderGeometry(report, internals) {
   const g = (report && report.geometry) || null;
   const kv = $('geom');
   if (!g) { kv.innerHTML = '<div><span>window</span><span class="dimmed">empty</span></div>'; return; }
-  const irNarrow = g.ir_width < g.spec_ir_width_floor;
   const items = [
-    ['IR width', `<span class="${irNarrow ? 'crit' : 'ok'}">${g.ir_width}</span> <span class="dimmed">/ spec &#8805;${g.spec_ir_width_floor}</span>`],
-    ['IR rank (window)', g.ir_rank],
-    ['IR eff. rank', g.ir_effective_rank],
+    ['J width', g.j_width],
+    ['J singular mass', g.j_spectral_measure && g.j_spectral_measure.mass],
+    ['J eff. rank', g.j_spectral_measure && g.j_spectral_measure.effective_rank],
     ['input x width', g.x_width],
-    ['input x rank', `<span class="${g.x_rank !== null && g.x_rank <= 5 ? 'crit' : ''}">${g.x_rank}</span>`],
-    ['x nonzero cols', `<span class="${g.x_nonzero_columns <= 8 ? 'crit' : ''}">${g.x_nonzero_columns}</span> <span class="dimmed">/ ${g.x_width}</span>`],
+    ['x eff. rank', g.x_spectral_measure && g.x_spectral_measure.effective_rank],
+    ['x nonzero cols', `${g.x_nonzero_columns} <span class="dimmed">/ ${g.x_width}</span>`],
     ['beta width', g.beta_width === null ? '<span class="absentval">absent</span>' : g.beta_width],
-    ['beta rank', g.beta_rank === null ? '<span class="absentval">absent</span>' : g.beta_rank],
+    ['beta eff. rank', g.beta_spectral_measure ? g.beta_spectral_measure.effective_rank : '<span class="absentval">absent</span>'],
     ['rows in window', g.rows],
     ['ticks in window', g.ticks],
   ];
-  if (internals && internals.ir_stats) {
-    items.push(['IR rank (this tick)', internals.ir_stats.frame_rank]);
-    items.push(['IR std', internals.ir_stats.std]);
+  if (internals && internals.j_stats) {
+    items.push(['J finite row mass (this tick)', internals.j_stats.finite_row_mass]);
+    items.push(['J std', internals.j_stats.std]);
   }
   if (internals) {
     const behind = internals.ticks_behind;
@@ -366,50 +382,38 @@ function renderGeometry(report, internals) {
   kv.innerHTML = items.map(([k, v]) => `<div><span>${k}</span><span>${v === null || v === undefined ? '<span class="dimmed">—</span>' : v}</span></div>`).join('');
 }
 
-function renderAlarms(report) {
-  const box = $('alarms');
-  const p = report && report.pathology;
-  if (!p) { box.innerHTML = '<div class="clear dimmed">waiting for the first probe window…</div>'; return; }
-  if (p.clear) {
-    box.innerHTML = '<div class="clear">&#10003; no rank collapse, no zeroed input block, probes honest, IR beats its controls somewhere non-tautological.</div>';
+function renderFieldMeasures(report) {
+  const body = $('fieldmeasures').querySelector('tbody');
+  if (!report || !report.frame_mass) {
+    body.innerHTML = '<tr><td colspan="6" class="dimmed">frame mass 0</td></tr>';
     return;
   }
-  box.innerHTML = p.alarms.map((a) =>
-    `<div class="alarm ${a.severity}"><span class="tag">${a.severity}</span>
-     <div class="body">${a.text}<br><code>${a.id}</code></div></div>`).join('');
-}
-
-function renderAudit(auditReport) {
-  const body = $('audit').querySelector('tbody');
-  if (!auditReport || !auditReport.available) {
-    body.innerHTML = '<tr><td colspan="5" class="dimmed">no frame to audit</td></tr>';
-    return;
-  }
-  body.innerHTML = auditReport.fields.map((f) => `<tr>
-      <td title="${f.why.replace(/"/g, '')}">${f.path}</td>
-      <td><span class="chip ${f.status}">${f.status}</span></td>
+  body.innerHTML = report.fields.map((f) => `<tr>
+      <td title="${f.label.replace(/"/g, '')}">${f.path}</td>
+      <td class="num">${f.value_mass}/${f.key_mass}</td>
       <td class="num dimmed">${f.shape ? f.shape.join('×') : '—'}</td>
-      <td class="num dimmed">${f.status === 'present' || f.status === 'all_zero' ? (100 * f.nonzero_fraction).toFixed(0) + '%' : '—'}</td>
+      <td class="num">${f.finite_mass}/${f.coordinate_mass}</td>
+      <td class="num">${f.nonzero_mass}/${f.coordinate_mass}</td>
       <td class="dimmed">${f.owner}</td>
     </tr>`).join('');
 }
 
-function renderXBlocks(auditReport) {
+function renderXBlocks(fieldReport) {
   const box = $('xblocks');
-  const blocks = (auditReport && auditReport.x_blocks) || [];
+  const blocks = (fieldReport && fieldReport.x_blocks) || [];
   if (!blocks.length) {
-    box.innerHTML = '<div class="block absent"><span>model.x</span><b class="crit">absent</b></div>';
-    $('xnote').textContent = 'the model input is not in the stream — the R19 question cannot even be asked from here.';
+    box.innerHTML = '<div class="block"><span>model.x</span><b>mass 0</b></div>';
+    $('xnote').textContent = 'model.x coordinate mass 0';
     return;
   }
-  box.innerHTML = blocks.map((b) => `<div class="block ${b.status}">
+  box.innerHTML = blocks.map((b) => `<div class="block">
       <span>${b.label}<br><span class="dimmed">x[${b.cols[0]}:${b.cols[1]}]</span></span>
-      <b class="${b.status === 'present' ? 'ok' : 'crit'}">${b.nonzero_cols}/${b.width}</b>
+      <b>${b.nonzero_columns}/${b.observed_width}</b>
     </div>`).join('');
-  const dead = blocks.filter((b) => b.per_player && b.status !== 'present');
-  $('xnote').innerHTML = dead.length
-    ? `<span class="crit">${dead.length} per-player block(s) all-zero: ${dead.map((d) => d.label).join(', ')}.</span> This is the AGENDA E9 / R19 condition — the policy is not integrating the state SPEC &#167;3 requires.`
-    : '<span class="ok">every per-player resource block carries signal</span> — health, armor, ammo, position, velocity and the weapon bitset are all entering the matmul.';
+  const coordinates = blocks.reduce((sum, block) => sum + block.coordinate_mass, 0);
+  const finite = blocks.reduce((sum, block) => sum + block.finite_mass, 0);
+  const nonzero = blocks.reduce((sum, block) => sum + block.nonzero_mass, 0);
+  $('xnote').textContent = `coordinate mass ${coordinates}, finite mass ${finite}, nonzero mass ${nonzero}`;
 }
 
 function renderValues(internals) {
@@ -433,7 +437,7 @@ function renderValues(internals) {
       ? '<span class="absentval">absent — see design/joracle-viewer.md hook 2</span>'
       : Number(internals.advantage).toFixed(4)],
     ['diag(K)', internals.diag_k ? 'present' : '<span class="absentval">absent — hook 1</span>'],
-    ['game value', internals.game_value ? JSON.stringify(internals.game_value).slice(0, 40) : '<span class="absentval">absent — B11 unresolved</span>'],
+    ['game value measures', internals.game_value ? JSON.stringify(internals.game_value).slice(0, 80) : '<span class="absentval">absent</span>'],
   ];
   const u = internals.update || {};
   ['loss', 'loss_pg', 'loss_w', 'loss_l', 'importance_mean', 'updates'].forEach((k) => {
@@ -441,8 +445,6 @@ function renderValues(internals) {
   });
   kv.innerHTML = items.map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join('');
 }
-
-/* ----------------------------------------------------------------- chrome */
 
 function renderHeader(live) {
   const f = live.follower;
@@ -465,8 +467,6 @@ function renderHeader(live) {
   $('clock').textContent = new Date().toLocaleTimeString();
 }
 
-/* -------------------------------------------------------------- polling */
-
 async function pull(url) {
   const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) throw new Error(url + ' -> ' + response.status);
@@ -484,11 +484,11 @@ async function tickLive() {
     renderHierarchy(latest);
     renderAssignments(LIVE.internals);
     renderValues(LIVE.internals);
-    renderAudit(LIVE.audit);
-    renderXBlocks(LIVE.audit);
-    heatmap($('irmap'), LIVE.internals && LIVE.internals.ir, { empty: 'model.ir absent from this frame' });
-    heatmap($('gram'), LIVE.internals && LIVE.internals.gram, { empty: 'model.gram absent from this frame' });
-    drawSpectrum(LIVE.internals && LIVE.internals.ir_stats && LIVE.internals.ir_stats.spectrum);
+    renderFieldMeasures(LIVE.field_measures);
+    renderXBlocks(LIVE.field_measures);
+    heatmap($('irmap'), LIVE.internals && LIVE.internals.j, { empty: 'model.j absent from this frame' });
+    heatmap($('coupling'), LIVE.internals && LIVE.internals.coupling, { empty: 'model.coupling absent from this frame' });
+    drawSpectrum(LIVE.internals && LIVE.internals.j_stats && LIVE.internals.j_stats.spectrum);
     renderGeometry(ORACLE && ORACLE.report, LIVE.internals);
   } catch (exc) {
     $('tap').className = 'pill crit';
@@ -499,11 +499,10 @@ async function tickLive() {
 async function tickOracle() {
   try {
     ORACLE = await pull('/api/joracle');
-    renderProbe(ORACLE.report);
-    renderAlarms(ORACLE.report);
+    renderJMeasures(ORACLE.report);
     renderGeometry(ORACLE.report, LIVE && LIVE.internals);
   } catch (exc) {
-    $('verdict').innerHTML = `<span class="crit">probe endpoint unreachable: ${exc.message}</span>`;
+    $('joraclemeta').textContent = `— endpoint error: ${exc.message}`;
   }
 }
 

@@ -5,7 +5,7 @@ M, KPB, GAMMA, MU = 32, 8, 0.92, 0.35
 K = B*KPB
 print(f"  N={N} bots={B} K={K}  A={N*N*4/1e6:.0f}MB  V={N*K*4/1e6:.0f}MB")
 A = mx.random.normal((N,N)).astype(mx.float32)
-A = A*A; A = A / mx.sum(A,axis=1,keepdims=True)      # row-stochastic
+A = A*A; A = A / mx.sum(A,axis=1,keepdims=True)
 R = mx.random.normal((N,K)).astype(mx.float32)
 V = mx.zeros((N,K), dtype=mx.float32)
 rho = mx.zeros((N,), dtype=mx.float32)
@@ -14,7 +14,7 @@ mx.eval(A,R,V,rho)
 def solve(A,R,V,rho, exchange=None):
     exchanged = 0
     for m in range(M):
-        Z = mx.logaddexp(R + V - MU*rho[:,None], mx.array(0.0))   # softplus
+        Z = mx.logaddexp(R + V - MU*rho[:,None], mx.array(0.0))
         V = GAMMA * (A @ Z)
         if m % 4 == 3:
             rho_local = mx.sum(Z, axis=1)

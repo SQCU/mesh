@@ -19,34 +19,17 @@ void SpawnCasing(vector vel, vector ang, int casingtype, entity casingowner, .en
 	vector org = casingowner.(weaponentity).spawnorigin;
 	org = casingowner.origin + casingowner.view_ofs + org.x * v_forward - org.y * v_right + org.z * v_up;
 
-	FOREACH_CLIENT(true, {
-		if (!(CS_CVAR(it).cvar_cl_casings))
-			continue;
+	casingtype &= 0x3F;
+	if (!sound_allowed(MSG_BROADCAST, casingowner))
+		casingtype |= 0x80;
 
-		casingtype &= 0x3F; // reset any bitflags that were set for the previous client
-
-		if (it == casingowner || (IS_SPEC(it) && it.enemy == casingowner))
-		{
-			if (!(CS_CVAR(it).cvar_r_drawviewmodel))
-				continue;
-
-			casingtype |= 0x40; // client will apply autocvar_cl_gunoffset in first person
-		}
-		else if (1 & ~checkpvs(it.origin + it.view_ofs, casingowner)) // 1 or 3 means visible
-			continue;
-
-		msg_entity = it; // sound_allowed checks this
-		if (!sound_allowed(MSG_ONE, it))
-			casingtype |= 0x80; // silent
-
-		WriteHeader(MSG_ONE, casings);
-		WriteByte(MSG_ONE, casingtype);
-		WriteVector(MSG_ONE, org);
-		WriteShort(MSG_ONE, compressShortVector(vel)); // actually compressed velocity
-		WriteByte(MSG_ONE, ang.x * 256 / 360);
-		WriteByte(MSG_ONE, ang.y * 256 / 360);
-		// weapons only have pitch and yaw, so no need to send ang.z
-	});
+	WriteHeader(MSG_BROADCAST, casings);
+	WriteByte(MSG_BROADCAST, casingtype);
+	WriteVector(MSG_BROADCAST, org);
+	WriteShort(MSG_BROADCAST, compressShortVector(vel));
+	WriteByte(MSG_BROADCAST, ang.x * 256 / 360);
+	WriteByte(MSG_BROADCAST, ang.y * 256 / 360);
+	sv_flushbroadcast();
 }
 #endif
 
@@ -57,7 +40,6 @@ classfield(Casing) .bool silent;
 classfield(Casing) .int state;
 classfield(Casing) .float cnt;
 
-// this is only needed because LimitedChildrenRubble() takes a func pointer
 void Casing_Delete(entity this)
 {
     delete(this);
@@ -69,7 +51,7 @@ void Casing_Draw(entity this)
     {
         this.angles_x = 0;
         this.angles_z = 0;
-        //UNSET_ONGROUND(this);
+
     }
 
     this.renderflags = 0;
@@ -82,13 +64,9 @@ void Casing_Draw(entity this)
         return;
     }
 
-    trace_startsolid = 0; // due to cl_casings_ticrate, traces are not always performed
+    trace_startsolid = 0;
     Movetype_Physics_MatchTicrate(this, autocvar_cl_casings_ticrate, autocvar_cl_casings_sloppy);
-    //if (wasfreed(this))
-    //    return; // deleted by touch function
 
-    // prevent glitchy casings when the gun model is poking into a wall
-    // doing this here is cheaper than doing it on the server as the client performs the trace anyway
     if (trace_startsolid)
     {
         delete(this);
@@ -169,7 +147,7 @@ NET_HANDLE(casings, bool isNew)
         casing.origin += autocvar_cl_gunoffset.x * v_forward
                        - autocvar_cl_gunoffset.y * v_right
                        + autocvar_cl_gunoffset.z * v_up;
-    casing.state &= 0x3F; // the 2 most significant bits are reserved for the silent and casingowner bitflags
+    casing.state &= 0x3F;
 
     setorigin(casing, casing.origin);
     casing.drawmask = MASK_NORMAL;

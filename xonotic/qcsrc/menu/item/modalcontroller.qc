@@ -15,7 +15,7 @@
 	void ModalController_initializeDialog(entity me, entity root)
 	{
 		me.hideAll(me, 1);
-		me.showChild(me, root, '0 0 0', '0 0 0', 1);  // someone else animates for us
+		me.showChild(me, root, '0 0 0', '0 0 0', 1);
 	}
 
 	void TabButton_Click(entity button, entity tab)
@@ -61,7 +61,7 @@
 		{
 			case 0:
 				other.ModalController_factor = 1 - other.Container_alpha / other.ModalController_initialAlpha;
-				// fading out
+
 				break;
 			case 1:
 				other.ModalController_factor = other.Container_alpha / other.ModalController_initialAlpha;
@@ -70,11 +70,11 @@
 					other.Container_origin = other.ModalController_buttonOrigin;
 					other.Container_size = other.ModalController_buttonSize;
 				}
-				// zooming in
+
 				break;
 			case 2:
 				other.ModalController_factor = bound(0, (1 - other.Container_alpha / other.ModalController_initialAlpha) / me.fadedAlpha, 1);
-				// fading out halfway
+
 				break;
 		}
 		if (skipAnimation) other.ModalController_factor = 1;
@@ -85,8 +85,8 @@
 		entity e;
 		entity front;
 		float animating;
-		float f;  // animation factor
-		float df; // animation step size
+		float f;
+		float df;
 		float prevFactor, targetFactor;
 		vector targetOrigin, targetSize;
 		float targetAlpha;
@@ -102,29 +102,29 @@
 			}
 		if (front) me.switchState(me, front, 1, 0);
 
-		df = frametime * 3;  // animation speed
+		df = frametime * 3;
 
 		for (e = me.firstChild; e; e = e.nextSibling)
 		{
 			if (e.ModalController_state == 2)
 			{
-				// fading out partially
-				targetOrigin = e.Container_origin; // stay as is
-				targetSize = e.Container_size;     // stay as is
+
+				targetOrigin = e.Container_origin;
+				targetSize = e.Container_size;
 				targetAlpha = me.fadedAlpha * e.ModalController_initialAlpha;
 			}
 			else if (e.ModalController_state == 1)
 			{
-				// zooming in
+
 				targetOrigin = e.ModalController_initialOrigin;
 				targetSize = e.ModalController_initialSize;
 				targetAlpha = e.ModalController_initialAlpha;
 			}
 			else
 			{
-				// fading out
-				targetOrigin = e.Container_origin; // stay as is
-				targetSize = e.Container_size;     // stay as is
+
+				targetOrigin = e.Container_origin;
+				targetSize = e.Container_size;
 				targetAlpha = 0;
 			}
 
@@ -140,7 +140,7 @@
 			else
 			{
 				prevFactor = (1 - f) / (1 - f + df);
-				if (!e.ModalController_state)  // optimize code and avoid precision errors
+				if (!e.ModalController_state)
 				{
 					me.setAlphaOf(me, e, e.Container_alpha  * prevFactor);
 				}
@@ -157,13 +157,6 @@
 					me.setAlphaOf(me, e, e.Container_alpha  * prevFactor + targetAlpha  * targetFactor);
 				}
 			}
-			// assume: o == to * f_prev + X * (1 - f_prev)
-			// make:   o' = to * f  + X * (1 - f)
-			// -->
-			// X == (o - to * f_prev) / (1 - f_prev)
-			// o' = to * f + (o - to * f_prev) / (1 - f_prev) * (1 - f)
-			// --> (maxima)
-			// o' = (to * (f - f_prev) + o * (1 - f)) / (1 - f_prev)
 
 			if (e.ModalController_state == 1)
 			{
@@ -198,7 +191,7 @@
 		other.ModalController_initialFontScale = other.Container_fontscale;
 		other.ModalController_initialSize = other.Container_size;
 		other.ModalController_initialOrigin = other.Container_origin;
-		other.ModalController_initialAlpha = theAlpha;  // hope Container never modifies this
+		other.ModalController_initialAlpha = theAlpha;
 		if (other.ModalController_initialFontScale == '0 0 0') other.ModalController_initialFontScale = '1 1 0';
 	}
 
@@ -213,7 +206,7 @@
 				other.ModalController_buttonSize = globalToBoxSize(theSize, me.size);
 			}
 			me.switchState(me, other, 1, skipAnimation);
-		}  // zoom in from button (factor increases)
+		}
 	}
 
 	void ModalController_hideAll(entity me, float skipAnimation)
@@ -234,5 +227,5 @@
 				other.ModalController_controllingButton.forcePressed = 0;
 				other.ModalController_controllingButton = NULL;
 			}
-		}  // just alpha fade out (factor increases and decreases alpha)
+		}
 	}

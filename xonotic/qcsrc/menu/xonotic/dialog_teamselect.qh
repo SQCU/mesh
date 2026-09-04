@@ -7,12 +7,13 @@ CLASS(XonoticTeamSelectDialog, XonoticRootDialog)
 	ATTRIB(XonoticTeamSelectDialog, title, string, _("Team Selection"));
 	ATTRIB(XonoticTeamSelectDialog, color, vector, SKINCOLOR_DIALOG_TEAMSELECT);
 	ATTRIB(XonoticTeamSelectDialog, intendedWidth, float, 0.4);
-	ATTRIB(XonoticTeamSelectDialog, rows, float, 5);
-	ATTRIB(XonoticTeamSelectDialog, columns, float, 4);
+	ATTRIB(XonoticTeamSelectDialog, rows, float, 6);
+	ATTRIB(XonoticTeamSelectDialog, columns, float, 5);
 	ATTRIB(XonoticTeamSelectDialog, name, string, "TeamSelect");
 	ATTRIB(XonoticTeamSelectDialog, team1, entity);
 	ATTRIB(XonoticTeamSelectDialog, team2, entity);
 	ATTRIB(XonoticTeamSelectDialog, team3, entity);
 	ATTRIB(XonoticTeamSelectDialog, team4, entity);
+	ATTRIB(XonoticTeamSelectDialog, team5, entity);
 	ATTRIB(XonoticTeamSelectDialog, requiresConnection, float, true);
 ENDCLASS(XonoticTeamSelectDialog)

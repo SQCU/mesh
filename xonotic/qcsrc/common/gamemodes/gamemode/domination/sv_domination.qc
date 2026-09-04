@@ -21,7 +21,7 @@ float autocvar_g_domination_warmup;
 float autocvar_g_domination_point_rate;
 int autocvar_g_domination_teams_override;
 
-void dom_EventLog(string mode, float team_before, entity actor) // use an alias for easy changing and quick editing later
+void dom_EventLog(string mode, float team_before, entity actor)
 {
 	if(autocvar_sv_eventlog)
 		GameLogEcho(strcat(":dom:", mode, ":", ftos(team_before), ((actor != NULL) ? (strcat(":", ftos(actor.playerid))) : "")));
@@ -42,7 +42,6 @@ void dompoint_captured(entity this)
 {
 	float old_delay, old_team, real_team;
 
-	// now that the delay has expired, switch to the latest team to lay claim to this point
 	entity head = this.owner;
 
 	real_team = this.cnt;
@@ -88,7 +87,6 @@ void dompoint_captured(entity this)
 
 	this.delay = time + wait_time;
 
-	// do trigger work
 	old_delay = this.delay;
 	old_team = this.team;
 	this.team = real_team;
@@ -156,14 +154,9 @@ void dompointthink(entity this)
 
 	this.nextthink = time + 0.1;
 
-	//this.frame = this.frame + 1;
-	//if(this.frame > 119)
-	//	this.frame = 0;
 	AnimateDomPoint(this);
 
-	// give points
-
-	if (game_stopped || this.delay > time || time < game_starttime)	// game has ended, don't keep giving points
+	if (game_stopped || this.delay > time || time < game_starttime)
 		return;
 
 	if(autocvar_g_domination_point_rate)
@@ -171,8 +164,6 @@ void dompointthink(entity this)
 	else
 		this.delay = time + this.wait;
 
-	// give credit to the team
-	// NOTE: this defaults to 0
 	if (!domination_roundbased)
 	if (this.goalentity.netname != "")
 	{
@@ -183,7 +174,6 @@ void dompointthink(entity this)
 		TeamScore_AddToTeam(this.goalentity.team, ST_SCORE, fragamt);
 		TeamScore_AddToTeam(this.goalentity.team, ST_DOM_TICKS, fragamt);
 
-		// give credit to the individual player, if they are still there
 		if (this.enemy.playerid == this.enemy_playerid)
 		{
 			GameRules_scoring_add(this.enemy, SCORE, fragamt);
@@ -207,27 +197,18 @@ void dompointtouch(entity this, entity toucher)
 	if(time < this.captime + 0.3)
 		return;
 
-	// only valid teams can claim it
 	entity head = find(NULL, classname, "dom_team");
 	while (head && head.team != toucher.team)
 		head = find(head, classname, "dom_team");
 	if (!head || head.netname == "" || head == this.goalentity)
 		return;
 
-	// delay capture
-
-	this.team = this.goalentity.team; // this stores the PREVIOUS team!
+	this.team = this.goalentity.team;
 
 	this.cnt = toucher.team;
-	this.owner = head; // team to switch to after the delay
+	this.owner = head;
 	this.dmg_inflictor = toucher;
 
-	// this.state = 1;
-	// this.delay = time + cvar("g_domination_point_capturetime");
-	//this.nextthink = time + cvar("g_domination_point_capturetime");
-	//this.think = dompoint_captured;
-
-	// go to neutral team in the mean time
 	head = find(NULL, classname, "dom_team");
 	while (head && head.netname != "")
 		head = find(head, classname, "dom_team");
@@ -243,7 +224,7 @@ void dompointtouch(entity this, entity toucher)
 	this.modelindex = head.dmg;
 	this.skin = head.skin;
 
-	this.enemy = toucher; // individual player scoring
+	this.enemy = toucher;
 	this.enemy_playerid = toucher.playerid;
 	dompoint_captured(this);
 }
@@ -251,16 +232,15 @@ void dompointtouch(entity this, entity toucher)
 void dom_controlpoint_setup(entity this)
 {
 	entity head;
-	// find the spawnfunc_dom_team representing unclaimed points
+
 	head = find(NULL, classname, "dom_team");
 	while(head && head.netname != "")
 		head = find(head, classname, "dom_team");
 	if (!head)
 		objerror(this, "no spawnfunc_dom_team with netname \"\" found\n");
 
-	// copy important properties from spawnfunc_dom_team entity
 	this.goalentity = head;
-	_setmodel(this, head.mdl); // precision already set
+	_setmodel(this, head.mdl);
 	this.skin = head.skin;
 
 	this.cnt = -1;
@@ -286,9 +266,9 @@ void dom_controlpoint_setup(entity this)
 	total_pps += points/waittime;
 
 	if(!this.t_width)
-		this.t_width = 0.02; // frame animation rate
+		this.t_width = 0.02;
 	if(!this.t_length)
-		this.t_length = 239; // maximum frame
+		this.t_length = 239;
 
 	setthink(this, dompointthink);
 	this.nextthink = time;
@@ -367,16 +347,15 @@ void Domination_RoundStart()
 	FOREACH_CLIENT(IS_PLAYER(it), { it.player_blocked = false; });
 }
 
-//go to best items, or control points you don't own
 void havocbot_goalrating_controlpoints(entity this, float ratingscale, vector org, float sradius)
 {
 	IL_EACH(g_dompoints, vdist((((it.absmin + it.absmax) * 0.5) - org), <, sradius),
 	{
-		if(it.cnt > -1) // this is just being fought
+		if(it.cnt > -1)
 			navigation_routerating(this, it, ratingscale, 5000);
-		else if(it.goalentity.cnt == 0) // unclaimed
+		else if(it.goalentity.cnt == 0)
 			navigation_routerating(this, it, ratingscale, 5000);
-		else if(it.goalentity.team != this.team) // other team's point
+		else if(it.goalentity.team != this.team)
 			navigation_routerating(this, it, ratingscale, 5000);
 	});
 }
@@ -391,7 +370,7 @@ void havocbot_role_dom(entity this)
 		navigation_goalrating_start(this);
 		havocbot_goalrating_controlpoints(this, 10000, this.origin, 15000);
 		havocbot_goalrating_items(this, 20000, this.origin, 8000);
-		//havocbot_goalrating_enemyplayers(this, 1500, this.origin, 2000);
+
 		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);
 		navigation_goalrating_end(this);
 
@@ -401,25 +380,17 @@ void havocbot_role_dom(entity this)
 
 MUTATOR_HOOKFUNCTION(dom, TeamBalance_CheckAllowedTeams)
 {
-	// fallback?
-	M_ARGV(0, float) = domination_teams;
-	string ret_string = "dom_team";
-
-	entity head = find(NULL, classname, ret_string);
+	entity balance = M_ARGV(0, entity);
+	for(int i = 1; i <= 4; ++i)
+		if(domination_teams & BIT(i - 1))
+			TeamBalance_AllowTeam(balance, i);
+	entity head = find(NULL, classname, "dom_team");
 	while(head)
 	{
 		if(head.netname != "")
-		{
-			if (Team_IsValidTeam(head.team))
-			{
-				M_ARGV(0, float) |= Team_TeamToBit(head.team);
-			}
-		}
-
-		head = find(head, classname, ret_string);
+			TeamBalance_AllowTeam(balance, Team_TeamToIndex(head.team));
+		head = find(head, classname, "dom_team");
 	}
-
-	M_ARGV(1, string) = string_null;
 
 	return true;
 }
@@ -463,9 +434,6 @@ MUTATOR_HOOKFUNCTION(dom, HavocBot_ChooseRole)
 	return true;
 }
 
-/*QUAKED spawnfunc_dom_controlpoint (0 .5 .8) (-16 -16 -24) (16 16 32)
-Control point for Domination gameplay.
-*/
 spawnfunc(dom_controlpoint)
 {
 	if(!g_domination)
@@ -487,32 +455,6 @@ spawnfunc(dom_controlpoint)
 	IL_PUSH(g_dompoints, this);
 }
 
-/*QUAKED spawnfunc_dom_team (0 .5 .8) (-32 -32 -24) (32 32 32)
-Team declaration for Domination gameplay, this allows you to decide what team
-names and control point models are used in your map.
-
-Note: If you use spawnfunc_dom_team entities you must define at least 3 and only two
-can have netname set!  The nameless team owns all control points at start.
-
-Keys:
-"netname"
- Name of the team (for example Red Team, Blue Team, Green Team, Yellow Team, Life, Death, etc)
-"cnt"
- Scoreboard color of the team (for example 4 is red and 13 is blue)
-"model"
- Model to use for control points owned by this team (for example
- "progs/b_g_key.mdl" is a gold keycard, and "progs/b_s_key.mdl" is a silver
- keycard)
-"skin"
- Skin of the model to use (for team skins on a single model)
-"noise"
- Sound to play when this team captures a point.
- (this is a localized sound, like a small alarm or other effect)
-"noise1"
- Narrator speech to play when this team captures a point.
- (this is a global sound, like "Red team has captured a control point")
-*/
-
 spawnfunc(dom_team)
 {
 	if(!g_domination || autocvar_g_domination_teams_override >= 2)
@@ -525,22 +467,21 @@ spawnfunc(dom_team)
 		precache_sound(this.noise);
 	if (this.noise1 != "")
 		precache_sound(this.noise1);
-	_setmodel(this, this.model); // precision not needed
+	_setmodel(this, this.model);
 	this.mdl = this.model;
 	this.dmg = this.modelindex;
 	this.model = "";
 	this.modelindex = 0;
-	// this would have to be changed if used in quakeworld
+
 	if(this.cnt)
-		this.team = this.cnt + 1; // WHY are these different anyway?
+		this.team = this.cnt + 1;
 }
 
-// scoreboard setup
 void ScoreRules_dom(int teams)
 {
 	if(domination_roundbased)
 	{
-	    GameRules_scoring(teams, SFL_SORT_PRIO_PRIMARY, 0, {
+	    GameRules_scoring(LegacyTeamBitCount(teams), SFL_SORT_PRIO_PRIMARY, 0, {
             field_team(ST_DOM_CAPS, "caps", SFL_SORT_PRIO_PRIMARY);
             field(SP_DOM_TAKES, "takes", 0);
 	    });
@@ -553,7 +494,7 @@ void ScoreRules_dom(int teams)
 			sp_domticks = SFL_SORT_PRIO_PRIMARY;
 		else
 			sp_score = SFL_SORT_PRIO_PRIMARY;
-		GameRules_scoring(teams, sp_score, sp_score, {
+		GameRules_scoring(LegacyTeamBitCount(teams), sp_score, sp_score, {
             field_team(ST_DOM_TICKS, "ticks", sp_domticks);
             field(SP_DOM_TICKS, "ticks", sp_domticks);
             field(SP_DOM_TAKES, "takes", 0);
@@ -561,7 +502,6 @@ void ScoreRules_dom(int teams)
 	}
 }
 
-// code from here on is just to support maps that don't have control point and team entities
 void dom_spawnteam(string teamname, float teamcolor, string pointmodel, float pointskin, Sound capsound, string capnarration, string capmessage)
 {
 	TC(Sound, capsound);
@@ -574,16 +514,14 @@ void dom_spawnteam(string teamname, float teamcolor, string pointmodel, float po
 	e.noise1 = strzone(capnarration);
 	e.message = strzone(capmessage);
 
-	// this code is identical to spawnfunc_dom_team
-	_setmodel(e, e.model); // precision not needed
+	_setmodel(e, e.model);
 	e.mdl = e.model;
 	e.dmg = e.modelindex;
 	e.model = "";
 	e.modelindex = 0;
-	// this would have to be changed if used in quakeworld
+
 	e.team = e.cnt + 1;
 
-	//eprint(e);
 }
 
 void dom_spawnpoint(vector org)
@@ -595,7 +533,6 @@ void dom_spawnpoint(vector org)
 	spawnfunc_dom_controlpoint(e);
 }
 
-// spawn some default teams if the map is not set up for domination
 void dom_spawnteams(int teams)
 {
 	TC(int, teams);
@@ -608,9 +545,9 @@ void dom_spawnteams(int teams)
 	dom_spawnteam("", 0, "models/domination/dom_unclaimed.md3", 0, SND_Null, "", "");
 }
 
-void dom_DelayedInit(entity this) // Do this check with a delay so we can wait for teams to be set up.
+void dom_DelayedInit(entity this)
 {
-	// if no teams are found, spawn defaults
+
 	if(find(NULL, classname, "dom_team") == NULL || autocvar_g_domination_teams_override >= 2)
 	{
 		LOG_TRACE("No \"dom_team\" entities found on this map, creating them anyway.");
@@ -623,7 +560,10 @@ void dom_DelayedInit(entity this) // Do this check with a delay so we can wait f
 	else
 	{
 		entity balance = TeamBalance_CheckAllowedTeams(NULL);
-		domination_teams = TeamBalance_GetAllowedTeams(balance);
+		domination_teams = 0;
+		for(int i = 1; i <= 4; ++i)
+			if(TeamBalance_IsTeamAllowed(balance, i))
+				domination_teams |= BIT(i - 1);
 		TeamBalance_Destroy(balance);
 	}
 

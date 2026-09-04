@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/command/generic.qc>
 #include <common/command/markup.qc>
 #include <common/command/reg.qc>

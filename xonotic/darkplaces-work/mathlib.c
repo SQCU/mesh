@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// mathlib.c -- math primitives
 
 #include "quakedef.h"
 
@@ -25,8 +6,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 vec3_t vec3_origin = {0,0,0};
 float ixtable[4096];
-
-/*-----------------------------------------------------------------*/
 
 float m_bytenormals[NUMVERTEXNORMALS][3] =
 {
@@ -133,19 +112,17 @@ unsigned char NormalToByte(const vec3_t n)
 	return best;
 }
 
-// note: uses byte partly to force unsigned for the validity check
 void ByteToNormal(unsigned char num, vec3_t n)
 {
 	if (num < NUMVERTEXNORMALS)
 		VectorCopy(m_bytenormals[num], n);
 	else
-		VectorClear(n); // FIXME: complain?
+		VectorClear(n);
 }
 
-// assumes "src" is normalized
 void PerpendicularVector( vec3_t dst, const vec3_t src )
 {
-	// LordHavoc: optimized to death and beyond
+
 	int pos;
 	float minelem;
 
@@ -173,7 +150,6 @@ void PerpendicularVector( vec3_t dst, const vec3_t src )
 				dst[1] -= src[pos] * src[1];
 				dst[2] -= src[pos] * src[2];
 
-				// normalize the result
 				VectorNormalize(dst);
 			}
 			else
@@ -194,11 +170,9 @@ void PerpendicularVector( vec3_t dst, const vec3_t src )
 }
 #endif
 
-
-// LordHavoc: like AngleVectors, but taking a forward vector instead of angles, useful!
 void VectorVectors(const vec3_t forward, vec3_t right, vec3_t up)
 {
-	// NOTE: this is consistent to AngleVectors applied to AnglesFromVectors
+
 	if (forward[0] == 0 && forward[1] == 0)
 	{
 		if(forward[2] > 0)
@@ -286,9 +260,6 @@ void RotatePointAroundVector( vec3_t dst, const vec3_t dir, const vec3_t point, 
 	       + (t0 * vr[2] + t1 * vu[2] + vf[2] * vf[2]) * point[2];
 }
 
-/*-----------------------------------------------------------------*/
-
-// returns the smallest integer greater than or equal to "value", or 0 if "value" is too big
 unsigned int CeilPowerOf2(unsigned int value)
 {
 	unsigned int ceilvalue;
@@ -303,13 +274,9 @@ unsigned int CeilPowerOf2(unsigned int value)
 	return ceilvalue;
 }
 
-
-/*-----------------------------------------------------------------*/
-
-
 void PlaneClassify(mplane_t *p)
 {
-	// for optimized plane comparisons
+
 	if (p->normal[0] == 1)
 		p->type = 0;
 	else if (p->normal[1] == 1)
@@ -318,13 +285,13 @@ void PlaneClassify(mplane_t *p)
 		p->type = 2;
 	else
 		p->type = 3;
-	// for BoxOnPlaneSide
+
 	p->signbits = 0;
-	if (p->normal[0] < 0) // 1
+	if (p->normal[0] < 0)
 		p->signbits |= 1;
-	if (p->normal[1] < 0) // 2
+	if (p->normal[1] < 0)
 		p->signbits |= 2;
-	if (p->normal[2] < 0) // 4
+	if (p->normal[2] < 0)
 		p->signbits |= 4;
 }
 
@@ -561,28 +528,18 @@ void AngleVectorsDuke3DFLU (const vec3_t angles, vec3_t forward, vec3_t left, ve
 	cy = cos(angle);
 	angle = angles[PITCH] * (M_PI*2 / 360);
 
-	// We will calculate a shear matrix pitch = [[sxx sxz][szx szz]].
-
 	if (fabs(cos(angle)) > cosMaxShearAngle)
 	{
-		// Pure shear. Keep the original sign of the coefficients.
+
 		sxx = 1;
 		sxz = 0;
 		szx = -tan(angle);
 		szz = 1;
-		// Covering angle per screen coordinate:
-		// d/dt arctan((sxz + t*szz) / (sxx + t*szx)) @ t=0
-		// d_angle = det(S) / (sxx*sxx + szx*szx)
-		//         = 1 / (1 + tan^2 angle)
-		//         = cos^2 angle.
+
 	}
 	else
 	{
-		// A mix of shear and rotation. Implementation-wise, we're
-		// looking at a capsule, and making the screen surface
-		// tangential to it... and if we get here, we're looking at the
-		// two half-spheres of the capsule (and the cylinder part is
-		// handled above).
+
 		double x, y, h, t, d, f;
 		h = tanMaxShearAngle;
 		x = cos(angle);
@@ -592,10 +549,7 @@ void AngleVectorsDuke3DFLU (const vec3_t angles, vec3_t forward, vec3_t left, ve
 		sxz =  y * t - h * (y > 0 ? 1.0 : -1.0);
 		szx = -y * t;
 		szz =  x * t;
-		// BUT: keep the amount of a sphere we see in pitch direction
-		// invariant.
-		// Covering angle per screen coordinate:
-		// d_angle = det(S) / (sxx*sxx + szx*szx)
+
 		d = (sxx * szz - sxz * szx) / (sxx * sxx + szx * szx);
 		f = cosMaxShearAngle * cosMaxShearAngle / d;
 		sxz *= f;
@@ -646,7 +600,6 @@ void AngleVectorsDuke3DFLU (const vec3_t angles, vec3_t forward, vec3_t left, ve
 	}
 }
 
-// LordHavoc: calculates pitch/yaw/roll angles from forward and up vectors
 void AnglesFromVectors (vec3_t angles, const vec3_t forward, const vec3_t up, qboolean flippitch)
 {
 	if (forward[0] == 0 && forward[1] == 0)
@@ -667,11 +620,11 @@ void AnglesFromVectors (vec3_t angles, const vec3_t forward, const vec3_t up, qb
 	{
 		angles[YAW] = atan2(forward[1], forward[0]);
 		angles[PITCH] = -atan2(forward[2], sqrt(forward[0]*forward[0] + forward[1]*forward[1]));
-		// note: we know that angles[PITCH] is in ]-pi/2..pi/2[ due to atan2(anything, positive)
+
 		if (up)
 		{
 			vec_t cp = cos(angles[PITCH]), sp = sin(angles[PITCH]);
-			// note: we know cp > 0, due to the range angles[pitch] is in
+
 			vec_t cy = cos(angles[YAW]), sy = sin(angles[YAW]);
 			vec3_t tleft, tup;
 			tleft[0] = -sy;
@@ -681,17 +634,13 @@ void AnglesFromVectors (vec3_t angles, const vec3_t forward, const vec3_t up, qb
 			tup[1] = sp*sy;
 			tup[2] = cp;
 			angles[ROLL] = -atan2(DotProduct(up, tleft), DotProduct(up, tup));
-			// for up == '0 0 1', this is
-			// angles[ROLL] = -atan2(0, cp);
-			// which is 0
+
 		}
 		else
 			angles[ROLL] = 0;
 
-		// so no up vector is equivalent to '1 0 0'!
 	}
 
-	// now convert radians to degrees, and make all values positive
 	VectorScale(angles, 180.0 / M_PI, angles);
 	if (flippitch)
 		angles[PITCH] *= -1;
@@ -701,7 +650,7 @@ void AnglesFromVectors (vec3_t angles, const vec3_t forward, const vec3_t up, qb
 
 #if 0
 {
-	// debugging code
+
 	vec3_t tforward, tleft, tup, nforward, nup;
 	VectorCopy(forward, nforward);
 	VectorNormalize(nforward);
@@ -758,8 +707,6 @@ void AngleMatrix (const vec3_t angles, const vec3_t translate, vec_t matrix[][4]
 }
 #endif
 
-
-// LordHavoc: renamed this to Length, and made the normal one a #define
 float VectorNormalizeLength (vec3_t v)
 {
 	float length, ilength;
@@ -779,12 +726,6 @@ float VectorNormalizeLength (vec3_t v)
 
 }
 
-
-/*
-================
-R_ConcatRotations
-================
-*/
 void R_ConcatRotations (const float in1[3*3], const float in2[3*3], float out[3*3])
 {
 	out[0*3+0] = in1[0*3+0] * in2[0*3+0] + in1[0*3+1] * in2[1*3+0] + in1[0*3+2] * in2[2*3+0];
@@ -798,12 +739,6 @@ void R_ConcatRotations (const float in1[3*3], const float in2[3*3], float out[3*
 	out[2*3+2] = in1[2*3+0] * in2[0*3+2] + in1[2*3+1] * in2[1*3+2] + in1[2*3+2] * in2[2*3+2];
 }
 
-
-/*
-================
-R_ConcatTransforms
-================
-*/
 void R_ConcatTransforms (const float in1[3*4], const float in2[3*4], float out[3*4])
 {
 	out[0*4+0] = in1[0*4+0] * in2[0*4+0] + in1[0*4+1] * in2[1*4+0] + in1[0*4+2] * in2[2*4+0];
@@ -841,7 +776,6 @@ void Mathlib_Init(void)
 {
 	int a;
 
-	// LordHavoc: setup 1.0f / N table for quick recipricols of integers
 	ixtable[0] = 0;
 	for (a = 1;a < 4096;a++)
 		ixtable[a] = 1.0f / a;
@@ -872,7 +806,7 @@ int Math_atov(const char *s, prvm_vec3_t out)
 			s++;
 		out[i] = atof (s);
 		if (out[i] == 0 && *s != '-' && *s != '+' && (*s < '0' || *s > '9'))
-			break; // not a number
+			break;
 		while (*s && *s != ' ' && *s !='\t' && *s != '\'')
 			s++;
 		if (*s == '\'')
@@ -894,7 +828,6 @@ void BoxFromPoints(vec3_t mins, vec3_t maxs, int numpoints, vec_t *point3f)
 	}
 }
 
-// LordHavoc: this has to be done right or you get severe precision breakdown
 int LoopingFrameNumberFromDouble(double t, int loopframes)
 {
 	if (loopframes)
@@ -907,7 +840,7 @@ static unsigned int mul_Lecuyer[4] = { 0x12e15e35, 0xb500f16e, 0x2e714eb2, 0xb37
 
 static void mul128(const unsigned int a[], const unsigned int b[], unsigned int dest[4])
 {
-#if 0 //defined(__GNUC__) && defined(__x86_64__)
+#if 0
 	unsigned __int128 ia = ((__int128)a[0] << 96) | ((__int128)a[1] << 64) | ((__int128)a[2] << 32) | (a[3]);
 	unsigned __int128 ib = ((__int128)b[0] << 96) | ((__int128)b[1] << 64) | ((__int128)b[2] << 32) | (b[3]);
 	unsigned __int128 id = ia * ib;
@@ -918,15 +851,6 @@ static void mul128(const unsigned int a[], const unsigned int b[], unsigned int 
 #else
 	unsigned long long t[4];
 
-	// this multiply chain is relatively straightforward - a[] is repeatedly
-	// added with shifts based on b[] and the results stored into uint64,
-	// but due to C limitations (no access to carry flag) we have to resolve
-	// carries in a really lame way which wastes a fair number of ops
-	// (repeatedly iterating MSB to LSB, rather than LSB to MSB with carry),
-	// an alternative would be to use 16bit multiplies and resolve carries
-	// only at the end, but that would be twice as many multiplies...
-	//
-	// note: >> 32 is a function call in win32 MSVS2015 debug builds.
 	t[0] = (unsigned long long)a[0] * b[3];
 	t[1] = (unsigned long long)a[1] * b[3];
 	t[2] = (unsigned long long)a[2] * b[3];
@@ -1043,7 +967,7 @@ void Math_RandomSeed_FromInts(randomseed_t *r, unsigned int s0, unsigned int s1,
 	r->s[0] = s0;
 	r->s[1] = s1;
 	r->s[2] = s2;
-	r->s[3] = s3 | 1; // the Lehmer RNG requires that the seed be odd
+	r->s[3] = s3 | 1;
 }
 
 unsigned long long Math_rand64(randomseed_t *r)
@@ -1065,7 +989,7 @@ float Math_randomf(randomseed_t *r)
 
 float Math_crandomf(randomseed_t *r)
 {
-	// do this with a signed number and double the result, so we make use of all parts of the cow
+
 	long long n = (long long)Math_rand64(r);
 	return n * (0.5f / 0x80000000 / 0x80000000);
 }

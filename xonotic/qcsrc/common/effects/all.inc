@@ -1,17 +1,13 @@
 #pragma once
-// Global list of effects, networked to CSQC by ID to save bandwidth and to use client particle numbers (allows mismatching effectinfos to some degree)
-// Not too concerned about the order of this list, just keep the weapon effects together!
 
 #include "../teams.qh"
 
-// EFFECT(istrail, EFFECT_NAME,     "effectinfo_string")
 EFFECT(0, EXPLOSION_SMALL,          "explosion_small")
 EFFECT(0, EXPLOSION_MEDIUM,         "explosion_medium")
 EFFECT(0, EXPLOSION_BIG,            "explosion_big")
 
 EFFECT(0, SMOKE_SMALL,              "smoke_small")
 EFFECT(0, SMOKE_LARGE,              "smoke_large")
-
 
 EFFECT(0, ARC_MUZZLEFLASH,          "electro_muzzleflash")
 
@@ -25,8 +21,7 @@ EFFECT(0, ARC_BEAM,                 "arc_beam")
 EFFECT(0, ARC_BEAM_HEAL,            "arc_beam_heal")
 EFFECT(0, ARC_BEAM_HEAL_IMPACT,     "arc_beam_healimpact")
 EFFECT(0, ARC_BEAM_HEAL_IMPACT2,    "healray_impact")
-// TODO: effect needs updating
-//EFFECT(0, ARC_BOLT_EXPLODE,         "arc_bolt_explode")
+
 EFFECT(0, ARC_OVERHEAT,             "arc_overheat")
 EFFECT(0, ARC_OVERHEAT_FIRE,        "arc_overheat_fire")
 EFFECT(0, ARC_SMOKE,                "arc_smoke")
@@ -112,8 +107,6 @@ EFFECT(0, FIREBALL_LASER,           "fireball_laser")
 EFFECT(0, FIREBALL_MUZZLEFLASH,     "fireball_muzzleflash")
 EFFECT(0, FIREBALL_PRE_MUZZLEFLASH, "fireball_preattack_muzzleflash")
 
-
-
 EFFECT(0, RAPTOR_CANNON_IMPACT,     "raptor_cannon_impact")
 EFFECT(0, RAPTOR_BOMB_IMPACT,       "raptor_bomb_impact")
 EFFECT(0, RAPTOR_BOMB_SPREAD,       "raptor_bomb_spread")
@@ -144,6 +137,7 @@ EFFECT(0, SPAWNPOINT_RED,           "spawn_point_red")
 EFFECT(0, SPAWNPOINT_BLUE,          "spawn_point_blue")
 EFFECT(0, SPAWNPOINT_YELLOW,        "spawn_point_yellow")
 EFFECT(0, SPAWNPOINT_PINK,          "spawn_point_pink")
+EFFECT(0, SPAWNPOINT_GREEN,         "spawn_point_green")
 EFFECT(0, SPAWNPOINT_NEUTRAL,       "spawn_point_neutral")
 entity EFFECT_SPAWNPOINT(int teamid)
 {
@@ -152,6 +146,7 @@ entity EFFECT_SPAWNPOINT(int teamid)
         case NUM_TEAM_2:    return EFFECT_SPAWNPOINT_BLUE;
         case NUM_TEAM_3:    return EFFECT_SPAWNPOINT_YELLOW;
         case NUM_TEAM_4:    return EFFECT_SPAWNPOINT_PINK;
+        case NUM_TEAM_5:    return EFFECT_SPAWNPOINT_GREEN;
         default:            return EFFECT_SPAWNPOINT_NEUTRAL;
     }
 }
@@ -160,6 +155,7 @@ EFFECT(0, SPAWN_RED,                "spawn_event_red")
 EFFECT(0, SPAWN_BLUE,               "spawn_event_blue")
 EFFECT(0, SPAWN_YELLOW,             "spawn_event_yellow")
 EFFECT(0, SPAWN_PINK,               "spawn_event_pink")
+EFFECT(0, SPAWN_GREEN,              "spawn_event_green")
 EFFECT(0, SPAWN_NEUTRAL,            "spawn_event_neutral")
 entity EFFECT_SPAWN(int teamid)
 {
@@ -168,6 +164,7 @@ entity EFFECT_SPAWN(int teamid)
         case NUM_TEAM_2:    return EFFECT_SPAWN_BLUE;
         case NUM_TEAM_3:    return EFFECT_SPAWN_YELLOW;
         case NUM_TEAM_4:    return EFFECT_SPAWN_PINK;
+        case NUM_TEAM_5:    return EFFECT_SPAWN_GREEN;
         default:            return EFFECT_SPAWN_NEUTRAL;
     }
 }
@@ -237,8 +234,6 @@ EFFECT(0, ONS_GENERATOR_DAMAGED,    "torch_small")
 EFFECT(0, ONS_GENERATOR_GIB,        "onslaught_generator_gib_explode")
 EFFECT(0, ONS_GENERATOR_EXPLODE,    "onslaught_generator_smallexplosion")
 EFFECT(0, ONS_GENERATOR_EXPLODE2,   "onslaught_generator_finalexplosion")
-
-
 
 EFFECT(0, LASER_DEADLY,             "laser_deadly")
 EFFECT(1, FLAC_TRAIL,               "TR_SEEKER")

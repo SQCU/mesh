@@ -22,8 +22,7 @@ void XonoticSlider_configureXonoticSlider(entity me, float theValueMin, float th
 
 	me.controlledCvar = (theCvar) ? theCvar : string_null;
 	if(theCvar)
-		// Prevent flickering of the slider button by initialising the
-		// slider out of bounds to hide the button before loading the cvar
+
 		me.configureSliderValues(me, theValueMin, theValueMin-theValueStep, theValueMax, theValueStep, theValueStep, vp);
 	else
 		me.configureSliderValues(me, theValueMin, theValueMin, theValueMax, theValueStep, theValueStep, vp);

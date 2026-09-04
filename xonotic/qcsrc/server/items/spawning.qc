@@ -1,10 +1,5 @@
 #include "spawning.qh"
 
-/// \file
-/// \brief Source file that contains implementation of the functions related to
-/// creation of game items.
-/// \copyright GNU GPLv2 or any later version.
-
 #include <common/mapobjects/subs.qh>
 #include <common/weapons/all.qh>
 #include <server/items/items.qh>
@@ -12,9 +7,8 @@
 #include <server/weapons/spawning.qh>
 #include <server/world.qh>
 
-.bool m_isloot; ///< Holds whether item is loot.
-/// \brief Holds whether strength, shield or superweapon timers expire while
-/// this item is on the ground.
+.bool m_isloot;
+
 .bool m_isexpiring;
 
 entity Item_FindDefinition(string class_name)
@@ -115,7 +109,7 @@ bool Item_InitializeLoot(entity item, string class_name, vector position,
 	}
 	item.gravity = 1;
 	item.velocity = vel;
-	// StartItem sets the default .wait expiry time which is respected by Item_Think()
+
 	if (time_to_live)
 		item.wait = time + time_to_live;
 	return true;
@@ -146,11 +140,8 @@ void Item_SetExpiring(entity item, bool expiring)
 	item.m_isexpiring = expiring;
 }
 
-// Compatibility spawn functions
-
-// in Quake this is green armor, in Xonotic maps it is an armor shard
 SPAWNFUNC_ITEM_COND(item_armor1, autocvar_sv_mapformat_is_quake3, ITEM_ArmorSmall, ITEM_ArmorMedium)
-SPAWNFUNC_ITEM(item_armor25, ITEM_ArmorMega) // Nexuiz used item_armor25 to spawn a Mega Armor
+SPAWNFUNC_ITEM(item_armor25, ITEM_ArmorMega)
 SPAWNFUNC_ITEM(item_health1, ITEM_HealthSmall)
 SPAWNFUNC_ITEM(item_health25, ITEM_HealthMedium)
 SPAWNFUNC_ITEM(item_health100, ITEM_HealthMega)

@@ -27,13 +27,12 @@ void sys_phys_update(entity this, float dt)
 	PHYS_CS(this).buttons_old = PHYS_INPUT_BUTTON_MASK(this);
 
 	sys_phys_ai(this);
-
 	sys_phys_pregame_hold(this);
 
 	if (IS_SVQC) {
 		if (this.move_movetype == MOVETYPE_NONE) { return; }
-		// when we get here, disableclientprediction cannot be 2
-		if(this.move_movetype == MOVETYPE_FOLLOW) // not compatible with prediction
+
+		if(this.move_movetype == MOVETYPE_FOLLOW)
 			this.disableclientprediction = 1;
 		else if(this.move_qcphysics)
 			this.disableclientprediction = -1;
@@ -49,7 +48,6 @@ void sys_phys_update(entity this, float dt)
 
 	float maxspeed_mod = 1;
 
-// conveyors: first fix velocity
 	if (this.conveyor.active) { this.velocity -= this.conveyor.movedir; }
 	MUTATOR_CALLHOOK(PlayerPhysics, this, dt);
 
@@ -60,15 +58,12 @@ void sys_phys_update(entity this, float dt)
 	sys_phys_fixspeed(this, maxspeed_mod);
 
 	if (IS_DEAD(this)) {
-		// handle water here
+
 		vector midpoint = ((this.absmin + this.absmax) * 0.5);
 		int cont = pointcontents(midpoint);
 		if (cont == CONTENT_WATER || cont == CONTENT_LAVA || cont == CONTENT_SLIME) {
 			this.velocity = this.velocity * 0.5;
 
-			// do we want this?
-			// if(pointcontents(midpoint + '0 0 2') == CONTENT_WATER)
-			// { this.velocity_z = 70; }
 		}
 		sys_phys_postupdate(this);
 		return;
@@ -95,7 +90,7 @@ void sys_phys_update(entity this, float dt)
 			this.teleport_time = 0;
 		}
 	} else if (MUTATOR_CALLHOOK(PM_Physics, this, maxspeed_mod, dt)) {
-		// handled
+
 	} else if (this.move_movetype == MOVETYPE_NOCLIP
 	    || this.move_movetype == MOVETYPE_FLY
 	    || this.move_movetype == MOVETYPE_FLY_WORLDONLY
@@ -163,22 +158,17 @@ void sys_phys_update(entity this, float dt)
 void sys_phys_postupdate(entity this)
 {
 	if (IS_ONGROUND(this)) { this.lastground = time; }
-// conveyors: then break velocity again
+
 	if (this.conveyor.active) { this.velocity += this.conveyor.movedir; }
 	this.lastflags = this.flags;
 
 	this.lastclassname = this.classname;
 }
 
-/** for players */
 void sys_phys_simulate(entity this, float dt)
 {
 	if (!this.com_phys_ground && !this.com_phys_air) {
-		// noclipping
-		// flying
-		// on a spawnfunc_func_ladder
-		// swimming in spawnfunc_func_water
-		// swimming
+
 		UNSET_ONGROUND(this);
 
 		if (this.com_phys_friction_air) {
@@ -190,8 +180,7 @@ void sys_phys_simulate(entity this, float dt)
 	}
 
 	if (this.com_phys_water) {
-		// water jump only in certain situations
-		// this mimics quakeworld code
+
 		if (this.com_in_jump && this.waterlevel == WATERLEVEL_SWIMMING && this.velocity_z >= -180 && !this.viewloc && !PHYS_FROZEN(this)) {
 			vector yawangles = '0 1 0' * this.v_angle.y;
 			vector forward, right, up;
@@ -214,17 +203,17 @@ void sys_phys_simulate(entity this, float dt)
 
 	vector forward, right, up;
 	MAKE_VECTORS(vmul(this.v_angle, (this.com_phys_vel_2d ? '0 1 0' : '1 1 1')), forward, right, up);
-	// wishvel = forward * PHYS_CS(this).movement.x + right * PHYS_CS(this).movement.y + up * PHYS_CS(this).movement.z;
+
 	vector wishvel = forward * PHYS_CS(this).movement.x
 	    + right * PHYS_CS(this).movement.y
 	    + '0 0 1' * PHYS_CS(this).movement.z * (this.com_phys_vel_2d ? 0 : 1);
 	if (this.com_phys_water) {
 		if (PHYS_FROZEN(this))
 		{
-			if(this.waterlevel >= WATERLEVEL_SUBMERGED && this.velocity.z >= -70) // don't change the speed too abruptally
-				wishvel = '0 0 160'; // resurface
+			if(this.waterlevel >= WATERLEVEL_SUBMERGED && this.velocity.z >= -70)
+				wishvel = '0 0 160';
 			else if(this.waterlevel >= WATERLEVEL_SWIMMING && this.velocity.z > 0)
-				wishvel = eZ * 1.3 * min(this.velocity.z, 160); // resurface a bit more above the surface
+				wishvel = eZ * 1.3 * min(this.velocity.z, 160);
 		}
 		else
 		{
@@ -232,9 +221,9 @@ void sys_phys_simulate(entity this, float dt)
 				wishvel.z = -PHYS_MAXSPEED(this);
 			}
 			if (this.viewloc) {
-				wishvel.z = -160;    // drift anyway
+				wishvel.z = -160;
 			} else if (wishvel == '0 0 0') {
-				wishvel = '0 0 -60'; // drift towards bottom
+				wishvel = '0 0 -60';
 			}
 		}
 	}
@@ -262,13 +251,13 @@ void sys_phys_simulate(entity this, float dt)
 			}
 		}
 	}
-	// acceleration
+
 	const vector wishdir = normalize(wishvel);
 	float wishspeed = min(vlen(wishvel), this.com_phys_vel_max);
 
 	if (this.com_phys_air) {
 		if (!(this.flags & FL_WATERJUMP)) {
-			// apply air speed limit
+
 			float airaccelqw = PHYS_AIRACCEL_QW(this);
 			float wishspeed0 = wishspeed;
 			const float maxairspd = this.com_phys_vel_max;
@@ -281,20 +270,12 @@ void sys_phys_simulate(entity this, float dt)
 			float accelerating = (this.velocity * wishdir > 0);
 			float wishspeed2 = wishspeed;
 
-			// CPM: air control
 			if (PHYS_AIRSTOPACCELERATE(this)) {
 				vector curdir = normalize(vec2(this.velocity));
 				airaccel += (this.com_phys_acc_rate_air_stop - airaccel) * max(0, -(curdir * wishdir));
 			}
-			// note that for straight forward jumping:
-			// step = accel * dt * wishspeed0;
-			// accel  = bound(0, wishspeed - vel_xy_current, step) * accelqw + step * (1 - accelqw);
-			// -->
-			// dv/dt = accel * maxspeed (when slow)
-			// dv/dt = accel * maxspeed * (1 - accelqw) (when fast)
-			// log dv/dt = logaccel + logmaxspeed (when slow)
-			// log dv/dt = logaccel + logmaxspeed + log(1 - accelqw) (when fast)
-			float strafity = IsMoveInDirection(PHYS_CS(this).movement, -90) + IsMoveInDirection(PHYS_CS(this).movement, +90);  // if one is nonzero, other is always zero
+
+			float strafity = IsMoveInDirection(PHYS_CS(this).movement, -90) + IsMoveInDirection(PHYS_CS(this).movement, +90);
 			if (PHYS_MAXAIRSTRAFESPEED(this)) {
 				wishspeed =
 				    min(wishspeed,
@@ -309,7 +290,6 @@ void sys_phys_simulate(entity this, float dt)
 				    *
 				    (1 - GeomLerp(1 - fabs(PHYS_AIRACCEL_QW(this)), strafity, 1 - fabs(PHYS_AIRSTRAFEACCEL_QW(this))));
 			}
-			// !CPM
 
 			if (PHYS_WARSOWBUNNY_TURNACCEL(this) && accelerating && PHYS_CS(this).movement.y == 0 && PHYS_CS(this).movement.x != 0) {
 				PM_AirAccelerate(this, dt, wishdir, wishspeed2);
@@ -328,9 +308,8 @@ void sys_phys_simulate(entity this, float dt)
 		if (this.com_phys_water) {
 			wishspeed *= 0.7;
 
-			//	if (!(this.flags & FL_WATERJUMP)) // TODO: use
 			{
-				// water friction
+
 				float f = 1 - dt * PHYS_FRICTION(this);
 				f = min(max(0, f), 1);
 				this.velocity *= f;
@@ -341,13 +320,8 @@ void sys_phys_simulate(entity this, float dt)
 					this.velocity += accelspeed * wishdir;
 				}
 
-				// holding jump button swims upward slowly
 				if (this.com_in_jump && !this.viewloc && !PHYS_FROZEN(this)) {
-					// was:
-					// lava: 50
-					// slime: 80
-					// water: 100
-					// idea: double those
+
 					this.velocity_z = 200;
 					if (this.waterlevel >= WATERLEVEL_SUBMERGED) {
 						this.velocity_z = PHYS_MAXSPEED(this) * 0.7;
@@ -361,17 +335,16 @@ void sys_phys_simulate(entity this, float dt)
 					this.velocity += accelspeed * wishdir;
 				}
 			} else {
-				// water acceleration
+
 				PM_Accelerate(this, dt, wishdir, wishspeed, wishspeed, this.com_phys_acc_rate, 1, 0, 0, 0);
 			}
 			return;
 		}
 		if (this.com_phys_ground) {
-			// apply edge friction
+
 			const float f2 = vlen2(vec2(this.velocity));
 			if (f2 > 0) {
-				// TODO: apply edge friction
-				// apply ground friction
+
 				const int realfriction = (IS_ONSLICK(this))
 				    ? PHYS_FRICTION_SLICK(this)
 					: PHYS_FRICTION(this);
@@ -381,28 +354,7 @@ void sys_phys_simulate(entity this, float dt)
 				    * ((f < PHYS_STOPSPEED(this)) ? (PHYS_STOPSPEED(this) / f) : 1);
 				f = max(0, f);
 				this.velocity *= f;
-				/*
-				   Mathematical analysis time!
 
-				   Our goal is to invert this mess.
-
-				   For the two cases we get:
-				    v = v0 * (1 - dt * (PHYS_STOPSPEED(this) / v0) * PHYS_FRICTION(this))
-				      = v0 - dt * PHYS_STOPSPEED(this) * PHYS_FRICTION(this)
-				    v0 = v + dt * PHYS_STOPSPEED(this) * PHYS_FRICTION(this)
-				   and
-				    v = v0 * (1 - dt * PHYS_FRICTION(this))
-				    v0 = v / (1 - dt * PHYS_FRICTION(this))
-
-				   These cases would be chosen ONLY if:
-				    v0 < PHYS_STOPSPEED(this)
-				    v + dt * PHYS_STOPSPEED(this) * PHYS_FRICTION(this) < PHYS_STOPSPEED(this)
-				    v < PHYS_STOPSPEED(this) * (1 - dt * PHYS_FRICTION(this))
-				   and, respectively:
-				    v0 >= PHYS_STOPSPEED(this)
-				    v / (1 - dt * PHYS_FRICTION(this)) >= PHYS_STOPSPEED(this)
-				    v >= PHYS_STOPSPEED(this) * (1 - dt * PHYS_FRICTION(this))
-				 */
 			}
 			const float addspeed = wishspeed - this.velocity * wishdir;
 			if (addspeed > 0) {
@@ -419,7 +371,7 @@ void sys_phys_simulate(entity this, float dt)
 }
 
 .entity groundentity;
-/** for other entities */
+
 void sys_phys_simulate_simple(entity this, float dt)
 {
 	vector mn = this.mins;
@@ -431,8 +383,6 @@ void sys_phys_simulate_simple(entity this, float dt)
 	vector vel = this.com_phys_vel;
 	vector pos = this.com_phys_pos;
 
-	// SV_Physics_Toss
-
 	vel += g * dt;
 
 	this.angles += dt * this.avelocity;
@@ -441,18 +391,18 @@ void sys_phys_simulate_simple(entity this, float dt)
 		vector push = vel * movetime;
 		vector p0 = pos;
 		vector p1 = p0 + push;
-		// SV_PushEntity
+
 		tracebox(p0, mn, mx, p1, MOVE_NORMAL, this);
 		if (!trace_startsolid) {
 			bool hit = trace_fraction < 1;
 			pos = trace_endpos;
 			entity ent = trace_ent;
-			// SV_LinkEdict_TouchAreaGrid
+
 			if (this.solid != SOLID_NOT) {
 				FOREACH_ENTITY_RADIUS_ORDERED(0.5 * (this.absmin + this.absmax), 0.5 * vlen(this.absmax - this.absmin), true, {
 					if (it.solid != SOLID_TRIGGER || it == this) continue;
 					if (gettouch(it) && boxesoverlap(it.absmin, it.absmax, this.absmin, this.absmax)) {
-					    // SV_LinkEdict_TouchAreaGrid_Call
+
 					    trace_allsolid = false;
 					    trace_startsolid = false;
 					    trace_fraction = 1;
@@ -472,7 +422,7 @@ void sys_phys_simulate_simple(entity this, float dt)
 				});
 			}
 			if (hit && this.solid >= SOLID_TRIGGER && (!IS_ONGROUND(this) || this.groundentity != ent)) {
-				// SV_Impact (ent, trace);
+
 				tracebox(p0, mn, mx, p1, MOVE_NORMAL, this);
 				void(entity, entity) touched = gettouch(this);
 				if (touched && this.solid != SOLID_NOT) {
@@ -492,7 +442,7 @@ void sys_phys_simulate_simple(entity this, float dt)
 				}
 			}
 		}
-		// end SV_PushEntity
+
 		if (wasfreed(this)) { return; }
 		tracebox(p0, mn, mx, p1, MOVE_NORMAL, this);
 		if (trace_fraction == 1) { break; }

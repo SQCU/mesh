@@ -2,7 +2,6 @@
 #   error "bad opts.def usage"
 #endif
 
-/* codegen flags */
 #ifdef GMQCC_TYPE_FLAGS
     GMQCC_DEFINE_FLAG(DARKPLACES_STRING_TABLE_BUG)
     GMQCC_DEFINE_FLAG(ADJUST_VECTOR_FIELDS)
@@ -40,7 +39,6 @@
     GMQCC_DEFINE_FLAG(DEFAULT_ERASEABLE)
 #endif
 
-/* warning flags */
 #ifdef GMQCC_TYPE_WARNS
     GMQCC_DEFINE_FLAG(UNINITIALIZED_GLOBAL)
     GMQCC_DEFINE_FLAG(DEBUG)
@@ -96,7 +94,7 @@
     GMQCC_DEFINE_FLAG(VOID_RETURN,          1)
     GMQCC_DEFINE_FLAG(VECTOR_COMPONENTS,    1)
     GMQCC_DEFINE_FLAG(CONST_FOLD_DCE,       2)
-    GMQCC_DEFINE_FLAG(CONST_FOLD,           0) /* cannot be turned off */
+    GMQCC_DEFINE_FLAG(CONST_FOLD,           0)
 #endif
 
 #ifdef GMQCC_TYPE_OPTIONS
@@ -118,7 +116,6 @@
     GMQCC_DEFINE_FLAG(STATE_FPS)
 #endif
 
-/* some cleanup so we don't have to */
 #undef GMQCC_TYPE_FLAGS
 #undef GMQCC_TYPE_WARNS
 #undef GMQCC_TYPE_OPTIONS

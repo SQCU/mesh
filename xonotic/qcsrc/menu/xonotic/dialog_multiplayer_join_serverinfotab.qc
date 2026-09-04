@@ -8,7 +8,6 @@
 #include "textlabel.qh"
 #include "button.qh"
 
-
 entity makeXonoticServerInfoTab()
 {
 	entity me;
@@ -104,4 +103,3 @@ void XonoticServerInfoTab_fill(entity me)
 		me.TD(me, me.rows - 8, 4, e = makeXonoticPlayerList());
 			me.rawPlayerList = e;
 }
-

@@ -1,7 +1,5 @@
 #pragma once
 
-// you're next
-
 #ifdef SVQC
 #include <server/client.qh>
 #include <server/compat/quake3.qh>
@@ -14,19 +12,7 @@
 #include <common/physics/player.qh>
 #endif
 
-// Full list of all stat constants, included in a single location for easy reference
-// 255 is the current limit (MAX_CL_STATS - 1), engine will need to be modified if you wish to add more stats
-
 const int MAX_CL_STATS = 256;
-
-// const int STAT_HEALTH = 0;
-// const int STAT_ARMOR = 4;
-// const int STAT_SHELLS = 6;
-// const int STAT_NAILS = 7;
-// const int STAT_ROCKETS = 8;
-// const int STAT_CELLS = 9;
-// const int STAT_ITEMS = 15; // .items | .items2 << 23 | serverflags << 28
-// const int STAT_VIEWHEIGHT = 16;
 
 #if defined(CSQC)
     #define g_stat_HEALTH getstati(STAT_HEALTH)
@@ -49,9 +35,9 @@ const int MAX_CL_STATS = 256;
 #endif
 
 #ifdef SVQC
-/// all the weapons actually spawned in the map, does not include filtered items
+
 vector weaponsInMap;
-/// all the weapons placed by the mapper (weaponreplace applied), ignores most filters
+
 vector weaponsInMapAll;
 #endif
 
@@ -67,7 +53,6 @@ REGISTER_STAT(PL_CROUCH_MIN, vector)
 REGISTER_STAT(PL_MAX, vector)
 REGISTER_STAT(PL_CROUCH_MAX, vector)
 
-// networked bitflag for game objective display (modicons)
 REGISTER_STAT(OBJECTIVE_STATUS, int)
 #ifdef SVQC
 SPECTATE_COPYFIELD(_STAT(OBJECTIVE_STATUS))
@@ -76,13 +61,12 @@ SPECTATE_COPYFIELD(_STAT(OBJECTIVE_STATUS))
 #ifdef SVQC
 float W_WeaponRateFactor(entity this);
 float game_stopped;
-float game_starttime; //point in time when the countdown to game start is over
-float round_starttime; //point in time when the countdown to round start is over
+float game_starttime;
+float round_starttime;
 int autocvar_leadlimit;
-int overtimes; // overtimes added (-1 = sudden death)
-int timeout_status; // (values: 0, 1, 2) contains whether a timeout is not active (0), was called but still at leadtime (1) or is active (2)
+int overtimes;
+int timeout_status;
 
-// TODO: world.qh can't be included here due to circular includes!
 #define autocvar_fraglimit cvar("fraglimit")
 #define autocvar_fraglimit_override cvar("fraglimit_override")
 #define autocvar_timelimit cvar("timelimit")
@@ -91,10 +75,10 @@ int timeout_status; // (values: 0, 1, 2) contains whether a timeout is not activ
 REGISTER_STAT(WEAPONRATEFACTOR, float, W_WeaponRateFactor(this))
 REGISTER_STAT(GAME_STOPPED, int, game_stopped)
 REGISTER_STAT(GAMESTARTTIME, float, game_starttime)
-/** arc heat in [0,1] */
+
 REGISTER_STAT(PRESSED_KEYS, int)
 REGISTER_STAT(FUEL, int)
-/** compressShotOrigin */
+
 REGISTER_STAT(SHOTORG, int)
 REGISTER_STAT(LEADLIMIT, float, autocvar_leadlimit)
 REGISTER_STAT(LEADLIMIT_AND_FRAGLIMIT, float, autocvar_leadlimit_and_fraglimit)
@@ -239,7 +223,7 @@ REGISTER_STAT(MOVEVARS_FRICTION_ONLAND, float, autocvar_sv_friction_on_land)
 
 REGISTER_STAT(MOVEVARS_JUMPSPEEDCAP_DISABLE_ONRAMPS, int, autocvar_sv_jumpspeedcap_max_disable_on_ramps)
 REGISTER_STAT(MOVEVARS_TRACK_CANJUMP, int)
-/** cvar loopback */
+
 REGISTER_STAT(MOVEVARS_CL_TRACK_CANJUMP, int)
 
 #ifdef SVQC
@@ -282,7 +266,7 @@ REGISTER_STAT(DODGING_MAXSPEED, float, autocvar_sv_dodging_maxspeed)
 REGISTER_STAT(DODGING_AIR_MAXSPEED, float, autocvar_sv_dodging_air_maxspeed)
 REGISTER_STAT(DODGING_CLIENTSELECT, bool, autocvar_sv_dodging_clientselect)
 #endif
-/** cvar loopback */
+
 REGISTER_STAT(DODGING_FROZEN, int, autocvar_sv_dodging_frozen)
 REGISTER_STAT(DODGING_TIMEOUT, float)
 
@@ -324,27 +308,28 @@ float autocvar_g_bloodloss;
 #endif
 REGISTER_STAT(BLOODLOSS, float, autocvar_g_bloodloss)
 
-// freeze tag, clan arena
 REGISTER_STAT(REDALIVE, int)
 REGISTER_STAT(BLUEALIVE, int)
 REGISTER_STAT(YELLOWALIVE, int)
 REGISTER_STAT(PINKALIVE, int)
+REGISTER_STAT(GREENALIVE, int)
 
-// domination
 REGISTER_STAT(DOM_TOTAL_PPS, float)
 REGISTER_STAT(DOM_PPS_RED, float)
 REGISTER_STAT(DOM_PPS_BLUE, float)
 REGISTER_STAT(DOM_PPS_YELLOW, float)
 REGISTER_STAT(DOM_PPS_PINK, float)
+REGISTER_STAT(DOM_PPS_GREEN, float)
 
-// payload
 REGISTER_STAT(PAYLOAD_PROGRESS, float)
 REGISTER_STAT(PAYLOAD_SPEED, float)
 REGISTER_STAT(PAYLOAD_PUSH_PACKED, int)
+REGISTER_STAT(PAYLOAD_PUSH_PACKED1, int)
+REGISTER_STAT(PAYLOAD_PUSH_PACKED2, int)
+REGISTER_STAT(PAYLOAD_PUSH_PACKED3, int)
 REGISTER_STAT(PAYLOAD_GOALS_PACKED, int)
 REGISTER_STAT(PAYLOAD_CARTS_STATE, int)
 
-// nexball
 REGISTER_STAT(NB_METERSTART, float)
 
 #ifdef SVQC
@@ -363,7 +348,7 @@ bool autocvar_sv_slick_applygravity;
 REGISTER_STAT(SLICK_APPLYGRAVITY, bool, autocvar_sv_slick_applygravity)
 
 REGISTER_STAT(Q3COMPAT, int, q3compat)
-// FIXME: workaround for https://gitlab.com/xonotic/xonotic-data.pk3dir/-/issues/2812
+
 #ifdef SVQC
 	#define Q3COMPAT_COMMON q3compat
 #elif defined(CSQC)
@@ -430,7 +415,7 @@ REGISTER_STAT(MOVEVARS_MAXSPEED, float)
 REGISTER_STAT(MOVEVARS_ACCELERATE, float)
 REGISTER_STAT(MOVEVARS_AIRACCELERATE, float)
 .float gravity;
-// FIXME: Was 0 on server, 1 on client. Still want that?
+
 REGISTER_STAT(MOVEVARS_ENTGRAVITY, float, (this.gravity) ? this.gravity : 1)
 REGISTER_STAT(MOVEVARS_JUMPVELOCITY, float)
 REGISTER_STAT(MOVEVARS_JUMPVELOCITY_CROUCH, float)

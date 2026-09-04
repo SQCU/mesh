@@ -1,10 +1,9 @@
 #include "slider_resolution.qh"
 
-/* private static */ float XonoticResolutionSlider_DataHasChanged;
-/* attrib */ float vid_conwidth;
-/* attrib */ float vid_conheight;
+                     float XonoticResolutionSlider_DataHasChanged;
+             float vid_conwidth;
+             float vid_conheight;
 
-// Updates cvars (to be called by menu.qc at startup or on detected res change)
 float updateConwidths(float width, float height, float pixelheight)
 {
 	vector r, c;
@@ -13,33 +12,30 @@ float updateConwidths(float width, float height, float pixelheight)
 
 	sz = cvar("menu_vid_scale");
 	if (sz < -1)
-		return 0;  // No recalculation.
+		return 0;
 
-	// Save off current settings.
 	cvar_set("_menu_vid_width", ftos(width));
 	cvar_set("_menu_vid_height", ftos(height));
 	cvar_set("_menu_vid_pixelheight", ftos(pixelheight));
 	cvar_set("_menu_vid_desktopfullscreen", cvar_string("vid_desktopfullscreen"));
 
-	// engine is handling conwidth calculations!
 	if((cvar_type("vid_conwidthauto") & CVAR_TYPEFLAG_ENGINE) && cvar("vid_conwidthauto"))
 	{
 		if(vid_conwidth != cvar("vid_conwidth") || vid_conheight != cvar("vid_conheight"))
 		{
-			// Please reload resolutions list and such stuff.
+
 			XonoticResolutionSlider_DataHasChanged = true;
 			vid_conwidth = cvar("vid_conwidth");
 			vid_conheight = cvar("vid_conheight");
 			return 1;
 		}
-		return 0; // No recalculation
+		return 0;
 	}
 
 	r_x = width;
 	r_y = height;
 	r_z = pixelheight;
 
-	// calculate the base resolution
 	c_z = 0;
 	c_x = 800;
 	c_y = c.x * r.y * r.z / r.x;
@@ -51,10 +47,10 @@ float updateConwidths(float width, float height, float pixelheight)
 
 	f = min(r.x / c.x, r.y / c.y);
 	if(f < 1)
-		c = c * f; // ensures that c_x <= r_x and c_y <= r_y
+		c = c * f;
 
-	minfactor = min(1, 640 / c.x);            // can be > 1 only if c_x is <640
-	maxfactor = max(1, r.x / c.x, r.y / c.y); // can be < 1 only if r_x < c_x and r_y < c_y
+	minfactor = min(1, 640 / c.x);
+	maxfactor = max(1, r.x / c.x, r.y / c.y);
 	LOG_TRACE("min factor: ", ftos(minfactor));
 	LOG_TRACE("max factor: ", ftos(maxfactor));
 
@@ -64,12 +60,11 @@ float updateConwidths(float width, float height, float pixelheight)
 		f = 1 + (minfactor - 1) * sz;
 	else
 		f = 1;
-	c = c * f; // fteqcc fail
+	c = c * f;
 
 	c_x = rint(c.x);
 	c_y = rint(c.y);
 
-	// Please reload resolutions list and such stuff.
 	XonoticResolutionSlider_DataHasChanged = true;
 
 	if (c.x != cvar("vid_conwidth") || c.y != cvar("vid_conheight"))
@@ -103,7 +98,7 @@ void XonoticResolutionSlider_addResolution(entity me, float w, float h, float pi
 		if (h < stof(argv(1))) break;
 		if (pixelheight > stof(argv(2)) + 0.01) continue;
 		if (pixelheight < stof(argv(2)) - 0.01) break;
-		return;  // already there
+		return;
 	}
 	if (pixelheight != 1)
 	{
@@ -136,14 +131,12 @@ void XonoticResolutionSlider_loadResolutions(entity me, float fullscreen)
 	float i;
 	vector r;
 
-	// HACK: text slider assumes the strings are constants, so clearValues
-	// will not unzone them
 	for(i = 0; i < me.nValues; ++i)
 	{
 		strunzone(me.valueToIdentifier(me, i));
 		strunzone(me.valueToText(me, i));
 	}
-	// NOW we can safely clear.
+
 	me.clearValues(me);
 	me.maxAllowedWidth = 0;
 	me.maxAllowedHeight = 0;
@@ -157,7 +150,7 @@ void XonoticResolutionSlider_loadResolutions(entity me, float fullscreen)
 				break;
 			if(r.x < 640 || r.y < 480)
 				continue;
-			if(r.x > 2 * r.y) // likely dualscreen resolution, skip this one
+			if(r.x > 2 * r.y)
 				if(autocvar_menu_vid_allowdualscreenresolution <= 0)
 					continue;
 			me.addResolution(me, r.x, r.y, r.z);
@@ -170,13 +163,12 @@ void XonoticResolutionSlider_loadResolutions(entity me, float fullscreen)
 
 	if(me.nValues == 0)
 	{
-		// Get workarea.
+
 		r = getresolution(-2);
-		// If workarea is not supported, get desktop size.
+
 		if(r.x == 0 && r.y == 0)
 			r = getresolution(-1);
 
-		// Add it, and limit all other resolutions to the workarea/desktop size.
 		if(r.x != 0 || r.y != 0)
 		{
 			me.maxAllowedWidth = r.x;
@@ -184,22 +176,21 @@ void XonoticResolutionSlider_loadResolutions(entity me, float fullscreen)
 			me.addResolution(me, r.x, r.y, r.z);
 		}
 
-		// Add nice hardcoded defaults.
-		me.addResolution(me, 640, 480, 1); // pc res
+		me.addResolution(me, 640, 480, 1);
 #if 0
-		me.addResolution(me, 720, 480, 1.125); // DVD NTSC 4:3
-		me.addResolution(me, 720, 576, 0.9375); // DVD PAL 4:3
-		me.addResolution(me, 720, 480, 0.84375); // DVD NTSC 16:9
-		me.addResolution(me, 720, 576, 0.703125); // DVD PAL 16:9
+		me.addResolution(me, 720, 480, 1.125);
+		me.addResolution(me, 720, 576, 0.9375);
+		me.addResolution(me, 720, 480, 0.84375);
+		me.addResolution(me, 720, 576, 0.703125);
 #endif
-		me.addResolution(me, 800, 480, 1); // 480p at 1:1 pixel aspect
-		me.addResolution(me, 800, 600, 1); // pc res
-		me.addResolution(me, 1024, 600, 1); // notebook res
-		me.addResolution(me, 1024, 768, 1); // pc res
-		me.addResolution(me, 1280, 720, 1); // 720p
-		me.addResolution(me, 1280, 960, 1); // pc res
-		me.addResolution(me, 1280, 1024, 1); // pc res
-		me.addResolution(me, 1920, 1080, 1); // 1080p
+		me.addResolution(me, 800, 480, 1);
+		me.addResolution(me, 800, 600, 1);
+		me.addResolution(me, 1024, 600, 1);
+		me.addResolution(me, 1024, 768, 1);
+		me.addResolution(me, 1280, 720, 1);
+		me.addResolution(me, 1280, 960, 1);
+		me.addResolution(me, 1280, 1024, 1);
+		me.addResolution(me, 1920, 1080, 1);
 		LOG_TRACE("Added default resolutions.");
 	}
 	LOG_TRACE("Total number of resolutions detected: ", ftos(me.nValues));

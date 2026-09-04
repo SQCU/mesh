@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <menu/xonotic/bigbutton.qh>
 #include <menu/xonotic/bigcommandbutton.qh>
 #include <menu/xonotic/button.qh>

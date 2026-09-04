@@ -65,7 +65,7 @@ void XonoticSkinList_getSkins(entity me)
 	for(i = 0; i < n; ++i)
 	{
 		s = search_getfilename(glob, i);
-		name = substring(s, 9, strlen(s) - 24); // the * part
+		name = substring(s, 9, strlen(s) - 24);
 		bufstr_set(buf, i * SKINPARM_COUNT + SKINPARM_NAME, name);
 		bufstr_set(buf, i * SKINPARM_COUNT + SKINPARM_TITLE, _("<TITLE>"));
 		bufstr_set(buf, i * SKINPARM_COUNT + SKINPARM_AUTHOR, _("<AUTHOR>"));
@@ -81,7 +81,7 @@ void XonoticSkinList_getSkins(entity me)
 		}
 		while((s = fgets(fh)))
 		{
-			// these two are handled by skinlist.qc
+
 			if(substring(s, 0, 6) == "title ")
 			{
 				if (name == cvar_defstring("menu_skin"))

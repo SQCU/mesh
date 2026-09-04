@@ -72,7 +72,7 @@ void saveCvarsMulti(entity me)
 	n = tokenize_console(me.controlledCvars_Multi);
 	for(i = 0; i < n; ++i)
 	{
-		// cvars prefixed with ! get saved with the inverted value
+
 		if(substring(argv(i), 0, 1) == "!")
 		{
 			cvarname = substring(argv(i), 1, strlen(argv(i)));
@@ -256,7 +256,7 @@ void setDependentWeird(entity e, float(entity) func)
 
 void setZonedTooltip(entity e, string theTooltip, string theCvar)
 {
-	if(theTooltip == "") // no tooltip, use cvar description then
+	if(theTooltip == "")
 	{
 		if(theCvar != "" && prvm_language == "en")
 		{
@@ -265,7 +265,7 @@ void setZonedTooltip(entity e, string theTooltip, string theCvar)
 				theTooltip = t;
 		}
 	}
-	else if(theTooltip == "-") // no cvar description as tooltip
+	else if(theTooltip == "-")
 	{
 		theTooltip = string_null;
 	}
@@ -279,28 +279,25 @@ void clearTooltip(entity e)
 	setZonedTooltip(e, string_null, string_null);
 }
 
-// URI SYSTEM ////////////////////////////////////////////////////////
-
 float _Nex_ExtResponseSystem_Queried;
 string _Nex_ExtResponseSystem_UpdateTo;
 string _Nex_ExtResponseSystem_UpdateToURL;
 string _Nex_ExtResponseSystem_Packs;
 float _Nex_ExtResponseSystem_PacksStep;
 
-/** engine callback */
 void URI_Get_Callback(float id, float status, string data)
 {
 	if(url_URI_Get_Callback(id, status, data))
 	{
-		// handled
+
 	}
 	else if (id == URI_GET_DISCARD)
 	{
-		// discard
+
 	}
 	else if (id >= URI_GET_CURL && id <= URI_GET_CURL_END)
 	{
-		// sv_cmd curl
+
 		Curl_URI_Get_Callback(id, status, data);
 	}
 	else if (id == URI_GET_UPDATENOTIFICATION)
@@ -359,7 +356,7 @@ void UpdateNotification_URI_Get_Callback(float id, float status, string data)
 	for(i = 0; i < n; ++i)
 	{
 		s = substring(argv(i), 2, -1);
-		if(s == "") { continue; } // ignore empty lines
+		if(s == "") { continue; }
 
 		switch(substring(argv(i), 0, 1))
 		{
@@ -395,8 +392,7 @@ void UpdateNotification_URI_Get_Callback(float id, float status, string data)
 			}
 			case "H":
 			{
-				// Hotfix (version-specific pk3 supported in >= 0.8.6)
-				// replaces "E" (missing-file-specific pk3 supported in <= 0.8.5)
+
 				APPEND_TO_STRING(un_emergency_pk3s, " ", s);
 				break;
 			}
@@ -415,7 +411,7 @@ void UpdateNotification_URI_Get_Callback(float id, float status, string data)
 
 	if(un_version != "" && vercmp(cvar_string("g_xonoticversion"), un_version) < 0)
 	{
-		// update needed
+
 		_Nex_ExtResponseSystem_UpdateTo = strzone(un_version);
 		if(un_download) { LOG_INFO(_("Update can be downloaded at:"), "\n", un_download); }
 		if(un_url) { _Nex_ExtResponseSystem_UpdateToURL = strzone(un_url); }
@@ -451,8 +447,6 @@ void UpdateNotification_URI_Get_Callback(float id, float status, string data)
 	}
 }
 
-// END OF URI SYSTEM ////////////////////////////////////////////////////////
-
 void updateCheck()
 {
 	if(!_Nex_ExtResponseSystem_Queried)
@@ -470,18 +464,18 @@ void updateCheck()
 		allgood = true;
 		for(i = 0; i+1 < n; i += 2)
 		{
-			if(strcmp(argv(i+1), cvar_string("g_xonoticversion"))) // these aren't the versions we're looking for
+			if(strcmp(argv(i+1), cvar_string("g_xonoticversion")))
 				continue;
 			string packfn = whichpack("hotfix-autoexec.cfg");
-			if(packfn) // we have the cfg we're looking for in some pk3
+			if(packfn)
 			{
-				if(!strncmp(packfn, "dlcache/", 8)) // it's in dlcache
-					packfn = substring(packfn, 8, strlen(packfn)); // strip prefix "dlcache/"
-				if(strstrofs(argv(i), packfn, strlen(argv(i)) - strlen(packfn)) > 0) // last chars of url == packfn
-					continue; // the pk3 we're looking for already provides the cfg we're looking for
+				if(!strncmp(packfn, "dlcache/", 8))
+					packfn = substring(packfn, 8, strlen(packfn));
+				if(strstrofs(argv(i), packfn, strlen(argv(i)) - strlen(packfn)) > 0)
+					continue;
 			}
 			allgood = false;
-			if(_Nex_ExtResponseSystem_PacksStep == 1) // first run
+			if(_Nex_ExtResponseSystem_PacksStep == 1)
 				localcmd("\ncurl --pak \"", argv(i), "\"\n");
 		}
 		if(allgood)
@@ -490,8 +484,7 @@ void updateCheck()
 			{
 				if(!Menu_Active)
 					cvar_set("_menu_initialized", "0");
-					// HACK: cause m_hide call on next start
-				//localcmd("\nmenu_restart\n"); // <= 0.8.5
+
 				localcmd("\nexec hotfix-autoexec.cfg\n");
 			}
 			_Nex_ExtResponseSystem_PacksStep = 0;
@@ -546,7 +539,7 @@ void preMenuDraw()
 
 	if(_Nex_ExtResponseSystem_UpdateTo != "" && !(gamestatus & (GAME_CONNECTED | GAME_ISSERVER)))
 	{
-		// TODO rather turn this into a dialog
+
 		fs = ((1/draw_scale.x) * eX + (1/draw_scale.y) * eY) * 12;
 		line = eY * fs.y;
 		string l1, l2;
@@ -571,7 +564,7 @@ void preMenuDraw()
 	}
 
 	if (!campaign_name_previous)
-		campaign_name_previous = strzone(strcat(campaign_name, "x")); // force unequal
+		campaign_name_previous = strzone(strcat(campaign_name, "x"));
 	if(campaign_name == campaign_name_previous)
 	{
 		if(cvar(strcat("g_campaign", campaign_name, "_won")))
@@ -611,16 +604,13 @@ float updateCompression()
 	can_dds = GL_Have_TextureCompression();
 	if(have_dds && (have_jpg || have_tga))
 	{
-		// both? Let's only use good quality precompressed files
-		// but ONLY if we actually support it!
+
 		if(can_dds)
 		{
-			// these builds are meant to have GOOD quality, so let's not compress non-skinframes
+
 			cvar_set("gl_texturecompression", "0");
 			return 1;
 
-			//cvar_set("gl_texturecompression", cvar_string("r_texture_dds_load"));
-			//return 2;
 		}
 		else
 		{
@@ -631,7 +621,7 @@ float updateCompression()
 	}
 	else if(have_dds)
 	{
-		// DDS only? We probably always want texture compression
+
 		cvar_set("gl_texturecompression", "1");
 		cvar_set("r_texture_dds_load", "1");
 		if(!can_dds)
@@ -640,7 +630,7 @@ float updateCompression()
 	}
 	else
 	{
-		// TGA only? Allow runtime compression
+
 		if(can_dds)
 		{
 			cvar_set("gl_texturecompression", cvar_string("r_texture_dds_load"));
@@ -655,7 +645,6 @@ float updateCompression()
 	}
 }
 
-// note: include only those that should be in the menu!
 #define GAMETYPES \
 	GAMETYPE(MAPINFO_TYPE_DEATHMATCH) \
 	GAMETYPE(MAPINFO_TYPE_TEAM_DEATHMATCH) \
@@ -673,15 +662,12 @@ float updateCompression()
 	GAMETYPE(MAPINFO_TYPE_ONSLAUGHT) \
 	GAMETYPE(MAPINFO_TYPE_ASSAULT) \
 	GAMETYPE(MAPINFO_TYPE_SURVIVAL) \
-	/* GAMETYPE(MAPINFO_TYPE_DUEL) */ \
-	/**/
+	                                  \
 
-// hidden gametypes come last so indexing always works correctly
 #define HIDDEN_GAMETYPES \
 	GAMETYPE(MAPINFO_TYPE_RACE) \
 	GAMETYPE(MAPINFO_TYPE_CTS) \
 	GAMETYPE(MAPINFO_TYPE_INVASION) \
-	/**/
 
 Gametype GameType_GetID(int cnt)
 {
@@ -816,7 +802,7 @@ bool isServerSingleplayer()
 
 void makeServerSingleplayer()
 {
-	// it doesn't allow clients to connect from different machines
+
 	localcmd("defer 0.1 \"sv_cmd settemp net_address 127.0.0.1\"\n");
 	localcmd("defer 0.1 \"sv_cmd settemp net_address_ipv6 ::1\"\n");
 }

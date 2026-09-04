@@ -71,7 +71,7 @@ string draw_PreloadPictureWithFlags(string pic, float f)
 
 void draw_Picture(vector theOrigin, string pic, vector theSize, vector theColor, float theAlpha)
 {
-	if(theSize.x == 0 || theSize.y <= 0) // no default sizing please
+	if(theSize.x == 0 || theSize.y <= 0)
 		return;
 	pic = draw_UseSkinFor(pic);
 	drawpic(boxToGlobal(theOrigin, draw_shift, draw_scale), pic, boxToGlobalSize(theSize, draw_scale), theColor, theAlpha * draw_alpha, 0);
@@ -99,12 +99,6 @@ void draw_Fill(vector theOrigin, vector theSize, vector theColor, float theAlpha
 	drawfill(boxToGlobal(theOrigin, draw_shift, draw_scale), boxToGlobalSize(theSize, draw_scale), theColor, theAlpha * draw_alpha, 0);
 }
 
-// a button picture is a texture containing three parts:
-//   1/4 width: left part
-//   1/2 width: middle part (stretched)
-//   1/4 width: right part
-// it is assumed to be 4x as wide as high for aspect ratio purposes, which
-// means, the parts are a square, two squares and a square.
 void draw_ButtonPicture(vector theOrigin, string pic, vector theSize, vector theColor, float theAlpha)
 {
 	vector square;
@@ -118,8 +112,7 @@ void draw_ButtonPicture(vector theOrigin, string pic, vector theSize, vector the
 	height = eY * theSize.y;
 	if(theSize.x <= theSize.y * 2)
 	{
-		// button not wide enough
-		// draw just left and right part then
+
 		square = eX * theSize.x * 0.5;
 		bW = eX * (0.25 * theSize.x / (theSize.y * 2));
 		drawsubpic(theOrigin,          square + height, pic, '0 0 0', eY + bW, theColor, theAlpha, 0);
@@ -134,12 +127,6 @@ void draw_ButtonPicture(vector theOrigin, string pic, vector theSize, vector the
 	}
 }
 
-// a vertical button picture is a texture containing three parts:
-//   1/4 height: left part
-//   1/2 height: middle part (stretched)
-//   1/4 height: right part
-// it is assumed to be 4x as high as wide for aspect ratio purposes, which
-// means, the parts are a square, two squares and a square.
 void draw_VertButtonPicture(vector theOrigin, string pic, vector theSize, vector theColor, float theAlpha)
 {
 	vector square;
@@ -153,8 +140,7 @@ void draw_VertButtonPicture(vector theOrigin, string pic, vector theSize, vector
 	height = eY * theSize.y;
 	if(theSize.y <= theSize.x * 2)
 	{
-		// button not high enough
-		// draw just upper and lower part then
+
 		square = eY * theSize.y * 0.5;
 		bH = eY * (0.25 * theSize.y / (theSize.x * 2));
 		drawsubpic(theOrigin,          square + width, pic, '0 0 0', eX + bH, theColor, theAlpha, 0);
@@ -169,14 +155,6 @@ void draw_VertButtonPicture(vector theOrigin, string pic, vector theSize, vector
 	}
 }
 
-// a border picture is a texture containing nine parts:
-//   1/4 width: left part
-//   1/2 width: middle part (stretched)
-//   1/4 width: right part
-// divided into
-//   1/4 height: top part
-//   1/2 height: middle part (stretched)
-//   1/4 height: bottom part
 void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector theColor, float theAlpha, vector theBorderSize)
 {
 	vector dX, dY;
@@ -189,10 +167,10 @@ void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector the
 	theAlpha *= draw_alpha;
 	width = eX * theSize.x;
 	height = eY * theSize.y;
-	// zero size? bail out, we cannot handle this
+
 	if(theSize.x <= 0 || theSize.y <= 0)
 		return;
-	if(theBorderSize.x <= 0) // no x border
+	if(theBorderSize.x <= 0)
 	{
 		if(theBorderSize.y <= 0)
 		{
@@ -200,7 +178,7 @@ void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector the
 		}
 		else if(theSize.y <= theBorderSize.y * 2)
 		{
-			// not high enough... draw just top and bottom then
+
 			bH = eY * (0.25 * theSize.y / (theBorderSize.y * 2));
 			drawsubpic(theOrigin,                             width          + height * 0.5, pic, '0.25 0 0',           '0.5  0 0' + bH, theColor, theAlpha, 0);
 			drawsubpic(theOrigin              + height * 0.5, width          + height * 0.5, pic, '0.25 0 0' + eY - bH, '0.5  0 0' + bH, theColor, theAlpha, 0);
@@ -215,7 +193,7 @@ void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector the
 	}
 	else if(theSize.x <= theBorderSize.x * 2)
 	{
-		// not wide enough... draw just left and right then
+
 		bW = eX * (0.25 * theSize.x / (theBorderSize.x * 2));
 		if(theBorderSize.y <= 0)
 		{
@@ -224,7 +202,7 @@ void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector the
 		}
 		else if(theSize.y <= theBorderSize.y * 2)
 		{
-			// not high enough... draw just corners
+
 			bH = eY * (0.25 * theSize.y / (theBorderSize.y * 2));
 			drawsubpic(theOrigin,                 width * 0.5 + height * 0.5, pic, '0 0 0',           bW + bH, theColor, theAlpha, 0);
 			drawsubpic(theOrigin + width   * 0.5, width * 0.5 + height * 0.5, pic, eX - bW,           bW + bH, theColor, theAlpha, 0);
@@ -253,7 +231,7 @@ void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector the
 		}
 		else if(theSize.y <= theBorderSize.y * 2)
 		{
-			// not high enough... draw just top and bottom then
+
 			bH = eY * (0.25 * theSize.y / (theBorderSize.y * 2));
 			dX = theBorderSize.x * eX;
 			drawsubpic(theOrigin,                                         dX + height * 0.5, pic, '0    0 0',           '0.25 0 0' + bH, theColor, theAlpha, 0);
@@ -286,10 +264,6 @@ void draw_Text(vector theOrigin, string theText, vector theSize, vector theColor
 		return;
 	}
 
-	//float wi;
-	//wi = draw_TextWidth(theText, ICanHasKallerz, theSize);
-	//draw_Fill(theOrigin, '1 0 0' * wi + '0 1 0' * theSize_y, '1 0 0', 0.3);
-
 	if(ICanHasKallerz)
 		drawcolorcodedstring(boxToGlobal(theOrigin, draw_shift, draw_scale), theText, globalToBoxSize(boxToGlobalSize(theSize, draw_scale), draw_fontscale), theAlpha * draw_alpha, 0);
 	else
@@ -297,17 +271,16 @@ void draw_Text(vector theOrigin, string theText, vector theSize, vector theColor
 }
 void draw_CenterText(vector theOrigin, string theText, vector theSize, vector theColor, float theAlpha, float ICanHasKallerz)
 {
-	//dprint(strcat("orig = ", vtos(theOrigin) ," tx = ", ftos(draw_TextWidth(theText, ICanHasKallerz, theSize)), "\n"));
+
 	draw_Text(theOrigin - eX * 0.5 * draw_TextWidth(theText, ICanHasKallerz, theSize), theText, theSize, theColor, theAlpha, ICanHasKallerz);
 }
 
 float draw_TextWidth(string theText, float ICanHasKallerz, vector SizeThxBye)
 {
-	//return strlen(theText);
-	//dprint("draw_TextWidth \"", theText, "\"\n");
+
 	vector v;
 	v = '0 0 0';
-	//float r;
+
 	v.x = stringwidth(theText, ICanHasKallerz, globalToBoxSize(boxToGlobalSize(SizeThxBye, draw_scale), draw_fontscale));
 	v = globalToBoxSize(v, draw_scale);
 	return v.x;
@@ -317,7 +290,7 @@ float draw_CondensedFontFactor(string theText, float ICanHasKallerz, vector Size
 {
 	float w = draw_TextWidth(theText, ICanHasKallerz, SizeThxBye);
 	if (w > maxWidth) {
-		//dprintf("NOTE: label text %s too wide for label, condensed by factor %f\n", theText, maxWidth / w);
+
 		return maxWidth / w;
 	}
 	return 1.0;
@@ -376,12 +349,7 @@ void draw_ClearClip()
 
 string draw_TextShortenToWidth(string theText, float maxWidth, float ICanHasKallerz, vector SizeThxBye)
 {
-	/*
-	if(draw_TextWidth(theText, ICanHasKallerz, SizeThxBye) <= maxWidth)
-		return theText;
-	else
-		return strcat(substring(theText, 0, draw_TextLengthUpToWidth(theText, maxWidth - draw_TextWidth("...", ICanHasKallerz, SizeThxBye), ICanHasKallerz, SizeThxBye)), "...");
-	*/
+
 	if(ICanHasKallerz)
 		return textShortenToWidth(theText, maxWidth, SizeThxBye, draw_TextWidth_WithColors);
 	else

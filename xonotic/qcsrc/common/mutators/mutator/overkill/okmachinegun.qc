@@ -36,9 +36,9 @@ void W_OverkillMachineGun_Attack_Auto(Weapon thiswep, entity actor, .entity weap
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir);
 
-	if(autocvar_g_casings >= 2) // casing code
+	if(autocvar_g_casings >= 2)
 	{
-		makevectors(actor.v_angle); // for some reason, this is lost
+		makevectors(actor.v_angle);
 		SpawnCasing(((random() * 50 + 50) * v_right) - (v_forward * (random() * 25 + 25)) - ((random() * 5 - 70) * v_up), vectoangles(v_forward), 3, actor, weaponentity);
 	}
 
@@ -56,14 +56,14 @@ METHOD(OverkillMachineGun, wr_think, void(entity thiswep, entity actor, .entity 
 {
 	if ((WEP_CVAR_SEC(okmachinegun, refire_type) == 1) && (fire & 2) && (time >= actor.jump_interval))
 	{
-		// Secondary uses it's own refire timer if refire_type is 1.
+
 		actor.jump_interval = time + WEP_CVAR_SEC(okmachinegun, refire) * W_WeaponRateFactor(actor);
 		makevectors(actor.v_angle);
 		W_Blaster_Attack(actor, weaponentity, WEP_BLASTER.m_id | HITTYPE_SECONDARY);
 		if ((actor.(weaponentity).wframe == WFRAME_IDLE) ||
 			(actor.(weaponentity).wframe == WFRAME_FIRE2))
 		{
-			// Set secondary fire animation.
+
 			actor.(weaponentity).wframe = WFRAME_FIRE2;
 			FOREACH_CLIENT(true, LAMBDA(
 				if (it == actor || (IS_SPEC(it) && it.enemy == actor))
@@ -76,11 +76,11 @@ METHOD(OverkillMachineGun, wr_think, void(entity thiswep, entity actor, .entity 
 	}
 	if (WEP_CVAR(okmachinegun, reload_ammo) && actor.(weaponentity).clip_load < WEP_CVAR_PRI(okmachinegun, ammo))
 	{
-		// Forced reload
+
 		thiswep.wr_reload(thiswep, actor, weaponentity);
 		return;
 	}
-	if (fire & 1) // Primary attack
+	if (fire & 1)
 	{
 		if (!weapon_prepareattack(thiswep, actor, weaponentity, false, 0))
 		{
@@ -90,7 +90,7 @@ METHOD(OverkillMachineGun, wr_think, void(entity thiswep, entity actor, .entity 
 		W_OverkillMachineGun_Attack_Auto(thiswep, actor, weaponentity, fire);
 		return;
 	}
-	if ((fire & 2) && (WEP_CVAR_SEC(okmachinegun, refire_type) == 0)) // Secondary attack
+	if ((fire & 2) && (WEP_CVAR_SEC(okmachinegun, refire_type) == 0))
 	{
 		if (!weapon_prepareattack(thiswep, actor, weaponentity, true, WEP_CVAR_SEC(okmachinegun, refire)))
 		{
@@ -115,7 +115,7 @@ METHOD(OverkillMachineGun, wr_checkammo1, bool(entity thiswep, entity actor, .en
 
 METHOD(OverkillMachineGun, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-	return true; // Blaster secondary is unlimited.
+	return true;
 }
 
 METHOD(OverkillMachineGun, wr_reload, void(entity thiswep, entity actor, .entity weaponentity))

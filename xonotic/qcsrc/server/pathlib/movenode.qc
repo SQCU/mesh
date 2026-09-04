@@ -98,7 +98,6 @@ vector pathlib_walknode(entity this, vector start, vector end, float doedge)
     start.x = fsnap(start.x,pathlib_gridsize);
     start.y = fsnap(start.y,pathlib_gridsize);
 
-    // Find the floor
     traceline(start + movenode_stepup, start - movenode_maxdrop, MOVE_WORLDONLY, this);
     if(trace_fraction == 1.0)
     {
@@ -108,7 +107,7 @@ vector pathlib_walknode(entity this, vector start, vector end, float doedge)
         a.nextthink = time;
         setorigin(a, start + movenode_stepup);
         a.pos1 = trace_endpos;
-        //start - movenode_maxdrop
+
         a.cnt = time + 10;
 
         LOG_TRACE("I cant walk on air!");
@@ -117,10 +116,9 @@ vector pathlib_walknode(entity this, vector start, vector end, float doedge)
 
     start = trace_endpos;
 
-    // Find the direcion, without Z
     vector s   = start;
     vector e   = end;
-    //e_z = 0; s_z = 0;
+
     vector direction = normalize(e - s);
 
     float distance  = vlen(start - end);
@@ -140,9 +138,6 @@ vector pathlib_walknode(entity this, vector start, vector end, float doedge)
     point = last_point + (direction * movenode_stepsize);
     point.x = fsnap(point.x,pathlib_gridsize);
     point.y = fsnap(point.y,pathlib_gridsize);
-
-    //dprint("end_x:  ",ftos(end_x),  "  end_y:  ",ftos(end_y),"\n");
-    //dprint("point_x:",ftos(point_x),"  point_y:",ftos(point_y),"\n\n");
 
     traceline(point + movenode_stepup, point - movenode_maxdrop,MOVE_WORLDONLY,this);
     if(trace_fraction == 1.0)

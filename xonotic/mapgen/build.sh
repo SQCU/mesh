@@ -1,11 +1,6 @@
 #!/bin/zsh
-# build.sh -- spiralgen -> q3map2 -> pk3, one command.
-#   ./build.sh <name> [spiralgen flags...]
 set -e
 SP=${0:A:h}
-# Resolve the toolchain instead of assuming it sits beside this file: the
-# generator lives in the mesh repo, the Xonotic install and netradiant-custom
-# do not, and the previous hardcode silently produced a .map with no BSP.
 X=${XONOTIC_DIR:-}
 [[ -z $X ]] && for c in $SP/../Xonotic ~/dox/xonotic/Xonotic; do [[ -d $c ]] && X=$c && break; done
 Q=${Q3MAP2:-}
@@ -19,7 +14,7 @@ MAPS=$FS/data/maps
 mkdir -p $MAPS
 Q3="$Q -game xonotic -fs_basepath $X -fs_homepath $FS"
 
-python3 $SP/spiralgen.py --name $NAME --out $MAPS "$@"
+$SP/../../bin/mesh-python $SP/spiralgen.py --name $NAME --out $MAPS "$@"
 
 cat > $MAPS/$NAME.mapinfo <<MI
 title $NAME
@@ -35,8 +30,6 @@ MI
 
 echo "--- BSP ---";   ${=Q3} -meta $MAPS/$NAME.map            | grep -iE 'leaked|^\*\*\* ERROR' && { echo "LEAK/ERROR"; exit 1; } || true
 echo "--- VIS ---";   ${=Q3} -vis  $MAPS/$NAME.map            > /dev/null
-# NOTE: needs the threads.cpp stack-size fix in netradiant-custom, otherwise
-# every multithreaded q3map2 stage SIGBUSes on macOS (512 KB worker stacks).
 echo "--- LIGHT ---"; ${=Q3} -light -fast -bounce 1 $MAPS/$NAME.map > /dev/null
 
 PK3=$SP/build/$NAME.pk3

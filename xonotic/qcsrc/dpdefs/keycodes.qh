@@ -2,10 +2,6 @@
 
 #pragma noref 1
 
-//#define float const int
-
 #include "upstream/keycodes.qc"
-
-//#undef float
 
 #pragma noref 0

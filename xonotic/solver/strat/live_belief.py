@@ -1,20 +1,7 @@
-"""Live adapter between the mesh event/observation stream and the belief stages.
-
-This file owns NO belief algebra. It maintains the V-cell dictionary, the
-observed navigable edges and the per-team observation buffer from the live
-mesh rows, folds them into observation rows, and then calls the canonical
-stages in :mod:`featurize` — ``segment_vcells`` (stage 2, which is what SETS
-the horizon), ``build_cell_slots`` + ``temporal_contraction`` (stage 3) and
-``beliefs_for_bots`` (stages 4-5). It previously re-implemented all four
-stages inline with a constant-literal Phi, a hardcoded support radius of 2.0
-and a normalization the formula does not have, while the canonical module sat
-unused; that copy is deleted.
-"""
-
 from __future__ import annotations
 
+import json
 import time
-from collections import deque
 
 import numpy as np
 
@@ -22,47 +9,83 @@ from .buffers import EventKind, Observation, ObservationBuffer
 from .featurize import (
     SLOT_DIM,
     UNINFORMATIVE_PRIOR,
-    build_cell_slots,
+    build_observation_slots,
     receptive_report,
     segment_vcells,
     temporal_contraction,
+    vcell_from_navigation,
 )
 
-# The two-sided receptive-field band stage 2 sizes the horizon to.
 BELIEF_BAND = (0.05, 0.15)
 
-# cell -> cell navigable adjacency read off the stock waypoint graph. Imported,
-# never mirrored: a duplicated constant is a duplicated definition, and the two
-# copies drift the moment the engine schema changes.
-from .instruments import EVT_KIND_CELL_LINK
-
+from payload.tools.strategy_io_schema import CELL_EXTENT, EVT_KIND
 
 class LiveBelief:
-    def __init__(self, decay=8.0, capacity=4096, signature_capacity=8192):
+    def __init__(self, decay=8.0, navigation=None):
         self.decay = float(decay)
-        self.buffer = ObservationBuffer(capacity=capacity)
-        self.signature_capacity = int(signature_capacity)
+        self.buffer = ObservationBuffer()
         self.key = None
         self.tick = None
         self.now = 0.0
         self.wall = time.monotonic()
         self.cells = {}
+        self.cell_times = {}
         self.cell_teams = {}
         self.edges = set()
-        # The MAP's navigable adjacency, streamed by the engine as kind-4
-        # (PLC_EVT_KIND_CELL_LINK) perception rows: {(cell_a, cell_b): length}.
-        # `nav_link_rows` counts rows accepted (the sweep cycles, so the same
-        # link arrives many times over a match and the shortest one wins).
+
         self.nav_links = {}
         self.nav_link_rows = 0
         self.player_cells = {}
-        self.signatures = set()
-        self.signature_order = deque()
-        self.accepted = 0
-        self.duplicates = 0
-        self.invalid = 0
+        self.deposited_rows = 0
+        self.nonfinite_rows = 0
+        self.zero_time_rows = 0
+        self.parse_error_rows = 0
         self.link_diagnostics = {}
         self._vcmap_cache = None
+        self._topology_revision = 0
+        self.navigation_vcmap = None
+        self.navigation_metadata = {}
+        if navigation is not None:
+            self.load_navigation(navigation)
+
+    def load_navigation(self, navigation):
+        if isinstance(navigation, str):
+            with open(navigation) as handle:
+                navigation = json.load(handle)
+        payload = navigation.get("navigation_realization", navigation) or {}
+        if not payload.get("nodes"):
+            self.navigation_metadata = {
+                "relation": payload.get("relation"),
+                "schema": payload.get("schema"),
+                "state": "navigation_realization_unavailable",
+            }
+            return
+        self.navigation_vcmap = vcell_from_navigation(payload, BELIEF_BAND)
+        self.navigation_metadata = {
+            "relation": payload.get("relation"),
+            "schema": payload.get("schema"),
+            "realization_id": payload.get("realization_id"),
+            "node_mass": len(payload.get("nodes", ())),
+            "edge_mass": len(payload.get("edges", ())),
+            "voronoi_cell_mass": len((payload.get("voronoi") or {}).get("site_nodes", ())),
+        }
+        self._install_navigation_cells()
+
+    def _install_navigation_cells(self):
+        if self.navigation_vcmap is None:
+            return
+        for cell, position in enumerate(self.navigation_vcmap.centroids):
+            self.cells[cell] = np.asarray(position, dtype=np.float64)
+
+    def _cell_key(self, cell, position):
+        if self.navigation_vcmap is not None:
+            return self.navigation_vcmap.assign_cell(np.asarray(position, dtype=np.float64)[:2])
+        return tuple(cell)
+
+    @staticmethod
+    def _actuator_cell(position):
+        point = np.asarray(position, dtype=np.float64)
+        return tuple(np.floor(point[:2] / CELL_EXTENT).astype(np.int64).tolist())
 
     def reset(self, key=None, tick=None):
         self.buffer.clear()
@@ -71,18 +94,20 @@ class LiveBelief:
         self.now = 0.0
         self.wall = time.monotonic()
         self.cells.clear()
+        self.cell_times.clear()
         self.cell_teams.clear()
         self.edges.clear()
         self.nav_links.clear()
         self.nav_link_rows = 0
         self.player_cells.clear()
-        self.signatures.clear()
-        self.signature_order.clear()
-        self.accepted = 0
-        self.duplicates = 0
-        self.invalid = 0
+        self.deposited_rows = 0
+        self.nonfinite_rows = 0
+        self.zero_time_rows = 0
+        self.parse_error_rows = 0
         self.link_diagnostics = {}
         self._vcmap_cache = None
+        self._topology_revision = 0
+        self._install_navigation_cells()
 
     def sync(self, key, tick):
         changed = self.key != key or (self.tick is not None and tick < self.tick)
@@ -93,65 +118,64 @@ class LiveBelief:
             self.tick = tick
         return changed
 
-    def _remember(self, signature):
-        if signature in self.signatures:
-            return False
-        if len(self.signature_order) >= self.signature_capacity:
-            self.signatures.discard(self.signature_order.popleft())
-        self.signatures.add(signature)
-        self.signature_order.append(signature)
-        return True
-
     def ingest(self, rows, columns):
         pending = []
         for row in np.atleast_2d(rows):
             try:
                 values = tuple(float(row[columns[name]]) for name in
-                               ("CELL", "KIND", "TEAM", "SUBJECT", "VALUE", "TIME"))
+                               ("KIND", "TIME", "OBSERVER", "TEAM", "SUBJECT",
+                                "CELL_X", "CELL_Y", "TARGET_CELL_X", "TARGET_CELL_Y",
+                                "POS_X", "POS_Y", "POS_Z", "RESPAWN_TIME", "HEALTH",
+                                "LINK_LENGTH", "AMOUNT"))
                 if not np.all(np.isfinite(values)):
-                    self.invalid += 1
+                    self.nonfinite_rows += 1
                     continue
-                if values[5] <= 0:
-                    self.invalid += int(any(values))
-                    continue
-                signature = tuple(round(v, 6) for v in values)
-                if not self._remember(signature):
-                    self.duplicates += 1
+                if values[1] <= 0:
+                    self.zero_time_rows += int(any(values))
                     continue
                 pending.append(values)
             except (IndexError, KeyError, TypeError, ValueError):
-                self.invalid += 1
-        pending.sort(key=lambda values: values[5])
+                self.parse_error_rows += 1
+        pending.sort(key=lambda values: values[1])
         deposited = 0
-        for cell, raw_kind, team, subject, value, stamp in pending:
-            code = int(round(raw_kind))
-            if code == EVT_KIND_CELL_LINK:
-                # Map geometry, not perception: CELL -> SUBJECT is one navigable
-                # edge of the stock waypoint graph and VALUE is its length (the
-                # engine divides by 1024, the same scale the positions are in).
-                # It carries no team and belongs in NO team's observation buffer
-                # -- routing it there is what the old `else: ENEMY_SEEN` branch
-                # did, which would have made every waypoint link look like a
-                # sighted enemy.
-                self._nav_link(cell, subject, value)
+        for (raw_kind, stamp, observer, team, subject, cell_x, cell_y,
+             target_cell_x, target_cell_y, px, py, pz,
+             respawn_time, health, link_length, amount) in pending:
+            code = int(raw_kind)
+            cell = (int(cell_x), int(cell_y))
+            target_cell = (int(target_cell_x), int(target_cell_y))
+            if code == EVT_KIND["CELL_LINK"]:
+                self._nav_link(cell, target_cell, link_length)
+                self.now = max(self.now, float(stamp))
+                continue
+            if code > EVT_KIND["CELL_LINK"]:
                 self.now = max(self.now, float(stamp))
                 continue
             kind = EventKind.ITEM_DESPAWN if code == 0 else (
                 EventKind.ITEM_SPAWN if code == 1 else EventKind.ENEMY_SEEN
             )
-            payload = {"value": float(value), "raw_kind": code}
+            position = (float(px), float(py), float(pz))
+            cell = self._cell_key(cell, position)
+            payload = {
+                "raw_kind": code, "respawn_time": float(respawn_time),
+                "health": float(health), "link_length": float(link_length),
+                "amount": float(amount),
+                "position": position,
+            }
             event = self.buffer.observe(Observation(
-                int(round(team)), -1, float(stamp), int(round(cell)), kind,
-                int(round(subject)), True, True, 0.0, payload,
+                int(team), int(observer), float(stamp), cell, kind,
+                int(subject), payload,
             ))
             deposited += int(event is not None)
             self.now = max(self.now, float(stamp))
-        self.accepted += deposited
+        self.deposited_rows += deposited
         return deposited
 
     def _nav_link(self, left, right, length):
-        """Record one engine-supplied navigable cell->cell edge, keeping the shortest."""
-        a, b = int(round(left)), int(round(right))
+        if self.navigation_vcmap is not None:
+            self.nav_link_rows += 1
+            return
+        a, b = tuple(left), tuple(right)
         if a == b:
             return
         key = (min(a, b), max(a, b))
@@ -161,106 +185,68 @@ class LiveBelief:
         previous = self.nav_links.get(key)
         if previous is None or length < previous:
             self.nav_links[key] = length
+            self._topology_revision += 1
         self.nav_link_rows += 1
 
-    @staticmethod
-    def cell_of_position(x, y):
-        gx = int(np.floor(float(x) * 4.0))
-        gy = int(np.floor(float(y) * 4.0))
-        return (gx * 131 + gy) & 1023
-
-    def _put_cell(self, cell, position, team=None):
+    def _put_cell(self, cell, position, team=None, stamp=None):
+        cell = int(cell) if np.isscalar(cell) else tuple(cell)
         position = np.asarray(position, dtype=np.float64)[:2]
-        old = self.cells.get(cell)
-        self.cells[cell] = position if old is None else 0.8 * old + 0.2 * position
+        if cell not in self.cells:
+            self._topology_revision += 1
+        self.cells[cell] = position
+        if stamp is not None:
+            self.cell_times[cell] = float(stamp)
         if team is not None:
-            self.cell_teams.setdefault(int(cell), set()).add(int(team))
+            self.cell_teams.setdefault(cell, set()).add(int(team))
 
     def _link(self, left, right):
+        if self.navigation_vcmap is not None:
+            return
         if left != right:
-            self.edges.add(tuple(sorted((int(left), int(right)))))
+            edge = tuple(sorted((tuple(left), tuple(right))))
+            if edge not in self.edges:
+                self.edges.add(edge)
+                self._topology_revision += 1
 
     def _update_cells(self, rows, columns):
         players = []
         by_id = {}
-        by_team = {}
-        player_positions = {}
         for row in np.atleast_2d(rows):
-            participant = int(round(row[columns["ID"]]))
-            team = int(round(row[columns["TEAM"]]))
+            participant = int(row[columns["ID"]])
+            team = int(row[columns["TEAM"]])
             position = np.asarray((row[columns["POS_X"]], row[columns["POS_Y"]]),
                                   dtype=np.float64)
-            cell = self.cell_of_position(*position)
+            raw_cell = (int(row[columns["CELL_X"]]), int(row[columns["CELL_Y"]]))
+            cell = self._cell_key(raw_cell, position)
             previous = self.player_cells.get(participant)
             if previous is not None:
                 self._link(previous, cell)
             self.player_cells[participant] = cell
-            player_positions.setdefault((cell, team), []).append(position)
+            self._put_cell(cell, position, team, row[columns["ENGINE_TIME"]])
             record = (participant, team, cell, position)
             players.append(record)
             by_id[participant] = record
-            by_team.setdefault(team, []).append(record)
-        for (cell, team), positions in player_positions.items():
-            self._put_cell(cell, np.mean(positions, axis=0), team)
-        event_positions = {}
         for team in self.buffer.teams():
-            observers = by_team.get(int(team), [])
             for event in self.buffer.events(team):
-                position = None
-                subject = by_id.get(int(event.subject))
-                if event.kind == EventKind.ENEMY_SEEN and subject is not None:
-                    position = subject[3]
-                elif observers:
-                    position = np.mean([record[3] for record in observers], axis=0)
-                elif self.cells:
-                    position = np.mean(list(self.cells.values()), axis=0)
-                else:
-                    position = np.zeros(2, dtype=np.float64)
-                event_positions.setdefault((int(event.cell), int(team)), []).append(position)
-                if observers:
-                    nearest = min(observers, key=lambda record: np.linalg.norm(record[3] - position))
-                    self._link(int(event.cell), nearest[2])
-        for (cell, team), positions in event_positions.items():
-            self._put_cell(cell, np.mean(positions, axis=0), team)
+                position = (event.payload or {}).get("position", (0.0, 0.0, 0.0))
+                self._put_cell(event.cell, position, int(team), event.t)
+                observer = by_id.get(int(event.observer))
+                if observer is not None:
+                    self._link(event.cell, observer[2])
         return players
 
     def _vcmap(self):
-        """Stage 2, via the CANONICAL :func:`featurize.segment_vcells`.
-
-        The navigable adjacency is the MAP's, not a stand-in: the engine sweeps
-        ``g_waypoints`` and streams every stock ``waypoint_get_link`` whose
-        endpoint hashes into a different V-cell as a kind-4
-        (``PLC_EVT_KIND_CELL_LINK``) perception row carrying the link's length
-        (``sv_payload_strategy_io.qc:payload_emit_cell_links``). Those rows are
-        collected by :meth:`ingest` into ``self.nav_links`` and passed straight
-        through here as ``adjacency`` + ``edge_lengths``, so stage 2 fuses
-        contiguous *navigable* paths and the graph distance the horizon is set
-        against is a real traversal length. Observed cell transitions (a player
-        moved i -> j; an event linked to its nearest observer's cell) are
-        unioned in -- a bot that walked between two cells demonstrated they are
-        navigable even if the waypoint sweep has not reached them yet.
-
-        The engine's sweep CYCLES rather than latching, because ``g_waypoints``
-        fills late in a match; the link table therefore grows tick over tick and
-        the shortest length seen for a pair wins. Until the first kind-4 row
-        arrives there is no map graph at all, and only then does the 2-nearest-
-        neighbour fallback run, so isolated cells are not stranded at infinite
-        graph distance in the opening ticks. ``link_source`` in the diagnostics
-        says which of the two produced the graph on this tick.
-
-        The support radius is NOT set here -- ``segment_vcells`` sets it from
-        the 5-15% receptive-field band.
-        """
-        # Stage 2 is all-pairs Dijkstra over the fused cells, and the real
-        # waypoint graph is two orders of magnitude bigger than the handful of
-        # observed cells it replaces (a real fused run: 467 waypoints, 3681 link
-        # rows). Recomputing it every tick at that size would not fit the live
-        # cadence, and it does not have to: the segmentation is a function of
-        # the graph's TOPOLOGY, which only changes when a cell, an observed
-        # transition or a navigable link is added. The engine's sweep cycles, so
-        # after the first pass this signature stops moving and the map is reused.
-        signature = (len(self.cells), len(self.nav_links),
-                     len(self.edges) if not self.nav_links else 0)
+        if self.navigation_vcmap is not None:
+            ids = list(range(self.navigation_vcmap.n_cells))
+            index = {cell: cell for cell in ids}
+            self.link_diagnostics = {
+                **self.navigation_metadata,
+                "nav_link_rows": self.nav_link_rows,
+                "link_source": "navigation_realization",
+                "vcmap_rebuilt": False,
+            }
+            return ids, index, self.navigation_vcmap
+        signature = self._topology_revision
         if self._vcmap_cache is not None and self._vcmap_cache[0] == signature:
             _, ids, index, vcmap, diagnostics = self._vcmap_cache
             self.link_diagnostics = dict(diagnostics, nav_link_rows=self.nav_link_rows,
@@ -271,8 +257,8 @@ class LiveBelief:
             ids.add(left)
             ids.add(right)
         if not ids:
-            self.cells[0] = np.zeros(2, dtype=np.float64)
-            ids = {0}
+            self.cells[(0, 0)] = np.zeros(2, dtype=np.float64)
+            ids = {(0, 0)}
         ids = sorted(ids)
         index = {cell: i for i, cell in enumerate(ids)}
         n = len(ids)
@@ -285,27 +271,11 @@ class LiveBelief:
             edge_lengths[(min(i, j), max(i, j))] = float(length)
         linked = len(edge_lengths)
         if not linked:
-            # No map graph yet. Until the engine's first kind-4 rows arrive, the
-            # transitions bots were seen making are the only navigability
-            # evidence there is, so they stand in for it -- with a 2-nearest-
-            # neighbour union so an isolated cell is not stranded at infinite
-            # graph distance. Once the map speaks, the map is the authority
-            # (SPEC 12: the stock navmesh owns "how do I get there"), and this
-            # whole branch stops being reached.
             for left, right in self.edges:
                 if left in index and right in index:
                     adjacency[index[left]].add(index[right])
                     adjacency[index[right]].add(index[left])
-        if not linked and n > 1:
-            # No map graph yet (pre-sweep ticks only). Nearest-neighbour fallback.
-            positions_knn = np.asarray(
-                [self.cells.get(cell, np.zeros(2)) for cell in ids], dtype=np.float64)
-            d2 = np.sum((positions_knn[:, None] - positions_knn[None, :]) ** 2, axis=-1)
-            for i in range(n):
-                for j in np.argsort(d2[i], kind="stable")[1:min(n, 3)]:
-                    adjacency[i].add(int(j))
-                    adjacency[int(j)].add(i)
-        positions = self._node_positions(ids, index, adjacency)
+        positions = self._node_positions(ids, index)
         vcmap = segment_vcells(positions, adjacency=[sorted(a) for a in adjacency],
                                band=BELIEF_BAND, edge_lengths=edge_lengths)
         self.link_diagnostics = {
@@ -313,127 +283,86 @@ class LiveBelief:
             "nav_link_rows": self.nav_link_rows,
             "link_edges_used": linked,
             "observed_edges": len(self.edges),
-            "link_source": "waypoint_links" if linked else "observed+knn_fallback",
+            "link_source": "waypoint_links" if linked else "observed_player_transitions",
             "cells_from_links_only": int(sum(cell not in self.cells for cell in ids)),
             "vcmap_rebuilt": True,
         }
         self._vcmap_cache = (signature, ids, index, vcmap, dict(self.link_diagnostics))
         return ids, index, vcmap
 
-    def _node_positions(self, ids, index, adjacency):
-        """World positions for the V-cell nodes, propagated to link-only cells.
-
-        A cell id is the engine's ``(floor(x/256)*131 + floor(y/256)) & 1023``
-        hash, which is not invertible, so a cell that only ever appeared as a
-        waypoint-link endpoint has no observed position. Those get the mean of
-        their navigable neighbours' positions, propagated breadth-first from the
-        observed set (and the global mean for a component that contains no
-        observed cell). This is used ONLY for centroids and for the fallback
-        edge weight of an observed transition; every waypoint edge's weight is
-        the engine's own link length, so the graph distance the horizon is set
-        against never depends on a propagated position.
-        """
+    def _node_positions(self, ids, index):
         positions = np.zeros((len(ids), 2), dtype=np.float64)
-        known = np.zeros(len(ids), dtype=bool)
         for cell, i in index.items():
-            observed = self.cells.get(cell)
-            if observed is not None:
-                positions[i] = observed
-                known[i] = True
-        if not known.any():
-            return positions
-        frontier = [i for i in range(len(ids)) if known[i]]
-        while frontier:
-            nxt = []
-            for i in frontier:
-                for j in adjacency[i]:
-                    if not known[j] and j not in nxt:
-                        nxt.append(j)
-            if not nxt:
-                break
-            for j in nxt:
-                anchors = [positions[i] for i in adjacency[j] if known[i]]
-                positions[j] = np.mean(anchors, axis=0) if anchors else positions[known].mean(0)
-            for j in nxt:
-                known[j] = True
-            frontier = nxt
-        if not known.all():
-            positions[~known] = positions[known].mean(0)
+            positions[i] = (np.asarray(cell, dtype=np.float64) + 0.5) * CELL_EXTENT
         return positions
 
     def _slot_rows(self, team, index, vcmap):
-        """Fold this TEAM's observation buffer into stage-2/3 observation rows.
-
-        One row per observed V-cell, carrying the merged ``SLOT_FIELDS`` vector
-        and the latest timestamp seen in that cell.  This is ingest only -- the
-        forgetting (stage 3), the mask (stage 4) and the integration (stage 5)
-        are the canonical :mod:`featurize` functions, called by :meth:`beliefs`.
-        """
-        item_latest = {}
-        enemy_latest = {}
+        rows = []
         for event in self.buffer.events(team):
-            if event.kind.is_status:
-                item_latest[event.subject] = event
-            else:
-                enemy_latest[(event.subject, event.cell)] = event
-        slots = {}
-        stamps = {}
-
-        def _slot(cell):
-            if cell not in slots:
-                slots[cell] = np.zeros(SLOT_DIM, dtype=np.float64)
-                stamps[cell] = -np.inf
-            return slots[cell]
-
-        by_cell_items = {}
-        by_cell_enemies = {}
-        for event in item_latest.values():
-            by_cell_items.setdefault(int(event.cell), []).append(event)
-        for event in enemy_latest.values():
-            by_cell_enemies.setdefault(int(event.cell), []).append(event)
-        for cell, events in by_cell_items.items():
+            cell = int(event.cell) if np.isscalar(event.cell) else tuple(event.cell)
             if cell not in index:
                 continue
-            slot = _slot(cell)
-            phases = [max(0.0, float((event.payload or {}).get("value", 0.0)))
-                      for event in events if event.kind == EventKind.ITEM_DESPAWN]
-            slot[0] = float(np.mean([event.kind == EventKind.ITEM_SPAWN for event in events]))
-            slot[1] = max(phases, default=0.0) / (10.0 + max(phases, default=0.0))
-            slot[2] = 1.0
-            stamps[cell] = max(stamps[cell], max(float(event.t) for event in events))
-        for cell, events in by_cell_enemies.items():
-            if cell not in index:
-                continue
-            slot = _slot(cell)
-            threat = max(float((event.payload or {}).get("value", 0.0)) for event in events)
-            slot[2] = 1.0
-            slot[4] = float(np.tanh(max(0.0, threat) / 100.0))
-            slot[5] = 1.0 - float(np.exp(-len(events)))
-            stamps[cell] = max(stamps[cell], max(float(event.t) for event in events))
-        return [
-            {"cell": int(vcmap.node_cell[index[cell]]), "time": stamps[cell], "slot": slot}
-            for cell, slot in slots.items()
-        ]
+            payload = event.payload or {}
+            kind = int(payload.get("raw_kind", 0))
+            position = payload.get("position", (0.0, 0.0, 0.0))
+            slot = np.zeros(SLOT_DIM, dtype=np.float64)
+            if 0 <= kind < 4:
+                slot[kind] = 1.0
+            slot[4:7] = np.asarray(position, dtype=np.float64)
+            slot[7:11] = (
+                float(payload.get("respawn_time", 0.0)),
+                float(payload.get("health", 0.0)),
+                float(payload.get("link_length", 0.0)),
+                float(payload.get("amount", 0.0)),
+            )
+            rows.append({
+                "cell": int(vcmap.node_cell[index[cell]]),
+                "time": float(event.t), "slot": slot,
+            })
+        return rows
 
     def chorus(self, rows, columns, now=None):
-        """Produce (cell_slots, gigi) for the composer. NOT the belief itself.
+        players = self._update_cells(rows, columns)
+        ids, index, vcmap = self._vcmap()
+        stamp = self.now if now is None else float(now)
+        teams = sorted({int(record[1]) for record in players})
+        blocks = []
+        spans = {}
+        block_cells = {}
+        for team in teams:
+            observed, obs_time, seen, slot_cells = build_observation_slots(
+                self._slot_rows(team, index, vcmap), vcmap, stamp
+            )
+            begin = sum(len(block) for block in blocks)
+            blocks.append(temporal_contraction(
+                observed, obs_time, stamp, self.decay, UNINFORMATIVE_PRIOR, seen
+            ))
+            spans[team] = (begin, begin + len(observed))
+            block_cells[team] = slot_cells
+        cell_slots = np.concatenate(blocks, axis=0)
+        gigi = np.zeros((len(players), len(cell_slots)), dtype=np.float64)
+        for player, (_, team, cell, position) in enumerate(players):
+            node = index.get(cell)
+            fused = int(vcmap.node_cell[node]) if node is not None else vcmap.assign_cell(position)
+            begin, end = spans[team]
+            gigi[player, begin:end] = vcmap.spatial_mask(fused)[block_cells[team]]
+        self.last_diagnostics = dict(
+            receptive_report(vcmap), teams=len(teams), slots=len(cell_slots),
+            deposited_rows=self.deposited_rows,
+            nonfinite_rows=self.nonfinite_rows, zero_time_rows=self.zero_time_rows,
+            parse_error_rows=self.parse_error_rows,
+            **self.link_diagnostics,
+        )
+        return cell_slots, gigi
 
-        The integration is `gigi @ phil(wally, cell_slots)` in strategy.py, once.
-        This returns RHO-contracted slots and GIGI's bounded mask and stops there.
-        """
-        vcmap = self._vcmap()
-        slots, obs_time = build_cell_slots(rows, vcmap, self.now if now is None else now)
-        f_eff = temporal_contraction(slots, obs_time, self.now if now is None else now,
-                                     self.decay, UNINFORMATIVE_PRIOR)
-        gigi = np.stack([vcmap.spatial_mask(c) for c in self._player_cells(rows, columns)])
-        return f_eff, gigi
-
+    def diagnostics(self):
+        return dict(getattr(self, "last_diagnostics", {}))
 
     def instrument_targets(self, rows, columns):
         from .instruments import CellTarget, ItemTarget, RivalTarget
 
         player_team = {
-            int(round(row[columns["ID"]])): int(round(row[columns["TEAM"]]))
+            int(row[columns["ID"]]): int(row[columns["TEAM"]])
             for row in np.atleast_2d(rows)
         }
         item_events = {}
@@ -441,7 +370,7 @@ class LiveBelief:
         for observer_team in self.buffer.teams():
             for event in self.buffer.events(observer_team):
                 key = int(event.subject)
-                target = item_events if event.kind.is_status else rival_events
+                target = item_events if event.kind.is_item_presence else rival_events
                 previous = target.get((key, int(observer_team)))
                 if previous is None or event.t >= previous.t:
                     target[(key, int(observer_team))] = event
@@ -449,43 +378,33 @@ class LiveBelief:
         for subject in sorted({key[0] for key in item_events}):
             events = [event for (item, _), event in item_events.items() if item == subject]
             latest = max(events, key=lambda event: event.t)
-            position = self.cells.get(int(latest.cell), np.zeros(2))
-            respawn = max(0.0, float((latest.payload or {}).get("value", 0.0)))
+            position = (latest.payload or {}).get("position", (0.0, 0.0, 0.0))
+            respawn = float((latest.payload or {}).get("respawn_time", 0.0))
             items.append(ItemTarget(
-                subject, int(latest.cell), (float(position[0]), float(position[1]), 0.0),
-                float(latest.kind == EventKind.ITEM_SPAWN), 1.0,
-                respawn / (10.0 + respawn),
+                subject, self._actuator_cell(position), tuple(float(value) for value in position),
+                float(latest.kind == EventKind.ITEM_SPAWN), respawn, float(latest.t),
                 tuple(sorted({team for (item, team) in item_events if item == subject})),
             ))
         rivals = []
         for subject in sorted({key[0] for key in rival_events}):
             events = [event for (rival, _), event in rival_events.items() if rival == subject]
             latest = max(events, key=lambda event: event.t)
-            position = self.cells.get(int(latest.cell), np.zeros(2))
-            threat = max(float((event.payload or {}).get("value", 0.0)) for event in events)
-            age = max(0.0, self.now - float(latest.t))
+            position = (latest.payload or {}).get("position", (0.0, 0.0, 0.0))
+            health = float((latest.payload or {}).get("health", 0.0))
             rivals.append(RivalTarget(
-                subject, player_team.get(subject, 0), int(latest.cell),
-                (float(position[0]), float(position[1]), 0.0), threat, age,
-                1.0 - np.exp(-age / self.decay),
+                subject, player_team.get(subject, 0), self._actuator_cell(position),
+                tuple(float(value) for value in position), health, float(latest.t),
                 tuple(sorted({team for (rival, team) in rival_events if rival == subject})),
             ))
-        # A cell's connectivity is its degree in the NAVIGABLE graph (the
-        # engine's waypoint links) unioned with the transitions bots were
-        # actually seen making -- counted once per cell instead of rescanning
-        # every edge per cell, which was quadratic and is now over a graph with
-        # thousands of edges.
-        degree = {}
-        for pair in set(self.nav_links) | self.edges:
-            for endpoint in pair:
-                degree[int(endpoint)] = degree.get(int(endpoint), 0) + 1
-        cells = [
-            CellTarget(
-                int(cell), (float(position[0]), float(position[1]), 0.0),
-                1.0, 1.0 / (1.0 + degree.get(int(cell), 0)),
-                float(degree.get(int(cell), 0)),
-                tuple(sorted(self.cell_teams.get(int(cell), ()))),
-            )
-            for cell, position in sorted(self.cells.items())
-        ]
+
+        cells = []
+        for cell in sorted(self.cells):
+            position = np.asarray(self.cells[cell], dtype=np.float64)
+            spatial = tuple(position.tolist()) + ((0.0,) if len(position) == 2 else ())
+            cells.append(CellTarget(
+                self._actuator_cell(spatial), spatial,
+                float(self.cell_times.get(cell, 0.0)),
+                tuple(sorted(self.cell_teams.get(cell, ()))),
+                int(cell) if np.isscalar(cell) else -1,
+            ))
         return items, rivals, cells

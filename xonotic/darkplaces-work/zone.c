@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// Z_zone.c
 
 #include "quakedef.h"
 #include "thread.h"
@@ -40,12 +21,10 @@ unsigned int sentinel_seed;
 qboolean mem_bigendian = false;
 void *mem_mutex = NULL;
 
-// divVerent: enables file backed malloc using mmap to conserve swap space (instead of malloc)
 #ifndef FILE_BACKED_MALLOC
 # define FILE_BACKED_MALLOC 0
 #endif
 
-// LordHavoc: enables our own low-level allocator (instead of malloc)
 #ifndef MEMCLUMPING
 # define MEMCLUMPING 0
 #endif
@@ -54,34 +33,32 @@ void *mem_mutex = NULL;
 #endif
 
 #if MEMCLUMPING
-// smallest unit we care about is this many bytes
+
 #define MEMUNIT 128
-// try to do 32MB clumps, but overhead eats into this
+
 #ifndef MEMWANTCLUMPSIZE
 # define MEMWANTCLUMPSIZE (1<<27)
 #endif
-// give malloc padding so we can't waste most of a page at the end
+
 #define MEMCLUMPSIZE (MEMWANTCLUMPSIZE - MEMWANTCLUMPSIZE/MEMUNIT/32 - 128)
 #define MEMBITS (MEMCLUMPSIZE / MEMUNIT)
 #define MEMBITINTS (MEMBITS / 32)
 
 typedef struct memclump_s
 {
-	// contents of the clump
+
 	unsigned char block[MEMCLUMPSIZE];
-	// should always be MEMCLUMP_SENTINEL
+
 	unsigned int sentinel1;
-	// if a bit is on, it means that the MEMUNIT bytes it represents are
-	// allocated, otherwise free
+
 	unsigned int bits[MEMBITINTS];
-	// should always be MEMCLUMP_SENTINEL
+
 	unsigned int sentinel2;
-	// if this drops to 0, the clump is freed
+
 	size_t blocksinuse;
-	// largest block of memory available (this is reset to an optimistic
-	// number when anything is freed, and updated when alloc fails the clump)
+
 	size_t largestavailable;
-	// next clump in the chain
+
 	struct memclump_s *chain;
 }
 memclump_t;
@@ -91,7 +68,6 @@ static memclump_t masterclump;
 #endif
 static memclump_t *clumpchain = NULL;
 #endif
-
 
 cvar_t developer_memory = {0, "developer_memory", "0", "prints debugging information about memory allocations"};
 cvar_t developer_memorydebug = {0, "developer_memorydebug", "0", "enables memory corruption checks (very slow)"};
@@ -118,7 +94,7 @@ static void *mmap_malloc(size_t size)
 	char *tmpdir = getenv("TEMP");
 	mmap_data_t *data;
 	int fd;
-	size += sizeof(mmap_data_t); // waste block
+	size += sizeof(mmap_data_t);
 	dpsnprintf(vabuf, sizeof(vabuf), "%s/darkplaces.XXXXXX", tmpdir ? tmpdir : "/tmp");
 	fd = mkstemp(vabuf);
 	if(fd < 0)
@@ -145,12 +121,11 @@ static void mmap_free(void *mem)
 #endif
 
 #if MEMCLUMPING != 2
-// some platforms have a malloc that returns NULL but succeeds later
-// (Windows growing its swapfile for example)
+
 static void *attempt_malloc(size_t size)
 {
 	void *base;
-	// try for half a second or so
+
 	unsigned int attempts = 500;
 	while (attempts--)
 	{
@@ -178,7 +153,6 @@ static memclump_t *Clump_NewClump(void)
 		return NULL;
 #endif
 
-	// initialize clump
 	if (developer_memorydebug.integer)
 		memset(clump, 0xEF, sizeof(*clump));
 	clump->sentinel1 = MEMHEADER_SENTINEL_FOR_ADDRESS(&clump->sentinel1);
@@ -188,7 +162,6 @@ static memclump_t *Clump_NewClump(void)
 	clump->largestavailable = 0;
 	clump->chain = NULL;
 
-	// link clump into chain
 	for (clumpchainpointer = &clumpchain;*clumpchainpointer;clumpchainpointer = &(*clumpchainpointer)->chain)
 		;
 	*clumpchainpointer = clump;
@@ -197,7 +170,6 @@ static memclump_t *Clump_NewClump(void)
 }
 #endif
 
-// low level clumping functions, all other memory functions use these
 static void *Clump_AllocBlock(size_t size)
 {
 	unsigned char *base;
@@ -235,11 +207,10 @@ static void *Clump_AllocBlock(size_t size)
 			startbit = 0;
 			endbit = startbit + needbits;
 			array = clump->bits;
-			// do as fast a search as possible, even if it means crude alignment
+
 			if (needbits >= 32)
 			{
-				// large allocations are aligned to large boundaries
-				// furthermore, they are allocated downward from the top...
+
 				endindex = MEMBITINTS;
 				startindex = endindex - needints;
 				index = endindex;
@@ -258,8 +229,7 @@ static void *Clump_AllocBlock(size_t size)
 			}
 			else
 			{
-				// search for a multi-bit gap in a single int
-				// (not dealing with the cases that cross two ints)
+
 				mask = (1<<needbits)-1;
 				endbit = 32-needbits;
 				bit = endbit;
@@ -268,7 +238,7 @@ static void *Clump_AllocBlock(size_t size)
 					value = array[index];
 					if (value != 0xFFFFFFFFu)
 					{
-						// there may be room in this one...
+
 						for (bit = 0;bit < endbit;bit++)
 						{
 							if (!(value & (mask<<bit)))
@@ -283,8 +253,7 @@ static void *Clump_AllocBlock(size_t size)
 			}
 foundblock:
 			endbit = startbit + needbits;
-			// mark this range as used
-			// TODO: optimize
+
 			for (bit = startbit;bit < endbit;bit++)
 				if (clump->bits[bit>>5] & (1<<(bit & 31)))
 					Sys_Error("Clump_AllocBlock: internal error (%i needbits)\n", needbits);
@@ -298,10 +267,10 @@ foundblock:
 nofreeblock:
 			;
 		}
-		// never reached
+
 		return NULL;
 	}
-	// too big, allocate it directly
+
 #endif
 #if MEMCLUMPING == 2
 	return NULL;
@@ -332,11 +301,11 @@ static void Clump_FreeBlock(void *base, size_t size)
 				Sys_Error("Clump_FreeBlock: trashed sentinel2\n");
 			if (start + size > clump->block + MEMCLUMPSIZE)
 				Sys_Error("Clump_FreeBlock: block overrun\n");
-			// the block belongs to this clump, clear the range
+
 			needbits = (size + MEMUNIT - 1) / MEMUNIT;
 			startbit = (start - clump->block) / MEMUNIT;
 			endbit = startbit + needbits;
-			// first verify all bits are set, otherwise this may be misaligned or a double free
+
 			for (bit = startbit;bit < endbit;bit++)
 				if ((clump->bits[bit>>5] & (1<<(bit & 31))) == 0)
 					Sys_Error("Clump_FreeBlock: double free\n");
@@ -344,7 +313,7 @@ static void Clump_FreeBlock(void *base, size_t size)
 				clump->bits[bit>>5] &= ~(1<<(bit & 31));
 			clump->blocksinuse -= needbits;
 			memset(base, 0xFF, needbits * MEMUNIT);
-			// if all has been freed, free the clump itself
+
 			if (clump->blocksinuse == 0)
 			{
 				*clumpchainpointer = clump->chain;
@@ -357,7 +326,7 @@ static void Clump_FreeBlock(void *base, size_t size)
 			return;
 		}
 	}
-	// does not belong to any known chunk...  assume it was a direct allocation
+
 #endif
 #if MEMCLUMPING != 2
 	memset(base, 0xFF, size);
@@ -393,8 +362,7 @@ void *_Mem_Alloc(mempool_t *pool, void *olddata, size_t size, size_t alignment, 
 		Thread_LockMutex(mem_mutex);
 	if (developer_memory.integer || size >= developer_memoryreportlargerthanmb.value * 1048576)
 		Con_DPrintf("Mem_Alloc: pool %s, file %s:%i, size %f bytes (%f MB)\n", pool->name, filename, fileline, (double)size, (double)size / 1048576.0f);
-	//if (developer.integer > 0 && developer_memorydebug.integer)
-	//	_Mem_CheckSentinelsGlobal(filename, fileline);
+
 	pool->totalsize += size;
 	realsize = alignment + sizeof(memheader_t) + size + sizeof(sentinel2);
 	pool->realsize += realsize;
@@ -407,7 +375,7 @@ void *_Mem_Alloc(mempool_t *pool, void *olddata, size_t size, size_t alignment, 
 		Mem_PrintStats();
 		Sys_Error("Mem_Alloc: out of memory (alloc of size %f (%.3fMB) at %s:%i)", (double)realsize, (double)realsize / (1 << 20), filename, fileline);
 	}
-	// calculate address that aligns the end of the memheader_t to the specified alignment
+
 	mem = (memheader_t*)((((size_t)base + sizeof(memheader_t) + (alignment-1)) & ~(alignment-1)) - sizeof(memheader_t));
 	mem->baseaddress = (void*)base;
 	mem->filename = filename;
@@ -415,13 +383,11 @@ void *_Mem_Alloc(mempool_t *pool, void *olddata, size_t size, size_t alignment, 
 	mem->size = size;
 	mem->pool = pool;
 
-	// calculate sentinels (detects buffer overruns, in a way that is hard to exploit)
 	sentinel1 = MEMHEADER_SENTINEL_FOR_ADDRESS(&mem->sentinel);
 	sentinel2 = MEMHEADER_SENTINEL_FOR_ADDRESS((unsigned char *) mem + sizeof(memheader_t) + mem->size);
 	mem->sentinel = sentinel1;
 	memcpy((unsigned char *) mem + sizeof(memheader_t) + mem->size, &sentinel2, sizeof(sentinel2));
 
-	// append to head of list
 	mem->next = pool->chain;
 	mem->prev = NULL;
 	pool->chain = mem;
@@ -431,7 +397,6 @@ void *_Mem_Alloc(mempool_t *pool, void *olddata, size_t size, size_t alignment, 
 	if (mem_mutex)
 		Thread_UnlockMutex(mem_mutex);
 
-	// copy the shared portion in the case of a realloc, then memset the rest
 	sharedsize = 0;
 	remainsize = size;
 	if (olddata)
@@ -446,7 +411,6 @@ void *_Mem_Alloc(mempool_t *pool, void *olddata, size_t size, size_t alignment, 
 	return (void *)((unsigned char *) mem + sizeof(memheader_t));
 }
 
-// only used by _Mem_Free and _Mem_FreePool
 static void _Mem_FreeBlock(memheader_t *mem, const char *filename, int fileline)
 {
 	mempool_t *pool;
@@ -455,7 +419,6 @@ static void _Mem_FreeBlock(memheader_t *mem, const char *filename, int fileline)
 	unsigned int sentinel1;
 	unsigned int sentinel2;
 
-	// check sentinels (detects buffer overruns, in a way that is hard to exploit)
 	sentinel1 = MEMHEADER_SENTINEL_FOR_ADDRESS(&mem->sentinel);
 	sentinel2 = MEMHEADER_SENTINEL_FOR_ADDRESS((unsigned char *) mem + sizeof(memheader_t) + mem->size);
 	if (mem->sentinel != sentinel1)
@@ -466,7 +429,7 @@ static void _Mem_FreeBlock(memheader_t *mem, const char *filename, int fileline)
 	pool = mem->pool;
 	if (developer_memory.integer)
 		Con_DPrintf("Mem_Free: pool %s, alloc %s:%i, free %s:%i, size %i bytes\n", pool->name, mem->filename, mem->fileline, filename, fileline, (int)(mem->size));
-	// unlink memheader from doubly linked list
+
 	if ((mem->prev ? mem->prev->next != mem : pool->chain != mem) || (mem->next && mem->next->prev != mem))
 		Sys_Error("Mem_Free: not allocated or double freed (free at %s:%i)", filename, fileline);
 	if (mem_mutex)
@@ -477,7 +440,7 @@ static void _Mem_FreeBlock(memheader_t *mem, const char *filename, int fileline)
 		pool->chain = mem->next;
 	if (mem->next)
 		mem->next->prev = mem->prev;
-	// memheader has been unlinked, do the actual free now
+
 	size = mem->size;
 	realsize = sizeof(memheader_t) + size + sizeof(sentinel2);
 	pool->totalsize -= size;
@@ -497,7 +460,7 @@ void _Mem_Free(void *data, const char *filename, int fileline)
 
 	if (developer_memorydebug.integer)
 	{
-		//_Mem_CheckSentinelsGlobal(filename, fileline);
+
 		if (!Mem_IsAllocated(NULL, data))
 			Sys_Error("Mem_Free: data is not allocated (called at %s:%i)", filename, fileline);
 	}
@@ -544,7 +507,7 @@ void _Mem_FreePool(mempool_t **poolpointer, const char *filename, int fileline)
 		_Mem_CheckSentinelsGlobal(filename, fileline);
 	if (pool)
 	{
-		// unlink pool from chain
+
 		for (chainaddress = &poolchain;*chainaddress && *chainaddress != pool;chainaddress = &((*chainaddress)->next));
 		if (*chainaddress != pool)
 			Sys_Error("Mem_FreePool: pool already free (freepool at %s:%i)", filename, fileline);
@@ -554,18 +517,15 @@ void _Mem_FreePool(mempool_t **poolpointer, const char *filename, int fileline)
 			Sys_Error("Mem_FreePool: trashed pool sentinel 2 (allocpool at %s:%i, freepool at %s:%i)", pool->filename, pool->fileline, filename, fileline);
 		*chainaddress = pool->next;
 
-		// free memory owned by the pool
 		while (pool->chain)
 			_Mem_FreeBlock(pool->chain, filename, fileline);
 
-		// free child pools, too
 		for(iter = poolchain; iter; iter = temp) {
 			temp = iter->next;
 			if(iter->parent == pool)
 				_Mem_FreePool(&temp, filename, fileline);
 		}
 
-		// free the pool itself
 		Clump_FreeBlock(pool, sizeof(*pool));
 
 		*poolpointer = NULL;
@@ -578,8 +538,7 @@ void _Mem_EmptyPool(mempool_t *pool, const char *filename, int fileline)
 
 	if (developer_memorydebug.integer)
 	{
-		//_Mem_CheckSentinelsGlobal(filename, fileline);
-		// check if this pool is in the poolchain
+
 		for (chainaddress = poolchain;chainaddress;chainaddress = chainaddress->next)
 			if (chainaddress == pool)
 				break;
@@ -593,11 +552,9 @@ void _Mem_EmptyPool(mempool_t *pool, const char *filename, int fileline)
 	if (pool->sentinel2 != MEMHEADER_SENTINEL_FOR_ADDRESS(&pool->sentinel2))
 		Sys_Error("Mem_EmptyPool: trashed pool sentinel 2 (allocpool at %s:%i, emptypool at %s:%i)", pool->filename, pool->fileline, filename, fileline);
 
-	// free memory owned by the pool
 	while (pool->chain)
 		_Mem_FreeBlock(pool->chain, filename, fileline);
 
-	// empty child pools, too
 	for(chainaddress = poolchain; chainaddress; chainaddress = chainaddress->next)
 		if(chainaddress->parent == pool)
 			_Mem_EmptyPool(chainaddress, filename, fileline);
@@ -625,7 +582,7 @@ void _Mem_CheckSentinels(void *data, const char *filename, int fileline)
 #if MEMCLUMPING
 static void _Mem_CheckClumpSentinels(memclump_t *clump, const char *filename, int fileline)
 {
-	// this isn't really very useful
+
 	if (clump->sentinel1 != MEMHEADER_SENTINEL_FOR_ADDRESS(&clump->sentinel1))
 		Sys_Error("Mem_CheckClumpSentinels: trashed sentinel 1 (sentinel check at %s:%i)", filename, fileline);
 	if (clump->sentinel2 != MEMHEADER_SENTINEL_FOR_ADDRESS(&clump->sentinel2))
@@ -664,7 +621,7 @@ qboolean Mem_IsAllocated(mempool_t *pool, void *data)
 
 	if (pool)
 	{
-		// search only one pool
+
 		target = (memheader_t *)((unsigned char *) data - sizeof(memheader_t));
 		for( header = pool->chain ; header ; header = header->next )
 			if( header == target )
@@ -672,7 +629,7 @@ qboolean Mem_IsAllocated(mempool_t *pool, void *data)
 	}
 	else
 	{
-		// search all pools
+
 		for (pool = poolchain;pool;pool = pool->next)
 			if (Mem_IsAllocated(pool, data))
 				return true;
@@ -739,16 +696,7 @@ void *Mem_ExpandableArray_AllocRecord(memexpandablearray_t *l)
 	}
 }
 
-/*****************************************************************************
- * IF YOU EDIT THIS:
- * If this function was to change the size of the "expandable" array, you have
- * to update r_shadow.c
- * Just do a search for "range =", R_ShadowClearWorldLights would be the first
- * function to look at. (And also seems like the only one?) You  might have to
- * move the  call to Mem_ExpandableArray_IndexRange  back into for(...) loop's
- * condition
- */
-void Mem_ExpandableArray_FreeRecord(memexpandablearray_t *l, void *record) // const!
+void Mem_ExpandableArray_FreeRecord(memexpandablearray_t *l, void *record)
 {
 	size_t i, j;
 	unsigned char *p = (unsigned char *)record;
@@ -795,12 +743,8 @@ void *Mem_ExpandableArray_RecordAtIndex(const memexpandablearray_t *l, size_t in
 	return (void *)(l->arrays[i].data + j * l->recordsize);
 }
 
-
-// used for temporary memory allocations around the engine, not for longterm
-// storage, if anything in this pool stays allocated during gameplay, it is
-// considered a leak
 mempool_t *tempmempool;
-// only for zone
+
 mempool_t *zonemempool;
 
 void Mem_PrintStats(void)
@@ -871,7 +815,6 @@ static void MemStats_f(void)
 	Mem_PrintStats();
 }
 
-
 char* Mem_strdup (mempool_t *pool, const char* s)
 {
 	char* p;
@@ -884,11 +827,6 @@ char* Mem_strdup (mempool_t *pool, const char* s)
 	return p;
 }
 
-/*
-========================
-Memory_Init
-========================
-*/
 void Memory_Init (void)
 {
 	static union {unsigned short s;unsigned char b[2];} u;
@@ -906,8 +844,6 @@ void Memory_Init (void)
 
 void Memory_Shutdown (void)
 {
-//	Mem_FreePool (&zonemempool);
-//	Mem_FreePool (&tempmempool);
 
 	if (mem_mutex)
 		Thread_DestroyMutex(mem_mutex);
@@ -928,9 +864,9 @@ void Memory_Init_Commands (void)
 #ifdef _WIN64
 	{
 		MEMORYSTATUSEX status;
-		// first guess
+
 		Cvar_SetValueQuick(&sys_memsize_virtual, 8388608);
-		// then improve
+
 		status.dwLength = sizeof(status);
 		if(GlobalMemoryStatusEx(&status))
 		{
@@ -941,9 +877,9 @@ void Memory_Init_Commands (void)
 #else
 	{
 		MEMORYSTATUS status;
-		// first guess
+
 		Cvar_SetValueQuick(&sys_memsize_virtual, 2048);
-		// then improve
+
 		status.dwLength = sizeof(status);
 		GlobalMemoryStatus(&status);
 		Cvar_SetValueQuick(&sys_memsize_physical, status.dwTotalPhys / 1048576.0);
@@ -952,11 +888,11 @@ void Memory_Init_Commands (void)
 #endif
 #else
 	{
-		// first guess
+
 		Cvar_SetValueQuick(&sys_memsize_virtual, (sizeof(void*) == 4) ? 2048 : 268435456);
-		// then improve
+
 		{
-			// Linux, and BSD with linprocfs mounted
+
 			FILE *f = fopen("/proc/meminfo", "r");
 			if(f)
 			{
@@ -985,4 +921,3 @@ void Memory_Init_Commands (void)
 	}
 #endif
 }
-

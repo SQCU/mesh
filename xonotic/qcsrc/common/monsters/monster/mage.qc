@@ -136,7 +136,6 @@ void M_Mage_Attack_Spike_Touch(entity this, entity toucher)
 
 .float wait;
 
-// copied from W_Seeker_Think
 void M_Mage_Attack_Spike_Think(entity this)
 {
 	if (time > this.ltime || (this.enemy && GetResource(this.enemy, RES_HEALTH) <= 0) || !this.owner || GetResource(this.owner, RES_HEALTH) <= 0) {
@@ -159,34 +158,28 @@ void M_Mage_Attack_Spike_Think(entity this)
 	{
 		entity e = this.enemy;
 		vector eorg = 0.5 * (e.absmin + e.absmax);
-		float turnrate = (autocvar_g_monster_mage_attack_spike_turnrate); // how fast to turn
+		float turnrate = (autocvar_g_monster_mage_attack_spike_turnrate);
 		vector desireddir = normalize(eorg - this.origin);
-		vector olddir = normalize(this.velocity); // get my current direction
+		vector olddir = normalize(this.velocity);
 
-		// Do evasive maneuvers for world objects? ( this should be a cpu hog. :P )
 		if ((autocvar_g_monster_mage_attack_spike_smart) && vdist(eorg - this.origin, >, autocvar_g_monster_mage_attack_spike_smart_mindist))
 		{
-			// Is it a better idea (shorter distance) to trace to the target itself?
+
 			if ( vlen2(this.origin + olddir * this.wait) < vlen2(eorg - this.origin))
 				traceline(this.origin, this.origin + olddir * this.wait, false, this);
 			else
 				traceline(this.origin, eorg, false, this);
 
-			// Setup adaptive tracelength
 			this.wait = bound((autocvar_g_monster_mage_attack_spike_smart_trace_min), vlen(this.origin - trace_endpos), this.wait = (autocvar_g_monster_mage_attack_spike_smart_trace_max));
 
-			// Calc how important it is that we turn and add this to the desierd (enemy) dir.
 			desireddir = normalize(((trace_plane_normal * (1 - trace_fraction)) + (desireddir * trace_fraction)) * 0.5);
 		}
 
-		vector newdir = normalize(olddir + desireddir * turnrate); // take the average of the 2 directions; not the best method but simple & easy
-		this.velocity = newdir * spd; // make me fly in the new direction at my flight speed
+		vector newdir = normalize(olddir + desireddir * turnrate);
+		this.velocity = newdir * spd;
 	}
 
-	///////////////
-
-	//this.angles = vectoangles(this.velocity);			// turn model in the new flight direction
-	this.nextthink = time;// + 0.05; // csqc projectiles
+	this.nextthink = time;
 	UpdateCSQCProjectile(this);
 }
 
@@ -241,7 +234,7 @@ void M_Mage_Defend_Heal(entity this)
 					if(GetResource(it, RES_ROCKETS)) GiveResourceWithLimit(it, RES_ROCKETS, 1, g_pickup_rockets_max);
 					if(GetResource(it, RES_SHELLS)) GiveResourceWithLimit(it, RES_SHELLS, 2, g_pickup_shells_max);
 					if(GetResource(it, RES_BULLETS)) GiveResourceWithLimit(it, RES_BULLETS, 5, g_pickup_nails_max);
-					// TODO: fuel?
+
 					fx = EFFECT_AMMO_REGEN;
 					break;
 				}
@@ -284,7 +277,7 @@ void M_Mage_Attack_Push(entity this)
 	setanim(this, this.anim_duckjump, true, true, true);
 	this.attack_finished_single[0] = time + (autocvar_g_monster_mage_attack_push_delay);
 	this.anim_finished = time + 1;
-	this.state = MONSTER_ATTACK_MELEE; // prevent moving while firing spike
+	this.state = MONSTER_ATTACK_MELEE;
 }
 
 void M_Mage_Attack_Teleport(entity this, entity targ)
@@ -297,7 +290,7 @@ void M_Mage_Attack_Teleport(entity this, entity targ)
 		vector oldpos = this.origin;
 		vector extrasize = '1 1 1' * autocvar_g_monster_mage_attack_teleport_random_range;
 		if(MoveToRandomLocationWithinBounds(this, this.absmin - extrasize, this.absmax + extrasize,
-											DPCONTENTS_SOLID | DPCONTENTS_CORPSE | DPCONTENTS_PLAYERCLIP, DPCONTENTS_SLIME | DPCONTENTS_LAVA | DPCONTENTS_SKY | DPCONTENTS_BODY | DPCONTENTS_DONOTENTER, 
+											DPCONTENTS_SOLID | DPCONTENTS_CORPSE | DPCONTENTS_PLAYERCLIP, DPCONTENTS_SLIME | DPCONTENTS_LAVA | DPCONTENTS_SKY | DPCONTENTS_BODY | DPCONTENTS_DONOTENTER,
 											Q3SURFACEFLAG_SKY, 10, 64, 256, true))
 		{
 			vector a = vectoangles(targ.origin - this.origin);
@@ -341,7 +334,7 @@ void M_Mage_Defend_Shield(entity this)
 	this.mage_shield_delay = time + (autocvar_g_monster_mage_shield_delay);
 	SetResourceExplicit(this, RES_ARMOR, autocvar_g_monster_mage_shield_blockpercent);
 	setanim(this, this.anim_shoot, true, true, true);
-	this.attack_finished_single[0] = time + 1; // give just a short cooldown on attacking
+	this.attack_finished_single[0] = time + 1;
 	this.anim_finished = time + 1;
 }
 
@@ -375,7 +368,7 @@ bool M_Mage_Attack(int attack_type, entity actor, entity targ, .entity weaponent
 				setanim(actor, actor.anim_shoot, true, true, true);
 				actor.attack_finished_single[0] = time + (autocvar_g_monster_mage_attack_spike_delay);
 				actor.anim_finished = time + 1;
-				actor.state = MONSTER_ATTACK_MELEE; // prevent moving while firing spike
+				actor.state = MONSTER_ATTACK_MELEE;
 				Weapon wep = WEP_MAGE_SPIKE;
 				wep.wr_think(wep, actor, weaponentity, 1);
 				return true;
@@ -390,7 +383,7 @@ bool M_Mage_Attack(int attack_type, entity actor, entity targ, .entity weaponent
 
 spawnfunc(monster_mage) { Monster_Spawn(this, true, MON_MAGE); }
 
-#endif // SVQC
+#endif
 
 #ifdef SVQC
 METHOD(Mage, mr_think, bool(Mage thismon, entity actor))
@@ -455,19 +448,16 @@ METHOD(Mage, mr_anim, bool(Mage this, entity actor))
     actor.anim_idle = animfixfps(actor, '0 1 1', none);
     actor.anim_walk = animfixfps(actor, '1 1 1', none);
     actor.anim_run = animfixfps(actor, '1 1 1', none);
-    actor.anim_shoot = animfixfps(actor, '2 1 5', none); // analyze models and set framerate
-    actor.anim_duckjump = animfixfps(actor, '4 1 5', none); // analyze models and set framerate
-    actor.anim_melee = animfixfps(actor, '5 1 5', none); // analyze models and set framerate
-    //actor.anim_fire1 = animfixfps(actor, '3 1 5', none); // analyze models and set framerate
-    //actor.anim_fire2 = animfixfps(actor, '4 1 5', none); // analyze models and set framerate
-    //actor.anim_fire3 = animfixfps(actor, '5 1 5', none); // analyze models and set framerate
-    actor.anim_pain1 = animfixfps(actor, '6 1 2', none); // 0.5 seconds
-    actor.anim_pain2 = animfixfps(actor, '7 1 2', none); // 0.5 seconds
-    //actor.anim_pain3 = animfixfps(actor, '8 1 2', none); // 0.5 seconds
-    actor.anim_die1 = animfixfps(actor, '9 1 0.5', none); // 2 seconds
-    actor.anim_die2 = animfixfps(actor, '10 1 0.5', none); // 2 seconds
-    //actor.anim_dead1 = animfixfps(actor, '11 1 0.5', none); // 2 seconds
-    //actor.anim_dead2 = animfixfps(actor, '12 1 0.5', none); // 2 seconds
+    actor.anim_shoot = animfixfps(actor, '2 1 5', none);
+    actor.anim_duckjump = animfixfps(actor, '4 1 5', none);
+    actor.anim_melee = animfixfps(actor, '5 1 5', none);
+
+    actor.anim_pain1 = animfixfps(actor, '6 1 2', none);
+    actor.anim_pain2 = animfixfps(actor, '7 1 2', none);
+
+    actor.anim_die1 = animfixfps(actor, '9 1 0.5', none);
+    actor.anim_die2 = animfixfps(actor, '10 1 0.5', none);
+
     return true;
 }
 #endif

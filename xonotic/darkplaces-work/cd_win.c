@@ -1,24 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// Quake is a trademark of Id Software, Inc., (c) 1996 Id Software, Inc. All
-// rights reserved.
 
 #include "quakedef.h"
 #include <windows.h>
@@ -41,7 +21,6 @@ void CDAudio_SysEject(void)
 	if ((dwReturn = mciSendCommand(wDeviceID, MCI_SET, MCI_SET_DOOR_OPEN, (DWORD_PTR)NULL)))
 		Con_Printf("MCI_SET_DOOR_OPEN failed (%x)\n", (unsigned)dwReturn);
 }
-
 
 void CDAudio_SysCloseDoor(void)
 {
@@ -85,19 +64,16 @@ int CDAudio_SysGetAudioDiskInfo(void)
 	return mciStatusParms.dwReturn;
 }
 
-
 float CDAudio_SysGetVolume (void)
 {
-	// IMPLEMENTME
+
 	return -1.0f;
 }
 
-
 void CDAudio_SysSetVolume (float fvolume)
 {
-	// IMPLEMENTME
-}
 
+}
 
 int CDAudio_SysPlay (int track)
 {
@@ -105,7 +81,6 @@ int CDAudio_SysPlay (int track)
 	MCI_PLAY_PARMS		mciPlayParms;
 	MCI_STATUS_PARMS	mciStatusParms;
 
-	// don't try to play a non-audio track
 	mciStatusParms.dwItem = MCI_CDA_STATUS_TYPE_TRACK;
 	mciStatusParms.dwTrack = track;
 	dwReturn = mciSendCommand(wDeviceID, MCI_STATUS, MCI_STATUS_ITEM | MCI_TRACK | MCI_WAIT, (DWORD_PTR) (LPVOID) &mciStatusParms);
@@ -123,7 +98,6 @@ int CDAudio_SysPlay (int track)
 	if (cdPlaying)
 		CDAudio_Stop();
 
-	// get the length of the track to be played
 	mciStatusParms.dwItem = MCI_STATUS_LENGTH;
 	mciStatusParms.dwTrack = track;
 	dwReturn = mciSendCommand(wDeviceID, MCI_STATUS, MCI_STATUS_ITEM | MCI_TRACK | MCI_WAIT, (DWORD_PTR) (LPVOID) &mciStatusParms);
@@ -145,7 +119,6 @@ int CDAudio_SysPlay (int track)
 
 	return 0;
 }
-
 
 int CDAudio_SysStop (void)
 {
@@ -172,7 +145,6 @@ int CDAudio_SysPause (void)
 	}
 	return 0;
 }
-
 
 int CDAudio_SysResume (void)
 {
@@ -225,7 +197,6 @@ LONG CDAudio_MessageHandler (HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
-
 int CDAudio_SysUpdate (void)
 {
 	return 0;
@@ -249,7 +220,6 @@ int CDAudio_SysStartup (void)
 	}
 	wDeviceID = mciOpenParms.wDeviceID;
 
-	// Set the time format to track/minute/second/frame (TMSF).
 	mciSetParms.dwTimeFormat = MCI_FORMAT_TMSF;
 	if ((dwReturn = mciSendCommand(wDeviceID, MCI_SET, MCI_SET_TIME_FORMAT, (DWORD_PTR)(LPVOID) &mciSetParms)))
 	{

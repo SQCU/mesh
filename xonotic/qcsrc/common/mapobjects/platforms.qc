@@ -11,7 +11,6 @@ void generic_plat_blocked(entity this, entity blocker)
 			this.dmgtime2 = time + this.dmgtime;
 		}
 
-		// Gib dead/dying stuff
 		if(IS_DEAD(blocker))
 			Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 	}
@@ -53,7 +52,6 @@ void plat_spawn_inside_trigger(entity this)
 				return;
 			}
 
-	// otherwise, something is fishy...
 	delete(trigger);
 	objerror(this, "plat_spawn_inside_trigger: platform has odd size or lip, can't spawn");
 }
@@ -130,15 +128,14 @@ void plat_outside_touch(entity this, entity toucher)
 void plat_trigger_use(entity this, entity actor, entity trigger)
 {
 	if (getthink(this))
-		return;		// already activated
+		return;
 	plat_go_down(this);
 }
-
 
 void plat_crush(entity this, entity blocker)
 {
 	if((this.spawnflags & CRUSH) && (blocker.takedamage != DAMAGE_NO))
-	{ // KIll Kill Kill!!
+	{
 #ifdef SVQC
 		Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 #endif
@@ -147,9 +144,9 @@ void plat_crush(entity this, entity blocker)
 	{
 #ifdef SVQC
 		if((this.dmg) && (blocker.takedamage != DAMAGE_NO))
-		{   // Shall we bite?
+		{
 			Damage (blocker, this, this, this.dmg, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
-			// Gib dead/dying stuff
+
 			if(IS_DEAD(blocker))
 				Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 		}
@@ -159,9 +156,7 @@ void plat_crush(entity this, entity blocker)
 			plat_go_down (this);
 		else if (this.state == STATE_DOWN)
 			plat_go_up (this);
-	// when in other states, then the plat_crush event came delayed after
-	// plat state already had changed
-	// this isn't a bug per se!
+
 	}
 }
 
@@ -173,8 +168,6 @@ void plat_use(entity this, entity actor, entity trigger)
 	plat_go_down(this);
 }
 
-// WARNING: backwards compatibility because people don't use already existing fields :(
-// TODO: Check if any maps use these fields and remove these fields if it doesn't break maps
 .string sound1, sound2;
 
 void plat_reset(entity this)
@@ -200,7 +193,6 @@ void plat_reset(entity this)
 .float platmovetype_start_default, platmovetype_end_default;
 bool set_platmovetype(entity e, string s)
 {
-	// sets platmovetype_start and platmovetype_end based on a string consisting of two values
 
 	int n = tokenize_console(s);
 	if(n > 0)
@@ -215,7 +207,7 @@ bool set_platmovetype(entity e, string s)
 
 	if(n > 2)
 		if(argv(2) == "force")
-			return true; // no checking, return immediately
+			return true;
 
 	if(!cubic_speedfunc_is_sane(e.platmovetype_start, e.platmovetype_end))
 	{

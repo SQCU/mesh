@@ -135,6 +135,19 @@ trips — 89 KB of wire each — to re-derive a signal the pool already carries.
 or transform work and checks again. Non-blocking is achievable here because the only
 shared state is a queue you inspect, never a permission you await.
 
+**A completion queue reserves one ACK slot per send.** The application ACK ring
+returns ownership of arena pages; it is not a second network protocol. An earlier bridge
+drained submissions whenever the QP had room and pushed completions without reserving an ACK
+slot. A sustained application could therefore fill the ACK ring, lose later completion
+descriptors, and leave successfully transmitted pages permanently marked in flight. The
+reservation preserves `ack_depth + outstanding_sends < ring_capacity`. The hardware QP remains 4,095
+entries while the shared software rings hold 65,536 descriptors, so an application polling
+interval does not turn hardware concurrency into an unrelated burst limit. A software-ring
+overflow increments `bad`; it is never silently recycled. The client owns one dynamic queue
+and cycles every arena page through that invariant. A 26,000-frame fixture crosses a
+24,576-page arena, completes every frame, and returns every page without an application-sized
+window.
+
 **Feedback has exactly two legitimate granularities**: a job completing, or data
 completing one orbit of a cycle in the graph. Anything finer is a handshake wearing a
 costume. A ring is a good topology precisely because an orbit *is* the synchronisation.
@@ -424,16 +437,16 @@ resolution for a kernel-bypass data plane is to spin, which is what such transpo
 design and why they are given a core. Sleeping was a way of pretending the choice did not
 have to be made, and it bought a latency floor in exchange.
 
-**Still present, with a verdict.**
+**Still present, with direct measurements.**
 
-| where | verdict |
+| where | measured state |
 |---|---|
 | `bin/mesh-peers.sh` | Partly fixed. The browse now ends when the reply stream goes quiet instead of after a fixed three seconds, using a 50 ms poll period. The per-node `dns-sd -t` resolve and the `nc -G` info probe still run to a deadline and dominate the wall time, so the script returns no faster than before. Saying it is fixed would be false. |
 | `bin/mesh-rdma-init.sh`, `install.sh` (three), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
-| `xonotic/bridge/solver/mesh_attach.h`, `xonotic/bridge/test/meshtest.c`, `xonotic/bridge/test/engine.sh`, `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
+| `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
 | `viz/serve.py`, `time.sleep(PERIOD)` | Defensible. This is a poll period — a scheduling decision about how often to sample — not a stall standing in for a wait. |
 | `bench/orth.py`, `time.sleep(...)` | Defensible. Thermal duty cycling in a benchmark, deliberate. |
 | `xonotic/darkplaces-work/**` | Vendored upstream. Not ours to clean. |
 
-`pmset sleep 0` and the `displaysleep`/`disksleep` keys in `install.sh` and `hmi-epilogue.sh`
-are power policy, not delays, and are unrelated.
+`pmset sleep 0` and the `displaysleep`/`disksleep` keys in `install.sh` are uniform
+fleet power policy, not delays, and are unrelated.

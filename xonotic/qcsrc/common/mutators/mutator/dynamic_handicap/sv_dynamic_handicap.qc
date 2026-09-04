@@ -1,34 +1,15 @@
 #include "sv_dynamic_handicap.qh"
-/// \file
-/// \brief Source file that contains implementation of the Dynamic handicap
-/// mutator.
-/// \author Lyberta
-/// \copyright GNU GPLv2 or any later version.
 
-//======================= Global variables ====================================
+int autocvar_g_dynamic_handicap;
 
-int autocvar_g_dynamic_handicap; ///< Whether to enable dynamic handicap.
-/// \brief The scale of the handicap. Larger values mean more penalties for
-/// strong players and more buffs for weak players.
 float autocvar_g_dynamic_handicap_scale;
-/// \brief The exponent used to calculate handicap. 1 means linear scale. Values
-/// more than 1 mean stronger non-linear handicap. Values less than 1 mean
-/// weaker non-linear handicap.
+
 float autocvar_g_dynamic_handicap_exponent;
-float autocvar_g_dynamic_handicap_min; ///< The minimum value of the handicap.
-float autocvar_g_dynamic_handicap_max; ///< The maximum value of the handicap.
+float autocvar_g_dynamic_handicap_min;
+float autocvar_g_dynamic_handicap_max;
 
-//====================== Forward declarations =================================
-
-/// \brief Clamps the value of the handicap.
-/// \param[in] handicap Value to clamp.
-/// \return Clamped value.
 float DynamicHandicap_ClampHandicap(float handicap);
 
-//========================= Free functions ====================================
-
-/// \brief Updates the handicap of all players.
-/// \return No return.
 void DynamicHandicap_UpdateHandicap()
 {
 	float total_score = 0;
@@ -76,8 +57,6 @@ float DynamicHandicap_ClampHandicap(float handicap)
 	}
 	return handicap;
 }
-
-//============================= Hooks ========================================
 
 REGISTER_MUTATOR(dynamic_handicap, autocvar_g_dynamic_handicap);
 

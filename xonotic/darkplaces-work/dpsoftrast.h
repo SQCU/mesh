@@ -9,7 +9,6 @@
 #define DPSOFTRAST_MAXTEXTUREUNITS 16
 #define DPSOFTRAST_MAXTEXCOORDARRAYS 8
 
-// type of pixels in texture (some of these are converted to BGRA8 on update)
 #define DPSOFTRAST_TEXTURE_FORMAT_BGRA8 0
 #define DPSOFTRAST_TEXTURE_FORMAT_DEPTH 1
 #define DPSOFTRAST_TEXTURE_FORMAT_RGBA8 2
@@ -18,7 +17,6 @@
 #define DPSOFTRAST_TEXTURE_FORMAT_RGBA32F 5
 #define DPSOFTRAST_TEXTURE_FORMAT_COMPAREMASK 0x0F
 
-// modifier flags for texture (can not be changed after creation)
 #define DPSOFTRAST_TEXTURE_FLAG_MIPMAP 0x10
 #define DPSOFTRAST_TEXTURE_FLAG_CUBEMAP 0x20
 #define DPSOFTRAST_TEXTURE_FLAG_USEALPHA 0x40
@@ -77,47 +75,43 @@ void DPSOFTRAST_SetTexCoordPointer(int unitnum, int numcomponents, size_t stride
 
 typedef enum gl20_texunit_e
 {
-	// postprocess shaders, and generic shaders:
+
 	GL20TU_FIRST = 0,
 	GL20TU_SECOND = 1,
 	GL20TU_GAMMARAMPS = 2,
-	// standard material properties
+
 	GL20TU_NORMAL = 0,
 	GL20TU_COLOR = 1,
 	GL20TU_GLOSS = 2,
 	GL20TU_GLOW = 3,
-	// material properties for a second material
+
 	GL20TU_SECONDARY_NORMAL = 4,
 	GL20TU_SECONDARY_COLOR = 5,
 	GL20TU_SECONDARY_GLOSS = 6,
 	GL20TU_SECONDARY_GLOW = 7,
-	// material properties for a colormapped material
-	// conflicts with secondary material
+
 	GL20TU_PANTS = 4,
 	GL20TU_SHIRT = 7,
-	// fog fade in the distance
+
 	GL20TU_FOGMASK = 8,
-	// compiled ambient lightmap and deluxemap
+
 	GL20TU_LIGHTMAP = 9,
 	GL20TU_DELUXEMAP = 10,
-	// refraction, used by water shaders
+
 	GL20TU_REFRACTION = 3,
-	// reflection, used by water shaders, also with normal material rendering
-	// conflicts with secondary material
+
 	GL20TU_REFLECTION = 7,
-	// rtlight attenuation (distance fade) and cubemap filter (projection texturing)
-	// conflicts with lightmap/deluxemap
+
 	GL20TU_ATTENUATION = 9,
 	GL20TU_CUBE = 10,
 	GL20TU_SHADOWMAP2D = 15,
 	GL20TU_CUBEPROJECTION = 12,
-	// rtlight prepass data (screenspace depth and normalmap)
-//	GL20TU_UNUSED1 = 13,
+
 	GL20TU_SCREENNORMALMAP = 14,
-	// lightmap prepass data (screenspace diffuse and specular from lights)
+
 	GL20TU_SCREENDIFFUSE = 11,
 	GL20TU_SCREENSPECULAR = 12,
-	// fake reflections
+
 	GL20TU_REFLECTMASK = 5,
 	GL20TU_REFLECTCUBE = 6,
 	GL20TU_FOGHEIGHTTEXTURE = 14
@@ -147,74 +141,69 @@ typedef enum shaderlanguage_e
 }
 shaderlanguage_t;
 
-// this enum selects which of the glslshadermodeinfo entries should be used
 typedef enum shadermode_e
 {
-	SHADERMODE_GENERIC, ///< (particles/HUD/etc) vertex color, optionally multiplied by one texture
-	SHADERMODE_POSTPROCESS, ///< postprocessing shader (r_glsl_postprocess)
-	SHADERMODE_DEPTH_OR_SHADOW, ///< (depthfirst/shadows) vertex shader only
-	SHADERMODE_FLATCOLOR, ///< (lightmap) modulate texture by uniform color (q1bsp, q3bsp)
-	SHADERMODE_VERTEXCOLOR, ///< (lightmap) modulate texture by vertex colors (q3bsp)
-	SHADERMODE_LIGHTMAP, ///< (lightmap) modulate texture by lightmap texture (q1bsp, q3bsp)
-	SHADERMODE_FAKELIGHT, ///< (fakelight) modulate texture by "fake" lighting (no lightmaps, no nothing)
-	SHADERMODE_LIGHTDIRECTIONMAP_MODELSPACE, ///< (lightmap) use directional pixel shading from texture containing modelspace light directions (q3bsp deluxemap)
-	SHADERMODE_LIGHTDIRECTIONMAP_TANGENTSPACE, ///< (lightmap) use directional pixel shading from texture containing tangentspace light directions (q1bsp deluxemap)
-	SHADERMODE_LIGHTDIRECTIONMAP_FORCED_LIGHTMAP, // forced deluxemapping for lightmapped surfaces
-	SHADERMODE_LIGHTDIRECTIONMAP_FORCED_VERTEXCOLOR, // forced deluxemapping for vertexlit surfaces
-	SHADERMODE_LIGHTDIRECTION, ///< (lightmap) use directional pixel shading from fixed light direction (q3bsp)
-	SHADERMODE_LIGHTSOURCE, ///< (lightsource) use directional pixel shading from light source (rtlight)
-	SHADERMODE_REFRACTION, ///< refract background (the material is rendered normally after this pass)
-	SHADERMODE_WATER, ///< refract background and reflection (the material is rendered normally after this pass)
-	SHADERMODE_DEFERREDGEOMETRY, ///< (deferred) render material properties to screenspace geometry buffers
-	SHADERMODE_DEFERREDLIGHTSOURCE, ///< (deferred) use directional pixel shading from light source (rtlight) on screenspace geometry buffers
+	SHADERMODE_GENERIC,
+	SHADERMODE_POSTPROCESS,
+	SHADERMODE_DEPTH_OR_SHADOW,
+	SHADERMODE_FLATCOLOR,
+	SHADERMODE_VERTEXCOLOR,
+	SHADERMODE_LIGHTMAP,
+	SHADERMODE_FAKELIGHT,
+	SHADERMODE_LIGHTDIRECTIONMAP_MODELSPACE,
+	SHADERMODE_LIGHTDIRECTIONMAP_TANGENTSPACE,
+	SHADERMODE_LIGHTDIRECTIONMAP_FORCED_LIGHTMAP,
+	SHADERMODE_LIGHTDIRECTIONMAP_FORCED_VERTEXCOLOR,
+	SHADERMODE_LIGHTDIRECTION,
+	SHADERMODE_LIGHTSOURCE,
+	SHADERMODE_REFRACTION,
+	SHADERMODE_WATER,
+	SHADERMODE_DEFERREDGEOMETRY,
+	SHADERMODE_DEFERREDLIGHTSOURCE,
 	SHADERMODE_COUNT
 }
 shadermode_t;
 
 typedef enum shaderpermutation_e
 {
-	SHADERPERMUTATION_DIFFUSE = 1<<0, ///< (lightsource) whether to use directional shading
-	SHADERPERMUTATION_VERTEXTEXTUREBLEND = 1<<1, ///< indicates this is a two-layer material blend based on vertex alpha (q3bsp)
-	SHADERPERMUTATION_VIEWTINT = 1<<2, ///< view tint (postprocessing only), use vertex colors (generic only)
-	SHADERPERMUTATION_COLORMAPPING = 1<<3, ///< indicates this is a colormapped skin
-	SHADERPERMUTATION_SATURATION = 1<<4, ///< saturation (postprocessing only)
-	SHADERPERMUTATION_FOGINSIDE = 1<<5, ///< tint the color by fog color or black if using additive blend mode
-	SHADERPERMUTATION_FOGOUTSIDE = 1<<6, ///< tint the color by fog color or black if using additive blend mode
-	SHADERPERMUTATION_FOGHEIGHTTEXTURE = 1<<7, ///< fog color and density determined by texture mapped on vertical axis
-	SHADERPERMUTATION_FOGALPHAHACK = 1<<8, ///< fog color and density determined by texture mapped on vertical axis
-	SHADERPERMUTATION_GAMMARAMPS = 1<<9, ///< gamma (postprocessing only)
-	SHADERPERMUTATION_CUBEFILTER = 1<<10, ///< (lightsource) use cubemap light filter
-	SHADERPERMUTATION_GLOW = 1<<11, ///< (lightmap) blend in an additive glow texture
-	SHADERPERMUTATION_BLOOM = 1<<12, ///< bloom (postprocessing only)
-	SHADERPERMUTATION_SPECULAR = 1<<13, ///< (lightsource or deluxemapping) render specular effects
-	SHADERPERMUTATION_POSTPROCESSING = 1<<14, ///< user defined postprocessing (postprocessing only)
-	SHADERPERMUTATION_REFLECTION = 1<<15, ///< normalmap-perturbed reflection of the scene infront of the surface, preformed as an overlay on the surface
-	SHADERPERMUTATION_OFFSETMAPPING = 1<<16, ///< adjust texcoords to roughly simulate a displacement mapped surface
-	SHADERPERMUTATION_OFFSETMAPPING_RELIEFMAPPING = 1<<17, ///< adjust texcoords to accurately simulate a displacement mapped surface (requires OFFSETMAPPING to also be set!)
-	SHADERPERMUTATION_SHADOWMAP2D = 1<<18, ///< (lightsource) use shadowmap texture as light filter
-	SHADERPERMUTATION_SHADOWMAPVSDCT = 1<<19, ///< (lightsource) use virtual shadow depth cube texture for shadowmap indexing
-	SHADERPERMUTATION_SHADOWMAPORTHO = 1<<20, ///< (lightsource) use orthographic shadowmap projection
-	SHADERPERMUTATION_DEFERREDLIGHTMAP = 1<<21, ///< (lightmap) read Texture_ScreenDiffuse/Specular textures and add them on top of lightmapping
-	SHADERPERMUTATION_ALPHAKILL = 1<<22, ///< (deferredgeometry) discard pixel if diffuse texture alpha below 0.5, (generic) apply global alpha
-	SHADERPERMUTATION_REFLECTCUBE = 1<<23, ///< fake reflections using global cubemap (not HDRI light probe)
-	SHADERPERMUTATION_NORMALMAPSCROLLBLEND = 1<<24, ///< (water) counter-direction normalmaps scrolling
-	SHADERPERMUTATION_BOUNCEGRID = 1<<25, ///< (lightmap) use Texture_BounceGrid as an additional source of ambient light
-	SHADERPERMUTATION_BOUNCEGRIDDIRECTIONAL = 1<<26, ///< (lightmap) use 16-component pixels in bouncegrid texture for directional lighting rather than standard 4-component
-	SHADERPERMUTATION_TRIPPY = 1<<27, ///< use trippy vertex shader effect
-	SHADERPERMUTATION_DEPTHRGB = 1<<28, ///< read/write depth values in RGB color coded format for older hardware without depth samplers
-	SHADERPERMUTATION_ALPHAGEN_VERTEX = 1<<29, ///< alphaGen vertex
-	SHADERPERMUTATION_SKELETAL = 1<<30, ///< (skeletal models) use skeletal matrices to deform vertices (gpu-skinning)
-	SHADERPERMUTATION_OCCLUDE = 0x80000000u ///< use occlusion buffer for corona
+	SHADERPERMUTATION_DIFFUSE = 1<<0,
+	SHADERPERMUTATION_VERTEXTEXTUREBLEND = 1<<1,
+	SHADERPERMUTATION_VIEWTINT = 1<<2,
+	SHADERPERMUTATION_COLORMAPPING = 1<<3,
+	SHADERPERMUTATION_SATURATION = 1<<4,
+	SHADERPERMUTATION_FOGINSIDE = 1<<5,
+	SHADERPERMUTATION_FOGOUTSIDE = 1<<6,
+	SHADERPERMUTATION_FOGHEIGHTTEXTURE = 1<<7,
+	SHADERPERMUTATION_FOGALPHAHACK = 1<<8,
+	SHADERPERMUTATION_GAMMARAMPS = 1<<9,
+	SHADERPERMUTATION_CUBEFILTER = 1<<10,
+	SHADERPERMUTATION_GLOW = 1<<11,
+	SHADERPERMUTATION_BLOOM = 1<<12,
+	SHADERPERMUTATION_SPECULAR = 1<<13,
+	SHADERPERMUTATION_POSTPROCESSING = 1<<14,
+	SHADERPERMUTATION_REFLECTION = 1<<15,
+	SHADERPERMUTATION_OFFSETMAPPING = 1<<16,
+	SHADERPERMUTATION_OFFSETMAPPING_RELIEFMAPPING = 1<<17,
+	SHADERPERMUTATION_SHADOWMAP2D = 1<<18,
+	SHADERPERMUTATION_SHADOWMAPVSDCT = 1<<19,
+	SHADERPERMUTATION_SHADOWMAPORTHO = 1<<20,
+	SHADERPERMUTATION_DEFERREDLIGHTMAP = 1<<21,
+	SHADERPERMUTATION_ALPHAKILL = 1<<22,
+	SHADERPERMUTATION_REFLECTCUBE = 1<<23,
+	SHADERPERMUTATION_NORMALMAPSCROLLBLEND = 1<<24,
+	SHADERPERMUTATION_BOUNCEGRID = 1<<25,
+	SHADERPERMUTATION_BOUNCEGRIDDIRECTIONAL = 1<<26,
+	SHADERPERMUTATION_TRIPPY = 1<<27,
+	SHADERPERMUTATION_DEPTHRGB = 1<<28,
+	SHADERPERMUTATION_ALPHAGEN_VERTEX = 1<<29,
+	SHADERPERMUTATION_SKELETAL = 1<<30,
+	SHADERPERMUTATION_OCCLUDE = 0x80000000u
 }
 shaderpermutation_t;
 
-// Permutation bits past 31 do not fit the enum above (which is int-typed on every
-// compiler we build with, so 1<<31 would sign-extend into a dpuint64 and light up
-// every high bit).  OCCLUDE is spelled 0x80000000u for the same reason.  The
-// permutation word itself has always been dpuint64, so bits 32+ just work.
-#define SHADERPERMUTATION_PBR (1ull<<32) ///< metallic-roughness BRDF (GGX) instead of Blinn-Phong
-#define SHADERPERMUTATION_INK (1ull<<33) ///< sample the accumulated world ink volume
-#define SHADERPERMUTATION_COUNT 34 ///< size of shaderpermutationinfo array
+#define SHADERPERMUTATION_PBR (1ull<<32)
+#define SHADERPERMUTATION_INK (1ull<<33)
+#define SHADERPERMUTATION_COUNT 34
 
 typedef enum DPSOFTRAST_UNIFORM_e
 {
@@ -340,4 +329,4 @@ void DPSOFTRAST_Uniform1i(DPSOFTRAST_UNIFORM index, int i0);
 
 void DPSOFTRAST_DrawTriangles(int firstvertex, int numvertices, int numtriangles, const int *element3i, const unsigned short *element3s);
 
-#endif // DPSOFTRAST_H
+#endif

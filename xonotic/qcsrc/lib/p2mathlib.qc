@@ -1,21 +1,4 @@
-/*
- Copyright (C) 2015 Micah Talkiewicz.
 
- This program is free software; you can redistribute it and/or
- modify it under the terms of the GNU General Public License
- as published by the Free Software Foundation; either version 2
- of the License, or (at your option) any later version.
-
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
- See the GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with this program; if not, write to the Free Software
- Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-*/
 
 ERASEABLE
 vector vec_bias(vector v, float f)
@@ -46,7 +29,6 @@ vector vec_to_max(vector a, vector b)
 	return c;
 }
 
-// there may already be a function for bounding a vector in this manner, however my very quick search did not reveal one -- Player_2
 ERASEABLE
 vector vec_bounds_in(vector point, vector a, vector b)
 {
@@ -95,10 +77,10 @@ ERASEABLE
 vector aim_vec(vector org, vector targ)
 {
 	vector v;
-	// we float around x and y, but rotate around z
+
 	v.x = targ.x - org.x;
 	v.y = targ.y - org.y;
 	v.z = org.z - targ.z;
-	// get the angles actual
+
 	return vectoangles(normalize(v));
 }

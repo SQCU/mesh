@@ -1,5 +1,5 @@
 DEF(onslaught_generator_gib_explode);
-// fire effect which expands then slows
+
 SUB(onslaught_generator_gib_explode) {
     MY(airfriction) = 5;
     MY(alpha_min) = 128;
@@ -20,7 +20,7 @@ SUB(onslaught_generator_gib_explode) {
     MY(type) = "static";
     MY(velocityjitter) = '286.0 286.0 286.0';
 }
-// smoke
+
 SUB(onslaught_generator_gib_explode) {
     MY(airfriction) = 5;
     MY(alpha_min) = 200;
@@ -39,7 +39,7 @@ SUB(onslaught_generator_gib_explode) {
     MY(type) = "alphastatic";
     MY(velocityjitter) = '244.0 244.0 244.0';
 }
-// underwater bubbles
+
 SUB(onslaught_generator_gib_explode) {
     MY(alpha_min) = 128;
     MY(alpha_max) = 256;
@@ -61,7 +61,7 @@ SUB(onslaught_generator_gib_explode) {
 }
 
 DEF(onslaught_generator_gib_flame);
-// fire effect which expands then slows
+
 SUB(onslaught_generator_gib_flame) {
     MY(airfriction) = 5;
     MY(alpha_min) = 128;
@@ -82,7 +82,7 @@ SUB(onslaught_generator_gib_flame) {
     MY(type) = "static";
     MY(velocityjitter) = '86.0 86.0 86.0';
 }
-// smoke
+
 SUB(onslaught_generator_gib_flame) {
     MY(airfriction) = 5;
     MY(alpha_min) = 200;
@@ -101,7 +101,7 @@ SUB(onslaught_generator_gib_flame) {
     MY(type) = "alphastatic";
     MY(velocityjitter) = '44.0 44.0 44.0';
 }
-// underwater bubbles
+
 SUB(onslaught_generator_gib_flame) {
     MY(alpha_min) = 128;
     MY(alpha_max) = 256;

@@ -7,11 +7,9 @@
 #include <common/resources/resources.qh>
 #include <common/wepent.qh>
 
-// Ammo (#1)
-
 void HUD_Ammo_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_ammo_onlycurrent");
 	HUD_Write_Cvar("hud_panel_ammo_noncurrent_alpha");
 	HUD_Write_Cvar("hud_panel_ammo_noncurrent_scale");
@@ -38,12 +36,10 @@ void DrawAmmoItem(vector myPos, vector mySize, Resource ammoType, bool isCurrent
 	if(ammoType == RES_NONE)
 		return;
 
-	// Initialize variables
-
 	int ammo;
 	if(autocvar__hud_configure)
 	{
-		isCurrent = (ammoType == RES_ROCKETS); // Rockets always current
+		isCurrent = (ammoType == RES_ROCKETS);
 		ammo = 60;
 	}
 	else
@@ -89,9 +85,7 @@ void DrawAmmoItem(vector myPos, vector mySize, Resource ammoType, bool isCurrent
 	else
 		alpha = panel_fg_alpha * bound(0, autocvar_hud_panel_ammo_noncurrent_alpha, 1);
 
-	string text = isInfinite ? "\xE2\x88\x9E" : ftos(ammo); // Use infinity symbol (U+221E)
-
-	// Draw item
+	string text = isInfinite ? "\xE2\x88\x9E" : ftos(ammo);
 
 	if(isCurrent)
 		drawpic_aspect_skin(myPos, "ammo_current_bg", mySize, '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
@@ -185,7 +179,7 @@ void HUD_Ammo()
 		ammo_size.y = newSize;
 	}
 
-	entity wepent = viewmodels[0]; // TODO: unhardcode
+	entity wepent = viewmodels[0];
 
 	Weapon wep = wepent.switchweapon;
 	int i;

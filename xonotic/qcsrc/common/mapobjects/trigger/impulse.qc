@@ -1,5 +1,5 @@
 #include "impulse.qh"
-// targeted (directional) mode
+
 void trigger_impulse_touch_directional(entity this, entity toucher)
 {
 	entity targ;
@@ -22,7 +22,6 @@ void trigger_impulse_touch_directional(entity this, entity toucher)
 		return;
 	}
 
-	// falloff is not supported because radius is always 0 in directional mode
 	str = this.strength;
 
 	pushdeltatime = time - toucher.lastpushtime;
@@ -55,7 +54,6 @@ void trigger_impulse_touch_directional(entity this, entity toucher)
 #endif
 }
 
-// Directionless (accelerator/decelerator) mode
 void trigger_impulse_touch_accel(entity this, entity toucher)
 {
 	float pushdeltatime;
@@ -79,7 +77,6 @@ void trigger_impulse_touch_accel(entity this, entity toucher)
 		return;
 	}
 
-	// div0: ticrate independent, 1 = identity (not 20)
 	toucher.velocity = toucher.velocity * (this.strength ** pushdeltatime);
 
 #ifdef SVQC
@@ -87,7 +84,6 @@ void trigger_impulse_touch_accel(entity this, entity toucher)
 #endif
 }
 
-// Spherical (gravity/repulsor) mode
 void trigger_impulse_touch_radial(entity this, entity toucher)
 {
 	float pushdeltatime;
@@ -117,9 +113,9 @@ void trigger_impulse_touch_radial(entity this, entity toucher)
 	str = min(this.radius, vlen(this.origin - toucher.origin));
 
 	if(this.falloff == FALLOFF_LINEAR)
-		str = (1 - str / this.radius) * this.strength; // 1 in the inside
+		str = (1 - str / this.radius) * this.strength;
 	else if(this.falloff == FALLOFF_LINEAR_INV)
-		str = (str / this.radius) * this.strength; // 0 in the inside
+		str = (str / this.radius) * this.strength;
 	else
 		str = this.strength;
 
@@ -132,24 +128,6 @@ void trigger_impulse_touch_radial(entity this, entity toucher)
 
 REGISTER_NET_LINKED(ENT_CLIENT_TRIGGER_IMPULSE)
 
-/*QUAKED spawnfunc_trigger_impulse (.5 .5 .5) ?
-Force field
--------- KEYS --------
-target : If this is set, this points to the spawnfunc_target_position to which the player will get pushed.
-		 If not, this trigger acts like a damper/accelerator field.
-
-strength : This is how much force to add in the direction of .target each second
-		   when .target is set. If not, this is how much to slow down/accelerate
-		   something cought inside this trigger. (1=no change, 0,5 half speed rougthly each tic, 2 = doubble)
-
-radius   : If set, act as a spherical device rather then a linear one.
-
-falloff : 0 = none, 1 = liniar, 2 = inverted liniar
-
--------- NOTES --------
-Use a brush textured with common/origin in the trigger entity to determine the origin of the force
-in directional and sperical mode. For damper/accelerator mode this is not nessesary (and has no effect).
-*/
 #ifdef SVQC
 bool trigger_impulse_send(entity this, entity to, int sf)
 {

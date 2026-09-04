@@ -62,11 +62,11 @@
 		me.valueKeyStep = theValueKeyStep;
 		me.valuePageStep = theValuePageStep;
 		me.valueDigits = 3;
-		if (fabs(floor(me.valueStep * 100 + 0.5) - (me.valueStep * 100)) < 0.01) // about a whole number of 100ths
+		if (fabs(floor(me.valueStep * 100 + 0.5) - (me.valueStep * 100)) < 0.01)
 			me.valueDigits = 2;
-		if (fabs(floor(me.valueStep * 10 + 0.5) - (me.valueStep * 10)) < 0.01)   // about a whole number of 10ths
+		if (fabs(floor(me.valueStep * 10 + 0.5) - (me.valueStep * 10)) < 0.01)
 			me.valueDigits = 1;
-		if (fabs(floor(me.valueStep * 1 + 0.5) - (me.valueStep * 1)) < 0.01)     // about a whole number
+		if (fabs(floor(me.valueStep * 1 + 0.5) - (me.valueStep * 1)) < 0.01)
 			me.valueDigits = 0;
 	}
 	float Slider_keyDown(entity me, float key, float ascii, float shift)
@@ -115,7 +115,7 @@
 				me.applyButton.disabled = false;
 			return 1;
 		}
-		// TODO more keys (NOTE also add them to Slider_keyUp)
+
 		return 0;
 	}
 	float Slider_keyUp(entity me, float key, float ascii, float shift)
@@ -154,13 +154,12 @@
 			if (pos.y >= 1 + me.tolerance.y) hit = 0;
 			if (hit)
 			{
-				// handle dragging
+
 				me.pressed = 2;
 
 				float f = bound(0, (pos.x - me.pressOffset - 0.5 * me.controlWidth) / (1 - me.textSpace - me.controlWidth), 1);
 				v = f * (me.valueMax - me.valueMin) + me.valueMin;
-				// there's no need to round min and max value... also if we did, v could be set
-				// to an out of bounds value due to precision errors
+
 				if (f > 0 && f < 1 && me.valueStep)
 					v = floor(0.5 + v / me.valueStep) * me.valueStep;
 				me.setValue_noAnim(me, v);
@@ -190,7 +189,7 @@
 			this.pressed = 1;
 			this.pressOffset = pos.x - controlCenter;
 			this.previousValue = this.value;
-			// this.mouseDrag(this, pos);
+
 		}
 		else
 		{
@@ -219,7 +218,7 @@
 				this.pressed = 1;
 				this.pressOffset = pos.x - controlCenter;
 				this.previousValue = this.value;
-				// this.mouseDrag(this, pos);
+
 			}
 		}
 		return true;
@@ -243,7 +242,7 @@
 		save = draw_alpha;
 		if (me.disabled) draw_alpha *= me.disabledAlpha;
 		draw_ButtonPicture('0 0 0', strcat(me.src, "_s"), eX * (1 - me.textSpace) + eY, me.color2, 1);
-		if (me.valueMax > me.valueMin) // valid?
+		if (me.valueMax > me.valueMin)
 		if (almost_in_bounds(me.valueMin, me.sliderValue, me.valueMax))
 		{
 			controlLeft = (me.sliderValue - me.valueMin) / (me.valueMax - me.valueMin) * (1 - me.textSpace - me.controlWidth);
@@ -260,9 +259,9 @@
 				me.sliderAnim = NULL;
 			}
 
-		if (me.valueMax > me.valueMin) // valid?
+		if (me.valueMax > me.valueMin)
 			me.setText(me, me.valueToText(me, me.value));
 		draw_alpha = save;
 		SUPER(Slider).draw(me);
-		me.text = string_null;  // TEMPSTRING!
+		me.text = string_null;
 	}

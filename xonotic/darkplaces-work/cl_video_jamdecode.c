@@ -1,7 +1,7 @@
-// JAM format decoder, used by Blood Omnicide
+
 
 #ifdef LIBAVCODEC
-//#define JAM_USELIBAVCODECSCALE
+
 #endif
 
 typedef struct jamdecodestream_s
@@ -15,7 +15,6 @@ typedef struct jamdecodestream_s
 	float          colorscale;
 	unsigned char  colorsub;
 
-	// info used during decoding
 	unsigned char *frame;
 	unsigned char *frame_prev;
 	unsigned char  frame_palette[768];
@@ -23,7 +22,6 @@ typedef struct jamdecodestream_s
 	unsigned int   framesize;
 	unsigned int   framenum;
 
-	// libavcodec scaling
 #ifdef JAM_USELIBAVCODECSCALE
 	unsigned char *frame_output_buffer;
 	AVFrame       *frame_output;
@@ -32,12 +30,10 @@ typedef struct jamdecodestream_s
 	unsigned int   frameheight;
 #endif
 
-	// channel the sound file is being played on
 	int sndchan;
 }
 jamdecodestream_t;
 
-// opens a stream
 void jam_close(void *stream);
 unsigned int jam_getwidth(void *stream);
 unsigned int jam_getheight(void *stream);
@@ -50,7 +46,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 	jamdecodestream_t *s;
 	char *wavename;
 
-	// allocate stream structure
 	s = (jamdecodestream_t *)Z_Malloc(sizeof(jamdecodestream_t));
 	memset(s, 0, sizeof(jamdecodestream_t));
 	if (s == NULL)
@@ -60,7 +55,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 	}
 	s->sndchan = -1;
 
-	// open file
 	s->file = FS_OpenVirtualFile(filename, true);
 	if (!s->file)
 	{
@@ -69,7 +63,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 		return NULL;
 	}
 
-	// read header
 	if (!FS_Read(s->file, jamHead, 16))
 	{
 		*errorstring = "JamDecoder: unexpected EOF reading header";
@@ -92,7 +85,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 	s->colorsub = 4;
 	s->framesize = s->info_imagewidth * s->info_imageheight;
 
-	// allocate frame input/output
 	if (s->framesize < 0)
 	{
 		*errorstring = "JamDecoder: bad framesize";
@@ -109,18 +101,15 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 		return NULL;
 	}
 
-	// scale support provided by libavcodec
 #ifdef JAM_USELIBAVCODECSCALE
 	s->framewidth = s->info_imagewidth;
 	s->frameheight = s->info_imageheight;
 
-	// min size
 	if (cl_video_libavcodec_minwidth.integer > 0)
 		s->info_imagewidth = max(s->info_imagewidth, (unsigned int)cl_video_libavcodec_minwidth.integer);
 	if (cl_video_libavcodec_minheight.integer > 0)
 		s->info_imageheight = max(s->info_imageheight, (unsigned int)cl_video_libavcodec_minheight.integer);
 
-	// allocate output
 	s->frame_output_buffer = (unsigned char *)Z_Malloc(s->framesize * 4);
 	s->frame_output = AvCodec_AllocFrame();
 	s->frame_output_scale = AvCodec_AllocFrame();
@@ -133,8 +122,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 	}
 #endif
 
-	// everything is ok
-	// set the module functions
 	s->framenum = 0;
 	video->close = jam_close;
 	video->getwidth = jam_getwidth;
@@ -143,7 +130,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 	video->decodeframe = jam_video;
 	video->getaspectratio = jam_getaspectratio;
 
-	// set sound
 	size_t namelen;
 	namelen = strlen(filename) + 10;
 	wavename = (char *)Z_Malloc(namelen);
@@ -163,7 +149,6 @@ void *jam_open(clvideo_t *video, char *filename, const char **errorstring)
 	return s;
 }
 
-// closes a stream
 void jam_close(void *stream)
 {
 	jamdecodestream_t *s = (jamdecodestream_t *)stream;
@@ -198,35 +183,30 @@ void jam_close(void *stream)
 	Z_Free(s);
 }
 
-// returns the width of the image data
 unsigned int jam_getwidth(void *stream)
 {
 	jamdecodestream_t *s = (jamdecodestream_t *)stream;
 	return s->info_imagewidth;
 }
 
-// returns the height of the image data
 unsigned int jam_getheight(void *stream)
 {
 	jamdecodestream_t *s = (jamdecodestream_t *)stream;
 	return s->info_imageheight;
 }
 
-// returns the framerate of the stream
 double jam_getframerate(void *stream)
 {
 	jamdecodestream_t *s = (jamdecodestream_t *)stream;
 	return s->info_framerate;
 }
 
-// returns aspect ration of the stream
 double jam_getaspectratio(void *stream)
 {
 	jamdecodestream_t *s = (jamdecodestream_t *)stream;
 	return s->info_aspectratio;
 }
 
-// decode JAM frame
 static void jam_decodeframe(unsigned char *inbuf, unsigned char *outbuf, unsigned char *prevbuf, int outsize, int frametype)
 {
 	unsigned char *srcptr, *destptr, *prevptr;
@@ -286,20 +266,18 @@ static void jam_decodeframe(unsigned char *inbuf, unsigned char *outbuf, unsigne
 	}
 }
 
-// decodes a video frame to the supplied output pixels
 int jam_video(void *stream, void *imagedata, unsigned int Rmask, unsigned int Gmask, unsigned int Bmask, unsigned int bytesperpixel, int imagebytesperrow)
 {
 	unsigned char frameHead[16], *b;
 	unsigned int compsize, outsize, i;
 	jamdecodestream_t *s = (jamdecodestream_t *)stream;
 
-	// EOF
 	if (s->framenum >= s->info_frames)
 		return 1;
 	s->framenum++;
 
 readframe:
-	// read frame header
+
 	if (!FS_Read(s->file, &frameHead, 16))
 	{
 		Con_Printf("JamDecoder: unexpected EOF on frame %i\n", s->framenum);
@@ -313,14 +291,12 @@ readframe:
 		return 1;
 	}
 
-	// read frame contents
 	if (!FS_Read(s->file, s->frame_compressed, compsize))
 	{
 		Con_Printf("JamDecoder: unexpected EOF on frame %i\n", s->framenum);
 		return 1;
 	}
 
-	// palette goes interleaved with special flag
 	if (frameHead[0] == 2)
 	{
 		if (compsize == 768)
@@ -333,14 +309,13 @@ readframe:
 	}
 	else
 	{
-		// decode frame
-		// shift buffers to provide current and previous one, decode
+
 		b = s->frame_prev;
 		s->frame_prev = s->frame;
 		s->frame = b;
 		jam_decodeframe(s->frame_compressed, s->frame, s->frame_prev, outsize, frameHead[4]);
 #ifdef JAM_USELIBAVCODECSCALE
-		// make BGRA imagepixels from 8bit palettized frame
+
 		b = (unsigned char *)s->frame_output_buffer;
 		for(i = 0; i < s->framesize; i++)
 		{
@@ -349,10 +324,10 @@ readframe:
 			*b++ = s->frame_palette[s->frame[i]*3];
 			*b++ = 255;
 		}
-		// scale
+
 		AvCodec_FillPicture((AVPicture *)s->frame_output, (uint8_t *)s->frame_output_buffer, PIX_FMT_BGRA, s->framewidth, s->frameheight);
 		AvCodec_FillPicture((AVPicture *)s->frame_output_scale, (uint8_t *)imagedata, PIX_FMT_BGRA, s->info_imagewidth, s->info_imageheight);
-		SwsContext *scale_context = SwScale_GetCachedContext(NULL, s->framewidth, s->frameheight, PIX_FMT_BGRA, s->info_imagewidth, s->info_imageheight, PIX_FMT_BGRA, libavcodec_scalers[max(0, min(LIBAVCODEC_SCALERS, cl_video_libavcodec_scaler.integer))], NULL, NULL, NULL); 
+		SwsContext *scale_context = SwScale_GetCachedContext(NULL, s->framewidth, s->frameheight, PIX_FMT_BGRA, s->info_imagewidth, s->info_imageheight, PIX_FMT_BGRA, libavcodec_scalers[max(0, min(LIBAVCODEC_SCALERS, cl_video_libavcodec_scaler.integer))], NULL, NULL, NULL);
 		if (!scale_context)
 		{
 			Con_Printf("JamDecoder: LibAvcodec: error creating scale context frame %i\n", s->framenum);
@@ -360,13 +335,13 @@ readframe:
 		}
 		if (!SwScale_Scale(scale_context, s->frame_output->data, s->frame_output->linesize, 0, s->frameheight, s->frame_output_scale->data, s->frame_output_scale->linesize))
 			Con_Printf("JamDecoder: LibAvcodec : error scaling frame\n", s->framenum);
-		SwScale_FreeContext(scale_context); 
+		SwScale_FreeContext(scale_context);
 #else
-		// make BGRA imagepixels from 8bit palettized frame
+
 		b = (unsigned char *)imagedata;
 		for(i = 0; i < s->framesize; i++)
 		{
-			// bgra
+
 			*b++ = s->frame_palette[s->frame[i]*3 + 2];
 			*b++ = s->frame_palette[s->frame[i]*3 + 1];
 			*b++ = s->frame_palette[s->frame[i]*3];

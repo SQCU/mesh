@@ -14,10 +14,9 @@ void W_Hook_ExplodeThink(entity this)
 
 	RadiusDamage(this, this.realowner, this.dmg * f, this.dmg_edge * f, this.dmg_radius, this.realowner, NULL, this.dmg_force * f, this.projectiledeathtype, this.weaponentity_fld, NULL);
 	this.projectiledeathtype |= HITTYPE_BOUNCE;
-	//RadiusDamage(this, NULL, this.dmg * f, this.dmg_edge * f, this.dmg_radius, NULL, NULL, this.dmg_force * f, this.projectiledeathtype, NULL);
 
 	if(dt < this.dmg_duration)
-		this.nextthink = time + 0.05; // soon
+		this.nextthink = time + 0.05;
 	else
 		delete(this);
 }
@@ -51,8 +50,8 @@ void W_Hook_Damage(entity this, entity inflictor, entity attacker, float damage,
 	if(GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1)) // no exceptions
-		return; // g_projectiles_damage says to halt
+	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
+		return;
 
 	SetResourceExplicit(this, RES_HEALTH, GetResource(this, RES_HEALTH));
 
@@ -68,7 +67,7 @@ void W_Hook_Touch2(entity this, entity toucher)
 
 void W_Hook_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 {
-	//W_DecreaseAmmo(thiswep, actor, WEP_CVAR_SEC(hook, ammo)); // WEAPONTODO: Figure out how to handle ammo with hook secondary (gravitybomb)
+
 	W_SetupShot(actor, weaponentity, false, 4, SND_HOOKBOMB_FIRE, CH_WEAPON_A, WEP_CVAR_SEC(hook, damage), WEP_HOOK.m_id | HITTYPE_SECONDARY);
 
 	entity gren = new(hookbomb);
@@ -100,7 +99,6 @@ void W_Hook_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 		gren.velocity = gren.velocity + actor.velocity;
 
 	gren.gravity = WEP_CVAR_SEC(hook, gravity);
-	//W_SetupProjVelocity_Basic(gren); // just falling down!
 
 	gren.angles = '0 0 0';
 	gren.flags = FL_PROJECTILE;
@@ -141,10 +139,9 @@ METHOD(Hook, wr_think, void(entity thiswep, entity actor, .entity weaponentity, 
 
     if(actor.(weaponentity).hook)
     {
-        // if hooked, no bombs, and increase the timer
+
         actor.(weaponentity).hook_refire = max(actor.(weaponentity).hook_refire, time + WEP_CVAR_PRI(hook, refire) * W_WeaponRateFactor(actor));
 
-        // hook also inhibits health regeneration, but only for 1 second
         if(!(actor.items & IT_UNLIMITED_AMMO))
             actor.pauseregen_finished = max(actor.pauseregen_finished, time + autocvar_g_balance_pause_fuel_regen);
     }
@@ -169,13 +166,13 @@ METHOD(Hook, wr_think, void(entity thiswep, entity actor, .entity weaponentity, 
                     {
                         W_DecreaseAmmo(thiswep, actor, (time - actor.(weaponentity).hook_time_fueldecrease) * hooked_fuel, weaponentity);
                         actor.(weaponentity).hook_time_fueldecrease = time;
-                        // decrease next frame again
+
                     }
                     else
                     {
                         SetResource(actor, RES_FUEL, 0);
                         actor.(weaponentity).hook_state |= HOOK_REMOVING;
-                        if(actor.(weaponentity).m_weapon != WEP_Null) // offhand
+                        if(actor.(weaponentity).m_weapon != WEP_Null)
                         	W_SwitchWeapon_Force(actor, w_getbestweapon(actor, weaponentity), weaponentity);
                     }
                 }
@@ -220,8 +217,8 @@ METHOD(Hook, wr_checkammo1, bool(Hook thiswep, entity actor, .entity weaponentit
 }
 METHOD(Hook, wr_checkammo2, bool(Hook thiswep, entity actor, .entity weaponentity))
 {
-    // infinite ammo for now
-    return true; // actor.ammo_cells >= WEP_CVAR_SEC(hook, ammo); // WEAPONTODO: see above
+
+    return true;
 }
 METHOD(Hook, wr_resetplayer, void(entity thiswep, entity actor))
 {
@@ -243,7 +240,7 @@ METHOD(Hook, wr_killmessage, Notification(entity thiswep))
 
 METHOD(Hook, wr_impacteffect, void(entity thiswep, entity actor))
 {
-    // the hook bomb uses a negative w_backoff factor because it explodes slightly below the floor, unlike other projectiles
+
     vector org2 = w_org + w_backoff * -2;
     pointparticles(EFFECT_HOOK_EXPLODE, org2, '0 0 0', 1);
     if(!w_issilent)
@@ -261,7 +258,7 @@ float autocvar_cl_grapplehook_alpha = 1;
 void Draw_CylindricLine(vector from, vector to, float thickness, string texture, float aspect, float shift, vector rgb, float theAlpha, float drawflag, vector vieworg);
 
 entityclass(Hook);
-classfield(Hook) .entity HookType; // ENT_CLIENT_*
+classfield(Hook) .entity HookType;
 classfield(Hook) .vector origin;
 classfield(Hook) .vector velocity;
 classfield(Hook) .float HookSilent;
@@ -294,7 +291,7 @@ void Draw_GrapplingHook(entity this)
 	if(this.teleport_time)
 	if(time > this.teleport_time)
 	{
-		sound (this, CH_SHOTS_SINGLE, SND_Null, VOL_BASE, ATTEN_NORM); // safeguard
+		sound (this, CH_SHOTS_SINGLE, SND_Null, VOL_BASE, ATTEN_NORM);
 		this.teleport_time = 0;
 	}
 
@@ -329,7 +326,7 @@ void Draw_GrapplingHook(entity this)
 				if(this.HookRange)
 					b = view_origin + view_forward * this.HookRange;
 				else
-					b = view_origin + view_forward * vlen(this.velocity - this.origin); // honor original length of beam!
+					b = view_origin + view_forward * vlen(this.velocity - this.origin);
 				WarpZone_TraceLine(view_origin, b, MOVE_NORMAL, NULL);
 				b = WarpZone_UnTransformOrigin(WarpZone_trace_transform, trace_endpos);
 				a = view_origin + view_forward * vs.x + view_right * -vs.y + view_up * vs.z;
@@ -366,10 +363,11 @@ void Draw_GrapplingHook(entity this)
 				case NUM_TEAM_2: tex = "particles/hook_blue"; rgb = '0.3 0.3 1'; break;
 				case NUM_TEAM_3: tex = "particles/hook_yellow"; rgb = '1 1 0.3'; break;
 				case NUM_TEAM_4: tex = "particles/hook_pink"; rgb = '1 0.3 1'; break;
+				case NUM_TEAM_5: tex = "particles/hook_white"; rgb = '0.3 1 0.3'; break;
 				default: tex = "particles/hook_white"; rgb = entcs_GetColor(this.sv_entnum - 1); break;
 			}
 			break;
-		case NET_ENT_CLIENT_ARC_BEAM: // todo
+		case NET_ENT_CLIENT_ARC_BEAM:
 			intensity = bound(0.2, 1 + Noise_Pink(this, frametime) * 1 + Noise_Burst(this, frametime, 0.03) * 0.3, 2);
 			offset = Noise_Brown(this, frametime) * 10;
 			tex = "particles/lgbeam";
@@ -396,7 +394,7 @@ void Draw_GrapplingHook(entity this)
 		case NET_ENT_CLIENT_HOOK:
 			if(vdist(trace_endpos - atrans, >, 0.5))
 			{
-				setorigin(this, trace_endpos); // hook endpoint!
+				setorigin(this, trace_endpos);
 				this.angles = vectoangles(trace_endpos - atrans);
 				this.drawmask = MASK_NORMAL;
 			}
@@ -406,7 +404,7 @@ void Draw_GrapplingHook(entity this)
 			}
 			break;
 		case NET_ENT_CLIENT_ARC_BEAM:
-			setorigin(this, a); // beam origin!
+			setorigin(this, a);
 			break;
 	}
 
@@ -416,7 +414,7 @@ void Draw_GrapplingHook(entity this)
 		case NET_ENT_CLIENT_HOOK:
 			break;
 		case NET_ENT_CLIENT_ARC_BEAM:
-			pointparticles(EFFECT_ARC_LIGHTNING2, trace_endpos, normalize(atrans - trace_endpos), frametime * intensity); // todo: new effect
+			pointparticles(EFFECT_ARC_LIGHTNING2, trace_endpos, normalize(atrans - trace_endpos), frametime * intensity);
 			break;
 	}
 }
@@ -446,7 +444,7 @@ NET_HANDLE(ENT_CLIENT_HOOK, bool bIsNew)
 
 	if(sf & 1)
 	{
-		int myowner = ReadByte();
+		int myowner = ReadShort();
 		int slot = ReadByte();
 		this.owner = playerslots[myowner - 1];
 		this.sv_entnum = myowner;
@@ -486,7 +484,7 @@ NET_HANDLE(ENT_CLIENT_HOOK, bool bIsNew)
 		{
 			default:
 			case NET_ENT_CLIENT_HOOK:
-				// for the model
+
 				setmodel(this, MDL_HOOK);
 				this.drawmask = MASK_NORMAL;
 				break;
@@ -500,5 +498,4 @@ NET_HANDLE(ENT_CLIENT_HOOK, bool bIsNew)
 	return true;
 }
 
-// TODO: hook: temporarily transform this.origin for drawing the model along warpzones!
 #endif

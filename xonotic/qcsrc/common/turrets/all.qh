@@ -39,11 +39,9 @@ REGISTRY_CHECK(Turrets)
 	P(class, prefix, track_accel_rot, float) \
 	P(class, prefix, track_blendrate, float) \
 	P(class, prefix, track_type, float) \
-	/**/
 
 #define TR_PROPS(L, class, prefix) \
 	L(TR_CONFIG_BEGIN, TR_CONFIG, TR_CONFIG_END, class, prefix) \
-	/**/
 
 #define TR_CONFIG(class, turname, fld, T)     _TR_CONFIG(class, fld, T, turname)
 #ifdef SVQC
@@ -57,7 +55,7 @@ REGISTRY_CHECK(Turrets)
 #endif
 
 #define DEFAULT_FILENAME "turrets_dump.cfg"
-// NOTE: dumpeffectinfo, dumpnotifs, dumpturrets and dumpweapons use similar code
+
 GENERIC_COMMAND(dumpturrets, "Dump all turrets into " DEFAULT_FILENAME, false)
 {
     switch(request)
@@ -111,7 +109,6 @@ GENERIC_COMMAND(dumpturrets, "Dump all turrets into " DEFAULT_FILENAME, false)
     }
 }
 #undef DEFAULT_FILENAME
-
 
 const int TUR_FIRST = 1;
 #define TUR_LAST (REGISTRY_COUNT(Turrets) - 1)

@@ -5,13 +5,11 @@
 #endif
 
 #ifdef SVQC
-	/** Use new sound handling. TODO: use when sounds play correctly on clients */
+
 	bool autocvar_g_debug_globalsounds = false;
 	bool autocvar_sv_taunt;
 	bool autocvar_sv_autotaunt;
 #endif
-
-// player sounds, voice messages
 
 .string m_playersoundstr;
 ..string m_playersoundfld;
@@ -80,10 +78,9 @@ REGISTER_VOICEMSG(seenflag, VOICETYPE_TEAMRADIO, true)
 REGISTER_VOICEMSG(taunt, VOICETYPE_TAUNT, true)
 REGISTER_VOICEMSG(teamshoot, VOICETYPE_LASTATTACKER, true)
 
-//NOTE: some models lack sounds for these:
 REGISTER_VOICEMSG(flagcarriertakingdamage, VOICETYPE_TEAMRADIO, false)
 REGISTER_VOICEMSG(getflag, VOICETYPE_TEAMRADIO, false)
-//NOTE: ALL models lack sounds for these (only available in default sounds currently):
+
 REGISTER_VOICEMSG(affirmative, VOICETYPE_TEAMRADIO, false)
 REGISTER_VOICEMSG(attacking, VOICETYPE_TEAMRADIO, false)
 REGISTER_VOICEMSG(defending, VOICETYPE_TEAMRADIO, false)
@@ -122,13 +119,13 @@ REGISTER_GLOBALSOUND(FALL_METAL, "misc/metalhitground 4")
 
 bool GetPlayerSoundSampleField_notFound;
 void PrecachePlayerSounds(string f);
-//#ifdef CSQC
+
 	.string GetVoiceMessageSampleField(string type);
 	.string GetPlayerSoundSampleField(string type);
 	void ClearPlayerSounds(entity this);
 	float LoadPlayerSounds(entity this, string f, bool strict);
 	void UpdatePlayerSounds(entity this);
-//#endif
+
 entity GetVoiceMessage(string type);
 
 string GlobalSound_sample(string pair, float r);

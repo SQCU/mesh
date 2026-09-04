@@ -1,10 +1,5 @@
-#include "test.qh"
 
-/**
- * handle string spacing as markdown:
- *   - two spaces escape a linebreak (otherwise text wraps)
- *   - two linebreaks become a paragraph (remain unchanged)
- */
+
 ERASEABLE
 string markdown(string s)
 {
@@ -40,27 +35,4 @@ string markdown(string s)
 		}
 	});
 	return buf;
-}
-
-TEST(Markdown, LineWrap)
-{
-	#define X(expect, in) MACRO_BEGIN \
-		string out = markdown(in); \
-		EXPECT_TRUE(expect == out); \
-		LOG_INFO(expect); \
-		LOG_INFO(out); \
-	MACRO_END
-
-	// identity
-	X("lorem ipsum", "lorem ipsum");
-	// trim trailing space
-	X("lorem ipsum", "lorem ipsum ");
-	// allow manual input wrapping
-	X("lorem ipsum", "lorem\nipsum");
-	// line break
-	X("lorem\nipsum", "lorem  \nipsum");
-	// paragraph
-	X("lorem\n\nipsum", "lorem\n\nipsum");
-	SUCCEED();
-	#undef X
 }

@@ -14,7 +14,6 @@ REGISTER_MUTATOR(doublejump, true);
 
 #define PHYS_DOUBLEJUMP(s)                     STAT(DOUBLEJUMP, s)
 
-
 MUTATOR_HOOKFUNCTION(doublejump, PlayerJump)
 {
     entity player = M_ARGV(0, entity);
@@ -26,7 +25,6 @@ MUTATOR_HOOKFUNCTION(doublejump, PlayerJump)
 		{
 			M_ARGV(2, bool) = true;
 
-			// we MUST clip velocity here!
 			float f = player.velocity * trace_plane_normal;
 			if (f < 0)
 				player.velocity -= f * trace_plane_normal;

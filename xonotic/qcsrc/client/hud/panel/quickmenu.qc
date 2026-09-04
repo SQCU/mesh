@@ -6,17 +6,14 @@
 #include <common/ent_cs.qh>
 #include <common/minigames/cl_minigames.qh>
 
-// QuickMenu (#23)
-
 void HUD_QuickMenu_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_quickmenu_align");
 }
 
-// QUICKMENU_MAXLINES must be <= 10
 const int QUICKMENU_MAXLINES = 10;
-// visible entries are loaded from QuickMenu_Buffer into QuickMenu_Page_* arrays
+
 string QuickMenu_Page_Command[QUICKMENU_MAXLINES];
 string QuickMenu_Page_Description[QUICKMENU_MAXLINES];
 int QuickMenu_Page_Command_Type[QUICKMENU_MAXLINES];
@@ -26,8 +23,7 @@ int QuickMenu_Page_ActivatedEntry = -1;
 bool QuickMenu_Page_ActivatedEntry_Close;
 float QuickMenu_Page_ActivatedEntry_Time;
 bool QuickMenu_IsLastPage;
-// all the entries are loaded into QuickMenu_Buffer
-// each entry (submenu or command) is composed of 2 entries
+
 const int QUICKMENU_MAXENTRIES = 256;
 const int QUICKMENU_BUFFER_MAXENTRIES = 2 * QUICKMENU_MAXENTRIES;
 int QuickMenu_Buffer = -1;
@@ -36,7 +32,6 @@ int QuickMenu_Buffer_Index;
 string QuickMenu_CurrentSubMenu;
 float QuickMenu_TimeOut;
 
-// QuickMenu_Buffer are labeled with these tags
 #define QM_TAG_TITLE "T"
 #define QM_TAG_SUBMENU "S"
 #define QM_TAG_COMMAND "C"
@@ -55,20 +50,17 @@ float QuickMenu_TimeOut;
 	++QuickMenu_Buffer_Size; \
 }
 
-// special entries are shown with a different color
 #define QUICKMENU_ENTRY_SPECIAL(title, command) QUICKMENU_ENTRY(title, strcat("\n", command))
-
 
 void QuickMenu_TimeOut_Set()
 {
 	QuickMenu_TimeOut = ((autocvar_hud_panel_quickmenu_time > 0) ? time + autocvar_hud_panel_quickmenu_time : 0);
 }
 
-// if s1 is not empty s will be displayed as command otherwise as submenu
 void QuickMenu_Page_LoadEntry(int i, string s, string s1)
 {
 	TC(int, i);
-	//LOG_INFOF("^xc80 entry %d: %s, %s\n", i, s, s1);
+
 	strcpy(QuickMenu_Page_Description[i], s);
 	strcpy(QuickMenu_Page_Command[i], s1);
 }
@@ -90,7 +82,6 @@ bool HUD_QuickMenu_Forbidden()
 		|| (QuickMenu_TimeOut && time > QuickMenu_TimeOut));
 }
 
-// returns true if succeded, false otherwise
 bool QuickMenu_Open(string mode, string submenu, string file)
 {
 	QuickMenu_TimeOut = 0;
@@ -151,7 +142,7 @@ bool QuickMenu_Open(string mode, string submenu, string file)
 		QuickMenu_Buffer_Size = 0;
 		while((s = fgets(fh)) && QuickMenu_Buffer_Size < QUICKMENU_BUFFER_MAXENTRIES)
 		{
-			// first skip invalid entries, so we don't check them anymore
+
 			int argc;
 			argc = tokenize_console(s);
 			if(argc == 0 || argv(0) == "")
@@ -168,13 +159,13 @@ bool QuickMenu_Open(string mode, string submenu, string file)
 			}
 			else if(argc == 3)
 			{
-				// check for special keywords
+
 				float teamplayers = 0, without_me = 0;
 				switch(argv(2))
 				{
-					case "ALLPLAYERS_BUT_ME":		without_me = 1; // fall through
+					case "ALLPLAYERS_BUT_ME":		without_me = 1;
 					case "ALLPLAYERS":				teamplayers = 0; break;
-					case "OWNTEAMPLAYERS_BUT_ME":	without_me = 1; // fall through
+					case "OWNTEAMPLAYERS_BUT_ME":	without_me = 1;
 					case "OWNTEAMPLAYERS":			teamplayers = 1; break;
 					case "ENEMYTEAMPLAYERS":		teamplayers = 2; break;
 					default: continue;
@@ -184,7 +175,7 @@ bool QuickMenu_Open(string mode, string submenu, string file)
 				{
 					QuickMenu_Buffer_Set(QM_TAG_SUBMENU, argv(0));
 					++QuickMenu_Buffer_Size;
-					QuickMenu_Buffer_Set(QM_TAG_TITLE, strcat(ftos(teamplayers), ftos(without_me))); // put PLCOMMAND arguments in the title string
+					QuickMenu_Buffer_Set(QM_TAG_TITLE, strcat(ftos(teamplayers), ftos(without_me)));
 					++QuickMenu_Buffer_Size;
 					QuickMenu_Buffer_Set(QM_TAG_PLCOMMAND, argv(1));
 					++QuickMenu_Buffer_Size;
@@ -195,7 +186,6 @@ bool QuickMenu_Open(string mode, string submenu, string file)
 		}
 		fclose(fh);
 
-		// forcedly add this entry
 		if (autocvar_hud_panel_quickmenu_server_is_default && autocvar__hud_panel_quickmenu_file_from_server != "")
 		{
 			string prev_value = cvar_string("hud_panel_quickmenu_server_is_default");
@@ -251,7 +241,6 @@ void QuickMenu_Close()
 	QuickMenu_Buffer_Close();
 }
 
-// It assumes submenu open tag is already detected
 void QuickMenu_skip_submenu(string submenu)
 {
 	string z_submenu = string_null; strcpy(z_submenu, submenu);
@@ -260,7 +249,7 @@ void QuickMenu_skip_submenu(string submenu)
 		string s = QuickMenu_Buffer_Get();
 		if(substring(s, 0, 1) != QM_TAG_SUBMENU)
 			continue;
-		if(substring(s, 1, -1) == z_submenu) // submenu end
+		if(substring(s, 1, -1) == z_submenu)
 			break;
 		QuickMenu_skip_submenu(substring(s, 1, -1));
 	}
@@ -295,7 +284,6 @@ bool HUD_Quickmenu_PlayerListEntries_Create(string cmd, int teamplayers, bool wi
 	return true;
 }
 
-// new_page 0 means page 0, new_page != 0 means next page
 int QuickMenu_Buffer_Index_Prev;
 bool QuickMenu_Page_Load(string target_submenu, bool new_page)
 {
@@ -317,34 +305,31 @@ bool QuickMenu_Page_Load(string target_submenu, bool new_page)
 	QuickMenu_Buffer_Index = 0;
 	if (z_submenu != "")
 	{
-		// skip everything until the submenu open tag is found
+
 		for( ; QuickMenu_Buffer_Index < QuickMenu_Buffer_Size; ++QuickMenu_Buffer_Index)
 		{
 			s = QuickMenu_Buffer_Get();
 			if(substring(s, 0, 1) == QM_TAG_SUBMENU && substring(s, 1, -1) == z_submenu)
 			{
-				//LOG_INFOF("^3 beginning of %s\n", z_submenu);
+
 				++QuickMenu_Buffer_Index;
-				break; // target_submenu found!
+				break;
 			}
-			//LOG_INFOF("^1 skipping %s\n", s);
+
 		}
 		if(QuickMenu_Buffer_Index == QuickMenu_Buffer_Size)
 			LOG_WARNF("Couldn't find submenu \"%s\"", z_submenu);
 	}
 
-	// only the last page can contain up to QUICKMENU_MAXLINES entries
-	// the other ones contain only (QUICKMENU_MAXLINES - 2) entries
-	// so that the panel can show an empty row and "Continue..."
 	float first_entry = QuickMenu_Page * (QUICKMENU_MAXLINES - 2);
-	int entry_num = 0; // counts entries in target_submenu
+	int entry_num = 0;
 	for( ; QuickMenu_Buffer_Index < QuickMenu_Buffer_Size; ++QuickMenu_Buffer_Index)
 	{
 		s = QuickMenu_Buffer_Get();
 
 		if(z_submenu != "" && substring(s, 1, -1) == z_submenu)
 		{
-			//LOG_INFOF("^3 end of %s\n", z_submenu);
+
 			break;
 		}
 
@@ -362,7 +347,6 @@ bool QuickMenu_Page_Load(string target_submenu, bool new_page)
 			}
 		}
 
-		// NOTE: entries are loaded starting from 1, not from 0
 		if(substring(s, 0, 1) == QM_TAG_SUBMENU)
 		{
 			if(entry_num >= first_entry)
@@ -380,7 +364,7 @@ bool QuickMenu_Page_Load(string target_submenu, bool new_page)
 					cmd = substring(cmd, 1, -1);
 				else if(command_code == QM_TAG_PLCOMMAND)
 				{
-					// throw away the current quickmenu buffer and load a new one
+
 					cmd = substring(cmd, 1, -1);
 					strunzone(z_submenu);
 					if(HUD_Quickmenu_PlayerListEntries_Create(cmd, stof(substring(s, 1, 1)), stof(substring(s, 2, 1))))
@@ -445,7 +429,7 @@ void QuickMenu_Page_ActiveEntry(int entry_num)
 	if(QuickMenu_Page_Command[QuickMenu_Page_ActivatedEntry])
 	{
 		bool f = QuickMenu_ActionForNumber(QuickMenu_Page_ActivatedEntry);
-		// toggle commands don't close the quickmenu
+
 		if(QuickMenu_Page_Command_Type[QuickMenu_Page_ActivatedEntry] == 1)
 			QuickMenu_Page_ActivatedEntry_Close = false;
 		else
@@ -472,7 +456,6 @@ bool QuickMenu_InputEvent(int bInputType, float nPrimary, float nSecondary)
 	if(bInputType == 2)
 		return false;
 
-	// at this point bInputType can only be 0 or 1 (key pressed or released)
 	bool key_pressed = (bInputType == 0);
 
 	int hudShiftState_prev = hudShiftState;
@@ -504,13 +487,13 @@ bool QuickMenu_InputEvent(int bInputType, float nPrimary, float nSecondary)
 	}
 	else if (hudShiftState_prev == hudShiftState && mouseClicked_prev == mouseClicked)
 	{
-		// allow console bind to work
+
 		string con_keys = findkeysforcommand("toggleconsole", 0);
-		int keys = tokenize(con_keys); // findkeysforcommand returns data for this
+		int keys = tokenize(con_keys);
 		for (int i = 0; i < keys; ++i)
 		{
 			if(nPrimary == stof(argv(i)))
-				return false; // hit console bind
+				return false;
 		}
 		if (key_pressed)
 			QuickMenu_Close();
@@ -600,7 +583,7 @@ void HUD_Quickmenu_DrawEntry(vector pos, string desc, string option, vector font
 
 		if(option)
 		{
-			// when there's enough room align description regardless the checkbox
+
 			float extra_offset = (panel_size.x - desc_width) * min(autocvar_hud_panel_quickmenu_align, 1);
 			if(offset + real_desc_width + extra_offset < desc_width)
 				offset += extra_offset;
@@ -635,8 +618,7 @@ void HUD_QuickMenu()
 			++QuickMenu_Page_Entries;
 			QuickMenu_Page_LoadEntry(QuickMenu_Page_Entries, sprintf(_("Submenu%d"), QuickMenu_Page_Entries), "");
 			++QuickMenu_Page_Entries;
-			// although real command doesn't matter here, it must not be empty
-			// otherwise the entry is displayed like a submenu
+
 			for (; QuickMenu_Page_Entries < QUICKMENU_MAXLINES - 1; ++QuickMenu_Page_Entries)
 				QuickMenu_Page_LoadEntry(QuickMenu_Page_Entries, sprintf(_("Command%d"), QuickMenu_Page_Entries), "-");
 			++QuickMenu_Page_Entries;
@@ -678,10 +660,10 @@ void HUD_QuickMenu()
 		else
 		{
 			if (substring(QuickMenu_Page_Command[i], 0, 1) == "\n")
-				color = "^6"; // special command
+				color = "^6";
 			else
 				color = "^3";
-			if(QuickMenu_Page_Command_Type[i] == 1) // toggle command
+			if(QuickMenu_Page_Command_Type[i] == 1)
 			{
 				int end = strstrofs(QuickMenu_Page_Command[i], ";", 0);
 				if(end < 0)
@@ -691,8 +673,7 @@ void HUD_QuickMenu()
 
 				if(argv(1) && argv(0) == "toggle")
 				{
-					// "enable feature xxx" "toggle xxx" (or "toggle xxx 1 0")
-					// "disable feature xxx" "toggle xxx 0 1"
+
 					float ON_value = 1, OFF_value = 0;
 					if(argv(2))
 						ON_value = stof(argv(2));
@@ -735,15 +716,14 @@ void HUD_QuickMenu()
 	}
 }
 
-
 #define QUICKMENU_SMENU(submenu,eng_submenu) { \
 	if(target_submenu == eng_submenu && target_submenu_found) \
-		return; /* target_submenu entries are now loaded, exit */ \
+		return;                                                   \
 	if(QuickMenu_Buffer_Size < QUICKMENU_BUFFER_MAXENTRIES) \
 		QuickMenu_Buffer_Set(QM_TAG_SUBMENU, submenu); \
 	++QuickMenu_Buffer_Size; \
 	if(target_submenu == eng_submenu && !target_submenu_found) { \
-		QuickMenu_Buffer_Size = 0; /* enable load of next entries */ \
+		QuickMenu_Buffer_Size = 0;                                   \
 		target_submenu_found = true; \
 	} \
 }
@@ -759,9 +739,6 @@ void HUD_QuickMenu()
 	} \
 }
 
-
-
-// useful to Translate a string inside the Command
 #define QUICKMENU_ENTRY_TC(title,command,text,translated_text) {\
 	if(prvm_language == "en") { \
 		tc_title = title; \
@@ -788,9 +765,9 @@ void HUD_Quickmenu_PlayerListEntries(string cmd, int teamplayers, bool without_m
 	Scoreboard_UpdatePlayerTeams();
 	for(pl = players.sort_next; pl; pl = pl.sort_next)
 	{
-		if(teamplayers == 1 && (pl.team != myteam || pl.team == NUM_SPECTATOR)) // only own team players
+		if(teamplayers == 1 && (pl.team != myteam || pl.team == NUM_SPECTATOR))
 			continue;
-		if(teamplayers == 2 && (pl.team == myteam || pl.team == NUM_SPECTATOR)) // only enemy team players
+		if(teamplayers == 2 && (pl.team == myteam || pl.team == NUM_SPECTATOR))
 			continue;
 		if(without_me && pl.sv_entnum == player_localnum)
 			continue;
@@ -800,17 +777,11 @@ void HUD_Quickmenu_PlayerListEntries(string cmd, int teamplayers, bool without_m
 	return;
 }
 
-
-// Specifying target_submenu, this function only loads entries inside target_submenu
-// NOTE: alternatively we could have loaded the whole default quickmenu and
-// then called QuickMenu_Page_Load(target_submenu, 0);
-// but this sytem is more reliable since we can always refer to target_submenu
-// with the English title even if a translation is active
 void QuickMenu_Default(string target_submenu)
 {
 	bool target_submenu_found = false;
 	if(target_submenu != "")
-		QuickMenu_Buffer_Size = QUICKMENU_BUFFER_MAXENTRIES; // forbids load of next entries until target_submenu
+		QuickMenu_Buffer_Size = QUICKMENU_BUFFER_MAXENTRIES;
 
 	string tc_title;
 	string tc_cmd;

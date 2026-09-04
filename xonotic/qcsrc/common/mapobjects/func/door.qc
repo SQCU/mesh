@@ -1,26 +1,5 @@
 #include "door.qh"
 #include "door_rotating.qh"
-/*
-
-Doors are similar to buttons, but can spawn a fat trigger field around them
-to open without a touch, and they link together to form simultanious
-double/quad doors.
-
-Door.owner is the master door.  If there is only one door, it points to itself.
-If multiple doors, all will point to a single one.
-
-Door.enemy chains from the master door through all doors linked in the chain.
-
-*/
-
-
-/*
-=============================================================================
-
-THINK FUNCTIONS
-
-=============================================================================
-*/
 
 void door_go_down(entity this);
 void door_go_up(entity this, entity actor, entity trigger);
@@ -35,7 +14,7 @@ void door_blocked(entity this, entity blocker)
 		&& !IS_DEAD(blocker)
 #endif
 	)
-	{ // KIll Kill Kill!!
+	{
 #ifdef SVQC
 		Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 #endif
@@ -43,11 +22,10 @@ void door_blocked(entity this, entity blocker)
 	else
 	{
 #ifdef SVQC
-		if((this.dmg) && (blocker.takedamage == DAMAGE_YES))    // Shall we bite?
+		if((this.dmg) && (blocker.takedamage == DAMAGE_YES))
 			Damage (blocker, this, this, this.dmg, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 #endif
 
-		 // don't change direction for dead or dying stuff
 		if(IS_DEAD(blocker)
 #ifdef SVQC
 			&& (blocker.takedamage == DAMAGE_NO)
@@ -76,8 +54,8 @@ void door_blocked(entity this, entity blocker)
 #ifdef SVQC
 		else
 		{
-			//gib dying stuff just to make sure
-			if((this.dmg) && (blocker.takedamage != DAMAGE_NO))    // Shall we bite?
+
+			if((this.dmg) && (blocker.takedamage != DAMAGE_NO))
 				Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 		}
 #endif
@@ -92,7 +70,7 @@ void door_hit_top(entity this)
 		_sound (this, CH_TRIGGER_SINGLE, this.noise1, VOL_BASE, ATTEN_NORM);
 	this.state = STATE_TOP;
 	if (this.spawnflags & DOOR_TOGGLE)
-		return;		// don't come down automatically
+		return;
 	if (this.classname == "door")
 	{
 		setthink(this, door_go_down);
@@ -127,10 +105,10 @@ void door_go_down(entity this)
 void door_go_up(entity this, entity actor, entity trigger)
 {
 	if (this.state == STATE_UP)
-		return;		// already going up
+		return;
 
 	if (this.state == STATE_TOP)
-	{	// reset top wait time
+	{
 		this.nextthink = this.ltime + this.wait;
 		return;
 	}
@@ -147,26 +125,14 @@ void door_go_up(entity this, entity actor, entity trigger)
 	this.message = oldmessage;
 }
 
-
-/*
-=============================================================================
-
-ACTIVATION FUNCTIONS
-
-=============================================================================
-*/
-
 bool door_check_keys(entity door, entity player)
 {
 	if(door.owner)
 		door = door.owner;
 
-	// no key needed
 	if(!door.itemkeys)
 		return true;
 
-	// this door require a key
-	// only a player can have a key
 	if(!IS_PLAYER(player))
 		return false;
 
@@ -175,7 +141,7 @@ bool door_check_keys(entity door, entity player)
 	store = PS(player);
 #endif
 	int valid = (door.itemkeys & store.itemkeys);
-	door.itemkeys &= ~valid; // only some of the needed keys were given
+	door.itemkeys &= ~valid;
 
 	if(!door.itemkeys)
 	{
@@ -199,7 +165,6 @@ bool door_check_keys(entity door, entity player)
 		return false;
 	}
 
-	// door needs keys the player doesn't have
 #ifdef SVQC
 	if(player.key_door_messagetime <= time)
 	{
@@ -234,18 +199,17 @@ void door_fire(entity this, entity actor, entity trigger)
 		}
 	}
 
-// trigger all paired doors
 	entity e = this;
 	do {
 		if (e.classname == "door") {
 			door_go_up(e, actor, trigger);
 		} else {
-			// if the BIDIR spawnflag (==2) is set and the trigger has set trigger_reverse, reverse the opening direction
+
 			if ((e.spawnflags & DOOR_ROTATING_BIDIR) && trigger.trigger_reverse!=0 && e.lip != 666 && e.state == STATE_BOTTOM) {
-				e.lip = 666; // e.lip is used to remember reverse opening direction for door_rotating
+				e.lip = 666;
 				e.pos2 = '0 0 0' - e.pos2;
 			}
-			// if BIDIR_IN_DOWN (==8) is set, prevent the door from reoping during closing if it is triggered from the wrong side
+
 			if (!((e.spawnflags & DOOR_ROTATING_BIDIR) &&  (e.spawnflags & DOOR_ROTATING_BIDIR_IN_DOWN) && e.state == STATE_DOWN
 				&& (((e.lip == 666) && (trigger.trigger_reverse == 0)) || ((e.lip != 666) && (trigger.trigger_reverse != 0)))))
 			{
@@ -258,7 +222,6 @@ void door_fire(entity this, entity actor, entity trigger)
 
 void door_use(entity this, entity actor, entity trigger)
 {
-	//dprint("door_use (model: ");dprint(this.model);dprint(")\n");
 
 	if (this.owner)
 		door_fire(this.owner, actor, trigger);
@@ -273,27 +236,19 @@ void door_damage(entity this, entity inflictor, entity attacker, float damage, i
 
 	if (this.itemkeys)
 	{
-		// don't allow opening doors through damage if keys are required
+
 		return;
 	}
 
 	if (GetResource(this, RES_HEALTH) <= 0)
 	{
 		SetResourceExplicit(this.owner, RES_HEALTH, this.owner.max_health);
-		this.owner.takedamage = DAMAGE_NO;	// will be reset upon return
+		this.owner.takedamage = DAMAGE_NO;
 		door_use(this.owner, attacker, NULL);
 	}
 }
 
 .float door_finished;
-
-/*
-================
-door_touch
-
-Prints messages
-================
-*/
 
 void door_touch(entity this, entity toucher)
 {
@@ -316,7 +271,7 @@ void door_touch(entity this, entity toucher)
 
 void door_generic_plat_blocked(entity this, entity blocker)
 {
-	if((this.spawnflags & DOOR_CRUSH) && (blocker.takedamage != DAMAGE_NO)) { // Kill Kill Kill!!
+	if((this.spawnflags & DOOR_CRUSH) && (blocker.takedamage != DAMAGE_NO)) {
 #ifdef SVQC
 		Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 #endif
@@ -325,11 +280,10 @@ void door_generic_plat_blocked(entity this, entity blocker)
 	{
 
 #ifdef SVQC
-		if((this.dmg) && (blocker.takedamage == DAMAGE_YES))    // Shall we bite?
+		if((this.dmg) && (blocker.takedamage == DAMAGE_YES))
 			Damage (blocker, this, this, this.dmg, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 #endif
 
-		 //Dont chamge direction for dead or dying stuff
 		if(IS_DEAD(blocker) && (blocker.takedamage == DAMAGE_NO))
 		{
 			if (this.wait >= 0)
@@ -343,21 +297,13 @@ void door_generic_plat_blocked(entity this, entity blocker)
 #ifdef SVQC
 		else
 		{
-			//gib dying stuff just to make sure
-			if((this.dmg) && (blocker.takedamage != DAMAGE_NO))    // Shall we bite?
+
+			if((this.dmg) && (blocker.takedamage != DAMAGE_NO))
 				Damage (blocker, this, this, 10000, DEATH_HURTTRIGGER.m_id, DMG_NOWEP, blocker.origin, '0 0 0');
 		}
 #endif
 	}
 }
-
-/*
-=========================================
-door trigger
-
-Spawned if a door lacks a real activator
-=========================================
-*/
 
 void door_trigger_touch(entity this, entity toucher)
 {
@@ -372,7 +318,6 @@ void door_trigger_touch(entity this, entity toucher)
 	if (time < this.door_finished)
 		return;
 
-	// check if door is locked
 	if (!door_check_keys(this, toucher))
 		return;
 
@@ -396,15 +341,6 @@ void door_spawnfield(entity this, vector fmins, vector fmaxs)
 
 	setsize (trigger, t1 - '60 60 8', t2 + '60 60 8');
 }
-
-
-/*
-=============
-LinkDoors
-
-
-=============
-*/
 
 entity LinkDoors_nextent(entity cur, entity near, entity pass)
 {
@@ -440,7 +376,7 @@ void LinkDoors(entity this)
 #endif
 
 	if (this.enemy)
-		return;		// already linked by another door
+		return;
 	if (this.spawnflags & DOOR_DONT_LINK)
 	{
 		this.owner = this.enemy = this;
@@ -454,12 +390,11 @@ void LinkDoors(entity this)
 
 		door_spawnfield(this, this.absmin, this.absmax);
 
-		return;		// don't want to link this door
+		return;
 	}
 
 	FindConnectedComponent(this, enemy, LinkDoors_nextent, LinkDoors_isconnected, this);
 
-	// set owner, and make a loop of the chain
 	LOG_TRACE("LinkDoors: linking doors:");
 	for(t = this; ; t = t.enemy)
 	{
@@ -473,7 +408,6 @@ void LinkDoors(entity this)
 	}
 	LOG_TRACE("");
 
-	// collect health, targetname, message, size
 	cmins = this.absmin;
 	cmaxs = this.absmax;
 	for(t = this; ; t = t.enemy)
@@ -500,7 +434,6 @@ void LinkDoors(entity this)
 			break;
 	}
 
-	// distribute health, targetname, message
 	for(t = this; t; t = t.enemy)
 	{
 		SetResourceExplicit(t, RES_HEALTH, GetResource(this, RES_HEALTH));
@@ -509,9 +442,6 @@ void LinkDoors(entity this)
 		if(t.enemy == this)
 			break;
 	}
-
-	// shootable, or triggered doors just needed the owner/enemy links,
-	// they don't spawn a field
 
 	if (GetResource(this, RES_HEALTH))
 		return;
@@ -526,34 +456,6 @@ void LinkDoors(entity this)
 REGISTER_NET_LINKED(ENT_CLIENT_DOOR)
 
 #ifdef SVQC
-/*QUAKED spawnfunc_func_door (0 .5 .8) ? START_OPEN x DOOR_DONT_LINK GOLD_KEY SILVER_KEY TOGGLE
-if two doors touch, they are assumed to be connected and operate as a unit.
-
-TOGGLE causes the door to wait in both the start and end states for a trigger event.
-
-START_OPEN causes the door to move to its destination when spawned, and operate in reverse.  It is used to temporarily or permanently close off an area when triggered (not useful for touch or takedamage doors).
-
-GOLD_KEY causes the door to open only if the activator holds a gold key.
-
-SILVER_KEY causes the door to open only if the activator holds a silver key.
-
-"message"	is printed when the door is touched if it is a trigger door and it hasn't been fired yet
-"angle"		determines the opening direction
-"targetname" if set, no touch field will be spawned and a remote button or trigger field activates the door.
-"health"	if set, door must be shot open
-"speed"		movement speed (100 default)
-"wait"		wait before returning (3 default, -1 = never return)
-"lip"		lip remaining at end of move (8 default)
-"dmg"		damage to inflict when blocked (2 default)
-"sounds"
-0)	no sound
-1)	stone
-2)	base
-3)	stone chain
-4)	screechy metal
-FIXME: only one sound set available at the time being
-
-*/
 
 float door_send(entity this, entity to, float sf)
 {
@@ -583,7 +485,7 @@ float door_send(entity this, entity to, float sf)
 
 	if(sf & SF_TRIGGER_RESET)
 	{
-		// client makes use of this, we do not
+
 	}
 
 	if(sf & SF_TRIGGER_UPDATE)
@@ -599,7 +501,7 @@ float door_send(entity this, entity to, float sf)
 
 void door_link()
 {
-	//Net_LinkEntity(this, false, 0, door_send);
+
 }
 #endif
 
@@ -629,17 +531,15 @@ void door_reset(entity this)
 
 #ifdef SVQC
 
-// common code for func_door and func_door_rotating spawnfuncs
 void door_init_shared(entity this)
 {
 	this.max_health = GetResource(this, RES_HEALTH);
 
-	// unlock sound
 	if(this.noise == "")
 	{
 		this.noise = "misc/talk.wav";
 	}
-	// door still locked sound
+
 	if(this.noise3 == "")
 	{
 		this.noise3 = "misc/talk.wav";
@@ -656,17 +556,16 @@ void door_init_shared(entity this)
 		this.message2 = "was squished by";
 	}
 
-	// TODO: other soundpacks
 	if (this.sounds > 0 || q3compat)
 	{
-		// Doors in Q3 always have sounds (they're hard coded)
+
 		this.noise2 = "plats/medplat1.wav";
 		this.noise1 = "plats/medplat2.wav";
 	}
 
 	if (q3compat)
 	{
-		// CPMA adds these fields for overriding the engine sounds
+
 		string s = GetField_fullspawndata(this, "sound_start", true);
 		string e = GetField_fullspawndata(this, "sound_end", true);
 
@@ -676,12 +575,11 @@ void door_init_shared(entity this)
 			this.noise1 = strzone(e);
 	}
 
-	// sound when door stops moving
 	if(this.noise1 && this.noise1 != "")
 	{
 		precache_sound(this.noise1);
 	}
-	// sound when door is moving
+
 	if(this.noise2 && this.noise2 != "")
 	{
 		precache_sound(this.noise2);
@@ -705,7 +603,7 @@ void door_init_shared(entity this)
 
 	if (GetResource(this, RES_HEALTH) || (q3compat && this.targetname == ""))
 	{
-		//this.canteamdamage = true; // TODO
+
 		this.takedamage = DAMAGE_YES;
 		this.event_damage = door_damage;
 	}
@@ -716,10 +614,9 @@ void door_init_shared(entity this)
 	}
 }
 
-// spawnflags require key (for now only func_door)
 spawnfunc(func_door)
 {
-	// Quake 1 keys compatibility
+
 	if (this.spawnflags & SPAWNFLAGS_GOLD_KEY)
 		this.itemkeys |= ITEM_KEY_BIT(0);
 	if (this.spawnflags & SPAWNFLAGS_SILVER_KEY)
@@ -738,8 +635,6 @@ spawnfunc(func_door)
 	if(this.spawnflags & DOOR_NONSOLID)
 		this.solid = SOLID_NOT;
 
-// DOOR_START_OPEN is to allow an entity to be lighted in the closed position
-// but spawn in the open position
 	if (this.spawnflags & DOOR_START_OPEN)
 		InitializeEntity(this, door_init_startopen, INITPRIO_SETLOCATION);
 
@@ -762,8 +657,6 @@ spawnfunc(func_door)
 
 	settouch(this, door_touch);
 
-// LinkDoors can't be done until all of the doors have been spawned, so
-// the sizes can be detected properly.
 	InitializeEntity(this, LinkDoors, INITPRIO_LINKDOORS);
 
 	this.reset = door_reset;

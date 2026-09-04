@@ -1,7 +1,5 @@
 #pragma once
 
-// Note:
-//   to use this, you FIRST call configureSliderVisuals, then multiple times addValue, then configureTextSlider
 #include "slider.qh"
 CLASS(TextSlider, Slider)
 	METHOD(TextSlider, valueToText, string(entity, float));

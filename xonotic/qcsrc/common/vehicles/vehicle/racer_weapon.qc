@@ -23,7 +23,6 @@ METHOD(RacerAttack, wr_think, void(entity thiswep, entity actor, .entity weapone
             w_shotorg = vshotorg;
             w_shotdir = v_forward;
 
-            // Fix z-aim (for chase mode)
             crosshair_trace(player);
             w_shotdir.z = normalize(trace_endpos - vshotorg).z * 0.5;
         }
@@ -105,13 +104,11 @@ void racer_rocket_tracker(entity this)
     traceline(this.origin, this.origin + v_forward * 64 - '0 0 32', MOVE_NORMAL, this);
     newdir = normalize(predicted_origin - this.origin);
 
-    //vector
     float height_diff = predicted_origin_z - this.origin_z;
 
     if(vdist(newdir - v_forward, >, autocvar_g_vehicle_racer_rocket_locked_maxangle))
     {
-        //bprint("Target lost!\n");
-        //dprint("OF:", ftos(vlen(newdir - v_forward)), "\n");
+
         setthink(this, racer_rocket_groundhugger);
         return;
     }
@@ -153,7 +150,7 @@ void racer_rocket_groundhugger(entity this)
     tracebox(this.origin, this.mins, this.maxs, this.origin + olddir * 64, MOVE_WORLDONLY,this);
     if(trace_fraction <= 0.5)
     {
-        // Hitting somethign soon, just speed ahead
+
         this.velocity = olddir * newvel;
         UpdateCSQCProjectile(this);
         return;
@@ -168,7 +165,7 @@ void racer_rocket_groundhugger(entity this)
     else
     {
         this.velocity = olddir * newvel;
-        this.velocity_z -= 1600 * sys_frametime; // 2x grav looks better for this one
+        this.velocity_z -= 1600 * sys_frametime;
     }
 
     int cont = pointcontents(this.origin - '0 0 32');

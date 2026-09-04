@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Frame-time harness for the DarkPlaces client.
-#
-#   ./bench.sh record <map>            record a fixed flythrough demo for <map>
-#   ./bench.sh run    <map> <label> [cvar=value ...]
-#                                      timedemo that demo 3x and print fps
-#
-# timedemo replays the identical input stream every run, so two labels differ
-# only by the cvars under test.  Everything lands in render/bench-out/.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -17,17 +9,25 @@ OUT=$here/bench-out
 W=${W:-1280}; H=${H:-720}
 mkdir -p "$HOME_DIR/data" "$OUT"
 
-run_dp() { # $1 = cfg name already written into $HOME_DIR/data, $2 = seconds budget
+run_dp() {
 	"$DP" -xonotic -basedir "$BASE" -userdir "$HOME_DIR" \
 	      -window -width "$W" -height "$H" -nosound +exec "$1" \
 	      > "$OUT/$1.log" 2>&1 &
 	local pid=$!
 	local i=0
 	while kill -0 $pid 2>/dev/null; do
-		i=$((i+1)); [ $i -gt "$2" ] && { kill -9 $pid 2>/dev/null; break; }
+		i=$((i+1)); [ $i -gt "$2" ] && { kill -TERM $pid 2>/dev/null || true; break; }
 		/bin/sleep 1
 	done
-	wait $pid 2>/dev/null || true
+	for _ in $(seq 1 120); do
+		kill -0 $pid 2>/dev/null || break
+		/bin/sleep 0.25
+	done
+	if kill -0 $pid 2>/dev/null; then
+		printf '{"event":"client_termination_pending","pid":%d}\n' "$pid" >&2
+	else
+		wait $pid 2>/dev/null || true
+	fi
 }
 
 cmd=$1; shift
@@ -59,17 +59,6 @@ CFG
 	;;
 run)
 	map=$1; label=$2; shift 2
-	{
-		echo "cl_curl_enabled 0"
-		echo "cl_capturevideo 0"
-		echo "vid_vsync 0"
-		echo "showfps 0"
-		for kv in "$@"; do echo "${kv%%=*} ${kv#*=}"; done
-		echo "defer 1 \"timedemo bench_$map\""
-		echo "defer 3 \"cl_timedemo_benchmark_runs 3\""
-	} > "$HOME_DIR/data/run_$label.cfg"
-	# timedemo chains its own runs; three sequential timedemos, then quit
-	# five back-to-back runs; the first is warm-up (shader compile, texture upload)
 	{
 		echo "cl_curl_enabled 0"
 		echo "vid_vsync 0"

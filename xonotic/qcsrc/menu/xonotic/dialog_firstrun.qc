@@ -19,7 +19,7 @@ float CheckFirstRunButton(entity me)
 		return 1;
 
 	if(cvar_string("_menu_prvm_language") != prvm_language)
-		return 1; // OK will then reopen the dialog in another language
+		return 1;
 
 	if(cvar_string("cl_allow_uid2name") != "-1")
 		return 1;
@@ -56,9 +56,9 @@ void XonoticFirstRunDialog_fill(entity me)
 	me.TR(me);
 		me.TD(me, 1, 3.75, box = makeXonoticInputBox_T(1, "_cl_name",
 			_("Name under which you will appear in the game")));
-			box.forbiddenCharacters = "\r\n\\\"$"; // don't care, isn't getting saved
-			box.maxLength = -127; // negative means encoded length in bytes
-			box.saveImmediately = 0;  // Sorry, can't do this, it spams "name" commands.
+			box.forbiddenCharacters = "\r\n\\\"$";
+			box.maxLength = -127;
+			box.saveImmediately = 0;
 			box.enableClearButton = 0;
 			label.textEntity = box;
 	me.TR(me);
@@ -90,7 +90,6 @@ void XonoticFirstRunDialog_fill(entity me)
 	me.TR(me);
 	me.TD(me, 1, me.columns, e = makeXonoticTextLabel(0.5, _("Player statistics are enabled by default, you can change this in the Profile menu")));
 
-	// because of the language selector, this is a menu_restart!
 	me.gotoRC(me, me.rows - 1, 0);
 	me.TD(me, 1, me.columns, e = makeXonoticCommandButton(_("Save settings"), '0 0 0', "prvm_language \"$_menu_prvm_language\"; saveconfig; menu_restart", COMMANDBUTTON_APPLY));
 		setDependentWeird(e, CheckFirstRunButton);

@@ -20,7 +20,7 @@ float texmemsize(float s3tc)
 	(
 		  2500 * (0.25 ** max(0, cvar("gl_picmip") + cvar("gl_picmip_other")))
 		+ 1500 * (0.25 ** max(0, cvar("gl_picmip") + cvar("gl_picmip_world")))
-	) * ((s3tc && (cvar("r_texture_dds_load") || cvar("gl_texturecompression"))) ? 0.2 : 1.0); // TC: normalmaps 50%, other 25%, few incompressible, guessing 40% as conservative average
+	) * ((s3tc && (cvar("r_texture_dds_load") || cvar("gl_texturecompression"))) ? 0.2 : 1.0);
 }
 void XonoticPicmipSlider_autofix(entity me)
 {
@@ -34,8 +34,7 @@ void XonoticPicmipSlider_autofix(entity me)
 		while(me.value > 0 && texmemsize(me.have_s3tc) > max_hard)
 			me.setValue(me, me.value - 1);
 	}
-	// TODO also check the soft limit!
-	// TODO better handling than clamping the slider!
+
 }
 void XonoticPicmipSlider_draw(entity me)
 {

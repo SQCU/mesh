@@ -3,7 +3,6 @@
 #include "textbox.qh"
 #include <lib/urllib.qh>
 
-
 entity makeXonoticServerToSTab()
 {
 	entity me;

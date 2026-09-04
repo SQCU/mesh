@@ -1,22 +1,5 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 #include "quakedef.h"
 #ifdef CONFIG_CD
 #include "cdaudio.h"
@@ -84,7 +67,6 @@ static void M_GameOptions_Draw (void);
 static void M_ServerList_Draw (void);
 static void M_ModList_Draw (void);
 
-
 static void M_Main_Key (int key, int ascii);
 	static void M_SinglePlayer_Key (int key, int ascii);
 		static void M_Transfusion_Episode_Key (int key, int ascii);
@@ -108,7 +90,7 @@ static void M_GameOptions_Key (int key, int ascii);
 static void M_ServerList_Key (int key, int ascii);
 static void M_ModList_Key (int key, int ascii);
 
-static qboolean	m_entersound;		///< play after drawing a frame, so caching won't disrupt the sound
+static qboolean	m_entersound;
 
 void M_Update_Return_Reason(const char *s)
 {
@@ -120,7 +102,6 @@ void M_Update_Return_Reason(const char *s)
 #define StartingGame	(m_multiplayer_cursor == 1)
 #define JoiningGame		(m_multiplayer_cursor == 0)
 
-// Nehahra
 #define NumberOfNehahraDemos 34
 typedef struct nehahrademonames_s
 {
@@ -174,17 +155,10 @@ static void M_Background(int width, int height)
 	menu_height = bound(1.0f, (float)height, vid_conheight.value);
 	menu_x = (vid_conwidth.integer - menu_width) * 0.5;
 	menu_y = (vid_conheight.integer - menu_height) * 0.5;
-	//DrawQ_Fill(menu_x, menu_y, menu_width, menu_height, 0, 0, 0, 0.5, 0);
+
 	DrawQ_Fill(0, 0, vid_conwidth.integer, vid_conheight.integer, 0, 0, 0, 0.5, 0);
 }
 
-/*
-================
-M_DrawCharacter
-
-Draws one solid graphics character
-================
-*/
 static void M_DrawCharacter (float cx, float cy, int num)
 {
 	char temp[2];
@@ -226,7 +200,6 @@ static void M_DrawTextBox(float x, float y, float width, float height)
 	int n;
 	float cx, cy;
 
-	// draw left side
 	cx = x;
 	cy = y;
 	M_DrawPic (cx, cy, "gfx/box_tl");
@@ -237,7 +210,6 @@ static void M_DrawTextBox(float x, float y, float width, float height)
 	}
 	M_DrawPic (cx, cy+8, "gfx/box_bl");
 
-	// draw middle
 	cx += 8;
 	while (width > 0)
 	{
@@ -256,7 +228,6 @@ static void M_DrawTextBox(float x, float y, float width, float height)
 		cx += 16;
 	}
 
-	// draw right side
 	cy = y;
 	M_DrawPic (cx, cy, "gfx/box_tr");
 	for (n = 0; n < height; n++)
@@ -267,15 +238,6 @@ static void M_DrawTextBox(float x, float y, float width, float height)
 	M_DrawPic (cx, cy+8, "gfx/box_br");
 }
 
-//=============================================================================
-
-//int m_save_demonum;
-
-/*
-================
-M_ToggleMenu
-================
-*/
 static void M_ToggleMenu(int mode)
 {
 	m_entersound = true;
@@ -283,18 +245,17 @@ static void M_ToggleMenu(int mode)
 	if ((key_dest != key_menu && key_dest != key_menu_grabbed) || m_state != m_main)
 	{
 		if(mode == 0)
-			return; // the menu is off, and we want it off
+			return;
 		M_Menu_Main_f ();
 	}
 	else
 	{
 		if(mode == 1)
-			return; // the menu is on, and we want it on
+			return;
 		key_dest = key_game;
 		m_state = m_none;
 	}
 }
-
 
 static int demo_cursor;
 static void M_Demo_Draw (void)
@@ -306,10 +267,8 @@ static void M_Demo_Draw (void)
 	for (i = 0;i < NumberOfNehahraDemos;i++)
 		M_Print(16, 16 + 8*i, NehahraDemos[i].desc);
 
-	// line cursor
 	M_DrawCharacter (8, 16 + demo_cursor*8, 12+((int)(realtime*4)&1));
 }
-
 
 static void M_Menu_Demos_f (void)
 {
@@ -317,7 +276,6 @@ static void M_Menu_Demos_f (void)
 	m_state = m_demo;
 	m_entersound = true;
 }
-
 
 static void M_Demo_Key (int k, int ascii)
 {
@@ -353,14 +311,10 @@ static void M_Demo_Key (int k, int ascii)
 	}
 }
 
-//=============================================================================
-/* MAIN MENU */
-
 static int	m_main_cursor;
 static qboolean m_missingdata = false;
 
-static int MAIN_ITEMS = 4; // Nehahra: Menu Disable
-
+static int MAIN_ITEMS = 4;
 
 void M_Menu_Main_f (void)
 {
@@ -392,7 +346,7 @@ void M_Menu_Main_f (void)
 			else
 			{
 				Con_DPrint("Nehahra not found.\n");
-				NehGameType = TYPE_GAME; // could just complain, but...
+				NehGameType = TYPE_GAME;
 			}
 		}
 		if (NehGameType == TYPE_DEMO)
@@ -413,23 +367,14 @@ void M_Menu_Main_f (void)
 	else
 		MAIN_ITEMS = 5;
 
-	// check if the game data is missing and use a different main menu if so
 	m_missingdata = !forceqmenu.integer && Draw_CachePic (s)->tex == r_texture_notexture;
 	if (m_missingdata)
 		MAIN_ITEMS = 2;
 
-	/*
-	if (key_dest != key_menu)
-	{
-		m_save_demonum = cls.demonum;
-		cls.demonum = -1;
-	}
-	*/
 	key_dest = key_menu;
 	m_state = m_main;
 	m_entersound = true;
 }
-
 
 static void M_Main_Draw (void)
 {
@@ -441,14 +386,14 @@ static void M_Main_Draw (void)
 	{
 		float y;
 		const char *s;
-		M_Background(640, 480); //fall back is always to 640x480, this makes it most readable at that.
+		M_Background(640, 480);
 		y = 480/3-16;
 		s = "You have reached this menu due to missing or unlocatable content/data";M_PrintRed ((640-strlen(s)*8)*0.5, (480/3)-16, s);y+=8;
 		y+=8;
 		s = "You may consider adding";M_Print ((640-strlen(s)*8)*0.5, y, s);y+=8;
 		s = "-basedir /path/to/game";M_Print ((640-strlen(s)*8)*0.5, y, s);y+=8;
 		s = "to your launch commandline";M_Print ((640-strlen(s)*8)*0.5, y, s);y+=8;
-		M_Print (640/2 - 48, 480/2, "Open Console"); //The console usually better shows errors (failures)
+		M_Print (640/2 - 48, 480/2, "Open Console");
 		M_Print (640/2 - 48, 480/2 + 8, "Quit");
 		M_DrawCharacter(640/2 - 56, 480/2 + (8 * m_main_cursor), 12+((int)(realtime*4)&1));
 		return;
@@ -460,7 +405,7 @@ static void M_Main_Draw (void)
 		p = Draw_CachePic ("gfx/menu/tb-transfusion");
 		M_DrawPic (640/2 - p->width/2, 40, "gfx/menu/tb-transfusion");
 		y2 = 120;
-		// 8 rather than MAIN_ITEMS to skip a number and not miss the last option
+
 		for (y1 = 1; y1 <= 8; y1++)
 		{
 			if (MAIN_ITEMS == 7 && y1 == 4)
@@ -480,7 +425,7 @@ static void M_Main_Draw (void)
 	M_DrawPic (16, 4, "gfx/qplaque");
 	p = Draw_CachePic ("gfx/ttl_main");
 	M_DrawPic ( (320-p->width)/2, 4, "gfx/ttl_main");
-// Nehahra
+
 	if (gamemode == GAME_NEHAHRA)
 	{
 		if (NehGameType == TYPE_BOTH)
@@ -498,7 +443,6 @@ static void M_Main_Draw (void)
 	M_DrawPic (54, 32 + m_main_cursor * 20, va(vabuf, sizeof(vabuf), "gfx/menudot%i", f+1));
 }
 
-
 static void M_Main_Key (int key, int ascii)
 {
 	switch (key)
@@ -506,9 +450,7 @@ static void M_Main_Key (int key, int ascii)
 	case K_ESCAPE:
 		key_dest = key_game;
 		m_state = m_none;
-		//cls.demonum = m_save_demonum;
-		//if (cls.demonum != -1 && !cls.demoplayback && cls.state != ca_connected)
-		//	CL_NextDemo ();
+
 		break;
 
 	case K_DOWNARROW:
@@ -730,12 +672,8 @@ static void M_Main_Key (int key, int ascii)
 	}
 }
 
-//=============================================================================
-/* SINGLE PLAYER MENU */
-
 static int	m_singleplayer_cursor;
 #define	SINGLEPLAYER_ITEMS	3
-
 
 void M_Menu_SinglePlayer_f (void)
 {
@@ -743,7 +681,6 @@ void M_Menu_SinglePlayer_f (void)
 	m_state = m_singleplayer;
 	m_entersound = true;
 }
-
 
 static void M_SinglePlayer_Draw (void)
 {
@@ -755,7 +692,6 @@ static void M_SinglePlayer_Draw (void)
 	M_DrawPic (16, 4, "gfx/qplaque");
 	p = Draw_CachePic ("gfx/ttl_sgl");
 
-	// Some mods don't have a single player mode
 	if (gamemode == GAME_GOODVSBAD2 || gamemode == GAME_BATTLEMECH)
 	{
 		M_DrawPic ((320 - p->width) / 2, 4, "gfx/ttl_sgl");
@@ -763,7 +699,7 @@ static void M_SinglePlayer_Draw (void)
 		M_DrawTextBox (60, 8 * 8, 23, 4);
 		if (gamemode == GAME_GOODVSBAD2)
 			M_Print(95, 10 * 8, "Good Vs Bad 2 is for");
-		else  // if (gamemode == GAME_BATTLEMECH)
+		else
 			M_Print(95, 10 * 8, "Battlemech is for");
 		M_Print(83, 11 * 8, "multiplayer play only");
 	}
@@ -779,7 +715,6 @@ static void M_SinglePlayer_Draw (void)
 		M_DrawPic (54, 32 + m_singleplayer_cursor * 20, va(vabuf, sizeof(vabuf), "gfx/menudot%i", f+1));
 	}
 }
-
 
 static void M_SinglePlayer_Key (int key, int ascii)
 {
@@ -840,10 +775,7 @@ static void M_SinglePlayer_Key (int key, int ascii)
 	}
 }
 
-//=============================================================================
-/* LOAD/SAVE MENU */
-
-static int		load_cursor;		///< 0 < load_cursor < MAX_SAVEGAMES
+static int		load_cursor;
 
 static char	m_filenames[MAX_SAVEGAMES][SAVEGAME_COMMENT_LENGTH+1];
 static int		loadable[MAX_SAVEGAMES];
@@ -856,7 +788,6 @@ static void M_ScanSaves (void)
 	char	buf[SAVEGAME_COMMENT_LENGTH + 256];
 	const char *t;
 	qfile_t	*f;
-//	int		version;
 
 	for (i=0 ; i<MAX_SAVEGAMES ; i++)
 	{
@@ -866,19 +797,17 @@ static void M_ScanSaves (void)
 		f = FS_OpenRealFile (name, "rb", false);
 		if (!f)
 			continue;
-		// read enough to get the comment
+
 		len = FS_Read(f, buf, sizeof(buf) - 1);
 		len = min(len, sizeof(buf)-1);
 		buf[len] = 0;
 		t = buf;
-		// version
+
 		COM_ParseToken_Simple(&t, false, false, true);
-		//version = atoi(com_token);
-		// description
+
 		COM_ParseToken_Simple(&t, false, false, true);
 		strlcpy (m_filenames[i], com_token, sizeof (m_filenames[i]));
 
-	// change _ back to space
 		for (j=0 ; j<SAVEGAME_COMMENT_LENGTH ; j++)
 			if (m_filenames[i][j] == '_')
 				m_filenames[i][j] = ' ';
@@ -895,13 +824,12 @@ void M_Menu_Load_f (void)
 	M_ScanSaves ();
 }
 
-
 void M_Menu_Save_f (void)
 {
 	if (!sv.active)
 		return;
 #if 1
-	// LordHavoc: allow saving multiplayer games
+
 	if (cl.islocalgame && cl.intermission)
 		return;
 #else
@@ -916,7 +844,6 @@ void M_Menu_Save_f (void)
 	M_ScanSaves ();
 }
 
-
 static void M_Load_Draw (void)
 {
 	int		i;
@@ -930,10 +857,8 @@ static void M_Load_Draw (void)
 	for (i=0 ; i< MAX_SAVEGAMES; i++)
 		M_Print(16, 32 + 8*i, m_filenames[i]);
 
-// line cursor
 	M_DrawCharacter (8, 32 + load_cursor*8, 12+((int)(realtime*4)&1));
 }
-
 
 static void M_Save_Draw (void)
 {
@@ -948,10 +873,8 @@ static void M_Save_Draw (void)
 	for (i=0 ; i<MAX_SAVEGAMES ; i++)
 		M_Print(16, 32 + 8*i, m_filenames[i]);
 
-// line cursor
 	M_DrawCharacter (8, 32 + load_cursor*8, 12+((int)(realtime*4)&1));
 }
-
 
 static void M_Load_Key (int k, int ascii)
 {
@@ -972,7 +895,6 @@ static void M_Load_Key (int k, int ascii)
 		m_state = m_none;
 		key_dest = key_game;
 
-		// issue the load command
 		Cbuf_AddText (va(vabuf, sizeof(vabuf), "load s%i\n", load_cursor) );
 		return;
 
@@ -993,7 +915,6 @@ static void M_Load_Key (int k, int ascii)
 		break;
 	}
 }
-
 
 static void M_Save_Key (int k, int ascii)
 {
@@ -1030,9 +951,6 @@ static void M_Save_Key (int k, int ascii)
 		break;
 	}
 }
-
-//=============================================================================
-/* Transfusion Single Player Episode Menu */
 
 static int	m_episode_cursor;
 #define	EPISODE_ITEMS	6
@@ -1088,9 +1006,6 @@ static void M_Transfusion_Episode_Key (int key, int ascii)
 		M_Menu_Transfusion_Skill_f ();
 	}
 }
-
-//=============================================================================
-/* Transfusion Single Player Skill Menu */
 
 static int	m_skill_cursor = 2;
 #define	SKILL_ITEMS	5
@@ -1190,12 +1105,9 @@ static void M_Transfusion_Skill_Key (int key, int ascii)
 		}
 	}
 }
-//=============================================================================
-/* MULTIPLAYER MENU */
 
 static int	m_multiplayer_cursor;
 #define	MULTIPLAYER_ITEMS	3
-
 
 void M_Menu_MultiPlayer_f (void)
 {
@@ -1203,7 +1115,6 @@ void M_Menu_MultiPlayer_f (void)
 	m_state = m_multiplayer;
 	m_entersound = true;
 }
-
 
 static void M_MultiPlayer_Draw (void)
 {
@@ -1232,7 +1143,6 @@ static void M_MultiPlayer_Draw (void)
 
 	M_DrawPic (54, 32 + m_multiplayer_cursor * 20, va(vabuf, sizeof(vabuf), "gfx/menudot%i", f+1));
 }
-
 
 static void M_MultiPlayer_Key (int key, int ascii)
 {
@@ -1269,9 +1179,6 @@ static void M_MultiPlayer_Key (int key, int ascii)
 		}
 	}
 }
-
-//=============================================================================
-/* SETUP MENU */
 
 static int		setup_cursor = 4;
 static int		setup_cursor_table[] = {40, 64, 88, 124, 140};
@@ -1362,7 +1269,6 @@ static void M_Setup_Draw (void)
 	M_DrawTextBox (64, 140-8, 14, 1);
 	M_Print(72, 140, "Accept Changes");
 
-	// LordHavoc: rewrote this code greatly
 	if (menuplyr_load)
 	{
 		unsigned char *f;
@@ -1426,7 +1332,6 @@ static void M_Setup_Draw (void)
 	else
 		M_DrawCharacter (56, setup_cursor_table [setup_cursor], 12+((int)(realtime*4)&1));
 }
-
 
 static void M_Setup_Key (int k, int ascii)
 {
@@ -1494,7 +1399,6 @@ forward:
 		if (setup_cursor == 1 || setup_cursor == 2 || setup_cursor == 3)
 			goto forward;
 
-		// setup_cursor == 4 (Accept changes)
 		if (strcmp(cl_name.string, setup_myname) != 0)
 			Cbuf_AddText(va(vabuf, sizeof(vabuf), "name \"%s\"\n", setup_myname) );
 		if (setup_top != setup_oldtop || setup_bottom != setup_oldbottom)
@@ -1538,9 +1442,6 @@ forward:
 		setup_bottom = 15;
 }
 
-//=============================================================================
-/* OPTIONS MENU */
-
 #define	SLIDER_RANGE	10
 
 static void M_DrawSlider (int x, int y, float num, float rangemin, float rangemax)
@@ -1569,10 +1470,7 @@ static void M_DrawCheckbox (int x, int y, int on)
 		M_Print(x, y, "off");
 }
 
-
-//#define OPTIONS_ITEMS 25 aule was here
 #define OPTIONS_ITEMS 27
-
 
 static int options_cursor;
 
@@ -1718,7 +1616,6 @@ static void M_Options_Draw (void)
 	M_Options_PrintCommand( "           Browse Mods", true);
 }
 
-
 static void M_Options_Key (int k, int ascii)
 {
 	switch (k)
@@ -1748,31 +1645,31 @@ static void M_Options_Key (int k, int ascii)
 		case 11:
 			M_Menu_Options_ColorControl_f ();
 			break;
-		case 17: // Customize Effects
+		case 17:
 			M_Menu_Options_Effects_f ();
 			break;
-		case 18: // Effects: Quake
+		case 18:
 			Cbuf_AddText("cl_particles 1;cl_particles_quake 1;cl_particles_quality 1;cl_particles_explosions_shell 0;r_explosionclip 1;cl_stainmaps 0;cl_stainmaps_clearonload 1;cl_decals 0;cl_particles_bulletimpacts 1;cl_particles_smoke 1;cl_particles_sparks 1;cl_particles_bubbles 1;cl_particles_blood 1;cl_particles_blood_alpha 1;cl_particles_blood_bloodhack 0;cl_beams_polygons 0;cl_beams_instantaimhack 0;cl_beams_quakepositionhack 1;cl_beams_lightatend 0;r_lerpmodels 1;r_lerpsprites 1;r_lerplightstyles 0;gl_polyblend 1;r_skyscroll1 1;r_skyscroll2 2;r_waterwarp 1;r_wateralpha 1;r_waterscroll 1\n");
 			break;
-		case 19: // Effects: Normal
+		case 19:
 			Cbuf_AddText("cl_particles 1;cl_particles_quake 0;cl_particles_quality 1;cl_particles_explosions_shell 0;r_explosionclip 1;cl_stainmaps 0;cl_stainmaps_clearonload 1;cl_decals 1;cl_particles_bulletimpacts 1;cl_particles_smoke 1;cl_particles_sparks 1;cl_particles_bubbles 1;cl_particles_blood 1;cl_particles_blood_alpha 1;cl_particles_blood_bloodhack 1;cl_beams_polygons 1;cl_beams_instantaimhack 0;cl_beams_quakepositionhack 1;cl_beams_lightatend 0;r_lerpmodels 1;r_lerpsprites 1;r_lerplightstyles 0;gl_polyblend 1;r_skyscroll1 1;r_skyscroll2 2;r_waterwarp 1;r_wateralpha 1;r_waterscroll 1\n");
 			break;
-		case 20: // Effects: High
+		case 20:
 			Cbuf_AddText("cl_particles 1;cl_particles_quake 0;cl_particles_quality 2;cl_particles_explosions_shell 0;r_explosionclip 1;cl_stainmaps 1;cl_stainmaps_clearonload 1;cl_decals 1;cl_particles_bulletimpacts 1;cl_particles_smoke 1;cl_particles_sparks 1;cl_particles_bubbles 1;cl_particles_blood 1;cl_particles_blood_alpha 1;cl_particles_blood_bloodhack 1;cl_beams_polygons 1;cl_beams_instantaimhack 0;cl_beams_quakepositionhack 1;cl_beams_lightatend 0;r_lerpmodels 1;r_lerpsprites 1;r_lerplightstyles 0;gl_polyblend 1;r_skyscroll1 1;r_skyscroll2 2;r_waterwarp 1;r_wateralpha 1;r_waterscroll 1\n");
 			break;
 		case 21:
 			M_Menu_Options_Graphics_f ();
 			break;
-		case 22: // Lighting: Flares
+		case 22:
 			Cbuf_AddText("r_coronas 1;gl_flashblend 1;r_shadow_gloss 0;r_shadow_realtime_dlight 0;r_shadow_realtime_dlight_shadows 0;r_shadow_realtime_world 0;r_shadow_realtime_world_lightmaps 0;r_shadow_realtime_world_shadows 1;r_bloom 0");
 			break;
-		case 23: // Lighting: Normal
+		case 23:
 			Cbuf_AddText("r_coronas 1;gl_flashblend 0;r_shadow_gloss 1;r_shadow_realtime_dlight 1;r_shadow_realtime_dlight_shadows 0;r_shadow_realtime_world 0;r_shadow_realtime_world_lightmaps 0;r_shadow_realtime_world_shadows 1;r_bloom 0");
 			break;
-		case 24: // Lighting: High
+		case 24:
 			Cbuf_AddText("r_coronas 1;gl_flashblend 0;r_shadow_gloss 1;r_shadow_realtime_dlight 1;r_shadow_realtime_dlight_shadows 1;r_shadow_realtime_world 0;r_shadow_realtime_world_lightmaps 0;r_shadow_realtime_world_shadows 1;r_bloom 1");
 			break;
-		case 25: // Lighting: Full
+		case 25:
 			Cbuf_AddText("r_coronas 1;gl_flashblend 0;r_shadow_gloss 1;r_shadow_realtime_dlight 1;r_shadow_realtime_dlight_shadows 1;r_shadow_realtime_world 1;r_shadow_realtime_world_lightmaps 0;r_shadow_realtime_world_shadows 1;r_bloom 1");
 			break;
 		case 26:
@@ -1818,7 +1715,6 @@ void M_Menu_Options_Effects_f (void)
 	m_state = m_options_effects;
 	m_entersound = true;
 }
-
 
 extern cvar_t cl_stainmaps;
 extern cvar_t cl_stainmaps_clearonload;
@@ -1933,7 +1829,6 @@ static void M_Options_Effects_Draw (void)
 	M_Options_PrintSlider(  "        Water Movement", true, r_waterscroll.value, 0, 10);
 }
 
-
 static void M_Options_Effects_Key (int k, int ascii)
 {
 	switch (k)
@@ -1969,7 +1864,6 @@ static void M_Options_Effects_Key (int k, int ascii)
 		break;
 	}
 }
-
 
 #define	OPTIONS_GRAPHICS_ITEMS	20
 
@@ -2026,7 +1920,6 @@ static void M_Menu_Options_Graphics_AdjustSliders (int dir)
 	else if (options_graphics_cursor == optnum++) Cbuf_AddText ("r_restart\n");
 }
 
-
 static void M_Options_Graphics_Draw (void)
 {
 	int visible;
@@ -2062,7 +1955,6 @@ static void M_Options_Graphics_Draw (void)
 	M_Options_PrintSlider(  "      Bloom Resolution", r_bloom.integer, r_bloom_resolution.value, 64, 2048);
 	M_Options_PrintCommand( "      Restart Renderer", true);
 }
-
 
 static void M_Options_Graphics_Key (int k, int ascii)
 {
@@ -2100,12 +1992,10 @@ static void M_Options_Graphics_Key (int k, int ascii)
 	}
 }
 
-
 #define	OPTIONS_COLORCONTROL_ITEMS	18
 
 static int		options_colorcontrol_cursor;
 
-// intensity value to match up to 50% dither to 'correct' quake
 static cvar_t menu_options_colorcontrol_correctionvalue = {0, "menu_options_colorcontrol_correctionvalue", "0.5", "intensity value that matches up to white/black dither pattern, should be 0.5 for linear color"};
 
 void M_Menu_Options_ColorControl_f (void)
@@ -2114,7 +2004,6 @@ void M_Menu_Options_ColorControl_f (void)
 	m_state = m_options_colorcontrol;
 	m_entersound = true;
 }
-
 
 static void M_Menu_Options_ColorControl_AdjustSliders (int dir)
 {
@@ -2264,7 +2153,7 @@ static void M_Options_ColorControl_Draw (void)
 	DrawQ_SuperPic(menu_x + 4, menu_y + m_opty, dither, 312, 4, 0,0, 1,1,1,1, s,0, 1,1,1,1, 0,t, 1,1,1,1, s,t, 1,1,1,1, 0);m_opty += 4;
 	DrawQ_SuperPic(menu_x + 4, menu_y + m_opty, NULL  , 312, 4, 0,0, 0,0,0,1, 1,0, 1,1,1,1, 0,1, 0,0,0,1, 1,1, 1,1,1,1, 0);m_opty += 4;
 
-	c[0] = menu_options_colorcontrol_correctionvalue.value; // intensity value that should be matched up to a 50% dither to 'correct' quake
+	c[0] = menu_options_colorcontrol_correctionvalue.value;
 	c[1] = c[0];
 	c[2] = c[1];
 	VID_ApplyGammaToColor(c, c);
@@ -2290,7 +2179,6 @@ static void M_Options_ColorControl_Draw (void)
 	DrawQ_SuperPic(menu_x + x + 16, menu_y + m_opty + 16, dither, 16, 16, 0,0, 1,1,1,1, s,0, 1,1,1,1, 0,t, 1,1,1,1, s,t, 1,1,1,1, 0);
 	DrawQ_SuperPic(menu_x + x + 32, menu_y + m_opty + 16, dither, 16, 16, 0,0, 1,1,1,1, u,0, 1,1,1,1, 0,v, 1,1,1,1, u,v, 1,1,1,1, 0);
 }
-
 
 static void M_Options_ColorControl_Key (int k, int ascii)
 {
@@ -2349,10 +2237,6 @@ static void M_Options_ColorControl_Key (int k, int ascii)
 	}
 }
 
-
-//=============================================================================
-/* KEYS MENU */
-
 static const char *quakebindnames[][2] =
 {
 {"+attack", 		"attack"},
@@ -2378,7 +2262,7 @@ static const char *quakebindnames[][2] =
 
 static const char *transfusionbindnames[][2] =
 {
-{"",				"Movement"},		// Movement commands
+{"",				"Movement"},
 {"+forward", 		"walk forward"},
 {"+back", 			"backpedal"},
 {"+left", 			"turn left"},
@@ -2387,7 +2271,7 @@ static const char *transfusionbindnames[][2] =
 {"+moveright", 		"step right"},
 {"+jump", 			"jump / swim up"},
 {"+movedown",		"swim down"},
-{"",				"Combat"},			// Combat commands
+{"",				"Combat"},
 {"impulse 1",		"Pitch Fork"},
 {"impulse 2",		"Flare Gun"},
 {"impulse 3",		"Shotgun"},
@@ -2404,7 +2288,7 @@ static const char *transfusionbindnames[][2] =
 {"impulse 22",		"previous weapon"},
 {"+attack", 		"attack"},
 {"+button3",		"altfire"},
-{"",				"Inventory"},		// Inventory commands
+{"",				"Inventory"},
 {"impulse 40",		"Dr.'s Bag"},
 {"impulse 41",		"Crystal Ball"},
 {"impulse 42",		"Beast Vision"},
@@ -2412,7 +2296,7 @@ static const char *transfusionbindnames[][2] =
 {"impulse 23",		"next item"},
 {"impulse 24",		"previous item"},
 {"impulse 25",		"use item"},
-{"",				"Misc"},			// Misc commands
+{"",				"Misc"},
 {"+button4",		"use"},
 {"impulse 50",		"add bot (red)"},
 {"impulse 51",		"add bot (blue)"},
@@ -2421,7 +2305,7 @@ static const char *transfusionbindnames[][2] =
 {"impulse 27",		"identify player"},
 {"impulse 55",		"voting menu"},
 {"impulse 56",		"observer mode"},
-{"",				"Taunts"},            // Taunts
+{"",				"Taunts"},
 {"impulse 70",		"taunt 0"},
 {"impulse 71",		"taunt 1"},
 {"impulse 72",		"taunt 2"},
@@ -2460,97 +2344,6 @@ static const char *goodvsbad2bindnames[][2] =
 static int numcommands;
 static const char *(*bindnames)[2];
 
-/*
-typedef struct binditem_s
-{
-	char *command, *description;
-	struct binditem_s *next;
-}
-binditem_t;
-
-typedef struct bindcategory_s
-{
-	char *name;
-	binditem_t *binds;
-	struct bindcategory_s *next;
-}
-bindcategory_t;
-
-static bindcategory_t *bindcategories = NULL;
-
-static void M_ClearBinds (void)
-{
-	for (c = bindcategories;c;c = cnext)
-	{
-		cnext = c->next;
-		for (b = c->binds;b;b = bnext)
-		{
-			bnext = b->next;
-			Z_Free(b);
-		}
-		Z_Free(c);
-	}
-	bindcategories = NULL;
-}
-
-static void M_AddBindToCategory(bindcategory_t *c, char *command, char *description)
-{
-	for (b = &c->binds;*b;*b = &(*b)->next);
-	*b = Z_Alloc(sizeof(binditem_t) + strlen(command) + 1 + strlen(description) + 1);
-	*b->command = (char *)((*b) + 1);
-	*b->description = *b->command + strlen(command) + 1;
-	strlcpy(*b->command, command, strlen(command) + 1);
-	strlcpy(*b->description, description, strlen(description) + 1);
-}
-
-static void M_AddBind (char *category, char *command, char *description)
-{
-	for (c = &bindcategories;*c;c = &(*c)->next)
-	{
-		if (!strcmp(category, (*c)->name))
-		{
-			M_AddBindToCategory(*c, command, description);
-			return;
-		}
-	}
-	*c = Z_Alloc(sizeof(bindcategory_t));
-	M_AddBindToCategory(*c, command, description);
-}
-
-static void M_DefaultBinds (void)
-{
-	M_ClearBinds();
-	M_AddBind("movement", "+jump", "jump / swim up");
-	M_AddBind("movement", "+forward", "walk forward");
-	M_AddBind("movement", "+back", "backpedal");
-	M_AddBind("movement", "+left", "turn left");
-	M_AddBind("movement", "+right", "turn right");
-	M_AddBind("movement", "+speed", "run");
-	M_AddBind("movement", "+moveleft", "step left");
-	M_AddBind("movement", "+moveright", "step right");
-	M_AddBind("movement", "+strafe", "sidestep");
-	M_AddBind("movement", "+lookup", "look up");
-	M_AddBind("movement", "+lookdown", "look down");
-	M_AddBind("movement", "centerview", "center view");
-	M_AddBind("movement", "+mlook", "mouse look");
-	M_AddBind("movement", "+klook", "keyboard look");
-	M_AddBind("movement", "+moveup", "swim up");
-	M_AddBind("movement", "+movedown", "swim down");
-	M_AddBind("weapons", "+attack", "attack");
-	M_AddBind("weapons", "impulse 10", "next weapon");
-	M_AddBind("weapons", "impulse 12", "previous weapon");
-	M_AddBind("weapons", "impulse 1", "select weapon 1 (axe)");
-	M_AddBind("weapons", "impulse 2", "select weapon 2 (shotgun)");
-	M_AddBind("weapons", "impulse 3", "select weapon 3 (super )");
-	M_AddBind("weapons", "impulse 4", "select weapon 4 (nailgun)");
-	M_AddBind("weapons", "impulse 5", "select weapon 5 (super nailgun)");
-	M_AddBind("weapons", "impulse 6", "select weapon 6 (grenade launcher)");
-	M_AddBind("weapons", "impulse 7", "select weapon 7 (rocket launcher)");
-	M_AddBind("weapons", "impulse 8", "select weapon 8 (lightning gun)");
-}
-*/
-
-
 static int		keys_cursor;
 static int		bind_grab;
 
@@ -2576,13 +2369,11 @@ void M_Menu_Keys_f (void)
 		bindnames = quakebindnames;
 	}
 
-	// Make sure "keys_cursor" doesn't start on a section in the binding list
 	keys_cursor = 0;
 	while (bindnames[keys_cursor][0][0] == '\0')
 	{
 		keys_cursor++;
 
-		// Only sections? There may be a problem somewhere...
 		if (keys_cursor >= numcommands)
 			Sys_Error ("M_Init: The key binding list only contains sections");
 	}
@@ -2605,7 +2396,6 @@ static void M_UnbindCommand (const char *command)
 	}
 }
 
-
 static void M_Keys_Draw (void)
 {
 	int		i, j;
@@ -2624,15 +2414,13 @@ static void M_Keys_Draw (void)
 	else
 		M_Print(18, 32, "Enter to change, backspace to clear");
 
-// search for known bindings
 	for (i=0 ; i<numcommands ; i++)
 	{
 		y = 48 + 8*i;
 
-		// If there's no command, it's just a section
 		if (bindnames[i][0][0] == '\0')
 		{
-			M_PrintRed (4, y, "\x0D");  // #13 is the little arrow pointing to the right
+			M_PrintRed (4, y, "\x0D");
 			M_PrintRed (16, y, bindnames[i][1]);
 			continue;
 		}
@@ -2641,7 +2429,6 @@ static void M_Keys_Draw (void)
 
 		Key_FindKeysForCommand (bindnames[i][0], keys, NUMKEYS, 0);
 
-		// LordHavoc: redesigned to print more than 2 keys, inspired by Tomaz's MiniRacer
 		if (keys[0] == -1)
 			strlcpy(keystring, "???", sizeof(keystring));
 		else
@@ -2667,7 +2454,6 @@ static void M_Keys_Draw (void)
 		M_DrawCharacter (140, 48 + keys_cursor*8, 12+((int)(realtime*4)&1));
 }
 
-
 static void M_Keys_Key (int k, int ascii)
 {
 	char	cmd[80];
@@ -2675,13 +2461,13 @@ static void M_Keys_Key (int k, int ascii)
 	char	tinystr[2];
 
 	if (bind_grab)
-	{	// defining a key
+	{
 		S_LocalSound ("sound/misc/menu1.wav");
 		if (k == K_ESCAPE)
 		{
 			bind_grab = false;
 		}
-		else //if (k != '`')
+		else
 		{
 			dpsnprintf (cmd, sizeof(cmd), "bind \"%s\" \"%s\"\n", Key_KeynumToString (k, tinystr, sizeof(tinystr)), bindnames[keys_cursor][0]);
 			Cbuf_InsertText (cmd);
@@ -2706,7 +2492,7 @@ static void M_Keys_Key (int k, int ascii)
 			if (keys_cursor < 0)
 				keys_cursor = numcommands-1;
 		}
-		while (bindnames[keys_cursor][0][0] == '\0');  // skip sections
+		while (bindnames[keys_cursor][0][0] == '\0');
 		break;
 
 	case K_DOWNARROW:
@@ -2718,10 +2504,10 @@ static void M_Keys_Key (int k, int ascii)
 			if (keys_cursor >= numcommands)
 				keys_cursor = 0;
 		}
-		while (bindnames[keys_cursor][0][0] == '\0');  // skip sections
+		while (bindnames[keys_cursor][0][0] == '\0');
 		break;
 
-	case K_ENTER:		// go into bind mode
+	case K_ENTER:
 		Key_FindKeysForCommand (bindnames[keys_cursor][0], keys, NUMKEYS, 0);
 		S_LocalSound ("sound/misc/menu2.wav");
 		if (keys[NUMKEYS - 1] != -1)
@@ -2729,8 +2515,8 @@ static void M_Keys_Key (int k, int ascii)
 		bind_grab = true;
 		break;
 
-	case K_BACKSPACE:		// delete bindings
-	case K_DEL:				// delete bindings
+	case K_BACKSPACE:
+	case K_DEL:
 		S_LocalSound ("sound/misc/menu2.wav");
 		M_UnbindCommand (bindnames[keys_cursor][0]);
 		break;
@@ -2744,7 +2530,6 @@ void M_Menu_Reset_f (void)
 	m_entersound = true;
 }
 
-
 static void M_Reset_Key (int key, int ascii)
 {
 	switch (key)
@@ -2752,7 +2537,6 @@ static void M_Reset_Key (int key, int ascii)
 	case 'Y':
 	case 'y':
 		Cbuf_AddText ("cvar_resettodefaults_all;exec default.cfg\n");
-		// no break here since we also exit the menu
 
 	case K_ESCAPE:
 	case 'n':
@@ -2774,9 +2558,6 @@ static void M_Reset_Draw (void)
 	M_Print(8 + 4 * (linelength - 19),  8, "Really wanna reset?");
 	M_Print(8 + 4 * (linelength - 11), 16, "Press y / n");
 }
-
-//=============================================================================
-/* VIDEO MENU */
 
 video_resolution_t video_resolutions_hardcoded[] =
 {
@@ -2838,7 +2619,7 @@ video_resolution_t video_resolutions_hardcoded[] =
 {"SNES 8x7"                  ,  512, 448, 512, 448, 1.1667},
 {NULL, 0, 0, 0, 0, 0}
 };
-// this is the number of the default mode (640x480) in the list above
+
 int video_resolutions_hardcoded_count = sizeof(video_resolutions_hardcoded) / sizeof(*video_resolutions_hardcoded) - 1;
 
 #define VIDEO_ITEMS 11
@@ -2868,35 +2649,34 @@ static void M_Menu_Video_FindResolution(int w, int h, float a)
 		menu_video_resolutions_count = video_resolutions_hardcoded_count;
 	}
 
-	// Look for the closest match to the current resolution
 	menu_video_resolution = 0;
 	for (i = 1;i < menu_video_resolutions_count;i++)
 	{
-		// if the new mode would be a worse match in width, skip it
+
 		if (abs(menu_video_resolutions[i].width - w) > abs(menu_video_resolutions[menu_video_resolution].width - w))
 			continue;
-		// if it is equal in width, check height
+
 		if (menu_video_resolutions[i].width == w && menu_video_resolutions[menu_video_resolution].width == w)
 		{
-			// if the new mode would be a worse match in height, skip it
+
 			if (abs(menu_video_resolutions[i].height - h) > abs(menu_video_resolutions[menu_video_resolution].height - h))
 				continue;
-			// if it is equal in width and height, check pixel aspect
+
 			if (menu_video_resolutions[i].height == h && menu_video_resolutions[menu_video_resolution].height == h)
 			{
-				// if the new mode would be a worse match in pixel aspect, skip it
+
 				if (fabs(menu_video_resolutions[i].pixelheight - a) > fabs(menu_video_resolutions[menu_video_resolution].pixelheight - a))
 					continue;
-				// if it is equal in everything, skip it (prefer earlier modes)
+
 				if (menu_video_resolutions[i].pixelheight == a && menu_video_resolutions[menu_video_resolution].pixelheight == a)
 					continue;
-				// better match for width, height, and pixel aspect
+
 				menu_video_resolution = i;
 			}
-			else // better match for width and height
+			else
 				menu_video_resolution = i;
 		}
-		else // better match for width
+		else
 			menu_video_resolution = i;
 	}
 }
@@ -2909,7 +2689,6 @@ void M_Menu_Video_f (void)
 
 	M_Menu_Video_FindResolution(vid.width, vid.height, vid_pixelheight.value);
 }
-
 
 static void M_Video_Draw (void)
 {
@@ -2932,7 +2711,6 @@ static void M_Video_Draw (void)
 
 	t = 0;
 
-	// Current and Proposed Resolution
 	M_Print(16, video_cursor_table[t] - 12, "    Current Resolution");
 	if (vid_supportrefreshrate && vid.userefreshrate && vid.fullscreen)
 		M_Print(220, video_cursor_table[t] - 12, va(vabuf, sizeof(vabuf), "%dx%d %.2fhz", vid.width, vid.height, vid.refreshrate));
@@ -2943,32 +2721,26 @@ static void M_Video_Draw (void)
 	M_Print(96, video_cursor_table[t] + 8, va(vabuf, sizeof(vabuf), "Type: %s", menu_video_resolutions[menu_video_resolution].type));
 	t++;
 
-	// Bits per pixel
 	M_Print(16, video_cursor_table[t], "        Bits per pixel");
 	M_Print(220, video_cursor_table[t], (vid_bitsperpixel.integer == 32) ? "32" : "16");
 	t++;
 
-	// Bits per pixel
 	M_Print(16, video_cursor_table[t], "          Antialiasing");
 	M_DrawSlider(220, video_cursor_table[t], vid_samples.value, 1, 32);
 	t++;
 
-	// Refresh Rate
 	M_ItemPrint(16, video_cursor_table[t], "      Use Refresh Rate", vid_supportrefreshrate);
 	M_DrawCheckbox(220, video_cursor_table[t], vid_userefreshrate.integer);
 	t++;
 
-	// Refresh Rate
 	M_ItemPrint(16, video_cursor_table[t], "          Refresh Rate", vid_supportrefreshrate && vid_userefreshrate.integer);
 	M_DrawSlider(220, video_cursor_table[t], vid_refreshrate.value, 50, 150);
 	t++;
 
-	// Fullscreen
 	M_Print(16, video_cursor_table[t], "            Fullscreen");
 	M_DrawCheckbox(220, video_cursor_table[t], vid_fullscreen.integer);
 	t++;
 
-	// Vertical Sync
 	M_ItemPrint(16, video_cursor_table[t], "         Vertical Sync", true);
 	M_DrawCheckbox(220, video_cursor_table[t], vid_vsync.integer);
 	t++;
@@ -2985,14 +2757,11 @@ static void M_Video_Draw (void)
 	M_DrawCheckbox(220, video_cursor_table[t], gl_texturecompression.integer);
 	t++;
 
-	// "Apply" button
 	M_Print(220, video_cursor_table[t], "Apply");
 	t++;
 
-	// Cursor
 	M_DrawCharacter(200, video_cursor_table[video_cursor], 12+((int)(realtime*4)&1));
 }
-
 
 static void M_Menu_Video_AdjustSliders (int dir)
 {
@@ -3003,7 +2772,7 @@ static void M_Menu_Video_AdjustSliders (int dir)
 	t = 0;
 	if (video_cursor == t++)
 	{
-		// Resolution
+
 		int r;
 		for(r = 0;r < menu_video_resolutions_count;r++)
 		{
@@ -3036,13 +2805,12 @@ static void M_Menu_Video_AdjustSliders (int dir)
 		Cvar_SetValueQuick (&gl_texturecompression, !gl_texturecompression.integer);
 }
 
-
 static void M_Video_Key (int key, int ascii)
 {
 	switch (key)
 	{
 		case K_ESCAPE:
-			// vid_shared.c has a copy of the current video config. We restore it
+
 			Cvar_SetValueQuick(&vid_fullscreen, vid.fullscreen);
 			Cvar_SetValueQuick(&vid_bitsperpixel, vid.bitsperpixel);
 			Cvar_SetValueQuick(&vid_samples, vid.samples);
@@ -3096,12 +2864,8 @@ static void M_Video_Key (int key, int ascii)
 	}
 }
 
-//=============================================================================
-/* HELP MENU */
-
 static int		help_page;
 #define	NUM_HELP_PAGES	6
-
 
 void M_Menu_Help_f (void)
 {
@@ -3111,15 +2875,12 @@ void M_Menu_Help_f (void)
 	help_page = 0;
 }
 
-
-
 static void M_Help_Draw (void)
 {
 	char vabuf[1024];
 	M_Background(320, 200);
 	M_DrawPic (0, 0, va(vabuf, sizeof(vabuf), "gfx/help%i", help_page));
 }
-
 
 static void M_Help_Key (int key, int ascii)
 {
@@ -3146,17 +2907,12 @@ static void M_Help_Key (int key, int ascii)
 
 }
 
-//=============================================================================
-/* CEDITS MENU */
-
 void M_Menu_Credits_f (void)
 {
 	key_dest = key_menu;
 	m_state = m_credits;
 	m_entersound = true;
 }
-
-
 
 static void M_Credits_Draw (void)
 {
@@ -3167,19 +2923,14 @@ static void M_Credits_Draw (void)
 	M_DrawPic (0, 433, "gfx/creditsbottom");
 }
 
-
 static void M_Credits_Key (int key, int ascii)
 {
 		M_Menu_Main_f ();
 }
 
-//=============================================================================
-/* QUIT MENU */
-
 static const char *m_quit_message[9];
 static int		m_quit_prevstate;
 static qboolean	wasInMenus;
-
 
 static int M_QuitMessage(const char *line1, const char *line2, const char *line3, const char *line4, const char *line5, const char *line6, const char *line7, const char *line8)
 {
@@ -3199,7 +2950,7 @@ static int M_ChooseQuitMessage(int request)
 {
 	if (m_missingdata)
 	{
-		// frag related quit messages are pointless for a fallback menu, so use something generic
+
 		if (request-- == 0) return M_QuitMessage("Are you sure you want to quit?","Press Y to quit, N to stay",NULL,NULL,NULL,NULL,NULL,NULL);
 		return 0;
 	}
@@ -3269,12 +3020,11 @@ void M_Menu_Quit_f (void)
 	m_quit_prevstate = m_state;
 	m_state = m_quit;
 	m_entersound = true;
-	// count how many there are
+
 	for (n = 1;M_ChooseQuitMessage(n);n++);
-	// choose one
+
 	M_ChooseQuitMessage(rand() % n);
 }
-
 
 static void M_Quit_Key (int key, int ascii)
 {
@@ -3322,14 +3072,11 @@ static void M_Quit_Draw (void)
 	}
 	lines = (lastline - firstline) + 1;
 	M_Background(linelength * 8 + 16, lines * 8 + 16);
-	if (!m_missingdata) //since this is a fallback menu for missing data, it is very hard to read with the box
-		M_DrawTextBox(0, 0, linelength, lines); //this is less obtrusive than hacking up the M_DrawTextBox function
+	if (!m_missingdata)
+		M_DrawTextBox(0, 0, linelength, lines);
 	for (i = 0, l = firstline;i < lines;i++, l++)
 		M_Print(8 + 4 * (linelength - strlen(m_quit_message[l])), 8 + 8 * i, m_quit_message[l]);
 }
-
-//=============================================================================
-/* LAN CONFIG MENU */
 
 static int		lanConfig_cursor = -1;
 static int		lanConfig_cursor_table [] = {56, 76, 84, 120};
@@ -3356,7 +3103,6 @@ void M_Menu_LanConfig_f (void)
 
 	M_Update_Return_Reason("");
 }
-
 
 static void M_LanConfig_Draw (void)
 {
@@ -3411,7 +3157,6 @@ static void M_LanConfig_Draw (void)
 		M_Print(basex, 168, m_return_reason);
 }
 
-
 static void M_LanConfig_Key (int key, int ascii)
 {
 	int		l;
@@ -3428,7 +3173,7 @@ static void M_LanConfig_Key (int key, int ascii)
 		lanConfig_cursor--;
 		if (lanConfig_cursor < 0)
 			lanConfig_cursor = NUM_LANCONFIG_CMDS-1;
-		// when in start game menu, skip the unused search qw servers item
+
 		if (StartingGame && lanConfig_cursor == 2)
 			lanConfig_cursor = 1;
 		break;
@@ -3438,7 +3183,7 @@ static void M_LanConfig_Key (int key, int ascii)
 		lanConfig_cursor++;
 		if (lanConfig_cursor >= NUM_LANCONFIG_CMDS)
 			lanConfig_cursor = 0;
-		// when in start game menu, skip the unused search qw servers item
+
 		if (StartingGame && lanConfig_cursor == 1)
 			lanConfig_cursor = 2;
 		break;
@@ -3523,9 +3268,6 @@ static void M_LanConfig_Key (int key, int ascii)
 	dpsnprintf(lanConfig_portname, sizeof(lanConfig_portname), "%u", (unsigned int) lanConfig_port);
 }
 
-//=============================================================================
-/* GAME OPTIONS MENU */
-
 typedef struct level_s
 {
 	const char	*name;
@@ -3550,9 +3292,9 @@ gamelevels_t;
 
 static level_t quakelevels[] =
 {
-	{"start", "Entrance"},	// 0
+	{"start", "Entrance"},
 
-	{"e1m1", "Slipgate Complex"},				// 1
+	{"e1m1", "Slipgate Complex"},
 	{"e1m2", "Castle of the Damned"},
 	{"e1m3", "The Necropolis"},
 	{"e1m4", "The Grisly Grotto"},
@@ -3561,7 +3303,7 @@ static level_t quakelevels[] =
 	{"e1m7", "The House of Chthon"},
 	{"e1m8", "Ziggurat Vertigo"},
 
-	{"e2m1", "The Installation"},				// 9
+	{"e2m1", "The Installation"},
 	{"e2m2", "Ogre Citadel"},
 	{"e2m3", "Crypt of Decay"},
 	{"e2m4", "The Ebon Fortress"},
@@ -3569,7 +3311,7 @@ static level_t quakelevels[] =
 	{"e2m6", "The Dismal Oubliette"},
 	{"e2m7", "Underearth"},
 
-	{"e3m1", "Termination Central"},			// 16
+	{"e3m1", "Termination Central"},
 	{"e3m2", "The Vaults of Zin"},
 	{"e3m3", "The Tomb of Terror"},
 	{"e3m4", "Satan's Dark Delight"},
@@ -3577,7 +3319,7 @@ static level_t quakelevels[] =
 	{"e3m6", "Chambers of Torment"},
 	{"e3m7", "The Haunted Halls"},
 
-	{"e4m1", "The Sewage System"},				// 23
+	{"e4m1", "The Sewage System"},
 	{"e4m2", "The Tower of Despair"},
 	{"e4m3", "The Elder God Shrine"},
 	{"e4m4", "The Palace of Hate"},
@@ -3586,9 +3328,9 @@ static level_t quakelevels[] =
 	{"e4m7", "Azure Agony"},
 	{"e4m8", "The Nameless City"},
 
-	{"end", "Shub-Niggurath's Pit"},			// 31
+	{"end", "Shub-Niggurath's Pit"},
 
-	{"dm1", "Place of Two Deaths"},				// 32
+	{"dm1", "Place of Two Deaths"},
 	{"dm2", "Claustrophobopolis"},
 	{"dm3", "The Abandoned Base"},
 	{"dm4", "The Bad Place"},
@@ -3607,35 +3349,33 @@ static episode_t quakeepisodes[] =
 	{"Deathmatch Arena", 32, 6}
 };
 
- //MED 01/06/97 added hipnotic levels
 static level_t     hipnoticlevels[] =
 {
-   {"start", "Command HQ"},  // 0
+   {"start", "Command HQ"},
 
-   {"hip1m1", "The Pumping Station"},          // 1
+   {"hip1m1", "The Pumping Station"},
    {"hip1m2", "Storage Facility"},
    {"hip1m3", "The Lost Mine"},
    {"hip1m4", "Research Facility"},
    {"hip1m5", "Military Complex"},
 
-   {"hip2m1", "Ancient Realms"},          // 6
+   {"hip2m1", "Ancient Realms"},
    {"hip2m2", "The Black Cathedral"},
    {"hip2m3", "The Catacombs"},
    {"hip2m4", "The Crypt"},
    {"hip2m5", "Mortum's Keep"},
    {"hip2m6", "The Gremlin's Domain"},
 
-   {"hip3m1", "Tur Torment"},       // 12
+   {"hip3m1", "Tur Torment"},
    {"hip3m2", "Pandemonium"},
    {"hip3m3", "Limbo"},
    {"hip3m4", "The Gauntlet"},
 
-   {"hipend", "Armagon's Lair"},       // 16
+   {"hipend", "Armagon's Lair"},
 
-   {"hipdm1", "The Edge of Oblivion"}           // 17
+   {"hipdm1", "The Edge of Oblivion"}
 };
 
-//MED 01/06/97  added hipnotic episodes
 static episode_t   hipnoticepisodes[] =
 {
    {"Scourge of Armagon", 0, 1},
@@ -3646,8 +3386,6 @@ static episode_t   hipnoticepisodes[] =
    {"Deathmatch Arena", 17, 1}
 };
 
-//PGM 01/07/97 added rogue levels
-//PGM 03/02/97 added dmatch level
 static level_t		roguelevels[] =
 {
 	{"start",	"Split Decision"},
@@ -3669,8 +3407,6 @@ static level_t		roguelevels[] =
 	{"ctf1",    "Division of Change"}
 };
 
-//PGM 01/07/97 added rogue episodes
-//PGM 03/02/97 added dmatch episode
 static episode_t	rogueepisodes[] =
 {
 	{"Introduction", 0, 1},
@@ -3710,7 +3446,6 @@ static episode_t	nehahraepisodes[] =
 	{"Dimension of the Lost", 17, 2}
 };
 
-// Map list for Transfusion
 static level_t		transfusionlevels[] =
 {
 	{"e1m1",		"Cradle to Grave"},
@@ -3836,8 +3571,8 @@ static episode_t	transfusionepisodes[] =
 
 static level_t goodvsbad2levels[] =
 {
-	{"rts", "Many Paths"},  // 0
-	{"chess", "Chess, Scott Hess"},                         // 1
+	{"rts", "Many Paths"},
+	{"chess", "Chess, Scott Hess"},
 	{"dot", "Big Wall"},
 	{"city2", "The Big City"},
 	{"bwall", "0 G like Psychic TV"},
@@ -3855,7 +3590,7 @@ static episode_t goodvsbad2episodes[] =
 static level_t battlemechlevels[] =
 {
 	{"start", "Parking Level"},
-	{"dm1", "Hot Dump"},                        // 1
+	{"dm1", "Hot Dump"},
 	{"dm2", "The Pits"},
 	{"dm3", "Dimber Died"},
 	{"dm4", "Fire in the Hole"},
@@ -3872,7 +3607,7 @@ static level_t openquartzlevels[] =
 {
 	{"start", "Welcome to Openquartz"},
 
-	{"void1", "The center of nowhere"},                        // 1
+	{"void1", "The center of nowhere"},
 	{"void2", "The place with no name"},
 	{"void3", "The lost supply base"},
 	{"void4", "Past the outer limits"},
@@ -3908,9 +3643,9 @@ static episode_t defeatindetail2episodes[] =
 
 static level_t prydonlevels[] =
 {
-	{"curig2", "Capel Curig"},	// 0
+	{"curig2", "Capel Curig"},
 
-	{"tdastart", "Gateway"},				// 1
+	{"tdastart", "Gateway"},
 };
 
 static episode_t prydonepisodes[] =
@@ -3972,13 +3707,12 @@ void M_Menu_GameOptions_f (void)
 		maxplayers = svs.maxclients;
 	if (maxplayers < 2)
 		maxplayers = min(8, MAX_SCOREBOARD);
-	// pick game level list based on gamemode (use GAME_NORMAL if no matches)
+
 	gameoptions_levels = registered.integer ? gamelist[0].registered : gamelist[0].notregistered;
 	for (i = 0;i < (int)(sizeof(gamelist)/sizeof(gamelist[0]));i++)
 		if (gamelist[i].gameid == gamemode)
 			gameoptions_levels = registered.integer ? gamelist[i].registered : gamelist[i].notregistered;
 }
-
 
 static int gameoptions_cursor_table[] = {40, 56, 64, 72, 80, 88, 96, 104, 112, 140, 160, 168};
 #define	NUM_GAMEOPTIONS	12
@@ -4122,7 +3856,6 @@ void M_GameOptions_Draw (void)
 	M_Print(160, 168, gameoptions_levels->levels[gameoptions_levels->episodes[startepisode].firstLevel + startlevel].description);
 	M_Print(160, 176, gameoptions_levels->levels[gameoptions_levels->episodes[startepisode].firstLevel + startlevel].name);
 
-// line cursor
 	if (gameoptions_cursor == 9)
 		M_DrawCharacter (8 + 8 * strlen(hostname.string), gameoptions_cursor_table[gameoptions_cursor], 10+((int)(realtime*4)&1));
 	else
@@ -4135,7 +3868,7 @@ void M_GameOptions_Draw (void)
 			x = (320-26*8)/2;
 			M_DrawTextBox (x, 138, 24, 4);
 			x += 8;
-			M_Print(x, 146, " More than 255 players??");
+			M_Print(x, 146, " More than 256 players??");
 			M_Print(x, 154, "  First, question your  ");
 			M_Print(x, 162, "   sanity, then email   ");
 			M_Print(x, 170, "darkplacesengine@gmail.com");
@@ -4144,7 +3877,6 @@ void M_GameOptions_Draw (void)
 			m_serverInfoMessage = false;
 	}
 }
-
 
 static void M_NetStart_Change (int dir)
 {
@@ -4171,20 +3903,17 @@ static void M_NetStart_Change (int dir)
 		{
 			switch (deathmatch.integer)
 			{
-				// From Cooperative to BloodBath
+
 				case 0:
 					Cvar_SetValueQuick (&coop, 0);
 					Cvar_SetValueQuick (&deathmatch, 1);
 					break;
 
-				// From BloodBath to CTF
 				case 1:
 					Cvar_SetValueQuick (&coop, 0);
 					Cvar_SetValueQuick (&deathmatch, 2);
 					break;
 
-				// From CTF to Cooperative
-				//case 2:
 				default:
 					Cvar_SetValueQuick (&coop, 1);
 					Cvar_SetValueQuick (&deathmatch, 0);
@@ -4192,19 +3921,19 @@ static void M_NetStart_Change (int dir)
 		}
 		else if (gamemode == GAME_BATTLEMECH)
 		{
-			if (deathmatch.integer == 2) // changing from Rambo to Deathmatch
+			if (deathmatch.integer == 2)
 				Cvar_SetValueQuick (&deathmatch, 0);
-			else // changing from Deathmatch to Rambo
+			else
 				Cvar_SetValueQuick (&deathmatch, 2);
 		}
 		else
 		{
-			if (deathmatch.integer) // changing from deathmatch to coop
+			if (deathmatch.integer)
 			{
 				Cvar_SetValueQuick (&coop, 1);
 				Cvar_SetValueQuick (&deathmatch, 0);
 			}
-			else // changing from coop to deathmatch
+			else
 			{
 				Cvar_SetValueQuick (&coop, 0);
 				Cvar_SetValueQuick (&deathmatch, 1);
@@ -4392,9 +4121,6 @@ static void M_GameOptions_Key (int key, int ascii)
 	}
 }
 
-//=============================================================================
-/* SLIST MENU */
-
 static int slist_cursor;
 
 void M_Menu_ServerList_f (void)
@@ -4410,7 +4136,6 @@ void M_Menu_ServerList_f (void)
 		Net_Slist_f();
 }
 
-
 static void M_ServerList_Draw (void)
 {
 	int n, y, visible, start, end, statnumplayers, statmaxplayers;
@@ -4418,12 +4143,11 @@ static void M_ServerList_Draw (void)
 	const char *s;
 	char vabuf[1024];
 
-	// use as much vertical space as available
 	if (gamemode == GAME_TRANSFUSION)
 		M_Background(640, vid_conheight.integer - 80);
 	else
 		M_Background(640, vid_conheight.integer);
-	// scroll the list as the cursor moves
+
 	ServerList_GetPlayerStatistics(&statnumplayers, &statmaxplayers);
 	s = va(vabuf, sizeof(vabuf), "%i/%i masters %i/%i servers %i/%i players", masterreplycount, masterquerycount, serverreplycount, serverquerycount, statnumplayers, statmaxplayers);
 	M_PrintRed((640 - strlen(s) * 8) / 2, 32, s);
@@ -4461,7 +4185,6 @@ static void M_ServerList_Draw (void)
 			M_Print(0, y, "Querying master servers");
 	}
 }
-
 
 static void M_ServerList_Key(int k, int ascii)
 {
@@ -4507,26 +4230,21 @@ static void M_ServerList_Key(int k, int ascii)
 
 }
 
-//=============================================================================
-/* MODLIST MENU */
-// same limit of mod dirs as in fs.c
 #define MODLIST_MAXDIRS 16
-static int modlist_enabled [MODLIST_MAXDIRS];	//array of indexs to modlist
-static int modlist_numenabled;			//number of enabled (or in process to be..) mods
+static int modlist_enabled [MODLIST_MAXDIRS];
+static int modlist_numenabled;
 
 typedef struct modlist_entry_s
 {
-	qboolean loaded;	// used to determine whether this entry is loaded and running
-	int enabled;		// index to array of modlist_enabled
+	qboolean loaded;
+	int enabled;
 
-	// name of the modification, this is (will...be) displayed on the menu entry
 	char name[128];
-	// directory where we will find it
+
 	char dir[MAX_QPATH];
 } modlist_entry_t;
 
 static int modlist_cursor;
-//static int modlist_viewcount;
 
 static int modlist_count = 0;
 static modlist_entry_t modlist[MODLIST_TOTALSIZE];
@@ -4544,21 +4262,16 @@ static void ModList_RebuildList(void)
 	modlist_numenabled = fs_numgamedirs;
 	for (i = 0;i < list.numstrings && modlist_count < MODLIST_TOTALSIZE;i++)
 	{
-		// quickly skip names with dot characters - generally these are files, not directories
+
 		if (strchr(list.strings[i], '.')) continue;
 
-		// reject any dirs that are part of the base game
 		if (gamedirname1 && !strcasecmp(gamedirname1, list.strings[i])) continue;
-		//if (gamedirname2 && !strcasecmp(gamedirname2, list.strings[i])) continue;
 
-		// check if we can get a description of the gamedir (from modinfo.txt),
-		// or if the directory is valid but has no description (fs_checkgamedir_missing)
-		// otherwise this isn't a valid gamedir
 		description = FS_CheckGameDir(list.strings[i]);
 		if (description == NULL || description == fs_checkgamedir_missing) continue;
 
 		strlcpy (modlist[modlist_count].dir, list.strings[i], sizeof(modlist[modlist_count].dir));
-		//check currently loaded mods
+
 		modlist[modlist_count].loaded = false;
 		if (fs_numgamedirs)
 			for (j = 0; j < fs_numgamedirs; j++)
@@ -4580,25 +4293,22 @@ static void ModList_Enable (void)
 	int numgamedirs;
 	char gamedirs[MODLIST_MAXDIRS][MAX_QPATH];
 
-	// copy our mod list into an array for FS_ChangeGameDirs
 	numgamedirs = modlist_numenabled;
 	for (i = 0; i < modlist_numenabled; i++)
 		strlcpy (gamedirs[i], modlist[modlist_enabled[i]].dir,sizeof (gamedirs[i]));
 
-	// this code snippet is from FS_ChangeGameDirs
 	if (fs_numgamedirs == numgamedirs)
 	{
 		for (i = 0;i < numgamedirs;i++)
 			if (strcasecmp(fs_gamedirs[i], gamedirs[i]))
 				break;
 		if (i == numgamedirs)
-			return; // already using this set of gamedirs, do nothing
+			return;
 	}
 
-	// this part is basically the same as the FS_GameDir_f function
 	if ((cls.state == ca_connected && !cls.demoplayback) || sv.active)
 	{
-		// actually, changing during game would work fine, but would be stupid
+
 		Con_Printf("Can not change gamedir while client is connected or server is running!\n");
 		return;
 	}
@@ -4621,18 +4331,17 @@ static void M_Menu_ModList_AdjustSliders (int dir)
 	int i;
 	S_LocalSound ("sound/misc/menu3.wav");
 
-	// stop adding mods, we reach the limit
 	if (!modlist[modlist_cursor].loaded && (modlist_numenabled == MODLIST_MAXDIRS)) return;
 	modlist[modlist_cursor].loaded = !modlist[modlist_cursor].loaded;
 	if (modlist[modlist_cursor].loaded)
 	{
 		modlist[modlist_cursor].enabled = modlist_numenabled;
-		//push the value on the enabled list
+
 		modlist_enabled[modlist_numenabled++] = modlist_cursor;
 	}
 	else
 	{
-		//eliminate the value from the enabled list
+
 		for (i = modlist[modlist_cursor].enabled; i < modlist_numenabled; i++)
 		{
 			modlist_enabled[i] = modlist_enabled[i+1];
@@ -4649,7 +4358,6 @@ static void M_ModList_Draw (void)
 	const char *s_available = "Available Mods";
 	const char *s_enabled = "Enabled Mods";
 
-	// use as much vertical space as available
 	if (gamemode == GAME_TRANSFUSION)
 		M_Background(640, vid_conheight.integer - 80);
 	else
@@ -4657,14 +4365,14 @@ static void M_ModList_Draw (void)
 
 	M_PrintRed(48 + 32, 32, s_available);
 	M_PrintRed(432, 32, s_enabled);
-	// Draw a list box with all enabled mods
+
 	DrawQ_Pic(menu_x + 432, menu_y + 48, NULL, 172, 8 * modlist_numenabled, 0, 0, 0, 0.5, 0);
 	for (y = 0; y < modlist_numenabled; y++)
 		M_PrintRed(432, 48 + y * 8, modlist[modlist_enabled[y]].dir);
 
 	if (*m_return_reason)
 		M_Print(16, menu_height - 8, m_return_reason);
-	// scroll the list as the cursor moves
+
 	y = 48;
 	visible = (int)((menu_height - 16 - y) / 8 / 2);
 	start = bound(0, modlist_cursor - (visible >> 1), modlist_count - visible);
@@ -4734,9 +4442,6 @@ static void M_ModList_Key(int k, int ascii)
 	}
 
 }
-
-//=============================================================================
-/* Menu Subsystem */
 
 static void M_KeyEvent(int key, int ascii, qboolean downevent);
 static void M_Draw(void);
@@ -4917,7 +4622,6 @@ void M_Draw (void)
 	S_ExtraUpdate ();
 }
 
-
 void M_KeyEvent (int key, int ascii, qboolean downevent)
 {
 	if (!downevent)
@@ -5033,12 +4737,9 @@ static int M_GetServerListEntryCategory(const serverlist_entry_t *entry)
 
 void M_Shutdown(void)
 {
-	// reset key_dest
+
 	key_dest = key_game;
 }
-
-//============================================================================
-// Menu prog handling
 
 static const char *m_required_func[] = {
 "m_init",
@@ -5231,17 +4932,12 @@ void MVM_error_cmd(const char *format, ...)
 		Con_Printf( "Menu_Error: Recursive call to MVM_error_cmd (from PRVM_Crash)!\n" );
 	}
 
-	// fall back to the normal menu
-
-	// say it
 	Con_Print("Falling back to normal menu\n");
 
 	key_dest = key_game;
 
-	// init the normal menu now -> this will also correct the menu router pointers
 	MR_SetRouting (TRUE);
 
-	// reset the active scene, too (to be on the safe side ;))
    R_SelectScene( RST_CLIENT );
 
 	Host_AbortCurrentFrame();
@@ -5291,7 +4987,6 @@ static void MP_KeyEvent (int key, int ascii, qboolean downevent)
 {
 	prvm_prog_t *prog = MVM_prog;
 
-	// pass key
 	prog->globals.fp[OFS_PARM0] = (prvm_vec_t) key;
 	prog->globals.fp[OFS_PARM1] = (prvm_vec_t) ascii;
 	if (downevent)
@@ -5303,28 +4998,22 @@ static void MP_KeyEvent (int key, int ascii, qboolean downevent)
 static void MP_Draw (void)
 {
 	prvm_prog_t *prog = MVM_prog;
-	// declarations that are needed right now
 
 	float oldquality;
 
 	R_SelectScene( RST_MENU );
 
-	// reset the temp entities each frame
 	r_refdef.scene.numtempentities = 0;
 
-	// menu scenes do not use reduced rendering quality
 	oldquality = r_refdef.view.quality;
 	r_refdef.view.quality = 1;
-	// TODO: this needs to be exposed to R_SetView (or something similar) ASAP [2/5/2008 Andreas]
+
 	r_refdef.scene.time = realtime;
 
-	// FIXME: this really shouldnt error out lest we have a very broken refdef state...?
-	// or does it kill the server too?
 	PRVM_G_FLOAT(OFS_PARM0) = vid.width;
 	PRVM_G_FLOAT(OFS_PARM1) = vid.height;
 	prog->ExecuteProgram(prog, PRVM_menufunction(m_draw),"m_draw() required");
 
-	// TODO: imo this should be moved into scene, too [1/27/2008 Andreas]
 	r_refdef.view.quality = oldquality;
 
 	R_SelectScene( RST_CLIENT );
@@ -5369,10 +5058,8 @@ static void MP_Shutdown (void)
 	if (prog->loaded)
 		prog->ExecuteProgram(prog, PRVM_menufunction(m_shutdown),"m_shutdown() required");
 
-	// reset key_dest
 	key_dest = key_game;
 
-	// AK not using this cause Im not sure whether this is useful at all instead :
 	PRVM_Prog_Reset(prog);
 }
 
@@ -5381,7 +5068,7 @@ static void MP_Init (void)
 	prvm_prog_t *prog = MVM_prog;
 	PRVM_Prog_Init(prog);
 
-	prog->edictprivate_size = 0; // no private struct used
+	prog->edictprivate_size = 0;
 	prog->name = "menu";
 	prog->num_edicts = 1;
 	prog->limit_edicts = M_MAX_EDICTS;
@@ -5389,7 +5076,6 @@ static void MP_Init (void)
 	prog->builtins = vm_m_builtins;
 	prog->numbuiltins = vm_m_numbuiltins;
 
-	// all callbacks must be defined (pointers are not checked before calling)
 	prog->begin_increase_edicts = MVM_begin_increase_edicts;
 	prog->end_increase_edicts   = MVM_end_increase_edicts;
 	prog->init_edict            = MVM_init_edict;
@@ -5401,25 +5087,16 @@ static void MP_Init (void)
 	prog->error_cmd             = MVM_error_cmd;
 	prog->ExecuteProgram        = MVM_ExecuteProgram;
 
-	// allocate the mempools
 	prog->progs_mempool = Mem_AllocPool(menu_progs.string, 0, NULL);
 
 	PRVM_Prog_Load(prog, menu_progs.string, NULL, 0, m_numrequiredfunc, m_required_func, m_numrequiredfields, m_required_fields, m_numrequiredglobals, m_required_globals);
 
-	// note: OP_STATE is not supported by menu qc, we don't even try to detect
-	// it here
-
 	in_client_mouse = true;
 
-	// call the prog init
 	prog->ExecuteProgram(prog, PRVM_menufunction(m_init),"m_init() required");
 
-	// Once m_init was called, we consider menuqc code fully initialized.
 	prog->inittime = realtime;
 }
-
-//============================================================================
-// Menu router
 
 void (*MR_KeyEvent) (int key, int ascii, qboolean downevent);
 void (*MR_Draw) (void);
@@ -5430,10 +5107,10 @@ int (*MR_GetServerListEntryCategory) (const serverlist_entry_t *entry);
 
 void MR_SetRouting(qboolean forceold)
 {
-	// if the menu prog isnt available or forceqmenu ist set, use the old menu
+
 	if(!FS_FileExists(menu_progs.string) || forceqmenu.integer || forceold)
 	{
-		// set menu router function pointers
+
 		MR_KeyEvent = M_KeyEvent;
 		MR_Draw = M_Draw;
 		MR_ToggleMenu = M_ToggleMenu;
@@ -5444,7 +5121,7 @@ void MR_SetRouting(qboolean forceold)
 	}
 	else
 	{
-		// set menu router function pointers
+
 		MR_KeyEvent = MP_KeyEvent;
 		MR_Draw = MP_Draw;
 		MR_ToggleMenu = MP_ToggleMenu;
@@ -5473,7 +5150,7 @@ static void Call_MR_ToggleMenu_f(void)
 
 void MR_Init_Commands(void)
 {
-	// set router console commands
+
 	Cvar_RegisterVariable (&forceqmenu);
 	Cvar_RegisterVariable (&menu_options_colorcontrol_correctionvalue);
 	Cvar_RegisterVariable (&menu_progs);
@@ -5496,7 +5173,7 @@ void MR_Init(void)
 		for(i = 0; i < res_count; ++i)
 		{
 			int n, d, t;
-			video_resolutions[i].type = "Detected mode"; // FIXME make this more dynamic
+			video_resolutions[i].type = "Detected mode";
 			video_resolutions[i].width = res[i].width;
 			video_resolutions[i].height = res[i].height;
 			video_resolutions[i].pixelheight = res[i].pixelheight_num / (double) res[i].pixelheight_denom;
@@ -5606,13 +5283,9 @@ void MR_Init(void)
 	menu_video_resolutions_forfullscreen = !!vid_fullscreen.integer;
 	M_Menu_Video_FindResolution(vid.width, vid.height, vid_pixelheight.value);
 
-	// use -forceqmenu to use always the normal quake menu (it sets forceqmenu to 1)
-// COMMANDLINEOPTION: Client: -forceqmenu disables menu.dat (same as +forceqmenu 1)
 	if(COM_CheckParm("-forceqmenu"))
 		Cvar_SetValueQuick(&forceqmenu,1);
-	// use -useqmenu for debugging proposes, cause it starts
-	// the normal quake menu only the first time
-// COMMANDLINEOPTION: Client: -useqmenu causes the first time you open the menu to use the quake menu, then reverts to menu.dat (if forceqmenu is 0)
+
 	if(COM_CheckParm("-useqmenu"))
 		MR_SetRouting (TRUE);
 	else

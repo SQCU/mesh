@@ -1,7 +1,4 @@
 
-/*
-Polygon clipping routines written by Forest Hale and placed into public domain.
-*/
 
 #include <math.h>
 #include "polygon.h"
@@ -21,22 +18,22 @@ void PolygonF_QuadForPlane(float *outpoints, float planenormalx, float planenorm
 		quadup[1] = 0;
 		quadup[2] = 1;
 	}
-	// d = -DotProduct(quadup, planenormal);
+
 	d = -(quadup[0] * planenormalx + quadup[1] * planenormaly + quadup[2] * planenormalz);
-	// VectorMA(quadup, d, planenormal, quadup);
+
 	quadup[0] += d * planenormalx;
 	quadup[1] += d * planenormaly;
 	quadup[2] += d * planenormalz;
-	// VectorNormalize(quadup);
+
 	d = (float)(1.0 / sqrt(quadup[0] * quadup[0] + quadup[1] * quadup[1] + quadup[2] * quadup[2]));
 	quadup[0] *= d;
 	quadup[1] *= d;
 	quadup[2] *= d;
-	// CrossProduct(quadup,planenormal,quadright);
+
 	quadright[0] = quadup[1] * planenormalz - quadup[2] * planenormaly;
 	quadright[1] = quadup[2] * planenormalx - quadup[0] * planenormalz;
 	quadright[2] = quadup[0] * planenormaly - quadup[1] * planenormalx;
-	// make the points
+
 	outpoints[0] = planedist * planenormalx - quadsize * quadright[0] + quadsize * quadup[0];
 	outpoints[1] = planedist * planenormaly - quadsize * quadright[1] + quadsize * quadup[1];
 	outpoints[2] = planedist * planenormalz - quadsize * quadright[2] + quadsize * quadup[2];
@@ -66,22 +63,22 @@ void PolygonD_QuadForPlane(double *outpoints, double planenormalx, double planen
 		quadup[1] = 0;
 		quadup[2] = 1;
 	}
-	// d = -DotProduct(quadup, planenormal);
+
 	d = -(quadup[0] * planenormalx + quadup[1] * planenormaly + quadup[2] * planenormalz);
-	// VectorMA(quadup, d, planenormal, quadup);
+
 	quadup[0] += d * planenormalx;
 	quadup[1] += d * planenormaly;
 	quadup[2] += d * planenormalz;
-	// VectorNormalize(quadup);
+
 	d = 1.0 / sqrt(quadup[0] * quadup[0] + quadup[1] * quadup[1] + quadup[2] * quadup[2]);
 	quadup[0] *= d;
 	quadup[1] *= d;
 	quadup[2] *= d;
-	// CrossProduct(quadup,planenormal,quadright);
+
 	quadright[0] = quadup[1] * planenormalz - quadup[2] * planenormaly;
 	quadright[1] = quadup[2] * planenormalx - quadup[0] * planenormalz;
 	quadright[2] = quadup[0] * planenormaly - quadup[1] * planenormalx;
-	// make the points
+
 	outpoints[0] = planedist * planenormalx - quadsize * quadright[0] + quadsize * quadup[0];
 	outpoints[1] = planedist * planenormaly - quadsize * quadright[1] + quadsize * quadup[1];
 	outpoints[2] = planedist * planenormalz - quadsize * quadright[2] + quadsize * quadup[2];
@@ -307,4 +304,3 @@ void PolygonD_Divide(int innumpoints, const double *inpoints, double planenormal
 	if (oncountpointer)
 		*oncountpointer = oncount;
 }
-

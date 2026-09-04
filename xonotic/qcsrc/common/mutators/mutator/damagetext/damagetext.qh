@@ -1,7 +1,7 @@
 #pragma once
 
 #define DAMAGETEXT_PRECISION_MULTIPLIER 128
-#define DAMAGETEXT_SHORT_LIMIT 256 // the smallest value that we can't send as short - 2^15 (signed short) / DAMAGETEXT_PRECISION_MULTIPLIER
+#define DAMAGETEXT_SHORT_LIMIT 256
 
 const int DTFLAG_SAMETEAM = BIT(0);
 const int DTFLAG_BIG_HEALTH = BIT(1);

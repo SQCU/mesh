@@ -17,7 +17,7 @@ typedef struct iqmheader_s
 	unsigned int num_frames, num_framechannels, ofs_frames, ofs_bounds;
 	unsigned int num_comment, ofs_comment;
 	unsigned int num_extensions, ofs_extensions;
-} 
+}
 iqmheader_t;
 
 typedef struct iqmmesh_s
@@ -48,7 +48,6 @@ iqmmesh_t;
 #define IQM_FLOAT   7
 #define IQM_DOUBLE  8
 
-// animflags
 #define IQM_LOOP 1
 
 typedef struct iqmtriangle_s
@@ -112,7 +111,7 @@ typedef struct iqmextension_s
 {
     unsigned int name;
     unsigned int num_data, ofs_data;
-    unsigned int ofs_extensions; // pointer to next extension
+    unsigned int ofs_extensions;
 }
 iqmextension_t;
 
@@ -122,6 +121,5 @@ typedef struct iqmbounds_s
 	float xyradius, radius;
 }
 iqmbounds_t;
-    
-#endif
 
+#endif

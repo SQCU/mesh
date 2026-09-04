@@ -2,22 +2,20 @@
 REGISTER_NET_LINKED(ENT_CLIENT_POINTPARTICLES)
 
 #ifdef SVQC
-// NOTE: also contains func_sparks
 
 bool pointparticles_SendEntity(entity this, entity to, float sendflags)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_POINTPARTICLES);
 
-	// optional features to save space
 	sendflags = sendflags & 0x0F;
 	if(this.spawnflags & PARTICLES_IMPULSE)
-		sendflags |= SF_POINTPARTICLES_IMPULSE; // absolute count on toggle-on
+		sendflags |= SF_POINTPARTICLES_IMPULSE;
 	if(this.movedir != '0 0 0' || this.velocity != '0 0 0')
-		sendflags |= SF_POINTPARTICLES_MOVING; // 4 bytes - saves CPU
+		sendflags |= SF_POINTPARTICLES_MOVING;
 	if(this.waterlevel || this.count != 1)
-		sendflags |= SF_POINTPARTICLES_JITTER_AND_COUNT; // 4 bytes - obscure features almost never used
+		sendflags |= SF_POINTPARTICLES_JITTER_AND_COUNT;
 	if(this.mins != '0 0 0' || this.maxs != '0 0 0')
-		sendflags |= SF_POINTPARTICLES_BOUNDS; // 14 bytes - saves lots of space
+		sendflags |= SF_POINTPARTICLES_BOUNDS;
 
 	WriteByte(MSG_ENTITY, sendflags);
 	if(sendflags & SF_TRIGGER_UPDATE)
@@ -25,7 +23,7 @@ bool pointparticles_SendEntity(entity this, entity to, float sendflags)
 		if(this.active == ACTIVE_ACTIVE)
 			WriteCoord(MSG_ENTITY, this.impulse);
 		else
-			WriteCoord(MSG_ENTITY, 0); // off
+			WriteCoord(MSG_ENTITY, 0);
 	}
 	if(sendflags & SF_TRIGGER_RESET)
 	{
@@ -94,7 +92,7 @@ spawnfunc(func_pointparticles)
 {
 	if(this.model != "") { precache_model(this.model); _setmodel(this, this.model); }
 	if(this.noise != "") precache_sound(this.noise);
-	if(this.mdl != "") this.cnt = 0; // use a good handler
+	if(this.mdl != "") this.cnt = 0;
 
 	if(!this.bgmscriptsustain) this.bgmscriptsustain = 1;
 	else if(this.bgmscriptsustain < 0) this.bgmscriptsustain = 0;
@@ -110,14 +108,14 @@ spawnfunc(func_pointparticles)
 		setorigin(this, this.origin + this.mins);
 		setsize(this, '0 0 0', this.maxs - this.mins);
 	}
-	//if(!this.cnt) this.cnt = _particleeffectnum(this.mdl);
+
 	this.setactive = generic_netlinked_setactive;
 
 	Net_LinkEntity(this, (this.spawnflags & PARTICLES_VISCULLING), 0, pointparticles_SendEntity);
 
 	if(this.targetname && this.targetname != "")
 	{
-		// backwards compatibility
+
 		this.use = generic_netlinked_legacy_use;
 	}
 	this.reset = generic_netlinked_reset;
@@ -129,18 +127,18 @@ spawnfunc(func_pointparticles)
 spawnfunc(func_sparks)
 {
 	if(this.count < 1) {
-		this.count = 25.0; // nice default value
+		this.count = 25.0;
 	}
 
 	if(this.impulse < 0.5) {
-		this.impulse = 2.5; // nice default value
+		this.impulse = 2.5;
 	}
 
 	this.mins = '0 0 0';
 	this.maxs = '0 0 0';
 	this.velocity = '0 0 -1';
 	this.mdl = "TE_SPARK";
-	this.cnt = 0; // use mdl
+	this.cnt = 0;
 
 	spawnfunc_func_pointparticles(this);
 }
@@ -149,17 +147,17 @@ spawnfunc(func_sparks)
 .int dphitcontentsmask;
 
 entityclass(PointParticles);
-classfield(PointParticles) .int cnt; // effect number
-classfield(PointParticles) .vector velocity; // particle velocity
-classfield(PointParticles) .float waterlevel; // direction jitter
-classfield(PointParticles) .int count; // count multiplier
-classfield(PointParticles) .int impulse; // density
-classfield(PointParticles) .string noise; // sound
+classfield(PointParticles) .int cnt;
+classfield(PointParticles) .vector velocity;
+classfield(PointParticles) .float waterlevel;
+classfield(PointParticles) .int count;
+classfield(PointParticles) .int impulse;
+classfield(PointParticles) .string noise;
 classfield(PointParticles) .float atten;
 classfield(PointParticles) .float volume;
-classfield(PointParticles) .float absolute; // 1 = count per second is absolute, ABSOLUTE_ONLY_SPAWN_AT_TOGGLE = only spawn at toggle
-classfield(PointParticles) .vector movedir; // trace direction
-classfield(PointParticles) .float glow_color; // palette index
+classfield(PointParticles) .float absolute;
+classfield(PointParticles) .vector movedir;
+classfield(PointParticles) .float glow_color;
 
 const int ABSOLUTE_ONLY_SPAWN_AT_TOGGLE = 2;
 
@@ -247,8 +245,8 @@ NET_HANDLE(ENT_CLIENT_POINTPARTICLES, bool isnew)
 	int sendflags = ReadByte();
 	if(sendflags & SF_TRIGGER_UPDATE)
 	{
-		i = ReadCoord(); // density (<0: point, >0: volume)
-		if(i && !this.impulse && (this.cnt || this.mdl)) // this.cnt check is so it only happens if the ent already existed
+		i = ReadCoord();
+		if(i && !this.impulse && (this.cnt || this.mdl))
 			this.just_toggled = 1;
 		this.impulse = i;
 	}
@@ -277,8 +275,8 @@ NET_HANDLE(ENT_CLIENT_POINTPARTICLES, bool isnew)
 			this.mins = this.maxs = '0 0 0';
 		}
 
-		this.cnt = ReadShort(); // effect number
-		this.mdl = strzone(ReadString()); // effect string
+		this.cnt = ReadShort();
+		this.mdl = strzone(ReadString());
 
 		if(sendflags & SF_POINTPARTICLES_MOVING)
 		{
@@ -324,7 +322,7 @@ NET_HANDLE(ENT_CLIENT_POINTPARTICLES, bool isnew)
 		if(!this.absolute)
 		{
 			v = this.maxs - this.mins;
-			this.impulse *= -v.x * v.y * v.z / (64**3); // relative: particles per 64^3 cube
+			this.impulse *= -v.x * v.y * v.z / (64**3);
 		}
 	}
 

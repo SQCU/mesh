@@ -1,33 +1,12 @@
-/*
- * Copyright (c) 2011 Rudolf Polzer
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- */
+
+
 #include "sv_model.qh"
 
 #include "common.qh"
 
-// generic CSQC model code
-
 bool CSQCModel_Send(entity this, entity to, int sf)
 {
-	// some nice flags for CSQCMODEL_IF
+
 	noref bool isplayer = IS_CLIENT(this);
 	noref bool islocalplayer = (this == to);
 	noref bool isnolocalplayer = (isplayer && (this != to));
@@ -67,28 +46,28 @@ bool CSQCModel_Send(entity this, entity to, int sf)
 #endif
 void CSQCModel_CheckUpdate(entity e)
 {
-	// some nice flags for CSQCMODEL_IF
+
 	noref float isplayer = IS_CLIENT(e);
-	noref float islocalplayer = isplayer; // we set BOTH to 1 here as we need the sendflags
-	noref float isnolocalplayer = isplayer; // we set BOTH to 1 here as we need the sendflags
+	noref float islocalplayer = isplayer;
+	noref float isnolocalplayer = isplayer;
 
 #if CSQCPLAYER_FORCE_UPDATES
 	if(isplayer && time > e.csqcmodel_nextforcedupdate)
 	{
 		e.SendFlags |= CSQCMODEL_PROPERTY_ORIGIN;
-		e.csqcmodel_nextforcedupdate = time + (1 / (CSQCPLAYER_FORCE_UPDATES)) * (0.5 + random()); // ensure about 4 origin sends per sec
+		e.csqcmodel_nextforcedupdate = time + (1 / (CSQCPLAYER_FORCE_UPDATES)) * (0.5 + random());
 	}
 #endif
 
 	if(e.effects & EF_RESTARTANIM_BIT)
 	{
-		e.SendFlags |= CSQCMODEL_PROPERTY_FRAME | CSQCMODEL_PROPERTY_FRAME2; // full anim resend please
+		e.SendFlags |= CSQCMODEL_PROPERTY_FRAME | CSQCMODEL_PROPERTY_FRAME2;
 		e.effects &= ~EF_RESTARTANIM_BIT;
 	}
 
 	if(e.effects & EF_TELEPORT_BIT)
 	{
-		e.SendFlags |= CSQCMODEL_PROPERTY_TELEPORTED; // no interpolation please
+		e.SendFlags |= CSQCMODEL_PROPERTY_TELEPORTED;
 		e.effects &= ~EF_TELEPORT_BIT;
 	}
 

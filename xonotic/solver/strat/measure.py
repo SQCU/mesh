@@ -1,26 +1,3 @@
-"""Measurements over REAL run artifacts.
-
-Every number this module produces comes from a real Xonotic server's own log or
-from a real responder telemetry file. Nothing here simulates the game (SPEC 13),
-and there are no tests -- these are measurements.
-
-Three subcommands:
-
-  rows      Parse a server log's `[PLCOBS]` / `[PLCCART]` / `[PLCEVT]` lines --
-            written by `payload_strategy_log` in sv_payload_strategy_io.qc, read
-            back off the very fields `mesh_gather` sweeps -- into one JSONL
-            record per strategy tick, with the per-player observation rows, the
-            instrument descriptors `z` and the relation rows reconstructed for
-            it. AGENDA E9/E10: the j-space probe needs `z` and the relation rows
-            and neither was ever logged.
-
-  cgt       Resolve rate of the closed-form cart-subgame evaluator over a real
-            telemetry file's `game_value.state` positions. AGENDA B11.
-
-  commit    Distribution of the travel-commitment horizon actually written into
-            the COMPLETE column, over a real run. AGENDA F4.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -28,6 +5,7 @@ import collections
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -35,31 +13,18 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "payload", "tools"))
 
-from strategy_io_schema import CS, EVT, OBS, SC  # noqa: E402
+from payload.tools.strategy_io_schema import CS, EVT, OBS
 
-# Column order the QC logger emits, verbatim from payload_strategy_log().
-OBS_LOG_COLUMNS = ("ID", "TEAM", "HEALTH", "ARMOR", "AMMO", "POS_X", "POS_Y", "POS_Z",
-                   "VEL_X", "VEL_Y", "VEL_Z", "WEAPONS", "POWER", "TSS", "CELL",
-                   "NCART", "NCART_D", "ALIVE", "CONTROL", "APPLIED_TARGET",
-                   "TARGET_RESOLVED", "GOAL_TARGET", "GOAL_DISTANCE", "GOAL_MATCH",
-                   "TARGET_TOUCH")
-CART_LOG_COLUMNS = ("ID", "DEPTH", "LENGTH", "CTRL", "SPEED", "IDLE", "BANKMASK",
-                    "PROGRESS", "POS_X", "POS_Y", "POS_Z")
-EVT_LOG_COLUMNS = ("CELL", "KIND", "TEAM", "SUBJECT", "VALUE", "TIME")
+OBS_LOG_COLUMNS = tuple(OBS)
+CART_LOG_COLUMNS = tuple(CS)
+EVT_LOG_COLUMNS = tuple(EVT)
 L_LEVELS = 8
-
 
 def _floats(parts):
     return [float(value) for value in parts]
 
-
 def parse_server_log(path):
-    """Group a server log's staged rows by publish sequence.
-
-    Yields dicts {seq, obs: ndarray(l, OBS_WIDTH), cart: ndarray(j, CART_WIDTH),
-    evt: ndarray(n, EVT_WIDTH), edicts: [...]} in sequence order.
-    """
-    from strategy_io_schema import CART_WIDTH, EVT_WIDTH, OBS_WIDTH
+    from payload.tools.strategy_io_schema import CART_WIDTH, EVT_WIDTH, OBS_WIDTH
 
     ticks = collections.OrderedDict()
     pool = None
@@ -84,18 +49,18 @@ def parse_server_log(path):
             except ValueError:
                 continue
             tick = ticks.setdefault(seq, {"seq": seq, "obs": [], "cart": [], "evt": [], "edicts": []})
-            if tag == "[PLCOBS]" and len(values) >= len(OBS_LOG_COLUMNS):
+            if tag == "[PLCOBS]" and len(values) == len(OBS_LOG_COLUMNS):
                 row = np.zeros(OBS_WIDTH, dtype=np.float32)
                 for name, value in zip(OBS_LOG_COLUMNS, values):
                     row[OBS[name]] = value
                 tick["obs"].append(row)
                 tick["edicts"].append(key)
-            elif tag == "[PLCCART]" and len(values) >= 8:
+            elif tag == "[PLCCART]" and len(values) == len(CART_LOG_COLUMNS):
                 row = np.zeros(CART_WIDTH, dtype=np.float32)
                 for name, value in zip(CART_LOG_COLUMNS, values):
                     row[CS[name]] = value
                 tick["cart"].append((key, row))
-            elif tag == "[PLCEVT]" and len(values) >= len(EVT_LOG_COLUMNS):
+            elif tag == "[PLCEVT]" and len(values) == len(EVT_LOG_COLUMNS):
                 row = np.zeros(EVT_WIDTH, dtype=np.float32)
                 for name, value in zip(EVT_LOG_COLUMNS, values):
                     row[EVT[name]] = value
@@ -112,13 +77,7 @@ def parse_server_log(path):
         })
     return out, (pool or [])
 
-
 def _batch_for(tick, belief=None):
-    """Rebuild the instrument batch the operator would see for one tick.
-
-    Uses the same constructors the live responder uses, so `z` and the relation
-    rows written here are the ones the model consumes, not a paraphrase.
-    """
     from solver.strat.instruments import CartTarget, Participant, build_instruments
     from solver.strat.live_belief import LiveBelief
 
@@ -130,20 +89,23 @@ def _batch_for(tick, belief=None):
     participants = [
         Participant(
             int(rows[p, OBS["ID"]]), int(rows[p, OBS["TEAM"]]),
-            int(round(rows[p, OBS["CELL"]])),
+            (int(rows[p, OBS["CELL_X"]]), int(rows[p, OBS["CELL_Y"]])),
             tuple(float(v) for v in rows[p, OBS["POS_X"]:OBS["POS_Z"] + 1]),
             float(rows[p, OBS["ALIVE"]]),
-            float(rows[p, OBS["HEALTH"]]) / 100.0,
-            float(rows[p, OBS["ARMOR"]]) / 100.0,
-            float(rows[p, OBS["AMMO"]]),
-            float(rows[p, OBS["TSS"]]),
+            float(rows[p, OBS["HEALTH"]]), float(rows[p, OBS["ARMOR"]]),
+            tuple(float(rows[p, OBS[name]]) for name in (
+                "AMMO_SHELLS", "AMMO_BULLETS", "AMMO_ROCKETS",
+                "AMMO_CELLS", "AMMO_PLASMA", "AMMO_FUEL",
+            )),
+            float(rows[p, OBS["SPAWN_TIME"]]), float(rows[p, OBS["ENGINE_TIME"]]),
         )
         for p in range(len(rows))
     ]
     carts = [
         CartTarget(
-            int(round(row[CS["ID"]])), int(round(row[CS["CTRL"]])),
-            float(row[CS["DEPTH"]]), float(row[CS["SPEED"]]), float(row[CS["PROGRESS"]]),
+            int(row[CS["ID"]]), int(row[CS["CONTROL_TEAM"]]),
+            float(row[CS["PATH_POSITION"]]), float(row[CS["PATH_LENGTH"]]),
+            float(row[CS["SPEED"]]),
             (float(row[CS["POS_X"]]), float(row[CS["POS_Y"]]), float(row[CS["POS_Z"]])),
         )
         for row in tick["cart"]
@@ -152,13 +114,12 @@ def _batch_for(tick, belief=None):
         belief = LiveBelief()
     if len(tick["evt"]):
         belief.ingest(tick["evt"], EVT)
-    # `beliefs` is what populates the per-cell positions the item/rival/cell
-    # targets are placed at; skipping it leaves every non-cart target at the
-    # world origin.
-    belief.beliefs(rows, OBS)
+    belief.chorus(rows, OBS)
     items, rivals, cells = belief.instrument_targets(rows, OBS)
-    return build_instruments(participants, carts, items, rivals, cells), rows
-
+    return build_instruments(
+        participants, carts, items, rivals, cells,
+        navigation=belief.navigation_vcmap,
+    ), rows
 
 def cmd_rows(args):
     from solver.strat.live_belief import LiveBelief
@@ -180,15 +141,14 @@ def cmd_rows(args):
             handle.write(json.dumps({
                 "seq": tick["seq"],
                 "obs_columns": list(OBS_LOG_COLUMNS),
-                "obs": np.round(rows[:, [OBS[name] for name in OBS_LOG_COLUMNS]], 6).tolist(),
+                "obs": rows[:, [OBS[name] for name in OBS_LOG_COLUMNS]].tolist(),
                 "cart_columns": list(CART_LOG_COLUMNS),
-                "cart": np.round(tick["cart"][:, [CS[name] for name in CART_LOG_COLUMNS]], 6).tolist(),
-                "evt": np.round(tick["evt"], 6).tolist(),
+                "cart": tick["cart"][:, [CS[name] for name in CART_LOG_COLUMNS]].tolist(),
+                "evt": tick["evt"].tolist(),
                 "instrument_kinds": [inst.kind.value for inst in batch.instruments],
-                "instrument_subjects": [int(inst.subject) for inst in batch.instruments],
-                "z": np.round(batch.descriptors, 6).tolist(),
-                "relation": np.round(batch.relations, 6).tolist(),
-                "eligible": batch.eligible.astype(int).tolist(),
+                "instrument_subjects": [inst.subject for inst in batch.instruments],
+                "z": batch.descriptors.tolist(),
+                "action_mass": batch.action_mass.tolist(),
             }) + "\n")
             written += 1
     summary = {
@@ -202,13 +162,16 @@ def cmd_rows(args):
     }
     print(json.dumps(summary, indent=2))
 
-
 def cmd_cgt(args):
-    from solver.strat.game_value import EmpiricalTransitionGraph, evaluate_cartstate
+    from solver.strat.game_value import evaluate_cartstate
+    from solver.strat.runtime import formal_projection_record, formal_value_record
 
-    logged = collections.Counter()
-    closed = collections.Counter()
+    source_measures = collections.Counter()
+    closed_measures = collections.Counter()
     nimbers = collections.Counter()
+    residuals = collections.Counter()
+    missing = collections.Counter()
+    compared = collections.Counter()
     total = 0
     with open(args.telemetry) as handle:
         for raw in handle:
@@ -220,90 +183,227 @@ def cmd_cgt(args):
             if not value:
                 continue
             total += 1
-            logged[(value.get("kind"), value.get("reason"))] += 1
+            for name in (
+                "reachable_state_mass", "reachable_role_state_mass",
+                "enumerated_role_state_mass",
+                "role_option_symmetric_difference_mass", "cycle_state_mass",
+            ):
+                if isinstance(value.get(name), (int, float)):
+                    source_measures[name] += value[name]
             _, _, k, depths, controls = value["state"]
-            result = evaluate_cartstate(depths, controls, list(range(int(k))), args.levels)
-            closed[result.kind] += 1
-            if result.kind == "impartial":
+            levels = value.get("levels", args.levels if args.levels is not None else L_LEVELS)
+            result = evaluate_cartstate(depths, controls, list(range(int(k))), int(levels))
+            closed_measures["reachable_state_mass"] += result.reachable_state_mass
+            closed_measures["reachable_role_state_mass"] += result.reachable_role_state_mass
+            closed_measures["enumerated_role_state_mass"] += result.enumerated_role_state_mass
+            closed_measures["role_option_symmetric_difference_mass"] += result.role_option_symmetric_difference_mass
+            closed_measures["cycle_state_mass"] += result.cycle_state_mass
+            if result.nimber is not None:
                 nimbers[result.nimber] += 1
-    del EmpiricalTransitionGraph
+            expected = formal_value_record(result, value["state"], levels)
+            expected.pop("state")
+            expected.pop("levels")
+            for name, target in expected.items():
+                if name not in value:
+                    missing[name] += 1
+                else:
+                    compared[name] += 1
+                    residuals[name] += int(value[name] != target)
+            wire = formal_projection_record(result, range(int(k)))
+            for name, target in wire.items():
+                if name not in line:
+                    missing[name] += 1
+                else:
+                    compared[name] += 1
+                    residuals[name] += int(line[name] != target)
+            if "levels" not in value:
+                missing["levels"] += 1
+            else:
+                compared["levels"] += 1
+                residuals["levels"] += int(int(value["levels"]) != int(levels))
     print(json.dumps({
         "telemetry": os.path.abspath(args.telemetry),
         "lines_with_a_cart_game_value": total,
-        "as_logged": {f"{kind}:{reason}": count for (kind, reason), count in logged.items()},
-        "closed_form": dict(closed),
-        "closed_form_nimbers": {str(key): value for key, value in nimbers.items()},
-        "resolved_before": total - logged.get(("unresolved", "incomplete option graph"), 0),
-        "resolved_after": sum(count for kind, count in closed.items() if kind != "unresolved"),
+        "source_measure_integrals": dict(source_measures),
+        "closed_form_measure_integrals": dict(closed_measures),
+        "closed_form_nimber_measure": {str(key): value for key, value in nimbers.items()},
+        "closed_form_nimber_atom_mass": sum(nimbers.values()),
+        "semantic_coordinate_measure": dict(compared),
+        "semantic_residual_measure": dict(residuals),
+        "semantic_residual_mass": sum(residuals.values()),
+        "missing_semantic_coordinate_measure": dict(missing),
+        "missing_semantic_coordinate_mass": sum(missing.values()),
     }, indent=2))
 
+def _tensor_measure(observed, reference):
+    observed = np.asarray(observed, dtype=np.float64)
+    reference = np.asarray(reference, dtype=np.float64)
+    difference = observed - reference
+    scale = max(float(np.max(np.abs(reference))), np.finfo(np.float64).tiny)
+    return {
+        "shape": list(observed.shape),
+        "coordinate_mass": int(observed.size),
+        "finite_coordinate_mass": int(np.isfinite(observed).sum()),
+        "reference_finite_coordinate_mass": int(np.isfinite(reference).sum()),
+        "maximum_absolute_residual": float(np.max(np.abs(difference))),
+        "maximum_relative_residual": float(np.max(np.abs(difference)) / scale),
+        "residual_square_integral": float(np.sum(difference * difference)),
+    }
 
-def cmd_commit(args):
-    from solver.strat.instruments import decode_allocations
+def _timed(operation, samples):
+    import mlx.core as mx
 
-    from solver.strat.live_belief import LiveBelief
+    warm = operation()
+    mx.eval(warm)
+    durations = []
+    value = warm
+    for _ in range(samples):
+        started = time.perf_counter()
+        value = operation()
+        mx.eval(value)
+        durations.append(time.perf_counter() - started)
+    return value, durations
 
-    ticks, _ = parse_server_log(args.log)
-    belief = LiveBelief()
-    values = []
-    by_kind = collections.defaultdict(list)
+def cmd_matrix(args):
+    import mlx.core as mx
+
+    from solver.strat.dpp import dpp_marginals
+    from solver.strat.matmul import (
+        matrix_execution_schedule,
+        matrix_multiply,
+        matrix_multiply_transpose_left,
+        matrix_multiply_transpose_right,
+    )
+
     rng = np.random.default_rng(args.seed)
-    for tick in ticks:
-        if not len(tick["obs"]) or not len(tick["cart"]):
-            continue
-        batch, rows = _batch_for(tick, belief)
-        if batch is None:
-            continue
-        count = len(batch.participants)
-        actions = np.array([rng.choice(np.flatnonzero(batch.eligible[p])) for p in range(count)])
-        out = decode_allocations(batch, actions, intensity=np.ones(count),
-                                 commitments=np.ones(count), spawn_delays=np.ones(count))
-        for p, action in enumerate(actions):
-            value = float(out[p, SC["COMMIT"]])
-            values.append(value)
-            by_kind[batch.instruments[int(action)].kind.value].append(value)
-    array = np.asarray(values, dtype=np.float64)
+    rows, inner, columns = args.rows, args.inner, args.columns
+    arrays = {
+        "ab": (
+            rng.standard_normal((rows, inner), dtype=np.float32),
+            rng.standard_normal((inner, columns), dtype=np.float32),
+            matrix_multiply,
+            lambda left, right: np.matmul(left.astype(np.float64), right.astype(np.float64)),
+        ),
+        "atb": (
+            rng.standard_normal((inner, rows), dtype=np.float32),
+            rng.standard_normal((inner, columns), dtype=np.float32),
+            matrix_multiply_transpose_left,
+            lambda left, right: np.matmul(left.astype(np.float64).T, right.astype(np.float64)),
+        ),
+        "abt": (
+            rng.standard_normal((rows, inner), dtype=np.float32),
+            rng.standard_normal((columns, inner), dtype=np.float32),
+            matrix_multiply_transpose_right,
+            lambda left, right: np.matmul(left.astype(np.float64), right.astype(np.float64).T),
+        ),
+    }
+    products = {}
+    for name, (left, right, operation, reference_operation) in arrays.items():
+        observed, elapsed = _timed(
+            lambda left=left, right=right, operation=operation: operation(
+                mx.array(left), mx.array(right),
+            ),
+            args.samples,
+        )
+        reference = reference_operation(left, right)
+        cotangent = rng.standard_normal(reference.shape, dtype=np.float32)
+        _, reverse = mx.vjp(
+            operation,
+            (mx.array(left), mx.array(right)),
+            (mx.array(cotangent),),
+        )
+        mx.eval(*reverse)
+        if name == "ab":
+            reverse_reference = (
+                np.matmul(cotangent.astype(np.float64), right.astype(np.float64).T),
+                np.matmul(left.astype(np.float64).T, cotangent.astype(np.float64)),
+            )
+        elif name == "atb":
+            reverse_reference = (
+                np.matmul(right.astype(np.float64), cotangent.astype(np.float64).T),
+                np.matmul(left.astype(np.float64), cotangent.astype(np.float64)),
+            )
+        else:
+            reverse_reference = (
+                np.matmul(cotangent.astype(np.float64), right.astype(np.float64)),
+                np.matmul(cotangent.astype(np.float64).T, left.astype(np.float64)),
+            )
+        products[name] = {
+            "forward": _tensor_measure(observed, reference),
+            "reverse_left": _tensor_measure(reverse[0], reverse_reference[0]),
+            "reverse_right": _tensor_measure(reverse[1], reverse_reference[1]),
+            "elapsed_s": {
+                "mass": len(elapsed),
+                "minimum": min(elapsed),
+                "maximum": max(elapsed),
+                "mean": float(np.mean(elapsed)),
+                "variance": float(np.var(elapsed)),
+            },
+            "flops_per_sample": int(2 * rows * inner * columns),
+            "execution": {
+                "forward": matrix_execution_schedule(*reference.shape),
+                "reverse_left": matrix_execution_schedule(*reverse_reference[0].shape),
+                "reverse_right": matrix_execution_schedule(*reverse_reference[1].shape),
+            },
+        }
+    quality = np.log1p(np.exp(rng.standard_normal(rows, dtype=np.float32))).astype(np.float32)
+    features = rng.standard_normal((rows, inner), dtype=np.float32)
+    dpp_observed, dpp_elapsed = _timed(
+        lambda: dpp_marginals(mx.array(quality), mx.array(features)),
+        args.samples,
+    )
+    normalized = features.astype(np.float64)
+    normalized /= np.sqrt(np.mean(normalized * normalized, axis=1, keepdims=True) + 1e-12)
+    weighted = quality.astype(np.float64)[:, None] * normalized
+    covariance = np.eye(inner, dtype=np.float64) + np.matmul(weighted.T, weighted)
+    dpp_reference = np.sum(
+        weighted * np.linalg.solve(covariance, weighted.T).T,
+        axis=1,
+    ).clip(0, 1)
     print(json.dumps({
-        "log": os.path.abspath(args.log),
-        "assignments": int(array.size),
-        "commit_nonzero": int(np.count_nonzero(array)),
-        "commit_nonzero_fraction": round(float(np.count_nonzero(array) / max(1, array.size)), 6),
-        "seconds": {
-            "min": round(float(array.min()), 4) if array.size else None,
-            "median": round(float(np.median(array)), 4) if array.size else None,
-            "mean": round(float(array.mean()), 4) if array.size else None,
-            "max": round(float(array.max()), 4) if array.size else None,
-        },
-        "by_instrument_kind": {
-            kind: {"n": len(items), "nonzero": int(np.count_nonzero(items)),
-                   "median_seconds": round(float(np.median(items)), 4)}
-            for kind, items in sorted(by_kind.items())
+        "definition": "owned relaxed-FP32 matrix boundary and DPP compared with an FP64 dense reference",
+        "rows": rows,
+        "inner": inner,
+        "columns": columns,
+        "samples": args.samples,
+        "products": products,
+        "dpp": {
+            **_tensor_measure(dpp_observed, dpp_reference),
+            "elapsed_s": {
+                "mass": len(dpp_elapsed),
+                "minimum": min(dpp_elapsed),
+                "maximum": max(dpp_elapsed),
+                "mean": float(np.mean(dpp_elapsed)),
+                "variance": float(np.var(dpp_elapsed)),
+            },
+            "feature_dimension_iterations": inner,
         },
     }, indent=2))
-
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
 
-    rows = sub.add_parser("rows", help="server log -> observation/z/relation JSONL")
+    rows = sub.add_parser("rows", help="server log -> observation/z/action-measure JSONL")
     rows.add_argument("log")
     rows.add_argument("--out", required=True)
     rows.set_defaults(func=cmd_rows)
 
     cgt = sub.add_parser("cgt", help="cart-subgame resolve rate over real telemetry")
     cgt.add_argument("telemetry")
-    cgt.add_argument("--levels", type=int, default=L_LEVELS)
+    cgt.add_argument("--levels", type=int)
     cgt.set_defaults(func=cmd_cgt)
 
-    commit = sub.add_parser("commit", help="travel-commitment horizon over a real run")
-    commit.add_argument("log")
-    commit.add_argument("--seed", type=int, default=20260831)
-    commit.set_defaults(func=cmd_commit)
+    matrix = sub.add_parser("matrix", help="owned matrix and DPP numerical measures")
+    matrix.add_argument("--rows", type=int, required=True)
+    matrix.add_argument("--inner", type=int, required=True)
+    matrix.add_argument("--columns", type=int, required=True)
+    matrix.add_argument("--samples", type=int, required=True)
+    matrix.add_argument("--seed", type=int, default=20260903)
+    matrix.set_defaults(func=cmd_matrix)
 
     args = ap.parse_args(argv)
     return args.func(args)
-
 
 if __name__ == "__main__":
     main()

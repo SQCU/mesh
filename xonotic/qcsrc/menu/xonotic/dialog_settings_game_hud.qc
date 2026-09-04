@@ -10,11 +10,11 @@
 
 void HUDSetup_Check_Gamestatus(entity me, entity btn)
 {
-	if(!(gamestatus & (GAME_CONNECTED | GAME_ISSERVER))) // we're not in a match, ask the player if they want to start one anyway
+	if(!(gamestatus & (GAME_CONNECTED | GAME_ISSERVER)))
 	{
 		DialogOpenButton_Click(me, main.hudconfirmDialog);
 	}
-	else // already in a match, lets just cut to the point and open up the hud editor directly
+	else
 	{
 		HUDSetup_Start(me, btn);
 	}
@@ -34,10 +34,6 @@ entity makeXonoticGameHUDSettingsTab()
 void XonoticGameHUDSettingsTab_fill(entity me)
 {
 	entity e;
-
-	// todo:
-	// threshold: hud_damage_pain_threshold_lower_health
-	// scoreboard_alpha*
 
 	me.TR(me);
 		me.TD(me, 1, 3, e = makeXonoticHeaderLabel(_("Scoreboard")));
@@ -149,7 +145,7 @@ void XonoticGameHUDSettingsTab_fill(entity me)
 			setDependent(e, "hud_shownames", 1, 1);
 
 	me.TR(me);
-	//me.TR(me);
+
 		me.TDempty(me, 0.2);
 		me.TD(me, 1, 2.8, e = makeXonoticCheckBoxEx(25, 0, "hud_shownames_crosshairdistance", _("Only when near crosshair")));
 			setDependent(e, "hud_shownames", 1, 1);
@@ -182,5 +178,5 @@ void XonoticGameHUDSettingsTab_fill(entity me)
 		me.TD(me, 1, 2, e = makeXonoticButton(_("Enter HUD editor"), '0 0 0'));
 			e.onClick = HUDSetup_Check_Gamestatus;
 			e.onClickEntity = me;
-		// TODO: show hud config name with text here
+
 }

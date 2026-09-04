@@ -13,8 +13,6 @@ bool autocvar_g_vehicle_raptor = true;
 float autocvar_g_vehicle_raptor_respawntime = 40;
 float autocvar_g_vehicle_raptor_takeofftime = 1.5;
 
-// 0: go where player aims, +forward etc relative to aim angles
-// 1: ignore aim for up/down movement. +forward always moved forward, +jump always moves up
 int autocvar_g_vehicle_raptor_movestyle = 1;
 float autocvar_g_vehicle_raptor_turnspeed = 200;
 float autocvar_g_vehicle_raptor_pitchspeed = 50;
@@ -149,29 +147,13 @@ bool raptor_frame(entity this, float dt)
 
 	vehicles_frame(vehic, this);
 
-	/*
-	ftmp = vlen(vehic.velocity);
-	if(ftmp > autocvar_g_vehicle_raptor_speed_forward)
-		ftmp = 1;
-	else
-		ftmp = ftmp / autocvar_g_vehicle_raptor_speed_forward;
-	*/
-
 	if(vehic.sound_nexttime < time)
 	{
 		vehic.sound_nexttime = time + 7.955812;
-		//sound (vehic.tur_head, CH_TRIGGER_SINGLE, SND_VEH_RAPTOR_FLY, 1 - ftmp,   ATTEN_NORM );
+
 		sound (vehic, CH_TRIGGER_SINGLE, SND_VEH_RAPTOR_SPEED, 1, ATTEN_NORM);
 		vehic.wait = 0;
 	}
-	/*
-	else if(fabs(ftmp - vehic.wait) > 0.2)
-	{
-		sound (vehic.tur_head, CH_TRIGGER_SINGLE, SND_Null, 1 - ftmp,   ATTEN_NORM );
-		sound (vehic, CH_TRIGGER_SINGLE, SND_Null, ftmp, ATTEN_NORM);
-		vehic.wait = ftmp;
-	}
-	*/
 
 	if(IS_DEAD(vehic))
 	{
@@ -180,8 +162,6 @@ bool raptor_frame(entity this, float dt)
 	}
 	crosshair_trace(this);
 
-	//if(time - vehic.lastteleporttime < 1)
-	//{
 		if(vehic.angles_z > 50 || vehic.angles_z < -50)
 		{
 			if(PHYS_INPUT_BUTTON_JUMP(this))
@@ -190,7 +170,6 @@ bool raptor_frame(entity this, float dt)
 				PHYS_INPUT_BUTTON_JUMP(this) = false;
 			}
 		}
-	//}
 
 	vector vang;
 	vang = vehic.angles;
@@ -206,7 +185,6 @@ bool raptor_frame(entity this, float dt)
 	if(ftmp > 180)  ftmp -= 360; if(ftmp < -180) ftmp += 360;
 	vehic.avelocity_y = bound(-autocvar_g_vehicle_raptor_turnspeed, ftmp + vehic.avelocity_y * 0.9, autocvar_g_vehicle_raptor_turnspeed);
 
-	// Pitch
 	ftmp = 0;
 	if(CS(this).movement_x > 0 && vang_x < autocvar_g_vehicle_raptor_pitchlimit) ftmp = 5;
 	else if(CS(this).movement_x < 0 && vang_x > -autocvar_g_vehicle_raptor_pitchlimit) ftmp = -20;
@@ -258,12 +236,12 @@ bool raptor_frame(entity this, float dt)
 	vehic.velocity  += df * dt;
 	this.velocity = CS(this).movement  = vehic.velocity;
 	setorigin(this, vehic.origin + '0 0 32');
-	this.oldorigin = this.origin; // negate fall damage
+	this.oldorigin = this.origin;
 
 	STAT(VEHICLESTAT_W2MODE, this) = STAT(VEHICLESTAT_W2MODE, vehic);
 
 	vector vf, ad;
-	// Target lock & predict
+
 	if(autocvar_g_vehicle_raptor_cannon_locktarget == 2)
 	{
 		if(vehic.gun1.lock_time < time || IS_DEAD(vehic.gun1.enemy) || STAT(FROZEN, vehic.gun1.enemy))
@@ -346,7 +324,6 @@ bool raptor_frame(entity this, float dt)
 		}
 	}
 
-
 	vehicle_aimturret(vehic, trace_endpos, vehic.gun1, "fire1",
 						  autocvar_g_vehicle_raptor_cannon_pitchlimit_down * -1,  autocvar_g_vehicle_raptor_cannon_pitchlimit_up,
 						  autocvar_g_vehicle_raptor_cannon_turnlimit * -1,  autocvar_g_vehicle_raptor_cannon_turnlimit,  autocvar_g_vehicle_raptor_cannon_turnspeed, dt);
@@ -354,13 +331,6 @@ bool raptor_frame(entity this, float dt)
 	vehicle_aimturret(vehic, trace_endpos, vehic.gun2, "fire1",
 						  autocvar_g_vehicle_raptor_cannon_pitchlimit_down * -1,  autocvar_g_vehicle_raptor_cannon_pitchlimit_up,
 						  autocvar_g_vehicle_raptor_cannon_turnlimit * -1,  autocvar_g_vehicle_raptor_cannon_turnlimit,  autocvar_g_vehicle_raptor_cannon_turnspeed, dt);
-
-	/*
-	ad = ad * 0.5;
-	v_forward = vf * 0.5;
-	traceline(ad, ad + v_forward * max_shot_distance, MOVE_NORMAL, vehic);
-	UpdateAuxiliaryXhair(this, trace_endpos, '0 1 0', 0);
-	*/
 
 	Weapon wep1 = WEP_RAPTOR;
 	.entity weaponentity = weaponentities[0];
@@ -432,7 +402,6 @@ bool raptor_frame(entity this, float dt)
 		vehic.bomb1.cnt = time + 1;
 	}
 
-
 	VEHICLE_UPDATE_PLAYER_RESOURCE(this, vehic, health, raptor, RES_HEALTH);
 	VEHICLE_UPDATE_PLAYER(this, vehic, energy, raptor);
 	if(vehic.vehicle_flags & VHF_HASSHIELD)
@@ -448,15 +417,14 @@ bool raptor_takeoff(entity this, float dt)
 
 	vehic.nextthink = time;
 	CSQCMODEL_AUTOUPDATE(vehic);
-	vehic.nextthink = 0; // will this work?
+	vehic.nextthink = 0;
 
 	if(vehic.sound_nexttime < time)
 	{
-		vehic.sound_nexttime = time + 7.955812; //soundlength("vehicles/raptor_fly.wav");
+		vehic.sound_nexttime = time + 7.955812;
 		sound (vehic, CH_TRIGGER_SINGLE, SND_VEH_RAPTOR_SPEED, VOL_VEHICLEENGINE, ATTEN_NORM);
 	}
 
-	// Takeoff sequense
 	if(vehic.frame < 25)
 	{
 		vehic.frame += 25 / (autocvar_g_vehicle_raptor_takeofftime / dt);
@@ -481,7 +449,6 @@ bool raptor_takeoff(entity this, float dt)
 
 	if(vehic.vehicle_flags  & VHF_ENERGYREGEN)
 		vehicles_regen(vehic, vehic.cnt, vehicle_energy, autocvar_g_vehicle_raptor_energy, autocvar_g_vehicle_raptor_energy_regen_pause, autocvar_g_vehicle_raptor_energy_regen, dt, false);
-
 
 	vehic.bomb1.alpha = vehic.bomb2.alpha = (time - vehic.lip) / (vehic.delay - vehic.lip);
 	this.vehicle_reload2 = bound(0, vehic.bomb1.alpha * 100, 100);
@@ -531,8 +498,6 @@ void raptor_diethink(entity this)
 	CSQCMODEL_AUTOUPDATE(this);
 }
 
-// If we dont do this ever now and then, the raptors rotors
-// stop working, presumably due to angle overflow. cute.
 void raptor_rotor_anglefix(entity this)
 {
 	this.gun1.angles_y = anglemods(this.gun1.angles_y);
@@ -573,12 +538,6 @@ bool raptor_impulse(entity this, int _imp)
 			CSQCVehicleSetup(this, 0);
 			return true;
 
-		/*
-		case IMP_weapon_drop.impulse: // toss gun, could be used to exit?
-			break;
-		case IMP_weapon_reload.impulse: // Manual minigun reload?
-			break;
-		*/
 	}
 	return false;
 }
@@ -602,7 +561,7 @@ METHOD(Raptor, vr_enter, void(Raptor thisveh, entity instance))
     instance.solid		  = SOLID_SLIDEBOX;
     instance.owner.vehicle_health = (GetResource(instance, RES_HEALTH) / autocvar_g_vehicle_raptor_health) * 100;
     instance.owner.vehicle_shield = (instance.vehicle_shield / autocvar_g_vehicle_raptor_shield) * 100;
-    instance.velocity = '0 0 1'; // nudge upwards so takeoff sequence can work
+    instance.velocity = '0 0 1';
     instance.tur_head.exteriormodeltoclient = instance.owner;
 
     instance.delay = time + autocvar_g_vehicle_raptor_bombs_refire;
@@ -642,9 +601,6 @@ METHOD(Raptor, vr_spawn, void(Raptor thisveh, entity instance))
         entity spinner;
         vector ofs;
 
-        //FIXME: Camera is in a bad place in HUD model.
-        //setorigin(instance.vehicle_viewport, '25 0 5');
-
         instance.vehicles_impulse = raptor_impulse;
 
         instance.frame = 0;
@@ -664,17 +620,14 @@ METHOD(Raptor, vr_spawn, void(Raptor thisveh, entity instance))
         setattachment(instance.bomb2, instance, "bombmount_right");
         setattachment(instance.tur_head, instance,"root");
 
-        // FIXMODEL Guns mounts to angled bones
         instance.bomb1.angles = instance.angles;
         instance.angles = '0 0 0';
-        // This messes up gun-aim, so work arround it.
-        //setattachment(instance.gun1, instance, "gunmount_left");
+
         ofs = gettaginfo(instance, gettagindex(instance, "gunmount_left"));
         ofs -= instance.origin;
         setattachment(instance.gun1, instance, "");
         setorigin(instance.gun1, ofs);
 
-        //setattachment(instance.gun2, instance, "gunmount_right");
         ofs = gettaginfo(instance, gettagindex(instance, "gunmount_right"));
         ofs -= instance.origin;
         setattachment(instance.gun2, instance, "");
@@ -699,7 +652,6 @@ METHOD(Raptor, vr_spawn, void(Raptor thisveh, entity instance))
         spinner.avelocity = '0 -90 0';
         instance.bomb1.gun2 = spinner;
 
-        // Sigh.
         setthink(instance.bomb1, raptor_rotor_anglefix);
         instance.bomb1.nextthink = time;
 
@@ -806,7 +758,7 @@ METHOD(Raptor, vr_crosshair, void(Raptor thisveh, entity player))
                 where.y -= tmpSize.y * 0.5;
                 where.z = 0;
                 drawpic(where, vCROSS_DROP, tmpSize, '0 1 0', autocvar_crosshair_alpha * 0.9, DRAWFLAG_ADDITIVE);
-                drawpic(where, vCROSS_DROP, tmpSize, '0 1 0', autocvar_crosshair_alpha * 0.6, DRAWFLAG_NORMAL); // Ensure visibility against bright bg
+                drawpic(where, vCROSS_DROP, tmpSize, '0 1 0', autocvar_crosshair_alpha * 0.6, DRAWFLAG_NORMAL);
             }
             dropmark.cnt = time + 5;
         }
@@ -823,7 +775,7 @@ METHOD(Raptor, vr_crosshair, void(Raptor thisveh, entity player))
                     where.y -= tmpSize.y * 0.5;
                     where.z = 0;
                     drawpic(where, vCROSS_DROP, tmpSize, '1 0 0', autocvar_crosshair_alpha * 0.9, DRAWFLAG_ADDITIVE);
-                    drawpic(where, vCROSS_DROP, tmpSize, '1 0 0', autocvar_crosshair_alpha * 0.6, DRAWFLAG_NORMAL); // Ensure visibility against bright bg
+                    drawpic(where, vCROSS_DROP, tmpSize, '1 0 0', autocvar_crosshair_alpha * 0.6, DRAWFLAG_NORMAL);
                 }
             }
         }

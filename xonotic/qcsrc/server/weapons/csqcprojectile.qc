@@ -14,11 +14,10 @@ bool CSQCProjectile_SendEntity(entity this, entity to, int sf)
 {
 	float ft, fr;
 
-	// note: flag 0x08 = no trail please (teleport bit)
 	sf = sf & 0x0F;
 
 	if(this.csqcprojectile_clientanimate)
-		sf |= 0x80; // client animated, not interpolated
+		sf |= 0x80;
 
 	if(IS_ONGROUND(this))
 		sf |= 0x40;
@@ -56,13 +55,13 @@ bool CSQCProjectile_SendEntity(entity this, entity to, int sf)
 		}
 
 		if(teamplay)
-			WriteByte(MSG_ENTITY, this.realowner.team);
+			WriteShort(MSG_ENTITY, this.realowner.team);
 		else
-			WriteByte(MSG_ENTITY, this.realowner.clientcolors); // NOTE: doesn't work on non-clients
+			WriteByte(MSG_ENTITY, this.realowner.clientcolors);
 	}
 
 	if(sf & 2)
-		WriteByte(MSG_ENTITY, this.csqcprojectile_type); // TODO maybe put this into sf?
+		WriteByte(MSG_ENTITY, this.csqcprojectile_type);
 
 	return true;
 }
@@ -100,28 +99,26 @@ void UpdateCSQCProjectile(entity e)
 {
 	if(getSendEntity(e) == CSQCProjectile_SendEntity)
 	{
-		// send new origin data
+
 		e.SendFlags |= 0x01;
 	}
-// FIXME HACK
+
 	else if(getSendEntity(e) == ItemSend)
 	{
 		ItemUpdate(e);
 	}
-// END HACK
+
 }
 
 void UpdateCSQCProjectileAfterTeleport(entity e)
 {
 	if(getSendEntity(e) == CSQCProjectile_SendEntity)
 	{
-		// send new origin data
+
 		e.SendFlags |= 0x01;
-		// send full data as the projectile may need resetting
-		// this is a workaround for client-side projectiles erroneously calling their SUB_Stop touch function occasionally
-		// when passing through a warpzone
+
 		e.SendFlags |= 2;
-		// mark as teleported
+
 		e.SendFlags |= 0x08;
 	}
 }

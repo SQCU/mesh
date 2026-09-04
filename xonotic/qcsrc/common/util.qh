@@ -1,28 +1,20 @@
 #pragma once
 
 #ifdef SVQC
-float tracebox_inverted (vector v1, vector mi, vector ma, vector v2, float nomonsters, entity forent, float stopatentity, entity ignorestopatentity); // returns the number of traces done, for benchmarking
+float tracebox_inverted (vector v1, vector mi, vector ma, vector v2, float nomonsters, entity forent, float stopatentity, entity ignorestopatentity);
 
 void traceline_inverted (vector v1, vector v2, float nomonsters, entity forent, float stopatentity, entity ignorestopatentity);
 #endif
 
 #ifdef GAMEQC
-/*
-==================
-findbetterlocation
 
-Returns a point at least 12 units away from walls
-(useful for explosion animations, although the blast is performed where it really happened)
-Ripped from DPMod
-==================
-*/
 vector findbetterlocation (vector org, float mindist);
 
 vector real_origin(entity ent);
 #endif
 
 #ifdef SVQC
-// temporary array used to dump settings for each weapon / turret
+
 const int MAX_CONFIG_SETTINGS = 70;
 string config_queue[MAX_CONFIG_SETTINGS];
 #endif
@@ -33,8 +25,6 @@ string config_queue[MAX_CONFIG_SETTINGS];
 IntrusiveList g_saved_cvars;
 STATIC_INIT(g_saved_cvars) { g_saved_cvars = IL_NEW(); }
 
-// this returns a tempstring containing a copy of s with additional \n newlines added, it also replaces \n in the text with a real newline
-// NOTE: s IS allowed to be a tempstring
 string wordwrap(string s, float l);
 #ifdef SVQC
 void wordwrap_sprint(entity to, string s, float l);
@@ -45,8 +35,6 @@ void wordwrap_cb(string s, float l, void(string) callback);
 string draw_currentSkin;
 string draw_UseSkinFor(string pic);
 
-// NOTE they aren't all registered mutators, e.g. jetpack, low gravity
-// TODO add missing "mutators"
 const int MUT_DODGING = 0;
 const int MUT_INSTAGIB = 1;
 const int MUT_NEW_TOYS = 2;
@@ -80,8 +68,6 @@ bool mut_is_active(int mut);
 string build_mutator_list(string s);
 #endif
 
-// iterative depth-first search, with fields that go "up", "down left" and "right" in a tree
-// for each element, funcPre is called first, then funcPre and funcPost for all its children, and funcPost last
 void depthfirst(entity start, .entity up, .entity downleft, .entity right, void(entity, entity) funcPre, void(entity, entity) funcPost, entity pass);
 
 #define TIME_TO_NTHS(t,n) floor((t) * (n) + 0.5)
@@ -114,21 +100,18 @@ float cvar_settemp(string pKey, string pValue);
 float cvar_settemp_restore();
 
 #ifdef GAMEQC
-// modes: 0 = trust q3map2 (_mini images)
-//        1 = trust tracebox (_radar images)
-// in both modes, mapinfo's "size" overrides
 
 string mi_shortname;
 vector mi_min;
 vector mi_max;
 void get_mi_min_max(float mode);
 
-vector mi_picmin; // adjusted mins that map to the picture (square)
-vector mi_picmax; // adjusted maxs that map to the picture (square)
-vector mi_pictexcoord0; // texcoords of the image corners (after transforming, these are 2D coords too)
-vector mi_pictexcoord1; // texcoords of the image corners (after transforming, these are 2D coords too)
-vector mi_pictexcoord2; // texcoords of the image corners (after transforming, these are 2D coords too)
-vector mi_pictexcoord3; // texcoords of the image corners (after transforming, these are 2D coords too)
+vector mi_picmin;
+vector mi_picmax;
+vector mi_pictexcoord0;
+vector mi_pictexcoord1;
+vector mi_pictexcoord2;
+vector mi_pictexcoord3;
 void get_mi_min_max_texcoords(float mode);
 #endif
 
@@ -152,22 +135,22 @@ float compressShotOrigin(vector v);
 vector decompressShotOrigin(float f);
 
 #ifdef SVQC
-string rankings_reply, ladder_reply, lsmaps_reply, maplist_reply, monsterlist_reply; // cached replies
+string rankings_reply, ladder_reply, lsmaps_reply, maplist_reply, monsterlist_reply;
 string records_reply[10];
 #endif
 
 #ifdef GAMEQC
-vector healtharmor_maxdamage(float h, float a, float armorblock, int deathtype); // returns vector: maxdamage, armorideal, 1 if fully armored
-vector healtharmor_applydamage(float a, float armorblock, int deathtype, float damage); // returns vector: take, save, 0
+vector healtharmor_maxdamage(float h, float a, float armorblock, int deathtype);
+vector healtharmor_applydamage(float a, float armorblock, int deathtype, float damage);
 #endif
 
 string getcurrentmod();
 
-float matchacl(string acl, string str); // matches str against ACL acl (with entries +foo*, +foo, +*foo, +*foo*, and same with - for forbidding)
+float matchacl(string acl, string str);
 
 void write_String_To_File(int fh, string str, bool alsoprint);
 
-string get_model_datafilename(string mod, float skn, string fil); // skin -1 will return wildcard, mod string_null will also put wildcard there
+string get_model_datafilename(string mod, float skn, string fil);
 string get_model_parameters_modelname;
 float get_model_parameters_modelskin;
 string get_model_parameters_name;
@@ -184,14 +167,12 @@ string get_model_parameters_bone_aim[MAX_AIM_BONES];
 float get_model_parameters_bone_aimweight[MAX_AIM_BONES];
 float get_model_parameters_fixbone;
 string get_model_parameters_desc;
-float get_model_parameters(string mod, float skn); // call with string_null to clear; skin -1 means mod is the filename of the txt file and is to be split
+float get_model_parameters(string mod, float skn);
 
 ERASEABLE
 string translate_key(string key);
 
-// x-encoding (encoding as zero length invisible string)
-// encodes approx. 14 bits into 5 bytes of color code string
-const float XENCODE_MAX = 21295; // 2*22*22*22-1
+const float XENCODE_MAX = 21295;
 const float XENCODE_LEN = 5;
 string xencode(float f);
 float xdecode(string s);
@@ -200,17 +181,15 @@ float xdecode(string s);
 string strtolower(string s);
 #endif
 
-// generic shutdown handler
 void Shutdown();
 
 #ifdef GAMEQC
 .float skeleton_bones;
 void Skeleton_SetBones(entity e);
-// loops through the tags of model v using counter tagnum
+
 #define FOR_EACH_TAG(v) float tagnum; Skeleton_SetBones(v); for(tagnum = 0; tagnum < v.skeleton_bones; tagnum++, gettaginfo(v, tagnum))
 #endif
 
-// execute-stuff-next-frame subsystem
 void execute_next_frame();
 void queue_to_execute_next_frame(string s);
 
@@ -218,10 +197,8 @@ USING(findNextEntityNearFunction_t, entity(entity cur, entity near, entity pass)
 USING(isConnectedFunction_t, float(entity a, entity b, entity pass));
 void FindConnectedComponent(entity e, .entity fld, findNextEntityNearFunction_t nxt, isConnectedFunction_t iscon, entity pass);
 
-// expand multiple arguments into one argument by stripping parenthesis
 #define XPD(...) __VA_ARGS__
 
-// Some common varargs functions. Lowercase as they match C.
 #define fprintf(file, ...) fputs(file, sprintf(__VA_ARGS__))
 #define bprintf(...) bprint(sprintf(__VA_ARGS__))
 
@@ -244,7 +221,7 @@ vector animfixfps(entity e, vector a, vector b);
 #ifdef GAMEQC
 const int CNT_NORMAL = 1;
 const int CNT_GAMESTART = 2;
-//const int CNT_IDLE = 3;
+
 const int CNT_KILL = 4;
 const int CNT_RESPAWN = 5;
 const int CNT_ROUNDSTART = 6;
@@ -258,7 +235,6 @@ int Mod_Q1BSP_NativeContentsFromSuperContents(int supercontents);
 
 #define APPEND_TO_STRING(list,sep,add) ((list) = (((list) != "") ? strcat(list, sep, add) : (add)))
 
-// Returns the correct difference between two always increasing numbers
 #define COMPARE_INCREASING(to,from) (to < from ? from + to + 2 : to - from)
 
 #ifdef SVQC

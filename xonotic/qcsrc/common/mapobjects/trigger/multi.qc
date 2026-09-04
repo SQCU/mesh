@@ -1,8 +1,7 @@
 #include "multi.qh"
-// NOTE: also contains trigger_once at bottom
 
 #ifdef SVQC
-// the wait time has passed, so set back up for another activation
+
 void multi_wait(entity this)
 {
 	if (this.max_health)
@@ -13,20 +12,16 @@ void multi_wait(entity this)
 	}
 }
 
-
-// the trigger was just touched/killed/used
-// this.enemy should be set to the activator so it can be held through a delay
-// so wait for the delay time before firing
 void multi_trigger(entity this)
 {
 	if (this.nextthink > time)
 	{
-		return;		// allready been triggered
+		return;
 	}
 
 	if((this.spawnflags & ONLY_PLAYERS) && !IS_PLAYER(this.enemy))
 	{
-		return; // only players
+		return;
 	}
 
 	if (this.noise && this.noise != "")
@@ -34,7 +29,6 @@ void multi_trigger(entity this)
 		_sound (this.enemy, CH_TRIGGER, this.noise, VOL_BASE, ATTEN_NORM);
 	}
 
-	// don't trigger again until reset
 	this.takedamage = DAMAGE_NO;
 
 	SUB_UseTargets(this, this.enemy, this.goalentity);
@@ -46,11 +40,11 @@ void multi_trigger(entity this)
 	}
 	else if (this.wait == 0)
 	{
-		multi_wait(this); // waiting finished
+		multi_wait(this);
 	}
 	else
-	{	// we can't just delete(this) here, because this is a touch function
-		// called while C code is looping through area links...
+	{
+
 		settouch(this, func_null);
 		this.use = func_null;
 	}
@@ -78,16 +72,14 @@ void multi_touch(entity this, entity toucher)
 		}
 	}
 
-	// if the trigger has an angles field, check player's facing direction
 	if (this.movedir != '0 0 0')
 	{
 		makevectors (toucher.angles);
 		if (v_forward * this.movedir < 0)
-			return;		// not facing the right way
+			return;
 	}
 
-	// if the trigger has pressed keys, check that the player is pressing those keys
-	if(this.pressedkeys && IS_PLAYER(toucher)) // only for players
+	if(this.pressedkeys && IS_PLAYER(toucher))
 	{
 		if(!(CS(toucher).pressedkeys & this.pressedkeys))
 		{
@@ -137,19 +129,6 @@ void multi_reset(entity this)
 	this.use = multi_use;
 }
 
-/*QUAKED spawnfunc_trigger_multiple (.5 .5 .5) ? notouch
-Variable sized repeatable trigger.  Must be targeted at one or more entities.  If "health" is set, the trigger must be killed to activate each time.
-If "delay" is set, the trigger waits some time after activating before firing.
-"wait" : Seconds between triggerings. (.2 default)
-If notouch is set, the trigger is only fired by other entities, not by touching.
-NOTOUCH has been obsoleted by spawnfunc_trigger_relay!
-sounds
-1)	secret
-2)	beep beep
-3)	large switch
-4)
-set "message" to text string
-*/
 spawnfunc(trigger_multiple)
 {
 	this.reset = multi_reset;
@@ -170,7 +149,7 @@ spawnfunc(trigger_multiple)
 	this.use = multi_use;
 
 	if(this.wait == -1 && (q3compat & Q3COMPAT_DEFI))
-		this.wait = 0.1; // compatibility for q3df: "instant" return
+		this.wait = 0.1;
 
 	EXACTTRIGGER_INIT;
 
@@ -186,32 +165,18 @@ spawnfunc(trigger_multiple)
 		this.event_damage = multi_eventdamage;
 		this.takedamage = DAMAGE_YES;
 		this.solid = SOLID_BBOX;
-		setorigin(this, this.origin);	// make sure it links into the world
+		setorigin(this, this.origin);
 	}
 	else
 	{
 		if ( !(this.spawnflags & SPAWNFLAG_NOTOUCH) )
 		{
 			settouch(this, multi_touch);
-			setorigin(this, this.origin);	// make sure it links into the world
+			setorigin(this, this.origin);
 		}
 	}
 }
 
-
-/*QUAKED spawnfunc_trigger_once (.5 .5 .5) ? notouch
-Variable sized trigger. Triggers once, then removes itself.  You must set the key "target" to the name of another object in the level that has a matching
-"targetname".  If "health" is set, the trigger must be killed to activate.
-If notouch is set, the trigger is only fired by other entities, not by touching.
-if "killtarget" is set, any objects that have a matching "target" will be removed when the trigger is fired.
-if "angle" is set, the trigger will only fire when someone is facing the direction of the angle.  Use "360" for an angle of 0.
-sounds
-1)	secret
-2)	beep beep
-3)	large switch
-4)
-set "message" to text string
-*/
 spawnfunc(trigger_once)
 {
 	this.wait = -1;

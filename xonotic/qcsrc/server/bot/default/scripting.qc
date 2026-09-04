@@ -39,8 +39,6 @@ void bot_queuecommand(entity bot, string cmdstring)
 
 	bufstr_set(bot.bot_cmdqueuebuf, bot.bot_cmdqueuebuf_end, cmdstring);
 
-	// if the command was a "sound" command, precache the sound NOW
-	// this prevents lagging!
 	{
 		float sp;
 		string parm;
@@ -53,7 +51,7 @@ void bot_queuecommand(entity bot, string cmdstring)
 			cmdstr = substring(cmdstring, 0, sp);
 			if(cmdstr == "sound")
 			{
-				// find the LAST word
+
 				for (;;)
 				{
 					sp = strstrofs(parm, " ", 0);
@@ -121,15 +119,15 @@ entity bot_getplace(entity this, string placename)
 		for(i = 0; i < this.bot_places_count; ++i)
 			if(this.(bot_placenames[i]) == placename)
 				return this.(bot_places[i]);
-		// now: i == this.bot_places_count
+
 		s = s2 = cvar_string(placename);
 		p = strstrofs(s2, " ", 0);
 		if(p >= 0)
 		{
 			s = substring(s2, 0, p);
-			//print("places: ", placename, " -> ", cvar_string(placename), "\n");
+
 			cvar_set(placename, strcat(substring(s2, p+1, -1), " ", s));
-			//print("places: ", placename, " := ", cvar_string(placename), "\n");
+
 		}
 		e = find(NULL, targetname, s);
 		if(!e)
@@ -151,9 +149,6 @@ entity bot_getplace(entity this, string placename)
 	}
 }
 
-
-// Initialize global commands list
-// NOTE: New commands should be initialized here
 void bot_commands_init()
 {
 	bot_cmd_string[BOT_CMD_NULL] = "";
@@ -231,7 +226,6 @@ void bot_commands_init()
 	bot_cmds_initialized = true;
 }
 
-// Returns first bot with matching name
 entity find_bot_by_name(string name)
 {
 	FOREACH_CLIENT(IS_BOT_CLIENT(it) && it.netname == name,
@@ -242,7 +236,6 @@ entity find_bot_by_name(string name)
 	return NULL;
 }
 
-// Returns a bot by number on list
 entity find_bot_by_number(float number)
 {
 	entity bot;
@@ -251,7 +244,7 @@ entity find_bot_by_number(float number)
 	if(!number)
 		return NULL;
 
-	bot = findchainflags(flags, FL_CLIENT); // TODO: doesn't findchainflags loop backwards through entities?
+	bot = findchainflags(flags, FL_CLIENT);
 	while (bot)
 	{
 		if(IS_BOT_CLIENT(bot))
@@ -299,10 +292,8 @@ float bot_decodecommand(string cmdstring)
 			return 0;
 		}
 
-		// Load command into queue
 		bot_cmd.bot_cmd_type = i;
 
-		// Attach parameter
 		switch(cmd_parm_type)
 		{
 			case BOT_CMD_PARAMETER_FLOAT:
@@ -476,7 +467,6 @@ void bot_list_commands()
 	LOG_HELP("For help about a specific command, type bot_cmd help <command>");
 }
 
-// Commands code
 .int bot_exec_status;
 
 float bot_cmd_cc(entity this)
@@ -530,35 +520,27 @@ float bot_cmd_wait_until(entity this)
 
 float bot_cmd_barrier(entity this)
 {
-	// 0 = no barrier, 1 = waiting, 2 = waiting finished
 
-	if(this.bot_barrier == 0) // initialization
+	if(this.bot_barrier == 0)
 	{
 		this.bot_barrier = 1;
 
-		//this.colormod = '4 4 0';
 	}
 
-	if(this.bot_barrier == 1) // find other bots
+	if(this.bot_barrier == 1)
 	{
 		FOREACH_CLIENT(it.isbot, {
 			if(it.bot_cmdqueuebuf_allocated)
 			if(it.bot_barrier != 1)
-				return CMD_STATUS_EXECUTING; // not all are at the barrier yet
+				return CMD_STATUS_EXECUTING;
 		});
 
-		// all bots hit the barrier!
-
-		// acknowledge barrier
 		FOREACH_CLIENT(it.isbot, { it.bot_barrier = 2; });
 
 		bot_barriertime = time;
 	}
 
-	// if we get here, the barrier is finished
-	// so end it...
 	this.bot_barrier = 0;
-	//this.colormod = '0 0 0';
 
 	return CMD_STATUS_FINISHED;
 }
@@ -608,16 +590,13 @@ const int CMD_CONDITION_false_BLOCK = 8;
 
 float bot_cmd_eval(entity this, string expr)
 {
-	// Search for numbers
+
 	if(IS_DIGIT(substring(expr, 0, 1)))
 		return stof(expr);
 
-	// Search for cvars
 	if(substring(expr, 0, 5)=="cvar.")
 		return cvar(substring(expr, 5, strlen(expr)));
 
-	// Search for fields
-	// TODO: expand with support for more fields (key carrier, ball carrier, armor etc)
 	switch(expr)
 	{
 		case "health":
@@ -639,7 +618,7 @@ float bot_cmd_if(entity this)
 
 	if(this.bot_cmd_condition_status != CMD_CONDITION_NONE)
 	{
-		// Only one "if" block is allowed at time
+
 		LOG_INFO("ERROR: Only one conditional block can be processed at time");
 		bot_clearqueue(this);
 		return CMD_STATUS_ERROR;
@@ -647,7 +626,6 @@ float bot_cmd_if(entity this)
 
 	this.bot_cmd_condition_status |= CMD_CONDITION_true_BLOCK;
 
-	// search for operators
 	expr = bot_cmd.bot_cmd_parm_string;
 
 	cmpofs = strstrofs(expr,"=",0);
@@ -729,7 +707,7 @@ float bot_cmd_resetaim(entity this)
 
 float bot_cmd_aim(entity this)
 {
-	// Current direction
+
 	if(this.bot_cmd_aim_endtime)
 	{
 		float progress;
@@ -746,7 +724,6 @@ float bot_cmd_aim(entity this)
 			return CMD_STATUS_EXECUTING;
 	}
 
-	// New aiming direction
 	string parms;
 	float tokens, step;
 
@@ -885,14 +862,13 @@ bool bot_presskeys(entity this)
 	return true;
 }
 
-
 float bot_cmd_keypress_handler(entity this, string key, float enabled)
 {
 	switch(key)
 	{
 		case "all":
 			if(enabled)
-				this.bot_cmd_keys = (2 ** 20) - 1; // >:)
+				this.bot_cmd_keys = (2 ** 20) - 1;
 			else
 				this.bot_cmd_keys = BOT_CMD_KEY_NONE;
 		case "forward":
@@ -1043,7 +1019,6 @@ float bot_cmd_resetgoal(entity this)
 	return this.cmd_resetgoal(this);
 }
 
-
 float bot_cmd_sound(entity this)
 {
 	string f;
@@ -1076,7 +1051,7 @@ float bot_cmd_debug_assert_canfire(entity this)
 {
 	float f = bot_cmd.bot_cmd_parm_float;
 
-	int slot = 0; // TODO: unhardcode?
+	int slot = 0;
 	.entity weaponentity = weaponentities[slot];
 	if(this.(weaponentity).state != WS_READY)
 	{
@@ -1114,8 +1089,6 @@ float bot_cmd_debug_assert_canfire(entity this)
 	return CMD_STATUS_FINISHED;
 }
 
-//
-
 void bot_command_executed(entity this, bool rm)
 {
 	entity cmd;
@@ -1151,7 +1124,7 @@ void bot_setcurrentcommand(entity this)
 			}
 			else
 			{
-				// Invalid command, remove from queue
+
 				bot_cmd = NULL;
 				bot_dequeuecommand(this, this.bot_cmd_execution_index);
 				this.bot_cmd_execution_index++;
@@ -1167,7 +1140,7 @@ void bot_resetqueues()
 	FOREACH_CLIENT(it.isbot, {
 		it.bot_cmd_execution_index = 0;
 		bot_clearqueue(it);
-		// also, cancel all barriers
+
 		it.bot_barrier = 0;
 		for(int i = 0; i < it.bot_places_count; ++i)
 		{
@@ -1179,22 +1152,15 @@ void bot_resetqueues()
 	bot_barriertime = time;
 }
 
-// Here we map commands to functions and deal with complex interactions between commands and execution states
-// NOTE: Of course you need to include your commands here too :)
 float bot_execute_commands_once(entity this)
 {
 	float status, ispressingkey;
 
-	// Find command
 	bot_setcurrentcommand(this);
 
-	// Ignore all commands except continue when the bot is paused
 	if(!(this.bot_exec_status & BOT_EXEC_STATUS_PAUSED))
 	{
-		// if we have no bot command, better return
-		// old logic kept pressing previously pressed keys, but that has problems
-		// (namely, it means you cannot make a bot "normal" ever again)
-		// to keep a bot walking for a while, use the "wait" bot command
+
 		if(bot_cmd == world)
 			return 0;
 	}
@@ -1208,10 +1174,8 @@ float bot_execute_commands_once(entity this)
 		return 1;
 	}
 
-	// Keep pressing keys raised by the "presskey" command
 	ispressingkey = boolean(bot_presskeys(this));
 
-	// Handle conditions
 	if (!(bot_cmd.bot_cmd_type==BOT_CMD_FI||bot_cmd.bot_cmd_type==BOT_CMD_ELSE))
 	if((this.bot_cmd_condition_status & CMD_CONDITION_true) && this.bot_cmd_condition_status & CMD_CONDITION_false_BLOCK)
 	{
@@ -1224,12 +1188,11 @@ float bot_execute_commands_once(entity this)
 		return -1;
 	}
 
-	// Map commands to functions
 	switch(bot_cmd.bot_cmd_type)
 	{
 		case BOT_CMD_NULL:
 			return ispressingkey;
-			//break;
+
 		case BOT_CMD_PAUSE:
 			status = bot_cmd_pause(this);
 			break;
@@ -1308,7 +1271,6 @@ float bot_execute_commands_once(entity this)
 	if (status==CMD_STATUS_ERROR)
 		LOG_INFOF("ERROR: The command '%s' returned an error status", bot_cmd_string[bot_cmd.bot_cmd_type]);
 
-	// Move execution pointer
 	if(status==CMD_STATUS_EXECUTING)
 	{
 		return 1;
@@ -1346,7 +1308,6 @@ float bot_execute_commands_once(entity this)
 	return CMD_STATUS_ERROR;
 }
 
-// This function should be (the only) called directly from the bot ai loop
 int bot_execute_commands(entity this)
 {
 	int f;

@@ -89,10 +89,9 @@ void W_Devastator_DoRemoteExplode(entity this, .entity weaponentity)
 			{
 				if(vdist(this.origin - head.WarpZone_findradius_nearest, <=, WEP_CVAR(devastator, remote_jump_radius)))
 				{
-					// we handled this as a rocketjump :)
+
 					handled_as_rocketjump = true;
 
-					// modify velocity
 					if(WEP_CVAR(devastator, remote_jump_velocity_z_add))
 					{
 						head.velocity_x *= 0.9;
@@ -104,7 +103,6 @@ void W_Devastator_DoRemoteExplode(entity this, .entity weaponentity)
 						);
 					}
 
-					// now do the damage
 					RadiusDamage(
 						this,
 						head,
@@ -159,8 +157,8 @@ void W_Devastator_RemoteExplode(entity this, .entity weaponentity)
 	if(this.realowner.(weaponentity).lastrocket)
 	{
 		if((this.spawnshieldtime >= 0)
-			? (time >= this.spawnshieldtime) // timer
-			: (vdist(NearestPointOnBox(this.realowner, this.origin) - this.origin, >, WEP_CVAR(devastator, remote_radius))) // safety device
+			? (time >= this.spawnshieldtime)
+			: (vdist(NearestPointOnBox(this.realowner, this.origin) - this.origin, >, WEP_CVAR(devastator, remote_radius)))
 		)
 		{
 			W_Devastator_DoRemoteExplode(this, weaponentity);
@@ -172,34 +170,17 @@ vector W_Devastator_SteerTo(vector thisdir, vector goaldir, float maxturn_cos)
 {
 	if(thisdir * goaldir > maxturn_cos)
 		return goaldir;
-	if(thisdir * goaldir < -0.9998) // less than 1 degree and opposite
-		return thisdir; // refuse to guide (better than letting a numerical error happen)
+	if(thisdir * goaldir < -0.9998)
+		return thisdir;
 	float f, m2;
 	vector v;
-	// solve:
-	//   g = normalize(thisdir + goaldir * X)
-	//   thisdir * g = maxturn
-	//
-	//   gg = thisdir + goaldir * X
-	//   (thisdir * gg)^2 = maxturn^2 * (gg * gg)
-	//
-	//   (1 + (thisdir * goaldir) * X)^2 = maxturn^2 * (1 + X*X + 2 * X * thisdir * goaldir)
+
 	f = thisdir * goaldir;
-	//   (1 + f * X)^2 = maxturn^2 * (1 + X*X + 2 * X * f)
-	//   0 = (m^2 - f^2) * x^2 + (2 * f * (m^2 - 1)) * x + (m^2 - 1)
+
 	m2 = maxturn_cos * maxturn_cos;
 	v = solve_quadratic(m2 - f * f, 2 * f * (m2 - 1), m2 - 1);
-	return normalize(thisdir + goaldir * v.y); // the larger solution!
+	return normalize(thisdir + goaldir * v.y);
 }
-// assume thisdir == -goaldir:
-//   f == -1
-//   v = solve_qadratic(m2 - 1, -2 * (m2 - 1), m2 - 1)
-//   (m2 - 1) x^2 - 2 * (m2 - 1) * x + (m2 - 1) = 0
-//   x^2 - 2 * x + 1 = 0
-//   (x - 1)^2 = 0
-//   x = 1
-//   normalize(thisdir + goaldir)
-//   normalize(0)
 
 void W_Devastator_Think(entity this)
 {
@@ -213,13 +194,11 @@ void W_Devastator_Think(entity this)
 		return;
 	}
 
-	// accelerate
 	makevectors(this.angles.x * '-1 0 0' + this.angles.y * '0 1 0');
 	velspeed = WEP_CVAR(devastator, speed) * W_WeaponSpeedFactor(this.realowner) - (this.velocity * v_forward);
 	if(velspeed > 0)
 		this.velocity = this.velocity + v_forward * min(WEP_CVAR(devastator, speedaccel) * W_WeaponSpeedFactor(this.realowner) * frametime, velspeed);
 
-	// laser guided, or remote detonation
 	.entity weaponentity = this.weaponentity_fld;
 	if(this.realowner.(weaponentity).m_weapon == WEP_DEVASTATOR)
 	{
@@ -242,7 +221,7 @@ void W_Devastator_Think(entity this)
 			vector dv = v_right * -vecs.y + v_up * vecs.z;
 
 			if(!W_DualWielding(this.realowner))
-				dv = '0 0 0'; // don't override!
+				dv = '0 0 0';
 
 			velspeed = vlen(this.velocity);
 
@@ -251,8 +230,6 @@ void W_Devastator_Think(entity this)
 			desiredorigin = WarpZone_RefSys_TransformOrigin(this.realowner, this, this.realowner.origin + this.realowner.view_ofs + dv);
 			olddir = normalize(this.velocity);
 
-			// now it gets tricky... we want to move like some curve to approximate the target direction
-			// but we are limiting the rate at which we can turn!
 			goal = desiredorigin + ((this.origin - desiredorigin) * desireddir + WEP_CVAR(devastator, guidegoal)) * desireddir;
 			newdir = W_Devastator_SteerTo(olddir, normalize(goal - this.origin), cos(WEP_CVAR(devastator, guiderate) * f * frametime * DEG2RAD));
 
@@ -262,7 +239,7 @@ void W_Devastator_Think(entity this)
 			if(!this.count)
 			{
 				Send_Effect(EFFECT_ROCKET_GUIDE, this.origin, this.velocity, 1);
-				// TODO add a better sound here
+
 				sound(this.realowner, CH_WEAPON_B, SND_ROCKET_MODE, VOL_BASE, ATTN_NORM);
 				this.count = 1;
 			}
@@ -293,8 +270,8 @@ void W_Devastator_Damage(entity this, entity inflictor, entity attacker, float d
 	if(GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1)) // no exceptions
-		return; // g_projectiles_damage says to halt
+	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 	this.angles = vectoangles(this.velocity);
@@ -317,11 +294,11 @@ void W_Devastator_Attack(Weapon thiswep, entity actor, .entity weaponentity, int
 	if(WEP_CVAR(devastator, detonatedelay) >= 0)
 		missile.spawnshieldtime = time + WEP_CVAR(devastator, detonatedelay);
 	else
-		missile.spawnshieldtime = -1; // NOTE: proximity based when rocket jumping
+		missile.spawnshieldtime = -1;
 	missile.pushltime = time + WEP_CVAR(devastator, guidedelay);
 	missile.classname = "rocket";
 	missile.bot_dodge = true;
-	missile.bot_dodgerating = WEP_CVAR(devastator, damage) * 2; // * 2 because it can be detonated inflight which makes it even more dangerous
+	missile.bot_dodgerating = WEP_CVAR(devastator, damage) * 2;
 
 	missile.takedamage = DAMAGE_YES;
 	missile.damageforcescale = WEP_CVAR(devastator, damageforcescale);
@@ -333,9 +310,9 @@ void W_Devastator_Attack(Weapon thiswep, entity actor, .entity weaponentity, int
 	set_movetype(missile, MOVETYPE_FLY);
 	PROJECTILE_MAKETRIGGER(missile);
 	missile.projectiledeathtype = thiswep.m_id;
-	setsize(missile, '-3 -3 -3', '3 3 3'); // give it some size so it can be shot
+	setsize(missile, '-3 -3 -3', '3 3 3');
 
-	setorigin(missile, w_shotorg - v_forward * 3); // move it back so it hits the wall at the right point
+	setorigin(missile, w_shotorg - v_forward * 3);
 	W_SetupProjVelocity_Basic(missile, WEP_CVAR(devastator, speedstart), 0);
 	missile.angles = vectoangles(missile.velocity);
 
@@ -343,15 +320,14 @@ void W_Devastator_Attack(Weapon thiswep, entity actor, .entity weaponentity, int
 	setthink(missile, W_Devastator_Think);
 	missile.nextthink = time;
 	missile.cnt = time + WEP_CVAR(devastator, lifetime);
-	missile.rl_detonate_later = (fire & 2); // allow instant detonation
+	missile.rl_detonate_later = (fire & 2);
 	missile.flags = FL_PROJECTILE;
 	IL_PUSH(g_projectiles, missile);
 	IL_PUSH(g_bot_dodge, missile);
 	missile.missile_flags = MIF_SPLASH;
 
-	CSQCProjectile(missile, WEP_CVAR(devastator, guiderate) == 0 && WEP_CVAR(devastator, speedaccel) == 0, PROJECTILE_ROCKET, false); // because of fly sound
+	CSQCProjectile(missile, WEP_CVAR(devastator, guiderate) == 0 && WEP_CVAR(devastator, speedaccel) == 0, PROJECTILE_ROCKET, false);
 
-	// common properties
 	MUTATOR_CALLHOOK(EditProjectile, actor, missile);
 
 	if (time >= missile.nextthink)
@@ -369,24 +345,22 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
         {
             fired_rockets++;
         });
-        // release PHYS_INPUT_BUTTON_ATCK after all fired rocket exploded otherwise bot can't fire again
+
         if (!fired_rockets)
             return;
     }
 
-    // aim and decide to fire if appropriate
     float spd = WEP_CVAR(devastator, speed);
-    // simulate rocket guide by calculating rocket trajectory with higher speed
-    // 20 times faster at 90 degrees guide rate
+
     if (WEP_CVAR(devastator, guiderate) > 0)
-        spd *= sqrt(WEP_CVAR(devastator, guiderate)) * (20 / 9.489); // 9.489 ~= sqrt(90)
-    // no need to fire with high accuracy on large distances if rockets can be guided
+        spd *= sqrt(WEP_CVAR(devastator, guiderate)) * (20 / 9.489);
+
     bool shot_accurate = (WEP_CVAR(devastator, guiderate) < 50);
     PHYS_INPUT_BUTTON_ATCK(actor) = bot_aim(actor, weaponentity, spd, 0, WEP_CVAR(devastator, lifetime), false, shot_accurate);
     float pred_time = bound(0.02, 0.02 + (8 - skill) * 0.01, 0.1);
-    if(skill >= 2) // skill 0 and 1 bots won't detonate rockets!
+    if(skill >= 2)
     {
-        // decide whether to detonate rockets
+
         float selfdamage = 0, teamdamage = 0, enemydamage = 0;
         float pred_selfdamage = 0, pred_teamdamage = 0, pred_enemydamage = 0;
         float edgedamage = WEP_CVAR(devastator, edgedamage);
@@ -397,7 +371,7 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
             entity rocket = it;
             IL_EACH(g_bot_targets, it.bot_attack,
             {
-                // code to calculate damage is similar to the one used in RadiusDamageForSource with some simplifications
+
                 vector target_pos = it.origin + (it.maxs - it.mins) * 0.5;
 
                 float dist = vlen(target_pos - rocket.origin);
@@ -416,14 +390,13 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
                     pred_dmg = coredamage * f + edgedamage * (1 - f);
                 }
 
-                // count potential damage according to type of target
                 if(it == actor)
                 {
                     if(StatusEffects_active(STATUSEFFECT_Strength, it))
                         dmg *= autocvar_g_balance_powerup_strength_damage;
                     if(StatusEffects_active(STATUSEFFECT_Shield, it))
                         dmg *= autocvar_g_balance_powerup_invincible_takedamage;
-                    // self damage reduction factor will be applied later to the total damage
+
                     selfdamage += dmg;
                     pred_selfdamage += pred_dmg;
                 }
@@ -431,7 +404,7 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
                 {
                     if(StatusEffects_active(STATUSEFFECT_Shield, it))
                         dmg *= autocvar_g_balance_powerup_invincible_takedamage;
-                    // bot strength factor will be applied later to the total damage
+
                     teamdamage += dmg;
                     pred_teamdamage += pred_dmg;
                 }
@@ -439,7 +412,7 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
                 {
                     if(StatusEffects_active(STATUSEFFECT_Shield, it))
                         dmg *= autocvar_g_balance_powerup_invincible_takedamage;
-                    // bot strength factor will be applied later to the total damage
+
                     enemydamage += dmg;
                     pred_enemydamage += pred_dmg;
                 }
@@ -450,7 +423,7 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
         pred_selfdamage *= autocvar_g_balance_selfdamagepercent;
         if(StatusEffects_active(STATUSEFFECT_Strength, actor))
         {
-            // FIXME bots don't know whether team damage is enabled or not
+
             teamdamage *= autocvar_g_balance_powerup_strength_damage;
             pred_teamdamage *= autocvar_g_balance_powerup_strength_damage;
             enemydamage *= autocvar_g_balance_powerup_strength_damage;
@@ -462,8 +435,6 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
         float bad_damage = selfdamage + teamdamage;
         float pred_bad_damage = pred_selfdamage + pred_teamdamage;
 
-        // detonate if predicted good damage is lower (current good damage is maximum)
-        // or if predicted bad damage is too much
         if(good_damage > coredamage * 0.1 && good_damage > bad_damage * 1.5
             && (pred_good_damage < good_damage + 2 || pred_good_damage < pred_bad_damage * 1.5))
         {
@@ -472,14 +443,13 @@ METHOD(Devastator, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
         if(skill >= 7 && selfdamage > GetResource(actor, RES_HEALTH))
             PHYS_INPUT_BUTTON_ATCK2(actor) = false;
 
-        // don't fire a new shot at the same time!
         if(PHYS_INPUT_BUTTON_ATCK2(actor)) PHYS_INPUT_BUTTON_ATCK(actor) = false;
     }
 }
 
 METHOD(Devastator, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    if(WEP_CVAR(devastator, reload_ammo) && actor.(weaponentity).clip_load < WEP_CVAR(devastator, ammo)) { // forced reload
+    if(WEP_CVAR(devastator, reload_ammo) && actor.(weaponentity).clip_load < WEP_CVAR(devastator, ammo)) {
         thiswep.wr_reload(thiswep, actor, weaponentity);
     } else {
         if(fire & 1)
@@ -519,7 +489,7 @@ METHOD(Devastator, wr_setup, void(entity thiswep, entity actor, .entity weaponen
 METHOD(Devastator, wr_checkammo1, bool(entity thiswep, entity actor, .entity weaponentity))
 {
     #if 0
-    // don't switch while guiding a missile
+
     if(ATTACK_FINISHED(actor, weaponentity) <= time || PS(actor).m_weapon != WEP_DEVASTATOR)
     {
         ammo_amount = false;
@@ -560,9 +530,9 @@ METHOD(Devastator, wr_resetplayer, void(entity thiswep, entity actor))
 {
     for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
     {
-    	.entity weaponentity = weaponentities[slot];
-    	actor.(weaponentity).lastrocket = NULL; // stop rocket guiding, no revenge from the grave!
-    	actor.(weaponentity).rl_release = 0;
+	.entity weaponentity = weaponentities[slot];
+	actor.(weaponentity).lastrocket = NULL;
+	actor.(weaponentity).rl_release = 0;
     }
 }
 METHOD(Devastator, wr_reload, void(entity thiswep, entity actor, .entity weaponentity))

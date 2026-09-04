@@ -7,7 +7,7 @@
 		SUPER(Button).resizeNotify(me, relOrigin, relSize, absOrigin, absSize);
 
 		if(me.disableOnClick)
-			me.disabled = true; // initially disabled
+			me.disabled = true;
 	}
 	void Button_configureButton(entity me, string txt, float sz, string gfx)
 	{
@@ -21,7 +21,7 @@
 			if(!me.disabled)
 			{
 				me.playClickSound(me);
-				me.clickTime = 0.1;  // delayed for effect
+				me.clickTime = 0.1;
 			}
 			return 1;
 		}
@@ -38,12 +38,12 @@
 	}
 	METHOD(Button, mousePress, bool(Button this, vector pos))
 	{
-		this.mouseDrag(this, pos);  // verify coordinates
+		this.mouseDrag(this, pos);
 		return true;
 	}
 	float Button_mouseRelease(entity me, vector pos)
 	{
-		me.mouseDrag(me, pos);  // verify coordinates
+		me.mouseDrag(me, pos);
 		if (me.pressed)
 		{
 			if (!me.disabled)
@@ -120,7 +120,7 @@
 
 		if (me.clickTime > 0 && me.clickTime <= frametime)
 		{
-			// keyboard click timer expired? Fire the event then.
+
 			if (!me.disabled && me.onClick)
 			{
 				if(me.applyButton)

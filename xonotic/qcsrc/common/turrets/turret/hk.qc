@@ -44,4 +44,4 @@ bool turret_hk_addtarget(entity this, entity e_target,entity e_sender)
     return false;
 }
 
-#endif // SVQC
+#endif

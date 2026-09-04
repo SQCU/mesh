@@ -1,6 +1,6 @@
 #include "vectormamamam.qh"
 #ifdef SVQC
-// reusing some fields havocbots declared
+
 .entity wp00, wp01, wp02, wp03;
 
 .float targetfactor, target2factor, target3factor, target4factor;
@@ -66,7 +66,7 @@ void func_vectormamamam_controller_think(entity this)
 		return;
 	}
 
-	if(this.owner.classname == "func_vectormamamam") // don't brake stuff if the func_vectormamamam was killtarget'ed
+	if(this.owner.classname == "func_vectormamamam")
 		this.owner.velocity = (this.owner.destvec + func_vectormamamam_origin(this.owner, VECTORMAMAMAM_TIMESTEP) - this.owner.origin) * 10;
 }
 
@@ -172,17 +172,14 @@ spawnfunc(func_vectormamamam)
 	if (!InitMovingBrushTrigger(this))
 		return;
 
-	// wait for targets to spawn
 	this.nextthink = this.ltime + 999999999;
-	setthink(this, SUB_NullThink); // for PushMove
+	setthink(this, SUB_NullThink);
 
-	// Savage: Reduce bandwith, critical on e.g. nexdm02
 	this.effects |= EF_LOWPRECISION;
 
 	this.setactive = func_vectormamamam_setactive;
 	this.setactive(this, ACTIVE_ACTIVE);
 
-	// maybe send sound to new players
 	IL_PUSH(g_initforplayer, this);
 	this.init_for_player = func_vectormamamam_init_for_player;
 

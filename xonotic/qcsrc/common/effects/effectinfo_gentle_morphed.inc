@@ -1,4 +1,4 @@
-// cl_gentle impact effect indicating damage
+
 DEF(morphed_damage_hit);
 SUB(morphed_damage_hit) {
     MY(airfriction) = 5;
@@ -35,7 +35,6 @@ SUB(morphed_damage_hit) {
     MY(type) = "smoke";
 }
 
-// effect for removing player model
 DEF(morphed_damage_dissolve);
 SUB(morphed_damage_dissolve) {
     MY(airfriction) = 8;

@@ -1,8 +1,8 @@
 fix_function_types() {
-	# Uncrustify handles QC function types (example:
-	#  void(void) func;
-	# ) wrong and removes the space between type and variable. Fix this by
-	# a simple sed on ")letter" which should normally not occur.
+
+
+
+
 	sed -e 's/)\([A-Za-z_]\)/) \1/g' "$@"
 }
 

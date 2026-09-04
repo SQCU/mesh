@@ -19,7 +19,7 @@ void pathlib_deletepath(entity start)
     });
 }
 
-const float PATHLIB_NODEEXPIRE = 20; // 0.05
+const float PATHLIB_NODEEXPIRE = 20;
 
 void dumpnode(entity n)
 {
@@ -33,7 +33,6 @@ void dumpnode(entity n)
 #if DEBUGPATHING
 #include "debug.qh"
 #endif
-
 
 entity pathlib_mknode(vector where,entity parent)
 {
@@ -91,8 +90,6 @@ bool pathlib_makenode_adaptive(entity parent,vector start, vector to, vector goa
         else
         {
             LOG_DEBUG("LandToLoand");
-            //if(edge_check(parent.origin))
-            //    return 0;
 
             pathlib_expandnode = pathlib_expandnode_star;
             pathlib_movenode   = pathlib_walknode;
@@ -134,13 +131,10 @@ bool pathlib_makenode_adaptive(entity parent,vector start, vector to, vector goa
 
     if (!pathlib_movenode_goodnode)
     {
-        //pathlib_showsquare(where, 0 ,30);
-        //pathlib_showsquare(parent.origin, 1 ,30);
+
         LOG_DEBUG("pathlib_movenode_goodnode = 0");
         return false;
     }
-
-    //pathlib_showsquare(where, 1 ,30);
 
     if(pathlib_nodeatpoint(where))
     {
@@ -149,7 +143,6 @@ bool pathlib_makenode_adaptive(entity parent,vector start, vector to, vector goa
         LOG_DEBUG("NAP-NNAP:",ftos(vlen(to-where)));
         return false;
     }
-
 
     if(dodge)
         if (!tile_check(parent, where))
@@ -161,44 +154,9 @@ bool pathlib_makenode_adaptive(entity parent,vector start, vector to, vector goa
             return false;
         }
 
-
     h = pathlib_heuristic(where,goal);
     g = pathlib_cost(parent,where,cost);
     f = g + h;
-
-    /*
-    node = findradius(where,pathlib_gridsize * 0.5);
-    while(node)
-    {
-        if(node.is_path_node == true)
-        {
-            ++pathlib_merge_cnt;
-            if(node.owner == openlist)
-            {
-                if(node.pathlib_node_g > g)
-                {
-                    //pathlib_movenode(node, where,node.origin,0);
-                    //if(pathlib_movenode_goodnode)
-                    //{
-                        //mark_error(node.origin + '0 0 128',30);
-                        node.pathlib_node_h = h;
-                        node.pathlib_node_g = g;
-                        node.pathlib_node_f = f;
-                        node.path_prev = parent;
-                    //}
-                }
-
-                if (!best_open_node)
-                    best_open_node = node;
-                else if(best_open_node.pathlib_node_f > node.pathlib_node_f)
-                    best_open_node = node;
-            }
-
-            return 1;
-        }
-        node = node.chain;
-    }
-    */
 
     node = pathlib_mknode(where, parent);
     node.pathlib_node_h = h;
@@ -268,8 +226,6 @@ void pathlib_cleanup()
 {
     best_open_node = NULL;
 
-    //return;
-
     IL_EACH(g_pathlib_nodes, it.is_path_node,
     {
     	dumpnode(it);
@@ -302,10 +258,10 @@ bool buildpath_nodefilter_directional(vector n,vector c,vector p)
 
     if(vdist(d1 - d2, <, 0.25))
     {
-        //mark_error(c,30);
+
         return true;
     }
-    //mark_info(c,30);
+
     return false;
 }
 
@@ -329,7 +285,6 @@ entity path_build(entity next, vector where, entity prev, entity start)
         if(buildpath_nodefilter)
             if(buildpath_nodefilter(next.origin,where,prev.origin))
                 return next;
-
 
     entity path    = spawn();
     path.owner     = start;
@@ -358,35 +313,25 @@ entity pathlib_astar(entity this, vector from, vector to)
 
     pathlib_cleanup();
 
-    // Select water<->land capable node make/link
     pathlib_makenode     = pathlib_makenode_adaptive;
 
-    // Select XYZ cost estimate
-    //pathlib_heuristic    = pathlib_h_diagonal3;
     pathlib_heuristic    = pathlib_h_diagonal;
 
-    // Select distance + waterfactor cost
     pathlib_cost         = pathlib_g_euclidean_water;
 
-    // Select star expander
     pathlib_expandnode   = pathlib_expandnode_star;
 
-    // Select walk simulation movement test
     pathlib_movenode     = pathlib_walknode;
 
-    // Filter final nodes by direction
     buildpath_nodefilter = buildpath_nodefilter_directional;
 
-    // Filter tiles with cross pattern
     tile_check = tile_check_cross;
 
-    // If the start is in water we need diffrent settings
     if(inwater(from))
     {
-        // Select volumetric node expaner
+
         pathlib_expandnode = pathlib_expandnode_box;
 
-        // Water movement test
         pathlib_movenode   = pathlib_swimnode;
     }
 
@@ -422,19 +367,16 @@ entity pathlib_astar(entity this, vector from, vector to)
     tile_check_down = '0 0 3' * pathlib_gridsize;
     tile_check_down = '0 0 256';
 
-    //movenode_stepup   = '0 0 128';
     movenode_stepup   = '0 0 36';
     movenode_maxdrop  = '0 0 512';
-    //movenode_maxdrop  = '0 0 512';
+
     movenode_boxup    = '0 0 72';
 
     from.x = fsnap(from.x, pathlib_gridsize);
     from.y = fsnap(from.y, pathlib_gridsize);
-    //from.z += 32;
 
     to.x = fsnap(to.x, pathlib_gridsize);
     to.y = fsnap(to.y, pathlib_gridsize);
-    //to.z += 32;
 
     LOG_DEBUG("AStar init");
     entity path = pathlib_mknode(from, NULL);
@@ -515,7 +457,6 @@ entity pathlib_astar(entity this, vector from, vector to)
             float ctime = gettime(GETTIME_REALTIME);
             pathlib_cleanup();
             ctime = gettime(GETTIME_REALTIME) - ctime;
-
 
 #if DEBUGPATHING
             pathlib_showpath2(start);

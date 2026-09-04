@@ -9,17 +9,10 @@ void SUB_CalcAngleMoveDone(entity this);
 spawnfunc(info_null)
 {
 	delete(this);
-	// if anything breaks, tell the mapper to fix their map! info_null is meant to remove itself immediately.
+
 }
 #endif
 
-/*
-==================
-SUB_Friction
-
-Applies some friction to this
-==================
-*/
 .float friction;
 void SUB_Friction (entity this)
 {
@@ -28,18 +21,11 @@ void SUB_Friction (entity this)
 		this.velocity = this.velocity * (1 - frametime * this.friction);
 }
 
-/*
-==================
-SUB_VanishOrRemove
-
-Makes client invisible or removes non-client
-==================
-*/
 void SUB_VanishOrRemove (entity ent)
 {
 	if (IS_CLIENT(ent))
 	{
-		// vanish
+
 		ent.alpha = -1;
 		ent.effects = 0;
 #ifdef SVQC
@@ -49,7 +35,7 @@ void SUB_VanishOrRemove (entity ent)
 	}
 	else
 	{
-		// remove
+
 		delete(ent);
 	}
 }
@@ -67,13 +53,6 @@ void SUB_SetFade_Think (entity this)
 		this.nextthink = time;
 }
 
-/*
-==================
-SUB_SetFade
-
-Fade ent out when time >= vanish_time
-==================
-*/
 void SUB_SetFade(entity ent, float vanish_time, float fading_time)
 {
 	if (fading_time <= 0)
@@ -83,17 +62,8 @@ void SUB_SetFade(entity ent, float vanish_time, float fading_time)
 	ent.nextthink = vanish_time;
 }
 
-/*
-=============
-SUB_CalcMove
-
-calculate this.velocity and this.nextthink to reach dest from
-this.origin traveling at speed
-===============
-*/
 void SUB_CalcMoveDone(entity this)
 {
-	// After moving, set origin to exact final destination
 
 	setorigin (this, this.finaldest);
 	this.velocity = '0 0 0';
@@ -126,43 +96,41 @@ void SUB_CalcMove_controller_think (entity this)
 		nexttick = time + PHYS_INPUT_FRAMETIME;
 
 		traveltime = this.animstate_endtime - this.animstate_starttime;
-		phasepos = (nexttick - this.animstate_starttime) / traveltime; // range: [0, 1]
+		phasepos = (nexttick - this.animstate_starttime) / traveltime;
 		phasepos = cubic_speedfunc(this.platmovetype_start, this.platmovetype_end, phasepos);
 		nextpos = this.origin + (delta * phasepos) + (delta2 * phasepos * phasepos);
-		// derivative: delta + 2 * delta2 * phasepos (e.g. for angle positioning)
 
 		if(this.owner.platmovetype_turn)
 		{
 			vector destangle;
 			destangle = delta + 2 * delta2 * phasepos;
 			destangle = vectoangles(destangle);
-			destangle_x = -destangle_x; // flip up / down orientation
+			destangle_x = -destangle_x;
 
-			// take the shortest distance for the angles
 			vector v = this.owner.angles;
 			v.x -= 360 * floor((v.x - destangle_x) / 360 + 0.5);
 			v.y -= 360 * floor((v.y - destangle_y) / 360 + 0.5);
 			v.z -= 360 * floor((v.z - destangle_z) / 360 + 0.5);
 			this.owner.angles = v;
 			angloc = destangle - this.owner.angles;
-			angloc = angloc * (1 / PHYS_INPUT_FRAMETIME); // so it arrives for the next frame
+			angloc = angloc * (1 / PHYS_INPUT_FRAMETIME);
 			this.owner.avelocity = angloc;
 		}
 		if(nexttick < this.animstate_endtime)
 			veloc = nextpos - this.owner.origin;
 		else
 			veloc = this.finaldest - this.owner.origin;
-		veloc = veloc * (1 / PHYS_INPUT_FRAMETIME); // so it arrives for the next frame
+		veloc = veloc * (1 / PHYS_INPUT_FRAMETIME);
 
 		this.owner.velocity = veloc;
 		this.nextthink = nexttick;
 	}
 	else
 	{
-		// derivative: delta + 2 * delta2 (e.g. for angle positioning)
+
 		entity own = this.owner;
 		setthink(own, this.think1);
-		// set the owner's reference to this entity to NULL
+
 		own.move_controller = NULL;
 		delete(this);
 		getthink(own)(own);
@@ -171,31 +139,23 @@ void SUB_CalcMove_controller_think (entity this)
 
 void SUB_CalcMove_controller_setbezier (entity controller, vector org, vector control, vector destin)
 {
-	// 0 * (1-t) * (1-t) + 2 * control * t * (1-t) + destin * t * t
-	// 2 * control * t - 2 * control * t * t + destin * t * t
-	// 2 * control * t + (destin - 2 * control) * t * t
 
-	//setorigin(controller, org); // don't link to the world
 	controller.origin = org;
 	control -= org;
 	destin -= org;
 
-	controller.destvec = 2 * control; // control point
-	controller.destvec2 = destin - 2 * control; // quadratic part required to reach end point
-	// also: initial d/dphasepos origin = 2 * control, final speed = 2 * (destin - control)
+	controller.destvec = 2 * control;
+	controller.destvec2 = destin - 2 * control;
+
 }
 
 void SUB_CalcMove_controller_setlinear (entity controller, vector org, vector destin)
 {
-	// 0 * (1-t) * (1-t) + 2 * control * t * (1-t) + destin * t * t
-	// 2 * control * t - 2 * control * t * t + destin * t * t
-	// 2 * control * t + (destin - 2 * control) * t * t
 
-	//setorigin(controller, org); // don't link to the world
 	controller.origin = org;
 	destin -= org;
 
-	controller.destvec = destin; // end point
+	controller.destvec = destin;
 	controller.destvec2 = '0 0 0';
 }
 
@@ -228,37 +188,34 @@ void SUB_CalcMove_Bezier (entity this, vector tcontrol, vector tdest, float tspe
 			break;
 	}
 
-	if (traveltime < 0.1) // useless anim
+	if (traveltime < 0.1)
 	{
 		this.velocity = '0 0 0';
 		this.nextthink = this.ltime + 0.1;
 		return;
 	}
 
-	// delete the previous controller, otherwise changing movement midway is glitchy
 	if (this.move_controller != NULL)
 	{
 		delete(this.move_controller);
 	}
 	controller = new_pure(SUB_CalcMove_controller);
-	set_movetype(controller, MOVETYPE_NONE); // mark the entity as physics driven so that thinking is handled by QC
+	set_movetype(controller, MOVETYPE_NONE);
 	controller.owner = this;
 	this.move_controller = controller;
 	controller.platmovetype = this.platmovetype;
 	controller.platmovetype_start = this.platmovetype_start;
 	controller.platmovetype_end = this.platmovetype_end;
 	SUB_CalcMove_controller_setbezier(controller, this.origin, tcontrol, tdest);
-	controller.finaldest = (tdest + '0 0 0.125'); // where do we want to end? Offset to overshoot a bit.
+	controller.finaldest = (tdest + '0 0 0.125');
 	controller.animstate_starttime = time;
 	controller.animstate_endtime = time + traveltime;
 	setthink(controller, SUB_CalcMove_controller_think);
 	controller.think1 = getthink(this);
 
-	// the thinking is now done by the controller
-	setthink(this, SUB_NullThink); // for PushMove
+	setthink(this, SUB_NullThink);
 	this.nextthink = this.ltime + traveltime;
 
-	// invoke controller
 	getthink(controller)(controller);
 }
 
@@ -296,18 +253,13 @@ void SUB_CalcMove (entity this, vector tdest, float tspeedtype, float tspeed, vo
 			break;
 	}
 
-	// Very short animations don't really show off the effect
-	// of controlled animation, so let's just use linear movement.
-	// Alternatively entities can choose to specify non-controlled movement.
-	// The only currently implemented alternative movement is linear (value 1)
-	if (traveltime < 0.15 || (this.platmovetype_start == 1 && this.platmovetype_end == 1)) // is this correct?
+	if (traveltime < 0.15 || (this.platmovetype_start == 1 && this.platmovetype_end == 1))
 	{
-		this.velocity = delta * (1/traveltime);	// QuakeC doesn't allow vector/float division
+		this.velocity = delta * (1/traveltime);
 		this.nextthink = this.ltime + traveltime;
 		return;
 	}
 
-	// now just run like a bezier curve...
 	SUB_CalcMove_Bezier(this, (this.origin + tdest) * 0.5, tdest, tspeedtype, tspeed, func);
 }
 
@@ -316,33 +268,21 @@ void SUB_CalcMoveEnt (entity ent, vector tdest, float tspeedtype, float tspeed, 
 	SUB_CalcMove(ent, tdest, tspeedtype, tspeed, func);
 }
 
-/*
-=============
-SUB_CalcAngleMove
-
-calculate this.avelocity and this.nextthink to reach destangle from
-this.angles rotating
-
-The calling function should make sure this.setthink is valid
-===============
-*/
 void SUB_CalcAngleMoveDone(entity this)
 {
-	// After rotating, set angle to exact final angle
+
 	this.angles = this.finalangle;
 	this.avelocity = '0 0 0';
 	this.nextthink = -1;
-	if (this.think1 && this.think1 != SUB_CalcAngleMoveDone) // avoid endless loops
+	if (this.think1 && this.think1 != SUB_CalcAngleMoveDone)
 		this.think1 (this);
 }
 
-// FIXME: I fixed this function only for rotation around the main axes
 void SUB_CalcAngleMove (entity this, vector destangle, float tspeedtype, float tspeed, void(entity this) func)
 {
 	if (!tspeed)
 		objerror (this, "No speed is defined!");
 
-	// take the shortest distance for the angles
 	this.angles_x -= 360 * floor((this.angles_x - destangle_x) / 360 + 0.5);
 	this.angles_y -= 360 * floor((this.angles_y - destangle_y) / 360 + 0.5);
 	this.angles_z -= 360 * floor((this.angles_z - destangle_z) / 360 + 0.5);
@@ -385,7 +325,7 @@ void SUB_CalcAngleMoveEnt (entity ent, vector destangle, float tspeedtype, float
 #ifdef SVQC
 void ApplyMinMaxScaleAngles(entity e)
 {
-	if(e.angles.x != 0 || e.angles.z != 0 || e.avelocity.x != 0 || e.avelocity.z != 0) // "weird" rotation
+	if(e.angles.x != 0 || e.angles.z != 0 || e.avelocity.x != 0 || e.avelocity.z != 0)
 	{
 		e.maxs = '1 1 1' * vlen(
 			'1 0 0' * max(-e.mins.x, e.maxs.x) +
@@ -394,7 +334,7 @@ void ApplyMinMaxScaleAngles(entity e)
 		);
 		e.mins = -e.maxs;
 	}
-	else if(e.angles.y != 0 || e.avelocity.y != 0) // yaw only is a bit better
+	else if(e.angles.y != 0 || e.avelocity.y != 0)
 	{
 		e.maxs_x = vlen(
 			'1 0 0' * max(-e.mins.x, e.maxs.x) +
@@ -412,7 +352,6 @@ void ApplyMinMaxScaleAngles(entity e)
 
 void SetBrushEntityModel(entity this, bool with_lod)
 {
-	// Ensure .solid is set correctly before calling this (for area grid linking/unlinking)
 
 	if(this.model != "")
 	{
@@ -421,15 +360,15 @@ void SetBrushEntityModel(entity this, bool with_lod)
 		{
 			vector mi = this.mins;
 			vector ma = this.maxs;
-			_setmodel(this, this.model); // no precision needed
+			_setmodel(this, this.model);
 			setsize(this, mi, ma);
 		}
 		else
-			_setmodel(this, this.model); // no precision needed
+			_setmodel(this, this.model);
 		if(with_lod)
 			InitializeEntity(this, LODmodel_attach, INITPRIO_FINDTARGET);
 
-		if(endsWith(this.model, ".obj")) // WORKAROUND: darkplaces currently rotates .obj models on entities incorrectly, we need to add 180 degrees to the Y axis
+		if(endsWith(this.model, ".obj"))
 			this.angles_y = anglemods(this.angles_y - 180);
 	}
 	setorigin(this, this.origin);
@@ -445,12 +384,11 @@ bool LOD_customize(entity this, entity client)
 			this.modelindex = this.lodmodelindex0;
 		else if(d == 2 || !this.lodmodelindex2)
 			this.modelindex = this.lodmodelindex1;
-		else // if(d == 3)
+		else
 			this.modelindex = this.lodmodelindex2;
 		return true;
 	}
 
-	// TODO csqc network this so it only gets sent once
 	vector near_point = NearestPointOnBox(this, client.origin);
 	if(vdist(near_point - client.origin, <, this.loddistance1))
 		this.modelindex = this.lodmodelindex0;
@@ -498,7 +436,7 @@ void LODmodel_attach(entity this)
 
 	if(autocvar_loddebug < 0)
 	{
-		this.lodmodel1 = this.lodmodel2 = ""; // don't even initialize
+		this.lodmodel1 = this.lodmodel2 = "";
 	}
 
 	if(this.lodmodel1 != "" && fexists(this.lodmodel1))
@@ -527,12 +465,6 @@ void LODmodel_attach(entity this)
 			SetCustomizer(this, LOD_customize, LOD_uncustomize);
 }
 
-/*
-================
-InitTrigger
-================
-*/
-
 void SetMovedir(entity this)
 {
 	if(this.movedir != '0 0 0')
@@ -548,8 +480,7 @@ void SetMovedir(entity this)
 
 void InitTrigger(entity this)
 {
-// trigger angles are used for one-way touches.  An angle of 0 is assumed
-// to mean no restrictions, so use a yaw of 360 instead.
+
 	SetMovedir(this);
 	this.solid = SOLID_TRIGGER;
 	SetBrushEntityModel(this, false);
@@ -560,20 +491,18 @@ void InitTrigger(entity this)
 
 void InitSolidBSPTrigger(entity this)
 {
-// trigger angles are used for one-way touches.  An angle of 0 is assumed
-// to mean no restrictions, so use a yaw of 360 instead.
+
 	SetMovedir(this);
 	this.solid = SOLID_BSP;
 	SetBrushEntityModel(this, false);
-	set_movetype(this, MOVETYPE_NONE); // why was this PUSH? -div0
-//	this.modelindex = 0;
+	set_movetype(this, MOVETYPE_NONE);
+
 	this.model = "";
 }
 
 bool InitMovingBrushTrigger(entity this)
 {
-// trigger angles are used for one-way touches.  An angle of 0 is assumed
-// to mean no restrictions, so use a yaw of 360 instead.
+
 	this.solid = SOLID_BSP;
 	SetBrushEntityModel(this, true);
 	set_movetype(this, MOVETYPE_PUSH);

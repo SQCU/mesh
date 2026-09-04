@@ -16,17 +16,6 @@ static cvar_t cl_curl_enabled = {CVAR_SAVE, "cl_curl_enabled","1", "whether clie
 static cvar_t cl_curl_useragent = {0, "cl_curl_useragent","1", "send the User-Agent string (note: turning this off may break stuff)"};
 static cvar_t cl_curl_useragent_append = {0, "cl_curl_useragent_append","", "a string to append to the User-Agent string (useful for name and version number of your mod)"};
 
-/*
-=================================================================
-
-  Minimal set of definitions from libcurl
-
-  WARNING: for a matter of simplicity, several pointer types are
-  casted to "void*", and most enumerated values are not included
-
-=================================================================
-*/
-
 typedef struct CURL_s CURL;
 typedef struct CURLM_s CURLM;
 typedef struct curl_slist curl_slist;
@@ -37,7 +26,7 @@ typedef enum
 CURLcode;
 typedef enum
 {
-	CURLM_CALL_MULTI_PERFORM=-1, /* please call curl_multi_perform() soon */
+	CURLM_CALL_MULTI_PERFORM=-1,
 	CURLM_OK = 0
 }
 CURLMcode;
@@ -62,8 +51,8 @@ typedef enum
 	CINIT(LOW_SPEED_TIME, LONG, 20),
 	CINIT(RESUME_FROM, LONG, 21),
 	CINIT(HTTPHEADER, OBJECTPOINT, 23),
-	CINIT(POST, LONG, 47),         /* HTTP POST method */
-	CINIT(FOLLOWLOCATION, LONG, 52),  /* use Location: Luke! */
+	CINIT(POST, LONG, 47),
+	CINIT(FOLLOWLOCATION, LONG, 52),
 	CINIT(POSTFIELDSIZE, LONG, 60),
 	CINIT(PRIVATE, OBJECTPOINT, 103),
 	CINIT(PROTOCOLS, LONG, 181),
@@ -76,12 +65,12 @@ CURLoption;
 typedef enum
 {
 	CURLINFO_TEXT = 0,
-	CURLINFO_HEADER_IN,    /* 1 */
-	CURLINFO_HEADER_OUT,   /* 2 */
-	CURLINFO_DATA_IN,      /* 3 */
-	CURLINFO_DATA_OUT,     /* 4 */
-	CURLINFO_SSL_DATA_IN,  /* 5 */
-	CURLINFO_SSL_DATA_OUT, /* 6 */
+	CURLINFO_HEADER_IN,
+	CURLINFO_HEADER_OUT,
+	CURLINFO_DATA_IN,
+	CURLINFO_DATA_OUT,
+	CURLINFO_SSL_DATA_IN,
+	CURLINFO_SSL_DATA_OUT,
 	CURLINFO_END
 }
 curl_infotype;
@@ -93,7 +82,7 @@ curl_infotype;
 #define CURLINFO_TYPEMASK 0xf00000
 typedef enum
 {
-	CURLINFO_NONE, /* first, never use this */
+	CURLINFO_NONE,
 	CURLINFO_EFFECTIVE_URL    = CURLINFO_STRING + 1,
 	CURLINFO_RESPONSE_CODE    = CURLINFO_LONG   + 2,
 	CURLINFO_TOTAL_TIME       = CURLINFO_DOUBLE + 3,
@@ -126,20 +115,20 @@ CURLINFO;
 
 typedef enum
 {
-	CURLMSG_NONE, /* first, not used */
-	CURLMSG_DONE, /* This easy handle has completed. 'result' contains
-					 the CURLcode of the transfer */
+	CURLMSG_NONE,
+	CURLMSG_DONE,
+
 	CURLMSG_LAST
 }
 CURLMSG;
 typedef struct
 {
-	CURLMSG msg;       /* what this message means */
-	CURL *easy_handle; /* the handle it concerns */
+	CURLMSG msg;
+	CURL *easy_handle;
 	union
 	{
-		void *whatever;    /* message-specific data */
-		CURLcode result;   /* return code for transfer */
+		void *whatever;
+		CURLcode result;
 	}
 	data;
 }
@@ -185,9 +174,7 @@ static dllfunction_t curlfuncs[] =
 	{NULL, NULL}
 };
 
-// Handle for CURL DLL
 static dllhandle_t curl_dll = NULL;
-// will be checked at many places to find out if qcurl calls are allowed
 
 #define LOADTYPE_NONE 0
 #define LOADTYPE_PAK 1
@@ -206,13 +193,13 @@ typedef struct downloadinfo_s
 	CURL *curle;
 	qboolean started;
 	int loadtype;
-	size_t bytes_received; // for buffer
-	double bytes_received_curl; // for throttling
-	double bytes_sent_curl; // for throttling
+	size_t bytes_received;
+	double bytes_received_curl;
+	double bytes_sent_curl;
 	struct downloadinfo_s *next, *prev;
 	qboolean forthismap;
 	double maxspeed;
-	curl_slist *slist; // http headers
+	curl_slist *slist;
 
 	unsigned char *buffer;
 	size_t buffersize;
@@ -236,15 +223,6 @@ static int numdownloads_added = 0;
 static char command_when_done[256] = "";
 static char command_when_error[256] = "";
 
-/*
-====================
-Curl_CommandWhenDone
-
-Sets the command which is to be executed when the last download completes AND
-all downloads since last server connect ended with a successful status.
-Setting the command to NULL clears it.
-====================
-*/
 static void Curl_CommandWhenDone(const char *cmd)
 {
 	if(!curl_dll)
@@ -254,12 +232,6 @@ static void Curl_CommandWhenDone(const char *cmd)
 	else
 		*command_when_done = 0;
 }
-
-/*
-FIXME
-Do not use yet. Not complete.
-Problem: what counts as an error?
-*/
 
 static void Curl_CommandWhenError(const char *cmd)
 {
@@ -271,13 +243,6 @@ static void Curl_CommandWhenError(const char *cmd)
 		*command_when_error = 0;
 }
 
-/*
-====================
-Curl_Clear_forthismap
-
-Clears the "will disconnect on failure" flags.
-====================
-*/
 void Curl_Clear_forthismap(void)
 {
 	downloadinfo *di;
@@ -294,13 +259,6 @@ void Curl_Clear_forthismap(void)
 	if (curl_mutex) Thread_UnlockMutex(curl_mutex);
 }
 
-/*
-====================
-Curl_Have_forthismap
-
-Returns true if a download needed for the current game is running.
-====================
-*/
 qboolean Curl_Have_forthismap(void)
 {
 	return numdownloads_added != 0;
@@ -314,14 +272,6 @@ void Curl_Register_predownload(void)
 	if (curl_mutex) Thread_UnlockMutex(curl_mutex);
 }
 
-/*
-====================
-Curl_CheckCommandWhenDone
-
-Checks if a "done command" is to be executed.
-All downloads finished, at least one success since connect, no single failure
--> execute the command.
-*/
 static void Curl_CheckCommandWhenDone(void)
 {
 	if(!curl_dll)
@@ -346,13 +296,6 @@ static void Curl_CheckCommandWhenDone(void)
 	}
 }
 
-/*
-====================
-CURL_CloseLibrary
-
-Load the cURL DLL
-====================
-*/
 static qboolean CURL_OpenLibrary (void)
 {
 	const char* dllnames [] =
@@ -361,52 +304,33 @@ static qboolean CURL_OpenLibrary (void)
 		"libcurl-4.dll",
 		"libcurl-3.dll",
 #elif defined(MACOSX)
-		"libcurl.4.dylib", // Mac OS X Notyetreleased
-		"libcurl.3.dylib", // Mac OS X Tiger
-		"libcurl.2.dylib", // Mac OS X Panther
+		"libcurl.4.dylib",
+		"libcurl.3.dylib",
+		"libcurl.2.dylib",
 #else
 		"libcurl.so.4",
 		"libcurl.so.3",
-		"libcurl.so", // FreeBSD
+		"libcurl.so",
 #endif
 		NULL
 	};
 
-	// Already loaded?
 	if (curl_dll)
 		return true;
 
-	// Load the DLL
 	return Sys_LoadLibrary (dllnames, &curl_dll, curlfuncs);
 }
 
-
-/*
-====================
-CURL_CloseLibrary
-
-Unload the cURL DLL
-====================
-*/
 static void CURL_CloseLibrary (void)
 {
 	Sys_UnloadLibrary (&curl_dll);
 }
 
-
 static CURLM *curlm = NULL;
-static double bytes_received = 0; // used for bandwidth throttling
-static double bytes_sent = 0; // used for bandwidth throttling
+static double bytes_received = 0;
+static double bytes_sent = 0;
 static double curltime = 0;
 
-/*
-====================
-CURL_fwrite
-
-fwrite-compatible function that writes the data to a file. libcurl can call
-this.
-====================
-*/
 static size_t CURL_fwrite(void *data, size_t size, size_t nmemb, void *vdi)
 {
 	fs_offset_t ret = -1;
@@ -420,7 +344,7 @@ static size_t CURL_fwrite(void *data, size_t size, size_t nmemb, void *vdi)
 			memcpy(di->buffer + di->bytes_received, data, bytes);
 			ret = bytes;
 		}
-		// otherwise: buffer overrun, ret stays -1
+
 	}
 
 	if(di->stream)
@@ -431,9 +355,7 @@ static size_t CURL_fwrite(void *data, size_t size, size_t nmemb, void *vdi)
 	di->bytes_received += bytes;
 
 	return ret;
-	// Why not ret / nmemb?
-	// Because CURLOPT_WRITEFUNCTION docs say to return the number of bytes.
-	// Yes, this is incompatible to fwrite(2).
+
 }
 
 typedef enum
@@ -496,19 +418,10 @@ static unsigned char *decode_image(downloadinfo *di, const char *content_type)
 			Con_Printf("Did not detect content type: %s\n", content_type);
 		Mem_Free(data);
 	}
-	// do we call Image_MakeLinearColorsFromsRGB or not?
+
 	return pixels;
 }
 
-/*
-====================
-Curl_EndDownload
-
-stops a download. It receives a status (CURL_DOWNLOAD_SUCCESS,
-CURL_DOWNLOAD_FAILED or CURL_DOWNLOAD_ABORTED) and in the second case the error
-code from libcurl, or 0, if another error has occurred.
-====================
-*/
 static qboolean Curl_Begin(const char *URL, const char *extraheaders, double maxspeed, const char *name, int loadtype, qboolean forthismap, const char *post_content_type, const unsigned char *postbuf, size_t postbufsize, unsigned char *buf, size_t bufsize, curl_callback_t callback, void *cbdata);
 static void Curl_EndDownload(downloadinfo *di, CurlStatus status, CURLcode error, const char *content_type_)
 {
@@ -529,7 +442,7 @@ static void Curl_EndDownload(downloadinfo *di, CurlStatus status, CURLcode error
 			di->callback(CURLCBSTATUS_ABORTED, di->bytes_received, di->buffer, di->callback_data);
 			break;
 		case CURL_DOWNLOAD_SERVERERROR:
-			// reopen to enforce it to have zero bytes again
+
 			if(di->stream)
 			{
 				FS_Close(di->stream);
@@ -615,7 +528,7 @@ static void Curl_EndDownload(downloadinfo *di, CurlStatus status, CURLcode error
 
 		pixels = decode_image(di, content_type);
 		if(pixels)
-			R_SkinFrame_LoadInternalBGRA(p, TEXF_FORCE_RELOAD | TEXF_MIPMAP | TEXF_ALPHA, pixels, image_width, image_height, false); // TODO what sRGB argument to put here?
+			R_SkinFrame_LoadInternalBGRA(p, TEXF_FORCE_RELOAD | TEXF_MIPMAP | TEXF_ALPHA, pixels, image_width, image_height, false);
 		else
 			CLEAR_AND_RETRY();
 	}
@@ -638,18 +551,10 @@ static void Curl_EndDownload(downloadinfo *di, CurlStatus status, CURLcode error
 	Z_Free(di);
 }
 
-/*
-====================
-CleanURL
-
-Returns a "cleaned up" URL for display (to strip login data)
-====================
-*/
 static const char *CleanURL(const char *url, char *urlbuf, size_t urlbuflength)
 {
 	const char *p, *q, *r;
 
-	// if URL is of form anything://foo-without-slash@rest, replace by anything://rest
 	p = strstr(url, "://");
 	if(p)
 	{
@@ -668,15 +573,6 @@ static const char *CleanURL(const char *url, char *urlbuf, size_t urlbuflength)
 	return url;
 }
 
-/*
-====================
-CheckPendingDownloads
-
-checks if there are free download slots to start new downloads in.
-To not start too many downloads at once, only one download is added at a time,
-up to a maximum number of cl_curl_maxdownloads are running.
-====================
-*/
 static void CheckPendingDownloads(void)
 {
 	const char *h;
@@ -751,7 +647,7 @@ static void CheckPendingDownloads(void)
 				if(qcurl_easy_setopt(di->curle, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS | CURLPROTO_FTP) != CURLE_OK)
 				{
 					Con_Printf("^1WARNING:^7 for security reasons, please upgrade to libcurl 7.19.4 or above. In a later version of DarkPlaces, HTTP redirect support will be disabled for this libcurl version.\n");
-					//qcurl_easy_setopt(di->curle, CURLOPT_FOLLOWLOCATION, 0);
+
 				}
 				if(di->post_content_type)
 				{
@@ -761,8 +657,6 @@ static void CheckPendingDownloads(void)
 					di->slist = qcurl_slist_append(di->slist, va(vabuf, sizeof(vabuf), "Content-Type: %s", di->post_content_type));
 				}
 
-				// parse extra headers into slist
-				// \n separated list!
 				h = di->extraheaders;
 				while(h)
 				{
@@ -783,7 +677,7 @@ static void CheckPendingDownloads(void)
 				}
 
 				qcurl_easy_setopt(di->curle, CURLOPT_HTTPHEADER, di->slist);
-				
+
 				qcurl_multi_add_handle(curlm, di->curle);
 				di->started = true;
 				++numdownloads;
@@ -794,14 +688,6 @@ static void CheckPendingDownloads(void)
 	}
 }
 
-/*
-====================
-Curl_Init
-
-this function MUST be called before using anything else in this file.
-On Win32, this must be called AFTER WSAStartup has been done!
-====================
-*/
 void Curl_Init(void)
 {
 	CURL_OpenLibrary();
@@ -812,13 +698,6 @@ void Curl_Init(void)
 	curlm = qcurl_multi_init();
 }
 
-/*
-====================
-Curl_Shutdown
-
-Surprise... closes all the stuff. Please do this BEFORE shutting down LHNET.
-====================
-*/
 void Curl_ClearRequirements(void);
 void Curl_Shutdown(void)
 {
@@ -831,13 +710,6 @@ void Curl_Shutdown(void)
 	curl_dll = NULL;
 }
 
-/*
-====================
-Curl_Find
-
-Finds the internal information block for a download given by file name.
-====================
-*/
 static downloadinfo *Curl_Find(const char *filename)
 {
 	downloadinfo *di;
@@ -858,7 +730,7 @@ void Curl_Cancel_ToMemory(curl_callback_t callback, void *cbdata)
 	{
 		if(di->callback == callback && di->callback_data == cbdata)
 		{
-			di->callback = curl_quiet_callback; // do NOT call the callback
+			di->callback = curl_quiet_callback;
 			Curl_EndDownload(di, CURL_DOWNLOAD_ABORTED, CURLE_OK, NULL);
 			di = downloads;
 		}
@@ -867,14 +739,6 @@ void Curl_Cancel_ToMemory(curl_callback_t callback, void *cbdata)
 	}
 }
 
-/*
-====================
-Curl_Begin
-
-Starts a download of a given URL to the file name portion of this URL (or name
-if given) in the "dlcache/" folder.
-====================
-*/
 static qboolean Curl_Begin(const char *URL, const char *extraheaders, double maxspeed, const char *name, int loadtype, qboolean forthismap, const char *post_content_type, const unsigned char *postbuf, size_t postbufsize, unsigned char *buf, size_t bufsize, curl_callback_t callback, void *cbdata)
 {
 	if(buf)
@@ -893,7 +757,6 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 		size_t length;
 		downloadinfo *di;
 
-		// if URL is protocol:///* or protocol://:port/*, insert the IP of the current server
 		p = strchr(URL, ':');
 		if(p)
 		{
@@ -912,32 +775,6 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 				}
 			}
 		}
-
-		// Note: This extraction of the file name portion is NOT entirely correct.
-		//
-		// It does the following:
-		//
-		//   http://host/some/script.cgi/SomeFile.pk3?uid=ABCDE -> SomeFile.pk3
-		//   http://host/some/script.php?uid=ABCDE&file=/SomeFile.pk3 -> SomeFile.pk3
-		//   http://host/some/script.php?uid=ABCDE&file=SomeFile.pk3 -> script.php
-		//
-		// However, I'd like to keep this "buggy" behavior so that PHP script
-		// authors can write download scripts without having to enable
-		// AcceptPathInfo on Apache. They just have to ensure that their script
-		// can be called with such a "fake" path name like
-		// http://host/some/script.php?uid=ABCDE&file=/SomeFile.pk3
-		//
-		// By the way, such PHP scripts should either send the file or a
-		// "Location:" redirect; PHP code example:
-		//
-		//   header("Location: http://www.example.com/");
-		//
-		// By the way, this will set User-Agent to something like
-		// "Nexuiz build 22:27:55 Mar 17 2006" (engineversion) and Referer to
-		// dp://serverhost:serverport/ so you can filter on this; an example
-		// httpd log file line might be:
-		//
-		//   141.2.16.3 - - [17/Mar/2006:22:32:43 +0100] "GET /maps/tznex07.pk3 HTTP/1.1" 200 1077455 "dp://141.2.16.7:26000/" "Nexuiz Linux 22:07:43 Mar 17 2006"
 
 		if (curl_mutex) Thread_LockMutex(curl_mutex);
 
@@ -962,21 +799,18 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 				dpsnprintf(fn, sizeof(fn), "dlcache/%s", name);
 			}
 
-			name = fn; // make it point back
+			name = fn;
 
-			// already downloading the file?
 			{
 				downloadinfo *existingdownloadinfo = Curl_Find(fn);
 				if(existingdownloadinfo)
 				{
 					Con_Printf("Can't download %s, already getting it from %s!\n", fn, CleanURL(existingdownloadinfo->url, urlbuf, sizeof(urlbuf)));
 
-					// however, if it was not for this map yet...
 					if(forthismap && !existingdownloadinfo->forthismap)
 					{
 						existingdownloadinfo->forthismap = true;
-						// this "fakes" a download attempt so the client will wait for
-						// the download to finish and then reconnect
+
 						++numdownloads_added;
 					}
 
@@ -1013,7 +847,7 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 						if(f)
 						{
 							char b[4] = {0};
-							FS_Read(f, b, sizeof(b)); // no "-1", I will use memcmp
+							FS_Read(f, b, sizeof(b));
 
 							if(memcmp(b, "PK\x03\x04", 4) && memcmp(b, "PACK", 4))
 							{
@@ -1025,7 +859,7 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 							}
 							else
 							{
-								// OK
+
 								FS_Close(f);
 							}
 						}
@@ -1033,7 +867,7 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 				}
 				else
 				{
-					// never resume these
+
 					qfile_t *f = FS_OpenRealFile(fn, "wb", false);
 					if(f)
 						FS_Close(f);
@@ -1041,8 +875,6 @@ static qboolean Curl_Begin(const char *URL, const char *extraheaders, double max
 			}
 		}
 
-		// if we get here, we actually want to download... so first verify the
-		// URL scheme (so one can't read local files using file://)
 		if(strncmp(URL, "http://", 7) && strncmp(URL, "ftp://", 6) && strncmp(URL, "https://", 8))
 		{
 			Con_Printf("Curl_Begin(\"%s\"): nasty URL scheme rejected\n", URL);
@@ -1117,14 +949,6 @@ qboolean Curl_Begin_ToMemory_POST(const char *URL, const char *extraheaders, dou
 	return Curl_Begin(URL, extraheaders, maxspeed, NULL, false, false, post_content_type, postbuf, postbufsize, buf, bufsize, callback, cbdata);
 }
 
-/*
-====================
-Curl_Run
-
-call this regularily as this will always download as much as possible without
-blocking.
-====================
-*/
 void Curl_Run(void)
 {
 	double maxspeed;
@@ -1148,7 +972,7 @@ void Curl_Run(void)
 		return;
 	}
 
-	if(realtime < curltime) // throttle
+	if(realtime < curltime)
 	{
 		if (curl_mutex) Thread_UnlockMutex(curl_mutex);
 		return;
@@ -1200,8 +1024,8 @@ void Curl_Run(void)
 					qcurl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &code);
 					switch(code / 100)
 					{
-						case 4: // e.g. 404?
-						case 5: // e.g. 500?
+						case 4:
+						case 5:
 							failed = CURL_DOWNLOAD_SERVERERROR;
 							result = (CURLcode) code;
 							break;
@@ -1216,12 +1040,6 @@ void Curl_Run(void)
 
 	CheckPendingDownloads();
 
-	// when will we curl the next time?
-	// we will wait a bit to ensure our download rate is kept.
-	// we now know that realtime >= curltime... so set up a new curltime
-
-	// use the slowest allowing download to derive the maxspeed... this CAN
-	// be done better, but maybe later
 	maxspeed = cl_curl_maxspeed.value;
 	for(di = downloads; di; di = di->next)
 		if(di->maxspeed > 0)
@@ -1230,7 +1048,7 @@ void Curl_Run(void)
 
 	if(maxspeed > 0)
 	{
-		double bytes = bytes_sent + bytes_received; // maybe smoothen a bit?
+		double bytes = bytes_sent + bytes_received;
 		curltime = realtime + bytes / (maxspeed * 1024.0);
 		bytes_sent = 0;
 		bytes_received = 0;
@@ -1241,13 +1059,6 @@ void Curl_Run(void)
 	if (curl_mutex) Thread_UnlockMutex(curl_mutex);
 }
 
-/*
-====================
-Curl_CancelAll
-
-Stops ALL downloads.
-====================
-*/
 void Curl_CancelAll(void)
 {
 	if(!curl_dll)
@@ -1258,19 +1069,12 @@ void Curl_CancelAll(void)
 	while(downloads)
 	{
 		Curl_EndDownload(downloads, CURL_DOWNLOAD_ABORTED, CURLE_OK, NULL);
-		// INVARIANT: downloads will point to the next download after that!
+
 	}
 
 	if (curl_mutex) Thread_UnlockMutex(curl_mutex);
 }
 
-/*
-====================
-Curl_Running
-
-returns true iff there is a download running.
-====================
-*/
 qboolean Curl_Running(void)
 {
 	if(!curl_dll)
@@ -1279,14 +1083,6 @@ qboolean Curl_Running(void)
 	return downloads != NULL;
 }
 
-/*
-====================
-Curl_GetDownloadAmount
-
-returns a value from 0.0 to 1.0 which represents the downloaded amount of data
-for the given download.
-====================
-*/
 static double Curl_GetDownloadAmount(downloadinfo *di)
 {
 	if(!curl_dll)
@@ -1304,13 +1100,6 @@ static double Curl_GetDownloadAmount(downloadinfo *di)
 		return -1;
 }
 
-/*
-====================
-Curl_GetDownloadSpeed
-
-returns the speed of the given download in bytes per second
-====================
-*/
 static double Curl_GetDownloadSpeed(downloadinfo *di)
 {
 	if(!curl_dll)
@@ -1325,14 +1114,6 @@ static double Curl_GetDownloadSpeed(downloadinfo *di)
 		return -1;
 }
 
-/*
-====================
-Curl_Info_f
-
-prints the download list
-====================
-*/
-// TODO rewrite using Curl_GetDownloadInfo?
 static void Curl_Info_f(void)
 {
 	downloadinfo *di;
@@ -1362,32 +1143,6 @@ static void Curl_Info_f(void)
 	}
 }
 
-/*
-====================
-Curl_Curl_f
-
-implements the "curl" console command
-
-curl --info
-curl --cancel
-curl --cancel filename
-curl url
-
-For internal use:
-
-curl [--pak] [--forthismap] [--for filename filename...] url
-	--pak: after downloading, load the package into the virtual file system
-	--for filename...: only download of at least one of the named files is missing
-	--forthismap: don't reconnect on failure
-
-curl --clear_autodownload
-	clears the download success/failure counters
-
-curl --finish_autodownload
-	if at least one download has been started, disconnect and drop to the menu
-	once the last download completes successfully, reconnect to the current server
-====================
-*/
 static void Curl_Curl_f(void)
 {
 	double maxspeed = 0;
@@ -1429,7 +1184,7 @@ static void Curl_Curl_f(void)
 		}
 		else if(!strcmp(a, "--cancel"))
 		{
-			if(i == end - 1) // last argument
+			if(i == end - 1)
 				Curl_CancelAll();
 			else
 			{
@@ -1453,14 +1208,14 @@ static void Curl_Curl_f(void)
 		{
 			loadtype = LOADTYPE_SKINFRAME;
 		}
-		else if(!strcmp(a, "--for")) // must be last option
+		else if(!strcmp(a, "--for"))
 		{
 			for(i = i + 1; i != end - 1; ++i)
 			{
 				if(!FS_FileExists(Cmd_Argv(i)))
-					goto needthefile; // why can't I have a "double break"?
+					goto needthefile;
 			}
-			// if we get here, we have all the files...
+
 			return;
 		}
 		else if(!strcmp(a, "--forthismap"))
@@ -1477,8 +1232,7 @@ static void Curl_Curl_f(void)
 		}
 		else if(!strcmp(a, "--clear_autodownload"))
 		{
-			// mark all running downloads as "not for this map", so if they
-			// fail, it does not matter
+
 			Curl_Clear_forthismap();
 			return;
 		}
@@ -1489,7 +1243,7 @@ static void Curl_Curl_f(void)
 				char donecommand[256];
 				if(cls.netcon)
 				{
-					if(cl.loadbegun) // curling won't inhibit loading the map any more when at this stage, so bail out and force a reconnect
+					if(cl.loadbegun)
 					{
 						dpsnprintf(donecommand, sizeof(donecommand), "connect %s", cls.netcon->address);
 						Curl_CommandWhenDone(donecommand);
@@ -1511,7 +1265,7 @@ static void Curl_Curl_f(void)
 		else if(*a == '-')
 		{
 			Con_Printf("curl: invalid option %s\n", a);
-			// but we ignore the option
+
 		}
 	}
 
@@ -1519,29 +1273,6 @@ needthefile:
 	Curl_Begin_ToFile(url, maxspeed, name, loadtype, forthismap);
 }
 
-/*
-static void curl_curlcat_callback(int code, size_t length_received, unsigned char *buffer, void *cbdata)
-{
-	Con_Printf("Received %d bytes (status %d):\n%.*s\n", (int) length_received, code, (int) length_received, buffer);
-	Z_Free(buffer);
-}
-
-void Curl_CurlCat_f(void)
-{
-	unsigned char *buf;
-	const char *url = Cmd_Argv(1);
-	buf = Z_Malloc(16384);
-	Curl_Begin_ToMemory(url, buf, 16384, curl_curlcat_callback, NULL);
-}
-*/
-
-/*
-====================
-Curl_Init_Commands
-
-loads the commands and cvars this library uses
-====================
-*/
 void Curl_Init_Commands(void)
 {
 	Cvar_RegisterVariable (&cl_curl_enabled);
@@ -1553,20 +1284,9 @@ void Curl_Init_Commands(void)
 	Cvar_RegisterVariable (&cl_curl_useragent);
 	Cvar_RegisterVariable (&cl_curl_useragent_append);
 	Cmd_AddCommand ("curl", Curl_Curl_f, "download data from an URL and add to search path");
-	//Cmd_AddCommand ("curlcat", Curl_CurlCat_f, "display data from an URL (debugging command)");
+
 }
 
-/*
-====================
-Curl_GetDownloadInfo
-
-returns an array of Curl_downloadinfo_t structs for usage by GUIs.
-The number of elements in the array is returned in int *nDownloads.
-const char **additional_info may be set to a string of additional user
-information, or to NULL if no such display shall occur. The returned
-array must be freed later using Z_Free.
-====================
-*/
 Curl_downloadinfo_t *Curl_GetDownloadInfo(int *nDownloads, const char **additional_info, char *addinfo, size_t addinfolength)
 {
 	int i;
@@ -1591,7 +1311,7 @@ Curl_downloadinfo_t *Curl_GetDownloadInfo(int *nDownloads, const char **addition
 	i = 0;
 	for(di = downloads; di; di = di->next)
 	{
-		// do not show infobars for background downloads
+
 		if(developer.integer <= 0)
 			if(di->buffer)
 				continue;
@@ -1611,7 +1331,7 @@ Curl_downloadinfo_t *Curl_GetDownloadInfo(int *nDownloads, const char **addition
 
 	if(additional_info)
 	{
-		// TODO: can I clear command_when_done as soon as the first download fails?
+
 		if(*command_when_done && !numdownloads_fail && numdownloads_added)
 		{
 			if(!strncmp(command_when_done, "connect ", 8))
@@ -1631,39 +1351,14 @@ Curl_downloadinfo_t *Curl_GetDownloadInfo(int *nDownloads, const char **addition
 	return downinfo;
 }
 
-
-/*
-====================
-Curl_FindPackURL
-
-finds the URL where to find a given package.
-
-For this, it reads a file "curl_urls.txt" of the following format:
-
-	data*.pk3	-
-	revdm*.pk3	http://revdm/downloads/are/here/
-	*			http://any/other/stuff/is/here/
-
-The URLs should end in /. If not, downloads will still work, but the cached files
-can't be just put into the data directory with the same download configuration
-(you might want to do this if you want to tag downloaded files from your
-server, but you should not). "-" means "don't download".
-
-If no single pattern matched, the cvar sv_curl_defaulturl is used as download
-location instead.
-
-Note: pak1.pak and data*.pk3 are excluded from autodownload at another point in
-this file for obvious reasons.
-====================
-*/
 static const char *Curl_FindPackURL(const char *filename)
 {
-	static char foundurl[1024]; // invoked only by server
+	static char foundurl[1024];
 	fs_offset_t filesize;
 	char *buf = (char *) FS_LoadFile("curl_urls.txt", tempmempool, true, &filesize);
 	if(buf && filesize)
 	{
-		// read lines of format "pattern url"
+
 		char *p = buf;
 		char *pattern = NULL, *patternend = NULL, *url = NULL, *urlend = NULL;
 		qboolean eof = false;
@@ -1675,7 +1370,7 @@ static const char *Curl_FindPackURL(const char *filename)
 			{
 				case 0:
 					eof = true;
-					// fallthrough
+
 				case '\n':
 				case '\r':
 					if(pattern && url && patternend)
@@ -1726,14 +1421,6 @@ typedef struct requirement_s
 requirement;
 static requirement *requirements = NULL;
 
-
-/*
-====================
-Curl_RequireFile
-
-Adds the given file to the list of requirements.
-====================
-*/
 void Curl_RequireFile(const char *filename)
 {
 	requirement *req = (requirement *) Z_Malloc(sizeof(*requirements));
@@ -1742,14 +1429,6 @@ void Curl_RequireFile(const char *filename)
 	requirements = req;
 }
 
-/*
-====================
-Curl_ClearRequirements
-
-Clears the list of required files for playing on the current map.
-This should be called at every map change.
-====================
-*/
 void Curl_ClearRequirements(void)
 {
 	while(requirements)
@@ -1760,18 +1439,6 @@ void Curl_ClearRequirements(void)
 	}
 }
 
-/*
-====================
-Curl_SendRequirements
-
-Makes the current host_clients download all files he needs.
-This is done by sending him the following console commands:
-
-	curl --clear_autodownload
-	curl --pak --for maps/pushmoddm1.bsp --forthismap http://where/this/darn/map/is/pushmoddm1.pk3
-	curl --finish_autodownload
-====================
-*/
 static qboolean Curl_SendRequirement(const char *filename, qboolean foundone, char *sendbuffer, size_t sendbuffer_len)
 {
 	const char *p;
@@ -1810,7 +1477,7 @@ static qboolean Curl_SendRequirement(const char *filename, qboolean foundone, ch
 }
 void Curl_SendRequirements(void)
 {
-	// for each requirement, find the pack name
+
 	char sendbuffer[4096] = "";
 	requirement *req;
 	qboolean foundone = false;

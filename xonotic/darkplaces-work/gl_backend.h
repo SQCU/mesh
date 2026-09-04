@@ -63,18 +63,12 @@ void GL_Backend_FreeProgram(unsigned int prog);
 extern cvar_t gl_paranoid;
 extern cvar_t gl_printcheckerror;
 
-// adds console variables and registers the render module (only call from GL_Init)
 void gl_backend_init(void);
 
-// starts mesh rendering for the frame
 void R_Mesh_Start(void);
 
-// ends mesh rendering for the frame
-// (only valid after R_Mesh_Start)
 void R_Mesh_Finish(void);
 
-
-// vertex buffer and index buffer creation/updating/freeing
 r_meshbuffer_t *R_Mesh_CreateMeshBuffer(const void *data, size_t size, const char *name, qboolean isindexbuffer, qboolean isuniformbuffer, qboolean isdynamic, qboolean isindex16);
 void R_Mesh_UpdateMeshBuffer(r_meshbuffer_t *buffer, const void *data, size_t size, qboolean subdata, size_t offset);
 void R_Mesh_DestroyMeshBuffer(r_meshbuffer_t *buffer);
@@ -88,40 +82,36 @@ void R_Mesh_PrepareVertices_Generic_Arrays(int numvertices, const float *vertex3
 void R_Mesh_PrepareVertices_Generic(int numvertices, const r_vertexgeneric_t *vertex, const r_meshbuffer_t *vertexbuffer, int bufferoffset);
 
 r_vertexmesh_t *R_Mesh_PrepareVertices_Mesh_Lock(int numvertices);
-qboolean R_Mesh_PrepareVertices_Mesh_Unlock(void); // if this returns false, you need to prepare the mesh again!
+qboolean R_Mesh_PrepareVertices_Mesh_Unlock(void);
 void R_Mesh_PrepareVertices_Mesh_Arrays(int numvertices, const float *vertex3f, const float *svector3f, const float *tvector3f, const float *normal3f, const float *color4f, const float *texcoordtexture2f, const float *texcoordlightmap2f);
 void R_Mesh_PrepareVertices_Mesh(int numvertices, const r_vertexmesh_t *vertex, const r_meshbuffer_t *buffer, int bufferoffset);
 
-// sets up the requested vertex transform matrix
 void R_EntityMatrix(const matrix4x4_t *matrix);
-// sets the vertex array pointer
+
 void R_Mesh_VertexPointer(int components, int gltype, size_t stride, const void *pointer, const r_meshbuffer_t *vertexbuffer, size_t bufferoffset);
-// sets the color array pointer (GL_Color only works when this is NULL)
+
 void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *pointer, const r_meshbuffer_t *vertexbuffer, size_t bufferoffset);
-// sets the texcoord array pointer for an array unit, if GL_UNSIGNED_BYTE | 0x80000000 is specified it will be an unnormalized type (integer values)
+
 void R_Mesh_TexCoordPointer(unsigned int unitnum, int components, int gltype, size_t stride, const void *pointer, const r_meshbuffer_t *vertexbuffer, size_t bufferoffset);
-// returns current texture bound to this identifier
+
 int R_Mesh_TexBound(unsigned int unitnum, int id);
-// copies a section of the framebuffer to a 2D texture
+
 void R_Mesh_CopyToTexture(rtexture_t *tex, int tx, int ty, int sx, int sy, int width, int height);
-// bind a given texture to a given image unit
+
 void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex);
-// sets the texcoord matrix for a texenv unit, can be NULL or blank (will use identity)
+
 void R_Mesh_TexMatrix(unsigned int unitnum, const matrix4x4_t *matrix);
-// sets the combine state for a texenv unit
+
 void R_Mesh_TexCombine(unsigned int unitnum, int combinergb, int combinealpha, int rgbscale, int alphascale);
-// set up a blank texture state (unbinds all textures, texcoord pointers, and resets combine settings)
+
 void R_Mesh_ResetTextureState(void);
-// before a texture is freed, make sure there are no references to it
+
 void R_Mesh_ClearBindingsForTexture(int texnum);
 
-// renders a mesh
 void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtriangles, const int *element3i, const r_meshbuffer_t *element3i_indexbuffer, int element3i_bufferoffset, const unsigned short *element3s, const r_meshbuffer_t *element3s_indexbuffer, int element3s_bufferoffset);
 
-// saves a section of the rendered frame to a .tga or .jpg file
 qboolean SCR_ScreenShot(char *filename, unsigned char *buffer1, unsigned char *buffer2, int x, int y, int width, int height, qboolean flipx, qboolean flipy, qboolean flipdiagonal, qboolean jpeg, qboolean png, qboolean gammacorrect, qboolean keep_alpha);
-// used by R_Envmap_f and internally in backend, clears the frame
+
 void R_ClearScreen(qboolean fogcolor);
 
 #endif
-

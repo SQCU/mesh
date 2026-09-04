@@ -9,14 +9,13 @@ void SV_StartDemoRecording(client_t *client, const char *filename, int forcetrac
 	char name[MAX_QPATH];
 
 	if(client->sv_demo_file != NULL)
-		return; // we already have a demo
+		return;
 
 	strlcpy(name, filename, sizeof(name));
 	FS_DefaultExtension(name, ".dem", sizeof(name));
 
 	Con_Printf("Recording demo for # %d (%s) to %s\n", PRVM_NUM_FOR_EDICT(client->edict), client->netaddress, name);
 
-	// Reset discardable flag for every new demo.
 	PRVM_serveredictfloat(client->edict, discardabledemo) = 0;
 
 	client->sv_demo_file = FS_OpenRealFile(name, "wb", false);
@@ -40,7 +39,7 @@ void SV_WriteDemoMessage(client_t *client, sizebuf_t *sendbuffer, qboolean clien
 		return;
 	if(sendbuffer->cursize == 0)
 		return;
-	
+
 	temp = sendbuffer->cursize | (clienttoserver ? DEMOMSG_CLIENT_TO_SERVER : 0);
 	len = LittleLong(temp);
 	FS_Write(client->sv_demo_file, &len, 4);
@@ -60,7 +59,7 @@ void SV_StopDemoRecording(client_t *client)
 
 	if(client->sv_demo_file == NULL)
 		return;
-	
+
 	buf.data = bufdata;
 	buf.maxsize = sizeof(bufdata);
 	SZ_Clear(&buf);
@@ -81,7 +80,7 @@ void SV_StopDemoRecording(client_t *client)
 
 void SV_WriteNetnameIntoDemo(client_t *client)
 {
-	// This "pseudo packet" is written so a program can easily find out whose demo this is
+
 	sizebuf_t buf;
 	unsigned char bufdata[MAX_SCOREBOARDNAME + 64];
 

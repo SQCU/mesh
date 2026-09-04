@@ -2,11 +2,9 @@
 
 #include <client/draw.qh>
 
-// Pressed keys (#11)
-
 void HUD_PressedKeys_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_pressedkeys_aspect");
 	HUD_Write_Cvar("hud_panel_pressedkeys_attack");
 }
@@ -35,7 +33,6 @@ void HUD_PressedKeys()
 		mySize -= '2 2 0' * panel_bg_padding;
 	}
 
-	// force custom aspect
 	float aspect = autocvar_hud_panel_pressedkeys_aspect;
 	if(aspect)
 	{

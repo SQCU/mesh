@@ -1,0 +1,19 @@
+#!/bin/sh
+mesh_script=$0
+if [ -L "$mesh_script" ]; then
+  mesh_link=$(readlink "$mesh_script")
+  case "$mesh_link" in /*) mesh_script=$mesh_link ;; *) mesh_script=$(dirname "$mesh_script")/$mesh_link ;; esac
+fi
+mesh_bin=$(cd "$(dirname "$mesh_script")" && pwd)
+mesh_project=$(cd "$mesh_bin/.." && pwd)
+mesh_python_version=$(cat "$mesh_project/.python-version" 2>/dev/null || printf 3.12.14)
+PATH=$mesh_bin:$PATH
+export PATH MESH_PYTHON_LAUNCHER=mesh-python MESH_RUNTIME_ROOT=$mesh_project
+for mesh_python in "$mesh_project/.venv/bin/python" /usr/local/mesh/.venv/bin/python "${HOME:-}/.local/mesh/.venv/bin/python"; do
+  [ -x "$mesh_python" ] && exec "$mesh_python" "$@"
+done
+for mesh_uv in "$mesh_project/bin/uv" /usr/local/mesh/bin/uv "${HOME:-}/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+  [ -x "$mesh_uv" ] || continue
+  exec env UV_PROJECT_ENVIRONMENT="$mesh_project/.venv" "$mesh_uv" run --project "$mesh_project" --frozen --managed-python --python "$mesh_python_version" python "$@"
+done
+exec /usr/bin/env uv run --project "$mesh_project" --frozen --managed-python --python "$mesh_python_version" python "$@"

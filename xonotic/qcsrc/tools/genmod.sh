@@ -3,8 +3,8 @@ set -eu
 
 export LC_ALL=C.UTF-8
 
-# This script creates / updates the _mod.qc / _mod.qh / _mod.inc files based on
-# the qc / qh files present in the qcsrc folder.
+
+
 
 cd ${0%/*}
 cd ..
@@ -17,7 +17,7 @@ function hash() {
 }
 
 function genmod() {
-    # use context to work around cmake issue #12619
+
     CTX="${PWD#$ROOT}/"
     if [ -f ${MOD}.inc ]; then
         oldHashC=$(hash ${MOD}.inc)

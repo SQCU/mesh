@@ -46,7 +46,7 @@ void XonoticGametypeList_loadCvars(entity me)
 			i = 0;
 	}
 	me.setSelected(me, i);
-	// do we need this: me.parent.gameTypeChangeNotify(me.parent); // to make sure
+
 }
 void XonoticGametypeList_saveCvars(entity me)
 {
@@ -56,7 +56,7 @@ void XonoticGametypeList_saveCvars(entity me)
 	}
 	MapInfo_SwitchGameType(t);
 	entity owner = me.parent;
-	if (owner) { // not set immediately
+	if (owner) {
 		owner.gameTypeChangeNotify(owner);
 	}
 }

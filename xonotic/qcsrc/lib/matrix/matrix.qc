@@ -29,7 +29,6 @@ void MX_Nick_(entity fh, entity pass, int status)
     }
 }
 
-
 void MX_Messages_(entity fh, entity pass, int status);
 void MX_Messages(string from)
 {
@@ -55,7 +54,11 @@ void MX_Messages_(entity fh, entity pass, int status)
             for (string s; (s = url_fgets(fh)); ) { json = strcat(json, s, "\n"); }
             url_fclose(fh);
             int buf = json_parse(json, _json_parse_object);
-            EXPECT_NE(-1, buf);
+            if (buf == -1) {
+                LOG_WARN("Matrix messages returned invalid JSON; retrying from the live stream");
+                MX_Messages("");
+                break;
+            }
             for (int i = 0, n = stof(json_get(buf, "chunk.length")); i < n; ++i) {
                 MX_Handle(buf, sprintf("chunk.%d", i));
             }
@@ -64,7 +67,6 @@ void MX_Messages_(entity fh, entity pass, int status)
         }
     }
 }
-
 
 void MX_Sync_(entity fh, entity pass, int status);
 void MX_Sync(string since)
@@ -99,7 +101,11 @@ void MX_Sync_(entity fh, entity pass, int status)
             for (string s; (s = url_fgets(fh)); ) { json = strcat(json, s, "\n"); }
             url_fclose(fh);
             int buf = json_parse(json, _json_parse_object);
-            EXPECT_NE(-1, buf);
+            if (buf == -1) {
+                LOG_WARN("Matrix sync returned invalid JSON; retrying from the live stream");
+                MX_Sync("");
+                break;
+            }
             string arr = sprintf("rooms.join.%s.timeline.events", matrix_room);
             for (int i = 0, n = stof(json_get(buf, sprintf("%s.length", arr))); i < n; ++i) {
                 MX_Handle(buf, sprintf("%s.%d", arr, i));
@@ -109,7 +115,6 @@ void MX_Sync_(entity fh, entity pass, int status)
         }
     }
 }
-
 
 void MX_JLF_(entity fh, entity pass, int status);
 void MX_Join(string room)
@@ -154,7 +159,6 @@ void MX_JLF_(entity fh, entity pass, int status)
     }
 }
 
-
 void MX_Typing_(entity fh, entity pass, int status);
 void MX_Typing(bool state)
 {
@@ -181,7 +185,6 @@ void MX_Typing_(entity fh, entity pass, int status)
         }
     }
 }
-
 
 void MX_Say_(entity fh, entity pass, int status);
 void MX_Say(string body)

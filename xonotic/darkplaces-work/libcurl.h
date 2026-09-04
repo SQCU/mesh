@@ -1,13 +1,12 @@
 enum
 {
 	CURLCBSTATUS_OK = 0,
-	CURLCBSTATUS_FAILED = -1, // failed for generic reason (e.g. buffer too small)
-	CURLCBSTATUS_ABORTED = -2, // aborted by curl --cancel
-	CURLCBSTATUS_SERVERERROR = -3, // only used if no HTTP status code is available
-	CURLCBSTATUS_UNKNOWN = -4 // should never happen
+	CURLCBSTATUS_FAILED = -1,
+	CURLCBSTATUS_ABORTED = -2,
+	CURLCBSTATUS_SERVERERROR = -3,
+	CURLCBSTATUS_UNKNOWN = -4
 };
 typedef void (*curl_callback_t) (int status, size_t length_received, unsigned char *buffer, void *cbdata);
-// code is one of the CURLCBSTATUS constants, or the HTTP error code (when > 0).
 
 void Curl_Run(void);
 qboolean Curl_Running(void);
@@ -38,8 +37,3 @@ typedef struct Curl_downloadinfo_s
 }
 Curl_downloadinfo_t;
 Curl_downloadinfo_t *Curl_GetDownloadInfo(int *nDownloads, const char **additional_info, char *addinfo, size_t addinfolength);
-	// this may and should be Z_Free()ed
-	// the result is actually an array
-	// an additional info string may be returned in additional_info as a
-	// pointer to a static string (but the argument may be NULL if the caller
-	// does not care)

@@ -8,10 +8,6 @@
 #include <server/intermission.qh>
 #include <server/world.qh>
 
-// ===============================================
-//	Generates radar map images for use in the HUD
-// ===============================================
-
 float FullTraceFraction(vector a, vector mi, vector ma, vector b)
 {
 	vector c;
@@ -66,7 +62,6 @@ float RadarMapAtPoint_LineBlock(float e, float f, float w, float h, float zmin, 
 	vector dz;
 
 	q = 256 * q - 1;
-	// 256q-1 is the ideal sample count to map equal amount of sample values to one pixel value
 
 	mi = '0 0 0';
 	dz = (zsize / q) * '0 0 1';
@@ -101,7 +96,6 @@ float RadarMapAtPoint_Block(float e, float f, float w, float h, float zmin, floa
 	vector dz;
 
 	q = 256 * q - 1;
-	// 256q-1 is the ideal sample count to map equal amount of sample values to one pixel value
 
 	mi = '0 0 0';
 	dz = (zsize / q) * '0 0 1';
@@ -125,10 +119,9 @@ float RadarMapAtPoint_Sample(float e, float f, float w, float h, float zmin, flo
 {
 	vector a, b, mi, ma;
 
-	q *= 4;  // choose q so it matches the regular algorithm in speed
+	q *= 4;
 
 	q = 256 * q - 1;
-	// 256q-1 is the ideal sample count to map equal amount of sample values to one pixel value
 
 	mi = '0 0 0';
 	ma = '1 0 0' * w + '0 1 0' * h;
@@ -211,18 +204,13 @@ void RadarMap_Next()
 }
 void RadarMap_Think(entity this)
 {
-	// rough map entity
-	//   cnt: current line
-	//   size: pixel width/height
-	//   maxs: cell width/height
-	//   frame: counter
 
 	float i, x, l;
 	string si;
 
 	if (this.frame == 0)
 	{
-		// initialize
+
 		get_mi_min_max_texcoords(1);
 		this.mins = mi_picmin;
 		this.maxs_x = (mi_picmax.x - mi_picmin.x) / this.size.x;
@@ -272,7 +260,7 @@ void RadarMap_Think(entity this)
 	}
 	else if (this.frame <= this.size.y)
 	{
-		// fill the sharpen buffer with this line
+
 		sharpen_shift(this.size.x);
 		i = this.count & 24;
 
@@ -309,10 +297,9 @@ void RadarMap_Think(entity this)
 				break;
 		}
 
-		// do we have enough lines?
 		if (this.frame >= 2)
 		{
-			// write a pixel line
+
 			fputs(this.cnt, "\"");
 			for (x = 0; x < this.size.x; ++x)
 			{
@@ -330,11 +317,10 @@ void RadarMap_Think(entity this)
 			}
 		}
 
-		// is this the last line? then write back the missing line
 		if (this.frame == this.size.y)
 		{
 			sharpen_shift(this.size.x);
-			// write a pixel line
+
 			fputs(this.cnt, "\"");
 			for (x = 0; x < this.size.x; ++x)
 			{
@@ -357,7 +343,7 @@ void RadarMap_Think(entity this)
 	}
 	else
 	{
-		// close the file
+
 		fputs(this.cnt, "};\n");
 		fclose(this.cnt);
 		LOG_INFO("Finished. Please edit data/", this.netname, " with an image editing application and place it in the TGA format in the gfx folder.");
@@ -374,7 +360,7 @@ bool RadarMap_Make(int argc)
 		radarmapper = new(radarmapper);
 		setthink(radarmapper, RadarMap_Think);
 		radarmapper.nextthink = time;
-		radarmapper.count = 8;  // default to the --trace method, as it is faster now
+		radarmapper.count = 8;
 		radarmapper.ltime = 1;
 		radarmapper.size = '512 512 1';
 		for (i = 1; i < argc; ++i)
@@ -415,13 +401,13 @@ bool RadarMap_Make(int argc)
 				{ ++i;
 				  radarmapper.count = stof(argv(i));
 				  break;
-				}  // for the recursive call
+				}
 				case "--sharpen":
 				{ ++i;
 				  radarmapper.ltime = stof(argv(i));
 				  break;
-				}  // for the recursive call
-				case "--res":  // minor alias
+				}
+				case "--res":
 				case "--resolution":
 				{ ++i;
 				  radarmapper.size_x = stof(argv(i));
@@ -429,7 +415,7 @@ bool RadarMap_Make(int argc)
 				  radarmapper.size_y = stof(argv(i));
 				  break;
 				}
-				case "--qual":  // minor alias
+				case "--qual":
 				case "--quality":
 				{ ++i;
 				  radarmapper.size_z = stof(argv(i));
@@ -444,10 +430,10 @@ bool RadarMap_Make(int argc)
 			}
 		}
 
-		if (radarmapper)  // after doing the arguments, see if we successfully went forward.
+		if (radarmapper)
 		{
 			LOG_INFO("Radarmap entity spawned.");
-			return true;  // if so, don't print usage.
+			return true;
 		}
 	}
 

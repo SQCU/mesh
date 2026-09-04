@@ -11,7 +11,7 @@ void XonoticCvarsDialog_showNotify(entity me)
 	SUPER(XonoticCvarsDialog).showNotify(me);
 	loadAllCvars(me);
 }
-void XonoticCvarsDialog_fill(entity me) // in this dialog, use SKINCOLOR_CVARLIST_CONTROLS to color ALL controls
+void XonoticCvarsDialog_fill(entity me)
 {
 
 	entity e, cvarlist;
@@ -24,9 +24,6 @@ void XonoticCvarsDialog_fill(entity me) // in this dialog, use SKINCOLOR_CVARLIS
 		cvarlist.colorC =
 		SKINCOLOR_CVARLIST_CONTROLS;
 
-	// todo:
-	// add button which does cvar_resettodefaults_saveonly
-
 	me.TR(me);
 		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, _("Cvar filter:")));
 		me.TD(me, 1, 3, e = makeXonoticInputBox(0, string_null));
@@ -34,7 +31,7 @@ void XonoticCvarsDialog_fill(entity me) // in this dialog, use SKINCOLOR_CVARLIS
 			e.cb_color = e.cb_colorC = e.cb_colorF = SKINCOLOR_CVARLIST_CONTROLS;
 			e.onChange = CvarList_Filter_Change;
 			e.onChangeEntity = cvarlist;
-			cvarlist.controlledTextbox = e; // this COULD also be the Value box, but this leads to accidentally editing stuff
+			cvarlist.controlledTextbox = e;
 		me.TD(me, 1, 2, e = makeXonoticCheckBox(0, "menu_cvarlist_onlymodified", _("Modified cvars only")));
 			e.color = e.colorC = e.colorF = e.colorD = SKINCOLOR_CVARLIST_CONTROLS;
 			e.onClickEntity = cvarlist;

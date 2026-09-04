@@ -1,5 +1,4 @@
 
-// Written by Forest Hale 2003-06-15 and placed into public domain.
 
 #ifndef LHNET_H
 #define LHNET_H
@@ -16,8 +15,8 @@ lhnetaddresstype_t;
 typedef struct lhnetaddress_s
 {
 	lhnetaddresstype_t addresstype;
-	int port; // used by LHNETADDRESSTYPE_LOOP
-	unsigned char storage[256]; // sockaddr_in or sockaddr_in6
+	int port;
+	unsigned char storage[256];
 }
 lhnetaddress_t;
 
@@ -40,7 +39,7 @@ lhnetsocket_t;
 
 void LHNET_Init(void);
 void LHNET_Shutdown(void);
-int LHNET_DefaultDSCP(int dscp); // < 0: query; >= 0: set (returns previous value)
+int LHNET_DefaultDSCP(int dscp);
 void LHNET_SleepUntilPacket_Microseconds(int microseconds);
 lhnetsocket_t *LHNET_OpenSocket_Connectionless(lhnetaddress_t *address);
 void LHNET_CloseSocket(lhnetsocket_t *lhnetsocket);
@@ -49,4 +48,3 @@ int LHNET_Read(lhnetsocket_t *lhnetsocket, void *content, int maxcontentlength, 
 int LHNET_Write(lhnetsocket_t *lhnetsocket, const void *content, int contentlength, const lhnetaddress_t *address);
 
 #endif
-

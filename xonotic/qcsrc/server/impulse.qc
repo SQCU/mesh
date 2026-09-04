@@ -29,28 +29,6 @@
 	} \
 	void id##_handle(entity this)
 
-/**
- * Impulse map:
- *
- * 0 reserved (no input)
- *
- * 99: loaded
- *
- * 140: moving clone
- * 141: ctf speedrun
- * 142: fixed clone
- * 143: emergency teleport
- * 148: unfairly eliminate
- *
- * TODO:
- * 200 to 209: prev weapon shortcuts
- * 210 to 219: best weapon shortcuts
- * 220 to 229: next weapon shortcuts
- * 230 to 253: individual weapons (up to 24)
- */
-
-// weapon switching impulses
-
 void weapon_group_handle(entity this, int number, int imp)
 {
 	if (IS_DEAD(this))
@@ -83,8 +61,6 @@ X(8)
 X(9)
 X(0)
 #undef X
-
-// custom order weapon cycling
 
 void weapon_priority_handle(entity this, int dir, int number, int imp)
 {
@@ -144,8 +120,6 @@ X(7, next)
 X(8, next)
 X(9, next)
 #undef X
-
-// direct weapons
 
 void weapon_byid_handle(entity this, int number, int imp)
 {
@@ -343,11 +317,11 @@ IMPULSE(weapon_drop)
 		vector vecs = ((md.x > 0) ? md : '0 0 0');
 		vector dv = v_right * -vecs.y;
 		if(!is_dualwielding)
-			dv = '0 0 0'; // don't override!
+			dv = '0 0 0';
 		W_ThrowWeapon(this, weaponentity, W_CalculateProjectileVelocity(this, this.velocity, v_forward * 750, false), dv, true);
 
 		if(autocvar_g_weaponswitch_debug == 2)
-			break; // in this mode, the off-hand weapon is selected based on the primary weapon, don't drop it twice!
+			break;
 	}
 }
 
@@ -363,9 +337,6 @@ IMPULSE(weapon_reload)
 		Weapon w = this.(weaponentity).m_weapon;
 		w.wr_reload(w, actor, weaponentity);
 
-		// allow reloading all active slots?
-		//if(autocvar_g_weaponswitch_debug != 1)
-			//break;
 	}
 }
 
@@ -379,11 +350,11 @@ void ImpulseCommands(entity this)
 
 	if (MinigameImpulse(this, imp)) return;
 
-	if (timeout_status == TIMEOUT_ACTIVE) return;  // don't allow any impulses while the game is paused
+	if (timeout_status == TIMEOUT_ACTIVE) return;
 
 	if (round_handler_IsActive() && !round_handler_IsRoundStarted())
 	{
-		// impulses forbidden while waiting for the start of a round
+
 		#define X(id) case IMP_##id.impulse:
 		switch (imp)
 		{

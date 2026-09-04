@@ -145,7 +145,7 @@ MACRO_END
 			if (cond) LAMBDA(body) \
 		} \
 	MACRO_END
-/** marker field, always NULL */
+
 .entity _FOREACH_ENTITY_fld;
 .entity _FOREACH_ENTITY_FIND_entity_nextall; noref string _FOREACH_ENTITY_FIND_entity_allmutex;
 #define FOREACH_ENTITY_UNORDERED(cond, body) _FOREACH_ENTITY_FIND_UNORDERED(all, entity, _FOREACH_ENTITY_fld, NULL, cond, body)

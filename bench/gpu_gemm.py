@@ -9,7 +9,7 @@ for K in (1,8,64,256,512,1024):
     it = 50 if K<=64 else 20 if K<=256 else 10
     t0=time.perf_counter()
     for _ in range(it):
-        mx.eval(A @ X)          # materialise every iteration
+        mx.eval(A @ X)
     e=(time.perf_counter()-t0)/it
     fl=2.0*N*N*K; ai=fl/(4.0*N*N+8.0*N*K)
     print(f"  {K:<6} {fl/1e9:<10.2f} {e*1e3:<12.3f} {fl/e/1e9:<10.1f} {ai:<8.1f}")

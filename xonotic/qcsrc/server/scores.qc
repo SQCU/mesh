@@ -17,7 +17,7 @@
 #include <server/world.qh>
 
 .entity scorekeeper;
-entity teamscorekeepers[16];
+entity teamscorekeepers[NUM_TEAMS];
 float teamscores_entities_count;
 var .float scores_primary;
 var .float teamscores_primary;
@@ -26,10 +26,9 @@ float teamscores_flags_primary;
 var .float scores_secondary;
 float scores_flags_secondary;
 
-// returns cmp value
 int ScoreField_Compare(entity t1, entity t2, .float field, float fieldflags, int previous)
 {
-	if(fieldflags & SFL_NOT_SORTABLE) // column does not sort
+	if(fieldflags & SFL_NOT_SORTABLE)
 		return previous;
 	if (t1.(field) == t2.(field))
 		return previous;
@@ -56,18 +55,13 @@ int ScoreField_Compare(entity t1, entity t2, .float field, float fieldflags, int
 	return previous;
 }
 
-/*
- * teamscore entities
- */
-
 bool TeamScore_SendEntity(entity this, entity to, float sendflags)
 {
 	float i, longflags;
 
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_TEAMSCORES);
-	int t = this.team - 1;
-	assert(t, eprint(this));
-	WriteByte(MSG_ENTITY, t);
+	assert(Team_IsValidTeam(this.team), eprint(this));
+	WriteShort(MSG_ENTITY, this.team);
 
 	longflags = 0;
 	for(i = 0; i < MAX_TEAMSCORE; ++i)
@@ -95,13 +89,20 @@ bool TeamScore_SendEntity(entity this, entity to, float sendflags)
 
 void TeamScore_Spawn(float t, string name)
 {
+	if(teamscorekeepers[t - 1])
+		return;
 	entity ts = new_pure(csqc_score_team);
-	ts.netname = name; // not used yet, FIXME
+	ts.netname = name;
 	ts.team = t;
 	Net_LinkEntity(ts, false, 0, TeamScore_SendEntity);
 	teamscorekeepers[t - 1] = ts;
 	++teamscores_entities_count;
 	PlayerStats_GameReport_AddTeam(t);
+}
+
+bool TeamScore_IsAvailable(int team_num)
+{
+	return Team_IsValidTeam(team_num) && teamscorekeepers[team_num - 1] != NULL;
 }
 
 float TeamScore_AddToTeam(int t, float scorefield, float score)
@@ -113,8 +114,8 @@ float TeamScore_AddToTeam(int t, float scorefield, float score)
 		score = 0;
 	}
 
-	if(!scores_initialized) return 0; // FIXME remove this when everything uses this system
-	if(t <= 0 || t >= 16)
+	if(!scores_initialized) return 0;
+	if(t <= 0 || t > NUM_TEAMS)
 	{
 		if(game_stopped)
 			return 0;
@@ -138,16 +139,13 @@ float TeamScore_Add(entity player, float scorefield, float score)
 	return TeamScore_AddToTeam(player.team, scorefield, score);
 }
 
-// strict: compare others fields too besides primary and secondary
 int TeamScore_Compare(entity t1, entity t2, bool strict)
 {
 	if(!t1 || !t2) return (!t2) - !t1;
 
-	// supporting MAX_TEAMSCORE > 2 requires keeping track of primary and secondary teamscore
 	if (MAX_TEAMSCORE > 2)
 		error("MAX_TEAMSCORE > 2 not supported");
 
-	// first compare primary, then others (don't check secondary flag since there are only 2 teamscores)
 	int result = 0;
 	int i = boolean(teamscores_primary && teamscores_primary == teamscores(1));
 	result = ScoreField_Compare(t1, t2, teamscores(i), teamscores_flags(i), result);
@@ -161,10 +159,6 @@ int TeamScore_Compare(entity t1, entity t2, bool strict)
 
 	return result;
 }
-
-/*
- * the scoreinfo entity
- */
 
 void ScoreInfo_SetLabel_PlayerScore(PlayerScoreField i, string label, float scoreflags)
 {
@@ -217,45 +211,39 @@ bool ScoreInfo_SendEntity(entity this, entity to, int sf)
 		WriteString(MSG_ENTITY, teamscores_label(i));
 		WriteByte(MSG_ENTITY, teamscores_flags(i));
 	}
-	// prevent sending the welcome message again when score types are sent again because the scoring system has changed
-	// it can happen in some game modes like Race when the qualyfing session ends and the race starts
+
 	bool welcome_msg_too = (!CS(to) || time < CS(to).jointime + 5);
 	WriteByte(MSG_ENTITY, welcome_msg_too);
-	// welcome message is sent here because it needs to know the gametype
+
 	if (welcome_msg_too)
 		SendWelcomeMessage(to, MSG_ENTITY);
 	return true;
 }
 
-void ScoreInfo_Init(int teams)
+void ScoreInfo_Init()
 {
 	if(scores_initialized)
 	{
-		scores_initialized.SendFlags |= 1; // force a resend
+		scores_initialized.SendFlags |= 1;
 	}
 	else
 	{
 		scores_initialized = new_pure(ent_client_scoreinfo);
 		Net_LinkEntity(scores_initialized, false, 0, ScoreInfo_SendEntity);
 	}
-	if(teams & BIT(0))
-		TeamScore_Spawn(NUM_TEAM_1, "Red");
-	if(teams & BIT(1))
-		TeamScore_Spawn(NUM_TEAM_2, "Blue");
-	if(teams & BIT(2))
-		TeamScore_Spawn(NUM_TEAM_3, "Yellow");
-	if(teams & BIT(3))
-		TeamScore_Spawn(NUM_TEAM_4, "Pink");
 }
 
-/*
- * per-player score entities
- */
+void ScoreInfo_InitCount(int teams)
+{
+	ScoreInfo_Init();
+	for(int i = 1; i <= bound(0, teams, NUM_TEAMS); ++i)
+		TeamScore_Spawn(Team_IndexToTeam(i), Static_Team_ColorName(Team_IndexToTeam(i)));
+}
 
 bool PlayerScore_SendEntity(entity this, entity to, float sendflags)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_SCORES);
-	WriteByte(MSG_ENTITY, etof(this.owner));
+	WriteShort(MSG_ENTITY, etof(this.owner));
 
 	int longflags = 0;
 	FOREACH(Scores, true, {
@@ -316,7 +304,7 @@ void Score_ClearAll()
 				sk.(scores(it)) = 0;
 		});
 	});
-	for(t = 0; t < 16; ++t)
+	for(t = 0; t < NUM_TEAMS; ++t)
 	{
 		sk = teamscorekeepers[t];
 		if(!sk)
@@ -359,7 +347,7 @@ float PlayerScore_Add(entity player, PlayerScoreField scorefield, float score)
 		score = 0;
 	}
 
-	if(!scores_initialized) return 0; // FIXME remove this when everything uses this system
+	if(!scores_initialized) return 0;
 	entity s = CS(player).scorekeeper;
 	if(!s)
 	{
@@ -383,7 +371,7 @@ float PlayerScore_Add(entity player, PlayerScoreField scorefield, float score)
 
 float PlayerScore_Set(entity player, PlayerScoreField scorefield, float score)
 {
-	if(!scores_initialized) return 0; // FIXME remove this when everything uses this system
+	if(!scores_initialized) return 0;
 	entity s = CS(player).scorekeeper;
 	if(!s)
 	{
@@ -407,19 +395,18 @@ float PlayerTeamScore_Add(entity player, PlayerScoreField pscorefield, float tsc
 {
 	float r;
 	r = PlayerScore_Add(player, pscorefield, score);
-	if(teamscores_entities_count) // only for teamplay
+	if(teamscores_entities_count)
 		r = TeamScore_Add(player, tscorefield, score);
 	return r;
 }
 
-// strict: compare others fields too besides primary and secondary
 float PlayerScore_Compare(entity t1, entity t2, bool strict)
 {
 	if(!t1 || !t2) return (!t2) - !t1;
 
 	int result = 0;
 	result = ScoreField_Compare(t1, t2, scores_primary, scores_flags_primary, result);
-	// NOTE: if (scores_secondary) doesn't work because it's a field pointer
+
 	if (result == 0 && scores_flags_secondary)
 		result = ScoreField_Compare(t1, t2, scores_secondary, scores_flags_secondary, result);
 
@@ -450,12 +437,6 @@ void WinningConditionHelper(entity this)
 	entity secondscorekeeper;
 	entity sk;
 
-	// format:
-	// gametype:P<pure>:S<slots>::plabel,plabel:tlabel,tlabel:teamid:tscore,tscore:teamid:tscore,tscore
-	// score labels always start with a symbol or with lower case
-	// so to match pure, match for :P0:
-	// to match full, match for :S0:
-
 	fullstatus = autocvar_g_full_getstatus_responses;
 
 	s = GetGametype();
@@ -472,7 +453,7 @@ void WinningConditionHelper(entity this)
 		float t;
 
 		s = strcat(s, ":", GetTeamScoreString(0, 1));
-		for(t = 0; t < 16; ++t)
+		for(t = 0; t < NUM_TEAMS; ++t)
 			if(teamscorekeepers[t])
 				s = strcat(s, ":", ftos(t+1), ":", GetTeamScoreString(t+1, 1));
 
@@ -480,7 +461,7 @@ void WinningConditionHelper(entity this)
 		WinningConditionHelper_secondteam = -1;
 		winnerscorekeeper = NULL;
 		secondscorekeeper = NULL;
-		for(t = 0; t < 16; ++t)
+		for(t = 0; t < NUM_TEAMS; ++t)
 		{
 			sk = teamscorekeepers[t];
 			c = TeamScore_Compare(winnerscorekeeper, sk, true);
@@ -511,8 +492,8 @@ void WinningConditionHelper(entity this)
 		WinningConditionHelper_lowerisbetter = (teamscores_flags_primary & SFL_LOWER_IS_BETTER);
 		WinningConditionHelper_zeroisworst = (teamscores_flags_primary & SFL_ZERO_IS_WORST);
 
-		WinningConditionHelper_winner = NULL; // not supported in teamplay
-		WinningConditionHelper_second = NULL; // not supported in teamplay
+		WinningConditionHelper_winner = NULL;
+		WinningConditionHelper_second = NULL;
 	}
 	else
 	{
@@ -550,8 +531,8 @@ void WinningConditionHelper(entity this)
 		WinningConditionHelper_lowerisbetter = (scores_flags_primary & SFL_LOWER_IS_BETTER);
 		WinningConditionHelper_zeroisworst = (scores_flags_primary & SFL_ZERO_IS_WORST);
 
-		WinningConditionHelper_winnerteam = -1; // no teamplay
-		WinningConditionHelper_secondteam = -1; // no teamplay
+		WinningConditionHelper_winnerteam = -1;
+		WinningConditionHelper_secondteam = -1;
 	}
 
 	if(WinningConditionHelper_topscore == 0)
@@ -563,7 +544,7 @@ void WinningConditionHelper(entity this)
 			else
 				WinningConditionHelper_topscore = -999999999;
 		}
-		if(player_count == 0) // special case: empty servers DO end the match at a 0:0 tie
+		if(player_count == 0)
 			WinningConditionHelper_equality = 0;
 	}
 
@@ -622,7 +603,7 @@ string GetPlayerScoreString(entity pl, float shortString)
 	out = "";
 	if(!pl)
 	{
-		// label
+
 		FOREACH(Scores, true, {
 			if ((scores_flags(it) & SFL_SORT_PRIO_MASK) == SFL_SORT_PRIO_PRIMARY)
 			{
@@ -684,7 +665,7 @@ string GetTeamScoreString(float tm, float shortString)
 	out = "";
 	if(tm == 0)
 	{
-		// label
+
 		for(i = 0; i < MAX_TEAMSCORE; ++i)
 			if((teamscores_flags(i) & SFL_SORT_PRIO_MASK) == SFL_SORT_PRIO_PRIMARY)
 			{
@@ -730,7 +711,6 @@ string GetTeamScoreString(float tm, float shortString)
 	return out;
 }
 
-// strict: compare others fields too besides primary and secondary
 int PlayerTeamScore_Compare(entity p1, entity p2, float teams, bool strict)
 {
 	if(teams && teamscores_entities_count)
@@ -769,7 +749,6 @@ entity PlayerScore_Sort(.float field, int teams, bool strict, bool nospectators)
 		it.chain = plist;
 		plist = it;
 	});
-	// Now plist points to the whole list.
 
 	pfirst = plast = NULL;
 
@@ -787,7 +766,6 @@ entity PlayerScore_Sort(.float field, int teams, bool strict, bool nospectators)
 			}
 		}
 
-		// remove pbest out of the chain
 		if(pbestprev == NULL)
 			plist = pbest.chain;
 		else
@@ -815,7 +793,7 @@ float TeamScore_GetCompareValue(float t)
 	float s;
 	entity sk;
 
-	if(t <= 0 || t >= 16)
+	if(t <= 0 || t > NUM_TEAMS)
 	{
 		if(game_stopped)
 			return 0;
@@ -836,7 +814,7 @@ float TeamScore_GetCompareValue(float t)
 
 const float NAMEWIDTH = 22;
 const float SCORESWIDTH = 58;
-// TODO put this somewhere in common?
+
 string Score_NicePrint_ItemColor(float vflags)
 {
 	if(vflags & SFL_SORT_PRIO_PRIMARY)
@@ -980,14 +958,14 @@ void PlayerScore_TeamStats()
 {
 	entity sk;
 	float t, i;
-	for(t = 0; t < 16; ++t)
+	for(t = 0; t < NUM_TEAMS; ++t)
 	{
 		sk = teamscorekeepers[t];
 		if(!sk)
 			continue;
 		for(i = 0; i < MAX_TEAMSCORE; ++i)
 			if(sk.(teamscores(i)) != 0 && teamscores_label(i) != "")
-				// the +1 is important here!
+
 				PlayerStats_GameReport_Event_Team(t+1,
 					strcat(PLAYERSTATS_SCOREBOARD, teamscores_label(i)), sk.(teamscores(i)));
 	}

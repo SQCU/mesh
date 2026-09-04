@@ -1,5 +1,4 @@
 #pragma once
 
-
 const int BOBBING_XAXIS = BIT(0);
 const int BOBBING_YAXIS = BIT(1);

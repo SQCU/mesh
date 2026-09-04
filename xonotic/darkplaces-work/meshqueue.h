@@ -2,7 +2,6 @@
 #ifndef MESHQUEUE_H
 #define MESHQUEUE_H
 
-// VorteX: seems this value is hardcoded in other several defines as it's changing makes mess
 #define MESHQUEUE_TRANSPARENT_BATCHSIZE 256
 
 void R_MeshQueue_BeginScene(void);

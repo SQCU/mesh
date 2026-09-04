@@ -25,8 +25,6 @@ vector W_HitPlotNormalizedUntransform(vector org, entity targ, vector screenforw
 
 	myv = W_HitPlotUnnormalizedUntransform(screenforward, screenright, screenup, org);
 
-	// x = 0..1 relative to hitbox; y = 0..1 relative to hitbox; z = distance
-
 	mi = ma = targ.origin + 0.5 * (targ.mins + targ.maxs);
 	for(i = 0; i < 2; ++i) for(j = 0; j < 2; ++j) for(k = 0; k < 2; ++k)
 	{
@@ -39,11 +37,11 @@ vector W_HitPlotNormalizedUntransform(vector org, entity targ, vector screenforw
 		{
 			if(mi.x > thisv.x) mi.x = thisv.x; if(ma.x < thisv.x) ma.x = thisv.x;
 			if(mi.y > thisv.y) mi.y = thisv.y; if(ma.y < thisv.y) ma.y = thisv.y;
-			//if(mi_z > thisv_z) mi_z = thisv_z; if(ma_z < thisv_z) ma_y = thisv_z;
+
 		}
 		else
 		{
-			// first run
+
 			mi = ma = thisv;
 		}
 	}
@@ -63,7 +61,7 @@ void W_HitPlotAnalysis(entity player, entity wep, vector screenforward, vector s
 		if(lag < 0.001)
 			lag = 0;
 		if(!IS_REAL_CLIENT(player))
-			lag = 0; // only antilag for clients
+			lag = 0;
 
 		vector org = player.origin + player.view_ofs;
 		traceline_antilag_force(player, org, org + screenforward * max_shot_distance, MOVE_NORMAL, player, lag);
@@ -74,7 +72,7 @@ void W_HitPlotAnalysis(entity player, entity wep, vector screenforward, vector s
 			vector hitplot = W_HitPlotNormalizedUntransform(org, trace_ent, screenforward, screenright, screenup, trace_endpos);
 			antilag_restore(trace_ent, store);
 			fputs(CS(player).hitplotfh, strcat(ftos(hitplot.x), " ", ftos(hitplot.y), " ", ftos(hitplot.z), " ", ftos(wep.m_id), "\n"));
-			//print(strcat(ftos(hitplot_x), " ", ftos(hitplot_y), " ", ftos(hitplot_z), "\n"));
+
 		}
 	}
 }

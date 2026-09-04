@@ -17,14 +17,14 @@ METHOD(OverkillShotgun, wr_think, void(entity thiswep, entity actor, .entity wea
 {
 	if ((WEP_CVAR_SEC(okshotgun, refire_type) == 1) && (fire & 2) && (time >= actor.jump_interval))
 	{
-		// Secondary uses it's own refire timer if refire_type is 1.
+
 		actor.jump_interval = time + WEP_CVAR_SEC(okshotgun, refire) * W_WeaponRateFactor(actor);
 		makevectors(actor.v_angle);
 		W_Blaster_Attack(actor, weaponentity, WEP_BLASTER.m_id | HITTYPE_SECONDARY);
 		if ((actor.(weaponentity).wframe == WFRAME_IDLE) ||
 			(actor.(weaponentity).wframe == WFRAME_FIRE2))
 		{
-			// Set secondary fire animation.
+
 			actor.(weaponentity).wframe = WFRAME_FIRE2;
 			FOREACH_CLIENT(true, LAMBDA(
 				if (it == actor || (IS_SPEC(it) && it.enemy == actor))
@@ -37,11 +37,11 @@ METHOD(OverkillShotgun, wr_think, void(entity thiswep, entity actor, .entity wea
 	}
 	if (WEP_CVAR(okshotgun, reload_ammo) && actor.(weaponentity).clip_load < WEP_CVAR_PRI(okshotgun, ammo))
 	{
-		// Forced reload
+
 		thiswep.wr_reload(thiswep, actor, weaponentity);
 		return;
 	}
-	if (fire & 1) // Primary attack
+	if (fire & 1)
 	{
 		if (!weapon_prepareattack(thiswep, actor, weaponentity, false, WEP_CVAR_PRI(okshotgun, refire)))
 		{
@@ -58,7 +58,7 @@ METHOD(OverkillShotgun, wr_think, void(entity thiswep, entity actor, .entity wea
 		weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, WEP_CVAR_PRI(okshotgun, animtime), w_ready);
 		return;
 	}
-	if ((fire & 2) && (WEP_CVAR_SEC(okshotgun, refire_type) == 0)) // Secondary attack
+	if ((fire & 2) && (WEP_CVAR_SEC(okshotgun, refire_type) == 0))
 	{
 		if (!weapon_prepareattack(thiswep, actor, weaponentity, false, WEP_CVAR_SEC(okshotgun, refire)))
 		{
@@ -79,12 +79,12 @@ METHOD(OverkillShotgun, wr_checkammo1, bool(entity thiswep, entity actor, .entit
 
 METHOD(OverkillShotgun, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-	return true; // Blaster secondary is unlimited.
+	return true;
 }
 
 METHOD(OverkillShotgun, wr_reload, void(entity thiswep, entity actor, .entity weaponentity))
 {
-	W_Reload(actor, weaponentity, WEP_CVAR_PRI(okshotgun, ammo), SND_RELOAD); // WEAPONTODO
+	W_Reload(actor, weaponentity, WEP_CVAR_PRI(okshotgun, ammo), SND_RELOAD);
 }
 
 METHOD(OverkillShotgun, wr_suicidemessage, Notification(entity thiswep))

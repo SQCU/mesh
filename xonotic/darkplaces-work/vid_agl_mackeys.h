@@ -1,31 +1,9 @@
-/*
-    SDL - Simple DirectMedia Layer
-    Copyright (C) 1997, 1998, 1999, 2000, 2001  Sam Lantinga
 
-    This library is free software; you can redistribute it and/or
-    modify it under the terms of the GNU Library General Public
-    License as published by the Free Software Foundation; either
-    version 2 of the License, or (at your option) any later version.
-
-    This library is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-    Library General Public License for more details.
-
-    You should have received a copy of the GNU Library General Public
-    License along with this library; if not, write to the Free
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-
-    Sam Lantinga
-    slouken@devolution.com
-*/
 
 #ifdef SAVE_RCSID
 static char rcsid =
  "@(#) $Id$";
 #endif
-
-/* These are the Macintosh key scancode constants -- from Inside Macintosh */
 
 #define MK_ESCAPE		0x35
 #define MK_F1			0x7A
@@ -114,7 +92,7 @@ static char rcsid =
 #define MK_COMMA		0x2B
 #define MK_PERIOD		0x2F
 #define MK_SLASH		0x2C
-#if 0	/* These are the same as the left versions - use left by default */
+#if 0
 #define MK_RSHIFT		0x38
 #endif
 #define MK_UP			0x7E
@@ -126,7 +104,7 @@ static char rcsid =
 #define MK_LALT			0x3A
 #define MK_LMETA		0x37
 #define MK_SPACE		0x31
-#if 0	/* These are the same as the left versions - use left by default */
+#if 0
 #define MK_RMETA		0x37
 #define MK_RALT			0x3A
 #define MK_RCTRL		0x3B
@@ -137,7 +115,6 @@ static char rcsid =
 #define MK_KP0			0x52
 #define MK_KP_PERIOD		0x41
 
-/* Wierd, these keys are on my iBook under MacOS X */
 #define MK_IBOOK_ENTER		0x34
 #define MK_IBOOK_LEFT		0x3B
 #define MK_IBOOK_RIGHT		0x3C

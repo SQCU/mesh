@@ -38,13 +38,12 @@ bool corner_send(entity this, entity to, int sf)
 
 void corner_link(entity this)
 {
-	//Net_LinkEntity(this, false, 0, corner_send);
+
 }
 
 spawnfunc(path_corner)
 {
-	// setup values for overriding train movement
-	// if a second value does not exist, both start and end speeds are the single value specified
+
 	set_platmovetype(this, this.platmovetype);
 
 	corner_link(this);

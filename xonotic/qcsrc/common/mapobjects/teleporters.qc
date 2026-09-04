@@ -53,7 +53,7 @@ void tdeath(entity player, entity teleporter, entity telefragger, vector telefra
 				Damage (head, teleporter, telefragger, 10000, DEATH_TELEFRAG.m_id, DMG_NOWEP, head.origin, '0 0 0');
 			}
 		}
-		else // dead bodies and monsters gib themselves instead of telefragging
+		else
 			Damage (telefragger, teleporter, telefragger, 10000, DEATH_TELEFRAG.m_id, DMG_NOWEP, telefragger.origin, '0 0 0');
 	}
 }
@@ -77,9 +77,9 @@ void TeleportPlayer(entity teleporter, entity player, vector to, vector to_angle
 	makevectors (to_angles);
 
 #ifdef SVQC
-	if(player.teleportable == TELEPORT_NORMAL) // don't play sounds or show particles for anything that isn't a player, maybe change later to block only observers
+	if(player.teleportable == TELEPORT_NORMAL)
 	{
-		if(teleporter.pushltime < time) // only show one teleport effect per teleporter per 0.2 seconds, for better fps
+		if(teleporter.pushltime < time)
 		{
 			if(tflags & TELEPORT_FLAG_SOUND)
 			{
@@ -105,12 +105,10 @@ void TeleportPlayer(entity teleporter, entity player, vector to, vector to_angle
 	}
 #endif
 
-	// Relocate the player
-	// assuming to allows PL_MIN to PL_MAX box and some more
 #ifdef SVQC
 	from = player.origin;
 	setorigin(player, to);
-	player.oldorigin = to; // don't undo the teleport by unsticking
+	player.oldorigin = to;
 	player.angles = to_angles;
 	if (IS_BOT_CLIENT(player))
 	{
@@ -135,7 +133,7 @@ void TeleportPlayer(entity teleporter, entity player, vector to, vector to_angle
 	player.csqcmodel_teleported = 1;
 	player.v_angle = to_angles;
 
-	if(player == csqcplayer) // not for anything but the main player
+	if(player == csqcplayer)
 	{
 		setproperty(VF_ANGLES, player.angles);
 		setproperty(VF_CL_VIEWANGLES, player.angles);
@@ -152,13 +150,10 @@ void TeleportPlayer(entity teleporter, entity player, vector to, vector to_angle
 			tdeath(player, teleporter, telefragger, telefragmin, telefragmax);
 		}
 
-		// player no longer is on ground
 		UNSET_ONGROUND(player);
 
-		// reset tracking of oldvelocity for impact damage (sudden velocity changes)
 		player.oldvelocity = player.velocity;
 
-		// reset tracking of who pushed you into a hazard (for kill credit)
 		if(teleporter.owner)
 		{
 			player.pusher = teleporter.owner;
@@ -182,14 +177,13 @@ entity Simple_TeleportPlayer(entity teleporter, entity player)
 	vector locout;
 	entity e = NULL;
 
-	// Find the output teleporter
 	if(teleporter.enemy)
 	{
 		e = teleporter.enemy;
 	}
 	else
 	{
-		// sorry CSQC, random stuff ain't gonna happen
+
 #ifdef SVQC
 		RandomSelection_Init();
 		FOREACH_ENTITY_STRING(targetname, teleporter.target,
@@ -260,22 +254,21 @@ void teleport_findtarget(entity this)
 
 	if(n == 0)
 	{
-		// no dest!
+
 		objerror (this, "Teleporter with nonexistent target");
 		return;
 	}
 	else if(n == 1)
 	{
-		// exactly one dest - bots love that
+
 		this.enemy = find(NULL, targetname, this.target);
 	}
 	else
 	{
-		// have to use random selection every single time
+
 		this.enemy = NULL;
 	}
 
-	// now enable touch
 	if(istrigger)
 		settouch(this, Teleport_Touch);
 #ifdef SVQC
@@ -302,21 +295,21 @@ void WarpZone_PostTeleportPlayer_Callback(entity pl)
 	UpdateItemAfterTeleport(pl);
     if (IS_PLAYER(pl)) anticheat_fixangle(pl);
 #endif
-	// "disown" projectiles after teleport
+
 	if(pl.owner)
 	if(pl.owner == pl.realowner)
 	{
 	#ifdef SVQC
 		if(!(pl.flags & FL_PROJECTILE))
 	#elif defined(CSQC)
-		if(!(pl.flags & BIT(15))) // FL_PROJECTILE
+		if(!(pl.flags & BIT(15)))
 	#endif
 			LOG_INFO("A non-projectile got through a warpzone and its owner cleared. It's a ", pl.classname, ".");
 		pl.owner = NULL;
 	}
 	if(IS_PLAYER(pl))
 	{
-		// reset tracking of oldvelocity for impact damage (sudden velocity changes)
+
 	#ifdef SVQC
 		pl.oldvelocity = pl.velocity;
 	#endif

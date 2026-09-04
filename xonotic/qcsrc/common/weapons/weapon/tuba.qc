@@ -7,7 +7,7 @@
 
 #define MAX_TUBANOTES 32
 .float tuba_lastnotes_last;
-.float tuba_lastnotes_cnt; // over
+.float tuba_lastnotes_cnt;
 .vector tuba_lastnotes[MAX_TUBANOTES];
 
 bool W_Tuba_HasPlayed(entity pl, .entity weaponentity, string melody, int instrument, bool ignorepitch, float mintempo, float maxtempo)
@@ -22,7 +22,6 @@ bool W_Tuba_HasPlayed(entity pl, .entity weaponentity, string melody, int instru
 		if(pl.(weaponentity).tuba_instrument != instrument)
 			return false;
 
-	// verify notes...
 	nolength = false;
 	for(i = 0; i < n; ++i)
 	{
@@ -31,10 +30,7 @@ bool W_Tuba_HasPlayed(entity pl, .entity weaponentity, string melody, int instru
 		float np = floor(ai);
 		if(ai == np)
 			nolength = true;
-		// n counts the last played notes BACKWARDS
-		// _x is start
-		// _y is end
-		// _z is note pitch
+
 		if(ignorepitch && i == 0)
 		{
 			pitchshift = np - v.z;
@@ -46,20 +42,18 @@ bool W_Tuba_HasPlayed(entity pl, .entity weaponentity, string melody, int instru
 		}
 	}
 
-	// now we know the right NOTES were played
 	if(!nolength)
 	{
-		// verify rhythm...
+
 		float ti = 0;
 		if(maxtempo > 0)
-			mmin = 240 / maxtempo; // 60 = "0.25 means 1 sec", at 120 0.5 means 1 sec, at 240 1 means 1 sec
+			mmin = 240 / maxtempo;
 		else
 			mmin = 0;
 		if(mintempo > 0)
-			mmax = 240 / mintempo; // 60 = "0.25 means 1 sec", at 120 0.5 means 1 sec, at 240 1 means 1 sec
+			mmax = 240 / mintempo;
 		else
-			mmax = 240; // you won't try THAT hard... (tempo 1)
-		//printf("initial tempo rules: %f %f\n", mmin, mmax);
+			mmax = 240;
 
 		for(i = 0; i < n; ++i)
 		{
@@ -73,26 +67,12 @@ bool W_Tuba_HasPlayed(entity pl, .entity weaponentity, string melody, int instru
 				float aj = stof(argv(n - j - 1));
 				tj -= (aj - floor(aj));
 
-				// note i should be at m*ti+b
-				// note j should be at m*tj+b
-				// so:
-				// we have a LINE l, so that
-				// vi_x <= l(ti) <= vi_y
-				// vj_x <= l(tj) <= vj_y
-				// what is m?
-
-				// vi_x <= vi_y <= vj_x <= vj_y
-				// ti <= tj
-				//printf("first note: %f to %f, should be %f\n", vi_x, vi_y, ti);
-				//printf("second note: %f to %f, should be %f\n", vj_x, vj_y, tj);
-				//printf("m1 = %f\n", (vi_x - vj_y) / (ti - tj));
-				//printf("m2 = %f\n", (vi_y - vj_x) / (ti - tj));
-				mmin = max(mmin, (vi.x - vj.y) / (ti - tj)); // lower bound
-				mmax = min(mmax, (vi.y - vj.x) / (ti - tj)); // upper bound
+				mmin = max(mmin, (vi.x - vj.y) / (ti - tj));
+				mmax = min(mmax, (vi.y - vj.x) / (ti - tj));
 			}
 		}
 
-		if(mmin > mmax) // rhythm fail
+		if(mmin > mmax)
 			return false;
 	}
 
@@ -104,10 +84,7 @@ bool W_Tuba_HasPlayed(entity pl, .entity weaponentity, string melody, int instru
 void W_Tuba_NoteOff(entity this)
 {
 	entity actor = this.owner;
-	// we have a note:
-	//   on: this.spawnshieldtime
-	//   off: time
-	//   note: this.cnt
+
 	.entity weaponentity = this.weaponentity_fld;
 	if (actor.(weaponentity).tuba_note == this)
 	{
@@ -119,11 +96,11 @@ void W_Tuba_NoteOff(entity this)
 		string s = trigger_magicear_processmessage_forallears(actor, 0, NULL, string_null);
 		if (s != "")
 		{
-			// simulate a server message
+
 			switch (this.tuba_instrument)
 			{
 				default:
-				case 0: // Tuba
+				case 0:
 					bprint(strcat("\{1}\{13}* ^3", actor.netname, "^3 played on the @!#%'n Tuba: ^7", s, "\n"));
 					break;
 				case 1:
@@ -149,25 +126,17 @@ int W_Tuba_GetNote(entity pl, int hittype)
 	int note = 0;
 	switch (movestate)
 	{
-	// layout: originally I wanted
-	//   eb e  e#=f
-	//   B  c  d
-	//   Gb G  G#
-	// but then you only use forward and right key. So to make things more
-	// interesting, I swapped B with e#. Har har har...
-	//   eb e  B
-	// f=e# c  d
-	//   Gb G  G#
-		case 1: note = -6; break; // Gb
-		case 2: note = -5; break; // G
-		case 3: note = -4; break; // G#
-		case 4: note = +5; break; // e#
+
+		case 1: note = -6; break;
+		case 2: note = -5; break;
+		case 3: note = -4; break;
+		case 4: note = +5; break;
 		default:
-		case 5: note =  0; break; // c
-		case 6: note = +2; break; // d
-		case 7: note = +3; break; // eb
-		case 8: note = +4; break; // e
-		case 9: note = -1; break; // B
+		case 5: note =  0; break;
+		case 6: note = +2; break;
+		case 7: note = +3; break;
+		case 8: note = +4; break;
+		case 9: note = -1; break;
 	}
 	if(PHYS_INPUT_BUTTON_CROUCH(pl))
 		note -= 12;
@@ -176,10 +145,6 @@ int W_Tuba_GetNote(entity pl, int hittype)
 	if(hittype & HITTYPE_SECONDARY)
 		note += 7;
 
-	// we support two kinds of tubas, those tuned in Eb and those tuned in C
-	// kind of tuba currently is player slot number, or team number if in
-	// teamplay
-	// that way, holes in the range of notes are "plugged"
 	if(teamplay)
 	{
 		if(pl.team == NUM_TEAM_2 || pl.team == NUM_TEAM_4)
@@ -191,18 +156,6 @@ int W_Tuba_GetNote(entity pl, int hittype)
 			note += 3;
 	}
 
-	// total range of notes:
-	//                       0
-	//                 ***  ** ****
-	//                        ***  ** ****
-	//     ***  ** ****
-	//            ***  ** ****
-	//     ***  ********************* ****
-	//     -18.........................+12
-	//        ***  ********************* ****
-	//     -18............................+15
-	//     with jump: ... +24
-	//     ... +27
 	return note;
 }
 
@@ -248,13 +201,13 @@ void W_Tuba_NoteThink(entity this)
 		v = this.realowner.origin - (it.origin + it.view_ofs);
 		vol1 = max(0, 1 - vlen(v) * dist_mult);
 		dir1 = normalize(v);
-		if(fabs(vol0 - vol1) > 0.005) // 0.5 percent change in volume
+		if(fabs(vol0 - vol1) > 0.005)
 		{
 			setorigin(this, this.realowner.origin);
 			this.SendFlags |= 2;
 			break;
 		}
-		if(dir0 * dir1 < 0.9994) // 2 degrees change in angle
+		if(dir0 * dir1 < 0.9994)
 		{
 			setorigin(this, this.realowner.origin);
 			this.SendFlags |= 2;
@@ -297,14 +250,13 @@ void W_Tuba_NoteOn(entity actor, .entity weaponentity, float hittype)
 		Net_LinkEntity(note, false, 0, W_Tuba_NoteSendEntity);
 	}
 
-	actor.(weaponentity).tuba_note.teleport_time = time + WEP_CVAR(tuba, refire) * 2 * W_WeaponRateFactor(actor); // so it can get prolonged safely
+	actor.(weaponentity).tuba_note.teleport_time = time + WEP_CVAR(tuba, refire) * 2 * W_WeaponRateFactor(actor);
 
-	//sound(actor, c, TUBA_NOTE(n), bound(0, VOL_BASE * cvar("g_balance_tuba_volume"), 1), autocvar_g_balance_tuba_attenuation);
 	RadiusDamage(actor, actor, WEP_CVAR(tuba, damage), WEP_CVAR(tuba, edgedamage), WEP_CVAR(tuba, radius), NULL, NULL, WEP_CVAR(tuba, force), hittype | WEP_TUBA.m_id, weaponentity, NULL);
 
 	if(time > actor.(weaponentity).tuba_smoketime)
 	{
-		// FIXME gettaginfo(actor.(weaponentity), 0) doesn't return the real origin of the weapon
+
 		vector org = gettaginfo(actor.(weaponentity), 0);
 		if(actor.(weaponentity).tuba_instrument == 1)
 			Send_Effect(EFFECT_SMOKE_RING, org + v_up * 25 + v_right * 10 + v_forward * 14, v_up * 100, 1);
@@ -320,8 +272,7 @@ void W_Tuba_NoteOn(entity actor, .entity weaponentity, float hittype)
 #ifdef SVQC
 METHOD(Tuba, wr_aim, void(Tuba this, entity actor, .entity weaponentity))
 {
-	// bots cannot play the Tuba well yet
-	// I think they should start with the recorder first
+
 	if (vdist((actor.origin - actor.enemy.origin), <, WEP_CVAR(tuba, radius)))
 	{
 		if (random() > 0.5)
@@ -361,7 +312,7 @@ METHOD(Tuba, wr_setup, void(Tuba this, entity actor, .entity weaponentity))
 
 METHOD(Tuba, wr_reload, void(Tuba this, entity actor, .entity weaponentity))
 {
-	// switch to alternate instruments :)
+
 	if (actor.(weaponentity).state == WS_READY)
 	{
 		switch (actor.(weaponentity).tuba_instrument)
@@ -394,7 +345,6 @@ METHOD(Tuba, wr_reload, void(Tuba this, entity actor, .entity weaponentity))
 
 #ifdef SVQC
 
-// infinite ammo
 METHOD(Tuba, wr_checkammo1, bool(Tuba this, entity actor, .entity weaponentity)) { return true; }
 METHOD(Tuba, wr_checkammo2, bool(Tuba this, entity actor, .entity weaponentity)) { return true; }
 

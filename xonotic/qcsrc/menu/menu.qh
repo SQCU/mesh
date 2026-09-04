@@ -32,14 +32,12 @@ void m_goto(string name);
 entity keyGrabber;
 .void(entity this, float key, float ascii) keyGrabbed;
 
-// "virtual" conwidth/height values for other stuff to assume for scaling
 float conwidth, conheight;
 
-/** you have to define this for pre-menu initialization. Return 0 if initialization needs to be retried a frame later, 1 if it succeeded. */
 float preMenuInit();
-/** this is run before the menu is drawn. You may put some stuff there that has to be done every frame. */
+
 void preMenuDraw();
-/** this is run just after the menu is drawn (or not). Useful to draw something over everything else. */
+
 void postMenuDraw();
 
 void m_sync();

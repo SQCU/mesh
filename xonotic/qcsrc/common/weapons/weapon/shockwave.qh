@@ -1,21 +1,21 @@
 #pragma once
 
 CLASS(Shockwave, Weapon)
-/* spawnfunc */ ATTRIB(Shockwave, m_canonical_spawnfunc, string, "weapon_shockwave");
-/* ammotype  */ //ATTRIB(Shockwave, ammo_type, Resource, RES_NONE);
-/* impulse   */ ATTRIB(Shockwave, impulse, int, 2);
-/* flags     */ ATTRIB(Shockwave, spawnflags, int, WEP_FLAG_HIDDEN | WEP_TYPE_HITSCAN | WEP_FLAG_CANCLIMB | WEP_TYPE_MELEE_SEC);
-/* rating    */ ATTRIB(Shockwave, bot_pickupbasevalue, float, 3000);
-/* color     */ ATTRIB(Shockwave, wpcolor, vector, '0.5 0.25 0');
-/* modelname */ ATTRIB(Shockwave, mdl, string, "shotgun");
+                ATTRIB(Shockwave, m_canonical_spawnfunc, string, "weapon_shockwave");
+
+                ATTRIB(Shockwave, impulse, int, 2);
+                ATTRIB(Shockwave, spawnflags, int, WEP_FLAG_HIDDEN | WEP_TYPE_HITSCAN | WEP_FLAG_CANCLIMB | WEP_TYPE_MELEE_SEC);
+                ATTRIB(Shockwave, bot_pickupbasevalue, float, 3000);
+                ATTRIB(Shockwave, wpcolor, vector, '0.5 0.25 0');
+                ATTRIB(Shockwave, mdl, string, "shotgun");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Shockwave, m_model, Model, MDL_SHOCKWAVE_ITEM);
+                ATTRIB(Shockwave, m_model, Model, MDL_SHOCKWAVE_ITEM);
 #endif
-/* crosshair */ ATTRIB(Shockwave, w_crosshair, string, "gfx/crosshairshotgun");
-/* crosshair */ ATTRIB(Shockwave, w_crosshair_size, float, 0.7);
-/* wepimg    */ ATTRIB(Shockwave, model2, string, "weaponshockwave");
-/* refname   */ ATTRIB(Shockwave, netname, string, "shockwave");
-/* wepname   */ ATTRIB(Shockwave, m_name, string, _("Shockwave"));
+                ATTRIB(Shockwave, w_crosshair, string, "gfx/crosshairshotgun");
+                ATTRIB(Shockwave, w_crosshair_size, float, 0.7);
+                ATTRIB(Shockwave, model2, string, "weaponshockwave");
+                ATTRIB(Shockwave, netname, string, "shockwave");
+                ATTRIB(Shockwave, m_name, string, _("Shockwave"));
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

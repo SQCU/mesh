@@ -4,7 +4,6 @@
 #include <common/gamemodes/_mod.qh>
 #include <common/mutators/mutator/powerups/_mod.qh>
 
-// TODO: make this its own mutator (somehow)!
 float autocvar_g_rm;
 float autocvar_g_rm_damage;
 float autocvar_g_rm_edgedamage;

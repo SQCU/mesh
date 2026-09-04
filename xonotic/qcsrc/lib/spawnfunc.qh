@@ -1,16 +1,13 @@
 #pragma once
 
-// remove this ifdef when client or menu will actually make use of this stuff
 #ifdef SVQC
 
-/** If this global exists, only functions with spawnfunc_ name prefix qualify as spawn functions */
 noref bool require_spawnfunc_prefix;
 .bool spawnfunc_checked;
-/** Not for production use, provides access to a dump of the entity's fields when it is parsed from map data */
+
 noref string __fullspawndata;
 .string fullspawndata;
 
-// Optional type checking; increases compile time too much to be enabled by default
 #if 0
 	bool entityfieldassignablefromeditor(int i)
 	{
@@ -47,7 +44,6 @@ noref string __fullspawndata;
         X(string, target3, string_null) \
         X(string, target4, string_null) \
         X(string, targetname, string_null) \
-        /**/
 
     #define X(T, fld, def) .T fld, __spawnfunc_##fld;
     SPAWNFUNC_INTERNAL_FIELDS(X)
@@ -87,8 +83,6 @@ noref string __fullspawndata;
         e.__spawnfunc_constructor(e);
     }
 
-// this function simply avoids expanding IL_NEW during compilation
-// for each spawning entity
 void g_spawn_queue_spawn() { g_spawn_queue = IL_NEW(); }
 
 noref bool __spawnfunc_first;
@@ -104,14 +98,14 @@ noref bool __spawnfunc_first;
 		bool dospawn = true; \
 		if (__spawnfunc_expecting > 1) { __spawnfunc_expecting = 0; } \
 		else if (__spawnfunc_expecting) { \
-			/* engine call */ \
+			                  \
 			if (!g_spawn_queue) g_spawn_queue_spawn(); \
 			__spawnfunc_expecting = 0; \
 			this = __spawnfunc_expect; \
 			__spawnfunc_expect = NULL; \
 			dospawn = false; \
 		} else { \
-			/* userland call */ \
+			                    \
 			assert(this); \
 		} \
 		if (!this.sourceLoc) { \
@@ -120,19 +114,19 @@ noref bool __spawnfunc_first;
 		this.classname = #id; \
 		if (!this.spawnfunc_checked) { \
 			if (__fullspawndata) { \
-				/* not supported in old DP */ \
-				/* must be read inside the real spawnfunc */ \
+				                              \
+				                                             \
 				this.fullspawndata = __fullspawndata; \
 			} \
 			this.spawnfunc_checked = true; \
 			if (this) { \
-				/* not worldspawn, delay spawn */ \
-				/* clear some dangerous fields (TODO: properly support these in the map!) */ \
+				                                  \
+				                                                                             \
 				this.think = func_null; \
 				this.nextthink = 0; \
 				__spawnfunc_defer(this, __spawnfunc_##id); \
 			} else { \
-				/* world might not be "worldspawn" */ \
+				                                      \
 				this.__spawnfunc_constructor = __spawnfunc_##id; \
 			} \
 		} \

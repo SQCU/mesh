@@ -38,7 +38,6 @@ string XonoticHUDSkinList_hudskinAuthor(entity me, float i)
 	return bufstr_get(me.listHUDSkin, i * HUDSKINPARM_COUNT + HUDSKINPARM_AUTHOR);
 }
 
-// subdir can be a regular expression
 void getHUDSkinFiles(entity me, int sortbuf, string subdir)
 {
 	string s;
@@ -72,7 +71,7 @@ void getHUDSkinFiles(entity me, int sortbuf, string subdir)
 			{
 				subdir = substring(s, 0, subdir_ofs);
 				string filename = substring(s, subdir_ofs + 1, -1);
-				// invert path and filename position so we can sort sortbuf by filename
+
 				bufstr_add(sortbuf, strcat(filename, "/", subdir), true);
 			}
 		}
@@ -91,14 +90,14 @@ void getAllHUDSkins(entity me, int sortbuf)
 		string filename = entry;
 		if(ofs >= 0)
 		{
-			s = substring(entry, ofs + 1, -1); // skip initial "/"
+			s = substring(entry, ofs + 1, -1);
 			s = strcat(s, "/");
 			bufstr_set(me.listHUDSkin, i * HUDSKINPARM_COUNT + HUDSKINPARM_PATH, s);
 			filename = strcat(s, substring(entry, 0, ofs));
 		}
 		else
 			ofs = strlen(entry);
-		s = substring(entry, 4, ofs - 4 - 4); // remove "hud_" prefix and ".cfg" suffix
+		s = substring(entry, 4, ofs - 4 - 4);
 		bufstr_set(me.listHUDSkin, i * HUDSKINPARM_COUNT + HUDSKINPARM_NAME, s);
 
 		int fh = fopen(filename, FILE_READ);
@@ -185,7 +184,7 @@ void XonoticHUDSkinList_showNotify(entity me)
 void HUDSkinList_Refresh_Click(entity btn, entity me)
 {
 	me.getHUDSkins(me);
-	me.setSelected(me, 0); //always select the first element after a list update
+	me.setSelected(me, 0);
 }
 
 void HUDSkinList_SavedName_Change(entity box, entity me)

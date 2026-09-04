@@ -1,6 +1,5 @@
 #pragma once
 
-
 const int BREAKABLE_INDICATE_DAMAGE = BIT(1);
 const int BREAKABLE_NODAMAGE = BIT(2);
 

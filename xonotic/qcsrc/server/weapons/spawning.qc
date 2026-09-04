@@ -8,7 +8,7 @@
 #include <server/weapons/weaponsystem.qh>
 #include <server/world.qh>
 
-.bool m_isreplaced; ///< Holds whether the weapon has been replaced.
+.bool m_isreplaced;
 
 string W_Apply_Weaponreplace(string in)
 {
@@ -35,7 +35,7 @@ void weapon_defaultspawnfunc(entity this, Weapon wpn)
 	{
 		if (wpn.spawnflags & WEP_FLAG_MUTATORBLOCKED)
 		{
-			//LOG_WARNF("Attempted to spawn a mutator-blocked weapon rejected: prvm_edict server %i", this);
+
 			startitem_failed = true;
 			return;
 		}
@@ -66,7 +66,7 @@ void weapon_defaultspawnfunc(entity this, Weapon wpn)
 				}
 			}
 		}
-		if (t >= 1) // always the case!
+		if (t >= 1)
 		{
 			s = argv(0);
 			wpn = Weapon_from_name(s);
@@ -107,14 +107,12 @@ void weapon_defaultspawnfunc(entity this, Weapon wpn)
 		if (!this.superweapons_finished)
 			this.superweapons_finished = autocvar_g_balance_superweapons_time;
 
-	// if we don't already have ammo, give us some ammo
-	// TODO: registry handles
 	if ((wpn.ammo_type != RES_NONE) && !GetResource(this, wpn.ammo_type))
 	{
 		int ammo = 0;
 		if (q3compat && this.count > 0)
 			ammo = this.count * GetAmmoConsumptionQ3(wpn.netname);
-			// WEAPONTODO: magazines of MG, rifle and OK weapons are unaccounted for
+
 		else
 		{
 			switch (wpn.ammo_type)
@@ -131,7 +129,7 @@ void weapon_defaultspawnfunc(entity this, Weapon wpn)
 		SetResource(this, wpn.ammo_type, ammo);
 	}
 
-	#if 0 // WEAPONTODO
+	#if 0
 	if (wpn.items)
 	{
 		for (int i = 0, j = 1; i < 24; ++i, j <<= 1)
@@ -146,7 +144,6 @@ void weapon_defaultspawnfunc(entity this, Weapon wpn)
 	}
 	#endif
 
-	// pickup anyway
 	if (g_pickup_weapons_anyway)
 		this.pickup_anyway = true;
 
@@ -159,8 +156,8 @@ void weapon_defaultspawnfunc(entity this, Weapon wpn)
 	this.itemdef = def;
 	_StartItem(this, this.itemdef, this.respawntime, this.respawntimejitter);
 
-	#if 0 // WEAPONTODO
-	if (this.modelindex) { // don't precache if this was removed
+	#if 0
+	if (this.modelindex) {
 		wpn.wr_init(wpn);
 	}
 	#endif

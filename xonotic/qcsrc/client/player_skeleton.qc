@@ -53,7 +53,7 @@ void skeleton_loadinfo(entity e)
 	}
 	else
 		LOG_TRACE("No model parameters for ", e.model);
-	//dprint(e.model, " uses ", ftos(e.bone_upperbody), " ", ftos(e.fixbone), "\n");
+
 	get_model_parameters(string_null, 0);
 	e.skeleton_info_modelindex = e.modelindex;
 	e.skeleton_info_skin = e.skin;
@@ -95,11 +95,6 @@ void skel_set_boneabs(float s, int bone, vector absorg)
 	fixedmakevectors(relang);
 	skel_set_bone(s, bone, relorg);
 
-	/*
-	vector neworg = skel_get_boneabs(s, bone);
-	printf("ANG: want: %v, got: %v\n", absang, fixedvectoangles2(v_forward, v_up));
-	printf("ORG: want: %v, got: %v\n", absorg, neworg);
-	*/
 }
 
 void free_skeleton_from_frames(entity e)
@@ -131,13 +126,13 @@ void skeleton_from_frames(entity e, bool is_dead)
 	vector fixbone_oldangles = '0 0 0';
 	if(e.fixbone)
 	{
-		// make all bones BONETYPE_UPPER
+
 		e.lerpfrac = 0;
 		e.lerpfrac3 = savelerpfrac3 * 2;
 		e.lerpfrac4 = 0;
-		// build skeleton
+
 		skel_build(s, e, m, 0, 1, n);
-		// get hip bone
+
 		skel_get_boneabs(s, e.bone_upperbody);
 		fixbone_oldangles = fixedvectoangles2(v_forward, v_up);
 	}
@@ -150,20 +145,19 @@ void skeleton_from_frames(entity e, bool is_dead)
 			;
 		if(bonetype == BONETYPE_UPPER)
 		{
-			// only show frames 1+3 (upper body)
+
 			e.lerpfrac = 0;
 			e.lerpfrac3 = savelerpfrac3 * 2;
 			e.lerpfrac4 = 0;
 		}
 		else
 		{
-			// only show frames 2+4 (lower body)
+
 			e.lerpfrac = savelerpfrac * 2;
 			e.lerpfrac3 = 0;
 			e.lerpfrac4 = savelerpfrac4 * 2;
 		}
-		//printf("Run: bone %d to %d, type %d\n", firstbone + 1, bone, bonetype);
-		//printf("frame %d %d %d %d lerpfrac * %d %d %d\n", e.frame, e.frame2, e.frame3, e.frame4, e.lerpfrac, e.lerpfrac3, e.lerpfrac4);
+
 		skel_build(s, e, m, 0, firstbone + 1, bone);
 	}
 	e.lerpfrac = savelerpfrac;
@@ -172,7 +166,7 @@ void skeleton_from_frames(entity e, bool is_dead)
 
 	if(e.fixbone)
 	{
-		// FIX IT
+
 		vector org = skel_get_boneabs(s, e.bone_upperbody);
 		fixedmakevectors(fixbone_oldangles);
 		skel_set_boneabs(s, e.bone_upperbody, org);

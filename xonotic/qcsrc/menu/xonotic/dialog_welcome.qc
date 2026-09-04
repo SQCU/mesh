@@ -28,8 +28,6 @@ float XonoticWelcomeDialog_keyDown(entity me, float key, float ascii, float shif
 	}
 }
 
-// the same implentation in mousePress apparently works, but for some reason if you try to open
-// the dialog again it doesn't show up and requires opening it a seconds time to show up
 bool XonoticWelcomeDialog_mouseRelease(entity me, vector pos)
 {
 	if (pos.x >= 0 && pos.y >= 0 && pos.x < 1 && pos.y < 1)
@@ -81,7 +79,7 @@ void XonoticWelcomeDialog_readInputArgs(entity me, int argsbuf)
 		}
 		++i;
 	}
-	//me.serverinfo_name_ent.setText(me.serverinfo_name_ent, me.serverinfo_name);
+
 	me.serverinfo_MOTD_ent.setText(me.serverinfo_MOTD_ent, me.serverinfo_MOTD);
 	me.frame.setText(me.frame, me.serverinfo_name);
 }
@@ -95,8 +93,7 @@ void XonoticWelcomeDialog_draw(entity me)
 
 	if(me.serverinfo_MOTD == "" && gamestatus & (GAME_CONNECTED | GAME_ISSERVER))
 	{
-		// if serverinfo_MOTD is empty while connected it means we are connected to an old server
-		// in this case show the csqc welcome message and instantly close the dialog
+
 		localcmd("\n+show_info0; defer 2 -show_info0\n");
 		me.close(me);
 	}
@@ -118,7 +115,7 @@ void XonoticWelcomeDialog_fill(entity me)
 	registercvar("_menu_welcome_dialog_available", "0", 0);
 	cvar_set("_menu_welcome_dialog_available", "1");
 
-	me.frame.allowColors = true; // allow color codes in the title
+	me.frame.allowColors = true;
 
 	entity e;
 

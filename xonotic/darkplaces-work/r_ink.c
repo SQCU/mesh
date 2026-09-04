@@ -19,8 +19,6 @@ static mempool_t *r_ink_mempool;
 static rtexturepool_t *r_ink_texturepool;
 static char r_ink_worldname[MAX_QPATH];
 
-// ---------------------------------------------------------------------------
-
 static void R_Ink_FreeVolume(void)
 {
 	if (r_ink_state.texture)
@@ -50,8 +48,6 @@ static void R_Ink_Clear_f(void)
 	Con_Printf("ink cleared\n");
 }
 
-/// Debug lever: drop one glob at the current view origin.
-///   r_ink_splat <radius> [r g b] [amount]
 static void R_Ink_Splat_f(void)
 {
 	vec3_t color;
@@ -69,8 +65,6 @@ static void R_Ink_Splat_f(void)
 	R_Ink_Splat(r_refdef.view.origin, radius, color, amount);
 }
 
-/// Debug lever: flood the whole volume, so the material response can be inspected
-/// without waiting for an artifact to traverse the level.
 static void R_Ink_Fill_f(void)
 {
 	int i;
@@ -115,9 +109,6 @@ static void R_Ink_Stats_f(void)
 		r_ink_state.texelswritten, r_ink_state.texelsuploaded);
 }
 
-// ---------------------------------------------------------------------------
-
-/// Build (or rebuild) the volume to cover the current world model.
 static void R_Ink_UpdateVolume(void)
 {
 	int i, res[3];
@@ -133,7 +124,6 @@ static void R_Ink_UpdateVolume(void)
 		return;
 	}
 
-	// keep the existing volume if it is already the right one
 	if (r_ink_state.enabled && !strcmp(r_ink_worldname, world->name))
 		return;
 
@@ -141,7 +131,7 @@ static void R_Ink_UpdateVolume(void)
 
 	VectorCopy(world->normalmins, mins);
 	VectorCopy(world->normalmaxs, maxs);
-	// a little slack so surfaces exactly on the bounds are not clamped
+
 	for (i = 0; i < 3; i++)
 	{
 		mins[i] -= 32.0f;
@@ -170,7 +160,6 @@ static void R_Ink_UpdateVolume(void)
 		r_ink_state.ispacing[i] = res[i] / r_ink_state.size[i];
 	}
 
-	// world space -> [0,1]^3, same shape as the bouncegrid matrix
 	memset(m, 0, sizeof(m));
 	m[0]  = 1.0f / r_ink_state.size[0];
 	m[3]  = -r_ink_state.mins[0] * m[0];
@@ -194,8 +183,6 @@ static void R_Ink_UpdateVolume(void)
 	Con_DPrintf("ink volume %ix%ix%i (%.1f KB) at %.1f units/voxel for %s\n",
 		res[0], res[1], res[2], r_ink_state.numtexels * 4 / 1024.0f, r_ink_state.spacing[0], world->name);
 }
-
-// ---------------------------------------------------------------------------
 
 void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float amount)
 {
@@ -246,16 +233,15 @@ void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float am
 				dx = dx * dx + dy;
 				if (dx > r2)
 					continue;
-				// smooth radial falloff, squared so the core stays solid
+
 				w = 1.0f - dx * ir2;
 				w = w * w * amount;
 				if (w <= (1.0f / 512.0f))
 					continue;
-				// source-over with premultiplied destination: a later team's paint
-				// covers an earlier one, and repeated passes saturate toward opaque
+
 				px = r_ink_state.pixels + (z * stridez + y * stridey + x) * 4;
 				oa = px[3] * (1.0f / 255.0f);
-				// BGRA in memory; every term here is 0..1 and is scaled to bytes once
+
 				sa = w;
 				px[0] = (unsigned char)bound(0, (int)((cf[2] * sa + px[0] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
 				px[1] = (unsigned char)bound(0, (int)((cf[1] * sa + px[1] * (1.0f / 255.0f) * (1.0f - sa)) * 255.0f + 0.5f), 255);
@@ -266,7 +252,6 @@ void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float am
 		}
 	}
 
-	// grow the dirty box
 	if (!r_ink_state.dirty)
 	{
 		for (i = 0; i < 3; i++)
@@ -287,16 +272,12 @@ void R_Ink_Splat(const vec3_t origin, float radius, const vec3_t color, float am
 	r_ink_state.splatstotal++;
 }
 
-// ---------------------------------------------------------------------------
-
 void R_Ink_GlobalTint(vec3_t out_color, float *out_coverage)
 {
 	VectorCopy(r_ink_state.globaltint, out_color);
 	*out_coverage = r_ink_state.globalcoverage;
 }
 
-/// Sampling every voxel every frame would be pointless work, so this walks a
-/// strided subset (about 4096 voxels), which is far more than a sky tint needs.
 static void R_Ink_RecomputeGlobalTint(void)
 {
 	int i, step, n = 0;
@@ -318,14 +299,12 @@ static void R_Ink_RecomputeGlobalTint(void)
 	}
 	if (n < 1 || aacc <= 0.0f)
 		return;
-	// premultiplied, so dividing the colour sum by the alpha sum gives the mean tint
+
 	r_ink_state.globaltint[0] = acc[0] / aacc;
 	r_ink_state.globaltint[1] = acc[1] / aacc;
 	r_ink_state.globaltint[2] = acc[2] / aacc;
 	r_ink_state.globalcoverage = aacc / n;
 }
-
-// ---------------------------------------------------------------------------
 
 void R_Ink_Frame(void)
 {
@@ -355,7 +334,6 @@ void R_Ink_Frame(void)
 		return;
 	}
 
-	// pack the dirty box contiguously; the partial-upload path takes a tight block
 	need = w * h * d * 4;
 	if (need > r_ink_state.scratchsize)
 	{
@@ -375,8 +353,6 @@ void R_Ink_Frame(void)
 	r_ink_state.texelsuploaded += w * h * d;
 	r_ink_state.dirty = false;
 }
-
-// ---------------------------------------------------------------------------
 
 static void R_Ink_Start(void)
 {
@@ -398,8 +374,7 @@ static void R_Ink_Stop(void)
 
 static void R_Ink_Newmap(void)
 {
-	// the volume itself is rebuilt lazily by R_Ink_UpdateVolume when the world
-	// model name changes; nothing to do here beyond dropping the old one
+
 	if (r_ink_state.texture)
 		R_Ink_FreeVolume();
 }

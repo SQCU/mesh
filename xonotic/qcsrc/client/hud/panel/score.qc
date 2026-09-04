@@ -5,11 +5,9 @@
 #include <common/ent_cs.qh>
 #include <common/scores.qh>
 
-// Score (#7)
-
 void HUD_Score_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_score_rankings");
 }
 
@@ -37,7 +35,7 @@ void HUD_Score_Rankings(vector pos, vector mySize, entity me)
 		float players_per_team = 0;
 		if (team_count)
 		{
-			// show team scores in the first line
+
 			float score_size = mySize.x / team_count;
 			players_per_team = max(2, ceil((entries - 1) / team_count));
 			for(i=0; i<team_count; ++i) {
@@ -51,9 +49,7 @@ void HUD_Score_Rankings(vector pos, vector mySize, entity me)
 		score = 10 + SCOREPANEL_MAX_ENTRIES * 3;
 		for (i=first_pl; i<entries; ++i)
 		{
-			//simulate my score is lower than all displayed players,
-			//so that I don't appear at all showing pure rankings.
-			//This is to better show the difference between the 2 ranking views
+
 			if (i == entries-1 && autocvar_hud_panel_score_rankings == 1)
 			{
 				rgb = '1 1 0';
@@ -80,7 +76,7 @@ void HUD_Score_Rankings(vector pos, vector mySize, entity me)
 	Scoreboard_UpdatePlayerTeams();
 	if (team_count)
 	{
-		// show team scores in the first line
+
 		float score_size = mySize.x / team_count;
 		for(tm = teams.sort_next; tm; tm = tm.sort_next) {
 			if(tm.team == NUM_SPECTATOR)
@@ -113,16 +109,16 @@ void HUD_Score_Rankings(vector pos, vector mySize, entity me)
 					break;
 
 			if (pl)
-				rgb = '1 1 0'; //not last but not among the leading players: yellow
+				rgb = '1 1 0';
 			else
-				rgb = '1 0 0'; //last: red
+				rgb = '1 0 0';
 			pl = me;
 		}
 
 		if (pl == me)
 		{
 			if (i == first_pl)
-				rgb = '0 1 0'; //first: green
+				rgb = '0 1 0';
 			me_printed = true;
 			drawfill(pos, eX * mySize.x + eY * fontsize.y, rgb, highlight_alpha * panel_fg_alpha, DRAWFLAG_NORMAL);
 		}
@@ -168,7 +164,7 @@ void HUD_Score()
 
 	me = playerslots[current_player];
 
-	if((scores_flags(ps_primary) & SFL_TIME) && !teamplay) { // race/cts record display on HUD
+	if((scores_flags(ps_primary) & SFL_TIME) && !teamplay) {
 		string timer, distrtimer;
 
 		pl = players.sort_next;
@@ -183,7 +179,7 @@ void HUD_Score()
 
 		draw_beginBoldFont();
 		if (pl && ((!(scores_flags(ps_primary) & SFL_ZERO_IS_WORST)) || score)) {
-			// distribution display
+
 			distribution = me.(scores(ps_primary)) - pl.(scores(ps_primary));
 
 			distrtimer = ftos_decimals(fabs(distribution/(10 ** TIME_DECIMALS)), TIME_DECIMALS);
@@ -198,18 +194,18 @@ void HUD_Score()
 			}
 			drawstring_aspect(pos + eX * 0.75 * mySize.x, strcat(sign, distrtimer), vec2(0.25 * mySize.x, (1/3) * mySize.y), distribution_color, panel_fg_alpha, DRAWFLAG_NORMAL);
 		}
-		// race record display
+
 		if (distribution <= 0)
 			HUD_Panel_DrawHighlight(pos, vec2(0.75 * mySize.x, mySize.y), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 		drawstring_aspect(pos, timer, vec2(0.75 * mySize.x, mySize.y), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 		draw_endBoldFont();
-	} else if (!teamplay) { // non-teamgames
+	} else if (!teamplay) {
 		if ((spectatee_status == -1 && !autocvar__hud_configure) || autocvar_hud_panel_score_rankings)
 		{
 			HUD_Score_Rankings(pos, mySize, me);
 			return;
 		}
-		// me vector := [team/connected frags id]
+
 		pl = players.sort_next;
 		if(pl == me)
 			pl = pl.sort_next;
@@ -246,10 +242,10 @@ void HUD_Score()
 		drawstring_aspect(pos, ftos(score), eX * 0.75 * mySize.x + eY * mySize.y, distribution_color, panel_fg_alpha, DRAWFLAG_NORMAL);
 		drawstring_aspect(pos + eX * 0.75 * mySize.x, distribution_str, vec2(0.25 * mySize.x, (1/3) * mySize.y), distribution_color, panel_fg_alpha, DRAWFLAG_NORMAL);
 		draw_endBoldFont();
-	} else { // teamgames
+	} else {
 		float row, column, rows = 0, columns = 0;
 		vector offset = '0 0 0';
-		vector score_pos, score_size; //for scores other than myteam
+		vector score_pos, score_size;
 		if(autocvar_hud_panel_score_rankings)
 		{
 			HUD_Score_Rankings(pos, mySize, me);

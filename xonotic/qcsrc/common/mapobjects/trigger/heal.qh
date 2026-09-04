@@ -1,4 +1,3 @@
 #pragma once
 
-
 const int HEAL_SOUND_ALWAYS = BIT(2);

@@ -27,8 +27,9 @@ void DrawCAItem(vector myPos, vector mySize, float aspect_ratio, int layout, int
 		case 0: stat = STAT(REDALIVE); pic = "player_red"; color = '1 0 0'; break;
 		case 1: stat = STAT(BLUEALIVE); pic = "player_blue"; color = '0 0 1'; break;
 		case 2: stat = STAT(YELLOWALIVE); pic = "player_yellow"; color = '1 1 0'; break;
-		default:
 		case 3: stat = STAT(PINKALIVE); pic = "player_pink"; color = '1 0 1'; break;
+		default:
+		case 4: stat = STAT(GREENALIVE); pic = "player_green"; color = '0 1 0'; break;
 	}
 
 	if(mySize.x/mySize.y > aspect_ratio)
@@ -81,10 +82,9 @@ void HUD_Mod_CA_Draw(vector myPos, vector mySize, int layout)
 	}
 }
 
-// Clan Arena and Freeze Tag HUD modicons
 void HUD_Mod_CA(vector myPos, vector mySize)
 {
-	mod_active = 1; // required in each mod function that always shows something
+	mod_active = 1;
 
 	HUD_Mod_CA_Draw(myPos, mySize, autocvar_hud_panel_modicons_ca_layout);
 }

@@ -9,7 +9,7 @@ entity makeXonoticListBox()
 }
 void XonoticListBox_configureXonoticListBox(entity me)
 {
-	me.configureListBox(me, me.scrollbarWidth, 1); // item height gets set up later
+	me.configureListBox(me, me.scrollbarWidth, 1);
 }
 void XonoticListBox_resizeNotify(entity me, vector relOrigin, vector relSize, vector absOrigin, vector absSize)
 {

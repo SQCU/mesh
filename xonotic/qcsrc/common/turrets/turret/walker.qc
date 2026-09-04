@@ -106,7 +106,6 @@ void walker_rocket_think(entity this)
 
     edist = vlen(this.enemy.origin - this.origin);
 
-    // Simulate crude guidance
     if (this.cnt < time)
     {
         if (edist < 1000)
@@ -135,7 +134,6 @@ void walker_rocket_think(entity this)
 
     m_speed = vlen(this.velocity);
 
-    // Enemy dead? just keep on the current heading then.
     if (this.enemy == NULL || IS_DEAD(this.enemy))
         this.enemy = NULL;
 
@@ -209,9 +207,9 @@ void walker_fire_rocket(entity this, vector org)
 
     entity rocket = new(walker_rocket);
     setorigin(rocket, org);
-    rocket.solid			  = SOLID_BBOX; // before setsize so it will be linked to the area grid
+    rocket.solid			  = SOLID_BBOX;
     sound (this, CH_WEAPON_A, SND_HAGAR_FIRE, VOL_BASE, ATTEN_NORM);
-    setsize (rocket, '-3 -3 -3', '3 3 3'); // give it some size so it can be shot
+    setsize (rocket, '-3 -3 -3', '3 3 3');
 
     rocket.owner			  = this;
     rocket.bot_dodge		  = true;
@@ -241,7 +239,7 @@ void walker_fire_rocket(entity this, vector org)
     rocket.max_health		 = time + 9;
     rocket.missile_flags = MIF_SPLASH | MIF_PROXY | MIF_GUIDED_HEAT;
 
-    CSQCProjectile(rocket, false, PROJECTILE_ROCKET, false); // no culling, has fly sound
+    CSQCProjectile(rocket, false, PROJECTILE_ROCKET, false);
 }
 
 .vector enemy_last_loc;
@@ -279,12 +277,12 @@ void walker_move_to(entity this, vector _target, float _dist)
 void walker_move_path(entity this)
 {
 #ifdef WALKER_FANCYPATHING
-    // Are we close enougth to a path node to switch to the next?
+
     if(turret_closetotarget(this, this.pathcurrent.origin, 64))
     {
         if (this.pathcurrent.path_next == NULL)
         {
-            // Path endpoint reached
+
             pathlib_deletepath(this.pathcurrent.owner);
             this.pathcurrent = NULL;
 
@@ -344,7 +342,6 @@ void walker_findtarget(entity this)
 #endif
     }
 
-    // TODO: this doesn't reset target, so tur_defend will be the checkpoint too!
 }
 
 spawnfunc(turret_walker) { if(!turret_initialize(this, TUR_WALKER)) delete(this); }
@@ -552,7 +549,6 @@ METHOD(WalkerTurret, tr_think, void(WalkerTurret thistur, entity it))
         it.velocity_z = vz;
     }
 
-
     if(it.origin != it.oldorigin)
         it.SendFlags |= TNSF_MOVE;
 
@@ -571,7 +567,6 @@ METHOD(WalkerTurret, tr_setup, void(WalkerTurret this, entity it))
 {
     it.ticrate = 0.05;
 
-    // Respawn is called & first spawn to, to set team. need to make sure we do not move the initial spawn.
     if(it.move_movetype == MOVETYPE_WALK)
     {
         if(it.pos1)
@@ -609,7 +604,7 @@ METHOD(WalkerTurret, tr_setup, void(WalkerTurret this, entity it))
         InitializeEntity(it, walker_findtarget, INITPRIO_FINDTARGET);
 }
 
-#endif // SVQC
+#endif
 #ifdef CSQC
 
 #include <common/physics/movelib.qh>
@@ -641,4 +636,4 @@ METHOD(WalkerTurret, tr_setup, void(WalkerTurret this, entity it))
     it.draw			= walker_draw;
 }
 
-#endif // CSQC
+#endif

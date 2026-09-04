@@ -31,4 +31,3 @@ CLASS(XonoticServerInfoDialog, XonoticDialog)
 ENDCLASS(XonoticServerInfoDialog)
 
 void Join_Click(entity btn, entity me);
-

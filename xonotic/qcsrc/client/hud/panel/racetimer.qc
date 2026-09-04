@@ -2,22 +2,19 @@
 
 #include <client/draw.qh>
 
-// Race timer (#8)
-
 void HUD_RaceTimer_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 }
 
-// return the string of the onscreen race timer
 string MakeRaceString(int cp, float mytime, float theirtime, float othertime, float lapdelta, string theirname)
 {
 	TC(int, cp);
 	string cpname, lapstr = "", timestr = "", col = "^7", othercol = "^7", othertimestr = "";
 	if(theirname == "" || !autocvar_cl_race_cptimes_showself)
-		othertime = 0; // don't count personal time
+		othertime = 0;
 
-	if(theirtime == 0) // goal hit
+	if(theirtime == 0)
 	{
 		if(mytime > 0)
 		{
@@ -62,7 +59,7 @@ string MakeRaceString(int cp, float mytime, float theirtime, float othertime, fl
 			col = "^1";
 		}
 	}
-	else if(theirtime > 0) // anticipation
+	else if(theirtime > 0)
 	{
 		if(mytime >= theirtime)
 			timestr = strcat("+", ftos_decimals(mytime - theirtime, TIME_DECIMALS));
@@ -121,7 +118,6 @@ void HUD_RaceTimer ()
 		mySize -= '2 2 0' * panel_bg_padding;
 	}
 
-	// always force 4:1 aspect
 	vector newSize = '0 0 0';
 	if(mySize.x/mySize.y > 4)
 	{
@@ -163,7 +159,7 @@ void HUD_RaceTimer ()
 		a = bound(0, 2 - (time - race_checkpointtime), 1);
 		s = "";
 		forcetime = "";
-		if(a > 0) // just hit a checkpoint?
+		if(a > 0)
 		{
 			if(race_checkpoint != 254)
 			{
@@ -183,7 +179,7 @@ void HUD_RaceTimer ()
 				{
 					a = bound(0, 2 - ((race_laptime + TIME_DECODE(race_nextbesttime)) - (time + TIME_DECODE(race_penaltyaccumulator))), 1);
 					float a2 = ((race_mybesttime) ? bound(0, 2 - ((race_laptime + TIME_DECODE(race_mybesttime)) - (time + TIME_DECODE(race_penaltyaccumulator))), 1) : 0);
-					if(a > 0) // next one?
+					if(a > 0)
 						s = MakeRaceString(race_nextcheckpoint, (time + TIME_DECODE(race_penaltyaccumulator)) - race_laptime, TIME_DECODE(race_nextbesttime), ((a2 > 0) ? TIME_DECODE(race_mybesttime) : 0), 0, race_nextbestname);
 				}
 			}

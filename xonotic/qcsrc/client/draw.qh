@@ -11,11 +11,6 @@ void drawborderlines(float thickness, vector pos, vector dim, vector color, floa
 
 void drawpic_tiled(vector pos, string pic, vector sz, vector area, vector color, float theAlpha, float drawflag);
 
-// The following functions / macros must be called from within
-// the panel HUD / scoreboard code so that pos and size are scaled
-// when the hud_dynamic code is running.
-// Make use of stringwidth_builtin and draw*_builtin everywhere else.
-
 float stringwidth(string text, float handleColors, vector sz);
 
 #define drawpic(position, pic, size, rgb, alpha, flag) \
@@ -39,16 +34,6 @@ float stringwidth(string text, float handleColors, vector sz);
 #define drawsetcliparea(xposition, yposition, w, h) \
 	drawsetcliparea_builtin(HUD_ShiftX(xposition), HUD_ShiftY(yposition), HUD_ScaleX(w), HUD_ScaleY(h))
 
-// Since drawsubpic usually gets called multiple times from within an
-// utility function, instead of scaling pos and size in every call
-// we scale them once for all in the beginning of that utility function.
-// That's why drawsubpic isn't remapped.
-/*
-#define drawsubpic(position, size, pic, srcPosition, srcSize, rgb, alpha, flag) \
-	drawsubpic_builtin(HUD_Shift(position), HUD_Scale(size), pic, HUD_Shift(srcPosition), HUD_Scale(srcSize), rgb, alpha, flag)
-*/
-
-// drawpic wrapper to draw an image as large as possible with preserved aspect ratio into a box
 float _drawpic_imgaspect;
 vector _drawpic_imgsize;
 vector _drawpic_sz;
@@ -74,7 +59,6 @@ string _drawpic_picpath;
 		}\
 	MACRO_END
 
-// draw HUD element with image from gfx/hud/hud_skin/foo.tga if it exists, otherwise gfx/hud/default/foo.tga
 #define drawpic_aspect_skin(pos,pic,sz,color,theAlpha,drawflag)\
 	MACRO_BEGIN \
 		_drawpic_picpath = strcat(hud_skin_path, "/", pic);\
@@ -85,7 +69,6 @@ string _drawpic_picpath;
 		_drawpic_picpath = string_null;\
 	MACRO_END
 
-// draw HUD element with image from gfx/hud/hud_skin/foo.tga if it exists, otherwise gfx/hud/default/foo.tga
 #define drawpic_skin(pos,pic,sz,color,theAlpha,drawflag)\
 	MACRO_BEGIN \
 		_drawpic_picpath = strcat(hud_skin_path, "/", pic);\
@@ -100,21 +83,18 @@ void drawpic_aspect_skin_expanding(vector position, string pic, vector theScale,
 
 void drawpic_aspect_skin_expanding_two(vector position, string pic, vector theScale, vector rgb, float theAlpha, float flag, float fadelerp);
 
-// drawstring wrapper to draw a string as large as possible with preserved aspect ratio into a box
 void drawstring_aspect(vector pos, string text, vector sz, vector color, float theAlpha, float drawflag);
 
-// drawstring wrapper to draw a colorcodedstring as large as possible with preserved aspect ratio into a box
 void drawcolorcodedstring_aspect(vector pos, string text, vector sz, float theAlpha, float drawflag);
 
 void drawstring_expanding(vector position, string text, vector theScale, vector rgb, float theAlpha, float flag, float fadelerp);
 
-// drawstring wrapper to draw a string as large as possible with preserved aspect ratio into a box
 void drawstring_aspect_expanding(vector pos, string text, vector sz, vector color, float theAlpha, float drawflag, float fadelerp);
 
 void drawcolorcodedstring_expanding(vector position, string text, vector theScale, float theAlpha, float flag, float fadelerp);
 
 void drawcolorcodedstring_aspect_expanding(vector pos, string text, vector sz, float theAlpha, float drawflag, float fadelerp);
-// this draws the triangles of a model DIRECTLY. Don't expect high performance, really...
+
 float PolyDrawModelSurface(entity e, float i_s);
 void PolyDrawModel(entity e);
 

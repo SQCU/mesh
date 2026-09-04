@@ -59,7 +59,6 @@ void RegisterSLCategories()
 	SL_ProcessCategoryOverrides(cat_dioverride_string, cat_dioverride);
 }
 
-// Supporting Functions
 entity RetrieveCategoryEnt(int catnum)
 {
 	if((catnum > 0) && (catnum <= category_ent_count))
@@ -137,10 +136,8 @@ int CategoryForEntry(int entry)
 
 	if(modtype != "xonotic") { impure += autocvar_menu_slist_modimpurity; }
 
-	// check if this server is favorited
 	if(gethostcachenumber(SLIST_FIELD_ISFAVORITE, entry)) { return CAT_FAVORITED; }
 
-	// now check if it's recommended
 	if(autocvar_menu_slist_recommendations)
 	{
 		string cname = gethostcachestring(SLIST_FIELD_CNAME, entry);
@@ -157,24 +154,24 @@ int CategoryForEntry(int entry)
 			if(autocvar_menu_slist_recommendations & 2)
 			{
 				if(
-					///// check for minimum free slots
+
 					(freeslots >= autocvar_menu_slist_recommendations_minfreeslots)
 
-					&& // check for purity requirement
+					&&
 					(
 						(autocvar_menu_slist_recommendations_purethreshold < 0)
 						||
 						(impure <= autocvar_menu_slist_recommendations_purethreshold)
 					)
 
-					&& // check for minimum amount of humans
+					&&
 					(
 						gethostcachenumber(SLIST_FIELD_NUMHUMANS, entry)
 						>=
 						autocvar_menu_slist_recommendations_minhumans
 					)
 
-					&& // check for maximum latency
+					&&
 					(
 						gethostcachenumber(SLIST_FIELD_PING, entry)
 						<=
@@ -189,12 +186,11 @@ int CategoryForEntry(int entry)
 		}
 	}
 
-	// if not favorited or recommended, check modname
 	if(modtype != "xonotic")
 	{
 		switch(modtype)
 		{
-			// old servers which don't report their mod name are considered modified now
+
 			case "": { return CAT_MODIFIED; }
 
 			case "xpm": { return CAT_XPM; }
@@ -202,7 +198,6 @@ int CategoryForEntry(int entry)
 			case "instagib": { return CAT_INSTAGIB; }
 			case "overkill": { return CAT_OVERKILL; }
 
-			// "cts" is allowed as compat, xdf is replacement
 			case "cts":
 			case "xdf": { return CAT_DEFRAG; }
 
@@ -210,7 +205,6 @@ int CategoryForEntry(int entry)
 		}
 	}
 
-	// must be normal or impure server
 	return ((impure > autocvar_menu_slist_purethreshold) ? CAT_MODIFIED : CAT_NORMAL);
 }
 
@@ -226,25 +220,24 @@ METHOD(XonoticServerList, toggleFavorite, void(XonoticServerList this, string sr
 		bool match;
 		if (substring(argv(i), 0, 1) != "[" && strlen(argv(i)) == 44 && strstrofs(argv(i), ".", 0) < 0)
 		{
-			// it's a pubkey hash
+
 			match = (p && p == argv(i));
 		}
 		else
 		{
-			// it's an ip
+
 			match = (srv_resolved == netaddress_resolve(argv(i), 26000));
 		}
 		if (!match) continue;
-		// on match: remove
+
 		adding = false;
 		string before = (i > 0) ? substring(s, 0, argv_end_index(i - 1)) : "";
 		string after = (i < n - 1) ? substring(s, argv_start_index(i + 1), -1) : "";
 		s = strcat(before, (before != "" && after != "" ? " " : ""), after);
 		ret = s;
-		// keep searching
-		// TODO: why not break here?
+
 		n = tokenize_console(s);
-		--i; // offset the increment that is about to happen
+		--i;
 	}
 	if (adding)
 	{
@@ -280,27 +273,22 @@ void XonoticServerList_configureXonoticServerList(entity me)
 {
 	me.configureXonoticListBox(me);
 
-	// update field ID's
 	#define SLIST_FIELD(suffix,name) SLIST_FIELD_##suffix = gethostcacheindexforkey(name);
 	SLIST_FIELDS
 	#undef SLIST_FIELD
 
-	// clear list
 	me.nItems = 0;
 }
 void XonoticServerList_setSelected(entity me, int i)
 {
 	me.lockedSelectedItem = false;
-	//int save = me.selectedItem;
+
 	SUPER(XonoticServerList).setSelected(me, i);
-	/*
-	if(me.selectedItem == save)
-		return;
-	*/
+
 	if(me.nItems == 0)
 		return;
 	if(gethostcachevalue(SLIST_HOSTCACHEVIEWCOUNT) != me.nItems)
-		return; // sorry, it would be wrong
+		return;
 
 	strcpy(me.selectedServer, gethostcachestring(SLIST_FIELD_CNAME, me.selectedItem));
 
@@ -310,7 +298,6 @@ void XonoticServerList_setSelected(entity me, int i)
 }
 void XonoticServerList_refreshServerList(entity me, int mode)
 {
-	//print("refresh of type ", ftos(mode), "\n");
 
 	if(mode >= REFRESHSERVERLIST_REFILTER)
 	{
@@ -333,29 +320,23 @@ void XonoticServerList_refreshServerList(entity me, int mode)
 		m = SLIST_MASK_AND - 1;
 		resethostcachemasks();
 
-		// ping: reject negative ping (no idea why this happens in the first place, engine bug)
 		sethostcachemasknumber(++m, SLIST_FIELD_PING, 0, SLIST_TEST_GREATEREQUAL);
 
-		// show full button
 		if(!me.filterShowFull)
 		{
-			sethostcachemasknumber(++m, SLIST_FIELD_FREESLOTS, 1, SLIST_TEST_GREATEREQUAL); // legacy
-			sethostcachemaskstring(++m, SLIST_FIELD_QCSTATUS, ":S0:", SLIST_TEST_NOTCONTAIN); // g_maxplayers support
+			sethostcachemasknumber(++m, SLIST_FIELD_FREESLOTS, 1, SLIST_TEST_GREATEREQUAL);
+			sethostcachemaskstring(++m, SLIST_FIELD_QCSTATUS, ":S0:", SLIST_TEST_NOTCONTAIN);
 		}
 
-		// show empty button
 		if(!me.filterShowEmpty)
 			sethostcachemasknumber(++m, SLIST_FIELD_NUMHUMANS, 1, SLIST_TEST_GREATEREQUAL);
 
-		// show laggy button
 		if(!me.filterShowLaggy && autocvar_menu_slist_maxping > 0)
 			sethostcachemasknumber(++m, SLIST_FIELD_PING, autocvar_menu_slist_maxping, SLIST_TEST_LESSEQUAL);
 
-		// gametype filtering
 		if(typestr != "")
 			sethostcachemaskstring(++m, SLIST_FIELD_QCSTATUS, strcat(typestr, ":"), SLIST_TEST_STARTSWITH);
 
-		// mod filtering
 		if(modstr != "")
 		{
 			if(substring(modstr, 0, 1) == "!")
@@ -364,7 +345,6 @@ void XonoticServerList_refreshServerList(entity me, int mode)
 				sethostcachemaskstring(++m, SLIST_FIELD_MOD, resolvemod(modstr), SLIST_TEST_EQUAL);
 		}
 
-		// server banning
 		int n = tokenizebyseparator(_Nex_ExtResponseSystem_BannedServers, " ");
 		for(int i = 0; i < n; ++i)
 			if(argv(i) != "")
@@ -380,7 +360,7 @@ void XonoticServerList_refreshServerList(entity me, int mode)
 		}
 
 		int sorting_flags = 0;
-		//sorting_flags |= SLSF_FAVORITES;
+
 		sorting_flags |= SLSF_CATEGORIES;
 		if(me.currentSortOrder < 0) { sorting_flags |= SLSF_DESCENDING; }
 		sethostcachesort(me.currentSortField, sorting_flags);
@@ -395,7 +375,7 @@ void XonoticServerList_focusEnter(entity me)
 	SUPER(XonoticServerList).focusEnter(me);
 	if(time < me.nextRefreshTime)
 	{
-		//print("sorry, no refresh yet\n");
+
 		return;
 	}
 	me.nextRefreshTime = time + 10;
@@ -434,7 +414,7 @@ void XonoticServerList_draw(entity me)
 	}
 	else if(me.needsRefresh == 1)
 	{
-		me.needsRefresh = 2; // delay by one frame to make sure "slist" has been executed
+		me.needsRefresh = 2;
 	}
 	else if(me.needsRefresh == 2)
 	{
@@ -454,38 +434,27 @@ void XonoticServerList_draw(entity me)
 
 	me.nItems = gethostcachevalue(SLIST_HOSTCACHEVIEWCOUNT);
 
-	if(autocvar_menu_slist_categories >= 0) // if less than 0, don't even draw a category heading for favorites
+	if(autocvar_menu_slist_categories >= 0)
 	{
 		int itemcount = me.nItems;
 
-		//float visible = floor(me.scrollPos / me.itemHeight);
-		// ^ unfortunately no such optimization can be made-- we must process through the
-		// entire list, otherwise there is no way to know which item is first in its category.
-
-		// binary search method suggested by div
 		float begin = 0;
 		for(int j = 1; j <= category_ent_count; ++j) {
 			float first = begin;
 			float last = (itemcount - 1);
 			if (first > last) {
-				// List is empty.
+
 				break;
 			}
 			float catf = gethostcachenumber(SLIST_FIELD_CATEGORY, first);
 			float catl = gethostcachenumber(SLIST_FIELD_CATEGORY, last);
 			if (catf > j) {
-				// The first one is already > j.
-				// Therefore, category j does not exist.
-				// Higher numbered categories do exist though.
+
 			} else if (catl < j) {
-				// The last one is < j.
-				// Thus this category - and any following -
-				// don't exist.
+
 				break;
 			} else if (catf == j) {
-				// Starts at first. This breaks the loop
-				// invariant in the binary search and thus has
-				// to be handled separately.
+
 				if(gethostcachenumber(SLIST_FIELD_CATEGORY, first) != j)
 					error("Category mismatch I");
 				if(first > 0)
@@ -496,17 +465,10 @@ void XonoticServerList_draw(entity me)
 				++category_draw_count;
 				begin = first + 1;
 			} else {
-				// At this point, catf <= j < catl, thus
-				// catf < catl, thus first < last.
-				// INVARIANTS:
-				// last - first >= 1
-				// catf == gethostcachenumber(SLIST_FIELD_CATEGORY(first)
-				// catl == gethostcachenumber(SLIST_FIELD_CATEGORY(last)
-				// catf < j
-				// catl >= j
+
 				while (last - first > 1) {
 					float middle = floor((first + last) / 2);
-					// By loop condition, middle != first && middle != last.
+
 					float cat = gethostcachenumber(SLIST_FIELD_CATEGORY, middle);
 					if (cat >= j) {
 						last = middle;
@@ -525,10 +487,10 @@ void XonoticServerList_draw(entity me)
 					category_name[category_draw_count] = j;
 					category_item[category_draw_count] = last;
 					++category_draw_count;
-					begin = last + 1; // already scanned through these, skip 'em
+					begin = last + 1;
 				}
 				else
-					begin = last; // already scanned through these, skip 'em
+					begin = last;
 			}
 		}
 		if(autocvar_menu_slist_categories_onlyifmultiple && (category_draw_count == 1))
@@ -562,7 +524,7 @@ void XonoticServerList_draw(entity me)
 		{
 			if(gethostcachestring(SLIST_FIELD_CNAME, i) == me.selectedServer)
 			{
-				// don't follow the selected item with SUPER(XonoticServerList).setSelected(me, i);
+
 				me.selectedItem = i;
 				found = true;
 				break;
@@ -573,7 +535,7 @@ void XonoticServerList_draw(entity me)
 	{
 		if(me.nItems > 0)
 		{
-			// selected server disappeared, select the last server (scrolling to it)
+
 			if(me.selectedItem >= me.nItems)
 				SUPER(XonoticServerList).setSelected(me, me.nItems - 1);
 			strcpy(me.selectedServer, gethostcachestring(SLIST_FIELD_CNAME, me.selectedItem));
@@ -605,11 +567,11 @@ void ServerList_PingSort_Click(entity btn, entity me)
 }
 void ServerList_NameSort_Click(entity btn, entity me)
 {
-	me.setSortOrder(me, SLIST_FIELD_NAME, -1); // why?
+	me.setSortOrder(me, SLIST_FIELD_NAME, -1);
 }
 void ServerList_MapSort_Click(entity btn, entity me)
 {
-	me.setSortOrder(me, SLIST_FIELD_MAP, -1); // why?
+	me.setSortOrder(me, SLIST_FIELD_MAP, -1);
 }
 void ServerList_PlayerSort_Click(entity btn, entity me)
 {
@@ -622,7 +584,7 @@ void ServerList_TypeSort_Click(entity btn, entity me)
 	if(m >= 0)
 	{
 		s = substring(s, 0, m);
-		while(substring(s, m+1, 1) == " ") // skip spaces
+		while(substring(s, m+1, 1) == " ")
 			++m;
 	}
 	else
@@ -631,16 +593,14 @@ void ServerList_TypeSort_Click(entity btn, entity me)
 	Gametype first = NULL; FOREACH(Gametypes, !first, first = it; break);
 	bool flag = false;
 	FOREACH(Gametypes, s == MapInfo_Type_ToString(it), {
-		// the type was found
-		// choose the next one
+
 		flag = true;
 		s = MapInfo_Type_ToString(REGISTRY_GET(Gametypes, it.m_id + 1));
 		if (s == "") s = MapInfo_Type_ToString(first);
 		break;
 	});
 	if (!flag) {
-		// no type was found
-		// choose the first one
+
 		s = MapInfo_Type_ToString(first);
 	}
 
@@ -650,7 +610,7 @@ void ServerList_TypeSort_Click(entity btn, entity me)
 	me.controlledTextbox.setText(me.controlledTextbox, s);
 	me.controlledTextbox.keyDown(me.controlledTextbox, K_END, 0, 0);
 	me.controlledTextbox.keyUp(me.controlledTextbox, K_END, 0, 0);
-	//ServerList_Filter_Change(me.controlledTextbox, me);
+
 }
 void ServerList_Filter_Change(entity box, entity me)
 {
@@ -744,7 +704,7 @@ void XonoticServerList_resizeNotify(entity me, vector relOrigin, vector relSize,
 	me.columnTypeSize = me.realFontSize.x * 4;
 	me.columnPlayersSize = me.realFontSize.x * 5;
 	me.columnNameSize = 1 - me.columnPlayersSize - me.columnMapSize - me.columnPingSize - me.columnIconsSize - me.columnTypeSize - 4 * me.realFontSize.x;
-	// no me.realFontSize.x separation between icons and ping columns because in practice they are already separated
+
 	me.columnPingOrigin = me.columnIconsOrigin + me.columnIconsSize;
 	me.columnNameOrigin = me.columnPingOrigin + me.columnPingSize + me.realFontSize.x;
 	me.columnMapOrigin = me.columnNameOrigin + me.columnNameSize + me.realFontSize.x;
@@ -761,7 +721,7 @@ void XonoticServerList_resizeNotify(entity me, vector relOrigin, vector relSize,
 	if(f >= 0)
 	{
 		me.currentSortField = -1;
-		me.setSortOrder(me, f, me.currentSortOrder); // force resetting the sort order
+		me.setSortOrder(me, f, me.currentSortOrder);
 	}
 }
 void ServerList_Connect_Click(entity btn, entity me)
@@ -803,7 +763,7 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 
 	int c;
 	for (c = 0; c < category_draw_count; ++c) {
-		// Matches exactly the headings with increased height.
+
 		if (i == category_item[c])
 			break;
 	}
@@ -836,7 +796,6 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 		}
 	}
 
-	// Now categories are done. Set the Y range in stone.
 	oldscale = draw_scale;
 	oldshift = draw_shift;
 
@@ -886,15 +845,6 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 	string original_modname = modname;
 	modname = strtolower(modname);
 
-	/*
-	SLIST_FIELD_MOD = gethostcacheindexforkey("mod");
-	s = gethostcachestring(SLIST_FIELD_MOD, i);
-	if(s != "data")
-		if(modname == "xonotic")
-			modname = s;
-	*/
-
-	// list the mods here on which the pure server check actually works
 	if(modname != "xonotic")
 	if(modname != "instagib" || modname != "minstagib")
 	if(modname != "cts")
@@ -906,7 +856,7 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 	if(gethostcachenumber(SLIST_FIELD_FREESLOTS, i) <= 0)
 		theAlpha = SKINALPHA_SERVERLIST_FULL;
 	else if(freeslots == 0)
-		theAlpha = SKINALPHA_SERVERLIST_FULL; // g_maxplayers support
+		theAlpha = SKINALPHA_SERVERLIST_FULL;
 	else if (!gethostcachenumber(SLIST_FIELD_NUMHUMANS, i))
 		theAlpha = SKINALPHA_SERVERLIST_EMPTY;
 	else
@@ -973,17 +923,7 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 		crypto = 5;
 	else if(crypto >= 3)
 		crypto -= 2;
-	// possible status:
-	// 0: crypto off
-	// 1: AES possible
-	// 2: AES recommended but not available
-	// 3: AES possible and will be used
-	// 4: AES recommended and will be used
-	// 5: AES required
 
-	// --------------
-	//  RENDER ICONS
-	// --------------
 	vector iconSize = '0 0 0';
 	iconSize_y = me.realFontSize.y * me.iconsSizeFactor / me.serversHeight;
 	iconSize_x = me.realFontSize.x * me.iconsSizeFactor;
@@ -995,7 +935,6 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 		iconPos_x = (me.columnIconsSize - 3 * iconSize.x) * 0.5;
 	iconPos_y = (1 - iconSize.y) * 0.5;
 
-	// IP
 	if(me.seenIPv4 && me.seenIPv6)
 	{
 		if(isv6)
@@ -1006,17 +945,14 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 		iconPos.x += iconSize.x;
 	}
 
-	// AES
 	if(crypto > 0)
 		draw_Picture(iconPos, strcat("icon_aeslevel", ftos(crypto)), iconSize, '1 1 1', 1);
 
 	iconPos.x += iconSize.x;
 
-	// Mod
 	if(modname == "xonotic")
 	{
-		// Here, pure_available should always be set. If not, consider
-		// it an impurity.
+
 		if(pure_available && pure)
 			draw_Picture(iconPos, "icon_pure1", iconSize, '1 1 1', 1);
 	}
@@ -1026,9 +962,6 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 		if(draw_PictureSize(icon) == '0 0 0')
 			icon = "icon_mod_";
 
-		// In mods, pure_available not being present indicates
-		// non-support of the feature. Just show the mod icon as is
-		// then.
 		if(pure_available && !pure)
 			draw_Picture(iconPos, icon, iconSize, '1 1 1', SKINALPHA_SERVERLIST_ICON_NONPURE);
 		else
@@ -1037,11 +970,10 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 
 	iconPos.x += iconSize.x;
 
-	// Stats
 	if(sflags >= 0 && (sflags & SERVERFLAG_PLAYERSTATS))
 	{
 		if (sflags & SERVERFLAG_PLAYERSTATS_CUSTOM)
-			draw_Picture(iconPos, "icon_mod_", iconSize, '1 1 1', 1); // TODO: custom stats server icon
+			draw_Picture(iconPos, "icon_mod_", iconSize, '1 1 1', 1);
 		else
 			draw_Picture(iconPos, "icon_stats1", iconSize, '1 1 1', 1);
 	}
@@ -1059,33 +991,24 @@ void XonoticServerList_drawListBoxItem(entity me, int i, vector absSize, bool is
 		t = strcat(t, ((sflags >= 0 && (sflags & SERVERFLAG_PLAYERSTATS)) ? ((sflags & SERVERFLAG_PLAYERSTATS_CUSTOM) ? _("custom stats server") : _("stats enabled")) : _("stats disabled")));
 		setZonedTooltip(me, t, string_null);
 	}
-	// --------------
-	//  RENDER TEXT
-	// --------------
 
-	// Center it in the row.
 	SET_YRANGE(
 		0.5 - 0.5 / me.serversHeight,
 		0.5 + 0.5 / me.serversHeight
 	);
 
-	// ping
 	s = ftos(ping);
 	draw_Text(me.realUpperMargin * eY + (me.columnPingOrigin + me.columnPingSize - draw_TextWidth(s, 0, me.realFontSize)) * eX, s, me.realFontSize, theColor, theAlpha, 0);
 
-	// server name
 	s = draw_TextShortenToWidth(gethostcachestring(SLIST_FIELD_NAME, i), me.columnNameSize, 0, me.realFontSize);
 	draw_Text(me.realUpperMargin * eY + me.columnNameOrigin * eX, s, me.realFontSize, theColor, theAlpha, 0);
 
-	// server map
 	s = draw_TextShortenToWidth(gethostcachestring(SLIST_FIELD_MAP, i), me.columnMapSize, 0, me.realFontSize);
 	draw_Text(me.realUpperMargin * eY + (me.columnMapOrigin + (me.columnMapSize - draw_TextWidth(s, 0, me.realFontSize)) * 0.5) * eX, s, me.realFontSize, theColor, theAlpha, 0);
 
-	// server gametype
 	s = draw_TextShortenToWidth(typestr, me.columnTypeSize, 0, me.realFontSize);
 	draw_Text(me.realUpperMargin * eY + (me.columnTypeOrigin + (me.columnTypeSize - draw_TextWidth(s, 0, me.realFontSize)) * 0.5) * eX, s, me.realFontSize, theColor, theAlpha, 0);
 
-	// server playercount
 	s = strcat(ftos(gethostcachenumber(SLIST_FIELD_NUMHUMANS, i)), "/", ftos(gethostcachenumber(SLIST_FIELD_MAXPLAYERS, i)));
 	draw_Text(me.realUpperMargin * eY + (me.columnPlayersOrigin + (me.columnPlayersSize - draw_TextWidth(s, 0, me.realFontSize)) * 0.5) * eX, s, me.realFontSize, theColor, theAlpha, 0);
 }
@@ -1173,7 +1096,7 @@ int XonoticServerList_getItemAtPos(entity me, float pos)
 		if (pos >= itempos)
 			return itemidx;
 	}
-	// No category matches? Note that category 0 is... 0. Therefore no headings exist at all.
+
 	return floor(pos / me.serversHeight);
 }
 float XonoticServerList_getItemStart(entity me, int item)
@@ -1186,13 +1109,13 @@ float XonoticServerList_getItemStart(entity me, int item)
 		if (item >= itemidx)
 			return itempos * me.itemHeight;
 	}
-	// No category matches? Note that category 0 is... 0. Therefore no headings exist at all.
+
 	return item * me.serversHeight * me.itemHeight;
 }
 float XonoticServerList_getItemHeight(entity me, int item)
 {
 	for (int i = 0; i < category_draw_count; ++i) {
-		// Matches exactly the headings with increased height.
+
 		if (item == category_item[i])
 			return me.itemHeight * (me.categoriesHeight + me.serversHeight);
 	}

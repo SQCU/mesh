@@ -3,10 +3,6 @@
 #include <common/items/item/ammo.qh>
 #include <common/resources/resources.qh>
 
-/// \file
-/// \brief Source file that contains implementation of the resource system.
-/// \copyright GNU GPLv2 or any later version.
-
 float GetResource(entity e, Resource res_type)
 {
 	return e.(GetResourceField(res_type));

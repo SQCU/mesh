@@ -24,7 +24,7 @@ using std::move;
 #        define GMQCC_DEV_VERSION_STRING "development build\n"
 #    else
 #        define GMQCC_DEV_VERSION_STRING
-#    endif /*! GMQCC_GITINGO */
+#    endif
 #else
 #    define GMQCC_DEV_VERSION_STRING
 #endif
@@ -59,7 +59,7 @@ GMQCC_IND_STRING(GMQCC_VERSION_PATCH) \
 #   define GMQCC_RESTRICT    __restrict__
 #else
 #   ifdef _MSC_VER
-        /* conversion from 'int' to 'float', possible loss of data */
+
 #       pragma warning(disable : 4244)
 
         typedef unsigned __int8  uint8_t;
@@ -98,14 +98,14 @@ GMQCC_IND_STRING(GMQCC_VERSION_PATCH) \
 #           define BIG_ENDIAN
 #       elif defined (__LITTLE_ENDIAN__) && !defined (LITTLE_ENDIAN)
 #           define LITTLE_ENDIAN
-#       endif /*! defined (__BIG_ENDIAN__) && !defined(BIG_ENDIAN) */
+#       endif
 #   elif !defined (__MINGW32__)
 #       include <endian.h>
 #       if !defined (__BEOS__)
 #           include <byteswap.h>
-#       endif /*! !definde (__BEOS__) */
-#   endif /*! defined (__FreeBSD__) || defined (__OpenBSD__) */
-#endif /*! defined (__GNUC__) || defined (__GNU_LIBRARY__) */
+#       endif
+#   endif
+#endif
 #if !defined(PLATFORM_BYTE_ORDER)
 #   if defined (LITTLE_ENDIAN) || defined (BIG_ENDIAN)
 #       if defined (LITTLE_ENDIAN) && !defined(BIG_ENDIAN)
@@ -116,7 +116,7 @@ GMQCC_IND_STRING(GMQCC_VERSION_PATCH) \
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_LITTLE
 #       elif defined (BYTE_ORDER) && (BYTE_ORDER == BIG_ENDIAN)
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_BIG
-#       endif /*! defined (LITTLE_ENDIAN) && !defined(BIG_ENDIAN) */
+#       endif
 #   elif defined (_LITTLE_ENDIAN) || defined (_BIG_ENDIAN)
 #       if defined (_LITTLE_ENDIAN) && !defined(_BIG_ENDIAN)
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_LITTLE
@@ -126,7 +126,7 @@ GMQCC_IND_STRING(GMQCC_VERSION_PATCH) \
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_LITTLE
 #       elif defined (_BYTE_ORDER) && (_BYTE_ORDER == _BIG_ENDIAN)
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_BIG
-#       endif /*! defined (_LITTLE_ENDIAN) && !defined(_BIG_ENDIAN) */
+#       endif
 #   elif defined (__LITTLE_ENDIAN__) || defined (__BIG_ENDIAN__)
 #       if defined (__LITTLE_ENDIAN__) && !defined (__BIG_ENDIAN__)
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_LITTLE
@@ -136,9 +136,9 @@ GMQCC_IND_STRING(GMQCC_VERSION_PATCH) \
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_LITTLE
 #       elif defined (__BYTE_ORDER__) && (__BYTE_ORDER__ == __BIG_ENDIAN__)
 #           define PLATFORM_BYTE_ORDER GMQCC_BYTE_ORDER_BIG
-#       endif /*! defined (__LITTLE_ENDIAN__) && !defined (__BIG_ENDIAN__) */
-#   endif /*! defined(LITTLE_ENDIAN) || defined (BIG_ENDIAN) */
-#endif /*! !defined(PLATFORM_BYTE_ORDER) */
+#       endif
+#   endif
+#endif
 #if !defined (PLATFORM_BYTE_ORDER)
 #   if   defined (__alpha__) || defined (__alpha)    || defined (i386)       || \
          defined (__i386__)  || defined (_M_I86)     || defined (_M_IX86)    || \
@@ -162,7 +162,6 @@ GMQCC_IND_STRING(GMQCC_VERSION_PATCH) \
 
 #define GMQCC_ARRAY_COUNT(X) (sizeof(X) / sizeof((X)[0]))
 
-/* stat.c */
 char *stat_mem_strdup(const char *, bool);
 
 #define mem_a(SIZE)              malloc(SIZE)
@@ -206,21 +205,12 @@ const char      *util_ctime    (const time_t *timer);
 bool             util_isatty(FILE *);
 size_t           hash(const char *key);
 
-/*
- * A flexible vector implementation: all vector pointers contain some
- * data about themselfs exactly - sizeof(vector_t) behind the pointer
- * this data is represented in the structure below.  Doing this allows
- * us to use the array [] to access individual elements from the vector
- * opposed to using set/get methods.
- */
 struct vector_t {
     size_t  allocated;
     size_t  used;
 
-    /* can be extended now! whoot */
 };
 
-/* hidden interface */
 void _util_vec_grow(void **a, size_t i, size_t s);
 void _util_vec_delete(void *vec);
 
@@ -230,7 +220,6 @@ void _util_vec_delete(void *vec);
         (void)0                                                   \
 )
 
-/* exposed interface */
 #define vec_meta(A)       ((vector_t*)(((char *)(A)) - sizeof(vector_t)))
 #define vec_free(A)       ((void)((A) ? (_util_vec_delete((void *)(A)), (A) = nullptr) : 0))
 #define vec_push(A,V)     (GMQCC_VEC_WILLGROW((A),1), (A)[vec_meta(A)->used++] = (V))
@@ -261,9 +250,6 @@ void *util_htgeth(hash_table_t *ht, const char *key, size_t hash);
 int util_snprintf(char *str, size_t, const char *fmt, ...);
 int util_getline(char  **, size_t *, FILE *);
 
-/* code.c */
-
-/* Note: if you change the order, fix type_sizeof in ir.c */
 enum qc_type {
     TYPE_VOID     ,
     TYPE_STRING   ,
@@ -279,56 +265,45 @@ enum qc_type {
     TYPE_UNION    ,
     TYPE_ARRAY    ,
 
-    TYPE_NIL      , /* it's its own type / untyped */
-    TYPE_NOEXPR   , /* simply invalid in expressions */
+    TYPE_NIL      ,
+    TYPE_NOEXPR   ,
 
     TYPE_COUNT
 };
 
-/* const/var qualifiers */
 #define CV_NONE   0
 #define CV_CONST  1
 #define CV_VAR   -1
-#define CV_WRONG  0x8000 /* magic number to help parsing */
+#define CV_WRONG  0x8000
 
 extern const char    *type_name        [TYPE_COUNT];
 extern const uint16_t type_store_instr [TYPE_COUNT];
 extern const uint16_t field_store_instr[TYPE_COUNT];
 
-/*
- * could use type_store_instr + INSTR_STOREP_F - INSTR_STORE_F
- * but this breaks when TYPE_INTEGER is added, since with the enhanced
- * instruction set, the old ones are left untouched, thus the _I instructions
- * are at a seperate place.
- */
 extern const uint16_t type_storep_instr[TYPE_COUNT];
 extern const uint16_t type_eq_instr    [TYPE_COUNT];
 extern const uint16_t type_ne_instr    [TYPE_COUNT];
 extern const uint16_t type_not_instr   [TYPE_COUNT];
 
 struct prog_section_t {
-    uint32_t offset;      /* Offset in file of where data begins  */
-    uint32_t length;      /* Length of section (how many of)      */
+    uint32_t offset;
+    uint32_t length;
 };
 
 struct prog_header_t {
-    uint32_t       version;      /* Program version (6)     */
+    uint32_t       version;
     uint16_t       crc16;
     uint16_t       skip;
 
-    prog_section_t statements;   /* prog_section_statement  */
-    prog_section_t defs;         /* prog_section_def        */
-    prog_section_t fields;       /* prog_section_field      */
-    prog_section_t functions;    /* prog_section_function   */
+    prog_section_t statements;
+    prog_section_t defs;
+    prog_section_t fields;
+    prog_section_t functions;
     prog_section_t strings;
     prog_section_t globals;
-    uint32_t       entfield;     /* Number of entity fields */
+    uint32_t       entfield;
 };
 
-/*
- * Each paramater incerements by 3 since vector types hold
- * 3 components (x,y,z).
- */
 #define OFS_NULL      0
 #define OFS_RETURN    1
 #define OFS_PARM0     (OFS_RETURN+3)
@@ -353,18 +328,7 @@ struct prog_section_statement_t {
 };
 
 struct prog_section_both_t {
-    /*
-     * The types:
-     * 0 = ev_void
-     * 1 = ev_string
-     * 2 = ev_float
-     * 3 = ev_vector
-     * 4 = ev_entity
-     * 5 = ev_field
-     * 6 = ev_function
-     * 7 = ev_pointer -- engine only
-     * 8 = ev_bad     -- engine only
-     */
+
     uint16_t type;
     uint16_t offset;
     uint32_t name;
@@ -373,32 +337,26 @@ struct prog_section_both_t {
 typedef prog_section_both_t prog_section_def_t;
 typedef prog_section_both_t prog_section_field_t;
 
-/* this is ORed to the type */
 #define DEF_SAVEGLOBAL (1<<15)
 #define DEF_TYPEMASK   ((1<<15)-1)
 
 struct prog_section_function_t {
-    int32_t   entry;      /* in statement table for instructions  */
-    uint32_t  firstlocal; /* First local in local table           */
-    uint32_t  locals;     /* Total ints of params + locals        */
-    uint32_t  profile;    /* Always zero (engine uses this)       */
-    uint32_t  name;       /* name of function in string table     */
-    uint32_t  file;       /* file of the source file              */
-    int32_t   nargs;      /* number of arguments                  */
-    uint8_t   argsize[8]; /* size of arguments (keep 8 always?)   */
+    int32_t   entry;
+    uint32_t  firstlocal;
+    uint32_t  locals;
+    uint32_t  profile;
+    uint32_t  name;
+    uint32_t  file;
+    int32_t   nargs;
+    uint8_t   argsize[8];
 };
 
-/*
- * Instructions
- * These are the external instructions supported by the interperter
- * this is what things compile to (from the C code).
- */
 enum {
     INSTR_DONE,
     INSTR_MUL_F,
     INSTR_MUL_V,
-    INSTR_MUL_FV, /* NOTE: the float operands must NOT be at the same locations: A != C */
-    INSTR_MUL_VF, /* and here: B != C */
+    INSTR_MUL_FV,
+    INSTR_MUL_VF,
     INSTR_DIV_F,
     INSTR_ADD_F,
     INSTR_ADD_V,
@@ -461,23 +419,14 @@ enum {
     INSTR_BITAND,
     INSTR_BITOR,
 
-    /*
-     * Virtual instructions used by the IR
-     * Keep at the end!
-     */
     VINSTR_END,
     VINSTR_PHI,
     VINSTR_JUMP,
     VINSTR_COND,
 
-    /* A never returning CALL.
-     * Creating this causes IR blocks to be marked as 'final'.
-     * No-Return-Call
-     */
     VINSTR_NRCALL,
 
-    /* Emulated instructions. */
-    VINSTR_BITAND_V, /* BITAND_V must be the first emulated bitop */
+    VINSTR_BITAND_V,
     VINSTR_BITAND_VF,
     VINSTR_BITOR_V,
     VINSTR_BITOR_VF,
@@ -489,7 +438,6 @@ enum {
     VINSTR_NEG_V
 };
 
-/* TODO: elide */
 extern const char *util_instr_str[VINSTR_END];
 
 void util_swap_header(prog_header_t &code_header);
@@ -521,24 +469,12 @@ struct code_t {
     qcint_t string_cached_empty = 0;
 };
 
-/*
- * A shallow copy of a lex_file to remember where which ast node
- * came from.
- */
 struct lex_ctx_t {
     const char *file;
     size_t line;
     size_t column;
 };
 
-/*
- * code_write          -- writes out the compiled file
- * code_init           -- prepares the code file
- * code_genstrin       -- generates string for code
- * code_alloc_field    -- allocated a field
- * code_push_statement -- keeps statements and linenumbers together
- * code_pop_statement  -- keeps statements and linenumbers together
- */
 bool      code_write         (code_t *, const char *filename, const char *lno);
 GMQCC_WARN
 code_t   *code_init          (void);
@@ -548,8 +484,6 @@ qcint_t   code_alloc_field   (code_t *, size_t qcsize);
 void      code_push_statement(code_t *, prog_section_statement_t *stmt, lex_ctx_t ctx);
 void      code_pop_statement (code_t *);
 
-
-/* conout.c */
 enum {
     CON_BLACK   = 30,
     CON_RED,
@@ -561,7 +495,6 @@ enum {
     CON_WHITE
 };
 
-/* message level */
 enum {
     LVL_MSG,
     LVL_WARNING,
@@ -585,13 +518,12 @@ int  con_vout  (const char *, va_list);
 int  con_err   (const char *, ...);
 int  con_out   (const char *, ...);
 
-/* error/warning interface */
 extern size_t compile_errors;
 extern size_t compile_Werrors;
 extern size_t compile_warnings;
 
-void /********/ compile_error_  (lex_ctx_t ctx, /*LVL_ERROR*/ const char *msg, ...);
-void /********/ vcompile_error  (lex_ctx_t ctx, /*LVL_ERROR*/ const char *msg, va_list ap);
+void            compile_error_  (lex_ctx_t ctx,               const char *msg, ...);
+void            vcompile_error  (lex_ctx_t ctx,               const char *msg, va_list ap);
 bool GMQCC_WARN compile_warning_(lex_ctx_t ctx, int warntype, const char *fmt, ...);
 bool GMQCC_WARN vcompile_warning(lex_ctx_t ctx, int warntype, const char *fmt, va_list ap);
 void            compile_show_werrors(void);
@@ -608,33 +540,22 @@ inline bool GMQCC_WARN compile_warning(lex_ctx_t ctx, int warntype, const char *
     return compile_warning_(ctx, warntype, fmt, formatNormalize(ts)...);
 }
 template<typename... Ts>
-inline void /********/ compile_error   (lex_ctx_t ctx, /*LVL_ERROR*/ const char *msg, const Ts&... ts) {
+inline void            compile_error   (lex_ctx_t ctx,               const char *msg, const Ts&... ts) {
     return compile_error_(ctx, msg, formatNormalize(ts)...);
 }
 
-/* ir.c */
-/* TODO: cleanup */
 enum store_type {
     store_global,
-    store_local,  /* local, assignable for now, should get promoted later */
-    store_param,  /* parameters, they are locals with a fixed position */
-    store_value,  /* unassignable */
-    store_return  /* unassignable, at OFS_RETURN */
+    store_local,
+    store_param,
+    store_value,
+    store_return
 };
 
 struct vec3_t {
     qcfloat_t x, y, z;
 };
 
-/* exec.c */
-
-/* TODO: cleanup */
-/*
- * Darkplaces has (or will have) a 64 bit prog loader
- * where the 32 bit qc program is autoconverted on load.
- * Since we may want to support that as well, let's redefine
- * float and int here.
- */
 typedef union {
     qcint_t   _int;
     qcint_t    string;
@@ -656,10 +577,9 @@ enum {
 
 #define VM_JUMPS_DEFAULT 1000000
 
-/* execute-flags */
-#define VMXF_DEFAULT 0x0000     /* default flags - nothing */
-#define VMXF_TRACE   0x0001     /* trace: print statements before executing */
-#define VMXF_PROFILE 0x0002     /* profile: increment the profile counters */
+#define VMXF_DEFAULT 0x0000
+#define VMXF_TRACE   0x0001
+#define VMXF_PROFILE 0x0002
 
 typedef struct qc_program qc_program_t;
 typedef int (*prog_builtin_t)(qc_program_t *prog);
@@ -698,7 +618,6 @@ struct qc_program {
     prog_builtin_t *builtins;
     size_t          builtins_count;
 
-    /* size_t ip; */
     qcint_t  entities;
     size_t entityfields;
     bool   allowworldwrites;
@@ -709,9 +628,8 @@ struct qc_program {
 
     size_t xflags;
 
-    int    argc; /* current arg count for debugging */
+    int    argc;
 
-    /* cached fields */
     struct {
         qcint_t frame;
         qcint_t nextthink;
@@ -723,7 +641,7 @@ struct qc_program {
         qcint_t time;
     } cached_globals;
 
-    bool supports_state; /* is INSTR_STATE supported? */
+    bool supports_state;
 };
 
 qc_program_t*       prog_load      (const char *filename, bool ignoreversion);
@@ -735,15 +653,12 @@ prog_section_def_t* prog_getdef    (qc_program_t *prog, qcint_t off);
 qcany_t*            prog_getedict  (qc_program_t *prog, qcint_t e);
 qcint_t             prog_tempstring(qc_program_t *prog, const char *_str);
 
-
-/* parser.c */
 struct parser_t;
 parser_t *parser_create(void);
 bool parser_compile_file(parser_t *parser, const char *);
 bool parser_compile_string(parser_t *parser, const char *, const char *, size_t);
 bool parser_finish(parser_t *parser, const char *);
 
-/* ftepp.c */
 struct ftepp_t;
 ftepp_t *ftepp_create           (void);
 bool ftepp_preprocess_file  (ftepp_t *ftepp, const char *filename);
@@ -754,15 +669,11 @@ void ftepp_flush(ftepp_t *ftepp);
 void ftepp_add_define(ftepp_t *ftepp, const char *source, const char *name);
 void ftepp_add_macro(ftepp_t *ftepp, const char *name,   const char *value);
 
-/* main.c */
-
 #if 1
-/* Helpers to allow for a whole lot of flags. Otherwise we'd limit
- * to 32 or 64 -f options...
- */
+
 struct longbit {
-    size_t  idx; /* index into an array of 32 bit words */
-    uint8_t bit; /* bit index for the 8 bit group idx points to */
+    size_t  idx;
+    uint8_t bit;
 };
 #define LONGBIT(bit) { ((bit)/32), ((bit)%32) }
 #define LONGBIT_SET(B, I) ((B).idx = (I)/32, (B).bit = ((I)%32))
@@ -772,12 +683,10 @@ typedef uint32_t longbit;
 #define LONGBIT_SET(B, I) ((B) = (I))
 #endif
 
-/* utf.8 */
 typedef long utf8ch_t;
 int utf8_from(char *, utf8ch_t);
 int utf8_to(utf8ch_t *, const unsigned char *, size_t);
 
-/* opts.c */
 struct opts_flag_def_t {
     const char *name;
     longbit     bit;
@@ -793,12 +702,10 @@ void opts_set          (uint32_t   *, size_t, bool);
 void opts_setoptimlevel(unsigned int);
 void opts_ini_init     (const char *);
 
-/* Saner flag handling */
 void opts_backup_non_Wall(void);
 void opts_restore_non_Wall(void);
 void opts_backup_non_Werror_all(void);
 void opts_restore_non_Werror_all(void);
-
 
 enum {
 # define GMQCC_TYPE_FLAGS
@@ -834,12 +741,11 @@ extern const opts_flag_def_t opts_opt_list[COUNT_OPTIMIZATIONS+1];
 extern const unsigned int    opts_opt_oflag[COUNT_OPTIMIZATIONS+1];
 extern unsigned int          opts_optimizationcount[COUNT_OPTIMIZATIONS];
 
-/* other options: */
 enum {
-    COMPILER_QCC,     /* circa  QuakeC */
-    COMPILER_FTEQCC,  /* fteqcc QuakeC */
-    COMPILER_QCCX,    /* qccx   QuakeC */
-    COMPILER_GMQCC    /* this   QuakeC */
+    COMPILER_QCC,
+    COMPILER_FTEQCC,
+    COMPILER_QCCX,
+    COMPILER_GMQCC
 };
 
 struct opt_value_t {
@@ -863,7 +769,7 @@ struct opts_cmd_t {
     uint32_t     warn_backup  [1 + (COUNT_WARNINGS      / 32)];
     uint32_t     werror_backup[1 + (COUNT_WARNINGS      / 32)];
     uint32_t     optimization [1 + (COUNT_OPTIMIZATIONS / 32)];
-    bool         optimizeoff; /* True when -O0 */
+    bool         optimizeoff;
 };
 
 extern opts_cmd_t opts;
@@ -882,4 +788,4 @@ extern opts_cmd_t opts;
 #define OPTS_OPTION_STR(X)   (opts.options[X].data.str.c)
 #define OPTS_OPTION_DUP(X)  *(OPTS_OPTION_DUPED(X)=true, &(opts.options[X].data.str.p))
 
-#endif /*! GMQCC_HDR */
+#endif

@@ -1,13 +1,13 @@
-#####  DP_MAKE_TARGET autodetection and arch specific variables #####
+
 
 ifndef DP_MAKE_TARGET
 
-# Win32
+
 ifdef WINDIR
 	DP_MAKE_TARGET=mingw
 else
 
-# UNIXes
+
 DP_ARCH:=$(shell uname)
 ifneq ($(filter %BSD,$(DP_ARCH)),)
 	DP_MAKE_TARGET=bsd
@@ -20,13 +20,13 @@ ifeq ($(DP_ARCH), SunOS)
 else
 	DP_MAKE_TARGET=linux
 
-endif  # ifeq ($(DP_ARCH), SunOS)
-endif  # ifeq ($(DP_ARCH), Darwin)
-endif  # ifneq ($(filter %BSD,$(DP_ARCH)),)
-endif  # ifdef windir
-endif  # ifndef DP_MAKE_TARGET
+endif
+endif
+endif
+endif
+endif
 
-# If we're targeting an x86 CPU we want to enable DP_SSE (CFLAGS_SSE and SSE2)
+
 ifeq ($(DP_MAKE_TARGET), mingw)
 	DP_SSE:=1
 else ifeq ($(OS),Windows_NT)
@@ -52,10 +52,10 @@ else
 	endif
 endif
 
-# Makefile name
+
 MAKEFILE=makefile
 
-# Commands
+
 ifdef windir
 	CMD_RM=del
 	CMD_CP=copy /y
@@ -66,21 +66,21 @@ else
 	CMD_MKDIR=$(CMD_UNIXMKDIR)
 endif
 
-# 64bits AMD CPUs use another lib directory
+
 ifeq ($(DP_MACHINE),x86_64)
 	UNIX_X11LIBPATH:=/usr/X11R6/lib64
 else
 	UNIX_X11LIBPATH:=/usr/X11R6/lib
 endif
 
-# default targets
+
 TARGETS_DEBUG=sv-debug cl-debug sdl-debug
 TARGETS_PROFILE=sv-profile cl-profile sdl-profile
 TARGETS_RELEASE=sv-release cl-release sdl-release
 TARGETS_RELEASE_PROFILE=sv-release-profile cl-release-profile sdl-release-profile
 TARGETS_NEXUIZ=sv-nexuiz cl-nexuiz sdl-nexuiz
 
-###### Optional features #####
+
 DP_CDDA?=enabled
 ifeq ($(DP_CDDA), enabled)
 	OBJ_SDLCD=$(OBJ_CD_COMMON) cd_sdl.o
@@ -103,7 +103,7 @@ else
 	OBJ_VIDEO_CAPTURE=
 endif
 
-# Linux configuration
+
 ifeq ($(DP_MAKE_TARGET), linux)
 	DEFAULT_SNDAPI=ALSA
 	OBJ_CD=$(OBJ_LINUXCD)
@@ -134,7 +134,7 @@ ifeq ($(DP_MAKE_TARGET), linux)
 	DP_LINK_CRYPTO_RIJNDAEL?=dlopen
 endif
 
-# Mac OS X configuration
+
 ifeq ($(DP_MAKE_TARGET), macosx)
 	DEFAULT_SNDAPI=COREAUDIO
 	OBJ_CD=$(OBJ_MACOSXCD)
@@ -168,8 +168,8 @@ ifeq ($(DP_MAKE_TARGET), macosx)
 	DP_LINK_CRYPTO?=dlopen
 	DP_LINK_CRYPTO_RIJNDAEL?=dlopen
 
-	# on OS X, we don't build the CL by default because it uses deprecated
-	# and not-implemented-in-64bit Carbon
+
+
 	TARGETS_DEBUG=sv-debug sdl-debug
 	TARGETS_PROFILE=sv-profile sdl-profile
 	TARGETS_RELEASE=sv-release sdl-release
@@ -177,7 +177,7 @@ ifeq ($(DP_MAKE_TARGET), macosx)
 	TARGETS_NEXUIZ=sv-nexuiz sdl-nexuiz
 endif
 
-# SunOS configuration (Solaris)
+
 ifeq ($(DP_MAKE_TARGET), sunos)
 	DEFAULT_SNDAPI=BSD
 	OBJ_CD=$(OBJ_SUNOSCD)
@@ -210,7 +210,7 @@ ifeq ($(DP_MAKE_TARGET), sunos)
 	DP_LINK_CRYPTO_RIJNDAEL?=dlopen
 endif
 
-# BSD configuration
+
 ifeq ($(DP_MAKE_TARGET), bsd)
 ifeq ($(DP_ARCH),FreeBSD)
 	DEFAULT_SNDAPI=OSS
@@ -245,22 +245,22 @@ endif
 	DP_LINK_CRYPTO_RIJNDAEL?=dlopen
 endif
 
-# Win32 configuration
+
 ifeq ($(WIN32RELEASE), 1)
-#	TARGET=i686-pc-mingw32
-#	CC=$(TARGET)-g++
-#	WINDRES=$(TARGET)-windres
+
+
+
 	CPUOPTIMIZATIONS=-march=pentium3 -mfpmath=sse -fno-math-errno -fno-rounding-math -fno-signaling-nans -fno-trapping-math
-#       CPUOPTIMIZATIONS+=-DUSE_WSPIAPI_H -DSUPPORTIPV6
+
 	LDFLAGS_WINCOMMON=-Wl,--large-address-aware
 else
 	LDFLAGS_WINCOMMON=
 endif
 
 ifeq ($(WIN64RELEASE), 1)
-#	TARGET=x86_64-pc-mingw32
-#	CC=$(TARGET)-g++
-#	WINDRES=$(TARGET)-windres
+
+
+
 endif
 
 ifeq ($(D3D), 1)
@@ -304,8 +304,8 @@ ifeq ($(DP_MAKE_TARGET), mingw)
 	DP_LINK_CRYPTO_RIJNDAEL?=dlopen
 endif
 
-# set these to "" if you want to use dynamic loading instead
-# zlib
+
+
 ifeq ($(DP_LINK_ZLIB), shared)
 	CFLAGS_LIBZ=-DLINK_TO_ZLIB
 	LIB_Z=-lz
@@ -315,7 +315,7 @@ ifeq ($(DP_LINK_ZLIB), dlopen)
 	LIB_Z=
 endif
 
-# jpeg
+
 ifeq ($(DP_LINK_JPEG), shared)
 	CFLAGS_LIBJPEG=-DLINK_TO_LIBJPEG
 	LIB_JPEG=-ljpeg
@@ -325,7 +325,7 @@ ifeq ($(DP_LINK_JPEG), dlopen)
 	LIB_JPEG=
 endif
 
-# ode
+
 ifeq ($(DP_LINK_ODE), shared)
 	ODE_CONFIG?=ode-config
 	LIB_ODE=`$(ODE_CONFIG) --libs`
@@ -336,7 +336,7 @@ ifeq ($(DP_LINK_ODE), dlopen)
 	CFLAGS_ODE=-DUSEODE
 endif
 
-# d0_blind_id
+
 ifeq ($(DP_LINK_CRYPTO), shared)
 	LIB_CRYPTO=-ld0_blind_id
 	CFLAGS_CRYPTO=-DLINK_TO_CRYPTO
@@ -354,43 +354,43 @@ ifeq ($(DP_LINK_CRYPTO_RIJNDAEL), dlopen)
 	CFLAGS_CRYPTO_RIJNDAEL=
 endif
 
-##### Sound configuration #####
+
 
 ifndef DP_SOUND_API
 	DP_SOUND_API=$(DEFAULT_SNDAPI)
 endif
 
-# NULL: no sound
+
 ifeq ($(DP_SOUND_API), NULL)
 	OBJ_SOUND=$(OBJ_SND_NULL)
 	LIB_SOUND=$(LIB_SND_NULL)
 endif
 
-# OSS: Open Sound System
+
 ifeq ($(DP_SOUND_API), OSS)
 	OBJ_SOUND=$(OBJ_SND_OSS)
 	LIB_SOUND=$(LIB_SND_OSS)
 endif
 
-# ALSA: Advanced Linux Sound Architecture
+
 ifeq ($(DP_SOUND_API), ALSA)
 	OBJ_SOUND=$(OBJ_SND_ALSA)
 	LIB_SOUND=$(LIB_SND_ALSA)
 endif
 
-# COREAUDIO: Core Audio
+
 ifeq ($(DP_SOUND_API), COREAUDIO)
 	OBJ_SOUND=$(OBJ_SND_COREAUDIO)
 	LIB_SOUND=$(LIB_SND_COREAUDIO)
 endif
 
-# BSD: BSD / Sun audio API
+
 ifeq ($(DP_SOUND_API), BSD)
 	OBJ_SOUND=$(OBJ_SND_BSD)
 	LIB_SOUND=$(LIB_SND_BSD)
 endif
 
-# WIN: DirectX and Win32 WAVE output
+
 ifeq ($(DP_SOUND_API), WIN)
 	OBJ_SOUND=$(OBJ_SND_WIN)
 	LIB_SOUND=$(LIB_SND_WIN)
@@ -401,7 +401,7 @@ ifeq ($(DP_SOUND_API),3DRAS)
 	LIB_SOUND=$(LIB_SND_3DRAS)
 endif
 
-##### Extra CFLAGS #####
+
 
 CFLAGS_MAKEDEP?=-MMD
 ifdef DP_FS_BASEDIR
@@ -413,8 +413,6 @@ endif
 CFLAGS_PRELOAD=
 ifneq ($(DP_MAKE_TARGET), mingw)
 ifdef DP_PRELOAD_DEPENDENCIES
-# DP_PRELOAD_DEPENDENCIES: when set, link against the libraries needed using -l
-# dynamically so they won't get loaded at runtime using dlopen
 	LDFLAGS_CL+=$(LDFLAGS_UNIXCL_PRELOAD)
 	LDFLAGS_SV+=$(LDFLAGS_UNIXSV_PRELOAD)
 	LDFLAGS_SDL+=$(LDFLAGS_UNIXSDL_PRELOAD)
@@ -423,23 +421,15 @@ endif
 endif
 
 CFLAGS_NET=
-# Systems without IPv6 support should uncomment this:
-#CFLAGS_NET+=-DNOSUPPORTIPV6
-
-##### GNU Make specific definitions #####
 
 DO_LD=$(CC) -o ../../../$@ $^ $(LDFLAGS)
 
 
-##### Definitions shared by all makefiles #####
 include makefile.inc
 
 
-##### Dependency files #####
-
 -include *.d
 
-# hack to deal with no-longer-needed .h files
 %.h:
 	@echo
 	@echo "NOTE: file $@ mentioned in dependencies missing, continuing..."

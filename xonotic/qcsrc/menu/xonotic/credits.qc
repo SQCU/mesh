@@ -517,8 +517,6 @@
 		PERSON(Zac "Mario" Jardine) \
 		PERSON(Zenex) \
 		PERSON(... and a goat) \
-		/**/
-
 
 int CREDITS_TYPE_TITLE = 2;
 int CREDITS_TYPE_FUNCTION = 1;
@@ -581,7 +579,7 @@ void XonoticCreditsList_configureXonoticCreditsList(entity me)
 	me.configureXonoticListBox(me);
 	me.bufferIndex = credits_get();
 	me.nItems = buf_getsize(me.bufferIndex);
-	if (cvar("_menu_credits_export")) // set by the menu_credits_export alias
+	if (cvar("_menu_credits_export"))
 	{
 		credits_export();
 		cvar_set("_menu_credits_export", "0");

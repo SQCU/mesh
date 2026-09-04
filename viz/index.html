@@ -4,156 +4,323 @@
  *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
    font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}
  #c{position:fixed;inset:0}
- #hud{position:fixed;top:0;left:0;padding:14px 16px;pointer-events:none;text-shadow:0 0 8px #000}
+ #hud{position:fixed;top:0;left:0;right:0;max-height:58vh;overflow-y:auto;padding:14px 16px;pointer-events:auto;text-shadow:0 0 8px #000;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;font-size:9px;line-height:1.25}
  h1{font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--hi);margin:0 0 10px}
- table{border-collapse:collapse} td{padding:1px 12px 1px 0;white-space:nowrap}
- td.k{color:var(--dim)} td.v{color:var(--fg)} .down{color:var(--warn)}
- .node{margin-bottom:12px} .name{color:var(--hi);letter-spacing:.1em}
- #foot{position:fixed;bottom:0;left:0;padding:12px 16px;color:var(--dim);pointer-events:none}
+ table{border-collapse:collapse;table-layout:fixed;width:100%}td{padding:1px 8px 1px 0;white-space:normal;vertical-align:top}
+ td.k{color:var(--dim);width:84px}td.v{color:var(--fg)}.down{color:var(--warn)}
+ .title{flex-basis:100%}.node{flex:1 1 0;min-width:280px;max-width:700px;padding:6px 8px;background:#07080bd9;border:1px solid #1b2430}.name{color:var(--hi);letter-spacing:.1em;font-size:10px}
+ td.v.exact{color:#9effa0}td.v.capacity{color:#c4a6ff}td.v.na{color:var(--dim)}
+ #foot{position:fixed;bottom:0;left:0;right:0;padding:12px 16px;color:var(--dim);pointer-events:none;background:linear-gradient(transparent,#07080bea)}
+ @media(max-width:700px){#hud{max-height:52vh}.node{min-width:100%}#foot{font-size:9px;line-height:1.35}}
 </style></head><body>
 <canvas id="c"></canvas><div id="hud"></div>
-<div id="foot">axes: free / posted / with-app, interval means normalised by pool size &middot; head size is the spread within the interval &middot; trail is the last 600 samples &middot; each stream runs between two nodes\u2019 real positions, sized by that node\u2019s measured page delta</div>
+<div id="foot">anchor: exact FREE / RECV / SEND / APP &middot; satellite: node + phase lens &middot; tether: provenance &middot; edge: topology &middot; stream: traffic &middot; halo: FP32 capacity / GPU activity / variance</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
 <script>
-const S = {nodes:{}, period:2};
+const S = {nodes:{}, inventory:{}, fabric:{}, period:2, zoom:1, connectionError:''};
 const scene = new THREE.Scene();
 const cam = new THREE.PerspectiveCamera(52, innerWidth/innerHeight, .01, 100);
-cam.position.set(2.1,1.5,2.4); cam.lookAt(0.35,0.3,0.35);
-const R = new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
-R.setPixelRatio(Math.min(devicePixelRatio,2)); R.setSize(innerWidth,innerHeight);
-addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();R.setSize(innerWidth,innerHeight)});
+cam.position.set(2.6,1.7,2.8); cam.lookAt(0,0,0);
+const R = new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:false,powerPreference:'low-power'});
+R.setPixelRatio(1); R.setSize(innerWidth,innerHeight);
+function layoutViewport(){
+  const top=Math.ceil(document.getElementById('hud').getBoundingClientRect().height)+12;
+  const bottom=Math.ceil(document.getElementById('foot').getBoundingClientRect().height)+8;
+  const height=Math.max(1,innerHeight-top-bottom);
+  cam.aspect=innerWidth/height; cam.updateProjectionMatrix(); R.setViewport(0,bottom,innerWidth,height);
+}
+addEventListener('resize',()=>{R.setSize(innerWidth,innerHeight);layoutViewport();wakeRenderer()});
 
-// the unit cube the phase point lives in: free, posted, sending over pool size
-const box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)),
-  new THREE.LineBasicMaterial({color:0x1b2430}));
-box.position.set(.5,.5,.5); scene.add(box);
-for(const [d,col] of [[[1,0,0],0xff6b6b],[[0,1,0],0x6bff9e],[[0,0,1],0x6bb6ff]]){ // free, posted, with-app
-  const g=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(...d)]);
-  scene.add(new THREE.Line(g,new THREE.LineBasicMaterial({color:col})));
+const PHASES=[
+  {key:'free',label:'FREE',color:0xff6b6b,p:new THREE.Vector3(0,1.02,0)},
+  {key:'recv',label:'RECV',color:0x6bff9e,p:new THREE.Vector3(-.98,-.48,.70)},
+  {key:'send',label:'SEND',color:0x6bb6ff,p:new THREE.Vector3(.98,-.48,.70)},
+  {key:'app',label:'APP',color:0xff8fd0,p:new THREE.Vector3(0,-.48,-1.08)}
+];
+const FACES=[[0,2,1],[0,1,3],[0,3,2],[1,2,3]], simplexPos=[], simplexPhase=[], simplexColor=[];
+for(const f of FACES) for(const i of f){
+  simplexPos.push(...PHASES[i].p.toArray());
+  simplexPhase.push(+(i===0),+(i===1),+(i===2),+(i===3));
+  simplexColor.push(...new THREE.Color(PHASES[i].color).toArray());
+}
+const simplexGeometry=new THREE.BufferGeometry();
+simplexGeometry.setAttribute('position',new THREE.Float32BufferAttribute(simplexPos,3));
+simplexGeometry.setAttribute('phase',new THREE.Float32BufferAttribute(simplexPhase,4));
+simplexGeometry.setAttribute('color',new THREE.Float32BufferAttribute(simplexColor,3));
+const simplex=new THREE.Mesh(simplexGeometry,new THREE.ShaderMaterial({
+  transparent:true,depthWrite:false,side:THREE.DoubleSide,blending:THREE.AdditiveBlending,
+  vertexShader:`attribute vec4 phase;attribute vec3 color;varying vec4 vPhase;varying vec3 vColor;void main(){vPhase=phase;vColor=color;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`varying vec4 vPhase;varying vec3 vColor;float iso(float x){float f=fract(x*10.0);float d=min(f,1.0-f);return step(.0001,x)*(1.0-smoothstep(.012,.055,d));}void main(){float g=max(max(iso(vPhase.x),iso(vPhase.y)),max(iso(vPhase.z),iso(vPhase.w)));gl_FragColor=vec4(vColor,.035+.075*g);}`
+}));
+scene.add(simplex);
+const edgePoints=[];
+for(let i=0;i<PHASES.length;i++) for(let j=i+1;j<PHASES.length;j++) edgePoints.push(PHASES[i].p,PHASES[j].p);
+scene.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(edgePoints),new THREE.LineBasicMaterial({color:0x314157,transparent:true,opacity:.8})));
+
+function label(textValue,color,scale=.36){
+  const canvas=document.createElement('canvas'); canvas.width=768; canvas.height=144;
+  const ctx=canvas.getContext('2d'); ctx.font='600 54px ui-monospace, monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.shadowColor='#000'; ctx.shadowBlur=18; ctx.fillStyle='#'+new THREE.Color(color).getHexString(); ctx.fillText(textValue,384,72);
+  const texture=new THREE.CanvasTexture(canvas); texture.colorSpace=THREE.SRGBColorSpace;
+  const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:false,depthWrite:false}));
+  sprite.scale.set(scale,scale*144/768,1); return sprite;
+}
+for(const phase of PHASES){
+  const marker=new THREE.Mesh(new THREE.SphereGeometry(.023,16,12),new THREE.MeshBasicMaterial({color:phase.color,depthTest:false}));
+  marker.position.copy(phase.p); scene.add(marker);
+  const tag=label(phase.label,phase.color,.38), outward=phase.p.clone().normalize().multiplyScalar(.13);
+  tag.position.copy(phase.p).add(outward); scene.add(tag);
 }
 
 const PALETTE=[0x7fd4ff,0xffb454,0x9effa0,0xff8fd0,0xc4a6ff];
 const COL={}; const colorOf=n=>COL[n]??(COL[n]=PALETTE[Object.keys(COL).length%PALETTE.length]);
+const phasePoint=s=>{
+  const counts=PHASES.map(x=>Math.max(0,Number(s[x.key])||0)), total=Math.max(1,counts.reduce((a,b)=>a+b,0));
+  return PHASES.reduce((p,x,i)=>p.addScaledVector(x.p,counts[i]/total),new THREE.Vector3());
+};
+const nodeOffset=(name,names)=>{
+  const i=Math.max(0,names.indexOf(name)), a=Math.PI*2*i/Math.max(1,names.length)+Math.PI/4;
+  return new THREE.Vector3(Math.cos(a)*.12,.055+((i%2)*2-1)*.025,Math.sin(a)*.12);
+};
 const tracks = {};
 function track(name){
   if(tracks[name]) return tracks[name];
   const N=600;
-  const g=new THREE.BufferGeometry();
-  g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(N*3),3));
-  g.setDrawRange(0,0);
-  const line=new THREE.Line(g,new THREE.LineBasicMaterial({color:colorOf(name),transparent:true,opacity:.55}));
-  const head=new THREE.Mesh(new THREE.SphereGeometry(.018,16,16),
-                            new THREE.MeshBasicMaterial({color:colorOf(name)}));
-  scene.add(line); scene.add(head);
-  return tracks[name]={line,head,g,N};
+  const exactG=new THREE.BufferGeometry(), lensG=new THREE.BufferGeometry(), tetherG=new THREE.BufferGeometry();
+  exactG.setAttribute('position',new THREE.BufferAttribute(new Float32Array(N*3),3)); exactG.setDrawRange(0,0);
+  lensG.setAttribute('position',new THREE.BufferAttribute(new Float32Array(N*3),3)); lensG.setDrawRange(0,0);
+  tetherG.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));
+  const exactLine=new THREE.Line(exactG,new THREE.LineBasicMaterial({color:colorOf(name),transparent:true,opacity:.24}));
+  const lensLine=new THREE.Line(lensG,new THREE.LineBasicMaterial({color:colorOf(name),transparent:true,opacity:.72}));
+  const tether=new THREE.Line(tetherG,new THREE.LineDashedMaterial({color:colorOf(name),transparent:true,opacity:.46,dashSize:.018,gapSize:.012}));
+  const anchor=new THREE.Mesh(new THREE.SphereGeometry(.015,14,10),new THREE.MeshBasicMaterial({color:colorOf(name),depthTest:false}));
+  const head=new THREE.Mesh(new THREE.OctahedronGeometry(.036,0),new THREE.MeshBasicMaterial({color:colorOf(name),depthTest:false}));
+  const halo=new THREE.Mesh(new THREE.SphereGeometry(.032,24,16),new THREE.ShaderMaterial({
+    transparent:true,depthWrite:false,depthTest:false,blending:THREE.AdditiveBlending,
+    uniforms:{uT:{value:0},uUtil:{value:0},uVar:{value:0},uC:{value:new THREE.Color(colorOf(name))}},
+    vertexShader:`varying vec3 vN,vV; void main(){vec4 p=modelViewMatrix*vec4(position,1.0);vN=normalMatrix*normal;vV=-p.xyz;gl_Position=projectionMatrix*p;}`,
+    fragmentShader:`varying vec3 vN,vV;uniform float uT,uUtil,uVar;uniform vec3 uC;void main(){float rim=pow(1.0-abs(dot(normalize(vN),normalize(vV))),2.0);float pulse=1.0-uVar*.35+uVar*.35*sin(uT*(1.0+6.0*uVar));float a=(.18+.55*uUtil)*(.2+.8*rim)*pulse;gl_FragColor=vec4(uC,a);}`
+  }));
+  const tag=label(name,colorOf(name),.48);
+  scene.add(exactLine,lensLine,tether,anchor,head,halo,tag);
+  return tracks[name]={exactLine,lensLine,tether,anchor,head,halo,tag,exactG,lensG,tetherG,N,
+    anchorTarget:new THREE.Vector3(),headTarget:new THREE.Vector3(),ready:false};
 }
 
-// One stream per ordered pair of nodes. Endpoints are the two nodes' actual
-// phase-space positions, so if a node moves in the cube its traffic moves with
-// it. Count is that source node's measured page delta. Nothing here is placed
-// at a constant.
-const PN=20000;
+const PARTICLE_CAP=2048;
 function stream(){
   const g=new THREE.BufferGeometry();
-  const seed=new Float32Array(PN);
-  for(let i=0;i<PN;i++) seed[i]=Math.random();
-  g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(PN*3),3));
+  const seed=new Float32Array(PARTICLE_CAP);
+  for(let i=0;i<PARTICLE_CAP;i++) seed[i]=Math.random();
+  g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(PARTICLE_CAP*3),3));
   g.setAttribute('seed',new THREE.BufferAttribute(seed,1));
   g.setDrawRange(0,0);
   const m=new THREE.ShaderMaterial({
     transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
-    uniforms:{uT:{value:0},uA:{value:new THREE.Vector3()},uB:{value:new THREE.Vector3()},
+    uniforms:{uT:{value:0},uLoad:{value:0},uA:{value:new THREE.Vector3()},uB:{value:new THREE.Vector3()},
               uC:{value:new THREE.Color(0x7fd4ff)}},
-    vertexShader:`attribute float seed; uniform float uT; uniform vec3 uA,uB; varying float vA;
+    vertexShader:`attribute float seed; uniform float uT,uLoad; uniform vec3 uA,uB; varying float vA;
       void main(){
-        float p = fract(seed*7.13 + uT*0.35);
+        float p = fract(seed*7.13 + uT*(.12+1.4*uLoad));
         vec3 pos = mix(uA,uB,p);
         vec3 n = normalize(cross(uB-uA, vec3(0.0,1.0,0.0))+vec3(1e-4));
         pos += n * 0.09 * sin(p*3.14159) * sin(seed*29.0);
         pos.y += 0.10*sin(p*3.14159);
         vA = sin(p*3.14159);
         gl_Position = projectionMatrix*modelViewMatrix*vec4(pos,1.0);
-        gl_PointSize = 1.5 + 2.5*vA; }`,
-    fragmentShader:`varying float vA; uniform vec3 uC;
+        gl_PointSize = 2.0 + (3.0+8.0*uLoad)*vA; }`,
+    fragmentShader:`varying float vA; uniform float uLoad; uniform vec3 uC;
       void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard;
-        gl_FragColor=vec4(uC, vA*0.55); }`});
+        gl_FragColor=vec4(uC, vA*(.35+.6*uLoad)); }`});
   const pts=new THREE.Points(g,m); scene.add(pts); return {g,m};
 }
 const streams={};
+let activeLinks=[];
+const topologyG=new THREE.BufferGeometry();
+topologyG.setAttribute('position',new THREE.BufferAttribute(new Float32Array(3072),3)); topologyG.setDrawRange(0,0);
+const topology=new THREE.LineSegments(topologyG,new THREE.LineBasicMaterial({color:0xaac6db,transparent:true,opacity:.22})); scene.add(topology);
+const topologyLinks=names=>{
+  const me=names.find(n=>S.inventory[n]?.self)??names[0];
+  return names.filter(n=>n!==me&&S.nodes[n]?.at(-1)?.membership?.present&&S.nodes[n]?.at(-1)?.reachable).map(n=>[me,n]);
+};
 
-const fmt=n=>n>=1e9?(n/1e9).toFixed(2)+'G':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':''+n;
+const fmt=n=>Number.isFinite(n)?n>=1e9?(n/1e9).toFixed(2)+'G':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':''+n:'—';
+const num=(n,d=2)=>Number.isFinite(n)?n.toFixed(d):'—';
+const rate=n=>num(n,n>0&&n<.01?3:2);
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const scalarLeaves=(value,path=[],out=[])=>{
+  if(!value||typeof value!=='object'||Array.isArray(value)) return out;
+  for(const [key,child] of Object.entries(value)){
+    const next=[...path,key];
+    if(typeof child==='number') out.push([next.join('.'),child]);
+    else if(child&&typeof child==='object'&&!Array.isArray(child)) scalarLeaves(child,next,out);
+  }
+  return out;
+};
 function hud(){
-  let h='<h1>mesh page-table phase space</h1>';
+  let h=`<h1 class="title">mesh page-table phase space / whole-fabric observatory / phase lens ×${num(S.zoom||1,1)}</h1>`;
+  const f=S.fabric||{}, fe=f.estimates||{}, ff=fe.fp32||{}, fm=fe.memory||{}, fwm=fe.workload_memory||{}, fw=f.workload||{}, fd=fw.deadlines||{};
+  h+=`<div class="node"><div class="name">ENTIRE MESH / ${f.connected?.length||0} connected / ${f.nodes||0} inventoried</div><table>`;
+  if(S.connectionError) h+=`<tr><td class="k">observer</td><td class="v down">${esc(S.connectionError)}</td></tr>`;
+  h+=`<tr><td class="k">nodes</td><td class="v exact">bridges ${(f.active||[]).length}  telemetry ${(f.reachable||[]).length}  stale ${esc((f.stale||[]).join(', ')||'none')}</td></tr>`;
+  h+=`<tr><td class="k">fabric tx/rx</td><td class="v exact">${rate(f.rates?.tx_gbps)} / ${rate(f.rates?.rx_gbps)} Gbit/s</td></tr>`;
+  h+=`<tr><td class="k">phase</td><td class="v exact">free ${fmt(f.phase?.free)}  posted ${fmt(f.phase?.recv)}  forward ${fmt(f.phase?.send)}  app ${fmt(f.phase?.app)}</td></tr>`;
+  h+=`<tr><td class="k">FP32 envelope</td><td class="v capacity">${Number.isFinite(ff.upper_gflops)?num(ff.lower_gflops/1000)+'–'+num(ff.upper_gflops/1000)+' TF/s across '+ff.nodes+' nodes':'unavailable'}</td></tr>`;
+  h+=`<tr><td class="k">machine bytes</td><td class="v capacity">${Number.isFinite(fm.upper_gbs)?num(fm.lower_gbs,1)+'–'+num(fm.upper_gbs,1)+' GB/s across '+fm.nodes+' nodes':'unavailable'}</td></tr>`;
+  h+=`<tr><td class="k">workload bytes</td><td class="v capacity">${Number.isFinite(fwm.upper_gbs)?num(fwm.lower_gbs,1)+'–'+num(fwm.upper_gbs,1)+' GB/s across '+fwm.nodes+' nodes':'unavailable'}</td></tr>`;
+  h+=`<tr><td class="k">workloads</td><td class="v capacity">${fw.producers??'—'} producers  ${fmt(fw.rows)} rows  deadline samples ${fd.observations??0}  min slack ${fmt(fd.minimum_slack_s)} s</td></tr></table></div>`;
   for(const name of Object.keys(S.nodes)){
     const s=S.nodes[name].at(-1); if(!s) continue;
-    h+=`<div class="node"><div class="name">${name}</div><table>`;
-    if(!s.up){ h+=`<tr><td class="k">state</td><td class="v down">no bridge running</td></tr>`; }
+    const member=s.membership||{}, present=member.present??s.reachable;
+    const tint='#'+new THREE.Color(colorOf(name)).getHexString();
+    h+=`<div class="node" style="border-color:${tint}55"><div class="name" style="color:${tint}">${esc(name)}${s.host?.model?' / '+esc(s.host.model):''}</div><table>`;
+    if(!present){ h+=`<tr><td class="k">membership</td><td class="v down">${esc(member.state||'unreachable')}${Number.isFinite(member.age_s)?' / last beacon '+num(member.age_s,1)+'s ago':''}</td></tr>`; }
     else{
+      h+=`<tr><td class="k">membership</td><td class="v exact">${esc(member.state||'connected')} / ${esc(member.source||'observer')}</td></tr>`;
+      if(!s.reachable) h+=`<tr><td class="k">telemetry</td><td class="v down">unavailable: ${esc(s.error||'poll failed')}</td></tr>`;
+      if(!s.up) h+=`<tr><td class="k">bridge</td><td class="v down">not publishing a census</td></tr>`;
       const pool=s.pool||1;
-      const rows=[['region',`${((s.pool+s.arena)*s.pgsz/1e9).toFixed(2)} GB  pool ${fmt(pool)}  arena ${fmt(s.arena)}`],
-                  ['free',`${fmt(s.free)} ±${s.sd_free}`],
-                  ['posted',`${fmt(s.recv)} ±${s.sd_recv}`],
-                  ['forwarding',`${fmt(s.send)}`],
-                  ['with app',`${fmt(s.app)} ±${s.sd_app}`],
-                  ['census',`${fmt(s.free+s.recv+s.send+s.app)} / ${fmt(pool)}`],
-                  ['rejected',`${fmt(s.bad||0)}`],
-                  ['sent/recvd',`${fmt(s.sent)} / ${fmt(s.recvd)}`],
-                  ['client',s.client?`pid ${s.client}`:'none']];
-      for(const [k,v] of rows) h+=`<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
+      const r=s.rates||{}, cap=s.capacity?.metrics||{}, m=s.machine?.metrics||{};
+      const fp=s.estimates?.fp32||{}, fm=fp.upper_moments||{}, mm=s.estimates?.memory||{}, wm=s.estimates?.workload_memory||{}, dl=s.estimates?.deadlines||{};
+      const producerRows=s.workload?.producers||[];
+      const producers=producerRows.map(p=>`${esc(p.name||'workload')}#${p.pid??'?'} ${fmt(p.rows)} rows`).join('; ');
+      const measures=producerRows.flatMap(p=>Object.entries(p.measures||{}).map(([name,measure])=>{
+        const scalars=scalarLeaves(measure).map(([key,value])=>`${esc(key)} ${fmt(value)}`).join('  ');
+        return `${esc(p.name||'workload')}.${esc(name)} ${scalars}`;
+      })).join('; ');
+      const clusters=Object.entries(m.cpu_clusters||{}).map(([k,v])=>`${k} ${num(v.active_pct,0)}% @ ${num(v.frequency_mhz,0)}MHz`).join('; ');
+      const rows=[];
+      const census=(s.free||0)+(s.recv||0)+(s.send||0)+(s.app||0);
+      if(s.up) rows.push(
+        ['fabric tx/rx',`${rate(r.tx_gbps)} / ${rate(r.rx_gbps)} Gbit/s  ${num(r.tx_fabric_pct,1)} / ${num(r.rx_fabric_pct,1)}%`,'exact'],
+        ['page region',`${num((s.pool+s.arena)*s.pgsz/1e9)} GB  pool ${fmt(pool)}  arena ${fmt(s.arena)}`,'exact'],
+        ['phase',`free ${fmt(s.free)}  posted ${fmt(s.recv)}  forward ${fmt(s.send)}  app ${fmt(s.app)}`,'exact'],
+        ['conservation',`${fmt(census)} / ${fmt(pool)}  Δ ${census-pool}  bad ${fmt(s.bad||0)}`,'exact']);
+      rows.push(
+        ['GPU live',Number.isFinite(m.gpu_active_pct)?`${num(m.gpu_active_pct,1)}%  render ${num(m.gpu_renderer_pct,0)}%  tiler ${num(m.gpu_tiler_pct,0)}%${Number.isFinite(m.gpu_frequency_mhz)?' @ '+num(m.gpu_frequency_mhz,0)+' MHz':''}${Number.isFinite(m.gpu_power_w)?'  '+num(m.gpu_power_w)+' W':''}`:'telemetry unavailable','exact'],
+        ['GPU memory',Number.isFinite(m.gpu_memory_bytes)?`${num(m.gpu_memory_bytes/1e9)} GB in use / ${num(m.gpu_allocated_bytes/1e9)} GB allocated`:'telemetry unavailable','exact'],
+        ['CPU live',clusters||(Number.isFinite(m.cpu_power_w)?`${num(m.cpu_power_w)} W`:'root sampler unavailable'),'exact'],
+        ['thermal',m.thermal_pressure?esc(m.thermal_pressure):'root sampler unavailable','exact'],
+        ['compute cap',cap.gpu_fp32_gflops?`${num(cap.gpu_fp32_gflops/1000,2)} fp32 / ${num(cap.gpu_bf16_gflops/1000,2)} bf16 TFLOP/s`:'uncharacterized','capacity'],
+        ['memory cap',cap.memory_gbs?`${num(cap.memory_gbs,0)} GB/s`:'uncharacterized','capacity'],
+        ['FP32 envelope',Number.isFinite(fp.upper_gflops)?`${num(fp.lower_gflops/1000)}–${num(fp.upper_gflops/1000)} TF/s`:'unavailable','capacity'],
+        ['upper μ / σ',Number.isFinite(fm.mean)?`${num(fm.mean/1000)} / ${num(fm.sd/1000)} TF/s  n=${fm.samples}`:'unavailable','capacity'],
+        ['lower μ / σ',Number.isFinite(fp.lower_moments?.mean)?`${num(fp.lower_moments.mean/1000)} / ${num(fp.lower_moments.sd/1000)} TF/s`:'unavailable','capacity'],
+        ['memory envelope',Number.isFinite(mm.upper_gbs)?`${num(mm.lower_gbs,1)}–${num(mm.upper_gbs,1)} GB/s  ${mm.source==='hardware_histogram'?'hardware':'capacity'}`:'counter unavailable','capacity'],
+        ['workload bytes',Number.isFinite(wm.upper_gbs)?`${num(wm.lower_gbs,1)}–${num(wm.upper_gbs,1)} GB/s`:'no producer','capacity'],
+        ['producers',producers||'none','capacity'],
+        ['application measures',measures||'none','capacity'],
+        ['work deadline',dl.observations?`${dl.observations} observations  min slack ${fmt(dl.minimum_slack_s)}s  mean slack ${fmt(dl.mean_slack_s)}s  rows ${fmt(s.estimates?.rows)}  producers ${s.estimates?.producers??'—'}`:'no producer','capacity'],
+        ['memory upper μ/σ',Number.isFinite(mm.upper_moments?.mean)?`${num(mm.upper_moments.mean,1)} / ${num(mm.upper_moments.sd,1)} GB/s  n=${mm.upper_moments.samples}`:'unavailable','capacity']);
+      for(const [k,v,c] of rows) h+=`<tr><td class="k">${k}</td><td class="v ${c}">${v}</td></tr>`;
     }
     h+='</table></div>';
   }
   document.getElementById('hud').innerHTML=h;
+  layoutViewport();
 }
 
-let lastTotal=0;
 function apply(){
-  for(const name of Object.keys(S.nodes)){
-    const hs=S.nodes[name].filter(x=>x.up); if(!hs.length) continue;
-    const t=track(name), pos=t.g.attributes.position.array;
-    const n=Math.min(hs.length,t.N);
-    for(let i=0;i<n;i++){
-      const s=hs[hs.length-n+i], pool=Math.max(1,s.pool);
-      pos[3*i]=s.free/pool; pos[3*i+1]=s.recv/pool; pos[3*i+2]=s.app/pool;
-    }
-    t.g.setDrawRange(0,n); t.g.attributes.position.needsUpdate=true;
-    t.g.computeBoundingSphere();
-    const s=hs.at(-1),pool=Math.max(1,s.pool);
-    t.head.position.set(s.free/pool, s.recv/pool, s.app/pool);
-    // the head grows with the spread inside the interval, so a pool that is
-    // churning looks different from one that is merely sitting somewhere
-    const sd=Math.hypot(s.sd_free,s.sd_recv,s.sd_app)/pool;
-    t.head.scale.setScalar(1+18*sd);
+  const capacities=Object.values(S.nodes).map(h=>{const c=h.at(-1)?.capacity?.metrics||{};return (c.gpu_fp32_gflops||0)+(c.cpu_gflops||0)});
+  const maxCapacity=Math.max(1,...capacities);
+  const names=Object.keys(S.nodes).sort();
+  for(const name of names) track(name);
+  for(const t of Object.values(tracks)) for(const o of [t.exactLine,t.lensLine,t.tether,t.anchor,t.head,t.halo,t.tag]) o.visible=false;
+  const anchors={};
+  for(const name of names){
+    const hs=S.nodes[name].filter(x=>x.up);
+    anchors[name]=hs.length?phasePoint(hs.at(-1)):new THREE.Vector3();
   }
-  // one stream per source node, from its head to every other node's head,
-  // sized by that node's own measured page delta since the previous sample
-  const names=Object.keys(S.nodes).filter(n=>tracks[n]);
-  for(const src of names) for(const dst of names){
-    if(src===dst) continue;
-    const key=src+'>'+dst;
-    if(!streams[key]) streams[key]=stream();
-    const st=streams[key], hs=S.nodes[src].filter(x=>x.up);
-    if(hs.length<2){ st.g.setDrawRange(0,0); continue; }
-    const d=Math.max(0,hs.at(-1).sent-hs.at(-2).sent);
-    st.m.uniforms.uA.value.copy(tracks[src].head.position);
-    st.m.uniforms.uB.value.copy(tracks[dst].head.position);
-    st.m.uniforms.uC.value.setHex(colorOf(src));
-    st.g.setDrawRange(0,Math.min(PN,Math.round(d/200)));
+  const mean=names.reduce((p,name)=>p.add(anchors[name]),new THREE.Vector3()).multiplyScalar(1/Math.max(1,names.length));
+  const maxDeviation=Math.max(0,...names.map(name=>anchors[name].distanceTo(mean)));
+  const zoom=names.length>1?Math.min(24,.25/Math.max(.01,maxDeviation)):1;
+  S.zoom=zoom;
+  for(const name of names){
+    const history=S.nodes[name], hs=history.filter(x=>x.up), latest=history.at(-1)||{}, live=Boolean(latest.membership?.present??latest.reachable), t=tracks[name], exact=t.exactG.attributes.position.array, lens=t.lensG.attributes.position.array;
+    const offset=nodeOffset(name,names), n=Math.min(hs.length,t.N);
+    for(let i=0;i<n;i++){
+      const p=phasePoint(hs[hs.length-n+i]), q=mean.clone().add(p.clone().sub(mean).multiplyScalar(zoom)).add(offset);
+      p.toArray(exact,3*i); q.toArray(lens,3*i);
+    }
+    t.exactG.setDrawRange(0,n); t.exactG.attributes.position.needsUpdate=true; t.exactG.computeBoundingSphere();
+    t.lensG.setDrawRange(0,n); t.lensG.attributes.position.needsUpdate=true; t.lensG.computeBoundingSphere();
+    const s=hs.at(-1)||latest,pool=Math.max(1,s.pool||1);
+    const anchor=anchors[name], satellite=mean.clone().add(anchor.clone().sub(mean).multiplyScalar(zoom)).add(offset);
+    t.anchorTarget.copy(anchor); t.headTarget.copy(satellite);
+    if(!t.ready){ t.anchor.position.copy(anchor); t.head.position.copy(satellite); t.ready=true; }
+    const cap=(s.capacity?.metrics?.gpu_fp32_gflops||0)+(s.capacity?.metrics?.cpu_gflops||0);
+    const achieved=s.estimates?.fp32?.upper_gflops;
+    const util=Math.max(0,Math.min(1,live?(Number.isFinite(achieved)&&cap?achieved/cap:(s.machine?.metrics?.gpu_active_pct||0)/100):0));
+    const spread=(s.estimates?.fp32?.upper_moments?.sd||0)/Math.max(1,s.estimates?.fp32?.upper_moments?.mean||0);
+    t.halo.scale.setScalar(1.5+1.5*Math.sqrt(cap/maxCapacity));
+    t.halo.material.uniforms.uUtil.value=util;
+    t.halo.material.uniforms.uVar.value=Math.max(0,Math.min(1,spread*4));
+    const sd=Math.hypot(s.sd_free||0,s.sd_recv||0,s.sd_send||0,s.sd_app||0)/pool;
+    t.head.scale.setScalar(1+18*sd);
+    t.exactLine.material.opacity=live ? .24 : .06; t.lensLine.material.opacity=live ? .72 : .16; t.tether.material.opacity=live ? .46 : .14;
+    t.anchor.material.transparent=true; t.head.material.transparent=true; t.anchor.material.opacity=live?1:.2; t.head.material.opacity=live?1:.24; t.tag.material.opacity=live?1:.35;
+    for(const o of [t.exactLine,t.lensLine,t.tether,t.anchor,t.head,t.halo,t.tag]) o.visible=true;
+  }
+  activeLinks=topologyLinks(names).filter(([a,b])=>tracks[a]?.head.visible&&tracks[b]?.head.visible);
+  topologyG.setDrawRange(0,activeLinks.length*2);
+  for(const st of Object.values(streams)) st.g.setDrawRange(0,0);
+  for(const [a,b] of activeLinks) for(const [src,dst] of [[a,b],[b,a]]){
+    const key=src+'>'+dst, st=streams[key]??(streams[key]=stream()), hs=S.nodes[src].filter(x=>x.up), current=S.nodes[src].at(-1);
+    if(hs.length<2||!current?.reachable||!current?.up) continue;
+    const latest=hs.at(-1), d=Math.max(0,(latest.sent||0)-(hs.at(-2).sent||0));
+    const util=Math.max(0,Math.min(1,(latest.rates?.tx_fabric_pct||0)/100)), moving=(latest.rates?.tx_bytes_s||0)>0||d>0;
+    st.m.uniforms.uC.value.setHex(colorOf(src)); st.m.uniforms.uLoad.value=moving?Math.max(.05,Math.sqrt(util)):0;
+    st.g.setDrawRange(0,moving?Math.min(PARTICLE_CAP,Math.max(8,Math.round(PARTICLE_CAP*Math.sqrt(util)))):0);
   }
   hud();
+  wakeRenderer();
 }
 
+let pollTimer=0,renderTimer=0,lastRender=performance.now(),animationDeadline=0;
+const FRAME_PERIOD=50,TWEEN_RATE=7,TWEEN_EPSILON=1e-7;
 async function poll(){
-  try{ const r=await fetch('/data.json'); const j=await r.json(); S.nodes=j.nodes; S.period=j.period; apply(); }
-  catch(e){}
-  setTimeout(poll, 1000);
+  pollTimer=0;
+  if(document.hidden) return;
+  try{ const r=await fetch('/v1/visualization'); if(!r.ok) throw new Error(`HTTP ${r.status}`); const j=await r.json(); S.nodes=j.nodes; S.inventory=j.inventory||{}; S.fabric=j.fabric||{}; S.period=j.period; S.connectionError=''; apply(); }
+  catch(e){ S.connectionError=`telemetry unavailable: ${e?.message||e}`; hud(); wakeRenderer(); }
+  pollTimer=setTimeout(poll,Math.max(1000,Number(S.period||1)*1000));
 }
-poll();
 
-let th=0;
-(function loop(t){ requestAnimationFrame(loop);
-  th=t*0.0002; cam.position.set(0.5+2.0*Math.cos(th),1.35,0.5+2.0*Math.sin(th));
-  cam.lookAt(0.4,0.35,0.4);
-  for(const k in streams) streams[k].m.uniforms.uT.value=t*0.001;
-  R.render(scene,cam); })(0);
+function wakeRenderer(){
+  animationDeadline=performance.now()+Math.min(1000,Math.max(250,Number(S.period||1)*500));
+  if(!document.hidden&&!renderTimer) renderTimer=setTimeout(renderFrame,0);
+}
+function renderFrame(){
+  renderTimer=0;
+  if(document.hidden) return;
+  const now=performance.now(),dt=Math.min(.25,Math.max(0,(now-lastRender)/1000)),alpha=1-Math.exp(-TWEEN_RATE*dt);
+  lastRender=now;
+  let moving=false;
+  for(const t of Object.values(tracks)){
+    t.anchor.position.lerp(t.anchorTarget,alpha); t.head.position.lerp(t.headTarget,alpha);
+    moving=moving||t.anchor.position.distanceToSquared(t.anchorTarget)>TWEEN_EPSILON||t.head.position.distanceToSquared(t.headTarget)>TWEEN_EPSILON;
+    t.halo.position.copy(t.head.position); t.tag.position.copy(t.head.position); t.tag.position.y+=.075;
+    const tether=t.tetherG.attributes.position.array; t.anchor.position.toArray(tether,0); t.head.position.toArray(tether,3);
+    t.tetherG.attributes.position.needsUpdate=true; t.tether.computeLineDistances();
+    t.halo.material.uniforms.uT.value=now*.001;
+  }
+  const topologyPos=topologyG.attributes.position.array;
+  for(let i=0;i<activeLinks.length;i++){
+    tracks[activeLinks[i][0]].head.position.toArray(topologyPos,i*6);
+    tracks[activeLinks[i][1]].head.position.toArray(topologyPos,i*6+3);
+  }
+  topologyG.attributes.position.needsUpdate=true;
+  for(const [key,st] of Object.entries(streams)){
+    const [src,dst]=key.split('>');
+    if(tracks[src]&&tracks[dst]){ st.m.uniforms.uA.value.copy(tracks[src].head.position); st.m.uniforms.uB.value.copy(tracks[dst].head.position); }
+    st.m.uniforms.uT.value=now*.001;
+  }
+  R.render(scene,cam);
+  if(moving||now<animationDeadline) renderTimer=setTimeout(renderFrame,FRAME_PERIOD);
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){ clearTimeout(pollTimer); clearTimeout(renderTimer); pollTimer=renderTimer=0; }
+  else{ lastRender=performance.now(); poll(); wakeRenderer(); }
+});
+poll(); wakeRenderer();
 </script></body></html>

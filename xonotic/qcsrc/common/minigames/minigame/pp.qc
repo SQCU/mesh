@@ -1,17 +1,17 @@
 #include "pp.qh"
 REGISTER_MINIGAME(pp, _("Push-Pull"));
 
-const int PP_TURN_PLACE = 0x0100; // player has to place a piece on the board
-const int PP_TURN_WIN   = 0x0200; // player has won
-const int PP_TURN_DRAW  = 0x0400; // players have equal scores
-const int PP_TURN_NEXT  = 0x0800; // a player wants to start a new match
-const int PP_TURN_TYPE  = 0x0f00; // turn type mask
+const int PP_TURN_PLACE = 0x0100;
+const int PP_TURN_WIN   = 0x0200;
+const int PP_TURN_DRAW  = 0x0400;
+const int PP_TURN_NEXT  = 0x0800;
+const int PP_TURN_TYPE  = 0x0f00;
 
 const int PP_TURN_TEAM1 = 0x0001;
 const int PP_TURN_TEAM2 = 0x0002;
-const int PP_TURN_TEAM  = 0x000f; // turn team mask
+const int PP_TURN_TEAM  = 0x000f;
 
-const int PP_SPECTATOR_TEAM = 255; // must be above max teams and equal to or below 255
+const int PP_SPECTATOR_TEAM = 255;
 
 const int PP_LET_CNT = 7;
 const int PP_NUM_CNT = 7;
@@ -25,9 +25,8 @@ const int PP_TILE_SIZE = 7;
 
 .int pp_nexteam;
 
-.entity pp_curr_piece; // identifier for the current target piece
+.entity pp_curr_piece;
 
-// find tic tac toe piece given its tile name
 entity pp_find_piece(entity minig, string tile)
 {
 	entity e = NULL;
@@ -37,7 +36,6 @@ entity pp_find_piece(entity minig, string tile)
 	return NULL;
 }
 
-// check if the tile name is valid (3x3 grid)
 bool pp_valid_tile(string tile)
 {
 	if ( !tile )
@@ -47,13 +45,11 @@ bool pp_valid_tile(string tile)
 	return 0 <= number && number < PP_NUM_CNT && 0 <= letter && letter < PP_LET_CNT;
 }
 
-// Checks if the given piece completes a row
 bool pp_winning_piece(entity piece)
 {
 	int number = minigame_tile_number(piece.netname);
 	int letter = minigame_tile_letter(piece.netname);
 
-	// here goes
 	if(!pp_valid_tile(minigame_tile_buildname(letter-1,number)) || pp_find_piece(piece.owner,minigame_tile_buildname(letter-1,number)).team == 5)
 	if(!pp_valid_tile(minigame_tile_buildname(letter+1,number)) || pp_find_piece(piece.owner,minigame_tile_buildname(letter+1,number)).team == 5)
 	if(!pp_valid_tile(minigame_tile_buildname(letter,number-1)) || pp_find_piece(piece.owner,minigame_tile_buildname(letter,number-1)).team == 5)
@@ -76,7 +72,7 @@ bool pp_valid_move(entity minigame, string pos)
 
 	entity current = minigame.pp_curr_piece;
 	if(!current)
-		return true; // no current piece? allow the move anywhere
+		return true;
 
 	int number = minigame_tile_number(pos);
 	int letter = minigame_tile_letter(pos);
@@ -94,7 +90,6 @@ bool pp_valid_move(entity minigame, string pos)
 	return false;
 }
 
-// make a move
 void pp_move(entity minigame, entity player, string pos )
 {
 	if ( minigame.minigame_flags & PP_TURN_PLACE )
@@ -127,7 +122,7 @@ void pp_move(entity minigame, entity player, string pos )
 
 			entity piece = msle_spawn(minigame,new(minigame_board_piece));
 			piece.cnt = 1;
-			piece.team = player.team; // temporary
+			piece.team = player.team;
 			piece.netname = strzone(pos);
 			minigame_server_sendflags(piece,MINIG_SF_ALL);
 			minigame_server_sendflags(minigame,MINIG_SF_UPDATE);
@@ -148,7 +143,7 @@ void pp_move(entity minigame, entity player, string pos )
 
 void pp_setup_pieces(entity minigame)
 {
-	int i, t; // letter, number
+	int i, t;
 	for(i = 0; i < PP_LET_CNT; ++i)
 	for(t = 0; t < PP_NUM_CNT; ++t)
 	{
@@ -168,11 +163,10 @@ void pp_setup_pieces(entity minigame)
 	minigame.pp_curr_piece = NULL;
 }
 
-// request a new match
 void pp_next_match(entity minigame, entity player)
 {
 #ifdef SVQC
-	// on multiplayer matches, wait for both players to agree
+
 	if ( minigame.minigame_flags & (PP_TURN_WIN|PP_TURN_DRAW) )
 	{
 		minigame.minigame_flags = PP_TURN_NEXT | player.team;
@@ -197,8 +191,6 @@ void pp_next_match(entity minigame, entity player)
 
 #ifdef SVQC
 
-
-// required function, handle server side events
 int pp_server_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -224,14 +216,11 @@ int pp_server_event(entity minigame, string event, ...)
 		{
 			int pl_num = minigame_count_players(minigame);
 
-			// Don't allow more than 2 players
 			if(pl_num >= 2) { return PP_SPECTATOR_TEAM; }
 
-			// Get the right team
 			if(minigame.minigame_players)
 				return minigame_next_team(minigame.minigame_players.team, 2);
 
-			// Team 1 by default
 			return 1;
 		}
 		case "cmd":
@@ -272,14 +261,12 @@ int pp_server_event(entity minigame, string event, ...)
 	return false;
 }
 
-
 #elif defined(CSQC)
 
-string pp_curr_pos; // identifier of the tile under the mouse
-vector pp_boardpos; // HUD board position
-vector pp_boardsize; // HUD board size
+string pp_curr_pos;
+vector pp_boardpos;
+vector pp_boardsize;
 
-// Required function, draw the game board
 void pp_hud_board(vector pos, vector mySize)
 {
 	minigame_hud_fitsqare(pos, mySize);
@@ -313,7 +300,7 @@ void pp_hud_board(vector pos, vector mySize)
 			{
 				case 1: tile_color = '1 0.3 0.3'; break;
 				case 2: tile_color = '0.3 0.3 1'; break;
-				// 3, 4 coming later?
+
 			}
 
 			string tile_name = strcat("pp/piece",ftos(e.team));
@@ -323,7 +310,6 @@ void pp_hud_board(vector pos, vector mySize)
 			{
 				tile_name = "pp/piece_current";
 
-				// draw the splat too
 				minigame_drawpic_centered( tile_pos,
 						minigame_texture("pp/piece_taken"),
 						tile_size, '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL );
@@ -376,8 +362,6 @@ void pp_hud_board(vector pos, vector mySize)
 	}
 }
 
-
-// Required function, draw the game status panel
 void pp_hud_status(vector pos, vector mySize)
 {
 	HUD_Panel_DrawBg();
@@ -414,7 +398,7 @@ void pp_hud_status(vector pos, vector mySize)
 			{
 				case 1: tile_color = '1 0.3 0.3'; break;
 				case 2: tile_color = '0.3 0.3 1'; break;
-				// 3, 4 coming later?
+
 			}
 
 			mypos = pos;
@@ -440,7 +424,6 @@ void pp_hud_status(vector pos, vector mySize)
 	}
 }
 
-// Turn a set of flags into a help message
 string pp_turn_to_string(int turnflags)
 {
 	if(minigame_self.team == PP_SPECTATOR_TEAM)
@@ -451,7 +434,7 @@ string pp_turn_to_string(int turnflags)
 
 	if ( turnflags & PP_TURN_WIN )
 	{
-		// translator-friendly messages composed of 2 existing messages
+
 		if ( (turnflags&PP_TURN_TEAM) != minigame_self.team )
 			return strcat(_("You lost the game!"), "\n", _("Select \"^1Next Match^7\" on the menu for a rematch!"));
 		return strcat(_("You win!"), "\n", _("Select \"^1Next Match^7\" on the menu to start a new match!"));
@@ -473,7 +456,6 @@ string pp_turn_to_string(int turnflags)
 	return "";
 }
 
-// Make the correct move
 void pp_make_move(entity minigame)
 {
 	if ( minigame.minigame_flags == (PP_TURN_PLACE|minigame_self.team) )
@@ -490,7 +472,6 @@ void pp_set_curr_pos(string s)
 	pp_curr_pos = s;
 }
 
-// Required function, handle client events
 int pp_client_event(entity minigame, string event, ...)
 {
 	switch(event)

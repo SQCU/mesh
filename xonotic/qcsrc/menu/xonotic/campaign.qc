@@ -57,7 +57,7 @@ void XonoticCampaignList_configureXonoticCampaignList(entity me)
 	me.configureXonoticListBox(me);
 	me.campaignGlob = search_begin("maps/campaign*.txt", true, true);
 	me.loadCvars(me);
-	me.campaignGo(me, 0); // it makes work buttons too
+	me.campaignGo(me, 0);
 }
 
 void XonoticCampaignList_destroy(entity me)
@@ -68,10 +68,10 @@ void XonoticCampaignList_destroy(entity me)
 
 void XonoticCampaignList_loadCvars(entity me)
 {
-	// read campaign cvars
+
 	strcpy(campaign_name, cvar_string("g_campaign_name"));
 	strcpy(me.controlledCvar, strcat("g_campaign", campaign_name, "_index"));
-	registercvar(me.controlledCvar, "", 0); // saved by server QC anyway
+	registercvar(me.controlledCvar, "", 0);
 	CampaignFile_Unload();
 	CampaignFile_Load(0, CAMPAIGN_MAX_ENTRIES);
 	me.campaignIndex = bound(0, cvar(me.controlledCvar), campaign_entries);
@@ -88,10 +88,7 @@ void XonoticCampaignList_loadCvars(entity me)
 
 void XonoticCampaignList_saveCvars(entity me)
 {
-	// write campaign cvars
-	// no reason to do this!
-	// cvar_set("g_campaign_name", campaign_name);
-	// cvar_set(me.controlledCvar, ftos(me.campaignIndex)); // NOTE: only server QC does that!
+
 }
 
 void XonoticCampaignList_campaignGo(entity me, float step)
@@ -236,11 +233,10 @@ void XonoticCampaignList_drawListBoxItem(entity me, int i, vector absSize, bool 
 	if(i < me.campaignIndex)
 		draw_Picture(me.checkMarkOrigin, "checkmark", me.checkMarkSize, '1 1 1', 1);
 	if(i <= me.campaignIndex)
-		s = campaign_shortdesc[i]; // fteqcc sucks
+		s = campaign_shortdesc[i];
 	else
 		s = "???";
-	// NOTE the following string should be equal to the one used in the Welcome dialog
-	// to avoid adding a slightly different string to translate
+
 	s = draw_TextShortenToWidth(strcat(sprintf(_("Level %d:"), i+1), " ", s), me.columnNameSize, 0, me.realFontSize);
 	draw_Text(me.realUpperMargin1 * eY + (me.columnNameOrigin + 0.00 * (me.columnNameSize - draw_TextWidth(s, 0, me.realFontSize))) * eX, s, me.realFontSize, theColor, theAlpha, 0);
 
@@ -268,7 +264,7 @@ void CampaignList_LoadMap(entity btn, entity me)
 
 void XonoticCampaignList_setSelected(entity me, float i)
 {
-	// prevent too late items from being played
+
 	SUPER(XonoticCampaignList).setSelected(me, min(i, me.campaignIndex));
 }
 

@@ -9,7 +9,6 @@ void ref_init(entity this, int init, void(entity this) finalize)
     this._ref_finalize = finalize;
 }
 
-// todo: rename to `ref`
 entity REF(entity this)
 {
     this._ref_count += 1;
@@ -51,7 +50,7 @@ void _Promise_finalize(Promise this)
 Promise Promise_new_(Promise this)
 {
     ref_init(this, 2, _Promise_finalize);
-    this._promise_result = this; // promises default to being their own result to save on entities
+    this._promise_result = this;
     return this;
 }
 
@@ -115,14 +114,14 @@ void _Promise_handle(Promise this, PromiseHandler h)
         case PROMISE_RESOLVED: {
             Promise ret = h._promise_handler_ret;
             Promise p = h._promise_handler_resolve(ret, this._promise_result, h._promise_handler_data);
-            if (p != ret) _Promise_then(p, ret, func_null, func_null, NULL); // bind p -> ret
+            if (p != ret) _Promise_then(p, ret, func_null, func_null, NULL);
             delete(h);
             break;
         }
         case PROMISE_REJECTED: {
             Promise ret = h._promise_handler_ret;
             Promise p = h._promise_handler_reject(ret, this._promise_result, h._promise_handler_data);
-            if (p != ret) _Promise_then(p, ret, func_null, func_null, NULL); // bind p -> ret
+            if (p != ret) _Promise_then(p, ret, func_null, func_null, NULL);
             delete(h);
             break;
         }
@@ -184,7 +183,7 @@ Promise Promise_then_(
         entity userdata
 )
 {
-    unref(ret); // ret is a temporary
+    unref(ret);
     return _Promise_then(this, ret, onResolve, func_null, userdata);
 }
 
@@ -195,11 +194,9 @@ Promise Promise_catch_(
         entity userdata
 )
 {
-    unref(ret); // ret is a temporary
+    unref(ret);
     return _Promise_then(this, ret, func_null, onReject, userdata);
 }
-
-// utils
 
 #ifndef MENUQC
 

@@ -3,16 +3,12 @@
 #include <client/draw.qh>
 #include <client/hud/panel/modicons.qh>
 
-// Keepaway HUD mod icon
-int kaball_prevstatus; // last remembered status
-float kaball_statuschange_time; // time when the status changed
-
-// we don't need to reset for keepaway since it immediately
-// autocorrects prevstatus as to if the player has the ball or not
+int kaball_prevstatus;
+float kaball_statuschange_time;
 
 void HUD_Mod_Keepaway(vector pos, vector mySize)
 {
-	mod_active = 1; // keepaway should always show the mod HUD
+	mod_active = 1;
 
 	float kaball_alpha = blink(0.85, 0.15, 5);
 

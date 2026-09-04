@@ -4,12 +4,10 @@
 #include "nil.qh"
 #include "static.qh"
 
-// pure entities: not linked to the area grid
-// see: sv_areagrid_link_SOLID_NOT and cl_areagrid_link_SOLID_NOT
 .bool pure_data;
 
 #ifdef GAMEQC
-	/** direct use is @deprecated use new_pure or NEW(class) */
+
 	#define make_pure(e) \
 		(e).pure_data = true; \
 		(e).solid = SOLID_NOT;
@@ -18,12 +16,12 @@
 	#define make_pure(e) \
 		(e).pure_data = true;
 	#define is_pure(e) ((e).pure_data)
-#endif // GAMEQC
+#endif
 #define make_impure(e) \
 	(e).pure_data = false;
 
 .string classname;
-/** Location entity was spawned from in source */
+
 .string sourceLoc;
 entity _spawn();
 
@@ -48,7 +46,6 @@ entity __spawn(string _classname, string _sourceLoc, bool pure)
 	return this;
 }
 
-
 #define entityclass(...) EVAL_entityclass(OVERLOAD_(entityclass, __VA_ARGS__))
 #define EVAL_entityclass(...) __VA_ARGS__
 #define entityclass_1(name) entityclass_2(name, Object)
@@ -61,9 +58,9 @@ entity __spawn(string _classname, string _sourceLoc, bool pure)
 	#define classfield(name) [[class(name)]]
 	#define _new(class, pure) ((class) __spawn(#class, __FILE__ ":" STR(__LINE__), pure))
 #endif
-/** entities you care about collisions with */
+
 #define new(class) _new(class, false)
-/** purely logical entities (not linked to the area grid) */
+
 #define new_pure(class) _new(class, true)
 #define spawn() __spawn("entity", __FILE__ ":" STR(__LINE__), false)
 
@@ -79,13 +76,13 @@ ACCUMULATE void ONREMOVE(entity this) {}
     void(entity) _dtor = _this.dtor; \
     ONREMOVE(this); \
     if (_dtor) _dtor(_this); else delete_fn(_this); \
-    /* this = NULL; */  \
+                        \
 MACRO_END
 
 void IL_REMOVE_RAW(entity it);
 void copyentity_qc(entity src, entity dst)
 {
-	copyentity(src, dst); // builtin function
+	copyentity(src, dst);
 	IL_REMOVE_RAW(dst);
 }
 
@@ -107,12 +104,8 @@ void clearentity(entity e)
 #endif
 }
 
-// Classes have a `spawn##cname(entity)` constructor
-// The parameter is used across ACCUMULATE functions
-
 .bool transmute;
 
-// Macros to hide this implementation detail:
 #ifdef __STDC__
 	#define NEW(cname, ...) \
 		OVERLOAD_(spawn##cname, new_pure(cname) P99_IF_EMPTY(__VA_ARGS__)()(, __VA_ARGS__))
@@ -195,7 +188,7 @@ void clearentity(entity e)
 	}                                                                                              \
 	INIT(cname)                                                                                    \
 	{                                                                                              \
-		/* Only statically initialize the current class, it contains everything it inherits */     \
+		                                                                                           \
 		if (cname##_vtbl.vtblname == this.classname)                                               \
 		{                                                                                          \
 			spawn##cname##_static(this);                                                           \
@@ -235,7 +228,7 @@ void clearentity(entity e)
 	ATTRIB_3(cname, name, type);                                                                   \
 	INIT(cname)                                                                                    \
 	{                                                                                              \
-		noref bool strzone; /* Error on strzone() calls. */                                        \
+		noref bool strzone;                                                                        \
 		this.name = val;                                                                           \
 	}                                                                                              \
 	ATTRIB_3(cname, name, type)
@@ -244,11 +237,10 @@ void clearentity(entity e)
 	type cname##_##name;                                                                           \
 	_INIT_STATIC(cname)                                                                            \
 	{                                                                                              \
-		noref bool strzone; /* Error on strzone() calls. */                                        \
+		noref bool strzone;                                                                        \
 		cname##_##name = val;                                                                      \
 	}
 
-// cleanup potentially zoned strings from base classes
 #define ATTRIB_STRZONE(cname, name, type, val)                                                     \
 	classfield(cname).type name;                                                                   \
 	INIT(cname)                                                                                    \
@@ -284,8 +276,6 @@ void clearentity(entity e)
 		return this;                                                                               \
 	}
 
-// impl
-
 .string vtblname;
 .entity vtblbase;
 
@@ -303,7 +293,7 @@ STATIC_INIT(RegisterClasses)
 		cname e = new_pure(vtbl); \
 		spawn##cname##_static(e); \
 		e.vtblname = #cname; \
-		/* Top level objects refer to themselves */ \
+		                                            \
 		e.vtblbase = base##_vtbl ? base##_vtbl : e; \
 		cname##_vtbl = e; \
 	} \

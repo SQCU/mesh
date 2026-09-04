@@ -2,24 +2,27 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-
-_DEFAULT_JITTER = 1e-6
-
+from .matmul import (
+    matrix_multiply,
+    matrix_multiply_transpose_left,
+    matrix_multiply_transpose_right,
+)
 
 def _as_f32(value):
     result = mx.array(value)
     return result if result.dtype == mx.float32 else result.astype(mx.float32)
 
+def _rms_norm(rows, eps):
+    return rows * mx.rsqrt(mx.mean(rows * rows, axis=1, keepdims=True) + eps)
 
 def feature_gram(features, normalize=True, eps=1e-12):
     rows = _as_f32(features)
     if rows.ndim != 2:
         raise ValueError(f"features must be 2-D; got {rows.shape}")
     if normalize:
-        rows = rows / mx.maximum(mx.sqrt(mx.sum(rows * rows, axis=1, keepdims=True)), eps)
-    gram = rows @ rows.T
+        rows = _rms_norm(rows, eps)
+    gram = matrix_multiply_transpose_right(rows, rows)
     return 0.5 * (gram + gram.T)
-
 
 def build_L(quality, features, normalize=True, eps=1e-12):
     quality = _as_f32(quality)
@@ -31,60 +34,64 @@ def build_L(quality, features, normalize=True, eps=1e-12):
     kernel = quality[:, None] * gram * quality[None, :]
     return 0.5 * (kernel + kernel.T)
 
-
-def _prepare(kernel, jitter, detached=False):
+def _prepare(kernel):
     kernel = _as_f32(kernel)
     if kernel.ndim != 2 or kernel.shape[0] != kernel.shape[1]:
         raise ValueError(f"L must be square; got {kernel.shape}")
     kernel = 0.5 * (kernel + kernel.T)
     eye = mx.eye(kernel.shape[0], dtype=mx.float32)
-    if jitter > 0:
-        scale = mx.maximum(mx.mean(mx.diagonal(kernel)), mx.array(1.0, dtype=mx.float32))
-        kernel = kernel + jitter * (mx.stop_gradient(scale) if detached else scale) * eye
     return kernel, eye
 
+def positive_definite_conjugate_gradient(matrix, rhs):
+    solution = mx.zeros_like(rhs)
+    residual = rhs
+    direction = residual
+    residual_norm = mx.sum(residual * residual, axis=0, keepdims=True)
+    initial_norm = residual_norm
+    epsilon = mx.array(mx.finfo(matrix.dtype).eps, dtype=matrix.dtype)
+    matrix_scale = mx.mean(mx.abs(mx.diagonal(matrix)))
+    norm_floor = epsilon * mx.maximum(initial_norm, epsilon)
+    action_floor = norm_floor * mx.maximum(matrix_scale, epsilon)
+    for _ in range(int(matrix.shape[0])):
+        action = matrix_multiply(matrix, direction)
+        denominator = mx.sum(direction * action, axis=0, keepdims=True)
+        scale = residual_norm / (denominator + action_floor)
+        solution = solution + direction * scale
+        following = residual - action * scale
+        following_norm = mx.sum(following * following, axis=0, keepdims=True)
+        direction = following + direction * (
+            following_norm / (residual_norm + norm_floor)
+        )
+        residual = following
+        residual_norm = following_norm
+    return solution
 
-def marginal_inclusion(kernel, method="eigh", jitter=_DEFAULT_JITTER, return_spectrum=False):
-    kernel, eye = _prepare(kernel, jitter)
-    if method == "eigh":
-        values, vectors = mx.linalg.eigh(kernel, stream=mx.cpu)
-        values = mx.maximum(values, 0)
-        result = mx.clip(mx.sum(vectors * vectors * (values / (1 + values))[None, :], axis=1), 0, 1)
-        return (result, values) if return_spectrum else result
-    if method == "inverse":
-        if return_spectrum:
-            raise ValueError("return_spectrum requires method='eigh'")
-        return mx.clip(1 - mx.diagonal(mx.linalg.inv(eye + kernel, stream=mx.cpu)), 0, 1)
-    raise ValueError(f"unknown method {method!r}")
+def marginal_inclusion(kernel):
+    kernel, eye = _prepare(kernel)
+    return mx.clip(mx.diagonal(positive_definite_conjugate_gradient(eye + kernel, kernel)), 0, 1)
 
-
-@mx.custom_function
-def _inv_diag_marginal(kernel):
-    inverse = mx.linalg.inv(mx.eye(kernel.shape[0], dtype=kernel.dtype) + kernel, stream=mx.cpu)
-    return mx.clip(1 - mx.diagonal(inverse), 0, 1)
-
-
-@_inv_diag_marginal.vjp
-def _inv_diag_marginal_vjp(primals, cotangent, output):
-    kernel = primals[0] if isinstance(primals, (tuple, list)) else primals
-    inverse = mx.linalg.inv(mx.eye(kernel.shape[0], dtype=kernel.dtype) + kernel, stream=mx.cpu)
-    return inverse @ (cotangent[:, None] * inverse)
-
-
-def marginal_inclusion_diff(kernel, jitter=_DEFAULT_JITTER):
-    return _inv_diag_marginal(_prepare(kernel, jitter, detached=True)[0])
-
-
-def marginal_kernel(kernel, jitter=_DEFAULT_JITTER):
-    kernel, eye = _prepare(kernel, jitter)
-    result = mx.linalg.solve(eye + kernel, kernel, stream=mx.cpu)
+def marginal_kernel(kernel):
+    kernel, eye = _prepare(kernel)
+    result = positive_definite_conjugate_gradient(eye + kernel, kernel)
     return 0.5 * (result + result.T)
 
+def dpp_marginals(quality, features, normalize=True, eps=1e-12):
+    quality = _as_f32(quality)
+    rows = _as_f32(features)
+    if quality.ndim != 1 or rows.ndim != 2 or quality.shape[0] != rows.shape[0]:
+        raise ValueError(f"quality/features shapes disagree: {quality.shape}, {rows.shape}")
+    if normalize:
+        rows = _rms_norm(rows, eps)
+    weighted = quality[:, None] * rows
+    covariance = mx.eye(rows.shape[1], dtype=mx.float32) + matrix_multiply_transpose_left(weighted, weighted)
+    dual = positive_definite_conjugate_gradient(covariance, weighted.T).T
+    return mx.clip(mx.sum(weighted * dual, axis=1), 0, 1)
 
-def dpp_marginals(quality, features, normalize=True, method="eigh", jitter=_DEFAULT_JITTER, return_spectrum=False):
-    kernel = build_L(quality, features, normalize)
-    if method == "inverse_diff":
-        if return_spectrum:
-            raise ValueError("return_spectrum requires method='eigh'")
-        return marginal_inclusion_diff(kernel, jitter)
-    return marginal_inclusion(kernel, method, jitter, return_spectrum)
+__all__ = [
+    "build_L",
+    "dpp_marginals",
+    "feature_gram",
+    "marginal_inclusion",
+    "marginal_kernel",
+    "positive_definite_conjugate_gradient",
+]

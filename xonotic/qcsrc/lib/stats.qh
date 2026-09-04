@@ -1,7 +1,5 @@
 #pragma once
 
-// TODO: rename to 'netvars'
-
 #include "registry.qh"
 #include "sort.qh"
 
@@ -9,7 +7,7 @@
 USING(vectori, vector);
 
 const int STATS_ENGINE_RESERVE = 32;
-// must be listed in ascending order
+
 #define MAGIC_STATS(_, x) \
 	_(x, MOVEVARS_AIRACCEL_QW_STRETCHFACTOR, 220) \
 	_(x, MOVEVARS_AIRCONTROL_PENALTY, 221) \
@@ -47,7 +45,6 @@ const int STATS_ENGINE_RESERVE = 32;
 	_(x, MOVEVARS_STEPHEIGHT, 253) \
 	_(x, MOVEVARS_AIRACCEL_QW, 254) \
 	_(x, MOVEVARS_AIRACCEL_SIDEWAYS_FRICTION, 255) \
-	/**/
 
 int g_magic_stats_hole = 0;
 
@@ -64,7 +61,7 @@ int g_magic_stats_hole = 0;
 #define REGISTER_STAT(...) EVAL_REGISTER_STAT(OVERLOAD(REGISTER_STAT, __VA_ARGS__))
 #define EVAL_REGISTER_STAT(...) __VA_ARGS__
 #if defined(CSQC)
-	/** Get all stats and store them as globals, access with `STAT(ID)` */
+
 	void stats_get() {}
 	#define STAT(...) EVAL_STAT(OVERLOAD(STAT, __VA_ARGS__))
 	#define EVAL_STAT(...) __VA_ARGS__
@@ -80,7 +77,7 @@ int g_magic_stats_hole = 0;
 	#define _STAT(id) g_stat_##id
 	#define REGISTER_STAT_2(id, T) \
 		T _STAT(id); \
-		/* T CAT(_STAT(id), _prev); */ \
+		                               \
 		REGISTER(Stats, STAT_##id, m_id, new_pure(stat)) \
 		{ \
 			if (#T == "vector" || #T == "vectori") { \
@@ -91,14 +88,14 @@ int g_magic_stats_hole = 0;
 		ACCUMULATE void stats_get() \
 		{ \
 			T it = getstat_##T(STAT_##id.m_id); \
-			/* if (it != CAT(_STAT(id), _prev)) \
-				CAT(_STAT(id), _prev) = */ _STAT(id) = it; \
+			                                     \
+                               _STAT(id) = it; \
 		}
 	#define REGISTER_STAT_3(x, T, expr) REGISTER_STAT_2(x, T)
 #elif defined(SVQC)
-    /** Internal use only */
+
     entity STATS;
-	/** Add all registered stats, access with `STAT(ID, player)` or `.type stat = _STAT(ID); player.stat` */
+
 	void stats_add() {}
 	#define STAT(...) EVAL_STAT(OVERLOAD_(STAT, __VA_ARGS__))
     #define EVAL_STAT(...) __VA_ARGS__
@@ -126,7 +123,7 @@ int g_magic_stats_hole = 0;
 	STATIC_INIT(stats)
 	{
 		STATS = new_pure(stats);
-		// Prevent engine stats being sent
+
 		int r = STATS_ENGINE_RESERVE;
 		for (int i = 0, n = 256 - r; i < n; ++i) {
 			#define X(_, name, id) if (i == id) continue;
@@ -153,7 +150,7 @@ int g_magic_stats_hole = 0;
 		}
 	void GlobalStats_update(entity this) {}
 	void GlobalStats_updateglobal() {}
-    /** TODO: do we want the global copy to update? */
+
     #define REGISTER_STAT_3(id, T, expr) \
     	REGISTER_STAT_2(id, T); \
     	ACCUMULATE void GlobalStats_update(entity this) { STAT(id, this) = (expr); } \

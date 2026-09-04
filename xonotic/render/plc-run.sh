@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Drive a real payload match and capture frames / frame times.
-#   plc-run.sh <label> <seconds> <extra cfg lines file>
+
+
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -18,8 +18,16 @@ cp "$steps" "$HOME_DIR/data/plcsteps.cfg"
 pid=$!
 i=0
 while kill -0 $pid 2>/dev/null; do
-  i=$((i+1)); [ $i -gt "$secs" ] && { kill -9 $pid 2>/dev/null; break; }
+  i=$((i+1)); [ $i -gt "$secs" ] && { kill -TERM $pid 2>/dev/null || true; break; }
   /bin/sleep 1
 done
-wait $pid 2>/dev/null || true
+for _ in $(seq 1 120); do
+  kill -0 $pid 2>/dev/null || break
+  /bin/sleep 0.25
+done
+if kill -0 $pid 2>/dev/null; then
+  printf '{"event":"client_termination_pending","pid":%d}\n' "$pid" >&2
+else
+  wait $pid 2>/dev/null || true
+fi
 echo "--- $label done"

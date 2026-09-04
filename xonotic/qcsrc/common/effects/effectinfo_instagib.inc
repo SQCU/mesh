@@ -16,7 +16,7 @@
         MY(type) = "static"; \
         MY(velocitymultiplier) = -0.100000; \
     } \
-    SUB(rocketminsta_laser_##name) /* bright sparks */ { \
+    SUB(rocketminsta_laser_##name)                     { \
         MY(airfriction) = 12; \
         MY(alpha_min) = 444; \
         MY(alpha_max) = 512; \
@@ -36,7 +36,6 @@
         MY(velocityjitter) = '50.0 50.0 50.0'; \
         MY(velocityoffset) = '0.0 0.0 15.0'; \
     } \
-    /**/
 
 rocketminsta_laser(red,     "0xFF0F0F")
 rocketminsta_laser(blue,    "0x0F0FFF")

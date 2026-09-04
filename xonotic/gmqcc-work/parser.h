@@ -27,7 +27,6 @@ struct parser_t {
     std::vector<ast_function *> functions;
     size_t translated;
 
-    /* must be deleted first, they reference immediates and values */
     std::vector<ast_value *> accessors;
 
     ast_value *nil;
@@ -39,45 +38,34 @@ struct parser_t {
     ast_function *function;
     ht aliases;
 
-    /* All the labels the function defined...
-     * Should they be in ast_function instead?
-     */
     std::vector<ast_label*> labels;
     std::vector<ast_goto*> gotos;
     std::vector<const char *> breaks;
     std::vector<const char *> continues;
 
-    /* A list of hashtables for each scope */
     std::vector<ht> variables;
     ht htfields;
     ht htglobals;
     std::vector<ht> typedefs;
 
-    /* not to be used directly, we use the hash table */
     std::vector<ast_expression*> _locals;
     std::vector<size_t> _blocklocals;
     std::vector<std::unique_ptr<ast_value>> _typedefs;
     std::vector<size_t> _blocktypedefs;
     std::vector<lex_ctx_t> _block_ctx;
 
-    /* we store the '=' operator info */
     const oper_info *assign_op;
 
-    /* magic values */
     ast_value *const_vec[3];
 
-    /* pragma flags */
     bool noref;
 
-    /* collected information */
     size_t max_param_count;
 
     fold m_fold;
     intrin m_intrin;
 };
 
-
-/* parser.c */
 char           *parser_strdup     (const char *str);
 ast_expression *parser_find_global(parser_t *parser, const char *name);
 

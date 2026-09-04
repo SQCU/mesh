@@ -11,11 +11,6 @@
 #include <server/ipban.qh>
 #include <server/player.qh>
 
-// =====================================================
-//  Banning and kicking command code, written by Samual
-//  Last updated: December 29th, 2011
-// =====================================================
-
 void BanCommand_ban(int request, int argc, string command)
 {
 	switch (request)
@@ -184,7 +179,7 @@ void BanCommand_playban(int request, int argc, string command)
 
 					LOG_INFO(strcat("Play-banning player ", GetCallerName(client), " (", argv(1), ")."));
 					PutObserverInServer(client, true, true);
-					if (autocvar_g_playban_minigames) 
+					if (autocvar_g_playban_minigames)
 						part_minigame(client);
 					cvar_set("g_playban_list", cons(autocvar_g_playban_list, theid));
 
@@ -224,13 +219,13 @@ void BanCommand_unban(int request, int argc)
 				{
 					tmp_string = substring(argv(1), 1, -1);
 
-					if (tmp_string != "") // is it all one token? like #1
+					if (tmp_string != "")
 						tmp_number = stof(tmp_string);
-					else if (argc > 2)    // no, it's two tokens? # 1
+					else if (argc > 2)
 						tmp_number = stof(argv(2));
 					else tmp_number = -1;
 				}
-				else  // maybe it's ONLY a number?
+				else
 				{
 					tmp_number = stof(argv(1));
 
@@ -435,35 +430,6 @@ void BanCommand_voteban(int request, int argc, string command)
 	}
 }
 
-/* use this when creating a new command, making sure to place it in alphabetical order... also,
-** ADD ALL NEW COMMANDS TO commands.cfg WITH PROPER ALIASES IN THE SAME FASHION!
-void BanCommand_(int request)
-{
-    switch(request)
-    {
-        case CMD_REQUEST_COMMAND:
-        {
-
-            return;
-        }
-
-        default:
-        case CMD_REQUEST_USAGE:
-        {
-            LOG_HELP("Usage:^3 sv_cmd ");
-            LOG_HELP("  No arguments required.");
-            return;
-        }
-    }
-}
-*/
-
-
-// ==================================
-//  Macro system for server commands
-// ==================================
-
-// Do not hard code aliases for these, instead create them in commands.cfg... also: keep in alphabetical order, please ;)
 #define BAN_COMMANDS(request, arguments, command) \
 	BAN_COMMAND("ban",          BanCommand_ban(request, arguments, command),        "Ban an IP address or a range of addresses (like 1.2.3)") \
 	BAN_COMMAND("banlist",      BanCommand_banlist(request),                        "List all existing bans") \
@@ -475,7 +441,6 @@ void BanCommand_(int request)
 	BAN_COMMAND("unvoteban",    BanCommand_unvoteban(request, arguments),           "Remove an existing voting ban") \
 	BAN_COMMAND("unplayban",    BanCommand_unplayban(request, arguments),           "Remove an existing forced to spectate ban") \
 	BAN_COMMAND("voteban",      BanCommand_voteban(request, arguments, command),    "Disallow a client from voting") \
-	/* nothing */
 
 void BanCommand_macro_help()
 {
@@ -521,13 +486,8 @@ float BanCommand(string command)
 {
 	int argc = tokenize_console(command);
 
-	// Guide for working with argc arguments by example:
-	// argc:   1    - 2      - 3     - 4
-	// argv:   0    - 1      - 2     - 3
-	// cmd     vote - master - login - password
-
-	if (BanCommand_macro_command(argc, command)) // continue as usual and scan for normal commands
-		return true;                             // handled by one of the above GenericCommand_* functions
+	if (BanCommand_macro_command(argc, command))
+		return true;
 
 	return false;
 }

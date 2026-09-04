@@ -31,7 +31,7 @@ METHOD(BallStealer, wr_think, void(BallStealer thiswep, entity actor, .entity we
     if(!(fire & 1) && STAT(NB_METERSTART, actor) && actor.ballcarried)
     {
         W_Nexball_Attack(thiswep, actor, weaponentity, time - STAT(NB_METERSTART, actor));
-        // DropBall or stealing will set metertime back to 0
+
         weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, autocvar_g_balance_nexball_primary_animtime, w_ready);
     }
 }
@@ -39,7 +39,7 @@ METHOD(BallStealer, wr_think, void(BallStealer thiswep, entity actor, .entity we
 METHOD(BallStealer, wr_setup, void(BallStealer this, entity actor, .entity weaponentity))
 {
     TC(BallStealer, this);
-    //weapon_setup(WEP_PORTO.m_id);
+
 }
 
 METHOD(BallStealer, wr_reload, void(entity thiswep, entity actor, .entity weaponentity))
@@ -61,13 +61,11 @@ METHOD(BallStealer, wr_checkammo2, bool(BallStealer this, entity actor, .entity 
 
 void W_Nexball_Think(entity this)
 {
-	//dprint("W_Nexball_Think\n");
-	//vector new_dir = steerlib_arrive(this.enemy.origin, 2500);
+
 	vector new_dir = normalize(this.enemy.origin + '0 0 50' - this.origin);
 	vector old_dir = normalize(this.velocity);
 	float _speed = vlen(this.velocity);
 	vector new_vel = normalize(old_dir + (new_dir * autocvar_g_nexball_safepass_turnrate)) * _speed;
-	//vector new_vel = (new_dir * autocvar_g_nexball_safepass_turnrate
 
 	this.velocity = new_vel;
 
@@ -78,8 +76,6 @@ void W_Nexball_Touch(entity this, entity toucher)
 {
 	entity ball, attacker;
 	attacker = this.owner;
-	//this.think = func_null;
-	//this.enemy = NULL;
 
 	PROJECTILE_TOUCH(this, toucher);
 	if(attacker.team != toucher.team || autocvar_g_nexball_basketball_teamsteal)
@@ -112,33 +108,30 @@ void W_Nexball_Attack(Weapon thiswep, entity actor, .entity weaponentity, float 
 	if(!(ball = actor.ballcarried))
 		return;
 
-	W_SetupShot(actor, weaponentity, false, 4, SND_NB_SHOOT1, CH_WEAPON_A, 0, WEP_PORTO.m_id); // TODO: use ballstealer weapon here? we don't want duplicates in the scoreboard
+	W_SetupShot(actor, weaponentity, false, 4, SND_NB_SHOOT1, CH_WEAPON_A, 0, WEP_PORTO.m_id);
 	tracebox(w_shotorg, BALL_MINS, BALL_MAXS, w_shotorg, MOVE_WORLDONLY, NULL);
 	if(trace_startsolid)
 	{
 		if(STAT(NB_METERSTART, actor))
-			STAT(NB_METERSTART, actor) = 0; // Shot failed, hide the power meter
+			STAT(NB_METERSTART, actor) = 0;
 		return;
 	}
 
-	//Calculate multiplier
 	if(t < 0)
 		mul = 1;
 	else
 	{
 		mi = autocvar_g_nexball_basketball_meter_minpower;
-		ma = max(mi, autocvar_g_nexball_basketball_meter_maxpower); // avoid confusion
-		//One triangle wave period with 1 as max
+		ma = max(mi, autocvar_g_nexball_basketball_meter_maxpower);
+
 		mul = 2 * (t % g_nexball_meter_period) / g_nexball_meter_period;
 		if(mul > 1)
 			mul = 2 - mul;
-		mul = mi + (ma - mi) * mul; // range from the minimal power to the maximal power
+		mul = mi + (ma - mi) * mul;
 	}
 
 	DropBall(ball, w_shotorg, W_CalculateProjectileVelocity(actor, actor.velocity, w_shotdir * autocvar_g_balance_nexball_primary_speed * mul, false));
 
-
-	//TODO: use the speed_up cvar too ??
 }
 
 void W_Nexball_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
@@ -146,7 +139,7 @@ void W_Nexball_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 	if(actor.ballcarried.enemy)
 	{
 		entity _ball = actor.ballcarried;
-		W_SetupShot(actor, weaponentity, false, 4, SND_NB_SHOOT1, CH_WEAPON_A, 0, WEP_PORTO.m_id | HITTYPE_SECONDARY); // TODO: use the ball stealer weapon here? probably don't want duplicates
+		W_SetupShot(actor, weaponentity, false, 4, SND_NB_SHOOT1, CH_WEAPON_A, 0, WEP_PORTO.m_id | HITTYPE_SECONDARY);
 		DropBall(_ball, w_shotorg, trigger_push_calculatevelocity(_ball.origin, _ball.enemy, 32, _ball));
 		setthink(_ball, W_Nexball_Think);
 		_ball.nextthink = time;
@@ -164,7 +157,6 @@ void W_Nexball_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 	set_movetype(missile, MOVETYPE_FLY);
 	PROJECTILE_MAKETRIGGER(missile);
 
-	//setmodel(missile, "models/elaser.mdl");  // precision set below
 	setsize(missile, '0 0 0', '0 0 0');
 	setorigin(missile, w_shotorg);
 
@@ -172,7 +164,7 @@ void W_Nexball_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 	missile.angles = vectoangles(missile.velocity);
 	settouch(missile, W_Nexball_Touch);
 	setthink(missile, SUB_Remove);
-	missile.nextthink = time + autocvar_g_balance_nexball_secondary_lifetime; //FIXME: use a distance instead?
+	missile.nextthink = time + autocvar_g_balance_nexball_secondary_lifetime;
 
 	missile.effects = EF_BRIGHTFIELD | EF_LOWPRECISION;
 	missile.flags = FL_PROJECTILE;

@@ -28,8 +28,5 @@ add_library(gmqcclib ${SOURCE_FILES})
 add_executable(gmqcc main.cpp)
 target_link_libraries(gmqcc gmqcclib)
 
-add_executable(testsuite test.cpp)
-target_link_libraries(testsuite gmqcclib)
-
 add_executable(qcvm exec.cpp)
 target_link_libraries(qcvm gmqcclib)

@@ -1,55 +1,147 @@
 from __future__ import annotations
 
-RESP_WIDTH = 4
-OBS_WIDTH = 40
-CART_WIDTH = 12
-EVT_WIDTH = 6
-EVT_ROWS = 256
-MAX_CARTS = 4
+MAP_MEASUREMENT_SCHEMA = 11
+RESP_WIDTH = 8
+OBS_WIDTH = 83
+CART_WIDTH = 16
+EVT_WIDTH = 17
+STRATEGY_DEADLINE_S = 0.4
+WEAPON_WORD_BITS = 24
+CELL_EXTENT = 256
 
-OBS = dict(ID=0, TEAM=1, HEALTH=2, ARMOR=3, AMMO=4, POS_X=5, POS_Y=6, POS_Z=7,
-           VEL_X=8, VEL_Y=9, VEL_Z=10, WEAPONS=11, POWER=12, TSS=13, CELL=14,
-           NCART=15, NCART_D=16, ALIVE=17, CONTROL=18, APPLIED_TARGET=19,
-           TARGET_RESOLVED=20, GOAL_TARGET=21, GOAL_DISTANCE=22, GOAL_MATCH=23,
-           TARGET_TOUCH=24)
-CS = dict(ID=0, DEPTH=1, LENGTH=2, CTRL=3, SPEED=4, IDLE=5, BANKMASK=6, PROGRESS=7,
-          POS_X=8, POS_Y=9, POS_Z=10)
-EVT = dict(CELL=0, KIND=1, TEAM=2, SUBJECT=3, VALUE=4, TIME=5)
-EVT_KIND = dict(ITEM_GONE=0, ITEM_HERE=1, ENEMY_HERE=2, RIVAL_HERE=3,
-                # cell -> cell navigable adjacency from the stock waypoint graph;
-                # CELL is the source cell, SUBJECT the destination, VALUE the
-                # link length / 1024. Map geometry, not perception.
-                CELL_LINK=4)
-SC = dict(TARGET=0, GAIN=1, COMMIT=2, SPAWN=3)
+OBS = dict(
+    ID=0, TEAM=1, HEALTH=2, ARMOR=3,
+    AMMO_SHELLS=4, AMMO_BULLETS=5, AMMO_ROCKETS=6, AMMO_CELLS=7,
+    AMMO_PLASMA=8, AMMO_FUEL=9,
+    POS_X=10, POS_Y=11, POS_Z=12, VEL_X=13, VEL_Y=14, VEL_Z=15,
+    WEAPONS_X=16, WEAPONS_Y=17, WEAPONS_Z=18,
+    STRENGTH_FINISHED=19, SPAWN_TIME=20, ENGINE_TIME=21,
+    CELL_X=22, CELL_Y=23, ALIVE=24, CONTROL=25,
+    APPLIED_TARGET_KIND=26, APPLIED_TARGET_ID=27,
+    APPLIED_TARGET_CELL_X=28, APPLIED_TARGET_CELL_Y=29, TARGET_RESOLVED=30,
+    GOAL_TARGET_KIND=31, GOAL_TARGET_ID=32,
+    GOAL_TARGET_CELL_X=33, GOAL_TARGET_CELL_Y=34, GOAL_PRESENT=35,
+    GOAL_POS_X=36, GOAL_POS_Y=37, GOAL_POS_Z=38,
+    RESPONSE_SEQ=39, RESPONSE_TIME=40, ROUTE_SEQ=41, ROUTE_LATENCY=42,
+    GOAL_SEQ=43, GOAL_LATENCY=44, TOUCH_SEQ=45, TOUCH_LATENCY=46,
+    ENEMY_DAMAGE_DEALT=47, ENEMY_DAMAGE_TAKEN=48, ENEMY_KILLS=49,
+    DEATHS=50, PICKUPS=51, CART_PUSH=52, CART_CONTEST=53,
+    OUTCOME_A_SEQ=54,
+    OUTCOME_A_ENEMY_DAMAGE_DEALT=55, OUTCOME_A_ENEMY_DAMAGE_TAKEN=56,
+    OUTCOME_A_ENEMY_KILLS=57, OUTCOME_A_DEATHS=58, OUTCOME_A_PICKUPS=59,
+    OUTCOME_A_CART_PUSH=60, OUTCOME_A_CART_CONTEST=61,
+    OUTCOME_B_SEQ=62,
+    OUTCOME_B_ENEMY_DAMAGE_DEALT=63, OUTCOME_B_ENEMY_DAMAGE_TAKEN=64,
+    OUTCOME_B_ENEMY_KILLS=65, OUTCOME_B_DEATHS=66, OUTCOME_B_PICKUPS=67,
+    OUTCOME_B_CART_PUSH=68, OUTCOME_B_CART_CONTEST=69,
+    SWIZZLE_ACTIVE=70, SWIZZLE_EPOCH=71, SWIZZLE_PLAYER_COUNT=72,
+    SWIZZLE_SPOT_COUNT=73, SWIZZLE_SLOT_COUNT=74, SWIZZLE_TICKET=75,
+    SWIZZLE_COHORT=76, SWIZZLE_COHORT_COUNT=77, SWIZZLE_GENERATION=78,
+    SWIZZLE_SCHEDULED_TIME=79, SWIZZLE_ACTUAL_TIME=80,
+    SWIZZLE_LANE=81, SWIZZLE_SPOT=82,
+)
+CS = dict(
+    ID=0, PATH_POSITION=1, PATH_LENGTH=2, CONTROL_TEAM=3, SPEED=4,
+    IDLE_TIME=5, LEAD_TEAM=6, SECOND_TEAM=7, HOME_TEAM=8,
+    POS_X=9, POS_Y=10, POS_Z=11,
+    SUPPORTS_PLAYER=12,
+    TEAM_COUNT=13,
+    ROLLBACK_ACTIVE=14,
+    ROLLBACK_TARGET=15,
+)
+EVT = dict(
+    KIND=0, TIME=1, OBSERVER=2, TEAM=3, SUBJECT=4,
+    CELL_X=5, CELL_Y=6, TARGET_CELL_X=7, TARGET_CELL_Y=8,
+    POS_X=9, POS_Y=10, POS_Z=11, RESPAWN_TIME=12, HEALTH=13,
+    LINK_LENGTH=14, AMOUNT=15, RESPONSE_SEQ=16,
+)
+EVT_KIND = dict(
+    ITEM_GONE=0, ITEM_HERE=1, ENEMY_HERE=2, RIVAL_HERE=3,
+    CELL_LINK=4, DAMAGE=5, KILL=6, PICKUP=7, ROUND=8,
+)
+SC = dict(
+    INSTRUMENT_KIND=0,
+    TARGET_KIND=1, TARGET_ID=2, TARGET_CELL_X=3, TARGET_CELL_Y=4,
+    GAIN=5, COMMIT=6, SPAWN=7,
+)
+INSTRUMENT_KIND = dict(
+    NONE=0, PUSH_CART=1, SUPPRESS_CART=2, CONTEST_POST=3,
+    HUNT_RIVAL=4, EXPLORE_CELL=5, SPAWN_TIMING=6, IDLE=7,
+)
+TARGET_KIND = dict(NONE=0, CART=1, ITEM=2, RIVAL=3, CELL=4)
+TARGET_KIND_NAME = {value: name.lower() for name, value in TARGET_KIND.items()}
+CONTROL_FIELDS = ("GAIN", "COMMIT_RESIDUAL", "SPAWN")
+CONTROL_WIDTH = len(CONTROL_FIELDS)
+OUTCOME_NAMES = (
+    "enemy_damage_dealt", "enemy_damage_taken", "enemy_kills", "deaths",
+    "pickups", "cart_push", "cart_contest",
+)
+OBS_OUTCOME_COUNTER_COLUMNS = tuple((name, name.upper()) for name in OUTCOME_NAMES)
+OBS_ROUTED_OUTCOME_GROUPS = tuple(
+    (
+        f"OUTCOME_{bank}_SEQ",
+        tuple((name, f"OUTCOME_{bank}_{name.upper()}") for name in OUTCOME_NAMES),
+    )
+    for bank in ("A", "B")
+)
 
-TGT_CART_BASE = 0
-TGT_ITEM_BASE = 65536
-TGT_RIVAL_BASE = 131072
-TGT_CELL_BASE = 196608
+OBS_AMMO_COLUMNS = (
+    "AMMO_SHELLS", "AMMO_BULLETS", "AMMO_ROCKETS",
+    "AMMO_CELLS", "AMMO_PLASMA", "AMMO_FUEL",
+)
+OBS_WEAPON_COLUMNS = ("WEAPONS_X", "WEAPONS_Y", "WEAPONS_Z")
+OBS_CATEGORICAL_COLUMNS = (
+    "ID", "TEAM", "CELL_X", "CELL_Y",
+    "APPLIED_TARGET_KIND", "APPLIED_TARGET_ID",
+    "APPLIED_TARGET_CELL_X", "APPLIED_TARGET_CELL_Y",
+    "GOAL_TARGET_KIND", "GOAL_TARGET_ID",
+    "GOAL_TARGET_CELL_X", "GOAL_TARGET_CELL_Y",
+    "RESPONSE_SEQ", "ROUTE_SEQ", "GOAL_SEQ", "TOUCH_SEQ",
+    "OUTCOME_A_SEQ", "OUTCOME_B_SEQ",
+    "SWIZZLE_EPOCH", "SWIZZLE_TICKET", "SWIZZLE_COHORT",
+    "SWIZZLE_GENERATION", "SWIZZLE_LANE", "SWIZZLE_SPOT",
+)
+CART_CATEGORICAL_COLUMNS = (
+    "ID", "CONTROL_TEAM", "LEAD_TEAM", "SECOND_TEAM", "HOME_TEAM",
+)
+XAN_SCALAR_COLUMNS = (
+    "HEALTH", "ARMOR", *OBS_AMMO_COLUMNS,
+    "POS_X", "POS_Y", "POS_Z", "VEL_X", "VEL_Y", "VEL_Z",
+    "STRENGTH_FINISHED", "SPAWN_TIME", "ENGINE_TIME", "ALIVE",
+)
+XAN = {name: index for index, name in enumerate(XAN_SCALAR_COLUMNS)}
+XAN_WEAPON_SLICES = {
+    name: (
+        len(XAN_SCALAR_COLUMNS) + word * WEAPON_WORD_BITS,
+        len(XAN_SCALAR_COLUMNS) + (word + 1) * WEAPON_WORD_BITS,
+    )
+    for word, name in enumerate(OBS_WEAPON_COLUMNS)
+}
+XAN_BLOCKS = (
+    ("health armor", XAN["HEALTH"], XAN["ARMOR"] + 1),
+    ("ammo resources", XAN["AMMO_SHELLS"], XAN["AMMO_FUEL"] + 1),
+    ("position", XAN["POS_X"], XAN["POS_Z"] + 1),
+    ("velocity", XAN["VEL_X"], XAN["VEL_Z"] + 1),
+    ("strength and timestamps", XAN["STRENGTH_FINISHED"], XAN["ENGINE_TIME"] + 1),
+    ("alive", XAN["ALIVE"], XAN["ALIVE"] + 1),
+    ("weapon words expanded to bits", XAN_WEAPON_SLICES["WEAPONS_X"][0],
+     XAN_WEAPON_SLICES["WEAPONS_Z"][1]),
+)
+XAN_WIDTH = XAN_WEAPON_SLICES["WEAPONS_Z"][1]
 
+def state_coordinate_kind(label):
+    prefix, _, name = label.rpartition(".")
+    column = name.upper()
+    if prefix == "observation" and column in OBS_WEAPON_COLUMNS:
+        return "bitset"
+    if prefix == "observation" and column in OBS_CATEGORICAL_COLUMNS:
+        return "categorical"
+    if prefix.startswith("cart.") and column in CART_CATEGORICAL_COLUMNS:
+        return "categorical"
+    return "real"
 
-def encode_target(kind, index):
-    return {"cart": TGT_CART_BASE, "item": TGT_ITEM_BASE,
-            "rival": TGT_RIVAL_BASE, "cell": TGT_CELL_BASE}[kind] + int(index)
-
-
-def decode_target(target):
-    target = int(target)
-    if target >= TGT_CELL_BASE:
-        return "cell", target - TGT_CELL_BASE
-    if target >= TGT_RIVAL_BASE:
-        return "rival", target - TGT_RIVAL_BASE
-    if target >= TGT_ITEM_BASE:
-        return "item", target - TGT_ITEM_BASE
-    return "cart", target
-
-
-def _selftest():
-    assert RESP_WIDTH == len(SC)
-    assert max(OBS.values()) < OBS_WIDTH and max(CS.values()) < CART_WIDTH and max(EVT.values()) < EVT_WIDTH
-    for kind, index in (("cart", 3), ("item", 32767), ("rival", 32767), ("cell", 65535)):
-        assert decode_target(encode_target(kind, index)) == (kind, index)
-
-
-if __name__ == "__main__":
-    _selftest()
+def decode_target(kind, subject, cell_x=0, cell_y=0):
+    name = TARGET_KIND_NAME.get(int(kind), "none")
+    if name == "none":
+        return None, None
+    return (name, (int(cell_x), int(cell_y))) if name == "cell" else (name, int(subject))

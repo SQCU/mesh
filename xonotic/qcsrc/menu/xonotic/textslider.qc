@@ -15,7 +15,7 @@ void XonoticTextSlider_configureXonoticTextSlider(entity me, string theCvar, str
 {
 	me.configureSliderVisuals(me, me.fontSize, me.align, me.valueSpace, me.image);
 	me.controlledCvar = (theCvar) ? theCvar : string_null;
-	// me.loadCvars(me); // don't load it yet
+
 	setZonedTooltip(me, theTooltip, theCvar);
 }
 void XonoticTextSlider_setValue(entity me, float val)
@@ -47,8 +47,7 @@ void XonoticTextSlider_loadCvars(entity me)
 	me.setValueFromIdentifier_noAnim(me, s);
 	if(me.value < 0 && n > 1)
 	{
-		// if it failed: check if all cvars have the same value
-		// if yes, try its value as 1-word identifier
+
 		for(i = 1; i < n; ++i)
 			if(cvar_string(argv(i)) != cvar_string(argv(i-1)))
 				break;
@@ -66,7 +65,7 @@ void XonoticTextSlider_saveCvars(entity me)
 		float n = tokenize_console(me.controlledCvar);
 		if(n == 1)
 		{
-			// this is a special case to allow spaces in the identifiers
+
 			cvar_set(argv(0), me.getIdentifier(me));
 			CheckSendCvars(me, argv(0));
 		}

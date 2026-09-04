@@ -9,16 +9,13 @@ struct token {
         vec3_t v;
         int i;
         qcfloat_t f;
-        qc_type t; /* type */
+        qc_type t;
     } constval;
     lex_ctx_t ctx;
 };
 
-/* Lexer
- *
- */
 enum {
-    /* Other tokens which we can return: */
+
     TOKEN_NONE = 0,
     TOKEN_START = 128,
 
@@ -28,18 +25,18 @@ enum {
 
     TOKEN_OPERATOR,
 
-    TOKEN_KEYWORD, /* loop */
+    TOKEN_KEYWORD,
 
-    TOKEN_DOTS, /* 3 dots, ... */
+    TOKEN_DOTS,
 
-    TOKEN_ATTRIBUTE_OPEN,  /* [[ */
-    TOKEN_ATTRIBUTE_CLOSE, /* ]] */
+    TOKEN_ATTRIBUTE_OPEN,
+    TOKEN_ATTRIBUTE_CLOSE,
 
-    TOKEN_VA_ARGS, /* for the ftepp only */
-    TOKEN_VA_ARGS_ARRAY, /* for the ftepp only */
-    TOKEN_VA_COUNT,     /* to get the count of vaargs */
+    TOKEN_VA_ARGS,
+    TOKEN_VA_ARGS_ARRAY,
+    TOKEN_VA_COUNT,
 
-    TOKEN_STRINGCONST, /* not the typename but an actual "string" */
+    TOKEN_STRINGCONST,
     TOKEN_CHARCONST,
     TOKEN_VECTORCONST,
     TOKEN_INTCONST,
@@ -48,17 +45,10 @@ enum {
     TOKEN_WHITE,
     TOKEN_EOL,
 
-    /* if we add additional tokens before this, the exposed API
-     * should not be broken anyway, but EOF/ERROR/... should
-     * still be at the bottom
-     */
     TOKEN_EOF = 1024,
 
-    /* We use '< TOKEN_ERROR', so TOKEN_FATAL must come after it and any
-     * other error related tokens as well
-     */
     TOKEN_ERROR,
-    TOKEN_FATAL /* internal error, eg out of memory */
+    TOKEN_FATAL
 };
 
 struct frame_macro {
@@ -74,7 +64,7 @@ struct lex_file {
 
     char   *name;
     size_t  line;
-    size_t  sline; /* line at the start of a token */
+    size_t  sline;
     size_t  column;
 
     int     peek[256];
@@ -82,14 +72,14 @@ struct lex_file {
 
     bool    eof;
 
-    token   tok; /* not a pointer anymore */
+    token   tok;
 
     struct {
         unsigned noops:1;
-        unsigned nodigraphs:1; /* used when lexing string constants */
-        unsigned preprocessing:1; /* whitespace and EOLs become actual tokens */
-        unsigned mergelines:1; /* backslash at the end of a line escapes the newline */
-    } flags; /* sizeof == 1 */
+        unsigned nodigraphs:1;
+        unsigned preprocessing:1;
+        unsigned mergelines:1;
+    } flags;
 
     int framevalue;
     frame_macro *frames;
@@ -103,10 +93,6 @@ lex_file* lex_open_string(const char *str, size_t len, const char *name);
 void      lex_close(lex_file   *lex);
 int       lex_do   (lex_file   *lex);
 void      lex_cleanup(void);
-
-/* Parser
- *
- */
 
 enum {
     ASSOC_LEFT,
@@ -126,24 +112,19 @@ struct oper_info {
     bool         folds;
 };
 
-/*
- * Explicit uint8_t casts since the left operand of shift operator cannot
- * be negative, even though it won't happen, this supresses the future
- * possibility.
- */
 #define opid1(a)     ((uint8_t)a)
 #define opid2(a,b)   (((uint8_t)a<<8) |(uint8_t)b)
 #define opid3(a,b,c) (((uint8_t)a<<16)|((uint8_t)b<<8)|(uint8_t)c)
 
 static const oper_info c_operators[] = {
-    { "(",       0, opid1('('),         ASSOC_LEFT,  99, OP_PREFIX, false}, /* paren expression - non function call */
+    { "(",       0, opid1('('),         ASSOC_LEFT,  99, OP_PREFIX, false},
     { "_length", 1, opid3('l','e','n'), ASSOC_RIGHT, 98, OP_PREFIX, true},
 
     { "++",     1, opid3('S','+','+'), ASSOC_LEFT,  17, OP_SUFFIX, false},
     { "--",     1, opid3('S','-','-'), ASSOC_LEFT,  17, OP_SUFFIX, false},
     { ".",      2, opid1('.'),         ASSOC_LEFT,  17, 0,         false},
-    { "(",      0, opid1('('),         ASSOC_LEFT,  17, 0,         false}, /* function call */
-    { "[",      2, opid1('['),         ASSOC_LEFT,  17, 0,         false}, /* array subscript */
+    { "(",      0, opid1('('),         ASSOC_LEFT,  17, 0,         false},
+    { "[",      2, opid1('['),         ASSOC_LEFT,  17, 0,         false},
 
     { "++",     1, opid3('+','+','P'), ASSOC_RIGHT, 16, OP_PREFIX, false},
     { "--",     1, opid3('-','-','P'), ASSOC_RIGHT, 16, OP_PREFIX, false},
@@ -153,7 +134,6 @@ static const oper_info c_operators[] = {
     { "~",      1, opid2('~','P'),     ASSOC_RIGHT, 14, OP_PREFIX, true},
     { "+",      1, opid2('+','P'),     ASSOC_RIGHT, 14, OP_PREFIX, false},
     { "-",      1, opid2('-','P'),     ASSOC_RIGHT, 14, OP_PREFIX, true},
-/*  { "&",      1, opid2('&','P'),     ASSOC_RIGHT, 14, OP_PREFIX, false}, */
 
     { "*",      2, opid1('*'),         ASSOC_LEFT,  13, 0,         true},
     { "/",      2, opid1('/'),         ASSOC_LEFT,  13, 0,         true},
@@ -205,13 +185,13 @@ static const oper_info c_operators[] = {
 };
 
 static const oper_info fte_operators[] = {
-    { "(",   0, opid1('('),         ASSOC_LEFT,  99, OP_PREFIX, false}, /* paren expression - non function call */
+    { "(",   0, opid1('('),         ASSOC_LEFT,  99, OP_PREFIX, false},
 
     { "++",  1, opid3('S','+','+'), ASSOC_LEFT,  15, OP_SUFFIX, false},
     { "--",  1, opid3('S','-','-'), ASSOC_LEFT,  15, OP_SUFFIX, false},
     { ".",   2, opid1('.'),         ASSOC_LEFT,  15, 0,         false},
-    { "(",   0, opid1('('),         ASSOC_LEFT,  15, 0,         false}, /* function call */
-    { "[",   2, opid1('['),         ASSOC_LEFT,  15, 0,         false}, /* array subscript */
+    { "(",   0, opid1('('),         ASSOC_LEFT,  15, 0,         false},
+    { "[",   2, opid1('['),         ASSOC_LEFT,  15, 0,         false},
 
     { "!",   1, opid2('!','P'),     ASSOC_RIGHT, 14, OP_PREFIX, true},
     { "+",   1, opid2('+','P'),     ASSOC_RIGHT, 14, OP_PREFIX, false},
@@ -252,17 +232,16 @@ static const oper_info fte_operators[] = {
     { "&&",  2, opid2('&','&'),     ASSOC_LEFT,  5,  0,         true},
     { "||",  2, opid2('|','|'),     ASSOC_LEFT,  5,  0,         true},
 
-    /* Leave precedence 3 for : with -fcorrect-ternary */
     { ",",   2, opid1(','),         ASSOC_LEFT,  2,  0,         false},
     { ":",   0, opid2(':','?'),     ASSOC_RIGHT, 1,  0,         false}
 };
 
 static const oper_info qcc_operators[] = {
-    { "(",   0, opid1('('),         ASSOC_LEFT,  99, OP_PREFIX, false}, /* paren expression - non function call */
+    { "(",   0, opid1('('),         ASSOC_LEFT,  99, OP_PREFIX, false},
 
     { ".",   2, opid1('.'),         ASSOC_LEFT,  15, 0,         false},
-    { "(",   0, opid1('('),         ASSOC_LEFT,  15, 0,         false}, /* function call */
-    { "[",   2, opid1('['),         ASSOC_LEFT,  15, 0,         false}, /* array subscript */
+    { "(",   0, opid1('('),         ASSOC_LEFT,  15, 0,         false},
+    { "[",   2, opid1('['),         ASSOC_LEFT,  15, 0,         false},
 
     { "!",   1, opid2('!','P'),     ASSOC_RIGHT, 14, OP_PREFIX, true},
     { "+",   1, opid2('+','P'),     ASSOC_RIGHT, 14, OP_PREFIX, false},

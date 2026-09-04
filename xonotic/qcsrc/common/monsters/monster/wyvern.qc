@@ -83,7 +83,7 @@ void M_Wyvern_Attack_Fireball(entity this)
 {
 	w_shotdir = normalize((this.enemy.origin + '0 0 10') - this.origin);
 	Weapon wep = WEP_WYVERN_ATTACK;
-	// TODO
+
 	.entity weaponentity = weaponentities[0];
 	wep.wr_think(wep, this, weaponentity, 1);
 }
@@ -96,7 +96,7 @@ bool M_Wyvern_Attack(int attack_type, entity actor, entity targ, .entity weapone
 		case MONSTER_ATTACK_RANGED:
 		{
 			Monster_Delay(actor, 0, 1, M_Wyvern_Attack_Fireball);
-			//actor.anim_finished = time + 1.2;
+
 			setanim(actor, actor.anim_shoot, false, true, true);
 			if(actor.animstate_endtime > time)
 				actor.anim_finished = actor.animstate_endtime;
@@ -111,7 +111,7 @@ bool M_Wyvern_Attack(int attack_type, entity actor, entity targ, .entity weapone
 }
 
 spawnfunc(monster_wyvern) { Monster_Spawn(this, true, MON_WYVERN); }
-#endif // SVQC
+#endif
 
 #ifdef SVQC
 METHOD(Wyvern, mr_think, bool(Wyvern this, entity actor))
@@ -154,12 +154,12 @@ METHOD(Wyvern, mr_anim, bool(Wyvern this, entity actor))
     actor.anim_idle = animfixfps(actor, '0 1 1', none);
     actor.anim_walk = animfixfps(actor, '1 1 1', none);
     actor.anim_run = animfixfps(actor, '2 1 1', none);
-    actor.anim_pain1 = animfixfps(actor, '3 1 2', none); // 0.5 seconds
-    actor.anim_pain2 = animfixfps(actor, '4 1 2', none); // 0.5 seconds
-    actor.anim_melee = animfixfps(actor, '5 1 5', none); // analyze models and set framerate
-    actor.anim_shoot = animfixfps(actor, '6 1 5', none); // analyze models and set framerate
-    actor.anim_die1 = animfixfps(actor, '7 1 0.5', none); // 2 seconds
-    actor.anim_die2 = animfixfps(actor, '8 1 0.5', none); // 2 seconds
+    actor.anim_pain1 = animfixfps(actor, '3 1 2', none);
+    actor.anim_pain2 = animfixfps(actor, '4 1 2', none);
+    actor.anim_melee = animfixfps(actor, '5 1 5', none);
+    actor.anim_shoot = animfixfps(actor, '6 1 5', none);
+    actor.anim_die1 = animfixfps(actor, '7 1 0.5', none);
+    actor.anim_die2 = animfixfps(actor, '8 1 0.5', none);
     return true;
 }
 #endif

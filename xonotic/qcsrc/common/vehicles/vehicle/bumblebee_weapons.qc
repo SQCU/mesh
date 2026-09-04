@@ -22,8 +22,8 @@ bool bumble_raygun_send(entity this, entity to, float sf)
     WriteByte(MSG_ENTITY, sf);
     if(sf & BRG_SETUP)
     {
-        WriteByte(MSG_ENTITY, etof(this.realowner));
-        WriteByte(MSG_ENTITY, this.realowner.team);
+		WriteShort(MSG_ENTITY, etof(this.realowner));
+		WriteShort(MSG_ENTITY, this.realowner.team);
         WriteByte(MSG_ENTITY, this.cnt);
     }
 
@@ -54,8 +54,8 @@ NET_HANDLE(ENT_CLIENT_BUMBLE_RAYGUN, bool isnew)
 
     if(sf & BRG_SETUP)
     {
-        this.cnt  = ReadByte();
-        this.team = ReadByte();
+		this.cnt  = ReadShort();
+		this.team = ReadShort();
         this.count  = ReadByte();
 
         if(this.count)
@@ -69,7 +69,6 @@ NET_HANDLE(ENT_CLIENT_BUMBLE_RAYGUN, bool isnew)
         this.draw = bumble_raygun_draw;
         if (isnew) IL_PUSH(g_drawables, this);
     }
-
 
     if(sf & BRG_START)
     {
@@ -105,19 +104,19 @@ void bumble_raygun_draw(entity this)
     float i, df, sz, al;
     for(i = -0.1; i < 0.2; i += 0.1)
     {
-        df = DRAWFLAG_NORMAL; //((random() < 0.5) ? DRAWFLAG_ADDITIVE : DRAWFLAG_SCREEN);
+        df = DRAWFLAG_NORMAL;
         sz = 5 + random() * 5;
         al = 0.25 + random() * 0.5;
         _vtmp1 = this.origin + _dir * _len * (0.25 + i);
-        _vtmp1 += (randomvec() * (_len * 0.2) * (frametime * 2));       //this.raygun_l1;
+        _vtmp1 += (randomvec() * (_len * 0.2) * (frametime * 2));
         Draw_CylindricLine(this.origin, _vtmp1, sz, "gfx/colors/white", 1, 1, this.colormod, al, df, view_origin);
 
         _vtmp2 = this.origin + _dir * _len * (0.5 + i);
-        _vtmp2 += (randomvec() * (_len * 0.2) * (frametime * 5));       //this.raygun_l2;
+        _vtmp2 += (randomvec() * (_len * 0.2) * (frametime * 5));
         Draw_CylindricLine(_vtmp1, _vtmp2, sz, "gfx/colors/white", 1, 1, this.colormod, al, df, view_origin);
 
         _vtmp1 = this.origin + _dir * _len * (0.75 + i);
-        _vtmp1 += randomvec() * (_len * 0.2) * (frametime * 10);     //this.raygun_l3;
+        _vtmp1 += randomvec() * (_len * 0.2) * (frametime * 10);
         Draw_CylindricLine(_vtmp2, _vtmp1, sz, "gfx/colors/white", 1, 1, this.colormod, al, df, view_origin);
 
         Draw_CylindricLine(_vtmp1, this.bumble_origin +  randomvec() * 32, sz, "gfx/colors/white", 1, 1, this.colormod, al, df, view_origin);

@@ -11,12 +11,12 @@ bool generator_send(entity this, entity to, int sf)
 		WriteByte(MSG_ENTITY, GetResource(this, RES_HEALTH));
 		WriteByte(MSG_ENTITY, this.max_health);
 		WriteByte(MSG_ENTITY, this.count);
-		WriteByte(MSG_ENTITY, this.team);
+		WriteShort(MSG_ENTITY, this.team);
 	}
 
 	if(sf & GSF_STATUS)
 	{
-		WriteByte(MSG_ENTITY, this.team);
+		WriteShort(MSG_ENTITY, this.team);
 
 		if(GetResource(this, RES_HEALTH) <= 0)
 			WriteByte(MSG_ENTITY, 0);

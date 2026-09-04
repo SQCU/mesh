@@ -5,68 +5,43 @@ HERE=$(cd -- "$(dirname -- "$0")" && pwd)
 STRAT=$(cd -- "$HERE/.." && pwd)
 XONOTIC=$(cd -- "$STRAT/../.." && pwd)
 REPO=$(cd -- "$XONOTIC/.." && pwd)
+MESH_PY="$REPO/bin/mesh-python"
 
 PORT=${JORACLE_PORT:-26042}
-VIEWER_PORT=${JORACLE_VIEWER_PORT:-8795}
+VIEWER_PORT=${JORACLE_VIEWER_PORT:-8787}
 RUNDIR=${JORACLE_RUNDIR:-/tmp/mesh-joracle}
-# Resolve the peer by IDENTITY at use time, not by a string baked into
-# ~/.ssh/config. That config said 192.168.1.183 -- a subnet this machine has not
-# been on for some time -- so every run reported "mesh-mini unreachable" while
-# the node was up on 10.0.0.165 and on the fabric at 169.254.225.22. One stale
-# string took out the responder, the telemetry viewer, and the conclusion that
-# any of it worked. rdma/peers.py asks the fabric instead.
-MINI=${JORACLE_MINI:-$(python3 "$REPO/rdma/peers.py" mesh-mini 2>/dev/null)}
-[ -n "$MINI" ] || MINI=mesh-mini   # no live edge: fall through and fail loudly
+MINI=${JORACLE_MINI:-mesh-mini}
 MINI_RUN=${JORACLE_MINI_RUNDIR:-/tmp/mesh-joracle}
-MINI_PY=${JORACLE_MINI_PYTHON:-\$HOME/.venv-mesh-uv/bin/python}
+MINI_PY=/usr/local/mesh/bin/mesh-python
 ENGINE=${JORACLE_ENGINE:-$XONOTIC/darkplaces-work/darkplaces-dedicated}
 ASSETROOT=${JORACLE_ASSETROOT:-$HOME/dox/xonotic/Xonotic}
 BASEDIR=$RUNDIR/basedir
 TRAINING_ASSETS=${JORACLE_TRAINING_ASSETS:-}
-BOTS=${JORACLE_BOTS:-30}
-TEAMS=${JORACLE_TEAMS:-5}
-CARTS=${JORACLE_CARTS:-4}
+PBRPK3=${JORACLE_PBR_PK3:-$XONOTIC/render-build/zzzzz-mesh-pbr.pk3}
+RUNTIMEPK3=${JORACLE_RUNTIME_PK3:-$XONOTIC/payload-build/zzzzzz-mesh-runtime.pk3}
+BOTS=${JORACLE_BOTS:-255}
+TEAMS=${JORACLE_TEAMS:-256}
+CARTS=${JORACLE_CARTS:-32}
 SKILL=${JORACLE_SKILL:-4}
-MAXPLAYERS=${JORACLE_MAXPLAYERS:-64}
+MAXPLAYERS=${JORACLE_MAXPLAYERS:-256}
+MAPLIST=${JORACLE_MAPLIST:-}
 PEER_NODE=${JORACLE_PEER_NODE:-0}
 OFF_POLICY=${JORACLE_OFF_POLICY:-3}
 TELEMETRY="$MINI_RUN/output/live.jsonl"
 MANIFEST="$RUNDIR/dev.manifest"
 SERVER_SESSION=${JORACLE_SERVER_SESSION:-joracle-server}
 CLIENT_SESSION=${JORACLE_CLIENT_SESSION:-joracle-client}
-VIEWER_SESSION=${JORACLE_VIEWER_SESSION:-joracle-viewer}
+MINI_REACHABLE=0
 
 say() { printf '[demo] %s\n' "$*" >&2; }
-die() { printf '[demo] BLOCKED: %s\n' "$*" >&2; exit 3; }
-
-port_free() {
-  if command -v lsof >/dev/null 2>&1; then
-    ! lsof -nP -iUDP:"$1" -iTCP:"$1" >/dev/null 2>&1
-  else
-    ! netstat -an 2>/dev/null | grep -q "\.$1 "
-  fi
-}
-
-select_port() {
-  requested=$1
-  while ! port_free "$requested"; do requested=$((requested + 1)); done
-  printf '%s\n' "$requested"
-}
+ssh_node() { ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$MINI" "$@"; }
+ssh_node_bg() { ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -f "$MINI" "$@"; }
+SSH_TRANSPORT="ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 file_id() {
   cksum "$1" | awk '{print $1 ":" $2}'
 }
 
-# Identity of the SOURCE that produced the build. The manifest already proved
-# deployed == payload-build; it could not say WHICH PROGRAM that was, so a
-# running server could be reasoned about as if it were current source while
-# being hours behind it. That ambiguity is what produced five progs.dat and a
-# session spent debugging code that was not running.
-#
-# A build output has no diff to merge: progs.dat is a pure function of (source,
-# compiler, flags). Two differing .dat are one program built twice, not two
-# programs -- so the fix is never to reconcile them, it is to name the source
-# and rebuild.
 qcsrc_id() {
   find "$XONOTIC/qcsrc" \( -name '*.qc' -o -name '*.qh' -o -name '*.inc' \) \
     | sort | xargs cksum 2>/dev/null | cksum | awk '{print $1}'
@@ -78,15 +53,23 @@ pid=$(cat "$RUNDIR/server.pid")
 port=$PORT
 engine=$ENGINE
 engine_id=$(file_id "$ENGINE")
+client_engine=$XONOTIC/darkplaces-work/darkplaces-sdl
+client_engine_id=$(file_id "$XONOTIC/darkplaces-work/darkplaces-sdl")
 basedir=$BASEDIR
 userdir=$RUNDIR/userdir
+assets_id=$(file_id "$RUNDIR/assets.manifest")
+pbr_id=$(file_id "$PBRPK3")
+runtime_id=$(file_id "$RUNTIMEPK3")
 progs_id=$(file_id "$RUNDIR/userdir/data/progs.dat")
 csprogs_id=$(file_id "$RUNDIR/userdir/data/csprogs.dat")
-commit=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
+menu_id=$(file_id "$RUNDIR/userdir/data/menu.dat")
+effectinfo_id=$(file_id "$RUNDIR/userdir/data/effectinfo.txt")
+runtime=$($MESH_PY "$REPO/bin/mesh-runtime-id.py")
+branch=$(git -C "$REPO" symbolic-ref --short HEAD 2>/dev/null || printf main)
 dirty=$(git -C "$REPO" status --porcelain -- xonotic/qcsrc | wc -l | tr -d ' ')
 qcsrc_id=$(qcsrc_id)
 set_id=$(sed -n 's/^set_id=//p' "$XONOTIC/payload-build/BUILD_MANIFEST" 2>/dev/null)
-build_commit=$(sed -n 's/^commit=//p' "$XONOTIC/payload-build/BUILD_MANIFEST" 2>/dev/null)
+build_branch=$(sed -n 's/^branch=//p' "$XONOTIC/payload-build/BUILD_MANIFEST" 2>/dev/null)
 build_dirty=$(sed -n 's/^dirty=//p' "$XONOTIC/payload-build/BUILD_MANIFEST" 2>/dev/null)
 EOF
 }
@@ -99,23 +82,31 @@ server_identity() {
   manifest_port=$(sed -n 's/^port=//p' "$MANIFEST")
   manifest_userdir=$(sed -n 's/^userdir=//p' "$MANIFEST")
   manifest_engine_id=$(sed -n 's/^engine_id=//p' "$MANIFEST")
+  manifest_client_engine=$(sed -n 's/^client_engine=//p' "$MANIFEST")
+  manifest_client_engine_id=$(sed -n 's/^client_engine_id=//p' "$MANIFEST")
+  manifest_assets_id=$(sed -n 's/^assets_id=//p' "$MANIFEST")
+  manifest_pbr_id=$(sed -n 's/^pbr_id=//p' "$MANIFEST")
+  manifest_runtime_id=$(sed -n 's/^runtime_id=//p' "$MANIFEST")
   manifest_progs_id=$(sed -n 's/^progs_id=//p' "$MANIFEST")
   manifest_csprogs_id=$(sed -n 's/^csprogs_id=//p' "$MANIFEST")
+  manifest_menu_id=$(sed -n 's/^menu_id=//p' "$MANIFEST")
+  manifest_effectinfo_id=$(sed -n 's/^effectinfo_id=//p' "$MANIFEST")
   [ "$manifest_engine_id" = "$(file_id "$manifest_engine")" ] || return 1
+  [ "$manifest_client_engine_id" = "$(file_id "$manifest_client_engine")" ] || return 1
+  [ "$manifest_assets_id" = "$(file_id "$RUNDIR/assets.manifest")" ] || return 1
+  [ "$manifest_pbr_id" = "$(file_id "$PBRPK3")" ] || return 1
+  [ "$manifest_runtime_id" = "$(file_id "$RUNTIMEPK3")" ] || return 1
   [ "$manifest_progs_id" = "$(file_id "$manifest_userdir/data/progs.dat")" ] || return 1
   [ "$manifest_csprogs_id" = "$(file_id "$manifest_userdir/data/csprogs.dat")" ] || return 1
+  [ "$manifest_menu_id" = "$(file_id "$manifest_userdir/data/menu.dat")" ] || return 1
+  [ "$manifest_effectinfo_id" = "$(file_id "$manifest_userdir/data/effectinfo.txt")" ] || return 1
   [ "$manifest_progs_id" = "$(file_id "$XONOTIC/payload-build/progs.dat")" ] || return 1
   [ "$manifest_csprogs_id" = "$(file_id "$XONOTIC/payload-build/csprogs.dat")" ] || return 1
-  # The QC source must not have moved under the running build. Without this the
-  # server stays "identical" through any number of source edits, and every
-  # observation of it is attributed to code that is not in it.
+  [ "$manifest_menu_id" = "$(file_id "$XONOTIC/payload-build/menu.dat")" ] || return 1
+  [ "$manifest_effectinfo_id" = "$(file_id "$XONOTIC/payload-build/effectinfo.txt")" ] || return 1
   manifest_qcsrc_id=$(sed -n 's/^qcsrc_id=//p' "$MANIFEST")
   [ -n "$manifest_qcsrc_id" ] || return 1
   [ "$manifest_qcsrc_id" = "$(qcsrc_id)" ] || return 1
-  # The build SET must match too. progs/csprogs/menu are compiled separately but
-  # share STAT indices, field offsets and string tables, so a mixed set is two
-  # programs disagreeing about the wire format -- silently, since neither side
-  # errors when a stat resolves to the wrong slot. build.sh records the set.
   bm=$XONOTIC/payload-build/BUILD_MANIFEST
   [ -f "$bm" ] || return 1
   manifest_set=$(sed -n 's/^set_id=//p' "$MANIFEST")
@@ -134,15 +125,15 @@ bridge_client() {
 }
 
 preflight() {
-  [ "$PORT" = 26012 ] && PORT=26013
-  [ -x "$ENGINE" ] || die "engine not found or not executable: $ENGINE"
-  [ -d "$ASSETROOT/data" ] || die "asset root has no data/: $ASSETROOT"
-  selected=$(select_port "$PORT")
-  [ "$selected" = "$PORT" ] || say "udp/$PORT belongs to another process; dev server will use udp/$selected"
-  PORT=$selected
-  VIEWER_PORT=$(select_port "$VIEWER_PORT")
+  [ -x "$ENGINE" ] || say "engine not found or not executable: $ENGINE"
+  [ -d "$ASSETROOT/data" ] || say "asset root has no data/: $ASSETROOT"
   "$REPO/bin/mesh-bridge.sh" status >/dev/null 2>&1 || "$REPO/bin/mesh-bridge.sh" start || true
-  ssh -o BatchMode=yes -o ConnectTimeout=8 "$MINI" true 2>/dev/null || say "mesh responder host $MINI is currently unreachable; local server and client still start"
+  if ssh_node true 2>/dev/null; then
+    MINI_REACHABLE=1
+  else
+    MINI_REACHABLE=0
+    say "mesh responder host $MINI is currently unreachable; local server and client still start"
+  fi
   client=$(bridge_client)
   if [ -n "${client:-}" ] && [ "$client" != 0 ]; then
     if kill -0 "$client" 2>/dev/null; then
@@ -157,26 +148,38 @@ stage() {
   "$XONOTIC/render/build-client.sh" sdl-release
   "$XONOTIC/payload/build.sh"
   mkdir -p "$RUNDIR/userdir/data/data" "$RUNDIR/logs" "$BASEDIR/data"
-  find "$BASEDIR/data" -type l -delete
-  for asset in "$ASSETROOT"/data/xonotic-*.pk3 "$ASSETROOT"/data/font-*.pk3; do
-    [ -f "$asset" ] && ln -s "$asset" "$BASEDIR/data/$(basename "$asset")"
+  for asset in "$ASSETROOT"/data/*.pk3; do
+    if [ -f "$asset" ]; then ln -sfn "$asset" "$BASEDIR/data/$(basename "$asset")"; else say "asset unavailable: $asset"; fi
   done
   if [ -n "$TRAINING_ASSETS" ]; then
     for asset in "$TRAINING_ASSETS"/*.pk3; do
-      [ -f "$asset" ] && ln -s "$asset" "$BASEDIR/data/$(basename "$asset")"
+      if [ -f "$asset" ]; then ln -sfn "$asset" "$BASEDIR/data/$(basename "$asset")"; else say "training asset unavailable: $asset"; fi
     done
   fi
+  for asset in "$XONOTIC"/mapgen/build/*.pk3; do
+    if [ -f "$asset" ]; then ln -sfn "$asset" "$BASEDIR/data/$(basename "$asset")"; else say "generated map asset unavailable: $asset"; fi
+  done
+  "$MESH_PY" "$XONOTIC/render/pbr-materials.py" "$BASEDIR" "$PBRPK3"
+  ln -sfn "$PBRPK3" "$BASEDIR/data/$(basename "$PBRPK3")"
+  ln -sfn "$RUNTIMEPK3" "$BASEDIR/data/$(basename "$RUNTIMEPK3")"
+  : > "$RUNDIR/assets.manifest"
+  for asset in "$BASEDIR"/data/*.pk3; do
+    target=$(readlink "$asset" 2>/dev/null || printf '%s' "$asset")
+    printf '%s\t%s\t%s\n' "$(basename "$asset")" "$(file_id "$target")" "$target" >> "$RUNDIR/assets.manifest"
+  done
   mkdir -p "$RUNDIR/userdir/data/maps"
-  maps=$(python3 "$HERE/training_maps.py" "$BASEDIR/data" "$RUNDIR/userdir/data/maps")
+  maps=$("$MESH_PY" "$HERE/training_maps.py" "$BASEDIR/data" "$RUNDIR/userdir/data/maps" "$TEAMS" "$CARTS" $MAPLIST)
+  printf '%s\n' "$maps" > "$RUNDIR/maps.list"
   cp "$XONOTIC/payload-build/progs.dat"   "$RUNDIR/userdir/data/progs.dat"
   cp "$XONOTIC/payload-build/csprogs.dat" "$RUNDIR/userdir/data/csprogs.dat"
+  cp "$XONOTIC/payload-build/menu.dat" "$RUNDIR/userdir/data/menu.dat"
+  cp "$XONOTIC/payload-build/effectinfo.txt" "$RUNDIR/userdir/data/effectinfo.txt"
   cp "$XONOTIC/payload/cfg/gamemodes-payload.cfg" "$RUNDIR/userdir/data/gamemodes-payload.cfg" 2>/dev/null || true
   : > "$RUNDIR/userdir/data/autoexec.cfg"
   cat > "$RUNDIR/userdir/data/server.cfg" <<EOF
 exec gamemodes-payload.cfg
 g_payload 1
 g_payload_teams_override $TEAMS
-g_payload_cart_count $CARTS
 sv_public 0
 g_payload_warmup 2
 g_payload_round_timelimit 180
@@ -196,66 +199,88 @@ EOF
 }
 
 push_runtime() {
-  ssh "$MINI" "mkdir -p $MINI_RUN/runtime $MINI_RUN/output"
-  rsync -a --delete \
+  [ "$MINI_REACHABLE" = 1 ] || return 1
+  ssh_node "mkdir -p $MINI_RUN/runtime $MINI_RUN/output" || return 1
+  rsync -e "$SSH_TRANSPORT" -a --delete \
     --exclude '__pycache__' --exclude 'runs/curriculum' --exclude '*.npz' \
-    "$REPO/rdma/" "$MINI:$MINI_RUN/runtime/rdma/"
-  rsync -a --delete \
+    "$REPO/rdma/" "$MINI:$MINI_RUN/runtime/rdma/" || return 1
+  rsync -e "$SSH_TRANSPORT" -a --delete \
     --exclude '__pycache__' --exclude 'runs/curriculum' \
-    "$XONOTIC/solver/" "$MINI:$MINI_RUN/runtime/xonotic/solver/"
-  rsync -a --delete --exclude '__pycache__' \
-    "$XONOTIC/payload/tools/" "$MINI:$MINI_RUN/runtime/xonotic/payload/tools/"
+    "$XONOTIC/solver/" "$MINI:$MINI_RUN/runtime/xonotic/solver/" || return 1
+  rsync -e "$SSH_TRANSPORT" -a --delete --exclude '__pycache__' \
+    "$XONOTIC/payload/tools/" "$MINI:$MINI_RUN/runtime/xonotic/payload/tools/" || return 1
   say "runtime pushed to $MINI:$MINI_RUN/runtime"
 }
 
 start_server() {
+  maps=$(cat "$RUNDIR/maps.list")
+  first_map=${maps%% *}
+  autoscreenshot_mass=$(awk '/"classname"[[:space:]]+"info_autoscreenshot"/ { n++ } END { print n + 0 }' "$RUNDIR"/userdir/data/maps/*.ent)
   tmux new-session -d -s "$SERVER_SESSION" /bin/sh "$HERE/server-keep.sh" \
-    "$RUNDIR/logs/server.log" "$ENGINE" -xonotic -basedir "$BASEDIR" \
+    "$RUNDIR/logs/server.log" "$ENGINE" -norunaway -xonotic -basedir "$BASEDIR" \
     -userdir "$RUNDIR/userdir" +developer 0 +sv_public 0 +port "$PORT" \
-    +sv_autopause 0
+    +maxplayers "$MAXPLAYERS" +exec gamemodes-payload.cfg +g_payload 1 \
+    +g_max_info_autoscreenshot "$autoscreenshot_mass" \
+    +g_payload_teams_override "$TEAMS" +g_payload_warmup 2 \
+    +g_payload_round_timelimit 180 +g_payload_idle_time 3 +minplayers 0 \
+    +skill "$SKILL" +sv_autopause 0 +sv_status_privacy 0 +bot_join_empty 1 \
+    +bot_number "$BOTS" +g_maplist "$maps" +g_maplist_shuffle 1 \
+    +g_maplist_selectrandom 1 +map "$first_map"
   tmux display-message -p -t "$SERVER_SESSION" '#{pane_pid}' > "$RUNDIR/server.pid"
   write_manifest
   say "cartserver pid $(cat "$RUNDIR/server.pid") on udp/$PORT server-owned map rotation -> $RUNDIR/logs/server.log"
 }
 
 start_client() {
+  if tmux has-session -t "$CLIENT_SESSION" 2>/dev/null; then
+    tmux display-message -p -t "$CLIENT_SESSION" '#{pane_pid}' > "$RUNDIR/client.pid"
+    say "client already supervised by pid $(cat "$RUNDIR/client.pid")"
+    return
+  fi
   tmux new-session -d -s "$CLIENT_SESSION" /bin/sh "$HERE/run-logged.sh" \
     "$RUNDIR/logs/client-supervisor.log" env \
     JORACLE_CLIENT_BIN="$XONOTIC/darkplaces-work/darkplaces-sdl" \
     JORACLE_BASEDIR="$BASEDIR" \
     JORACLE_CLIENT_USERDIR="$RUNDIR/client-userdir" \
     JORACLE_CLIENT_LOG="$RUNDIR/logs/client.log" \
+    JORACLE_CLIENT_EVENTS="$RUNDIR/logs/client.events" \
     JORACLE_CLIENT_STATE="$RUNDIR/client-engine.pid" \
+    JORACLE_CLIENT_SESSIONID="$CLIENT_SESSION" \
+    JORACLE_ASSET_MANIFEST="$RUNDIR/assets.manifest" \
     "$HERE/client-keep.sh" "127.0.0.1:$PORT"
   tmux display-message -p -t "$CLIENT_SESSION" '#{pane_pid}' > "$RUNDIR/client.pid"
   say "client supervisor pid $(cat "$RUNDIR/client.pid") auto-connecting to 127.0.0.1:$PORT"
 }
 
 start_responder() {
-  ssh -o BatchMode=yes -f "$MINI" \
+  ssh_node_bg \
     "cd $MINI_RUN/runtime/xonotic && \
      PYTHONPATH=$MINI_RUN/runtime/xonotic:$MINI_RUN/runtime/xonotic/payload/tools \
      nohup $MINI_PY -m solver.strat.strat_responder \
        --train --peer-node $PEER_NODE \
        --off-policy-players $OFF_POLICY \
        --online-checkpoint $MINI_RUN/output/live.npz \
-       --allow-arch-mismatch \
        --telemetry $TELEMETRY --append-telemetry \
        --environment joracle_demo --save-every 10 --save-secs 15 \
-       --model-sample-every ${JORACLE_MODEL_SAMPLE_EVERY:-1} \
+       --model-sample-every ${JORACLE_MODEL_SAMPLE_EVERY:-50} \
        > $MINI_RUN/output/responder.log 2>&1 &"
   say "responder launched on $MINI -> $MINI_RUN/output/responder.log"
 }
 
 start_viewer() {
   source_arg=${JORACLE_TELEMETRY:-$MINI:$TELEMETRY}
-  tmux new-session -d -s "$VIEWER_SESSION" /bin/sh "$HERE/run-logged.sh" \
-    "$RUNDIR/logs/viewer.log" env PYTHONPATH="$XONOTIC" python3 -m solver.strat.joracle.server \
-    --telemetry "$source_arg" --port "$VIEWER_PORT" \
-    --server-address "127.0.0.1:$PORT" --map "server rotation" --note "joracle demo"
-  tmux display-message -p -t "$VIEWER_SESSION" '#{pane_pid}' > "$RUNDIR/viewer.pid"
   VIEWER_SOURCE=$source_arg
-  say "viewer pid $(cat "$RUNDIR/viewer.pid") -> http://127.0.0.1:$VIEWER_PORT"
+  if ! curl -fsS "http://127.0.0.1:$VIEWER_PORT/latest.json" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$UID/io.mesh.observer" >/dev/null 2>&1 || true
+    n=0
+    while ! curl -fsS "http://127.0.0.1:$VIEWER_PORT/latest.json" >/dev/null 2>&1 && [ "$n" -lt 10 ]; do
+      sleep 1
+      n=$((n + 1))
+    done
+  fi
+  curl -fsS "http://127.0.0.1:$VIEWER_PORT/latest.json" >/dev/null 2>&1 \
+    && say "whole-mesh reporter serving http://127.0.0.1:$VIEWER_PORT" \
+    || say "whole-mesh reporter is not answering on http://127.0.0.1:$VIEWER_PORT"
 }
 
 banner() {
@@ -263,7 +288,7 @@ banner() {
   cat >&2 <<EOF
 
   ------------------------------------------------------------------
-  j-oracle viewer     http://127.0.0.1:$VIEWER_PORT
+  mesh phase viewer   http://127.0.0.1:$VIEWER_PORT
   xonotic client      automatically connected to 127.0.0.1:$PORT
   LAN players         connect $lan:$PORT
   telemetry           ${VIEWER_SOURCE:-$MINI:$TELEMETRY}
@@ -278,41 +303,43 @@ EOF
 case "${1:-up}" in
   up)
     preflight
-    stage
-    push_runtime
-    start_server
-    start_client
+    stage || say "staging did not complete; continuing with every independently available component"
+    push_runtime || say "runtime push did not complete; continuing locally"
+    start_server || say "server did not start; continuing with client, responder, and viewer"
+    start_client || say "client did not start; continuing with responder and viewer"
     sleep 3
     if [ "${JORACLE_SKIP_RESPONDER:-${SKIP_RESPONDER:-0}}" = 1 ]; then
       say "JORACLE_SKIP_RESPONDER=1: leaving the responder on $MINI alone"
     else
-      start_responder
+      start_responder || say "responder did not start; viewer remains available"
     fi
-    start_viewer
+    start_viewer || say "viewer did not start"
     banner
     ;;
   attach)
-    [ -x "$ENGINE" ] || die "engine missing (needed only to confirm the tree): $ENGINE"
-    ssh -o BatchMode=yes -o ConnectTimeout=8 "$MINI" true 2>/dev/null || die "cannot ssh $MINI"
+    ssh_node true 2>/dev/null || say "cannot currently ssh $MINI; local viewer still starts"
     holder=$(bridge_client)
     [ -n "${holder:-}" ] && [ "$holder" != 0 ] \
       && say "attaching to the cartserver already holding the bridge: pid $holder" \
       || say "warning: no process currently holds the bridge client slot; the server may be between mesh_open retries"
     mkdir -p "$RUNDIR/logs"
-    push_runtime
-    start_responder
-    start_viewer
+    push_runtime || say "runtime push did not complete"
+    start_responder || say "responder did not start"
+    start_viewer || say "viewer did not start"
     banner
     ;;
   viewer)
-    VIEWER_PORT=$(select_port "$VIEWER_PORT")
     mkdir -p "$RUNDIR/logs"
     start_viewer
     banner
     ;;
   responder)
-    push_runtime
-    start_responder
+    push_runtime || say "runtime push did not complete"
+    start_responder || say "responder did not start"
+    ;;
+  client)
+    mkdir -p "$RUNDIR/logs"
+    start_client
     ;;
   status)
     say "bridge client: $(bridge_client)"
@@ -323,15 +350,23 @@ case "${1:-up}" in
     else
       say "server: not running"
     fi
-    for name in viewer client; do
+    for name in client; do
       if [ -f "$RUNDIR/$name.pid" ] && kill -0 "$(cat "$RUNDIR/$name.pid")" 2>/dev/null; then
         say "$name: running pid $(cat "$RUNDIR/$name.pid")"
       else
         say "$name: not running"
       fi
     done
-    ssh -o BatchMode=yes "$MINI" "pgrep -fl strat_responder || echo 'responder: not running'" 2>/dev/null || true
-    ssh -o BatchMode=yes "$MINI" "wc -l $TELEMETRY 2>/dev/null || echo 'telemetry: none'" 2>/dev/null || true
+    curl -fsS "http://127.0.0.1:$VIEWER_PORT/latest.json" >/dev/null 2>&1 \
+      && say "viewer: whole-mesh reporter answering on $VIEWER_PORT" \
+      || say "viewer: whole-mesh reporter unavailable on $VIEWER_PORT"
+    if [ -f "$RUNDIR/client-engine.health" ]; then
+      sed 's/^/[demo] client engine: /' "$RUNDIR/client-engine.health" >&2
+    else
+      say "client engine: no health record"
+    fi
+    ssh_node "pgrep -fl strat_responder || echo 'responder: not running'" 2>/dev/null || true
+    ssh_node "wc -l $TELEMETRY 2>/dev/null || echo 'telemetry: none'" 2>/dev/null || true
     ;;
   down)
     if [ -f "$RUNDIR/server.pid" ]; then
@@ -339,20 +374,16 @@ case "${1:-up}" in
       kill -TERM "$pid" 2>/dev/null && say "asked cartserver $pid to quit" || say "cartserver already gone"
       rm -f "$RUNDIR/server.pid"
     fi
-    if [ -f "$RUNDIR/viewer.pid" ]; then
-      pid=$(cat "$RUNDIR/viewer.pid")
-      kill -TERM "$pid" 2>/dev/null && say "stopped viewer $pid" || say "viewer already gone"
-      rm -f "$RUNDIR/viewer.pid"
-    fi
     if [ -f "$RUNDIR/client.pid" ]; then
       pid=$(cat "$RUNDIR/client.pid")
       kill -TERM "$pid" 2>/dev/null && say "stopped client supervisor $pid" || say "client supervisor already gone"
+      while tmux has-session -t "$CLIENT_SESSION" 2>/dev/null; do sleep 1; done
       rm -f "$RUNDIR/client.pid"
     fi
     say "the responder on $MINI is left running; stop it there if you want it stopped"
     ;;
   *)
-    echo "usage: $0 {up|attach|viewer|responder|status|down}" >&2
+    echo "usage: $0 {up|attach|viewer|responder|client|status|down}" >&2
     exit 2
     ;;
 esac

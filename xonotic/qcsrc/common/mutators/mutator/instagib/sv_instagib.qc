@@ -11,15 +11,12 @@ bool autocvar_g_instagib_blaster_keepdamage = false;
 bool autocvar_g_instagib_blaster_keepforce = false;
 bool autocvar_g_instagib_mirrordamage;
 bool autocvar_g_instagib_friendlypush = true;
-//int autocvar_g_instagib_ammo_drop;
+
 bool autocvar_g_instagib_ammo_convert_cells;
 bool autocvar_g_instagib_ammo_convert_rockets;
 bool autocvar_g_instagib_ammo_convert_shells;
 bool autocvar_g_instagib_ammo_convert_bullets;
 
-/// \brief Returns a random classname of the instagib item.
-/// \param[in] prefix Prefix of the cvars that hold probabilities.
-/// \return Random classname of the instagib item.
 string RandomItems_GetRandomInstagibItemClassName(string prefix)
 {
 	RandomSelection_Init();
@@ -71,7 +68,7 @@ void instagib_ammocheck(entity this)
 	if(time < this.instagib_nextthink)
 		return;
 	if(!IS_PLAYER(this))
-		return; // not a player
+		return;
 
 	if(IS_DEAD(this) || game_stopped)
 		instagib_stop_countdown(this);
@@ -116,7 +113,6 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, MonsterSpawn)
 {
 	entity mon = M_ARGV(0, entity);
 
-	// always refill ammo
 	if(mon.monsterdef == MON_MAGE)
 		mon.skin = 1;
 }
@@ -149,19 +145,19 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, PlayerPreThink)
 
 MUTATOR_HOOKFUNCTION(mutator_instagib, PlayerRegen)
 {
-	// no regeneration in instagib
+
 	return true;
 }
 
 MUTATOR_HOOKFUNCTION(mutator_instagib, PlayerDamage_SplitHealthArmor)
 {
-	M_ARGV(4, float) = M_ARGV(7, float); // take = damage
-	M_ARGV(5, float) = 0; // save
+	M_ARGV(4, float) = M_ARGV(7, float);
+	M_ARGV(5, float) = 0;
 }
 
 MUTATOR_HOOKFUNCTION(mutator_instagib, ForbidThrowCurrentWeapon)
 {
-	// weapon dropping on death handled by FilterItem
+
 	return true;
 }
 
@@ -180,7 +176,7 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, Damage_Calculate)
 	if(IS_PLAYER(frag_target))
 	{
 		if(frag_deathtype == DEATH_FALL.m_id)
-			frag_damage = 0; // never count fall damage
+			frag_damage = 0;
 
 		if(!autocvar_g_instagib_damagedbycontents)
 		switch(DEATH_ENT(frag_deathtype))
@@ -218,7 +214,7 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, Damage_Calculate)
 				{
 					frag_damage = 0;
 					if(!autocvar_g_instagib_mirrordamage)
-						frag_mirrordamage = 0; // never do mirror damage on enemies
+						frag_mirrordamage = 0;
 				}
 
 				if(frag_target != frag_attacker)
@@ -230,11 +226,11 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, Damage_Calculate)
 		}
 	}
 
-	if(!autocvar_g_instagib_mirrordamage) // only apply the taking lives hack if we don't want to support real damage mirroring
+	if(!autocvar_g_instagib_mirrordamage)
 	if(IS_PLAYER(frag_attacker))
 	if(frag_mirrordamage > 0)
 	{
-		// just lose extra LIVES, don't kill the player for mirror damage
+
 		float armor = GetResource(frag_attacker, RES_ARMOR);
 		if(armor > 0)
 		{
@@ -265,7 +261,6 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, SetStartItems, CBC_ORDER_LAST)
 	start_ammo_cells   = warmup_start_ammo_cells   = cvar("g_instagib_ammo_start");
 	start_ammo_plasma  = warmup_start_ammo_plasma  = 0;
 	start_ammo_rockets = warmup_start_ammo_rockets = 0;
-	//start_ammo_fuel    = warmup_start_ammo_fuel    = 0;
 
 	start_weapons = warmup_start_weapons = WEPSET(VAPORIZER);
 	start_items |= IT_UNLIMITED_SUPERWEAPONS;
@@ -273,7 +268,7 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, SetStartItems, CBC_ORDER_LAST)
 
 MUTATOR_HOOKFUNCTION(mutator_instagib, SetWeaponArena)
 {
-	// turn weapon arena off
+
 	M_ARGV(0, string) = "off";
 }
 
@@ -306,7 +301,6 @@ void instagib_replace_item_with(entity this, GameItem def)
 const int INSTAGIB_POWERUP_COUNT = 3;
 GameItem instagib_remaining_powerups[INSTAGIB_POWERUP_COUNT];
 
-// replaces item with a random powerup selected among the less spawned ones
 void instagib_replace_item_with_random_powerup(entity item)
 {
 	static int remaining_powerups_count = INSTAGIB_POWERUP_COUNT;
@@ -392,7 +386,7 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, PlayerDies)
 	float frag_deathtype = M_ARGV(3, float);
 
 	if(DEATH_ISWEAPON(frag_deathtype, WEP_VAPORIZER))
-		M_ARGV(4, float) = 1000; // always gib if it was a vaporizer death
+		M_ARGV(4, float) = 1000;
 }
 
 MUTATOR_HOOKFUNCTION(mutator_instagib, ItemTouch)
@@ -404,7 +398,7 @@ MUTATOR_HOOKFUNCTION(mutator_instagib, ItemTouch)
 
 	if(GetResource(item, RES_CELLS))
 	{
-		// play some cool sounds ;)
+
 		float hp = GetResource(toucher, RES_HEALTH);
 		if (IS_CLIENT(toucher))
 		{

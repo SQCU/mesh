@@ -5,10 +5,9 @@
 #include <client/hud/_mod.qh>
 #include <client/hud/panel/modicons.qh>
 
-// CTF HUD modicon section
-int redflag_prevframe, blueflag_prevframe, yellowflag_prevframe, pinkflag_prevframe, neutralflag_prevframe; // status during previous frame
-int redflag_prevstatus, blueflag_prevstatus, yellowflag_prevstatus, pinkflag_prevstatus, neutralflag_prevstatus; // last remembered status
-float redflag_statuschange_time, blueflag_statuschange_time, yellowflag_statuschange_time, pinkflag_statuschange_time, neutralflag_statuschange_time; // time when the status changed
+int redflag_prevframe, blueflag_prevframe, yellowflag_prevframe, pinkflag_prevframe, neutralflag_prevframe;
+int redflag_prevstatus, blueflag_prevstatus, yellowflag_prevstatus, pinkflag_prevstatus, neutralflag_prevstatus;
+float redflag_statuschange_time, blueflag_statuschange_time, yellowflag_statuschange_time, pinkflag_statuschange_time, neutralflag_statuschange_time;
 
 void HUD_Mod_CTF_Reset()
 {
@@ -17,22 +16,26 @@ void HUD_Mod_CTF_Reset()
     redflag_statuschange_time = blueflag_statuschange_time = yellowflag_statuschange_time = pinkflag_statuschange_time = neutralflag_statuschange_time = 0;
 }
 
-int autocvar__teams_available;
+string autocvar__teams_available_rows;
 void HUD_Mod_CTF(vector pos, vector mySize)
 {
     vector redflag_pos, blueflag_pos, yellowflag_pos, pinkflag_pos, neutralflag_pos;
     vector flag_size;
-    float f; // every function should have that
+    float f;
 
-    int redflag, blueflag, yellowflag, pinkflag, neutralflag; // current status
-    float redflag_statuschange_elapsedtime = 0, blueflag_statuschange_elapsedtime = 0, yellowflag_statuschange_elapsedtime = 0, pinkflag_statuschange_elapsedtime = 0, neutralflag_statuschange_elapsedtime = 0; // time since the status changed
-    bool ctf_oneflag; // one-flag CTF mode enabled/disabled
-    bool ctf_stalemate; // currently in stalemate
+    int redflag, blueflag, yellowflag, pinkflag, neutralflag;
+    float redflag_statuschange_elapsedtime = 0, blueflag_statuschange_elapsedtime = 0, yellowflag_statuschange_elapsedtime = 0, pinkflag_statuschange_elapsedtime = 0, neutralflag_statuschange_elapsedtime = 0;
+    bool ctf_oneflag;
+    bool ctf_stalemate;
     int stat_items = STAT(OBJECTIVE_STATUS);
     float fs, fs2, fs3, size1, size2;
     vector e1, e2;
 
-    int nteams = autocvar__teams_available;
+    string team_rows = strcat(",", autocvar__teams_available_rows, ",");
+    bool team1_available = strstrofs(team_rows, ",1,", 0) >= 0;
+    bool team2_available = strstrofs(team_rows, ",2,", 0) >= 0;
+    bool team3_available = strstrofs(team_rows, ",3,", 0) >= 0;
+    bool team4_available = strstrofs(team_rows, ",4,", 0) >= 0;
 
     redflag = (stat_items/CTF_RED_FLAG_TAKEN) & 3;
     blueflag = (stat_items/CTF_BLUE_FLAG_TAKEN) & 3;
@@ -49,14 +52,13 @@ void HUD_Mod_CTF(vector pos, vector mySize)
     if (autocvar__hud_configure) {
         redflag = 1;
         blueflag = 2;
-        if (nteams & BIT(2))
+        if (strstrofs(team_rows, ",3,", 0) >= 0)
             yellowflag = 2;
-        if (nteams & BIT(3))
+        if (strstrofs(team_rows, ",4,", 0) >= 0)
             pinkflag = 3;
-        ctf_oneflag = neutralflag = 0; // disable neutral flag in hud editor?
+        ctf_oneflag = neutralflag = 0;
     }
 
-    // when status CHANGES, set old status into prevstatus and current status into status
     #define X(team) MACRO_BEGIN \
         if (team##flag != team##flag_prevframe) { \
             team##flag_statuschange_time = time; \
@@ -95,7 +97,7 @@ void HUD_Mod_CTF(vector pos, vector mySize)
             case 3: team##_icon_prevstatus = "flag_" #team "_carrying"; team##_alpha_prevstatus = blink(0.85, 0.15, 5); break; \
             default: \
                 if (team##flag == 3) { \
-                    team##_icon_prevstatus = "flag_" #team "_carrying"; /* make it more visible */\
+                    team##_icon_prevstatus = "flag_" #team "_carrying";                           \
                 } else if((stat_items & CTF_SHIELDED) && (cond)) { \
                     team##_icon_prevstatus = "flag_" #team "_shielded"; \
                 } else { \
@@ -104,21 +106,21 @@ void HUD_Mod_CTF(vector pos, vector mySize)
                 break; \
         } \
     MACRO_END
-    X(red, myteam != NUM_TEAM_1 && (nteams & BIT(0)));
-    X(blue, myteam != NUM_TEAM_2 && (nteams & BIT(1)));
-    X(yellow, myteam != NUM_TEAM_3 && (nteams & BIT(2)));
-    X(pink, myteam != NUM_TEAM_4 && (nteams & BIT(3)));
+    X(red, myteam != NUM_TEAM_1 && team1_available);
+    X(blue, myteam != NUM_TEAM_2 && team2_available);
+    X(yellow, myteam != NUM_TEAM_3 && team3_available);
+    X(pink, myteam != NUM_TEAM_4 && team4_available);
     X(neutral, ctf_oneflag);
     #undef X
 
     int tcount = 2;
-    if(nteams & BIT(2))
+    if(team3_available)
         tcount = 3;
-    if(nteams & BIT(3))
+    if(team4_available)
         tcount = 4;
 
     if (ctf_oneflag) {
-        // hacky, but these aren't needed
+
         red_icon = red_icon_prevstatus = blue_icon = blue_icon_prevstatus = yellow_icon = yellow_icon_prevstatus = pink_icon = pink_icon_prevstatus = string_null;
         fs = fs2 = fs3 = 1;
     } else switch (tcount) {

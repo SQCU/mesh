@@ -1,41 +1,9 @@
-/*
-	mdfour.c
 
-	An implementation of MD4 designed for use in the samba SMB
-	authentication protocol
-
-	Copyright (C) 1997-1998  Andrew Tridgell
-
-	This program is free software; you can redistribute it and/or
-	modify it under the terms of the GNU General Public License
-	as published by the Free Software Foundation; either version 2
-	of the License, or (at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-	See the GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to:
-
-		Free Software Foundation, Inc.
-		59 Temple Place - Suite 330
-		Boston, MA  02111-1307, USA
-
-	$Id$
-*/
 
 #include "quakedef.h"
 
-#include <string.h>		/* XoXus: needed for memset call */
+#include <string.h>
 #include "mdfour.h"
-
-/* NOTE: This code makes no attempt to be fast!
-
-   It assumes that a int is at least 32 bits long
-*/
 
 #define F(X,Y,Z) (((X)&(Y)) | ((~(X))&(Z)))
 #define G(X,Y,Z) (((X)&(Y)) | ((X)&(Z)) | ((Y)&(Z)))
@@ -50,7 +18,6 @@
 #define ROUND2(a,b,c,d,k,s) a = lshift(a + G(b,c,d) + X[k] + 0x5A827999,s)
 #define ROUND3(a,b,c,d,k,s) a = lshift(a + H(b,c,d) + X[k] + 0x6ED9EBA1,s)
 
-/* this applies md4 to 64 byte chunks */
 static void mdfour64(struct mdfour *md, uint32 *M)
 {
 	int j;
@@ -130,7 +97,6 @@ void mdfour_begin(struct mdfour *md)
 	md->totalN = 0;
 }
 
-
 static void mdfour_tail(struct mdfour *md, const unsigned char *in, int n)
 {
 	unsigned char buf[128];
@@ -162,11 +128,6 @@ void mdfour_update(struct mdfour *md, const unsigned char *in, int n)
 {
 	uint32 M[16];
 
-// start of edit by Forest 'LordHavoc' Hale
-// commented out to prevent crashing when length is 0
-//	if (n == 0) mdfour_tail(in, n);
-// end of edit by Forest 'LordHavoc' Hale
-
 	while (n >= 64) {
 		copy64(M, in);
 		mdfour64(md, M);
@@ -178,7 +139,6 @@ void mdfour_update(struct mdfour *md, const unsigned char *in, int n)
 	mdfour_tail(md, in, n);
 }
 
-
 void mdfour_result(struct mdfour *md, unsigned char *out)
 {
 	copy4(out, md->A);
@@ -187,7 +147,6 @@ void mdfour_result(struct mdfour *md, unsigned char *out)
 	copy4(out+12, md->D);
 }
 
-
 void mdfour(unsigned char *out, const unsigned char *in, int n)
 {
 	struct mdfour md;
@@ -195,14 +154,6 @@ void mdfour(unsigned char *out, const unsigned char *in, int n)
 	mdfour_update(&md, in, n);
 	mdfour_result(&md, out);
 }
-
-///////////////////////////////////////////////////////////////
-//	MD4-based checksum utility functions
-//
-//	Copyright (C) 2000       Jeff Teunissen <d2deek@pmail.net>
-//
-//	Author: Jeff Teunissen	<d2deek@pmail.net>
-//	Date: 01 Jan 2000
 
 unsigned Com_BlockChecksum (void *buffer, int length)
 {
@@ -220,4 +171,3 @@ void Com_BlockFullChecksum (void *buffer, int len, unsigned char *outbuf)
 {
 	mdfour ( outbuf, (unsigned char *) buffer, len );
 }
-

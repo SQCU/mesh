@@ -1,5 +1,6 @@
 #!/bin/bash
 LW=/Library/Preferences/com.apple.loginwindow
+R="$(cd "$(dirname "$0")" && pwd)"
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
 
 [ "${1:-}" = "--disable" ] && {
@@ -19,11 +20,11 @@ printf 'password for %s (not echoed): ' "$USER_NAME"
 stty -echo; IFS= read -r PW; stty echo; printf '\n'
 
 dscl . -authonly "$USER_NAME" "$PW" >/dev/null 2>&1 || {
-  echo "password rejected for $USER_NAME, nothing written"
+  echo "password validation failed for $USER_NAME, nothing written"
   echo "an unvalidated write would boot this node to a login it cannot pass"
   exit 1; }
 
-PW="$PW" python3 - <<'PY'
+PW="$PW" "$R/bin/mesh-python" - <<'PY'
 import os
 key = [0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F]
 pw  = list(os.environ['PW'].encode('utf-8'))

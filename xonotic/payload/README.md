@@ -1,13 +1,13 @@
 # Xonotic payload mode (`plc`)
 
 A k-team, k-cart payload gamemode. Each cart is a `MOVETYPE_PUSH` brush driven along
-its own waypoint path by contested occupancy. Any number of carts (up to 4) coexist;
+its own waypoint path by contested occupancy. Up to 256 carts coexist;
 every cart is pushed forward by the team that controls it and backward by everyone
 else, and teams bank score for every control point a cart crosses while they hold it.
 
-Everything under `qcsrc/` drops into a Xonotic `qcsrc` tree at the same relative path.
-`patch/0001-payload-registry-hooks.patch` carries the five one-line-per-file registry
-edits to shared files. `cfg/gamemodes-payload.cfg` is the cvar overlay.
+The authoritative game source is `../qcsrc/`. Payload mode and its registry
+entries are implemented directly there. `cfg/gamemodes-payload.cfg` is runtime
+configuration.
 
 ## Control and the speed law
 
@@ -24,27 +24,30 @@ law with the per-team goal-direction rule deleted: direction is now a property o
 control, not of goals.
 
 **Direction**: every cart path has one origin (`s = 0`, the first `plc_path` node) and
-one end (`s = L`). The controlling team pushes toward the end; every non-controlling
-team's occupancy pushes toward the origin. With `c` the controlling index (or none):
+one end (`s = L`). The cart's sticky controller is established at the origin. With
+`c` its controller, `w_c` its occupancy weight, and `w_opp = Σ_{j != c} w_j`:
 
 ```
-P+ = w_c (0 if uncontrolled)     P− = Σ_{j ≠ c} w_j
-v  = clamp(cart.speed · (P+ − P−), ±g_payload_max_speed)
-s' = clamp(s + v · PLC_TICK, 0, L)
+w_c > 0:       v = clamp(cart.speed · (w_c − w_opp) / (1 + w_opp²),
+                         −g_payload_contest_speed, g_payload_max_speed)
+w_c = 0, w_opp > 0:
+               v = clamp(−g_payload_reverse_speed · max_j(w_j),
+                         −g_payload_max_speed, 0)
+empty past g_payload_idle_time:
+               v = −g_payload_rollback_speed until the preceding checkpoint
 ```
 
-Two consequences the mode is built around: a controlled cart still regresses when the
-combined non-controllers outweigh the controller, and a cart contested to a tie
-regresses under everyone's weight — sustained regression returns it to the path
-origin. A stall needs `P+ = P−` exactly with players present.
+The local contest regime keeps a defended cart near the fight. Once its controller
+leaves, the strongest opposing team walks it backward without the contest damping.
+With nobody present, the separate idle clock rolls it to the nearest preceding
+checkpoint and stops there.
 
 The per-team `plc_goal` entities no longer carry direction or round targets. They
 survive as team declarations only: their team bits drive the team count exactly as
 before, and their `target`/`radius` keys are inert.
 
-Rollback: after `g_payload_idle_time` seconds with `Σ w_j == 0`, the cart moves at
-`g_payload_rollback_speed` toward the path origin, stopping at the first
-`PLC_CHECKPOINT` node it meets.
+Rollback state and target arclength are emitted literally in every cart row, so a
+perturbation of idle time or rollback speed is visible in the same stream as motion.
 
 Cart motion is direct velocity (`velocity = (pos(s') − pos(s)) / PLC_TICK`), not
 `SUB_CalcMove`, because `SUB_CalcMove` commits to a destination and a traveltime at
@@ -101,7 +104,7 @@ timeout the team with strictly the most bankings this round wins; otherwise
 
 ## Map entity format
 
-### `func_plc_cart` (brush, 1 to 4)
+### `func_plc_cart` (brush, 1 to 256)
 
 Each cart gets an id in spawn order (0-based) and its own path.
 
@@ -115,17 +118,18 @@ Each cart gets an id in spawn order (0-based) and its own path.
 | `spawnflags` | `1` = `PLC_CART_TURN`, face along the track |
 
 Carts always start at their path origin; the old `plc_start` key is gone, since the
-control law needs an unambiguous origin. `view_ofs` is assigned after
-`InitMovingBrushTrigger`, not before: mins is empty until the brush model is set, and
-an earlier assignment left the tracked point at the entity origin so no pusher was
-ever in radius.
+control law needs an unambiguous origin. A path coordinate is the cart's floor-contact
+coordinate. The offline constructor derives every path from stock navigation and the
+continuous negative-space representation, then subtracts `PLC_CART_RIDE_OFS` when it
+emits the entity coordinate. Runtime applies the inverse view offset and does not derive
+another path from generic waypoints.
 
 ### `plc_path` (point, ≥ 2 per cart)
 
 `targetname`, `target` (next node; omit on the last), `curvetarget` (quadratic bezier
 control point, same key `path_corner` uses), `spawnflags 1` = `PLC_CHECKPOINT`.
 Chains must be disjoint between carts; a `target` pointing at the first or an
-already-visited node terminates the chain (bounded at 4096 nodes).
+already-visited node terminates the chain.
 
 ### `plc_goal` (point, one per participating team)
 
@@ -192,6 +196,90 @@ the banking team's colour, the mesh-chosen objective node per team gets
 `RADARICON_OBJECTIVE` in that team's colour, everything else stays neutral cyan. The
 "which point is contested right now" answer is carried by the ribbon's active-segment
 colour rather than by re-colouring a node every tick.
+
+### The artifact, the cart body, and ink as territory
+
+The mode's fourth channel is the world surface itself. It has three pieces and one
+shared definition.
+
+**The artifact.** A knot curve in R^5 — a (2,3) torus knot in x/y/z plus two further
+harmonics in w and v — is rotated every frame by a product of five SO(5) Givens
+rotations whose rates are mutually incommensurate, then projected to R^3 by two
+successive perspective divides (5D→4D on v, 4D→3D on w) and swept as a tube. Because
+the rotation folds the two hidden axes into the visible three, the body turns itself
+inside out continuously while its 5D shape never changes. Cost is `ART_SEG` curve
+samples × 5 sin/cos + 5 Givens (20 multiply-adds) + 2 divides per frame; the polygon
+emission dominates the mathematics by two orders of magnitude, so `cl_artifact_segments`
+and `cl_artifact_sides` are the knobs, not the geometry.
+
+It drifts on a Lissajous through the level's bounding volume, clipped by one traceline
+per frame from the level centre so it slides along the inside of the hull instead of
+orbiting through the void, and drops ink globs on a cadence keyed to match time — so
+every client places the same glob at the same spot on the same frame with no network
+traffic, and a client joining mid-match replays what it missed (`cl_artifact_catchup`).
+
+**The cart is an instance of the same body.** `mkentfile.py` gives a cart whichever
+inline brush the source map left visible, so "the cart" is some door from `warfare`
+with no silhouette, no size and no team colour. That brush is now hidden
+(`g_payload_cart_procedural 1`; it stays solid, it is still what pushes and crushes)
+and the cart is drawn as the same knot at a cvar-fixed size — one silhouette and one
+set of bounds for every cart on every fused tile — tinted by its control state and
+emissive by it: grey uncontrolled, the team colour under a plurality, and streaked
+between the two strongest claimants along a helical stripe when its cylinder is
+contested. The stripe is spatial rather than a time-alternation so a still frame reads
+as contested rather than as a coin flip.
+
+**Ink is cart territory.** Every `PLC_TICK` an advancing cart lays its controller's
+colour on the ground it has just covered; a contested cart lays the muddied blend of
+the two claimants; a cart being driven back has its own paint overpainted by the team
+pushing it home. That writes depth, control, contest and reversal onto the world
+surface with no HUD overlay.
+
+**How the drift and the cart ink compose rather than compete.** They write the same
+voxels, so they mean different things in them. The volume already separates the two:
+coverage (alpha) drives how wet and rubbery a surface is, colour (rgb) drives what it
+is tinted. The carts own colour — a narrow, decisive, high-amplitude write along a
+track. The drift owns coverage — a wide, low-amplitude wash whose *colour is the mean
+colour the world already carries* (`ink_stat(INK_TINT_*)`, the same cached pair the
+engine tints the sky with), pulled toward the sour green only as far as the world is
+still unpainted. So the drift wets everything and repaints nothing.
+
+**The skybox counterpart.** The fused world is ~152,281 units across; nobody can see
+the far theatre. Each cart therefore also hangs supermassive against the sky in the
+direction it actually lies, in its own elevation band, wearing its control colour and
+its contest streak, with a bright band travelling along the tube at its arclength
+fraction. Which cart, where, whose colour and how deep — at sky scale, without a HUD.
+
+Frames and frame times for all of this are captured by `../render/plc-run.sh`;
+`../render/PLC-CAPTURE.md` documents the harness, the measured cost and the shipped
+`../render/shots/plc-dance-*.png` pair.
+
+### What the client reads, and what it does not re-derive
+
+Everything above is decoded from state the server already networks:
+
+| datum | source |
+|---|---|
+| control team, regress, stall | `STAT(PAYLOAD_CARTS_STATE)`, 5 bits per cart |
+| presence, coarse arclength | `STAT(PAYLOAD_GOALS_PACKED)`, 6 bits per cart |
+| cart 0 arclength, full precision | `STAT(PAYLOAD_PROGRESS)` |
+| per-cart per-team occupancy | `STAT(PAYLOAD_PUSH_PACKED{,1,2,3})` |
+| **cart world origin** | the cart's own waypointsprite, which is spawned with `ref` = the cart and therefore re-sends the cart's origin every time it moves |
+| **which cart a sprite is** | the sprite's spare `wp_extra` byte |
+
+The last two are the only additions, and neither is a new entity or a new packing: the
+sprite already ships. An earlier revision instead walked `g_radarlinks` with the
+arclength fraction, which is wrong twice over — that list holds every cart's links
+undifferentiated, and those links are subsampled to at most `PLC_RIBBON_SEG` straight
+hops, so the reconstructed point left the track on every curve. That re-derivation is
+deleted.
+
+`payload_cart_read()` in `payload.qc` is the single definition of "what is cart c
+doing". The modicons row, the world body, the sky body and the ink all read it and
+nowhere else; `payload_link_color()` is likewise the single decode of a path-link
+colour byte. A second unpacking of the cart state, a second team-colour lookup or a
+second control-state palette anywhere in the client is a defect on sight
+(`design/CAST.md`).
 
 ### Cart state — legible per cart
 
@@ -265,11 +353,7 @@ this was a compile-only pass against a running match:
 ## Building
 
 ```
-rsync -a /Applications/Xonotic/source/qcsrc/ build/qcsrc/
-rsync -a payload/qcsrc/ build/qcsrc/
-patch -p1 -d build/qcsrc < payload/patch/0001-payload-registry-hooks.patch
-cd build/qcsrc
-make QCC=<abs path to gmqcc> QCCFLAGS_WATERMARK=payload qc
+./payload/build.sh
 ```
 
 `gmqcc` must be built first and passed explicitly: the Makefile default
@@ -278,16 +362,15 @@ make QCC=<abs path to gmqcc> QCCFLAGS_WATERMARK=payload qc
 own Makefile passes `-Wl,--gc-sections`, which Apple `ld` rejects; relink with
 `c++ .build/objs/*.o -o gmqcc`.
 
-`tools/mkpatch.sh` regenerates the registry patch. `check-units.sh` compiles each
-payload `.qc` as its own translation unit.
-
 ## Running it without a payload map
 
 `tools/mkentfile.py <bsp> <out.ent> [teams] [carts]` reads a stock BSP's entity lump
-and appends `carts` (default 2) disjoint 5-node `plc_path` tracks. The team-spawn set
-is split into contiguous halves along its wider axis so the two polylines are
-geometrically separated, each cart takes the next visible inline brush model, and one
-`plc_goal` per team is emitted (teams alternate across tracks). Drop the result in
+and appends the requested number of negative-space-constrained `plc_path` tracks. It
+replaces team-labeled spawns with a shared spawn set, configures every cart through the
+same procedural pusher body, and emits one team declaration per team. The adjacent
+measurement artifact reports nondegenerate-path, stock-navigation spawn reachability,
+rider-volume continuity, their cart-advanceability conjunction, and spawn/cart
+clearance and origin-occupancy masses. Drop the result in
 `<userdir>/data/maps/<name>.ent` with a `<name>.mapinfo` carrying `gametype plc`.
 `+sv_autopause 0` is required or an empty dedicated server freezes `sv.time` after
 ~5 s.
@@ -296,91 +379,3 @@ geometrically separated, each cart takes the next visible inline brush model, an
 (`server/bot/default/bot.qc:640`) only computes a bot target when
 `realplayers || autocvar_bot_join_empty || (currentbots > 0 && time < 5)`; on a
 headless dedicated server with no human client all three are false.
-
-`tools/checklaw.py <log> <start_time>` re-derives the control/speed law from a
-`plcdbg` log (`debug/plcdbg.patch` adds the instrumentation) and reports mismatches.
-
-## The mesh objective hook
-
-`qcsrc/common/gamemodes/gamemode/payload/sv_payload_mesh.qc` is the SVQC side of the
-bridge described in `../bridge/PORT.md`. It declares only the six surviving builtins
-(`#644`, `#648`–`#651`, `#653`) and holds all of the fabric state the mode has.
-
-Objectives are (cart, node) addressable as a combined index `cart * 5 + node` in
-`[0, k·5)`. Cart 0's think (only) stages the width-26 request of PORT.md §2 —
-the sixteen base columns (distance/progress now relative to the bot's nearest cart,
-the objective a combined index), the four dominance columns, and six per-cart state
-columns (progress, controlling team, regression flag for carts 0 and 1) — then
-publishes and polls. Nothing waits; a missed response keeps the previous plan.
-
-The response stays width 8: the pick is a combined index, and the five weight columns
-are a distribution over the picked cart's path nodes. Per-team majority over the
-picks becomes `payload_mesh_objective[team]`, a combined index that
-`havocbot_goalrating_payload` maps through `payload_mesh_node()` to the chosen
-stretch of the chosen cart's track, rated above the carts themselves so the solver's
-allocation is visible in bot movement, not only in a stat.
-
-## Procgen pipeline (tools/)
-
-Two authoritative surfaces, staged from least to most authored:
-
-- `tools/mapfuse.py <seed> [maps... | /path/prefix...]` — roguelike fusion of
-  compiled BSPs. Places j sources (stock pk3 maps, or loose `.bsp/.waypoints/
-  .waypoints.cache` triples such as mapgen output, addressed by path prefix) on a
-  disjoint grid, merges every IBSP v46 lump with index fixups, and joins them with
-  synthesized connectors: at most one cart-navigable corridor per map, jump-pad
-  shafts and teleporter pairs for everything else. Emits `fused.{bsp,waypoints,
-  waypoints.cache,mapinfo,ent,pk3}`. The pk3 is what clients must mount — a client
-  without it renders the world as untextured void.
-- `tools/mapgen.py <seed> [--rooms=N] [--smoke]` — parametric map SOURCE authoring.
-  A small DSL (rooms with doorways, corridors, ledges, jump-pads, teleporters,
-  team/dm spawns, lights) emits a `.map` and compiles it with q3map2
-  (`-meta`, `-vis`, `-light -fast -samples 2 -bounce 2`) into a textured, lit,
-  vis'd BSP; generates grid waypoints+links over the authored floors, runs the
-  corridor-gated cart placer for the payload `.ent`, and packages a pk3.
-  Compiled arenas can be fed back into mapfuse as tiles by path prefix.
-
-q3map2 comes from netradiant-custom (github.com/Garux/netradiant-custom) built on
-macOS arm64 with only its q3map2 target:
-
-    brew install assimp glib libxml2 libpng jpeg-turbo
-    make OS=Darwin MACLIBDIR=/opt/homebrew/lib DEPENDENCIES_CHECK=off binaries-q3map2
-
-The threaded vis/light stages SIGBUS on arm64; mapgen pins `-threads 1` for both.
-Override paths with `Q3MAP2` and `XON_BASEPATH`. Some stock shader images are
-dds-only so q3map2 logs "Couldn't find image" — harmless for compile and runtime.
-
-## Join quality and navigability (mapfuse + joinview)
-
-Every fused join is built to be bot-traversable and classified for prominence:
-
-- **Bot transport**: corridor joins carry a chain of walkable waypoint links in
-  the fused `.cache`. Jump-pad and teleporter joins do NOT get synthetic walk
-  links — Xonotic autogenerates their bot waypoints from the entities at map init
-  (`trigger_push` tracetosses to the real landing then `waypoint_spawnforteleporter`,
-  jumppads.qc:551; `trigger_teleport` likewise, teleporters.qc:253), so mapfuse
-  emits canonical `trigger_push`+`target_position` / `trigger_teleport`+
-  `misc_teleporter_dest` and models the resulting one-way jump in `fused.joins.json`.
-  A region flood-fill over (cache walk-links + modeled jumps) asserts all source
-  maps land in one bot-reachable component and reports per-join traversability.
-- **Prominence rule**: each map-node is classified by edge count. An edge whose
-  endpoint is a degree-1 leaf (the sole lifeline to that map/objective) is
-  EXCLUSIVE and gets the prominent template — wide mouth, light entities at both
-  ends, kept short, corridor (cart-navigable) when geometry and the one-corridor-
-  per-map budget allow, else a lit teleporter/pad. Redundant edges (both endpoints
-  degree ≥2) may be subtle. The generated classification is printed per topology.
-- **Clip carving**: corridor selection now carves stock-map PLAYERCLIP/BOTCLIP/
-  MONSTERCLIP brushes (0x430000) that cross the tube, not just solid brushes — a
-  clip brush leaves the floor walkable but physically blocks players, which
-  silently broke crossings.
-- **Sizing**: source maps pack tighter (MARGIN 896, was 2048) and the corridor
-  length cap dropped (6000, was 14000); over-long joins become short jump-pads.
-
-`tools/joinview.py <dir>` diagnoses a fused map's joins offline: it writes
-`fused.floorplan.svg` (dependency-free top-down plan — map footprints, nav graph,
-joins colored by type, prominent=thick/solid vs subtle=dashed, lights) and reports
-per edge a **contortion** score (fuzzed walk-distance / straight-line through the
-join), a **visual-occlusion** ray count (eye rays from both sides that hit solid
-before the opening), and whether the join is **clip-blocked**. Headless engine
-screenshots are not available (the dedicated server has no GL), so the egocentric
-check is the raycast probe rather than a rendered view.

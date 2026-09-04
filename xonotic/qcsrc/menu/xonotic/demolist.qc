@@ -22,12 +22,11 @@ string XonoticDemoList_demoName(entity me, float i)
 	s = bufstr_get(me.listDemo, i);
 
 	if(substring(s, 0, 1) == "/")
-		s = substring(s, 1, strlen(s) - 1);  // remove the first forward slash
+		s = substring(s, 1, strlen(s) - 1);
 
 	return s;
 }
 
-// if subdir is true look in subdirectories too (1 level)
 void getDemos_for_ext(entity me, string ext, float subdir)
 {
 	string s;
@@ -47,13 +46,13 @@ void getDemos_for_ext(entity me, string ext, float subdir)
 		n = search_getsize(list);
 		for(i = 0; i < n; ++i)
 		{
-			s = search_getfilename(list, i); // get initial full file name
-			s = substring(s, 6, (strlen(s) - 6 - 4)); // remove "demos/" prefix and ".dem" suffix
-			s = strdecolorize(s); // remove any pre-existing colors
+			s = search_getfilename(list, i);
+			s = substring(s, 6, (strlen(s) - 6 - 4));
+			s = strdecolorize(s);
 			if(subdir)
 			{
-				s = strreplace("/", "^7/", s); // clear colors at the forward slash
-				s = strcat("/", rgb_to_hexcolor(SKINCOLOR_DEMOLIST_SUBDIR), s); // add a forward slash for sorting, then color
+				s = strreplace("/", "^7/", s);
+				s = strcat("/", rgb_to_hexcolor(SKINCOLOR_DEMOLIST_SUBDIR), s);
 				bufstr_add(me.listDemo, s, true);
 			}
 			else { bufstr_add(me.listDemo, s, true); }
@@ -126,7 +125,7 @@ void XonoticDemoList_showNotify(entity me)
 void DemoList_Refresh_Click(entity btn, entity me)
 {
 	me.getDemos(me);
-	me.setSelected(me, 0); //always select the first element after a list update
+	me.setSelected(me, 0);
 }
 
 void DemoList_Filter_Change(entity box, entity me)
@@ -166,11 +165,11 @@ void XonoticDemoList_timeDemo(entity me)
 
 void DemoConfirm_ListClick_Check_Gamestatus(entity me)
 {
-	if(!(gamestatus & (GAME_CONNECTED | GAME_ISSERVER))) // we're not in a match, lets watch the demo
+	if(!(gamestatus & (GAME_CONNECTED | GAME_ISSERVER)))
 	{
 		me.startDemo(me);
 	}
-	else // already in a match, player has to confirm
+	else
 	{
 		DialogOpenButton_Click_withCoords(
 			me,

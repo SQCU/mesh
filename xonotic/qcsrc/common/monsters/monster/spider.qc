@@ -38,8 +38,8 @@ MUTATOR_HOOKFUNCTION(spiderweb, MonsterMove)
 
 	if(StatusEffects_active(STATUSEFFECT_Webbed, mon))
 	{
-		M_ARGV(1, float) *= 0.5; // run speed
-		M_ARGV(2, float) *= 0.5; // walk speed
+		M_ARGV(1, float) *= 0.5;
+		M_ARGV(2, float) *= 0.5;
 	}
 }
 
@@ -121,8 +121,6 @@ void M_Spider_Attack_Web(entity this)
 	proj.projectiledeathtype = DEATH_MONSTER_SPIDER.m_id;
 	setorigin(proj, CENTER_OR_VIEWOFS(this));
 
-	//proj.glow_size = 50;
-	//proj.glow_color = 45;
 	set_movetype(proj, MOVETYPE_BOUNCE);
 	W_SetupProjVelocity_Explicit(proj, v_forward, v_up, (autocvar_g_monster_spider_attack_web_speed), (autocvar_g_monster_spider_attack_web_speed_up), 0, 0, false);
 	settouch(proj, M_Spider_Attack_Web_Touch);
@@ -168,7 +166,7 @@ bool M_Spider_Attack(int attack_type, entity actor, entity targ, .entity weapone
 }
 
 spawnfunc(monster_spider) { Monster_Spawn(this, true, MON_SPIDER); }
-#endif // SVQC
+#endif
 
 #ifdef SVQC
 METHOD(Spider, mr_think, bool(Spider this, entity actor))
@@ -197,25 +195,19 @@ METHOD(Spider, mr_anim, bool(Spider this, entity actor))
 {
     TC(Spider, this);
     vector none = '0 0 0';
-    actor.anim_melee = animfixfps(actor, '0 1 5', none); // analyze models and set framerate
+    actor.anim_melee = animfixfps(actor, '0 1 5', none);
     actor.anim_die1 = animfixfps(actor, '1 1 1', none);
     actor.anim_die2 = animfixfps(actor, '2 1 1', none);
     actor.anim_shoot = animfixfps(actor, '3 1 1', none);
-    //actor.anim_fire2 = animfixfps(actor, '4 1 1', none);
+
     actor.anim_idle = animfixfps(actor, '5 1 1', none);
-    //actor.anim_sight = animfixfps(actor, '6 1 1', none);
+
     actor.anim_pain1 = animfixfps(actor, '7 1 1', none);
     actor.anim_pain2 = animfixfps(actor, '8 1 1', none);
-    //actor.anim_pain3 = animfixfps(actor, '9 1 1', none);
+
     actor.anim_walk = animfixfps(actor, '10 1 1', none);
-    actor.anim_run = animfixfps(actor, '10 1 1', none); // temp?
-    //actor.anim_forwardright = animfixfps(actor, '11 1 1', none);
-    //actor.anim_walkright = animfixfps(actor, '12 1 1', none);
-    //actor.anim_walkbackright = animfixfps(actor, '13 1 1', none);
-    //actor.anim_walkback = animfixfps(actor, '14 1 1', none);
-    //actor.anim_walkbackleft = animfixfps(actor, '15 1 1', none);
-    //actor.anim_walkleft = animfixfps(actor, '16 1 1', none);
-    //actor.anim_forwardleft = animfixfps(actor, '17 1 1', none);
+    actor.anim_run = animfixfps(actor, '10 1 1', none);
+
     return true;
 }
 #endif

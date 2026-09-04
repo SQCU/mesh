@@ -11,8 +11,8 @@
 
 #ifdef WIN32
 # include <windows.h>
-# include <mmsystem.h> // timeGetTime
-# include <time.h> // localtime
+# include <mmsystem.h>
+# include <time.h>
 #ifdef _MSC_VER
 #pragma comment(lib, "winmm.lib")
 #endif
@@ -40,11 +40,10 @@ char *Sys_TimeString(const char *timeformat)
 	return sys_timestring;
 }
 
-
 extern qboolean host_shuttingdown;
 void Sys_Quit (int returnvalue)
 {
-	// Unlock mutexes because the quit command may jump directly here, causing a deadlock
+
 	Cbuf_UnlockThreadMutex();
 	SV_UnlockThreadMutex();
 
@@ -74,15 +73,6 @@ void Sys_AllowProfiling(qboolean enable)
 	moncontrol(enable);
 #endif
 }
-
-
-/*
-===============================================================================
-
-DLL MANAGEMENT
-
-===============================================================================
-*/
 
 static qboolean Sys_LoadLibraryFunctions(dllhandle_t dllhandle, const dllfunction_t *fcts, qboolean complain, qboolean has_next)
 {
@@ -134,11 +124,9 @@ notfound:
 #endif
 #endif
 
-	// Initializations
 	for (func = fcts; func && func->name != NULL; func++)
 		*func->funcvariable = NULL;
 
-	// Try every possible name
 	Con_DPrintf ("Trying to load library...");
 	for (i = 0; dllnames[i] != NULL; i++)
 	{
@@ -152,7 +140,7 @@ notfound:
 #  endif
 # endif
 		dllhandle = LoadLibrary (dllnames[i]);
-		// no need to unset this - we want ALL dlls to be loaded from there, anyway
+
 #else
 		dllhandle = dlopen (dllnames[i], RTLD_LAZY | RTLD_GLOBAL);
 #endif
@@ -162,8 +150,6 @@ notfound:
 			Sys_UnloadLibrary (&dllhandle);
 	}
 
-	// see if the names can be loaded relative to the executable path
-	// (this is for Mac OSX which does not check next to the executable)
 	if (!dllhandle && strrchr(com_argv[0], '/'))
 	{
 		char path[MAX_OSPATH];
@@ -187,7 +173,6 @@ notfound:
 		}
 	}
 
-	// No DLL found
 	if (! dllhandle)
 	{
 		Con_DPrintf(" - failed.\n");
@@ -242,27 +227,24 @@ void* Sys_GetProcAddress (dllhandle_t handle, const char* name)
 #if defined(CLOCK_MONOTONIC) || defined(CLOCK_HIRES)
 # define HAVE_CLOCKGETTIME 1
 #endif
-// FIXME improve this check, manpage hints to DST_NONE
+
 # define HAVE_GETTIMEOFDAY 1
 #endif
 
 #ifndef WIN32
-// on Win32, select() cannot be used with all three FD list args being NULL according to MSDN
-// (so much for POSIX...)
+
 # ifdef FD_SET
 #  define HAVE_SELECT 1
 # endif
 #endif
 
 #ifndef WIN32
-// FIXME improve this check
+
 # define HAVE_USLEEP 1
 #endif
 
-// this one is referenced elsewhere
 cvar_t sys_usenoclockbutbenchmark = {CVAR_SAVE, "sys_usenoclockbutbenchmark", "0", "don't use ANY real timing, and simulate a clock (for benchmarking); the game then runs as fast as possible. Run a QC mod with bots that does some stuff, then does a quit at the end, to benchmark a server. NEVER do this on a public server."};
 
-// these are not
 static cvar_t sys_debugsleep = {0, "sys_debugsleep", "0", "write requested and attained sleep times to standard output, to be used with gnuplot"};
 static cvar_t sys_usesdlgetticks = {CVAR_SAVE, "sys_usesdlgetticks", "0", "use SDL_GetTicks() timer (less accurate, for debugging)"};
 static cvar_t sys_usesdldelay = {CVAR_SAVE, "sys_usesdldelay", "0", "use SDL_Delay() (less accurate, for debugging)"};
@@ -273,7 +255,7 @@ static cvar_t sys_usequeryperformancecounter = {CVAR_SAVE, "sys_usequeryperforma
 static cvar_t sys_useclockgettime = {CVAR_SAVE, "sys_useclockgettime", "1", "use POSIX clock_gettime function (not adjusted by NTP on some older Linux kernels) for timing rather than gettimeofday (which has issues if the system time is stepped by ntpdate, or apparently on some Xen installations)"};
 #endif
 
-static double benchmark_time; // actually always contains an integer amount of milliseconds, will eventually "overflow"
+static double benchmark_time;
 
 void Sys_Init_Commands (void)
 {
@@ -296,9 +278,7 @@ void Sys_Init_Commands (void)
 
 double Sys_DirtyTime(void)
 {
-	// first all the OPTIONAL timers
 
-	// benchmark timer (fake clock)
 	if(sys_usenoclockbutbenchmark.integer)
 	{
 		double old_benchmark_time = benchmark_time;
@@ -310,15 +290,7 @@ double Sys_DirtyTime(void)
 #if HAVE_QUERYPERFORMANCECOUNTER
 	if (sys_usequeryperformancecounter.integer)
 	{
-		// LordHavoc: note to people modifying this code, DWORD is specifically defined as an unsigned 32bit number, therefore the 65536.0 * 65536.0 is fine.
-		// QueryPerformanceCounter
-		// platform:
-		// Windows 95/98/ME/NT/2000/XP
-		// features:
-		// very accurate (CPU cycles)
-		// known issues:
-		// does not necessarily match realtime too well (tends to get faster and faster in win98)
-		// wraps around occasionally on some platforms (depends on CPU speed and probably other unknown factors)
+
 		double timescale;
 		LARGE_INTEGER PerformanceFreq;
 		LARGE_INTEGER PerformanceCount;
@@ -326,7 +298,7 @@ double Sys_DirtyTime(void)
 		if (QueryPerformanceFrequency (&PerformanceFreq))
 		{
 			QueryPerformanceCounter (&PerformanceCount);
-	
+
 			#ifdef __BORLANDC__
 			timescale = 1.0 / ((double) PerformanceFreq.u.LowPart + (double) PerformanceFreq.u.HighPart * 65536.0 * 65536.0);
 			return ((double) PerformanceCount.u.LowPart + (double) PerformanceCount.u.HighPart * 65536.0 * 65536.0) * timescale;
@@ -338,7 +310,7 @@ double Sys_DirtyTime(void)
 		else
 		{
 			Con_Printf("No hardware timer available\n");
-			// fall back to other clock sources
+
 			Cvar_SetValueQuick(&sys_usequeryperformancecounter, false);
 		}
 	}
@@ -349,17 +321,16 @@ double Sys_DirtyTime(void)
 	{
 		struct timespec ts;
 #  ifdef CLOCK_MONOTONIC
-		// linux
+
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 #  else
-		// sunos
+
 		clock_gettime(CLOCK_HIGHRES, &ts);
 #  endif
 		return (double) ts.tv_sec + ts.tv_nsec / 1000000000.0;
 	}
 #endif
 
-	// now all the FALLBACK timers
 	if(sys_supportsdlgetticks && sys_usesdlgetticks.integer)
 		return (double) Sys_SDL_GetTicks() / 1000.0;
 #if HAVE_GETTIMEOFDAY
@@ -371,15 +342,7 @@ double Sys_DirtyTime(void)
 #elif HAVE_TIMEGETTIME
 	{
 		static int firsttimegettime = true;
-		// timeGetTime
-		// platform:
-		// Windows 95/98/ME/NT/2000/XP
-		// features:
-		// reasonable accuracy (millisecond)
-		// issues:
-		// wraps around every 47 days or so (but this is non-fatal to us, odd times are rejected, only causes a one frame stutter)
 
-		// make sure the timer is high precision, otherwise different versions of windows have varying accuracy
 		if (firsttimegettime)
 		{
 			timeBeginPeriod(1);
@@ -389,8 +352,7 @@ double Sys_DirtyTime(void)
 		return (double) timeGetTime() / 1000.0;
 	}
 #else
-	// fallback for using the SDL timer if no other timer is available
-	// this calls Sys_Error() if not linking against SDL
+
 	return (double) Sys_SDL_GetTicks() / 1000.0;
 #endif
 }
@@ -474,7 +436,7 @@ static const char *Sys_FindInPATH(const char *name, char namesep, const char *PA
 				return buf;
 			p = q + 1;
 		}
-		if(!q) // none found - try the last item
+		if(!q)
 		{
 			dpsnprintf(buf, bufsize, "%s%c%s", p, namesep, name);
 			if(FS_SysFileExists(buf))
@@ -503,7 +465,7 @@ static const char *Sys_FindExecutableName(void)
 		return exenamebuf;
 	}
 	if(strchr(com_argv[0], '/'))
-		return com_argv[0]; // possibly a relative path
+		return com_argv[0];
 	else
 		return Sys_FindInPATH(com_argv[0], '/', getenv("PATH"), ':', exenamebuf, sizeof(exenamebuf));
 #endif
@@ -516,9 +478,8 @@ void Sys_ProvideSelfFD(void)
 	com_selffd = FS_SysOpenFD(Sys_FindExecutableName(), "rb", false);
 }
 
-// for x86 cpus only...  (x64 has SSE2_PRESENT)
 #if defined(SSE_POSSIBLE) && !defined(SSE2_PRESENT)
-// code from SDL, shortened as we can expect CPUID to work
+
 static int CPUID_Features(void)
 {
 	int features = 0;
@@ -551,13 +512,13 @@ static int CPUID_Features(void)
 #ifdef SSE_POSSIBLE
 qboolean Sys_HaveSSE(void)
 {
-	// COMMANDLINEOPTION: SSE: -nosse disables SSE support and detection
+
 	if(COM_CheckParm("-nosse"))
 		return false;
 #ifdef SSE_PRESENT
 	return true;
 #else
-	// COMMANDLINEOPTION: SSE: -forcesse enables SSE support and disables detection
+
 	if(COM_CheckParm("-forcesse") || COM_CheckParm("-forcesse2"))
 		return true;
 	if(CPUID_Features() & (1 << 25))
@@ -568,23 +529,22 @@ qboolean Sys_HaveSSE(void)
 
 qboolean Sys_HaveSSE2(void)
 {
-	// COMMANDLINEOPTION: SSE2: -nosse2 disables SSE2 support and detection
+
 	if(COM_CheckParm("-nosse") || COM_CheckParm("-nosse2"))
 		return false;
 #ifdef SSE2_PRESENT
 	return true;
 #else
-	// COMMANDLINEOPTION: SSE2: -forcesse2 enables SSE2 support and disables detection
+
 	if(COM_CheckParm("-forcesse2"))
 		return true;
-	if((CPUID_Features() & (3 << 25)) == (3 << 25)) // SSE is 1<<25, SSE2 is 1<<26
+	if((CPUID_Features() & (3 << 25)) == (3 << 25))
 		return true;
 	return false;
 #endif
 }
 #endif
 
-/// called to set process priority for dedicated servers
 #if defined(__linux__)
 #include <sys/resource.h>
 #include <errno.h>

@@ -1,6 +1,5 @@
 #pragma once
 
-
 const int MAGICEAR_IGNORE_SAY = BIT(0);
 const int MAGICEAR_IGNORE_TEAMSAY = BIT(1);
 const int MAGICEAR_IGNORE_TELL = BIT(2);

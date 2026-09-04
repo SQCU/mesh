@@ -7,26 +7,12 @@
 #include "jpeg.h"
 #include "image.h"
 
-//============================================================================
-// Client
-//[515]: unsolved PROBLEMS
-//- finish player physics code (cs_runplayerphysics)
-//- EntWasFreed ?
-//- RF_DEPTHHACK is not like it should be
-//- add builtin that sets cl.viewangles instead of reading "input_angles" global
-//- finish lines support for R_Polygon***
-//- insert selecttraceline into traceline somehow
-
-//4 feature darkplaces csqc: add builtin to clientside qc for reading triangles of model meshes (useful to orient a ui along a triangle of a model mesh)
-//4 feature darkplaces csqc: add builtins to clientside qc for gl calls
-
 extern cvar_t v_flipped;
 extern cvar_t r_equalize_entities_fullbright;
 
 r_refdef_view_t csqc_original_r_refdef_view;
 r_refdef_view_t csqc_main_r_refdef_view;
 
-// #1 void(vector ang) makevectors
 static void VM_CL_makevectors (prvm_prog_t *prog)
 {
 	vec3_t angles, forward, right, up;
@@ -38,7 +24,6 @@ static void VM_CL_makevectors (prvm_prog_t *prog)
 	VectorCopy(up, PRVM_clientglobalvector(v_up));
 }
 
-// #2 void(entity e, vector o) setorigin
 static void VM_CL_setorigin (prvm_prog_t *prog)
 {
 	prvm_edict_t	*e;
@@ -71,7 +56,6 @@ static void SetMinMaxSizePRVM (prvm_prog_t *prog, prvm_edict_t *e, prvm_vec_t *m
 		if (min[i] > max[i])
 			prog->error_cmd("SetMinMaxSize: backwards mins/maxs");
 
-	// set derived values
 	VectorCopy (min, PRVM_clientedictvector(e, mins));
 	VectorCopy (max, PRVM_clientedictvector(e, maxs));
 	VectorSubtract (max, min, PRVM_clientedictvector(e, size));
@@ -87,7 +71,6 @@ static void SetMinMaxSize (prvm_prog_t *prog, prvm_edict_t *e, const vec_t *min,
 	SetMinMaxSizePRVM(prog, e, mins, maxs);
 }
 
-// #3 void(entity e, string m) setmodel
 static void VM_CL_setmodel (prvm_prog_t *prog)
 {
 	prvm_edict_t	*e;
@@ -128,8 +111,7 @@ static void VM_CL_setmodel (prvm_prog_t *prog)
 	}
 
 	if( mod ) {
-		// TODO: check if this breaks needed consistency and maybe add a cvar for it too?? [1/10/2008 Black]
-		// LordHavoc: erm you broke it by commenting this out - setmodel must do setsize or else the qc can't find out the model size, and ssqc does this by necessity, consistency.
+
 		SetMinMaxSize (prog, e, mod->normalmins, mod->normalmaxs);
 	}
 	else
@@ -139,7 +121,6 @@ static void VM_CL_setmodel (prvm_prog_t *prog)
 	}
 }
 
-// #4 void(entity e, vector min, vector max) setsize
 static void VM_CL_setsize (prvm_prog_t *prog)
 {
 	prvm_edict_t	*e;
@@ -165,7 +146,6 @@ static void VM_CL_setsize (prvm_prog_t *prog)
 	CL_LinkEdict(e);
 }
 
-// #8 void(entity e, float chan, string samp, float volume, float atten[, float pitchchange[, float flags]]) sound
 static void VM_CL_sound (prvm_prog_t *prog)
 {
 	const char			*sample;
@@ -207,14 +187,10 @@ static void VM_CL_sound (prvm_prog_t *prog)
 		flags = 0;
 	else
 	{
-		// LordHavoc: we only let the qc set certain flags, others are off-limits
+
 		flags = (int)PRVM_G_FLOAT(OFS_PARM6) & (CHANNELFLAG_RELIABLE | CHANNELFLAG_FORCELOOP | CHANNELFLAG_PAUSED | CHANNELFLAG_FULLVOLUME);
 	}
 
-	// sound_starttime exists instead of sound_startposition because in a
-	// networking sense you might not know when something is being received,
-	// so making sounds match up in sync would be impossible if relative
-	// position was sent
 	if (PRVM_clientglobalfloat(sound_starttime))
 		startposition = cl.time - PRVM_clientglobalfloat(sound_starttime);
 	else
@@ -232,7 +208,6 @@ static void VM_CL_sound (prvm_prog_t *prog)
 	S_StartSound_StartPosition_Flags(MAX_EDICTS + PRVM_NUM_FOR_EDICT(entity), channel, S_FindName(sample), org, fvolume, attenuation, startposition, flags, pitchchange > 0.0f ? pitchchange * 0.01f : 1.0f);
 }
 
-// #483 void(vector origin, string sample, float volume, float attenuation) pointsound
 static void VM_CL_pointsound(prvm_prog_t *prog)
 {
 	const char			*sample;
@@ -259,11 +234,9 @@ static void VM_CL_pointsound(prvm_prog_t *prog)
 		return;
 	}
 
-	// Send World Entity as Entity to Play Sound (for CSQC, that is MAX_EDICTS)
 	S_StartSound(MAX_EDICTS, 0, S_FindName(sample), org, fvolume, attenuation);
 }
 
-// #14 entity() spawn
 static void VM_CL_spawn (prvm_prog_t *prog)
 {
 	prvm_edict_t *ed;
@@ -280,15 +253,12 @@ static void CL_VM_SetTraceGlobals(prvm_prog_t *prog, const trace_t *trace, int s
 #define CL_HitNetworkBrushModels(move) !((move) == MOVE_WORLDONLY)
 #define CL_HitNetworkPlayers(move)     !((move) == MOVE_WORLDONLY || (move) == MOVE_NOMONSTERS)
 
-// #16 void(vector v1, vector v2, float movetype, entity ignore) traceline
 static void VM_CL_traceline (prvm_prog_t *prog)
 {
 	vec3_t	v1, v2;
 	trace_t	trace;
 	int		move, svent;
 	prvm_edict_t	*ent;
-
-//	R_TimeReport("pretraceline");
 
 	VM_SAFEPARMCOUNTRANGE(4, 4, VM_CL_traceline);
 
@@ -305,21 +275,9 @@ static void VM_CL_traceline (prvm_prog_t *prog)
 	trace = CL_TraceLine(v1, v2, move, ent, CL_GenericHitSuperContentsMask(ent), 0, 0, collision_extendtracelinelength.value, CL_HitNetworkBrushModels(move), CL_HitNetworkPlayers(move), &svent, true, false);
 
 	CL_VM_SetTraceGlobals(prog, &trace, svent);
-//	R_TimeReport("traceline");
+
 }
 
-/*
-=================
-VM_CL_tracebox
-
-Used for use tracing and shot targeting
-Traces are blocked by bbox and exact bsp entityes, and also slide box entities
-if the tryents flag is set.
-
-tracebox (vector1, vector mins, vector maxs, vector2, tryents)
-=================
-*/
-// LordHavoc: added this for my own use, VERY useful, similar to traceline
 static void VM_CL_tracebox (prvm_prog_t *prog)
 {
 	vec3_t	v1, v2, m1, m2;
@@ -327,8 +285,7 @@ static void VM_CL_tracebox (prvm_prog_t *prog)
 	int		move, svent;
 	prvm_edict_t	*ent;
 
-//	R_TimeReport("pretracebox");
-	VM_SAFEPARMCOUNTRANGE(6, 8, VM_CL_tracebox); // allow more parameters for future expansion
+	VM_SAFEPARMCOUNTRANGE(6, 8, VM_CL_tracebox);
 
 	prog->xfunction->builtinsprofile += 30;
 
@@ -345,7 +302,7 @@ static void VM_CL_tracebox (prvm_prog_t *prog)
 	trace = CL_TraceBox(v1, m1, m2, v2, move, ent, CL_GenericHitSuperContentsMask(ent), 0, 0, collision_extendtraceboxlength.value, CL_HitNetworkBrushModels(move), CL_HitNetworkPlayers(move), &svent, true);
 
 	CL_VM_SetTraceGlobals(prog, &trace, svent);
-//	R_TimeReport("tracebox");
+
 }
 
 static trace_t CL_Trace_Toss (prvm_prog_t *prog, prvm_edict_t *tossent, prvm_edict_t *ignore, int *svent)
@@ -369,7 +326,7 @@ static trace_t CL_Trace_Toss (prvm_prog_t *prog, prvm_edict_t *tossent, prvm_edi
 		gravity = 1.0f;
 	gravity *= cl.movevars_gravity * 0.05;
 
-	for (i = 0;i < 200;i++) // LordHavoc: sanity check; never trace more than 10 seconds
+	for (i = 0;i < 200;i++)
 	{
 		PRVM_clientedictvector(tossent, velocity)[2] -= gravity;
 		VectorMA (PRVM_clientedictvector(tossent, angles), 0.05, PRVM_clientedictvector(tossent, avelocity), PRVM_clientedictvector(tossent, angles));
@@ -417,8 +374,6 @@ static void VM_CL_tracetoss (prvm_prog_t *prog)
 	CL_VM_SetTraceGlobals(prog, &trace, svent);
 }
 
-
-// #20 void(string s) precache_model
 static void VM_CL_precache_model (prvm_prog_t *prog)
 {
 	const char	*name;
@@ -455,7 +410,6 @@ static void VM_CL_precache_model (prvm_prog_t *prog)
 	VM_Warning(prog, "VM_CL_precache_model: model \"%s\" not found\n", name);
 }
 
-// #22 entity(vector org, float rad) findradius
 static void VM_CL_findradius (prvm_prog_t *prog)
 {
 	prvm_edict_t	*ent, *chain;
@@ -489,20 +443,17 @@ static void VM_CL_findradius (prvm_prog_t *prog)
 	numtouchedicts = World_EntitiesInBox(&cl.world, mins, maxs, MAX_EDICTS, touchedicts);
 	if (numtouchedicts > MAX_EDICTS)
 	{
-		// this never happens	//[515]: for what then ?
+
 		Con_Printf("CSQC_EntitiesInBox returned %i edicts, max was %i\n", numtouchedicts, MAX_EDICTS);
 		numtouchedicts = MAX_EDICTS;
 	}
 	for (i = 0;i < numtouchedicts;i++)
 	{
 		ent = touchedicts[i];
-		// Quake did not return non-solid entities but darkplaces does
-		// (note: this is the reason you can't blow up fallen zombies)
+
 		if (PRVM_clientedictfloat(ent, solid) == SOLID_NOT && !sv_gameplayfix_blowupfallenzombies.integer)
 			continue;
-		// LordHavoc: compare against bounding box rather than center so it
-		// doesn't miss large objects, and use DotProduct instead of Length
-		// for a major speedup
+
 		VectorSubtract(org, PRVM_clientedictvector(ent, origin), eorg);
 		if (sv_gameplayfix_findradiusdistancetobox.integer)
 		{
@@ -522,16 +473,14 @@ static void VM_CL_findradius (prvm_prog_t *prog)
 	VM_RETURN_EDICT(chain);
 }
 
-// #34 float() droptofloor
 static void VM_CL_droptofloor (prvm_prog_t *prog)
 {
 	prvm_edict_t		*ent;
 	vec3_t				start, end, mins, maxs;
 	trace_t				trace;
 
-	VM_SAFEPARMCOUNTRANGE(0, 2, VM_CL_droptofloor); // allow 2 parameters because the id1 defs.qc had an incorrect prototype
+	VM_SAFEPARMCOUNTRANGE(0, 2, VM_CL_droptofloor);
 
-	// assume failure if it returns early
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 
 	ent = PRVM_PROG_TO_EDICT(PRVM_clientglobaledict(self));
@@ -560,12 +509,10 @@ static void VM_CL_droptofloor (prvm_prog_t *prog)
 		PRVM_clientedictfloat(ent, flags) = (int)PRVM_clientedictfloat(ent, flags) | FL_ONGROUND;
 		PRVM_clientedictedict(ent, groundentity) = PRVM_EDICT_TO_PROG(trace.ent);
 		PRVM_G_FLOAT(OFS_RETURN) = 1;
-		// if support is destroyed, keep suspended (gross hack for floating items in various maps)
-//		ent->priv.server->suspendedinairflag = true;
+
 	}
 }
 
-// #35 void(float style, string value) lightstyle
 static void VM_CL_lightstyle (prvm_prog_t *prog)
 {
 	int			i;
@@ -585,7 +532,6 @@ static void VM_CL_lightstyle (prvm_prog_t *prog)
 	cl.lightstyle[i].length = (int)strlen(cl.lightstyle[i].map);
 }
 
-// #40 float(entity e) checkbottom
 static void VM_CL_checkbottom (prvm_prog_t *prog)
 {
 	static int		cs_yes, cs_no;
@@ -602,9 +548,6 @@ static void VM_CL_checkbottom (prvm_prog_t *prog)
 	VectorAdd (PRVM_clientedictvector(ent, origin), PRVM_clientedictvector(ent, mins), mins);
 	VectorAdd (PRVM_clientedictvector(ent, origin), PRVM_clientedictvector(ent, maxs), maxs);
 
-// if all of the points under the corners are solid world, don't bother
-// with the tougher checks
-// the corners must be within 16 of the midpoint
 	start[2] = mins[2] - 1;
 	for	(x=0 ; x<=1 ; x++)
 		for	(y=0 ; y<=1 ; y++)
@@ -617,16 +560,13 @@ static void VM_CL_checkbottom (prvm_prog_t *prog)
 
 	cs_yes++;
 	PRVM_G_FLOAT(OFS_RETURN) = true;
-	return;		// we got out easy
+	return;
 
 realcheck:
 	cs_no++;
-//
-// check it for real...
-//
+
 	start[2] = mins[2];
 
-// the midpoint must be within 16 of the bottom
 	start[0] = stop[0] = (mins[0] + maxs[0])*0.5;
 	start[1] = stop[1] = (mins[1] + maxs[1])*0.5;
 	stop[2] = start[2] - 2*sv_stepheight.value;
@@ -637,7 +577,6 @@ realcheck:
 
 	mid = bottom = trace.endpos[2];
 
-// the corners must be within 16 of the midpoint
 	for	(x=0 ; x<=1 ; x++)
 		for	(y=0 ; y<=1 ; y++)
 		{
@@ -656,7 +595,6 @@ realcheck:
 	PRVM_G_FLOAT(OFS_RETURN) = true;
 }
 
-// #41 float(vector v) pointcontents
 static void VM_CL_pointcontents (prvm_prog_t *prog)
 {
 	vec3_t point;
@@ -665,7 +603,6 @@ static void VM_CL_pointcontents (prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = Mod_Q1BSP_NativeContentsFromSuperContents(CL_PointSuperContents(point));
 }
 
-// #48 void(vector o, vector d, float color, float count) particle
 static void VM_CL_particle (prvm_prog_t *prog)
 {
 	vec3_t org, dir;
@@ -680,7 +617,6 @@ static void VM_CL_particle (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_SVC_PARTICLE, count, org, org, dir, dir, NULL, color);
 }
 
-// #74 void(vector pos, string samp, float vol, float atten) ambientsound
 static void VM_CL_ambientsound (prvm_prog_t *prog)
 {
 	vec3_t f;
@@ -691,7 +627,6 @@ static void VM_CL_ambientsound (prvm_prog_t *prog)
 	S_StaticSound (s, f, PRVM_G_FLOAT(OFS_PARM2), PRVM_G_FLOAT(OFS_PARM3)*64);
 }
 
-// #92 vector(vector org[, float lpflag]) getlight (DP_QC_GETLIGHT)
 static void VM_CL_getlight (prvm_prog_t *prog)
 {
 	vec3_t ambientcolor, diffusecolor, diffusenormal;
@@ -711,9 +646,6 @@ static void VM_CL_getlight (prvm_prog_t *prog)
 		VectorCopy(diffusenormal, PRVM_clientglobalvector(getlight_dir));
 }
 
-//============================================================================
-//[515]: SCENE MANAGER builtins
-
 extern cvar_t v_yshearing;
 void CSQC_R_RecalcView (void)
 {
@@ -727,14 +659,13 @@ void CSQC_R_RecalcView (void)
 	Matrix4x4_Concat(&viewmodelmatrix_withbob, &r_refdef.view.matrix, &cl.csqc_viewmodelmatrixfromengine);
 }
 
-//#300 void() clearscene (EXT_CSQC)
 static void VM_CL_R_ClearScene (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_R_ClearScene);
-	// clear renderable entity and light lists
+
 	r_refdef.scene.numentities = 0;
 	r_refdef.scene.numlights = 0;
-	// restore the view settings to the values that VM_CL_UpdateView received from the client code
+
 	r_refdef.view = csqc_original_r_refdef_view;
 	VectorCopy(cl.csqc_vieworiginfromengine, cl.csqc_vieworigin);
 	VectorCopy(cl.csqc_viewanglesfromengine, cl.csqc_viewangles);
@@ -744,7 +675,6 @@ static void VM_CL_R_ClearScene (prvm_prog_t *prog)
 	CSQC_R_RecalcView();
 }
 
-//#301 void(float mask) addentities (EXT_CSQC)
 static void VM_CL_R_AddEntities (prvm_prog_t *prog)
 {
 	double t = Sys_DirtyTime();
@@ -757,7 +687,7 @@ static void VM_CL_R_AddEntities (prvm_prog_t *prog)
 	PRVM_clientglobalfloat(time) = cl.time;
 	for(i=1;i<prog->num_edicts;i++)
 	{
-		// so we can easily check if CSQC entity #edictnum is currently drawn
+
 		cl.csqcrenderentities[i].entitynumber = 0;
 		ed = &prog->edicts[i];
 		if(ed->priv.required->free)
@@ -765,7 +695,7 @@ static void VM_CL_R_AddEntities (prvm_prog_t *prog)
 		CSQC_Think(ed);
 		if(ed->priv.required->free)
 			continue;
-		// note that for RF_USEAXIS entities, Predraw sets v_forward/v_right/v_up globals that are read by CSQC_AddRenderEdict
+
 		CSQC_Predraw(ed);
 		if(ed->priv.required->free)
 			continue;
@@ -774,12 +704,10 @@ static void VM_CL_R_AddEntities (prvm_prog_t *prog)
 		CSQC_AddRenderEdict(ed, i);
 	}
 
-	// callprofile fixing hack: do not include this time in what is counted for CSQC_UpdateView
 	t = Sys_DirtyTime() - t;if (t < 0 || t >= 1800) t = 0;
 	prog->functions[PRVM_clientfunction(CSQC_UpdateView)].totaltime -= t;
 }
 
-//#302 void(entity ent) addentity (EXT_CSQC)
 static void VM_CL_R_AddEntity (prvm_prog_t *prog)
 {
 	double t = Sys_DirtyTime();
@@ -789,12 +717,6 @@ static void VM_CL_R_AddEntity (prvm_prog_t *prog)
 	prog->functions[PRVM_clientfunction(CSQC_UpdateView)].totaltime -= t;
 }
 
-//#303 float(float property, ...) setproperty (EXT_CSQC)
-//#303 float(float property) getproperty
-//#303 vector(float property) getpropertyvec
-//#309 float(float property) getproperty
-//#309 vector(float property) getpropertyvec
-// VorteX: make this function be able to return previously set property if new value is not given
 static void VM_CL_R_SetView (prvm_prog_t *prog)
 {
 	int		c;
@@ -805,7 +727,6 @@ static void VM_CL_R_SetView (prvm_prog_t *prog)
 
 	c = (int)PRVM_G_FLOAT(OFS_PARM0);
 
-	// return value?
 	if (prog->argc < 2)
 	{
 		switch(c)
@@ -1090,7 +1011,6 @@ static void VM_CL_R_SetView (prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
-//#305 void(vector org, float radius, vector lightcolours[, float style, string cubemapname, float pflags]) adddynamiclight (EXT_CSQC)
 static void VM_CL_R_AddDynamicLight (prvm_prog_t *prog)
 {
 	double t = Sys_DirtyTime();
@@ -1110,7 +1030,6 @@ static void VM_CL_R_AddDynamicLight (prvm_prog_t *prog)
 	vec3_t forward, left, up;
 	VM_SAFEPARMCOUNTRANGE(3, 8, VM_CL_R_AddDynamicLight);
 
-	// if we've run out of dlights, just return
 	if (r_refdef.scene.numlights >= MAX_DLIGHTS)
 		return;
 
@@ -1144,9 +1063,6 @@ static void VM_CL_R_AddDynamicLight (prvm_prog_t *prog)
 	prog->functions[PRVM_clientfunction(CSQC_UpdateView)].totaltime -= t;
 }
 
-//============================================================================
-
-//#310 vector (vector v) cs_unproject (EXT_CSQC)
 static void VM_CL_unproject (prvm_prog_t *prog)
 {
 	vec3_t f;
@@ -1165,7 +1081,6 @@ static void VM_CL_unproject (prvm_prog_t *prog)
 	VectorCopy(result, PRVM_G_VECTOR(OFS_RETURN));
 }
 
-//#311 vector (vector v) cs_project (EXT_CSQC)
 static void VM_CL_project (prvm_prog_t *prog)
 {
 	vec3_t f;
@@ -1182,12 +1097,9 @@ static void VM_CL_project (prvm_prog_t *prog)
 		vid_conwidth.integer * (0.5*(1.0+v[1]/v[0]/-r_refdef.view.frustum_x)),
 		vid_conheight.integer * (0.5*(1.0+v[2]/v[0]/-r_refdef.view.frustum_y)),
 		v[0]);
-	// explanation:
-	// after transforming, relative position to viewport (0..1) = 0.5 * (1 + v[2]/v[0]/-frustum_{x \or y})
-	// as 2D drawing honors the viewport too, to get the same pixel, we simply multiply this by conwidth/height
+
 }
 
-//#330 float(float stnum) getstatf (EXT_CSQC)
 static void VM_CL_getstatf (prvm_prog_t *prog)
 {
 	int i;
@@ -1207,7 +1119,6 @@ static void VM_CL_getstatf (prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) =  dat.f;
 }
 
-//#331 float(float stnum) getstati (EXT_CSQC)
 static void VM_CL_getstati (prvm_prog_t *prog)
 {
 	int i, index;
@@ -1236,12 +1147,11 @@ static void VM_CL_getstati (prvm_prog_t *prog)
 		return;
 	}
 	i = cl.stats[index];
-	if (bitcount != 32)	//32 causes the mask to overflow, so there's nothing to subtract from.
+	if (bitcount != 32)
 		i = (((unsigned int)i)&(((1<<bitcount)-1)<<firstbit))>>firstbit;
 	PRVM_G_FLOAT(OFS_RETURN) = i;
 }
 
-//#332 string(float firststnum) getstats (EXT_CSQC)
 static void VM_CL_getstats (prvm_prog_t *prog)
 {
 	int i;
@@ -1258,7 +1168,6 @@ static void VM_CL_getstats (prvm_prog_t *prog)
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, t);
 }
 
-//#333 void(entity e, float mdlindex) setmodelindex (EXT_CSQC)
 static void VM_CL_setmodelindex (prvm_prog_t *prog)
 {
 	int				i;
@@ -1286,7 +1195,6 @@ static void VM_CL_setmodelindex (prvm_prog_t *prog)
 	PRVM_clientedictstring(t, model) = PRVM_SetEngineString(prog, model->name);
 	PRVM_clientedictfloat(t, modelindex) = i;
 
-	// TODO: check if this breaks needed consistency and maybe add a cvar for it too?? [1/10/2008 Black]
 	if (model)
 	{
 		SetMinMaxSize (prog, t, model->normalmins, model->normalmaxs);
@@ -1295,7 +1203,6 @@ static void VM_CL_setmodelindex (prvm_prog_t *prog)
 		SetMinMaxSize (prog, t, vec3_origin, vec3_origin);
 }
 
-//#334 string(float mdlindex) modelnameforindex (EXT_CSQC)
 static void VM_CL_modelnameforindex (prvm_prog_t *prog)
 {
 	dp_model_t *model;
@@ -1307,7 +1214,6 @@ static void VM_CL_modelnameforindex (prvm_prog_t *prog)
 	PRVM_G_INT(OFS_RETURN) = model ? PRVM_SetEngineString(prog, model->name) : 0;
 }
 
-//#335 float(string effectname) particleeffectnum (EXT_CSQC)
 static void VM_CL_particleeffectnum (prvm_prog_t *prog)
 {
 	int			i;
@@ -1318,7 +1224,6 @@ static void VM_CL_particleeffectnum (prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = i;
 }
 
-// #336 void(entity ent, float effectnum, vector start, vector end[, float color]) trailparticles (EXT_CSQC)
 static void VM_CL_trailparticles (prvm_prog_t *prog)
 {
 	int				i;
@@ -1337,7 +1242,6 @@ static void VM_CL_trailparticles (prvm_prog_t *prog)
 	CL_ParticleTrail(i, 1, start, end, velocity, velocity, NULL, prog->argc >= 5 ? (int)PRVM_G_FLOAT(OFS_PARM4) : 0, true, true, NULL, NULL, 1);
 }
 
-//#337 void(float effectnum, vector origin, vector dir, float count[, float color]) pointparticles (EXT_CSQC)
 static void VM_CL_pointparticles (prvm_prog_t *prog)
 {
 	int			i;
@@ -1353,11 +1257,10 @@ static void VM_CL_pointparticles (prvm_prog_t *prog)
 	CL_ParticleEffect(i, n, f, f, v, v, NULL, prog->argc >= 5 ? (int)PRVM_G_FLOAT(OFS_PARM4) : 0);
 }
 
-//#502 void(float effectnum, entity own, vector origin_from, vector origin_to, vector dir_from, vector dir_to, float count, float extflags) boxparticles (DP_CSQC_BOXPARTICLES)
 static void VM_CL_boxparticles (prvm_prog_t *prog)
 {
 	int effectnum;
-	// prvm_edict_t *own;
+
 	vec3_t origin_from, origin_to, dir_from, dir_to;
 	float count;
 	int flags;
@@ -1368,7 +1271,7 @@ static void VM_CL_boxparticles (prvm_prog_t *prog)
 	effectnum = (int)PRVM_G_FLOAT(OFS_PARM0);
 	if (effectnum < 0)
 		return;
-	// own = PRVM_G_EDICT(OFS_PARM1); // TODO find use for this
+
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), origin_from);
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM3), origin_to  );
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM4), dir_from   );
@@ -1384,21 +1287,21 @@ static void VM_CL_boxparticles (prvm_prog_t *prog)
 	fade = 1;
 	istrail = false;
 
-	if(flags & 1) // read alpha
+	if(flags & 1)
 	{
 		tintmins[3] = PRVM_clientglobalfloat(particles_alphamin);
 		tintmaxs[3] = PRVM_clientglobalfloat(particles_alphamax);
 	}
-	if(flags & 2) // read color
+	if(flags & 2)
 	{
 		VectorCopy(PRVM_clientglobalvector(particles_colormin), tintmins);
 		VectorCopy(PRVM_clientglobalvector(particles_colormax), tintmaxs);
 	}
-	if(flags & 4) // read fade
+	if(flags & 4)
 	{
 		fade = PRVM_clientglobalfloat(particles_fade);
 	}
-	if(flags & 128) // draw as trail
+	if(flags & 128)
 	{
 		istrail = true;
 	}
@@ -1409,7 +1312,6 @@ static void VM_CL_boxparticles (prvm_prog_t *prog)
 		CL_ParticleBox(effectnum, count, origin_from, origin_to, dir_from, dir_to, NULL, 0, true, true, tintmins, tintmaxs, fade);
 }
 
-//#531 void(float pause) setpause
 static void VM_CL_setpause(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1, VM_CL_setpause);
@@ -1419,7 +1321,6 @@ static void VM_CL_setpause(prvm_prog_t *prog)
 		cl.csqc_paused = false;
 }
 
-//#343 void(float usecursor) setcursormode (DP_CSQC)
 static void VM_CL_setcursormode (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1, VM_CL_setcursormode);
@@ -1427,7 +1328,6 @@ static void VM_CL_setcursormode (prvm_prog_t *prog)
 	cl_ignoremousemoves = 2;
 }
 
-//#344 vector() getmousepos (DP_CSQC)
 static void VM_CL_getmousepos(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0,VM_CL_getmousepos);
@@ -1440,7 +1340,6 @@ static void VM_CL_getmousepos(prvm_prog_t *prog)
 		VectorSet(PRVM_G_VECTOR(OFS_RETURN), in_mouse_x * vid_conwidth.integer / vid.width, in_mouse_y * vid_conheight.integer / vid.height, 0);
 }
 
-//#345 float(float framenum) getinputstate (EXT_CSQC)
 static void VM_CL_getinputstate (prvm_prog_t *prog)
 {
 	unsigned int i, frame;
@@ -1452,12 +1351,12 @@ static void VM_CL_getinputstate (prvm_prog_t *prog)
 		if (cl.movecmd[i].sequence == frame)
 		{
 			VectorCopy(cl.movecmd[i].viewangles, PRVM_clientglobalvector(input_angles));
-			PRVM_clientglobalfloat(input_buttons) = cl.movecmd[i].buttons; // FIXME: this should not be directly exposed to csqc (translation layer needed?)
+			PRVM_clientglobalfloat(input_buttons) = cl.movecmd[i].buttons;
 			PRVM_clientglobalvector(input_movevalues)[0] = cl.movecmd[i].forwardmove;
 			PRVM_clientglobalvector(input_movevalues)[1] = cl.movecmd[i].sidemove;
 			PRVM_clientglobalvector(input_movevalues)[2] = cl.movecmd[i].upmove;
 			PRVM_clientglobalfloat(input_timelength) = cl.movecmd[i].frametime;
-			// this probably shouldn't be here
+
 			if(cl.movecmd[i].crouch)
 			{
 				VectorCopy(cl.playercrouchmins, PRVM_clientglobalvector(pmove_mins));
@@ -1473,18 +1372,16 @@ static void VM_CL_getinputstate (prvm_prog_t *prog)
 	}
 }
 
-//#346 void(float sens) setsensitivityscaler (EXT_CSQC)
 static void VM_CL_setsensitivityscale (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1, VM_CL_setsensitivityscale);
 	cl.sensitivityscale = PRVM_G_FLOAT(OFS_PARM0);
 }
 
-//#347 void() runstandardplayerphysics (EXT_CSQC)
-#define PMF_JUMP_HELD 1 // matches FTEQW
-#define PMF_LADDER 2 // not used by DP, FTEQW sets this in runplayerphysics but does not read it
-#define PMF_DUCKED 4 // FIXME FTEQW doesn't have this for Q1 like movement because Q1 cannot crouch
-#define PMF_ONGROUND 8 // FIXME FTEQW doesn't have this for Q1 like movement and expects CSQC code to do its own trace, this is stupid CPU waste
+#define PMF_JUMP_HELD 1
+#define PMF_LADDER 2
+#define PMF_DUCKED 4
+#define PMF_ONGROUND 8
 static void VM_CL_runplayerphysics (prvm_prog_t *prog)
 {
 	cl_clientmovement_state_t s;
@@ -1497,7 +1394,7 @@ static void VM_CL_runplayerphysics (prvm_prog_t *prog)
 	ent = (prog->argc == 1 ? PRVM_G_EDICT(OFS_PARM0) : prog->edicts);
 	if(ent == prog->edicts)
 	{
-		// deprecated use
+
 		s.self = NULL;
 		VectorCopy(PRVM_clientglobalvector(pmove_org), s.origin);
 		VectorCopy(PRVM_clientglobalvector(pmove_vel), s.velocity);
@@ -1509,14 +1406,14 @@ static void VM_CL_runplayerphysics (prvm_prog_t *prog)
 	}
 	else
 	{
-		// new use
+
 		s.self = ent;
 		VectorCopy(PRVM_clientedictvector(ent, origin), s.origin);
 		VectorCopy(PRVM_clientedictvector(ent, velocity), s.velocity);
 		VectorCopy(PRVM_clientedictvector(ent, mins), s.mins);
 		VectorCopy(PRVM_clientedictvector(ent, maxs), s.maxs);
 		s.crouched = ((int)PRVM_clientedictfloat(ent, pmove_flags) & PMF_DUCKED) != 0;
-		s.waterjumptime = 0; // FIXME where do we get this from? FTEQW lacks support for this too
+		s.waterjumptime = 0;
 		s.cmd.canjump = ((int)PRVM_clientedictfloat(ent, pmove_flags) & PMF_JUMP_HELD) == 0;
 	}
 
@@ -1533,7 +1430,7 @@ static void VM_CL_runplayerphysics (prvm_prog_t *prog)
 
 	if(ent == prog->edicts)
 	{
-		// deprecated use
+
 		VectorCopy(s.origin, PRVM_clientglobalvector(pmove_org));
 		VectorCopy(s.velocity, PRVM_clientglobalvector(pmove_vel));
 		PRVM_clientglobalfloat(pmove_jump_held) = !s.cmd.canjump;
@@ -1541,7 +1438,7 @@ static void VM_CL_runplayerphysics (prvm_prog_t *prog)
 	}
 	else
 	{
-		// new use
+
 		VectorCopy(s.origin, PRVM_clientedictvector(ent, origin));
 		VectorCopy(s.velocity, PRVM_clientedictvector(ent, velocity));
 		PRVM_clientedictfloat(ent, pmove_flags) =
@@ -1551,7 +1448,6 @@ static void VM_CL_runplayerphysics (prvm_prog_t *prog)
 	}
 }
 
-//#348 string(float playernum, string keyname) getplayerkeyvalue (EXT_CSQC)
 static void VM_CL_getplayerkey (prvm_prog_t *prog)
 {
 	int			i;
@@ -1606,7 +1502,6 @@ static void VM_CL_getplayerkey (prvm_prog_t *prog)
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, t);
 }
 
-//#351 void(vector origin, vector forward, vector right, vector up) SetListener (EXT_CSQC)
 static void VM_CL_setlistener (prvm_prog_t *prog)
 {
 	vec3_t origin, forward, left, up;
@@ -1616,10 +1511,9 @@ static void VM_CL_setlistener (prvm_prog_t *prog)
 	VectorNegate(PRVM_G_VECTOR(OFS_PARM2), left);
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM3), up);
 	Matrix4x4_FromVectors(&cl.csqc_listenermatrix, forward, left, up, origin);
-	cl.csqc_usecsqclistener = true;	//use csqc listener at this frame
+	cl.csqc_usecsqclistener = true;
 }
 
-//#352 void(string cmdname) registercommand (EXT_CSQC)
 static void VM_CL_registercmd (prvm_prog_t *prog)
 {
 	char *t;
@@ -1638,63 +1532,54 @@ static void VM_CL_registercmd (prvm_prog_t *prog)
 
 }
 
-//#360 float() readbyte (EXT_CSQC)
 static void VM_CL_ReadByte (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadByte);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadByte(&cl_message);
 }
 
-//#361 float() readchar (EXT_CSQC)
 static void VM_CL_ReadChar (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadChar);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadChar(&cl_message);
 }
 
-//#362 float() readshort (EXT_CSQC)
 static void VM_CL_ReadShort (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadShort);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadShort(&cl_message);
 }
 
-//#363 float() readlong (EXT_CSQC)
 static void VM_CL_ReadLong (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadLong);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadLong(&cl_message);
 }
 
-//#364 float() readcoord (EXT_CSQC)
 static void VM_CL_ReadCoord (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadCoord);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadCoord(&cl_message, cls.protocol);
 }
 
-//#365 float() readangle (EXT_CSQC)
 static void VM_CL_ReadAngle (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadAngle);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadAngle(&cl_message, cls.protocol);
 }
 
-//#366 string() readstring (EXT_CSQC)
 static void VM_CL_ReadString (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadString);
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, MSG_ReadString(&cl_message, cl_readstring, sizeof(cl_readstring)));
 }
 
-//#367 float() readfloat (EXT_CSQC)
 static void VM_CL_ReadFloat (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ReadFloat);
 	PRVM_G_FLOAT(OFS_RETURN) = MSG_ReadFloat(&cl_message);
 }
 
-//#501 string() readpicture (DP_CSQC_READWRITEPICTURE)
 extern cvar_t cl_readpicture_force;
 static void VM_CL_ReadPicture (prvm_prog_t *prog)
 {
@@ -1710,27 +1595,21 @@ static void VM_CL_ReadPicture (prvm_prog_t *prog)
 	name = MSG_ReadString(&cl_message, cl_readstring, sizeof(cl_readstring));
 	size = (unsigned short) MSG_ReadShort(&cl_message);
 
-	// check if a texture of that name exists
-	// if yes, it is used and the data is discarded
-	// if not, the (low quality) data is used to build a new texture, whose name will get returned
-
 	pic = Draw_CachePic_Flags (name, CACHEPICFLAG_NOTPERSISTENT);
 
 	if(size)
 	{
 		if(pic->tex == r_texture_notexture)
-			pic->tex = NULL; // don't overwrite the notexture by Draw_NewPic
+			pic->tex = NULL;
 		if(pic->tex && !cl_readpicture_force.integer)
 		{
-			// texture found and loaded
-			// skip over the jpeg as we don't need it
+
 			for(i = 0; i < size; ++i)
 				(void) MSG_ReadByte(&cl_message);
 		}
 		else
 		{
-			// texture not found
-			// use the attached jpeg as texture
+
 			buf = (unsigned char *) Mem_Alloc(tempmempool, size);
 			MSG_ReadBytes(&cl_message, size, buf);
 			data = JPEG_LoadImage_BGRA(buf, size, NULL);
@@ -1742,8 +1621,6 @@ static void VM_CL_ReadPicture (prvm_prog_t *prog)
 
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, name);
 }
-
-//////////////////////////////////////////////////////////
 
 static void VM_CL_makestatic (prvm_prog_t *prog)
 {
@@ -1768,12 +1645,11 @@ static void VM_CL_makestatic (prvm_prog_t *prog)
 		int renderflags;
 		entity_t *staticent = &cl.static_entities[cl.num_static_entities++];
 
-		// copy it to the current state
 		memset(staticent, 0, sizeof(*staticent));
 		staticent->render.model = CL_GetModelByIndex((int)PRVM_clientedictfloat(ent, modelindex));
 		staticent->render.framegroupblend[0].frame = (int)PRVM_clientedictfloat(ent, frame);
 		staticent->render.framegroupblend[0].lerp = 1;
-		// make torchs play out of sync
+
 		staticent->render.framegroupblend[0].start = lhrandom(-10, -1);
 		staticent->render.skinnum = (int)PRVM_clientedictfloat(ent, skin);
 		staticent->render.effects = (int)PRVM_clientedictfloat(ent, effects);
@@ -1782,7 +1658,6 @@ static void VM_CL_makestatic (prvm_prog_t *prog)
 		VectorCopy(PRVM_clientedictvector(ent, colormod), staticent->render.colormod);
 		VectorCopy(PRVM_clientedictvector(ent, glowmod), staticent->render.glowmod);
 
-		// sanitize values
 		if (!staticent->render.alpha)
 			staticent->render.alpha = 1.0f;
 		if (!staticent->render.scale)
@@ -1806,7 +1681,6 @@ static void VM_CL_makestatic (prvm_prog_t *prog)
 		else
 			Matrix4x4_CreateFromQuakeEntity(&staticent->render.matrix, PRVM_clientedictvector(ent, origin)[0], PRVM_clientedictvector(ent, origin)[1], PRVM_clientedictvector(ent, origin)[2], PRVM_clientedictvector(ent, angles)[0], PRVM_clientedictvector(ent, angles)[1], PRVM_clientedictvector(ent, angles)[2], staticent->render.scale);
 
-		// either fullbright or lit
 		if(!r_fullbright.integer)
 		{
 			if (!(staticent->render.effects & EF_FULLBRIGHT))
@@ -1814,7 +1688,7 @@ static void VM_CL_makestatic (prvm_prog_t *prog)
 			else if(r_equalize_entities_fullbright.integer)
 				staticent->render.flags |= RENDER_LIGHT | RENDER_EQUALIZE;
 		}
-		// turn off shadows from transparent objects
+
 		if (!(staticent->render.effects & (EF_NOSHADOW | EF_ADDITIVE | EF_NODEPTHTEST)) && (staticent->render.alpha >= 1))
 			staticent->render.flags |= RENDER_SHADOW;
 		if (staticent->render.effects & EF_NODEPTHTEST)
@@ -1830,21 +1704,9 @@ static void VM_CL_makestatic (prvm_prog_t *prog)
 	else
 		Con_Printf("Too many static entities");
 
-// throw the entity away now
 	PRVM_ED_Free(prog, ent);
 }
 
-//=================================================================//
-
-/*
-=================
-VM_CL_copyentity
-
-copies data from one entity to another
-
-copyentity(src, dst)
-=================
-*/
 static void VM_CL_copyentity (prvm_prog_t *prog)
 {
 	prvm_edict_t *in, *out;
@@ -1878,13 +1740,10 @@ static void VM_CL_copyentity (prvm_prog_t *prog)
 	CL_LinkEdict(out);
 }
 
-//=================================================================//
-
-// #404 void(vector org, string modelname, float startframe, float endframe, float framerate) effect (DP_SV_EFFECT)
 static void VM_CL_effect (prvm_prog_t *prog)
 {
 #if 1
-	Con_Printf("WARNING: VM_CL_effect not implemented\n"); // FIXME: this needs to take modelname not modelindex, the csqc defs has it as string and so it shall be
+	Con_Printf("WARNING: VM_CL_effect not implemented\n");
 #else
 	vec3_t org;
 	VM_SAFEPARMCOUNT(5, VM_CL_effect);
@@ -1893,7 +1752,6 @@ static void VM_CL_effect (prvm_prog_t *prog)
 #endif
 }
 
-// #405 void(vector org, vector velocity, float howmany) te_blood (DP_TE_BLOOD)
 static void VM_CL_te_blood (prvm_prog_t *prog)
 {
 	vec3_t pos, vel, pos2;
@@ -1906,7 +1764,6 @@ static void VM_CL_te_blood (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_BLOOD, PRVM_G_FLOAT(OFS_PARM2), pos2, pos2, vel, vel, NULL, 0);
 }
 
-// #406 void(vector mincorner, vector maxcorner, float explosionspeed, float howmany) te_bloodshower (DP_TE_BLOODSHOWER)
 static void VM_CL_te_bloodshower (prvm_prog_t *prog)
 {
 	vec_t speed;
@@ -1926,7 +1783,6 @@ static void VM_CL_te_bloodshower (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_BLOOD, PRVM_G_FLOAT(OFS_PARM3), mincorner, maxcorner, vel1, vel2, NULL, 0);
 }
 
-// #407 void(vector org, vector color) te_explosionrgb (DP_TE_EXPLOSIONRGB)
 static void VM_CL_te_explosionrgb (prvm_prog_t *prog)
 {
 	vec3_t		pos;
@@ -1940,7 +1796,6 @@ static void VM_CL_te_explosionrgb (prvm_prog_t *prog)
 	CL_AllocLightFlash(NULL, &tempmatrix, 350, PRVM_G_VECTOR(OFS_PARM1)[0], PRVM_G_VECTOR(OFS_PARM1)[1], PRVM_G_VECTOR(OFS_PARM1)[2], 700, 0.5, 0, -1, true, 1, 0.25, 0.25, 1, 1, LIGHTFLAG_NORMALMODE | LIGHTFLAG_REALTIMEMODE);
 }
 
-// #408 void(vector mincorner, vector maxcorner, vector vel, float howmany, float color, float gravityflag, float randomveljitter) te_particlecube (DP_TE_PARTICLECUBE)
 static void VM_CL_te_particlecube (prvm_prog_t *prog)
 {
 	vec3_t mincorner, maxcorner, vel;
@@ -1951,7 +1806,6 @@ static void VM_CL_te_particlecube (prvm_prog_t *prog)
 	CL_ParticleCube(mincorner, maxcorner, vel, (int)PRVM_G_FLOAT(OFS_PARM3), (int)PRVM_G_FLOAT(OFS_PARM4), PRVM_G_FLOAT(OFS_PARM5), PRVM_G_FLOAT(OFS_PARM6));
 }
 
-// #409 void(vector mincorner, vector maxcorner, vector vel, float howmany, float color) te_particlerain (DP_TE_PARTICLERAIN)
 static void VM_CL_te_particlerain (prvm_prog_t *prog)
 {
 	vec3_t mincorner, maxcorner, vel;
@@ -1962,7 +1816,6 @@ static void VM_CL_te_particlerain (prvm_prog_t *prog)
 	CL_ParticleRain(mincorner, maxcorner, vel, (int)PRVM_G_FLOAT(OFS_PARM3), (int)PRVM_G_FLOAT(OFS_PARM4), 0);
 }
 
-// #410 void(vector mincorner, vector maxcorner, vector vel, float howmany, float color) te_particlesnow (DP_TE_PARTICLESNOW)
 static void VM_CL_te_particlesnow (prvm_prog_t *prog)
 {
 	vec3_t mincorner, maxcorner, vel;
@@ -1973,7 +1826,6 @@ static void VM_CL_te_particlesnow (prvm_prog_t *prog)
 	CL_ParticleRain(mincorner, maxcorner, vel, (int)PRVM_G_FLOAT(OFS_PARM3), (int)PRVM_G_FLOAT(OFS_PARM4), 1);
 }
 
-// #411 void(vector org, vector vel, float howmany) te_spark
 static void VM_CL_te_spark (prvm_prog_t *prog)
 {
 	vec3_t pos, pos2, vel;
@@ -1986,7 +1838,7 @@ static void VM_CL_te_spark (prvm_prog_t *prog)
 }
 
 extern cvar_t cl_sound_ric_gunshot;
-// #412 void(vector org) te_gunshotquad (DP_QUADEFFECTS1)
+
 static void VM_CL_te_gunshotquad (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2009,7 +1861,6 @@ static void VM_CL_te_gunshotquad (prvm_prog_t *prog)
 	}
 }
 
-// #413 void(vector org) te_spikequad (DP_QUADEFFECTS1)
 static void VM_CL_te_spikequad (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2029,7 +1880,6 @@ static void VM_CL_te_spikequad (prvm_prog_t *prog)
 	}
 }
 
-// #414 void(vector org) te_superspikequad (DP_QUADEFFECTS1)
 static void VM_CL_te_superspikequad (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2049,7 +1899,6 @@ static void VM_CL_te_superspikequad (prvm_prog_t *prog)
 	}
 }
 
-// #415 void(vector org) te_explosionquad (DP_QUADEFFECTS1)
 static void VM_CL_te_explosionquad (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2061,7 +1910,6 @@ static void VM_CL_te_explosionquad (prvm_prog_t *prog)
 	S_StartSound(-1, 0, cl.sfx_r_exp3, pos2, 1, 1);
 }
 
-// #416 void(vector org) te_smallflash (DP_TE_SMALLFLASH)
 static void VM_CL_te_smallflash (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2072,7 +1920,6 @@ static void VM_CL_te_smallflash (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_SMALLFLASH, 1, pos2, pos2, vec3_origin, vec3_origin, NULL, 0);
 }
 
-// #417 void(vector org, float radius, float lifetime, vector color) te_customflash (DP_TE_CUSTOMFLASH)
 static void VM_CL_te_customflash (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2085,7 +1932,6 @@ static void VM_CL_te_customflash (prvm_prog_t *prog)
 	CL_AllocLightFlash(NULL, &tempmatrix, PRVM_G_FLOAT(OFS_PARM1), PRVM_G_VECTOR(OFS_PARM3)[0], PRVM_G_VECTOR(OFS_PARM3)[1], PRVM_G_VECTOR(OFS_PARM3)[2], PRVM_G_FLOAT(OFS_PARM1) / PRVM_G_FLOAT(OFS_PARM2), PRVM_G_FLOAT(OFS_PARM2), 0, -1, true, 1, 0.25, 1, 1, 1, LIGHTFLAG_NORMALMODE | LIGHTFLAG_REALTIMEMODE);
 }
 
-// #418 void(vector org) te_gunshot (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_gunshot (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2108,7 +1954,6 @@ static void VM_CL_te_gunshot (prvm_prog_t *prog)
 	}
 }
 
-// #419 void(vector org) te_spike (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_spike (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2128,7 +1973,6 @@ static void VM_CL_te_spike (prvm_prog_t *prog)
 	}
 }
 
-// #420 void(vector org) te_superspike (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_superspike (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2148,7 +1992,6 @@ static void VM_CL_te_superspike (prvm_prog_t *prog)
 	}
 }
 
-// #421 void(vector org) te_explosion (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_explosion (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2160,7 +2003,6 @@ static void VM_CL_te_explosion (prvm_prog_t *prog)
 	S_StartSound(-1, 0, cl.sfx_r_exp3, pos2, 1, 1);
 }
 
-// #422 void(vector org) te_tarexplosion (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_tarexplosion (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2172,7 +2014,6 @@ static void VM_CL_te_tarexplosion (prvm_prog_t *prog)
 	S_StartSound(-1, 0, cl.sfx_r_exp3, pos2, 1, 1);
 }
 
-// #423 void(vector org) te_wizspike (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_wizspike (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2184,7 +2025,6 @@ static void VM_CL_te_wizspike (prvm_prog_t *prog)
 	S_StartSound(-1, 0, cl.sfx_wizhit, pos2, 1, 1);
 }
 
-// #424 void(vector org) te_knightspike (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_knightspike (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2196,7 +2036,6 @@ static void VM_CL_te_knightspike (prvm_prog_t *prog)
 	S_StartSound(-1, 0, cl.sfx_knighthit, pos2, 1, 1);
 }
 
-// #425 void(vector org) te_lavasplash (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_lavasplash (prvm_prog_t *prog)
 {
 	vec3_t		pos;
@@ -2205,7 +2044,6 @@ static void VM_CL_te_lavasplash (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_LAVASPLASH, 1, pos, pos, vec3_origin, vec3_origin, NULL, 0);
 }
 
-// #426 void(vector org) te_teleport (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_teleport (prvm_prog_t *prog)
 {
 	vec3_t		pos;
@@ -2214,7 +2052,6 @@ static void VM_CL_te_teleport (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_TELEPORT, 1, pos, pos, vec3_origin, vec3_origin, NULL, 0);
 }
 
-// #427 void(vector org, float colorstart, float colorlength) te_explosion2 (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_explosion2 (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2, color;
@@ -2237,8 +2074,6 @@ static void VM_CL_te_explosion2 (prvm_prog_t *prog)
 	S_StartSound(-1, 0, cl.sfx_r_exp3, pos2, 1, 1);
 }
 
-
-// #428 void(entity own, vector start, vector end) te_lightning1 (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_lightning1 (prvm_prog_t *prog)
 {
 	vec3_t		start, end;
@@ -2248,7 +2083,6 @@ static void VM_CL_te_lightning1 (prvm_prog_t *prog)
 	CL_NewBeam(PRVM_G_EDICTNUM(OFS_PARM0), start, end, cl.model_bolt, true);
 }
 
-// #429 void(entity own, vector start, vector end) te_lightning2 (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_lightning2 (prvm_prog_t *prog)
 {
 	vec3_t		start, end;
@@ -2258,7 +2092,6 @@ static void VM_CL_te_lightning2 (prvm_prog_t *prog)
 	CL_NewBeam(PRVM_G_EDICTNUM(OFS_PARM0), start, end, cl.model_bolt2, true);
 }
 
-// #430 void(entity own, vector start, vector end) te_lightning3 (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_lightning3 (prvm_prog_t *prog)
 {
 	vec3_t		start, end;
@@ -2268,7 +2101,6 @@ static void VM_CL_te_lightning3 (prvm_prog_t *prog)
 	CL_NewBeam(PRVM_G_EDICTNUM(OFS_PARM0), start, end, cl.model_bolt3, false);
 }
 
-// #431 void(entity own, vector start, vector end) te_beam (DP_TE_STANDARDEFFECTBUILTINS)
 static void VM_CL_te_beam (prvm_prog_t *prog)
 {
 	vec3_t		start, end;
@@ -2278,7 +2110,6 @@ static void VM_CL_te_beam (prvm_prog_t *prog)
 	CL_NewBeam(PRVM_G_EDICTNUM(OFS_PARM0), start, end, cl.model_beam, false);
 }
 
-// #433 void(vector org) te_plasmaburn (DP_TE_PLASMABURN)
 static void VM_CL_te_plasmaburn (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2;
@@ -2289,7 +2120,6 @@ static void VM_CL_te_plasmaburn (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_PLASMABURN, 1, pos2, pos2, vec3_origin, vec3_origin, NULL, 0);
 }
 
-// #457 void(vector org, vector velocity, float howmany) te_flamejet (DP_TE_FLAMEJET)
 static void VM_CL_te_flamejet (prvm_prog_t *prog)
 {
 	vec3_t		pos, pos2, vel;
@@ -2302,8 +2132,6 @@ static void VM_CL_te_flamejet (prvm_prog_t *prog)
 	CL_ParticleEffect(EFFECT_TE_FLAMEJET, PRVM_G_FLOAT(OFS_PARM2), pos2, pos2, vel, vel, NULL, 0);
 }
 
-
-// #443 void(entity e, entity tagentity, string tagname) setattachment
 static void VM_CL_setattachment (prvm_prog_t *prog)
 {
 	prvm_edict_t *e;
@@ -2351,9 +2179,6 @@ static void VM_CL_setattachment (prvm_prog_t *prog)
 	PRVM_clientedictfloat(e, tag_index) = tagindex;
 }
 
-/////////////////////////////////////////
-// DP_MD3_TAGINFO extension coded by VorteX
-
 static int CL_GetTagIndex (prvm_prog_t *prog, prvm_edict_t *e, const char *tagname)
 {
 	dp_model_t *model = CL_GetModelFromEdict(e);
@@ -2378,7 +2203,7 @@ static int CL_GetExtendedTagInfo (prvm_prog_t *prog, prvm_edict_t *e, int tagind
 	{
 		r = Mod_Alias_GetExtendedTagInfoForIndex(model, (int)PRVM_clientedictfloat(e, skin), e->priv.server->frameblend, &e->priv.server->skeleton, tagindex - 1, parentindex, tagname, tag_localmatrix);
 
-		if(!r) // success?
+		if(!r)
 			*parentindex += 1;
 
 		return r;
@@ -2441,13 +2266,6 @@ static int CL_GetEntityLocalTagMatrix(prvm_prog_t *prog, prvm_edict_t *ent, int 
 	return 0;
 }
 
-// Warnings/errors code:
-// 0 - normal (everything all-right)
-// 1 - world entity
-// 2 - free entity
-// 3 - null or non-precached model
-// 4 - no tags with requested index
-// 5 - runaway loop at attachment chain
 extern cvar_t cl_bob;
 extern cvar_t cl_bobcycle;
 extern cvar_t cl_bobup;
@@ -2458,7 +2276,7 @@ int CL_GetTagMatrix (prvm_prog_t *prog, matrix4x4_t *out, prvm_edict_t *ent, int
 	matrix4x4_t entitymatrix, tagmatrix, attachmatrix;
 	dp_model_t *model;
 
-	*out = identitymatrix; // warnings and errors return identical matrix
+	*out = identitymatrix;
 
 	if (ent == prog->edicts)
 		return 1;
@@ -2475,15 +2293,14 @@ int CL_GetTagMatrix (prvm_prog_t *prog, matrix4x4_t *out, prvm_edict_t *ent, int
 	{
 		if(attachloop >= 256)
 			return 5;
-		// apply transformation by child's tagindex on parent entity and then
-		// by parent entity itself
+
 		ret = CL_GetEntityLocalTagMatrix(prog, ent, tagindex - 1, &attachmatrix);
 		if(ret && attachloop == 0)
 			return ret;
 		CL_GetEntityMatrix(prog, ent, &entitymatrix, false);
 		Matrix4x4_Concat(&tagmatrix, &attachmatrix, out);
 		Matrix4x4_Concat(out, &entitymatrix, &tagmatrix);
-		// next iteration we process the parent entity
+
 		if (PRVM_clientedictedict(ent, tag_entity))
 		{
 			tagindex = (int)PRVM_clientedictfloat(ent, tag_index);
@@ -2494,7 +2311,6 @@ int CL_GetTagMatrix (prvm_prog_t *prog, matrix4x4_t *out, prvm_edict_t *ent, int
 		attachloop++;
 	}
 
-	// RENDER_VIEWMODEL magic
 	if ((int)PRVM_clientedictfloat(ent, renderflags) & RF_VIEWMODEL)
 	{
 		Matrix4x4_Copy(&tagmatrix, out);
@@ -2502,43 +2318,18 @@ int CL_GetTagMatrix (prvm_prog_t *prog, matrix4x4_t *out, prvm_edict_t *ent, int
 		CL_GetEntityMatrix(prog, prog->edicts, &entitymatrix, true);
 		Matrix4x4_Concat(out, &entitymatrix, &tagmatrix);
 
-		/*
-		// Cl_bob, ported from rendering code
-		if (PRVM_clientedictfloat(ent, health) > 0 && cl_bob.value && cl_bobcycle.value)
-		{
-			double bob, cycle;
-			// LordHavoc: this code is *weird*, but not replacable (I think it
-			// should be done in QC on the server, but oh well, quake is quake)
-			// LordHavoc: figured out bobup: the time at which the sin is at 180
-			// degrees (which allows lengthening or squishing the peak or valley)
-			cycle = cl.time/cl_bobcycle.value;
-			cycle -= (int)cycle;
-			if (cycle < cl_bobup.value)
-				cycle = sin(M_PI * cycle / cl_bobup.value);
-			else
-				cycle = sin(M_PI + M_PI * (cycle-cl_bobup.value)/(1.0 - cl_bobup.value));
-			// bob is proportional to velocity in the xy plane
-			// (don't count Z, or jumping messes it up)
-			bob = sqrt(PRVM_clientedictvector(ent, velocity)[0]*PRVM_clientedictvector(ent, velocity)[0] + PRVM_clientedictvector(ent, velocity)[1]*PRVM_clientedictvector(ent, velocity)[1])*cl_bob.value;
-			bob = bob*0.3 + bob*0.7*cycle;
-			Matrix4x4_AdjustOrigin(out, 0, 0, bound(-7, bob, 4));
-		}
-		*/
-
-		// return the origin of the view
 		if (shadingorigin)
 			Matrix4x4_OriginFromMatrix(&r_refdef.view.matrix, shadingorigin);
 	}
 	else
 	{
-		// return the origin of the root entity in the chain
+
 		if (shadingorigin)
 			Matrix4x4_OriginFromMatrix(out, shadingorigin);
 	}
 	return 0;
 }
 
-// #451 float(entity ent, string tagname) gettagindex (DP_QC_GETTAGINFO)
 static void VM_CL_gettagindex (prvm_prog_t *prog)
 {
 	prvm_edict_t *ent;
@@ -2573,7 +2364,6 @@ static void VM_CL_gettagindex (prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = tag_index;
 }
 
-// #452 vector(entity ent, float tagindex) gettaginfo (DP_QC_GETTAGINFO)
 static void VM_CL_gettaginfo (prvm_prog_t *prog)
 {
 	prvm_edict_t *e;
@@ -2630,14 +2420,6 @@ static void VM_CL_gettaginfo (prvm_prog_t *prog)
 	}
 }
 
-//============================================================================
-
-//====================
-// DP_CSQC_SPAWNPARTICLE
-// a QC hook to engine's CL_NewParticle
-//====================
-
-// particle theme struct
 typedef struct vmparticletheme_s
 {
 	unsigned short typeindex;
@@ -2671,7 +2453,6 @@ typedef struct vmparticletheme_s
 	float spin;
 }vmparticletheme_t;
 
-// particle spawner
 typedef struct vmparticlespawner_s
 {
 	mempool_t			*pool;
@@ -2683,16 +2464,15 @@ typedef struct vmparticlespawner_s
 
 vmparticlespawner_t vmpartspawner;
 
-// TODO: automatic max_themes grow
 static void VM_InitParticleSpawner (prvm_prog_t *prog, int maxthemes)
 {
-	// bound max themes to not be an insane value
+
 	if (maxthemes < 4)
 		maxthemes = 4;
 	if (maxthemes > 2048)
 		maxthemes = 2048;
-	// allocate and set up structure
-	if (vmpartspawner.initialized) // reallocate
+
+	if (vmpartspawner.initialized)
 	{
 		Mem_FreePool(&vmpartspawner.pool);
 		memset(&vmpartspawner, 0, sizeof(vmparticlespawner_t));
@@ -2704,7 +2484,6 @@ static void VM_InitParticleSpawner (prvm_prog_t *prog, int maxthemes)
 	vmpartspawner.verified = true;
 }
 
-// reset particle theme to default values
 static void VM_ResetParticleTheme (vmparticletheme_t *theme)
 {
 	theme->initialized = true;
@@ -2736,13 +2515,12 @@ static void VM_ResetParticleTheme (vmparticletheme_t *theme)
 	theme->spin = 0.0f;
 }
 
-// particle theme -> QC globals
 static void VM_CL_ParticleThemeToGlobals(vmparticletheme_t *theme, prvm_prog_t *prog)
 {
 	PRVM_clientglobalfloat(particle_type) = theme->typeindex;
 	PRVM_clientglobalfloat(particle_blendmode) = theme->blendmode;
 	PRVM_clientglobalfloat(particle_orientation) = theme->orientation;
-	// VorteX: int only can store 0-255, not 0-256 which means 0 - 0,99609375...
+
 	VectorSet(PRVM_clientglobalvector(particle_color1), (theme->color1 >> 16) & 0xFF, (theme->color1 >> 8) & 0xFF, (theme->color1 >> 0) & 0xFF);
 	VectorSet(PRVM_clientglobalvector(particle_color2), (theme->color2 >> 16) & 0xFF, (theme->color2 >> 8) & 0xFF, (theme->color2 >> 0) & 0xFF);
 	PRVM_clientglobalfloat(particle_tex) = (prvm_vec_t)theme->tex;
@@ -2770,7 +2548,6 @@ static void VM_CL_ParticleThemeToGlobals(vmparticletheme_t *theme, prvm_prog_t *
 	PRVM_clientglobalfloat(particle_spin) = theme->spin;
 }
 
-// QC globals ->  particle theme
 static void VM_CL_ParticleThemeFromGlobals(vmparticletheme_t *theme, prvm_prog_t *prog)
 {
 	theme->typeindex = (unsigned short)PRVM_clientglobalfloat(particle_type);
@@ -2803,8 +2580,6 @@ static void VM_CL_ParticleThemeFromGlobals(vmparticletheme_t *theme, prvm_prog_t
 	theme->spin = PRVM_clientglobalfloat(particle_spin);
 }
 
-// init particle spawner interface
-// # float(float max_themes) initparticlespawner
 static void VM_CL_InitParticleSpawner (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNTRANGE(0, 1, VM_CL_InitParticleSpawner);
@@ -2814,7 +2589,6 @@ static void VM_CL_InitParticleSpawner (prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = (vmpartspawner.verified == true) ? 1 : 0;
 }
 
-// void() resetparticle
 static void VM_CL_ResetParticle (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ResetParticle);
@@ -2826,7 +2600,6 @@ static void VM_CL_ResetParticle (prvm_prog_t *prog)
 	VM_CL_ParticleThemeToGlobals(&vmpartspawner.themes[0], prog);
 }
 
-// void(float themenum) particletheme
 static void VM_CL_ParticleTheme (prvm_prog_t *prog)
 {
 	int themenum;
@@ -2850,12 +2623,10 @@ static void VM_CL_ParticleTheme (prvm_prog_t *prog)
 		VM_CL_ParticleThemeToGlobals(&vmpartspawner.themes[0], prog);
 		return;
 	}
-	// load particle theme into globals
+
 	VM_CL_ParticleThemeToGlobals(&vmpartspawner.themes[themenum], prog);
 }
 
-// float() saveparticletheme
-// void(float themenum) updateparticletheme
 static void VM_CL_ParticleThemeSave (prvm_prog_t *prog)
 {
 	int themenum;
@@ -2866,7 +2637,7 @@ static void VM_CL_ParticleThemeSave (prvm_prog_t *prog)
 		VM_Warning(prog, "VM_CL_ParticleThemeSave: particle spawner not initialized\n");
 		return;
 	}
-	// allocate new theme, save it and return
+
 	if (prog->argc < 1)
 	{
 		for (themenum = 0; themenum < vmpartspawner.max_themes; themenum++)
@@ -2886,7 +2657,7 @@ static void VM_CL_ParticleThemeSave (prvm_prog_t *prog)
 		PRVM_G_FLOAT(OFS_RETURN) = themenum;
 		return;
 	}
-	// update existing theme
+
 	themenum = (int)PRVM_G_FLOAT(OFS_PARM0);
 	if (themenum < 0 || themenum >= vmpartspawner.max_themes)
 	{
@@ -2897,7 +2668,6 @@ static void VM_CL_ParticleThemeSave (prvm_prog_t *prog)
 	VM_CL_ParticleThemeFromGlobals(&vmpartspawner.themes[themenum], prog);
 }
 
-// void(float themenum) freeparticletheme
 static void VM_CL_ParticleThemeFree (prvm_prog_t *prog)
 {
 	int themenum;
@@ -2909,7 +2679,7 @@ static void VM_CL_ParticleThemeFree (prvm_prog_t *prog)
 		return;
 	}
 	themenum = (int)PRVM_G_FLOAT(OFS_PARM0);
-	// check parms
+
 	if (themenum <= 0 || themenum >= vmpartspawner.max_themes)
 	{
 		VM_Warning(prog, "VM_CL_ParticleThemeFree: bad theme number %i\n", themenum);
@@ -2921,13 +2691,11 @@ static void VM_CL_ParticleThemeFree (prvm_prog_t *prog)
 		VM_CL_ParticleThemeToGlobals(&vmpartspawner.themes[0], prog);
 		return;
 	}
-	// free theme
+
 	VM_ResetParticleTheme(&vmpartspawner.themes[themenum]);
 	vmpartspawner.themes[themenum].initialized = false;
 }
 
-// float(vector org, vector dir, [float theme]) particle
-// returns 0 if failed, 1 if succesful
 static void VM_CL_SpawnParticle (prvm_prog_t *prog)
 {
 	vec3_t org, dir;
@@ -2939,13 +2707,13 @@ static void VM_CL_SpawnParticle (prvm_prog_t *prog)
 	if (vmpartspawner.verified == false)
 	{
 		VM_Warning(prog, "VM_CL_SpawnParticle: particle spawner not initialized\n");
-		PRVM_G_FLOAT(OFS_RETURN) = 0; 
+		PRVM_G_FLOAT(OFS_RETURN) = 0;
 		return;
 	}
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), org);
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), dir);
-	
-	if (prog->argc < 3) // global-set particle
+
+	if (prog->argc < 3)
 	{
 		part = CL_NewParticle(org,
 			(unsigned short)PRVM_clientglobalfloat(particle_type),
@@ -2983,21 +2751,20 @@ static void VM_CL_SpawnParticle (prvm_prog_t *prog)
 			NULL);
 		if (!part)
 		{
-			PRVM_G_FLOAT(OFS_RETURN) = 0; 
+			PRVM_G_FLOAT(OFS_RETURN) = 0;
 			return;
 		}
 		if (PRVM_clientglobalfloat(particle_delayspawn))
 			part->delayedspawn = cl.time + PRVM_clientglobalfloat(particle_delayspawn);
-		//if (PRVM_clientglobalfloat(particle_delaycollision))
-		//	part->delayedcollisions = cl.time + PRVM_clientglobalfloat(particle_delaycollision);
+
 	}
-	else // quick themed particle
+	else
 	{
 		themenum = (int)PRVM_G_FLOAT(OFS_PARM2);
 		if (themenum <= 0 || themenum >= vmpartspawner.max_themes)
 		{
 			VM_Warning(prog, "VM_CL_SpawnParticle: bad theme number %i\n", themenum);
-			PRVM_G_FLOAT(OFS_RETURN) = 0; 
+			PRVM_G_FLOAT(OFS_RETURN) = 0;
 			return;
 		}
 		theme = &vmpartspawner.themes[themenum];
@@ -3037,19 +2804,16 @@ static void VM_CL_SpawnParticle (prvm_prog_t *prog)
 			NULL);
 		if (!part)
 		{
-			PRVM_G_FLOAT(OFS_RETURN) = 0; 
+			PRVM_G_FLOAT(OFS_RETURN) = 0;
 			return;
 		}
 		if (theme->delayspawn)
 			part->delayedspawn = cl.time + theme->delayspawn;
-		//if (theme->delaycollision)
-		//	part->delayedcollisions = cl.time + theme->delaycollision;
+
 	}
-	PRVM_G_FLOAT(OFS_RETURN) = 1; 
+	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
-// float(vector org, vector dir, float spawndelay, float collisiondelay, [float theme]) delayedparticle
-// returns 0 if failed, 1 if success
 static void VM_CL_SpawnParticleDelayed (prvm_prog_t *prog)
 {
 	vec3_t org, dir;
@@ -3061,12 +2825,12 @@ static void VM_CL_SpawnParticleDelayed (prvm_prog_t *prog)
 	if (vmpartspawner.verified == false)
 	{
 		VM_Warning(prog, "VM_CL_SpawnParticle: particle spawner not initialized\n");
-		PRVM_G_FLOAT(OFS_RETURN) = 0; 
+		PRVM_G_FLOAT(OFS_RETURN) = 0;
 		return;
 	}
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), org);
 	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), dir);
-	if (prog->argc < 5) // global-set particle
+	if (prog->argc < 5)
 		part = CL_NewParticle(org,
 			(unsigned short)PRVM_clientglobalfloat(particle_type),
 			((int)PRVM_clientglobalvector(particle_color1)[0] << 16) + ((int)PRVM_clientglobalvector(particle_color1)[1] << 8) + ((int)PRVM_clientglobalvector(particle_color1)[2]),
@@ -3101,13 +2865,13 @@ static void VM_CL_SpawnParticleDelayed (prvm_prog_t *prog)
 			PRVM_clientglobalfloat(particle_angle),
 			PRVM_clientglobalfloat(particle_spin),
 			NULL);
-	else // themed particle
+	else
 	{
 		themenum = (int)PRVM_G_FLOAT(OFS_PARM4);
 		if (themenum <= 0 || themenum >= vmpartspawner.max_themes)
 		{
 			VM_Warning(prog, "VM_CL_SpawnParticle: bad theme number %i\n", themenum);
-			PRVM_G_FLOAT(OFS_RETURN) = 0;  
+			PRVM_G_FLOAT(OFS_RETURN) = 0;
 			return;
 		}
 		theme = &vmpartspawner.themes[themenum];
@@ -3146,24 +2910,16 @@ static void VM_CL_SpawnParticleDelayed (prvm_prog_t *prog)
 			theme->spin,
 			NULL);
 	}
-	if (!part) 
-	{ 
-		PRVM_G_FLOAT(OFS_RETURN) = 0; 
-		return; 
+	if (!part)
+	{
+		PRVM_G_FLOAT(OFS_RETURN) = 0;
+		return;
 	}
 	part->delayedspawn = cl.time + PRVM_G_FLOAT(OFS_PARM2);
-	//part->delayedcollisions = cl.time + PRVM_G_FLOAT(OFS_PARM3);
+
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 }
 
-//====================
-//CSQC engine entities query
-//====================
-
-// float(float entitynum, float whatfld) getentity;
-// vector(float entitynum, float whatfld) getentityvec;
-// querying engine-drawn entity
-// VorteX: currently it's only tested with whatfld = 1..7
 static void VM_CL_GetEntity (prvm_prog_t *prog)
 {
 	int entnum, fieldnum;
@@ -3179,109 +2935,95 @@ static void VM_CL_GetEntity (prvm_prog_t *prog)
 	fieldnum = PRVM_G_FLOAT(OFS_PARM1);
 	switch(fieldnum)
 	{
-		case 0: // active state
+		case 0:
 			PRVM_G_FLOAT(OFS_RETURN) = cl.entities_active[entnum];
 			break;
-		case 1: // origin
+		case 1:
 			Matrix4x4_OriginFromMatrix(&cl.entities[entnum].render.matrix, org);
 			VectorCopy(org, PRVM_G_VECTOR(OFS_RETURN));
-			break; 
-		case 2: // forward
+			break;
+		case 2:
 			Matrix4x4_ToVectors(&cl.entities[entnum].render.matrix, forward, left, up, org);
 			VectorCopy(forward, PRVM_G_VECTOR(OFS_RETURN));
 			break;
-		case 3: // right
+		case 3:
 			Matrix4x4_ToVectors(&cl.entities[entnum].render.matrix, forward, left, up, org);
 			VectorNegate(left, PRVM_G_VECTOR(OFS_RETURN));
 			break;
-		case 4: // up
+		case 4:
 			Matrix4x4_ToVectors(&cl.entities[entnum].render.matrix, forward, left, up, org);
 			VectorCopy(up, PRVM_G_VECTOR(OFS_RETURN));
 			break;
-		case 5: // scale
+		case 5:
 			PRVM_G_FLOAT(OFS_RETURN) = Matrix4x4_ScaleFromMatrix(&cl.entities[entnum].render.matrix);
-			break;	
-		case 6: // origin + v_forward, v_right, v_up
+			break;
+		case 6:
 			Matrix4x4_ToVectors(&cl.entities[entnum].render.matrix, forward, left, up, org);
 			VectorCopy(forward, PRVM_clientglobalvector(v_forward));
 			VectorNegate(left, PRVM_clientglobalvector(v_right));
 			VectorCopy(up, PRVM_clientglobalvector(v_up));
 			VectorCopy(org, PRVM_G_VECTOR(OFS_RETURN));
-			break;	
-		case 7: // alpha
+			break;
+		case 7:
 			PRVM_G_FLOAT(OFS_RETURN) = cl.entities[entnum].render.alpha;
-			break;	
-		case 8: // colormor
+			break;
+		case 8:
 			VectorCopy(cl.entities[entnum].render.colormod, PRVM_G_VECTOR(OFS_RETURN));
 			break;
-		case 9: // pants colormod
+		case 9:
 			VectorCopy(cl.entities[entnum].render.colormap_pantscolor, PRVM_G_VECTOR(OFS_RETURN));
 			break;
-		case 10: // shirt colormod
+		case 10:
 			VectorCopy(cl.entities[entnum].render.colormap_shirtcolor, PRVM_G_VECTOR(OFS_RETURN));
 			break;
-		case 11: // skinnum
+		case 11:
 			PRVM_G_FLOAT(OFS_RETURN) = cl.entities[entnum].render.skinnum;
-			break;	
-		case 12: // mins
-			VectorCopy(cl.entities[entnum].render.mins, PRVM_G_VECTOR(OFS_RETURN));		
-			break;	
-		case 13: // maxs
-			VectorCopy(cl.entities[entnum].render.maxs, PRVM_G_VECTOR(OFS_RETURN));		
-			break;	
-		case 14: // absmin
-			Matrix4x4_OriginFromMatrix(&cl.entities[entnum].render.matrix, org);
-			VectorAdd(cl.entities[entnum].render.mins, org, PRVM_G_VECTOR(OFS_RETURN));		
-			break;	
-		case 15: // absmax
-			Matrix4x4_OriginFromMatrix(&cl.entities[entnum].render.matrix, org);
-			VectorAdd(cl.entities[entnum].render.maxs, org, PRVM_G_VECTOR(OFS_RETURN));		
 			break;
-		case 16: // light
+		case 12:
+			VectorCopy(cl.entities[entnum].render.mins, PRVM_G_VECTOR(OFS_RETURN));
+			break;
+		case 13:
+			VectorCopy(cl.entities[entnum].render.maxs, PRVM_G_VECTOR(OFS_RETURN));
+			break;
+		case 14:
+			Matrix4x4_OriginFromMatrix(&cl.entities[entnum].render.matrix, org);
+			VectorAdd(cl.entities[entnum].render.mins, org, PRVM_G_VECTOR(OFS_RETURN));
+			break;
+		case 15:
+			Matrix4x4_OriginFromMatrix(&cl.entities[entnum].render.matrix, org);
+			VectorAdd(cl.entities[entnum].render.maxs, org, PRVM_G_VECTOR(OFS_RETURN));
+			break;
+		case 16:
 			VectorMA(cl.entities[entnum].render.render_modellight_ambient, 0.5, cl.entities[entnum].render.render_modellight_diffuse, PRVM_G_VECTOR(OFS_RETURN));
-			break;	
+			break;
 		default:
 			PRVM_G_FLOAT(OFS_RETURN) = 0;
 			break;
 	}
 }
 
-//====================
-//QC POLYGON functions
-//====================
-
-//#304 void() renderscene (EXT_CSQC)
-// moved that here to reset the polygons,
-// resetting them earlier causes R_Mesh_Draw to be called with numvertices = 0
-// --blub
 static void VM_CL_R_RenderScene (prvm_prog_t *prog)
 {
 	double t = Sys_DirtyTime();
 	vmpolygons_t *polys = &prog->vmpolygons;
 	VM_SAFEPARMCOUNT(0, VM_CL_R_RenderScene);
 
-	// update the views
 	if(r_refdef.view.ismain)
 	{
-		// set the main view
+
 		csqc_main_r_refdef_view = r_refdef.view;
 
-		// clear the flags so no other view becomes "main" unless CSQC sets VF_MAINVIEW
 		r_refdef.view.ismain = false;
 		csqc_original_r_refdef_view.ismain = false;
 	}
 
-	// we need to update any RENDER_VIEWMODEL entities at this point because
-	// csqc supplies its own view matrix
 	CL_UpdateViewEntities();
 	CL_UpdateEntityShading();
 
-	// now draw stuff!
 	R_RenderView();
 
 	polys->num_vertices = polys->num_triangles = 0;
 
-	// callprofile fixing hack: do not include this time in what is counted for CSQC_UpdateView
 	t = Sys_DirtyTime() - t;if (t < 0 || t >= 1800) t = 0;
 	prog->functions[PRVM_clientfunction(CSQC_UpdateView)].totaltime -= t;
 }
@@ -3335,10 +3077,10 @@ static void VM_DrawPolygonCallback (const entity_render_t *ent, const rtlight_t 
 {
 	int surfacelistindex;
 	vmpolygons_t *polys = (vmpolygons_t *)ent;
-//	R_Mesh_ResetTextureState();
+
 	R_EntityMatrix(&identitymatrix);
 	GL_CullFace(GL_NONE);
-	GL_DepthTest(true); // polys in 3D space shall always have depth test
+	GL_DepthTest(true);
 	GL_DepthRange(0, 1);
 	R_Mesh_PrepareVertices_Generic_Arrays(polys->num_vertices, polys->data_vertex3f, polys->data_color4f, polys->data_texcoord2f);
 
@@ -3366,7 +3108,6 @@ static void VMPolygons_Store(vmpolygons_t *polys)
 	qboolean hasalpha;
 	int i;
 
-	// detect if we have alpha
 	hasalpha = polys->begin_texture_hasalpha;
 	for(i = 0; !hasalpha && (i < polys->begin_vertices); ++i)
 		if(polys->begin_color[i][3] < 1)
@@ -3374,7 +3115,7 @@ static void VMPolygons_Store(vmpolygons_t *polys)
 
 	if (polys->begin_draw2d)
 	{
-		// draw the polygon as 2D immediately
+
 		drawqueuemesh_t mesh;
 		mesh.texture = polys->begin_texture;
 		mesh.num_vertices = polys->begin_vertices;
@@ -3388,7 +3129,7 @@ static void VMPolygons_Store(vmpolygons_t *polys)
 	}
 	else
 	{
-		// queue the polygon as 3D for sorted transparent rendering later
+
 		if (polys->max_triangles < polys->num_triangles + polys->begin_vertices-2)
 		{
 			while (polys->max_triangles < polys->num_triangles + polys->begin_vertices-2)
@@ -3397,10 +3138,7 @@ static void VMPolygons_Store(vmpolygons_t *polys)
 		}
 		if (polys->num_vertices + polys->begin_vertices <= polys->max_vertices)
 		{
-			// needle in a haystack!
-			// polys->num_vertices was used for copying where we actually want to copy begin_vertices
-			// that also caused it to not render the first polygon that is added
-			// --blub
+
 			memcpy(polys->data_vertex3f + polys->num_vertices * 3, polys->begin_vertex[0], polys->begin_vertices * sizeof(float[3]));
 			memcpy(polys->data_color4f + polys->num_vertices * 4, polys->begin_color[0], polys->begin_vertices * sizeof(float[4]));
 			memcpy(polys->data_texcoord2f + polys->num_vertices * 2, polys->begin_texcoord[0], polys->begin_vertices * sizeof(float[2]));
@@ -3420,15 +3158,12 @@ static void VMPolygons_Store(vmpolygons_t *polys)
 	polys->begin_active = false;
 }
 
-// TODO: move this into the client code and clean-up everything else, too! [1/6/2008 Black]
-// LordHavoc: agreed, this is a mess
 void VM_CL_AddPolygonsToMeshQueue (prvm_prog_t *prog)
 {
 	int i;
 	vmpolygons_t *polys = &prog->vmpolygons;
 	vec3_t center;
 
-	// only add polygons of the currently active prog to the queue - if there is none, we're done
 	if( !prog )
 		return;
 
@@ -3441,21 +3176,14 @@ void VM_CL_AddPolygonsToMeshQueue (prvm_prog_t *prog)
 		R_MeshQueue_AddTransparent(TRANSPARENTSORT_DISTANCE, center, VM_DrawPolygonCallback, (entity_render_t *)polys, i, NULL);
 	}
 
-	/*polys->num_triangles = 0; // now done after rendering the scene,
-	  polys->num_vertices = 0;  // otherwise it's not rendered at all and prints an error message --blub */
 }
 
-//void(string texturename, float flag[, float is2d]) R_BeginPolygon
 static void VM_CL_R_PolygonBegin (prvm_prog_t *prog)
 {
 	const char		*picname;
 	skinframe_t     *sf;
 	vmpolygons_t *polys = &prog->vmpolygons;
 	int tf;
-
-	// TODO instead of using skinframes here (which provides the benefit of
-	// better management of flags, and is more suited for 3D rendering), what
-	// about supporting Q3 shaders?
 
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_CL_R_PolygonBegin);
 
@@ -3496,7 +3224,6 @@ static void VM_CL_R_PolygonBegin (prvm_prog_t *prog)
 	polys->begin_draw2d = (prog->argc >= 3 ? (int)PRVM_G_FLOAT(OFS_PARM2) : r_refdef.draw2dstage);
 }
 
-//void(vector org, vector texcoords, vector rgb, float alpha) R_PolygonVertex
 static void VM_CL_R_PolygonVertex (prvm_prog_t *prog)
 {
 	vmpolygons_t *polys = &prog->vmpolygons;
@@ -3527,7 +3254,6 @@ static void VM_CL_R_PolygonVertex (prvm_prog_t *prog)
 	polys->begin_vertices++;
 }
 
-//void() R_EndPolygon
 static void VM_CL_R_PolygonEnd (prvm_prog_t *prog)
 {
 	vmpolygons_t *polys = &prog->vmpolygons;
@@ -3545,15 +3271,6 @@ static void VM_CL_R_PolygonEnd (prvm_prog_t *prog)
 		VM_Warning(prog, "VM_CL_R_PolygonEnd: %i vertices isn't a good choice\n", polys->begin_vertices);
 }
 
-/*
-=============
-CL_CheckBottom
-
-Returns false if any part of the bottom of the entity is off an edge that
-is not a staircase.
-
-=============
-*/
 static qboolean CL_CheckBottom (prvm_edict_t *ent)
 {
 	prvm_prog_t *prog = CLVM_prog;
@@ -3565,9 +3282,6 @@ static qboolean CL_CheckBottom (prvm_edict_t *ent)
 	VectorAdd (PRVM_clientedictvector(ent, origin), PRVM_clientedictvector(ent, mins), mins);
 	VectorAdd (PRVM_clientedictvector(ent, origin), PRVM_clientedictvector(ent, maxs), maxs);
 
-// if all of the points under the corners are solid world, don't bother
-// with the tougher checks
-// the corners must be within 16 of the midpoint
 	start[2] = mins[2] - 1;
 	for	(x=0 ; x<=1 ; x++)
 		for	(y=0 ; y<=1 ; y++)
@@ -3578,15 +3292,12 @@ static qboolean CL_CheckBottom (prvm_edict_t *ent)
 				goto realcheck;
 		}
 
-	return true;		// we got out easy
+	return true;
 
 realcheck:
-//
-// check it for real...
-//
+
 	start[2] = mins[2];
 
-// the midpoint must be within 16 of the bottom
 	start[0] = stop[0] = (mins[0] + maxs[0])*0.5;
 	start[1] = stop[1] = (mins[1] + maxs[1])*0.5;
 	stop[2] = start[2] - 2*sv_stepheight.value;
@@ -3596,7 +3307,6 @@ realcheck:
 		return false;
 	mid = bottom = trace.endpos[2];
 
-// the corners must be within 16 of the midpoint
 	for	(x=0 ; x<=1 ; x++)
 		for	(y=0 ; y<=1 ; y++)
 		{
@@ -3614,15 +3324,6 @@ realcheck:
 	return true;
 }
 
-/*
-=============
-CL_movestep
-
-Called by monster program code.
-The move will be adjusted for slopes and stairs, but if the move isn't
-possible, no move is done and false is returned
-=============
-*/
 static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean noenemy, qboolean settrace)
 {
 	prvm_prog_t *prog = CLVM_prog;
@@ -3633,16 +3334,14 @@ static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qb
 	int			i, svent;
 	prvm_edict_t		*enemy;
 
-// try the move
 	VectorCopy(PRVM_clientedictvector(ent, mins), mins);
 	VectorCopy(PRVM_clientedictvector(ent, maxs), maxs);
 	VectorCopy (PRVM_clientedictvector(ent, origin), oldorg);
 	VectorAdd (PRVM_clientedictvector(ent, origin), move, neworg);
 
-// flying monsters don't step up
 	if ( (int)PRVM_clientedictfloat(ent, flags) & (FL_SWIM | FL_FLY) )
 	{
-	// try one move with vertical motion, then one without
+
 		for (i=0 ; i<2 ; i++)
 		{
 			VectorAdd (PRVM_clientedictvector(ent, origin), move, neworg);
@@ -3664,7 +3363,7 @@ static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qb
 			{
 				VectorCopy(trace.endpos, traceendpos);
 				if (((int)PRVM_clientedictfloat(ent, flags) & FL_SWIM) && !(CL_PointSuperContents(traceendpos) & SUPERCONTENTS_LIQUIDSMASK))
-					return false;	// swim monster left water
+					return false;
 
 				VectorCopy (traceendpos, PRVM_clientedictvector(ent, origin));
 				if (relink)
@@ -3679,7 +3378,6 @@ static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qb
 		return false;
 	}
 
-// push down from a step height above the wished position
 	neworg[2] += sv_stepheight.value;
 	VectorCopy (neworg, end);
 	end[2] -= sv_stepheight.value*2;
@@ -3699,7 +3397,7 @@ static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qb
 	}
 	if (trace.fraction == 1)
 	{
-	// if monster had the ground pulled out, go ahead and fall
+
 		if ( (int)PRVM_clientedictfloat(ent, flags) & FL_PARTIALGROUND )
 		{
 			VectorAdd (PRVM_clientedictvector(ent, origin), move, PRVM_clientedictvector(ent, origin));
@@ -3709,17 +3407,16 @@ static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qb
 			return true;
 		}
 
-		return false;		// walked off an edge
+		return false;
 	}
 
-// check point traces down for dangling corners
 	VectorCopy (trace.endpos, PRVM_clientedictvector(ent, origin));
 
 	if (!CL_CheckBottom (ent))
 	{
 		if ( (int)PRVM_clientedictfloat(ent, flags) & FL_PARTIALGROUND )
-		{	// entity had floor mostly pulled out from underneath it
-			// and is trying to correct
+		{
+
 			if (relink)
 				CL_LinkEdict(ent);
 			return true;
@@ -3733,19 +3430,11 @@ static qboolean CL_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qb
 
 	PRVM_clientedictedict(ent, groundentity) = PRVM_EDICT_TO_PROG(trace.ent);
 
-// the move is ok
 	if (relink)
 		CL_LinkEdict(ent);
 	return true;
 }
 
-/*
-===============
-VM_CL_walkmove
-
-float(float yaw, float dist[, settrace]) walkmove
-===============
-*/
 static void VM_CL_walkmove (prvm_prog_t *prog)
 {
 	prvm_edict_t	*ent;
@@ -3757,7 +3446,6 @@ static void VM_CL_walkmove (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_CL_walkmove);
 
-	// assume failure if it returns early
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 
 	ent = PRVM_PROG_TO_EDICT(PRVM_clientglobaledict(self));
@@ -3784,25 +3472,15 @@ static void VM_CL_walkmove (prvm_prog_t *prog)
 	move[1] = sin(yaw)*dist;
 	move[2] = 0;
 
-// save program state, because CL_movestep may call other progs
 	oldf = prog->xfunction;
 	oldself = PRVM_clientglobaledict(self);
 
 	PRVM_G_FLOAT(OFS_RETURN) = CL_movestep(ent, move, true, false, settrace);
 
-
-// restore program state
 	prog->xfunction = oldf;
 	PRVM_clientglobaledict(self) = oldself;
 }
 
-/*
-===============
-VM_CL_serverkey
-
-string(string key) serverkey
-===============
-*/
 static void VM_CL_serverkey(prvm_prog_t *prog)
 {
 	char string[VM_STRINGTEMP_LENGTH];
@@ -3811,16 +3489,6 @@ static void VM_CL_serverkey(prvm_prog_t *prog)
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, string);
 }
 
-/*
-=================
-VM_CL_checkpvs
-
-Checks if an entity is in a point's PVS.
-Should be fast but can be inexact.
-
-float checkpvs(vector viewpos, entity viewee) = #240;
-=================
-*/
 static void VM_CL_checkpvs (prvm_prog_t *prog)
 {
 	vec3_t viewpos;
@@ -3850,30 +3518,30 @@ static void VM_CL_checkpvs (prvm_prog_t *prog)
 #if 1
 	if(!cl.worldmodel || !cl.worldmodel->brush.GetPVS || !cl.worldmodel->brush.BoxTouchingPVS)
 	{
-		// no PVS support on this worldmodel... darn
+
 		PRVM_G_FLOAT(OFS_RETURN) = 3;
 		return;
 	}
 	pvs = cl.worldmodel->brush.GetPVS(cl.worldmodel, viewpos);
 	if(!pvs)
 	{
-		// viewpos isn't in any PVS... darn
+
 		PRVM_G_FLOAT(OFS_RETURN) = 2;
 		return;
 	}
 	PRVM_G_FLOAT(OFS_RETURN) = cl.worldmodel->brush.BoxTouchingPVS(cl.worldmodel, pvs, mi, ma);
 #else
-	// using fat PVS like FTEQW does (slow)
+
 	if(!cl.worldmodel || !cl.worldmodel->brush.FatPVS || !cl.worldmodel->brush.BoxTouchingPVS)
 	{
-		// no PVS support on this worldmodel... darn
+
 		PRVM_G_FLOAT(OFS_RETURN) = 3;
 		return;
 	}
 	fatpvsbytes = cl.worldmodel->brush.FatPVS(cl.worldmodel, viewpos, 8, fatpvs, sizeof(fatpvs), false);
 	if(!fatpvsbytes)
 	{
-		// viewpos isn't in any PVS... darn
+
 		PRVM_G_FLOAT(OFS_RETURN) = 2;
 		return;
 	}
@@ -3881,7 +3549,6 @@ static void VM_CL_checkpvs (prvm_prog_t *prog)
 #endif
 }
 
-// #263 float(float modlindex) skel_create = #263; // (FTE_CSQC_SKELETONOBJECTS) create a skeleton (be sure to assign this value into .skeletonindex for use), returns skeleton index (1 or higher) on success, returns 0 on failure  (for example if the modelindex is not skeletal), it is recommended that you create a new skeleton if you change modelindex.
 static void VM_CL_skel_create(prvm_prog_t *prog)
 {
 	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM0);
@@ -3900,12 +3567,11 @@ static void VM_CL_skel_create(prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = i + 1;
 	skeleton->model = model;
 	skeleton->relativetransforms = (matrix4x4_t *)(skeleton+1);
-	// initialize to identity matrices
+
 	for (i = 0;i < skeleton->model->num_bones;i++)
 		skeleton->relativetransforms[i] = identitymatrix;
 }
 
-// #264 float(float skel, entity ent, float modlindex, float retainfrac, float firstbone, float lastbone) skel_build = #264; // (FTE_CSQC_SKELETONOBJECTS) blend in a percentage of standard animation, 0 replaces entirely, 1 does nothing, 0.5 blends half, etc, and this only alters the bones in the specified range for which out of bounds values like 0,100000 are safe (uses .frame, .frame2, .frame3, .frame4, .lerpfrac, .lerpfrac3, .lerpfrac4, .frame1time, .frame2time, .frame3time, .frame4time), returns skel on success, 0 on failure
 static void VM_CL_skel_build(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -3947,7 +3613,6 @@ static void VM_CL_skel_build(prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = skeletonindex + 1;
 }
 
-// #265 float(float skel) skel_get_numbones = #265; // (FTE_CSQC_SKELETONOBJECTS) returns how many bones exist in the created skeleton
 static void VM_CL_skel_get_numbones(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -3958,7 +3623,6 @@ static void VM_CL_skel_get_numbones(prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = skeleton->model->num_bones;
 }
 
-// #266 string(float skel, float bonenum) skel_get_bonename = #266; // (FTE_CSQC_SKELETONOBJECTS) returns name of bone (as a tempstring)
 static void VM_CL_skel_get_bonename(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -3972,7 +3636,6 @@ static void VM_CL_skel_get_bonename(prvm_prog_t *prog)
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, skeleton->model->data_bones[bonenum].name);
 }
 
-// #267 float(float skel, float bonenum) skel_get_boneparent = #267; // (FTE_CSQC_SKELETONOBJECTS) returns parent num for supplied bonenum, 0 if bonenum has no parent or bone does not exist (returned value is always less than bonenum, you can loop on this)
 static void VM_CL_skel_get_boneparent(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -3986,7 +3649,6 @@ static void VM_CL_skel_get_boneparent(prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = skeleton->model->data_bones[bonenum].parent + 1;
 }
 
-// #268 float(float skel, string tagname) skel_find_bone = #268; // (FTE_CSQC_SKELETONOBJECTS) get number of bone with specified name, 0 on failure, tagindex (bonenum+1) on success, same as using gettagindex on the modelindex
 static void VM_CL_skel_find_bone(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -3998,7 +3660,6 @@ static void VM_CL_skel_find_bone(prvm_prog_t *prog)
 	PRVM_G_FLOAT(OFS_RETURN) = Mod_Alias_GetTagIndexForName(skeleton->model, 0, tagname);
 }
 
-// #269 vector(float skel, float bonenum) skel_get_bonerel = #269; // (FTE_CSQC_SKELETONOBJECTS) get matrix of bone in skeleton relative to its parent - sets v_forward, v_right, v_up, returns origin (relative to parent bone)
 static void VM_CL_skel_get_bonerel(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4022,7 +3683,6 @@ static void VM_CL_skel_get_bonerel(prvm_prog_t *prog)
 	VectorCopy(origin, PRVM_G_VECTOR(OFS_RETURN));
 }
 
-// #270 vector(float skel, float bonenum) skel_get_boneabs = #270; // (FTE_CSQC_SKELETONOBJECTS) get matrix of bone in skeleton in model space - sets v_forward, v_right, v_up, returns origin (relative to entity)
 static void VM_CL_skel_get_boneabs(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4040,7 +3700,7 @@ static void VM_CL_skel_get_boneabs(prvm_prog_t *prog)
 	if (bonenum < 0 || bonenum >= skeleton->model->num_bones)
 		return;
 	matrix = skeleton->relativetransforms[bonenum];
-	// convert to absolute
+
 	while ((bonenum = skeleton->model->data_bones[bonenum].parent) >= 0)
 	{
 		temp = matrix;
@@ -4053,7 +3713,6 @@ static void VM_CL_skel_get_boneabs(prvm_prog_t *prog)
 	VectorCopy(origin, PRVM_G_VECTOR(OFS_RETURN));
 }
 
-// #271 void(float skel, float bonenum, vector org) skel_set_bone = #271; // (FTE_CSQC_SKELETONOBJECTS) set matrix of bone relative to its parent, reads v_forward, v_right, v_up, takes origin as parameter (relative to parent bone)
 static void VM_CL_skel_set_bone(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4073,7 +3732,6 @@ static void VM_CL_skel_set_bone(prvm_prog_t *prog)
 	skeleton->relativetransforms[bonenum] = matrix;
 }
 
-// #272 void(float skel, float bonenum, vector org) skel_mul_bone = #272; // (FTE_CSQC_SKELETONOBJECTS) transform bone matrix (relative to its parent) by the supplied matrix in v_forward, v_right, v_up, takes origin as parameter (relative to parent bone)
 static void VM_CL_skel_mul_bone(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4095,7 +3753,6 @@ static void VM_CL_skel_mul_bone(prvm_prog_t *prog)
 	Matrix4x4_Concat(&skeleton->relativetransforms[bonenum], &matrix, &temp);
 }
 
-// #273 void(float skel, float startbone, float endbone, vector org) skel_mul_bones = #273; // (FTE_CSQC_SKELETONOBJECTS) transform bone matrices (relative to their parents) by the supplied matrix in v_forward, v_right, v_up, takes origin as parameter (relative to parent bones)
 static void VM_CL_skel_mul_bones(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4122,7 +3779,6 @@ static void VM_CL_skel_mul_bones(prvm_prog_t *prog)
 	}
 }
 
-// #274 void(float skeldst, float skelsrc, float startbone, float endbone) skel_copybones = #274; // (FTE_CSQC_SKELETONOBJECTS) copy bone matrices (relative to their parents) from one skeleton to another, useful for copying a skeleton to a corpse
 static void VM_CL_skel_copybones(prvm_prog_t *prog)
 {
 	int skeletonindexdst = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4143,7 +3799,6 @@ static void VM_CL_skel_copybones(prvm_prog_t *prog)
 		skeletondst->relativetransforms[bonenum] = skeletonsrc->relativetransforms[bonenum];
 }
 
-// #275 void(float skel) skel_delete = #275; // (FTE_CSQC_SKELETONOBJECTS) deletes skeleton at the beginning of the next frame (you can add the entity, delete the skeleton, renderscene, and it will still work)
 static void VM_CL_skel_delete(prvm_prog_t *prog)
 {
 	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
@@ -4154,7 +3809,6 @@ static void VM_CL_skel_delete(prvm_prog_t *prog)
 	prog->skeletons[skeletonindex] = NULL;
 }
 
-// #276 float(float modlindex, string framename) frameforname = #276; // (FTE_CSQC_SKELETONOBJECTS) finds number of a specified frame in the animation, returns -1 if no match found
 static void VM_CL_frameforname(prvm_prog_t *prog)
 {
 	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM0);
@@ -4174,7 +3828,6 @@ static void VM_CL_frameforname(prvm_prog_t *prog)
 	}
 }
 
-// #277 float(float modlindex, float framenum) frameduration = #277; // (FTE_CSQC_SKELETONOBJECTS) returns the intended play time (in seconds) of the specified framegroup, if it does not exist the result is 0, if it is a single frame it may be a small value around 0.1 or 0.
 static void VM_CL_frameduration(prvm_prog_t *prog)
 {
 	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM0);
@@ -4189,33 +3842,7 @@ static void VM_CL_frameduration(prvm_prog_t *prog)
 
 static void VM_CL_RotateMoves(prvm_prog_t *prog)
 {
-	/*
-	 * Obscure builtin used by GAME_XONOTIC.
-	 *
-	 * Edits the input history of cl_movement by rotating all move commands
-	 * currently in the queue using the given transform.
-	 *
-	 * The vector passed is an "angles transform" as used by warpzonelib, i.e.
-	 * v_angle-like (non-inverted) euler angles that perform the rotation
-	 * of the space that is to be done.
-	 *
-	 * This is meant to be used as a fixangle replacement after passing
-	 * through a warpzone/portal: the client is told about the warp transform,
-	 * and calls this function in the same frame as the one on which the
-	 * client's origin got changed by the serverside teleport. Then this code
-	 * transforms the pre-warp input (which matches the empty space behind
-	 * the warp plane) into post-warp input (which matches the target area
-	 * of the warp). Also, at the same time, the client has to use
-	 * R_SetView to adjust VF_CL_VIEWANGLES according to the same transform.
-	 *
-	 * This together allows warpzone motion to be perfectly predicted by
-	 * the client!
-	 *
-	 * Furthermore, for perfect warpzone behaviour, the server side also
-	 * has to detect input the client sent before it received the origin
-	 * update, but after the warp occurred on the server, and has to adjust
-	 * input appropriately.
-    */
+
 	matrix4x4_t m;
 	vec3_t v = {0, 0, 0};
 	vec3_t a, x, y, z;
@@ -4226,7 +3853,6 @@ static void VM_CL_RotateMoves(prvm_prog_t *prog)
 	CL_RotateMoves(&m);
 }
 
-// #358 void(string cubemapname) loadcubemap
 static void VM_CL_loadcubemap(prvm_prog_t *prog)
 {
 	const char *name;
@@ -4258,7 +3884,6 @@ static void VM_CL_V_CalcRefdef(prvm_prog_t *prog)
 	ent = PRVM_G_EDICT(OFS_PARM0);
 	flags = PRVM_G_FLOAT(OFS_PARM1);
 
-	// use the CL_GetTagMatrix function on self to ensure consistent behavior (duplicate code would be bad)
 	CL_GetTagMatrix(prog, &entrendermatrix, ent, 0, NULL);
 
 	VectorCopy(cl.csqc_viewangles, clviewangles);
@@ -4277,691 +3902,677 @@ static void VM_CL_V_CalcRefdef(prvm_prog_t *prog)
 	CSQC_R_RecalcView();
 }
 
-//============================================================================
-
-// To create a almost working builtin file from this replace:
-// "^NULL.*" with ""
-// "^{.*//.*}:Wh\(.*\)" with "\1"
-// "\:" with "//"
-// "^.*//:Wh{\#:d*}:Wh{.*}" with "\2 = \1;"
-// "\n\n+" with "\n\n"
-
 static void VM_CL_ink_splat(prvm_prog_t *prog);
 static void VM_CL_ink_clear(prvm_prog_t *prog);
 static void VM_CL_ink_stat(prvm_prog_t *prog);
 
 prvm_builtin_t vm_cl_builtins[] = {
-NULL,							// #0 NULL function (not callable) (QUAKE)
-VM_CL_makevectors,				// #1 void(vector ang) makevectors (QUAKE)
-VM_CL_setorigin,				// #2 void(entity e, vector o) setorigin (QUAKE)
-VM_CL_setmodel,					// #3 void(entity e, string m) setmodel (QUAKE)
-VM_CL_setsize,					// #4 void(entity e, vector min, vector max) setsize (QUAKE)
-NULL,							// #5 void(entity e, vector min, vector max) setabssize (QUAKE)
-VM_break,						// #6 void() break (QUAKE)
-VM_random,						// #7 float() random (QUAKE)
-VM_CL_sound,					// #8 void(entity e, float chan, string samp) sound (QUAKE)
-VM_normalize,					// #9 vector(vector v) normalize (QUAKE)
-VM_error,						// #10 void(string e) error (QUAKE)
-VM_objerror,					// #11 void(string e) objerror (QUAKE)
-VM_vlen,						// #12 float(vector v) vlen (QUAKE)
-VM_vectoyaw,					// #13 float(vector v) vectoyaw (QUAKE)
-VM_CL_spawn,					// #14 entity() spawn (QUAKE)
-VM_remove,						// #15 void(entity e) remove (QUAKE)
-VM_CL_traceline,				// #16 void(vector v1, vector v2, float tryents, entity ignoreentity) traceline (QUAKE)
-NULL,							// #17 entity() checkclient (QUAKE)
-VM_find,						// #18 entity(entity start, .string fld, string match) find (QUAKE)
-VM_precache_sound,				// #19 void(string s) precache_sound (QUAKE)
-VM_CL_precache_model,			// #20 void(string s) precache_model (QUAKE)
-NULL,							// #21 void(entity client, string s, ...) stuffcmd (QUAKE)
-VM_CL_findradius,				// #22 entity(vector org, float rad) findradius (QUAKE)
-NULL,							// #23 void(string s, ...) bprint (QUAKE)
-NULL,							// #24 void(entity client, string s, ...) sprint (QUAKE)
-VM_dprint,						// #25 void(string s, ...) dprint (QUAKE)
-VM_ftos,						// #26 string(float f) ftos (QUAKE)
-VM_vtos,						// #27 string(vector v) vtos (QUAKE)
-VM_coredump,					// #28 void() coredump (QUAKE)
-VM_traceon,						// #29 void() traceon (QUAKE)
-VM_traceoff,					// #30 void() traceoff (QUAKE)
-VM_eprint,						// #31 void(entity e) eprint (QUAKE)
-VM_CL_walkmove,					// #32 float(float yaw, float dist[, float settrace]) walkmove (QUAKE)
-NULL,							// #33 (QUAKE)
-VM_CL_droptofloor,				// #34 float() droptofloor (QUAKE)
-VM_CL_lightstyle,				// #35 void(float style, string value) lightstyle (QUAKE)
-VM_rint,						// #36 float(float v) rint (QUAKE)
-VM_floor,						// #37 float(float v) floor (QUAKE)
-VM_ceil,						// #38 float(float v) ceil (QUAKE)
-NULL,							// #39 (QUAKE)
-VM_CL_checkbottom,				// #40 float(entity e) checkbottom (QUAKE)
-VM_CL_pointcontents,			// #41 float(vector v) pointcontents (QUAKE)
-NULL,							// #42 (QUAKE)
-VM_fabs,						// #43 float(float f) fabs (QUAKE)
-NULL,							// #44 vector(entity e, float speed) aim (QUAKE)
-VM_cvar,						// #45 float(string s) cvar (QUAKE)
-VM_localcmd,					// #46 void(string s) localcmd (QUAKE)
-VM_nextent,						// #47 entity(entity e) nextent (QUAKE)
-VM_CL_particle,					// #48 void(vector o, vector d, float color, float count) particle (QUAKE)
-VM_changeyaw,					// #49 void() ChangeYaw (QUAKE)
-NULL,							// #50 (QUAKE)
-VM_vectoangles,					// #51 vector(vector v) vectoangles (QUAKE)
-NULL,							// #52 void(float to, float f) WriteByte (QUAKE)
-NULL,							// #53 void(float to, float f) WriteChar (QUAKE)
-NULL,							// #54 void(float to, float f) WriteShort (QUAKE)
-NULL,							// #55 void(float to, float f) WriteLong (QUAKE)
-NULL,							// #56 void(float to, float f) WriteCoord (QUAKE)
-NULL,							// #57 void(float to, float f) WriteAngle (QUAKE)
-NULL,							// #58 void(float to, string s) WriteString (QUAKE)
-NULL,							// #59 (QUAKE)
-VM_sin,							// #60 float(float f) sin (DP_QC_SINCOSSQRTPOW)
-VM_cos,							// #61 float(float f) cos (DP_QC_SINCOSSQRTPOW)
-VM_sqrt,						// #62 float(float f) sqrt (DP_QC_SINCOSSQRTPOW)
-VM_changepitch,					// #63 void(entity ent) changepitch (DP_QC_CHANGEPITCH)
-VM_CL_tracetoss,				// #64 void(entity e, entity ignore) tracetoss (DP_QC_TRACETOSS)
-VM_etos,						// #65 string(entity ent) etos (DP_QC_ETOS)
-NULL,							// #66 (QUAKE)
-NULL,							// #67 void(float step) movetogoal (QUAKE)
-VM_precache_file,				// #68 string(string s) precache_file (QUAKE)
-VM_CL_makestatic,				// #69 void(entity e) makestatic (QUAKE)
-NULL,							// #70 void(string s) changelevel (QUAKE)
-NULL,							// #71 (QUAKE)
-VM_cvar_set,					// #72 void(string var, string val) cvar_set (QUAKE)
-NULL,							// #73 void(entity client, strings) centerprint (QUAKE)
-VM_CL_ambientsound,				// #74 void(vector pos, string samp, float vol, float atten) ambientsound (QUAKE)
-VM_CL_precache_model,			// #75 string(string s) precache_model2 (QUAKE)
-VM_precache_sound,				// #76 string(string s) precache_sound2 (QUAKE)
-VM_precache_file,				// #77 string(string s) precache_file2 (QUAKE)
-NULL,							// #78 void(entity e) setspawnparms (QUAKE)
-NULL,							// #79 void(entity killer, entity killee) logfrag (QUAKEWORLD)
-NULL,							// #80 string(entity e, string keyname) infokey (QUAKEWORLD)
-VM_stof,						// #81 float(string s) stof (FRIK_FILE)
-NULL,							// #82 void(vector where, float set) multicast (QUAKEWORLD)
-NULL,							// #83 (QUAKE)
-NULL,							// #84 (QUAKE)
-NULL,							// #85 (QUAKE)
-NULL,							// #86 (QUAKE)
-NULL,							// #87 (QUAKE)
-NULL,							// #88 (QUAKE)
-NULL,							// #89 (QUAKE)
-VM_CL_tracebox,					// #90 void(vector v1, vector min, vector max, vector v2, float nomonsters, entity forent) tracebox (DP_QC_TRACEBOX)
-VM_randomvec,					// #91 vector() randomvec (DP_QC_RANDOMVEC)
-VM_CL_getlight,					// #92 vector(vector org) getlight (DP_QC_GETLIGHT)
-VM_registercvar,				// #93 float(string name, string value) registercvar (DP_REGISTERCVAR)
-VM_min,							// #94 float(float a, floats) min (DP_QC_MINMAXBOUND)
-VM_max,							// #95 float(float a, floats) max (DP_QC_MINMAXBOUND)
-VM_bound,						// #96 float(float minimum, float val, float maximum) bound (DP_QC_MINMAXBOUND)
-VM_pow,							// #97 float(float f, float f) pow (DP_QC_SINCOSSQRTPOW)
-VM_findfloat,					// #98 entity(entity start, .float fld, float match) findfloat (DP_QC_FINDFLOAT)
-VM_checkextension,				// #99 float(string s) checkextension (the basis of the extension system)
-// FrikaC and Telejano range #100-#199
-NULL,							// #100
-NULL,							// #101
-NULL,							// #102
-NULL,							// #103
-NULL,							// #104
-NULL,							// #105
-NULL,							// #106
-NULL,							// #107
-NULL,							// #108
-NULL,							// #109
-VM_fopen,						// #110 float(string filename, float mode) fopen (FRIK_FILE)
-VM_fclose,						// #111 void(float fhandle) fclose (FRIK_FILE)
-VM_fgets,						// #112 string(float fhandle) fgets (FRIK_FILE)
-VM_fputs,						// #113 void(float fhandle, string s) fputs (FRIK_FILE)
-VM_strlen,						// #114 float(string s) strlen (FRIK_FILE)
-VM_strcat,						// #115 string(string s1, string s2, ...) strcat (FRIK_FILE)
-VM_substring,					// #116 string(string s, float start, float length) substring (FRIK_FILE)
-VM_stov,						// #117 vector(string) stov (FRIK_FILE)
-VM_strzone,						// #118 string(string s) strzone (FRIK_FILE)
-VM_strunzone,					// #119 void(string s) strunzone (FRIK_FILE)
-NULL,							// #120
-NULL,							// #121
-NULL,							// #122
-NULL,							// #123
-NULL,							// #124
-NULL,							// #125
-NULL,							// #126
-NULL,							// #127
-NULL,							// #128
-NULL,							// #129
-NULL,							// #130
-NULL,							// #131
-NULL,							// #132
-NULL,							// #133
-NULL,							// #134
-NULL,							// #135
-NULL,							// #136
-NULL,							// #137
-NULL,							// #138
-NULL,							// #139
-NULL,							// #140
-NULL,							// #141
-NULL,							// #142
-NULL,							// #143
-NULL,							// #144
-NULL,							// #145
-NULL,							// #146
-NULL,							// #147
-NULL,							// #148
-NULL,							// #149
-NULL,							// #150
-NULL,							// #151
-NULL,							// #152
-NULL,							// #153
-NULL,							// #154
-NULL,							// #155
-NULL,							// #156
-NULL,							// #157
-NULL,							// #158
-NULL,							// #159
-NULL,							// #160
-NULL,							// #161
-NULL,							// #162
-NULL,							// #163
-NULL,							// #164
-NULL,							// #165
-NULL,							// #166
-NULL,							// #167
-NULL,							// #168
-NULL,							// #169
-NULL,							// #170
-NULL,							// #171
-NULL,							// #172
-NULL,							// #173
-NULL,							// #174
-NULL,							// #175
-NULL,							// #176
-NULL,							// #177
-NULL,							// #178
-NULL,							// #179
-NULL,							// #180
-NULL,							// #181
-NULL,							// #182
-NULL,							// #183
-NULL,							// #184
-NULL,							// #185
-NULL,							// #186
-NULL,							// #187
-NULL,							// #188
-NULL,							// #189
-NULL,							// #190
-NULL,							// #191
-NULL,							// #192
-NULL,							// #193
-NULL,							// #194
-NULL,							// #195
-NULL,							// #196
-NULL,							// #197
-NULL,							// #198
-NULL,							// #199
-// FTEQW range #200-#299
-NULL,							// #200
-NULL,							// #201
-NULL,							// #202
-NULL,							// #203
-NULL,							// #204
-NULL,							// #205
-NULL,							// #206
-NULL,							// #207
-NULL,							// #208
-NULL,							// #209
-NULL,							// #210
-NULL,							// #211
-NULL,							// #212
-NULL,							// #213
-NULL,							// #214
-NULL,							// #215
-NULL,							// #216
-NULL,							// #217
-VM_bitshift,					// #218 float(float number, float quantity) bitshift (EXT_BITSHIFT)
-NULL,							// #219
-NULL,							// #220
-VM_strstrofs,					// #221 float(string str, string sub[, float startpos]) strstrofs (FTE_STRINGS)
-VM_str2chr,						// #222 float(string str, float ofs) str2chr (FTE_STRINGS)
-VM_chr2str,						// #223 string(float c, ...) chr2str (FTE_STRINGS)
-VM_strconv,						// #224 string(float ccase, float calpha, float cnum, string s, ...) strconv (FTE_STRINGS)
-VM_strpad,						// #225 string(float chars, string s, ...) strpad (FTE_STRINGS)
-VM_infoadd,						// #226 string(string info, string key, string value, ...) infoadd (FTE_STRINGS)
-VM_infoget,						// #227 string(string info, string key) infoget (FTE_STRINGS)
-VM_strncmp,						// #228 float(string s1, string s2, float len) strncmp (FTE_STRINGS)
-VM_strncasecmp,					// #229 float(string s1, string s2) strcasecmp (FTE_STRINGS)
-VM_strncasecmp,					// #230 float(string s1, string s2, float len) strncasecmp (FTE_STRINGS)
-NULL,							// #231
-NULL,							// #232 void(float index, float type, .void field) SV_AddStat (EXT_CSQC)
-NULL,							// #233
-NULL,							// #234
-NULL,							// #235
-NULL,							// #236
-NULL,							// #237
-NULL,							// #238
-NULL,							// #239
-VM_CL_checkpvs,					// #240
-NULL,							// #241
-NULL,							// #242
-NULL,							// #243
-NULL,							// #244
-NULL,							// #245
-NULL,							// #246
-NULL,							// #247
-NULL,							// #248
-NULL,							// #249
-NULL,							// #250
-NULL,							// #251
-NULL,							// #252
-NULL,							// #253
-NULL,							// #254
-NULL,							// #255
-NULL,							// #256
-NULL,							// #257
-NULL,							// #258
-NULL,							// #259
-NULL,							// #260
-NULL,							// #261
-NULL,							// #262
-VM_CL_skel_create,				// #263 float(float modlindex) skel_create = #263; // (FTE_CSQC_SKELETONOBJECTS) create a skeleton (be sure to assign this value into .skeletonindex for use), returns skeleton index (1 or higher) on success, returns 0 on failure  (for example if the modelindex is not skeletal), it is recommended that you create a new skeleton if you change modelindex.
-VM_CL_skel_build,				// #264 float(float skel, entity ent, float modlindex, float retainfrac, float firstbone, float lastbone) skel_build = #264; // (FTE_CSQC_SKELETONOBJECTS) blend in a percentage of standard animation, 0 replaces entirely, 1 does nothing, 0.5 blends half, etc, and this only alters the bones in the specified range for which out of bounds values like 0,100000 are safe (uses .frame, .frame2, .frame3, .frame4, .lerpfrac, .lerpfrac3, .lerpfrac4, .frame1time, .frame2time, .frame3time, .frame4time), returns skel on success, 0 on failure
-VM_CL_skel_get_numbones,		// #265 float(float skel) skel_get_numbones = #265; // (FTE_CSQC_SKELETONOBJECTS) returns how many bones exist in the created skeleton
-VM_CL_skel_get_bonename,		// #266 string(float skel, float bonenum) skel_get_bonename = #266; // (FTE_CSQC_SKELETONOBJECTS) returns name of bone (as a tempstring)
-VM_CL_skel_get_boneparent,		// #267 float(float skel, float bonenum) skel_get_boneparent = #267; // (FTE_CSQC_SKELETONOBJECTS) returns parent num for supplied bonenum, -1 if bonenum has no parent or bone does not exist (returned value is always less than bonenum, you can loop on this)
-VM_CL_skel_find_bone,			// #268 float(float skel, string tagname) skel_find_bone = #268; // (FTE_CSQC_SKELETONOBJECTS) get number of bone with specified name, 0 on failure, tagindex (bonenum+1) on success, same as using gettagindex on the modelindex
-VM_CL_skel_get_bonerel,			// #269 vector(float skel, float bonenum) skel_get_bonerel = #269; // (FTE_CSQC_SKELETONOBJECTS) get matrix of bone in skeleton relative to its parent - sets v_forward, v_right, v_up, returns origin (relative to parent bone)
-VM_CL_skel_get_boneabs,			// #270 vector(float skel, float bonenum) skel_get_boneabs = #270; // (FTE_CSQC_SKELETONOBJECTS) get matrix of bone in skeleton in model space - sets v_forward, v_right, v_up, returns origin (relative to entity)
-VM_CL_skel_set_bone,			// #271 void(float skel, float bonenum, vector org) skel_set_bone = #271; // (FTE_CSQC_SKELETONOBJECTS) set matrix of bone relative to its parent, reads v_forward, v_right, v_up, takes origin as parameter (relative to parent bone)
-VM_CL_skel_mul_bone,			// #272 void(float skel, float bonenum, vector org) skel_mul_bone = #272; // (FTE_CSQC_SKELETONOBJECTS) transform bone matrix (relative to its parent) by the supplied matrix in v_forward, v_right, v_up, takes origin as parameter (relative to parent bone)
-VM_CL_skel_mul_bones,			// #273 void(float skel, float startbone, float endbone, vector org) skel_mul_bones = #273; // (FTE_CSQC_SKELETONOBJECTS) transform bone matrices (relative to their parents) by the supplied matrix in v_forward, v_right, v_up, takes origin as parameter (relative to parent bones)
-VM_CL_skel_copybones,			// #274 void(float skeldst, float skelsrc, float startbone, float endbone) skel_copybones = #274; // (FTE_CSQC_SKELETONOBJECTS) copy bone matrices (relative to their parents) from one skeleton to another, useful for copying a skeleton to a corpse
-VM_CL_skel_delete,				// #275 void(float skel) skel_delete = #275; // (FTE_CSQC_SKELETONOBJECTS) deletes skeleton at the beginning of the next frame (you can add the entity, delete the skeleton, renderscene, and it will still work)
-VM_CL_frameforname,				// #276 float(float modlindex, string framename) frameforname = #276; // (FTE_CSQC_SKELETONOBJECTS) finds number of a specified frame in the animation, returns -1 if no match found
-VM_CL_frameduration,			// #277 float(float modlindex, float framenum) frameduration = #277; // (FTE_CSQC_SKELETONOBJECTS) returns the intended play time (in seconds) of the specified framegroup, if it does not exist the result is 0, if it is a single frame it may be a small value around 0.1 or 0.
-NULL,							// #278
-NULL,							// #279
-NULL,							// #280
-NULL,							// #281
-NULL,							// #282
-NULL,							// #283
-NULL,							// #284
-NULL,							// #285
-NULL,							// #286
-NULL,							// #287
-NULL,							// #288
-NULL,							// #289
-NULL,							// #290
-NULL,							// #291
-NULL,							// #292
-NULL,							// #293
-NULL,							// #294
-NULL,							// #295
-NULL,							// #296
-NULL,							// #297
-NULL,							// #298
-NULL,							// #299
-// CSQC range #300-#399
-VM_CL_R_ClearScene,				// #300 void() clearscene (EXT_CSQC)
-VM_CL_R_AddEntities,			// #301 void(float mask) addentities (EXT_CSQC)
-VM_CL_R_AddEntity,				// #302 void(entity ent) addentity (EXT_CSQC)
-VM_CL_R_SetView,				// #303 float(float property, ...) setproperty (EXT_CSQC)
-VM_CL_R_RenderScene,			// #304 void() renderscene (EXT_CSQC)
-VM_CL_R_AddDynamicLight,		// #305 void(vector org, float radius, vector lightcolours) adddynamiclight (EXT_CSQC)
-VM_CL_R_PolygonBegin,			// #306 void(string texturename, float flag, float is2d[NYI: , float lines]) R_BeginPolygon
-VM_CL_R_PolygonVertex,			// #307 void(vector org, vector texcoords, vector rgb, float alpha) R_PolygonVertex
-VM_CL_R_PolygonEnd,				// #308 void() R_EndPolygon
-VM_CL_R_SetView,				// #309 float(float property) getproperty (EXT_CSQC)
-VM_CL_unproject,				// #310 vector (vector v) cs_unproject (EXT_CSQC)
-VM_CL_project,					// #311 vector (vector v) cs_project (EXT_CSQC)
-NULL,							// #312
-NULL,							// #313
-NULL,							// #314
-VM_drawline,					// #315 void(float width, vector pos1, vector pos2, float flag) drawline (EXT_CSQC)
-VM_iscachedpic,					// #316 float(string name) iscachedpic (EXT_CSQC)
-VM_precache_pic,				// #317 string(string name, float trywad) precache_pic (EXT_CSQC)
-VM_getimagesize,				// #318 vector(string picname) draw_getimagesize (EXT_CSQC)
-VM_freepic,						// #319 void(string name) freepic (EXT_CSQC)
-VM_drawcharacter,				// #320 float(vector position, float character, vector scale, vector rgb, float alpha, float flag) drawcharacter (EXT_CSQC)
-VM_drawstring,					// #321 float(vector position, string text, vector scale, vector rgb, float alpha[, float flag]) drawstring (EXT_CSQC, DP_CSQC)
-VM_drawpic,						// #322 float(vector position, string pic, vector size, vector rgb, float alpha[, float flag]) drawpic (EXT_CSQC)
-VM_drawfill,					// #323 float(vector position, vector size, vector rgb, float alpha, float flag) drawfill (EXT_CSQC)
-VM_drawsetcliparea,				// #324 void(float x, float y, float width, float height) drawsetcliparea
-VM_drawresetcliparea,			// #325 void(void) drawresetcliparea
-VM_drawcolorcodedstring,		// #326 float drawcolorcodedstring(vector position, string text, vector scale, vector rgb, float alpha, float flag) (EXT_CSQC)
-VM_stringwidth,                 // #327 // FIXME is this okay?
-VM_drawsubpic,					// #328 // FIXME is this okay?
-VM_drawrotpic,					// #329 // FIXME is this okay?
-VM_CL_getstatf,					// #330 float(float stnum) getstatf (EXT_CSQC)
-VM_CL_getstati,					// #331 float(float stnum) getstati (EXT_CSQC)
-VM_CL_getstats,					// #332 string(float firststnum) getstats (EXT_CSQC)
-VM_CL_setmodelindex,			// #333 void(entity e, float mdlindex) setmodelindex (EXT_CSQC)
-VM_CL_modelnameforindex,		// #334 string(float mdlindex) modelnameforindex (EXT_CSQC)
-VM_CL_particleeffectnum,		// #335 float(string effectname) particleeffectnum (EXT_CSQC)
-VM_CL_trailparticles,			// #336 void(entity ent, float effectnum, vector start, vector end) trailparticles (EXT_CSQC)
-VM_CL_pointparticles,			// #337 void(float effectnum, vector origin [, vector dir, float count]) pointparticles (EXT_CSQC)
-VM_centerprint,					// #338 void(string s, ...) centerprint (EXT_CSQC)
-VM_print,						// #339 void(string s, ...) print (EXT_CSQC, DP_SV_PRINT)
-VM_keynumtostring,				// #340 string(float keynum) keynumtostring (EXT_CSQC)
-VM_stringtokeynum,				// #341 float(string keyname) stringtokeynum (EXT_CSQC)
-VM_getkeybind,					// #342 string(float keynum[, float bindmap]) getkeybind (EXT_CSQC)
-VM_CL_setcursormode,			// #343 void(float usecursor) setcursormode (DP_CSQC)
-VM_CL_getmousepos,				// #344 vector() getmousepos (DP_CSQC)
-VM_CL_getinputstate,			// #345 float(float framenum) getinputstate (EXT_CSQC)
-VM_CL_setsensitivityscale,		// #346 void(float sens) setsensitivityscale (EXT_CSQC)
-VM_CL_runplayerphysics,			// #347 void() runstandardplayerphysics (EXT_CSQC)
-VM_CL_getplayerkey,				// #348 string(float playernum, string keyname) getplayerkeyvalue (EXT_CSQC)
-VM_CL_isdemo,					// #349 float() isdemo (EXT_CSQC)
-VM_isserver,					// #350 float() isserver (EXT_CSQC)
-VM_CL_setlistener,				// #351 void(vector origin, vector forward, vector right, vector up) SetListener (EXT_CSQC)
-VM_CL_registercmd,				// #352 void(string cmdname) registercommand (EXT_CSQC)
-VM_wasfreed,					// #353 float(entity ent) wasfreed (EXT_CSQC) (should be availabe on server too)
-VM_CL_serverkey,				// #354 string(string key) serverkey (EXT_CSQC)
-VM_CL_videoplaying,				// #355
-VM_findfont,					// #356 float(string fontname) loadfont (DP_GFX_FONTS)
-VM_loadfont,					// #357 float(string fontname, string fontmaps, string sizes, float slot) loadfont (DP_GFX_FONTS)
-VM_CL_loadcubemap,				// #358 void(string cubemapname) loadcubemap (DP_GFX_)
-NULL,							// #359
-VM_CL_ReadByte,					// #360 float() readbyte (EXT_CSQC)
-VM_CL_ReadChar,					// #361 float() readchar (EXT_CSQC)
-VM_CL_ReadShort,				// #362 float() readshort (EXT_CSQC)
-VM_CL_ReadLong,					// #363 float() readlong (EXT_CSQC)
-VM_CL_ReadCoord,				// #364 float() readcoord (EXT_CSQC)
-VM_CL_ReadAngle,				// #365 float() readangle (EXT_CSQC)
-VM_CL_ReadString,				// #366 string() readstring (EXT_CSQC)
-VM_CL_ReadFloat,				// #367 float() readfloat (EXT_CSQC)
-NULL,						// #368
-NULL,							// #369
-NULL,							// #370
-NULL,							// #371
-NULL,							// #372
-NULL,							// #373
-NULL,							// #374
-NULL,							// #375
-NULL,							// #376
-NULL,							// #377
-NULL,							// #378
-NULL,							// #379
-NULL,							// #380
-NULL,							// #381
-NULL,							// #382
-NULL,							// #383
-NULL,							// #384
-NULL,							// #385
-NULL,							// #386
-NULL,							// #387
-NULL,							// #388
-NULL,							// #389
-NULL,							// #390
-NULL,							// #391
-NULL,							// #392
-NULL,							// #393
-NULL,							// #394
-NULL,							// #395
-NULL,							// #396
-NULL,							// #397
-NULL,							// #398
-NULL,							// #399
-// LordHavoc's range #400-#499
-VM_CL_copyentity,				// #400 void(entity from, entity to) copyentity (DP_QC_COPYENTITY)
-NULL,							// #401 void(entity ent, float colors) setcolor (DP_QC_SETCOLOR)
-VM_findchain,					// #402 entity(.string fld, string match) findchain (DP_QC_FINDCHAIN)
-VM_findchainfloat,				// #403 entity(.float fld, float match) findchainfloat (DP_QC_FINDCHAINFLOAT)
-VM_CL_effect,					// #404 void(vector org, string modelname, float startframe, float endframe, float framerate) effect (DP_SV_EFFECT)
-VM_CL_te_blood,					// #405 void(vector org, vector velocity, float howmany) te_blood (DP_TE_BLOOD)
-VM_CL_te_bloodshower,			// #406 void(vector mincorner, vector maxcorner, float explosionspeed, float howmany) te_bloodshower (DP_TE_BLOODSHOWER)
-VM_CL_te_explosionrgb,			// #407 void(vector org, vector color) te_explosionrgb (DP_TE_EXPLOSIONRGB)
-VM_CL_te_particlecube,			// #408 void(vector mincorner, vector maxcorner, vector vel, float howmany, float color, float gravityflag, float randomveljitter) te_particlecube (DP_TE_PARTICLECUBE)
-VM_CL_te_particlerain,			// #409 void(vector mincorner, vector maxcorner, vector vel, float howmany, float color) te_particlerain (DP_TE_PARTICLERAIN)
-VM_CL_te_particlesnow,			// #410 void(vector mincorner, vector maxcorner, vector vel, float howmany, float color) te_particlesnow (DP_TE_PARTICLESNOW)
-VM_CL_te_spark,					// #411 void(vector org, vector vel, float howmany) te_spark (DP_TE_SPARK)
-VM_CL_te_gunshotquad,			// #412 void(vector org) te_gunshotquad (DP_QUADEFFECTS1)
-VM_CL_te_spikequad,				// #413 void(vector org) te_spikequad (DP_QUADEFFECTS1)
-VM_CL_te_superspikequad,		// #414 void(vector org) te_superspikequad (DP_QUADEFFECTS1)
-VM_CL_te_explosionquad,			// #415 void(vector org) te_explosionquad (DP_QUADEFFECTS1)
-VM_CL_te_smallflash,			// #416 void(vector org) te_smallflash (DP_TE_SMALLFLASH)
-VM_CL_te_customflash,			// #417 void(vector org, float radius, float lifetime, vector color) te_customflash (DP_TE_CUSTOMFLASH)
-VM_CL_te_gunshot,				// #418 void(vector org) te_gunshot (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_spike,					// #419 void(vector org) te_spike (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_superspike,			// #420 void(vector org) te_superspike (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_explosion,				// #421 void(vector org) te_explosion (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_tarexplosion,			// #422 void(vector org) te_tarexplosion (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_wizspike,				// #423 void(vector org) te_wizspike (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_knightspike,			// #424 void(vector org) te_knightspike (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_lavasplash,			// #425 void(vector org) te_lavasplash (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_teleport,				// #426 void(vector org) te_teleport (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_explosion2,			// #427 void(vector org, float colorstart, float colorlength) te_explosion2 (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_lightning1,			// #428 void(entity own, vector start, vector end) te_lightning1 (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_lightning2,			// #429 void(entity own, vector start, vector end) te_lightning2 (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_lightning3,			// #430 void(entity own, vector start, vector end) te_lightning3 (DP_TE_STANDARDEFFECTBUILTINS)
-VM_CL_te_beam,					// #431 void(entity own, vector start, vector end) te_beam (DP_TE_STANDARDEFFECTBUILTINS)
-VM_vectorvectors,				// #432 void(vector dir) vectorvectors (DP_QC_VECTORVECTORS)
-VM_CL_te_plasmaburn,			// #433 void(vector org) te_plasmaburn (DP_TE_PLASMABURN)
-VM_getsurfacenumpoints,		// #434 float(entity e, float s) getsurfacenumpoints (DP_QC_GETSURFACE)
-VM_getsurfacepoint,			// #435 vector(entity e, float s, float n) getsurfacepoint (DP_QC_GETSURFACE)
-VM_getsurfacenormal,			// #436 vector(entity e, float s) getsurfacenormal (DP_QC_GETSURFACE)
-VM_getsurfacetexture,		// #437 string(entity e, float s) getsurfacetexture (DP_QC_GETSURFACE)
-VM_getsurfacenearpoint,		// #438 float(entity e, vector p) getsurfacenearpoint (DP_QC_GETSURFACE)
-VM_getsurfaceclippedpoint,	// #439 vector(entity e, float s, vector p) getsurfaceclippedpoint (DP_QC_GETSURFACE)
-NULL,							// #440 void(entity e, string s) clientcommand (KRIMZON_SV_PARSECLIENTCOMMAND)
-VM_tokenize,					// #441 float(string s) tokenize (KRIMZON_SV_PARSECLIENTCOMMAND)
-VM_argv,						// #442 string(float n) argv (KRIMZON_SV_PARSECLIENTCOMMAND)
-VM_CL_setattachment,			// #443 void(entity e, entity tagentity, string tagname) setattachment (DP_GFX_QUAKE3MODELTAGS)
-VM_search_begin,				// #444 float(string pattern, float caseinsensitive, float quiet) search_begin (DP_QC_FS_SEARCH)
-VM_search_end,					// #445 void(float handle) search_end (DP_QC_FS_SEARCH)
-VM_search_getsize,				// #446 float(float handle) search_getsize (DP_QC_FS_SEARCH)
-VM_search_getfilename,			// #447 string(float handle, float num) search_getfilename (DP_QC_FS_SEARCH)
-VM_cvar_string,					// #448 string(string s) cvar_string (DP_QC_CVAR_STRING)
-VM_findflags,					// #449 entity(entity start, .float fld, float match) findflags (DP_QC_FINDFLAGS)
-VM_findchainflags,				// #450 entity(.float fld, float match) findchainflags (DP_QC_FINDCHAINFLAGS)
-VM_CL_gettagindex,				// #451 float(entity ent, string tagname) gettagindex (DP_QC_GETTAGINFO)
-VM_CL_gettaginfo,				// #452 vector(entity ent, float tagindex) gettaginfo (DP_QC_GETTAGINFO)
-NULL,							// #453 void(entity clent) dropclient (DP_SV_DROPCLIENT)
-NULL,							// #454 entity() spawnclient (DP_SV_BOTCLIENT)
-NULL,							// #455 float(entity clent) clienttype (DP_SV_BOTCLIENT)
-NULL,							// #456 void(float to, string s) WriteUnterminatedString (DP_SV_WRITEUNTERMINATEDSTRING)
-VM_CL_te_flamejet,				// #457 void(vector org, vector vel, float howmany) te_flamejet (DP_TE_FLAMEJET)
-NULL,							// #458
-VM_ftoe,						// #459 entity(float num) entitybyindex (DP_QC_EDICT_NUM)
-VM_buf_create,					// #460 float() buf_create (DP_QC_STRINGBUFFERS)
-VM_buf_del,						// #461 void(float bufhandle) buf_del (DP_QC_STRINGBUFFERS)
-VM_buf_getsize,					// #462 float(float bufhandle) buf_getsize (DP_QC_STRINGBUFFERS)
-VM_buf_copy,					// #463 void(float bufhandle_from, float bufhandle_to) buf_copy (DP_QC_STRINGBUFFERS)
-VM_buf_sort,					// #464 void(float bufhandle, float sortpower, float backward) buf_sort (DP_QC_STRINGBUFFERS)
-VM_buf_implode,					// #465 string(float bufhandle, string glue) buf_implode (DP_QC_STRINGBUFFERS)
-VM_bufstr_get,					// #466 string(float bufhandle, float string_index) bufstr_get (DP_QC_STRINGBUFFERS)
-VM_bufstr_set,					// #467 void(float bufhandle, float string_index, string str) bufstr_set (DP_QC_STRINGBUFFERS)
-VM_bufstr_add,					// #468 float(float bufhandle, string str, float order) bufstr_add (DP_QC_STRINGBUFFERS)
-VM_bufstr_free,					// #469 void(float bufhandle, float string_index) bufstr_free (DP_QC_STRINGBUFFERS)
-NULL,							// #470 void(float index, float type, .void field) SV_AddStat (EXT_CSQC)
-VM_asin,						// #471 float(float s) VM_asin (DP_QC_ASINACOSATANATAN2TAN)
-VM_acos,						// #472 float(float c) VM_acos (DP_QC_ASINACOSATANATAN2TAN)
-VM_atan,						// #473 float(float t) VM_atan (DP_QC_ASINACOSATANATAN2TAN)
-VM_atan2,						// #474 float(float c, float s) VM_atan2 (DP_QC_ASINACOSATANATAN2TAN)
-VM_tan,							// #475 float(float a) VM_tan (DP_QC_ASINACOSATANATAN2TAN)
-VM_strlennocol,					// #476 float(string s) : DRESK - String Length (not counting color codes) (DP_QC_STRINGCOLORFUNCTIONS)
-VM_strdecolorize,				// #477 string(string s) : DRESK - Decolorized String (DP_QC_STRINGCOLORFUNCTIONS)
-VM_strftime,					// #478 string(float uselocaltime, string format, ...) (DP_QC_STRFTIME)
-VM_tokenizebyseparator,			// #479 float(string s) tokenizebyseparator (DP_QC_TOKENIZEBYSEPARATOR)
-VM_strtolower,					// #480 string(string s) VM_strtolower (DP_QC_STRING_CASE_FUNCTIONS)
-VM_strtoupper,					// #481 string(string s) VM_strtoupper (DP_QC_STRING_CASE_FUNCTIONS)
-VM_cvar_defstring,				// #482 string(string s) cvar_defstring (DP_QC_CVAR_DEFSTRING)
-VM_CL_pointsound,				// #483 void(vector origin, string sample, float volume, float attenuation) pointsound (DP_SV_POINTSOUND)
-VM_strreplace,					// #484 string(string search, string replace, string subject) strreplace (DP_QC_STRREPLACE)
-VM_strireplace,					// #485 string(string search, string replace, string subject) strireplace (DP_QC_STRREPLACE)
-VM_getsurfacepointattribute,// #486 vector(entity e, float s, float n, float a) getsurfacepointattribute
-VM_gecko_create,					// #487 float gecko_create( string name )
-VM_gecko_destroy,					// #488 void gecko_destroy( string name )
-VM_gecko_navigate,				// #489 void gecko_navigate( string name, string URI )
-VM_gecko_keyevent,				// #490 float gecko_keyevent( string name, float key, float eventtype )
-VM_gecko_movemouse,				// #491 void gecko_mousemove( string name, float x, float y )
-VM_gecko_resize,					// #492 void gecko_resize( string name, float w, float h )
-VM_gecko_get_texture_extent,	// #493 vector gecko_get_texture_extent( string name )
-VM_crc16,						// #494 float(float caseinsensitive, string s, ...) crc16 = #494 (DP_QC_CRC16)
-VM_cvar_type,					// #495 float(string name) cvar_type = #495; (DP_QC_CVAR_TYPE)
-VM_numentityfields,				// #496 float() numentityfields = #496; (QP_QC_ENTITYDATA)
-VM_entityfieldname,				// #497 string(float fieldnum) entityfieldname = #497; (DP_QC_ENTITYDATA)
-VM_entityfieldtype,				// #498 float(float fieldnum) entityfieldtype = #498; (DP_QC_ENTITYDATA)
-VM_getentityfieldstring,		// #499 string(float fieldnum, entity ent) getentityfieldstring = #499; (DP_QC_ENTITYDATA)
-VM_putentityfieldstring,		// #500 float(float fieldnum, entity ent, string s) putentityfieldstring = #500; (DP_QC_ENTITYDATA)
-VM_CL_ReadPicture,				// #501 string() ReadPicture = #501;
-VM_CL_boxparticles,				// #502 void(float effectnum, entity own, vector origin_from, vector origin_to, vector dir_from, vector dir_to, float count) boxparticles (DP_CSQC_BOXPARTICLES)
-VM_whichpack,					// #503 string(string) whichpack = #503;
-VM_CL_GetEntity,				// #504 float(float entitynum, float fldnum) getentity = #504; vector(float entitynum, float fldnum) getentityvec = #504;
-NULL,							// #505
-NULL,							// #506
-NULL,							// #507
-NULL,							// #508
-NULL,							// #509
-VM_uri_escape,					// #510 string(string in) uri_escape = #510;
-VM_uri_unescape,				// #511 string(string in) uri_unescape = #511;
-VM_etof,					// #512 float(entity ent) num_for_edict = #512 (DP_QC_NUM_FOR_EDICT)
-VM_uri_get,						// #513 float(string uri, float id, [string post_contenttype, string post_delim, [float buf]]) uri_get = #513; (DP_QC_URI_GET, DP_QC_URI_POST)
-VM_tokenize_console,					// #514 float(string str) tokenize_console = #514; (DP_QC_TOKENIZE_CONSOLE)
-VM_argv_start_index,					// #515 float(float idx) argv_start_index = #515; (DP_QC_TOKENIZE_CONSOLE)
-VM_argv_end_index,						// #516 float(float idx) argv_end_index = #516; (DP_QC_TOKENIZE_CONSOLE)
-VM_buf_cvarlist,						// #517 void(float buf, string prefix, string antiprefix) buf_cvarlist = #517; (DP_QC_STRINGBUFFERS_CVARLIST)
-VM_cvar_description,					// #518 float(string name) cvar_description = #518; (DP_QC_CVAR_DESCRIPTION)
-VM_gettime,						// #519 float(float timer) gettime = #519; (DP_QC_GETTIME)
-VM_keynumtostring,				// #520 string keynumtostring(float keynum)
-VM_findkeysforcommand,			// #521 string findkeysforcommand(string command[, float bindmap])
-VM_CL_InitParticleSpawner,		// #522 void(float max_themes) initparticlespawner (DP_CSQC_SPAWNPARTICLE)
-VM_CL_ResetParticle,			// #523 void() resetparticle (DP_CSQC_SPAWNPARTICLE)
-VM_CL_ParticleTheme,			// #524 void(float theme) particletheme (DP_CSQC_SPAWNPARTICLE)
-VM_CL_ParticleThemeSave,		// #525 void() particlethemesave, void(float theme) particlethemeupdate (DP_CSQC_SPAWNPARTICLE)
-VM_CL_ParticleThemeFree,		// #526 void() particlethemefree (DP_CSQC_SPAWNPARTICLE)
-VM_CL_SpawnParticle,			// #527 float(vector org, vector vel, [float theme]) particle (DP_CSQC_SPAWNPARTICLE)
-VM_CL_SpawnParticleDelayed,		// #528 float(vector org, vector vel, float delay, float collisiondelay, [float theme]) delayedparticle (DP_CSQC_SPAWNPARTICLE)
-VM_loadfromdata,				// #529
-VM_loadfromfile,				// #530
-VM_CL_setpause,					// #531 float(float ispaused) setpause = #531 (DP_CSQC_SETPAUSE)
-VM_log,							// #532
-VM_getsoundtime,				// #533 float(entity e, float channel) getsoundtime = #533; (DP_SND_GETSOUNDTIME)
-VM_soundlength,					// #534 float(string sample) soundlength = #534; (DP_SND_GETSOUNDTIME)
-VM_buf_loadfile,                // #535 float(string filename, float bufhandle) buf_loadfile (DP_QC_STRINGBUFFERS_EXT_WIP)
-VM_buf_writefile,               // #536 float(float filehandle, float bufhandle, float startpos, float numstrings) buf_writefile (DP_QC_STRINGBUFFERS_EXT_WIP)
-VM_bufstr_find,                 // #537 float(float bufhandle, string match, float matchrule, float startpos) bufstr_find (DP_QC_STRINGBUFFERS_EXT_WIP)
-VM_matchpattern,                // #538 float(string s, string pattern, float matchrule) matchpattern (DP_QC_STRINGBUFFERS_EXT_WIP)
-NULL,							// #539
-VM_physics_enable,				// #540 void(entity e, float physics_enabled) physics_enable = #540; (DP_PHYSICS_ODE)
-VM_physics_addforce,			// #541 void(entity e, vector force, vector relative_ofs) physics_addforce = #541; (DP_PHYSICS_ODE)
-VM_physics_addtorque,			// #542 void(entity e, vector torque) physics_addtorque = #542; (DP_PHYSICS_ODE)
-NULL,							// #543
-NULL,							// #544
-NULL,							// #545
-NULL,							// #546
-NULL,							// #547
-NULL,							// #548
-NULL,							// #549
-NULL,							// #550
-NULL,							// #551
-NULL,							// #552
-NULL,							// #553
-NULL,							// #554
-NULL,							// #555
-NULL,							// #556
-NULL,							// #557
-NULL,							// #558
-NULL,							// #559
-NULL,							// #560
-NULL,							// #561
-NULL,							// #562
-NULL,							// #563
-NULL,							// #564
-NULL,							// #565
-NULL,							// #566
-NULL,							// #567
-NULL,							// #568
-NULL,							// #569
-NULL,							// #570
-NULL,							// #571
-NULL,							// #572
-NULL,							// #573
-NULL,							// #574
-NULL,							// #575
-NULL,							// #576
-NULL,							// #577
-NULL,							// #578
-NULL,							// #579
-NULL,							// #580
-NULL,							// #581
-NULL,							// #582
-NULL,							// #583
-NULL,							// #584
-NULL,							// #585
-NULL,							// #586
-NULL,							// #587
-NULL,							// #588
-NULL,							// #589
-NULL,							// #590
-NULL,							// #591
-NULL,							// #592
-NULL,							// #593
-NULL,							// #594
-NULL,							// #595
-NULL,							// #596
-NULL,							// #597
-NULL,							// #598
-NULL,							// #599
-NULL,							// #600
-NULL,							// #601
-NULL,							// #602
-NULL,							// #603
-NULL,							// #604
-VM_callfunction,				// #605
-VM_writetofile,					// #606
-VM_isfunction,					// #607
-NULL,							// #608
-NULL,							// #609
-VM_findkeysforcommand,			// #610 string findkeysforcommand(string command[, float bindmap])
-NULL,							// #611
-NULL,							// #612
-VM_parseentitydata,				// #613
-NULL,							// #614
-NULL,							// #615
-NULL,							// #616
-NULL,							// #617
-NULL,							// #618
-NULL,							// #619
-NULL,							// #620
-NULL,							// #621
-NULL,							// #622
-NULL,							// #623
-VM_CL_getextresponse,			// #624 string getextresponse(void)
-NULL,							// #625
-NULL,							// #626
-VM_sprintf,                     // #627 string sprintf(string format, ...)
-VM_getsurfacenumtriangles,		// #628 float(entity e, float s) getsurfacenumpoints (DP_QC_GETSURFACETRIANGLE)
-VM_getsurfacetriangle,			// #629 vector(entity e, float s, float n) getsurfacepoint (DP_QC_GETSURFACETRIANGLE)
-VM_setkeybind,						// #630 float(float key, string bind[, float bindmap]) setkeybind
-VM_getbindmaps,						// #631 vector(void) getbindmap
-VM_setbindmaps,						// #632 float(vector bm) setbindmap
-NULL,							// #633
-NULL,							// #634
-NULL,							// #635
-NULL,							// #636
-NULL,							// #637
-VM_CL_RotateMoves,					// #638
-VM_digest_hex,						// #639
-VM_CL_V_CalcRefdef,					// #640 void(entity e) V_CalcRefdef (DP_CSQC_V_CALCREFDEF)
-NULL,							// #641
-VM_coverage,						// #642
-NULL,							// #643
-VM_mesh_open,					// #644
-NULL,							// #645
-NULL,							// #646
-NULL,							// #647
-VM_mesh_gather,					// #648
-VM_mesh_scatter,					// #649
-VM_mesh_publish,					// #650
-VM_mesh_poll,					// #651
-NULL,							// #652
-VM_mesh_stat,					// #653
-VM_CL_ink_splat,				// #654 void(vector origin, float radius, vector color, float amount) ink_splat
-VM_CL_ink_clear,				// #655 void() ink_clear
-VM_CL_ink_stat,					// #656 float(float sel) ink_stat
+NULL,
+VM_CL_makevectors,
+VM_CL_setorigin,
+VM_CL_setmodel,
+VM_CL_setsize,
+NULL,
+VM_break,
+VM_random,
+VM_CL_sound,
+VM_normalize,
+VM_error,
+VM_objerror,
+VM_vlen,
+VM_vectoyaw,
+VM_CL_spawn,
+VM_remove,
+VM_CL_traceline,
+NULL,
+VM_find,
+VM_precache_sound,
+VM_CL_precache_model,
+NULL,
+VM_CL_findradius,
+NULL,
+NULL,
+VM_dprint,
+VM_ftos,
+VM_vtos,
+VM_coredump,
+VM_traceon,
+VM_traceoff,
+VM_eprint,
+VM_CL_walkmove,
+NULL,
+VM_CL_droptofloor,
+VM_CL_lightstyle,
+VM_rint,
+VM_floor,
+VM_ceil,
+NULL,
+VM_CL_checkbottom,
+VM_CL_pointcontents,
+NULL,
+VM_fabs,
+NULL,
+VM_cvar,
+VM_localcmd,
+VM_nextent,
+VM_CL_particle,
+VM_changeyaw,
+NULL,
+VM_vectoangles,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_sin,
+VM_cos,
+VM_sqrt,
+VM_changepitch,
+VM_CL_tracetoss,
+VM_etos,
+NULL,
+NULL,
+VM_precache_file,
+VM_CL_makestatic,
+NULL,
+NULL,
+VM_cvar_set,
+NULL,
+VM_CL_ambientsound,
+VM_CL_precache_model,
+VM_precache_sound,
+VM_precache_file,
+NULL,
+NULL,
+NULL,
+VM_stof,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_CL_tracebox,
+VM_randomvec,
+VM_CL_getlight,
+VM_registercvar,
+VM_min,
+VM_max,
+VM_bound,
+VM_pow,
+VM_findfloat,
+VM_checkextension,
+
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_fopen,
+VM_fclose,
+VM_fgets,
+VM_fputs,
+VM_strlen,
+VM_strcat,
+VM_substring,
+VM_stov,
+VM_strzone,
+VM_strunzone,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_bitshift,
+NULL,
+NULL,
+VM_strstrofs,
+VM_str2chr,
+VM_chr2str,
+VM_strconv,
+VM_strpad,
+VM_infoadd,
+VM_infoget,
+VM_strncmp,
+VM_strncasecmp,
+VM_strncasecmp,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_CL_checkpvs,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_CL_skel_create,
+VM_CL_skel_build,
+VM_CL_skel_get_numbones,
+VM_CL_skel_get_bonename,
+VM_CL_skel_get_boneparent,
+VM_CL_skel_find_bone,
+VM_CL_skel_get_bonerel,
+VM_CL_skel_get_boneabs,
+VM_CL_skel_set_bone,
+VM_CL_skel_mul_bone,
+VM_CL_skel_mul_bones,
+VM_CL_skel_copybones,
+VM_CL_skel_delete,
+VM_CL_frameforname,
+VM_CL_frameduration,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+
+VM_CL_R_ClearScene,
+VM_CL_R_AddEntities,
+VM_CL_R_AddEntity,
+VM_CL_R_SetView,
+VM_CL_R_RenderScene,
+VM_CL_R_AddDynamicLight,
+VM_CL_R_PolygonBegin,
+VM_CL_R_PolygonVertex,
+VM_CL_R_PolygonEnd,
+VM_CL_R_SetView,
+VM_CL_unproject,
+VM_CL_project,
+NULL,
+NULL,
+NULL,
+VM_drawline,
+VM_iscachedpic,
+VM_precache_pic,
+VM_getimagesize,
+VM_freepic,
+VM_drawcharacter,
+VM_drawstring,
+VM_drawpic,
+VM_drawfill,
+VM_drawsetcliparea,
+VM_drawresetcliparea,
+VM_drawcolorcodedstring,
+VM_stringwidth,
+VM_drawsubpic,
+VM_drawrotpic,
+VM_CL_getstatf,
+VM_CL_getstati,
+VM_CL_getstats,
+VM_CL_setmodelindex,
+VM_CL_modelnameforindex,
+VM_CL_particleeffectnum,
+VM_CL_trailparticles,
+VM_CL_pointparticles,
+VM_centerprint,
+VM_print,
+VM_keynumtostring,
+VM_stringtokeynum,
+VM_getkeybind,
+VM_CL_setcursormode,
+VM_CL_getmousepos,
+VM_CL_getinputstate,
+VM_CL_setsensitivityscale,
+VM_CL_runplayerphysics,
+VM_CL_getplayerkey,
+VM_CL_isdemo,
+VM_isserver,
+VM_CL_setlistener,
+VM_CL_registercmd,
+VM_wasfreed,
+VM_CL_serverkey,
+VM_CL_videoplaying,
+VM_findfont,
+VM_loadfont,
+VM_CL_loadcubemap,
+NULL,
+VM_CL_ReadByte,
+VM_CL_ReadChar,
+VM_CL_ReadShort,
+VM_CL_ReadLong,
+VM_CL_ReadCoord,
+VM_CL_ReadAngle,
+VM_CL_ReadString,
+VM_CL_ReadFloat,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+
+VM_CL_copyentity,
+NULL,
+VM_findchain,
+VM_findchainfloat,
+VM_CL_effect,
+VM_CL_te_blood,
+VM_CL_te_bloodshower,
+VM_CL_te_explosionrgb,
+VM_CL_te_particlecube,
+VM_CL_te_particlerain,
+VM_CL_te_particlesnow,
+VM_CL_te_spark,
+VM_CL_te_gunshotquad,
+VM_CL_te_spikequad,
+VM_CL_te_superspikequad,
+VM_CL_te_explosionquad,
+VM_CL_te_smallflash,
+VM_CL_te_customflash,
+VM_CL_te_gunshot,
+VM_CL_te_spike,
+VM_CL_te_superspike,
+VM_CL_te_explosion,
+VM_CL_te_tarexplosion,
+VM_CL_te_wizspike,
+VM_CL_te_knightspike,
+VM_CL_te_lavasplash,
+VM_CL_te_teleport,
+VM_CL_te_explosion2,
+VM_CL_te_lightning1,
+VM_CL_te_lightning2,
+VM_CL_te_lightning3,
+VM_CL_te_beam,
+VM_vectorvectors,
+VM_CL_te_plasmaburn,
+VM_getsurfacenumpoints,
+VM_getsurfacepoint,
+VM_getsurfacenormal,
+VM_getsurfacetexture,
+VM_getsurfacenearpoint,
+VM_getsurfaceclippedpoint,
+NULL,
+VM_tokenize,
+VM_argv,
+VM_CL_setattachment,
+VM_search_begin,
+VM_search_end,
+VM_search_getsize,
+VM_search_getfilename,
+VM_cvar_string,
+VM_findflags,
+VM_findchainflags,
+VM_CL_gettagindex,
+VM_CL_gettaginfo,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_CL_te_flamejet,
+NULL,
+VM_ftoe,
+VM_buf_create,
+VM_buf_del,
+VM_buf_getsize,
+VM_buf_copy,
+VM_buf_sort,
+VM_buf_implode,
+VM_bufstr_get,
+VM_bufstr_set,
+VM_bufstr_add,
+VM_bufstr_free,
+NULL,
+VM_asin,
+VM_acos,
+VM_atan,
+VM_atan2,
+VM_tan,
+VM_strlennocol,
+VM_strdecolorize,
+VM_strftime,
+VM_tokenizebyseparator,
+VM_strtolower,
+VM_strtoupper,
+VM_cvar_defstring,
+VM_CL_pointsound,
+VM_strreplace,
+VM_strireplace,
+VM_getsurfacepointattribute,
+VM_gecko_create,
+VM_gecko_destroy,
+VM_gecko_navigate,
+VM_gecko_keyevent,
+VM_gecko_movemouse,
+VM_gecko_resize,
+VM_gecko_get_texture_extent,
+VM_crc16,
+VM_cvar_type,
+VM_numentityfields,
+VM_entityfieldname,
+VM_entityfieldtype,
+VM_getentityfieldstring,
+VM_putentityfieldstring,
+VM_CL_ReadPicture,
+VM_CL_boxparticles,
+VM_whichpack,
+VM_CL_GetEntity,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_uri_escape,
+VM_uri_unescape,
+VM_etof,
+VM_uri_get,
+VM_tokenize_console,
+VM_argv_start_index,
+VM_argv_end_index,
+VM_buf_cvarlist,
+VM_cvar_description,
+VM_gettime,
+VM_keynumtostring,
+VM_findkeysforcommand,
+VM_CL_InitParticleSpawner,
+VM_CL_ResetParticle,
+VM_CL_ParticleTheme,
+VM_CL_ParticleThemeSave,
+VM_CL_ParticleThemeFree,
+VM_CL_SpawnParticle,
+VM_CL_SpawnParticleDelayed,
+VM_loadfromdata,
+VM_loadfromfile,
+VM_CL_setpause,
+VM_log,
+VM_getsoundtime,
+VM_soundlength,
+VM_buf_loadfile,
+VM_buf_writefile,
+VM_bufstr_find,
+VM_matchpattern,
+NULL,
+VM_physics_enable,
+VM_physics_addforce,
+VM_physics_addtorque,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_callfunction,
+VM_writetofile,
+VM_isfunction,
+NULL,
+NULL,
+VM_findkeysforcommand,
+NULL,
+NULL,
+VM_parseentitydata,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_CL_getextresponse,
+NULL,
+NULL,
+VM_sprintf,
+VM_getsurfacenumtriangles,
+VM_getsurfacetriangle,
+VM_setkeybind,
+VM_getbindmaps,
+VM_setbindmaps,
+NULL,
+NULL,
+NULL,
+NULL,
+NULL,
+VM_CL_RotateMoves,
+VM_digest_hex,
+VM_CL_V_CalcRefdef,
+NULL,
+VM_coverage,
+NULL,
+VM_mesh_open,
+NULL,
+NULL,
+NULL,
+VM_mesh_gather,
+VM_mesh_scatter,
+VM_mesh_publish,
+VM_mesh_poll,
+NULL,
+VM_mesh_stat,
+VM_CL_ink_splat,
+VM_CL_ink_clear,
+VM_CL_ink_stat,
 NULL
 };
 
 const int vm_cl_numbuiltins = sizeof(vm_cl_builtins) / sizeof(prvm_builtin_t);
 
-//====================================================================
-// world ink volume (see r_ink.c)
-//====================================================================
-
-// #654 void(vector origin, float radius, vector color, float amount) ink_splat
 static void VM_CL_ink_splat(prvm_prog_t *prog)
 {
 	vec3_t origin, color;
@@ -4971,23 +4582,12 @@ static void VM_CL_ink_splat(prvm_prog_t *prog)
 	R_Ink_Splat(origin, PRVM_G_FLOAT(OFS_PARM1), color, PRVM_G_FLOAT(OFS_PARM3));
 }
 
-// #655 void() ink_clear
 static void VM_CL_ink_clear(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(0, VM_CL_ink_clear);
 	R_Ink_Clear();
 }
 
-// #656 float(float sel) ink_stat
-// 0 active, 1..3 resolution xyz, 4 world units per voxel, 5 splats accepted,
-// 6..8 volume mins xyz, 9..11 volume size xyz  (the volume covers the world model
-// bounds, so this is also how CSQC learns the extent of the level),
-// 12..14 mean accumulated ink colour, 15 mean coverage.
-//
-// 12..15 are the same cached pair R_Sky_InkTint uses to tint the sky, exposed
-// rather than recomputed: they let the client's neutral drift deposit the colour
-// the world already carries instead of asserting a colour of its own, which is
-// what keeps the drift and the team-coloured cart ink out of each other's way.
 static void VM_CL_ink_stat(prvm_prog_t *prog)
 {
 	int sel;
@@ -5022,7 +4622,6 @@ void VM_Polygons_Reset(prvm_prog_t *prog)
 {
 	vmpolygons_t *polys = &prog->vmpolygons;
 
-	// TODO: replace vm_polygons stuff with a more general debugging polygon system, and make vm_polygons functions use that system
 	if(polys->initialized)
 	{
 		Mem_FreePool(&polys->pool);

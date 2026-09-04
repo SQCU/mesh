@@ -24,15 +24,7 @@ bool isinf(float e)
 }
 bool isnan(float e)
 {
-	// The sane way to detect NaN is this:
-	// float f = e;
-	// return (e != f);
-	// but darkplaces used to be compiled with -ffinite-math-only which broke it.
-	// DP is fixed now but until all clients update (so after 0.8.3) we have to use the following workaround
-	// or they'd have issues when connecting to newer servers.
 
-	// Negative NaN ("-nan") is much more common but plain "nan" can be created by negating *some* -nans so we need to check both.
-	// DP's QCVM and GMQCC's QCVM behave differently - one needs ftos(-(0.0 / 0.0)), the other ftos(-sqrt(-1)).
 	string s = ftos(e);
 	return s == "nan" || s == "-nan";
 }
@@ -140,7 +132,7 @@ float hypot(float e, float f)
 
 float erf(float e)
 {
-	// approximation taken from wikipedia
+
 	float f;
 	f = e*e;
 	return copysign(sqrt(1 - exp(-f * (1.273239544735163 + 0.14001228868667 * f) / (1 + 0.14001228868667 * f))), e);
@@ -151,7 +143,7 @@ float erfc(float e)
 }
 vector lgamma(float e)
 {
-	// TODO improve accuracy
+
 	if(!isfinite(e))
 		return fabs(e) * '1 0 0' + copysign(1, e) * '0 1 0';
 	if(e < 1 && e == floor(e))
@@ -160,10 +152,7 @@ vector lgamma(float e)
 	{
 		vector v;
 		v = lgamma(1.0 - e);
-		// reflection formula:
-		// gamma(1-z) * gamma(z) = pi / sin(pi*z)
-		// lgamma(1-z) + lgamma(z) = log(pi) - log(sin(pi*z))
-		// sign of gamma(1-z) = sign of gamma(z) * sign of sin(pi*z)
+
 		v.z = sin(M_PI * e);
 		v.x = log(M_PI) - log(fabs(v.z)) - v.x;
 		if(v.z < 0)
@@ -182,15 +171,6 @@ float tgamma(float e)
 	return exp(v.x) * v.y;
 }
 
-/**
- * Pythonic mod:
- * TODO: %% operator?
- *
- *  1 %  2 ==  1
- * -1 %  2 ==  1
- *  1 % -2 == -1
- * -1 % -2 == -1
- */
 float pymod(float e, float f)
 {
 	return e - f * floor(e / f);
@@ -233,13 +213,12 @@ float nan(string tag)
 }
 float nextafter(float e, float f)
 {
-	// TODO very crude
+
 	if(e == f)
 		return nan("nextafter");
 	if(e > f)
 		return -nextafter(-e, -f);
-	// now we know that e < f
-	// so we need the next number > e
+
 	float d, a, b;
 	d = max(fabs(e), 0.00000000000000000000001);
 	a = e + d;

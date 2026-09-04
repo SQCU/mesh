@@ -39,6 +39,7 @@ void CA_count_alive_players()
 		STAT(BLUEALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(2));
 		STAT(YELLOWALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(3));
 		STAT(PINKALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(4));
+		STAT(GREENALIVE, it) = Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(5));
 	});
 }
 
@@ -46,7 +47,7 @@ void nades_Clear(entity player);
 
 int CA_PreventStalemate()
 {
-	//LOG_INFO("PreventStalemate running");
+
 	int winnerTeam = 0;
 	int secondTeam = 0;
 
@@ -72,8 +73,6 @@ int CA_PreventStalemate()
 		return winnerTeam;
 	}
 
-	// Equality. Let's check which team has more health now
-	//LOG_INFO("Equality. Checking health now.");
 	winnerTeam = 0;
 	secondTeam = 0;
 	int winnerTeamHealth = 0;
@@ -85,7 +84,6 @@ int CA_PreventStalemate()
 		teamIndex = i;
 		teamHealth = 0;
 
-		// Add up health for the players in this team
 		FOREACH_CLIENT(IS_PLAYER(it) && Entity_HasValidTeam(it) && it.team == Team_IndexToTeam(teamIndex),
 		{
 			if (IS_DEAD(it))
@@ -93,7 +91,6 @@ int CA_PreventStalemate()
 			teamHealth += GetResource(it, RES_HEALTH) + GetResource(it, RES_ARMOR);
 		});
 
-		// Set the winner teams
 		if(!winnerTeam || teamHealth > winnerTeamHealth)
 		{
 			secondTeam = winnerTeam;
@@ -119,7 +116,7 @@ int CA_PreventStalemate()
 		return winnerTeam;
 	}
 	else
-		return -2; // Equality. Can't avoid the stalemate.
+		return -2;
 }
 
 float CA_CheckWinner()
@@ -176,7 +173,7 @@ bool CA_CheckTeams()
 	static int prev_missing_teams_mask;
 	allowed_to_spawn = true;
 	CA_count_alive_players();
-	if (Team_GetNumberOfAliveTeams() == NumTeams(ca_teams))
+	if (Team_GetNumberOfAliveTeams() == LegacyTeamBitCount(ca_teams))
 	{
 		if(prev_missing_teams_mask > 0)
 			Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_MISSING_TEAMS);
@@ -193,10 +190,10 @@ bool CA_CheckTeams()
 	int missing_teams_mask = 0;
 	for (int i = 1; i <= NUM_TEAMS; ++i)
 	{
-		if ((ca_teams & Team_IndexToBit(i)) &&
+		if ((ca_teams & BIT(i - 1)) &&
 			(Team_GetNumberOfAlivePlayers(Team_GetTeamFromIndex(i)) == 0))
 		{
-			missing_teams_mask |= Team_IndexToBit(i);
+			missing_teams_mask |= BIT(i - 1);
 		}
 	}
 	if(prev_missing_teams_mask != missing_teams_mask)
@@ -216,16 +213,15 @@ bool ca_isEliminated(entity e)
 	return false;
 }
 
-/** Returns next available player to spectate if g_ca_spectate_enemies == 0 */
 entity CA_SpectateNext(entity player, entity start)
 {
 	if (SAME_TEAM(start, player)) return start;
-	// continue from current player
+
 	for (entity e = start; (e = find(e, classname, STR_PLAYER)); )
 	{
 		if (SAME_TEAM(player, e)) return e;
 	}
-	// restart from the beginning
+
 	for (entity e = NULL; (e = find(e, classname, STR_PLAYER)); )
 	{
 		if (SAME_TEAM(player, e)) return e;
@@ -233,13 +229,12 @@ entity CA_SpectateNext(entity player, entity start)
 	return start;
 }
 
-
 MUTATOR_HOOKFUNCTION(ca, PlayerSpawn)
 {
 	entity player = M_ARGV(0, entity);
 
 	INGAME_STATUS_SET(player, INGAME_STATUS_JOINED);
-	if (time <= game_starttime) // reset on game restart, not on round start
+	if (time <= game_starttime)
 		player.ca_damage_counter = 0;
 	if (!warmup_stage)
 		eliminatedPlayers.SendFlags |= 1;
@@ -249,9 +244,6 @@ MUTATOR_HOOKFUNCTION(ca, ForbidSpawn)
 {
 	entity player = M_ARGV(0, entity);
 
-	// spectators / observers that weren't playing can join; they are
-	// immediately forced to observe in the PutClientInServer hook
-	// this way they are put in a team and can play in the next round
 	if (!allowed_to_spawn && INGAME(player))
 		return true;
 	return false;
@@ -261,10 +253,10 @@ MUTATOR_HOOKFUNCTION(ca, PutClientInServer)
 {
 	entity player = M_ARGV(0, entity);
 
-	if (!allowed_to_spawn && IS_PLAYER(player)) // this is true even when player is trying to join
+	if (!allowed_to_spawn && IS_PLAYER(player))
 	{
 		TRANSMUTE(Observer, player);
-		if (CS(player).jointime != time && !INGAME(player)) // not when connecting
+		if (CS(player).jointime != time && !INGAME(player))
 		{
 			INGAME_STATUS_SET(player, INGAME_STATUS_JOINING);
 			Send_Notification(NOTIF_ONE_ONLY, player, MSG_INFO, INFO_CA_JOIN_LATE);
@@ -279,8 +271,6 @@ MUTATOR_HOOKFUNCTION(ca, reset_map_players)
 {
 	g_ca_spectate_enemies = autocvar_g_ca_spectate_enemies;
 	observe_blocked_if_eliminated = (g_ca_spectate_enemies == -1);
-	// we can avoid sending observe_blocked_if_eliminated to all clients here (with ClientData_Touch)
-	// since it will get sent whenever the client spectates someone anyway
 
 	FOREACH_CLIENT(true, {
 		CS(it).killcount = 0;
@@ -302,7 +292,10 @@ MUTATOR_HOOKFUNCTION(ca, reset_map_global)
 
 MUTATOR_HOOKFUNCTION(ca, TeamBalance_CheckAllowedTeams, CBC_ORDER_EXCLUSIVE)
 {
-	M_ARGV(0, float) = ca_teams;
+	entity balance = M_ARGV(0, entity);
+	for(int i = 1; i <= 4; ++i)
+		if(ca_teams & BIT(i - 1))
+			TeamBalance_AllowTeam(balance, i);
 	return true;
 }
 
@@ -339,7 +332,7 @@ MUTATOR_HOOKFUNCTION(ca, PlayerDies)
 	if (!allowed_to_spawn)
 	{
 		frag_target.respawn_flags = RESPAWN_SILENT;
-		// prevent unwanted sudden rejoin as spectator and movement of spectator camera
+
 		frag_target.respawn_time = time + 2;
 	}
 	frag_target.respawn_flags |= RESPAWN_FORCE;
@@ -347,7 +340,6 @@ MUTATOR_HOOKFUNCTION(ca, PlayerDies)
 		eliminatedPlayers.SendFlags |= 1;
 	return true;
 }
-
 
 MUTATOR_HOOKFUNCTION(ca, ClientDisconnect)
 {
@@ -368,7 +360,7 @@ MUTATOR_HOOKFUNCTION(ca, MakePlayerObserver)
 
 	if (IS_PLAYER(player) && !IS_DEAD(player))
 		ca_LastPlayerForTeam_Notify(player);
-	if (player.killindicator_teamchange == -2) // player wants to spectate
+	if (player.killindicator_teamchange == -2)
 	{
 		entcs_update_players(player);
 		INGAME_STATUS_CLEAR(player);
@@ -376,13 +368,13 @@ MUTATOR_HOOKFUNCTION(ca, MakePlayerObserver)
 	if (INGAME(player))
 	{
 		player.frags = FRAGS_PLAYER_OUT_OF_GAME;
-		player.would_spectate = observe_blocked_if_eliminated; // if blocked from observing force to spectate now
+		player.would_spectate = observe_blocked_if_eliminated;
 	}
 	if (!warmup_stage)
 		eliminatedPlayers.SendFlags |= 1;
 	if (!INGAME(player))
-		return false;  // allow team reset
-	return true;  // prevent team reset
+		return false;
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(ca, ForbidThrowCurrentWeapon)
@@ -392,7 +384,7 @@ MUTATOR_HOOKFUNCTION(ca, ForbidThrowCurrentWeapon)
 
 MUTATOR_HOOKFUNCTION(ca, GiveFragsForKill, CBC_ORDER_FIRST)
 {
-	M_ARGV(2, float) = 0; // score will be given to the winner team when the round ends
+	M_ARGV(2, float) = 0;
 	return true;
 }
 
@@ -466,18 +458,14 @@ MUTATOR_HOOKFUNCTION(ca, PlayerDamage_SplitHealthArmor)
 	{
 		if (DIFF_TEAM(frag_target, frag_attacker))
 			scorer_damage = frag_damage - excess;
-		else // friendly fire
+		else
 			scorer_damage = -(frag_damage - excess);
 
 		scorer = frag_attacker;
 	}
 	else
 	{
-		//handle (environmental hazard) suiciding, check first if player has a registered attacker who most likely pushed them there to avoid punishing pushed players as pushers are already rewarded
-		//deathtypes:
-		//kill = suicide, drown = drown in water/liquid, hurttrigger = out of the map void or hurt triggers inside maps like electric sparks
-		//camp = campcheck, lava = lava, slime = slime
-		//team change / rebalance suicides are currently not included
+
 		if (frag_deathtype == DEATH_KILL.m_id ||
 			frag_deathtype == DEATH_DROWN.m_id ||
 			frag_deathtype == DEATH_HURTTRIGGER.m_id ||
@@ -497,19 +485,19 @@ MUTATOR_HOOKFUNCTION(ca, PlayerDamage_SplitHealthArmor)
 
 MUTATOR_HOOKFUNCTION(ca, CalculateRespawnTime)
 {
-	// no respawn calculations needed, player is forced to spectate anyway
+
 	return true;
 }
 
 MUTATOR_HOOKFUNCTION(ca, PlayerRegen)
 {
-	// no regeneration in CA
+
 	return true;
 }
 
 MUTATOR_HOOKFUNCTION(ca, Scores_CountFragsRemaining)
 {
-	// announce remaining frags
+
 	return true;
 }
 
@@ -580,7 +568,7 @@ MUTATOR_HOOKFUNCTION(ca, ClientCommand_Spectate)
 
 	if (INGAME(player))
 	{
-		// they're going to spec, we can do other checks
+
 		if (autocvar_sv_spectate && (IS_SPEC(player) || IS_OBSERVER(player)))
 			Send_Notification(NOTIF_ONE_ONLY, player, MSG_INFO, INFO_CA_LEAVE);
 		return MUT_SPECCMD_FORCE;
@@ -591,7 +579,7 @@ MUTATOR_HOOKFUNCTION(ca, ClientCommand_Spectate)
 
 MUTATOR_HOOKFUNCTION(ca, HideTeamNagger)
 {
-	return true; // doesn't work well with the whole spectator as player thing
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(ca, SetWeaponArena)

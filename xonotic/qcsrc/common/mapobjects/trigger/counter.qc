@@ -23,7 +23,7 @@ void counter_use(entity this, entity actor, entity trigger)
 			IL_PUSH(g_counters, mycounter);
 			mycounter.owner = this;
 			mycounter.realowner = actor;
-			mycounter.reset = counter_reset; // NOTE: this may be useless as the player deletes their counters upon respawning
+			mycounter.reset = counter_reset;
 			mycounter.counter_cnt = 0;
 		}
 		store = mycounter;
@@ -71,16 +71,6 @@ void counter_reset(entity this)
 	this.active = ACTIVE_ACTIVE;
 }
 
-/*QUAKED spawnfunc_trigger_counter (.5 .5 .5) ? nomessage COUNTER_FIRE_AT_COUNT
-Acts as an intermediary for an action that takes multiple inputs.
-
-If nomessage is not set, it will print "1 more.. " etc when triggered and "sequence complete" when finished.
-If COUNTER_FIRE_AT_COUNT is set, it will also fire all of its targets at countdown, making it behave like trigger_mulitple with limited shots
-
-If respawntime is set, it will re-enable itself after the time once the sequence has been completed
-
-After the counter has been triggered "count" times (default 2), it will fire all of its targets.
-*/
 spawnfunc(trigger_counter)
 {
 	if (!this.count)

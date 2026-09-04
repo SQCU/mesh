@@ -34,11 +34,10 @@
 
 STATIC_INIT(bot) { bot_calculate_stepheightvec(); }
 
-// TODO: remove this function! its only purpose is to update these fields since bot_setnameandstuff is called before ClientState
 void bot_setclientfields(entity this)
 {
-	CS_CVAR(this).cvar_cl_accuracy_data_share = 1;  // share the bots weapon accuracy data with the world
-	CS_CVAR(this).cvar_cl_accuracy_data_receive = 0;  // don't receive any weapon accuracy data
+	CS_CVAR(this).cvar_cl_accuracy_data_share = 1;
+	CS_CVAR(this).cvar_cl_accuracy_data_receive = 0;
 }
 
 entity bot_spawn()
@@ -65,7 +64,6 @@ void bot_think(entity this)
 	if(autocvar_bot_god)
 		this.flags |= FL_GODMODE;
 
-	// if bot skill is high enough don't limit their think frequency
 	if (SUPERBOT)
 		this.bot_nextthink = max(time, this.bot_nextthink) + 0.005;
 	else
@@ -89,23 +87,17 @@ void bot_think(entity this)
 	this.dmg_save = 0;
 	this.dmg_inflictor = NULL;
 
-	// if bot skill is high enough don't assign latency to them
 	if (SUPERBOT)
 		CS(this).ping = 0;
 	else
 	{
-		// calculate an aiming latency based on the skill setting
-		// (simulated network latency + naturally delayed reflexes)
-		//this.ping = 0.7 - bound(0, 0.05 * skill, 0.5); // moved the reflexes to bot_aimdir (under the name 'think')
-		// minimum ping 20+10 random
-		CS(this).ping = bound(0,0.07 - bound(0, (skill + this.bot_pingskill) * 0.005,0.05)+random()*0.01,0.65); // Now holds real lag to server, and higher skill players take a less laggy server
-		// skill 10 = ping 0.2 (adrenaline)
-		// skill 0 = ping 0.7 (slightly drunk)
+
+		CS(this).ping = bound(0,0.07 - bound(0, (skill + this.bot_pingskill) * 0.005,0.05)+random()*0.01,0.65);
+
 	}
 
-	// clear buttons
 	PHYS_INPUT_BUTTON_ATCK(this) = false;
-	// keep jump button pressed for a short while, useful with ramp jumps
+
 	PHYS_INPUT_BUTTON_JUMP(this) = (!IS_DEAD(this) && time < this.bot_jump_time + 0.2);
 	PHYS_INPUT_BUTTON_ATCK2(this) = false;
 	PHYS_INPUT_BUTTON_ZOOM(this) = false;
@@ -118,12 +110,11 @@ void bot_think(entity this)
 
 	if (time < game_starttime)
 	{
-		// block the bot during the countdown to game start
+
 		CS(this).movement = '0 0 0';
 		return;
 	}
 
-	// if dead, just wait until we can respawn
 	if (IS_DEAD(this) || IS_OBSERVER(this))
 	{
 		if (bot_waypoint_queue_owner == this)
@@ -136,12 +127,11 @@ void bot_think(entity this)
 		{
 			if (!navigation_goalrating_timeout(this))
 				navigation_goalrating_timeout_force(this);
-			// jump must not be pressed for at least one frame in order for
-			// PlayerThink to detect the key down event
+
 			if (this.deadflag == DEAD_DYING)
 				PHYS_INPUT_BUTTON_JUMP(this) = false;
 			else if (this.deadflag == DEAD_DEAD)
-				PHYS_INPUT_BUTTON_JUMP(this) = true; // press jump to respawn
+				PHYS_INPUT_BUTTON_JUMP(this) = true;
 		}
 	}
 	else if(this.aistatus & AI_STATUS_STUCK)
@@ -150,10 +140,9 @@ void bot_think(entity this)
 	if (warmup_stage && !this.ready)
 	{
 		this.ready = true;
-		ReadyCount(); // this must be delayed until the bot has spawned
+		ReadyCount();
 	}
 
-	// now call the current bot AI (havocbot for example)
 	this.bot_ai(this);
 }
 
@@ -179,9 +168,7 @@ void bot_setnameandstuff(entity this)
 		{
 			for (int i = 1; i <= AVAILABLE_TEAMS; ++i)
 			{
-				// NOTE if (autocvar_g_campaign && autocvar_g_campaign_forceteam == i)
-				// TeamBalance_GetNumberOfPlayers(balance, i); returns the number of players + 1
-				// since it keeps a spot for the real player in the desired team
+
 				int count = TeamBalance_GetNumberOfPlayers(balance, i);
 				if (smallest_count < 0 || count < smallest_count)
 				{
@@ -198,8 +185,7 @@ void bot_setnameandstuff(entity this)
 				continue;
 			if(substring(readfile, 0, 1) == "#")
 				continue;
-			// NOTE if the line is empty tokenizebyseparator(readfile, "\t")
-			// will create 1 empty token because there's no separator (bug?)
+
 			if (readfile == "")
 				continue;
 			tokens = tokenizebyseparator(readfile, "\t");
@@ -267,49 +253,35 @@ void bot_setnameandstuff(entity this)
 			this.f = (!autocvar_g_campaign) * (2 * random() - 1) * r * w; \
 		prio++; \
 	MACRO_END
-	//print(bot_name, ": ping=", argv(9), "\n");
 
-	READSKILL(havocbot_keyboardskill, 0.5, 0.5); // keyboard skill
-	READSKILL(bot_moveskill, 2, 0); // move skill
-	READSKILL(bot_dodgeskill, 2, 0); // dodge skill
+	READSKILL(havocbot_keyboardskill, 0.5, 0.5);
+	READSKILL(bot_moveskill, 2, 0);
+	READSKILL(bot_dodgeskill, 2, 0);
 
-	READSKILL(bot_pingskill, 0.5, 0); // ping skill
+	READSKILL(bot_pingskill, 0.5, 0);
 
-	READSKILL(bot_weaponskill, 2, 0); // weapon skill
-	READSKILL(bot_aggresskill, 1, 0); // aggre skill
-	READSKILL(bot_rangepreference, 1, 0); // read skill
+	READSKILL(bot_weaponskill, 2, 0);
+	READSKILL(bot_aggresskill, 1, 0);
+	READSKILL(bot_rangepreference, 1, 0);
 
-	READSKILL(bot_aimskill, 2, 0); // aim skill
-	READSKILL(bot_offsetskill, 2, 0.5); // offset skill
-	READSKILL(bot_mouseskill, 1, 0.5); // mouse skill
+	READSKILL(bot_aimskill, 2, 0);
+	READSKILL(bot_offsetskill, 2, 0.5);
+	READSKILL(bot_mouseskill, 1, 0.5);
 
-	READSKILL(bot_thinkskill, 1, 0.5); // think skill
-	READSKILL(bot_aiskill, 2, 0); // "ai" skill
+	READSKILL(bot_thinkskill, 1, 0.5);
+	READSKILL(bot_aiskill, 2, 0);
 
-	// if bot skill is high enough don't limit their skill
 	if (SUPERBOT)
 	{
-		// commented out means they're meaningless with this high skill
-		// no reason to set them, uncomment if this changes
-		//this.havocbot_keyboardskill = 10;
-		//this.bot_moveskill = 10; //midair modifier sets this to 0 to disable bhop
-		//this.bot_dodgeskill = 10;
-		//this.bot_pingskill = 10;
-		//this.bot_weaponskill = 10;
-		//this.bot_aggresskill = 10;
-		this.bot_rangepreference = 1; // no range preference modification
-		//this.bot_aimskill = 10;
-		//this.bot_offsetskill = 10;
-		//this.bot_mouseskill = 10;
-		//this.bot_thinkskill = 10;
-		//this.bot_aiskill = 10;
+
+		this.bot_rangepreference = 1;
+
 	}
 	if (file >= 0 && argv(prio) != "")
 		LOG_INFOF("^1Warning^7: too many parameters for bot %s, please check format of %s", bot_name, autocvar_bot_config_file);
 
 	this.bot_config_loaded = true;
 
-	// this is really only a default, TeamBalance_JoinBestTeam is called later
 	setcolor(this, stof(bot_shirt) * 16 + stof(bot_pants));
 	this.bot_preferredcolors = this.clientcolors;
 
@@ -324,7 +296,7 @@ void bot_setnameandstuff(entity this)
 	}
 	else
 	{
-		// number bots with identical names
+
 		int j = 0;
 		FOREACH_CLIENT(IS_BOT_CLIENT(it), {
 			if(it.cleanname == name)
@@ -337,7 +309,6 @@ void bot_setnameandstuff(entity this)
 	}
 	this.cleanname = strzone(name);
 
-	// pick the model and skin
 	if(substring(bot_model, -4, 1) != ".")
 		bot_model = strcat(bot_model, ".iqm");
 	this.playermodel = this.playermodel_freeme = strzone(strcat("models/player/", bot_model));
@@ -414,7 +385,7 @@ void bot_endgame()
 		setcolor(e, e.bot_preferredcolors);
 		e = e.nextbot;
 	}
-	// if dynamic waypoints are ever implemented, save them here
+
 }
 
 void bot_relinkplayerlist()
@@ -470,7 +441,7 @@ void bot_clientconnect(entity this)
 	this.isbot = true;
 	this.createdtime = this.bot_nextthink;
 
-	if(!this.bot_config_loaded) // This is needed so team overrider doesn't break between matches
+	if(!this.bot_config_loaded)
 	{
 		bot_setnameandstuff(this);
 		bot_setclientfields(this);
@@ -521,7 +492,7 @@ void bot_removefromlargestteam()
 	});
 	TeamBalance_Destroy(balance);
 	if(!bcount)
-		return; // no bots to remove
+		return;
 	currentbots = currentbots - 1;
 	dropclient(best);
 }
@@ -556,7 +527,7 @@ void bot_removenewest()
 	});
 
 	if(!bcount)
-		return; // no bots to remove
+		return;
 
 	currentbots = currentbots - 1;
 	dropclient(best);
@@ -577,7 +548,7 @@ void autoskill(float factor)
 	if(bestbot < 0 || bestplayer < 0)
 	{
 		msg = strcat(msg, "not doing anything");
-		// don't return, let it reset all counters below
+
 	}
 	else if(bestbot <= bestplayer * factor - 2)
 	{
@@ -601,7 +572,7 @@ void autoskill(float factor)
 	{
 		msg = strcat(msg, "not doing anything");
 		return;
-		// don't reset counters, wait for them to accumulate
+
 	}
 	LOG_DEBUG(msg);
 
@@ -612,7 +583,7 @@ void bot_calculate_stepheightvec()
 {
 	stepheightvec = autocvar_sv_stepheight * '0 0 1';
 	jumpheight_vec = (autocvar_sv_jumpvelocity ** 2) / (2 * autocvar_sv_gravity) * '0 0 1';
-	jumpstepheightvec = stepheightvec + jumpheight_vec * 0.85; // reduce it a bit to make the jumps easy
+	jumpstepheightvec = stepheightvec + jumpheight_vec * 0.85;
 	jumpheight_time = autocvar_sv_jumpvelocity / autocvar_sv_gravity;
 }
 
@@ -632,8 +603,7 @@ bool bot_fixcount(bool multiple_per_frame)
 	}
 
 	int bots;
-	// But don't remove bots immediately on level change, as the real players
-	// usually haven't rejoined yet
+
 	bots_would_leave = false;
 	if (autocvar_bot_vs_human && AVAILABLE_TEAMS == 2)
 		bots = min(ceil(fabs(autocvar_bot_vs_human) * activerealplayers), maxclients - realplayers);
@@ -644,9 +614,8 @@ bool bot_fixcount(bool multiple_per_frame)
 			minplayers = max(0, floor(autocvar_minplayers_per_team) * AVAILABLE_TEAMS);
 		int minbots = max(0, floor(autocvar_bot_number));
 
-		// add bots to reach minplayers if needed
 		bots = max(minbots, minplayers - activerealplayers);
-		// cap bots to the max players allowed by the server
+
 		int player_limit = GetPlayerLimit();
 		if(player_limit)
 			bots = min(bots, max(player_limit - activerealplayers, 0));
@@ -657,11 +626,10 @@ bool bot_fixcount(bool multiple_per_frame)
 	}
 	else
 	{
-		// if there are no players, remove bots
+
 		bots = 0;
 	}
 
-	// only add one bot per frame to avoid utter chaos
 	if(time > botframe_nextthink)
 	{
 		while (currentbots < bots)
@@ -687,7 +655,7 @@ void bot_serverframe()
 {
 	if (intermission_running && currentbots > 0)
 	{
-		// after the end of the match all bots stay unless all human players disconnect
+
 		int realplayers = 0;
 		FOREACH_CLIENT(IS_REAL_CLIENT(it), { ++realplayers; });
 		if (!realplayers)
@@ -701,11 +669,6 @@ void bot_serverframe()
 	if (game_stopped)
 		return;
 
-	// Added 0.5 to avoid possible addition + immediate removal of bots that would make them appear as
-	// spectators in the scoreboard and never go away. This issue happens at time 2 if map is changed
-	// with the gotomap command, minplayers is > 1 and human clients join as players very soon
-	// either intentionally or automatically (sv_spectate 0)
-	// A working workaround for this bug was implemented in commit fbd145044, see entcs_attach
 	if (time < 2.5)
 	{
 		currentbots = -1;
@@ -714,7 +677,7 @@ void bot_serverframe()
 
 	if (currentbots == -1)
 	{
-		// count bots already in the server from the previous match
+
 		currentbots = 0;
 		FOREACH_CLIENT(IS_BOT_CLIENT(it), { ++currentbots; });
 	}
@@ -766,7 +729,7 @@ void bot_serverframe()
 		}
 		else
 		{
-			// TODO: Make this check cleaner
+
 			IL_EACH(g_waypoints, time - it.nextthink > 10,
 			{
 				waypoint_save_links();
@@ -783,13 +746,10 @@ void bot_serverframe()
 
 	if (bot_list)
 	{
-		// cycle the goal token from one bot to the next each frame
-		// (this prevents them from all doing spawnfunc_waypoint searches on the same
-		//  frame, which causes choppy framerates)
+
 		if (bot_strategytoken_taken)
 		{
-			// give goal token to the first bot without goals; if all bots don't have
-			// any goal (or are dead/frozen) simply give it to the next one
+
 			bot_strategytoken_taken = false;
 			entity bot_strategytoken_save = bot_strategytoken;
 			while (true)
@@ -803,10 +763,10 @@ void bot_serverframe()
 					&& !bot_strategytoken.goalcurrent)
 					break;
 
-				if (!bot_strategytoken_save) // break loop if all the bots are dead or frozen
+				if (!bot_strategytoken_save)
 					break;
 				if (bot_strategytoken == bot_strategytoken_save)
-					bot_strategytoken_save = NULL; // looped through all the bots
+					bot_strategytoken_save = NULL;
 			}
 		}
 

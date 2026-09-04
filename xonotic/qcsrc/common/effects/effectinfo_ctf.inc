@@ -1,4 +1,4 @@
-// flag_touch -- effects for touching the flag
+
 #define flag_touch(name, colormin, colormax) \
     DEF(name##flag_touch); \
     SUB(name##flag_touch) { \
@@ -70,7 +70,6 @@ flag_touch(neutral, "0xFFFFFF", "0xFFFFFF")
         MY(trailspacing) = 12; \
         MY(type) = "static"; \
     } \
-    /**/
 
 pass(red,       "0xFF0000", "0x970000")
 pass(blue,      "0x0000FF", "0x000097")
@@ -79,7 +78,6 @@ pass(pink,      "0xFFFFFF", "0xFFFFFF")
 pass(neutral,   "0xFFFFFF", "0xFFFFFF")
 #undef pass
 
-// cap -- team capture effect
 #define cap(name, colormin, colormax) \
     DEF(name##_cap); \
     SUB(name##_cap) { \
@@ -114,7 +112,6 @@ pass(neutral,   "0xFFFFFF", "0xFFFFFF")
         MY(tex_max) = 65; \
         MY(type) = "smoke"; \
     } \
-    /**/
 
 cap(red,    "0xFF0000", "0x970000")
 cap(blue,   "0x0000FF", "0x000097")

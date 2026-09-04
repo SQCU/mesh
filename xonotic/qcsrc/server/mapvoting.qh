@@ -25,7 +25,6 @@ string autocvar_sv_vote_gametype_options;
 float autocvar_sv_vote_gametype_keeptwotime;
 bool autocvar_sv_vote_gametype_default_current;
 
-// definitions for functions used outside mapvoting.qc
 void MapVote_Start();
 void MapVote_Spawn();
 void MapVote_Think();

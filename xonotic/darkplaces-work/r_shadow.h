@@ -37,7 +37,6 @@ extern cvar_t r_shadow_texture3d;
 extern cvar_t gl_ext_separatestencil;
 extern cvar_t gl_ext_stenciltwoside;
 
-// used by shader for bouncegrid feature
 typedef struct r_shadow_bouncegrid_settings_s
 {
 	qboolean staticmode;
@@ -69,8 +68,8 @@ typedef struct r_shadow_bouncegrid_state_s
 	r_shadow_bouncegrid_settings_t settings;
 	qboolean capable;
 	qboolean allowdirectionalshading;
-	qboolean directional; // copied from settings.directionalshading after createtexture is decided
-	qboolean createtexture; // set to true to recreate the texture rather than updating it - happens when size changes or directional changes
+	qboolean directional;
+	qboolean createtexture;
 	rtexture_t *texture;
 	matrix4x4_t matrix;
 	vec_t intensity;
@@ -87,14 +86,13 @@ typedef struct r_shadow_bouncegrid_state_s
 	vec3_t size;
 	int maxsplatpaths;
 
-	// per-frame data that is very temporary
 	int numsplatpaths;
 	struct r_shadow_bouncegrid_splatpath_s *splatpaths;
-	int highpixels_index; // which one is active - this toggles when doing blur
-	float *highpixels; // equals blurpixels[highpixels_index]
+	int highpixels_index;
+	float *highpixels;
 	float *blurpixels[2];
-	unsigned char *u8pixels; // temporary processing buffer when outputting to rgba8 format
-	unsigned short *fp16pixels; // temporary processing buffer when outputting to rgba16f format
+	unsigned char *u8pixels;
+	unsigned short *fp16pixels;
 }
 r_shadow_bouncegrid_state_t;
 
@@ -123,7 +121,6 @@ void R_Shadow_SetupEntityLight(const entity_render_t *ent);
 
 qboolean R_Shadow_ScissorForBBox(const float *mins, const float *maxs);
 
-// these never change, they are used to create attenuation matrices
 extern matrix4x4_t matrix_attenuationxyz;
 extern matrix4x4_t matrix_attenuationz;
 

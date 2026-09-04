@@ -15,7 +15,7 @@
 
 void havocbot_goalrating_waypoints(entity this, float ratingscale, vector org, float sradius)
 {
-	// rate waypoints only if there's no alternative goal
+
 	if(navigation_bestgoal)
 		return;
 
@@ -62,7 +62,6 @@ bool havocbot_goalrating_item_pickable_check_players(entity this, vector org, en
 	if(!teamplay)
 		return true;
 
-	// these variables hold squared distances in order to optimize code
 	float friend_dist2 = FLOAT_MAX;
 	float enemy_dist2 = FLOAT_MAX;
 	float dist2;
@@ -86,15 +85,13 @@ bool havocbot_goalrating_item_pickable_check_players(entity this, vector org, en
 		}
 		else
 		{
-			// If enemy only track distances
-			// TODO: track only if visible ?
+
 			dist2 = vlen2(it.origin - item_org);
 			if (dist2 < enemy_dist2)
 				enemy_dist2 = dist2;
 		}
 	});
 
-	// Rate the item only if no one needs it, or if an enemy is closer to it
 	dist2 = vlen2(item_org - org);
 	if ((enemy_dist2 < friend_dist2 && dist2 < enemy_dist2)
 		|| (friend_dist2 > autocvar_bot_ai_friends_aware_pickup_radius ** 2)
@@ -109,8 +106,7 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 
 	IL_EACH(g_items, it.bot_pickup,
 	{
-		// ignore if bot already rated this item with a higher ratingscale
-		// NOTE: this code assumes each bot rates items in a different frame
+
 		if(it.bot_ratingscale_time == time && ratingscale < it.bot_ratingscale)
 			continue;
 
@@ -140,7 +136,6 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 		if(vdist(o - org, >, sradius) || (it == this.ignoregoal && time < this.ignoregoaltime) )
 			continue;
 
-		// Check if the item can be picked up safely
 		if(Item_IsLoot(it))
 		{
 			if(!IS_ONGROUND(it))
@@ -150,11 +145,6 @@ void havocbot_goalrating_items(entity this, float ratingscale, vector org, float
 			if(IN_LAVA(trace_endpos + '0 0 1'))
 				continue;
 
-			// this tracebox_hits_trigger_hurt call isn't needed:
-			// dropped weapons are removed as soon as they fall on a trigger_hurt
-			// and can't be rated while they are in the air
-			//if(tracebox_hits_trigger_hurt(it.origin, it.mins, it.maxs, trace_endpos))
-			//	continue;
 		}
 		else
 		{
@@ -178,25 +168,17 @@ void havocbot_goalrating_enemyplayers(entity this, float ratingscale, vector org
 	if (autocvar_bot_nofire)
 		return;
 
-	// don't chase players if we're under water
 	if(this.waterlevel > WATERLEVEL_WETFEET)
 		return;
 
 	ratingscale = ratingscale * 0.0001;
 
 	FOREACH_CLIENT(IS_PLAYER(it) && bot_shouldattack(this, it), {
-		// TODO: Merge this logic with the bot_shouldattack function
+
 		if(vdist(it.origin - org, <, 100) || vdist(it.origin - org, >, sradius))
 			continue;
 		if(vdist(vec2(it.velocity), >, autocvar_sv_maxspeed * 2))
 			continue;
-
-		// rate only visible enemies
-		/*
-		traceline(this.origin + this.view_ofs, it.origin, MOVE_NOMONSTERS, this);
-		if (trace_fraction < 1 || trace_ent != it)
-			continue;
-		*/
 
 		float t = ((GetResource(this, RES_HEALTH) + GetResource(this, RES_ARMOR)) - (GetResource(it, RES_HEALTH) + GetResource(it, RES_ARMOR))) / 150;
 		t = bound(0, 1 + t, 3);
@@ -207,15 +189,13 @@ void havocbot_goalrating_enemyplayers(entity this, float ratingscale, vector org
 			if (time < StatusEffects_gettime(STATUSEFFECT_Shield, this) - 1) t += 0.2;
 			if (time < StatusEffects_gettime(STATUSEFFECT_Shield, it) - 1) t -= 0.4;
 		}
-		t += max(0, 8 - skill) * 0.05; // less skilled bots attack more mindlessly
+		t += max(0, 8 - skill) * 0.05;
 		ratingscale *= t;
 		if (ratingscale > 0)
 			navigation_routerating(this, it, ratingscale * BOT_RATING_ENEMY, 2000);
 	});
 }
 
-// legacy bot role for standard gamemodes
-// go to best items
 void havocbot_role_generic(entity this)
 {
 	if(IS_DEAD(this))

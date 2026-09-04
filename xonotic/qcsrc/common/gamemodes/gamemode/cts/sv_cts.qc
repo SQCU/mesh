@@ -14,7 +14,6 @@ bool autocvar_g_cts_selfdamage;
 bool autocvar_g_cts_removeprojectiles;
 bool autocvar_g_cts_drop_monster_items;
 
-// legacy bot roles
 .float race_checkpoint;
 void havocbot_role_cts(entity this)
 {
@@ -33,9 +32,7 @@ void havocbot_role_cts(entity this)
 		{
 			if(it.cnt == cp || cp == -1)
 			{
-				// redirect bot to next goal if it touched the waypoint of an untouchable checkpoint
-				// e.g. checkpoint in front of Stormkeep's warpzone
-				// the same workaround is applied in Race game mode
+
 				if (raw_touch_check && vdist(this.origin - it.nearestwaypoint.origin, <, 30))
 				{
 					cp = race_NextCheckpoint(cp);
@@ -66,7 +63,7 @@ void cts_ScoreRules()
     });
 }
 
-void cts_EventLog(string mode, entity actor) // use an alias for easy changing and quick editing later
+void cts_EventLog(string mode, entity actor)
 {
 	if(autocvar_sv_eventlog)
 		GameLogEcho(strcat(":cts:", mode, ":", ((actor != NULL) ? (strcat(":", ftos(actor.playerid))) : "")));
@@ -96,14 +93,9 @@ MUTATOR_HOOKFUNCTION(cts, PlayerPhysics)
 		}
 	}
 
-	// force kbd movement for fairness
 	float wishspeed;
 	vector wishvel;
 
-	// if record times matter
-	// ensure nothing EVIL is being done (i.e. div0_evade)
-	// this hinders joystick users though
-	// but it still gives SOME analog control
 	wishvel.x = fabs(CS(player).movement.x);
 	wishvel.y = fabs(CS(player).movement.y);
 	if(wishvel.x != 0 && wishvel.y != 0 && wishvel.x != wishvel.y)
@@ -112,7 +104,7 @@ MUTATOR_HOOKFUNCTION(cts, PlayerPhysics)
 		wishspeed = vlen(wishvel);
 		if(wishvel.x >= 2 * wishvel.y)
 		{
-			// pure X motion
+
 			if(CS(player).movement.x > 0)
 				CS(player).movement_x = wishspeed;
 			else
@@ -121,7 +113,7 @@ MUTATOR_HOOKFUNCTION(cts, PlayerPhysics)
 		}
 		else if(wishvel.y >= 2 * wishvel.x)
 		{
-			// pure Y motion
+
 			CS(player).movement_x = 0;
 			if(CS(player).movement.y > 0)
 				CS(player).movement_y = wishspeed;
@@ -130,7 +122,7 @@ MUTATOR_HOOKFUNCTION(cts, PlayerPhysics)
 		}
 		else
 		{
-			// diagonal
+
 			if(CS(player).movement.x > 0)
 				CS(player).movement_x = M_SQRT1_2 * wishspeed;
 			else
@@ -188,7 +180,7 @@ MUTATOR_HOOKFUNCTION(cts, AbortSpeedrun)
 	entity player = M_ARGV(0, entity);
 
 	if(autocvar_g_allow_checkpoints)
-		race_PreparePlayer(player); // nice try
+		race_PreparePlayer(player);
 }
 
 MUTATOR_HOOKFUNCTION(cts, MakePlayerObserver)
@@ -210,10 +202,9 @@ MUTATOR_HOOKFUNCTION(cts, PlayerSpawn)
 	entity spawn_spot = M_ARGV(1, entity);
 
 	if(spawn_spot.target == "")
-		// Emergency: this wasn't a real spawnpoint. Can this ever happen?
+
 		race_PreparePlayer(player);
 
-	// if we need to respawn, do it right
 	player.race_respawn_checkpoint = player.race_checkpoint;
 	player.race_respawn_spotref = spawn_spot;
 
@@ -227,9 +218,9 @@ MUTATOR_HOOKFUNCTION(cts, PutClientInServer)
 	if(IS_PLAYER(player))
 	if(!game_stopped)
 	{
-		if(CS(player).killcount == FRAGS_SPECTATOR /* initial spawn */ || g_race_qualifying) // spawn
+		if(CS(player).killcount == FRAGS_SPECTATOR                     || g_race_qualifying)
 			race_PreparePlayer(player);
-		else // respawn
+		else
 			race_RetractPlayer(player);
 
 		race_AbandonRaceCheck(player);
@@ -238,7 +229,7 @@ MUTATOR_HOOKFUNCTION(cts, PutClientInServer)
 
 MUTATOR_HOOKFUNCTION(cts, PlayerDamaged)
 {
-	return true; // forbid logging damage
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(cts, PlayerDies)
@@ -275,7 +266,7 @@ MUTATOR_HOOKFUNCTION(cts, GetPressedKeys)
 
 MUTATOR_HOOKFUNCTION(cts, ForbidThrowCurrentWeapon)
 {
-	// no weapon dropping in CTS
+
 	return true;
 }
 
@@ -308,7 +299,7 @@ MUTATOR_HOOKFUNCTION(cts, Damage_Calculate)
 
 MUTATOR_HOOKFUNCTION(cts, ForbidPlayerScore_Clear)
 {
-	return true; // in CTS, you don't lose score by observing
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(cts, GetRecords)
@@ -335,21 +326,20 @@ MUTATOR_HOOKFUNCTION(cts, GetRecords)
 
 MUTATOR_HOOKFUNCTION(cts, ClientKill)
 {
-	M_ARGV(1, float) = 0; // kill delay
+	M_ARGV(1, float) = 0;
 }
 
 MUTATOR_HOOKFUNCTION(cts, Race_FinalCheckpoint)
 {
 	entity player = M_ARGV(0, entity);
 
-	// useful to prevent cheating by running back to the start line and starting out with more speed
 	if(autocvar_g_cts_finish_kill_delay)
 		ClientKill_Silent(player, autocvar_g_cts_finish_kill_delay);
 }
 
 MUTATOR_HOOKFUNCTION(cts, HideTeamNagger)
 {
-	return true; // doesn't work so well (but isn't cts a teamless mode?)
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(cts, FixClientCvars)
@@ -361,8 +351,8 @@ MUTATOR_HOOKFUNCTION(cts, FixClientCvars)
 
 MUTATOR_HOOKFUNCTION(cts, WantWeapon)
 {
-	M_ARGV(1, float) = (M_ARGV(0, entity) == WEP_SHOTGUN); // want weapon = weapon info
-	M_ARGV(3, bool) = true; // want mutator blocked
+	M_ARGV(1, float) = (M_ARGV(0, entity) == WEP_SHOTGUN);
+	M_ARGV(3, bool) = true;
 	return true;
 }
 

@@ -17,7 +17,7 @@ bool isPushable(entity e)
 	{
 		case "body":
 			return true;
-		case "bullet": // antilagged bullets can't hit this either
+		case "bullet":
 			return false;
 	}
 	if (e.projectiledeathtype)
@@ -94,10 +94,9 @@ void generic_netlinked_reset(entity this)
 	this.SendFlags |= SF_TRIGGER_UPDATE;
 }
 
-// Compatibility with old maps
 void generic_netlinked_legacy_use(entity this, entity actor, entity trigger)
 {
-	//LOG_WARNF("Entity %s was (de)activated by a trigger, please update map to use relays", this.targetname);
+
 	this.setactive(this, ACTIVE_TOGGLE);
 }
 
@@ -122,7 +121,7 @@ void trigger_common_write(entity this, bool withtarget)
 
 	if(withtarget)
 	{
-		// probably some way to clean this up...
+
 		int targbits = 0;
 		if(this.target && this.target != "") targbits |= BIT(0);
 		if(this.target2 && this.target2 != "") targbits |= BIT(1);
@@ -222,35 +221,12 @@ void trigger_remove_generic(entity this)
 }
 #endif
 
-
-/*
-==============================
-SUB_UseTargets
-
-the global "activator" should be set to the entity that initiated the firing.
-
-If this.delay is set, a DelayedUse entity will be created that will actually
-do the SUB_UseTargets after that many seconds have passed.
-
-Centerprints any this.message to the activator.
-
-Removes all entities with a targetname that match this.killtarget,
-and removes them, so some events can remove other triggers.
-
-Search for (string)targetname in all entities that
-match (string)this.target and call their .use function
-
-==============================
-*/
-
 void SUB_UseTargets_Ex(entity this, entity actor, entity trigger, bool preventReuse, int skiptargets)
 {
-//
-// check for a delay
-//
+
 	if (this.delay)
 	{
-		// create a temp object to fire at a later time
+
 		entity t = new_pure(DelayedUse);
 		t.nextthink = time + this.delay;
 		setthink(t, DelayThink);
@@ -267,9 +243,6 @@ void SUB_UseTargets_Ex(entity this, entity actor, entity trigger, bool preventRe
 
 	string s;
 
-//
-// print the message
-//
 #ifdef SVQC
 	if(this)
 	if(IS_PLAYER(actor) && this.message != "")
@@ -280,9 +253,6 @@ void SUB_UseTargets_Ex(entity this, entity actor, entity trigger, bool preventRe
 			play2(actor, SND(TALK));
 	}
 
-//
-// kill the killtagets
-//
 	s = this.killtarget;
 	if (s != "")
 	{
@@ -290,10 +260,6 @@ void SUB_UseTargets_Ex(entity this, entity actor, entity trigger, bool preventRe
 			delete(t);
 	}
 #endif
-
-//
-// fire targets
-//
 
 	if(this.target_random)
 		RandomSelection_Init();

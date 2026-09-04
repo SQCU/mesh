@@ -58,8 +58,6 @@ string XonoticTextBox_getTextBoxLine(entity me, int i)
 	return string_null;
 }
 
-// mostly copied from playerlist
-// FIXME: is this really needed
 void XonoticTextBox_resizeNotify(entity me, vector relOrigin, vector relSize, vector absOrigin, vector absSize)
 {
 	me.itemAbsSize = '0 0 0';

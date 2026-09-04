@@ -4,13 +4,11 @@ IntrusiveList g_events;
 IntrusiveList g_components;
 STATIC_INIT(components) { g_events = IL_NEW(); g_components = IL_NEW(); }
 
-/** Components always interpolate from the previous state */
 #define COMPONENT(com) \
 	void com_##com##_interpolate(entity it, float a); \
 	.bool com_##com
 
 #define FOREACH_COMPONENT(com, body) IL_EACH(g_components, it.com_##com, body)
-
 
 #define EVENT(T, args) .bool evt_##T##_listener; .void args evt_##T
 
@@ -26,11 +24,6 @@ STATIC_INIT(components) { g_events = IL_NEW(); g_components = IL_NEW(); }
 	IL_PUSH(g_events, listener); \
 	MACRO_END
 
-
-/**
- * framelimit 0 is no limit, interpolation does not apply
- * framerate below minfps will result in less than 100% speed
- */
 #define SYSTEM(sys, frameLimit, minfps) \
 	void sys_##sys##_update(entity this, float dt); \
 	noref float autocvar_xon_sys_##sys##_dt = ((frameLimit) ? (1 / (frameLimit)) : 0); \

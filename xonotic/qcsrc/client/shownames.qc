@@ -10,15 +10,6 @@
 #include <common/teams.qh>
 #include <lib/csqcmodel/cl_model.qh>
 
-// this.isactive = player is in range and coordinates/status (health and armor) are up to date
-// this.origin = player origin
-// this.healthvalue
-// this.armorvalue
-// this.sameteam = player is on same team as local client
-// this.fadedelay = time to wait before name tag starts fading in for enemies
-// this.pointtime = last time you pointed at this player
-// this.csqcmodel_isdead = value of csqcmodel_isdead to know when the player is dead or not
-
 LinkedList shownames_ent;
 STATIC_INIT(shownames_ent)
 {
@@ -31,7 +22,6 @@ STATIC_INIT(shownames_ent)
 	}
 }
 
-// used by the antioverlap code
 .vector box_ofs;
 .vector box_org;
 
@@ -39,7 +29,7 @@ const float SHOWNAMES_FADESPEED = 4;
 const float SHOWNAMES_FADEDELAY = 0;
 void Draw_ShowNames(entity this)
 {
-	if (this.sv_entnum == current_player + 1) // self or spectatee
+	if (this.sv_entnum == current_player + 1)
 	{
 		if (!autocvar_chase_active)
 			return;
@@ -62,7 +52,7 @@ void Draw_ShowNames(entity this)
 		traceline(view_origin, this.origin, MOVE_NOMONSTERS, this);
 		hit = !(trace_fraction < 1 && (trace_networkentity != this.sv_entnum && trace_ent.entnum != this.sv_entnum));
 	}
-	// handle tag fading
+
 	int overlap = -1;
 	vector o = project_3d_to_2d(this.origin + eZ * autocvar_hud_shownames_offset);
 	if (autocvar_hud_shownames_crosshairdistance)
@@ -77,11 +67,10 @@ void Draw_ShowNames(entity this)
 			overlap = 0;
 	}
 
-	// o.z is < 0 when o is behind me
 	#define OFF_SCREEN(o) (o.z < 0 || o.x < 0 || o.y < 0 || o.x > vid_conwidth || o.y > vid_conheight)
 	if (overlap == -1 && autocvar_hud_shownames_antioverlap)
 	{
-		// fade tag out if another tag that is closer to you overlaps
+
 		entity entcs = NULL;
 		LL_EACH(shownames_ent, it != this, {
 			entcs = entcs_receiver(i);
@@ -99,20 +88,20 @@ void Draw_ShowNames(entity this)
 		});
 	}
 	if (!this.fadedelay) this.fadedelay = time + SHOWNAMES_FADEDELAY;
-	if (this.csqcmodel_isdead) // dead player, fade out slowly
+	if (this.csqcmodel_isdead)
 	{
 		this.alpha = max(0, this.alpha - SHOWNAMES_FADESPEED * 0.25 * frametime);
 	}
-	else if (!this.sameteam && !hit) // view blocked, fade out
+	else if (!this.sameteam && !hit)
 	{
 		this.alpha = max(0, this.alpha - SHOWNAMES_FADESPEED * frametime);
-		this.fadedelay = 0; // reset fade in delay, enemy has left the view
+		this.fadedelay = 0;
 	}
-	else if (OFF_SCREEN(o)) // out of view, fade out
+	else if (OFF_SCREEN(o))
 	{
 		this.alpha = max(0, this.alpha - SHOWNAMES_FADESPEED * frametime);
 	}
-	else if (overlap > 0) // tag overlap detected, fade out
+	else if (overlap > 0)
 	{
 		float minalpha = autocvar_hud_shownames_antioverlap_minalpha;
 		if (this.alpha >= minalpha)
@@ -120,11 +109,11 @@ void Draw_ShowNames(entity this)
 		else
 			this.alpha = min(minalpha, this.alpha + SHOWNAMES_FADESPEED * frametime);
 	}
-	else if (this.sameteam)  // fade in for team mates
+	else if (this.sameteam)
 	{
 		this.alpha = min(1, this.alpha + SHOWNAMES_FADESPEED * frametime);
 	}
-	else if (time > this.fadedelay || this.alpha > 0)  // fade in for enemies
+	else if (time > this.fadedelay || this.alpha > 0)
 	{
 		this.alpha = min(1, this.alpha + SHOWNAMES_FADESPEED * frametime);
 	}
@@ -138,7 +127,7 @@ void Draw_ShowNames(entity this)
 	}
 	if (MUTATOR_CALLHOOK(ShowNames_Draw, this, a)) return;
 	a = M_ARGV(1, float);
-	float dist = -1; // dist will be calculated only when really needed to avoid wasting a vlen call
+	float dist = -1;
 	if (autocvar_hud_shownames_maxdistance)
 	{
 		float max_dist = min(autocvar_hud_shownames_maxdistance, max_shot_distance);
@@ -160,7 +149,7 @@ void Draw_ShowNames(entity this)
 	float resize = 1;
 	if (autocvar_hud_shownames_resize && vdist(this.origin - view_origin, >=, autocvar_hud_shownames_mindistance))
 	{
-		// limit resize so its never smaller than 0.5... gets unreadable
+
 		float f = autocvar_hud_shownames_maxdistance - autocvar_hud_shownames_mindistance;
 		if (dist == -1)
 			dist = vlen(this.origin - view_origin);
@@ -182,11 +171,9 @@ void Draw_ShowNames(entity this)
 		vector pos = myPos + eY * autocvar_hud_shownames_fontsize * resize;
 		vector sz = vec2(0.5 * mySize.x, resize * autocvar_hud_shownames_statusbar_height);
 
-		this.box_ofs.x = max(mySize.x / 2, sz.x); // sz.x is already half as wide
+		this.box_ofs.x = max(mySize.x / 2, sz.x);
 		this.box_ofs.y += sz.y / 2;
 		this.box_org.y = myPos.y + (mySize.y + sz.y) / 2;
-		// antioverlap debug code
-		//drawfill(this.box_org - this.box_ofs, this.box_ofs * 2, '1 1 1', a / 2, DRAWFLAG_NORMAL);
 
 		if (autocvar_hud_shownames_statusbar_highlight)
 			drawfill(pos + eX * 0.25 * mySize.x, sz, '0.7 0.7 0.7', a / 2, DRAWFLAG_NORMAL);
@@ -203,8 +190,6 @@ void Draw_ShowNames(entity this)
 				DRAWFLAG_NORMAL);
 		}
 	}
-	// antioverlap debug code
-	//else drawfill(this.box_org - this.box_ofs, this.box_ofs * 2, '1 1 1', a / 2, DRAWFLAG_NORMAL);
 
 	string s = entcs_GetName(this.sv_entnum - 1);
 	if ((autocvar_hud_shownames_decolorize == 1 && teamplay) || autocvar_hud_shownames_decolorize == 2)

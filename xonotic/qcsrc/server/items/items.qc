@@ -39,7 +39,6 @@ bool ItemSend(entity this, entity to, int sf)
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_ITEM);
 	WriteByte(MSG_ENTITY, sf);
 
-	//WriteByte(MSG_ENTITY, this.cnt);
 	if(sf & ISF_LOCATION)
 	{
 		WriteVector(MSG_ENTITY, this.origin);
@@ -49,9 +48,6 @@ bool ItemSend(entity this, entity to, int sf)
 	{
 		WriteAngleVector(MSG_ENTITY, this.angles);
 	}
-
-	// sets size on the client, unused on server
-	//if(sf & ISF_SIZE)
 
 	if(sf & ISF_STATUS)
 		WriteByte(MSG_ENTITY, this.ItemStatus);
@@ -114,7 +110,7 @@ bool have_pickup_item(entity this)
 		if(autocvar_g_pickup_items == 0)
 			return false;
 		if(g_weaponarena)
-			if(STAT(WEAPONS, this) || this.itemdef.instanceOfAmmo) // no item or ammo pickups in weaponarena
+			if(STAT(WEAPONS, this) || this.itemdef.instanceOfAmmo)
 				return false;
 	}
 	return true;
@@ -127,7 +123,7 @@ void Item_Show(entity e, int mode)
 	entity def = e.itemdef;
 	if (mode > 0)
 	{
-		// make the item look normal, and be touchable
+
 		e.model = e.mdl;
 		e.solid = SOLID_TRIGGER;
 		e.spawnshieldtime = 1;
@@ -135,7 +131,7 @@ void Item_Show(entity e, int mode)
 	}
 	else if (mode < 0)
 	{
-		// hide the item completely
+
 		e.model = string_null;
 		e.solid = SOLID_NOT;
 		e.spawnshieldtime = 1;
@@ -143,16 +139,16 @@ void Item_Show(entity e, int mode)
 	}
 	else
 	{
-		bool nostay = def.instanceOfWeaponPickup ? !!(def.m_weapon.m_wepset & WEPSET_SUPERWEAPONS) : false // no weapon-stay on superweapons
-			|| e.team // weapon stay isn't supported for teamed weapons
+		bool nostay = def.instanceOfWeaponPickup ? !!(def.m_weapon.m_wepset & WEPSET_SUPERWEAPONS) : false
+			|| e.team
 			;
 		if(def.instanceOfWeaponPickup && !nostay && g_weapon_stay)
 		{
-			// make the item translucent and not touchable
+
 			e.model = e.mdl;
-			e.solid = SOLID_TRIGGER; // can STILL be picked up!
+			e.solid = SOLID_TRIGGER;
 			e.effects |= EF_STARDUST;
-			e.spawnshieldtime = 0; // field indicates whether picking it up may give you anything other than the weapon
+			e.spawnshieldtime = 0;
 			e.ItemStatus |= (ITS_AVAILABLE | ITS_STAYWEP);
 		}
 		else
@@ -177,7 +173,6 @@ void Item_Show(entity e, int mode)
 	if (autocvar_sv_simple_items)
 		e.ItemStatus |= ITS_ALLOWSI;
 
-	// relink entity (because solid may have changed)
 	setorigin(e, e.origin);
 	e.SendFlags |= ISF_STATUS;
 }
@@ -187,10 +182,10 @@ void Item_Think(entity this)
 	if (Item_IsLoot(this))
 	{
 		if (time < this.wait - IT_DESPAWNFX_TIME)
-			this.nextthink = min(time + IT_UPDATE_INTERVAL, this.wait - IT_DESPAWNFX_TIME); // ensuring full time for effects
+			this.nextthink = min(time + IT_UPDATE_INTERVAL, this.wait - IT_DESPAWNFX_TIME);
 		else
 		{
-			// despawning soon, start effects
+
 			this.ItemStatus |= ITS_EXPIRING;
 			this.SendFlags |= ISF_STATUS;
 			if (time < this.wait - IT_UPDATE_INTERVAL)
@@ -205,19 +200,14 @@ void Item_Think(entity this)
 		if (this.itemdef.instanceOfPowerup)
 			powerups_DropItem_Think(this);
 
-		// caution: kludge FIXME (with sv_legacy_bbox_expand)
-		// this works around prediction errors caused by bbox discrepancy between SVQC and CSQC
 		if (this.velocity == '0 0 0' && IS_ONGROUND(this))
-			this.gravity = 0; // don't send ISF_DROP anymore
+			this.gravity = 0;
 
-		// send slow updates even if the item didn't move
-		// recovers prediction desyncs where server thinks item stopped, client thinks it didn't
 		ItemUpdate(this);
 	}
 	else
 	{
-		// bones_was_here: TODO: predict movers, enable client prediction of items with a groundentity,
-		// and then send those less often too (and not all on the same frame)
+
 		this.nextthink = time;
 
 		if(this.origin != this.oldorigin)
@@ -234,7 +224,7 @@ void Item_ItemsTime_SetTimesForAllPlayers();
 void Item_Respawn(entity this)
 {
 	Item_Show(this, 1);
-	sound(this, CH_TRIGGER, this.itemdef.m_respawnsound, VOL_BASE, ATTEN_NORM);	// play respawn sound
+	sound(this, CH_TRIGGER, this.itemdef.m_respawnsound, VOL_BASE, ATTEN_NORM);
 
 	if (Item_ItemsTime_Allow(this.itemdef) || (STAT(WEAPONS, this) & WEPSET_SUPERWEAPONS))
 	{
@@ -295,12 +285,12 @@ void Item_RespawnCountdown(entity this)
 				if(this.waypointsprite_attached.waypointsprite_visible_for_player(this.waypointsprite_attached, it, it))
 				{
 					msg_entity = it;
-					soundto(MSG_ONE, this, CH_TRIGGER, SND(ITEMRESPAWNCOUNTDOWN), VOL_BASE, ATTEN_NORM, 0);	// play respawn sound
+					soundto(MSG_ONE, this, CH_TRIGGER, SND(ITEMRESPAWNCOUNTDOWN), VOL_BASE, ATTEN_NORM, 0);
 				}
 			});
 
 			WaypointSprite_Ping(this.waypointsprite_attached);
-			//WaypointSprite_UpdateHealth(this.waypointsprite_attached, this.item_respawncounter);
+
 		}
 	}
 }
@@ -317,7 +307,7 @@ void Item_RespawnThink(entity this)
 
 void Item_ScheduleRespawnIn(entity e, float t)
 {
-	// if the respawn time is longer than 10 seconds, show a waypoint, otherwise, just respawn normally
+
 	if ((Item_ItemsTime_Allow(e.itemdef) || (STAT(WEAPONS, e) & WEPSET_SUPERWEAPONS) || MUTATOR_CALLHOOK(Item_ScheduleRespawn, e, t)) && (t - ITEM_RESPAWN_TICKS) > 0)
 	{
 		setthink(e, Item_RespawnCountdown);
@@ -351,7 +341,6 @@ AUTOCVAR(g_pickup_respawntime_scaling_reciprocal, float, 0.0, "Multiply respawn 
 AUTOCVAR(g_pickup_respawntime_scaling_offset, float, 0.0, "Multiply respawn time by `reciprocal / (p + offset) + linear` where `p` is the current number of players, takes effect with 2 or more players present, `offset` offsets the curve left or right - the results are not intuitive and I recommend plotting the respawn time and the number of items per player to see what's happening");
 AUTOCVAR(g_pickup_respawntime_scaling_linear, float, 1.0, "Multiply respawn time by `reciprocal / (p + offset) + linear` where `p` is the current number of players, takes effect with 2 or more players present, `linear` can be used to simply scale the respawn time linearly");
 
-/// Adjust respawn time according to the number of players.
 float adjust_respawntime(float normal_respawntime) {
 	float r = autocvar_g_pickup_respawntime_scaling_reciprocal;
 	float o = autocvar_g_pickup_respawntime_scaling_offset;
@@ -387,13 +376,11 @@ void Item_ScheduleRespawn(entity e)
 		Item_Show(e, 0);
 
 		float adjusted_respawntime = adjust_respawntime(e.respawntime);
-		//LOG_INFOF("item %s will respawn in %f", e.classname, adjusted_respawntime);
 
-		// range: adjusted_respawntime - respawntimejitter .. adjusted_respawntime + respawntimejitter
 		float respawn_in = adjusted_respawntime + crandom() * e.respawntimejitter;
 		Item_ScheduleRespawnIn(e, respawn_in);
 	}
-	else // if respawntime is -1, this item does not respawn
+	else
 		Item_Show(e, -1);
 }
 
@@ -407,7 +394,7 @@ void Item_ScheduleInitialRespawn(entity e)
 	float spawn_in;
 	if (autocvar_g_pickup_respawntime_initial_random == 0)
 	{
-		// range: respawntime .. respawntime + respawntimejitter
+
 		spawn_in = e.respawntime + random() * e.respawntimejitter;
 	}
 	else
@@ -416,8 +403,7 @@ void Item_ScheduleInitialRespawn(entity e)
 		if (autocvar_g_pickup_respawntime_initial_random == 1)
 		{
 			static float shared_random = 0;
-			// NOTE this code works only if items are scheduled at the same time (normal case)
-			// NOTE2 random() can't return exactly 1 so this check always work as intended
+
 			if (!shared_random || floor(time) > shared_random)
 				shared_random = floor(time) + random();
 			rnd = shared_random - floor(time);
@@ -425,10 +411,6 @@ void Item_ScheduleInitialRespawn(entity e)
 		else
 			rnd = random();
 
-		// range:
-		// if respawntime >= ITEM_RESPAWN_TICKS: ITEM_RESPAWN_TICKS .. respawntime + respawntimejitter
-		// else: 0 .. ITEM_RESPAWN_TICKS
-		// this is to prevent powerups spawning unexpectedly without waypoints
 		spawn_in = ITEM_RESPAWN_TICKS + rnd * (e.respawntime + e.respawntimejitter - ITEM_RESPAWN_TICKS);
 	}
 
@@ -452,7 +434,7 @@ void GiveRandomWeapons(entity receiver, int num_weapons, string weapon_names,
 			string weapon = argv(weapon_index);
 			FOREACH(Weapons, it != WEP_Null,
 			{
-				// Finding a weapon which player doesn't have.
+
 				if (!(STAT(WEAPONS, receiver) & it.m_wepset) && (it.netname == weapon))
 				{
 					RandomSelection_AddEnt(it, 1, 1);
@@ -519,11 +501,8 @@ void Item_NotifyWeapon(entity player, int wep)
 
 bool Item_GiveTo(entity item, entity player)
 {
-	// if nothing happens to player, just return without taking the item
+
 	int _switchweapon = 0;
-	// in case the player has autoswitch enabled do the following:
-	// if the player is using their best weapon before items are given, they
-	// probably want to switch to an even better weapon after items are given
 
 	if(CS_CVAR(player).cvar_cl_autoswitch)
 	{
@@ -589,8 +568,7 @@ bool Item_GiveTo(entity item, entity player)
 	{
 		pickedup = true;
 		player.items |= its;
-		// TODO: we probably want to show a message in the console, but not this one!
-		//Send_Notification(NOTIF_ONE, player, MSG_INFO, INFO_ITEM_WEAPON_GOT, item.netname);
+
 	}
 
 	if (item.strength_finished)
@@ -639,14 +617,12 @@ bool Item_GiveTo(entity item, entity player)
 		StatusEffects_apply(STATUSEFFECT_Superweapons, player, max(StatusEffects_gettime(STATUSEFFECT_Superweapons, player), time) + item.superweapons_finished, 0);
 	}
 
-	// always eat teamed entities
 	if(item.team)
 		pickedup = true;
 
 	if (!pickedup)
 		return false;
 
-	// crude hack to enforce switching weapons
 	if(g_cts && item.itemdef.instanceOfWeaponPickup && !CS_CVAR(player).cvar_cl_cts_noautoswitch)
 	{
 		for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
@@ -674,7 +650,7 @@ bool Item_GiveTo(entity item, entity player)
 
 void Item_Touch(entity this, entity toucher)
 {
-	// remove the item if it's currnetly in a NODROP brush or hits a NOIMPACT surface (such as sky)
+
 	if (Item_IsLoot(this))
 	{
 		if (ITEM_TOUCH_NEEDKILL())
@@ -713,7 +689,7 @@ void Item_Touch(entity this, entity toucher)
 	{
 		if (Item_IsExpiring(this))
 		{
-			// undo what we did above
+
 			this.strength_finished += time;
 			this.invincible_finished += time;
 			this.speed_finished += time;
@@ -725,7 +701,7 @@ void Item_Touch(entity this, entity toucher)
 
 LABEL(pickup)
 
-	if(this.target && this.target != "" && this.target != "###item###") // defrag support
+	if(this.target && this.target != "" && this.target != "###item###")
 		SUB_UseTargets(this, toucher, NULL);
 
 	STAT(LAST_PICKUP, toucher) = time;
@@ -755,7 +731,7 @@ LABEL(pickup)
 		RandomSelection_Init();
 		IL_EACH(g_items, it.team == this.team,
 		{
-			if (it.itemdef) // is a registered item
+			if (it.itemdef)
 			{
 				Item_Show(it, -1);
 				it.scheduledrespawntime = 0;
@@ -763,7 +739,7 @@ LABEL(pickup)
 			}
 		});
 		e = RandomSelection_chosen_ent;
-		Item_Show(e, 1); // reset its state so it is visible (extra sendflags doesn't matter, this happens anyway)
+		Item_Show(e, 1);
 	}
 	else
 		e = this;
@@ -784,7 +760,7 @@ void Item_Reset(entity this)
 	{
 		WaypointSprite_Kill(this.waypointsprite_attached);
 	}
-	if (this.itemdef.instanceOfPowerup || (STAT(WEAPONS, this) & WEPSET_SUPERWEAPONS)) // do not spawn powerups initially!
+	if (this.itemdef.instanceOfPowerup || (STAT(WEAPONS, this) & WEPSET_SUPERWEAPONS))
 	{
 		Item_ScheduleInitialRespawn(this);
 	}
@@ -792,14 +768,14 @@ void Item_Reset(entity this)
 
 void Item_FindTeam(entity this)
 {
-	if(!(this.effects & EF_NOGUNBOB)) // marker for item team search
+	if(!(this.effects & EF_NOGUNBOB))
 		return;
 
 	LOG_TRACE("Initializing item team ", ftos(this.team));
 	RandomSelection_Init();
 	IL_EACH(g_items, it.team == this.team,
 	{
-		if(it.itemdef) // is a registered item
+		if(it.itemdef)
 			RandomSelection_AddEnt(it, it.cnt, 0);
 	});
 
@@ -809,19 +785,18 @@ void Item_FindTeam(entity this)
 
 	IL_EACH(g_items, it.team == this.team,
 	{
-		if(it.itemdef) // is a registered item
+		if(it.itemdef)
 		{
 			if(it != e)
 			{
-				Item_Show(it, -1); // make it non-spawned
+				Item_Show(it, -1);
 				if (it.waypointsprite_attached)
 					WaypointSprite_Kill(it.waypointsprite_attached);
-				it.nextthink = 0; // disable any scheduled powerup spawn
+				it.nextthink = 0;
 			}
 			else
 				Item_Reset(it);
 
-			// leave 'this' marked so Item_FindTeam() works when called again via this.reset
 			if(it != this)
 				it.effects &= ~EF_NOGUNBOB;
 		}
@@ -836,12 +811,9 @@ void Item_CopyFields(entity this, entity to)
 	to.cnt = this.cnt;
 	to.team = this.team;
 	to.spawnfunc_checked = true;
-	// TODO: copy respawn times? this may not be desirable in some cases
-	//to.respawntime = this.respawntime;
-	//to.respawntimejitter = this.respawntimejitter;
+
 }
 
-// Savage: used for item garbage-collection
 void RemoveItem(entity this)
 {
 	if(wasfreed(this) || !this) { return; }
@@ -850,23 +822,19 @@ void RemoveItem(entity this)
 	delete(this);
 }
 
-// pickup evaluation functions
-// these functions decide how desirable an item is to the bots
-
 float generic_pickupevalfunc(entity player, entity item) {return item.bot_pickupbasevalue;}
 
 float weapon_pickupevalfunc(entity player, entity item)
 {
-	// See if I have it already
+
 	if(STAT(WEAPONS, player) & STAT(WEAPONS, item))
 	{
-		// If I can pick it up
+
 		if(!item.spawnshieldtime)
 			return 0;
 		return ammo_pickupevalfunc(player, item);
 	}
 
-	// reduce weapon value if bot already got a good arsenal
 	float c = 1;
 	int weapons_value = 0;
 	FOREACH(Weapons, it != WEP_Null && (STAT(WEAPONS, player) & it.m_wepset), {
@@ -879,12 +847,11 @@ float weapon_pickupevalfunc(entity player, entity item)
 
 float ammo_pickupevalfunc(entity player, entity item)
 {
-	entity item_resource = NULL; // pointer to the resource that may be associated with the given item
+	entity item_resource = NULL;
 	entity wpn = NULL;
 	float c = 0;
 	float rating = 0;
 
-	// detect needed ammo
 	if(item.itemdef.instanceOfWeaponPickup)
 	{
 		entity res = item.itemdef.m_weapon.ammo_type;
@@ -957,12 +924,10 @@ void Item_Damage(entity this, entity inflictor, entity attacker, float damage, i
 
 void item_use(entity this, entity actor, entity trigger)
 {
-	// use the touch function to handle collection
+
 	gettouch(this)(this, actor);
 }
 
-// if defaultrespawntime is 0 get respawntime from the item definition
-// if defaultrespawntimejitter is 0 get respawntimejitter from the item definition
 void _StartItem(entity this, entity def, float defaultrespawntime, float defaultrespawntimejitter)
 {
 	string itemname = def.m_name;
@@ -987,7 +952,6 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 	int weaponid = def.instanceOfWeaponPickup ? def.m_weapon.m_id : 0;
 	this.weapon = weaponid;
 
-	// bones_was_here TODO: implement sv_cullentities_dist and replace g_items_maxdist with it
 	if(!this.fade_end)
 		this.fade_end = autocvar_g_items_maxdist;
 
@@ -997,7 +961,7 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 	this.flags = FL_ITEM | def.m_itemflags;
 	IL_PUSH(g_items, this);
 
-	if(MUTATOR_CALLHOOK(FilterItem, this)) // error means we do not want the item
+	if(MUTATOR_CALLHOOK(FilterItem, this))
 	{
 		startitem_failed = true;
 		delete(this);
@@ -1005,8 +969,8 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 	}
 
 	this.mdl = this.model ? this.model : strzone(this.item_model_ent.model_str());
-	setmodel(this, MDL_Null); // precision set below
-	// set item size before we spawn a waypoint or droptofloor or MoveOutOfSolid
+	setmodel(this, MDL_Null);
+
 	setsize (this, this.pos1 = def.m_mins, this.pos2 = def.m_maxs);
 
 	if (Item_IsLoot(this))
@@ -1020,22 +984,18 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 		this.nextthink = time + IT_UPDATE_INTERVAL;
 		this.wait = time + autocvar_g_items_dropped_lifetime;
 
-		this.owner = NULL; // anyone can pick this up, including the player who threw it
-		this.item_spawnshieldtime = time + 0.5; // but not straight away
+		this.owner = NULL;
+		this.item_spawnshieldtime = time + 0.5;
 
 		this.takedamage = DAMAGE_YES;
 		this.event_damage = Item_Damage;
-		// enable this to have thrown items burn in lava
-		//this.damagedbycontents = true;
-		//IL_PUSH(g_damagedbycontents, this);
 
 		if (Item_IsExpiring(this))
 		{
-			// if item is worthless after a timer, have it expire then
+
 			this.nextthink = max(this.strength_finished, this.invincible_finished, this.superweapons_finished);
 		}
 
-		// don't drop if in a NODROP zone (such as lava)
 		traceline(this.origin, this.origin, MOVE_NORMAL, this);
 		if (trace_dpstartcontents & DPCONTENTS_NODROP)
 		{
@@ -1048,7 +1008,6 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 	{
 		this.reset = Item_Reset;
 
-		// must be done after def.m_iteminit() as that may set ITEM_FLAG_MUTATORBLOCKED
 		if(!have_pickup_item(this))
 		{
 			startitem_failed = true;
@@ -1056,8 +1015,7 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 			return;
 		}
 
-		// must be done before Item_Reset() and after MUTATORBLOCKED check (blocked items may have null func ptrs)
-		if(!this.respawntime) // both need to be set
+		if(!this.respawntime)
 		{
 			this.respawntime = defaultrespawntime ? defaultrespawntime : def.m_respawntime();
 			this.respawntimejitter = defaultrespawntimejitter ? defaultrespawntimejitter : def.m_respawntimejitter();
@@ -1069,48 +1027,33 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 		if(q3compat && !this.team)
 		{
 			string t = GetField_fullspawndata(this, "team");
-			// bones_was_here: this hack is cheaper than changing to a .string strcmp()
+
 			if(t) this.team = crc16(false, t);
 		}
 
-		// it's a level item
 		if(this.spawnflags & 1)
 			this.noalign = 1;
 		if (this.noalign > 0)
 			set_movetype(this, MOVETYPE_NONE);
 		else
 			set_movetype(this, MOVETYPE_TOSS);
-		// do item filtering according to game mode and other things
+
 		if (this.noalign <= 0)
 		{
-			// first nudge it off the floor a little bit to avoid math errors
+
 			setorigin(this, this.origin + '0 0 1');
-			// note droptofloor returns false if stuck/or would fall too far
+
 			if (!this.noalign)
 				droptofloor(this);
 			waypoint_spawnforitem(this);
 		}
-
-		/*
-		 * can't do it that way, as it would break maps
-		 * TODO make a target_give like entity another way, that perhaps has
-		 * the weapon name in a key
-		if(this.targetname)
-		{
-			// target_give not yet supported; maybe later
-			print("removed targeted ", this.classname, "\n");
-			startitem_failed = true;
-			delete(this);
-			return;
-		}
-		*/
 
 		if(this.targetname != "" && (this.spawnflags & 16))
 			this.use = item_use;
 
 		if(autocvar_spawn_debug >= 2)
 		{
-			// why not flags & fl_item?
+
 			FOREACH_ENTITY_RADIUS(this.origin, 3, it.is_item, {
 				LOG_TRACE("XXX Found duplicated item: ", itemname, vtos(this.origin));
 				LOG_TRACE(" vs ", it.netname, vtos(it.origin));
@@ -1129,7 +1072,7 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 		)
 		{
 			if(!this.target || this.target == "")
-				this.target = "###item###"; // for finding the nearest item using findnearest
+				this.target = "###item###";
 		}
 
 		Item_ItemsTime_SetTime(this, 0);
@@ -1142,9 +1085,7 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 	this.bot_pickupbasevalue = pickupbasevalue;
 	this.netname = itemname;
 	settouch(this, Item_Touch);
-	//this.effects |= EF_LOWPRECISION;
 
-	// support skinned models for powerups
 	if(!this.skin)
 		this.skin = def.m_skin;
 
@@ -1158,8 +1099,8 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 
 	if(def.instanceOfWeaponPickup)
 	{
-		if (!Item_IsLoot(this)) // if dropped, colormap is already set up nicely
-			this.colormap = 1024; // color shirt=0 pants=0 grey
+		if (!Item_IsLoot(this))
+			this.colormap = 1024;
 		if (!(this.spawnflags & 1024))
 			this.ItemStatus |= ITS_ANIMATE1;
 		this.SendFlags |= ISF_COLORMAP;
@@ -1169,9 +1110,9 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 	if(this.team)
 	{
 		if(!this.cnt)
-			this.cnt = 1; // item probability weight
+			this.cnt = 1;
 
-		this.effects |= EF_NOGUNBOB; // marker for item team search
+		this.effects |= EF_NOGUNBOB;
 		InitializeEntity(this, Item_FindTeam, INITPRIO_FINDTARGET);
 		this.reset = Item_FindTeam;
 	}
@@ -1180,7 +1121,6 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 
 	Net_LinkEntity(this, !(def.instanceOfPowerup || def.instanceOfHealth || def.instanceOfArmor), 0, ItemSend);
 
-	// call this hook after everything else has been done
 	if (MUTATOR_CALLHOOK(Item_Spawn, this))
 	{
 		startitem_failed = true;
@@ -1188,9 +1128,6 @@ void _StartItem(entity this, entity def, float defaultrespawntime, float default
 		return;
 	}
 
-	// we should be sure this item will spawn before loading its assets
-	// CSQC handles model precaching: it may not use this model (eg simple items) and may not have connected yet
-	//precache_model(this.mdl);
 	precache_sound(this.item_pickupsound);
 
 	setItemGroup(this);
@@ -1225,14 +1162,14 @@ void setItemGroup(entity this)
 			}
 			this.item_group = it.item_group;
 		}
-		else // spawning item is already part of a item_group X
+		else
 		{
 			if(!it.item_group)
 				it.item_group = this.item_group;
-			else if(it.item_group != this.item_group) // found an item near the spawning item that is part of a different item_group Y
+			else if(it.item_group != this.item_group)
 			{
 				int grY = it.item_group;
-				// move all items of item_group Y to item_group X
+
 				IL_EACH(g_items, IS_SMALL(it.itemdef),
 				{
 					if(it.item_group == grY)
@@ -1304,7 +1241,7 @@ spawnfunc(target_items)
 	{
 		for(int j = 0; j < n; ++j)
 		{
-			// this is from a time when unlimited superweapons were handled together with ammo in some parts of the code
+
 			if     (argv(j) == "unlimited_ammo")         this.items |= IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS;
 			else if(argv(j) == "unlimited_weapon_ammo")  this.items |= IT_UNLIMITED_AMMO;
 			else if(argv(j) == "unlimited_superweapons") this.items |= IT_UNLIMITED_SUPERWEAPONS;
@@ -1458,12 +1395,12 @@ bool GiveBuff(entity e, Buff thebuff, int op, int val)
 	}
 	if(new_buff_time <= 0)
 	{
-		if(had_buff) // only trigger removal mechanics if there is an effect to remove!
+		if(had_buff)
 			StatusEffects_remove(thebuff, e, STATUSEFFECT_REMOVE_NORMAL);
 	}
 	else
 	{
-		buff_RemoveAll(e, STATUSEFFECT_REMOVE_CLEAR); // clear old buffs on the player first!
+		buff_RemoveAll(e, STATUSEFFECT_REMOVE_CLEAR);
 		StatusEffects_apply(thebuff, e, new_buff_time, 0);
 	}
 	bool have_buff = StatusEffects_active(thebuff, e);
@@ -1499,7 +1436,7 @@ bool GiveResourceValue(entity e, Resource res_type, int op, int val)
 	float new_val = 0;
 	switch (op)
 	{
-		// min 100 cells = at least 100 cells
+
 		case OP_SET: new_val = val; break;
 		case OP_MIN: new_val = max(v0, val); break;
 		case OP_MAX: new_val = min(v0, val); break;
@@ -1534,7 +1471,7 @@ bool GiveStatusEffect(entity e, StatusEffects this, int op, float val)
 	}
 	if(new_eff_time <= 0)
 	{
-		if(had_eff) // only trigger removal mechanics if there is an effect to remove!
+		if(had_eff)
 			StatusEffects_remove(this, e, STATUSEFFECT_REMOVE_NORMAL);
 	}
 	else
@@ -1580,7 +1517,7 @@ float GiveItems(entity e, float beginarg, float endarg)
 	PREGIVE_STATUSEFFECT(e, STATUSEFFECT_Shield);
 	PREGIVE_STATUSEFFECT(e, STATUSEFFECT_Speed);
 	PREGIVE_STATUSEFFECT(e, STATUSEFFECT_Invisibility);
-	//PREGIVE_STATUSEFFECT(e, STATUSEFFECT_Superweapons);
+
 	PREGIVE_RESOURCE(e, RES_BULLETS);
 	PREGIVE_RESOURCE(e, RES_CELLS);
 	PREGIVE_RESOURCE(e, RES_PLASMA);
@@ -1627,8 +1564,7 @@ float GiveItems(entity e, float beginarg, float endarg)
 				got += GiveResourceValue(e, RES_ARMOR, op, val);
 			case "allweapons":
 				FOREACH(Weapons, it != WEP_Null && !(it.spawnflags & (WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_SPECIALATTACK)), got += GiveWeapon(e, it.m_id, op, val));
-			//case "allbuffs": // all buffs makes a player god, do not want!
-				//FOREACH(StatusEffect, it.instanceOfBuff, got += GiveBuff(e, it, op, val));
+
 			case "allammo":
 				got += GiveResourceValue(e, RES_CELLS, op, val);
 				got += GiveResourceValue(e, RES_PLASMA, op, val);
@@ -1638,7 +1574,7 @@ float GiveItems(entity e, float beginarg, float endarg)
 				got += GiveResourceValue(e, RES_FUEL, op, val);
 				break;
 			case "unlimited_ammo":
-				// this is from a time when unlimited superweapons were handled together with ammo in some parts of the code
+
 				got += GiveBit(e, items, IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS, op, val);
 				break;
 			case "unlimited_weapon_ammo":
@@ -1748,7 +1684,7 @@ float GiveItems(entity e, float beginarg, float endarg)
 			else
 				e.statuseffects.statuseffect_time[it.m_id] += time;
 		});
-			
+
 		StatusEffects_update(e);
 	}
 

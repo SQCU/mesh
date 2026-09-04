@@ -8,22 +8,20 @@
 #include <common/sounds/sound.qh>
 #include <common/weapons/all.qh>
 
-// Operator for bold notifications
 #define BOLD_OPERATOR "^BOLD"
 
-/** main types/groups of notifications */
 ENUMCLASS(MSG)
-	/** "Global" AND "personal" announcer messages */
+
 	CASE(MSG, ANNCE)
-	/** "Global" information messages */
+
 	CASE(MSG, INFO)
-	/** "Personal" centerprint messages */
+
 	CASE(MSG, CENTER)
-	/** Subcall MSG_INFO and/or MSG_CENTER notifications */
+
 	CASE(MSG, MULTI)
-	/** Choose which subcall wrapper to activate */
+
 	CASE(MSG, CHOICE)
-	/** Kill centerprint message @deprecated */
+
 	CASE(MSG, CENTER_KILL)
 ENUMCLASS_END(MSG)
 
@@ -74,14 +72,13 @@ ENUMCLASS(CPID)
 	CASE(CPID, TIMEIN)
 	CASE(CPID, VEHICLES)
 	CASE(CPID, VEHICLES_OTHER)
-	/** always last */
+
 	CASE(CPID, LAST)
 ENUMCLASS_END(CPID)
 
 USING(Notification, entity);
 
-// used for notification system multi-team identifiers
-#define APP_TEAM_NUM(num, prefix) ((num == NUM_TEAM_1) ? prefix##_RED : ((num == NUM_TEAM_2) ? prefix##_BLUE : ((num == NUM_TEAM_3) ? prefix##_YELLOW : prefix##_PINK)))
+#define APP_TEAM_NUM(num, prefix) ((num == NUM_TEAM_1) ? prefix##_RED : ((num == NUM_TEAM_2) ? prefix##_BLUE : ((num == NUM_TEAM_3) ? prefix##_YELLOW : ((num == NUM_TEAM_4) ? prefix##_PINK : prefix##_GREEN))))
 #define APP_NUM(num, prefix) ((num) ? APP_TEAM_NUM(num, prefix) : prefix##_NEUTRAL)
 
 #define EIGHT_VARS_TO_VARARGS_VARLIST \
@@ -120,7 +117,7 @@ void Create_Notification_Entity(entity notif,
 void Create_Notification_Entity_Annce(entity notif,
 										float var_cvar,
 										string namestring,
-										/* MSG_ANNCE */
+
 										float channel,
 										string snd,
 										float vol,
@@ -132,7 +129,7 @@ void Create_Notification_Entity_InfoCenter(entity notif,
 											string namestring,
 											int strnum,
 											int flnum,
-											/* MSG_INFO & MSG_CENTER */
+
 											string args,
 											string hudargs,
 											string icon,
@@ -144,7 +141,7 @@ void Create_Notification_Entity_InfoCenter(entity notif,
 void Create_Notification_Entity_Multi(entity notif,
 										float var_cvar,
 										string namestring,
-										/* MSG_MULTI */
+
 										Notification anncename,
 										Notification infoname,
 										Notification centername);
@@ -152,7 +149,7 @@ void Create_Notification_Entity_Multi(entity notif,
 void Create_Notification_Entity_Choice(entity notif,
 										float var_cvar,
 										string namestring,
-										/* MSG_CHOICE */
+
 										float challow_def,
 										float challow_var,
 										MSG chtype,
@@ -162,7 +159,7 @@ void Create_Notification_Entity_Choice(entity notif,
 void Dump_Notifications(int fh, bool alsoprint);
 
 #define DEFAULT_FILENAME "notifications_dump.cfg"
-// NOTE: dumpeffectinfo, dumpnotifs, dumpturrets and dumpweapons use similar code
+
 GENERIC_COMMAND(dumpnotifs, "Dump all notifications into " DEFAULT_FILENAME, false)
 {
 	switch (request)
@@ -224,7 +221,7 @@ void Debug_Notification(string input)
 #endif
 
 void Local_Notification(MSG net_type, Notification net_name, ...count);
-/** glue for networking, forwards to `Local_Notification` */
+
 void Local_Notification_WOVA(
 	MSG net_type, Notification net_name,
 	float stringcount, float floatcount,
@@ -243,17 +240,17 @@ STATIC_INIT(g_notifications) { g_notifications = IL_NEW(); }
 
 #ifdef SVQC
 ENUMCLASS(NOTIF)
-	/** send to one client and their spectators */
+
 	CASE(NOTIF, ONE)
-	/** send ONLY to one client */
+
 	CASE(NOTIF, ONE_ONLY)
-	/** send only to X team and their spectators */
+
 	CASE(NOTIF, TEAM)
-	/** send only to X team and their spectators, except for Y person and their spectators */
+
 	CASE(NOTIF, TEAM_EXCEPT)
-	/** send to everyone */
+
 	CASE(NOTIF, ALL)
-	/** send to everyone except X person and their spectators */
+
 	CASE(NOTIF, ALL_EXCEPT)
 ENUMCLASS_END(NOTIF)
 
@@ -292,19 +289,12 @@ void Send_Notification_WOCOVA(
 	float f1, float f2, float f3, float f4);
 #endif
 
-// ===========================
-//  Special CVAR Declarations
-// ===========================
-
-// MAKE SURE THIS IS ALWAYS SYNCHRONIZED WITH THE DUMP
-// NOTIFICATIONS FUNCTION IN THE .QC FILE!
-
 #define NOTIF_ADD_AUTOCVAR(name,defaultvalue) float autocvar_notification_##name = defaultvalue;
 
 float autocvar_notification_show_location = false;
-string autocvar_notification_show_location_string = ""; //_(" at the %s");
+string autocvar_notification_show_location_string = "";
 float autocvar_notification_show_sprees = true;
-float autocvar_notification_show_sprees_info = 3; // 0 = off, 1 = target only, 2 = attacker only, 3 = target and attacker
+float autocvar_notification_show_sprees_info = 3;
 float autocvar_notification_show_sprees_info_newline = true;
 float autocvar_notification_show_sprees_info_specialonly = true;
 float autocvar_notification_errors_are_fatal = true;
@@ -315,72 +305,15 @@ float autocvar_notification_lifetime_mapload = 10;
 
 #ifdef SVQC
 void Notification_GetCvars(entity this, entity store);
-float autocvar_notification_server_allows_location = 1; // 0 = no, 1 = yes
+float autocvar_notification_server_allows_location = 1;
 #else
 float autocvar_notification_item_centerprinttime = 1.5;
 
-// 0 = no, 1 = yes, 2 = forced on for all MSG_INFO notifs
-// DISABLED IN CODE, BUT ENABLED IN CONFIG FOR COMPATIBILITY WITH OLD CLIENTS
 float autocvar_notification_allow_chatboxprint = 0;
 
 float autocvar_notification_show_sprees_center = true;
 float autocvar_notification_show_sprees_center_specialonly = true;
 #endif
-
-
-// ============================
-//  Notification Argument List
-// ============================
-/*
- These arguments get replaced with the Local_Notification_sprintf
- and other such functions found in all.qc to supply data
- from networked notifications to their usage in sprintf... It
- allows for more dynamic data to be inferred by the local
- notification parser, so that the server does not have to network
- anything too crazy on a per-client/per-situation basis.
-
- Pay attention to the CSQC/SVQC relations, some of these are redefined
- in slightly different ways for different programs, this is because the
- server does a more conservative approach to the notifs than the client.
-
- All arguments are swapped into strings, so be sure that your
- sprintf usage matches with proper %s placement.
-
- Argument descriptions:
-	s1-s4: string arguments to be literally swapped into sprintf
-	s2loc: s2 string of locations of deaths or other events
-	s3loc: s3 string of locations of deaths or other events
-	f1-f4: float arguments expanded into strings to be swapped into sprintf
-	f1p2dec: f1 float to string with 2 decimal places
-	f2p2dec: f2 float to string with 2 decimal places
-	f2primsec: f2 float primary or secondary selection for weapons
-	f3primsec: f3 float primary or secondary selection for weapons
-	f1secs: count_seconds of f1
-	f1points: point or points depending on f1
-	f1ord: count_ordinal of f1
-	f1time: process_time of f1
-	f1race_time: TIME_ENCODED_TOSTRING of f1
-	f2race_time: TIME_ENCODED_TOSTRING of f2
-	race_col: color of race time/position (i.e. good or bad)
-	race_diff: show time difference between f2 and f3
-	missing_teams: show which teams still need players
-	pass_key: find the keybind for "passing" or "dropping" in CTF game mode
-	nade_key: find the keybind for nade throwing
-	frag_ping: show the ping of a player
-	frag_stats: show health/armor/ping of a player
-	frag_pos: show score status and position in the match of a player
-	spree_cen: centerprint notif for kill spree/how many kills they have
-	spree_inf: info notif for kill spree/how many kills they have
-	spree_end: placed at the end of murder messages to show ending of sprees
-	spree_lost: placed at the end of suicide messages to show losing of sprees
-	item_wepname: return full name of a weapon from weaponid
-	item_wepammo: ammo display for weapon from f1 and f2
-	item_centime: amount of time to display weapon message in centerprint
-	item_buffname: return full name of a buff from buffid
-	death_team: show the full name of the team a player is switching from
-	minigame1_name: return human readable name of a minigame from its id(s1)
-	minigame1_d: return descriptor name of a minigame from its id(s1)
-*/
 
 const float NOTIF_MAX_ARGS = 7;
 const float NOTIF_MAX_HUDARGS = 2;
@@ -400,15 +333,12 @@ void Local_Notification_Queue_Process();
 
 string arg_slot[NOTIF_MAX_ARGS];
 
-const float ARG_CS_SV_HA = 1; // enabled on CSQC, SVQC, and Hudargs
-const float ARG_CS_SV_DC = 2; // enabled on CSQC, SVQC, and durcnt centerprint
-const float ARG_CS_SV = 3; // enabled on CSQC and SVQC
-const float ARG_CS = 4; // unique result to CSQC
-const float ARG_SV = 5; // unique result to SVQC
-const float ARG_DC = 6; // unique result to durcnt/centerprint
-
-// todo possible idea.... declare how many floats/strings each arg needs, and then dynamically increment the input
-// this way, we don't need to have duplicates like i.e. s2loc and s3loc?
+const float ARG_CS_SV_HA = 1;
+const float ARG_CS_SV_DC = 2;
+const float ARG_CS_SV = 3;
+const float ARG_CS = 4;
+const float ARG_SV = 5;
+const float ARG_DC = 6;
 
 string BUFF_NAME(int i);
 
@@ -442,7 +372,7 @@ string BUFF_NAME(int i);
 	ARG_CASE(ARG_CS,        "join_key",      getcommandkey(_("jump"), "+jump")) \
 	ARG_CASE(ARG_CS,        "frag_ping",     notif_arg_frag_ping(true, f2)) \
 	ARG_CASE(ARG_CS,        "frag_stats",    notif_arg_frag_stats(f2, f3, f4)) \
-	/*ARG_CASE(ARG_CS,      "frag_pos",      ((Should_Print_Score_Pos(f1)) ? sprintf("\n^BG%s", Read_Score_Pos(f1)) : ""))*/ \
+	                                                                                                                         \
 	ARG_CASE(ARG_CS,        "spree_cen",     (autocvar_notification_show_sprees ? notif_arg_spree_cen(f1) : "")) \
 	ARG_CASE(ARG_CS_SV,     "spree_inf",     (autocvar_notification_show_sprees ? notif_arg_spree_inf(1, input, s2, f2) : "")) \
 	ARG_CASE(ARG_CS_SV,     "spree_end",     (autocvar_notification_show_sprees ? notif_arg_spree_inf(-1, "", "", f1) : "")) \
@@ -497,13 +427,14 @@ string notif_arg_missing_teams(float f1)
 		((f1 & BIT(0)) ? strcat(Team_ColoredFullName(NUM_TEAM_1), (f1 >> 1) ? ", " : "") : ""),
 		((f1 & BIT(1)) ? strcat(Team_ColoredFullName(NUM_TEAM_2), (f1 >> 2) ? ", " : "") : ""),
 		((f1 & BIT(2)) ? strcat(Team_ColoredFullName(NUM_TEAM_3), (f1 >> 3) ? ", " : "") : ""),
-		((f1 & BIT(3)) ?        Team_ColoredFullName(NUM_TEAM_4)                         : "")
+		((f1 & BIT(3)) ? strcat(Team_ColoredFullName(NUM_TEAM_4), (f1 >> 4) ? ", " : "") : ""),
+		((f1 & BIT(4)) ?        Team_ColoredFullName(NUM_TEAM_5)                         : "")
 	);
 }
 
 string notif_arg_spree_cen(float spree)
 {
-	// 0 = off, 1 = target (but only for first victim) and attacker
+
 	if(autocvar_notification_show_sprees_center)
 	{
 		if(spree > 1)
@@ -526,17 +457,17 @@ string notif_arg_spree_cen(float spree)
 								),
 								spree);
 					}
-					else { return ""; } // don't show spree information if it isn't an achievement
+					else { return ""; }
 				}
 			}
 
 			#undef SPREE_ITEM
 		}
-		else if(spree == -1) // first blood
+		else if(spree == -1)
 		{
 			return normal_or_gentle(_("First blood! "), _("First score! "));
 		}
-		else if(spree == -2) // first victim
+		else if(spree == -2)
 		{
 			return normal_or_gentle(_("First victim! "), _("First casualty! "));
 		}
@@ -549,10 +480,9 @@ string notif_arg_spree_inf(float type, string input, string player, float spree)
 {
 	switch(type)
 	{
-		case 1: // attacker kill spree
+		case 1:
 		{
-			// 0 = off, 1 = target only, 2 = attacker only, 3 = target and attacker
-			// this conditional (& 2) is true for 2 and 3
+
 			if(autocvar_notification_show_sprees_info & 2)
 			{
 				#ifdef CSQC
@@ -587,13 +517,13 @@ string notif_arg_spree_inf(float type, string input, string player, float spree)
 										spree_newline
 									);
 							}
-							else { return ""; } // don't show spree information if it isn't an achievement
+							else { return ""; }
 						}
 					}
 
 					#undef SPREE_ITEM
 				}
-				else if(spree == -1) // firstblood
+				else if(spree == -1)
 				{
 					return
 						sprintf(
@@ -609,7 +539,7 @@ string notif_arg_spree_inf(float type, string input, string player, float spree)
 			break;
 		}
 
-		case -1: // kill spree ended
+		case -1:
 		{
 			if((spree > 1) && (autocvar_notification_show_sprees_info & 1))
 			{
@@ -624,7 +554,7 @@ string notif_arg_spree_inf(float type, string input, string player, float spree)
 			break;
 		}
 
-		case -2: // kill spree lost
+		case -2:
 		{
 			if((spree > 1) && (autocvar_notification_show_sprees_info & 1))
 			{
@@ -646,7 +576,7 @@ string notif_arg_item_wepammo(float f1, float f2)
 {
 	string ammoitems = "";
 	Weapon wep = REGISTRY_GET(Weapons, f1);
-	// TODO: registry handles
+
 	switch (wep.ammo_type)
 	{
 		case RES_SHELLS:  ammoitems = ITEM_Shells.m_name;      break;
@@ -655,17 +585,11 @@ string notif_arg_item_wepammo(float f1, float f2)
 		case RES_CELLS:   ammoitems = ITEM_Cells.m_name;       break;
 		case RES_PLASMA:  ammoitems = ITEM_Plasma.m_name;      break;
 		case RES_FUEL:    ammoitems = ITEM_JetpackFuel.m_name; break;
-		default: return ""; // doesn't use ammo
+		default: return "";
 	}
 	return sprintf(_(" with %d %s"), f2, strtolower(ammoitems));
 }
 
-
-// ====================================
-//  Initialization/Create Declarations
-// ====================================
-
-// common notification entity values
 .int nent_default;
 .bool nent_enabled;
 .MSG nent_type;
@@ -674,33 +598,28 @@ string notif_arg_item_wepammo(float f1, float f2)
 .int nent_floatcount;
 .int nent_teamnum;
 
-// MSG_ANNCE entity values
 .int nent_channel;
 .string nent_snd;
 .float nent_vol;
 .float nent_position;
 .float nent_queuetime;
 
-// MSG_INFO and MSG_CENTER entity values
-.string nent_args; // used by both
-.string nent_hudargs; // used by info
-.string nent_icon; // used by info
-.CPID nent_cpid; // used by center
-.string nent_durcnt; // used by center
-.string nent_string; // used by both
+.string nent_args;
+.string nent_hudargs;
+.string nent_icon;
+.CPID nent_cpid;
+.string nent_durcnt;
+.string nent_string;
 
-// MSG_MULTI entity values
 .entity nent_msgannce;
 .entity nent_msginfo;
 .entity nent_msgcenter;
 
-// MSG_CHOICE entity values
 .float nent_challow_def;
 .float nent_challow_var;
 .entity nent_optiona;
 .entity nent_optionb;
 
-// networked notification entity values
 #ifdef SVQC
 .NOTIF nent_broadcast;
 #endif
@@ -721,12 +640,11 @@ STATIC_INIT(Notifications) { FOREACH(Notifications, true, it.m_id = i); }
 REGISTRY_CHECK(Notifications)
 
 const int NOTIF_CHOICE_MAX = 20;
-// NOTE: a team choice is actually made of 4 choices (one per team) with the same nent_choice_idx
-// thus they are counted as 1 in nent_choice_count
+
 int nent_choice_count = 0;
 .int nent_choice_idx;
-.int msg_choice_choices[NOTIF_CHOICE_MAX]; // set on each player containing MSG_CHOICE choices
-// initialization error detection
+.int msg_choice_choices[NOTIF_CHOICE_MAX];
+
 bool notif_error;
 bool notif_global_error;
 
@@ -769,11 +687,11 @@ Notification Get_Notif_Ent(MSG net_type, int net_name)
 	REGISTER(Notifications, name, m_id, new_pure(msg_annce_notification)) { \
 		Create_Notification_Entity      (this, defaultvalue, ACVNN(cvarname), MSG_ANNCE, strtoupper(#name), teamnum); \
 		Create_Notification_Entity_Annce(this, ACVNN(cvarname), strtoupper(#name), \
-			channel,    /* channel   */ \
-			sound,      /* snd       */ \
-			volume,     /* vol       */ \
-			position,   /* position  */ \
-			queuetime); /* queuetime */ \
+			channel,                    \
+			sound,                      \
+			volume,                     \
+			position,                   \
+			queuetime);                 \
 	}
 
 #define MSG_INFO_NOTIF_TEAM(teamnum, name, cvarname, defaultvalue, strnum, flnum, args, hudargs, icon, normal, gentle) \
@@ -787,13 +705,13 @@ Notification Get_Notif_Ent(MSG net_type, int net_name)
 	REGISTER(Notifications, name, m_id, new_pure(msg_info_notification)) { \
 		Create_Notification_Entity           (this, defaultvalue, ACVNN(cvarname), MSG_INFO, strtoupper(#name), teamnum); \
 		Create_Notification_Entity_InfoCenter(this, ACVNN(cvarname), strtoupper(#name), strnum, flnum, \
-			args,     /* args    */ \
-			hudargs,  /* hudargs */ \
-			icon,     /* icon    */ \
-			CPID_Null,/* cpid    */ \
-			"",       /* durcnt  */ \
-			normal,   /* normal  */ \
-			gentle);  /* gentle  */ \
+			args,                   \
+			hudargs,                \
+			icon,                   \
+			CPID_Null,              \
+			"",                     \
+			normal,                 \
+			gentle);                \
 	}
 
 .string nent_iconargs;
@@ -804,13 +722,13 @@ Notification Get_Notif_Ent(MSG net_type, int net_name)
 	REGISTER(Notifications, name, m_id, new_pure(msg_info_notification)) { \
 		Create_Notification_Entity           (this, defaultvalue, ACVNN(name), MSG_INFO, strtoupper(#name), 0); \
 		Create_Notification_Entity_InfoCenter(this, ACVNN(name), strtoupper(#name), strnum, flnum, \
-			args,     /* args    */ \
-			hudargs,  /* hudargs */ \
-			icon,     /* icon    */ \
-			CPID_Null,/* cpid    */ \
-			"",       /* durcnt  */ \
-			normal,   /* normal  */ \
-			gentle);  /* gentle  */ \
+			args,                   \
+			hudargs,                \
+			icon,                   \
+			CPID_Null,              \
+			"",                     \
+			normal,                 \
+			gentle);                \
 		this.nent_iconargs = iconargs; \
 	}
 
@@ -825,13 +743,13 @@ Notification Get_Notif_Ent(MSG net_type, int net_name)
 	REGISTER(Notifications, name, m_id, new_pure(msg_center_notification)) { \
 		Create_Notification_Entity           (this, defaultvalue, ACVNN(cvarname), MSG_CENTER, strtoupper(#name), teamnum); \
 		Create_Notification_Entity_InfoCenter(this, ACVNN(cvarname), strtoupper(#name), strnum, flnum, \
-			args,    /* args    */ \
-			"",      /* hudargs */ \
-			"",      /* icon    */ \
-			cpid,    /* cpid    */ \
-			durcnt,  /* durcnt  */ \
-			normal,  /* normal  */ \
-			gentle); /* gentle  */ \
+			args,                  \
+			"",                    \
+			"",                    \
+			cpid,                  \
+			durcnt,                \
+			normal,                \
+			gentle);               \
 	}
 
 #define MSG_MULTI_NOTIF(name, defaultvalue, anncename, infoname, centername) \
@@ -839,9 +757,9 @@ Notification Get_Notif_Ent(MSG net_type, int net_name)
 	REGISTER(Notifications, name, m_id, new_pure(msg_multi_notification)) { \
 		Create_Notification_Entity      (this, defaultvalue, ACVNN(name), MSG_MULTI, strtoupper(#name), 0); \
 		Create_Notification_Entity_Multi(this, ACVNN(name), strtoupper(#name), \
-			anncename,   /* anncename  */ \
-			infoname,    /* infoname   */ \
-			centername); /* centername */ \
+			anncename,                    \
+			infoname,                     \
+			centername);                  \
 	}
 
 #define MSG_CHOICE_NOTIF_TEAM(teamnum, name, cvarname, defaultvalue, challow, chtype, optiona, optionb) \
@@ -855,15 +773,15 @@ Notification Get_Notif_Ent(MSG net_type, int net_name)
 #define MSG_CHOICE_NOTIF_(teamnum, name, cvarname, defaultvalue, challow, chtype, optiona, optionb) \
 	REGISTER(Notifications, name, m_id, new_pure(msg_choice_notification)) { \
 		this.nent_choice_idx = nent_choice_count; \
-		if (!teamnum || teamnum == NUM_TEAM_4) \
+		if (!teamnum || teamnum == NUM_TEAM_5) \
 			nent_choice_count++; \
 		Create_Notification_Entity       (this, defaultvalue, ACVNN(cvarname), MSG_CHOICE, strtoupper(#name), teamnum); \
 		Create_Notification_Entity_Choice(this, ACVNN(cvarname), strtoupper(#name), \
-			challow,                                 /* challow_def */ \
-			autocvar_notification_##cvarname##_ALLOWED,  /* challow_var */ \
-			chtype,                                  /* chtype      */ \
-			optiona,                                 /* optiona     */ \
-			optionb);                                /* optionb     */ \
+			challow,                                                   \
+			autocvar_notification_##cvarname##_ALLOWED,                    \
+			chtype,                                                    \
+			optiona,                                                   \
+			optionb);                                                  \
 	}
 
 REGISTRY_BEGIN(Notifications)
@@ -874,7 +792,7 @@ REGISTRY_BEGIN(Notifications)
 REGISTRY_END(Notifications)
 {
 	if (!notif_global_error) return;
-	// shit happened... stop the loading of the program now if this is unacceptable
+
 	if (autocvar_notification_errors_are_fatal)
 		LOG_FATAL("Notification initialization failed! Read above and fix the errors!");
 	else
@@ -888,7 +806,7 @@ void ReplicateVars(bool would_destroy)
 	if (!would_destroy)
 		FOREACH(Notifications, it.nent_type == MSG_CHOICE && (!it.nent_teamnum || it.nent_teamnum == NUM_TEAM_1), {
 			string cvarname = strcat("notification_", Get_Notif_CvarName(it));
-			// NOTE: REPLICATE_SIMPLE can return;
+
 			REPLICATE_SIMPLE(it.cvar_value, cvarname);
 		});
 }

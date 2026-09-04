@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 #include "sv_demo.h"
@@ -25,7 +7,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "prvm_cmds.h"
 #include "utf8lib.h"
 
-// for secure rcon authentication
 #include "hmac.h"
 #include "mdfour.h"
 #include <time.h>
@@ -49,12 +30,6 @@ qboolean allowcheats = false;
 extern qboolean host_shuttingdown;
 extern cvar_t developer_entityparsing;
 
-/*
-==================
-Host_Quit_f
-==================
-*/
-
 void Host_Quit_f (void)
 {
 	if(host_shuttingdown)
@@ -63,11 +38,6 @@ void Host_Quit_f (void)
 		Sys_Quit (0);
 }
 
-/*
-==================
-Host_Status_f
-==================
-*/
 static void Host_Status_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -75,13 +45,13 @@ static void Host_Status_f (void)
 	client_t *client;
 	int seconds = 0, minutes = 0, hours = 0, i, j, k, in, players, ping = 0, packetloss = 0;
 	void (*print) (const char *fmt, ...);
-	char ip[48]; // can contain a full length v6 address with [] and a port
+	char ip[48];
 	int frags;
 	char vabuf[1024];
 
 	if (cmd_source == src_command)
 	{
-		// if running a client, try to send over network so the client's status report parser will see the report
+
 		if (cls.state == ca_connected)
 		{
 			Cmd_ForwardToServer ();
@@ -139,7 +109,7 @@ static void Host_Status_f (void)
 			}
 			else
 				hours = 0;
-			
+
 			packetloss = 0;
 			if (client->netconnection)
 				for (j = 0;j < NETGRAPH_PACKETS;j++)
@@ -173,41 +143,33 @@ static void Host_Status_f (void)
 					frags = atoi(qcstatus);
 			}
 		}
-		
-		if (in == 0) // default layout
+
+		if (in == 0)
 		{
 			if (sv.protocol == PROTOCOL_QUAKE && svs.maxclients <= 99)
 			{
-				// LordHavoc: this is very touchy because we must maintain ProQuake compatible status output
+
 				print ("#%-2u %-16.16s  %3i  %2i:%02i:%02i\n", i+1, client->name, frags, hours, minutes, seconds);
 				print ("   %s\n", ip);
 			}
 			else
 			{
-				// LordHavoc: no real restrictions here, not a ProQuake-compatible protocol anyway...
+
 				print ("#%-3u %-16.16s %4i  %2i:%02i:%02i\n", i+1, client->name, frags, hours, minutes, seconds);
 				print ("   %s\n", ip);
 			}
 		}
-		else if (in == 1) // extended layout
+		else if (in == 1)
 		{
 			print ("%s%-47s %2i %4i %2i:%02i:%02i %4i  #%-3u ^7%s\n", k%2 ? "^3" : "^7", ip, packetloss, ping, hours, minutes, seconds, frags, i+1, client->name);
 		}
-		else if (in == 2) // reduced layout
+		else if (in == 2)
 		{
 			print ("%s%-47s #%-3u ^7%s\n", k%2 ? "^3" : "^7", ip, i+1, client->name);
 		}
 	}
 }
 
-
-/*
-==================
-Host_God_f
-
-Sets client to godmode
-==================
-*/
 static void Host_God_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -265,13 +227,6 @@ static void Host_Noclip_f (void)
 	}
 }
 
-/*
-==================
-Host_Fly_f
-
-Sets client to flymode
-==================
-*/
 static void Host_Fly_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -293,14 +248,7 @@ static void Host_Fly_f (void)
 	}
 }
 
-
-/*
-==================
-Host_Ping_f
-
-==================
-*/
-void Host_Pings_f (void); // called by Host_Ping_f
+void Host_Pings_f (void);
 static void Host_Ping_f (void)
 {
 	int i;
@@ -309,7 +257,7 @@ static void Host_Ping_f (void)
 
 	if (cmd_source == src_command)
 	{
-		// if running a client, try to send over network so the client's ping report parser will see the report
+
 		if (cls.state == ca_connected)
 		{
 			Cmd_ForwardToServer ();
@@ -331,28 +279,8 @@ static void Host_Ping_f (void)
 		print("%4i %s\n", bound(0, (int)floor(client->ping*1000+0.5), 9999), client->name);
 	}
 
-	// now call the Pings command also, which will send a report that contains packet loss for the scoreboard (as well as a simpler ping report)
-	// actually, don't, it confuses old clients (resulting in "unknown command pingplreport" flooding the console)
-	//Host_Pings_f();
 }
 
-/*
-===============================================================================
-
-SERVER TRANSITIONS
-
-===============================================================================
-*/
-
-/*
-======================
-Host_Map_f
-
-handle a
-map <servername>
-command from the console.  Active clients are kicked off.
-======================
-*/
 static void Host_Map_f (void)
 {
 	char level[MAX_QPATH];
@@ -363,11 +291,10 @@ static void Host_Map_f (void)
 		return;
 	}
 
-	// GAME_DELUXEQUAKE - clear warpmark (used by QC)
 	if (gamemode == GAME_DELUXEQUAKE)
 		Cvar_Set("warpmark", "");
 
-	cls.demonum = -1;		// stop demo loop in case this fails
+	cls.demonum = -1;
 
 	CL_Disconnect ();
 	Host_ShutdownServer();
@@ -381,13 +308,13 @@ static void Host_Map_f (void)
 	}
 
 #ifdef CONFIG_MENU
-	// remove menu
+
 	if (key_dest == key_menu || key_dest == key_menu_grabbed)
 		MR_ToggleMenu(0);
 #endif
 	key_dest = key_game;
 
-	svs.serverflags = 0;			// haven't completed an episode yet
+	svs.serverflags = 0;
 	allowcheats = sv_cheats.integer != 0;
 	strlcpy(level, Cmd_Argv(1), sizeof(level));
 	SV_SpawnServer(level);
@@ -395,13 +322,6 @@ static void Host_Map_f (void)
 		CL_EstablishConnection("local:1", -2);
 }
 
-/*
-==================
-Host_Changelevel_f
-
-Goes to a new map, taking all clients along
-==================
-*/
 static void Host_Changelevel_f (void)
 {
 	char level[MAX_QPATH];
@@ -411,14 +331,14 @@ static void Host_Changelevel_f (void)
 		Con_Print("changelevel <levelname> : continue game on a new level\n");
 		return;
 	}
-	// HACKHACKHACK
+
 	if (!sv.active) {
 		Host_Map_f();
 		return;
 	}
 
 #ifdef CONFIG_MENU
-	// remove menu
+
 	if (key_dest == key_menu || key_dest == key_menu_grabbed)
 		MR_ToggleMenu(0);
 #endif
@@ -432,13 +352,6 @@ static void Host_Changelevel_f (void)
 		CL_EstablishConnection("local:1", -2);
 }
 
-/*
-==================
-Host_Restart_f
-
-Restarts the current server for a dead player
-==================
-*/
 static void Host_Restart_f (void)
 {
 	char mapname[MAX_QPATH];
@@ -455,7 +368,7 @@ static void Host_Restart_f (void)
 	}
 
 #ifdef CONFIG_MENU
-	// remove menu
+
 	if (key_dest == key_menu || key_dest == key_menu_grabbed)
 		MR_ToggleMenu(0);
 #endif
@@ -468,22 +381,13 @@ static void Host_Restart_f (void)
 		CL_EstablishConnection("local:1", -2);
 }
 
-/*
-==================
-Host_Reconnect_f
-
-This command causes the client to wait for the signon messages again.
-This is sent just before a server changes levels
-==================
-*/
 void Host_Reconnect_f (void)
 {
 	char temp[128];
-	// if not connected, reconnect to the most recent server
+
 	if (!cls.netcon)
 	{
-		// if we have connected to a server recently, the userinfo
-		// will still contain its IP address, so get the address...
+
 		InfoString_GetValue(cls.userinfo, "*ip", temp, sizeof(temp));
 		if (temp[0])
 			CL_EstablishConnection(temp, -1);
@@ -491,11 +395,11 @@ void Host_Reconnect_f (void)
 			Con_Printf("Reconnect to what server?  (you have not connected to a server yet)\n");
 		return;
 	}
-	// if connected, do something based on protocol
+
 	if (cls.protocol == PROTOCOL_QUAKEWORLD)
 	{
-		// quakeworld can just re-login
-		if (cls.qw_downloadmemory)  // don't change when downloading
+
+		if (cls.qw_downloadmemory)
 			return;
 
 		S_StopAllSounds();
@@ -509,7 +413,7 @@ void Host_Reconnect_f (void)
 	}
 	else
 	{
-		// netquake uses reconnect on level changes (silly)
+
 		if (Cmd_Argc() != 1)
 		{
 			Con_Print("reconnect : wait for signon messages again\n");
@@ -520,17 +424,10 @@ void Host_Reconnect_f (void)
 			Con_Print("reconnect: no signon, ignoring reconnect\n");
 			return;
 		}
-		cls.signon = 0;		// need new connection messages
+		cls.signon = 0;
 	}
 }
 
-/*
-=====================
-Host_Connect_f
-
-User command to connect to server
-=====================
-*/
 static void Host_Connect_f (void)
 {
 	if (Cmd_Argc() < 2)
@@ -538,20 +435,11 @@ static void Host_Connect_f (void)
 		Con_Print("connect <serveraddress> [<key> <value> ...]: connect to a multiplayer game\n");
 		return;
 	}
-	// clear the rcon password, to prevent vulnerability by stuffcmd-ing a connect command
+
 	if(rcon_secure.integer <= 0)
 		Cvar_SetQuick(&rcon_password, "");
 	CL_EstablishConnection(Cmd_Argv(1), 2);
 }
-
-
-/*
-===============================================================================
-
-LOAD / SAVE GAME
-
-===============================================================================
-*/
 
 #define	SAVEGAME_VERSION	5
 
@@ -564,8 +452,6 @@ void Host_Savegame_to(prvm_prog_t *prog, const char *name)
 	qboolean isserver;
 	char	*s;
 
-	// first we have to figure out if this can be saved in 64 lightstyles
-	// (for Quake compatibility)
 	for (i=64 ; i<MAX_LIGHTSTYLES ; i++)
 		if (sv.lightstyles[i][0])
 			lightstyles = i+1;
@@ -587,8 +473,7 @@ void Host_Savegame_to(prvm_prog_t *prog, const char *name)
 		dpsnprintf(comment, sizeof(comment), "%-21.21s kills:%3i/%3i", PRVM_GetString(prog, PRVM_serveredictstring(prog->edicts, message)), (int)PRVM_serverglobalfloat(killed_monsters), (int)PRVM_serverglobalfloat(total_monsters));
 	else
 		dpsnprintf(comment, sizeof(comment), "(crash dump of %s progs)", prog->name);
-	// convert space to _ to make stdio happy
-	// LordHavoc: convert control characters to _ as well
+
 	for (i=0 ; i<SAVEGAME_COMMENT_LENGTH ; i++)
 		if (ISWHITESPACEORCONTROL(comment[i]))
 			comment[i] = '_';
@@ -612,7 +497,6 @@ void Host_Savegame_to(prvm_prog_t *prog, const char *name)
 		FS_Printf(f, "%f\n", realtime);
 	}
 
-	// write the light styles
 	for (i=0 ; i<lightstyles ; i++)
 	{
 		if (isserver && sv.lightstyles[i][0])
@@ -625,29 +509,26 @@ void Host_Savegame_to(prvm_prog_t *prog, const char *name)
 	for (i=0 ; i<prog->num_edicts ; i++)
 	{
 		FS_Printf(f,"// edict %d\n", i);
-		//Con_Printf("edict %d...\n", i);
+
 		PRVM_ED_Write (prog, f, PRVM_EDICT_NUM(i));
 	}
 
 #if 1
 	FS_Printf(f,"/*\n");
 	FS_Printf(f,"// DarkPlaces extended savegame\n");
-	// darkplaces extension - extra lightstyles, support for color lightstyles
+
 	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
 		if (isserver && sv.lightstyles[i][0])
 			FS_Printf(f, "sv.lightstyles %i %s\n", i, sv.lightstyles[i]);
 
-	// darkplaces extension - model precaches
 	for (i=1 ; i<MAX_MODELS ; i++)
 		if (sv.model_precache[i][0])
 			FS_Printf(f,"sv.model_precache %i %s\n", i, sv.model_precache[i]);
 
-	// darkplaces extension - sound precaches
 	for (i=1 ; i<MAX_SOUNDS ; i++)
 		if (sv.sound_precache[i][0])
 			FS_Printf(f,"sv.sound_precache %i %s\n", i, sv.sound_precache[i]);
 
-	// darkplaces extension - save buffers
 	numbuffers = (int)Mem_ExpandableArray_IndexRange(&prog->stringbuffersarray);
 	for (i = 0; i < numbuffers; i++)
 	{
@@ -659,11 +540,10 @@ void Host_Savegame_to(prvm_prog_t *prog, const char *name)
 			{
 				if (!stringbuffer->strings[k])
 					continue;
-				// Parse the string a bit to turn special characters
-				// (like newline, specifically) into escape codes
+
 				s = stringbuffer->strings[k];
 				for (l = 0;l < (int)sizeof(line) - 2 && *s;)
-				{	
+				{
 					if (*s == '\n')
 					{
 						line[l++] = '\\';
@@ -700,11 +580,6 @@ void Host_Savegame_to(prvm_prog_t *prog, const char *name)
 	Con_Print("done.\n");
 }
 
-/*
-===============
-Host_Savegame_f
-===============
-*/
 static void Host_Savegame_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -721,7 +596,7 @@ static void Host_Savegame_f (void)
 
 	if (cl.islocalgame)
 	{
-		// singleplayer checks
+
 		if (cl.intermission)
 		{
 			Con_Print("Can't save in intermission.\n");
@@ -755,13 +630,6 @@ static void Host_Savegame_f (void)
 	Host_Savegame_to(prog, name);
 }
 
-
-/*
-===============
-Host_Loadgame_f
-===============
-*/
-
 static void Host_Loadgame_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -790,18 +658,17 @@ static void Host_Loadgame_f (void)
 
 	Con_Printf("Loading game from %s...\n", filename);
 
-	// stop playing demos
 	if (cls.demoplayback)
 		CL_Disconnect ();
 
 #ifdef CONFIG_MENU
-	// remove menu
+
 	if (key_dest == key_menu || key_dest == key_menu_grabbed)
 		MR_ToggleMenu(0);
 #endif
 	key_dest = key_game;
 
-	cls.demonum = -1;		// stop demo loop in case this fails
+	cls.demonum = -1;
 
 	t = text = (char *)FS_LoadFile (filename, tempmempool, false, NULL);
 	if (!text)
@@ -813,7 +680,6 @@ static void Host_Loadgame_f (void)
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: loading version\n");
 
-	// version
 	COM_ParseToken_Simple(&t, false, false, true);
 	version = atoi(com_token);
 	if (version != SAVEGAME_VERSION)
@@ -826,7 +692,6 @@ static void Host_Loadgame_f (void)
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: loading description\n");
 
-	// description
 	COM_ParseToken_Simple(&t, false, false, true);
 
 	for (i = 0;i < NUM_SPAWN_PARMS;i++)
@@ -834,23 +699,21 @@ static void Host_Loadgame_f (void)
 		COM_ParseToken_Simple(&t, false, false, true);
 		spawn_parms[i] = atof(com_token);
 	}
-	// skill
+
 	COM_ParseToken_Simple(&t, false, false, true);
-// this silliness is so we can load 1.06 save files, which have float skill values
+
 	current_skill = (int)(atof(com_token) + 0.5);
 	Cvar_SetValue ("skill", (float)current_skill);
 
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: loading mapname\n");
 
-	// mapname
 	COM_ParseToken_Simple(&t, false, false, true);
 	strlcpy (mapname, com_token, sizeof(mapname));
 
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: loading time\n");
 
-	// time
 	COM_ParseToken_Simple(&t, false, false, true);
 	time = atof(com_token);
 
@@ -866,24 +729,20 @@ static void Host_Loadgame_f (void)
 		Con_Print("Couldn't load map\n");
 		return;
 	}
-	sv.paused = true;		// pause until all clients connect
+	sv.paused = true;
 	sv.loadgame = true;
 
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: loading light styles\n");
 
-// load the light styles
-
-	// -1 is the globals
 	entnum = -1;
 
 	for (i = 0;i < MAX_LIGHTSTYLES;i++)
 	{
-		// light style
+
 		start = t;
 		COM_ParseToken_Simple(&t, false, false, true);
-		// if this is a 64 lightstyle savegame produced by Quake, stop now
-		// we have to check this because darkplaces may save more than 64
+
 		if (com_token[0] == '{')
 		{
 			t = start;
@@ -895,10 +754,6 @@ static void Host_Loadgame_f (void)
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: skipping until globals\n");
 
-	// now skip everything before the first opening brace
-	// (this is for forward compatibility, so that older versions (at
-	// least ones with this fix) can load savegames with extra data before the
-	// first brace, as might be produced by a later engine version)
 	for (;;)
 	{
 		start = t;
@@ -911,10 +766,8 @@ static void Host_Loadgame_f (void)
 		}
 	}
 
-	// unlink all entities
 	World_UnlinkAll(&sv.world);
 
-// load the edicts out of the savegame file
 	end = t;
 	for (;;)
 	{
@@ -924,7 +777,7 @@ static void Host_Loadgame_f (void)
 				break;
 		if (!COM_ParseToken_Simple(&start, false, false, true))
 		{
-			// end of file
+
 			break;
 		}
 		if (strcmp(com_token,"{"))
@@ -938,15 +791,13 @@ static void Host_Loadgame_f (void)
 			if(developer_entityparsing.integer)
 				Con_Printf("Host_Loadgame_f: loading globals\n");
 
-			// parse the global vars
 			PRVM_ED_ParseGlobals (prog, start);
 
-			// restore the autocvar globals
 			Cvar_UpdateAllAutoCvars();
 		}
 		else
 		{
-			// parse an edict
+
 			if (entnum >= MAX_EDICTS)
 			{
 				Mem_Free(text);
@@ -963,7 +814,6 @@ static void Host_Loadgame_f (void)
 
 			PRVM_ED_ParseEdict (prog, start, ent);
 
-			// link it into the bsp tree
 			if (!ent->priv.server->free && !VectorCompare(PRVM_serveredictvector(ent, absmin), PRVM_serveredictvector(ent, absmax)))
 				SV_LinkEdict(ent);
 		}
@@ -981,9 +831,6 @@ static void Host_Loadgame_f (void)
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: skipping until extended data\n");
 
-	// read extended data if present
-	// the extended data is stored inside a /* */ comment block, which the
-	// parser intentionally skips, so we have to check for it manually here
 	if(end)
 	{
 		while (*end == '\r' || *end == '\n')
@@ -1078,8 +925,8 @@ static void Host_Loadgame_f (void)
 						else
 							Con_Printf("failed to create stringbuffer %i \"%s\"\n", i, com_token);
 					}
-				}	
-				// skip any trailing text or unrecognized commands
+				}
+
 				while (COM_ParseToken_Simple(&t, true, false, true) && strcmp(com_token, "\n"))
 					;
 			}
@@ -1087,7 +934,6 @@ static void Host_Loadgame_f (void)
 	}
 	Mem_Free(text);
 
-	// remove all temporary flagged string buffers (ones created with BufStr_FindCreateReplace)
 	numbuffers = (int)Mem_ExpandableArray_IndexRange(&prog->stringbuffersarray);
 	for (i = 0; i < numbuffers; i++)
 	{
@@ -1099,18 +945,10 @@ static void Host_Loadgame_f (void)
 	if(developer_entityparsing.integer)
 		Con_Printf("Host_Loadgame_f: finished\n");
 
-	// make sure we're connected to loopback
 	if (sv.active && cls.state == ca_disconnected)
 		CL_EstablishConnection("local:1", -2);
 }
 
-//============================================================================
-
-/*
-======================
-Host_Name_f
-======================
-*/
 cvar_t cl_name = {CVAR_SAVE | CVAR_NQUSERINFOHACK, "_cl_name", "player", "internal storage cvar for current player name (changed by name command)"};
 static void Host_Name_f (void)
 {
@@ -1139,7 +977,7 @@ static void Host_Name_f (void)
 	if (cmd_source == src_command)
 	{
 		Cvar_Set ("_cl_name", newName);
-		if (strlen(newNameSource) >= sizeof(newName)) // overflowed
+		if (strlen(newNameSource) >= sizeof(newName))
 		{
 			Con_Printf("Your name is longer than %i chars! It has been truncated.\n", (int) (sizeof(newName) - 1));
 			Con_Printf("name: %s\n", cl_name.string);
@@ -1155,7 +993,6 @@ static void Host_Name_f (void)
 
 	host_client->nametime = realtime + max(0.0f, sv_namechangetimer.value);
 
-	// point the string back at updateclient->name to keep it safe
 	strlcpy (host_client->name, newName, sizeof (host_client->name));
 
 	for (i = 0, j = 0;host_client->name[i];i++)
@@ -1164,7 +1001,7 @@ static void Host_Name_f (void)
 	host_client->name[j] = 0;
 
 	if(host_client->name[0] == 1 || host_client->name[0] == 2)
-	// may interfere with chat area, and will needlessly beep; so let's add a ^7
+
 	{
 		memmove(host_client->name + 2, host_client->name, sizeof(host_client->name) - 2);
 		host_client->name[sizeof(host_client->name) - 1] = 0;
@@ -1173,26 +1010,25 @@ static void Host_Name_f (void)
 	}
 
 	u8_COM_StringLengthNoColors(host_client->name, 0, &valid_colors);
-	if(!valid_colors) // NOTE: this also proves the string is not empty, as "" is a valid colored string
+	if(!valid_colors)
 	{
 		size_t l;
 		l = strlen(host_client->name);
 		if(l < sizeof(host_client->name) - 1)
 		{
-			// duplicate the color tag to escape it
+
 			host_client->name[i] = STRING_COLOR_TAG;
 			host_client->name[i+1] = 0;
-			//Con_DPrintf("abuse detected, adding another trailing color tag\n");
+
 		}
 		else
 		{
-			// remove the last character to fix the color code
+
 			host_client->name[l-1] = 0;
-			//Con_DPrintf("abuse detected, removing a trailing color tag\n");
+
 		}
 	}
 
-	// find the last color tag offset and decide if we need to add a reset tag
 	for (i = 0, j = -1;host_client->name[i];i++)
 	{
 		if (host_client->name[i] == STRING_COLOR_TAG)
@@ -1200,7 +1036,7 @@ static void Host_Name_f (void)
 			if (host_client->name[i+1] >= '0' && host_client->name[i+1] <= '9')
 			{
 				j = i;
-				// if this happens to be a reset  tag then we don't need one
+
 				if (host_client->name[i+1] == '0' + STRING_COLOR_DEFAULT)
 					j = -1;
 				i++;
@@ -1219,7 +1055,7 @@ static void Host_Name_f (void)
 			}
 		}
 	}
-	// does not end in the default color string, so add it
+
 	if (j >= 0 && strlen(host_client->name) < sizeof(host_client->name) - 2)
 		memcpy(host_client->name + strlen(host_client->name), STRING_COLOR_DEFAULT_STR, strlen(STRING_COLOR_DEFAULT_STR) + 1);
 
@@ -1229,7 +1065,7 @@ static void Host_Name_f (void)
 		if (host_client->begun)
 			SV_BroadcastPrintf("%s ^7changed name to %s\n", host_client->old_name, host_client->name);
 		strlcpy(host_client->old_name, host_client->name, sizeof(host_client->old_name));
-		// send notification to all clients
+
 		MSG_WriteByte (&sv.reliable_datagram, svc_updatename);
 		MSG_WriteByte (&sv.reliable_datagram, host_client - svs.clients);
 		MSG_WriteString (&sv.reliable_datagram, host_client->name);
@@ -1237,13 +1073,8 @@ static void Host_Name_f (void)
 	}
 }
 
-/*
-======================
-Host_Playermodel_f
-======================
-*/
 cvar_t cl_playermodel = {CVAR_SAVE | CVAR_NQUSERINFOHACK, "_cl_playermodel", "", "internal storage cvar for current player model in Nexuiz/Xonotic (changed by playermodel command)"};
-// the old cl_playermodel in cl_main has been renamed to __cl_playermodel
+
 static void Host_Playermodel_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -1275,34 +1106,15 @@ static void Host_Playermodel_f (void)
 		return;
 	}
 
-	/*
-	if (realtime < host_client->nametime)
-	{
-		SV_ClientPrintf("You can't change playermodel more than once every 5 seconds!\n");
-		return;
-	}
-
-	host_client->nametime = realtime + 5;
-	*/
-
-	// point the string back at updateclient->name to keep it safe
 	strlcpy (host_client->playermodel, newPath, sizeof (host_client->playermodel));
 	PRVM_serveredictstring(host_client->edict, playermodel) = PRVM_SetEngineString(prog, host_client->playermodel);
 	if (strcmp(host_client->old_model, host_client->playermodel))
 	{
 		strlcpy(host_client->old_model, host_client->playermodel, sizeof(host_client->old_model));
-		/*// send notification to all clients
-		MSG_WriteByte (&sv.reliable_datagram, svc_updatepmodel);
-		MSG_WriteByte (&sv.reliable_datagram, host_client - svs.clients);
-		MSG_WriteString (&sv.reliable_datagram, host_client->playermodel);*/
+
 	}
 }
 
-/*
-======================
-Host_Playerskin_f
-======================
-*/
 cvar_t cl_playerskin = {CVAR_SAVE | CVAR_NQUSERINFOHACK, "_cl_playerskin", "", "internal storage cvar for current player skin in Nexuiz/Xonotic (changed by playerskin command)"};
 static void Host_Playerskin_f (void)
 {
@@ -1335,28 +1147,13 @@ static void Host_Playerskin_f (void)
 		return;
 	}
 
-	/*
-	if (realtime < host_client->nametime)
-	{
-		SV_ClientPrintf("You can't change playermodel more than once every 5 seconds!\n");
-		return;
-	}
-
-	host_client->nametime = realtime + 5;
-	*/
-
-	// point the string back at updateclient->name to keep it safe
 	strlcpy (host_client->playerskin, newPath, sizeof (host_client->playerskin));
 	PRVM_serveredictstring(host_client->edict, playerskin) = PRVM_SetEngineString(prog, host_client->playerskin);
 	if (strcmp(host_client->old_skin, host_client->playerskin))
 	{
-		//if (host_client->begun)
-		//	SV_BroadcastPrintf("%s changed skin to %s\n", host_client->name, host_client->playerskin);
+
 		strlcpy(host_client->old_skin, host_client->playerskin, sizeof(host_client->old_skin));
-		/*// send notification to all clients
-		MSG_WriteByte (&sv.reliable_datagram, svc_updatepskin);
-		MSG_WriteByte (&sv.reliable_datagram, host_client - svs.clients);
-		MSG_WriteString (&sv.reliable_datagram, host_client->playerskin);*/
+
 	}
 }
 
@@ -1372,7 +1169,7 @@ static void Host_Say(qboolean teamonly)
 	int j, quoted;
 	const char *p1;
 	char *p2;
-	// LordHavoc: long say messages
+
 	char text[1024];
 	qboolean fromServer = false;
 
@@ -1403,7 +1200,7 @@ static void Host_Say(qboolean teamonly)
 		quoted = true;
 		p1++;
 	}
-	// note this uses the chat prefix \001
+
 	if (!fromServer && !teamonly)
 		dpsnprintf (text, sizeof(text), "\001%s: %s", host_client->name, p1);
 	else if (!fromServer && teamonly)
@@ -1422,7 +1219,6 @@ static void Host_Say(qboolean teamonly)
 	}
 	strlcat(text, "\n", sizeof(text));
 
-	// note: save is not a valid edict if fromServer is true
 	save = host_client;
 	for (j = 0, host_client = svs.clients;j < svs.maxclients;j++, host_client++)
 		if (host_client->active && (!teamonly || PRVM_serveredictfloat(host_client->edict, team) == PRVM_serveredictfloat(save->edict, team)))
@@ -1433,18 +1229,15 @@ static void Host_Say(qboolean teamonly)
 		Con_Print(&text[1]);
 }
 
-
 static void Host_Say_f(void)
 {
 	Host_Say(false);
 }
 
-
 static void Host_Say_Team_f(void)
 {
 	Host_Say(true);
 }
-
 
 static void Host_Tell_f(void)
 {
@@ -1454,7 +1247,7 @@ static void Host_Tell_f(void)
 	client_t *save;
 	int j;
 	const char *p1, *p2;
-	char text[MAX_INPUTLINE]; // LordHavoc: FIXME: temporary buffer overflow fix (was 64)
+	char text[MAX_INPUTLINE];
 	qboolean fromServer = false;
 
 	if (cmd_source == src_command)
@@ -1471,7 +1264,6 @@ static void Host_Tell_f(void)
 	if (Cmd_Argc () < 2)
 		return;
 
-	// note this uses the chat prefix \001
 	if (!fromServer)
 		dpsnprintf (text, sizeof(text), "\001%s tells you: ", host_client->name);
 	else if(*(sv_adminnick.string))
@@ -1481,7 +1273,7 @@ static void Host_Tell_f(void)
 
 	p1 = Cmd_Args();
 	p2 = p1 + strlen(p1);
-	// remove the target name
+
 	while (p1 < p2 && *p1 == ' ')
 		p1++;
 	if(*p1 == '#')
@@ -1517,7 +1309,7 @@ static void Host_Tell_f(void)
 		p1++;
 	if(playername_start)
 	{
-		// set playernumber to the right client
+
 		char namebuf[128];
 		if(playername_length >= sizeof(namebuf))
 		{
@@ -1545,10 +1337,10 @@ static void Host_Tell_f(void)
 			SV_ClientPrint("Host_Tell: invalid player name/ID\n");
 		return;
 	}
-	// remove trailing newlines
+
 	while (p2 > p1 && (p2[-1] == '\n' || p2[-1] == '\r'))
 		p2--;
-	// remove quotes if present
+
 	if (*p1 == '"')
 	{
 		p1++;
@@ -1562,7 +1354,7 @@ static void Host_Tell_f(void)
 	while (p2 > p1 && (p2[-1] == '\n' || p2[-1] == '\r'))
 		p2--;
 	if(p1 == p2)
-		return; // empty say
+		return;
 	for (j = (int)strlen(text);j < (int)(sizeof(text) - 2) && p1 < p2;)
 		text[j++] = *p1++;
 	text[j++] = '\n';
@@ -1574,30 +1366,17 @@ static void Host_Tell_f(void)
 	host_client = save;
 }
 
-
-/*
-==================
-Host_Color_f
-==================
-*/
 cvar_t cl_color = {CVAR_SAVE | CVAR_NQUSERINFOHACK, "_cl_color", "0", "internal storage cvar for current player colors (changed by color command)"};
 static void Host_Color(int changetop, int changebottom)
 {
 	prvm_prog_t *prog = SVVM_prog;
 	int top, bottom, playercolor;
 
-	// get top and bottom either from the provided values or the current values
-	// (allows changing only top or bottom, or both at once)
 	top = changetop >= 0 ? changetop : (cl_color.integer >> 4);
 	bottom = changebottom >= 0 ? changebottom : cl_color.integer;
 
 	top &= 15;
 	bottom &= 15;
-	// LordHavoc: allowing skin colormaps 14 and 15 by commenting this out
-	//if (top > 13)
-	//	top = 13;
-	//if (bottom > 13)
-	//	bottom = 13;
 
 	playercolor = top*16 + bottom;
 
@@ -1629,7 +1408,7 @@ static void Host_Color(int changetop, int changebottom)
 		if (host_client->old_colors != host_client->colors)
 		{
 			host_client->old_colors = host_client->colors;
-			// send notification to all clients
+
 			MSG_WriteByte (&sv.reliable_datagram, svc_updatecolors);
 			MSG_WriteByte (&sv.reliable_datagram, host_client - svs.clients);
 			MSG_WriteByte (&sv.reliable_datagram, host_client->colors);
@@ -1739,11 +1518,6 @@ static void Host_Rate_BurstSize_f(void)
 	host_client->rate_burstsize = rate_burstsize;
 }
 
-/*
-==================
-Host_Kill_f
-==================
-*/
 static void Host_Kill_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -1758,18 +1532,12 @@ static void Host_Kill_f (void)
 	prog->ExecuteProgram(prog, PRVM_serverfunction(ClientKill), "QC function ClientKill is missing");
 }
 
-
-/*
-==================
-Host_Pause_f
-==================
-*/
 static void Host_Pause_f (void)
 {
 	void (*print) (const char *fmt, ...);
 	if (cmd_source == src_command)
 	{
-		// if running a client, try to send over network so the pause is handled by the server
+
 		if (cls.state == ca_connected)
 		{
 			Cmd_ForwardToServer ();
@@ -1784,14 +1552,14 @@ static void Host_Pause_f (void)
 	{
 		if (cmd_source == src_client)
 		{
-			if(cls.state == ca_dedicated || host_client != &svs.clients[0]) // non-admin
+			if(cls.state == ca_dedicated || host_client != &svs.clients[0])
 			{
 				print("Pause not allowed.\n");
 				return;
 			}
 		}
 	}
-	
+
 	sv.paused ^= 1;
 	if (cmd_source != src_command)
 		SV_BroadcastPrintf("%s %spaused the game\n", host_client->name, sv.paused ? "" : "un");
@@ -1799,18 +1567,11 @@ static void Host_Pause_f (void)
 		SV_BroadcastPrintf("%s %spaused the game\n", sv_adminnick.string, sv.paused ? "" : "un");
 	else
 		SV_BroadcastPrintf("%s %spaused the game\n", hostname.string, sv.paused ? "" : "un");
-	// send notification to all clients
+
 	MSG_WriteByte(&sv.reliable_datagram, svc_setpause);
 	MSG_WriteByte(&sv.reliable_datagram, sv.paused);
 }
 
-/*
-======================
-Host_PModel_f
-LordHavoc: only supported for Nehahra, I personally think this is dumb, but Mindcrime won't listen.
-LordHavoc: correction, Mindcrime will be removing pmodel in the future, but it's still stuck here for compatibility.
-======================
-*/
 cvar_t cl_pmodel = {CVAR_SAVE | CVAR_NQUSERINFOHACK, "_cl_pmodel", "0", "internal storage cvar for current player model number in nehahra (changed by pmodel command)"};
 static void Host_PModel_f (void)
 {
@@ -1840,14 +1601,6 @@ static void Host_PModel_f (void)
 	PRVM_serveredictfloat(host_client->edict, pmodel) = i;
 }
 
-//===========================================================================
-
-
-/*
-==================
-Host_PreSpawn_f
-==================
-*/
 static void Host_PreSpawn_f (void)
 {
 	if (host_client->prespawned)
@@ -1862,18 +1615,12 @@ static void Host_PreSpawn_f (void)
 		SZ_Write (&host_client->netconnection->message, sv.signon.data, sv.signon.cursize);
 		MSG_WriteByte (&host_client->netconnection->message, svc_signonnum);
 		MSG_WriteByte (&host_client->netconnection->message, 2);
-		host_client->sendsignon = 0;		// enable unlimited sends again
+		host_client->sendsignon = 0;
 	}
 
-	// reset the name change timer because the client will send name soon
 	host_client->nametime = 0;
 }
 
-/*
-==================
-Host_Spawn_f
-==================
-*/
 static void Host_Spawn_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -1893,19 +1640,11 @@ static void Host_Spawn_f (void)
 	}
 	host_client->spawned = true;
 
-	// reset name change timer again because they might want to change name
-	// again in the first 5 seconds after connecting
 	host_client->nametime = 0;
 
-	// LordHavoc: moved this above the QC calls at FrikaC's request
-	// LordHavoc: commented this out
-	//if (host_client->netconnection)
-	//	SZ_Clear (&host_client->netconnection->message);
-
-	// run the entrance script
 	if (sv.loadgame)
 	{
-		// loaded games are fully initialized already
+
 		if (PRVM_serverfunction(RestoreGame))
 		{
 			Con_DPrint("Calling RestoreGame\n");
@@ -1916,13 +1655,10 @@ static void Host_Spawn_f (void)
 	}
 	else
 	{
-		//Con_Printf("Host_Spawn_f: host_client->edict->netname = %s, host_client->edict->netname = %s, host_client->name = %s\n", PRVM_GetString(PRVM_serveredictstring(host_client->edict, netname)), PRVM_GetString(PRVM_serveredictstring(host_client->edict, netname)), host_client->name);
 
-		// copy spawn parms out of the client_t
 		for (i=0 ; i< NUM_SPAWN_PARMS ; i++)
 			(&PRVM_serverglobalfloat(parm1))[i] = host_client->spawn_parms[i];
 
-		// call the spawn function
 		host_client->clientconnectcalled = true;
 		PRVM_serverglobalfloat(time) = sv.time;
 		PRVM_serverglobaledict(self) = PRVM_EDICT_TO_PROG(host_client->edict);
@@ -1938,11 +1674,9 @@ static void Host_Spawn_f (void)
 	if (!host_client->netconnection)
 		return;
 
-	// send time of update
 	MSG_WriteByte (&host_client->netconnection->message, svc_time);
 	MSG_WriteFloat (&host_client->netconnection->message, sv.time);
 
-	// send all current names, colors, and frag counts
 	for (i = 0, client = svs.clients;i < svs.maxclients;i++, client++)
 	{
 		if (!client->active)
@@ -1958,7 +1692,6 @@ static void Host_Spawn_f (void)
 		MSG_WriteByte (&host_client->netconnection->message, client->colors);
 	}
 
-	// send all current light styles
 	for (i=0 ; i<MAX_LIGHTSTYLES ; i++)
 	{
 		if (sv.lightstyles[i][0])
@@ -1969,7 +1702,6 @@ static void Host_Spawn_f (void)
 		}
 	}
 
-	// send some stats
 	MSG_WriteByte (&host_client->netconnection->message, svc_updatestat);
 	MSG_WriteByte (&host_client->netconnection->message, STAT_TOTALSECRETS);
 	MSG_WriteLong (&host_client->netconnection->message, (int)PRVM_serverglobalfloat(total_secrets));
@@ -1986,11 +1718,6 @@ static void Host_Spawn_f (void)
 	MSG_WriteByte (&host_client->netconnection->message, STAT_MONSTERS);
 	MSG_WriteLong (&host_client->netconnection->message, (int)PRVM_serverglobalfloat(killed_monsters));
 
-	// send a fixangle
-	// Never send a roll angle, because savegames can catch the server
-	// in a state where it is expecting the client to correct the angle
-	// and it won't happen if the game was just loaded, so you wind up
-	// with a permanent head tilt
 	if (sv.loadgame)
 	{
 		MSG_WriteByte (&host_client->netconnection->message, svc_setangle);
@@ -2012,11 +1739,6 @@ static void Host_Spawn_f (void)
 	MSG_WriteByte (&host_client->netconnection->message, 3);
 }
 
-/*
-==================
-Host_Begin_f
-==================
-*/
 static void Host_Begin_f (void)
 {
 	if (!host_client->spawned)
@@ -2031,7 +1753,6 @@ static void Host_Begin_f (void)
 	}
 	host_client->begun = true;
 
-	// LordHavoc: note: this code also exists in SV_DropClient
 	if (sv.loadgame)
 	{
 		int i;
@@ -2041,21 +1762,11 @@ static void Host_Begin_f (void)
 		if (i == svs.maxclients)
 		{
 			Con_Printf("Loaded game, everyone rejoined - unpausing\n");
-			sv.paused = sv.loadgame = false; // we're basically done with loading now
+			sv.paused = sv.loadgame = false;
 		}
 	}
 }
 
-//===========================================================================
-
-
-/*
-==================
-Host_Kick_f
-
-Kicks a user off of the server
-==================
-*/
 static void Host_Kick_f (void)
 {
 	const char *who;
@@ -2099,7 +1810,6 @@ static void Host_Kick_f (void)
 		else
 			who = save->name;
 
-		// can't kick yourself!
 		if (host_client == save)
 			return;
 
@@ -2109,10 +1819,10 @@ static void Host_Kick_f (void)
 			COM_ParseToken_Simple(&message, false, false, true);
 			if (byNumber)
 			{
-				message++;							// skip the #
-				while (*message == ' ')				// skip white space
+				message++;
+				while (*message == ' ')
 					message++;
-				message += strlen(Cmd_Argv(2));	// skip the number
+				message += strlen(Cmd_Argv(2));
 			}
 			while (*message && *message == ' ')
 				message++;
@@ -2121,25 +1831,12 @@ static void Host_Kick_f (void)
 			SV_ClientPrintf("Kicked by %s: %s\n", who, message);
 		else
 			SV_ClientPrintf("Kicked by %s\n", who);
-		SV_DropClient (false); // kicked
+		SV_DropClient (false);
 	}
 
 	host_client = save;
 }
 
-/*
-===============================================================================
-
-DEBUGGING TOOLS
-
-===============================================================================
-*/
-
-/*
-==================
-Host_Give_f
-==================
-*/
 static void Host_Give_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -2167,7 +1864,7 @@ static void Host_Give_f (void)
 	case '7':
 	case '8':
 	case '9':
-		// MED 01/04/97 added hipnotic give stuff
+
 		if (gamemode == GAME_HIPNOTIC || gamemode == GAME_QUOTH)
 		{
 			if (t[0] == '6')
@@ -2278,11 +1975,6 @@ static prvm_edict_t	*FindViewthing(prvm_prog_t *prog)
 	return NULL;
 }
 
-/*
-==================
-Host_Viewmodel_f
-==================
-*/
 static void Host_Viewmodel_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -2306,11 +1998,6 @@ static void Host_Viewmodel_f (void)
 	}
 }
 
-/*
-==================
-Host_Viewframe_f
-==================
-*/
 static void Host_Viewframe_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -2334,7 +2021,6 @@ static void Host_Viewframe_f (void)
 	}
 }
 
-
 static void PrintFrameName (dp_model_t *m, int frame)
 {
 	if (m->animscenes)
@@ -2343,11 +2029,6 @@ static void PrintFrameName (dp_model_t *m, int frame)
 		Con_Printf("frame %i\n", frame);
 }
 
-/*
-==================
-Host_Viewnext_f
-==================
-*/
 static void Host_Viewnext_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -2370,11 +2051,6 @@ static void Host_Viewnext_f (void)
 	}
 }
 
-/*
-==================
-Host_Viewprev_f
-==================
-*/
 static void Host_Viewprev_f (void)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -2397,20 +2073,6 @@ static void Host_Viewprev_f (void)
 	}
 }
 
-/*
-===============================================================================
-
-DEMO LOOP CONTROL
-
-===============================================================================
-*/
-
-
-/*
-==================
-Host_Startdemos_f
-==================
-*/
 static void Host_Startdemos_f (void)
 {
 	int		i, c;
@@ -2429,7 +2091,6 @@ static void Host_Startdemos_f (void)
 	for (i=1 ; i<c+1 ; i++)
 		strlcpy (cls.demos[i-1], Cmd_Argv(i), sizeof (cls.demos[i-1]));
 
-	// LordHavoc: clear the remaining slots
 	for (;i <= MAX_DEMOS;i++)
 		cls.demos[i-1][0] = 0;
 
@@ -2442,14 +2103,6 @@ static void Host_Startdemos_f (void)
 		cls.demonum = -1;
 }
 
-
-/*
-==================
-Host_Demos_f
-
-Return to looping demos
-==================
-*/
 static void Host_Demos_f (void)
 {
 	if (cls.state == ca_dedicated)
@@ -2460,13 +2113,6 @@ static void Host_Demos_f (void)
 	CL_NextDemo ();
 }
 
-/*
-==================
-Host_Stopdemo_f
-
-Return to looping demos
-==================
-*/
 static void Host_Stopdemo_f (void)
 {
 	if (!cls.demoplayback)
@@ -2489,15 +2135,14 @@ static void Host_SendCvar_f (void)
 	if (cls.state == ca_connected)
 	{
 		c = Cvar_FindVar(cvarname);
-		// LordHavoc: if there is no such cvar or if it is private, send a
-		// reply indicating that it has no value
+
 		if(!c || (c->flags & CVAR_PRIVATE))
 			Cmd_ForwardStringToServer(va(vabuf, sizeof(vabuf), "sentcvar %s", cvarname));
 		else
 			Cmd_ForwardStringToServer(va(vabuf, sizeof(vabuf), "sentcvar %s \"%s\"", c->name, c->string));
 		return;
 	}
-	if(!sv.active)// || !PRVM_serverfunction(SV_ParseClientCommand))
+	if(!sv.active)
 		return;
 
 	old = host_client;
@@ -2541,13 +2186,6 @@ static void MaxPlayers_f(void)
 		Cvar_Set ("deathmatch", "1");
 }
 
-/*
-=====================
-Host_PQRcon_f
-
-ProQuake rcon support
-=====================
-*/
 static void Host_PQRcon_f (void)
 {
 	int n;
@@ -2590,7 +2228,7 @@ static void Host_PQRcon_f (void)
 		MSG_WriteLong(&buf, 0);
 		MSG_WriteByte(&buf, CCREQ_RCON);
 		SZ_Write(&buf, (const unsigned char*)rcon_password.string, n);
-		MSG_WriteByte(&buf, 0); // terminate the (possibly partial) string
+		MSG_WriteByte(&buf, 0);
 		MSG_WriteString(&buf, Cmd_Args());
 		StoreBigLong(buf.data, NETFLAG_CTL | (buf.cursize & NETFLAG_LENGTH_MASK));
 		NetConn_Write(mysocket, buf.data, buf.cursize, &cls.rcon_address);
@@ -2598,19 +2236,7 @@ static void Host_PQRcon_f (void)
 	}
 }
 
-//=============================================================================
-
-// QuakeWorld commands
-
-/*
-=====================
-Host_Rcon_f
-
-  Send the rest of the command line over as
-  an unconnected command.
-=====================
-*/
-static void Host_Rcon_f (void) // credit: taken from QuakeWorld
+static void Host_Rcon_f (void)
 {
 	int i, n;
 	const char *e;
@@ -2645,7 +2271,7 @@ static void Host_Rcon_f (void) // credit: taken from QuakeWorld
 	mysocket = NetConn_ChooseClientSocketForAddress(&cls.rcon_address);
 	if (mysocket && Cmd_Args()[0])
 	{
-		// simply put together the rcon packet and send it
+
 		if(Cmd_Argv(0)[0] == 's' || rcon_secure.integer > 1)
 		{
 			if(cls.rcon_commands[cls.rcon_ringpos][0])
@@ -2662,7 +2288,7 @@ static void Host_Rcon_f (void) // credit: taken from QuakeWorld
 						break;
 			++cls.rcon_trying;
 			if(i >= MAX_RCONS)
-				NetConn_WriteString(mysocket, "\377\377\377\377getchallenge", &cls.rcon_address); // otherwise we'll request the challenge later
+				NetConn_WriteString(mysocket, "\377\377\377\377getchallenge", &cls.rcon_address);
 			strlcpy(cls.rcon_commands[cls.rcon_ringpos], Cmd_Args(), sizeof(cls.rcon_commands[cls.rcon_ringpos]));
 			cls.rcon_addresses[cls.rcon_ringpos] = cls.rcon_address;
 			cls.rcon_timeout[cls.rcon_ringpos] = realtime + rcon_secure_challengetimeout.value;
@@ -2691,16 +2317,7 @@ static void Host_Rcon_f (void) // credit: taken from QuakeWorld
 	}
 }
 
-/*
-====================
-Host_User_f
-
-user <name or userid>
-
-Dump userdata / masterdata for a user
-====================
-*/
-static void Host_User_f (void) // credit: taken from QuakeWorld
+static void Host_User_f (void)
 {
 	int		uid;
 	int		i;
@@ -2726,14 +2343,7 @@ static void Host_User_f (void) // credit: taken from QuakeWorld
 	Con_Printf ("User not in server.\n");
 }
 
-/*
-====================
-Host_Users_f
-
-Dump userids for all current players
-====================
-*/
-static void Host_Users_f (void) // credit: taken from QuakeWorld
+static void Host_Users_f (void)
 {
 	int		i;
 	int		c;
@@ -2753,15 +2363,7 @@ static void Host_Users_f (void) // credit: taken from QuakeWorld
 	Con_Printf ("%i total users\n", c);
 }
 
-/*
-==================
-Host_FullServerinfo_f
-
-Sent by server when serverinfo changes
-==================
-*/
-// TODO: shouldn't this be a cvar instead?
-static void Host_FullServerinfo_f (void) // credit: taken from QuakeWorld
+static void Host_FullServerinfo_f (void)
 {
 	char temp[512];
 	if (Cmd_Argc() != 2)
@@ -2775,15 +2377,7 @@ static void Host_FullServerinfo_f (void) // credit: taken from QuakeWorld
 	cl.qw_teamplay = atoi(temp);
 }
 
-/*
-==================
-Host_FullInfo_f
-
-Allow clients to change userinfo
-==================
-Casey was here :)
-*/
-static void Host_FullInfo_f (void) // credit: taken from QuakeWorld
+static void Host_FullInfo_f (void)
 {
 	char key[512];
 	char value[512];
@@ -2811,7 +2405,7 @@ static void Host_FullInfo_f (void) // credit: taken from QuakeWorld
 			Con_Printf ("MISSING VALUE\n");
 			return;
 		}
-		++s; // Skip over backslash.
+		++s;
 
 		len = strcspn(s, "\\");
 		if (len >= sizeof(value)) {
@@ -2826,18 +2420,11 @@ static void Host_FullInfo_f (void) // credit: taken from QuakeWorld
 		{
 			break;
 		}
-		++s; // Skip over backslash.
+		++s;
 	}
 }
 
-/*
-==================
-CL_SetInfo_f
-
-Allow clients to change userinfo
-==================
-*/
-static void Host_SetInfo_f (void) // credit: taken from QuakeWorld
+static void Host_SetInfo_f (void)
 {
 	if (Cmd_Argc() == 1)
 	{
@@ -2852,16 +2439,7 @@ static void Host_SetInfo_f (void) // credit: taken from QuakeWorld
 	CL_SetInfo(Cmd_Argv(1), Cmd_Argv(2), true, false, false, false);
 }
 
-/*
-====================
-Host_Packet_f
-
-packet <destination> <contents>
-
-Contents allows \n escape character
-====================
-*/
-static void Host_Packet_f (void) // credit: taken from QuakeWorld
+static void Host_Packet_f (void)
 {
 	char send[2048];
 	int i, l;
@@ -2927,13 +2505,6 @@ static void Host_Packet_f (void) // credit: taken from QuakeWorld
 		NetConn_Write(mysocket, send, out - send, &address);
 }
 
-/*
-====================
-Host_Pings_f
-
-Send back ping and packet loss update for all current players to this player
-====================
-*/
 void Host_Pings_f (void)
 {
 	int		i, j, ping, packetloss, movementloss;
@@ -2966,7 +2537,7 @@ void Host_Pings_f (void)
 		ping = bound(0, ping, 9999);
 		if (sv.protocol == PROTOCOL_QUAKEWORLD)
 		{
-			// send qw_svc_updateping and qw_svc_updatepl messages
+
 			MSG_WriteByte(&host_client->netconnection->message, qw_svc_updateping);
 			MSG_WriteShort(&host_client->netconnection->message, ping);
 			MSG_WriteByte(&host_client->netconnection->message, qw_svc_updatepl);
@@ -2974,7 +2545,7 @@ void Host_Pings_f (void)
 		}
 		else
 		{
-			// write the string into the packet as multiple unterminated strings to avoid needing a local buffer
+
 			if(movementloss)
 				dpsnprintf(temp, sizeof(temp), " %d %d,%d", ping, packetloss, movementloss);
 			else
@@ -3004,13 +2575,6 @@ static void Host_PingPLReport_f(void)
 	}
 }
 
-//=============================================================================
-
-/*
-==================
-Host_InitCommands
-==================
-*/
 void Host_InitCommands (void)
 {
 	dpsnprintf(cls.userinfo, sizeof(cls.userinfo), "\\name\\player\\team\\none\\topcolor\\0\\bottomcolor\\0\\rate\\10000\\msg\\1\\noaim\\1\\*ver\\dp");
@@ -3058,7 +2622,6 @@ void Host_InitCommands (void)
 	Cvar_RegisterVariable (&cl_pmodel);
 	Cmd_AddCommand_WithClientCommand ("pmodel", Host_PModel_f, Host_PModel_f, "(Nehahra-only) change your player model choice");
 
-	// BLACK: This isnt game specific anymore (it was GAME_NEXUIZ at first)
 	Cvar_RegisterVariable (&cl_playermodel);
 	Cmd_AddCommand_WithClientCommand ("playermodel", Host_Playermodel_f, Host_Playermodel_f, "change your player model");
 	Cvar_RegisterVariable (&cl_playerskin);

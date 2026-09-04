@@ -15,7 +15,7 @@ void IT_Write(entity e, int i, float f) {
 #endif
 
 #ifdef CSQC
-// reserve one more spot for superweapons time
+
 float ItemsTime_time[REGISTRY_MAX(Items) + 1];
 float ItemsTime_availableTime[REGISTRY_MAX(Items) + 1];
 NET_HANDLE(itemstime, bool isNew)
@@ -39,7 +39,7 @@ STATIC_INIT(ItemsTime_Init) {
 int autocvar_hud_panel_itemstime = 2;
 float autocvar_hud_panel_itemstime_dynamicsize = 1;
 float autocvar_hud_panel_itemstime_ratio = 2;
-//bool autocvar_hud_panel_itemstime_dynamichud    = true;
+
 int autocvar_hud_panel_itemstime_iconalign;
 bool autocvar_hud_panel_itemstime_progressbar = 0;
 float autocvar_hud_panel_itemstime_progressbar_maxtime = 30;
@@ -71,7 +71,6 @@ bool Item_ItemsTime_Allow(GameItem it)
 
 #ifdef SVQC
 
-// reserve one more spot for superweapons time
 float it_times[REGISTRY_MAX(Items) + 1];
 
 STATIC_INIT(ItemsTime_Init) {
@@ -138,15 +137,14 @@ float Item_ItemsTime_UpdateTime(entity e, float t)
             t = it.scheduledrespawntime;
     });
     if (isavailable)
-        t = -t; // let know the client there's another available item
+        t = -t;
     return t;
 }
 
 MUTATOR_HOOKFUNCTION(itemstime, reset_map_global)
 {
     Item_ItemsTime_ResetTimes();
-    // ALL the times need to be reset before .reset()ing each item
-    // since Item_Reset schedules respawn of superweapons and powerups
+
     IL_EACH(g_items, it.reset,
     {
         Item_ItemsTime_SetTime(it, 0);
@@ -167,7 +165,7 @@ MUTATOR_HOOKFUNCTION(itemstime, ClientConnect, CBC_ORDER_LAST)
 
 	if(IS_PLAYER(player))
 	{
-		// client became player on connection skipping putObserverInServer step
+
 		if (IS_REAL_CLIENT(player))
 		if (warmup_stage || autocvar_sv_itemstime == 2)
 			Item_ItemsTime_SetTimesForPlayer(player);
@@ -186,11 +184,9 @@ MUTATOR_HOOKFUNCTION(itemstime, PlayerSpawn)
 
 #ifdef CSQC
 
-// ItemsTime (#22)
-
 void HUD_ItemsTime_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_itemstime_iconalign");
 	HUD_Write_Cvar("hud_panel_itemstime_progressbar");
 	HUD_Write_Cvar("hud_panel_itemstime_progressbar_name");
@@ -252,9 +248,9 @@ void DrawItemsTimeItem(vector myPos, vector mySize, float ar, string item_icon, 
     {
         if(t > 0)
             drawstring_aspect(numpos, ftos(t), vec2(((ar - 1)/ar) * mySize.x, mySize.y), color, panel_fg_alpha, DRAWFLAG_NORMAL);
-        else if(precache_pic("gfx/hud/default/checkmark")) // COMPAT: check if this image exists, as 0.8.1 clients lack it
+        else if(precache_pic("gfx/hud/default/checkmark"))
             drawpic_aspect_skin(numpos, "checkmark", vec2((ar - 1) * mySize.y, mySize.y), '1 1 1', panel_fg_alpha * picalpha, DRAWFLAG_NORMAL);
-        else // legacy code, if the image is missing just center the icon
+        else
             picpos.x = myPos.x + mySize.x / 2 - mySize.y / 2;
     }
     if (item_availableTime)
@@ -274,7 +270,7 @@ float Item_ItemsTime_GetTime(int item)
             case ITEM_Shield.m_id: return time + 4;
         }
 
-        return -1; // don't show others
+        return -1;
     }
     else
         return ItemsTime_time[item];
@@ -340,9 +336,8 @@ void HUD_ItemsTime()
     {
         if (autocvar__hud_configure)
         if (hud_configure_menu_open != 2)
-            HUD_Panel_DrawBg(); // also draw the bg of the entire panel
+            HUD_Panel_DrawBg();
 
-        // reduce panel to avoid spacing items
         if (itemstime_size.x / itemstime_size.y < ar)
         {
             newSize = rows * itemstime_size.x / ar;
@@ -427,10 +422,10 @@ LABEL(iteration)
             row = 0;
             column = column + 1;
         }
-        if(id == REGISTRY_MAX(Items)) // can happen only in the last fake iteration
+        if(id == REGISTRY_MAX(Items))
         	break;
     });
-    // add another fake iteration for superweapons time
+
     if(id < REGISTRY_MAX(Items) && Item_ItemsTime_GetTime(REGISTRY_MAX(Items)) != -1)
     {
 		id = REGISTRY_MAX(Items);

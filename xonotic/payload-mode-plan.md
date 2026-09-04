@@ -128,34 +128,33 @@ n_j = |{ p : IS_PLAYER(p) && !IS_DEAD(p) && Team_TeamToIndex(p.team) == j
 Falloff 1.0 gives linear-capped (Xonotic-native); 0.5 gives TF2's diminishing returns.
 One expression, no branch.
 
-**Direction.** The track is one-dimensional, so a team's intent is one bit derived from
-its goal arclength `s*_j` (from its `plc_goal`): `d_j = sign(s*_j - s)`.
+**Direction.** The track is one-dimensional. A neutral cart is claimed at the origin by
+the unique plurality. That controller remains the cart color until regression reaches
+the origin.
 
 **Net push and velocity.**
 
 ```
-P_plus  = sum over j with d_j > 0 of w_j
-P_minus = sum over j with d_j < 0 of w_j
-v = clamp(g_payload_speed * (P_plus - P_minus), -v_max, +v_max)
-s' = s + v * PL_TICK
+w_c > 0:
+    v = clamp(g_payload_speed * (w_c - sum_{j != c} w_j)
+              / (1 + (sum_{j != c} w_j)^2),
+              -g_payload_contest_speed, g_payload_max_speed)
+w_c == 0 and max_{j != c}(w_j) > 0:
+    v = clamp(-g_payload_reverse_speed * max_{j != c}(w_j),
+              -g_payload_max_speed, 0)
 ```
 
 Why this is the right generalisation, and not k copies of a two-team rule:
 
-- k enters only through the sums. Two teams reproduce Onslaught's
-  `_friendly_count - _enemy_count` exactly.
-- Coalitions are emergent, not coded. Any set of teams whose goals lie on the same side
-  of the cart adds into the same sum, for as long as the cart is between them and their
-  goals - and stops doing so the instant the cart passes one of their goals. That is the
-  loose, temporary alignment the demo needs, produced by arithmetic rather than by an
-  alliance table.
-- Ties stall visibly. `P_plus == P_minus` gives `v = 0` with players present, which is
-  the readout the demo depends on.
-- No branch can withhold motion: there is no "only the attacking team may push" case.
+- k enters only through invariant reductions over the live team rows.
+- Every team can claim every neutral cart and deliver it at the common path end.
+- Ties stall visibly while the controller remains present.
+- When the controller leaves, the strongest present opponent reverses the cart.
 
-**Rollback.** If `P_plus == P_minus == 0` for longer than `g_payload_idle_time`, the cart
-moves at `g_payload_rollback_speed` toward the nearest passed checkpoint node and stops
-there. Checkpoints are path nodes with spawnflag `PLC_CHECKPOINT`.
+**Rollback.** If all occupancy weights remain zero for `g_payload_idle_time`, the cart
+moves at `g_payload_rollback_speed` toward the nearest preceding `PLC_CHECKPOINT` and
+stops there. `ROLLBACK_ACTIVE` and `ROLLBACK_TARGET` are authoritative cart-row
+coordinates.
 
 **Scoring, per tick, per team** - partial credit, so coalition pushing is rewarded:
 
@@ -256,7 +255,7 @@ built first. Then, from a copy of `qcsrc`:
 `make QCC=<abs path>/gmqcc/gmqcc QCCFLAGS_WATERMARK=payload sv`. The default
 `QCC ?= ../../../../gmqcc/gmqcc` does not resolve in this layout, and
 `QCCFLAGS_WATERMARK ?= $(shell git describe ...)` fails outside a git repo; both must be
-passed explicitly. `tools/compilationunits.sh test-server` is the per-file compile check.
+passed explicitly.
 
 ## 4. Map entity format
 

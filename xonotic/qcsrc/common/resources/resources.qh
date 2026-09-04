@@ -5,7 +5,7 @@
 #endif
 
 #ifdef CSQC
-/// \brief Legacy fields for the resources. To be removed.
+
 .float health;
 .float armorvalue;
 #endif
@@ -37,8 +37,7 @@ REGISTRY(Resources, BITS(4));
 REGISTER_REGISTRY(Resources)
 
 #ifdef CSQC
-// Copy Resources registry here before it gets sorted alphabetically by REGISTRY_SORT
-// so we can keep resources sorted by categories (as they appear in the code)
+
 IntrusiveList default_order_resources;
 STATIC_INIT(default_order_resources)
 {
@@ -55,25 +54,16 @@ REGISTRY_CHECK(Resources);
 REGISTRY_DEFINE_GET(Resources, NULL)
 STATIC_INIT(Resources_renumber) { FOREACH(Resources, true, it.m_id = i); }
 
-/// \brief Unconditional maximum amount of resources the entity can have.
 const int RES_AMOUNT_HARD_LIMIT = 999;
 const int RES_LIMIT_NONE = -1;
 
-/// \brief Describes the available resource types.
-REGISTER_RESOURCE(NONE, NEW(Resource)); ///< Indicates the lack of resource. Use with caution.
+REGISTER_RESOURCE(NONE, NEW(Resource));
 
 #include "all.inc"
 
 #ifdef GAMEQC
-// ===================== Legacy and/or internal API ===========================
 
-/// \brief Converts an entity field to resource type.
-/// \param[in] res_field Entity field to convert.
-/// \return Resource type (a RES_* constant).
 Resource GetResourceType(.float res_field);
 
-/// \brief Converts resource type (a RES_* constant) to entity field.
-/// \param[in] res_type Type of the resource.
-/// \return Entity field for that resource.
 .float GetResourceField(Resource res_type);
 #endif

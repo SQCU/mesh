@@ -1,23 +1,23 @@
 #pragma once
 
 CLASS(Arc, Weapon)
-/* spawnfunc */ ATTRIB(Arc, m_canonical_spawnfunc, string, "weapon_arc");
-/* ammotype  */ ATTRIB(Arc, ammo_type, Resource, RES_CELLS);
-/* impulse   */ ATTRIB(Arc, impulse, int, 3);
-/* flags     */ ATTRIB(Arc, spawnflags, int, WEP_TYPE_HITSCAN);
-/* rating    */ ATTRIB(Arc, bot_pickupbasevalue, float, 8000);
-/* color     */ ATTRIB(Arc, wpcolor, vector, '1 1 1');
-/* modelname */ ATTRIB(Arc, mdl, string, "arc");
+                ATTRIB(Arc, m_canonical_spawnfunc, string, "weapon_arc");
+                ATTRIB(Arc, ammo_type, Resource, RES_CELLS);
+                ATTRIB(Arc, impulse, int, 3);
+                ATTRIB(Arc, spawnflags, int, WEP_TYPE_HITSCAN);
+                ATTRIB(Arc, bot_pickupbasevalue, float, 8000);
+                ATTRIB(Arc, wpcolor, vector, '1 1 1');
+                ATTRIB(Arc, mdl, string, "arc");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Arc, m_model, Model, MDL_ARC_ITEM);
-/* flash mdl */ ATTRIB(Arc, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Arc, m_muzzleeffect, entity, EFFECT_ARC_MUZZLEFLASH);
+                ATTRIB(Arc, m_model, Model, MDL_ARC_ITEM);
+                ATTRIB(Arc, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Arc, m_muzzleeffect, entity, EFFECT_ARC_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Arc, w_crosshair, string, "gfx/crosshairhlac");
-/* crosshair */ ATTRIB(Arc, w_crosshair_size, float, 0.7);
-/* wepimg    */ ATTRIB(Arc, model2, string, "weaponarc");
-/* refname   */ ATTRIB(Arc, netname, string, "arc");
-/* wepname   */ ATTRIB(Arc, m_name, string, _("Arc"));
+                ATTRIB(Arc, w_crosshair, string, "gfx/crosshairhlac");
+                ATTRIB(Arc, w_crosshair_size, float, 0.7);
+                ATTRIB(Arc, model2, string, "weaponarc");
+                ATTRIB(Arc, netname, string, "arc");
+                ATTRIB(Arc, m_name, string, _("Arc"));
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \
@@ -53,7 +53,7 @@ CLASS(Arc, Weapon)
         P(class, prefix, beam_healing_aps, float, NONE) \
         P(class, prefix, beam_healing_hmax, float, NONE) \
         P(class, prefix, beam_healing_hps, float, NONE) \
-        P(class, prefix, beam_heat, float, NONE) /* heat increase per second (primary) */ \
+        P(class, prefix, beam_heat, float, NONE)                                          \
         P(class, prefix, beam_maxangle, float, NONE) \
         P(class, prefix, beam_nonplayerdamage, float, NONE) \
         P(class, prefix, beam_range, float, NONE) \
@@ -64,11 +64,11 @@ CLASS(Arc, Weapon)
         P(class, prefix, burst_damage, float, NONE) \
         P(class, prefix, burst_healing_aps, float, NONE) \
         P(class, prefix, burst_healing_hps, float, NONE) \
-        P(class, prefix, burst_heat, float, NONE) /* heat increase per second (secondary) */ \
-        P(class, prefix, cooldown, float, NONE) /* heat decrease per second when resting */ \
-        P(class, prefix, cooldown_release, float, NONE) /* delay weapon re-use when releasing button */ \
-        P(class, prefix, overheat_max, float, NONE) /* maximum heat before jamming */ \
-        P(class, prefix, overheat_min, float, NONE) /* minimum heat to wait for cooldown */ \
+        P(class, prefix, burst_heat, float, NONE)                                            \
+        P(class, prefix, cooldown, float, NONE)                                             \
+        P(class, prefix, cooldown_release, float, NONE)                                                 \
+        P(class, prefix, overheat_max, float, NONE)                                   \
+        P(class, prefix, overheat_min, float, NONE)                                         \
         P(class, prefix, switchdelay_drop, float, NONE) \
         P(class, prefix, switchdelay_raise, float, NONE) \
         P(class, prefix, weaponreplace, string, NONE) \
@@ -111,14 +111,14 @@ const int ARC_SF_LOCALMASK =   ARC_SF_START | ARC_SF_WANTDIR | ARC_SF_BEAMDIR;
 #endif
 #ifdef SVQC
 .entity arc_beam;
-.bool arc_BUTTON_ATCK_prev; // for better animation control
+.bool arc_BUTTON_ATCK_prev;
 .float beam_prev;
 .float beam_initialized;
 .float beam_bursting;
 .float beam_teleporttime;
-.float beam_heat; // (beam) amount of heat produced
-.float arc_overheat; // (dropped arc/player) time during which it's too hot
-.float arc_cooldown; // (dropped arc/player) cooling speed
+.float beam_heat;
+.float arc_overheat;
+.float arc_cooldown;
 .float arc_heat_percent;
 .float arc_smoke_sound;
 #endif
@@ -129,9 +129,9 @@ const int ARC_SF_LOCALMASK =   ARC_SF_START | ARC_SF_WANTDIR | ARC_SF_BEAMDIR;
 .float beam_thickness;
 .entity beam_traileffect;
 .entity beam_hiteffect;
-.float beam_hitlight[4]; // 0: radius, 123: rgb
+.float beam_hitlight[4];
 .entity beam_muzzleeffect;
-.float beam_muzzlelight[4]; // 0: radius, 123: rgb
+.float beam_muzzlelight[4];
 .string beam_image;
 
 .entity beam_muzzleentity;
@@ -148,6 +148,6 @@ const int ARC_SF_LOCALMASK =   ARC_SF_START | ARC_SF_WANTDIR | ARC_SF_BEAMDIR;
 
 entity Draw_ArcBeam_callback_entity;
 float Draw_ArcBeam_callback_last_thickness;
-vector Draw_ArcBeam_callback_last_top; // NOTE: in same coordinate system as player.
-vector Draw_ArcBeam_callback_last_bottom; // NOTE: in same coordinate system as player.
+vector Draw_ArcBeam_callback_last_top;
+vector Draw_ArcBeam_callback_last_bottom;
 #endif

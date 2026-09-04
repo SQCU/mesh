@@ -35,7 +35,7 @@ MUTATOR_HOOKFUNCTION(midair, PlayerSpawn)
 	entity player = M_ARGV(0, entity);
 
 	if(IS_BOT_CLIENT(player))
-		player.bot_moveskill = 0; // disable bunnyhopping
+		player.bot_moveskill = 0;
 }
 
 MUTATOR_HOOKFUNCTION(midair, BuildMutatorsString)

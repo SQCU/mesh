@@ -15,9 +15,9 @@ bool WaypointSprite_SendEntity(entity this, entity to, float sendflags)
         sendflags |= 0x80;
 
     int hide_flags = 0;
-    if(this.currentammo == 1) hide_flags |= 1; // hideable
-    else if(this.currentammo == 2) hide_flags |= 2; // radar only
-    if(this.exteriormodeltoclient == to) hide_flags |= 2; // my own
+    if(this.currentammo == 1) hide_flags |= 1;
+    else if(this.currentammo == 2) hide_flags |= 2;
+    if(this.exteriormodeltoclient == to) hide_flags |= 2;
 
     MUTATOR_CALLHOOK(SendWaypoint, this, to, sendflags, hide_flags);
     sendflags = M_ARGV(2, int);
@@ -48,7 +48,7 @@ bool WaypointSprite_SendEntity(entity this, entity to, float sendflags)
 
     if (sendflags & 1)
     {
-        WriteByte(MSG_ENTITY, this.team);
+		WriteShort(MSG_ENTITY, this.team);
         WriteByte(MSG_ENTITY, this.rule);
     }
 
@@ -65,13 +65,13 @@ bool WaypointSprite_SendEntity(entity this, entity to, float sendflags)
     {
         WriteCoord(MSG_ENTITY, this.fade_time);
         WriteCoord(MSG_ENTITY, this.teleport_time);
-        WriteShort(MSG_ENTITY, bound(0, this.fade_rate, 32767)); // maxdist
+        WriteShort(MSG_ENTITY, bound(0, this.fade_rate, 32767));
         WriteByte(MSG_ENTITY, hide_flags);
     }
 
     if (sendflags & 32)
     {
-        WriteByte(MSG_ENTITY, this.cnt); // icon on radar
+        WriteByte(MSG_ENTITY, this.cnt);
         WriteByte(MSG_ENTITY, this.colormod.x * 255.0);
         WriteByte(MSG_ENTITY, this.colormod.y * 255.0);
         WriteByte(MSG_ENTITY, this.colormod.z * 255.0);
@@ -147,14 +147,14 @@ void Ent_WaypointSprite(entity this, bool isnew)
 
     if (sendflags & 64)
     {
-        // unfortunately, this needs to be exact (for the 3D display)
+
         this.origin = ReadVector();
         setorigin(this, this.origin);
     }
 
     if (sendflags & 1)
     {
-        this.team = ReadByte();
+		this.team = ReadShort();
         this.rule = ReadByte();
     }
 
@@ -231,7 +231,7 @@ vector spritelookupcolor(entity this, string s, vector def)
 string spritelookuptext(entity this, string s)
 {
 	if(autocvar_g_waypointsprite_spam && waypointsprite_count >= autocvar_g_waypointsprite_spam)
-		return "Spam"; // no need to translate this debug string
+		return "Spam";
     if (s == WP_RaceStartFinish.netname) return (race_checkpointtime || race_mycheckpointtime) ? _("Finish") : _("Start");
     if (s == WP_Weapon.netname) return REGISTRY_GET(Weapons, this.wp_extra).m_name;
     if (s == WP_Item.netname) return REGISTRY_GET(Items, this.wp_extra).m_waypoint;
@@ -241,7 +241,6 @@ string spritelookuptext(entity this, string s)
         return M_ARGV(3, string);
     }
 
-    // need to loop, as our netname could be one of three
     FOREACH(Waypoints, it.netname == s, {
         return it.m_name;
     });
@@ -251,17 +250,16 @@ string spritelookuptext(entity this, string s)
 
 string spritelookupicon(entity this, string s)
 {
-    // TODO: needs icons! //if (s == WP_RaceStartFinish.netname) return (race_checkpointtime || race_mycheckpointtime) ? _("Finish") : _("Start");
+
     if (s == WP_Weapon.netname) return REGISTRY_GET(Weapons, this.wp_extra).model2;
     if (s == WP_Item.netname) return REGISTRY_GET(Items, this.wp_extra).m_icon;
     if (s == WP_Vehicle.netname) return REGISTRY_GET(Vehicles, this.wp_extra).m_icon;
-    //if (s == WP_Monster.netname) return get_monsterinfo(this.wp_extra).m_icon;
+
     if (MUTATOR_CALLHOOK(WP_Format, this, s))
     {
         return M_ARGV(4, string);
     }
 
-    // need to loop, as our netname could be one of three
     FOREACH(Waypoints, it.netname == s, {
         return it.m_icon;
     });
@@ -277,20 +275,17 @@ void drawrotpic(vector org, float rot, string pic, vector sz, vector hotspot, ve
 
     hotspot = -1 * hotspot;
 
-    // hotspot-relative coordinates of the corners
     v1 = hotspot;
     v2 = hotspot + '1 0 0' * sz.x;
     v3 = hotspot + '1 0 0' * sz.x + '0 1 0' * sz.y;
     v4 = hotspot                  + '0 1 0' * sz.y;
 
-    // rotate them, and make them absolute
-    rot = -rot; // rotate by the opposite angle, as our coordinate system is reversed
+    rot = -rot;
     v1 = Rotate(v1, rot) + org;
     v2 = Rotate(v2, rot) + org;
     v3 = Rotate(v3, rot) + org;
     v4 = Rotate(v4, rot) + org;
 
-    // draw them
     R_BeginPolygon(pic, f, true);
     R_PolygonVertex(v1, '0 0 0', rgb, a);
     R_PolygonVertex(v2, '1 0 0', rgb, a);
@@ -312,16 +307,15 @@ void drawquad(vector o, vector ri, vector up, string pic, vector rgb, float a, f
 void drawhealthbar(vector org, float rot, float h, vector sz, vector hotspot, float width, float theheight, float margin, float border, float align, vector rgb, float a, vector hrgb, float ha, float f)
 {
     vector o, ri, up;
-    float owidth; // outer width
+    float owidth;
 
     hotspot = -1 * hotspot;
 
-    // hotspot-relative coordinates of the healthbar corners
     o = hotspot;
     ri = '1 0 0';
     up = '0 1 0';
 
-    rot = -rot; // rotate by the opposite angle, as our coordinate system is reversed
+    rot = -rot;
     o = Rotate(o, rot) + org;
     ri = Rotate(ri, rot);
     up = Rotate(up, rot);
@@ -336,7 +330,6 @@ void drawhealthbar(vector org, float rot, float h, vector sz, vector hotspot, fl
     drawquad(o + ri * (border + align * ((1 - h) * width)), ri * width * h, up * theheight, "", hrgb, ha, f);
 }
 
-// returns location of sprite text
 vector drawspritearrow(vector o, float ang, vector rgb, float a, float t)
 {
     float size   = 9.0 * t;
@@ -366,7 +359,6 @@ vector drawspritearrow(vector o, float ang, vector rgb, float a, float t)
     return o + Rotate(eY * (borderDiag+size+margin), ang);
 }
 
-// returns location of sprite healthbar
 vector drawsprite_TextOrIcon(bool is_text, vector o, float ang, float minwidth, vector rgb, float a, vector sz, string str)
 {
     float algnx, algny;
@@ -384,7 +376,6 @@ vector drawsprite_TextOrIcon(bool is_text, vector o, float ang, float minwidth, 
         w = minwidth;
     h = sz.y;
 
-    // how do corners work?
     aspect = vid_conwidth / vid_conheight;
     sa = sin(ang);
     ca = cos(ang) * aspect;
@@ -401,11 +392,9 @@ vector drawsprite_TextOrIcon(bool is_text, vector o, float ang, float minwidth, 
         algny = (ca < 0);
     }
 
-    // align
     o.x -= w * algnx;
     o.y -= h * algny;
 
-    // we want to be onscreen
     if (o.x < 0)
         o.x = 0;
     if (o.y < 0)
@@ -475,20 +464,19 @@ void Draw_WaypointSprite(entity this)
         this.alpha = 1;
 
     if (this.hideflags & 2)
-        return; // radar only
+        return;
 
     if (autocvar_cl_hidewaypoints >= 2)
         return;
 
     if ((this.hideflags & 1) && autocvar_cl_hidewaypoints)
-        return; // fixed waypoint
+        return;
 
     InterpolateOrigin_Do(this);
 
     float t = entcs_GetTeam(player_localnum) + 1;
     string spriteimage = "";
 
-    // choose the sprite
     switch (this.rule)
     {
         case SPRITERULE_SPECTATOR:
@@ -533,7 +521,7 @@ void Draw_WaypointSprite(entity this)
 
     if(this.maxdistance > 0)
     {
-        // restrict maximum normal distance to the waypoint's maximum distance to prevent exploiting cvars
+
         float maxnormdistance = bound(0, waypointsprite_normdistance, this.maxdistance - 1);
         a *= (bound(0, (this.maxdistance - dist) / (this.maxdistance - maxnormdistance), 1) ** waypointsprite_distancealphaexponent);
     }
@@ -551,7 +539,7 @@ void Draw_WaypointSprite(entity this)
     {
         if (this.helpme && time < this.helpme)
             a *= SPRITE_HELPME_BLINK;
-        else if (!this.lifetime) // fading out waypoints don't blink
+        else if (!this.lifetime)
             a *= spritelookupblinkvalue(this, spriteimage);
     }
 
@@ -576,7 +564,7 @@ void Draw_WaypointSprite(entity this)
     || o.x > (vid_conwidth - (vid_conwidth * waypointsprite_edgeoffset_right))
     || o.y > (vid_conheight - (vid_conheight * waypointsprite_edgeoffset_bottom)))
     {
-        // scale it to be just in view
+
         vector d;
 
         d = o - '0.5 0 0' * vid_conwidth - '0 0.5 0' * vid_conheight;
@@ -591,18 +579,18 @@ void Draw_WaypointSprite(entity this)
 
         if (max(f1, -f1) > max(f2, -f2)) {
             if (d.z * f1 > 0) {
-                // RIGHT edge
+
                 d = d * ((0.5 - waypointsprite_edgeoffset_right) / f1);
             } else {
-                // LEFT edge
+
                 d = d * (-(0.5 - waypointsprite_edgeoffset_left) / f1);
             }
         } else {
             if (d.z * f2 > 0) {
-                // BOTTOM edge
+
                 d = d * ((0.5 - waypointsprite_edgeoffset_bottom) / f2);
             } else {
-                // TOP edge
+
                 d = d * (-(0.5 - waypointsprite_edgeoffset_top) / f2);
             }
         }
@@ -668,7 +656,7 @@ void Draw_WaypointSprite(entity this)
 		string spr_icon = spritelookupicon(this, spriteimage);
 		pic = spr_icon;
 		bool icon_found = !(!spr_icon || spr_icon == "");
-		if (icon_found) // it's valid, but let's make sure it exists!
+		if (icon_found)
 		{
 			pic = strcat(hud_skin_path, "/", spr_icon);
 			if(precache_pic(pic) == "")
@@ -697,7 +685,7 @@ void Draw_WaypointSprite(entity this)
     }
     else
     {
-        // for convenience icon path and color are saved to txt and txt_color
+
         txt = pic;
         txt_color = ((autocvar_g_waypointsprite_iconcolor) ? '1 1 1' : rgb);
         sz = autocvar_g_waypointsprite_iconsize * '1 1 0';
@@ -753,7 +741,7 @@ void WaypointSprite_Load_Frames(string ext)
     for (int i = 0; i < n; ++i)
     {
         string s = search_getfilename(dh, i);
-        s = substring(s, 15, strlen(s) - 15 - ext_len); // strip models/sprites/ and extension
+        s = substring(s, 15, strlen(s) - 15 - ext_len);
 
         int o = strstrofs(s, "_frame", 0);
         string sname = strcat("/spriteframes/", substring(s, 0, o));
@@ -866,7 +854,7 @@ void WaypointSprite_UpdateOrigin(entity e, vector o)
 
 void WaypointSprite_UpdateRule(entity e, float t, float r)
 {
-    // no check, as this is never called without doing an actual change (usually only once)
+
     e.rule = r;
     e.team = t;
     e.SendFlags |= 1;
@@ -874,7 +862,7 @@ void WaypointSprite_UpdateRule(entity e, float t, float r)
 
 void WaypointSprite_UpdateTeamRadar(entity e, entity icon, vector col)
 {
-    // no check, as this is never called without doing an actual change (usually only once)
+
     int i = icon.m_id;
     int new_cnt = (e.cnt & BIT(7)) | (i & BITS(7));
     if (new_cnt != e.cnt || col != e.colormod)
@@ -887,10 +875,10 @@ void WaypointSprite_UpdateTeamRadar(entity e, entity icon, vector col)
 
 void WaypointSprite_Ping(entity e)
 {
-    // anti spam
+
     if (time < e.waypointsprite_pingtime) return;
     e.waypointsprite_pingtime = time + 0.3;
-    // ALWAYS sends (this causes a radar circle), thus no check
+
     e.cnt |= BIT(7);
     e.SendFlags |= 32;
 }
@@ -911,10 +899,7 @@ void WaypointSprite_FadeOutIn(entity e, float t)
     }
     else if (t < (e.teleport_time - time))
     {
-        // accelerate the waypoint's dying
-        // ensure:
-        //   (e.teleport_time - time) / wp.fade_time stays
-        //   e.teleport_time = time + fadetime
+
         float current_fadetime = e.teleport_time - time;
         e.teleport_time = time + t;
         if (e.fade_time < 0)
@@ -973,16 +958,15 @@ void WaypointSprite_Think(entity this)
     if (doremove)
         WaypointSprite_Kill(this);
     else
-        this.nextthink = time; // WHY?!?
+        this.nextthink = time;
 }
 
 bool WaypointSprite_visible_for_player(entity this, entity player, entity view)
 {
-    // personal waypoints
+
     if (this.enemy && this.enemy != view)
         return false;
 
-    // team waypoints
     if (this.rule == SPRITERULE_SPECTATOR)
     {
         if (!autocvar_sv_itemstime)
@@ -1004,10 +988,7 @@ bool WaypointSprite_visible_for_player(entity this, entity player, entity view)
 entity WaypointSprite_getviewentity(entity e)
 {
     if (IS_SPEC(e)) e = e.enemy;
-    /* TODO idea (check this breaks nothing)
-    else if (e.classname == "observer")
-        e = NULL;
-    */
+
     return e;
 }
 
@@ -1020,9 +1001,7 @@ float WaypointSprite_isteammate(entity e, entity e2)
 
 bool WaypointSprite_Customize(entity this, entity client)
 {
-    // this is not in SendEntity because it shall run every frame, not just every update
 
-    // make spectators see what the player would see
     entity e = WaypointSprite_getviewentity(client);
 
     if (MUTATOR_CALLHOOK(CustomizeWaypoint, this, client))
@@ -1035,24 +1014,23 @@ bool WaypointSprite_SendEntity(entity this, entity to, float sendflags);
 
 void WaypointSprite_Reset(entity this)
 {
-    // if a WP wants to time out, let it time out immediately; other WPs ought to be reset/killed by their owners
 
     if (this.fade_time)
         WaypointSprite_Kill(this);
 }
 
 entity WaypointSprite_Spawn(
-    entity spr, // sprite
-    float _lifetime, float maxdistance, // lifetime, max distance
-    entity ref, vector ofs, // position
-    entity showto, float t, // show to whom? Use a flag to indicate a team
-    entity own, .entity ownfield, // remove when own gets killed
-    float hideable, // true when it should be controlled by cl_hidewaypoints
-    entity icon // initial icon
+    entity spr,
+    float _lifetime, float maxdistance,
+    entity ref, vector ofs,
+    entity showto, float t,
+    entity own, .entity ownfield,
+    float hideable,
+    entity icon
 )
 {
     entity wp = new(sprite_waypoint);
-    wp.fade_time = _lifetime; // if negative tells client not to fade it out
+    wp.fade_time = _lifetime;
     if(_lifetime < 0)
     	_lifetime = -_lifetime;
     wp.teleport_time = time + _lifetime;
@@ -1093,7 +1071,7 @@ entity WaypointSprite_SpawnFixed(
     vector ofs,
     entity own,
     .entity ownfield,
-    entity icon // initial icon
+    entity icon
 )
 {
     return WaypointSprite_Spawn(spr, 0, 0, NULL, ofs, NULL, 0, own, ownfield, true, icon);
@@ -1104,7 +1082,7 @@ entity WaypointSprite_DeployFixed(
     bool limited_range,
     entity player,
     vector ofs,
-    entity icon // initial icon
+    entity icon
 )
 {
     float t;
@@ -1124,7 +1102,7 @@ entity WaypointSprite_DeployPersonal(
     entity spr,
     entity player,
     vector ofs,
-    entity icon // initial icon
+    entity icon
 )
 {
     return WaypointSprite_Spawn(spr, 0, 0, NULL, ofs, NULL, 0, player, waypointsprite_deployed_personal, false, icon);
@@ -1134,12 +1112,12 @@ entity WaypointSprite_Attach(
     entity spr,
     entity player,
     bool limited_range,
-    entity icon // initial icon
+    entity icon
 )
 {
     float t;
     if (player.waypointsprite_attachedforcarrier)
-        return NULL; // can't attach to FC
+        return NULL;
     if (teamplay)
         t = player.team;
     else
@@ -1155,10 +1133,10 @@ entity WaypointSprite_Attach(
 entity WaypointSprite_AttachCarrier(
     entity spr,
     entity carrier,
-    entity icon // initial icon and color
+    entity icon
 )
 {
-    WaypointSprite_Kill(carrier.waypointsprite_attached); // FC overrides attached
+    WaypointSprite_Kill(carrier.waypointsprite_attached);
     entity e = WaypointSprite_Spawn(spr, 0, 0, carrier, '0 0 64', NULL, carrier.team, carrier, waypointsprite_attachedforcarrier, false, icon);
     if (GetResource(carrier, RES_HEALTH))
     {

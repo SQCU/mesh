@@ -1,46 +1,5 @@
 #include "gmqcc.h"
 
-/*
- * Based on the flexible and economical utf8 decoder:
- * http://bjoern.hoehrmann.de/utf-8/decoder/dfa/
- *
- * This is slightly more economical, the fastest way to decode utf8 is
- * with a lookup table as in:
- *
- * first 1-byte lookup
- * if that fails, 2-byte lookup
- * if that fails, 3-byte lookup
- * if that fails, 4-byte lookup
- *
- * The following table can be generated with some interval trickery.
- * consider an interval [a, b):
- *
- *      a must be 0x80 or b must be 0xc0, lower 3 bits
- *      are clear, thus:
- *          interval(a,b) = ((uint32_t)((a==0x80?0x40-b:-a)<<23))
- *
- * The failstate can be represented as interval(0x80,0x80), it's
- * odd to see but this is a full state machine.
- *
- * The table than maps the corresponding sections as a serise of
- * intervals.
- *
- * In this table the transition values are pre-multiplied with 16 to
- * save a shift instruction for every byte, we throw away fillers
- * which makes the table smaller.
- *
- * The first section of the table handles bytes with leading C
- * The second section of the table handles bytes with leading D
- * The third section of the table handles bytes with leading E
- * The last section of the table handles bytes with leading F
- *
- * The values themselfs in the table are arranged so that when you
- * left shift them by 6 to shift continuation characters into place, the
- * new top bits tell you:
- *
- *  1 - if you keep going
- *  2 - the range of valid values for the next byte
- */
 static const uint32_t utf8_tab[] = {
     0xC0000002, 0xC0000003, 0xC0000004, 0xC0000005, 0xC0000006,
     0xC0000007, 0xC0000008, 0xC0000009, 0xC000000A, 0xC000000B,
@@ -87,7 +46,6 @@ int utf8_to(utf8ch_t *i, const unsigned char *s, size_t n) {
     if (!s || !n)
         return 0;
 
-    /* This is consistent with mbtowc behaviour. */
     if (!i)
         i = (utf8ch_t*)(void*)&i;
 
@@ -98,20 +56,9 @@ int utf8_to(utf8ch_t *i, const unsigned char *s, size_t n) {
 
     c = utf8_tab[*s++-0xC2U];
 
-    /*
-     * Avoid excessive checks against n.
-     *
-     * When shifting state `n-1` times does not clear the high bit,
-     * then the value of `n` won't satisfy the condition to read a
-     * character as it will be insufficent.
-     */
     if (n < 4 && ((c<<(6*n-6)) & (1U << 31)))
         return 0;
 
-    /*
-     * The upper 6 state bits are negitive integer offset to a bound-check
-     * next byte equivlant to: ((b-0x80)+(b+offset))&~0x3f
-     */
     if ((((*s>>3)-0x10)|((*s>>3)+((int32_t)c>>26))) & ~7)
         return 0;
 

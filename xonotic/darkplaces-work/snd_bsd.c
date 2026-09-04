@@ -1,22 +1,5 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 #include "quakedef.h"
 
 #include <sys/param.h>
@@ -34,25 +17,14 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "snd_main.h"
 
-
 static int audio_fd = -1;
 
-
-/*
-====================
-SndSys_Init
-
-Create "snd_renderbuffer" with the proper sound format if the call is successful
-May return a suggested format if the requested format isn't available
-====================
-*/
 qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 {
 	unsigned int i;
 	const char *snddev;
 	audio_info_t info;
 
-	// Open the audio device
 #ifdef _PATH_SOUND
 	snddev = _PATH_SOUND;
 #elif defined(SUNOS)
@@ -68,7 +40,7 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	}
 
 	AUDIO_INITINFO (&info);
-#ifdef AUMODE_PLAY	// NetBSD / OpenBSD
+#ifdef AUMODE_PLAY
 	info.mode = AUMODE_PLAY;
 #endif
 	info.play.sample_rate = requested->speed;
@@ -96,21 +68,10 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 		return false;
 	}
 
-	// TODO: check the parameters with AUDIO_GETINFO
-	// TODO: check AUDIO_ENCODINGFLAG_EMULATED with AUDIO_GETENC
-
 	snd_renderbuffer = Snd_CreateRingBuffer(requested, 0, NULL);
 	return true;
 }
 
-
-/*
-====================
-SndSys_Shutdown
-
-Stop the sound card, delete "snd_renderbuffer" and free its other resources
-====================
-*/
 void SndSys_Shutdown (void)
 {
 	if (audio_fd >= 0)
@@ -127,14 +88,6 @@ void SndSys_Shutdown (void)
 	}
 }
 
-
-/*
-====================
-SndSys_Submit
-
-Submit the contents of "snd_renderbuffer" to the sound card
-====================
-*/
 void SndSys_Submit (void)
 {
 	unsigned int startoffset, factor, limit, nbframes;
@@ -181,14 +134,6 @@ void SndSys_Submit (void)
 	snd_renderbuffer->startframe += written / factor;
 }
 
-
-/*
-====================
-SndSys_GetSoundTime
-
-Returns the number of sample frames consumed since the sound started
-====================
-*/
 unsigned int SndSys_GetSoundTime (void)
 {
 	audio_info_t info;
@@ -203,41 +148,18 @@ unsigned int SndSys_GetSoundTime (void)
 	return info.play.samples;
 }
 
-
-/*
-====================
-SndSys_LockRenderBuffer
-
-Get the exclusive lock on "snd_renderbuffer"
-====================
-*/
 qboolean SndSys_LockRenderBuffer (void)
 {
-	// Nothing to do
+
 	return true;
 }
 
-
-/*
-====================
-SndSys_UnlockRenderBuffer
-
-Release the exclusive lock on "snd_renderbuffer"
-====================
-*/
 void SndSys_UnlockRenderBuffer (void)
 {
-	// Nothing to do
+
 }
 
-/*
-====================
-SndSys_SendKeyEvents
-
-Send keyboard events originating from the sound system (e.g. MIDI)
-====================
-*/
 void SndSys_SendKeyEvents(void)
 {
-	// not supported
+
 }

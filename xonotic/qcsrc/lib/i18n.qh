@@ -4,12 +4,8 @@
 #include "map.qh"
 #include "unsafe.qh"
 
-// translation helpers
 string prvm_language;
 
-/**
- * @deprecated prefer _("translatable text") - GMQCC's -ftranslatable-strings feature
- */
 ERASEABLE
 string language_filename(string s)
 {
@@ -50,11 +46,11 @@ string CTX(string s)
 #endif
 	int caret_ofs = strstrofs(s, "^", 0);
 	string ret = s;
-	// empty (caret_ofs == 0) and one char (caret_ofs == 1) prefixes are invalid
+
 	if (caret_ofs > 1)
 	{
 		int space_ofs = strstrofs(substring(s, 0, caret_ofs), " ", 0);
-		// prefixes containing a space are invalid (likely the caret is part of a color code)
+
 		if (space_ofs < 0 || space_ofs > caret_ofs)
 			ret = substring(s, caret_ofs + 1, -1);
 	}

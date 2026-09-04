@@ -10,38 +10,34 @@ void W_Electro_TriggerCombo(vector org, float rad, entity own)
 	{
 		if(e.classname == "electro_orb")
 		{
-			// check if the ball we are exploding is not owned by an
-			// independent player which is not the player who shot the ball
+
 			if(IS_INDEPENDENT_PLAYER(e.realowner) && own != e.realowner)
 			{
 				e = e.chain;
 				continue;
 			}
-			// do we allow thruwall triggering?
+
 			if(WEP_CVAR(electro, combo_comboradius_thruwall))
 			{
-				// if distance is greater than thruwall distance, check to make sure it's not through a wall
+
 				if(vdist(e.WarpZone_findradius_dist, >, WEP_CVAR(electro, combo_comboradius_thruwall)))
 				{
 					WarpZone_TraceLine(org, e.origin, MOVE_NOMONSTERS, e);
 					if(trace_fraction != 1)
 					{
-						// trigger is through a wall and outside of thruwall range, abort
+
 						e = e.chain;
 						continue;
 					}
 				}
 			}
 
-			// change owner to whoever caused the combo explosion
 			e.realowner = own;
 			e.takedamage = DAMAGE_NO;
 			e.classname = "electro_orb_chain";
 
-			// now set the next one to trigger as well
 			setthink(e, W_Electro_ExplodeCombo);
 
-			// delay combo chains, looks cooler
 			float delay = 0;
 			if (WEP_CVAR(electro, combo_speed))
 				delay = vlen(e.WarpZone_findradius_dist) / WEP_CVAR(electro, combo_speed);
@@ -56,7 +52,7 @@ void W_Electro_ExplodeCombo(entity this)
 	W_Electro_TriggerCombo(this.origin, WEP_CVAR(electro, combo_comboradius), this.realowner);
 
 	this.event_damage = func_null;
-	this.velocity = this.movedir; // .velocity must be != '0 0 0' for particle fx and decal to work
+	this.velocity = this.movedir;
 
 	RadiusDamage(
 		this,
@@ -67,7 +63,7 @@ void W_Electro_ExplodeCombo(entity this)
 		NULL,
 		NULL,
 		WEP_CVAR(electro, combo_force),
-		WEP_ELECTRO.m_id | HITTYPE_BOUNCE, // use THIS type for a combo because primary can't bounce
+		WEP_ELECTRO.m_id | HITTYPE_BOUNCE,
 		this.weaponentity_fld,
 		NULL
 	);
@@ -86,9 +82,9 @@ void W_Electro_Explode(entity this, entity directhitentity)
 
 	this.event_damage = func_null;
 	this.takedamage = DAMAGE_NO;
-	this.velocity = this.movedir; // .velocity must be != '0 0 0' for particle fx and decal to work
+	this.velocity = this.movedir;
 
-	if(this.move_movetype == MOVETYPE_BOUNCE || this.classname == "electro_orb") // TODO: classname is more reliable anyway?
+	if(this.move_movetype == MOVETYPE_BOUNCE || this.classname == "electro_orb")
 	{
 		RadiusDamage(
 			this,
@@ -136,12 +132,9 @@ void W_Electro_TouchExplode(entity this, entity toucher)
 	W_Electro_Explode(this, toucher);
 }
 
-
-//void sys_phys_update_single(entity this);
-
 void W_Electro_Bolt_Think(entity this)
 {
-	// sys_phys_update_single(this);
+
 	if(time >= this.ltime)
 	{
 		this.use(this, NULL, NULL);
@@ -153,13 +146,11 @@ void W_Electro_Bolt_Think(entity this)
 		float found = 0;
 		entity e = WarpZone_FindRadius(this.origin, WEP_CVAR_PRI(electro, midaircombo_radius), true);
 
-		// loop through nearby orbs and trigger them
 		while(e)
 		{
 			if(e.classname == "electro_orb")
 			{
-				// check if the ball we are exploding is not owned by an
-				// independent player which is not the player who shot the ball
+
 				if(IS_INDEPENDENT_PLAYER(e.realowner) && this.realowner != e.realowner)
 				{
 					e = e.chain;
@@ -181,15 +172,11 @@ void W_Electro_Bolt_Think(entity this)
 
 				if (explode)
 				{
-					// change owner to whoever caused the combo explosion
+
 					e.realowner = this.realowner;
 					e.takedamage = DAMAGE_NO;
 					e.classname = "electro_orb_chain";
 
-					// Only first orb explosion uses midaircombo_speed, others use the normal combo_speed.
-					// This allows to avoid the delay on the first explosion which looks better
-					// (the bolt and orb should explode together because they interacted together)
-					// while keeping the chaining delay.
 					setthink(e, W_Electro_ExplodeCombo);
 					float delay = 0;
 					if (WEP_CVAR_PRI(electro, midaircombo_speed))
@@ -202,14 +189,13 @@ void W_Electro_Bolt_Think(entity this)
 			e = e.chain;
 		}
 
-		// if we triggered an orb, should we explode? if not, lets try again next time
 		if(found && WEP_CVAR_PRI(electro, midaircombo_explode))
 			{ this.use(this, NULL, NULL); }
 		else
 			{ this.nextthink = min(time + WEP_CVAR_PRI(electro, midaircombo_interval), this.ltime); }
 	}
 	else { this.nextthink = this.ltime; }
-	// this.nextthink = time;
+
 }
 
 void W_Electro_Attack_Bolt(Weapon thiswep, entity actor, .entity weaponentity)
@@ -246,7 +232,6 @@ void W_Electro_Attack_Bolt(Weapon thiswep, entity actor, .entity weaponentity)
 	proj.weaponentity_fld = weaponentity;
 	setorigin(proj, w_shotorg);
 
-	// if (IS_CSQC)
 	set_movetype(proj, MOVETYPE_FLY);
 	W_SetupProjVelocity_PRI(proj, electro);
 	proj.angles = vectoangles(proj.velocity);
@@ -260,8 +245,7 @@ void W_Electro_Attack_Bolt(Weapon thiswep, entity actor, .entity weaponentity)
 	CSQCProjectile(proj, true, PROJECTILE_ELECTRO_BEAM, true);
 
 	MUTATOR_CALLHOOK(EditProjectile, actor, proj);
-	// proj.com_phys_pos = proj.origin;
-	// proj.com_phys_vel = proj.velocity;
+
 }
 
 void W_Electro_Orb_Follow_Think(entity this)
@@ -276,14 +260,13 @@ void W_Electro_Orb_Follow_Think(entity this)
 		int lost = LostMovetypeFollow(this);
 		if (lost == 2)
 		{
-			// FIXME if player disconnected, it isn't possible to drop the orb at player's origin
-			// see comment in LostMovetypeFollow implementation
+
 			delete(this);
 			return;
 		}
 		if (lost)
 		{
-			// drop the orb at the corpse's location
+
 			PROJECTILE_MAKETRIGGER(this);
 			set_movetype(this, MOVETYPE_TOSS);
 
@@ -308,7 +291,7 @@ void W_Electro_Orb_Stick(entity this, entity to)
 	setorigin(newproj, this.origin);
 	setmodel(newproj, MDL_PROJECTILE_ELECTRO);
 	setsize(newproj, this.mins, this.maxs);
-	newproj.angles = vectoangles(-trace_plane_normal); // face against the surface
+	newproj.angles = vectoangles(-trace_plane_normal);
 	newproj.traileffectnum = _particleeffectnum(EFFECT_TR_NEXUIZPLASMA.eent_eff_name);
 
 	newproj.movedir = -trace_plane_normal;
@@ -321,7 +304,7 @@ void W_Electro_Orb_Stick(entity this, entity to)
 	newproj.damagedbycontents = true;
 	IL_PUSH(g_damagedbycontents, newproj);
 
-	set_movetype(newproj, MOVETYPE_NONE); // lock the orb in place
+	set_movetype(newproj, MOVETYPE_NONE);
 	newproj.projectiledeathtype = this.projectiledeathtype;
 	newproj.weaponentity_fld = this.weaponentity_fld;
 
@@ -336,7 +319,6 @@ void W_Electro_Orb_Stick(entity this, entity to)
 	IL_PUSH(g_projectiles, newproj);
 	IL_PUSH(g_bot_dodge, newproj);
 
-	// check if limits are enabled (we can tell by checking if the original orb is listed) and push it to the list if so
 	if(LimitedElectroBallRubbleList && IL_CONTAINS(LimitedElectroBallRubbleList, this))
 	{
 		ReplaceOldListedChildRubble(LimitedElectroBallRubbleList, newproj, this);
@@ -363,9 +345,9 @@ void W_Electro_Orb_Touch(entity this, entity toucher)
 	PROJECTILE_TOUCH(this, toucher);
 	if(toucher.takedamage == DAMAGE_AIM && WEP_CVAR_SEC(electro, touchexplode))
 		{ W_Electro_Explode(this, toucher); }
-	else if(toucher.owner != this.owner && toucher.classname != this.classname) // don't stick to player's other projectiles!
+	else if(toucher.owner != this.owner && toucher.classname != this.classname)
 	{
-		//UpdateCSQCProjectile(this);
+
 		spamsound(this, CH_SHOTS, SND_ELECTRO_BOUNCE, VOL_BASE, ATTEN_NORM);
 		this.projectiledeathtype |= HITTYPE_BOUNCE;
 
@@ -384,11 +366,10 @@ void W_Electro_Orb_Damage(entity this, entity inflictor, entity attacker, float 
 	if(GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	// note: combos are usually triggered by W_Electro_TriggerCombo, not damage
 	float is_combo = (inflictor.classname == "electro_orb_chain" || inflictor.classname == "electro_bolt");
 
 	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, (is_combo ? 1 : -1)))
-		return; // g_projectiles_damage says to halt
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 	if(GetResource(this, RES_HEALTH) <= 0)
@@ -397,12 +378,11 @@ void W_Electro_Orb_Damage(entity this, entity inflictor, entity attacker, float 
 		this.nextthink = time;
 		if(is_combo)
 		{
-			// change owner to whoever caused the combo explosion
+
 			this.realowner = inflictor.realowner;
 			this.classname = "electro_orb_chain";
 			setthink(this, W_Electro_ExplodeCombo);
-			// delay combo chains, looks cooler
-			// bound the length, inflictor may be in a galaxy far far away (warpzones)
+
 			float len = min(WEP_CVAR(electro, combo_radius), vlen(this.origin - inflictor.origin));
 			float delay = len / WEP_CVAR(electro, combo_speed);
 			this.nextthink = time + delay;
@@ -410,7 +390,7 @@ void W_Electro_Orb_Damage(entity this, entity inflictor, entity attacker, float 
 		else
 		{
 			this.use = W_Electro_Explode_use;
-			setthink(this, adaptor_think2use); // not _hittype_splash, as this runs "immediately"
+			setthink(this, adaptor_think2use);
 		}
 	}
 }
@@ -432,7 +412,7 @@ void W_Electro_Attack_Orb(Weapon thiswep, entity actor, .entity weaponentity)
 		thiswep.m_id | HITTYPE_SECONDARY
 	);
 
-	w_shotdir = v_forward; // no TrueAim for grenades please
+	w_shotdir = v_forward;
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir);
 
@@ -449,8 +429,6 @@ void W_Electro_Attack_Orb(Weapon thiswep, entity actor, .entity weaponentity)
 	proj.weaponentity_fld = weaponentity;
 	setorigin(proj, w_shotorg);
 
-	//proj.glow_size = 50;
-	//proj.glow_color = 45;
 	set_movetype(proj, MOVETYPE_BOUNCE);
 	W_SetupProjVelocity_UP_SEC(proj, electro);
 	settouch(proj, W_Electro_Orb_Touch);
@@ -478,7 +456,7 @@ void W_Electro_Attack_Orb(Weapon thiswep, entity actor, .entity weaponentity)
 		LimitedChildrenRubble(LimitedElectroBallRubbleList, "electro_orb", WEP_CVAR_SEC(electro, limit), adaptor_think2use_hittype_splash, actor);
 	}
 
-	CSQCProjectile(proj, true, PROJECTILE_ELECTRO, false); // no culling, it has sound
+	CSQCProjectile(proj, true, PROJECTILE_ELECTRO, false);
 
 	MUTATOR_CALLHOOK(EditProjectile, actor, proj);
 }
@@ -530,7 +508,7 @@ METHOD(Electro, wr_aim, void(entity thiswep, entity actor, .entity weaponentity)
 }
 METHOD(Electro, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    if(autocvar_g_balance_electro_reload_ammo) // forced reload // WEAPONTODO
+    if(autocvar_g_balance_electro_reload_ammo)
     {
         float ammo_amount = 0;
         if(actor.(weaponentity).clip_load >= WEP_CVAR_PRI(electro, ammo))
@@ -575,7 +553,7 @@ METHOD(Electro, wr_checkammo1, bool(entity thiswep, entity actor, .entity weapon
 METHOD(Electro, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {
     float ammo_amount;
-    if(WEP_CVAR(electro, combo_safeammocheck)) // true if you can fire at least one secondary blob AND one primary shot after it, otherwise false.
+    if(WEP_CVAR(electro, combo_safeammocheck))
     {
         ammo_amount = GetResource(actor, thiswep.ammo_type) >= WEP_CVAR_SEC(electro, ammo) + WEP_CVAR_PRI(electro, ammo);
         ammo_amount += actor.(weaponentity).(weapon_load[thiswep.m_id]) >= WEP_CVAR_SEC(electro, ammo) + WEP_CVAR_PRI(electro, ammo);
@@ -629,7 +607,7 @@ METHOD(Electro, wr_impacteffect, void(entity thiswep, entity actor))
     {
         if(w_deathtype & HITTYPE_BOUNCE)
         {
-            // this is sent as "primary (w_deathtype & HITTYPE_BOUNCE)" to distinguish it from (w_deathtype & HITTYPE_SECONDARY) bounced balls
+
             pointparticles(EFFECT_ELECTRO_COMBO, org2, '0 0 0', 1);
             if(!w_issilent)
                 sound(actor, CH_SHOTS, SND_ELECTRO_IMPACT_COMBO, VOL_BASE, ATTEN_NORM);

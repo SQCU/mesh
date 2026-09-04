@@ -29,10 +29,10 @@ bool accuracy_send(entity this, entity to, int sf)
 	if (to != a.owner)
 		if (!autocvar_sv_accuracy_data_share && !CS_CVAR(a.owner).cvar_cl_accuracy_data_share)
 			sf = 0;
-	// note: zero sendflags can never be sent... so we can use that to say that we send no accuracy!
+
 	WriteInt24_t(MSG_ENTITY, sf);
 	if (sf == 0) return true;
-	// note: we know that client and server agree about SendFlags...
+
 	int f = 1;
 	for (int w = 0; w <= WEP_LAST - WEP_FIRST; ++w) {
 		if (sf & f) WriteByte(MSG_ENTITY, accuracy_byte(a.accuracy_hit[w], a.accuracy_fired[w]));
@@ -41,7 +41,6 @@ bool accuracy_send(entity this, entity to, int sf)
 	return true;
 }
 
-// init/free
 void accuracy_init(entity e)
 {
 	entity a = CS(e).accuracy = new_pure(accuracy);
@@ -70,14 +69,11 @@ void accuracy_reset(entity e)
 	}
 }
 
-// force a resend of a player's accuracy stats
 void accuracy_resend(entity e)
 {
 	CS(e).accuracy.SendFlags = 0xFFFFFF;
 }
 
-// update accuracy stats
-//.float hit_time;
 .float fired_time;
 
 void accuracy_add(entity this, Weapon w, float fired, float hit)
@@ -93,17 +89,17 @@ void accuracy_add(entity this, Weapon w, float fired, float hit)
 	if (hit)    a.accuracy_hit  [wepid] += hit;
 	if (fired)  a.accuracy_fired[wepid] += fired;
 
-    if (hit && STAT(HIT_TIME, a) != time) { // only run this once per frame
+    if (hit && STAT(HIT_TIME, a) != time) {
         a.accuracy_cnt_hit[wepid] += 1;
         STAT(HIT_TIME, a) = time;
     }
 
-    if (fired && a.fired_time != time) { // only run this once per frame
+    if (fired && a.fired_time != time) {
         a.accuracy_cnt_fired[wepid] += 1;
         a.fired_time = time;
     }
 
-	if (b == accuracy_byte(a.accuracy_hit[wepid], a.accuracy_fired[wepid])) return; // no change
+	if (b == accuracy_byte(a.accuracy_hit[wepid], a.accuracy_fired[wepid])) return;
 	int sf = 1 << (wepid % 24);
 	a.SendFlags |= sf;
 	FOREACH_CLIENT(IS_SPEC(it) && it.enemy == this, { CS(it).accuracy.SendFlags |= sf; });
@@ -115,8 +111,6 @@ bool accuracy_isgooddamage(entity attacker, entity targ)
 
 	if (warmup_stage || game_stopped) return false;
 
-	// damage to dead/frozen players is good only if it happens in the frame they get killed / frozen
-	// so that stats for weapons that shoot multiple projectiles per shot are properly counted
 	if (IS_DEAD(targ) && time > targ.death_time) return false;
 	if (STAT(FROZEN, targ) && time > targ.freeze_time) return false;
 	if (SAME_TEAM(attacker, targ)) return false;

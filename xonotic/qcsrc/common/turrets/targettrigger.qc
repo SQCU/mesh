@@ -17,8 +17,6 @@ void turret_targettrigger_touch(entity this, entity toucher)
     this.cnt = time + 0.5;
 }
 
-/*QUAKED turret_targettrigger (.5 .5 .5) ?
-*/
 spawnfunc(turret_targettrigger)
 {
     if(!autocvar_g_turrets) { delete(this); return; }

@@ -29,7 +29,7 @@ static void CL_Beams_SetupExternalTexture(void)
 
 static void CL_Beams_SetupBuiltinTexture(void)
 {
-	// beam direction is horizontal in the lightning texture
+
 	int texwidth = 128;
 	int texheight = 64;
 	float r, g, b, intensity, thickness = texheight * 0.25f, border = thickness + 2.0f, ithickness = 1.0f / thickness, center, n;
@@ -38,7 +38,6 @@ static void CL_Beams_SetupBuiltinTexture(void)
 	skinframe_t *skinframe;
 	float centersamples[17][2];
 
-	// make a repeating noise pattern for the beam path
 	for (x = 0; x < 16; x++)
 	{
 		centersamples[x][0] = lhrandom(border, texheight - border);
@@ -49,7 +48,6 @@ static void CL_Beams_SetupBuiltinTexture(void)
 
 	data = (unsigned char *)Mem_Alloc(tempmempool, texwidth * texheight * 4);
 
-	// iterate by columns and draw the entire column of pixels
 	for (x = 0; x < texwidth; x++)
 	{
 		r = x * 16.0f / texwidth;
@@ -142,55 +140,38 @@ void CL_Beam_AddPolygons(const beam_t *b)
 	if (!r_lightningbeam_qmbtexture.integer && cl_beams_builtintexture.currentskinframe == NULL)
 		CL_Beams_SetupBuiltinTexture();
 
-	// calculate beam direction (beamdir) vector and beam length
-	// get difference vector
 	CL_Beam_CalculatePositions(b, start, end);
 	VectorSubtract(end, start, beamdir);
-	// find length of difference vector
+
 	length = sqrt(DotProduct(beamdir, beamdir));
-	// calculate scale to make beamdir a unit vector (normalized)
+
 	t1 = 1.0f / length;
-	// scale beamdir so it is now normalized
+
 	VectorScale(beamdir, t1, beamdir);
 
-	// calculate up vector such that it points toward viewer, and rotates around the beamdir
-	// get direction from start of beam to viewer
 	VectorSubtract(r_refdef.view.origin, start, up);
-	// remove the portion of the vector that moves along the beam
-	// (this leaves only a vector pointing directly away from the beam)
+
 	t1 = -DotProduct(up, beamdir);
 	VectorMA(up, t1, beamdir, up);
-	// generate right vector from forward and up, the result is unnormalized
+
 	CrossProduct(beamdir, up, right);
-	// now normalize the right vector and up vector
+
 	VectorNormalize(right);
 	VectorNormalize(up);
 
-	// calculate T coordinate scrolling (start and end texcoord along the beam)
 	t1 = beamscroll;
 	t1 = t1 - (int)t1;
 	t2 = t1 + beamrepeatscale * length;
 
-	// the beam is 3 polygons in this configuration:
-	//  *   2
-	//   * *
-	// 1*****
-	//   * *
-	//  *   3
-	// they are showing different portions of the beam texture, creating an
-	// illusion of a beam that appears to curl around in 3D space
-	// (and realize that the whole polygon assembly orients itself to face
-	//  the viewer)
-
 	mod = &cl_meshentitymodels[MESH_PARTICLES];
 	surf = Mod_Mesh_AddSurface(mod, r_lightningbeam_qmbtexture.integer ? &cl_beams_externaltexture : &cl_beams_builtintexture);
-	// polygon 1
+
 	VectorM(r_lightningbeam_thickness.value, right, offset);
 	CL_Beam_AddQuad(mod, surf, start, end, offset, t1, t2);
-	// polygon 2
+
 	VectorMAM(r_lightningbeam_thickness.value * 0.70710681f, right, r_lightningbeam_thickness.value * 0.70710681f, up, offset);
 	CL_Beam_AddQuad(mod, surf, start, end, offset, t1 + 0.33f, t2 + 0.33f);
-	// polygon 3
+
 	VectorMAM(r_lightningbeam_thickness.value * 0.70710681f, right, r_lightningbeam_thickness.value * -0.70710681f, up, offset);
 	CL_Beam_AddQuad(mod, surf, start, end, offset, t1 + 0.66f, t2 + 0.66f);
 }

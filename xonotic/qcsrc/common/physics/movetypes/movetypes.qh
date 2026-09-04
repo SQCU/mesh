@@ -1,13 +1,12 @@
 #pragma once
 
 #ifdef SVQC
-// undefined on client, engine cvar
+
 bool autocvar_physics_ode;
 
-bool use_engine_physics; // debug option for testing legacy engine code
+bool use_engine_physics;
 #endif
 
-// water levels
 const int WATERLEVEL_NONE = 0;
 const int WATERLEVEL_WETFEET = 1;
 const int WATERLEVEL_SWIMMING = 2;
@@ -34,7 +33,6 @@ const int WATERLEVEL_SUBMERGED = 3;
 #define UPWARD_VELOCITY_CLEARS_ONGROUND(s)  STAT(GAMEPLAYFIX_UPVELOCITYCLEARSONGROUND)
 #define GAMEPLAYFIX_DELAYPROJECTILES(s) 	STAT(GAMEPLAYFIX_DELAYPROJECTILES)
 
-
 #define PHYS_STEPHEIGHT(s)                  STAT(MOVEVARS_STEPHEIGHT)
 #define PHYS_NOSTEP(s)                      STAT(NOSTEP)
 #define PHYS_JUMPSTEP(s)                    STAT(MOVEVARS_JUMPSTEP)
@@ -51,7 +49,7 @@ const int WATERLEVEL_SUBMERGED = 3;
 	#define GAMEPLAYFIX_Q2AIRACCELERATE             (boolean(moveflags & MOVEFLAG_Q2AIRACCELERATE))
 
 	#define PHYS_GRAVITY(s)                     STAT(MOVEVARS_GRAVITY, s)
-	// FIXME: 0 doesn't mean zero gravity
+
 	#define PHYS_ENTGRAVITY(s)                  STAT(MOVEVARS_ENTGRAVITY, s)
 
 	#define TICRATE                             ticrate
@@ -75,31 +73,22 @@ void set_movetype(entity this, int mt);
 
 .float move_movetype;
 .float move_time;
-//.vector move_origin;
-//.vector move_angles;
-//.vector move_velocity;
-//.vector move_avelocity;
-//.int move_flags;
-//.int move_watertype;
-//.int move_waterlevel;
+
 .void(float, float)contentstransition;
-//.float move_bounce_factor;
-//.float move_bounce_stopspeed;
-.float move_nomonsters;  // -1 for MOVE_NORMAL, otherwise a MOVE_ constant
+
+.float move_nomonsters;
 
 .entity aiment;
 .vector punchangle;
 
-.entity groundentity;  // FIXME add move_groundnetworkentity?
+.entity groundentity;
 .float move_suspendedinair;
 .float move_didgravity;
 
-// unsticking
 const int UNSTICK_FINE = 0;
 const int UNSTICK_FIXED = 1;
 const int UNSTICK_STUCK = 2;
 
-// set by _Movetype_FlyMove
 vector move_stepnormal;
 
 bool _Movetype_NudgeOutOfSolid_PivotIsKnownGood(entity this, vector pivot);
@@ -138,7 +127,7 @@ const int MOVETYPE_PUSH             = 7;
 const int MOVETYPE_NOCLIP           = 8;
 const int MOVETYPE_FLYMISSILE       = 9;
 const int MOVETYPE_BOUNCE           = 10;
-const int MOVETYPE_BOUNCEMISSILE    = 11;  // Like bounce but doesn't lose speed on bouncing
+const int MOVETYPE_BOUNCEMISSILE    = 11;
 const int MOVETYPE_FOLLOW           = 12;
 const int MOVETYPE_PHYSICS          = 32;
 const int MOVETYPE_FLY_WORLDONLY    = 33;
@@ -148,8 +137,8 @@ const int MOVETYPE_ANGLENOCLIP      = 1;
 const int MOVETYPE_ANGLECLIP        = 2;
 #endif
 
-const int MOVETYPE_QCPLAYER = 150; // QC-driven player physics, no think functions!
-const int MOVETYPE_QCENTITY = 151; // QC-driven entity physics, some think functions!
+const int MOVETYPE_QCPLAYER = 150;
+const int MOVETYPE_QCENTITY = 151;
 
 const int MOVETYPE_FAKEPUSH         = 13;
 

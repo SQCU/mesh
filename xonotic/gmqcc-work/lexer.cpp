@@ -4,11 +4,6 @@
 #include "gmqcc.h"
 #include "lexer.h"
 
-/*
- * List of Keywords
- */
-
-/* original */
 static const char *keywords_qc[] = {
     "for", "do", "while",
     "if", "else",
@@ -16,7 +11,7 @@ static const char *keywords_qc[] = {
     "return",
     "const"
 };
-/* For fte/gmgqcc */
+
 static const char *keywords_fg[] = {
     "switch", "case", "default",
     "struct", "union",
@@ -27,9 +22,6 @@ static const char *keywords_fg[] = {
     "__builtin_debug_printtype"
 };
 
-/*
- * Lexer code
- */
 static char* *lex_filenames;
 
 static void lexerror(lex_file *lex, const char *fmt, ...)
@@ -96,21 +88,17 @@ lex_file* lex_open(const char *file)
 
     lex->file    = in;
     lex->name    = util_strdup(file);
-    lex->line    = 1; /* we start counting at 1 */
+    lex->line    = 1;
     lex->column  = 0;
     lex->peekpos = 0;
     lex->eof     = false;
 
-    /* handle BOM */
     if ((read = (lex_getch(lex) << 16) | (lex_getch(lex) << 8) | lex_getch(lex)) != 0xEFBBBF) {
         lex_ungetch(lex, (read & 0x0000FF));
         lex_ungetch(lex, (read & 0x00FF00) >> 8);
         lex_ungetch(lex, (read & 0xFF0000) >> 16);
     } else {
-        /*
-         * otherwise the lexer has advanced 3 bytes for the BOM, we need
-         * to set the column back to 0
-         */
+
         lex->column = 0;
     }
 
@@ -136,7 +124,7 @@ lex_file* lex_open_string(const char *str, size_t len, const char *name)
     lex->open_string_pos    = 0;
 
     lex->name    = util_strdup(name ? name : "<string-source>");
-    lex->line    = 1; /* we start counting at 1 */
+    lex->line    = 1;
     lex->peekpos = 0;
     lex->eof     = false;
     lex->column  = 0;
@@ -169,11 +157,8 @@ void lex_close(lex_file *lex)
 
     vec_free(lex->tok.value);
 
-    /* mem_d(lex->name); collected in lex_filenames */
     mem_d(lex);
 }
-
-
 
 static int lex_fgetc(lex_file *lex)
 {
@@ -190,11 +175,6 @@ static int lex_fgetc(lex_file *lex)
     return EOF;
 }
 
-/* Get or put-back data
- * The following to functions do NOT understand what kind of data they
- * are working on.
- * The are merely wrapping get/put in order to count line numbers.
- */
 static int lex_try_trigraph(lex_file *lex, int old)
 {
     int c2, c3;
@@ -236,9 +216,7 @@ static int lex_try_digraph(lex_file *lex, int ch)
 {
     int c2;
     c2 = lex_fgetc(lex);
-    /* we just used fgetc() so count lines
-     * need to offset a \n the ungetch would recognize
-     */
+
     if (!lex->push_line && c2 == '\n')
         lex->line++;
     if      (ch == '<' && c2 == ':')
@@ -290,11 +268,6 @@ static void lex_ungetch(lex_file *lex, int ch)
     }
 }
 
-/* classify characters
- * some additions to the is*() functions of ctype.h
- */
-
-/* Idents are alphanumberic, but they start with alpha or _ */
 static bool isident_start(int ch)
 {
     return util_isalpha(ch) || ch == '_';
@@ -305,21 +278,16 @@ static bool isident(int ch, bool allow_dot)
     return isident_start(ch) || util_isdigit(ch) || (allow_dot && ch == '.');
 }
 
-/* isxdigit_only is used when we already know it's not a digit
- * and want to see if it's a hex digit anyway.
- */
 static bool isxdigit_only(int ch)
 {
     return (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
 }
 
-/* Append a character to the token buffer */
 static void lex_tokench(lex_file *lex, int ch)
 {
     vec_push(lex->tok.value, ch);
 }
 
-/* Append a trailing null-byte */
 static void lex_endtoken(lex_file *lex)
 {
     vec_push(lex->tok.value, 0);
@@ -443,38 +411,6 @@ unroll:
     return false;
 }
 
-/* Skip whitespace and comments and return the first
- * non-white character.
- * As this makes use of the above getch() ungetch() functions,
- * we don't need to care at all about line numbering anymore.
- *
- * In theory, this function should only be used at the beginning
- * of lexing, or when we *know* the next character is part of the token.
- * Otherwise, if the parser throws an error, the linenumber may not be
- * the line of the error, but the line of the next token AFTER the error.
- *
- * This is currently only problematic when using c-like string-continuation,
- * since comments and whitespaces are allowed between 2 such strings.
- * Example:
-printf(   "line one\n"
-// A comment
-          "A continuation of the previous string"
-// This line is skipped
-      , foo);
-
- * In this case, if the parse decides it didn't actually want a string,
- * and uses lex->line to print an error, it will show the ', foo);' line's
- * linenumber.
- *
- * On the other hand, the parser is supposed to remember the line of the next
- * token's beginning. In this case we would want skipwhite() to be called
- * AFTER reading a token, so that the parser, before reading the NEXT token,
- * doesn't store teh *comment's* linenumber, but the actual token's linenumber.
- *
- * THIS SOLUTION
- *    here is to store the line of the first character after skipping
- *    the initial whitespace in lex->sline, this happens in lex_do.
- */
 static int lex_skipwhite(lex_file *lex, bool hadwhite)
 {
     int ch = 0;
@@ -490,14 +426,13 @@ static int lex_skipwhite(lex_file *lex, bool hadwhite)
             }
             if (lex->flags.preprocessing) {
                 if (ch == '\n') {
-                    /* end-of-line */
-                    /* see if there was whitespace first */
-                    if (haswhite) { /* (vec_size(lex->tok.value)) { */
+
+                    if (haswhite) {
                         lex_ungetch(lex, ch);
                         lex_endtoken(lex);
                         return TOKEN_WHITE;
                     }
-                    /* otherwise return EOL */
+
                     return TOKEN_EOL;
                 }
                 haswhite = true;
@@ -510,7 +445,7 @@ static int lex_skipwhite(lex_file *lex, bool hadwhite)
             ch = lex_getch(lex);
             if (ch == '/')
             {
-                /* one line comment */
+
                 ch = lex_getch(lex);
 
                 if (lex->flags.preprocessing) {
@@ -521,7 +456,7 @@ static int lex_skipwhite(lex_file *lex, bool hadwhite)
 
                 while (ch != EOF && ch != '\n') {
                     if (lex->flags.preprocessing)
-                        lex_tokench(lex, ' '); /* ch); */
+                        lex_tokench(lex, ' ');
                     ch = lex_getch(lex);
                 }
                 if (lex->flags.preprocessing) {
@@ -533,7 +468,7 @@ static int lex_skipwhite(lex_file *lex, bool hadwhite)
             }
             if (ch == '*')
             {
-                /* multiline comment */
+
                 if (lex->flags.preprocessing) {
                     haswhite = true;
                     lex_tokench(lex, ' ');
@@ -561,10 +496,10 @@ static int lex_skipwhite(lex_file *lex, bool hadwhite)
                             lex_tokench(lex, ' ');
                     }
                 }
-                ch = ' '; /* cause TRUE in the isspace check */
+                ch = ' ';
                 continue;
             }
-            /* Otherwise roll back to the slash and break out of the loop */
+
             lex_ungetch(lex, ch);
             ch = '/';
             break;
@@ -579,7 +514,6 @@ static int lex_skipwhite(lex_file *lex, bool hadwhite)
     return ch;
 }
 
-/* Get a token */
 static bool GMQCC_WARN lex_finish_ident(lex_file *lex, bool allow_dot)
 {
     int ch;
@@ -591,13 +525,11 @@ static bool GMQCC_WARN lex_finish_ident(lex_file *lex, bool allow_dot)
         ch = lex_getch(lex);
     }
 
-    /* last ch was not an ident ch: */
     lex_ungetch(lex, ch);
 
     return true;
 }
 
-/* read one ident for the frame list */
 static int lex_parse_frame(lex_file *lex)
 {
     int ch;
@@ -623,7 +555,6 @@ static int lex_parse_frame(lex_file *lex)
     return 0;
 }
 
-/* read a list of $frames */
 static bool lex_finish_frames(lex_file *lex)
 {
     do {
@@ -632,9 +563,9 @@ static bool lex_finish_frames(lex_file *lex)
         frame_macro m;
 
         rc = lex_parse_frame(lex);
-        if (rc > 0) /* end of line */
+        if (rc > 0)
             return true;
-        if (rc < 0) /* error */
+        if (rc < 0)
             return false;
 
         for (i = 0; i < vec_size(lex->frames); ++i) {
@@ -664,7 +595,7 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
     int nextch;
     bool hex;
     bool oct;
-    char u8buf[8]; /* way more than enough */
+    char u8buf[8];
     int  u8len, uc;
 
     while (ch != EOF)
@@ -678,7 +609,7 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
             ch = lex_getch(lex);
             if (ch == EOF) {
                 lexerror(lex, "unexpected end of file");
-                lex_ungetch(lex, EOF); /* next token to be TOKEN_EOF */
+                lex_ungetch(lex, EOF);
                 return (lex->tok.ttype = TOKEN_ERROR);
             }
             lex_tokench(lex, ch);
@@ -687,7 +618,7 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
             ch = lex_getch(lex);
             if (ch == EOF) {
                 lexerror(lex, "unexpected end of file");
-                lex_ungetch(lex, EOF); /* next token to be TOKEN_EOF */
+                lex_ungetch(lex, EOF);
                 return (lex->tok.ttype = TOKEN_ERROR);
             }
 
@@ -703,7 +634,7 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
             case 'v': ch = '\v'; break;
             case 'x':
             case 'X':
-                /* same procedure as in fteqcc */
+
                 ch = 0;
                 nextch = lex_getch(lex);
                 if      (nextch >= '0' && nextch <= '9')
@@ -733,7 +664,6 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
                 }
                 break;
 
-            /* fteqcc support */
             case '0': case '1': case '2': case '3':
             case '4': case '5': case '6': case '7':
             case '8': case '9':
@@ -793,10 +723,7 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
                         lex->column += u8len;
                         for (uc = 0; uc < u8len; ++uc)
                             lex_tokench(lex, u8buf[uc]);
-                        /*
-                         * the last character will be inserted with the tokench() call
-                         * below the switch
-                         */
+
                         ch = u8buf[uc];
                     }
                 }
@@ -804,7 +731,6 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
                     ch = chr;
                 break;
 
-            /* high bit text */
             case 'b': case 's':
                 texttype ^= 128;
                 continue;
@@ -815,17 +741,17 @@ static int GMQCC_WARN lex_finish_string(lex_file *lex, int quote)
 
             default:
                 lexwarn(lex, WARN_UNKNOWN_CONTROL_SEQUENCE, "unrecognized control sequence: \\%c", ch);
-                /* so we just add the character plus backslash no matter what it actually is */
+
                 lex_tokench(lex, '\\');
             }
-            /* add the character finally */
+
             lex_tokench(lex, ch | texttype);
         }
         else
             lex_tokench(lex, ch);
     }
     lexerror(lex, "unexpected end of file within string constant");
-    lex_ungetch(lex, EOF); /* next token to be TOKEN_EOF */
+    lex_ungetch(lex, EOF);
     return (lex->tok.ttype = TOKEN_ERROR);
 }
 
@@ -836,7 +762,6 @@ static int GMQCC_WARN lex_finish_digit(lex_file *lex, int lastch)
 
     int  ch = lastch;
 
-    /* parse a number... */
     if (ch == '.')
         lex->tok.ttype = TOKEN_FLOATCONST;
     else
@@ -858,7 +783,7 @@ static int GMQCC_WARN lex_finish_digit(lex_file *lex, int lastch)
     {
         if (lastch != '0' || ch != 'x')
         {
-            /* end of the number or EOF */
+
             lex_ungetch(lex, ch);
             lex_endtoken(lex);
 
@@ -868,8 +793,6 @@ static int GMQCC_WARN lex_finish_digit(lex_file *lex, int lastch)
 
         ishex = true;
     }
-
-    /* EOF would have been caught above */
 
     if (ch != '.')
     {
@@ -881,14 +804,13 @@ static int GMQCC_WARN lex_finish_digit(lex_file *lex, int lastch)
             ch = lex_getch(lex);
         }
     }
-    /* NOT else, '.' can come from above as well */
+
     if (lex->tok.ttype != TOKEN_FLOATCONST && ch == '.' && !ishex)
     {
-        /* Allow floating comma in non-hex mode */
+
         lex->tok.ttype = TOKEN_FLOATCONST;
         lex_tokench(lex, ch);
 
-        /* continue digits-only */
         ch = lex_getch(lex);
         while (util_isdigit(ch))
         {
@@ -896,12 +818,10 @@ static int GMQCC_WARN lex_finish_digit(lex_file *lex, int lastch)
             ch = lex_getch(lex);
         }
     }
-    /* put back the last character */
-    /* but do not put back the trailing 'f' or a float */
+
     if (lex->tok.ttype == TOKEN_FLOATCONST && ch == 'f')
         ch = lex_getch(lex);
 
-    /* generally we don't want words to follow numbers: */
     if (isident(ch, false)) {
         lexerror(lex, "unexpected trailing characters after number");
         return (lex->tok.ttype = TOKEN_ERROR);
@@ -912,7 +832,7 @@ static int GMQCC_WARN lex_finish_digit(lex_file *lex, int lastch)
     if (lex->tok.ttype == TOKEN_FLOATCONST) {
         lex->tok.constval.f = strtod(lex->tok.value, nullptr);
     } else {
-      /* determine base for strtol */
+
       int base = 10;
       if (ishex) base = 16;
       if (isoct) base = 8;
@@ -941,7 +861,7 @@ int lex_do(lex_file *lex)
             ch = '\\';
             break;
         }
-        /* we reached a linemerge */
+
         lex_tokench(lex, '\n');
         continue;
     }
@@ -962,7 +882,6 @@ int lex_do(lex_file *lex)
         return (lex->tok.ttype = TOKEN_EOF);
     }
 
-    /* modelgen / spiritgen commands */
     if (ch == '$' && !lex->flags.preprocessing) {
         const char *v;
         size_t frame;
@@ -976,16 +895,12 @@ int lex_do(lex_file *lex)
         if (!lex_finish_ident(lex, true))
             return (lex->tok.ttype = TOKEN_ERROR);
         lex_endtoken(lex);
-        /* skip the known commands */
+
         v = lex->tok.value;
 
         if (!strcmp(v, "frame") || !strcmp(v, "framesave"))
         {
-            /* frame/framesave command works like an enum
-             * similar to fteqcc we handle this in the lexer.
-             * The reason for this is that it is sensitive to newlines,
-             * which the parser is unaware of
-             */
+
             if (!lex_finish_frames(lex))
                  return (lex->tok.ttype = TOKEN_ERROR);
             return lex_do(lex);
@@ -1072,7 +987,7 @@ int lex_do(lex_file *lex)
             for (fi = 0; fi < vec_size(lex->frames); ++fi)
                 mem_d(lex->frames[fi].name);
             vec_free(lex->frames);
-            /* skip line (fteqcc does it too) */
+
             ch = lex_getch(lex);
             while (ch != EOF && ch != '\n')
                 ch = lex_getch(lex);
@@ -1086,7 +1001,7 @@ int lex_do(lex_file *lex)
             !strcmp(v, "scale") ||
             !strcmp(v, "skin"))
         {
-            /* skip line */
+
             ch = lex_getch(lex);
             while (ch != EOF && ch != '\n')
                 ch = lex_getch(lex);
@@ -1104,7 +1019,6 @@ int lex_do(lex_file *lex)
         return lex_do(lex);
     }
 
-    /* single-character tokens */
     switch (ch)
     {
         case '[':
@@ -1116,7 +1030,7 @@ int lex_do(lex_file *lex)
                 return (lex->tok.ttype = TOKEN_ATTRIBUTE_OPEN);
             }
             lex_ungetch(lex, nextch);
-            /* FALL THROUGH */
+
         case '(':
         case ':':
         case '?':
@@ -1138,7 +1052,7 @@ int lex_do(lex_file *lex)
                 }
                 lex_ungetch(lex, nextch);
             }
-            /* FALL THROUGH */
+
         case ')':
         case ';':
         case '{':
@@ -1154,7 +1068,7 @@ int lex_do(lex_file *lex)
 
     if (ch == '.') {
         nextch = lex_getch(lex);
-        /* digits starting with a dot */
+
         if (util_isdigit(nextch)) {
             lex_ungetch(lex, nextch);
             lex->tok.ttype = lex_finish_digit(lex, ch);
@@ -1166,9 +1080,7 @@ int lex_do(lex_file *lex)
 
     if (lex->flags.noops)
     {
-        /* Detect characters early which are normally
-         * operators OR PART of an operator.
-         */
+
         switch (ch)
         {
             case '*':
@@ -1193,7 +1105,7 @@ int lex_do(lex_file *lex)
     if (ch == '.')
     {
         lex_tokench(lex, ch);
-        /* peak ahead once */
+
         nextch = lex_getch(lex);
         if (nextch != '.') {
             lex_ungetch(lex, nextch);
@@ -1203,7 +1115,7 @@ int lex_do(lex_file *lex)
             else
                 return (lex->tok.ttype = TOKEN_OPERATOR);
         }
-        /* peak ahead again */
+
         nextch = lex_getch(lex);
         if (nextch != '.') {
             lex_ungetch(lex, nextch);
@@ -1214,7 +1126,7 @@ int lex_do(lex_file *lex)
             else
                 return (lex->tok.ttype = TOKEN_OPERATOR);
         }
-        /* fill the token to be "..." */
+
         lex_tokench(lex, ch);
         lex_tokench(lex, ch);
         lex_endtoken(lex);
@@ -1227,11 +1139,11 @@ int lex_do(lex_file *lex)
         return (lex->tok.ttype = TOKEN_OPERATOR);
     }
 
-    if (ch == '+' || ch == '-' || /* ++, --, +=, -=  and -> as well! */
-        ch == '>' || ch == '<' || /* <<, >>, <=, >=  and >< as well! */
-        ch == '=' || ch == '!' || /* <=>, ==, !=                     */
-        ch == '&' || ch == '|' || /* &&, ||, &=, |=                  */
-        ch == '~' || ch == '^'    /* ~=, ~, ^                        */
+    if (ch == '+' || ch == '-' ||
+        ch == '>' || ch == '<' ||
+        ch == '=' || ch == '!' ||
+        ch == '&' || ch == '|' ||
+        ch == '~' || ch == '^'
     )  {
         lex_tokench(lex, ch);
         nextch = lex_getch(lex);
@@ -1282,7 +1194,7 @@ int lex_do(lex_file *lex)
         return (lex->tok.ttype = TOKEN_OPERATOR);
     }
 
-    if (ch == '*' || ch == '/') /* *=, /= */
+    if (ch == '*' || ch == '/')
     {
         lex_tokench(lex, ch);
 
@@ -1308,7 +1220,7 @@ int lex_do(lex_file *lex)
 
         lex_tokench(lex, ch);
         if (!lex_finish_ident(lex, false)) {
-            /* error? */
+
             return (lex->tok.ttype = TOKEN_ERROR);
         }
         lex_endtoken(lex);
@@ -1362,7 +1274,7 @@ int lex_do(lex_file *lex)
             lex_tokench(lex, ch);
         while (!lex->flags.preprocessing && lex->tok.ttype == TOKEN_STRINGCONST)
         {
-            /* Allow c style "string" "continuation" */
+
             ch = lex_skipwhite(lex, false);
             if (ch != '"') {
                 lex_ungetch(lex, ch);
@@ -1378,11 +1290,7 @@ int lex_do(lex_file *lex)
 
     if (ch == '\'')
     {
-        /* we parse character constants like string,
-         * but return TOKEN_CHARCONST, or a vector type if it fits...
-         * Likewise actual unescaping has to be done by the parser.
-         * The difference is we don't allow 'char' 'continuation'.
-         */
+
         if (lex->flags.preprocessing)
             lex_tokench(lex, ch);
         lex->tok.ttype = lex_finish_string(lex, '\'');
@@ -1392,7 +1300,6 @@ int lex_do(lex_file *lex)
 
         lex->tok.ttype = TOKEN_CHARCONST;
 
-        /* It's a vector if we can successfully scan 3 floats */
         if (util_sscanf(lex->tok.value, " %f %f %f ",
                    &lex->tok.constval.v.x, &lex->tok.constval.v.y, &lex->tok.constval.v.z) == 3)
 
@@ -1403,7 +1310,7 @@ int lex_do(lex_file *lex)
         {
             if (!lex->flags.preprocessing && strlen(lex->tok.value) > 1) {
                 utf8ch_t u8char;
-                /* check for a valid utf8 character */
+
                 if (!OPTS_FLAG(UTF8) || !utf8_to(&u8char, (const unsigned char *)lex->tok.value, 8)) {
                     if (lexwarn(lex, WARN_MULTIBYTE_CHARACTER,
                                 ( OPTS_FLAG(UTF8) ? "invalid multibyte character sequence `%s`"

@@ -1,5 +1,4 @@
 #pragma once
 
-
 const int RAINSNOW_SNOW = 0;
 const int RAINSNOW_RAIN = 1;

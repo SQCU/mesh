@@ -38,7 +38,7 @@ MUTATOR_HOOKFUNCTION(walljump, PlayerJump)
 	entity player = M_ARGV(0, entity);
 
 	if(PHYS_WALLJUMP(player))
-	if(time - STAT(LASTWJ, player) > PHYS_WALLJUMP_DELAY(player)) // can't do this on client, as it's too stupid to obey counters
+	if(time - STAT(LASTWJ, player) > PHYS_WALLJUMP_DELAY(player))
 	if(!IS_ONGROUND(player))
 	if(player.move_movetype != MOVETYPE_NONE && player.move_movetype != MOVETYPE_FOLLOW && player.move_movetype != MOVETYPE_FLY && player.move_movetype != MOVETYPE_NOCLIP)
 	if(!IS_JUMP_HELD(player))
@@ -67,7 +67,7 @@ MUTATOR_HOOKFUNCTION(walljump, PlayerJump)
 			animdecide_setaction(player, ANIMACTION_JUMP, true);
 #endif
 
-			M_ARGV(2, bool) = true; // multijump
+			M_ARGV(2, bool) = true;
 		}
 	}
 }

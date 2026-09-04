@@ -1,6 +1,4 @@
-// ambient+diffuse+specular+normalmap+attenuation+cubemap+fog shader
-// written by Forest 'LordHavoc' Hale
-// shadowmapping enhancements by Lee 'eihrul' Salzman
+
 
 #if defined(USESKELETAL) || defined(USEOCCLUDE)
 #  ifdef GL_ARB_uniform_buffer_object
@@ -38,7 +36,7 @@
 #endif
 
 #if (defined(GLSL120) || defined(GLSL130) || defined(GLSL140) || defined(GLES)) && defined(VERTEX_SHADER)
-invariant gl_Position; // fix for lighting polygons not matching base surface
+invariant gl_Position;
 # endif
 #if defined(GLSL130) || defined(GLSL140)
 precision highp float;
@@ -75,8 +73,6 @@ out vec4 dp_FragColor;
 # define dp_shadow2D(a,b) float(shadow2D(a,b))
 #endif
 
-// GL ES and GLSL130 shaders use precision modifiers, standard GL does not
-// in GLSL130 we don't use them though because of syntax differences (can't use precision with inout)
 #ifndef GL_ES
 #define lowp
 #define mediump
@@ -84,25 +80,21 @@ out vec4 dp_FragColor;
 #endif
 
 #ifdef USEDEPTHRGB
-	// for 565 RGB we'd need to use different multipliers
+
 #define decodedepthmacro(d) dot((d).rgb, vec3(1.0, 255.0 / 65536.0, 255.0 / 16777215.0))
 #define encodedepthmacro(d) (vec4(d, d*256.0, d*65536.0, 0.0) - floor(vec4(d, d*256.0, d*65536.0, 0.0)))
 #endif
 
 #ifdef VERTEX_SHADER
-dp_attribute vec4 Attrib_Position;  // vertex
-dp_attribute vec4 Attrib_Color;     // color
-dp_attribute vec4 Attrib_TexCoord0; // material texcoords
-dp_attribute vec3 Attrib_TexCoord1; // svector
-dp_attribute vec3 Attrib_TexCoord2; // tvector
-dp_attribute vec3 Attrib_TexCoord3; // normal
-dp_attribute vec4 Attrib_TexCoord4; // lightmap texcoords
+dp_attribute vec4 Attrib_Position;
+dp_attribute vec4 Attrib_Color;
+dp_attribute vec4 Attrib_TexCoord0;
+dp_attribute vec3 Attrib_TexCoord1;
+dp_attribute vec3 Attrib_TexCoord2;
+dp_attribute vec3 Attrib_TexCoord3;
+dp_attribute vec4 Attrib_TexCoord4;
 #ifdef USESKELETAL
-//uniform mat4 Skeletal_Transform[128];
-// this is used with glBindBufferRange to bind a uniform block to the name
-// Skeletal_Transform12_UniformBlock, the Skeletal_Transform12 variable is
-// directly accessible without a namespace.
-// explanation: http://www.opengl.org/wiki/Interface_Block_%28GLSL%29#Syntax
+
 uniform Skeletal_Transform12_UniformBlock
 {
 	vec4 Skeletal_Transform12[768];
@@ -123,16 +115,6 @@ dp_varying mediump vec4 VertexColor;
 # define USEEYEVECTOR
 #endif
 
-//#ifdef __GLSL_CG_DATA_TYPES
-//# define myhalf half
-//# define myhalf2 half2
-//# define myhalf3 half3
-//# define myhalf4 half4
-//# define cast_myhalf half
-//# define cast_myhalf2 half2
-//# define cast_myhalf3 half3
-//# define cast_myhalf4 half4
-//#else
 # define myhalf mediump float
 # define myhalf2 mediump vec2
 # define myhalf3 mediump vec3
@@ -141,7 +123,6 @@ dp_varying mediump vec4 VertexColor;
 # define cast_myhalf2 vec2
 # define cast_myhalf3 vec3
 # define cast_myhalf4 vec4
-//#endif
 
 #ifdef VERTEX_SHADER
 uniform highp mat4 ModelViewProjectionMatrix;
@@ -149,16 +130,15 @@ uniform highp mat4 ModelViewProjectionMatrix;
 
 #ifdef VERTEX_SHADER
 #ifdef USETRIPPY
-// LordHavoc: based on shader code linked at: http://www.youtube.com/watch?v=JpksyojwqzE
-// tweaked scale
+
 uniform highp float ClientTime;
 vec4 TrippyVertex(vec4 position)
 {
 	float worldTime = ClientTime;
-	// tweaked for Quake
+
 	worldTime *= 10.0;
 	position *= 0.125;
-	//~tweaked for Quake
+
 	float distanceSquared = (position.x * position.x + position.z * position.z);
 	position.y += 5.0*sin(distanceSquared*sin(worldTime/143.0)/1000.0);
 	float y = position.y;
@@ -206,10 +186,7 @@ void main(void)
 #endif
 }
 #endif
-#else // !MODE_DEPTH_ORSHADOW
-
-
-
+#else
 
 #ifdef MODE_POSTPROCESS
 dp_varying mediump vec2 TexCoord1;
@@ -241,31 +218,26 @@ uniform mediump float Saturation;
 #ifdef USEVIEWTINT
 uniform mediump vec4 ViewTintColor;
 #endif
-//uncomment these if you want to use them:
+
 uniform mediump vec4 UserVec1;
 uniform mediump vec4 UserVec2;
-// uniform mediump vec4 UserVec3;
-// uniform mediump vec4 UserVec4;
-// uniform highp float ClientTime;
+
 uniform mediump vec2 PixelSize;
 
 #ifdef USEFXAA
-// graphitemaster: based off the white paper by Timothy Lottes
-// http://developer.download.nvidia.com/assets/gamedev/files/sdk/11/FXAA_WhitePaper.pdf
+
 vec4 fxaa(vec4 inColor, float maxspan)
 {
-	vec4 ret = inColor; // preserve old
+	vec4 ret = inColor;
 	float mulreduct = 1.0/maxspan;
 	float minreduct = (1.0 / 128.0);
 
-	// directions
 	vec3 NW = dp_texture2D(Texture_First, TexCoord1 + (vec2(-1.0, -1.0) * PixelSize)).xyz;
 	vec3 NE = dp_texture2D(Texture_First, TexCoord1 + (vec2(+1.0, -1.0) * PixelSize)).xyz;
 	vec3 SW = dp_texture2D(Texture_First, TexCoord1 + (vec2(-1.0, +1.0) * PixelSize)).xyz;
 	vec3 SE = dp_texture2D(Texture_First, TexCoord1 + (vec2(+1.0, +1.0) * PixelSize)).xyz;
 	vec3 M = dp_texture2D(Texture_First, TexCoord1).xyz;
 
-	// luminance directions
 	vec3 luma = vec3(0.299, 0.587, 0.114);
 	float lNW = dot(NW, luma);
 	float lNE = dot(NE, luma);
@@ -275,11 +247,9 @@ vec4 fxaa(vec4 inColor, float maxspan)
 	float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
 	float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
 
-	// direction and reciprocal
 	vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), ((lNW + lSW) - (lNE + lSE)));
 	float rcp = 1.0/(min(abs(dir.x), abs(dir.y)) + max((lNW + lNE + lSW + lSE) * (0.25 * mulreduct), minreduct));
 
-	// span
 	dir = min(vec2(maxspan, maxspan), max(vec2(-maxspan, -maxspan), dir * rcp)) * PixelSize;
 
 	vec3 rA = (1.0/2.0) * (
@@ -301,16 +271,14 @@ void main(void)
 	dp_FragColor = dp_texture2D(Texture_First, TexCoord1);
 
 #ifdef USEFXAA
-	dp_FragColor = fxaa(dp_FragColor, 8.0); // 8.0 can be changed for larger span
+	dp_FragColor = fxaa(dp_FragColor, 8.0);
 #endif
 
 #ifdef USEPOSTPROCESSING
-// do r_glsl_dumpshader, edit glsl/default.glsl, and replace this by your own postprocessing if you want
-// this code does a blur with the radius specified in the first component of r_glsl_postprocess_uservec1 and blends it using the second component
+
 #if defined(USERVEC1) || defined(USERVEC2)
 	float sobel = 1.0;
-	// vec2 ts = textureSize(Texture_First, 0);
-	// vec2 px = vec2(1/ts.x, 1/ts.y);
+
 	vec2 px = PixelSize;
 	vec3 x1 = dp_texture2D(Texture_First, TexCoord1 + vec2(-px.x, px.y)).rgb;
 	vec3 x2 = dp_texture2D(Texture_First, TexCoord1 + vec2(-px.x,  0.0)).rgb;
@@ -356,16 +324,15 @@ void main(void)
 #endif
 
 #ifdef USESATURATION
-	//apply saturation BEFORE gamma ramps, so v_glslgamma value does not matter
+
 	float y = dot(dp_FragColor.rgb, vec3(0.299, 0.587, 0.114));
-	// 'vampire sight' effect, wheres red is compensated
+
 	#ifdef SATURATION_REDCOMPENSATE
 		float rboost = max(0.0, (dp_FragColor.r - max(dp_FragColor.g, dp_FragColor.b))*(1.0 - Saturation));
 		dp_FragColor.rgb = mix(vec3(y), dp_FragColor.rgb, Saturation);
 		dp_FragColor.r += rboost;
 	#else
-		// normal desaturation
-		//dp_FragColor = vec3(y) + (dp_FragColor.rgb - vec3(y)) * Saturation;
+
 		dp_FragColor.rgb = mix(vec3(y), dp_FragColor.rgb, Saturation);
 	#endif
 #endif
@@ -377,10 +344,7 @@ void main(void)
 #endif
 }
 #endif
-#else // !MODE_POSTPROCESS
-
-
-
+#else
 
 #ifdef MODE_GENERIC
 #ifdef USEDIFFUSE
@@ -439,7 +403,7 @@ void main(void)
 #endif
 #ifdef USEDIFFUSE
 # ifdef USEREFLECTCUBE
-	// suppress texture alpha
+
 	dp_FragColor.rgb *= dp_texture2D(Texture_First, TexCoord1).rgb;
 # else
 	dp_FragColor *= dp_texture2D(Texture_First, TexCoord1);
@@ -468,10 +432,7 @@ void main(void)
 #endif
 }
 #endif
-#else // !MODE_GENERIC
-
-
-
+#else
 
 #ifdef MODE_BLOOMBLUR
 dp_varying mediump vec2 TexCoord;
@@ -502,7 +463,7 @@ void main(void)
 	dp_FragColor = vec4(color * BloomBlur_Parameters.z + vec3(BloomBlur_Parameters.w), 1);
 }
 #endif
-#else // !MODE_BLOOMBLUR
+#else
 #ifdef MODE_REFRACTION
 dp_varying mediump vec2 TexCoord;
 dp_varying highp vec4 ModelViewProjectionPosition;
@@ -552,7 +513,7 @@ uniform highp vec2 NormalmapScrollBlend;
 void main(void)
 {
 	vec2 ScreenScaleRefractReflectIW = ScreenScaleRefractReflect.xy * (1.0 / ModelViewProjectionPosition.w);
-	//vec2 ScreenTexCoord = (ModelViewProjectionPosition.xy + normalize(vec3(dp_texture2D(Texture_Normal, TexCoord)) - vec3(0.5)).xy * DistortScaleRefractReflect.xy * 100) * ScreenScaleRefractReflectIW + ScreenCenterRefractReflect.xy;
+
 	vec2 SafeScreenTexCoord = ModelViewProjectionPosition.xy * ScreenScaleRefractReflectIW + ScreenCenterRefractReflect.xy;
 #ifdef USEALPHAGENVERTEX
 	vec2 distort = DistortScaleRefractReflect.xy * VertexColor.a;
@@ -568,11 +529,7 @@ void main(void)
 	#else
 		vec2 ScreenTexCoord = SafeScreenTexCoord + vec3(normalize(cast_myhalf3(dp_texture2D(Texture_Normal, TexCoord)) - cast_myhalf3(0.5))).xy * distort;
 	#endif
-	// FIXME temporary hack to detect the case that the reflection
-	// gets blackened at edges due to leaving the area that contains actual
-	// content.
-	// Remove this 'ack once we have a better way to stop this thing from
-	// 'appening.
+
 	float f = min(1.0, length(dp_texture2D(Texture_Refraction, ScreenTexCoord + vec2(0.01, 0.01)).rgb) / 0.05);
 	f      *= min(1.0, length(dp_texture2D(Texture_Refraction, ScreenTexCoord + vec2(0.01, -0.01)).rgb) / 0.05);
 	f      *= min(1.0, length(dp_texture2D(Texture_Refraction, ScreenTexCoord + vec2(-0.01, 0.01)).rgb) / 0.05);
@@ -581,10 +538,7 @@ void main(void)
 	dp_FragColor = vec4(dp_texture2D(Texture_Refraction, ScreenTexCoord).rgb, 1.0) * refractcolor;
 }
 #endif
-#else // !MODE_REFRACTION
-
-
-
+#else
 
 #ifdef MODE_WATER
 dp_varying mediump vec2 TexCoord;
@@ -605,7 +559,7 @@ void main(void)
 	vec4 SkeletalMatrix2 = Skeletal_Transform12[si1.x] * sw.x + Skeletal_Transform12[si1.y] * sw.y + Skeletal_Transform12[si1.z] * sw.z + Skeletal_Transform12[si1.w] * sw.w;
 	vec4 SkeletalMatrix3 = Skeletal_Transform12[si2.x] * sw.x + Skeletal_Transform12[si2.y] * sw.y + Skeletal_Transform12[si2.z] * sw.z + Skeletal_Transform12[si2.w] * sw.w;
 	mat4 SkeletalMatrix = mat4(SkeletalMatrix1, SkeletalMatrix2, SkeletalMatrix3, vec4(0.0, 0.0, 0.0, 1.0));
-	mat3 SkeletalNormalMatrix = mat3(cross(SkeletalMatrix[1].xyz, SkeletalMatrix[2].xyz), cross(SkeletalMatrix[2].xyz, SkeletalMatrix[0].xyz), cross(SkeletalMatrix[0].xyz, SkeletalMatrix[1].xyz)); // is actually transpose(inverse(mat3(SkeletalMatrix))) * det(mat3(SkeletalMatrix))
+	mat3 SkeletalNormalMatrix = mat3(cross(SkeletalMatrix[1].xyz, SkeletalMatrix[2].xyz), cross(SkeletalMatrix[2].xyz, SkeletalMatrix[0].xyz), cross(SkeletalMatrix[0].xyz, SkeletalMatrix[1].xyz));
 	vec4 SkeletalVertex = Attrib_Position * SkeletalMatrix;
 	vec3 SkeletalSVector = normalize(Attrib_TexCoord1.xyz * SkeletalNormalMatrix);
 	vec3 SkeletalTVector = normalize(Attrib_TexCoord2.xyz * SkeletalNormalMatrix);
@@ -651,10 +605,9 @@ uniform highp vec2 NormalmapScrollBlend;
 void main(void)
 {
 	vec4 ScreenScaleRefractReflectIW = ScreenScaleRefractReflect * (1.0 / ModelViewProjectionPosition.w);
-	//vec4 ScreenTexCoord = (ModelViewProjectionPosition.xyxy + normalize(vec3(dp_texture2D(Texture_Normal, TexCoord)) - vec3(0.5)).xyxy * DistortScaleRefractReflect * 100) * ScreenScaleRefractReflectIW + ScreenCenterRefractReflect;
+
 	vec4 SafeScreenTexCoord = ModelViewProjectionPosition.xyxy * ScreenScaleRefractReflectIW + ScreenCenterRefractReflect;
-	//SafeScreenTexCoord = gl_FragCoord.xyxy * vec4(1.0 / 1920.0, 1.0 / 1200.0, 1.0 / 1920.0, 1.0 / 1200.0);
-	// slight water animation via 2 layer scrolling (todo: tweak)
+
 #ifdef USEALPHAGENVERTEX
 	vec4 distort = DistortScaleRefractReflect * VertexColor.a;
 	float reflectoffset = ReflectOffset * VertexColor.a;
@@ -673,11 +626,7 @@ void main(void)
 	#else
 		vec4 ScreenTexCoord = SafeScreenTexCoord + vec2(normalize(vec3(dp_texture2D(Texture_Normal, TexCoord)) - vec3(0.5))).xyxy * distort;
 	#endif
-	// FIXME temporary hack to detect the case that the reflection
-	// gets blackened at edges due to leaving the area that contains actual
-	// content.
-	// Remove this 'ack once we have a better way to stop this thing from
-	// 'appening.
+
 	float f  = min(1.0, length(dp_texture2D(Texture_Refraction, ScreenTexCoord.xy + vec2(0.005, 0.01)).rgb) / 0.002);
 	f       *= min(1.0, length(dp_texture2D(Texture_Refraction, ScreenTexCoord.xy + vec2(0.005, -0.01)).rgb) / 0.002);
 	f       *= min(1.0, length(dp_texture2D(Texture_Refraction, ScreenTexCoord.xy + vec2(-0.005, 0.01)).rgb) / 0.002);
@@ -692,12 +641,7 @@ void main(void)
 	dp_FragColor = mix(vec4(dp_texture2D(Texture_Refraction, ScreenTexCoord.xy).rgb, 1) * refractcolor, vec4(dp_texture2D(Texture_Reflection, ScreenTexCoord.zw).rgb, 1) * ReflectColor, Fresnel);
 }
 #endif
-#else // !MODE_WATER
-
-
-
-
-// common definitions between vertex shader and fragment shader:
+#else
 
 dp_varying mediump vec4 TexCoordSurfaceLightmap;
 #ifdef USEVERTEXTEXTUREBLEND
@@ -717,9 +661,9 @@ dp_varying highp vec4 EyeVectorFogDepth;
 #endif
 
 #if defined(MODE_LIGHTDIRECTIONMAP_MODELSPACE) || defined(MODE_DEFERREDGEOMETRY) || defined(USEREFLECTCUBE) || defined(USEBOUNCEGRIDDIRECTIONAL)
-dp_varying highp vec4 VectorS; // direction of S texcoord (sometimes crudely called tangent)
-dp_varying highp vec4 VectorT; // direction of T texcoord (sometimes crudely called binormal)
-dp_varying highp vec4 VectorR; // direction of R texcoord (surface normal)
+dp_varying highp vec4 VectorS;
+dp_varying highp vec4 VectorT;
+dp_varying highp vec4 VectorR;
 #else
 # ifdef USEFOG
 dp_varying highp vec3 EyeVectorModelSpace;
@@ -755,14 +699,6 @@ dp_varying highp vec3 BounceGridTexCoord;
 dp_varying highp float Depth;
 #endif
 
-
-
-
-
-
-// TODO: get rid of tangentt (texcoord2) and use a crossproduct to regenerate it from tangents (texcoord1) and normal (texcoord3), this would require sending a 4 component texcoord1 with W as 1 or -1 according to which side the texcoord2 should be on
-
-// fragment shader specific:
 #ifdef FRAGMENT_SHADER
 
 uniform sampler2D Texture_Normal;
@@ -853,13 +789,12 @@ uniform mediump float OffsetMapping_LodDistance;
 vec2 OffsetMapping(vec2 TexCoord, vec2 dPdx, vec2 dPdy)
 {
 	float i;
-	// distance-based LOD
+
 #ifdef USEOFFSETMAPPING_LOD
-	//mediump float LODFactor = min(1.0, OffsetMapping_LodDistance / EyeVectorFogDepth.z);
-	//mediump vec4 ScaleSteps = vec4(OffsetMapping_ScaleSteps.x, OffsetMapping_ScaleSteps.y * LODFactor, OffsetMapping_ScaleSteps.z / LODFactor, OffsetMapping_ScaleSteps.w * LODFactor);
+
 	mediump float GuessLODFactor = min(1.0, OffsetMapping_LodDistance / EyeVectorFogDepth.z);
 #ifdef USEOFFSETMAPPING_RELIEFMAPPING
-	// stupid workaround because 1-step and 2-step reliefmapping is void
+
 	mediump float LODSteps = max(3.0, ceil(GuessLODFactor * OffsetMapping_ScaleSteps.y));
 #else
 	mediump float LODSteps = ceil(GuessLODFactor * OffsetMapping_ScaleSteps.y);
@@ -871,12 +806,7 @@ vec2 OffsetMapping(vec2 TexCoord, vec2 dPdx, vec2 dPdy)
 #endif
 #ifdef USEOFFSETMAPPING_RELIEFMAPPING
 	float f;
-	// 14 sample relief mapping: linear search and then binary search
-	// this basically steps forward a small amount repeatedly until it finds
-	// itself inside solid, then jitters forward and back using decreasing
-	// amounts to find the impact
-	//vec3 OffsetVector = vec3(EyeVectorFogDepth.xy * ((1.0 / EyeVectorFogDepth.z) * ScaleSteps.x) * vec2(-1, 1), -1);
-	//vec3 OffsetVector = vec3(normalize(EyeVectorFogDepth.xy) * ScaleSteps.x * vec2(-1, 1), -1);
+
 	vec3 OffsetVector = vec3(normalize(EyeVectorFogDepth.xyz).xy * ScaleSteps.x * vec2(-1, 1), -1);
 	vec3 RT = vec3(vec2(TexCoord.xy - OffsetVector.xy*OffsetMapping_Bias), 1);
 	OffsetVector *= ScaleSteps.z;
@@ -886,9 +816,7 @@ vec2 OffsetMapping(vec2 TexCoord, vec2 dPdx, vec2 dPdy)
 		RT += OffsetVector * (step(dp_textureGrad(Texture_Normal, RT.xy, dPdx, dPdy).a, RT.z) * f - 0.5 * f);
 	return RT.xy;
 #else
-	// 2 sample offset mapping (only 2 samples because of ATI Radeon 9500-9800/X300 limits)
-	//vec2 OffsetVector = vec2(EyeVectorFogDepth.xy * ((1.0 / EyeVectorFogDepth.z) * ScaleSteps.x) * vec2(-1, 1));
-	//vec2 OffsetVector = vec2(normalize(EyeVectorFogDepth.xy) * ScaleSteps.x * vec2(-1, 1));
+
 	vec2 OffsetVector = vec2(normalize(EyeVectorFogDepth.xyz).xy * ScaleSteps.x * vec2(-1, 1));
 	OffsetVector *= ScaleSteps.z;
 	for(i = 0.0; i < ScaleSteps.y; ++i)
@@ -896,7 +824,7 @@ vec2 OffsetMapping(vec2 TexCoord, vec2 dPdx, vec2 dPdy)
 	return TexCoord;
 #endif
 }
-#endif // USEOFFSETMAPPING
+#endif
 
 #if defined(MODE_LIGHTSOURCE) || defined(MODE_DEFERREDLIGHTSOURCE)
 uniform sampler2D Texture_Attenuation;
@@ -955,7 +883,7 @@ vec3 GetShadowMapTC2D(vec3 dir)
 }
 #  endif
 # endif
-#endif // defined(USESHADOWMAP2D)
+#endif
 
 # ifdef USESHADOWMAP2D
 float ShadowMapCompare(vec3 dir)
@@ -989,7 +917,7 @@ float ShadowMapCompare(vec3 dir)
 #  else
 #   ifdef USESHADOWSAMPLER
 #     ifdef USESHADOWMAPPCF
-#       define texval(off) dp_shadow2D(Texture_ShadowMap2D, vec3(off, shadowmaptc.z))  
+#       define texval(off) dp_shadow2D(Texture_ShadowMap2D, vec3(off, shadowmaptc.z))
 	vec2 offset = fract(shadowmaptc.xy - 0.5);
    vec4 size = vec4(offset + 1.0, 2.0 - offset);
 #       if USESHADOWMAPPCF > 1
@@ -1001,7 +929,7 @@ float ShadowMapCompare(vec3 dir)
 #       else
 	vec4 weight = (vec4(1.0, 1.0, -0.5, -0.5) + (shadowmaptc.xy - 0.5*offset).xyxy)*ShadowMap_TextureScale.xyxy;
 	f = (1.0/9.0)*dot(size.zxzx*size.wwyy, vec4(texval(weight.zw), texval(weight.xw), texval(weight.zy), texval(weight.xy)));
-#       endif        
+#       endif
 #     else
 	f = dp_shadow2D(Texture_ShadowMap2D, vec3(shadowmaptc.xy*ShadowMap_TextureScale.xy, shadowmaptc.z));
 #     endif
@@ -1047,7 +975,7 @@ float ShadowMapCompare(vec3 dir)
 #       ifdef GL_EXT_gpu_shader4
 #         define texval(x, y) dp_textureOffset(Texture_ShadowMap2D, center, x, y).r
 #       else
-#         define texval(x, y) dp_texture2D(Texture_ShadowMap2D, center + vec2(x, y)*ShadowMap_TextureScale.xy).r  
+#         define texval(x, y) dp_texture2D(Texture_ShadowMap2D, center + vec2(x, y)*ShadowMap_TextureScale.xy).r
 #       endif
 #       if USESHADOWMAPPCF > 1
 	vec2 center = shadowmaptc.xy - 0.5, offset = fract(center);
@@ -1079,11 +1007,8 @@ float ShadowMapCompare(vec3 dir)
 #  endif
 }
 # endif
-#endif // !defined(MODE_LIGHTSOURCE) && !defined(MODE_DEFERREDLIGHTSOURCE) && !defined(USESHADOWMAPORTHO)
-#endif // FRAGMENT_SHADER
-
-
-
+#endif
+#endif
 
 #ifdef MODE_DEFERREDGEOMETRY
 #ifdef VERTEX_SHADER
@@ -1103,7 +1028,7 @@ void main(void)
 	vec4 SkeletalMatrix2 = Skeletal_Transform12[si1.x] * sw.x + Skeletal_Transform12[si1.y] * sw.y + Skeletal_Transform12[si1.z] * sw.z + Skeletal_Transform12[si1.w] * sw.w;
 	vec4 SkeletalMatrix3 = Skeletal_Transform12[si2.x] * sw.x + Skeletal_Transform12[si2.y] * sw.y + Skeletal_Transform12[si2.z] * sw.z + Skeletal_Transform12[si2.w] * sw.w;
 	mat4 SkeletalMatrix = mat4(SkeletalMatrix1, SkeletalMatrix2, SkeletalMatrix3, vec4(0.0, 0.0, 0.0, 1.0));
-	mat3 SkeletalNormalMatrix = mat3(cross(SkeletalMatrix[1].xyz, SkeletalMatrix[2].xyz), cross(SkeletalMatrix[2].xyz, SkeletalMatrix[0].xyz), cross(SkeletalMatrix[0].xyz, SkeletalMatrix[1].xyz)); // is actually transpose(inverse(mat3(SkeletalMatrix))) * det(mat3(SkeletalMatrix))
+	mat3 SkeletalNormalMatrix = mat3(cross(SkeletalMatrix[1].xyz, SkeletalMatrix[2].xyz), cross(SkeletalMatrix[2].xyz, SkeletalMatrix[0].xyz), cross(SkeletalMatrix[0].xyz, SkeletalMatrix[1].xyz));
 	vec4 SkeletalVertex = Attrib_Position * SkeletalMatrix;
 	vec3 SkeletalSVector = normalize(Attrib_TexCoord1.xyz * SkeletalNormalMatrix);
 	vec3 SkeletalTVector = normalize(Attrib_TexCoord2.xyz * SkeletalNormalMatrix);
@@ -1119,7 +1044,6 @@ void main(void)
 	TexCoord2 = vec2(BackgroundTexMatrix * Attrib_TexCoord0);
 #endif
 
-	// transform unnormalized eye direction into tangent space
 #ifdef USEOFFSETMAPPING
 	vec3 EyeRelative = EyePosition - Attrib_Position.xyz;
 	EyeVectorFogDepth.x = dot(EyeRelative, Attrib_TexCoord1.xyz);
@@ -1137,13 +1061,13 @@ void main(void)
 #endif
 	Depth = (ModelViewMatrix * Attrib_Position).z;
 }
-#endif // VERTEX_SHADER
+#endif
 
 #ifdef FRAGMENT_SHADER
 void main(void)
 {
 #ifdef USEOFFSETMAPPING
-	// apply offsetmapping
+
 	vec2 dPdx = dp_offsetmapping_dFdx(TexCoordSurfaceLightmap.xy);
 	vec2 dPdy = dp_offsetmapping_dFdy(TexCoordSurfaceLightmap.xy);
 	vec2 TexCoordOffset = OffsetMapping(TexCoordSurfaceLightmap.xy, dPdx, dPdy);
@@ -1160,8 +1084,7 @@ void main(void)
 #ifdef USEVERTEXTEXTUREBLEND
 	float alpha = offsetMappedTexture2D(Texture_Color).a;
 	float terrainblend = clamp(float(VertexColor.a) * alpha * 2.0 - 0.5, float(0.0), float(1.0));
-	//float terrainblend = min(float(VertexColor.a) * alpha * 2.0, float(1.0));
-	//float terrainblend = float(VertexColor.a) * alpha > 0.5;
+
 #endif
 
 #ifdef USEVERTEXTEXTUREBLEND
@@ -1175,11 +1098,8 @@ void main(void)
 	vec3 pixelnormal = normalize(surfacenormal.x * VectorS.xyz + surfacenormal.y * VectorT.xyz + surfacenormal.z * VectorR.xyz);
 	dp_FragColor = vec4(pixelnormal.x, pixelnormal.y, Depth, a);
 }
-#endif // FRAGMENT_SHADER
-#else // !MODE_DEFERREDGEOMETRY
-
-
-
+#endif
+#else
 
 #ifdef MODE_DEFERREDLIGHTSOURCE
 #ifdef VERTEX_SHADER
@@ -1189,11 +1109,11 @@ void main(void)
 	ModelViewPosition = ModelViewMatrix * Attrib_Position;
 	gl_Position = ModelViewProjectionMatrix * Attrib_Position;
 }
-#endif // VERTEX_SHADER
+#endif
 
 #ifdef FRAGMENT_SHADER
 uniform highp mat4 ViewToLight;
-// ScreenToDepth = vec2(Far / (Far - Near), Far * Near / (Near - Far));
+
 uniform highp vec2 ScreenToDepth;
 uniform myhalf3 DeferredColor_Ambient;
 uniform myhalf3 DeferredColor_Diffuse;
@@ -1204,34 +1124,27 @@ uniform myhalf SpecularPower;
 uniform myhalf2 PixelToScreenTexCoord;
 void main(void)
 {
-	// calculate viewspace pixel position
+
 	vec2 ScreenTexCoord = gl_FragCoord.xy * PixelToScreenTexCoord;
 	vec3 position;
-	// get the geometry information (depth, normal, specular exponent)
+
 	myhalf4 normalmap = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord);
-	// decode viewspace pixel normal
-//	myhalf3 surfacenormal = normalize(normalmap.rgb - cast_myhalf3(0.5,0.5,0.5));
+
 	myhalf3 surfacenormal = myhalf3(normalmap.rg, sqrt(1.0-dot(normalmap.rg, normalmap.rg)));
-	// decode viewspace pixel position
-//	position.z = decodedepthmacro(dp_texture2D(Texture_ScreenDepth, ScreenTexCoord));
+
 	position.z = normalmap.b;
-//	position.z = ScreenToDepth.y / (dp_texture2D(Texture_ScreenDepth, ScreenTexCoord).r + ScreenToDepth.x);
+
 	position.xy = ModelViewPosition.xy * (position.z / ModelViewPosition.z);
 
-	// now do the actual shading
-	// surfacenormal = pixel normal in viewspace
-	// LightVector = pixel to light in viewspace
-	// CubeVector = pixel in lightspace
-	// eyenormal = pixel to view direction in viewspace
 	vec3 CubeVector = vec3(ViewToLight * vec4(position,1));
 	myhalf fade = cast_myhalf(dp_texture2D(Texture_Attenuation, vec2(length(CubeVector), 0.0)));
 #ifdef USEDIFFUSE
-	// calculate diffuse shading
+
 	myhalf3 lightnormal = cast_myhalf3(normalize(LightPosition - position));
 SHADEDIFFUSE
 #endif
 #ifdef USESPECULAR
-	// calculate directional shading
+
 	myhalf3 eyenormal = -normalize(cast_myhalf3(position));
 SHADESPECULAR(SpecularPower * normalmap.a)
 #endif
@@ -1260,11 +1173,8 @@ SHADESPECULAR(SpecularPower * normalmap.a)
 # endif
 #endif
 }
-#endif // FRAGMENT_SHADER
-#else // !MODE_DEFERREDLIGHTSOURCE
-
-
-
+#endif
+#else
 
 #ifdef VERTEX_SHADER
 uniform highp mat4 TexMatrix;
@@ -1291,9 +1201,8 @@ void main(void)
 	vec4 SkeletalMatrix2 = Skeletal_Transform12[si1.x] * sw.x + Skeletal_Transform12[si1.y] * sw.y + Skeletal_Transform12[si1.z] * sw.z + Skeletal_Transform12[si1.w] * sw.w;
 	vec4 SkeletalMatrix3 = Skeletal_Transform12[si2.x] * sw.x + Skeletal_Transform12[si2.y] * sw.y + Skeletal_Transform12[si2.z] * sw.z + Skeletal_Transform12[si2.w] * sw.w;
 	mat4 SkeletalMatrix = mat4(SkeletalMatrix1, SkeletalMatrix2, SkeletalMatrix3, vec4(0.0, 0.0, 0.0, 1.0));
-//	ivec4 si = ivec4(Attrib_SkeletalIndex);
-//	mat4 SkeletalMatrix = Skeletal_Transform[si.x] * Attrib_SkeletalWeight.x + Skeletal_Transform[si.y] * Attrib_SkeletalWeight.y + Skeletal_Transform[si.z] * Attrib_SkeletalWeight.z + Skeletal_Transform[si.w] * Attrib_SkeletalWeight.w;
-	mat3 SkeletalNormalMatrix = mat3(cross(SkeletalMatrix[1].xyz, SkeletalMatrix[2].xyz), cross(SkeletalMatrix[2].xyz, SkeletalMatrix[0].xyz), cross(SkeletalMatrix[0].xyz, SkeletalMatrix[1].xyz)); // is actually transpose(inverse(mat3(SkeletalMatrix))) * det(mat3(SkeletalMatrix))
+
+	mat3 SkeletalNormalMatrix = mat3(cross(SkeletalMatrix[1].xyz, SkeletalMatrix[2].xyz), cross(SkeletalMatrix[2].xyz, SkeletalMatrix[0].xyz), cross(SkeletalMatrix[0].xyz, SkeletalMatrix[1].xyz));
 	vec4 SkeletalVertex = Attrib_Position * SkeletalMatrix;
 	SkeletalVertex.w = 1.0;
 	vec3 SkeletalSVector = normalize(Attrib_TexCoord1.xyz * SkeletalNormalMatrix);
@@ -1308,7 +1217,7 @@ void main(void)
 #if defined(MODE_VERTEXCOLOR) || defined(USEVERTEXTEXTUREBLEND) || defined(MODE_LIGHTDIRECTIONMAP_FORCED_VERTEXCOLOR) || defined(USEALPHAGENVERTEX)
 	VertexColor = Attrib_Color;
 #endif
-	// copy the surface texcoord
+
 #ifdef USELIGHTMAP
 	TexCoordSurfaceLightmap = vec4((TexMatrix * Attrib_TexCoord0).xy, Attrib_TexCoord4.xy);
 #else
@@ -1326,14 +1235,11 @@ void main(void)
 #endif
 
 #ifdef MODE_LIGHTSOURCE
-	// transform vertex position into light attenuation/cubemap space
-	// (-1 to +1 across the light box)
+
 	CubeVector = vec3(ModelToLight * Attrib_Position);
 
 # ifdef USEDIFFUSE
-	// transform unnormalized light direction into tangent space
-	// (we use unnormalized to ensure that it interpolates correctly and then
-	//  normalize it per pixel)
+
 	vec3 lightminusvertex = LightPosition - Attrib_Position.xyz;
 	LightVector.x = dot(lightminusvertex, Attrib_TexCoord1.xyz);
 	LightVector.y = dot(lightminusvertex, Attrib_TexCoord2.xyz);
@@ -1347,7 +1253,6 @@ void main(void)
 	LightVector.z = dot(LightDir, Attrib_TexCoord3.xyz);
 #endif
 
-	// transform unnormalized eye direction into tangent space
 #ifdef USEEYEVECTOR
 	vec3 EyeRelative = EyePosition - Attrib_Position.xyz;
 	EyeVectorFogDepth.x = dot(EyeRelative, Attrib_TexCoord1.xyz);
@@ -1359,7 +1264,6 @@ void main(void)
 	EyeVectorFogDepth.w = 0.0;
 #endif
 #endif
-
 
 #if defined(MODE_LIGHTDIRECTIONMAP_MODELSPACE) || defined(USEREFLECTCUBE) || defined(USEBOUNCEGRIDDIRECTIONAL)
 # ifdef USEFOG
@@ -1377,7 +1281,6 @@ void main(void)
 # endif
 #endif
 
-	// transform vertex to clipspace (post-projection, but before perspective divide by W occurs)
 	gl_Position = ModelViewProjectionMatrix * Attrib_Position;
 
 #ifdef USESHADOWMAPORTHO
@@ -1391,10 +1294,7 @@ void main(void)
 	gl_Position = TrippyVertex(gl_Position);
 #endif
 }
-#endif // VERTEX_SHADER
-
-
-
+#endif
 
 #ifdef FRAGMENT_SHADER
 #ifdef USEDEFERREDLIGHTMAP
@@ -1439,7 +1339,7 @@ uniform occludeQuery {
 void main(void)
 {
 #ifdef USEOFFSETMAPPING
-	// apply offsetmapping
+
 	vec2 dPdx = dp_offsetmapping_dFdx(TexCoordSurfaceLightmap.xy);
 	vec2 dPdy = dp_offsetmapping_dFdy(TexCoordSurfaceLightmap.xy);
 	vec2 TexCoordOffset = OffsetMapping(TexCoordSurfaceLightmap.xy, dPdx, dPdy);
@@ -1450,7 +1350,6 @@ void main(void)
 # define TexCoord TexCoordSurfaceLightmap.xy
 #endif
 
-	// combine the diffuse textures (base, pants, shirt)
 	myhalf4 color = cast_myhalf4(offsetMappedTexture2D(Texture_Color));
 #ifdef USEALPHAKILL
 	if (color.a < 0.5)
@@ -1467,25 +1366,22 @@ void main(void)
 	color.rgb = mix(color2.rgb, color.rgb, terrainblend);
 #else
 	myhalf terrainblend = clamp(cast_myhalf(VertexColor.a) * color.a * 2.0 - 0.5, cast_myhalf(0.0), cast_myhalf(1.0));
-	//myhalf terrainblend = min(cast_myhalf(VertexColor.a) * color.a * 2.0, cast_myhalf(1.0));
-	//myhalf terrainblend = cast_myhalf(VertexColor.a) * color.a > 0.5;
+
 	color.rgb = mix(cast_myhalf3(dp_texture2D(Texture_SecondaryColor, TexCoord2)), color.rgb, terrainblend);
 #endif
 	color.a = 1.0;
-	//color = mix(cast_myhalf4(1, 0, 0, 1), color, terrainblend);
+
 #endif
 #ifdef USEALPHAGENVERTEX
 	color.a *= VertexColor.a;
 #endif
 
-	// get the surface normal
 #ifdef USEVERTEXTEXTUREBLEND
 	myhalf3 surfacenormal = normalize(mix(cast_myhalf3(dp_texture2D(Texture_SecondaryNormal, TexCoord2)), cast_myhalf3(offsetMappedTexture2D(Texture_Normal)), terrainblend) - cast_myhalf3(0.5, 0.5, 0.5));
 #else
 	myhalf3 surfacenormal = normalize(cast_myhalf3(offsetMappedTexture2D(Texture_Normal)) - cast_myhalf3(0.5, 0.5, 0.5));
 #endif
 
-	// get the material colors
 	myhalf3 diffusetex = color.rgb;
 #if defined(USESPECULAR) || defined(USEDEFERREDLIGHTMAP)
 # ifdef USEVERTEXTEXTUREBLEND
@@ -1506,11 +1402,8 @@ void main(void)
 	myhalf3 eyenormal = normalize(cast_myhalf3(EyeVectorFogDepth.xyz));
 #endif
 
-
-
-
 #ifdef MODE_LIGHTSOURCE
-	// light source
+
 #ifdef USEDIFFUSE
 	myhalf3 lightnormal = cast_myhalf3(normalize(LightVector));
 SHADEDIFFUSE
@@ -1529,10 +1422,7 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 # ifdef USECUBEFILTER
 	color.rgb *= cast_myhalf3(dp_textureCube(Texture_Cube, CubeVector));
 # endif
-#endif // MODE_LIGHTSOURCE
-
-
-
+#endif
 
 #ifdef MODE_LIGHTDIRECTION
 	#define SHADING
@@ -1540,38 +1430,30 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 		myhalf3 lightnormal = cast_myhalf3(normalize(LightVector));
 	#endif
 	#define lightcolor 1
-#endif // MODE_LIGHTDIRECTION
+#endif
 #ifdef MODE_LIGHTDIRECTIONMAP_MODELSPACE
    #define SHADING
-	// deluxemap lightmapping using light vectors in modelspace (q3map2 -light -deluxe)
+
 	myhalf3 lightnormal_modelspace = cast_myhalf3(dp_texture2D(Texture_Deluxemap, TexCoordSurfaceLightmap.zw)) * 2.0 + cast_myhalf3(-1.0, -1.0, -1.0);
 	myhalf3 lightcolor = cast_myhalf3(dp_texture2D(Texture_Lightmap, TexCoordSurfaceLightmap.zw));
-	// convert modelspace light vector to tangentspace
+
 	myhalf3 lightnormal;
 	lightnormal.x = dot(lightnormal_modelspace, cast_myhalf3(VectorS));
 	lightnormal.y = dot(lightnormal_modelspace, cast_myhalf3(VectorT));
 	lightnormal.z = dot(lightnormal_modelspace, cast_myhalf3(VectorR));
-	lightnormal = normalize(lightnormal); // VectorS/T/R are not always perfectly normalized, and EXACTSPECULARMATH is very picky about this
-	// calculate directional shading (and undoing the existing angle attenuation on the lightmap by the division)
-	// note that q3map2 is too stupid to calculate proper surface normals when q3map_nonplanar
-	// is used (the lightmap and deluxemap coords correspond to virtually random coordinates
-	// on that luxel, and NOT to its center, because recursive triangle subdivision is used
-	// to map the luxels to coordinates on the draw surfaces), which also causes
-	// deluxemaps to be wrong because light contributions from the wrong side of the surface
-	// are added up. To prevent divisions by zero or strong exaggerations, a max()
-	// nudge is done here at expense of some additional fps. This is ONLY needed for
-	// deluxemaps, tangentspace deluxemap avoid this problem by design.
+	lightnormal = normalize(lightnormal);
+
 	lightcolor *= 1.0 / max(0.25, lightnormal.z);
-#endif // MODE_LIGHTDIRECTIONMAP_MODELSPACE
+#endif
 #ifdef MODE_LIGHTDIRECTIONMAP_TANGENTSPACE
    #define SHADING
-	// deluxemap lightmapping using light vectors in tangentspace (hmap2 -light)
+
 	myhalf3 lightnormal = cast_myhalf3(dp_texture2D(Texture_Deluxemap, TexCoordSurfaceLightmap.zw)) * 2.0 + cast_myhalf3(-1.0, -1.0, -1.0);
 	myhalf3 lightcolor = cast_myhalf3(dp_texture2D(Texture_Lightmap, TexCoordSurfaceLightmap.zw));
 #endif
 #if defined(MODE_LIGHTDIRECTIONMAP_FORCED_LIGHTMAP) || defined(MODE_LIGHTDIRECTIONMAP_FORCED_VERTEXCOLOR)
 	#define SHADING
-	// forced deluxemap on lightmapped/vertexlit surfaces
+
 	myhalf3 lightnormal = cast_myhalf3(0.0, 0.0, 1.0);
    #ifdef USELIGHTMAP
 		myhalf3 lightcolor = cast_myhalf3(dp_texture2D(Texture_Lightmap, TexCoordSurfaceLightmap.zw));
@@ -1583,23 +1465,17 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 	#define SHADING
 	myhalf3 lightnormal = cast_myhalf3(normalize(EyeVectorFogDepth.xyz));
 	#define lightcolor 1
-#endif // MODE_FAKELIGHT
-
-
-
+#endif
 
 #ifdef MODE_LIGHTMAP
 	color.rgb = diffusetex * (Color_Ambient + cast_myhalf3(dp_texture2D(Texture_Lightmap, TexCoordSurfaceLightmap.zw)) * Color_Diffuse);
-#endif // MODE_LIGHTMAP
+#endif
 #ifdef MODE_VERTEXCOLOR
 	color.rgb = diffusetex * (Color_Ambient + cast_myhalf3(VertexColor.rgb) * Color_Diffuse);
-#endif // MODE_VERTEXCOLOR
+#endif
 #ifdef MODE_FLATCOLOR
 	color.rgb = diffusetex * Color_Ambient;
-#endif // MODE_FLATCOLOR
-
-
-
+#endif
 
 #ifdef SHADING
 # ifdef USEDIFFUSE
@@ -1623,13 +1499,12 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 	vec2 ScreenTexCoord = gl_FragCoord.xy * PixelToScreenTexCoord;
 	color.rgb += diffusetex * cast_myhalf3(dp_texture2D(Texture_ScreenDiffuse, ScreenTexCoord)) * DeferredMod_Diffuse;
 	color.rgb += glosstex.rgb * cast_myhalf3(dp_texture2D(Texture_ScreenSpecular, ScreenTexCoord)) * DeferredMod_Specular;
-//	color.rgb = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord).rgb * vec3(1.0, 1.0, 0.001);
+
 #endif
 
 #ifdef USEBOUNCEGRID
 #ifdef USEBOUNCEGRIDDIRECTIONAL
-//	myhalf4 bouncegrid_coeff1 = cast_myhalf4(dp_texture3D(Texture_BounceGrid, BounceGridTexCoord                        ));
-//	myhalf4 bouncegrid_coeff2 = cast_myhalf4(dp_texture3D(Texture_BounceGrid, BounceGridTexCoord + vec3(0.0, 0.0, 0.125))) * 2.0 + cast_myhalf4(-1.0, -1.0, -1.0, -1.0);
+
 	myhalf4 bouncegrid_coeff3 = cast_myhalf4(dp_texture3D(Texture_BounceGrid, BounceGridTexCoord + vec3(0.0, 0.0, 0.250)));
 	myhalf4 bouncegrid_coeff4 = cast_myhalf4(dp_texture3D(Texture_BounceGrid, BounceGridTexCoord + vec3(0.0, 0.0, 0.375)));
 	myhalf4 bouncegrid_coeff5 = cast_myhalf4(dp_texture3D(Texture_BounceGrid, BounceGridTexCoord + vec3(0.0, 0.0, 0.500)));
@@ -1639,13 +1514,13 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 	myhalf3 bouncegrid_dir = normalize(mat3(BounceGridMatrix) * (surfacenormal.x * VectorS.xyz + surfacenormal.y * VectorT.xyz + surfacenormal.z * VectorR.xyz));
 	myhalf3 bouncegrid_dirp = max(cast_myhalf3(0.0, 0.0, 0.0), bouncegrid_dir);
 	myhalf3 bouncegrid_dirn = max(cast_myhalf3(0.0, 0.0, 0.0), -bouncegrid_dir);
-//	bouncegrid_dirp  = bouncegrid_dirn = cast_myhalf3(1.0,1.0,1.0);
+
 	myhalf3 bouncegrid_light = cast_myhalf3(
 		dot(bouncegrid_coeff3.xyz, bouncegrid_dirp) + dot(bouncegrid_coeff6.xyz, bouncegrid_dirn),
 		dot(bouncegrid_coeff4.xyz, bouncegrid_dirp) + dot(bouncegrid_coeff7.xyz, bouncegrid_dirn),
 		dot(bouncegrid_coeff5.xyz, bouncegrid_dirp) + dot(bouncegrid_coeff8.xyz, bouncegrid_dirn));
 	color.rgb += diffusetex * bouncegrid_light * BounceGridIntensity;
-//	color.rgb = bouncegrid_dir.rgb * 0.5 + vec3(0.5, 0.5, 0.5);
+
 #else
 	color.rgb += diffusetex * cast_myhalf3(dp_texture3D(Texture_BounceGrid, BounceGridTexCoord)) * BounceGridIntensity;
 #endif
@@ -1661,35 +1536,19 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 
 #ifdef USECELOUTLINES
 # ifdef USEDEFERREDLIGHTMAP
-//	vec2 ScreenTexCoord = gl_FragCoord.xy * PixelToScreenTexCoord;
+
 	vec4 ScreenTexCoordStep = vec4(PixelToScreenTexCoord.x, 0.0, 0.0, PixelToScreenTexCoord.y);
 	vec4 DepthNeighbors;
 
-	// enable to test ink on white geometry
-//	color.rgb = vec3(1.0, 1.0, 1.0);
-
-	// note: this seems to be negative
 	float DepthCenter = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord).b;
 
-	// edge detect method
-//	DepthNeighbors.x = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord - ScreenTexCoordStep.xy).b;
-//	DepthNeighbors.y = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + ScreenTexCoordStep.xy).b;
-//	DepthNeighbors.z = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + ScreenTexCoordStep.zw).b;
-//	DepthNeighbors.w = dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord - ScreenTexCoordStep.zw).b;
-//	float DepthAverage = dot(DepthNeighbors, vec4(0.25, 0.25, 0.25, 0.25));
-//	float DepthDelta = abs(dot(DepthNeighbors.xy, vec2(-1.0, 1.0))) + abs(dot(DepthNeighbors.zw, vec2(-1.0, 1.0)));
-//	color.rgb *= max(0.5, 1.0 - max(0.0, abs(DepthCenter - DepthAverage) - 0.2 * DepthDelta) / (0.01 + 0.2 * DepthDelta));
-//	color.rgb *= step(abs(DepthCenter - DepthAverage), 0.2 * DepthDelta); 
+	float DepthScale1 = 4.0 / DepthCenter;
 
-	// shadow method
-	float DepthScale1 = 4.0 / DepthCenter; // inner ink (shadow on object)
-//	float DepthScale1 = -4.0 / DepthCenter; // outer ink (shadow around object)
-//	float DepthScale1 = 0.003;
 	float DepthScale2 = DepthScale1 / 2.0;
-//	float DepthScale3 = DepthScale1 / 4.0;
+
 	float DepthBias1 = -DepthCenter * DepthScale1;
 	float DepthBias2 = -DepthCenter * DepthScale2;
-//	float DepthBias3 = -DepthCenter * DepthScale3;
+
 	float DepthShadow = max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2(-1.0,  0.0)).b * DepthScale1 + DepthBias1)
 	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 1.0,  0.0)).b * DepthScale1 + DepthBias1)
 	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 0.0, -1.0)).b * DepthScale1 + DepthBias1)
@@ -1698,13 +1557,10 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 2.0,  0.0)).b * DepthScale2 + DepthBias2)
 	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 0.0, -2.0)).b * DepthScale2 + DepthBias2)
 	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 0.0,  2.0)).b * DepthScale2 + DepthBias2)
-//	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2(-3.0,  0.0)).b * DepthScale3 + DepthBias3)
-//	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 3.0,  0.0)).b * DepthScale3 + DepthBias3)
-//	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 0.0, -3.0)).b * DepthScale3 + DepthBias3)
-//	                  + max(0.0, dp_texture2D(Texture_ScreenNormalMap, ScreenTexCoord + PixelToScreenTexCoord * vec2( 0.0,  3.0)).b * DepthScale3 + DepthBias3)
+
 	                  - 0.0;
 	color.rgb *= 1.0 - max(0.0, min(DepthShadow, 1.0));
-//	color.r = DepthCenter / -1024.0;
+
 # endif
 #endif
 
@@ -1712,10 +1568,9 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 	color.rgb = FogVertex(color);
 #endif
 
-	// reflection must come last because it already contains exactly the correct fog (the reflection render preserves camera distance from the plane, it only flips the side) and ContrastBoost/SceneBrightness
 #ifdef USEREFLECTION
 	vec4 ScreenScaleRefractReflectIW = ScreenScaleRefractReflect * (1.0 / ModelViewProjectionPosition.w);
-	//vec4 ScreenTexCoord = (ModelViewProjectionPosition.xyxy + normalize(cast_myhalf3(offsetMappedTexture2D(Texture_Normal)) - cast_myhalf3(0.5)).xyxy * DistortScaleRefractReflect * 100) * ScreenScaleRefractReflectIW + ScreenCenterRefractReflect;
+
 	vec2 SafeScreenTexCoord = ModelViewProjectionPosition.xy * ScreenScaleRefractReflectIW.zw + ScreenCenterRefractReflect.zw;
 	#ifdef USENORMALMAPSCROLLBLEND
 # ifdef USEOFFSETMAPPING
@@ -1728,11 +1583,7 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 	#else
 		vec2 ScreenTexCoord = SafeScreenTexCoord + vec3(normalize(cast_myhalf3(offsetMappedTexture2D(Texture_Normal)) - cast_myhalf3(0.5))).xy * DistortScaleRefractReflect.zw;
 	#endif
-	// FIXME temporary hack to detect the case that the reflection
-	// gets blackened at edges due to leaving the area that contains actual
-	// content.
-	// Remove this 'ack once we have a better way to stop this thing from
-	// 'appening.
+
 	float f = min(1.0, length(dp_texture2D(Texture_Reflection, ScreenTexCoord + vec2(0.01, 0.01)).rgb) / 0.05);
 	f      *= min(1.0, length(dp_texture2D(Texture_Reflection, ScreenTexCoord + vec2(0.01, -0.01)).rgb) / 0.05);
 	f      *= min(1.0, length(dp_texture2D(Texture_Reflection, ScreenTexCoord + vec2(-0.01, 0.01)).rgb) / 0.05);
@@ -1746,13 +1597,13 @@ SHADESPECULAR(SpecularPower * glosstex.a)
 
 	dp_FragColor = vec4(color);
 }
-#endif // FRAGMENT_SHADER
+#endif
 
-#endif // !MODE_DEFERREDLIGHTSOURCE
-#endif // !MODE_DEFERREDGEOMETRY
-#endif // !MODE_WATER
-#endif // !MODE_REFRACTION
-#endif // !MODE_BLOOMBLUR
-#endif // !MODE_GENERIC
-#endif // !MODE_POSTPROCESS
-#endif // !MODE_DEPTH_OR_SHADOW
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif
+#endif

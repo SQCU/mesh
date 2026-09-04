@@ -3,6 +3,17 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 PREFIX=fd6d:6573:68
 D=${MESH_DEADLINE:-2}
 U="${MESH_SSH_USER:-$(id -un)}"
+SSHID=()
+MESHROOT=$(cd "$(dirname "$0")/.." && pwd)
+KEYROSTER="$MESHROOT/keys/authorized_keys"
+[ -f "$KEYROSTER" ] || KEYROSTER="$MESHROOT/etc/authorized_keys"
+for pub in "$HOME"/.ssh/*.pub; do
+  [ -f "$pub" ] || continue
+  priv=${pub%.pub}
+  [ -f "$priv" ] || continue
+  blob=$(awk 'NF>=2 && $1 !~ /^#/{print $2;exit}' "$pub")
+  grep -q "^[^#].* $blob\( \|$\)" "$KEYROSTER" 2>/dev/null && SSHID+=( -i "$priv" )
+done
 [ "$#" -ge 2 ] || { echo "usage: mesh-run [<name>|all|others] <command...>" >&2; exit 1; }
 target=$1; shift
 probe(){ t=$(mktemp)
@@ -42,7 +53,7 @@ for row in $(cat "$T"/* 2>/dev/null | sort -u -k1,1); do
   esac
   tag=${name:-$addr}
   if [ "$ula" = "$self" ]; then bash -c "$*" 2>&1 | sed "s|^|$tag |" &
-  else ssh -o BatchMode=yes -o ConnectTimeout="$D" -o StrictHostKeyChecking=accept-new \
+  else ssh "${SSHID[@]}" -o BatchMode=yes -o ConnectTimeout="$D" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
          "$U@$addr" "$@" 2>&1 | sed "s|^|$tag |" & fi
 done
 wait

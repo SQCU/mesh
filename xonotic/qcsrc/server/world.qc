@@ -72,13 +72,12 @@ void PingPLReport_Think(entity this)
 		WriteByte(MSG_BROADCAST, min(ceil(CS(e).ping_packetloss * 255), 255));
 		WriteByte(MSG_BROADCAST, min(ceil(CS(e).ping_movementloss * 255), 255));
 
-		// record latency times for clients throughout the match so we can report it to playerstats
 		if(time > (CS(e).latency_time + LATENCY_THINKRATE))
 		{
 			CS(e).latency_sum += CS(e).ping;
 			CS(e).latency_cnt += 1;
 			CS(e).latency_time = time;
-			//print("sum: ", ftos(CS(e).latency_sum), ", cnt: ", ftos(CS(e).latency_cnt), ", avg: ", ftos(CS(e).latency_sum / CS(e).latency_cnt), ".\n");
+
 		}
 	}
 	else
@@ -116,14 +115,11 @@ void GotoFirstMap(entity this)
 	float n;
 	if(autocvar__sv_init)
 	{
-		// cvar_set("_sv_init", "0");
-		// we do NOT set this to 0 any more, so someone "accidentally" changing
-		// to this "init" map on a dedicated server will cause no permanent
-		// harm
+
 		if(autocvar_g_maplist_shuffle)
 			ShuffleMaplist();
 		n = tokenizebyseparator(autocvar_g_maplist, " ");
-		cvar_set("g_maplist_index", ftos(n - 1)); // jump to map 0 in GotoNextMap
+		cvar_set("g_maplist_index", ftos(n - 1));
 
 		MapInfo_Enumerate();
 		MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 0);
@@ -156,7 +152,7 @@ void cvar_changes_init()
 	cvar_purechanges_count = 0;
 
 	h = buf_create();
-	buf_cvarlist(h, "", "_"); // exclude all _ cvars as they are temporary
+	buf_cvarlist(h, "", "_");
 	n = buf_getsize(h);
 
 	adding = true;
@@ -175,10 +171,8 @@ void cvar_changes_init()
 #define BADVALUE(p, val) if (k == p && v == val) continue
 #define BADPRESUFFIXVALUE(p, s, val) if(BADPREFIX_COND(p) && BADSUFFIX_COND(s) && v == val) continue
 
-		// general excludes and namespaces for server admin used cvars
-		BADPREFIX("help_"); // PN's server has this listed as changed, let's not rat him out for THAT
+		BADPREFIX("help_");
 
-		// internal
 		BADPREFIX("csqc_");
 		BADPREFIX("cvar_check_");
 		BADCVAR("gamecfg");
@@ -188,7 +182,6 @@ void cvar_changes_init()
 		BADCVAR("sv_mapformat_is_quake3");
 		BADPREFIX("sv_world");
 
-		// client
 		BADPREFIX("chase_");
 		BADPREFIX("cl_");
 		BADPREFIX("con_");
@@ -220,7 +213,6 @@ void cvar_changes_init()
 		BADCVAR("in_pitch_min");
 		BADCVAR("in_pitch_max");
 
-		// private
 		BADCVAR("developer");
 		BADCVAR("log_dest_udp");
 		BADCVAR("net_address");
@@ -261,12 +253,10 @@ void cvar_changes_init()
 		BADPREFIX("sv_waypointsprite_");
 		BADCVAR("rescan_pending");
 
-		// these can contain player IDs, so better hide
 		BADPREFIX("g_forced_team_");
 		BADCVAR("sv_allow_customplayermodels_idlist");
 		BADCVAR("sv_allow_customplayermodels_speciallist");
 
-		// mapinfo
 		BADCVAR("fraglimit");
 		BADCVAR("g_arena");
 		BADCVAR("g_assault");
@@ -323,7 +313,6 @@ void cvar_changes_init()
 		BADCVAR("g_maplist_ignore_sizes");
 		BADCVAR("g_maplist_sizes_count_bots");
 
-		// long
 		BADCVAR("hostname");
 		BADCVAR("g_maplist");
 		BADCVAR("g_maplist_mostrecent");
@@ -345,9 +334,6 @@ void cvar_changes_init()
 			}
 		}
 
-		// now check if the changes are actually gameplay relevant
-
-		// does nothing gameplay relevant
 		BADCVAR("captureleadlimit_override");
 		BADCVAR("condump_stripcolors");
 		BADCVAR("fs_gamedir");
@@ -434,13 +420,6 @@ void cvar_changes_init()
 		BADPREFIX("timelimit_");
 		BADPRESUFFIX("g_", "_round_timelimit");
 
-		// allowed changes to server admins (please sync this to server.cfg)
-		// vi commands:
-		//   :/"impure"/,$d
-		//   :g!,^\/\/[^ /],d
-		//   :%s,//\([^ ]*\).*,BADCVAR("\1");,
-		//   :%!sort
-		// yes, this does contain some redundant stuff, don't really care
 		BADPREFIX("bot_ai_");
 		BADCVAR("bot_config_file");
 		BADCVAR("bot_number");
@@ -536,7 +515,6 @@ void cvar_changes_init()
 		BADPRESUFFIXVALUE("g_", "_weaponarena", "most");
 		BADPRESUFFIXVALUE("g_", "_weaponarena", "most_available");
 
-		// mutators that announce themselves properly to the server browser
 		BADCVAR("g_instagib");
 		BADCVAR("g_new_toys");
 		BADCVAR("g_nix");
@@ -559,12 +537,7 @@ void cvar_changes_init()
 			}
 		}
 		++cvar_purechanges_count;
-		// WARNING: this variable is used for the server list
-		// NEVER dare to skip this code!
-		// Hacks to intentionally appearing as "pure server" even though you DO have
-		// modified settings may be punished by removal from the server list.
-		// You can do to the variables cvar_changes and cvar_purechanges all you want,
-		// though.
+
 	}
 	buf_del(h);
 	if(cvar_changes == "")
@@ -599,41 +572,38 @@ void RandomSeed_Spawn()
 	setthink(randomseed, RandomSeed_Think);
 	Net_LinkEntity(randomseed, false, 0, RandomSeed_Send);
 
-	getthink(randomseed)(randomseed); // sets random seed and nextthink
+	getthink(randomseed)(randomseed);
 }
 
 spawnfunc(__init_dedicated_server)
 {
-	// handler for _init/_init map (only for dedicated server initialization)
 
-	world_initialized = -1; // don't complain
+	world_initialized = -1;
 
 	delete_fn = remove_unsafely;
 
 	entity e = new(GotoFirstMap);
 	setthink(e, GotoFirstMap);
-	e.nextthink = time; // this is usually 1 at this point
+	e.nextthink = time;
 
-	e = new(info_player_deathmatch);  // safeguard against player joining
+	e = new(info_player_deathmatch);
 
-	// assign reflectively to avoid "assignment to world" warning
 	for (int i = 0, n = numentityfields(); i < n; ++i)
 	{
 		string k = entityfieldname(i);
 		if (k == "classname")
 		{
-			// safeguard against various stuff ;)
+
 			putentityfieldstring(i, this, "worldspawn");
 			break;
 		}
 	}
 
-	// needs to be done so early because of the constants they create
 	static_init();
 	static_init_late();
 	static_init_precache();
 
-	IL_PUSH(g_spawnpoints, e); // just incase
+	IL_PUSH(g_spawnpoints, e);
 
 	MapInfo_Enumerate();
 	MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 0);
@@ -653,7 +623,6 @@ STATIC_INIT_EARLY(maxclients)
 
 void GameplayMode_DelayedInit(entity this)
 {
-	// at this stage team entities are spawned, teamplay contains the number of them
 
 	if(!scores_initialized)
 		ScoreRules_generic();
@@ -665,9 +634,9 @@ void GameplayMode_DelayedInit(entity this)
 
 	if (autocvar_g_maxplayers < 0 && teamplay)
 	{
-		// automatic maxplayers should be a multiple of team count
+
 		if (map_maxplayers == 0 || map_maxplayers > maxclients)
-			map_maxplayers = maxclients; // unlimited, but may need rounding
+			map_maxplayers = maxclients;
 		int d = map_maxplayers % AVAILABLE_TEAMS;
 		int u = AVAILABLE_TEAMS - d;
 		map_maxplayers += (u <= d && u + map_maxplayers <= maxclients) ? u : -d;
@@ -680,23 +649,22 @@ void GameplayMode_DelayedInit(entity this)
 		map_minplayers = bound(max(2, AVAILABLE_TEAMS * 2), map_minplayers, m);
 		if (teamplay)
 		{
-			// automatic minplayers should be a multiple of team count
+
 			int d = map_minplayers % AVAILABLE_TEAMS;
 			int u = AVAILABLE_TEAMS - d;
 			map_minplayers += (u < d && u + map_minplayers <= m) ? u : -d;
 		}
 	}
 	else
-		map_minplayers = 0; // don't display a minimum if it's not used (g_maxplayers < 0 && g_warmup >= 0)
+		map_minplayers = 0;
 }
 
 void InitGameplayMode()
 {
 	VoteReset(false);
 
-	// find out good world mins/maxs bounds, either the static bounds found by looking for solid, or the mapinfo specified bounds
 	get_mi_min_max(1);
-	// assign reflectively to avoid "assignment to world" warning
+
 	for (int i = 0, done = 0, n = numentityfields(); i < n; ++i)
 	{
 		string k = entityfieldname(i);
@@ -707,10 +675,7 @@ void InitGameplayMode()
 			if (++done == 2) break;
 		}
 	}
-	// currently, NetRadiant's limit is 131072 qu for each side
-	// distance from one corner of a 131072qu cube to the opposite corner is approx. 227023 qu
-	// set the distance according to map size but don't go over the limit to avoid issues with float precision
-	// in case somebody makes extremely large maps
+
 	max_shot_distance = min(230000, vlen(world.maxs - world.mins));
 
 	MapInfo_LoadMapSettings(mapname);
@@ -759,19 +724,16 @@ spawnfunc(worldspawn)
 	{
 		if (!server_is_dedicated)
 		{
-			// DP unloads dlcache pk3s before starting a listen server since https://gitlab.com/xonotic/darkplaces/-/merge_requests/134
-			// restore csqc_progname too
+
 			string expect = "csprogs.dat";
 			wantrestart = cvar_string("csqc_progname") != expect;
 			cvar_set("csqc_progname", expect);
 		}
 		else
 		{
-			// Try to use versioned csprogs from pk3
-			// Only ever use versioned csprogs.dat files on dedicated servers;
-			// we need to reset csqc_progname on clients ourselves, and it's easier if the client's release name is constant
+
 			string pk3csprogs = "csprogs-" WATERMARK ".dat";
-			// This always works; fall back to it if a versioned csprogs.dat is suddenly missing
+
 			string select = "csprogs.dat";
 			if (fexists(pk3csprogs)) select = pk3csprogs;
 			if (cvar_string("csqc_progname") != select)
@@ -779,8 +741,7 @@ spawnfunc(worldspawn)
 				cvar_set("csqc_progname", select);
 				wantrestart = true;
 			}
-			// Check for updates on startup
-			// We do it this way for atomicity so that connecting clients still match the server progs and don't disconnect
+
 			int sentinel = fopen("progs.txt", FILE_READ);
 			if (sentinel >= 0)
 			{
@@ -789,9 +750,7 @@ spawnfunc(worldspawn)
 				if (switchversion != "" && switchversion != WATERMARK)
 				{
 					LOG_INFOF("Switching progs: " WATERMARK " -> %s", switchversion);
-					// if it doesn't exist, assume either:
-					//   a) the current program was overwritten
-					//   b) this is a client only update
+
 					string newprogs = sprintf("progs-%s.dat", switchversion);
 					if (fexists(newprogs))
 					{
@@ -811,7 +770,7 @@ spawnfunc(worldspawn)
 		{
 			LOG_INFO("Restart requested");
 			changelevel(mapname);
-			// let initialization continue, shutdown depends on it
+
 		}
 	}
 
@@ -819,65 +778,48 @@ spawnfunc(worldspawn)
 		error("world already spawned - you may have EXACTLY ONE worldspawn!");
 	world_already_spawned = true;
 
-	delete_fn = remove_safely; // during spawning, watch what you remove!
+	delete_fn = remove_safely;
 
-	cvar_changes_init(); // do this very early now so it REALLY matches the server config
+	cvar_changes_init();
 
-	// default to RACE_RECORD, can be overwritten by gamemodes
 	record_type = RACE_RECORD;
 
-	// needs to be done so early because of the constants they create
 	static_init();
 
 	ServerProgsDB = db_load(strcat("server.db", autocvar_sessionid));
 
 	TemporaryDB = db_create();
 
-	// 0 normal
 	lightstyle(0, "m");
 
-	// 1 FLICKER (first variety)
 	lightstyle(1, "mmnmmommommnonmmonqnmmo");
 
-	// 2 SLOW STRONG PULSE
 	lightstyle(2, "abcdefghijklmnopqrstuvwxyzyxwvutsrqponmlkjihgfedcba");
 
-	// 3 CANDLE (first variety)
 	lightstyle(3, "mmmmmaaaaammmmmaaaaaabcdefgabcdefg");
 
-	// 4 FAST STROBE
 	lightstyle(4, "mamamamamama");
 
-	// 5 GENTLE PULSE 1
 	lightstyle(5,"jklmnopqrstuvwxyzyxwvutsrqponmlkj");
 
-	// 6 FLICKER (second variety)
 	lightstyle(6, "nmonqnmomnmomomno");
 
-	// 7 CANDLE (second variety)
 	lightstyle(7, "mmmaaaabcdefgmmmmaaaammmaamm");
 
-	// 8 CANDLE (third variety)
 	lightstyle(8, "mmmaaammmaaammmabcdefaaaammmmabcdefmmmaaaa");
 
-	// 9 SLOW STROBE (fourth variety)
 	lightstyle(9, "aaaaaaaazzzzzzzz");
 
-	// 10 FLUORESCENT FLICKER
 	lightstyle(10, "mmamammmmammamamaaamammma");
 
-	// 11 SLOW PULSE NOT FADE TO BLACK
 	lightstyle(11, "abcdefghijklmnopqrrqponmlkjihgfedcba");
 
-	// styles 32-62 are assigned by the spawnfunc_light program for switchable lights
-
-	// 63 testing
 	lightstyle(63, "a");
 
 	if(autocvar_g_campaign)
 		CampaignPreInit();
 	else
-		PlayerStats_GameReport_Init(); // we need this to be initiated before InitGameplayMode
+		PlayerStats_GameReport_Init();
 
 	Map_MarkAsRecent(mapname);
 
@@ -896,15 +838,10 @@ spawnfunc(worldspawn)
 
 	WaypointSprite_Init();
 
-	// NOTE for matchid:
-	// changing the logic generating it is okay. But:
-	// it HAS to stay <= 64 chars
-	// character set: ASCII 33-126 without the following characters: : ; ' " \ $
-	// strftime(false, "%s") isn't reliable, see strftime_s description
 	matchid = strzone(sprintf("%d.%s.%06d", autocvar_sv_eventlog_files_counter, strftime_s(), random() * 1000000));
 
 	if(autocvar_sv_eventlog)
-		GameLogInit(); // requires matchid to be set
+		GameLogInit();
 
 	cvar_set("nextmap", "");
 
@@ -921,10 +858,9 @@ spawnfunc(worldspawn)
 	q3compat = BITSET(q3compat, Q3COMPAT_ARENA, _MapInfo_FindArenaFile(mapname, ".arena") != "");
 	q3compat = BITSET(q3compat, Q3COMPAT_DEFI, _MapInfo_FindArenaFile(mapname, ".defi") != "");
 
-	// quake 3 music support
 	if(world.music || world.noise)
 	{
-		// prefer .music over .noise
+
 		string chosen_music;
 		if(world.music)
 			chosen_music = world.music;
@@ -981,7 +917,6 @@ spawnfunc(worldspawn)
 
 	Nagger_Init();
 
-	// set up information replies for clients and server to use
 	maplist_reply = strzone(getmaplist());
 	lsmaps_reply = strzone(getlsmaps());
 	monsterlist_reply = strzone(getmonsterlist());
@@ -1000,7 +935,6 @@ spawnfunc(worldspawn)
 	ladder_reply = strzone(getladder());
 	rankings_reply = strzone(getrankings());
 
-	// begin other init
 	ClientInit_Spawn();
 	RandomSeed_Spawn();
 	PingPLReport_Spawn();
@@ -1009,20 +943,19 @@ spawnfunc(worldspawn)
 
 	if (!wantrestart) localcmd("\n_sv_hook_gamestart ", GetGametype(), "\n");
 
-	// fill sv_curl_serverpackages from .serverpackage files
 	if (autocvar_sv_curl_serverpackages_auto)
 	{
 		string s = "csprogs-" WATERMARK ".dat";
-		// remove automatically managed files from the list to prevent duplicates
+
 		for (int i = 0, n = tokenize_console(cvar_string("sv_curl_serverpackages")); i < n; ++i)
 		{
 			string pkg = argv(i);
 			if (startsWith(pkg, "csprogs-")) continue;
 			if (endsWith(pkg, "-serverpackage.txt")) continue;
-			if (endsWith(pkg, ".serverpackage")) continue;  // OLD legacy
+			if (endsWith(pkg, ".serverpackage")) continue;
 			s = cons(s, pkg);
 		}
-		// add automatically managed files to the list
+
 		#define X(match) MACRO_BEGIN \
 			int fd = search_begin(match, true, false); \
 			if (fd >= 0) \
@@ -1040,26 +973,24 @@ spawnfunc(worldspawn)
 		cvar_set("sv_curl_serverpackages", s);
 	}
 
-	// MOD AUTHORS: change this, and possibly remove a few of the blocks below to ignore certain changes
 	modname = "Xonotic";
-	// physics/balance/config changes that count as mod
+
 	if(cvar_string("g_mod_physics") != cvar_defstring("g_mod_physics"))
 		modname = cvar_string("g_mod_physics");
 	if(cvar_string("g_mod_balance") != cvar_defstring("g_mod_balance") && cvar_string("g_mod_balance") != "Testing")
 		modname = cvar_string("g_mod_balance");
 	if(cvar_string("g_mod_config") != cvar_defstring("g_mod_config"))
 		modname = cvar_string("g_mod_config");
-	// extra mutators that deserve to count as mod
+
 	MUTATOR_CALLHOOK(SetModname, modname);
 	modname = M_ARGV(0, string);
 
-	// save it for later
 	modname = strzone(modname);
 
-	WinningConditionHelper(this); // set worldstatus
+	WinningConditionHelper(this);
 
 	if (autocvar_sv_autopause && server_is_dedicated && !wantrestart)
-		// INITPRIO_LAST is to soon: bots either didn't join yet or didn't leave yet, see: bot_fixcount()
+
 		defer(this, 5, Pause_TryPause_Dedicated);
 
 	world_initialized = 1;
@@ -1068,7 +999,7 @@ spawnfunc(worldspawn)
 
 spawnfunc(light)
 {
-	//makestatic (this); // Who the f___ did that?
+
 	delete(this);
 }
 
@@ -1082,16 +1013,13 @@ bool MoveToRandomLocationWithinBounds(entity e, vector boundmin, vector boundmax
 
 	vector start, end;
 	start = end = org;
-	int j; // used after the loop
+	int j;
 	for(j = 0; j < attempts; ++j)
 	{
 		start.x = org.x + random() * delta.x;
 		start.y = org.y + random() * delta.y;
 		start.z = org.z + random() * delta.z;
 
-		// rule 1: start inside world bounds, and outside
-		// solid, and don't start from somewhere where you can
-		// fall down to evil
 		tracebox(start, e.mins, e.maxs, start - '0 0 1' * delta.z, MOVE_NORMAL, e);
 		if (trace_fraction >= 1)
 			continue;
@@ -1102,15 +1030,10 @@ bool MoveToRandomLocationWithinBounds(entity e, vector boundmin, vector boundmax
 		if (trace_dphitq3surfaceflags & badsurfaceflags)
 			continue;
 
-		// rule 2: if we are too high, lower the point
 		if (trace_fraction * delta.z > maxaboveground)
 			start = trace_endpos + '0 0 1' * maxaboveground;
 		vector enddown = trace_endpos;
 
-		// rule 3: make sure we aren't outside the map. This only works
-		// for somewhat well formed maps. A good rule of thumb is that
-		// the map should have a convex outside hull.
-		// these can be traceLINES as we already verified the starting box
 		vector mstart = start + 0.5 * (e.mins + e.maxs);
 		traceline(mstart, mstart + '1 0 0' * delta.x, MOVE_NORMAL, e);
 		if (trace_fraction >= 1 || trace_dphittexturename == "common/caulk")
@@ -1128,7 +1051,6 @@ bool MoveToRandomLocationWithinBounds(entity e, vector boundmin, vector boundmax
 		if (trace_fraction >= 1 || trace_dphittexturename == "common/caulk")
 			continue;
 
-		// rule 4: we must "see" some spawnpoint or item
 		entity sp = NULL;
 		if(frompos)
 		{
@@ -1159,31 +1081,27 @@ bool MoveToRandomLocationWithinBounds(entity e, vector boundmin, vector boundmax
 
 				++items_checked;
 				if(items_checked >= attempts)
-					break; // sanity
+					break;
 			});
 
 			if(!sp)
 				continue;
 		}
 
-		// find a random vector to "look at"
 		end.x = org.x + random() * delta.x;
 		end.y = org.y + random() * delta.y;
 		end.z = org.z + random() * delta.z;
 		end = start + normalize(end - start) * vlen(delta);
 
-		// rule 4: start TO end must not be too short
 		tracebox(start, e.mins, e.maxs, end, MOVE_NORMAL, e);
 		if(trace_startsolid)
 			continue;
 		if(trace_fraction < minviewdistance / vlen(delta))
 			continue;
 
-		// rule 5: don't want to look at sky
 		if(trace_dphitq3surfaceflags & Q3SURFACEFLAG_SKY)
 			continue;
 
-		// rule 6: we must not end up in trigger_hurt
 		if(tracebox_hits_trigger_hurt(start, e.mins, e.maxs, enddown))
 			continue;
 
@@ -1207,14 +1125,6 @@ float MoveToRandomMapLocation(entity e, float goodcontents, float badcontents, f
 	return MoveToRandomLocationWithinBounds(e, world.mins, world.maxs, goodcontents, badcontents, badsurfaceflags, attempts, maxaboveground, minviewdistance, false);
 }
 
-/*
-===============================================================================
-
-RULES
-
-===============================================================================
-*/
-
 void DumpStats(float final)
 {
 	float file;
@@ -1230,13 +1140,13 @@ void DumpStats(float final)
 
 	if(!final)
 	{
-		to_console = true; // always print printstats replies
-		to_eventlog = false; // but never print them to the event log
+		to_console = true;
+		to_eventlog = false;
 	}
 
 	if(to_eventlog)
 		if(autocvar_sv_eventlog_console)
-			to_console = false; // otherwise we get the output twice
+			to_console = false;
 
 	if(final)
 		s = ":scores:";
@@ -1293,7 +1203,7 @@ void DumpStats(float final)
 		if(to_file)
 			fputs(file, strcat(s, "\n"));
 
-		for(i = 1; i < 16; ++i)
+		for(i = 1; i <= NUM_TEAMS; ++i)
 		{
 			s = strcat(":teamscores:see-labels:", GetTeamScoreString(i, 0));
 			s = strcat(s, ":", ftos(i));
@@ -1317,40 +1227,25 @@ void DumpStats(float final)
 	}
 }
 
-/*
-go to the next level for deathmatch
-only called if a time or frag limit has expired
-*/
 void NextLevel()
 {
 	cvar_set("_endmatch", "0");
 	game_stopped = true;
-	intermission_running = true; // game over
+	intermission_running = true;
 
-	// enforce a wait time before allowing changelevel
 	if(player_count > 0)
 		intermission_exittime = time + autocvar_sv_mapchange_delay;
 	else
 		intermission_exittime = -1;
 
-	/*
-	WriteByte (MSG_ALL, SVC_CDTRACK);
-	WriteByte (MSG_ALL, 3);
-	WriteByte (MSG_ALL, 3);
-	// done in FixIntermission
-	*/
-
-	//pos = FindIntermission ();
-
 	VoteReset(true);
 
 	DumpStats(true);
 
-	// send statistics
 	PlayerStats_GameReport(true);
 	WeaponStats_Shutdown();
 
-	Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_Null); // kill all centerprints now
+	Kill_Notification(NOTIF_ALL, NULL, MSG_CENTER, CPID_Null);
 
 	if(autocvar_sv_eventlog)
 		GameLogEcho(":gameover");
@@ -1381,18 +1276,14 @@ void NextLevel()
 	localcmd("\nsv_hook_gameend\n");
 }
 
-
 int InitiateSuddenDeath()
 {
-	// Check first whether normal overtimes could be added before initiating suddendeath mode
-	// - for this timelimit_overtime needs to be >0 of course
-	// - also check the winning condition calculated in the previous frame and only add normal overtime
-	//   again, if at the point at which timelimit would be extended again, still no winner was found
+
 	if (!autocvar_g_campaign && checkrules_overtimesadded >= 0
 		&& (checkrules_overtimesadded < autocvar_timelimit_overtimes || autocvar_timelimit_overtimes < 0)
 		&& autocvar_timelimit_overtime && !(g_race && !g_race_qualifying))
 	{
-		return 1; // need to call InitiateOvertime later
+		return 1;
 	}
 	else
 	{
@@ -1400,7 +1291,7 @@ int InitiateSuddenDeath()
 		{
 			if(autocvar_g_campaign)
 			{
-				checkrules_suddendeathend = time; // no suddendeath in campaign
+				checkrules_suddendeathend = time;
 			}
 			else
 			{
@@ -1414,11 +1305,11 @@ int InitiateSuddenDeath()
 	}
 }
 
-void InitiateOvertime() // ONLY call this if InitiateSuddenDeath returned true
+void InitiateOvertime()
 {
 	++checkrules_overtimesadded;
 	overtimes = checkrules_overtimesadded;
-	//add one more overtime by simply extending the timelimit
+
 	cvar_set("timelimit", ftos(autocvar_timelimit + autocvar_timelimit_overtime));
 	Send_Notification(NOTIF_ALL, NULL, MSG_CENTER, CENTER_OVERTIME_TIME, autocvar_timelimit_overtime * 60);
 }
@@ -1451,13 +1342,11 @@ float GetWinningCode(float fraglimitreached, float equality)
 	}
 }
 
-// set the .winning flag for exactly those players with a given field value
 void SetWinners(.float field, float value)
 {
 	FOREACH_CLIENT(IS_PLAYER(it) || INGAME(it), { it.winning = (it.(field) == value); });
 }
 
-// set the .winning flag for those players with a given field value
 void AddWinners(.float field, float value)
 {
 	FOREACH_CLIENT(IS_PLAYER(it) || INGAME(it), {
@@ -1466,7 +1355,6 @@ void AddWinners(.float field, float value)
 	});
 }
 
-// clear the .winning flags
 void ClearWinners()
 {
 	FOREACH_CLIENT(IS_PLAYER(it) || INGAME(it), { it.winning = 0; });
@@ -1475,7 +1363,7 @@ void ClearWinners()
 int fragsleft_last;
 float WinningCondition_Scores(float limit, float leadlimit)
 {
-	// TODO make everything use THIS winning condition (except LMS)
+
 	WinningConditionHelper(NULL);
 
 	if(teamplay)
@@ -1501,7 +1389,7 @@ float WinningCondition_Scores(float limit, float leadlimit)
 	}
 
 	if(WinningConditionHelper_zeroisworst)
-		leadlimit = 0; // not supported in this mode
+		leadlimit = 0;
 
 	if(MUTATOR_CALLHOOK(Scores_CountFragsRemaining))
 	{
@@ -1525,7 +1413,7 @@ float WinningCondition_Scores(float limit, float leadlimit)
 				fragsleft = min(fragsleft, leadingfragsleft);
 		}
 
-		if (fragsleft_last != fragsleft) // do not announce same remaining frags multiple times
+		if (fragsleft_last != fragsleft)
 		{
 			if (fragsleft == 1)
 				Send_Notification(NOTIF_ALL, NULL, MSG_ANNCE, ANNCE_REMAINING_FRAG_1);
@@ -1542,7 +1430,7 @@ float WinningCondition_Scores(float limit, float leadlimit)
 	bool leadlimit_reached = (leadlimit && WinningConditionHelper_topscore - WinningConditionHelper_secondscore >= leadlimit);
 
 	bool limit_reached;
-	// only respect leadlimit_and_fraglimit when both limits are set or the game will never end
+
 	if (limit && leadlimit && autocvar_leadlimit_and_fraglimit)
 		limit_reached = (fraglimit_reached && leadlimit_reached);
 	else
@@ -1587,26 +1475,22 @@ float WinningCondition_RanOutOfSpawns()
 	});
 
 	ClearWinners();
-	float team1_score = Team_GetTeamScore(Team_GetTeamFromIndex(1));
-	float team2_score = Team_GetTeamScore(Team_GetTeamFromIndex(2));
-	float team3_score = Team_GetTeamScore(Team_GetTeamFromIndex(3));
-	float team4_score = Team_GetTeamScore(Team_GetTeamFromIndex(4));
-	if(team1_score + team2_score + team3_score + team4_score == 0)
+	float total_score = 0;
+	float t = 0, i;
+	for (int j = 1; j <= NUM_TEAMS; ++j)
+	{
+		float s = Team_GetTeamScore(Team_GetTeamFromIndex(j));
+		total_score += s;
+		if(s && !t)
+			t = j;
+	}
+	if(total_score == 0)
 	{
 		checkrules_equality = true;
 		return WINNING_YES;
 	}
-	else if(team1_score + team2_score + team3_score + team4_score == 1)
+	else if(total_score == 1)
 	{
-		float t, i;
-		if(team1_score)
-			t = 1;
-		else if(team2_score)
-			t = 2;
-		else if(team3_score)
-			t = 3;
-		else // if(team4_score)
-			t = 4;
 		entity balance = TeamBalance_CheckAllowedTeams(NULL);
 		for(i = 0; i < MAX_TEAMSCORE; ++i)
 		{
@@ -1631,13 +1515,6 @@ float WinningCondition_RanOutOfSpawns()
 		return WINNING_NO;
 }
 
-/*
-============
-CheckRules_World
-
-Exit deathmatch games upon conditions
-============
-*/
 void CheckRules_World()
 {
 	VoteThink();
@@ -1645,12 +1522,11 @@ void CheckRules_World()
 
 	SetDefaultAlpha();
 
-	if (intermission_running) // someone else quit the game already
+	if (intermission_running)
 	{
-		if(player_count == 0) // Nobody there? Then let's go to the next map
+		if(player_count == 0)
 			MapVote_Start();
-			// this will actually check the player count in the next frame
-			// again, but this shouldn't hurt
+
 		return;
 	}
 
@@ -1659,18 +1535,18 @@ void CheckRules_World()
 	float leadlimit = autocvar_leadlimit;
 	if (leadlimit < 0) leadlimit = 0;
 
-	if(warmup_stage || time <= game_starttime) // NOTE: this is <= to prevent problems in the very tic where the game starts
+	if(warmup_stage || time <= game_starttime)
 	{
 		if(timelimit > 0)
-			timelimit = 0; // timelimit is not made for warmup
+			timelimit = 0;
 		if(fraglimit > 0)
-			fraglimit = 0; // no fraglimit for now
-		leadlimit = 0; // no leadlimit for now
+			fraglimit = 0;
+		leadlimit = 0;
 	}
 
 	if (autocvar__endmatch || timelimit < 0)
 	{
-		// endmatch
+
 		NextLevel();
 		return;
 	}
@@ -1710,12 +1586,10 @@ void CheckRules_World()
 						++readyplayers;
 				});
 
-				// at least 2 of the players have completed a lap: start the RACE
-				// otherwise, the players should end the qualifying on their own
 				if(readyplayers || playerswithlaps >= 2)
 				{
 					checkrules_suddendeathend = 0;
-					ReadyRestart(true); // go to race
+					ReadyRestart(true);
 					return;
 				}
 				else
@@ -1748,7 +1622,7 @@ void CheckRules_World()
 	}
 
 	if(checkrules_status == WINNING_NEVER)
-		// equality cases! Nobody wins if the overtime ends in a draw.
+
 		ClearWinners();
 
 	if(wantovertime)
@@ -1767,11 +1641,11 @@ void CheckRules_World()
 	{
 		if (overtimes == -1 && overtimes != overtimes_prev)
 		{
-			// if suddendeathend overtime has just begun, revert it
+
 			checkrules_suddendeathend = 0;
 			overtimes = overtimes_prev;
 		}
-		//print("WINNING\n");
+
 		NextLevel();
 	}
 }
@@ -1794,17 +1668,11 @@ float want_weapon(entity weaponinfo, float allguns)
 	else if(!mutator_returnvalue)
 		d = !(!weaponinfo.weaponstart);
 
-	if(!allow_mutatorblocked && (weaponinfo.spawnflags & WEP_FLAG_MUTATORBLOCKED)) // never default mutator blocked guns
+	if(!allow_mutatorblocked && (weaponinfo.spawnflags & WEP_FLAG_MUTATORBLOCKED))
 		d = 0;
 
 	float t = weaponinfo.weaponstartoverride;
 
-	//LOG_INFOF("want_weapon: %s - d: %d t: %d\n", weaponinfo.netname, d, t);
-
-	// bit order in t:
-	// 1: want or not
-	// 2: is default?
-	// 4: is set by default?
 	if(t < 0)
 		t = 4 | (3 * d);
 	else
@@ -1813,7 +1681,6 @@ float want_weapon(entity weaponinfo, float allguns)
 	return t;
 }
 
-/// Weapons the player normally starts with outside weapon arena.
 WepSet weapons_start()
 {
 	WepSet ret = '0 0 0';
@@ -1863,7 +1730,7 @@ void weaponarena_available_all_update(entity this)
 	}
 	else
 	{
-		// if no weapons are available on the map, just fall back to all weapons arena
+
 		start_weapons = warmup_start_weapons = g_weaponarena_weapons = weapons_all();
 	}
 }
@@ -1876,7 +1743,7 @@ void weaponarena_available_devall_update(entity this)
 	}
 	else
 	{
-		// if no weapons are available on the map, just fall back to devall weapons arena
+
 		start_weapons = warmup_start_weapons = g_weaponarena_weapons = weapons_devall();
 	}
 }
@@ -1889,14 +1756,14 @@ void weaponarena_available_most_update(entity this)
 	}
 	else
 	{
-		// if no weapons are available on the map, just fall back to most weapons arena
+
 		start_weapons = warmup_start_weapons = g_weaponarena_weapons = weapons_most();
 	}
 }
 
 void readplayerstartcvars()
 {
-	// initialize starting values for players
+
 	start_weapons = '0 0 0';
 	start_weapons_default = '0 0 0';
 	start_weapons_defaultmask = '0 0 0';
@@ -1923,11 +1790,11 @@ void readplayerstartcvars()
 
 	if (s == "0" || s == "")
 	{
-		// no arena
+
 	}
 	else if (s == "off")
 	{
-		// forcibly turn off weaponarena
+
 	}
 	else if (s == "all" || s == "1")
 	{
@@ -1952,7 +1819,6 @@ void readplayerstartcvars()
 		g_weaponarena = 1;
 		g_weaponarena_list = "All Available Weapons Arena";
 
-		// this needs to run after weaponsInMapAll is initialized
 		InitializeEntity(NULL, weaponarena_available_all_update, INITPRIO_FINDTARGET);
 	}
 	else if (s == "devall_available")
@@ -1960,7 +1826,6 @@ void readplayerstartcvars()
 		g_weaponarena = 1;
 		g_weaponarena_list = "Dev All Available Weapons Arena";
 
-		// this needs to run after weaponsInMapAll is initialized
 		InitializeEntity(NULL, weaponarena_available_devall_update, INITPRIO_FINDTARGET);
 	}
 	else if (s == "most_available")
@@ -1968,7 +1833,6 @@ void readplayerstartcvars()
 		g_weaponarena = 1;
 		g_weaponarena_list = "Most Available Weapons Arena";
 
-		// this needs to run after weaponsInMapAll is initialized
 		InitializeEntity(NULL, weaponarena_available_most_update, INITPRIO_FINDTARGET);
 	}
 	else if (s == "none")
@@ -1991,15 +1855,15 @@ void readplayerstartcvars()
 				g_weaponarena_list = strcat(g_weaponarena_list, wep.netname, " & ");
 			}
 		}
-		if (g_weaponarena_list != "") // remove trailing " & "
+		if (g_weaponarena_list != "")
 			g_weaponarena_list = substring(g_weaponarena_list, 0, strlen(g_weaponarena_list) - 3);
-		else // no valid weapon found
+		else
 			g_weaponarena_list = "No Weapons Arena";
 	}
 
 	if (g_weaponarena)
 	{
-		g_weapon_stay = 0; // incompatible
+		g_weapon_stay = 0;
 		start_weapons = g_weaponarena_weapons;
 		start_items |= IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS;
 		g_weaponarena_list = strzone(g_weaponarena_list);
@@ -2131,15 +1995,15 @@ void readlevelcvars()
 	sv_ready_restart_after_countdown = cvar("sv_ready_restart_after_countdown");
 
 	if(cvar("g_campaign"))
-		warmup_stage = 0; // no warmup during campaign
+		warmup_stage = 0;
 	else
 	{
 		warmup_stage = autocvar_g_warmup;
 		if (warmup_stage < 0 || warmup_stage > 1)
-			warmup_limit = -1; // don't start until there's enough players
+			warmup_limit = -1;
 		else if (warmup_stage == 1)
 		{
-			// this code is duplicated in ReadyCount()
+
 			warmup_limit = cvar("g_warmup_limit");
 			if(warmup_limit == 0)
 				warmup_limit = autocvar_timelimit * 60;
@@ -2222,7 +2086,7 @@ void InitializeEntity(entity e, void(entity this) func, int order)
 
 	if (!e || e.initialize_entity)
 	{
-		// make a proxy initializer entity
+
 		entity e_old = e;
 		e = new(initialize_entity);
 		e.enemy = e_old;
@@ -2237,7 +2101,7 @@ void InitializeEntity(entity e, void(entity this) func, int order)
 	{
 		if (!cur || cur.initialize_entity_order > order)
 		{
-			// insert between prev and cur
+
 			if (prev)
 				prev.initialize_entity_next = e;
 			else
@@ -2272,7 +2136,7 @@ void InitializeEntitiesRun()
 			builtin_remove(e);
 			e = wrappee;
 		}
-		//dprint("Delayed initialization: ", e.classname, "\n");
+
 		if (func)
 		{
 			func(e);
@@ -2287,13 +2151,11 @@ void InitializeEntitiesRun()
 	delete_fn = remove_unsafely;
 }
 
-// deferred dropping
-// ported from VM_SV_droptofloor TODO: make a common function for the client-side?
 void DropToFloor_Handler(entity this)
 {
 	if(!this || wasfreed(this))
 	{
-		// no modifying free entities
+
 		return;
 	}
 
@@ -2303,9 +2165,8 @@ void DropToFloor_Handler(entity this)
 	else if (autocvar_sv_mapformat_is_quake2)
 		end.z -= 128;
 	else
-		end.z -= 256; // Quake, QuakeWorld
+		end.z -= 256;
 
-	// NOTE: SV_NudgeOutOfSolid is used in the engine here
 	if(autocvar_sv_gameplayfix_droptofloorstartsolid_nudgetocorrect)
 	{
 		_Movetype_UnstickEntity(this);
@@ -2340,7 +2201,7 @@ void DropToFloor_Handler(entity this)
 			}
 			SET_ONGROUND(this);
 			this.groundentity = trace_ent;
-			// if support is destroyed, keep suspended (gross hack for floating items in various maps)
+
 			this.move_suspendedinair = true;
 		}
 	}
@@ -2351,13 +2212,12 @@ void DropToFloor_Handler(entity this)
 			setorigin(this, trace_endpos);
 			SET_ONGROUND(this);
 			this.groundentity = trace_ent;
-			// if support is destroyed, keep suspended (gross hack for floating items in various maps)
+
 			this.move_suspendedinair = true;
 		}
 		else
 		{
-			// if we can't get the entity out of solid, mark it as on ground so physics doesn't attempt to drop it
-			// hacky workaround for #2774
+
 			SET_ONGROUND(this);
 		}
 	}
@@ -2372,12 +2232,11 @@ void droptofloor(entity this)
 bool autocvar_sv_gameplayfix_multiplethinksperframe = true;
 void RunThink(entity this, float dt)
 {
-	// don't let things stay in the past.
-	// it is possible to start that way by a trigger with a local time.
+
 	if(this.nextthink <= 0 || this.nextthink > time + dt)
 		return;
 
-	float oldtime = time; // do we need to save this?
+	float oldtime = time;
 
 	for (int iterations = 0; iterations < 128 && !wasfreed(this); iterations++)
 	{
@@ -2386,10 +2245,7 @@ void RunThink(entity this, float dt)
 
 		if(getthink(this))
 			getthink(this)(this);
-		// mods often set nextthink to time to cause a think every frame,
-		// we don't want to loop in that case, so exit if the new nextthink is
-		// <= the time the qc was told, also exit if it is past the end of the
-		// frame
+
 		if(this.nextthink <= time || this.nextthink > oldtime + dt || !autocvar_sv_gameplayfix_multiplethinksperframe)
 			break;
 	}
@@ -2408,18 +2264,16 @@ void Physics_Frame()
 		if(IS_CLIENT(it) || it.move_movetype == MOVETYPE_PHYSICS)
 			continue;
 
-		//set_movetype(it, it.move_movetype);
-		// inline the set_movetype function, since this is called a lot
 		it.movetype = (it.move_qcphysics) ? MOVETYPE_QCENTITY : it.move_movetype;
 
 		if(it.move_qcphysics && it.move_movetype != MOVETYPE_NONE)
 			Movetype_Physics_NoMatchTicrate(it, PHYS_INPUT_TIMELENGTH, false);
 
-		if(it.movetype >= MOVETYPE_USER_FIRST && it.movetype <= MOVETYPE_USER_LAST) // these cases have no think handling
+		if(it.movetype >= MOVETYPE_USER_FIRST && it.movetype <= MOVETYPE_USER_LAST)
 		{
 			if(it.move_movetype == MOVETYPE_PUSH || it.move_movetype == MOVETYPE_FAKEPUSH)
-				continue; // these movetypes have no regular think function
-			// handle thinking here
+				continue;
+
 			if (getthink(it) && it.nextthink > 0 && it.nextthink <= time + PHYS_INPUT_TIMELENGTH)
 				RunThink(it, PHYS_INPUT_TIMELENGTH);
 		}
@@ -2428,9 +2282,6 @@ void Physics_Frame()
 	if(autocvar_sv_gameplayfix_delayprojectiles >= 0)
 		return;
 
-	// make a second pass to see if any ents spawned this frame and make
-	// sure they run their move/think. this is verified by checking .move_time, which will never be 0 if the entity has moved
-	// MOVETYPE_NONE is also checked as .move_time WILL be 0 with that movetype
 	IL_EACH(g_moveables, it.move_qcphysics,
 	{
 		if(IS_CLIENT(it) || it.move_time || it.move_movetype == MOVETYPE_NONE || it.move_movetype == MOVETYPE_PHYSICS)
@@ -2454,15 +2305,11 @@ void EndFrame()
 			STAT(KILL_TIME, it) = time;
 		} else if (e.hitsound_damage_dealt) {
 			STAT(HIT_TIME, it) = time;
-			// NOTE: this is not accurate as client code doesn't need so much accuracy for its purposes
+
 			STAT(HITSOUND_DAMAGE_DEALT_TOTAL, it) += ceil(e.hitsound_damage_dealt);
 		}
 	});
-	// add 1 frametime because after this, engine SV_Physics
-	// increases time by a frametime and then networks the frame
-	// add another frametime because client shows everything with
-	// 1 frame of lag (cl_nolerp 0). The last +1 however should not be
-	// needed!
+
 	float altime = time + frametime * (1 + autocvar_g_antilag_nudge);
 	FOREACH_CLIENT(true, {
 		it.typehitsound = false;
@@ -2482,11 +2329,6 @@ void EndFrame()
 	IL_ENDFRAME();
 }
 
-
-/*
- * RedirectionThink:
- * returns true if redirecting
- */
 float redirection_timeout;
 float redirection_nextthink;
 float RedirectionThink()
@@ -2498,8 +2340,8 @@ float RedirectionThink()
 
 	if(!redirection_timeout)
 	{
-		cvar_set("sv_public", "-2");
-		redirection_timeout = time + 0.6; // this will only try twice... should be able to keep more clients
+		cvar_set("sv_public", "0");
+		redirection_timeout = time + 0.6;
 		if(redirection_target == "self")
 			bprint("^3SERVER NOTICE:^7 restarting the server\n");
 		else
@@ -2513,7 +2355,7 @@ float RedirectionThink()
 
 	clients_found = 0;
 	FOREACH_CLIENT(IS_REAL_CLIENT(it), {
-		// TODO add timer
+
 		LOG_INFO("Redirecting: sending connect command to ", it.netname);
 		if(redirection_target == "self")
 			stuffcmd(it, "\ndisconnect; defer ", ftos(autocvar_quit_and_redirect_timer), " reconnect\n");
@@ -2532,13 +2374,9 @@ float RedirectionThink()
 
 void RestoreGame()
 {
-	// Loaded from a save game
-	// some things then break, so let's work around them...
 
-	// Progs DB (capture records)
 	ServerProgsDB = db_load(strcat("server.db", autocvar_sessionid));
 
-	// Mapinfo
 	MapInfo_Shutdown();
 	MapInfo_Enumerate();
 	MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 1);
@@ -2555,14 +2393,12 @@ void Shutdown()
 	{
 		world_initialized = 0;
 
-		// if a timeout is active, reset the slowmo value to normal
 		if(timeout_status == TIMEOUT_ACTIVE)
 			cvar_set("slowmo", ftos(orig_slowmo));
 
 		LOG_TRACE("Saving persistent data...");
 		Ban_SaveBans();
 
-		// playerstats with unfinished match
 		PlayerStats_GameReport(false);
 
 		if(!cheatcount_total)
@@ -2579,11 +2415,11 @@ void Shutdown()
 			else
 				db_save(TemporaryDB, "server-temp.db");
 		}
-		CheatShutdown(); // must be after cheatcount check
+		CheatShutdown();
 		db_close(ServerProgsDB);
 		db_close(TemporaryDB);
 		LOG_TRACE("Saving persistent data... done!");
-		// tell the bot system the game is ending now
+
 		bot_endgame();
 
 		WeaponStats_Shutdown();

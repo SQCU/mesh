@@ -1,11 +1,8 @@
 #include "anim.qh"
 
-/**
- * @param anim x = startframe, y = numframes, z = framerate
- */
 void anim_set(entity e, vector anim, bool looping, bool override, bool restart)
 {
-	if (!anim) return;  // no animation was given to us! We can't use this.
+	if (!anim) return;
 
 	if (anim.x == e.animstate_startframe)
 	{
@@ -14,7 +11,7 @@ void anim_set(entity e, vector anim, bool looping, bool override, bool restart)
 			if (anim.z == e.animstate_framerate)
 			{
 				if (!restart) return;
-				if (anim.y == 1)  // ZYM animation
+				if (anim.y == 1)
 					BITXOR_ASSIGN(e.effects, EF_RESTARTANIM_BIT);
 			}
 		}
@@ -22,7 +19,7 @@ void anim_set(entity e, vector anim, bool looping, bool override, bool restart)
 	e.animstate_startframe = anim.x;
 	e.animstate_numframes = anim.y;
 	e.animstate_framerate = anim.z;
-	e.animstate_starttime = time - 0.1 * frametime;  // shift it a little bit into the past to prevent float inaccuracy hiccups
+	e.animstate_starttime = time - 0.1 * frametime;
 	e.animstate_endtime = e.animstate_starttime + e.animstate_numframes / e.animstate_framerate;
 	e.animstate_looping = looping;
 	e.animstate_override = override;
@@ -30,9 +27,6 @@ void anim_set(entity e, vector anim, bool looping, bool override, bool restart)
 	e.frame1time = time;
 }
 
-/**
- * Update e.frame based on its animstate relative to time
- */
 void anim_update(entity e)
 {
 	if (time >= e.animstate_endtime)

@@ -2,7 +2,7 @@
 
 	void Nexposee_close(entity me)
 	{
-		// user must override this
+
 	}
 
 	void ExposeeCloseButton_Click(entity button, entity other)
@@ -34,10 +34,7 @@
 
 	void Nexposee_calc(entity me)
 	{
-		/*
-		 * patented by Apple
-		 * can't put that here ;)
-		 */
+
 		float scale;
 		entity e, e2;
 		vector emins, emaxs, e2mins, e2maxs;
@@ -55,13 +52,8 @@
 					e2mins = e2.Nexposee_smallOrigin;
 					e2maxs = e2mins + e2.Nexposee_smallSize;
 
-					// two intervals [amins, amaxs] and [bmins, bmaxs] overlap if:
-					//   amins < bmins < amaxs < bmaxs
-					// for which suffices
-					//   bmins < amaxs
-					//   amins < bmaxs
-					if ((e2mins.x - emaxs.x) * (emins.x - e2maxs.x) > 0)     // x overlap
-						if ((e2mins.y - emaxs.y) * (emins.y - e2maxs.y) > 0) // y overlap
+					if ((e2mins.x - emaxs.x) * (emins.x - e2maxs.x) > 0)
+						if ((e2mins.y - emaxs.y) * (emins.y - e2maxs.y) > 0)
 							goto have_overlap;
 				}
 			}
@@ -138,7 +130,7 @@ LABEL(have_overlap)
 			}
 			else
 			{
-				// minimum theSize counts
+
 				e.Container_origin = e.Nexposee_smallOrigin;
 				e.Container_size = e.Nexposee_smallSize;
 				e.Nexposee_animationFactor = 0;

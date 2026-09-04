@@ -1,23 +1,11 @@
 #include <string.h>
 #include "gmqcc.h"
 
-/*
- * We could use the old method of casting to uintptr_t then to void*
- * or qcint_t; however, it's incredibly unsafe for two reasons.
- * 1) The compilers aliasing optimization can legally make it unstable
- *    (it's undefined behaviour).
- *
- * 2) The cast itself depends on fresh storage (newly allocated in which
- *    ever function is using the cast macros), the contents of which are
- *    transferred in a way that the obligation to release storage is not
- *    propagated.
- */
 typedef union {
     void   *enter;
     qcint_t leave;
 } code_hash_entry_t;
 
-/* Some sanity macros */
 #define CODE_HASH_ENTER(ENTRY) ((ENTRY).enter)
 #define CODE_HASH_LEAVE(ENTRY) ((ENTRY).leave)
 
@@ -47,7 +35,6 @@ void code_push_statement(code_t *code, prog_section_statement_t *stmt_in, lex_ct
                 break;
         }
     }
-
 
     if (OPTS_FLAG(SORT_OPERANDS)) {
         uint16_t pair;
@@ -123,8 +110,6 @@ code_t::code_t()
 
     string_cache = util_htnew(OPTS_OPTIMIZATION(OPTIM_OVERLAP_STRINGS) ? 0x100 : 1024);
 
-    // The way progs.dat is suppose to work is odd, there needs to be
-    // some null (empty) statements, functions, and 28 globals
     globals.insert(globals.begin(), 28, 0);
 
     chars.push_back('\0');
@@ -186,8 +171,8 @@ qcint_t code_alloc_field (code_t *code, size_t qcsize)
 static size_t code_size_generic(code_t *code, prog_header_t *code_header, bool lno) {
     size_t size = 0;
     if (lno) {
-        size += 4;  /* LNOF */
-        size += sizeof(uint32_t); /* version */
+        size += 4;
+        size += sizeof(uint32_t);
         size += sizeof(code_header->defs.length);
         size += sizeof(code_header->globals.length);
         size += sizeof(code_header->fields.length);
@@ -234,13 +219,12 @@ static void code_create_header(code_t *code, prog_header_t *code_header, const c
     code_header->entfield          = code->entfields;
 
     if (OPTS_FLAG(DARKPLACES_STRING_TABLE_BUG)) {
-        /* >= + P */
-        code->chars.push_back('\0'); /* > */
-        code->chars.push_back('\0'); /* = */
-        code->chars.push_back('\0'); /* P */
+
+        code->chars.push_back('\0');
+        code->chars.push_back('\0');
+        code->chars.push_back('\0');
     }
 
-    /* ensure all data is in LE format */
     util_swap_header(*code_header);
     util_swap_statements(code->statements);
     util_swap_defs_fields(code->defs);

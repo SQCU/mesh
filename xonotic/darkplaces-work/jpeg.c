@@ -1,25 +1,3 @@
-/*
-	Copyright (C) 2002  Mathieu Olivier
-
-	This program is free software; you can redistribute it and/or
-	modify it under the terms of the GNU General Public License
-	as published by the Free Software Foundation; either version 2
-	of the License, or (at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-	See the GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to:
-
-		Free Software Foundation, Inc.
-		59 Temple Place - Suite 330
-		Boston, MA  02111-1307, USA
-
-*/
 
 
 #include "quakedef.h"
@@ -30,7 +8,6 @@
 cvar_t sv_writepicture_quality = {CVAR_SAVE, "sv_writepicture_quality", "10", "WritePicture quality offset (higher means better quality, but slower)"};
 cvar_t r_texture_jpeg_fastpicmip = {CVAR_SAVE, "r_texture_jpeg_fastpicmip", "1", "perform gl_picmip during decompression for JPEG files (faster)"};
 
-// jboolean is unsigned char instead of int on Win32
 #ifdef WIN32
 typedef unsigned char jboolean;
 #else
@@ -57,22 +34,12 @@ typedef int jboolean;
 #define qjpeg_simple_progression jpeg_simple_progression
 #define jpeg_dll true
 #else
-/*
-=================================================================
-
-  Minimal set of definitions from the JPEG lib
-
-  WARNING: for a matter of simplicity, several pointer types are
-  casted to "void*", and most enumerated values are not included
-
-=================================================================
-*/
 
 typedef void *j_common_ptr;
 typedef struct jpeg_compress_struct *j_compress_ptr;
 typedef struct jpeg_decompress_struct *j_decompress_ptr;
 
-#define JPEG_LIB_VERSION  62  // Version 6b
+#define JPEG_LIB_VERSION  62
 
 typedef enum
 {
@@ -87,10 +54,10 @@ typedef enum {JPEG_DUMMY1} J_DCT_METHOD;
 typedef enum {JPEG_DUMMY2} J_DITHER_MODE;
 typedef unsigned int JDIMENSION;
 
-#define JPOOL_PERMANENT	0	// lasts until master record is destroyed
-#define JPOOL_IMAGE		1	// lasts until done with image/datastream
+#define JPOOL_PERMANENT	0
+#define JPOOL_IMAGE		1
 
-#define JPEG_EOI	0xD9  // EOI marker code
+#define JPEG_EOI	0xD9
 
 #define JMSG_STR_PARM_MAX  80
 
@@ -154,83 +121,51 @@ struct jpeg_source_mgr
 };
 
 typedef struct {
-  /* These values are fixed over the whole image. */
-  /* For compression, they must be supplied by parameter setup; */
-  /* for decompression, they are read from the SOF marker. */
-  int component_id;             /* identifier for this component (0..255) */
-  int component_index;          /* its index in SOF or cinfo->comp_info[] */
-  int h_samp_factor;            /* horizontal sampling factor (1..4) */
-  int v_samp_factor;            /* vertical sampling factor (1..4) */
-  int quant_tbl_no;             /* quantization table selector (0..3) */
-  /* These values may vary between scans. */
-  /* For compression, they must be supplied by parameter setup; */
-  /* for decompression, they are read from the SOS marker. */
-  /* The decompressor output side may not use these variables. */
-  int dc_tbl_no;                /* DC entropy table selector (0..3) */
-  int ac_tbl_no;                /* AC entropy table selector (0..3) */
-  
-  /* Remaining fields should be treated as private by applications. */
-  
-  /* These values are computed during compression or decompression startup: */
-  /* Component's size in DCT blocks.
-   * Any dummy blocks added to complete an MCU are not counted; therefore
-   * these values do not depend on whether a scan is interleaved or not.
-   */
+
+  int component_id;
+  int component_index;
+  int h_samp_factor;
+  int v_samp_factor;
+  int quant_tbl_no;
+
+  int dc_tbl_no;
+  int ac_tbl_no;
+
   JDIMENSION width_in_blocks;
   JDIMENSION height_in_blocks;
-  /* Size of a DCT block in samples.  Always DCTSIZE for compression.
-   * For decompression this is the size of the output from one DCT block,
-   * reflecting any scaling we choose to apply during the IDCT step.
-   * Values of 1,2,4,8 are likely to be supported.  Note that different
-   * components may receive different IDCT scalings.
-   */
+
   int DCT_scaled_size;
-  /* The downsampled dimensions are the component's actual, unpadded number
-   * of samples at the main buffer (preprocessing/compression interface), thus
-   * downsampled_width = ceil(image_width * Hi/Hmax)
-   * and similarly for height.  For decompression, IDCT scaling is included, so
-   * downsampled_width = ceil(image_width * Hi/Hmax * DCT_scaled_size/DCTSIZE)
-   */
-  JDIMENSION downsampled_width;  /* actual width in samples */
-  JDIMENSION downsampled_height; /* actual height in samples */
-  /* This flag is used only for decompression.  In cases where some of the
-   * components will be ignored (eg grayscale output from YCbCr image),
-   * we can skip most computations for the unused components.
-   */
-  jboolean component_needed;     /* do we need the value of this component? */
 
-  /* These values are computed before starting a scan of the component. */
-  /* The decompressor output side may not use these variables. */
-  int MCU_width;                /* number of blocks per MCU, horizontally */
-  int MCU_height;               /* number of blocks per MCU, vertically */
-  int MCU_blocks;               /* MCU_width * MCU_height */
-  int MCU_sample_width;         /* MCU width in samples, MCU_width*DCT_scaled_size */
-  int last_col_width;           /* # of non-dummy blocks across in last MCU */
-  int last_row_height;          /* # of non-dummy blocks down in last MCU */
+  JDIMENSION downsampled_width;
+  JDIMENSION downsampled_height;
 
-  /* Saved quantization table for component; NULL if none yet saved.
-   * See jdinput.c comments about the need for this information.
-   * This field is currently used only for decompression.
-   */
+  jboolean component_needed;
+
+  int MCU_width;
+  int MCU_height;
+  int MCU_blocks;
+  int MCU_sample_width;
+  int last_col_width;
+  int last_row_height;
+
   void *quant_table;
 
-  /* Private per-component storage for DCT or IDCT subsystem. */
   void * dct_table;
 } jpeg_component_info;
 
 struct jpeg_decompress_struct
 {
-	struct jpeg_error_mgr *err;		// USED
-	struct jpeg_memory_mgr *mem;	// USED
+	struct jpeg_error_mgr *err;
+	struct jpeg_memory_mgr *mem;
 
 	void *progress;
 	void *client_data;
 	jboolean is_decompressor;
 	int global_state;
 
-	struct jpeg_source_mgr *src;	// USED
-	JDIMENSION image_width;			// USED
-	JDIMENSION image_height;		// USED
+	struct jpeg_source_mgr *src;
+	JDIMENSION image_width;
+	JDIMENSION image_height;
 
 	int num_components;
 	J_COLOR_SPACE jpeg_color_space;
@@ -251,17 +186,17 @@ struct jpeg_decompress_struct
 	jboolean enable_2pass_quant;
 	JDIMENSION output_width;
 
-	JDIMENSION output_height;	// USED
+	JDIMENSION output_height;
 
 	int out_color_components;
 
-	int output_components;		// USED
+	int output_components;
 
 	int rec_outbuf_height;
 	int actual_number_of_colors;
 	void *colormap;
 
-	JDIMENSION output_scanline;	// USED
+	JDIMENSION output_scanline;
 
 	int input_scan_number;
 	JDIMENSION input_iMCU_row;
@@ -314,7 +249,6 @@ struct jpeg_decompress_struct
 	void *cconvert;
 	void *cquantize;
 };
-
 
 struct jpeg_compress_struct
 {
@@ -399,16 +333,6 @@ struct jpeg_destination_mgr
 	void (*term_destination) (j_compress_ptr cinfo);
 };
 
-
-/*
-=================================================================
-
-  DarkPlaces definitions
-
-=================================================================
-*/
-
-// Functions exported from libjpeg
 #define qjpeg_create_compress(cinfo) \
 	qjpeg_CreateCompress((cinfo), JPEG_LIB_VERSION, (size_t) sizeof(struct jpeg_compress_struct))
 #define qjpeg_create_decompress(cinfo) \
@@ -452,7 +376,6 @@ static dllfunction_t jpegfuncs[] =
 	{NULL, NULL}
 };
 
-// Handle for JPEG DLL
 dllhandle_t jpeg_dll = NULL;
 qboolean jpeg_tried_loading = 0;
 #endif
@@ -461,33 +384,16 @@ static unsigned char jpeg_eoi_marker [2] = {0xFF, JPEG_EOI};
 static jmp_buf error_in_jpeg;
 static qboolean jpeg_toolarge;
 
-// Our own output manager for JPEG compression
 typedef struct
 {
 	struct jpeg_destination_mgr pub;
 
 	qfile_t* outfile;
 	unsigned char* buffer;
-	size_t bufsize; // used if outfile is NULL
+	size_t bufsize;
 } my_destination_mgr;
 typedef my_destination_mgr* my_dest_ptr;
 
-
-/*
-=================================================================
-
-  DLL load & unload
-
-=================================================================
-*/
-
-/*
-====================
-JPEG_OpenLibrary
-
-Try to load the JPEG DLL
-====================
-*/
 qboolean JPEG_OpenLibrary (void)
 {
 #ifdef LINK_TO_LIBJPEG
@@ -506,56 +412,37 @@ qboolean JPEG_OpenLibrary (void)
 		NULL
 	};
 
-	// Already loaded?
 	if (jpeg_dll)
 		return true;
 
-	if (jpeg_tried_loading) // only try once
+	if (jpeg_tried_loading)
 		return false;
 
 	jpeg_tried_loading = true;
 
 #ifdef __ANDROID__
-	// loading the native Android libjpeg.so causes crashes
+
 	Con_Printf("Not opening libjpeg.so dynamically on Android - use LINK_TO_LIBJPEG instead if it is needed.\n");
 	return false;
 #endif
 
-	// Load the DLL
 	return Sys_LoadLibrary (dllnames, &jpeg_dll, jpegfuncs);
 #endif
 }
 
-
-/*
-====================
-JPEG_CloseLibrary
-
-Unload the JPEG DLL
-====================
-*/
 void JPEG_CloseLibrary (void)
 {
 #ifndef LINK_TO_LIBJPEG
 	Sys_UnloadLibrary (&jpeg_dll);
-	jpeg_tried_loading = false; // allow retry
+	jpeg_tried_loading = false;
 #endif
 }
-
-
-/*
-=================================================================
-
-	JPEG decompression
-
-=================================================================
-*/
 
 static void JPEG_Noop (j_decompress_ptr cinfo) {}
 
 static jboolean JPEG_FillInputBuffer (j_decompress_ptr cinfo)
 {
-    // Insert a fake EOI marker
+
     cinfo->src->next_input_byte = jpeg_eoi_marker;
     cinfo->src->bytes_in_buffer = 2;
 
@@ -584,7 +471,7 @@ static void JPEG_MemSrc (j_decompress_ptr cinfo, const unsigned char *buffer, si
 	cinfo->src->init_source = JPEG_Noop;
 	cinfo->src->fill_input_buffer = JPEG_FillInputBuffer;
 	cinfo->src->skip_input_data = JPEG_SkipInputData;
-	cinfo->src->resync_to_restart = qjpeg_resync_to_restart; // use the default method
+	cinfo->src->resync_to_restart = qjpeg_resync_to_restart;
 	cinfo->src->term_source = JPEG_Noop;
 }
 
@@ -594,14 +481,6 @@ static void JPEG_ErrorExit (j_common_ptr cinfo)
 	longjmp(error_in_jpeg, 1);
 }
 
-
-/*
-====================
-JPEG_LoadImage
-
-Load a JPEG image into a BGRA buffer
-====================
-*/
 unsigned char* JPEG_LoadImage_BGRA (const unsigned char *f, int filesize, int *miplevel)
 {
 	struct jpeg_decompress_struct cinfo;
@@ -610,7 +489,6 @@ unsigned char* JPEG_LoadImage_BGRA (const unsigned char *f, int filesize, int *m
 	unsigned int line;
 	int submip = 0;
 
-	// No DLL = no JPEGs
 	if (!jpeg_dll)
 		return NULL;
 
@@ -653,7 +531,6 @@ unsigned char* JPEG_LoadImage_BGRA (const unsigned char *f, int filesize, int *m
 		return NULL;
 	}
 
-	// Decompress the image, line by line
 	line = 0;
 	while (cinfo.output_scanline < cinfo.output_height)
 	{
@@ -662,10 +539,9 @@ unsigned char* JPEG_LoadImage_BGRA (const unsigned char *f, int filesize, int *m
 
 		qjpeg_read_scanlines (&cinfo, &scanline, 1);
 
-		// Convert the image to BGRA
 		switch (cinfo.output_components)
 		{
-			// RGB images
+
 			case 3:
 				buffer_ptr = &image_buffer[image_width * line * 4];
 				for (ind = 0; ind < image_width * 3; ind += 3, buffer_ptr += 4)
@@ -677,7 +553,6 @@ unsigned char* JPEG_LoadImage_BGRA (const unsigned char *f, int filesize, int *m
 				}
 				break;
 
-			// Greyscale images (default to it, just in case)
 			case 1:
 			default:
 				buffer_ptr = &image_buffer[image_width * line * 4];
@@ -711,15 +586,6 @@ error_caught:
 	return NULL;
 }
 
-
-/*
-=================================================================
-
-  JPEG compression
-
-=================================================================
-*/
-
 #define JPEG_OUTPUT_BUF_SIZE 4096
 static void JPEG_InitDestination (j_compress_ptr cinfo)
 {
@@ -746,7 +612,6 @@ static void JPEG_TermDestination (j_compress_ptr cinfo)
 	my_dest_ptr dest = (my_dest_ptr)cinfo->dest;
 	size_t datacount = JPEG_OUTPUT_BUF_SIZE - dest->pub.free_in_buffer;
 
-	// Write any data remaining in the buffer
 	if (datacount > 0)
 		if (FS_Write (dest->outfile, dest->buffer, datacount) != (fs_offset_t)datacount)
 			longjmp(error_in_jpeg, 1);
@@ -756,7 +621,6 @@ static void JPEG_FileDest (j_compress_ptr cinfo, qfile_t* outfile)
 {
 	my_dest_ptr dest;
 
-	// First time for this JPEG object?
 	if (cinfo->dest == NULL)
 		cinfo->dest = (struct jpeg_destination_mgr *)(*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_PERMANENT, sizeof(my_destination_mgr));
 
@@ -792,7 +656,6 @@ static void JPEG_MemDest (j_compress_ptr cinfo, void* buf, size_t bufsize)
 {
 	my_dest_ptr dest;
 
-	// First time for this JPEG object?
 	if (cinfo->dest == NULL)
 		cinfo->dest = (struct jpeg_destination_mgr *)(*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_PERMANENT, sizeof(my_destination_mgr));
 
@@ -806,14 +669,6 @@ static void JPEG_MemDest (j_compress_ptr cinfo, void* buf, size_t bufsize)
 	dest->bufsize = bufsize;
 }
 
-
-/*
-====================
-JPEG_SaveImage_preflipped
-
-Save a preflipped JPEG image to a file
-====================
-*/
 qboolean JPEG_SaveImage_preflipped (const char *filename, int width, int height, unsigned char *data)
 {
 	struct jpeg_compress_struct cinfo;
@@ -822,14 +677,12 @@ qboolean JPEG_SaveImage_preflipped (const char *filename, int width, int height,
 	unsigned int offset, linesize;
 	qfile_t* file;
 
-	// No DLL = no JPEGs
 	if (!jpeg_dll)
 	{
 		Con_Print("You need the libjpeg library to save JPEG images\n");
 		return false;
 	}
 
-	// Open the file
 	file = FS_OpenRealFile(filename, "wb", true);
 	if (!file)
 		return false;
@@ -842,7 +695,6 @@ qboolean JPEG_SaveImage_preflipped (const char *filename, int width, int height,
 	qjpeg_create_compress (&cinfo);
 	JPEG_FileDest (&cinfo, file);
 
-	// Set the parameters for compression
 	cinfo.image_width = width;
 	cinfo.image_height = height;
 	cinfo.in_color_space = JCS_RGB;
@@ -851,7 +703,6 @@ qboolean JPEG_SaveImage_preflipped (const char *filename, int width, int height,
 	qjpeg_set_quality (&cinfo, (int)(scr_screenshot_jpeg_quality.value * 100), TRUE);
 	qjpeg_simple_progression (&cinfo);
 
-	// turn off subsampling (to make text look better)
 	cinfo.optimize_coding = 1;
 	cinfo.comp_info[0].h_samp_factor = 1;
 	cinfo.comp_info[0].v_samp_factor = 1;
@@ -862,7 +713,6 @@ qboolean JPEG_SaveImage_preflipped (const char *filename, int width, int height,
 
 	qjpeg_start_compress (&cinfo, true);
 
-	// Compress each scanline
 	linesize = cinfo.image_width * 3;
 	offset = linesize * (cinfo.image_height - 1);
 	while (cinfo.next_scanline < cinfo.image_height)
@@ -892,7 +742,6 @@ static size_t JPEG_try_SaveImage_to_Buffer (struct jpeg_compress_struct *cinfo, 
 	jpeg_toolarge = false;
 	JPEG_MemDest (cinfo, jpegbuf, jpegsize);
 
-	// Set the parameters for compression
 	cinfo->image_width = width;
 	cinfo->image_height = height;
 	cinfo->in_color_space = JCS_RGB;
@@ -910,7 +759,6 @@ static size_t JPEG_try_SaveImage_to_Buffer (struct jpeg_compress_struct *cinfo, 
 
 	qjpeg_start_compress (cinfo, true);
 
-	// Compress each scanline
 	linesize = width * 3;
 	while (cinfo->next_scanline < cinfo->image_height)
 	{
@@ -936,7 +784,6 @@ size_t JPEG_SaveImage_to_Buffer (char *jpegbuf, size_t jpegsize, int width, int 
 	int quality_guess;
 	size_t result;
 
-	// No DLL = no JPEGs
 	if (!jpeg_dll)
 	{
 		Con_Print("You need the libjpeg library to save JPEG images\n");
@@ -951,7 +798,7 @@ size_t JPEG_SaveImage_to_Buffer (char *jpegbuf, size_t jpegsize, int width, int 
 	qjpeg_create_compress (&cinfo);
 
 #if 0
-	// used to get the formula below
+
 	{
 		char buf[1048576];
 		unsigned char *img;
@@ -970,11 +817,10 @@ size_t JPEG_SaveImage_to_Buffer (char *jpegbuf, size_t jpegsize, int width, int 
 	}
 #endif
 
-	//quality_guess = (int)((100 * jpegsize - 41000) / (width*height) + 2); // fits random data
-	quality_guess   = (int)((256 * jpegsize - 81920) / (width*height) - 8); // fits Nexuiz's/Xonotic's map pictures
+	quality_guess   = (int)((256 * jpegsize - 81920) / (width*height) - 8);
 
 	quality_guess = bound(0, quality_guess, 100);
-	quality = bound(0, quality_guess + sv_writepicture_quality.integer, 100); // assume it can do 10 failed attempts
+	quality = bound(0, quality_guess + sv_writepicture_quality.integer, 100);
 
 	while(!(result = JPEG_try_SaveImage_to_Buffer(&cinfo, jpegbuf, jpegsize, quality, width, height, data)))
 	{
@@ -1015,8 +861,8 @@ static void CompressedImageCache_Add(const char *imagename, size_t maxsize, void
 	CompressedImageCacheItem *i;
 
 	if(strlen(imagename) >= MAX_QPATH)
-		return; // can't add this
-	
+		return;
+
 	i = (CompressedImageCacheItem*) Z_Malloc(sizeof(CompressedImageCacheItem));
 	strlcpy(i->imagename, imagename, sizeof(i->imagename));
 	i->maxsize = maxsize;
@@ -1050,10 +896,9 @@ qboolean Image_Compress(const char *imagename, size_t maxsize, void **buf, size_
 	int components[3] = {2, 1, 0};
 	CompressedImageCacheItem *i;
 
-	JPEG_OpenLibrary (); // for now; LH had the idea of replacing this by a better format
-	PNG_OpenLibrary (); // for loading
+	JPEG_OpenLibrary ();
+	PNG_OpenLibrary ();
 
-	// No DLL = no JPEGs
 	if (!jpeg_dll)
 	{
 		Con_Print("You need the libjpeg library to save JPEG images\n");
@@ -1067,12 +912,10 @@ qboolean Image_Compress(const char *imagename, size_t maxsize, void **buf, size_
 		*buf = i->compressed;
 	}
 
-	// load the image
 	imagedata = loadimagepixelsbgra(imagename, true, false, false, NULL);
 	if(!imagedata)
 		return false;
 
-	// find an appropriate size for somewhat okay compression
 	if(maxsize <= 768)
 		maxPixelCount = 32 * 32;
 	else if(maxsize <= 1024)
@@ -1090,11 +933,9 @@ qboolean Image_Compress(const char *imagename, size_t maxsize, void **buf, size_
 
 	newimagedata = (unsigned char *) Mem_Alloc(tempmempool, image_width * image_height * 3);
 
-	// convert the image from BGRA to RGB
 	Image_CopyMux(newimagedata, imagedata, image_width, image_height, false, false, false, 3, 4, components);
 	Mem_Free(imagedata);
 
-	// try to compress it to JPEG
 	*buf = Z_Malloc(maxsize);
 	*size = JPEG_SaveImage_to_Buffer((char *) *buf, maxsize, image_width, image_height, newimagedata);
 	Mem_Free(newimagedata);
@@ -1104,11 +945,9 @@ qboolean Image_Compress(const char *imagename, size_t maxsize, void **buf, size_
 		Z_Free(*buf);
 		*buf = NULL;
 		Con_Printf("could not compress image %s to %d bytes\n", imagename, (int)maxsize);
-		// return false;
-		// also cache failures!
+
 	}
 
-	// store it in the cache
 	CompressedImageCache_Add(imagename, maxsize, *buf, *size);
 	return (*buf != NULL);
 }

@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/turrets/all.qc>
 #include <common/turrets/checkpoint.qc>
 #include <common/turrets/config.qc>

@@ -10,14 +10,14 @@ MUTATOR_HOOKFUNCTION(rocketflying, EditProjectile)
 
 	if(autocvar_g_rocket_flying_disabledelays && (proj.classname == "rocket" || proj.classname == "mine"))
 	{
-		// kill detonate delay of rockets
+
 		proj.spawnshieldtime = time;
 	}
 }
 
 MUTATOR_HOOKFUNCTION(rocketflying, AllowRocketJumping)
 {
-	M_ARGV(0, bool) = true; // force rocket jumping
+	M_ARGV(0, bool) = true;
 }
 
 MUTATOR_HOOKFUNCTION(rocketflying, BuildMutatorsString)

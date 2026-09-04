@@ -27,8 +27,8 @@ string WeaponArenaString()
 	if(s == "all_available") return _("All Available Weapons Arena");
 	if(s == "most") return _("Most Weapons Arena");
 	if(s == "most_available") return _("Most Available Weapons Arena");
-	if(s == "devall") return "Dev All Weapons Arena"; // development option, do not translate
-	if(s == "devall_available") return "Dev All Available Weapons Arena"; // development option, do not translate
+	if(s == "devall") return "Dev All Weapons Arena";
+	if(s == "devall_available") return "Dev All Available Weapons Arena";
 	if(s == weaponarenastring_cvar)
 		return weaponarenastring;
 
@@ -132,7 +132,7 @@ void XonoticMutatorsDialog_fill(entity me)
 		me.TDempty(me, 0.2);
 		me.TD(me, 1, 1.8, e = makeXonoticCheckBox_T(0, "g_buffs", _("Buffs"),
 			_("Enable buff pickups (random bonuses like Medic, Invisible, etc.) on the maps that support it")));
-			e.cvarOffValue = "-1"; // TODO: make this a radio button?
+			e.cvarOffValue = "-1";
 	me.TR(me);
 		me.TDempty(me, 0.2);
 		me.TD(me, 1, 1.8, e = makeXonoticCheckBox_T(0, "g_midair", _("Midair"),
@@ -156,9 +156,9 @@ void XonoticMutatorsDialog_fill(entity me)
 		s = makeXonoticSlider_T(80, 400, 8, "sv_gravity",
 			_("Make things fall to the ground slower (percentage of normal gravity)"));
 			s.valueDigits = 0;
-			s.valueDisplayMultiplier = 0.125; // show gravity in percent
+			s.valueDisplayMultiplier = 0.125;
 		me.TD(me, 1, 1.8, e = makeXonoticSliderCheckBox(800, 1, s, _("Low gravity")));
-			e.savedValue = 200; // good on silvercity
+			e.savedValue = 200;
 	me.TR(me);
 		me.TDempty(me, 0.4);
 		me.TD(me, 1, 1.6, s);
@@ -210,7 +210,7 @@ void XonoticMutatorsDialog_fill(entity me)
 			e.cvarValueIsAnotherCvar = true;
 			e.cvarOffValue = "0";
 
-		me.TDempty(me, 0.1); // fix initial position
+		me.TDempty(me, 0.1);
 	for(i = WEP_FIRST, j = 0; i <= WEP_LAST; ++i)
 	{
 		w = REGISTRY_GET(Weapons, i);

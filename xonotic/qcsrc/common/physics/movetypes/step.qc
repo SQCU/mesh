@@ -1,6 +1,6 @@
 #include "step.qh"
 
-void _Movetype_Physics_Step(entity this, float dt) // SV_Physics_Step
+void _Movetype_Physics_Step(entity this, float dt)
 {
 	if(IS_ONGROUND(this))
 	{
@@ -18,7 +18,6 @@ void _Movetype_Physics_Step(entity this, float dt) // SV_Physics_Step
 		_Movetype_FlyMove(this, dt, true, false, 0);
 		_Movetype_LinkEdict(this, true);
 
-		// TODO? movetypesteplandevent
 	}
 
 	_Movetype_CheckWaterTransition(this);

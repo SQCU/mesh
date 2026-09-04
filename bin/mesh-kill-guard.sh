@@ -75,6 +75,6 @@ matches() {
 
 case "${1:-}" in
   --match) shift; matches "$*" ;;
-  --hook) matches "$(/usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin).get("tool_input",{}).get("command",""))')" && { msg; exit 2; }; exit 0 ;;
+  --hook) matches "$("$(dirname "$0")/mesh-python" -c 'import json,sys;print(json.load(sys.stdin).get("tool_input",{}).get("command",""))')" && { msg; exit 2; }; exit 0 ;;
   *) msg; exit 2 ;;
 esac

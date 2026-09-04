@@ -10,12 +10,6 @@
 
 #ifdef SVQC
 
-// spawner entity
-// "classname" "target_spawn"
-// "message" "fieldname value fieldname value ..."
-// "spawnflags"
-//   ON_MAPLOAD = trigger on map load
-
 float target_spawn_initialized;
 .void(entity this) target_spawn_spawnfunc;
 float target_spawn_spawnfunc_field;
@@ -54,7 +48,7 @@ void target_spawn_edit_entity(entity this, entity e, string msg, entity kt, enti
 		else
 		{
 			data = stov(db_get(TemporaryDB, strcat("/target_spawn/field/", key)));
-			if(data.y == 0) // undefined field, i.e., invalid type
+			if(data.y == 0)
 			{
 				LOG_INFO("target_spawn: invalid/unknown entity key ", key, " specified, ignored!");
 				continue;
@@ -65,13 +59,11 @@ void target_spawn_edit_entity(entity this, entity e, string msg, entity kt, enti
 			value = substring(value, 1, strlen(value) - 1);
 			if(substring(value, 0, 1) == "$")
 			{
-				// deferred replacement
-				// do nothing
-				// useful for creating target_spawns with this!
+
 			}
 			else
 			{
-				// replace me!
+
 				valuefieldpos = strstrofs(value, "+", 0);
 				valueoffset = "";
 				if(valuefieldpos != -1)
@@ -168,7 +160,7 @@ void target_spawn_edit_entity(entity this, entity e, string msg, entity kt, enti
 						continue;
 					}
 					data2 = stov(db_get(TemporaryDB, strcat("/target_spawn/field/", valuefield)));
-					if(data2_y == 0) // undefined field, i.e., invalid type
+					if(data2_y == 0)
 					{
 						LOG_INFO("target_spawn: invalid/unknown entity key replacement ", valuefield, " specified, ignored!");
 						continue;
@@ -221,13 +213,12 @@ void target_spawn_edit_entity(entity this, entity e, string msg, entity kt, enti
 
 			e.target_spawn_spawnfunc(e);
 
-			// We called an external function, so we have to re-tokenize msg.
 			n = tokenize_console(msg);
 		}
 		else
 		{
 			if(data.y == FIELD_VECTOR)
-				value = strreplace("'", "", value); // why?!?
+				value = strreplace("'", "", value);
 			putentityfieldstring(data.x, e, value);
 		}
 	}
@@ -255,14 +246,13 @@ bool target_spawn_cancreate(entity this)
 	entity e;
 
 	c = this.count;
-	if(c == 0) // no limit?
+	if(c == 0)
 		return true;
 
-	++c; // increase count to not include MYSELF
+	++c;
 	for(e = NULL; (e = findfloat(e, target_spawn_id, this.target_spawn_id)); --c)
 		;
 
-	// if c now is 0, we have AT LEAST the given count (maybe more), so don't spawn any more
 	if(c == 0)
 		return false;
 	return true;
@@ -272,7 +262,7 @@ void target_spawn_use(entity this, entity actor, entity trigger)
 {
 	if(this.target == "")
 	{
-		// spawn new entity
+
 		if(!target_spawn_cancreate(this))
 			return;
 		entity e = spawn();
@@ -282,13 +272,13 @@ void target_spawn_use(entity this, entity actor, entity trigger)
 	}
 	else if(this.target == "*activator")
 	{
-		// edit entity
+
 		if(actor)
 			target_spawn_useon(actor, this, actor, trigger);
 	}
 	else
 	{
-		// edit entity
+
 		FOREACH_ENTITY_STRING(targetname, this.target,
 		{
 			target_spawn_useon(it, this, actor, trigger);

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
+import math
 from operator import xor
 from typing import Hashable, Iterable, Mapping, Sequence
 
-
 State = Hashable
 Role = Hashable
-
 
 def mex(values: Iterable[int]) -> int:
     values = {int(value) for value in values if int(value) >= 0}
@@ -18,60 +17,60 @@ def mex(values: Iterable[int]) -> int:
         value += 1
     return value
 
-
 @dataclass(frozen=True)
 class RoleValue:
     mobility: int
-    options: tuple[State, ...]
-    complete: bool
-
+    enumerated_mass: int
 
 @dataclass(frozen=True)
 class GameValue:
-    kind: str
     nimber: int | None
     role_values: Mapping[Role, RoleValue]
-    reason: str | None = None
-
+    reachable_state_mass: int
+    reachable_role_state_mass: int
+    enumerated_role_state_mass: int
+    role_option_symmetric_difference_mass: int
+    cycle_state_mass: int
+    projected_role: Role | None = None
+    portfolio_nimbers: Mapping[Role, int] = field(default_factory=dict)
+    role_ranks: Mapping[Role, int] = field(default_factory=dict)
+    succession: tuple[tuple[Role, int], ...] = ()
 
 @dataclass(frozen=True)
 class ComponentBelief:
     probabilities: Mapping[State, float]
     unknown_probability: float = 0.0
 
-
 @dataclass(frozen=True)
 class NimberBelief:
     probabilities: Mapping[int, float]
-    unresolved_probability: float
+    undefined_probability: float
 
     def probability(self, nimber: int) -> float:
         return float(self.probabilities.get(int(nimber), 0.0))
 
-
 def _ordered(values: Iterable[State]) -> tuple[State, ...]:
     return tuple(sorted(set(values), key=repr))
-
 
 class FiniteGameGraph:
     def __init__(
         self,
         options_by_role: Mapping[State, Mapping[Role, Iterable[State]]],
         roles: Iterable[Role],
-        complete_options: Iterable[tuple[State, Role]] | None = None,
+        enumerated_options: Iterable[tuple[State, Role]] | None = None,
     ) -> None:
         self.roles = _ordered(roles) or ("player",)
         self._options = {
             state: {role: _ordered(options) for role, options in by_role.items()}
             for state, by_role in options_by_role.items()
         }
-        if complete_options is None:
+        if enumerated_options is None:
             states = set(self._options)
             for by_role in self._options.values():
                 for options in by_role.values():
                     states.update(options)
-            complete_options = ((state, role) for state in states for role in self.roles)
-        self._complete = set(complete_options)
+            enumerated_options = ((state, role) for state in states for role in self.roles)
+        self._enumerated = set(enumerated_options)
 
     @classmethod
     def impartial(
@@ -105,8 +104,8 @@ class FiniteGameGraph:
             for option in self.options(state, current_role)
         )
 
-    def options_complete(self, state: State, role: Role) -> bool:
-        return (state, role) in self._complete
+    def option_enumeration_mass(self, state: State, role: Role) -> int:
+        return int((state, role) in self._enumerated)
 
     def reachable(self, state: State) -> tuple[State, ...]:
         seen = set()
@@ -119,49 +118,68 @@ class FiniteGameGraph:
             pending.extend(self.options(current))
         return _ordered(seen)
 
-    def classification(self, state: State) -> str:
-        for current in self.reachable(state):
-            sets = [set(self.options(current, role)) for role in self.roles]
-            if sets and any(options != sets[0] for options in sets[1:]):
-                return "partizan"
-        return "impartial"
+    def role_option_symmetric_difference_mass(self, states: Iterable[State]) -> int:
+        mass = 0
+        for state in states:
+            options = [set(self.options(state, role)) for role in self.roles]
+            incidence = Counter(option for role_options in options for option in role_options)
+            mass += sum(count * (len(options) - count) for count in incidence.values())
+        return mass
+
+    def cycle_state_mass(self, states: Iterable[State]) -> int:
+        mass = 0
+        for root in states:
+            seen = set()
+            pending = list(self.options(root))
+            while pending:
+                current = pending.pop()
+                if current == root:
+                    mass += 1
+                    break
+                if current in seen:
+                    continue
+                seen.add(current)
+                pending.extend(self.options(current))
+        return mass
 
     def role_values(self, state: State) -> dict[Role, RoleValue]:
         return {
             role: RoleValue(
                 len(self.options(state, role)),
-                self.options(state, role),
-                self.options_complete(state, role),
+                self.option_enumeration_mass(state, role),
             )
             for role in self.roles
         }
 
     def evaluate(self, state: State) -> GameValue:
         reachable = self.reachable(state)
-        if any(not self.options_complete(current, role) for current in reachable for role in self.roles):
-            return GameValue("unresolved", None, self.role_values(state), "incomplete option graph")
-        if self.classification(state) == "partizan":
-            return GameValue("partizan", None, self.role_values(state))
+        reachable_role_state_mass = len(reachable) * len(self.roles)
+        enumerated_role_state_mass = sum(
+            self.option_enumeration_mass(current, role)
+            for current in reachable for role in self.roles
+        )
+        difference_mass = self.role_option_symmetric_difference_mass(reachable)
+        cycle_state_mass = self.cycle_state_mass(reachable)
+        measurements = dict(
+            role_values=self.role_values(state),
+            reachable_state_mass=len(reachable),
+            reachable_role_state_mass=reachable_role_state_mass,
+            enumerated_role_state_mass=enumerated_role_state_mass,
+            role_option_symmetric_difference_mass=difference_mass,
+            cycle_state_mass=cycle_state_mass,
+        )
+        if enumerated_role_state_mass != reachable_role_state_mass or difference_mass or cycle_state_mass:
+            return GameValue(nimber=None, **measurements)
         cache: dict[State, int] = {}
-        visiting = set()
 
         def grundy(current: State) -> int:
             if current in cache:
                 return cache[current]
-            if current in visiting:
-                raise RuntimeError
-            visiting.add(current)
             value = mex(grundy(option) for option in self.options(current, self.roles[0]))
-            visiting.remove(current)
             cache[current] = value
             return value
 
-        try:
-            nimber = grundy(state)
-        except RuntimeError:
-            return GameValue("unresolved", None, self.role_values(state), "cyclic option graph")
-        return GameValue("impartial", nimber, self.role_values(state))
-
+        return GameValue(nimber=grundy(state), **measurements)
 
 def disjunctive_sum_options(
     graphs: Sequence[FiniteGameGraph],
@@ -177,27 +195,45 @@ def disjunctive_sum_options(
             moves.append(tuple(successor))
     return tuple(moves)
 
-
 def disjunctive_sum_value(
     graphs: Sequence[FiniteGameGraph],
     states: Sequence[State],
 ) -> GameValue:
     values = [graph.evaluate(state) for graph, state in zip(graphs, states)]
-    if all(value.kind == "impartial" for value in values):
-        return GameValue("impartial", reduce(xor, (value.nimber for value in values), 0), {})
     roles = _ordered(role for graph in graphs for role in graph.roles)
     role_values = {
         role: RoleValue(
             len(disjunctive_sum_options(graphs, states, role)),
-            disjunctive_sum_options(graphs, states, role),
-            all(graph.options_complete(state, role) for graph, state in zip(graphs, states) if role in graph.roles),
+            int(all(
+                graph.option_enumeration_mass(state, role)
+                for graph, state in zip(graphs, states) if role in graph.roles
+            )),
         )
         for role in roles
     }
-    kind = "partizan" if any(value.kind == "partizan" for value in values) else "unresolved"
-    reasons = "; ".join(value.reason for value in values if value.reason)
-    return GameValue(kind, None, role_values, reasons or None)
-
+    component_masses = [value.reachable_state_mass for value in values]
+    reachable_state_mass = math.prod(component_masses)
+    reachable_role_state_mass = reachable_state_mass * len(roles)
+    enumerated_role_state_mass = sum(
+        all(
+            role not in graph.roles or value.enumerated_role_state_mass == value.reachable_role_state_mass
+            for graph, value in zip(graphs, values)
+        ) for role in roles
+    ) * reachable_state_mass
+    difference_mass = sum(
+        value.role_option_symmetric_difference_mass
+        * math.prod(component_masses[:index] + component_masses[index + 1:])
+        for index, value in enumerate(values)
+    )
+    cycle_state_mass = reachable_state_mass - math.prod(
+        value.reachable_state_mass - value.cycle_state_mass for value in values
+    )
+    nimbers = [value.nimber for value in values]
+    nimber = reduce(xor, nimbers, 0) if all(value is not None for value in nimbers) else None
+    return GameValue(
+        nimber, role_values, reachable_state_mass, reachable_role_state_mass,
+        enumerated_role_state_mass, difference_mass, cycle_state_mass,
+    )
 
 def _coerce_belief(belief: ComponentBelief | Mapping[State, float]) -> ComponentBelief:
     if isinstance(belief, ComponentBelief):
@@ -206,7 +242,6 @@ def _coerce_belief(belief: ComponentBelief | Mapping[State, float]) -> Component
     if total == 0.0:
         return ComponentBelief({}, 1.0)
     return ComponentBelief({state: max(0.0, float(weight)) / total for state, weight in belief.items()})
-
 
 def belief_nimber_distribution(
     graphs: Sequence[FiniteGameGraph],
@@ -221,7 +256,7 @@ def belief_nimber_distribution(
         scale = min(1.0, allowed / total) if total else 0.0
         for state, probability in belief.probabilities.items():
             value = graph.evaluate(state)
-            if value.kind == "impartial":
+            if value.nimber is not None:
                 component[int(value.nimber)] += max(0.0, float(probability)) * scale
         combined: dict[int, float] = defaultdict(float)
         for left, left_probability in distribution.items():
@@ -231,15 +266,7 @@ def belief_nimber_distribution(
     known = sum(distribution.values())
     return NimberBelief(dict(sorted(distribution.items())), max(0.0, 1.0 - known))
 
-
 def parse_cartstate(state: State):
-    """Recover (depths, controls, teams) from a responder cartstate key.
-
-    The responder keys the cart subgame by
-        (map_key, episode, k, depth_levels, controls)
-    (`strat_responder.py`, the `game_state` tuple). Anything that does not have
-    that shape is not a cartstate and gets no closed form.
-    """
     if not isinstance(state, tuple) or len(state) != 5:
         return None
     _, _, k, depths, controls = state
@@ -254,36 +281,25 @@ def parse_cartstate(state: State):
         return None
     return depths, controls, list(range(max(1, k)))
 
-
 class EmpiricalTransitionGraph:
-    """Options learned by watching real transitions.
-
-    A watched graph is incomplete until every reachable state has been marked
-    complete, which for the cart subgame only happens when a cart is delivered.
-    Where the position is a cartstate the option graph does not have to be
-    watched at all -- `evaluate_cartstate` writes it down in closed form -- so
-    that is what `evaluate` falls back to instead of reporting "incomplete
-    option graph" for the whole match (AGENDA B11).
-    """
-
     def __init__(self, roles: Iterable[Role], cart_levels: int = 8) -> None:
         self.roles = _ordered(roles)
         self.cart_levels = int(cart_levels)
         self._counts: dict[State, dict[Role, Counter]] = defaultdict(lambda: defaultdict(Counter))
-        self._complete: set[tuple[State, Role]] = set()
+        self._enumerated: set[tuple[State, Role]] = set()
 
     def observe(self, state: State, successor: State, role: Role, weight: float = 1.0) -> None:
         self.roles = _ordered((*self.roles, role))
         self._counts[state][role][successor] += max(0.0, float(weight))
 
-    def mark_complete(self, state: State, role: Role | None = None) -> None:
+    def mark_enumerated(self, state: State, role: Role | None = None) -> None:
         if role is not None:
             self.roles = _ordered((*self.roles, role))
         for current_role in self.roles if role is None else (role,):
-            self._complete.add((state, current_role))
+            self._enumerated.add((state, current_role))
 
     def observe_terminal(self, state: State) -> None:
-        self.mark_complete(state)
+        self.mark_enumerated(state)
 
     def transition_probabilities(self, state: State, role: Role) -> dict[State, float]:
         counts = self._counts.get(state, {}).get(role, Counter())
@@ -295,71 +311,92 @@ class EmpiricalTransitionGraph:
             state: {role: tuple(counts) for role, counts in by_role.items()}
             for state, by_role in self._counts.items()
         }
-        return FiniteGameGraph(options, self.roles, self._complete)
+        return FiniteGameGraph(options, self.roles, self._enumerated)
 
     def evaluate(self, state: State) -> GameValue:
         value = self.snapshot().evaluate(state)
-        if value.kind != "unresolved":
+        if value.enumerated_role_state_mass == value.reachable_role_state_mass:
             return value
         parsed = parse_cartstate(state)
         if parsed is None:
             return value
         depths, controls, teams = parsed
-        closed = evaluate_cartstate(depths, controls, teams, self.cart_levels)
-        return GameValue(closed.kind, closed.nimber, closed.role_values,
-                         closed.reason or "closed-form cart option graph")
-
-
-
-# =============================================================================
-#  The cart subgame's option graph, in closed form.
-# -----------------------------------------------------------------------------
-#  AGENDA B11. `EmpiricalTransitionGraph` learns options by WATCHING transitions,
-#  so `FiniteGameGraph.evaluate` can only ever say "incomplete option graph"
-#  until `observe_terminal` has been called on every reachable state. On the real
-#  Game-2 run no cart was ever delivered, `mark_complete` was therefore never
-#  reached, and the CGT value came back
-#      {"kind": "unresolved", "nimber": null, "reason": "incomplete option graph"}
-#  on 228 of 228 lines. Nothing was wrong with the evaluator: it was being asked
-#  to price a graph that had no edges.
-#
-#  The cart subgame does not need to be observed. SPEC 1 calls it
-#      "a nim-like counting-game-over-payload-carts"
-#  and its options follow from the cart rules, so they are enumerated here and
-#  every state is complete by construction.
-#
-#  ONE CART = ONE COMPONENT of a disjunctive sum. Its position is the number of
-#  levels still to be covered, r = levels - depth, floored by the cart's banked
-#  point (score is monotone: sv_payload.qc banks and never un-banks).
-#
-#    * A NEUTRAL cart (no controlling team) is IMPARTIAL: the cylinder occupancy
-#      law (sv_payload.qc `payload_occupancy`) lets any team present move it, so
-#      every role has the same options -- reduce r to any smaller value. That is
-#      a Nim heap, and backward induction over mex reproduces Grundy(r) = r, so
-#      the nim-sum in game.py is derived here rather than asserted.
-#
-#    * A CONTROLLED cart is PARTIZAN and gets NO nimber. Regime A/B of the cart
-#      velocity law (AGENDA R2) gives the controlling team and its opponents
-#      genuinely different moves: the color team advances the cart, an opponent
-#      reverses it toward the origin, where it recolors neutral (sv_payload.qc
-#      "regressed to origin, recolored neutral"). Left and Right options differ,
-#      a Grundy value does not exist, and none is invented (AGENDA B10).
-#
-#  So the sum resolves to an exact nimber exactly when every cart is neutral,
-#  and to an explicit "partizan" otherwise. Neither answer is "incomplete".
-# =============================================================================
+        return evaluate_cartstate(depths, controls, teams, self.cart_levels)
 
 NEUTRAL = None
 
+def cart_projection(
+    depths: Sequence[int],
+    controls: Sequence[Role],
+    teams: Sequence[Role],
+) -> tuple[Role | None, dict[Role, int], dict[Role, int], tuple[tuple[Role, int], ...]]:
+    roles = _ordered(teams)
+    rows = [
+        [controls[index] if index < len(controls) else NEUTRAL, max(0, int(depth))]
+        for index, depth in enumerate(depths)
+    ]
 
-def _neutral_cart_graph(levels: int) -> FiniteGameGraph:
-    # Impartial: one role, options of r are every strictly smaller position.
-    return FiniteGameGraph.impartial({r: tuple(range(r)) for r in range(levels + 1)})
+    def coordinates():
+        values = {role: 0 for role in roles}
+        for holder, depth in rows:
+            if holder in values and depth:
+                values[holder] ^= depth
+        return values
 
+    def leader(values):
+        maximum = max(values.values(), default=0)
+        found = [role for role, value in values.items() if value == maximum]
+        return found[0] if maximum > 0 and len(found) == 1 else None
+
+    values = coordinates()
+    projected = leader(values)
+    ranks = {
+        role: sum(
+            value > other
+            for other_role, other in values.items()
+            if other_role != role and other_role != projected
+        )
+        for role, value in values.items()
+    }
+    if projected is not None:
+        ranks[projected] = max(0, len(roles) - 1)
+    order = []
+    current = projected
+    if current is not None:
+        order.append((current, 0))
+        seen = {current}
+        steps = 0
+        previous = 0
+        while steps <= sum(row[1] for row in rows) and len(seen) < len(roles):
+            candidates = [
+                (row[1], index) for index, row in enumerate(rows)
+                if row[0] == current and row[1] > 0
+            ]
+            if not candidates:
+                break
+            _, index = max(candidates)
+            rows[index][1] -= 1
+            if rows[index][1] == 0:
+                rows[index][0] = NEUTRAL
+            steps += 1
+            following = leader(coordinates())
+            if following != current:
+                if following is None:
+                    break
+                if following not in seen:
+                    order.append((following, steps - previous))
+                    seen.add(following)
+                    previous = steps
+                current = following
+    return projected, values, ranks, tuple(order)
+
+def _neutral_cart_graph(levels: int, teams: Sequence[Role]) -> FiniteGameGraph:
+    return FiniteGameGraph.impartial(
+        {r: tuple(range(r)) for r in range(levels + 1)},
+        tuple(teams) or ("player",),
+    )
 
 def _controlled_cart_graph(levels: int, holder: Role, teams: Sequence[Role]) -> FiniteGameGraph:
-    # Partizan: the holder advances (r decreases toward delivery), everyone else
-    # reverses (r increases back toward the origin). Positions are r = levels - depth.
     roles = tuple(teams) or (holder,)
     options: dict[State, dict[Role, tuple[State, ...]]] = {}
     for r in range(levels + 1):
@@ -372,7 +409,6 @@ def _controlled_cart_graph(levels: int, holder: Role, teams: Sequence[Role]) -> 
         options[r] = by_role
     return FiniteGameGraph.partizan(options, roles)
 
-
 def cart_components(
     depths: Sequence[int],
     controls: Sequence[Role],
@@ -380,13 +416,6 @@ def cart_components(
     levels: int,
     floors: Sequence[int] | None = None,
 ) -> tuple[list[FiniteGameGraph], list[State]]:
-    """Closed-form option graphs and positions for one cartstate.
-
-    `controls[c]` is the controlling team, or None / a negative index for a
-    neutral cart (the engine writes 0 for uncontrolled, the responder maps it to
-    -1). `floors[c]` is the cart's banked level, which its position can never
-    fall back below.
-    """
     graphs, states = [], []
     floors = list(floors) if floors is not None else [0] * len(depths)
     for index, depth in enumerate(depths):
@@ -398,12 +427,11 @@ def cart_components(
         position = max(0, min(int(depth) - floor, span))
         remaining = span - position
         if holder is NEUTRAL:
-            graphs.append(_neutral_cart_graph(span))
+            graphs.append(_neutral_cart_graph(span, teams))
         else:
             graphs.append(_controlled_cart_graph(span, holder, teams))
         states.append(remaining)
     return graphs, states
-
 
 def evaluate_cartstate(
     depths: Sequence[int],
@@ -412,12 +440,82 @@ def evaluate_cartstate(
     levels: int,
     floors: Sequence[int] | None = None,
 ) -> GameValue:
-    """Price a real server cartstate as a disjunctive sum of cart components."""
+    roles = _ordered(teams) or ("player",)
+    projected, portfolio_nimbers, ranks, order = cart_projection(depths, controls, roles)
     if not list(depths):
-        return GameValue("impartial", 0, {})
-    graphs, states = cart_components(depths, controls, teams, levels, floors)
-    return disjunctive_sum_value(graphs, states)
-
+        return GameValue(0, {}, 0, 0, 0, 0, 0, projected,
+                         portfolio_nimbers, ranks, order)
+    floors = list(floors) if floors is not None else [0] * len(depths)
+    mobility = {role: 0 for role in roles}
+    state_masses = []
+    difference_masses = []
+    cycle_masses = []
+    nimber = 0
+    nimber_mass = 0
+    for index, depth in enumerate(depths):
+        holder = controls[index] if index < len(controls) else NEUTRAL
+        if holder is not None and not isinstance(holder, str) and holder < 0:
+            holder = NEUTRAL
+        floor = max(0, min(int(floors[index]), levels))
+        span = max(0, levels - floor)
+        progress = max(0, min(int(depth) - floor, span))
+        remaining = span - progress
+        if holder is NEUTRAL:
+            state_mass = remaining + 1
+            component_nimber = remaining
+            for role in roles:
+                mobility[role] += remaining
+        elif holder not in roles:
+            state_mass = span - remaining + 1
+            component_nimber = span - remaining
+            for role in roles:
+                mobility[role] += span - remaining
+        elif len(roles) == 1 or span == 0:
+            state_mass = remaining + 1
+            component_nimber = remaining
+            mobility[holder] += remaining
+        else:
+            state_mass = span + 1
+            component_nimber = None
+            component_difference = (len(roles) - 1) * span * state_mass
+            component_cycle = state_mass
+            for role in roles:
+                mobility[role] += remaining if role == holder else span - remaining
+        if not (holder in roles and len(roles) > 1 and span > 0):
+            component_difference = 0
+            component_cycle = 0
+        state_masses.append(state_mass)
+        difference_masses.append(component_difference)
+        cycle_masses.append(component_cycle)
+        if component_nimber is not None:
+            nimber ^= component_nimber
+            nimber_mass += 1
+    role_values = {
+        role: RoleValue(value, 1) for role, value in mobility.items()
+    }
+    reachable_state_mass = math.prod(state_masses)
+    reachable_role_state_mass = reachable_state_mass * len(roles)
+    difference_mass = sum(
+        mass * math.prod(state_masses[:index] + state_masses[index + 1:])
+        for index, mass in enumerate(difference_masses)
+    )
+    cycle_state_mass = reachable_state_mass - math.prod(
+        state_mass - cycle_mass
+        for state_mass, cycle_mass in zip(state_masses, cycle_masses)
+    )
+    return GameValue(
+        nimber if nimber_mass == len(depths) else None,
+        role_values,
+        reachable_state_mass,
+        reachable_role_state_mass,
+        reachable_role_state_mass,
+        difference_mass,
+        cycle_state_mass,
+        projected,
+        portfolio_nimbers,
+        ranks,
+        order,
+    )
 
 __all__ = [
     "ComponentBelief",
@@ -428,6 +526,7 @@ __all__ = [
     "RoleValue",
     "belief_nimber_distribution",
     "cart_components",
+    "cart_projection",
     "parse_cartstate",
     "evaluate_cartstate",
     "disjunctive_sum_options",

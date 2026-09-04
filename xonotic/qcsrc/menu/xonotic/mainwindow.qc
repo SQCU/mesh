@@ -66,7 +66,7 @@ void MainWindow_draw(entity me)
 		}
 		else if(me.firstRunDialog.shouldShow())
 			DialogOpenButton_Click_withCoords(NULL, me.firstRunDialog, '0 0 0', eX * conwidth + eY * conheight);
-		
+
 		me.firstDraw = false;
 	}
 }
@@ -83,12 +83,10 @@ void MainWindow_configureMainWindow(entity me)
 {
 	entity n, i;
 
-	// terms of service dialog
 	me.ToSDialog = i = NEW(XonoticToSDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-	// dialog run upon startup
 	me.firstRunDialog = i = NEW(XonoticFirstRunDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
@@ -97,8 +95,6 @@ void MainWindow_configureMainWindow(entity me)
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-
-	// hud_configure dialogs
 	i = NEW(XonoticHUDExitDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
@@ -187,7 +183,6 @@ void MainWindow_configureMainWindow(entity me)
 	i.configureDialog(i);
 	me.addItemRightCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-	// dialogs used by settings
 	me.userbindEditDialog = i = NEW(XonoticUserbindEditDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
@@ -212,14 +207,10 @@ void MainWindow_configureMainWindow(entity me)
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-
-	// dialog used by singleplayer
 	me.winnerDialog = i = NEW(XonoticWinnerDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-
-	// dialog used by multiplayer/join
 	me.serverInfoDialog = i = NEW(XonoticServerInfoDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
@@ -232,8 +223,6 @@ void MainWindow_configureMainWindow(entity me)
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-
-	// dialogs used by multiplayer/create
 	me.mapInfoDialog = i = NEW(XonoticMapInfoDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
@@ -242,20 +231,14 @@ void MainWindow_configureMainWindow(entity me)
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-
-	// dialogs used by multiplayer/media
 	me.screenshotViewerDialog = i = NEW(XonoticScreenshotViewerDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
 
-
-	// mutator dialogs
 	i = NEW(XonoticSandboxToolsDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z * SKINALPHA_DIALOG_SANDBOXTOOLS);
 
-
-	// miscellaneous dialogs
 	i = NEW(XonoticGameMenuDialog);
 	i.configureDialog(i);
 	me.addItemCentered(me, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
@@ -274,19 +257,7 @@ void MainWindow_configureMainWindow(entity me)
 
 	MUTATOR_CALLHOOK(ConfigureDialogs, me);
 
-
-	// main dialogs/windows
 	me.mainNexposee = n = NEW(XonoticNexposee);
-
-	/*
-		if(checkextension("DP_GECKO_SUPPORT"))
-		{
-			i = spawnXonoticNewsDialog();
-			i.configureDialog(i);
-			n.addItemCentered(n, i, i.intendedWidth * eX + i.intendedHeight * eY, SKINALPHAS_MAINMENU_z);
-			n.setNexposee(n, i, '0.1 0.1 0', SKINALPHAS_MAINMENU_x, SKINALPHAS_MAINMENU_y);
-		}
-	*/
 
 		i = NEW(XonoticSingleplayerDialog);
 		i.configureDialog(i);

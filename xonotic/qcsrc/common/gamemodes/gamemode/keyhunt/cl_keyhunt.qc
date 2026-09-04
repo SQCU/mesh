@@ -2,14 +2,12 @@
 
 #include <client/hud/panel/modicons.qh>
 
-// Keyhunt HUD modicon section
 vector KH_SLOTS[4];
 
 void HUD_Mod_KH(vector pos, vector mySize)
 {
-	mod_active = 1; // keyhunt should never hide the mod icons panel
+	mod_active = 1;
 
-	// Read current state
 	int state = STAT(OBJECTIVE_STATUS);
 	if(!state) return;
 
@@ -42,11 +40,10 @@ void HUD_Mod_KH(vector pos, vector mySize)
 		++all_keys;
 	}
 
-	// Calculate slot measurements
 	vector slot_size;
 	if(all_keys == 4 && mySize.x * 0.5 < mySize.y && mySize.y * 0.5 < mySize.x)
 	{
-		// Quadratic arrangement
+
 		slot_size = vec2(mySize.x * 0.5, mySize.y * 0.5);
 		KH_SLOTS[0] = pos;
 		KH_SLOTS[1] = pos + eX * slot_size.x;
@@ -57,26 +54,24 @@ void HUD_Mod_KH(vector pos, vector mySize)
 	{
 		if(mySize.x > mySize.y)
 		{
-			// Horizontal arrangement
+
 			slot_size = vec2(mySize.x / all_keys, mySize.y);
 			for(i = 0; i < all_keys; ++i)
 				KH_SLOTS[i] = pos + eX * slot_size.x * i;
 		}
 		else
 		{
-			// Vertical arrangement
+
 			slot_size = vec2(mySize.x, mySize.y / all_keys);
 			for(i = 0; i < all_keys; ++i)
 				KH_SLOTS[i] = pos + eY * slot_size.y * i;
 		}
 	}
 
-	// Make icons blink in case of RUN HERE
-
 	float alpha = 1;
 	if(carrying_keys)
 	{
-		float blink = 0.6 + sin(2 * M_PI * time) * 0.4; // Oscillate between 0.2 and 1
+		float blink = 0.6 + sin(2 * M_PI * time) * 0.4;
 		switch(myteam)
 		{
 			case NUM_TEAM_1: if(team1_keys == all_keys) alpha = blink; break;
@@ -86,8 +81,6 @@ void HUD_Mod_KH(vector pos, vector mySize)
 		}
 	}
 	alpha *= panel_fg_alpha;
-
-	// Draw icons
 
 	i = 0;
 

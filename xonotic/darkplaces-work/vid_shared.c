@@ -15,7 +15,7 @@ LPDIRECT3DDEVICE9 vid_d3d9dev;
 #endif
 
 #ifdef WIN32
-//#include <XInput.h>
+
 #define XINPUT_GAMEPAD_DPAD_UP          0x0001
 #define XINPUT_GAMEPAD_DPAD_DOWN        0x0002
 #define XINPUT_GAMEPAD_DPAD_LEFT        0x0004
@@ -71,20 +71,15 @@ qboolean vid_xinputinitialized = false;
 int vid_xinputindex = -1;
 #endif
 
-// global video state
 viddef_t vid;
 
-// AK FIXME -> input_dest
 qboolean in_client_mouse = true;
 
-// AK where should it be placed ?
 float in_mouse_x, in_mouse_y;
 float in_windowmouse_x, in_windowmouse_y;
 
-// LordHavoc: if window is hidden, don't update screen
 qboolean vid_hidden = true;
-// LordHavoc: if window is not the active window, don't hog as much CPU time,
-// let go of the mouse, turn off sound, and restore system gamma ramps...
+
 qboolean vid_activewindow = true;
 
 vid_joystate_t vid_joystate;
@@ -135,12 +130,10 @@ cvar_t joy_x360_sensitivitypitch = {0, "joy_x360_sensitivitypitch", "-1", "movem
 cvar_t joy_x360_sensitivityyaw = {0, "joy_x360_sensitivityyaw", "-1", "movement multiplier"};
 cvar_t joy_x360_sensitivityroll = {0, "joy_x360_sensitivityroll", "1", "movement multiplier"};
 
-// cvars for DPSOFTRAST
 cvar_t vid_soft = {CVAR_SAVE, "vid_soft", "0", "enables use of the DarkPlaces Software Rasterizer rather than OpenGL or Direct3D"};
-cvar_t vid_soft_threads = {CVAR_SAVE, "vid_soft_threads", "8", "the number of threads the DarkPlaces Software Rasterizer should use"}; 
+cvar_t vid_soft_threads = {CVAR_SAVE, "vid_soft_threads", "8", "the number of threads the DarkPlaces Software Rasterizer should use"};
 cvar_t vid_soft_interlace = {CVAR_SAVE, "vid_soft_interlace", "1", "whether the DarkPlaces Software Rasterizer should interlace the screen bands occupied by each thread"};
 
-// VorteX: more info cvars, mostly set in VID_CheckExtensions
 cvar_t gl_info_vendor = {CVAR_READONLY, "gl_info_vendor", "", "indicates brand of graphics chip"};
 cvar_t gl_info_renderer = {CVAR_READONLY, "gl_info_renderer", "", "indicates graphics chip model and other information"};
 cvar_t gl_info_version = {CVAR_READONLY, "gl_info_version", "", "indicates version of current renderer. begins with 1.0.0, 1.1.0, 1.2.0, 1.3.1 etc."};
@@ -156,9 +149,7 @@ cvar_t vid_samples = {CVAR_SAVE, "vid_samples", "1", "how many anti-aliasing sam
 cvar_t vid_refreshrate = {CVAR_SAVE, "vid_refreshrate", "60", "refresh rate to use, in hz (higher values flicker less, if supported by your monitor)"};
 cvar_t vid_userefreshrate = {CVAR_SAVE, "vid_userefreshrate", "0", "set this to 1 to make vid_refreshrate used, or to 0 to let the engine choose a sane default"};
 cvar_t vid_stereobuffer = {CVAR_SAVE, "vid_stereobuffer", "0", "enables 'quad-buffered' stereo rendering for stereo shutterglasses, HMD (head mounted display) devices, or polarized stereo LCDs, if supported by your drivers"};
-// the density cvars are completely optional, set and use when something needs to have a density-independent size.
-// TODO: set them when changing resolution, setting them from the commandline will be independent from the resolution - use only if you have a native fixed resolution.
-// values for the Samsung Galaxy SIII, Snapdragon version: 2.000000 density, 304.799988 xdpi, 303.850464 ydpi
+
 cvar_t vid_touchscreen_density = {0, "vid_touchscreen_density", "2.0", "Standard quantized screen density multiplier (see Android documentation for DisplayMetrics), similar values are given on iPhoneOS"};
 cvar_t vid_touchscreen_xdpi = {0, "vid_touchscreen_xdpi", "300", "Horizontal DPI of the screen (only valid on Android currently)"};
 cvar_t vid_touchscreen_ydpi = {0, "vid_touchscreen_ydpi", "300", "Vertical DPI of the screen (only valid on Android currently)"};
@@ -198,32 +189,28 @@ cvar_t v_color_white_b = {CVAR_SAVE, "v_color_white_b", "1", "desired color of w
 cvar_t v_glslgamma_2d = {CVAR_SAVE, "v_glslgamma_2d", "1", "applies GLSL gamma to 2d pictures (HUD, fonts)"};
 cvar_t v_psycho = {0, "v_psycho", "0", "easter egg - R.I.P. zinx http://obits.al.com/obituaries/birmingham/obituary.aspx?n=christopher-robert-lais&pid=186080667"};
 
-// brand of graphics chip
 const char *gl_vendor;
-// graphics chip model and other information
+
 const char *gl_renderer;
-// begins with 1.0.0, 1.1.0, 1.2.0, 1.2.1, 1.3.0, 1.3.1, or 1.4.0
+
 const char *gl_version;
-// extensions list, space separated
+
 const char *gl_extensions;
-// WGL, GLX, or AGL
+
 const char *gl_platform;
-// another extensions list, containing platform-specific extensions that are
-// not in the main list
+
 const char *gl_platformextensions;
-// name of driver library (opengl32.dll, libGL.so.1, or whatever)
+
 char gl_driver[256];
 
 #ifndef USE_GLES2
-// GL_ARB_multitexture
+
 void (GLAPIENTRY *qglMultiTexCoord1f) (GLenum, GLfloat);
 void (GLAPIENTRY *qglMultiTexCoord2f) (GLenum, GLfloat, GLfloat);
 void (GLAPIENTRY *qglMultiTexCoord3f) (GLenum, GLfloat, GLfloat, GLfloat);
 void (GLAPIENTRY *qglMultiTexCoord4f) (GLenum, GLfloat, GLfloat, GLfloat, GLfloat);
 void (GLAPIENTRY *qglActiveTexture) (GLenum);
 void (GLAPIENTRY *qglClientActiveTexture) (GLenum);
-
-// general GL functions
 
 void (GLAPIENTRY *qglClearColor)(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha);
 
@@ -281,22 +268,12 @@ void (GLAPIENTRY *qglBegin)(GLenum mode);
 void (GLAPIENTRY *qglEnd)(void);
 
 void (GLAPIENTRY *qglMatrixMode)(GLenum mode);
-//void (GLAPIENTRY *qglOrtho)(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
-//void (GLAPIENTRY *qglFrustum)(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
+
 void (GLAPIENTRY *qglViewport)(GLint x, GLint y, GLsizei width, GLsizei height);
-//void (GLAPIENTRY *qglPushMatrix)(void);
-//void (GLAPIENTRY *qglPopMatrix)(void);
+
 void (GLAPIENTRY *qglLoadIdentity)(void);
-//void (GLAPIENTRY *qglLoadMatrixd)(const GLdouble *m);
+
 void (GLAPIENTRY *qglLoadMatrixf)(const GLfloat *m);
-//void (GLAPIENTRY *qglMultMatrixd)(const GLdouble *m);
-//void (GLAPIENTRY *qglMultMatrixf)(const GLfloat *m);
-//void (GLAPIENTRY *qglRotated)(GLdouble angle, GLdouble x, GLdouble y, GLdouble z);
-//void (GLAPIENTRY *qglRotatef)(GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
-//void (GLAPIENTRY *qglScaled)(GLdouble x, GLdouble y, GLdouble z);
-//void (GLAPIENTRY *qglScalef)(GLfloat x, GLfloat y, GLfloat z);
-//void (GLAPIENTRY *qglTranslated)(GLdouble x, GLdouble y, GLdouble z);
-//void (GLAPIENTRY *qglTranslatef)(GLfloat x, GLfloat y, GLfloat z);
 
 void (GLAPIENTRY *qglReadPixels)(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels);
 
@@ -321,25 +298,18 @@ void (GLAPIENTRY *qglHint)(GLenum target, GLenum mode);
 void (GLAPIENTRY *qglGenTextures)(GLsizei n, GLuint *textures);
 void (GLAPIENTRY *qglDeleteTextures)(GLsizei n, const GLuint *textures);
 void (GLAPIENTRY *qglBindTexture)(GLenum target, GLuint texture);
-//void (GLAPIENTRY *qglPrioritizeTextures)(GLsizei n, const GLuint *textures, const GLclampf *priorities);
-//GLboolean (GLAPIENTRY *qglAreTexturesResident)(GLsizei n, const GLuint *textures, GLboolean *residences);
-//GLboolean (GLAPIENTRY *qglIsTexture)(GLuint texture);
-//void (GLAPIENTRY *qglPixelStoref)(GLenum pname, GLfloat param);
+
 void (GLAPIENTRY *qglPixelStorei)(GLenum pname, GLint param);
 
-//void (GLAPIENTRY *qglTexImage1D)(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 void (GLAPIENTRY *qglTexImage2D)(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
-//void (GLAPIENTRY *qglTexSubImage1D)(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels);
+
 void (GLAPIENTRY *qglTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels);
-//void (GLAPIENTRY *qglCopyTexImage1D)(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border);
+
 void (GLAPIENTRY *qglCopyTexImage2D)(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
-//void (GLAPIENTRY *qglCopyTexSubImage1D)(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+
 void (GLAPIENTRY *qglCopyTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
 
-
 void (GLAPIENTRY *qglDrawRangeElementsEXT)(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const GLvoid *indices);
-
-//void (GLAPIENTRY *qglColorTableEXT)(int, int, int, int, int, const void *);
 
 void (GLAPIENTRY *qglTexImage3D)(GLenum target, GLint level, GLenum internalFormat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 void (GLAPIENTRY *qglTexSubImage3D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const GLvoid *pixels);
@@ -351,10 +321,6 @@ void (GLAPIENTRY *qglPolygonOffset)(GLfloat factor, GLfloat units);
 void (GLAPIENTRY *qglPolygonMode)(GLenum face, GLenum mode);
 void (GLAPIENTRY *qglPolygonStipple)(const GLubyte *mask);
 
-//void (GLAPIENTRY *qglClipPlane)(GLenum plane, const GLdouble *equation);
-//void (GLAPIENTRY *qglGetClipPlane)(GLenum plane, GLdouble *equation);
-
-//[515]: added on 29.07.2005
 void (GLAPIENTRY *qglLineWidth)(GLfloat width);
 void (GLAPIENTRY *qglPointSize)(GLfloat size);
 
@@ -366,7 +332,7 @@ void (GLAPIENTRY *qglActiveStencilFaceEXT)(GLenum);
 
 void (GLAPIENTRY *qglDeleteShader)(GLuint obj);
 void (GLAPIENTRY *qglDeleteProgram)(GLuint obj);
-//GLuint (GLAPIENTRY *qglGetHandle)(GLenum pname);
+
 void (GLAPIENTRY *qglDetachShader)(GLuint containerObj, GLuint attachedObj);
 GLuint (GLAPIENTRY *qglCreateShader)(GLenum shaderType);
 void (GLAPIENTRY *qglShaderSource)(GLuint shaderObj, GLsizei count, const GLchar **string, const GLint *length);
@@ -454,7 +420,6 @@ void (GLAPIENTRY *qglGetVertexAttribfv)(GLuint index, GLenum pname, GLfloat *par
 void (GLAPIENTRY *qglGetVertexAttribiv)(GLuint index, GLenum pname, GLint *params);
 void (GLAPIENTRY *qglGetVertexAttribPointerv)(GLuint index, GLenum pname, GLvoid **pointer);
 
-//GL_ARB_vertex_buffer_object
 void (GLAPIENTRY *qglBindBufferARB) (GLenum target, GLuint buffer);
 void (GLAPIENTRY *qglDeleteBuffersARB) (GLsizei n, const GLuint *buffers);
 void (GLAPIENTRY *qglGenBuffersARB) (GLsizei n, GLuint *buffers);
@@ -464,7 +429,6 @@ GLboolean (GLAPIENTRY *qglUnmapBufferARB) (GLenum target);
 void (GLAPIENTRY *qglBufferDataARB) (GLenum target, GLsizeiptrARB size, const GLvoid *data, GLenum usage);
 void (GLAPIENTRY *qglBufferSubDataARB) (GLenum target, GLintptrARB offset, GLsizeiptrARB size, const GLvoid *data);
 
-//GL_ARB_framebuffer_object
 GLboolean (GLAPIENTRY *qglIsRenderbuffer)(GLuint renderbuffer);
 GLvoid (GLAPIENTRY *qglBindRenderbuffer)(GLenum target, GLuint renderbuffer);
 GLvoid (GLAPIENTRY *qglDeleteRenderbuffers)(GLsizei n, const GLuint *renderbuffers);
@@ -490,10 +454,10 @@ void (GLAPIENTRY *qglDrawBuffersARB)(GLsizei n, const GLenum *bufs);
 
 void (GLAPIENTRY *qglCompressedTexImage3DARB)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data);
 void (GLAPIENTRY *qglCompressedTexImage2DARB)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border,  GLsizei imageSize, const void *data);
-//void (GLAPIENTRY *qglCompressedTexImage1DARB)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data);
+
 void (GLAPIENTRY *qglCompressedTexSubImage3DARB)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data);
 void (GLAPIENTRY *qglCompressedTexSubImage2DARB)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data);
-//void (GLAPIENTRY *qglCompressedTexSubImage1DARB)(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data);
+
 void (GLAPIENTRY *qglGetCompressedTexImageARB)(GLenum target, GLint lod, void *img);
 
 void (GLAPIENTRY *qglGenQueriesARB)(GLsizei n, GLuint *ids);
@@ -534,11 +498,11 @@ qboolean GL_CheckExtension(const char *minglver_or_ext, const dllfunction_t *fun
 	int ext;
 
 	if(sscanf(minglver_or_ext, "%d.%d", &min_version.major, &min_version.minor) == 2)
-		ext = 0; // opengl version
+		ext = 0;
 	else if(minglver_or_ext[0] != toupper(minglver_or_ext[0]))
-		ext = -1; // pseudo name
+		ext = -1;
 	else
-		ext = 1; // extension name
+		ext = 1;
 
 	if (ext)
 		Con_DPrintf("checking for %s...  ", minglver_or_ext);
@@ -554,7 +518,7 @@ qboolean GL_CheckExtension(const char *minglver_or_ext, const dllfunction_t *fun
 		return false;
 	}
 
-	if (ext == 1) // opengl extension
+	if (ext == 1)
 	{
 		if (!strstr(gl_extensions ? gl_extensions : "", minglver_or_ext) && !strstr(gl_platformextensions ? gl_platformextensions : "", minglver_or_ext))
 		{
@@ -563,7 +527,7 @@ qboolean GL_CheckExtension(const char *minglver_or_ext, const dllfunction_t *fun
 		}
 	}
 
-	if(ext == 0) // opengl version
+	if(ext == 0)
 	{
 		if (sscanf(gl_version, "%d.%d", &curr_version.major, &curr_version.minor) < 2)
 			curr_version.major = curr_version.minor = 1;
@@ -577,9 +541,7 @@ qboolean GL_CheckExtension(const char *minglver_or_ext, const dllfunction_t *fun
 
 	for (func = funcs;func && func->name != NULL;func++)
 	{
-		// Con_DPrintf("\n    %s...  ", func->name);
 
-		// functions are cleared before all the extensions are evaluated
 		if (!(*func->funcvariable = (void *) GL_GetProcAddress(func->name)))
 		{
 			if (ext && !silent)
@@ -589,10 +551,10 @@ qboolean GL_CheckExtension(const char *minglver_or_ext, const dllfunction_t *fun
 			failed = true;
 		}
 	}
-	// delay the return so it prints all missing functions
+
 	if (failed)
 		return false;
-	// VorteX: add to found extension list
+
 	dpsnprintf(extstr, sizeof(extstr), "%s %s ", gl_info_extensions.string, minglver_or_ext);
 	Cvar_SetQuick(&gl_info_extensions, extstr);
 
@@ -646,27 +608,18 @@ static dllfunction_t opengl110funcs[] =
 	{"glVertex4f", (void **) &qglVertex4f},
 	{"glBegin", (void **) &qglBegin},
 	{"glEnd", (void **) &qglEnd},
-//[515]: added on 29.07.2005
+
 	{"glLineWidth", (void**) &qglLineWidth},
 	{"glPointSize", (void**) &qglPointSize},
-//
+
 	{"glMatrixMode", (void **) &qglMatrixMode},
-//	{"glOrtho", (void **) &qglOrtho},
-//	{"glFrustum", (void **) &qglFrustum},
+
 	{"glViewport", (void **) &qglViewport},
-//	{"glPushMatrix", (void **) &qglPushMatrix},
-//	{"glPopMatrix", (void **) &qglPopMatrix},
+
 	{"glLoadIdentity", (void **) &qglLoadIdentity},
-//	{"glLoadMatrixd", (void **) &qglLoadMatrixd},
+
 	{"glLoadMatrixf", (void **) &qglLoadMatrixf},
-//	{"glMultMatrixd", (void **) &qglMultMatrixd},
-//	{"glMultMatrixf", (void **) &qglMultMatrixf},
-//	{"glRotated", (void **) &qglRotated},
-//	{"glRotatef", (void **) &qglRotatef},
-//	{"glScaled", (void **) &qglScaled},
-//	{"glScalef", (void **) &qglScalef},
-//	{"glTranslated", (void **) &qglTranslated},
-//	{"glTranslatef", (void **) &qglTranslatef},
+
 	{"glReadPixels", (void **) &qglReadPixels},
 	{"glStencilFunc", (void **) &qglStencilFunc},
 	{"glStencilMask", (void **) &qglStencilMask},
@@ -684,28 +637,24 @@ static dllfunction_t opengl110funcs[] =
 	{"glGetTexLevelParameterfv", (void **) &qglGetTexLevelParameterfv},
 	{"glGetTexLevelParameteriv", (void **) &qglGetTexLevelParameteriv},
 	{"glHint", (void **) &qglHint},
-//	{"glPixelStoref", (void **) &qglPixelStoref},
+
 	{"glPixelStorei", (void **) &qglPixelStorei},
 	{"glGenTextures", (void **) &qglGenTextures},
 	{"glDeleteTextures", (void **) &qglDeleteTextures},
 	{"glBindTexture", (void **) &qglBindTexture},
-//	{"glPrioritizeTextures", (void **) &qglPrioritizeTextures},
-//	{"glAreTexturesResident", (void **) &qglAreTexturesResident},
-//	{"glIsTexture", (void **) &qglIsTexture},
-//	{"glTexImage1D", (void **) &qglTexImage1D},
+
 	{"glTexImage2D", (void **) &qglTexImage2D},
-//	{"glTexSubImage1D", (void **) &qglTexSubImage1D},
+
 	{"glTexSubImage2D", (void **) &qglTexSubImage2D},
-//	{"glCopyTexImage1D", (void **) &qglCopyTexImage1D},
+
 	{"glCopyTexImage2D", (void **) &qglCopyTexImage2D},
-//	{"glCopyTexSubImage1D", (void **) &qglCopyTexSubImage1D},
+
 	{"glCopyTexSubImage2D", (void **) &qglCopyTexSubImage2D},
 	{"glScissor", (void **) &qglScissor},
 	{"glPolygonOffset", (void **) &qglPolygonOffset},
 	{"glPolygonMode", (void **) &qglPolygonMode},
 	{"glPolygonStipple", (void **) &qglPolygonStipple},
-//	{"glClipPlane", (void **) &qglClipPlane},
-//	{"glGetClipPlane", (void **) &qglGetClipPlane},
+
 	{NULL, NULL}
 };
 
@@ -778,7 +727,7 @@ static dllfunction_t gl20shaderfuncs[] =
 {
 	{"glDeleteShader", (void **) &qglDeleteShader},
 	{"glDeleteProgram", (void **) &qglDeleteProgram},
-//	{"glGetHandle", (void **) &qglGetHandle},
+
 	{"glDetachShader", (void **) &qglDetachShader},
 	{"glCreateShader", (void **) &qglCreateShader},
 	{"glShaderSource", (void **) &qglShaderSource},
@@ -842,17 +791,7 @@ static dllfunction_t gl20shaderfuncs[] =
 	{"glVertexAttrib4fv", (void **) &qglVertexAttrib1fv},
 	{"glVertexAttrib4sv", (void **) &qglVertexAttrib1sv},
 	{"glVertexAttrib4dv", (void **) &qglVertexAttrib1dv},
-//	{"glVertexAttrib4iv", (void **) &qglVertexAttrib1iv},
-//	{"glVertexAttrib4bv", (void **) &qglVertexAttrib1bv},
-//	{"glVertexAttrib4ubv", (void **) &qglVertexAttrib1ubv},
-//	{"glVertexAttrib4usv", (void **) &qglVertexAttrib1usv},
-//	{"glVertexAttrib4uiv", (void **) &qglVertexAttrib1uiv},
-//	{"glVertexAttrib4Nbv", (void **) &qglVertexAttrib1Nbv},
-//	{"glVertexAttrib4Nsv", (void **) &qglVertexAttrib1Nsv},
-//	{"glVertexAttrib4Niv", (void **) &qglVertexAttrib1Niv},
-//	{"glVertexAttrib4Nubv", (void **) &qglVertexAttrib1Nubv},
-//	{"glVertexAttrib4Nusv", (void **) &qglVertexAttrib1Nusv},
-//	{"glVertexAttrib4Nuiv", (void **) &qglVertexAttrib1Nuiv},
+
 	{"glVertexAttribPointer", (void **) &qglVertexAttribPointer},
 	{"glEnableVertexAttribArray", (void **) &qglEnableVertexAttribArray},
 	{"glDisableVertexAttribArray", (void **) &qglDisableVertexAttribArray},
@@ -907,7 +846,7 @@ static dllfunction_t arbfbofuncs[] =
 	{"glDeleteRenderbuffers"                 , (void **) &qglDeleteRenderbuffers},
 	{"glGenRenderbuffers"                    , (void **) &qglGenRenderbuffers},
 	{"glRenderbufferStorage"                 , (void **) &qglRenderbufferStorage},
-	{"glRenderbufferStorageMultisample"      , (void **) &qglRenderbufferStorageMultisample}, // not in GL_EXT_framebuffer_object
+	{"glRenderbufferStorageMultisample"      , (void **) &qglRenderbufferStorageMultisample},
 	{"glGetRenderbufferParameteriv"          , (void **) &qglGetRenderbufferParameteriv},
 	{"glIsFramebuffer"                       , (void **) &qglIsFramebuffer},
 	{"glBindFramebuffer"                     , (void **) &qglBindFramebuffer},
@@ -917,10 +856,10 @@ static dllfunction_t arbfbofuncs[] =
 	{"glFramebufferTexture1D"                , (void **) &qglFramebufferTexture1D},
 	{"glFramebufferTexture2D"                , (void **) &qglFramebufferTexture2D},
 	{"glFramebufferTexture3D"                , (void **) &qglFramebufferTexture3D},
-	{"glFramebufferTextureLayer"             , (void **) &qglFramebufferTextureLayer}, // not in GL_EXT_framebuffer_object
+	{"glFramebufferTextureLayer"             , (void **) &qglFramebufferTextureLayer},
 	{"glFramebufferRenderbuffer"             , (void **) &qglFramebufferRenderbuffer},
 	{"glGetFramebufferAttachmentParameteriv" , (void **) &qglGetFramebufferAttachmentParameteriv},
-	{"glBlitFramebuffer"                     , (void **) &qglBlitFramebuffer}, // not in GL_EXT_framebuffer_object
+	{"glBlitFramebuffer"                     , (void **) &qglBlitFramebuffer},
 	{"glGenerateMipmap"                      , (void **) &qglGenerateMipmap},
 	{NULL, NULL}
 };
@@ -951,10 +890,10 @@ static dllfunction_t texturecompressionfuncs[] =
 {
 	{"glCompressedTexImage3DARB",    (void **) &qglCompressedTexImage3DARB},
 	{"glCompressedTexImage2DARB",    (void **) &qglCompressedTexImage2DARB},
-//	{"glCompressedTexImage1DARB",    (void **) &qglCompressedTexImage1DARB},
+
 	{"glCompressedTexSubImage3DARB", (void **) &qglCompressedTexSubImage3DARB},
 	{"glCompressedTexSubImage2DARB", (void **) &qglCompressedTexSubImage2DARB},
-//	{"glCompressedTexSubImage1DARB", (void **) &qglCompressedTexSubImage1DARB},
+
 	{"glGetCompressedTexImageARB",   (void **) &qglGetCompressedTexImageARB},
 	{NULL, NULL}
 };
@@ -994,10 +933,9 @@ static dllfunction_t blendfuncseparatefuncs[] =
 
 void VID_ClearExtensions(void)
 {
-	// VorteX: reset extensions info cvar, it got filled by GL_CheckExtension
+
 	Cvar_SetQuick(&gl_info_extensions, "");
 
-	// clear the extension flags
 	memset(&vid.support, 0, sizeof(vid.support));
 	vid.renderpath = RENDERPATH_GL11;
 	vid.sRGBcapable2D = false;
@@ -1014,7 +952,7 @@ void VID_ClearExtensions(void)
 	vid.maxdrawbuffers = 1;
 
 #ifndef USE_GLES2
-	// this is a complete list of all functions that are directly checked in the renderer
+
 	qglDrawRangeElements = NULL;
 	qglDrawBuffer = NULL;
 	qglPolygonStipple = NULL;
@@ -1040,7 +978,7 @@ void VID_CheckExtensions(void)
 	if (vid.support.gl20shaders)
 	{
 		char *s;
-		// detect what GLSL version is available, to enable features like r_glsl_skeletal and higher quality reliefmapping
+
 		vid.support.glshaderversion = 100;
 		s = (char *) qglGetString(GL_SHADING_LANGUAGE_VERSION);
 		if (s)
@@ -1048,12 +986,11 @@ void VID_CheckExtensions(void)
 		if (vid.support.glshaderversion < 100)
 			vid.support.glshaderversion = 100;
 		Con_DPrintf("Detected GLSL #version %i\n", vid.support.glshaderversion);
-		// get the glBindFragDataLocation function
+
 		if (vid.support.glshaderversion >= 130)
 			vid.support.gl20shaders130 = GL_CheckExtension("glshaders130", glsl130funcs, "-noglsl130", true);
 	}
 
-	// GL drivers generally prefer GL_BGRA
 	vid.forcetextype = GL_BGRA;
 
 	vid.support.amd_texture_texture4 = GL_CheckExtension("GL_AMD_texture_texture4", NULL, "-notexture4", false);
@@ -1083,10 +1020,7 @@ void VID_CheckExtensions(void)
 
 	vid.support.ext_packed_depth_stencil = GL_CheckExtension("GL_EXT_packed_depth_stencil", NULL, "-nopackeddepthstencil", false);
 	vid.support.ext_stencil_two_side = GL_CheckExtension("GL_EXT_stencil_two_side", stenciltwosidefuncs, "-nostenciltwoside", false);
-	// 3D textures have been core since OpenGL 1.2.  Drivers that ship them only as
-	// core - Apple's GL 2.1 among them - advertise no GL_EXT_texture3D and export no
-	// EXT-suffixed entrypoints, so check core first and keep the extension as the
-	// fallback for pre-1.2 drivers.
+
 	vid.support.ext_texture_3d = GL_CheckExtension("1.2", texture3dcorefuncs, "-notexture3d", true) || GL_CheckExtension("GL_EXT_texture3D", texture3dextfuncs, "-notexture3d", false);
 	vid.support.ext_texture_compression_s3tc = GL_CheckExtension("GL_EXT_texture_compression_s3tc", NULL, "-nos3tc", false);
 	vid.support.ext_texture_edge_clamp = GL_CheckExtension("GL_EXT_texture_edge_clamp", NULL, "-noedgeclamp", false) || GL_CheckExtension("GL_SGIS_texture_edge_clamp", NULL, "-noedgeclamp", false);
@@ -1098,38 +1032,9 @@ void VID_CheckExtensions(void)
 	vid.support.arb_multisample = GL_CheckExtension("GL_ARB_multisample", multisamplefuncs, "-nomultisample", false);
 	vid.allowalphatocoverage = false;
 
-// COMMANDLINEOPTION: GL: -noshaders disables use of OpenGL 2.0 shaders (which allow pixel shader effects, can improve per pixel lighting performance and capabilities)
-// COMMANDLINEOPTION: GL: -noanisotropy disables GL_EXT_texture_filter_anisotropic (allows higher quality texturing)
-// COMMANDLINEOPTION: GL: -noblendminmax disables GL_EXT_blend_minmax
-// COMMANDLINEOPTION: GL: -noblendsubtract disables GL_EXT_blend_subtract
-// COMMANDLINEOPTION: GL: -nocombine disables GL_ARB_texture_env_combine or GL_EXT_texture_env_combine (required for bumpmapping and faster map rendering)
-// COMMANDLINEOPTION: GL: -nocubemap disables GL_ARB_texture_cube_map (required for bumpmapping)
-// COMMANDLINEOPTION: GL: -nodepthtexture disables use of GL_ARB_depth_texture (required for shadowmapping)
-// COMMANDLINEOPTION: GL: -nodrawbuffers disables use of GL_ARB_draw_buffers (required for r_shadow_deferredprepass)
-// COMMANDLINEOPTION: GL: -nodrawrangeelements disables GL_EXT_draw_range_elements (renders faster)
-// COMMANDLINEOPTION: GL: -noedgeclamp disables GL_EXT_texture_edge_clamp or GL_SGIS_texture_edge_clamp (recommended, some cards do not support the other texture clamp method)
-// COMMANDLINEOPTION: GL: -nofbo disables GL_EXT_framebuffer_object (which accelerates rendering), only used if GL_ARB_fragment_shader is also available
-// COMMANDLINEOPTION: GL: -nomtex disables GL_ARB_multitexture (required for faster map rendering)
-// COMMANDLINEOPTION: GL: -noocclusionquery disables GL_ARB_occlusion_query (which allows coronas to fade according to visibility, and potentially used for rendering optimizations)
-// COMMANDLINEOPTION: GL: -noquerybuffer disables GL_ARB_query_buffer_object (which allows corona fading without synchronous rendering)
-// COMMANDLINEOPTION: GL: -nos3tc disables GL_EXT_texture_compression_s3tc (which allows use of .dds texture caching)
-// COMMANDLINEOPTION: GL: -noseparatestencil disables use of OpenGL2.0 glStencilOpSeparate and GL_ATI_separate_stencil extensions (which accelerate shadow rendering)
-// COMMANDLINEOPTION: GL: -noshadow disables use of GL_ARB_shadow (required for hardware shadowmap filtering)
-// COMMANDLINEOPTION: GL: -nostenciltwoside disables GL_EXT_stencil_two_side (which accelerate shadow rendering)
-// COMMANDLINEOPTION: GL: -notexture3d disables GL_EXT_texture3D (required for spherical lights, otherwise they render as a column)
-// COMMANDLINEOPTION: GL: -notexture4 disables GL_AMD_texture_texture4 (which provides fetch4 sampling)
-// COMMANDLINEOPTION: GL: -notexturecompression disables GL_ARB_texture_compression (which saves video memory if it is supported, but can also degrade image quality, see gl_texturecompression cvar documentation for more information)
-// COMMANDLINEOPTION: GL: -notexturegather disables GL_ARB_texture_gather (which provides fetch4 sampling)
-// COMMANDLINEOPTION: GL: -notexturenonpoweroftwo disables GL_ARB_texture_non_power_of_two (which saves video memory if it is supported, but crashes on some buggy drivers)
-// COMMANDLINEOPTION: GL: -novbo disables GL_ARB_vertex_buffer_object (which accelerates rendering)
-// COMMANDLINEOPTION: GL: -nosrgb disables GL_EXT_texture_sRGB (which is used for higher quality non-linear texture gamma)
-// COMMANDLINEOPTION: GL: -nomultisample disables GL_ARB_multisample
-
 	if (vid.support.arb_draw_buffers)
 		qglGetIntegerv(GL_MAX_DRAW_BUFFERS_ARB, (GLint*)&vid.maxdrawbuffers);
 
-	// disable non-power-of-two textures on Radeon X1600 and other cards that do not accelerate it with some filtering modes / repeat modes that we use
-	// we detect these cards by checking if the hardware supports vertex texture fetch (Geforce6 does, Radeon X1600 does not, all GL3-class hardware does)
 	if(vid.support.arb_texture_non_power_of_two && vid.support.gl20shaders)
 	{
 		int val = 0;
@@ -1138,7 +1043,6 @@ void VID_CheckExtensions(void)
 			vid.support.arb_texture_non_power_of_two = false;
 	}
 
-	// we don't care if it's an extension or not, they are identical functions, so keep it simple in the rendering code
 	if (qglDrawRangeElements == NULL)
 		qglDrawRangeElements = qglDrawRangeElementsEXT;
 
@@ -1150,7 +1054,6 @@ void VID_CheckExtensions(void)
 	if (vid.support.ext_texture_3d)
 		qglGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, (GLint*)&vid.maxtexturesize_3d);
 
-	// verify that 3d textures are really supported
 	if (vid.support.ext_texture_3d && vid.maxtexturesize_3d < 32)
 	{
 		vid.support.ext_texture_3d = false;
@@ -1175,7 +1078,7 @@ void VID_CheckExtensions(void)
 		vid.useinterleavedarrays = false;
 		Con_Printf("vid.support.arb_multisample %i\n", vid.support.arb_multisample);
 		Con_Printf("vid.support.gl20shaders %i\n", vid.support.gl20shaders);
-		vid.allowalphatocoverage = true; // but see below, it may get turned to false again if GL_SAMPLES_ARB is <= 1
+		vid.allowalphatocoverage = true;
 	}
 	else if (vid.support.arb_texture_env_combine && vid.texunits >= 2 && vid_gl13.integer)
 	{
@@ -1201,7 +1104,6 @@ void VID_CheckExtensions(void)
 		vid.useinterleavedarrays = false;
 	}
 
-	// enable multisample antialiasing if possible
 	if(vid.support.arb_multisample)
 	{
 		int samples = 0;
@@ -1218,7 +1120,6 @@ void VID_CheckExtensions(void)
 		vid.samples = 1;
 	}
 
-	// VorteX: set other info (maybe place them in VID_InitMode?)
 	Cvar_SetQuick(&gl_info_vendor, gl_vendor);
 	Cvar_SetQuick(&gl_info_renderer, gl_renderer);
 	Cvar_SetQuick(&gl_info_version, gl_version);
@@ -1249,7 +1150,6 @@ qboolean VID_JoyBlockEmulatedKeys(int keycode)
 	if (keycode != K_UPARROW && keycode != K_DOWNARROW && keycode != K_RIGHTARROW && keycode != K_LEFTARROW)
 		return false;
 
-	// block system-generated key events for arrow keys if we're emulating the arrow keys ourselves
 	VID_BuildJoyState(&joystate);
 	for (j = 32;j < 36;j++)
 		if (vid_joystate.button[j] || joystate.button[j])
@@ -1307,7 +1207,7 @@ void VID_Shared_BuildJoyState_Finish(vid_joystate_t *joystate)
 	float f, r;
 	if (joystate->is360)
 		return;
-	// emulate key events for thumbstick
+
 	f = VID_JoyState_GetAxis(joystate, joy_axisforward.integer, 1, joy_axiskeyevents_deadzone.value) * joy_sensitivityforward.value;
 	r = VID_JoyState_GetAxis(joystate, joy_axisside.integer   , 1, joy_axiskeyevents_deadzone.value) * joy_sensitivityside.value;
 #if MAXJOYBUTTON != 36
@@ -1393,38 +1293,34 @@ void VID_ApplyJoyState(vid_joystate_t *joystate)
 	if (joystate->is360)
 	{
 #if 0
-		// keystrokes (chatpad)
-		// DOES NOT WORK - no driver support in xinput1_3.dll :(
+
 		xinput_keystroke_t keystroke;
 		while (qXInputGetKeystroke && qXInputGetKeystroke(XUSER_INDEX_ANY, 0, &keystroke) == S_OK)
 			Con_Printf("XInput KeyStroke: VirtualKey %i, Unicode %i, Flags %x, UserIndex %i, HidCode %i\n", keystroke.VirtualKey, keystroke.Unicode, keystroke.Flags, keystroke.UserIndex, keystroke.HidCode);
 #endif
 
-		// emit key events for buttons
 		for (j = 0;j < (int)(sizeof(joybuttonkey360)/sizeof(joybuttonkey360[0]));j++)
 			VID_KeyEventForButton(vid_joystate.button[j] != 0, joystate->button[j] != 0, joybuttonkey360[j][c], &vid_joybuttontimer[j]);
 
-		// axes
 		cl.cmd.forwardmove += VID_JoyState_GetAxis(joystate, joy_x360_axisforward.integer, joy_x360_sensitivityforward.value, joy_x360_deadzoneforward.value) * cl_forwardspeed.value;
 		cl.cmd.sidemove    += VID_JoyState_GetAxis(joystate, joy_x360_axisside.integer, joy_x360_sensitivityside.value, joy_x360_deadzoneside.value) * cl_sidespeed.value;
 		cl.cmd.upmove      += VID_JoyState_GetAxis(joystate, joy_x360_axisup.integer, joy_x360_sensitivityup.value, joy_x360_deadzoneup.value) * cl_upspeed.value;
 		cl.viewangles[0]   += VID_JoyState_GetAxis(joystate, joy_x360_axispitch.integer, joy_x360_sensitivitypitch.value, joy_x360_deadzonepitch.value) * cl.realframetime * cl_pitchspeed.value;
 		cl.viewangles[1]   += VID_JoyState_GetAxis(joystate, joy_x360_axisyaw.integer, joy_x360_sensitivityyaw.value, joy_x360_deadzoneyaw.value) * cl.realframetime * cl_yawspeed.value;
-		//cl.viewangles[2]   += VID_JoyState_GetAxis(joystate, joy_x360_axisroll.integer, joy_x360_sensitivityroll.value, joy_x360_deadzoneroll.value) * cl.realframetime * cl_rollspeed.value;
+
 	}
 	else
 	{
-		// emit key events for buttons
+
 		for (j = 0;j < MAXJOYBUTTON;j++)
 			VID_KeyEventForButton(vid_joystate.button[j] != 0, joystate->button[j] != 0, joybuttonkey[j][c], &vid_joybuttontimer[j]);
 
-		// axes
 		cl.cmd.forwardmove += VID_JoyState_GetAxis(joystate, joy_axisforward.integer, joy_sensitivityforward.value, joy_deadzoneforward.value) * cl_forwardspeed.value;
 		cl.cmd.sidemove    += VID_JoyState_GetAxis(joystate, joy_axisside.integer, joy_sensitivityside.value, joy_deadzoneside.value) * cl_sidespeed.value;
 		cl.cmd.upmove      += VID_JoyState_GetAxis(joystate, joy_axisup.integer, joy_sensitivityup.value, joy_deadzoneup.value) * cl_upspeed.value;
 		cl.viewangles[0]   += VID_JoyState_GetAxis(joystate, joy_axispitch.integer, joy_sensitivitypitch.value, joy_deadzonepitch.value) * cl.realframetime * cl_pitchspeed.value;
 		cl.viewangles[1]   += VID_JoyState_GetAxis(joystate, joy_axisyaw.integer, joy_sensitivityyaw.value, joy_deadzoneyaw.value) * cl.realframetime * cl_yawspeed.value;
-		//cl.viewangles[2]   += VID_JoyState_GetAxis(joystate, joy_axisroll.integer, joy_sensitivityroll.value, joy_deadzoneroll.value) * cl.realframetime * cl_rollspeed.value;
+
 	}
 
 	vid_joystate = *joystate;
@@ -1438,7 +1334,7 @@ int VID_Shared_SetJoystick(int index)
 	int xinputindex = -1;
 	int xinputavailable = 0;
 	xinput_state_t state;
-	// detect available XInput controllers
+
 	for (i = 0;i < 4;i++)
 	{
 		if (qXInputGetState && qXInputGetState(i, &state) == S_OK)
@@ -1462,7 +1358,6 @@ int VID_Shared_SetJoystick(int index)
 	return 0;
 #endif
 }
-
 
 static void Force_CenterView_f (void)
 {
@@ -1488,7 +1383,7 @@ void VID_ApplyGammaToColor(const float *rgb, float *out)
 	}
 }
 
-unsigned int vid_gammatables_serial = 0; // so other subsystems can poll if gamma parameters have changed
+unsigned int vid_gammatables_serial = 0;
 qboolean vid_gammatables_trivial = true;
 void VID_BuildGammaTables(unsigned short *ramps, int rampsize)
 {
@@ -1512,11 +1407,6 @@ void VID_BuildGammaTables(unsigned short *ramps, int rampsize)
 			ramps[i] = (int)floor(bound(0.0f, Image_sRGBFloatFromLinearFloat(ramps[i] / 65535.0f), 1.0f) * 65535.0f + 0.5f);
 	}
 
-	// LordHavoc: this code came from Ben Winslow and Zinx Verituse, I have
-	// immensely butchered it to work with variable framerates and fit in with
-	// the rest of darkplaces.
-	//
-	// R.I.P. zinx http://obits.al.com/obituaries/birmingham/obituary.aspx?n=christopher-robert-lais&pid=186080667
 	if (v_psycho.integer)
 	{
 		int x, y;
@@ -1564,7 +1454,7 @@ void VID_UpdateGamma(void)
 	BOUNDCVAR(v_gamma, 0.1, 5);
 	BOUNDCVAR(v_contrast, 0.2, 5);
 	BOUNDCVAR(v_brightness, -v_contrast.value * 0.8, 0.8);
-	//BOUNDCVAR(v_contrastboost, 0.0625, 16);
+
 	BOUNDCVAR(v_color_black_r, 0, 0.8);
 	BOUNDCVAR(v_color_black_g, 0, 0.8);
 	BOUNDCVAR(v_color_black_b, 0, 0.8);
@@ -1576,7 +1466,6 @@ void VID_UpdateGamma(void)
 	BOUNDCVAR(v_color_white_b, 1, 5);
 #undef BOUNDCVAR
 
-	// set vid_gammatables_trivial to true if the current settings would generate the identity gamma table
 	vid_gammatables_trivial = false;
 	if(v_psycho.integer == 0)
 	if(v_contrastboost.value == 1)
@@ -1605,7 +1494,6 @@ void VID_UpdateGamma(void)
 		}
 	}
 
-	// if any gamma settings were changed, bump vid_gammatables_serial so we regenerate the gamma ramp texture
 #define GAMMACHECK(cache, value) if (cache != (value)) gamma_changed = true;cache = (value)
 	if(v_psycho.integer)
 		gamma_changed = true;
@@ -1728,19 +1616,19 @@ void VID_Shared_Init(void)
 	Cvar_RegisterVariable(&joy_axisup);
 	Cvar_RegisterVariable(&joy_axispitch);
 	Cvar_RegisterVariable(&joy_axisyaw);
-	//Cvar_RegisterVariable(&joy_axisroll);
+
 	Cvar_RegisterVariable(&joy_deadzoneforward);
 	Cvar_RegisterVariable(&joy_deadzoneside);
 	Cvar_RegisterVariable(&joy_deadzoneup);
 	Cvar_RegisterVariable(&joy_deadzonepitch);
 	Cvar_RegisterVariable(&joy_deadzoneyaw);
-	//Cvar_RegisterVariable(&joy_deadzoneroll);
+
 	Cvar_RegisterVariable(&joy_sensitivityforward);
 	Cvar_RegisterVariable(&joy_sensitivityside);
 	Cvar_RegisterVariable(&joy_sensitivityup);
 	Cvar_RegisterVariable(&joy_sensitivitypitch);
 	Cvar_RegisterVariable(&joy_sensitivityyaw);
-	//Cvar_RegisterVariable(&joy_sensitivityroll);
+
 	Cvar_RegisterVariable(&joy_axiskeyevents);
 	Cvar_RegisterVariable(&joy_axiskeyevents_deadzone);
 	Cvar_RegisterVariable(&joy_x360_axisforward);
@@ -1748,19 +1636,18 @@ void VID_Shared_Init(void)
 	Cvar_RegisterVariable(&joy_x360_axisup);
 	Cvar_RegisterVariable(&joy_x360_axispitch);
 	Cvar_RegisterVariable(&joy_x360_axisyaw);
-	//Cvar_RegisterVariable(&joy_x360_axisroll);
+
 	Cvar_RegisterVariable(&joy_x360_deadzoneforward);
 	Cvar_RegisterVariable(&joy_x360_deadzoneside);
 	Cvar_RegisterVariable(&joy_x360_deadzoneup);
 	Cvar_RegisterVariable(&joy_x360_deadzonepitch);
 	Cvar_RegisterVariable(&joy_x360_deadzoneyaw);
-	//Cvar_RegisterVariable(&joy_x360_deadzoneroll);
+
 	Cvar_RegisterVariable(&joy_x360_sensitivityforward);
 	Cvar_RegisterVariable(&joy_x360_sensitivityside);
 	Cvar_RegisterVariable(&joy_x360_sensitivityup);
 	Cvar_RegisterVariable(&joy_x360_sensitivitypitch);
 	Cvar_RegisterVariable(&joy_x360_sensitivityyaw);
-	//Cvar_RegisterVariable(&joy_x360_sensitivityroll);
 
 #ifdef WIN32
 	Sys_LoadLibrary(xinputdllnames, &xinputdll_dll, xinputdllfuncs);
@@ -1790,7 +1677,7 @@ static int VID_Mode(int fullscreen, int width, int height, int bpp, float refres
 	vid.samples = vid.mode.samples;
 	if (VID_InitMode(&mode))
 	{
-		// accept the (possibly modified) mode
+
 		vid.mode = mode;
 		vid.fullscreen     = vid.mode.fullscreen;
 		vid.width          = vid.mode.width;
@@ -1822,9 +1709,9 @@ static int VID_Mode(int fullscreen, int width, int height, int bpp, float refres
 		}
 
 		if(
-			(vid_sRGB_fallback.integer >= 3) // force fallback
+			(vid_sRGB_fallback.integer >= 3)
 			||
-			(vid_sRGB_fallback.integer >= 2 && // fallback if framebuffer is 8bit
+			(vid_sRGB_fallback.integer >= 2 &&
 				!(r_viewfbo.integer >= 2 && vid.support.ext_framebuffer_object && vid.support.arb_texture_non_power_of_two && vid.samples < 2))
 		)
 			vid.sRGB2D = vid.sRGB3D = false;
@@ -1876,7 +1763,7 @@ void VID_Restart_f(void)
 {
 	char vabuf[1024];
 	char vabuf2[1024];
-	// don't crash if video hasn't started yet
+
 	if (vid_commandlinecheck)
 		return;
 
@@ -1911,26 +1798,25 @@ const char *vidfallbacks[][2] =
 	{NULL, NULL}
 };
 
-// this is only called once by Host_StartVideo and again on each FS_GameDir_f
 void VID_Start(void)
 {
 	int i, width, height, success;
 	if (vid_commandlinecheck)
 	{
-		// interpret command-line parameters
+
 		vid_commandlinecheck = false;
-// COMMANDLINEOPTION: Video: -window performs +vid_fullscreen 0
+
 		if (COM_CheckParm("-window") || COM_CheckParm("-safe"))
 			Cvar_SetValueQuick(&vid_fullscreen, false);
-// COMMANDLINEOPTION: Video: -fullscreen performs +vid_fullscreen 1
+
 		if (COM_CheckParm("-fullscreen"))
 			Cvar_SetValueQuick(&vid_fullscreen, true);
 		width = 0;
 		height = 0;
-// COMMANDLINEOPTION: Video: -width <pixels> performs +vid_width <pixels> and also +vid_height <pixels*3/4> if only -width is specified (example: -width 1024 sets 1024x768 mode)
+
 		if ((i = COM_CheckParm("-width")) != 0)
 			width = atoi(com_argv[i+1]);
-// COMMANDLINEOPTION: Video: -height <pixels> performs +vid_height <pixels> and also +vid_width <pixels*4/3> if only -height is specified (example: -height 768 sets 1024x768 mode)
+
 		if ((i = COM_CheckParm("-height")) != 0)
 			height = atoi(com_argv[i+1]);
 		if (width == 0)
@@ -1941,16 +1827,16 @@ void VID_Start(void)
 			Cvar_SetValueQuick(&vid_width, width);
 		if (height)
 			Cvar_SetValueQuick(&vid_height, height);
-// COMMANDLINEOPTION: Video: -bpp <bits> performs +vid_bitsperpixel <bits> (example -bpp 32 or -bpp 16)
+
 		if ((i = COM_CheckParm("-bpp")) != 0)
 			Cvar_SetQuick(&vid_bitsperpixel, com_argv[i+1]);
-// COMMANDLINEOPTION: Video: -density <multiplier> performs +vid_touchscreen_density <multiplier> (example -density 1 or -density 1.5)
+
 		if ((i = COM_CheckParm("-density")) != 0)
 			Cvar_SetQuick(&vid_touchscreen_density, com_argv[i+1]);
-// COMMANDLINEOPTION: Video: -xdpi <dpi> performs +vid_touchscreen_xdpi <dpi> (example -xdpi 160 or -xdpi 320)
+
 		if ((i = COM_CheckParm("-touchscreen_xdpi")) != 0)
 			Cvar_SetQuick(&vid_touchscreen_xdpi, com_argv[i+1]);
-// COMMANDLINEOPTION: Video: -ydpi <dpi> performs +vid_touchscreen_ydpi <dpi> (example -ydpi 160 or -ydpi 320)
+
 		if ((i = COM_CheckParm("-touchscreen_ydpi")) != 0)
 			Cvar_SetQuick(&vid_touchscreen_ydpi, com_argv[i+1]);
 	}
@@ -2007,9 +1893,9 @@ size_t VID_SortModes(vid_mode_t *modes, size_t count, qboolean usebpp, qboolean 
 	size_t i;
 	if(count == 0)
 		return 0;
-	// 1. sort them
+
 	qsort(modes, count, sizeof(*modes), VID_SortModes_Compare);
-	// 2. remove duplicates
+
 	for(i = 0; i < count; ++i)
 	{
 		if(modes[i].width && modes[i].height)
@@ -2030,10 +1916,10 @@ size_t VID_SortModes(vid_mode_t *modes, size_t count, qboolean usebpp, qboolean 
 				if(modes[i].pixelheight_num * modes[i-1].pixelheight_denom != modes[i].pixelheight_denom * modes[i-1].pixelheight_num)
 					continue;
 		}
-		// a dupe, or a bogus mode!
+
 		if(i < count-1)
 			memmove(&modes[i], &modes[i+1], sizeof(*modes) * (count-1 - i));
-		--i; // check this index again, as mode i+1 is now here
+		--i;
 		--count;
 	}
 	return count;
@@ -2049,11 +1935,9 @@ void VID_Soft_SharedSetup(void)
 	gl_version = "0.0";
 	gl_extensions = "";
 
-	// clear the extension flags
 	memset(&vid.support, 0, sizeof(vid.support));
 	Cvar_SetQuick(&gl_info_extensions, "");
 
-	// DPSOFTRAST requires BGRA
 	vid.forcetextype = TEXTYPE_BGRA;
 
 	vid.forcevbo = false;
@@ -2062,7 +1946,7 @@ void VID_Soft_SharedSetup(void)
 	vid.support.arb_occlusion_query = true;
 	vid.support.arb_query_buffer_object = false;
 	vid.support.arb_shadow = true;
-	//vid.support.arb_texture_compression = true;
+
 	vid.support.arb_texture_cube_map = true;
 	vid.support.arb_texture_non_power_of_two = false;
 	vid.support.arb_vertex_buffer_object = true;
@@ -2071,7 +1955,7 @@ void VID_Soft_SharedSetup(void)
 	vid.support.ext_framebuffer_object = true;
 
 	vid.support.ext_texture_3d = true;
-	//vid.support.ext_texture_compression_s3tc = true;
+
 	vid.support.ext_texture_filter_anisotropic = true;
 	vid.support.ati_separate_stencil = true;
 	vid.support.ext_texture_srgb = false;
@@ -2100,13 +1984,11 @@ void VID_Soft_SharedSetup(void)
 	Cvar_SetQuick(&gl_info_platform, gl_platform ? gl_platform : "");
 	Cvar_SetQuick(&gl_info_driver, gl_driver);
 
-	// LordHavoc: report supported extensions
 #ifdef CONFIG_MENU
 	Con_DPrintf("\nQuakeC extensions for server and client: %s\nQuakeC extensions for menu: %s\n", vm_sv_extensions, vm_m_extensions );
 #else
 	Con_DPrintf("\nQuakeC extensions for server and client: %s\n", vm_sv_extensions );
 #endif
 
-	// clear to black (loading plaque will be seen over this)
 	GL_Clear(GL_COLOR_BUFFER_BIT, NULL, 1.0f, 128);
 }

@@ -1,9 +1,7 @@
 #pragma once
 
-// Client/server mappings
-
 #ifdef SVQC
-// TODO: get rid of this random dumb include!
+
 	#include <common/state.qh>
 
 float autocvar_sv_airaccel_qw;
@@ -36,10 +34,10 @@ bool autocvar_g_physics_clientselect;
 float autocvar_g_maxspeed;
 float autocvar_g_movement_highspeed = 1;
 bool autocvar_g_movement_highspeed_q3_compat = 0;
-//float autocvar_g_nick_flood_penalty;
+
 int autocvar_g_nick_flood_penalty_red;
 int autocvar_g_nick_flood_penalty_yellow;
-//float autocvar_g_nick_flood_timeout;
+
 bool autocvar_speedmeter;
 string autocvar_sv_jumpspeedcap_max;
 float autocvar_sv_jumpspeedcap_max_disable_on_ramps;
@@ -149,7 +147,7 @@ REPLICATE_INIT(bool, cvar_cl_movement_track_canjump);
 #define PHYS_INPUT_BUTTON_ZOOM(s)           PHYS_INPUT_BUTTON_BUTTON4(s)
 #define PHYS_INPUT_BUTTON_CROUCH(s)         PHYS_INPUT_BUTTON_BUTTON5(s)
 #define PHYS_INPUT_BUTTON_HOOK(s)           PHYS_INPUT_BUTTON_BUTTON6(s)
-#define PHYS_INPUT_BUTTON_INFO(s)           PHYS_INPUT_BUTTON_BUTTON7(s) // button7 is FREE
+#define PHYS_INPUT_BUTTON_INFO(s)           PHYS_INPUT_BUTTON_BUTTON7(s)
 #define PHYS_INPUT_BUTTON_DRAG(s)           PHYS_INPUT_BUTTON_BUTTON8(s)
 #define PHYS_INPUT_BUTTON_USE(s)            PHYS_INPUT_BUTTON_BUTTON_USE(s)
 #define PHYS_INPUT_BUTTON_CHAT(s)           PHYS_INPUT_BUTTON_BUTTON_CHAT(s)
@@ -173,15 +171,11 @@ STATIC_INIT(PHYS_INPUT_BUTTON)
 }
 #endif
 
-// if more buttons are needed, start using impulse bits as buttons
-
 #define PHYS_INPUT_BUTTON_BACKWARD(s)       (PHYS_INPUT_MOVEVALUES(s).x < 0)
 #define PHYS_INPUT_BUTTON_FORWARD(s)        (PHYS_INPUT_MOVEVALUES(s).x > 0)
 #define PHYS_INPUT_BUTTON_LEFT(s)           (PHYS_INPUT_MOVEVALUES(s).y < 0)
 #define PHYS_INPUT_BUTTON_RIGHT(s)          (PHYS_INPUT_MOVEVALUES(s).y > 0)
 
-// used for special commands and idle checking, not from the engine
-// TODO: cache
 #define PHYS_INPUT_BUTTON_MASK(s) ( \
 	  (BIT(0) * PHYS_INPUT_BUTTON_ATCK(s)) \
 	| (BIT(1) * PHYS_INPUT_BUTTON_JUMP(s)) \
@@ -224,27 +218,17 @@ STATIC_INIT(PHYS_INPUT_BUTTON)
 
 	.vector movement;
 
-	// angles of the player's view (as opposed to their model which uses `.vector angles;`) in degrees
-	// x is pitch: positive means down (unlike .angles)
-	// y is yaw: between -180 and 180, increases when turning left
-	// z is roll: positive means tilted clockwise, usually is 0
-	// when .fixangle is set, the player's view will change to the direction where the model is facing
-	// more info: https://gitlab.com/xonotic/xonotic-data.pk3dir/merge_requests/447#note_32816794
 	.vector v_angle;
 
 	.entity hook;
 
-// TODO
 	#define IS_CLIENT(s)                        (((s).isplayermodel & ISPLAYER_CLIENT) || (s) == csqcplayer)
 	#define IS_PLAYER(s)                        ((s).isplayermodel & ISPLAYER_PLAYER)
 	#define IS_NOT_A_CLIENT(s)                  (!(s).isplayermodel && (s) != csqcplayer)
 	#define IS_DEAD(s)                          (((s).classname == "ENT_CLIENT_MODEL") ? (s).csqcmodel_isdead : (GetResource((s), RES_HEALTH) <= 0))
 
-	//float player_multijump;
-	//float player_jumpheight;
-
 	#define PHYS_INPUT_ANGLES(s)                input_angles
-// TODO
+
 	#define PHYS_WORLD_ANGLES(s)                input_angles
 
 	#define PHYS_INPUT_TIMELENGTH               input_timelength
@@ -290,11 +274,9 @@ STATIC_INIT(PHYS_INPUT_BUTTON)
 
 	void PM_UpdateButtons(entity this, entity store);
 
-	/** Not real stats */
 	.string jumpspeedcap_min;
 	.string jumpspeedcap_max;
 
-	// footstep interval
 	.float nextstep;
 
 	#define PHYS_INPUT_ANGLES(s)                ((s).v_angle)
@@ -336,14 +318,14 @@ STATIC_INIT(PHYS_INPUT_BUTTON)
 #endif
 
 #ifdef SVQC
-// FIXME/EXPLAINME: why? Mario: because
+
 vector autocvar_sv_player_maxs = '16 16 45';
 vector autocvar_sv_player_mins = '-16 -16 -24';
 vector autocvar_sv_player_viewoffset = '0 0 35';
 vector autocvar_sv_player_crouch_maxs = '16 16 25';
 vector autocvar_sv_player_crouch_mins = '-16 -16 -24';
 vector autocvar_sv_player_crouch_viewoffset = '0 0 20';
-//vector autocvar_sv_player_headsize = '24 24 12';
+
 #endif
 
 REGISTER_NET_C2S(setpause)
@@ -354,8 +336,8 @@ void unpause_update()
 	bool ispaused = PHYS_INPUT_BUTTON_CHAT(this);
 	if (ispaused == waspaused) return;
 	waspaused = ispaused;
-	// if (!serverispaused) return; // TODO: find out somehow
-	if (ispaused) return; // ignore setting pause, server will get those presses anyway, but it won't get releases
+
+	if (ispaused) return;
 	int channel = MSG_C2S;
 	WriteHeader(channel, setpause);
 	WriteByte(channel, ispaused);

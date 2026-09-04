@@ -2,7 +2,6 @@
 
 #include "int.qh"
 
-// Databases (hash tables)
 const int DB_BUCKETS = 8192;
 ERASEABLE
 void db_save(int db, string filename)
@@ -48,11 +47,7 @@ int db_load(string filename)
 	}
 	else
 	{
-		// different count of buckets, or a dump?
-		// need to reorganize the database then (SLOW)
-		//
-		// note: we also parse the first line (l) in case the DB file is
-		// missing the bucket count
+
 		do
 		{
 			int n = tokenizebyseparator(l, "\\");
@@ -104,19 +99,3 @@ void db_put(int db, string key, string value)
 	bufstr_set(db, h, infoadd(bufstr_get(db, h), key, uri_escape(value)));
 }
 #define HM_sets(this, key, val) db_put(this, key, val)
-
-/*
-void db_test()
-{
-	LOG_INFO("LOAD...\n");
-	int db = db_load("foo.db");
-	LOG_INFO("LOADED. FILL...\n");
-	for (int i = 0; i < DB_BUCKETS; ++i)
-		db_put(db, ftos(random()), "X");
-	LOG_INFO("FILLED. SAVE...\n");
-	db_save(db, "foo.db");
-	LOG_INFO("SAVED. CLOSE...\n");
-	db_close(db);
-	LOG_INFO("CLOSED.\n");
-}
-*/

@@ -1,23 +1,23 @@
 #pragma once
 
 CLASS(Hagar, Weapon)
-/* spawnfunc */ ATTRIB(Hagar, m_canonical_spawnfunc, string, "weapon_hagar");
-/* ammotype  */ ATTRIB(Hagar, ammo_type, Resource, RES_ROCKETS);
-/* impulse   */ ATTRIB(Hagar, impulse, int, 8);
-/* flags     */ ATTRIB(Hagar, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_FLAG_CANCLIMB | WEP_TYPE_SPLASH);
-/* rating    */ ATTRIB(Hagar, bot_pickupbasevalue, float, 6000);
-/* color     */ ATTRIB(Hagar, wpcolor, vector, '1 1 0.5');
-/* modelname */ ATTRIB(Hagar, mdl, string, "hagar");
+                ATTRIB(Hagar, m_canonical_spawnfunc, string, "weapon_hagar");
+                ATTRIB(Hagar, ammo_type, Resource, RES_ROCKETS);
+                ATTRIB(Hagar, impulse, int, 8);
+                ATTRIB(Hagar, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_FLAG_CANCLIMB | WEP_TYPE_SPLASH);
+                ATTRIB(Hagar, bot_pickupbasevalue, float, 6000);
+                ATTRIB(Hagar, wpcolor, vector, '1 1 0.5');
+                ATTRIB(Hagar, mdl, string, "hagar");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Hagar, m_model, Model, MDL_HAGAR_ITEM);
-/* flash mdl */ ATTRIB(Hagar, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Hagar, m_muzzleeffect, entity, EFFECT_HAGAR_MUZZLEFLASH);
+                ATTRIB(Hagar, m_model, Model, MDL_HAGAR_ITEM);
+                ATTRIB(Hagar, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Hagar, m_muzzleeffect, entity, EFFECT_HAGAR_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Hagar, w_crosshair, string, "gfx/crosshairhagar");
-/* crosshair */ ATTRIB(Hagar, w_crosshair_size, float, 0.8);
-/* wepimg    */ ATTRIB(Hagar, model2, string, "weaponhagar");
-/* refname   */ ATTRIB(Hagar, netname, string, "hagar");
-/* wepname   */ ATTRIB(Hagar, m_name, string, _("Hagar"));
+                ATTRIB(Hagar, w_crosshair, string, "gfx/crosshairhagar");
+                ATTRIB(Hagar, w_crosshair_size, float, 0.8);
+                ATTRIB(Hagar, model2, string, "weaponhagar");
+                ATTRIB(Hagar, netname, string, "hagar");
+                ATTRIB(Hagar, m_name, string, _("Hagar"));
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

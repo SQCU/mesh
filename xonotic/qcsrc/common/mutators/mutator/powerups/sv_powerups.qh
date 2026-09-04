@@ -16,5 +16,4 @@ REGISTER_MUTATOR(powerups, true);
 
 void powerups_DropItem_Think(entity this);
 
-// q3compat
 .float count;

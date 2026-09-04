@@ -15,8 +15,6 @@
 #include <server/intermission.qh>
 #include <server/world.qh>
 
-// definitions
-
 float mapvote_nextthink;
 float mapvote_keeptwotime;
 float mapvote_timeout;
@@ -42,10 +40,6 @@ bool mapvote_abstain;
 
 entity mapvote_ent;
 
-/**
- * Returns the gamtype ID from its name, if type_name isn't a real gametype it
- * checks for sv_vote_gametype_(type_name)_type
- */
 Gametype GameTypeVote_Type_FromString(string type_name)
 {
 	Gametype type = MapInfo_Type_FromString(type_name, false, false);
@@ -170,7 +164,7 @@ void MapVote_AddVotable(string nextMap, bool isSuggestion)
 	for(j = 0; j < mapvote_count; ++j)
 		if(mapvote_maps[j] == nextMap)
 			return;
-	// suggestions might be no longer valid/allowed after gametype switch!
+
 	if(isSuggestion)
 		if(!MapInfo_CheckMap(nextMap))
 			return;
@@ -190,7 +184,7 @@ void MapVote_AddVotable(string nextMap, bool isSuggestion)
 			break;
 	}
 	if(i >= mapvote_screenshot_dirs_count)
-		i = 0; // FIXME maybe network this error case, as that means there is no mapshot on the server?
+		i = 0;
 	for(o = strstrofs(pakfile, "/", 0)+1; o > 0; o = strstrofs(pakfile, "/", 0)+1)
 		pakfile = substring(pakfile, o, -1);
 
@@ -242,7 +236,6 @@ void MapVote_Init()
 		nmax = min(MAPVOTE_COUNT, autocvar_g_maplist_votable);
 	smax = min3(nmax, autocvar_g_maplist_votable_suggestions, mapvote_suggestion_ptr);
 
-	// we need this for AddVotable, as that cycles through the screenshot dirs
 	mapvote_screenshot_dirs_count = tokenize_console(autocvar_g_maplist_votable_screenshot_dir);
 	if(mapvote_screenshot_dirs_count == 0)
 		mapvote_screenshot_dirs_count = tokenize_console("maps levelshots");
@@ -266,8 +259,6 @@ void MapVote_Init()
 	if(mapvote_abstain)
 		MapVote_AddVotable("don't care", false);
 
-	//dprint("mapvote count is ", ftos(mapvote_count), "\n");
-
 	mapvote_keeptwotime = time + autocvar_g_maplist_votable_keeptwotime;
 	mapvote_timeout = time + autocvar_g_maplist_votable_timeout;
 	if(mapvote_count_real < 3 || mapvote_keeptwotime <= time)
@@ -283,7 +274,6 @@ void MapVote_SendPicture(entity to, int id)
 	WriteByte(MSG_ONE, id);
 	WritePicture(MSG_ONE, strcat(mapvote_screenshot_dirs[mapvote_maps_screenshot_dir[id]], "/", mapvote_maps[id]), 3072);
 }
-
 
 void MapVote_WriteMask()
 {
@@ -310,17 +300,14 @@ void MapVote_WriteMask()
 	}
 }
 
-/*
- * Sends a single map vote option to the client
- */
 void MapVote_SendOption(int i)
 {
-	// abstain
+
 	if(mapvote_abstain && i == mapvote_count - 1)
 	{
-		WriteString(MSG_ENTITY, ""); // abstain needs no text
-		WriteString(MSG_ENTITY, ""); // abstain needs no pack
-		WriteByte(MSG_ENTITY, 0); // abstain needs no screenshot dir
+		WriteString(MSG_ENTITY, "");
+		WriteString(MSG_ENTITY, "");
+		WriteByte(MSG_ENTITY, 0);
 	}
 	else
 	{
@@ -330,15 +317,12 @@ void MapVote_SendOption(int i)
 	}
 }
 
-/*
- * Sends a single gametype vote option to the client
- */
 void GameTypeVote_SendOption(int i)
 {
-	// abstain
+
 	if(mapvote_abstain && i == mapvote_count - 1)
 	{
-		WriteString(MSG_ENTITY, ""); // abstain needs no text
+		WriteString(MSG_ENTITY, "");
 		WriteByte(MSG_ENTITY, GTV_AVAILABLE);
 	}
 	else
@@ -365,17 +349,17 @@ bool MapVote_SendEntity(entity this, entity to, int sf)
 	int i;
 
 	if(sf & 1)
-		sf &= ~2; // if we send 1, we don't need to also send 2
+		sf &= ~2;
 
 	if (!mapvote_winner_time)
-		sf &= ~8; // no winner yet
+		sf &= ~8;
 
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_MAPVOTE);
 	WriteByte(MSG_ENTITY, sf);
 
 	if(sf & 1)
 	{
-		// flag 1 == initialization
+
 		for(i = 0; i < mapvote_screenshot_dirs_count; ++i)
 			WriteString(MSG_ENTITY, mapvote_screenshot_dirs[i]);
 		WriteString(MSG_ENTITY, "");
@@ -386,22 +370,21 @@ bool MapVote_SendEntity(entity this, entity to, int sf)
 
 		if ( gametypevote )
 		{
-			// gametype vote
-			WriteByte(MSG_ENTITY, BIT(0)); // gametypevote_flags
+
+			WriteByte(MSG_ENTITY, BIT(0));
 			WriteString(MSG_ENTITY, autocvar_nextmap);
 		}
 		else if ( autocvar_sv_vote_gametype )
 		{
-			// map vote but gametype has been chosen via voting screen
-			WriteByte(MSG_ENTITY, BIT(1)); // gametypevote_flags
+
+			WriteByte(MSG_ENTITY, BIT(1));
 			WriteString(MSG_ENTITY, MapInfo_Type_ToText(MapInfo_CurrentGametype()));
 		}
 		else
-			WriteByte(MSG_ENTITY, 0); // map vote
+			WriteByte(MSG_ENTITY, 0);
 
 		MapVote_WriteMask();
 
-		// Send data for the vote options
 		for(i = 0; i < mapvote_count; ++i)
 		{
 			if(gametypevote)
@@ -413,7 +396,7 @@ bool MapVote_SendEntity(entity this, entity to, int sf)
 
 	if(sf & 2)
 	{
-		// flag 2 == update of mask
+
 		MapVote_WriteMask();
 	}
 
@@ -519,7 +502,7 @@ void MapVote_CheckRules_1()
 	for (int i = 0; i < mapvote_count; ++i)
 		if (mapvote_maps_flags[i] & GTV_AVAILABLE)
 		{
-			//dprint("Map ", ftos(i), ": "); dprint(mapvote_maps[i], "\n");
+
 			mapvote_selections[i] = 0;
 		}
 
@@ -529,7 +512,7 @@ void MapVote_CheckRules_1()
 		if (it.mapvote)
 		{
 			int idx = it.mapvote - 1;
-			//dprint("Player ", it.netname, " vote = ", ftos(idx), "\n");
+
 			++mapvote_selections[idx];
 		}
 	});
@@ -569,9 +552,6 @@ bool MapVote_CheckRules_2()
 	else
 		firstPlace = RandomSelection_chosen_float;
 
-	//dprint("First place: ", ftos(firstPlace), "\n");
-	//dprint("First place votes: ", ftos(firstPlaceVotes), "\n");
-
 	RandomSelection_Init();
 	for(i = 0; i < mapvote_count_real; ++i)
 		if(i != firstPlace)
@@ -579,8 +559,6 @@ bool MapVote_CheckRules_2()
 			RandomSelection_AddFloat(i, 1, mapvote_selections[i]);
 	secondPlace = RandomSelection_chosen_float;
 	secondPlaceVotes = RandomSelection_best_priority;
-	//dprint("Second place: ", ftos(secondPlace), "\n");
-	//dprint("Second place votes: ", ftos(secondPlaceVotes), "\n");
 
 	if(firstPlace == -1)
 		error("No first place in map vote... WTF?");
@@ -626,23 +604,23 @@ bool MapVote_CheckRules_2()
 
 void MapVote_Tick()
 {
-	MapVote_CheckRules_1(); // count
-	if(MapVote_CheckRules_2()) // decide
+	MapVote_CheckRules_1();
+	if(MapVote_CheckRules_2())
 		return;
 
 	int totalvotes = 0;
 	FOREACH_CLIENT(true, {
 		if(!IS_REAL_CLIENT(it))
 		{
-			// apply the same special health value to bots too for consistency's sake
+
 			if(GetResource(it, RES_HEALTH) != 2342)
 				SetResourceExplicit(it, RES_HEALTH, 2342);
 			continue;
 		}
-		// hide scoreboard again
+
 		if(GetResource(it, RES_HEALTH) != 2342)
 		{
-			SetResourceExplicit(it, RES_HEALTH, 2342); // health in the voting phase
+			SetResourceExplicit(it, RES_HEALTH, 2342);
 			CS(it).impulse = 0;
 
 			msg_entity = it;
@@ -650,10 +628,9 @@ void MapVote_Tick()
 			WriteString(MSG_ONE, "");
 		}
 
-		// clear possibly invalid votes
 		if ( !(mapvote_maps_flags[it.mapvote-1] & GTV_AVAILABLE) )
 			it.mapvote = 0;
-		// use impulses as new vote
+
 		if(CS(it).impulse >= 1 && CS(it).impulse <= mapvote_count)
 			if( mapvote_maps_flags[CS(it).impulse - 1] & GTV_AVAILABLE )
 			{
@@ -666,15 +643,14 @@ void MapVote_Tick()
 			++totalvotes;
 	});
 
-	MapVote_CheckRules_1(); // just count
+	MapVote_CheckRules_1();
 }
 
 void MapVote_Start()
 {
-	// if mapvote is already running, don't do this initialization again
+
 	if(mapvote_run) { return; }
 
-	// don't start mapvote until after playerstats gamereport is sent
 	if(PlayerStats_GameReport_DelayMapVote) { return; }
 
 	MapInfo_Enumerate();
@@ -702,10 +678,9 @@ void MapVote_Think()
 
 	if(time < mapvote_nextthink)
 		return;
-	//dprint("tick\n");
 
 	mapvote_nextthink = time + 0.5;
-	if (mapvote_nextthink > mapvote_timeout - 0.1) // make sure there's no delay when map vote times out
+	if (mapvote_nextthink > mapvote_timeout - 0.1)
 		mapvote_nextthink = mapvote_timeout + 0.001;
 
 	if(!mapvote_initialized)
@@ -722,11 +697,10 @@ void MapVote_Think()
 		}
 		else if(autocvar_rescan_pending == 3)
 		{
-			// now build missing mapinfo files
+
 			if(!MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 1))
 				return;
 
-			// we're done, start the timer
 			cvar_set("rescan_pending", "0");
 		}
 
@@ -759,7 +733,7 @@ bool GameTypeVote_SetGametype(Gametype type)
 	MapInfo_FilterGametype(type, MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 0);
 	if(MapInfo_count > 0)
 	{
-		// update lsmaps in case the gametype changed, this way people can easily list maps for it
+
 		if(lsmaps_reply != "") { strunzone(lsmaps_reply); }
 		lsmaps_reply = strzone(getlsmaps());
 		bprint("Game type successfully switched to ", MapInfo_Type_ToString(type), "\n");
@@ -771,8 +745,6 @@ bool GameTypeVote_SetGametype(Gametype type)
 		MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 0);
 		return false;
 	}
-
-	//localcmd("gametype ", MapInfo_Type_ToString(type), "\n");
 
 	cvar_set("g_maplist", MapInfo_ListAllowedMaps(type, MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags()) );
 	if(autocvar_g_maplist_shuffle)
@@ -857,13 +829,13 @@ bool GameTypeVote_Start()
 		if ( mapvote_count > 0 )
 			strunzone(mapvote_maps[0]);
 		mapvote_maps[0] = strzone(MapInfo_Type_ToString(MapInfo_CurrentGametype()));
-		//GameTypeVote_Finished(0);
+
 		MapVote_Finished(0);
 		return false;
 	}
 	if ( really_available == 1 )
 	{
-		//GameTypeVote_Finished(which_available);
+
 		MapVote_Finished(which_available);
 		return false;
 	}

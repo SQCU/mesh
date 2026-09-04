@@ -8,13 +8,6 @@
 spawnfunc(item_speed);
 spawnfunc(item_invisibility);
 
-//***********************
-//WORLD OF PADMAN ENTITIES - So people can play wop maps with the xonotic weapons
-//***********************
-
-//spawnfunc(item_revival)     /* handled by buffs mutator */
-//spawnfunc(item_jumper)      /* handled by buffs mutator */
-
 SPAWNFUNC_WEAPON(weapon_punchy, WEP_ARC)
 SPAWNFUNC_WEAPON(weapon_nipper, WEP_MACHINEGUN)
 SPAWNFUNC_WEAPON(weapon_pumper, WEP_SHOTGUN)

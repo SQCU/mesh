@@ -21,13 +21,6 @@
 #include <lib/csqcmodel/cl_model.qh>
 #include <lib/csqcmodel/cl_player.qh>
 
-
-/*
-==================
-Misc HUD functions
-==================
-*/
-
 void draw_cursor(vector pos, vector ofs, string img, vector col, float a)
 {
 	ofs = vec2(ofs.x * SIZE_CURSOR.x, ofs.y * SIZE_CURSOR.y);
@@ -122,11 +115,11 @@ vector HUD_GetFontsize(string cvarname)
 
 vector HUD_Get_Num_Color(float hp, float maxvalue, bool blink)
 {
-	const vector COLOR100 = '0 1 0'; // green
-	const vector COLOR75 = '0.4 0.9 0'; // lightgreen
-	const vector COLOR50 = '1 1 1'; // white
-	const vector COLOR25 = '1 1 0.2'; // lightyellow
-	const vector COLOR10 = '1 0 0'; // red
+	const vector COLOR100 = '0 1 0';
+	const vector COLOR75 = '0.4 0.9 0';
+	const vector COLOR50 = '1 1 1';
+	const vector COLOR25 = '1 1 0.2';
+	const vector COLOR10 = '1 0 0';
 	vector color;
 
 	float hp_percent = hp / maxvalue * 100;
@@ -191,7 +184,7 @@ vector HUD_GetTableSize_BestItemAR(int item_count, vector psize, float item_aspe
 			ratio = item_aspect * item_aspect / ratio;
 
 		if(ratio <= best_ratio)
-			break; // ratio starts decreasing by now, skip next configurations
+			break;
 
 		best_columns = columns;
 		best_rows = rows;
@@ -207,15 +200,9 @@ vector HUD_GetTableSize_BestItemAR(int item_count, vector psize, float item_aspe
 	return (vertical) ? vec2(best_rows, best_columns) : vec2(best_columns, best_rows);
 }
 
-/*
-==================
-HUD panels
-==================
-*/
-
 void HUD_Panel_LoadCvars()
 {
-	// NOTE: in hud_configure mode cvars must be reloaded every frame
+
 	if (panel.update_time <= time)
 	{
 		panel_pos = stov(cvar_string(strcat("hud_panel_", panel.panel_name, "_pos")));
@@ -266,7 +253,6 @@ void HUD_Panel_LoadCvars()
 	panel_fg_alpha = panel.current_panel_fg_alpha * hud_fade_alpha * panel_fade_alpha;
 }
 
-//basically the same code of draw_ButtonPicture and draw_VertButtonPicture for the menu
 void HUD_Panel_DrawProgressBar(vector theOrigin, vector theSize, string pic, float length_ratio, bool vertical, float baralign, vector theColor, float theAlpha, int drawflag)
 {
 	TC(bool, vertical); TC(int, drawflag);
@@ -293,11 +279,11 @@ void HUD_Panel_DrawProgressBar(vector theOrigin, vector theSize, string pic, flo
 			pic = "gfx/hud/default/progressbar_vertical";
 		}
 
-		if (baralign == 1) // bottom align
+		if (baralign == 1)
 			theOrigin.y += (1 - length_ratio) * theSize.y;
-		else if (baralign == 2) // center align
+		else if (baralign == 2)
 			theOrigin.y += 0.5 * (1 - length_ratio) * theSize.y;
-		else if (baralign == 3) // center align, positive values down, negative up
+		else if (baralign == 3)
 		{
 			theSize.y *= 0.5;
 			if (length_ratio > 0)
@@ -315,8 +301,7 @@ void HUD_Panel_DrawProgressBar(vector theOrigin, vector theSize, string pic, flo
 		height = eY * theSize.y;
 		if(theSize.y <= theSize.x * 2)
 		{
-			// button not high enough
-			// draw just upper and lower part then
+
 			square = eY * theSize.y * 0.5;
 			bH = eY * (0.25 * theSize.y / (theSize.x * 2));
 			drawsubpic(theOrigin,          square + width, pic, '0 0 0', eX + bH, theColor, theAlpha, drawflag);
@@ -335,11 +320,11 @@ void HUD_Panel_DrawProgressBar(vector theOrigin, vector theSize, string pic, flo
 			pic = "gfx/hud/default/progressbar";
 		}
 
-		if (baralign == 1) // right align
+		if (baralign == 1)
 			theOrigin.x += (1 - length_ratio) * theSize.x;
-		else if (baralign == 2) // center align
+		else if (baralign == 2)
 			theOrigin.x += 0.5 * (1 - length_ratio) * theSize.x;
-		else if (baralign == 3) // center align, positive values on the right, negative on the left
+		else if (baralign == 3)
 		{
 			theSize.x *= 0.5;
 			if (length_ratio > 0)
@@ -357,8 +342,7 @@ void HUD_Panel_DrawProgressBar(vector theOrigin, vector theSize, string pic, flo
 		height = eY * theSize.y;
 		if(theSize.x <= theSize.y * 2)
 		{
-			// button not wide enough
-			// draw just left and right part then
+
 			square = eX * theSize.x * 0.5;
 			bW = eX * (0.25 * theSize.x / (theSize.y * 2));
 			drawsubpic(theOrigin,          square + height, pic, '0 0 0', eY + bW, theColor, theAlpha, drawflag);
@@ -400,7 +384,7 @@ void DrawNumIcon_expanding(vector myPos, vector mySize, float theTime, string ic
 	TC(bool, vertical); TC(int, icon_right_align);
 	vector newPos = '0 0 0', newSize = '0 0 0';
 	vector picpos, numpos;
-	string text = isInfinite ? "\xE2\x88\x9E" : ftos(theTime); // Use infinity symbol (U+221E)
+	string text = isInfinite ? "\xE2\x88\x9E" : ftos(theTime);
 
 	if (vertical)
 	{
@@ -434,8 +418,7 @@ void DrawNumIcon_expanding(vector myPos, vector mySize, float theTime, string ic
 
 		newSize.y /= 2;
 		drawpic_aspect_skin(picpos, icon, newSize, '1 1 1', panel_fg_alpha * theAlpha, DRAWFLAG_NORMAL);
-		// make number smaller than icon, it looks better
-		// reduce only y to draw numbers with different number of digits with the same y size
+
 		numpos.y += newSize.y * ((1 - 0.7) / 2);
 		newSize.y *= 0.7;
 		drawstring_aspect(numpos, text, newSize, color, panel_fg_alpha * theAlpha, DRAWFLAG_NORMAL);
@@ -459,19 +442,17 @@ void DrawNumIcon_expanding(vector myPos, vector mySize, float theTime, string ic
 		newPos.x = myPos.x;
 	}
 
-	if(icon_right_align) // right align
+	if(icon_right_align)
 	{
 		numpos = newPos;
 		picpos = newPos + eX * 2 * newSize.y;
 	}
-	else // left align
+	else
 	{
 		numpos = newPos + eX * newSize.y;
 		picpos = newPos;
 	}
 
-	// NOTE: newSize_x is always equal to 3 * mySize_y so we can use
-	// '2 1 0' * newSize_y instead of eX * (2/3) * newSize_x + eY * newSize_y
 	drawstring_aspect_expanding(numpos, text, '2 1 0' * newSize.y, color, panel_fg_alpha * theAlpha, DRAWFLAG_NORMAL, fadelerp);
 	drawpic_aspect_skin_expanding(picpos, icon, '1 1 0' * newSize.y, '1 1 1', panel_fg_alpha * theAlpha, DRAWFLAG_NORMAL, fadelerp);
 }
@@ -481,12 +462,6 @@ void DrawNumIcon(vector myPos, vector mySize, float theTime, string icon, bool v
 	TC(bool, vertical); TC(int, icon_right_align);
 	DrawNumIcon_expanding(myPos, mySize, theTime, icon, vertical, isInfinite, icon_right_align, color, theAlpha, 0);
 }
-
-/*
-==================
-Main HUD system
-==================
-*/
 
 float lasthud;
 float vh_notice_time;
@@ -560,7 +535,7 @@ void HUD_Panel_Draw(entity panent)
 
 void HUD_Reset()
 {
-	// reset gametype specific icons
+
 	if(gametype.m_modicons_reset)
 		gametype.m_modicons_reset();
 }
@@ -626,7 +601,7 @@ void Hud_Dynamic_Frame()
 	{
 		static float old_health = 0;
 		float health = max(-1, STAT(HEALTH));
-		if(hud_dynamic_shake_factor == -1) // don't allow the effect for this frame
+		if(hud_dynamic_shake_factor == -1)
 		{
 			hud_dynamic_shake_factor = 0;
 			old_health = health;
@@ -673,9 +648,7 @@ bool HUD_WouldShowCursor()
 		return true;
 	if(mv_active && !isdemo())
 		return true;
-	//entity local_player = ((csqcplayer) ? csqcplayer : CSQCModel_server2csqc(player_localentnum - 1)); // TODO: doesn't use regular cursor handling
-	//if(local_player.viewloc && (local_player.viewloc.spawnflags & VIEWLOC_FREEAIM))
-		//return true;
+
 	if(HUD_Radar_Clickable())
 		return true;
 	if(HUD_MinigameMenu_IsOpened())
@@ -707,14 +680,12 @@ void HUD_Main()
 		if(autocvar__menu_alpha == 1)
 			return;
 
-	// Drawing stuff
 	if (hud_skin_prev != autocvar_hud_skin)
 	{
 		strcpy(hud_skin_path, strcat("gfx/hud/", autocvar_hud_skin));
 		strcpy(hud_skin_prev, autocvar_hud_skin);
 	}
 
-	// draw the dock
 	if(autocvar_hud_dock != "" && autocvar_hud_dock != "0")
 	{
 		int f;
@@ -752,10 +723,9 @@ void HUD_Main()
 				pic = "gfx/hud/default/dock_medium";
 			}
 		}
-		drawpic('0 0 0', pic, eX * vid_conwidth + eY * vid_conheight, color, autocvar_hud_dock_alpha * hud_fade_alpha, DRAWFLAG_NORMAL); // no aspect ratio forcing on dock...
+		drawpic('0 0 0', pic, eX * vid_conwidth + eY * vid_conheight, color, autocvar_hud_dock_alpha * hud_fade_alpha, DRAWFLAG_NORMAL);
 	}
 
-	// cache the panel order into the panel_order array
 	if(autocvar__hud_panelorder != hud_panelorder_prev) {
 		for(i = 0; i < REGISTRY_COUNT(hud_panels); ++i)
 			panel_order[i] = -1;
@@ -765,13 +735,13 @@ void HUD_Main()
 		int argc = tokenize_console(autocvar__hud_panelorder);
 		if (argc > REGISTRY_COUNT(hud_panels))
 			warning = true;
-		//first detect wrong/missing panel numbers
+
 		for(i = 0; i < REGISTRY_COUNT(hud_panels); ++i) {
 			p_num = stoi(argv(i));
-			if (p_num >= 0 && p_num < REGISTRY_COUNT(hud_panels)) { //correct panel number?
-				if (panel_order[p_num] == -1) //found for the first time?
+			if (p_num >= 0 && p_num < REGISTRY_COUNT(hud_panels)) {
+				if (panel_order[p_num] == -1)
 					s = strcat(s, ftos(p_num), " ");
-				panel_order[p_num] = 1; //mark as found
+				panel_order[p_num] = 1;
 			}
 			else
 				warning = true;
@@ -779,7 +749,7 @@ void HUD_Main()
 		for(i = 0; i < REGISTRY_COUNT(hud_panels); ++i) {
 			if (panel_order[i] == -1) {
 				warning = true;
-				s = strcat(s, ftos(i), " "); //add missing panel number
+				s = strcat(s, ftos(i), " ");
 			}
 		}
 		if (warning)
@@ -788,7 +758,6 @@ void HUD_Main()
 		cvar_set("_hud_panelorder", s);
 		strcpy(hud_panelorder_prev, s);
 
-		//now properly set panel_order
 		tokenize_console(s);
 		for(i = 0; i < REGISTRY_COUNT(hud_panels); ++i) {
 			panel_order[i] = stof(argv(i));
@@ -796,14 +765,14 @@ void HUD_Main()
 	}
 
 	hud_draw_maximized = 0;
-	// draw panels in the order specified by panel_order array
+
 	for(i = REGISTRY_COUNT(hud_panels) - 1; i >= 0; --i)
 		HUD_Panel_Draw(REGISTRY_GET(hud_panels, panel_order[i]));
 
 	HUD_Vehicle();
 
-	hud_draw_maximized = 1; // panels that may be maximized must check this var
-	// draw maximized panels on top
+	hud_draw_maximized = 1;
+
 	if(hud_panel_radar_maximized)
 		HUD_Panel_Draw(HUD_PANEL(RADAR));
 	if(autocvar__con_chat_maximized)
@@ -817,7 +786,7 @@ void HUD_Main()
 	if (cursor_active_prev != cursor_active && autocvar_hud_cursormode)
 	{
 		setcursormode(cursor_active);
-		// cursor inactive this frame, will be set to 1 the next frame
+
 		if (cursor_active)
 			cursor_active = -1;
 	}

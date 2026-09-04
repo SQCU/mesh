@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 
@@ -28,32 +10,12 @@ int old_vsync = 0;
 
 static void CL_FinishTimeDemo (void);
 
-/*
-==============================================================================
-
-DEMO CODE
-
-When a demo is playing back, all outgoing network messages are skipped, and
-incoming messages are read from the demo file.
-
-Whenever cl.time gets past the last received message, another message is
-read from the demo file.
-==============================================================================
-*/
-
-/*
-=====================
-CL_NextDemo
-
-Called to play the next demo in the demo loop
-=====================
-*/
 void CL_NextDemo (void)
 {
 	char	str[MAX_INPUTLINE];
 
 	if (cls.demonum == -1)
-		return;		// don't play demos
+		return;
 
 	if (!cls.demos[cls.demonum][0] || cls.demonum == MAX_DEMOS)
 	{
@@ -71,14 +33,6 @@ void CL_NextDemo (void)
 	cls.demonum++;
 }
 
-/*
-==============
-CL_StopPlayback
-
-Called when a demo file runs out, or the user starts a game
-==============
-*/
-// LordHavoc: now called only by CL_Disconnect
 void CL_StopPlayback (void)
 {
 #ifdef CONFIG_VIDEO_CAPTURE
@@ -96,26 +50,19 @@ void CL_StopPlayback (void)
 	if (cls.timedemo)
 		CL_FinishTimeDemo ();
 
-	if (!cls.demostarting) // only quit if not starting another demo
+	if (!cls.demostarting)
 		if (COM_CheckParm("-demo") || COM_CheckParm("-capturedemo"))
 			Host_Quit_f();
 
 }
 
-/*
-====================
-CL_WriteDemoMessage
-
-Dumps the current net message, prefixed by the length and view angles
-#====================
-*/
 void CL_WriteDemoMessage (sizebuf_t *message)
 {
 	int		len;
 	int		i;
 	float	f;
 
-	if (cls.demopaused) // LordHavoc: pausedemo
+	if (cls.demopaused)
 		return;
 
 	len = LittleLong (message->cursize);
@@ -128,14 +75,6 @@ void CL_WriteDemoMessage (sizebuf_t *message)
 	FS_Write (cls.demofile, message->data, message->cursize);
 }
 
-/*
-====================
-CL_CutDemo
-
-Dumps the current demo to a buffer, and resets the demo to its starting point.
-Used to insert csprogs.dat files as a download to the beginning of a demo file.
-====================
-*/
 void CL_CutDemo (unsigned char **buf, fs_offset_t *filesize)
 {
 	*buf = NULL;
@@ -144,21 +83,12 @@ void CL_CutDemo (unsigned char **buf, fs_offset_t *filesize)
 	FS_Close(cls.demofile);
 	*buf = FS_LoadFile(cls.demoname, tempmempool, false, filesize);
 
-	// restart the demo recording
 	cls.demofile = FS_OpenRealFile(cls.demoname, "wb", false);
 	if(!cls.demofile)
 		Sys_Error("failed to reopen the demo file");
 	FS_Printf(cls.demofile, "%i\n", cls.forcetrack);
 }
 
-/*
-====================
-CL_PasteDemo
-
-Adds the cut stuff back to the demo. Also frees the buffer.
-Used to insert csprogs.dat files as a download to the beginning of a demo file.
-====================
-*/
 void CL_PasteDemo (unsigned char **buf, fs_offset_t *filesize)
 {
 	fs_offset_t startoffset = 0;
@@ -166,7 +96,6 @@ void CL_PasteDemo (unsigned char **buf, fs_offset_t *filesize)
 	if(!*buf)
 		return;
 
-	// skip cdtrack
 	while(startoffset < *filesize && ((char *)(*buf))[startoffset] != '\n')
 		++startoffset;
 	if(startoffset < *filesize)
@@ -179,13 +108,6 @@ void CL_PasteDemo (unsigned char **buf, fs_offset_t *filesize)
 	*filesize = 0;
 }
 
-/*
-====================
-CL_ReadDemoMessage
-
-Handles playback of demos
-====================
-*/
 void CL_ReadDemoMessage(void)
 {
 	int i;
@@ -194,23 +116,19 @@ void CL_ReadDemoMessage(void)
 	if (!cls.demoplayback)
 		return;
 
-	// LordHavoc: pausedemo
 	if (cls.demopaused)
 		return;
 
 	for (;;)
 	{
-		// decide if it is time to grab the next message
-		// always grab until fully connected
+
 		if (cls.signon == SIGNONS)
 		{
 			if (cls.timedemo)
 			{
 				cls.td_frames++;
 				cls.td_onesecondframes++;
-				// if this is the first official frame we can now grab the real
-				// td_starttime so the bogus time on the first frame doesn't
-				// count against the final report
+
 				if (cls.td_frames == 0)
 				{
 					cls.td_starttime = realtime;
@@ -241,17 +159,16 @@ void CL_ReadDemoMessage(void)
 			}
 			else if (cl.time < cl.mtime[0])
 			{
-				// don't need another message yet
+
 				return;
 			}
 		}
 
-		// get the next message
 		FS_Read(cls.demofile, &cl_message.cursize, 4);
 		cl_message.cursize = LittleLong(cl_message.cursize);
-		if(cl_message.cursize & DEMOMSG_CLIENT_TO_SERVER) // This is a client->server message! Ignore for now!
+		if(cl_message.cursize & DEMOMSG_CLIENT_TO_SERVER)
 		{
-			// skip over demo packet
+
 			FS_Seek(cls.demofile, 12 + (cl_message.cursize & (~DEMOMSG_CLIENT_TO_SERVER)), SEEK_CUR);
 			continue;
 		}
@@ -275,9 +192,8 @@ void CL_ReadDemoMessage(void)
 			CL_ParseServerMessage();
 
 			if (cls.signon != SIGNONS)
-				Cbuf_Execute(); // immediately execute svc_stufftext if in the demo before connect!
+				Cbuf_Execute();
 
-			// In case the demo contains a "svc_disconnect" message
 			if (!cls.demoplayback)
 				return;
 
@@ -292,14 +208,6 @@ void CL_ReadDemoMessage(void)
 	}
 }
 
-
-/*
-====================
-CL_Stop_f
-
-stop recording a demo
-====================
-*/
 void CL_Stop_f (void)
 {
 	sizebuf_t buf;
@@ -311,15 +219,12 @@ void CL_Stop_f (void)
 		return;
 	}
 
-// write a disconnect message to the demo file
-	// LordHavoc: don't replace the cl_message when doing this
 	buf.data = bufdata;
 	buf.maxsize = sizeof(bufdata);
 	SZ_Clear(&buf);
 	MSG_WriteByte(&buf, svc_disconnect);
 	CL_WriteDemoMessage(&buf);
 
-// finish up
 	if(cl_autodemo.integer && (cl_autodemo_delete.integer & 1))
 	{
 		FS_RemoveOnClose(cls.demofile);
@@ -332,13 +237,6 @@ void CL_Stop_f (void)
 	cls.demorecording = false;
 }
 
-/*
-====================
-CL_Record_f
-
-record <demoname> <map> [cd track]
-====================
-*/
 void CL_Record_f (void)
 {
 	int c, track;
@@ -367,7 +265,6 @@ void CL_Record_f (void)
 	if (cls.state == ca_connected)
 		CL_Disconnect();
 
-	// write the forced cd track number, or -1
 	if (c == 4)
 	{
 		track = atoi(Cmd_Argv(3));
@@ -376,15 +273,12 @@ void CL_Record_f (void)
 	else
 		track = -1;
 
-	// get the demo name
 	strlcpy (name, Cmd_Argv(1), sizeof (name));
 	FS_DefaultExtension (name, ".dem", sizeof (name));
 
-	// start the map up
 	if (c > 2)
 		Cmd_ExecuteString ( va(vabuf, sizeof(vabuf), "map %s", Cmd_Argv(2)), src_command, false);
 
-	// open the demo file
 	Con_Printf("recording to %s.\n", name);
 	cls.demofile = FS_OpenRealFile(name, "wb", false);
 	if (!cls.demofile)
@@ -402,14 +296,6 @@ void CL_Record_f (void)
 	cls.demo_lastcsprogscrc = -1;
 }
 
-
-/*
-====================
-CL_PlayDemo_f
-
-play [demoname]
-====================
-*/
 void CL_PlayDemo_f (void)
 {
 	char	name[MAX_QPATH];
@@ -423,24 +309,21 @@ void CL_PlayDemo_f (void)
 		return;
 	}
 
-	// open the demo file
 	strlcpy (name, Cmd_Argv(1), sizeof (name));
 	FS_DefaultExtension (name, ".dem", sizeof (name));
 	f = FS_OpenVirtualFile(name, false);
 	if (!f)
 	{
 		Con_Printf("ERROR: couldn't open %s.\n", name);
-		cls.demonum = -1;		// stop demo loop
+		cls.demonum = -1;
 		return;
 	}
 
 	cls.demostarting = true;
 
-	// disconnect from server
 	CL_Disconnect ();
 	Host_ShutdownServer ();
 
-	// update networking ports (this is mainly just needed at startup)
 	NetConn_UpdateSockets();
 
 	cls.protocol = PROTOCOL_QUAKE;
@@ -484,18 +367,12 @@ static int doublecmp_withoffset(const void *a_, const void *b_)
 	return 0;
 }
 
-/*
-====================
-CL_FinishTimeDemo
-
-====================
-*/
 static void CL_FinishTimeDemo (void)
 {
 	int frames;
 	int i;
 	double time, totalfpsavg;
-	double fpsmin, fpsavg, fpsmax; // report min/avg/max fps
+	double fpsmin, fpsavg, fpsmax;
 	static int benchmark_runs = 0;
 	char vabuf[1024];
 
@@ -507,7 +384,7 @@ static void CL_FinishTimeDemo (void)
 	fpsmin = cls.td_onesecondminfps;
 	fpsavg = cls.td_onesecondavgcount ? cls.td_onesecondavgfps / cls.td_onesecondavgcount : 0;
 	fpsmax = cls.td_onesecondmaxfps;
-	// LordHavoc: timedemo now prints out 7 digits of fraction, and min/avg/max
+
 	Con_Printf("%i frames %5.7f seconds %5.7f fps, one-second fps min/avg/max: %.0f %.0f %.0f (%i seconds)\n", frames, time, totalfpsavg, fpsmin, fpsavg, fpsmax, cls.td_onesecondavgcount);
 	Log_Printf("benchmark.log", "date %s | enginedate %s | demo %s | commandline %s | run %d | result %i frames %5.7f seconds %5.7f fps, one-second fps min/avg/max: %.0f %.0f %.0f (%i seconds)\n", Sys_TimeString("%Y-%m-%d %H:%M:%S"), buildstring, cls.demoname, cmdline.string, benchmark_runs + 1, frames, time, totalfpsavg, fpsmin, fpsavg, fpsmax, cls.td_onesecondavgcount);
 	if (COM_CheckParm("-benchmark"))
@@ -529,13 +406,13 @@ static void CL_FinishTimeDemo (void)
 
 			if(atoi(com_argv[i + 1]) > benchmark_runs)
 			{
-				// restart the benchmark
+
 				Cbuf_AddText(va(vabuf, sizeof(vabuf), "timedemo %s\n", cls.demoname));
-				// cannot execute here
+
 			}
 			else
 			{
-				// print statistics
+
 				int first = COM_CheckParm("-benchmarkruns_skipfirst") ? 1 : 0;
 				if(benchmark_runs > first)
 				{
@@ -587,13 +464,6 @@ static void CL_FinishTimeDemo (void)
 	}
 }
 
-/*
-====================
-CL_TimeDemo_f
-
-timedemo [demoname]
-====================
-*/
 void CL_TimeDemo_f (void)
 {
 	if (Cmd_Argc() != 2)
@@ -602,20 +472,15 @@ void CL_TimeDemo_f (void)
 		return;
 	}
 
-	srand(0); // predictable random sequence for benchmarking
+	srand(0);
 
 	CL_PlayDemo_f ();
 
-// cls.td_starttime will be grabbed at the second frame of the demo, so
-// all the loading time doesn't get counted
-
-	// instantly hide console and deactivate it
 	key_dest = key_game;
 	key_consoleactive = 0;
 	scr_con_current = 0;
 
 	cls.timedemo = true;
-	cls.td_frames = -2;		// skip the first frame
-	cls.demonum = -1;		// stop demo loop
+	cls.td_frames = -2;
+	cls.demonum = -1;
 }
-

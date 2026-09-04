@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// sbar.c -- status bar code
 
 #include "quakedef.h"
 #include <time.h>
@@ -26,27 +7,24 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 cachepic_t *sb_disc;
 
-#define STAT_MINUS 10 // num frame for '-' stats digit
+#define STAT_MINUS 10
 cachepic_t *sb_nums[2][11];
 cachepic_t *sb_colon, *sb_slash;
 cachepic_t *sb_ibar;
 cachepic_t *sb_sbar;
 cachepic_t *sb_scorebar;
-// AK only used by NEX
+
 cachepic_t *sb_sbar_minimal;
 cachepic_t *sb_sbar_overlay;
 
-// AK changed the bound to 9
-cachepic_t *sb_weapons[7][9]; // 0 is active, 1 is owned, 2-5 are flashes
+cachepic_t *sb_weapons[7][9];
 cachepic_t *sb_ammo[4];
 cachepic_t *sb_sigil[4];
 cachepic_t *sb_armor[3];
 cachepic_t *sb_items[32];
 
-// 0-4 are based on health (in 20 increments)
-// 0 is static, 1 is temporary animation
 cachepic_t *sb_faces[5][2];
-cachepic_t *sb_health; // GAME_NEXUIZ
+cachepic_t *sb_health;
 
 cachepic_t *sb_face_invis;
 cachepic_t *sb_face_quad;
@@ -55,19 +33,18 @@ cachepic_t *sb_face_invis_invuln;
 
 qboolean sb_showscores;
 
-int sb_lines;			// scan lines to draw
+int sb_lines;
 
 cachepic_t *rsb_invbar[2];
 cachepic_t *rsb_weapons[5];
 cachepic_t *rsb_items[2];
 cachepic_t *rsb_ammo[3];
-cachepic_t *rsb_teambord;		// PGM 01/19/97 - team color border
+cachepic_t *rsb_teambord;
 
-//MED 01/04/97 added two more weapons + 3 alternates for grenade launcher
-cachepic_t *hsb_weapons[7][5];   // 0 is active, 1 is owned, 2-5 are flashes
-//MED 01/04/97 added array to simplify weapon parsing
+cachepic_t *hsb_weapons[7][5];
+
 int hipweapons[4] = {HIT_LASER_CANNON_BIT,HIT_MJOLNIR_BIT,4,HIT_PROXIMITY_GUN_BIT};
-//MED 01/04/97 added hipnotic items array
+
 cachepic_t *hsb_items[2];
 
 cachepic_t *zymsb_crosshair_center;
@@ -118,15 +95,6 @@ static void Sbar_DeathmatchOverlay (void);
 static void Sbar_IntermissionOverlay (void);
 static void Sbar_FinaleOverlay (void);
 
-
-
-/*
-===============
-Sbar_ShowScores
-
-Tab key down
-===============
-*/
 static void Sbar_ShowScores (void)
 {
 	if (sb_showscores)
@@ -135,13 +103,6 @@ static void Sbar_ShowScores (void)
 	CL_VM_UpdateShowingScoresState(sb_showscores);
 }
 
-/*
-===============
-Sbar_DontShowScores
-
-Tab key up
-===============
-*/
 static void Sbar_DontShowScores (void)
 {
 	sb_showscores = false;
@@ -290,7 +251,6 @@ static void sbar_start(void)
 		sb_ibar = Draw_CachePic_Flags ("gfx/ibar", CACHEPICFLAG_QUIET);
 		sb_scorebar = Draw_CachePic_Flags ("gfx/scorebar", CACHEPICFLAG_QUIET);
 
-	//MED 01/04/97 added new hipnotic weapons
 		if (gamemode == GAME_HIPNOTIC || gamemode == GAME_QUOTH)
 		{
 			hsb_weapons[0][0] = Draw_CachePic_Flags ("gfx/inv_laser", CACHEPICFLAG_QUIET);
@@ -331,9 +291,7 @@ static void sbar_start(void)
 			rsb_items[0] = Draw_CachePic_Flags ("gfx/r_shield1", CACHEPICFLAG_QUIET);
 			rsb_items[1] = Draw_CachePic_Flags ("gfx/r_agrav1", CACHEPICFLAG_QUIET);
 
-	// PGM 01/19/97 - team color border
 			rsb_teambord = Draw_CachePic_Flags ("gfx/r_teambord", CACHEPICFLAG_QUIET);
-	// PGM 01/19/97 - team color border
 
 			rsb_ammo[0] = Draw_CachePic_Flags ("gfx/r_ammolava", CACHEPICFLAG_QUIET);
 			rsb_ammo[1] = Draw_CachePic_Flags ("gfx/r_ammomulti", CACHEPICFLAG_QUIET);
@@ -384,24 +342,14 @@ void Sbar_Init (void)
 	Cvar_RegisterVariable(&crosshair_color_alpha);
 	Cvar_RegisterVariable(&crosshair_size);
 
-	Cvar_RegisterVariable(&sbar_flagstatus_right); // (GAME_NEXUZI ONLY)
-	Cvar_RegisterVariable(&sbar_flagstatus_pos); // (GAME_NEXUIZ ONLY)
+	Cvar_RegisterVariable(&sbar_flagstatus_right);
+	Cvar_RegisterVariable(&sbar_flagstatus_pos);
 
 	R_RegisterModule("sbar", sbar_start, sbar_shutdown, sbar_newmap, NULL, NULL);
 }
 
-
-//=============================================================================
-
-// drawing routines are relative to the status bar location
-
 int sbar_x, sbar_y;
 
-/*
-=============
-Sbar_DrawPic
-=============
-*/
 static void Sbar_DrawStretchPic (int x, int y, cachepic_t *pic, float alpha, float overridewidth, float overrideheight)
 {
 	DrawQ_Pic (sbar_x + x, sbar_y + y, pic, overridewidth, overrideheight, 1, 1, 1, alpha, 0);
@@ -417,34 +365,17 @@ static void Sbar_DrawAlphaPic (int x, int y, cachepic_t *pic, float alpha)
 	DrawQ_Pic (sbar_x + x, sbar_y + y, pic, 0, 0, 1, 1, 1, alpha, 0);
 }
 
-/*
-================
-Sbar_DrawCharacter
-
-Draws one solid graphics character
-================
-*/
 static void Sbar_DrawCharacter (int x, int y, int num)
 {
 	char vabuf[1024];
 	DrawQ_String (sbar_x + x + 4 , sbar_y + y, va(vabuf, sizeof(vabuf), "%c", num), 0, 8, 8, 1, 1, 1, sbar_alpha_fg.value, 0, NULL, true, FONT_SBAR);
 }
 
-/*
-================
-Sbar_DrawString
-================
-*/
 static void Sbar_DrawString (int x, int y, char *str)
 {
 	DrawQ_String (sbar_x + x, sbar_y + y, str, 0, 8, 8, 1, 1, 1, sbar_alpha_fg.value, 0, NULL, false, FONT_SBAR);
 }
 
-/*
-=============
-Sbar_DrawNum
-=============
-*/
 static void Sbar_DrawNum (int x, int y, int num, int digits, int color)
 {
 	char str[32], *ptr;
@@ -470,12 +401,6 @@ static void Sbar_DrawNum (int x, int y, int num, int digits, int color)
 		ptr++;
 	}
 }
-
-/*
-=============
-Sbar_DrawXNum
-=============
-*/
 
 static void Sbar_DrawXNum (int x, int y, int num, int digits, int lettersize, float r, float g, float b, float a, int flags)
 {
@@ -509,21 +434,13 @@ static void Sbar_DrawXNum (int x, int y, int num, int digits, int lettersize, fl
 	}
 }
 
-//=============================================================================
-
-
 static int Sbar_IsTeammatch(void)
 {
-	// currently only nexuiz uses the team score board
+
 	return (IS_OLDNEXUIZ_DERIVED(gamemode)
 		&& (teamplay.integer > 0));
 }
 
-/*
-===============
-Sbar_SortFrags
-===============
-*/
 static int fragsort[MAX_SCOREBOARD];
 static int scoreboardlines;
 
@@ -539,7 +456,6 @@ void Sbar_SortFrags (void)
 {
 	int i, j, k, color;
 
-	// sort by frags
 	scoreboardlines = 0;
 	for (i=0 ; i<cl.maxclients ; i++)
 	{
@@ -562,7 +478,7 @@ void Sbar_SortFrags (void)
 	teamlines = 0;
 	if (Sbar_IsTeammatch ())
 	{
-		// now sort players by teams.
+
 		for (i=0 ; i<scoreboardlines ; i++)
 		{
 			for (j=0 ; j<scoreboardlines-1-i ; j++)
@@ -576,7 +492,6 @@ void Sbar_SortFrags (void)
 			}
 		}
 
-		// calculate team scores
 		color = -1;
 		for (i=0 ; i<scoreboardlines ; i++)
 		{
@@ -613,13 +528,11 @@ void Sbar_SortFrags (void)
 
 			if (cl.scores[fragsort[i]].frags != -666)
 			{
-				// do not add spedcators
-				// (ugly hack for nexuiz)
+
 				teams[teamlines-1].frags += cl.scores[fragsort[i]].frags;
 			}
 		}
 
-		// now sort teams by scores.
 		for (i=0 ; i<teamlines ; i++)
 			teamsort[i] = i;
 		for (i=0 ; i<teamlines ; i++)
@@ -637,11 +550,6 @@ void Sbar_SortFrags (void)
 	}
 }
 
-/*
-===============
-Sbar_SoloScoreboard
-===============
-*/
 static void Sbar_SoloScoreboard (void)
 {
 #if 1
@@ -655,36 +563,29 @@ static void Sbar_SoloScoreboard (void)
 	minutes = (int)(t / 60);
 	seconds = (int)(t - 60*floor(t/60));
 
-	// monsters and secrets are now both on the top row
 	if (cl.stats[STAT_TOTALMONSTERS])
 		Sbar_DrawString(8, 4, va(vabuf, sizeof(vabuf), "Monsters:%3i /%3i", cl.stats[STAT_MONSTERS], cl.stats[STAT_TOTALMONSTERS]));
-	else if (cl.stats[STAT_MONSTERS]) // LA: Display something if monsters_killed is non-zero, but total_monsters is zero
+	else if (cl.stats[STAT_MONSTERS])
 		Sbar_DrawString(8, 4, va(vabuf, sizeof(vabuf), "Monsters:%3i", cl.stats[STAT_MONSTERS]));
 
 	if (cl.stats[STAT_TOTALSECRETS])
 		Sbar_DrawString(8+22*8, 4, va(vabuf, sizeof(vabuf), "Secrets:%3i /%3i", cl.stats[STAT_SECRETS], cl.stats[STAT_TOTALSECRETS]));
-	else if (cl.stats[STAT_SECRETS]) // LA: And similarly for secrets
+	else if (cl.stats[STAT_SECRETS])
 		Sbar_DrawString(8+22*8, 4, va(vabuf, sizeof(vabuf), "Secrets:%3i", cl.stats[STAT_SECRETS]));
 
-	// format is like this: e1m1:The Sligpate Complex
 	dpsnprintf(str, sizeof(str), "%s:%s", cl.worldbasename, cl.worldmessage);
 
-	// if there's a newline character, terminate the string there
 	if (strchr(str, '\n'))
 		*(strchr(str, '\n')) = 0;
 
-	// make the time string
 	timelen = dpsnprintf(timestr, sizeof(timestr), " %i:%02i", minutes, seconds);
 
-	// truncate the level name if necessary to make room for time
 	max = 38 - timelen;
 	if ((int)strlen(str) > max)
 		str[max] = 0;
 
-	// print the filename and message
 	Sbar_DrawString(8, 12, str);
 
-	// print the time
 	Sbar_DrawString(8 + max*8, 12, timestr);
 
 #else
@@ -700,7 +601,6 @@ static void Sbar_SoloScoreboard (void)
 		Sbar_DrawString (8, 12, str);
 	}
 
-// time
 	minutes = (int)(cl.time / 60);
 	seconds = (int)(cl.time - 60*minutes);
 	tens = seconds / 10;
@@ -708,7 +608,6 @@ static void Sbar_SoloScoreboard (void)
 	dpsnprintf (str, sizeof(str), "Time :%3i:%i%i", minutes, tens, units);
 	Sbar_DrawString (184, 4, str);
 
-// draw level name
 	if (IS_OLDNEXUIZ_DERIVED(gamemode)) {
 		l = (int) strlen (cl.worldname);
 		Sbar_DrawString (232 - l*4, 12, cl.worldname);
@@ -719,51 +618,37 @@ static void Sbar_SoloScoreboard (void)
 #endif
 }
 
-/*
-===============
-Sbar_DrawScoreboard
-===============
-*/
 static void Sbar_DrawScoreboard (void)
 {
 	Sbar_SoloScoreboard ();
-	// LordHavoc: changed to draw the deathmatch overlays in any multiplayer mode
-	//if (cl.gametype == GAME_DEATHMATCH)
+
 	if (!cl.islocalgame)
 		Sbar_DeathmatchOverlay ();
 }
 
-//=============================================================================
-
-// AK to make DrawInventory smaller
 static void Sbar_DrawWeapon(int nr, float fade, int active)
 {
 	char vabuf[1024];
 	if (sbar_hudselector.integer == 1)
 	{
-		// width = 300, height = 100
+
 		const int w_width = 32, w_height = 12, w_space = 2, font_size = 8;
 
 		DrawQ_Pic((vid_conwidth.integer - w_width * 9) * 0.5 + w_width * nr, vid_conheight.integer - w_height, sb_weapons[0][nr], w_width, w_height, (active) ? 1 : 0.6, active ? 1 : 0.6, active ? 1 : 0.6, (active ? 1 : 0.6) * fade * sbar_alpha_fg.value, DRAWFLAG_NORMAL);
-		// FIXME ??
+
 		DrawQ_String((vid_conwidth.integer - w_width * 9) * 0.5 + w_width * nr + w_space, vid_conheight.integer - w_height + w_space, va(vabuf, sizeof(vabuf), "%i",nr+1), 0, font_size, font_size, 1, 1, 0, sbar_alpha_fg.value, 0, NULL, true, FONT_DEFAULT);
 	}
 	else
 	{
-		// width = 300, height = 100
+
 		const int w_width = 300, w_height = 100, w_space = 10;
 		const float w_scale = 0.4;
 
 		DrawQ_Pic(vid_conwidth.integer - (w_width + w_space) * w_scale, (w_height + w_space) * w_scale * nr + w_space, sb_weapons[0][nr], w_width * w_scale, w_height * w_scale, (active) ? 1 : 0.6, active ? 1 : 0.6, active ? 1 : 1, fade * sbar_alpha_fg.value, DRAWFLAG_NORMAL);
-		//DrawQ_String(vid_conwidth.integer - (w_space + font_size ), (w_height + w_space) * w_scale * nr + w_space, va(vabuf, sizeof(vabuf), "%i",nr+1), 0, font_size, font_size, 1, 0, 0, fade, 0, NULL, true, FONT_DEFAULT);
+
 	}
 }
 
-/*
-===============
-Sbar_DrawInventory
-===============
-*/
 static void Sbar_DrawInventory (void)
 {
 	int i;
@@ -781,7 +666,6 @@ static void Sbar_DrawInventory (void)
 	else
 		Sbar_DrawAlphaPic (0, -24, sb_ibar, sbar_alpha_bg.value);
 
-	// weapons
 	for (i=0 ; i<7 ; i++)
 	{
 		if (cl.stats[STAT_ITEMS] & (IT_SHOTGUN<<i) )
@@ -802,8 +686,6 @@ static void Sbar_DrawInventory (void)
 		}
 	}
 
-	// MED 01/04/97
-	// hipnotic weapons
 	if (gamemode == GAME_HIPNOTIC || gamemode == GAME_QUOTH)
 	{
 		int grenadeflashing=0;
@@ -823,7 +705,6 @@ static void Sbar_DrawInventory (void)
 				else
 					flashon = (flashon%5) + 2;
 
-				// check grenade launcher
 				if (i==2)
 				{
 					if (cl.stats[STAT_ITEMS] & HIT_PROXIMITY_GUN)
@@ -853,14 +734,13 @@ static void Sbar_DrawInventory (void)
 
 	if (gamemode == GAME_ROGUE)
 	{
-		// check for powered up weapon.
+
 		if ( cl.stats[STAT_ACTIVEWEAPON] >= RIT_LAVA_NAILGUN )
 			for (i=0;i<5;i++)
 				if (cl.stats[STAT_ACTIVEWEAPON] == (RIT_LAVA_NAILGUN << i))
 					Sbar_DrawPic ((i+2)*24, -16, rsb_weapons[i]);
 	}
 
-	// ammo counts
 	for (i=0 ; i<4 ; i++)
 	{
 		dpsnprintf (num, sizeof(num), "%4i",cl.stats[STAT_SHELLS+i] );
@@ -874,17 +754,14 @@ static void Sbar_DrawInventory (void)
 			Sbar_DrawCharacter ( (6*i+3)*8 - 2, -24, 18 + num[3] - '0');
 	}
 
-	// items
 	for (i=0 ; i<6 ; i++)
 		if (cl.stats[STAT_ITEMS] & (1<<(17+i)))
 		{
-			//MED 01/04/97 changed keys
+
 			if (!(gamemode == GAME_HIPNOTIC || gamemode == GAME_QUOTH) || (i>1))
 				Sbar_DrawPic (192 + i*16, -16, sb_items[i]);
 		}
 
-	//MED 01/04/97 added hipnotic items
-	// hipnotic items
 	if (gamemode == GAME_HIPNOTIC || gamemode == GAME_QUOTH)
 	{
 		for (i=0 ; i<2 ; i++)
@@ -894,27 +771,20 @@ static void Sbar_DrawInventory (void)
 
 	if (gamemode == GAME_ROGUE)
 	{
-		// new rogue items
+
 		for (i=0 ; i<2 ; i++)
 			if (cl.stats[STAT_ITEMS] & (1<<(29+i)))
 				Sbar_DrawPic (288 + i*16, -16, rsb_items[i]);
 	}
 	else
 	{
-		// sigils
+
 		for (i=0 ; i<4 ; i++)
 			if (cl.stats[STAT_ITEMS] & (1<<(28+i)))
 				Sbar_DrawPic (320-32 + i*8, -16, sb_sigil[i]);
 	}
 }
 
-//=============================================================================
-
-/*
-===============
-Sbar_DrawFrags
-===============
-*/
 static void Sbar_DrawFrags (void)
 {
 	int i, k, l, x, f;
@@ -924,7 +794,6 @@ static void Sbar_DrawFrags (void)
 
 	Sbar_SortFrags ();
 
-	// draw the text
 	l = min(scoreboardlines, 4);
 
 	x = 23 * 8;
@@ -934,13 +803,11 @@ static void Sbar_DrawFrags (void)
 		k = fragsort[i];
 		s = &cl.scores[k];
 
-		// draw background
 		c = palette_rgb_pantsscoreboard[(s->colors & 0xf0) >> 4];
 		DrawQ_Fill (sbar_x + x + 10, sbar_y     - 23, 28, 4, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
 		c = palette_rgb_shirtscoreboard[s->colors & 0xf];
 		DrawQ_Fill (sbar_x + x + 10, sbar_y + 4 - 23, 28, 3, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
 
-		// draw number
 		f = s->frags;
 		dpsnprintf (num, sizeof(num), "%3i",f);
 
@@ -956,20 +823,10 @@ static void Sbar_DrawFrags (void)
 	}
 }
 
-//=============================================================================
-
-
-/*
-===============
-Sbar_DrawFace
-===============
-*/
 static void Sbar_DrawFace (void)
 {
 	int f;
 
-// PGM 01/19/97 - team color drawing
-// PGM 03/02/97 - fixed so color swatch only appears in CTF modes
 	if (gamemode == GAME_ROGUE && !cl.islocalgame && (teamplay.integer > 3) && (teamplay.integer < 7))
 	{
 		char num[12];
@@ -977,14 +834,13 @@ static void Sbar_DrawFace (void)
 		unsigned char *c;
 
 		s = &cl.scores[cl.viewentity - 1];
-		// draw background
+
 		Sbar_DrawPic (112, 0, rsb_teambord);
 		c = palette_rgb_pantsscoreboard[(s->colors & 0xf0) >> 4];
 		DrawQ_Fill (sbar_x + 113, vid_conheight.integer-SBAR_HEIGHT+3, 22, 9, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
 		c = palette_rgb_shirtscoreboard[s->colors & 0xf];
 		DrawQ_Fill (sbar_x + 113, vid_conheight.integer-SBAR_HEIGHT+12, 22, 9, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
 
-		// draw number
 		f = s->frags;
 		dpsnprintf (num, sizeof(num), "%3i",f);
 
@@ -1006,7 +862,6 @@ static void Sbar_DrawFace (void)
 
 		return;
 	}
-// PGM 01/19/97 - team color drawing
 
 	if ( (cl.stats[STAT_ITEMS] & (IT_INVISIBILITY | IT_INVULNERABILITY) ) == (IT_INVISIBILITY | IT_INVULNERABILITY) )
 		Sbar_DrawPic (112, 0, sb_face_invis_invuln);
@@ -1048,7 +903,7 @@ static void get_showspeed_unit(int unitnumber, double *conversion_factor, const 
 			*conversion_factor = 0.0254;
 			if(!IS_NEXUIZ_DERIVED(gamemode))
 				*conversion_factor *= 1.5;
-			// 1qu=1.5in is for non-Nexuiz/Xonotic only - Nexuiz/Xonotic players are overly large, but 1qu=1in fixes that
+
 			break;
 		case 3:
 			*unit = "km/h";
@@ -1064,7 +919,7 @@ static void get_showspeed_unit(int unitnumber, double *conversion_factor, const 
 			break;
 		case 5:
 			*unit = "knots";
-			*conversion_factor = 0.0254 * 1.943844492; // 1 m/s = 1.943844492 knots, because 1 knot = 1.852 km/h
+			*conversion_factor = 0.0254 * 1.943844492;
 			if(!IS_NEXUIZ_DERIVED(gamemode))
 				*conversion_factor *= 1.5;
 			break;
@@ -1205,12 +1060,12 @@ void Sbar_ShowFPS(void)
 		Matrix4x4_OriginFromMatrix(&r_refdef.view.matrix, org);
 		VectorSet(temp, 65536, 0, 0);
 		Matrix4x4_Transform(&r_refdef.view.matrix, temp, dest);
-		// clear the traces as we may or may not fill them out, and mark them with an invalid fraction so we know if we did
+
 		memset(&svtrace, 0, sizeof(svtrace));
 		memset(&cltrace, 0, sizeof(cltrace));
 		svtrace.fraction = 2.0;
 		cltrace.fraction = 2.0;
-		// ray hits models (even animated ones) and ignores translucent materials
+
 		if (SVVM_prog != NULL)
 			svtrace = SV_TraceLine(org, dest, MOVE_HITMODEL, NULL, SUPERCONTENTS_SOLID, 0, MATERIALFLAGMASK_TRANSLUCENT, collision_extendmovelength.value);
 		cltrace = CL_TraceLine(org, dest, MOVE_HITMODEL, NULL, SUPERCONTENTS_SOLID, 0, MATERIALFLAGMASK_TRANSLUCENT, collision_extendmovelength.value, true, false, &hitnetentity, true, true);
@@ -1249,8 +1104,7 @@ void Sbar_ShowFPS(void)
 	{
 		fps_scalex = 12;
 		fps_scaley = 12;
-		//fps_y = vid_conheight.integer - sb_lines; // yes this may draw over the sbar
-		//fps_y = bound(0, fps_y, vid_conheight.integer - fps_strings*fps_scaley);
+
 		fps_y = vid_conheight.integer - sbar_info_pos.integer - fps_strings*fps_scaley;
 		if (soundstring[0])
 		{
@@ -1357,11 +1211,6 @@ static void Sbar_DrawGauge(float x, float y, cachepic_t *pic, float width, float
 		DrawQ_SuperPic(x, y + r[3], pic, width, (r[4] - r[3]), 0,(r[3] / height), c3r,c3g,c3b,c3a, 1,(r[3] / height), c3r,c3g,c3b,c3a, 0,(r[4] / height), c3r,c3g,c3b,c3a, 1,(r[4] / height), c3r,c3g,c3b,c3a, drawflags);
 }
 
-/*
-===============
-Sbar_Draw
-===============
-*/
 extern float v_dmg_time, v_dmg_roll, v_dmg_pitch;
 extern cvar_t v_kicktime;
 void Sbar_Score (int margin);
@@ -1370,13 +1219,13 @@ void Sbar_Draw (void)
 	cachepic_t *pic;
 	char vabuf[1024];
 
-	if(cl.csqc_vidvars.drawenginesbar)	//[515]: csqc drawsbar
+	if(cl.csqc_vidvars.drawenginesbar)
 	{
 		if (sb_showscores)
 			Sbar_DrawScoreboard ();
 		else if (cl.intermission == 1)
 		{
-			if(IS_OLDNEXUIZ_DERIVED(gamemode)) // display full scoreboard (that is, show scores + map name)
+			if(IS_OLDNEXUIZ_DERIVED(gamemode))
 			{
 				Sbar_DrawScoreboard();
 				return;
@@ -1407,7 +1256,6 @@ void Sbar_Draw (void)
 				sbar_x = (vid_conwidth.integer - 320)/2;
 				sbar_y = vid_conheight.integer - 24 - 16;
 
-				// calculate intensity to draw weapons bar at
 				fade = 3.2 - 2 * (cl.time - cl.weapontime);
 				fade = bound(0.7, fade, 1);
 				for (i = 0; i < 8;i++)
@@ -1416,14 +1264,12 @@ void Sbar_Draw (void)
 				if((cl.stats[STAT_ITEMS] & (1<<12)))
 					Sbar_DrawWeapon(0, fade, (cl.stats[STAT_ACTIVEWEAPON] == 1));
 
-				// flag icons
 				redflag = ((cl.stats[STAT_ITEMS]>>15) & 3);
 				blueflag = ((cl.stats[STAT_ITEMS]>>17) & 3);
 				x = sbar_flagstatus_right.integer ? vid_conwidth.integer - 10 - sbar_x - 64 : 10 - sbar_x;
 				if (redflag == 3 && blueflag == 3)
 				{
-					// The Impossible Combination[tm]
-					// Can only happen in Key Hunt mode...
+
 					Sbar_DrawPic ((int) x, (int) ((vid_conheight.integer - sbar_y) - (sbar_flagstatus_pos.value + 128)), sb_items[14]);
 				}
 				else
@@ -1434,7 +1280,6 @@ void Sbar_Draw (void)
 						Sbar_DrawPic ((int) x, (int) ((vid_conheight.integer - sbar_y) - (sbar_flagstatus_pos.value + 128)), sb_items[blueflag+14]);
 				}
 
-				// armor
 				if (cl.stats[STAT_ARMOR] > 0)
 				{
 					Sbar_DrawStretchPic (72, 0, sb_armor[0], sbar_alpha_fg.value, 24, 24);
@@ -1450,7 +1295,6 @@ void Sbar_Draw (void)
 						Sbar_DrawXNum(0,0,cl.stats[STAT_ARMOR],3,24,0.7,0,0,1,0);
 				}
 
-				// health
 				if (cl.stats[STAT_HEALTH] != 0)
 				{
 					Sbar_DrawStretchPic (184, 0, sb_health, sbar_alpha_fg.value, 24, 24);
@@ -1466,7 +1310,6 @@ void Sbar_Draw (void)
 						Sbar_DrawXNum(112,0,cl.stats[STAT_HEALTH],3,24,0.7,0,0,1,0);
 				}
 
-				// ammo
 				if ((cl.stats[STAT_ITEMS] & (NEX_IT_SHELLS | NEX_IT_BULLETS | NEX_IT_ROCKETS | NEX_IT_CELLS)) || cl.stats[STAT_AMMO] != 0)
 				{
 					if (cl.stats[STAT_ITEMS] & NEX_IT_SHELLS)
@@ -1487,8 +1330,7 @@ void Sbar_Draw (void)
 					Sbar_MiniDeathmatchOverlay (sbar_x + 320, sbar_y);
 				if (sbar_x > 0)
 					Sbar_Score(16);
-					// The margin can be at most 8 to support 640x480 console size:
-					//   320 + 2 * (144 + 16) = 640
+
 			}
 			else if (sb_lines)
 			{
@@ -1500,7 +1342,6 @@ void Sbar_Draw (void)
 				sbar_x = (vid_conwidth.integer - 640)/2;
 				sbar_y = vid_conheight.integer - 47;
 
-				// calculate intensity to draw weapons bar at
 				fade = 3 - 2 * (cl.time - cl.weapontime);
 				if (fade > 0)
 				{
@@ -1513,22 +1354,17 @@ void Sbar_Draw (void)
 						Sbar_DrawWeapon(0, fade, (cl.stats[STAT_ACTIVEWEAPON] == 1));
 				}
 
-				//if (!cl.islocalgame)
-				//	Sbar_DrawFrags ();
-
 				if (sb_lines > 24)
 					Sbar_DrawAlphaPic (0, 0, sb_sbar, sbar_alpha_fg.value);
 				else
 					Sbar_DrawAlphaPic (0, 0, sb_sbar_minimal, sbar_alpha_fg.value);
 
-				// flag icons
 				redflag = ((cl.stats[STAT_ITEMS]>>15) & 3);
 				blueflag = ((cl.stats[STAT_ITEMS]>>17) & 3);
 				x = sbar_flagstatus_right.integer ? vid_conwidth.integer - 10 - sbar_x - 64 : 10 - sbar_x;
 				if (redflag == 3 && blueflag == 3)
 				{
-					// The Impossible Combination[tm]
-					// Can only happen in Key Hunt mode...
+
 					Sbar_DrawPic ((int) x, -179, sb_items[14]);
 				}
 				else
@@ -1539,10 +1375,8 @@ void Sbar_Draw (void)
 						Sbar_DrawPic ((int) x, -177, sb_items[blueflag+14]);
 				}
 
-				// armor
 				Sbar_DrawXNum ((340-3*24), 12, cl.stats[STAT_ARMOR], 3, 24, 0.6,0.7,0.8,1,0);
 
-				// health
 				if(cl.stats[STAT_HEALTH] > 100)
 					Sbar_DrawXNum((154-3*24),12,cl.stats[STAT_HEALTH],3,24,1,1,1,1,0);
 				else if(cl.stats[STAT_HEALTH] <= 25 && cl.time - (int)cl.time > 0.5)
@@ -1550,7 +1384,6 @@ void Sbar_Draw (void)
 				else
 					Sbar_DrawXNum((154-3*24),12,cl.stats[STAT_HEALTH],3,24,0.6,0.7,0.8,1,0);
 
-				// AK dont draw ammo for the laser
 				if(cl.stats[STAT_ACTIVEWEAPON] != 12)
 				{
 					if (cl.stats[STAT_ITEMS] & NEX_IT_SHELLS)
@@ -1577,16 +1410,7 @@ void Sbar_Draw (void)
 
 				if (sbar_x > 0)
 					Sbar_Score(-16);
-					// Because:
-					//   Mini scoreboard uses 12*4 per other team, that is, 144
-					//   pixels when there are four teams...
-					//   Nexuiz by default sets vid_conwidth to 800... makes
-					//   sbar_x == 80...
-					//   so we need to shift it by 64 pixels to the right to fit
-					//   BUT: then it overlaps with the image that gets drawn
-					//   for viewsize 100! Therefore, just account for 3 teams,
-					//   that is, 96 pixels mini scoreboard size, needing 16 pixels
-					//   to the right!
+
 			}
 		}
 		else if (gamemode == GAME_ZYMOTIC)
@@ -1602,9 +1426,7 @@ void Sbar_Draw (void)
 			}
 			sbar_x = (int)((vid_conwidth.integer - 256 * scale)/2 + kickoffset[0]);
 			sbar_y = (int)((vid_conheight.integer - 256 * scale)/2 + kickoffset[1]);
-			// left1 16, 48 : 126 -66
-			// left2 16, 128 : 196 -66
-			// right 176, 48 : 196 -136
+
 			Sbar_DrawGauge(sbar_x +  16 * scale, sbar_y +  48 * scale, zymsb_crosshair_left1, 64*scale,  80*scale, 78*scale,  -66*scale, cl.stats[STAT_AMMO]  * (1.0 / 200.0), cl.stats[STAT_SHELLS]  * (1.0 / 200.0), 0.8f,0.8f,0.0f,1.0f, 0.8f,0.5f,0.0f,1.0f, 0.3f,0.3f,0.3f,1.0f, DRAWFLAG_NORMAL);
 			Sbar_DrawGauge(sbar_x +  16 * scale, sbar_y + 128 * scale, zymsb_crosshair_left2, 64*scale,  80*scale, 68*scale,  -66*scale, cl.stats[STAT_NAILS] * (1.0 / 200.0), cl.stats[STAT_ROCKETS] * (1.0 / 200.0), 0.8f,0.8f,0.0f,1.0f, 0.8f,0.5f,0.0f,1.0f, 0.3f,0.3f,0.3f,1.0f, DRAWFLAG_NORMAL);
 			Sbar_DrawGauge(sbar_x + 176 * scale, sbar_y +  48 * scale, zymsb_crosshair_right, 64*scale, 160*scale, 148*scale, -136*scale, cl.stats[STAT_ARMOR]  * (1.0 / 300.0), cl.stats[STAT_HEALTH]  * (1.0 / 300.0), 0.0f,0.5f,1.0f,1.0f, 1.0f,0.0f,0.0f,1.0f, 0.3f,0.3f,0.3f,1.0f, DRAWFLAG_NORMAL);
@@ -1624,7 +1446,7 @@ void Sbar_Draw (void)
 			}
 			sbar_x = (vid_conwidth.integer - 256 * scale)/2 + kickoffset[0];
 			sbar_y = (vid_conheight.integer - 256 * scale)/2 + kickoffset[1];
-			offset = 0; // TODO: offset should be controlled by recoil (question: how to detect firing?)
+			offset = 0;
 			DrawQ_SuperPic(sbar_x +  120           * scale, sbar_y + ( 88 - offset) * scale, zymsb_crosshair_line, 16 * scale, 36 * scale, 0,0, 1,1,1,1, 1,0, 1,1,1,1, 0,1, 1,1,1,1, 1,1, 1,1,1,1, 0);
 			DrawQ_SuperPic(sbar_x + (132 + offset) * scale, sbar_y + 120            * scale, zymsb_crosshair_line, 36 * scale, 16 * scale, 0,1, 1,1,1,1, 0,0, 1,1,1,1, 1,1, 1,1,1,1, 1,0, 1,1,1,1, 0);
 			DrawQ_SuperPic(sbar_x +  120           * scale, sbar_y + (132 + offset) * scale, zymsb_crosshair_line, 16 * scale, 36 * scale, 1,1, 1,1,1,1, 0,1, 1,1,1,1, 1,0, 1,1,1,1, 0,0, 1,1,1,1, 0);
@@ -1653,12 +1475,10 @@ void Sbar_Draw (void)
 			DrawQ_Pic(sbar_x + 120 * scale, sbar_y + 120 * scale, zymsb_crosshair_center, 16 * scale, 16 * scale, 1, 1, 1, 1, DRAWFLAG_NORMAL);
 #endif
 		}
-		else // Quake and others
+		else
 		{
 			sbar_x = (vid_conwidth.integer - 320)/2;
 			sbar_y = vid_conheight.integer - SBAR_HEIGHT;
-			// LordHavoc: changed to draw the deathmatch overlays in any multiplayer mode
-			//if (cl.gametype == GAME_DEATHMATCH && gamemode != GAME_TRANSFUSION)
 
 			if (sb_lines > 24)
 			{
@@ -1678,8 +1498,6 @@ void Sbar_Draw (void)
 			{
 				Sbar_DrawAlphaPic (0, 0, sb_sbar, sbar_alpha_bg.value);
 
-				// keys (hipnotic only)
-				//MED 01/04/97 moved keys here so they would not be overwritten
 				if (gamemode == GAME_HIPNOTIC || gamemode == GAME_QUOTH)
 				{
 					if (cl.stats[STAT_ITEMS] & IT_KEY1)
@@ -1687,7 +1505,7 @@ void Sbar_Draw (void)
 					if (cl.stats[STAT_ITEMS] & IT_KEY2)
 						Sbar_DrawPic (209, 12, sb_items[1]);
 				}
-				// armor
+
 				if (gamemode != GAME_GOODVSBAD2)
 				{
 					if (cl.stats[STAT_ITEMS] & IT_INVULNERABILITY)
@@ -1720,13 +1538,10 @@ void Sbar_Draw (void)
 					}
 				}
 
-				// face
 				Sbar_DrawFace ();
 
-				// health
 				Sbar_DrawNum (136, 0, cl.stats[STAT_HEALTH], 3, cl.stats[STAT_HEALTH] <= 25);
 
-				// ammo icon
 				if (gamemode == GAME_ROGUE)
 				{
 					if (cl.stats[STAT_ITEMS] & RIT_SHELLS)
@@ -1758,7 +1573,6 @@ void Sbar_Draw (void)
 
 				Sbar_DrawNum (248, 0, cl.stats[STAT_AMMO], 3, cl.stats[STAT_AMMO] <= 10);
 
-				// LordHavoc: changed to draw the deathmatch overlays in any multiplayer mode
 				if ((!cl.islocalgame || cl.gametype != GAME_COOP))
 				{
 					if (gamemode == GAME_TRANSFUSION)
@@ -1781,14 +1595,6 @@ void Sbar_Draw (void)
 		DrawQ_Pic((cl.cmd.cursor_screen[0] + 1) * 0.5 * vid_conwidth.integer, (cl.cmd.cursor_screen[1] + 1) * 0.5 * vid_conheight.integer, Draw_CachePic (va(vabuf, sizeof(vabuf), "gfx/prydoncursor%03i", cl_prydoncursor.integer)), 0, 0, 1, 1, 1, 1, 0);
 }
 
-//=============================================================================
-
-/*
-==================
-Sbar_DeathmatchOverlay
-
-==================
-*/
 static float Sbar_PrintScoreboardItem(scoreboard_t *s, float x, float y)
 {
 	int minutes;
@@ -1814,18 +1620,12 @@ static float Sbar_PrintScoreboardItem(scoreboard_t *s, float x, float y)
 		}
 		else
 		{
-			// draw colors behind score
-			//
-			//
-			//
-			//
-			//
+
 			c = palette_rgb_pantsscoreboard[(s->colors & 0xf0) >> 4];
 			DrawQ_Fill(x + 14*8*FONT_SBAR->maxwidth, y+1, 40*FONT_SBAR->maxwidth, 3, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
 			c = palette_rgb_shirtscoreboard[s->colors & 0xf];
 			DrawQ_Fill(x + 14*8*FONT_SBAR->maxwidth, y+4, 40*FONT_SBAR->maxwidth, 3, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
-			// print the text
-			//DrawQ_String(x, y, va(vabuf, sizeof(vabuf), "%c%4i %s", myself ? 13 : ' ', (int) s->frags, s->name), 0, 8, 8, 1, 1, 1, 1 * sbar_alpha_fg.value, 0, NULL, true, FONT_DEFAULT);
+
 			if (s->qw_ping || s->qw_packetloss)
 				DrawQ_String(x, y, va(vabuf, sizeof(vabuf), "%4i %3i %4i %5i %-4s %c%s", bound(0, s->qw_ping, 9999), bound(0, s->qw_packetloss, 99), minutes,(int) s->frags, cl.qw_teamplay ? s->qw_team : "", myself ? 13 : ' ', s->name), 0, 8, 8, 1, 1, 1, 1 * sbar_alpha_fg.value, 0, NULL, false, FONT_SBAR );
 			else
@@ -1843,13 +1643,12 @@ static float Sbar_PrintScoreboardItem(scoreboard_t *s, float x, float y)
 		}
 		else
 		{
-			// draw colors behind score
+
 			c = palette_rgb_pantsscoreboard[(s->colors & 0xf0) >> 4];
 			DrawQ_Fill(x + 9*8*FONT_SBAR->maxwidth, y+1, 40*FONT_SBAR->maxwidth, 3, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
 			c = palette_rgb_shirtscoreboard[s->colors & 0xf];
 			DrawQ_Fill(x + 9*8*FONT_SBAR->maxwidth, y+4, 40*FONT_SBAR->maxwidth, 3, c[0] * (1.0f / 255.0f), c[1] * (1.0f / 255.0f), c[2] * (1.0f / 255.0f), sbar_alpha_fg.value, 0);
-			// print the text
-			//DrawQ_String(x, y, va(vabuf, sizeof(vabuf), "%c%4i %s", myself ? 13 : ' ', (int) s->frags, s->name), 0, 8, 8, 1, 1, 1, 1 * sbar_alpha_fg.value, 0, NULL, true, FONT_DEFAULT);
+
 			if (s->qw_ping || s->qw_packetloss)
 				DrawQ_String(x, y, va(vabuf, sizeof(vabuf), "%4i %3i %5i %c%s", bound(0, s->qw_ping, 9999), bound(0, s->qw_packetloss, 99), (int) s->frags, myself ? 13 : ' ', s->name), 0, 8, 8, 1, 1, 1, 1 * sbar_alpha_fg.value, 0, NULL, false, FONT_SBAR );
 			else
@@ -1864,7 +1663,6 @@ void Sbar_DeathmatchOverlay (void)
 	int i, y, xmin, xmax, ymin, ymax;
 	char vabuf[1024];
 
-	// request new ping times every two second
 	if (cl.last_ping_request < realtime - 2 && cls.netcon)
 	{
 		cl.last_ping_request = realtime;
@@ -1873,9 +1671,9 @@ void Sbar_DeathmatchOverlay (void)
 			MSG_WriteByte(&cls.netcon->message, qw_clc_stringcmd);
 			MSG_WriteString(&cls.netcon->message, "pings");
 		}
-		else if (cls.protocol == PROTOCOL_QUAKE || cls.protocol == PROTOCOL_QUAKEDP || cls.protocol == PROTOCOL_NEHAHRAMOVIE || cls.protocol == PROTOCOL_NEHAHRABJP || cls.protocol == PROTOCOL_NEHAHRABJP2 || cls.protocol == PROTOCOL_NEHAHRABJP3 || cls.protocol == PROTOCOL_DARKPLACES1 || cls.protocol == PROTOCOL_DARKPLACES2 || cls.protocol == PROTOCOL_DARKPLACES3 || cls.protocol == PROTOCOL_DARKPLACES4 || cls.protocol == PROTOCOL_DARKPLACES5 || cls.protocol == PROTOCOL_DARKPLACES6/* || cls.protocol == PROTOCOL_DARKPLACES7*/)
+		else if (cls.protocol == PROTOCOL_QUAKE || cls.protocol == PROTOCOL_QUAKEDP || cls.protocol == PROTOCOL_NEHAHRAMOVIE || cls.protocol == PROTOCOL_NEHAHRABJP || cls.protocol == PROTOCOL_NEHAHRABJP2 || cls.protocol == PROTOCOL_NEHAHRABJP3 || cls.protocol == PROTOCOL_DARKPLACES1 || cls.protocol == PROTOCOL_DARKPLACES2 || cls.protocol == PROTOCOL_DARKPLACES3 || cls.protocol == PROTOCOL_DARKPLACES4 || cls.protocol == PROTOCOL_DARKPLACES5 || cls.protocol == PROTOCOL_DARKPLACES6                                            )
 		{
-			// these servers usually lack the pings command and so a less efficient "ping" command must be sent, which on modern DP servers will also reply with a pingplreport command after the ping listing
+
 			static int ping_anyway_counter = 0;
 			if(cl.parsingtextexpectingpingforscores == 1)
 			{
@@ -1886,29 +1684,28 @@ void Sbar_DeathmatchOverlay (void)
 			if(cl.parsingtextexpectingpingforscores != 1)
 			{
 				ping_anyway_counter = 0;
-				cl.parsingtextexpectingpingforscores = 1; // hide the output of the next ping report
+				cl.parsingtextexpectingpingforscores = 1;
 				MSG_WriteByte(&cls.netcon->message, clc_stringcmd);
 				MSG_WriteString(&cls.netcon->message, "ping");
 			}
 		}
 		else
 		{
-			// newer server definitely has pings command, so use it for more efficiency, avoids ping reports spamming the console if they are misparsed, and saves a little bandwidth
+
 			MSG_WriteByte(&cls.netcon->message, clc_stringcmd);
 			MSG_WriteString(&cls.netcon->message, "pings");
 		}
 	}
 
-	// scores
 	Sbar_SortFrags ();
 
 	ymin = 8;
 	ymax = 40 + 8 + (Sbar_IsTeammatch() ? (teamlines * 8 + 5): 0) + scoreboardlines * 8 - 1;
 
 	if (cls.protocol == PROTOCOL_QUAKEWORLD)
-		xmin = (int) (vid_conwidth.integer - (26 + 15) * 8 * FONT_SBAR->maxwidth) / 2; // 26 characters until name, then we assume 15 character names (they can be longer but usually aren't)
+		xmin = (int) (vid_conwidth.integer - (26 + 15) * 8 * FONT_SBAR->maxwidth) / 2;
 	else
-		xmin = (int) (vid_conwidth.integer - (16 + 25) * 8 * FONT_SBAR->maxwidth) / 2; // 16 characters until name, then we assume 25 character names (they can be longer but usually aren't)
+		xmin = (int) (vid_conwidth.integer - (16 + 25) * 8 * FONT_SBAR->maxwidth) / 2;
 	xmax = vid_conwidth.integer - xmin;
 
 	if(IS_OLDNEXUIZ_DERIVED(gamemode))
@@ -1916,7 +1713,6 @@ void Sbar_DeathmatchOverlay (void)
 
 	DrawQ_Pic ((vid_conwidth.integer - sb_ranking->width)/2, 8, sb_ranking, 0, 0, 1, 1, 1, 1 * sbar_alpha_fg.value, 0);
 
-	// draw the text
 	y = 40;
 	if (cls.protocol == PROTOCOL_QUAKEWORLD)
 	{
@@ -1930,7 +1726,7 @@ void Sbar_DeathmatchOverlay (void)
 
 	if (Sbar_IsTeammatch ())
 	{
-		// show team scores first
+
 		for (i = 0;i < teamlines && y < vid_conheight.integer;i++)
 			y += (int)Sbar_PrintScoreboardItem((teams + teamsort[i]), xmin, y);
 		y += 5;
@@ -1940,37 +1736,26 @@ void Sbar_DeathmatchOverlay (void)
 		y += (int)Sbar_PrintScoreboardItem(cl.scores + fragsort[i], xmin, y);
 }
 
-/*
-==================
-Sbar_MiniDeathmatchOverlay
-
-==================
-*/
 void Sbar_MiniDeathmatchOverlay (int x, int y)
 {
 	int i, j, numlines, range_begin, range_end, myteam, teamsep;
 
-	// do not draw this if sbar_miniscoreboard_size is zero
 	if(sbar_miniscoreboard_size.value == 0)
 		return;
-	// adjust the given y if sbar_miniscoreboard_size doesn't indicate default (< 0)
+
 	if(sbar_miniscoreboard_size.value > 0)
 		y = (int) (vid_conheight.integer - sbar_miniscoreboard_size.value * 8);
 
-	// scores
 	Sbar_SortFrags ();
 
-	// decide where to print
 	if (gamemode == GAME_TRANSFUSION)
 		numlines = (vid_conwidth.integer - x + 127) / 128;
 	else
 		numlines = (vid_conheight.integer - y + 7) / 8;
 
-	// give up if there isn't room
 	if (x >= vid_conwidth.integer || y >= vid_conheight.integer || numlines < 1)
 		return;
 
-	//find us
 	for (i = 0; i < scoreboardlines; i++)
 		if (fragsort[i] == cl.playerentity - 1)
 			break;
@@ -1982,10 +1767,9 @@ void Sbar_MiniDeathmatchOverlay (int x, int y)
 	if (gamemode != GAME_TRANSFUSION)
 		if (Sbar_IsTeammatch ())
 		{
-			// reserve space for the team scores
+
 			numlines -= teamlines;
 
-			// find first and last player of my team (only draw the team totals and my own team)
 			range_begin = range_end = i;
 			myteam = cl.scores[fragsort[i]].colors & 15;
 			while(range_begin > 0 && (cl.scores[fragsort[range_begin-1]].colors & 15) == myteam)
@@ -1993,7 +1777,6 @@ void Sbar_MiniDeathmatchOverlay (int x, int y)
 			while(range_end < scoreboardlines && (cl.scores[fragsort[range_end]].colors & 15) == myteam)
 				++range_end;
 
-			// looks better than two players
 			if(numlines == 2)
 			{
 				teamsep = 8;
@@ -2001,7 +1784,6 @@ void Sbar_MiniDeathmatchOverlay (int x, int y)
 			}
 		}
 
-	// figure out start
 	i -= numlines/2;
 	i = min(i, range_end - numlines);
 	i = max(i, range_begin);
@@ -2013,9 +1795,9 @@ void Sbar_MiniDeathmatchOverlay (int x, int y)
 	}
 	else
 	{
-		if(range_end - i < numlines) // won't draw to bottom?
-			y += 8 * (numlines - (range_end - i)); // bottom align
-		// show team scores first
+		if(range_end - i < numlines)
+			y += 8 * (numlines - (range_end - i));
+
 		for (j = 0;j < teamlines && y < vid_conheight.integer;j++)
 			y += (int)Sbar_PrintScoreboardItem((teams + teamsort[j]), x, y);
 		y += teamsep;
@@ -2032,16 +1814,16 @@ static int Sbar_TeamColorCompare(const void *t1_, const void *t2_)
 		1002,
 		1003,
 		1004,
-		1, // red
+		1,
 		1005,
 		1006,
 		1007,
 		1008,
-		4, // pink
+		4,
 		1009,
 		1010,
-		3, // yellow
-		2, // blue
+		3,
+		2,
 		1011,
 		1012
 	};
@@ -2059,7 +1841,6 @@ void Sbar_Score (int margin)
 	int sbar_x_save = sbar_x;
 	int sbar_y_save = sbar_y;
 
-
 	sbar_y = (int) (vid_conheight.value - (32+12));
 	sbar_x -= margin;
 
@@ -2068,11 +1849,6 @@ void Sbar_Score (int margin)
 	{
 		if(Sbar_IsTeammatch())
 		{
-			// Layout:
-			//
-			//   team1 team3 team4
-			//
-			//         TEAM2
 
 			scoreboard_t *teamcolorsort[16];
 
@@ -2080,11 +1856,8 @@ void Sbar_Score (int margin)
 			for(i = 0; i < teamlines; ++i)
 				teamcolorsort[i] = &(teams[i]);
 
-			// Now sort them by color
 			qsort(teamcolorsort, teamlines, sizeof(*teamcolorsort), Sbar_TeamColorCompare);
 
-			// : margin
-			// -12*4: four digits space
 			place = (teamlines - 1) * (-12 * 4);
 
 			for(i = 0; i < teamlines; ++i)
@@ -2095,11 +1868,11 @@ void Sbar_Score (int margin)
 				float cr = c[0] / cm;
 				float cg = c[1] / cm;
 				float cb = c[2] / cm;
-				if(cindex == (cl.scores[cl.playerentity - 1].colors & 15)) // my team
+				if(cindex == (cl.scores[cl.playerentity - 1].colors & 15))
 				{
 					Sbar_DrawXNum(-32*4, 0, teamcolorsort[i]->frags, 4, 32, cr, cg, cb, 1, 0);
 				}
-				else // other team
+				else
 				{
 					Sbar_DrawXNum(place, -12, teamcolorsort[i]->frags, 4, 12, cr, cg, cb, 1, 0);
 					place += 4 * 12;
@@ -2108,14 +1881,7 @@ void Sbar_Score (int margin)
 		}
 		else
 		{
-			// Layout:
-			//
-			//   leading  place
-			//
-			//        FRAGS
-			//
-			// find leading score other than ourselves, to calculate distribution
-			// find our place in the scoreboard
+
 			score = cl.scores[me].frags;
 			for (i = 0, otherleader = -1, place = 1;i < cl.maxclients;i++)
 			{
@@ -2192,12 +1958,6 @@ void Sbar_Score (int margin)
 	sbar_y = sbar_y_save;
 }
 
-/*
-==================
-Sbar_IntermissionOverlay
-
-==================
-*/
 void Sbar_IntermissionOverlay (void)
 {
 	int		dig;
@@ -2215,7 +1975,6 @@ void Sbar_IntermissionOverlay (void)
 	DrawQ_Pic (sbar_x + 64, sbar_y + 24, sb_complete, 0, 0, 1, 1, 1, 1 * sbar_alpha_fg.value, 0);
 	DrawQ_Pic (sbar_x + 0, sbar_y + 56, sb_inter, 0, 0, 1, 1, 1, 1 * sbar_alpha_fg.value, 0);
 
-// time
 	dig = (int)cl.completed_time / 60;
 	Sbar_DrawNum (160, 64, dig, 3, 0);
 	num = (int)cl.completed_time - dig*60;
@@ -2223,7 +1982,6 @@ void Sbar_IntermissionOverlay (void)
 	Sbar_DrawPic (246,64,sb_nums[0][num/10]);
 	Sbar_DrawPic (266,64,sb_nums[0][num%10]);
 
-// LA: Display as "a" instead of "a/b" if b is 0
 	if(cl.stats[STAT_TOTALSECRETS])
 	{
 		Sbar_DrawNum (160, 104, cl.stats[STAT_SECRETS], 3, 0);
@@ -2249,15 +2007,7 @@ void Sbar_IntermissionOverlay (void)
 	}
 }
 
-
-/*
-==================
-Sbar_FinaleOverlay
-
-==================
-*/
 void Sbar_FinaleOverlay (void)
 {
 	DrawQ_Pic((vid_conwidth.integer - sb_finale->width)/2, 16, sb_finale, 0, 0, 1, 1, 1, 1 * sbar_alpha_fg.value, 0);
 }
-

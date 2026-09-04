@@ -5,7 +5,7 @@
 
 typedef struct rendermodule_s
 {
-	int active; // set by start, cleared by shutdown
+	int active;
 	const char *name;
 	void(*start)(void);
 	void(*shutdown)(void);
@@ -66,7 +66,7 @@ void R_Modules_Start(void)
 void R_Modules_Shutdown(void)
 {
 	int i;
-	// shutdown in reverse
+
 	for (i = MAXRENDERMODULES - 1;i >= 0;i--)
 	{
 		if (rendermodule[i].name == NULL)
@@ -116,7 +116,6 @@ void R_Modules_DeviceLost(void)
 	}
 }
 
-
 void R_Modules_DeviceRestored(void)
 {
 	int i;
@@ -131,4 +130,3 @@ void R_Modules_DeviceRestored(void)
 		rendermodule[i].devicerestored();
 	}
 }
-

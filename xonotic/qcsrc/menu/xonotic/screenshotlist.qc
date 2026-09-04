@@ -25,12 +25,11 @@ string XonoticScreenshotList_screenshotName(entity me, float i)
 	s = bufstr_get(me.listScreenshot, i);
 
 	if(substring(s, 0, 1) == "/")
-		s = substring(s, 1, strlen(s) - 1);  // remove the first forward slash
+		s = substring(s, 1, strlen(s) - 1);
 
 	return s;
 }
 
-// if subdir is true look in subdirectories too (1 level)
 void getScreenshots_for_ext(entity me, string ext, float subdir)
 {
 	string s;
@@ -50,13 +49,13 @@ void getScreenshots_for_ext(entity me, string ext, float subdir)
 		n = search_getsize(list);
 		for(i = 0; i < n; ++i)
 		{
-			s = search_getfilename(list, i); // get initial full file name
-			s = substring(s, 12, (strlen(s) - 12 - 4)); // remove "screenshots/" prefix and ".<ext>" suffix
-			s = strdecolorize(s); // remove any pre-existing colors
+			s = search_getfilename(list, i);
+			s = substring(s, 12, (strlen(s) - 12 - 4));
+			s = strdecolorize(s);
 			if(subdir)
 			{
-				s = strreplace("/", "^7/", s); // clear colors at the forward slash
-				s = strcat("/", rgb_to_hexcolor(SKINCOLOR_SCREENSHOTLIST_SUBDIR), s); // add a forward slash for sorting, then color
+				s = strreplace("/", "^7/", s);
+				s = strcat("/", rgb_to_hexcolor(SKINCOLOR_SCREENSHOTLIST_SUBDIR), s);
 				bufstr_add(me.listScreenshot, s, true);
 			}
 			else { bufstr_add(me.listScreenshot, s, true); }
@@ -115,13 +114,13 @@ void XonoticScreenshotList_setSelected(entity me, float i)
 	SUPER(XonoticScreenshotList).setSelected(me, i);
 	if (me.pressed && me.selectedItem != selectedItem_save)
 	{
-		// avoid immediate image loading on quick repeated selection changes
+
 		me.newScreenshotTime = time + 0.22;
 	}
 	else if (time > me.newScreenshotTime)
 	{
 		me.newScreenshotTime = 0;
-		me.previewScreenshot(me); // load the preview on selection change
+		me.previewScreenshot(me);
 	}
 }
 
@@ -150,7 +149,7 @@ void XonoticScreenshotList_showNotify(entity me)
 void ScreenshotList_Refresh_Click(entity btn, entity me)
 {
 	me.getScreenshots(me);
-	me.setSelected(me, 0); //always select the first element after a list update
+	me.setSelected(me, 0);
 }
 
 void ScreenshotList_Filter_Change(entity box, entity me)
@@ -188,9 +187,9 @@ void XonoticScreenshotList_draw(entity me)
 	}
 	else if (me.newSlideShowScreenshotTime && time > me.newSlideShowScreenshotTime)
 	{
-		if (me.selectedItem == me.nItems - 1) //last screenshot?
+		if (me.selectedItem == me.nItems - 1)
 		{
-			// restart from the first screenshot
+
 			me.setSelected(me, 0);
 			me.goScreenshot(me, +0);
 		}
@@ -221,7 +220,7 @@ void XonoticScreenshotList_goScreenshot(entity me, float d)
 void XonoticScreenshotList_startScreenshot(entity me)
 {
 	me.screenshotViewerDialog.loadScreenshot(me.screenshotViewerDialog, strcat("/screenshots/", strdecolorize(me.screenshotName(me,me.selectedItem))));
-	// pop up screenshot
+
 	DialogOpenButton_Click_withCoords(NULL, me.screenshotViewerDialog, me.origin + eX * (me.columnNameOrigin * me.size.x) + eY * ((me.itemHeight * me.selectedItem - me.scrollPos) * me.size.y), eY * me.itemAbsSize.y + eX * (me.itemAbsSize.x * me.columnNameSize));
 }
 

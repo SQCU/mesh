@@ -3,7 +3,7 @@
 void turret_remove(entity this)
 {
 	delete(this.tur_head);
-	//remove(this.enemy);
+
 	this.tur_head = NULL;
 }
 
@@ -21,7 +21,6 @@ void turret_changeteam(entity this)
 
 }
 
-// unused?
 void turret_head_draw(entity this)
 {
 	this.drawmask = MASK_NORMAL;
@@ -76,14 +75,14 @@ void turret_draw2d(entity this)
 	if(autocvar_cl_vehicles_hud_tactical)
 	if(dist < 10240 && t != this.team)
 	{
-		// TODO: Vehicle tactical hud
+
 		o = project_3d_to_2d(this.origin + '0 0 32');
 		if(o_z < 0
 		|| o_x < (vid_conwidth * waypointsprite_edgeoffset_left)
 		|| o_y < (vid_conheight * waypointsprite_edgeoffset_top)
 		|| o_x > (vid_conwidth - (vid_conwidth * waypointsprite_edgeoffset_right))
 		|| o_y > (vid_conheight - (vid_conheight * waypointsprite_edgeoffset_bottom)))
-			return; // Dont draw wp's for turrets out of view
+			return;
 		o_z = 0;
 		if(hud != HUD_NORMAL)
 		{
@@ -103,7 +102,6 @@ void turret_draw2d(entity this)
 	string spriteimage = this.netname;
 	float a = this.alpha * autocvar_hud_panel_fg_alpha;
 	vector rgb = spritelookupcolor(this, spriteimage, this.teamradar_color);
-
 
 	if(this.maxdistance > waypointsprite_normdistance)
 		a *= (bound(0, (this.maxdistance - dist) / (this.maxdistance - waypointsprite_normdistance), 1) ** waypointsprite_distancealphaexponent);
@@ -149,7 +147,7 @@ void turret_draw2d(entity this)
 	|| o_y < (vid_conheight * waypointsprite_edgeoffset_top)
 	|| o_x > (vid_conwidth - (vid_conwidth * waypointsprite_edgeoffset_right))
 	|| o_y > (vid_conheight - (vid_conheight * waypointsprite_edgeoffset_bottom)))
-		return; // Dont draw wp's for turrets out of view
+		return;
 
 	o_z = 0;
 
@@ -179,7 +177,7 @@ void turret_draw2d(entity this)
 	bool draw_healthbar = ((this.helpme && time < this.helpme) || !autocvar_g_waypointsprite_turrets_onlyhurt || hud != HUD_NORMAL);
 	bool draw_text = autocvar_g_waypointsprite_turrets_text;
 
-	if(draw_healthbar || draw_text) // make sure it's actually being drawn
+	if(draw_healthbar || draw_text)
 	{
 		o = drawspritearrow(o, M_PI, rgb, a, SPRITE_ARROW_SCALE * t);
 	}
@@ -221,7 +219,7 @@ void turret_construct(entity this, bool isnew)
 	setorigin(this, this.origin);
 	_setmodel(this, tur.model);
 	_setmodel(this.tur_head, tur.head_model);
-	this.solid = SOLID_BBOX; // before setsize so it will be linked to the area grid
+	this.solid = SOLID_BBOX;
 	this.tur_head.solid = SOLID_NOT;
 	setsize(this, tur.m_mins, tur.m_maxs);
 	setsize(this.tur_head, '0 0 0', '0 0 0');
@@ -332,7 +330,7 @@ void turret_die(entity this)
 	pointparticles(EFFECT_ROCKET_EXPLODE, this.origin, '0 0 0', 1);
 	if (!autocvar_cl_nogibs)
 	{
-		// Base
+
 		if(this.m_id == TUR_EWHEEL.m_id)
 			turret_gibtoss((get_turretinfo(this.m_id)).model, this.origin + '0 0 18', this.velocity + '0 0 400' + '0.1 0.1 1' * (random() * 400), '-1 -1 -1', true);
 		else if (this.m_id == TUR_WALKER.m_id)
@@ -388,17 +386,17 @@ NET_HANDLE(ENT_CLIENT_TURRET, bool isnew)
 
 	if(sf & TNSF_ANG)
 	{
-		if(this.tur_head == NULL) // aparenly this can happpen before TNSF_SETUP. great.
+		if(this.tur_head == NULL)
 			this.tur_head = spawn();
 
 		this.tur_head.angles_x = ReadShort();
 		this.tur_head.angles_y = ReadShort();
-		//this.tur_head.angles = this.angles + this.tur_head.angles;
+
 	}
 
 	if(sf & TNSF_AVEL)
 	{
-		if(this.tur_head == NULL) // aparenly this can happpen before TNSF_SETUP. great.
+		if(this.tur_head == NULL)
 			this.tur_head = spawn();
 
 		this.tur_head.avelocity_x = ReadShort();
@@ -426,7 +424,7 @@ NET_HANDLE(ENT_CLIENT_TURRET, bool isnew)
 	if(sf & TNSF_STATUS)
 	{
 		float _tmp;
-		_tmp = ReadByte();
+		_tmp = ReadShort();
 		if(_tmp != this.team)
 		{
 			this.team = _tmp;
@@ -440,7 +438,7 @@ NET_HANDLE(ENT_CLIENT_TURRET, bool isnew)
 		else if(myhp && myhp > _tmp)
 			this.helpme = servertime + 10;
 		else if(myhp && myhp < _tmp)
-			this.helpme = 0; // we're being healed, don't spam help me waypoints
+			this.helpme = 0;
 
 		SetResourceExplicit(this, RES_HEALTH, _tmp);
 	}

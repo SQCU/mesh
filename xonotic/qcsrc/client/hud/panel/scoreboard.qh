@@ -5,7 +5,7 @@ bool autocvar_cl_deathscoreboard;
 string autocvar_scoreboard_columns;
 float autocvar_hud_panel_scoreboard_namesize = 15;
 
-bool sb_showscores; // set by +showscores engine command
+bool sb_showscores;
 
 bool scoreboard_active;
 float scoreboard_fade_alpha;
@@ -38,7 +38,6 @@ entity scoreboard_selected_player;
 entity scoreboard_selected_team;
 int scoreboard_selected_columns_layout;
 
-// start from 1
 int SB_PANEL_FIRST = 1;
 int SB_PANEL_SCOREBOARD = 1;
 int SB_PANEL_RANKINGS = 2;

@@ -4,7 +4,7 @@
 void gamestart_use(entity this, entity actor, entity trigger)
 {
 	SUB_UseTargets(this, this, trigger);
-	delete(this); // TODO: deleting this means it can't be used upon map reset!
+	delete(this);
 }
 
 spawnfunc(trigger_gamestart)

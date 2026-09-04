@@ -16,8 +16,6 @@ void RandomSelection_Add(entity e, float f, string s, vector v, float weight, fl
 #define RandomSelection_AddString(s, weight, priority) RandomSelection_Add(NULL, 0, s, '0 0 0', weight, priority)
 #define RandomSelection_AddVec(v, weight, priority) RandomSelection_Add(NULL, 0, string_null, v, weight, priority)
 
-// prandom - PREDICTABLE random number generator
-
 #define USE_PRANDOM
 
 #ifdef USE_PRANDOM

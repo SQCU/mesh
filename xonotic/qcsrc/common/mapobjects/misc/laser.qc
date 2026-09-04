@@ -87,7 +87,7 @@ void misc_laser_think(entity this)
 	hitent = trace_ent;
 	hitloc = trace_endpos;
 
-	if(this.enemy.target != "") // DETECTOR laser
+	if(this.enemy.target != "")
 	{
 		if(trace_ent.iscreature)
 		{
@@ -123,7 +123,7 @@ void misc_laser_think(entity this)
 bool laser_SendEntity(entity this, entity to, float sendflags)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_LASER);
-	sendflags = sendflags & 0x0F; // use that bit to indicate finite length laser
+	sendflags = sendflags & 0x0F;
 	if(this.spawnflags & LASER_FINITE)
 		sendflags |= SF_LASER_FINITE;
 	if(this.alpha)
@@ -149,7 +149,7 @@ bool laser_SendEntity(entity this, entity to, float sendflags)
 			WriteByte(MSG_ENTITY, bound(0, this.scale * 16.0, 255));
 			WriteByte(MSG_ENTITY, bound(0, this.modelscale * 16.0, 255));
 		}
-		if((sendflags & SF_LASER_FINITE) || !(sendflags & SF_LASER_NOTRACE)) // effect doesn't need sending if the laser is infinite and has collision testing turned off
+		if((sendflags & SF_LASER_FINITE) || !(sendflags & SF_LASER_NOTRACE))
 			WriteShort(MSG_ENTITY, this.cnt);
 	}
 	if(sendflags & SF_LASER_UPDATE_TARGET)
@@ -167,19 +167,6 @@ bool laser_SendEntity(entity this, entity to, float sendflags)
 		WriteByte(MSG_ENTITY, this.active);
 	return true;
 }
-
-/*QUAKED spawnfunc_misc_laser (.5 .5 .5) ? START_ON DEST_IS_FIXED
-Any object touching the beam will be hurt
-Keys:
-"target"
- spawnfunc_target_position where the laser ends
-"mdl"
- name of beam end effect to use
-"beam_color"
- color of the beam (default: red)
-"dmg"
- damage per second (-1 for a laser that kills immediately)
-*/
 
 void laser_setactive(entity this, int act)
 {
@@ -279,7 +266,7 @@ spawnfunc(misc_laser)
 
 	if(this.targetname && this.targetname != "")
 	{
-		// backwards compatibility
+
 		this.use = laser_use;
 	}
 
@@ -343,7 +330,6 @@ NET_HANDLE(ENT_CLIENT_LASER, bool isnew)
 {
 	InterpolateOrigin_Undo(this);
 
-	// 30 bytes, or 13 bytes for just moving
 	int sendflags = ReadByte();
 	this.count = (sendflags & 0xF0);
 
@@ -366,15 +352,15 @@ NET_HANDLE(ENT_CLIENT_LASER, bool isnew)
 			this.alpha = ReadByte() / 255.0;
 		else
 			this.alpha = 0;
-		this.scale = 2; // NOTE: why 2?
-		this.modelscale = 50; // NOTE: why 50?
+		this.scale = 2;
+		this.modelscale = 50;
 		if(sendflags & SF_LASER_SCALE)
 		{
-			this.scale *= ReadByte() / 16.0; // beam radius
-			this.modelscale *= ReadByte() / 16.0; // dlight radius
+			this.scale *= ReadByte() / 16.0;
+			this.modelscale *= ReadByte() / 16.0;
 		}
 		if((sendflags & SF_LASER_FINITE) || !(sendflags & SF_LASER_NOTRACE))
-			this.cnt = ReadShort(); // effect number
+			this.cnt = ReadShort();
 		else
 			this.cnt = 0;
 	}

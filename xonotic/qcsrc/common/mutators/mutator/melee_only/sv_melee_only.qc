@@ -13,7 +13,7 @@ MUTATOR_HOOKFUNCTION(melee_only, SetStartItems, CBC_ORDER_LAST)
 
 MUTATOR_HOOKFUNCTION(melee_only, SetWeaponArena)
 {
-	// turn weapon arena off
+
 	M_ARGV(0, string) = "off";
 }
 

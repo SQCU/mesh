@@ -72,7 +72,6 @@ float DistributeEvenly_GetRandomized(float weight)
 	return f;
 }
 
-// from the GNU Scientific Library
 float gsl_ran_gaussian_lastvalue;
 float gsl_ran_gaussian_lastvalue_set;
 ERASEABLE
@@ -93,8 +92,6 @@ float gsl_ran_gaussian(float sigma)
 	}
 }
 
-// prandom - PREDICTABLE random number generator (not seeded yet)
-
 #ifdef USE_PRANDOM
 	float prandom_seed;
 	float prandom()
@@ -107,7 +104,7 @@ float gsl_ran_gaussian(float sigma)
 			LOG_TRACE("RANDOM -> ", ftos(c));
 	#endif
 
-		return c / 65536;  // in [0..1[
+		return c / 65536;
 	}
 
 	vector prandomvec()

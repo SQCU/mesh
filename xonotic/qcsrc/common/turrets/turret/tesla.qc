@@ -51,13 +51,12 @@ METHOD(TeslaCoil, tr_setup, void(TeslaCoil this, entity it))
 
 bool turret_tesla_firecheck(entity this)
 {
-    // g_turrets_targetscan_maxdelay forces a target re-scan at least this often
+
     float do_target_scan = 0;
 
     if((this.target_select_time + autocvar_g_turrets_targetscan_maxdelay) < time)
         do_target_scan = 1;
 
-    // Old target (if any) invalid?
     if(this.target_validate_time < time)
     if (turret_validate_target(this, this.enemy, this.target_validate_flags) <= 0)
     {
@@ -66,7 +65,6 @@ bool turret_tesla_firecheck(entity this)
         do_target_scan = 1;
     }
 
-    // But never more often then g_turrets_targetscan_mindelay!
     if (this.target_select_time + autocvar_g_turrets_targetscan_mindelay > time)
         do_target_scan = 0;
 

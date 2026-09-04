@@ -31,13 +31,12 @@ spawnfunc(info_teleport_destination)
 	this.mangle = this.angles;
 	this.angles = '0 0 0';
 
-	//setorigin(this, this.origin + '0 0 27');	// To fix a mappers' habit as old as Quake
 	setorigin(this, this.origin);
 
 	if(!this.targetname || this.targetname == "")
 	{
 		objerror (this, "^3Teleport destination without a targetname");
-		return; // don't link it to CSQC in this case!
+		return;
 	}
 
 	teleport_dest_link(this);
@@ -52,7 +51,7 @@ spawnfunc(misc_teleporter_dest)
 
 void teleport_dest_remove(entity this)
 {
-    // strfree(this.classname);
+
     strfree(this.targetname);
 }
 

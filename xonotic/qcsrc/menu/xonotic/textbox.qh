@@ -2,7 +2,6 @@
 
 #include "listbox.qh"
 
-// slightly hacky multiline textbox with scrollbar
 CLASS(XonoticTextBox, XonoticListBox)
 	METHOD(XonoticTextBox, destroy, void(entity));
 	ATTRIB(XonoticTextBox, rowsPerItem, float, 1);
@@ -23,4 +22,3 @@ CLASS(XonoticTextBox, XonoticListBox)
 	ATTRIB(XonoticTextBox, selectionDoesntMatter, bool, true);
 ENDCLASS(XonoticTextBox)
 entity makeXonoticTextBox();
-

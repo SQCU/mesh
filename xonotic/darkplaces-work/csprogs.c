@@ -7,10 +7,6 @@
 #include "clvm_cmds.h"
 #include "prvm_cmds.h"
 
-//============================================================================
-// Client prog handling
-//[515]: omg !!! optimize it ! a lot of hacks here and there also :P
-
 #define CSQC_RETURNVAL	prog->globals.fp[OFS_RETURN]
 #define CSQC_BEGIN
 #define CSQC_END
@@ -26,7 +22,6 @@ void CL_VM_PreventInformationLeaks(void)
 	CSQC_END
 }
 
-//[515]: these are required funcs
 static const char *cl_required_func[] =
 {
 	"CSQC_Init",
@@ -220,27 +215,23 @@ void CSQC_UpdateNetworkTimes(double newtime, double oldtime)
 	CSQC_END
 }
 
-//[515]: set globals before calling R_UpdateView, WEIRD CRAP
 static void CSQC_SetGlobals (double frametime)
 {
 	vec3_t pmove_org;
 	prvm_prog_t *prog = CLVM_prog;
 	CSQC_BEGIN
 		PRVM_clientglobalfloat(time) = cl.time;
-		PRVM_clientglobalfloat(cltime) = realtime; // Spike named it that way.
+		PRVM_clientglobalfloat(cltime) = realtime;
 		PRVM_clientglobalfloat(frametime) = frametime;
 		PRVM_clientglobalfloat(servercommandframe) = cls.servermovesequence;
 		PRVM_clientglobalfloat(clientcommandframe) = cl.movecmd[0].sequence;
 		VectorCopy(cl.viewangles, PRVM_clientglobalvector(input_angles));
-		// // FIXME: this actually belongs into getinputstate().. [12/17/2007 Black]
+
 		PRVM_clientglobalfloat(input_buttons) = cl.movecmd[0].buttons;
 		VectorSet(PRVM_clientglobalvector(input_movevalues), cl.movecmd[0].forwardmove, cl.movecmd[0].sidemove, cl.movecmd[0].upmove);
 		VectorCopy(cl.csqc_vieworiginfromengine, cl.csqc_vieworigin);
 		VectorCopy(cl.csqc_viewanglesfromengine, cl.csqc_viewangles);
 
-		// LordHavoc: Spike says not to do this, but without pmove_org the
-		// CSQC is useless as it can't alter the view origin without
-		// completely replacing it
 		Matrix4x4_OriginFromMatrix(&cl.entities[cl.viewentity].render.matrix, pmove_org);
 		VectorCopy(pmove_org, PRVM_clientglobalvector(pmove_org));
 		VectorCopy(cl.movement_velocity, PRVM_clientglobalvector(pmove_vel));
@@ -307,7 +298,7 @@ qboolean CSQC_AddRenderEdict(prvm_edict_t *ed, int edictnum)
 		entrender = cl.csqcrenderentities + edictnum;
 		r_refdef.scene.entities[r_refdef.scene.numentities++] = entrender;
 		entrender->entitynumber = edictnum + MAX_EDICTS;
-		//entrender->shadertime = 0; // shadertime was set by spawn()
+
 		entrender->flags = 0;
 		entrender->effects = 0;
 		entrender->alpha = 1;
@@ -346,22 +337,17 @@ qboolean CSQC_AddRenderEdict(prvm_edict_t *ed, int edictnum)
 	if (!VectorLength2(entrender->glowmod))
 		VectorSet(entrender->glowmod, 1, 1, 1);
 
-	// LadyHavoc: use the CL_GetTagMatrix function on self to ensure consistent behavior (duplicate code would be bad)
-	// this also sets the custommodellight_origin for us
 	CL_GetTagMatrix(prog, &entrender->matrix, ed, 0, entrender->custommodellight_origin);
 
-	// set up the animation data
 	VM_GenerateFrameGroupBlend(prog, ed->priv.server->framegroupblend, ed);
 	VM_FrameBlendFromFrameGroupBlend(ed->priv.server->frameblend, ed->priv.server->framegroupblend, model, cl.time);
 	VM_UpdateEdictSkeleton(prog, ed, model, ed->priv.server->frameblend);
-	if (PRVM_clientedictfloat(ed, shadertime)) // hack for csprogs.dat files that do not set shadertime, leaves the value at entity spawn time
+	if (PRVM_clientedictfloat(ed, shadertime))
 		entrender->shadertime = PRVM_clientedictfloat(ed, shadertime);
 
-	// transparent offset
 	if (renderflags & RF_USETRANSPARENTOFFSET)
 		entrender->transparent_offset = PRVM_clientglobalfloat(transparent_offset);
 
-	// model light
 	if (renderflags & RF_MODELLIGHT)
 	{
 		if (PRVM_clientedictvector(ed, modellight_ambient)) VectorCopy(PRVM_clientedictvector(ed, modellight_ambient), entrender->custommodellight_ambient); else VectorClear(entrender->custommodellight_ambient);
@@ -389,7 +375,7 @@ qboolean CSQC_AddRenderEdict(prvm_edict_t *ed, int edictnum)
 		CL_SetEntityColormapColors(entrender, c);
 
 	entrender->flags &= ~(RENDER_SHADOW | RENDER_LIGHT | RENDER_NOSELFSHADOW);
-	// either fullbright or lit
+
 	if(!r_fullbright.integer)
 	{
 		if (!(entrender->effects & EF_FULLBRIGHT) && !(renderflags & RF_FULLBRIGHT))
@@ -397,7 +383,7 @@ qboolean CSQC_AddRenderEdict(prvm_edict_t *ed, int edictnum)
 		else if(r_equalize_entities_fullbright.integer)
 			entrender->flags |= RENDER_LIGHT | RENDER_EQUALIZE;
 	}
-	// hide player shadow during intermission or nehahra movie
+
 	if (!(entrender->effects & (EF_NOSHADOW | EF_ADDITIVE | EF_NODEPTHTEST))
 	 &&  (entrender->alpha >= 1)
 	 && !(renderflags & RF_NOSHADOW)
@@ -417,11 +403,9 @@ qboolean CSQC_AddRenderEdict(prvm_edict_t *ed, int edictnum)
 	if (entrender->effects & EF_DYNAMICMODELLIGHT)
 		entrender->flags |= RENDER_DYNAMICMODELLIGHT;
 
-	// make the other useful stuff
 	memcpy(entrender->framegroupblend, ed->priv.server->framegroupblend, sizeof(ed->priv.server->framegroupblend));
 	CL_UpdateRenderEntity(entrender);
 
-	// override animation data with full control
 	memcpy(entrender->frameblend, ed->priv.server->frameblend, sizeof(ed->priv.server->frameblend));
 	if (ed->priv.server->skeleton.relativetransforms)
 		entrender->skeleton = &ed->priv.server->skeleton;
@@ -431,10 +415,6 @@ qboolean CSQC_AddRenderEdict(prvm_edict_t *ed, int edictnum)
 	return true;
 }
 
-// 0 = keydown, key, character (EXT_CSQC)
-// 1 = keyup, key, character (EXT_CSQC)
-// 2 = mousemove relative, x, y (EXT_CSQC)
-// 3 = mousemove absolute, x, y (DP_CSQC)
 qboolean CL_VM_InputEvent (int eventtype, float x, float y)
 {
 	prvm_prog_t *prog = CLVM_prog;
@@ -451,8 +431,8 @@ qboolean CL_VM_InputEvent (int eventtype, float x, float y)
 			PRVM_clientglobalfloat(time) = cl.time;
 			PRVM_clientglobaledict(self) = cl.csqc_server2csqcentitynumber[cl.playerentity];
 			PRVM_G_FLOAT(OFS_PARM0) = eventtype;
-			PRVM_G_FLOAT(OFS_PARM1) = x; // key or x
-			PRVM_G_FLOAT(OFS_PARM2) = y; // ascii or y
+			PRVM_G_FLOAT(OFS_PARM1) = x;
+			PRVM_G_FLOAT(OFS_PARM2) = y;
 			prog->ExecuteProgram(prog, PRVM_clientfunction(CSQC_InputEvent), "QC function CSQC_InputEvent is missing");
 			r = CSQC_RETURNVAL != 0;
 		}
@@ -469,7 +449,7 @@ qboolean CL_VM_UpdateView (double frametime)
 	emptyvector[0] = 0;
 	emptyvector[1] = 0;
 	emptyvector[2] = 0;
-//	vec3_t oldangles;
+
 	if(!cl.csqc_loaded)
 		return false;
 	R_TimeReport("pre-UpdateView");
@@ -477,23 +457,21 @@ qboolean CL_VM_UpdateView (double frametime)
 		r_refdef.view.ismain = true;
 		csqc_original_r_refdef_view = r_refdef.view;
 		csqc_main_r_refdef_view = r_refdef.view;
-		//VectorCopy(cl.viewangles, oldangles);
+
 		PRVM_clientglobalfloat(time) = cl.time;
 		PRVM_clientglobaledict(self) = cl.csqc_server2csqcentitynumber[cl.playerentity];
 		CSQC_SetGlobals(frametime);
-		// clear renderable entity and light lists to prevent crashes if the
-		// CSQC_UpdateView function does not call R_ClearScene as it should
+
 		r_refdef.scene.numentities = 0;
 		r_refdef.scene.numlights = 0;
-		// pass in width and height as parameters (EXT_CSQC_1)
+
 		PRVM_G_FLOAT(OFS_PARM0) = vid.width;
 		PRVM_G_FLOAT(OFS_PARM1) = vid.height;
 		prog->ExecuteProgram(prog, PRVM_clientfunction(CSQC_UpdateView), "QC function CSQC_UpdateView is missing");
-		//VectorCopy(oldangles, cl.viewangles);
-		// Dresk : Reset Dmg Globals Here
+
 		CL_VM_UpdateDmgGlobals(0, 0, emptyvector);
 		r_refdef.view = csqc_main_r_refdef_view;
-		R_RenderView_UpdateViewVectors(); // we have to do this, as we undid the scene render doing this for us
+		R_RenderView_UpdateViewVectors();
 	CSQC_END
 
 	R_TimeReport("UpdateView");
@@ -556,9 +534,7 @@ void CL_VM_Parse_StuffCmd (const char *msg)
 	if(msg[2] == 'q')
 	if(msg[3] == 'c')
 	{
-		// if this is setting a csqc variable, deprotect csqc_progcrc
-		// temporarily so that it can be set by the cvar command,
-		// and then reprotect it afterwards
+
 		int crcflags = csqc_progcrc.flags;
 		int sizeflags = csqc_progcrc.flags;
 		csqc_progcrc.flags &= ~CVAR_READONLY;
@@ -572,12 +548,6 @@ void CL_VM_Parse_StuffCmd (const char *msg)
 	if(cls.demoplayback)
 	if(!strncmp(msg, "curl --clear_autodownload\ncurl --pak --forthismap --as ", 55))
 	{
-		// special handling for map download commands
-		// run these commands IMMEDIATELY, instead of waiting for a client frame
-		// that way, there is no black screen when playing back demos
-		// I know this is a really ugly hack, but I can't think of any better way
-		// FIXME find the actual CAUSE of this, and make demo playback WAIT
-		// until all maps are loaded, then remove this hack
 
 		char buf[MAX_INPUTLINE];
 		const char *p, *q;
@@ -594,17 +564,17 @@ void CL_VM_Parse_StuffCmd (const char *msg)
 				l = strlen(p);
 			if(l > sizeof(buf) - 1)
 				l = sizeof(buf) - 1;
-			strlcpy(buf, p, l + 1); // strlcpy needs a + 1 as it includes the newline!
+			strlcpy(buf, p, l + 1);
 
 			Cmd_ExecuteString(buf, src_command, true);
 
 			p += l;
 			if(*p == '\n')
-				++p; // skip the newline and continue
+				++p;
 			else
-				break; // end of string or overflow
+				break;
 		}
-		Cmd_ExecuteString("curl --clear_autodownload", src_command, true); // don't inhibit CSQC loading
+		Cmd_ExecuteString("curl --clear_autodownload", src_command, true);
 		return;
 	}
 
@@ -652,7 +622,7 @@ void CSQC_AddPrintText (const char *msg)
 	CSQC_BEGIN
 	if(PRVM_clientfunction(CSQC_Parse_Print))
 	{
-		// FIXME: is this bugged?
+
 		i = strlen(msg)-1;
 		if(msg[i] != '\n' && msg[i] != '\r')
 		{
@@ -736,7 +706,7 @@ qboolean CL_VM_Event_Sound(int sound_num, float fvolume, int channel, float atte
 			PRVM_G_FLOAT(OFS_PARM4) = attenuation;
 			VectorCopy(pos, PRVM_G_VECTOR(OFS_PARM5) );
 			PRVM_G_FLOAT(OFS_PARM6) = speed * 100.0f;
-			PRVM_G_FLOAT(OFS_PARM7) = flags; // flags
+			PRVM_G_FLOAT(OFS_PARM7) = flags;
 			prog->ExecuteProgram(prog, PRVM_clientfunction(CSQC_Event_Sound), "QC function CSQC_Event_Sound is missing");
 			r = CSQC_RETURNVAL != 0;
 		}
@@ -748,7 +718,7 @@ qboolean CL_VM_Event_Sound(int sound_num, float fvolume, int channel, float atte
 static void CL_VM_UpdateCoopDeathmatchGlobals (int gametype)
 {
 	prvm_prog_t *prog = CLVM_prog;
-	// Avoid global names for clean(er) coding
+
 	int localcoop;
 	int localdeathmatch;
 
@@ -767,8 +737,7 @@ static void CL_VM_UpdateCoopDeathmatchGlobals (int gametype)
 		}
 		else
 		{
-			// How did the ServerInfo send an unknown gametype?
-			// Better just assign the globals as 0...
+
 			localcoop = 0;
 			localdeathmatch = 0;
 		}
@@ -779,7 +748,7 @@ static void CL_VM_UpdateCoopDeathmatchGlobals (int gametype)
 	}
 }
 #if 0
-static float CL_VM_Event (float event)		//[515]: needed ? I'd say "YES", but don't know for what :D
+static float CL_VM_Event (float event)
 {
 	prvm_prog_t *prog = CLVM_prog;
 	float r = 0;
@@ -828,11 +797,7 @@ void CSQC_ReadEntities (void)
 				}
 				else
 				{
-					// LordHavoc: removing an entity that is already gone on
-					// the csqc side is possible for legitimate reasons (such
-					// as a repeat of the remove message), so no warning is
-					// needed
-					//Con_Printf("Bad csqc_server2csqcentitynumber map\n");	//[515]: never happens ?
+
 				}
 			}
 			else
@@ -848,10 +813,9 @@ void CSQC_ReadEntities (void)
 					}
 					else
 					{
-						// entity( float entnum ) CSQC_Ent_Spawn;
-						// the qc function should set entnum, too (this way it also can return world [2/1/2008 Andreas]
+
 						PRVM_G_FLOAT(OFS_PARM0) = (float) realentnum;
-						// make sure no one gets wrong ideas
+
 						PRVM_clientglobaledict(self) = 0;
 						prog->ExecuteProgram(prog, PRVM_clientfunction(CSQC_Ent_Spawn), "QC function CSQC_Ent_Spawn is missing");
 						PRVM_clientglobaledict(self) = cl.csqc_server2csqcentitynumber[realentnum] = PRVM_EDICT( PRVM_G_INT( OFS_RETURN ) );
@@ -871,7 +835,7 @@ void CSQC_ReadEntities (void)
 
 static void CLVM_begin_increase_edicts(prvm_prog_t *prog)
 {
-	// links don't survive the transition, so unlink everything
+
 	World_UnlinkAll(&cl.world);
 }
 
@@ -880,7 +844,6 @@ static void CLVM_end_increase_edicts(prvm_prog_t *prog)
 	int i;
 	prvm_edict_t *ent;
 
-	// link every entity except world
 	for (i = 1, ent = prog->edicts;i < prog->num_edicts;i++, ent++)
 		if (!ent->priv.server->free && !VectorCompare(PRVM_clientedictvector(ent, absmin), PRVM_clientedictvector(ent, absmax)))
 			CL_LinkEdict(ent);
@@ -892,7 +855,7 @@ static void CLVM_init_edict(prvm_prog_t *prog, prvm_edict_t *e)
 	entity_render_t *entrender;
 	CL_ExpandCSQCRenderEntities(edictnum);
 	entrender = cl.csqcrenderentities + edictnum;
-	e->priv.server->move = false; // don't move on first frame
+	e->priv.server->move = false;
 	memset(entrender, 0, sizeof(*entrender));
 	entrender->shadertime = cl.time;
 }
@@ -938,16 +901,14 @@ static qboolean CLVM_load_edict(prvm_prog_t *prog, prvm_edict_t *ent)
 	return true;
 }
 
-// returns true if the packet is valid, false if end of file is reached
-// used for dumping the CSQC download into demo files
 qboolean MakeDownloadPacket(const char *filename, unsigned char *data, size_t len, int crc, int cnt, sizebuf_t *buf, int protocol)
 {
-	int packetsize = buf->maxsize - 7; // byte short long
+	int packetsize = buf->maxsize - 7;
 	int npackets = ((int)len + packetsize - 1) / (packetsize);
 	char vabuf[1024];
 
 	if(protocol == PROTOCOL_QUAKEWORLD)
-		return false; // CSQC can't run in QW anyway
+		return false;
 
 	SZ_Clear(buf);
 	if(cnt == 0)
@@ -990,18 +951,14 @@ void CL_VM_Init (void)
 	int requiredsize;
 	char vabuf[1024];
 
-	// reset csqc_progcrc after reading it, so that changing servers doesn't
-	// expect csqc on the next server
 	requiredcrc = csqc_progcrc.integer;
 	requiredsize = csqc_progsize.integer;
 	Cvar_SetValueQuick(&csqc_progcrc, -1);
 	Cvar_SetValueQuick(&csqc_progsize, -1);
 
-	// if the server is not requesting a csprogs, then we're done here
 	if (requiredcrc < 0)
 		return;
 
-	// see if the requested csprogs.dat file matches the requested crc
 	if (!cls.demoplayback || csqc_usedemoprogs.integer)
 	{
 		csprogsfn = va(vabuf, sizeof(vabuf), "dlcache/%s.%i.%i", csqc_progname.string, requiredsize, requiredcrc);
@@ -1032,10 +989,7 @@ void CL_VM_Init (void)
 			if (cls.demoplayback)
 			{
 				Con_Printf("^1Warning: Your %s is not the same version as the demo was recorded with (CRC/size are %i/%i but should be %i/%i)\n", csqc_progname.string, csprogsdatacrc, (int)csprogsdatasize, requiredcrc, requiredsize);
-				// Mem_Free(csprogsdata);
-				// return;
-				// We WANT to continue here, and play the demo with different csprogs!
-				// After all, this is just a warning. Sure things may go wrong from here.
+
 			}
 			else
 			{
@@ -1061,21 +1015,19 @@ void CL_VM_Init (void)
 
 	PRVM_Prog_Init(prog);
 
-	// allocate the mempools
 	prog->progs_mempool = Mem_AllocPool(csqc_progname.string, 0, NULL);
-	prog->edictprivate_size = 0; // no private struct used
+	prog->edictprivate_size = 0;
 	prog->name = "client";
 	prog->num_edicts = 1;
 	prog->max_edicts = 512;
 	prog->limit_edicts = CL_MAX_EDICTS;
 	prog->reserved_edicts = 0;
 	prog->edictprivate_size = sizeof(edict_engineprivate_t);
-	// TODO: add a shared extension string #define and add real support for csqc extension strings [12/5/2007 Black]
+
 	prog->extensionstring = vm_sv_extensions;
 	prog->builtins = vm_cl_builtins;
 	prog->numbuiltins = vm_cl_numbuiltins;
 
-	// all callbacks must be defined (pointers are not checked before calling)
 	prog->begin_increase_edicts = CLVM_begin_increase_edicts;
 	prog->end_increase_edicts   = CLVM_end_increase_edicts;
 	prog->init_edict            = CLVM_init_edict;
@@ -1124,11 +1076,9 @@ void CL_VM_Init (void)
 	}
 	Mem_Free(csprogsdata);
 
-	// check if OP_STATE animation is possible in this dat file
 	if (prog->fieldoffsets.nextthink >= 0 && prog->fieldoffsets.frame >= 0 && prog->fieldoffsets.think >= 0 && prog->globaloffsets.self >= 0)
 		prog->flag |= PRVM_OP_STATE;
 
-	// set time
 	PRVM_clientglobalfloat(time) = cl.time;
 	PRVM_clientglobaledict(self) = 0;
 
@@ -1136,17 +1086,14 @@ void CL_VM_Init (void)
 	PRVM_clientglobalfloat(player_localnum) = cl.realplayerentity - 1;
 	PRVM_clientglobalfloat(player_localentnum) = cl.viewentity;
 
-	// set map description (use world entity 0)
 	PRVM_clientedictstring(prog->edicts, message) = PRVM_SetEngineString(prog, cl.worldmessage);
 	VectorCopy(cl.world.mins, PRVM_clientedictvector(prog->edicts, mins));
 	VectorCopy(cl.world.maxs, PRVM_clientedictvector(prog->edicts, maxs));
 	VectorCopy(cl.world.mins, PRVM_clientedictvector(prog->edicts, absmin));
 	VectorCopy(cl.world.maxs, PRVM_clientedictvector(prog->edicts, absmax));
 
-	// call the prog init
 	prog->ExecuteProgram(prog, PRVM_clientfunction(CSQC_Init), "QC function CSQC_Init is missing");
 
-	// Once CSQC_Init was called, we consider csqc code fully initialized.
 	prog->inittime = realtime;
 
 	cl.csqc_loaded = true;
@@ -1154,7 +1101,6 @@ void CL_VM_Init (void)
 	cl.csqc_vidvars.drawcrosshair = false;
 	cl.csqc_vidvars.drawenginesbar = false;
 
-	// Update Coop and Deathmatch Globals (at this point the client knows them from ServerInfo)
 	CL_VM_UpdateCoopDeathmatchGlobals(cl.gametype);
 }
 
@@ -1162,8 +1108,7 @@ void CL_VM_ShutDown (void)
 {
 	prvm_prog_t *prog = CLVM_prog;
 	Cmd_ClearCsqcFuncs();
-	//Cvar_SetValueQuick(&csqc_progcrc, -1);
-	//Cvar_SetValueQuick(&csqc_progsize, -1);
+
 	if(!cl.csqc_loaded)
 		return;
 	CSQC_BEGIN
@@ -1218,8 +1163,7 @@ qboolean CL_VM_TransformView(int entnum, matrix4x4_t *viewmatrix, mplane_t *clip
 
 	CSQC_BEGIN
 		ed = PRVM_EDICT_NUM(entnum);
-		// camera:
-		//   camera_transform
+
 		if(PRVM_clientedictfunction(ed, camera_transform))
 		{
 			ret = true;

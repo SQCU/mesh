@@ -1,23 +1,23 @@
 #pragma once
 
 CLASS(Fireball, Weapon)
-/* spawnfunc */ ATTRIB(Fireball, m_canonical_spawnfunc, string, "weapon_fireball");
-/* ammotype  */ //ATTRIB(Fireball, ammo_type, Resource, RES_NONE);
-/* impulse   */ ATTRIB(Fireball, impulse, int, 9);
-/* flags     */ ATTRIB(Fireball, spawnflags, int, WEP_FLAG_SUPERWEAPON | WEP_TYPE_SPLASH | WEP_FLAG_NODUAL);
-/* rating    */ ATTRIB(Fireball, bot_pickupbasevalue, float, 5000);
-/* color     */ ATTRIB(Fireball, wpcolor, vector, '1 0.5 0');
-/* modelname */ ATTRIB(Fireball, mdl, string, "fireball");
+                ATTRIB(Fireball, m_canonical_spawnfunc, string, "weapon_fireball");
+
+                ATTRIB(Fireball, impulse, int, 9);
+                ATTRIB(Fireball, spawnflags, int, WEP_FLAG_SUPERWEAPON | WEP_TYPE_SPLASH | WEP_FLAG_NODUAL);
+                ATTRIB(Fireball, bot_pickupbasevalue, float, 5000);
+                ATTRIB(Fireball, wpcolor, vector, '1 0.5 0');
+                ATTRIB(Fireball, mdl, string, "fireball");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Fireball, m_model, Model, MDL_FIREBALL_ITEM);
-/* flash mdl */ ATTRIB(Fireball, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Fireball, m_muzzleeffect, entity, EFFECT_FIREBALL_MUZZLEFLASH);
+                ATTRIB(Fireball, m_model, Model, MDL_FIREBALL_ITEM);
+                ATTRIB(Fireball, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Fireball, m_muzzleeffect, entity, EFFECT_FIREBALL_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Fireball, w_crosshair, string, "gfx/crosshairfireball");
-/* crosshair */ //ATTRIB(Fireball, w_crosshair_size, float, 0.65);
-/* wepimg    */ ATTRIB(Fireball, model2, string, "weaponfireball");
-/* refname   */ ATTRIB(Fireball, netname, string, "fireball");
-/* wepname   */ ATTRIB(Fireball, m_name, string, _("Fireball"));
+                ATTRIB(Fireball, w_crosshair, string, "gfx/crosshairfireball");
+
+                ATTRIB(Fireball, model2, string, "weaponfireball");
+                ATTRIB(Fireball, netname, string, "fireball");
+                ATTRIB(Fireball, m_name, string, _("Fireball"));
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \
@@ -59,7 +59,7 @@ REGISTER_WEAPON(FIREBALL, fireball, NEW(Fireball));
 SPAWNFUNC_WEAPON(weapon_fireball, WEP_FIREBALL)
 
 #ifdef SVQC
-.float bot_primary_fireballmooth; // whatever a mooth is
+.float bot_primary_fireballmooth;
 .vector fireball_impactvec;
 .float fireball_primarytime;
 #endif

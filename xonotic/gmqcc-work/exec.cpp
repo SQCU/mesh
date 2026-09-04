@@ -40,7 +40,6 @@ qc_program_t* prog_load(const char *filename, bool skipversion)
     qc_program_t *prog;
     FILE *file = fopen(filename, "rb");
 
-    /* we need all those in order to support INSTR_STATE: */
     bool            has_self      = false,
                     has_time      = false,
                     has_think     = false,
@@ -90,7 +89,7 @@ qc_program_t* prog_load(const char *filename, bool skipversion)
     read_data1(fields);
     read_data1(functions);
     read_data1(strings);
-    read_data2(globals, 2); /* reserve more in case a RETURN using with the global at "the end" exists */
+    read_data2(globals, 2);
 
     util_swap_statements(prog->code);
     util_swap_defs_fields(prog->defs);
@@ -100,24 +99,20 @@ qc_program_t* prog_load(const char *filename, bool skipversion)
 
     fclose(file);
 
-    /* profile counters */
     prog->profile.resize(prog->code.size());
     memset(&prog->profile[0], 0, sizeof(prog->profile[0]) * prog->profile.size());
 
-    /* Add tempstring area */
     prog->tempstring_start = prog->strings.size();
     prog->tempstring_at = prog->strings.size();
 
     prog->strings.resize(prog->strings.size() + 16*1024, '\0');
 
-    /* spawn the world entity */
     prog->entitypool.emplace_back(true);
     prog->entitydata.resize(prog->entityfields);
     if (prog->entitydata.size())
         memset(prog->entitydata.data(), 0, sizeof(prog->entitydata[0]) * prog->entityfields);
     prog->entities = 1;
 
-    /* cache some globals and fields from names */
     for (auto &it : prog->defs) {
         const char *name = prog_getstring(prog, it.name);
         if (!strcmp(name, "self")) {
@@ -161,12 +156,8 @@ void prog_delete(qc_program_t *prog)
     delete prog;
 }
 
-/***********************************************************************
- * VM code
- */
-
 const char* prog_getstring(qc_program_t *prog, qcint_t str) {
-    /* cast for return required for C++ */
+
     if (str < 0 || str >= (qcint_t)prog->strings.size())
         return  "<<<invalid string>>>";
 
@@ -240,11 +231,9 @@ qcint_t prog_tempstring(qc_program_t *prog, const char *str) {
     size_t len = strlen(str);
     size_t at = prog->tempstring_at;
 
-    /* when we reach the end we start over */
     if (at + len >= prog->strings.size())
         at = prog->tempstring_start;
 
-    /* when it doesn't fit, reallocate */
     if (at + len >= prog->strings.size())
     {
         prog->strings.resize(prog->strings.size() + len+1);
@@ -252,7 +241,6 @@ qcint_t prog_tempstring(qc_program_t *prog, const char *str) {
         return at;
     }
 
-    /* when it fits, just copy */
     memcpy(&prog->strings[0] + at, str, len+1);
     prog->tempstring_at += len+1;
     return at;
@@ -261,7 +249,7 @@ qcint_t prog_tempstring(qc_program_t *prog, const char *str) {
 static size_t print_escaped_string(const char *str, size_t maxlen) {
     size_t len = 2;
     putchar('"');
-    --maxlen; /* because we're lazy and have escape sequences */
+    --maxlen;
     while (*str) {
         if (len >= maxlen) {
             putchar('.');
@@ -336,7 +324,7 @@ static void trace_print_global(qc_program_t *prog, unsigned int glob, int vtype)
             else
                 len += printf("(null)");
             len += printf(",");
-            /* len += printf("\"%s\",", prog_getstring(prog, value->string)); */
+
             break;
         case TYPE_FLOAT:
         default:
@@ -453,7 +441,6 @@ static qcint_t prog_enterfunction(qc_program_t *prog, prog_section_function_t *f
     size_t  parampos;
     int32_t p;
 
-    /* back up locals */
     st.localsp  = prog->localstack.size();
     st.stmt     = prog->statement;
     st.function = func;
@@ -481,7 +468,6 @@ static qcint_t prog_enterfunction(qc_program_t *prog, prog_section_function_t *f
     }
 #endif
 
-    /* copy parameters */
     parampos = func->firstlocal;
     for (p = 0; p < func->nargs; ++p)
     {
@@ -527,7 +513,7 @@ static qcint_t prog_leavefunction(qc_program_t *prog) {
 
     prog->stack.pop_back();
 
-    return st.stmt - 1; /* offset the ++st */
+    return st.stmt - 1;
 }
 
 bool prog_exec(qc_program_t *prog, prog_section_function_t *func, size_t flags, long maxjumps) {
@@ -578,10 +564,6 @@ cleanup:
         return false;
     return true;
 }
-
-/***********************************************************************
- * main for when building the standalone executor
- */
 
 #include <math.h>
 
@@ -835,22 +817,22 @@ static int qc_pow(qc_program_t *prog) {
 
 static prog_builtin_t qc_builtins[] = {
     nullptr,
-    &qc_print,       /*   1   */
-    &qc_ftos,        /*   2   */
-    &qc_spawn,       /*   3   */
-    &qc_kill,        /*   4   */
-    &qc_vtos,        /*   5   */
-    &qc_error,       /*   6   */
-    &qc_vlen,        /*   7   */
-    &qc_etos,        /*   8   */
-    &qc_stof,        /*   9   */
-    &qc_strcat,      /*   10  */
-    &qc_strcmp,      /*   11  */
-    &qc_normalize,   /*   12  */
-    &qc_sqrt,        /*   13  */
-    &qc_floor,       /*   14  */
-    &qc_pow,         /*   15  */
-    &qc_stov         /*   16  */
+    &qc_print,
+    &qc_ftos,
+    &qc_spawn,
+    &qc_kill,
+    &qc_vtos,
+    &qc_error,
+    &qc_vlen,
+    &qc_etos,
+    &qc_stof,
+    &qc_strcat,
+    &qc_strcmp,
+    &qc_normalize,
+    &qc_sqrt,
+    &qc_floor,
+    &qc_pow,
+    &qc_stov
 };
 
 static const char *arg0 = nullptr;
@@ -1246,14 +1228,7 @@ static void prog_disasm_function(qc_program_t *prog, size_t id) {
         ++st;
     }
 }
-#else /* !QCVM_LOOP */
-/*
- * Everything from here on is not including into the compilation of the
- * executor.  This is simply code that is #included via #include __FILE__
- * see when QCVM_LOOP is defined, the rest of the code above do not get
- * re-included.  So this really just acts like one large macro, but it
- * sort of isn't, which makes it nicer looking.
- */
+#else
 
 #define OPA ( (qcany_t*) (&prog->globals[0] + st->o1.u1) )
 #define OPB ( (qcany_t*) (&prog->globals[0] + st->o2.u1) )
@@ -1261,7 +1236,6 @@ static void prog_disasm_function(qc_program_t *prog, size_t id) {
 
 #define GLOBAL(x) ( (qcany_t*) (&prog->globals[0] + (x)) )
 
-/* to be consistent with current darkplaces behaviour */
 #if !defined(FLOAT_IS_TRUE_FOR_INT)
 #   define FLOAT_IS_TRUE_FOR_INT(x) ( (x) & 0x7FFFFFFF )
 #endif
@@ -1289,7 +1263,7 @@ while (prog->vmerror == 0) {
 
         case INSTR_DONE:
         case INSTR_RETURN:
-            /* TODO: add instruction count to function profile count */
+
             GLOBAL(OFS_RETURN)->ivector[0] = OPA->ivector[0];
             GLOBAL(OFS_RETURN)->ivector[1] = OPA->ivector[1];
             GLOBAL(OFS_RETURN)->ivector[2] = OPA->ivector[2];
@@ -1518,10 +1492,10 @@ while (prog->vmerror == 0) {
             break;
 
         case INSTR_IF:
-            /* this is consistent with darkplaces' behaviour */
+
             if(FLOAT_IS_TRUE_FOR_INT(OPA->_int))
             {
-                st += st->o2.s1 - 1;    /* offset the s++ */
+                st += st->o2.s1 - 1;
                 if (++jumpcount >= maxjumps)
                     qcvmerror(prog, "`%s` hit the runaway loop counter limit of %li jumps", prog->filename.c_str(), jumpcount);
             }
@@ -1529,7 +1503,7 @@ while (prog->vmerror == 0) {
         case INSTR_IFNOT:
             if(!FLOAT_IS_TRUE_FOR_INT(OPA->_int))
             {
-                st += st->o2.s1 - 1;    /* offset the s++ */
+                st += st->o2.s1 - 1;
                 if (++jumpcount >= maxjumps)
                     qcvmerror(prog, "`%s` hit the runaway loop counter limit of %li jumps", prog->filename.c_str(), jumpcount);
             }
@@ -1561,7 +1535,7 @@ while (prog->vmerror == 0) {
 
             if (newf->entry < 0)
             {
-                /* negative statements are built in functions */
+
                 qcint_t builtinnumber = -newf->entry;
                 if (builtinnumber < (qcint_t)prog->builtins_count && prog->builtins[builtinnumber])
                     prog->builtins[builtinnumber](prog);
@@ -1570,7 +1544,7 @@ while (prog->vmerror == 0) {
                               builtinnumber, prog->filename.c_str());
             }
             else
-                st = &prog->code[0] + prog_enterfunction(prog, newf) - 1; /* offset st++ */
+                st = &prog->code[0] + prog_enterfunction(prog, newf) - 1;
             if (prog->vmerror)
                 goto cleanup;
             break;
@@ -1596,7 +1570,7 @@ while (prog->vmerror == 0) {
         }
 
         case INSTR_GOTO:
-            st += st->o1.s1 - 1;    /* offset the s++ */
+            st += st->o1.s1 - 1;
             if (++jumpcount == 10000000)
                 qcvmerror(prog, "`%s` hit the runaway loop counter limit of %li jumps", prog->filename.c_str(), jumpcount);
             break;
@@ -1621,4 +1595,4 @@ while (prog->vmerror == 0) {
 
 #undef QCVM_PROFILE
 #undef QCVM_TRACE
-#endif /* !QCVM_LOOP */
+#endif

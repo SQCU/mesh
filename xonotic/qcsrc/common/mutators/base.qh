@@ -9,20 +9,10 @@ const int CBC_ORDER_LAST = 2;
 const int CBC_ORDER_EXCLUSIVE = 3;
 const int CBC_ORDER_ANY = 4;
 
-bool CallbackChain_ReturnValue; // read-only field of the current return value
+bool CallbackChain_ReturnValue;
 
-/**
- * Callbacks may be added to zero or more callback chains.
- */
 CLASS(Callback, Object)
-    /**
-     * a callback function is like this:
-     * bool mycallback()
-     * {
-     *     do something
-     *     return false;
-     * }
-     */
+
     ATTRIB(Callback, cbc_func, bool());
     CONSTRUCTOR(Callback, bool() func) {
         CONSTRUCT(Callback);
@@ -30,9 +20,6 @@ CLASS(Callback, Object)
     }
 ENDCLASS(Callback)
 
-/**
- * Callback chains contain zero or more callbacks.
- */
 CLASS(CallbackChain, Object)
     CLASS(CallbackNode, Object)
         ATTRIB(CallbackNode, cbc, Callback);
@@ -74,7 +61,7 @@ CLASS(CallbackChain, Object)
             if (prev) prev.cbc_next = node;
             else this.cbc_next = node;
         } else {
-            // by default we execute last, but before a possible CBC_ORDER_LAST callback
+
             CallbackNode prev = NULL, it = this.cbc_next;
             while (it && !(it.cbc_order & CBC_ORDER_LAST)) { prev = it, it = it.cbc_next; }
             node.cbc_next = it;
@@ -89,13 +76,13 @@ CLASS(CallbackChain, Object)
         int n = 0, order = 0;
         for (Callback prev = NULL, it = this.cbc_next; it; prev = it, it = it.cbc_next) {
             if (it.cbc == cb) {
-                // remove it from the chain
+
                 Callback next = it.cbc_next;
                 if (prev) prev.cbc_next = next;
                 else this.cbc_next = next;
                 ++n;
             }
-            // it is now something we want to keep
+
             order |= (it.cbc_order & CBC_ORDER_ANY);
         }
         this.cbc_order = order;
@@ -108,7 +95,7 @@ CLASS(CallbackChain, Object)
             CallbackChain_ReturnValue = r;
             r |= it.cbc.cbc_func();
         }
-        return r; // callbacks return an error status, so 0 is default return value
+        return r;
     }
 ENDCLASS(CallbackChain)
 
@@ -176,7 +163,7 @@ bool mutator_log = false;
 #define MUTATOR_IS_ENABLED(this) _MUTATOR_IS_ENABLED(MUTATOR_##this)
 
 #ifdef GAMEQC
-/** server mutators activate corresponding client mutators for all clients */
+
 REGISTER_NET_LINKED(Mutator)
 
 #ifdef SVQC
@@ -220,12 +207,12 @@ NET_HANDLE(Mutator, bool isNew)
 bool Mutator_Add(Mutator mut)
 {
     if(mut.m_added)
-        return true; // already added
+        return true;
 
     mut.m_added = true;
     mutatorfunc_t func = mut.mutatorfunc;
     if (!func(MUTATOR_ADDING)) {
-        // good
+
         if (mutator_log) LOG_TRACEF("Mutator: added %s", mut.m_name);
 #ifdef SVQC
         Net_LinkEntity(mut, false, 0, Mutator_SendEntity);
@@ -234,7 +221,7 @@ bool Mutator_Add(Mutator mut)
     }
     backtrace("WARNING: when adding mutator: adding failed, rolling back\n");
     if (func(MUTATOR_ROLLING_BACK)) {
-        // baaaaad
+
         error("WARNING: when adding mutator: rolling back failed");
     }
     return false;
@@ -251,7 +238,7 @@ void Mutator_Remove(Mutator mut)
     mut.m_added = false;
     mutatorfunc_t func = mut.mutatorfunc;
     if (func(MUTATOR_REMOVING)) {
-        // baaaaad
+
         error("Mutator_Remove: removing mutator failed");
     }
     if (mutator_log) LOG_TRACEF("Mutator: removed %s", mut.m_name);
@@ -287,7 +274,7 @@ STATIC_INIT_LATE(Mutators) {
 
 #define MUTATOR_STATIC() MACRO_BEGIN \
     MUTATOR_ONADD { \
-        /* game loads at time 1 */ \
+                                   \
         if (time > 1) { \
             error("This is a game type and it cannot be added at runtime."); \
         } \
@@ -322,7 +309,7 @@ MACRO_END
 
 void _mutPrintFail(string cb, string func)
 {
-	// this is inside a function to avoid expanding it on compilation everytime
+
 	LOG_INFO("HOOK FAILED: ", cb, ":", func);
 }
 

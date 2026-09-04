@@ -3,10 +3,6 @@
 #ifdef SVQC
 .vector moveto;
 
-/**
-    Simulate drag
-    this.velocity = movelib_dragvec(this.velocity,0.02,0.5);
-**/
 vector movelib_dragvec(entity this, float drag, float exp_)
 {
     float lspeed,ldrag;
@@ -19,10 +15,6 @@ vector movelib_dragvec(entity this, float drag, float exp_)
     return this.velocity * ldrag;
 }
 
-/**
-    Simulate drag
-    this.velocity *= movelib_dragflt(somespeed,0.01,0.7);
-**/
 float movelib_dragflt(float fspeed,float drag,float exp_)
 {
     float ldrag;
@@ -34,11 +26,6 @@ float movelib_dragflt(float fspeed,float drag,float exp_)
     return ldrag;
 }
 
-/**
-    Do a inertia simulation based on velocity.
-    Basicaly, this allows you to simulate loss of steering with higher speed.
-    this.velocity = movelib_inertmove_byspeed(this.velocity,newvel,1000,0.1,0.9);
-**/
 vector movelib_inertmove_byspeed(entity this, vector vel_new, float vel_max,float newmin,float oldmax)
 {
     float influense;
@@ -100,68 +87,8 @@ void movelib_move(entity this, vector force,float max_velocity,float drag,float 
 
     if (max_velocity)
         if (mspeed > max_velocity)
-            this.velocity = normalize(this.velocity) * (mspeed - 50);//* max_velocity;
+            this.velocity = normalize(this.velocity) * (mspeed - 50);
 }
-
-/*
-.float mass;
-.float side_friction;
-.float ground_friction;
-.float air_friction;
-.float water_friction;
-.float buoyancy;
-float movelib_deltatime;
-
-void movelib_startupdate(entity this)
-{
-    movelib_deltatime = time - this.movelib_lastupdate;
-
-    if (movelib_deltatime > 0.5)
-        movelib_deltatime = 0;
-
-    this.movelib_lastupdate = time;
-}
-
-void movelib_update(entity this, vector dir,float force)
-{
-    vector acceleration;
-    float old_speed;
-    float ffriction,v_z;
-
-    vector breakvec;
-    vector old_dir;
-    vector ggravity;
-    vector old;
-
-    if(!movelib_deltatime)
-        return;
-    v_z = this.velocity_z;
-    old_speed    = vlen(this.velocity);
-    old_dir      = normalize(this.velocity);
-
-    //ggravity      =  (autocvar_sv_gravity / this.mass) * '0 0 100';
-    acceleration =  (force / this.mass) * dir;
-    //acceleration -= old_dir * (old_speed / this.mass);
-    acceleration -= ggravity;
-
-    if(this.waterlevel > 1)
-    {
-        ffriction = this.water_friction;
-        acceleration += this.buoyancy * '0 0 1';
-    }
-    else
-        if(IS_ONGROUND(this))
-            ffriction = this.ground_friction;
-        else
-            ffriction = this.air_friction;
-
-    acceleration *= ffriction;
-    //this.velocity = this.velocity * (ffriction * movelib_deltatime);
-    this.velocity += acceleration * movelib_deltatime;
-    this.velocity_z = v_z;
-
-}
-*/
 
 void movelib_brake_simple(entity this, float force)
 {
@@ -176,10 +103,6 @@ void movelib_brake_simple(entity this, float force)
     this.velocity_z = vz;
 }
 
-/**
-Pitches and rolls the entity to match the gound.
-Yed need to set v_up and v_forward (generally by calling makevectors) before calling this.
-**/
 #endif
 
 void movelib_groundalign4point(entity this, float spring_length, float spring_up, float blendrate, float _max)
@@ -190,7 +113,6 @@ void movelib_groundalign4point(entity this, float spring_length, float spring_up
     r = (this.absmax + this.absmin) * 0.5 + (v_up * spring_up);
     e = v_up * spring_length;
 
-    // Put springs slightly inside bbox
     ahead = v_forward * (this.maxs.x * 0.8);
     side  = v_right   * (this.maxs.y * 0.8);
 
@@ -225,13 +147,8 @@ void movelib_groundalign4point(entity this, float spring_length, float spring_up
     push_angle.z = (b.z - a.z) * _max;
     push_angle.z += (d.z - c.z) * _max;
 
-    //this.angles_x += push_angle_x * 0.95;
-    //this.angles_z += push_angle_z * 0.95;
-
     this.angles_x = ((1-blendrate) *  this.angles.x)  + (push_angle.x * blendrate);
     this.angles_z = ((1-blendrate) *  this.angles.z)  + (push_angle.z * blendrate);
 
-    //a = this.origin;
     setorigin(this, r);
 }
-

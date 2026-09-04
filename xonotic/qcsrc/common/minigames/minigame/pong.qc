@@ -1,29 +1,24 @@
 #include "pong.qh"
 REGISTER_MINIGAME(pong, _("Pong"));
 
-// minigame flags
-const int PONG_STATUS_WAIT = 0x0010; // waiting for players to join
-const int PONG_STATUS_PLAY = 0x0020; // playing
+const int PONG_STATUS_WAIT = 0x0010;
+const int PONG_STATUS_PLAY = 0x0020;
 
-// send flags
-// (minigame_player) sent when reporting scores
 const int PONG_SF_PLAYERSCORE = MINIG_SF_CUSTOM;
-// (pong_ball) sent when changing team
+
 const int PONG_SF_BALLTEAM = MINIG_SF_CUSTOM;
 
-// keys
-const int PONG_KEY_INCREASE = 0x01; // Move down/right
-const int PONG_KEY_DECREASE = 0x02; // Move up/left
-const int PONG_KEY_BOTH     = 0x03; // Player jamming keys at ramdom
+const int PONG_KEY_INCREASE = 0x01;
+const int PONG_KEY_DECREASE = 0x02;
+const int PONG_KEY_BOTH     = 0x03;
 
-// fields
 const int PONG_MAX_PLAYERS = 4;
-const int PONG_SPECTATOR_TEAM = 255; // must be above max teams and equal to or below 255
-.int    pong_score;                    // (minigame_player) number of goals
-.int    pong_keys;                     // (client) pressed keys
-.entity pong_paddles[PONG_MAX_PLAYERS];// (minigame) paddles
-.float  pong_length;                   // (pong_paddle/pong_ball) size (0,1)
-.entity pong_ai_paddle;                // (pong_ai) controlled paddle entity
+const int PONG_SPECTATOR_TEAM = 255;
+.int    pong_score;
+.int    pong_keys;
+.entity pong_paddles[PONG_MAX_PLAYERS];
+.float  pong_length;
+.entity pong_ai_paddle;
 
 #ifdef SVQC
 
@@ -40,7 +35,6 @@ float autocvar_sv_minigames_pong_ai_tolerance;
 
 void pong_ball_think(entity this);
 
-// Throws a ball in a random direction and sets the think function
 void pong_ball_throw(entity ball)
 {
 	float angle;
@@ -55,13 +49,11 @@ void pong_ball_throw(entity ball)
 	ball.SendFlags |= MINIG_SF_UPDATE|PONG_SF_BALLTEAM;
 }
 
-// Think equivalent of pong_ball_throw, used to delay throws
 void pong_ball_throwthink(entity this)
 {
 	pong_ball_throw(this);
 }
 
-// Moves ball to the center and stops its motion
 void pong_ball_reset(entity ball)
 {
 	ball.velocity = '0 0 0';
@@ -73,7 +65,6 @@ void pong_ball_reset(entity ball)
 	ball.nextthink = time + autocvar_sv_minigames_pong_ball_wait;
 }
 
-// Add the score to the given team in the minigame
 void pong_add_score(entity minigame, int team_thrower, int team_receiver, int delta)
 {
 	if ( !minigame )
@@ -93,7 +84,6 @@ void pong_add_score(entity minigame, int team_thrower, int team_receiver, int de
 	}
 }
 
-// get point in the box nearest to the given one (2D)
 vector box_nearest(vector box_min, vector box_max, vector p)
 {
 	return vec2( p.x > box_max.x  ? box_max.x  : ( p.x < box_min.x ? box_min.x : p.x ),
@@ -118,7 +108,6 @@ void pong_paddle_bounce(entity ball, int pteam)
 	ball.velocity_x = speed * cos(angle);
 }
 
-// checks if the ball hit the paddle for the given team
 bool pong_paddle_hit(entity ball, int pteam)
 {
 	entity paddle = ball.owner.pong_paddles[pteam-1];
@@ -134,7 +123,6 @@ bool pong_paddle_hit(entity ball, int pteam)
 #endif
 }
 
-// Checks for a goal, when that happes adds scores and resets the ball
 bool pong_goal(entity ball, int pteam)
 {
 	entity paddle = ball.owner.pong_paddles[pteam-1];
@@ -151,7 +139,6 @@ bool pong_goal(entity ball, int pteam)
 	return false;
 }
 
-// Moves the ball around
 void pong_ball_think(entity this)
 {
 	float think_speed = autocvar_sys_ticrate;
@@ -207,7 +194,6 @@ void pong_ball_think(entity this)
 
 }
 
-// AI action
 void pong_ai_think(entity this)
 {
 	float think_speed = autocvar_sv_minigames_pong_ai_thinkspeed;
@@ -232,7 +218,6 @@ void pong_ai_think(entity this)
 
 	float target = 0.5;
 	float my_pos;
-
 
 	if ( this.team <= 2 )
 	{
@@ -272,7 +257,6 @@ entity pong_ai_spawn(entity paddle)
 	return ai;
 }
 
-// Moves the paddle
 void pong_paddle_think(entity this)
 {
 	float think_speed = autocvar_sys_ticrate;
@@ -315,8 +299,6 @@ vector pong_team_to_paddlepos(int nteam)
 	}
 }
 
-// Spawns a pong paddle
-// if real_player is NULL, the paddle is controlled by AI
 entity pong_paddle_spawn(entity minigame, int pl_team, entity real_player)
 {
 	entity paddle = msle_spawn(minigame,new(pong_paddle));
@@ -339,7 +321,6 @@ entity pong_paddle_spawn(entity minigame, int pl_team, entity real_player)
 
 }
 
-// required function, handle server side events
 int pong_server_event(entity minigame, string event, ...)
 {
 	switch (event)
@@ -351,7 +332,7 @@ int pong_server_event(entity minigame, string event, ...)
 		}
 		case "join":
 		{
-			// Don't allow joining a match that is already running
+
 			if ( minigame.minigame_flags & PONG_STATUS_PLAY )
 				return PONG_SPECTATOR_TEAM;
 
@@ -443,12 +424,11 @@ int pong_server_event(entity minigame, string event, ...)
 				{
 					if(event_blocked)
 						return true;
-					// keep declaration here, moving it into for() reverses weapon order
-					// potentially compiler bug
+
 					int j;
 					if ( minigame.minigame_flags & PONG_STATUS_WAIT )
 						for ( j = 0; j < PONG_MAX_PLAYERS; j++ )
-						//for ( int j = 0; j < PONG_MAX_PLAYERS; j++ )
+
 						{
 							if ( minigame.pong_paddles[j] == NULL )
 							{
@@ -500,7 +480,6 @@ int pong_server_event(entity minigame, string event, ...)
 	return false;
 }
 
-
 #elif defined(CSQC)
 
 void drawrotpic(vector org, float rot, string pic, vector sz, vector hotspot, vector rgb, float a, float f);
@@ -532,7 +511,6 @@ vector pong_team_to_color(int nteam)
 int pong_keys_pressed;
 int pong_keys_pressed_old;
 
-// Required function, draw the game board
 void pong_hud_board(vector pos, vector mySize)
 {
 	if(pong_keys_pressed != pong_keys_pressed_old)
@@ -549,7 +527,7 @@ void pong_hud_board(vector pos, vector mySize)
 	{
 		if ( e.classname == "pong_ball" )
 		{
-			// Note: 4*radius = 2*diameter because the image is large enough to fit the glow around the ball
+
 			obj_size =  minigame_hud_denormalize_size('4 4 0'*e.pong_length,pos,mySize);
 			obj_pos = minigame_hud_denormalize(e.origin,pos,mySize);
 
@@ -577,7 +555,6 @@ void pong_hud_board(vector pos, vector mySize)
 	}
 }
 
-// Required function, draw the game status panel
 void pong_hud_status(vector pos, vector mySize)
 {
 	HUD_Panel_DrawBg();
@@ -616,7 +593,6 @@ void pong_hud_status(vector pos, vector mySize)
 	}
 }
 
-// convert minigame flags to a message
 string pong_message(int mgflags)
 {
 	string rmessage = "";
@@ -627,7 +603,6 @@ string pong_message(int mgflags)
 	return rmessage;
 }
 
-// Required function, handle client events
 int pong_client_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -650,12 +625,12 @@ int pong_client_event(entity minigame, string event, ...)
 					case K_KP_LEFTARROW:
 						if (event == "key_pressed")
 						{
-							//minigame_cmd("+moved");
+
 							pong_keys_pressed |= PONG_KEY_DECREASE;
 						}
 						else
 						{
-							//minigame_cmd("-moved");
+
 							pong_keys_pressed &= ~PONG_KEY_DECREASE;
 						}
 						return true;
@@ -665,12 +640,12 @@ int pong_client_event(entity minigame, string event, ...)
 					case K_KP_RIGHTARROW:
 						if (event == "key_pressed")
 						{
-							//minigame_cmd("+movei");
+
 							pong_keys_pressed |= PONG_KEY_INCREASE;
 						}
 						else
 						{
-							//minigame_cmd("-movei");
+
 							pong_keys_pressed &= ~PONG_KEY_INCREASE;
 						}
 						return true;

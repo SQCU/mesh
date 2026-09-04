@@ -7,15 +7,15 @@ void GameRules_teams(bool value)
 {
     if (value) {
         serverflags |= SERVERFLAG_TEAMPLAY;
-        teamplay = 1;  // aka AVAILABLE_TEAMS, updated by ScoreRules_basics() after team ents spawn
-        cvar_set("teamplay", "2");  // DP needs this for sending proper getstatus replies.
+        teamplay = 1;
+        cvar_set("teamplay", "2");
         Team_InitTeams();
         GameRules_spawning_teams(true);
     } else {
-    	serverflags &= ~SERVERFLAG_TEAMPLAY;
-    	teamplay = 0;
-    	cvar_set("teamplay", "0");  // DP needs this for sending proper getstatus replies.
-    	GameRules_spawning_teams(false);
+	serverflags &= ~SERVERFLAG_TEAMPLAY;
+	teamplay = 0;
+	cvar_set("teamplay", "0");
+	GameRules_spawning_teams(false);
     }
 }
 
@@ -77,9 +77,9 @@ void GameRules_limit_fallbacks()
     GameRules_limit_time(autocvar_timelimit_override);
 }
 
-void _GameRules_scoring_begin(int teams, float spprio, float stprio)
+void _GameRules_scoring_begin(int team_count, float spprio, float stprio)
 {
-    ScoreRules_basics(teams, spprio, stprio, _GameRules_score_enabled);
+    ScoreRules_basics(team_count, spprio, stprio, _GameRules_score_enabled);
 }
 void _GameRules_scoring_field(entity i, string label, int scoreflags)
 {
@@ -104,10 +104,6 @@ bool GameRules_scoring_is_vip(entity player)
     return player.m_GameRules_scoring_vip;
 }
 
-// Uses client.float_field to accumulate and consume float score and adds score to the player as int (rounded)
-// only when at least one unit of score has been accumulated. It works with negative score too
-// Float scores can't be used as score because they aren't supported by the QC score networking system
-// and online server browsers (e.g. qstat)
 float _GameRules_scoring_add_float2int(entity client, entity sp, float value, .float float_field, float score_factor)
 {
 	client.(float_field) += value;
@@ -115,7 +111,6 @@ float _GameRules_scoring_add_float2int(entity client, entity sp, float value, .f
 	if (score_counter >= -0.5 && score_counter < 0.5)
 		return 0;
 
-	// NOTE: this code works for subtracting score too
 	int points = floor(score_counter + 0.5);
 	client.(float_field) -= points * score_factor;
 	if (!points)

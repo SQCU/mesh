@@ -8,4 +8,3 @@ float autocvar_hud_panel_notify_flip;
 float autocvar_hud_panel_notify_fontsize;
 float autocvar_hud_panel_notify_time;
 float autocvar_hud_panel_notify_icon_aspect;
-

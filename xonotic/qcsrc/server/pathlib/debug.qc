@@ -112,10 +112,8 @@ void pathlib_showedge(vector where,float _lifetime,float rot)
     e.solid     = SOLID_NOT;
     setorigin(e, where);
     setmodel(e, MDL_EDGE);
-    //traceline(where + '0 0 32',where - '0 0 128',MOVE_WORLDONLY,e);
-    //e.angles = vectoangles(trace_plane_normal);
+
     e.angles_y = rot;
-    //e.angles_x += 90;
 
 }
 

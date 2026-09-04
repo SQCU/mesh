@@ -1,14 +1,14 @@
 #pragma once
 
 #ifdef SVQC
-// copies a string to a tempstring (so one can strunzone it)
-string strcat1(string s) = #115; // FRIK_FILE
+
+string strcat1(string s) = #115;
 #endif
 
 #if defined(CSQC)
-const int REPLICATEVARS_SEND_ALL = -1; // sync all cvars with the server (init)
-const int REPLICATEVARS_CHECK = 0; // check if any cvar has changed and sync it with the server
-const int REPLICATEVARS_DESTROY = 1; // destroy data associated with cvars (shutdown)
+const int REPLICATEVARS_SEND_ALL = -1;
+const int REPLICATEVARS_CHECK = 0;
+const int REPLICATEVARS_DESTROY = 1;
 #define REPLICATE_INIT(type, name) type name
 #elif defined(SVQC)
 #define REPLICATE_INIT(type, name) .type name
@@ -16,28 +16,13 @@ const int REPLICATEVARS_DESTROY = 1; // destroy data associated with cvars (shut
 
 #ifdef GAMEQC
 
-    /**
-     * \def REPLICATE(fld, type, cvar)
-     * Replicates a client cvar into a server field
-     *
-     * @param fld   The field to replicate into
-     * @param type  The field type
-     * @param cvarname
-     * @param fixup_func((entity this, string original_value))  optional parameter
-     */
 	#define REPLICATE(...) EVAL_REPLICATE(OVERLOAD(REPLICATE, __VA_ARGS__))
 	#define EVAL_REPLICATE(...) __VA_ARGS__
 
 	#if defined(SVQC)
 	ACCUMULATE void ReplicateVars(entity this, entity store, string thisname, int i) {}
 	ACCUMULATE void ReplicateVars_ApplyChange(entity this, entity store, string thisname, int i) {}
-    /**
-     * \def REPLICATE_APPLYCHANGE(cvarname, ApplyChange_code)
-     * Allows setting code that will be executed on cvar value changes
-     *
-     * @param cvarname
-     * @param ApplyChange_code  code meant to be run on cvar value changes
-     */
+
 	#define REPLICATE_APPLYCHANGE(var, ApplyChange_code) \
 		void ReplicateVars_ApplyChange(entity this, entity store, string thisname, int i) \
 			{ if (thisname == var) { ApplyChange_code } }
@@ -47,11 +32,11 @@ const int REPLICATEVARS_DESTROY = 1; // destroy data associated with cvars (shut
 	{
 		if (!ReplicateVars_time || time < ReplicateVars_time)
 			return;
-		ReplicateVars_time = time + 0.8 + random() * 0.4; // check cvars periodically
+		ReplicateVars_time = time + 0.8 + random() * 0.4;
 	}
 	void ReplicateVars_Start()
 	{
-		if (!ReplicateVars_time) // make sure it gets executed only once
+		if (!ReplicateVars_time)
 		{
 			ReplicateVars_time = time;
 			ReplicateVars(REPLICATEVARS_SEND_ALL);
@@ -67,7 +52,7 @@ const int REPLICATEVARS_DESTROY = 1; // destroy data associated with cvars (shut
 		{ strcpy(field, it); }, \
 		{ strfree(field); }, \
 		{ \
-			/* also initialize to the default value of func when requesting cvars */ \
+			                                                                         \
 			string s = func(this, strcat1(field)); \
 			if (s != field) \
 			{ \

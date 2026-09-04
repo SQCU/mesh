@@ -47,7 +47,7 @@ void XonoticLanguageList_drawListBoxItem(entity me, int i, vector absSize, bool 
 			alpha_factor = 0.3;
 	}
 	else
-		p = "\xE2\x9C\x94"; // Unicode Character 'HEAVY CHECK MARK' (U+2714)
+		p = "\xE2\x9C\x94";
 
 	string s = me.languageParameter(me, i, LANGPARM_NAME_LOCALIZED);
 
@@ -97,7 +97,6 @@ void XonoticLanguageList_loadCvars(entity me)
 	s = cvar_string("_menu_prvm_language");
 	n = me.nItems;
 
-	// default to English
 	for(i = 0; i < n; ++i)
 	{
 		if(me.languageParameter(me, i, LANGPARM_ID) == "en")
@@ -107,7 +106,6 @@ void XonoticLanguageList_loadCvars(entity me)
 		}
 	}
 
-	// otherwise, find the language
 	for(i = 0; i < n; ++i)
 	{
 		if(me.languageParameter(me, i, LANGPARM_ID) == s)
@@ -117,7 +115,6 @@ void XonoticLanguageList_loadCvars(entity me)
 		}
 	}
 
-	// save it off (turning anything unknown into "en")
 	me.saveCvars(me);
 }
 

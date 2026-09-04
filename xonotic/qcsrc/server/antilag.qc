@@ -36,7 +36,6 @@ void antilag_record(entity e, entity store, float t)
 		te_spark(antilag_takebackorigin(e, store, t - store.antilag_debug), '0 0 0', 32);
 }
 
-// finds the index BEFORE t
 float antilag_find(entity e, entity store, float t)
 {
 	for(int i = store.antilag_index; i > 0; --i)
@@ -53,7 +52,6 @@ float antilag_find(entity e, entity store, float t)
 			if(store.antilag_times[i - 1] < t)
 				return i - 1;
 
-	// if we get here, t is sandwiched nowhere, so let's assume it's in the present
 	return -1;
 }
 
@@ -62,7 +60,7 @@ vector antilag_takebackorigin(entity e, entity store, float t)
 	int i0 = antilag_find(e, store, t);
 	if (i0 < 0)
 	{
-		// IN THE PRESENT
+
 		if(store.antilag_takenback)
 			return store.antilag_saved_origin;
 		else
@@ -118,10 +116,9 @@ void antilag_clear(entity e, entity store)
 		store.antilag_times[i] = -2342;
 		store.antilag_origins[i] = e.origin;
 	}
-	store.antilag_index = ANTILAG_MAX_ORIGINS - 1; // next one is 0
+	store.antilag_index = ANTILAG_MAX_ORIGINS - 1;
 }
 
-// TODO: use a single intrusive list across all antilagged entities
 void antilag_takeback_all(entity ignore, float lag)
 {
 	FOREACH_CLIENT(IS_PLAYER(it) && it != ignore, antilag_takeback(it, CS(it), time - lag));
@@ -158,23 +155,14 @@ float antilag_getlag(entity e)
 	return lag;
 }
 
-/*
-==================
-traceline_antilag
-
-A version of traceline that must be used by SOLID_SLIDEBOX things that want to hit SOLID_CORPSE things with a trace attack
-Additionally it moves players back into the past before the trace and restores them afterward.
-==================
-*/
 void tracebox_antilag_force_wz (entity source, vector v1, vector mi, vector ma, vector v2, float nomonst, entity forent, float lag, float wz)
 {
-	// check whether antilagged traces are enabled
+
 	if (lag < 0.001)
 		lag = 0;
 	if (!IS_REAL_CLIENT(forent))
-		lag = 0; // only antilag for clients
+		lag = 0;
 
-	// change shooter to SOLID_BBOX so the shot can hit corpses
 	int oldsolid = source.dphitcontentsmask;
 	if(source)
 		source.dphitcontentsmask = DPCONTENTS_SOLID | DPCONTENTS_BODY | DPCONTENTS_CORPSE;
@@ -182,17 +170,14 @@ void tracebox_antilag_force_wz (entity source, vector v1, vector mi, vector ma, 
 	if (lag)
 		antilag_takeback_all(forent, lag);
 
-	// do the trace
 	if(wz)
 		WarpZone_TraceBox (v1, mi, ma, v2, nomonst, forent);
 	else
 		tracebox (v1, mi, ma, v2, nomonst, forent);
 
-	// restore players to current positions
 	if (lag)
 		antilag_restore_all(forent);
 
-	// restore shooter solid type
 	if(source)
 		source.dphitcontentsmask = oldsolid;
 }

@@ -251,8 +251,6 @@ int _Thread_WaitThread(void *d, int retval, const char *filename, int fileline)
 	return retval;
 }
 
-// standard barrier implementation using conds and mutexes
-// see: http://www.howforge.com/implementing-barrier-in-pthreads
 typedef struct {
 	unsigned int needed;
 	unsigned int called;

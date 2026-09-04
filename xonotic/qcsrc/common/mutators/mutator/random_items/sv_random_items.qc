@@ -1,55 +1,14 @@
 #include "sv_random_items.qh"
 
-/// \file
-/// \brief Source file that contains implementation of the random items mutator.
-/// \author Lyberta
-/// \copyright GNU GPLv2 or any later version.
+float autocvar_g_random_loot_min;
+float autocvar_g_random_loot_max;
+float autocvar_g_random_loot_time;
+float autocvar_g_random_loot_spread;
 
-//============================ Constants ======================================
-
-//======================= Global variables ====================================
-
-// Replace cvars
-
-/// \brief Classnames to replace %s with.
-/// string autocvar_g_random_items_replace_%s;
-
-// Map probability cvars
-
-/// \brief Probability of random %s spawning in the map.
-/// float autocvar_g_random_items_%s_probability;
-
-/// \brief Probability of random %s spawning in the map during overkill.
-/// float autocvar_g_random_items_overkill_%s_probability;
-
-// Loot
-
-float autocvar_g_random_loot_min; ///< Minimum amount of loot items.
-float autocvar_g_random_loot_max; ///< Maximum amount of loot items.
-float autocvar_g_random_loot_time; ///< Amount of time the loot will stay.
-float autocvar_g_random_loot_spread; ///< How far can loot be thrown.
-
-// Loot probability cvars
-
-/// \brief Probability of random %s spawning as loot.
-/// float autocvar_g_random_loot_%s_probability;
-
-/// \brief Probability of random %s spawning as loot during overkill.
-/// float autocvar_g_random_loot_overkill_%s_probability;
-
-/// \brief Holds whether random item is spawning. Used to prevent infinite
-/// recursion.
 bool random_items_is_spawning = false;
 
-//====================== Forward declarations =================================
-
-/// \brief Returns a random classname of the item with specific property.
-/// \param[in] prefix Prefix of the cvars that hold probabilities.
-/// \return Random classname of the item.
 string RandomItems_GetRandomItemClassNameWithProperty(string prefix,
 	.bool item_property);
-
-//=========================== Public API ======================================
 
 string RandomItems_GetRandomItemClassName(string prefix)
 {
@@ -192,11 +151,6 @@ string RandomItems_GetRandomVanillaItemClassName(string prefix, int types)
 	return "";
 }
 
-//========================= Free functions ====================================
-
-/// \brief Returns list of classnames to replace a map item with.
-/// \param[in] item Item to inspect.
-/// \return List of classnames to replace a map item with.
 string RandomItems_GetItemReplacementClassNames(entity item)
 {
 	string cvar_name = sprintf("g_random_items_replace_%s", item.classname);
@@ -227,12 +181,9 @@ string RandomItems_GetRandomItemClassNameWithProperty(string prefix,
 	return RandomSelection_chosen_string;
 }
 
-/// \brief Replaces a map item.
-/// \param[in] item Item to replace.
-/// \return Spawned item on success, NULL otherwise.
 entity RandomItems_ReplaceMapItem(entity item)
 {
-	//PrintToChatAll(strcat("Replacing ", item.classname));
+
 	string new_classnames = RandomItems_GetItemReplacementClassNames(item);
 	if (new_classnames == "")
 	{
@@ -260,7 +211,7 @@ entity RandomItems_ReplaceMapItem(entity item)
 			new_classname = argv(classname_index);
 		}
 	}
-	//PrintToChatAll(strcat("Replacing with ", new_classname));
+
 	if (new_classname == item.classname)
 	{
 		return NULL;
@@ -269,7 +220,7 @@ entity RandomItems_ReplaceMapItem(entity item)
 	entity new_item;
 	if (!MUTATOR_IS_ENABLED(ok))
 	{
-		// TODO: doesn't copy many fields from items
+
 		new_item = Item_Create(strzone(new_classname), item.origin,
 			Item_ShouldKeepPosition(item));
 		random_items_is_spawning = false;
@@ -298,9 +249,6 @@ entity RandomItems_ReplaceMapItem(entity item)
 	return new_item;
 }
 
-/// \brief Spawns a random loot item.
-/// \param[in] position Position of the item.
-/// \return No return.
 void RandomItems_SpawnLootItem(vector position)
 {
 	string class_name = RandomItems_GetRandomItemClassName("random_loot");
@@ -328,8 +276,6 @@ void RandomItems_SpawnLootItem(vector position)
 	random_items_is_spawning = false;
 }
 
-//============================= Hooks ========================================
-
 MUTATOR_HOOKFUNCTION(random_items, BuildMutatorsString)
 {
 	M_ARGV(0, string) = strcat(M_ARGV(0, string), ":random_items");
@@ -340,10 +286,9 @@ MUTATOR_HOOKFUNCTION(random_items, BuildMutatorsPrettyString)
 	M_ARGV(0, string) = strcat(M_ARGV(0, string), ", Random items");
 }
 
-/// \brief Hook that is called when an item is about to spawn.
 MUTATOR_HOOKFUNCTION(random_items, FilterItem, CBC_ORDER_LAST)
 {
-	//PrintToChatAll("FilterItem");
+
 	if (!autocvar_g_random_items)
 	{
 		return false;
@@ -364,10 +309,9 @@ MUTATOR_HOOKFUNCTION(random_items, FilterItem, CBC_ORDER_LAST)
 	return true;
 }
 
-/// \brief Hook that is called after the player has touched an item.
 MUTATOR_HOOKFUNCTION(random_items, ItemTouched, CBC_ORDER_LAST)
 {
-	//PrintToChatAll("ItemTouched");
+
 	if (!autocvar_g_random_items)
 	{
 		return;
@@ -386,10 +330,9 @@ MUTATOR_HOOKFUNCTION(random_items, ItemTouched, CBC_ORDER_LAST)
 	delete(item);
 }
 
-/// \brief Hook which is called when the player dies.
 MUTATOR_HOOKFUNCTION(random_items, PlayerDies)
 {
-	//PrintToChatAll("PlayerDies");
+
 	if (!autocvar_g_random_loot)
 	{
 		return;

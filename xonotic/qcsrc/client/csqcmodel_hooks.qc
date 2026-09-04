@@ -19,7 +19,6 @@
 .float death_time;
 .int modelflags;
 
-// FEATURE: LOD
 .int lodmodelindex0;
 .int lodmodelindex1;
 .int lodmodelindex2;
@@ -29,7 +28,6 @@ void CSQCModel_LOD_Apply(entity this, bool isplayer)
 {
 	int detailreduction = ((isplayer) ? autocvar_cl_playerdetailreduction : autocvar_cl_modeldetailreduction);
 
-	// LOD model loading
 	if(this.lodmodelindex0 != this.modelindex && this.lodmodelindex1 != this.modelindex && this.lodmodelindex2 != this.modelindex)
 	{
 		string modelname = this.model;
@@ -38,12 +36,10 @@ void CSQCModel_LOD_Apply(entity this, bool isplayer)
 		vector mi = this.mins;
 		vector ma = this.maxs;
 
-		// set modelindex
 		this.lodmodelindex0 = this.modelindex;
 		this.lodmodelindex1 = this.modelindex;
 		this.lodmodelindex2 = this.modelindex;
 
-		// FIXME: this only supports 3-letter extensions
 		s = strcat(substring(modelname, 0, strlen(modelname)-4), "_lod1", substring(modelname, -4, 4));
 		if(fexists(s))
 		{
@@ -62,11 +58,10 @@ void CSQCModel_LOD_Apply(entity this, bool isplayer)
 				this.lodmodelindex2 = this.modelindex;
 		}
 
-		_setmodel(this, modelname); // make everything normal again
+		_setmodel(this, modelname);
 		setsize(this, mi, ma);
 	}
 
-	// apply LOD
 	if(detailreduction <= 0)
 	{
 		if(detailreduction <= -2)
@@ -78,7 +73,7 @@ void CSQCModel_LOD_Apply(entity this, bool isplayer)
 	}
 	else
 	{
-		float distance = vlen(((isplayer) ? this.origin : NearestPointOnBox(this, view_origin)) - view_origin); // TODO: perhaps it should just use NearestPointOnBox all the time, player hitbox can potentially be huge
+		float distance = vlen(((isplayer) ? this.origin : NearestPointOnBox(this, view_origin)) - view_origin);
 		float dist1 = (this.loddistance1 > 0) ? this.loddistance1 : autocvar_cl_loddistance1;
 		float dist2 = (this.loddistance2 > 0) ? this.loddistance2 : autocvar_cl_loddistance2;
 		float f = (distance * current_viewzoom + 100.0) * detailreduction;
@@ -92,7 +87,6 @@ void CSQCModel_LOD_Apply(entity this, bool isplayer)
 	}
 }
 
-// FEATURE: forcemodel and model color selection (MUST be called BEFORE LOD!)
 string forceplayermodels_model;
 bool forceplayermodels_modelisgoodmodel;
 int forceplayermodels_modelindex;
@@ -147,8 +141,6 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 	if(MUTATOR_CALLHOOK(ForcePlayermodels_Skip, this, islocalplayer))
 		goto skipforcemodels;
 
-	// FORCEMODEL
-	// which one is ALWAYS good?
 	if (!forceplayermodels_goodmodel)
 	{
 		entity e = spawn();
@@ -159,14 +151,13 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 		delete(e);
 	}
 
-	// first, try finding it from the server
 	if(this.forceplayermodels_savemodelindex && this.forceplayermodels_savemodel != "null")
 	{
 		if(islocalplayer)
 		{
-			if(!isdemo()) // this is mainly cheat protection; not needed for demos
+			if(!isdemo())
 			{
-				// trust server's idea of "own player model"
+
 				forceplayermodels_modelisgoodmodel = this.forceplayermodels_isgoodmodel;
 				forceplayermodels_model = this.forceplayermodels_savemodel;
 				forceplayermodels_modelindex = this.forceplayermodels_savemodelindex;
@@ -176,15 +167,13 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 		}
 	}
 
-	// forcemodel finding
 	if(!forceplayermodels_attempted)
 	{
 		forceplayermodels_attempted = 1;
 
-		// only if this failed, find it out on our own
 		entity e = spawn();
 		precache_model(autocvar__cl_playermodel);
-		_setmodel(e, autocvar__cl_playermodel); // this is harmless, see below
+		_setmodel(e, autocvar__cl_playermodel);
 		forceplayermodels_modelisgoodmodel = fexists(e.model);
 		forceplayermodels_model = e.model;
 		forceplayermodels_modelindex = e.modelindex;
@@ -195,14 +184,13 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 	if(autocvar_cl_forcemyplayermodel != "" && autocvar_cl_forcemyplayermodel != forceplayermodels_mymodel)
 	{
 		entity e = spawn();
-		_setmodel(e, autocvar_cl_forcemyplayermodel); // this is harmless, see below
+		_setmodel(e, autocvar_cl_forcemyplayermodel);
 		forceplayermodels_myisgoodmodel = fexists(e.model);
 		forceplayermodels_mymodel = e.model;
 		forceplayermodels_mymodelindex = e.modelindex;
 		delete(e);
 	}
 
-	// apply it
 	bool isfriend;
 
 	if(teamplay)
@@ -258,10 +246,9 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 			forceplayercolors_enabled = true;
 	}
 
-	// forceplayercolors too
 	if(teamplay)
 	{
-		// own team's color is never forced
+
 		int forcecolor_friend = 0, forcecolor_enemy = 0;
 		entity tm;
 
@@ -273,21 +260,16 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 
 		if(forcecolor_enemy && !forcecolor_friend)
 		{
-			// only enemy color is forced?
-			// verify it is not equal to the friend color
+
 			if(forcecolor_enemy == 1024 + 17 * myteam)
 				forcecolor_enemy = 0;
 		}
 
 		if(forcecolor_friend && !forcecolor_enemy)
 		{
-			// only friend color is forced?
-			// verify it is not equal to the enemy color
+
 			for(tm = teams.sort_next; tm; tm = tm.sort_next)
-				// note: we even compare against our own team.
-				// if we rejected because we matched our OWN team color,
-				// this is not bad; we then simply keep our color as is
-				// anyway.
+
 				if(forcecolor_friend == 1024 + 17 * tm.team)
 					forcecolor_friend = 0;
 		}
@@ -303,16 +285,13 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 				this.colormap = forcecolor_enemy;
 		}
 	}
-	else // if(!teamplay)
+	else
 	{
 		if(autocvar_cl_forcemyplayercolors && islocalplayer)
 			this.colormap = 1024 + autocvar_cl_forcemyplayercolors;
 		else if (autocvar_cl_forceuniqueplayercolors && !islocalplayer && !gametype.m_1v1)
 		{
-			// Assign each enemy unique colors
-			// pick colors from 0 to 14 since 15 is the rainbow color
-			// pl01 0 1, pl02 1 2, ..., pl14 13 14, pl15 14 0
-			// pl16 0 2, pl17 1 3, ..., pl29 13  0, pl30 14 1
+
 			int num = this.entnum - 1;
 			int c1 = num % 15;
 			int q = floor(num / 15);
@@ -332,7 +311,6 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 		return;
 	}
 
-	// GLOWMOD AND DEATH FADING
 	if(this.colormap > 0)
 		this.glowmod = colormapPaletteColor(((this.colormap >= 1024) ? this.colormap : entcs_GetClientColors(this.colormap - 1)) & 0x0F, true);
 	else
@@ -352,14 +330,11 @@ void CSQCPlayer_ModelAppearance_Apply(entity this, bool islocalplayer)
 		}
 	}
 
-	// don't let the engine increase player's glowmod
 	if (autocvar_r_hdr_glowintensity > 1)
 		this.glowmod /= autocvar_r_hdr_glowintensity;
 
-	//printf("CSQCPlayer_ModelAppearance_Apply(): state = %s, colormap = %f, glowmod = %s\n", (this.csqcmodel_isdead ? "DEAD" : "ALIVE"), this.colormap, vtos(this.glowmod));
 }
 
-// FEATURE: fallback frames
 .int csqcmodel_saveframe;
 .int csqcmodel_saveframe2;
 #ifdef CSQCMODEL_HAVE_TWO_FRAMES
@@ -387,8 +362,6 @@ void CSQCPlayer_FallbackFrame_PostUpdate(entity this, bool isnew)
 	this.csqcmodel_saveframe4 = this.frame4;
 #endif
 
-	// hack for death animations: set their frametime to zero in case a
-	// player "pops in"
 	if(isnew)
 	{
 #define FIX_FRAMETIME(f,ft) MACRO_BEGIN \
@@ -412,19 +385,19 @@ int CSQCPlayer_FallbackFrame(entity this, int f)
 {
 	TC(int, f);
 	if(frameduration(this.modelindex, f) > 0)
-		return f; // goooooood
+		return f;
 	if(frameduration(this.modelindex, 1) <= 0)
-		return f; // this is a static model. We can't fix it if we wanted to
+		return f;
 	switch(f)
 	{
-		case 23: return 11; // anim_melee -> anim_shoot
-		case 24: return 4; // anim_duckwalkbackwards -> anim_duckwalk
-		case 25: return 4; // anim_duckwalkstrafeleft -> anim_duckwalk
-		case 26: return 4; // anim_duckwalkstraferight -> anim_duckwalk
-		case 27: return 4; // anim_duckwalkforwardright -> anim_duckwalk
-		case 28: return 4; // anim_duckwalkforwardleft -> anim_duckwalk
-		case 29: return 4; // anim_duckwalkbackright -> anim_duckwalk
-		case 30: return 4; // anim_duckwalkbackleft -> anim_duckwalk
+		case 23: return 11;
+		case 24: return 4;
+		case 25: return 4;
+		case 26: return 4;
+		case 27: return 4;
+		case 28: return 4;
+		case 29: return 4;
+		case 30: return 4;
 	}
 	LOG_DEBUGF("Frame %d missing in model %s, and we have no fallback - FAIL!", f, this.model);
 	return f;
@@ -439,7 +412,6 @@ void CSQCPlayer_FallbackFrame_Apply(entity this)
 #endif
 }
 
-// FEATURE: auto tag_index
 .entity tag_entity;
 .int tag_entity_lastmodelindex;
 .int tag_index;
@@ -452,7 +424,7 @@ void CSQCModel_AutoTagIndex_Apply(entity this)
 
 	if(this.tag_networkentity)
 	{
-		// we are ATTACHED!
+
 		bool changed = 0;
 		if(this.tag_entity.entnum != this.tag_networkentity)
 		{
@@ -460,7 +432,6 @@ void CSQCModel_AutoTagIndex_Apply(entity this)
 			changed = 1;
 		}
 
-		// recursive predraw call to fix issues with forcemodels and LOD if bone indexes mismatch
 		if(this.tag_entity.classname == "ENT_CLIENT_MODEL")
 		{
 			CSQCModel_Hook_PreDraw(this.tag_entity, (this.tag_entity.isplayermodel & ISPLAYER_CLIENT));
@@ -475,7 +446,7 @@ void CSQCModel_AutoTagIndex_Apply(entity this)
 		{
 			if(this.tag_entity)
 			{
-				// the best part is: IT EXISTS
+
 				if(substring(this.model, 0, 14) == "models/weapons")
 				{
 					if(substring(this.tag_entity.model, 0, 14) == "models/weapons")
@@ -485,7 +456,7 @@ void CSQCModel_AutoTagIndex_Apply(entity this)
 							this.tag_index = gettagindex(this.tag_entity, "tag_weapon");
 						if(!this.tag_index)
 						{
-							// we need to prevent this from 'appening
+
 							this.tag_entity = NULL;
 							this.drawmask = 0;
 							LOG_TRACE("h_ model lacks weapon attachment, but v_ model is attached to it");
@@ -509,7 +480,7 @@ void CSQCModel_AutoTagIndex_Apply(entity this)
 			}
 			else
 			{
-				// damn, see you next frame
+
 				this.drawmask = 0;
 			}
 		}
@@ -550,7 +521,7 @@ void CSQCModel_Effects_Apply(entity this)
 
 	if(eff & EF_BRIGHTFIELD)
 		tref = EFFECT_TR_NEXUIZPLASMA.m_id;
-	// ignoring EF_MUZZLEFLASH
+
 	if(eff & EF_BRIGHTLIGHT)
 		adddynamiclight(this.origin, 400, '3 3 3');
 	if(eff & EF_DIMLIGHT)
@@ -563,36 +534,36 @@ void CSQCModel_Effects_Apply(entity this)
 		adddynamiclight(this.origin, 200, '0.15 0.15 1.5');
 	if(eff & EF_RED)
 		adddynamiclight(this.origin, 200, '1.5 0.15 0.15');
-	// ignoring EF_NOGUNBOB
+
 	if(eff & EF_FULLBRIGHT)
 		this.renderflags |= RF_FULLBRIGHT;
 	if(eff & EF_FLAME)
 	{
 		boxparticles(particleeffectnum(EFFECT_EF_FLAME), this, this.absmin, this.absmax, this.velocity, this.velocity, bound(0, frametime, 0.1), 0);
-		//pointparticles(EFFECT_EF_FLAME, this.origin, '0 0 0', bound(0, frametime, 0.1));
+
 	}
 	if(eff & EF_SHOCK)
 	{
 		boxparticles(particleeffectnum(EFFECT_ARC_LIGHTNING), this, this.absmin, this.absmax, '0 0 0', '0 0 0', bound(0, frametime, 0.1), 0);
-		//pointparticles(EFFECT_ARC_LIGHTNING, this.origin, '0 0 0', bound(0, frametime, 0.1));
+
 	}
 	if(eff & EF_STARDUST)
 	{
 		boxparticles(particleeffectnum(EFFECT_EF_STARDUST), this, this.absmin, this.absmax, this.velocity, this.velocity, bound(0, frametime, 0.1), 0);
-		//pointparticles(EFFECT_EF_STARDUST, this.origin, '0 0 0', bound(0, frametime, 0.1));
+
 	}
 	if(eff & EF_NOSHADOW)
 		this.renderflags |= RF_NOSHADOW;
 	if(eff & EF_NODEPTHTEST)
 		this.renderflags |= RF_DEPTHHACK;
-	// ignoring EF_SELECTABLE
+
 	if(eff & EF_DOUBLESIDED)
 		this.effects |= EF_DOUBLESIDED;
 	if(eff & EF_NOSELFSHADOW)
 		this.effects |= EF_NOSELFSHADOW;
 	if(eff & EF_DYNAMICMODELLIGHT)
 		this.renderflags |= RF_DYNAMICMODELLIGHT;
-	// ignoring EF_UNUSED18, EF_UNUSED19, EF_RESTARTANIM_BIT, EF_TELEPORT_BIT, EF_LOWPRECISION
+
 	if(this.csqcmodel_modelflags & MF_ROCKET)
 		tref = EFFECT_TR_ROCKET.m_id;
 	if(this.csqcmodel_modelflags & MF_GRENADE)
@@ -601,9 +572,7 @@ void CSQCModel_Effects_Apply(entity this)
 		tref = EFFECT_TR_BLOOD.m_id;
 	if(this.csqcmodel_modelflags & MF_ROTATE)
 	{
-		// This will be hard to replace with MAKE_VECTORS because it's called as part of the predraw function
-		// as documented in csprogs.h in the engine. The globals can then be read in many places in the engine.
-		// However MF_ROTATE is currently only used in one place - might be possible to get rid of it entirely.
+
 		this.renderflags |= RF_USEAXIS;
 		makevectors(this.angles + '0 100 0' * fmod(time, 3.6));
 	}
@@ -625,7 +594,6 @@ void CSQCModel_Effects_Apply(entity this)
 
 	if(this.csqcmodel_effects & CSQCMODEL_EF_RESPAWNGHOST)
 		this.renderflags |= RF_ADDITIVE;
-		// also special in CSQCPlayer_GlowMod_Apply
 
 	if(this.csqcmodel_modelflags & MF_ROCKET)
 	{
@@ -645,7 +613,6 @@ void CSQCModel_Effects_Apply(entity this)
 	}
 }
 
-// general functions
 .int csqcmodel_predraw_run;
 .int anim_frame;
 .int anim_frame1time;
@@ -675,7 +642,7 @@ void CSQCModel_Hook_PreDraw(entity this, bool isplayer)
 	else
 		this.drawmask = MASK_NORMAL;
 
-	if((this.isplayermodel & ISPLAYER_MODEL) && this.drawmask) // this checks if it's a player MODEL!
+	if((this.isplayermodel & ISPLAYER_MODEL) && this.drawmask)
 	{
 		CSQCPlayer_ModelAppearance_Apply(this, (this.isplayermodel & ISPLAYER_LOCAL));
 		CSQCModel_LOD_Apply(this, true);
@@ -692,14 +659,14 @@ void CSQCModel_Hook_PreDraw(entity this, bool isplayer)
 			else
 			{
 				free_skeleton_from_frames(this);
-				// just in case, clear these (we're animating in frame and frame3)
+
 				this.lerpfrac = 0;
 				this.lerpfrac4 = 0;
 			}
 		}
 		else
 		{
-			// we know that frame3 and frame4 fields, used by InterpolateAnimation, are left alone - but that is all we know!
+
 			skeleton_loadinfo(this);
 			bool doblend = (this.bone_upperbody >= 0);
 			bool onground = 0;
@@ -718,7 +685,7 @@ void CSQCModel_Hook_PreDraw(entity this, bool isplayer)
 				tracebox(this.origin + '0 0 1', this.mins, this.maxs, this.origin - '0 0 4', MOVE_NORMAL, this);
 				if(trace_startsolid || trace_fraction < 1)
 					onground = 1;
-				// predicted clients handle smoothing in the prediction code
+
 				this.origin = CSQCModel_ApplyStairSmoothing(this, onground, this.origin);
 			}
 			animdecide_load_if_needed(this);
@@ -733,8 +700,7 @@ void CSQCModel_Hook_PreDraw(entity this, bool isplayer)
 			this.anim_saveframe1time = this.anim_frame1time;
 			this.anim_saveframe2 = this.anim_frame2;
 			this.anim_saveframe2time = this.anim_frame2time;
-			// Note: we always consider lerpfrac "changed", as it uses fixed values every time anyway.
-			// This ensures that .frame etc. are always written.
+
 			CSQCModel_InterpolateAnimation_2To4_PreNote(this, sf | CSQCMODEL_PROPERTY_LERPFRAC);
 			this.lerpfrac = (doblend ? 0.5 : 0);
 			this.frame = this.anim_frame;
@@ -750,7 +716,7 @@ void CSQCModel_Hook_PreDraw(entity this, bool isplayer)
 			else
 			{
 				free_skeleton_from_frames(this);
-				// just in case, clear these (we're animating in frame and frame3)
+
 				this.lerpfrac = 0;
 				this.lerpfrac4 = 0;
 			}
@@ -766,9 +732,9 @@ void CSQCModel_Hook_PreDraw(entity this, bool isplayer)
 
 void CSQCModel_Hook_PreUpdate(entity this, bool isnew, bool isplayer, bool islocalplayer)
 {
-	// interpolate v_angle
+
 	this.iflags |= IFLAG_V_ANGLE_X;
-	// revert to values from server
+
 	CSQCModel_Effects_PreUpdate(this);
 	if((this.isplayermodel & ISPLAYER_MODEL))
 	{
@@ -780,13 +746,12 @@ void CSQCModel_Hook_PreUpdate(entity this, bool isnew, bool isplayer, bool isloc
 
 void CSQCModel_Hook_PostUpdate(entity this, bool isnew, bool isplayer, bool islocalplayer)
 {
-	// is it a player model? (shared state)
-	bool is_playermodel = (substring(this.model, 0, 14) == "models/player/" || substring(this.model, 0, 17) == "models/ok_player/" || 
+
+	bool is_playermodel = (substring(this.model, 0, 14) == "models/player/" || substring(this.model, 0, 17) == "models/ok_player/" ||
 							(substring(this.model, 0, 16) == "models/monsters/" && (this.isplayermodel & BIT(1))));
 	this.isplayermodel = BITSET(this.isplayermodel, ISPLAYER_MODEL, is_playermodel);
-	this.csqcmodel_isdead = false; // workaround for dead players who become a spectator
+	this.csqcmodel_isdead = false;
 
-	// save values set by server
 	if((this.isplayermodel & ISPLAYER_MODEL))
 	{
 		CSQCPlayer_ModelAppearance_PostUpdate(this);

@@ -25,7 +25,6 @@ vector vehicles_force_fromtag_maglev(entity this, string tag_name, float spring_
 	v_forward  = normalize(v_forward) * -1;
 	traceline(force_fromtag_origin, force_fromtag_origin - (v_forward  * spring_length), MOVE_NORMAL, this);
 
-	// TODO - this may NOT be compatible with wall/celing movement, unhardcode 0.25 (engine count multiplier)
 	if(trace_fraction == 1.0)
 	{
 		force_fromtag_normpower = -0.25;

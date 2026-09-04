@@ -7,15 +7,11 @@
 
 #include "quakedef.h"
 
-// LordHavoc: some portable directory listing code I wrote for lmp2pcx, now used in darkplaces to load id1/*.pak and such...
-
 int matchpattern(const char *in, const char *pattern, int caseinsensitive)
 {
 	return matchpattern_with_separator(in, pattern, caseinsensitive, "/\\:", false);
 }
 
-// wildcard_least_one: if true * matches 1 or more characters
-//                     if false * matches 0 or more characters
 int matchpattern_with_separator(const char *in, const char *pattern, int caseinsensitive, const char *separators, qboolean wildcard_least_one)
 {
 	int c1, c2;
@@ -24,18 +20,18 @@ int matchpattern_with_separator(const char *in, const char *pattern, int caseins
 		switch (*pattern)
 		{
 		case 0:
-			return 1; // end of pattern
-		case '?': // match any single character
+			return 1;
+		case '?':
 			if (*in == 0 || strchr(separators, *in))
-				return 0; // no match
+				return 0;
 			in++;
 			pattern++;
 			break;
-		case '*': // match anything until following string
+		case '*':
 			if(wildcard_least_one)
 			{
 				if (*in == 0 || strchr(separators, *in))
-					return 0; // no match
+					return 0;
 				in++;
 			}
 			pattern++;
@@ -43,10 +39,10 @@ int matchpattern_with_separator(const char *in, const char *pattern, int caseins
 			{
 				if (strchr(separators, *in))
 					break;
-				// see if pattern matches at this offset
+
 				if (matchpattern_with_separator(in, pattern, caseinsensitive, separators, wildcard_least_one))
 					return 1;
-				// nope, advance to next offset
+
 				in++;
 			}
 			break;
@@ -54,7 +50,7 @@ int matchpattern_with_separator(const char *in, const char *pattern, int caseins
 			if (*in != *pattern)
 			{
 				if (!caseinsensitive)
-					return 0; // no match
+					return 0;
 				c1 = *in;
 				if (c1 >= 'A' && c1 <= 'Z')
 					c1 += 'a' - 'A';
@@ -62,7 +58,7 @@ int matchpattern_with_separator(const char *in, const char *pattern, int caseins
 				if (c2 >= 'A' && c2 <= 'Z')
 					c2 += 'a' - 'A';
 				if (c1 != c2)
-					return 0; // no match
+					return 0;
 			}
 			in++;
 			pattern++;
@@ -70,11 +66,10 @@ int matchpattern_with_separator(const char *in, const char *pattern, int caseins
 		}
 	}
 	if (*in)
-		return 0; // reached end of pattern but not end of input
-	return 1; // success
+		return 0;
+	return 1;
 }
 
-// a little strings system
 void stringlistinit(stringlist_t *list)
 {
 	memset(list, 0, sizeof(*list));
@@ -130,8 +125,7 @@ void stringlistsort(stringlist_t *list, qboolean uniq)
 	qsort(&list->strings[0], list->numstrings, sizeof(list->strings[0]), stringlistsort_cmp);
 	if(uniq)
 	{
-		// i: the item to read
-		// j: the item last written
+
 		for (i = 1, j = 0; i < list->numstrings; ++i)
 		{
 			char *save;
@@ -151,7 +145,6 @@ void stringlistsort(stringlist_t *list, qboolean uniq)
 	}
 }
 
-// operating system specific code
 static void adddirentry(stringlist_t *list, const char *path, const char *name)
 {
 	if (strcmp(name, ".") && strcmp(name, ".."))
@@ -170,7 +163,7 @@ void listdirectory(stringlist_t *list, const char *basepath, const char *path)
 	strlcpy (pattern, basepath, sizeof(pattern));
 	strlcat (pattern, path, sizeof (pattern));
 	strlcat (pattern, "*", sizeof (pattern));
-	// ask for the directory listing handle
+
 	hFile = FindFirstFile(pattern, &n_file);
 	if(hFile == INVALID_HANDLE_VALUE)
 		return;
@@ -187,8 +180,7 @@ void listdirectory(stringlist_t *list, const char *basepath, const char *path)
 	struct dirent *ent;
 	dpsnprintf(fullpath, sizeof(fullpath), "%s%s", basepath, path);
 #ifdef __ANDROID__
-	// SDL currently does not support listing assets, so we have to emulate
-	// it. We're using relative paths for assets, so that will do.
+
 	if (basepath[0] != '/')
 	{
 		char listpath[MAX_OSPATH];
@@ -220,4 +212,3 @@ void listdirectory(stringlist_t *list, const char *basepath, const char *path)
 	closedir(dir);
 }
 #endif
-

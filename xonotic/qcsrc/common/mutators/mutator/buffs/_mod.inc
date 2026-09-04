@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <common/mutators/mutator/buffs/buffs.qc>
 #ifdef CSQC
     #include <common/mutators/mutator/buffs/cl_buffs.qc>

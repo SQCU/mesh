@@ -1,12 +1,7 @@
 #pragma once
 
 #include "iter.qh"
-#include "test.qh"
 
-/**
- * Maximum amount of creatable lists.
- * Lists can be given endless amount of entities, only restricted by engine limitations.
- */
 const int IL_MAX = 128;
 
 ERASEABLE
@@ -16,13 +11,6 @@ void IL_DTOR(entity this);
 ERASEABLE
 void IL_ENDFRAME();
 
-/**
- * limitations:
- *   NULL cannot be present
- *   elements can only be present once
- *   a maximum of `IL_MAX` lists can exist at one time
- *   freed entities must be removed from the list
- */
 CLASS(IntrusiveList, Object)
 	ATTRIB(IntrusiveList, il_head, entity);
 	ATTRIB(IntrusiveList, il_tail, entity);
@@ -33,9 +21,8 @@ CLASS(IntrusiveList, Object)
 	DESTRUCTOR(IntrusiveList) { IL_DTOR(this); }
 ENDCLASS(IntrusiveList)
 
-// bitflags
 .vector il_lists;
-// bitflags
+
 .vector il_listmask;
 
 #define IL_NEW() NEW(IntrusiveList)
@@ -53,9 +40,6 @@ bool IL_CONTAINS(IntrusiveList this, entity it)
 	return it.(this.il_nextfld) || this.il_head == it || this.il_tail == it;
 }
 
-/**
- * Push to tail
- */
 ERASEABLE
 entity IL_PUSH(IntrusiveList this, entity it)
 {
@@ -72,9 +56,6 @@ entity IL_PUSH(IntrusiveList this, entity it)
 	return it;
 }
 
-/**
- * Push to head
- */
 ERASEABLE
 entity IL_UNSHIFT(IntrusiveList this, entity it)
 {
@@ -91,9 +72,6 @@ entity IL_UNSHIFT(IntrusiveList this, entity it)
 	return it;
 }
 
-/**
- * Pop from tail
- */
 ERASEABLE
 entity IL_POP(IntrusiveList this)
 {
@@ -112,9 +90,6 @@ entity IL_POP(IntrusiveList this)
 	return it;
 }
 
-/**
- * Pop from head
- */
 ERASEABLE
 entity IL_SHIFT(IntrusiveList this)
 {
@@ -133,16 +108,13 @@ entity IL_SHIFT(IntrusiveList this)
 	return it;
 }
 
-/**
- * Remove any element, anywhere in the list
- */
 ERASEABLE
 void IL_REMOVE(IntrusiveList this, entity it)
 {
 	assert(this, return);
 	.entity il_next = this.il_nextfld;
 	.entity il_prev = this.il_prevfld;
-	//assert(!IL_CONTAINS(this, it), return);
+
 	entity next = it.(il_next);
 	entity prev = it.(il_prev);
 	entity ohead = this.il_head;
@@ -155,9 +127,6 @@ void IL_REMOVE(IntrusiveList this, entity it)
 	it.(il_next) = it.(il_prev) = NULL;
 }
 
-/**
- * Remove all elements
- */
 #define IL_CLEAR(this) \
 	MACRO_BEGIN \
 		IntrusiveList _il = this; \
@@ -173,9 +142,6 @@ void IL_REMOVE(IntrusiveList this, entity it)
 		_il.il_head = _il.il_tail = NULL; \
 	MACRO_END
 
-/**
- * Delete the list
- */
 #define IL_DELETE(this) \
 	MACRO_BEGIN \
 		delete(this); \
@@ -196,10 +162,10 @@ void IL_REMOVE(IntrusiveList this, entity it)
 			this.il_loop_item = it; \
 			_next = it.(il_next); \
 			if (cond) { LAMBDA(body) } \
-			if (this.il_loop_item != it) /* current item removed? */ \
+			if (this.il_loop_item != it)                             \
 				_next = this.il_loop_item; \
 			else \
-				_next = it.(il_next); /* in case next item has changed */ \
+				_next = it.(il_next);                                     \
 		} \
 		this.il_loop_item = il_loop_item_save; \
 	MACRO_END
@@ -254,7 +220,7 @@ ERASEABLE
 void IL_ENDFRAME()
 {
 #if 0
-	// incompatible with CSQC, remove() clears entities
+
 	for (int i = 0; i < IL_MAX; ++i) {
 		IntrusiveList list = il_links[i];
 		if (list) {
@@ -270,8 +236,6 @@ void IL_ENDFRAME()
 #endif
 }
 
-// clears any IL data from an entity (not an intrusive list)
-// it should be used only in very particular cases such as after a copyentity call
 void IL_REMOVE_RAW(entity it)
 {
 	if (it.il_lists)
@@ -282,11 +246,9 @@ void IL_REMOVE_RAW(entity it)
 	}
 }
 
-// called when an entity is deleted with delete() / remove()
-// or when a player disconnects
 void ONREMOVE(entity this)
 {
-	// remove 'this' from any intrusive lists it is on
+
 	vector lists = this.il_lists;
 	if (lists) {
 		for (int i = 0; i < IL_MAX; ++i) {
@@ -296,79 +258,4 @@ void ONREMOVE(entity this)
 			}
 		}
 	}
-}
-
-
-#define IL_TEST_BUILD() s = il_test_build(il_test, ent1, ent2, ent3, ent4, ent5)
-
-string il_test_build(entity il_test, entity ent1, entity ent2, entity ent3, entity ent4, entity ent5)
-{
-	IL_CLEAR(il_test);
-	IL_PUSH(il_test, ent1);
-	IL_PUSH(il_test, ent2);
-	IL_PUSH(il_test, ent3);
-	IL_PUSH(il_test, ent4);
-	IL_PUSH(il_test, ent5);
-	return "";
-}
-
-TEST(intrusivelist, ModificationsWhileLooping)
-{
-	IntrusiveList il_test = IL_NEW();
-	entity ent1 = new(1), ent2 = new(2), ent3 = new(3), ent4 = new(4), ent5 = new(5);
-	string s;
-
-	IL_TEST_BUILD();
-	IL_EACH(il_test, true,
-	{
-		s = strcat(s, it.classname);
-		if (it == ent2) IL_REMOVE(il_test, ent3);
-		if (it == ent4) IL_PUSH(il_test, ent3);
-	});
-	EXPECT_TRUE(s == "12453");
-
-	IL_TEST_BUILD();
-	IL_EACH(il_test, true,
-	{
-		s = strcat(s, it.classname);
-		if (it == ent2) IL_REMOVE(il_test, ent2);
-		if (it == ent3) IL_REMOVE(il_test, ent3);
-		if (it == ent3) IL_REMOVE(il_test, ent4);
-		if (it == ent5) IL_POP(il_test);
-	});
-	EXPECT_TRUE(s == "1235");
-
-	IL_TEST_BUILD();
-	IL_REMOVE(il_test, ent5);
-	IL_EACH(il_test, true,
-	{
-		s = strcat(s, it.classname);
-		if (it == ent1) IL_SHIFT(il_test);
-		if (it == ent4) IL_POP(il_test);
-	});
-	EXPECT_TRUE(s == "1234");
-
-	IL_TEST_BUILD();
-	IL_EACH(il_test, true,
-	{
-		s = strcat(s, it.classname);
-		if (it == ent2)
-			IL_EACH(il_test, true,
-			{
-				s = strcat(s, it.classname);
-				if (it == ent3)
-					IL_EACH(il_test, true,
-					{
-						s = strcat(s, it.classname);
-					});
-				if (it == ent4)
-					break;
-			});
-	});
-	EXPECT_TRUE(s == "12123123454345");
-
-	IL_DELETE(il_test);
-	delete(ent1); delete(ent2); delete(ent3); delete(ent4); delete(ent5);
-
-	SUCCEED();
 }

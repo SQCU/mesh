@@ -16,13 +16,13 @@ const int ewheel_anim_bck_fast = 4;
 
 void ewheel_move_path(entity this)
 {
-    // Are we close enough to a path node to switch to the next?
+
     if(turret_closetotarget(this, this.pathcurrent.origin, 64))
     {
 #ifdef EWHEEL_FANCYPATH
         if (this.pathcurrent.path_next == NULL)
         {
-            // Path endpoint reached
+
             pathlib_deletepath(this.pathcurrent.owner);
             this.pathcurrent = NULL;
 
@@ -207,12 +207,11 @@ METHOD(EWheel, tr_setup, void(EWheel this, entity it))
     it.frame					= it.tur_head.frame = 1;
     it.ammo_flags				= TFL_AMMO_ENERGY | TFL_AMMO_RECHARGE | TFL_AMMO_RECIEVE;
 
-    // Convert from dgr / sec to dgr / tic
     it.tur_head.aim_speed = (autocvar_g_turrets_unit_ewheel_turnrate);
     it.tur_head.aim_speed = it.tur_head.aim_speed / (1 / it.ticrate);
 }
 
-#endif // SVQC
+#endif
 #ifdef CSQC
 
 void ewheel_draw(entity this)
@@ -241,4 +240,4 @@ METHOD(EWheel, tr_setup, void(EWheel this, entity it))
     it.draw			= ewheel_draw;
 }
 
-#endif // CSQC
+#endif

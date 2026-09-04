@@ -1,7 +1,5 @@
 #include "sv_dodging.qh"
 
-// TODO the CSQC blocks in this sv_ file are currently not compiled but will be when dodging prediction gets enabled
-
 #define PHYS_DODGING 						g_dodging
 #define PHYS_DODGING_DELAY 					autocvar_sv_dodging_delay
 #define PHYS_DODGING_DISTANCE_THRESHOLD 	autocvar_sv_dodging_wall_distance_threshold
@@ -20,7 +18,6 @@
 #define PHYS_DODGING_AIR_MAXSPEED			autocvar_sv_dodging_air_maxspeed
 #define PHYS_DODGING_CLIENTSELECT			autocvar_sv_dodging_clientselect
 
-// we ran out of stats slots! TODO: re-enable this when prediction is available for dodging
 #if 0
 #define PHYS_DODGING 						STAT(DODGING, this)
 #define PHYS_DODGING_DELAY 					STAT(DODGING_DELAY, this)
@@ -66,13 +63,12 @@ bool autocvar_sv_dodging_sound;
 
 REGISTER_MUTATOR(dodging, cvar("g_dodging"))
 {
-	// this just turns on the cvar.
+
 	MUTATOR_ONADD
 	{
 		g_dodging = cvar("g_dodging");
 	}
 
-	// this just turns off the cvar.
 	MUTATOR_ONROLLBACK_OR_REMOVE
 	{
 		g_dodging = 0;
@@ -85,28 +81,21 @@ REGISTER_MUTATOR(dodging, cvar("g_dodging"))
 REGISTER_MUTATOR(dodging, true);
 #endif
 
-// set to 1 to indicate dodging has started.. reset by physics hook after dodge has been done..
 .float dodging_action;
 
-// the jump part of the dodge cannot be ramped
 .float dodging_single_action;
 
-// these are used to store the last key press time for each of the keys..
 .float last_FORWARD_KEY_time;
 .float last_BACKWARD_KEY_time;
 .float last_LEFT_KEY_time;
 .float last_RIGHT_KEY_time;
 
-// these store the movement direction at the time of the dodge action happening.
 .vector dodging_direction;
 
-// this indicates the last time a dodge was executed. used to check if another one is allowed
-// and to ramp up the dodge acceleration in the physics hook.
 .float last_dodging_time;
 
-// the total speed that will be added over the ramp time
 .float dodging_force_total;
-// the part of total yet to be added
+
 .float dodging_force_remaining;
 
 #ifdef CSQC
@@ -118,7 +107,6 @@ REGISTER_MUTATOR(dodging, true);
 	if (trace_fraction < 1 && !(trace_dphitq3surfaceflags & Q3SURFACEFLAG_SKY)) \
 		return true;
 
-// returns true if the player is close to a wall
 bool is_close_to_wall(entity this, float threshold, vector forward, vector right)
 {
 	X(right);
@@ -132,7 +120,7 @@ bool is_close_to_wall(entity this, float threshold, vector forward, vector right
 bool is_close_to_ground(entity this, float threshold, vector up)
 {
 	if (IS_ONGROUND(this)) return true;
-	X(-up); // necessary for dodging down a slope using doubletap (using `+dodge` works anyway)
+	X(-up);
 
 	return false;
 }
@@ -160,7 +148,7 @@ bool PM_dodging_checkpressedkeys(entity this)
 
 	#define X(COND,BTN,RESULT)																				\
 	if (mymovement_##COND) {																				\
-		/* is this a state change? */																		\
+																				\
 		if(!(PHYS_DODGING_PRESSED_KEYS(this) & KEY_##BTN) || frozen_no_doubletap) {							\
 			tap_direction_##RESULT;																			\
 			if ((time - this.last_##BTN##_KEY_time) < PHYS_DODGING_TIMEOUT(this) || frozen_no_doubletap) {	\
@@ -179,10 +167,6 @@ bool PM_dodging_checkpressedkeys(entity this)
 
 	if (!dodge_detected) return false;
 
-	// this check has to be after checking keys:
-	// the first key press of the double tap is allowed to be before dodging delay,
-	// only the second has to be after, otherwise +dodge gives an advantage because typical repress time is 0.1 s
-	// or higher which means players using +dodge would be able to do it more often
 	if ((time - this.last_dodging_time) < PHYS_DODGING_DELAY)
 		return false;
 
@@ -205,7 +189,6 @@ bool PM_dodging_checkpressedkeys(entity this)
 	this.dodging_direction.x = tap_direction_x;
 	this.dodging_direction.y = tap_direction_y;
 
-	// normalize the dodging_direction vector.. (unlike UT99) XD
 	float length = sqrt(this.dodging_direction.x ** 2 + this.dodging_direction.y ** 2);
 
 	this.dodging_direction.x = this.dodging_direction.x / length;
@@ -216,10 +199,9 @@ bool PM_dodging_checkpressedkeys(entity this)
 
 void PM_dodging(entity this)
 {
-	// can't use return value from PM_dodging_checkpressedkeys because they're called from different hooks
+
 	if (!this.dodging_action) return;
 
-	// when swimming or dead, no dodging allowed..
 	bool frozen_dodging = (PHYS_FROZEN(this) && PHYS_DODGING_FROZEN(this));
 	if (this.waterlevel >= WATERLEVEL_SWIMMING || IS_DEAD(this) || (PHYS_DODGING_CLIENTSELECT && !PHYS_DODGING_ENABLED(this) && !frozen_dodging))
 	{
@@ -235,20 +217,13 @@ void PM_dodging(entity this)
 	else
 		MAKE_VECTORS(this.angles, forward, right, up);
 
-	// fraction of the force to apply each frame
-	// if we have e.g. 0.5 sec ramptime and a frametime of 0.25, then the ramp code
-	// will be called ramp_time/frametime times = 2 times. so, we need to
-	// add 0.5 * the total speed each frame until the dodge action is done..
 	float common_factor = PHYS_DODGING_FRAMETIME / PHYS_DODGING_RAMP_TIME;
-	// NOTE: depending on cl_netfps the client may (and probably will) send more input frames during each server frame
-	// but common_factor uses server frame rate so players with higher cl_netfps will ramp slightly faster
 
 	float velocity_increase = min(common_factor * this.dodging_force_total, this.dodging_force_remaining);
 	this.dodging_force_remaining -= velocity_increase;
 	this.velocity += this.dodging_direction.x * velocity_increase * forward
 	               + this.dodging_direction.y * velocity_increase * right;
 
-	// the up part of the dodge is a single shot action
 	if (this.dodging_single_action == 1)
 	{
 		UNSET_ONGROUND(this);
@@ -267,7 +242,7 @@ void PM_dodging(entity this)
 
 	if(this.dodging_force_remaining <= 0)
 	{
-		// reset state so next dodge can be done correctly
+
 		this.dodging_action = 0;
 		this.dodging_direction.x = 0;
 		this.dodging_direction.y = 0;
@@ -279,7 +254,6 @@ void PM_dodging_GetPressedKeys(entity this)
 {
 	PM_dodging_checkpressedkeys(this);
 
-	// NOTE: GetPressedKeys and PM_dodging_GetPressedKeys use similar code
 	int keys = this.pressedkeys;
 	keys = BITSET(keys, KEY_FORWARD, 	PHYS_CS(this).movement.x > 0);
 	keys = BITSET(keys, KEY_BACKWARD, 	PHYS_CS(this).movement.x < 0);
@@ -287,7 +261,7 @@ void PM_dodging_GetPressedKeys(entity this)
 	keys = BITSET(keys, KEY_LEFT, 		PHYS_CS(this).movement.y < 0);
 
 	keys = BITSET(keys, KEY_JUMP, 		PHYS_INPUT_BUTTON_JUMP(this));
-	keys = BITSET(keys, KEY_CROUCH, 	IS_DUCKED(this)); // workaround: player can't un-crouch until their path is clear, so we keep the button held here
+	keys = BITSET(keys, KEY_CROUCH, 	IS_DUCKED(this));
 	keys = BITSET(keys, KEY_ATCK, 		PHYS_INPUT_BUTTON_ATCK(this));
 	keys = BITSET(keys, KEY_ATCK2, 		PHYS_INPUT_BUTTON_ATCK2(this));
 	this.pressedkeys = keys;

@@ -6,16 +6,9 @@
 #include <common/resources/cl_resources.qh>
 #endif
 
-
-// This includes some functions useful for debugging.
-// Some more bot-specific ones are in server/pathlib/debug.qc.
-// Look for other useful commands under prvm_* in console (apropos / search).
-
-
 #ifdef CSQC
 .entity tag_entity;
 #endif
-
 
 #ifdef GAMEQC
 .bool debug;
@@ -31,7 +24,7 @@ REGISTER_NET_TEMP(net_debug)
 		if (ReadByte()) make_pure(this);
 		this.origin = ReadVector();
 		setorigin(this, this.origin);
-		this.debug = true;  // identify server entities by this
+		this.debug = true;
 		this.classname = strzone(ReadString());
 		this.sourceLoc = strzone(ReadString());
 		return true;
@@ -47,7 +40,7 @@ REGISTER_NET_TEMP(net_debug)
 		WriteShort(channel, etof(this));
 		WriteByte(channel, is_pure(this));
 		vector o = this.origin;
-		if (o == '0 0 0') // brushes
+		if (o == '0 0 0')
 			o = (this.absmin + this.absmax) / 2;
 		if (this.tag_entity)
 			o += this.tag_entity.origin;
@@ -58,20 +51,11 @@ REGISTER_NET_TEMP(net_debug)
 	}
 #endif
 
-
 #if ENABLE_DEBUGDRAW
 #ifdef GAMEQC
-/**
- * 0: off
- * 1: on
- * 2: on (pure)
- * 3: on (.entnum != 0)
- * 4: on (.origin == '0 0 0')
- * 5: on (.debug != 0), server only
- * 6: on (.solid != 0)
- */
+
 bool autocvar_debugdraw;
-#endif // GAMEQC
+#endif
 
 #ifdef CSQC
 	string autocvar_debugdraw_filter, autocvar_debugdraw_filterout;
@@ -107,38 +91,9 @@ bool autocvar_debugdraw;
 				{
 					bool flag = true;
 					do {
-//						if (it.modelindex) break;
-//						if (it.absmin) break;
-//						if (it.absmax) break;
-//						if (it.entnum) break;
-//						if (it.drawmask) break;
-//						if (it.predraw) break;
-//						if (it.move_movetype) break;
+
 						if (it.solid) break;
-//						if (it.origin) break;
-//						if (it.oldorigin) break;
-//						if (it.velocity) break;
-//						if (it.angles) break;
-//						if (it.avelocity) break;
-//						if (it.classname) break;
-//						if (it.model) break;
-//						if (it.frame) break;
-//						if (it.skin) break;
-//						if (it.effects) break;
-//						if (it.mins) break;
-//						if (it.maxs) break;
-//						if (it.size) break;
-//						if (it.touch) break;
-//						if (it.use) break;
-//						if (it.think) break;
-//						if (it.blocked) break;
-//						if (it.nextthink) break;
-//						if (it.chain) break;
-//						if (it.netname) break;
-//						if (it.enemy) break;
-//						if (it.flags) break;
-//						if (it.colormap) break;
-//						if (it.owner) break;
+
 						flag = false;
 					} while (0);
 					if (!flag) continue;
@@ -163,7 +118,7 @@ bool autocvar_debugdraw;
             });
 		});
 	}
-#endif // CSQC
+#endif
 
 #ifdef SVQC
 	COMMON_COMMAND(debugdraw_sv, "Dump all server entities")
@@ -194,9 +149,8 @@ bool autocvar_debugdraw;
 			}
 		}
 	}
-#endif // SVQC
-#endif // ENABLE_DEBUGDRAW
-
+#endif
+#endif
 
 GENERIC_COMMAND(bufstr_get, "Examine a string buffer object", false)
 {
@@ -219,7 +173,6 @@ GENERIC_COMMAND(bufstr_get, "Examine a string buffer object", false)
 	}
 }
 
-
 GENERIC_COMMAND(version, "Print the current version", false)
 {
 	switch (request)
@@ -238,7 +191,6 @@ GENERIC_COMMAND(version, "Print the current version", false)
 	}
 }
 
-
 #ifdef CSQC
 void(float bufhandle, string pattern, string antipattern) buf_cvarlist = #517;
 #endif
@@ -251,7 +203,7 @@ GENERIC_COMMAND(cvar_localchanges, "Print locally changed cvars", false)
 		{
 			string s = "";
 			int h = buf_create();
-			buf_cvarlist(h, "", "_"); // exclude all _ cvars as they are temporary
+			buf_cvarlist(h, "", "_");
 			int n = buf_getsize(h);
 			for (int i = 0; i < n; ++i) {
 				string k = bufstr_get(h, i);
@@ -273,7 +225,6 @@ GENERIC_COMMAND(cvar_localchanges, "Print locally changed cvars", false)
 		}
 	}
 }
-
 
 #if ENABLE_DEBUGTRACE
 REGISTER_STAT(TRACE_ENT, int)
@@ -313,7 +264,7 @@ MUTATOR_HOOKFUNCTION(trace, SV_StartFrame)
 		stuffcmd(it, sprintf("prvm_edict server %d\n", i));
 	});
 }
-#endif // SVQC
+#endif
 
 #ifdef CSQC
 entity TRACE_ENT;
@@ -332,10 +283,9 @@ STATIC_INIT(TRACE_ENT)
 	e.draw2d = Trace_draw2d;
 	IL_PUSH(g_drawables_2d, e);
 }
-#endif // CSQC
-
 #endif
 
+#endif
 
 GENERIC_COMMAND(findent, "Search through entities for matching classname", false)
 {
@@ -364,7 +314,6 @@ GENERIC_COMMAND(findent, "Search through entities for matching classname", false
 		}
 	}
 }
-
 
 GENERIC_COMMAND(findat, "Search through entities for matching origin", false)
 {
@@ -403,9 +352,6 @@ GENERIC_COMMAND(findat, "Search through entities for matching origin", false)
 	}
 }
 
-
-// debug_test() allows drawing text from server on the client anywhere in world coordinates.
-
 #ifdef GAMEQC
 REGISTER_NET_TEMP(debug_text_3d);
 #endif
@@ -413,12 +359,12 @@ REGISTER_NET_TEMP(debug_text_3d);
 #ifdef CSQC
 
 CLASS(DebugText3d, Object)
-	// reusing existing fields
+
 	ATTRIB(DebugText3d, origin, vector);
-	ATTRIB(DebugText3d, message, string); // the text (i wanted to use the .text field but then this whole macro-based-inheritance thing shat itself)
-	ATTRIB(DebugText3d, health, float); // text alignment (recycled field)
-	ATTRIB(DebugText3d, hit_time, float); // when it was created
-	ATTRIB(DebugText3d, fade_rate, float); // how fast it should disappear
+	ATTRIB(DebugText3d, message, string);
+	ATTRIB(DebugText3d, health, float);
+	ATTRIB(DebugText3d, hit_time, float);
+	ATTRIB(DebugText3d, fade_rate, float);
 	ATTRIB(DebugText3d, velocity, vector);
 
 	CONSTRUCTOR(DebugText3d, vector pos, string msg, float align, float fade_rate_, vector vel) {
@@ -447,7 +393,7 @@ CLASS(DebugText3d, Object)
 
 		int size = 11;
 		vector screen_pos = project_3d_to_2d(this.origin) + since_created * this.velocity;
-		if (screen_pos.z < 0) return; // behind camera
+		if (screen_pos.z < 0) return;
 
 		screen_pos.z = 0;
 		float align = GetResource(this, RES_HEALTH);
@@ -478,11 +424,10 @@ NET_HANDLE(debug_text_3d, bool is_new) {
 	return true;
 }
 
-#endif // CSQC
+#endif
 
 #ifdef SVQC
 
-// can't use autocvars because they give unused warning unless the macros are expanded
 #define debug_text_3d(...) EVAL(OVERLOAD(debug_text_3d, __VA_ARGS__))
 #define debug_text_3d_2(pos, msg) debug_text_3d_3(pos, msg, cvar("debug_text_3d_default_align"))
 #define debug_text_3d_3(pos, msg, align) debug_text_3d_4(pos, msg, align, cvar("debug_text_3d_default_duration"))
@@ -499,4 +444,4 @@ void debug_text_3d_fn(vector pos, string msg, float align, float duration, vecto
 	WriteVector(MSG_BROADCAST, vel);
 }
 
-#endif // SVQC
+#endif

@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 #include "cl_collision.h"
@@ -50,7 +32,6 @@ explosion_t;
 static explosion_t explosion[MAX_EXPLOSIONS];
 
 static rtexture_t	*explosiontexture;
-//static rtexture_t	*explosiontexturefog;
 
 static rtexturepool_t	*explosiontexturepool;
 #endif
@@ -59,14 +40,13 @@ cvar_t r_explosionclip = {CVAR_SAVE, "r_explosionclip", "1", "enables collision 
 #ifdef MAX_EXPLOSIONS
 static cvar_t r_drawexplosions = {0, "r_drawexplosions", "1", "enables rendering of explosion shells (see also cl_particles_explosions_shell)"};
 
-//extern qboolean r_loadfog;
 static void r_explosion_start(void)
 {
 	int x, y;
 	static unsigned char noise1[128][128], noise2[128][128], noise3[128][128], data[128][128][4];
 	explosiontexturepool = R_AllocTexturePool();
 	explosiontexture = NULL;
-	//explosiontexturefog = NULL;
+
 	fractalnoise(&noise1[0][0], 128, 32);
 	fractalnoise(&noise2[0][0], 128, 4);
 	fractalnoise(&noise3[0][0], 128, 4);
@@ -87,14 +67,7 @@ static void r_explosion_start(void)
 		}
 	}
 	explosiontexture = R_LoadTexture2D(explosiontexturepool, "explosiontexture", 128, 128, &data[0][0][0], TEXTYPE_BGRA, TEXF_MIPMAP | TEXF_ALPHA | TEXF_FORCELINEAR, -1, NULL);
-//	if (r_loadfog)
-//	{
-//		for (y = 0;y < 128;y++)
-//			for (x = 0;x < 128;x++)
-//				data[y][x][0] = data[y][x][1] = data[y][x][2] = 255;
-//		explosiontexturefog = R_LoadTexture2D(explosiontexturepool, "explosiontexture_fog", 128, 128, &data[0][0][0], TEXTYPE_BGRA, TEXF_MIPMAP | TEXF_ALPHA | TEXF_FORCELINEAR, NULL);
-//	}
-	// note that explosions survive the restart
+
 }
 
 static void r_explosion_shutdown(void)
@@ -112,7 +85,7 @@ static int R_ExplosionVert(int column, int row)
 {
 	int i;
 	float yaw, pitch;
-	// top and bottom rows are all one position...
+
 	if (row == 0 || row == EXPLOSIONGRID)
 		column = 0;
 	i = row * (EXPLOSIONGRID + 1) + column;
@@ -165,7 +138,7 @@ void R_NewExplosion(const vec3_t org)
 	explosion_t *e;
 	trace_t trace;
 	unsigned char noise[EXPLOSIONGRID*EXPLOSIONGRID];
-	fractalnoisequick(noise, EXPLOSIONGRID, 4); // adjust noise grid size according to explosion
+	fractalnoisequick(noise, EXPLOSIONGRID, 4);
 	for (i = 0, e = explosion;i < MAX_EXPLOSIONS;i++, e++)
 	{
 		if (!e->alpha)
@@ -180,13 +153,13 @@ void R_NewExplosion(const vec3_t org)
 			VectorCopy(org, e->origin);
 			for (j = 0;j < EXPLOSIONVERTS;j++)
 			{
-				// calculate start origin and velocity
+
 				n = noise[explosionnoiseindex[j]] * (1.0f / 255.0f) + 0.5;
 				dist = n * cl_explosions_size_start.value;
 				VectorMA(e->origin, dist, explosionpoint[j], e->vert[j]);
 				dist = n * (cl_explosions_size_end.value - cl_explosions_size_start.value) / cl_explosions_lifetime.value;
 				VectorScale(explosionpoint[j], dist, e->vertvel[j]);
-				// clip start origin
+
 				if (e->clipping)
 				{
 					trace = CL_TraceLine(e->origin, e->vert[j], MOVE_NOMONSTERS, NULL, SUPERCONTENTS_SOLID, 0, 0, collision_extendmovelength.value, true, false, NULL, false, false);
@@ -212,12 +185,11 @@ static void R_DrawExplosion_TransparentCallback(const entity_render_t *ent, cons
 	GL_CullFace(r_refdef.view.cullface_back);
 	R_EntityMatrix(&identitymatrix);
 
-//	R_Mesh_ResetTextureState();
 	R_SetupShader_Generic(explosiontexture, NULL, GL_MODULATE, 1, false, false, false);
 	for (surfacelistindex = 0;surfacelistindex < numsurfaces;surfacelistindex++)
 	{
 		const explosion_t *e = explosion + surfacelist[surfacelistindex];
-		// FIXME: this can't properly handle r_refdef.view.colorscale > 1
+
 		GL_Color(e->alpha * r_refdef.view.colorscale, e->alpha * r_refdef.view.colorscale, e->alpha * r_refdef.view.colorscale, 1);
 		R_Mesh_PrepareVertices_Generic_Arrays(numverts, e->vert[0], NULL, explosiontexcoord2f[0]);
 		R_Mesh_Draw(0, numverts, 0, numtriangles, NULL, NULL, 0, explosiontris[0], NULL, 0);
@@ -248,7 +220,7 @@ static void R_MoveExplosion(explosion_t *e)
 				trace = CL_TraceLine(e->vert[i], end, MOVE_NOMONSTERS, NULL, SUPERCONTENTS_SOLID, 0, 0, collision_extendmovelength.value, true, false, NULL, false, false);
 				if (trace.fraction < 1)
 				{
-					// clip velocity against the wall
+
 					dot = -DotProduct(e->vertvel[i], trace.plane.normal);
 					VectorMA(e->vertvel[i], dot, trace.plane.normal, e->vertvel[i]);
 				}
@@ -282,4 +254,3 @@ void R_DrawExplosions(void)
 		numexplosions--;
 #endif
 }
-

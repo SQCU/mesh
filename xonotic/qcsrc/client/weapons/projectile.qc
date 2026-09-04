@@ -29,11 +29,10 @@ void Projectile_ResetTrail(entity this, vector to)
 void Projectile_DrawTrail(entity this, vector to)
 {
 	vector from = this.trail_oldorigin;
-	// float t0 = this.trail_oldtime;
+
 	this.trail_oldorigin = to;
 	this.trail_oldtime = time;
 
-	// force the effect even for stationary firemine
 	if (this.cnt == PROJECTILE_FIREMINE)
 		if (from == to)
 			from.z += 1;
@@ -59,14 +58,10 @@ void Projectile_Draw(entity this)
 
 	if (this.count & 0x80)
 	{
-		// UNSET_ONGROUND(this);
+
 		if (this.move_movetype == MOVETYPE_NONE || this.move_movetype == MOVETYPE_FLY)
 			Movetype_Physics_NoMatchServer(this);
-		// the trivial movetypes do not have to match the
-		// server's ticrate as they are ticrate independent
-		// NOTE: this assumption is only true if MOVETYPE_FLY
-		// projectiles detonate on impact. If they continue
-		// moving, we might still be ticrate dependent.
+
 		else
 			Movetype_Physics_MatchServer(this, autocvar_cl_projectiles_sloppy);
 		if (!IS_ONGROUND(this))
@@ -97,13 +92,13 @@ void Projectile_Draw(entity this)
 		else switch (this.cnt)
 		{
 			case PROJECTILE_GRENADE_BOUNCING:
-				rot = '0 -1000 0'; // sideways
+				rot = '0 -1000 0';
 				break;
 			case PROJECTILE_HOOKBOMB:
-				rot = '1000 0 0';  // forward
+				rot = '1000 0 0';
 				break;
 			case PROJECTILE_ROCKET:
-				rot = '0 0 720'; // spinning
+				rot = '0 0 720';
 				break;
 		}
 
@@ -111,7 +106,7 @@ void Projectile_Draw(entity this)
 		{
 			if (!rot.x && !rot.y)
 			{
-				// cheaper z-only rotation formula
+
 				this.angles.z = (rot.z * (t - this.spawntime)) % 360;
 				if (this.angles.z < 0)
 					this.angles.z += 360;
@@ -156,7 +151,7 @@ void Projectile_Draw(entity this)
 
 	switch (this.cnt)
 	{
-		// Possibly add dlights here.
+
 		default:
 			break;
 	}
@@ -185,29 +180,13 @@ void Ent_RemoveProjectile(entity this)
 
 NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 {
-	// projectile properties:
-	//   kind (interpolated, or clientside)
-	//
-	//   modelindex
-	//   origin
-	//   scale
-	//   if clientside:
-	//     velocity
-	//     gravity
-	//   soundindex (hardcoded list)
-	//   effects
-	//
-	// projectiles don't send angles, because they always follow the velocity
 
 	int f = ReadByte();
 	this.count = (f & 0x80);
 	this.flags |= FL_PROJECTILE;
 	this.iflags = (this.iflags & IFLAG_INTERNALMASK) | IFLAG_AUTOANGLES | IFLAG_ANGLES | IFLAG_ORIGIN;
 	this.solid = SOLID_TRIGGER;
-	// this.effects = EF_NOMODELFLAGS;
 
-	// this should make collisions with bmodels more exact, but it leads to
-	// projectiles no longer being able to lie on a bmodel
 	this.move_nomonsters = MOVE_WORLDONLY;
 	if (f & 0x40)
 		SET_ONGROUND(this);
@@ -216,8 +195,7 @@ NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 
 	if (!this.move_time)
 	{
-		// for some unknown reason, we don't need to care for
-		// sv_gameplayfix_delayprojectiles here.
+
 		this.move_time = time;
 		this.spawntime = time;
 	}
@@ -239,7 +217,7 @@ NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 			if (f & 0x10)
 				this.gravity = ReadCoord();
 			else
-				this.gravity = 0;  // none
+				this.gravity = 0;
 		}
 
 		if (time == this.spawntime || (this.count & 0x80) || (f & 0x08))
@@ -260,20 +238,20 @@ NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 			this.fade_rate = 0;
 		}
 
-		int proj_team = ReadByte();
+		int proj_team = ReadShort();
 		this.team = proj_team - 1;
 
 		if(teamplay)
 		{
 			if(proj_team)
-				this.colormap = (this.team) * 0x11; // note: team - 1 on server (client uses different numbers)
+				this.colormap = (this.team) * 0x11;
 			else
 				this.colormap = 0x00;
-			this.colormap |= BIT(10); // RENDER_COLORMAPPED
+			this.colormap |= BIT(10);
 		}
 		else
 			this.colormap = proj_team;
-		// TODO: projectiles use glowmaps for their color, not teams
+
 		#if 0
 		if(this.colormap > 0)
 			this.glowmod = colormapPaletteColor(this.colormap & 0x0F, true);
@@ -310,8 +288,8 @@ NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 			HANDLE(HOOKBOMB)           this.traileffect = EFFECT_TR_KNIGHTSPIKE.m_id; break;
 			HANDLE(HAGAR)              this.traileffect = EFFECT_HAGAR_ROCKET.m_id; this.scale = 0.75; break;
 			HANDLE(HAGAR_BOUNCING)     this.traileffect = EFFECT_HAGAR_ROCKET.m_id; this.scale = 0.75; break;
-			HANDLE(FIREBALL)           this.modelindex = 0; this.traileffect = EFFECT_FIREBALL.m_id; break; // particle effect is good enough
-			HANDLE(FIREMINE)           this.modelindex = 0; this.traileffect = EFFECT_FIREMINE.m_id; break; // particle effect is good enough
+			HANDLE(FIREBALL)           this.modelindex = 0; this.traileffect = EFFECT_FIREBALL.m_id; break;
+			HANDLE(FIREMINE)           this.modelindex = 0; this.traileffect = EFFECT_FIREMINE.m_id; break;
 			HANDLE(TAG)                this.traileffect = EFFECT_TR_ROCKET.m_id; break;
 			HANDLE(FLAC)               this.scale = 0.4; this.traileffect = EFFECT_FLAC_TRAIL.m_id; break;
 			HANDLE(SEEKER)             this.traileffect = EFFECT_SEEKER_TRAIL.m_id; break;
@@ -352,7 +330,7 @@ NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 		switch (this.cnt)
 		{
 			case PROJECTILE_ELECTRO:
-				// only new engines support sound moving with object
+
 				loopsound(this, CH_SHOTS_SINGLE, SND_ELECTRO_FLY, VOL_BASE, ATTEN_NORM);
 				this.mins = '-4 -4 -4';
 				this.maxs = '4 4 4';
@@ -452,20 +430,7 @@ NET_HANDLE(ENT_CLIENT_PROJECTILE, bool isnew)
 			case PROJECTILE_WAKIROCKET:
 				loopsound(this, CH_SHOTS_SINGLE, SND_TAG_ROCKET_FLY, VOL_BASE, ATTEN_NORM);
 				break;
-			/*
-			case PROJECTILE_WAKICANNON:
-			    break;
-			case PROJECTILE_BUMBLE_GUN:
-			    // only new engines support sound moving with object
-			    loopsound(this, CH_SHOTS_SINGLE, SND_ELECTRO_FLY, VOL_BASE, ATTEN_NORM);
-			    this.mins = '0 0 -4';
-			    this.maxs = '0 0 -4';
-			    this.move_movetype = MOVETYPE_BOUNCE;
-			    settouch(this, func_null);
-			    this.bouncefactor = WEP_CVAR_SEC(electro, bouncefactor);
-			    this.bouncestop = WEP_CVAR_SEC(electro, bouncestop);
-			    break;
-			*/
+
 			default:
 				break;
 		}

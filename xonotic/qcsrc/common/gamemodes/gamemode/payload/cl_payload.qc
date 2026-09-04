@@ -3,43 +3,131 @@
 #include "payload.qh"
 
 #include <client/draw.qh>
+#include <client/main.qh>
 #include <client/hud/panel/modicons.qh>
+#include <lib/color.qh>
 
 void HUD_Mod_Payload_Export(int fh)
 {
 	HUD_Write_Cvar("hud_panel_modicons_payload_layout");
 }
-
 int autocvar_hud_panel_modicons_payload_layout;
+float autocvar_hud_panel_modicons_payload_ribbon = 1;
+float autocvar_hud_panel_modicons_payload_ribbon_width = 12;
+
+entity payload_ribbon_mgr;
+float payload_ribbon_stamp;
+
+void Payload_Ribbon_Draw(entity this)
+{
+	if(!autocvar_hud_panel_modicons_payload_ribbon || time - payload_ribbon_stamp > 0.5)
+		return;
+	float hw = autocvar_hud_panel_modicons_payload_ribbon_width;
+	IL_EACH(g_radarlinks, it.plc_payload_link,
+	{
+		vector a = it.origin + '0 0 6';
+		vector b = it.velocity + '0 0 6';
+		vector dir = b - a;
+		dir.z = 0;
+		if(vlen(dir) < 1)
+			continue;
+		vector perp = normalize(vec2(-dir.y, dir.x)) * hw;
+		vector c0 = payload_link_color(it.plc_link_team_a);
+		vector c1 = payload_link_color(it.plc_link_team_b);
+		R_BeginPolygon("", DRAWFLAG_ADDITIVE, false);
+		R_PolygonVertex(a - perp, '0 0 0', c0, 0.28);
+		R_PolygonVertex(a + perp, '1 0 0', c0, 0.28);
+		R_PolygonVertex(b + perp, '1 1 0', c1, 0.28);
+		R_PolygonVertex(b - perp, '0 1 0', c1, 0.28);
+		R_EndPolygon();
+	});
+}
+
+void Payload_Ribbon_Setup()
+{
+	payload_ribbon_stamp = time;
+	if(payload_ribbon_mgr)
+		return;
+	payload_ribbon_mgr = new(payload_ribbon);
+	payload_ribbon_mgr.draw = Payload_Ribbon_Draw;
+	IL_PUSH(g_drawables, payload_ribbon_mgr);
+}
 
 void HUD_Mod_Payload(vector myPos, vector mySize)
 {
 	mod_active = 1;
+	Payload_Ribbon_Setup();
 
-	float progress = bound(0, STAT(PAYLOAD_PROGRESS), 1);
-	float spd = STAT(PAYLOAD_SPEED);
-	int push = STAT(PAYLOAD_PUSH_PACKED);
-	int goals = STAT(PAYLOAD_GOALS_PACKED);
-
-	float barh = mySize.y * 0.34;
-	vector barPos = myPos + vec2(0, (mySize.y - barh) * 0.5);
-	vector barSize = vec2(mySize.x, barh);
-
-	drawfill(barPos, barSize, '0.1 0.1 0.1', panel_fg_alpha * 0.5, DRAWFLAG_NORMAL);
-
-	for(int j = 1; j <= NUM_TEAMS; ++j)
+	int n = 0;
+	for(int c = 0; c < PLC_MAX_CARTS; ++c)
 	{
-		float f = ((goals >> ((j - 1) * PLC_PUSH_BITS)) & PLC_PUSH_MASK) / PLC_PUSH_MASK;
-		float w = payload_unpack_push(push, j);
-		vector col = Team_ColorRGB(Team_IndexToTeam(j));
-		drawfill(barPos + vec2(f * barSize.x - barSize.y * 0.1, 0), vec2(barSize.y * 0.2, barSize.y), col, panel_fg_alpha, DRAWFLAG_NORMAL);
-		if(w > 0)
-			drawfill(barPos + vec2(f * barSize.x - barSize.y * 0.1, -barSize.y * 0.5), vec2(barSize.y * 0.2, barSize.y * 0.4 * min(1, w)), col, panel_fg_alpha, DRAWFLAG_ADDITIVE);
+		payload_cart_read(c);
+		if(plc_r_present)
+			++n;
+	}
+	if(n < 1)
+		n = 1;
+
+	float pipband = mySize.y * 0.16;
+	float rowarea = mySize.y - pipband;
+	float rowh = rowarea / n;
+	float barh = rowh * 0.5;
+
+	int pipslot = 0;
+	for(int c = 0; c < PLC_MAX_CARTS; ++c)
+	{
+		payload_cart_read(c);
+		if(!plc_r_present)
+			continue;
+		float x = myPos.x + pipslot * mySize.x / n;
+		float w = mySize.x / n;
+		int lead = plc_r_lead ? plc_r_lead : plc_r_ctrl;
+		vector a = lead ? Team_ColorRGB(Team_IndexToTeam(lead)) : PLC_GREY;
+		drawfill(vec2(x, myPos.y), vec2(w, pipband), a, panel_fg_alpha, DRAWFLAG_ADDITIVE);
+		if(plc_r_second)
+			drawfill(vec2(x + w * (1 - 0.5 * plc_r_contest), myPos.y),
+				vec2(w * 0.5 * plc_r_contest, pipband), plc_r_color2,
+				panel_fg_alpha, DRAWFLAG_ADDITIVE);
+		++pipslot;
 	}
 
-	vector cartCol = (spd == 0) ? '0.6 0.6 0.6' : '1 0.8 0.2';
-	drawfill(barPos + vec2(progress * barSize.x - barSize.y * 0.25, -barSize.y * 0.15), vec2(barSize.y * 0.5, barSize.y * 1.3), cartCol, panel_fg_alpha, DRAWFLAG_NORMAL);
+	int slot = 0;
+	for(int c = 0; c < PLC_MAX_CARTS; ++c)
+	{
+		payload_cart_read(c);
+		if(!plc_r_present && !(n == 1 && c == 0))
+			continue;
+
+		float f = plc_r_frac;
+		bool regress = plc_r_regress, stall = plc_r_stall;
+		vector teamcol = plc_r_color;
+		vector motcol = plc_r_color2;
+
+		vector rp = myPos + vec2(0, pipband + slot * rowh + (rowh - barh) * 0.5);
+		vector rs = vec2(mySize.x, barh);
+
+		drawfill(rp, rs, '0.08 0.08 0.08', panel_fg_alpha * 0.6, DRAWFLAG_NORMAL);
+		if(f > 0)
+			drawfill(rp, vec2(f * rs.x, rs.y), teamcol, panel_fg_alpha * 0.45, DRAWFLAG_ADDITIVE);
+
+		float hx = rp.x + bound(barh * 0.25, f * rs.x, rs.x - barh * 0.25);
+		drawfill(vec2(hx - barh * 0.22, rp.y - barh * 0.15), vec2(barh * 0.44, barh * 1.3),
+			motcol, panel_fg_alpha * plc_r_glow, DRAWFLAG_NORMAL);
+
+		float gy = rp.y + barh * 0.5 - barh * 0.18;
+		vector gc = myPos + vec2(mySize.x - barh * 0.4, gy);
+		if(regress)
+			drawfill(gc, vec2(barh * 0.36, barh * 0.36), plc_r_inkcolor, panel_fg_alpha, DRAWFLAG_ADDITIVE);
+		else if(!stall)
+			drawfill(gc, vec2(barh * 0.36, barh * 0.36), teamcol, panel_fg_alpha, DRAWFLAG_ADDITIVE);
+
+		++slot;
+	}
 
 	if(autocvar_hud_panel_modicons_payload_layout)
-		drawstring_aspect(myPos, strcat(ftos(floor(progress * 100 + 0.5)), "%"), vec2(mySize.x * 0.25, mySize.y * 0.3), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+	{
+		payload_cart_read(0);
+		drawstring_aspect(myPos, strcat(ftos(floor(plc_r_frac * 100 + 0.5)), "%"),
+			vec2(mySize.x * 0.22, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+	}
 }

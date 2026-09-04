@@ -14,7 +14,7 @@
         MY(trailspacing) = 1; \
         MY(type) = "smoke"; \
     } \
-    SUB(nade_##name) /* fire */ { \
+    SUB(nade_##name)            { \
         MY(alpha_min) = 30; \
         MY(alpha_max) = 30; \
         MY(alpha_fade) = 150; \
@@ -29,7 +29,7 @@
         MY(trailspacing) = 8; \
         MY(type) = "smoke"; \
     } \
-    SUB(nade_##name) /* bubbles */ { \
+    SUB(nade_##name)               { \
         MY(alpha_min) = 256; \
         MY(alpha_max) = 256; \
         MY(alpha_fade) = 256; \
@@ -47,7 +47,6 @@
         MY(underwater) = true; \
         MY(velocityjitter) = '16.0 16.0 16.0'; \
     } \
-    /**/
 
 nade(blue,      "0x006cff", "0x0600ff", "0x0600ff", "0x9794ff")
 nade(red,       "0xff0000", "0xff3c00", "0xff0000", "0xffa2a2")
@@ -72,7 +71,7 @@ nade(neutral,   "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(trailspacing) = 1; \
         MY(type) = "smoke"; \
     } \
-    SUB(nade_##name##_burn) /* fire */ { \
+    SUB(nade_##name##_burn)            { \
         MY(alpha_min) = 200; \
         MY(alpha_max) = 200; \
         MY(alpha_fade) = 1000; \
@@ -87,7 +86,7 @@ nade(neutral,   "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(trailspacing) = 64; \
         MY(type) = "smoke"; \
     } \
-    SUB(nade_##name##_burn) /* bubbles */ { \
+    SUB(nade_##name##_burn)               { \
         MY(alpha_min) = 256; \
         MY(alpha_max) = 256; \
         MY(alpha_fade) = 256; \
@@ -125,7 +124,6 @@ nade(neutral,   "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(type) = "smoke"; \
         MY(velocityjitter) = '10.0 10.0 10.0'; \
     } \
-    /**/
 
 nade_burn(red,      "0xff0000", "0xff3c00", "0xff0000", "0xffa2a2")
 nade_burn(blue,     "0x006cff", "0x0600ff", "0x0600ff", "0x9794ff")
@@ -150,7 +148,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(tex_max) = 16; \
         MY(type) = "decal"; \
     } \
-    SUB(nade_##name##_explode) /* shockwave */ { \
+    SUB(nade_##name##_explode)                 { \
         MY(alpha_min) = 80; \
         MY(alpha_max) = 80; \
         MY(alpha_fade) = 650; \
@@ -165,7 +163,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(type) = "smoke"; \
         MY(velocitymultiplier) = 44; \
     } \
-    SUB(nade_##name##_explode) /* fire */ { \
+    SUB(nade_##name##_explode)            { \
         MY(airfriction) = 30; \
         MY(alpha_min) = 400; \
         MY(alpha_max) = 656; \
@@ -187,7 +185,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(type) = "smoke"; \
         MY(velocityjitter) = '320.0 320.0 320.0'; \
     } \
-    SUB(nade_##name##_explode) /* fire stretched */ { \
+    SUB(nade_##name##_explode)                      { \
         MY(airfriction) = -9; \
         MY(alpha_min) = 1500; \
         MY(alpha_max) = 3000; \
@@ -204,7 +202,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(type) = "spark"; \
         MY(velocityjitter) = '30.0 30.0 30.0'; \
     } \
-    SUB(nade_##name##_explode) /* smoke */ { \
+    SUB(nade_##name##_explode)             { \
         MY(airfriction) = 0.040000; \
         MY(alpha_min) = 128; \
         MY(alpha_max) = 328; \
@@ -227,7 +225,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(velocityjitter) = '200.0 200.0 200.0'; \
         MY(velocityoffset) = '0.0 0.0 180.0'; \
     } \
-    SUB(nade_##name##_explode) /* underwater bubbles */ { \
+    SUB(nade_##name##_explode)                          { \
         MY(alpha_min) = 128; \
         MY(alpha_max) = 256; \
         MY(alpha_fade) = 64; \
@@ -246,7 +244,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(underwater) = true; \
         MY(velocityjitter) = '196.0 196.0 196.0'; \
     } \
-    SUB(nade_##name##_explode) /* bouncing sparks */ { \
+    SUB(nade_##name##_explode)                       { \
         MY(airfriction) = 1; \
         MY(alpha_min) = 644; \
         MY(alpha_max) = 956; \
@@ -267,7 +265,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(velocityjitter) = '424.0 424.0 624.0'; \
         MY(velocityoffset) = '0.0 0.0 80.0'; \
     } \
-    SUB(nade_##name##_explode) /* notbouncing sparks */ { \
+    SUB(nade_##name##_explode)                          { \
         MY(airfriction) = 0.700000; \
         MY(alpha_min) = 644; \
         MY(alpha_max) = 956; \
@@ -286,7 +284,7 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(velocityjitter) = '424.0 424.0 624.0'; \
         MY(velocityoffset) = '0.0 0.0 80.0'; \
     } \
-    SUB(nade_##name##_explode) /* debris */ { \
+    SUB(nade_##name##_explode)              { \
         MY(alpha_min) = 644; \
         MY(alpha_max) = 956; \
         MY(alpha_fade) = 2500; \
@@ -306,7 +304,6 @@ nade_burn(neutral,  "0xFFFFFF", "0xFFFFFF", "0xFFFFFF", "0xFFFFFF")
         MY(type) = "smoke"; \
         MY(velocityjitter) = '324.0 324.0 324.0'; \
     } \
-    /**/
 
 nade_explode(blue,      '20.0 20.0 100.0', "0x80C0FF", "0x80C0FF", "0x629dff", "0x0018ff", "0x006cff", "0x0600ff")
 nade_explode(red,       '100.0 20.0 20.0', "0xff0000", "0xffa2a2", "0xff0000", "0xff4200", "0xff0000", "0xffa2a2")

@@ -1,4 +1,4 @@
-// BSD
+
 
 #include "quakedef.h"
 #include "snd_3dras_typedefs.h"
@@ -13,32 +13,31 @@ cvar_t snd_mutewhenidle = {CVAR_SAVE, "snd_mutewhenidle", "1", "whether to disab
 static cvar_t snd_precache = {0, "snd_precache", "1", "loads sounds before they are used"};
 
 static dllhandle_t   ras_dll = NULL;
-// This values is used as a multiple version support check AND to check if the lib has been loaded with success (its 0 if it failed)
+
 int ras_version;
 
 static mempool_t *snd_mempool;
-static sfx_t sfx_list ={//This is a header, never contains only useful data, only the first next (makes the code less complex, later)
-	NULL, //next
-	"",  //name[MAX_QPATH];
-	NULL, //sounddata
-	0,    //locks
-	0    //flags
-	//0,    //loopstart,
-	//0     //total_length
+static sfx_t sfx_list ={
+	NULL,
+	"",
+	NULL,
+	0,
+	0
+
 };
 static unsigned int channel_id_count=0;
 static channel_t channel_list={
-	NULL, //next
-	NULL, //soundevent
-	0, //entnum
-	0, //entchannel
-	0 //id
+	NULL,
+	NULL,
+	0,
+	0,
+	0
 };
 static entnum_t  entnum_list={
-	NULL,// *next;
-	0,   //  entnum;
-	{0.0,0.0,0.0}, //lastloc
-	NULL,// *soundsource;// This is also used to indicate a unused slot (when it's pointing to 0)
+	NULL,
+	0,
+	{0.0,0.0,0.0},
+	NULL,
 };
 
 int   updatecount=0;
@@ -48,15 +47,9 @@ void* soundworld;
 void* listener;
 float listener_location   [3];
 
-//1 qu = 0.0381 meter aka 38.1 mm
-//2^17 qu's is the max map size in DP
-//3DRAS uses atleast 32 bit to store it's locations.
-//So the smallest possible step is 0.0381*2^17/2^(32)
-// =~ 1.16 nm so let's pick 2 to be safe
-static float DP_Ras_UnitSize=(float)2/1000/1000; //2 nm
+static float DP_Ras_UnitSize=(float)2/1000/1000;
 static float DP_Ras_VolumeScale=0.075;
-//static float QU_Size = 0.0381; //meter
-//static float DP_QU_Ras_Scale=QU_Size/DP_Ras_UnitSize;
+
 static float DP_QU_Ras_Scale=19050;
 static void* (*ras_delete                     )(void*);
 static int   (*ras_getversion                 )();
@@ -83,8 +76,6 @@ static int   (*ras_soundevent_ended           )(void*);
 static int   (*ras_setcoordinatesystem        )(Location*,Location*,Location*);
 static int   (*ras_testrotation               )(Scalar  *,Scalar  *,Scalar  *);
 
-// #define RAS_PRINT //Comment out for to not print extra crap.
-
 static dllfunction_t ras_funcs[] =
 {
 	{"Delete"                                      ,(void**) &ras_delete                     },
@@ -99,7 +90,7 @@ static dllfunction_t ras_funcs[] =
 	{"AudioDecoderFileWav_New"                     ,(void**) &ras_audiodecoderwav_new        },
 	{"AudioDecoderFileOgg_New"                     ,(void**) &ras_audiodecoderogg_new        },
 	{"SoundDataAudioDecoderOneShot_New"            ,(void**) &ras_sounddataoneshot_new       },
-	//{"SoundDataAudioDecoderFileLoop_New"           ,(void**) &ras_sounddataloop_new          },
+
 	{"SoundWorld_SetMainListener"                  ,(void**) &ras_soundworld_setmainlistener },
 	{"SoundWorld_SetScale"                         ,(void**) &ras_soundworld_setscale        },
 	{"ListenerPlayer_New"                          ,(void**) &ras_listener_new               },
@@ -125,8 +116,7 @@ static const char* ras_dllname [] =
 		NULL
 };
 
-// --- entnum_t List functions ----
-void entnum_new(entnum_t** prev, entnum_t** new){ //Adds a new item to the start of the list and sets the pointers.
+void entnum_new(entnum_t** prev, entnum_t** new){
 	(*new)=Mem_Alloc(snd_mempool,sizeof(entnum_t));
 	if(&new){
 		(*new)->next=entnum_list.next;
@@ -136,15 +126,15 @@ void entnum_new(entnum_t** prev, entnum_t** new){ //Adds a new item to the start
 		Con_Printf("Could not allocate memory for a new entnum_t");
 	}
 }
-void entnum_begin(entnum_t** prev, entnum_t** now){ //Goes to the beginning of the list and sets the pointers.
+void entnum_begin(entnum_t** prev, entnum_t** now){
 	(*prev)=&entnum_list;
 	(*now )=entnum_list.next;
 }
-void entnum_next(entnum_t** prev, entnum_t** now){ //Goes to the next element
+void entnum_next(entnum_t** prev, entnum_t** now){
 	(*prev)=(*now);
 	(*now )=(*now)->next;
 }
-void entnum_delete_and_next(entnum_t** prev, entnum_t** now){ //Deletes the element and goes to the next element
+void entnum_delete_and_next(entnum_t** prev, entnum_t** now){
 	entnum_t* next;
 	next=(*now)->next;
 	if((*now)->rasptr) ras_delete((*now)->rasptr);
@@ -152,10 +142,8 @@ void entnum_delete_and_next(entnum_t** prev, entnum_t** now){ //Deletes the elem
 	(*now)=next;
 	(*prev)->next=(*now);
 }
-// --- End Of entnum_t List functions ----
 
-// --- channel_t List functions ----
-void channel_new(channel_t** prev, channel_t** new){ //Adds a new item to the start of the list and sets the pointers.
+void channel_new(channel_t** prev, channel_t** new){
 	(*new)=Mem_Alloc(snd_mempool,sizeof(channel_t));
 	if(&new){
 		(*new)->next=channel_list.next;
@@ -165,15 +153,15 @@ void channel_new(channel_t** prev, channel_t** new){ //Adds a new item to the st
 		Con_Printf("Could not allocate memory for a new channel_t");
 	}
 }
-void channel_begin(channel_t** prev, channel_t** now){ //Goes to the beginning of the list and sets the pointers.
+void channel_begin(channel_t** prev, channel_t** now){
 	(*prev)=&channel_list;
 	(*now )=channel_list.next;
 }
-void channel_next(channel_t** prev, channel_t** now){ //Goes to the next element
+void channel_next(channel_t** prev, channel_t** now){
 	(*prev)=(*now );
 	(*now )=(*now)->next;
 }
-void channel_delete_and_next(channel_t** prev, channel_t** now){ //Deletes the element and goes to the next element
+void channel_delete_and_next(channel_t** prev, channel_t** now){
 	channel_t* next;
 	next=(*now)->next;
 	if((*now)->rasptr) ras_delete((*now)->rasptr);
@@ -181,10 +169,8 @@ void channel_delete_and_next(channel_t** prev, channel_t** now){ //Deletes the e
 	(*now)=next;
 	(*prev)->next=(*now);
 }
-// --- End Of channel_t List functions ----
 
-// --- sfx_t List functions ----
-void sfx_new(sfx_t** prev, sfx_t** new){ //Adds a new item to the start of the list and sets the pointers.
+void sfx_new(sfx_t** prev, sfx_t** new){
 	(*new)=Mem_Alloc(snd_mempool,sizeof(sfx_t));
 	if(&new){
 		(*new)->next=sfx_list.next;
@@ -194,15 +180,15 @@ void sfx_new(sfx_t** prev, sfx_t** new){ //Adds a new item to the start of the l
 		Con_Printf("Could not allocate memory for a new sfx_t");
 	}
 }
-void sfx_begin(sfx_t** prev, sfx_t** now){ //Goes to the beginning of the list and sets the pointers.
+void sfx_begin(sfx_t** prev, sfx_t** now){
 	(*prev)=&sfx_list;
 	(*now )=sfx_list.next;
 }
-void sfx_next(sfx_t** prev, sfx_t** now){ //Goes to the next element
+void sfx_next(sfx_t** prev, sfx_t** now){
 	(*prev)=(*now );
 	(*now )=(*now)->next;
 }
-void sfx_delete_and_next(sfx_t** prev, sfx_t** now){ //Deletes the element and goes to the next element
+void sfx_delete_and_next(sfx_t** prev, sfx_t** now){
 	sfx_t* next;
 	next=(*now)->next;
 	if((*now)->rasptr) ras_delete((*now)->rasptr);
@@ -210,7 +196,6 @@ void sfx_delete_and_next(sfx_t** prev, sfx_t** now){ //Deletes the element and g
 	(*now)=next;
 	(*prev)->next=(*now);
 }
-// --- End Of sfx_t List functions ----
 
 void channel_new_smart(channel_t** prev, channel_t** now){
 	channel_new(prev,now);
@@ -253,13 +238,12 @@ static void S_Play_Common (float fvol, float attenuation){
 		i = 1;
 		while (i < Cmd_Argc ())
 		{
-			// Get the name, and appends ".wav" as an extension if there's none
+
 			strlcpy (name, Cmd_Argv (i), sizeof (name));
 			if (!strrchr (name, '.'))
 				strlcat (name, ".wav", sizeof (name));
 			i++;
 
-			// If we need to get the volume from the command line
 			if (fvol == -1.0f)
 			{
 				fvol = atof (Cmd_Argv (i));
@@ -286,7 +270,7 @@ static void S_SoundList_f(void){
 	    sfx_t *prev_s, *now_s;
 	 entnum_t *prev_e, *now_e;
 	 int count_c,count_s,count_e;
-	
+
 	if(ras_version>0 && ras_dll){
 
 		Con_Printf("Sfx (SoundDatas) :\n"
@@ -364,7 +348,7 @@ void S_Init (void){
 		Con_Printf ("Checking the lib version\n");
 		ras_version=ras_getversion();
 		if (ras_version>0){
-			
+
 			Con_Printf ("Version %i found\n",ras_version);
 			Cvar_RegisterVariable(&volume);
 			Cvar_RegisterVariable(&bgmvolume);
@@ -387,7 +371,6 @@ void S_Init (void){
 			Cmd_AddCommand("snd_startup", S_Startup, "start the sound system");
 			Cmd_AddCommand("snd_unloadallsounds", S_UnloadAllSounds_f, "unload all sound files");
 
-			//Set the coordinate system inside the lib equal to the one inside dp:
 			   up[0]= 0 ,   up[1]= 0 ,    up[2]=1;
 			right[0]= 0 ,right[1]=-1 , right[2]=0;
 			front[0]= 1 ,front[1]= 0 , front[2]=0;
@@ -409,7 +392,7 @@ void S_Init (void){
 void S_Terminate (void){
 	if(ras_dll){
 		S_Shutdown();
-		Free_All_sfx(); // <= The only valid place to free the sfx.
+		Free_All_sfx();
 		Sys_UnloadLibrary(&ras_dll);
 		ras_dll=0;
 		ras_version=0;
@@ -436,12 +419,10 @@ void S_Startup (void){
 void S_Shutdown (void){
 	if(ras_version>0 && ras_dll && soundworld){
 		if(openframe) ras_soundworld_endframe(soundworld);
-		
-		//Order doesn't really matter because the lib takes care of the references
-		//Free_All_sfx(); <= DO NOT FREE SFX ... they just keep sending in the old sfx causing havoc.
+
 		Free_All_channel();
 		Free_All_entnum();
-		
+
 		ras_soundworld_destroy(soundworld);
 		soundworld=ras_delete(soundworld);
 		if(soundworld){
@@ -466,27 +447,13 @@ void S_Update(const matrix4x4_t *listener_matrix){
 	entnum_t  *prev_e, *now_e;
 	channel_t *prev_c, *now_c;
 	if(ras_version>0 && ras_dll && soundworld){
-		Matrix4x4_ToVectors(listener_matrix,forward,left,up,listener_location); //Add the new player location.
+		Matrix4x4_ToVectors(listener_matrix,forward,left,up,listener_location);
 		if(openframe){
 			VectorNegate(left,left);
 			DP_To_Ras_Location(listener_location,location3);
 			ras_listener_setlocation(listener,location3);
 			ras_listener_setrotation(listener,left,up,forward);
-			/*
-			Con_Printf(
-				"DP:  Left={%f|%f|%f} Up={%f|%f|%f} Front={%f|%f|%f}\n",
-				   left[0],   left[1],   left[2],
-				     up[0],     up[1],     up[2],
-				forward[0],forward[1],forward[2]
-			);
-			ras_testrotation(left,up,forward);
-			Con_Printf(
-				"RAS: Left={%f|%f|%f} Up={%f|%f|%f} Front={%f|%f|%f}\n",
-				   left[0],   left[1],   left[2],
-				     up[0],     up[1],     up[2],
-				forward[0],forward[1],forward[2]
-			);
-			*/
+
 			if(updatecount>100){
 				updatecount=0;
 				#ifdef RAS_PRINT
@@ -498,17 +465,16 @@ void S_Update(const matrix4x4_t *listener_matrix){
 			}else{
 				++updatecount;
 			}
-			//(15:20:31) div0: (at the moment, you can extend it to multichannel)
-			//(15:20:40) div0: see S_CaptureAVISound()
-			if(cl.entities){ //if there is a list of ents
-				//Update all entities there position into the sound sources.
+
+			if(cl.entities){
+
 				entnum_begin(&prev_e,&now_e);
 				while(now_e){
 					if(!now_e->rasptr){
 						Con_Printf("S_Update: Found an entnum_t without a valid RAS-ptr... This indicates a bug.\n");
 						entnum_delete_and_next(&prev_e,&now_e);
-					}else{ //Look for unused ent and drop them.
-						if(now_e->entnum!=-1){ //Talking about an ent ? Or a static sound source ?
+					}else{
+						if(now_e->entnum!=-1){
 							if(ras_soundsource_ended(now_e->rasptr)){
 									VectorCopy(cl.entities[now_e->entnum].state_current.origin,float3);
 									VectorCopy(now_e->lastloc,float3);
@@ -535,7 +501,7 @@ void S_Update(const matrix4x4_t *listener_matrix){
 				if(!now_c->rasptr){
 					Con_Printf("S_Update: Found an channel_t without a valid RAS-ptr... This indicates a bug.\n");
 					channel_delete_and_next(&prev_c,&now_c);
-				}else{ //Look for stopped sound channels and free them
+				}else{
 					if(ras_soundevent_ended(now_c->rasptr)){
 						channel_delete_and_next(&prev_c,&now_c);
 					}else{
@@ -549,9 +515,7 @@ void S_Update(const matrix4x4_t *listener_matrix){
 	}
 }
 void S_ExtraUpdate (void){
-	// This lib is unable to use any extra updates.
-	//if(ras_version>0 && ras_dll){
-	//}
+
 }
 sfx_t* S_FindName (const char *name){
 	sfx_t *prev,*now;
@@ -565,29 +529,26 @@ sfx_t* S_FindName (const char *name){
 			Con_Printf ("S_FindName: sound name too long (%s)\n", name);
 			return NULL;
 		}
-		
+
 		sfx_begin(&prev,&now);
-		// Seek in list
+
 		while (now){
 			if(strcmp (now->name, name)==0) return now;
 			sfx_next(&prev,&now);
 		}
-		
-		// None found in the list,
-		// Add a sfx_t struct for this sound
+
 		sfx_new(&prev,&now);
 		now->locks=0;
 		now->flags=0;
 		now->rasptr=0;
-		//sfx->looptstart=0;
-		//sfx->total_length=0;
+
 		strlcpy (now->name, name, sizeof (now->name));
 		return now;
 	}
 	return NULL;
 }
 int S_LoadSound(sfx_t *sfx, int complain){
-	// TODO add SCR_PushLoadingScreen, SCR_PopLoadingScreen calls to this
+
 	fs_offset_t filesize;
 	char namebuffer[MAX_QPATH +16  ];
 	char filename  [MAX_QPATH +16+4];
@@ -598,29 +559,28 @@ int S_LoadSound(sfx_t *sfx, int complain){
 	void* decoder_ptr=NULL;
 	if(ras_version>0 && ras_dll){
 
-		fileext[3]=0; //Terminator
-		// See if already loaded
+		fileext[3]=0;
+
 		if (sfx->rasptr) return true;
 
-		// LordHavoc: if the sound filename does not begin with sound/, try adding it
 		if (!data && strncasecmp(sfx->name, "sound/", 6))
 		{
 			len = dpsnprintf (namebuffer, sizeof(namebuffer), "sound/%s", sfx->name);
-			if (len < 0){ // name too long
+			if (len < 0){
 				Con_DPrintf("S_LoadSound: name \"%s\" is too long\n", sfx->name);
 				return false;
 			}
 			if(!data){
 				data = FS_LoadFile(namebuffer, snd_mempool, false, &filesize);
-				if(data) memcpy(fileext,namebuffer+len-3,3); //Copy the extention
+				if(data) memcpy(fileext,namebuffer+len-3,3);
 			}
-			if(!data){ //Stick .wav to the end and try again
+			if(!data){
 				memcpy(filename,namebuffer,len);
 				memcpy(filename+len-4,".wav",5);
 				data = FS_LoadFile(filename, snd_mempool, false, &filesize);
 				if(data) memcpy(fileext,"wav",3);
 			}
-			if(!data){ //Stick .ogg to the end and try again
+			if(!data){
 				memcpy(filename,namebuffer,len);
 				memcpy(filename+len-4,".ogg",5);
 				data = FS_LoadFile(filename, snd_mempool, false, &filesize);
@@ -628,23 +588,23 @@ int S_LoadSound(sfx_t *sfx, int complain){
 			}
 		}
 		if(!data){
-			// LordHavoc: then try without the added sound/ as wav and ogg
+
 			len = dpsnprintf (namebuffer, sizeof(namebuffer), "%s", sfx->name);
-			if (len < 0){ // name too long
+			if (len < 0){
 				Con_DPrintf("S_LoadSound: name \"%s\" is too long\n", sfx->name);
 				return false;
 			}
 			if(!data){
 				data = FS_LoadFile(namebuffer, snd_mempool, false, &filesize);
-				if(data) memcpy(fileext,namebuffer+len-3,3); //Copy the file extention
+				if(data) memcpy(fileext,namebuffer+len-3,3);
 			}
-			if(!data){ //Stick .wav to the end
+			if(!data){
 				memcpy(filename,namebuffer,len);
 				memcpy(filename+len-4,".wav",5);
 				data = FS_LoadFile(filename, snd_mempool, false, &filesize);
 				if(data) memcpy(fileext,"wav",3);
 			}
-			if(!data){ //Stick .ogg to the end
+			if(!data){
 				memcpy(filename,namebuffer,len);
 				memcpy(filename+len-4,".ogg",5);
 				data = FS_LoadFile(filename, snd_mempool, false, &filesize);
@@ -653,17 +613,16 @@ int S_LoadSound(sfx_t *sfx, int complain){
 		}
 		if (!data){
 			if(complain) Con_Printf("Failed attempt load file '%s'\n",namebuffer);
-		}else{ //if the file loaded: pass to RAS 3D
+		}else{
 			file_ptr=ras_fileinputwhole_new(data,filesize);
-			// There we transfered to file to RAS 3D
-			// So lets free up data shall we ?
+
 			FS_Close(data);
 
 			if(!file_ptr){
 				Con_Printf("Failed to upload file to audio lib\n");
 			}else{
 				if(0==strncasecmp(fileext,"wav",3)){
-					decoder_ptr=ras_audiodecoderwav_new(file_ptr,true); //(true)use seek mode: some quake files are broken.
+					decoder_ptr=ras_audiodecoderwav_new(file_ptr,true);
 				}
 				if(0==strncasecmp(fileext,"ogg",3)){
 					decoder_ptr=ras_audiodecoderogg_new(file_ptr);
@@ -709,11 +668,9 @@ void S_ClearUsed (void){
 		Con_Printf("Called S_ClearUsed\n");
 		for(i=0;i<numsounds;++i){
 			Con_Printf("Loading :'%s'\n",serversound[i]);
-			// Load the ambient sounds
 
 			Con_Printf("ToDo: Load abmient sounds (Need geometry).\n");
 
-			// Remove the SFXFLAG_SERVERSOUND flag
 			sfx_begin(&prev_s,&now_s);
 			while(now_s){
 				if (now_s->flags & SFXFLAG_SERVERSOUND) now_s->flags &= ~SFXFLAG_SERVERSOUND;
@@ -732,7 +689,7 @@ qboolean S_IsSoundPrecached (const sfx_t *sfx){
 	return 0;
 }
 
-void S_KillChannel (channel_t *now){ //Silences a SoundEvent
+void S_KillChannel (channel_t *now){
 	if(now->rasptr){
 		ras_soundevent_setsoundpower(now->rasptr,0);
 		ras_delete(now->rasptr);
@@ -747,19 +704,17 @@ int S_StartSound_OnEnt (int entnum, int entchannel, sfx_t *sfx, float fvol, floa
 	channel_t *prev_c, *now_c;
 	Location tmp_location[3];
 
-	//If there is a game world
 	if(!cl.entities){
 		Con_Printf("S_StartSound_OnEnt: no entity list exists\n");
 		return -1;
 	}
 
-	// Look for the correct ent_t
 	entnum_begin(&prev_e,&now_e);
 	while(now_e){
 		if(now_e->entnum==entnum) break;
 		entnum_next(&prev_e,&now_e);
 	}
-	//We found no ent ...  lets make one...
+
 	if(!now_e){
 		entnum_new(&prev_e,&now_e);
 		if(!now_e){
@@ -775,7 +730,6 @@ int S_StartSound_OnEnt (int entnum, int entchannel, sfx_t *sfx, float fvol, floa
 		}
 	}
 
-	//Ok now lets look for the channel.
 	channel_begin(&prev_c,&now_c);
 	while(now_c){
 		if(
@@ -784,10 +738,10 @@ int S_StartSound_OnEnt (int entnum, int entchannel, sfx_t *sfx, float fvol, floa
 		) break;
 		channel_next(&prev_c,&now_c);
 	}
-	
-	if(now_c){ //O dear the channel excists ....
+
+	if(now_c){
 		S_KillChannel(now_c);
-	}else{ //We found no channel .... So we need to make a new one ...
+	}else{
 		channel_new_smart(&prev_c,&now_c);
 		if(!now_c){
 			Con_Printf("S_StartSound_OnEnt: could not make new channel_t\n");
@@ -798,11 +752,10 @@ int S_StartSound_OnEnt (int entnum, int entchannel, sfx_t *sfx, float fvol, floa
 		now_c->entchannel=entchannel;
 	}
 
-	//Lets start the sound on the acquired sound source and channel
 	now_c->rasptr=ras_soundevent_new(
 		soundworld,now_e->rasptr,sfx->rasptr,fvol*DP_Ras_VolumeScale,1.0
 	);
-	if(!now_c->rasptr){ //Whoops, failed, lets delete this channel then.
+	if(!now_c->rasptr){
 		channel_delete_and_next(&prev_c,&now_c);
 		Con_Printf("S_StartSound_OnEnt: could not make a new soundevent.\n");
 		return -1;
@@ -814,7 +767,7 @@ int S_StartSound_OnLocation (sfx_t *sfx, vec3_t origin, float fvol, float attenu
 	channel_t *prev_c, *now_c;
 	Location tmp_location[3];
 	DP_To_Ras_Location(origin,tmp_location);
-	
+
 	 entnum_new      (&prev_e,&now_e);
 	VectorCopy(now_e->lastloc,origin);
 	now_e->entnum=-1;
@@ -837,20 +790,6 @@ int S_StartSound_OnLocation (sfx_t *sfx, vec3_t origin, float fvol, float attenu
 	return now_c->id;
 }
 
-
-// Qantourisc on the wicked-quake-sound-system:
-// --------------------------------------------
-// entnum can be Zero or lower => This means "use the origin" so it's not tracked.
-// entnum -1 is a "world" containing more then 1 soundsource.
-// If channel !=  0 try to overwrite the requested channel. Otherwise play it on some random channel.
-// If channel == -1 overwrite the first track of the ent.
-// If a channel replacement is requested, only allow overwriting if it's owned by the same channel.
-// If no channel can be replaced, pick a new one.
-// Also when you overwrite a channel, that one has to stop dead.
-// This function returns the channel it was played on (so it can be stopped later)
-// This starts CD-music: S_StartSound (-1, 0, sfx, vec3_origin, cdvolume, 0);
-// The channel you return then, can later be requested to be stopped.
-
 int S_StartSound (int entnum, int entchannel, sfx_t *sfx, vec3_t origin, float fvol, float attenuation){
 	sfx_t *prev_s,*now_s;
 	int sfx_ok;
@@ -858,7 +797,7 @@ int S_StartSound (int entnum, int entchannel, sfx_t *sfx, vec3_t origin, float f
 		#ifdef RAS_PRINT
 		Con_Printf("Called S_StartSound %i, %i, %f, %f\n",entnum,entchannel,fvol,attenuation);
 		#endif
-		if(sfx==NULL){ // They pass this to me ... but WHY ? it makes no sense !
+		if(sfx==NULL){
 			#ifdef RAS_PRINT
 			Con_Printf("S_StartSound: forgot to mention a sfx!\n");
 			#endif
@@ -880,8 +819,7 @@ int S_StartSound (int entnum, int entchannel, sfx_t *sfx, vec3_t origin, float f
 		}
 		if (!S_LoadSound(sfx,true)) return -1;
 
-
-		if(entnum!=-1){ //If we are talking about an ent
+		if(entnum!=-1){
 			return S_StartSound_OnEnt(entnum,entchannel,sfx,fvol,attenuation);
 		}else{
 			return S_StartSound_OnLocation(      sfx,origin,fvol,attenuation);
@@ -905,7 +843,6 @@ qboolean S_LocalSound (const char *s){
 			return false;
 		}
 
-		// Local sounds must not be freed
 		sfx->flags |= SFXFLAG_PERMANENTLOCK;
 		#ifdef RAS_PRINT
 		Con_Printf("S_LocalSound: this is still a small hack\n");
@@ -914,31 +851,30 @@ qboolean S_LocalSound (const char *s){
 		if (ch_ind < 0)
 			return false;
 
-		//channels[ch_ind].flags |= CHANNELFLAG_LOCALSOUND;
 		return true;
 	}
 	return 0;
 }
 void S_StaticSound (sfx_t *sfx, vec3_t origin, float fvol, float attenuation){
-	//Static sounds should not be looped
+
 	if(ras_version>0 && ras_dll){
 		#ifdef RAS_PRINT
 		Con_Printf("Called S_StaticSound\n");
 		Con_Printf("Waiting on Qantourisc to add Static sounds in his lib.\n");
 		#endif
-		//Static sounds are sounds that are not pauzed, and or played locally.
+
 	}
 }
 void S_StopSound (int entnum, int entchannel){
 	channel_t *prev, *now;
 	if(ras_version>0 && ras_dll){
-		//Con_Printf("Called S_StopSound %i, %i\n",entnum,entchannel);
+
 		channel_begin(&prev,&now);
 		while(now){
 			if(now->entnum==entnum && now->entchannel==entchannel) break;
 			channel_next(&prev,&now);
 		}
-		if(now){ //If we found our to delete sound.
+		if(now){
 			S_KillChannel(now);
 			channel_delete_and_next(&prev,&now);
 		}else{
@@ -949,7 +885,7 @@ void S_StopSound (int entnum, int entchannel){
 void S_StopAllSounds (void){
 	channel_t *prev, *now;
 	if(ras_version>0 && ras_dll){
-		//Con_Printf("Called S_StopAllSounds\n");
+
 		channel_begin(&prev,&now);
 		while(now){
 			S_KillChannel(now);
@@ -960,7 +896,7 @@ void S_StopAllSounds (void){
 void S_PauseGameSounds (qboolean toggle){
 	if(ras_version>0 && ras_dll){
 		Con_Printf("Called S_PauseGameSounds %i\n",toggle);
-		//Localsounds should not be pauzed
+
 	}
 }
 void S_StopChannel (unsigned int channel_ind){
@@ -1003,7 +939,7 @@ void S_SetChannelVolume (unsigned int ch_ind, float fvol){
 
 float S_GetChannelPosition (unsigned int ch_ind)
 {
-	// FIXME unsupported
+
 	return -1;
 }
 
@@ -1029,14 +965,7 @@ int S_GetSoundChannels (void){
 	return 2;
 }
 
-/*
-====================
-SndSys_SendKeyEvents
-
-Send keyboard events originating from the sound system (e.g. MIDI)
-====================
-*/
 void SndSys_SendKeyEvents(void)
 {
-	// not supported
+
 }

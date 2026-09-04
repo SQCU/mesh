@@ -1,28 +1,10 @@
-"""The j-oracle side channel: a local HTTP server over the responder's telemetry.
-
-    python3 -m solver.strat.joracle.server \
-        --telemetry mesh-mini:/tmp/mesh-joracle/output/live.jsonl \
-        --port 8795
-
-It reads.  It never writes to the game, the responder, the mesh or a checkpoint.
-It survives the responder and the game server being killed and restarted: the
-follower reattaches, and the page keeps rendering the last frames it has with an
-explicit staleness readout rather than a blank screen.
-
-Endpoints
-    /                 the viewer page (xonotic/solver/strat/web/)
-    /api/live         behavior series + latest internals + field audit
-    /api/joracle      the rolling probe report
-    /api/frame        the single most recent raw telemetry frame, verbatim
-    /api/health       liveness of the tap itself
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 import math
 import os
+import sys
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -30,21 +12,24 @@ from urllib.parse import urlparse, parse_qs
 import numpy as np
 
 try:
-    from .follow import TelemetryFollower
+    from .follow import TelemetryFollower, split_source
+    from .liveness import RuntimeMeasure
+    from .metrics import summarize
     from .probe import RollingProbe
-    from .expect import audit
-except ImportError:                                   # run as a plain script
+    from .field_measures import field_measures
+except ImportError:
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    from solver.strat.joracle.follow import TelemetryFollower
+    from solver.strat.joracle.follow import TelemetryFollower, split_source
+    from solver.strat.joracle.liveness import RuntimeMeasure
+    from solver.strat.joracle.metrics import summarize
     from solver.strat.joracle.probe import RollingProbe
-    from solver.strat.joracle.expect import audit
+    from solver.strat.joracle.field_measures import field_measures
 
 WEB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
-
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../.."))
 
 def clean(value):
-    """JSON-safe: NaN/Inf become null rather than invalid JSON."""
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -59,9 +44,7 @@ def clean(value):
         return clean(value.tolist())
     return value
 
-
 def series_row(frame):
-    """The compact per-tick record the behavior charts consume."""
     carts = frame.get("carts") or []
     return {
         "t": frame.get("t"),
@@ -70,15 +53,14 @@ def series_row(frame):
         "resp_id": frame.get("resp_id"),
         "req_tick": frame.get("req_tick"),
         "k": frame.get("k"), "j": frame.get("j"), "l": frame.get("l"),
-        "mode": frame.get("mode"), "trained": frame.get("trained"),
+        "mode": frame.get("mode"),
         "updates": frame.get("updates"),
         "PW": frame.get("PW"),
         "SUCC": frame.get("SUCC"),
         "loser_ranks": frame.get("loser_ranks"),
         "depth": [c.get("depth") for c in carts],
-        "ctrl": [c.get("ctrl") for c in carts],
+        "control_team": [c.get("control_team") for c in carts],
         "speed": [c.get("speed") for c in carts],
-        "progress": [c.get("progress") for c in carts],
         "focus": frame.get("strategy_focus"),
         "resources": frame.get("resources"),
         "instrument_counts": frame.get("instrument_counts"),
@@ -95,7 +77,6 @@ def series_row(frame):
         "loser_value_mean": _mean((frame.get("model") or {}).get("loser_value")),
     }
 
-
 def _mean(value):
     if value is None:
         return None
@@ -104,14 +85,12 @@ def _mean(value):
         return None
     return round(float(np.nanmean(array)), 5)
 
-
 def internals(frame):
-    """The policy internals panel for the newest frame, downsampled for the wire."""
     if not frame:
         return {"available": False}
     model = frame.get("model") or {}
 
-    def matrix(name, cap_cols=None):
+    def matrix(name):
         value = model.get(name)
         if value is None:
             return None
@@ -120,55 +99,61 @@ def internals(frame):
             array = array.reshape(-1, 1)
         if array.ndim != 2:
             return None
-        if cap_cols and array.shape[1] > cap_cols:
-            array = array[:, :cap_cols]
-        return np.round(array, 5).tolist()
+        return array.tolist()
 
-    ir = model.get("ir")
-    ir_array = np.asarray(ir, dtype=np.float64) if ir is not None else None
-    ir_stats = None
-    if ir_array is not None and ir_array.ndim == 2 and ir_array.size:
-        centered = ir_array - ir_array.mean(axis=0, keepdims=True)
-        try:
-            singular = np.linalg.svd(centered, compute_uv=False)
-            spectrum = np.round(singular[:40] / max(singular[0], 1e-12), 5).tolist()
-        except np.linalg.LinAlgError:
-            spectrum = None
-        ir_stats = {
-            "shape": list(ir_array.shape),
-            "min": round(float(ir_array.min()), 5),
-            "max": round(float(ir_array.max()), 5),
-            "std": round(float(ir_array.std()), 5),
-            "frame_rank": int(np.linalg.matrix_rank(centered, tol=1e-6)),
+    j = model.get("j")
+    j_array = np.asarray(j, dtype=np.float64) if j is not None else None
+    j_stats = None
+    if j_array is not None and j_array.ndim == 2 and j_array.size:
+        finite = np.isfinite(j_array)
+        values = j_array[finite]
+        spectrum = None
+        finite_rows = j_array[np.isfinite(j_array).all(axis=1)]
+        if len(finite_rows):
+            centered = finite_rows - finite_rows.mean(axis=0, keepdims=True)
+            spectrum_error = None
+            try:
+                singular = np.linalg.svd(centered, compute_uv=False)
+                spectrum = (singular / singular[0]).tolist() if singular[0] else np.zeros_like(singular).tolist()
+            except np.linalg.LinAlgError as error:
+                spectrum_error = f"{type(error).__name__}: {error}"
+        else:
+            spectrum_error = None
+        j_stats = {
+            "shape": list(j_array.shape),
+            "finite": int(finite.sum()), "size": int(finite.size),
+            "min": None if not values.size else float(values.min()),
+            "max": None if not values.size else float(values.max()),
+            "std": None if not values.size else float(values.std()),
+            "finite_row_mass": len(finite_rows),
             "spectrum": spectrum,
+            "spectrum_error": spectrum_error,
         }
 
     assignments = sorted(frame.get("assignments") or [], key=lambda a: a.get("row", 0))
     return {
         "available": True,
         "resp_id": frame.get("resp_id"),
-        "ir": matrix("ir"),
-        "ir_stats": ir_stats,
-        "gram": matrix("gram"),
+        "j": matrix("j"),
+        "j_stats": j_stats,
+        "coupling": matrix("coupling"),
         "hierarchy": matrix("hierarchy"),
         "x": matrix("x"),
         "beta": matrix("beta"),
-        "score_stats": _range(model.get("score")),
-        "w_stats": _range(model.get("w")),
+        "score_stats": _model_range(model, "score"),
+        "w_stats": _model_range(model, "w"),
         "winner_value": clean(model.get("winner_value")),
         "loser_value": clean(model.get("loser_value")),
-        "diag_k": matrix("diag_k"),
-        "appetite": matrix("appetite", cap_cols=64),
-        "dw_dt": matrix("dw_dt", cap_cols=64),
+        "diag_k": clean(model.get("diag_k")),
+        "dw_dt": matrix("dw_dt"),
         "advantage": (frame.get("update") or {}).get("advantage"),
         "update": clean(frame.get("update")),
         "assignments": assignments,
         "shapes": model.get("shapes"),
-        "finite": model.get("finite"),
+        "finite_coordinate_mass": model.get("finite_coordinate_mass"),
         "ranges": model.get("range"),
         "game_value": frame.get("game_value"),
     }
-
 
 def _range(value):
     if value is None:
@@ -182,6 +167,15 @@ def _range(value):
         "mean": round(float(finite.mean()), 5), "shape": list(array.shape),
     }
 
+def _model_range(model, name):
+    direct = _range(model.get(name))
+    if direct is not None:
+        return direct
+    limits = (model.get("range") or {}).get(name)
+    if not isinstance(limits, list) or len(limits) != 2:
+        return None
+    return {"min": limits[0], "max": limits[1], "mean": None,
+            "shape": (model.get("shapes") or {}).get(name)}
 
 class Handler(SimpleHTTPRequestHandler):
     server_version = "MeshJOracle/1"
@@ -199,8 +193,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError) as error:
+            print(json.dumps({"event":"response_disconnect","path":self.path,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr, flush=True)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -212,18 +206,20 @@ class Handler(SimpleHTTPRequestHandler):
                 "uptime": round(time.time() - state["started"], 1),
                 "follower": state["follower"].status(),
                 "probe_errors": state["probe"].errors,
+                "runtime": state["runtime"].snapshot(),
             })
+        if route == "/api/runtime":
+            return self._json(state["runtime"].snapshot())
+        if route == "/api/metrics":
+            return self._json(summarize(state["follower"].snapshot()))
         if route == "/api/live":
             limit = int(parse_qs(parsed.query).get("limit", ["600"])[0])
             frames = state["follower"].snapshot()
             latest = frames[-1] if frames else None
-            # The responder samples the big arrays every --model-sample-every
-            # ticks, so the internals panel reads the newest frame that actually
-            # carries them and says how far behind that is.  It never fills the
-            # gap with the previous tick's numbers pretending to be this tick's.
+
             carrier, behind = None, None
             for index in range(len(frames) - 1, -1, -1):
-                if (frames[index].get("model") or {}).get("ir") is not None:
+                if (frames[index].get("model") or {}).get("j") is not None:
                     carrier, behind = frames[index], len(frames) - 1 - index
                     break
             detail = internals(carrier or latest)
@@ -235,7 +231,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "demo": state["demo"],
                 "series": [series_row(f) for f in frames[-limit:]],
                 "internals": detail,
-                "audit": audit(latest, carrier),
+                "field_measures": field_measures(latest, carrier),
             })
         if route == "/api/joracle":
             return self._json({"now": time.time(), **state["probe"].status()})
@@ -250,7 +246,6 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.quiet:
             print("[joracle] " + fmt % args, flush=True)
 
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="j-oracle live viewer side channel")
     ap.add_argument("--telemetry", required=True,
@@ -263,18 +258,25 @@ def main(argv=None):
     ap.add_argument("--server-address", default="", help="what to tell a human to `connect` to")
     ap.add_argument("--map", dest="map_name", default="")
     ap.add_argument("--note", default="")
+    ap.add_argument("--remote-host", default="")
+    ap.add_argument("--remote-alias", default="mesh-mini")
+    ap.add_argument("--remote-repo", default="/Users/mdot/mesh")
+    ap.add_argument("--local-repo", default=REPO)
+    ap.add_argument("--runtime-interval", type=float, default=2.0)
     args = ap.parse_args(argv)
 
-    if args.port == 26012:
-        raise SystemExit("refusing port 26012")
-
     probe = RollingProbe(max_rows=args.probe_rows, interval=args.probe_interval).start()
-    follower = TelemetryFollower(args.telemetry, capacity=args.frames, on_frame=probe.ingest).start()
+    follower = TelemetryFollower(args.telemetry, capacity=args.frames, on_frame=probe.ingest,
+                                 host_key_alias=args.remote_alias).start()
+    source_host, _ = split_source(args.telemetry)
+    runtime = RuntimeMeasure(args.local_repo, args.remote_host or source_host,
+                             args.runtime_interval, args.remote_alias,
+                             args.remote_repo).start()
 
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     server.daemon_threads = True
     server.joracle = {
-        "follower": follower, "probe": probe, "started": time.time(),
+        "follower": follower, "probe": probe, "runtime": runtime, "started": time.time(),
         "demo": {
             "telemetry": args.telemetry,
             "connect": args.server_address,
@@ -292,8 +294,8 @@ def main(argv=None):
     finally:
         follower.stop()
         probe.stop()
+        runtime.stop()
         server.server_close()
-
 
 if __name__ == "__main__":
     main()

@@ -12,9 +12,9 @@
 .int item_simple;
 .float alpha;
 .bool pushable;
-.float anim_start_time; // reusing for bob waveform synchronisation
-.vector angles_held; // reusing for (re)storing original angles
-.float wait, delay, pointtime; // reusing for despawn effects
+.float anim_start_time;
+.vector angles_held;
+.float wait, delay, pointtime;
 
 HashMap ENT_CLIENT_ITEM_simple;
 STATIC_INIT(ENT_CLIENT_ITEM_simple)
@@ -36,7 +36,7 @@ void ItemSetModel(entity this, bool wantsimple)
 		x(dpm) \
 		x(md3) \
 		x(mdl) \
-		/**/
+
 		#define tryext(ext) { \
 			string s = strcat(_fn2, autocvar_cl_simpleitems_postfix, "." #ext); \
 			string cached = HM_gets(ENT_CLIENT_ITEM_simple, s); \
@@ -51,8 +51,8 @@ void ItemSetModel(entity this, bool wantsimple)
 		}
 		do {
 			extensions(tryext);
-			this.model = this.mdl; // fall back to 3d model
-			this.item_simple = -1; // don't retry every frame
+			this.model = this.mdl;
+			this.item_simple = -1;
 			LOG_TRACEF("Simple item requested for %s but no model exists for it", this.mdl);
 		} while (0);
 		#undef tryext
@@ -64,13 +64,12 @@ void ItemSetModel(entity this, bool wantsimple)
 		this.item_simple = 0;
 	}
 
-	// this.model is an engine string so it doesn't need to be zoned and can't be unzoned
 	if(this.model == "")
 		LOG_WARNF("this.model is unset for item %s", this.classname);
 	precache_model(this.model);
 	_setmodel(this, this.model);
 	setsize(this, '-16 -16 0', '16 16 48');
-	// bones_was_here TODO: network proper box size for sv_legacy_bbox_expand 0
+
 }
 
 void ItemDraw(entity this)
@@ -79,16 +78,14 @@ void ItemDraw(entity this)
 	if(wantsimple != this.item_simple && this.item_simple != -1)
 		ItemSetModel(this, wantsimple);
 
-	// no bobbing applied to simple items, for consistency's sake (no visual difference between ammo and weapons)
 	bool animate = autocvar_cl_items_animate & 1 && this.item_simple <= 0 && (this.ItemStatus & ITS_ANIMATE1 || this.ItemStatus & ITS_ANIMATE2);
 
-	// rotation must be set before running physics
 	if(!animate)
 	{
 		this.avelocity_y = 0;
-		this.angles = this.angles_held; // restore angles sent from server
+		this.angles = this.angles_held;
 	}
-	else if(!this.avelocity_y) // unset by MOVETYPE_TOSS or animation was disabled previously
+	else if(!this.avelocity_y)
 	{
 		if(this.ItemStatus & ITS_ANIMATE1)
 			this.avelocity_y = 180;
@@ -96,36 +93,34 @@ void ItemDraw(entity this)
 			this.avelocity_y = -90;
 	}
 
-	// CSQC physics OR bobbing (both would look weird)
-	float bobheight = 0; // reset bob offset if animations are disabled
+	float bobheight = 0;
 	if(this.move_movetype && (!IS_ONGROUND(this) || this.velocity != '0 0 0'))
 	{
-		// this isn't equivalent to player prediction but allows smooth motion with very low ISF_LOCATION rate
-		// which requires running this even if the item is just outside visible range (it could be moving into range)
+
 		if(animate)
 			bobheight = this.origin_z - this.oldorigin_z;
 		Movetype_Physics_NoMatchTicrate(this, frametime, true);
-		this.oldorigin = this.origin; // update real (SVQC equivalent) origin
+		this.oldorigin = this.origin;
 		if(animate)
 		{
 			if(bobheight)
 			{
-				this.anim_start_time += frametime; // bobbing is paused this frame
-				this.oldorigin_z -= bobheight; // restore bob offset (CSQC physics uses the offset bbox)
+				this.anim_start_time += frametime;
+				this.oldorigin_z -= bobheight;
 			}
 			else
 			{
-				this.anim_start_time = time; // starting our bob animation from NOW
+				this.anim_start_time = time;
 				if(this.ItemStatus & ITS_ANIMATE1)
-					bobheight = 10; // height of wave at 0 time
+					bobheight = 10;
 				else if(this.ItemStatus & ITS_ANIMATE2)
-					bobheight = 8; // height of wave at 0 time
+					bobheight = 8;
 			}
 		}
 	}
 	else if(animate)
 	{
-		this.angles += this.avelocity * frametime; // MOVETYPE_TOSS does this while it's moving
+		this.angles += this.avelocity * frametime;
 
 		if(this.ItemStatus & ITS_ANIMATE1)
 			bobheight = 10 + 8 * sin((time - this.anim_start_time) * 2);
@@ -133,23 +128,21 @@ void ItemDraw(entity this)
 			bobheight = 8 + 4 * sin((time - this.anim_start_time) * 3);
 	}
 
-	// apply new bob offset
 	if (bobheight != this.origin_z - this.oldorigin_z)
 	{
 		this.origin_z = this.oldorigin_z + bobheight;
-		this.mins_z = 0 - bobheight; // don't want the absmin and absmax to bob
+		this.mins_z = 0 - bobheight;
 		this.maxs_z = 48 - bobheight;
-		// bones_was_here TODO: network proper box size for sv_legacy_bbox_expand 0
+
 	}
 
-	// set alpha based on distance
 	this.alpha = 1;
 	this.drawmask = 0;
 	if(this.fade_end && !warpzone_warpzones_exist)
 	{
 		vector org = getpropertyvec(VF_ORIGIN);
 		if(vdist(org - this.origin, >, this.fade_end))
-			this.alpha = 0; // save on some processing
+			this.alpha = 0;
 		else if(autocvar_cl_items_fadedist > 0)
 		{
 			this.fade_start = max(500, this.fade_end - autocvar_cl_items_fadedist);
@@ -161,10 +154,9 @@ void ItemDraw(entity this)
 	if(!this.alpha)
 		return;
 
-	// modify alpha based on availability and vehicle hud
 	if(this.ItemStatus & ITS_AVAILABLE)
 	{
-		if(hud) // apparently this means we're in a vehicle lol
+		if(hud)
 		{
 			this.alpha *= autocvar_cl_items_vehicle_alpha;
 			this.colormod = this.glowmod = autocvar_cl_items_vehicle_color;
@@ -189,12 +181,11 @@ void ItemDraw(entity this)
 	if(!this.alpha)
 		return;
 
-	// loot item despawn effects
 	if(this.ItemStatus & ITS_EXPIRING)
 	{
-		if(!this.wait) // when receiving the first message with ITS_EXPIRING set
+		if(!this.wait)
 		{
-			this.wait = time + IT_DESPAWNFX_TIME; // it will despawn then
+			this.wait = time + IT_DESPAWNFX_TIME;
 			this.delay = 0.25;
 		}
 
@@ -216,7 +207,7 @@ void ItemDraw(entity this)
 void ItemRemove(entity this)
 {
 	if(this.alpha)
-	if(!this.wait || time < this.wait - ticrate) // despawning loot items have their own effects
+	if(!this.wait || time < this.wait - ticrate)
 		pointparticles(EFFECT_ITEM_PICKUP, (this.absmin + this.absmax) * 0.5, '0 0 0', 1);
 	strfree(this.mdl);
 }
@@ -229,8 +220,8 @@ NET_HANDLE(ENT_CLIENT_ITEM, bool isnew)
 	{
 		float bobheight = this.origin_z - this.oldorigin_z;
 		this.origin = this.oldorigin = ReadVector();
-		this.origin_z += bobheight; // restore animation offset (SVQC physics is unaware of CSQC bbox offset)
-		setorigin(this, this.origin); // link
+		this.origin_z += bobheight;
+		setorigin(this, this.origin);
 	}
 
 	if(sf & ISF_ANGLES)
@@ -238,14 +229,7 @@ NET_HANDLE(ENT_CLIENT_ITEM, bool isnew)
 		this.angles = this.angles_held = ReadAngleVector();
 	}
 
-	/* bones_was_here TODO: network proper box size for sv_legacy_bbox_expand 0
-	if(sf & ISF_SIZE)
-	{
-		setsize(this, '-16 -16 0', '16 16 48');
-	}
-	*/
-
-	if(sf & ISF_STATUS) // need to read/write status first so model can handle simple, fb etc.
+	if(sf & ISF_STATUS)
 	{
 		int prevItemStatus = this.ItemStatus;
 		this.ItemStatus = ReadByte();
@@ -260,7 +244,7 @@ NET_HANDLE(ENT_CLIENT_ITEM, bool isnew)
 			if(this.solid != SOLID_TRIGGER)
 			{
 				this.solid = SOLID_TRIGGER;
-				setorigin(this, this.origin); // link it to the area grid
+				setorigin(this, this.origin);
 			}
 
 			if(this.ItemStatus & ITS_GLOW)
@@ -273,7 +257,7 @@ NET_HANDLE(ENT_CLIENT_ITEM, bool isnew)
 			if(this.solid != SOLID_NOT)
 			{
 				this.solid = SOLID_NOT;
-				setorigin(this, this.origin); // optimisation: unlink it from the area grid
+				setorigin(this, this.origin);
 			}
 
 			if(this.ItemStatus & ITS_GLOW)
@@ -315,14 +299,14 @@ NET_HANDLE(ENT_CLIENT_ITEM, bool isnew)
 		set_movetype(this, MOVETYPE_TOSS);
 		this.velocity = ReadVector();
 	}
-	else if (this.gravity) // caution: kludge FIXME (with sv_legacy_bbox_expand)
+	else if (this.gravity)
 	{
-		// workaround for prediction errors caused by bbox discrepancy between SVQC and CSQC
-		this.gravity = 0; // don't do this kludge again
-		this.pushable = false; // no fun allowed
-		set_movetype(this, MOVETYPE_NONE); // disable physics
-		this.velocity = '0 0 0'; // disable it more
-		SET_ONGROUND(this); // extra overkill
+
+		this.gravity = 0;
+		this.pushable = false;
+		set_movetype(this, MOVETYPE_NONE);
+		this.velocity = '0 0 0';
+		SET_ONGROUND(this);
 	}
 
 	this.entremove = ItemRemove;

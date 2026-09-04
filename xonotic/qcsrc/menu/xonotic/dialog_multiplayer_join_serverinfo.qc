@@ -10,16 +10,12 @@
 #include "dialog_multiplayer_join_serverinfotab.qh"
 #include "dialog_multiplayer_join_termsofservice.qh"
 
-
 void XonoticServerInfoDialog_loadServerInfo(entity me, float i)
 {
 	bool pure_available;
 	float m, pure_violations, freeslots, numh, maxp, numb, sflags;
 	string s, typestr, versionstr, k, v, modname;
 
-	// ====================================
-	//  First clear and unzone the strings
-	// ====================================
 	strfree(me.currentServerName);
 	strfree(me.currentServerCName);
 	strfree(me.currentServerType);
@@ -30,15 +26,11 @@ void XonoticServerInfoDialog_loadServerInfo(entity me, float i)
 	strfree(me.currentServerNumFreeSlots);
 	strfree(me.currentServerMod);
 	strfree(me.currentServerVersion);
-	// not zoned!
-	//	strfree(me.currentServerEncrypt);
+
 	strfree(me.currentServerPure);
 	strfree(me.currentServerKey);
 	strfree(me.currentServerID);
 
-	// ==========================
-	//  Now, fill in the strings
-	// ==========================
 	me.currentServerName = strzone(gethostcachestring(SLIST_FIELD_NAME, i));
 	me.infoTab.nameLabel.setText(me.infoTab.nameLabel, me.currentServerName);
 
@@ -114,8 +106,8 @@ void XonoticServerInfoDialog_loadServerInfo(entity me, float i)
 	if(s != "data")
 		modname = sprintf("%s (%s)", modname, s);
 
-	Gametype j = MapInfo_Type_FromString(typestr, false, false); // try and get the real name of the game type
-	if(j) { typestr = MapInfo_Type_ToText(j); } // only set it if we actually found it
+	Gametype j = MapInfo_Type_FromString(typestr, false, false);
+	if(j) { typestr = MapInfo_Type_ToText(j); }
 
 	me.currentServerType = strzone(typestr);
 	me.infoTab.typeLabel.setText(me.infoTab.typeLabel, me.currentServerType);
@@ -220,10 +212,7 @@ void XonoticServerInfoDialog_fill(entity me)
 		me.TD(me, 1, me.columns/2, e = makeXonoticButton(_("Close"), '0 0 0'));
 			e.onClick = Dialog_Close;
 			e.onClickEntity = me;
-		//me.TD(me, 1, me.columns/3, e = makeXonoticButton("", '0 0 0')); // TODO: Add bookmark button here
-		//	e.onClick = ServerList_Favorite_Click;
-		//	e.onClickEntity = slist;
-		//	slist.favoriteButton = e;
+
 		me.TD(me, 1, me.columns/2, e = makeXonoticButton(_("Join!"), '0 0 0'));
 			e.onClick = Join_Click;
 			e.onClickEntity = me;
@@ -233,4 +222,3 @@ void Join_Click(entity btn, entity me)
 {
 	localcmd("connect ", me.currentServerCName, "\n");
 }
-

@@ -1,5 +1,4 @@
 
-// This code written in 2010 by Forest Hale (darkplacesengine gmail com), and placed into public domain.
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,7 +24,7 @@ static int BIH_BuildNode(bih_t *bih, int numchildren, int *leaflist, float *tota
 	float frontmaxs[3];
 	float backmins[3];
 	float backmaxs[3];
-	// calculate bounds of children
+
 	child = bih->leafs + leaflist[0];
 	mins[0] = child->mins[0];
 	mins[1] = child->mins[1];
@@ -46,14 +45,14 @@ static int BIH_BuildNode(bih_t *bih, int numchildren, int *leaflist, float *tota
 	size[0] = maxs[0] - mins[0];
 	size[1] = maxs[1] - mins[1];
 	size[2] = maxs[2] - mins[2];
-	// provide bounds to caller
+
 	totalmins[0] = mins[0];
 	totalmins[1] = mins[1];
 	totalmins[2] = mins[2];
 	totalmaxs[0] = maxs[0];
 	totalmaxs[1] = maxs[1];
 	totalmaxs[2] = maxs[2];
-	// if we run out of nodes it's the caller's fault, but don't crash
+
 	if (bih->numnodes == bih->maxnodes)
 	{
 		if (!bih->error)
@@ -62,7 +61,7 @@ static int BIH_BuildNode(bih_t *bih, int numchildren, int *leaflist, float *tota
 	}
 	nodenum = bih->numnodes++;
 	node = bih->nodes + nodenum;
-	// store bounds for node
+
 	node->mins[0] = mins[0];
 	node->mins[1] = mins[1];
 	node->mins[2] = mins[2];
@@ -74,7 +73,7 @@ static int BIH_BuildNode(bih_t *bih, int numchildren, int *leaflist, float *tota
 	node->frontmin = 0;
 	node->backmax = 0;
 	memset(node->children, -1, sizeof(node->children));
-	// check if there are few enough children to store an unordered node
+
 	if (numchildren <= BIH_MAXUNORDEREDCHILDREN)
 	{
 		node->type = BIH_UNORDERED;
@@ -82,18 +81,16 @@ static int BIH_BuildNode(bih_t *bih, int numchildren, int *leaflist, float *tota
 			node->children[j] = leaflist[j];
 		return nodenum;
 	}
-	// pick longest axis
+
 	longestaxis = 0;
 	if (size[0] < size[1]) longestaxis = 1;
 	if (size[longestaxis] < size[2]) longestaxis = 2;
-	// iterate possible split axis choices, starting with the longest axis, if
-	// all fail it means all children have the same bounds and we simply split
-	// the list in half because each node can only have two children.
+
 	for (j = 0;j < 3;j++)
 	{
-		// pick an axis
+
 		axis = (longestaxis + j) % 3;
-		// sort children into front and back lists
+
 		splitdist = (node->mins[axis] + node->maxs[axis]) * 0.5f;
 		front = 0;
 		back = 0;
@@ -106,22 +103,21 @@ static int BIH_BuildNode(bih_t *bih, int numchildren, int *leaflist, float *tota
 			else
 				leaflist[front++] = leaflist[i];
 		}
-		// now copy the back ones into the space made in the leaflist for them
+
 		if (back)
 			memcpy(leaflist + front, bih->leafsortscratch, back*sizeof(leaflist[0]));
-		// if both sides have some children, it's good enough for us.
+
 		if (front && back)
 			break;
 	}
 	if (j == 3)
 	{
-		// somewhat common case: no good choice, divide children arbitrarily
+
 		axis = 0;
 		back = numchildren >> 1;
 		front = numchildren - back;
 	}
 
-	// we now have front and back children divided in leaflist...
 	node->type = (bih_nodetype_t)((int)BIH_SPLITX + axis);
 	node->front = BIH_BuildNode(bih, front, leaflist, frontmins, frontmaxs);
 	node->frontmin = frontmins[axis];
@@ -143,7 +139,6 @@ int BIH_Build(bih_t *bih, int numleafs, bih_leaf_t *leafs, int maxnodes, bih_nod
 	bih->maxnodes = maxnodes;
 	bih->nodes = nodes;
 
-	// clear things we intend to rebuild
 	memset(bih->nodes, 0, sizeof(bih->nodes[0]) * bih->maxnodes);
 	for (i = 0;i < bih->numleafs;i++)
 		bih->leafsort[i] = i;
@@ -160,7 +155,7 @@ static void BIH_GetTriangleListForBox_Node(const bih_t *bih, int nodenum, int ma
 	for(;;)
 	{
 		node = bih->nodes + nodenum;
-		// check if this is an unordered node (which holds an array of leaf numbers)
+
 		if (node->type == BIH_UNORDERED)
 		{
 			for (axis = 0;axis < BIH_MAXUNORDEREDCHILDREN && node->children[axis] >= 0;axis++)
@@ -175,7 +170,7 @@ static void BIH_GetTriangleListForBox_Node(const bih_t *bih, int nodenum, int ma
 				case BIH_RENDERTRIANGLE:
 					if (*numtrianglespointer >= maxtriangles)
 					{
-						++*numtrianglespointer; // so the caller can detect overflow
+						++*numtrianglespointer;
 						break;
 					}
 					if(trianglelist_surf)
@@ -189,7 +184,7 @@ static void BIH_GetTriangleListForBox_Node(const bih_t *bih, int nodenum, int ma
 			}
 			return;
 		}
-		// splitting node
+
 		axis = node->type - BIH_SPLITX;
 		if (mins[axis] < node->backmax)
 		{
@@ -203,7 +198,7 @@ static void BIH_GetTriangleListForBox_Node(const bih_t *bih, int nodenum, int ma
 			nodenum = node->front;
 			continue;
 		}
-		// fell between the child groups, nothing here
+
 		return;
 	}
 }

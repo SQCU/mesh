@@ -38,7 +38,7 @@ bool AuxiliaryXhair_customize(entity this, entity client)
 {
 	entity e = WaypointSprite_getviewentity(client);
 	entity axh = e.(AuxiliaryXhair[this.cnt]);
-	return axh.owner == this.owner; // cheaply check if the client's axh owner is the same as our real owner
+	return axh.owner == this.owner;
 }
 
 .vector axh_prevorigin;
@@ -52,11 +52,11 @@ void UpdateAuxiliaryXhair(entity own, vector loc, vector clr, int axh_id)
 	axh_id = bound(0, axh_id, MAX_AXH);
 	entity axh = own.(AuxiliaryXhair[axh_id]);
 
-	if(axh == NULL || wasfreed(axh))  // MADNESS? THIS IS QQQQCCCCCCCCC (wasfreed, why do you exsist? Mario: because of sloppy code like this)
+	if(axh == NULL || wasfreed(axh))
 	{
 		axh = new(auxiliary_xhair);
 		axh.cnt = axh_id;
-		//axh.drawonlytoclient = own; // not spectatable
+
 		setcefc(axh, AuxiliaryXhair_customize);
 		axh.owner = own;
 		Net_LinkEntity(axh, false, 0, SendAuxiliaryXhair);
@@ -74,7 +74,7 @@ void UpdateAuxiliaryXhair(entity own, vector loc, vector clr, int axh_id)
 		axh.SendFlags |= 4;
 	}
 
-	own.(AuxiliaryXhair[axh_id]) = axh; // set it anyway...?
+	own.(AuxiliaryXhair[axh_id]) = axh;
 }
 
 void CSQCVehicleSetup(entity own, int vehicle_id)
@@ -133,7 +133,7 @@ void vehicles_locktarget(entity this, float incr, float decr, float _lock_time)
 			trace_ent = NULL;
 
 		if(trace_ent.alpha <= 0.5 && trace_ent.alpha != 0)
-			trace_ent = NULL; // invisible
+			trace_ent = NULL;
 	}
 
 	if(this.lock_target == NULL && trace_ent != NULL)
@@ -153,8 +153,6 @@ void vehicles_locktarget(entity this, float incr, float decr, float _lock_time)
 		}
 	}
 
-	// Have a locking target
-	// Trace hit current target
 	if(trace_ent == this.lock_target && trace_ent != NULL)
 	{
 		this.lock_strength = min(this.lock_strength + incr, 1);
@@ -173,10 +171,9 @@ void vehicles_locktarget(entity this, float incr, float decr, float _lock_time)
 	}
 }
 
-// projectile handling
 void vehicles_projectile_damage(entity this, entity inflictor, entity attacker, float damage, int deathtype, .entity weaponentity, vector hitloc, vector force)
 {
-	// Ignore damage from oterh projectiles from my owner (dont mess up volly's)
+
 	if(inflictor.owner == this.owner)
 		return;
 
@@ -389,7 +386,6 @@ void vehicles_reset_colors(entity this, entity player)
 	if(autocvar_g_fullbrightplayers)
 		eff |= EF_FULLBRIGHT;
 
-	// Find all ents attacked to main model and setup effects, colormod etc.
 	FOREACH_ENTITY_ENT(tag_entity, this,
 	{
 		if(it == this.vehicle_shieldent)
@@ -401,7 +397,6 @@ void vehicles_reset_colors(entity this, entity player)
 		it.alpha = 1;
 	});
 
-	// Also check head tags
 	FOREACH_ENTITY_ENT(tag_entity, this.tur_head,
 	{
 		if(it == this.vehicle_shieldent)
@@ -413,7 +408,7 @@ void vehicles_reset_colors(entity this, entity player)
 		it.alpha = 1;
 	});
 
-	this.vehicle_hudmodel.effects  = this.effects  = eff; // | EF_LOWPRECISION;
+	this.vehicle_hudmodel.effects  = this.effects  = eff;
 	this.vehicle_hudmodel.colormod = this.colormod = cmod;
 	this.vehicle_hudmodel.colormap = this.colormap = cmap;
 	this.vehicle_viewport.effects = (EF_ADDITIVE | EF_DOUBLESIDED | EF_FULLBRIGHT | EF_NODEPTHTEST | EF_NOGUNBOB | EF_NOSHADOW | EF_LOWPRECISION | EF_SELECTABLE | EF_TELEPORT_BIT);
@@ -423,13 +418,13 @@ void vehicles_reset_colors(entity this, entity player)
 	this.velocity  = '0 0 0';
 	this.effects   = eff;
 
-	Vehicle info = this.vehicledef; //REGISTRY_GET(Vehicles, this.vehicleid);
+	Vehicle info = this.vehicledef;
 	info.vr_setcolors(info, this);
 }
 
 void vehicles_clearreturn(entity veh)
 {
-	// Remove "return helper" entities, if any.
+
 	IL_EACH(g_vehicle_returners, it.wp00 == veh,
 	{
 		it.classname = "";
@@ -591,7 +586,7 @@ void shieldhit_think(entity this)
 	this.alpha -= 0.1;
 	if (this.alpha <= 0)
 	{
-		// setmodel(this, MDL_Null);
+
 		this.alpha = -1;
 		this.effects |= EF_NODRAW;
 	}
@@ -634,7 +629,6 @@ void vehicles_damage(entity this, entity inflictor, entity attacker, float damag
 {
 	this.dmg_time = time;
 
-	// WEAPONTODO
 	if(DEATH_ISWEAPON(deathtype, WEP_VORTEX))
 		damage *= autocvar_g_vehicles_vortex_damagerate;
 	else if(DEATH_ISWEAPON(deathtype, WEP_MACHINEGUN))
@@ -682,11 +676,11 @@ void vehicles_damage(entity this, entity inflictor, entity attacker, float damag
 			this.vehicle_shieldent.alpha = 0.75;
 
 			if(sound_allowed(MSG_BROADCAST, attacker))
-				spamsound (this, CH_PAIN, SND_ONS_HIT2, VOL_BASE, ATTEN_NORM);   // FIXME: PLACEHOLDER
+				spamsound (this, CH_PAIN, SND_ONS_HIT2, VOL_BASE, ATTEN_NORM);
 		}
 		else
 			if(sound_allowed(MSG_BROADCAST, attacker))
-				spamsound (this, CH_PAIN, SND_ONS_ELECTRICITY_EXPLODE, VOL_BASE, ATTEN_NORM);  // FIXME: PLACEHOLDER
+				spamsound (this, CH_PAIN, SND_ONS_ELECTRICITY_EXPLODE, VOL_BASE, ATTEN_NORM);
 
 	}
 	else
@@ -694,7 +688,7 @@ void vehicles_damage(entity this, entity inflictor, entity attacker, float damag
 		TakeResource(this, RES_HEALTH, damage);
 
 		if(sound_allowed(MSG_BROADCAST, attacker))
-			spamsound (this, CH_PAIN, SND_ONS_HIT2, VOL_BASE, ATTEN_NORM);  // FIXME: PLACEHOLDER
+			spamsound (this, CH_PAIN, SND_ONS_HIT2, VOL_BASE, ATTEN_NORM);
 	}
 
 	if(this.damageforcescale < 1 && this.damageforcescale > 0)
@@ -714,7 +708,7 @@ void vehicles_damage(entity this, entity inflictor, entity attacker, float damag
 
 		antilag_clear(this, this);
 
-		Vehicle info = this.vehicledef; //REGISTRY_GET(Vehicles, this.vehicleid);
+		Vehicle info = this.vehicledef;
 		info.vr_death(info, this);
 		vehicles_setreturn(this);
 	}
@@ -760,10 +754,9 @@ void vehicles_impact(entity this, float _minspeed, float _speedfac, float _maxpa
 	}
 }
 
-// vehicle enter/exit handling
 vector vehicles_findgoodexit(entity this, entity player, vector prefer_spot)
 {
-	// TODO: we actually want the player's size here
+
 	tracebox(this.origin + '0 0 32', PL_MIN_CONST, PL_MAX_CONST, prefer_spot, MOVE_NORMAL, player);
 	if(trace_fraction == 1.0 && !trace_startsolid && !trace_allsolid)
 		return prefer_spot;
@@ -812,7 +805,6 @@ void vehicles_exit(entity vehic, bool eject)
 			WriteByte (MSG_ONE, SVC_SETVIEWPORT);
 			WriteEntity( MSG_ONE, player);
 
-			// NOTE: engine networked
 			WriteByte (MSG_ONE, SVC_SETVIEWANGLES);
 			WriteAngle(MSG_ONE, 0);
 			WriteAngle(MSG_ONE, vehic.angles_y);
@@ -834,7 +826,7 @@ void vehicles_exit(entity vehic, bool eject)
 		{
 			.entity weaponentity = weaponentities[slot];
 			player.(weaponentity).m_switchweapon = vehic.(weaponentity).m_switchweapon;
-			delete(vehic.(weaponentity)); // no longer needed
+			delete(vehic.(weaponentity));
 		}
 		player.last_vehiclecheck = time + 3;
 		player.vehicle_enter_delay = time + 2;
@@ -843,7 +835,7 @@ void vehicles_exit(entity vehic, bool eject)
 		CSQCVehicleSetup(player, HUD_NORMAL);
 
 		Kill_Notification(NOTIF_ONE, player, MSG_CENTER, CPID_VEHICLES);
-		Kill_Notification(NOTIF_ONE, player, MSG_CENTER, CPID_VEHICLES_OTHER); // kill all vehicle notifications when exiting a vehicle?
+		Kill_Notification(NOTIF_ONE, player, MSG_CENTER, CPID_VEHICLES_OTHER);
 	}
 
 	vehic.flags |= FL_NOTARGET;
@@ -879,7 +871,7 @@ void vehicles_exit(entity vehic, bool eject)
 	CSQCMODEL_AUTOINIT(vehic);
 
 	if(player)
-		player.oldorigin = player.origin; // player's location is set by the exit functions, so we need to do this after everything
+		player.oldorigin = player.origin;
 
 	vehicles_exit_running = false;
 }
@@ -889,7 +881,6 @@ void vehicles_touch(entity this, entity toucher)
 	if(MUTATOR_CALLHOOK(VehicleTouch, this, toucher))
 		return;
 
-	// Vehicle currently in use
 	if(this.owner)
 	{
 		if(toucher != NULL)
@@ -900,11 +891,11 @@ void vehicles_touch(entity this, entity toucher)
 			if(vdist(this.velocity, >=, autocvar_g_vehicles_crush_minspeed))
 				Damage(toucher, this, this.owner, autocvar_g_vehicles_crush_dmg, DEATH_VH_CRUSH.m_id, DMG_NOWEP, '0 0 0', normalize(toucher.origin - this.origin) * autocvar_g_vehicles_crush_force);
 
-			return; // Dont do selfdamage when hitting "soft targets".
+			return;
 		}
 
 		if(this.play_time < time) {
-			Vehicle info = this.vehicledef; //REGISTRY_GET(Vehicles, this.vehicleid);
+			Vehicle info = this.vehicledef;
 			info.vr_impact(info, this);
 		}
 
@@ -937,7 +928,7 @@ bool vehicle_impulse(entity this, int imp)
 
 void vehicles_enter(entity pl, entity veh)
 {
-	// Remove this when bots know how to use vehicles
+
 	if((IS_BOT_CLIENT(pl) && !autocvar_g_vehicles_allow_bots))
 		return;
 
@@ -949,19 +940,18 @@ void vehicles_enter(entity pl, entity veh)
 	|| (pl.vehicle)
 	) { return; }
 
-	Vehicle info = veh.vehicledef; //REGISTRY_GET(Vehicles, veh.vehicleid);
+	Vehicle info = veh.vehicledef;
 
-	if(autocvar_g_vehicles_enter) // vehicle's touch function should handle this if entering via use key is disabled (TODO)
+	if(autocvar_g_vehicles_enter)
 	if(veh.vehicle_flags & VHF_MULTISLOT)
 	if(veh.owner && SAME_TEAM(pl, veh))
 	{
-		// we don't need a return value or anything here
-		// if successful the owner check below will prevent anything weird
+
 		info.vr_gunner_enter(info, veh, pl);
 	}
 
 	if(veh.owner)
-		return; // got here and didn't enter the gunner, return
+		return;
 
 	if(teamplay)
 	if(veh.team)
@@ -973,7 +963,7 @@ void vehicles_enter(entity pl, entity veh)
 		Send_Notification(NOTIF_ONE, pl, MSG_CENTER, CENTER_VEHICLE_STEAL_SELF);
 
 		veh.vehicle_shield = 0;
-		veh.old_vehicle_flags = veh.vehicle_flags; // make a backup just so we're not permanently crippling this vehicle
+		veh.old_vehicle_flags = veh.vehicle_flags;
 		veh.vehicle_flags &= ~VHF_SHIELDREGEN;
 
 		if (autocvar_g_vehicles_steal_show_waypoint) {
@@ -994,9 +984,6 @@ void vehicles_enter(entity pl, entity veh)
 	veh.owner = pl;
 	pl.vehicle = veh;
 
-	// .viewmodelforclient works better.
-	//veh.vehicle_hudmodel.drawonlytoclient = veh.owner;
-
 	veh.vehicle_hudmodel.viewmodelforclient = pl;
 
 	UNSET_DUCKED(pl);
@@ -1010,7 +997,7 @@ void vehicles_enter(entity pl, entity veh)
 	pl.angles			= veh.angles;
 	pl.takedamage		= DAMAGE_NO;
 	pl.solid			= SOLID_NOT;
-	pl.disableclientprediction = 1; // physics is no longer run, so this won't be reset
+	pl.disableclientprediction = 1;
 	set_movetype(pl, MOVETYPE_NOCLIP);
 	pl.teleportable		= false;
 	pl.alpha			= -1;
@@ -1034,10 +1021,6 @@ void vehicles_enter(entity pl, entity veh)
 	pl.vehicle_reload2 = veh.vehicle_reload2;
 	pl.vehicle_energy = veh.vehicle_energy;
 
-	// Cant do this, hides attached objects too.
-	//veh.exteriormodeltoclient = veh.owner;
-	//veh.tur_head.exteriormodeltoclient = veh.owner;
-
 	UNSET_ONGROUND(pl);
 	UNSET_ONGROUND(veh);
 
@@ -1054,19 +1037,18 @@ void vehicles_enter(entity pl, entity veh)
 		WriteByte (MSG_ONE, SVC_SETVIEWPORT);
 		WriteEntity(MSG_ONE, veh.vehicle_viewport);
 
-		// NOTE: engine networked
 		WriteByte (MSG_ONE, SVC_SETVIEWANGLES);
 		if(veh.tur_head)
 		{
-			WriteAngle(MSG_ONE, veh.tur_head.angles_x + veh.angles_x); // tilt
-			WriteAngle(MSG_ONE, veh.tur_head.angles_y + veh.angles_y); // yaw
-			WriteAngle(MSG_ONE, 0);									  // roll
+			WriteAngle(MSG_ONE, veh.tur_head.angles_x + veh.angles_x);
+			WriteAngle(MSG_ONE, veh.tur_head.angles_y + veh.angles_y);
+			WriteAngle(MSG_ONE, 0);
 		}
 		else
 		{
-			WriteAngle(MSG_ONE, veh.angles_x * -1); // tilt
-			WriteAngle(MSG_ONE, veh.angles_y);	  // yaw
-			WriteAngle(MSG_ONE, 0);				  // roll
+			WriteAngle(MSG_ONE, veh.angles_x * -1);
+			WriteAngle(MSG_ONE, veh.angles_y);
+			WriteAngle(MSG_ONE, 0);
 		}
 	}
 
@@ -1089,7 +1071,7 @@ void vehicles_think(entity this)
 	if(this.owner)
 		STAT(VEHICLESTAT_W2MODE, this.owner) = STAT(VEHICLESTAT_W2MODE, this);
 
-	Vehicle info = this.vehicledef; //REGISTRY_GET(Vehicles, this.vehicleid);
+	Vehicle info = this.vehicledef;
 	info.vr_think(info, this);
 
 	vehicles_painframe(this);
@@ -1108,12 +1090,10 @@ void vehicles_reset(entity this)
 		vehicles_spawn(this);
 }
 
-// initialization
 void vehicles_spawn(entity this)
 {
 	LOG_DEBUG("Spawning vehicle: ", this.classname);
 
-	// disown & reset
 	this.vehicle_hudmodel.viewmodelforclient = this;
 
 	this.owner				= NULL;
@@ -1122,7 +1102,7 @@ void vehicles_spawn(entity this)
 	this.event_heal 		= vehicles_heal;
 	this.reset 				= vehicles_reset;
 	this.iscreature			= true;
-	this.teleportable		= false; // no teleporting for vehicles, too buggy
+	this.teleportable		= false;
 	this.damagedbycontents	= true;
 	set_movetype(this, MOVETYPE_WALK);
 	this.solid				= SOLID_SLIDEBOX;
@@ -1137,15 +1117,13 @@ void vehicles_spawn(entity this)
 	setthink(this, vehicles_think);
 	this.nextthink			= time;
 
-	// Reset locking
 	this.lock_strength = 0;
 	this.lock_target = NULL;
 	this.misc_bulletcounter = 0;
 
-	// Return to spawn
 	this.angles = this.pos2;
 	setorigin(this, this.pos1);
-	// Show it
+
 	Send_Effect(EFFECT_TELEPORT, this.origin + '0 0 64', '0 0 0', 1);
 
 	if(this.vehicle_controller)
@@ -1161,8 +1139,7 @@ void vehicles_spawn(entity this)
 	    }
 	});
 
-
-	Vehicle info = this.vehicledef; //REGISTRY_GET(Vehicles, this.vehicleid);
+	Vehicle info = this.vehicledef;
 	info.vr_spawn(info, this);
 
 	vehicles_reset_colors(this, NULL);
@@ -1223,7 +1200,7 @@ bool vehicle_initialize(entity this, Vehicle info, bool nodrop)
 	this.bot_attack				= true;
 	IL_PUSH(g_bot_targets, this);
 	this.iscreature				= true;
-	this.teleportable			= false; // no teleporting for vehicles, too buggy
+	this.teleportable			= false;
 	this.damagedbycontents		= true;
 	IL_PUSH(g_damagedbycontents, this);
 	this.vehicleid				= info.vehicleid;
@@ -1279,7 +1256,7 @@ bool vehicle_initialize(entity this, Vehicle info, bool nodrop)
 	this.tur_head.team = this.team;
 
 	if(this.active == ACTIVE_NOT)
-		this.nextthink = 0; // wait until activated
+		this.nextthink = 0;
 	else if(autocvar_g_vehicles_delayspawn)
 		this.nextthink = time + this.respawntime + (random() * autocvar_g_vehicles_delayspawn_jitter);
 	else

@@ -1,12 +1,12 @@
 #include "toss.qh"
 
-void _Movetype_Physics_Toss(entity this, float dt)  // SV_Physics_Toss
+void _Movetype_Physics_Toss(entity this, float dt)
 {
 	if(IS_ONGROUND(this))
 	{
 		if(this.velocity.z >= (1 / 32) && UPWARD_VELOCITY_CLEARS_ONGROUND(this))
 		{
-			// don't stick to ground if onground and moving upward
+
 			UNSET_ONGROUND(this);
 		}
 		else if(!this.groundentity || !GAMEPLAYFIX_NOAIRBORNCORPSE(this))
@@ -21,7 +21,7 @@ void _Movetype_Physics_Toss(entity this, float dt)  // SV_Physics_Toss
 		}
 		else if(boxesoverlap(this.absmin, this.absmax, this.groundentity.absmin, this.groundentity.absmax))
 		{
-			// don't slide if still touching the groundentity
+
 			return;
 		}
 	}
@@ -39,12 +39,6 @@ void _Movetype_Physics_Toss(entity this, float dt)  // SV_Physics_Toss
 		    * PHYS_GRAVITY(this);
 	}
 
-	/*if (this.move_movetype == MOVETYPE_BOUNCE || this.move_movetype == MOVETYPE_TOSS)
-	{
-		this.move_didgravity = true;
-		this.velocity_z -= (((this.gravity) ? this.gravity : 1) * PHYS_GRAVITY(this) * dt);
-	}*/
-
 	this.angles = this.angles + this.avelocity * dt;
 
 	float movetime = dt;
@@ -56,10 +50,9 @@ void _Movetype_Physics_Toss(entity this, float dt)  // SV_Physics_Toss
 		if (wasfreed(this))
 			return;
 
-		// NOTE: this is bmodelstartsolid in the engine
 		if (trace_startsolid && trace_ent.solid == SOLID_BSP)
 		{
-			// QC lacks pointers so we must save the old trace values
+
 			float oldtrace_fraction = trace_fraction;
 			vector oldtrace_plane_normal = trace_plane_normal;
 			entity oldtrace_ent = trace_ent;
@@ -133,13 +126,6 @@ void _Movetype_Physics_Toss(entity this, float dt)  // SV_Physics_Toss
 			}
 		}
 
-		// DP revision 8905 (just, WHY...)
-		//if (this.move_movetype == MOVETYPE_BOUNCEMISSILE)
-			//break;
-
-		// DP revision 8918 (WHY...)
-		//if (IS_ONGROUND(this))
-			//break;
 	}
 
 	if (GAMEPLAYFIX_GRAVITYUNAFFECTEDBYTICRATE && this.move_didgravity > 0 && !IS_ONGROUND(this))

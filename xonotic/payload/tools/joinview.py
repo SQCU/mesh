@@ -4,7 +4,6 @@ import mkentfile as M
 
 PLAYERCLIP, BOTCLIP, MONSTERCLIP = 0x10000, 0x400000, 0x20000
 
-
 def clip_brushes(d):
     L = lambda i: struct.unpack_from('<ii', d, 8 + i * 8)
     to, tl = L(1)
@@ -35,7 +34,6 @@ def clip_brushes(d):
             boxes.append((lo, hi))
     return boxes
 
-
 def seg_hits_box(pa, pb, lo, hi):
     t0, t1 = 0.0, 1.0
     for a in range(3):
@@ -51,7 +49,6 @@ def seg_hits_box(pa, pb, lo, hi):
         if t0 > t1:
             return False
     return True
-
 
 def dijkstra_nodes(adj, srcs):
     D = {}
@@ -70,10 +67,8 @@ def dijkstra_nodes(adj, srcs):
                 heapq.heappush(pq, (nd, v))
     return D
 
-
 def nearest_k(nodes, p, k):
     return [i for _, i in sorted((math.dist(nodes[i], p), i) for i in range(len(nodes)))[:k]]
-
 
 def build_dir_adj(nodes, adj, bot_jumps):
     key = lambda q: tuple(round(x, 1) for x in q)
@@ -85,7 +80,6 @@ def build_dir_adj(nodes, adj, bot_jumps):
             w = math.dist(nodes[u], nodes[v])
             dadj[u][v] = min(dadj[u].get(v, 1e18), w)
     return dadj, idx
-
 
 def contortion(nodes, dadj, sa, sb, k=6):
     ea = nearest_k(nodes, sa, k)
@@ -101,16 +95,7 @@ def contortion(nodes, dadj, sa, sb, k=6):
         return None
     return min(ratios), sum(ratios) / len(ratios), max(ratios), len(ratios)
 
-
 def sightline(ns, clipgrid, sa, sb):
-    """Is the join's straight line actually OPEN, and is it clip-blocked?
-
-    DELETED here: `occlusion_probe`, which stepped 24 units at a time along nine
-    rays asking `mkentfile.Bsp.inside` -- a point sampler over an
-    AABB-from-plane-distance grid, i.e. exactly the class of proxy this toolchain
-    no longer contains.  A segment's intersection with a convex free cell is an
-    interval, so the OPEN part of each ray is computed in closed form and what is
-    reported is the fraction of the line that is genuinely open, in units."""
     mid = [(sa[i] + sb[i]) / 2 for i in range(3)]
     d = [sb[i] - sa[i] for i in range(3)]
     L = math.hypot(d[0], d[1]) or 1.0
@@ -131,7 +116,6 @@ def sightline(ns, clipgrid, sa, sb):
         if seg_hits_box(pa, pb, lo, hi):
             clipblocked += 1
     return occluded, samples, clipblocked
-
 
 def svg_floorplan(path, maps, nodes, adj, joins, lights):
     allpts = [m['mins'][:2] for m in maps] + [m['maxs'][:2] for m in maps]
@@ -183,7 +167,6 @@ def svg_floorplan(path, maps, nodes, adj, joins, lights):
     out.append('</svg>')
     open(path, 'w').write('\n'.join(out))
 
-
 def analyze(outdir):
     d = open(os.path.join(outdir, 'fused.bsp'), 'rb').read()
     joins = json.load(open(os.path.join(outdir, 'fused.joins.json')))
@@ -192,14 +175,16 @@ def analyze(outdir):
     nspath = os.path.join(outdir, 'fused.negspace.npz')
     if os.path.exists(nspath):
         ns = NS.load_saved(nspath)
+        if ns.schema != NS.NEGSPACE_SCHEMA:
+            ns = NS.NegSpace(d, mask=NS.MASK_PLAYERSOLID)
     else:
-        # a single map's own tree does cover its whole world, so this is exact there
+
         ns = NS.NegSpace(d, mask=NS.MASK_PLAYERSOLID)
     clip = clip_brushes(d)
     dadj, idx = build_dir_adj(nodes, adj, joins.get('bot_jumps', []))
     names = [m['name'] for m in joins['maps']]
     svg = os.path.join(outdir, 'fused.floorplan.svg')
-    # collect light origins from entities
+
     lo, ln = struct.unpack_from('<ii', d, 8)
     ents = d[lo:lo + ln].split(b'\0')[0].decode('latin-1')
     import re
@@ -214,7 +199,7 @@ def analyze(outdir):
     print('wrote %s (%d maps, %d nav nodes, %d joins, %d lights, %d clip brushes)'
           % (svg, len(names), len(nodes), len(joins['joins']), len(lights), len(clip)))
     def dest_ok(p):
-        # standable in the ASSEMBLED world's computed free volume
+
         return ns.standing_point([p[0], p[1], p[2] + 24]) is not None
     print('per-edge diagnostics (contortion = walk/straight-line, fuzzed over nearest entry/exit waypoints;')
     print('clip/occlusion along the straight line gate CORRIDORS only -- teleport/pad transport is instant/ballistic,')
@@ -233,7 +218,6 @@ def analyze(outdir):
                 'ok' if dest_ok(sa) else 'BLOCKED', 'ok' if dest_ok(sb) else 'BLOCKED')
         print('  %s<->%s %s%s len=%.0f: contortion %s | %s'
               % (names[jn['a']], names[jn['b']], jn['kind'], tag, jn['length'], ctstr, phys))
-
 
 if __name__ == '__main__':
     outdir = sys.argv[1] if len(sys.argv) > 1 else '/tmp/fuse_v4/data/maps'

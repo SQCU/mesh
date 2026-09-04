@@ -1,4 +1,4 @@
-// see RDMA-FIRST.md
+
 #ifndef MESH_H
 #define MESH_H
 #include <stdint.h>
@@ -8,9 +8,9 @@
 #define MESH_NAME    "/mesh0"
 #define MESH_PORT    "18519"
 #define MESH_MODE    0666
-#define MESH_VERSION 4u
+#define MESH_VERSION 5u
 #define MESH_CL      128
-#define MESH_RING    4096
+#define MESH_RING    65536
 #define MESH_OFF     16
 #define RINGS        ((sizeof(struct hdr)+MESH_CL-1)/MESH_CL*MESH_CL)
 enum { FREE, RECV, SEND, APP, NOWN };
@@ -47,8 +47,12 @@ struct shdr { uint64_t off; uint32_t sid, k; };
 enum { K_DATA, K_FIN, K_REQ, K_OK };
 enum { MS_RUN, MS_DONE, MS_FAIL };
 struct mstream { char *buf; const char *src; size_t n, off, done, nb, hole;
-                 unsigned char *seen; uint32_t sid; int node, rx, st; long quiet; };
+                 unsigned char *seen; uint32_t sid; int node, rx, st; uint64_t fin_ack; };
 struct mesh_ctx { struct hdr *M; unsigned char *arena; size_t len;
+                  unsigned char *busy; size_t cursor;
+                  unsigned char *pending; int *pending_nodes; uint32_t *pending_bytes;
+                  size_t pending_head, pending_count, pending_capacity;
+                  size_t inflight;
                   uint64_t sub, ack, ino, idle; int last; };
 int    mesh_attach(struct mesh_ctx *c, const char *name);
 int    mesh_turn(struct mesh_ctx *c, struct mstream **v, int k);
@@ -58,7 +62,13 @@ int    mesh_scatter(struct mesh_ctx *c, struct mstream *ss, const void *p, size_
 int    mesh_gather(struct mesh_ctx *c, struct mstream *ss, void *p, size_t n, int k, uint32_t sid0);
 void  *mesh_open(size_t *nslots, size_t *stride, size_t *usable);
 size_t mesh_write(const void *p, size_t nbytes, int node);
+size_t mesh_write_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node);
+size_t mesh_queue_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node);
+size_t mesh_pump(void);
+size_t mesh_queued(void);
+size_t mesh_inflight(void);
 size_t mesh_read(void **p, int *from);
+size_t mesh_readv(void *p, size_t stride, uint32_t *sizes, int *from, size_t count);
 size_t mesh_yell(const void *p, size_t n, int node);
 size_t mesh_lissen(void *p, size_t n);
 #endif

@@ -4,18 +4,17 @@
 void target_levelwarp_use(entity this, entity actor, entity trigger)
 {
 	if(!autocvar_g_campaign)
-		return; // only in campaign
+		return;
 
 	if(this.cnt)
-		CampaignLevelWarp(this.cnt - 1); // specific level
+		CampaignLevelWarp(this.cnt - 1);
 	else
-		CampaignLevelWarp(-1); // next level
+		CampaignLevelWarp(-1);
 }
 
 spawnfunc(target_levelwarp)
 {
-	// this.cnt is index (starting from 1) of the campaign level to warp to
-	// 0 means next level
+
 	this.use = target_levelwarp_use;
 }
 #endif

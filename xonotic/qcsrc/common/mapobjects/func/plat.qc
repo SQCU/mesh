@@ -7,7 +7,7 @@ void plat_link(entity this);
 void plat_delayedinit(entity this)
 {
 	plat_link(this);
-	plat_spawn_inside_trigger(this); // the "start moving" trigger
+	plat_spawn_inside_trigger(this);
 }
 
 float plat_send(entity this, entity to, float sf)
@@ -43,7 +43,7 @@ float plat_send(entity this, entity to, float sf)
 
 	if(sf & SF_TRIGGER_RESET)
 	{
-		// used on client
+
 	}
 
 	return true;
@@ -51,7 +51,7 @@ float plat_send(entity this, entity to, float sf)
 
 void plat_link(entity this)
 {
-	//Net_LinkEntity(this, 0, false, plat_send);
+
 }
 
 spawnfunc(func_plat)
@@ -78,12 +78,11 @@ spawnfunc(func_plat)
 
 	if (this.sounds == 2 || q3compat)
 	{
-		// Plats in Q3 always have sounds (they're hard coded in Q3 engine)
+
 		this.noise = "plats/medplat1.wav";
 		this.noise1 = "plats/medplat2.wav";
 	}
 
-	// WARNING: backwards compatibility because people don't use already existing fields :(
 	if (this.sound1)
 		this.noise = this.sound1;
 	if (this.sound2)
@@ -91,7 +90,7 @@ spawnfunc(func_plat)
 
 	if (q3compat)
 	{
-		// CPMA adds these fields for overriding the engine sounds
+
 		string s = GetField_fullspawndata(this, "sound_start", true);
 		string e = GetField_fullspawndata(this, "sound_end", true);
 
@@ -139,7 +138,7 @@ spawnfunc(func_plat)
 void plat_draw(entity this)
 {
 	Movetype_Physics_NoMatchServer(this);
-	//Movetype_Physics_MatchServer(autocvar_cl_projectiles_sloppy);
+
 }
 
 NET_HANDLE(ENT_CLIENT_PLAT, bool isnew)
@@ -181,7 +180,7 @@ NET_HANDLE(ENT_CLIENT_PLAT, bool isnew)
 		this.use = plat_use;
 		this.entremove = trigger_remove_generic;
 
-		plat_reset(this); // also called here
+		plat_reset(this);
 
 		set_movetype(this, MOVETYPE_PUSH);
 		this.move_time = time;

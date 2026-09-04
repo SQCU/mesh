@@ -45,7 +45,6 @@ void GameCommand(string theCommand)
 	int argc = tokenize_console(theCommand);
 	string ss = strtolower(argv(0));
 
-	// TODO port these commands to the command system
 	if (argv(0) == "help" || argc == 0)
 	{
 		LOG_HELP("Usage:^3 menu_cmd <command> [<item>], where possible commands are:");
@@ -109,16 +108,16 @@ void GameCommand(string theCommand)
 					LOG_HELP("   ", s);
 			});
 		}
-		else if (argc == 2 && !close_mode && (!isdemo() || argv(1) == "Welcome")) // don't allow this command in demos
+		else if (argc == 2 && !close_mode && (!isdemo() || argv(1) == "Welcome"))
 		{
 			m_play_click_sound(MENU_SOUND_OPEN);
-			m_goto(strcat(filter, argv(1))); // switch to a menu item
+			m_goto(strcat(filter, argv(1)));
 		}
 		else if(argc > 2 && (!isdemo() || argv(1) == "Welcome"))
 		{
 			entity e = NULL;
 			float argsbuf = 0;
-			string s = strzone(argv(1)); // dialog name
+			string s = strzone(argv(1));
 			for(int i = 0; (e = nextent(e)); )
 				if(e.classname != "vtbl" && e.name == strcat(filter, s))
 				{
@@ -135,7 +134,6 @@ void GameCommand(string theCommand)
 					if(argsbuf >= 0)
 						buf_del(argsbuf);
 
-					// NOTE input args are read even in close mode
 					if (close_mode)
 					{
 						if (e.instanceOfContainer && e.closable && e.focused)
@@ -201,7 +199,7 @@ void GameCommand(string theCommand)
 		return;
 	}
 
-	if(MUTATOR_CALLHOOK(Menu_ConsoleCommand, ss, argc, theCommand)) // handled by a mutator
+	if(MUTATOR_CALLHOOK(Menu_ConsoleCommand, ss, argc, theCommand))
 		return;
 
 	LOG_INFO("Invalid command. For a list of supported commands, try menu_cmd help.");

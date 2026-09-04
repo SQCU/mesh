@@ -18,10 +18,6 @@ classfield(BGMScript) .float bgmscriptstatetime;
 
 float GetAttackDecaySustainAmplitude(float a, float d, float s, float t)
 {
-	// phase:
-	//   attack: from 0 to 1, in time a for a full length
-	//   decay: from 1 to s, in time d
-	//   sustain: s
 
 	if(t < 0)
 		return 0;
@@ -54,9 +50,7 @@ float GetReleaseAmplitude(float d, float s, float r, float t)
 
 	if(t < 0 && t >= -d)
 	{
-		// pre-time decay
-		// value is s at time  0
-		//          1 at time -d
+
 		decayval = ((t + d) / d) * (s - 1) + 1;
 		return max(decayval, releaseval);
 	}
@@ -76,17 +70,13 @@ float GetReleaseTime(float d, float s, float r, float amp)
 	if(!s)
 		return 0;
 
-	// if amp > s, we may be in the attack or in the prolonged decay curve
 	releasetime = (1 - amp / s) * r;
 
 	if(amp > s)
 	{
-		if(s == 1) // gracefully handle division by zero here
+		if(s == 1)
 			return 0;
 
-		// pre-time decay
-		// value is s at time  0
-		//          1 at time -d
 		decaytime = (amp - 1) / (s - 1) * d - d;
 		return max(decaytime, releasetime);
 	}
@@ -192,13 +182,11 @@ float doBGMScript(entity e)
 		e.bgmscriptline = e.bgmscriptline0;
 		e.bgmscripttime = bgmtime;
 
-		// treat this as a stop event for all notes, to prevent sticking keys
 		e.bgmscriptstate = false;
 		e.bgmscriptvolume = 1;
 		e.bgmscriptstatetime = bgmtime - GetTimeForAmplitude(e, amp);
 	}
 
-	// find the CURRENT line
 	for (;;)
 	{
 		tokenize_console(bufstr_get(bgmscriptbuf, e.bgmscriptline));
@@ -214,7 +202,6 @@ float doBGMScript(entity e)
 
 			amp = GetCurrentAmplitude(e, e.bgmscripttime - e.bgmscriptstatetime);
 
-			// time code reached!
 			vel = stof(argv(2));
 			if(vel > 0)
 			{
@@ -228,4 +215,3 @@ float doBGMScript(entity e)
 		}
 	}
 }
-

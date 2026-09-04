@@ -1,4 +1,5 @@
 #!/bin/bash
+HERE="$(cd "$(dirname "$0")" && pwd)"
 b(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
 b "NODE"; printf "  branch %s converged %s\n" "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)" "$(awk '{print $2}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"; echo "  $(scutil --get ComputerName) / $(scutil --get LocalHostName).local  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
 b "POWER"; pmset -g custom | awk '/^ (sleep|displaysleep|disksleep|standby|autorestart|womp|powermode)/{printf "  %-22s %s\n",$1,$2}'
@@ -36,5 +37,5 @@ b "DAEMONS"; for spec in io.mesh.caffeinate:resident io.mesh.beacon:resident io.
   [ "$kind" = resident ] && [ -z "$pid" ] && { printf '  %-22s %-9s \033[31mDOWN\033[0m\n' "$L" "$kind"; continue; }
   printf '  %-22s %-9s %s\n' "$L" "$kind" "${pid:+pid $pid}"
 done
-b "FABRIC PEERS"; /usr/local/mesh/bin/mesh-peers.sh 3 2>/dev/null | sed '/^$/d'
+b "FABRIC PEERS"; MESH_DEADLINE=3 "$HERE/mesh-peers.sh" 2>/dev/null | sed '/^$/d'
 echo

@@ -3,7 +3,6 @@
 #include <server/weapons/selection.qh>
 #include <server/world.qh>
 
-//string autocvar_g_nix;
 int autocvar_g_balance_nix_ammo_cells;
 int autocvar_g_balance_nix_ammo_plasma;
 int autocvar_g_balance_nix_ammo_fuel;
@@ -29,7 +28,7 @@ int autocvar_g_pickup_rockets_max;
 int autocvar_g_pickup_shells_max;
 
 float g_nix_with_blaster;
-// WEAPONTODO
+
 int nix_weapon;
 float nix_nextchange;
 float nix_nextweapon;
@@ -53,12 +52,12 @@ REGISTER_MUTATOR(nix, expr_evaluate(cvar_string("g_nix")) && !MUTATOR_IS_ENABLED
 
 	MUTATOR_ONROLLBACK_OR_REMOVE
 	{
-		// nothing to roll back
+
 	}
 
 	MUTATOR_ONREMOVE
 	{
-		// as the PlayerSpawn hook will no longer run, NIX is turned off by this!
+
 		FOREACH_CLIENT(IS_PLAYER(it) && !IS_DEAD(it), {
 			SetResource(it, RES_SHELLS, start_ammo_shells);
 			SetResource(it, RES_BULLETS, start_ammo_nails);
@@ -84,7 +83,7 @@ REGISTER_MUTATOR(nix, expr_evaluate(cvar_string("g_nix")) && !MUTATOR_IS_ENABLED
 bool NIX_CanChooseWeapon(int wpn)
 {
 	entity e = REGISTRY_GET(Weapons, wpn);
-	if (e == WEP_Null) return false; // skip dummies
+	if (e == WEP_Null) return false;
 	if(g_weaponarena)
 	{
 		if(!(g_weaponarena_weapons & e.m_wepset))
@@ -124,19 +123,16 @@ void NIX_GiveCurrentWeapon(entity this)
 	{
 		nix_weapon = nix_nextweapon;
 		nix_nextweapon = 0;
-		if (!nix_nextchange) // no round played yet?
-			nix_nextchange = time; // start the first round now!
+		if (!nix_nextchange)
+			nix_nextchange = time;
 		else
 			nix_nextchange = time + autocvar_g_balance_nix_roundtime;
-		// Weapon w = REGISTRY_GET(Weapons, nix_weapon);
-		// w.wr_init(w); // forget it, too slow
+
 	}
 
-	// get weapon info
 	entity wpn = REGISTRY_GET(Weapons, nix_weapon);
 
-	// TODO: registry handles
-	if(nix_nextchange != this.nix_lastchange_id) // this shall only be called once per round!
+	if(nix_nextchange != this.nix_lastchange_id)
 	{
 		SetResource(this, RES_SHELLS, 0);
 		SetResource(this, RES_BULLETS, 0);
@@ -177,8 +173,7 @@ void NIX_GiveCurrentWeapon(entity this)
 
 		wpn.wr_resetplayer(wpn, this);
 
-		// all weapons must be fully loaded when we spawn
-		if (wpn.spawnflags & WEP_FLAG_RELOADABLE) // prevent accessing undefined cvars
+		if (wpn.spawnflags & WEP_FLAG_RELOADABLE)
 		{
 			for (int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 			{
@@ -187,12 +182,11 @@ void NIX_GiveCurrentWeapon(entity this)
 			}
 		}
 
-		// set last change info
 		this.nix_lastchange_id = nix_nextchange;
 	}
 	if(this.nix_lastinfotime != dt)
 	{
-		this.nix_lastinfotime = dt; // initial value 0 should count as "not seen"
+		this.nix_lastinfotime = dt;
 		if(dt >= 1 && dt <= 5)
 			Send_Notification(NOTIF_ONE_ONLY, this, MSG_CENTER, CENTER_NIX_COUNTDOWN, nix_nextweapon, dt);
 	}
@@ -234,7 +228,7 @@ void NIX_GiveCurrentWeapon(entity this)
 
 MUTATOR_HOOKFUNCTION(nix, ForbidThrowCurrentWeapon)
 {
-	return true; // no throwing in NIX
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(nix, BuildMutatorsString)
@@ -260,14 +254,14 @@ MUTATOR_HOOKFUNCTION(nix, FilterItemDefinition)
 		return !autocvar_g_nix_with_powerups;
 	}
 
-	return true; // delete all other items
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(nix, OnEntityPreSpawn)
 {
 	entity ent = M_ARGV(0, entity);
 
-	if(ent.classname == "target_items") // items triggers cannot work in nix (as they change weapons/ammo)
+	if(ent.classname == "target_items")
 		return true;
 }
 
@@ -291,7 +285,7 @@ MUTATOR_HOOKFUNCTION(nix, PlayerSpawn)
 	entity player = M_ARGV(0, entity);
 
 	player.nix_lastchange_id = -1;
-	NIX_GiveCurrentWeapon(player); // overrides the weapons you got when spawning
+	NIX_GiveCurrentWeapon(player);
 	player.items |= IT_UNLIMITED_SUPERWEAPONS;
 }
 

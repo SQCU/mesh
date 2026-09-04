@@ -99,4 +99,3 @@ void XonoticToSDialog_fill(entity me)
 		e.onClick = DontAccept_Clicked;
 		e.onClickEntity = me;
 }
-

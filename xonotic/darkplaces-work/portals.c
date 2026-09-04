@@ -45,10 +45,9 @@ static int Portal_RecursiveFlowSearch (mleaf_t *leaf, vec3_t eye, int firstclipp
 	if (leaf->portalmarkid == portal_markid)
 		return true;
 
-	// follow portals into other leafs
 	for (p = leaf->portals;p;p = p->next)
 	{
-		// only flow through portals facing away from the viewer
+
 		if (PlaneDiff(eye, (&p->plane)) < 0)
 		{
 			newpoints = Portal_PortalThroughPortalPlanes(&portalplanes[firstclipplane], numclipplanes, (float *) p->points, p->numpoints, &portaltemppoints2[0][0], 256);
@@ -58,13 +57,13 @@ static int Portal_RecursiveFlowSearch (mleaf_t *leaf, vec3_t eye, int firstclipp
 				ranoutofportalplanes = true;
 			else
 			{
-				// find the center by averaging
+
 				VectorClear(center);
 				for (i = 0;i < newpoints;i++)
 					VectorAdd(center, portaltemppoints2[i], center);
-				// ixtable is a 1.0f / N table
+
 				VectorScale(center, ixtable[newpoints], center);
-				// calculate the planes, and make sure the polygon can see it's own center
+
 				newplanes = &portalplanes[firstclipplane + numclipplanes];
 				for (prev = newpoints - 1, i = 0;i < newpoints;prev = i, i++)
 				{
@@ -75,7 +74,7 @@ static int Portal_RecursiveFlowSearch (mleaf_t *leaf, vec3_t eye, int firstclipp
 					newplanes[i].dist = DotProduct(eye, newplanes[i].normal);
 					if (DotProduct(newplanes[i].normal, center) <= newplanes[i].dist)
 					{
-						// polygon can't see it's own center, discard and use parent portal
+
 						break;
 					}
 				}
@@ -134,7 +133,6 @@ int Portal_CheckPolygon(dp_model_t *model, vec3_t eye, float *polypoints, int nu
 	mleaf_t *eyeleaf;
 	vec3_t center, v1, v2;
 
-	// if there is no model, it can not block visibility
 	if (model == NULL || !model->brush.PointInLeaf)
 		return true;
 
@@ -144,14 +142,12 @@ int Portal_CheckPolygon(dp_model_t *model, vec3_t eye, float *polypoints, int nu
 
 	eyeleaf = model->brush.PointInLeaf(model, eye);
 
-	// find the center by averaging
 	VectorClear(center);
 	for (i = 0;i < numpoints;i++)
 		VectorAdd(center, (&polypoints[i * 3]), center);
-	// ixtable is a 1.0f / N table
+
 	VectorScale(center, ixtable[numpoints], center);
 
-	// calculate the planes, and make sure the polygon can see it's own center
 	for (prev = numpoints - 1, i = 0;i < numpoints;prev = i, i++)
 	{
 		VectorSubtract(eye, (&polypoints[i * 3]), v1);
@@ -161,7 +157,7 @@ int Portal_CheckPolygon(dp_model_t *model, vec3_t eye, float *polypoints, int nu
 		portalplanes[i].dist = DotProduct(eye, portalplanes[i].normal);
 		if (DotProduct(portalplanes[i].normal, center) <= portalplanes[i].dist)
 		{
-			// polygon can't see it's own center, discard
+
 			return false;
 		}
 	}
@@ -274,7 +270,7 @@ typedef struct portalrecursioninfo_s
 	int *surfacelist;
 	unsigned char *surfacepvs;
 	int numleafs;
-	unsigned char *visitingleafpvs; // used to prevent infinite loops
+	unsigned char *visitingleafpvs;
 	int *leaflist;
 	unsigned char *leafpvs;
 	unsigned char *shadowtrispvs;
@@ -296,7 +292,7 @@ static void Portal_RecursiveFlow (portalrecursioninfo_t *info, mleaf_t *leaf, in
 	int leafindex = leaf - info->model->brush.data_leafs;
 
 	if (CHECKPVSBIT(info->visitingleafpvs, leafindex))
-		return; // recursive loop of leafs (cmc.bsp for megatf coop)
+		return;
 
 	SETPVSBIT(info->visitingleafpvs, leafindex);
 
@@ -305,7 +301,6 @@ static void Portal_RecursiveFlow (portalrecursioninfo_t *info, mleaf_t *leaf, in
 		if (info->updateleafsmins && info->updateleafsmins[i] > leaf->mins[i]) info->updateleafsmins[i] = leaf->mins[i];
 		if (info->updateleafsmaxs && info->updateleafsmaxs[i] < leaf->maxs[i]) info->updateleafsmaxs[i] = leaf->maxs[i];
 	}
-
 
 	if (info->leafpvs)
 	{
@@ -316,7 +311,6 @@ static void Portal_RecursiveFlow (portalrecursioninfo_t *info, mleaf_t *leaf, in
 		}
 	}
 
-	// mark surfaces in leaf that can be seen through portal
 	if (leaf->numleafsurfaces && info->surfacepvs)
 	{
 		for (i = 0;i < leaf->numleafsurfaces;i++)
@@ -358,10 +352,9 @@ static void Portal_RecursiveFlow (portalrecursioninfo_t *info, mleaf_t *leaf, in
 		}
 	}
 
-	// follow portals into other leafs
 	for (p = leaf->portals;p;p = p->next)
 	{
-		// only flow through portals facing the viewer
+
 		dist = PlaneDiff(info->eye, (&p->plane));
 		if (dist < 0 && BoxesOverlap(p->past->mins, p->past->maxs, info->boxmins, info->boxmaxs))
 		{
@@ -372,13 +365,13 @@ static void Portal_RecursiveFlow (portalrecursioninfo_t *info, mleaf_t *leaf, in
 				ranoutofportalplanes = true;
 			else
 			{
-				// find the center by averaging
+
 				VectorClear(center);
 				for (i = 0;i < newpoints;i++)
 					VectorAdd(center, portaltemppoints2[i], center);
-				// ixtable is a 1.0f / N table
+
 				VectorScale(center, ixtable[newpoints], center);
-				// calculate the planes, and make sure the polygon can see its own center
+
 				newplanes = &portalplanes[firstclipplane + numclipplanes];
 				for (prev = newpoints - 1, i = 0;i < newpoints;prev = i, i++)
 				{
@@ -387,7 +380,7 @@ static void Portal_RecursiveFlow (portalrecursioninfo_t *info, mleaf_t *leaf, in
 					newplanes[i].dist = DotProduct(info->eye, newplanes[i].normal);
 					if (DotProduct(newplanes[i].normal, center) <= newplanes[i].dist)
 					{
-						// polygon can't see its own center, discard and use parent portal
+
 						break;
 					}
 				}
@@ -425,7 +418,6 @@ void Portal_Visibility(dp_model_t *model, const vec3_t eye, int *leaflist, unsig
 	int i;
 	portalrecursioninfo_t info;
 
-	// if there is no model, it can not block visibility
 	if (model == NULL)
 	{
 		Con_Print("Portal_Visibility: NULL model\n");
@@ -438,7 +430,6 @@ void Portal_Visibility(dp_model_t *model, const vec3_t eye, int *leaflist, unsig
 		return;
 	}
 
-	// put frustum planes (if any) into tinyplane format at start of buffer
 	for (i = 0;i < numfrustumplanes;i++)
 	{
 		VectorCopy(frustumplanes[i].normal, portalplanes[i].normal);
@@ -477,4 +468,3 @@ void Portal_Visibility(dp_model_t *model, const vec3_t eye, int *leaflist, unsig
 	if (numleafspointer)
 		*numleafspointer = info.numleafs;
 }
-

@@ -50,7 +50,7 @@
 		{
 			if (other.Container_alpha > 0) other.hideNotify(other);
 		}
-		else  // value > 0
+		else
 		{
 			if (other.Container_alpha <= 0) other.showNotify(other);
 		}
@@ -119,7 +119,7 @@
 		for (e = me.firstChild; e; e = e.nextSibling)
 		{
 			if (e.focusable) me.focusable += 1;
-			if (e.Container_alpha < 0.003)  // can't change color values anyway
+			if (e.Container_alpha < 0.003)
 				continue;
 			me.enterSubitem(me, e);
 			e.draw(e);
@@ -252,8 +252,6 @@
 		other.Container_origin = theOrigin;
 		other.Container_size = theSize;
 
-		// don't call setAlphaOf, it would uneccessarily trigger showNotify
-		//me.setAlphaOf(me, other, theAlpha);
 		other.Container_alpha = theAlpha;
 
 		entity l;
@@ -329,7 +327,7 @@
 
 	void Container_moveItemAfter(entity me, entity other, entity dest)
 	{
-		// first: remove other from the chain
+
 		entity n, p;
 
 		if (other.parent != me) error("Can't move in wrong container!");
@@ -343,7 +341,6 @@
 		if (n) n.prevSibling = p;
 		else me.lastChild = p;
 
-		// now other got removed. Insert it behind dest now.
 		other.prevSibling = dest;
 		if (dest) other.nextSibling = dest.nextSibling;
 		else other.nextSibling = me.firstChild;

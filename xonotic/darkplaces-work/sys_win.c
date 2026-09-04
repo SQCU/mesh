@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// sys_win.c -- Win32 system interface code
 
 #include <windows.h>
 #include <mmsystem.h>
@@ -42,15 +23,6 @@ static HANDLE	heventParent;
 static HANDLE	heventChild;
 #endif
 
-
-/*
-===============================================================================
-
-SYSTEM IO
-
-===============================================================================
-*/
-
 void Sys_Error (const char *error, ...)
 {
 	va_list		argptr;
@@ -66,7 +38,6 @@ void Sys_Error (const char *error, ...)
 
 	Con_Printf ("Quake Error: %s\n", text);
 
-	// close video so the message box is visible, unless we already tried that
 	if (!in_sys_error0 && cls.state != ca_dedicated)
 	{
 		in_sys_error0 = 1;
@@ -85,7 +56,6 @@ void Sys_Error (const char *error, ...)
 		Host_Shutdown ();
 	}
 
-// shut down QHOST hooks if necessary
 	if (!in_sys_error2)
 	{
 		in_sys_error2 = 1;
@@ -106,7 +76,7 @@ void Sys_Shutdown (void)
 		FreeConsole ();
 
 #ifdef QHOST
-// shut down QHOST hooks if necessary
+
 	DeinitConProc ();
 #endif
 }
@@ -230,7 +200,6 @@ void Sys_InitConsole (void)
 #ifdef QHOST
 	int t;
 
-	// initialize the windows dedicated server console if needed
 	tevent = CreateEvent(NULL, false, false, NULL);
 
 	if (!tevent)
@@ -240,11 +209,9 @@ void Sys_InitConsole (void)
 	houtput = GetStdHandle (STD_OUTPUT_HANDLE);
 	hinput = GetStdHandle (STD_INPUT_HANDLE);
 
-	// LordHavoc: can't check cls.state because it hasn't been initialized yet
-	// if (cls.state == ca_dedicated)
 	if (COM_CheckParm("-dedicated"))
 	{
-		//if ((houtput == 0) || (houtput == INVALID_HANDLE_VALUE)) // LordHavoc: on Windows XP this is never 0 or invalid, but hinput is invalid
+
 		{
 			if (!AllocConsole ())
 				Sys_Error ("Couldn't create dedicated server console (error code %x)", (unsigned int)GetLastError());
@@ -254,12 +221,11 @@ void Sys_InitConsole (void)
 		if ((houtput == 0) || (houtput == INVALID_HANDLE_VALUE))
 			Sys_Error ("Couldn't create dedicated server console");
 
-
 #ifdef QHOST
 #ifdef _WIN64
 #define atoi _atoi64
 #endif
-	// give QHOST a chance to hook into the console
+
 		if ((t = COM_CheckParm ("-HFILE")) > 0)
 		{
 			if (t < com_argc)
@@ -282,24 +248,9 @@ void Sys_InitConsole (void)
 #endif
 	}
 
-// because sound is off until we become active
 	S_BlockSound ();
 }
 
-/*
-==============================================================================
-
-WINDOWS CRAP
-
-==============================================================================
-*/
-
-
-/*
-==================
-WinMain
-==================
-*/
 HINSTANCE	global_hInstance;
 const char	*argv[MAX_NUM_ARGVS];
 char		program_name[MAX_OSPATH];
@@ -308,7 +259,6 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 {
 	MEMORYSTATUS lpBuffer;
 
-	/* previous instances do not exist in Win32 */
 	if (hPrevInstance)
 		return 0;
 
@@ -324,7 +274,6 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 	com_argv = argv;
 	argv[0] = program_name;
 
-	// FIXME: this tokenizer is rather redundent, call a more general one
 	while (*lpCmdLine && (com_argc < MAX_NUM_ARGVS))
 	{
 		while (*lpCmdLine && ISWHITESPACE(*lpCmdLine))
@@ -335,7 +284,7 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 
 		if (*lpCmdLine == '\"')
 		{
-			// quoted string
+
 			lpCmdLine++;
 			argv[com_argc] = lpCmdLine;
 			com_argc++;
@@ -344,7 +293,7 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 		}
 		else
 		{
-			// unquoted word
+
 			argv[com_argc] = lpCmdLine;
 			com_argc++;
 			while (*lpCmdLine && !ISWHITESPACE(*lpCmdLine))
@@ -362,12 +311,11 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 
 	Host_Main();
 
-	/* return success of application */
 	return true;
 }
 
 #if 0
-// unused, this file is only used when building windows client and vid_wgl provides WinMain() instead
+
 int main (int argc, const char* argv[])
 {
 	MEMORYSTATUS lpBuffer;

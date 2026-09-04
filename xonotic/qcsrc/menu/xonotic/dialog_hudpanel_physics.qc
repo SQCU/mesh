@@ -32,18 +32,10 @@ void XonoticHUDPhysicsDialog_fill(entity me)
 	me.TR(me);
 		me.TD(me, 1, 4, e = makeXonoticCheckBox(0, "hud_panel_physics_flip", _("Flip speed/acceleration positions")));
 
-//speed
 	me.TR(me);
 		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, _("Speed:")));
 		me.TD(me, 1, 3, e = makeXonoticCheckBox(0, "hud_panel_physics_speed_vertical", _("Include vertical speed")));
-	// me.TR(me);
-		// me.TDempty(me, 0.2);
-		// me.TD(me, 1, 1.8, e = makeXonoticTextLabel(0, _("Full status bar at:")));
-			// setDependent(e, "hud_panel_physics_progressbar", 1, 1);
-		// me.TD(me, 1, 1, e = makeXonoticInputBox(1, "hud_panel_physics_speed_max"));
-			// setDependent(e, "hud_panel_physics_progressbar", 1, 1);
-		// me.TD(me, 1, 1, e = makeXonoticTextLabel(0, _("qu/s")));
-			// setDependent(e, "hud_panel_physics_progressbar", 1, 1);
+
 	me.TR(me);
 		me.TDempty(me, 1);
 		me.TD(me, 1, 3, e = makeXonoticCheckBox(0, "hud_panel_physics_speed_unit_show", _("Show speed unit")));
@@ -53,14 +45,8 @@ void XonoticHUDPhysicsDialog_fill(entity me)
 		me.TD(me, 1, 3.8/2, e = makeXonoticSlider(1, 10, 1, "hud_panel_physics_topspeed_time"));
 			setDependent(e, "hud_panel_physics_topspeed", 1, 1);
 
-//acceleration
 	me.TR(me);
 		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, _("Acceleration:")));
 		me.TD(me, 1, 3, e = makeXonoticCheckBox(0, "hud_panel_physics_acceleration_vertical", _("Include vertical acceleration")));
-	// me.TR(me);
-		// me.TDempty(me, 0.2);
-		// me.TD(me, 1, 1.8, e = makeXonoticTextLabel(0, _("Full status bar at:")));
-			// setDependent(e, "hud_panel_physics_progressbar", 1, 1);
-		// me.TD(me, 1, 0.6, e = makeXonoticInputBox(1, "hud_panel_physics_acceleration_max"));
-			// setDependent(e, "hud_panel_physics_progressbar", 1, 1);
+
 }

@@ -8,123 +8,204 @@ float plc_str_h_sc   = -1;
 float plc_str_req_seq  = 0;
 float plc_str_resp_seq = 0;
 
-entity plc_str_evt_pool[PLC_STR_EVT_ROWS];
+entity plc_str_cart_pool[PLC_MAX_CARTS];
 float  plc_str_evt_w = 0;
-float  plc_str_evt_base = 0;
+entity plc_str_evt_head;
+entity plc_str_evt_tail;
 float  plc_str_cart_base = 0;
+const float PLC_STR_CELL_EXTENT = 256;
 
-float plc_str_last_cell[NUM_TEAMS + 1];
-float plc_str_last_kind[NUM_TEAMS + 1];
-float plc_str_last_subj[NUM_TEAMS + 1];
+void payload_str_measure_reset(entity player)
+{
+	player.plc_str_outcome_a_used = 0;
+	player.plc_str_outcome_a_seq = 0;
+	player.plc_str_outcome_a_enemy_damage_dealt = 0;
+	player.plc_str_outcome_a_enemy_damage_taken = 0;
+	player.plc_str_outcome_a_enemy_kills = 0;
+	player.plc_str_outcome_a_deaths = 0;
+	player.plc_str_outcome_a_pickups = 0;
+	player.plc_str_outcome_a_cart_push = 0;
+	player.plc_str_outcome_a_cart_contest = 0;
+	player.plc_str_outcome_b_used = 0;
+	player.plc_str_outcome_b_seq = 0;
+	player.plc_str_outcome_b_enemy_damage_dealt = 0;
+	player.plc_str_outcome_b_enemy_damage_taken = 0;
+	player.plc_str_outcome_b_enemy_kills = 0;
+	player.plc_str_outcome_b_deaths = 0;
+	player.plc_str_outcome_b_pickups = 0;
+	player.plc_str_outcome_b_cart_push = 0;
+	player.plc_str_outcome_b_cart_contest = 0;
+}
 
-// mesh_gather(h, col, .field, firstedict, count) reads `count` CONSECUTIVE
-// edicts.
-// A staging pool is therefore only a valid gather source if its edict numbers
-// are consecutive. spawn() gives no such guarantee: PRVM_ED_Alloc
-// (darkplaces prvm_edict.c:267) scans from `reserved_edicts+1` upward and
-// returns the FIRST reusable free slot, so a burst of spawn() calls after map
-// load lands in whatever holes the map's self-removing entities left behind.
-// This builds the run explicitly: keep spawning and restart the run whenever
-// the edict number is not prev+1. Free holes are finite, so once they are
-// consumed PRVM_ED_Alloc appends and the run completes. Rejected edicts are
-// simply never removed, so they can never be recycled underneath the pool.
-float payload_str_pool_run(float want, float is_cart)
+void payload_strategy_reset_player(entity player)
+{
+	player.plc_str_target_kind = PLC_TARGET_NONE;
+	player.plc_str_instrument_kind = PLC_INSTRUMENT_NONE;
+	player.plc_str_target_id = -1;
+	player.plc_str_target_cell_x = 0;
+	player.plc_str_target_cell_y = 0;
+	player.plc_str_applied_target_kind = PLC_TARGET_NONE;
+	player.plc_str_applied_instrument_kind = PLC_INSTRUMENT_NONE;
+	player.plc_str_applied_target_id = -1;
+	player.plc_str_applied_target_cell_x = 0;
+	player.plc_str_applied_target_cell_y = 0;
+	player.plc_str_applied_gain = 0;
+	player.plc_str_goal_target_kind = PLC_TARGET_NONE;
+	player.plc_str_goal_target_id = -1;
+	player.plc_str_goal_target_cell_x = 0;
+	player.plc_str_goal_target_cell_y = 0;
+	player.plc_str_response_seq = 0;
+	player.plc_str_response_time = 0;
+	player.plc_str_route_seq = 0;
+	player.plc_str_route_latency = 0;
+	player.plc_str_goal_seq = 0;
+	player.plc_str_goal_latency = 0;
+	player.plc_str_touch_seq = 0;
+	player.plc_str_touch_latency = 0;
+	player.plc_str_enemy_damage_dealt = 0;
+	player.plc_str_enemy_damage_taken = 0;
+	player.plc_str_enemy_kills = 0;
+	player.plc_str_deaths = 0;
+	player.plc_str_pickups = 0;
+	player.plc_str_cart_push = 0;
+	player.plc_str_cart_contest = 0;
+	payload_str_measure_reset(player);
+}
+
+void payload_str_measure(entity player, float coordinate, float amount)
+{
+	bool a = !player.plc_str_outcome_a_used || player.plc_str_outcome_a_seq == player.plc_str_route_seq;
+	if (a && !player.plc_str_outcome_a_used)
+	{
+		player.plc_str_outcome_a_used = 1;
+		player.plc_str_outcome_a_seq = player.plc_str_route_seq;
+	}
+	if (!a && !player.plc_str_outcome_b_used)
+	{
+		player.plc_str_outcome_b_used = 1;
+		player.plc_str_outcome_b_seq = player.plc_str_route_seq;
+	}
+	if (a)
+	{
+		if (coordinate == PLC_OUTCOME_ENEMY_DAMAGE_DEALT) player.plc_str_outcome_a_enemy_damage_dealt += amount;
+		else if (coordinate == PLC_OUTCOME_ENEMY_DAMAGE_TAKEN) player.plc_str_outcome_a_enemy_damage_taken += amount;
+		else if (coordinate == PLC_OUTCOME_ENEMY_KILLS) player.plc_str_outcome_a_enemy_kills += amount;
+		else if (coordinate == PLC_OUTCOME_DEATHS) player.plc_str_outcome_a_deaths += amount;
+		else if (coordinate == PLC_OUTCOME_PICKUPS) player.plc_str_outcome_a_pickups += amount;
+		else if (coordinate == PLC_OUTCOME_CART_PUSH) player.plc_str_outcome_a_cart_push += amount;
+		else player.plc_str_outcome_a_cart_contest += amount;
+	}
+	else
+	{
+		if (coordinate == PLC_OUTCOME_ENEMY_DAMAGE_DEALT) player.plc_str_outcome_b_enemy_damage_dealt += amount;
+		else if (coordinate == PLC_OUTCOME_ENEMY_DAMAGE_TAKEN) player.plc_str_outcome_b_enemy_damage_taken += amount;
+		else if (coordinate == PLC_OUTCOME_ENEMY_KILLS) player.plc_str_outcome_b_enemy_kills += amount;
+		else if (coordinate == PLC_OUTCOME_DEATHS) player.plc_str_outcome_b_deaths += amount;
+		else if (coordinate == PLC_OUTCOME_PICKUPS) player.plc_str_outcome_b_pickups += amount;
+		else if (coordinate == PLC_OUTCOME_CART_PUSH) player.plc_str_outcome_b_cart_push += amount;
+		else player.plc_str_outcome_b_cart_contest += amount;
+	}
+}
+
+float payload_str_cart_pool_run()
 {
 	float have = 0;
 	float prev = 0;
-	float tries = 0;
-	while (have < want && tries < 8192)
+	while (have < PLC_MAX_CARTS)
 	{
 		entity e = spawn();
-		tries += 1;
 		if (have > 0 && etof(e) != prev + 1)
 			have = 0;
-		if (!is_cart)
-			plc_str_evt_pool[have] = e;
+		plc_str_cart_pool[have] = e;
+		e.plc_cs_f_pool = etof(e);
 		prev = etof(e);
 		have += 1;
 	}
-	if (have < want)
+	return prev - PLC_MAX_CARTS + 1;
+}
+
+void payload_strategy_cart_pool()
+{
+	bool valid = plc_str_cart_base > 0;
+	for (int i = 0; i < PLC_MAX_CARTS && valid; ++i)
+		if (!plc_str_cart_pool[i]
+			|| etof(plc_str_cart_pool[i]) != plc_str_cart_base + i
+			|| plc_str_cart_pool[i].plc_cs_f_pool != etof(plc_str_cart_pool[i]))
+			valid = false;
+	if (!valid)
 	{
-		LOG_INFO(strcat("payload: FAILED to allocate a contiguous ",
-			ftos(want), "-edict strategy pool in ", ftos(tries), " spawns"));
-		return 0;
+		plc_str_cart_base = payload_str_cart_pool_run();
+		LOG_INFO(sprintf("payload: [PLCPOOL] cart_base %d rows %d capacity %d contiguous %d obs_base 1 rows %d",
+			plc_str_cart_base, payload_cart_count, PLC_MAX_CARTS,
+			boolean(plc_str_cart_base), maxclients));
 	}
-	return prev - want + 1;
 }
 
 void payload_strategy_attach()
 {
 	if (plc_str_h_obs < 0)
-		plc_str_h_obs  = mesh_open(PLC_STR_NODE, PLC_STR_OBS_W,  maxclients);
+		plc_str_h_obs  = mesh_open(PLC_STR_NODE, MESH_KIND_OBSERVATION, MESH_KIND_NONE, PLC_STR_OBS_W, maxclients);
 	if (plc_str_h_cart < 0)
-		plc_str_h_cart = mesh_open(PLC_STR_NODE, PLC_STR_CART_W, payload_cart_count);
+		plc_str_h_cart = mesh_open(PLC_STR_NODE, MESH_KIND_CART, MESH_KIND_NONE, PLC_STR_CART_W, PLC_MAX_CARTS);
 	if (plc_str_h_evt < 0)
-		plc_str_h_evt  = mesh_open(PLC_STR_NODE, PLC_STR_EVT_W,  PLC_STR_EVT_ROWS);
+		plc_str_h_evt  = mesh_open(PLC_STR_NODE, MESH_KIND_EVENT, MESH_KIND_NONE, PLC_STR_EVT_W, max(1, maxclients));
 	if (plc_str_h_sc < 0)
-		plc_str_h_sc   = mesh_open(PLC_STR_NODE, PLC_STR_RESP_W, maxclients);
+		plc_str_h_sc   = mesh_open(PLC_STR_NODE, MESH_KIND_NONE, MESH_KIND_STRATEGY, PLC_STR_RESP_W, maxclients);
 
-	if (!plc_str_evt_pool[0])
-	{
-		plc_str_evt_base  = payload_str_pool_run(PLC_STR_EVT_ROWS, 0);
-		// Contiguity is the gather precondition; state it as a measurement, not
-		// as a comment. Both runs are re-verified here against the live edict
-		// numbers so a real run's log carries the proof.
-		float oke = 1;
-		for (int i = 0; i < PLC_STR_EVT_ROWS; ++i)
-			if (etof(plc_str_evt_pool[i]) != plc_str_evt_base + i) oke = 0;
-		// One sprintf, not a strcat chain: DP's VM_strcat takes at most 8
-		// arguments and silently drops the rest.
-		LOG_INFO(sprintf("payload: [PLCPOOL] evt_base %d rows %d contiguous %d",
-			plc_str_evt_base, PLC_STR_EVT_ROWS, oke));
-	}
-	if (!plc_str_cart_base && payload_cart_count > 0)
-	{
-		plc_str_cart_base = payload_str_pool_run(payload_cart_count, 1);
-		LOG_INFO(sprintf("payload: [PLCPOOL] cart_base %d rows %d contiguous %d obs_base 1 rows %d",
-			plc_str_cart_base, payload_cart_count, boolean(plc_str_cart_base), maxclients));
-	}
+	payload_strategy_cart_pool();
 }
 
-float payload_str_cell_of(vector org)
+vector payload_str_cell_of(vector org)
 {
-	float gx = floor(org.x / 256);
-	float gy = floor(org.y / 256);
-	return (gx * 131 + gy) & 1023;
+	return vec2(floor(org.x / PLC_STR_CELL_EXTENT), floor(org.y / PLC_STR_CELL_EXTENT));
 }
 
 float payload_str_within2(vector a, vector b)
 {
-	float dx = fabs(floor(a.x / 256) - floor(b.x / 256));
-	float dy = fabs(floor(a.y / 256) - floor(b.y / 256));
+	float dx = fabs(floor(a.x / PLC_STR_CELL_EXTENT) - floor(b.x / PLC_STR_CELL_EXTENT));
+	float dy = fabs(floor(a.y / PLC_STR_CELL_EXTENT) - floor(b.y / PLC_STR_CELL_EXTENT));
 	return (max(dx, dy) <= 2);
 }
 
-void payload_str_deposit(float cell, float kind, float team, float subject, float value)
+void payload_str_deposit(float kind, float observer, float team, float subject, vector position, vector cell, vector target_cell, float respawn_time, float health, float link_length, float amount, float response_seq)
 {
-	float ti = team;
-	if (ti < 0) ti = 0;
-	if (ti > NUM_TEAMS) ti = NUM_TEAMS;
-
-	if (cell == plc_str_last_cell[ti] && kind == plc_str_last_kind[ti]
-	    && subject == plc_str_last_subj[ti])
-		return;
-
-	plc_str_last_cell[ti] = cell;
-	plc_str_last_kind[ti] = kind;
-	plc_str_last_subj[ti] = subject;
-
-	entity e = plc_str_evt_pool[plc_str_evt_w];
-	e.plc_ev_f_cell    = cell;
+	entity e = spawn();
 	e.plc_ev_f_kind    = kind;
+	e.plc_ev_f_time    = time;
+	e.plc_ev_f_observer = observer;
 	e.plc_ev_f_team    = team;
 	e.plc_ev_f_subject = subject;
-	e.plc_ev_f_value   = value;
-	e.plc_ev_f_time    = time;
-
+	e.plc_ev_f_cell_x = cell.x;
+	e.plc_ev_f_cell_y = cell.y;
+	e.plc_ev_f_target_cell_x = target_cell.x;
+	e.plc_ev_f_target_cell_y = target_cell.y;
+	e.plc_ev_f_px      = position.x;
+	e.plc_ev_f_py      = position.y;
+	e.plc_ev_f_pz      = position.z;
+	e.plc_ev_f_respawn_time = respawn_time;
+	e.plc_ev_f_health = health;
+	e.plc_ev_f_link_length = link_length;
+	e.plc_ev_f_amount = amount;
+	e.plc_ev_f_response_seq = response_seq;
+	e.plc_ev_next = NULL;
+	if (plc_str_evt_tail)
+		plc_str_evt_tail.plc_ev_next = e;
+	else
+		plc_str_evt_head = e;
+	plc_str_evt_tail = e;
 	plc_str_evt_w += 1;
-	if (plc_str_evt_w >= PLC_STR_EVT_ROWS)
-		plc_str_evt_w = 0;
+}
+
+void payload_str_outcome(entity actor, float kind, entity subject, float value)
+{
+	payload_str_deposit(kind, etof(actor), Team_TeamToIndex(actor.team),
+		etof(subject), actor.origin, payload_str_cell_of(actor.origin), '0 0 0', 0, 0, 0, value,
+		actor.plc_str_route_seq);
+}
+
+void payload_str_round(float winner)
+{
+	payload_str_deposit(PLC_EVT_KIND_ROUND, 0, winner, 0, '0 0 0', '0 0 0', '0 0 0', 0, 0, 0, 1, 0);
 }
 
 void payload_perceive(entity bot)
@@ -133,8 +214,9 @@ void payload_perceive(entity bot)
 		return;
 
 	vector eye = bot.origin + bot.view_ofs;
-	float bcell = payload_str_cell_of(bot.origin);
-	bot.plc_str_cell = bcell;
+	vector bcell = payload_str_cell_of(bot.origin);
+	bot.plc_str_cell_x = bcell.x;
+	bot.plc_str_cell_y = bcell.y;
 	float myteam = Team_TeamToIndex(bot.team);
 
 	FOREACH_CLIENT(IS_PLAYER(it) && it != bot && !IS_DEAD(it) && DIFF_TEAM(it, bot),
@@ -146,8 +228,8 @@ void payload_perceive(entity bot)
 		traceline(eye, it.origin, MOVE_NOMONSTERS, bot);
 		if (trace_fraction < 1)
 			continue;
-		payload_str_deposit(payload_str_cell_of(it.origin), 3, myteam,
-			etof(it), GetResource(it, RES_HEALTH));
+		payload_str_deposit(PLC_EVT_KIND_RIVAL_HERE, etof(bot), myteam, etof(it), it.origin,
+			payload_str_cell_of(it.origin), '0 0 0', 0, GetResource(it, RES_HEALTH), 0, 0, 0);
 	});
 
 	IL_EACH(g_items, it.bot_pickup,
@@ -160,70 +242,129 @@ void payload_perceive(entity bot)
 		traceline(eye, o, MOVE_NOMONSTERS, bot);
 		if (trace_fraction < 1)
 			continue;
-		float kind  = it.solid ? 1 : 0;
-		float phase = it.solid ? 0 : max(0, it.scheduledrespawntime - time);
-		payload_str_deposit(payload_str_cell_of(o), kind, myteam, etof(it), phase);
+		float kind = it.solid ? PLC_EVT_KIND_ITEM_HERE : PLC_EVT_KIND_ITEM_GONE;
+		payload_str_deposit(kind, etof(bot), myteam, etof(it), o,
+			payload_str_cell_of(o), '0 0 0', it.scheduledrespawntime, 0, 0, 0, 0);
 	});
 }
 
-// Log the EXACT rows the mesh is about to carry, read back off the staged
-// fields rather than recomputed, so the log IS the gather source. One line per
-// row; tools/measure.py parses these into the per-player observation table
-// (AGENDA E9/E10) and reconstructs the instrument descriptors z and the
-// relation rows from them. Gated on g_payload_strategy_log because it is one
-// line per player per strategy tick.
+void payload_vcell_log()
+{
+	LOG_INFOF("[BOTWARP] rows %.0f kernel_rows %.0f cells %.0f waves %.0f working_sets %.0f peak_rows %.0f\n",
+		bot_controller_stat_read(0), bot_controller_stat_read(1),
+		bot_controller_stat_read(3), bot_controller_stat_read(2),
+		bot_controller_stat_read(6),
+		bot_controller_stat_read(7));
+	LOG_INFOF("[VCELL] barriers %.0f total_rows %.0f total_kernel_rows %.0f wave_span %.0f cell_extent %.3f causal_cells %.0f\n",
+		bot_controller_stat_read(4), bot_controller_stat_read(5),
+		bot_controller_stat_read(11), bot_controller_stat_read(8),
+		bot_controller_stat_read(9), bot_controller_stat_read(10));
+	LOG_INFOF("[VCELLMERGE] input_coordinates %.0f output_coordinates %.0f buffer_bytes %.0f\n",
+		bot_controller_stat_read(12), bot_controller_stat_read(13),
+		bot_controller_stat_read(14));
+	LOG_INFOF("[BOTQC] staged_rows %.0f staged_total %.0f scalar_total %.0f fallback_total %.0f\n",
+		bot_controller_qc_stat(0), bot_controller_qc_stat(1),
+		bot_controller_qc_stat(2), bot_controller_qc_stat(3));
+}
+
 void payload_strategy_log(float nclients)
 {
-	LOG_INFO(strcat("[PLCPUB] ", ftos(plc_str_req_seq), " ", ftos(time),
-		" carts ", ftos(payload_cart_count), " clients ", ftos(nclients),
-		" evtrows ", ftos(PLC_STR_EVT_ROWS)));
+	string pub_left = strcat("[PLCPUB] ", ftos(plc_str_req_seq), " ", ftos(time),
+		" carts ", ftos(payload_cart_count), " clients ");
+	string pub_right = strcat(ftos(nclients), " evtrows ", ftos(plc_str_evt_w));
+	LOG_INFO(strcat(pub_left, pub_right));
 
 	for (int c = 0; c < payload_cart_count; ++c)
 	{
-		entity row = ftoe(plc_str_cart_base + c);
-		// At most 7 values per sprintf: the QuakeC calling convention carries
-		// MAX_PARMS = 8 (darkplaces pr_comp.h:143) and the format string is
-		// one of them, so an 8th value is silently dropped.
+		entity row = plc_str_cart_pool[c];
 		LOG_INFO(strcat(
-			sprintf("[PLCCART] %d %d %g %g %g", plc_str_req_seq, c,
-				row.plc_cs_f_id, row.plc_cs_f_depth, row.plc_cs_f_length),
-			sprintf(" %g %g %g %g %g",
-				row.plc_cs_f_ctrl, row.plc_cs_f_speed, row.plc_cs_f_idle,
-				row.plc_cs_f_bankmask, row.plc_cs_f_progress),
-			sprintf(" %g %g %g",
-				row.plc_cs_f_px, row.plc_cs_f_py, row.plc_cs_f_pz)));
+			sprintf("[PLCCART] %d %d %g %g %g %g %g", plc_str_req_seq, c,
+				row.plc_cs_f_id, row.plc_cs_f_path_position,
+				row.plc_cs_f_path_length, row.plc_cs_f_control_team,
+				row.plc_cs_f_speed),
+				sprintf(" %g %g %g %g %g %g %g", row.plc_cs_f_idle_time,
+				row.plc_cs_f_lead_team, row.plc_cs_f_second_team,
+				row.plc_cs_f_home_team,
+				row.plc_cs_f_px, row.plc_cs_f_py, row.plc_cs_f_pz),
+				sprintf(" %g %g %g %g", row.plc_cs_f_supports_player,
+				row.plc_cs_f_team_count, row.plc_cs_f_rollback_active,
+				row.plc_cs_f_rollback_target)));
 	}
 
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
 		string a = sprintf("[PLCOBS] %d %d %g %g %g", plc_str_req_seq, etof(it),
 			it.plc_ob_f_id, it.plc_ob_f_team, it.plc_ob_f_health);
-		string b = sprintf(" %g %g %g %g %g %g",
-			it.plc_ob_f_armor, it.plc_ob_f_ammo, it.plc_ob_f_px,
-			it.plc_ob_f_py, it.plc_ob_f_pz, it.plc_ob_f_vx);
-		string c2 = sprintf(" %g %g %g %g %g %g",
-			it.plc_ob_f_vy, it.plc_ob_f_vz, it.plc_ob_f_weapons,
-			it.plc_ob_f_power, it.plc_ob_f_tss, it.plc_ob_f_cell);
-		string d = sprintf(" %g %g %g %g",
-			it.plc_ob_f_ncart, it.plc_ob_f_ncartd,
-			it.plc_ob_f_alive, it.plc_ob_f_control);
-		string e = sprintf(" %g %g %g %g %g %g",
-			it.plc_ob_f_applied_target, it.plc_ob_f_target_resolved,
-			it.plc_ob_f_goal_target, it.plc_ob_f_goal_distance,
-			it.plc_ob_f_goal_match, it.plc_ob_f_target_touch);
-		LOG_INFO(strcat(a, b, c2, d, e));
+		string b = sprintf(" %g %g %g %g %g %g %g", it.plc_ob_f_armor,
+			it.plc_ob_f_ammo_shells, it.plc_ob_f_ammo_bullets,
+			it.plc_ob_f_ammo_rockets, it.plc_ob_f_ammo_cells,
+			it.plc_ob_f_ammo_plasma, it.plc_ob_f_ammo_fuel);
+		string c2 = sprintf(" %g %g %g %g %g %g %g", it.plc_ob_f_px,
+			it.plc_ob_f_py, it.plc_ob_f_pz, it.plc_ob_f_vx,
+			it.plc_ob_f_vy, it.plc_ob_f_vz, it.plc_ob_f_weapons_x);
+		string d = sprintf(" %g %g %g %g %g %g %g", it.plc_ob_f_weapons_y,
+			it.plc_ob_f_weapons_z, it.plc_ob_f_strength_finished,
+			it.plc_ob_f_spawn_time, it.plc_ob_f_engine_time,
+			it.plc_ob_f_cell_x, it.plc_ob_f_cell_y);
+		string e = sprintf(" %g %g %g %g %g %g %g", it.plc_ob_f_alive,
+			it.plc_ob_f_control,
+			it.plc_ob_f_applied_target_kind, it.plc_ob_f_applied_target_id,
+			it.plc_ob_f_applied_target_cell_x, it.plc_ob_f_applied_target_cell_y,
+			it.plc_ob_f_target_resolved);
+		string f = sprintf(" %g %g %g %g %g %g %g",
+			it.plc_ob_f_goal_target_kind, it.plc_ob_f_goal_target_id,
+			it.plc_ob_f_goal_target_cell_x, it.plc_ob_f_goal_target_cell_y,
+			it.plc_ob_f_goal_present, it.plc_ob_f_goal_px, it.plc_ob_f_goal_py);
+		string g = sprintf(" %g %g %g %g %g %g %g", it.plc_ob_f_goal_pz,
+			it.plc_ob_f_response_seq, it.plc_ob_f_response_time,
+			it.plc_ob_f_route_seq, it.plc_ob_f_route_latency,
+			it.plc_ob_f_goal_seq, it.plc_ob_f_goal_latency);
+		string h = sprintf(" %g %g %g %g %g %g %g",
+			it.plc_ob_f_touch_seq, it.plc_ob_f_touch_latency,
+			it.plc_ob_f_enemy_damage_dealt, it.plc_ob_f_enemy_damage_taken,
+			it.plc_ob_f_enemy_kills, it.plc_ob_f_deaths, it.plc_ob_f_pickups);
+		string i = sprintf(" %g %g %g %g %g %g %g", it.plc_ob_f_cart_push,
+			it.plc_ob_f_cart_contest, it.plc_ob_f_outcome_a_seq,
+			it.plc_ob_f_outcome_a_enemy_damage_dealt,
+			it.plc_ob_f_outcome_a_enemy_damage_taken, it.plc_ob_f_outcome_a_enemy_kills,
+			it.plc_ob_f_outcome_a_deaths);
+		string i2 = sprintf(" %g %g %g %g %g %g %g",
+			it.plc_ob_f_outcome_a_pickups, it.plc_ob_f_outcome_a_cart_push,
+			it.plc_ob_f_outcome_a_cart_contest, it.plc_ob_f_outcome_b_seq,
+			it.plc_ob_f_outcome_b_enemy_damage_dealt,
+			it.plc_ob_f_outcome_b_enemy_damage_taken,
+			it.plc_ob_f_outcome_b_enemy_kills);
+		string j = sprintf(" %g %g %g %g %g %g %g",
+			it.plc_ob_f_outcome_b_deaths, it.plc_ob_f_outcome_b_pickups,
+			it.plc_ob_f_outcome_b_cart_push, it.plc_ob_f_outcome_b_cart_contest,
+			it.plc_ob_f_swizzle_active, it.plc_ob_f_swizzle_epoch,
+			it.plc_ob_f_swizzle_player_count);
+		string j2 = sprintf(" %g %g %g %g %g %g %g",
+			it.plc_ob_f_swizzle_spot_count, it.plc_ob_f_swizzle_slot_count,
+			it.plc_ob_f_swizzle_ticket, it.plc_ob_f_swizzle_cohort,
+			it.plc_ob_f_swizzle_cohort_count, it.plc_ob_f_swizzle_generation,
+			it.plc_ob_f_swizzle_scheduled_time);
+		string k = sprintf(" %g %g %g", it.plc_ob_f_swizzle_actual_time,
+			it.plc_ob_f_swizzle_lane, it.plc_ob_f_swizzle_spot);
+		string left = strcat(a, b, c2, d, e, f, g);
+		string right = strcat(h, i, i2, j, j2, k);
+		LOG_INFO(strcat(left, right));
 	});
 
-	for (int r = 0; r < PLC_STR_EVT_ROWS; ++r)
+	int r = 0;
+	for (entity e = plc_str_evt_head; e; e = e.plc_ev_next)
 	{
-		entity e = plc_str_evt_pool[r];
-		if (e.plc_ev_f_time == 0 && e.plc_ev_f_kind == 0 && e.plc_ev_f_subject == 0)
-			continue;
 		LOG_INFO(strcat(
-			sprintf("[PLCEVT] %d %d %g %g %g", plc_str_req_seq, r,
-				e.plc_ev_f_cell, e.plc_ev_f_kind, e.plc_ev_f_team),
-			sprintf(" %g %g %g", e.plc_ev_f_subject, e.plc_ev_f_value,
-				e.plc_ev_f_time)));
+			sprintf("[PLCEVT] %d %d %g %g %g %g %g", plc_str_req_seq, r,
+				e.plc_ev_f_kind, e.plc_ev_f_time, e.plc_ev_f_observer,
+				e.plc_ev_f_team, e.plc_ev_f_subject),
+			sprintf(" %g %g %g %g %g %g %g", e.plc_ev_f_cell_x, e.plc_ev_f_cell_y,
+				e.plc_ev_f_target_cell_x, e.plc_ev_f_target_cell_y,
+				e.plc_ev_f_px, e.plc_ev_f_py, e.plc_ev_f_pz),
+			sprintf(" %g %g %g %g %g", e.plc_ev_f_respawn_time,
+				e.plc_ev_f_health, e.plc_ev_f_link_length,
+				e.plc_ev_f_amount, e.plc_ev_f_response_seq)));
+		r += 1;
 	}
 }
 
@@ -231,17 +372,6 @@ float plc_str_link_cursor = 0;
 float plc_str_link_pass = 0;
 float plc_str_link_rows = 0;
 
-// Stream the map's V-cell adjacency onto the perception ring: for each stock
-// waypoint, every outgoing link whose endpoint hashes to a DIFFERENT V-cell is
-// one navigable cell->cell edge. `waypoint_get_link` reads the stock nav graph
-// (server/bot/default/waypoints.qh:28), so this reports the engine's own
-// navigability and introduces no second navigation definition (SPEC 12).
-//
-// The sweep never latches "done": g_waypoints is still filling during the first
-// seconds of a match (a one-shot pass caught 33 of 469 waypoints on a real
-// fused run), and a map can gain waypoints later. It keeps cycling instead, at
-// a rate low enough that link rows never crowd the perception events out of the
-// 256-row ring.
 void payload_emit_cell_links()
 {
 	float index = 0;
@@ -252,25 +382,17 @@ void payload_emit_cell_links()
 		total += 1;
 		if (index >= plc_str_link_cursor && processed < PLC_STR_LINKS_PER_STEP)
 		{
-			float ca = payload_str_cell_of(it.origin);
+			vector ca = payload_str_cell_of(it.origin);
 			for (int j = 0; j < 32; ++j)
 			{
 				entity link = waypoint_get_link(it, j);
 				if (!link)
 					continue;
-				float cb = payload_str_cell_of(link.origin);
+				vector cb = payload_str_cell_of(link.origin);
 				if (cb == ca)
 					continue;
-				entity row = plc_str_evt_pool[plc_str_evt_w];
-				row.plc_ev_f_cell    = ca;
-				row.plc_ev_f_kind    = PLC_EVT_KIND_CELL_LINK;
-				row.plc_ev_f_team    = 0;
-				row.plc_ev_f_subject = cb;
-				row.plc_ev_f_value   = vlen(link.origin - it.origin) / 1024;
-				row.plc_ev_f_time    = time;
-				plc_str_evt_w += 1;
-				if (plc_str_evt_w >= PLC_STR_EVT_ROWS)
-					plc_str_evt_w = 0;
+				payload_str_deposit(PLC_EVT_KIND_CELL_LINK, 0, 0, 0,
+					it.origin, ca, cb, 0, 0, vlen(link.origin - it.origin), 0, 0);
 				plc_str_link_rows += 1;
 			}
 			processed += 1;
@@ -293,136 +415,178 @@ void payload_strategy_gather(float nclients)
 	int c = 0;
 	IL_EACH(g_payload_carts, true,
 	{
-		entity row = ftoe(plc_str_cart_base + c);
-		row.plc_cs_f_id       = it.plc_cart_id;
-		row.plc_cs_f_depth    = (it.plc_length > 0) ? it.plc_s / it.plc_length : 0;
-		row.plc_cs_f_length   = it.plc_length;
-		row.plc_cs_f_ctrl     = it.plc_ctrl;
-		row.plc_cs_f_speed    = it.plc_speed_now;
-		row.plc_cs_f_idle     = it.plc_idle;
-		row.plc_cs_f_bankmask = it.plc_bank_team;
-		row.plc_cs_f_progress = it.plc_banked;
-		// Cart world origin, same 1/1024 scaling as the per-player position
-		// columns. Without it no consumer can price the travel a cart
-		// assignment costs (AGENDA F4).
-		// A cart is a brush model: sv_payload.qc sets `view_ofs = mins` and
-		// parks it at `payload_pos(...) - view_ofs`, so its WORLD position on
-		// the golden path is origin + view_ofs, not origin.
+		entity row = plc_str_cart_pool[c];
+		row.plc_cs_f_id            = it.plc_cart_id;
+		row.plc_cs_f_path_position = it.plc_s;
+		row.plc_cs_f_path_length   = it.plc_length;
+		row.plc_cs_f_control_team  = it.plc_ctrl;
+		row.plc_cs_f_speed         = it.plc_speed_now;
+		row.plc_cs_f_idle_time     = it.plc_idle;
+		row.plc_cs_f_lead_team     = it.plc_lead;
+		row.plc_cs_f_second_team   = it.plc_second;
+		row.plc_cs_f_home_team     = it.plc_home;
 		vector cpos = it.origin + it.view_ofs;
-		row.plc_cs_f_px      = cpos.x / 1024;
-		row.plc_cs_f_py      = cpos.y / 1024;
-		row.plc_cs_f_pz      = cpos.z / 1024;
+		row.plc_cs_f_px           = cpos.x;
+		row.plc_cs_f_py           = cpos.y;
+		row.plc_cs_f_pz           = cpos.z;
+		row.plc_cs_f_supports_player = payload_cart_supports_player(it);
+		row.plc_cs_f_team_count = payload_teams;
+		row.plc_cs_f_rollback_active = it.plc_rollback_active;
+		row.plc_cs_f_rollback_target = it.plc_rollback_target;
 		c += 1;
 	});
 	if (payload_cart_count > 0)
 	{
 		float cbase = plc_str_cart_base;
-		mesh_gather(plc_str_h_cart, PLC_CS_ID,       plc_cs_f_id,       cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_DEPTH,    plc_cs_f_depth,    cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_LENGTH,   plc_cs_f_length,   cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_CTRL,     plc_cs_f_ctrl,     cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_SPEED,    plc_cs_f_speed,    cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_IDLE,     plc_cs_f_idle,     cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_BANKMASK, plc_cs_f_bankmask, cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_PROGRESS, plc_cs_f_progress, cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_POS_X,    plc_cs_f_px,       cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_POS_Y,    plc_cs_f_py,       cbase, payload_cart_count);
-		mesh_gather(plc_str_h_cart, PLC_CS_POS_Z,    plc_cs_f_pz,       cbase, payload_cart_count);
+		mesh_gather_rows(plc_str_h_cart, plc_cs_f_id, cbase, payload_cart_count, PLC_STR_CART_W);
 	}
 
 	FOREACH_CLIENT(IS_PLAYER(it),
 	{
-		float nci = -1; float ncd = 999999999;
-		entity player = it;
-		IL_EACH(g_payload_carts, true,
-		{
-			// Same brush-model correction: comparing a player's origin to a
-			// cart's UNOFFSET origin made the nearest-cart columns wrong by
-			// the cart brush's mins on every row of every run so far.
-			float d = vlen((it.origin + it.view_ofs) - player.origin);
-			if (d < ncd) { ncd = d; nci = it.plc_cart_id; }
-		});
-		float ammo = GetResource(it, RES_SHELLS) + GetResource(it, RES_BULLETS)
-		           + GetResource(it, RES_ROCKETS) + GetResource(it, RES_CELLS)
-		           + GetResource(it, RES_PLASMA)  + GetResource(it, RES_FUEL);
-
 		it.plc_ob_f_id      = etof(it);
 		it.plc_ob_f_team    = Team_TeamToIndex(it.team);
 		it.plc_ob_f_health  = GetResource(it, RES_HEALTH);
 		it.plc_ob_f_armor   = GetResource(it, RES_ARMOR);
-		it.plc_ob_f_ammo    = ammo / 100;
-		it.plc_ob_f_px      = it.origin.x / 1024;
-		it.plc_ob_f_py      = it.origin.y / 1024;
-		it.plc_ob_f_pz      = it.origin.z / 1024;
-		it.plc_ob_f_vx      = it.velocity.x / 1024;
-		it.plc_ob_f_vy      = it.velocity.y / 1024;
-		it.plc_ob_f_vz      = it.velocity.z / 1024;
-		it.plc_ob_f_weapons = STAT(WEAPONS, it).x;
-		it.plc_ob_f_power   = max(0, it.strength_finished - time);
-		it.plc_ob_f_tss     = (it.plc_str_spawn_stamp2 > 0) ? time - it.plc_str_spawn_stamp2 : 0;
-		it.plc_ob_f_cell    = it.plc_str_cell;
-		it.plc_ob_f_ncart   = nci;
-		it.plc_ob_f_ncartd  = ncd / 1024;
+		it.plc_ob_f_ammo_shells = GetResource(it, RES_SHELLS);
+		it.plc_ob_f_ammo_bullets = GetResource(it, RES_BULLETS);
+		it.plc_ob_f_ammo_rockets = GetResource(it, RES_ROCKETS);
+		it.plc_ob_f_ammo_cells = GetResource(it, RES_CELLS);
+		it.plc_ob_f_ammo_plasma = GetResource(it, RES_PLASMA);
+		it.plc_ob_f_ammo_fuel = GetResource(it, RES_FUEL);
+		it.plc_ob_f_px      = it.origin.x;
+		it.plc_ob_f_py      = it.origin.y;
+		it.plc_ob_f_pz      = it.origin.z;
+		it.plc_ob_f_vx      = it.velocity.x;
+		it.plc_ob_f_vy      = it.velocity.y;
+		it.plc_ob_f_vz      = it.velocity.z;
+		it.plc_ob_f_weapons_x = STAT(WEAPONS, it).x;
+		it.plc_ob_f_weapons_y = STAT(WEAPONS, it).y;
+		it.plc_ob_f_weapons_z = STAT(WEAPONS, it).z;
+		it.plc_ob_f_strength_finished = it.strength_finished;
+		it.plc_ob_f_spawn_time = it.plc_str_spawn_stamp2;
+		it.plc_ob_f_engine_time = time;
+		it.plc_ob_f_cell_x = it.plc_str_cell_x;
+		it.plc_ob_f_cell_y = it.plc_str_cell_y;
 		it.plc_ob_f_alive   = IS_DEAD(it) ? 0 : 1;
 		it.plc_ob_f_control = IS_BOT_CLIENT(it) ? 1 : 0;
-		it.plc_ob_f_applied_target = it.plc_str_applied_target;
+		it.plc_ob_f_applied_target_kind = it.plc_str_applied_target_kind;
+		it.plc_ob_f_applied_target_id = it.plc_str_applied_target_id;
+		it.plc_ob_f_applied_target_cell_x = it.plc_str_applied_target_cell_x;
+		it.plc_ob_f_applied_target_cell_y = it.plc_str_applied_target_cell_y;
 		it.plc_ob_f_target_resolved = it.plc_str_resolved;
-		it.plc_ob_f_goal_target = it.plc_str_goal_target;
-		it.plc_ob_f_goal_distance = -1;
+		it.plc_ob_f_goal_target_kind = it.plc_str_goal_target_kind;
+		it.plc_ob_f_goal_target_id = it.plc_str_goal_target_id;
+		it.plc_ob_f_goal_target_cell_x = it.plc_str_goal_target_cell_x;
+		it.plc_ob_f_goal_target_cell_y = it.plc_str_goal_target_cell_y;
+		it.plc_ob_f_goal_present = (it.plc_str_goal_entity != NULL);
+		it.plc_ob_f_goal_px = 0;
+		it.plc_ob_f_goal_py = 0;
+		it.plc_ob_f_goal_pz = 0;
+		vector goalpos = '0 0 0';
 		if (it.plc_str_goal_entity != NULL)
-			it.plc_ob_f_goal_distance = vlen(((it.plc_str_goal_entity.absmin
-				+ it.plc_str_goal_entity.absmax) * 0.5) - it.origin) / 1024;
-		it.plc_ob_f_goal_match = (it.plc_str_applied_target >= 0
-			&& it.plc_str_goal_target == it.plc_str_applied_target);
-		it.plc_ob_f_target_touch = 0;
-		if (it.plc_ob_f_goal_match && it.plc_str_applied_target >= PLC_TGT_CELL_BASE)
-			it.plc_ob_f_target_touch = (payload_str_cell_of(it.origin)
-				== it.plc_str_applied_target - PLC_TGT_CELL_BASE);
-		if (it.plc_ob_f_goal_match && it.plc_str_applied_target < PLC_TGT_CELL_BASE
-			&& it.plc_ob_f_goal_distance >= 0 && it.plc_ob_f_goal_distance <= 0.16)
-			it.plc_ob_f_target_touch = 1;
+		{
+			goalpos = (it.plc_str_goal_entity.absmin + it.plc_str_goal_entity.absmax) * 0.5;
+			it.plc_ob_f_goal_px = goalpos.x;
+			it.plc_ob_f_goal_py = goalpos.y;
+			it.plc_ob_f_goal_pz = goalpos.z;
+		}
+		bool goalmatch = it.plc_str_applied_target_kind != PLC_TARGET_NONE
+			&& it.plc_str_goal_target_kind == it.plc_str_applied_target_kind
+			&& ((it.plc_str_applied_target_kind == PLC_TARGET_CELL
+			&& it.plc_str_goal_target_cell_x == it.plc_str_applied_target_cell_x
+			&& it.plc_str_goal_target_cell_y == it.plc_str_applied_target_cell_y)
+			|| (it.plc_str_applied_target_kind != PLC_TARGET_CELL
+			&& it.plc_str_goal_target_id == it.plc_str_applied_target_id));
+		bool targettouch = goalmatch && ((it.plc_str_applied_target_kind == PLC_TARGET_CELL
+			&& it.plc_str_cell_x == it.plc_str_applied_target_cell_x
+			&& it.plc_str_cell_y == it.plc_str_applied_target_cell_y)
+			|| (it.plc_str_applied_target_kind != PLC_TARGET_CELL && it.plc_str_goal_entity != NULL
+			&& vlen(goalpos - it.origin) <= 163.84));
+		if (targettouch)
+		{
+			it.plc_str_touch_seq = it.plc_str_goal_seq;
+			it.plc_str_touch_latency = max(0, time - it.plc_str_response_time);
+		}
+		it.plc_ob_f_response_seq = it.plc_str_response_seq;
+		it.plc_ob_f_response_time = it.plc_str_response_time;
+		it.plc_ob_f_route_seq = it.plc_str_route_seq;
+		it.plc_ob_f_route_latency = it.plc_str_route_latency;
+		it.plc_ob_f_goal_seq = it.plc_str_goal_seq;
+		it.plc_ob_f_goal_latency = it.plc_str_goal_latency;
+		it.plc_ob_f_touch_seq = it.plc_str_touch_seq;
+		it.plc_ob_f_touch_latency = it.plc_str_touch_latency;
+		it.plc_ob_f_enemy_damage_dealt = it.plc_str_enemy_damage_dealt;
+		it.plc_ob_f_enemy_damage_taken = it.plc_str_enemy_damage_taken;
+		it.plc_ob_f_enemy_kills = it.plc_str_enemy_kills;
+		it.plc_ob_f_deaths = it.plc_str_deaths;
+		it.plc_ob_f_pickups = it.plc_str_pickups;
+		it.plc_ob_f_cart_push = it.plc_str_cart_push;
+		it.plc_ob_f_cart_contest = it.plc_str_cart_contest;
+		if (!it.plc_str_outcome_a_used)
+		{
+			it.plc_str_outcome_a_used = 1;
+			it.plc_str_outcome_a_seq = it.plc_str_route_seq;
+		}
+		else if (it.plc_str_outcome_a_seq != it.plc_str_route_seq && !it.plc_str_outcome_b_used)
+		{
+			it.plc_str_outcome_b_used = 1;
+			it.plc_str_outcome_b_seq = it.plc_str_route_seq;
+		}
+		it.plc_ob_f_outcome_a_seq = it.plc_str_outcome_a_seq;
+		it.plc_ob_f_outcome_a_enemy_damage_dealt = it.plc_str_outcome_a_enemy_damage_dealt;
+		it.plc_ob_f_outcome_a_enemy_damage_taken = it.plc_str_outcome_a_enemy_damage_taken;
+		it.plc_ob_f_outcome_a_enemy_kills = it.plc_str_outcome_a_enemy_kills;
+		it.plc_ob_f_outcome_a_deaths = it.plc_str_outcome_a_deaths;
+		it.plc_ob_f_outcome_a_pickups = it.plc_str_outcome_a_pickups;
+		it.plc_ob_f_outcome_a_cart_push = it.plc_str_outcome_a_cart_push;
+		it.plc_ob_f_outcome_a_cart_contest = it.plc_str_outcome_a_cart_contest;
+		it.plc_ob_f_outcome_b_seq = it.plc_str_outcome_b_seq;
+		it.plc_ob_f_outcome_b_enemy_damage_dealt = it.plc_str_outcome_b_enemy_damage_dealt;
+		it.plc_ob_f_outcome_b_enemy_damage_taken = it.plc_str_outcome_b_enemy_damage_taken;
+		it.plc_ob_f_outcome_b_enemy_kills = it.plc_str_outcome_b_enemy_kills;
+		it.plc_ob_f_outcome_b_deaths = it.plc_str_outcome_b_deaths;
+		it.plc_ob_f_outcome_b_pickups = it.plc_str_outcome_b_pickups;
+		it.plc_ob_f_outcome_b_cart_push = it.plc_str_outcome_b_cart_push;
+		it.plc_ob_f_outcome_b_cart_contest = it.plc_str_outcome_b_cart_contest;
+		it.plc_ob_f_swizzle_active = it.spawn_swizzle_active;
+		it.plc_ob_f_swizzle_epoch = it.spawn_swizzle_epoch;
+		it.plc_ob_f_swizzle_player_count = it.spawn_swizzle_player_count;
+		it.plc_ob_f_swizzle_spot_count = it.spawn_swizzle_spot_count;
+		it.plc_ob_f_swizzle_slot_count = it.spawn_swizzle_slot_count;
+		it.plc_ob_f_swizzle_ticket = it.spawn_swizzle_ticket;
+		it.plc_ob_f_swizzle_cohort = it.spawn_swizzle_cohort;
+		it.plc_ob_f_swizzle_cohort_count = it.spawn_swizzle_cohort_count;
+		it.plc_ob_f_swizzle_generation = it.spawn_swizzle_generation;
+		it.plc_ob_f_swizzle_scheduled_time = it.spawn_swizzle_scheduled_time;
+		it.plc_ob_f_swizzle_actual_time = it.spawn_swizzle_actual_time;
+		it.plc_ob_f_swizzle_lane = it.spawn_swizzle_lane;
+		it.plc_ob_f_swizzle_spot = it.spawn_swizzle_spot;
 	});
-	mesh_gather(plc_str_h_obs, PLC_OBS_ID,      plc_ob_f_id,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_TEAM,    plc_ob_f_team,    1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_HEALTH,  plc_ob_f_health,  1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_ARMOR,   plc_ob_f_armor,   1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_AMMO,    plc_ob_f_ammo,    1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_POS_X,   plc_ob_f_px,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_POS_Y,   plc_ob_f_py,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_POS_Z,   plc_ob_f_pz,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_VEL_X,   plc_ob_f_vx,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_VEL_Y,   plc_ob_f_vy,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_VEL_Z,   plc_ob_f_vz,      1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_WEAPONS, plc_ob_f_weapons, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_POWER,   plc_ob_f_power,   1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_TSS,     plc_ob_f_tss,     1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_CELL,    plc_ob_f_cell,    1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_NCART,   plc_ob_f_ncart,   1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_NCART_D, plc_ob_f_ncartd,  1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_ALIVE,   plc_ob_f_alive,   1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_CONTROL, plc_ob_f_control, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_APPLIED_TARGET, plc_ob_f_applied_target, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_TARGET_RESOLVED, plc_ob_f_target_resolved, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_GOAL_TARGET, plc_ob_f_goal_target, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_GOAL_DISTANCE, plc_ob_f_goal_distance, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_GOAL_MATCH, plc_ob_f_goal_match, 1, nclients);
-	mesh_gather(plc_str_h_obs, PLC_OBS_TARGET_TOUCH, plc_ob_f_target_touch, 1, nclients);
+	mesh_gather_rows(plc_str_h_obs, plc_ob_f_id, 1, nclients, PLC_STR_OBS_W);
+	FOREACH_CLIENT(IS_PLAYER(it), { payload_str_measure_reset(it); });
 
-	float ebase = plc_str_evt_base;
-	mesh_gather(plc_str_h_evt, PLC_EVT_CELL,    plc_ev_f_cell,    ebase, PLC_STR_EVT_ROWS);
-	mesh_gather(plc_str_h_evt, PLC_EVT_KIND,    plc_ev_f_kind,    ebase, PLC_STR_EVT_ROWS);
-	mesh_gather(plc_str_h_evt, PLC_EVT_TEAM,    plc_ev_f_team,    ebase, PLC_STR_EVT_ROWS);
-	mesh_gather(plc_str_h_evt, PLC_EVT_SUBJECT, plc_ev_f_subject, ebase, PLC_STR_EVT_ROWS);
-	mesh_gather(plc_str_h_evt, PLC_EVT_VALUE,   plc_ev_f_value,   ebase, PLC_STR_EVT_ROWS);
-	mesh_gather(plc_str_h_evt, PLC_EVT_TIME,    plc_ev_f_time,    ebase, PLC_STR_EVT_ROWS);
+	float event_rows = mesh_gather_list(plc_str_h_evt, plc_ev_f_kind, plc_str_evt_head,
+		plc_ev_next, plc_str_evt_w, PLC_STR_EVT_W);
 
 	plc_str_req_seq += 1;
+	if (autocvar_g_payload_vcell_log)
+		payload_vcell_log();
 	if (autocvar_g_payload_strategy_log)
 		payload_strategy_log(nclients);
 
 	mesh_publish(plc_str_h_cart, plc_str_req_seq, payload_cart_count);
 	mesh_publish(plc_str_h_obs,  plc_str_req_seq, nclients);
-	mesh_publish(plc_str_h_evt,  plc_str_req_seq, PLC_STR_EVT_ROWS);
+	mesh_publish(plc_str_h_evt,  plc_str_req_seq, event_rows);
+	entity event = plc_str_evt_head;
+	while (event)
+	{
+		entity next = event.plc_ev_next;
+		remove(event);
+		event = next;
+	}
+	plc_str_evt_head = NULL;
+	plc_str_evt_tail = NULL;
+	plc_str_evt_w = 0;
 }
 
 void payload_strategy_scatter(float nclients)
@@ -430,76 +594,134 @@ void payload_strategy_scatter(float nclients)
 	float seq = mesh_poll(plc_str_h_sc);
 	if (seq <= plc_str_resp_seq)
 		return;
+	float committed = mesh_scatter_rows(plc_str_h_sc, plc_str_instrument_kind, 1, nclients, PLC_STR_RESP_W);
+	if (committed < nclients)
+	{
+		LOG_INFOF("payload: [PLCBARRIER] seq %.0f rows %.0f required %.0f committed 0\n", seq, committed, nclients);
+		return;
+	}
 	plc_str_resp_seq = seq;
-
-	mesh_scatter(plc_str_h_sc, PLC_SC_TARGET,  plc_str_target,  1, nclients);
-	mesh_scatter(plc_str_h_sc, PLC_SC_GAIN,    plc_str_gain,    1, nclients);
-	mesh_scatter(plc_str_h_sc, PLC_SC_COMMIT,  plc_str_commit,  1, nclients);
-	mesh_scatter(plc_str_h_sc, PLC_SC_SPAWN,   plc_str_spawn,   1, nclients);
+	FOREACH_CLIENT(IS_PLAYER(it),
+	{
+		it.plc_str_response_seq = seq;
+		it.plc_str_response_time = time;
+		if(IS_BOT_CLIENT(it) && (it.plc_str_instrument_kind != it.plc_str_applied_instrument_kind
+			|| it.plc_str_target_kind != it.plc_str_applied_target_kind
+			|| it.plc_str_target_id != it.plc_str_applied_target_id
+			|| it.plc_str_target_cell_x != it.plc_str_applied_target_cell_x
+			|| it.plc_str_target_cell_y != it.plc_str_applied_target_cell_y
+			|| it.plc_str_gain != it.plc_str_applied_gain))
+			navigation_goalrating_timeout_force(it);
+	});
+	if (autocvar_g_payload_strategy_log)
+		LOG_INFOF("payload: [PLCBARRIER] seq %.0f rows %.0f barriers %.0f total_rows %.0f\n", seq, committed, mesh_stat(plc_str_h_sc, MESH_STAT_BARRIERS), mesh_stat(plc_str_h_sc, MESH_STAT_SCATTER_ROWS));
 }
 
-float payload_strategy_entity_target(entity e)
+void payload_strategy_entity_target(entity player, entity target)
 {
-	if (!e)
-		return -1;
-	IL_EACH(g_payload_carts, e == it,
+	player.plc_str_goal_target_kind = PLC_TARGET_NONE;
+	player.plc_str_goal_target_id = -1;
+	player.plc_str_goal_target_cell_x = 0;
+	player.plc_str_goal_target_cell_y = 0;
+	if (!target)
+		return;
+	IL_EACH(g_payload_carts, target == it,
 	{
-		return PLC_TGT_CART_BASE + it.plc_cart_id;
+		player.plc_str_goal_target_kind = PLC_TARGET_CART;
+		player.plc_str_goal_target_id = it.plc_cart_id;
+		return;
 	});
-	if (IS_PLAYER(e))
-		return PLC_TGT_RIVAL_BASE + etof(e);
-	if (e.bot_pickup)
-		return PLC_TGT_ITEM_BASE + etof(e);
-	if (e.classname == "waypoint")
-		return PLC_TGT_CELL_BASE + payload_str_cell_of(e.origin);
-	return -1;
+	if (IS_PLAYER(target))
+		player.plc_str_goal_target_kind = PLC_TARGET_RIVAL;
+	else if (target.bot_pickup)
+		player.plc_str_goal_target_kind = PLC_TARGET_ITEM;
+	else if (target.classname == "waypoint")
+		player.plc_str_goal_target_kind = PLC_TARGET_CELL;
+	if (player.plc_str_goal_target_kind != PLC_TARGET_NONE)
+	{
+		if (player.plc_str_goal_target_kind == PLC_TARGET_CELL)
+		{
+			vector cell = payload_str_cell_of(target.origin);
+			player.plc_str_goal_target_cell_x = cell.x;
+			player.plc_str_goal_target_cell_y = cell.y;
+		}
+		else
+			player.plc_str_goal_target_id = etof(target);
+	}
 }
 
 void havocbot_goalrating_strategy(entity this, float ratingscale)
 {
-	float tgt  = this.plc_str_target;
+	float kind = this.plc_str_target_kind;
+	float instrument = this.plc_str_instrument_kind;
+	float tgt  = this.plc_str_target_id;
+	float cell_x = this.plc_str_target_cell_x;
+	float cell_y = this.plc_str_target_cell_y;
 	float gain = this.plc_str_gain;
-	this.plc_str_applied_target = tgt;
+	this.plc_str_applied_target_kind = kind;
+	this.plc_str_applied_instrument_kind = instrument;
+	this.plc_str_applied_target_id = tgt;
+	this.plc_str_applied_target_cell_x = cell_x;
+	this.plc_str_applied_target_cell_y = cell_y;
+	this.plc_str_applied_gain = gain;
 	this.plc_str_resolved = 0;
 
-	if (tgt >= PLC_TGT_CART_BASE && tgt < PLC_TGT_ITEM_BASE)
+	if (kind == PLC_TARGET_NONE || (kind != PLC_TARGET_CELL && tgt < 0) || gain == 0)
 	{
-		float k = tgt - PLC_TGT_CART_BASE;
-		entity cart = payload_cart_by_id(k);
+		this.plc_str_resolved = 1;
+	}
+	else if (kind == PLC_TARGET_CART)
+	{
+		entity cart = payload_cart_by_id(tgt);
 		if (cart && gain != 0)
 		{
 			this.plc_str_resolved = 1;
-			navigation_routerating(this, cart, ratingscale * gain, 5000);
+			if (instrument == PLC_INSTRUMENT_SUPPRESS_CART)
+			{
+				float rivals = 0;
+				FOREACH_CLIENT(IS_PLAYER(it) && DIFF_TEAM(it, this) && vlen(it.origin - cart.origin) <= 1024,
+				{
+					navigation_routerating(this, it, ratingscale * gain, 5000);
+					rivals += 1;
+				});
+				if (!rivals)
+					navigation_routerating(this, cart, ratingscale * gain, 5000);
+			}
+			else
+				navigation_routerating(this, cart, ratingscale * gain, 5000);
 		}
 	}
-	else if (tgt >= PLC_TGT_ITEM_BASE && tgt < PLC_TGT_RIVAL_BASE)
+	else if (kind == PLC_TARGET_ITEM)
 	{
-		float subj = tgt - PLC_TGT_ITEM_BASE;
-		IL_EACH(g_items, etof(it) == subj,
+		IL_EACH(g_items, etof(it) == tgt && gain != 0,
 		{
 			this.plc_str_resolved = 1;
 			navigation_routerating(this, it, ratingscale * gain, 3000);
 			break;
 		});
 	}
-	else if (tgt >= PLC_TGT_RIVAL_BASE && tgt < PLC_TGT_CELL_BASE)
+	else if (kind == PLC_TARGET_RIVAL)
 	{
-		float subj = tgt - PLC_TGT_RIVAL_BASE;
-		FOREACH_CLIENT(IS_PLAYER(it) && etof(it) == subj && DIFF_TEAM(it, this),
+		FOREACH_CLIENT(IS_PLAYER(it) && etof(it) == tgt && DIFF_TEAM(it, this) && gain != 0,
 		{
 			this.plc_str_resolved = 1;
 			navigation_routerating(this, it, ratingscale * gain, 5000);
 			break;
 		});
 	}
-	else if (tgt >= PLC_TGT_CELL_BASE && gain != 0)
+	else if (kind == PLC_TARGET_CELL && gain != 0)
 	{
-		float cell = tgt - PLC_TGT_CELL_BASE;
-		IL_EACH(g_waypoints, payload_str_cell_of(it.origin) == cell,
+		vector target_cell = cell_x * '1 0 0' + cell_y * '0 1 0';
+		IL_EACH(g_waypoints, payload_str_cell_of(it.origin) == target_cell,
 		{
 			this.plc_str_resolved = 1;
 			navigation_routerating(this, it, ratingscale * gain, 3000);
 		});
+	}
+	if (this.plc_str_resolved)
+	{
+		this.plc_str_route_seq = this.plc_str_response_seq;
+		this.plc_str_route_latency = max(0, time - this.plc_str_response_time);
 	}
 }
 

@@ -1,36 +1,17 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// vid_wgl.c -- NT GL vid component
 
 #ifdef _MSC_VER
 #pragma comment(lib, "comctl32.lib")
 #endif
 
 #ifdef SUPPORTDIRECTX
-// Include DX libs
+
 #ifdef _MSC_VER
 #pragma comment(lib, "dinput8.lib")
 #pragma comment(lib, "dxguid.lib")
 #endif
 #ifndef DIRECTINPUT_VERSION
-#	define DIRECTINPUT_VERSION 0x0500  /* Version 5.0 */
+#	define DIRECTINPUT_VERSION 0x0500
 #endif
 #endif
 
@@ -54,12 +35,9 @@ cvar_t vid_dx9 = {CVAR_SAVE, "vid_dx9", "0", "use Microsoft Direct3D9(r) for ren
 cvar_t vid_dx9_hal = {CVAR_SAVE, "vid_dx9_hal", "1", "enables hardware rendering (1), otherwise software reference rasterizer (0 - very slow), note that 0 is necessary when using NVPerfHUD (which renders in hardware but requires this option to enable it)"};
 cvar_t vid_dx9_softvertex = {CVAR_SAVE, "vid_dx9_softvertex", "0", "enables software vertex processing (for compatibility testing?  or if you have a very fast CPU), usually you want this off"};
 cvar_t vid_dx9_triplebuffer = {CVAR_SAVE, "vid_dx9_triplebuffer", "0", "enables triple buffering when using vid_vsync in fullscreen, this options adds some latency and only helps when framerate is below 60 so you usually don't want it"};
-//cvar_t vid_dx10 = {CVAR_SAVE, "vid_dx10", "1", "use Microsoft Direct3D10(r) for rendering"};
-//cvar_t vid_dx11 = {CVAR_SAVE, "vid_dx11", "1", "use Microsoft Direct3D11(r) for rendering"};
 
 D3DPRESENT_PARAMETERS vid_d3dpresentparameters;
 
-// we declare this in vid_shared.c because it is required by dedicated server and all clients when SUPPORTD3D is defined
 extern LPDIRECT3DDEVICE9 vid_d3d9dev;
 
 LPDIRECT3D9 vid_d3d9;
@@ -75,14 +53,13 @@ static HINSTANCE gldll;
 #define WM_MOUSEWHEEL                   0x020A
 #endif
 
-// Tell startup code that we have a client
 int cl_available = true;
 
 qboolean vid_supportrefreshrate = true;
 
 static int (WINAPI *qwglChoosePixelFormat)(HDC, CONST PIXELFORMATDESCRIPTOR *);
 static int (WINAPI *qwglDescribePixelFormat)(HDC, int, UINT, LPPIXELFORMATDESCRIPTOR);
-//static int (WINAPI *qwglGetPixelFormat)(HDC);
+
 static BOOL (WINAPI *qwglSetPixelFormat)(HDC, int, CONST PIXELFORMATDESCRIPTOR *);
 static BOOL (WINAPI *qwglSwapBuffers)(HDC);
 static HGLRC (WINAPI *qwglCreateContext)(HDC);
@@ -100,7 +77,7 @@ static dllfunction_t wglfuncs[] =
 {
 	{"wglChoosePixelFormat", (void **) &qwglChoosePixelFormat},
 	{"wglDescribePixelFormat", (void **) &qwglDescribePixelFormat},
-//	{"wglGetPixelFormat", (void **) &qwglGetPixelFormat},
+
 	{"wglSetPixelFormat", (void **) &qwglSetPixelFormat},
 	{"wglSwapBuffers", (void **) &qwglSwapBuffers},
 	{"wglCreateContext", (void **) &qwglCreateContext},
@@ -135,7 +112,6 @@ static qboolean vid_usingvsync = false;
 static qboolean vid_usevsync = false;
 static HICON hIcon;
 
-// used by cd_win.c and snd_win.c
 HWND mainwindow;
 
 static HDC	 baseDC;
@@ -146,20 +122,13 @@ static HGDIOBJ vid_softhdc_backup;
 static BITMAPINFO vid_softbmi;
 static HBITMAP vid_softdibhandle;
 
-//HWND WINAPI InitializeWindow (HINSTANCE hInstance, int nCmdShow);
-
 static qboolean vid_isfullscreen;
-
-//void VID_MenuDraw (void);
-//void VID_MenuKey (int key);
 
 LONG WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void AppActivate(BOOL fActive, BOOL minimize);
 static void ClearAllStates(void);
 qboolean VID_InitModeGL(viddef_mode_t *mode);
 qboolean VID_InitModeSOFT(viddef_mode_t *mode);
-
-//====================================
 
 static int window_x, window_y;
 
@@ -173,10 +142,6 @@ static qboolean dinput;
 static HRESULT (WINAPI *pDirectInputCreate)(HINSTANCE hinst, DWORD dwVersion, LPDIRECTINPUT * lplpDirectInput, LPUNKNOWN punkOuter);
 #endif
 
-// LordHavoc: thanks to backslash for this support for mouse buttons 4 and 5
-/* backslash :: imouse explorer buttons */
-/* These are #ifdefed out for non-Win2K in the February 2001 version of
-   MS's platform SDK, but we need them for compilation. . . */
 #ifndef WM_XBUTTONDOWN
    #define WM_XBUTTONDOWN      0x020B
    #define WM_XBUTTONUP      0x020C
@@ -186,16 +151,14 @@ static HRESULT (WINAPI *pDirectInputCreate)(HINSTANCE hinst, DWORD dwVersion, LP
    #define MK_XBUTTON2         0x0040
 #endif
 #ifndef MK_XBUTTON3
-// LordHavoc: lets hope this allows more buttons in the future...
+
    #define MK_XBUTTON3         0x0080
    #define MK_XBUTTON4         0x0100
    #define MK_XBUTTON5         0x0200
    #define MK_XBUTTON6         0x0400
    #define MK_XBUTTON7         0x0800
 #endif
-/* :: backslash */
 
-// mouse variables
 static int			mouse_buttons;
 static int			mouse_oldbuttonstate;
 
@@ -214,11 +177,8 @@ static LPDIRECTINPUTDEVICE	g_pMouse;
 static HINSTANCE hInstDI;
 #endif
 
-// forward-referenced functions
 static void IN_StartupMouse (void);
 static void AdjustWindowBounds(int fullscreen, int *width, int *height, viddef_mode_t *mode, DWORD WindowStyle, RECT *rect);
-
-//====================================
 
 qboolean vid_reallyhidden = true;
 #ifdef SUPPORTD3D
@@ -308,46 +268,31 @@ void VID_Finish (void)
 			break;
 		case RENDERPATH_SOFT:
 			DPSOFTRAST_Finish();
-//			baseDC = GetDC(mainwindow);
+
 			BitBlt(baseDC, 0, 0, vid.width, vid.height, vid_softhdc, 0, 0, SRCCOPY);
-//			ReleaseDC(mainwindow, baseDC);
-//			baseDC = NULL;
+
 			break;
 		}
 	}
 
-	// make sure a context switch can happen every frame - Logitech drivers
-	// input drivers sometimes eat cpu time every 3 seconds or lag badly
-	// without this help
 	Sleep(0);
 
 	VID_UpdateGamma();
 }
 
-//==========================================================================
-
-
 static unsigned char scantokey[128] =
 {
-//  0           1        2     3     4     5       6           7      8         9      A          B           C       D            E           F
-	0          ,K_ESCAPE,'1'  ,'2'  ,'3'  ,'4'    ,'5'        ,'6'   ,'7'      ,'8'   ,'9'       ,'0'        ,'-'    ,'='         ,K_BACKSPACE,K_TAB,//0
-	'q'        ,'w'     ,'e'  ,'r'  ,'t'  ,'y'    ,'u'        ,'i'   ,'o'      ,'p'   ,'['       ,']'        ,K_ENTER,K_CTRL      ,'a'        ,'s'  ,//1
-	'd'        ,'f'     ,'g'  ,'h'  ,'j'  ,'k'    ,'l'        ,';'   ,'\''     ,'`'   ,K_SHIFT   ,'\\'       ,'z'    ,'x'         ,'c'        ,'v'  ,//2
-	'b'        ,'n'     ,'m'  ,','  ,'.'  ,'/'    ,K_SHIFT    ,'*'   ,K_ALT    ,' '   ,K_CAPSLOCK,K_F1       ,K_F2   ,K_F3        ,K_F4       ,K_F5 ,//3
-	K_F6       ,K_F7    ,K_F8 ,K_F9 ,K_F10,K_PAUSE,K_SCROLLOCK,K_HOME,K_UPARROW,K_PGUP,K_KP_MINUS,K_LEFTARROW,K_KP_5 ,K_RIGHTARROW,K_KP_PLUS  ,K_END,//4
-	K_DOWNARROW,K_PGDN  ,K_INS,K_DEL,0    ,0      ,0          ,K_F11 ,K_F12    ,0     ,0         ,0          ,0      ,0           ,0          ,0    ,//5
-	0          ,0       ,0    ,0    ,0    ,0      ,0          ,0     ,0        ,0     ,0         ,0          ,0      ,0           ,0          ,0    ,//6
-	0          ,0       ,0    ,0    ,0    ,0      ,0          ,0     ,0        ,0     ,0         ,0          ,0      ,0           ,0          ,0     //7
+
+	0          ,K_ESCAPE,'1'  ,'2'  ,'3'  ,'4'    ,'5'        ,'6'   ,'7'      ,'8'   ,'9'       ,'0'        ,'-'    ,'='         ,K_BACKSPACE,K_TAB,
+	'q'        ,'w'     ,'e'  ,'r'  ,'t'  ,'y'    ,'u'        ,'i'   ,'o'      ,'p'   ,'['       ,']'        ,K_ENTER,K_CTRL      ,'a'        ,'s'  ,
+	'd'        ,'f'     ,'g'  ,'h'  ,'j'  ,'k'    ,'l'        ,';'   ,'\''     ,'`'   ,K_SHIFT   ,'\\'       ,'z'    ,'x'         ,'c'        ,'v'  ,
+	'b'        ,'n'     ,'m'  ,','  ,'.'  ,'/'    ,K_SHIFT    ,'*'   ,K_ALT    ,' '   ,K_CAPSLOCK,K_F1       ,K_F2   ,K_F3        ,K_F4       ,K_F5 ,
+	K_F6       ,K_F7    ,K_F8 ,K_F9 ,K_F10,K_PAUSE,K_SCROLLOCK,K_HOME,K_UPARROW,K_PGUP,K_KP_MINUS,K_LEFTARROW,K_KP_5 ,K_RIGHTARROW,K_KP_PLUS  ,K_END,
+	K_DOWNARROW,K_PGDN  ,K_INS,K_DEL,0    ,0      ,0          ,K_F11 ,K_F12    ,0     ,0         ,0          ,0      ,0           ,0          ,0    ,
+	0          ,0       ,0    ,0    ,0    ,0      ,0          ,0     ,0        ,0     ,0         ,0          ,0      ,0           ,0          ,0    ,
+	0          ,0       ,0    ,0    ,0    ,0      ,0          ,0     ,0        ,0     ,0         ,0          ,0      ,0           ,0          ,0
 };
 
-
-/*
-=======
-MapKey
-
-Map from windows to quake keynums
-=======
-*/
 static int MapKey (int key, int virtualkey)
 {
 	int result;
@@ -414,19 +359,6 @@ static int MapKey (int key, int virtualkey)
 	}
 }
 
-/*
-===================================================================
-
-MAIN WINDOW
-
-===================================================================
-*/
-
-/*
-================
-ClearAllStates
-================
-*/
 static void ClearAllStates (void)
 {
 	Key_ReleaseAll();
@@ -435,23 +367,13 @@ static void ClearAllStates (void)
 }
 
 void AppActivate(BOOL fActive, BOOL minimize)
-/****************************************************************************
-*
-* Function:     AppActivate
-* Parameters:   fActive - True if app is activating
-*
-* Description:  If the application is activating, then swap the system
-*               into SYSPAL_NOSTATIC mode so that our palettes will display
-*               correctly.
-*
-****************************************************************************/
+
 {
-	static qboolean sound_active = false;  // initially blocked by Sys_InitConsole()
+	static qboolean sound_active = false;
 
 	vid_activewindow = fActive != FALSE;
 	vid_reallyhidden = minimize != FALSE;
 
-	// enable/disable sound on focus gain/loss
 	if ((!vid_reallyhidden && vid_activewindow) || !snd_mutewhenidle.integer)
 	{
 		if (!sound_active)
@@ -483,7 +405,6 @@ void AppActivate(BOOL fActive, BOOL minimize)
 				}
 			}
 
-			// LordHavoc: from dabb, fix for alt-tab bug in NVidia drivers
 			if (gldll)
 				MoveWindow(mainwindow,0,0,gdevmode.dmPelsWidth,gdevmode.dmPelsHeight,false);
 		}
@@ -501,7 +422,6 @@ void AppActivate(BOOL fActive, BOOL minimize)
 	}
 }
 
-//TODO: move it around in vid_wgl.c since I dont think this is the right position
 void Sys_SendKeyEvents (void)
 {
 	MSG msg;
@@ -540,7 +460,6 @@ static keynum_t buttonremap[16] =
 	K_MOUSE16,
 };
 
-/* main window procedure */
 LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 {
 	LONG    lRet = 1;
@@ -578,8 +497,7 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 		case WM_SYSKEYUP:
 			vkey = MapKey(lParam, wParam);
 			GetKeyboardState (state);
-			// alt/ctrl/shift tend to produce funky ToAscii values,
-			// and if it's not a single character we don't know care about it
+
 			charlength = ToUnicode(wParam, lParam >> 16, state, unicode, UNICODE_BUFFER_LENGTH, 0);
 			if(vkey == K_ALT || vkey == K_CTRL || vkey == K_SHIFT || charlength == 0)
 				unicode[0] = 0;
@@ -590,28 +508,25 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 			break;
 
 		case WM_SYSCHAR:
-		// keep Alt-Space from happening
+
 			break;
 
 		case WM_SYSCOMMAND:
-			// prevent screensaver from occuring while the active window
-			// note: password-locked screensavers on Vista still work
+
 			if (vid_activewindow && ((wParam & 0xFFF0) == SC_SCREENSAVE || (wParam & 0xFFF0) == SC_MONITORPOWER))
 				lRet = 0;
 			else
 				lRet = DefWindowProc (hWnd, uMsg, wParam, lParam);
 			break;
 
-	// this is complicated because Win32 seems to pack multiple mouse events into
-	// one update sometimes, so we always check all states and look for events
 		case WM_LBUTTONDOWN:
 		case WM_LBUTTONUP:
 		case WM_RBUTTONDOWN:
 		case WM_RBUTTONUP:
 		case WM_MBUTTONDOWN:
 		case WM_MBUTTONUP:
-		case WM_XBUTTONDOWN:   // backslash :: imouse explorer buttons
-		case WM_XBUTTONUP:      // backslash :: imouse explorer buttons
+		case WM_XBUTTONDOWN:
+		case WM_XBUTTONUP:
 		case WM_MOUSEMOVE:
 			temp = 0;
 
@@ -624,15 +539,12 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 			if (wParam & MK_MBUTTON)
 				temp |= 4;
 
-			/* backslash :: imouse explorer buttons */
 			if (wParam & MK_XBUTTON1)
 				temp |= 8;
 
 			if (wParam & MK_XBUTTON2)
 				temp |= 16;
-			/* :: backslash */
 
-			// LordHavoc: lets hope this allows more buttons in the future...
 			if (wParam & MK_XBUTTON3)
 				temp |= 32;
 			if (wParam & MK_XBUTTON4)
@@ -648,7 +560,7 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 			if (!dinput_acquired)
 #endif
 			{
-				// perform button actions
+
 				int i;
 				for (i=0 ; i<mouse_buttons && i < 16 ; i++)
 					if ((temp ^ mouse_oldbuttonstate) & (1<<i))
@@ -658,9 +570,6 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 
 			break;
 
-		// JACK: This is the mouse wheel with the Intellimouse
-		// Its delta is either positive or neg, and we generate the proper
-		// Event.
 		case WM_MOUSEWHEEL:
 			if ((short) HIWORD(wParam) > 0) {
 				Key_Event(K_MWHEELUP, 0, true);
@@ -685,14 +594,9 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 			fMinimized = (BOOL) HIWORD(wParam);
 			AppActivate(!(fActive == WA_INACTIVE), fMinimized);
 
-		// fix the leftover Alt from any Alt-Tab or the like that switched us away
 			ClearAllStates ();
 
 			break;
-
-		//case WM_DESTROY:
-		//	PostQuitMessage (0);
-		//	break;
 
 		case MM_MCINOTIFY:
 #ifdef CONFIG_CD
@@ -701,12 +605,11 @@ LONG WINAPI MainWndProc (HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam)
 			break;
 
 		default:
-			/* pass all unhandled messages to DefWindowProc */
+
 			lRet = DefWindowProc (hWnd, uMsg, wParam, lParam);
 		break;
 	}
 
-	/* return 1 if handled message, 0 if not */
 	return lRet;
 }
 
@@ -809,7 +712,6 @@ void *GL_GetProcAddress(const char *name)
 #define WGL_SAMPLES_ARB                0x2042
 #endif
 
-
 static void IN_Init(void);
 void VID_Init(void)
 {
@@ -820,14 +722,12 @@ void VID_Init(void)
 	Cvar_RegisterVariable(&vid_dx9_hal);
 	Cvar_RegisterVariable(&vid_dx9_softvertex);
 	Cvar_RegisterVariable(&vid_dx9_triplebuffer);
-//	Cvar_RegisterVariable(&vid_dx10);
-//	Cvar_RegisterVariable(&vid_dx11);
+
 #endif
 
 	InitCommonControls();
 	hIcon = LoadIcon (global_hInstance, MAKEINTRESOURCE (IDI_ICON1));
 
-	// Register the frame class
 	wc.style         = 0;
 	wc.lpfnWndProc   = (WNDPROC)MainWndProc;
 	wc.cbClsExtra    = 0;
@@ -850,7 +750,7 @@ void VID_Init(void)
 	desktop_mode.bpp = initialdevmode.dmBitsPerPel;
 	desktop_mode.refreshrate = initialdevmode.dmDisplayFrequency;
 	desktop_mode.pixelheight_num = 1;
-	desktop_mode.pixelheight_denom = 1; // Win32 apparently does not provide this (FIXME)
+	desktop_mode.pixelheight_denom = 1;
 
 	IN_Init();
 }
@@ -863,24 +763,24 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 	MSG msg;
 	PIXELFORMATDESCRIPTOR pfd =
 	{
-		sizeof(PIXELFORMATDESCRIPTOR),	// size of this pfd
-		1,				// version number
-		PFD_DRAW_TO_WINDOW 		// support window
-		|  PFD_SUPPORT_OPENGL 	// support OpenGL
-		|  PFD_DOUBLEBUFFER ,	// double buffered
-		PFD_TYPE_RGBA,			// RGBA type
-		24,				// 24-bit color depth
-		0, 0, 0, 0, 0, 0,		// color bits ignored
-		0,				// no alpha buffer
-		0,				// shift bit ignored
-		0,				// no accumulation buffer
-		0, 0, 0, 0, 			// accum bits ignored
-		32,				// 32-bit z-buffer
-		0,				// no stencil buffer
-		0,				// no auxiliary buffer
-		PFD_MAIN_PLANE,			// main layer
-		0,				// reserved
-		0, 0, 0				// layer masks ignored
+		sizeof(PIXELFORMATDESCRIPTOR),
+		1,
+		PFD_DRAW_TO_WINDOW
+		|  PFD_SUPPORT_OPENGL
+		|  PFD_DOUBLEBUFFER ,
+		PFD_TYPE_RGBA,
+		24,
+		0, 0, 0, 0, 0, 0,
+		0,
+		0,
+		0,
+		0, 0, 0, 0,
+		32,
+		0,
+		0,
+		PFD_MAIN_PLANE,
+		0,
+		0, 0, 0
 	};
 	int windowpass;
 	int pixelformat, newpixelformat;
@@ -905,7 +805,6 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 	if (vid_initialized)
 		Sys_Error("VID_InitMode called when video is already initialised");
 
-	// if stencil is enabled, ask for alpha too
 	if (bpp >= 32)
 	{
 		pfd.cRedBits = 8;
@@ -982,7 +881,7 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 	*af = 0;
 
 	gldrivername = "opengl32.dll";
-// COMMANDLINEOPTION: Windows WGL: -gl_driver <drivername> selects a GL driver library, default is opengl32.dll, useful only for 3dfxogl.dll or 3dfxvgl.dll, if you don't know what this is for, you don't need it
+
 	i = COM_CheckParm("-gl_driver");
 	if (i && i < com_argc - 1)
 		gldrivername = com_argv[i + 1];
@@ -1022,7 +921,7 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 		else
 		{
 			if(refreshrate == 0)
-				refreshrate = initialdevmode.dmDisplayFrequency; // default vid_refreshrate to the rate of the desktop
+				refreshrate = initialdevmode.dmDisplayFrequency;
 
 			foundmode = false;
 			foundgoodmode = false;
@@ -1059,7 +958,7 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 
 				if(foundgoodmode)
 				{
-					// if we have a good mode, make sure this mode is better than the previous one, and allowed by the refreshrate
+
 					if(thismode.dmDisplayFrequency > (DWORD)refreshrate)
 					{
 						if(developer_extra.integer)
@@ -1075,7 +974,7 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 				}
 				else if(foundmode)
 				{
-					// we do have one, but it isn't good... make sure it has a lower frequency than the previous one
+
 					if(thismode.dmDisplayFrequency >= gdevmode.dmDisplayFrequency)
 					{
 						if(developer_extra.integer)
@@ -1083,7 +982,6 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 						continue;
 					}
 				}
-				// otherwise, take anything
 
 				memcpy(&gdevmode, &thismode, sizeof(gdevmode));
 				if(thismode.dmDisplayFrequency <= (DWORD)refreshrate)
@@ -1143,7 +1041,7 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 
 	pixelformat = 0;
 	newpixelformat = 0;
-	// start out at the final windowpass if samples is 1 as it's the only feature we need extended pixel formats for
+
 	for (windowpass = samples == 1;windowpass < 2;windowpass++)
 	{
 		gl_extensions = "";
@@ -1218,21 +1116,15 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 		if (!gl_platformextensions)
 			gl_platformextensions = "";
 
-		// now some nice Windows pain:
-		// we have created a window, we needed one to find out if there are
-		// any multisample pixel formats available, the problem is that to
-		// actually use one of those multisample formats we now have to
-		// recreate the window (yes Microsoft OpenGL really is that bad)
-
 		if (windowpass == 0)
 		{
 			if (!GL_CheckExtension("WGL_ARB_pixel_format", wglpixelformatfuncs, "-noarbpixelformat", false) || !qwglChoosePixelFormatARB(baseDC, attribs, attribsf, 1, &newpixelformat, &numpixelformats) || !newpixelformat)
 				break;
-			// ok we got one - do it all over again with newpixelformat
+
 			qwglMakeCurrent(NULL, NULL);
 			qwglDeleteContext(baseRC);baseRC = 0;
 			ReleaseDC(mainwindow, baseDC);baseDC = 0;
-			// eat up any messages waiting for us
+
 			while (PeekMessage (&msg, NULL, 0, 0, PM_REMOVE))
 			{
 				TranslateMessage (&msg);
@@ -1241,20 +1133,9 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 		}
 	}
 
-	/*
-	if (!fullscreen)
-		SetWindowPos (mainwindow, NULL, CenterX, CenterY, 0, 0,SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW | SWP_DRAWFRAME);
-	*/
-
 	ShowWindow (mainwindow, SW_SHOWDEFAULT);
 	UpdateWindow (mainwindow);
 
-	// now we try to make sure we get the focus on the mode switch, because
-	// sometimes in some systems we don't.  We grab the foreground, then
-	// finish setting up, pump all our messages, and sleep for a little while
-	// to let messages finish bouncing around the system, then we put
-	// ourselves at the top of the z order, then grab the foreground again,
-	// Who knows if it helps, but it probably doesn't hurt
 	SetForegroundWindow (mainwindow);
 
 	while (PeekMessage (&msg, NULL, 0, 0, PM_REMOVE))
@@ -1269,16 +1150,12 @@ qboolean VID_InitModeGL(viddef_mode_t *mode)
 
 	SetForegroundWindow (mainwindow);
 
-	// fix the leftover Alt from any Alt-Tab or the like that switched us away
 	ClearAllStates ();
 
-// COMMANDLINEOPTION: Windows WGL: -novideosync disables WGL_EXT_swap_control
 	GL_CheckExtension("WGL_EXT_swap_control", wglswapintervalfuncs, "-novideosync", false);
 
 	GL_Init ();
 
-	//vid_menudrawfn = VID_MenuDraw;
-	//vid_menukeyfn = VID_MenuKey;
 	vid_usingmouse = false;
 	vid_usinghidecursor = false;
 	vid_usingvsync = false;
@@ -1319,8 +1196,6 @@ static void AdjustWindowBounds(int fullscreen, int *width, int *height, viddef_m
 		int workWidth = workArea.right - workArea.left;
 		int workHeight = workArea.bottom - workArea.top;
 
-		// if height/width matches physical screen height/width, adjust it to available desktop size
-		// and allow 2 pixels on top for the title bar so the window can be moved
 		const int titleBarPixels = 2;
 		if (*width == GetSystemMetrics(SM_CXSCREEN) && (*height == GetSystemMetrics(SM_CYSCREEN) || *height == workHeight - titleBarPixels))
 		{
@@ -1338,7 +1213,6 @@ static void AdjustWindowBounds(int fullscreen, int *width, int *height, viddef_m
 		}
 	}
 
-	// x and y may be changed by WM_MOVE messages
 	window_x = CenterX;
 	window_y = CenterY;
 	rect->left += CenterX;
@@ -1366,7 +1240,7 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 	int width = mode->width;
 	int height = mode->height;
 	int refreshrate = (int)floor(mode->refreshrate+0.5);
-//	int stereobuffer = mode->stereobuffer;
+
 	int samples = mode->samples;
 	int fullscreen = mode->fullscreen;
 	int numdevices;
@@ -1411,7 +1285,7 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 	for (deviceindex = 0;deviceindex < numdevices && !vid_d3d9dev;deviceindex++)
 	{
 		memset(&vid_d3dpresentparameters, 0, sizeof(vid_d3dpresentparameters));
-//		vid_d3dpresentparameters.Flags = D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL;
+
 		vid_d3dpresentparameters.Flags = 0;
 		vid_d3dpresentparameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
 		vid_d3dpresentparameters.hDeviceWindow = mainwindow;
@@ -1448,12 +1322,6 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 	ShowWindow (mainwindow, SW_SHOWDEFAULT);
 	UpdateWindow (mainwindow);
 
-	// now we try to make sure we get the focus on the mode switch, because
-	// sometimes in some systems we don't.  We grab the foreground, then
-	// finish setting up, pump all our messages, and sleep for a little while
-	// to let messages finish bouncing around the system, then we put
-	// ourselves at the top of the z order, then grab the foreground again,
-	// Who knows if it helps, but it probably doesn't hurt
 	SetForegroundWindow (mainwindow);
 
 	while (PeekMessage (&msg, NULL, 0, 0, PM_REMOVE))
@@ -1468,7 +1336,6 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 
 	SetForegroundWindow (mainwindow);
 
-	// fix the leftover Alt from any Alt-Tab or the like that switched us away
 	ClearAllStates ();
 
 	gl_renderer = d3d9adapteridentifier.Description;
@@ -1485,17 +1352,15 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 	Con_DPrintf("GL_EXTENSIONS: %s\n", gl_extensions);
 	Con_DPrintf("%s_EXTENSIONS: %s\n", gl_platform, gl_platformextensions);
 
-	// clear the extension flags
 	memset(&vid.support, 0, sizeof(vid.support));
 	Cvar_SetQuick(&gl_info_extensions, "");
 
-	// D3D9 requires BGRA
 	vid.forcetextype = TEXTYPE_BGRA;
 
 	vid.forcevbo = false;
 	vid.support.arb_depth_texture = true;
 	vid.support.arb_draw_buffers = vid_d3d9caps.NumSimultaneousRTs > 1;
-	vid.support.arb_occlusion_query = true; // can't find a cap for this
+	vid.support.arb_occlusion_query = true;
 	vid.support.arb_query_buffer_object = true;
 	vid.support.arb_shadow = true;
 	vid.support.arb_texture_compression = true;
@@ -1510,14 +1375,14 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 	vid.support.ext_texture_compression_s3tc = true;
 	vid.support.ext_texture_filter_anisotropic = true;
 	vid.support.ati_separate_stencil = (vid_d3d9caps.StencilCaps & D3DSTENCILCAPS_TWOSIDED) != 0;
-	vid.support.ext_texture_srgb = false; // FIXME use D3DSAMP_SRGBTEXTURE if CheckDeviceFormat agrees
+	vid.support.ext_texture_srgb = false;
 
 	vid.maxtexturesize_2d = min(vid_d3d9caps.MaxTextureWidth, vid_d3d9caps.MaxTextureHeight);
 	vid.maxtexturesize_3d = vid_d3d9caps.MaxVolumeExtent;
 	vid.maxtexturesize_cubemap = vid.maxtexturesize_2d;
 	vid.texunits = 4;
 	vid.teximageunits = vid_d3d9caps.MaxSimultaneousTextures;
-	vid.texarrayunits = 8; // can't find a caps field for this?
+	vid.texarrayunits = 8;
 	vid.max_anisotropy = vid_d3d9caps.MaxAnisotropy;
 	vid.maxdrawbuffers = vid_d3d9caps.NumSimultaneousRTs;
 
@@ -1536,20 +1401,16 @@ qboolean VID_InitModeDX(viddef_mode_t *mode, int version)
 	Cvar_SetQuick(&gl_info_platform, gl_platform ? gl_platform : "");
 	Cvar_SetQuick(&gl_info_driver, gl_driver);
 
-	// LordHavoc: report supported extensions
 	Con_DPrintf("\nQuakeC extensions for server and client: %s\nQuakeC extensions for menu: %s\n", vm_sv_extensions, vm_m_extensions );
 
-	// clear to black (loading plaque will be seen over this)
 	IDirect3DDevice9_Clear(vid_d3d9dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
 	IDirect3DDevice9_BeginScene(vid_d3d9dev);
 	IDirect3DDevice9_EndScene(vid_d3d9dev);
 	IDirect3DDevice9_Present(vid_d3d9dev, NULL, NULL, NULL, NULL);
-	// because the only time we end/begin scene is in VID_Finish, we'd better start a scene now...
+
 	IDirect3DDevice9_BeginScene(vid_d3d9dev);
 	vid_begunscene = true;
 
-	//vid_menudrawfn = VID_MenuDraw;
-	//vid_menukeyfn = VID_MenuKey;
 	vid_usingmouse = false;
 	vid_usinghidecursor = false;
 	vid_usingvsync = false;
@@ -1604,7 +1465,7 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 		else
 		{
 			if(refreshrate == 0)
-				refreshrate = initialdevmode.dmDisplayFrequency; // default vid_refreshrate to the rate of the desktop
+				refreshrate = initialdevmode.dmDisplayFrequency;
 
 			foundmode = false;
 			foundgoodmode = false;
@@ -1641,7 +1502,7 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 
 				if(foundgoodmode)
 				{
-					// if we have a good mode, make sure this mode is better than the previous one, and allowed by the refreshrate
+
 					if(thismode.dmDisplayFrequency > (DWORD)refreshrate)
 					{
 						if(developer_extra.integer)
@@ -1657,7 +1518,7 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 				}
 				else if(foundmode)
 				{
-					// we do have one, but it isn't good... make sure it has a lower frequency than the previous one
+
 					if(thismode.dmDisplayFrequency >= gdevmode.dmDisplayFrequency)
 					{
 						if(developer_extra.integer)
@@ -1665,7 +1526,6 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 						continue;
 					}
 				}
-				// otherwise, take anything
 
 				memcpy(&gdevmode, &thismode, sizeof(gdevmode));
 				if(thismode.dmDisplayFrequency <= (DWORD)refreshrate)
@@ -1741,7 +1601,7 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 	memset(&vid_softbmi, 0, sizeof(vid_softbmi));
 	vid_softbmi.bmiHeader.biSize = sizeof(vid_softbmi.bmiHeader);
 	vid_softbmi.bmiHeader.biWidth = width;
-	vid_softbmi.bmiHeader.biHeight = -height; // negative to make a top-down bitmap
+	vid_softbmi.bmiHeader.biHeight = -height;
 	vid_softbmi.bmiHeader.biPlanes = 1;
 	vid_softbmi.bmiHeader.biBitCount = 32;
 	vid_softbmi.bmiHeader.biCompression = BI_RGB;
@@ -1764,8 +1624,6 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 		VID_Shutdown();
 		return false;
 	}
-//	ReleaseDC(mainwindow, baseDC);
-//	baseDC = NULL;
 
 	vid.softdepthpixels = (unsigned int *)calloc(1, mode->width * mode->height * 4);
 	if (DPSOFTRAST_Init(mode->width, mode->height, vid_soft_threads.integer, vid_soft_interlace.integer, (unsigned int *)vid.softpixels, (unsigned int *)vid.softdepthpixels) < 0)
@@ -1780,12 +1638,6 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 	ShowWindow (mainwindow, SW_SHOWDEFAULT);
 	UpdateWindow (mainwindow);
 
-	// now we try to make sure we get the focus on the mode switch, because
-	// sometimes in some systems we don't.  We grab the foreground, then
-	// finish setting up, pump all our messages, and sleep for a little while
-	// to let messages finish bouncing around the system, then we put
-	// ourselves at the top of the z order, then grab the foreground again,
-	// Who knows if it helps, but it probably doesn't hurt
 	SetForegroundWindow (mainwindow);
 
 	while (PeekMessage (&msg, NULL, 0, 0, PM_REMOVE))
@@ -1800,11 +1652,8 @@ qboolean VID_InitModeSOFT(viddef_mode_t *mode)
 
 	SetForegroundWindow (mainwindow);
 
-	// fix the leftover Alt from any Alt-Tab or the like that switched us away
 	ClearAllStates ();
 
-	//vid_menudrawfn = VID_MenuDraw;
-	//vid_menukeyfn = VID_MenuKey;
 	vid_usingmouse = false;
 	vid_usinghidecursor = false;
 	vid_usingvsync = false;
@@ -1823,16 +1672,12 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 		return VID_InitModeSOFT(mode);
 #endif
 #ifdef SUPPORTD3D
-//	if (vid_dx11.integer)
-//		return VID_InitModeDX(mode, 11);
-//	if (vid_dx10.integer)
-//		return VID_InitModeDX(mode, 10);
+
 	if (vid_dx9.integer)
 		return VID_InitModeDX(mode, 9);
 #endif
 	return VID_InitModeGL(mode);
 }
-
 
 static void IN_Shutdown(void);
 void VID_Shutdown (void)
@@ -1871,8 +1716,7 @@ void VID_Shutdown (void)
 		if (vid_begunscene)
 			IDirect3DDevice9_EndScene(vid_d3d9dev);
 		vid_begunscene = false;
-//		Cmd_ExecuteString("r_texturestats", src_command, true);
-//		Cmd_ExecuteString("memlist", src_command, true);
+
 		IDirect3DDevice9_Release(vid_d3d9dev);
 	}
 	vid_d3d9dev = NULL;
@@ -1886,7 +1730,7 @@ void VID_Shutdown (void)
 	if (baseRC && qwglDeleteContext)
 		qwglDeleteContext(baseRC);
 	qwglDeleteContext = NULL;
-	// close the library before we get rid of the window
+
 	GL_CloseLibrary();
 	if (baseDC && mainwindow)
 		ReleaseDC(mainwindow, baseDC);
@@ -1929,14 +1773,12 @@ void VID_SetMouse(qboolean fullscreengrab, qboolean relative, qboolean hidecurso
 				window_rect.right = window_x + vid.width;
 				window_rect.bottom = window_y + vid.height;
 
-				// change mouse settings to turn off acceleration
-// COMMANDLINEOPTION: Windows GDI Input: -noforcemparms disables setting of mouse parameters (not used with -dinput, windows only)
 				if (!COM_CheckParm ("-noforcemparms") && SystemParametersInfo (SPI_GETMOUSE, 0, originalmouseparms, 0))
 				{
 					int newmouseparms[3];
-					newmouseparms[0] = 0; // threshold to double movement (only if accel level is >= 1)
-					newmouseparms[1] = 0; // threshold to quadruple movement (only if accel level is >= 2)
-					newmouseparms[2] = 0; // maximum level of acceleration (0 = off)
+					newmouseparms[0] = 0;
+					newmouseparms[1] = 0;
+					newmouseparms[2] = 0;
 					restore_spi = SystemParametersInfo (SPI_SETMOUSE, 0, newmouseparms, 0) != FALSE;
 				}
 				else
@@ -1963,7 +1805,7 @@ void VID_SetMouse(qboolean fullscreengrab, qboolean relative, qboolean hidecurso
 			else
 #endif
 			{
-				// restore system mouseparms if we changed them
+
 				if (restore_spi)
 					SystemParametersInfo (SPI_SETMOUSE, 0, originalmouseparms, 0);
 				restore_spi = false;
@@ -1995,7 +1837,6 @@ void VID_EnableJoystick(qboolean enable)
 	if (index >= 0 && index < sharedcount)
 		success = true;
 
-	// update cvar containing count of XInput joysticks
 	if (joy_detected.integer != sharedcount)
 		Cvar_SetValueQuick(&joy_detected, sharedcount);
 
@@ -2004,22 +1845,18 @@ void VID_EnableJoystick(qboolean enable)
 }
 
 #ifdef SUPPORTDIRECTX
-/*
-===========
-IN_InitDInput
-===========
-*/
+
 static qboolean IN_InitDInput (void)
 {
     HRESULT		hr;
 	DIPROPDWORD	dipdw = {
 		{
-			sizeof(DIPROPDWORD),        // diph.dwSize
-			sizeof(DIPROPHEADER),       // diph.dwHeaderSize
-			0,                          // diph.dwObj
-			DIPH_DEVICE,                // diph.dwHow
+			sizeof(DIPROPDWORD),
+			sizeof(DIPROPHEADER),
+			0,
+			DIPH_DEVICE,
 		},
-		DINPUT_BUFFERSIZE,              // dwData
+		DINPUT_BUFFERSIZE,
 	};
 
 	if (!hInstDI)
@@ -2044,7 +1881,6 @@ static qboolean IN_InitDInput (void)
 		}
 	}
 
-// register with DirectInput and get an IDirectInput to play with.
 	hr = iDirectInputCreate(global_hInstance, DIRECTINPUT_VERSION, &g_pdi, NULL);
 
 	if (FAILED(hr))
@@ -2052,7 +1888,6 @@ static qboolean IN_InitDInput (void)
 		return false;
 	}
 
-// obtain an interface to the system mouse device.
 #ifdef __cplusplus
 	hr = IDirectInput_CreateDevice(g_pdi, GUID_SysMouse, &g_pMouse, NULL);
 #else
@@ -2065,7 +1900,6 @@ static qboolean IN_InitDInput (void)
 		return false;
 	}
 
-// set the data format to "mouse format".
 	hr = IDirectInputDevice_SetDataFormat(g_pMouse, &c_dfDIMouse);
 
 	if (FAILED(hr))
@@ -2074,7 +1908,6 @@ static qboolean IN_InitDInput (void)
 		return false;
 	}
 
-// set the cooperativity level.
 	hr = IDirectInputDevice_SetCooperativeLevel(g_pMouse, mainwindow,
 			DISCL_EXCLUSIVE | DISCL_FOREGROUND);
 
@@ -2084,9 +1917,6 @@ static qboolean IN_InitDInput (void)
 		return false;
 	}
 
-
-// set the buffer size to DINPUT_BUFFERSIZE elements.
-// the buffer size is a DWORD property associated with the device
 	hr = IDirectInputDevice_SetProperty(g_pMouse, DIPROP_BUFFERSIZE, &dipdw.diph);
 
 	if (FAILED(hr))
@@ -2099,12 +1929,6 @@ static qboolean IN_InitDInput (void)
 }
 #endif
 
-
-/*
-===========
-IN_StartupMouse
-===========
-*/
 static void IN_StartupMouse (void)
 {
 	if (COM_CheckParm ("-nomouse"))
@@ -2113,7 +1937,7 @@ static void IN_StartupMouse (void)
 	mouseinitialized = true;
 
 #ifdef SUPPORTDIRECTX
-// COMMANDLINEOPTION: Windows Input: -dinput enables DirectInput for mouse input
+
 	if (COM_CheckParm ("-dinput"))
 		dinput = IN_InitDInput ();
 
@@ -2126,12 +1950,6 @@ static void IN_StartupMouse (void)
 	mouse_buttons = 10;
 }
 
-
-/*
-===========
-IN_MouseMove
-===========
-*/
 static void IN_MouseMove (void)
 {
 	POINT current_pos;
@@ -2164,11 +1982,8 @@ static void IN_MouseMove (void)
 				break;
 			}
 
-			/* Unable to read data or no data available */
 			if (FAILED(hr) || dwElements == 0)
 				break;
-
-			/* Look at the element to see what happened */
 
 			if ((int)od.dwOfs == DIMOFS_X)
 				in_mouse_x += (LONG) od.dwData;
@@ -2197,7 +2012,6 @@ static void IN_MouseMove (void)
 				mstate_di = (mstate_di & ~8) | ((od.dwData & 0x80) >> 4);
 		}
 
-		// perform button actions
 		for (i=0 ; i<mouse_buttons && i < 16 ; i++)
 			if ((mstate_di ^ mouse_oldbuttonstate) & (1<<i))
 				Key_Event (buttonremap[i], 0, (mstate_di & (1<<i)) != 0);
@@ -2209,18 +2023,11 @@ static void IN_MouseMove (void)
 		in_mouse_x += in_windowmouse_x - (int)(vid.width / 2);
 		in_mouse_y += in_windowmouse_y - (int)(vid.height / 2);
 
-		// if the mouse has moved, force it to the center, so there's room to move
 		if (in_mouse_x || in_mouse_y)
 			SetCursorPos ((window_x + vid.width / 2), (window_y + vid.height / 2));
 	}
 }
 
-
-/*
-===========
-IN_Move
-===========
-*/
 void IN_Move (void)
 {
 	vid_joystate_t joystate;
@@ -2230,7 +2037,6 @@ void IN_Move (void)
 	VID_BuildJoyState(&joystate);
 	VID_ApplyJoyState(&joystate);
 }
-
 
 static void IN_Init(void)
 {
@@ -2279,7 +2085,7 @@ size_t VID_ListModes(vid_mode_t *modes, size_t maxcount)
 		modes[k].bpp = thismode.dmBitsPerPel;
 		modes[k].refreshrate = thismode.dmDisplayFrequency;
 		modes[k].pixelheight_num = 1;
-		modes[k].pixelheight_denom = 1; // Win32 apparently does not provide this (FIXME)
+		modes[k].pixelheight_denom = 1;
 		++k;
 	}
 	return k;

@@ -5,11 +5,9 @@
 #include <client/hud/panel/timer.qh>
 #include <common/items/inventory.qh>
 
-// Pickup (#26)
-
 void HUD_Pickup_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 }
 
 void Pickup_Update(entity it, int count)
@@ -83,9 +81,7 @@ void HUD_Pickup()
 			a = (last_pickup_time + display_time - time) / fade_out_time;
 
 		if(autocvar_hud_panel_pickup_showtimer) {
-			// 1 will show the timer always
-			// 2 will show the timer only if spectating
-			// forbid serverflag will force the 2nd behavior
+
 			if((autocvar_hud_panel_pickup_showtimer == 1 && !(serverflags & SERVERFLAG_FORBID_PICKUPTIMER)) || spectatee_status)
 			{
 				if(autocvar__hud_configure)

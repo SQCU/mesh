@@ -1,121 +1,149 @@
-"""STRATEGY — the composer. It owns nothing.
-
-This file is the strategy parametric function, in one place. It imports ONLY cast
-functions from ``cast_header`` and wires their outputs to their inputs.
-
-What this file may NOT do, by construction:
-  * declare a parameter                      -- every parameter is in cast_header
-  * fabricate content (zeros, constants,
-    hand-authored features, magic widths)    -- SPEC §7
-  * re-implement a cast function             -- one definition, imported
-  * hold state between calls                 -- it is a pure composition
-
-What it receives are the COMPUTED CHORUS values (``design/CAST.md``): the three
-things the spec licenses as computed rather than learned, plus the engine's own
-raw rows. They arrive already computed; this file never derives them.
-
-    XAN   x        raw per-player engine rows          (l, d_x)
-    ZED   z        per-instrument descriptors          (m, d_z)
-    cells f_eff    temporally-contracted cell slots    (c, d_c)   -- RHO applied
-    gigi  g        bounded-support spatial mask        (l, c)     -- GIGI
-    DEE   diag(K)  DPP marginal inclusion              (m,)
-    PIA/SUE/NIM    closed-form cartstate semantics     (l, d_sem) -- read, not learned
-    MASK  eligible which actions EXIST                 (l, m) bool
-
-The per-(player, instrument) score is ``quinn · kay`` — a dot product of two
->=128d learned vectors, computed here and never stored.
-"""
-
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import mlx.core as mx
 
 from .cast_header import (
     Wally,
+    actuator,
+    dee,
+    dina_action,
     dina_drift,
     dina_matrix,
+    dina_readout,
+    dina_state,
     gia_uma_dov,
-    graham,
+    participant_gram_matrix,
+    ir_query,
+    ir_value,
     kay,
     lou,
+    norm,
     phil,
     quinn,
-    rex,
+    scale_fuse,
     tau,
     val,
     vera_lou,
     vera_winnie,
     winnie,
 )
+from .matmul import batched_matrix_vector, matrix_multiply, matrix_multiply_transpose_right
+__all__ = [
+    "Dynamics", "Strategy", "strategy", "dynamics", "log_probs", "logp_of",
+    "control_logp_of", "sample_controls", "act", "integrate", "measure_log_density",
+]
 
-__all__ = ["Strategy", "strategy", "dynamics", "log_probs", "logp_of", "act", "integrate"]
-
+class Dynamics(NamedTuple):
+    mean: mx.array
+    first: mx.array
+    second: mx.array
+    matrix: mx.array
+    disagreement: mx.array
 
 class Strategy(NamedTuple):
-    """Everything the composition produces. No member is stored anywhere."""
+    dw_dt: mx.array
+    logits: mx.array
+    ir: mx.array
+    query: mx.array
+    value_winnie: mx.array
+    value_lou: mx.array
+    aux_winnie: mx.array
+    aux_lou: mx.array
+    coupling: mx.array
+    belief: mx.array
+    pooled: mx.array
+    weights: mx.array
+    dee: mx.array
+    guidance: mx.array
+    uncertainty: mx.array
+    scale_matrix_stats: mx.array
+    scale_expert_load: mx.array
+    controls: mx.array
+    control_log_scale: mx.array
+    control_density: mx.array
 
-    dw_dt: mx.array        # (l, m)   DOV's velocity, one per instrument row
-    logits: mx.array       # (l, m)   masked score / TAU, for sampling
-    ir: mx.array           # (l, m, d_ir)
-    query: mx.array        # (l, d)
-    value_winnie: mx.array # (l,)     WINNIE, on the IR
-    value_lou: mx.array    # (l,)     LOU, on the IR
-    aux_winnie: mx.array   # (l,)     VERA_WINNIE, on the query
-    aux_lou: mx.array      # (l,)     VERA_LOU, on the query
-    coupling: mx.array     # (l, l)   GRAHAM + REX, the all-to-all term
+def measure_log_density(scores, action_mass):
+    return scores + mx.log(action_mass)
 
+def normalized_log_probs(logits):
+    return logits - mx.logsumexp(logits, axis=-1, keepdims=True)
 
 def strategy(
     wally: Wally,
-    xan: mx.array,        # (l, d_x)   raw engine rows
-    zed: mx.array,        # (m, d_z)   instrument descriptors
-    cell_slots: mx.array, # (c, d_c)   RHO-contracted cell slots
-    gigi: mx.array,       # (l, c)     GIGI's bounded-support mask
-    dee: mx.array,        # (m,)       DEE, the DPP marginal inclusion
-    semantics: mx.array,  # (l, d_sem) PIA / SUE / NIM, read-only
-    mask: mx.array,       # (l, m)     MASK: which actions exist
+    xan: mx.array,
+    zed: mx.array,
+    cell_slots: mx.array,
+    gigi: mx.array,
+    semantics: mx.array,
+    team_ids: mx.array,
+    weights: mx.array,
+    action_mass: mx.array,
+    delta: mx.array,
+    control_weight: mx.array,
+    exploration_weight: mx.array,
+    *,
+    participant_fusion_scale=None,
+    residual_fusion_scale=None,
+    execute_remote_scale=True,
 ) -> Strategy:
-    """Compose the cast into the strategy parametric function.
+    bea = norm(matrix_multiply(gigi, phil(wally, cell_slots)))
 
-    Every line below is a call to an imported cast function or a wiring of their
-    outputs. Nothing is invented here.
-    """
-    # BEA -- the belief. The only spatial mixing operator in the system: PHIL
-    # projects the cell slots, GIGI weights them by bounded graph distance.
-    bea = gigi @ phil(wally, cell_slots)                       # (l, d_beta)
+    q = norm(quinn(wally, xan, bea, semantics))
 
-    # QUINN -- the query; the only place XAN and BEA meet.
-    q = quinn(wally, xan, bea)                                 # (l, d)
+    k = norm(kay(wally, zed))
+    v = norm(val(wally, zed))
 
-    # KAY / VAL -- per-instrument key and behavioural value.
-    k = kay(wally, zed)                                        # (m, d)
-    v = val(wally, zed)                                        # (m, d_v)
+    score = matrix_multiply_transpose_right(q, k) / (wally.w.d ** 0.5)
 
-    # The per-(player, instrument) score: a dot product, computed, never stored.
-    score = q @ k.T                                            # (l, m)
+    participant_fusion_scale = float(
+        getattr(wally, "participant_fusion_scale", 1.0)
+        if participant_fusion_scale is None else participant_fusion_scale
+    )
+    same_team = team_ids[:, None] == team_ids[None, :]
+    coupling = participant_gram_matrix(wally, q, team_ids) * participant_fusion_scale
 
-    # GRAHAM + REX -- the all-to-all coupling over the player rows, O(l²).
-    coupling = graham(wally, q) + rex(wally, q)                # (l, l)
-
-    # The IR every probe and the head read. The coupling mixes player rows; the
-    # score and DEE select per instrument; VAL carries what pursuing it implies.
-    mixed = coupling @ q                                       # (l, d)
+    quality = mx.mean(mx.logaddexp(score, 0), axis=0)
+    inclusion = dee(quality, k)
+    projected = ir_query(wally, q)
+    same_count = mx.sum(same_team, axis=1, keepdims=True)
+    rival_count = q.shape[0] - same_count
+    normalizer = mx.where(
+        same_team, same_count, mx.maximum(rival_count, 1),
+    )
+    mixed = matrix_multiply(coupling / normalizer, projected)
     ir = (
         mixed[:, None, :]
-        + (score * dee[None, :])[:, :, None] * v[None, :, :]
-    )                                                          # (l, m, d_ir)
+        + (score * inclusion[None, :])[:, :, None]
+        * ir_value(wally, v)[None, :, :]
+    )
+    scale_delta, scale_matrix_stats, scale_expert_load = scale_fuse(
+        wally, ir, execute_remote=execute_remote_scale,
+        residual_fusion_scale=residual_fusion_scale,
+    )
+    ir = norm(ir + scale_delta)
 
-    # GIA / UMA / DOV -- the velocity. No normalisation: NORM is dropped.
-    dw_dt = gia_uma_dov(wally, ir)                             # (l, m)
+    dw_dt = gia_uma_dov(wally, ir)
 
-    # Sampling is weighted, never argmax; MASK removes actions that do not exist.
-    logits = mx.where(mask, score / tau(wally), -mx.inf)       # (l, m)
+    weights_next = integrate(weights, dw_dt, delta)
+    control = dynamics(wally, q[:, None, :], ir)
+    future_query = norm(q[:, None, :] + dina_readout(wally, control.mean))
+    winner_guidance = vera_winnie(wally, future_query) - vera_winnie(wally, q)[:, None]
+    loser_guidance = vera_lou(wally, future_query) - vera_lou(wally, q)[:, None]
+    guidance = mx.where(semantics[:, 5:6] >= 0.5, winner_guidance, loser_guidance)
+    uncertainty = mx.tanh(mx.sqrt(mx.maximum(control.disagreement, 0)))
+    anticipated = (
+        weights_next
+        + control_weight * guidance
+        + exploration_weight * uncertainty
+    )
+    logits = measure_log_density(anticipated / tau(wally), action_mass)
 
-    # WINNIE / LOU on the IR; VERA_WINNIE / VERA_LOU on the query. Two values
-    # wherever a value is estimated.
-    pooled = mx.sum(ir * mask[:, :, None], axis=1)             # (l, d_ir)
+    allocation = mx.exp(normalized_log_probs(logits))
+    pooled = norm(mx.sum(ir * allocation[:, :, None], axis=1))
+    actuator_parameters = actuator(wally, ir)
     return Strategy(
         dw_dt=dw_dt,
         logits=logits,
@@ -126,51 +154,74 @@ def strategy(
         aux_winnie=vera_winnie(wally, q),
         aux_lou=vera_lou(wally, q),
         coupling=coupling,
+        belief=bea,
+        pooled=pooled,
+        weights=weights_next,
+        dee=inclusion,
+        guidance=guidance,
+        uncertainty=uncertainty,
+        scale_matrix_stats=scale_matrix_stats,
+        scale_expert_load=scale_expert_load,
+        controls=actuator_parameters[..., :3],
+        control_log_scale=actuator_parameters[..., 3:],
+        control_density=mx.ones((xan.shape[0],), dtype=xan.dtype),
     )
 
-
-def dynamics(wally: Wally, y: mx.array, u: mx.array) -> mx.array:
-    """DINA -- the local action-linear model, ``Δy = b(y) + A(y)·u``.
-
-    y (..., d_y) reduced state, u (..., d_u) reduced action -> (..., d_y).
-    """
-    return dina_drift(wally, y) + mx.squeeze(
-        dina_matrix(wally, y) @ u[..., None], axis=-1
+def dynamics(wally: Wally, y: mx.array, u: mx.array) -> Dynamics:
+    state = norm(dina_state(wally, y))
+    action = norm(dina_action(wally, u))
+    drift_first, drift_second = dina_drift(wally, state)
+    matrix_first, matrix_second = dina_matrix(wally, state)
+    first = drift_first + batched_matrix_vector(
+        matrix_first, action,
+    ) / (wally.w.d_u ** 0.5)
+    second = drift_second + batched_matrix_vector(
+        matrix_second, action,
+    ) / (wally.w.d_u ** 0.5)
+    matrix = 0.5 * (matrix_first + matrix_second)
+    return Dynamics(
+        mean=0.5 * (first + second),
+        first=first,
+        second=second,
+        matrix=matrix,
+        disagreement=mx.mean(mx.square(first - second), axis=-1),
     )
-
-
-# --------------------------------------------------------------------------
-# Policy read-out. ONE definition, used by the responder to ACT and by the
-# learner to EVALUATE. Two copies would make exp(logpi_target - logpi_behavior)
-# compare numbers produced by different code, which is the failure the project
-# law exists to prevent (see design/CAST.md).
-# --------------------------------------------------------------------------
-
 
 def log_probs(out: Strategy) -> mx.array:
-    """Normalised log-probabilities over instruments.  ``(l, m)``"""
-    return out.logits - mx.logsumexp(out.logits, axis=-1, keepdims=True)
+    return normalized_log_probs(out.logits)
 
+def control_logp_of(out: Strategy, actions: mx.array, controls: mx.array) -> mx.array:
+    mean = mx.take_along_axis(
+        out.controls, actions[:, None, None], axis=1,
+    )[:, 0, :]
+    log_scale = mx.take_along_axis(
+        out.control_log_scale, actions[:, None, None], axis=1,
+    )[:, 0, :]
+    standardized = (controls - mean) * mx.exp(-log_scale)
+    density_logp = -0.5 * mx.sum(
+        mx.square(standardized) + 2 * log_scale + math.log(2 * math.pi), axis=-1,
+    )
+    return density_logp * out.control_density
 
-def logp_of(out: Strategy, actions: mx.array) -> mx.array:
-    """log pi of actions already taken — the LEARNER's read-out.  ``(l,)``"""
-    return mx.take_along_axis(log_probs(out), actions[:, None], axis=-1)[:, 0]
+def sample_controls(out: Strategy, actions: mx.array, key: mx.array):
+    mean = mx.take_along_axis(
+        out.controls, actions[:, None, None], axis=1,
+    )[:, 0, :]
+    log_scale = mx.take_along_axis(
+        out.control_log_scale, actions[:, None, None], axis=1,
+    )[:, 0, :]
+    controls = mean + out.control_density[:, None] * mx.exp(log_scale) * mx.random.normal(mean.shape, key=key)
+    return controls, control_logp_of(out, actions, controls)
 
+def logp_of(out: Strategy, actions: mx.array, controls=None) -> mx.array:
+    discrete = mx.take_along_axis(log_probs(out), actions[:, None], axis=-1)[:, 0]
+    return discrete if controls is None else discrete + control_logp_of(out, actions, controls)
 
-def act(out: Strategy, key: mx.array) -> tuple[mx.array, mx.array]:
-    """Sample actions and return their log pi — the RESPONDER's read-out.
-
-    Weighted sampling, never argmax (SPEC §10). Returns ``(actions, logp)`` from
-    the SAME log_probs the learner will later evaluate.
-    """
-    actions = mx.random.categorical(out.logits, key=key)
-    return actions, logp_of(out, actions)
-
+def act(out: Strategy, key: mx.array):
+    action_key, control_key = mx.random.split(key)
+    actions = mx.random.categorical(out.logits, key=action_key)
+    controls, control_logp = sample_controls(out, actions, control_key)
+    return actions, controls, logp_of(out, actions) + control_logp
 
 def integrate(w: mx.array, dw_dt: mx.array, delta: float) -> mx.array:
-    """The replicator step, ``w <- w + (dw/dt)*delta``. ONE definition.
-
-    `delta` is the strategy cadence, and therefore the forward-Euler step size
-    and a stability parameter — not a free scheduling knob.
-    """
-    return w + dw_dt * delta
+    return mx.tanh(w + dw_dt * delta)

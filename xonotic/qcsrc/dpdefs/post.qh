@@ -17,7 +17,6 @@
 	#define NULL (RVALUE, world)
 #endif
 
-// Shadow functions which use globals - see deglobalization.qh for details.
 #define makevectors DO_NOT_USE_GLOBALS_PREFER_MAKE_VECTORS_MACRO_INSTEAD
 #define aim DO_NOT_USE_GLOBALS
 #define makestatic DO_NOT_USE_GLOBALS

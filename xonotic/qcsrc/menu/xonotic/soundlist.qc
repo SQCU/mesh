@@ -21,17 +21,16 @@ string XonoticSoundList_soundName(entity me, int i)
 {
 	string s;
 	s = search_getfilename(me.listSound, i);
-	s = substring(s, 15, strlen(s) - 15 - 4);  // sound/cdtracks/, .ogg
+	s = substring(s, 15, strlen(s) - 15 - 4);
 	return s;
 }
-
 
 void XonoticSoundList_getSounds(entity me)
 {
 	string s;
 
 	if(me.filterString)
-		//subdirectory in filterString allowed
+
 		s = strcat("sound/cdtracks/*", me.filterString, "*.ogg");
 	else
 		s = "sound/cdtracks/*.ogg";
@@ -80,9 +79,9 @@ void XonoticSoundList_drawListBoxItem(entity me, int i, vector absSize, bool isS
 	}
 
 	s = me.soundName(me, i);
-	if(s == cvar_string("menu_cdtrack")) // current menu track
+	if(s == cvar_string("menu_cdtrack"))
 		draw_CenterText((me.columnNumberOrigin + 0.5 * me.columnNumberSize) * eX + me.realUpperMargin * eY, "[C]", me.realFontSize, '1 1 1', SKINALPHA_TEXT, 0);
-	else if(s == cvar_defstring("menu_cdtrack")) // default menu track
+	else if(s == cvar_defstring("menu_cdtrack"))
 		draw_CenterText((me.columnNumberOrigin + 0.5 * me.columnNumberSize) * eX + me.realUpperMargin * eY, "[D]", me.realFontSize, '1 1 1', SKINALPHA_TEXT, 0);
 
 	s = draw_TextShortenToWidth(s, me.columnNameSize, 0, me.realFontSize);

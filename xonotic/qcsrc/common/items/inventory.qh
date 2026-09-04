@@ -4,22 +4,20 @@
 
 #ifdef GAMEQC
 CLASS(Inventory, Object)
-    /** Stores counts of items, the id being the index */
+
     ATTRIBARRAY(Inventory, inv_items, int, REGISTRY_MAX(Items));
 ENDCLASS(Inventory)
 
-/** Player inventory */
 .Inventory inventory;
-/** Player inventory storage (holds previous state) */
+
 .Inventory inventory_store;
 
 REGISTER_NET_LINKED(ENT_CLIENT_INVENTORY)
 
-const int Inventory_groups_minor = 8; // must be a multiple of 8 (one byte) to optimize bandwidth usage
-const int Inventory_groups_major = 4; // must be >= ceil(REGISTRY_COUNT(Items) / Inventory_groups_minor)
+const int Inventory_groups_minor = 8;
+const int Inventory_groups_major = 4;
 #endif
 
-// no need to perform these checks on both server and client
 #ifdef CSQC
 STATIC_INIT(Inventory)
 {
@@ -142,7 +140,7 @@ bool Inventory_Send(Inventory this, Client to, int sf)
 
 bool Inventory_customize(entity this, entity client)
 {
-    // sends to spectators too!
+
     return (PS(client) && PS(client).inventory == this);
 }
 
@@ -160,7 +158,7 @@ void Inventory_update(entity e) { e.inventory.SendFlags = 0xFFFFFF; }
 
 void Inventory_pickupitem(Pickup this, entity player)
 {
-	//LOG_DEBUGF("entity %i picked up %s", player, this.m_name);
+
 	entity store = IS_PLAYER(player) ? PS(player) : player;
 	++store.inventory.inv_items[this.m_id];
 	Inventory_update(store);
@@ -168,8 +166,7 @@ void Inventory_pickupitem(Pickup this, entity player)
 
 void Inventory_clear(entity store)
 {
-    // NOTE: you will need to perform Inventory_update after this to update the storage entity
-    // (unless store is the storage entity)
+
     FOREACH(Items, true, {
         .int fld = inv_items[it.m_id];
         store.(fld) = 0;

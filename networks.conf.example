@@ -1,14 +1,2 @@
-# Seeds a node's preferred Wi-Fi networks so it can join whichever is in range.
-# macOS auto-joins any known network, so "find an available network" needs no
-# code -- only a list with more than one entry in it.
-#
-# TAB separated:  SSID <tab> SECURITY <tab> PASSWORD
-# SECURITY: OPEN | WPA | WPA2 | WPA3 | WPAE | WPA2E | WEP
-#
-# Copy to networks.conf (gitignored -- it holds live credentials) and to
-# /usr/local/mesh/networks.conf on each node. install.sh and the keeper re-assert
-# it; entries are only ever added, never removed.
-#
-# A node whose list has one entry is one venue change away from needing a keyboard.
 home-network	WPA2	correcthorsebattery
 lab-network	WPA2	anotherpassphrase

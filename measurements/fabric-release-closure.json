@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "observed_at": 1788467019.341005,
+  "definition": "orderly two-node bridge replacement, host-derived region depth, and leased whole-mesh reporter reconnection",
+  "source_measure": {
+    "mesh_flow_c_sha256": "db05da985f9d75ec1e74e95e4aebf7a970ac1a782bbd17155a394684408a0d3f",
+    "mesh_client_c_sha256": "5fc35b0e05dca382157d2e8dc21a3ce7421c2b51258e9f33435c51433ce53c47",
+    "mesh_h_sha256": "595193bb26c0e68777af5c9e3ef0a2f41893738a7388a7c0cf1e658abec80b63"
+  },
+  "before": {
+    "mbp": {
+      "pool_pages": 2097152,
+      "application_pages": 6291456,
+      "client_pid": 43542,
+      "bad_descriptor_mass": 0
+    },
+    "mini": {
+      "pool_pages": 24576,
+      "application_pages": 73728,
+      "client_pid": 0,
+      "bad_descriptor_mass": 0
+    }
+  },
+  "after": {
+    "mbp": {
+      "memory_bytes": 137438953472,
+      "configured_memory_fraction": 0.25,
+      "page_bytes": 4096,
+      "pool_pages": 2097152,
+      "application_pages": 6291456,
+      "total_pages": 8388608,
+      "registered_bytes": 34359738368,
+      "client_pid": 0,
+      "bad_descriptor_mass": 0
+    },
+    "mini": {
+      "memory_bytes": 25769803776,
+      "configured_memory_fraction": 0.25,
+      "page_bytes": 4096,
+      "pool_pages": 393216,
+      "application_pages": 1179648,
+      "total_pages": 1572864,
+      "registered_bytes": 6442450944,
+      "client_pid": 0,
+      "bad_descriptor_mass": 0,
+      "depth_ratio_over_preceding_generation": 16.0
+    }
+  },
+  "replacement_measure": {
+    "game_server_term_exit_mass": 1,
+    "game_client_term_exit_mass": 1,
+    "bridge_term_exit_mass": 2,
+    "uncatchable_signal_mass": 0,
+    "paired_bridge_mass": 2,
+    "counter_restart_residual_mass": 0
+  },
+  "reporter_measure": {
+    "service_port": 8787,
+    "alternate_service_mass": 0,
+    "connected_nodes": ["Ms-MacBook-Pro", "Ms-Mac-mini"],
+    "reachable_nodes": ["Ms-MacBook-Pro", "Ms-Mac-mini"],
+    "active_nodes": ["Ms-MacBook-Pro", "Ms-Mac-mini"],
+    "stale_node_mass": 0,
+    "leased_node_mass": 2,
+    "reconnection_residual_mass": 0
+  }
+}

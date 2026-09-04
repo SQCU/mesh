@@ -13,7 +13,6 @@ float autocvar_g_race_qualifying_timelimit;
 float autocvar_g_race_qualifying_timelimit_override;
 int autocvar_g_race_teams;
 
-// legacy bot roles
 .float race_checkpoint;
 void havocbot_role_race(entity this)
 {
@@ -32,9 +31,7 @@ void havocbot_role_race(entity this)
 		{
 			if(it.cnt == cp || cp == -1)
 			{
-				// redirect bot to next goal if it touched the waypoint of an untouchable checkpoint
-				// e.g. checkpoint in front of Stormkeep's warpzone
-				// the same workaround is applied in CTS game mode
+
 				if (raw_touch_check && vdist(this.origin - it.nearestwaypoint.origin, <, 30))
 				{
 					cp = race_NextCheckpoint(cp);
@@ -54,7 +51,7 @@ void havocbot_role_race(entity this)
 void race_ScoreRules()
 {
 	GameRules_score_enabled(false);
-	GameRules_scoring(race_teams, 0, 0, {
+	GameRules_scoring(LegacyTeamBitCount(race_teams), 0, 0, {
 		if (race_teams)
 			field_team(ST_RACE_LAPS, "laps", SFL_SORT_PRIO_PRIMARY);
 		else if (g_race_qualifying)
@@ -68,7 +65,7 @@ void race_ScoreRules()
 	});
 }
 
-void race_EventLog(string mode, entity actor) // use an alias for easy changing and quick editing later
+void race_EventLog(string mode, entity actor)
 {
 	if(autocvar_sv_eventlog)
 		GameLogEcho(strcat(":race:", mode, ":", ((actor != NULL) ? (strcat(":", ftos(actor.playerid))) : "")));
@@ -90,9 +87,8 @@ float WinningCondition_Race(float fraglimit)
 		return WINNING_YES;
 	wc = WinningCondition_Scores(fraglimit, 0);
 
-	// ALWAYS initiate overtime, unless EVERYONE has finished the race!
 	if(wc == WINNING_YES || wc == WINNING_STARTSUDDENDEATHOVERTIME)
-	// do NOT support equality when the laps are all raced!
+
 		return WINNING_STARTSUDDENDEATHOVERTIME;
 	else
 		return WINNING_NEVER;
@@ -103,7 +99,6 @@ float WinningCondition_QualifyingThenRace(float limit)
 	float wc;
 	wc = WinningCondition_Scores(limit, 0);
 
-	// NEVER initiate overtime
 	if(wc == WINNING_YES || wc == WINNING_STARTSUDDENDEATHOVERTIME)
 	{
 		return WINNING_YES;
@@ -115,7 +110,7 @@ float WinningCondition_QualifyingThenRace(float limit)
 MUTATOR_HOOKFUNCTION(rc, ClientKill)
 {
 	if(g_race_qualifying)
-		M_ARGV(1, float) = 0; // killtime
+		M_ARGV(1, float) = 0;
 }
 
 MUTATOR_HOOKFUNCTION(rc, AbortSpeedrun)
@@ -123,7 +118,7 @@ MUTATOR_HOOKFUNCTION(rc, AbortSpeedrun)
 	entity player = M_ARGV(0, entity);
 
 	if(autocvar_g_allow_checkpoints)
-		race_PreparePlayer(player); // nice try
+		race_PreparePlayer(player);
 }
 
 MUTATOR_HOOKFUNCTION(rc, PlayerPhysics)
@@ -150,14 +145,9 @@ MUTATOR_HOOKFUNCTION(rc, PlayerPhysics)
 		}
 	}
 
-	// force kbd movement for fairness
 	float wishspeed;
 	vector wishvel;
 
-	// if record times matter
-	// ensure nothing EVIL is being done (i.e. div0_evade)
-	// this hinders joystick users though
-	// but it still gives SOME analog control
 	wishvel.x = fabs(CS(player).movement.x);
 	wishvel.y = fabs(CS(player).movement.y);
 	if(wishvel.x != 0 && wishvel.y != 0 && wishvel.x != wishvel.y)
@@ -166,7 +156,7 @@ MUTATOR_HOOKFUNCTION(rc, PlayerPhysics)
 		wishspeed = vlen(wishvel);
 		if(wishvel.x >= 2 * wishvel.y)
 		{
-			// pure X motion
+
 			if(CS(player).movement.x > 0)
 				CS(player).movement_x = wishspeed;
 			else
@@ -175,7 +165,7 @@ MUTATOR_HOOKFUNCTION(rc, PlayerPhysics)
 		}
 		else if(wishvel.y >= 2 * wishvel.x)
 		{
-			// pure Y motion
+
 			CS(player).movement_x = 0;
 			if(CS(player).movement.y > 0)
 				CS(player).movement_y = wishspeed;
@@ -184,7 +174,7 @@ MUTATOR_HOOKFUNCTION(rc, PlayerPhysics)
 		}
 		else
 		{
-			// diagonal
+
 			if(CS(player).movement.x > 0)
 				CS(player).movement_x = M_SQRT1_2 * wishspeed;
 			else
@@ -259,10 +249,9 @@ MUTATOR_HOOKFUNCTION(rc, PlayerSpawn)
 	entity spawn_spot = M_ARGV(1, entity);
 
 	if(spawn_spot.target == "")
-		// Emergency: this wasn't a real spawnpoint. Can this ever happen?
+
 		race_PreparePlayer(player);
 
-	// if we need to respawn, do it right
 	player.race_respawn_checkpoint = player.race_checkpoint;
 	player.race_respawn_spotref = spawn_spot;
 
@@ -276,9 +265,9 @@ MUTATOR_HOOKFUNCTION(rc, PutClientInServer)
 	if(IS_PLAYER(player))
 	if(!game_stopped)
 	{
-		if(CS(player).killcount == FRAGS_SPECTATOR /* initial spawn */ || g_race_qualifying) // spawn
+		if(CS(player).killcount == FRAGS_SPECTATOR                     || g_race_qualifying)
 			race_PreparePlayer(player);
-		else // respawn
+		else
 			race_RetractPlayer(player);
 
 		race_AbandonRaceCheck(player);
@@ -289,7 +278,7 @@ MUTATOR_HOOKFUNCTION(rc, PlayerDamaged)
 {
 	int frag_deathtype = M_ARGV(5, int);
 	if (frag_deathtype == DEATH_KILL.m_id)
-		return true; // forbid logging damage
+		return true;
 }
 
 MUTATOR_HOOKFUNCTION(rc, PlayerDies)
@@ -319,18 +308,21 @@ MUTATOR_HOOKFUNCTION(rc, GetPressedKeys)
 MUTATOR_HOOKFUNCTION(rc, ForbidPlayerScore_Clear)
 {
 	if(g_race_qualifying)
-		return true; // in qualifying, you don't lose score by observing
+		return true;
 }
 
 MUTATOR_HOOKFUNCTION(rc, TeamBalance_CheckAllowedTeams, CBC_ORDER_EXCLUSIVE)
 {
-	M_ARGV(0, float) = race_teams;
+	entity balance = M_ARGV(0, entity);
+	for(int i = 1; i <= 4; ++i)
+		if(race_teams & BIT(i - 1))
+			TeamBalance_AllowTeam(balance, i);
 	return true;
 }
 
 MUTATOR_HOOKFUNCTION(rc, Scores_CountFragsRemaining)
 {
-	// announce remaining frags if not in qualifying mode
+
 	if(!g_race_qualifying)
 		return true;
 }
@@ -359,7 +351,7 @@ MUTATOR_HOOKFUNCTION(rc, GetRecords)
 
 MUTATOR_HOOKFUNCTION(rc, HideTeamNagger)
 {
-	return true; // doesn't work so well
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(rc, FixClientCvars)
@@ -418,7 +410,7 @@ void rc_SetLimits()
 
 	qualifying_override = autocvar_g_race_qualifying_timelimit_override;
 	fraglimit_override = autocvar_g_race_laps_limit;
-	leadlimit_override = 0; // currently not supported by race
+	leadlimit_override = 0;
 	timelimit_override = autocvar_timelimit_override;
 
 	float want_qualifying = ((qualifying_override >= 0) ? qualifying_override : autocvar_g_race_qualifying_timelimit) > 0;

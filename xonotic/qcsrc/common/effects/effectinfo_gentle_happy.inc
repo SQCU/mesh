@@ -1,4 +1,4 @@
-// happy death fx for cl_gentle
+
 DEF(happy_damage_dissolve);
 SUB(happy_damage_dissolve) {
     MY(airfriction) = 3;
@@ -58,7 +58,6 @@ SUB(happy_damage_dissolve) {
     MY(velocityjitter) = '312.0 312.0 312.0';
 }
 
-// happy damage fx for cl_gentle
 DEF(happy_damage_hit);
 SUB(happy_damage_hit) {
     MY(airfriction) = 5;

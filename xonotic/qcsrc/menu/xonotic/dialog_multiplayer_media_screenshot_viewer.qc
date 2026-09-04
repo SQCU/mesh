@@ -7,11 +7,11 @@
 float music_playlist_index_backup;
 void XonoticScreenshotViewerDialog_loadScreenshot(entity me, string scrImage)
 {
-	// disable music as it can lag depending on image loading time
+
 	if(!cvar("menu_screenshotviewer_enablemusic"))
-	if(cvar("music_playlist_index") != 999) // if the playlist isn't paused
+	if(cvar("music_playlist_index") != 999)
 	{
-		// pause music
+
 		if(cvar("music_playlist_index") != -1)
 		{
 			music_playlist_index_backup = cvar("music_playlist_index");
@@ -76,8 +76,7 @@ float XonoticScreenshotViewerDialog_keyDown(entity me, float key, float ascii, f
 		case K_KP_ENTER:
 		case K_ENTER:
 		case K_SPACE:
-			// we cannot use SPACE/ENTER directly, as in a dialog they are needed
-			// to press buttons while browsing with only the keyboard
+
 			if (shift & S_CTRL)
 			{
 				toggleSlideShow_Click(NULL, me);
@@ -97,7 +96,7 @@ float XonoticScreenshotViewerDialog_keyDown(entity me, float key, float ascii, f
 			}
 			if (me.scrList.keyDown(me.scrList, key, ascii, shift))
 			{
-				// keyDown has already changed the selected item
+
 				me.scrList.goScreenshot(me.scrList, 0);
 				return 1;
 			}
@@ -106,7 +105,7 @@ float XonoticScreenshotViewerDialog_keyDown(entity me, float key, float ascii, f
 }
 void XonoticScreenshotViewerDialog_close(entity me)
 {
-	// resume music
+
 	if(!cvar("menu_screenshotviewer_enablemusic"))
 	if(cvar("music_playlist_index") == 999)
 	{
@@ -124,7 +123,7 @@ void XonoticScreenshotViewerDialog_fill(entity me)
 	entity e;
 	me.TR(me);
 		me.TD(me, me.rows - 1, me.columns, e = makeXonoticScreenshotImage());
-			e.showTitle = 0; // dialog title is enough
+			e.showTitle = 0;
 			me.screenshotImage = e;
 	me.gotoRC(me, me.rows - 1, 0);
 		me.TDempty(me, 1/20 * me.columns);

@@ -10,24 +10,20 @@ float autocvar_g_weaponspeedfactor;
 
 #define INDEPENDENT_ATTACK_FINISHED 1
 
-// there is 2 weapon tics that can run in one server frame
 const int W_TICSPERFRAME = 2;
 
-// VorteX: standalone think for weapons, so normal think on weaponentity can be reserved by weaponflashes (which needs update even player dies)
 .float weapon_nextthink;
 .void(Weapon thiswep, entity actor, .entity weaponentity, int fire) weapon_think;
 
 float internalteam;
 entity weapon_dropevent_item;
 
-// reset to 0 on weapon switch
-// may be useful to all weapons
 .float bulletcounter;
 
 ..entity weaponentity_fld;
 
 .float weapon_load[REGISTRY_MAX(Weapons)];
-.int ammo_none; // used by the reloading system, must always be 0
+.int ammo_none;
 .int clip_load;
 .int old_clip_load;
 .int clip_size;
@@ -75,5 +71,3 @@ bool weapon_prepareattack_check(Weapon thiswep, entity actor, .entity weaponenti
 void weapon_prepareattack_do(entity actor, .entity weaponentity, float secondary, float attacktime);
 
 void weapon_thinkf(entity actor, .entity weaponentity, WFRAME fr, float t, void(Weapon thiswep, entity actor, .entity weaponentity, int fire) func);
-
-//REPLICATE_APPLYCHANGE("cl_gunalign", { W_ResetGunAlign(this, store.cvar_cl_gunalign); });

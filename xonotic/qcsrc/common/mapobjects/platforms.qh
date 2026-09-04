@@ -1,6 +1,5 @@
 #pragma once
 
-
 const int PLAT_LOW_TRIGGER = BIT(0);
 
 .float dmg;

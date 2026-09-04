@@ -10,10 +10,10 @@
 #ifdef SVQC
 bool autocvar_g_vehicle_racer = true;
 
-float autocvar_g_vehicle_racer_thinkrate = 0.05; // TODO: any higher causes it to sink in liquids
+float autocvar_g_vehicle_racer_thinkrate = 0.05;
 
 float autocvar_g_vehicle_racer_speed_afterburn = 3000;
-// energy consumed per second
+
 float autocvar_g_vehicle_racer_afterburn_cost = 130;
 
 float autocvar_g_vehicle_racer_waterburn_cost = 5;
@@ -38,11 +38,8 @@ float autocvar_g_vehicle_racer_friction = 0.45;
 
 float autocvar_g_vehicle_racer_water_time = 5;
 
-//float autocvar_g_vehicle_racer_collision_multiplier = 0.05;
-
-// 0 = hover, != 0 = maglev
 int autocvar_g_vehicle_racer_hovertype = 0;
-// NOTE!! x 4 (4 engines)
+
 float autocvar_g_vehicle_racer_hoverpower = 8000;
 
 float autocvar_g_vehicle_racer_turnroll = 30;
@@ -73,15 +70,14 @@ float autocvar_g_vehicle_racer_blowup_coredamage = 250;
 float autocvar_g_vehicle_racer_blowup_edgedamage = 15;
 float autocvar_g_vehicle_racer_blowup_forceintensity = 250;
 
-// Factor of old velocity to keep after collision
 float autocvar_g_vehicle_racer_bouncefactor = 0.25;
-// if != 0, New veloctiy after bounce = 0 if new velocity < this
+
 float autocvar_g_vehicle_racer_bouncestop = 0;
-// "minspeed_for_pain speedchange_to_pain_factor max_damage"
+
 vector autocvar_g_vehicle_racer_bouncepain = '200 0.15 150';
 
 .float racer_watertime;
-.float racer_air_finished; // TODO: use a standard air meter for entities
+.float racer_air_finished;
 
 var .vector(entity this, string tag_name, float spring_length, float max_power) racer_force_from_tag;
 
@@ -92,19 +88,15 @@ void racer_align4point(entity this, entity player, float _delta)
 
 	push_vector  = this.racer_force_from_tag(this, "tag_engine_fr", autocvar_g_vehicle_racer_springlength, autocvar_g_vehicle_racer_hoverpower);
 	fr_push	  = force_fromtag_normpower;
-	//vehicles_sweap_collision(force_fromtag_origin, this.velocity, _delta, v_add, autocvar_g_vehicle_racer_collision_multiplier);
 
 	push_vector += this.racer_force_from_tag(this, "tag_engine_fl", autocvar_g_vehicle_racer_springlength, autocvar_g_vehicle_racer_hoverpower);
 	fl_push	  = force_fromtag_normpower;
-	//vehicles_sweap_collision(force_fromtag_origin, this.velocity, _delta, v_add, autocvar_g_vehicle_racer_collision_multiplier);
 
 	push_vector += this.racer_force_from_tag(this, "tag_engine_br", autocvar_g_vehicle_racer_springlength, autocvar_g_vehicle_racer_hoverpower);
 	br_push	  = force_fromtag_normpower;
-	//vehicles_sweap_collision(force_fromtag_origin, this.velocity, _delta, v_add, autocvar_g_vehicle_racer_collision_multiplier);
 
 	push_vector += this.racer_force_from_tag(this, "tag_engine_bl", autocvar_g_vehicle_racer_springlength, autocvar_g_vehicle_racer_hoverpower);
 	bl_push	  = force_fromtag_normpower;
-	//vehicles_sweap_collision(force_fromtag_origin, this.velocity, _delta, v_add, autocvar_g_vehicle_racer_collision_multiplier);
 
 	this.velocity += push_vector * _delta;
 
@@ -121,8 +113,6 @@ void racer_align4point(entity this, entity player, float _delta)
 			this.velocity_z += 200;
 	}
 
-
-	// Anti ocilation
 	if(this.velocity_z > 0)
 		this.velocity_z *= 1 - uforce * _delta;
 
@@ -134,11 +124,9 @@ void racer_align4point(entity this, entity player, float _delta)
 	push_vector_z += (br_push - bl_push);
 	push_vector_z *= 360;
 
-	// Apply angle diffrance
 	this.angles_z += push_vector_z * _delta;
 	this.angles_x += push_vector_x * _delta;
 
-	// Apply stabilizer
 	this.angles_x *= 1 - (autocvar_g_vehicle_racer_anglestabilizer * _delta);
 	this.angles_z *= 1 - (autocvar_g_vehicle_racer_anglestabilizer * _delta);
 }
@@ -189,15 +177,12 @@ bool racer_frame(entity this, float dt)
 
 	vehic.angles_x *= -1;
 
-	// Yaw
 	float ftmp = autocvar_g_vehicle_racer_turnspeed * dt;
 	ftmp = bound(-ftmp, shortangle_f(player.v_angle_y - vehic.angles_y, vehic.angles_y), ftmp);
 	vehic.angles_y = anglemods(vehic.angles_y + ftmp);
 
-	// Roll
 	vehic.angles_z += -ftmp * autocvar_g_vehicle_racer_turnroll * dt;
 
-	// Pitch
 	ftmp = autocvar_g_vehicle_racer_pitchspeed  * dt;
 	ftmp = bound(-ftmp, shortangle_f(player.v_angle_x - vehic.angles_x, vehic.angles_x), ftmp);
 	vehic.angles_x = bound(-autocvar_g_vehicle_racer_pitchlimit, anglemods(vehic.angles_x + ftmp), autocvar_g_vehicle_racer_pitchlimit);
@@ -205,9 +190,7 @@ bool racer_frame(entity this, float dt)
 	makevectors(vehic.angles);
 	vehic.angles_x *= -1;
 
-	//ftmp = vehic.velocity_z;
 	vector df = vehic.velocity * -autocvar_g_vehicle_racer_friction;
-	//vehic.velocity_z = ftmp;
 
 	if(PHYS_CS(player).movement)
 	{
@@ -226,7 +209,7 @@ bool racer_frame(entity this, float dt)
 		if(vehic.sound_nexttime < time || vehic.sounds != 1)
 		{
 			vehic.sounds = 1;
-			vehic.sound_nexttime = time + 10.922667; //soundlength("vehicles/racer_move.wav");
+			vehic.sound_nexttime = time + 10.922667;
 			sound (vehic, CH_TRIGGER_SINGLE, SND_VEH_RACER_MOVE, VOL_VEHICLEENGINE, ATTEN_NORM);
 		}
 #endif
@@ -237,13 +220,12 @@ bool racer_frame(entity this, float dt)
 		if(vehic.sound_nexttime < time || vehic.sounds != 0)
 		{
 			vehic.sounds = 0;
-			vehic.sound_nexttime = time + 11.888604; //soundlength("vehicles/racer_idle.wav");
+			vehic.sound_nexttime = time + 11.888604;
 			sound (vehic, CH_TRIGGER_SINGLE, SND_VEH_RACER_IDLE, VOL_VEHICLEENGINE, ATTEN_NORM);
 		}
 	}
 #endif
 
-	// Afterburn
 	if (PHYS_INPUT_BUTTON_JUMP(player) && vehic.vehicle_energy >= (autocvar_g_vehicle_racer_afterburn_cost * dt))
 	{
 #ifdef SVQC
@@ -265,8 +247,7 @@ bool racer_frame(entity this, float dt)
 		}
 
 #ifdef SVQC
-		// TODO: move these to the client side where they belong
-		// NOTE: reusing .invincible_finished here as delay counter for the smoke effect
+
 		if(vehic.invincible_finished < time)
 		{
 			traceline(vehic.origin, vehic.origin - '0 0 256', MOVE_NORMAL, vehic);
@@ -276,10 +257,9 @@ bool racer_frame(entity this, float dt)
 			vehic.invincible_finished = time + 0.1 + (random() * 0.1);
 		}
 
-		// NOTE: reusing .strength_finished here as a sound delay counter
 		if(vehic.strength_finished < time)
 		{
-			vehic.strength_finished = time + 10.922667; //soundlength("vehicles/racer_boost.wav");
+			vehic.strength_finished = time + 10.922667;
 			sound (vehic.tur_head, CH_TRIGGER_SINGLE, SND_VEH_RACER_BOOST, VOL_VEHICLEENGINE, ATTEN_NORM);
 		}
 #endif
@@ -303,7 +283,7 @@ bool racer_frame(entity this, float dt)
 #ifdef SVQC
 
 	Weapon wep1 = WEP_RACER;
-	.entity weaponentity = weaponentities[0]; // TODO: unhardcode
+	.entity weaponentity = weaponentities[0];
 	if (!weaponLocked(player) && !weaponUseForbidden(player))
 	if (PHYS_INPUT_BUTTON_ATCK(player))
 	if (wep1.wr_checkammo1(wep1, vehic, weaponentity))
@@ -383,7 +363,7 @@ bool racer_frame(entity this, float dt)
 
 	setorigin(player, vehic.origin + '0 0 32');
 #ifdef SVQC
-	player.oldorigin = player.origin; // negate fall damage
+	player.oldorigin = player.origin;
 #endif
 	player.velocity = vehic.velocity;
 }
@@ -403,9 +383,8 @@ void racer_think(entity this)
 
 	float forced = autocvar_g_vehicle_racer_upforcedamper;
 
-	//int cont = pointcontents(this.origin - '0 0 64');
 	traceline(this.origin - '0 0 64', this.origin - '0 0 64', MOVE_NOMONSTERS, this);
-	//if(cont == CONTENT_WATER || cont == CONTENT_LAVA || cont == CONTENT_SLIME)
+
 	if(trace_dpstartcontents & DPCONTENTS_LIQUIDSMASK)
 	{
 		forced = autocvar_g_vehicle_racer_water_upforcedamper;
@@ -497,7 +476,6 @@ void racer_blowup_think(entity this)
 	if(time >= this.delay)
 		racer_blowup(this);
 
-	//CSQCMODEL_AUTOUPDATE(this);
 }
 
 void racer_deadtouch(entity this, entity toucher)
@@ -514,7 +492,7 @@ spawnfunc(vehicle_racer)
 	if(!vehicle_initialize(this, VEH_RACER, false)) { delete(this); return; }
 }
 
-#endif // SVQC
+#endif
 
 METHOD(Racer, vr_impact, void(Racer thisveh, entity instance))
 {
@@ -552,7 +530,7 @@ METHOD(Racer, vr_spawn, void(Racer thisveh, entity instance))
     set_movetype(instance, MOVETYPE_TOSS);
     instance.solid		  = SOLID_SLIDEBOX;
     instance.delay		  = time;
-    instance.scale		  = 0.5; // FIXME: this be hakkz, fix the models insted (scale body, add tag_viewport to the hudmodel).
+    instance.scale		  = 0.5;
     instance.mass		  = 900;
 
     setattachment(instance.vehicle_hudmodel, instance, "");
@@ -571,7 +549,7 @@ METHOD(Racer, vr_spawn, void(Racer thisveh, entity instance))
 METHOD(Racer, vr_death, void(Racer thisveh, entity instance))
 {
 #ifdef SVQC
-    setSendEntity(instance, func_null); // stop networking this racer (for now)
+    setSendEntity(instance, func_null);
     SetResourceExplicit(instance, RES_HEALTH, 0);
     instance.event_damage	= func_null;
     instance.solid			= SOLID_CORPSE;
@@ -616,7 +594,6 @@ METHOD(Racer, vr_setup, void(Racer thisveh, entity instance))
 #ifdef SVQC
     instance.vehicle_exit = racer_exit;
 
-    // we have no need to network energy
     if(autocvar_g_vehicle_racer_energy && autocvar_g_vehicle_racer_energy_regen)
         instance.vehicle_flags |= VHF_ENERGYREGEN;
 
@@ -636,7 +613,7 @@ METHOD(Racer, vr_setup, void(Racer thisveh, entity instance))
 #endif
 
 #ifdef CSQC
-    AuxiliaryXhair[0].axh_image = vCROSS_LOCK; // Rocket
+    AuxiliaryXhair[0].axh_image = vCROSS_LOCK;
 #endif
 }
 

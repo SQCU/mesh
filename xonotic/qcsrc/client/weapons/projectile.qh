@@ -14,8 +14,8 @@ classfield(Projectile).float trail_oldtime;
 classfield(Projectile).float fade_time, fade_rate;
 
 classfield(Projectile).float alphamod;
-classfield(Projectile).int count; // set if clientside projectile
-classfield(Projectile).int cnt;   // sound index
+classfield(Projectile).int count;
+classfield(Projectile).int cnt;
 classfield(Projectile).float gravity;
 classfield(Projectile).int snd_looping;
 classfield(Projectile).bool silent;

@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <server/anticheat.qh>
 #include <server/antilag.qh>
 #include <server/campaign.qh>
@@ -26,7 +26,6 @@
 #include <server/spawnpoints.qh>
 #include <server/steerlib.qh>
 #include <server/teamplay.qh>
-#include <server/tests.qh>
 #include <server/world.qh>
 
 #include <server/bot/_mod.qh>

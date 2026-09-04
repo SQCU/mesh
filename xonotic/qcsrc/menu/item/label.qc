@@ -46,18 +46,17 @@
 			vector dfs;
 			vector fs;
 
-			// set up variables to draw in condensed size, but use hinting for original size
 			fs = me.realFontSize;
 			fs.x *= me.condenseFactor;
 
 			dfs = draw_fontscale;
 			draw_fontscale.x *= me.condenseFactor;
 
-			if (me.allowCut)  // FIXME allowCut incompatible with align != 0
+			if (me.allowCut)
 			{
 				lines = 1;
 			}
-			else if (me.allowWrap)  // FIXME allowWrap incompatible with align != 0
+			else if (me.allowWrap)
 			{
 				getWrappedLine_remaining = me.text;
 				lines = 0;
@@ -86,7 +85,6 @@
 	{
 		SUPER(Label).resizeNotify(me, relOrigin, relSize, absOrigin, absSize);
 
-		// absSize_y is height of label
 		me.realFontSize_y = absSize.y == 0 ? 0 : (me.fontSize / absSize.y);
 		me.realFontSize_x = absSize.x == 0 ? 0 : (me.fontSize / absSize.x);
 		if (me.marginLeft) me.keepspaceLeft = me.marginLeft * me.realFontSize.x;
@@ -130,18 +128,17 @@
 
 				if (me.isBold) draw_beginBoldFont();
 
-				// set up variables to draw in condensed size, but use hinting for original size
 				fs = me.realFontSize;
 				fs.x *= me.condenseFactor;
 
 				dfs = draw_fontscale;
 				draw_fontscale.x *= me.condenseFactor;
 
-				if (me.allowCut)  // FIXME allowCut incompatible with align != 0
+				if (me.allowCut)
 				{
 					draw_Text(me.realOrigin, draw_TextShortenToWidth(t, (1 - me.keepspaceLeft - me.keepspaceRight), me.allowColors, fs), fs, me.colorL, me.alpha, me.allowColors);
 				}
-				else if (me.allowWrap)  // FIXME allowWrap incompatible with align != 0
+				else if (me.allowWrap)
 				{
 					getWrappedLine_remaining = t;
 					o = me.realOrigin;

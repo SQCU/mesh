@@ -5,14 +5,14 @@ namespace algo {
 
 template<typename ITER>
 void shiftback(ITER element, ITER end) {
-    //typename ITER::value_type backup(move(*element)); // hold the element
-    typename std::remove_reference<decltype(*element)>::type backup(move(*element)); // hold the element
+
+    typename std::remove_reference<decltype(*element)>::type backup(move(*element));
     ITER p = element++;
     for (; element != end; p = element++)
         *p = move(*element);
     *p = move(backup);
 }
 
-} // ::algo
+}
 
 #endif

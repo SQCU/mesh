@@ -37,7 +37,6 @@ void XonoticMapList_loadCvars(entity me)
 	me.refilter(me);
 }
 
-
 float XonoticMapList_g_maplistCacheQuery(entity me, float i)
 {
 	return stof(substring(me.g_maplistCache, i, 1));
@@ -55,12 +54,12 @@ void XonoticMapList_g_maplistCacheToggle(entity me, float i)
 	else if(b == "1")
 		b = "0";
 	else
-		return; // nothing happens
+		return;
 	a = substring(s, 0, i);
 	c = substring(s, i+1, strlen(s) - (i+1));
 	strunzone(s);
 	me.g_maplistCache = strzone(strcat(a, b, c));
-	// TODO also update the actual cvar
+
 	if (!((bspname = MapInfo_BSPName_ByID(i))))
 		return;
 	if(b == "1")
@@ -120,7 +119,7 @@ void XonoticMapList_doubleClickListBoxItem(entity me, float i, vector where)
 	if(where.x >= me.columnNameOrigin)
 		if(where.x <= 1)
 		{
-			// pop up map info screen
+
 			m_play_click_sound(MENU_SOUND_OPEN);
 			main.mapInfoDialog.loadMapInfo(main.mapInfoDialog, i, me);
 			DialogOpenButton_Click_withCoords(NULL, main.mapInfoDialog, me.origin + eX * (me.columnNameOrigin * me.size.x) + eY * ((me.itemHeight * i - me.scrollPos) * me.size.y), eY * me.itemAbsSize.y + eX * (me.itemAbsSize.x * me.columnNameSize));
@@ -129,7 +128,7 @@ void XonoticMapList_doubleClickListBoxItem(entity me, float i, vector where)
 
 void XonoticMapList_drawListBoxItem(entity me, int i, vector absSize, bool isSelected, bool isFocused)
 {
-	// layout: Ping, Map name, Map name, NP, TP, MP
+
 	string s;
 	float theAlpha;
 	float included;
@@ -198,7 +197,7 @@ void XonoticMapList_refilter(entity me)
 		j = MapInfo_FindName(argv(i));
 		if(j >= 0)
 		{
-			// double check that the two mapnames are "identical", not just share the same prefix
+
 			if (strlen(MapInfo_BSPName_ByID(j)) == strlen(argv(i)))
 				s = strcat(
 					substring(s, 0, j),
@@ -258,7 +257,7 @@ void MapList_Add_All(entity btn, entity me)
 {
 	float i;
 	string s;
-	_MapInfo_FilterGametype(MAPINFO_TYPE_ALL, 0, 0, MapInfo_ForbiddenFlags(), 0); // all
+	_MapInfo_FilterGametype(MAPINFO_TYPE_ALL, 0, 0, MapInfo_ForbiddenFlags(), 0);
 	s = "";
 	for(i = 0; i < MapInfo_count; ++i)
 		s = strcat(s, " ", MapInfo_BSPName_ByID(i));
@@ -317,7 +316,7 @@ float XonoticMapList_keyDown(entity me, float scan, float ascii, float shift)
 		return SUPER(XonoticMapList).keyDown(me, scan, ascii, shift);
 	if(scan == K_MOUSE2 || scan == K_SPACE || scan == K_ENTER || scan == K_KP_ENTER)
 	{
-		// pop up map info screen
+
 		m_play_click_sound(MENU_SOUND_OPEN);
 		main.mapInfoDialog.loadMapInfo(main.mapInfoDialog, me.selectedItem, me);
 		DialogOpenButton_Click_withCoords(NULL, main.mapInfoDialog, me.origin + eX * (me.columnNameOrigin * me.size.x) + eY * ((me.itemHeight * me.selectedItem - me.scrollPos) * me.size.y), eY * me.itemAbsSize.y + eX * (me.itemAbsSize.x * me.columnNameSize));
@@ -327,7 +326,7 @@ float XonoticMapList_keyDown(entity me, float scan, float ascii, float shift)
 		m_play_click_sound(MENU_SOUND_SELECT);
 		me.g_maplistCacheToggle(me, me.selectedItem);
 	}
-	else if(ascii == 43) // +
+	else if(ascii == 43)
 	{
 		if (!me.g_maplistCacheQuery(me, me.selectedItem))
 		{
@@ -335,7 +334,7 @@ float XonoticMapList_keyDown(entity me, float scan, float ascii, float shift)
 			me.g_maplistCacheToggle(me, me.selectedItem);
 		}
 	}
-	else if(ascii == 45) // -
+	else if(ascii == 45)
 	{
 		if(me.g_maplistCacheQuery(me, me.selectedItem))
 		{
@@ -371,11 +370,11 @@ float XonoticMapList_keyDown(entity me, float scan, float ascii, float shift)
 		if(MapInfo_FindName_firstResult >= 0)
 			me.setSelected(me, MapInfo_FindName_firstResult);
 	}
-	else if((shift & S_CTRL) && scan == 'f') // ctrl-f (as in "F"ind)
+	else if((shift & S_CTRL) && scan == 'f')
 	{
 		me.parent.setFocus(me.parent, me.stringFilterBox);
 	}
-	else if((shift & S_CTRL) && scan == 'u') // ctrl-u (remove stringFilter line
+	else if((shift & S_CTRL) && scan == 'u')
 	{
 		me.stringFilterBox.setText(me.stringFilterBox, "");
 		MapList_StringFilterBox_Change(me.stringFilterBox, me);
@@ -387,20 +386,19 @@ float XonoticMapList_keyDown(entity me, float scan, float ascii, float shift)
 
 float MapList_StringFilterBox_keyDown(entity me, float scan, float ascii, float shift)
 {
-	// in this section, note that onChangeEntity has the ref to mapListBox
-	// we make use of that, instead of extending a class to add one more attrib
+
 	switch(scan)
 	{
 		case K_KP_ENTER:
 		case K_ENTER:
-			// move the focus to the mapListBox
+
 			me.onChangeEntity.parent.setFocus(me.onChangeEntity.parent, me.onChangeEntity);
 			return 1;
 		case K_KP_UPARROW:
 		case K_UPARROW:
 		case K_KP_DOWNARROW:
 		case K_DOWNARROW:
-			// pass the event to the mapListBox (to scroll up and down)
+
 			return me.onChangeEntity.keyDown(me.onChangeEntity, scan, ascii, shift);
 	}
 	return SUPER(XonoticInputBox).keyDown(me, scan, ascii, shift);

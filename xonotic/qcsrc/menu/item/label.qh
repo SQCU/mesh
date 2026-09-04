@@ -15,9 +15,9 @@ CLASS(Label, MenuItem)
 	ATTRIB(Label, align, float, 0.5);
 	ATTRIB(Label, allowCut, float, 0);
 	ATTRIB(Label, allowColors, float, 0);
-	ATTRIB(Label, keepspaceLeft, float, 0); // for use by subclasses (radiobuttons for example);
+	ATTRIB(Label, keepspaceLeft, float, 0);
 	ATTRIB(Label, keepspaceRight, float, 0);
-	ATTRIB(Label, marginLeft, float, 0);    // alternate way to specify keepspace* (in characters from the font);
+	ATTRIB(Label, marginLeft, float, 0);
 	ATTRIB(Label, marginRight, float, 0);
 	ATTRIB(Label, realFontSize, vector, '0 0 0');
 	ATTRIB(Label, realOrigin, vector, '0 0 0');

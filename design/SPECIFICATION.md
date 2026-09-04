@@ -97,7 +97,7 @@ caches rather than specifications.
 > RL is here to ground the semantic meanings of input vectors just as much as it is
 > to induce value learning over a mixing IR output from using gram matrix stuff
 
-## 7. Don't feature-engineer behavior; saturate the SoCs; the Gram lands in the IR
+## 7. Don't feature-engineer behavior; saturate the SoCs; the Gram matrix lands in the IR
 
 `d3ad4328`, 2026-08-31T00:38:10Z:
 
@@ -110,7 +110,7 @@ caches rather than specifications.
 > measurable features into the learned projections which give a gram matrix
 > something with semantic values at all
 
-## 8. The operator is a Gram + SwiGLU (not softmax attention), into a wide IR
+## 8. The operator is Gram-matrix fusion + SwiGLU (not softmax attention), into a wide IR
 
 `d3ad4328`, 2026-08-31T00:06:00Z:
 

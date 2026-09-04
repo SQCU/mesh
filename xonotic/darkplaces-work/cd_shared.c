@@ -1,36 +1,15 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// Quake is a trademark of Id Software, Inc., (c) 1996 Id Software, Inc. All
-// rights reserved.
 
 #include "quakedef.h"
 #include "cdaudio.h"
 #include "sound.h"
 
-// used by menu to ghost CD audio slider
 cvar_t cdaudioinitialized = {CVAR_READONLY,"cdaudioinitialized","0","indicates if CD Audio system is active"};
 cvar_t cdaudio = {CVAR_SAVE,"cdaudio","1","CD playing mode (0 = never access CD drive, 1 = play CD tracks if no replacement available, 2 = play fake tracks if no CD track available, 3 = play only real CD tracks, 4 = play real CD tracks even instead of named fake tracks)"};
 
 #define MAX_PLAYLISTS 10
 int music_playlist_active = -1;
-int music_playlist_playing = 0; // 0 = not playing, 1 = playing, -1 = tried and failed
+int music_playlist_playing = 0;
 
 cvar_t music_playlist_index = {0, "music_playlist_index", "-1", "selects which of the music_playlist_ variables is the active one, -1 disables playlists"};
 cvar_t music_playlist_list[MAX_PLAYLISTS] =
@@ -99,7 +78,6 @@ static int faketrack = -1;
 
 static float saved_vol = 1.0f;
 
-// exported variables
 qboolean cdValid = false;
 qboolean cdPlaying = false;
 qboolean cdPlayLooping = false;
@@ -111,13 +89,12 @@ static void CDAudio_Eject (void)
 {
 	if (!enabled)
 		return;
-	
+
 	if(cdaudio.integer == 0)
 		return;
 
 	CDAudio_SysEject();
 }
-
 
 static void CDAudio_CloseDoor (void)
 {
@@ -209,20 +186,20 @@ void CDAudio_Play_byName (const char *trackname, qboolean looping, qboolean tryr
 				}
 				else
 				{
-					// ignore remappings to fake tracks if we're going to play a real track
+
 					switch(cdaudio.integer)
 					{
-						case 0: // we never access CD
-						case 1: // we have a replacement
+						case 0:
+						case 1:
 							trackname = remap[track];
 							break;
-						case 2: // we only use fake track replacement if CD track is invalid
+						case 2:
 							CDAudio_GetAudioDiskInfo();
 							if(!cdValid || track > maxTrack)
 								trackname = remap[track];
 							break;
-						case 3: // we always play from CD - ignore this remapping then
-						case 4: // we randomize anyway
+						case 3:
+						case 4:
 							break;
 					}
 				}
@@ -242,32 +219,31 @@ void CDAudio_Play_byName (const char *trackname, qboolean looping, qboolean tryr
 	else
 		track = 0;
 
-	// div0: I assume this code was intentionally there. Maybe turn it into a cvar?
 	if (cdPlaying && cdPlayTrack == track && faketrack == -1)
 		return;
 	CDAudio_Stop ();
 
 	if(track >= 1)
 	{
-		if(cdaudio.integer == 3) // only play real CD tracks at all
+		if(cdaudio.integer == 3)
 		{
 			if(CDAudio_Play_real(track, looping, true))
 				goto success;
 			return;
 		}
 
-		if(cdaudio.integer == 2) // prefer real CD track over fake
+		if(cdaudio.integer == 2)
 		{
 			if(CDAudio_Play_real(track, looping, false))
 				goto success;
 		}
 	}
 
-	if(cdaudio.integer == 4) // only play real CD tracks, EVEN instead of fake tracks!
+	if(cdaudio.integer == 4)
 	{
 		if(CDAudio_Play_real(track, looping, false))
 			goto success;
-		
+
 		if(cdValid && maxTrack > 0)
 		{
 			track = 1 + (rand() % maxTrack);
@@ -281,17 +257,16 @@ void CDAudio_Play_byName (const char *trackname, qboolean looping, qboolean tryr
 		return;
 	}
 
-	// Try playing a fake track (sound file) first
 	if(track >= 1)
 	{
 		                              dpsnprintf(filename, sizeof(filename), "sound/cdtracks/track%03u.wav", track);
 		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "sound/cdtracks/track%03u.ogg", track);
-		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/track%03u.ogg", track);// added by motorsep
-		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/cdtracks/track%03u.ogg", track);// added by motorsep
+		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/track%03u.ogg", track);
+		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/cdtracks/track%03u.ogg", track);
 		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "sound/cdtracks/track%02u.wav", track);
 		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "sound/cdtracks/track%02u.ogg", track);
-		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/track%02u.ogg", track);// added by motorsep
-		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/cdtracks/track%02u.ogg", track);// added by motorsep
+		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/track%02u.ogg", track);
+		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/cdtracks/track%02u.ogg", track);
 	}
 	else
 	{
@@ -304,8 +279,8 @@ void CDAudio_Play_byName (const char *trackname, qboolean looping, qboolean tryr
 		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "sound/cdtracks/%s", trackname);
 		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "sound/cdtracks/%s.wav", trackname);
 		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "sound/cdtracks/%s.ogg", trackname);
-		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/%s.ogg", trackname); // added by motorsep
-		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/cdtracks/%s.ogg", trackname); // added by motorsep
+		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/%s.ogg", trackname);
+		if (!FS_FileExists(filename)) dpsnprintf(filename, sizeof(filename), "music/cdtracks/%s.ogg", trackname);
 	}
 	if (FS_FileExists(filename) && (sfx = S_PrecacheSound (filename, false, false)))
 	{
@@ -314,7 +289,7 @@ void CDAudio_Play_byName (const char *trackname, qboolean looping, qboolean tryr
 		{
 			if(track >= 1)
 			{
-				if(cdaudio.integer != 0) // we don't need these messages if only fake tracks can be played anyway
+				if(cdaudio.integer != 0)
 					Con_DPrintf ("Fake CD track %u playing...\n", track);
 			}
 			else
@@ -322,7 +297,6 @@ void CDAudio_Play_byName (const char *trackname, qboolean looping, qboolean tryr
 		}
 	}
 
-	// If we can't play a fake CD track, try the real one
 	if (faketrack == -1)
 	{
 		if(cdaudio.integer == 0 || track < 1)
@@ -369,7 +343,6 @@ void CDAudio_Stop (void)
 	if (!enabled)
 		return;
 
-	// save the playlist position
 	CDAudio_StopPlaylistTrack();
 
 	if (faketrack != -1)
@@ -381,7 +354,7 @@ void CDAudio_Stop (void)
 		return;
 	else if(wasPlaying)
 	{
-		CDAudio_Resume(); // needed by SDL - can't stop while paused there (causing pause/stop to fail after play, pause, stop, play otherwise)
+		CDAudio_Resume();
 		if (cdPlaying && (CDAudio_SysStop() == -1))
 			return;
 	}
@@ -403,7 +376,6 @@ void CDAudio_Pause (void)
 	wasPlaying = cdPlaying;
 	cdPlaying = false;
 }
-
 
 void CDAudio_Resume (void)
 {
@@ -449,7 +421,7 @@ static void CD_f (void)
 		CDAudio_Stop();
 #ifdef MAXTRACKS
 		for (n = 0; n < MAXTRACKS; n++)
-			*remap[n] = 0; // empty string, that is, unremapped
+			*remap[n] = 0;
 #endif
 		CDAudio_GetAudioDiskInfo();
 		return;
@@ -570,16 +542,15 @@ static void CD_f (void)
 
 static void CDAudio_SetVolume (float newvol)
 {
-	// If the volume hasn't changed
+
 	if (newvol == cdvolume)
 		return;
 
-	// If the CD has been muted
 	if (newvol == 0.0f)
 		CDAudio_Pause ();
 	else
 	{
-		// If the CD has been unmuted
+
 		if (cdvolume == 0.0f)
 			CDAudio_Resume ();
 
@@ -596,12 +567,12 @@ static void CDAudio_StopPlaylistTrack(void)
 {
 	if (music_playlist_active >= 0 && music_playlist_active < MAX_PLAYLISTS && music_playlist_sampleposition[music_playlist_active].value >= 0)
 	{
-		// save position for resume
+
 		float position = CDAudio_GetPosition();
 		Cvar_SetValueQuick(&music_playlist_sampleposition[music_playlist_active], position >= 0 ? position : 0);
 	}
 	music_playlist_active = -1;
-	music_playlist_playing = 0; // not playing
+	music_playlist_playing = 0;
 }
 
 void CDAudio_StartPlaylist(qboolean resume)
@@ -631,17 +602,17 @@ void CDAudio_StartPlaylist(qboolean resume)
 			{
 				if (!COM_ParseToken_Console(&t))
 					break;
-				// if we don't find the desired track, use the first one
+
 				if (count == 0)
 					strlcpy(trackname, com_token, sizeof(trackname));
 			}
 		}
 		if (count > 0)
 		{
-			// position < 0 means never resume track
+
 			if (position < 0)
 				position = 0;
-			// advance to next track in playlist if the last one ended
+
 			if (!resume)
 			{
 				position = 0;
@@ -649,12 +620,12 @@ void CDAudio_StartPlaylist(qboolean resume)
 				if (randomplay)
 					current = (int)lhrandom(0, count);
 			}
-			// wrap playlist position if needed
+
 			if (current >= count)
 				current = 0;
-			// set current
+
 			Cvar_SetValueQuick(&music_playlist_current[index], current);
-			// get the Nth trackname
+
 			if (current >= 0 && current < count)
 			{
 				for (listindex = 0, t = list;;listindex++)
@@ -688,14 +659,14 @@ void CDAudio_Update (void)
 	CDAudio_SetVolume (bgmvolume.value);
 	if (music_playlist_playing > 0 && CDAudio_GetPosition() < 0)
 	{
-		// this track ended, start a new track from the beginning
+
 		CDAudio_StartPlaylist(false);
 		lastplaylist = music_playlist_index.integer;
 	}
 	else if (lastplaylist != music_playlist_index.integer
 	|| (bgmvolume.value > 0 && !music_playlist_playing && music_playlist_index.integer >= 0))
 	{
-		// active playlist changed, save position and switch track
+
 		CDAudio_StartPlaylist(true);
 		lastplaylist = music_playlist_index.integer;
 	}
@@ -711,7 +682,6 @@ int CDAudio_Init (void)
 	if (cls.state == ca_dedicated)
 		return -1;
 
-// COMMANDLINEOPTION: Sound: -nocdaudio disables CD audio support
 	if (COM_CheckParm("-nocdaudio"))
 		return -1;
 

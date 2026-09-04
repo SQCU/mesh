@@ -3,11 +3,9 @@
 #include <client/draw.qh>
 #include <common/deathtypes/all.qh>
 
-// Health/armor (#3)
-
 void HUD_HealthArmor_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_healtharmor_combined");
 	HUD_Write_Cvar("hud_panel_healtharmor_flip");
 	HUD_Write_Cvar("hud_panel_healtharmor_iconalign");
@@ -39,12 +37,9 @@ void HUD_HealthArmor()
 		}
 		armor = STAT(ARMOR);
 
-		// code to check for spectatee_status changes is in ENT_CLIENT_CLIENTDATA
-		// prev_p_health and prev_health can be set to -1 there
-
 		if (prev_p_health == -1)
 		{
-			// no effect
+
 			health_beforedamage = 0;
 			armor_beforedamage = 0;
 			health_damagetime = 0;
@@ -58,7 +53,7 @@ void HUD_HealthArmor()
 		}
 		else if (prev_health == -1)
 		{
-			//start the load effect
+
 			health_damagetime = 0;
 			armor_damagetime = 0;
 			prev_health = 0;
@@ -125,14 +120,14 @@ void HUD_HealthArmor()
 
 	int maxhealth = autocvar_hud_panel_healtharmor_maxhealth;
 	int maxarmor = autocvar_hud_panel_healtharmor_maxarmor;
-	if(autocvar_hud_panel_healtharmor_combined) // combined health and armor display
+	if(autocvar_hud_panel_healtharmor_combined)
 	{
 		vector v = healtharmor_maxdamage(health, armor, armorblockpercent, DEATH_WEAPON.m_id);
 		float hp = floor(v.x + 1);
 
 		float maxtotal = maxhealth + maxarmor;
 		string biggercount;
-		if(v.z) // NOT fully armored
+		if(v.z)
 		{
 			biggercount = "health";
 			if(autocvar_hud_panel_healtharmor_progressbar)
@@ -197,7 +192,6 @@ void HUD_HealthArmor()
 			armor_iconalign = (autocvar_hud_panel_healtharmor_iconalign == 3 || autocvar_hud_panel_healtharmor_iconalign == 1);
 		}
 
-		//if(health)
 		{
 			if(autocvar_hud_panel_healtharmor_progressbar)
 			{
@@ -249,7 +243,6 @@ void HUD_HealthArmor()
 				DrawNumIcon(pos + health_offset, mySize, health, "health", is_vertical, false, health_iconalign, HUD_Get_Num_Color(health, maxhealth, true), 1);
 		}
 
-		//if(armor)
 		{
 			float p_armor = armor;
 			if(autocvar_hud_panel_healtharmor_progressbar)
@@ -300,13 +293,13 @@ void HUD_HealthArmor()
 		if (fuel || air_time)
 		{
 			if (is_vertical)
-				mySize.x *= 0.2 / 2; //if vertical always halve x to not cover too much numbers with 3 digits
+				mySize.x *= 0.2 / 2;
 			else
 				mySize.y *= 0.2;
 			if (panel_ar >= 4)
-				mySize.x *= 2; //restore full panel size
+				mySize.x *= 2;
 			else if (panel_ar < 1/4)
-				mySize.y *= 2; //restore full panel size
+				mySize.y *= 2;
 			if (fuel)
 				HUD_Panel_DrawProgressBar(pos, mySize, "progressbar", fuel / 100, is_vertical, fuel_baralign, autocvar_hud_progressbar_fuel_color, fuel_alpha * panel_fg_alpha * 0.8, DRAWFLAG_NORMAL);
 			if (air_time)

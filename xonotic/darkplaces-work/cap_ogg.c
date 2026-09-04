@@ -7,7 +7,6 @@
 #include "client.h"
 #include "cap_ogg.h"
 
-// video capture cvars
 static cvar_t cl_capturevideo_ogg_theora_vp3compat = {CVAR_SAVE, "cl_capturevideo_ogg_theora_vp3compat", "1", "make VP3 compatible theora streams"};
 static cvar_t cl_capturevideo_ogg_theora_quality = {CVAR_SAVE, "cl_capturevideo_ogg_theora_quality", "48", "video quality factor (0 to 63), or -1 to use bitrate only; higher is better; setting both to -1 achieves unlimited quality"};
 static cvar_t cl_capturevideo_ogg_theora_bitrate = {CVAR_SAVE, "cl_capturevideo_ogg_theora_bitrate", "-1", "video bitrate (45 to 2000 kbps), or -1 to use quality only; higher is better; setting both to -1 achieves unlimited quality"};
@@ -19,7 +18,6 @@ static cvar_t cl_capturevideo_ogg_theora_noise_sensitivity = {CVAR_SAVE, "cl_cap
 static cvar_t cl_capturevideo_ogg_theora_sharpness = {CVAR_SAVE, "cl_capturevideo_ogg_theora_sharpness", "0", "sharpness (0 to 2); lower is sharper"};
 static cvar_t cl_capturevideo_ogg_vorbis_quality = {CVAR_SAVE, "cl_capturevideo_ogg_vorbis_quality", "3", "audio quality (-1 to 10); higher is better"};
 
-// ogg.h stuff
 #ifdef _MSC_VER
 typedef __int16 ogg_int16_t;
 typedef unsigned __int16 ogg_uint16_t;
@@ -43,8 +41,6 @@ typedef struct {
   long storage;
 } oggpack_buffer;
 
-/* ogg_page is used to encapsulate the data in one Ogg bitstream page *****/
-
 typedef struct {
   unsigned char *header;
   long header_len;
@@ -52,45 +48,34 @@ typedef struct {
   long body_len;
 } ogg_page;
 
-/* ogg_stream_state contains the current encode/decode state of a logical
-   Ogg bitstream **********************************************************/
-
 typedef struct {
-  unsigned char   *body_data;    /* bytes from packet bodies */
-  long    body_storage;          /* storage elements allocated */
-  long    body_fill;             /* elements stored; fill mark */
-  long    body_returned;         /* elements of fill returned */
+  unsigned char   *body_data;
+  long    body_storage;
+  long    body_fill;
+  long    body_returned;
 
+  int     *lacing_vals;
+  ogg_int64_t *granule_vals;
 
-  int     *lacing_vals;      /* The values that will go to the segment table */
-  ogg_int64_t *granule_vals; /* granulepos values for headers. Not compact
-				this way, but it is simple coupled to the
-				lacing fifo */
   long    lacing_storage;
   long    lacing_fill;
   long    lacing_packet;
   long    lacing_returned;
 
-  unsigned char    header[282];      /* working space for header encode */
+  unsigned char    header[282];
   int              header_fill;
 
-  int     e_o_s;          /* set when we have buffered the last packet in the
-                             logical bitstream */
-  int     b_o_s;          /* set after we've written the initial page
-                             of a logical bitstream */
+  int     e_o_s;
+
+  int     b_o_s;
+
   long    serialno;
   long    pageno;
-  ogg_int64_t  packetno;      /* sequence number for decode; the framing
-                             knows where there's a hole in the data,
-                             but we need coupling so that the codec
-                             (which is in a seperate abstraction
-                             layer) also knows about the gap */
+  ogg_int64_t  packetno;
+
   ogg_int64_t   granulepos;
 
 } ogg_stream_state;
-
-/* ogg_packet is used to encapsulate the data and metadata belonging
-   to a single raw Ogg/Vorbis packet *************************************/
 
 typedef struct {
   unsigned char *packet;
@@ -99,12 +84,9 @@ typedef struct {
   long  e_o_s;
 
   ogg_int64_t  granulepos;
-  
-  ogg_int64_t  packetno;     /* sequence number for decode; the framing
-				knows where there's a hole in the data,
-				but we need coupling so that the codec
-				(which is in a seperate abstraction
-				layer) also knows about the gap */
+
+  ogg_int64_t  packetno;
+
 } ogg_packet;
 
 typedef struct {
@@ -118,40 +100,18 @@ typedef struct {
   int bodybytes;
 } ogg_sync_state;
 
-/* Ogg BITSTREAM PRIMITIVES: encoding **************************/
-
 static int      (*qogg_stream_packetin) (ogg_stream_state *os, ogg_packet *op);
 static int      (*qogg_stream_pageout) (ogg_stream_state *os, ogg_page *og);
 static int      (*qogg_stream_flush) (ogg_stream_state *os, ogg_page *og);
-
-/* Ogg BITSTREAM PRIMITIVES: general ***************************/
 
 static int      (*qogg_stream_init) (ogg_stream_state *os,int serialno);
 static int      (*qogg_stream_clear) (ogg_stream_state *os);
 static ogg_int64_t  (*qogg_page_granulepos) (ogg_page *og);
 
-// end of ogg.h stuff
-
-// vorbis/codec.h stuff
 typedef struct vorbis_info{
   int version;
   int channels;
   long rate;
-
-  /* The below bitrate declarations are *hints*.
-     Combinations of the three values carry the following implications:
-
-     all three set to the same value:
-       implies a fixed rate bitstream
-     only nominal set:
-       implies a VBR stream that averages the nominal bitrate.  No hard
-       upper/lower limit
-     upper and or lower set:
-       implies a VBR bitstream that obeys the bitrate limits. nominal
-       may also be set to give a nominal rate.
-     none set:
-       the coder does not care to speculate.
-  */
 
   long bitrate_upper;
   long bitrate_nominal;
@@ -161,9 +121,6 @@ typedef struct vorbis_info{
   void *codec_setup;
 } vorbis_info;
 
-/* vorbis_dsp_state buffers the current vorbis audio
-   analysis/synthesis state.  The DSP state belongs to a specific
-   logical bitstream ****************************************************/
 typedef struct vorbis_dsp_state{
   int analysisp;
   vorbis_info *vi;
@@ -194,8 +151,8 @@ typedef struct vorbis_dsp_state{
 } vorbis_dsp_state;
 
 typedef struct vorbis_block{
-  /* necessary stream state for linking to the framing abstraction */
-  float  **pcm;       /* this is a pointer into local storage */
+
+  float  **pcm;
   oggpack_buffer opb;
 
   long  lW;
@@ -207,17 +164,14 @@ typedef struct vorbis_block{
   int         eofflag;
   ogg_int64_t granulepos;
   ogg_int64_t sequence;
-  vorbis_dsp_state *vd; /* For read-only access of configuration */
+  vorbis_dsp_state *vd;
 
-  /* local storage to avoid remallocing; it's up to the mapping to
-     structure it */
   void               *localstore;
   long                localtop;
   long                localalloc;
   long                totaluse;
   struct alloc_chain *reap;
 
-  /* bitmetrics for the frame */
   long glue_bits;
   long time_bits;
   long floor_bits;
@@ -227,48 +181,19 @@ typedef struct vorbis_block{
 
 } vorbis_block;
 
-/* vorbis_block is a single block of data to be processed as part of
-the analysis/synthesis stream; it belongs to a specific logical
-bitstream, but is independant from other vorbis_blocks belonging to
-that logical bitstream. *************************************************/
-
 struct alloc_chain{
   void *ptr;
   struct alloc_chain *next;
 };
 
-/* vorbis_info contains all the setup information specific to the
-   specific compression/decompression mode in progress (eg,
-   psychoacoustic settings, channel setup, options, codebook
-   etc). vorbis_info and substructures are in backends.h.
-*********************************************************************/
-
-/* the comments are not part of vorbis_info so that vorbis_info can be
-   static storage */
 typedef struct vorbis_comment{
-  /* unlimited user comment fields.  libvorbis writes 'libvorbis'
-     whatever vendor is set to in encode */
+
   char **user_comments;
   int   *comment_lengths;
   int    comments;
   char  *vendor;
 
 } vorbis_comment;
-
-
-/* libvorbis encodes in two abstraction layers; first we perform DSP
-   and produce a packet (see docs/analysis.txt).  The packet is then
-   coded into a framed OggSquish bitstream by the second layer (see
-   docs/framing.txt).  Decode is the reverse process; we sync/frame
-   the bitstream and extract individual packets, then decode the
-   packet back into PCM audio.
-
-   The extra framing/packetizing is used in streaming formats, such as
-   files.  Over the net (such as with UDP), the framing and
-   packetization aren't necessary as they're provided by the transport
-   and the streaming layer is not used */
-
-/* Vorbis PRIMITIVES: general ***************************************/
 
 static void     (*qvorbis_info_init) (vorbis_info *vi);
 static void     (*qvorbis_info_clear) (vorbis_info *vi);
@@ -280,8 +205,6 @@ static int      (*qvorbis_block_clear) (vorbis_block *vb);
 static void     (*qvorbis_dsp_clear) (vorbis_dsp_state *v);
 static double   (*qvorbis_granule_time) (vorbis_dsp_state *v,
 				    ogg_int64_t granulepos);
-
-/* Vorbis PRIMITIVES: analysis/DSP layer ****************************/
 
 static int      (*qvorbis_analysis_init) (vorbis_dsp_state *v,vorbis_info *vi);
 static int      (*qvorbis_commentheader_out) (vorbis_comment *vc, ogg_packet *op);
@@ -299,120 +222,80 @@ static int      (*qvorbis_bitrate_addblock) (vorbis_block *vb);
 static int      (*qvorbis_bitrate_flushpacket) (vorbis_dsp_state *vd,
 					   ogg_packet *op);
 
-// end of vorbis/codec.h stuff
-
-// vorbisenc.h stuff
 static int (*qvorbis_encode_init_vbr) (vorbis_info *vi,
 				  long channels,
 				  long rate,
 
-				  float base_quality /* quality level from 0. (lo) to 1. (hi) */
+				  float base_quality
 				  );
-// end of vorbisenc.h stuff
-
-// theora.h stuff
 
 #define TH_ENCCTL_SET_VP3_COMPATIBLE (10)
 
 typedef struct {
-    int   y_width;      /**< Width of the Y' luminance plane */
-    int   y_height;     /**< Height of the luminance plane */
-    int   y_stride;     /**< Offset in bytes between successive rows */
+    int   y_width;
+    int   y_height;
+    int   y_stride;
 
-    int   uv_width;     /**< Width of the Cb and Cr chroma planes */
-    int   uv_height;    /**< Height of the chroma planes */
-    int   uv_stride;    /**< Offset between successive chroma rows */
-    unsigned char *y;   /**< Pointer to start of luminance data */
-    unsigned char *u;   /**< Pointer to start of Cb data */
-    unsigned char *v;   /**< Pointer to start of Cr data */
+    int   uv_width;
+    int   uv_height;
+    int   uv_stride;
+    unsigned char *y;
+    unsigned char *u;
+    unsigned char *v;
 
 } yuv_buffer;
 
-/**
- * A Colorspace.
- */
 typedef enum {
-  OC_CS_UNSPECIFIED,    /**< The colorspace is unknown or unspecified */
-  OC_CS_ITU_REC_470M,   /**< This is the best option for 'NTSC' content */
-  OC_CS_ITU_REC_470BG,  /**< This is the best option for 'PAL' content */
-  OC_CS_NSPACES         /**< This marks the end of the defined colorspaces */
+  OC_CS_UNSPECIFIED,
+  OC_CS_ITU_REC_470M,
+  OC_CS_ITU_REC_470BG,
+  OC_CS_NSPACES
 } theora_colorspace;
 
-/**
- * A Chroma subsampling
- *
- * These enumerate the available chroma subsampling options supported
- * by the theora format. See Section 4.4 of the specification for
- * exact definitions.
- */
 typedef enum {
-  OC_PF_420,    /**< Chroma subsampling by 2 in each direction (4:2:0) */
-  OC_PF_RSVD,   /**< Reserved value */
-  OC_PF_422,    /**< Horizonatal chroma subsampling by 2 (4:2:2) */
-  OC_PF_444     /**< No chroma subsampling at all (4:4:4) */
+  OC_PF_420,
+  OC_PF_RSVD,
+  OC_PF_422,
+  OC_PF_444
 } theora_pixelformat;
-/**
- * Theora bitstream info.
- * Contains the basic playback parameters for a stream,
- * corresponding to the initial 'info' header packet.
- * 
- * Encoded theora frames must be a multiple of 16 in width and height.
- * To handle other frame sizes, a crop rectangle is specified in
- * frame_height and frame_width, offset_x and * offset_y. The offset
- * and size should still be a multiple of 2 to avoid chroma sampling
- * shifts. Offset values in this structure are measured from the
- * upper left of the image.
- *
- * Frame rate, in frames per second, is stored as a rational
- * fraction. Aspect ratio is also stored as a rational fraction, and
- * refers to the aspect ratio of the frame pixels, not of the
- * overall frame itself.
- * 
- * See <a href="http://svn.xiph.org/trunk/theora/examples/encoder_example.c">
- * examples/encoder_example.c</a> for usage examples of the
- * other paramters and good default settings for the encoder parameters.
- */
-typedef struct {
-  ogg_uint32_t  width;      /**< encoded frame width  */
-  ogg_uint32_t  height;     /**< encoded frame height */
-  ogg_uint32_t  frame_width;    /**< display frame width  */
-  ogg_uint32_t  frame_height;   /**< display frame height */
-  ogg_uint32_t  offset_x;   /**< horizontal offset of the displayed frame */
-  ogg_uint32_t  offset_y;   /**< vertical offset of the displayed frame */
-  ogg_uint32_t  fps_numerator;      /**< frame rate numerator **/
-  ogg_uint32_t  fps_denominator;    /**< frame rate denominator **/
-  ogg_uint32_t  aspect_numerator;   /**< pixel aspect ratio numerator */
-  ogg_uint32_t  aspect_denominator; /**< pixel aspect ratio denominator */
-  theora_colorspace colorspace;     /**< colorspace */
-  int           target_bitrate;     /**< nominal bitrate in bits per second */
-  int           quality;  /**< Nominal quality setting, 0-63 */
-  int           quick_p;  /**< Quick encode/decode */
 
-  /* decode only */
+typedef struct {
+  ogg_uint32_t  width;
+  ogg_uint32_t  height;
+  ogg_uint32_t  frame_width;
+  ogg_uint32_t  frame_height;
+  ogg_uint32_t  offset_x;
+  ogg_uint32_t  offset_y;
+  ogg_uint32_t  fps_numerator;
+  ogg_uint32_t  fps_denominator;
+  ogg_uint32_t  aspect_numerator;
+  ogg_uint32_t  aspect_denominator;
+  theora_colorspace colorspace;
+  int           target_bitrate;
+  int           quality;
+  int           quick_p;
+
   unsigned char version_major;
   unsigned char version_minor;
   unsigned char version_subminor;
 
   void *codec_setup;
 
-  /* encode only */
   int           dropframes_p;
   int           keyframe_auto_p;
   ogg_uint32_t  keyframe_frequency;
-  ogg_uint32_t  keyframe_frequency_force;  /* also used for decode init to
-                                              get granpos shift correct */
+  ogg_uint32_t  keyframe_frequency_force;
+
   ogg_uint32_t  keyframe_data_target_bitrate;
   ogg_int32_t   keyframe_auto_threshold;
   ogg_uint32_t  keyframe_mindistance;
   ogg_int32_t   noise_sensitivity;
   ogg_int32_t   sharpness;
 
-  theora_pixelformat pixelformat;   /**< chroma subsampling mode to expect */
+  theora_pixelformat pixelformat;
 
 } theora_info;
 
-/** Codec internal state and context.
- */
 typedef struct{
   theora_info *i;
   ogg_int64_t granulepos;
@@ -422,30 +305,11 @@ typedef struct{
 
 } theora_state;
 
-/** 
- * Comment header metadata.
- *
- * This structure holds the in-stream metadata corresponding to
- * the 'comment' header packet.
- *
- * Meta data is stored as a series of (tag, value) pairs, in
- * length-encoded string vectors. The first occurence of the 
- * '=' character delimits the tag and value. A particular tag
- * may occur more than once. The character set encoding for
- * the strings is always UTF-8, but the tag names are limited
- * to case-insensitive ASCII. See the spec for details.
- *
- * In filling in this structure, qtheora_decode_header() will
- * null-terminate the user_comment strings for safety. However,
- * the bitstream format itself treats them as 8-bit clean,
- * and so the length array should be treated as authoritative
- * for their length.
- */
 typedef struct theora_comment{
-  char **user_comments;         /**< An array of comment string vectors */
-  int   *comment_lengths;       /**< An array of corresponding string vector lengths in bytes */
-  int    comments;              /**< The total number of comment string vectors */
-  char  *vendor;                /**< The vendor string identifying the encoder, null terminated */
+  char **user_comments;
+  int   *comment_lengths;
+  int    comments;
+  char  *vendor;
 
 } theora_comment;
 static int (*qtheora_encode_init) (theora_state *th, theora_info *ti);
@@ -462,7 +326,6 @@ static void (*qtheora_comment_init) (theora_comment *tc);
 static void  (*qtheora_comment_clear) (theora_comment *tc);
 static double (*qtheora_granule_time) (theora_state *th,ogg_int64_t granulepos);
 static int (*qtheora_control) (theora_state *th,int req,void *buf,size_t buf_sz);
-// end of theora.h stuff
 
 static dllfunction_t oggfuncs[] =
 {
@@ -620,18 +483,12 @@ void SCR_CaptureVideo_Ogg_CloseDLL(void)
 	Sys_UnloadLibrary (&og_dll);
 }
 
-// this struct should not be needed
-// however, libogg appears to pull the ogg_page's data element away from our
-// feet before we get to write the data due to interleaving
-// so this struct is used to keep the page data around until it actually gets
-// written
 typedef struct allocatedoggpage_s
 {
 	size_t len;
 	double time;
 	unsigned char data[65307];
-	// this number is from RFC 3533. In case libogg writes more, we'll have to increase this
-	// but we'll get a Host_Error in this case so we can track it down
+
 }
 allocatedoggpage_t;
 
@@ -670,7 +527,7 @@ static void SCR_CaptureVideo_Ogg_Interleave(void)
 
 	for(;;)
 	{
-		// first: make sure we have a page of both types
+
 		if(!format->videopage.len)
 			if(qogg_stream_pageout(&format->to, &pg) > 0)
 			{
@@ -694,7 +551,7 @@ static void SCR_CaptureVideo_Ogg_Interleave(void)
 
 		if(format->videopage.len && format->audiopage.len)
 		{
-			// output the page that ends first
+
 			if(format->videopage.time < format->audiopage.time)
 			{
 				FS_Write(cls.capturevideo.videofile, format->videopage.data, format->videopage.len);
@@ -737,7 +594,7 @@ static void SCR_CaptureVideo_Ogg_EndVideo(void)
 
 	if(format->yuvi >= 0)
 	{
-		// send the previous (and last) frame
+
 		while(format->lastnum-- > 0)
 		{
 			qtheora_encode_YUVin(&format->ts, &format->yuv[format->yuvi]);
@@ -778,11 +635,11 @@ static void SCR_CaptureVideo_Ogg_EndVideo(void)
 			FS_Write(cls.capturevideo.videofile, pg.body, pg.body_len);
 		}
 	}
-		
+
 	while (1) {
 		int result = qogg_stream_flush (&format->to, &pg);
 		if (result < 0)
-			fprintf (stderr, "Internal Ogg library error.\n"); // TODO Sys_Error
+			fprintf (stderr, "Internal Ogg library error.\n");
 		if (result <= 0)
 			break;
 		FS_Write(cls.capturevideo.videofile, pg.header, pg.header_len);
@@ -794,7 +651,7 @@ static void SCR_CaptureVideo_Ogg_EndVideo(void)
 		while (1) {
 			int result = qogg_stream_flush (&format->vo, &pg);
 			if (result < 0)
-				fprintf (stderr, "Internal Ogg library error.\n"); // TODO Sys_Error
+				fprintf (stderr, "Internal Ogg library error.\n");
 			if (result <= 0)
 				break;
 			FS_Write(cls.capturevideo.videofile, pg.header, pg.header_len);
@@ -847,7 +704,7 @@ static void SCR_CaptureVideo_Ogg_ConvertFrame_BGRA_to_YUV(void)
 			b += 4;
 		}
 
-		if ((y & 1) == 0 && y/2 < h/2) // if h is odd, this skips the last row
+		if ((y & 1) == 0 && y/2 < h/2)
 		{
 			for(b = cls.capturevideo.outbuffer + (h-2-y)*w*4, x = 0; x < w/2; ++x)
 			{
@@ -869,11 +726,9 @@ static void SCR_CaptureVideo_Ogg_VideoFrames(int num)
 	LOAD_FORMATSPECIFIC_OGG();
 	ogg_packet pt;
 
-	// data is in cls.capturevideo.outbuffer as BGRA and has size width*height
-
 	if(format->yuvi >= 0)
 	{
-		// send the previous frame
+
 		while(format->lastnum-- > 0)
 		{
 			qtheora_encode_YUVin(&format->ts, &format->yuv[format->yuvi]);
@@ -889,20 +744,19 @@ static void SCR_CaptureVideo_Ogg_VideoFrames(int num)
 	SCR_CaptureVideo_Ogg_ConvertFrame_BGRA_to_YUV();
 	format->lastnum = num;
 
-	// TODO maybe send num-1 frames from here already
 }
 
 typedef int channelmapping_t[8];
 channelmapping_t mapping[8] =
 {
-	{ 0, -1, -1, -1, -1, -1, -1, -1 }, // mono
-	{ 0, 1, -1, -1, -1, -1, -1, -1 }, // stereo
-	{ 0, 1, 2, -1, -1, -1, -1, -1 }, // L C R
-	{ 0, 1, 2, 3, -1, -1, -1, -1 }, // surround40
-	{ 0, 2, 3, 4, 1, -1, -1, -1 }, // FL FC FR RL RR
-	{ 0, 2, 3, 4, 1, 5, -1, -1 }, // surround51
-	{ 0, 2, 3, 4, 1, 5, 6, -1 }, // (not defined by vorbis spec)
-	{ 0, 2, 3, 4, 1, 5, 6, 7 } // surround71 (not defined by vorbis spec)
+	{ 0, -1, -1, -1, -1, -1, -1, -1 },
+	{ 0, 1, -1, -1, -1, -1, -1, -1 },
+	{ 0, 1, 2, -1, -1, -1, -1, -1 },
+	{ 0, 1, 2, 3, -1, -1, -1, -1 },
+	{ 0, 2, 3, 4, 1, -1, -1, -1 },
+	{ 0, 2, 3, 4, 1, 5, -1, -1 },
+	{ 0, 2, 3, 4, 1, 5, 6, -1 },
+	{ 0, 2, 3, 4, 1, 5, 6, 7 }
 };
 
 static void SCR_CaptureVideo_Ogg_SoundFrame(const portable_sampleframe_t *paintbuffer, size_t length)
@@ -975,8 +829,6 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 		ti.frame_height = cls.capturevideo.height;
 		ti.width = (ti.frame_width + 15) & ~15;
 		ti.height = (ti.frame_height + 15) & ~15;
-		//ti.offset_x = ((ti.width - ti.frame_width) / 2) & ~1;
-		//ti.offset_y = ((ti.height - ti.frame_height) / 2) & ~1;
 
 		for(i = 0; i < 2; ++i)
 		{
@@ -990,7 +842,7 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 			format->yuv[i].u = (unsigned char *) Mem_Alloc(tempmempool, format->yuv[i].uv_stride * format->yuv[i].uv_height);
 			format->yuv[i].v = (unsigned char *) Mem_Alloc(tempmempool, format->yuv[i].uv_stride * format->yuv[i].uv_height);
 		}
-		format->yuvi = -1; // -1: no frame valid yet, write into 0
+		format->yuvi = -1;
 
 		FindFraction(cls.capturevideo.framerate / cls.capturevideo.framestep, &num, &denom, 1001);
 		ti.fps_numerator = num;
@@ -1003,7 +855,7 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 		ti.colorspace = OC_CS_UNSPECIFIED;
 		ti.pixelformat = OC_PF_420;
 
-		ti.quick_p = true; // http://mlblog.osdir.com/multimedia.ogg.theora.general/2004-07/index.shtml
+		ti.quick_p = true;
 		ti.dropframes_p = false;
 
 		ti.target_bitrate = cl_capturevideo_ogg_theora_bitrate.integer * 1000;
@@ -1032,7 +884,6 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 			}
 		}
 
-		// this -1 magic is because ti.keyframe_frequency and ti.keyframe_mindistance use different metrics
 		ti.keyframe_frequency = bound(1, cl_capturevideo_ogg_theora_keyframe_maxinterval.integer, 1000);
 		ti.keyframe_mindistance = bound(1, cl_capturevideo_ogg_theora_keyframe_mininterval.integer, (int) ti.keyframe_frequency) - 1;
 		ti.noise_sensitivity = bound(0, cl_capturevideo_ogg_theora_noise_sensitivity.integer, 6);
@@ -1053,7 +904,6 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 				Con_DPrintf("Warning: theora stream is not fully VP3 compatible\n");
 		}
 
-		// vorbis?
 		if(cls.capturevideo.soundrate)
 		{
 			qvorbis_info_init(&format->vi);
@@ -1065,7 +915,6 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 
 		qtheora_comment_init(&tc);
 
-		/* create the remaining theora headers */
 		qtheora_encode_header(&format->ts, &pt);
 		qogg_stream_packetin(&format->to, &pt);
 		if (qogg_stream_pageout (&format->to, &pg) != 1)
@@ -1099,7 +948,7 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 		{
 			int result = qogg_stream_flush (&format->to, &pg);
 			if (result < 0)
-				fprintf (stderr, "Internal Ogg library error.\n"); // TODO Sys_Error
+				fprintf (stderr, "Internal Ogg library error.\n");
 			if (result <= 0)
 				break;
 			FS_Write(cls.capturevideo.videofile, pg.header, pg.header_len);
@@ -1111,7 +960,7 @@ void SCR_CaptureVideo_Ogg_BeginVideo(void)
 		{
 			int result = qogg_stream_flush (&format->vo, &pg);
 			if (result < 0)
-				fprintf (stderr, "Internal Ogg library error.\n"); // TODO Sys_Error
+				fprintf (stderr, "Internal Ogg library error.\n");
 			if (result <= 0)
 				break;
 			FS_Write(cls.capturevideo.videofile, pg.header, pg.header_len);

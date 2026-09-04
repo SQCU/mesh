@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "observed_at": 1788466854,
+  "definition": "uncapped convex half-space realization and complete fused-map compiler closure",
+  "halfspace_vertex_measure": {
+    "halfspace_row_mass": 26,
+    "rows_beyond_former_cap_mass": 2,
+    "vertex_mass": 8,
+    "bounds_min": [-1.0, -1.0, -1.0],
+    "bounds_max": [0.25, 0.5, 1.0],
+    "maximum_constraint_residual": 0.0
+  },
+  "realized_map_measure": {
+    "requested_stock_map_mass": 29,
+    "realized_stock_map_mass": 29,
+    "requested_bridge_mass": 6,
+    "realized_bridge_mass": 6,
+    "realized_map_mass": 35,
+    "computed_join_mass": 34,
+    "cart_navigable_join_mass": 18,
+    "noncart_join_mass": 16,
+    "waypoint_mass": 4656,
+    "waypoint_link_mass": 37362,
+    "team_mass": 256,
+    "requested_cart_mass": 32,
+    "realized_cart_mass": 32,
+    "cart_path_segment_mass": 32,
+    "cart_rider_gap_segment_mass": 0,
+    "cart_construction_residual_mass": 0,
+    "team_cart_nonadvanceable_pair_mass": 0
+  },
+  "visibility_measure": {
+    "portal_cluster_mass": 32960,
+    "file_portal_mass": 94379,
+    "directed_portal_mass": 188758,
+    "hint_portal_mass": 12502,
+    "visibility_byte_mass": 135795208,
+    "visible_cluster_incidence_mass": 13324395,
+    "mean_visible_clusters": 404.26,
+    "base_portal_seconds": 16,
+    "passage_construction_seconds": 34,
+    "passage_portal_flow_seconds": 3010,
+    "total_visibility_seconds": 3065,
+    "reported_passage_memory_megabytes": 15456
+  },
+  "compiler_measure": {
+    "q3map2_sha256": "fc9d51386d77b3ec7fb1e646966ca8f3b656ae7adc246b2007bd1636cbc8fc50",
+    "meta_returncode": 0,
+    "vis_returncode": 0,
+    "light_returncode": 0,
+    "leak_line_mass": 0,
+    "missing_image_line_mass": 0,
+    "missing_file_line_mass": 0,
+    "shaderlist_missing_mass": 0,
+    "bsp_problem_mass": 0,
+    "bsp_coordinate_excess_axis_mass": 0
+  },
+  "artifact_measure": {
+    "map_bytes": 109827783,
+    "bsp_bytes": 367022916,
+    "negative_space_bytes": 17346309,
+    "package_bytes": 99008654,
+    "package_entry_mass": 10,
+    "package_mode": "0644",
+    "compressed_data_error_mass": 0,
+    "missing_bundle_artifact_mass": 0
+  },
+  "geometry_residual_measure": {
+    "source_translation_error_mass": 0,
+    "negative_space_error_mass": 0,
+    "overlay_error_mass": 0,
+    "portal_support_residual_mass": 0,
+    "corridor_geometry_residual_mass": 0,
+    "noncart_join_budget_residual_mass": 0,
+    "region_component_residual_mass": 0,
+    "release_residual_mass": 0
+  }
+}

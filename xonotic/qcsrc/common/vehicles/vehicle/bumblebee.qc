@@ -47,7 +47,6 @@ float autocvar_g_vehicle_bumblebee_cannon_pitchlimit_up = 60;
 float autocvar_g_vehicle_bumblebee_cannon_turnlimit_in = 20;
 float autocvar_g_vehicle_bumblebee_cannon_turnlimit_out = 80;
 
-
 float autocvar_g_vehicle_bumblebee_raygun_turnspeed = 180;
 float autocvar_g_vehicle_bumblebee_raygun_pitchlimit_down = 20;
 float autocvar_g_vehicle_bumblebee_raygun_pitchlimit_up = 5;
@@ -80,11 +79,8 @@ bool bumblebee_gunner_frame(entity this, float dt)
 	entity gun = this.vehicle;
 	return = true;
 
-	// this isn't technically a vehicle (yet), let's not do frame functions on it (yet)
-	//vehicles_frame(gun, player);
-
 	vehic.solid = SOLID_NOT;
-	//setorigin(this, vehic.origin);
+
 	this.velocity = vehic.velocity;
 
 	float _in, _out;
@@ -103,7 +99,7 @@ bool bumblebee_gunner_frame(entity this, float dt)
 		_out = autocvar_g_vehicle_bumblebee_cannon_turnlimit_in;
 		setorigin(this, vehic.origin + v_up * -16 + v_forward * -16 + v_right * -128);
 	}
-	this.oldorigin = this.origin; // negate fall damage
+	this.oldorigin = this.origin;
 
 	crosshair_trace(this);
 	vector _ct = trace_endpos;
@@ -144,13 +140,11 @@ bool bumblebee_gunner_frame(entity this, float dt)
 		if(gun.enemy.move_movetype == MOVETYPE_WALK)
 			_vel.z *= 0.1;
 
-
 		ad = vf;
 		distance = vlen(ad - this.origin);
 		impact_time = distance / autocvar_g_vehicle_bumblebee_cannon_speed;
 		ad = vf + _vel * impact_time;
 		trace_endpos = ad;
-
 
 		UpdateAuxiliaryXhair(this, ad, '1 0 1', 1);
 		vehicle_aimturret(vehic, trace_endpos, gun, "fire",
@@ -194,14 +188,14 @@ bool bumblebee_gunner_frame(entity this, float dt)
 
 vector bumblebee_gunner_findgoodexit(vector prefer_spot, entity gunner, entity player)
 {
-	//vector exitspot;
+
 	float mysize;
 
 	tracebox(gunner.origin + '0 0 32', STAT(PL_MIN, player), STAT(PL_MAX, player), prefer_spot, MOVE_NORMAL, player);
 	if(trace_fraction == 1.0 && !trace_startsolid && !trace_allsolid)
 		return prefer_spot;
 
-	mysize = 1.5 * vlen(STAT(PL_MAX, player) - STAT(PL_MIN, player)); // can't use gunner's size, as they don't have a size
+	mysize = 1.5 * vlen(STAT(PL_MAX, player) - STAT(PL_MIN, player));
 	float i;
 	vector v, v2;
 	v2 = 0.5 * (gunner.absmin + gunner.absmax);
@@ -215,7 +209,7 @@ vector bumblebee_gunner_findgoodexit(vector prefer_spot, entity gunner, entity p
 			return v;
 	}
 
-	return prefer_spot; // this should be considered a fallback?!
+	return prefer_spot;
 }
 
 void bumblebee_gunner_exit(entity this, int _exitflag)
@@ -230,7 +224,6 @@ void bumblebee_gunner_exit(entity this, int _exitflag)
 		WriteByte(MSG_ONE, SVC_SETVIEWPORT);
 		WriteEntity(MSG_ONE, player);
 
-		// NOTE: engine networked
 		WriteByte(MSG_ONE, SVC_SETVIEWANGLES);
 		WriteAngle(MSG_ONE, 0);
 		WriteAngle(MSG_ONE, vehic.angles.y);
@@ -267,8 +260,6 @@ void bumblebee_gunner_exit(entity this, int _exitflag)
 	spot = spot + v_up * 128 + v_forward * 300 + v_right * 150;
 	spot = bumblebee_gunner_findgoodexit(spot, gunner, player);
 
-	// TODO: figure a way to move player out of the gunner
-
 	player.velocity = 0.75 * vehic.velocity + normalize(spot - vehic.origin) * 200;
 	player.velocity_z += 10;
 
@@ -287,7 +278,7 @@ bool bumblebee_gunner_enter(entity this, entity player)
 
 	if(!vehic.gunner1 && !vehic.gunner2 && ((time >= vehic.gun1.phase) + (time >= vehic.gun2.phase)) == 2)
 	{
-		// we can have some fun
+
 		vector v1 = gettaginfo(vehic, gettagindex(vehic, "cannon_right"));
 		vector v2 = gettaginfo(vehic, gettagindex(vehic, "cannon_left"));
 		if(vlen2(player.origin - v1) < vlen2(player.origin - v2))
@@ -341,11 +332,10 @@ bool bumblebee_gunner_enter(entity this, entity player)
 		WriteByte(MSG_ONE, 		SVC_SETVIEWPORT);
 		WriteEntity(MSG_ONE, 	gunner.vehicle_viewport);
 
-		// NOTE: engine networked
 		WriteByte(MSG_ONE, 		SVC_SETVIEWANGLES);
-		WriteAngle(MSG_ONE, 	gunner.angles_x + vehic.angles_x); // tilt
-		WriteAngle(MSG_ONE, 	gunner.angles_y + vehic.angles_y); // yaw
-		WriteAngle(MSG_ONE, 	0); // roll
+		WriteAngle(MSG_ONE, 	gunner.angles_x + vehic.angles_x);
+		WriteAngle(MSG_ONE, 	gunner.angles_y + vehic.angles_y);
+		WriteAngle(MSG_ONE, 	0);
 	}
 
 	CSQCVehicleSetup(player, STAT(HUD, player));
@@ -451,7 +441,6 @@ bool bumblebee_pilot_frame(entity this, float dt)
 	if(ftmp < -180) ftmp += 360;
 	vehic.avelocity_y = bound(-autocvar_g_vehicle_bumblebee_turnspeed, ftmp + vehic.avelocity.y * 0.9, autocvar_g_vehicle_bumblebee_turnspeed);
 
-	// Pitch
 	ftmp = 0;
 	if(CS(this).movement.x > 0 && vang.x < autocvar_g_vehicle_bumblebee_pitchlimit)
 		ftmp = 4;
@@ -501,7 +490,6 @@ bool bumblebee_pilot_frame(entity this, float dt)
 
 	vehic.velocity  += newvel * dt;
 	this.velocity = CS(this).movement  = vehic.velocity;
-
 
 	if(autocvar_g_vehicle_bumblebee_healgun_locktime)
 	{
@@ -593,13 +581,6 @@ bool bumblebee_pilot_frame(entity this, float dt)
 	}
 	else
 		vehic.gun3.enemy.effects |= EF_NODRAW;
-	/*{
-		if(vehic.gun3.enemy)
-			remove(vehic.gun3.enemy);
-
-		vehic.gun3.enemy = NULL;
-	}
-	*/
 
 	VEHICLE_UPDATE_PLAYER_RESOURCE(this, vehic, health, bumblebee, RES_HEALTH);
 	VEHICLE_UPDATE_PLAYER(this, vehic, energy, bumblebee);
@@ -614,7 +595,7 @@ bool bumblebee_pilot_frame(entity this, float dt)
 	makevectors(vehic.angles);
 	vehic.angles_x *= -1;
 	setorigin(this, vehic.origin + v_up * 48 + v_forward * 160);
-	this.oldorigin = this.origin; // negate fall damage
+	this.oldorigin = this.origin;
 
 	PHYS_INPUT_BUTTON_ATCK(this) = PHYS_INPUT_BUTTON_ATCK2(this) = PHYS_INPUT_BUTTON_CROUCH(this) = false;
 }
@@ -666,7 +647,6 @@ void bumblebee_exit(entity this, int eject)
 
 	spot = vehicles_findgoodexit(this, this.owner, spot);
 
-	// Hide beam
 	if(this.gun3.enemy || !wasfreed(this.gun3.enemy))
 		this.gun3.enemy.effects |= EF_NODRAW;
 
@@ -777,7 +757,6 @@ METHOD(Bumblebee, vr_death, void(Bumblebee thisveh, entity instance))
 {
 	CSQCModel_UnlinkEntity(instance);
 
-	// hide beam
 	if(instance.gun3.enemy || !wasfreed(instance.gun3.enemy))
 		instance.gun3.enemy.effects |= EF_NODRAW;
 
@@ -830,7 +809,7 @@ METHOD(Bumblebee, vr_spawn, void(Bumblebee thisveh, entity instance))
 {
     if(!instance.gun1)
     {
-        // for some reason, autosizing of the shield entity refuses to work for this one so set it up in advance.
+
         instance.vehicle_shieldent = new(vehicle_shieldent);
         instance.vehicle_shieldent.effects = EF_LOWPRECISION;
         setmodel(instance.vehicle_shieldent, MDL_VEH_BUMBLEBEE_SHIELD);
@@ -858,7 +837,6 @@ METHOD(Bumblebee, vr_spawn, void(Bumblebee thisveh, entity instance))
         setattachment(instance.gun1, instance, "cannon_right");
         setattachment(instance.gun2, instance, "cannon_left");
 
-        // Angled bones are no fun, messes up gun-aim; so work arround it.
         instance.gun3.pos1 = instance.angles;
         instance.angles = '0 0 0';
         vector ofs = gettaginfo(instance, gettagindex(instance, "raygun"));
@@ -870,19 +848,17 @@ METHOD(Bumblebee, vr_spawn, void(Bumblebee thisveh, entity instance))
         vehicle_addplayerslot(instance, instance.gun1, HUD_BUMBLEBEE_GUN, MDL_VEH_BUMBLEBEE_GUNCOCKPIT, bumblebee_gunner_frame, bumblebee_gunner_exit, bumblebee_gunner_enter);
         vehicle_addplayerslot(instance, instance.gun2, HUD_BUMBLEBEE_GUN, MDL_VEH_BUMBLEBEE_GUNCOCKPIT, bumblebee_gunner_frame, bumblebee_gunner_exit, bumblebee_gunner_enter);
 
-        setorigin(instance.vehicle_hudmodel, '50 0 -5');    // Move cockpit forward - down.
-        setorigin(instance.vehicle_viewport, '5 0 2');    // Move camera forward up
+        setorigin(instance.vehicle_hudmodel, '50 0 -5');
+        setorigin(instance.vehicle_viewport, '5 0 2');
 
-        //fixme-model-bones
         setorigin(instance.gun1.vehicle_hudmodel, '90 -27 -23');
         setorigin(instance.gun1.vehicle_viewport, '-85 0 50');
-        //fixme-model-bones
+
         setorigin(instance.gun2.vehicle_hudmodel, '90 27 -23');
         setorigin(instance.gun2.vehicle_viewport, '-85 0 50');
 
         instance.scale = 1.5;
 
-        // Raygun beam
         if(instance.gun3.enemy == NULL)
         {
             instance.gun3.enemy = new(bumble_raygun);
@@ -928,7 +904,7 @@ METHOD(Bumblebee, vr_setup, void(Bumblebee thisveh, entity instance))
     instance.vehicle_shield = autocvar_g_vehicle_bumblebee_shield;
 }
 
-#endif // SVQC
+#endif
 #ifdef CSQC
 
 void CSQC_BUMBLE_GUN_HUD()
@@ -968,9 +944,9 @@ METHOD(Bumblebee, vr_crosshair, void(Bumblebee thisveh, entity player))
 }
 METHOD(Bumblebee, vr_setup, void(Bumblebee thisveh, entity instance))
 {
-    AuxiliaryXhair[0].axh_image = vCROSS_LOCK;  // Raygun-locked
-    AuxiliaryXhair[1].axh_image = vCROSS_BURST; // Gunner1
-    AuxiliaryXhair[2].axh_image = vCROSS_BURST; // Gunner2
+    AuxiliaryXhair[0].axh_image = vCROSS_LOCK;
+    AuxiliaryXhair[1].axh_image = vCROSS_BURST;
+    AuxiliaryXhair[2].axh_image = vCROSS_BURST;
 }
 
 #endif

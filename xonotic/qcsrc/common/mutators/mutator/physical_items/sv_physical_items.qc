@@ -6,7 +6,7 @@ float autocvar_g_physical_items_reset;
 
 REGISTER_MUTATOR(physical_items, autocvar_g_physical_items)
 {
-	// check if we have a physics engine
+
 	MUTATOR_ONADD
 	{
 		if (!(autocvar_physics_ode && checkextension("DP_PHYSICS_ODE")))
@@ -18,7 +18,7 @@ REGISTER_MUTATOR(physical_items, autocvar_g_physical_items)
 
 	MUTATOR_ONROLLBACK_OR_REMOVE
 	{
-		// nothing to roll back
+
 	}
 
 	MUTATOR_ONREMOVE
@@ -36,19 +36,18 @@ void physical_item_think(entity this)
 {
 	this.nextthink = time;
 
-	this.alpha = this.owner.alpha; // apply fading and ghosting
+	this.alpha = this.owner.alpha;
 
-	if(!this.cnt) // map item, not dropped
+	if(!this.cnt)
 	{
-		// copy ghost item properties
+
 		this.colormap = this.owner.colormap;
 		this.colormod = this.owner.colormod;
 		this.glowmod = this.owner.glowmod;
 
-		// if the item is not spawned, make sure the invisible / ghost item returns to its origin and stays there
 		if(autocvar_g_physical_items_reset)
 		{
-			if(this.owner.wait > time) // awaiting respawn
+			if(this.owner.wait > time)
 			{
 				setorigin(this, this.spawn_origin);
 				this.angles = this.spawn_angles;
@@ -66,12 +65,12 @@ void physical_item_think(entity this)
 	}
 
 	if(!this.owner.modelindex)
-		delete(this); // the real item is gone, remove this
+		delete(this);
 }
 
 void physical_item_touch(entity this, entity toucher)
 {
-	if(!this.cnt) // not for dropped items
+	if(!this.cnt)
 	if (ITEM_TOUCH_NEEDKILL())
 	{
 		setorigin(this, this.spawn_origin);
@@ -81,7 +80,7 @@ void physical_item_touch(entity this, entity toucher)
 
 void physical_item_damage(entity this, entity inflictor, entity attacker, float damage, int deathtype, .entity weaponentity, vector hitloc, vector force)
 {
-	if(!this.cnt) // not for dropped items
+	if(!this.cnt)
 	if(ITEM_DAMAGE_NEEDKILL(deathtype))
 	{
 		setorigin(this, this.spawn_origin);
@@ -95,11 +94,9 @@ MUTATOR_HOOKFUNCTION(physical_items, Item_Spawn)
 
 	if(item.owner == NULL && autocvar_g_physical_items <= 1)
 		return;
-	if (item.spawnflags & 1) // floating item
+	if (item.spawnflags & 1)
 		return;
 
-	// The actual item can't be physical and trigger at the same time, so make it invisible and use a second entity for physics.
-	// Ugly hack, but unless SOLID_TRIGGER is gotten to work with MOVETYPE_PHYSICS in the engine it can't be fixed.
 	entity wep = spawn();
 	_setmodel(wep, item.model);
 	setsize(wep, item.mins, item.maxs);
@@ -111,7 +108,7 @@ MUTATOR_HOOKFUNCTION(physical_items, Item_Spawn)
 	wep.solid = SOLID_CORPSE;
 	set_movetype(wep, MOVETYPE_PHYSICS);
 	wep.takedamage = DAMAGE_AIM;
-	wep.effects |= EF_NOMODELFLAGS; // disable the spinning
+	wep.effects |= EF_NOMODELFLAGS;
 	wep.colormap = item.owner.colormap;
 	wep.glowmod = item.owner.glowmod;
 	wep.damageforcescale = autocvar_g_physical_items_damageforcescale;
@@ -125,7 +122,7 @@ MUTATOR_HOOKFUNCTION(physical_items, Item_Spawn)
 
 	if(!wep.cnt)
 	{
-		// fix the spawn origin
+
 		setorigin(wep, wep.origin + '0 0 1');
 		droptofloor(wep);
 	}
@@ -133,8 +130,8 @@ MUTATOR_HOOKFUNCTION(physical_items, Item_Spawn)
 	wep.spawn_origin = wep.origin;
 	wep.spawn_angles = item.angles;
 
-	item.effects |= EF_NODRAW; // hide the original weapon
+	item.effects |= EF_NODRAW;
 	set_movetype(item, MOVETYPE_FOLLOW);
-	item.aiment = wep; // attach the original weapon
+	item.aiment = wep;
 	setSendEntity(item, func_null);
 }

@@ -6,11 +6,11 @@ METHOD(Shield, m_remove, void(StatusEffects this, entity actor, int removal_type
     bool wasactive = (actor.statuseffects && (actor.statuseffects.statuseffect_flags[this.m_id] & STATUSEFFECT_FLAG_ACTIVE));
     if(removal_type == STATUSEFFECT_REMOVE_TIMEOUT && wasactive && IS_PLAYER(actor))
     {
-        //Send_Notification(NOTIF_ALL, NULL, MSG_INFO, INFO_POWERDOWN_SHIELD, actor.netname);
+
         Send_Notification(NOTIF_ONE, actor, MSG_CENTER, CENTER_POWERDOWN_SHIELD);
     }
     if(wasactive)
-        stopsound(actor, CH_TRIGGER_SINGLE); // get rid of the pickup sound
+        stopsound(actor, CH_TRIGGER_SINGLE);
     actor.effects &= ~(EF_RED | EF_ADDITIVE | EF_FULLBRIGHT);
     SUPER(Shield).m_remove(this, actor, removal_type);
 }

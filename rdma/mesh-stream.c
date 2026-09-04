@@ -1,4 +1,4 @@
-// see RDMA-FIRST.md
+
 #include "mesh.h"
 #include <stdio.h>
 #include <stdlib.h>

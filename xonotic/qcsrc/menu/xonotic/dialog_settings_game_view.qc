@@ -71,16 +71,16 @@ void XonoticGameViewSettingsTab_fill(entity me)
 			_("Field of vision in degrees")));
 	me.TR(me);
 	me.TR(me);
-		//me.TDempty(me, 0.2);
+
 		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, ZCTX(_("ZOOM^Zoom factor:"))));
 		me.TD(me, 1, 2, e = makeXonoticSlider_T(2, 30, 0.5, "cl_zoomfactor",
 			_("How big the zoom factor is when the zoom button is pressed")));
 	me.TR(me);
-		//me.TDempty(me, 0.2);
+
 		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, ZCTX(_("ZOOM^Zoom speed:"))));
 		me.TD(me, 1, 2, e = makeXonoticTextSlider_T("cl_zoomspeed",
 			_("How fast the view will be zoomed, disable to zoom instantly")));
-			e.addValue(e, "1", "1"); // Samual: for() loop doesn't work here, even though it would make sense.
+			e.addValue(e, "1", "1");
 			e.addValue(e, "2", "2");
 			e.addValue(e, "3", "3");
 			e.addValue(e, "4", "4");
@@ -91,7 +91,7 @@ void XonoticGameViewSettingsTab_fill(entity me)
 			e.addValue(e, ZCTX(_("ZOOM^Instant")), "-1");
 			e.configureXonoticTextSliderValues(e);
 	me.TR(me);
-		//me.TDempty(me, 0.2);
+
 		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, ZCTX(_("ZOOM^Zoom sensitivity:"))));
 		me.TD(me, 1, 2, e = makeXonoticSlider_T(0, 1, 0.1, "cl_zoomsensitivity",
 			_("How zoom changes sensitivity, from 0 (lower sensitivity) to 1 (no sensitivity change)")));
@@ -108,13 +108,13 @@ void XonoticGameViewSettingsTab_fill(entity me)
 			setDependentAND(e, "cl_velocityzoom_enabled", 1, 1, "cl_velocityzoom_type", 1, 3);
 	me.TR(me);
 	me.TR(me);
-		//me.TDempty(me, 0.2);
+
 		me.TD(me, 1, 3, e = makeXonoticCheckBox(0, "cl_reticle", _("Display reticle 2D overlay while zooming")));
 	me.TR(me);
-		//me.TDempty(me, 0.2);
+
 		me.TD(me, 1, 3, e = makeXonoticCheckBox_T(0, "cl_unpress_zoom_on_death", _("Release zoom when you die or respawn"), "-"));
 			makeMulti(e, "cl_unpress_zoom_on_spawn");
 	me.TR(me);
-		//me.TDempty(me, 0.2);
+
 		me.TD(me, 1, 3, e = makeXonoticCheckBox(0, "cl_unpress_zoom_on_weapon_switch", _("Release zoom when you switch weapons")));
 }

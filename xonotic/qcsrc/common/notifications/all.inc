@@ -1,107 +1,11 @@
-// ====================================
-//  Notifications List and Information
-// ====================================
-/*
- List of all notifications (including identifiers and display information)
- Possible Tokens:
-    default, name, strnum, flnum,
-    channel, sound, volume, position,
-    args, hudargs, icon, cpid, durcnt, normal, gentle,
-    anncename, infoname, centername,
-    challow, chtype, optiona, optionb
- Format Specifications:
-    name: VAR: Name of notification
-    MSG_ANNCE:
-      default: FLOAT: Default setting for whether the notification is enabled or not
-         ^-> 0 = disabled, 1 = enabled if gentle is disabled, 2 = always enabled
-      sound: STRING: Filename for the announcement sound
-      channel: FLOAT: Sound channel to broadcast on to
-      volume: FLOAT: Volume setting for the announcement sound
-      position: FLOAT: Attenuation/positioning value
-    MSG_INFO:
-      default: FLOAT: Default setting for whether the notification is enabled or not
-         ^-> 0 = disabled, 1 = enabled, 2 = also print to chat box
-      strnum: FLOAT: Number of STRING arguments (so that networking knows how many to send/receive)
-      flnum: FLOAT: Number of FLOAT arguments (so that networking knows how many to send/receive)
-      args: STRING: Arguments for Local_Notification_sprintf()
-      hudargs: STRING: Arguments for Local_Notification_HUD_Notify_Push()
-      icon: STRING: icon string name for the hud notify panel, "" if no icon is used
-      normal: STRING: Normal message (string for sprintf when gentle messages are NOT enabled)
-      gentle: STRING: Gentle message (string for sprintf when gentle messages ARE enabled)
-    MSG_CENTER:
-      default: FLOAT: Default setting for whether the notification is enabled or not
-         ^-> 0 = disabled, 1 = enabled
-      strnum: FLOAT: Number of STRING arguments (so that networking knows how many to send/receive)
-      flnum: FLOAT: Number of FLOAT arguments (so that networking knows how many to send/receive)
-      args: STRING: Arguments for Local_Notification_sprintf()
-      cpid: FLOAT: centerprint ID number (CPID_*), CPID_Null if no CPID is needed
-      durcnt: XPD(FLOAT, FLOAT): Duration/Countdown: extra arguments for centerprint messages
-      normal: STRING: Normal message (string for sprintf when gentle messages are NOT enabled)
-      gentle: STRING: Gentle message (string for sprintf when gentle messages ARE enabled)
-    MSG_MULTI:
-      default: FLOAT: Default setting for whether the notification is enabled or not
-         ^-> 0 = disabled, 1 = enabled
-      anncename: VAR: Name of announcer notification for reference
-      infoname: VAR: Name of info notification for reference
-      centername: VAR: Name of centerprint notification for reference
-    MSG_CHOICE:
-      default: FLOAT: Default setting for whether the notification is enabled or not
-         ^-> 0 = disabled, 1 = select option A, 2 = selection option B
-      challow: FLOAT: Default setting for server allowing choices other than A
-         ^-> 0 = no choice, 1 = allowed in warmup, 2 = always allowed
-      chtype: VAR: Notification message type for options
-      optiona: VAR: Name of choice "A" notification for reference
-      optionb: VAR: Name of choice "B" notification for reference
 
- Messages with ^F1, ^BG, ^TC, etc etc in them will replace those strings
- with colors according to the cvars the user has chosen. This allows for
- users to create unique color profiles for their HUD, giving more customization
- options to HUD designers and end users who want such a feature.
 
- Check out the definitions in util.qc/util.qh/teams.qh for string CCR(...) and
- string TCR(...) to better understand how these code replacements work.
-
- Additionally, you can find all the definitions and explanations for
- the argument values and what they return down below in this file.
-
- Guidlines for notification declaration (please try and follow these):
-  Specific rules:
-    - ALWAYS start the string with a color, preferably background.
-    - ALWAYS reset a color after a name (this way they don't set it for the whole string).
-    - NEVER add or remove tokens from the format, it SHOULD already work.
-    - MSG_INFO hudargs must always be ATTACKER -> VICTIM
-    - MSG_INFO and MSG_CENTER should NOT end with a new line
-
- General rules:
-    - Be clean and simple with your notification naming,
-     nothing too long for the name field... Abbreviations are your friend. :D
-    - Keep the spacing as clean as possible... if the arguments are abnormally long,
-      it's okay to go out of line a bit... but try and keep it clean still.
-    - Use ONLY spaces for spacing in the notification list, tabs are too inconsistent
-      with keeping alignment on different mediums.
-    - Sort the notifications in the most appropriate order for their tasks.
-
- Final note: DO NOT PROVIDE MORE ARGUMENTS THAN NECESSARY FOR THE NOTIFICATION YOU'RE CALLING!
-      The system is designed to save as much networking bandwidth as possible,
-      so please dynamically control your argument sending to fit *exactly* what is required.
-      If you send a notification with mismatching arguments, Send_Notification() will error.
-*/
-
-// NOTE: leaving BOLD_OPERATOR outside of translatable messages has 2 advantages:
-// 1. translators don't have to deal with it
-// 2. messages can be changed to bold / normal without the need to translate them again
 #define BOLD(translatable_msg) strcat(BOLD_OPERATOR, translatable_msg)
 
-// default value for annce notification cvars (notification_ANNCE_*):
-// 0: off, 1: announce only if gentle mode is off, 2: announce always
 #define N___NEVER 0
 #define N_GNTLOFF 1
 #define N__ALWAYS 2
 
-// default time for announcer queue (time to wait before the next announcer is played)
-// -1 = bypass queue and play the announcer immediately
-// 0 = use the announcer sound length
-// >0 = use the specified time in seconds
 #define ANNCE_INSTANT -1
 #define ANNCE_LENGTH 0
 #define ANNCE_DEFTIME 2
@@ -111,9 +15,9 @@
     MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_1)), channel, volume, position) \
     MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_2)), channel, volume, position) \
     MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_3)), channel, volume, position) \
-    MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_4)), channel, volume, position)
+    MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_4)), channel, volume, position) \
+    MSG_ANNCE_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, sprintf(sound, strtolower(STATIC_NAME_TEAM_5)), channel, volume, position)
 
-// MSG_ANNCE_NOTIFICATIONS
     MSG_ANNCE_NOTIF(ACHIEVEMENT_AIRSHOT,        N_GNTLOFF, "airshot",           CH_INFO, VOL_BASEVOICE, ATTEN_NONE, ANNCE_DEFTIME)
     MSG_ANNCE_NOTIF(ACHIEVEMENT_AMAZING,        N_GNTLOFF, "amazing",           CH_INFO, VOL_BASEVOICE, ATTEN_NONE, ANNCE_DEFTIME)
     MSG_ANNCE_NOTIF(ACHIEVEMENT_AWESOME,        N_GNTLOFF, "awesome",           CH_INFO, VOL_BASEVOICE, ATTEN_NONE, ANNCE_DEFTIME)
@@ -214,13 +118,10 @@
 #undef N_GNTLOFF
 #undef N__ALWAYS
 
-// default value for info notification cvars (notification_INFO_*):
-// 0: off, 1: display in console, 2: display in chatbox and console
 #define N_DISABLE 0
 #define N_CONSOLE 1
 #define N_CHATCON 2
 
-// hack to work around the limitations of sprintf
 string multiteam_info_sprintf(string input, string teamname) { return ((input != "") ? sprintf(input, teamname) : ""); }
 
 #define MULTITEAM_INFO(prefix, defaultvalue, strnum, flnum, args, hudargs, icon, normal, gentle, type) \
@@ -228,9 +129,9 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
     MSG_INFO_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_1)), TCR(normal, type, 1), TCR(gentle, type, 1)) \
     MSG_INFO_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_2)), TCR(normal, type, 2), TCR(gentle, type, 2)) \
     MSG_INFO_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_3)), TCR(normal, type, 3), TCR(gentle, type, 3)) \
-    MSG_INFO_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_4)), TCR(normal, type, 4), TCR(gentle, type, 4))
+    MSG_INFO_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_4)), TCR(normal, type, 4), TCR(gentle, type, 4)) \
+    MSG_INFO_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, strnum, flnum, args, hudargs, multiteam_info_sprintf(icon, strtolower(STATIC_NAME_TEAM_5)), TCR(normal, type, 5), TCR(gentle, type, 5))
 
-// MSG_INFO_NOTIFICATIONS
     MSG_INFO_NOTIF(CHAT_DISABLED,                           N_CHATCON,  0, 0, "", "",       "",     _("^F4NOTE: ^BGChat is currently disabled on this server"), "")
     MSG_INFO_NOTIF(CHAT_NOSPECTATORS,                       N_CHATCON,  0, 0, "", "",       "",     _("^F4NOTE: ^BGSpectator chat is not sent to players during the match"), "")
     MSG_INFO_NOTIF(CHAT_PRIVATE_DISABLED,                   N_CHATCON,  0, 0, "", "",       "",     _("^F4NOTE: ^BGPrivate chat is currently disabled on this server"), "")
@@ -526,8 +427,6 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
 #undef N_CONSOLE
 #undef N_CHATCON
 
-// default value for centerprint notification cvars (notification_CENTER_*):
-// 0: off, 1: centerprint
 #define N_DISABL 0
 #define N_ENABLE 1
 
@@ -536,9 +435,9 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
     MSG_CENTER_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 1), TCR(gentle, type, 1)) \
     MSG_CENTER_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 2), TCR(gentle, type, 2)) \
     MSG_CENTER_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 3), TCR(gentle, type, 3)) \
-    MSG_CENTER_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 4), TCR(gentle, type, 4))
+    MSG_CENTER_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 4), TCR(gentle, type, 4)) \
+    MSG_CENTER_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, strnum, flnum, args, cpid, durcnt, TCR(normal, type, 5), TCR(gentle, type, 5))
 
-// MSG_CENTER_NOTIFICATIONS
     MSG_CENTER_NOTIF(ALONE,                             N_ENABLE,    0, 0, "",               CPID_Null,              "0 0",  _("^F4You are now alone!"), "")
 
     MSG_CENTER_NOTIF(ASSAULT_ATTACKING,                 N_ENABLE,    0, 0, "",               CPID_ASSAULT_ROLE,      "0 0",  _("^BGYou are attacking!"), "")
@@ -814,8 +713,6 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
 #undef N_DISABL
 #undef N_ENABLE
 
-// default value for multi notification cvars:
-// 0: off, 1: enable this multiple notification
 #define N_DISABL 0
 #define N_ENABLE 1
 
@@ -823,9 +720,9 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
     MSG_MULTI_NOTIF(prefix##_RED, defaultvalue, anncepre##_RED, infopre##_RED, centerpre##_RED) \
     MSG_MULTI_NOTIF(prefix##_BLUE, defaultvalue, anncepre##_BLUE, infopre##_BLUE, centerpre##_BLUE) \
     MSG_MULTI_NOTIF(prefix##_YELLOW, defaultvalue, anncepre##YELLOW, infopre##YELLOW, centerpre##YELLOW) \
-    MSG_MULTI_NOTIF(prefix##_PINK, defaultvalue, anncepre##PINK, infopre##PINK, centerpre##PINK)
+    MSG_MULTI_NOTIF(prefix##_PINK, defaultvalue, anncepre##PINK, infopre##PINK, centerpre##PINK) \
+    MSG_MULTI_NOTIF(prefix##_GREEN, defaultvalue, anncepre##GREEN, infopre##GREEN, centerpre##GREEN)
 
-// MSG_MULTI_NOTIFICATIONS
     MSG_MULTI_NOTIF(COUNTDOWN_BEGIN,                    N_ENABLE,  ANNCE_BEGIN,    NULL,                                   CENTER_COUNTDOWN_BEGIN)
     MSG_MULTI_NOTIF(COUNTDOWN_STOP,                     N_ENABLE,  NULL,           INFO_COUNTDOWN_STOP,                    CENTER_COUNTDOWN_STOP)
 
@@ -996,24 +893,20 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
     MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_1, prefix##_RED, prefix, defaultvalue, challow, chtype, optiona##_RED, optionb##_RED) \
     MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_2, prefix##_BLUE, prefix, defaultvalue, challow, chtype, optiona##_BLUE, optionb##_BLUE) \
     MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_3, prefix##_YELLOW, prefix, defaultvalue, challow, chtype, optiona##_YELLOW, optionb##_YELLOW) \
-    MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, challow, chtype, optiona##_PINK, optionb##_PINK)
+    MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_4, prefix##_PINK, prefix, defaultvalue, challow, chtype, optiona##_PINK, optionb##_PINK) \
+    MSG_CHOICE_NOTIF_TEAM(NUM_TEAM_5, prefix##_GREEN, prefix, defaultvalue, challow, chtype, optiona##_GREEN, optionb##_GREEN)
 
 #undef N_DISABL
 #undef N_ENABLE
 
-// default value for choice notification cvars (notification_CHOICE_*):
-// 0: off, 1: display default message, 2: display verbose message
 #define N_DISABLE 0
 #define N__NORMAL 1
 #define N_VERBOSE 2
 
-// default value for allowed choice notification cvars (notification_CHOICE_*_ALLOWED):
-// 0: never allowed, 1: allowed in warmup, 2: always allowed
 #define A__NEVER 0
 #define A_WARMUP 1
 #define A_ALWAYS 2
 
-// MSG_CHOICE_NOTIFICATIONS
     MULTITEAM_CHOICE(CTF_CAPTURE_BROKEN,        N_VERBOSE, A_ALWAYS,  MSG_INFO,   INFO_CTF_CAPTURE,                   INFO_CTF_CAPTURE_BROKEN)
     MULTITEAM_CHOICE(CTF_CAPTURE_TIME,          N_VERBOSE, A_ALWAYS,  MSG_INFO,   INFO_CTF_CAPTURE,                   INFO_CTF_CAPTURE_TIME)
     MULTITEAM_CHOICE(CTF_CAPTURE_UNBROKEN,      N_VERBOSE, A_ALWAYS,  MSG_INFO,   INFO_CTF_CAPTURE,                   INFO_CTF_CAPTURE_UNBROKEN)
@@ -1037,8 +930,6 @@ string multiteam_info_sprintf(string input, string teamname) { return ((input !=
 #undef N__NORMAL
 #undef N_VERBOSE
 
-// default value for allowed choice notification cvars (notification_CHOICE_*_ALLOWED):
-// 0: never allowed, 1: allowed in warmup, 2: always allowed
 #undef A__NEVER
 #undef A_WARMUP
 #undef A_ALWAYS

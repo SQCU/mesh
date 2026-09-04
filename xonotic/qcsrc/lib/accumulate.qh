@@ -10,10 +10,7 @@
 		func()
 #else
 	#ifdef HAVE_YO_DAWG_CPP
-// YO DAWG!
-// I HERD YO LIEK MACROS
-// SO I PUT A MACRO DEFINITION IN YO MACRO DEFINITION
-// SO YO CAN EXPAND MACROS WHILE YO EXPAND MACROS
+
 		#define ACCUMULATE_FUNCTION(func, otherfunc) \
 			#ifdef func \
 			void __merge__##otherfunc() \
@@ -47,7 +44,6 @@
 	#endif
 #endif
 
-// used for simplifying ACCUMULATE_FUNCTIONs
 #define SET_FIRST_OR_LAST(input, first, count) \
 	if (!input) { input = (first + count); }
 #define SET_FIELD_COUNT(field, first, count) \

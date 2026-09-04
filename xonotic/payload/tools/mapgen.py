@@ -1,7 +1,7 @@
-import struct, sys, os, re, math, glob, random, subprocess, time, zipfile
+import sys, os, math, random, subprocess, tempfile, time, zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
-from placement import fnum, vstr, check_bsp, vadd, vsub, vdot, vscale, vnorm, vcross
+from placement import fnum, vstr, check_bsp, vadd, vscale, vnorm, vcross
 
 Q3MAP2 = os.environ.get('Q3MAP2', os.path.expanduser('~/dox/xonotic/netradiant-custom/install/q3map2'))
 BASEPATH = os.environ.get('XON_BASEPATH', os.path.expanduser('~/dox/xonotic/Xonotic'))
@@ -10,17 +10,14 @@ TEX = dict(floor='exx/floor-tread01', wall='exx/wall-bigrib02', ceil='exx/panel-
            caulk='common/caulk', trigger='common/trigger')
 THK, DOORH, GRID = 32.0, 192.0, 176.0
 
-
 def basis(n):
     w = [0.0, 0.0, 1.0] if abs(n[2]) < 0.9 else [1.0, 0.0, 0.0]
     u = vnorm(vcross(n, w))
     return u, vcross(n, u)
 
-
 def face_pts(n, o):
     u, v = basis(n)
     return [o, vadd(o, vscale(v, 64)), vadd(o, vscale(u, 64))]
-
 
 class Gen:
     def __init__(self, seed, name):
@@ -34,7 +31,6 @@ class Gen:
             for s, coord in ((1, maxs), (-1, mins)):
                 n = [0.0] * 3
                 n[a] = float(s)
-                o = list(coord) if s > 0 else list(mins)
                 o2 = [maxs[k] if k != a else coord[a] for k in range(3)] if s > 0 else \
                      [mins[k] if k != a else coord[a] for k in range(3)]
                 t = texmap.get((a, s), tex) if texmap else tex
@@ -45,8 +41,9 @@ class Gen:
         tm = {(2, 1): top} if top else None
         self.box([x0, y0, z0], [x1, y1, z1], tex, tm)
 
-    def wall_with_door(self, axis, at, lo0, lo1, z0, z1, door_c, door_w, tex):
-        dz1 = min(z1, z0 + DOORH)
+    def wall_with_door(self, axis, at, lo0, lo1, z0, z1, door_c, door_w, tex,
+                       door_h=DOORH):
+        dz1 = min(z1, z0 + door_h)
         d0, d1 = door_c - door_w / 2, door_c + door_w / 2
         segs = [(lo0, d0, z0, z1), (d1, lo1, z0, z1), (d0, d1, dz1, z1)]
         for s0, s1, sz0, sz1 in segs:
@@ -71,11 +68,12 @@ class Gen:
                                          ('s', 1, y0 - THK, x0 - THK, x1 + THK), ('n', 1, y1, x0 - THK, x1 + THK)):
             dr = doors.get(side)
             if dr:
-                self.wall_with_door(axis, at, lo0, lo1, z, z + h, dr[0], dr[1], TEX['wall'])
+                self.wall_with_door(axis, at, lo0, lo1, z, z + h, dr[0], dr[1],
+                                    TEX['wall'], dr[2] if len(dr) > 2 else DOORH)
             else:
                 self.wall(axis, at, lo0, lo1, z, z + h, TEX['wall'])
         self.slab(cx - 32, cy - 32, cx + 32, cy + 32, z + h - 2, z + h, TEX['light'])
-        self.floors.append((x0 + 24, y0 + 24, x1 - 24, y1 - 24, z))
+        self.floors.append((x0 + 48, y0 + 48, x1 - 48, y1 - 48, z))
         self.ents.append({'classname': 'light', 'origin': '%g %g %g' % (cx, cy, z + h - 48), 'light': '600'})
 
     def corridor(self, axis, c0, c1, perp, z, w, h):
@@ -92,11 +90,11 @@ class Gen:
         else:
             self.wall(0, x0 - THK, y0, y1, z, z + h, TEX['wall'])
             self.wall(0, x1, y0, y1, z, z + h, TEX['wall'])
-        self.floors.append((x0 + 24, y0 + 24, x1 - 24, y1 - 24, z))
+        self.floors.append((x0 + 48, y0 + 48, x1 - 48, y1 - 48, z))
 
     def ledge(self, x0, y0, x1, y1, z):
         self.slab(x0, y0, x1, y1, z - 24, z, TEX['caulk'], top=TEX['floor'])
-        self.floors.append((x0 + 16, y0 + 16, x1 - 16, y1 - 16, z))
+        self.floors.append((x0 + 48, y0 + 48, x1 - 48, y1 - 48, z))
 
     def jumppad(self, at, target, idx):
         self.slab(at[0] - 48, at[1] - 48, at[0] + 48, at[1] + 48, at[2], at[2] + 8, TEX['pad'])
@@ -176,62 +174,38 @@ class Gen:
         seen = set()
         wl = ['//WAYPOINT_VERSION 1.04', '//WAYPOINT_SYMMETRY 0', '//WAYPOINT_TIME ' + ts]
         for p in self.wps:
-            k = vstr(p)
+            k = vstr([p[0], p[1], p[2] + 24])
             if k in seen:
                 continue
             seen.add(k)
             wl += [k, k, '0']
         cl = ['//WAYPOINT_VERSION 1.04', '//WAYPOINT_TIME ' + ts]
         for a, b, oneway in self.links:
-            cl.append(vstr(a) + '*' + vstr(b))
+            aa = [a[0], a[1], a[2] + 24]
+            bb = [b[0], b[1], b[2] + 24]
+            cl.append(vstr(aa) + '*' + vstr(bb))
             if not oneway:
-                cl.append(vstr(b) + '*' + vstr(a))
+                cl.append(vstr(bb) + '*' + vstr(aa))
         open(os.path.join(outdir, mapname + '.waypoints'), 'w').write('\n'.join(wl) + '\n')
         open(os.path.join(outdir, mapname + '.waypoints.cache'), 'w').write('\n'.join(cl) + '\n')
         print('nav: %d waypoints %d links' % (len(seen), len(cl) - 2))
 
-
-
-# ---------------------------------------------------------------------------
-# Procedural BRIDGE TILE  (the "k-many bridge maps" of the fusion spec)
-#
-# A bridge tile is a small procedurally generated map whose only purpose is to be
-# socketed to several other maps at once -- the 'connector' map of the spec, the
-# thing that is allowed to have subtle/weakly-signposted edges *because* it has
-# multiple edges to multiple other map nodes.  It is real q3map2-compiled brush
-# geometry, not a corridor slab: a two-tier hub chamber with cardinal arms.
-#
-#   * up to 4 arms on the ground tier   (z = 0)
-#   * up to 4 arms on the gallery tier  (z = TIER) reached by jumppads, and a
-#     teleporter back down -- the commanded use of jumppad + portal + verticality
-#   * every arm ends in a thin caulk PLUG brush so q3map2 sees a sealed hull; the
-#     plug is small enough (<< 640^3) that mapfuse's corridor carver removes it
-#     when it punches the join corridor through.
-#
-# Returns (Gen, ports) where ports is a list of dicts:
-#     {'p': [x,y,z] floor point just inside the arm mouth, 'dir': [dx,dy,0],
-#      'tier': 0|1, 'name': 'e0'|...}
-# ---------------------------------------------------------------------------
 DIRS = {'e': (1, 0), 'w': (-1, 0), 'n': (0, 1), 's': (0, -1)}
 HUBW, ARMW, ARMH, ARML, TIER, PLUGT = 1024.0, 288.0, 224.0, 640.0, 320.0, 32.0
 
-
 def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
-    """arms_lo / arms_hi: iterables of 'e','w','n','s' -- which cardinal arms to
-    cut on the ground tier and on the gallery tier."""
     rng = random.Random(seed)
     g = Gen(seed, name)
     h = HUBW / 2.0
     hub_h = TIER + 320.0
-    arms_lo = list(arms_lo) + list(arms_hi)      # all ports on the ground tier:
-    arms_hi = []                                 # a port must be cart-navigable
-    doors_lo = {d: (0.0, ARMW) for d in arms_lo}
+    arms_lo = list(arms_lo) + list(arms_hi)
+    arms_hi = []
+    doors_lo = {d: (0.0, ARMW + 2.0 * THK, ARMH + THK) for d in arms_lo}
     g.room(0.0, 0.0, 0.0, HUBW, HUBW, hub_h, doors_lo)
     ports = []
-    # bright light-panel bands around the hub at eye height.  The fused BSP carries a
-    # flat grey lightmap, so a connector reads as "bright" only through its diffuse
-    # surfaces -- and the spec wants a connector to be noticeable, not concealed.
-    for bx in ((-h, -h, h, -h + 8), (-h, h - 8, h, h), (-h, -h, -h + 8, h), (h - 8, -h, h, h)):
+
+    for bx in ((-h + 8, -h, h - 8, -h + 8), (-h + 8, h - 8, h - 8, h),
+               (-h, -h, -h + 8, h), (h - 8, -h, h, h)):
         g.box([bx[0], bx[1], 120.0], [bx[2], bx[3], 168.0], TEX['light'])
 
     def arm(d, z, tier):
@@ -240,7 +214,7 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
         c0 = h if (dx > 0 or dy > 0) else -(h + ARML)
         c1 = c0 + ARML
         g.corridor(axis, c0, c1, 0.0, z, ARMW, ARMH)
-        # end plug: sealed for q3map2, small enough for mapfuse to carve
+
         far = c1 if (dx > 0 or dy > 0) else c0
         sgn = 1 if (dx > 0 or dy > 0) else -1
         lo = [0.0] * 3
@@ -261,9 +235,7 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
 
     for d in arms_lo:
         arm(d, 0.0, 0)
-    # VERTICALITY: a gallery ring ledge above the hub floor, reached by a jumppad and
-    # left by a teleporter -- "ways to use the portal and jump pad and verticality".
-    # It is an interior feature, never a port, so every port stays cart-navigable.
+
     gw = 288.0
     g.ledge(-h, -h, h, -h + gw, TIER)
     g.ledge(-h, h - gw, h, h, TIER)
@@ -275,9 +247,7 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
     g.teleporter(land, [0.0, -(h - 400.0), 0.0], 90, 0)
     g.spawn('info_player_deathmatch', [0.0, 0.0, 0.0], rng.randrange(360))
     g.gen_nav()
-    # gen_nav only grid-links coplanar floors; snap the jumppad/teleporter links onto
-    # the nearest REAL generated waypoint so the gallery is genuinely reachable in the
-    # fused waypoint cache rather than dangling on a synthetic endpoint.
+
     wpset = {tuple(w) for w in g.wps}
 
     def snap(q):
@@ -286,8 +256,7 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
         cand = [w for w in g.wps if abs(w[2] - q[2]) < 1.0] or g.wps
         return list(min(cand, key=lambda w: math.dist(w, q)))
     g.links = [(snap(a), snap(b), o) for a, b, o in g.links]
-    # a port must be a REAL node of the tile's waypoint graph, otherwise mapfuse
-    # sockets the join corridor onto a point no bot can stand on or route through.
+
     linked = set()
     for a, b, o in g.links:
         linked.add(tuple(a)); linked.add(tuple(b))
@@ -297,28 +266,24 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
             pt['p'] = list(min(cand, key=lambda w: math.dist(w, pt['p'])))
     return g, ports
 
-
-def build_bridge_tile(outdir, name, seed, arms_lo, arms_hi):
-    """Emit + q3map2-compile a bridge tile and its nav files into outdir.
-    Returns (basepath_without_ext, ports)."""
+def build_bridge_tile(outdir, name, seed, arms_lo, arms_hi,
+                      q3map2=Q3MAP2, basepath=BASEPATH):
     os.makedirs(outdir, exist_ok=True)
     g, ports = bridge_tile(seed, arms_lo, arms_hi, name)
     mappath = os.path.join(outdir, name + '.map')
     g.emit_map(mappath)
-    compile_map(mappath)
+    compile_map(mappath, q3map2=q3map2, basepath=basepath)
     g.write_nav(outdir, name)
     base = os.path.join(outdir, name)
     probs = check_bsp(open(base + '.bsp', 'rb').read())
-    print('bridge %s: parse-back %s  ports=%s' %
-          (name, 'OK' if not probs else 'PROBLEMS %s' % probs[:5],
-           [p['name'] for p in ports]))
+    print('bridge %s: parse_problem_mass=%d parse_problems=%s ports=%s' %
+          (name, len(probs), probs[:5], [p['name'] for p in ports]))
     return base, ports
 
-
-def compile_map(mappath, verbose=False):
+def compile_map(mappath, verbose=False, q3map2=Q3MAP2, basepath=BASEPATH):
     env = dict(os.environ)
     for stage in (['-meta'], ['-vis', '-threads', '1'], ['-light', '-threads', '1', '-fast', '-samples', '2', '-bounce', '2']):
-        cmd = [Q3MAP2, '-game', 'xonotic', '-fs_basepath', BASEPATH] + stage + [mappath]
+        cmd = [q3map2, '-game', 'xonotic', '-fs_basepath', basepath] + stage + [mappath]
         r = subprocess.run(cmd, capture_output=True, text=True, env=env)
         tail = [l for l in r.stdout.splitlines() if l.strip()][-3:]
         leaked = [l for l in r.stdout.splitlines() if 'LEAK' in l.upper() or 'WARNING' in l]
@@ -330,14 +295,22 @@ def compile_map(mappath, verbose=False):
             print(r.stderr[-1000:])
             raise SystemExit('q3map2 %s failed' % stage[0])
 
-
 def ring_arena(seed, nrooms):
     rng = random.Random(seed)
     g = Gen(seed, 'arena seed %d' % seed)
     nrooms = max(4, nrooms + (nrooms & 1))
-    cols = nrooms // 2
+    rows = int(math.sqrt(nrooms))
+    while rows > 2 and (nrooms % rows or rows & 1):
+        rows -= 1
+    cols = nrooms // rows
     pitch = 1536.0
-    cells = [(i, 0) for i in range(cols)] + [(i, 1) for i in range(cols - 1, -1, -1)]
+    cells = [(i, 0) for i in range(cols)]
+    for y in range(1, rows):
+        if y & 1:
+            cells += [(i, y) for i in range(cols - 1, 0, -1)]
+        else:
+            cells += [(i, y) for i in range(1, cols)]
+    cells += [(0, y) for y in range(rows - 1, 0, -1)]
     rooms = []
     for gx, gy in cells:
         rooms.append([gx * pitch, gy * pitch, rng.choice([704, 832, 960]),
@@ -382,41 +355,27 @@ def ring_arena(seed, nrooms):
         if i % 2:
             g.spawn('info_player_team%d' % (i % 4 + 1), [cx - 128, cy + 128, 0], rng.randrange(360))
     g.gen_nav()
+    centers = [[room[0], room[1], 0.0] for room in rooms]
+    g.wps += centers
+    for i, jn, axis in pairs:
+        g.links.append((centers[i], centers[jn], 0))
     return g
-
-
-def smoke(outdir, mapname):
-    log = os.path.join(outdir, 'smoke.log')
-    cmd = [os.path.expanduser('~/dox/mesh/xonotic/darkplaces-work/darkplaces-dedicated'), '-xonotic',
-           '-basedir', BASEPATH, '-userdir', os.path.dirname(os.path.dirname(outdir)),
-           '+port', '26013', '+sv_public', '0', '+g_payload', '0',
-           '+bot_number', '2', '+skill', '1', '+map', mapname]
-    with open(log, 'w') as lf:
-        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
-        time.sleep(20)
-        p.terminate()
-        try:
-            p.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            p.kill()
-    out = open(log, errors='ignore').read()
-    errs = [l for l in out.splitlines() if re.search(r'Host_Error|OBJECT ERROR|not found|invalid|funny', l)]
-    print('smoke: %d lines, %d error-ish -> %s' % (len(out.splitlines()), len(errs), log))
-    for l in errs[:10]:
-        print('smoke-err: %s' % l)
-    for l in out.splitlines()[-6:]:
-        print('smoke-tail: %s' % l)
-
 
 if __name__ == '__main__':
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     flags = [a for a in sys.argv[1:] if a.startswith('--')]
     seed = int(args[0]) if args else 0
     nrooms = 6
-    outdir = '/tmp/mapgensmoke/data/maps'
+    kteams = 5
+    kcarts = 3
+    outdir = '/tmp/mapgen/data/maps'
     for f in flags:
         if f.startswith('--rooms='):
             nrooms = int(f[8:])
+        if f.startswith('--teams='):
+            kteams = int(f[8:])
+        if f.startswith('--carts='):
+            kcarts = int(f[8:])
         if f.startswith('--out='):
             outdir = f[6:]
     os.makedirs(outdir, exist_ok=True)
@@ -428,10 +387,9 @@ if __name__ == '__main__':
     compile_map(mappath)
     bsp = os.path.join(outdir, mapname + '.bsp')
     probs = check_bsp(open(bsp, 'rb').read())
-    print('parse-back: %s' % ('OK' if not probs else 'PROBLEMS %s' % probs[:8]))
+    print('parse_problem_mass=%d parse_problems=%s' % (len(probs), probs[:8]))
     g.write_nav(outdir, mapname)
-    # The generated tile's own waypoints must stand in its COMPUTED free volume.
-    # `mkentfile.Bsp` is deleted; this is the one definition of solidity.
+
     import negspace as _NS
     _d = open(bsp, 'rb').read()
     gns = _NS.NegSpace(_d, mask=_NS.MASK_PLAYERSOLID)
@@ -440,15 +398,24 @@ if __name__ == '__main__':
     viol = sum(1 for p in g.wps
                if not intrig((p[0], p[1], p[2] + 24))
                and gns.standing_point([p[0], p[1], p[2] + 24]) is None)
-    print('wp standable check (computed free volume): %s (%d/%d violations)'
-          % ('PASS' if viol == 0 else 'FAIL', viol, len(g.wps)))
+    print('wp_standable_mass=%d wp_unstandable_mass=%d' % (len(g.wps) - viol, viol))
     open(os.path.join(outdir, mapname + '.mapinfo'), 'w').write(
         'title GenArena %d\ndescription parametric payload arena\nauthor mapgen\n'
         'gametype dm\ngametype tdm\ngametype plc\n' % seed)
-    M.emit(bsp, os.path.join(outdir, mapname + '.ent'), 5, 3, '', ns=gns)
-    with zipfile.ZipFile(os.path.join(outdir, mapname + '.pk3'), 'w', zipfile.ZIP_DEFLATED) as z:
-        for ext in ('.bsp', '.waypoints', '.waypoints.cache', '.mapinfo', '.ent'):
-            z.write(os.path.join(outdir, mapname + ext), 'maps/' + mapname + ext)
-    print('wrote %s' % os.path.join(outdir, mapname + '.pk3'))
-    if '--smoke' in flags:
-        smoke(outdir, mapname)
+    M.emit(bsp, os.path.join(outdir, mapname + '.ent'), kteams, kcarts, '', ns=gns)
+    target = os.path.join(outdir, mapname + '.pk3')
+    handle = tempfile.NamedTemporaryFile(dir=outdir, prefix=mapname + '.pk3.', delete=False)
+    temporary = handle.name
+    handle.close()
+    try:
+        with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as z:
+            for ext in ('.bsp', '.waypoints', '.waypoints.cache', '.mapinfo', '.ent'):
+                z.write(os.path.join(outdir, mapname + ext), 'maps/' + mapname + ext)
+            z.write(os.path.join(outdir, mapname + '.ent.measurements.json'),
+                    'maps/' + mapname + '.measurements.json')
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print('wrote %s' % target)

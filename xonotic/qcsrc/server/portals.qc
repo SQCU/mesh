@@ -53,17 +53,10 @@ vector Portal_ApplyTransformToPlayerAngle(vector transform, vector vangle)
 
 	vector ang;
 	ang = vangle;
-	/*
-	   ang_x = bound(-89, mod(-ang_x + 180, 360) - 180, 89);
-	   ang = AnglesTransform_ApplyToVAngles(transform, ang);
-	 */
 
-	// PLAYERS use different math
 #if !(POSITIVE_PITCH_IS_DOWN)
 	ang.x = -ang.x;
 #endif
-
-	//print("reference: ", vtos(AnglesTransform_ApplyToVAngles(transform, ang)), "\n");
 
 	fixedmakevectors(ang);
 	old_forward = v_forward;
@@ -71,33 +64,24 @@ vector Portal_ApplyTransformToPlayerAngle(vector transform, vector vangle)
 	fixedmakevectors(ang.y * '0 1 0');
 	old_yawforward = v_forward;
 
-	// their aiming directions are portalled...
 	new_forward = AnglesTransform_Apply(transform, old_forward);
 	new_up = AnglesTransform_Apply(transform, old_up);
 	new_yawforward = AnglesTransform_Apply(transform, old_yawforward);
 
-	// but now find a new sense of direction
-	// this is NOT easy!
-	// assume new_forward points straight up.
-	// What is our yaw?
-	//
-	// new_up could now point forward OR backward... which direction to choose?
-
-	if(new_forward.z > 0.7 || new_forward.z < -0.7) // far up; in this case, the "up" vector points backwards
+	if(new_forward.z > 0.7 || new_forward.z < -0.7)
 	{
-		// new_yawforward and new_yawup define the new aiming half-circle
-		// we "just" need to find out whether new_up or -new_up is in that half circle
-		ang = fixedvectoangles(new_forward); // this still gets us a nice pitch value...
+
+		ang = fixedvectoangles(new_forward);
 		if(new_up * new_yawforward < 0)
 			new_up = -1 * new_up;
-		ang.y = vectoyaw(new_up); // this vector is the yaw we want
-		//print("UP/DOWN path: ", vtos(ang), "\n");
+		ang.y = vectoyaw(new_up);
+
 	}
 	else
 	{
-		// good angles; here, "forward" suffices
+
 		ang = fixedvectoangles(new_forward);
-		//print("GOOD path: ", vtos(ang), "\n");
+
 	}
 
 #if !(POSITIVE_PITCH_IS_DOWN)
@@ -125,19 +109,11 @@ float Portal_TeleportPlayer(entity teleporter, entity player, entity portal_owne
 	to = teleporter.enemy.origin;
 	to = to + AnglesTransform_Apply(teleporter.portal_transform, player.origin - from);
 	newvel = AnglesTransform_Apply(transform, player.velocity);
-	// this now is INSIDE the plane... can't use that
 
-	// shift it out
 	fixedmakevectors(teleporter.enemy.mangle);
 
-	// first shift it ON the plane if needed
 	planeshift = ((teleporter.enemy.origin - to) * v_forward) + PlayerEdgeDistance(player, v_forward) + 1;
-	/*
-	if(planeshift > 0 && (newvel * v_forward) > vlen(newvel) * 0.01)
-		// if we can't, let us not do the planeshift and do somewhat incorrect transformation in the end
-		to += newvel * (planeshift / (newvel * v_forward));
-	else
-	*/
+
 		to += v_forward * planeshift;
 
 	s = (to - teleporter.enemy.origin) * v_right;
@@ -149,13 +125,13 @@ float Portal_TeleportPlayer(entity teleporter, entity player, entity portal_owne
 	   +     s                                        * v_right
 	   +     t                                        * v_up;
 
-	safe = teleporter.enemy.portal_safe_origin; // a valid player origin
+	safe = teleporter.enemy.portal_safe_origin;
 	step = to + ((safe - to) * v_forward) * v_forward;
 	tracebox(safe, player.mins - SAFENUDGE, player.maxs + SAFENUDGE, step, MOVE_NOMONSTERS, player);
 	if(trace_startsolid)
 	{
 		LOG_INFO("'safe' teleport location is not safe!");
-		// FAIL TODO why does this happen?
+
 		return 0;
 	}
 	safe = trace_endpos + normalize(safe - trace_endpos) * 0;
@@ -163,19 +139,16 @@ float Portal_TeleportPlayer(entity teleporter, entity player, entity portal_owne
 	if(trace_startsolid)
 	{
 		LOG_INFO("trace_endpos in solid, this can't be!");
-		// FAIL TODO why does this happen? (reported by MrBougo)
+
 		return 0;
 	}
 	to = trace_endpos + normalize(safe - trace_endpos) * 0;
-	//print(vtos(to), "\n");
 
-	// ang_x stuff works around weird quake angles
 	if(IS_PLAYER(player))
 		ang = Portal_ApplyTransformToPlayerAngle(transform, player.v_angle);
 	else
 		ang = AnglesTransform_ApplyToAngles(transform, player.angles);
 
-	// factor -1 allows chaining portals, but may be weird
 	player.right_vector = -1 * AnglesTransform_Apply(transform, player.right_vector);
 
 	MUTATOR_CALLHOOK(PortalTeleport, player);
@@ -190,7 +163,7 @@ float Portal_TeleportPlayer(entity teleporter, entity player, entity portal_owne
 	TeleportPlayer(teleporter, player, to, ang, newvel, teleporter.enemy.absmin, teleporter.enemy.absmax, TELEPORT_FLAGS_PORTAL);
 	if(tdeath_hit)
 	{
-		// telefrag within 1 second of portal creation = amazing
+
 		if(time < teleporter.teleport_time + 1)
 			Send_Notification(NOTIF_ONE, player, MSG_ANNCE, ANNCE_ACHIEVEMENT_AMAZING);
 	}
@@ -207,7 +180,6 @@ float Portal_TeleportPlayer(entity teleporter, entity player, entity portal_owne
 		return 0;
 	}
 
-	// reset fade counter
 	teleporter.portal_wants_to_vanish = 0;
 	teleporter.fade_time = ((autocvar_g_balance_portal_lifetime >= 0) ? time + autocvar_g_balance_portal_lifetime : 0);
 	SetResourceExplicit(teleporter, RES_HEALTH, autocvar_g_balance_portal_health);
@@ -245,13 +217,13 @@ float Portal_WillHitPlane(vector eorg, vector emins, vector emaxs, vector evel, 
 	dist += min(emins.x * pnorm.x, emaxs.x * pnorm.x);
 	dist += min(emins.y * pnorm.y, emaxs.y * pnorm.y);
 	dist += min(emins.z * pnorm.z, emaxs.z * pnorm.z);
-	if(dist < -1) // other side?
+	if(dist < -1)
 		return 0;
 #ifdef PORTALS_ARE_NOT_SOLID
 	distpersec = evel * pnorm;
-	if(distpersec >= 0) // going away from the portal?
+	if(distpersec >= 0)
 		return 0;
-	// we don't need this check with solid portals, them being SOLID_BSP should suffice
+
 	delta = dist / distpersec;
 	v = eorg - evel * delta - porg;
 	v = v - pnorm * (pnorm * v);
@@ -266,33 +238,33 @@ void Portal_Touch(entity this, entity toucher)
 	vector g;
 
 #ifdef PORTALS_ARE_NOT_SOLID
-	// portal is being removed?
+
 	if(this.solid != SOLID_TRIGGER)
-		return; // possibly engine bug
+		return;
 
 	if(IS_PLAYER(toucher))
-		return; // handled by think
+		return;
 #endif
 
 	if(toucher.classname == "item_flag_team")
-		return; // never portal these
+		return;
 
 	if(toucher.classname == "grapplinghook")
-		return; // handled by think
+		return;
 
 	if(!autocvar_g_vehicles_teleportable)
 	if(IS_VEHICLE(toucher))
-		return; // no teleporting vehicles?
+		return;
 
 	if(!this.enemy)
 		error("Portal_Touch called for a broken portal\n");
 
 #ifdef PORTALS_ARE_NOT_SOLID
 	if(trace_fraction < 1)
-		return; // only handle TouchAreaGrid ones (only these can teleport)
+		return;
 #else
 	if(trace_fraction >= 1)
-		return; // only handle impacts
+		return;
 #endif
 
 	if(toucher.classname == "porto")
@@ -309,24 +281,15 @@ void Portal_Touch(entity this, entity toucher)
 	if(toucher != this.aiment)
 		if(IS_PLAYER(toucher))
 			if(IS_INDEPENDENT_PLAYER(toucher) || IS_INDEPENDENT_PLAYER(this.aiment))
-				return; // cannot go through someone else's portal
+				return;
 	if(toucher.aiment != this.aiment)
 		if(IS_PLAYER(toucher.aiment))
 			if(IS_INDEPENDENT_PLAYER(toucher.aiment) || IS_INDEPENDENT_PLAYER(this.aiment))
-				return; // cannot go through someone else's portal
+				return;
 	fixedmakevectors(this.mangle);
 	g = frametime * '0 0 -1' * autocvar_sv_gravity;
 	if(!Portal_WillHitPlane(toucher.origin, toucher.mins, toucher.maxs, toucher.velocity + g, this.origin, v_forward, this.maxs.x))
 		return;
-
-	/*
-	if(toucher.mins_x < PL_MIN.x || toucher.mins_y < PL_MIN.y || toucher.mins_z < PL_MIN.z
-	|| toucher.maxs_x > PL_MAX.x || toucher.maxs_y > PL_MAX.y || toucher.maxs_z > PL_MAX.z)
-	{
-		// can't teleport this
-		return;
-	}
-	*/
 
 	if(Portal_TeleportPlayer(this, toucher, this.aiment))
 		if(toucher.classname == "porto")
@@ -359,7 +322,7 @@ void Portal_MakeWaitingPortal(entity portal)
 void Portal_MakeInPortal(entity portal)
 {
 	portal.skin = 0;
-	portal.solid = SOLID_NOT; // this is done when connecting them!
+	portal.solid = SOLID_NOT;
 	settouch(portal, Portal_Touch);
 	setthink(portal, Portal_Think);
 	portal.effects = EF_RED;
@@ -404,7 +367,7 @@ void Portal_Connect(entity teleporter, entity destination)
 #else
 	teleporter.solid = SOLID_BSP;
 #endif
-	setorigin(teleporter, teleporter.origin); // link it to the area grid
+	setorigin(teleporter, teleporter.origin);
 }
 
 void Portal_Remove(entity portal, float killed)
@@ -422,9 +385,7 @@ void Portal_Remove(entity portal, float killed)
 		portal.aiment.portal_in = NULL;
 	if(portal == portal.aiment.portal_out)
 		portal.aiment.portal_out = NULL;
-	//portal.aiment = NULL;
 
-	// makes the portal vanish
 	if(killed)
 	{
 		fixedmakevectors(portal.mangle);
@@ -457,8 +418,6 @@ void Portal_Think_TryTeleportPlayer(entity this, entity e, vector g, entity port
 	if(!Portal_WillHitPlane(e.origin, e.mins, e.maxs, e.velocity + g, this.origin, v_forward, this.maxs.x))
 		return;
 
-	// if e would hit the portal in a frame...
-	// already teleport him
 	tracebox(e.origin, e.mins, e.maxs, e.origin + e.velocity * 2 * frametime, MOVE_NORMAL, e);
 	if(trace_ent == this)
 		Portal_TeleportPlayer(this, e, portal_owner);
@@ -470,9 +429,9 @@ void Portal_Think(entity this)
 	vector g;
 
 #ifdef PORTALS_ARE_NOT_SOLID
-	// portal is being removed?
+
 	if(this.solid != SOLID_TRIGGER)
-		return; // possibly engine bug
+		return;
 
 	if(!this.enemy)
 		error("Portal_Think called for a broken portal\n");
@@ -488,7 +447,7 @@ void Portal_Think(entity this)
 	FOREACH_CLIENT(IS_PLAYER(it), {
 		if(it != o)
 			if(IS_INDEPENDENT_PLAYER(it) || IS_INDEPENDENT_PLAYER(o))
-				continue; // cannot go through someone else's portal
+				continue;
 
 		if(it != o || time >= this.portal_activatetime)
 			Portal_Think_TryTeleportPlayer(this, it, g, o);
@@ -529,23 +488,6 @@ bool Portal_Customize(entity this, entity client)
 	return true;
 }
 
-// cleanup:
-//   when creating in-portal:
-//     disconnect
-//     clear existing in-portal
-//     set as in-portal
-//     connect
-//   when creating out-portal:
-//     disconnect
-//     clear existing out-portal
-//     set as out-portal
-//   when player dies:
-//     disconnect portals
-//     clear both portals
-//   after timeout of in-portal:
-//     disconnect portals
-//     clear both portals
-//   TODO: ensure only one portal shot at once
 float Portal_SetInPortal(entity own, entity portal)
 {
 	if(own.portal_in)
@@ -644,7 +586,7 @@ entity Portal_Spawn(entity own, vector org, vector ang)
 	setorigin(portal, org);
 	portal.mangle = ang;
 	portal.angles = ang;
-	portal.angles_x = -portal.angles.x; // is a bmodel
+	portal.angles_x = -portal.angles.x;
 	setthink(portal, Portal_Think);
 	portal.nextthink = 0;
 	portal.portal_activatetime = time + 0.1;

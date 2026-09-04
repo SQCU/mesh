@@ -20,5 +20,4 @@ REGISTER_MUTATOR(cts, false)
 	return 0;
 }
 
-// scores
 const float ST_CTS_LAPS = 1;

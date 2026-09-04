@@ -4,24 +4,21 @@
 #include <common/items/_mod.qh>
 #include <common/util.qh>
 
-// Powerups (#2)
-
 void HUD_Powerups_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_powerups_iconalign");
 	HUD_Write_Cvar("hud_panel_powerups_baralign");
 	HUD_Write_Cvar("hud_panel_powerups_progressbar");
 	HUD_Write_Cvar("hud_panel_powerups_text");
 }
 
-// Powerup item fields (reusing existing fields)
-.string message;  // Human readable name
-.string netname;  // Icon name
-.vector colormod; // Color
-.float count;     // Time left
-.float lifetime;  // Maximum time
-.float cnt;       // Infinite timer
+.string message;
+.string netname;
+.vector colormod;
+.float count;
+.float lifetime;
+.float cnt;
 
 entity powerupItems;
 int powerupItemsCount;
@@ -74,7 +71,7 @@ int getPowerupItemAlign(int align, int column, int row, int columns, int rows, b
 
 void HUD_Powerups()
 {
-	// Initialize items
+
 	if(!autocvar__hud_configure)
 	{
 		if((!autocvar_hud_panel_powerups) || (spectatee_status == -1))
@@ -83,7 +80,6 @@ void HUD_Powerups()
 			return;
 	}
 
-	// Add items to linked list
 	resetPowerupItems();
 
 	MUTATOR_CALLHOOK(HUD_Powerups_add);
@@ -91,7 +87,6 @@ void HUD_Powerups()
 	if(!powerupItemsCount)
 		return;
 
-	// Draw panel background
 	HUD_Panel_LoadCvars();
 
 	if (autocvar_hud_panel_powerups_dynamichud)
@@ -100,7 +95,6 @@ void HUD_Powerups()
 		HUD_Scale_Disable();
 	HUD_Panel_DrawBg();
 
-	// Set drawing area
 	vector pos = panel_pos;
 	vector size = panel_size;
 	bool isVertical = size.y > size.x;
@@ -111,7 +105,6 @@ void HUD_Powerups()
 		size -= '2 2 0' * panel_bg_padding;
 	}
 
-	// Find best partitioning of the drawing area
 	const float DESIRED_ASPECT = 6;
 	float aspect = 0, a;
 	int columns = 0, c;
@@ -133,7 +126,6 @@ void HUD_Powerups()
 	}
 	while(++i <= powerupItemsCount);
 
-	// Prevent single items from getting too wide
 	if(powerupItemsCount == 1 && aspect > DESIRED_ASPECT)
 	{
 		if(isVertical)
@@ -148,7 +140,6 @@ void HUD_Powerups()
 		}
 	}
 
-	// Draw items from linked list
 	vector itemPos = pos;
 	vector itemSize = vec2(size.x / columns, size.y / rows);
 	vector textColor = '1 1 1';
@@ -163,14 +154,12 @@ void HUD_Powerups()
 	{
 		itemPos = vec2(pos.x + column * itemSize.x, pos.y + row * itemSize.y);
 
-		// Draw progressbar
 		if(autocvar_hud_panel_powerups_progressbar)
 		{
 			align = getPowerupItemAlign(autocvar_hud_panel_powerups_baralign, column, row, columns, rows, isVertical);
 			HUD_Panel_DrawProgressBar(itemPos, itemSize, "progressbar", item.count / item.lifetime, isVertical, align, item.colormod, autocvar_hud_progressbar_alpha * panel_fg_alpha, DRAWFLAG_NORMAL);
 		}
 
-		// Draw icon and text
 		if(autocvar_hud_panel_powerups_text)
 		{
 			align = getPowerupItemAlign(autocvar_hud_panel_powerups_iconalign, column, row, columns, rows, isVertical);
@@ -188,7 +177,6 @@ void HUD_Powerups()
 			}
 		}
 
-		// Determine next section
 		if(isVertical)
 		{
 			if(++column >= columns)

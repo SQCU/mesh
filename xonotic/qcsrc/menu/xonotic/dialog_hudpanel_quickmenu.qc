@@ -9,9 +9,6 @@ void XonoticHUDQuickMenuDialog_fill(entity me)
 	entity e;
 	string panelname = "quickmenu";
 
-	// this panel has no main cvar
-	//dialog_hudpanel_main_checkbox(me, panelname);
-
 	dialog_hudpanel_main_settings(me, panelname);
 
 	me.TR(me);

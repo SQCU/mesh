@@ -9,9 +9,9 @@ function hash() {
 
 function check() {
     declare -l base="${1}"
-    # strip trailing spaces
+
     STRIP_TRAILING_WS='s/[[:space:]]\+$//'
-    # line feed at EOF for #include to work properly
+
     ENSURE_EOFLF='$a\'
     find "$base" -type f -print0 | sort -z | while read -r -d '' file; do
         oldHash=$(hash ${file})

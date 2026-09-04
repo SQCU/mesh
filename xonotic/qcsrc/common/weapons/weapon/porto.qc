@@ -36,7 +36,7 @@ void Porto_Draw(entity this)
 		wepent.polyline[0] = pos;
 
 		int portal_number = 0, portal1_idx = 1, portal_max = 2;
-		int n = 1 + 2;  // 2 lines == 3 points
+		int n = 1 + 2;
 		for (int idx = 0; idx < n && idx < polyline_length - 1; )
 		{
 			traceline(pos, pos + 65536 * dir, true, this);
@@ -53,7 +53,7 @@ void Porto_Draw(entity this)
 				n = max(2, idx);
 				break;
 			}
-			// check size
+
 			{
 				vector ang = vectoangles2(trace_plane_normal, dir);
 				ang.x = -ang.x;
@@ -71,7 +71,7 @@ void Porto_Draw(entity this)
 		for (int idx = 0; idx < n - 1; ++idx)
 		{
 			vector p = wepent.polyline[idx], q = wepent.polyline[idx + 1];
-			if (idx == 0) p -= view_up * 16;  // line from player
+			if (idx == 0) p -= view_up * 16;
 			vector rgb = (idx < portal1_idx) ? '1 0 0' : '0 0 1';
 			Draw_CylindricLine(p, q, 4, "", 1, 0, rgb, 0.5, DRAWFLAG_NORMAL, view_origin);
 		}
@@ -108,7 +108,6 @@ void W_Porto_Fail(entity this, float failhard)
 		return;
 	}
 
-	// no portals here!
 	if(this.cnt < 0)
 	{
 		Portal_ClearWithID(this.realowner, this.portal_id);
@@ -158,16 +157,13 @@ void W_Porto_Touch(entity this, entity toucher)
 {
 	vector norm;
 
-	// do not use PROJECTILE_TOUCH here
-	// FIXME but DO handle warpzones!
-
 	if(toucher.classname == "portal")
-		return; // handled by the portal
+		return;
 
 	norm = trace_plane_normal;
 	if(trace_ent.iscreature)
 	{
-		// TODO: why not use entity size?
+
 		traceline(trace_ent.origin, trace_ent.origin + '0 0 2' * PL_MIN_CONST.z, MOVE_WORLDONLY, this);
 		if(trace_fraction >= 1)
 			return;
@@ -185,7 +181,7 @@ void W_Porto_Touch(entity this, entity toucher)
 	else if((trace_dphitq3surfaceflags & Q3SURFACEFLAG_SLICK) || (trace_dphitcontents & DPCONTENTS_PLAYERCLIP))
 	{
 		spamsound(this, CH_SHOTS, SND_PORTO_BOUNCE, VOL_BASE, ATTEN_NORM);
-		// just reflect
+
 		this.right_vector = this.right_vector - 2 * trace_plane_normal * (this.right_vector * trace_plane_normal);
 		this.angles = vectoangles(this.velocity - 2 * trace_plane_normal * (this.velocity * trace_plane_normal));
 	}
@@ -198,7 +194,7 @@ void W_Porto_Touch(entity this, entity toucher)
 	}
 	else if(this.cnt == 0)
 	{
-		// in-portal only
+
 		if(Portal_SpawnInPortalAtTrace(this.realowner, this.right_vector, this.portal_id))
 		{
 			sound(this, CH_SHOTS, SND_PORTO_CREATE, VOL_BASE, ATTEN_NORM);
@@ -215,7 +211,7 @@ void W_Porto_Touch(entity this, entity toucher)
 	}
 	else if(this.cnt == 1)
 	{
-		// out-portal only
+
 		if(Portal_SpawnOutPortalAtTrace(this.realowner, this.right_vector, this.portal_id))
 		{
 			sound(this, CH_SHOTS, SND_PORTO_CREATE, VOL_BASE, ATTEN_NORM);
@@ -240,7 +236,7 @@ void W_Porto_Touch(entity this, entity toucher)
 			Send_Notification(NOTIF_ONE, this.realowner, MSG_CENTER, CENTER_PORTO_CREATED_IN);
 			this.right_vector = this.right_vector - 2 * trace_plane_normal * (this.right_vector * norm);
 			this.angles = vectoangles(this.velocity - 2 * trace_plane_normal * (this.velocity * norm));
-			CSQCProjectile(this, true, PROJECTILE_PORTO_BLUE, true); // change type
+			CSQCProjectile(this, true, PROJECTILE_PORTO_BLUE, true);
 		}
 		else
 		{
@@ -281,12 +277,10 @@ void W_Porto_Attack(Weapon thiswep, entity actor, .entity weaponentity, float ty
 {
 	entity gren;
 
-	W_SetupShot(actor, weaponentity, false, 4, SND_PORTO_FIRE, CH_WEAPON_A, 0, thiswep.m_id); // TODO: does the deathtype even need to be set here? porto can't hurt people
-	// always shoot from the eye
+	W_SetupShot(actor, weaponentity, false, 4, SND_PORTO_FIRE, CH_WEAPON_A, 0, thiswep.m_id);
+
 	w_shotdir = v_forward;
 	w_shotorg = actor.origin + actor.view_ofs + ((w_shotorg - actor.origin - actor.view_ofs) * v_forward) * v_forward;
-
-	//Send_Effect(EFFECT_GRENADE_MUZZLEFLASH, w_shotorg, w_shotdir * 1000, 1);
 
 	gren = new(porto);
 	gren.weaponentity_fld = weaponentity;
@@ -306,7 +300,6 @@ void W_Porto_Attack(Weapon thiswep, entity actor, .entity weaponentity, float ty
 	setthink(gren, W_Porto_Think);
 	settouch(gren, W_Porto_Touch);
 
-	// TODO: handle as mutator effect
 	if(StatusEffects_active(STATUSEFFECT_Strength, actor))
 		W_SetupProjVelocity_Basic(gren, WEP_CVAR_BOTH(porto, (type <= 0), speed) * autocvar_g_balance_powerup_strength_force, 0);
 	else
@@ -379,7 +372,7 @@ METHOD(PortoLaunch, wr_think, void(entity thiswep, entity actor, .entity weapone
             }
         }
         if(actor.(weaponentity).porto_v_angle_held)
-            makevectors(actor.(weaponentity).porto_v_angle); // override the previously set angles
+            makevectors(actor.(weaponentity).porto_v_angle);
 
         if(fire & 1)
         if(!actor.porto_current)
@@ -393,12 +386,12 @@ METHOD(PortoLaunch, wr_think, void(entity thiswep, entity actor, .entity weapone
 }
 METHOD(PortoLaunch, wr_checkammo1, bool(entity thiswep, entity this, .entity weaponentity))
 {
-    // always allow infinite ammo
+
     return true;
 }
 METHOD(PortoLaunch, wr_checkammo2, bool(entity thiswep, entity this, .entity weaponentity))
 {
-    // always allow infinite ammo
+
     return true;
 }
 METHOD(PortoLaunch, wr_resetplayer, void(entity thiswep, entity actor))

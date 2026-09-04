@@ -1,46 +1,17 @@
-/*
-	$RCSfile$
 
-	Copyright (C) 1996-1997  Id Software, Inc.
-
-	This program is free software; you can redistribute it and/or
-	modify it under the terms of the GNU General Public License
-	as published by the Free Software Foundation; either version 2
-	of the License, or (at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-	See the GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to:
-
-		Free Software Foundation, Inc.
-		59 Temple Place - Suite 330
-		Boston, MA  02111-1307, USA
-
-	$Id$
-*/
 
 #ifndef __KEYS_H
 #define __KEYS_H
 
 #include "qtypes.h"
 
-//
-// these are the key numbers that should be passed to Key_Event
-//
 typedef enum keynum_e
 {
-	K_TEXT			= 1, // used only for unicode character input
+	K_TEXT			= 1,
 	K_TAB			= 9,
 	K_ENTER			= 13,
 	K_ESCAPE		= 27,
 	K_SPACE			= 32,
-
-	// normal keys should be passed as lowercased ascii
 
 	K_BACKSPACE		= 127,
 	K_UPARROW,
@@ -109,8 +80,6 @@ typedef enum keynum_e
 
 	K_PRINTSCREEN,
 
-	// mouse buttons generate virtual keys
-
 	K_MOUSE1 = 512,
 	K_OTHERDEVICESBEGIN = K_MOUSE1,
 	K_MOUSE2,
@@ -131,9 +100,6 @@ typedef enum keynum_e
 	K_MOUSE15,
 	K_MOUSE16,
 
-//
-// joystick buttons
-//
 	K_JOY1 = 768,
 	K_JOY2,
 	K_JOY3,
@@ -151,10 +117,6 @@ typedef enum keynum_e
 	K_JOY15,
 	K_JOY16,
 
-//
-// aux keys are for multi-buttoned joysticks to generate so they can use
-// the normal binding process
-//
 	K_AUX1,
 	K_AUX2,
 	K_AUX3,
@@ -188,7 +150,6 @@ typedef enum keynum_e
 	K_AUX31,
 	K_AUX32,
 
-	// Microsoft Xbox 360 Controller For Windows
 	K_X360_DPAD_UP,
 	K_X360_DPAD_DOWN,
 	K_X360_DPAD_LEFT,
@@ -214,13 +175,12 @@ typedef enum keynum_e
 	K_X360_RIGHT_THUMB_LEFT,
 	K_X360_RIGHT_THUMB_RIGHT,
 
-	// generic joystick emulation for menu
 	K_JOY_UP,
 	K_JOY_DOWN,
 	K_JOY_LEFT,
 	K_JOY_RIGHT,
 
-	K_MIDINOTE0 = 896, // to this, the note number is added
+	K_MIDINOTE0 = 896,
 	K_MIDINOTE1,
 	K_MIDINOTE2,
 	K_MIDINOTE3,
@@ -357,17 +317,16 @@ typedef enum keydest_e { key_game, key_message, key_menu, key_menu_grabbed, key_
 
 extern	char		key_line[MAX_INPUTLINE];
 extern	int			key_linepos;
-extern	qboolean	key_insert;	// insert key toggle (for editing)
+extern	qboolean	key_insert;
 extern	keydest_t	key_dest;
-// key_consoleactive bits
-// user wants console (halfscreen)
+
 #define KEY_CONSOLEACTIVE_USER 1
-// console forced because there's nothing else active (fullscreen)
+
 #define KEY_CONSOLEACTIVE_FORCED 4
 extern	int			key_consoleactive;
 extern	char		*keybindings[MAX_BINDMAPS][MAX_KEYS];
 
-extern int chat_mode; // 0 for say, 1 for say_team, -1 for command
+extern int chat_mode;
 extern char chat_buffer[MAX_INPUTLINE];
 extern unsigned int chat_bufferlen;
 
@@ -387,5 +346,4 @@ void Key_FindKeysForCommand (const char *command, int *keys, int numkeys, int bi
 qboolean Key_SetBindMap(int fg, int bg);
 void Key_GetBindMap(int *fg, int *bg);
 
-#endif // __KEYS_H
-
+#endif

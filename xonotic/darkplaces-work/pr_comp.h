@@ -1,24 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-
-// this file is shared by quake and qcc
 
 #ifndef PR_COMP_H
 #define PR_COMP_H
@@ -28,10 +8,9 @@ typedef int	string_t;
 
 typedef enum etype_e {ev_void, ev_string, ev_float, ev_vector, ev_entity, ev_field, ev_function, ev_pointer} etype_t;
 
-
 #define	OFS_NULL		0
 #define	OFS_RETURN		1
-#define	OFS_PARM0		4		// leave 3 ofs for each parm to hold vectors
+#define	OFS_PARM0		4
 #define	OFS_PARM1		7
 #define	OFS_PARM2		10
 #define	OFS_PARM3		13
@@ -40,7 +19,6 @@ typedef enum etype_e {ev_void, ev_string, ev_float, ev_vector, ev_entity, ev_fie
 #define	OFS_PARM6		22
 #define	OFS_PARM7		25
 #define	RESERVED_OFS	28
-
 
 typedef enum opcode_e
 {
@@ -122,7 +100,6 @@ typedef enum opcode_e
 }
 opcode_t;
 
-
 typedef struct statement_s
 {
 	unsigned short	op;
@@ -132,8 +109,8 @@ dstatement_t;
 
 typedef struct ddef_s
 {
-	unsigned short	type;		// if DEF_SAVEGLOBGAL bit is set
-								// the variable needs to be saved in savegames
+	unsigned short	type;
+
 	unsigned short	ofs;
 	int			s_name;
 }
@@ -144,14 +121,14 @@ ddef_t;
 
 typedef struct dfunction_s
 {
-	int		first_statement;	// negative numbers are builtins
+	int		first_statement;
 	int		parm_start;
-	int		locals;				// total ints of parms + locals
+	int		locals;
 
-	int		profile;		// runtime
+	int		profile;
 
 	int		s_name;
-	int		s_file;			// source file defined in
+	int		s_file;
 
 	int		numparms;
 	unsigned char	parm_size[MAX_PARMS];
@@ -160,24 +137,23 @@ dfunction_t;
 
 typedef struct mfunction_s
 {
-	int		first_statement;	// negative numbers are builtins
+	int		first_statement;
 	int		parm_start;
-	int		locals;				// total ints of parms + locals
+	int		locals;
 
-	// these are doubles so that they can count up to 54bits or so rather than 32bit
-	double  tprofile;           // realtime in this function
-	double  tbprofile;          // realtime in builtins called by this function (NOTE: builtins also have a tprofile!)
-	double	profile;		// runtime
-	double	builtinsprofile; // cost of builtin functions called by this function
-	double	callcount; // times the functions has been called since the last profile call
-	double  totaltime; // total execution time of this function DIRECTLY FROM THE ENGINE
-	double	tprofile_total;		// runtime (NOTE: tbprofile_total makes no real sense, so not accumulating that)
-	double	profile_total;		// runtime
-	double	builtinsprofile_total; // cost of builtin functions called by this function
+	double  tprofile;
+	double  tbprofile;
+	double	profile;
+	double	builtinsprofile;
+	double	callcount;
+	double  totaltime;
+	double	tprofile_total;
+	double	profile_total;
+	double	builtinsprofile_total;
 	int     recursion;
 
 	int		s_name;
-	int		s_file;			// source file defined in
+	int		s_file;
 
 	int		numparms;
 	unsigned char	parm_size[MAX_PARMS];
@@ -187,20 +163,19 @@ mfunction_t;
 typedef struct mstatement_s
 {
 	opcode_t	op;
-	int			operand[3]; // always a global or -1 for unused
-	int			jumpabsolute; // only used by IF, IFNOT, GOTO
+	int			operand[3];
+	int			jumpabsolute;
 }
 mstatement_t;
-
 
 #define	PROG_VERSION	6
 typedef struct dprograms_s
 {
 	int		version;
-	int		crc;			// check of header file
+	int		crc;
 
 	int		ofs_statements;
-	int		numstatements;	// statement 0 is an error
+	int		numstatements;
 
 	int		ofs_globaldefs;
 	int		numglobaldefs;
@@ -209,10 +184,10 @@ typedef struct dprograms_s
 	int		numfielddefs;
 
 	int		ofs_functions;
-	int		numfunctions;	// function 0 is an empty
+	int		numfunctions;
 
 	int		ofs_strings;
-	int		numstrings;		// first string is a null string
+	int		numstrings;
 
 	int		ofs_globals;
 	int		numglobals;
@@ -222,4 +197,3 @@ typedef struct dprograms_s
 dprograms_t;
 
 #endif
-

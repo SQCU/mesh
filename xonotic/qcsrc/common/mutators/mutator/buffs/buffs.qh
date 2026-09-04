@@ -59,7 +59,8 @@ STATIC_INIT(REGISTER_BUFFS) {
 			BUFF_SPAWNFUNC(e##_team1,   b,  NUM_TEAM_1) \
 			BUFF_SPAWNFUNC(e##_team2,   b,  NUM_TEAM_2) \
 			BUFF_SPAWNFUNC(e##_team3,   b,  NUM_TEAM_3) \
-			BUFF_SPAWNFUNC(e##_team4,   b,  NUM_TEAM_4)
+			BUFF_SPAWNFUNC(e##_team4,   b,  NUM_TEAM_4) \
+			BUFF_SPAWNFUNC(e##_team5,   b,  NUM_TEAM_5)
 	#define BUFF_SPAWNFUNC_Q3COMPAT(o, r) spawnfunc(o) { buff_Init_Compat(this, r); }
 #else
 	#define BUFF_SPAWNFUNC(e, b, t)

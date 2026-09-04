@@ -1,26 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// models.c -- model loading and caching
-
-// models are the only shared resource between a client and server running
-// on the same machine.
 
 #include "quakedef.h"
 #include "image.h"
@@ -37,11 +15,6 @@ cvar_t r_track_sprites_flags = {CVAR_SAVE, "r_track_sprites_flags", "1", "1: Rot
 cvar_t r_track_sprites_scalew = {CVAR_SAVE, "r_track_sprites_scalew", "1", "width scaling of tracked sprites"};
 cvar_t r_track_sprites_scaleh = {CVAR_SAVE, "r_track_sprites_scaleh", "1", "height scaling of tracked sprites"};
 
-/*
-===============
-Mod_SpriteInit
-===============
-*/
 void Mod_SpriteInit (void)
 {
 	Cvar_RegisterVariable(&r_mipsprites);
@@ -67,7 +40,7 @@ static void Mod_SpriteSetupTexture(texture_t *texture, skinframe_t *skinframe, q
 	texture->specularscalemod = 1;
 	texture->specularpowermod = 1;
 	texture->pbrroughnessmod = 1;
-	texture->pbrmetallicmod = 0;
+	texture->pbrmetallicmod = 1;
 	texture->basematerialflags = MATERIALFLAG_WALL;
 	texture->basealpha = 1.0f;
 	if (fullbright)
@@ -84,8 +57,7 @@ static void Mod_SpriteSetupTexture(texture_t *texture, skinframe_t *skinframe, q
 	if (!(texture->basematerialflags & MATERIALFLAG_BLENDED))
 		texture->supercontents |= SUPERCONTENTS_OPAQUE;
 	texture->transparentsort = TRANSPARENTSORT_DISTANCE;
-	// WHEN ADDING DEFAULTS HERE, REMEMBER TO PUT DEFAULTS IN ALL LOADERS
-	// JUST GREP FOR "specularscalemod = 1".
+
 }
 
 extern cvar_t gl_texturecompression_sprites;
@@ -108,15 +80,11 @@ static void Mod_Sprite_SharedSetup(const unsigned char *datapointer, int version
 	if (loadmodel->numframes < 1)
 		Host_Error ("Mod_Sprite_SharedSetup: Invalid # of frames: %d", loadmodel->numframes);
 
-	// LordHavoc: hack to allow sprites to be non-fullbright
 	fullbright = true;
 	for (i = 0;i < MAX_QPATH && loadmodel->name[i];i++)
 		if (loadmodel->name[i] == '!')
 			fullbright = false;
 
-//
-// load the frames
-//
 	startframes = datapointer;
 	realframes = 0;
 	for (i = 0;i < loadmodel->numframes;i++)
@@ -141,7 +109,7 @@ static void Mod_Sprite_SharedSetup(const unsigned char *datapointer, int version
 			pinframe = (dspriteframe_t *)datapointer;
 			if (version == SPRITE32_VERSION)
 				datapointer += sizeof(dspriteframe_t) + LittleLong(pinframe->width) * LittleLong(pinframe->height) * 4;
-			else //if (version == SPRITE_VERSION || version == SPRITEHL_VERSION)
+			else
 				datapointer += sizeof(dspriteframe_t) + LittleLong(pinframe->width) * LittleLong(pinframe->height);
 		}
 		realframes += groupframes;
@@ -209,7 +177,7 @@ static void Mod_Sprite_SharedSetup(const unsigned char *datapointer, int version
 			if (cls.state != ca_dedicated)
 			{
 				skinframe = NULL;
-				// note: Nehahra's null.spr has width == 0 and height == 0
+
 				if (width > 0 && height > 0)
 				{
 					if (groupframes > 1)
@@ -235,10 +203,10 @@ static void Mod_Sprite_SharedSetup(const unsigned char *datapointer, int version
 								pixels[x*4+3] = datapointer[x*4+3];
 							}
 						}
-						else //if (version == SPRITEHL_VERSION || version == SPRITE_VERSION)
+						else
 							Image_Copy8bitBGRA(datapointer, pixels, width*height, palette ? palette : palette_bgra_transparent);
 						skinframe = R_SkinFrame_LoadInternalBGRA(name, texflags, pixels, width, height, false);
-						// texflags |= TEXF_COMPRESS;
+
 						Mem_Free(pixels);
 					}
 				}
@@ -249,7 +217,7 @@ static void Mod_Sprite_SharedSetup(const unsigned char *datapointer, int version
 
 			if (version == SPRITE32_VERSION)
 				datapointer += width * height * 4;
-			else //if (version == SPRITE_VERSION || version == SPRITEHL_VERSION)
+			else
 				datapointer += width * height;
 			realframes++;
 		}
@@ -339,7 +307,7 @@ void Mod_IDSP_Load(dp_model_t *mod, void *buffer, void *bufferend)
 				palette[i][0] = in[i*3+2];
 				palette[i][3] = 255;
 			}
-			// also passes additive == true to Mod_Sprite_SharedSetup
+
 			break;
 		case SPRHL_INDEXALPHA:
 			for (i = 0;i < 256;i++)
@@ -360,7 +328,7 @@ void Mod_IDSP_Load(dp_model_t *mod, void *buffer, void *bufferend)
 				palette[i][3] = 255;
 			}
 			palette[255][0] = palette[255][1] = palette[255][2] = palette[255][3] = 0;
-			// should this use alpha test or alpha blend?  (currently blend)
+
 			break;
 		default:
 			Host_Error("Mod_IDSP_Load: unknown texFormat (%i, should be 0, 1, 2, or 3)", i);
@@ -373,12 +341,8 @@ void Mod_IDSP_Load(dp_model_t *mod, void *buffer, void *bufferend)
 		Host_Error("Mod_IDSP_Load: %s has wrong version number (%i). Only %i (quake), %i (HalfLife), and %i (sprite32) supported",
 					loadmodel->name, version, SPRITE_VERSION, SPRITEHL_VERSION, SPRITE32_VERSION);
 
-	// TODO: Note that isanimated only means whether vertices change due to
-	// the animation. This may happen due to sprframe parameters changing.
-	// Mere texture chanegs OTOH shouldn't require isanimated to be 1.
 	loadmodel->surfmesh.isanimated = loadmodel->numframes > 1 || (loadmodel->animscenes && loadmodel->animscenes[0].framecount > 1);
 }
-
 
 void Mod_IDS2_Load(dp_model_t *mod, void *buffer, void *bufferend)
 {
@@ -413,7 +377,6 @@ void Mod_IDS2_Load(dp_model_t *mod, void *buffer, void *bufferend)
 	loadmodel->sprite.sprnum_type = SPR_VP_PARALLEL;
 	loadmodel->synctype = ST_SYNC;
 
-	// LordHavoc: hack to allow sprites to be non-fullbright
 	fullbright = true;
 	for (i = 0;i < MAX_QPATH && loadmodel->name[i];i++)
 		if (loadmodel->name[i] == '!')
@@ -447,8 +410,6 @@ void Mod_IDS2_Load(dp_model_t *mod, void *buffer, void *bufferend)
 
 		sprframe = &loadmodel->sprite.sprdata_frames[i];
 
-		// note that sp2 origin[0] is positive, where as it is negative in
-		// spr/spr32/hlspr
 		sprframe->left = -origin[0];
 		sprframe->right = -origin[0] + width;
 		sprframe->up = origin[1];
@@ -484,8 +445,5 @@ void Mod_IDS2_Load(dp_model_t *mod, void *buffer, void *bufferend)
 	loadmodel->radius = modelradius;
 	loadmodel->radius2 = modelradius * modelradius;
 
-	// TODO: Note that isanimated only means whether vertices change due to
-	// the animation. This may happen due to sprframe parameters changing.
-	// Mere texture chanegs OTOH shouldn't require isanimated to be 1.
 	loadmodel->surfmesh.isanimated = loadmodel->numframes > 1 || (loadmodel->animscenes && loadmodel->animscenes[0].framecount > 1);
 }

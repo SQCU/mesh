@@ -135,12 +135,12 @@ NET_HANDLE(ENT_CLIENT_MODELEFFECT, bool isnew)
 	e.lifetime = time + ReadByte() * 0.01;
 	e.fadetime = ReadByte() * 0.01;
 	e.teleport_time = time;
-	e.cnt = ReadByte() / 255.0; // actually alpha
+	e.cnt = ReadByte() / 255.0;
 
 	e.draw = ModelEffect_Draw;
 	if (isnew) IL_PUSH(g_drawables, e);
 
-	if (!isnew) delete(e); // yes, this IS stupid, but I don't need to duplicate all the read* stuff then
+	if (!isnew) delete(e);
 	return true;
 }
 #endif

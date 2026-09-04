@@ -1,66 +1,20 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// cl.input.c  -- builds an intended movement command to send to the server
-
-// Quake is a trademark of Id Software, Inc., (c) 1996 Id Software, Inc. All
-// rights reserved.
 
 #include "quakedef.h"
 #include "csprogs.h"
 #include "thread.h"
-
-/*
-===============================================================================
-
-KEY BUTTONS
-
-Continuous button event tracking is complicated by the fact that two different
-input sources (say, mouse button 1 and the control key) can both press the
-same button, but the button should only be released when both of the
-pressing key have been released.
-
-When a key event issues a button command (+forward, +attack, etc), it appends
-its key number as a parameter to the command so it can be matched up with
-the release.
-
-state bit 0 is the current state of the key
-state bit 1 is edge triggered on the up to down transition
-state bit 2 is edge triggered on the down to up transition
-
-===============================================================================
-*/
-
 
 kbutton_t	in_mlook, in_klook;
 kbutton_t	in_left, in_right, in_forward, in_back;
 kbutton_t	in_lookup, in_lookdown, in_moveleft, in_moveright;
 kbutton_t	in_strafe, in_speed, in_jump, in_attack, in_use;
 kbutton_t	in_up, in_down;
-// LordHavoc: added 6 new buttons
+
 kbutton_t	in_button3, in_button4, in_button5, in_button6, in_button7, in_button8;
-//even more
+
 kbutton_t	in_button9, in_button10, in_button11, in_button12, in_button13, in_button14, in_button15, in_button16;
 
 int			in_impulse;
-
-
 
 static void KeyDown (kbutton_t *b)
 {
@@ -71,10 +25,10 @@ static void KeyDown (kbutton_t *b)
 	if (c[0])
 		k = atoi(c);
 	else
-		k = -1;		// typed manually at the console for continuous down
+		k = -1;
 
 	if (k == b->down[0] || k == b->down[1])
-		return;		// repeating key
+		return;
 
 	if (!b->down[0])
 		b->down[0] = k;
@@ -87,8 +41,8 @@ static void KeyDown (kbutton_t *b)
 	}
 
 	if (b->state & 1)
-		return;		// still down
-	b->state |= 1 + 2;	// down + impulse down
+		return;
+	b->state |= 1 + 2;
 }
 
 static void KeyUp (kbutton_t *b)
@@ -100,9 +54,9 @@ static void KeyUp (kbutton_t *b)
 	if (c[0])
 		k = atoi(c);
 	else
-	{ // typed manually at the console, assume for unsticking, so clear all
+	{
 		b->down[0] = b->down[1] = 0;
-		b->state = 4;	// impulse up
+		b->state = 4;
 		return;
 	}
 
@@ -111,14 +65,14 @@ static void KeyUp (kbutton_t *b)
 	else if (b->down[1] == k)
 		b->down[1] = 0;
 	else
-		return;		// key up without coresponding down (menu pass through)
+		return;
 	if (b->down[0] || b->down[1])
-		return;		// some other key is still holding it down
+		return;
 
 	if (!(b->state & 1))
-		return;		// still up (this should not happen)
-	b->state &= ~1;		// now up
-	b->state |= 4; 		// impulse up
+		return;
+	b->state &= ~1;
+	b->state |= 4;
 }
 
 static void IN_KLookDown (void) {KeyDown(&in_klook);}
@@ -162,7 +116,6 @@ static void IN_AttackUp(void) {KeyUp(&in_attack);}
 static void IN_UseDown(void) {KeyDown(&in_use);}
 static void IN_UseUp(void) {KeyUp(&in_use);}
 
-// LordHavoc: added 6 new buttons
 static void IN_Button3Down(void) {KeyDown(&in_button3);}
 static void IN_Button3Up(void) {KeyUp(&in_button3);}
 static void IN_Button4Down(void) {KeyDown(&in_button4);}
@@ -209,7 +162,7 @@ static void IN_BestWeapon_Register(const char *name, int impulse, int weaponbit,
 	if(i >= IN_BESTWEAPON_MAX)
 	{
 		Con_Printf("no slot left for weapon definition; increase IN_BESTWEAPON_MAX\n");
-		return; // sorry
+		return;
 	}
 	strlcpy(in_bestweapon_info[i].name, name, sizeof(in_bestweapon_info[i].name));
 	in_bestweapon_info[i].impulse = impulse;
@@ -234,11 +187,11 @@ void IN_BestWeapon_ResetData (void)
 	IN_BestWeapon_Register("6", 6, IT_GRENADE_LAUNCHER, IT_GRENADE_LAUNCHER, STAT_ROCKETS, 1);
 	IN_BestWeapon_Register("7", 7, IT_ROCKET_LAUNCHER, IT_ROCKET_LAUNCHER, STAT_ROCKETS, 1);
 	IN_BestWeapon_Register("8", 8, IT_LIGHTNING, IT_LIGHTNING, STAT_CELLS, 1);
-	IN_BestWeapon_Register("9", 9, 128, 128, STAT_CELLS, 1); // generic energy weapon for mods
-	IN_BestWeapon_Register("p", 209, 128, 128, STAT_CELLS, 1); // dpmod plasma gun
-	IN_BestWeapon_Register("w", 210, 8388608, 8388608, STAT_CELLS, 1); // dpmod plasma wave cannon
-	IN_BestWeapon_Register("l", 225, HIT_LASER_CANNON, HIT_LASER_CANNON, STAT_CELLS, 1); // hipnotic laser cannon
-	IN_BestWeapon_Register("h", 226, HIT_MJOLNIR, HIT_MJOLNIR, STAT_CELLS, 0); // hipnotic mjolnir hammer
+	IN_BestWeapon_Register("9", 9, 128, 128, STAT_CELLS, 1);
+	IN_BestWeapon_Register("p", 209, 128, 128, STAT_CELLS, 1);
+	IN_BestWeapon_Register("w", 210, 8388608, 8388608, STAT_CELLS, 1);
+	IN_BestWeapon_Register("l", 225, HIT_LASER_CANNON, HIT_LASER_CANNON, STAT_CELLS, 1);
+	IN_BestWeapon_Register("h", 226, HIT_MJOLNIR, HIT_MJOLNIR, STAT_CELLS, 0);
 }
 
 static void IN_BestWeapon_Register_f (void)
@@ -280,26 +233,24 @@ static void IN_BestWeapon (void)
 	for (i = 1;i < Cmd_Argc();i++)
 	{
 		t = Cmd_Argv(i);
-		// figure out which weapon this character refers to
+
 		for (n = 0;n < IN_BESTWEAPON_MAX && in_bestweapon_info[n].impulse;n++)
 		{
 			if (!strcmp(in_bestweapon_info[n].name, t))
 			{
-				// we found out what weapon this character refers to
-				// check if the inventory contains the weapon and enough ammo
+
 				if ((cl.stats[STAT_ITEMS] & in_bestweapon_info[n].weaponbit) && (cl.stats[in_bestweapon_info[n].ammostat] >= in_bestweapon_info[n].ammomin))
 				{
-					// we found one of the weapons the player wanted
-					// send an impulse to switch to it
+
 					in_impulse = in_bestweapon_info[n].impulse;
 					return;
 				}
 				break;
 			}
 		}
-		// if we couldn't identify the weapon we just ignore it and continue checking for other weapons
+
 	}
-	// if we couldn't find any of the weapons, there's nothing more we can do...
+
 }
 
 #if 0
@@ -317,16 +268,15 @@ void IN_CycleWeapon (void)
 	for (i = 1;i < Cmd_Argc();i++)
 	{
 		t = Cmd_Argv(i);
-		// figure out which weapon this character refers to
+
 		for (n = 0;n < IN_BESTWEAPON_MAX && in_bestweapon_info[n].impulse;n++)
 		{
 			if (!strcmp(in_bestweapon_info[n].name, t))
 			{
-				// we found out what weapon this character refers to
-				// check if the inventory contains the weapon and enough ammo
+
 				if ((cl.stats[STAT_ITEMS] & in_bestweapon_info[n].weaponbit) && (cl.stats[in_bestweapon_info[n].ammostat] >= in_bestweapon_info[n].ammomin))
 				{
-					// we found one of the weapons the player wanted
+
 					if(first == -1)
 						first = n;
 					if(found)
@@ -340,27 +290,17 @@ void IN_CycleWeapon (void)
 				break;
 			}
 		}
-		// if we couldn't identify the weapon we just ignore it and continue checking for other weapons
+
 	}
 	if(first != -1)
 	{
 		in_impulse = in_bestweapon_info[first].impulse;
 		return;
 	}
-	// if we couldn't find any of the weapons, there's nothing more we can do...
+
 }
 #endif
 
-/*
-===============
-CL_KeyState
-
-Returns 0.25 if a key was pressed and released during the frame,
-0.5 if it was pressed and held
-0 if held then released, and
-1.0 if held for the entire time
-===============
-*/
 float CL_KeyState (kbutton_t *key)
 {
 	float		val;
@@ -374,41 +314,36 @@ float CL_KeyState (kbutton_t *key)
 	if (impulsedown && !impulseup)
 	{
 		if (down)
-			val = 0.5;	// pressed and held this frame
+			val = 0.5;
 		else
-			val = 0;	//	I_Error ();
+			val = 0;
 	}
 	if (impulseup && !impulsedown)
 	{
 		if (down)
-			val = 0;	//	I_Error ();
+			val = 0;
 		else
-			val = 0;	// released this frame
+			val = 0;
 	}
 	if (!impulsedown && !impulseup)
 	{
 		if (down)
-			val = 1.0;	// held the entire frame
+			val = 1.0;
 		else
-			val = 0;	// up the entire frame
+			val = 0;
 	}
 	if (impulsedown && impulseup)
 	{
 		if (down)
-			val = 0.75;	// released and re-pressed this frame
+			val = 0.75;
 		else
-			val = 0.25;	// pressed and released this frame
+			val = 0.25;
 	}
 
-	key->state &= 1;		// clear impulses
+	key->state &= 1;
 
 	return val;
 }
-
-
-
-
-//==========================================================================
 
 cvar_t cl_upspeed = {CVAR_SAVE, "cl_upspeed","400","vertical movement speed (while swimming or flying)"};
 cvar_t cl_forwardspeed = {CVAR_SAVE, "cl_forwardspeed","400","forward movement speed"};
@@ -447,7 +382,7 @@ cvar_t cl_nopred = {CVAR_SAVE, "cl_nopred", "0", "(QWSV only) disables player mo
 cvar_t in_pitch_min = {0, "in_pitch_min", "-90", "how far you can aim upward (quake used -70)"};
 cvar_t in_pitch_max = {0, "in_pitch_max", "90", "how far you can aim downward (quake used 80)"};
 
-cvar_t m_filter = {CVAR_SAVE, "m_filter","0", "smoothes mouse movement, less responsive but smoother aiming"}; 
+cvar_t m_filter = {CVAR_SAVE, "m_filter","0", "smoothes mouse movement, less responsive but smoother aiming"};
 cvar_t m_accelerate = {CVAR_SAVE, "m_accelerate","1", "linear mouse acceleration factor (set to 1 to disable the linear acceleration and use only the power acceleration; set to 0 to disable all acceleration)"};
 cvar_t m_accelerate_minspeed = {CVAR_SAVE, "m_accelerate_minspeed","5000", "below this speed in px/s, no acceleration is done, with a linear slope between (applied only on linear acceleration)"};
 cvar_t m_accelerate_maxspeed = {CVAR_SAVE, "m_accelerate_maxspeed","10000", "above this speed in px/s, full acceleration is done, with a linear slope between (applied only on linear acceleration)"};
@@ -467,13 +402,6 @@ cvar_t cl_csqc_generatemousemoveevents = {0, "cl_csqc_generatemousemoveevents", 
 
 extern cvar_t v_flipped;
 
-/*
-================
-CL_AdjustAngles
-
-Moves the local angle positions
-================
-*/
 static void CL_AdjustAngles (void)
 {
 	float	speed;
@@ -511,38 +439,27 @@ static void CL_AdjustAngles (void)
 		cl.viewangles[YAW] -= 360;
 	if (cl.viewangles[PITCH] >= 180)
 		cl.viewangles[PITCH] -= 360;
-        // TODO: honor serverinfo minpitch and maxpitch values in PROTOCOL_QUAKEWORLD
-        // TODO: honor proquake pq_fullpitch cvar when playing on proquake server (server stuffcmd's this to 0 usually)
+
 	cl.viewangles[PITCH] = bound(in_pitch_min.value, cl.viewangles[PITCH], in_pitch_max.value);
 	cl.viewangles[ROLL] = bound(-180, cl.viewangles[ROLL], 180);
 }
 
 int cl_ignoremousemoves = 2;
 
-/*
-================
-CL_Input
-
-Send the intended movement message to the server
-================
-*/
 void CL_Input (void)
 {
 	float mx, my;
 	static float old_mouse_x = 0, old_mouse_y = 0;
 
-	// clamp before the move to prevent starting with bad angles
 	CL_AdjustAngles ();
 
 	if(v_flipped.integer)
 		cl.viewangles[YAW] = -cl.viewangles[YAW];
 
-	// reset some of the command fields
 	cl.cmd.forwardmove = 0;
 	cl.cmd.sidemove = 0;
 	cl.cmd.upmove = 0;
 
-	// get basic movement from keyboard
 	if (in_strafe.state & 1)
 	{
 		cl.cmd.sidemove += cl_sidespeed.value * CL_KeyState (&in_right);
@@ -561,7 +478,6 @@ void CL_Input (void)
 		cl.cmd.forwardmove -= cl_backspeed.value * CL_KeyState (&in_back);
 	}
 
-	// adjust for speed key
 	if (in_speed.state & 1)
 	{
 		cl.cmd.forwardmove *= cl_movespeedkey.value;
@@ -569,15 +485,13 @@ void CL_Input (void)
 		cl.cmd.upmove *= cl_movespeedkey.value;
 	}
 
-	// allow mice or other external controllers to add to the move
 	IN_Move ();
 
-	// send mouse move to csqc
 	if (cl.csqc_loaded && cl_csqc_generatemousemoveevents.integer)
 	{
 		if (cl.csqc_wantsmousemove)
 		{
-			// event type 3 is a DP_CSQC thing
+
 			static int oldwindowmouse[2];
 			if (oldwindowmouse[0] != in_windowmouse_x || oldwindowmouse[1] != in_windowmouse_y)
 			{
@@ -593,7 +507,6 @@ void CL_Input (void)
 		}
 	}
 
-       // apply m_accelerate if it is on
 	if(m_accelerate.value > 0)
 	{
 		float mouse_deltadist = sqrtf(in_mouse_x * in_mouse_x + in_mouse_y * in_mouse_y);
@@ -606,12 +519,8 @@ void CL_Input (void)
 		        f = 1;
 		averagespeed = speed * f + averagespeed * (1 - f);
 
-		// Note: this check is technically unnecessary, as everything in here cancels out if it is zero.
 		if (m_accelerate.value != 1.0f)
 		{
-			// First do linear slope acceleration which was ripped "in
-			// spirit" from many classic mouse driver implementations.
-			// If m_accelerate.value == 1, this code does nothing at all.
 
 			mi = max(1, m_accelerate_minspeed.value);
 			ma = max(m_accelerate_minspeed.value + 1, m_accelerate_maxspeed.value);
@@ -633,14 +542,9 @@ void CL_Input (void)
 			in_mouse_y *= f;
 		}
 
-		// Note: this check is technically unnecessary, as everything in here cancels out if it is zero.
 		if (m_accelerate_power_strength.value != 0.0f)
 		{
-			// Then do Quake Live-style power acceleration.
-			// Note that this behavior REPLACES the usual
-			// sensitivity, so we apply it but then dividie by
-			// sensitivity.value so that the later multiplication
-			// restores it again.
+
 			float accelsens = 1.0f;
 			float adjusted_speed_pxms = (averagespeed * 0.001f - m_accelerate_power_offset.value) * m_accelerate_power_strength.value;
 			float inv_sensitivity = 1.0f / sensitivity.value;
@@ -648,27 +552,23 @@ void CL_Input (void)
 			{
 				if (m_accelerate_power.value > 1.0f)
 				{
-					// TODO: How does this interact with sensitivity changes? Is this intended?
-					// Currently: more sensitivity = less acceleration at same pixel speed.
+
 					accelsens += expf((m_accelerate_power.value - 1.0f) * logf(adjusted_speed_pxms)) * inv_sensitivity;
 				}
 				else
 				{
-					// The limit of the then-branch for m_accelerate_power -> 1.
+
 					accelsens += inv_sensitivity;
-					// Note: QL had just accelsens = 1.0f.
-					// This is mathematically wrong though.
+
 				}
 			}
 			else
 			{
-				// The limit of the then-branch for adjusted_speed -> 0.
-				// accelsens += 0.0f;
+
 			}
 			if (m_accelerate_power_senscap.value > 0.0f && accelsens > m_accelerate_power_senscap.value * inv_sensitivity)
 			{
-				// TODO: How does this interact with sensitivity changes? Is this intended?
-				// Currently: senscap is in absolute sensitivity units, so if senscap < sensitivity, it overrides.
+
 			        accelsens = m_accelerate_power_senscap.value * inv_sensitivity;
 			}
 
@@ -677,7 +577,6 @@ void CL_Input (void)
 		}
 	}
 
-	// apply m_filter if it is on
 	mx = in_mouse_x;
 	my = in_mouse_y;
 	if (m_filter.integer)
@@ -688,7 +587,6 @@ void CL_Input (void)
 	old_mouse_x = mx;
 	old_mouse_y = my;
 
-	// ignore a mouse move if mouse was activated/deactivated this frame
 	if (cl_ignoremousemoves)
 	{
 		cl_ignoremousemoves--;
@@ -696,13 +594,12 @@ void CL_Input (void)
 		in_mouse_y = old_mouse_y = 0;
 	}
 
-	// if not in menu, apply mouse move to viewangles/movement
 	if (!key_consoleactive && key_dest == key_game && !cl.csqc_wantsmousemove && cl_prydoncursor.integer <= 0)
 	{
 		float modulatedsensitivity = sensitivity.value * cl.sensitivityscale;
 		if (in_strafe.state & 1)
 		{
-			// strafing mode, all looking is movement
+
 			V_StopPitchDrift();
 			cl.cmd.sidemove += m_side.value * in_mouse_x * modulatedsensitivity;
 			if (noclip_anglehack)
@@ -712,7 +609,7 @@ void CL_Input (void)
 		}
 		else if ((in_mlook.state & 1) || freelook.integer)
 		{
-			// mouselook, lookstrafe causes turning to become strafing
+
 			V_StopPitchDrift();
 			if (lookstrafe.integer)
 				cl.cmd.sidemove += m_side.value * in_mouse_x * modulatedsensitivity;
@@ -722,16 +619,16 @@ void CL_Input (void)
 		}
 		else
 		{
-			// non-mouselook, yaw turning and forward/back movement
+
 			cl.viewangles[YAW] -= m_yaw.value * in_mouse_x * modulatedsensitivity * cl.viewzoom;
 			cl.cmd.forwardmove -= m_forward.value * in_mouse_y * modulatedsensitivity;
 		}
 	}
-	else // don't pitch drift when csqc is controlling the mouse
+	else
 	{
-		// mouse interacting with the scene, mostly stationary view
+
 		V_StopPitchDrift();
-		// update prydon cursor
+
 		cl.cmd.cursor_screen[0] = in_windowmouse_x * 2.0 / vid.width - 1.0;
 		cl.cmd.cursor_screen[1] = in_windowmouse_y * 2.0 / vid.height - 1.0;
 	}
@@ -742,7 +639,6 @@ void CL_Input (void)
 		cl.cmd.sidemove = -cl.cmd.sidemove;
 	}
 
-	// clamp after the move to prevent rendering with bad angles
 	CL_AdjustAngles ();
 
 	if(cl_movecliptokeyboard.integer)
@@ -752,7 +648,7 @@ void CL_Input (void)
 			f *= cl_movespeedkey.value;
 		if(cl_movecliptokeyboard.integer == 2)
 		{
-			// digital direction, analog amount
+
 			vec_t wishvel_x, wishvel_y;
 			wishvel_x = fabs(cl.cmd.forwardmove);
 			wishvel_y = fabs(cl.cmd.sidemove);
@@ -761,7 +657,7 @@ void CL_Input (void)
 				vec_t wishspeed = sqrt(wishvel_x * wishvel_x + wishvel_y * wishvel_y);
 				if(wishvel_x >= 2 * wishvel_y)
 				{
-					// pure X motion
+
 					if(cl.cmd.forwardmove > 0)
 						cl.cmd.forwardmove = wishspeed;
 					else
@@ -770,7 +666,7 @@ void CL_Input (void)
 				}
 				else if(wishvel_y >= 2 * wishvel_x)
 				{
-					// pure Y motion
+
 					cl.cmd.forwardmove = 0;
 					if(cl.cmd.sidemove > 0)
 						cl.cmd.sidemove = wishspeed;
@@ -779,7 +675,7 @@ void CL_Input (void)
 				}
 				else
 				{
-					// diagonal
+
 					if(cl.cmd.forwardmove > 0)
 						cl.cmd.forwardmove = 0.70710678118654752440 * wishspeed;
 					else
@@ -793,7 +689,7 @@ void CL_Input (void)
 		}
 		else if(cl_movecliptokeyboard.integer)
 		{
-			// digital direction, digital amount
+
 			if(cl.cmd.sidemove >= cl_sidespeed.value * f * 0.5)
 				cl.cmd.sidemove = cl_sidespeed.value * f;
 			else if(cl.cmd.sidemove <= -cl_sidespeed.value * f * 0.5)
@@ -819,38 +715,15 @@ static void CL_UpdatePrydonCursor(void)
 	if (cl_prydoncursor.integer <= 0)
 		VectorClear(cl.cmd.cursor_screen);
 
-	/*
-	if (cl.cmd.cursor_screen[0] < -1)
-	{
-		cl.viewangles[YAW] -= m_yaw.value * (cl.cmd.cursor_screen[0] - -1) * vid.width * sensitivity.value * cl.viewzoom;
-		cl.cmd.cursor_screen[0] = -1;
-	}
-	if (cl.cmd.cursor_screen[0] > 1)
-	{
-		cl.viewangles[YAW] -= m_yaw.value * (cl.cmd.cursor_screen[0] - 1) * vid.width * sensitivity.value * cl.viewzoom;
-		cl.cmd.cursor_screen[0] = 1;
-	}
-	if (cl.cmd.cursor_screen[1] < -1)
-	{
-		cl.viewangles[PITCH] += m_pitch.value * (cl.cmd.cursor_screen[1] - -1) * vid.height * sensitivity.value * cl.viewzoom;
-		cl.cmd.cursor_screen[1] = -1;
-	}
-	if (cl.cmd.cursor_screen[1] > 1)
-	{
-		cl.viewangles[PITCH] += m_pitch.value * (cl.cmd.cursor_screen[1] - 1) * vid.height * sensitivity.value * cl.viewzoom;
-		cl.cmd.cursor_screen[1] = 1;
-	}
-	*/
 	cl.cmd.cursor_screen[0] = bound(-1, cl.cmd.cursor_screen[0], 1);
 	cl.cmd.cursor_screen[1] = bound(-1, cl.cmd.cursor_screen[1], 1);
 	cl.cmd.cursor_screen[2] = 1;
 
-	// calculate current view matrix
 	Matrix4x4_OriginFromMatrix(&r_refdef.view.matrix, cl.cmd.cursor_start);
-	// calculate direction vector of cursor in viewspace by using frustum slopes
+
 	VectorSet(temp, cl.cmd.cursor_screen[2] * 1000000, (v_flipped.integer ? -1 : 1) * cl.cmd.cursor_screen[0] * -r_refdef.view.frustum_x * 1000000, cl.cmd.cursor_screen[1] * -r_refdef.view.frustum_y * 1000000);
 	Matrix4x4_Transform(&r_refdef.view.matrix, temp, cl.cmd.cursor_end);
-	// trace from view origin to the cursor
+
 	if (cl_prydoncursor_notrace.integer)
 	{
 		cl.cmd.cursor_fraction = 1.0f;
@@ -865,21 +738,21 @@ static void CL_UpdatePrydonCursor(void)
 #define NUMOFFSETS 27
 static vec3_t offsets[NUMOFFSETS] =
 {
-// 1 no nudge (just return the original if this test passes)
+
 	{ 0.000,  0.000,  0.000},
-// 6 simple nudges
+
 	{ 0.000,  0.000,  0.125}, { 0.000,  0.000, -0.125},
 	{-0.125,  0.000,  0.000}, { 0.125,  0.000,  0.000},
 	{ 0.000, -0.125,  0.000}, { 0.000,  0.125,  0.000},
-// 4 diagonal flat nudges
+
 	{-0.125, -0.125,  0.000}, { 0.125, -0.125,  0.000},
 	{-0.125,  0.125,  0.000}, { 0.125,  0.125,  0.000},
-// 8 diagonal upward nudges
+
 	{-0.125,  0.000,  0.125}, { 0.125,  0.000,  0.125},
 	{ 0.000, -0.125,  0.125}, { 0.000,  0.125,  0.125},
 	{-0.125, -0.125,  0.125}, { 0.125, -0.125,  0.125},
 	{-0.125,  0.125,  0.125}, { 0.125,  0.125,  0.125},
-// 8 diagonal downward nudges
+
 	{-0.125,  0.000, -0.125}, { 0.125,  0.000, -0.125},
 	{ 0.000, -0.125, -0.125}, { 0.000,  0.125, -0.125},
 	{-0.125, -0.125, -0.125}, { 0.125, -0.125, -0.125},
@@ -899,7 +772,7 @@ static qboolean CL_ClientMovement_Unstick(cl_clientmovement_state_t *s)
 			return true;
 		}
 	}
-	// if all offsets failed, give up
+
 	return false;
 }
 
@@ -909,20 +782,17 @@ static void CL_ClientMovement_UpdateStatus(cl_clientmovement_state_t *s)
 	vec3_t origin1, origin2;
 	trace_t trace;
 
-	// make sure player is not stuck
 	CL_ClientMovement_Unstick(s);
 
-	// set crouched
 	if (s->cmd.crouch)
 	{
-		// wants to crouch, this always works..
+
 		if (!s->crouched)
 			s->crouched = true;
 	}
 	else
 	{
-		// wants to stand, if currently crouching we need to check for a
-		// low ceiling first
+
 		if (s->crouched)
 		{
 			trace = CL_TraceBox(s->origin, cl.playerstandmins, cl.playerstandmaxs, s->origin, MOVE_NORMAL, s->self, SUPERCONTENTS_SOLID | SUPERCONTENTS_BODY | SUPERCONTENTS_PLAYERCLIP, 0, 0, collision_extendmovelength.value, true, true, NULL, true);
@@ -941,23 +811,20 @@ static void CL_ClientMovement_UpdateStatus(cl_clientmovement_state_t *s)
 		VectorCopy(cl.playerstandmaxs, s->maxs);
 	}
 
-	// set onground
 	VectorSet(origin1, s->origin[0], s->origin[1], s->origin[2] + 1);
-	VectorSet(origin2, s->origin[0], s->origin[1], s->origin[2] - 1); // -2 causes clientside doublejump bug at above 150fps, raising that to 300fps :)
+	VectorSet(origin2, s->origin[0], s->origin[1], s->origin[2] - 1);
 	trace = CL_TraceBox(origin1, s->mins, s->maxs, origin2, MOVE_NORMAL, s->self, SUPERCONTENTS_SOLID | SUPERCONTENTS_BODY | SUPERCONTENTS_PLAYERCLIP, 0, 0, collision_extendmovelength.value, true, true, NULL, true);
 	if(trace.fraction < 1 && trace.plane.normal[2] > 0.7)
 	{
 		s->onground = true;
 
-		// this code actually "predicts" an impact; so let's clip velocity first
 		f = DotProduct(s->velocity, trace.plane.normal);
-		if(f < 0) // only if moving downwards actually
+		if(f < 0)
 			VectorMA(s->velocity, -f, trace.plane.normal, s->velocity);
 	}
 	else
 		s->onground = false;
 
-	// set watertype/waterlevel
 	VectorSet(origin1, s->origin[0], s->origin[1], s->origin[2] + s->mins[2] + 1);
 	s->waterlevel = WATERLEVEL_NONE;
 	s->watertype = CL_TracePoint(origin1, MOVE_NOMONSTERS, s->self, 0, 0, 0, true, false, NULL, false).startsupercontents & SUPERCONTENTS_LIQUIDSMASK;
@@ -974,7 +841,6 @@ static void CL_ClientMovement_UpdateStatus(cl_clientmovement_state_t *s)
 		}
 	}
 
-	// water jump prediction
 	if (s->onground || s->velocity[2] <= 0 || s->waterjumptime <= 0)
 		s->waterjumptime = 0;
 }
@@ -999,19 +865,17 @@ static void CL_ClientMovement_Move(cl_clientmovement_state_t *s)
 		trace = CL_TraceBox(s->origin, s->mins, s->maxs, neworigin, MOVE_NORMAL, s->self, SUPERCONTENTS_SOLID | SUPERCONTENTS_BODY | SUPERCONTENTS_PLAYERCLIP, 0, 0, collision_extendmovelength.value, true, true, NULL, true);
 		if (trace.fraction < 1 && trace.plane.normal[2] == 0)
 		{
-			// may be a step or wall, try stepping up
-			// first move forward at a higher level
+
 			VectorSet(currentorigin2, s->origin[0], s->origin[1], s->origin[2] + cl.movevars_stepheight);
 			VectorSet(neworigin2, neworigin[0], neworigin[1], s->origin[2] + cl.movevars_stepheight);
 			trace2 = CL_TraceBox(currentorigin2, s->mins, s->maxs, neworigin2, MOVE_NORMAL, s->self, SUPERCONTENTS_SOLID | SUPERCONTENTS_BODY | SUPERCONTENTS_PLAYERCLIP, 0, 0, collision_extendmovelength.value, true, true, NULL, true);
 			if (!trace2.startsolid)
 			{
-				// then move down from there
+
 				VectorCopy(trace2.endpos, currentorigin2);
 				VectorSet(neworigin2, trace2.endpos[0], trace2.endpos[1], s->origin[2]);
 				trace3 = CL_TraceBox(currentorigin2, s->mins, s->maxs, neworigin2, MOVE_NORMAL, s->self, SUPERCONTENTS_SOLID | SUPERCONTENTS_BODY | SUPERCONTENTS_PLAYERCLIP, 0, 0, collision_extendmovelength.value, true, true, NULL, true);
-				//Con_Printf("%f %f %f %f : %f %f %f %f : %f %f %f %f\n", trace.fraction, trace.endpos[0], trace.endpos[1], trace.endpos[2], trace2.fraction, trace2.endpos[0], trace2.endpos[1], trace2.endpos[2], trace3.fraction, trace3.endpos[0], trace3.endpos[1], trace3.endpos[2]);
-				// accept the new trace if it made some progress
+
 				if (fabs(trace3.endpos[0] - trace.endpos[0]) >= 0.03125 || fabs(trace3.endpos[1] - trace.endpos[1]) >= 0.03125)
 				{
 					trace = trace2;
@@ -1020,18 +884,12 @@ static void CL_ClientMovement_Move(cl_clientmovement_state_t *s)
 			}
 		}
 
-		// check if it moved at all
 		if (trace.fraction >= 0.001)
 			VectorCopy(trace.endpos, s->origin);
 
-		// check if it moved all the way
 		if (trace.fraction == 1)
 			break;
 
-		// this is only really needed for nogravityonground combined with gravityunaffectedbyticrate
-		// <LordHavoc> I'm pretty sure I commented it out solely because it seemed redundant
-		// this got commented out in a change that supposedly makes the code match QW better
-		// so if this is broken, maybe put it in an if(cls.protocol != PROTOCOL_QUAKEWORLD) block
 		if (trace.plane.normal[2] > 0.7)
 			s->onground = true;
 
@@ -1044,7 +902,6 @@ static void CL_ClientMovement_Move(cl_clientmovement_state_t *s)
 		VectorCopy(primalvelocity, s->velocity);
 }
 
-
 static void CL_ClientMovement_Physics_Swim(cl_clientmovement_state_t *s)
 {
 	vec_t wishspeed;
@@ -1052,8 +909,6 @@ static void CL_ClientMovement_Physics_Swim(cl_clientmovement_state_t *s)
 	vec3_t wishvel;
 	vec3_t wishdir;
 
-	// water jump only in certain situations
-	// this mimics quakeworld code
 	if (s->cmd.jump && s->waterlevel == 2 && s->velocity[2] >= -180)
 	{
 		vec3_t forward;
@@ -1079,22 +934,21 @@ static void CL_ClientMovement_Physics_Swim(cl_clientmovement_state_t *s)
 
 	if (!(s->cmd.forwardmove*s->cmd.forwardmove + s->cmd.sidemove*s->cmd.sidemove + s->cmd.upmove*s->cmd.upmove))
 	{
-		// drift towards bottom
+
 		VectorSet(wishvel, 0, 0, -60);
 	}
 	else
 	{
-		// swim
+
 		vec3_t forward;
 		vec3_t right;
 		vec3_t up;
-		// calculate movement vector
+
 		AngleVectors(s->cmd.viewangles, forward, right, up);
 		VectorSet(up, 0, 0, 1);
 		VectorMAMAM(s->cmd.forwardmove, forward, s->cmd.sidemove, right, s->cmd.upmove, up, wishvel);
 	}
 
-	// split wishvel into wishspeed and wishdir
 	wishspeed = VectorLength(wishvel);
 	if (wishspeed)
 		VectorScale(wishvel, 1 / wishspeed, wishdir);
@@ -1107,12 +961,11 @@ static void CL_ClientMovement_Physics_Swim(cl_clientmovement_state_t *s)
 
 	if (s->waterjumptime <= 0)
 	{
-		// water friction
+
 		f = 1 - s->cmd.frametime * cl.movevars_waterfriction * (cls.protocol == PROTOCOL_QUAKEWORLD ? s->waterlevel : 1);
 		f = bound(0, f, 1);
 		VectorScale(s->velocity, f, s->velocity);
 
-		// water acceleration
 		f = wishspeed - DotProduct(s->velocity, wishdir);
 		if (f > 0)
 		{
@@ -1120,7 +973,6 @@ static void CL_ClientMovement_Physics_Swim(cl_clientmovement_state_t *s)
 			VectorMA(s->velocity, f, wishdir, s->velocity);
 		}
 
-		// holding jump button swims upward slowly
 		if (s->cmd.jump)
 		{
 			if (s->watertype & SUPERCONTENTS_LAVA)
@@ -1143,7 +995,7 @@ static void CL_ClientMovement_Physics_Swim(cl_clientmovement_state_t *s)
 static vec_t CL_IsMoveInDirection(vec_t forward, vec_t side, vec_t angle)
 {
 	if(forward == 0 && side == 0)
-		return 0; // avoid division by zero
+		return 0;
 	angle -= RAD2DEG(atan2(side, forward));
 	angle = (ANGLEMOD(angle + 180) - 180) / 45;
 	if(angle >  1)
@@ -1177,7 +1029,7 @@ static void CL_ClientMovement_Physics_CPM_PM_Aircontrol(cl_clientmovement_state_
 	vec_t zspeed, speed, dot, k;
 
 #if 0
-	// this doesn't play well with analog input
+
 	if(s->cmd.forwardmove == 0 || s->cmd.sidemove != 0)
 		return;
 	k = 32;
@@ -1195,7 +1047,7 @@ static void CL_ClientMovement_Physics_CPM_PM_Aircontrol(cl_clientmovement_state_
 
 	dot = DotProduct(s->velocity, wishdir);
 
-	if(dot > 0) { // we can't change direction while slowing down
+	if(dot > 0) {
 		k *= pow(dot, cl.movevars_aircontrol_power)*s->cmd.frametime;
 		speed = max(0, speed - cl.movevars_aircontrol_penalty * sqrt(max(0, 1 - dot*dot)) * k/32);
 		k *= cl.movevars_aircontrol;
@@ -1231,13 +1083,13 @@ static void CL_ClientMovement_Physics_PM_Accelerate(cl_clientmovement_state_t *s
 	else if(accelqw < 0)
 		speedclamp = 1;
 	else
-		speedclamp = -1; // no clamping
+		speedclamp = -1;
 
 	if(accelqw < 0)
 		accelqw = -accelqw;
 
 	if(cl.moveflags & MOVEFLAG_Q2AIRACCELERATE)
-		wishspeed0 = wishspeed; // don't need to emulate this Q1 bug
+		wishspeed0 = wishspeed;
 
 	vel_straight = DotProduct(s->velocity, wishdir);
 	vel_z = s->velocity[2];
@@ -1252,21 +1104,17 @@ static void CL_ClientMovement_Physics_PM_Accelerate(cl_clientmovement_state_t *s
 	vel_xy_forward  = vel_xy_current + bound(0, wishspeed - vel_xy_current, step) * accelqw + step * (1 - accelqw);
 	vel_xy_backward = vel_xy_current - bound(0, wishspeed + vel_xy_current, step) * accelqw - step * (1 - accelqw);
 	if(vel_xy_backward < 0)
-		vel_xy_backward = 0; // not that it REALLY occurs that this would cause wrong behaviour afterwards
+		vel_xy_backward = 0;
 
 	vel_straight    = vel_straight   + bound(0, wishspeed - vel_straight,   step) * accelqw + step * (1 - accelqw);
 
 	if(sidefric < 0 && VectorLength2(vel_perpend))
-		// negative: only apply so much sideways friction to stay below the speed you could get by "braking"
+
 	{
 		vec_t f, fmin;
 		f = max(0, 1 + s->cmd.frametime * wishspeed * sidefric);
 		fmin = (vel_xy_backward*vel_xy_backward - vel_straight*vel_straight) / VectorLength2(vel_perpend);
-		// assume: fmin > 1
-		// vel_xy_backward*vel_xy_backward - vel_straight*vel_straight > vel_perpend*vel_perpend
-		// vel_xy_backward*vel_xy_backward > vel_straight*vel_straight + vel_perpend*vel_perpend
-		// vel_xy_backward*vel_xy_backward > vel_xy * vel_xy
-		// obviously, this cannot be
+
 		if(fmin <= 0)
 			VectorScale(vel_perpend, f, vel_perpend);
 		else
@@ -1284,7 +1132,7 @@ static void CL_ClientMovement_Physics_PM_Accelerate(cl_clientmovement_state_t *s
 	{
 		vec_t vel_xy_preclamp;
 		vel_xy_preclamp = VectorLength(s->velocity);
-		if(vel_xy_preclamp > 0) // prevent division by zero
+		if(vel_xy_preclamp > 0)
 		{
 			vel_xy_current += (vel_xy_forward - vel_xy_current) * speedclamp;
 			if(vel_xy_current < vel_xy_preclamp)
@@ -1331,7 +1179,7 @@ static void CL_ClientMovement_Physics_PM_AirAccelerate(cl_clientmovement_state_t
     VectorSubtract( wishvel, curvel, acceldir );
     addspeed = VectorNormalizeLength( acceldir );
 
-    accelspeed = turnaccel * cl.movevars_maxairspeed /* wishspeed */ * s->cmd.frametime;
+    accelspeed = turnaccel * cl.movevars_maxairspeed                 * s->cmd.frametime;
     if( accelspeed > addspeed )
         accelspeed = addspeed;
 
@@ -1362,8 +1210,6 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 	vec3_t yawangles;
 	trace_t trace;
 
-	// jump if on ground with jump button pressed but only if it has been
-	// released at least once since the last jump
 	if (s->cmd.jump)
 	{
 		if (s->onground && (s->cmd.canjump || !cl_movement_track_canjump.integer))
@@ -1376,25 +1222,22 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 	else
 		s->cmd.canjump = true;
 
-	// calculate movement vector
 	VectorSet(yawangles, 0, s->cmd.viewangles[1], 0);
 	AngleVectors(yawangles, forward, right, up);
 	VectorMAM(s->cmd.forwardmove, forward, s->cmd.sidemove, right, wishvel);
 
-	// split wishvel into wishspeed and wishdir
 	wishspeed = VectorLength(wishvel);
 	if (wishspeed)
 		VectorScale(wishvel, 1 / wishspeed, wishdir);
 	else
 		VectorSet( wishdir, 0.0, 0.0, 0.0 );
-	// check if onground
+
 	if (s->onground)
 	{
 		wishspeed = min(wishspeed, cl.movevars_maxspeed);
 		if (s->crouched)
 			wishspeed *= 0.5;
 
-		// apply edge friction
 		f = sqrt(s->velocity[0] * s->velocity[0] + s->velocity[1] * s->velocity[1]);
 		if (f > 0)
 		{
@@ -1403,9 +1246,7 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 			{
 				vec3_t neworigin2;
 				vec3_t neworigin3;
-				// note: QW uses the full player box for the trace, and yet still
-				// uses s->origin[2] + s->mins[2], which is clearly an bug, but
-				// this mimics it for compatibility
+
 				VectorSet(neworigin2, s->origin[0] + s->velocity[0]*(16/f), s->origin[1] + s->velocity[1]*(16/f), s->origin[2] + s->mins[2]);
 				VectorSet(neworigin3, neworigin2[0], neworigin2[1], neworigin2[2] - 34);
 				if (cls.protocol == PROTOCOL_QUAKEWORLD)
@@ -1415,7 +1256,7 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 				if (trace.fraction == 1 && !trace.startsolid)
 					friction *= cl.movevars_edgefriction;
 			}
-			// apply ground friction
+
 			f = 1 - s->cmd.frametime * friction * ((f < cl.movevars_stopspeed) ? (cl.movevars_stopspeed / f) : 1);
 			f = max(f, 0);
 			VectorScale(s->velocity, f, s->velocity);
@@ -1448,7 +1289,7 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 	{
 		if (s->waterjumptime <= 0)
 		{
-			// apply air speed limit
+
 			vec_t accel, wishspeed0, wishspeed2, accelqw, strafity;
 			qboolean accelerating;
 
@@ -1462,7 +1303,6 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 			accelerating = (DotProduct(s->velocity, wishdir) > 0);
 			wishspeed2 = wishspeed;
 
-			// CPM: air control
 			if(cl.movevars_airstopaccelerate != 0)
 			{
 				vec3_t curdir;
@@ -1472,7 +1312,7 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 				VectorNormalize(curdir);
 				accel = accel + (cl.movevars_airstopaccelerate - accel) * max(0, -DotProduct(curdir, wishdir));
 			}
-			strafity = CL_IsMoveInDirection(s->cmd.forwardmove, s->cmd.sidemove, -90) + CL_IsMoveInDirection(s->cmd.forwardmove, s->cmd.sidemove, +90); // if one is nonzero, other is always zero
+			strafity = CL_IsMoveInDirection(s->cmd.forwardmove, s->cmd.sidemove, -90) + CL_IsMoveInDirection(s->cmd.forwardmove, s->cmd.sidemove, +90);
 			if(cl.movevars_maxairstrafespeed)
 				wishspeed = min(wishspeed, CL_GeomLerp(cl.movevars_maxairspeed, strafity, cl.movevars_maxairstrafespeed));
 			if(cl.movevars_airstrafeaccelerate)
@@ -1482,7 +1322,6 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 					(((strafity > 0.5 ? cl.movevars_airstrafeaccel_qw : cl.movevars_airaccel_qw) >= 0) ? +1 : -1)
 					*
 					(1 - CL_GeomLerp(1 - fabs(cl.movevars_airaccel_qw), strafity, 1 - fabs(cl.movevars_airstrafeaccel_qw)));
-			// !CPM
 
 			if(cl.movevars_warsowbunny_turnaccel && accelerating && s->cmd.sidemove == 0 && s->cmd.forwardmove != 0)
 				CL_ClientMovement_Physics_PM_AirAccelerate(s, wishdir, wishspeed2);
@@ -1508,7 +1347,7 @@ static void CL_ClientMovement_Physics_Walk(cl_clientmovement_state_t *s)
 
 static void CL_ClientMovement_PlayerMove(cl_clientmovement_state_t *s)
 {
-	//Con_Printf(" %f", frametime);
+
 	if (!s->cmd.jump)
 		s->cmd.canjump = true;
 	s->waterjumptime -= s->cmd.frametime;
@@ -1603,18 +1442,17 @@ void CL_UpdateMoveVars(void)
 
 	if(!(cl.moveflags & MOVEFLAG_VALID))
 	{
-		if(gamemode == GAME_NEXUIZ)  // Legacy hack to work with old servers of Nexuiz.
+		if(gamemode == GAME_NEXUIZ)
 			cl.moveflags = MOVEFLAG_Q2AIRACCELERATE;
 	}
 
 	if(cl.movevars_aircontrol_power <= 0)
-		cl.movevars_aircontrol_power = 2; // CPMA default
+		cl.movevars_aircontrol_power = 2;
 }
 
 void CL_ClientMovement_PlayerMove_Frame(cl_clientmovement_state_t *s)
 {
-	// if a move is more than 50ms, do it as two moves (matching qwsv)
-	//Con_Printf("%i ", s.cmd.msec);
+
 	if(s->cmd.frametime > 0.0005)
 	{
 		if (s->cmd.frametime > 0.05)
@@ -1626,7 +1464,7 @@ void CL_ClientMovement_PlayerMove_Frame(cl_clientmovement_state_t *s)
 	}
 	else
 	{
-		// we REALLY need this handling to happen, even if the move is not executed
+
 		if (!s->cmd.jump)
 			s->cmd.canjump = true;
 	}
@@ -1646,31 +1484,24 @@ void CL_ClientMovement_Replay(void)
 	if (!cl_movement_replay.integer)
 		return;
 
-	// set up starting state for the series of moves
 	memset(&s, 0, sizeof(s));
 	VectorCopy(cl.entities[cl.playerentity].state_current.origin, s.origin);
 	VectorCopy(cl.mvelocity[0], s.velocity);
-	s.crouched = true; // will be updated on first move
-	//Con_Printf("movement replay starting org %f %f %f vel %f %f %f\n", s.origin[0], s.origin[1], s.origin[2], s.velocity[0], s.velocity[1], s.velocity[2]);
+	s.crouched = true;
 
 	totalmovemsec = 0;
 	for (i = 0;i < CL_MAX_USERCMDS;i++)
 		if (cl.movecmd[i].sequence > cls.servermovesequence)
 			totalmovemsec += cl.movecmd[i].msec;
 	cl.movement_predicted = totalmovemsec >= cl_movement_minping.value && cls.servermovesequence && (cl_movement.integer && !cls.demoplayback && cls.signon == SIGNONS && cl.stats[STAT_HEALTH] > 0 && !cl.intermission);
-	//Con_Printf("%i = %.0f >= %.0f && %u && (%i && %i && %i == %i && %i > 0 && %i\n", cl.movement_predicted, totalmovemsec, cl_movement_minping.value, cls.servermovesequence, cl_movement.integer, !cls.demoplayback, cls.signon, SIGNONS, cl.stats[STAT_HEALTH], !cl.intermission);
+
 	if (cl.movement_predicted)
 	{
-		//Con_Printf("%ims\n", cl.movecmd[0].msec);
 
-		// replay the input queue to predict current location
-		// note: this relies on the fact there's always one queue item at the end
-
-		// find how many are still valid
 		for (i = 0;i < CL_MAX_USERCMDS;i++)
 			if (cl.movecmd[i].sequence <= cls.servermovesequence)
 				break;
-		// now walk them in oldest to newest order
+
 		for (i--;i >= 0;i--)
 		{
 			s.cmd = cl.movecmd[i];
@@ -1681,40 +1512,31 @@ void CL_ClientMovement_Replay(void)
 
 			cl.movecmd[i].canjump = s.cmd.canjump;
 		}
-		//Con_Printf("\n");
+
 		CL_ClientMovement_UpdateStatus(&s);
 	}
 	else
 	{
-		// get the first movement queue entry to know whether to crouch and such
+
 		s.cmd = cl.movecmd[0];
 	}
 
-	if (!cls.demoplayback) // for bob, speedometer
+	if (!cls.demoplayback)
 	{
 		cl.movement_replay = false;
-		// update the interpolation target position and velocity
+
 		VectorCopy(s.origin, cl.movement_origin);
 		VectorCopy(s.velocity, cl.movement_velocity);
 	}
 
-	// update the onground flag if appropriate
 	if (cl.movement_predicted)
 	{
-		// when predicted we simply set the flag according to the UpdateStatus
+
 		cl.onground = s.onground;
 	}
 	else
 	{
-		// when not predicted, cl.onground is cleared by cl_parse.c each time
-		// an update packet is received, but can be forced on here to hide
-		// server inconsistencies in the onground flag
-		// (which mostly occur when stepping up stairs at very high framerates
-		//  where after the step up the move continues forward and not
-		//  downward so the ground is not detected)
-		//
-		// such onground inconsistencies can cause jittery gun bobbing and
-		// stair smoothing, so we set onground if UpdateStatus says so
+
 		if (s.onground)
 			cl.onground = true;
 	}
@@ -1773,7 +1595,7 @@ void CL_NewFrameReceived(int num)
 
 void CL_RotateMoves(const matrix4x4_t *m)
 {
-	// rotate viewangles in all previous moves
+
 	vec3_t v;
 	vec3_t f, r, u;
 	int i;
@@ -1790,12 +1612,7 @@ void CL_RotateMoves(const matrix4x4_t *m)
 	}
 }
 
-/*
-==============
-CL_SendMove
-==============
-*/
-usercmd_t nullcmd; // for delta compression of qw moves
+usercmd_t nullcmd;
 void CL_SendMove(void)
 {
 	int i, j, packetloss;
@@ -1810,21 +1627,14 @@ void CL_SendMove(void)
 	qboolean quemove;
 	qboolean important;
 
-	// if playing a demo, do nothing
 	if (!cls.netcon)
 		return;
 
-	// we don't que moves during a lag spike (potential network timeout)
 	quemove = realtime - cl.last_received_message < cl_movement_nettimeout.value;
 
-	// we build up cl.cmd and then decide whether to send or not
-	// we store this into cl.movecmd[0] for prediction each frame even if we
-	// do not send, to make sure that prediction is instant
 	cl.cmd.time = cl.time;
 	cl.cmd.sequence = cls.netcon->outgoing_unreliable_sequence;
 
-	// set button bits
-	// LordHavoc: added 6 new buttons and use and chat buttons, and prydon cursor active button
 	bits = 0;
 	if (in_attack.state   & 3) bits |=   1;
 	if (in_jump.state     & 3) bits |=   2;
@@ -1845,8 +1655,7 @@ void CL_SendMove(void)
 	if (in_button14.state  & 3) bits |=  65536;
 	if (in_button15.state  & 3) bits |= 131072;
 	if (in_button16.state  & 3) bits |= 262144;
-	// button bits 19-31 unused currently
-	// rotate/zoom view serverside if PRYDON_CLIENTCURSOR cursor is at edge of screen
+
 	if(cl_prydoncursor.integer > 0)
 	{
 		if (cl.cmd.cursor_screen[0] <= -1) bits |= 8;
@@ -1855,16 +1664,14 @@ void CL_SendMove(void)
 		if (cl.cmd.cursor_screen[1] >=  1) bits |= 64;
 	}
 
-	// set buttons and impulse
 	cl.cmd.buttons = bits;
 	cl.cmd.impulse = in_impulse;
 
-	// set viewangles
 	VectorCopy(cl.viewangles, cl.cmd.viewangles);
 
 	msecdelta = (int)(floor(cl.cmd.time * 1000) - floor(cl.movecmd[1].time * 1000));
 	cl.cmd.msec = (unsigned char)bound(0, msecdelta, 255);
-	// ridiculous value rejection (matches qw)
+
 	if (cl.cmd.msec > 250)
 		cl.cmd.msec = 100;
 	cl.cmd.frametime = cl.cmd.msec * (1.0 / 1000.0);
@@ -1872,7 +1679,7 @@ void CL_SendMove(void)
 	switch(cls.protocol)
 	{
 	case PROTOCOL_QUAKEWORLD:
-		// quakeworld uses a different cvar with opposite meaning, for compatibility
+
 		cl.cmd.predicted = cl_nopred.integer == 0;
 		break;
 	case PROTOCOL_DARKPLACES6:
@@ -1884,8 +1691,6 @@ void CL_SendMove(void)
 		break;
 	}
 
-	// movement is set by input code (forwardmove/sidemove/upmove)
-	// always dump the first two moves, because they may contain leftover inputs from the last level
 	if (cl.cmd.sequence <= 2)
 		cl.cmd.forwardmove = cl.cmd.sidemove = cl.cmd.upmove = cl.cmd.impulse = cl.cmd.buttons = 0;
 
@@ -1908,7 +1713,7 @@ void CL_SendMove(void)
 		break;
 	case PROTOCOL_DARKPLACES6:
 	case PROTOCOL_DARKPLACES7:
-		// FIXME: cl.cmd.buttons & 16 is +button5, Nexuiz/Xonotic specific
+
 		cl.cmd.crouch = (cl.cmd.buttons & 16) != 0;
 		break;
 	case PROTOCOL_UNKNOWN:
@@ -1918,15 +1723,9 @@ void CL_SendMove(void)
 	if (quemove)
 		cl.movecmd[0] = cl.cmd;
 
-	// don't predict more than 200fps
 	if (realtime >= cl.lastpackettime + 0.005)
-		cl.movement_replay = true; // redo the prediction
+		cl.movement_replay = true;
 
-	// now decide whether to actually send this move
-	// (otherwise it is only for prediction)
-
-	// don't send too often or else network connections can get clogged by a
-	// high renderer framerate
 	packettime = 1.0 / bound(1, cl_netfps.value, 1000);
 	if (cl.movevars_timescale && cl.movevars_ticrate)
 	{
@@ -1934,24 +1733,17 @@ void CL_SendMove(void)
 		packettime = min(packettime, maxtic);
 	}
 
-	// do not send 0ms packets because they mess up physics
 	if(cl.cmd.msec == 0 && cl.time > cl.oldtime && (cls.protocol == PROTOCOL_QUAKEWORLD || cls.signon == SIGNONS))
 		return;
-	// always send if buttons changed or an impulse is pending
-	// even if it violates the rate limit!
+
 	important = (cl.cmd.impulse || (cl_netimmediatebuttons.integer && cl.cmd.buttons != cl.movecmd[1].buttons));
-	// don't send too often (cl_netfps)
+
 	if (!important && realtime < cl.lastpackettime + packettime)
 		return;
-	// don't choke the connection with packets (obey rate limit)
-	// it is important that this check be last, because it adds a new
-	// frame to the shownetgraph output and any cancelation after this
-	// will produce a nasty spike-like look to the netgraph
-	// we also still send if it is important
+
 	if (!NetConn_CanSend(cls.netcon) && !important)
 		return;
-	// try to round off the lastpackettime to a multiple of the packet interval
-	// (this causes it to emit packets at a steady beat)
+
 	if (packettime > 0)
 		cl.lastpackettime = floor(realtime / packettime) * packettime;
 	else
@@ -1961,20 +1753,6 @@ void CL_SendMove(void)
 	buf.cursize = 0;
 	buf.data = data;
 
-	// send the movement message
-	// PROTOCOL_QUAKE        clc_move = 16 bytes total
-	// PROTOCOL_QUAKEDP      clc_move = 16 bytes total
-	// PROTOCOL_NEHAHRAMOVIE clc_move = 16 bytes total
-	// PROTOCOL_DARKPLACES1  clc_move = 19 bytes total
-	// PROTOCOL_DARKPLACES2  clc_move = 25 bytes total
-	// PROTOCOL_DARKPLACES3  clc_move = 25 bytes total
-	// PROTOCOL_DARKPLACES4  clc_move = 19 bytes total
-	// PROTOCOL_DARKPLACES5  clc_move = 19 bytes total
-	// PROTOCOL_DARKPLACES6  clc_move = 52 bytes total
-	// PROTOCOL_DARKPLACES7  clc_move = 56 bytes total per move (can be up to 16 moves)
-	// PROTOCOL_QUAKEWORLD   clc_move = 34 bytes total (typically, but can reach 43 bytes, or even 49 bytes with roll)
-
-	// set prydon cursor info
 	CL_UpdatePrydonCursor();
 
 	if (cls.protocol == PROTOCOL_QUAKEWORLD || cls.signon == SIGNONS)
@@ -1983,25 +1761,25 @@ void CL_SendMove(void)
 		{
 		case PROTOCOL_QUAKEWORLD:
 			MSG_WriteByte(&buf, qw_clc_move);
-			// save the position for a checksum byte
+
 			checksumindex = buf.cursize;
 			MSG_WriteByte(&buf, 0);
-			// packet loss percentage
+
 			for (j = 0, packetloss = 0;j < NETGRAPH_PACKETS;j++)
 				if (cls.netcon->incoming_netgraph[j].unreliablebytes == NETGRAPH_LOSTPACKET)
 					packetloss++;
 			packetloss = packetloss * 100 / NETGRAPH_PACKETS;
 			MSG_WriteByte(&buf, packetloss);
-			// write most recent 3 moves
+
 			QW_MSG_WriteDeltaUsercmd(&buf, &nullcmd, &cl.movecmd[2]);
 			QW_MSG_WriteDeltaUsercmd(&buf, &cl.movecmd[2], &cl.movecmd[1]);
 			QW_MSG_WriteDeltaUsercmd(&buf, &cl.movecmd[1], &cl.cmd);
-			// calculate the checksum
+
 			buf.data[checksumindex] = COM_BlockSequenceCRCByteQW(buf.data + checksumindex + 1, buf.cursize - checksumindex - 1, cls.netcon->outgoing_unreliable_sequence);
-			// if delta compression history overflows, request no delta
+
 			if (cls.netcon->outgoing_unreliable_sequence - cl.qw_validsequence >= QW_UPDATE_BACKUP-1)
 				cl.qw_validsequence = 0;
-			// request delta compression if appropriate
+
 			if (cl.qw_validsequence && !cl_nodelta.integer && cls.state == ca_connected && !cls.demorecording)
 			{
 				cl.qw_deltasequence[cls.netcon->outgoing_unreliable_sequence & QW_UPDATE_MASK] = cl.qw_validsequence;
@@ -2017,11 +1795,11 @@ void CL_SendMove(void)
 		case PROTOCOL_NEHAHRABJP:
 		case PROTOCOL_NEHAHRABJP2:
 		case PROTOCOL_NEHAHRABJP3:
-			// 5 bytes
+
 			MSG_WriteByte (&buf, clc_move);
-			MSG_WriteFloat (&buf, cl.cmd.time); // last server packet time
-			// 3 bytes (6 bytes in proquake)
-			if (cls.proquake_servermod == 1) // MOD_PROQUAKE
+			MSG_WriteFloat (&buf, cl.cmd.time);
+
+			if (cls.proquake_servermod == 1)
 			{
 				for (i = 0;i < 3;i++)
 					MSG_WriteAngle16i (&buf, cl.cmd.viewangles[i]);
@@ -2031,81 +1809,75 @@ void CL_SendMove(void)
 				for (i = 0;i < 3;i++)
 					MSG_WriteAngle8i (&buf, cl.cmd.viewangles[i]);
 			}
-			// 6 bytes
+
 			MSG_WriteCoord16i (&buf, cl.cmd.forwardmove);
 			MSG_WriteCoord16i (&buf, cl.cmd.sidemove);
 			MSG_WriteCoord16i (&buf, cl.cmd.upmove);
-			// 2 bytes
+
 			MSG_WriteByte (&buf, cl.cmd.buttons);
 			MSG_WriteByte (&buf, cl.cmd.impulse);
 			break;
 		case PROTOCOL_DARKPLACES2:
 		case PROTOCOL_DARKPLACES3:
-			// 5 bytes
+
 			MSG_WriteByte (&buf, clc_move);
-			MSG_WriteFloat (&buf, cl.cmd.time); // last server packet time
-			// 12 bytes
+			MSG_WriteFloat (&buf, cl.cmd.time);
+
 			for (i = 0;i < 3;i++)
 				MSG_WriteAngle32f (&buf, cl.cmd.viewangles[i]);
-			// 6 bytes
+
 			MSG_WriteCoord16i (&buf, cl.cmd.forwardmove);
 			MSG_WriteCoord16i (&buf, cl.cmd.sidemove);
 			MSG_WriteCoord16i (&buf, cl.cmd.upmove);
-			// 2 bytes
+
 			MSG_WriteByte (&buf, cl.cmd.buttons);
 			MSG_WriteByte (&buf, cl.cmd.impulse);
 			break;
 		case PROTOCOL_DARKPLACES1:
 		case PROTOCOL_DARKPLACES4:
 		case PROTOCOL_DARKPLACES5:
-			// 5 bytes
+
 			MSG_WriteByte (&buf, clc_move);
-			MSG_WriteFloat (&buf, cl.cmd.time); // last server packet time
-			// 6 bytes
+			MSG_WriteFloat (&buf, cl.cmd.time);
+
 			for (i = 0;i < 3;i++)
 				MSG_WriteAngle16i (&buf, cl.cmd.viewangles[i]);
-			// 6 bytes
+
 			MSG_WriteCoord16i (&buf, cl.cmd.forwardmove);
 			MSG_WriteCoord16i (&buf, cl.cmd.sidemove);
 			MSG_WriteCoord16i (&buf, cl.cmd.upmove);
-			// 2 bytes
+
 			MSG_WriteByte (&buf, cl.cmd.buttons);
 			MSG_WriteByte (&buf, cl.cmd.impulse);
 		case PROTOCOL_DARKPLACES6:
 		case PROTOCOL_DARKPLACES7:
-			// set the maxusercmds variable to limit how many should be sent
+
 			maxusercmds = bound(1, cl_netrepeatinput.integer + 1, min(3, CL_MAX_USERCMDS));
-			// when movement prediction is off, there's not much point in repeating old input as it will just be ignored
+
 			if (!cl.cmd.predicted)
 				maxusercmds = 1;
 
-			// send the latest moves in order, the old ones will be
-			// ignored by the server harmlessly, however if the previous
-			// packets were lost these moves will be used
-			//
-			// this reduces packet loss impact on gameplay.
 			for (j = 0, cmd = &cl.movecmd[maxusercmds-1];j < maxusercmds;j++, cmd--)
 			{
-				// don't repeat any stale moves
+
 				if (cmd->sequence && cmd->sequence < cls.servermovesequence)
 					continue;
-				// 5/9 bytes
+
 				MSG_WriteByte (&buf, clc_move);
 				if (cls.protocol != PROTOCOL_DARKPLACES6)
 					MSG_WriteLong (&buf, cmd->predicted ? cmd->sequence : 0);
-				MSG_WriteFloat (&buf, cmd->time); // last server packet time
-				// 6 bytes
+				MSG_WriteFloat (&buf, cmd->time);
+
 				for (i = 0;i < 3;i++)
 					MSG_WriteAngle16i (&buf, cmd->viewangles[i]);
-				// 6 bytes
+
 				MSG_WriteCoord16i (&buf, cmd->forwardmove);
 				MSG_WriteCoord16i (&buf, cmd->sidemove);
 				MSG_WriteCoord16i (&buf, cmd->upmove);
-				// 5 bytes
+
 				MSG_WriteLong (&buf, cmd->buttons);
 				MSG_WriteByte (&buf, cmd->impulse);
-				// PRYDON_CLIENTCURSOR
-				// 30 bytes
+
 				MSG_WriteShort (&buf, (short)(cmd->cursor_screen[0] * 32767.0f));
 				MSG_WriteShort (&buf, (short)(cmd->cursor_screen[1] * 32767.0f));
 				MSG_WriteFloat (&buf, cmd->cursor_start[0]);
@@ -2124,11 +1896,7 @@ void CL_SendMove(void)
 
 	if (cls.protocol != PROTOCOL_QUAKEWORLD && buf.cursize)
 	{
-		// ack entity frame numbers received since the last input was sent
-		// (redundent to improve handling of client->server packet loss)
-		// if cl_netrepeatinput is 1 and client framerate matches server
-		// framerate, this is 10 bytes, if client framerate is lower this
-		// will be more...
+
 		unsigned int oldsequence = cl.cmd.sequence;
 		unsigned int delta = bound(1, cl_netrepeatinput.integer + 1, 3);
 		if (oldsequence > delta)
@@ -2148,10 +1916,6 @@ void CL_SendMove(void)
 		}
 	}
 
-	// PROTOCOL_DARKPLACES6 = 67 bytes per packet
-	// PROTOCOL_DARKPLACES7 = 71 bytes per packet
-
-	// acknowledge any recently received data blocks
 	for (i = 0;i < CL_MAX_DOWNLOADACKS && (cls.dp_downloadack[i].start || cls.dp_downloadack[i].size);i++)
 	{
 		MSG_WriteByte(&buf, clc_ackdownloaddata);
@@ -2161,21 +1925,18 @@ void CL_SendMove(void)
 		cls.dp_downloadack[i].size = 0;
 	}
 
-	// send the reliable message (forwarded commands) if there is one
 	if (buf.cursize || cls.netcon->message.cursize)
 		NetConn_SendUnreliableMessage(cls.netcon, &buf, cls.protocol, max(20*(buf.cursize+40), cl_rate.integer), cl_rate_burstsize.integer, false);
 
 	if (quemove)
 	{
-		// update the cl.movecmd array which holds the most recent moves,
-		// because we now need a new slot for the next input
+
 		for (i = CL_MAX_USERCMDS - 1;i >= 1;i--)
 			cl.movecmd[i] = cl.movecmd[i-1];
 		cl.movecmd[0].msec = 0;
 		cl.movecmd[0].frametime = 0;
 	}
 
-	// clear button 'click' states
 	in_attack.state  &= ~2;
 	in_jump.state    &= ~2;
 	in_button3.state &= ~2;
@@ -2193,7 +1954,7 @@ void CL_SendMove(void)
 	in_button14.state &= ~2;
 	in_button15.state &= ~2;
 	in_button16.state &= ~2;
-	// clear impulse
+
 	in_impulse = 0;
 
 	if (cls.netcon->message.overflowed)
@@ -2206,11 +1967,6 @@ void CL_SendMove(void)
 	}
 }
 
-/*
-============
-CL_InitInput
-============
-*/
 void CL_InitInput (void)
 {
 	Cmd_AddCommand ("+moveup",IN_UpDown, "swim upward");
@@ -2247,11 +2003,9 @@ void CL_InitInput (void)
 	Cmd_AddCommand ("+mlook", IN_MLookDown, "activate mouse looking mode, do not recenter view");
 	Cmd_AddCommand ("-mlook", IN_MLookUp, "deactivate mouse looking mode");
 
-	// LordHavoc: added use button
 	Cmd_AddCommand ("+use", IN_UseDown, "use something (may be used by some mods)");
 	Cmd_AddCommand ("-use", IN_UseUp, "stop using something");
 
-	// LordHavoc: added 6 new buttons
 	Cmd_AddCommand ("+button3", IN_Button3Down, "activate button3 (behavior depends on mod)");
 	Cmd_AddCommand ("-button3", IN_Button3Up, "deactivate button3");
 	Cmd_AddCommand ("+button4", IN_Button4Down, "activate button4 (behavior depends on mod)");
@@ -2281,7 +2035,6 @@ void CL_InitInput (void)
 	Cmd_AddCommand ("+button16", IN_Button16Down, "activate button16 (behavior depends on mod)");
 	Cmd_AddCommand ("-button16", IN_Button16Up, "deactivate button16");
 
-	// LordHavoc: added bestweapon command
 	Cmd_AddCommand ("bestweapon", IN_BestWeapon, "send an impulse number to server to select the first usable weapon out of several (example: 8 7 6 5 4 3 2 1)");
 #if 0
 	Cmd_AddCommand ("cycleweapon", IN_CycleWeapon, "send an impulse number to server to select the next usable weapon out of several (example: 9 4 8) if you are holding one of these, and choose the first one if you are holding none of these");
@@ -2330,4 +2083,3 @@ void CL_InitInput (void)
 
 	Cvar_RegisterVariable(&cl_csqc_generatemousemoveevents);
 }
-

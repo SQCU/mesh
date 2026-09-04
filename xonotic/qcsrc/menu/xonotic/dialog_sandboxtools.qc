@@ -14,8 +14,8 @@ void XonoticSandboxToolsDialog_fill(entity me)
 	me.TR(me);
 		me.TD(me, 1, 0.25, e = makeXonoticTextLabel(0, _("Model:")));
 		me.TD(me, 1, 1.5, box = makeXonoticInputBox(1, "menu_sandbox_spawn_model"));
-			box.forbiddenCharacters = "\r\n\\\"$"; // don't care, isn't getting saved
-			box.maxLength = -127; // negative means encoded length in bytes
+			box.forbiddenCharacters = "\r\n\\\"$";
+			box.maxLength = -127;
 			box.saveImmediately = 1;
 		me.TD(me, 1, 0.5, e = makeXonoticCommandButton(_("Spawn"), '0 0 0', "sandbox object_spawn \"$menu_sandbox_spawn_model\"", 0));
 		me.TD(me, 1, 0.5, e = makeXonoticCommandButton(_("Remove *"), '0 0 0', "sandbox object_remove", 0));
@@ -25,8 +25,8 @@ void XonoticSandboxToolsDialog_fill(entity me)
 	me.TR(me);
 		me.TD(me, 1, 0.25, e = makeXonoticTextLabel(0, _("Bone:")));
 		me.TD(me, 1, 1.5, box = makeXonoticInputBox(1, "menu_sandbox_attach_bone"));
-			box.forbiddenCharacters = "\r\n\\\"$"; // don't care, isn't getting saved
-			box.maxLength = -127; // negative means encoded length in bytes
+			box.forbiddenCharacters = "\r\n\\\"$";
+			box.maxLength = -127;
 			box.saveImmediately = 1;
 		me.TD(me, 1, 0.5, e = makeXonoticCommandButton(_("Set * as child"), '0 0 0', "sandbox object_attach get", 0));
 		me.TD(me, 1, 0.5, e = makeXonoticCommandButton(_("Attach to *"), '0 0 0', "sandbox object_attach set \"$menu_sandbox_attach_bone\"", 0));
@@ -55,8 +55,8 @@ void XonoticSandboxToolsDialog_fill(entity me)
 	me.TR(me);
 		me.TD(me, 1, 0.5, e = makeXonoticCommandButton(_("Set material:"), '0 0 0', "sandbox object_edit material \"$menu_sandbox_edit_material\"", 0));
 		me.TD(me, 1, 1.5, box = makeXonoticInputBox(1, "menu_sandbox_edit_material"));
-			box.forbiddenCharacters = "\r\n\\\"$"; // don't care, isn't getting saved
-			box.maxLength = -127; // negative means encoded length in bytes
+			box.forbiddenCharacters = "\r\n\\\"$";
+			box.maxLength = -127;
 			box.saveImmediately = 1;
 	me.TR(me);
 		me.TD(me, 1, 0.5, e = makeXonoticCommandButton(_("Set solidity:"), '0 0 0', "sandbox object_edit solidity $menu_sandbox_edit_solidity", 0));

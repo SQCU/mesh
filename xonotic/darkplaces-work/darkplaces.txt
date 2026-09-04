@@ -939,7 +939,7 @@ sv_nostep                                         0                   prevents M
 sv_playerphysicsqc                                1                   enables QuakeC function to override player physics
 sv_progs                                          progs.dat           selects which quakec progs.dat file to run
 sv_protocolname                                   DP7                 selects network protocol to host for (values include QUAKE, QUAKEDP, NEHAHRAMOVIE, DP1 and up)
-sv_public                                         0                   1: advertises this server on the master server (so that players can find it in the server browser); 0: allow direct queries only; -1: do not respond to direct queries; -2: do not allow anyone to connect
+sv_public                                         0                   1 advertises this server on the master server; every value permits direct discovery and connection
 sv_qwmaster1                                                          user-chosen qwmaster server 1
 sv_qwmaster2                                                          user-chosen qwmaster server 2
 sv_qwmaster3                                                          user-chosen qwmaster server 3

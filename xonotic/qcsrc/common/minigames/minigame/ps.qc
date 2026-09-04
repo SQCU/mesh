@@ -1,19 +1,18 @@
 #include "ps.qh"
 REGISTER_MINIGAME(ps, _("Peg Solitaire"));
 
-const float PS_TURN_MOVE  = 0x0100; // player has to click on a piece on the board
-const float PS_TURN_WIN   = 0x0200; // player has won
-const float PS_TURN_DRAW  = 0x0400; // player can make no more moves
-const float PS_TURN_TYPE  = 0x0f00; // turn type mask
+const float PS_TURN_MOVE  = 0x0100;
+const float PS_TURN_WIN   = 0x0200;
+const float PS_TURN_DRAW  = 0x0400;
+const float PS_TURN_TYPE  = 0x0f00;
 
-const int PS_SPECTATOR_TEAM = 255; // must be above max teams and equal to or below 255
+const int PS_SPECTATOR_TEAM = 255;
 
 const int PS_LET_CNT = 7;
 const int PS_NUM_CNT = 7;
 
 const int PS_TILE_SIZE = 8;
 
-// find same game piece given its tile name
 entity ps_find_piece(entity minig, string tile)
 {
 	entity e = NULL;
@@ -57,7 +56,6 @@ bool ps_tile_blacklisted(string tile)
 	return false;
 }
 
-// check if the tile name is valid (5x5 grid)
 bool ps_valid_tile(string tile)
 {
 	if ( !tile )
@@ -69,11 +67,8 @@ bool ps_valid_tile(string tile)
 	return 0 <= number && number < PS_NUM_CNT && 0 <= letter && letter < PS_LET_CNT;
 }
 
-// Checks if the given piece completes a row
 bool ps_winning_piece(entity minigame)
 {
-	//int number = minigame_tile_number(piece.netname);
-	//int letter = minigame_tile_letter(piece.netname);
 
 	entity e = NULL;
 	while ( ( e = findentity(e,owner,minigame) ) )
@@ -86,28 +81,28 @@ bool ps_winning_piece(entity minigame)
 			{
 				try = minigame_tile_buildname(letter - 2, number);
 				if(ps_valid_tile(try) && !ps_find_piece(minigame,try))
-					return false; // a move is valid, abort!
+					return false;
 			}
 			try = minigame_tile_buildname(letter + 1, number);
 			if(ps_find_piece(minigame,try))
 			{
 				try = minigame_tile_buildname(letter + 2, number);
 				if(ps_valid_tile(try) && !ps_find_piece(minigame,try))
-					return false; // a move is valid, abort!
+					return false;
 			}
 			try = minigame_tile_buildname(letter, number - 1);
 			if(ps_find_piece(minigame,try))
 			{
 				try = minigame_tile_buildname(letter, number - 2);
 				if(ps_valid_tile(try) && !ps_find_piece(minigame,try))
-					return false; // a move is valid, abort!
+					return false;
 			}
 			try = minigame_tile_buildname(letter, number + 1);
 			if(ps_find_piece(minigame,try))
 			{
 				try = minigame_tile_buildname(letter, number + 2);
 				if(ps_valid_tile(try) && !ps_find_piece(minigame,try))
-					return false; // a move is valid, abort!
+					return false;
 			}
 		}
 
@@ -124,9 +119,9 @@ void ps_setup_pieces(entity minigame)
 		if(!ps_valid_tile(try))
 			continue;
 		if(i == floor(PS_NUM_CNT * 0.5) && t == floor(PS_LET_CNT * 0.5))
-			continue; // middle piece is empty
+			continue;
 		entity piece = msle_spawn(minigame,new(minigame_board_piece));
-		piece.team = 1; // init default team?
+		piece.team = 1;
 		piece.netname = strzone(minigame_tile_buildname(t,i));
 		minigame_server_sendflags(piece,MINIG_SF_ALL);
 	}
@@ -154,7 +149,6 @@ bool ps_move_piece(entity minigame, entity piece, string pos, int leti, int numb
 	return true;
 }
 
-// make a move
 void ps_move(entity minigame, entity player, string thepiece, string pos )
 {
 	if ( (minigame.minigame_flags & PS_TURN_MOVE) )
@@ -199,7 +193,7 @@ void ps_move(entity minigame, entity player, string thepiece, string pos )
 			}
 
 			if(!done)
-				return; // didn't make a move
+				return;
 
 			minigame_server_sendflags(minigame,MINIG_SF_UPDATE);
 
@@ -218,8 +212,6 @@ void ps_move(entity minigame, entity player, string thepiece, string pos )
 
 #ifdef SVQC
 
-
-// required function, handle server side events
 int ps_server_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -245,10 +237,8 @@ int ps_server_event(entity minigame, string event, ...)
 		{
 			int pl_num = minigame_count_players(minigame);
 
-			// Don't allow more than 1 player
 			if(pl_num >= 1) { return PS_SPECTATOR_TEAM; }
 
-			// Team 1 by default
 			return 1;
 		}
 		case "cmd":
@@ -271,15 +261,13 @@ int ps_server_event(entity minigame, string event, ...)
 	return false;
 }
 
-
 #elif defined(CSQC)
 
-entity ps_curr_piece; // identifier for the currently selected piece
-string ps_curr_pos; // identifier of the tile under the mouse
-vector ps_boardpos; // HUD board position
-vector ps_boardsize;// HUD board size
+entity ps_curr_piece;
+string ps_curr_pos;
+vector ps_boardpos;
+vector ps_boardsize;
 
-// Required function, draw the game board
 void ps_hud_board(vector pos, vector mySize)
 {
 	minigame_hud_fitsqare(pos, mySize);
@@ -330,7 +318,7 @@ void ps_hud_board(vector pos, vector mySize)
 	bool draw_pos = false;
 	if(ps_curr_piece && valid && !ps_find_piece(active_minigame, ps_curr_pos))
 	{
-		string try; // sigh
+		string try;
 		int numb = minigame_tile_number(ps_curr_piece.netname);
 		int leti = minigame_tile_letter(ps_curr_piece.netname);
 
@@ -433,8 +421,6 @@ void ps_hud_board(vector pos, vector mySize)
 	}
 }
 
-
-// Required function, draw the game status panel
 void ps_hud_status(vector pos, vector mySize)
 {
 	HUD_Panel_DrawBg();
@@ -479,11 +465,6 @@ void ps_hud_status(vector pos, vector mySize)
 				player_fontsize, panel_fg_alpha, DRAWFLAG_NORMAL);
 
 			mypos_y += player_fontsize_y;
-			//drawpic( mypos,
-			//		minigame_texture("ps/piece"),
-			//		tile_size, '1 0 0', panel_fg_alpha, DRAWFLAG_NORMAL );
-
-			//mypos_x += tile_size_x;
 
 			drawstring(mypos,sprintf(_("Pieces left: %s"), ftos(remaining)),'28 28 0',
 					   '0.7 0.84 1', panel_fg_alpha, DRAWFLAG_NORMAL);
@@ -491,7 +472,6 @@ void ps_hud_status(vector pos, vector mySize)
 	}
 }
 
-// Turn a set of flags into a help message
 string ps_turn_to_string(int turnflags)
 {
 	if(minigame_self.team == PS_SPECTATOR_TEAM)
@@ -509,7 +489,6 @@ string ps_turn_to_string(int turnflags)
 	return "";
 }
 
-// Make the correct move
 void ps_make_move(entity minigame)
 {
 	if ( minigame.minigame_flags == PS_TURN_MOVE )
@@ -533,7 +512,6 @@ void ps_set_curr_pos(string s)
 	ps_curr_pos = s;
 }
 
-// Required function, handle client events
 int ps_client_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -638,8 +616,7 @@ int ps_client_event(entity minigame, string event, ...)
 				if ( sf & MINIG_SF_UPDATE )
 				{
 					strcpy(sent.message, ps_turn_to_string(sent.minigame_flags));
-					//if ( sent.minigame_flags & minigame_self.team )
-						//minigame_prompt();
+
 				}
 			}
 

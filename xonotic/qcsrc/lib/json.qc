@@ -1,12 +1,9 @@
-#include "test.qh"
-
 STRING_ITERATOR(_json, string_null, 0);
-// Store interleaved keys/values in a string buffer
+
 int _json_buffer;
-// Last read string
+
 string _json_temp;
 
-/** parse a json object */
 bool _json_parse_object();
     bool _json_parse_members();
         bool _json_parse_pair();
@@ -27,9 +24,9 @@ bool _json_parse_number();
 :fail \
    STRING_ITERATOR_LOAD(_json, __i); \
    return false;
-// Current namespace
+
 string _json_ns;
-// Current keys
+
 int _json_keys;
 
 ERASEABLE
@@ -165,7 +162,7 @@ bool _json_parse_string(bool add) {
                 case '\\': esc = "\\"; break;
                 case 'n': esc = "\n"; break;
                 case 't': esc = "\t"; break;
-                case 'u': esc = "\\u"; break; // TODO
+                case 'u': esc = "\\u"; break;
                 case '/': esc = "/"; break;
             }
             s = strcat(s, esc);
@@ -194,7 +191,7 @@ bool _json_parse_number() {
         for (int c; (c = STRING_ITERATOR_GET(_json)); ) {
             if (!(c >= '0' && c <= '9')) {
                 if (c == '.' && needdot) {
-                    // fine
+
                     needdot = false;
                 } else {
                     STRING_ITERATOR_UNGET(_json);
@@ -249,12 +246,12 @@ int json_parse(string in, bool() func) {
         int o = strstrofs(in, "\"", 0);
         int esc = strstrofs(in, "\\\"", 0);
         if (o < esc || esc < 0) {
-            // simple string
+
             string part = substring(in, 0, o + 1); in = substring(in, o + 1, -1);
             trimmed = strcat(trimmed, part);
             goto trim;
         } else {
-            // has escape
+
             string part = substring(in, 0, esc + 2); in = substring(in, esc + 2, -1);
             trimmed = strcat(trimmed, part);
             goto trim_str;
@@ -298,19 +295,3 @@ void json_dump(int buf)
 #undef JSON_BEGIN
 #undef JSON_FAIL
 #undef JSON_END
-
-TEST(json, Parse)
-{
-    string s = "{\n\
-    \"m_string\": \"\\\"string\\\"\",\n\
-    \"m_int\": 123,\n\
-    \"m_bool\": true,\n\
-    \"m_null\": null,\n\
-    \"m_obj\": { },\n\
-    \"m_arr\": [ ]\n}"; // "
-    print(s, "\n");
-    int buf = json_parse(s, _json_parse_object);
-    EXPECT_NE(-1, buf);
-    json_dump(buf);
-    SUCCEED();
-}

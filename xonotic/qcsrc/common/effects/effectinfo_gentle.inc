@@ -1,5 +1,5 @@
-// cl_gentle impact effect indicating damage
-// NOTE: maintained by div0, make your own new effect instead of changing this one without asking!
+
+
 DEF(damage_hit);
 SUB(damage_hit) {
     MY(airfriction) = 5;
@@ -59,9 +59,8 @@ SUB(damage_hit) {
     MY(velocityjitter) = '256.0 256.0 256.0';
 }
 
-// effect for removing player model
 DEF(damage_dissolve);
-// large sparks
+
 SUB(damage_dissolve) {
     MY(airfriction) = 3;
     MY(alpha_min) = 256;

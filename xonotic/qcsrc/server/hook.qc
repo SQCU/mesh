@@ -26,55 +26,6 @@
 #include <server/weapons/weaponsystem.qh>
 #include <server/world.qh>
 
-/*============================================
-
-      Wazat's Xonotic Grappling Hook
-
-        Contact: Wazat1@gmail.com
-
-
-Installation instructions:
---------------------------
-
-1. Place hook.c in your gamec source directory with the other source files.
-
-2. Add this line to the bottom of progs.src:
-
-gamec/hook.c
-
-3. Open defs.h and add these lines to the very bottom:
-
-// Wazat's grappling hook
-.entity		hook;
-void GrapplingHookFrame();
-void RemoveGrapplingHook(entity pl);
-void SetGrappleHookBindings();
-// hook impulses
-const float GRAPHOOK_FIRE		= 20;
-const float GRAPHOOK_RELEASE		= 21;
-// (note: you can change the hook impulse #'s to whatever you please)
-
-4. Open client.c and add this to the top of PutClientInServer():
-
-	RemoveGrapplingHook(this); // Wazat's Grappling Hook
-
-5. Find ClientConnect() (in client.c) and add these lines to the bottom:
-
-	// Wazat's grappling hook
-	SetGrappleHookBindings();
-
-6. Still in client.c, find PlayerPreThink and add this line just above the call to W_WeaponFrame:
-
- 	GrapplingHookFrame();
-
-7. Build and test the mod.  You'll want to bind a key to "+hook" like this:
-bind ctrl "+hook"
-
-And you should be done!
-
-
-============================================*/
-
 void RemoveGrapplingHooks(entity pl)
 {
 	if(pl.move_movetype == MOVETYPE_FLY)
@@ -82,15 +33,14 @@ void RemoveGrapplingHooks(entity pl)
 
 	for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
     {
-    	.entity weaponentity = weaponentities[slot];
-    	if(!pl.(weaponentity))
-    		continue; // continue incase other slots exist?
-    	if(pl.(weaponentity).hook)
-    		delete(pl.(weaponentity).hook);
-    	pl.(weaponentity).hook = NULL;
+	.entity weaponentity = weaponentities[slot];
+	if(!pl.(weaponentity))
+		continue;
+	if(pl.(weaponentity).hook)
+		delete(pl.(weaponentity).hook);
+	pl.(weaponentity).hook = NULL;
     }
 
-	//pl.disableclientprediction = false;
 }
 
 void RemoveHook(entity this)
@@ -99,10 +49,10 @@ void RemoveHook(entity this)
     .entity weaponentity = this.weaponentity_fld;
 
     if(player.(weaponentity).hook == this)
-    	player.(weaponentity).hook = NULL;
+	player.(weaponentity).hook = NULL;
 
     if(player.move_movetype == MOVETYPE_FLY)
-    	set_movetype(player, MOVETYPE_WALK);
+	set_movetype(player, MOVETYPE_WALK);
     delete(this);
 }
 
@@ -135,7 +85,7 @@ bool GrapplingHookSend(entity this, entity to, int sf)
 	WriteByte(MSG_ENTITY, sf);
 	if(sf & 1)
 	{
-		WriteByte(MSG_ENTITY, etof(this.realowner));
+		WriteShort(MSG_ENTITY, etof(this.realowner));
 		WriteByte(MSG_ENTITY, weaponslot(this.weaponentity_fld));
 	}
 	if(sf & 2)
@@ -156,7 +106,7 @@ void GrapplingHookThink(entity this)
 	float spd, dist, minlength, pullspeed, ropestretch, ropeairfriction, rubberforce, newlength, rubberforce_overstretch;
 	vector dir, org, end, v0, dv, v, myorg, vs;
 	.entity weaponentity = this.weaponentity_fld;
-	if(this.realowner.(weaponentity).hook != this)	// how did that happen?
+	if(this.realowner.(weaponentity).hook != this)
 	{
 		error("Owner lost the hook!\n");
 		return;
@@ -193,26 +143,17 @@ void GrapplingHookThink(entity this)
 
 	if(this.state == 1)
 	{
-		pullspeed = autocvar_g_balance_grapplehook_speed_pull;//2000;
-		// speed the rope is pulled with
+		pullspeed = autocvar_g_balance_grapplehook_speed_pull;
 
-		rubberforce = autocvar_g_balance_grapplehook_force_rubber;//2000;
-		// force the rope will use if it is stretched
+		rubberforce = autocvar_g_balance_grapplehook_force_rubber;
 
-		rubberforce_overstretch = autocvar_g_balance_grapplehook_force_rubber_overstretch;//1000;
-		// force the rope will use if it is stretched
+		rubberforce_overstretch = autocvar_g_balance_grapplehook_force_rubber_overstretch;
 
-		minlength = autocvar_g_balance_grapplehook_length_min;//100;
-		// minimal rope length
-		// if the rope goes below this length, it isn't pulled any more
+		minlength = autocvar_g_balance_grapplehook_length_min;
 
-		ropestretch = autocvar_g_balance_grapplehook_stretch;//400;
-		// if the rope is stretched by more than this amount, more rope is
-		// given to you again
+		ropestretch = autocvar_g_balance_grapplehook_stretch;
 
-		ropeairfriction = autocvar_g_balance_grapplehook_airfriction;//0.2
-		// while hanging on the rope, this friction component will help you a
-		// bit to control the rope
+		ropeairfriction = autocvar_g_balance_grapplehook_airfriction;
 
 		bool frozen_pulling = (autocvar_g_grappling_hook_tarzan >= 2 && autocvar_g_balance_grapplehook_pull_frozen);
 
@@ -224,16 +165,15 @@ void GrapplingHookThink(entity this)
 		{
 			v = v0 = WarpZone_RefSys_TransformVelocity(pull_entity, this, pull_entity.velocity);
 
-			// first pull the rope...
 			if(this.realowner.(weaponentity).hook_state & HOOK_PULLING)
 			{
 				newlength = this.hook_length;
 				newlength = max(newlength - pullspeed * frametime, minlength);
 
-				if(newlength < dist - ropestretch) // overstretched?
+				if(newlength < dist - ropestretch)
 				{
 					newlength = dist - ropestretch;
-					if(v * dir < 0) // only if not already moving in hook direction
+					if(v * dir < 0)
 						v = v + frametime * dir * rubberforce_overstretch;
 				}
 
@@ -250,7 +190,7 @@ void GrapplingHookThink(entity this)
 			}
 			else
 			{
-				// then pull the player
+
 				spd = bound(0, (dist - this.hook_length) / ropestretch, 1);
 				v = v * (1 - frametime * ropeairfriction);
 				v = v + frametime * dir * spd * rubberforce;
@@ -270,7 +210,7 @@ void GrapplingHookThink(entity this)
 								UpdateCSQCProjectile(this.aiment);
 						}
 						if(this.aiment.classname == "nade")
-							this.aiment.nextthink = time + autocvar_g_balance_grapplehook_nade_time; // set time after letting go?
+							this.aiment.nextthink = time + autocvar_g_balance_grapplehook_nade_time;
 						aim_ent.pusher = this.realowner;
 						aim_ent.pushltime = time + autocvar_g_maxpushtime;
 						aim_ent.istypefrag = PHYS_INPUT_BUTTON_CHAT(aim_ent);
@@ -307,7 +247,7 @@ void GrapplingHookThink(entity this)
 	}
 
 	makevectors(this.angles.x * '-1 0 0' + this.angles.y * '0 1 0');
-	myorg = WarpZone_RefSys_TransformOrigin(this, this.realowner, this.origin); // + v_forward * (-9);
+	myorg = WarpZone_RefSys_TransformOrigin(this, this.realowner, this.origin);
 
 	if(myorg != this.hook_start)
 	{
@@ -330,13 +270,12 @@ void GrapplingHookTouch(entity this, entity toucher)
 	GrapplingHook_Stop(this);
 
 	if(toucher)
-		//if(toucher.move_movetype != MOVETYPE_NONE)
+
 		{
 			SetMovetypeFollow(this, toucher);
 			WarpZone_RefSys_BeginAddingIncrementally(this, this.aiment);
 		}
 
-	//this.realowner.disableclientprediction = true;
 }
 
 void GrapplingHook_Damage(entity this, entity inflictor, entity attacker, float damage, int deathtype, .entity weaponentity, vector hitloc, vector force)
@@ -344,8 +283,8 @@ void GrapplingHook_Damage(entity this, entity inflictor, entity attacker, float 
 	if(GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	if (!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1)) // no exceptions
-		return; // g_balance_projectiledamage says to halt
+	if (!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 
@@ -387,22 +326,20 @@ void FireGrapplingHook(entity actor, .entity weaponentity)
 	set_movetype(missile, ((autocvar_g_balance_grapplehook_gravity) ? MOVETYPE_TOSS : MOVETYPE_FLY));
 	PROJECTILE_MAKETRIGGER(missile);
 
-	//setmodel (missile, MDL_HOOK); // precision set below
 	setsize (missile, '-3 -3 -3', '3 3 3');
 	setorigin(missile, w_shotorg);
 
-	missile.state = 0; // not latched onto anything
+	missile.state = 0;
 
 	W_SetupProjVelocity_Explicit(missile, w_shotdir, v_up, autocvar_g_balance_grapplehook_speed_fly, 0, 0, 0, false);
 
 	missile.angles = vectoangles (missile.velocity);
-	//missile.glow_color = 250; // 244, 250
-	//missile.glow_size = 120;
+
 	settouch(missile, GrapplingHookTouch);
 	setthink(missile, GrapplingHookThink);
 	missile.nextthink = time;
 
-	missile.effects = /*EF_FULLBRIGHT | EF_ADDITIVE |*/ EF_LOWPRECISION;
+	missile.effects =                                   EF_LOWPRECISION;
 
 	SetResourceExplicit(missile, RES_HEALTH, autocvar_g_balance_grapplehook_health);
 	missile.event_damage = GrapplingHook_Damage;
@@ -417,7 +354,6 @@ void FireGrapplingHook(entity actor, .entity weaponentity)
 	Net_LinkEntity(missile, false, 0, GrapplingHookSend);
 }
 
-// NOTE: using PRECACHE here to make sure it's called after everything else
 PRECACHE(GrappleHookInit)
 {
 	if(g_grappling_hook)

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "nodes": {
+    "Ms-MacBook-Pro": {
+      "model": "Mac17,6",
+      "via": "Ms-MacBook-Pro.local"
+    },
+    "Ms-Mac-mini": {
+      "model": "Mac16,11",
+      "via": "Ms-Mac-mini.local",
+      "aliases": ["mesh-mini"]
+    }
+  }
+}

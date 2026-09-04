@@ -3,86 +3,15 @@
 #include "../random_items/sv_random_items.qh"
 #include <server/weapons/spawning.qh>
 
-/*
-
-CORE    laser   vortex     lg      rl      cry     gl      elec    hagar   fireb   hook
-									vaporizer  porto
-									tuba
-
-NEW             rifle   hlac    minel                           seeker
-IDEAS                                   OPEN    flak    OPEN            FUN FUN FUN FUN
-
-
-
-How this mutator works:
- =======================
-
-When a gun tries to spawn, this mutator is called. It will provide alternate
-weaponreplace lists.
-
-Entity:
-
-{
-"classname" "weapon_vortex"
-"new_toys" "rifle"
-}
--> This will spawn as Rifle in this mutator ONLY, and as Vortex otherwise.
-
-{
-"classname" "weapon_vortex"
-"new_toys" "vortex rifle"
-}
--> This will spawn as either Vortex or Rifle in this mutator ONLY, and as Vortex otherwise.
-
-{
-"classname" "weapon_vortex"
-"new_toys" "vortex"
-}
--> This is always a Vortex.
-
-If the map specifies no "new_toys" argument
-
-There will be two default replacements selectable: "replace all" and "replace random".
-In "replace all" mode, e.g. Vortex will have the default replacement "rifle".
-In "replace random" mode, Vortex will have the default replacement "vortex rifle".
-
-This mutator's replacements run BEFORE regular weaponreplace!
-
-The New Toys guns do NOT get a spawn function, so they can only ever be spawned
-when this mutator is active.
-
-Likewise, warmup, give all, give ALL and impulse 99 will not give them unless
-this mutator is active.
-
-Outside this mutator, they still can be spawned by:
-- setting their start weapon cvar to 1
-- give weaponname
-- weaponreplace
-- weaponarena (but all and most weapons arena again won't include them)
-
-This mutator performs the default replacements on the DEFAULTS of the
-start weapon selection.
-
-These weapons appear in the menu's priority list, BUT get a suffix
-"(Mutator weapon)".
-
-Picking up a "new toys" weapon will not play standard weapon pickup sound, but
-roflsound "New toys, new toys!" sound.
-
-*/
-
-//string autocvar_g_new_toys;
-
 bool nt_IsNewToy(int w);
 
 REGISTER_MUTATOR(nt, expr_evaluate(cvar_string("g_new_toys")) && !MUTATOR_IS_ENABLED(mutator_instagib) && !MUTATOR_IS_ENABLED(ok))
 {
 	MUTATOR_ONADD
 	{
-		if(time > 1) // game loads at time 1
+		if(time > 1)
 			error("This cannot be added at runtime\n");
 
-		// mark the guns as ok to use by e.g. impulse 99
 		FOREACH(Weapons, it != WEP_Null, {
 			if(nt_IsNewToy(it.m_id))
 				it.spawnflags &= ~WEP_FLAG_MUTATORBLOCKED;
@@ -137,7 +66,7 @@ string nt_GetFullReplacement(string w)
 		case "devastator": return "minelayer";
 		case "machinegun": return "hlac";
 		case "vortex": return "rifle";
-		//case "shotgun": return "shockwave";
+
 		default: return string_null;
 	}
 }
@@ -156,9 +85,6 @@ string nt_GetReplacement(string w, float m)
 
 MUTATOR_HOOKFUNCTION(nt, SetStartItems)
 {
-	// rearrange start_weapon_default
-	// apply those bits that are set by start_weapon_defaultmask
-	// same for warmup
 
 	float j, n;
 
@@ -198,26 +124,24 @@ MUTATOR_HOOKFUNCTION(nt, SetWeaponreplace)
 {
 	if (MUTATOR_IS_ENABLED(random_items))
 	{
-		// Do not replace weapons when random items are enabled.
+
 		return;
 	}
 	entity wep = M_ARGV(0, entity);
 	entity wepinfo = M_ARGV(1, entity);
 	string ret_string = M_ARGV(2, string);
 
-	// otherwise, we do replace
 	if(wep.new_toys)
 	{
-		// map defined replacement:
+
 		ret_string = wep.new_toys;
 	}
 	else
 	{
-		// auto replacement:
+
 		ret_string = nt_GetReplacement(wepinfo.netname, autocvar_g_new_toys_autoreplace);
 	}
 
-	// apply regular weaponreplace
 	ret_string = W_Apply_Weaponreplace(ret_string);
 
 	M_ARGV(2, string) = ret_string;

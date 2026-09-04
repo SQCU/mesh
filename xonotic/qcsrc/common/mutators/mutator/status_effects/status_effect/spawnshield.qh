@@ -5,8 +5,7 @@
 CLASS(SpawnShield, StatusEffects)
     ATTRIB(SpawnShield, netname, string, "spawnshield");
 #if 0
-    // NOTE: status effect name and icon disabled as they are not displayed
-    // re-enable if status effects are given a visual element
+
     ATTRIB(SpawnShield, m_name, string, _("Spawn Shield"));
     ATTRIB(SpawnShield, m_icon, string, "shield");
 #endif

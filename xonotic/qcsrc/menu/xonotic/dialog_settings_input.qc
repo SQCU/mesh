@@ -23,7 +23,7 @@ void CheckBox_Click_Redisplay(entity me, entity checkbox)
 {
 	CheckBox_Click(me, checkbox);
 	cmd("\ndefer 0.2 \"togglemenu 1\"\n");
-	//m_display();
+
 }
 void XonoticInputSettingsTab_fill(entity me)
 {
@@ -84,7 +84,7 @@ void XonoticInputSettingsTab_fill(entity me)
 		else
 		{
 			me.TD(me, 1, 3, e = makeXonoticCheckBox(0, string_null, _("Disable system mouse acceleration")));
-			e.disabled = 1; // the option is never available in this case, just there for show
+			e.disabled = 1;
 		}
 
 	me.TR(me);
@@ -118,6 +118,6 @@ void XonoticInputSettingsTab_fill(entity me)
 		else
 		{
 			me.TD(me, 1, 3, e = makeXonoticCheckBox(0, string_null, _("Use joystick input")));
-			e.disabled = 1; // the option is never available in this case, just there for show
+			e.disabled = 1;
 		}
 }

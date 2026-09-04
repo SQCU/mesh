@@ -1,0 +1,92 @@
+{
+  "definition": "closed cart-game semantic transduction and sparse role-reward support over the finite two-cart three-role lattice",
+  "levels": 8,
+  "state_mass": 1296,
+  "cart_game_closure": {
+    "telemetry": "complete finite two-cart three-role lattice generated through runtime.formal_value_record and runtime.formal_projection_record",
+    "lines_with_a_cart_game_value": 1296,
+    "source_measure_integrals": {
+      "reachable_state_mass": 82944,
+      "reachable_role_state_mass": 248832,
+      "enumerated_role_state_mass": 248832,
+      "role_option_symmetric_difference_mass": 2239488,
+      "cycle_state_mass": 80919
+    },
+    "closed_form_measure_integrals": {
+      "reachable_state_mass": 82944,
+      "reachable_role_state_mass": 248832,
+      "enumerated_role_state_mass": 248832,
+      "role_option_symmetric_difference_mass": 2239488,
+      "cycle_state_mass": 80919
+    },
+    "closed_form_nimber_measure": {
+      "0": 9,
+      "15": 2,
+      "14": 2,
+      "13": 2,
+      "12": 2,
+      "11": 2,
+      "10": 2,
+      "9": 2,
+      "8": 2,
+      "1": 8,
+      "2": 8,
+      "3": 8,
+      "4": 8,
+      "5": 8,
+      "6": 8,
+      "7": 8
+    },
+    "closed_form_nimber_atom_mass": 81,
+    "semantic_coordinate_measure": {
+      "nimber": 1296,
+      "projected_role": 1296,
+      "portfolio_nimbers": 1296,
+      "role_ranks": 1296,
+      "succession": 1296,
+      "mobility": 1296,
+      "option_enumeration_mass": 1296,
+      "reachable_state_mass": 1296,
+      "reachable_role_state_mass": 1296,
+      "enumerated_role_state_mass": 1296,
+      "role_option_symmetric_difference_mass": 1296,
+      "cycle_state_mass": 1296,
+      "PW": 1296,
+      "SUCC": 1296,
+      "loser_ranks": 1296,
+      "levels": 1296
+    },
+    "semantic_residual_measure": {
+      "nimber": 0,
+      "projected_role": 0,
+      "portfolio_nimbers": 0,
+      "role_ranks": 0,
+      "succession": 0,
+      "mobility": 0,
+      "option_enumeration_mass": 0,
+      "reachable_state_mass": 0,
+      "reachable_role_state_mass": 0,
+      "enumerated_role_state_mass": 0,
+      "role_option_symmetric_difference_mass": 0,
+      "cycle_state_mass": 0,
+      "PW": 0,
+      "SUCC": 0,
+      "loser_ranks": 0,
+      "levels": 0
+    },
+    "semantic_residual_mass": 0,
+    "missing_semantic_coordinate_measure": {},
+    "missing_semantic_coordinate_mass": 0
+  },
+  "one_step_transition_mass": 9216,
+  "reward_coordinate_mass": 27648,
+  "reward_value_measure": {
+    "-1": 3432,
+    "0": 19092,
+    "1": 5124
+  },
+  "projected_winner_loss_measure": 3432,
+  "upward_loser_rank_flip_measure": 5124,
+  "unexpected_reward_value_mass": 0,
+  "sparse_reward_contract_residual_mass": 0
+}

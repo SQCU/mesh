@@ -14,31 +14,14 @@ struct con_t {
 
 static con_t console;
 
-/*
- * Enables color on output if supported.
- * NOTE: The support for checking colors is nullptr.  On windows this will
- * always work, on *nix it depends if the term has colors.
- *
- * NOTE: This prevents colored output to piped stdout/err via isatty
- * checks.
- */
 static void con_enablecolor(void) {
     console.color_err = util_isatty(console.handle_err);
     console.color_out = util_isatty(console.handle_out);
 }
 
-/*
- * Does a write to the handle with the format string and list of
- * arguments.  This colorizes for windows as well via translate
- * step.
- */
 static int con_write(FILE *handle, const char *fmt, va_list va) {
     return vfprintf(handle, fmt, va);
 }
-
-/**********************************************************************
- * EXPOSED INTERFACE BEGINS
- *********************************************************************/
 
 void con_close() {
     if (!GMQCC_IS_DEFINE(console.handle_err))
@@ -67,10 +50,6 @@ void con_reset() {
     con_init();
 }
 
-/*
- * Defaultizer because stdio.h shouldn't be used anywhere except here
- * and inside file.c To prevent mis-match of wrapper-interfaces.
- */
 FILE *con_default_out() {
     return console.handle_out = stdout;
 }
@@ -86,10 +65,6 @@ int con_vout(const char *fmt, va_list va) {
     return con_write(console.handle_out, fmt, va);
 }
 
-/*
- * Standard stdout/stderr printf functions used generally where they need
- * to be used.
- */
 int con_err(const char *fmt, ...) {
     va_list va;
     int ln = 0;
@@ -107,13 +82,8 @@ int con_out(const char *fmt, ...) {
     return ln;
 }
 
-/*
- * Utility console message writes for lexer contexts.  These will allow
- * for reporting of file:line based on lexer context, These are used
- * heavily in the parser/ir/ast.
- */
 static void con_vprintmsg_c(int level, const char *name, size_t line, size_t column, const char *msgtype, const char *msg, va_list ap, const char *condname) {
-    /* color selection table */
+
     static int sel[] = {
         CON_WHITE,
         CON_CYAN,
@@ -159,7 +129,6 @@ void con_cprintmsg(lex_ctx_t ctx, int lvl, const char *msgtype, const char *msg,
     va_end  (va);
 }
 
-/* General error interface: TODO seperate as part of the compiler front-end */
 size_t compile_errors   = 0;
 size_t compile_warnings = 0;
 size_t compile_Werrors  = 0;

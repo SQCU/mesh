@@ -49,7 +49,7 @@ void spiderbot_guide_release(entity this)
     bool donetrace = false;
     IL_EACH(g_projectiles, it.realowner == this.owner && getthink(it) == spiderbot_rocket_guided,
     {
-        if(!donetrace) // something exists, let's trace!
+        if(!donetrace)
         {
             donetrace = true;
             crosshair_trace(this.owner);
@@ -71,66 +71,54 @@ vector spiberbot_calcartillery(vector org, vector tgt, float ht)
     sdist = vlen(tgt - org - zdist * '0 0 1');
     sdir  = normalize(tgt - org - zdist * '0 0 1');
 
-    // how high do we need to go?
     jumpheight = fabs(ht);
     if(zdist > 0)
         jumpheight = jumpheight + zdist;
 
-    // push so high...
-    vz = sqrt(2 * grav * jumpheight); // NOTE: sqrt(positive)!
+    vz = sqrt(2 * grav * jumpheight);
 
-    // we start with downwards velocity only if it's a downjump and the jump apex should be outside the jump!
     if(ht < 0)
         if(zdist < 0)
             vz = -vz;
 
     vector solution;
-    solution = solve_quadratic(0.5 * grav, -vz, zdist); // equation "z(ti) = zdist"
-    // ALWAYS solvable because jumpheight >= zdist
+    solution = solve_quadratic(0.5 * grav, -vz, zdist);
+
     if(!solution_z)
-        solution_y = solution_x; // just in case it is not solvable due to roundoff errors, assume two equal solutions at their center (this is mainly for the usual case with ht == 0)
+        solution_y = solution_x;
     if(zdist == 0)
-        solution_x = solution_y; // solution_x is 0 in this case, so don't use it, but rather use solution_y (which will be sqrt(0.5 * jumpheight / grav), actually)
+        solution_x = solution_y;
 
     if(zdist < 0)
     {
-        // down-jump
+
         if(ht < 0)
         {
-            // almost straight line type
-            // jump apex is before the jump
-            // we must take the larger one
+
             spiberbot_calcartillery_flighttime = solution_y;
         }
         else
         {
-            // regular jump
-            // jump apex is during the jump
-            // we must take the larger one too
+
             spiberbot_calcartillery_flighttime = solution_y;
         }
     }
     else
     {
-        // up-jump
+
         if(ht < 0)
         {
-            // almost straight line type
-            // jump apex is after the jump
-            // we must take the smaller one
+
             spiberbot_calcartillery_flighttime = solution_x;
         }
         else
         {
-            // regular jump
-            // jump apex is during the jump
-            // we must take the larger one
+
             spiberbot_calcartillery_flighttime = solution_y;
         }
     }
     vs = sdist / spiberbot_calcartillery_flighttime;
 
-    // finally calculate the velocity
     return sdir * vs + '0 0 1' * vz;
 }
 
@@ -206,7 +194,6 @@ void spiderbot_rocket_do(entity this)
             rocket.nextthink  = time;
             setthink(rocket, spiderbot_rocket_guided);
 
-
         break;
         case SBRM_ARTILLERY:
             rocket = vehicles_projectile(this, EFFECT_SPIDERBOT_ROCKETLAUNCH, SND_ROCKET_FIRE,
@@ -222,14 +209,13 @@ void spiderbot_rocket_do(entity this)
             traceline(v, v + '0 0 1' * max_shot_distance, MOVE_WORLDONLY, this);
             float h1 = 0.75 * vlen(v - trace_endpos);
 
-            //v = trace_endpos;
             traceline(v , rocket.pos1 + '0 0 1' * max_shot_distance, MOVE_WORLDONLY, this);
             float h2 = 0.75 * vlen(rocket.pos1 - v);
 
             rocket.velocity  = spiberbot_calcartillery(v, rocket.pos1, ((h1 < h2) ? h1 : h2));
             set_movetype(rocket, MOVETYPE_TOSS);
             rocket.gravity   = 1;
-            //setthink(rocket, spiderbot_rocket_artillery);
+
         break;
     }
     rocket.classname  = "spiderbot_rocket";

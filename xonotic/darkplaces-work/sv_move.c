@@ -1,36 +1,8 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// sv_move.c -- monster movement
 
 #include "quakedef.h"
 #include "prvm_cmds.h"
 
-/*
-=============
-SV_CheckBottom
-
-Returns false if any part of the bottom of the entity is off an edge that
-is not a staircase.
-
-=============
-*/
 int c_yes, c_no;
 
 qboolean SV_CheckBottom (prvm_edict_t *ent)
@@ -44,9 +16,6 @@ qboolean SV_CheckBottom (prvm_edict_t *ent)
 	VectorAdd (PRVM_serveredictvector(ent, origin), PRVM_serveredictvector(ent, mins), mins);
 	VectorAdd (PRVM_serveredictvector(ent, origin), PRVM_serveredictvector(ent, maxs), maxs);
 
-// if all of the points under the corners are solid world, don't bother
-// with the tougher checks
-// the corners must be within 16 of the midpoint
 	start[2] = mins[2] - 1;
 	for	(x=0 ; x<=1 ; x++)
 		for	(y=0 ; y<=1 ; y++)
@@ -58,16 +27,13 @@ qboolean SV_CheckBottom (prvm_edict_t *ent)
 		}
 
 	c_yes++;
-	return true;		// we got out easy
+	return true;
 
 realcheck:
 	c_no++;
-//
-// check it for real...
-//
+
 	start[2] = mins[2];
 
-// the midpoint must be within 16 of the bottom
 	start[0] = stop[0] = (mins[0] + maxs[0])*0.5;
 	start[1] = stop[1] = (mins[1] + maxs[1])*0.5;
 	stop[2] = start[2] - 2*sv_stepheight.value;
@@ -77,7 +43,6 @@ realcheck:
 		return false;
 	mid = bottom = trace.endpos[2];
 
-// the corners must be within 16 of the midpoint
 	for	(x=0 ; x<=1 ; x++)
 		for	(y=0 ; y<=1 ; y++)
 		{
@@ -96,16 +61,6 @@ realcheck:
 	return true;
 }
 
-
-/*
-=============
-SV_movestep
-
-Called by monster program code.
-The move will be adjusted for slopes and stairs, but if the move isn't
-possible, no move is done and false is returned
-=============
-*/
 qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean noenemy, qboolean settrace)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -115,16 +70,14 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 	int			i;
 	prvm_edict_t		*enemy;
 
-// try the move
 	VectorCopy (PRVM_serveredictvector(ent, origin), oldorg);
 	VectorAdd (PRVM_serveredictvector(ent, origin), move, neworg);
 	VectorCopy(PRVM_serveredictvector(ent, mins), entmins);
 	VectorCopy(PRVM_serveredictvector(ent, maxs), entmaxs);
 
-// flying monsters don't step up
 	if ( (int)PRVM_serveredictfloat(ent, flags) & (FL_SWIM | FL_FLY) )
 	{
-	// try one move with vertical motion, then one without
+
 		for (i=0 ; i<2 ; i++)
 		{
 			VectorAdd (PRVM_serveredictvector(ent, origin), move, neworg);
@@ -149,7 +102,7 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 			{
 				VectorCopy(trace.endpos, traceendpos);
 				if (((int)PRVM_serveredictfloat(ent, flags) & FL_SWIM) && !(SV_PointSuperContents(traceendpos) & SUPERCONTENTS_LIQUIDSMASK))
-					return false;	// swim monster left water
+					return false;
 
 				VectorCopy (traceendpos, PRVM_serveredictvector(ent, origin));
 				if (relink)
@@ -167,7 +120,6 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 		return false;
 	}
 
-// push down from a step height above the wished position
 	neworg[2] += sv_stepheight.value;
 	VectorCopy (neworg, end);
 	end[2] -= sv_stepheight.value*2;
@@ -183,7 +135,7 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 	}
 	if (trace.fraction == 1)
 	{
-	// if monster had the ground pulled out, go ahead and fall
+
 		if ( (int)PRVM_serveredictfloat(ent, flags) & FL_PARTIALGROUND )
 		{
 			VectorAdd (PRVM_serveredictvector(ent, origin), move, PRVM_serveredictvector(ent, origin));
@@ -196,17 +148,16 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 			return true;
 		}
 
-		return false;		// walked off an edge
+		return false;
 	}
 
-// check point traces down for dangling corners
 	VectorCopy (trace.endpos, PRVM_serveredictvector(ent, origin));
 
 	if (!SV_CheckBottom (ent))
 	{
 		if ( (int)PRVM_serveredictfloat(ent, flags) & FL_PARTIALGROUND )
-		{	// entity had floor mostly pulled out from underneath it
-			// and is trying to correct
+		{
+
 			if (relink)
 			{
 				SV_LinkEdict(ent);
@@ -221,7 +172,6 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 	if ( (int)PRVM_serveredictfloat(ent, flags) & FL_PARTIALGROUND )
 		PRVM_serveredictfloat(ent, flags) = (int)PRVM_serveredictfloat(ent, flags) & ~FL_PARTIALGROUND;
 
-// gameplayfix: check if reached pretty steep plane and bail
 	if ( ! ( (int)PRVM_serveredictfloat(ent, flags) & (FL_SWIM | FL_FLY) ) && sv_gameplayfix_nostepmoveonsteepslopes.integer )
 	{
 		if (trace.plane.normal[ 2 ] < 0.5)
@@ -233,7 +183,6 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 
 	PRVM_serveredictedict(ent, groundentity) = PRVM_EDICT_TO_PROG(trace.ent);
 
-// the move is ok
 	if (relink)
 	{
 		SV_LinkEdict(ent);
@@ -242,18 +191,6 @@ qboolean SV_movestep (prvm_edict_t *ent, vec3_t move, qboolean relink, qboolean 
 	return true;
 }
 
-
-//============================================================================
-
-/*
-======================
-SV_StepDirection
-
-Turns to the movement direction, and walks the current distance if
-facing it.
-
-======================
-*/
 static qboolean SV_StepDirection (prvm_edict_t *ent, float yaw, float dist)
 {
 	prvm_prog_t *prog = SVVM_prog;
@@ -273,7 +210,7 @@ static qboolean SV_StepDirection (prvm_edict_t *ent, float yaw, float dist)
 	{
 		delta = PRVM_serveredictvector(ent, angles)[YAW] - PRVM_serveredictfloat(ent, ideal_yaw);
 		if (delta > 45 && delta < 315)
-		{		// not turned far enough, so don't take the step
+		{
 			VectorCopy (oldorigin, PRVM_serveredictvector(ent, origin));
 		}
 		SV_LinkEdict(ent);
@@ -286,26 +223,12 @@ static qboolean SV_StepDirection (prvm_edict_t *ent, float yaw, float dist)
 	return false;
 }
 
-/*
-======================
-SV_FixCheckBottom
-
-======================
-*/
 static void SV_FixCheckBottom (prvm_edict_t *ent)
 {
 	prvm_prog_t *prog = SVVM_prog;
 	PRVM_serveredictfloat(ent, flags) = (int)PRVM_serveredictfloat(ent, flags) | FL_PARTIALGROUND;
 }
 
-
-
-/*
-================
-SV_NewChaseDir
-
-================
-*/
 #define	DI_NODIR	-1
 static void SV_NewChaseDir (prvm_edict_t *actor, prvm_edict_t *enemy, float dist)
 {
@@ -332,7 +255,6 @@ static void SV_NewChaseDir (prvm_edict_t *actor, prvm_edict_t *enemy, float dist
 	else
 		d[2]= DI_NODIR;
 
-// try direct route
 	if (d[1] != DI_NODIR && d[2] != DI_NODIR)
 	{
 		if (d[1] == 0)
@@ -344,7 +266,6 @@ static void SV_NewChaseDir (prvm_edict_t *actor, prvm_edict_t *enemy, float dist
 			return;
 	}
 
-// try other directions
 	if ( ((rand()&3) & 1) ||  fabs(deltay)>fabs(deltax))
 	{
 		tdir=d[1];
@@ -360,12 +281,10 @@ static void SV_NewChaseDir (prvm_edict_t *actor, prvm_edict_t *enemy, float dist
 	&& SV_StepDirection(actor, d[2], dist))
 			return;
 
-/* there is no direct path to the player, so pick another direction */
-
 	if (olddir!=DI_NODIR && SV_StepDirection(actor, olddir, dist))
 			return;
 
-	if (rand()&1) 	/*randomly determine direction of search*/
+	if (rand()&1)
 	{
 		for (tdir=0 ; tdir<=315 ; tdir += 45)
 			if (tdir!=turnaround && SV_StepDirection(actor, tdir, dist) )
@@ -381,22 +300,13 @@ static void SV_NewChaseDir (prvm_edict_t *actor, prvm_edict_t *enemy, float dist
 	if (turnaround != DI_NODIR && SV_StepDirection(actor, turnaround, dist) )
 			return;
 
-	PRVM_serveredictfloat(actor, ideal_yaw) = olddir;		// can't move
-
-// if a bridge was pulled out from underneath a monster, it may not have
-// a valid standing position at all
+	PRVM_serveredictfloat(actor, ideal_yaw) = olddir;
 
 	if (!SV_CheckBottom (actor))
 		SV_FixCheckBottom (actor);
 
 }
 
-/*
-======================
-SV_CloseEnough
-
-======================
-*/
 static qboolean SV_CloseEnough (prvm_edict_t *ent, prvm_edict_t *goal, float dist)
 {
 	int		i;
@@ -411,12 +321,6 @@ static qboolean SV_CloseEnough (prvm_edict_t *ent, prvm_edict_t *goal, float dis
 	return true;
 }
 
-/*
-======================
-SV_MoveToGoal
-
-======================
-*/
 void VM_SV_MoveToGoal(prvm_prog_t *prog)
 {
 	prvm_edict_t		*ent, *goal;
@@ -434,15 +338,12 @@ void VM_SV_MoveToGoal(prvm_prog_t *prog)
 		return;
 	}
 
-// if the next step hits the enemy, return immediately
 	if ( PRVM_PROG_TO_EDICT(PRVM_serveredictedict(ent, enemy)) != prog->edicts &&  SV_CloseEnough (ent, goal, dist) )
 		return;
 
-// bump around...
 	if ( (rand()&3)==1 ||
 	!SV_StepDirection (ent, PRVM_serveredictfloat(ent, ideal_yaw), dist))
 	{
 		SV_NewChaseDir (ent, goal, dist);
 	}
 }
-

@@ -15,7 +15,7 @@
 		if (me.enableClearButton)
 		{
 			me.cb_width = absSize.y / absSize.x;
-			me.cb_offset = bound(-1, me.cb_offset, 0) * me.cb_width;  // bound to range -1, 0
+			me.cb_offset = bound(-1, me.cb_offset, 0) * me.cb_width;
 			me.keepspaceRight = me.keepspaceRight - me.cb_offset + me.cb_width;
 		}
 	}
@@ -99,8 +99,7 @@
 				return 1;
 			}
 		float r = InputBox_mouseDrag(me, pos);
-		// reset cb_pressed after mouseDrag, mouseDrag could set cb_pressed in this case:
-		// mouse press out of the clear button, drag and then mouse release over the clear button
+
 		me.cb_pressed = 0;
 		me.pressed = 0;
 		return r;
@@ -182,7 +181,7 @@
 		string CURSOR = "_";
 		float cursorPosInWidths, totalSizeInWidths;
 
-		if (me.pressed) me.mouseDrag(me, me.dragScrollPos);  // simulate mouseDrag event
+		if (me.pressed) me.mouseDrag(me, me.dragScrollPos);
 
 		if (me.recalcPos) me.recalcPositionWithText(me, me.text);
 
@@ -253,22 +252,22 @@
 						draw_Fill(p, eX * w + eY * me.realFontSize.y, '1 1 1', fill_alpha);
 						draw_Text(p, strcat(ch, ch2), me.realFontSize, theColor, theAlpha, 0);
 					}
-					else if (ch2 == "x")  // ^x found
+					else if (ch2 == "x")
 					{
 						vector theTempColor;
 						theColor = '1 1 1';
 						float component = HEXDIGIT_TO_DEC(substring(me.text, i + 2, 1));
-						if (component >= 0)  // ^xr found
+						if (component >= 0)
 						{
 							theTempColor.x = component / 15;
 
 							component = HEXDIGIT_TO_DEC(substring(me.text, i + 3, 1));
-							if (component >= 0)  // ^xrg found
+							if (component >= 0)
 							{
 								theTempColor.y = component / 15;
 
 								component = HEXDIGIT_TO_DEC(substring(me.text, i + 4, 1));
-								if (component >= 0)  // ^xrgb found
+								if (component >= 0)
 								{
 									theTempColor.z = component / 15;
 									theColor = theTempColor;
@@ -282,7 +281,7 @@
 								}
 								else
 								{
-									// blue missing
+
 									w = draw_TextWidth(substring(me.text, i, 4), 0, me.realFontSize);
 									draw_Fill(p, eX * w + eY * me.realFontSize.y, eZ, fill_alpha);
 									draw_Text(p, substring(me.text, i, 4), me.realFontSize, '1 1 1', theAlpha, 0);
@@ -291,7 +290,7 @@
 							}
 							else
 							{
-								// green missing
+
 								w = draw_TextWidth(substring(me.text, i, 3), 0, me.realFontSize);
 								draw_Fill(p, eX * w + eY * me.realFontSize.y, eY, fill_alpha);
 								draw_Text(p, substring(me.text, i, 3), me.realFontSize, '1 1 1', theAlpha, 0);
@@ -300,8 +299,7 @@
 						}
 						else
 						{
-							// red missing
-							// w = draw_TextWidth(substring(me.text, i, 2), 0) * me.realFontSize_x;
+
 							draw_Fill(p, eX * w + eY * me.realFontSize.y, eX, fill_alpha);
 							draw_Text(p, substring(me.text, i, 2), me.realFontSize, '1 1 1', theAlpha, 0);
 						}
@@ -339,7 +337,6 @@
 				draw_Picture(eX * (1 + me.cb_offset - me.cb_width), strcat(me.cb_src, "_n"), eX * me.cb_width + eY, me.cb_color, 1);
 		}
 
-		// skipping SUPER(InputBox).draw(me);
 		MenuItem_draw(me);
 	}
 

@@ -11,11 +11,11 @@ const string STR_OBSERVER = "observer";
 #define IS_OBSERVER(v) ((v).classname == STR_OBSERVER)
 
 #define IS_CLIENT(v) (v.flags & FL_CLIENT)
-/** want: (IS_CLIENT(v) && !IS_REAL_CLIENT(v)) */
+
 #define IS_BOT_CLIENT(v) (clienttype(v) == CLIENTTYPE_BOT)
 #define IS_FAKE_CLIENT(v) (clienttype(v) == CLIENTTYPE_NOTACLIENT)
 #define IS_REAL_CLIENT(v) (clienttype(v) == CLIENTTYPE_REAL)
-/** was: (clienttype(v) == CLIENTTYPE_NOTACLIENT) */
+
 #define IS_NOT_A_CLIENT(v) (!IS_CLIENT(v))
 
 #define IS_MONSTER(v) (v.flags & FL_MONSTER)
@@ -26,15 +26,6 @@ const string STR_OBSERVER = "observer";
 #define IS_DEAD(s) ((s).deadflag != DEAD_NO)
 
 #define CENTER_OR_VIEWOFS(ent) (ent.origin + (IS_PLAYER(ent) ? ent.view_ofs : ((ent.mins + ent.maxs) * 0.5)))
-
-// NOTE: FOR_EACH_CLIENTSLOT deprecated! Use the following instead: FOREACH_CLIENTSLOT(true, { code; });
-// NOTE: FOR_EACH_CLIENT deprecated! Use the following instead: FOREACH_CLIENT(true, { code; });
-// NOTE: FOR_EACH_REALCLIENT deprecated! Use the following instead: FOREACH_CLIENT(IS_REAL_CLIENT(it), { code; });
-
-// NOTE: FOR_EACH_PLAYER deprecated! Use the following instead: FOREACH_CLIENT(IS_PLAYER(it), { code; });
-// NOTE: FOR_EACH_SPEC deprecated! Use the following instead: FOREACH_CLIENT(IS_SPEC(it), { code; });
-// NOTE: FOR_EACH_OBSERVER deprecated! Use the following instead: FOREACH_CLIENT(IS_OBSERVER(it), { code; });
-// NOTE: FOR_EACH_REALPLAYER deprecated! Use the following instead: FOREACH_CLIENT(IS_PLAYER(it) && IS_REAL_CLIENT(it), { code; });
 
 #define FOREACH_CLIENTSLOT(cond, body) \
 	MACRO_BEGIN \
@@ -48,9 +39,7 @@ const string STR_OBSERVER = "observer";
 
 #define FOREACH_CLIENT(cond, body) FOREACH_CLIENTSLOT(IS_CLIENT(it) && (cond), LAMBDA(body))
 
-// using the "inside out" version of knuth-fisher-yates shuffle
-// https://en.wikipedia.org/wiki/Fisher–Yates_shuffle
-entity _FCR_clients[255];
+entity _FCR_clients[256];
 bool _FCR_entered = false;
 #define FOREACH_CLIENT_RANDOM(cond, body) \
 	MACRO_BEGIN \
@@ -72,5 +61,3 @@ bool _FCR_entered = false;
 		} \
 		_FCR_entered = false; \
 	MACRO_END
-
-// NOTE: FOR_EACH_MONSTER deprecated! Use the following instead: IL_EACH(g_monsters, true, { code; });

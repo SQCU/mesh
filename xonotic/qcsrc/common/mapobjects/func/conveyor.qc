@@ -4,13 +4,12 @@ REGISTER_NET_LINKED(ENT_CLIENT_CONVEYOR)
 void conveyor_think(entity this)
 {
 #ifdef CSQC
-	// TODO: check if this is what is causing the glitchiness when switching between them
+
 	float dt = time - this.move_time;
 	this.move_time = time;
 	if(dt <= 0) { return; }
 #endif
 
-	// set myself as current conveyor where possible
 	IL_EACH(g_conveyed, it.conveyor == this,
 	{
 		it.conveyor = NULL;
@@ -28,8 +27,8 @@ void conveyor_think(entity this)
 				emin -= '1 1 1';
 				emax += '1 1 1';
 			}
-			if(boxesoverlap(emin, emax, this.absmin, this.absmax)) // quick
-				if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it)) // accurate
+			if(boxesoverlap(emin, emax, this.absmin, this.absmax))
+				if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it))
 				{
 					if(!it.conveyor)
 						IL_PUSH(g_conveyed, it);
@@ -39,20 +38,15 @@ void conveyor_think(entity this)
 
 		IL_EACH(g_conveyed, it.conveyor == this,
 		{
-			if(IS_CLIENT(it)) // doing it via velocity has quite some advantages
-				continue; // done in SV_PlayerPhysics	continue;
+			if(IS_CLIENT(it))
+				continue;
 
 			setorigin(it, it.origin + this.movedir * PHYS_INPUT_FRAMETIME);
 			move_out_of_solid(it);
 #ifdef SVQC
 			UpdateCSQCProjectile(it);
 #endif
-			/*
-			// stupid conveyor code
-			tracebox(it.origin, it.mins, it.maxs, it.origin + this.movedir * sys_frametime, MOVE_NORMAL, it);
-			if(trace_fraction > 0)
-				setorigin(it, trace_endpos);
-			*/
+
 		});
 	}
 
@@ -100,7 +94,7 @@ void conveyor_init(entity this)
 	this.setactive = generic_netlinked_setactive;
 	if(this.targetname && this.targetname != "")
 	{
-		// backwards compatibility
+
 		this.use = generic_netlinked_legacy_use;
 	}
 	this.reset = generic_netlinked_reset;

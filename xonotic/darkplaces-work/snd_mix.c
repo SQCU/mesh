@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 #include "snd_main.h"
@@ -26,7 +8,7 @@ extern cvar_t snd_softclip;
 static portable_sampleframe_t paintbuffer[PAINTBUFFER_SIZE];
 static portable_sampleframe_t paintbuffer_unswapped[PAINTBUFFER_SIZE];
 
-extern speakerlayout_t snd_speakerlayout; // for querying the listeners
+extern speakerlayout_t snd_speakerlayout;
 
 #ifdef CONFIG_VIDEO_CAPTURE
 static void S_CaptureAVISound(const portable_sampleframe_t *paintbuffer, size_t length)
@@ -37,7 +19,6 @@ static void S_CaptureAVISound(const portable_sampleframe_t *paintbuffer, size_t 
 	if (!cls.capturevideo.active)
 		return;
 
-	// undo whatever swapping the channel layout (swapstereo, ALSA) did
 	for(j = 0; j < snd_speakerlayout.channels; ++j)
 	{
 		unsigned int j0 = snd_speakerlayout.listeners[j].channel_unswapped;
@@ -60,17 +41,15 @@ static void S_SoftClipPaintBuffer(portable_sampleframe_t *painted_ptr, int nbfra
 		portable_sampleframe_t *p = painted_ptr;
 
 #if 0
-/* Soft clipping, the sound of a dream, thanks to Jon Wattes
-   post to Musicdsp.org */
+
 #define SOFTCLIP(x) (x) = sin(bound(-M_PI/2, (x), M_PI/2)) * 0.25
 #endif
 
-		// let's do a simple limiter instead, seems to sound better
 		static float maxvol = 0;
 		maxvol = max(1.0f, maxvol * (1.0f - nbframes / (0.4f * snd_renderbuffer->format.speed)));
 #define SOFTCLIP(x) if(fabs(x)>maxvol) maxvol=fabs(x); (x) /= maxvol;
 
-		if (nchannels == 8)  // 7.1 surround
+		if (nchannels == 8)
 		{
 			for (i = 0;i < nbframes;i++, p++)
 			{
@@ -84,7 +63,7 @@ static void S_SoftClipPaintBuffer(portable_sampleframe_t *painted_ptr, int nbfra
 				SOFTCLIP(p->sample[7]);
 			}
 		}
-		else if (nchannels == 6)  // 5.1 surround
+		else if (nchannels == 6)
 		{
 			for (i = 0; i < nbframes; i++, p++)
 			{
@@ -96,7 +75,7 @@ static void S_SoftClipPaintBuffer(portable_sampleframe_t *painted_ptr, int nbfra
 				SOFTCLIP(p->sample[5]);
 			}
 		}
-		else if (nchannels == 4)  // 4.0 surround
+		else if (nchannels == 4)
 		{
 			for (i = 0; i < nbframes; i++, p++)
 			{
@@ -106,7 +85,7 @@ static void S_SoftClipPaintBuffer(portable_sampleframe_t *painted_ptr, int nbfra
 				SOFTCLIP(p->sample[3]);
 			}
 		}
-		else if (nchannels == 2)  // 2.0 stereo
+		else if (nchannels == 2)
 		{
 			for (i = 0; i < nbframes; i++, p++)
 			{
@@ -114,7 +93,7 @@ static void S_SoftClipPaintBuffer(portable_sampleframe_t *painted_ptr, int nbfra
 				SOFTCLIP(p->sample[1]);
 			}
 		}
-		else if (nchannels == 1)  // 1.0 mono
+		else if (nchannels == 1)
 		{
 			for (i = 0; i < nbframes; i++, p++)
 			{
@@ -129,12 +108,10 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 {
 	int i, val;
 
-	// FIXME: add 24bit and 32bit float formats
-	// FIXME: optimize with SSE intrinsics?
-	if (width == 2)  // 16bit
+	if (width == 2)
 	{
 		short *snd_out = (short*)rb_ptr;
-		if (nchannels == 8)  // 7.1 surround
+		if (nchannels == 8)
 		{
 			for (i = 0;i < nbframes;i++, painted_ptr++)
 			{
@@ -148,7 +125,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[7] * 32768.0f);*snd_out++ = bound(-32768, val, 32767);
 			}
 		}
-		else if (nchannels == 6)  // 5.1 surround
+		else if (nchannels == 6)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -160,7 +137,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[5] * 32768.0f);*snd_out++ = bound(-32768, val, 32767);
 			}
 		}
-		else if (nchannels == 4)  // 4.0 surround
+		else if (nchannels == 4)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -170,7 +147,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[3] * 32768.0f);*snd_out++ = bound(-32768, val, 32767);
 			}
 		}
-		else if (nchannels == 2)  // 2.0 stereo
+		else if (nchannels == 2)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -178,7 +155,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[1] * 32768.0f);*snd_out++ = bound(-32768, val, 32767);
 			}
 		}
-		else if (nchannels == 1)  // 1.0 mono
+		else if (nchannels == 1)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -186,14 +163,13 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 			}
 		}
 
-		// noise is really really annoying
 		if (cls.timedemo)
 			memset(rb_ptr, 0, nbframes * nchannels * width);
 	}
-	else  // 8bit
+	else
 	{
 		unsigned char *snd_out = (unsigned char*)rb_ptr;
-		if (nchannels == 8)  // 7.1 surround
+		if (nchannels == 8)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -207,7 +183,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[7] * 128.0f) + 128; *snd_out++ = bound(0, val, 255);
 			}
 		}
-		else if (nchannels == 6)  // 5.1 surround
+		else if (nchannels == 6)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -219,7 +195,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[5] * 128.0f) + 128; *snd_out++ = bound(0, val, 255);
 			}
 		}
-		else if (nchannels == 4)  // 4.0 surround
+		else if (nchannels == 4)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -229,7 +205,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[3] * 128.0f) + 128; *snd_out++ = bound(0, val, 255);
 			}
 		}
-		else if (nchannels == 2)  // 2.0 stereo
+		else if (nchannels == 2)
 		{
 			for (i = 0; i < nbframes; i++, painted_ptr++)
 			{
@@ -237,7 +213,7 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 				val = (int)(painted_ptr->sample[1] * 128.0f) + 128; *snd_out++ = bound(0, val, 255);
 			}
 		}
-		else if (nchannels == 1)  // 1.0 mono
+		else if (nchannels == 1)
 		{
 			for (i = 0;i < nbframes;i++, painted_ptr++)
 			{
@@ -245,20 +221,10 @@ static void S_ConvertPaintBuffer(portable_sampleframe_t *painted_ptr, void *rb_p
 			}
 		}
 
-		// noise is really really annoying
 		if (cls.timedemo)
 			memset(rb_ptr, 128, nbframes * nchannels);
 	}
 }
-
-
-/*
-===============================================================================
-
-CHANNEL MIXING
-
-===============================================================================
-*/
 
 void S_MixToBuffer(void *stream, unsigned int bufferframes)
 {
@@ -292,18 +258,14 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 	qboolean looping;
 	qboolean silent;
 
-	// mix as many times as needed to fill the requested buffer
 	while (bufferframes)
 	{
-		// limit to the size of the paint buffer
+
 		totalmixframes = min(bufferframes, PAINTBUFFER_SIZE);
 
-		// clear the paint buffer
 		memset(paintbuffer, 0, totalmixframes * sizeof(paintbuffer[0]));
 
-		// paint in the channels.
-		// channels with zero volumes still advance in time but don't paint.
-		ch = channels; // cppcheck complains here but it is wrong, channels is a channel_t[MAX_CHANNELS] and not an int
+		ch = channels;
 		for (channelindex = 0;channelindex < (int)total_channels;channelindex++, ch++)
 		{
 			sfx = ch->sfx;
@@ -316,66 +278,52 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 			if (!sfx->total_length)
 				continue;
 
-			// copy the channel information to the stack for reference, otherwise the
-			// values might change during a mix if the spatializer is updating them
-			// (note: this still may get some old and some new values!)
 			posd = ch->position;
 			speedd = ch->mixspeed * sfx->format.speed / snd_renderbuffer->format.speed;
 			for (i = 0;i < SND_LISTENERS;i++)
 				vol[i] = ch->volume[i];
 
-			// check total volume level, because we can skip some code on silent sounds but other code must still run (position updates mainly)
 			maxvol = 0;
 			for (i = 0;i < SND_LISTENERS;i++)
 				if(vol[i] > maxvol)
 					maxvol = vol[i];
 			switch(snd_renderbuffer->format.width)
 			{
-				case 1: // 8bpp
+				case 1:
 					silent = maxvol < (1.0f / (256.0f));
-					// so silent it has zero effect
+
 					break;
-				case 2: // 16bpp
+				case 2:
 					silent = maxvol < (1.0f / (65536.0f));
-					// so silent it has zero effect
+
 					break;
-				default: // floating point
+				default:
 					silent = maxvol < 1.0e-13f;
-					// 130 dB is difference between hearing
-					// threshold and a jackhammer from
-					// working distance.
-					// therefore, anyone who turns up
-					// volume so much they notice this
-					// cutoff, likely already has their
-					// ear-drums blown out anyway.
+
 					break;
 			}
 
-			// when doing prologic mixing, some channels invert one side
 			if (ch->prologic_invert == -1)
 				vol[1] *= -1.0f;
 
-			// get some sfx info in a consistent form
 			totallength = sfx->total_length;
 			loopstart = (int)sfx->loopstart < totallength ? (int)sfx->loopstart : ((ch->flags & CHANNELFLAG_FORCELOOP) ? 0 : totallength);
 			looping = loopstart < totallength;
 
-			// do the actual paint now (may skip work if silent)
 			paint = paintbuffer;
 			istartframe = 0;
 			for (wantframes = totalmixframes;wantframes > 0;posd += count * speedd, wantframes -= count)
 			{
-				// check if this is a delayed sound
+
 				if (posd < 0)
 				{
-					// for a delayed sound we have to eat into the delay first
+
 					count = (int)floor(-posd / speedd) + 1;
 					count = bound(1, count, wantframes);
-					// let the for loop iterator apply the skip
+
 					continue;
 				}
 
-				// compute a fetch size that won't overflow our buffer
 				count = wantframes;
 				for (;;)
 				{
@@ -384,17 +332,13 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 					ilengthframes = count > 1 ? (iendframe - istartframe + 2) : 2;
 					if (ilengthframes <= S_FETCHBUFFERSIZE)
 						break;
-					// reduce count by 25% and try again
+
 					count -= count >> 2;
 				}
 
-				// zero whole fetch buffer for safety
-				// (floating point noise from uninitialized memory = HORRIBLE)
-				// otherwise we would only need to clear the excess
 				if (!silent)
 					memset(fetchsampleframes, 0, ilengthframes*sfx->format.channels*sizeof(fetchsampleframes[0]));
 
-				// if looping, do multiple fetches
 				fetched = 0;
 				for (;;)
 				{
@@ -408,7 +352,7 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 					}
 					if (istartframe == totallength && looping && fetched < ilengthframes)
 					{
-						// loop and fetch some more
+
 						posd += loopstart - totallength;
 						istartframe = loopstart;
 					}
@@ -418,7 +362,6 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 					}
 				}
 
-				// set up our fixedpoint resampling variables (float to int conversions are expensive so do not do one per sampleframe)
 				fetchsampleframe = fetchsampleframes;
 				indexfrac = (int)floor((posd - floor(posd)) * 65536.0);
 				indexfracstep = (int)floor(speedd * 65536.0);
@@ -426,13 +369,13 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 				{
 					if (sfx->format.channels == 2)
 					{
-						// music is stereo
+
 #if SND_LISTENERS != 8
 #error the following code only supports up to 8 channels, update it
 #endif
 						if (snd_speakerlayout.channels > 2)
 						{
-							// surround mixing
+
 							for (i = 0;i < count;i++, paint++)
 							{
 								lerp[1] = indexfrac * (1.0f / 65536.0f);
@@ -455,7 +398,7 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 						}
 						else
 						{
-							// stereo mixing
+
 							for (i = 0;i < count;i++, paint++)
 							{
 								lerp[1] = indexfrac * (1.0f / 65536.0f);
@@ -472,13 +415,13 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 					}
 					else if (sfx->format.channels == 1)
 					{
-						// most sounds are mono
+
 #if SND_LISTENERS != 8
 #error the following code only supports up to 8 channels, update it
 #endif
 						if (snd_speakerlayout.channels > 2)
 						{
-							// surround mixing
+
 							for (i = 0;i < count;i++, paint++)
 							{
 								lerp[1] = indexfrac * (1.0f / 65536.0f);
@@ -499,7 +442,7 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 						}
 						else
 						{
-							// stereo mixing
+
 							for (i = 0;i < count;i++, paint++)
 							{
 								lerp[1] = indexfrac * (1.0f / 65536.0f);
@@ -529,7 +472,6 @@ void S_MixToBuffer(void *stream, unsigned int bufferframes)
 
 		S_ConvertPaintBuffer(paintbuffer, outbytes, totalmixframes, snd_renderbuffer->format.width, snd_renderbuffer->format.channels);
 
-		// advance the output pointer
 		outbytes += totalmixframes * snd_renderbuffer->format.width * snd_renderbuffer->format.channels;
 		bufferframes -= totalmixframes;
 	}

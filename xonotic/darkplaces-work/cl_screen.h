@@ -24,4 +24,3 @@ qboolean R_Stereo_Active(void);
 qboolean R_Stereo_ColorMasking(void);
 
 #endif
-

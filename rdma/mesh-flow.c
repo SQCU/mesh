@@ -1,4 +1,4 @@
-// see RDMA-FIRST.md
+
 #include "mesh.h"
 #include <infiniband/verbs.h>
 #include <sys/mman.h>
@@ -20,6 +20,7 @@
 
 #define CHUNK (1ull<<30)
 #define QD 4095
+#define IDLE_POLL_US 50
 static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *cq;
 static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
@@ -68,16 +69,16 @@ static int oob(const char *peer){
   int f=accept(lsock,NULL,NULL);
   if(f>=0){ struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
     backoff_n=0; return f; }
-  if(!peer){ backoff(); return -1; }
+  if(!peer) return -1;
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC},*r;
-  if(getaddrinfo(peer,MESH_PORT,&hint,&r)){ backoff(); return -1; }
+  if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
   for(int pass=0; pass<2; pass++)
     for(struct addrinfo *a=r; a; a=a->ai_next){
       if((pass==0) != (a->ai_family==AF_INET)) continue;
       if((f=dial(a))>=0){ freeaddrinfo(r); backoff_n=0;
         struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
         return f; } }
-  freeaddrinfo(r); backoff(); return -1; }
+  freeaddrinfo(r); return -1; }
 
 static struct ibv_port_attr pa;
 static int verbs_up(const char *peer, char *mem, size_t span, int me){
@@ -89,7 +90,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     if(ctx && !ibv_query_port(ctx,1,&pa) && pa.state==IBV_PORT_ACTIVE) break;
     if(ctx){ ibv_close_device(ctx); ctx=0; } }
   if(dl) ibv_free_device_list(dl);
-  if(!ctx){ close(f); usleep(500000); return -1; }
+  if(!ctx){ close(f); return -1; }
   pd=ibv_alloc_pd(ctx); if(!pd){ close(f); down_verbs(); return -1; }
   mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
@@ -134,7 +135,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   }
   if(rc){ fprintf(stderr,"rtr rc %d dlid %u dqpn %u dgid %02x%02x..%02x%02x mygid %02x%02x\n",
       rc, you.lid, you.qpn, you.gid[0],you.gid[1],you.gid[14],you.gid[15],
-      mine.gid[0],mine.gid[15]); usleep(300000); return -1; }
+      mine.gid[0],mine.gid[15]); return -1; }
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
@@ -147,10 +148,10 @@ static void add(struct wf *w, double x){
 int main(int argc,char**argv){
   const char *peer=NULL, *name=MESH_NAME; int me=0; double pct=25;
   for(int i=1;i<argc;i++)
-    if(!strcmp(argv[i],"-I")) me=atoi(argv[++i]);
-    else if(!strcmp(argv[i],"-M")) pct=atof(argv[++i]);
-    else if(!strcmp(argv[i],"-s")) name=argv[++i];
-    else if(argv[i][0]=='-'){ fprintf(stderr,"unknown %s\n",argv[i]); return 2; }
+    if(!strcmp(argv[i],"-I") && i+1<argc) me=atoi(argv[++i]);
+    else if(!strcmp(argv[i],"-M") && i+1<argc) pct=atof(argv[++i]);
+    else if(!strcmp(argv[i],"-s") && i+1<argc) name=argv[++i];
+    else if(argv[i][0]=='-') fprintf(stderr,"ignoring unknown %s\n",argv[i]);
     else peer=argv[i];
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL);
@@ -159,12 +160,11 @@ int main(int argc,char**argv){
   listener_up();
 
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
-  const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<16384) np=16384;
+  const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<NOWN) np=NOWN;
   size_t d0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
   int pool; size_t span; int rf; void *base; struct hdr *M; char *mem;
   int *fl; unsigned char *own;
-region:
-  pool = np/4 < 244140 ? np/4 : 244140;
+  pool = np/NOWN;
   span=(size_t)pg*np;
   shm_unlink(name); rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
   if(ftruncate(rf,(off_t)(d0+span))) die("ftruncate"); fchmod(rf,MESH_MODE);
@@ -195,38 +195,30 @@ region:
     struct ibv_send_wr s={.wr_id=(i),.sg_list=&g,.num_sge=1,.opcode=IBV_WR_SEND, \
       .send_flags=IBV_SEND_SIGNALED},*bs; ibv_post_send(qp,&s,&bs); })
 
-  int fails=0, np0=np, served=0;
   while(!stop){
-    if(served && np!=np0){
-      munmap(base,d0+span); close(rf); free(fl); free(own);
-      fprintf(stderr,"pair died, retrying at the configured %.2f GB\n",(double)np0*pg/1e9);
-      np=np0; served=0; goto region; }
     while(!stop && verbs_up(peer,mem,span,me)){
-      if(++fails>=6){
-        fails=0;
-        if(np>16384){
-          munmap(base,d0+span); close(rf); free(fl); free(own);
-          fprintf(stderr,"pairing refused at %.2f GB, degrading\n",span/1e9);
-          np/=2; if(np<16384) np=16384;
-          goto region; }
-        fprintf(stderr,"pairing refused at floor, respawning\n");
-        return 0; } }
+      fprintf(stderr,"pairing unavailable at configured %.2f GB, retrying\n",span/1e9);
+      backoff(); }
     if(stop) break;
-    fails=0; served=1;
     n[FREE]=n[RECV]=n[SEND]=n[APP]=0; int nf=0;
     for(int i=0;i<pool;i++){
       if(own[i]==APP) n[APP]++;
       else { own[i]=FREE; n[FREE]++; fl[nf++]=i; } }
     sends=0; int alive=1, dry=0; uint64_t wcs=0;
     while(!stop && alive){
+    int activity=0;
     while(n[FREE] && n[RECV]<QD){ int i=fl[n[FREE]-1];
       if(POST_RECV(i)) break;
-      MV(i,RECV); }
+      MV(i,RECV); activity=1; }
     struct desc d;
-    while(!pop(M,REL,&d)) if(POOL(d.page) && own[d.page]==APP) GIVE(d.page);
+    while(!pop(M,REL,&d)){ activity=1; if(POOL(d.page) && own[d.page]==APP) GIVE(d.page); }
     uint64_t who=atomic_load_explicit(&M->client,memory_order_acquire);
     if(who)
-      while(sends<QD && !pop(M,SUB,&d)){
+      while(sends<QD &&
+            atomic_load_explicit(&M->r[ACK].head,memory_order_relaxed)-
+            atomic_load_explicit(&M->r[ACK].tail,memory_order_acquire)+(uint64_t)sends<MESH_RING &&
+            !pop(M,SUB,&d)){
+        activity=1;
         uint32_t p=d.page;
         if(p<(uint32_t)pool || !VALID(p)){ BUMP(bad); continue; }
         struct wire *w2=(struct wire*)mesh_at(M,p);
@@ -235,6 +227,7 @@ region:
         if(POST_SEND(p,(uint32_t)sizeof(struct wire)+len)){ BUMP(bad); break; }
         sends++; BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
+    if(k>0) activity=1;
     wcs+=(uint64_t)(k>0?k:0);
     for(int j=0;j<k;j++){ int i=(int)wc[j].wr_id;
       if(!VALID(i)) die("wr_id outside the pool");
@@ -251,7 +244,8 @@ region:
       if(h->dst!=(uint16_t)me && h->hops<=32){
         if(sends<QD && !POST_SEND(i,bl)){ sends++; MV(i,SEND); } else GIVE(i); continue; }
       struct desc c={.page=(uint32_t)i,.bytes=bl-(uint32_t)sizeof(struct wire),.node=h->src};
-      if(!who || push(M,CMP,&c)) GIVE(i);
+      if(!who) GIVE(i);
+      else if(push(M,CMP,&c)){ BUMP(bad); GIVE(i); }
       else { MV(i,APP); BUMP(recvd); } }
     for(int s=0;s<NOWN;s++) add(&w[s],n[s]);
     double tn=now();
@@ -281,5 +275,6 @@ region:
       else dry=0;
       wcs=0;
       if(!alive) fprintf(stderr,"pair down\n");
-      tel=tn; } } }
+      tel=tn; }
+    if(!activity && sends==0) usleep(IDLE_POLL_US); } }
   return 0; }

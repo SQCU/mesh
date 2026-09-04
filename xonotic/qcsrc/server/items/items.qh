@@ -20,7 +20,6 @@ bool ItemSend(entity this, entity to, int sf);
 
 const float ITEM_RESPAWN_TICKS = 10;
 
-// string overrides entity
 .string item_pickupsound;
 .entity item_pickupsound_ent;
 .entity item_model_ent;
@@ -36,11 +35,10 @@ const float ITEM_RESPAWN_TICKS = 10;
 
 .float item_respawncounter;
 
-.float noalign; // if set to 1, the item or spawnpoint won't be dropped to the floor
+.float noalign;
 
-.float superweapons_finished; // NOTE: this field is used only by map entities, it does not directly apply the superweapons stat
+.float superweapons_finished;
 
-// delay before this item can be picked up
 .float item_spawnshieldtime;
 
 void Item_Show (entity e, int mode);
@@ -54,12 +52,6 @@ void Item_ScheduleRespawn(entity e);
 
 void Item_ScheduleInitialRespawn(entity e);
 
-/// \brief Give several random weapons and ammo to the entity.
-/// \param[in,out] receiver Entity to give weapons to.
-/// \param[in] num_weapons Number of weapons to give.
-/// \param[in] weapon_names Names of weapons to give separated by spaces.
-/// \param[in] ammo Entity containing the ammo amount for each possible weapon.
-/// \return No return.
 void GiveRandomWeapons(entity receiver, int num_weapons, string weapon_names, entity ammo_entity);
 
 bool Item_GiveAmmoTo(entity item, entity player, Resource res_type, float ammomax);
@@ -81,10 +73,7 @@ void UpdateItemAfterTeleport(entity this);
 
 void RemoveItem(entity this);
 
-// pickup evaluation functions
-// these functions decide how desirable an item is to the bots
-
-float generic_pickupevalfunc(entity player, entity item);// {return item.bot_pickupbasevalue;} // WEAPONTODO
+float generic_pickupevalfunc(entity player, entity item);
 
 float weapon_pickupevalfunc(entity player, entity item);
 float ammo_pickupevalfunc(entity player, entity item);

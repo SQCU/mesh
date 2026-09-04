@@ -27,7 +27,7 @@ void trigger_disablerelay_use(entity this, entity actor, entity trigger)
 
 spawnfunc(trigger_disablerelay)
 {
-	this.reset = spawnfunc_trigger_disablerelay; // this spawnfunc resets fully
+	this.reset = spawnfunc_trigger_disablerelay;
 	this.active = ACTIVE_ACTIVE;
 	this.use = trigger_disablerelay_use;
 }

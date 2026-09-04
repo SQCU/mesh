@@ -2,7 +2,6 @@
 #include "quakedef.h"
 #include "image.h"
 
-// FIXME: fix skybox after vid_restart
 cvar_t r_sky = {CVAR_SAVE, "r_sky", "1", "enables sky rendering (black otherwise)"};
 cvar_t r_skyscroll1 = {CVAR_SAVE, "r_skyscroll1", "1", "speed at which upper clouds layer scrolls in quake sky"};
 cvar_t r_skyscroll2 = {CVAR_SAVE, "r_skyscroll2", "2", "speed at which lower clouds layer scrolls in quake sky"};
@@ -59,9 +58,9 @@ void R_SkyStartFrame(void)
 	skyrendersphere = false;
 	skyrenderbox = false;
 	skyrendermasked = false;
-	// for depth-masked sky, we need to know whether any sky was rendered
+
 	skyrenderlater = false;
-	// we can scissor the sky to just the relevant area
+
 	Vector4Clear(skyscissor);
 	if (r_sky.integer)
 	{
@@ -73,11 +72,6 @@ void R_SkyStartFrame(void)
 	}
 }
 
-/*
-==================
-R_SetSkyBox
-==================
-*/
 static void R_UnloadSkyBox(void)
 {
 	int i;
@@ -86,7 +80,7 @@ static void R_UnloadSkyBox(void)
 	{
 		if (skyboxskinframe[i])
 		{
-			// TODO: make a R_SkinFrame_Purge for single skins...
+
 			c++;
 		}
 		skyboxskinframe[i] = NULL;
@@ -148,7 +142,7 @@ static int R_LoadSkyBox(void)
 
 int R_SetSkyBox(const char *sky)
 {
-	if (strcmp(sky, skyname) == 0) // no change
+	if (strcmp(sky, skyname) == 0)
 		return true;
 
 	if (strlen(sky) > 1000)
@@ -162,7 +156,6 @@ int R_SetSkyBox(const char *sky)
 	return R_LoadSkyBox();
 }
 
-// LordHavoc: added LoadSky console command
 static void LoadSky_f (void)
 {
 	switch (Cmd_Argc())
@@ -192,32 +185,32 @@ static void LoadSky_f (void)
 
 static const float skyboxvertex3f[6*4*3] =
 {
-	// skyside[0]
+
 	 16, -16,  16,
 	 16, -16, -16,
 	 16,  16, -16,
 	 16,  16,  16,
-	// skyside[1]
+
 	-16,  16,  16,
 	-16,  16, -16,
 	-16, -16, -16,
 	-16, -16,  16,
-	// skyside[2]
+
 	 16,  16,  16,
 	 16,  16, -16,
 	-16,  16, -16,
 	-16,  16,  16,
-	// skyside[3]
+
 	-16, -16,  16,
 	-16, -16, -16,
 	 16, -16, -16,
 	 16, -16,  16,
-	// skyside[4]
+
 	-16, -16,  16,
 	 16, -16,  16,
 	 16,  16,  16,
 	-16,  16,  16,
-	// skyside[5]
+
 	 16, -16, -16,
 	-16, -16, -16,
 	-16,  16, -16,
@@ -226,32 +219,32 @@ static const float skyboxvertex3f[6*4*3] =
 
 static const float skyboxtexcoord2f[6*4*2] =
 {
-	// skyside[0]
+
 	0, 1,
 	1, 1,
 	1, 0,
 	0, 0,
-	// skyside[1]
+
 	1, 0,
 	0, 0,
 	0, 1,
 	1, 1,
-	// skyside[2]
+
 	1, 1,
 	1, 0,
 	0, 0,
 	0, 1,
-	// skyside[3]
+
 	0, 0,
 	0, 1,
 	1, 1,
 	1, 0,
-	// skyside[4]
+
 	0, 1,
 	1, 1,
 	1, 0,
 	0, 0,
-	// skyside[5]
+
 	0, 1,
 	1, 1,
 	1, 0,
@@ -260,50 +253,48 @@ static const float skyboxtexcoord2f[6*4*2] =
 
 static const int skyboxelement3i[6*2*3] =
 {
-	// skyside[3]
+
 	 0,  1,  2,
 	 0,  2,  3,
-	// skyside[1]
+
 	 4,  5,  6,
 	 4,  6,  7,
-	// skyside[0]
+
 	 8,  9, 10,
 	 8, 10, 11,
-	// skyside[2]
+
 	12, 13, 14,
 	12, 14, 15,
-	// skyside[4]
+
 	16, 17, 18,
 	16, 18, 19,
-	// skyside[5]
+
 	20, 21, 22,
 	20, 22, 23
 };
 
 static const unsigned short skyboxelement3s[6*2*3] =
 {
-	// skyside[3]
+
 	 0,  1,  2,
 	 0,  2,  3,
-	// skyside[1]
+
 	 4,  5,  6,
 	 4,  6,  7,
-	// skyside[0]
+
 	 8,  9, 10,
 	 8, 10, 11,
-	// skyside[2]
+
 	12, 13, 14,
 	12, 14, 15,
-	// skyside[4]
+
 	16, 17, 18,
 	16, 18, 19,
-	// skyside[5]
+
 	20, 21, 22,
 	20, 22, 23
 };
 
-/// Globs the artifact drops on the skybox stain it too: the accumulated mean ink
-/// colour modulates the sky entity's vertex colour.  One lerp per frame.
 static void R_Sky_InkTint(vec3_t out)
 {
 	vec3_t tint;
@@ -405,13 +396,10 @@ static void R_SkySphere(void)
 		skyspherecalc();
 	}
 
-	// wrap the scroll values just to be extra kind to float accuracy
-
-	// scroll speed for upper layer
 	speedscale = r_refdef.scene.time*r_skyscroll1.value*8.0/128.0;
 	speedscale -= floor(speedscale);
 	Matrix4x4_CreateTranslate(&scroll1matrix, speedscale, speedscale, 0);
-	// scroll speed for lower layer (transparent layer)
+
 	speedscale = r_refdef.scene.time*r_skyscroll2.value*8.0/128.0;
 	speedscale -= floor(speedscale);
 	Matrix4x4_CreateTranslate(&scroll2matrix, speedscale, speedscale, 0);
@@ -429,7 +417,7 @@ void R_Sky(void)
 
 	if (r_sky_scissor.integer)
 	{
-		// if the scissor is empty just return
+
 		if (skyscissor[2] == 0 || skyscissor[3] == 0)
 			return;
 		GL_Scissor(skyscissor[0], skyscissor[1], skyscissor[2], skyscissor[3]);
@@ -437,27 +425,17 @@ void R_Sky(void)
 	}
 	if (skyrendersphere)
 	{
-		// this does not modify depth buffer
+
 		R_SkySphere();
 	}
 	else if (skyrenderbox)
 	{
-		// this does not modify depth buffer
+
 		R_SkyBox();
 	}
-	/* this will be skyroom someday
-	else
-	{
-		// this modifies the depth buffer so we have to clear it afterward
-		//R_SkyRoom();
-		// clear the depthbuffer that was used while rendering the skyroom
-		//GL_Clear(GL_DEPTH_BUFFER_BIT);
-	}
-	*/
+
 	GL_Scissor(0, 0, vid.width, vid.height);
 }
-
-//===============================================================
 
 void R_ResetSkyBox(void)
 {
@@ -482,7 +460,6 @@ static void r_sky_newmap(void)
 {
 }
 
-
 void R_Sky_Init(void)
 {
 	Cmd_AddCommand ("loadsky", &LoadSky_f, "load a skybox by basename (for example loadsky mtnsun_ loads mtnsun_ft.tga and so on)");
@@ -494,4 +471,3 @@ void R_Sky_Init(void)
 	skyname[0] = 0;
 	R_RegisterModule("R_Sky", r_sky_start, r_sky_shutdown, r_sky_newmap, NULL, NULL);
 }
-

@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// r_surf.c: surface-related refresh code
 
 #include "quakedef.h"
 #include "r_shadow.h"
@@ -32,13 +13,6 @@ cvar_t r_useportalculling = {0, "r_useportalculling", "2", "improve framerate wi
 cvar_t r_usesurfaceculling = {0, "r_usesurfaceculling", "1", "skip off-screen surfaces (1 = cull surfaces if the map is likely to benefit, 2 = always cull surfaces)"};
 cvar_t r_q3bsp_renderskydepth = {0, "r_q3bsp_renderskydepth", "0", "draws sky depth masking in q3 maps (as in q1 maps), this means for example that sky polygons can hide other things"};
 
-/*
-===============
-R_BuildLightMap
-
-Combine and scale multiple lightmaps into the 8.8 format in blocklights
-===============
-*/
 void R_BuildLightMap (const entity_render_t *ent, msurface_t *surface)
 {
 	int smax, tmax, i, size, size3, maps, l;
@@ -64,17 +38,13 @@ void R_BuildLightMap (const entity_render_t *ent, msurface_t *surface)
 		cl.buildlightmapmemory = (unsigned char *) Mem_Alloc(cls.levelmempool, cl.buildlightmapmemorysize);
 	}
 
-	// these both point at the same buffer, templight is only used for final
-	// processing and can replace the intblocklights data as it goes
 	intblocklights = (int *)cl.buildlightmapmemory;
 	templight = (unsigned char *)cl.buildlightmapmemory;
 
-	// update cached lighting info
 	model->brushq1.lightmapupdateflags[surface - model->data_surfaces] = false;
 
 	lightmap = surface->lightmapinfo->samples;
 
-// set to full bright if no light data
 	bl = intblocklights;
 	if (!model->brushq1.lightdata)
 	{
@@ -83,10 +53,9 @@ void R_BuildLightMap (const entity_render_t *ent, msurface_t *surface)
 	}
 	else
 	{
-// clear to no light
+
 		memset(bl, 0, size3*sizeof(*bl));
 
-// add all the lightmaps
 		if (lightmap)
 			for (maps = 0;maps < MAXLIGHTMAPS && surface->lightmapinfo->styles[maps] != 255;maps++, lightmap += size3)
 				for (scale = r_refdef.scene.lightstylevalue[surface->lightmapinfo->styles[maps]], i = 0;i < size3;i++)
@@ -96,10 +65,7 @@ void R_BuildLightMap (const entity_render_t *ent, msurface_t *surface)
 	stain = surface->lightmapinfo->stainsamples;
 	bl = intblocklights;
 	out = templight;
-	// the >> 16 shift adjusts down 8 bits to account for the stainmap
-	// scaling, and remaps the 0-65536 (2x overbright) to 0-256, it will
-	// be doubled during rendering to achieve 2x overbright
-	// (0 = 0.0, 128 = 1.0, 256 = 2.0)
+
 	if (stain)
 	{
 		for (i = 0;i < size;i++, bl += 3, stain += 3, out += 4)
@@ -125,23 +91,22 @@ void R_BuildLightMap (const entity_render_t *ent, msurface_t *surface)
 		Image_MakesRGBColorsFromLinear_Lightmap(templight, templight, size);
 	R_UpdateTexture(surface->lightmaptexture, templight, surface->lightmapinfo->lightmaporigin[0], surface->lightmapinfo->lightmaporigin[1], 0, smax, tmax, 1);
 
-	// update the surface's deluxemap if it has one
 	if (surface->deluxemaptexture != r_texture_blanknormalmap)
 	{
 		vec3_t n;
 		unsigned char *normalmap = surface->lightmapinfo->nmapsamples;
 		lightmap = surface->lightmapinfo->samples;
-		// clear to no normalmap
+
 		bl = intblocklights;
 		memset(bl, 0, size3*sizeof(*bl));
-		// add all the normalmaps
+
 		if (lightmap && normalmap)
 		{
 			for (maps = 0;maps < MAXLIGHTMAPS && surface->lightmapinfo->styles[maps] != 255;maps++, lightmap += size3, normalmap += size3)
 			{
 				for (scale = r_refdef.scene.lightstylevalue[surface->lightmapinfo->styles[maps]], i = 0;i < size;i++)
 				{
-					// add the normalmap with weighting proportional to the style's lightmap intensity
+
 					l = (int)(VectorLength(lightmap + i*3) * scale);
 					bl[i*3+0] += ((int)normalmap[i*3+0] - 128) * l;
 					bl[i*3+1] += ((int)normalmap[i*3+1] - 128) * l;
@@ -151,7 +116,7 @@ void R_BuildLightMap (const entity_render_t *ent, msurface_t *surface)
 		}
 		bl = intblocklights;
 		out = templight;
-		// we simply renormalize the weighted normals to get a valid deluxemap
+
 		for (i = 0;i < size;i++, bl += 3, out += 4)
 		{
 			VectorCopy(bl, n);
@@ -219,10 +184,9 @@ loc0:
 			s = bound(0, impacts, smax * 16) - impacts;
 			t = bound(0, impactt, tmax * 16) - impactt;
 			i = (int)(s * s + t * t + dist2);
-			if ((i > maxdist) || (smax > (int)(sizeof(sdtable)/sizeof(sdtable[0])))) // smax overflow fix from Andreas Dehmel
+			if ((i > maxdist) || (smax > (int)(sizeof(sdtable)/sizeof(sdtable[0]))))
 				continue;
 
-			// reduce calculations
 			for (s = 0, i = impacts; s < smax; s++, i -= 16)
 				sdtable[s] = i * i + dist2;
 
@@ -234,7 +198,7 @@ loc0:
 			for (t = 0;t < tmax;t++, i -= 16)
 			{
 				td = i * i;
-				// make sure some part of it is visible on this line
+
 				if (td < maxdist3)
 				{
 					maxdist2 = maxdist - td;
@@ -257,10 +221,10 @@ loc0:
 						bl += 3;
 					}
 				}
-				else // skip line
+				else
 					bl += smax3;
 			}
-			// force lightmap upload
+
 			if (stained)
 				model->brushq1.lightmapupdateflags[surface - model->data_surfaces] = true;
 		}
@@ -307,7 +271,6 @@ void R_Stain (const vec3_t origin, float radius, int cr1, int cg1, int cb1, int 
 
 	R_StainNode(r_refdef.scene.worldmodel->brush.data_nodes + r_refdef.scene.worldmodel->brushq1.hulls[0].firstclipnode, r_refdef.scene.worldmodel, origin, radius, fcolor);
 
-	// look for embedded bmodels
 	for (n = 0;n < cl.num_brushmodel_entities;n++)
 	{
 		ent = &cl.entities[cl.brushmodel_entities[n]].render;
@@ -323,20 +286,9 @@ void R_Stain (const vec3_t origin, float radius, int cr1, int cg1, int cb1, int 
 	}
 }
 
-
-/*
-=============================================================
-
-	BRUSH MODELS
-
-=============================================================
-*/
-
 static void R_DrawPortal_Callback(const entity_render_t *ent, const rtlight_t *rtlight, int numsurfaces, int *surfacelist)
 {
-	// due to the hacky nature of this function's parameters, this is never
-	// called with a batch, so numsurfaces is always 1, and the surfacelist
-	// contains only a leaf number for coloring purposes
+
 	const mportal_t *portal = (mportal_t *)ent;
 	qboolean isvis;
 	int i, numpoints;
@@ -353,8 +305,6 @@ static void R_DrawPortal_Callback(const entity_render_t *ent, const rtlight_t *r
 
 	numpoints = min(portal->numpoints, POLYGONELEMENTS_MAXPOINTS);
 
-//	R_Mesh_ResetTextureState();
-
 	isvis = (portal->here->clusterindex >= 0 && portal->past->clusterindex >= 0 && portal->here->clusterindex != portal->past->clusterindex);
 
 	i = surfacelist[0] >> 1;
@@ -369,7 +319,6 @@ static void R_DrawPortal_Callback(const entity_render_t *ent, const rtlight_t *r
 	R_Mesh_Draw(0, numpoints, 0, numpoints - 2, polygonelement3i, NULL, 0, polygonelement3s, NULL, 0);
 }
 
-// LordHavoc: this is just a nice debugging tool, very slow
 void R_DrawPortals(void)
 {
 	int i, leafnum;
@@ -382,7 +331,7 @@ void R_DrawPortals(void)
 	{
 		if (r_refdef.viewcache.world_leafvisible[leafnum])
 		{
-			//for (portalnum = 0, portal = model->brush.data_portals;portalnum < model->brush.num_portals;portalnum++, portal++)
+
 			for (portal = r_refdef.scene.worldmodel->brush.data_leafs[leafnum].portals;portal;portal = portal->next)
 			{
 				if (portal->numpoints <= POLYGONELEMENTS_MAXPOINTS)
@@ -435,15 +384,14 @@ void R_View_WorldVisibility(qboolean forcenovis)
 
 	if (r_refdef.view.usecustompvs)
 	{
-		// clear the visible surface and leaf flags arrays
+
 		memset(r_refdef.viewcache.world_surfacevisible, 0, model->num_surfaces);
 		memset(r_refdef.viewcache.world_leafvisible, 0, model->brush.num_leafs);
 		r_refdef.viewcache.world_novis = false;
 
-		// simply cull each marked leaf to the frustum (view pyramid)
 		for (j = 0, leaf = model->brush.data_leafs;j < model->brush.num_leafs;j++, leaf++)
 		{
-			// if leaf is in current pvs and on the screen, mark its surfaces
+
 			if (CHECKPVSBIT(r_refdef.viewcache.world_pvsbits, leaf->clusterindex) && !R_CullBox(leaf->mins, leaf->maxs))
 			{
 				r_refdef.stats[r_stat_world_leafs]++;
@@ -457,33 +405,28 @@ void R_View_WorldVisibility(qboolean forcenovis)
 		return;
 	}
 
-	// if possible find the leaf the view origin is in
 	viewleaf = model->brush.PointInLeaf ? model->brush.PointInLeaf(model, r_refdef.view.origin) : NULL;
-	// if possible fetch the visible cluster bits
+
 	if (!r_lockpvs.integer && model->brush.FatPVS)
 		model->brush.FatPVS(model, r_refdef.view.origin, 2, r_refdef.viewcache.world_pvsbits, (r_refdef.viewcache.world_numclusters+7)>>3, false);
 
 	if (!r_lockvisibility.integer)
 	{
-		// clear the visible surface and leaf flags arrays
+
 		memset(r_refdef.viewcache.world_surfacevisible, 0, model->num_surfaces);
 		memset(r_refdef.viewcache.world_leafvisible, 0, model->brush.num_leafs);
 
 		r_refdef.viewcache.world_novis = false;
 
-		// if floating around in the void (no pvs data available, and no
-		// portals available), simply use all on-screen leafs.
 		if (!viewleaf || viewleaf->clusterindex < 0 || forcenovis || r_trippy.integer)
 		{
-			// no visibility method: (used when floating around in the void)
-			// simply cull each leaf to the frustum (view pyramid)
-			// similar to quake's RecursiveWorldNode but without cache misses
+
 			r_refdef.viewcache.world_novis = true;
 			for (j = 0, leaf = model->brush.data_leafs;j < model->brush.num_leafs;j++, leaf++)
 			{
 				if (leaf->clusterindex < 0)
 					continue;
-				// if leaf is in current pvs and on the screen, mark its surfaces
+
 				if (!R_CullBox(leaf->mins, leaf->maxs))
 				{
 					r_refdef.stats[r_stat_world_leafs]++;
@@ -494,19 +437,15 @@ void R_View_WorldVisibility(qboolean forcenovis)
 				}
 			}
 		}
-		// just check if each leaf in the PVS is on screen
-		// (unless portal culling is enabled)
+
 		else if (!model->brush.data_portals || r_useportalculling.integer < 1 || (r_useportalculling.integer < 2 && !r_novis.integer))
 		{
-			// pvs method:
-			// simply check if each leaf is in the Potentially Visible Set,
-			// and cull to frustum (view pyramid)
-			// similar to quake's RecursiveWorldNode but without cache misses
+
 			for (j = 0, leaf = model->brush.data_leafs;j < model->brush.num_leafs;j++, leaf++)
 			{
 				if (leaf->clusterindex < 0)
 					continue;
-				// if leaf is in current pvs and on the screen, mark its surfaces
+
 				if (CHECKPVSBIT(r_refdef.viewcache.world_pvsbits, leaf->clusterindex) && !R_CullBox(leaf->mins, leaf->maxs))
 				{
 					r_refdef.stats[r_stat_world_leafs]++;
@@ -517,22 +456,15 @@ void R_View_WorldVisibility(qboolean forcenovis)
 				}
 			}
 		}
-		// if desired use a recursive portal flow, culling each portal to
-		// frustum and checking if the leaf the portal leads to is in the pvs
+
 		else
 		{
 			int leafstackpos;
 			mportal_t *p;
 			mleaf_t *leafstack[8192];
 			vec3_t cullmins, cullmaxs;
-			float cullbias = r_nearclip.value * 2.0f; // the nearclip plane can easily end up culling portals in certain perfectly-aligned views, causing view blackouts
-			// simple-frustum portal method:
-			// follows portals leading outward from viewleaf, does not venture
-			// offscreen or into leafs that are not visible, faster than
-			// Quake's RecursiveWorldNode and vastly better in unvised maps,
-			// often culls some surfaces that pvs alone would miss
-			// (such as a room in pvs that is hidden behind a wall, but the
-			//  passage leading to the room is off-screen)
+			float cullbias = r_nearclip.value * 2.0f;
+
 			leafstack[0] = viewleaf;
 			leafstackpos = 1;
 			while (leafstackpos)
@@ -544,15 +476,11 @@ void R_View_WorldVisibility(qboolean forcenovis)
 					continue;
 				r_refdef.stats[r_stat_world_leafs]++;
 				r_refdef.viewcache.world_leafvisible[leaf - model->brush.data_leafs] = true;
-				// mark any surfaces bounding this leaf
+
 				if (leaf->numleafsurfaces)
 					for (i = 0, mark = leaf->firstleafsurface;i < leaf->numleafsurfaces;i++, mark++)
 						r_refdef.viewcache.world_surfacevisible[*mark] = true;
-				// follow portals into other leafs
-				// the checks are:
-				// the leaf has not been visited yet
-				// and the leaf is visible in the pvs
-				// the portal polygon's bounding box is on the screen
+
 				for (p = leaf->portals;p;p = p->next)
 				{
 					r_refdef.stats[r_stat_world_portals]++;
@@ -599,7 +527,6 @@ void R_Q1BSP_DrawAddWaterPlanes(entity_render_t *ent)
 	surfaces = model->data_surfaces;
 	flagsmask = MATERIALFLAG_WATERSHADER | MATERIALFLAG_REFRACTION | MATERIALFLAG_REFLECTION | MATERIALFLAG_CAMERA;
 
-	// add visible surfaces to draw list
 	if (ent == r_refdef.scene.worldentity)
 	{
 		for (i = 0;i < model->nummodelsurfaces;i++)
@@ -612,7 +539,7 @@ void R_Q1BSP_DrawAddWaterPlanes(entity_render_t *ent)
 	}
 	else
 	{
-		if(ent->entitynumber >= MAX_EDICTS) // && CL_VM_TransformView(ent->entitynumber - MAX_EDICTS, NULL, NULL, NULL))
+		if(ent->entitynumber >= MAX_EDICTS)
 			n = ent->entitynumber;
 		else
 			n = 0;
@@ -623,7 +550,7 @@ void R_Q1BSP_DrawAddWaterPlanes(entity_render_t *ent)
 				R_Water_AddWaterPlane(surfaces + j, n);
 		}
 	}
-	rsurface.entity = NULL; // used only by R_GetCurrentTexture and RSurf_ActiveModelEntity
+	rsurface.entity = NULL;
 }
 
 void R_Q1BSP_Draw(entity_render_t *ent)
@@ -644,7 +571,7 @@ void R_Q1BSP_DrawDepth(entity_render_t *ent)
 	GL_DepthTest(true);
 	GL_BlendFunc(GL_ONE, GL_ZERO);
 	GL_DepthMask(true);
-//	R_Mesh_ResetTextureState();
+
 	R_DrawModelSurfaces(ent, false, false, true, false, false);
 	GL_ColorMask(r_refdef.view.colormask[0], r_refdef.view.colormask[1], r_refdef.view.colormask[2], 1);
 }
@@ -686,8 +613,8 @@ typedef struct r_q1bsp_getlightinfo_s
 	const unsigned char *pvs;
 	qboolean svbsp_active;
 	qboolean svbsp_insertoccluder;
-	qboolean noocclusion; // avoids PVS culling
-	qboolean frontsidecasting; // casts shadows from surfaces facing the light (otherwise ones facing away)
+	qboolean noocclusion;
+	qboolean frontsidecasting;
 	int numfrustumplanes;
 	const mplane_t *frustumplanes;
 }
@@ -697,14 +624,14 @@ r_q1bsp_getlightinfo_t;
 
 static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboolean skipsurfaces)
 {
-	// nodestack
+
 	mnode_t *nodestack[GETLIGHTINFO_MAXNODESTACK];
 	int nodestackpos = 0;
-	// node processing
+
 	mplane_t *plane;
 	mnode_t *node;
 	int sides;
-	// leaf processing
+
 	mleaf_t *leaf;
 	const msurface_t *surface;
 	const msurface_t *surfaces = info->model->data_surfaces;
@@ -727,18 +654,18 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 	int i;
 	mportal_t *portal;
 	static float points[128][3];
-	// push the root node onto our nodestack
+
 	nodestack[nodestackpos++] = info->model->brush.data_nodes;
-	// we'll be done when the nodestack is empty
+
 	while (nodestackpos)
 	{
-		// get a node from the stack to process
+
 		node = nodestack[--nodestackpos];
-		// is it a node or a leaf?
+
 		plane = node->plane;
 		if (plane)
 		{
-			// node
+
 #if 0
 			if (!BoxesOverlap(info->lightmins, info->lightmaxs, node->mins, node->maxs))
 				continue;
@@ -747,17 +674,17 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 			if (!r_shadow_compilingrtlight && R_CullBoxCustomPlanes(node->mins, node->maxs, rtlight->cached_numfrustumplanes, rtlight->cached_frustumplanes))
 				continue;
 #endif
-			// axial planes can be processed much more quickly
+
 			if (plane->type < 3)
 			{
-				// axial plane
+
 				if (info->lightmins[plane->type] > plane->dist)
 					nodestack[nodestackpos++] = node->children[0];
 				else if (info->lightmaxs[plane->type] < plane->dist)
 					nodestack[nodestackpos++] = node->children[1];
 				else
 				{
-					// recurse front side first because the svbsp building prefers it
+
 					if (info->relativelightorigin[plane->type] >= plane->dist)
 					{
 						if (nodestackpos < GETLIGHTINFO_MAXNODESTACK-1)
@@ -774,12 +701,12 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 			}
 			else
 			{
-				// sloped plane
+
 				sides = BoxOnPlaneSide(info->lightmins, info->lightmaxs, plane);
 				switch (sides)
 				{
 				default:
-					continue; // ERROR: NAN bounding box!
+					continue;
 				case 1:
 					nodestack[nodestackpos++] = node->children[0];
 					break;
@@ -787,7 +714,7 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 					nodestack[nodestackpos++] = node->children[1];
 					break;
 				case 3:
-					// recurse front side first because the svbsp building prefers it
+
 					if (PlaneDist(info->relativelightorigin, plane) >= 0)
 					{
 						if (nodestackpos < GETLIGHTINFO_MAXNODESTACK-1)
@@ -806,7 +733,7 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 		}
 		else
 		{
-			// leaf
+
 			leaf = (mleaf_t *)node;
 #if 1
 			if (!info->noocclusion && info->pvs != NULL && !CHECKPVSBIT(info->pvs, leaf->clusterindex))
@@ -823,9 +750,7 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 
 			if (svbspactive)
 			{
-				// we can occlusion test the leaf by checking if all of its portals
-				// are occluded (unless the light is in this leaf - but that was
-				// already handled by the caller)
+
 				for (portal = leaf->portals;portal;portal = portal->next)
 				{
 					for (i = 0;i < portal->numpoints;i++)
@@ -834,10 +759,9 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 						break;
 				}
 				if (leaf->portals && portal == NULL)
-					continue; // no portals of this leaf visible
+					continue;
 			}
 
-			// add this leaf to the reduced light bounds
 			info->outmins[0] = min(info->outmins[0], leaf->mins[0]);
 			info->outmins[1] = min(info->outmins[1], leaf->mins[1]);
 			info->outmins[2] = min(info->outmins[2], leaf->mins[2]);
@@ -845,7 +769,6 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 			info->outmaxs[1] = max(info->outmaxs[1], leaf->maxs[1]);
 			info->outmaxs[2] = max(info->outmaxs[2], leaf->maxs[2]);
 
-			// mark this leaf as being visible to the light
 			if (info->outleafpvs)
 			{
 				int leafindex = leaf - info->model->brush.data_leafs;
@@ -856,11 +779,9 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 				}
 			}
 
-			// when using BIH, we skip the surfaces here
 			if (skipsurfaces)
 				continue;
 
-			// iterate the surfaces linked by this leaf and check their triangles
 			leafsurfaceindices = leaf->firstleafsurface;
 			numleafsurfaces = leaf->numleafsurfaces;
 			if (svbspinsertoccluder)
@@ -919,31 +840,25 @@ static void R_Q1BSP_RecursiveGetLightInfo_BSP(r_q1bsp_getlightinfo_t *info, qboo
 							continue;
 						if (svbspactive && !(SVBSP_AddPolygon(&r_svbsp, 3, v2[0], false, NULL, NULL, 0) & 2))
 							continue;
-						// we don't omit triangles from lighting even if they are
-						// backfacing, because when using shadowmapping they are often
-						// not fully occluded on the horizon of an edge
+
 						SETPVSBIT(info->outlighttrispvs, t);
 						addedtris = true;
 						if (castshadow)
 						{
 							if (noocclusion || (currentmaterialflags & MATERIALFLAG_NOCULLFACE))
 							{
-								// if the material is double sided we
-								// can't cull by direction
+
 								SETPVSBIT(info->outshadowtrispvs, t);
 							}
 							else if (frontsidecasting)
 							{
-								// front side casting occludes backfaces,
-								// so they are completely useless as both
-								// casters and lit polygons
+
 								if (PointInfrontOfTriangle(info->relativelightorigin, v2[0], v2[1], v2[2]))
 									SETPVSBIT(info->outshadowtrispvs, t);
 							}
 							else
 							{
-								// back side casting does not occlude
-								// anything so we can't cull lit polygons
+
 								if (!PointInfrontOfTriangle(info->relativelightorigin, v2[0], v2[1], v2[2]))
 									SETPVSBIT(info->outshadowtrispvs, t);
 							}
@@ -976,16 +891,14 @@ static void R_Q1BSP_RecursiveGetLightInfo_BIH(r_q1bsp_getlightinfo_t *info, cons
 	float v2[3][3];
 	int nodestack[GETLIGHTINFO_MAXNODESTACK];
 	int nodestackpos = 0;
-	// note: because the BSP leafs are not in the BIH tree, the _BSP function
-	// must be called to mark leafs visible for entity culling...
-	// we start at the root node
+
 	nodestack[nodestackpos++] = bih->rootnode;
-	// we'll be done when the stack is empty
+
 	while (nodestackpos)
 	{
-		// pop one off the stack to process
+
 		nodenum = nodestack[--nodestackpos];
-		// node
+
 		node = bih->nodes + nodenum;
 		if (node->type == BIH_UNORDERED)
 		{
@@ -1022,31 +935,24 @@ static void R_Q1BSP_RecursiveGetLightInfo_BIH(r_q1bsp_getlightinfo_t *info, cons
 				}
 				if (info->svbsp_active && !(SVBSP_AddPolygon(&r_svbsp, 3, v2[0], false, NULL, NULL, 0) & 2))
 					continue;
-				// we don't occlude triangles from lighting even
-				// if they are backfacing, because when using
-				// shadowmapping they are often not fully occluded
-				// on the horizon of an edge
+
 				SETPVSBIT(info->outlighttrispvs, t);
 				if (castshadow)
 				{
 					if (noocclusion || (currentmaterialflags & MATERIALFLAG_NOCULLFACE))
 					{
-						// if the material is double sided we
-						// can't cull by direction
+
 						SETPVSBIT(info->outshadowtrispvs, t);
 					}
 					else if (frontsidecasting)
 					{
-						// front side casting occludes backfaces,
-						// so they are completely useless as both
-						// casters and lit polygons
+
 						if (PointInfrontOfTriangle(info->relativelightorigin, v2[0], v2[1], v2[2]))
 							SETPVSBIT(info->outshadowtrispvs, t);
 					}
 					else
 					{
-						// back side casting does not occlude
-						// anything so we can't cull lit polygons
+
 						if (!PointInfrontOfTriangle(info->relativelightorigin, v2[0], v2[1], v2[2]))
 							SETPVSBIT(info->outshadowtrispvs, t);
 					}
@@ -1082,7 +988,7 @@ static void R_Q1BSP_RecursiveGetLightInfo_BIH(r_q1bsp_getlightinfo_t *info, cons
 				continue;
 			}
 			else
-				continue; // light falls between children, nothing here
+				continue;
 		}
 	}
 }
@@ -1102,21 +1008,20 @@ static void R_Q1BSP_CallRecursiveGetLightInfo(r_q1bsp_getlightinfo_t *info, qboo
 		{
 			SVBSP_Init(&r_svbsp, origin, r_svbsp.maxnodes, r_svbsp.nodes);
 			R_Q1BSP_RecursiveGetLightInfo_BSP(info, false);
-			// if that failed, retry with more nodes
+
 			if (r_svbsp.ranoutofnodes)
 			{
-				// an upper limit is imposed
+
 				if (r_svbsp.maxnodes >= 2<<22)
 					break;
 				r_svbsp.maxnodes *= 2;
 				r_svbsp.nodes = (svbsp_node_t*) R_FrameData_Alloc(r_svbsp.maxnodes * sizeof(svbsp_node_t));
-				//Mem_Free(r_svbsp.nodes);
-				//r_svbsp.nodes = (svbsp_node_t*) Mem_Alloc(tempmempool, r_svbsp.maxnodes * sizeof(svbsp_node_t));
+
 			}
 			else
 				break;
 		}
-		// now clear the visibility arrays because we need to redo it
+
 		info->outnumleafs = 0;
 		info->outnumsurfaces = 0;
 		memset(info->outleafpvs, 0, (info->model->brush.num_leafs + 7) >> 3);
@@ -1130,9 +1035,6 @@ static void R_Q1BSP_CallRecursiveGetLightInfo(r_q1bsp_getlightinfo_t *info, qboo
 	else
 		info->svbsp_active = false;
 
-	// we HAVE to mark the leaf the light is in as lit, because portals are
-	// irrelevant to a leaf that the light source is inside of
-	// (and they are all facing away, too)
 	{
 		mnode_t *node = info->model->brush.data_nodes;
 		mleaf_t *leaf;
@@ -1157,7 +1059,7 @@ static void R_Q1BSP_CallRecursiveGetLightInfo(r_q1bsp_getlightinfo_t *info, qboo
 	}
 
 	info->svbsp_insertoccluder = false;
-	// use BIH culling on single leaf maps (generally this only happens if running a model as a map), otherwise use BSP culling to make use of vis data
+
 	if (r_shadow_usebihculling.integer > 0 && (r_shadow_usebihculling.integer == 2 || info->model->brush.num_leafs == 1) && info->model->render_bih.leafs != NULL)
 	{
 		R_Q1BSP_RecursiveGetLightInfo_BSP(info, true);
@@ -1165,7 +1067,7 @@ static void R_Q1BSP_CallRecursiveGetLightInfo(r_q1bsp_getlightinfo_t *info, qboo
 	}
 	else
 		R_Q1BSP_RecursiveGetLightInfo_BSP(info, false);
-	// we're using temporary framedata memory, so this pointer will be invalid soon, clear it
+
 	r_svbsp.nodes = NULL;
 	if (developer_extra.integer && use_svbsp)
 	{
@@ -1243,26 +1145,22 @@ void R_Q1BSP_GetLightInfo(entity_render_t *ent, vec3_t relativelightorigin, floa
 
 	if (!info.noocclusion && r_shadow_compilingrtlight && r_shadow_realtime_world_compileportalculling.integer && info.model->brush.data_portals)
 	{
-		// use portal recursion for exact light volume culling, and exact surface checking
+
 		Portal_Visibility(info.model, info.relativelightorigin, info.outleaflist, info.outleafpvs, &info.outnumleafs, info.outsurfacelist, info.outsurfacepvs, &info.outnumsurfaces, NULL, 0, true, info.lightmins, info.lightmaxs, info.outmins, info.outmaxs, info.outshadowtrispvs, info.outlighttrispvs, info.visitingleafpvs);
 	}
 	else if (!info.noocclusion && r_shadow_realtime_dlight_portalculling.integer && info.model->brush.data_portals)
 	{
-		// use portal recursion for exact light volume culling, but not the expensive exact surface checking
+
 		Portal_Visibility(info.model, info.relativelightorigin, info.outleaflist, info.outleafpvs, &info.outnumleafs, info.outsurfacelist, info.outsurfacepvs, &info.outnumsurfaces, NULL, 0, r_shadow_realtime_dlight_portalculling.integer >= 2, info.lightmins, info.lightmaxs, info.outmins, info.outmaxs, info.outshadowtrispvs, info.outlighttrispvs, info.visitingleafpvs);
 	}
 	else
 	{
-		// recurse the bsp tree, checking leafs and surfaces for visibility
-		// optionally using svbsp for exact culling of compiled lights
-		// (or if the user enables dlight svbsp culling, which is mostly for
-		//  debugging not actual use)
+
 		R_Q1BSP_CallRecursiveGetLightInfo(&info, !info.noocclusion && (r_shadow_compilingrtlight ? r_shadow_realtime_world_compilesvbsp.integer : r_shadow_realtime_dlight_svbspculling.integer) != 0);
 	}
 
-	rsurface.entity = NULL; // used only by R_GetCurrentTexture and RSurf_ActiveModelEntity
+	rsurface.entity = NULL;
 
-	// limit combined leaf box to light boundaries
 	outmins[0] = max(info.outmins[0] - 1, info.lightmins[0]);
 	outmins[1] = max(info.outmins[1] - 1, info.lightmins[1]);
 	outmins[2] = max(info.outmins[2] - 1, info.lightmins[2]);
@@ -1273,7 +1171,6 @@ void R_Q1BSP_GetLightInfo(entity_render_t *ent, vec3_t relativelightorigin, floa
 	*outnumleafspointer = info.outnumleafs;
 	*outnumsurfacespointer = info.outnumsurfaces;
 
-	// now sort surfaces by texture for faster rendering
 	r_q1bsp_getlightinfo_surfaces = info.model->data_surfaces;
 	if (r_shadow_sortsurfaces.integer)
 		qsort(info.outsurfacelist, info.outnumsurfaces, sizeof(*info.outsurfacelist), R_Q1BSP_GetLightInfo_comparefunc);
@@ -1285,7 +1182,7 @@ void R_Q1BSP_CompileShadowVolume(entity_render_t *ent, vec3_t relativelightorigi
 	msurface_t *surface;
 	int surfacelistindex;
 	float projectdistance = relativelightdirection ? lightradius : lightradius + model->radius*2 + r_shadow_projectdistance.value;
-	// if triangle neighbors are disabled, shadowvolumes are disabled
+
 	if (!model->brush.shadowmesh->neighbor3i)
 		return;
 	r_shadow_compilingrtlight->static_meshchain_shadow_zfail = Mod_ShadowMesh_Begin(r_main_mempool, 32768, 32768, NULL, NULL, NULL, false, false, true);
@@ -1309,7 +1206,7 @@ void R_Q1BSP_DrawShadowVolume(entity_render_t *ent, const vec3_t relativelightor
 	const msurface_t *surface;
 	int modelsurfacelistindex;
 	float projectdistance = relativelightdirection ? lightradius : lightradius + model->radius*2 + r_shadow_projectdistance.value;
-	// check the box in modelspace, it was already checked in worldspace
+
 	if (!BoxesOverlap(model->normalmins, model->normalmaxs, lightmins, lightmaxs))
 		return;
 	R_FrameData_SetMark();
@@ -1317,7 +1214,7 @@ void R_Q1BSP_DrawShadowVolume(entity_render_t *ent, const vec3_t relativelightor
 		GL_PolygonOffset(r_refdef.shadowpolygonfactor + r_polygonoffset_submodel_factor.value, r_refdef.shadowpolygonoffset + r_polygonoffset_submodel_offset.value);
 	if (model->brush.shadowmesh)
 	{
-		// if triangle neighbors are disabled, shadowvolumes are disabled
+
 		if (!model->brush.shadowmesh->neighbor3i)
 			return;
 		R_Shadow_PrepareShadowMark(model->brush.shadowmesh->numtriangles);
@@ -1332,12 +1229,12 @@ void R_Q1BSP_DrawShadowVolume(entity_render_t *ent, const vec3_t relativelightor
 	}
 	else
 	{
-		// if triangle neighbors are disabled, shadowvolumes are disabled
+
 		if (!model->surfmesh.data_neighbor3i)
 			return;
 		projectdistance = lightradius + model->radius*2;
 		R_Shadow_PrepareShadowMark(model->surfmesh.num_triangles);
-		// identify lit faces within the bounding box
+
 		for (modelsurfacelistindex = 0;modelsurfacelistindex < modelnumsurfaces;modelsurfacelistindex++)
 		{
 			surface = model->data_surfaces + modelsurfacelist[modelsurfacelistindex];
@@ -1386,11 +1283,11 @@ void R_Q1BSP_DrawShadowMap(int side, entity_render_t *ent, const vec3_t relative
 	dp_model_t *model = ent->model;
 	const msurface_t *surface;
 	int modelsurfacelistindex, batchnumsurfaces;
-	// check the box in modelspace, it was already checked in worldspace
+
 	if (!BoxesOverlap(model->normalmins, model->normalmaxs, lightmins, lightmaxs))
 		return;
 	R_FrameData_SetMark();
-	// identify lit faces within the bounding box
+
 	for (modelsurfacelistindex = 0;modelsurfacelistindex < modelnumsurfaces;modelsurfacelistindex++)
 	{
 		surface = model->data_surfaces + modelsurfacelist[modelsurfacelistindex];
@@ -1435,7 +1332,7 @@ static void R_Q1BSP_DrawLight_TransparentCallback(const entity_render_t *ent, co
 	texture_t *t;
 	const msurface_t *surface;
 	R_FrameData_SetMark();
-	// note: in practice this never actually receives batches
+
 	R_Shadow_RenderMode_Begin();
 	R_Shadow_RenderMode_ActiveLight(rtlight);
 	R_Shadow_RenderMode_Lighting(false, true, rtlight->shadowmapatlassidesize != 0, (ent->flags & RENDER_NOSELFSHADOW) != 0);
@@ -1469,10 +1366,7 @@ void R_Q1BSP_DrawLight(entity_render_t *ent, int numsurfaces, const int *surface
 	texture_t *tex;
 	CHECKGLERROR
 	R_FrameData_SetMark();
-	// this is a double loop because non-visible surface skipping has to be
-	// fast, and even if this is not the world model (and hence no visibility
-	// checking) the input surface list and batch buffer are different formats
-	// so some processing is necessary.  (luckily models have few surfaces)
+
 	for (i = 0;i < numsurfaces;)
 	{
 		batchnumsurfaces = 0;
@@ -1495,11 +1389,10 @@ void R_Q1BSP_DrawLight(entity_render_t *ent, int numsurfaces, const int *surface
 			surface = batchsurfacelist[k];
 			tex = surface->texture;
 			rsurface.texture = R_GetCurrentTexture(tex);
-			// gather surfaces into a batch range
+
 			for (kend = k;kend < batchnumsurfaces && tex == batchsurfacelist[kend]->texture;kend++)
 				;
-			// now figure out what to do with this particular range of surfaces
-			// VorteX: added MATERIALFLAG_NORTLIGHT
+
 			if ((rsurface.texture->currentmaterialflags & (MATERIALFLAG_WALL | MATERIALFLAG_NORTLIGHT)) != MATERIALFLAG_WALL)
 				continue;
 			if (r_fb.water.renderingscene && (rsurface.texture->currentmaterialflags & (MATERIALFLAG_WATERSHADER | MATERIALFLAG_REFRACTION | MATERIALFLAG_REFLECTION | MATERIALFLAG_CAMERA)))
@@ -1523,7 +1416,7 @@ void R_Q1BSP_DrawLight(entity_render_t *ent, int numsurfaces, const int *surface
 						tempcenter[2] = (surface->mins[2] + surface->maxs[2]) * 0.5f;
 					}
 					Matrix4x4_Transform(&rsurface.matrix, tempcenter, center);
-					if (ent->transparent_offset) // transparent offset
+					if (ent->transparent_offset)
 					{
 						center[0] += r_refdef.view.forward[0]*ent->transparent_offset;
 						center[1] += r_refdef.view.forward[1]*ent->transparent_offset;
@@ -1543,7 +1436,6 @@ void R_Q1BSP_DrawLight(entity_render_t *ent, int numsurfaces, const int *surface
 	R_FrameData_ReturnToMark();
 }
 
-//Made by [515]
 static void R_ReplaceWorldTexture (void)
 {
 	dp_model_t		*m;
@@ -1575,11 +1467,11 @@ static void R_ReplaceWorldTexture (void)
 		newt = r;
 	for(i=0,t=m->data_textures;i<m->num_textures;i++,t++)
 	{
-		if(/*t->width && !strcasecmp(t->name, r)*/ matchpattern( t->name, r, true ) )
+		if(                                        matchpattern( t->name, r, true ) )
 		{
 			if ((skinframe = R_SkinFrame_LoadExternal(newt, TEXF_MIPMAP | TEXF_ALPHA | TEXF_PICMIP, true)))
 			{
-//				t->skinframes[0] = skinframe;
+
 				t->currentskinframe = skinframe;
 				Con_Printf("%s replaced with %s\n", r, newt);
 			}
@@ -1592,7 +1484,6 @@ static void R_ReplaceWorldTexture (void)
 	}
 }
 
-//Made by [515]
 static void R_ListWorldTextures (void)
 {
 	dp_model_t		*m;
@@ -1638,6 +1529,4 @@ void GL_Surf_Init(void)
 	Cmd_AddCommand ("r_replacemaptexture", R_ReplaceWorldTexture, "override a map texture for testing purposes");
 	Cmd_AddCommand ("r_listmaptextures", R_ListWorldTextures, "list all textures used by the current map");
 
-	//R_RegisterModule("GL_Surf", gl_surf_start, gl_surf_shutdown, gl_surf_newmap);
 }
-

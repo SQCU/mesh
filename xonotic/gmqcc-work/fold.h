@@ -19,11 +19,6 @@ struct fold {
     fold(parser_t *parser);
     ~fold();
 
-    // Bitmask describing which branches of a conditional to take after folding.
-    // Zero indicates all the branches can be removed.
-    // ON_TRUE means ON_FALSE can be removed.
-    // ON_FALSE means ON_TRUE can be removed.
-    // ON_TRUE | ON_FALSE means nothing can be removed.
     enum {
         ON_TRUE  = 1 << 0,
         ON_FALSE = 1 << 1,
@@ -112,8 +107,8 @@ private:
     std::vector<ast_value*> m_imm_float;
     std::vector<ast_value*> m_imm_vector;
     std::vector<ast_value*> m_imm_string;
-    hash_table_t *m_imm_string_untranslate; /* map<string, ast_value*> */
-    hash_table_t *m_imm_string_dotranslate; /* map<string, ast_value*> */
+    hash_table_t *m_imm_string_untranslate;
+    hash_table_t *m_imm_string_dotranslate;
     parser_t *m_parser;
     bool m_initialized;
 };

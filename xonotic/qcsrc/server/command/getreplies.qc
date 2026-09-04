@@ -20,18 +20,6 @@
 #include <server/weapons/selection.qh>
 #include <server/world.qh>
 
-// =========================================================
-//  Reply messages for common commands, re-worked by Samual
-//  Last updated: December 30th, 2011
-// =========================================================
-
-// These strings are set usually during init in world.qc,
-// or also by some game modes or other functions manually,
-// and their purpose is to output information to clients
-// without using any extra processing time.
-
-// See common.qc for their proper commands
-
 string getrecords(int page)
 {
 	string s = "";
@@ -79,27 +67,20 @@ string getladder()
 	{
 		if (MapInfo_Get_ByID(k))
 		{
-			for (i = 0; i <= LADDER_CNT; ++i) // i = 0 because it is the speed award
+			for (i = 0; i <= LADDER_CNT; ++i)
 			{
-				if (i == 0)                   // speed award
+				if (i == 0)
 				{
 					if (stof(db_get(ServerProgsDB, strcat(MapInfo_Map_bspname, rr, "speed/speed"))) == 0) continue;
 
 					myuid = db_get(ServerProgsDB, strcat(MapInfo_Map_bspname, rr, "speed/crypto_idfp"));
 				}
-				else  // normal record, if it exists (else break)
+				else
 				{
 					if (race_readTime(MapInfo_Map_bspname, i) == 0) continue;
 
 					myuid = race_readUID(MapInfo_Map_bspname, i);
 				}
-
-				// string s contains:
-				// arg 0 = # of speed recs
-				// arg 1 = # of 1st place recs
-				// arg 2 = # of 2nd place recs
-				// ... etc
-				// LADDER_CNT+1 = total points
 
 				temp_s = db_get(TemporaryDB, strcat("ladder", myuid));
 
@@ -118,44 +99,35 @@ string getladder()
 				tokenize_console(temp_s);
 				s = "";
 
-				if (i == 0)                                         // speed award
+				if (i == 0)
 				{
-					for (j = 0; j <= LADDER_CNT; ++j)               // loop over each arg in the string
+					for (j = 0; j <= LADDER_CNT; ++j)
 					{
-						if (j == 0)                                 // speed award
-							s = strcat(s, ftos(stof(argv(j)) + 1)); // add 1 to speed rec count and write
-						else s = strcat(s, " ", argv(j));           // just copy over everything else
+						if (j == 0)
+							s = strcat(s, ftos(stof(argv(j)) + 1));
+						else s = strcat(s, " ", argv(j));
 					}
 				}
-				else  // record
+				else
 				{
-					for (j = 0; j <= LADDER_CNT; ++j)                    // loop over each arg in the string
+					for (j = 0; j <= LADDER_CNT; ++j)
 					{
-						if (j == 0) s = strcat(s, argv(j));              // speed award, dont prefix with " "
-						else if (j == i)                                 // wanted rec!
-							s = strcat(s, " ", ftos(stof(argv(j)) + 1)); // update argv(j)
-						else s = strcat(s, " ", argv(j));                // just copy over everything else
+						if (j == 0) s = strcat(s, argv(j));
+						else if (j == i)
+							s = strcat(s, " ", ftos(stof(argv(j)) + 1));
+						else s = strcat(s, " ", argv(j));
 					}
 				}
 
-				// total points are (by default) calculated like this:
-				// speedrec = floor(100 / 10) = 10 points
-				// 1st place = floor(100 / 1) = 100 points
-				// 2nd place = floor(100 / 2) = 50 points
-				// 3rd place = floor(100 / 3) = 33 points
-				// 4th place = floor(100 / 4) = 25 points
-				// 5th place = floor(100 / 5) = 20 points
-				// ... etc
-
-				if (i == 0) s = strcat(s, " ", ftos(stof(argv(LADDER_CNT + 1)) + LADDER_FIRSTPOINT / 10)); // speed award, add LADDER_FIRSTPOINT / 10 points
-				else s = strcat(s, " ", ftos(stof(argv(LADDER_CNT + 1)) + floor(LADDER_FIRSTPOINT / i)));  // record, add LADDER_FIRSTPOINT / i points
+				if (i == 0) s = strcat(s, " ", ftos(stof(argv(LADDER_CNT + 1)) + LADDER_FIRSTPOINT / 10));
+				else s = strcat(s, " ", ftos(stof(argv(LADDER_CNT + 1)) + floor(LADDER_FIRSTPOINT / i)));
 
 				db_put(TemporaryDB, strcat("ladder", myuid), s);
 			}
 		}
 	}
 
-	for (i = 0; i <= uidcnt; ++i)  // for each known uid
+	for (i = 0; i <= uidcnt; ++i)
 	{
 		thisuid = db_get(TemporaryDB, strcat("uid", ftos(i)));
 		temp_s = db_get(TemporaryDB, strcat("ladder", thisuid));
@@ -164,7 +136,7 @@ string getladder()
 
 		if (thiscnt > top_scores[LADDER_SIZE - 1])
 		{
-			for (j = 0; j < LADDER_SIZE; ++j)  // for each place in ladder
+			for (j = 0; j < LADDER_SIZE; ++j)
 			{
 				if (thiscnt > top_scores[j])
 				{
@@ -206,22 +178,22 @@ string getladder()
 		temp_s = db_get(TemporaryDB, strcat("ladder", top_uids[i]));
 		tokenize_console(temp_s);
 
-		if (argv(LADDER_CNT + 1) == "")                           // total is 0, skip
+		if (argv(LADDER_CNT + 1) == "")
 			continue;
 
-		s = strcat(s, strpad(4, count_ordinal(i + 1)), "^3| ^7"); // pos
-		s = strcat(s, strpad(7, argv(LADDER_CNT + 1)), "^3| ^7"); // total
+		s = strcat(s, strpad(4, count_ordinal(i + 1)), "^3| ^7");
+		s = strcat(s, strpad(7, argv(LADDER_CNT + 1)), "^3| ^7");
 
 		for (j = 1; j <= min(9, LADDER_CNT); ++j)
-			s = strcat(s, strpad(4, argv(j)), "^3| ^7");          // 1st, 2nd, 3rd etc cnt
+			s = strcat(s, strpad(4, argv(j)), "^3| ^7");
 
 #if LADDER_CNT > 9
 			for (j = 10; j <= LADDER_CNT; ++j)
-				s = strcat(s, strpad(4, argv(j)), " ^3| ^7"); // 1st, 2nd, 3rd etc cnt
+				s = strcat(s, strpad(4, argv(j)), " ^3| ^7");
 #endif
 
-		s = strcat(s, strpad(13, argv(0)), "^3| ^7");         // speed award cnt
-		s = strcat(s, uid2name(top_uids[i]), "\n");           // name
+		s = strcat(s, strpad(13, argv(0)), "^3| ^7");
+		s = strcat(s, uid2name(top_uids[i]), "\n");
 	}
 
 	MapInfo_ClearTemps();
@@ -263,9 +235,8 @@ string getlsmaps()
 			++added;
 
 			if(added > LSMAPS_MAX)
-				continue; // we still get the added count, but skip the actual processing
+				continue;
 
-			// todo: Check by play count of maps for other game types?
 			if((g_race || g_cts) && !race_readTime(MapInfo_Map_bspname, 1))
 			{
 				newmaps = true;
@@ -300,15 +271,6 @@ string getmonsterlist()
 	return sprintf("^7Monsters available: %s\n", monsterlist);
 }
 
-/*
-=============
-GetCvars
-=============
-Superseded by REPLICATE
-Called with:
-  0:  sends the request
-  >0: receives a cvar from name=argv(f) value=argv(f+1)
-*/
 void GetCvars_handleString(entity this, entity store, string thisname, float f, .string field, string name)
 {
 	if (f < 0)
@@ -328,7 +290,7 @@ void GetCvars_handleString(entity this, entity store, string thisname, float f, 
 void GetCvars_handleString_Fixup(entity this, entity store, string thisname, float f, .string field, string name, string(entity, string) func)
 {
 	GetCvars_handleString(this, store, thisname, f, field, name);
-	if (f >= 0) // also initialize to the fitting value for "" when sending cvars out
+	if (f >= 0)
 		if (thisname == name)
 		{
 			string s = func(this, strcat1(store.(field)));
@@ -375,9 +337,6 @@ void GetCvars_handleFloatOnce(entity this, entity store, string thisname, float 
 	}
 }
 
-/**
- * @param f -1: cleanup, 0: request, 1: receive
- */
 void GetCvars(entity this, entity store, int f)
 {
 	string s = string_null;

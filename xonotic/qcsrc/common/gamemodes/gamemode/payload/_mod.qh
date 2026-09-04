@@ -1,8 +1,10 @@
-// generated file; do not modify
+
 #include <common/gamemodes/gamemode/payload/payload.qh>
 #ifdef CSQC
     #include <common/gamemodes/gamemode/payload/cl_payload.qh>
+    #include <common/gamemodes/gamemode/payload/cl_artifact.qh>
 #endif
 #ifdef SVQC
     #include <common/gamemodes/gamemode/payload/sv_payload.qh>
+    #include <common/gamemodes/gamemode/payload/sv_payload_strategy_io.qh>
 #endif

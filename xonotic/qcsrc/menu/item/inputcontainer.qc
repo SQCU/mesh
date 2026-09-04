@@ -3,12 +3,7 @@
 	void InputContainer_resizeNotify(entity me, vector relOrigin, vector relSize, vector absOrigin, vector absSize)
 	{
 		SUPER(InputContainer).resizeNotify(me, relOrigin, relSize, absOrigin, absSize);
-		/*
-		if(me.parent.instanceOfInputContainer)
-		    me.isTabRoot = 0;
-		else
-		    me.isTabRoot = 1;
-		*/
+
 	}
 
 	void InputContainer_focusLeave(entity me)
@@ -54,7 +49,7 @@
 						me.setFocus(me, ff);
 						return 1;
 					}
-					return 0;  // AIIIIEEEEE!
+					return 0;
 				}
 			}
 			else
@@ -76,7 +71,7 @@
 						me.setFocus(me, ff);
 						return 1;
 					}
-					return 0;  // AIIIIEEEEE!
+					return 0;
 				}
 			}
 		}
@@ -98,7 +93,7 @@
 				e._changeFocusXY(e, globalToBox(pos, e.Container_origin, e.Container_size));
 			}
 		}
-		return true;  // have focus
+		return true;
 	}
 
 	float InputContainer_mouseDrag(entity me, vector pos)
@@ -109,8 +104,8 @@
 	}
 	float InputContainer_mouseMove(entity me, vector pos)
 	{
-		if (me.mouseFocusedChild != me.focusedChild) // if the keyboard moved the focus away
-			me.mouseFocusedChild = NULL;             // force focusing
+		if (me.mouseFocusedChild != me.focusedChild)
+			me.mouseFocusedChild = NULL;
 		if (me._changeFocusXY(me, pos))
 			if (SUPER(InputContainer).mouseMove(me, pos)) return 1;
 		if (pos.x >= 0 && pos.y >= 0 && pos.x < 1 && pos.y < 1) return 1;
@@ -118,7 +113,7 @@
 	}
 	METHOD(InputContainer, mousePress, bool(InputContainer this, vector pos))
 	{
-		this.mouseFocusedChild = NULL;  // force focusing
+		this.mouseFocusedChild = NULL;
 		if (this._changeFocusXY(this, pos))
 			if (SUPER(InputContainer).mousePress(this, pos)) return true;
 		if (pos.x >= 0 && pos.y >= 0 && pos.x < 1 && pos.y < 1) return true;
@@ -126,8 +121,8 @@
 	}
 	float InputContainer_mouseRelease(entity me, vector pos)
 	{
-		SUPER(InputContainer).mouseRelease(me, pos); // return value?
-		if (me.focused)                              // am I still eligible for this? (UGLY HACK, but a mouse event could have changed focus away)
+		SUPER(InputContainer).mouseRelease(me, pos);
+		if (me.focused)
 			if (me._changeFocusXY(me, pos)) return 1;
 		if (pos.x >= 0 && pos.y >= 0 && pos.x < 1 && pos.y < 1) return 1;
 		return 0;

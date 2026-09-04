@@ -2,10 +2,6 @@
 
 #ifdef SVQC
 
-/*
-* Update this.tur_shotorg by getting up2date bone info
-* NOTICE this func overwrites the global v_forward, v_right and v_up vectors.
-*/
 float turret_tag_fire_update(entity this)
 {
 	if(!this.tur_head)
@@ -21,9 +17,6 @@ float turret_tag_fire_update(entity this)
 	return true;
 }
 
-/*
-* Railgun-like beam, but has thickness and suppots slowing of target
-*/
 void FireImoBeam(entity this, vector start, vector end, vector smin, vector smax,
 				  float bforce, float f_dmg, float f_velfactor, int deathtype)
 
@@ -31,11 +24,8 @@ void FireImoBeam(entity this, vector start, vector end, vector smin, vector smax
 	vector dir = normalize(end - start);
 	vector force = dir * bforce;
 
-	// go a little bit into the wall because we need to hit this wall later
 	end = end + dir;
 
-	// trace multiple times until we hit a wall, each obstacle will be made unsolid.
-	// note down which entities were hit so we can damage them later
 	entity o = this;
 	while (1)
 	{
@@ -49,11 +39,9 @@ void FireImoBeam(entity this, vector start, vector end, vector smin, vector smax
 			continue;
 		}
 
-		// if it is NULL we can't hurt it so stop now
 		if (trace_ent == NULL || trace_fraction == 1)
 			break;
 
-		// make the entity non-solid so we can hit the next one
 		IL_PUSH(g_railgunhit, trace_ent);
 		trace_ent.railgunhit = true;
 		trace_ent.railgunhitloc = end;
@@ -61,11 +49,9 @@ void FireImoBeam(entity this, vector start, vector end, vector smin, vector smax
 		trace_ent.railgundistance = vlen(WarpZone_UnTransformOrigin(WarpZone_trace_transform, trace_endpos) - start);
 		trace_ent.railgunforce = WarpZone_TransformVelocity(WarpZone_trace_transform, force);
 
-		// stop if this is a wall
 		if (trace_ent.solid == SOLID_BSP)
 			break;
 
-		// make the entity non-solid
 		trace_ent.solid = SOLID_NOT;
 	}
 
@@ -73,27 +59,18 @@ void FireImoBeam(entity this, vector start, vector end, vector smin, vector smax
 	entity endent = trace_ent;
 	float endq3surfaceflags = trace_dphitq3surfaceflags;
 
-	// find all the entities the railgun hit and restore their solid state
 	IL_EACH(g_railgunhit, it.railgunhit,
 	{
 		it.solid = it.railgunhitsolidbackup;
 	});
 
-	/*
-		Unlike the railgun, this does NOT check for targets close by
-	*/
-
-	// find all the entities the railgun hit and hurt them
 	IL_EACH(g_railgunhit, it.railgunhit,
 	{
-		// removal from the list is handled below
-		/* no falloff applied */
 
-		// apply the damage
 		if (it.takedamage)
 		{
 			Damage(it, this, this, f_dmg, deathtype, DMG_NOWEP, it.railgunhitloc, it.railgunforce);
-			// slow down the target
+
 			it.velocity = it.velocity * f_velfactor;
 		}
 
@@ -104,8 +81,6 @@ void FireImoBeam(entity this, vector start, vector end, vector smin, vector smax
 	});
 
 	IL_CLEAR(g_railgunhit);
-
-	/* no accuracy, as a weapon entity is not attached */
 
 	trace_endpos = endpoint;
 	trace_ent = endent;
@@ -172,22 +147,17 @@ entity mark_misc(vector where,float lifetime)
 
 MODEL(TUR_C512, "models/turrets/c512.md3");
 
-/*
-* Paint a v_color colord circle on target onwho
-* that fades away over f_time
-*/
 void paint_target(entity onwho, float f_size, vector v_color, float f_time)
 {
 	entity e = spawn();
 	setmodel(e, MDL_TUR_C512);
 	e.scale = (f_size/512);
-	//setsize(e, '0 0 0', '0 0 0');
-	//setattachment(e,onwho,"");
+
 	setorigin(e, onwho.origin + '0 0 1');
 	e.alpha = 0.15;
 	set_movetype(e, MOVETYPE_FLY);
 
-	e.velocity = (v_color * 32); // + '0 0 1' * 64;
+	e.velocity = (v_color * 32);
 
 	e.colormod = v_color;
 	SUB_SetFade(e,time,f_time);
@@ -204,7 +174,7 @@ void paint_target2(entity onwho, float f_size, vector v_color, float f_time)
 	e.alpha = 0.15;
 	set_movetype(e, MOVETYPE_FLY);
 
-	e.velocity = (v_color * 32); // + '0 0 1' * 64;
+	e.velocity = (v_color * 32);
 	e.avelocity_x = -128;
 
 	e.colormod = v_color;

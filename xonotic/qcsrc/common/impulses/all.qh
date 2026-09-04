@@ -31,7 +31,7 @@ REGISTRY_CHECK(IMPULSES)
 
 void _impCheck(string s, string alias)
 {
-	// this is inside a function to avoid expanding it on compilation everytime
+
 	if (s == alias)
 		LOG_FATALF("LEGACY_IMPULSE: would define a recursive alias for '%s', use LEGACY_IMPULSE_ID instead", s);
 }
@@ -95,8 +95,6 @@ X(7, next, 227)
 X(8, next, 228)
 X(9, next, 229)
 #undef X
-
-// direct weapons
 
 #define X(i, imp) \
 	REGISTER_IMPULSE(weapon_byid_##i, imp)
@@ -194,7 +192,6 @@ LEGACY_IMPULSE(g_waypointsprite_clear_personal, 47, "waypoint_clear_personal")
 
 REGISTER_IMPULSE(waypoint_clear, 48)
 LEGACY_IMPULSE(g_waypointsprite_clear, 48, "waypoint_clear")
-
 
 #define CHIMPULSE(id, n) _CHIMPULSE(CHIMPULSE_##id, n)
 #define _CHIMPULSE(id, n) \

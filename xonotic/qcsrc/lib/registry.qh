@@ -16,13 +16,7 @@
 
 #define REGISTRY_MAX(id) id##_MAX
 #define REGISTRY_COUNT(id) id##_COUNT
-/**
- * Declare a new registry.
- *
- * Don't forget to call REGISTER_REGISTRY and REGISTRY_DEFINE_GET:
- *     REGISTER_REGISTRY(Foos)
- *     REGISTRY_DEFINE_GET(Foos, null_ent)
- */
+
 #define REGISTRY(id, max) \
 	void Register##id(); \
 	ACCUMULATE void REGISTRY_DEPENDS_(id) {} \
@@ -42,48 +36,26 @@
 
 #define REGISTRY_GET(id, i) id##_from(i)
 
-/** Add registry dependencies to a registry */
 #define REGISTRY_DEPENDS(id, dep) void Register##dep(); void REGISTRY_DEPENDS_(id) { Register##dep(); }
 #define REGISTRY_DEPENDS_(id) Register##id##_Depends()
 
-/** Called before initializing a registry. */
 #define REGISTRY_BEGIN(id) ACCUMULATE void REGISTRY_BEGIN_(id) { noref void() f = Register##id; } void REGISTRY_BEGIN_(id)
 #define REGISTRY_BEGIN_(id) Register##id##_First()
 
-/** Called after initializing a registry. */
 #define REGISTRY_END(id) ACCUMULATE void REGISTRY_END_(id) { noref void() f = Register##id; } void REGISTRY_END_(id)
 #define REGISTRY_END_(id) Register##id##_Done()
 
 REGISTRY(Registries, BITS(8))
 
-/** registered item identifier */
 .string registered_id;
 
 void _regCheck(int i, int _max)
 {
-	// this is inside a function to avoid expanding it on compilation everytime
-	// (this very long line would be repeated literally thousands times!)
+
 	if (i >= _max)
 		LOG_FATALF("Registry capacity exceeded (%d)", _max);
 }
 
-/**
- * Register a new entity with a registry.
- * Must be followed by a semicolon or a function body with a `this` parameter.
- * Wrapper macros may perform actions after user initialization like so:
- *     #define REGISTER_FOO(id) \
- *         REGISTER(Foos, FOO, id, m_id, NEW(Foo)) { \
- *             print("Registering foo #", this.m_id + 1, "\n"); \
- *         } \
- *         REGISTER_INIT(FOO, id)
- *
- *
- * @param registry  The registry to add each entity to.
- * @param ns        Short for namespace, prefix for each global (ns##_##id)
- * @param id        The identifier of the current entity being registered
- * @param fld       The field to store the locally unique unique entity id
- * @param inst      An expression to create a new instance, invoked for every registration
- */
 #define REGISTER(...) EVAL_REGISTER(OVERLOAD_(REGISTER, __VA_ARGS__))
 #define EVAL_REGISTER(...) __VA_ARGS__
 #define REGISTER_5(registry, ns, id, fld, inst) REGISTER_4(registry, ns##_##id, fld, inst)
@@ -121,7 +93,6 @@ MACRO_END
 
 #define REGISTER_INIT(id) ACCUMULATE void Register_##id##_init(entity this)
 
-/** internal next pointer */
 #define REGISTRY_NEXT enemy
 .entity REGISTRY_NEXT;
 
@@ -176,10 +147,10 @@ void Registry_send(string id, string hash);
 	string REGISTRY_HASH(id); \
 	STATIC_INIT(Registry_check_##id) \
 	{ \
-		/* Note: SHA256 isn't always available, use MD4 instead */ \
+		                                                           \
 		string s = ""; \
 		FOREACH(id, true, s = strcat(s, ":", it.registered_id)); \
-		s = substring(s, 1, -1); /* remove initial ":" */ \
+		s = substring(s, 1, -1);                          \
 		string h = REGISTRY_HASH(id) = strzone(digest_hex("MD4", s)); \
 		LOG_DEBUGF(#id ": %s\n[%s]", h, s); \
 	} \

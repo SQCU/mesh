@@ -1,23 +1,23 @@
 #pragma once
 
 CLASS(Crylink, Weapon)
-/* spawnfunc */ ATTRIB(Crylink, m_canonical_spawnfunc, string, "weapon_crylink");
-/* ammotype  */ ATTRIB(Crylink, ammo_type, Resource, RES_CELLS);
-/* impulse   */ ATTRIB(Crylink, impulse, int, 6);
-/* flags     */ ATTRIB(Crylink, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_TYPE_SPLASH | WEP_FLAG_CANCLIMB);
-/* rating    */ ATTRIB(Crylink, bot_pickupbasevalue, float, 6000);
-/* color     */ ATTRIB(Crylink, wpcolor, vector, '1 0.5 1');
-/* modelname */ ATTRIB(Crylink, mdl, string, "crylink");
+                ATTRIB(Crylink, m_canonical_spawnfunc, string, "weapon_crylink");
+                ATTRIB(Crylink, ammo_type, Resource, RES_CELLS);
+                ATTRIB(Crylink, impulse, int, 6);
+                ATTRIB(Crylink, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_TYPE_SPLASH | WEP_FLAG_CANCLIMB);
+                ATTRIB(Crylink, bot_pickupbasevalue, float, 6000);
+                ATTRIB(Crylink, wpcolor, vector, '1 0.5 1');
+                ATTRIB(Crylink, mdl, string, "crylink");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Crylink, m_model, Model, MDL_CRYLINK_ITEM);
-/* flash mdl */ ATTRIB(Crylink, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Crylink, m_muzzleeffect, entity, EFFECT_CRYLINK_MUZZLEFLASH);
+                ATTRIB(Crylink, m_model, Model, MDL_CRYLINK_ITEM);
+                ATTRIB(Crylink, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Crylink, m_muzzleeffect, entity, EFFECT_CRYLINK_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Crylink, w_crosshair, string, "gfx/crosshaircrylink");
-/* crosshair */ ATTRIB(Crylink, w_crosshair_size, float, 0.5);
-/* wepimg    */ ATTRIB(Crylink, model2, string, "weaponcrylink");
-/* refname   */ ATTRIB(Crylink, netname, string, "crylink");
-/* wepname   */ ATTRIB(Crylink, m_name, string, _("Crylink"));
+                ATTRIB(Crylink, w_crosshair, string, "gfx/crosshaircrylink");
+                ATTRIB(Crylink, w_crosshair_size, float, 0.5);
+                ATTRIB(Crylink, model2, string, "weaponcrylink");
+                ATTRIB(Crylink, netname, string, "crylink");
+                ATTRIB(Crylink, m_name, string, _("Crylink"));
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \
@@ -69,7 +69,7 @@ SPAWNFUNC_WEAPON(weapon_crylink, WEP_CRYLINK)
 .float crylink_waitrelease;
 .entity crylink_lastgroup;
 
-.entity crylink_owner; // we can't use realowner, as that's subject to change
+.entity crylink_owner;
 
 .entity queuenext;
 .entity queueprev;

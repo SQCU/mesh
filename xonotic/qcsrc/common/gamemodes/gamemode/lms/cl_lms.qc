@@ -26,7 +26,7 @@ MUTATOR_HOOKFUNCTION(cl_lms, DrawInfoMessages)
 
 void HUD_Mod_LMS_Draw(vector myPos, vector mySize)
 {
-	int leaders_count = STAT(REDALIVE); // recycled stat
+	int leaders_count = STAT(REDALIVE);
 	if(!leaders_count)
 	{
 		mod_active = 0;
@@ -53,7 +53,7 @@ void HUD_Mod_LMS_Draw(vector myPos, vector mySize)
 	else
 		pos.x = myPos.x + itemSize.x;
 
-	int lives_diff = STAT(BLUEALIVE); // recycled stat
+	int lives_diff = STAT(BLUEALIVE);
 	vector color = '1 1 0';
 	if (lives_diff >= 4)
 		color = '1 0 0';

@@ -2,18 +2,12 @@
 
 #include <common/command/command.qh>
 
-// =========================================================
-//  Markup chat characters command code, reworked by Samual
-//  Last updated: December 28th, 2011
-// =========================================================
-
 void GenericCommand_markup_init()
 {
 	if (markup_init)
 		return;
 	markup_init = true;
-	// "&<-" doesn't have a corresponding symbol anymore
-	// replaced with similar triangle facing left ("&<|")
+
 	int i = 0;
 	markup_from[i] = "&alien";  markup_to[i] = "\x12"; ++i;
 	markup_from[i] = "&:-)";    markup_to[i] = "\x13"; ++i;
@@ -31,7 +25,7 @@ void GenericCommand_markup_init()
 	markup_from[i] = "&[-";     markup_to[i] = "\x1f"; ++i;
 	markup_from[i] = "&s<";     markup_to[i] = "\xac"; ++i;
 	markup_from[i] = "&s>";     markup_to[i] = "\xae"; ++i;
-	markup_from[i] = "&<-";     markup_to[i] = "\xff"; ++i; // same as "&<|"
+	markup_from[i] = "&<-";     markup_to[i] = "\xff"; ++i;
 	markup_from[i] = "&[=";     markup_to[i] = "\x80"; ++i;
 	markup_from[i] = "&==";     markup_to[i] = "\x81"; ++i;
 	markup_from[i] = "&=]";     markup_to[i] = "\x82"; ++i;

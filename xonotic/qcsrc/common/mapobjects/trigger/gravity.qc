@@ -15,9 +15,7 @@ void trigger_gravity_remove(entity own)
 }
 void trigger_gravity_check_think(entity this)
 {
-	// This spawns when a player enters the gravity zone and checks if they left.
-	// Each frame, this.count is set to 2 by trigger_gravity_touch() and decreased by 1 here.
-	// It the player has left the gravity trigger, this will be allowed to reach 0 and indicate that.
+
 	if(this.count <= 0)
 	{
 		if(this.owner.trigger_gravity_check == this)
@@ -33,7 +31,6 @@ void trigger_gravity_check_think(entity this)
 	}
 }
 
-// legacy
 void trigger_gravity_use(entity this, entity actor, entity trigger)
 {
 	this.setactive(this, ACTIVE_TOGGLE);
@@ -56,13 +53,11 @@ void trigger_gravity_touch(entity this, entity toucher)
 		{
 			if(this == toucher.trigger_gravity_check.enemy)
 			{
-				// same?
-				// NOTE: see explanation in trigger_gravity_check_think
-				toucher.trigger_gravity_check.count = 2; // gravity one more frame...
+
+				toucher.trigger_gravity_check.count = 2;
 				return;
 			}
 
-			// compare prio
 			if(this.cnt > toucher.trigger_gravity_check.enemy.cnt)
 				trigger_gravity_remove(toucher);
 			else
@@ -102,7 +97,7 @@ spawnfunc(trigger_gravity)
 	this.setactive = generic_setactive;
 	if(this.targetname && this.targetname != "")
 	{
-		// legacy use
+
 		this.use = trigger_gravity_use;
 		if(this.spawnflags & GRAVITY_START_DISABLED)
 			this.active = ACTIVE_NOT;

@@ -7,7 +7,7 @@ void spiderbot_rocket_do(entity this);
 #endif
 
 #ifdef SVQC
-// 400 (x2) DPS
+
 float autocvar_g_vehicle_spiderbot_minigun_damage = 16;
 float autocvar_g_vehicle_spiderbot_minigun_refire = 0.06;
 float autocvar_g_vehicle_spiderbot_minigun_spread = 0.012;
@@ -24,7 +24,7 @@ float autocvar_g_vehicle_spiderbot_rocket_radius = 250;
 float autocvar_g_vehicle_spiderbot_rocket_speed = 3500;
 float autocvar_g_vehicle_spiderbot_rocket_spread = 0.05;
 float autocvar_g_vehicle_spiderbot_rocket_refire = 0.1;
-// volley
+
 float autocvar_g_vehicle_spiderbot_rocket_refire2 = 0.025;
 float autocvar_g_vehicle_spiderbot_rocket_reload = 4;
 float autocvar_g_vehicle_spiderbot_rocket_health = 100;

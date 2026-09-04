@@ -1,24 +1,24 @@
 #pragma once
 
 CLASS(Mortar, Weapon)
-/* spawnfunc */ ATTRIB(Mortar, m_canonical_spawnfunc, string, "weapon_mortar");
-/* ammotype  */ ATTRIB(Mortar, ammo_type, Resource, RES_ROCKETS);
-/* impulse   */ ATTRIB(Mortar, impulse, int, 4);
-/* flags     */ ATTRIB(Mortar, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_FLAG_CANCLIMB | WEP_TYPE_SPLASH | WEP_FLAG_NOTRUEAIM);
-/* rating    */ ATTRIB(Mortar, bot_pickupbasevalue, float, 7000);
-/* color     */ ATTRIB(Mortar, wpcolor, vector, '1 0 0');
-/* modelname */ ATTRIB(Mortar, mdl, string, "gl");
+                ATTRIB(Mortar, m_canonical_spawnfunc, string, "weapon_mortar");
+                ATTRIB(Mortar, ammo_type, Resource, RES_ROCKETS);
+                ATTRIB(Mortar, impulse, int, 4);
+                ATTRIB(Mortar, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_RELOADABLE | WEP_FLAG_CANCLIMB | WEP_TYPE_SPLASH | WEP_FLAG_NOTRUEAIM);
+                ATTRIB(Mortar, bot_pickupbasevalue, float, 7000);
+                ATTRIB(Mortar, wpcolor, vector, '1 0 0');
+                ATTRIB(Mortar, mdl, string, "gl");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Mortar, m_model, Model, MDL_MORTAR_ITEM);
-/* flash mdl */ ATTRIB(Mortar, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Mortar, m_muzzleeffect, entity, EFFECT_GRENADE_MUZZLEFLASH);
+                ATTRIB(Mortar, m_model, Model, MDL_MORTAR_ITEM);
+                ATTRIB(Mortar, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Mortar, m_muzzleeffect, entity, EFFECT_GRENADE_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Mortar, w_crosshair, string, "gfx/crosshairgrenadelauncher");
-/* crosshair */ ATTRIB(Mortar, w_crosshair_size, float, 0.7);
-/* wepimg    */ ATTRIB(Mortar, model2, string, "weapongrenadelauncher");
-/* refname   */ ATTRIB(Mortar, netname, string, "mortar");
-/* wepname   */ ATTRIB(Mortar, m_name, string, _("Mortar"));
-/* legacy    */ ATTRIB(Mortar, m_deprecated_netname, string, "grenadelauncher");
+                ATTRIB(Mortar, w_crosshair, string, "gfx/crosshairgrenadelauncher");
+                ATTRIB(Mortar, w_crosshair_size, float, 0.7);
+                ATTRIB(Mortar, model2, string, "weapongrenadelauncher");
+                ATTRIB(Mortar, netname, string, "mortar");
+                ATTRIB(Mortar, m_name, string, _("Mortar"));
+                ATTRIB(Mortar, m_deprecated_netname, string, "grenadelauncher");
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

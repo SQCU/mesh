@@ -9,7 +9,6 @@ REPLICATE(cvar_cl_multijump, bool, "cl_multijump");
 #endif
 #include <common/physics/player.qh>
 
-
 #if defined(SVQC)
 REGISTER_MUTATOR(multijump, autocvar_g_multijump);
 #elif defined(CSQC)
@@ -56,10 +55,10 @@ MUTATOR_HOOKFUNCTION(multijump, PlayerJump)
 	if(client_multijump == -1)
 		client_multijump = PHYS_MULTIJUMP_CLIENTDEFAULT(player);
 	if(client_multijump > 1)
-		return; // nope
+		return;
 
-	if (!IS_JUMP_HELD(player) && !IS_ONGROUND(player) && client_multijump) // jump button pressed this frame and we are in midair
-		player.multijump_ready = true;  // this is necessary to check that we released the jump button and pressed it again
+	if (!IS_JUMP_HELD(player) && !IS_ONGROUND(player) && client_multijump)
+		player.multijump_ready = true;
 	else
 		player.multijump_ready = false;
 
@@ -70,7 +69,7 @@ MUTATOR_HOOKFUNCTION(multijump, PlayerJump)
 	{
 		if (PHYS_MULTIJUMP(player))
 		{
-			if (!PHYS_MULTIJUMP_ADD(player)) // in this case we make the z velocity == jumpvelocity
+			if (!PHYS_MULTIJUMP_ADD(player))
 			{
 				if (player.velocity_z < PHYS_JUMPVELOCITY(player))
 				{
@@ -84,27 +83,20 @@ MUTATOR_HOOKFUNCTION(multijump, PlayerJump)
 			if(M_ARGV(2, bool))
 			{
 				if(PHYS_MULTIJUMP_DODGING(player))
-				if(PHYS_CS(player).movement_x != 0 || PHYS_CS(player).movement_y != 0) // don't remove all speed if player isnt pressing any movement keys
+				if(PHYS_CS(player).movement_x != 0 || PHYS_CS(player).movement_y != 0)
 				{
 					float curspeed;
 					vector wishvel, wishdir;
 
-/*#ifdef SVQC
-					curspeed = max(
-						vlen(vec2(player.velocity)), // current xy speed
-						vlen(vec2(antilag_takebackavgvelocity(player, max(player.lastteleporttime + sys_frametime, time - 0.25), time))) // average xy topspeed over the last 0.25 secs
-					);
-#elif defined(CSQC)*/
 					curspeed = vlen(vec2(player.velocity));
-//#endif
 
 					makevectors(player.v_angle_y * '0 1 0');
 					wishvel = v_forward * PHYS_CS(player).movement_x + v_right * PHYS_CS(player).movement_y;
 					wishdir = normalize(wishvel);
 
-					player.velocity_x = wishdir_x * curspeed; // allow "dodging" at a multijump
+					player.velocity_x = wishdir_x * curspeed;
 					player.velocity_y = wishdir_y * curspeed;
-					// keep velocity_z unchanged!
+
 				}
 				if (PHYS_MULTIJUMP(player) > 0)
 				{
@@ -112,7 +104,7 @@ MUTATOR_HOOKFUNCTION(multijump, PlayerJump)
 				}
 			}
 		}
-		player.multijump_ready = false; // require releasing and pressing the jump button again for the next jump
+		player.multijump_ready = false;
 	}
 }
 

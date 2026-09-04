@@ -6,47 +6,43 @@ REGISTER_NET_TEMP(net_gibsplash)
 
 .int state;
 
-bool Violence_GibSplash_SendEntity(entity this, entity to, int sf)
+bool Violence_GibSplash_SendEntity(entity this)
 {
-	int channel = MSG_ONE;
-	msg_entity = to;
+	int channel = MSG_BROADCAST;
 	WriteHeader(channel, net_gibsplash);
-	WriteByte(channel, this.state); // actually type
-	WriteByte(channel, bound(1, this.cnt * 16, 255)); // gibbage amount multiplier
-	WriteShort(channel, floor(this.origin.x / 4)); // not using a coord here, as gibs don't need this accuracy
-	WriteShort(channel, floor(this.origin.y / 4)); // not using a coord here, as gibs don't need this accuracy
-	WriteShort(channel, floor(this.origin.z / 4)); // not using a coord here, as gibs don't need this accuracy
-	WriteShort(channel, this.oldorigin.x); // actually compressed velocity
+	WriteByte(channel, this.state);
+	WriteByte(channel, bound(1, this.cnt * 16, 255));
+	WriteShort(channel, floor(this.origin.x / 4));
+	WriteShort(channel, floor(this.origin.y / 4));
+	WriteShort(channel, floor(this.origin.z / 4));
+	WriteShort(channel, this.oldorigin.x);
+	sv_flushbroadcast();
 	return true;
 }
 
 void Violence_GibSplash_At(vector org, vector dir, float type, float amount, entity gibowner, entity attacker)
 {
-	if(g_cts) // no gibs in CTS
+	if(g_cts)
 		return;
 
 	entity e = new_pure(gibsplash);
 	e.cnt = amount;
-	e.state = type; // should stay smaller than 15
+	e.state = type;
 	if(!sound_allowed(MSG_BROADCAST, gibowner) || !sound_allowed(MSG_BROADCAST, attacker))
-		e.state |= 0x40; // "silence" bit
-	e.state |= 8 * gibowner.species; // gib type, ranges from 0 to 15
+		e.state |= 0x40;
+	e.state |= 8 * gibowner.species;
 
-	// if this is a copied dead body, send the num of its player instead
-	// TODO: remove this field, read from model txt files
 	if(gibowner.classname == "body")
 		e.team = etof(gibowner.enemy);
 	else
 		e.team = etof(gibowner);
 
-	// origin is just data to be sent
-	//setorigin(e, org);
 	e.origin = org;
 	e.velocity = dir;
 
 	e.oldorigin_x = compressShortVector(e.velocity);
 
-	FOREACH_CLIENT(IS_REAL_CLIENT(it), Violence_GibSplash_SendEntity(e, it, 0));
+	Violence_GibSplash_SendEntity(e);
 	delete(e);
 }
 
@@ -120,7 +116,6 @@ void SUB_RemoveOnNoImpact(entity this, entity toucher)
 
 void Gib_Touch(entity this, entity toucher)
 {
-	// TODO maybe bounce of walls, make more gibs, etc.
 
 	if(trace_dphitq3surfaceflags & Q3SURFACEFLAG_NOIMPACT)
 	{
@@ -144,16 +139,14 @@ void Gib_Draw(entity this)
 	if(wasfreed(this))
 		return;
 
-	if(gettouch(this) == Gib_Touch) // don't do this for the "chunk" thingie...
-		// TODO somehow make it spray in a direction dependent on this.angles
+	if(gettouch(this) == Gib_Touch)
+
 		__trailparticles(this, _particleeffectnum(strcat(species_prefix(this.cnt), EFFECT_TR_SLIGHTBLOOD.eent_eff_name)), oldorg, this.origin);
 	else
 		__trailparticles(this, _particleeffectnum(strcat(species_prefix(this.cnt), EFFECT_TR_BLOOD.eent_eff_name)), oldorg, this.origin);
 
 	this.renderflags = 0;
 
-	// make gibs die faster at low view quality
-	// if view_quality is 0.5, we want to have them die twice as fast
 	this.nextthink -= frametime * (1 / bound(0.01, view_quality, 1.00) - 1);
 
 	this.alpha = bound(0, this.nextthink - time, 1);
@@ -169,15 +162,14 @@ void TossGib (string mdlname, vector safeorg, vector org, vector vconst, vector 
 {
 	entity gib;
 
-	// TODO remove some gibs according to cl_nogibs
 	gib = ListNewChildRubble(CasingsNGibs, new(gib));
 	set_movetype(gib, MOVETYPE_BOUNCE);
 	gib.gravity = 1;
 	gib.solid = SOLID_CORPSE;
 	gib.cnt = specnum;
 	gib.silent = issilent;
-	gib.colormap = 4; // red
-	gib.colormap |= BIT(10); // RENDER_COLORMAPPED
+	gib.colormap = 4;
+	gib.colormap |= BIT(10);
 	Gib_setmodel(gib, mdlname, specnum);
 
 	setsize (gib, '-8 -8 -8', '8 8 8');
@@ -189,7 +181,6 @@ void TossGib (string mdlname, vector safeorg, vector org, vector vconst, vector 
 	else
 		settouch(gib, SUB_RemoveOnNoImpact);
 
-	// don't spawn gibs inside solid - just don't
 	if(org != safeorg)
 	{
 		tracebox(safeorg, gib.mins, gib.maxs, org, MOVE_NOMONSTERS, gib);
@@ -214,8 +205,8 @@ NET_HANDLE(net_gibsplash, bool isNew)
 
 	string gentle_prefix = "morphed_";
 
-	int type = ReadByte(); // gibbage type
-	int amount = ReadByte() / 16.0; // gibbage amount
+	int type = ReadByte();
+	int amount = ReadByte() / 16.0;
 	vector org;
 	org.x = ReadShort() * 4 + 2;
 	org.y = ReadShort() * 4 + 2;
@@ -226,7 +217,7 @@ NET_HANDLE(net_gibsplash, bool isNew)
 
 	float cl_gentle_gibs = autocvar_cl_gentle_gibs;
 	if(cl_gentle_gibs || autocvar_cl_gentle)
-		type |= 0x80; // set gentle bit
+		type |= 0x80;
 
 	if(type & 0x80)
 	{
@@ -250,11 +241,11 @@ NET_HANDLE(net_gibsplash, bool isNew)
 	if(amount <= 0 || !isNew)
 		return;
 
-	setorigin(this, org); // for the sounds
+	setorigin(this, org);
 
-	int specnum = (type & 0x78) / 8; // blood/gibmodel type: using four bits (0..7, bit indexes 3,4,5)
+	int specnum = (type & 0x78) / 8;
 	bool issilent = (type & 0x40);
-	type = type & 0x87; // remove the species bits: bit 7 = gentle, bit 0,1,2 = kind of gib
+	type = type & 0x87;
 	string specstr = species_prefix(specnum);
 
 	switch(type)
@@ -286,7 +277,6 @@ NET_HANDLE(net_gibsplash, bool isNew)
 				if(prandom() < randomvalue)
 					TossGib ("models/gibs/leg2.md3", org, org + 16 * prandomvec() + '0 0 -5', vel, prandomvec() * (prandom() * 120 + 85), specnum,0, issilent);
 
-				// these splat on impact
 				if(prandom() < randomvalue)
 					TossGib ("models/gibs/chunk.mdl", org, org + 16 * prandomvec(), vel, prandomvec() * 450, specnum,1, issilent);
 				if(prandom() < randomvalue)
@@ -302,7 +292,7 @@ NET_HANDLE(net_gibsplash, bool isNew)
 			break;
 		case 0x03:
 			if(prandom() < amount)
-				TossGib ("models/gibs/chunk.mdl", org, org, vel, prandomvec() * (prandom() * 30 + 20), specnum, 1, issilent); // TODO maybe adjust to more randomization?
+				TossGib ("models/gibs/chunk.mdl", org, org, vel, prandomvec() * (prandom() * 30 + 20), specnum, 1, issilent);
 			break;
 		case 0x81:
 			__pointparticles(_particleeffectnum(strcat(gentle_prefix, "damage_dissolve")), org, vel, amount);
@@ -311,7 +301,7 @@ NET_HANDLE(net_gibsplash, bool isNew)
 			__pointparticles(_particleeffectnum(strcat(gentle_prefix, "damage_hit")), org, vel, amount * 16);
 			break;
 		case 0x83:
-			// no gibs in gentle mode, sorry
+
 			break;
 	}
 	delete(this);

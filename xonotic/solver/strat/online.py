@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -12,74 +11,46 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 
-from .cast_header import Wally, Widths, elle
-# The loss coefficients, named once and in one place. `rl-training-spec.md §6`
-# gives the shape L = L_pg + c_W L_W + c_L L_L + c_D L_dyn + c_reg L_reg; these
-# are those c's. They are listed as [OPEN] in the spec, so they are a tunable
-# table rather than a derivation — but they are a TABLE, not five floats sprayed
-# through an expression where nobody can find or vary them.
+from .cast_header import Wally, Widths, dina_state, elle
+from .checkpoint_state import (
+    ARCH_KEY, ARCH_SPEC_KEY, POLICY_KEY, POLICY_VERSION_KEY, RNG_KEY,
+    REWARD_CONTRACT_KEY, LINEAGE_INITIAL_KEY, POLICY_VERSIONS, architecture_fingerprint,
+    architecture_spec, tensor_tree_measurement, whole_tensor_tree,
+    load_module_checkpoint,
+)
+from .runtime import (
+    SPARSE_REWARD_FINGERPRINT,
+    POLICY_ACTOR_WEIGHT,
+    POLICY_ENTROPY_FLOOR,
+    POLICY_ENTROPY_WEIGHT,
+    POLICY_RATIO_CLIP,
+    role_rewards,
+    winner,
+)
+from .matmul import matrix_multiply
+
 LOSS_WEIGHTS = {
-    "actor":  1.0,    # L_pg, the policy gradient itself
-    "winnie": 0.5,    # c_W -- WINNIE's masked regression
-    "lou":    0.5,    # c_L -- LOU's masked regression
-    "vera":   0.25,   # VERA_WINNIE + VERA_LOU, the auxiliary pair
-    "dina":   0.25,   # c_D -- the dynamics ensemble
-    "elle":   1e-3,   # c_reg -- ELLE's pull toward logit 0
+    "actor":  POLICY_ACTOR_WEIGHT,
+    "entropy": POLICY_ENTROPY_WEIGHT,
+    "winnie": 0.5,
+    "lou":    0.5,
+    "vera":   0.25,
+    "dina":   0.25,
+    "elle":   1e-3,
 }
 
 from .replay import Replay
-from .strategy import strategy, dynamics, logp_of
-from .replay_store import RawReplayBuffer
-from .runtime import role_rewards
+from .instruments import KINDS
+from .strategy import strategy, dynamics, log_probs, logp_of
 
-
-ARCH_KEY = "__arch__"
-ARCH_SPEC_KEY = "__arch_spec__"
-
-
-def architecture_spec(module) -> list:
-    """Sorted ``[name, shape]`` list for every parameter leaf of ``module``.
-
-    This IS the architecture as far as a checkpoint is concerned: change the IR
-    width, add the Gram's learned metric, swap an MLP value head for a linear
-    probe, and this list changes.
-    """
-    return sorted(
-        [name, [int(d) for d in value.shape]]
-        for name, value in tree_flatten(module.parameters())
+def clipped_policy_surrogate(ratio, advantage):
+    clipped = mx.clip(
+        ratio, 1.0 - POLICY_RATIO_CLIP, 1.0 + POLICY_RATIO_CLIP,
     )
+    return mx.minimum(ratio * advantage, clipped * advantage)
 
-
-def architecture_fingerprint(module) -> str:
-    return hashlib.sha256(
-        json.dumps(architecture_spec(module), separators=(",", ":")).encode()
-    ).hexdigest()[:16]
-
-
-REPLAY_NOTE = """The ring stores RAW ENGINE ROWS, not derived features.
-
-`replay_store.RawReplayBuffer` keeps the per-player OBS rows, the cart rows,
-the action, the behaviour log-prob and the credited return, and rebuilds `x`,
-`hierarchy`, `winner_mask`, `z`, `relation` and `eligible` at SAMPLE time
-through `replay_store.featurize_tick` -- the same function the live responder
-calls, so a replayed state is identical to the live one by construction.
-
-The R24 ring cached `StrategyState`s instead.  On the real Game-2 shape that is
-374 KB per transition with the dense dense per-pair relation block (now deleted) at
-56% of it, and at the design shape (l=256) the relation block is over 90% and a
-transition costs megabytes -- so the ring was MEMORY bound, holding 574
-transitions, and the "data-bound" limit of R24/R25 was a storage-format defect.
-"""
-
-
-class CheckpointArchitectureMismatch(RuntimeError):
-    """A checkpoint was written by a DIFFERENT architecture than the live model.
-
-    Raised instead of partially loading.  ``load_weights(..., strict=False)``
-    used to swallow this: a 128d model resuming a 16d checkpoint restored
-    almost nothing and reported success.
-    """
-
+def entropy_floor_penalty(entropy):
+    return mx.square(mx.maximum(POLICY_ENTROPY_FLOOR - entropy, 0.0))
 
 class OnlineLearner:
     def __init__(
@@ -87,31 +58,34 @@ class OnlineLearner:
         wally,
         *,
         learning_rate: float = 3e-4,
+        gradient_clip: float = 1.0,
         gamma: float = 0.95,
         importance_clip: float = 2.0,
         dynamics=None,
         checkpoint=None,
         load_checkpoint=None,
         credit_horizon: int = 5,
-        on_architecture_mismatch: str = "refuse",
-        replay_capacity: int = 200000,
+        replay_capacity: int = 0,
         replay_memory_mb: float = 256.0,
         replay_precision: str = "float32",
         replay_batch: int = 8,
         replay_steps: int = 4,
         seed: int = 20260831,
+        policy_forward=strategy,
+        policy_arm: str = "matrix_fusion",
     ):
         self.wally = wally
         self.gamma = float(gamma)
         self.importance_clip = float(importance_clip)
+        self.gradient_clip = abs(float(gradient_clip))
         self.bundle = wally
         self.optimizer = optim.AdamW(learning_rate=learning_rate, weight_decay=1e-4)
         self.checkpoint = checkpoint
         self.updates = 0
         self.credit_horizon = max(1, int(credit_horizon))
         self.pending = []
-        self.replay = RawReplayBuffer(replay_capacity, replay_memory_mb,
-                                      precision=replay_precision)
+        self.replay = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
+        self.replay_precision = replay_precision
         self.replay_batch = max(1, int(replay_batch))
         self.replay_steps = max(0, int(replay_steps))
         self.rng = np.random.default_rng(seed)
@@ -122,70 +96,88 @@ class OnlineLearner:
         self.forward_seconds = 0.0
         self.ratios = deque(maxlen=256)
         self._ratio_sink = []
-        if on_architecture_mismatch not in ("refuse", "reinit"):
-            raise ValueError("on_architecture_mismatch must be 'refuse' or 'reinit'")
-        self.on_architecture_mismatch = on_architecture_mismatch
+        self.policy_forward = policy_forward
+        self.policy_arm = policy_arm
         self.architecture = architecture_fingerprint(self.bundle)
-        self.loaded = False
-        self.loaded_optimizer = False
+        self.loaded_weight_mass = 0
+        self.live_weight_mass = len(tree_flatten(self.bundle.parameters()))
+        self.loaded_optimizer_moment_mass = 0
+        self.live_optimizer_moment_mass = 0
+        self.optimizer_moment_measurement = {}
+        self.initial_checkpoint_sha256 = None
         source = load_checkpoint or checkpoint
         if source is not None and os.path.exists(source):
             self._load_full(source)
 
     def _load_full(self, source):
-        """Resume, or refuse.  Never a silent partial load.
-
-        The checkpoint carries the architecture fingerprint that wrote it.  If
-        it disagrees with the live model -- or is absent, which is what every
-        pre-fingerprint checkpoint looks like -- the resume is REFUSED unless
-        the caller explicitly asked for ``on_architecture_mismatch="reinit"``,
-        in which case the mismatch is announced and training starts from a
-        fresh initialization instead of a hollowed-out one.
-        """
-        data = np.load(source, allow_pickle=False)
-        keys = list(data.files)
-        stored = str(data[ARCH_KEY]) if ARCH_KEY in keys else None
-        if stored != self.architecture:
-            local = json.dumps(architecture_spec(self.bundle), separators=(",", ":"))
-            saved = str(data[ARCH_SPEC_KEY]) if ARCH_SPEC_KEY in keys else "(none recorded)"
-            message = (
-                f"checkpoint {source} was written by architecture {stored!r}; "
-                f"this model is {self.architecture!r}. Refusing to partially load.\n"
-                f"  checkpoint parameters: {saved}\n"
-                f"  live parameters:       {local}"
-            )
-            if self.on_architecture_mismatch == "refuse":
-                raise CheckpointArchitectureMismatch(message)
-            print(f"[online] ARCHITECTURE MISMATCH -- re-initializing.\n{message}", flush=True)
-            return
-        weights = [
-            (key, mx.array(data[key]))
-            for key in keys
-            if not key.startswith("__")
-        ]
-        self.bundle.load_weights(weights, strict=True)
-        self.loaded = True
-        if "__updates__" in keys:
-            self.updates = int(np.asarray(data["__updates__"]))
-        if "__transitions__" in keys:
-            self.transitions = int(np.asarray(data["__transitions__"]))
-        if "__gradient_steps__" in keys:
-            self.gradient_steps = int(np.asarray(data["__gradient_steps__"]))
-        restored, replay_note = self.replay.load_arrays(data, keys)
-        if replay_note:
-            print(f"[online] replay buffer NOT restored: {replay_note}", flush=True)
-        moments = [(key[7:], mx.array(data[key])) for key in keys if key.startswith("__opt__")]
-        if moments:
-            self.optimizer.init(self.bundle.trainable_parameters())
-            self.optimizer.state = tree_unflatten(moments)
-            self.loaded_optimizer = True
-        print(
-            f"[online] resumed {source}: arch={self.architecture} weights={self.loaded} "
-            f"optimizer={self.loaded_optimizer} updates={self.updates} "
-            f"replay={restored}/{self.replay.capacity} "
-            f"({self.replay.nbytes / (1 << 20):.1f} MB) transitions={self.transitions}",
-            flush=True,
+        state = load_module_checkpoint(
+            self.bundle, source, self.policy_arm, SPARSE_REWARD_FINGERPRINT,
         )
+        self.loaded_weight_mass = state["loaded_weight_mass"]
+        self.initial_checkpoint_sha256 = state["lineage_initial_sha256"]
+        self.live_weight_mass = state["live_weight_mass"]
+        replay_atom_mass = 0
+        replay_exception = None
+        optimizer_exception = None
+        with np.load(source, allow_pickle=False) as data:
+            keys = list(data.files)
+            if "__updates__" in keys:
+                self.updates = int(np.asarray(data["__updates__"]))
+            if "__transitions__" in keys:
+                self.transitions = int(np.asarray(data["__transitions__"]))
+            if "__gradient_steps__" in keys:
+                self.gradient_steps = int(np.asarray(data["__gradient_steps__"]))
+            self.optimizer.init(self.bundle.trainable_parameters())
+            live_moments = dict(tree_flatten(self.optimizer.state))
+            source_moments = {
+                key[7:]: np.asarray(data[key]).copy() for key in keys if key.startswith("__opt__")
+            }
+            moment_measurement = tensor_tree_measurement(
+                live_moments.items(), source_moments.items(),
+            )
+            self.optimizer_moment_measurement = moment_measurement
+            try:
+                source_state, _ = whole_tensor_tree(
+                    live_moments.items(), source_moments.items(),
+                )
+                self.optimizer.state = source_state
+                self.loaded_optimizer_moment_mass = moment_measurement["source_mass"]
+            except Exception as error:
+                self.optimizer.state = tree_unflatten(list(live_moments.items()))
+                optimizer_exception = f"{type(error).__name__}: {error}"
+            self.live_optimizer_moment_mass = len(live_moments)
+            try:
+                self.replay.restore_payload(data)
+                replay_atom_mass = len(self.replay)
+            except Exception as error:
+                replay_exception = f"{type(error).__name__}: {error}"
+            if RNG_KEY in keys:
+                self.rng.bit_generator.state = json.loads(str(data[RNG_KEY]))
+        print(json.dumps({
+            "event": "online_checkpoint_measurement", "path": source,
+            "source_arm": state["source_arm"], "source_version": state["source_version"],
+            "source_architecture": state["source_architecture"], "live_arm": self.policy_arm,
+            "live_version": state["live_version"], "live_architecture": self.architecture,
+            "source_reward_contract": state["source_reward_contract"],
+            "live_reward_contract": SPARSE_REWARD_FINGERPRINT,
+            "source_weight_mass": state["source_weight_mass"],
+            "live_weight_mass": self.live_weight_mass,
+            "loaded_weight_mass": self.loaded_weight_mass,
+            "composable_weight_mass": state["composable_weight_mass"],
+            "source_only_weight_mass": state["source_only_weight_mass"],
+            "live_only_weight_mass": state["live_only_weight_mass"],
+            "shape_difference_mass": state["shape_difference_mass"],
+            "nonfinite_weight_mass": state["nonfinite_weight_mass"],
+            "load_exception": state["load_exception"],
+            "source_optimizer_moment_mass": len(source_moments),
+            "live_optimizer_moment_mass": self.live_optimizer_moment_mass,
+            "loaded_optimizer_moment_mass": self.loaded_optimizer_moment_mass,
+            "optimizer_moment_measurement": self.optimizer_moment_measurement,
+            "replay_atom_mass": replay_atom_mass, "replay_bytes": self.replay.nbytes,
+            "optimizer_exception": optimizer_exception,
+            "replay_exception": replay_exception,
+            "updates": self.updates, "transitions": self.transitions,
+        }), flush=True)
 
     def transition(
         self,
@@ -196,67 +188,56 @@ class OnlineLearner:
         snapshot,
         next_snapshot,
         actions,
+        controls,
         behavior_logp,
-        reward_override=None,
+        train_mask=None,
+        dynamics_mask=None,
+        sparse_return=None,
         bootstrap_discount=None,
     ):
-        """One completed, replayable transition — three frame references and
-        the three per-player vectors that are NOT recomputable.
-
-        `frame`/`next_frame`/`dyn_frame` are ids into the ring's interned frame
-        table.  `w_in` is `frame.w`; `w_out` is `dyn_frame.w` (the responder's
-        `previous["w_out"] = w_in.copy()` of the immediate successor is exactly
-        that array); `target_delta` is `dyn.hierarchy - state.hierarchy`, both
-        of which come back out of the cart rows.  None of them are stored.
-
-        The reward is resolved HERE, at collection time, so a replayed item
-        never needs the `GameContext`/`CartSnapshot` it came from.
-        """
-        state = self.replay.frames[frame].state()
-        players = np.asarray(state.hierarchy).shape[0]
-        # Every array below is indexed BY PLAYER, so a transition whose
-        # endpoints have different player counts is not a transition of the
-        # same object.  Caught here with the two shapes named.  Callers close
-        # the credit segment at a roster change rather than crediting across it.
-        for name, other in (("next_state", next_frame), ("dynamics target", dyn_frame)):
-            rows = self.replay.frames[other].obs_int.shape[0]
-            if rows != players:
-                raise ValueError(
-                    f"cross-roster transition: state has {players} players, {name} has "
-                    f"{rows}. A roster change must close the credit segment, not be "
-                    f"credited across."
-                )
+        players = np.asarray(self.replay.frame(frame).xan).shape[0]
         reward = (role_rewards(context, snapshot, next_snapshot)
-                  if reward_override is None else np.asarray(reward_override))
+                  if sparse_return is None else np.asarray(sparse_return))
+        before_winner = winner(context, snapshot)
+        after_winner = winner(context, next_snapshot)
+        teams = np.asarray(context.team_of, dtype=np.int64)
+        discount = np.array(np.broadcast_to(
+            self.gamma if bootstrap_discount is None else bootstrap_discount,
+            (players,),
+        ), dtype=np.float32, copy=True)
         return {
-            "frame": frame,
-            "next_frame": next_frame,
-            "dyn_frame": dyn_frame,
+            "frame_in": frame,
+            "frame_out": next_frame,
             "actions": np.asarray(actions, dtype=np.int32),
+            "controls": np.asarray(controls, dtype=np.float32),
             "behavior_logp": np.asarray(behavior_logp, dtype=np.float32),
+            "train_mask": np.ones(players, dtype=bool) if train_mask is None else np.asarray(train_mask, dtype=bool),
+            "dynamics_mask": np.ones(players, dtype=bool) if dynamics_mask is None else np.asarray(dynamics_mask, dtype=bool),
+            "roster_row_residual_mass": 0,
             "reward": np.asarray(reward, dtype=np.float32),
-            "discount": self.gamma if bootstrap_discount is None else float(bootstrap_discount),
+            "winner_mask": teams == before_winner,
+            "next_winner_mask": teams == after_winner,
+            "discount": discount,
         }
 
     def _item_loss(self, item):
-        """One transition's loss. Every learned quantity comes from strategy();
-        there is no second forward pass anywhere in the program (CAST project law:
-        two copies make exp(logpi_target - logpi_behavior) meaningless silently).
-        """
         actions_mx = mx.array(item["actions"])
+        controls_mx = mx.array(item["controls"])
         behavior_logp_mx = mx.array(item["behavior_logp"])
+        train_mask = mx.array(item.get("train_mask", np.ones_like(item["actions"], dtype=bool))).astype(mx.bool_)
+        train_weight = train_mask.astype(mx.float32)
+        dynamics_mask = mx.array(item.get("dynamics_mask", np.ones_like(item["actions"], dtype=bool))).astype(mx.bool_)
+        train_count = mx.maximum(mx.sum(train_weight), 1.0)
         reward = mx.array(item["reward"])
         winner_mask = mx.array(item["winner_mask"]).astype(mx.bool_)
         next_winner_mask = mx.array(item["next_winner_mask"]).astype(mx.bool_)
+        current_action_mass = mx.array(item["chorus_in"].action_mass)
 
-        current = strategy(self.wally, *item["chorus_in"])
-        following = strategy(self.wally, *item["chorus_out"])
+        current = self.policy_forward(self.wally, *(mx.array(a) for a in item["chorus_in"]))
+        following = self.policy_forward(self.wally, *(mx.array(a) for a in item["chorus_out"]))
 
-        # log pi of the action taken — the SAME read-out the responder sampled
-        # with. One definition, so the importance ratio compares like with like.
-        logpi = logp_of(current, actions_mx)
+        logpi = logp_of(current, actions_mx, controls_mx)
 
-        # Role gating: WINNIE for rows whose team holds the path, LOU otherwise.
         value = mx.where(winner_mask, current.value_winnie, current.value_lou)
         bootstrap = mx.where(
             winner_mask,
@@ -266,37 +247,69 @@ class OnlineLearner:
         target = reward + item["discount"] * mx.stop_gradient(bootstrap)
         error = target - value
 
-        ratio = mx.stop_gradient(mx.minimum(
-            mx.exp(logpi - behavior_logp_mx), self.importance_clip))
-        self._ratio_sink.append(ratio)
-        actor = -mx.mean(mx.stop_gradient(ratio * error) * logpi)
+        ratio = mx.exp(logpi - behavior_logp_mx)
+        self._ratio_sink.append((
+            mx.stop_gradient(ratio),
+            np.asarray(item.get(
+                "train_mask", np.ones_like(item["actions"], dtype=bool),
+            )),
+        ))
+        td_advantage = mx.stop_gradient(error)
+        actor = -mx.sum(
+            clipped_policy_surrogate(ratio, td_advantage) * train_weight
+        ) / train_count
 
-        winner_weight = winner_mask.astype(mx.float32) * ratio
-        loser_weight = (~winner_mask).astype(mx.float32) * ratio
+        probabilities = mx.exp(log_probs(current))
+        kind_probabilities = matrix_multiply(
+            probabilities,
+            mx.array(item["chorus_in"].zed[:, :len(KINDS)]),
+        )
+        semantic_entropy = -mx.sum(
+            kind_probabilities
+            * mx.log(mx.maximum(kind_probabilities, 1e-12))
+            * train_weight[:, None]
+        ) / train_count
+        entropy_penalty = entropy_floor_penalty(semantic_entropy)
+
+        winner_weight = winner_mask.astype(mx.float32) * train_weight
+        loser_weight = (~winner_mask).astype(mx.float32) * train_weight
         winner_loss = mx.sum(mx.square(current.value_winnie - target) * winner_weight) / mx.maximum(mx.sum(winner_weight), 1.0)
         loser_loss = mx.sum(mx.square(current.value_lou - target) * loser_weight) / mx.maximum(mx.sum(loser_weight), 1.0)
 
-        # VERA_WINNIE / VERA_LOU: the auxiliary probes on the QUERY, regressed
-        # toward Winnie and Lou. Two, because two values are estimated.
-        aux = 0.5 * (  # the two Veras contribute equally; see LOSS_WEIGHTS["vera"]
-            mx.mean(mx.square(current.aux_winnie - mx.stop_gradient(current.value_winnie)))
-            + mx.mean(mx.square(current.aux_lou - mx.stop_gradient(current.value_lou)))
+        aux = 0.5 * (
+            mx.sum(mx.square(current.aux_winnie - mx.stop_gradient(current.value_winnie)) * train_weight) / train_count
+            + mx.sum(mx.square(current.aux_lou - mx.stop_gradient(current.value_lou)) * train_weight) / train_count
         )
+        if self.policy_arm == "matrix_fusion":
+            y = mx.stop_gradient(current.query)
+            u = mx.stop_gradient(mx.take_along_axis(
+                current.ir, actions_mx[:, None, None], axis=1
+            )[:, 0, :])
+            target_delta = mx.stop_gradient(
+                dina_state(self.wally, following.query)
+                - dina_state(self.wally, current.query)
+            )
+            predicted = dynamics(self.wally, y, u)
+            dynamics_weight = (train_weight * dynamics_mask.astype(mx.float32))[:, None]
+            dynamics_count = mx.maximum(mx.sum(dynamics_weight) * predicted.first.shape[-1], 1.0)
+            dynamics_value = 0.5 * (
+                mx.sum(mx.square(predicted.first - target_delta) * dynamics_weight) / dynamics_count
+                + mx.sum(mx.square(predicted.second - target_delta) * dynamics_weight) / dynamics_count
+            )
+            dynamics_error = mx.sum(mx.square(predicted.mean - target_delta) * dynamics_weight) / dynamics_count
+            dynamics_disagreement = mx.sum(predicted.disagreement * train_weight) / train_count
+        else:
+            dynamics_value = mx.array(0.0)
+            dynamics_error = mx.array(0.0)
+            dynamics_disagreement = mx.array(0.0)
 
-        # DINA, through the one definition in cast_header.
-        y = mx.stop_gradient(mx.array(item["dyn_y"]))
-        u = mx.stop_gradient(mx.array(item["dyn_u"]))
-        target_delta = mx.stop_gradient(mx.array(item["target_delta"]))
-        predicted = dynamics(self.wally, y, u)
-        dynamics_value = mx.mean(mx.square(predicted - target_delta))
-        dynamics_error = dynamics_value
-
-        # ELLE: the L2-toward-zero pull on the logits, so untrained is broad
-        # weighted sampling and trained peaks without collapsing.
-        regularization = elle(current.logits)
+        regularization = elle(
+            current.logits, current_action_mass * train_weight[:, None],
+        )
 
         total = (
             LOSS_WEIGHTS["actor"] * actor
+            + LOSS_WEIGHTS["entropy"] * entropy_penalty
             + LOSS_WEIGHTS["winnie"] * winner_loss
             + LOSS_WEIGHTS["lou"] * loser_loss
             + LOSS_WEIGHTS["vera"] * aux
@@ -304,29 +317,24 @@ class OnlineLearner:
             + LOSS_WEIGHTS["elle"] * regularization
         )
 
-        advantage = mx.mean(mx.stop_gradient(error))
-        weighted_advantage = mx.mean(mx.stop_gradient(ratio * error))
-        winner_count = mx.sum(winner_mask.astype(mx.float32))
-        loser_count = mx.sum((~winner_mask).astype(mx.float32))
-        winner_advantage = mx.sum(mx.stop_gradient(ratio * error) * winner_mask) / mx.maximum(winner_count, 1.0)
-        loser_advantage = mx.sum(mx.stop_gradient(ratio * error) * (~winner_mask)) / mx.maximum(loser_count, 1.0)
-        winner_reward = mx.sum(reward * winner_mask) / mx.maximum(winner_count, 1.0)
-        loser_reward = mx.sum(reward * (~winner_mask)) / mx.maximum(loser_count, 1.0)
-        role_change = mx.mean((winner_mask != next_winner_mask).astype(mx.float32))
+        advantage = mx.sum(mx.stop_gradient(error) * train_weight) / train_count
+        weighted_advantage = mx.sum(mx.stop_gradient(ratio * error) * train_weight) / train_count
+        winner_count = mx.sum(winner_mask.astype(mx.float32) * train_weight)
+        loser_count = mx.sum((~winner_mask).astype(mx.float32) * train_weight)
+        winner_advantage = mx.sum(mx.stop_gradient(ratio * error) * winner_mask * train_weight) / mx.maximum(winner_count, 1.0)
+        loser_advantage = mx.sum(mx.stop_gradient(ratio * error) * (~winner_mask) * train_weight) / mx.maximum(loser_count, 1.0)
+        winner_reward = mx.sum(reward * winner_mask * train_weight) / mx.maximum(winner_count, 1.0)
+        loser_reward = mx.sum(reward * (~winner_mask) * train_weight) / mx.maximum(loser_count, 1.0)
+        role_change = mx.sum((winner_mask != next_winner_mask).astype(mx.float32) * train_weight) / train_count
         return total, mx.stack([actor, winner_loss, loser_loss, dynamics_value,
-                                regularization, mx.mean(ratio), aux,
+                                regularization, mx.sum(ratio * train_weight) / train_count, aux,
                                 dynamics_error, advantage, weighted_advantage,
                                 winner_advantage, loser_advantage, winner_reward,
-                                loser_reward, winner_count, loser_count, role_change])
+                                loser_reward, winner_count, loser_count, role_change,
+                                dynamics_disagreement, semantic_entropy,
+                                entropy_penalty])
 
     def learn(self, items):
-        """ONE gradient step on a minibatch of transitions.
-
-        The rows of different transitions have different player and instrument
-        counts, so the minibatch is the MEAN of the per-transition scalar
-        losses rather than a stacked tensor — the operator is count-invariant,
-        so this is the only shape-agnostic way to batch it.
-        """
         items = list(items)
         if not items:
             return None
@@ -340,41 +348,72 @@ class OnlineLearner:
             return mx.mean(mx.stack(losses)), mx.mean(mx.stack(parts), axis=0)
 
         self._ratio_sink = []
+        scale_executor = getattr(self.wally, "scale_executor", None)
+        if scale_executor is not None:
+            scale_executor.begin_gradient_batch()
         (total, parts), gradients = nn.value_and_grad(self.bundle, loss_fn)()
+        remote_batch = None if scale_executor is None else scale_executor.commit_gradient_batch()
         if self._ratio_sink:
-            mx.eval(*self._ratio_sink)
+            mx.eval(*(ratio for ratio, _ in self._ratio_sink))
             self.ratios.append(np.concatenate(
-                [np.asarray(r).reshape(-1) for r in self._ratio_sink]))
+                [np.asarray(ratio).reshape(-1)[np.asarray(mask, dtype=bool).reshape(-1)]
+                 for ratio, mask in self._ratio_sink]))
             self._ratio_sink = []
+        gradients, gradient_norm = optim.clip_grad_norm(gradients, self.gradient_clip)
         self.optimizer.update(self.bundle, gradients)
-        mx.eval(self.bundle.parameters(), self.optimizer.state, total, parts)
+        mx.eval(self.bundle.parameters(), self.optimizer.state, total, parts, gradient_norm)
         self.updates += 1
         self.gradient_steps += 1
-        rows = np.asarray(items[-1]["dyn_y"])
-        matrices = np.asarray(self.dynamics.local_matrix(mx.array(rows)))
-        singular = [np.linalg.svd(matrix, compute_uv=False).min() for matrix in matrices]
         names = ("loss_pg", "loss_w", "loss_l", "loss_dynamics", "loss_reg",
-                 "importance_mean", "model_uncertainty", "model_one_step_error",
+                 "importance_mean", "loss_aux_values", "model_one_step_error",
                  "advantage", "advantage_importance_weighted", "advantage_w",
                  "advantage_l", "reward_w", "reward_l", "winner_rows",
-                 "loser_rows", "role_change_fraction")
+                 "loser_rows", "role_change_fraction", "model_uncertainty",
+                 "semantic_entropy", "entropy_floor_penalty")
         parts = np.asarray(parts)
         metrics = {name: float(parts[i]) for i, name in enumerate(names)}
+        metrics["gradient_norm"] = float(np.asarray(gradient_norm))
+        metrics["gradient_clip"] = self.gradient_clip
+        if remote_batch is not None:
+            metrics["remote_scale_gradient_atoms"] = int(remote_batch[1])
+            metrics["remote_scale_gradient_norm"] = float(remote_batch[2])
+            metrics["remote_scale_updates"] = int(remote_batch[3])
+        metrics["local_control_sigma_min"] = self._control_sigma(items)
         metrics.update(
             loss=float(np.asarray(total)),
-            local_control_sigma_min=float(np.mean(singular)),
             updates=self.updates,
             batch=len(items),
         )
         return metrics
 
+    def _control_sigma(self, items):
+        if self.policy_arm != "matrix_fusion":
+            return float("nan")
+        values = []
+        for item in items[:1]:
+            current = self.policy_forward(self.wally, *(mx.array(a) for a in item["chorus_in"]))
+            actions = mx.array(item["actions"])
+            chosen = mx.take_along_axis(current.ir, actions[:, None, None], axis=1)[:, 0, :]
+            matrix = dynamics(self.wally, current.query, chosen).matrix
+            mx.eval(matrix)
+            mask = np.asarray(item.get("train_mask", np.ones_like(item["actions"], dtype=bool)), dtype=bool)
+            for row in np.asarray(matrix)[mask]:
+                if not np.isfinite(row).all():
+                    continue
+                try:
+                    values.append(float(np.linalg.svd(row, compute_uv=False)[-1]))
+                except np.linalg.LinAlgError:
+                    continue
+        return float(np.mean(values)) if values else float("nan")
+
     def update(self, *args, **kwargs):
-        """Collect one transition, buffer it, and take one step on it."""
         item = self.replay.push(self.transition(*args, **kwargs))
         self.transitions += 1
         return self.learn([item])
 
-    def observe(self, previous, next_frame, next_snapshot, *, terminal=False):
+    def observe(
+        self, previous, next_frame, next_snapshot, *, terminal=False,
+    ):
         reward = role_rewards(previous["context"], previous["snapshot"], next_snapshot)
         self.pending.append({
             "previous": previous,
@@ -402,15 +441,29 @@ class OnlineLearner:
                 previous["context"], previous["frame"], next_frame,
                 item["immediate_next_frame"],
                 previous["snapshot"], next_snapshot,
-                previous["actions"], previous["behavior_logp"], reward_override=total,
+                previous["actions"], previous["controls"], previous["behavior_logp"], sparse_return=total,
+                train_mask=previous.get("train_mask"),
                 bootstrap_discount=0.0 if terminal else factor,
             )))
-        self.transitions += len(fresh)
         self.pending.clear()
-        self.replay.release_unreferenced()
+        return self._train_fresh(fresh)
 
-        # The fresh segment enters immediately; then the ring is replayed, so a
-        # collected state is trained on many times instead of exactly once.
+    def observe_attributed(self, records):
+        fresh = [self.replay.push(self.transition(**record)) for record in records]
+        out = self._train_fresh(fresh)
+        if out is not None:
+            out["attributed_groups"] = len(fresh)
+            out["attributed_rows"] = int(sum(
+                np.asarray(item["train_mask"], dtype=bool).sum() for item in fresh
+            ))
+        return out
+
+    def _train_fresh(self, fresh):
+        if not fresh:
+            self.replay.release_unreferenced()
+            return None
+        self.transitions += len(fresh)
+        self.replay.release_unreferenced()
         metrics = [self.learn(fresh)]
         ages = [0.0]
         for _ in range(self.replay_steps):
@@ -422,11 +475,12 @@ class OnlineLearner:
         metrics = [m for m in metrics if m]
         if not metrics:
             return None
-        out = {
-            key: metrics[-1][key] if key in ("updates", "batch")
-            else float(np.mean([row[key] for row in metrics]))
-            for key in metrics[0]
-        }
+        out = {}
+        for key in sorted(set().union(*(row.keys() for row in metrics))):
+            values = [row[key] for row in metrics if key in row]
+            out[key] = values[-1] if key in ("updates", "batch") else float(np.mean(values))
+            if len(values) != len(metrics):
+                out[key + "_sample_mass"] = len(values)
         report = self.replay.report()
         out.update(
             credited_steps=len(fresh),
@@ -436,8 +490,7 @@ class OnlineLearner:
             replay_mb=round(self.replay.nbytes / (1 << 20), 3),
             replay_bytes_per_state=report["bytes_per_transition"],
             replay_frames=report["frames"],
-            replay_target_tables=report["target_tables"],
-            replay_precision=report["precision"],
+            replay_precision=self.replay_precision,
             replay_mean_age=round(float(np.mean(ages)), 2),
             steps_per_transition=round(self.gradient_steps / max(1, self.transitions), 3),
             feature_rebuild_ms=round(1000.0 * self.rebuild_seconds / max(1, self.rebuild_calls), 3),
@@ -446,13 +499,6 @@ class OnlineLearner:
         return out
 
     def ratio_report(self):
-        """The distribution of the clipped participant-local importance ratio.
-
-        The ring now holds orders of magnitude more experience, so the mean
-        sample age is much older by design.  This is what lets the clip be
-        judged against the staleness that actually occurs instead of against
-        an assumed one.
-        """
         if not self.ratios:
             return None
         values = np.concatenate(self.ratios)
@@ -460,13 +506,16 @@ class OnlineLearner:
         return {
             "n": int(values.size),
             "mean": round(float(values.mean()), 5),
-            "clipped_fraction": round(float(np.mean(values >= self.importance_clip - 1e-6)), 5),
+            "clipped_fraction": round(float(np.mean(
+                (values <= 1.0 - POLICY_RATIO_CLIP + 1e-6)
+                | (values >= 1.0 + POLICY_RATIO_CLIP - 1e-6)
+            )), 5),
             "quantiles": [round(float(q), 5) for q in quantiles],
         }
 
     @staticmethod
     def _cart_signature(snapshot):
-        return tuple(np.floor(snapshot.pos).astype(np.int64)), tuple(snapshot.control.astype(np.int64))
+        return tuple(np.floor(np.clip(snapshot.pos, 0, 1) * snapshot.levels).astype(np.int64)), tuple(snapshot.control.astype(np.int64))
 
     def save(self, path=None):
         target = path or self.checkpoint
@@ -476,17 +525,22 @@ class OnlineLearner:
         temporary = target + ".new.npz"
         payload = {name: np.asarray(value) for name, value in tree_flatten(self.bundle.parameters())}
         for name, value in tree_flatten(self.optimizer.state):
-            try:
-                payload["__opt__" + name] = np.asarray(value)
-            except Exception:
-                pass
+            payload["__opt__" + name] = np.asarray(value)
         payload["__updates__"] = np.asarray(self.updates)
         payload["__transitions__"] = np.asarray(self.transitions)
         payload["__gradient_steps__"] = np.asarray(self.gradient_steps)
-        payload.update(self.replay.to_arrays())   # the buffer is checkpoint state
         payload[ARCH_KEY] = np.asarray(self.architecture)
         payload[ARCH_SPEC_KEY] = np.asarray(
             json.dumps(architecture_spec(self.bundle), separators=(",", ":"))
         )
+        payload[RNG_KEY] = np.asarray(
+            json.dumps(self.rng.bit_generator.state, separators=(",", ":"))
+        )
+        payload[POLICY_KEY] = np.asarray(self.policy_arm)
+        payload[POLICY_VERSION_KEY] = np.asarray(POLICY_VERSIONS.get(self.policy_arm, POLICY_VERSIONS["linear"]))
+        payload[REWARD_CONTRACT_KEY] = np.asarray(SPARSE_REWARD_FINGERPRINT)
+        if self.initial_checkpoint_sha256:
+            payload[LINEAGE_INITIAL_KEY] = np.asarray(self.initial_checkpoint_sha256)
+        payload.update(self.replay.export_payload())
         np.savez(temporary, **payload)
         os.replace(temporary, target)

@@ -60,7 +60,6 @@ void ClientKill_Now(entity this)
 		Damage(this, this, this, 100000, DEATH_KILL.m_id, DMG_NOWEP, this.origin, '0 0 0');
 	}
 
-	// now I am sure the player IS dead
 }
 void KillIndicator_Think(entity this)
 {
@@ -77,7 +76,6 @@ void KillIndicator_Think(entity this)
 		return;
 	}
 
-	// count == 1 means that it's silent
 	if (this.count != 1)
 	{
 		if (this.cnt <= 10)
@@ -95,7 +93,7 @@ void KillIndicator_Think(entity this)
 .float lip;
 float clientkilltime;
 .float clientkill_nexttime;
-void ClientKill_TeamChange(entity this, float targetteam) // 0 = don't change, -1 = auto, -2 = spec
+void ClientKill_TeamChange(entity this, float targetteam)
 {
 	if (game_stopped)
 		return;
@@ -111,10 +109,9 @@ void ClientKill_TeamChange(entity this, float targetteam) // 0 = don't change, -
 
 	this.killindicator_teamchange = targetteam;
 
-	// this.killindicator.count == 1 means that the kill indicator was spawned by ClientKill_Silent
 	if(killtime <= 0 && this.killindicator && this.killindicator.count == 1)
 	{
-		ClientKill_Now(this); // allow instant kill in this case
+		ClientKill_Now(this);
 		return;
 	}
 
@@ -147,7 +144,6 @@ void ClientKill_TeamChange(entity this, float targetteam) // 0 = don't change, -
 			clientkilltime = max(clientkilltime, this.killindicator.nextthink + 0.05);
 			this.killindicator.cnt = ceil(killtime);
 			this.killindicator.count = bound(0, ceil(killtime), 10);
-			//sprint(this, strcat("^1You'll be dead in ", ftos(this.killindicator.cnt), " seconds\n"));
 
 			IL_EACH(g_clones, it.enemy == this && !(it.effects & CSQCMODEL_EF_RESPAWNGHOST) && !it.killindicator,
 			{
@@ -158,7 +154,7 @@ void ClientKill_TeamChange(entity this, float targetteam) // 0 = don't change, -
 				setorigin(it.killindicator, '0 0 52');
 				setthink(it.killindicator, KillIndicator_Think);
 				it.killindicator.nextthink = starttime + (it.lip) * 0.05;
-				//clientkilltime = max(clientkilltime, it.killindicator.nextthink + 0.05);
+
 				it.killindicator.cnt = ceil(killtime);
 			});
 			this.lip = 0;
@@ -167,17 +163,17 @@ void ClientKill_TeamChange(entity this, float targetteam) // 0 = don't change, -
 	if (this.killindicator)
 	{
 		Notification notif;
-		if (targetteam == 0) // just die
+		if (targetteam == 0)
 		{
 			this.killindicator.colormod = '0 0 0';
 			notif = CENTER_TEAMCHANGE_SUICIDE;
 		}
-		else if (targetteam == -1) // auto
+		else if (targetteam == -1)
 		{
 			this.killindicator.colormod = '0 1 0';
 			notif = CENTER_TEAMCHANGE_AUTO;
 		}
-		else if (targetteam == -2) // spectate
+		else if (targetteam == -2)
 		{
 			this.killindicator.colormod = '0.5 0.5 0.5';
 			notif = CENTER_TEAMCHANGE_SPECTATE;
@@ -200,11 +196,10 @@ void ClientKill_Silent(entity this, float _delay)
 	setthink(this.killindicator, KillIndicator_Think);
 	this.killindicator.nextthink = time + (this.lip) * 0.05;
 	this.killindicator.cnt = ceil(_delay);
-	this.killindicator.count = 1; // this is used to indicate that it should be silent
+	this.killindicator.count = 1;
 	this.lip = 0;
 }
 
-// Called when a client types 'kill' in the console
 void ClientKill(entity this)
 {
 	if (game_stopped || this.player_blocked || STAT(FROZEN, this))

@@ -1,6 +1,6 @@
 #include "speaker.qh"
 #ifdef SVQC
-// TODO add a way to do looped sounds with sound(); then complete this entity
+
 void target_speaker_use_off(entity this, entity actor, entity trigger);
 void target_speaker_use_activator(entity this, entity actor, entity trigger)
 {
@@ -20,9 +20,9 @@ void target_speaker_use_activator(entity this, entity actor, entity trigger)
 			float n;
 			n = stof(argv(1));
 			if(n > 0)
-				snd = strcat(argv(0), ftos(floor(random() * n + 1)), ".wav"); // randomization
+				snd = strcat(argv(0), ftos(floor(random() * n + 1)), ".wav");
 			else
-				snd = strcat(argv(0), ".wav"); // randomization
+				snd = strcat(argv(0), ".wav");
 		}
 	}
 	else
@@ -46,9 +46,9 @@ void target_speaker_use_on(entity this, entity actor, entity trigger)
 			float n;
 			n = stof(argv(1));
 			if(n > 0)
-				snd = strcat(argv(0), ftos(floor(random() * n + 1)), ".wav"); // randomization
+				snd = strcat(argv(0), ftos(floor(random() * n + 1)), ".wav");
 			else
-				snd = strcat(argv(0), ".wav"); // randomization
+				snd = strcat(argv(0), ".wav");
 		}
 	}
 	else
@@ -78,12 +78,11 @@ void target_speaker_reset(entity this)
 
 spawnfunc(target_speaker)
 {
-	// TODO: "*" prefix to sound file name
-	// TODO: wait and random (just, HOW? random is not a field)
+
 	if(this.noise)
 		precache_sound (this.noise);
 
-	if(!this.atten && (this.spawnflags & SPEAKER_GLOBAL) && !(this.spawnflags & 3)) // special check for quake 3: looped sounds are never global
+	if(!this.atten && (this.spawnflags & SPEAKER_GLOBAL) && !(this.spawnflags & 3))
 	{
 		LOG_WARN("target_speaker uses legacy spawnflag GLOBAL (BIT(2)), please set atten to -1 instead");
 		this.atten = -1;
@@ -130,7 +129,7 @@ spawnfunc(target_speaker)
 	}
 	else
 	{
-		// Quake/Nexuiz fallback
+
 		ambientsound (this.origin, this.noise, VOL_BASE * this.volume, this.atten);
 		delete(this);
 	}

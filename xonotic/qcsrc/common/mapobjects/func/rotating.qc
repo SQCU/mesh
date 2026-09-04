@@ -30,7 +30,6 @@ void func_rotating_setactive(entity this, int astate)
 
 void func_rotating_reset(entity this)
 {
-	// TODO: reset angles as well?
 
 	if(this.spawnflags & FUNC_ROTATING_STARTOFF)
 	{
@@ -51,14 +50,6 @@ void func_rotating_init_for_player(entity this, entity player)
 	}
 }
 
-/*QUAKED spawnfunc_func_rotating (0 .5 .8) ? - - X_AXIS Y_AXIS
-Brush model that spins in place on one axis (default Z).
-speed   : speed to rotate (in degrees per second)
-noise   : path/name of looping .wav file to play.
-dmg     : Do this much damage every .dmgtime interval when blocked
-dmgtime : See above.
-*/
-
 spawnfunc(func_rotating)
 {
 	if (this.noise && this.noise != "")
@@ -74,7 +65,7 @@ spawnfunc(func_rotating)
 		this.avelocity = '0 0 1' * this.speed;
 	else if (this.spawnflags & FUNC_ROTATING_YAXIS)
 		this.avelocity = '1 0 0' * this.speed;
-	else // Z
+	else
 		this.avelocity = '0 1 0' * this.speed;
 
 	this.pos1 = this.avelocity;
@@ -84,7 +75,6 @@ spawnfunc(func_rotating)
     if(this.dmg && (this.message2 == ""))
 		this.message2 = "was squished by";
 
-
     if(this.dmg && (!this.dmgtime))
         this.dmgtime = 0.25;
 
@@ -92,18 +82,15 @@ spawnfunc(func_rotating)
 
 	if (!InitMovingBrushTrigger(this))
 		return;
-	// no EF_LOWPRECISION here, as rounding angles is bad
 
     setblocked(this, generic_plat_blocked);
 
-	// wait for targets to spawn
 	this.nextthink = this.ltime + 999999999;
-	setthink(this, SUB_NullThink); // for PushMove
+	setthink(this, SUB_NullThink);
 
 	this.reset = func_rotating_reset;
 	this.reset(this);
 
-	// maybe send sound to new players
 	IL_PUSH(g_initforplayer, this);
 	this.init_for_player = func_rotating_init_for_player;
 }

@@ -6,16 +6,14 @@ float autocvar_sv_clientcommand_antispam_time;
 int autocvar_sv_clientcommand_antispam_count;
 
 .float cmd_floodtime;
-.string ignore_list; // stores player id's, maybe can be upgraded to store net address for reconnect protection
+.string ignore_list;
 
-const int IGNORE_MAXPLAYERS = 16; // maximum players to be ignored in the personal chat
+const int IGNORE_MAXPLAYERS = 16;
 
 string MapVote_Suggest(entity this, string m);
 
-// used by common/command/generic.qc:GenericCommand_dumpcommands to list all commands into a .txt file
 void ClientCommand_macro_write_aliases(float fh);
 
-// functions for ignore command
 string ignore_removefromlist(entity list, entity ignore)
 {
 	if(ignore.crypto_idfp && ignore.crypto_idfp != "" && list.crypto_idfp && list.crypto_idfp != "")
@@ -29,7 +27,7 @@ string ignore_removefromlist(entity list, entity ignore)
 				return string_null;
 			}
 		}
-		// should this fall back? we know advanced mode is being used
+
 	}
 
 	string newlist = "";
@@ -48,7 +46,7 @@ string ignore_removefromlist(entity list, entity ignore)
 
 bool ignore_playerinlist(entity sender, entity targ)
 {
-	// TODO: optimize this by saving it to .ignore_list?
+
 	if(targ.crypto_idfp && targ.crypto_idfp != "" && sender.crypto_idfp && sender.crypto_idfp != "")
 	{
 		string thelist = "";

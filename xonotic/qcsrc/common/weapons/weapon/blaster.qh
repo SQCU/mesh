@@ -1,24 +1,24 @@
 #pragma once
 
 CLASS(Blaster, Weapon)
-/* spawnfunc */ ATTRIB(Blaster, m_canonical_spawnfunc, string, "weapon_blaster");
-/* ammotype  */ //ATTRIB(Blaster, ammo_type, Resource, RES_NONE);
-/* impulse   */ ATTRIB(Blaster, impulse, int, 1);
-/* flags     */ ATTRIB(Blaster, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_CANCLIMB | WEP_TYPE_SPLASH);
-/* rating    */ ATTRIB(Blaster, bot_pickupbasevalue, float, 0);
-/* color     */ ATTRIB(Blaster, wpcolor, vector, '1 0.5 0.5');
-/* modelname */ ATTRIB(Blaster, mdl, string, "laser");
+                ATTRIB(Blaster, m_canonical_spawnfunc, string, "weapon_blaster");
+
+                ATTRIB(Blaster, impulse, int, 1);
+                ATTRIB(Blaster, spawnflags, int, WEP_FLAG_NORMAL | WEP_FLAG_CANCLIMB | WEP_TYPE_SPLASH);
+                ATTRIB(Blaster, bot_pickupbasevalue, float, 0);
+                ATTRIB(Blaster, wpcolor, vector, '1 0.5 0.5');
+                ATTRIB(Blaster, mdl, string, "laser");
 #ifdef GAMEQC
-/* model     */ ATTRIB(Blaster, m_model, Model, MDL_BLASTER_ITEM);
-/* flash mdl */ ATTRIB(Blaster, m_muzzlemodel, Model, MDL_Null);
-/* flash eff */ ATTRIB(Blaster, m_muzzleeffect, entity, EFFECT_BLASTER_MUZZLEFLASH);
+                ATTRIB(Blaster, m_model, Model, MDL_BLASTER_ITEM);
+                ATTRIB(Blaster, m_muzzlemodel, Model, MDL_Null);
+                ATTRIB(Blaster, m_muzzleeffect, entity, EFFECT_BLASTER_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(Blaster, w_crosshair, string, "gfx/crosshairlaser");
-/* crosshair */ ATTRIB(Blaster, w_crosshair_size, float, 0.5);
-/* wepimg    */ ATTRIB(Blaster, model2, string, "weaponlaser");
-/* refname   */ ATTRIB(Blaster, netname, string, "blaster");
-/* wepname   */ ATTRIB(Blaster, m_name, string, _("Blaster"));
-/* legacy    */ ATTRIB(Blaster, m_deprecated_netname, string, "laser");
+                ATTRIB(Blaster, w_crosshair, string, "gfx/crosshairlaser");
+                ATTRIB(Blaster, w_crosshair_size, float, 0.5);
+                ATTRIB(Blaster, model2, string, "weaponlaser");
+                ATTRIB(Blaster, netname, string, "blaster");
+                ATTRIB(Blaster, m_name, string, _("Blaster"));
+                ATTRIB(Blaster, m_deprecated_netname, string, "laser");
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

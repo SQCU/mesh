@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-"""Dump the FUNCTION and GLOBAL name tables of a QuakeC progs.dat.
-
-The server is a VM and progs.dat is the program: statements, globals, a string
-table and a field layout. So two .dat are two programs, and the way to compare
-them is to read their symbol tables -- not their sizes or mtimes.
-"""
+#!/usr/bin/env mesh-python
 import struct, sys
 
 def load(path):

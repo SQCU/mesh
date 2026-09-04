@@ -47,10 +47,7 @@ void XonoticRadioButton_loadCvars(entity me)
 		}
 		else
 		{
-			// this is difficult
-			// this is the "generic" selection... but at this time, not
-			// everything is constructed yet.
-			// we need to set this later in draw()
+
 			me.checked = 0;
 		}
 	}
@@ -60,8 +57,7 @@ void XonoticRadioButton_draw(entity me)
 	if (!me.cvarValue)
 		if (!me.controlledCvar)
 		{
-			// this is the "other" option
-			// always select this if none other is
+
 			entity e;
 			float found;
 			found = 0;

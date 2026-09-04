@@ -1,26 +1,8 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #ifdef SUPPORTDIRECTX
 #ifndef DIRECTSOUND_VERSION
-#	define DIRECTSOUND_VERSION 0x0500  /* Version 5.0 */
+#	define DIRECTSOUND_VERSION 0x0500
 #endif
 #endif
 #include <windows.h>
@@ -33,8 +15,6 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "quakedef.h"
 #include "snd_main.h"
 
-// ==============================================================================
-
 #ifndef _WAVEFORMATEXTENSIBLE_
 #define _WAVEFORMATEXTENSIBLE_
 typedef struct
@@ -42,11 +22,11 @@ typedef struct
 	WAVEFORMATEX Format;
 	union
 	{
-		WORD wValidBitsPerSample;	// bits of precision
-		WORD wSamplesPerBlock;		// valid if wBitsPerSample==0
-		WORD wReserved;				// If neither applies, set to zero
+		WORD wValidBitsPerSample;
+		WORD wSamplesPerBlock;
+		WORD wReserved;
 	} Samples;
-    DWORD dwChannelMask;			// which channels are present in stream
+    DWORD dwChannelMask;
     GUID SubFormat;
 } WAVEFORMATEXTENSIBLE, *PWAVEFORMATEXTENSIBLE;
 #endif
@@ -55,7 +35,6 @@ typedef struct
 #	define WAVE_FORMAT_EXTENSIBLE 0xFFFE
 #endif
 
-// Some speaker positions
 #ifndef SPEAKER_FRONT_LEFT
 #	define SPEAKER_FRONT_LEFT				0x1
 #	define SPEAKER_FRONT_RIGHT				0x2
@@ -65,10 +44,9 @@ typedef struct
 #	define SPEAKER_BACK_RIGHT				0x20
 #	define SPEAKER_FRONT_LEFT_OF_CENTER		0x40
 #	define SPEAKER_FRONT_RIGHT_OF_CENTER	0x80
-// ... we never use the other values
+
 #endif
 
-// KSDATAFORMAT_SUBTYPE_PCM = GUID "00000001-0000-0010-8000-00aa00389b71"
 static const GUID MY_KSDATAFORMAT_SUBTYPE_PCM =
 {
 	0x00000001,
@@ -80,9 +58,6 @@ static const GUID MY_KSDATAFORMAT_SUBTYPE_PCM =
 	}
 };
 
-
-// ==============================================================================
-
 extern HWND mainwindow;
 static cvar_t snd_wav_partitionsize = {CVAR_SAVE, "snd_wav_partitionsize", "1024", "controls sound delay in samples, values too low will cause crackling, too high will cause delayed sounds"};
 static qboolean sndsys_registeredcvars = false;
@@ -91,14 +66,10 @@ static qboolean sndsys_registeredcvars = false;
 HRESULT (WINAPI *pDirectSoundCreate)(GUID FAR *lpGUID, LPDIRECTSOUND FAR *lplpDS, IUnknown FAR *pUnkOuter);
 #endif
 
-// Wave output: queue of this many sound buffers to play, reused cyclically
 #define	WAV_BUFFERS		16
 #define	WAV_MASK		(WAV_BUFFERS - 1)
 static unsigned int wav_buffer_size;
 
-// DirectSound output: 64KB in 1 buffer
-//#define SECONDARY_BUFFER_SIZE(fmt_ptr) ((fmt_ptr)->width * (fmt_ptr)->channels * (fmt_ptr)->speed / 2)
-// LordHavoc: changed this to be a multiple of 32768
 #define SECONDARY_BUFFER_SIZE(fmt_ptr) ((fmt_ptr)->channels * 32768)
 
 typedef enum sndinitstat_e {SIS_SUCCESS, SIS_FAILURE, SIS_NOTAVAIL} sndinitstat;
@@ -115,13 +86,6 @@ static int	snd_sent, snd_completed;
 
 static int prev_painted;
 static unsigned int paintpot;
-
-
-
-/*
- * Global variables. Must be visible to window-procedure function
- *  so it can unlock and free the data block after it has been played.
- */
 
 HANDLE		hData;
 HPSTR		lpData, lpData2;
@@ -149,12 +113,6 @@ qboolean SNDDMA_InitWav (void);
 sndinitstat SNDDMA_InitDirect (void);
 #endif
 
-
-/*
-==================
-SndSys_BuildWaveFormat
-==================
-*/
 static qboolean SndSys_BuildWaveFormat (const snd_format_t* requested, WAVEFORMATEXTENSIBLE* fmt_ptr)
 {
 	WAVEFORMATEX* pfmtex;
@@ -168,7 +126,6 @@ static qboolean SndSys_BuildWaveFormat (const snd_format_t* requested, WAVEFORMA
 	pfmtex->nBlockAlign = pfmtex->nChannels * pfmtex->wBitsPerSample / 8;
 	pfmtex->nAvgBytesPerSec = pfmtex->nSamplesPerSec * pfmtex->nBlockAlign;
 
-	// LordHavoc: disabled this WAVE_FORMAT_EXTENSIBLE support because it does not seem to be working
 #if 0
 	if (requested->channels <= 2)
 	{
@@ -184,16 +141,15 @@ static qboolean SndSys_BuildWaveFormat (const snd_format_t* requested, WAVEFORMA
 		fmt_ptr->Samples.wValidBitsPerSample = fmt_ptr->Format.wBitsPerSample;
 		fmt_ptr->SubFormat = MY_KSDATAFORMAT_SUBTYPE_PCM;
 
-		// Build the channel mask
 		fmt_ptr->dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
 		switch (requested->channels)
 		{
 			case 8:
 				fmt_ptr->dwChannelMask |= SPEAKER_FRONT_LEFT_OF_CENTER | SPEAKER_FRONT_RIGHT_OF_CENTER;
-				// no break
+
 			case 6:
 				fmt_ptr->dwChannelMask |= SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY;
-				// no break
+
 			case 4:
 				fmt_ptr->dwChannelMask |= SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT;
 				break;
@@ -208,15 +164,8 @@ static qboolean SndSys_BuildWaveFormat (const snd_format_t* requested, WAVEFORMA
 	return true;
 }
 
-
 #ifdef SUPPORTDIRECTX
-/*
-==================
-SndSys_InitDirectSound
 
-DirectSound 5 support
-==================
-*/
 static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 {
 	DSBUFFERDESC			dsbuf;
@@ -289,8 +238,6 @@ static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 		return SIS_FAILURE;
 	}
 
-	// get access to the primary buffer, if possible, so we can set the
-	// sound hardware format
 	memset (&dsbuf, 0, sizeof(dsbuf));
 	dsbuf.dwSize = sizeof(DSBUFFERDESC);
 	dsbuf.dwFlags = DSBCAPS_PRIMARYBUFFER;
@@ -301,7 +248,6 @@ static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 	dsbcaps.dwSize = sizeof(dsbcaps);
 	primary_format_set = false;
 
-// COMMANDLINEOPTION: Windows DirectSound: -snoforceformat uses the format that DirectSound returns, rather than forcing it
 	if (!COM_CheckParm ("-snoforceformat"))
 	{
 		if (DS_OK == IDirectSound_CreateSoundBuffer(pDS, &dsbuf, &pDSPBuf, NULL))
@@ -321,12 +267,10 @@ static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 		}
 	}
 
-// COMMANDLINEOPTION: Windows DirectSound: -primarysound locks the sound hardware for exclusive use
 	if (!primary_format_set || !COM_CheckParm ("-primarysound"))
 	{
 		HRESULT result;
 
-		// create the secondary buffer we'll actually work with
 		memset (&dsbuf, 0, sizeof(dsbuf));
 		dsbuf.dwSize = sizeof(DSBUFFERDESC);
 		dsbuf.dwFlags = DSBCAPS_CTRLFREQUENCY | DSBCAPS_LOCSOFTWARE;
@@ -376,7 +320,6 @@ static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 		Con_Print("Using primary sound buffer\n");
 	}
 
-	// Make sure mixer is active
 	IDirectSoundBuffer_Play(pDSBuf, 0, 0, DSBPLAY_LOOPING);
 
 	Con_Printf("   %d channel(s)\n"
@@ -386,7 +329,6 @@ static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 
 	gSndBufSize = dsbcaps.dwBufferBytes;
 
-	// initialize the buffer
 	reps = 0;
 
 	while ((hresult = IDirectSoundBuffer_Lock(pDSBuf, 0, gSndBufSize, (LPVOID*)&lpData, &dwSize, NULL, NULL, 0)) != DS_OK)
@@ -423,14 +365,6 @@ static sndinitstat SndSys_InitDirectSound (const snd_format_t* requested)
 }
 #endif
 
-
-/*
-==================
-SndSys_InitMmsystem
-
-Crappy windows multimedia base
-==================
-*/
 static qboolean SndSys_InitMmsystem (const snd_format_t* requested)
 {
 	WAVEFORMATEXTENSIBLE format;
@@ -440,7 +374,6 @@ static qboolean SndSys_InitMmsystem (const snd_format_t* requested)
 	if (! SndSys_BuildWaveFormat(requested, &format))
 		return false;
 
-	// Open a waveform device for output using window callback
 	while ((hr = waveOutOpen((LPHWAVEOUT)&hWaveOut, WAVE_MAPPER, (WAVEFORMATEX*)&format,
 					0, 0L, CALLBACK_NULL)) != MMSYSERR_NOERROR)
 	{
@@ -463,11 +396,6 @@ static qboolean SndSys_InitMmsystem (const snd_format_t* requested)
 
 	wav_buffer_size = bound(128, snd_wav_partitionsize.integer, 8192) * requested->channels * requested->width;
 
-	/*
-	 * Allocate and lock memory for the waveform data. The memory
-	 * for waveform data must be globally allocated with
-	 * GMEM_MOVEABLE and GMEM_SHARE flags.
-	 */
 	gSndBufSize = WAV_BUFFERS * wav_buffer_size;
 	hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_SHARE, gSndBufSize);
 	if (!hData)
@@ -485,11 +413,6 @@ static qboolean SndSys_InitMmsystem (const snd_format_t* requested)
 	}
 	memset (lpData, 0, gSndBufSize);
 
-	/*
-	 * Allocate and lock memory for the header. This memory must
-	 * also be globally allocated with GMEM_MOVEABLE and
-	 * GMEM_SHARE flags.
-	 */
 	hWaveHdr = GlobalAlloc(GMEM_MOVEABLE | GMEM_SHARE, (DWORD) sizeof(WAVEHDR) * WAV_BUFFERS);
 
 	if (hWaveHdr == NULL)
@@ -510,7 +433,6 @@ static qboolean SndSys_InitMmsystem (const snd_format_t* requested)
 
 	memset (lpWaveHdr, 0, sizeof(WAVEHDR) * WAV_BUFFERS);
 
-	// After allocation, set up and prepare headers
 	for (i=0 ; i<WAV_BUFFERS ; i++)
 	{
 		lpWaveHdr[i].dwBufferLength = wav_buffer_size;
@@ -537,15 +459,6 @@ static qboolean SndSys_InitMmsystem (const snd_format_t* requested)
 	return true;
 }
 
-
-/*
-====================
-SndSys_Init
-
-Create "snd_renderbuffer" with the proper sound format if the call is successful
-May return a suggested format if the requested format isn't available
-====================
-*/
 qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 {
 #ifdef SUPPORTDIRECTX
@@ -562,16 +475,16 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	Con_Print ("SndSys_Init: using the Win32 module\n");
 
 #ifdef SUPPORTDIRECTX
-// COMMANDLINEOPTION: Windows Sound: -wavonly uses wave sound instead of DirectSound
+
 	wavonly = (COM_CheckParm ("-wavonly") != 0);
 	dsound_init = false;
 #endif
 	wav_init = false;
 
-	stat = SIS_FAILURE;	// assume DirectSound won't initialize
+	stat = SIS_FAILURE;
 
 #ifdef SUPPORTDIRECTX
-	// Init DirectSound
+
 	if (!wavonly)
 	{
 		stat = SndSys_InitDirectSound (requested);
@@ -583,10 +496,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	}
 #endif
 
-	// if DirectSound didn't succeed in initializing, try to initialize
-	// waveOut sound, unless DirectSound failed because the hardware is
-	// already allocated (in which case the user has already chosen not
-	// to have sound)
 #ifdef SUPPORTDIRECTX
 	if (!dsound_init && (stat != SIS_NOTAVAIL))
 #endif
@@ -604,14 +513,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 #endif
 }
 
-
-/*
-====================
-SndSys_Shutdown
-
-Stop the sound card, delete "snd_renderbuffer" and free its other resources
-====================
-*/
 void SndSys_Shutdown (void)
 {
 #ifdef SUPPORTDIRECTX
@@ -621,7 +522,6 @@ void SndSys_Shutdown (void)
 		IDirectSoundBuffer_Release(pDSBuf);
 	}
 
-	// only release primary buffer if it's not also the mixing buffer we just released
 	if (pDSPBuf && (pDSBuf != pDSPBuf))
 	{
 		IDirectSoundBuffer_Release(pDSPBuf);
@@ -681,20 +581,11 @@ void SndSys_Shutdown (void)
 	wav_init = false;
 }
 
-
-/*
-====================
-SndSys_Submit
-
-Submit the contents of "snd_renderbuffer" to the sound card
-====================
-*/
 void SndSys_Submit (void)
 {
 	LPWAVEHDR	h;
 	int			wResult;
 
-	// DirectSound doesn't need this
 	if (!wav_init)
 		return;
 
@@ -703,16 +594,10 @@ void SndSys_Submit (void)
 		paintpot = WAV_BUFFERS * wav_buffer_size;
 	prev_painted = snd_renderbuffer->endframe;
 
-	// submit new sound blocks
 	while (paintpot > wav_buffer_size)
 	{
 		h = lpWaveHdr + (snd_sent & WAV_MASK);
 
-		/*
-		 * Now the data block can be sent to the output device. The
-		 * waveOutWrite function returns immediately and waveform
-		 * data is sent to the output device in the background.
-		 */
 		wResult = waveOutWrite(hWaveOut, h, sizeof(WAVEHDR));
 		if (wResult == MMSYSERR_NOERROR)
 			snd_sent++;
@@ -720,8 +605,7 @@ void SndSys_Submit (void)
 		{
 			if(developer_insane.integer)
 				Con_DPrint("waveOutWrite failed (too much sound data)\n");
-			//h->dwFlags |= WHDR_DONE;
-			//snd_sent++;
+
 		}
 		else
 		{
@@ -735,14 +619,6 @@ void SndSys_Submit (void)
 
 }
 
-
-/*
-====================
-SndSys_GetSoundTime
-
-Returns the number of sample frames consumed since the sound started
-====================
-*/
 unsigned int SndSys_GetSoundTime (void)
 {
 	unsigned int factor;
@@ -766,41 +642,27 @@ unsigned int SndSys_GetSoundTime (void)
 
 	if (wav_init)
 	{
-		// Find which sound blocks have completed
+
 		for (;;)
 		{
 			if (snd_completed == snd_sent)
 			{
-			//	Con_DPrint("Sound overrun\n");
+
 				break;
 			}
 
 			if (!(lpWaveHdr[snd_completed & WAV_MASK].dwFlags & WHDR_DONE))
 				break;
 
-			snd_completed++;	// this buffer has been played
+			snd_completed++;
 		}
 
 		return (snd_completed * wav_buffer_size) / factor;
 
-		/*
-		 * S_PaintAndSubmit: WARNING: newsoundtime (soundtime (275 < 134217707)
-		 * apparently this sound time wraps quite early?
-		{
-		MMRESULT res;
-		MMTIME mmtime;
-
-		mmtime.wType = TIME_SAMPLES;
-		res = waveOutGetPosition(hWaveOut, &mmtime, sizeof(mmtime));
-		if(res == MMSYSERR_NOERROR)
-			return mmtime.u.sample;
-		}
-		*/
 	}
 
 	return 0;
 }
-
 
 #ifdef SUPPORTDIRECTX
 static DWORD dsound_dwSize;
@@ -809,13 +671,6 @@ static DWORD *dsound_pbuf;
 static DWORD *dsound_pbuf2;
 #endif
 
-/*
-====================
-SndSys_LockRenderBuffer
-
-Get the exclusive lock on "snd_renderbuffer"
-====================
-*/
 qboolean SndSys_LockRenderBuffer (void)
 {
 #ifdef SUPPORTDIRECTX
@@ -825,7 +680,7 @@ qboolean SndSys_LockRenderBuffer (void)
 
 	if (pDSBuf)
 	{
-		// if the buffer was lost or stopped, restore it and/or restart it
+
 		if (IDirectSoundBuffer_GetStatus (pDSBuf, &dwStatus) != DS_OK)
 			Con_Print("Couldn't get sound buffer status\n");
 
@@ -868,14 +723,6 @@ qboolean SndSys_LockRenderBuffer (void)
 	return wav_init;
 }
 
-
-/*
-====================
-SndSys_UnlockRenderBuffer
-
-Release the exclusive lock on "snd_renderbuffer"
-====================
-*/
 void SndSys_UnlockRenderBuffer (void)
 {
 #ifdef SUPPORTDIRECTX
@@ -884,14 +731,7 @@ void SndSys_UnlockRenderBuffer (void)
 #endif
 }
 
-/*
-====================
-SndSys_SendKeyEvents
-
-Send keyboard events originating from the sound system (e.g. MIDI)
-====================
-*/
 void SndSys_SendKeyEvents(void)
 {
-	// not supported
+
 }

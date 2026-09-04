@@ -1,6 +1,6 @@
 #pragma once
 #include "../panel.qh"
-#include "scoreboard.qh" // for Scoreboard_UpdatePlayerTeams()
+#include "scoreboard.qh"
 
 bool autocvar_hud_panel_infomessages;
 bool autocvar_hud_panel_infomessages_dynamichud = false;

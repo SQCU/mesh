@@ -2,7 +2,7 @@
 
 #include "utils.qh"
 #include <server/intermission.qh>
-//#include <common/resources/resources.qh>
+
 #include <common/replicate.qh>
 #include <common/sounds/all.qh>
 
@@ -58,14 +58,13 @@ int autocvar_sv_spectate;
 bool autocvar_sv_teamnagger;
 float autocvar_sv_player_scale;
 
-// WEAPONTODO
 .string weaponorder_byimpulse;
 
 .entity clientdata;
 
-.float jointime; // time of connecting
-.float startplaytime; // time of switching from spectator to player
-.float alivetime; // time of being alive
+.float jointime;
+.float startplaytime;
+.float alivetime;
 
 .bool wasplayer;
 
@@ -87,30 +86,28 @@ IntrusiveList g_players;
 STATIC_INIT(g_players) { g_players = IL_NEW(); }
 
 CLASS(Client, Object)
-    /** Client name */
+
     ATTRIB(Client, netname, string, this.netname);
     ATTRIB(Client, colormap, int, this.colormap);
     ATTRIB(Client, team, int, this.team);
     ATTRIB(Client, clientcolors, int, this.clientcolors);
-    /** Client IP */
+
     ATTRIB(Client, netaddress, string, this.netaddress);
     ATTRIB(Client, playermodel, string, this.playermodel);
     ATTRIB(Client, playerskin, string, this.playerskin);
 
-    /** fingerprint of CA key the player used to authenticate */
     ATTRIB(Client, crypto_keyfp, string, this.crypto_keyfp);
-    /** fingerprint of CA key the server used to authenticate to the player */
+
     ATTRIB(Client, crypto_mykeyfp, string, this.crypto_mykeyfp);
-    /** fingerprint of ID used by the player entity, or string_null if not identified */
+
     ATTRIB(Client, crypto_idfp, string, this.crypto_idfp);
-    /** set if the player's ID has been signed */
+
     ATTRIB(Client, crypto_idfp_signed, bool, this.crypto_idfp_signed);
-    /** the string "AES128" if encrypting, and string_null if plaintext */
+
     ATTRIB(Client, crypto_encryptmethod, string, this.crypto_encryptmethod);
-    /** the string "HMAC-SHA256" if signing, and string_null if plaintext */
+
     ATTRIB(Client, crypto_signmethod, string, this.crypto_signmethod);
 
-    // engine client fields
     ATTRIB(Client, impulse, int, this.impulse);
 
     ATTRIB(Client, button0, int, this.button0);
@@ -144,8 +141,6 @@ CLASS(Client, Object)
 
     ATTRIB(Client, v_angle, vector, this.v_angle);
     ATTRIB(Client, movement, vector, this.movement);
-
-    // custom
 
     ATTRIB(Client, playerid, int, this.playerid);
 
@@ -191,11 +186,8 @@ CLASS(Client, Object)
     ATTRIB(Client, weaponorder_byimpulse, string, this.weaponorder_byimpulse);
     ATTRIB(Client, autojoin_checked, int, this.wasplayer);
 
-    // networked cvars
-
-// not currently handled by ClientState
 #if 0
-    ATTRIBARRAY(Client, msg_choice_choices, int, 20); // TODO: actually NOTIF_CHOICE_MAX
+    ATTRIBARRAY(Client, msg_choice_choices, int, 20);
     ATTRIB(Client, cvar_cl_allow_uid2name, int, this.cvar_cl_allow_uid2name);
     ATTRIB(Client, cvar_cl_allow_uidtracking, int, this.cvar_cl_allow_uidtracking);
     ATTRIB(Client, cvar_cl_autotaunt, float, this.cvar_cl_autotaunt);
@@ -270,9 +262,7 @@ ENDCLASS(Spectator)
 
 CLASS(Player, Client)
 
-    // custom
-
-    ATTRIB(Player, dual_weapons, vector, this.dual_weapons); // TODO: actually WepSet!
+    ATTRIB(Player, dual_weapons, vector, this.dual_weapons);
     ATTRIB(Player, itemkeys, int, this.itemkeys);
     ATTRIB(Player, ballistics_density, float, this.ballistics_density);
 
@@ -315,41 +305,33 @@ bool independent_players;
 
 .int killcount;
 
-//flood fields
-.float nickspamtime; // time of last nick change
+.float nickspamtime;
 .float nickspamcount;
 
 void SendWelcomeMessage(entity this, int msg_type);
 
-// respawning
 .int respawn_flags;
 .float respawn_time;
 .float respawn_time_max;
 
-.float respawn_countdown; // next number to count
+.float respawn_countdown;
 
 const int RESPAWN_FORCE = BIT(0);
 const int RESPAWN_SILENT = BIT(1);
 const int RESPAWN_DENY = BIT(2);
 
-float blockSpectators; // if set, new or existing spectators or observers will be removed unless they become a player within g_maxplayers_spectator_blocktime seconds
-.float spectatortime; // point in time since the client is spectating or observing
+float blockSpectators;
+.float spectatortime;
 
 .bool player_blocked;
 
-const int SVC_SETVIEW = 5; // TODO: move to dpdefs where this belongs!
+const int SVC_SETVIEW = 5;
 
-// TODO: standardise resource regeneration
 .float pauseregen_finished;
 .float pauserothealth_finished;
 .float pauserotarmor_finished;
 .float pauserotfuel_finished;
 
-// g_<gametype>_str:
-// If 0, default is used.
-// If <0, 0 is used.
-// Otherwise, g_str (default value) is used.
-// For consistency, negative values there are mapped to zero too.
 #define GAMETYPE_DEFAULTED_SETTING(str) \
     ((gametype_setting_tmp = cvar(strcat("g_", GetGametype(), "_" #str))), \
     (gametype_setting_tmp < 0) ? 0 \
@@ -372,7 +354,6 @@ void PlayerUseKey(entity this);
 
 void FixClientCvars(entity e);
 
-// called when a client connects, useful for updating sounds and such of static objects
 .void(entity this, entity player) init_for_player;
 
 IntrusiveList g_initforplayer;
@@ -381,7 +362,6 @@ STATIC_INIT(g_initforplayer) { g_initforplayer = IL_NEW(); }
 void play_countdown(entity this, float finished, Sound samp);
 void player_powerups_remove_all(entity this);
 
-// NOTE: current type is Resource (avoiding circular includes!)
 void RotRegen(entity this, entity current, float limit_mod,
 	float regenstable, float regenfactor, float regenlinear, float regenframetime,
 	float rotstable, float rotfactor, float rotlinear, float rotframetime);

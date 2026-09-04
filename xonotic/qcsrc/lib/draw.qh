@@ -10,8 +10,6 @@
 
 	void Draw_CylindricLine(vector from, vector to, float thickness, string texture, float aspect, float shift, vector rgb, float theAlpha, float drawflag, vector vieworg)
 	{
-		// I want to draw a quad...
-		// from and to are MIDPOINTS.
 
 		vector axis, thickdir, A, B, C, D;
 		float length_tex;
@@ -19,7 +17,6 @@
 		axis = normalize(to - from);
 		length_tex = aspect * vlen(to - from) / thickness;
 
-		// direction is perpendicular to the view normal, and perpendicular to the axis
 		thickdir = normalize(cross(axis, vieworg - from));
 
 		A = from - thickdir * (thickness / 2);
@@ -35,24 +32,16 @@
 		R_EndPolygon();
 	}
 
-// a border picture is a texture containing nine parts:
-//   1/4 width: left part
-//   1/2 width: middle part (stretched)
-//   1/4 width: right part
-// divided into
-//   1/4 height: top part
-//   1/2 height: middle part (stretched)
-//   1/4 height: bottom part
 	void draw_BorderPicture(vector theOrigin, string pic, vector theSize, vector theColor, float theAlpha, vector theBorderSize)
 	{
-		if (theBorderSize.x < 0 && theBorderSize.y < 0)  // draw whole image as it is
+		if (theBorderSize.x < 0 && theBorderSize.y < 0)
 		{
 			drawpic_builtin(theOrigin, pic, theSize, theColor, theAlpha, 0);
 			return;
 		}
-		if (theBorderSize.x == 0 && theBorderSize.y == 0)  // no border
+		if (theBorderSize.x == 0 && theBorderSize.y == 0)
 		{
-			// draw only the central part
+
 			drawsubpic(theOrigin, theSize, pic, '0.25 0.25 0', '0.5 0.5 0', theColor, theAlpha, 0);
 			return;
 		}
@@ -60,16 +49,16 @@
 		vector dX, dY;
 		vector width, height;
 		vector bW, bH;
-		// pic = draw_UseSkinFor(pic);
+
 		width = eX * theSize.x;
 		height = eY * theSize.y;
 		if (theSize.x <= theBorderSize.x * 2)
 		{
-			// not wide enough... draw just left and right then
+
 			bW = eX * (0.25 * theSize.x / (theBorderSize.x * 2));
 			if (theSize.y <= theBorderSize.y * 2)
 			{
-				// not high enough... draw just corners
+
 				bH = eY * (0.25 * theSize.y / (theBorderSize.y * 2));
 				drawsubpic(theOrigin,                 width * 0.5 + height * 0.5, pic, '0 0 0',           bW + bH, theColor, theAlpha, 0);
 				drawsubpic(theOrigin + width   * 0.5, width * 0.5 + height * 0.5, pic, eX - bW,           bW + bH, theColor, theAlpha, 0);
@@ -91,7 +80,7 @@
 		{
 			if (theSize.y <= theBorderSize.y * 2)
 			{
-				// not high enough... draw just top and bottom then
+
 				bH = eY * (0.25 * theSize.y / (theBorderSize.y * 2));
 				dX = theBorderSize.x * eX;
 				drawsubpic(theOrigin,                                         dX + height * 0.5, pic, '0    0 0',           '0.25 0 0' + bH, theColor, theAlpha, 0);

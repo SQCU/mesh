@@ -2,12 +2,12 @@
 
 MUTATOR_HOOKFUNCTION(duel, GetPlayerLimit)
 {
-	M_ARGV(0, int) = 2; // duel is always 1v1!
+	M_ARGV(0, int) = 2;
 }
 
 MUTATOR_HOOKFUNCTION(duel, Scores_CountFragsRemaining)
 {
-	// announce remaining frags?
+
 	return true;
 }
 

@@ -25,7 +25,7 @@ void g_model_setcolormaptoactivator(entity this, entity actor, entity trigger)
 	}
 	else
 		this.colormap = floor(random() * 256);
-	this.colormap |= BIT(10); // RENDER_COLORMAPPED
+	this.colormap |= BIT(10);
 }
 
 void g_clientmodel_setcolormaptoactivator(entity this, entity actor, entity trigger)
@@ -36,8 +36,7 @@ void g_clientmodel_setcolormaptoactivator(entity this, entity actor, entity trig
 
 void g_clientmodel_use(entity this, entity actor, entity trigger)
 {
-	// Flag to set func_clientwall state
-	// 1 == deactivate, 2 == activate, 0 == do nothing
+
 	if(this.classname == "func_clientwall" || this.classname == "func_clientillusionary")
 		this.antiwall_flag = trigger.antiwall_flag;
 
@@ -47,7 +46,7 @@ void g_clientmodel_use(entity this, entity actor, entity trigger)
 		if (this.solid != SOLID_NOT)
 		{
 			this.solid = SOLID_NOT;
-			setorigin(this, this.origin); // unlink
+			setorigin(this, this.origin);
 		}
 	}
 	else if (this.antiwall_flag == 2)
@@ -56,7 +55,7 @@ void g_clientmodel_use(entity this, entity actor, entity trigger)
 		if (this.solid != this.default_solid)
 		{
 			this.solid = this.default_solid;
-			setorigin(this, this.origin); // link
+			setorigin(this, this.origin);
 		}
 	}
 	g_clientmodel_setcolormaptoactivator(this, actor, trigger);
@@ -64,17 +63,17 @@ void g_clientmodel_use(entity this, entity actor, entity trigger)
 
 void g_model_dropbyspawnflags(entity this)
 {
-	if((this.spawnflags & 3) == 1) // ALIGN_ORIGIN
+	if((this.spawnflags & 3) == 1)
 	{
 		traceline(this.origin, this.origin - '0 0 4096', MOVE_NOMONSTERS, this);
 		setorigin(this, trace_endpos);
 	}
-	else if((this.spawnflags & 3) == 2) // ALIGN_BOTTOM
+	else if((this.spawnflags & 3) == 2)
 	{
 		tracebox(this.origin, this.mins, this.maxs, this.origin - '0 0 4096', MOVE_NOMONSTERS, this);
 		setorigin(this, trace_endpos);
 	}
-	else if((this.spawnflags & 3) == 3) // ALIGN_ORIGIN | ALIGN_BOTTOM
+	else if((this.spawnflags & 3) == 3)
 	{
 		traceline(this.origin, this.origin - '0 0 4096', MOVE_NOMONSTERS, this);
 		setorigin(this, trace_endpos - '0 0 1' * this.mins.z);
@@ -178,7 +177,7 @@ void g_model_init(entity ent, float sol)
 
 	if(!ent.solid) ent.solid = (sol);
 	else if(ent.solid < 0) ent.solid = SOLID_NOT;
-	SetBrushEntityModel(ent,true); // called after setting .solid to ensure correct area grid linking/unlinking
+	SetBrushEntityModel(ent,true);
 
 	ent.use = g_model_setcolormaptoactivator;
 	InitializeEntity(ent, g_model_dropbyspawnflags, INITPRIO_DROPTOFLOOR);
@@ -191,12 +190,12 @@ void g_clientmodel_init(entity ent, float sol)
 
 	if(!ent.solid) ent.solid = (sol);
 	else if(ent.solid < 0) ent.solid = SOLID_NOT;
-	SetBrushEntityModel(ent,true); // called after setting .solid to ensure correct area grid linking/unlinking
+	SetBrushEntityModel(ent,true);
 
 	ent.use = g_clientmodel_use;
 	setthink(ent, g_clientmodel_think);
 	ent.nextthink = time;
-	ent.oldorigin = ent.origin; // don't run an initial double update
+	ent.oldorigin = ent.origin;
 	InitializeEntity(ent, g_clientmodel_dropbyspawnflags, INITPRIO_DROPTOFLOOR);
 	if(!ent.bgmscriptsustain) ent.bgmscriptsustain = 1;
 	else if(ent.bgmscriptsustain < 0) ent.bgmscriptsustain = 0;
@@ -204,19 +203,16 @@ void g_clientmodel_init(entity ent, float sol)
 	ent.default_solid = sol;
 }
 
-// non-solid model entities:
-spawnfunc(misc_gamemodel)         { this.angles_x = -this.angles.x; g_model_init(this, SOLID_NOT); } // model entity
-spawnfunc(misc_clientmodel)       { this.angles_x = -this.angles.x; g_clientmodel_init(this, SOLID_NOT); } // model entity
-spawnfunc(misc_models)            { this.angles_x = -this.angles.x; g_model_init(this, SOLID_NOT); } // DEPRECATED old compat entity with confusing name, do not use
+spawnfunc(misc_gamemodel)         { this.angles_x = -this.angles.x; g_model_init(this, SOLID_NOT); }
+spawnfunc(misc_clientmodel)       { this.angles_x = -this.angles.x; g_clientmodel_init(this, SOLID_NOT); }
+spawnfunc(misc_models)            { this.angles_x = -this.angles.x; g_model_init(this, SOLID_NOT); }
 
-// non-solid brush entities:
-spawnfunc(func_illusionary)       { g_model_init(this, SOLID_NOT); } // Q1 name (WARNING: MISPREDICTED)
-spawnfunc(func_clientillusionary) { g_clientmodel_init(this, SOLID_NOT); } // brush entity
+spawnfunc(func_illusionary)       { g_model_init(this, SOLID_NOT); }
+spawnfunc(func_clientillusionary) { g_clientmodel_init(this, SOLID_NOT); }
 
-// solid brush entities
-spawnfunc(func_wall)              { g_model_init(this, SOLID_BSP); } // Q1 name
-spawnfunc(func_clientwall)        { g_clientmodel_init(this, SOLID_BSP); } // brush entity (WARNING: MISPREDICTED)
-spawnfunc(func_static)            { g_model_init(this, SOLID_BSP); } // DEPRECATED old alias name from some other game
+spawnfunc(func_wall)              { g_model_init(this, SOLID_BSP); }
+spawnfunc(func_clientwall)        { g_clientmodel_init(this, SOLID_BSP); }
+spawnfunc(func_static)            { g_model_init(this, SOLID_BSP); }
 #elif defined(CSQC)
 .float alpha;
 .float scale;
@@ -282,9 +278,9 @@ void Ent_Wall_Draw(entity this)
 	f = doBGMScript(this);
 	if(f >= 0)
 	{
-		if(this.lip < 0) // < 0: alpha goes from 1 to 1-|lip| when toggled (toggling subtracts lip)
+		if(this.lip < 0)
 			this.alpha = 1 + this.lip * f;
-		else // > 0: alpha goes from 1-|lip| to 1 when toggled (toggling adds lip)
+		else
 			this.alpha = 1 - this.lip * (1 - f);
 		this.(fld) = this.(fld) + this.movedir * f;
 	}
@@ -352,10 +348,9 @@ NET_HANDLE(ENT_CLIENT_WALL, bool isnew)
 			this.lodmodelindex2 = ReadShort();
 			this.modelindex = this.lodmodelindex0;
 			vector pmin = this.mins, pmax = this.maxs;
-			setmodelindex(this, this.modelindex); // this retrieves the .model key and sets mins/maxs/absmin/absmax
+			setmodelindex(this, this.modelindex);
 			setsize(this, pmin, pmax);
-			// if there's no second LOD model, fall back to the first
-			// avoids using the high quality model at a distance
+
 			if(!this.lodmodelindex2 && this.lodmodelindex1)
 				this.lodmodelindex2 = this.lodmodelindex1;
 		}
@@ -363,7 +358,7 @@ NET_HANDLE(ENT_CLIENT_WALL, bool isnew)
 		{
 			this.modelindex = ReadShort();
 			vector pmin = this.mins, pmax = this.maxs;
-			setmodelindex(this, this.modelindex); // this retrieves the .model key and sets mins/maxs/absmin/absmax
+			setmodelindex(this, this.modelindex);
 			setsize(this, pmin, pmax);
 			this.loddistance1 = 0;
 			this.loddistance2 = 0;

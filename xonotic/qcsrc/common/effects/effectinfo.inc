@@ -1,16 +1,7 @@
-// docs: https://www.quakewiki.net/darkplaces-wiki/effectinfo-scripting-reference/
-// use `cl_particles_reloadeffects` to reload effects without restarting engine
-// use `chase_active 1` and `cl_lockview 1` to see effects from different perspectives
-// `dumpeffectinfo` currently doesn't work so edit effectinfo.txt manually, just try to keep the files in sync
-// always add new effects to the bottom of the list
 
-// `tex` are indices into particles/particlefont.tga (see particles/particlefont-template.tga for numbers)
-// the first index is inclusive, second exclusive (so `tex 0 8` will use images 0 though 7)
-// unless they're equal (`tex 69 69` is the same as `tex 69 70`)
 
-// item respawn effect
 DEF(TE_WIZSPIKE);
-// flare particle and light
+
 SUB(TE_WIZSPIKE) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 128;
@@ -25,7 +16,7 @@ SUB(TE_WIZSPIKE) {
 	MY(size_max) = 20;
 	MY(type) = "static";
 }
-// cloud of particles which expand rapidly and then slow to form a ball
+
 SUB(TE_WIZSPIKE) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 64;
@@ -42,9 +33,8 @@ SUB(TE_WIZSPIKE) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 }
 
-// laser impact
 DEF(TE_KNIGHTSPIKE);
-// decal
+
 SUB(TE_KNIGHTSPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -59,7 +49,7 @@ SUB(TE_KNIGHTSPIKE) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(TE_KNIGHTSPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -73,7 +63,7 @@ SUB(TE_KNIGHTSPIKE) {
 	MY(tex_max) = 39;
 	MY(type) = "static";
 }
-// sparks that rapidly expand and rapidly slow down to form an interesting spherical effect
+
 SUB(TE_KNIGHTSPIKE) {
 	MY(airfriction) = 6;
 	MY(alpha_min) = 256;
@@ -89,9 +79,8 @@ SUB(TE_KNIGHTSPIKE) {
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
 
-// machinegun bullet impact
 DEF(TE_SPIKE);
-// bullet impact decal
+
 SUB(TE_SPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -103,7 +92,7 @@ SUB(TE_SPIKE) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(TE_SPIKE) {
 	MY(alpha_min) = 255;
 	MY(alpha_max) = 255;
@@ -118,7 +107,7 @@ SUB(TE_SPIKE) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '8.0 8.0 8.0';
 }
-// dust/smoke staying at the impact
+
 SUB(TE_SPIKE) {
 	MY(alpha_min) = 255;
 	MY(alpha_max) = 255;
@@ -132,7 +121,7 @@ SUB(TE_SPIKE) {
 	MY(tex_max) = 8;
 	MY(type) = "smoke";
 }
-// bouncing sparks
+
 SUB(TE_SPIKE) {
 	MY(alpha_max) = 256;
 	MY(alpha_fade) = 256;
@@ -148,9 +137,8 @@ SUB(TE_SPIKE) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// electro combo explosion
 DEF(TE_SPIKEQUAD);
-// decal
+
 SUB(TE_SPIKEQUAD) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -165,7 +153,7 @@ SUB(TE_SPIKEQUAD) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(TE_SPIKEQUAD) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -179,7 +167,7 @@ SUB(TE_SPIKEQUAD) {
 	MY(tex_max) = 38;
 	MY(type) = "static";
 }
-// large sparks
+
 SUB(TE_SPIKEQUAD) {
 	MY(airfriction) = 4;
 	MY(alpha_min) = 256;
@@ -196,9 +184,8 @@ SUB(TE_SPIKEQUAD) {
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
 
-// quake effect
 DEF(TE_SUPERSPIKE);
-// decal
+
 SUB(TE_SUPERSPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -210,7 +197,7 @@ SUB(TE_SUPERSPIKE) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(TE_SUPERSPIKE) {
 	MY(alpha_min) = 255;
 	MY(alpha_max) = 255;
@@ -225,7 +212,7 @@ SUB(TE_SUPERSPIKE) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '8.0 8.0 8.0';
 }
-// dust/smoke staying at the impact
+
 SUB(TE_SUPERSPIKE) {
 	MY(alpha_min) = 255;
 	MY(alpha_max) = 255;
@@ -239,7 +226,7 @@ SUB(TE_SUPERSPIKE) {
 	MY(tex_max) = 8;
 	MY(type) = "smoke";
 }
-// sparks that disappear on impact
+
 SUB(TE_SUPERSPIKE) {
 	MY(alpha_max) = 256;
 	MY(alpha_fade) = 768;
@@ -255,9 +242,8 @@ SUB(TE_SUPERSPIKE) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// quake effect
 DEF(TE_SUPERSPIKEQUAD);
-// decal
+
 SUB(TE_SUPERSPIKEQUAD) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -272,7 +258,7 @@ SUB(TE_SUPERSPIKEQUAD) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(TE_SUPERSPIKEQUAD) {
 	MY(alpha_min) = 255;
 	MY(alpha_max) = 255;
@@ -287,7 +273,7 @@ SUB(TE_SUPERSPIKEQUAD) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '8.0 8.0 8.0';
 }
-// dust/smoke staying at the impact
+
 SUB(TE_SUPERSPIKEQUAD) {
 	MY(alpha_min) = 255;
 	MY(alpha_max) = 255;
@@ -301,7 +287,7 @@ SUB(TE_SUPERSPIKEQUAD) {
 	MY(tex_max) = 8;
 	MY(type) = "smoke";
 }
-// sparks that disappear on impact
+
 SUB(TE_SUPERSPIKEQUAD) {
 	MY(alpha_max) = 256;
 	MY(alpha_fade) = 768;
@@ -317,9 +303,8 @@ SUB(TE_SUPERSPIKEQUAD) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// shotgun pellet impact
 DEF(TE_GUNSHOT);
-// decal
+
 SUB(TE_GUNSHOT) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -331,7 +316,7 @@ SUB(TE_GUNSHOT) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(TE_GUNSHOT) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 128;
@@ -346,7 +331,7 @@ SUB(TE_GUNSHOT) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '8.0 8.0 8.0';
 }
-// dust/smoke staying at the impact
+
 SUB(TE_GUNSHOT) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 128;
@@ -360,7 +345,7 @@ SUB(TE_GUNSHOT) {
 	MY(tex_max) = 8;
 	MY(type) = "smoke";
 }
-// bouncing sparks
+
 SUB(TE_GUNSHOT) {
 	MY(alpha_max) = 64;
 	MY(alpha_fade) = 64;
@@ -376,9 +361,8 @@ SUB(TE_GUNSHOT) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// crylink impact effect
 DEF(TE_GUNSHOTQUAD);
-// decal
+
 SUB(TE_GUNSHOTQUAD) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -390,7 +374,7 @@ SUB(TE_GUNSHOTQUAD) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// purple flare effect
+
 SUB(TE_GUNSHOTQUAD) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -404,7 +388,7 @@ SUB(TE_GUNSHOTQUAD) {
 	MY(tex_max) = 39;
 	MY(type) = "static";
 }
-// purple sparks
+
 SUB(TE_GUNSHOTQUAD) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 128;
@@ -421,9 +405,8 @@ SUB(TE_GUNSHOTQUAD) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// mortar/hagar explosion (smaller than rocket)
 DEF(TE_EXPLOSION);
-// decal
+
 SUB(TE_EXPLOSION) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -438,7 +421,7 @@ SUB(TE_EXPLOSION) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(TE_EXPLOSION) {
 	MY(alpha_min) = 192;
 	MY(alpha_max) = 192;
@@ -452,7 +435,7 @@ SUB(TE_EXPLOSION) {
 	MY(tex_max) = 37;
 	MY(type) = "static";
 }
-// fire effect which expands then slows
+
 SUB(TE_EXPLOSION) {
 	MY(airfriction) = 4;
 	MY(alpha_min) = 128;
@@ -472,7 +455,7 @@ SUB(TE_EXPLOSION) {
 	MY(type) = "static";
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
-// underwater bubbles
+
 SUB(TE_EXPLOSION) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -492,7 +475,7 @@ SUB(TE_EXPLOSION) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '96.0 96.0 96.0';
 }
-// bouncing sparks
+
 SUB(TE_EXPLOSION) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_min) = 256;
@@ -512,9 +495,8 @@ SUB(TE_EXPLOSION) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// quake effect
 DEF(TE_EXPLOSIONQUAD);
-// decal
+
 SUB(TE_EXPLOSIONQUAD) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -529,7 +511,7 @@ SUB(TE_EXPLOSIONQUAD) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// smoke cloud
+
 SUB(TE_EXPLOSIONQUAD) {
 	MY(alpha_min) = 32;
 	MY(alpha_max) = 32;
@@ -544,7 +526,7 @@ SUB(TE_EXPLOSIONQUAD) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '48.0 48.0 48.0';
 }
-// underwater bubbles
+
 SUB(TE_EXPLOSIONQUAD) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -564,7 +546,7 @@ SUB(TE_EXPLOSIONQUAD) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '96.0 96.0 96.0';
 }
-// sparks which go through walls
+
 SUB(TE_EXPLOSIONQUAD) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_max) = 256;
@@ -582,9 +564,8 @@ SUB(TE_EXPLOSIONQUAD) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// quake effect
 DEF(TE_TAREXPLOSION);
-// decal
+
 SUB(TE_TAREXPLOSION) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -599,7 +580,7 @@ SUB(TE_TAREXPLOSION) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// smoke cloud
+
 SUB(TE_TAREXPLOSION) {
 	MY(alpha_min) = 32;
 	MY(alpha_max) = 32;
@@ -614,7 +595,7 @@ SUB(TE_TAREXPLOSION) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '48.0 48.0 48.0';
 }
-// underwater bubbles
+
 SUB(TE_TAREXPLOSION) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -634,7 +615,7 @@ SUB(TE_TAREXPLOSION) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '96.0 96.0 96.0';
 }
-// sparks which go through walls
+
 SUB(TE_TAREXPLOSION) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_max) = 256;
@@ -652,7 +633,6 @@ SUB(TE_TAREXPLOSION) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// bloody impact effect indicating damage
 DEF(TE_BLOOD);
 SUB(TE_BLOOD) {
 	MY(airfriction) = 1;
@@ -675,7 +655,6 @@ SUB(TE_BLOOD) {
 	MY(velocitymultiplier) = 1;
 }
 
-// sparks (quake effect)
 DEF(TE_SPARK);
 SUB(TE_SPARK) {
 	MY(alpha_min) = 64;
@@ -696,9 +675,8 @@ SUB(TE_SPARK) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// vortex impact
 DEF(TE_PLASMABURN);
-// decal
+
 SUB(TE_PLASMABURN) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -713,7 +691,7 @@ SUB(TE_PLASMABURN) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(TE_PLASMABURN) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -727,7 +705,7 @@ SUB(TE_PLASMABURN) {
 	MY(tex_max) = 37;
 	MY(type) = "static";
 }
-// small sparks which form a sphere as they slow down
+
 SUB(TE_PLASMABURN) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 256;
@@ -744,7 +722,6 @@ SUB(TE_PLASMABURN) {
 	MY(velocityjitter) = '128.0 128.0 128.0';
 }
 
-// quake effect
 DEF(TE_SMALLFLASH);
 SUB(TE_SMALLFLASH) {
 	MY(lightcolor) = '2.0 2.0 2.0';
@@ -752,7 +729,6 @@ SUB(TE_SMALLFLASH) {
 	MY(lightradius) = 200;
 }
 
-// quake effect
 DEF(TE_FLAMEJET);
 SUB(TE_FLAMEJET) {
 	MY(airfriction) = 1;
@@ -772,7 +748,6 @@ SUB(TE_FLAMEJET) {
 	MY(velocitymultiplier) = 1;
 }
 
-// quake effect
 DEF(TE_LAVASPLASH);
 SUB(TE_LAVASPLASH) {
 	MY(alpha_min) = 256;
@@ -791,7 +766,6 @@ SUB(TE_LAVASPLASH) {
 	MY(velocityoffset) = '0.0 0.0 256.0';
 }
 
-// player teleport effect
 DEF(TE_TELEPORT);
 SUB(TE_TELEPORT) {
 	MY(airfriction) = 1;
@@ -810,7 +784,6 @@ SUB(TE_TELEPORT) {
 	MY(velocityjitter) = '0.0 0.0 256.0';
 }
 
-// vortex beam
 DEF(TE_TEI_G3);
 SUB(TE_TEI_G3) {
 	MY(alpha_min) = 128;
@@ -839,7 +812,6 @@ SUB(TE_TEI_G3) {
 	MY(velocityjitter) = '8.0 8.0 8.0';
 }
 
-// smoke effect
 DEF(TE_TEI_SMOKE);
 SUB(TE_TEI_SMOKE) {
 	MY(alpha_min) = 256;
@@ -857,9 +829,8 @@ SUB(TE_TEI_SMOKE) {
 	MY(velocitymultiplier) = 1;
 }
 
-// rocket explosion (bigger than mortar and hagar)
 DEF(TE_TEI_BIGEXPLOSION);
-// decal
+
 SUB(TE_TEI_BIGEXPLOSION) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -874,7 +845,7 @@ SUB(TE_TEI_BIGEXPLOSION) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(TE_TEI_BIGEXPLOSION) {
 	MY(alpha_min) = 192;
 	MY(alpha_max) = 192;
@@ -888,7 +859,7 @@ SUB(TE_TEI_BIGEXPLOSION) {
 	MY(tex_max) = 37;
 	MY(type) = "static";
 }
-// fire effect
+
 SUB(TE_TEI_BIGEXPLOSION) {
 	MY(airfriction) = 4;
 	MY(alpha_min) = 128;
@@ -908,7 +879,7 @@ SUB(TE_TEI_BIGEXPLOSION) {
 	MY(type) = "static";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// underwater bubbles
+
 SUB(TE_TEI_BIGEXPLOSION) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -928,7 +899,7 @@ SUB(TE_TEI_BIGEXPLOSION) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '144.0 144.0 144.0';
 }
-// bouncing sparks
+
 SUB(TE_TEI_BIGEXPLOSION) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_min) = 256;
@@ -948,9 +919,8 @@ SUB(TE_TEI_BIGEXPLOSION) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// electro explosion
 DEF(TE_TEI_PLASMAHIT);
-// decal
+
 SUB(TE_TEI_PLASMAHIT) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -965,7 +935,7 @@ SUB(TE_TEI_PLASMAHIT) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(TE_TEI_PLASMAHIT) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -979,7 +949,7 @@ SUB(TE_TEI_PLASMAHIT) {
 	MY(tex_max) = 38;
 	MY(type) = "static";
 }
-// cloud of bouncing sparks
+
 SUB(TE_TEI_PLASMAHIT) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -994,7 +964,6 @@ SUB(TE_TEI_PLASMAHIT) {
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
 
-// bloody impact effect indicating damage
 DEF(blood);
 SUB(blood) {
 	MY(airfriction) = 0.400000;
@@ -1021,7 +990,7 @@ SUB(blood) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '99.0 99.0 55.0';
 }
-//blood mist
+
 SUB(blood) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -1039,7 +1008,6 @@ SUB(blood) {
 	MY(type) = "alphastatic";
 }
 
-// player teleport effect
 DEF(teleport);
 SUB(teleport) {
 	MY(airfriction) = 2;
@@ -1074,7 +1042,6 @@ SUB(teleport) {
 	MY(type) = "smoke";
 }
 
-// normal super gory blood trail (used by gibs)
 DEF(TR_BLOOD);
 SUB(TR_BLOOD) {
 	MY(airfriction) = -2;
@@ -1104,7 +1071,7 @@ SUB(TR_BLOOD) {
 	MY(velocityjitter) = '64.0 64.0 64.0';
 	MY(velocitymultiplier) = -0.100000;
 }
-// splash around gib
+
 SUB(TR_BLOOD) {
 	MY(alpha_min) = 684;
 	MY(alpha_max) = 684;
@@ -1120,7 +1087,6 @@ SUB(TR_BLOOD) {
 	MY(type) = "blood";
 }
 
-// thinner blood trail (used by quake zombies)
 DEF(TR_SLIGHTBLOOD);
 SUB(TR_SLIGHTBLOOD) {
 	MY(airfriction) = 1;
@@ -1145,7 +1111,6 @@ SUB(TR_SLIGHTBLOOD) {
 	MY(velocitymultiplier) = 0.500000;
 }
 
-// func_stardust effect, used in some maps to indicate teleporters
 DEF(EF_STARDUST);
 SUB(EF_STARDUST) {
 	MY(airfriction) = 0.200000;
@@ -1164,7 +1129,6 @@ SUB(EF_STARDUST) {
 	MY(velocityjitter) = '32.0 32.0 0.0';
 }
 
-// flare particle and light
 DEF(item_respawn);
 SUB(item_respawn) {
 	MY(alpha_min) = 128;
@@ -1177,7 +1141,7 @@ SUB(item_respawn) {
 	MY(size_max) = 32;
 	MY(type) = "static";
 }
-// cloud of particles which expand rapidly and then slow to form a ball
+
 SUB(item_respawn) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1201,7 +1165,7 @@ SUB(jumppad_activate) {
 }
 
 DEF(laser_muzzleflash);
-// glow and light
+
 SUB(laser_muzzleflash) {
 	MY(airfriction) = 10;
 	MY(alpha_min) = 256;
@@ -1221,7 +1185,7 @@ SUB(laser_muzzleflash) {
 	MY(tex_max) = 65;
 	MY(type) = "smoke";
 }
-// electricity
+
 SUB(laser_muzzleflash) {
 	MY(airfriction) = 10;
 	MY(alpha_min) = 256;
@@ -1245,7 +1209,7 @@ SUB(laser_muzzleflash) {
 	MY(velocityjitter) = '150.0 150.0 150.0';
 	MY(velocitymultiplier) = 0.200000;
 }
-// fire
+
 SUB(laser_muzzleflash) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 256;
@@ -1267,7 +1231,7 @@ SUB(laser_muzzleflash) {
 }
 
 DEF(laser_impact);
-// decal
+
 SUB(laser_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1282,7 +1246,7 @@ SUB(laser_impact) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(laser_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1296,7 +1260,7 @@ SUB(laser_impact) {
 	MY(tex_max) = 39;
 	MY(type) = "static";
 }
-// sparks that rapidly expand and rapidly slow down to form an interesting spherical effect
+
 SUB(laser_impact) {
 	MY(airfriction) = 6;
 	MY(alpha_min) = 256;
@@ -1367,9 +1331,8 @@ SUB(shotgun_muzzleflash) {
 	MY(velocitymultiplier) = 0.500000;
 }
 
-// shotgun pellet impact
 DEF(shotgun_impact);
-// decal
+
 SUB(shotgun_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1381,7 +1344,7 @@ SUB(shotgun_impact) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(shotgun_impact) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 300;
@@ -1402,7 +1365,7 @@ SUB(shotgun_impact) {
 	MY(velocityjitter) = '150.0 150.0 150.0';
 	MY(velocitymultiplier) = 0.200000;
 }
-// dust/smoke staying at the impact
+
 SUB(shotgun_impact) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 200;
@@ -1425,7 +1388,7 @@ SUB(shotgun_impact) {
 	MY(velocityjitter) = '11.0 11.0 11.0';
 	MY(velocitymultiplier) = 0.030000;
 }
-// sparks
+
 SUB(shotgun_impact) {
 	MY(airfriction) = 1.100000;
 	MY(alpha_max) = 356;
@@ -1485,7 +1448,7 @@ SUB(uzi_muzzleflash) {
 }
 
 DEF(machinegun_impact);
-// decal
+
 SUB(machinegun_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1500,7 +1463,7 @@ SUB(machinegun_impact) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(machinegun_impact) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 300;
@@ -1521,7 +1484,7 @@ SUB(machinegun_impact) {
 	MY(velocityjitter) = '150.0 150.0 150.0';
 	MY(velocitymultiplier) = 0.100000;
 }
-// dust/smoke staying at the impact
+
 SUB(machinegun_impact) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 200;
@@ -1544,7 +1507,7 @@ SUB(machinegun_impact) {
 	MY(velocityjitter) = '11.0 11.0 11.0';
 	MY(velocitymultiplier) = 0.030000;
 }
-// debris
+
 SUB(machinegun_impact) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 300;
@@ -1567,7 +1530,7 @@ SUB(machinegun_impact) {
 	MY(velocityjitter) = '350.0 350.0 350.0';
 	MY(velocitymultiplier) = 0.200000;
 }
-// sparks
+
 SUB(machinegun_impact) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 256;
@@ -1627,9 +1590,8 @@ SUB(grenadelauncher_muzzleflash) {
 	MY(velocitymultiplier) = 0.500000;
 }
 
-// mortar trail
 DEF(TR_GRENADE);
-// smoke
+
 SUB(TR_GRENADE) {
 	MY(alpha_min) = 300;
 	MY(alpha_max) = 400;
@@ -1647,7 +1609,7 @@ SUB(TR_GRENADE) {
 	MY(velocityjitter) = '1.0 1.0 1.0';
 	MY(velocitymultiplier) = -0.020000;
 }
-// fire
+
 SUB(TR_GRENADE) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 100;
@@ -1666,7 +1628,7 @@ SUB(TR_GRENADE) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = -1;
 }
-// bubbles
+
 SUB(TR_GRENADE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1686,9 +1648,8 @@ SUB(TR_GRENADE) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 }
 
-// hookbomb trail
 DEF(TR_KNIGHTSPIKE);
-// smoke
+
 SUB(TR_KNIGHTSPIKE) {
 	MY(alpha_min) = 300;
 	MY(alpha_max) = 400;
@@ -1708,7 +1669,7 @@ SUB(TR_KNIGHTSPIKE) {
 	MY(velocityjitter) = '3.0 3.0 3.0';
 	MY(velocitymultiplier) = -0.020000;
 }
-// marker
+
 SUB(TR_KNIGHTSPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1723,7 +1684,7 @@ SUB(TR_KNIGHTSPIKE) {
 	MY(trailspacing) = 2;
 	MY(type) = "alphastatic";
 }
-// bubbles
+
 SUB(TR_KNIGHTSPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1744,7 +1705,7 @@ SUB(TR_KNIGHTSPIKE) {
 }
 
 DEF(grenade_explode);
-// decal
+
 SUB(grenade_explode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1759,7 +1720,7 @@ SUB(grenade_explode) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// fire effect which expands then slows
+
 SUB(grenade_explode) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 128;
@@ -1780,7 +1741,7 @@ SUB(grenade_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
-// fire effect which make bright dot inside
+
 SUB(grenade_explode) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 228;
@@ -1801,7 +1762,7 @@ SUB(grenade_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
-// smoke
+
 SUB(grenade_explode) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 300;
@@ -1819,7 +1780,7 @@ SUB(grenade_explode) {
 	MY(type) = "alphastatic";
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
-// underwater bubbles
+
 SUB(grenade_explode) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -1839,7 +1800,7 @@ SUB(grenade_explode) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '196.0 196.0 196.0';
 }
-// underwatershockwave
+
 SUB(grenade_explode) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -1854,7 +1815,7 @@ SUB(grenade_explode) {
 	MY(underwater) = true;
 	MY(velocitymultiplier) = 0.300000;
 }
-// bouncing sparks
+
 SUB(grenade_explode) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 644;
@@ -1876,7 +1837,7 @@ SUB(grenade_explode) {
 	MY(velocityjitter) = '424.0 424.0 624.0';
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
-// debris
+
 SUB(grenade_explode) {
 	MY(airfriction) = 0.500000;
 	MY(alpha_min) = 644;
@@ -1959,9 +1920,8 @@ SUB(electro_muzzleflash) {
 	MY(velocitymultiplier) = 2.500000;
 }
 
-// electro trail
 DEF(TR_NEXUIZPLASMA);
-// glowing vapor trail
+
 SUB(TR_NEXUIZPLASMA) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -1978,7 +1938,7 @@ SUB(TR_NEXUIZPLASMA) {
 	MY(type) = "static";
 	MY(velocitymultiplier) = -0.100000;
 }
-// bright sparks
+
 SUB(TR_NEXUIZPLASMA) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 444;
@@ -2001,7 +1961,7 @@ SUB(TR_NEXUIZPLASMA) {
 }
 
 DEF(electro_impact);
-// decal
+
 SUB(electro_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2016,7 +1976,7 @@ SUB(electro_impact) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// shockwave
+
 SUB(electro_impact) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -2032,7 +1992,7 @@ SUB(electro_impact) {
 	MY(type) = "smoke";
 	MY(velocitymultiplier) = 44;
 }
-// flare effect
+
 SUB(electro_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2046,7 +2006,7 @@ SUB(electro_impact) {
 	MY(tex_max) = 38;
 	MY(type) = "static";
 }
-// cloud of bouncing sparks
+
 SUB(electro_impact) {
 	MY(airfriction) = 6;
 	MY(alpha_min) = 256;
@@ -2070,7 +2030,7 @@ SUB(electro_impact) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// inner cloud of smoke
+
 SUB(electro_impact) {
 	MY(airfriction) = 30;
 	MY(alpha_min) = 200;
@@ -2089,7 +2049,7 @@ SUB(electro_impact) {
 }
 
 DEF(electro_ballexplode);
-// decal
+
 SUB(electro_ballexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2104,7 +2064,7 @@ SUB(electro_ballexplode) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(electro_ballexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2118,7 +2078,7 @@ SUB(electro_ballexplode) {
 	MY(tex_max) = 38;
 	MY(type) = "static";
 }
-// cloud of bouncing sparks
+
 SUB(electro_ballexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2136,7 +2096,7 @@ SUB(electro_ballexplode) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// inner cloud of smoke
+
 SUB(electro_ballexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2153,7 +2113,7 @@ SUB(electro_ballexplode) {
 }
 
 DEF(electro_combo);
-// decal
+
 SUB(electro_combo) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2168,7 +2128,7 @@ SUB(electro_combo) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(electro_combo) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 128;
@@ -2182,7 +2142,7 @@ SUB(electro_combo) {
 	MY(tex_max) = 38;
 	MY(type) = "static";
 }
-// large sparks
+
 SUB(electro_combo) {
 	MY(airfriction) = 6;
 	MY(alpha_min) = 156;
@@ -2219,7 +2179,7 @@ SUB(electro_combo) {
 	MY(velocityjitter) = '312.0 312.0 312.0';
 	MY(velocitymultiplier) = 3;
 }
-// inner cloud of smoke
+
 SUB(electro_combo) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2234,7 +2194,7 @@ SUB(electro_combo) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '32.0 32.0 32.0';
 }
-// shockwave
+
 SUB(electro_combo) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -2288,7 +2248,7 @@ SUB(crylink_muzzleflash) {
 }
 
 DEF(crylink_impact);
-// decal
+
 SUB(crylink_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2300,7 +2260,7 @@ SUB(crylink_impact) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// purple flare effect
+
 SUB(crylink_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2314,7 +2274,7 @@ SUB(crylink_impact) {
 	MY(tex_max) = 39;
 	MY(type) = "static";
 }
-// purple sparks
+
 SUB(crylink_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2330,7 +2290,7 @@ SUB(crylink_impact) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// purple splash
+
 SUB(crylink_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2343,7 +2303,7 @@ SUB(crylink_impact) {
 	MY(type) = "static";
 	MY(velocityjitter) = '32.0 32.0 32.0';
 }
-// purple splash
+
 SUB(crylink_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2397,7 +2357,6 @@ SUB(nex_muzzleflash) {
 	MY(velocitymultiplier) = 1.500000;
 }
 
-// vortex beam
 DEF(nex_beam);
 SUB(nex_beam) {
 	MY(airfriction) = 5;
@@ -2414,7 +2373,7 @@ SUB(nex_beam) {
 	MY(trailspacing) = 64;
 	MY(type) = "static";
 }
-// drifting smoke
+
 SUB(nex_beam) {
 	MY(airfriction) = 9;
 	MY(alpha_min) = 32;
@@ -2430,7 +2389,7 @@ SUB(nex_beam) {
 	MY(type) = "static";
 	MY(velocityjitter) = '64.0 64.0 64.0';
 }
-// bright core
+
 SUB(nex_beam) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2442,7 +2401,7 @@ SUB(nex_beam) {
 	MY(trailspacing) = 12;
 	MY(type) = "static";
 }
-// sparks
+
 SUB(nex_beam) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 64;
@@ -2460,7 +2419,7 @@ SUB(nex_beam) {
 }
 
 DEF(nex_impact);
-// decal
+
 SUB(nex_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2477,7 +2436,7 @@ SUB(nex_impact) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// rotating something
+
 SUB(nex_impact) {
 	MY(alpha_min) = 55;
 	MY(alpha_max) = 55;
@@ -2496,7 +2455,7 @@ SUB(nex_impact) {
 	MY(tex_max) = 46;
 	MY(type) = "smoke";
 }
-// shockwave
+
 SUB(nex_impact) {
 	MY(alpha_min) = 50;
 	MY(alpha_max) = 50;
@@ -2511,7 +2470,7 @@ SUB(nex_impact) {
 	MY(tex_max) = 33;
 	MY(type) = "static";
 }
-// shockwave2
+
 SUB(nex_impact) {
 	MY(alpha_min) = 50;
 	MY(alpha_max) = 50;
@@ -2526,7 +2485,7 @@ SUB(nex_impact) {
 	MY(tex_max) = 65;
 	MY(type) = "static";
 }
-// flare effect
+
 SUB(nex_impact) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2540,7 +2499,7 @@ SUB(nex_impact) {
 	MY(tex_max) = 37;
 	MY(type) = "static";
 }
-// small sparks which glow brightly but live briefly
+
 SUB(nex_impact) {
 	MY(airfriction) = 9;
 	MY(alpha_max) = 128;
@@ -2558,7 +2517,7 @@ SUB(nex_impact) {
 	MY(velocityjitter) = '600.0 600.0 600.0';
 	MY(velocitymultiplier) = 0.500000;
 }
-// small sparks that live longer
+
 SUB(nex_impact) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 255;
@@ -2659,7 +2618,7 @@ SUB(hagar_bounce) {
 }
 
 DEF(hagar_explode);
-// decal
+
 SUB(hagar_explode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2674,7 +2633,7 @@ SUB(hagar_explode) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// fire effect which make bright dot inside
+
 SUB(hagar_explode) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 80;
@@ -2695,7 +2654,7 @@ SUB(hagar_explode) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '156.0 156.0 156.0';
 }
-// fire effect which expands then slows
+
 SUB(hagar_explode) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 128;
@@ -2716,7 +2675,7 @@ SUB(hagar_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '286.0 286.0 286.0';
 }
-// smoke
+
 SUB(hagar_explode) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 200;
@@ -2734,7 +2693,7 @@ SUB(hagar_explode) {
 	MY(type) = "alphastatic";
 	MY(velocityjitter) = '244.0 244.0 244.0';
 }
-// underwater bubbles
+
 SUB(hagar_explode) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -2754,7 +2713,7 @@ SUB(hagar_explode) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '96.0 96.0 96.0';
 }
-// bouncing sparks
+
 SUB(hagar_explode) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 644;
@@ -2818,9 +2777,8 @@ SUB(rocketlauncher_muzzleflash) {
 	MY(velocitymultiplier) = 0.300000;
 }
 
-// rocket trail
 DEF(TR_ROCKET);
-// smoke
+
 SUB(TR_ROCKET) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 300;
@@ -2845,7 +2803,7 @@ SUB(TR_ROCKET) {
 	MY(velocityjitter) = '3.0 3.0 3.0';
 	MY(velocitymultiplier) = -0.020000;
 }
-// fire
+
 SUB(TR_ROCKET) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 100;
@@ -2863,7 +2821,7 @@ SUB(TR_ROCKET) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = -1.500000;
 }
-// bubbles
+
 SUB(TR_ROCKET) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -2881,7 +2839,7 @@ SUB(TR_ROCKET) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 	MY(velocitymultiplier) = -0.310000;
 }
-// sparks
+
 SUB(TR_ROCKET) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 444;
@@ -2903,7 +2861,6 @@ SUB(TR_ROCKET) {
 	MY(velocitymultiplier) = -0.310000;
 }
 
-// rocket explosion (bigger than mortar and hagar)
 DEF(rocket_explode);
 SUB(rocket_explode) {
 	MY(alpha_min) = 256;
@@ -2919,7 +2876,7 @@ SUB(rocket_explode) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// fire effect
+
 SUB(rocket_explode) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 200;
@@ -2940,7 +2897,7 @@ SUB(rocket_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// fire effect 2
+
 SUB(rocket_explode) {
 	MY(airfriction) = 19;
 	MY(alpha_min) = 200;
@@ -2961,7 +2918,7 @@ SUB(rocket_explode) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '912.0 912.0 912.0';
 }
-// smoke
+
 SUB(rocket_explode) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 200;
@@ -2979,7 +2936,7 @@ SUB(rocket_explode) {
 	MY(type) = "alphastatic";
 	MY(velocityjitter) = '444.0 444.0 444.0';
 }
-// underwater bubbles
+
 SUB(rocket_explode) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -2999,7 +2956,7 @@ SUB(rocket_explode) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '144.0 144.0 144.0';
 }
-// underwatershockwave
+
 SUB(rocket_explode) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -3014,7 +2971,7 @@ SUB(rocket_explode) {
 	MY(underwater) = true;
 	MY(velocitymultiplier) = 0.300000;
 }
-// bouncing sparks
+
 SUB(rocket_explode) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 644;
@@ -3036,7 +2993,7 @@ SUB(rocket_explode) {
 	MY(velocityjitter) = '424.0 424.0 624.0';
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
-// debris
+
 SUB(rocket_explode) {
 	MY(airfriction) = 0.500000;
 	MY(alpha_min) = 644;
@@ -3404,9 +3361,8 @@ SUB(nex242_misc_laser_orange_beam_end) {
 	MY(velocitymultiplier) = 100;
 }
 
-// bigger crylink impact effect
 DEF(crylink_impactbig);
-// decal
+
 SUB(crylink_impactbig) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3418,7 +3374,7 @@ SUB(crylink_impactbig) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// purple flare effect
+
 SUB(crylink_impactbig) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3432,7 +3388,7 @@ SUB(crylink_impactbig) {
 	MY(tex_max) = 39;
 	MY(type) = "static";
 }
-// purple sparks
+
 SUB(crylink_impactbig) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3448,7 +3404,7 @@ SUB(crylink_impactbig) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// purple splash
+
 SUB(crylink_impactbig) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3461,7 +3417,7 @@ SUB(crylink_impactbig) {
 	MY(type) = "static";
 	MY(velocityjitter) = '32.0 32.0 32.0';
 }
-// purple splash
+
 SUB(crylink_impactbig) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3478,7 +3434,7 @@ SUB(crylink_impactbig) {
 #include "effectinfo_gentle.inc"
 
 DEF(laser_deadly);
-// decal
+
 SUB(laser_deadly) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3490,7 +3446,7 @@ SUB(laser_deadly) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// dust/smoke drifting away from the impact
+
 SUB(laser_deadly) {
 	MY(airfriction) = 7;
 	MY(alpha_max) = 64;
@@ -3509,7 +3465,7 @@ SUB(laser_deadly) {
 	MY(velocityjitter) = '15.0 15.0 15.0';
 	MY(velocitymultiplier) = 20;
 }
-// sparks
+
 SUB(laser_deadly) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 256;
@@ -3532,7 +3488,7 @@ SUB(laser_deadly) {
 }
 
 DEF(torch_small);
-// fire
+
 SUB(torch_small) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 256;
@@ -3550,7 +3506,7 @@ SUB(torch_small) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '1.0 1.0 50.0';
 }
-// smoke
+
 SUB(torch_small) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 256;
@@ -3588,7 +3544,7 @@ SUB(fountain01) {
 }
 
 DEF(hookbomb_explode);
-// decal
+
 SUB(hookbomb_explode) {
 	MY(airfriction) = 10;
 	MY(alpha_max) = 256;
@@ -3606,7 +3562,7 @@ SUB(hookbomb_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '550.0 550.0 550.0';
 }
-// decal in the air
+
 SUB(hookbomb_explode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 265;
@@ -3622,7 +3578,7 @@ SUB(hookbomb_explode) {
 	MY(tex_max) = 38;
 	MY(type) = "static";
 }
-// decal on the ground
+
 SUB(hookbomb_explode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3634,7 +3590,7 @@ SUB(hookbomb_explode) {
 	MY(tex_max) = 39;
 	MY(type) = "decal";
 }
-// some sparks
+
 SUB(hookbomb_explode) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 256;
@@ -3657,7 +3613,7 @@ SUB(hookbomb_explode) {
 }
 
 DEF(EF_MGTURRETTRAIL);
-// smoke
+
 SUB(EF_MGTURRETTRAIL) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 196;
@@ -3673,7 +3629,7 @@ SUB(EF_MGTURRETTRAIL) {
 	MY(trailspacing) = 10;
 	MY(type) = "smoke";
 }
-// bubbles
+
 SUB(EF_MGTURRETTRAIL) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -3694,7 +3650,7 @@ SUB(EF_MGTURRETTRAIL) {
 }
 
 DEF(fire_big);
-// fire
+
 SUB(fire_big) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 356;
@@ -3713,7 +3669,7 @@ SUB(fire_big) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(fire_big) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 256;
@@ -3734,7 +3690,7 @@ SUB(fire_big) {
 
 #define flare(name, colormin, colormax) \
 	DEF(name##_flare); \
-	SUB(name##_flare) /* smoke */ { \
+	SUB(name##_flare)             { \
 		MY(alpha_min) = 200; \
 		MY(alpha_max) = 256; \
 		MY(alpha_fade) = 160; \
@@ -3757,7 +3713,7 @@ flare(blue, "0x0000ff", "0x7194dc")
 #undef flare
 
 DEF(smoke_ring);
-// smoke
+
 SUB(smoke_ring) {
 	MY(airfriction) = 3;
 	MY(alpha_min) = 100;
@@ -3778,7 +3734,7 @@ SUB(smoke_ring) {
 }
 
 DEF(smoke_large);
-// smoke
+
 SUB(smoke_large) {
 	MY(airfriction) = 7;
 	MY(alpha_min) = 140;
@@ -3879,7 +3835,6 @@ SUB(smoking) {
 	MY(velocityjitter) = '5.0 5.0 20.0';
 }
 
-// golden dust (create it once per second to cover large area in small yellow particles)
 DEF(goldendust);
 SUB(goldendust) {
 	MY(alpha_min) = 256;
@@ -3962,7 +3917,6 @@ SUB(ammoregen_fx) {
 	MY(velocityjitter) = '50.0 50.0 0.0';
 }
 
-// red-yellow flame like fx
 DEF(rage);
 SUB(rage) {
 	MY(airfriction) = 2;
@@ -3983,7 +3937,6 @@ SUB(rage) {
 	MY(velocityjitter) = '25.0 25.0 25.0';
 }
 
-// pieces of glass or ice falling on the floor
 DEF(iceorglass);
 SUB(iceorglass) {
 	MY(airfriction) = 3;
@@ -4005,7 +3958,6 @@ SUB(iceorglass) {
 	MY(velocityjitter) = '100.0 100.0 100.0';
 }
 
-// cover small area in poison gas, spawn it once per second
 DEF(poisonfield);
 SUB(poisonfield) {
 	MY(airfriction) = 1;
@@ -4026,7 +3978,6 @@ SUB(poisonfield) {
 	MY(velocityjitter) = '5.0 5.0 5.0';
 }
 
-// cover small area in icy mist, spawn it once per second
 DEF(icefield);
 SUB(icefield) {
 	MY(airfriction) = 1;
@@ -4063,9 +4014,8 @@ SUB(icefield) {
 	MY(type) = "smoke";
 }
 
-// cover very small area in flames, spawn it 3 times per second (or more often to get better looking fire at cost of fps hit )
 DEF(firefield);
-// flames that go up
+
 SUB(firefield) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 50;
@@ -4085,7 +4035,7 @@ SUB(firefield) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '5.0 5.0 30.0';
 }
-// flames that stay on the ground
+
 SUB(firefield) {
 	MY(alpha_min) = 50;
 	MY(alpha_max) = 256;
@@ -4101,7 +4051,7 @@ SUB(firefield) {
 	MY(tex_max) = 55;
 	MY(type) = "smoke";
 }
-// smoke
+
 SUB(firefield) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4118,9 +4068,8 @@ SUB(firefield) {
 	MY(type) = "alphastatic";
 }
 
-// flamethrower, spawn it as fast as you can  20 times per second or more, it needs direction
 DEF(flamethrower);
-// fast fire
+
 SUB(flamethrower) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -4140,7 +4089,7 @@ SUB(flamethrower) {
 	MY(velocityjitter) = '40.0 40.0 11.0';
 	MY(velocitymultiplier) = 30;
 }
-// slow fire
+
 SUB(flamethrower) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -4160,7 +4109,7 @@ SUB(flamethrower) {
 	MY(velocityjitter) = '40.0 40.0 40.0';
 	MY(velocitymultiplier) = 20;
 }
-// very slow and small fire
+
 SUB(flamethrower) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -4180,7 +4129,7 @@ SUB(flamethrower) {
 	MY(velocityjitter) = '30.0 30.0 30.0';
 	MY(velocitymultiplier) = 10;
 }
-// decreasing fire
+
 SUB(flamethrower) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -4200,7 +4149,7 @@ SUB(flamethrower) {
 	MY(velocityjitter) = '10.0 10.0 10.0';
 	MY(velocitymultiplier) = 15;
 }
-// smoke
+
 SUB(flamethrower) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 256;
@@ -4219,9 +4168,8 @@ SUB(flamethrower) {
 	MY(velocityoffset) = '0.0 0.0 10.0';
 }
 
-// port-o-launch trail
 DEF(TR_WIZSPIKE);
-// glowing vapor trail
+
 SUB(TR_WIZSPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4238,7 +4186,7 @@ SUB(TR_WIZSPIKE) {
 	MY(type) = "static";
 	MY(velocitymultiplier) = -0.100000;
 }
-// bright sparks
+
 SUB(TR_WIZSPIKE) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 444;
@@ -4260,9 +4208,8 @@ SUB(TR_WIZSPIKE) {
 	MY(velocityoffset) = '0.0 0.0 15.0';
 }
 
-// TAG trail
 DEF(TR_VORESPIKE);
-// glowing vapor trail
+
 SUB(TR_VORESPIKE) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4279,7 +4226,7 @@ SUB(TR_VORESPIKE) {
 	MY(type) = "static";
 	MY(velocitymultiplier) = -0.100000;
 }
-// bright sparks
+
 SUB(TR_VORESPIKE) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 444;
@@ -4316,7 +4263,7 @@ SUB(flac_explode) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// fire effect which make bright dot inside
+
 SUB(flac_explode) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 128;
@@ -4337,7 +4284,7 @@ SUB(flac_explode) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '156.0 156.0 156.0';
 }
-// fire effect which expands then slows
+
 SUB(flac_explode) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 128;
@@ -4358,7 +4305,7 @@ SUB(flac_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
-// smoke
+
 SUB(flac_explode) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 500;
@@ -4376,7 +4323,7 @@ SUB(flac_explode) {
 	MY(type) = "alphastatic";
 	MY(velocityjitter) = '244.0 244.0 244.0';
 }
-// underwater bubbles
+
 SUB(flac_explode) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -4396,7 +4343,7 @@ SUB(flac_explode) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '96.0 96.0 96.0';
 }
-// bouncing sparks
+
 SUB(flac_explode) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_min) = 256;
@@ -4418,7 +4365,6 @@ SUB(flac_explode) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// bullet trail (somewhat like a tracer)
 DEF(tr_bullet);
 SUB(tr_bullet) {
 	MY(alpha) = '500 600 10000';
@@ -4466,7 +4412,6 @@ SUB(tr_bullet) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 }
 
-// smoke emitter for small pipes
 DEF(smoking_smallemitter);
 SUB(smoking_smallemitter) {
 	MY(airfriction) = -1;
@@ -4486,9 +4431,8 @@ SUB(smoking_smallemitter) {
 	MY(velocityjitter) = '5.0 5.0 20.0';
 }
 
-// crylink trail
 DEF(TR_CRYLINKPLASMA);
-// plasma smoke
+
 SUB(TR_CRYLINKPLASMA) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4505,7 +4449,7 @@ SUB(TR_CRYLINKPLASMA) {
 	MY(velocityjitter) = '8.0 8.0 8.0';
 	MY(velocitymultiplier) = -0.010000;
 }
-// crylink main trail
+
 SUB(TR_CRYLINKPLASMA) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4570,7 +4514,7 @@ SUB(alien_blood) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '99.0 99.0 55.0';
 }
-// blood mist
+
 SUB(alien_blood) {
 	MY(alpha_min) = 3000;
 	MY(alpha_max) = 5560;
@@ -4608,7 +4552,7 @@ SUB(robot_blood) {
 	MY(velocityjitter) = '264.0 264.0 264.0';
 	MY(velocityoffset) = '0.0 0.0 100.0';
 }
-// shockwave
+
 SUB(robot_blood) {
 	MY(alpha_max) = 90;
 	MY(alpha_fade) = 1000;
@@ -4623,7 +4567,7 @@ SUB(robot_blood) {
 	MY(tex_max) = 74;
 	MY(type) = "smoke";
 }
-// electo sparks
+
 SUB(robot_blood) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4673,7 +4617,6 @@ SUB(alien_TR_BLOOD) {
 	MY(velocitymultiplier) = -0.100000;
 }
 
-// splash around gib
 SUB(TR_BLOOD) {
 	MY(alpha_min) = 684;
 	MY(alpha_max) = 684;
@@ -4718,7 +4661,7 @@ SUB(robot_TR_BLOOD) {
 	MY(velocityjitter) = '64.0 64.0 64.0';
 	MY(velocitymultiplier) = -0.300000;
 }
-// fire
+
 SUB(robot_TR_BLOOD) {
 	MY(airfriction) = 4;
 	MY(alpha_min) = 128;
@@ -4739,7 +4682,7 @@ SUB(robot_TR_BLOOD) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '44.0 44.0 44.0';
 }
-// arcs
+
 SUB(robot_TR_BLOOD) {
 	MY(alpha_min) = 1128;
 	MY(alpha_max) = 1256;
@@ -4808,7 +4751,7 @@ SUB(robot_TR_SLIGHTBLOOD) {
 }
 
 DEF(item_pickup);
-// flare particle and light
+
 SUB(item_pickup) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 64;
@@ -4820,7 +4763,7 @@ SUB(item_pickup) {
 	MY(size_max) = 16;
 	MY(type) = "static";
 }
-// cloud of particles which expand rapidly and then slow to form a ball
+
 SUB(item_pickup) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -4862,7 +4805,7 @@ SUB(bloodshower) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '764.0 764.0 764.0';
 }
-// center blood
+
 SUB(bloodshower) {
 	MY(alpha_min) = 156;
 	MY(alpha_max) = 656;
@@ -4906,7 +4849,7 @@ SUB(alien_bloodshower) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '764.0 764.0 764.0';
 }
-// center blood
+
 SUB(bloodshower) {
 	MY(alpha_min) = 156;
 	MY(alpha_max) = 656;
@@ -4950,7 +4893,7 @@ SUB(robot_bloodshower) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '764.0 764.0 764.0';
 }
-// arc
+
 SUB(robot_bloodshower) {
 	MY(alpha_min) = 1128;
 	MY(alpha_max) = 1256;
@@ -4970,7 +4913,7 @@ SUB(robot_bloodshower) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '44.0 44.0 44.0';
 }
-// shockwave
+
 SUB(robot_bloodshower) {
 	MY(alpha_min) = 11;
 	MY(alpha_max) = 125;
@@ -4988,7 +4931,7 @@ SUB(robot_bloodshower) {
 
 #define ground_quake(name, colormin, colormax) \
 	DEF(name##_ground_quake); \
-	SUB(name##_ground_quake) /* smoke */ { \
+	SUB(name##_ground_quake)             { \
 		MY(airfriction) = 3; \
 		MY(alpha_min) = 100; \
 		MY(alpha_max) = 126; \
@@ -5048,7 +4991,7 @@ SUB(robot_bloodshower) {
 		MY(type) = "smoke"; \
 		MY(velocityjitter) = '22.0 22.0 50.0'; \
 	} \
-	SUB(name##_ground_quake) /* smoke */ { \
+	SUB(name##_ground_quake)             { \
 		MY(alpha_min) = 200; \
 		MY(alpha_max) = 256; \
 		MY(alpha_fade) = 200; \
@@ -5067,7 +5010,6 @@ SUB(robot_bloodshower) {
 		MY(type) = "alphastatic"; \
 		MY(velocityjitter) = '11.0 11.0 50.0'; \
 	} \
-	/**/
 
 ground_quake(red, 	"0x9E6A64", "0x91302D")
 ground_quake(blue, 	"0x64679E", "0x2D4C91")
@@ -5075,7 +5017,6 @@ ground_quake(blue, 	"0x64679E", "0x2D4C91")
 
 #include "effectinfo_gentle_morphed.inc"
 
-// Team / hit vaporizer effects
 #define TE_TEI_G3(name, colormin1, colormax1, colormin2, colormax2) \
 	DEF(TE_TEI_G3##name); \
 	SUB(TE_TEI_G3##name) { \
@@ -5121,7 +5062,7 @@ ground_quake(blue, 	"0x64679E", "0x2D4C91")
 		MY(tex_max) = 200; \
 		MY(type) = "beam"; \
 	} \
-	SUB(TE_TEI_G3##name##_HIT) /* rings */ { \
+	SUB(TE_TEI_G3##name##_HIT)             { \
 		MY(airfriction) = -4; \
 		MY(alpha_min) = 256; \
 		MY(alpha_max) = 256; \
@@ -5148,7 +5089,7 @@ ground_quake(blue, 	"0x64679E", "0x2D4C91")
 		MY(trailspacing) = 40; \
 		MY(type) = "smoke"; \
 	} \
-	/**/
+
 TE_TEI_G3(RED, "0xFF0000", "0xFF0011", "0x200000", "0x400000")
 TE_TEI_G3(BLUE, "0x0000FF", "0x1100FF", "0x000020", "0x000040")
 TE_TEI_G3(YELLOW, "0xffff00", "0xffff11", "0x202000", "0x404000")
@@ -5179,7 +5120,7 @@ SUB(firemine) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '10.0 10.0 2.0';
 }
-// slowfire
+
 SUB(firemine) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -5199,7 +5140,7 @@ SUB(firemine) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '10.0 10.0 10.0';
 }
-// very slow and small fire
+
 SUB(firemine) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -5219,7 +5160,7 @@ SUB(firemine) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '8.0 8.0 8.0';
 }
-// decreasing fire
+
 SUB(firemine) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -5239,7 +5180,7 @@ SUB(firemine) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '3.0 3.0 3.0';
 }
-// smoke
+
 SUB(firemine) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 256;
@@ -5257,7 +5198,7 @@ SUB(firemine) {
 	MY(type) = "alphastatic";
 	MY(velocityoffset) = '0.0 0.0 3.0';
 }
-// fastfire
+
 SUB(firemine) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -5274,7 +5215,7 @@ SUB(firemine) {
 	MY(trailspacing) = 1;
 	MY(type) = "smoke";
 }
-// light only
+
 SUB(firemine) {
 	MY(lightcolor) = '2.7 2.7 0.6';
 	MY(lightradiusfade) = 50000;
@@ -5302,7 +5243,7 @@ SUB(fireball) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '40.0 40.0 11.0';
 }
-// slow fire
+
 SUB(fireball) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -5322,7 +5263,7 @@ SUB(fireball) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '40.0 40.0 40.0';
 }
-// very slow and small fire
+
 SUB(fireball) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -5342,7 +5283,7 @@ SUB(fireball) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '30.0 30.0 30.0';
 }
-// decreasing fire
+
 SUB(fireball) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -5362,7 +5303,7 @@ SUB(fireball) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '10.0 10.0 10.0';
 }
-// smoke
+
 SUB(fireball) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 256;
@@ -5380,7 +5321,7 @@ SUB(fireball) {
 	MY(type) = "alphastatic";
 	MY(velocityoffset) = '0.0 0.0 10.0';
 }
-// fast fire
+
 SUB(fireball) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -5397,7 +5338,7 @@ SUB(fireball) {
 	MY(trailspacing) = 1;
 	MY(type) = "smoke";
 }
-// light only
+
 SUB(fireball) {
 	MY(lightcolor) = '2.7 2.7 0.6';
 	MY(lightradiusfade) = 3000;
@@ -5421,9 +5362,8 @@ SUB(fireball_laser) {
 	MY(velocitymultiplier) = 10;
 }
 
-// rocket explosion (bigger than mortar and hagar)
 DEF(fireball_explode);
-// decal
+
 SUB(fireball_explode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -5438,7 +5378,7 @@ SUB(fireball_explode) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// flare effect
+
 SUB(fireball_explode) {
 	MY(alpha_min) = 192;
 	MY(alpha_max) = 192;
@@ -5452,7 +5392,7 @@ SUB(fireball_explode) {
 	MY(tex_max) = 37;
 	MY(type) = "static";
 }
-// fire effect
+
 SUB(fireball_explode) {
 	MY(airfriction) = 4;
 	MY(alpha_min) = 128;
@@ -5472,7 +5412,7 @@ SUB(fireball_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// underwater bubbles
+
 SUB(fireball_explode) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -5492,7 +5432,7 @@ SUB(fireball_explode) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '144.0 144.0 144.0';
 }
-// bouncing sparks
+
 SUB(fireball_explode) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_min) = 256;
@@ -5621,7 +5561,7 @@ SUB(fireball_bfgdamage) {
 }
 
 DEF(EF_FLAME);
-// fire
+
 SUB(EF_FLAME) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 356;
@@ -5641,7 +5581,7 @@ SUB(EF_FLAME) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(EF_FLAME) {
 	MY(alpha_min) = 200;
 	MY(alpha_max) = 256;
@@ -5667,7 +5607,6 @@ SUB(EF_FLAME) {
 	MY(lightradius) = 200;
 }
 
-// rifle bullet trail (somewhat like a tracer)
 DEF(tr_rifle);
 SUB(tr_rifle) {
 	MY(alpha_min) = 256;
@@ -5717,9 +5656,8 @@ SUB(tr_rifle) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 }
 
-// rocket guiding start
 DEF(rocket_guide);
-// underwater bubbles
+
 SUB(rocket_guide) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -5740,7 +5678,7 @@ SUB(rocket_guide) {
 	MY(velocityjitter) = '48.0 48.0 48.0';
 	MY(velocitymultiplier) = -0.100000;
 }
-// bouncing sparks
+
 SUB(rocket_guide) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_min) = 256;
@@ -5778,7 +5716,6 @@ SUB(rocket_guide) {
 	MY(type) = "smoke";
 }
 
-// gauntlet laser
 DEF(laser_gauntlet);
 SUB(laser_gauntlet) {
 	MY(airfriction) = 10;
@@ -5824,7 +5761,7 @@ SUB(laser_gauntlet) {
 }
 
 DEF(laser_gauntletmuzzleflash);
-// glow and light
+
 SUB(laser_gauntletmuzzleflash) {
 	MY(airfriction) = 10;
 	MY(alpha_min) = 256;
@@ -5844,7 +5781,7 @@ SUB(laser_gauntletmuzzleflash) {
 	MY(tex_max) = 65;
 	MY(type) = "smoke";
 }
-// electricity
+
 SUB(laser_gauntletmuzzleflash) {
 	MY(airfriction) = 10;
 	MY(alpha_min) = 128;
@@ -5868,7 +5805,7 @@ SUB(laser_gauntletmuzzleflash) {
 	MY(velocityjitter) = '150.0 150.0 150.0';
 	MY(velocitymultiplier) = 0.200000;
 }
-// fire
+
 SUB(laser_gauntletmuzzleflash) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 256;
@@ -5889,9 +5826,8 @@ SUB(laser_gauntletmuzzleflash) {
 	MY(velocitymultiplier) = 0.200000;
 }
 
-// torch flame, spawn it as fast as you can  20 times per second or more, supports direction but not required
 DEF(torchflame);
-// fast fire
+
 SUB(torchflame) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -5910,7 +5846,7 @@ SUB(torchflame) {
 	MY(velocityjitter) = '40.0 40.0 11.0';
 	MY(velocitymultiplier) = 30;
 }
-// slow fire
+
 SUB(torchflame) {
 	MY(airfriction) = 1.200000;
 	MY(alpha_min) = 50;
@@ -5929,7 +5865,7 @@ SUB(torchflame) {
 	MY(velocityjitter) = '40.0 40.0 40.0';
 	MY(velocitymultiplier) = 20;
 }
-// very slow and small fire
+
 SUB(torchflame) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -5948,7 +5884,7 @@ SUB(torchflame) {
 	MY(velocityjitter) = '30.0 30.0 30.0';
 	MY(velocitymultiplier) = 10;
 }
-// decreasing fire
+
 SUB(torchflame) {
 	MY(airfriction) = 0.300000;
 	MY(alpha_min) = 50;
@@ -5967,7 +5903,7 @@ SUB(torchflame) {
 	MY(velocityjitter) = '10.0 10.0 10.0';
 	MY(velocitymultiplier) = 15;
 }
-// smoke
+
 SUB(torchflame) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 256;
@@ -6115,7 +6051,7 @@ SUB(gauntlet_lightning) {
 }
 
 DEF(crylink_joinexplode);
-// decal
+
 SUB(crylink_joinexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6127,7 +6063,7 @@ SUB(crylink_joinexplode) {
 	MY(tex_max) = 47;
 	MY(type) = "decal";
 }
-// purple flare effect
+
 SUB(crylink_joinexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6141,7 +6077,7 @@ SUB(crylink_joinexplode) {
 	MY(tex_max) = 39;
 	MY(type) = "static";
 }
-// purple sparks
+
 SUB(crylink_joinexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6157,7 +6093,7 @@ SUB(crylink_joinexplode) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// purple splash
+
 SUB(crylink_joinexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6170,7 +6106,7 @@ SUB(crylink_joinexplode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '32.0 32.0 32.0';
 }
-// purple splash
+
 SUB(crylink_joinexplode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6184,7 +6120,6 @@ SUB(crylink_joinexplode) {
 	MY(velocityjitter) = '256.0 256.0 256.0';
 }
 
-// sparks for keepaway ball touch
 DEF(kaball_sparks);
 SUB(kaball_sparks) {
 	MY(airfriction) = 3;
@@ -6205,7 +6140,6 @@ SUB(kaball_sparks) {
 	MY(velocitymultiplier) = 0.500000;
 }
 
-// weak rifle bullet trail (somewhat like a tracer)
 DEF(tr_rifle_weak);
 SUB(tr_rifle_weak) {
 	MY(alpha_min) = 256;
@@ -6255,7 +6189,6 @@ SUB(tr_rifle_weak) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 }
 
-// red smoke emiter
 DEF(red_smoke);
 SUB(red_smoke) {
 	MY(airfriction) = -1;
@@ -6276,7 +6209,6 @@ SUB(red_smoke) {
 	MY(velocitymultiplier) = 5;
 }
 
-// pipe smoke emiter
 DEF(pipe_smoke);
 SUB(pipe_smoke) {
 	MY(airfriction) = -1;
@@ -6299,7 +6231,6 @@ SUB(pipe_smoke) {
 	MY(velocitymultiplier) = 15;
 }
 
-// seeker missile trail
 DEF(TR_SEEKER);
 SUB(TR_SEEKER) {
 	MY(alpha_min) = 200;
@@ -6325,7 +6256,7 @@ SUB(TR_SEEKER) {
 	MY(velocityjitter) = '3.0 3.0 3.0';
 	MY(velocitymultiplier) = -0.020000;
 }
-// fire
+
 SUB(TR_SEEKER) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 100;
@@ -6343,7 +6274,7 @@ SUB(TR_SEEKER) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = -1.500000;
 }
-// bubbles
+
 SUB(TR_SEEKER) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6361,7 +6292,7 @@ SUB(TR_SEEKER) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 	MY(velocitymultiplier) = -0.310000;
 }
-// sparks
+
 SUB(TR_SEEKER) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 444;
@@ -6385,9 +6316,8 @@ SUB(TR_SEEKER) {
 
 #include "effectinfo_vehicles.inc"
 
-// generic explosion size:big (biggest explosion ever)
 DEF(explosion_big);
-// decal
+
 SUB(explosion_big) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -6402,7 +6332,7 @@ SUB(explosion_big) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// shockwave
+
 SUB(explosion_big) {
 	MY(alpha_min) = 56;
 	MY(alpha_max) = 56;
@@ -6417,7 +6347,7 @@ SUB(explosion_big) {
 	MY(tex_max) = 33;
 	MY(type) = "static";
 }
-// fire effect
+
 SUB(explosion_big) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 200;
@@ -6437,7 +6367,7 @@ SUB(explosion_big) {
 	MY(type) = "static";
 	MY(velocityjitter) = '2512.0 2512.0 2512.0';
 }
-// fire rays
+
 SUB(explosion_big) {
 	MY(airfriction) = -5;
 	MY(alpha_min) = 200;
@@ -6458,7 +6388,7 @@ SUB(explosion_big) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// smoke
+
 SUB(explosion_big) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 300;
@@ -6475,7 +6405,7 @@ SUB(explosion_big) {
 	MY(type) = "alphastatic";
 	MY(velocityjitter) = '3444.0 3444.0 3444.0';
 }
-// bouncing sparks
+
 SUB(explosion_big) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 644;
@@ -6497,7 +6427,7 @@ SUB(explosion_big) {
 	MY(velocityjitter) = '924.0 924.0 924.0';
 	MY(velocityoffset) = '0.0 0.0 370.0';
 }
-// debris
+
 SUB(explosion_big) {
 	MY(airfriction) = 0.500000;
 	MY(alpha_min) = 444;
@@ -6521,7 +6451,7 @@ SUB(explosion_big) {
 	MY(velocityjitter) = '1800.0 1800.0 1800.0';
 	MY(velocityoffset) = '0.0 0.0 970.0';
 }
-// underwater bubbles
+
 SUB(explosion_big) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -6541,7 +6471,7 @@ SUB(explosion_big) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '444.0 444.0 444.0';
 }
-// underwatershockwave
+
 SUB(explosion_big) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -6557,9 +6487,8 @@ SUB(explosion_big) {
 	MY(velocitymultiplier) = 0.300000;
 }
 
-// generic explosion size:medium (it leaves rising smoke for a longer time)
 DEF(explosion_medium);
-// shockwave
+
 SUB(explosion_medium) {
 	MY(alpha_min) = 56;
 	MY(alpha_max) = 56;
@@ -6574,7 +6503,7 @@ SUB(explosion_medium) {
 	MY(tex_max) = 33;
 	MY(type) = "static";
 }
-// fire effect
+
 SUB(explosion_medium) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 200;
@@ -6598,7 +6527,7 @@ SUB(explosion_medium) {
 	MY(type) = "static";
 	MY(velocityjitter) = '1512.0 1512.0 1512.0';
 }
-// fire effect 2
+
 SUB(explosion_medium) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 200;
@@ -6623,7 +6552,7 @@ SUB(explosion_medium) {
 	MY(type) = "static";
 	MY(velocityjitter) = '1512.0 1512.0 1512.0';
 }
-// fire rays
+
 SUB(explosion_medium) {
 	MY(airfriction) = -3;
 	MY(alpha_min) = 200;
@@ -6644,7 +6573,7 @@ SUB(explosion_medium) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// smoke
+
 SUB(explosion_medium) {
 	MY(airfriction) = 3;
 	MY(alpha_min) = 300;
@@ -6666,7 +6595,7 @@ SUB(explosion_medium) {
 	MY(type) = "alphastatic";
 	MY(velocityjitter) = '200.0 200.0 200.0';
 }
-// smoke 2
+
 SUB(explosion_medium) {
 	MY(airfriction) = 3;
 	MY(alpha_min) = 300;
@@ -6690,7 +6619,7 @@ SUB(explosion_medium) {
 	MY(velocityjitter) = '500.0 500.0 500.0';
 	MY(velocityoffset) = '0.0 0.0 200.0';
 }
-// smoke rays
+
 SUB(explosion_medium) {
 	MY(alpha_min) = 140;
 	MY(alpha_max) = 255;
@@ -6708,7 +6637,7 @@ SUB(explosion_medium) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '250.0 250.0 250.0';
 }
-// bouncing sparks
+
 SUB(explosion_medium) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 644;
@@ -6730,7 +6659,7 @@ SUB(explosion_medium) {
 	MY(velocityjitter) = '624.0 624.0 624.0';
 	MY(velocityoffset) = '0.0 0.0 370.0';
 }
-// underwater bubbles
+
 SUB(explosion_medium) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -6750,7 +6679,7 @@ SUB(explosion_medium) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '444.0 444.0 444.0';
 }
-// underwatershockwave
+
 SUB(explosion_medium) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -6766,9 +6695,8 @@ SUB(explosion_medium) {
 	MY(velocitymultiplier) = 0.300000;
 }
 
-// generic explosion size:small (its fire only, made to support other explosions)
 DEF(explosion_small);
-// shockwave
+
 SUB(explosion_small) {
 	MY(alpha_min) = 56;
 	MY(alpha_max) = 56;
@@ -6783,7 +6711,7 @@ SUB(explosion_small) {
 	MY(tex_max) = 33;
 	MY(type) = "static";
 }
-// fire effect
+
 SUB(explosion_small) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 200;
@@ -6806,7 +6734,7 @@ SUB(explosion_small) {
 	MY(type) = "static";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// fire effect 2
+
 SUB(explosion_small) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 200;
@@ -6829,7 +6757,7 @@ SUB(explosion_small) {
 	MY(type) = "static";
 	MY(velocityjitter) = '912.0 912.0 912.0';
 }
-// fire rays
+
 SUB(explosion_small) {
 	MY(airfriction) = -3;
 	MY(alpha_min) = 200;
@@ -6850,7 +6778,7 @@ SUB(explosion_small) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '512.0 512.0 512.0';
 }
-// underwater bubbles
+
 SUB(explosion_small) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -6870,7 +6798,7 @@ SUB(explosion_small) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '144.0 144.0 144.0';
 }
-// underwatershockwave
+
 SUB(explosion_small) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -6885,7 +6813,6 @@ SUB(explosion_small) {
 	MY(underwater) = true;
 }
 
-// big smoke ( for spamming on damaged stuff )
 DEF(smoke_big);
 SUB(smoke_big) {
 	MY(airfriction) = 4;
@@ -6911,7 +6838,6 @@ SUB(smoke_big) {
 	MY(velocityoffset) = '0.0 0.0 200.0';
 }
 
-// small smoke ( more precise than big one, for spamming on damaged parts like raptors spinner )
 DEF(smoke_small);
 SUB(smoke_small) {
 	MY(airfriction) = 4;
@@ -6936,7 +6862,6 @@ SUB(smoke_small) {
 	MY(velocityoffset) = '0.0 0.0 200.0';
 }
 
-// metal impact effect
 DEF(impact_metal);
 SUB(impact_metal) {
 	MY(alpha_min) = 25;
@@ -6953,7 +6878,7 @@ SUB(impact_metal) {
 	MY(tex_max) = 8;
 	MY(type) = "alphastatic";
 }
-// sparks
+
 SUB(impact_metal) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 255;
@@ -6974,7 +6899,6 @@ SUB(impact_metal) {
 	MY(velocitymultiplier) = 2;
 }
 
-// stone impact effect
 DEF(impact_stone);
 SUB(impact_stone) {
 	MY(alpha_min) = 50;
@@ -6991,7 +6915,7 @@ SUB(impact_stone) {
 	MY(tex_max) = 8;
 	MY(type) = "alphastatic";
 }
-// debris
+
 SUB(impact_stone) {
 	MY(airfriction) = 0.500000;
 	MY(alpha_min) = 450;
@@ -7015,7 +6939,6 @@ SUB(impact_stone) {
 	MY(velocityjitter) = '124.0 124.0 324.0';
 }
 
-// wood impact effect
 DEF(impact_wood);
 SUB(impact_wood) {
 	MY(alpha_min) = 50;
@@ -7032,7 +6955,7 @@ SUB(impact_wood) {
 	MY(tex_max) = 8;
 	MY(type) = "alphastatic";
 }
-// sparks
+
 SUB(impact_wood) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 255;
@@ -7052,7 +6975,6 @@ SUB(impact_wood) {
 	MY(velocitymultiplier) = 2;
 }
 
-// flesh impact effect
 DEF(impact_flesh);
 SUB(impact_flesh) {
 	MY(alpha_min) = 100;
@@ -7067,7 +6989,7 @@ SUB(impact_flesh) {
 	MY(tex_max) = 8;
 	MY(type) = "alphastatic";
 }
-// blood splash
+
 SUB(impact_flesh) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 256;
@@ -7091,9 +7013,8 @@ SUB(impact_flesh) {
 	MY(velocitymultiplier) = 5;
 }
 
-// hagar trail
 DEF(tr_hagar);
-// smoke
+
 SUB(tr_hagar) {
 	MY(alpha_min) = 300;
 	MY(alpha_max) = 400;
@@ -7111,7 +7032,7 @@ SUB(tr_hagar) {
 	MY(velocityjitter) = '1.0 1.0 1.0';
 	MY(velocitymultiplier) = -0.020000;
 }
-// fire
+
 SUB(tr_hagar) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 100;
@@ -7130,7 +7051,7 @@ SUB(tr_hagar) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = -1;
 }
-// bubbles
+
 SUB(tr_hagar) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -7150,7 +7071,6 @@ SUB(tr_hagar) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 }
 
-// laser damage effect
 DEF(damage_blaster);
 SUB(damage_blaster) {
 	MY(airfriction) = -0.350000;
@@ -7173,7 +7093,6 @@ SUB(damage_blaster) {
 	MY(velocityjitter) = '0.4 0.4 0.6';
 }
 
-// shotgun damage effect, normal blood
 DEF(damage_shotgun);
 SUB(damage_shotgun) {
 	MY(airfriction) = 1;
@@ -7197,7 +7116,7 @@ SUB(damage_shotgun) {
 	MY(velocityjitter) = '64.0 64.0 64.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(damage_shotgun) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7212,7 +7131,6 @@ SUB(damage_shotgun) {
 	MY(type) = "alphastatic";
 }
 
-// shotgun damage effect, alien blood
 DEF(alien_damage_shotgun);
 SUB(alien_damage_shotgun) {
 	MY(airfriction) = 1;
@@ -7236,7 +7154,7 @@ SUB(alien_damage_shotgun) {
 	MY(velocityjitter) = '64.0 64.0 64.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(alien_damage_shotgun) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7251,7 +7169,6 @@ SUB(alien_damage_shotgun) {
 	MY(type) = "alphastatic";
 }
 
-// shotgun damage effect, robot blood
 DEF(robot_damage_shotgun);
 SUB(robot_damage_shotgun) {
 	MY(airfriction) = 1;
@@ -7275,7 +7192,7 @@ SUB(robot_damage_shotgun) {
 	MY(velocityjitter) = '64.0 64.0 64.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(robot_damage_shotgun) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7290,7 +7207,6 @@ SUB(robot_damage_shotgun) {
 	MY(type) = "alphastatic";
 }
 
-// machinegun damage effect, normal blood
 DEF(damage_machinegun);
 SUB(damage_machinegun) {
 	MY(airfriction) = 1;
@@ -7314,7 +7230,7 @@ SUB(damage_machinegun) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(damage_machinegun) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7328,7 +7244,6 @@ SUB(damage_machinegun) {
 	MY(type) = "alphastatic";
 }
 
-// machinegun damage effect, alien blood
 DEF(alien_damage_machinegun);
 SUB(alien_damage_machinegun) {
 	MY(airfriction) = 1;
@@ -7352,7 +7267,7 @@ SUB(alien_damage_machinegun) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(alien_damage_machinegun) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7366,7 +7281,6 @@ SUB(alien_damage_machinegun) {
 	MY(type) = "alphastatic";
 }
 
-// machinegun damage effect, robot blood
 DEF(robot_damage_machinegun);
 SUB(robot_damage_machinegun) {
 	MY(airfriction) = 1;
@@ -7390,7 +7304,7 @@ SUB(robot_damage_machinegun) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(robot_damage_machinegun) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7404,7 +7318,6 @@ SUB(robot_damage_machinegun) {
 	MY(type) = "alphastatic";
 }
 
-// minelayer damage effect
 DEF(damage_minelayer);
 SUB(damage_minelayer) {
 	MY(alpha_min) = 512;
@@ -7424,7 +7337,7 @@ SUB(damage_minelayer) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(damage_minelayer) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 32;
@@ -7443,7 +7356,6 @@ SUB(damage_minelayer) {
 	MY(velocityjitter) = '11.0 11.0 50.0';
 }
 
-// mortar damage effect
 DEF(damage_mortar);
 SUB(damage_mortar) {
 	MY(alpha_min) = 512;
@@ -7463,7 +7375,7 @@ SUB(damage_mortar) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(damage_mortar) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 32;
@@ -7482,7 +7394,6 @@ SUB(damage_mortar) {
 	MY(velocityjitter) = '11.0 11.0 50.0';
 }
 
-// arc damage effect
 DEF(damage_arc);
 SUB(damage_arc) {
 	MY(airfriction) = -0.650000;
@@ -7508,7 +7419,7 @@ SUB(damage_arc) {
 	MY(type) = "static";
 	MY(velocityjitter) = '6.0 6.0 12.0';
 }
-// plasma smoke
+
 SUB(damage_arc) {
 	MY(airfriction) = -0.500000;
 	MY(alpha_min) = 64;
@@ -7529,7 +7440,7 @@ SUB(damage_arc) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '0.3 0.3 0.5';
 }
-// bouncing sparks
+
 SUB(damage_arc) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 768;
@@ -7549,7 +7460,6 @@ SUB(damage_arc) {
 	MY(velocityjitter) = '24.0 24.0 24.0';
 }
 
-// electro damage effect
 DEF(damage_electro);
 SUB(damage_electro) {
 	MY(airfriction) = -0.500000;
@@ -7575,7 +7485,7 @@ SUB(damage_electro) {
 	MY(type) = "static";
 	MY(velocityjitter) = '8.0 8.0 16.0';
 }
-// plasma smoke
+
 SUB(damage_electro) {
 	MY(airfriction) = -0.350000;
 	MY(alpha_min) = 64;
@@ -7596,7 +7506,7 @@ SUB(damage_electro) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '0.4 0.4 0.6';
 }
-// bouncing sparks
+
 SUB(damage_electro) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 768;
@@ -7616,7 +7526,6 @@ SUB(damage_electro) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 }
 
-// crylink damage effect
 DEF(damage_crylink);
 SUB(damage_crylink) {
 	MY(airfriction) = -0.500000;
@@ -7642,7 +7551,7 @@ SUB(damage_crylink) {
 	MY(type) = "static";
 	MY(velocityjitter) = '10.0 10.0 20.0';
 }
-// plasma smoke
+
 SUB(damage_crylink) {
 	MY(airfriction) = -0.350000;
 	MY(alpha_min) = 64;
@@ -7664,7 +7573,7 @@ SUB(damage_crylink) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '0.4 0.4 0.6';
 }
-// floating sparks
+
 SUB(damage_crylink) {
 	MY(airfriction) = 0.200000;
 	MY(alpha_min) = 192;
@@ -7681,7 +7590,6 @@ SUB(damage_crylink) {
 	MY(velocityjitter) = '12.0 12.0 12.0';
 }
 
-// hlac damage effect
 DEF(damage_hlac);
 SUB(damage_hlac) {
 	MY(airfriction) = -0.350000;
@@ -7704,7 +7612,6 @@ SUB(damage_hlac) {
 	MY(velocityjitter) = '0.4 0.4 0.6';
 }
 
-// vortex damage effect
 DEF(damage_vortex);
 SUB(damage_vortex) {
 	MY(airfriction) = -0.500000;
@@ -7729,7 +7636,7 @@ SUB(damage_vortex) {
 	MY(type) = "static";
 	MY(velocityjitter) = '8.0 8.0 16.0';
 }
-// plasma smoke
+
 SUB(damage_vortex) {
 	MY(airfriction) = -0.350000;
 	MY(alpha_min) = 64;
@@ -7749,7 +7656,7 @@ SUB(damage_vortex) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '0.5 0.5 0.8';
 }
-// bouncing sparks
+
 SUB(damage_vortex) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 255;
@@ -7770,7 +7677,6 @@ SUB(damage_vortex) {
 	MY(velocitymultiplier) = 3;
 }
 
-// vaporizer damage effect
 DEF(damage_vaporizer);
 SUB(damage_vaporizer) {
 	MY(airfriction) = -0.500000;
@@ -7795,7 +7701,7 @@ SUB(damage_vaporizer) {
 	MY(type) = "static";
 	MY(velocityjitter) = '8.0 8.0 16.0';
 }
-// plasma smoke
+
 SUB(damage_vaporizer) {
 	MY(airfriction) = -0.350000;
 	MY(alpha_min) = 64;
@@ -7815,7 +7721,7 @@ SUB(damage_vaporizer) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '0.5 0.5 0.8';
 }
-// bouncing sparks
+
 SUB(damage_vaporizer) {
 	MY(airfriction) = 2;
 	MY(alpha_min) = 255;
@@ -7836,7 +7742,6 @@ SUB(damage_vaporizer) {
 	MY(velocitymultiplier) = 3;
 }
 
-// rifle damage effect, normal blood
 DEF(damage_rifle);
 SUB(damage_rifle) {
 	MY(airfriction) = 1;
@@ -7860,7 +7765,7 @@ SUB(damage_rifle) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(damage_rifle) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7874,7 +7779,6 @@ SUB(damage_rifle) {
 	MY(type) = "alphastatic";
 }
 
-// rifle damage effect, alien blood
 DEF(damage_rifle_alien);
 SUB(damage_rifle_alien) {
 	MY(airfriction) = 1;
@@ -7898,7 +7802,7 @@ SUB(damage_rifle_alien) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(damage_rifle_alien) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7912,7 +7816,6 @@ SUB(damage_rifle_alien) {
 	MY(type) = "alphastatic";
 }
 
-// rifle damage effect, robot blood
 DEF(damage_rifle_robot);
 SUB(damage_rifle_robot) {
 	MY(airfriction) = 1;
@@ -7936,7 +7839,7 @@ SUB(damage_rifle_robot) {
 	MY(velocityjitter) = '32.0 32.0 32.0';
 	MY(velocitymultiplier) = 5;
 }
-// blood mist
+
 SUB(damage_rifle_robot) {
 	MY(alpha_min) = 100;
 	MY(alpha_max) = 256;
@@ -7950,7 +7853,6 @@ SUB(damage_rifle_robot) {
 	MY(type) = "alphastatic";
 }
 
-// seeker damage effect
 DEF(damage_seeker);
 SUB(damage_seeker) {
 	MY(alpha_min) = 512;
@@ -7970,7 +7872,7 @@ SUB(damage_seeker) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(damage_seeker) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 32;
@@ -7989,7 +7891,6 @@ SUB(damage_seeker) {
 	MY(velocityjitter) = '11.0 11.0 50.0';
 }
 
-// hagar damage effect
 DEF(damage_hagar);
 SUB(damage_hagar) {
 	MY(alpha_min) = 512;
@@ -8009,7 +7910,7 @@ SUB(damage_hagar) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(damage_hagar) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 32;
@@ -8028,7 +7929,6 @@ SUB(damage_hagar) {
 	MY(velocityjitter) = '11.0 11.0 50.0';
 }
 
-// fireball damage effect
 DEF(damage_fireball);
 SUB(damage_fireball) {
 	MY(alpha_min) = 256;
@@ -8048,7 +7948,7 @@ SUB(damage_fireball) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 50.0';
 }
-// smoke
+
 SUB(damage_fireball) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 32;
@@ -8067,7 +7967,6 @@ SUB(damage_fireball) {
 	MY(velocityjitter) = '11.0 11.0 50.0';
 }
 
-// rocketlauncher damage effect
 DEF(damage_devastator);
 SUB(damage_devastator) {
 	MY(alpha_min) = 512;
@@ -8087,7 +7986,7 @@ SUB(damage_devastator) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '22.0 22.0 30.0';
 }
-// smoke
+
 SUB(damage_devastator) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 32;
@@ -8106,7 +8005,6 @@ SUB(damage_devastator) {
 	MY(velocityjitter) = '11.0 11.0 50.0';
 }
 
-// fireflies
 DEF(fireflies);
 SUB(fireflies) {
 	MY(airfriction) = 5;
@@ -8206,7 +8104,7 @@ SUB(healray_impact) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// shockwave
+
 SUB(healray_impact) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -8222,7 +8120,7 @@ SUB(healray_impact) {
 	MY(type) = "smoke";
 	MY(velocitymultiplier) = 44;
 }
-// cloud of bouncing sparks
+
 SUB(healray_impact) {
 	MY(airfriction) = 6;
 	MY(alpha_min) = 156;
@@ -8240,7 +8138,7 @@ SUB(healray_impact) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '1112.0 1112.0 1112.0';
 }
-// inner cloud of smoke
+
 SUB(healray_impact) {
 	MY(airfriction) = 3;
 	MY(alpha_min) = 200;
@@ -8349,7 +8247,7 @@ SUB(bigplasma_impact) {
 	MY(tex_max) = 59;
 	MY(type) = "decal";
 }
-// shockwave
+
 SUB(bigplasma_impact) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -8365,7 +8263,7 @@ SUB(bigplasma_impact) {
 	MY(type) = "smoke";
 	MY(velocitymultiplier) = 44;
 }
-// cloud of bouncing sparks
+
 SUB(bigplasma_impact) {
 	MY(airfriction) = 6;
 	MY(alpha_min) = 156;
@@ -8383,7 +8281,7 @@ SUB(bigplasma_impact) {
 	MY(type) = "spark";
 	MY(velocityjitter) = '1512.0 1512.0 1512.0';
 }
-// inner cloud of smoke
+
 SUB(bigplasma_impact) {
 	MY(airfriction) = 30;
 	MY(alpha_min) = 200;
@@ -8405,7 +8303,7 @@ SUB(bigplasma_impact) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '320.0 320.0 320.0';
 }
-// smoke
+
 SUB(bigplasma_impact) {
 	MY(airfriction) = 0.040000;
 	MY(alpha_min) = 128;
@@ -8429,7 +8327,7 @@ SUB(bigplasma_impact) {
 	MY(velocityjitter) = '100.0 100.0 200.0';
 	MY(velocityoffset) = '0.0 0.0 180.0';
 }
-// smoke in the middle
+
 SUB(bigplasma_impact) {
 	MY(airfriction) = 0.040000;
 	MY(alpha_min) = 128;
@@ -8454,7 +8352,6 @@ SUB(bigplasma_impact) {
 
 #include "effectinfo_ctf.inc"
 
-// spawn_point -- team idle spawn point effect
 #define spawn_point(name, color) \
 	DEF(spawn_point_##name); \
 	SUB(spawn_point_##name) { \
@@ -8481,7 +8378,6 @@ spawn_point(pink, 		"0xFF0FFF")
 spawn_point(neutral, 	"0xFFFFFF")
 #undef spawn_point
 
-// spawn_event -- team spawning effect
 #define spawn_event(name, color) \
 	DEF(spawn_event_##name); \
 	SUB(spawn_event_##name) { \
@@ -8516,7 +8412,6 @@ spawn_point(neutral, 	"0xFFFFFF")
 		MY(tex_max) = 65; \
 		MY(type) = "smoke"; \
 	} \
-	/**/
 
 spawn_event(red, 		"0xFF0F0F")
 spawn_event(blue, 		"0x0F0FFF")
@@ -8528,7 +8423,7 @@ spawn_event(neutral, 	"0xFFFFFF")
 #include "effectinfo_nades.inc"
 
 DEF(shockwave_attack);
-// electricity
+
 SUB(shockwave_attack) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 4096;
@@ -8552,7 +8447,7 @@ SUB(shockwave_attack) {
 	MY(velocityjitter) = '10.0 10.0 10.0';
 	MY(velocitymultiplier) = 10;
 }
-// fire
+
 SUB(shockwave_attack) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 4096;
@@ -8574,7 +8469,7 @@ SUB(shockwave_attack) {
 }
 
 DEF(arc_lightning);
-// impact decal
+
 SUB(arc_lightning) {
 	MY(alpha_min) = 32;
 	MY(alpha_max) = 32;
@@ -8589,7 +8484,7 @@ SUB(arc_lightning) {
 	MY(tex_max) = 32;
 	MY(type) = "decal";
 }
-// impact sparks
+
 SUB(arc_lightning) {
 	MY(airfriction) = 110;
 	MY(alpha_min) = 256;
@@ -8611,7 +8506,7 @@ SUB(arc_lightning) {
 	MY(velocityjitter) = '250.0 250.0 250.0';
 	MY(velocitymultiplier) = 100;
 }
-// impact sparks (underwater)
+
 SUB(arc_lightning) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 256;
@@ -8636,7 +8531,7 @@ SUB(arc_lightning) {
 	MY(velocityjitter) = '250.0 250.0 250.0';
 	MY(velocitymultiplier) = 20;
 }
-// impact smoke
+
 SUB(arc_lightning) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -8654,7 +8549,7 @@ SUB(arc_lightning) {
 }
 
 DEF(arc_beam);
-// sparks on beam
+
 SUB(arc_beam) {
 	MY(airfriction) = -10;
 	MY(alpha_min) = 256;
@@ -8677,7 +8572,7 @@ SUB(arc_beam) {
 	MY(velocityjitter) = '100.0 100.0 100.0';
 	MY(velocitymultiplier) = 200;
 }
-// sparks on beam (underwater)
+
 SUB(arc_beam) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -8703,7 +8598,7 @@ SUB(arc_beam) {
 }
 
 DEF(arc_beam_heal);
-// bubble this...
+
 SUB(arc_beam_heal) {
 	MY(airfriction) = -20;
 	MY(alpha_min) = 2048;
@@ -8725,7 +8620,7 @@ SUB(arc_beam_heal) {
 }
 
 DEF(arc_beam_healimpact);
-// healing "aura"
+
 SUB(arc_beam_healimpact) {
 	MY(alpha_min) = 40;
 	MY(alpha_max) = 40;
@@ -8744,7 +8639,7 @@ SUB(arc_beam_healimpact) {
 	MY(type) = "smoke";
 	MY(velocitymultiplier) = 44;
 }
-// rising "smoke"
+
 SUB(arc_beam_healimpact) {
 	MY(airfriction) = 3;
 	MY(alpha_min) = 200;
@@ -8767,7 +8662,7 @@ SUB(arc_beam_healimpact) {
 }
 
 DEF(arc_smoke);
-// arc heat smoke  (notunderwater)
+
 SUB(arc_smoke) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 32;
@@ -8788,7 +8683,7 @@ SUB(arc_smoke) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '0.0 0.0 16.0';
 }
-// arc heat bubbles  (underwater)
+
 SUB(arc_smoke) {
 	MY(alpha_min) = 170;
 	MY(alpha_max) = 256;
@@ -8810,7 +8705,7 @@ SUB(arc_smoke) {
 }
 
 DEF(arc_overheat);
-// arc overheat electric bolts
+
 SUB(arc_overheat) {
 	MY(airfriction) = 5;
 	MY(alpha_min) = 128;
@@ -8832,7 +8727,7 @@ SUB(arc_overheat) {
 }
 
 DEF(arc_overheat_fire);
-// arc overheat bouncing sparks
+
 SUB(arc_overheat_fire) {
 	MY(alpha_max) = 256;
 	MY(alpha_fade) = 640;
@@ -8897,7 +8792,7 @@ SUB(arc_muzzleflash) {
 }
 
 DEF(arc_bolt_explode);
-// decal
+
 SUB(arc_bolt_explode) {
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -8912,7 +8807,7 @@ SUB(arc_bolt_explode) {
 	MY(tex_max) = 16;
 	MY(type) = "decal";
 }
-// fire effect which make bright dot inside
+
 SUB(arc_bolt_explode) {
 	MY(airfriction) = 8;
 	MY(alpha_min) = 80;
@@ -8933,7 +8828,7 @@ SUB(arc_bolt_explode) {
 	MY(type) = "smoke";
 	MY(velocityjitter) = '156.0 156.0 156.0';
 }
-// fire effect which expands then slows
+
 SUB(arc_bolt_explode) {
 	MY(airfriction) = 12;
 	MY(alpha_min) = 128;
@@ -8954,7 +8849,7 @@ SUB(arc_bolt_explode) {
 	MY(type) = "static";
 	MY(velocityjitter) = '286.0 286.0 286.0';
 }
-// underwater bubbles
+
 SUB(arc_bolt_explode) {
 	MY(alpha_min) = 128;
 	MY(alpha_max) = 256;
@@ -8974,7 +8869,7 @@ SUB(arc_bolt_explode) {
 	MY(underwater) = true;
 	MY(velocityjitter) = '96.0 96.0 96.0';
 }
-// bouncing sparks
+
 SUB(arc_bolt_explode) {
 	MY(airfriction) = 1;
 	MY(alpha_min) = 644;
@@ -8997,7 +8892,6 @@ SUB(arc_bolt_explode) {
 	MY(velocityoffset) = '0.0 0.0 80.0';
 }
 
-// weak bullet trail (somewhat like a tracer)
 DEF(tr_bullet_weak);
 SUB(tr_bullet_weak) {
 	MY(alpha) = '75 100 3000';
@@ -9045,7 +8939,6 @@ SUB(tr_bullet_weak) {
 	MY(velocityjitter) = '16.0 16.0 16.0';
 }
 
-// Vaporizer hit effect
 DEF(TE_TEI_G3_HIT);
 SUB(TE_TEI_G3_HIT) {
 	MY(alpha_min) = 128;
@@ -9060,7 +8953,7 @@ SUB(TE_TEI_G3_HIT) {
 	MY(tex_max) = 200;
 	MY(type) = "beam";
 }
-SUB(TE_TEI_G3_HIT) /* rings */ {
+SUB(TE_TEI_G3_HIT)             {
 	MY(airfriction) = -4;
 	MY(alpha_min) = 256;
 	MY(alpha_max) = 256;
@@ -9088,7 +8981,6 @@ SUB(TE_TEI_G3_HIT) {
 	MY(type) = "smoke";
 }
 
-// respawn ghosts effect
 DEF(respawn_ghost);
 SUB(respawn_ghost) {
 	MY(count) = 75;
@@ -9107,11 +8999,10 @@ SUB(respawn_ghost) {
 	MY(velocityjitter) = '0 0 256';
 }
 
-// originally based on goldendust
 DEF(item_despawn);
 SUB(item_despawn) {
 	MY(type) = "snow";
-//	MY(type) = "smoke";
+
 	MY(blend) = "add";
 	MY(alpha_min) = 192;
 	MY(alpha_max) = 256;
@@ -9131,5 +9022,3 @@ SUB(item_despawn) {
 	MY(lightcolor) '1 0.75 0.36';
 	MY(lightshadow) 1;
 }
-
-// always add new effects to the bottom of the list. And keep this comment in the bottom line of this file!

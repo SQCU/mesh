@@ -1,39 +1,15 @@
-/*
-Copyright (C) 2004 Andreas Kirsch (used cd_null.c as template)
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 #include "cdaudio.h"
 
 #if SDL_MAJOR_VERSION == 1 && SDL_MINOR_VERSION == 2
-// SDL 1.2 has CD audio
 
 #include <SDL.h>
 #include <time.h>
 
-// If one of the functions fails, it returns -1, if not 0
-
-// SDL supports multiple cd devices - so we are going to support this, too.
 static void CDAudio_SDL_CDDrive_f( void );
 
-// we only support playing one CD at a time
 static SDL_CD *cd;
 
 static int ValidateDrive( void )
@@ -49,15 +25,14 @@ void CDAudio_SysEject (void)
 	SDL_CDEject( cd );
 }
 
-
 void CDAudio_SysCloseDoor (void)
 {
-	//NO SDL FUNCTION
+
 }
 
 int CDAudio_SysGetAudioDiskInfo (void)
 {
-	if( ValidateDrive() ) // everything > 0 is ok, 0 is trayempty and -1 is error
+	if( ValidateDrive() )
 		return cd->numtracks;
 	return -1;
 }
@@ -69,7 +44,7 @@ float CDAudio_SysGetVolume (void)
 
 void CDAudio_SysSetVolume (float volume)
 {
-	//NO SDL FUNCTION
+
 }
 
 int CDAudio_SysPlay (int track)
@@ -98,7 +73,7 @@ int CDAudio_SysUpdate (void)
 
 	if (cdPlaying && lastchk < time(NULL))
 	{
-		lastchk = time(NULL) + 2; //two seconds between chks
+		lastchk = time(NULL) + 2;
 		if( !cd || cd->status <= 0 ) {
 			cdValid = false;
 			return -1;
@@ -137,7 +112,7 @@ int CDAudio_SysStartup (void)
 	int numdrives;
 
 	numdrives = SDL_CDNumDrives();
-	if( numdrives == -1 ) // was the CDROM system initialized correctly?
+	if( numdrives == -1 )
 		return -1;
 
 	Con_Printf( "Found %i cdrom drives.\n", numdrives );
@@ -205,51 +180,39 @@ void CDAudio_SDL_CDDrive_f( void )
 	ValidateDrive();
 }
 
-
-
-
-
 #else
-// SDL 1.3 does not have CD audio
 
 void CDAudio_SysEject (void)
 {
 }
 
-
 void CDAudio_SysCloseDoor (void)
 {
 }
-
 
 int CDAudio_SysGetAudioDiskInfo (void)
 {
 	return -1;
 }
 
-
 float CDAudio_SysGetVolume (void)
 {
 	return -1.0f;
 }
 
-
 void CDAudio_SysSetVolume (float fvolume)
 {
 }
-
 
 int CDAudio_SysPlay (int track)
 {
 	return -1;
 }
 
-
 int CDAudio_SysStop (void)
 {
 	return -1;
 }
-
 
 int CDAudio_SysPause (void)
 {
@@ -266,7 +229,6 @@ int CDAudio_SysUpdate (void)
 	return -1;
 }
 
-
 void CDAudio_SysInit (void)
 {
 }
@@ -280,4 +242,3 @@ void CDAudio_SysShutdown (void)
 {
 }
 #endif
-

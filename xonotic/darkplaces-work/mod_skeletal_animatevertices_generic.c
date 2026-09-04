@@ -2,19 +2,17 @@
 
 void Mod_Skeletal_AnimateVertices_Generic(const dp_model_t * RESTRICT model, const frameblend_t * RESTRICT frameblend, const skeleton_t *skeleton, float * RESTRICT vertex3f, float * RESTRICT normal3f, float * RESTRICT svector3f, float * RESTRICT tvector3f)
 {
-	// vertex weighted skeletal
+
 	int i, k;
 	float *bonepose;
 	float *boneposerelative;
 	const blendweights_t * RESTRICT weights;
 
-	//unsigned long long ts = rdtsc();
 	bonepose = (float *) Mod_Skeletal_AnimateVertices_AllocBuffers(sizeof(float[12]) * (model->num_bones*2 + model->surfmesh.num_blends));
 	boneposerelative = bonepose + model->num_bones * 12;
 
 	Mod_Skeletal_BuildTransforms(model, frameblend, skeleton, bonepose, boneposerelative);
 
-	// generate matrices for all blend combinations
 	weights = model->surfmesh.data_blendweights;
 	for (i = 0;i < model->surfmesh.num_blends;i++, weights++)
 	{
@@ -55,12 +53,11 @@ void Mod_Skeletal_AnimateVertices_Generic(const dp_model_t * RESTRICT model, con
 #define TRANSFORM_VECTOR(in, out) \
 	TRANSFORM_VECTOR_SCALAR(in, out)
 
-	// transform vertex attributes by blended matrices
 	if (vertex3f)
 	{
 		const float * RESTRICT v = model->surfmesh.data_vertex3f;
 		const unsigned short * RESTRICT b = model->surfmesh.blends;
-		// special case common combinations of attributes to avoid repeated loading of matrices
+
 		if (normal3f)
 		{
 			const float * RESTRICT n = model->surfmesh.data_normal3f;
@@ -69,8 +66,6 @@ void Mod_Skeletal_AnimateVertices_Generic(const dp_model_t * RESTRICT model, con
 				const float * RESTRICT svec = model->surfmesh.data_svector3f;
 				const float * RESTRICT tvec = model->surfmesh.data_tvector3f;
 
-				// Note that for SSE each iteration stores one element past end, so we break one vertex short
-				// and handle that with scalars in that case
 				for (i = 0; i < model->surfmesh.num_vertices; i++, v += 3, n += 3, svec += 3, tvec += 3, b++,
 						vertex3f += 3, normal3f += 3, svector3f += 3, tvector3f += 3)
 				{

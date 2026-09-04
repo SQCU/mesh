@@ -14,7 +14,6 @@ void target_spawnpoint_reset(entity this)
 	this.active = ACTIVE_ACTIVE;
 }
 
-// TODO: persistent spawnflag?
 spawnfunc(target_spawnpoint)
 {
 	this.active = ACTIVE_ACTIVE;

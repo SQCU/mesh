@@ -7,7 +7,7 @@ REGISTRY_SORT(GENERIC_COMMANDS)
 
 REGISTRY_DEFINE_GET(GENERIC_COMMANDS, NULL)
 
-.bool m_menubased; // switch to tell whether this alias should be registered as a menu or client based command
+.bool m_menubased;
 
 #define GENERIC_COMMAND(id, description, menubased) \
 	CLASS(genericcommand_##id, Command) \

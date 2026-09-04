@@ -1,14 +1,13 @@
 #pragma once
 
 #ifndef QCC_SUPPORT_BOOL
-	// Boolean Constants
+
 	const int true  = 1;
 	const int false = 0;
 #endif
 
 #define boolean(value) ((value) != 0)
 
-// get true/false value of a string with multiple different inputs
 ERASEABLE
 float InterpretBoolean(string input)
 {

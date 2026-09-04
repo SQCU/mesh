@@ -114,7 +114,7 @@ for(<../*.h>, <../*.c>)
 				{
 					$extension = $1;
 				}
-				# 'void(vector ang) makevectors'
+
 
 				if($descr eq "")
 				{
@@ -180,14 +180,14 @@ for(<../*.h>, <../*.c>)
 		}
 		elsif(/getglobal\w*\(\w+, "(\w+)"\)/)
 		{
-			# hack for weird DP source 
+
 			$vm{csprogs}{globals}{$1} = [0, "DP_CSQC_SPAWNPARTICLE"];
 		}
 	}
 	close $fh;
 }
 
-# now read in dpdefs
+
 for((
 	["csprogsdefs.qc", "csprogs"],
 	["dpextensions.qc", "progs"],
@@ -207,7 +207,7 @@ for((
 			{
 				print "// $v: Global $_ declared but not defined\n"
 					if not $vm{$v}{globals}{$_};
-				$vm{$v}{globals}{$_}[0] = 1; # documented!
+				$vm{$v}{globals}{$_}[0] = 1;
 			}
 		}
 		elsif(/^\.(?:float|entity|string|vector|void)(?:.*\))?\s+((?:\w+\s*,\s*)*\w+)\s*;/)
@@ -216,14 +216,14 @@ for((
 			{
 				print "// $v: Field $_ declared but not defined\n"
 					if not $vm{$v}{fields}{$_};
-				$vm{$v}{fields}{$_}[0] = 1; # documented!
+				$vm{$v}{fields}{$_}[0] = 1;
 			}
 		}
 		elsif(/#(\d+)/)
 		{
 			print "// $v: Builtin #$1 declared but not defined\n"
 				if not $vm{$v}{builtins}[$1];
-			$vm{$v}{builtins}[$1][0] = 1; # documented!
+			$vm{$v}{builtins}[$1][0] = 1;
 		}
 		else
 		{
@@ -232,7 +232,7 @@ for((
 	close $fh;
 }
 
-# some dumb output
+
 for my $v(sort keys %vm)
 {
 	print "/******************************************\n";

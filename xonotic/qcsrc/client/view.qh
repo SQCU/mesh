@@ -118,8 +118,6 @@ float unaccounted_damage = 0;
 float zoomscript_caught;
 
 float dmg_take;
-// float dmg_save;
-// vector dmg_origin;
 
 #ifdef BLURTEST
 float blurtest_time0, blurtest_time1, blurtest_radius, blurtest_power;

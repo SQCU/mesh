@@ -5,34 +5,26 @@ rdma/mesh-flow
 rdma/mesh-hop
 rdma/qcaps
 rdma/qfill
+user/mesh-bandwidth
 .claude/*
 !.claude/settings.json
-xonotic/bridge/test/meshtest
 __pycache__/
+.venv/
+cmux-assets/
 xonotic/payload-build/run*/
 xonotic/payload-build/.tmp/
 xonotic/payload-build/extract/
 xonotic/payload-build/userdir/
-
-# QC build output. `xonotic/payload/build.sh` is the ONE writer and its
-# destination is xonotic/payload-build; invoking `make -C qcsrc` directly writes
-# these instead, which is how a fifth progs.dat appeared.
 xonotic/progs.dat
 xonotic/csprogs.dat
 xonotic/menu.dat
 xonotic/*.lno
-
-# BUILT PROGRAMS ARE NOT SOURCE. One writer (xonotic/payload/build.sh), one
-# destination (xonotic/payload-build), never committed. Tracking a build output
-# is what let five progs.dat coexist and made stale ones look authoritative to
-# the next reader -- see design/AGENDA.md R36.
 xonotic/payload-build/
-# Captured runtime home directories. A client's userdir (client.db, server.db,
-# darkplaces_history.txt, demos) is a RECORDING of a run, not a component of the
-# program; committing one makes a past execution look like a buildable variant.
 xonotic/render/*-home/
-# Stock Quake data + its compiled progs, for the qcbench fixture.
+xonotic/render-build/
+xonotic/darkplaces-work/libjpeg*.dylib
+xonotic/darkplaces-work/libpng*.dylib
+xonotic/darkplaces-work/libfreetype*.dylib
 xonotic/qcbench/id1/
-# qpp preprocessor spill. Appears when qcsrc's Makefile is run without WORKDIR,
-# i.e. when someone bypasses xonotic/payload/build.sh.
 xonotic/.tmp/
+xonotic/solver/strat/runs/

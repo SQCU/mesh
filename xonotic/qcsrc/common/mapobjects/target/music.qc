@@ -19,15 +19,6 @@ STATIC_INIT(g_targetmusic_list)
 	g_targetmusic_list = IL_NEW();
 }
 
-// values:
-//   volume
-//   noise
-//   targetname
-//   lifetime
-//   fade_time
-//   fade_rate
-// when triggered, the music is overridden for activator until lifetime (or forever, if lifetime is 0)
-// when targetname is not set, THIS ONE is default
 void target_music_sendto(entity this, int to, bool is)
 {
 	WriteHeader(to, TE_CSQC_TARGET_MUSIC);
@@ -92,14 +83,7 @@ void TargetMusic_RestoreGame()
 			target_music_sendto(it, MSG_INIT, false);
 	});
 }
-// values:
-//   volume
-//   noise
-//   targetname
-//   fade_time
-// spawnflags:
-//   START_DISABLED
-// can be disabled/enabled for everyone with relays
+
 bool trigger_music_SendEntity(entity this, entity to, int sendflags)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_TRIGGER_MUSIC);
@@ -161,7 +145,7 @@ spawnfunc(trigger_music)
 	}
 
 	this.setactive = generic_netlinked_setactive;
-	this.use = generic_netlinked_legacy_use; // backwards compatibility
+	this.use = generic_netlinked_legacy_use;
 	this.reset = trigger_music_reset;
 	this.reset(this);
 
@@ -177,7 +161,7 @@ STATIC_INIT(TargetMusic_list)
 
 void TargetMusic_Advance()
 {
-	// run AFTER all the thinks!
+
 	entity best = music_default;
 	if (music_target && time < music_target.lifetime)
 	{
@@ -191,19 +175,19 @@ void TargetMusic_Advance()
 		const float vol0 = (getsoundtime(it, CH_BGM_SINGLE) >= 0) ? it.lastvol : -1;
 		if (it == best)
 		{
-			// increase volume
+
 			it.state = (it.fade_time > 0) ? bound(0, it.state + frametime / it.fade_time, 1) : 1;
 		}
 		else
 		{
-			// decrease volume
+
 			it.state = (it.fade_rate > 0) ? bound(0, it.state - frametime / it.fade_rate, 1) : 0;
 		}
 		const float vol = it.state * it.volume * autocvar_bgmvolume;
 		if (vol != vol0)
 		{
 			if(vol0 < 0)
-				sound7(it, CH_BGM_SINGLE, it.noise, vol, ATTEN_NONE, 0, BIT(4)); // restart
+				sound7(it, CH_BGM_SINGLE, it.noise, vol, ATTEN_NONE, 0, BIT(4));
 			else
 				sound7(it, CH_BGM_SINGLE, "", vol, ATTEN_NONE, 0, BIT(4));
 			it.lastvol = vol;
@@ -257,8 +241,8 @@ void Net_TargetMusic()
 			if(!music_disabled)
 			{
 				e.state = 2;
-				cvar_settemp("music_playlist_index", "-1"); // don't use playlists
-				localcmd("cd stop\n"); // just in case
+				cvar_settemp("music_playlist_index", "-1");
+				localcmd("cd stop\n");
 				music_disabled = 1;
 			}
 		}

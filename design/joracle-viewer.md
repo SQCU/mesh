@@ -1,331 +1,305 @@
-# The j-oracle viewer — a continuous read of the live policy
+# The J-lens and J-oracle
 
-`design/jspace-probe.md` is a one-shot measurement: 228 archived lines, run once,
-verdict written down. This document specifies the **continuous** version of that
-measurement, wired to a real Xonotic match while it is being played, next to the
-behavior the same policy is producing.
+The live viewer measures the strategy representation and the server transitions it
+causes. It does not decide whether a representation, policy, match, or release passes.
+Every output is an empirical measure over values emitted by the running responder and
+the Xonotic server state machine.
 
-A captured frame of it running against a real match is committed next to the page
-at `xonotic/solver/strat/web/joracle-live.png`.
+The computation is in `xonotic/solver/strat/joracle/probe.py`. The responder publishes
+its measures through the same generic workload record as its FLOP, byte, row, and
+deadline coordinates. The node telemetry ring on port 8788 retains the record and the
+whole-mesh reporter on port 8787 presents it. No J-specific service or browser pane is
+launched by the runnable demo.
 
-Everything here lives in `xonotic/solver/strat/joracle/` (the tap and the server)
-and `xonotic/solver/strat/web/` (the page). Nothing in those directories writes
-to the game, the responder, the mesh, or a checkpoint. The tap is a `tail -F` on
-the responder's own telemetry JSONL and nothing else.
+## J
 
-The design constraint that shapes the whole page comes from AGENDA R19: a run can
-look completely healthy from the outside — bots moving, carts advancing, losses
-descending — while its model input is rank 4, its per-player state is identically
-zero, and its trained encoder is indistinguishable from a random-initialised one.
-None of that is visible in behavior. So the page shows the internals **and their
-controls**, and it shows absent fields as absent.
-
----
-
-## 1. Bring-up — one command
+For participant `p`, the selected instrument is `a_p`. The measured J row is
 
 ```
-xonotic/solver/strat/joracle/demo.sh up
+J_p = Strategy.ir[p, a_p, :]
 ```
 
-That brings up all three pieces:
+This is the participant–instrument representation consumed by the action sampler and
+actuator. It is not the policy-distribution expectation `Strategy.pooled[p, :]` consumed by the two
+value probes. A homogeneous native-width frame exposes the two matrices as `model.j`
+and `model.pooled`. Every sampled frame also exposes `model.row_outputs`, a tagged row
+union carrying the arm and literal native-width J, belief, and pooled coordinates. A
+mixed matrix-fusion/baseline frame is never padded or broadcast into a fictional common J width.
+The frame-level composer tensors and paired matrix-fusion intervention remain retained when J
+widths differ; each participant's native J stays in its labeled source stratum.
 
-| piece | where | what |
-|---|---|---|
-| Xonotic dedicated cartserver | this Mac, `udp/26042` | `darkplaces-dedicated`, payload gamemode, 12 playerbots, map `fused`, strategy I/O over the mesh |
-| mlx strategy responder | `mesh-mini`, `~/.venv-mesh` | `solver.strat.strat_responder --train`, one strategy tick per server request |
-| j-oracle viewer | this Mac, `http://127.0.0.1:8795` | this package |
-
-`demo.sh up` also accepts `JORACLE_SKIP_RESPONDER=1`, which brings up the server
-and the viewer but leaves an already-running responder on the mini alone — the
-mini's bridge also has a single client slot, so a second responder would take the
-mesh from the first.
-
-and prints:
+The strategy response is the literal tuple
 
 ```
-  j-oracle viewer     http://127.0.0.1:8795
-  xonotic client      launch Xonotic, press ~ for the console, then:
-                          connect 127.0.0.1:26042
-                      (from another machine on the LAN: connect <en0 addr>:26042)
+A_p = (target_kind, target_id, target_cell_x, target_cell_y, gain, commit, spawn)
 ```
 
-**Connecting the on-device client.** Start the normal Xonotic app, open the
-console with `~`, and type `connect 127.0.0.1:26042`. The server runs
-`sv_public 0`, so it does not appear in the public browser; a direct `connect` is
-the way in. The human player is featurized exactly like the bots — the responder
-tags the row `controller: "human"` and still computes an assignment for it, which
-the viewer shows in the assignments table as `HUMAN`. Your own row is therefore
-visible in the same table as the bots you are playing against.
+Target kind, entity identity, and the two cell-lattice coordinates remain separately
+typed coordinates. Gain, commitment, and spawn delay remain the three float controls
+emitted by the actuator. The telemetry path does not pack, normalize, round, truncate,
+or reinterpret these values.
 
-Ports: `26042` for the game, `8795` for the viewer, both overridable
-(`JORACLE_PORT`, `JORACLE_VIEWER_PORT`). `26012` is refused by the script
-outright, and any port already bound is refused rather than fought over.
+Every policy output has one actuator mean tensor `(participants, instruments, 3)`, one
+log-scale tensor of the same shape, and one participant-indexed density mass. Learned
+`matrix_fusion`, `initial_policy`, `participant_fusion_ablated`,
+`residual_fusion_ablated`, linear, and FFN arms have density mass one; the literal default arm
+has density mass zero and emits its mean without noise. No tensor width selects policy
+semantics. In a mixed-arm match, every reported participant row is gathered from the
+same arm that sampled that participant's instrument and controls. `diag(K)` is therefore
+participant-by-instrument: matrix-fusion rows carry their literal DPP diagonal and arms without
+that computation carry zero contribution.
 
-### Subcommands
+## J-lens
+
+At every response, the lens forms the empirical joint measure
 
 ```
-demo.sh up       # server + responder + viewer
-demo.sh viewer   # viewer only — reattaches to a run that is already going
-demo.sh status   # bridge client, server/viewer pids, responder, telemetry length
-demo.sh down     # stops only the server and viewer this script started
+μ_lens = Σ_p δ_(F_p, J_p)
 ```
 
-`demo.sh viewer` with `JORACLE_TELEMETRY=host:/path/live.jsonl` points the viewer
-at any responder's telemetry, including one somebody else launched.
+where the row-aligned feature coordinate `F_p` contains the exact `x`, learned belief,
+closed-form hierarchy, team identity, selected instrument descriptor, incoming
+integrated instrument weight, selected action-support mass, cadence, and the control
+and exploration coefficients used for that selected row. The report
+publishes mass, coordinate integrals, coordinate variances, J integrals, J variances,
+and the complete `cov(F,J)` matrix.
 
-### Interruptible and resumable
+For every feature schema and authoritative server-state schema, a separately named
+derived measure computes the minimum-norm affine empirical L2 projection from J to those exact ground-truth
+coordinates. This is an unregularized projection over the complete retained empirical
+measure, not a train/test probe. The operator, offset, source singular values, numerical
+rank, target and image square integrals, and residual square integral per coordinate are
+all published. Finite and non-finite atom masses remain separate; the residual remains
+a numerical measure.
 
-The run directory is a fixed path (`/tmp/mesh-joracle`), not a `mktemp -d`. That
-is the whole resumability story:
+The wire schema owns the coordinate types. Real coordinates remain real, each packed
+weapon word expands losslessly to its 24 bit atoms, and entity, team, cell, target-kind,
+target-identity, and response-sequence coordinates expand to observed categorical atoms.
+The affine projection therefore never assigns metric meaning to an edict number, team
+number, packed target, or sequence number.
 
-* the **viewer** follows its source through a supervised `tail -F` subprocess. If
-  the file is truncated, deleted and recreated, or the whole match is restarted
-  underneath it, the follower's subprocess dies and is respawned; the page keeps
-  rendering the frames it already has, marked stale, and picks up again by
-  itself. Restarts are counted (`epochs`, `resp_id_resets`) and drawn on the
-  depth chart as dashed red verticals so a restart is never mistaken for a jump
-  in the game;
-* the **responder** is launched with `--append-telemetry`, so it restores its RNG
-  state, `resp_id` and telemetry cursor from `live.npz.runstate.json` and appends
-  to the same JSONL rather than truncating it;
-* the **server** can be killed and re-`up`'d against the same run directory.
+Each feature/J coordinate schema and policy arm is a separate measure stratum. J labels
+carry the arm name and native coordinate index. A responder restart, architecture
+change, or a same-width baseline with different semantics therefore cannot make older
+atoms disappear or merge unlike coordinates; the compact table renders the newest
+stratum and `coordinate_strata` retains the moments of every observed schema.
 
-### Preflight refusals
+When `matrix_fusion` and either independent fusion-ablation arm are present, the
+parametric functions consume the same
+authoritative frame with the same model object and realized checkpoint. A second
+configured checkpoint cannot change the ablation's parameters. The lens also forms the paired
+same-state intervention measure
 
-`demo.sh up` stops with `BLOCKED:` and a non-zero exit rather than doing damage
-when: the port is 26012 or in use; the engine, basedir or payload `.dat`s are
-missing; the local mesh bridge is down; `mesh-mini` is unreachable; or — the
-important one — **another live process already holds the mesh bridge's single
-client slot**. `rdma/mesh-flow.c` keeps one `M->client`; a second attaching game
-server would take the mesh away from a run in progress. The script reports the
-holding pid and its command line and exits instead.
+```
+μ_participant = Σ_t δ_(J_matrix_fusion - J_participant_fusion_ablated, TV(π_matrix_fusion, π_participant_fusion_ablated), Δactuator_mean, Δactuator_log_scale, Δvalue, Δparticipant_coupling)
+μ_residual = Σ_t δ_(J_matrix_fusion - J_residual_fusion_ablated, TV(π_matrix_fusion, π_residual_fusion_ablated), Δactuator_mean, Δactuator_log_scale, Δvalue, Δresidual_fusion)
+```
 
----
+over every participant, instrument, and J coordinate. Its mass, integral, square
+integral, mean, variance, minimum, and maximum are additive rolling-window measures.
+No sampled action, fitted probe, reconstructed input, or later game outcome enters this
+same-state computation. The oracle separately disintegrates later server outcomes by
+the arm that was actually assigned, preserving the causal path from matrix-fusion intervention
+through changed J and action distributions to realized behavior.
 
-## 2. What the tap publishes
+The responder passes all eleven composer inputs verbatim to the in-memory measure on
+every response and serializes them when it samples a model frame:
 
-`joracle/follow.py` parses each telemetry line; `joracle/server.py` serves it.
+```
+x, z, cell_slots, gigi, hierarchy, team_ids,
+w, action_mass, delta, control_weight, exploration_weight
+```
 
-| endpoint | content |
-|---|---|
-| `/api/live` | behavior series (last 600 ticks), latest policy internals, field audit, follower status |
-| `/api/joracle` | the rolling probe report |
-| `/api/frame` | the newest raw telemetry line, verbatim, for anything the page does not render |
-| `/api/health` | liveness of the tap itself |
+The lens reports mass, integral, mean, variance, and observed shapes for every composer
+family. Dynamic player, instrument, and cell axes remain dynamic; no study constant
+pads them and every observed size retains its own stratum. The responder's live frame
+retains the newest exact sampled arrays; the generic mesh interface carries their
+empirical measures without learning the array schema.
+The completed strategy response is scattered before selected-J copies, tensor moments,
+telemetry serialization, or local counterfactual timing. Observer work therefore does
+not occupy the server control deadline or inflate the delivered-response elapsed time.
+The workload record carries `post_response_measure_elapsed_s` separately so observer
+cost remains visible to the whole-mesh profiler instead of disappearing from host-load
+accounting.
 
-The responder samples the large arrays every `--model-sample-every` ticks. The
-demo sets that to 1 so the probe sees every tick; when it is larger, the viewer
-reads the newest frame that actually carries the arrays and labels it "N ticks
-back". It never carries the previous tick's numbers forward as if they were this
-tick's.
+## J-oracle
 
----
+The server exposes four sequence coordinates for each participant:
 
-## 3. The page
+- `observed_response_seq`: the response delivered to gamecode;
+- `route_seq`: the response currently used by navigation routing;
+- `goal_seq` and `touch_seq`: the route that produced a goal and target contact.
 
-`xonotic/solver/strat/web/index.html` — plain files, no build step, no CDN, no
-dependencies at all. Open it through the viewer's own port; it is not a static
-page (it polls `/api/*`: 1 Hz for behavior, 3 s for the probe).
+They are not interchangeable. A delivered response may not yet be routed, while an
+older route may still be producing movement and combat. The oracle therefore preserves
+each named sequence relation rather than filtering them into the newest delivery.
 
-**Behavior.** Cart depth per cart over time, with a control strip under the axis
-coloured by the controlling team; the PW timeline as a coloured band with white
-flip markers and a flip count; per-team hierarchy (alive, health, armor, ammo,
-weapon slots, carts controlled, SUCC denial budget, PW); the cross-team focus
-matrix — row *i* column *j* is how many of team *i*'s players were assigned an
-instrument aimed at team *j* this tick, i.e. who is hunting or suppressing whom;
-and the per-player assignment table (edict, team, bot/human, policy/uniform,
-instrument kind, subject, packed target, gain, lane, commit, spawn, log π).
+At the source response it first forms
 
-**Internals.** The final IR as a heatmap (rows = players, columns = IR dims), its
-singular spectrum, the Gram matrix, the W and L value-head outputs with W−L, the
-advantage, `diag(K)` per assignment, and the online-training losses.
+```
+μ_source = Σ δ_(J_p, A_p, S_p)
+```
 
-**The j-oracle.** See §4.
+where `S_p` is the authoritative server wire state: the complete 83-coordinate
+participant observation row and every complete 16-coordinate cart row, all retained
+verbatim before featurization. Learned belief, expanded weapon bits, selected instrument,
+closed-form hierarchy, and integrated weight remain in the exact lens coordinate `F_p`.
+The report retains state mass, integral, mean, variance,
+`E[SJ]`, and `cov(S,J)` for every labeled state coordinate.
 
-**What is missing.** A table over every field the viewer wants, each marked
-`present` / `all_zero` / `shape_only` / `absent`, with the producer that would
-have to emit it. Next to it, the engine-input block audit: the 14 named column
-blocks of `x` from `estimator.state_from_runtime`, each showing how many of its
-columns carry any signal. A zeroed `health` / `ammo` / `weapon bitset` block is
-the AGENDA E9 condition and is drawn in red.
+The authoritative state-reference measure is
 
----
+```
+μ_state = Σ_r Σ δ_(r, J_p, A_p, S_p, S′_p, ΔS_p, applied_target_resolution)
+```
 
-## 4. The measurement, and why the controls are the point
+where `r` is `delivery`, `route`, `goal`, or `touch`, joined by each relation's own
+`(stream epoch, response sequence, participant edict)`. `ΔS_p` is the subsequent
+difference of the complete participant and cart rows supplied by the server state
+machine. It is formed in the measure worker directly from the retained authoritative
+source and successor rows rather than serialized as a second implementation by the
+responder. Differences are formed only for real coordinates and losslessly expanded
+weapon bits. Categorical coordinates produce literal `(coordinate, source, target)`
+atoms, including unchanged atoms, with J and control integrals for each transition.
+Every source retains its own coordinate labels. If a dynamic schema
+changes, the delta is taken over the literal name intersection and both schema strata
+remain measured. A delivered response that is not the current route remains a delivery
+atom, and an older active route, goal, or touch remains an independently joined atom.
+Cart coordinates are named by the server's cart ID rather than their temporary wire-row
+ordinal, so a row reorder cannot masquerade as cart motion.
+`applied_target_resolution` is the server's raw coordinate at each target observation;
+it is not conjoined with route identity into a synthetic category. The report publishes
+mass, exact-source mass, joined mass, and unjoined mass separately for all four relations.
 
-Methodology is deliberately identical to `runs/jspace_probe.py` so the live
-numbers and the archived ones are comparable:
+The responder snapshots the complete row-aligned source coordinates, authoritative
+server-state row, `J_p`, policy intervention, and literal action with each live sequence
+reference before handing the frame to the measure worker. A row-counted in-memory source
+window retains delayed response references across subsequent exchanges and roster changes;
+its capacity, ingested mass, retained mass, evicted mass, and sequence mass are published.
+State-reference and behavior joins
+therefore do not depend on the source response still occupying the rolling feature
+window. `source_atom_mass` counts unique `(epoch, response, participant)` atoms and
+`source_state_all_atom_mass` counts the atoms carrying authoritative source state.
+Changing cart counts produce separate state-coordinate strata rather than discarded
+rows; `source_state_coordinate_mass` names the newest stratum rendered in the compact
+summary while `source_state_strata` retains every stratum's moments.
+The state-reference and behavior exact-source masses count later atoms joined directly to
+those retained sources. A missing source remains unjoined mass; no sampled frame is
+used to reconstruct it.
 
-* ridge least squares, λ = 1e−3, features standardised on the train split with a
-  bias column appended;
-* one-vs-rest ridge for categorical targets; accuracy is reported against the
-  test-split majority baseline, never alone;
-* **split by tick**, 60/40, fixed seed — no test row shares a server tick with a
-  training row;
-* rolling window of the last 4000 player-rows, recomputed every 4 s;
-* the window must hold at least **16 player-rows per IR dimension** (2048 rows at
-  the 128-wide IR) before any score is published. Below that a 128-feature ridge
-  interpolates the train split and explodes on the test split — which shows up as
-  a hugely negative shuffled-label R², i.e. as the honesty control failing. The
-  page says `accumulating: N/2048 player-rows` until the window is wide enough,
-  rather than publishing a degenerate fit. (`jspace_probe.py` had 3150 rows
-  against 16–40 features; this is the same discipline at the live width.)
+Every joined state-reference atom also carries the complete authoritative successor row and its
+schema verbatim. `successor_state_strata` publishes its direct integrals, variance,
+cross-moments with J, covariance with J, and the derived J-to-successor affine projection.
+The successor row is not reconstructed by adding the reported delta to the source row;
+the delta and categorical-transition measures are separate pushforwards of the same
+literal source and successor atoms.
 
-Four columns are shown for every target, and only the relationship between them
-means anything:
+The behavior measure is
 
-| column | what it is | what it tells you |
-|---|---|---|
-| **IR** | ridge on the live final IR | the claim |
-| **ctrl: rand-proj** | ridge on a fixed random Gaussian projection of the raw input `x`, at the same width as the IR | if the IR does not beat this, the IR added nothing to what the input already handed it |
-| **ctrl: shuffled** | ridge on the IR against permuted labels | if this is not ≈0 (or ≈majority), the probe is fitting noise and **every** other number on the page is void |
-| **raw x** | ridge on `x` itself | marks tautological targets — ones that *are* input columns |
+```
+μ_behavior = Σ δ_(J_p, A_p, ΔY_p)
+```
 
-**The control is applied per target, not once for the page.** Tick-level targets
-(`total_cart_depth`, `pw_team`) take the same value for every player-row in a
-tick, so their effective sample size is the tick count and they go degenerate
-long before the per-player targets do. Each row therefore carries its own
-`control_ok`: a target whose shuffled-label control did not land at chance is
-struck through and excluded from the verdict, and the alarm names exactly which
-targets failed. That is a stronger statement than one global honesty flag.
+joined by `(stream epoch, route_seq, participant edict)`. `ΔY_p` contains the exact
+successive server counter differences for enemy damage dealt and taken, kills, deaths,
+pickups, cart push, and cart contest. This associates realized behavior with the route
+that was actually active rather than the newest response merely present in memory.
+Each counter also carries value-present, numeric, and finite mass. A non-finite counter
+therefore remains an oracle atom and contributes to non-finite mass instead of being
+omitted from the pushforward.
 
-Targets that are literally input columns (health, armor, ammo, own nimber, …) are
-tagged `taut` and greyed. They are kept because `jspace-probe.md` reports them and
-because their *absence* is informative — a health probe that fails means health is
-not in `x` at all — but they can never be evidence of a j-space. The verdict line
-counts only non-tautological targets, with a Δ > 0.05 threshold over the
-random-projection control.
+The event measure is
 
-**The one control this cannot run.** `jspace-probe.md`'s decisive comparison was
-trained IR vs a *random-initialised encoder's* IR, which agreed to three decimals.
-That needs a second forward pass through the model. This process never touches
-the model, so it is stated as not-measured on the page rather than quietly
-omitted. The random-projection control is the one that runs live, and it is the
-one R19 reports the trained IR failing.
+```
+μ_event = Σ δ_(J_p, A_p, event_kind, event_value)
+```
 
-### The pathology panel
+joined by the event row's own `(stream epoch, response_seq, actor edict)`. Damage,
+kill, pickup, and round atoms come from the same authoritative event table consumed by
+live featurization. Event-owned response sequences participate in source retention even
+after the corresponding route leaves the current observation row, so the direct atom is
+not replaced by an accumulated counter or a reconstructed source.
+Event value presence, numeric mass, and finite mass are separate coordinates. An absent
+or non-finite event value contributes to those masses and never becomes a fabricated
+zero-valued outcome.
 
-Top of the page, before anything else, because R19's failure mode was invisible
-from behavior:
+For every event, outcome, and state-delta coordinate the report publishes empirical mass,
+integral, mean, variance, `E[JY]`, `cov(J,Y)`, `E[AY]`, and `cov(A,Y)`. It also publishes
+the delivery, route, goal, touch, behavior, and event masses that joined and the masses whose source J row lies
+outside the retained exact-source window. The same measures are disintegrated by
+assigned policy arm and by actual behavior policy. `matrix_fusion`, both independent
+fusion ablations, FFN, linear,
+default, and uniform exploration therefore never disappear into one aggregate or
+receive one another's outcomes. Missing joins remain counted as missing mass.
 
-| alarm | fires when | the R19 fact behind it |
-|---|---|---|
-| `rank-collapsed-input` | rank of `x` over the window ≤ 5 | *"the rank of the real input matrix `[x;beta]` over all 3150 rows = **4**"* |
-| `per-player-state-zeroed` | ≤ 8 of `x`'s columns carry any signal | *"health, armor, ammo, weapon bitmask … were all zero in the model's own input on this run"* |
-| `ir-too-narrow` | IR width < 128 | SPEC §8, *"under 128d? maybe you were slippin"* |
-| `ir-rank-collapse` | IR rank < 10% of IR width | *"a 128-dimensional embedding of a 4-dimensional signal"* |
-| `probe-dishonest` | more than 30% of targets failed their own shuffled-label control | those columns are not admissible; the alarm names them |
-| `underdetermined-probe` | fewer than 4 player-rows per IR dimension | the ridge fit has not enough data yet |
-| `no-jspace` | no non-tautological target beats rand-proj | *"nothing beats the random-projection control on any non-tautological target"* |
+Every common outcome schema additionally forms a minimum-norm affine empirical L2
+projection from the exact source J row to the complete joined outcome vector inside each
+policy-arm/native-J stratum. Every continuous/bit state-difference schema forms the
+corresponding stratified J-to-state-difference projection. Their per-coordinate residual
+square measures are rendered beside the arm's direct moments. The source and target atoms
+remain the server transition; these projections only measure how much of that observed
+pushforward is linearly present in the corresponding J coordinate system.
 
-The geometry panel next to it always shows IR width, IR rank and effective rank,
-input width, input rank, nonzero input columns, and belief width/rank — so the
-numbers are there even when no alarm fires.
+This is the literal pushforward measure available from the controlled state machine:
+the same process owns the authoritative source state, every featurization input, the
+selected representation and response, and the later route-owned state and outcome
+atoms. It is not a learned action-to-successor model and it does not substitute a
+prediction for an engine transition. Policy-arm interventions are coordinates of the
+source atom; mirrored match blocks provide repeated interventions under the same map,
+seed, roster, team-side schedule, and perturbation.
 
----
+## Spectral measures
 
-## 5. What the live stream actually carried (2026-08-31, real run)
+J width, centered singular-value mass, integrals, participation-ratio effective rank,
+nonzero input columns, and singular values are direct numerical summaries. Absent and non-finite
+arrays are reported as their observed state. Numerical estimates use the finite-coordinate
+submeasure and report both its mass and total row mass; neither condition suppresses the
+literal lens or oracle. Width changes produce separate shape strata rather than deleting
+older rows.
 
-Real cartserver on `udp/26042`, map `fused`, 12 playerbots, 4 teams, responder on
-`mesh-mini`; captured page: `xonotic/solver/strat/web/joracle-live.png`.
-Field audit at the moment of capture:
+## Runtime interface
 
-**Present and nonzero:** `PW`, `SUCC`, `carts`, `resources`, `strategy_focus`,
-`assignments`, `belief`, `instrument_counts`, and — the whole internals block —
-`model.x` (12x48), `model.beta` (12x8), `model.z` (279x16), `model.hierarchy`,
-`model.w` (12x279), `model.ir` (12x128), `model.gram` (12x12), `model.score`,
-`model.winner_value`, `model.loser_value`, `model.relation` (12x279x16).
+`LiteralJReporter` owns a bounded in-memory observation window inside the responder.
+Ingestion of the already-materialized arrays remains on the game-response path; matrix
+moments are computed by a separate low-cadence thread. A match or map reset clears
+the transition window so response sequence reuse cannot join across server episodes.
+The first frame after start or reset wakes an immediate computation; later frames use
+the configured cadence. Graceful stop drains pending atoms before the measure thread
+joins, submits the final measure to the node telemetry ring, and gives the generic
+publisher a bounded final delivery attempt, so a short match cannot lose its only
+literal source window merely because the process exits first.
+The report names the window's row capacity and the ingested, retained, and evicted
+coordinate and transition row masses. Its integrals are therefore explicitly measures
+over the retained rolling domain rather than claims about unseen episode history. The
+window bounds observer memory only; it does not bound player, instrument, residual,
+expert, transport, or strategy workload rows.
+The responder retains decision records by causal reach: the newest response and every
+response sequence still named by a delivered response, active route, goal, touch, or
+outcome interval. Once no live server coordinate can name a sequence again, its record
+is removed rather than accumulating for the lifetime of the process.
+If the live causal set itself exceeds the configured observation depth, the source
+window expands to that measured set instead of evicting a response still named by the
+server.
 
-**Absent:** `model.diag_k`, `model.appetite`, `model.dw_dt`, `update.advantage`,
-`game_value`. (`update` itself is absent on ticks where the online learner did
-not flush a credit window — that is per-tick, not a wiring gap, and the page says
-so by re-auditing every tick.)
+`rdma/workload.py` sends the small FLOP/byte/deadline heartbeat independently from a
+latest-only asynchronous measure update. `user/mesh-telemetry.py` merges them by
+producer identity in memory, so serialization or HTTP transport of the full covariance
+objects never occupies the solver response path. The mesh observer does not import a
+Xonotic schema: it transports every producer's `measures` dictionary and the phase-space
+HUD renders every top-level scalar coordinate generically.
 
-**All-zero:** one `x` block, `powerup` (`x[17:18]`) — no powerup was held during
-the capture.
+The full live measure is available at:
 
-**The R19 pathology does not recur on this run**, and that is the headline the
-viewer exists to make checkable at a glance:
+```
+http://127.0.0.1:8788/v1/latest
+http://127.0.0.1:8787/latest.json
+```
 
-| R19 (2026-08-31, `game2_train.jsonl`) | live now |
-|---|---|
-| rank of the model input = **4** | rank(`x`) = **27** over 3312 rows |
-| per-player health/armor/ammo/weapons **zeroed** | 13 of 14 `x` blocks carry signal; 9 of 24 weapon bits set |
-| IR width 16 (spec >=128) | IR width **128**, effective rank 42.7 |
-| value heads were an MLP | `value.RoleValueHead` is `nn.Linear(width,1)` — a linear probe |
-| nothing beat the random-projection control | `winner_value` +0.534, `loser_value` +0.663, `team` +0.098 |
-
-The shuffled-label control passed everywhere on that window (worst \|R^2\| 0.098),
-so those three are real separations rather than a degenerate fit. They are also
-modest: the two large ones are the IR predicting its own value heads' outputs,
-and every tautological target still ties or loses to the random projection. The
-page states exactly that and does not round it up into a claim of a j-space.
-
----
-
-## 6. Hooks needed from files this package does not own
-
-Consumed defensively — the page shows each as `absent` with the owning producer
-named — but each is one line in a sibling-owned file.
-
-1. **`diag(K)`, appetite and `dw/dt` in the telemetry.**
-   `strat_responder.py` builds `model_arrays` from the `ForwardResult`; it takes
-   `ir`, `gram`, `score`, `winner_value`, `loser_value` but not
-   `result.diag_k`, `result.appetite` or `result.dw_dt`, all of which already
-   exist on the result. Add to the `model_arrays` dict:
-
-   ```python
-   "diag_k": array(result.diag_k, np.float32),
-   "appetite": array(result.appetite, np.float32),
-   "dw_dt": array(result.dw_dt, np.float32),
-   ```
-
-   and add `"diag_k", "appetite", "dw_dt"` to the `for name in (...)` tuple in the
-   `if sampled:` branch. Until then the DPP marginal-inclusion signal — AGENDA
-   C4, *"as a DPP kernel (→ determinant, diversity semantics)"* — is computed
-   every tick and never observable, and C5's velocity-on-integrated-weight is
-   visible only through its integral.
-
-2. **Advantage in the online metrics.**
-   `online.OnlineLearner.update` returns eight named losses; the advantage — the
-   quantity SPEC §5 says optimization exists to increase — is computed inside and
-   discarded. Add its mean to the returned `metrics` dict as `"advantage"`.
-
-3. **The CGT game value on the live line — already added, but it does not run.**
-   `strat_responder.py` now calls `evaluate_cartstate` and emits `game_value`.
-   On `mesh-mini` that call raises on the first tick:
-
-   ```
-   File ".../solver/strat/game_value.py", line 185, in disjunctive_sum_value
-     values = [graph.evaluate(state) for graph, state in zip(graphs, states, strict=True)]
-   TypeError: zip() takes no keyword arguments
-   ```
-
-   `zip(..., strict=True)` is Python 3.10+. `mesh-mini` has exactly one
-   interpreter, `~/.venv-mesh/bin/python` = **Python 3.9.6**, and there is no
-   other python3 on that machine. So the current tree **cannot run the responder
-   on the mini at all** — it dies before writing a single telemetry line. The
-   one-line fix is to zip without `strict` (and assert the lengths above it if
-   the check matters). Until then the live demo has to run a pinned earlier copy
-   of the responder tree, and `game_value` stays `absent` in the stream, so B11
-   remains unobservable live.
-
-4. *(not a hook, a note)* `--model-sample-every 1` is an existing responder flag
-   and the demo passes it. No change required. It matters more than it looks: at
-   the default of 10 the probe window fills ten times slower, which at a 128-wide
-   IR is the difference between two minutes and an hour before any score is
-   admissible.
-
----
-
-## 7. Rules this package keeps
-
-* No unit tests, and no simulator: `joracle/` imports `numpy` and the standard
-  library, and nothing else from the project. `cartsim` is not imported anywhere
-  in it, so a sibling deleting it (AGENDA D7) cannot break the viewer.
-* Never `pkill`; `demo.sh down` sends `TERM` only to the pids it wrote itself,
-  and leaves the responder to its own `--secs` bound.
-* The viewer is a committed repo page, opened locally over the loopback port.
-* Absent is rendered as absent. There is no default-to-zero anywhere on the read
-  path.
+under `workload.producers[].measures`. `/v1/visualization` carries the same newest
+producer object for each node while compacting older phase-space samples. Consequently
+both laptop and Mini measures appear in one 8787 response whenever both nodes are
+meshed, and either remains a named stale node through a partition.
+The curriculum's generic roofline sampler retains the newest nonempty `measures` object
+for every matching producer on every node as `producer_measure_records` in the match
+artifact. It copies the dictionary without importing this schema, so the exact J measure
+remains available after the live in-memory ring advances.

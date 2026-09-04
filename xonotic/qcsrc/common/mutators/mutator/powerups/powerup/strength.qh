@@ -3,7 +3,7 @@
 #include <common/items/all.qh>
 #include <common/mutators/mutator/powerups/powerups.qh>
 #ifdef SVQC
-    // For FL_POWERUP
+
     #include <common/constants.qh>
     #include <server/items/items.qh>
 #endif

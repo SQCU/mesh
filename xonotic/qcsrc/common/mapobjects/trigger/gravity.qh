@@ -1,5 +1,4 @@
 #pragma once
 
-
-const int GRAVITY_STICKY = BIT(0); // keep gravity multiplier even after exiting the trigger_gravity
+const int GRAVITY_STICKY = BIT(0);
 const int GRAVITY_START_DISABLED = BIT(1);

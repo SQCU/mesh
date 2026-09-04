@@ -3,17 +3,15 @@
 #include <client/draw.qh>
 #include <common/mutators/base.qh>
 
-// Race/CTS HUD mod icons
-float crecordtime_prev; // last remembered crecordtime
-float crecordtime_change_time; // time when crecordtime last changed
-float srecordtime_prev; // last remembered srecordtime
-float srecordtime_change_time; // time when srecordtime last changed
+float crecordtime_prev;
+float crecordtime_change_time;
+float srecordtime_prev;
+float srecordtime_change_time;
 
 float race_status_time;
 int race_status_prev;
 string race_status_name_prev;
 
-// Check if the given name already exist in race rankings? In that case, where? (otherwise return 0)
 int race_CheckName(string net_name)
 {
 	int rank = 0;
@@ -43,15 +41,14 @@ void HUD_Mod_Race(vector pos, vector mySize)
 	entity me = playerslots[player_localnum];
 	float score = me.(scores(ps_primary));
 
-	if(!(scores_flags(ps_primary) & SFL_TIME) || teamplay) // race/cts record display on HUD
+	if(!(scores_flags(ps_primary) & SFL_TIME) || teamplay)
 	{
-		mod_active = 0; // hide it in this case!
-		return; // no records in the actual race
+		mod_active = 0;
+		return;
 	}
 
 	mod_active = 1;
 
-	// clientside personal record
 	string rr;
 	if(ISGAMETYPE(CTS))
 		rr = CTS_RECORD;
@@ -65,7 +62,7 @@ void HUD_Mod_Race(vector pos, vector mySize)
 		{
 			float f = autocvar_cl_autodemo_delete;
 			f &= ~1;
-			cvar_set("cl_autodemo_delete", ftos(f)); // don't delete demo with new record!
+			cvar_set("cl_autodemo_delete", ftos(f));
 		}
 	}
 
@@ -77,14 +74,14 @@ void HUD_Mod_Race(vector pos, vector mySize)
 	vector textPos, medalPos;
 	float squareSize;
 	if(mySize.x > mySize.y) {
-		// text on left side
+
 		squareSize = min(mySize.y, mySize.x/2);
 		vector ofs = vec2(0.5 * max(0, mySize.x/2 - squareSize), 0.5 * (mySize.y - squareSize));
 		textPos = pos + ofs;
 		ofs.x += 0.5 * mySize.x;
 		medalPos = pos + ofs;
 	} else {
-		// text on top
+
 		squareSize = min(mySize.x, mySize.y/2);
 		vector ofs = vec2(0.5 * (mySize.x - squareSize), 0.5 * max(0, mySize.y/2 - squareSize));
 		textPos = pos + ofs;
@@ -95,7 +92,6 @@ void HUD_Mod_Race(vector pos, vector mySize)
 
 	race_showTime(_("Personal best"), textPos, eY * 0.25 * squareSize, t, textSize, time - crecordtime_change_time);
 
-	// server record
 	t = race_server_record;
 	if(t != srecordtime_prev) {
 		srecordtime_prev = t;
@@ -111,7 +107,6 @@ void HUD_Mod_Race(vector pos, vector mySize)
 		strcpy(race_status_name_prev, race_status_name);
 	}
 
-	// race "awards"
 	float a = bound(0, race_status_time - time, 1);
 	string s = textShortenToWidth(ColorTranslateRGB(race_status_name), squareSize, '1 1 0' * 0.1 * squareSize, stringwidth_colors);
 
@@ -153,22 +148,22 @@ REGISTER_MUTATOR(cl_race, true);
 
 MUTATOR_HOOKFUNCTION(cl_race, HUD_Physics_showoptional)
 {
-	return ISGAMETYPE(RACE); // show the optional physics panel
+	return ISGAMETYPE(RACE);
 }
 
 MUTATOR_HOOKFUNCTION(cl_race, HUD_StrafeHUD_showoptional)
 {
-	return ISGAMETYPE(RACE); // show the optional strafehud
+	return ISGAMETYPE(RACE);
 }
 
 MUTATOR_HOOKFUNCTION(cl_race, HUD_Score_show)
 {
-	return spectatee_status == -1 && ISGAMETYPE(RACE); // hide the score panel while observing
+	return spectatee_status == -1 && ISGAMETYPE(RACE);
 }
 
 MUTATOR_HOOKFUNCTION(cl_race, DrawScoreboardItemStats)
 {
-	return ISGAMETYPE(RACE); // hide the item stats panel
+	return ISGAMETYPE(RACE);
 }
 
 MUTATOR_HOOKFUNCTION(cl_race, ShowRankings)
@@ -182,15 +177,15 @@ MUTATOR_HOOKFUNCTION(cl_race, ShowRankings)
 
 MUTATOR_HOOKFUNCTION(cl_race, DrawScoreboardAccuracy)
 {
-	return ISGAMETYPE(RACE); // accuracy is not a factor in this gamemode
+	return ISGAMETYPE(RACE);
 }
 
 MUTATOR_HOOKFUNCTION(cl_race, ShowRaceTimer)
 {
-	return ISGAMETYPE(RACE); // show the race timer panel
+	return ISGAMETYPE(RACE);
 }
 
 MUTATOR_HOOKFUNCTION(cl_race, TeamRadar_Draw)
 {
-	return ISGAMETYPE(RACE); // show all competitors in a race
+	return ISGAMETYPE(RACE);
 }

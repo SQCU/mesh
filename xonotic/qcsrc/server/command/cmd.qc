@@ -35,16 +35,6 @@
 #include <server/teamplay.qh>
 #include <server/world.qh>
 
-// =========================================================
-//  Server side networked commands code, reworked by Samual
-//  Last updated: December 28th, 2011
-// =========================================================
-
-
-// =======================
-//  Command Sub-Functions
-// =======================
-
 void ClientCommand_autoswitch(entity caller, int request, int argc)
 {
 	switch (request)
@@ -99,7 +89,7 @@ void ClientCommand_clear_ignores(entity caller, int request)
 	}
 }
 
-void ClientCommand_clientversion(entity caller, int request, int argc)  // internal command, used only by code
+void ClientCommand_clientversion(entity caller, int request, int argc)
 {
 	switch (request)
 	{
@@ -114,15 +104,15 @@ void ClientCommand_clientversion(entity caller, int request, int argc)  // inter
 					if (CS(caller).version < autocvar_gameversion_min || CS(caller).version > autocvar_gameversion_max)
 					{
 						CS(caller).version_mismatch = true;
-						ClientKill_TeamChange(caller, -2);  // observe
+						ClientKill_TeamChange(caller, -2);
 					}
 					else if (autocvar_g_campaign || autocvar_g_balance_teams)
 					{
-						// JoinBestTeam(caller, false, true);
+
 					}
 					else if (teamplay && !autocvar_sv_spectate && !(Player_GetForcedTeamIndex(caller) > 0))
 					{
-						TRANSMUTE(Observer, caller);  // really?
+						TRANSMUTE(Observer, caller);
 						stuffcmd(caller, "team_selection_show\n");
 					}
 				}
@@ -142,7 +132,7 @@ void ClientCommand_clientversion(entity caller, int request, int argc)  // inter
 	}
 }
 
-void ClientCommand_mv_getpicture(entity caller, int request, int argc)  // internal command, used only by code
+void ClientCommand_mv_getpicture(entity caller, int request, int argc)
 {
 	switch (request)
 	{
@@ -297,9 +287,9 @@ void ClientCommand_ignore(entity caller, int request, int argc, string command)
 				entity ignore_to = GetIndexedEntity(argc, 1);
 				float ignore_accepted = VerifyClientEntity(ignore_to, true, false);
 
-				if (ignore_accepted > 0 && IS_REAL_CLIENT(ignore_to))   // the target is a real client
+				if (ignore_accepted > 0 && IS_REAL_CLIENT(ignore_to))
 				{
-					if (ignore_to != caller) // and we're allowed to ignore them heh
+					if (ignore_to != caller)
 					{
 						if(ignore_playerinlist(ignore_to, caller))
 						{
@@ -307,7 +297,6 @@ void ClientCommand_ignore(entity caller, int request, int argc, string command)
 							return;
 						}
 
-						// advanced ignore mode, works if both the player and the sender have a stats UID
 						if(advanced && ignore_to.crypto_idfp && ignore_to.crypto_idfp != "")
 						{
 							for(int j = 0; j < IGNORE_MAXPLAYERS; ++j)
@@ -365,7 +354,7 @@ void ClientCommand_join(entity caller, int request)
 			}
 			CS(caller).parm_idlesince = time;
 
-			return;  // never fall through to usage
+			return;
 		}
 
 		default:
@@ -385,7 +374,7 @@ void ClientCommand_kill(entity caller, int request)
 		case CMD_REQUEST_COMMAND:
 		{
 			if(IS_SPEC(caller) || IS_OBSERVER(caller))
-				return; // no point warning about this, command does nothing
+				return;
 
 			if(GetResource(caller, RES_HEALTH) <= 0)
 			{
@@ -395,7 +384,7 @@ void ClientCommand_kill(entity caller, int request)
 
 			ClientKill(caller);
 
-			return;  // never fall through to usage
+			return;
 		}
 
 		default:
@@ -457,7 +446,7 @@ void ClientCommand_ready(entity caller, int request)
 			if (warmup_stage || g_race_qualifying == 2)
 			if (IS_PLAYER(caller) || INGAME_JOINED(caller))
 			{
-				if (caller.ready) // toggle
+				if (caller.ready)
 				{
 					caller.ready = false;
 					bprint(playername(caller.netname, caller.team, false), "^2 is ^1NOT^2 ready\n");
@@ -469,7 +458,7 @@ void ClientCommand_ready(entity caller, int request)
 				}
 				ReadyCount();
 			}
-			return;  // never fall through to usage
+			return;
 		}
 
 		default:
@@ -489,7 +478,7 @@ void ClientCommand_say(entity caller, int request, int argc, string command)
 		case CMD_REQUEST_COMMAND:
 		{
 			if (argc >= 2)   Say(caller, false, NULL, substring(command, argv_start_index(1), argv_end_index(-1) - argv_start_index(1)), 1);
-			return;  // never fall through to usage
+			return;
 		}
 
 		default:
@@ -510,7 +499,7 @@ void ClientCommand_say_team(entity caller, int request, int argc, string command
 		{
 			if (argc >= 2)
 				Say(caller, true, NULL, substring(command, argv_start_index(1), argv_end_index(-1) - argv_start_index(1)), 1);
-			return;  // never fall through to usage
+			return;
 		}
 
 		default:
@@ -555,7 +544,7 @@ void ClientCommand_selectteam(entity caller, int request, int argc)
 			}
 
 			float team_num = Team_ColorToTeam(argv(1));
-			if (team_num == -1) // invalid
+			if (team_num == -1)
 				return;
 			if (caller.team == team_num && team_num && !IS_DEAD(caller))
 			{
@@ -571,8 +560,7 @@ void ClientCommand_selectteam(entity caller, int request, int argc)
 			{
 				entity balance = TeamBalance_CheckAllowedTeams(caller);
 				TeamBalance_GetTeamCounts(balance, caller);
-				if ((Team_IndexToBit(Team_TeamToIndex(team_num)) &
-					TeamBalance_FindBestTeams(balance, caller, false)) == 0)
+				if (!TeamBalance_IsBestTeam(balance, Team_TeamToIndex(team_num), caller, false))
 				{
 					Send_Notification(NOTIF_ONE, caller, MSG_INFO, INFO_TEAMCHANGE_LARGERTEAM);
 					TeamBalance_Destroy(balance);
@@ -582,12 +570,12 @@ void ClientCommand_selectteam(entity caller, int request, int argc)
 			}
 			if (team_num)
 				ClientKill_TeamChange(caller, team_num);
-			else // auto
+			else
 				ClientKill_TeamChange(caller, -1);
 
 			if (!IS_PLAYER(caller))
 			{
-				caller.team_selected = true; // avoids asking again for team selection on join
+				caller.team_selected = true;
 			}
 			return;
 		}
@@ -597,7 +585,7 @@ void ClientCommand_selectteam(entity caller, int request, int argc)
 		{
 			sprint(caller, "\nUsage:^3 cmd selectteam <team>\n");
 			sprint(caller, "  Where <team> is the prefered team to try and join.\n");
-			sprint(caller, "  Full list of options here: red, blue, yellow, pink, auto.\n");
+			sprint(caller, "  Full list of options here: red, blue, yellow, pink, green, auto.\n");
 			return;
 		}
 	}
@@ -635,9 +623,9 @@ void ClientCommand_sentcvar(entity caller, int request, int argc)
 		{
 			if (argc >= 3)
 			{
-			// NOTE: client-side settings do not exist on the server, this functionality has been deprecated
+
 			#if 0
-				if (argc == 2)  // undefined cvar: use the default value on the server then
+				if (argc == 2)
 				{
 					string s = strcat(substring(command, argv_start_index(0), argv_end_index(1) - argv_start_index(0)), " \"", cvar_defstring(argv(1)), "\"");
 					tokenize_console(s);
@@ -696,9 +684,9 @@ void ClientCommand_spectate(entity caller, int request)
 
 				if ((IS_PLAYER(caller) || mutator_returnvalue == MUT_SPECCMD_FORCE))
 				if (autocvar_sv_spectate == 1)
-					ClientKill_TeamChange(caller, -2); // observe
+					ClientKill_TeamChange(caller, -2);
 			}
-			return; // never fall through to usage
+			return;
 		}
 
 		default:
@@ -743,7 +731,7 @@ void ClientCommand_tell(entity caller, int request, int argc, string command)
 		{
 			if (argc >= 3)
 			{
-				if(!IS_CLIENT(caller) && IS_REAL_CLIENT(caller)) // connecting
+				if(!IS_CLIENT(caller) && IS_REAL_CLIENT(caller))
 				{
 					print_to(caller, "You can't ^2tell^7 a message while connecting.");
 					return;
@@ -752,15 +740,10 @@ void ClientCommand_tell(entity caller, int request, int argc, string command)
 				entity tell_to = GetIndexedEntity(argc, 1);
 				float tell_accepted = VerifyClientEntity(tell_to, true, false);
 
-				if (tell_accepted > 0)   // the target is a real client
+				if (tell_accepted > 0)
 				{
-					if (tell_to != caller) // and we're allowed to send to them :D
+					if (tell_to != caller)
 					{
-						// workaround for argv indexes indexing ascii chars instead of utf8 chars
-						// In this case when the player name contains utf8 chars
-						// the message gets partially trimmed in the beginning.
-						// Potentially this bug affects any substring call that uses
-						// argv_start_index and argv_end_index.
 
 						string utf8_enable_save = cvar_string("utf8_enable");
 						cvar_set("utf8_enable", "0");
@@ -811,7 +794,7 @@ void ClientCommand_unignore(entity caller, int request, int argc, string command
 				entity unignore_to = GetIndexedEntity(argc, 1);
 				float unignore_accepted = VerifyClientEntity(unignore_to, true, false);
 
-				if (unignore_accepted > 0 && IS_REAL_CLIENT(unignore_to))   // the target is a real client
+				if (unignore_accepted > 0 && IS_REAL_CLIENT(unignore_to))
 				{
 					if (unignore_to != caller)
 					{
@@ -862,14 +845,12 @@ void ClientCommand_voice(entity caller, int request, int argc, string command)
 				}
 				if (IS_DEAD(caller))
 				{
-					// don't warn the caller when trying to taunt while dead, just don't play any sounds!
-					// we still allow them to see warnings if it's invalid, so a dead player can find out the sounds in peace
+
 					return;
 				}
 				if (IS_SPEC(caller) || IS_OBSERVER(caller))
 				{
-					// observers/spectators have no player model of their own to play taunts from
-					// again, allow them to see warnings
+
 					return;
 				}
 				string msg = "";
@@ -894,35 +875,6 @@ void ClientCommand_voice(entity caller, int request, int argc, string command)
 	}
 }
 
-/* use this when creating a new command, making sure to place it in alphabetical order... also,
-** ADD ALL NEW COMMANDS TO commands.cfg WITH PROPER ALIASES IN THE SAME FASHION!
-void ClientCommand_(entity caller, int request)
-{
-    switch(request)
-    {
-        case CMD_REQUEST_COMMAND:
-        {
-
-            return; // never fall through to usage
-        }
-
-        default:
-        case CMD_REQUEST_USAGE:
-        {
-            sprint(caller, "\nUsage:^3 cmd \n");
-            sprint(caller, "  No arguments required.\n");
-            return;
-        }
-    }
-}
-*/
-
-
-// =====================================
-//  Macro system for networked commands
-// =====================================
-
-// Do not hard code aliases for these, instead create them in commands.cfg... also: keep in alphabetical order, please ;)
 #define CLIENT_COMMANDS(ent, request, arguments, command) \
 	CLIENT_COMMAND("autoswitch", ClientCommand_autoswitch(ent, request, arguments), "Whether or not to switch automatically when getting a better weapon") \
 	CLIENT_COMMAND("clear_ignores", ClientCommand_clear_ignores(ent, request), "Remove all existing ignored clients") \
@@ -945,7 +897,6 @@ void ClientCommand_(entity caller, int request)
 	CLIENT_COMMAND("voice", ClientCommand_voice(ent, request, arguments, command), "Send voice message via sound") \
 	CLIENT_COMMAND("unignore", ClientCommand_unignore(ent, request, arguments, command), "Remove an existing ignored player") \
 	CLIENT_COMMAND("wpeditor", ClientCommand_wpeditor(ent, request, arguments), "Waypoint editor commands") \
-	/* nothing */
 
 void ClientCommand_macro_help(entity caller)
 {
@@ -987,14 +938,9 @@ void ClientCommand_macro_write_aliases(float fh)
 #undef CLIENT_COMMAND
 }
 
-// ======================================
-//  Main Function Called By Engine (cmd)
-// ======================================
-// If this function exists, server game code parses clientcommand before the engine code gets it.
-
 void SV_ParseClientCommand(entity this, string command)
 {
-	// If invalid UTF-8, don't even parse it
+
 	string command2 = "";
 	float len = strlen(command);
 	float i;
@@ -1002,61 +948,52 @@ void SV_ParseClientCommand(entity this, string command)
 		command2 = strcat(command2, chr2str(str2chr(command, i)));
 	if (command != command2) return;
 
-	// if we're banned, don't even parse the command
 	if (Ban_MaybeEnforceBanOnce(this)) return;
 
 	int argc = tokenize_console(command);
 
-	// Guide for working with argc arguments by example:
-	// argc:   1    - 2      - 3     - 4
-	// argv:   0    - 1      - 2     - 3
-	// cmd     vote - master - login - password
-
-	// for floodcheck
 	switch (strtolower(argv(0)))
 	{
-		// exempt commands which are not subject to floodcheck
-		case "begin": break;                               // handled by engine in host_cmd.c
-		case "download": break;                            // handled by engine in cl_parse.c
-		case "mv_getpicture": break;                       // handled by server in this file
-		case "wpeditor": break;                            // handled by server in this file
-		case "pause": break;                               // handled by engine in host_cmd.c
-		case "prespawn": break;                            // handled by engine in host_cmd.c
-		case "sentcvar": break;                            // handled by server in this file
-		case "spawn": break;                               // handled by engine in host_cmd.c
-		case "say": case "say_team": case "tell": break;   // chat has its own flood control in chat.qc
-		case "color": case "topcolor": case "bottomcolor": // handled by engine in host_cmd.c
-			if(!IS_CLIENT(this)) // on connection
+
+		case "begin": break;
+		case "download": break;
+		case "mv_getpicture": break;
+		case "wpeditor": break;
+		case "pause": break;
+		case "prespawn": break;
+		case "sentcvar": break;
+		case "spawn": break;
+		case "say": case "say_team": case "tell": break;
+		case "color": case "topcolor": case "bottomcolor":
+			if(!IS_CLIENT(this))
 			{
-				// since gamecode doesn't have any calls earlier than this, do the connecting message here
+
 				Send_Notification(NOTIF_ALL, NULL, MSG_INFO, INFO_CONNECTING, this.netname);
 			}
 			if(teamplay)
 				return;
 			break;
-		case "c2s": Net_ClientCommand(this, command); return; // handled by net.qh
+		case "c2s": Net_ClientCommand(this, command); return;
 
-		// on connection, client sends all of these
 		case "name": case "rate": case "rate_burstsize": case "playermodel": case "playerskin": case "clientversion":
 			if(!IS_CLIENT(this)) break;
-			// else fall through to default: flood control
+
 		default:
-			if (!timeout_status)  // not while paused
+			if (!timeout_status)
 			{
-				entity store = IS_CLIENT(this) ? CS(this) : this; // unfortunately, we need to store these on the client initially
-				// this is basically the same as the chat flood control
+				entity store = IS_CLIENT(this) ? CS(this) : this;
+
 				if (time < store.cmd_floodtime)
 				{
 					sprint(this, strcat("^3CMD FLOOD CONTROL: wait ^1", ftos(store.cmd_floodtime - time), "^3 seconds, command was: ", command, "\n"));
-					return;  // too much spam, halt
+					return;
 				}
 				else
 					store.cmd_floodtime = max(time - autocvar_sv_clientcommand_antispam_count * autocvar_sv_clientcommand_antispam_time, store.cmd_floodtime) + autocvar_sv_clientcommand_antispam_time;
 			}
-			break;  // continue, as we're not flooding yet
+			break;
 	}
 
-	/* NOTE: should this be disabled? It can be spammy perhaps, but hopefully it's okay for now */
 	if (argv(0) == "help")
 	{
 		if (argc == 1)
@@ -1071,30 +1008,30 @@ void SV_ParseClientCommand(entity this, string command)
 			sprint(this, "For help about a specific command, type cmd help <command>\n");
 			return;
 		}
-		else if (CommonCommand_macro_usage(argc, this))  // Instead of trying to call a command, we're going to see detailed information about it
+		else if (CommonCommand_macro_usage(argc, this))
 		{
 			return;
 		}
-		else if (ClientCommand_macro_usage(argc, this))  // same, but for normal commands now
+		else if (ClientCommand_macro_usage(argc, this))
 		{
 			return;
 		}
 	}
 	else if (MUTATOR_CALLHOOK(SV_ParseClientCommand, this, strtolower(argv(0)), argc, command))
 	{
-		return;  // handled by a mutator
+		return;
 	}
 	else if (CheatCommand(this, argc))
 	{
-		return;  // handled by server/cheats.qc
+		return;
 	}
 	else if (CommonCommand_macro_command(argc, this, command))
 	{
-		return;                                          // handled by server/command/common.qc
+		return;
 	}
-	else if (ClientCommand_macro_command(argc, this, command)) // continue as usual and scan for normal commands
+	else if (ClientCommand_macro_command(argc, this, command))
 	{
-		return;                                          // handled by one of the above ClientCommand_* functions
+		return;
 	}
 	else
 	{

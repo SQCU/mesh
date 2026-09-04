@@ -32,7 +32,7 @@
 		me.realOrigin_y = 0.5 * (me.borderVec.y - me.realFontSize.y);
 		if (me.closeButton)
 		{
-			// move the close button to the right place
+
 			me.closeButton.Container_origin = '1 0 0' * (1 - me.borderVec.x);
 			me.closeButton.Container_size = me.borderVec;
 			me.closeButton.color = me.color;
@@ -59,8 +59,6 @@
 			{
 				vector ro, rf, df;
 
-				// me.parent.Nexposee_animationFactor 0 (small) or 1 (full)
-				// default values are for 1
 				ro = me.realOrigin;
 				rf = me.realFontSize;
 				df = draw_fontscale;
@@ -70,8 +68,6 @@
 
 				SUPER(BorderImage).draw(me);
 
-				// me.Nexposee_animationState 0 (small) or 1 (full)
-				// default values are for 1
 				me.realOrigin = ro;
 				me.realFontSize = rf;
 				draw_fontscale = df;

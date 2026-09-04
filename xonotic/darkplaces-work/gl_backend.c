@@ -8,7 +8,6 @@ extern LPDIRECT3DDEVICE9 vid_d3d9dev;
 extern D3DCAPS9 vid_d3d9caps;
 #endif
 
-// on GLES we have to use some proper #define's
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER                                   0x8D40
 #define GL_DEPTH_ATTACHMENT                              0x8D00
@@ -36,11 +35,7 @@ extern D3DCAPS9 vid_d3d9caps;
 #define GL_ARRAY_BUFFER               0x8892
 #define GL_ELEMENT_ARRAY_BUFFER       0x8893
 #endif
-//#ifndef GL_VERTEX_ARRAY
-//#define GL_VERTEX_ARRAY				0x8074
-//#define GL_COLOR_ARRAY				0x8076
-//#define GL_TEXTURE_COORD_ARRAY			0x8078
-//#endif
+
 #ifndef GL_TEXTURE0
 #define GL_TEXTURE0					0x84C0
 #define GL_TEXTURE1					0x84C1
@@ -82,19 +77,6 @@ extern D3DCAPS9 vid_d3d9caps;
 #ifndef GL_TEXTURE_CUBE_MAP
 #define GL_TEXTURE_CUBE_MAP		    0x8513
 #endif
-//#ifndef GL_MODELVIEW
-//#define GL_MODELVIEW				0x1700
-//#endif
-//#ifndef GL_PROJECTION
-//#define GL_PROJECTION				0x1701
-//#endif
-//#ifndef GL_DECAL
-//#define GL_DECAL				0x2101
-//#endif
-//#ifndef GL_INTERPOLATE
-//#define GL_INTERPOLATE				0x8575
-//#endif
-
 
 #define MAX_RENDERTARGETS 4
 
@@ -202,7 +184,7 @@ typedef struct gltextureunit_s
 	int rgbscale, alphascale;
 	int combine;
 	int combinergb, combinealpha;
-	// texmatrixenabled exists only to avoid unnecessary texmatrix compares
+
 	int texmatrixenabled;
 	matrix4x4_t matrix;
 }
@@ -216,7 +198,7 @@ typedef struct gl_state_s
 	int blendfunc2;
 	qboolean blend;
 	GLboolean depthmask;
-	int colormask; // stored as bottom 4 bits: r g b a (3 2 1 0 order)
+	int colormask;
 	int depthtest;
 	int depthfunc;
 	float depthrange[2];
@@ -236,7 +218,7 @@ typedef struct gl_state_s
 	int elementbufferobject;
 	int uniformbufferobject;
 	int framebufferobject;
-	int defaultframebufferobject; // deal with platforms that use a non-zero default fbo
+	int defaultframebufferobject;
 	qboolean pointer_color_enabled;
 
 	int pointer_vertex_components;
@@ -269,8 +251,7 @@ typedef struct gl_state_s
 	qboolean active;
 
 #ifdef SUPPORTD3D
-//	rtexture_t *d3drt_depthtexture;
-//	rtexture_t *d3drt_colortextures[MAX_RENDERTARGETS];
+
 	IDirect3DSurface9 *d3drt_depthsurface;
 	IDirect3DSurface9 *d3drt_colorsurfaces[MAX_RENDERTARGETS];
 	IDirect3DSurface9 *d3drt_backbufferdepthsurface;
@@ -283,61 +264,6 @@ typedef struct gl_state_s
 gl_state_t;
 
 static gl_state_t gl_state;
-
-
-/*
-note: here's strip order for a terrain row:
-0--1--2--3--4
-|\ |\ |\ |\ |
-| \| \| \| \|
-A--B--C--D--E
-clockwise
-
-A0B, 01B, B1C, 12C, C2D, 23D, D3E, 34E
-
-*elements++ = i + row;
-*elements++ = i;
-*elements++ = i + row + 1;
-*elements++ = i;
-*elements++ = i + 1;
-*elements++ = i + row + 1;
-
-
-for (y = 0;y < rows - 1;y++)
-{
-	for (x = 0;x < columns - 1;x++)
-	{
-		i = y * rows + x;
-		*elements++ = i + columns;
-		*elements++ = i;
-		*elements++ = i + columns + 1;
-		*elements++ = i;
-		*elements++ = i + 1;
-		*elements++ = i + columns + 1;
-	}
-}
-
-alternative:
-0--1--2--3--4
-| /| /|\ | /|
-|/ |/ | \|/ |
-A--B--C--D--E
-counterclockwise
-
-for (y = 0;y < rows - 1;y++)
-{
-	for (x = 0;x < columns - 1;x++)
-	{
-		i = y * rows + x;
-		*elements++ = i;
-		*elements++ = i + columns;
-		*elements++ = i + columns + 1;
-		*elements++ = i + columns;
-		*elements++ = i + columns + 1;
-		*elements++ = i + 1;
-	}
-}
-*/
 
 int polygonelement3i[(POLYGONELEMENTS_MAXPOINTS-2)*3];
 unsigned short polygonelement3s[(POLYGONELEMENTS_MAXPOINTS-2)*3];
@@ -414,7 +340,7 @@ static void gl_backend_start(void)
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		// fetch current fbo here (default fbo is not 0 on some GLES devices)
+
 		if (vid.support.ext_framebuffer_object)
 			qglGetIntegerv(GL_FRAMEBUFFER_BINDING, &gl_state.defaultframebufferobject);
 		break;
@@ -578,7 +504,7 @@ void gl_backend_init(void)
 		polygonelement3s[i * 3 + 1] = i + 1;
 		polygonelement3s[i * 3 + 2] = i + 2;
 	}
-	// elements for rendering a series of quads as triangles
+
 	for (i = 0;i < QUADELEMENTS_MAXQUADS;i++)
 	{
 		quadelement3s[i * 6 + 0] = i * 4;
@@ -625,8 +551,6 @@ void R_Viewport_TransformToScreen(const r_viewport_t *v, const vec4_t in, vec4_t
 	iw = 1.0f / out[3];
 	out[0] = v->x + (out[0] * iw + 1.0f) * v->width * 0.5f;
 
-	// for an odd reason, inverting this is wrong for R_Shadow_ScissorForBBox (we then get badly scissored lights)
-	//out[1] = v->y + v->height - (out[1] * iw + 1.0f) * v->height * 0.5f;
 	out[1] = v->y + (out[1] * iw + 1.0f) * v->height * 0.5f;
 
 	out[2] = v->z + (out[2] * iw + 1.0f) * v->depth * 0.5f;
@@ -644,7 +568,7 @@ void GL_Finish(void)
 		qglFinish();
 		break;
 	case RENDERPATH_D3D9:
-		//Con_DPrintf("FIXME D3D9 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_D3D10:
 		Con_DPrintf("FIXME D3D10 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
@@ -660,21 +584,21 @@ void GL_Finish(void)
 
 static int bboxedges[12][2] =
 {
-	// top
-	{0, 1}, // +X
-	{0, 2}, // +Y
-	{1, 3}, // Y, +X
-	{2, 3}, // X, +Y
-	// bottom
-	{4, 5}, // +X
-	{4, 6}, // +Y
-	{5, 7}, // Y, +X
-	{6, 7}, // X, +Y
-	// verticals
-	{0, 4}, // +Z
-	{1, 5}, // X, +Z
-	{2, 6}, // Y, +Z
-	{3, 7}, // XY, +Z
+
+	{0, 1},
+	{0, 2},
+	{1, 3},
+	{2, 3},
+
+	{4, 5},
+	{4, 6},
+	{5, 7},
+	{6, 7},
+
+	{0, 4},
+	{1, 5},
+	{2, 6},
+	{3, 7},
 };
 
 qboolean R_ScissorForBBox(const float *mins, const float *maxs, int *scissor)
@@ -696,11 +620,9 @@ qboolean R_ScissorForBBox(const float *mins, const float *maxs, int *scissor)
 	scissor[2] = r_refdef.view.viewport.width;
 	scissor[3] = r_refdef.view.viewport.height;
 
-	// if view is inside the box, just say yes it's visible
 	if (BoxesOverlap(r_refdef.view.origin, r_refdef.view.origin, mins, maxs))
 		return false;
 
-	// transform all corners that are infront of the nearclip plane
 	VectorNegate(r_refdef.view.frustum[4].normal, plane4f);
 	plane4f[3] = r_refdef.view.frustum[4].dist;
 	numvertices = 0;
@@ -715,11 +637,10 @@ qboolean R_ScissorForBBox(const float *mins, const float *maxs, int *scissor)
 			numvertices++;
 		}
 	}
-	// if some points are behind the nearclip, add clipped edge points to make
-	// sure that the scissor boundary is complete
+
 	if (numvertices > 0 && numvertices < 8)
 	{
-		// add clipped edge points
+
 		for (i = 0;i < 12;i++)
 		{
 			j = bboxedges[i][0];
@@ -733,19 +654,17 @@ qboolean R_ScissorForBBox(const float *mins, const float *maxs, int *scissor)
 		}
 	}
 
-	// if we have no points to check, it is behind the view plane
 	if (!numvertices)
 		return true;
 
-	// if we have some points to transform, check what screen area is covered
 	x1 = y1 = x2 = y2 = 0;
 	v[3] = 1.0f;
-	//Con_Printf("%i vertices to transform...\n", numvertices);
+
 	for (i = 0;i < numvertices;i++)
 	{
 		VectorCopy(vertex[i], v);
 		R_Viewport_TransformToScreen(&r_refdef.view.viewport, v, v2);
-		//Con_Printf("%.3f %.3f %.3f %.3f transformed to %.3f %.3f %.3f %.3f\n", v[0], v[1], v[2], v[3], v2[0], v2[1], v2[2], v2[3]);
+
 		if (i)
 		{
 			if (x1 > v2[0]) x1 = v2[0];
@@ -760,34 +679,26 @@ qboolean R_ScissorForBBox(const float *mins, const float *maxs, int *scissor)
 		}
 	}
 
-	// now convert the scissor rectangle to integer screen coordinates
 	ix1 = (int)(x1 - 1.0f);
-	//iy1 = vid.height - (int)(y2 - 1.0f);
-	//iy1 = r_refdef.view.viewport.width + 2 * r_refdef.view.viewport.x - (int)(y2 - 1.0f);
+
 	iy1 = (int)(y1 - 1.0f);
 	ix2 = (int)(x2 + 1.0f);
-	//iy2 = vid.height - (int)(y1 + 1.0f);
-	//iy2 = r_refdef.view.viewport.height + 2 * r_refdef.view.viewport.y - (int)(y1 + 1.0f);
-	iy2 = (int)(y2 + 1.0f);
-	//Con_Printf("%f %f %f %f\n", x1, y1, x2, y2);
 
-	// clamp it to the screen
+	iy2 = (int)(y2 + 1.0f);
+
 	if (ix1 < r_refdef.view.viewport.x) ix1 = r_refdef.view.viewport.x;
 	if (iy1 < r_refdef.view.viewport.y) iy1 = r_refdef.view.viewport.y;
 	if (ix2 > r_refdef.view.viewport.x + r_refdef.view.viewport.width) ix2 = r_refdef.view.viewport.x + r_refdef.view.viewport.width;
 	if (iy2 > r_refdef.view.viewport.y + r_refdef.view.viewport.height) iy2 = r_refdef.view.viewport.y + r_refdef.view.viewport.height;
 
-	// if it is inside out, it's not visible
 	if (ix2 <= ix1 || iy2 <= iy1)
 		return true;
 
-	// the light area is visible, set up the scissor rectangle
 	scissor[0] = ix1;
 	scissor[1] = iy1;
 	scissor[2] = ix2 - ix1;
 	scissor[3] = iy2 - iy1;
 
-	// D3D Y coordinate is top to bottom, OpenGL is bottom to top, fix the D3D one
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_D3D9:
@@ -807,7 +718,6 @@ qboolean R_ScissorForBBox(const float *mins, const float *maxs, int *scissor)
 	return false;
 }
 
-
 static void R_Viewport_ApplyNearClipPlaneFloatGL(const r_viewport_t *v, float *m, float normalx, float normaly, float normalz, float dist)
 {
 	float q[4];
@@ -815,18 +725,16 @@ static void R_Viewport_ApplyNearClipPlaneFloatGL(const r_viewport_t *v, float *m
 	float clipPlane[4], v3[3], v4[3];
 	float normal[3];
 
-	// This is inspired by Oblique Depth Projection from http://www.terathon.com/code/oblique.php
-
 	VectorSet(normal, normalx, normaly, normalz);
 	Matrix4x4_Transform3x3(&v->viewmatrix, normal, clipPlane);
 	VectorScale(normal, -dist, v3);
 	Matrix4x4_Transform(&v->viewmatrix, v3, v4);
-	// FIXME: LordHavoc: I think this can be done more efficiently somehow but I can't remember the technique
+
 	clipPlane[3] = -DotProduct(v4, clipPlane);
 
 #if 0
 {
-	// testing code for comparing results
+
 	float clipPlane2[4];
 	VectorCopy4(clipPlane, clipPlane2);
 	R_EntityMatrix(&identitymatrix);
@@ -837,19 +745,13 @@ static void R_Viewport_ApplyNearClipPlaneFloatGL(const r_viewport_t *v, float *m
 }
 #endif
 
-	// Calculate the clip-space corner point opposite the clipping plane
-	// as (sgn(clipPlane.x), sgn(clipPlane.y), 1, 1) and
-	// transform it into camera space by multiplying it
-	// by the inverse of the projection matrix
 	q[0] = ((clipPlane[0] < 0.0f ? -1.0f : clipPlane[0] > 0.0f ? 1.0f : 0.0f) + m[8]) / m[0];
 	q[1] = ((clipPlane[1] < 0.0f ? -1.0f : clipPlane[1] > 0.0f ? 1.0f : 0.0f) + m[9]) / m[5];
 	q[2] = -1.0f;
 	q[3] = (1.0f + m[10]) / m[14];
 
-	// Calculate the scaled plane vector
 	d = 2.0f / DotProduct4(clipPlane, q);
 
-	// Replace the third row of the projection matrix
 	m[2] = clipPlane[0] * d;
 	m[6] = clipPlane[1] * d;
 	m[10] = clipPlane[2] * d + 1.0f;
@@ -1001,38 +903,38 @@ void R_Viewport_InitPerspectiveInfinite(r_viewport_t *v, const matrix4x4_t *came
 
 float cubeviewmatrix[6][16] =
 {
-    // standard cubemap projections
-    { // +X
+
+    {
          0, 0,-1, 0,
          0,-1, 0, 0,
         -1, 0, 0, 0,
          0, 0, 0, 1,
     },
-    { // -X
+    {
          0, 0, 1, 0,
          0,-1, 0, 0,
          1, 0, 0, 0,
          0, 0, 0, 1,
     },
-    { // +Y
+    {
          1, 0, 0, 0,
          0, 0,-1, 0,
          0, 1, 0, 0,
          0, 0, 0, 1,
     },
-    { // -Y
+    {
          1, 0, 0, 0,
          0, 0, 1, 0,
          0,-1, 0, 0,
          0, 0, 0, 1,
     },
-    { // +Z
+    {
          1, 0, 0, 0,
          0,-1, 0, 0,
          0, 0,-1, 0,
          0, 0, 0, 1,
     },
-    { // -Z
+    {
         -1, 0, 0, 0,
          0,-1, 0, 0,
          0, 0, 1, 0,
@@ -1041,38 +943,38 @@ float cubeviewmatrix[6][16] =
 };
 float rectviewmatrix[6][16] =
 {
-    // sign-preserving cubemap projections
-    { // +X
+
+    {
          0, 0,-1, 0,
          0, 1, 0, 0,
          1, 0, 0, 0,
          0, 0, 0, 1,
     },
-    { // -X
+    {
          0, 0, 1, 0,
          0, 1, 0, 0,
          1, 0, 0, 0,
          0, 0, 0, 1,
     },
-    { // +Y
+    {
          1, 0, 0, 0,
          0, 0,-1, 0,
          0, 1, 0, 0,
          0, 0, 0, 1,
     },
-    { // -Y
+    {
          1, 0, 0, 0,
          0, 0, 1, 0,
          0, 1, 0, 0,
          0, 0, 0, 1,
     },
-    { // +Z
+    {
          1, 0, 0, 0,
          0, 1, 0, 0,
          0, 0,-1, 0,
          0, 0, 0, 1,
     },
-    { // -Z
+    {
          1, 0, 0, 0,
          0, 1, 0, 0,
          0, 0, 1, 0,
@@ -1158,10 +1060,8 @@ void R_SetViewport(const r_viewport_t *v)
 {
 	gl_viewport = *v;
 
-	// FIXME: v_flipped_state is evil, this probably breaks somewhere
 	GL_SetMirrorState(v_flipped.integer && (v->type == R_VIEWPORTTYPE_PERSPECTIVE || v->type == R_VIEWPORTTYPE_PERSPECTIVE_INFINITEFARCLIP));
 
-	// copy over the matrices to our state
 	gl_viewmatrix = v->viewmatrix;
 	gl_projectionmatrix = v->projectmatrix;
 
@@ -1175,7 +1075,7 @@ void R_SetViewport(const r_viewport_t *v)
 			float m[16];
 			CHECKGLERROR
 			qglViewport(v->x, v->y, v->width, v->height);CHECKGLERROR
-			// Load the projection matrix into OpenGL
+
 			qglMatrixMode(GL_PROJECTION);CHECKGLERROR
 			Matrix4x4_ToArrayFloatGL(&gl_projectionmatrix, m);
 			qglLoadMatrixf(m);CHECKGLERROR
@@ -1213,7 +1113,6 @@ void R_SetViewport(const r_viewport_t *v)
 		break;
 	}
 
-	// force an update of the derived matrices
 	gl_modelmatrixchanged = true;
 	R_EntityMatrix(&gl_modelmatrix);
 }
@@ -1271,9 +1170,9 @@ int R_Mesh_CreateFramebufferObject(rtexture_t *depthtexture, rtexture_t *colorte
 			GLuint status;
 			qglGenFramebuffers(1, (GLuint*)&temp);CHECKGLERROR
 			R_Mesh_SetRenderTargets(temp, NULL, NULL, NULL, NULL, NULL);
-			// GL_ARB_framebuffer_object (GL3-class hardware) - depth stencil attachment
+
 #ifdef USE_GLES2
-			// FIXME: separate stencil attachment on GLES
+
 			if (depthtexture  && depthtexture->texnum ) qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT  , depthtexture->gltexturetypeenum , depthtexture->texnum , 0);CHECKGLERROR
 			if (depthtexture  && depthtexture->renderbuffernum ) qglFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT  , GL_RENDERBUFFER, depthtexture->renderbuffernum );CHECKGLERROR
 #else
@@ -1328,7 +1227,7 @@ int R_Mesh_CreateFramebufferObject(rtexture_t *depthtexture, rtexture_t *colorte
 			if (status != GL_FRAMEBUFFER_COMPLETE)
 			{
 				Con_Printf("R_Mesh_CreateFramebufferObject: glCheckFramebufferStatus returned %i\n", status);
-				gl_state.framebufferobject = 0; // GL unbinds it for us
+				gl_state.framebufferobject = 0;
 				qglDeleteFramebuffers(1, (GLuint*)&temp);
 				temp = 0;
 			}
@@ -1340,7 +1239,7 @@ int R_Mesh_CreateFramebufferObject(rtexture_t *depthtexture, rtexture_t *colorte
 			GLuint status;
 			qglGenFramebuffers(1, (GLuint*)&temp);CHECKGLERROR
 			R_Mesh_SetRenderTargets(temp, NULL, NULL, NULL, NULL, NULL);
-			// GL_EXT_framebuffer_object (GL2-class hardware) - no depth stencil attachment, let it break stencil
+
 			if (depthtexture  && depthtexture->texnum ) qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT  , depthtexture->gltexturetypeenum , depthtexture->texnum , 0);CHECKGLERROR
 			if (depthtexture  && depthtexture->renderbuffernum ) qglFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT  , GL_RENDERBUFFER, depthtexture->renderbuffernum );CHECKGLERROR
 			if (colortexture  && colortexture->texnum ) qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 , colortexture->gltexturetypeenum , colortexture->texnum , 0);CHECKGLERROR
@@ -1383,7 +1282,7 @@ int R_Mesh_CreateFramebufferObject(rtexture_t *depthtexture, rtexture_t *colorte
 			if (status != GL_FRAMEBUFFER_COMPLETE)
 			{
 				Con_Printf("R_Mesh_CreateFramebufferObject: glCheckFramebufferStatus returned %i\n", status);
-				gl_state.framebufferobject = 0; // GL unbinds it for us
+				gl_state.framebufferobject = 0;
 				qglDeleteFramebuffers(1, (GLuint*)&temp);
 				temp = 0;
 			}
@@ -1411,7 +1310,7 @@ void R_Mesh_DestroyFramebufferObject(int fbo)
 	case RENDERPATH_GLES2:
 		if (fbo)
 		{
-			// GL clears the binding if we delete something bound
+
 			if (gl_state.framebufferobject == fbo)
 				gl_state.framebufferobject = 0;
 			qglDeleteFramebuffers(1, (GLuint*)&fbo);
@@ -1465,13 +1364,13 @@ void R_Mesh_SetRenderTargets(int fbo, rtexture_t *depthtexture, rtexture_t *colo
 	rtexture_t *textures[5];
 	Vector4Set(textures, colortexture, colortexture2, colortexture3, colortexture4);
 	textures[4] = depthtexture;
-	// unbind any matching textures immediately, otherwise D3D will complain about a bound texture being used as a render target
+
 	for (j = 0;j < 5;j++)
 		if (textures[j])
 			for (i = 0;i < vid.teximageunits;i++)
 				if (gl_state.units[i].texture == textures[j])
 					R_Mesh_TexBind(i, NULL);
-	// set up framebuffer object or render targets for the active rendering API
+
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -1487,8 +1386,7 @@ void R_Mesh_SetRenderTargets(int fbo, rtexture_t *depthtexture, rtexture_t *colo
 		break;
 	case RENDERPATH_D3D9:
 #ifdef SUPPORTD3D
-		// set up the new render targets, a NULL depthtexture intentionally binds nothing
-		// TODO: optimize: keep surface pointer around in rtexture_t until texture is freed or lost
+
 		if (fbo)
 		{
 			IDirect3DSurface9 *surfaces[5];
@@ -1503,9 +1401,9 @@ void R_Mesh_SetRenderTargets(int fbo, rtexture_t *depthtexture, rtexture_t *colo
 						IDirect3DTexture9_GetSurfaceLevel((IDirect3DTexture9 *)textures[i]->d3dtexture, 0, &surfaces[i]);
 				}
 			}
-			// set the render targets for real
+
 			R_Mesh_SetRenderTargetsD3D9(surfaces[4], surfaces[0], surfaces[1], surfaces[2], surfaces[3]);
-			// release the texture surface levels (they won't be lost while bound...)
+
 			for (i = 0;i < 5;i++)
 				if (textures[i] && !textures[i]->d3dsurface)
 					IDirect3DSurface9_Release(surfaces[i]);
@@ -1560,8 +1458,8 @@ static int d3dstencilopforglfunc(int f)
 	switch(f)
 	{
 	case GL_KEEP: return D3DSTENCILOP_KEEP;
-	case GL_INCR: return D3DSTENCILOP_INCR; // note: GL_INCR is clamped, D3DSTENCILOP_INCR wraps
-	case GL_DECR: return D3DSTENCILOP_DECR; // note: GL_DECR is clamped, D3DSTENCILOP_DECR wraps
+	case GL_INCR: return D3DSTENCILOP_INCR;
+	case GL_DECR: return D3DSTENCILOP_DECR;
 	default: Con_DPrintf("Unknown GL_StencilFunc\n");return D3DSTENCILOP_KEEP;
 	}
 }
@@ -1623,7 +1521,7 @@ static void GL_Backend_ResetState(void)
 		qglDisable(GL_ALPHA_TEST);CHECKGLERROR
 		if (qglBlendFuncSeparate)
 		{
-			qglBlendFuncSeparate(gl_state.blendfunc1, gl_state.blendfunc2, GL_ZERO, GL_ONE);CHECKGLERROR // ELUAN: Adreno 225 (and others) compositing workaround
+			qglBlendFuncSeparate(gl_state.blendfunc1, gl_state.blendfunc2, GL_ZERO, GL_ONE);CHECKGLERROR
 		}
 		else
 		{
@@ -1645,7 +1543,7 @@ static void GL_Backend_ResetState(void)
 
 		if (vid.support.ext_framebuffer_object)
 		{
-			//qglBindRenderbuffer(GL_RENDERBUFFER, 0);
+
 			qglBindFramebuffer(GL_FRAMEBUFFER, 0);
 		}
 
@@ -1827,7 +1725,7 @@ void GL_BlendFunc(int blendfunc1, int blendfunc2)
 			CHECKGLERROR
 			if (qglBlendFuncSeparate)
 			{
-				qglBlendFuncSeparate(gl_state.blendfunc1, gl_state.blendfunc2, GL_ZERO, GL_ONE);CHECKGLERROR // ELUAN: Adreno 225 (and others) compositing workaround
+				qglBlendFuncSeparate(gl_state.blendfunc1, gl_state.blendfunc2, GL_ZERO, GL_ONE);CHECKGLERROR
 			}
 			else
 			{
@@ -2110,7 +2008,7 @@ void R_SetStencilSeparate(qboolean enable, int writemask, int frontfail, int fro
 		Con_DPrintf("FIXME D3D11 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 		break;
 	case RENDERPATH_SOFT:
-		//Con_DPrintf("FIXME SOFT %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	}
 }
@@ -2165,7 +2063,7 @@ void R_SetStencil(qboolean enable, int writemask, int fail, int zfail, int zpass
 		Con_DPrintf("FIXME D3D11 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 		break;
 	case RENDERPATH_SOFT:
-		//Con_DPrintf("FIXME SOFT %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	}
 }
@@ -2334,7 +2232,7 @@ void GL_AlphaTest(int state)
 		case RENDERPATH_GL13:
 		case RENDERPATH_GLES1:
 #ifdef GL_ALPHA_TEST
-			// only fixed function uses alpha test, other paths use pixel kill capability in shaders
+
 			CHECKGLERROR
 			if (gl_state.alphatest)
 			{
@@ -2375,17 +2273,17 @@ void GL_AlphaToCoverage(qboolean state)
 			break;
 		case RENDERPATH_GL20:
 #ifdef GL_SAMPLE_ALPHA_TO_COVERAGE_ARB
-			// alpha to coverage turns the alpha value of the pixel into 0%, 25%, 50%, 75% or 100% by masking the multisample fragments accordingly
+
 			CHECKGLERROR
 			if (gl_state.alphatocoverage)
 			{
 				qglEnable(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB);CHECKGLERROR
-//				qglEnable(GL_MULTISAMPLE_ARB);CHECKGLERROR
+
 			}
 			else
 			{
 				qglDisable(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB);CHECKGLERROR
-//				qglDisable(GL_MULTISAMPLE_ARB);CHECKGLERROR
+
 			}
 #endif
 			break;
@@ -2395,7 +2293,7 @@ void GL_AlphaToCoverage(qboolean state)
 
 void GL_ColorMask(int r, int g, int b, int a)
 {
-	// NOTE: this matches D3DCOLORWRITEENABLE_RED, GREEN, BLUE, ALPHA
+
 	int state = (r ? 1 : 0) | (g ? 2 : 0) | (b ? 4 : 0) | (a ? 8 : 0);
 	if (gl_state.colormask != state)
 	{
@@ -2450,7 +2348,7 @@ void GL_Color(float cr, float cg, float cb, float ca)
 		case RENDERPATH_D3D9:
 		case RENDERPATH_D3D10:
 		case RENDERPATH_D3D11:
-			// no equivalent in D3D
+
 			break;
 		case RENDERPATH_SOFT:
 			DPSOFTRAST_Color4f(cr, cg, cb, ca);
@@ -2539,9 +2437,9 @@ void GL_ScissorTest(int state)
 
 void GL_Clear(int mask, const float *colorvalue, float depthvalue, int stencilvalue)
 {
-	// opaque black - if you want transparent black, you'll need to pass in a colorvalue
+
 	static const float blackcolor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-	// prevent warnings when trying to clear a buffer that does not exist
+
 	if (!colorvalue)
 		colorvalue = blackcolor;
 	if (!vid.stencil)
@@ -2609,20 +2507,20 @@ void GL_ReadPixelsBGRA(int x, int y, int width, int height, unsigned char *outpi
 		{
 			int i;
 			int r;
-		//	int g;
+
 			int b;
-		//	int a;
+
 			qglReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, outpixels);CHECKGLERROR
 			for (i = 0;i < width * height * 4;i += 4)
 			{
 				r = outpixels[i+0];
-		//		g = outpixels[i+1];
+
 				b = outpixels[i+2];
-		//		a = outpixels[i+3];
+
 				outpixels[i+0] = b;
-		//		outpixels[i+1] = g;
+
 				outpixels[i+2] = r;
-		//		outpixels[i+3] = a;
+
 			}
 		}
 #else
@@ -2632,10 +2530,7 @@ void GL_ReadPixelsBGRA(int x, int y, int width, int height, unsigned char *outpi
 	case RENDERPATH_D3D9:
 #ifdef SUPPORTD3D
 		{
-			// LordHavoc: we can't directly download the backbuffer because it may be
-			// multisampled, and it may not be lockable, so we blit it to a lockable
-			// surface of the same dimensions (but without multisample) to resolve the
-			// multisample buffer to a normal image, and then lock that...
+
 			IDirect3DSurface9 *stretchsurface = NULL;
 			if (!FAILED(IDirect3DDevice9_CreateRenderTarget(vid_d3d9dev, vid.width, vid.height, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &stretchsurface, NULL)))
 			{
@@ -2653,15 +2548,7 @@ void GL_ReadPixelsBGRA(int x, int y, int width, int height, unsigned char *outpi
 				}
 				IDirect3DSurface9_Release(stretchsurface);
 			}
-			// code scraps
-			//IDirect3DSurface9 *syssurface = NULL;
-			//if (!FAILED(IDirect3DDevice9_CreateRenderTarget(vid_d3d9dev, vid.width, vid.height, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &stretchsurface, NULL)))
-			//if (!FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(vid_d3d9dev, vid.width, vid.height, D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH, &syssurface, NULL)))
-			//IDirect3DDevice9_GetRenderTargetData(vid_d3d9dev, gl_state.d3drt_backbuffercolorsurface, syssurface);
-			//if (!FAILED(IDirect3DDevice9_GetFrontBufferData(vid_d3d9dev, 0, syssurface)))
-			//if (!FAILED(IDirect3DSurface9_LockRect(syssurface, &lockedrect, NULL, D3DLOCK_READONLY)))
-			//IDirect3DSurface9_UnlockRect(syssurface);
-			//IDirect3DSurface9_Release(syssurface);
+
 		}
 #endif
 		break;
@@ -2677,7 +2564,6 @@ void GL_ReadPixelsBGRA(int x, int y, int width, int height, unsigned char *outpi
 	}
 }
 
-// called at beginning of frame
 void R_Mesh_Start(void)
 {
 	BACKENDACTIVECHECK
@@ -2768,12 +2654,6 @@ unsigned int GL_Backend_CompileProgram(int vertexstrings_count, const char **ver
 		if (strstr(linklog, "error") || strstr(linklog, "ERROR") || strstr(linklog, "Error") || strstr(linklog, "WARNING") || strstr(linklog, "warning") || strstr(linklog, "Warning") || developer_extra.integer)
 			Con_DPrintf("program link log:\n%s\n", linklog);
 
-		// software vertex shader is ok but software fragment shader is WAY
-		// too slow, fail program if so.
-		// NOTE: this string might be ATI specific, but that's ok because the
-		// ATI R300 chip (Radeon 9500-9800/X300) is the most likely to use a
-		// software fragment shader due to low instruction and dependent
-		// texture limits.
 		if (strstr(linklog, "fragment shader will run in software"))
 			programlinked = false;
 	}
@@ -2794,7 +2674,6 @@ void GL_Backend_FreeProgram(unsigned int prog)
 	CHECKGLERROR
 }
 
-// renders triangles using vertices from the active arrays
 int paranoidblah = 0;
 void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtriangles, const int *element3i, const r_meshbuffer_t *element3i_indexbuffer, int element3i_bufferoffset, const unsigned short *element3s, const r_meshbuffer_t *element3s_indexbuffer, int element3s_bufferoffset)
 {
@@ -2809,7 +2688,7 @@ void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtri
 			Con_DPrintf("R_Mesh_Draw(%d, %d, %d, %d, %8p, %8p, %8x, %8p, %8p, %8x);\n", firstvertex, numvertices, firsttriangle, numtriangles, (void *)element3i, (void *)element3i_indexbuffer, (int)element3i_bufferoffset, (void *)element3s, (void *)element3s_indexbuffer, (int)element3s_bufferoffset);
 		return;
 	}
-	// adjust the pointers for firsttriangle
+
 	if (element3i)
 		element3i += firsttriangle * 3;
 	if (element3i_indexbuffer)
@@ -2825,7 +2704,7 @@ void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtri
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		// check if the user specified to ignore static index buffers
+
 		if (!gl_state.usevbo_staticindex || (gl_vbo.integer == 3 && !vid.forcevbo && (element3i_bufferoffset || element3s_bufferoffset)))
 		{
 			element3i_indexbuffer = NULL;
@@ -2839,7 +2718,7 @@ void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtri
 	case RENDERPATH_SOFT:
 		break;
 	}
-	// upload a dynamic index buffer if needed
+
 	if (element3s)
 	{
 		if (!element3s_indexbuffer && gl_state.usevbo_dynamicindex)
@@ -2860,15 +2739,11 @@ void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtri
 	if (gl_paranoid.integer)
 	{
 		unsigned int i;
-		// LordHavoc: disabled this - it needs to be updated to handle components and gltype and stride in each array
+
 #if 0
 		unsigned int j, size;
 		const int *p;
-		// note: there's no validation done here on buffer objects because it
-		// is somewhat difficult to get at the data, and gl_paranoid can be
-		// used without buffer objects if the need arises
-		// (the data could be gotten using glMapBuffer but it would be very
-		//  slow due to uncachable video memory reads)
+
 		if (!qglIsEnabled(GL_VERTEX_ARRAY))
 			Con_Print("R_Mesh_Draw: vertex array not enabled\n");
 		CHECKGLERROR
@@ -3268,7 +3143,7 @@ void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtri
 			break;
 		case RENDERPATH_GLES1:
 		case RENDERPATH_GLES2:
-			// GLES does not have glDrawRangeElements so this is a bit shorter than the GL20 path
+
 			if (bufferobject3s)
 			{
 				GL_BindEBO(bufferobject3s);
@@ -3303,7 +3178,6 @@ void R_Mesh_Draw(int firstvertex, int numvertices, int firsttriangle, int numtri
 	}
 }
 
-// restores backend state, used when done with 3D rendering
 void R_Mesh_Finish(void)
 {
 	R_Mesh_SetRenderTargets(0, NULL, NULL, NULL, NULL, NULL);
@@ -3459,7 +3333,7 @@ void R_Mesh_DestroyMeshBuffer(r_meshbuffer_t *buffer)
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		// GL clears the binding if we delete something bound
+
 		if (gl_state.uniformbufferobject == buffer->bufferobject)
 			gl_state.uniformbufferobject = 0;
 		if (gl_state.vertexbufferobject == buffer->bufferobject)
@@ -3541,8 +3415,6 @@ void GL_Mesh_ListVBOs(qboolean printeach)
 	Con_Printf("%i 16bit indexbuffers totalling %i bytes (%.3f MB)\n%i 32bit indexbuffers totalling %i bytes (%.3f MB)\n%i vertexbuffers totalling %i bytes (%.3f MB)\n%i uniformbuffers totalling %i bytes (%.3f MB)\ncombined %i buffers totalling %i bytes (%.3fMB)\n", index16count, index16mem, index16mem / 10248576.0, index32count, index32mem, index32mem / 10248576.0, vertexcount, vertexmem, vertexmem / 10248576.0, uniformcount, uniformmem, uniformmem / 10248576.0, totalcount, totalmem, totalmem / 10248576.0);
 }
 
-
-
 void R_Mesh_VertexPointer(int components, int gltype, size_t stride, const void *pointer, const r_meshbuffer_t *vertexbuffer, size_t bufferoffset)
 {
 	switch(vid.renderpath)
@@ -3579,7 +3451,7 @@ void R_Mesh_VertexPointer(int components, int gltype, size_t stride, const void 
 			gl_state.pointer_vertex_offset = bufferoffset;
 			CHECKGLERROR
 			GL_BindVBO(bufferobject);
-			// LordHavoc: special flag added to gltype for unnormalized types
+
 			qglVertexAttribPointer(GLSLATTRIB_POSITION, components, gltype & ~0x80000000, (gltype & 0x80000000) == 0, (GLsizei)stride, bufferobject ? (void *)bufferoffset : pointer);CHECKGLERROR
 		}
 		break;
@@ -3593,8 +3465,7 @@ void R_Mesh_VertexPointer(int components, int gltype, size_t stride, const void 
 
 void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *pointer, const r_meshbuffer_t *vertexbuffer, size_t bufferoffset)
 {
-	// note: vertexbuffer may be non-NULL even if pointer is NULL, so check
-	// the pointer only.
+
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -3604,7 +3475,7 @@ void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *
 		CHECKGLERROR
 		if (pointer)
 		{
-			// caller wants color array enabled
+
 			int bufferobject = vertexbuffer ? vertexbuffer->bufferobject : 0;
 			if (!gl_state.pointer_color_enabled)
 			{
@@ -3627,13 +3498,13 @@ void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *
 		}
 		else
 		{
-			// caller wants color array disabled
+
 			if (gl_state.pointer_color_enabled)
 			{
 				gl_state.pointer_color_enabled = false;
 				CHECKGLERROR
 				qglDisableClientState(GL_COLOR_ARRAY);CHECKGLERROR
-				// when color array is on the glColor gets trashed, set it again
+
 				qglColor4f(gl_state.color4f[0], gl_state.color4f[1], gl_state.color4f[2], gl_state.color4f[3]);CHECKGLERROR
 			}
 		}
@@ -3644,7 +3515,7 @@ void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *
 		CHECKGLERROR
 		if (pointer)
 		{
-			// caller wants color array enabled
+
 			int bufferobject = vertexbuffer ? vertexbuffer->bufferobject : 0;
 			if (!gl_state.pointer_color_enabled)
 			{
@@ -3662,19 +3533,19 @@ void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *
 				gl_state.pointer_color_offset = bufferoffset;
 				CHECKGLERROR
 				GL_BindVBO(bufferobject);
-				// LordHavoc: special flag added to gltype for unnormalized types
+
 				qglVertexAttribPointer(GLSLATTRIB_COLOR, components, gltype & ~0x80000000, (gltype & 0x80000000) == 0, (GLsizei)stride, bufferobject ? (void *)bufferoffset : pointer);CHECKGLERROR
 			}
 		}
 		else
 		{
-			// caller wants color array disabled
+
 			if (gl_state.pointer_color_enabled)
 			{
 				gl_state.pointer_color_enabled = false;
 				CHECKGLERROR
 				qglDisableVertexAttribArray(GLSLATTRIB_COLOR);CHECKGLERROR
-				// when color array is on the glColor gets trashed, set it again
+
 				qglVertexAttrib4f(GLSLATTRIB_COLOR, gl_state.color4f[0], gl_state.color4f[1], gl_state.color4f[2], gl_state.color4f[3]);CHECKGLERROR
 			}
 		}
@@ -3690,9 +3561,7 @@ void R_Mesh_ColorPointer(int components, int gltype, size_t stride, const void *
 void R_Mesh_TexCoordPointer(unsigned int unitnum, int components, int gltype, size_t stride, const void *pointer, const r_meshbuffer_t *vertexbuffer, size_t bufferoffset)
 {
 	gltextureunit_t *unit = gl_state.units + unitnum;
-	// update array settings
-	// note: there is no need to check bufferobject here because all cases
-	// that involve a valid bufferobject also supply a texcoord array
+
 	switch(vid.renderpath)
 	{
 	case RENDERPATH_GL11:
@@ -3703,14 +3572,14 @@ void R_Mesh_TexCoordPointer(unsigned int unitnum, int components, int gltype, si
 		if (pointer)
 		{
 			int bufferobject = vertexbuffer ? vertexbuffer->bufferobject : 0;
-			// texture array unit is enabled, enable the array
+
 			if (!unit->arrayenabled)
 			{
 				unit->arrayenabled = true;
 				GL_ClientActiveTexture(unitnum);
 				qglEnableClientState(GL_TEXTURE_COORD_ARRAY);CHECKGLERROR
 			}
-			// texcoord array
+
 			if (unit->pointer_texcoord_components != components || unit->pointer_texcoord_gltype != gltype || unit->pointer_texcoord_stride != stride || unit->pointer_texcoord_pointer != pointer || unit->pointer_texcoord_vertexbuffer != vertexbuffer || unit->pointer_texcoord_offset != bufferoffset)
 			{
 				unit->pointer_texcoord_components = components;
@@ -3726,7 +3595,7 @@ void R_Mesh_TexCoordPointer(unsigned int unitnum, int components, int gltype, si
 		}
 		else
 		{
-			// texture array unit is disabled, disable the array
+
 			if (unit->arrayenabled)
 			{
 				unit->arrayenabled = false;
@@ -3742,13 +3611,13 @@ void R_Mesh_TexCoordPointer(unsigned int unitnum, int components, int gltype, si
 		if (pointer)
 		{
 			int bufferobject = vertexbuffer ? vertexbuffer->bufferobject : 0;
-			// texture array unit is enabled, enable the array
+
 			if (!unit->arrayenabled)
 			{
 				unit->arrayenabled = true;
 				qglEnableVertexAttribArray(unitnum+GLSLATTRIB_TEXCOORD0);CHECKGLERROR
 			}
-			// texcoord array
+
 			if (unit->pointer_texcoord_components != components || unit->pointer_texcoord_gltype != gltype || unit->pointer_texcoord_stride != stride || unit->pointer_texcoord_pointer != pointer || unit->pointer_texcoord_vertexbuffer != vertexbuffer || unit->pointer_texcoord_offset != bufferoffset)
 			{
 				unit->pointer_texcoord_components = components;
@@ -3758,13 +3627,13 @@ void R_Mesh_TexCoordPointer(unsigned int unitnum, int components, int gltype, si
 				unit->pointer_texcoord_vertexbuffer = vertexbuffer;
 				unit->pointer_texcoord_offset = bufferoffset;
 				GL_BindVBO(bufferobject);
-				// LordHavoc: special flag added to gltype for unnormalized types
+
 				qglVertexAttribPointer(unitnum+GLSLATTRIB_TEXCOORD0, components, gltype & ~0x80000000, (gltype & 0x80000000) == 0, (GLsizei)stride, bufferobject ? (void *)bufferoffset : pointer);CHECKGLERROR
 			}
 		}
 		else
 		{
-			// texture array unit is disabled, disable the array
+
 			if (unit->arrayenabled)
 			{
 				unit->arrayenabled = false;
@@ -3854,7 +3723,7 @@ void R_Mesh_ClearBindingsForTexture(int texnum)
 {
 	gltextureunit_t *unit;
 	unsigned int unitnum;
-	// this doesn't really unbind the texture, but it does prevent a mistaken "do nothing" behavior on the next time this same texnum is bound on the same unit as the same type (this mainly affects r_shadow_bouncegrid because 3D textures are so rarely used)
+
 	for (unitnum = 0;unitnum < vid.teximageunits;unitnum++)
 	{
 		unit = gl_state.units + unitnum;
@@ -3882,7 +3751,7 @@ void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex)
 		if (!tex)
 		{
 			tex = r_texture_white;
-			// not initialized enough yet...
+
 			if (!tex)
 				return;
 		}
@@ -3918,7 +3787,7 @@ void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex)
 				break;
 			}
 		}
-		// update 2d texture binding
+
 		if (unit->t2d != tex2d)
 		{
 			GL_ActiveTexture(unitnum);
@@ -3939,7 +3808,7 @@ void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex)
 			unit->t2d = tex2d;
 			qglBindTexture(GL_TEXTURE_2D, unit->t2d);CHECKGLERROR
 		}
-		// update 3d texture binding
+
 		if (unit->t3d != tex3d)
 		{
 			GL_ActiveTexture(unitnum);
@@ -3960,7 +3829,7 @@ void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex)
 			unit->t3d = tex3d;
 			qglBindTexture(GL_TEXTURE_3D, unit->t3d);CHECKGLERROR
 		}
-		// update cubemap texture binding
+
 		if (unit->tcubemap != texcubemap)
 		{
 			GL_ActiveTexture(unitnum);
@@ -3989,17 +3858,17 @@ void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex)
 			if (!tex)
 			{
 				tex = r_texture_white;
-				// not initialized enough yet...
+
 				if (!tex)
 					return;
 			}
-			// upload texture if needed
+
 			R_GetTexture(tex);
 			if (unit->texture == tex)
 				return;
 			unit->texture = tex;
 			IDirect3DDevice9_SetTexture(vid_d3d9dev, unitnum, (IDirect3DBaseTexture9*)tex->d3dtexture);
-			//IDirect3DDevice9_SetRenderState(vid_d3d9dev, d3drswrap[unitnum], (tex->flags & TEXF_CLAMP) ? (D3DWRAPCOORD_0 | D3DWRAPCOORD_1 | D3DWRAPCOORD_2) : 0);
+
 			IDirect3DDevice9_SetSamplerState(vid_d3d9dev, unitnum, D3DSAMP_ADDRESSU, tex->d3daddressu);
 			IDirect3DDevice9_SetSamplerState(vid_d3d9dev, unitnum, D3DSAMP_ADDRESSV, tex->d3daddressv);
 			if (tex->d3daddressw)
@@ -4023,7 +3892,7 @@ void R_Mesh_TexBind(unsigned int unitnum, rtexture_t *tex)
 		if (!tex)
 		{
 			tex = r_texture_white;
-			// not initialized enough yet...
+
 			if (!tex)
 				return;
 		}
@@ -4049,7 +3918,7 @@ void R_Mesh_TexMatrix(unsigned int unitnum, const matrix4x4_t *matrix)
 		if (matrix && matrix->m[3][3])
 		{
 			gltextureunit_t *unit = gl_state.units + unitnum;
-			// texmatrix specified, check if it is different
+
 			if (!unit->texmatrixenabled || memcmp(&unit->matrix, matrix, sizeof(matrix4x4_t)))
 			{
 				float glmatrix[16];
@@ -4065,7 +3934,7 @@ void R_Mesh_TexMatrix(unsigned int unitnum, const matrix4x4_t *matrix)
 		}
 		else
 		{
-			// no texmatrix specified, revert to identity
+
 			gltextureunit_t *unit = gl_state.units + unitnum;
 			if (unit->texmatrixenabled)
 			{
@@ -4098,11 +3967,11 @@ void R_Mesh_TexCombine(unsigned int unitnum, int combinergb, int combinealpha, i
 	{
 	case RENDERPATH_GL20:
 	case RENDERPATH_GLES2:
-		// do nothing
+
 		break;
 	case RENDERPATH_GL13:
 	case RENDERPATH_GLES1:
-		// GL_ARB_texture_env_combine
+
 		if (!combinergb)
 			combinergb = GL_MODULATE;
 		if (!combinealpha)
@@ -4120,7 +3989,7 @@ void R_Mesh_TexCombine(unsigned int unitnum, int combinergb, int combinealpha, i
 				unit->combine = GL_COMBINE;
 				GL_ActiveTexture(unitnum);
 				qglTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);CHECKGLERROR
-				qglTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE);CHECKGLERROR // for GL_INTERPOLATE mode
+				qglTexEnvi(GL_TEXTURE_ENV, GL_SOURCE2_RGB, GL_TEXTURE);CHECKGLERROR
 			}
 			if (unit->combinergb != combinergb)
 			{
@@ -4158,7 +4027,7 @@ void R_Mesh_TexCombine(unsigned int unitnum, int combinergb, int combinealpha, i
 		}
 		break;
 	case RENDERPATH_GL11:
-		// normal GL texenv
+
 		if (!combinergb)
 			combinergb = GL_MODULATE;
 		if (unit->combine != combinergb)
@@ -4209,12 +4078,7 @@ void R_Mesh_ResetTextureState(void)
 	}
 }
 
-
-
 #ifdef SUPPORTD3D
-//#define r_vertex3f_d3d9fvf (D3DFVF_XYZ)
-//#define r_vertexgeneric_d3d9fvf (D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1)
-//#define r_vertexmesh_d3d9fvf (D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX5 | D3DFVF_TEXCOORDSIZE1(3) | D3DFVF_TEXCOORDSIZE2(3) | D3DFVF_TEXCOORDSIZE3(3))
 
 D3DVERTEXELEMENT9 r_vertex3f_d3d9elements[] =
 {
@@ -4297,7 +4161,7 @@ static void R_Mesh_DestroyVertexDeclarations(void)
 
 void R_Mesh_PrepareVertices_Vertex3f(int numvertices, const float *vertex3f, const r_meshbuffer_t *vertexbuffer, int bufferoffset)
 {
-	// upload temporary vertexbuffer for this rendering
+
 	if (!gl_state.usevbo_staticvertex)
 		vertexbuffer = NULL;
 	if (!vertexbuffer && gl_state.usevbo_dynamicvertex)
@@ -4393,8 +4257,6 @@ void R_Mesh_PrepareVertices_Vertex3f(int numvertices, const float *vertex3f, con
 		break;
 	}
 }
-
-
 
 r_vertexgeneric_t *R_Mesh_PrepareVertices_Generic_Lock(int numvertices)
 {
@@ -4493,7 +4355,6 @@ void R_Mesh_PrepareVertices_Generic_Arrays(int numvertices, const float *vertex3
 		return;
 	}
 
-	// no quick path for this case, convert to vertex structs
 	vertex = R_Mesh_PrepareVertices_Generic_Lock(numvertices);
 	for (i = 0;i < numvertices;i++)
 		VectorCopy(vertex3f + 3*i, vertex[i].vertex3f);
@@ -4516,7 +4377,7 @@ void R_Mesh_PrepareVertices_Generic_Arrays(int numvertices, const float *vertex3
 
 void R_Mesh_PrepareVertices_Generic(int numvertices, const r_vertexgeneric_t *vertex, const r_meshbuffer_t *vertexbuffer, int bufferoffset)
 {
-	// upload temporary vertexbuffer for this rendering
+
 	if (!gl_state.usevbo_staticvertex)
 		vertexbuffer = NULL;
 	if (!vertexbuffer && gl_state.usevbo_dynamicvertex)
@@ -4612,8 +4473,6 @@ void R_Mesh_PrepareVertices_Generic(int numvertices, const r_vertexgeneric_t *ve
 		break;
 	}
 }
-
-
 
 r_vertexmesh_t *R_Mesh_PrepareVertices_Mesh_Lock(int numvertices)
 {
@@ -4758,7 +4617,7 @@ void R_Mesh_PrepareVertices_Mesh_Arrays(int numvertices, const float *vertex3f, 
 
 void R_Mesh_PrepareVertices_Mesh(int numvertices, const r_vertexmesh_t *vertex, const r_meshbuffer_t *vertexbuffer, int bufferoffset)
 {
-	// upload temporary vertexbuffer for this rendering
+
 	if (!gl_state.usevbo_staticvertex)
 		vertexbuffer = NULL;
 	if (!vertexbuffer && gl_state.usevbo_dynamicvertex)

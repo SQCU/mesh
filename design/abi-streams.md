@@ -1,124 +1,126 @@
-# The ABI is the boundary, and streams are the unit
+# Mesh application ABI
 
-**Status: the diagnosis landed, the proposed interface did not.** Read the two error sections
-below — they are still accurate and are why the current design looks the way it does. Then
-stop, because everything after **The rule** describes an interface that was never built and in
-part cannot be.
+The application boundary is the POSIX shared-memory region declared by
+[`rdma/mesh.h`](../rdma/mesh.h). The bridge creates and registers that mapping; an
+application maps the same bytes. Applications do not open a verbs device, construct a
+queue pair, or perform the out-of-band connection.
 
-What actually landed instead: the workload is no longer linked into the transport, but the
-boundary is a process boundary rather than a richer callback — one bridge binary, applications
-as separate processes attaching to POSIX shared memory, speaking through three functions
-(`README.md`, **Using the mesh**). Spans are gone entirely rather than being replaced by
-streams: delivery is per page, and an application that wants an ordering imposes it in its own
-payload. `mesh_f` does not become anything; it is deleted. `mesh_abi`, `SPAN_MAX`, `F_FIRST`
-and `F_META` no longer exist.
+This document specifies the implemented ABI. It contains no proposed callbacks or
+workload-specific transport objects.
 
-The placement idea in **Streams, not spans** — pre-posting receives at the destination offset
-so arrival is placement and nothing is reassembled — was not built and is blocked by hardware:
-`max_sge` is 1 and there is no immediate data, so every page must carry its own header
-contiguously, which is why memory is handed to applications in slots rather than as one flat
-span.
+## Region and page interface
 
-Written after two design errors were caught in review. Both are recorded because both were
-mine and both were defended before they were fixed.
+`mesh_attach(ctx, name)` maps a named region and records its inode. `mesh_open` attaches
+the process-global context and returns the first application-arena slot while writing:
 
-## Error 1: the workload is statically linked into the transport
+- `nslots`: application-arena slot count;
+- `stride`: byte distance between slots;
+- `usable`: payload bytes in each slot after the wire header.
 
-```make
-mesh-flow: mesh-flow.c $(F) mesh-f.h
-	cc -O2 -o $@ mesh-flow.c $(F) -lrdma
-```
-
-`make F=f-yourthing.c` does not produce a workload. It produces **a different transport**.
-Every workload is therefore its own binary, which means its own TCP out-of-band connect, its
-own `ibv_open_device`, its own protection domain, and its own queue pair. On a device with
-`max_qp: 11` that is a hard ceiling of about ten concurrent workloads per node, and each one
-is a distinct application identity to the host firewall.
-
-That last consequence is not hypothetical. The OOB handshake failure debugged on this link
-was the macOS application firewall filtering per-binary: it completes the TCP handshake for
-an unapproved binary and drops it, so the connector sees success and the listener never sees
-an accept. **That was this antipattern announcing itself, and it was diagnosed as a macOS
-quirk instead of a design error.** An architecture where arbitrary applications open TCP to
-arbitrary targets makes every new workload a new firewall negotiation. The correct
-architecture has exactly one binary that ever touches TCP, once, at bootstrap.
-
-## Error 2: spans were treated as ontologically real
+The low-level submission and completion operations are:
 
 ```c
-enum { SPAN_MAX = 4096 };
-...
-if(nspan>=SPAN_MAX){ ...; span_abort++; ... }
+void  *mesh_open(size_t *nslots, size_t *stride, size_t *usable);
+size_t mesh_write(const void *p, size_t nbytes, int node);
+size_t mesh_write_copy(const void *p, size_t stride, size_t bytes,
+                       size_t nslots, int node);
+size_t mesh_queue_copy(const void *p, size_t stride, size_t bytes,
+                       size_t nslots, int node);
+size_t mesh_pump(void);
+size_t mesh_queued(void);
+size_t mesh_inflight(void);
+size_t mesh_read(void **p, int *from);
+size_t mesh_readv(void *p, size_t stride, uint32_t *sizes,
+                  int *from, size_t count);
 ```
 
-A span longer than 4096 pages is not rejected with an error. It is **silently discarded** and
-counted in `span_abort`. A transport-layer buffer bound was promoted into a semantic limit on
-what a datum is permitted to be. A stream that takes 23000 spans to transmit is not an edge
-case to be supported later; it is the normal case, and the span is not a thing the workload
-should ever have been shown.
+`mesh_write` submits consecutive arena pages already owned by the application and
+returns the payload byte mass accepted in that call. `mesh_write_copy` copies a strided
+row array into currently available arena credits and returns the accepted row mass.
+`mesh_queue_copy` additionally retains all rows not immediately accepted in a
+dynamically growing process buffer. `mesh_pump` advances that buffer and reports queued
+plus in-flight row mass.
 
-Two adjacent bugs come from the same mistake. Line 329 aborts an entire span if a page arrives
-out of order, and line 325 discards an open span when a new `F_FIRST` appears. Both are
-reassembly logic that should not exist.
+`mesh_read` returns a pointer directly into one received shared-memory page. Its next
+call releases the previous page, so the pointer lifetime ends at that call. `mesh_readv`
+copies up to `count` completed pages into a caller-owned strided array and returns their
+individual byte lengths and source-node identities.
 
-## The rule
+The `SUB`, `CMP`, `REL`, and `ACK` rings are credit and scheduling structures. Their
+depth is not a maximum tensor extent: producers repeat non-queued writes, use the
+growing queued path, or use the stream state machine until the entire datum moves.
 
-**The number of copies per datum must not scale with N.** For a datum of content size N the
-budget is one: the NIC DMA that puts the bytes in memory. Everything after that is a view.
-Reassembling a large stream by concatenating spans violates this by construction, because the
-concatenation cost is O(N) and buys nothing — the bytes were already in memory.
+## Arbitrary-extent stream interface
 
-## The shape
-
-```
-app --DLPack view--> ABI region <--DMA--> wire <--DMA--> ABI region --DLPack view--> app
-```
-
-One region, mapped by both the daemon and the application, registered as the MR. The
-application never names a peer, never opens a verbs device, never opens a socket.
-
-Today `mesh-flow` registers its own private allocation:
+The implemented stream is a caller-owned `struct mstream` advanced by `mesh_turn`:
 
 ```c
-mrs[nmr]=ibv_reg_mr(g_pd,(char*)mem+off,len,IBV_ACCESS_LOCAL_WRITE);
+void mesh_yell_start(struct mesh_ctx *ctx, struct mstream *stream,
+                     const void *source, size_t bytes, int node, uint32_t id);
+int mesh_lissen_start(struct mesh_ctx *ctx, struct mstream *stream,
+                      void *destination, size_t bytes, uint32_t id);
+int mesh_turn(struct mesh_ctx *ctx, struct mstream **streams, int count);
+int mesh_scatter(struct mesh_ctx *ctx, struct mstream *streams,
+                 const void *source, size_t bytes, const int *nodes,
+                 int count, uint32_t first_id);
+int mesh_gather(struct mesh_ctx *ctx, struct mstream *streams,
+                void *destination, size_t bytes, int count,
+                uint32_t first_id);
 ```
 
-`mem` is the daemon's, not the application's. That is the copy boundary that must not exist.
-`ibv_reg_mr` must instead cover the `mesh_abi_create` mapping, so that a page arriving off the
-wire lands in memory the application already has mapped.
+`mesh_yell_start` closure-converts a source pointer, total byte extent, destination node,
+and stream identity into send state. `mesh_lissen_start` binds the same identity and byte
+extent to caller-owned destination storage. `mesh_turn` advances any number of these
+states together. DATA frames carry literal byte offsets. FIN reports the full extent,
+REQ reports the first missing page offset, and OK closes the sender. Arrival order does
+not define placement or completion. FIN is emitted immediately after the data extent and
+is retried only after the preceding FIN page has a transport completion; no spin count,
+elapsed-time window, tensor shape, or workload count controls stream progress.
 
-## Streams, not spans
+`mesh_scatter` and `mesh_gather` divide one contiguous byte extent into adjacent shards
+whose union is the original extent. They create stream states only; the caller advances
+the complete set through `mesh_turn`. The number of shards is a placement choice, never
+a statement about the maximum row or tensor count.
 
-A `F_META` page announces `{stream_id, nbytes, npages}` before its payload. On receipt the
-consumer reserves a contiguous extent of the region for that stream. Every subsequent page of
-the stream is placed at `extent_base + seq * payload` by the page allocator.
+The blocking `mesh_yell` and `mesh_lissen` wrappers use the same state machine and accept
+`size_t` extents.
 
-Three properties follow, none of which the current code has:
+## Copy accounting
 
-- **Arrival order stops mattering.** A page is written where its sequence number says, so
-  reorder is not a reassembly problem and needs no abort path.
-- **Length stops mattering.** 23000 pages and 3 pages take the same path. There is no
-  `SPAN_MAX`, because nothing accumulates a list of pages.
-- **Completion is a count, not a concatenation.** The stream is ready when its page count is
-  met. The datum was assembled by the NIC, in place, for free.
+RDMA receives land in the registered shared region. `mesh_read` exposes that landing
+page without a second copy. All other copy boundaries are explicit:
 
-Extents will exceed one memory region. `mesh-mem` handles this: it chunks at a fixed 1 GiB
-and maps an address to its region by ordered lookup, so an extent spans regions and the page
-allocator respects region boundaries when placing. The 16.4 MB figure this section originally
-cited is the advertised `max_mr_size`, which turned out to be neither enforced nor usable;
-the real limit is 2^32.
+| operation | application-side copy |
+|---|---:|
+| arena-backed `mesh_write` | none |
+| `mesh_write_copy` | source row into arena page |
+| `mesh_queue_copy` | source row into pending storage, then arena page |
+| stream send | source page extent into arena page |
+| stream receive | received page into destination offset |
+| Python `Mesh.read` | received page into the reusable NumPy batch |
 
-## What `mesh_f` becomes
+These alternatives are semantic peers with different ownership contracts. A caller may
+choose an arena view to minimize copies or a copied/queued path to retain independent
+storage. No documentation may describe a copied path as zero-copy.
 
-Per-page and per-span delivery both go away. The workload sees a stream open, and a stream
-complete carrying one zero-copy tensor view:
+## Restart continuity
 
-```c
-void mesh_stream_open(uint32_t stream, uint64_t nbytes, uint64_t npages, int node_idx);
-void mesh_stream_ready(uint32_t stream, struct mtensor *t, int node_idx);
-```
+The library periodically compares the mapped region inode with the current named region.
+A bridge replacement at the same size is remapped at the same virtual address. Page
+operations can then continue against the new region. In-progress stream states are marked
+failed because the replacement no longer possesses their peer protocol state; the caller
+reissues those byte extents. A link re-pair inside one bridge lifetime retains the region
+and does not create that boundary.
 
-`struct mtensor` is DLPack-shaped: data pointer, ndim, shape, strides, dtype, device. The data
-pointer is the extent base. No copy occurs between the wire and that pointer, and the
-workload is a separate process that obtained it by attaching to the region, not by being
-linked into the transport.
+The ABI data flow is specified alongside the bridge control flow in
+[`bridge-and-ipc.md`](bridge-and-ipc.md). Workload tensor framing belongs above this ABI
+and is specified in [`ALGORITHM-CONTRACTS.md`](ALGORITHM-CONTRACTS.md).
+
+## Xonotic strategy frame kinds
+
+[`rdma/xonwire.def`](../rdma/xonwire.def) is the single numeric definition consumed by
+the Python frame producer/consumer and the DarkPlaces relay. It names observations,
+carts, events, strategy responses, expert inference, expert training forward passes,
+input and parameter gradients, and batch begin/commit responses. The engine relay sends
+every expert request/control kind to the worker and sends every worker response kind back
+to its literal source node; it does not interpret or rewrite tensor values.

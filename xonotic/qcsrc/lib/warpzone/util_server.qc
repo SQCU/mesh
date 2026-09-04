@@ -21,7 +21,7 @@ void WarpZoneLib_ExactTrigger_Init(entity this, bool unsetmodel)
 	}
 	if(this.model == "")
 	{
-		// It's a box! No need to match with exacttriggers.
+
 		this.warpzone_isboxy = 1;
 	}
 	else
@@ -30,17 +30,17 @@ void WarpZoneLib_ExactTrigger_Init(entity this, bool unsetmodel)
 		ma = this.maxs;
  		precache_model(this.model);
  		_setmodel(this, this.model);
-		// let mapper-set mins/maxs override the model's bounds if set
+
 		if(mi != '0 0 0' || ma != '0 0 0')
 		{
-			// It's a box! No need to match with exacttriggers.
+
 			this.mins = mi;
 			this.maxs = ma;
 			this.warpzone_isboxy = 1;
 		}
  	}
 	setorigin(this, this.origin);
-	this.solid = SOLID_TRIGGER; // before setsize to ensure area grid linking
+	this.solid = SOLID_TRIGGER;
 	if(this.scale)
 		setsize(this, this.mins * this.scale, this.maxs * this.scale);
 	else

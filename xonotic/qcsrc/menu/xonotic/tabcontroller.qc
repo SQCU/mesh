@@ -20,7 +20,7 @@ entity XonoticTabController_makeTabButton_T(entity me, string theTitle, entity t
 		error("Tab dialog height mismatch!");
 	b = makeXonoticButton_T(theTitle, '0 0 0', theTooltip);
 		me.addTab(me, tab, b);
-	// TODO make this real tab buttons (with color parameters, and different gfx)
+
 	return b;
 }
 entity XonoticTabController_makeTabButton(entity me, string theTitle, entity tab)

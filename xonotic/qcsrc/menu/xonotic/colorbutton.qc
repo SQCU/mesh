@@ -11,7 +11,7 @@ void XonoticColorButton_configureXonoticColorButton(entity me, float theGroup, f
 {
 	switch(theValue)
 	{
-		// rearrange 1..14 for rainbow order
+
 		case  1: theValue = 10; break;
 		case  2: theValue =  4; break;
 		case  3: theValue =  1; break;
@@ -27,7 +27,7 @@ void XonoticColorButton_configureXonoticColorButton(entity me, float theGroup, f
 		case 13: theValue =  8; break;
 		case 14: theValue =  9; break;
 		default:
-			// no change
+
 			break;
 	}
 	me.controlledCvar = "_cl_color";

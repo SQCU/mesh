@@ -26,7 +26,6 @@ float pathlib_wpp_opencb(entity wp, entity child, float cost)
     if(child.pathlib_list == closedlist)
         return false;
 
-	// FIXME! wp.wp##mincost is NOT distance. Make it distance or add a field for distance to be used here (for better speed)
 	cost = vlen(child.origin - wp.origin);
 
     child.path_prev 	 = wp;
@@ -35,7 +34,6 @@ float pathlib_wpp_opencb(entity wp, entity child, float cost)
     child.pathlib_node_h = pathlib_heuristic(child.origin, goal_node.origin);
     child.pathlib_node_c = pathlib_wpp_waypointcallback(child, wp);
     child.pathlib_node_f = child.pathlib_node_g + child.pathlib_node_h + child.pathlib_node_c;
-
 
     if(child == goal_node)
         pathlib_foundgoal = true;
@@ -54,7 +52,6 @@ float pathlib_wpp_openncb(entity wp, entity child, float cost)
     if(child.pathlib_list == closedlist)
         return false;
 
-	// FIXME! wp.wp##mincost is NOT distance. Make it distance or add a field for distance to be used here (for better speed)
 	cost = vlen(child.origin - wp.origin);
 
     child.path_prev 	 = wp;
@@ -146,7 +143,7 @@ entity pathlib_waypointpath(entity wp_from, entity wp_to, float callback)
 	else
 		pathlib_wpp_open = pathlib_wpp_openncb;
 
-	pathlib_heuristic = pathlib_h_none; // We run Dijkstra, A* does not make sense with variable distanced nodes.
+	pathlib_heuristic = pathlib_h_none;
 
     if (!openlist)
         openlist       = spawn();
@@ -161,7 +158,6 @@ entity pathlib_waypointpath(entity wp_from, entity wp_to, float callback)
 
     LOG_TRACE("pathlib_waypointpath init");
 
-    // Initialize waypoint grid
     IL_EACH(g_waypoints, true,
     {
         it.pathlib_list = NULL;
@@ -169,10 +165,6 @@ entity pathlib_waypointpath(entity wp_from, entity wp_to, float callback)
         it.pathlib_node_f = 0;
         it.pathlib_node_h = 0;
 
-        //setmodel(it, "models/runematch/rune.mdl");
-        //it.effects = EF_LOWPRECISION;
-        //it.colormod = '0 0 0';
-        //it.scale = 1;
     });
 
     goal_node  = wp_to;

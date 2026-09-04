@@ -72,7 +72,7 @@ float XonoticPicker_keyDown(entity me, float key, float ascii, float shift)
 	{
 		case K_END:
 		case K_KP_END:
-			// lower left cell then left arrow to select the last valid cell
+
 			me.focusedCell = eY * (me.rows - 1);
 		case K_LEFTARROW:
 		case K_KP_LEFTARROW:
@@ -80,7 +80,7 @@ float XonoticPicker_keyDown(entity me, float key, float ascii, float shift)
 			return 1;
 		case K_HOME:
 		case K_KP_HOME:
-			// upper right cell then right arrow to select the first valid cell
+
 			me.focusedCell = eX * (me.columns - 1);
 		case K_RIGHTARROW:
 		case K_KP_RIGHTARROW:
@@ -109,7 +109,7 @@ void XonoticPicker_moveFocus(entity me, vector initialCell, vector step)
 	me.focusedCell_x = mod(me.focusedCell.x + step.x + me.columns, me.columns);
 	me.focusedCell_y = mod(me.focusedCell.y + step.y + me.rows, me.rows);
 
-	if(me.focusedCell != initialCell) // Recursion break
+	if(me.focusedCell != initialCell)
 		if(!me.cellIsValid(me, me.focusedCell))
 			me.moveFocus(me, initialCell, step);
 

@@ -24,14 +24,11 @@ void navigation_goalrating_timeout_set(entity this)
 		this.bot_strategytime = time + autocvar_bot_ai_strategyinterval;
 }
 
-// use this when current goal must be discarded immediately
 void navigation_goalrating_timeout_force(entity this)
 {
 	navigation_goalrating_timeout_expire(this, 0);
 }
 
-// use this when current goal can be kept for a short while to increase the chance
-// of bot touching a waypoint, which helps to find a new goal more efficiently
 void navigation_goalrating_timeout_expire(entity this, float seconds)
 {
 	if (seconds <= 0)
@@ -99,7 +96,6 @@ void navigation_dynamicgoal_unset(entity this)
 	this.nearestwaypointtimeout = -1;
 }
 
-// returns point of ent closer to org
 vector get_closer_dest(entity ent, vector org)
 {
 	vector dest = '0 0 0';
@@ -124,13 +120,11 @@ void set_tracewalk_dest(entity ent, vector org, bool fix_player_dest)
 		vector wm2 = ent.origin + ent.maxs;
 		if (IS_PLAYER(ent) || IS_MONSTER(ent))
 		{
-			// move destination point out of player bbox otherwise tracebox always fails
-			// (if bot_navigation_ignoreplayers is false)
+
 			wm1 += vec2(PL_MIN_CONST) + '-1 -1 0';
 			wm2 += vec2(PL_MAX_CONST) + '1 1 0';
 		}
-		// set destination point to x and y coords of ent that are closer to org
-		// z coord is set to ent's min height
+
 		tracewalk_dest.x = bound(wm1.x, org.x, wm2.x);
 		tracewalk_dest.y = bound(wm1.y, org.y, wm2.y);
 		if ((IS_PLAYER(ent) || IS_MONSTER(ent))
@@ -153,10 +147,10 @@ void set_tracewalk_dest(entity ent, vector org, bool fix_player_dest)
 	}
 	if (fix_player_dest && IS_PLAYER(ent) && !IS_ONGROUND(ent))
 	{
-		// snap player to the ground
+
 		if (org.x == tracewalk_dest.x && org.y == tracewalk_dest.y)
 		{
-			// bot is right under the player
+
 			tracebox(ent.origin, ent.mins, ent.maxs, ent.origin - '0 0 700', MOVE_NORMAL, ent);
 			tracewalk_dest = trace_endpos;
 			tracewalk_dest_height = 0;
@@ -173,7 +167,6 @@ void set_tracewalk_dest(entity ent, vector org, bool fix_player_dest)
 	}
 }
 
-// returns point of ent closer to org
 vector set_tracewalk_dest_2(entity ent, vector org)
 {
 	vector closer_dest = '0 0 0';
@@ -184,12 +177,11 @@ vector set_tracewalk_dest_2(entity ent, vector org)
 		closer_dest.x = bound(wm1.x, org.x, wm2.x);
 		closer_dest.y = bound(wm1.y, org.y, wm2.y);
 		closer_dest.z = bound(wm1.z, org.z, wm2.z);
-		// set destination point to x and y coords of ent that are closer to org
-		// z coord is set to ent's min height
+
 		tracewalk_dest.x = closer_dest.x;
 		tracewalk_dest.y = closer_dest.y;
 		tracewalk_dest.z = wm1.z;
-		tracewalk_dest_height = wm2.z - wm1.z; // destination height
+		tracewalk_dest_height = wm2.z - wm1.z;
 	}
 	else
 	{
@@ -210,10 +202,7 @@ bool navigation_check_submerged_state(entity ent, vector pos)
 	else
 	{
 		submerged = SUBMERGED(pos);
-		// NOTE: SUBMERGED check of box waypoint origin may fail even if origin
-		//  is actually submerged because often they are inside some solid.
-		//  That's why submerged state is saved now that we know current pos is
-		//  not stuck in solid (previous tracewalk call to this pos was successfully)
+
 		if(!ent.navigation_dynamicgoal)
 			ent.nav_submerged_state = (submerged) ? SUBMERGED_YES : SUBMERGED_NO;
 	}
@@ -238,9 +227,6 @@ bool navigation_checkladders(entity e, vector org, vector m1, vector m2, vector 
 	return false;
 }
 
-// Unfortuntely we can't use trace_inwater since it doesn't hold the fraction of the total
-// distance that was traveled before impact as the description in the engine (collision.h) says.
-// It would have helped to speed up tracewalk underwater
 vector resurface_limited(vector org, float lim, vector m1)
 {
 	if (WETFEET(org + eZ * (lim - org.z)))
@@ -266,10 +252,6 @@ vector resurface_limited(vector org, float lim, vector m1)
 #define NAV_SWIM_ONWATER 1
 #define NAV_SWIM_UNDERWATER 2
 
-// rough simulation of walking from one point to another to test if a path
-// can be traveled, used for waypoint linking and havocbot
-// if end_height is > 0 destination is any point in the vertical segment [end, end + end_height * eZ]
-// INFO: the command sv_cmd trace walk is useful to test this function in game
 bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float end_height, float movemode)
 {
 	if(autocvar_bot_debug_tracewalk)
@@ -287,18 +269,16 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 	bool ignorehazards = false;
 	int nav_action;
 
-	// Analyze starting point
 	if (IN_LAVA(start))
 		ignorehazards = true;
 
 	tracebox(start, m1, m2, start, MOVE_NOMONSTERS, e);
 	if (trace_startsolid)
 	{
-		// Bad start
+
 		if(autocvar_bot_debug_tracewalk)
 			debugnodestatus(start, DEBUG_NODE_FAIL);
 
-		//print("tracewalk: ", vtos(start), " is a bad start\n");
 		return false;
 	}
 
@@ -315,8 +295,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 			nav_action = NAV_SWIM_UNDERWATER;
 		else
 		{
-			// tracebox down by player's height
-			// useful to know if water level is so low that bot can still walk
+
 			tracebox(org, m1, m2, org - eZ * (m2.z - m1.z), movemode, e);
 			if (SUBMERGED(trace_endpos))
 			{
@@ -330,7 +309,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 	else
 		nav_action =  NAV_WALK;
 
-	// Movement loop
 	while (true)
 	{
 		if (flatdist <= 0)
@@ -365,14 +343,13 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 
 			if (success)
 			{
-				// Succeeded
+
 				if(autocvar_bot_debug_tracewalk)
 				{
 					debugnode(e, org);
 					debugnodestatus(org, DEBUG_NODE_SUCCESS);
 				}
 
-				//print("tracewalk: ", vtos(start), " can reach ", vtos(end), "\n");
 				return true;
 			}
 		}
@@ -387,10 +364,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 			stepdist = flatdist;
 		if(nav_action == NAV_SWIM_UNDERWATER || (nav_action == NAV_SWIM_ONWATER && org.z > end2.z))
 		{
-			// can't use movement direction here to calculate move because of
-			// precision errors especially when direction has a high enough z value
-			//water_dir = normalize(water_end - org);
-			//move = org + water_dir * stepdist;
+
 			fixed_end.z = bound(end.z, org.z, end2.z);
 			if (stepdist == flatdist) {
 				move = fixed_end;
@@ -400,7 +374,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 				flatdist = vlen(vec2(fixed_end - move));
 			}
 		}
-		else // horiz. direction
+		else
 		{
 			flatdist -= stepdist;
 			move = org + flatdir * stepdist;
@@ -408,15 +382,14 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 
 		if(nav_action == NAV_SWIM_ONWATER)
 		{
-			tracebox(org, m1, m2, move, movemode, e); // swim
+			tracebox(org, m1, m2, move, movemode, e);
 
-			// hit something
 			if (trace_fraction < 1)
 			{
-				// stepswim
+
 				tracebox(org + stepheightvec, m1, m2, move + stepheightvec, movemode, e);
 
-				if (trace_fraction < 1 || trace_startsolid) // can't jump obstacle out of water
+				if (trace_fraction < 1 || trace_startsolid)
 				{
 					org = trace_endpos;
 					if(navigation_checkladders(e, org, m1, m2, end, end2, movemode))
@@ -427,7 +400,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 							debugnodestatus(org, DEBUG_NODE_SUCCESS);
 						}
 
-						//print("tracewalk: ", vtos(start), " can reach ", vtos(end), "\n");
 						return true;
 					}
 
@@ -435,10 +407,8 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 						debugnodestatus(org, DEBUG_NODE_FAIL);
 
 					return false;
-					//print("tracewalk: ", vtos(start), " hit something when trying to reach ", vtos(end), "\n");
-				}
 
-				//succesful stepswim
+				}
 
 				if (flatdist <= 0)
 				{
@@ -446,7 +416,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 					continue;
 				}
 
-				if (org.z <= move.z) // going horiz.
+				if (org.z <= move.z)
 				{
 					tracebox(trace_endpos, m1, m2, move, movemode, e);
 					org = trace_endpos;
@@ -455,12 +425,12 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 				}
 			}
 
-			if (org.z <= move.z) // going horiz.
+			if (org.z <= move.z)
 			{
 				org = trace_endpos;
 				nav_action = NAV_SWIM_ONWATER;
 			}
-			else // going down
+			else
 			{
 				org = trace_endpos;
 				if (SUBMERGED(org))
@@ -471,29 +441,26 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 		}
 		else if(nav_action == NAV_SWIM_UNDERWATER)
 		{
-			if (move.z >= org.z) // swimming upwards or horiz.
+			if (move.z >= org.z)
 			{
-				tracebox(org, m1, m2, move, movemode, e); // swim
+				tracebox(org, m1, m2, move, movemode, e);
 
 				bool stepswum = false;
 
-				// hit something
 				if (trace_fraction < 1)
 				{
-					// stepswim
+
 					vector stepswim_move = move + stepheightvec;
-					if (flatdist > 0 && stepswim_move.z > end2.z + stepheightvec.z) // don't allow stepswim to go higher than destination
+					if (flatdist > 0 && stepswim_move.z > end2.z + stepheightvec.z)
 						stepswim_move.z = end2.z;
 
 					tracebox(org + stepheightvec, m1, m2, stepswim_move, movemode, e);
 
-					// hit something
 					if (trace_startsolid)
 					{
 						if(autocvar_bot_debug_tracewalk)
 							debugnodestatus(org, DEBUG_NODE_FAIL);
 
-						//print("tracewalk: ", vtos(start), " hit something when trying to reach ", vtos(end), "\n");
 						return false;
 					}
 
@@ -506,7 +473,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 							if(autocvar_bot_debug_tracewalk)
 								debugnodestatus(org, DEBUG_NODE_FAIL);
 
-							//print("tracewalk: ", vtos(start), " can't reach ", vtos(end), "\n");
 							return false;
 						}
 						if(SUBMERGED(org))
@@ -514,15 +480,11 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 						else
 							nav_action = NAV_SWIM_ONWATER;
 
-						// we didn't advance horiz. in this step, flatdist decrease should be reverted
-						// but we can't do it properly right now... apply this workaround instead
 						if (flatdist <= 0)
 							flatdist = 1;
 
 						continue;
 					}
-
-					//succesful stepswim
 
 					if (flatdist <= 0)
 					{
@@ -536,7 +498,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 				if (!WETFEET(trace_endpos))
 				{
 					tracebox(trace_endpos, m1, m2, trace_endpos - eZ * (stepdist + (m2.z - m1.z)), movemode, e);
-					// if stepswum we'll land on the obstacle, avoid the SUBMERGED check
+
 					if (!stepswum && SUBMERGED(trace_endpos))
 					{
 						RESURFACE_LIMITED(trace_endpos, end2.z);
@@ -545,38 +507,31 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 						continue;
 					}
 
-					// not submerged
 					org = trace_endpos;
 					nav_action = NAV_WALK;
 					continue;
 				}
 
-				// wetfeet
 				org = trace_endpos;
 				nav_action = NAV_SWIM_UNDERWATER;
 				continue;
 			}
-			else //if (move.z < org.z) // swimming downwards
+			else
 			{
-				tracebox(org, m1, m2, move, movemode, e); // swim
+				tracebox(org, m1, m2, move, movemode, e);
 
-				// hit something
 				if (trace_fraction < 1)
 				{
-					// stepswim
+
 					tracebox(org + stepheightvec, m1, m2, move + stepheightvec, movemode, e);
 
-					// hit something
-					if (trace_fraction < 1 || trace_startsolid) // can't jump obstacle out of water
+					if (trace_fraction < 1 || trace_startsolid)
 					{
 						if(autocvar_bot_debug_tracewalk)
 							debugnodestatus(move, DEBUG_NODE_FAIL);
 
-						//print("tracewalk: ", vtos(start), " hit something when trying to reach ", vtos(end), "\n");
 						return false;
 					}
-
-					//succesful stepswim
 
 					if (flatdist <= 0)
 					{
@@ -586,7 +541,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 
 					if (trace_endpos.z > org.z && !SUBMERGED(trace_endpos))
 					{
-						// stepswim caused upwards direction
+
 						tracebox(trace_endpos, m1, m2, trace_endpos - stepheightvec, movemode, e);
 						if (!SUBMERGED(trace_endpos))
 						{
@@ -604,31 +559,30 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 		}
 		else if(nav_action == NAV_WALK)
 		{
-			// walk
+
 			tracebox(org, m1, m2, move, movemode, e);
 
 			if(autocvar_bot_debug_tracewalk)
 				debugnode(e, trace_endpos);
 
-			// hit something
 			if (trace_fraction < 1)
 			{
-				// check if we can walk over this obstacle, possibly by jumpstepping
+
 				tracebox(org + stepheightvec, m1, m2, move + stepheightvec, movemode, e);
 				if (trace_fraction < 1 || trace_startsolid)
 				{
-					if (trace_startsolid) // hit ceiling above org
+					if (trace_startsolid)
 					{
-						// reduce stepwalk height
+
 						tracebox(org, m1, m2, org + stepheightvec, movemode, e);
 						tracebox(trace_endpos, m1, m2, move + eZ * (trace_endpos.z - move.z), movemode, e);
 					}
-					else //if (trace_fraction < 1)
+					else
 					{
 						tracebox(org + jumpstepheightvec, m1, m2, move + jumpstepheightvec, movemode, e);
-						if (trace_startsolid) // hit ceiling above org
+						if (trace_startsolid)
 						{
-							// reduce jumpstepwalk height
+
 							tracebox(org, m1, m2, org + jumpstepheightvec, movemode, e);
 							tracebox(trace_endpos, m1, m2, move + eZ * (trace_endpos.z - move.z), movemode, e);
 						}
@@ -646,7 +600,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 								debugnodestatus(v, DEBUG_NODE_SUCCESS);
 							}
 
-							//print("tracewalk: ", vtos(start), " can reach ", vtos(end), "\n");
 							return true;
 						}
 
@@ -672,10 +625,7 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 							if(autocvar_bot_debug_tracewalk)
 								debugnodestatus(trace_endpos, DEBUG_NODE_FAIL);
 
-							//print("tracewalk: ", vtos(start), " hit something when trying to reach ", vtos(end), "\n");
-							//te_explosion(trace_endpos);
-							//print(ftos(e.dphitcontentsmask), "\n");
-							return false; // failed
+							return false;
 						}
 					}
 					else
@@ -687,10 +637,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 			else
 				move = trace_endpos;
 
-			// trace down from stepheight as far as possible and move there,
-			// if this starts in solid we try again without the stepup, and
-			// if that also fails we assume it is a wall
-			// (this is the same logic as the Quake walkmove function used)
 			tracebox(move, m1, m2, move + '0 0 -65536', movemode, e);
 
 			org = trace_endpos;
@@ -705,7 +651,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 						debugnodestatus(org, DEBUG_NODE_FAIL);
 					}
 
-					//print("tracewalk: ", vtos(start), " hits a hazard when trying to reach ", vtos(end), "\n");
 					return false;
 				}
 			}
@@ -723,7 +668,6 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 				continue;
 			}
 
-			// ended up submerged while walking
 			if(autocvar_bot_debug_tracewalk)
 				debugnode(e, org);
 
@@ -733,20 +677,12 @@ bool tracewalk(entity e, vector start, vector m1, vector m2, vector end, float e
 		}
 	}
 
-	//print("tracewalk: ", vtos(start), " did not arrive at ", vtos(end), " but at ", vtos(org), "\n");
-
-	// moved but didn't arrive at the intended destination
 	if(autocvar_bot_debug_tracewalk)
 		debugnodestatus(org, DEBUG_NODE_FAIL);
 
 	return false;
 }
 
-/////////////////////////////////////////////////////////////////////////////
-// goal stack
-/////////////////////////////////////////////////////////////////////////////
-
-// completely empty the goal stack, used when deciding where to go
 void navigation_clearroute(entity this)
 {
 	this.lastteleporttime = 0;
@@ -791,19 +727,13 @@ void navigation_clearroute(entity this)
 	this.goalstack31 = NULL;
 }
 
-// add a new goal at the beginning of the stack
-// (in other words: add a new prerequisite before going to the later goals)
-// NOTE: when a waypoint is added, the WP gets pushed first, then the
-// next-closest WP on the shortest path to the WP
-// That means, if the stack overflows, the bot will know how to do the FIRST 32
-// steps to the goal, and then recalculate the path.
 void navigation_pushroute(entity this, entity e)
 {
 	this.goalcurrent_prev = this.goalcurrent;
 	this.goalcurrent_distance_2d = FLOAT_MAX;
 	this.goalcurrent_distance_z = FLOAT_MAX;
 	this.goalcurrent_distance_time = 0;
-	//print("bot ", etos(this), " push ", etos(e), "\n");
+
 	if(this.goalstack31 == this.goalentity)
 		this.goalentity = NULL;
 	this.goalstack31 = this.goalstack30;
@@ -840,16 +770,13 @@ void navigation_pushroute(entity this, entity e)
 	this.goalcurrent = e;
 }
 
-// remove first goal from stack
-// (in other words: remove a prerequisite for reaching the later goals)
-// (used when a spawnfunc_waypoint is reached)
 void navigation_poproute(entity this)
 {
 	this.goalcurrent_prev = this.goalcurrent;
 	this.goalcurrent_distance_2d = FLOAT_MAX;
 	this.goalcurrent_distance_z = FLOAT_MAX;
 	this.goalcurrent_distance_time = 0;
-	//print("bot ", etos(this), " pop\n");
+
 	if(this.goalcurrent == this.goalentity)
 	{
 		this.goalentity = NULL;
@@ -889,9 +816,6 @@ void navigation_poproute(entity this)
 	this.goalstack31 = NULL;
 }
 
-// walking to wp (walkfromwp == false) v2 and v2_height will be used as
-// waypoint destination coordinates instead of v (only useful for box waypoints)
-// for normal waypoints v2 == v and v2_height == 0
 float navigation_waypoint_will_link(vector v, vector org, entity ent, vector v2, float v2_height, vector o2, float o2_height, float walkfromwp, float bestdist)
 {
 	if (vdist(v - org, <, bestdist))
@@ -914,7 +838,6 @@ float navigation_waypoint_will_link(vector v, vector org, entity ent, vector v2,
 	return false;
 }
 
-// find the spawnfunc_waypoint near a dynamic goal such as a dropped weapon
 entity navigation_findnearestwaypoint_withdist_except(entity ent, float walkfromwp, float bestdist, entity except)
 {
 	if(ent.tag_entity)
@@ -925,9 +848,7 @@ entity navigation_findnearestwaypoint_withdist_except(entity ent, float walkfrom
 
 	if (waypointeditor_enabled && !IS_BOT_CLIENT(ent))
 	{
-		// this code allows removing waypoints in the air and seeing jumppad/telepport waypoint links
-		// FIXME it causes a bug where a waypoint spawned really close to another one (max 16 qu)
-		// isn't detected as the nearest waypoint
+
 		IL_EACH(g_waypoints, it != ent && it != except,
 		{
 			if (boxesoverlap(pm1, pm2, it.absmin, it.absmax))
@@ -936,13 +857,13 @@ entity navigation_findnearestwaypoint_withdist_except(entity ent, float walkfrom
 	}
 	else
 	{
-		// do two scans, because box test is cheaper
+
 		IL_EACH(g_waypoints, it != ent && it != except && !(it.wpflags & (WAYPOINTFLAG_TELEPORT | WAYPOINTFLAG_JUMP)),
 		{
 			if(boxesoverlap(pm1, pm2, it.absmin, it.absmax))
 			{
 				if(walkfromwp && !ent.navigation_dynamicgoal)
-					waypoint_clearlinks(ent); // initialize wpXXmincost fields
+					waypoint_clearlinks(ent);
 				return it;
 			}
 		});
@@ -958,10 +879,9 @@ entity navigation_findnearestwaypoint_withdist_except(entity ent, float walkfrom
 	if(ent.size && !IS_PLAYER(ent))
 	{
 		org += 0.5 * (ent.mins + ent.maxs);
-		org.z = ent.origin.z + ent.mins.z - PL_MIN_CONST.z; // player height
+		org.z = ent.origin.z + ent.mins.z - PL_MIN_CONST.z;
 	}
 
-	// box check failed, try walk
 	IL_EACH(g_waypoints, it != ent,
 	{
 		if (walkfromwp && (it.wpflags & WPFLAGMASK_NORELINK))
@@ -1020,10 +940,9 @@ entity navigation_findnearestwaypoint(entity ent, float walkfromwp)
 	return wp;
 }
 
-// finds the waypoints near the bot initiating a navigation query
 float navigation_markroutes_nearestwaypoints(entity this, float maxdist)
 {
-	//navigation_testtracewalk = true;
+
 	int c = 0;
 	IL_EACH(g_waypoints, !it.wpconsidered,
 	{
@@ -1045,11 +964,10 @@ float navigation_markroutes_nearestwaypoints(entity this, float maxdist)
 			}
 		}
 	});
-	//navigation_testtracewalk = false;
+
 	return c;
 }
 
-// updates a path link if a spawnfunc_waypoint link is better than the current one
 void navigation_markroutes_checkwaypoint(entity w, entity wp, float cost, vector p)
 {
 	vector m1, m2;
@@ -1065,7 +983,7 @@ void navigation_markroutes_checkwaypoint(entity w, entity wp, float cost, vector
 	else
 		v = wp.origin;
 	if (w.wpflags & WAYPOINTFLAG_TELEPORT)
-		cost += w.wp00mincost; // assuming teleport has exactly one destination
+		cost += w.wp00mincost;
 	else
 		cost += waypoint_gettravelcost(p, v, w, wp);
 	if (wp.wpcost > cost)
@@ -1077,7 +995,6 @@ void navigation_markroutes_checkwaypoint(entity w, entity wp, float cost, vector
 	}
 }
 
-// queries the entire spawnfunc_waypoint network for pathes leading away from the bot
 void navigation_markroutes(entity this, entity fixed_source_waypoint)
 {
 	float cost, cost2;
@@ -1102,8 +1019,7 @@ void navigation_markroutes(entity this, entity fixed_source_waypoint)
 	}
 	else
 	{
-		// try a short range search for the nearest waypoints, and expand the search repeatedly if none are found
-		// as this search is expensive we will use lower values if the bot is on the air
+
 		float increment, maxdistance;
 		if(IS_ONGROUND(this))
 		{
@@ -1167,7 +1083,6 @@ void navigation_markroutes(entity this, entity fixed_source_waypoint)
 	}
 }
 
-// queries the entire spawnfunc_waypoint network for pathes leading to the bot
 void navigation_markroutes_inverted(entity fixed_source_waypoint)
 {
 	float cost, cost2;
@@ -1185,7 +1100,7 @@ void navigation_markroutes_inverted(entity fixed_source_waypoint)
 	{
 		fixed_source_waypoint.wpconsidered = true;
 		fixed_source_waypoint.wpnearestpoint = fixed_source_waypoint.origin + 0.5 * (fixed_source_waypoint.mins + fixed_source_waypoint.maxs);
-		fixed_source_waypoint.wpcost = fixed_source_waypoint.dmg; // the cost to get from X to fixed_source_waypoint
+		fixed_source_waypoint.wpcost = fixed_source_waypoint.dmg;
 		fixed_source_waypoint.wpfire = 1;
 		fixed_source_waypoint.enemy = NULL;
 	}
@@ -1202,7 +1117,7 @@ void navigation_markroutes_inverted(entity fixed_source_waypoint)
 		{
 			searching = true;
 			it.wpfire = 0;
-			cost = it.wpcost; // cost to walk from it to home
+			cost = it.wpcost;
 			p = it.wpnearestpoint;
 			entity wp = it;
 			IL_EACH(g_waypoints, it != wp,
@@ -1216,7 +1131,6 @@ void navigation_markroutes_inverted(entity fixed_source_waypoint)
 	}
 }
 
-// updates the best goal according to a weighted calculation of travel cost and item value of a new proposed item
 void navigation_routerating(entity this, entity e, float f, float rangebias)
 {
 	if (!e || e.blacklisted) { return; }
@@ -1271,9 +1185,6 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 
 	vector goal_org = (e.absmin + e.absmax) * 0.5;
 
-	//print("routerating ", etos(e), " = ", ftos(f), " - ", ftos(rangebias), "\n");
-
-	// Evaluate path using jetpack
 	if(this.items & IT_JETPACK)
 	if(autocvar_bot_ai_navigation_jetpack)
 	if(vdist(this.origin - goal_org, >, autocvar_bot_ai_navigation_jetpack_mindistance))
@@ -1282,22 +1193,18 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 
 		LOG_DEBUG("jetpack ai: evaluating path for ", e.classname);
 
-		// Point A
 		traceline(this.origin, this.origin + '0 0 65535', MOVE_NORMAL, this);
 		pointa = trace_endpos - '0 0 1';
 
-		// Point B
 		traceline(goal_org, goal_org + '0 0 65535', MOVE_NORMAL, e);
 		pointb = trace_endpos - '0 0 1';
 
-		// Can I see these two points from the sky?
 		traceline(pointa, pointb, MOVE_NORMAL, this);
 
 		if(trace_fraction==1)
 		{
 			LOG_DEBUG("jetpack ai: can bridge these two points");
 
-			// Lower the altitude of these points as much as possible
 			float zdistance, xydistance, cost, t, fuel;
 			vector down, npa, npb;
 
@@ -1322,9 +1229,6 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 			}
 			while(trace_fraction == 1);
 
-
-			// Rough estimation of fuel consumption
-			// (ignores acceleration and current xyz velocity)
 			xydistance = vlen(pointa - pointb);
 			zdistance = fabs(pointa.z - this.origin.z);
 
@@ -1334,18 +1238,13 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 
 			LOG_DEBUG("jetpack ai: required fuel ", ftos(fuel), ", have ", ftos(GetResource(this, RES_FUEL)));
 
-			// enough fuel ?
 			if(GetResource(this, RES_FUEL) > fuel || (this.items & IT_UNLIMITED_AMMO))
 			{
-				// Estimate cost
-				// (as onground costs calculation is mostly based on distances, here we do the same establishing some relationship
-				//  - between air and ground speeds)
 
 				cost = xydistance / (autocvar_g_jetpack_maxspeed_side/autocvar_sv_maxspeed);
 				cost += zdistance / (autocvar_g_jetpack_maxspeed_up/autocvar_sv_maxspeed);
 				cost *= 1.5;
 
-				// Compare against other goals
 				f = f * rangebias / (rangebias + cost);
 
 				if (navigation_bestrating < f)
@@ -1362,10 +1261,7 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 	}
 
 	entity nwp;
-	//te_wizspike(e.origin);
-	//bprint(etos(e));
-	//bprint("\n");
-	// update the cached spawnfunc_waypoint link on a dynamic item entity
+
 	if(e.classname == "waypoint" && !(e.wpflags & WAYPOINTFLAG_PERSONAL))
 	{
 		nwp = e;
@@ -1406,7 +1302,7 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 
 	if (nwp && nwp.wpcost < 10000000)
 	{
-		//te_wizspike(nwp.wpnearestpoint);
+
 		float nwptoitem_cost = 0;
 		if(nwp.wpflags & WAYPOINTFLAG_TELEPORT)
 			nwptoitem_cost = nwp.wp00mincost;
@@ -1425,10 +1321,9 @@ void navigation_routerating(entity this, entity e, float f, float rangebias)
 	}
 }
 
-// adds an item to the the goal stack with the path to a given item
 bool navigation_routetogoal(entity this, entity e, vector startposition)
 {
-	// if there is no goal, just exit
+
 	if (!e)
 		return false;
 
@@ -1438,14 +1333,12 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 
 	if(e.wpflags & WAYPOINTFLAG_TELEPORT)
 	{
-		// force teleport destination as route destination
+
 		teleport_goal = e;
 		navigation_pushroute(this, e.wp00);
 		this.goalentity = e.wp00;
 	}
 
-	// put the entity on the goal stack
-	//print("routetogoal ", etos(e), "\n");
 	navigation_pushroute(this, e);
 
 	if(teleport_goal)
@@ -1460,7 +1353,6 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 	if((this.items & IT_JETPACK) && e == this.navigation_jetpack_goal)
 		return true;
 
-	// if it can reach the goal there is nothing more to do
 	set_tracewalk_dest(e, startposition, true);
 	if ((!IS_MOVABLE(this.goalcurrent) || vdist(tracewalk_dest - this.origin, <, MAX_CHASE_DISTANCE))
 		&& (trace_ent == this || tracewalk(this, startposition, STAT(PL_MIN, this), STAT(PL_MAX, this),
@@ -1470,7 +1362,7 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 	}
 
 	entity nearest_wp = NULL;
-	// see if there are waypoints describing a path to the item
+
 	if(e.classname != "waypoint" || (e.wpflags & WAYPOINTFLAG_PERSONAL))
 	{
 		e = e.nearestwaypoint;
@@ -1479,14 +1371,14 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 	else if(teleport_goal)
 		e = teleport_goal;
 	else
-		e = e.enemy; // we already have added it, so...
+		e = e.enemy;
 
 	if(e == NULL)
 		return false;
 
 	if(nearest_wp && nearest_wp.enemy && !(nearest_wp.enemy.wpflags & WPFLAGMASK_NORELINK))
 	{
-		// often path can be optimized by not adding the nearest waypoint
+
 		if (this.goalentity.navigation_dynamicgoal || waypointeditor_enabled)
 		{
 			if (nearest_wp.enemy.wpcost < autocvar_bot_ai_strategyinterval_movingtarget)
@@ -1508,7 +1400,7 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 		}
 		else
 		{
-			// NOTE unlike waypoints, items hold incoming links
+
 			navigation_item_initlinks_ifneeded(this.goalentity);
 			int link_num = navigation_item_getlinknum(this.goalentity, nearest_wp.enemy);
 			if (link_num >= 0)
@@ -1516,7 +1408,7 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 				if (navigation_item_iswalkablelink(this.goalentity, link_num))
 					e = nearest_wp.enemy;
 			}
-			else // untested link
+			else
 			{
 				entity wp = nearest_wp.enemy;
 				entity goal = this.goalentity;
@@ -1539,7 +1431,7 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 
 	for (;;)
 	{
-		// add the spawnfunc_waypoint to the path
+
 		navigation_pushroute(this, e);
 		e = e.enemy;
 
@@ -1550,7 +1442,6 @@ bool navigation_routetogoal(entity this, entity e, vector startposition)
 	return false;
 }
 
-// shorten path by removing intermediate goals
 bool navigation_shortenpath(entity this)
 {
 	if (!this.goalstack01 || wasfreed(this.goalstack01))
@@ -1561,8 +1452,7 @@ bool navigation_shortenpath(entity this)
 
 	bool cut_allowed = false;
 	entity next = this.goalentity;
-	// evaluate whether bot can discard current route and chase directly a player, trying to
-	// keep waypoint route as long as possible, as it is safer and faster (bot can bunnyhop)
+
 	if (IS_MOVABLE(next))
 	{
 		set_tracewalk_dest(next, this.origin, true);
@@ -1602,7 +1492,7 @@ bool navigation_shortenpath(entity this)
 	}
 
 	next = this.goalstack01;
-	// if for some reason the bot is closer to the next goal, pop the current one
+
 	if (!IS_MOVABLE(next) && !(this.goalcurrent.wpflags & (WAYPOINTFLAG_TELEPORT | WAYPOINTFLAG_JUMP))
 		&& vlen2(this.goalcurrent.origin - next.origin) > vlen2(next.origin - this.origin)
 		&& checkpvs(this.origin + this.view_ofs, next))
@@ -1624,8 +1514,6 @@ bool navigation_shortenpath(entity this)
 	return false;
 }
 
-// removes any currently touching waypoints from the goal stack
-// (this is how bots detect if they reached a goal)
 int navigation_poptouchedgoals(entity this)
 {
 	int removed_goals = 0;
@@ -1635,10 +1523,10 @@ int navigation_poptouchedgoals(entity this)
 
 	if(this.goalcurrent.wpflags & WAYPOINTFLAG_TELEPORT)
 	{
-		if (!this.goalcurrent.wpisbox // warpzone
+		if (!this.goalcurrent.wpisbox
 			&& vlen2(this.origin - this.goalstack01.origin) < vlen2(this.origin - this.goalcurrent.origin))
 		{
-			// immediately remove origin and destination waypoints
+
 			navigation_poproute(this);
 			++removed_goals;
 			navigation_poproute(this);
@@ -1646,8 +1534,6 @@ int navigation_poptouchedgoals(entity this)
 			this.lastteleporttime = 0;
 		}
 
-		// make sure jumppad is really hit, don't rely on distance based checks
-		// as they may report a touch even if it didn't really happen
 		if(this.lastteleporttime > 0 && TELEPORT_USED(this, this.goalcurrent))
 		{
 			if(this.aistatus & AI_STATUS_WAYPOINT_PERSONAL_GOING)
@@ -1658,17 +1544,16 @@ int navigation_poptouchedgoals(entity this)
 			}
 			if(this.jumppadcount)
 			{
-				// remove jumppad waypoint after a random delay to prevent bots getting
-				// stuck on certain jumppads that require an extra initial horizontal speed
+
 				float max_delay = 0.1;
 				if (vdist(vec2(this.velocity), >, 2 * autocvar_sv_maxspeed))
 					max_delay = 0.05;
 				if (time - this.lastteleporttime < random() * max_delay)
 					return removed_goals;
 			}
-			else if (this.goalcurrent.wpisbox) // teleport
+			else if (this.goalcurrent.wpisbox)
 			{
-				// immediately remove origin and destination waypoints
+
 				navigation_poproute(this);
 				++removed_goals;
 			}
@@ -1680,9 +1565,7 @@ int navigation_poptouchedgoals(entity this)
 	}
 	else if (this.lastteleporttime > 0)
 	{
-		// sometimes bot is pushed so hard (by a jumppad or a shot) that ends up touching the next
-		// teleport / jumppad / warpzone present in its path skipping check of one or more goals
-		// if so immediately fix bot path by removing skipped goals
+
 		entity tele_ent = NULL;
 		if (this.goalstack01 && (this.goalstack01.wpflags & WAYPOINTFLAG_TELEPORT))
 			tele_ent = this.goalstack01;
@@ -1708,27 +1591,23 @@ int navigation_poptouchedgoals(entity this)
 			++removed_goals;
 			return removed_goals;
 		}
-		// reset of lastteleporttime can be overriden by a jumppad when it's set
-		// in more than one frame: make sure it's reset
+
 		this.lastteleporttime = 0;
 	}
 
-	// Loose goal touching check when running
-	// check goalstack01 to make sure waypoint isn't the final goal
 	if((this.aistatus & AI_STATUS_RUNNING) && this.goalcurrent.classname == "waypoint" && !(this.goalcurrent.wpflags & WAYPOINTFLAG_JUMP)
 		&& this.goalstack01 && !wasfreed(this.goalstack01) && vdist(vec2(this.velocity), >=, autocvar_sv_maxspeed))
 	{
 		vector gco = this.goalcurrent.origin;
 		float min_dist = BOT_BUNNYHOP_WP_DETECTION_RANGE;
-		// also detect waypoints when bot is way above them but with a narrower horizontal range
-		// so to increase chances bot ends up in the standard range (optimizes nearest waypoint finding)
+
 		if(vdist(this.origin - gco, <, min_dist)
 			|| (vdist(vec2(this.origin - gco), <, min_dist * 0.5) && vdist(this.origin - eZ * 1.5 * min_dist - gco, <, min_dist)))
 		{
 			traceline(this.origin + this.view_ofs , this.goalcurrent.origin, true, NULL);
 			if(trace_fraction==1)
 			{
-				// Detect personal waypoints
+
 				if(this.aistatus & AI_STATUS_WAYPOINT_PERSONAL_GOING)
 				if((this.goalcurrent.wpflags & WAYPOINTFLAG_PERSONAL) && this.goalcurrent.owner==this)
 				{
@@ -1764,7 +1643,6 @@ int navigation_poptouchedgoals(entity this)
 				break;
 		}
 
-		// Detect personal waypoints
 		if(this.aistatus & AI_STATUS_WAYPOINT_PERSONAL_GOING)
 		if((this.goalcurrent.wpflags & WAYPOINTFLAG_PERSONAL) && this.goalcurrent.owner==this)
 		{
@@ -1826,7 +1704,6 @@ entity navigation_get_really_close_waypoint(entity this)
 	return wp;
 }
 
-// begin a goal selection session (queries spawnfunc_waypoint network)
 void navigation_goalrating_start(entity this)
 {
 	if(this.aistatus & AI_STATUS_STUCK)
@@ -1838,16 +1715,15 @@ void navigation_goalrating_start(entity this)
 	navigation_clearroute(this);
 	navigation_bestgoal = NULL;
 	navigation_markroutes(this, wp);
-	this.goalstack31 = wp; // temporarly save the really close waypoint
+	this.goalstack31 = wp;
 }
 
-// ends a goal selection session (updates goal stack to the best goal)
 void navigation_goalrating_end(entity this)
 {
 	if(this.aistatus & AI_STATUS_STUCK)
 		return;
 
-	entity wp = this.goalstack31; // save to wp as this.goalstack31 is set by navigation_routetogoal
+	entity wp = this.goalstack31;
 	this.goalstack31 = NULL;
 
 	navigation_routetogoal(this, navigation_bestgoal, this.origin);
@@ -1856,7 +1732,6 @@ void navigation_goalrating_end(entity this)
 	if (wp && this.goalcurrent == wp)
 		navigation_poproute(this);
 
-	// If the bot got stuck then try to reach the farthest waypoint
 	if (!this.goalentity)
 	{
 		if (autocvar_bot_wander_enable && !(this.aistatus & AI_STATUS_STUCK))
@@ -1933,7 +1808,7 @@ void navigation_unstuck(entity this)
 
 	if (bot_waypoint_queue_goal)
 	{
-		// evaluate the next goal on the queue
+
 		float d = vlen2(this.origin - bot_waypoint_queue_goal.origin);
 		LOG_DEBUG(this.netname, " evaluating ", bot_waypoint_queue_goal.classname, " with squared distance ", ftos(d));
 		set_tracewalk_dest(bot_waypoint_queue_goal, this.origin, false);
@@ -1947,9 +1822,6 @@ void navigation_unstuck(entity this)
 			}
 		}
 
-		// move to a random waypoint while bot is searching for a walkable path;
-		// this is usually sufficient to unstuck bots from bad spots or when other
-		// bots of the same team block all their ways
 		if (!bot_waypoint_queue_bestgoal && (!this.goalentity || random() < 0.1))
 		{
 			navigation_clearroute(this);
@@ -1982,7 +1854,6 @@ void navigation_unstuck(entity this)
 		if(bot_strategytoken!=this)
 			return;
 
-		// build a new queue
 		LOG_DEBUG(this.netname, " stuck, scanning reachable waypoints within ", ftos(search_radius)," qu");
 
 		entity first = NULL;
@@ -2007,8 +1878,6 @@ void navigation_unstuck(entity this)
 		}
 	}
 }
-
-// Support for debugging tracewalk visually
 
 void debugresetnodes()
 {
@@ -2052,12 +1921,9 @@ void debugnodestatus(vector position, float status)
 	te_customflash(position, 40,  2, c);
 }
 
-// Support for debugging the goal stack visually
-
 .float goalcounter;
 .vector lastposition;
 
-// Debug the goal stack visually
 void debuggoalstack(entity this)
 {
 	entity goal;
@@ -2108,7 +1974,6 @@ void debuggoalstack(entity this)
 		org = this.origin;
 	else
 		org = this.lastposition;
-
 
 	go = ( goal.absmin + goal.absmax ) * 0.5;
 	te_lightning2(NULL, org, go);

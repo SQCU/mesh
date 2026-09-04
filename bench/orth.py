@@ -1,6 +1,6 @@
 import mlx.core as mx, time, sys, json, platform, os
 
-def gram(X, ridge):
+def ridge_adjusted_normal_matrix(X, ridge):
     G = X.T @ X
     return G + mx.eye(G.shape[0], dtype=G.dtype) * ridge
 
@@ -108,16 +108,16 @@ def run(n, R, names, reps, ridge_rel, kw):
     G0 = X.T @ X
     mx.eval(G0)
     ridge = float(mx.mean(mx.diag(G0))) * ridge_rel
-    calls = [("gram_only", lambda: gram(X, ridge))]
+    calls = [("normal_matrix_only", lambda: ridge_adjusted_normal_matrix(X, ridge))]
     for nm in names:
         f = METHODS[nm]
         a = dict(kw); a["ridge"] = ridge
-        calls.append((nm, (lambda f=f, a=a: f(X, gram(X, ridge), **a))))
+        calls.append((nm, (lambda f=f, a=a: f(X, ridge_adjusted_normal_matrix(X, ridge), **a))))
     errs = {}
     for nm, c in calls:
         Q = c()
         mx.eval(Q)
-        errs[nm] = orth_err(Q) if nm != "gram_only" else float("nan")
+        errs[nm] = orth_err(Q) if nm != "normal_matrix_only" else float("nan")
         del Q
     best = {nm: float("inf") for nm, _ in calls}
     duty = float(os.environ.get("ORTH_DUTY", "0.0"))
@@ -129,7 +129,7 @@ def run(n, R, names, reps, ridge_rel, kw):
             if e < best[nm]:
                 best[nm] = e
             time.sleep(min(20.0, e * duty))
-    return best["gram_only"], [(nm, best[nm], errs[nm]) for nm, _ in calls]
+    return best["normal_matrix_only"], [(nm, best[nm], errs[nm]) for nm, _ in calls]
 
 if __name__ == "__main__":
     n = int(sys.argv[1]); R = int(sys.argv[2])
@@ -142,5 +142,5 @@ if __name__ == "__main__":
     for nm, e, err in rows:
         fl = 2.0 * n * R * R
         print(json.dumps({"host": host, "n": n, "R": R, "m": nm, "ms": round(e * 1e3, 3),
-                          "err": err, "gram_ms": round(tg * 1e3, 3),
-                          "gram_gfs": round(fl / tg / 1e9, 1), "kw": kw}))
+                          "err": err, "normal_matrix_ms": round(tg * 1e3, 3),
+                          "normal_matrix_gfs": round(fl / tg / 1e9, 1), "kw": kw}))

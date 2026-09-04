@@ -9,7 +9,5 @@
 gmqcc
 gmqpak
 qcvm
-testsuite
-
 build/
 .idea/

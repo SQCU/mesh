@@ -47,9 +47,6 @@
 	#include <server/weapons/tracing.qh>
 #endif
 
-
-// WEAPON PLUGIN SYSTEM
-
 WepSet _WepSet_FromWeapon(int a)
 {
 	a -= WEP_FIRST;
@@ -138,10 +135,10 @@ float W_FixWeaponOrder_BuildImpulseList_cmp(int i, int j, entity pass)
 	int sj = W_FixWeaponOrder_BuildImpulseList_buf[j];
 	Weapon e2 = REGISTRY_GET(Weapons, sj);
 	int d = (e1.impulse + 9) % 10 - (e2.impulse + 9) % 10;
-	if (d != 0) return -d;  // high impulse first!
+	if (d != 0) return -d;
 	string s = strcat(" ", W_FixWeaponOrder_BuildImpulseList_order, " ");
 	return strstrofs(s, sprintf(" %d ", si), 0)
-		- strstrofs(s, sprintf(" %d ", sj), 0); // low char index first!
+		- strstrofs(s, sprintf(" %d ", sj), 0);
 }
 string W_FixWeaponOrder_BuildImpulseList(string o)
 {
@@ -186,7 +183,6 @@ WepSet W_RandomWeapons(entity e, WepSet remaining, int n)
 	return result;
 }
 
-// TODO: registry handles for below functions
 string GetAmmoPicture(Resource ammotype)
 {
 	switch (ammotype)
@@ -197,7 +193,7 @@ string GetAmmoPicture(Resource ammotype)
 		case RES_CELLS:   return ITEM_Cells.m_icon;
 		case RES_PLASMA:  return ITEM_Plasma.m_icon;
 		case RES_FUEL:    return ITEM_JetpackFuel.m_icon;
-		default: return "";  // wtf, no ammo type?
+		default: return "";
 	}
 }
 
@@ -228,8 +224,7 @@ entity GetAmmoItem(Resource ammotype)
 	}
 	LOG_WARNF("Invalid ammo type %d ", ammotype.m_id);
 	return NULL;
-	// WEAPONTODO: use this generic func to reduce duplication ?
-	// GetAmmoPicture  GetAmmoName  notif_arg_item_wepammo  ammo_pickupevalfunc ?
+
 }
 
 #ifdef CSQC
@@ -269,15 +264,15 @@ vector shotorg_adjustfromclient(vector vecs, float y_is_right, float algn)
 	{
 		default:
 		case 3:
-			// right alignment
+
 			break;
 		case 4:
-			// left
+
 			vecs.y = -vecs.y;
 			break;
 		case 1:
 		case 2:
-			// center
+
 			vecs.y = 0;
 			vecs.z -= 2;
 			break;
@@ -309,7 +304,7 @@ vector shotorg_adjust_values(vector vecs, bool y_is_right, bool visual, int algn
 		vecs.y = v.y;
 		vecs.z = v.z;
 	}
-	else  // just do the same as top
+	else
 	{
 		vecs = shotorg_adjustfromclient(vecs, y_is_right, algn);
 	}
@@ -319,58 +314,6 @@ vector shotorg_adjust_values(vector vecs, bool y_is_right, bool visual, int algn
 
 #define shotorg_adjust shotorg_adjust_values
 
-/**
- * supported formats:
- *
- * 1. simple animated model, muzzle flash handling on h_ model:
- *    h_tuba.dpm, h_tuba.dpm.framegroups - invisible model controlling the animation
- *      tags:
- *        shot = muzzle end (shot origin, also used for muzzle flashes)
- *        shell = casings ejection point (must be on the right hand side of the gun)
- *        weapon = attachment for v_tuba.md3
- *    v_tuba.md3 - first and third person model
- *    g_tuba.md3 - pickup model
- *
- * 2. simple animated model, muzzle flash handling on v_ model:
- *    h_tuba.dpm, h_tuba.dpm.framegroups - invisible model controlling the animation
- *      tags:
- *        weapon = attachment for v_tuba.md3
- *    v_tuba.md3 - first and third person model
- *      tags:
- *        shot = muzzle end (shot origin, also used for muzzle flashes)
- *        shell = casings ejection point (must be on the right hand side of the gun)
- *    g_tuba.md3 - pickup model
- *
- * 3. fully animated model, muzzle flash handling on h_ model:
- *    h_tuba.dpm, h_tuba.dpm.framegroups - animated first person model
- *      tags:
- *        shot = muzzle end (shot origin, also used for muzzle flashes)
- *        shell = casings ejection point (must be on the right hand side of the gun)
- *        handle = corresponding to the origin of v_tuba.md3 (used for muzzle flashes)
- *    v_tuba.md3 - third person model
- *    g_tuba.md3 - pickup model
- *
- * 4. fully animated model, muzzle flash handling on v_ model:
- *    h_tuba.dpm, h_tuba.dpm.framegroups - animated first person model
- *      tags:
- *        shot = muzzle end (shot origin)
- *        shell = casings ejection point (must be on the right hand side of the gun)
- *    v_tuba.md3 - third person model
- *      tags:
- *        shot = muzzle end (for muzzle flashes)
- *    g_tuba.md3 - pickup model
- *
- * writes:
- *   this.origin, this.angles
- *   this.weaponchild
- *   this.movedir, this.view_ofs, this.movedir_aligned
- *   this.spawnorigin (SVQC only)
- *   attachment stuff
- *   anim stuff
- * to free:
- *   call again with ""
- *   remove the ent
- */
 void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 {
 	if (name == "")
@@ -392,21 +335,19 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 	}
 	else
 	{
-		// if there is a child entity, hide it until we're sure we use it
+
 		if (this.weaponchild) this.weaponchild.model = "";
 		_setmodel(this, W_Model(strcat("v_", name, ".md3")));
-		int v_shot_idx;  // used later
+		int v_shot_idx;
 		(v_shot_idx = gettagindex(this, "shot")) || (v_shot_idx = gettagindex(this, "tag_shot"));
 
 		_setmodel(this, W_Model(strcat("h_", name, ".iqm")));
-		// preset some defaults that work great for renamed zym files (which don't need an animinfo)
+
 		this.anim_fire1  = animfixfps(this, '0 1 0.01', '0 0 0');
 		this.anim_fire2  = animfixfps(this, '1 1 0.01', '0 0 0');
 		this.anim_idle   = animfixfps(this, '2 1 0.01', '0 0 0');
 		this.anim_reload = animfixfps(this, '3 1 0.01', '0 0 0');
 
-		// if we have a "weapon" tag, let's attach the v_ model to it ("invisible hand" style model)
-		// if we don't, this is a "real" animated model
 		string t;
 		if ((t = "weapon", gettagindex(this, t)) || (t = "tag_weapon", gettagindex(this, t)))
 		{
@@ -437,7 +378,7 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 #else
 		this.renderflags &= ~RF_VIEWMODEL;
 #endif
-		if (v_shot_idx)  // v_ model attached to invisible h_ model
+		if (v_shot_idx)
 		{
 			this.movedir = gettaginfo(this.weaponchild, v_shot_idx);
 		}
@@ -458,7 +399,7 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 #ifdef SVQC
 		{
 			int idx = 0;
-			// v_ model attached to invisible h_ model
+
 			if (this.weaponchild
 				&& ((idx = gettagindex(this.weaponchild, "shell")) || (idx = gettagindex(this.weaponchild, "tag_shell"))))
 			{
@@ -478,7 +419,7 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 #endif
 		if (v_shot_idx)
 		{
-			this.oldorigin = '0 0 0';  // use regular attachment
+			this.oldorigin = '0 0 0';
 		}
 		else
 		{
@@ -498,7 +439,7 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 					"and neither does the v_ model support the 'shot' tag, "
 					"will display muzzle flashes TOTALLY wrong\n",
 					this.model);
-				this.oldorigin = '0 0 0';  // there is no way to recover from this
+				this.oldorigin = '0 0 0';
 			}
 		}
 
@@ -514,7 +455,7 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 
 	if (this.movedir.x >= 0)
 	{
-		//int algn = STAT(GUNALIGN, this.owner);
+
 		int algn = W_GunAlign(this, STAT(GUNALIGN, this.owner));
 	#ifdef SVQC
 		this.m_gunalign = algn;
@@ -525,21 +466,20 @@ void CL_WeaponEntity_SetModel(entity this, string name, bool _anim)
 		this.view_ofs = this.movedir_aligned - v;
 	}
 	int compressed_shotorg = compressShotOrigin(this.movedir);
-	// make them match perfectly
+
 #ifdef SVQC
-	// null during init
+
 	if (this.owner) STAT(SHOTORG, this.owner) = compressed_shotorg;
 #endif
 	this.movedir = decompressShotOrigin(compressed_shotorg);
 
 #ifdef SVQC
-	this.spawnorigin += this.view_ofs;  // offset the casings origin by the same amount
+	this.spawnorigin += this.view_ofs;
 #endif
 
-	// check if an instant weapon switch occurred
 	setorigin(this, this.view_ofs);
 	if (!_anim) return;
-	// reset animstate now
+
 	this.wframe = WFRAME_IDLE;
 	setanim(this, this.anim_idle, true, false, true);
 }
@@ -557,7 +497,7 @@ NET_HANDLE(wframe, bool isNew)
 	bool restartanim = ReadByte();
 	entity wepent = viewmodels[slot];
 	if(fr == WFRAME_IDLE)
-		wepent.animstate_looping = false; // we don't need to enforce idle animation
+		wepent.animstate_looping = false;
 	else
 	{
 		vector a = '0 0 0';
@@ -712,7 +652,7 @@ void W_MuzzleFlash_Model(entity wepent, entity muzzlemodel)
 		wepent.muzzle_flash = spawn();
 
 	entity flash = wepent.muzzle_flash;
-	setmodel(flash, muzzlemodel); // precision set below
+	setmodel(flash, muzzlemodel);
 
 	flash.scale = 0.75;
 	setthink(flash, W_MuzzleFlash_Model_Think);
@@ -733,7 +673,7 @@ REGISTER_NET_TEMP(w_muzzleflash)
 #ifdef SVQC
 void W_MuzzleFlash(Weapon thiswep, entity actor, .entity weaponentity, vector shotorg, vector shotdir)
 {
-	// don't show an exterior muzzle effect for the off-hand
+
 	if(weaponslot(weaponentity) == 0)
 	{
 		Send_Effect_Except(thiswep.m_muzzleeffect, shotorg, shotdir * 1000, 1, actor);
@@ -772,18 +712,17 @@ NET_HANDLE(w_muzzleflash, bool isNew)
 
 	if(autocvar_chase_active)
 	{
-		// in third person mode, show the muzzle flash from the server side weapon position
-		// we don't have a view model to reference in this case
+
 		pointparticles(thiswep.m_muzzleeffect, sv_shotorg, forward * 1000, 1);
 		return;
 	}
 	if(!autocvar_r_drawviewmodel) return;
 
 	entity wepent = viewmodels[slot];
-	// get the local player entity to calculate shot origin
+
 	entity rlplayer = CSQCModel_server2csqc(player_localentnum - 1);
 	if(!rlplayer)
-		rlplayer = csqcplayer; // fall back to the global
+		rlplayer = csqcplayer;
 
 	vector md = wepent.movedir_aligned;
 	vector vecs = ((md.x > 0) ? md : '0 0 0');
@@ -799,7 +738,6 @@ NET_HANDLE(w_muzzleflash, bool isNew)
 	}
 }
 #endif
-
 
 #endif
 

@@ -3,24 +3,24 @@
 #include <common/weapons/all.qh>
 
 CLASS(OverkillHeavyMachineGun, Weapon)
-/* spawnfunc */ ATTRIB(OverkillHeavyMachineGun, m_canonical_spawnfunc, string, "weapon_okhmg");
-/* ammotype  */ ATTRIB(OverkillHeavyMachineGun, ammo_type, Resource, RES_BULLETS);
-/* impulse   */ ATTRIB(OverkillHeavyMachineGun, impulse, int, 3);
-/* flags     */ ATTRIB(OverkillHeavyMachineGun, spawnflags, int, WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_HIDDEN | WEP_FLAG_RELOADABLE | WEP_TYPE_HITSCAN | WEP_FLAG_SUPERWEAPON | WEP_FLAG_PENETRATEWALLS);
-/* rating    */ ATTRIB(OverkillHeavyMachineGun, bot_pickupbasevalue, float, 10000);
-/* color     */ ATTRIB(OverkillHeavyMachineGun, wpcolor, vector, '0.5 0.5 0');
-/* modelname */ ATTRIB(OverkillHeavyMachineGun, mdl, string, "ok_hmg");
+                ATTRIB(OverkillHeavyMachineGun, m_canonical_spawnfunc, string, "weapon_okhmg");
+                ATTRIB(OverkillHeavyMachineGun, ammo_type, Resource, RES_BULLETS);
+                ATTRIB(OverkillHeavyMachineGun, impulse, int, 3);
+                ATTRIB(OverkillHeavyMachineGun, spawnflags, int, WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_HIDDEN | WEP_FLAG_RELOADABLE | WEP_TYPE_HITSCAN | WEP_FLAG_SUPERWEAPON | WEP_FLAG_PENETRATEWALLS);
+                ATTRIB(OverkillHeavyMachineGun, bot_pickupbasevalue, float, 10000);
+                ATTRIB(OverkillHeavyMachineGun, wpcolor, vector, '0.5 0.5 0');
+                ATTRIB(OverkillHeavyMachineGun, mdl, string, "ok_hmg");
 #ifdef GAMEQC
-/* model     */ ATTRIB(OverkillHeavyMachineGun, m_model, Model, MDL_HMG_ITEM);
-/* flash mdl */ ATTRIB(OverkillHeavyMachineGun, m_muzzlemodel, Model, MDL_MACHINEGUN_MUZZLEFLASH);
-/* flash eff */ ATTRIB(OverkillHeavyMachineGun, m_muzzleeffect, entity, EFFECT_MACHINEGUN_MUZZLEFLASH);
+                ATTRIB(OverkillHeavyMachineGun, m_model, Model, MDL_HMG_ITEM);
+                ATTRIB(OverkillHeavyMachineGun, m_muzzlemodel, Model, MDL_MACHINEGUN_MUZZLEFLASH);
+                ATTRIB(OverkillHeavyMachineGun, m_muzzleeffect, entity, EFFECT_MACHINEGUN_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(OverkillHeavyMachineGun, w_crosshair, string, "gfx/crosshairuzi");
-/* crosshair */ ATTRIB(OverkillHeavyMachineGun, w_crosshair_size, float, 0.6);
-/* wepimg    */ ATTRIB(OverkillHeavyMachineGun, model2, string, "weaponhmg");
-/* refname   */ ATTRIB(OverkillHeavyMachineGun, netname, string, "okhmg");
-/* wepname   */ ATTRIB(OverkillHeavyMachineGun, m_name, string, _("Overkill Heavy Machine Gun"));
-/* legacy    */ ATTRIB(OverkillHeavyMachineGun, m_deprecated_netname, string, "hmg");
+                ATTRIB(OverkillHeavyMachineGun, w_crosshair, string, "gfx/crosshairuzi");
+                ATTRIB(OverkillHeavyMachineGun, w_crosshair_size, float, 0.6);
+                ATTRIB(OverkillHeavyMachineGun, model2, string, "weaponhmg");
+                ATTRIB(OverkillHeavyMachineGun, netname, string, "okhmg");
+                ATTRIB(OverkillHeavyMachineGun, m_name, string, _("Overkill Heavy Machine Gun"));
+                ATTRIB(OverkillHeavyMachineGun, m_deprecated_netname, string, "hmg");
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \
@@ -60,6 +60,3 @@ CLASS(OverkillHeavyMachineGun, Weapon)
 
 ENDCLASS(OverkillHeavyMachineGun)
 REGISTER_WEAPON(OVERKILL_HMG, okhmg, NEW(OverkillHeavyMachineGun));
-
-//SPAWNFUNC_WEAPON(weapon_okhmg, WEP_OVERKILL_HMG)
-//SPAWNFUNC_WEAPON(weapon_hmg, WEP_OVERKILL_HMG)

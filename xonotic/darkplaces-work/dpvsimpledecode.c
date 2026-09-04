@@ -5,7 +5,6 @@
 #define HZREADERROR_EOF 1
 #define HZREADERROR_MALLOCFAILED 2
 
-//#define HZREADBLOCKSIZE 16000
 #define HZREADBLOCKSIZE 1048576
 
 typedef struct hz_bitstream_read_s
@@ -160,8 +159,7 @@ static int hz_bitstream_read_bit(hz_bitstream_readblocks_t *blocks)
 static unsigned int hz_bitstream_read_bits(hz_bitstream_readblocks_t *blocks, int size)
 {
 	unsigned int num = 0;
-	// we can only handle about 24 bits at a time safely
-	// (there might be up to 7 bits more than we need in the bit store)
+
 	if (size > 24)
 	{
 		size -= 8;
@@ -232,12 +230,10 @@ typedef struct dpvsimpledecodestream_s
 	unsigned int info_imagesize;
 	double info_aspectratio;
 
-	// current video frame (needed because of delta compression)
 	int videoframenum;
-	// current video frame data (needed because of delta compression)
+
 	unsigned int *videopixels;
 
-	// channel the sound file is being played on
 	int sndchan;
 }
 dpvsimpledecodestream_t;
@@ -330,9 +326,6 @@ static int dpvsimpledecode_setpixelformat(dpvsimpledecodestream_t *s, unsigned i
 	return s->error;
 }
 
-// opening and closing streams
-
-// opens a stream
 void *dpvsimpledecode_open(clvideo_t *video, char *filename, const char **errorstring)
 {
 	dpvsimpledecodestream_t *s;
@@ -345,7 +338,7 @@ void *dpvsimpledecode_open(clvideo_t *video, char *filename, const char **errors
 		s->bitstream = hz_bitstream_read_open(filename);
 		if (s->bitstream != NULL)
 		{
-			// check file identification
+
 			s->framedatablocks = hz_bitstream_read_blocks_new();
 			if (s->framedatablocks != NULL)
 			{
@@ -353,7 +346,7 @@ void *dpvsimpledecode_open(clvideo_t *video, char *filename, const char **errors
 				hz_bitstream_read_bytes(s->framedatablocks, t, 8);
 				if (!memcmp(t, "DPVideo", 8))
 				{
-					// check version number
+
 					hz_bitstream_read_blocks_read(s->framedatablocks, s->bitstream, 2);
 					if (hz_bitstream_read_short(s->framedatablocks) == 1)
 					{
@@ -385,8 +378,7 @@ void *dpvsimpledecode_open(clvideo_t *video, char *filename, const char **errors
 										s->sndchan = -1;
 									Z_Free(wavename);
 								}
-								// all is well...
-								// set the module functions
+
 								s->videoframenum = -10000;
 								video->close = dpvsimpledecode_close;
 								video->getwidth = dpvsimpledecode_getwidth;
@@ -423,7 +415,6 @@ void *dpvsimpledecode_open(clvideo_t *video, char *filename, const char **errors
 	return NULL;
 }
 
-// closes a stream
 void dpvsimpledecode_close(void *stream)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;
@@ -440,12 +431,6 @@ void dpvsimpledecode_close(void *stream)
 	Z_Free(s);
 }
 
-// utilitarian functions
-
-// returns the current error number for the stream, and resets the error
-// number to DPVSIMPLEDECODEERROR_NONE
-// if the supplied string pointer variable is not NULL, it will be set to the
-// error message
 int dpvsimpledecode_error(void *stream, const char **errorstring)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;
@@ -494,28 +479,24 @@ int dpvsimpledecode_error(void *stream, const char **errorstring)
 	return e;
 }
 
-// returns the width of the image data
 unsigned int dpvsimpledecode_getwidth(void *stream)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;
 	return s->info_imagewidth;
 }
 
-// returns the height of the image data
 unsigned int dpvsimpledecode_getheight(void *stream)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;
 	return s->info_imageheight;
 }
 
-// returns the framerate of the stream
 double dpvsimpledecode_getframerate(void *stream)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;
 	return s->info_framerate;
 }
 
-// return aspect ratio of the stream
 double dpvsimpledecode_getaspectratio(void *stream)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;
@@ -563,7 +544,7 @@ static int dpvsimpledecode_convertpixels(dpvsimpledecodestream_t *s, void *image
 			outrow = (unsigned short *)((unsigned char *)imagedata + y * imagebytesperrow);
 			if (Rloss == 19 && Gloss == 10 && Bloss == 3 && Rshift == 11 && Gshift == 5 && Bshift == 0)
 			{
-				// optimized
+
 				for (x = 0;x < width;x++)
 				{
 					a = *in++;
@@ -604,7 +585,7 @@ static int dpvsimpledecode_decompressimage(dpvsimpledecodestream_t *s)
 				bw = width - x1;
 			if (hz_bitstream_read_bit(s->framedatablocks))
 			{
-				// updated block
+
 				palettebits = hz_bitstream_read_bits(s->framedatablocks, 3);
 				colors = 1 << palettebits;
 				for (i = 0;i < colors;i++)
@@ -627,7 +608,6 @@ static int dpvsimpledecode_decompressimage(dpvsimpledecodestream_t *s)
 	return s->error;
 }
 
-// decodes a video frame to the supplied output pixels
 int dpvsimpledecode_video(void *stream, void *imagedata, unsigned int Rmask, unsigned int Gmask, unsigned int Bmask, unsigned int bytesperpixel, int imagebytesperrow)
 {
 	dpvsimpledecodestream_t *s = (dpvsimpledecodestream_t *)stream;

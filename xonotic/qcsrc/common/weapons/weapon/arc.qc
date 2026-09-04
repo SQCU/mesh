@@ -8,17 +8,13 @@ bool W_Arc_Beam_Send(entity this, entity to, int sf)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_ARC_BEAM);
 
-	// Truncate information when this beam is displayed to the owner client
-	// - The owner client has no use for beam start position or directions,
-	//    it always figures this information out for itself with csqc code.
-	// - Spectating the owner also truncates this information.
 	float drawlocal = ((to == this.owner) || ((to.enemy == this.owner) && IS_SPEC(to)));
 	if(drawlocal) { sf &= ~ARC_SF_LOCALMASK; }
 
 	WriteByte(MSG_ENTITY, sf);
 	WriteByte(MSG_ENTITY, weaponslot(this.weaponentity_fld));
 
-	if(sf & ARC_SF_SETTINGS) // settings information
+	if(sf & ARC_SF_SETTINGS)
 	{
 		WriteShort(MSG_ENTITY, WEP_CVAR(arc, beam_degreespersegment));
 		WriteShort(MSG_ENTITY, WEP_CVAR(arc, beam_distancepersegment));
@@ -28,21 +24,21 @@ bool W_Arc_Beam_Send(entity this, entity to, int sf)
 		WriteByte(MSG_ENTITY, WEP_CVAR(arc, beam_tightness) * 10);
 
 		WriteByte(MSG_ENTITY, drawlocal);
-		WriteByte(MSG_ENTITY, etof(this.owner));
+		WriteShort(MSG_ENTITY, etof(this.owner));
 	}
-	if(sf & ARC_SF_START) // starting location
+	if(sf & ARC_SF_START)
 	{
 		WriteVector(MSG_ENTITY, this.beam_start);
 	}
-	if(sf & ARC_SF_WANTDIR) // want/aim direction
+	if(sf & ARC_SF_WANTDIR)
 	{
 		WriteVector(MSG_ENTITY, this.beam_wantdir);
 	}
-	if(sf & ARC_SF_BEAMDIR) // beam direction
+	if(sf & ARC_SF_BEAMDIR)
 	{
 		WriteAngleVector(MSG_ENTITY, this.beam_dir);
 	}
-	if(sf & ARC_SF_BEAMTYPE) // beam type
+	if(sf & ARC_SF_BEAMTYPE)
 	{
 		WriteByte(MSG_ENTITY, this.beam_type);
 	}
@@ -84,7 +80,7 @@ float Arc_GetHeat_Percent(entity player, .entity weaponentity)
 void Arc_Player_SetHeat(entity player, .entity weaponentity)
 {
 	player.(weaponentity).arc_heat_percent = Arc_GetHeat_Percent(player, weaponentity);
-	//dprint("Heat: ",ftos(player.arc_heat_percent*100),"%\n");
+
 }
 
 void W_Arc_Bolt_Explode(entity this, entity directhitentity)
@@ -106,7 +102,7 @@ void W_Arc_Bolt_Damage(entity this, entity inflictor, entity attacker, float dam
 		return;
 
 	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
-		return; // g_projectiles_damage says to halt
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 	this.angles = vectoangles(this.velocity);
@@ -207,7 +203,6 @@ void W_Arc_Beam_Think(entity this)
 
 	Weapon thiswep = WEP_ARC;
 
-	// TODO: use standard weapon use checks here!
 	if(!IS_PLAYER(own) || IS_DEAD(own) || STAT(FROZEN, own) || game_stopped || own.vehicle
 		|| !weapon_prepareattack_check(thiswep, own, weaponentity, this.beam_bursting, -1)
 		|| own.(weaponentity).m_switchweapon != WEP_ARC
@@ -245,15 +240,14 @@ void W_Arc_Beam_Think(entity this)
 		if(this == own.(weaponentity).arc_beam) { own.(weaponentity).arc_beam = NULL; }
 		if(!thiswep.wr_checkammo1(thiswep, own, weaponentity) && !(own.items & IT_UNLIMITED_AMMO))
 		{
-			// note: this doesn't force the switch
+
 			W_SwitchToOtherWeapon(own, weaponentity);
 		}
-		own.(weaponentity).arc_BUTTON_ATCK_prev = false; // allow switching weapons
+		own.(weaponentity).arc_BUTTON_ATCK_prev = false;
 		delete(this);
 		return;
 	}
 
-	// decrease ammo
 	float coefficient = frametime;
 	if(!(own.items & IT_UNLIMITED_AMMO))
 	{
@@ -286,12 +280,10 @@ void W_Arc_Beam_Think(entity this)
 		thiswep.m_id
 	);
 
-	// After teleport, "lock" the beam until the teleport is confirmed.
 	if (time < this.beam_teleporttime + ANTILAG_LATENCY(own)) {
 		w_shotdir = this.beam_dir;
 	}
 
-	// network information: shot origin and want/aim direction
 	if(this.beam_start != w_shotorg)
 	{
 		this.SendFlags |= ARC_SF_START;
@@ -309,25 +301,14 @@ void W_Arc_Beam_Think(entity this)
 		this.beam_initialized = true;
 	}
 
-	// WEAPONTODO: Detect player velocity so that the beam curves when moving too
-	// idea: blend together this.beam_dir with the inverted direction the player is moving in
-	// might have to make some special accomodation so that it only uses view_right and view_up
-
-	// note that if we do this, it'll always be corrected to a maximum angle by beam_maxangle handling
-
 	float segments;
 	if(this.beam_dir != w_shotdir)
 	{
-		// calculate how much we're going to move the end of the beam to the want position
-		// WEAPONTODO (server and client):
-		// blendfactor never actually becomes 0 in this situation, which is a problem
-		// regarding precision... this means that this.beam_dir and w_shotdir approach
-		// eachother, however they never actually become the same value with this method.
-		// Perhaps we should do some form of rounding/snapping?
+
 		float angle = vlen(w_shotdir - this.beam_dir) * RAD2DEG;
 		if(angle && (angle > WEP_CVAR(arc, beam_maxangle)))
 		{
-			// if the angle is greater than maxangle, force the blendfactor to make this the maximum factor
+
 			float blendfactor = bound(
 				0,
 				(1 - (WEP_CVAR(arc, beam_returnspeed) * frametime)),
@@ -340,7 +321,7 @@ void W_Arc_Beam_Think(entity this)
 		}
 		else
 		{
-			// the radius is not too far yet, no worries :D
+
 			float blendfactor = bound(
 				0,
 				(1 - (WEP_CVAR(arc, beam_returnspeed) * frametime)),
@@ -352,10 +333,8 @@ void W_Arc_Beam_Think(entity this)
 				this.beam_dir = normalize((w_shotdir * (1 - blendfactor)) + (this.beam_dir * blendfactor));
 		}
 
-		// network information: beam direction
 		this.SendFlags |= ARC_SF_BEAMDIR;
 
-		// calculate how many segments are needed
 		float max_allowed_segments;
 
 		if(WEP_CVAR(arc, beam_distancepersegment))
@@ -394,11 +373,6 @@ void W_Arc_Beam_Think(entity this)
 	vector last_origin = w_shotorg;
 	for(i = 1; i <= segments; ++i)
 	{
-		// WEAPONTODO (client):
-		// In order to do nice fading and pointing on the starting segment, we must always
-		// have that drawn as a separate triangle... However, that is difficult to do when
-		// keeping in mind the above problems and also optimizing the amount of segments
-		// drawn on screen at any given time. (Automatic beam quality scaling, essentially)
 
 		vector new_origin = bezier_quadratic_getpoint(
 			w_shotorg,
@@ -416,9 +390,6 @@ void W_Arc_Beam_Think(entity this)
 			ANTILAG_LATENCY(own)
 		);
 
-		// Do all the transforms for warpzones right now, as we already
-		// "are" in the post-trace system (if we hit a player, that's
-		// always BEHIND the last passed wz).
 		last_origin = trace_endpos;
 		w_shotorg = WarpZone_TransformOrigin(WarpZone_trace_transform, w_shotorg);
 		beam_controlpoint = WarpZone_TransformOrigin(WarpZone_trace_transform, beam_controlpoint);
@@ -450,9 +421,7 @@ void W_Arc_Beam_Think(entity this)
 			}
 			else if(trace_ent.takedamage && (is_player || WEP_CVAR(arc, beam_nonplayerdamage)))
 			{
-				// calculate our own hit origin as trace_endpos tends to jump around annoyingly (to player origin?)
-				// NO. trace_endpos should be just fine. If not,
-				// that's an engine bug that needs proper debugging.
+
 				vector hitorigin = trace_endpos;
 
 				float falloff = ExponentialFalloff(
@@ -500,18 +469,14 @@ void W_Arc_Beam_Think(entity this)
 		}
 		else if(trace_fraction != 1)
 		{
-			// we collided with geometry
+
 			new_beam_type = ARC_BT_WALL;
 			break;
 		}
 	}
 
-	// te_explosion(trace_endpos);
-
-	// if we're bursting, use burst visual effects
 	new_beam_type |= burst;
 
-	// network information: beam type
 	if(new_beam_type != this.beam_type)
 	{
 		this.SendFlags |= ARC_SF_BEAMTYPE;
@@ -525,7 +490,6 @@ void W_Arc_Beam_Think(entity this)
 void W_Arc_Beam(float burst, entity actor, .entity weaponentity)
 {
 
-	// only play fire sound if 1 sec has passed since player let go the fire button
 	if(time - actor.(weaponentity).beam_prev > 1)
 		sound(actor, CH_WEAPON_A, SND_ARC_FIRE, VOL_BASE, ATTN_NORM);
 
@@ -551,23 +515,18 @@ void W_Arc_Attack(Weapon thiswep, entity actor, .entity weaponentity, int fire)
 		return;
 	}
 
-	// attack handled by the beam itself, this is just a loop to keep the attack happening!
-
-	// NOTE: arc doesn't use a refire
-	//ATTACK_FINISHED(actor, weaponentity) = time + WEP_CVAR_PRI(arc, refire) * W_WeaponRateFactor(actor);
 	actor.(weaponentity).wframe = WFRAME_FIRE1;
 	weapon_thinkf(actor, weaponentity, WFRAME_DONTCHANGE, WEP_CVAR(arc, beam_animtime), W_Arc_Attack);
 }
 void Arc_Smoke(Weapon thiswep, entity actor, .entity weaponentity, int fire)
 {
-	// calculate a rough shot origin to show the effect from TODO: move this to the client side!
+
 	makevectors(actor.v_angle);
 	w_shotdir = v_forward;
 	vector md = actor.(weaponentity).movedir;
 	vector vecs = ((md.x > 0) ? md : '0 0 0');
 	vector dv = v_forward * vecs.x + v_right * -vecs.y + v_up * vecs.z;
 	w_shotorg = actor.origin + actor.view_ofs + dv;
-	//W_SetupShot_Range(actor,weaponentity,false,0,SND_Null,0,0,0,thiswep.m_id);
 
 	vector smoke_origin = w_shotorg + actor.velocity*frametime;
 	if ( actor.arc_overheat > time )
@@ -677,16 +636,13 @@ METHOD(Arc, wr_think, void(entity thiswep, entity actor, .entity weaponentity, i
                 return;
             }
             float ammo_available = GetResource(actor, thiswep.ammo_type);
-            // We don't want to shoot 3 rounds if there's 2 left in the mag, so we'll use a fraction.
-            // Also keep the fraction <= 1 otherwise we'd mag dump in one burst.
+
             float burst_fraction = min(1, ammo_available / WEP_CVAR(arc, bolt_ammo));
             int to_shoot = floor(WEP_CVAR(arc, bolt_count) * burst_fraction);
 
-            // We also don't want to use 3 rounds if there's only 2 left.
             int to_use = min(WEP_CVAR(arc, bolt_ammo), ammo_available);
             W_DecreaseAmmo(thiswep, actor, to_use, weaponentity);
 
-            // Bursting counts up to 0 from a negative.
             actor.(weaponentity).misc_bulletcounter = -to_shoot;
             W_Arc_Attack_Bolt(thiswep, actor, weaponentity, fire);
         }
@@ -807,17 +763,14 @@ void Draw_ArcBeam_callback(vector start, vector hit, vector end)
 	vector transformed_view_org;
 	transformed_view_org = WarpZone_TransformOrigin(WarpZone_trace_transform, view_origin);
 
-	// Thickdir shall be perpendicular to the beam and to the view-to-beam direction (WEAPONTODO: WHY)
-	// WEAPONTODO: Wouldn't it be better to be perpendicular to the beam and to the view FORWARD direction?
 	vector thickdir = normalize(cross(normalize(start - hit), transformed_view_org - start));
 
 	vector hitorigin;
 
-	// draw segment
 	#if 0
 	if(trace_fraction != 1)
 	{
-		// calculate our own hit origin as trace_endpos tends to jump around annoyingly (to player origin?)
+
 		hitorigin = start + (Draw_ArcBeam_callback_new_dir * Draw_ArcBeam_callback_segmentdist * trace_fraction);
 		hitorigin = WarpZone_TransformOrigin(WarpZone_trace_transform, hitorigin);
 	}
@@ -829,10 +782,8 @@ void Draw_ArcBeam_callback(vector start, vector hit, vector end)
 	hitorigin = hit;
 	#endif
 
-	// decide upon thickness
 	float thickness = beam.beam_thickness;
 
-	// draw primary beam render
 	vector top    = hitorigin + (thickdir * thickness);
 	vector bottom = hitorigin - (thickdir * thickness);
 
@@ -843,7 +794,7 @@ void Draw_ArcBeam_callback(vector start, vector hit, vector end)
 		Draw_CylindricLine(start, end, thickness, beam.beam_image, 0.25, -time * 3, beam.beam_color, beam.beam_alpha, DRAWFLAG_NORMAL, transformed_view_org);
 	else
 	{
-		R_BeginPolygon(beam.beam_image, DRAWFLAG_NORMAL, false); // DRAWFLAG_ADDITIVE
+		R_BeginPolygon(beam.beam_image, DRAWFLAG_NORMAL, false);
 		R_PolygonVertex(
 			top,
 			'0 0.5 0' + ('0 0.5 0' * (thickness / beam.beam_thickness)),
@@ -871,16 +822,11 @@ void Draw_ArcBeam_callback(vector start, vector hit, vector end)
 		R_EndPolygon();
 	}
 
-	// draw trailing particles
-	// NOTES:
-	//  - Don't use spammy particle counts here, use a FEW small particles around the beam
-	//  - We're not using WarpZone_TrailParticles here because we will handle warpzones ourselves.
 	if(beam.beam_traileffect)
 	{
 		trailparticles(beam, beam.beam_traileffect, start, hitorigin);
 	}
 
-	// set up for the next
 	Draw_ArcBeam_callback_last_thickness = thickness;
 	Draw_ArcBeam_callback_last_top = WarpZone_UnTransformOrigin(WarpZone_trace_transform, top);
 	Draw_ArcBeam_callback_last_bottom = WarpZone_UnTransformOrigin(WarpZone_trace_transform, bottom);
@@ -908,24 +854,14 @@ void Draw_ArcBeam(entity this)
 		InterpolateOrigin_Do(this);
 	}
 
-	// origin = beam starting origin
-	// v_angle = wanted/aim direction
-	// angles = current direction of beam
-
 	vector start_pos;
-	vector wantdir; //= view_forward;
-	vector beamdir; //= this.beam_dir;
+	vector wantdir;
+	vector beamdir;
 
 	float segments;
 	if(this.beam_usevieworigin)
 	{
-		// WEAPONTODO:
-		// Currently we have to replicate nearly the same method of figuring
-		// out the shotdir that the server does... Ideally in the future we
-		// should be able to acquire this from a generalized function built
-		// into a weapon system for client code.
 
-		// find where we are aiming
 		vector myviewangle = view_angles;
 		if (autocvar_chase_active)
 		{
@@ -940,7 +876,6 @@ void Draw_ArcBeam(entity this)
 
 		this.beam_usevieworigin = (autocvar_chase_active) ? 1 : 2;
 
-		// decide upon start position
 		if(this.beam_usevieworigin == 2)
 			{ start_pos = warpzone_save_view_origin; }
 		else if(csqcplayer)
@@ -948,7 +883,6 @@ void Draw_ArcBeam(entity this)
 		else
 			{ start_pos = this.origin; }
 
-		// trace forward with an estimation
 		WarpZone_TraceLine(
 			start_pos,
 			start_pos + forward * this.beam_range,
@@ -956,19 +890,16 @@ void Draw_ArcBeam(entity this)
 			this
 		);
 
-		int v_shot_idx;  // used later
+		int v_shot_idx;
 		(v_shot_idx = gettagindex(wepent, "shot")) || (v_shot_idx = gettagindex(wepent, "tag_shot"));
 		if(v_shot_idx && this.beam_usevieworigin == 2)
 			start_pos = gettaginfo(wepent, v_shot_idx) - '0 0 2';
 
-		// untransform in case our trace went through a warpzone
 		vector end_pos = WarpZone_UnTransformOrigin(WarpZone_trace_transform, trace_endpos);
 
-		// un-adjust trueaim if shotend is too close
 		if(vdist(end_pos - start_pos, <, g_trueaim_minrange))
 			end_pos = start_pos + (forward * g_trueaim_minrange);
 
-		// move shot origin to the actual gun muzzle origin
 		vector origin_offset = '0 0 0';
 		if(!v_shot_idx || this.beam_usevieworigin != 2)
 		{
@@ -980,11 +911,9 @@ void Draw_ArcBeam(entity this)
 
 		start_pos = start_pos + origin_offset;
 
-		// Move it also forward, but only as far as possible without hitting anything. Don't poke into walls!
 		traceline(start_pos, start_pos + forward * this.beam_shotorigin.x, MOVE_NORMAL, this);
 		start_pos = trace_endpos;
 
-		// calculate the aim direction now
 		wantdir = normalize(end_pos - start_pos);
 
 		if(!this.beam_initialized)
@@ -992,21 +921,16 @@ void Draw_ArcBeam(entity this)
 			this.beam_dir = wantdir;
 			this.beam_initialized = true;
 
-			this.beam_muzzleentity.drawmask = MASK_NORMAL; // NOTE: this works around the muzzle entity flashing on the middle of the screen for a frame
+			this.beam_muzzleentity.drawmask = MASK_NORMAL;
 		}
 
 		if(this.beam_dir != wantdir)
 		{
-			// calculate how much we're going to move the end of the beam to the want position
-			// WEAPONTODO (server and client):
-			// blendfactor never actually becomes 0 in this situation, which is a problem
-			// regarding precision... this means that this.beam_dir and w_shotdir approach
-			// eachother, however they never actually become the same value with this method.
-			// Perhaps we should do some form of rounding/snapping?
+
 			float angle = vlen(wantdir - this.beam_dir) * RAD2DEG;
 			if(angle && (angle > this.beam_maxangle))
 			{
-				// if the angle is greater than maxangle, force the blendfactor to make this the maximum factor
+
 				float blendfactor = bound(
 					0,
 					(1 - (this.beam_returnspeed * dt)),
@@ -1016,7 +940,7 @@ void Draw_ArcBeam(entity this)
 			}
 			else
 			{
-				// the radius is not too far yet, no worries :D
+
 				float blendfactor = bound(
 					0,
 					(1 - (this.beam_returnspeed * dt)),
@@ -1025,7 +949,6 @@ void Draw_ArcBeam(entity this)
 				this.beam_dir = normalize((wantdir * (1 - blendfactor)) + (this.beam_dir * blendfactor));
 			}
 
-			// calculate how many segments are needed
 			float max_allowed_segments;
 
 			if(this.beam_distancepersegment)
@@ -1056,15 +979,13 @@ void Draw_ArcBeam(entity this)
 		}
 		else { segments = 1; }
 
-		// set the beam direction which the rest of the code will refer to
 		beamdir = this.beam_dir;
 
-		// finally, set this.angles to the proper direction so that muzzle attachment points in proper direction
-		this.angles = fixedvectoangles2(forward, up); // TODO(Samual): is this == warpzone_save_view_angles?
+		this.angles = fixedvectoangles2(forward, up);
 	}
 	else
 	{
-		// set the values from the provided info from the networked entity
+
 		start_pos = this.origin;
 		wantdir = this.v_angle;
 		beamdir = this.angles;
@@ -1073,7 +994,6 @@ void Draw_ArcBeam(entity this)
 		{
 			float angle = vlen(wantdir - beamdir) * RAD2DEG;
 
-			// calculate how many segments are needed
 			float max_allowed_segments;
 
 			if(this.beam_distancepersegment)
@@ -1106,7 +1026,7 @@ void Draw_ArcBeam(entity this)
 	}
 
 	setorigin(this, start_pos);
-	this.beam_muzzleentity.angles_z = random() * 360; // WEAPONTODO: use avelocity instead?
+	this.beam_muzzleentity.angles_z = random() * 360;
 
 	vector beam_endpos = (start_pos + (beamdir * this.beam_range));
 	vector beam_controlpoint = start_pos + wantdir * (this.beam_range * (1 - this.beam_tightness));
@@ -1122,11 +1042,6 @@ void Draw_ArcBeam(entity this)
 	float i;
 	for(i = 1; i <= segments; ++i)
 	{
-		// WEAPONTODO (client):
-		// In order to do nice fading and pointing on the starting segment, we must always
-		// have that drawn as a separate triangle... However, that is difficult to do when
-		// keeping in mind the above problems and also optimizing the amount of segments
-		// drawn on screen at any given time. (Automatic beam quality scaling, essentially)
 
 		vector new_origin = bezier_quadratic_getpoint(
 			start_pos,
@@ -1145,8 +1060,6 @@ void Draw_ArcBeam(entity this)
 			Draw_ArcBeam_callback
 		);
 
-		// Do all the transforms for warpzones right now, as we already "are" in the post-trace
-		// system (if we hit a player, that's always BEHIND the last passed wz).
 		last_origin = trace_endpos;
 		start_pos = WarpZone_TransformOrigin(WarpZone_trace_transform, start_pos);
 		beam_controlpoint = WarpZone_TransformOrigin(WarpZone_trace_transform, beam_controlpoint);
@@ -1158,12 +1071,9 @@ void Draw_ArcBeam(entity this)
 		if(trace_fraction < 1) { break; }
 	}
 
-	// visual effects for startpoint and endpoint
 	if(this.beam_hiteffect)
 	{
-		// FIXME we really should do this on the server so it actually
-		// matches gameplay. What this client side stuff is doing is no
-		// more than guesswork.
+
 		if((trace_ent || trace_fraction < 1) && !(trace_dphitq3surfaceflags & Q3SURFACEFLAG_NOIMPACT))
 		pointparticles(
 			this.beam_hiteffect,
@@ -1206,7 +1116,6 @@ void Draw_ArcBeam(entity this)
 		);
 	}
 
-	// cleanup
 	Draw_ArcBeam_callback_entity = NULL;
 	Draw_ArcBeam_callback_last_thickness = 0;
 	Draw_ArcBeam_callback_last_top = '0 0 0';
@@ -1231,9 +1140,8 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 	{
 		int gunalign = W_GunAlign(viewmodels[slot], STAT(GUNALIGN)) - 1;
 
-		this.beam_shotorigin = arc_shotorigin[gunalign]; // get a starting point
+		this.beam_shotorigin = arc_shotorigin[gunalign];
 
-		// set other main attributes of the beam
 		this.draw = Draw_ArcBeam;
 		IL_PUSH(g_drawables, this);
 		this.entremove = Remove_ArcBeam;
@@ -1243,7 +1151,7 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 		flash = new(arc_flash);
 		flash.owner = this;
 		flash.effects = EF_ADDITIVE | EF_FULLBRIGHT;
-		//flash.drawmask = MASK_NORMAL;
+
 		flash.solid = SOLID_NOT;
 		flash.avelocity_z = 5000;
 		setattachment(flash, this, "");
@@ -1256,7 +1164,7 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 		flash = this.beam_muzzleentity;
 	}
 
-	if(sf & ARC_SF_SETTINGS) // settings information
+	if(sf & ARC_SF_SETTINGS)
 	{
 		this.beam_degreespersegment = ReadShort();
 		this.beam_distancepersegment = ReadShort();
@@ -1274,48 +1182,48 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 			this.beam_usevieworigin = 0;
 		}
 
-		this.sv_entnum = ReadByte();
+		this.sv_entnum = ReadShort();
 	}
 
 	if(!this.beam_usevieworigin)
 	{
-		// this.iflags = IFLAG_ORIGIN | IFLAG_ANGLES | IFLAG_V_ANGLE; // why doesn't this work?
+
 		this.iflags = IFLAG_ORIGIN;
 
 		InterpolateOrigin_Undo(this);
 	}
 
-	if(sf & ARC_SF_START) // starting location
+	if(sf & ARC_SF_START)
 	{
 		this.origin = ReadVector();
 	}
-	else if(this.beam_usevieworigin) // infer the location from player location
+	else if(this.beam_usevieworigin)
 	{
 		if(this.beam_usevieworigin == 2)
 		{
-			// use view origin
+
 			this.origin = view_origin;
 		}
 		else
 		{
-			// use player origin so that third person display still works
+
 			this.origin = entcs_receiver(player_localnum).origin + ('0 0 1' * STAT(VIEWHEIGHT));
 		}
 	}
 
 	setorigin(this, this.origin);
 
-	if(sf & ARC_SF_WANTDIR) // want/aim direction
+	if(sf & ARC_SF_WANTDIR)
 	{
 		this.v_angle = ReadVector();
 	}
 
-	if(sf & ARC_SF_BEAMDIR) // beam direction
+	if(sf & ARC_SF_BEAMDIR)
 	{
 		this.angles = ReadAngleVector();
 	}
 
-	if(sf & ARC_SF_BEAMTYPE) // beam type
+	if(sf & ARC_SF_BEAMTYPE)
 	{
 		this.beam_type = ReadByte();
 
@@ -1348,7 +1256,7 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 				}
 				break;
 			}
-			case ARC_BT_WALL: // grenadelauncher_muzzleflash healray_muzzleflash
+			case ARC_BT_WALL:
 			{
 				this.beam_color = beamcolor;
 				this.beam_alpha = 0.5;
@@ -1359,7 +1267,7 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 				this.beam_hitlight[1] = 1;
 				this.beam_hitlight[2] = 1;
 				this.beam_hitlight[3] = 1;
-				this.beam_muzzleeffect = EFFECT_Null; // (EFFECT_GRENADE_MUZZLEFLASH);
+				this.beam_muzzleeffect = EFFECT_Null;
 				this.beam_muzzlelight[0] = 0;
 				this.beam_muzzlelight[1] = 1;
 				this.beam_muzzlelight[2] = 1;
@@ -1531,7 +1439,6 @@ NET_HANDLE(ENT_CLIENT_ARC_BEAM, bool isnew)
 				break;
 			}
 
-			// shouldn't be possible, but lets make it colorful if it does :D
 			default:
 			{
 				this.beam_color = randomvec();

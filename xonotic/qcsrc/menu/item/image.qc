@@ -12,8 +12,8 @@
 	{
 		me.zoomOffset = '0.5 0.5 0';
 		me.zoomFactor = 1;
-		if (me.forcedAspect == -2) me.zoomBox = -1;  // calculate zoomBox at the first updateAspect call
-		if (me.zoomLimitedByTheBox) me.zoomMax = -1; // calculate zoomMax at the first updateAspect call
+		if (me.forcedAspect == -2) me.zoomBox = -1;
+		if (me.zoomLimitedByTheBox) me.zoomMax = -1;
 	}
 
 	void Image_draw(entity me)
@@ -41,7 +41,7 @@
 				if (me.src != "") sz = draw_PictureSize(me.src);
 				if (sz.x <= 0 || sz.y <= 0)
 				{
-					// image is broken or doesn't exist, set the size for the placeholder image
+
 					sz.x = me.size.x;
 					sz.y = me.size.y;
 				}
@@ -58,7 +58,7 @@
 				me.imgSize_y = sz.y / me.size.y;
 				if (me.zoomBox < 0 && (me.imgSize.x > 1 || me.imgSize.y > 1))
 				{
-					// image larger than the containing box, zoom it out to fit into the box
+
 					if (me.size.x > asp * me.size.y) me.zoomBox = (me.size.y * asp / me.size.x) / me.imgSize.x;
 					else me.zoomBox = (me.size.x / (asp * me.size.y)) / me.imgSize.y;
 					me.zoomFactor = me.zoomBox;
@@ -68,12 +68,12 @@
 			{
 				if (me.size.x > asp * me.size.y)
 				{
-					// x too large, so center x-wise
+
 					me.imgSize = eY + eX * (me.size.y * asp / me.size.x);
 				}
 				else
 				{
-					// y too large, so center y-wise
+
 					me.imgSize = eX + eY * (me.size.x / (asp * me.size.y));
 				}
 			}
@@ -121,7 +121,7 @@
 	}
 	float Image_drag_setStartPos(entity me, vector coords)
 	{
-		// if(me.imgSize_x > 1 || me.imgSize_y > 1) // check disabled: mousewheel zoom may start from a non-zoomed-in image
+
 		{
 			me.start_zoomOffset = me.zoomOffset;
 			me.start_coords = coords;
@@ -142,7 +142,7 @@
 	{
 		float prev_zoomFactor;
 		prev_zoomFactor = me.zoomFactor;
-		if (newzoom < 0)  // multiply by the current zoomFactor (but can also snap to real dimensions or to box)
+		if (newzoom < 0)
 		{
 			me.zoomFactor *= -newzoom;
 			float realSize_in_the_middle, boxSize_in_the_middle;
@@ -150,25 +150,25 @@
 			boxSize_in_the_middle = (me.zoomBox > 0 && (prev_zoomFactor - me.zoomBox) * (me.zoomFactor - me.zoomBox) < 0);
 			if (realSize_in_the_middle && boxSize_in_the_middle)
 			{
-				// snap to real dimensions or to box
+
 				if (prev_zoomFactor < me.zoomFactor) me.zoomFactor = min(1, me.zoomBox);
 				else me.zoomFactor = max(1, me.zoomBox);
 			}
 			else if (realSize_in_the_middle)
 			{
-				me.zoomFactor = 1;  // snap to real dimensions
+				me.zoomFactor = 1;
 			}
 			else if (boxSize_in_the_middle)
 			{
-				me.zoomFactor = me.zoomBox; // snap to box
+				me.zoomFactor = me.zoomBox;
 			}
 		}
-		else if (newzoom == 0)                    // reset (no zoom)
+		else if (newzoom == 0)
 		{
 			if (me.zoomBox > 0) me.zoomFactor = me.zoomBox;
 			else me.zoomFactor = 1;
 		}
-		else  // directly set
+		else
 		{
 			me.zoomFactor = newzoom;
 		}
@@ -181,9 +181,7 @@
 			{
 				me.zoomOffset_x = me.start_zoomOffset.x + (me.start_coords.x - 0.5) / me.imgSize.x;
 				me.zoomOffset_y = me.start_zoomOffset.y + (me.start_coords.y - 0.5) / me.imgSize.y;
-				// updateAspect will reset zoomOffset to '0.5 0.5 0' if
-				// with this zoomFactor the image will not be zoomed in
-				// (updateAspect will check the new values of imgSize).
+
 			}
 		}
 		me.updateAspect(me);

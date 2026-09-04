@@ -2,29 +2,28 @@
 
 REGISTER_MINIGAME(nmm, _("Nine Men's Morris"));
 
-const int NMM_TURN_PLACE = 0x0100; // player has to place a piece on the board
-const int NMM_TURN_MOVE  = 0x0200; // player has to move a piece by one tile
-const int NMM_TURN_FLY   = 0x0400; // player has to move a piece anywhere
-const int NMM_TURN_TAKE  = 0x0800; // player has to take a non-mill piece
-const int NMM_TURN_TAKEANY=0x1000; // combine with NMM_TURN_TAKE, can take mill pieces
-const int NMM_TURN_WIN   = 0x2000; // player has won
+const int NMM_TURN_PLACE = 0x0100;
+const int NMM_TURN_MOVE  = 0x0200;
+const int NMM_TURN_FLY   = 0x0400;
+const int NMM_TURN_TAKE  = 0x0800;
+const int NMM_TURN_TAKEANY=0x1000;
+const int NMM_TURN_WIN   = 0x2000;
 const int NMM_TURN_TYPE  = 0xff00;
 const int NMM_TURN_TEAM1 = 0x0001;
 const int NMM_TURN_TEAM2 = 0x0002;
 const int NMM_TURN_TEAM  = 0x00ff;
 
-const int NMM_PIECE_DEAD  = 0x0; // captured by the enemy
-const int NMM_PIECE_HOME  = 0x1; // not yet placed
-const int NMM_PIECE_BOARD = 0x2; // placed on the board
+const int NMM_PIECE_DEAD  = 0x0;
+const int NMM_PIECE_HOME  = 0x1;
+const int NMM_PIECE_BOARD = 0x2;
 
-const int NMM_SPECTATOR_TEAM = 255; // must be above max teams and equal to or below 255
+const int NMM_SPECTATOR_TEAM = 255;
 
 .int  nmm_tile_distance;
 .entity nmm_tile_piece;
 .string nmm_tile_hmill;
 .string nmm_tile_vmill;
 
-// build a string containing the indices of the tile to check for a horizontal mill
 string nmm_tile_build_hmill(entity tile)
 {
 	int number = minigame_tile_number(tile.netname);
@@ -50,7 +49,6 @@ string nmm_tile_build_hmill(entity tile)
 			minigame_tile_buildname(6,number) );
 }
 
-// build a string containing the indices of the tile to check for a vertical mill
 string nmm_tile_build_vmill(entity tile)
 {
 	int letter = minigame_tile_letter(tile.netname);
@@ -76,13 +74,9 @@ string nmm_tile_build_vmill(entity tile)
 			minigame_tile_buildname(letter,6) );
 }
 
-// Create an new tile
-// \param id       Tile index (eg: a1)
-// \param minig    Owner minigame instance
-// \param distance Distance from adjacent tiles
 void nmm_spawn_tile(string id, entity minig, int distance)
 {
-	// TODO global variable + list_next for simpler tile loops
+
 	entity e = new(minigame_nmm_tile);
 	e.origin = minigame_tile_pos(id,7,7);
 	e.netname = id;
@@ -93,10 +87,6 @@ void nmm_spawn_tile(string id, entity minig, int distance)
 	e.nmm_tile_vmill = strzone(nmm_tile_build_vmill(e));
 }
 
-// Create a tile square and recursively create inner squares
-// \param minig    Owner minigame instance
-// \param offset   Index offset (eg: 1 to start the square at b2, 0 at a1 etc.)
-// \param skip     Number of indices to skip between tiles (eg 1: a1, a3)
 void nmm_spawn_tile_square( entity minig, int offset, int skip )
 {
 	int letter = offset;
@@ -117,7 +107,6 @@ void nmm_spawn_tile_square( entity minig, int offset, int skip )
 		nmm_spawn_tile_square(minig,offset+1,skip-1);
 }
 
-// Remove tiles of a NMM minigame
 void nmm_kill_tiles(entity minig)
 {
 	entity e = NULL;
@@ -131,13 +120,11 @@ void nmm_kill_tiles(entity minig)
 		}
 }
 
-// Create the tiles of a NMM minigame
 void nmm_init_tiles(entity minig)
 {
 	nmm_spawn_tile_square(minig,0,2);
 }
 
-// Find a tile by its id
 entity nmm_find_tile(entity minig, string id)
 {
 	entity e = NULL;
@@ -147,7 +134,6 @@ entity nmm_find_tile(entity minig, string id)
 	return NULL;
 }
 
-// Check whether two tiles are adjacent
 bool nmm_tile_adjacent(entity tile1, entity tile2)
 {
 
@@ -158,7 +144,6 @@ bool nmm_tile_adjacent(entity tile1, entity tile2)
 		( dletter == 0 && ( dnumber == 1 || dnumber == tile1.nmm_tile_distance ) );
 }
 
-// Returns 1 if there is at least 1 free adjacent tile
 bool nmm_tile_canmove(entity tile)
 {
 	entity e = NULL;
@@ -171,7 +156,6 @@ bool nmm_tile_canmove(entity tile)
 	return false;
 }
 
-// Check if the given tile id appears in the string
 bool nmm_in_mill_string(entity tile, string s)
 {
 	int argc = tokenize(s);
@@ -184,7 +168,6 @@ bool nmm_in_mill_string(entity tile, string s)
 	return true;
 }
 
-// Check if a tile is in a mill
 bool nmm_in_mill(entity tile)
 {
 	return tile.nmm_tile_piece &&  (
@@ -192,9 +175,8 @@ bool nmm_in_mill(entity tile)
 		nmm_in_mill_string(tile,tile.nmm_tile_vmill) );
 }
 
-
 #ifdef SVQC
-// Find a NMM piece matching some of the given flags and team number
+
 entity nmm_find_piece(entity start, entity minigame, int teamn, int pieceflags)
 {
 	entity e = start;
@@ -205,7 +187,6 @@ entity nmm_find_piece(entity start, entity minigame, int teamn, int pieceflags)
 	return NULL;
 }
 
-// Count NMM pieces matching flags and team number
 int nmm_count_pieces(entity minigame, int teamn, int pieceflags)
 {
 	int n = 0;
@@ -215,7 +196,6 @@ int nmm_count_pieces(entity minigame, int teamn, int pieceflags)
 	return n;
 }
 
-// required function, handle server side events
 int nmm_server_event(entity minigame, string event, ...)
 {
 	if ( event == "start" )
@@ -388,19 +368,18 @@ entity nmm_fromtile;
 vector nmm_boardpos;
 vector nmm_boardsize;
 
-// whether the given tile is a valid selection
 bool nmm_valid_selection(entity tile)
 {
 	if ( ( tile.owner.minigame_flags & NMM_TURN_TEAM ) != minigame_self.team )
-		return false; // not our turn
+		return false;
 	if ( tile.owner.minigame_flags & NMM_TURN_PLACE )
-		return !tile.nmm_tile_piece; // need to put a piece on an empty spot
+		return !tile.nmm_tile_piece;
 	if ( tile.owner.minigame_flags & NMM_TURN_MOVE )
 	{
 		if ( tile.nmm_tile_piece && tile.nmm_tile_piece.team == minigame_self.team &&
 				nmm_tile_canmove(tile) )
-			return true; //  movable tile
-		if ( nmm_fromtile ) // valid destination
+			return true;
+		if ( nmm_fromtile )
 			return !tile.nmm_tile_piece && nmm_tile_adjacent(nmm_fromtile,tile);
 		return false;
 	}
@@ -417,7 +396,6 @@ bool nmm_valid_selection(entity tile)
 	return false;
 }
 
-// whether it should highlight valid tile selections
 bool nmm_draw_avaliable(entity tile)
 {
 	if ( ( tile.owner.minigame_flags & NMM_TURN_TEAM ) != minigame_self.team )
@@ -429,7 +407,6 @@ bool nmm_draw_avaliable(entity tile)
 	return false;
 }
 
-// Required function, draw the game board
 void nmm_hud_board(vector pos, vector mySize)
 {
 	minigame_hud_fitsqare(pos, mySize);
@@ -470,7 +447,6 @@ void nmm_hud_board(vector pos, vector mySize)
 					tile_size*0.8, '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL );
 			}
 
-			//drawstring(tile_pos, e.netname, hud_fontsize, '1 0 0', 1, DRAWFLAG_NORMAL);
 		}
 	}
 
@@ -497,7 +473,6 @@ void nmm_hud_board(vector pos, vector mySize)
 	}
 }
 
-// Required function, draw the game status panel
 void nmm_hud_status(vector pos, vector mySize)
 {
 	HUD_Panel_DrawBg();
@@ -568,7 +543,6 @@ void nmm_hud_status(vector pos, vector mySize)
 	}
 }
 
-// Make the correct move
 void nmm_make_move(entity minigame)
 {
 	if ( nmm_currtile )
@@ -625,7 +599,6 @@ string nmm_turn_to_string(int turnflags)
 	return "";
 }
 
-// Required function, handle client events
 int nmm_client_event(entity minigame, string event, ...)
 {
 	if ( event == "activate" )

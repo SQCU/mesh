@@ -1,34 +1,10 @@
-/*
-	Copyright (C) 2006  Mathieu Olivier
 
-	This program is free software; you can redistribute it and/or
-	modify it under the terms of the GNU General Public License
-	as published by the Free Software Foundation; either version 2
-	of the License, or (at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-	See the GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to:
-
-		Free Software Foundation, Inc.
-		59 Temple Place - Suite 330
-		Boston, MA  02111-1307, USA
-
-*/
-
-// ALSA module, used by Linux
 
 #include "quakedef.h"
 
 #include <alsa/asoundlib.h>
 
 #include "snd_main.h"
-
 
 #define NB_PERIODS 4
 
@@ -38,14 +14,6 @@ static unsigned int alsasoundtime;
 
 static snd_seq_t* seq_handle = NULL;
 
-/*
-====================
-SndSys_Init
-
-Create "snd_renderbuffer" with the proper sound format if the call is successful
-May return a suggested format if the requested format isn't available
-====================
-*/
 qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 {
 	const char* pcm_name, *seq_name;
@@ -57,8 +25,8 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	Con_Print ("SndSys_Init: using the ALSA module\n");
 
 	seq_name = NULL;
-// COMMANDLINEOPTION: Linux ALSA Sound: -sndseqin <client>:<port> selects which sequencer port to use for input, by default no sequencer port is used (MIDI note events from that port get mapped to MIDINOTE<n> keys that can be bound)
-	i = COM_CheckParm ("-sndseqin"); // TODO turn this into a cvar, maybe
+
+	i = COM_CheckParm ("-sndseqin");
 	if (i != 0 && i < com_argc - 1)
 		seq_name = com_argv[i + 1];
 	if(seq_name)
@@ -107,7 +75,7 @@ seqerror:
 	}
 
 seqdone:
-	// Check the requested sound format
+
 	if (requested->width < 1 || requested->width > 2)
 	{
 		Con_Printf ("SndSys_Init: invalid sound width (%hu)\n",
@@ -135,7 +103,6 @@ seqdone:
 		SndSys_Shutdown ();
 	}
 
-	// Determine the name of the PCM handle we'll use
 	switch (requested->channels)
 	{
 		case 4:
@@ -151,12 +118,11 @@ seqdone:
 			pcm_name = "default";
 			break;
 	}
-// COMMANDLINEOPTION: Linux ALSA Sound: -sndpcm <devicename> selects which pcm device to use, default is "default"
+
 	i = COM_CheckParm ("-sndpcm");
 	if (i != 0 && i < com_argc - 1)
 		pcm_name = com_argv[i + 1];
 
-	// Open the audio device
 	Con_Printf ("SndSys_Init: PCM device is \"%s\"\n", pcm_name);
 	err = snd_pcm_open (&pcm_handle, pcm_name, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
 	if (err < 0)
@@ -166,7 +132,6 @@ seqdone:
 		return false;
 	}
 
-	// Allocate the hardware parameters
 	err = snd_pcm_hw_params_malloc (&hw_params);
 	if (err < 0)
 	{
@@ -182,7 +147,6 @@ seqdone:
 		goto init_error;
 	}
 
-	// Set the access type
 	err = snd_pcm_hw_params_set_access (pcm_handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
 	if (err < 0)
 	{
@@ -191,7 +155,6 @@ seqdone:
 		goto init_error;
 	}
 
-	// Set the sound width
 	if (requested->width == 1)
 		snd_pcm_format = SND_PCM_FORMAT_U8;
 	else
@@ -204,7 +167,6 @@ seqdone:
 		goto init_error;
 	}
 
-	// Set the sound channels
 	err = snd_pcm_hw_params_set_channels (pcm_handle, hw_params, requested->channels);
 	if (err < 0)
 	{
@@ -213,7 +175,6 @@ seqdone:
 		goto init_error;
 	}
 
-	// Set the sound speed
 	err = snd_pcm_hw_params_set_rate (pcm_handle, hw_params, requested->speed, 0);
 	if (err < 0)
 	{
@@ -222,11 +183,10 @@ seqdone:
 		goto init_error;
 	}
 
-	// pick a buffer size that is a power of 2 (by masking off low bits)
 	buffer_size = i = (int)(requested->speed * 0.15f);
 	while (buffer_size & (buffer_size-1))
 		buffer_size &= (buffer_size-1);
-	// then check if it is the nearest power of 2 and bump it up if not
+
 	if (i - buffer_size >= buffer_size >> 1)
 		buffer_size *= 2;
 
@@ -238,7 +198,6 @@ seqdone:
 		goto init_error;
 	}
 
-	// pick a period size near the buffer_size we got from ALSA
 	snd_pcm_hw_params_get_buffer_size (hw_params, &buffer_size);
 	buffer_size /= NB_PERIODS;
 	err = snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params, &buffer_size, 0);
@@ -267,8 +226,6 @@ seqdone:
 
 	return true;
 
-
-// It's not very clean, but it avoids a lot of duplicated code.
 init_error:
 
 	if (hw_params != NULL)
@@ -280,14 +237,6 @@ init_error:
 	return false;
 }
 
-
-/*
-====================
-SndSys_Shutdown
-
-Stop the sound card, delete "snd_renderbuffer" and free its other resources
-====================
-*/
 void SndSys_Shutdown (void)
 {
 	if (seq_handle != NULL)
@@ -310,19 +259,10 @@ void SndSys_Shutdown (void)
 	}
 }
 
-
-/*
-====================
-SndSys_Recover
-
-Try to recover from errors
-====================
-*/
 static qboolean SndSys_Recover (int err_num)
 {
 	int err;
 
-	// We can only do something on underrun ("broken pipe") errors
 	if (err_num != -EPIPE)
 		return false;
 
@@ -332,20 +272,12 @@ static qboolean SndSys_Recover (int err_num)
 		Con_Printf ("SndSys_Recover: unable to recover (%s)\n",
 					 snd_strerror (err));
 
-		// TOCHECK: should we stop the playback ?
-
 		return false;
 	}
 
 	return true;
 }
 
-
-/*
-====================
-SndSys_Write
-====================
-*/
 static snd_pcm_sframes_t SndSys_Write (const unsigned char* buffer, unsigned int nbframes)
 {
 	snd_pcm_sframes_t written;
@@ -374,14 +306,6 @@ static snd_pcm_sframes_t SndSys_Write (const unsigned char* buffer, unsigned int
 	return written;
 }
 
-
-/*
-====================
-SndSys_Submit
-
-Submit the contents of "snd_renderbuffer" to the sound card
-====================
-*/
 void SndSys_Submit (void)
 {
 	unsigned int startoffset, factor;
@@ -412,14 +336,6 @@ void SndSys_Submit (void)
 		return;
 }
 
-
-/*
-====================
-SndSys_GetSoundTime
-
-Returns the number of sample frames consumed since the sound started
-====================
-*/
 unsigned int SndSys_GetSoundTime (void)
 {
 	snd_pcm_sframes_t delay, timediff;
@@ -462,40 +378,17 @@ unsigned int SndSys_GetSoundTime (void)
 	return alsasoundtime;
 }
 
-
-/*
-====================
-SndSys_LockRenderBuffer
-
-Get the exclusive lock on "snd_renderbuffer"
-====================
-*/
 qboolean SndSys_LockRenderBuffer (void)
 {
-	// Nothing to do
+
 	return true;
 }
 
-
-/*
-====================
-SndSys_UnlockRenderBuffer
-
-Release the exclusive lock on "snd_renderbuffer"
-====================
-*/
 void SndSys_UnlockRenderBuffer (void)
 {
-	// Nothing to do
+
 }
 
-/*
-====================
-SndSys_SendKeyEvents
-
-Send keyboard events originating from the sound system (e.g. MIDI)
-====================
-*/
 void SndSys_SendKeyEvents(void)
 {
 	snd_seq_event_t *event;

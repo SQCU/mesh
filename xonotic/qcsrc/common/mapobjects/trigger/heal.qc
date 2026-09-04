@@ -6,7 +6,6 @@ void trigger_heal_touch(entity this, entity toucher)
 	if (this.active != ACTIVE_ACTIVE)
 		return;
 
-	// only do the EXACTTRIGGER_TOUCH checks when really needed (saves some cpu)
 	if (toucher.iscreature)
 	{
 		if (toucher.takedamage && !IS_DEAD(toucher) && toucher.triggerhealtime < time)
@@ -39,7 +38,7 @@ void trigger_heal_init(entity this)
 	if(!this.health)
 		this.health = 10;
 	if(!this.max_health)
-		this.max_health = 200; // max health topoff for field
+		this.max_health = 200;
 	if(this.noise == "")
 		this.noise = "misc/mediumhealth.wav";
 	precache_sound(this.noise);

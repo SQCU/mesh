@@ -1,5 +1,5 @@
 #include "jumppads.qh"
-// TODO: split target_push and put it in the target folder
+
 #ifdef SVQC
 #include <common/physics/movetypes/movetypes.qh>
 
@@ -16,18 +16,6 @@ void trigger_push_use(entity this, entity actor, entity trigger)
 REGISTER_NET_LINKED(ENT_CLIENT_TRIGGER_PUSH)
 REGISTER_NET_LINKED(ENT_CLIENT_TARGET_PUSH)
 
-/*
-	trigger_push_calculatevelocity
-
-	Arguments:
-	  org - origin of the object which is to be pushed
-	  tgt - target entity (can be either a point or a model entity; if it is
-	        the latter, its midpoint is used)
-	  ht  - jump height, measured from the higher one of org and tgt's midpoint
-	  pushed_entity - object that is to be pushed
-
-	Returns: velocity for the jump
- */
 vector trigger_push_calculatevelocity(vector org, entity tgt, float ht, entity pushed_entity)
 {
 	float grav, sdist, zdist, vs, vz, jumpheight;
@@ -39,100 +27,62 @@ vector trigger_push_calculatevelocity(vector org, entity tgt, float ht, entity p
 	if(pushed_entity && pushed_entity.gravity)
 		grav *= pushed_entity.gravity;
 
-	// Q3 has frametime-dependent gravity, but its trigger_push velocity calculation doesn't account for that.
-	// This discrepancy can be simulated accurately which ensures that all entities will arrive
-	// where they would in Q3 with gravity 800 at 125fps, even if entity-specific gravity is applied.
-	// This can be hard-coded because we don't support the Q3 world.gravity field at this time.
-	// See physicsCPMA.cfg for maths and test results.
 	if (Q3COMPAT_COMMON)
-		grav /= 750/800; // exact float, unlike 800/750
+		grav /= 750/800;
 
 	zdist = torg.z - org.z;
 	sdist = vlen(torg - org - zdist * '0 0 1');
 	sdir = normalize(torg - org - zdist * '0 0 1');
 
-	// how high do we need to push the player?
 	jumpheight = fabs(ht);
 	if(zdist > 0)
 		jumpheight = jumpheight + zdist;
 
-	/*
-		STOP.
+	vz = sqrt(fabs(2 * grav * jumpheight));
 
-		You will not understand the following equations anyway...
-		But here is what I did to get them.
-
-		I used the functions
-
-		  s(t) = t * vs
-		  z(t) = t * vz - 1/2 grav t^2
-
-		and solved for:
-
-		  s(ti) = sdist
-		  z(ti) = zdist
-		  max(z, ti) = jumpheight
-
-		From these three equations, you will find the three parameters vs, vz
-		and ti.
-	 */
-
-	// push them so high...
-	vz = sqrt(fabs(2 * grav * jumpheight)); // NOTE: sqrt(positive)!
-
-	// we start with downwards velocity only if it's a downjump and the jump apex should be outside the jump!
 	if(ht < 0)
 		if(zdist < 0)
 			vz = -vz;
 
 	vector solution;
-	solution = solve_quadratic(0.5 * grav, -vz, zdist); // equation "z(ti) = zdist"
-	// ALWAYS solvable because jumpheight >= zdist
+	solution = solve_quadratic(0.5 * grav, -vz, zdist);
+
 	if(!solution.z)
-		solution_y = solution.x; // just in case it is not solvable due to roundoff errors, assume two equal solutions at their center (this is mainly for the usual case with ht == 0)
+		solution_y = solution.x;
 	if(zdist == 0)
-		solution_x = solution.y; // solution_x is 0 in this case, so don't use it, but rather use solution_y (which will be sqrt(0.5 * jumpheight / grav), actually)
+		solution_x = solution.y;
 
 	float flighttime;
 	if(zdist < 0)
 	{
-		// down-jump
+
 		if(ht < 0)
 		{
-			// almost straight line type
-			// jump apex is before the jump
-			// we must take the larger one
+
 			flighttime = solution.y;
 		}
 		else
 		{
-			// regular jump
-			// jump apex is during the jump
-			// we must take the larger one too
+
 			flighttime = solution.y;
 		}
 	}
 	else
 	{
-		// up-jump
+
 		if(ht < 0)
 		{
-			// almost straight line type
-			// jump apex is after the jump
-			// we must take the smaller one
+
 			flighttime = solution.x;
 		}
 		else
 		{
-			// regular jump
-			// jump apex is during the jump
-			// we must take the larger one
+
 			flighttime = solution.y;
 		}
 	}
 	vs = sdist / flighttime;
 
-	// finally calculate the velocity
 	return sdir * vs + '0 0 1' * vz;
 }
 
@@ -191,14 +141,12 @@ bool jumppad_push(entity this, entity targ)
 #ifdef SVQC
 	if (IS_PLAYER(targ))
 	{
-		// reset tracking of oldvelocity for impact damage (sudden velocity changes)
+
 		targ.oldvelocity = targ.velocity;
 
-		// prevent sound spam when a player hits the jumppad more than once
-		// or when a dead player gets stuck in the jumppad for some reason
 		if(this.pushltime < time && !(IS_DEAD(targ) && targ.velocity == '0 0 0'))
 		{
-			// flash when activated
+
 			Send_Effect(EFFECT_JUMPPAD, targ.origin, targ.velocity, 1);
 			_sound (targ, CH_TRIGGER, this.noise, VOL_BASE, ATTEN_NORM);
 			this.pushltime = time + 0.2;
@@ -232,7 +180,6 @@ bool jumppad_push(entity this, entity targ)
 		else
 			targ.jumppadcount = 1;
 
-		// reset tracking of who pushed you into a hazard (for kill credit)
 		targ.pushltime = 0;
 		targ.istypefrag = 0;
 	}
@@ -297,9 +244,7 @@ bool trigger_push_testorigin(entity tracetest_ent, entity targ, entity jp, vecto
 
 	if (!jp.height)
 	{
-		// since tracetoss starting from jumppad's origin often fails when target
-		// is very close to real destination, start it directly from target's
-		// origin instead
+
 		vector ofs = '0 0 0';
 		if (vdist(vec2(tracetest_ent.velocity), <, autocvar_sv_maxspeed))
 			ofs = stepheightvec;
@@ -346,7 +291,7 @@ bool trigger_push_testorigin_for_item(entity tracetest_ent, entity item, vector 
 #ifdef SVQC
 vector trigger_push_get_start_point(entity this)
 {
-	// calculate a typical start point for the jump
+
 	vector org = (this.absmin + this.absmax) * 0.5;
 	org.z = this.absmax.z - PL_MIN_CONST.z - 7;
 	return org;
@@ -387,8 +332,6 @@ float trigger_push_get_push_time(entity this, vector endpos)
 }
 #endif
 
-/// if (item != NULL) returns true if the item can be reached by using this jumppad, false otherwise
-/// if (item == NULL) tests jumppad's trajectory and eventually spawns waypoints for it (return value doesn't matter)
 bool trigger_push_test(entity this, entity item)
 {
 #ifdef SVQC
@@ -408,7 +351,6 @@ bool trigger_push_test(entity this, entity item)
 			if(t.move_movetype != MOVETYPE_NONE)
 				continue;
 
-			// bots can't tell teamed jumppads from normal ones
 			if (this.team)
 				continue;
 
@@ -443,11 +385,9 @@ bool trigger_push_test(entity this, entity item)
 
 			vector new_org;
 			vector dist = t.origin - org;
-			if (dist.x || dist.y) // if not perfectly vertical
+			if (dist.x || dist.y)
 			{
-				// test trajectory with different starting points, sometimes the trajectory
-				// starting from the jumppad origin can't reach the real destination
-				// and destination waypoint ends up near the jumppad itself
+
 				vector flatdir = normalize(dist - eZ * dist.z);
 				vector ofs = flatdir * 0.5 * min(fabs(this.absmax.x - this.absmin.x), fabs(this.absmax.y - this.absmin.y));
 				new_org = org + ofs;
@@ -509,7 +449,7 @@ bool trigger_push_test(entity this, entity item)
 
 		if(!n)
 		{
-			// no dest!
+
 #ifdef SVQC
 			objerror (this, "Jumppad with nonexistant target");
 #endif
@@ -517,15 +457,15 @@ bool trigger_push_test(entity this, entity item)
 		}
 		else if(n == 1)
 		{
-			// exactly one dest - bots love that
+
 			if (!this.team)
 				this.enemy = find(NULL, targetname, this.target);
-			else // bots can't tell teamed jumppads from normal ones
+			else
 				this.enemy = NULL;
 		}
 		else
 		{
-			// have to use random selection every single time
+
 			this.enemy = NULL;
 		}
 
@@ -570,7 +510,7 @@ float trigger_push_send(entity this, entity to, float sf)
 {
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_TRIGGER_PUSH);
 
-	WriteByte(MSG_ENTITY, this.team);
+	WriteShort(MSG_ENTITY, this.team);
 	WriteInt24_t(MSG_ENTITY, this.spawnflags);
 	WriteByte(MSG_ENTITY, this.active);
 	WriteCoord(MSG_ENTITY, this.height);
@@ -590,18 +530,6 @@ void trigger_push_link(entity this)
 	trigger_link(this, trigger_push_send);
 }
 
-/*
- * ENTITY PARAMETERS:
- *
- *   target:  target of jump
- *   height:  the absolute value is the height of the highest point of the jump
- *            trajectory above the higher one of the player and the target.
- *            the sign indicates whether the highest point is INSIDE (positive)
- *            or OUTSIDE (negative) of the jump trajectory. General rule: use
- *            positive values for targets mounted on the floor, and use negative
- *            values to target a point on the ceiling.
- *   movedir: if target is not set, this * speed * 10 is the velocity to be reached.
- */
 spawnfunc(trigger_push)
 {
 	SetMovedir(this);
@@ -612,7 +540,6 @@ spawnfunc(trigger_push)
 	this.use = trigger_push_use;
 	settouch(this, trigger_push_touch);
 
-	// normal push setup
 	if (!this.speed)
 		this.speed = 1000;
 	this.movedir = this.movedir * this.speed * 10;
@@ -621,14 +548,12 @@ spawnfunc(trigger_push)
 		this.noise = "misc/jumppad.wav";
 	precache_sound (this.noise);
 
-	trigger_push_link(this); // link it now
+	trigger_push_link(this);
 
 	IL_PUSH(g_jumppads, this);
 
-	// this must be called to spawn the teleport waypoints for bots
 	InitializeEntity(this, trigger_push_findtarget, INITPRIO_FINDTARGET);
 }
-
 
 bool target_push_send(entity this, entity to, float sf)
 {
@@ -646,7 +571,7 @@ bool target_push_send(entity this, entity to, float sf)
 void target_push_use(entity this, entity actor, entity trigger)
 {
 	if(trigger.classname == "trigger_push" || trigger == this)
-		return; // WTF, why is this a thing
+		return;
 
 	jumppad_push(this, actor);
 }
@@ -655,7 +580,7 @@ void target_push_link(entity this)
 {
 	BITSET_ASSIGN(this.effects, EF_NODEPTHTEST);
 	Net_LinkEntity(this, false, 0, target_push_send);
-	//this.SendFlags |= 1; // update
+
 }
 
 void target_push_init(entity this)
@@ -667,13 +592,13 @@ void target_push_init(entity this)
 
 void target_push_init2(entity this)
 {
-	if(this.target && this.target != "") // we have an old style pusher!
+	if(this.target && this.target != "")
 	{
 		InitializeEntity(this, trigger_push_findtarget, INITPRIO_FINDTARGET);
 		this.use = target_push_use;
 	}
 
-	target_push_init(this); // normal push target behaviour can be combined with a legacy pusher?
+	target_push_init(this);
 }
 
 spawnfunc(target_push)
@@ -694,7 +619,7 @@ spawnfunc(target_position)
 
 NET_HANDLE(ENT_CLIENT_TRIGGER_PUSH, bool isnew)
 {
-	int mytm = ReadByte(); if(mytm) { this.team = mytm - 1; }
+	int mytm = ReadShort(); if(mytm) { this.team = mytm - 1; }
 	this.spawnflags = ReadInt24_t();
 	this.active = ReadByte();
 	this.height = ReadCoord();
@@ -712,7 +637,7 @@ NET_HANDLE(ENT_CLIENT_TRIGGER_PUSH, bool isnew)
 
 void target_push_remove(entity this)
 {
-	// strfree(this.classname);
+
 	strfree(this.targetname);
 }
 

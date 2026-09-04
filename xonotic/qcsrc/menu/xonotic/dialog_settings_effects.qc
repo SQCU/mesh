@@ -101,14 +101,14 @@ void XonoticEffectsSettingsTab_fill(entity me)
 	me.TR(me);
 		me.TDempty(me, 0.2);
 		{
-			// detect texture compression method
+
 			float f;
 			f = updateCompression();
 			switch(f)
 			{
 				case 0:
 					me.TD(me, 1, 2.8, e = makeXonoticCheckBox(1, "r_texture_dds_load", _("Avoid lossy texture compression")));
-						e.disabled = 1; // just show the checkbox anyway, but with no ability to control it
+						e.disabled = 1;
 						e.applyButton = effectsApplyButton;
 					break;
 				case 1:
@@ -230,7 +230,7 @@ void XonoticEffectsSettingsTab_fill(entity me)
 			_("Motion blur strength - 0.4 recommended"));
 		me.TD(me, 1, 1, e = makeXonoticSliderCheckBox(0, 1, s, _("Motion blur:")));
 		if(s.value != e.savedValue)
-			e.savedValue = 0.4; // default
+			e.savedValue = 0.4;
 		me.TD(me, 1, 2, s);
 	me.TR(me);
 	me.TR(me);

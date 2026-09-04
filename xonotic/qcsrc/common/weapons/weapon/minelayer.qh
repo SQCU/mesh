@@ -1,23 +1,23 @@
 #pragma once
 
 CLASS(MineLayer, Weapon)
-/* spawnfunc */ ATTRIB(MineLayer, m_canonical_spawnfunc, string, "weapon_minelayer");
-/* ammotype  */ ATTRIB(MineLayer, ammo_type, Resource, RES_ROCKETS);
-/* impulse   */ ATTRIB(MineLayer, impulse, int, 4);
-/* flags     */ ATTRIB(MineLayer, spawnflags, int, WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_RELOADABLE | WEP_TYPE_SPLASH);
-/* rating    */ ATTRIB(MineLayer, bot_pickupbasevalue, float, 7000);
-/* color     */ ATTRIB(MineLayer, wpcolor, vector, '0.75 1 0');
-/* modelname */ ATTRIB(MineLayer, mdl, string, "minelayer");
+                ATTRIB(MineLayer, m_canonical_spawnfunc, string, "weapon_minelayer");
+                ATTRIB(MineLayer, ammo_type, Resource, RES_ROCKETS);
+                ATTRIB(MineLayer, impulse, int, 4);
+                ATTRIB(MineLayer, spawnflags, int, WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_RELOADABLE | WEP_TYPE_SPLASH);
+                ATTRIB(MineLayer, bot_pickupbasevalue, float, 7000);
+                ATTRIB(MineLayer, wpcolor, vector, '0.75 1 0');
+                ATTRIB(MineLayer, mdl, string, "minelayer");
 #ifdef GAMEQC
-/* model     */ ATTRIB(MineLayer, m_model, Model, MDL_MINELAYER_ITEM);
-/* flash mdl */ ATTRIB(MineLayer, m_muzzlemodel, Model, MDL_MINELAYER_MUZZLEFLASH);
-/* flash eff */ ATTRIB(MineLayer, m_muzzleeffect, entity, EFFECT_ROCKET_MUZZLEFLASH);
+                ATTRIB(MineLayer, m_model, Model, MDL_MINELAYER_ITEM);
+                ATTRIB(MineLayer, m_muzzlemodel, Model, MDL_MINELAYER_MUZZLEFLASH);
+                ATTRIB(MineLayer, m_muzzleeffect, entity, EFFECT_ROCKET_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(MineLayer, w_crosshair, string, "gfx/crosshairminelayer");
-/* crosshair */ ATTRIB(MineLayer, w_crosshair_size, float, 0.9);
-/* wepimg    */ ATTRIB(MineLayer, model2, string, "weaponminelayer");
-/* refname   */ ATTRIB(MineLayer, netname, string, "minelayer");
-/* wepname   */ ATTRIB(MineLayer, m_name, string, _("Mine Layer"));
+                ATTRIB(MineLayer, w_crosshair, string, "gfx/crosshairminelayer");
+                ATTRIB(MineLayer, w_crosshair_size, float, 0.9);
+                ATTRIB(MineLayer, model2, string, "weaponminelayer");
+                ATTRIB(MineLayer, netname, string, "minelayer");
+                ATTRIB(MineLayer, m_name, string, _("Mine Layer"));
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \

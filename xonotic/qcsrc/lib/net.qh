@@ -4,8 +4,6 @@
 #include "sort.qh"
 #include "yenc.qh"
 
-// netcode mismatch and not sure what caused it? developer_csqcentities 1
-
 .string netname;
 .int m_id;
 .bool(entity this, entity sender, bool isNew) m_read;
@@ -47,8 +45,6 @@ REGISTRY_CHECK(TempEntities)
 REGISTRY_DEFINE_GET(TempEntities, NULL)
 STATIC_INIT(TempEntities_renumber) { FOREACH(TempEntities, true, it.m_id = 80 + i); }
 
-
-
 #ifdef CSQC
 	#define REGISTER_NET_LINKED(id) \
 		ACCUMULATE NET_HANDLE(id, bool isnew) \
@@ -79,8 +75,6 @@ REGISTRY_CHECK(LinkedEntities)
 
 REGISTRY_DEFINE_GET(LinkedEntities, NULL)
 STATIC_INIT(LinkedEntities_renumber) { FOREACH(LinkedEntities, true, it.m_id = 1 + i); }
-
-
 
 #ifdef SVQC
 	#define REGISTER_NET_C2S(id) \
@@ -171,7 +165,7 @@ STATIC_INIT(C2S_Protocol_renumber) { FOREACH(C2S_Protocol, true, it.m_id = i); }
 
 	void Net_ClientCommand(entity sender, string command)
 	{
-		// command matches `c2s "(.+)"`
+
 		string buf = substring(command, argv_start_index(1) + 1, -2);
 		if (buf == "") return;
 		STRING_ITERATOR_SET(g_buf, buf, 0);
@@ -223,8 +217,6 @@ STATIC_INIT(C2S_Protocol_renumber) { FOREACH(C2S_Protocol, true, it.m_id = i); }
 			bool _net_valid = false; serialize_marker(to, _net_valid); \
 		MACRO_END
 #endif
-
-// serialization: new style
 
 USING(Stream, int);
 #if defined(SVQC)
@@ -288,8 +280,6 @@ MACRO_BEGIN \
     } \
 MACRO_END
 
-// serialization: old
-
 #define ReadRegistered(r) REGISTRY_GET(r, Read_byte())
 #define WriteRegistered(r, to, it) Write_byte(to, it.m_id)
 
@@ -349,8 +339,8 @@ MACRO_END
 		}
 		int ReadInt24_t()
 		{
-			int v = ReadShort() << 8; // note: this is signed
-			v += ReadByte();          // note: this is unsigned
+			int v = ReadShort() << 8;
+			v += ReadByte();
 			return v;
 		}
 		#define ReadInt48_t() vec2(ReadInt24_t(), ReadInt24_t())
@@ -375,7 +365,6 @@ MACRO_END
 		{
 			float dt = ReadByte();
 
-			// map from range...PPROXPASTTIME_MAX / 256
 			dt = (APPROXPASTTIME_MAX / 256) * (dt / (256 - dt));
 
 			return servertime - dt;
@@ -386,7 +375,7 @@ MACRO_END
 		{
 			float v;
 			WriteShort(dst, (v = floor(val >> 8)));
-			WriteByte(dst, val - (v << 8));  // 0..255
+			WriteByte(dst, val - (v << 8));
 		}
 		void WriteInt48_t(float dst, vector val)
 		{
@@ -413,29 +402,17 @@ MACRO_END
 			WriteByte(dst, val);
 		}
 
-		// this will use the value:
-		//   128
-		// accuracy near zero is APPROXPASTTIME_MAX/(256*255)
-		// accuracy at x is 1/derivative, i.e.
-		//   APPROXPASTTIME_MAX * (1 + 256 * (dt / APPROXPASTTIME_MAX))^2 / 65536
 		void WriteApproxPastTime(float dst, float t)
 		{
 			float dt = time - t;
 
-			// warning: this is approximate; do not resend when you don't have to!
-			// be careful with sendflags here!
-			// we want: 0 -> 0.05, 1 -> 0.1, ..., 255 -> 12.75
-
-			// map to range...
 			dt = 256 * (dt / ((APPROXPASTTIME_MAX / 256) + dt));
 
-			// round...
 			dt = rint(bound(0, dt, 255));
 
 			WriteByte(dst, dt);
 		}
 
-		// allow writing to also pass through to spectators (like so spectators see the same centerprints as players for example)
 		#define WRITESPECTATABLE_MSG_ONE(to, statement) MACRO_BEGIN \
 			entity prev = msg_entity; \
 			entity dst = to; \

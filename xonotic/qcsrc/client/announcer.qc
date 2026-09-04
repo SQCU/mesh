@@ -21,9 +21,6 @@ string AnnouncerOption()
 
 entity announcer_countdown;
 
-/**
- * Displays duel title; updates it if the players in-game have changed.
- */
 string prev_pl1_name;
 string prev_pl2_name;
 void Announcer_Duel()
@@ -36,12 +33,11 @@ void Announcer_Duel()
 	string pl2_name = (pl2 && pl2.team != NUM_SPECTATOR ? entcs_GetName(pl2.sv_entnum) : "???");
 
 	if(pl1_name == prev_pl1_name && pl2_name == prev_pl2_name)
-		return; // Players haven't changed, stop here
+		return;
 
 	strcpy(prev_pl1_name, pl1_name);
 	strcpy(prev_pl2_name, pl2_name);
 
-	// There are new duelers, update title
 	centerprint_SetDuelTitle(pl1_name, pl2_name);
 }
 
@@ -73,9 +69,9 @@ void Announcer_Countdown(entity this)
 	float countdown_rounded = floor(0.5 + countdown);
 
 	if (starttime != prev_starttime || roundstarttime != prev_roundstarttime || prev_inround != inround)
-		this.skin = 0; // restart centerprint countdown
+		this.skin = 0;
 
-	if(countdown <= 0) // countdown has finished, starttime is now
+	if(countdown <= 0)
 	{
 		Local_Notification(MSG_CENTER, CENTER_COUNTDOWN_BEGIN);
 		Local_Notification(MSG_MULTI, COUNTDOWN_BEGIN);
@@ -84,12 +80,12 @@ void Announcer_Countdown(entity this)
 		Announcer_ClearTitle();
 		return;
 	}
-	else // countdown is still going
+	else
 	{
 		if(inround)
 		{
-			if(!prev_inround) Announcer_ClearTitle(); // clear title if we just started the match
-			if (!this.skin) // first tic
+			if(!prev_inround) Announcer_ClearTitle();
+			if (!this.skin)
 				Local_Notification(MSG_CENTER, CENTER_COUNTDOWN_ROUNDSTART, STAT(ROUNDS_PLAYED) + 1, countdown_rounded);
 			Notification annce_num = Announcer_PickNumber(CNT_ROUNDSTART, countdown_rounded);
 			if(annce_num != NULL)
@@ -98,17 +94,15 @@ void Announcer_Countdown(entity this)
 		}
 		else
 		{
-			if (!this.skin) // first tic
+			if (!this.skin)
 				Local_Notification(MSG_CENTER, CENTER_COUNTDOWN_GAMESTART, countdown_rounded);
 			Notification annce_num = Announcer_PickNumber(CNT_GAMESTART, countdown_rounded);
-			if(!roundstarttime && annce_num != NULL) // Don't announce game start in round based modes
+			if(!roundstarttime && annce_num != NULL)
 				Local_Notification(MSG_ANNCE, annce_num);
 			this.nextthink = (starttime - (countdown - 1));
 		}
-		// Don't call centerprint countdown in the remaining tics, it will continue automatically.
-		// It's an optimization but also fixes ^COUNT shown in the last tic because of high slowmo values (15+).
-		// Hopefully it fixes ^COUNT occasionally shown in online servers, probably due to lags.
-		this.skin = 1; // recycled field
+
+		this.skin = 1;
 	}
 
 	prev_inround = inround;
@@ -116,13 +110,6 @@ void Announcer_Countdown(entity this)
 	prev_roundstarttime = roundstarttime;
 }
 
-/**
- * Checks whether the server initiated a map restart (stat_game_starttime changed)
- *
- * TODO: Use a better solution where a common shared entitiy is used that contains
- * timelimit, fraglimit and game_starttime! Requires engine changes (remove STAT_TIMELIMIT
- * and STAT_FRAGLIMIT to be auto-sent)
- */
 float previous_game_starttime;
 void Announcer_Gamestart()
 {
@@ -160,13 +147,13 @@ void Announcer_Gamestart()
 				if (gametype.m_1v1)
 					Announcer_Duel();
 				else
-					centerprint_SetTitle(strcat("^BG", MapInfo_Type_ToText(gametype))); // Show game type as title
+					centerprint_SetTitle(strcat("^BG", MapInfo_Type_ToText(gametype)));
 
-				if(time + 5.0 < startTime) // if connecting to server while restart was active don't always play prepareforbattle
+				if(time + 5.0 < startTime)
 					Local_Notification(MSG_ANNCE, ANNCE_PREPARE);
 			}
 
-			announcer_countdown.nextthink = startTime - floor(startTime - time + 0.5); //synchronize nextthink to startTime
+			announcer_countdown.nextthink = startTime - floor(startTime - time + 0.5);
 		}
 	}
 
@@ -227,7 +214,7 @@ void Announcer_Time()
 
 void Announcer()
 {
-	// announcer code sets gametype name as centerprint title
+
 	if(!gametype)
 		return;
 	Announcer_Gamestart();

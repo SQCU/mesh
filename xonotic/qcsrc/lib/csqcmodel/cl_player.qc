@@ -1,25 +1,5 @@
-/*
- * Copyright (c) 2011 Rudolf Polzer
- * Copyright (c) 2015 Micah Talkiewicz
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- */
+
+
 #include "cl_player.qh"
 
 #include "cl_model.qh"
@@ -29,8 +9,7 @@
 float autocvar_cl_movement_errorcompensation = 0;
 bool autocvar_cl_movement_intermissionrunning = false;
 
-// engine stuff
-float pmove_onground; // weird engine flag we shouldn't really use but have to for now
+float pmove_onground;
 
 vector csqcplayer_origin, csqcplayer_velocity;
 float csqcplayer_sequence;
@@ -55,22 +34,10 @@ vector CSQCPlayer_GetPredictionErrorV()
 
 void CSQCPlayer_SetPredictionError(vector o, vector v, float onground_diff)
 {
-	// error too big to compensate, we LIKELY hit a teleport or a
-	// jumppad, or it's a jump time disagreement that'll get fixed
-	// next frame
 
-	// FIXME we sometimes have disagreement in order of jump velocity. Do not act on them!
-	/*
-	// commented out as this one did not help
-	if(onground_diff)
-	{
-		printf("ONGROUND MISMATCH: %d x=%v v=%v\n", onground_diff, o, v);
-		return;
-	}
-	*/
 	if(vdist(o, >, 32) || vdist(v, >, 192))
 	{
-		//printf("TOO BIG: x=%v v=%v\n", o, v);
+
 		return;
 	}
 
@@ -92,7 +59,7 @@ void CSQCPlayer_Unpredict(entity this)
 	if (csqcplayer_status != CSQCPLAYERSTATUS_PREDICTED) LOG_FATALF("Cannot unpredict in current status (%d)", csqcplayer_status);
 	this.origin = csqcplayer_origin;
 	this.velocity = csqcplayer_velocity;
-	csqcplayer_moveframe = csqcplayer_sequence + 1; // + 1 because the recieved frame has the move already done (server side)
+	csqcplayer_moveframe = csqcplayer_sequence + 1;
 	this.flags = player_pmflags;
 }
 
@@ -129,10 +96,8 @@ void CSQCPlayer_Physics(entity this)
 {
 	if(!autocvar_cl_movement) { return; }
 
-	//_Movetype_CheckWater(this); // we apparently need to check water *before* physics so it can use this for water jump
-
 	vector oldv_angle = this.v_angle;
-	vector oldangles = this.angles; // we need to save these, as they're abused by other code
+	vector oldangles = this.angles;
 	this.v_angle = PHYS_INPUT_ANGLES(this);
 	this.angles = PHYS_WORLD_ANGLES(this);
 
@@ -164,8 +129,7 @@ void CSQCPlayer_PredictTo(entity this, float endframe, bool apply_error)
 	csqcplayer_status = CSQCPLAYERSTATUS_PREDICTED;
 
 #if 0
-	// we don't need this
-	// darkplaces makes servercommandframe == 0 in these cases anyway
+
 	if (STAT(HEALTH) <= 0)
 	{
 		csqcplayer_moveframe = clientcommandframe;
@@ -184,15 +148,7 @@ void CSQCPlayer_PredictTo(entity this, float endframe, bool apply_error)
 		do
 		{
 			if (!getinputstate(csqcplayer_moveframe)) break;
-			/*if (input_timelength > 0.0005)
-			{
-				if (input_timelength > 0.05)
-				{
-					input_timelength /= 2;
-					CSQCPlayer_Physics(this);
-				}
-				CSQCPlayer_Physics(this);
-			}*/
+
 			CSQCPlayer_Physics(this);
 			CSQCPlayer_SetMinsMaxs(this);
 			++csqcplayer_moveframe;
@@ -200,7 +156,6 @@ void CSQCPlayer_PredictTo(entity this, float endframe, bool apply_error)
 		while (csqcplayer_moveframe < endframe);
 	}
 
-	// add in anything that was applied after (for low packet rate protocols)
 	input_angles = view_angles;
 }
 
@@ -217,7 +172,7 @@ float viewheightavg;
 vector CSQCPlayer_ApplySmoothing(entity this, vector v)
 {
 	float smoothtime = bound(0, time - smooth_prevtime, 0.1);
-	smooth_prevtime = max(smooth_prevtime, drawtime); // drawtime is the previous frame's time at this point
+	smooth_prevtime = max(smooth_prevtime, drawtime);
 
 	if(this.csqcmodel_teleported || !(this.pmove_flags & PMF_ONGROUND) || autocvar_cl_stairsmoothspeed <= 0 || this.ground_networkentity)
 		stairsmoothz = v.z;
@@ -238,14 +193,13 @@ vector CSQCPlayer_ApplySmoothing(entity this, vector v)
 	return v;
 }
 
-// simplified copy of CSQCPlayer_ApplySmoothing for use on player models
 .float stairsmooth_offset;
 .float stairsmooth_prevtime;
-.float stairsmooth_drawtime; // holds the previous draw time
+.float stairsmooth_drawtime;
 vector CSQCModel_ApplyStairSmoothing(entity this, bool isonground, vector v)
 {
 	float smoothtime = bound(0, time - this.stairsmooth_prevtime, 0.1);
-	this.stairsmooth_prevtime = max(this.stairsmooth_prevtime, this.stairsmooth_drawtime); // stairsmooth_drawtime is the previous frame's time at this point
+	this.stairsmooth_prevtime = max(this.stairsmooth_prevtime, this.stairsmooth_drawtime);
 
 	if(this.csqcmodel_teleported || !isonground || autocvar_cl_stairsmoothspeed <= 0 || this.ground_networkentity)
 		this.stairsmooth_offset = v.z;
@@ -269,8 +223,7 @@ void CSQCPlayer_ApplyDeathTilt(entity this)
 {
 	if(!this.csqcmodel_isdead || !autocvar_v_deathtilt)
 		return;
-	// incompatible with cl_eventchase_death 2 because tilting is applied while the corpse is
-	// in the air and immediately turned off when it touches the ground
+
 	if (autocvar_cl_eventchase_death == 2 && this.csqcmodel_isdead)
 		return;
 	view_angles.z += min((time - this.death_time) * 8, 1) * autocvar_v_deathtiltangle;
@@ -290,7 +243,7 @@ void CSQCPlayer_ApplyIdleScaling(entity this)
 	view_angles.x += autocvar_v_idlescale * sin(time * autocvar_v_ipitch_cycle) * autocvar_v_ipitch_level;
 	view_angles.y += autocvar_v_idlescale * sin(time * autocvar_v_iyaw_cycle) * autocvar_v_iyaw_level;
 	view_angles.z += autocvar_v_idlescale * sin(time * autocvar_v_iroll_cycle) * autocvar_v_iroll_level;
-	//setproperty(VF_CL_VIEWANGLES, view_angles); // update view angles as well so we can aim
+
 }
 
 float autocvar_cl_bob = 0;
@@ -313,17 +266,15 @@ vector CSQCPlayer_ApplyBobbing(entity this, vector v)
 	if(this.csqcmodel_isdead || PHYS_INVEHICLE(this) || !(this.isplayermodel & ISPLAYER_PLAYER))
 		return v;
 
-	// bounded XY speed, used by several effects below
 	float bob, cycle;
 
-	// vertical view bobbing code
 	if(autocvar_cl_bob && autocvar_cl_bobcycle)
 	{
 		float bob_limit = autocvar_cl_bob_limit;
 
 		if(autocvar_cl_bob_limit_heightcheck)
 		{
-			// use traces to determine what range the view can bob in, and scale down the bob as needed
+
 			vector bob_height_check_dest = v;
 			bob_height_check_dest.z += autocvar_cl_bob_limit * 1.1;
 			traceline(v, bob_height_check_dest, MOVE_NOMONSTERS, NULL);
@@ -337,16 +288,13 @@ vector CSQCPlayer_ApplyBobbing(entity this, vector v)
 			bob_limit *= min(trace1fraction, trace2fraction);
 		}
 
-		// LordHavoc: figured out bobup: the time at which the sin is at 180
-		// degrees (which allows lengthening or squishing the peak or valley)
 		cycle = time / autocvar_cl_bobcycle;
 		cycle -= rint(cycle);
 		if(cycle < autocvar_cl_bobup)
 			cycle = sin(M_PI * cycle / autocvar_cl_bobup);
 		else
 			cycle = sin(M_PI + M_PI * (cycle - autocvar_cl_bobup) / (1.0 - autocvar_cl_bobup));
-		// bob is proportional to velocity in the xy plane
-		// (don't count Z, or jumping messes it up)
+
 		float xyspeed = bound(0, sqrt(this.velocity.x * this.velocity.x + this.velocity.y * this.velocity.y), autocvar_cl_bob_velocity_limit);
 		bob = xyspeed * autocvar_cl_bob;
 		bob = bound(0, bob, bob_limit);
@@ -354,20 +302,17 @@ vector CSQCPlayer_ApplyBobbing(entity this, vector v)
 		v.z += bob;
 	}
 
-	// horizontal view bobbing code
 	if(autocvar_cl_bob2 && autocvar_cl_bob2cycle)
 	{
 		cycle = time / autocvar_cl_bob2cycle;
 		cycle -= rint(cycle);
 		if(cycle < 0.5)
-			cycle = cos(M_PI * cycle / 0.5); // cos looks better here with the other view bobbing using sin
+			cycle = cos(M_PI * cycle / 0.5);
 		else
 			cycle = cos(M_PI + M_PI * (cycle - 0.5) / 0.5);
 		bob = autocvar_cl_bob2 * cycle;
 
-		// this value slowly decreases from 1 to 0 when we stop touching the ground.
-		// The cycle is later multiplied with it so the view smooths back to normal
-		if(IS_ONGROUND(this) && !(input_buttons & BIT(1))) // also block the effect while the jump button is pressed, to avoid twitches when bunny-hopping
+		if(IS_ONGROUND(this) && !(input_buttons & BIT(1)))
 			bob2_smooth = 1;
 		else
 		{
@@ -377,15 +322,13 @@ vector CSQCPlayer_ApplyBobbing(entity this, vector v)
 				bob2_smooth = 0;
 		}
 
-		// calculate the front and side of the player between the X and Y axes
 		makevectors(view_angles);
-		// now get the speed based on those angles. The bounds should match the same value as xyspeed's
+
 		float side = bound(-autocvar_cl_bob_velocity_limit, (this.velocity * v_right) * bob2_smooth, autocvar_cl_bob_velocity_limit);
 		float front = bound(-autocvar_cl_bob_velocity_limit, (this.velocity * v_forward) * bob2_smooth, autocvar_cl_bob_velocity_limit);
 		v_forward = v_forward * bob;
 		v_right = v_right * bob;
-		// we use side with forward and front with right, so the bobbing goes
-		// to the side when we walk forward and to the front when we strafe
+
 		vector bob2vel;
 		bob2vel.x = side * v_forward.x + front * v_right.x + 0 * v_up.x;
 		bob2vel.y = side * v_forward.y + front * v_right.y + 0 * v_up.y;
@@ -394,8 +337,6 @@ vector CSQCPlayer_ApplyBobbing(entity this, vector v)
 		v.y += bob2vel.y;
 	}
 
-	// fall bobbing code
-	// causes the view to swing down and back up when touching the ground
 	if(autocvar_cl_bobfall && autocvar_cl_bobfallcycle)
 	{
 		if(!IS_ONGROUND(this))
@@ -404,7 +345,7 @@ vector CSQCPlayer_ApplyBobbing(entity this, vector v)
 			if(this.velocity.z < -autocvar_cl_bobfallminspeed)
 				bobfall_swing = 1;
 			else
-				bobfall_swing = 0; // really?
+				bobfall_swing = 0;
 		}
 		else
 		{
@@ -451,12 +392,11 @@ vector CSQCPlayer_ApplyChase(entity this, vector v)
 		makevectors(view_angles);
 		forward = v_forward;
 		vector up = v_up;
-		// trace a little further so it hits a surface more consistently (to avoid 'snapping' on the edge of the range)
+
 		chase_dest.x = v.x - forward.x * autocvar_chase_back + up.x * autocvar_chase_up;
 		chase_dest.y = v.y - forward.y * autocvar_chase_back + up.y * autocvar_chase_up;
 		chase_dest.z = v.z - forward.z * autocvar_chase_back + up.z * autocvar_chase_up;
 
-		// trace from first person view location to our chosen third person view location
 		traceline(v, chase_dest, MOVE_NOMONSTERS, NULL);
 
 		vector bestvieworg = trace_endpos;
@@ -479,7 +419,7 @@ vector CSQCPlayer_ApplyChase(entity this, vector v)
 		v = bestvieworg;
 
 		view_angles.x = autocvar_chase_pitchangle;
-		//setproperty(VF_CL_VIEWANGLES, view_angles); // update view angles as well so we can aim
+
 	}
 	else
 	{
@@ -487,14 +427,14 @@ vector CSQCPlayer_ApplyChase(entity this, vector v)
 		forward = v_forward;
 		if(autocvar_chase_front && spectatee_status != -1)
 			forward = normalize(forward * -1);
-		// trace a little further so it hits a surface more consistently (to avoid 'snapping' on the edge of the range)
+
 		float cdist = -autocvar_chase_back - 8;
 		chase_dest.x = v.x + forward.x * cdist;
 		chase_dest.y = v.y + forward.y * cdist;
 		chase_dest.z = v.z + forward.z * cdist + autocvar_chase_up;
 		if (this.move_movetype == MOVETYPE_NOCLIP)
 		{
-			// as if traceline hasn't hit anything
+
 			trace_endpos = chase_dest;
 			trace_plane_normal = '0 0 0';
 		}
@@ -508,9 +448,9 @@ vector CSQCPlayer_ApplyChase(entity this, vector v)
 
 		if(autocvar_chase_front && spectatee_status != -1)
 		{
-			// now flip the view so the player is looking at themselves
+
 			vector newang = vectoangles(forward);
-			view_angles.x = view_angles.x * -1; // inverse up-down looking direction
+			view_angles.x = view_angles.x * -1;
 			view_angles.y = newang.y;
 		}
 	}
@@ -531,17 +471,17 @@ void CSQCPlayer_CalcRefdef(entity this)
 		int refdefflags = 0;
 		if (this.csqcmodel_teleported) refdefflags |= REFDEFFLAG_TELEPORTED;
 		if (input_buttons & BIT(1)) refdefflags |= REFDEFFLAG_JUMPING;
-		// note: these two only work in WIP2, but are harmless in WIP1
+
 		if (PHYS_HEALTH(NULL) <= 0 && PHYS_HEALTH(NULL) != -666 && PHYS_HEALTH(NULL) != -2342) refdefflags |= REFDEFFLAG_DEAD;
 		if (intermission) refdefflags |= REFDEFFLAG_INTERMISSION;
-		V_CalcRefdef(this, refdefflags); // TODO? uses .health stat in the engine when this isn't called here, may be broken!
+		V_CalcRefdef(this, refdefflags);
 		return;
 	}
 
 	vector vieworg = this.origin;
 	if(intermission)
 	{
-		// just update view offset, don't need to do anything else
+
 		vieworg.z += this.view_ofs.z;
 	}
 	else
@@ -551,12 +491,11 @@ void CSQCPlayer_CalcRefdef(entity this)
 			vieworg = CSQCPlayer_ApplyChase(this, vieworg);
 		else
 		{
-			// angles
+
 			CSQCPlayer_ApplyDeathTilt(this);
 			view_angles = view_angles + view_punchangle;
 			view_angles.z += CSQCPlayer_CalcRoll(this);
-			// TODO? we don't have damage time accessible here
-			// origin
+
 			vieworg = vieworg + view_punchvector;
 			vieworg = CSQCPlayer_ApplyBobbing(this, vieworg);
 		}
@@ -566,10 +505,9 @@ void CSQCPlayer_CalcRefdef(entity this)
 	setproperty(VF_ANGLES, view_angles);
 }
 
-/** Called once per CSQC_UpdateView() */
 void CSQCPlayer_SetCamera()
 {
-	vector v0 = ((intermission && !autocvar_cl_movement_intermissionrunning) ? '0 0 0' : pmove_vel); // TRICK: pmove_vel is set by the engine when we get here. No need to network velocity
+	vector v0 = ((intermission && !autocvar_cl_movement_intermissionrunning) ? '0 0 0' : pmove_vel);
 	float vh = PHYS_VIEWHEIGHT(NULL);
 	vector pl_viewofs = PHYS_PL_VIEWOFS(NULL);
 	vector pl_viewofs_crouch = PHYS_PL_CROUCH_VIEWOFS(NULL);
@@ -581,19 +519,15 @@ void CSQCPlayer_SetCamera()
 			InterpolateOrigin_Do(e);
 			e.view_ofs = '0 0 1' * vh;
 
-			// get crouch state from the server
 			if (vh == pl_viewofs.z) e.flags &= ~FL_DUCKED;
 			else if (vh == pl_viewofs_crouch.z) e.flags |= FL_DUCKED;
 
-			// get onground state from the server
 			e.flags = BITSET(e.flags, FL_ONGROUND, pmove_onground);
 
 			CSQCPlayer_SetMinsMaxs(e);
 
-			// override it back just in case
 			e.view_ofs = '0 0 1' * vh;
 
-			// set velocity
 			e.velocity = v0;
 		}
 		else
@@ -611,11 +545,9 @@ void CSQCPlayer_SetCamera()
 				e.origin = o;
 				e.velocity = v0;
 
-				// get crouch state from the server
 				if (vh == pl_viewofs.z) e.flags &= ~FL_DUCKED;
 				else if(vh == pl_viewofs_crouch.z) e.flags |= FL_DUCKED;
 
-				// get onground state from the server
 				e.flags = BITSET(e.flags, FL_ONGROUND, pmove_onground);
 
 				CSQCPlayer_SavePrediction(e);
@@ -623,7 +555,7 @@ void CSQCPlayer_SetCamera()
 			CSQCPlayer_PredictTo(e, clientcommandframe + 1, true);
 
 #ifdef CSQCMODEL_SERVERSIDE_CROUCH
-			// get crouch state from the server (LAG)
+
 			if (vh == pl_viewofs.z) e.flags &= ~FL_DUCKED;
 			else if (vh == pl_viewofs_crouch.z) e.flags |= FL_DUCKED;
 #endif
@@ -633,8 +565,7 @@ void CSQCPlayer_SetCamera()
 				e.angles.y = input_angles.y;
 		}
 
-		// relink
-		e.stairsmooth_drawtime = drawtime; // since drawtime is a frame old at this point, copy it now to avoid using a drawtime 2 frames old!
+		e.stairsmooth_drawtime = drawtime;
 		e.origin = CSQCModel_ApplyStairSmoothing(e, (e.pmove_flags & PMF_ONGROUND), e.origin);
 		setorigin(e, e.origin);
 	}
@@ -651,12 +582,7 @@ void CSQCPlayer_SetCamera()
 	}
 	else
 	{
-		// FIXME by CSQC spec we have to do this:
-		// but it breaks chase cam
-		/*
-		setproperty(VF_ORIGIN, pmove_org + '0 0 1' * vh);
-		setproperty(VF_ANGLES, view_angles);
-		*/
+
 	}
 	CSQCPLAYER_HOOK_POSTCAMERASETUP();
 }

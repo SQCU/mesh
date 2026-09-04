@@ -109,7 +109,7 @@ replay, and temporal-difference returns train feed-forward estimators without an
 - The policy is a **statewise map** `state → per-player action distribution`, trained to
   act well given the role-selected value and advantage.
 
-This is why the learned operator is **shallow-and-wide (a big Gram + SwiGLU), not a deep
+This is why the learned operator is **shallow-and-wide (a large Gram-matrix fusion + SwiGLU), not a deep
 multi-head-attention-resnet and not an RNN.** Depth/recurrence would only be forced if
 we made the network *learn* the `H`-hop succession; we compute it. What remains is a
 statewise pricing readout — one big all-to-all matmul over the player rows, the compute
@@ -130,7 +130,7 @@ flowchart TD
   C -- "closed-form nim / Sprague-Grundy" --> PW["PW, SUCC, N_i  (who is winning; succession)"]
   PW -- "asymmetric sparse role rewards" --> VAL["linear W and L value probes"]
 
-  F -- "big all-to-all Gram over ALL player rows (O(n^2), mesh-saturating)" --> G["coupled rows R'"]
+  F -- "large all-to-all Gram matrix over ALL player rows (O(n^2), mesh-saturating)" --> G["coupled rows R'"]
   PW -. "closed-form succession as a feature, not learned" .-> G
   G -- "SwiGLU + value heads" --> POL["statewise policy: per-player instrument weights"]
 
@@ -148,7 +148,7 @@ Text form of the same graph:
         │                                              sparse rewards  ▼
         │                                                   W head / L head
         │                                              selected advantage
-        └──featurize──► player rows ──BIG GRAM (all-to-all, O(n^2))──► R' ─SwiGLU/value─► statewise policy
+        └──featurize──► player rows ──GRAM MATRIX (all-to-all, O(n^2))──► R' ─SwiGLU/value─► statewise policy
                                             ▲ (SUCC as feature)                 │
                                             └── closed-form, not learned        ▼
                                               per-player instrument weights ──stock navmesh + point&shoot──► actions
@@ -163,7 +163,7 @@ Text form of the same graph:
 - No `reward = score`, no whole-game RLVR — both degenerate (§2).
 - No recurrent learned state machine — feed-forward values and policy (§4).
 - No deep attention/resnet in the learned operator — the depth is closed-form in A; the
-  learned part is one big Gram + SwiGLU (§4, and the expressivity note in the strategy
+  learned part is one large Gram-matrix fusion + SwiGLU (§4, and the expressivity note in the strategy
   spec).
 - No fake re-simulation of the game to train against — B is already the simulation;
   train on it or prove the price. Synthetic re-simulation is not Game-2 evidence.

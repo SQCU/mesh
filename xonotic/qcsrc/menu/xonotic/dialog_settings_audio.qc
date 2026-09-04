@@ -90,7 +90,7 @@ void XonoticAudioSettingsTab_fill(entity me)
 	me.TR(me);
 		me.TDempty(me, 0.2);
 		s = makeXonoticDecibelsSlider_T(-40, 0, 0.4, "snd_channel1volume", "-");
-		makeMulti(s, "snd_channel5volume"); // @!#%'n Tuba
+		makeMulti(s, "snd_channel5volume");
 		me.TD(me, 1, 0.8, e = makeXonoticTextLabel(0, _("Weapons:")));
 		me.TD(me, 1, 2, s);
 		setDependentStringNotEqual(e, "mastervolume", "0");

@@ -1,7 +1,4 @@
 
-// Shadow Volume BSP code written by Forest "LordHavoc" Hale on 2003-11-06 and placed into public domain.
-// Modified by LordHavoc (to make it work and other nice things like that) on 2007-01-24 and 2007-01-25
-// Optimized by LordHavoc on 2009-12-24 and 2009-12-25
 
 #include <math.h>
 #include <string.h>
@@ -16,7 +13,7 @@
 typedef struct svbsp_polygon_s
 {
 	float points[MAX_SVBSP_POLYGONPOINTS][3];
-	//unsigned char splitflags[MAX_SVBSP_POLYGONPOINTS];
+
 	int facesplitflag;
 	int numpoints;
 }
@@ -25,12 +22,12 @@ svbsp_polygon_t;
 static void SVBSP_PlaneFromPoints(float *plane4f, const float *p1, const float *p2, const float *p3)
 {
 	float ilength;
-	// calculate unnormalized plane
+
 	plane4f[0] = (p1[1] - p2[1]) * (p3[2] - p2[2]) - (p1[2] - p2[2]) * (p3[1] - p2[1]);
 	plane4f[1] = (p1[2] - p2[2]) * (p3[0] - p2[0]) - (p1[0] - p2[0]) * (p3[2] - p2[2]);
 	plane4f[2] = (p1[0] - p2[0]) * (p3[1] - p2[1]) - (p1[1] - p2[1]) * (p3[0] - p2[0]);
 	plane4f[3] = SVBSP_DotProduct(plane4f, p1);
-	// normalize the plane normal and adjust distance accordingly
+
 	ilength = (float)sqrt(SVBSP_DotProduct(plane4f, plane4f));
 	if (ilength)
 		ilength = 1.0f / ilength;
@@ -69,7 +66,7 @@ static void SVBSP_DividePolygon(const svbsp_polygon_t *poly, const float *plane,
 		}
 		if ((sides[i] | sides[j]) == 3)
 		{
-			// don't allow splits if remaining points would overflow point buffer
+
 			if (frontcount + (count - i) > MAX_SVBSP_POLYGONPOINTS - 1)
 				continue;
 			if (backcount + (count - i) > MAX_SVBSP_POLYGONPOINTS - 1)
@@ -115,16 +112,6 @@ void SVBSP_Init(svbsp_t *b, const float *origin, int maxnodes, svbsp_node_t *nod
 	b->stat_queries_fragments_accepted = 0;
 	b->stat_queries_fragments_rejected = 0;
 
-	// the bsp tree must be initialized to have two perpendicular splits axes
-	// through origin, otherwise the polygon insertions would affect the
-	// opposite side of the tree, which would be disasterous.
-	//
-	// so this code has to make 3 nodes and 4 leafs, and since the leafs are
-	// represented by empty/solid state numbers in this system rather than
-	// actual structs, we only need to make the 3 nodes.
-
-	// root node
-	// this one splits the world into +X and -X sides
 	b->nodes[0].plane[0] = 1;
 	b->nodes[0].plane[1] = 0;
 	b->nodes[0].plane[2] = 0;
@@ -133,8 +120,6 @@ void SVBSP_Init(svbsp_t *b, const float *origin, int maxnodes, svbsp_node_t *nod
 	b->nodes[0].children[0] = 1;
 	b->nodes[0].children[1] = 2;
 
-	// +X side node
-	// this one splits the +X half of the world into +Y and -Y
 	b->nodes[1].plane[0] = 0;
 	b->nodes[1].plane[1] = 1;
 	b->nodes[1].plane[2] = 0;
@@ -143,8 +128,6 @@ void SVBSP_Init(svbsp_t *b, const float *origin, int maxnodes, svbsp_node_t *nod
 	b->nodes[1].children[0] = -1;
 	b->nodes[1].children[1] = -1;
 
-	// -X side node
-	// this one splits the -X half of the world into +Y and -Y
 	b->nodes[2].plane[0] = 0;
 	b->nodes[2].plane[1] = 1;
 	b->nodes[2].plane[2] = 0;
@@ -156,41 +139,23 @@ void SVBSP_Init(svbsp_t *b, const float *origin, int maxnodes, svbsp_node_t *nod
 
 static void SVBSP_InsertOccluderPolygonNodes(svbsp_t *b, int *parentnodenumpointer, int parentnodenum, const svbsp_polygon_t *poly, void (*fragmentcallback)(void *fragmentcallback_pointer1, int fragmentcallback_number1, svbsp_t *b, int numpoints, const float *points), void *fragmentcallback_pointer1, int fragmentcallback_number1)
 {
-	// now we need to create up to numpoints + 1 new nodes, forming a BSP tree
-	// describing the occluder polygon's shadow volume
+
 	int i, j, p;
 	svbsp_node_t *node;
 
-	// points and lines are valid testers but not occluders
 	if (poly->numpoints < 3)
 		return;
 
-	// if there aren't enough nodes remaining, skip it
 	if (b->numnodes + poly->numpoints + 1 >= b->maxnodes)
 	{
 		b->ranoutofnodes = 1;
 		return;
 	}
 
-	// add one node per side, then the actual occluding face node
-
-	// thread safety notes:
-	// DO NOT multithread insertion, it could be made 'safe' but the results
-	// would be inconsistent.
-	//
-	// it is completely safe to multithread queries in all cases.
-	//
-	// if an insertion is occurring the query will give intermediate results,
-	// being blocked by some volumes but not others, which is perfectly okay
-	// for visibility culling intended only to reduce rendering work
-
-	// note down the first available nodenum for the *parentnodenumpointer
-	// line which is done last to allow multithreaded queries during an
-	// insertion
 	for (i = 0, p = poly->numpoints - 1;i < poly->numpoints;p = i, i++)
 	{
 #if 1
-		// see if a parent plane describes this side
+
 		for (j = parentnodenum;j >= 0;j = b->nodes[j].parent)
 		{
 			float *parentnodeplane = b->nodes[j].plane;
@@ -200,26 +165,17 @@ static void SVBSP_InsertOccluderPolygonNodes(svbsp_t *b, int *parentnodenumpoint
 				break;
 		}
 		if (j >= 0)
-			continue; // already have a matching parent plane
+			continue;
 #endif
 #if 0
-		// skip any sides that were classified as belonging to a parent plane
+
 		if (poly->splitflags[i])
 			continue;
 #endif
-		// create a side plane
-		// anything infront of this is not inside the shadow volume
+
 		node = b->nodes + b->numnodes++;
 		SVBSP_PlaneFromPoints(node->plane, b->origin, poly->points[p], poly->points[i]);
-		// we need to flip the plane if it puts any part of the polygon on the
-		// wrong side
-		// (in this way this code treats all polygons as float sided)
-		//
-		// because speed is important this stops as soon as it finds proof
-		// that the orientation is right or wrong
-		// (we know that the plane is on one edge of the polygon, so there is
-		// never a case where points lie on both sides, so the first hint is
-		// sufficient)
+
 		for (j = 0;j < poly->numpoints;j++)
 		{
 			float d = SVBSP_DotProduct(poly->points[j], node->plane) - node->plane[3];
@@ -235,25 +191,23 @@ static void SVBSP_InsertOccluderPolygonNodes(svbsp_t *b, int *parentnodenumpoint
 			}
 		}
 		node->parent = parentnodenum;
-		node->children[0] = -1; // empty
-		node->children[1] = -1; // empty
-		// link this child into the tree
+		node->children[0] = -1;
+		node->children[1] = -1;
+
 		*parentnodenumpointer = parentnodenum = (int)(node - b->nodes);
-		// now point to the child pointer for the next node to update later
+
 		parentnodenumpointer = &node->children[1];
 	}
 
 #if 1
-	// skip the face plane if it lies on a parent plane
+
 	if (!poly->facesplitflag)
 #endif
 	{
-		// add the face-plane node
-		// infront is empty, behind is shadow
+
 		node = b->nodes + b->numnodes++;
 		SVBSP_PlaneFromPoints(node->plane, poly->points[0], poly->points[1], poly->points[2]);
-		// this is a flip check similar to the one above
-		// this one checks if the plane faces the origin, if not, flip it
+
 		if (SVBSP_DotProduct(b->origin, node->plane) - node->plane[3] < -SVBSP_CLIP_EPSILON)
 		{
 			node->plane[0] *= -1;
@@ -262,10 +216,9 @@ static void SVBSP_InsertOccluderPolygonNodes(svbsp_t *b, int *parentnodenumpoint
 			node->plane[3] *= -1;
 		}
 		node->parent = parentnodenum;
-		node->children[0] = -1; // empty
-		node->children[1] = -2; // shadow
-		// link this child into the tree
-		// (with the addition of this node, queries will now be culled by it)
+		node->children[0] = -1;
+		node->children[1] = -2;
+
 		*parentnodenumpointer = (int)(node - b->nodes);
 	}
 }
@@ -285,17 +238,17 @@ static int SVBSP_AddPolygonNode(svbsp_t *b, int *parentnodenumpointer, int paren
 	float dists[MAX_SVBSP_POLYGONPOINTS];
 	if (poly->numpoints < 1)
 		return 0;
-	// recurse through plane nodes
+
 	while (*parentnodenumpointer >= 0)
 	{
-		// get node info
+
 		parentnodenum = *parentnodenumpointer;
 		node = b->nodes + parentnodenum;
 		plane[0] = node->plane[0];
 		plane[1] = node->plane[1];
 		plane[2] = node->plane[2];
 		plane[3] = node->plane[3];
-		// calculate point dists for clipping
+
 		bothsides = 0;
 		for (i = 0;i < poly->numpoints;i++)
 		{
@@ -309,33 +262,28 @@ static int SVBSP_AddPolygonNode(svbsp_t *b, int *parentnodenumpointer, int paren
 			dists[i] = d;
 			sides[i] = s;
 		}
-		// see which side the polygon is on
+
 		switch(bothsides)
 		{
 		default:
 		case 0:
-			// no need to split, this polygon is on the plane
-			// this case only occurs for polygons on the face plane, usually
-			// the same polygon (inserted twice - once as occluder, once as
-			// tester)
-			// if this is an occluder, it is redundant
+
 			if (insertoccluder)
-				return 1; // occluded
-			// if this is a tester, test the front side, because it is
-			// probably the same polygon that created this node...
+				return 1;
+
 			facesplitflag = 1;
 			parentnodenumpointer = &node->children[0];
 			continue;
 		case 1:
-			// no need to split, just go to one side
+
 			parentnodenumpointer = &node->children[0];
 			continue;
 		case 2:
-			// no need to split, just go to one side
+
 			parentnodenumpointer = &node->children[1];
 			continue;
 		case 3:
-			// lies on both sides of the plane, we need to split it
+
 #if 1
 			SVBSP_DividePolygon(poly, plane, &front, &back, dists, sides);
 #else
@@ -347,17 +295,16 @@ static int SVBSP_AddPolygonNode(svbsp_t *b, int *parentnodenumpointer, int paren
 #endif
 			front.facesplitflag = facesplitflag;
 			back.facesplitflag = facesplitflag;
-			// recurse the sides and return the resulting occlusion flags
+
 			i  = SVBSP_AddPolygonNode(b, &node->children[0], *parentnodenumpointer, &front, insertoccluder, fragmentcallback, fragmentcallback_pointer1, fragmentcallback_number1);
 			i |= SVBSP_AddPolygonNode(b, &node->children[1], *parentnodenumpointer, &back , insertoccluder, fragmentcallback, fragmentcallback_pointer1, fragmentcallback_number1);
 			return i;
 		}
 	}
-	// leaf node
+
 	if (*parentnodenumpointer == -1)
 	{
-		// empty leaf node; and some geometry survived
-		// if inserting an occluder, replace this empty leaf with a shadow volume
+
 #if 0
 		for (i = 0;i < poly->numpoints-2;i++)
 		{
@@ -381,7 +328,7 @@ static int SVBSP_AddPolygonNode(svbsp_t *b, int *parentnodenumpointer, int paren
 	}
 	else
 	{
-		// otherwise it's a solid leaf which destroys all polygons inside it
+
 		if (insertoccluder)
 			b->stat_occluders_fragments_rejected++;
 		else
@@ -405,11 +352,10 @@ int SVBSP_AddPolygon(svbsp_t *b, int numpoints, const float *points, int inserto
 	int i;
 	int nodenum;
 	svbsp_polygon_t poly;
-	// don't even consider an empty polygon
-	// note we still allow points and lines to be tested...
+
 	if (numpoints < 1)
 		return 0;
-	// if the polygon has too many points, we would crash
+
 	if (numpoints > MAX_SVBSP_POLYGONPOINTS)
 		return 0;
 	poly.numpoints = numpoints;
@@ -418,11 +364,11 @@ int SVBSP_AddPolygon(svbsp_t *b, int numpoints, const float *points, int inserto
 		poly.points[i][0] = points[i*3+0];
 		poly.points[i][1] = points[i*3+1];
 		poly.points[i][2] = points[i*3+2];
-		//poly.splitflags[i] = 0; // this edge is a valid BSP splitter - clipped edges are not (because they lie on a bsp plane)
-		poly.facesplitflag = 0; // this face is a valid BSP Splitter - if it lies on a bsp plane it is not
+
+		poly.facesplitflag = 0;
 	}
 #if 0
-//if (insertoccluder)
+
 	for (i = 0;i < poly.numpoints-2;i++)
 	{
 		Debug_PolygonBegin(NULL, DRAWFLAG_ADDITIVE);
@@ -450,4 +396,3 @@ int SVBSP_AddPolygon(svbsp_t *b, int numpoints, const float *points, int inserto
 	}
 	return i;
 }
-

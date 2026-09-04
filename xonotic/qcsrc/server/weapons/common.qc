@@ -48,40 +48,38 @@ float W_CheckProjectileDamage(entity inflictor, entity projowner, int deathtype,
 	float is_from_owner = (inflictor == projowner);
 	float is_from_exception = (exception != -1);
 
-	//dprint(strcat("W_CheckProjectileDamage: from_contents ", ftos(is_from_contents), " : from_owner ", ftos(is_from_owner), " : exception ", strcat(ftos(is_from_exception), " (", ftos(exception), "). \n")));
-
 	if(autocvar_g_projectiles_damage <= -2)
 	{
-		return false; // no damage to projectiles at all, not even with the exceptions
+		return false;
 	}
 	else if(autocvar_g_projectiles_damage == -1)
 	{
 		if(is_from_exception)
-			return (exception); // if exception is detected, allow it to override
+			return (exception);
 		else
-			return false; // otherwise, no other damage is allowed
+			return false;
 	}
 	else if(autocvar_g_projectiles_damage == 0)
 	{
 		if(is_from_exception)
-			return (exception); // if exception is detected, allow it to override
+			return (exception);
 		else if(!is_from_contents)
-			return false; // otherwise, only allow damage from contents
+			return false;
 	}
 	else if(autocvar_g_projectiles_damage == 1)
 	{
 		if(is_from_exception)
-			return (exception); // if exception is detected, allow it to override
+			return (exception);
 		else if(!(is_from_contents || is_from_owner))
-			return false; // otherwise, only allow self damage and damage from contents
+			return false;
 	}
-	else if(autocvar_g_projectiles_damage == 2) // allow any damage, but override for exceptions
+	else if(autocvar_g_projectiles_damage == 2)
 	{
 		if(is_from_exception)
-			return (exception); // if exception is detected, allow it to override
+			return (exception);
 	}
 
-	return true; // if none of these return, then allow damage anyway.
+	return true;
 }
 
 void W_PrepareExplosionByDamage(entity this, entity attacker, void(entity this) explode)
@@ -97,31 +95,25 @@ void W_PrepareExplosionByDamage(entity this, entity attacker, void(entity this) 
 		this.realowner = attacker;
 	}
 
-	// do not explode NOW but in the NEXT FRAME!
-	// because recursive calls to RadiusDamage are not allowed
 	this.nextthink = time;
 	setthink(this, explode);
 }
 
-void adaptor_think2use_hittype_splash(entity this) // for timed projectile detonation
+void adaptor_think2use_hittype_splash(entity this)
 {
-	if(!(IS_ONGROUND(this))) // if onground, we ARE touching something, but HITTYPE_SPLASH is to be networked if the damage causing projectile is not touching ANYTHING
+	if(!(IS_ONGROUND(this)))
 		this.projectiledeathtype |= HITTYPE_SPLASH;
 	adaptor_think2use(this);
 }
 
 bool SUB_NoImpactCheck(entity this, entity toucher)
 {
-	// zero hitcontents = this is not the real impact, but either the
-	// mirror-impact of something hitting the projectile instead of the
-	// projectile hitting the something, or a touchareagrid one. Neither of
-	// these stop the projectile from moving, so...
-	// NOTE: this notice is disabled to prevent spam as projectiles can hit content-less objects (other projectiles!)
+
 #if 0
 	if(trace_dphitcontents == 0)
 	{
 		LOG_TRACEF("A hit from a projectile happened with no hit contents! DEBUG THIS, this should never happen for projectiles! Projectile will self-destruct. (edict: %i, classname: %s, origin: %v)", this, this.classname, this.origin);
-		checkclient(this); // TODO: .health is checked in the engine with this, possibly replace with a QC function?
+		checkclient(this);
 	}
 #endif
     if (trace_dphitq3surfaceflags & Q3SURFACEFLAG_NOIMPACT)
@@ -134,8 +126,7 @@ bool SUB_NoImpactCheck(entity this, entity toucher)
         traceline(this.origin - tic, this.origin + tic, MOVE_NORMAL, this);
         if (trace_fraction >= 1)
         {
-            // NOTE: this notice can occur when projectiles hit non-world objects, better to not spam the console!
-            //LOG_TRACE("Odd... did not hit...?");
+
         }
         else if (trace_dphitq3surfaceflags & Q3SURFACEFLAG_NOIMPACT)
         {
@@ -149,13 +140,13 @@ bool SUB_NoImpactCheck(entity this, entity toucher)
 
 bool WarpZone_Projectile_Touch_ImpactFilter_Callback(entity this, entity toucher)
 {
-	// owner check
+
 	if(toucher && toucher == this.owner)
 		return true;
 	if(SUB_NoImpactCheck(this, toucher))
 	{
 		if(this.classname == "nade")
-			return false; // no checks here
+			return false;
 		else if(this.classname == "grapplinghook")
 			RemoveHook(this);
 		else

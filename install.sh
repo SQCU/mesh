@@ -19,17 +19,32 @@ keys(){ grep -cve '^[[:space:]]*#' -e '^[[:space:]]*$' "$1"; }
 echo "provisioning $ADMIN_USER   ($REPO)"
 
 sec "1. Layout"
-mkdir -p "$MESH_ROOT"/{bin,jobs,log,templates} /usr/local/bin
+mkdir -p "$MESH_ROOT"/{bin,etc,jobs,log,templates,viz} /usr/local/bin
 install -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
+try "UV runtime realized" "$MESH_ROOT/bin/mesh-runtime-install.sh" "$MESH_ROOT" "$REPO"
+install -m 755 -o root -g wheel "$REPO"/bin/mesh-observe.py "$MESH_ROOT/bin/mesh-observe.py"
+install -m 755 -o root -g wheel "$REPO"/user/mesh-telemetry.py "$MESH_ROOT/bin/mesh-telemetry.py"
+install -m 644 -o root -g wheel "$REPO"/etc/mesh-capacity.json "$MESH_ROOT/etc/mesh-capacity.json"
+install -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$MESH_ROOT/etc/mesh-nodes.json"
+install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist /Library/LaunchDaemons/io.mesh.telemetry.plist
+install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"
+install -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py"
+install -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.html"
+try "mesh-stat built" make -C "$REPO/rdma" mesh-stat
+try "mesh-stat installed" install -m 755 -o root -g wheel "$REPO/rdma/mesh-stat" "$MESH_ROOT/bin/mesh-stat"
+try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
+try "memory bandwidth sampler installed" install -m 755 -o root -g wheel "$REPO/user/mesh-bandwidth" "$MESH_ROOT/bin/mesh-bandwidth"
 install -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babeld"
 install -m 644 -o root -g wheel "$REPO"/templates/* "$MESH_ROOT/templates/" 2>/dev/null
 ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
 ln -sf "$MESH_ROOT/bin/mesh-run.sh"    /usr/local/bin/mesh-run
-ok "$MESH_ROOT; mesh-status and mesh-peers on PATH"
+ln -sf "$MESH_ROOT/bin/mesh-observe.py" /usr/local/bin/mesh-observe
+ln -sf "$MESH_ROOT/bin/mesh-python" /usr/local/bin/mesh-python
+ok "$MESH_ROOT; mesh-status, mesh-peers and mesh-observe on PATH"
 printf 'sleep 0\ndisplaysleep 0\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
 cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
-ok "policy: fleet default (run ./hmi-epilogue.sh after this for a machine someone uses)"
+ok "policy: uniform fleet default"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MESH_ROOT/revision"
 ok "converged from branch $(awk '{print $1}' "$MESH_ROOT/revision") at $(awk '{print $2}' "$MESH_ROOT/revision")"
 
@@ -133,7 +148,9 @@ mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
 install -m 755 -o root -g wheel "$REPO"/user/mesh-nodeinfod.py "$MESH_ROOT/bin/mesh-nodeinfod.py"
-MESH_PY=$(command -v python3 || echo /usr/bin/python3)
+MESH_PY=$MESH_ROOT/bin/mesh-python
+sed -e "s|__MESH_USER__|$ADMIN_USER|g" -e "s|__MESH_HOME__|$H|g" "$REPO/etc/io.mesh.observer.plist" > /Library/LaunchDaemons/io.mesh.observer.plist
+chmod 644 /Library/LaunchDaemons/io.mesh.observer.plist
 cat > /Library/LaunchDaemons/io.mesh.nodeinfo.plist <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -155,7 +172,11 @@ mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
-for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
+ADMIN_UID=$(id -u "$ADMIN_USER")
+for L in io.mesh.telemetry io.mesh.observer; do
+  launchctl bootout "gui/$ADMIN_UID/$L" >/dev/null 2>&1
+done
+for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
   launchctl bootout system/$L >/dev/null 2>&1
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     launchctl print system/$L >/dev/null 2>&1 || break
@@ -168,6 +189,14 @@ for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh
     sleep 2
   done
   launchctl print system/$L >/dev/null 2>&1 && ok "$L" || bad "$L NOT LOADED"
+done
+for spec in io.mesh.telemetry:8788:/v1/latest io.mesh.observer:8787:/latest.json; do
+  label=${spec%%:*}; rest=${spec#*:}; port=${rest%%:*}; path=${rest#*:}
+  if ! curl -fsS --max-time 3 "http://127.0.0.1:$port$path" >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$ADMIN_UID" "$H/Library/LaunchAgents/$label.plist" >/dev/null 2>&1
+    curl -fsS --max-time 3 "http://127.0.0.1:$port$path" >/dev/null 2>&1 \
+      && ok "$label userspace provider restored on :$port" || bad "$label has no answering provider on :$port"
+  fi
 done
 
 sec "9. Status"

@@ -20,7 +20,7 @@ METHOD(PhaserTurretAttack, wr_think, void(entity thiswep, entity actor, .entity 
             weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, WEP_CVAR_PRI(electro, animtime), w_ready);
         }
         entity beam = new(PhaserTurret_beam);
-        beam.ticrate = 0.1; //autocvar_sys_ticrate;
+        beam.ticrate = 0.1;
         setmodel(beam, MDL_TUR_PHASER_BEAM);
         beam.effects = EF_LOWPRECISION;
         beam.solid = SOLID_NOT;
@@ -40,7 +40,7 @@ METHOD(PhaserTurretAttack, wr_think, void(entity thiswep, entity actor, .entity 
         actor.fireflag = 1;
 
         beam.attack_finished_single[0] = actor.attack_finished_single[0];
-        actor.attack_finished_single[0] = time; // + autocvar_sys_ticrate;
+        actor.attack_finished_single[0] = time;
 
         setattachment(beam, actor.tur_head, "tag_fire");
 

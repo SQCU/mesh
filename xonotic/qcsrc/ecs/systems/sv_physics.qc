@@ -15,7 +15,7 @@ bool sys_phys_override(entity this, float dt)
 {
 	int buttons = PHYS_INPUT_BUTTON_MASK(this);
 	float idlesince = CS(this).parm_idlesince;
-	CS(this).parm_idlesince = time; // in the case that physics are overridden
+	CS(this).parm_idlesince = time;
 	if (PM_check_specialcommand(this, buttons)) { return true; }
 	if (this.PlayerPhysplug && this.PlayerPhysplug(this, dt)) { return true; }
 	CS(this).parm_idlesince = idlesince;
@@ -81,7 +81,7 @@ void sys_phys_spectator_control(entity this)
 			} else if (CS(this).impulse >= 1 && CS(this).impulse <= 9) {
 				STAT(SPECTATORSPEED, this) = 1 + 0.5 * (CS(this).impulse - 1);
 			}
-		}  // otherwise just clear
+		}
 		CS(this).impulse = 0;
 	}
 }
@@ -90,7 +90,7 @@ void sys_phys_fixspeed(entity this, float maxspeed_mod)
 {
 	float spd = max(PHYS_MAXSPEED(this), PHYS_MAXAIRSPEED(this)) * maxspeed_mod;
 	if (this.speed != spd) {
-		this.speed = spd; // TODO: send this as a stat and set the below cvars on the client?
+		this.speed = spd;
 		string temps = ftos(spd);
 		stuffcmd(this, strcat("cl_forwardspeed ", temps, "\n"));
 		stuffcmd(this, strcat("cl_backspeed ", temps, "\n"));

@@ -1,6 +1,5 @@
 #pragma once
 
-// from the engine
 vector drawfontscale;
 #define draw_fontscale drawfontscale
 
@@ -41,4 +40,3 @@ vector globalToBoxSize(vector v, vector scale);
 
 float draw_TextWidth_WithColors(string s, vector size);
 float draw_TextWidth_WithoutColors(string s, vector size);
-

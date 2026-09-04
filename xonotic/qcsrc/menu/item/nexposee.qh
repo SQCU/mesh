@@ -24,14 +24,8 @@ CLASS(Nexposee, Container)
 	METHOD(Nexposee, pullNexposee, void(entity, entity, vector));
 ENDCLASS(Nexposee)
 
-void ExposeeCloseButton_Click(entity button, entity other);  // un-exposees the current state
+void ExposeeCloseButton_Click(entity button, entity other);
 
-// animation states:
-//   0 = thumbnails seen
-//   1 = zooming in
-//   2 = zoomed in
-//   3 = zooming out
-// animation factor: 0 = minimum theSize, 1 = maximum theSize
 .vector Nexposee_initialSize;
 .vector Nexposee_initialFontScale;
 .vector Nexposee_initialOrigin;

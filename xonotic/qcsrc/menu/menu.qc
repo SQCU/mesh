@@ -40,7 +40,7 @@ float realconwidth, realconheight;
 void m_sync()
 {
 	updateCompression();
-	vidwidth_s = vidheight_s = vidpixelheight_s = 0;  // Force updateConwidths on next draw
+	vidwidth_s = vidheight_s = vidpixelheight_s = 0;
 
 	loadAllCvars(main);
 }
@@ -72,7 +72,6 @@ void m_init()
 		LOG_TRACEF("^4MQC Build information: ^1%s", WATERMARK);
 #endif
 
-	// list all game dirs (TEST)
 	if (cvar("developer") > 0)
 	{
 		for (int i = 0; ; ++i)
@@ -86,7 +85,6 @@ void m_init()
 	registercvar("_menu_cmd_closemenu_available", "0", 0);
 	cvar_set("_menu_cmd_closemenu_available", "1");
 
-	// needs to be done so early because of the constants they create
 	static_init();
 	static_init_late();
 	static_init_precache();
@@ -100,7 +98,7 @@ void m_init()
 
 	if (!restarting)
 	{
-		if (cvar("_menu_initialized"))  // always show menu after menu_restart
+		if (cvar("_menu_initialized"))
 			m_display();
 		else m_hide();
 		cvar_set("_menu_initialized", "1");
@@ -133,13 +131,13 @@ void UpdateConWidthHeight(float w, float h, float p)
 	realconheight = cvar("vid_conheight");
 	if (realconwidth / realconheight > MENU_ASPECT)
 	{
-		// widescreen
+
 		conwidth = realconheight * MENU_ASPECT;
 		conheight = realconheight;
 	}
 	else
 	{
-		// squarescreen
+
 		conwidth = realconwidth;
 		conheight = realconwidth / MENU_ASPECT;
 	}
@@ -153,7 +151,7 @@ void UpdateConWidthHeight(float w, float h, float p)
 	}
 	else
 	{
-		vidwidth_s = vidheight_s = vidpixelheight_s = 0;  // retry next frame
+		vidwidth_s = vidheight_s = vidpixelheight_s = 0;
 	}
 }
 
@@ -187,7 +185,7 @@ void m_init_delayed()
 	draw_currentSkin = strzone(draw_currentSkin);
 	for (string s; (s = fgets(fh)); )
 	{
-		// these two are handled by skinlist.qc
+
 		if (substring(s, 0, 6) == "title ") continue;
 		if (substring(s, 0, 7) == "author ") continue;
 		int n = tokenize_console(s);
@@ -223,7 +221,7 @@ void m_init_delayed()
 		strfree(m_goto_buffer);
 	}
 
-	if (Menu_Active) m_display();  // delayed menu display
+	if (Menu_Active) m_display();
 
 	cvar_set("_menu_initialized", "2");
 }
@@ -256,7 +254,7 @@ void m_keydown(float key, float ascii)
 
 	if (menuMouseMode && key >= K_MOUSE1 && key <= K_MOUSE3)
 	{
-		// detect a click outside of the game window
+
 		vector p = getmousepos();
 		if (p.x < 0 || p.x > realconwidth || p.y < 0 || p.y > realconheight)
 		{
@@ -278,9 +276,9 @@ void m_keydown(float key, float ascii)
 			main.mousePress(main, menuMousePos);
 		if (!main.keyDown(main, key, ascii, menuShiftState))
 		{
-			// disable menu on unhandled ESC
+
 			if (key == K_ESCAPE)
-				if (gamestatus & (GAME_ISSERVER | GAME_CONNECTED))  // don't back out to console only
+				if (gamestatus & (GAME_ISSERVER | GAME_CONNECTED))
 					m_hide();
 		}
 	}
@@ -395,9 +393,7 @@ void drawBackground(string img, float a, string algn, float force1)
 		}
 		else if (force1)
 		{
-			// force all secondary layers to use alpha 1. Prevents ugly issues
-			// with overlap. It's a flag because it cannot be used for the
-			// ingame background
+
 			draw_Picture_Aligned(v, scalemode, strcat(img, "_l", ftos(l + 1)), 1);
 		}
 		else
@@ -417,7 +413,7 @@ vector menuTooltipOrigin;
 vector menuTooltipSize;
 float menuTooltipAlpha;
 string menuTooltipText;
-int menuTooltipState;  // 0: static, 1: fading in, 2: fading out, 3: forced fading out
+int menuTooltipState;
 bool m_testmousetooltipbox(vector pos)
 {
 	return !(
@@ -446,27 +442,21 @@ bool m_allocatetooltipbox(vector pos)
 	avoidminus.y = (SKINAVOID_TOOLTIP_y + SKINOFFSET_CURSOR_y * SKINSIZE_CURSOR_y) / conheight + menuTooltipSize.y;
 	avoidminus.z = 0;
 
-	// bottom right
 	vector v = pos + avoidplus;
 	if (m_testtooltipbox(v)) return true;
 
-	// bottom center
 	v.x = pos.x - menuTooltipSize.x * 0.5;
 	if (m_testtooltipbox(v)) return true;
 
-	// bottom left
 	v.x = pos.x - avoidminus.x;
 	if (m_testtooltipbox(v)) return true;
 
-	// top left
 	v.y = pos.y - avoidminus.y;
 	if (m_testtooltipbox(v)) return true;
 
-	// top center
 	v.x = pos.x - menuTooltipSize.x * 0.5;
 	if (m_testtooltipbox(v)) return true;
 
-	// top right
 	v.x = pos.x + avoidplus.x;
 	if (m_testtooltipbox(v)) return true;
 
@@ -539,7 +529,7 @@ void m_tooltip(vector pos)
 	menu_tooltips = cvar("menu_tooltips");
 	if (!menu_tooltips)
 	{
-		// don't return immediately, fade out the active tooltip first
+
 		if (menuTooltipItem == NULL) return;
 		it = NULL;
 		menu_tooltips_old = menu_tooltips;
@@ -556,13 +546,13 @@ void m_tooltip(vector pos)
 
 			if (it && prev_tooltip != it.tooltip)
 			{
-				// fade out if tooltip of a certain item has changed
+
 				menuTooltipState = 3;
 				strcpy(prev_tooltip, it.tooltip);
 			}
 			else if (menuTooltipItem && !m_testmousetooltipbox(pos))
 			{
-				menuTooltipState = 3;  // fade out if mouse touches it
+				menuTooltipState = 3;
 			}
 		}
 		else
@@ -572,7 +562,6 @@ void m_tooltip(vector pos)
 	}
 	vector fontsize = '1 0 0' * (SKINFONTSIZE_TOOLTIP / conwidth) + '0 1 0' * (SKINFONTSIZE_TOOLTIP / conheight);
 
-	// float menuTooltipState; // 0: static, 1: fading in, 2: fading out, 3: forced fading out
 	if (it != menuTooltipItem)
 	{
 		switch (menuTooltipState)
@@ -580,16 +569,16 @@ void m_tooltip(vector pos)
 			case 0:
 				if (menuTooltipItem)
 				{
-					// another item: fade out first
+
 					menuTooltipState = 2;
 				}
 				else
 				{
-					// new item: fade in
+
 					menuTooltipState = 1;
 					menuTooltipItem = it;
 
-					menuTooltipOrigin.x = -1;  // unallocated
+					menuTooltipOrigin.x = -1;
 
 					strcpy(menuTooltipText, gettooltip());
 
@@ -609,27 +598,27 @@ void m_tooltip(vector pos)
 				}
 				break;
 			case 1:
-				// changing item while fading in: fade out first
+
 				menuTooltipState = 2;
 				break;
 			case 2:
-				// changing item while fading out: can't
+
 				break;
 		}
 	}
-	else if (menuTooltipState == 2)  // re-fade in?
+	else if (menuTooltipState == 2)
 	{
 		menuTooltipState = 1;
 	}
 
 	switch (menuTooltipState)
 	{
-		case 1:  // fade in
+		case 1:
 			menuTooltipAlpha = bound(0, menuTooltipAlpha + 5 * frametime, 1);
 			if (menuTooltipAlpha == 1) menuTooltipState = 0;
 			break;
-		case 2:  // fade out
-		case 3:  // forced fade out
+		case 2:
+		case 3:
 			menuTooltipAlpha = bound(0, menuTooltipAlpha - 2 * frametime, 1);
 			if (menuTooltipAlpha == 0)
 			{
@@ -648,16 +637,16 @@ void m_tooltip(vector pos)
 	{
 		if (menu_tooltips != menu_tooltips_old)
 		{
-			if (menu_tooltips != 0 && menu_tooltips_old != 0) menuTooltipItem = NULL; // reload tooltip next frame
+			if (menu_tooltips != 0 && menu_tooltips_old != 0) menuTooltipItem = NULL;
 			menu_tooltips_old = menu_tooltips;
 		}
-		else if (menuTooltipOrigin.x < 0)                                             // unallocated?
+		else if (menuTooltipOrigin.x < 0)
 		{
 			m_allocatetooltipbox(pos);
 		}
 		if (menuTooltipOrigin.x >= 0)
 		{
-			// draw the tooltip!
+
 			vector p = SKINBORDER_TOOLTIP;
 			p.x *= 1 / conwidth;
 			p.y *= 1 / conheight;
@@ -689,9 +678,7 @@ void m_draw(float width, float height)
 		{
 			if (autocvar_g_campaign)
 			{
-				// in the case player uses the disconnect command (in the console or with a key)
-				// reset g_campaign and update menu items to reflect cvar values that may have been restored after quiting the campaign
-				// see also LEAVEMATCH_CMD
+
 				cvar_set("g_campaign", "0");
 				m_sync();
 			}
@@ -716,7 +703,7 @@ void m_draw(float width, float height)
 
 	if (!menuInitialized)
 	{
-		// TODO draw an info image about this situation
+
 		m_init_delayed();
 		return;
 	}
@@ -726,11 +713,10 @@ void m_draw(float width, float height)
 		if (Menu_Active && !cvar("menu_video_played"))
         {
             localcmd("cd loop $menu_cdtrack\n");
-            // TODO: use this when we have a welcome sound
-            //localcmd("cd loop $menu_cdtrack; play sound/announcer/default/welcome.wav\n");
-            menuLogoAlpha = -0.8;  // no idea why, but when I start this at zero, it jumps instead of fading FIXME
+
+            menuLogoAlpha = -0.8;
         }
-		// ALWAYS set this cvar; if we start but menu is not active, this means we want no background music!
+
 		localcmd("set menu_video_played 1\n");
 	}
 
@@ -758,7 +744,7 @@ void m_draw(float width, float height)
 		else m_hide();
 	}
 
-	if (cvar("cl_capturevideo")) frametime = t / cvar("cl_capturevideo_fps");  // make capturevideo work smoothly
+	if (cvar("cl_capturevideo")) frametime = t / cvar("cl_capturevideo_fps");
 
 	prevMenuAlpha = menuAlpha;
 	if (Menu_Active)
@@ -837,7 +823,7 @@ void m_draw(float width, float height)
 	}
 	else if (frametime > 0)
 	{
-		vector dMouse = getmousepos() * (frametime / realFrametime);  // for capturevideo
+		vector dMouse = getmousepos() * (frametime / realFrametime);
 		if (dMouse != '0 0 0')
 		{
 			vector minpos = globalToBox('0 0 0', draw_shift, draw_scale);
@@ -930,22 +916,22 @@ void m_activate_window(entity wnd)
 	if (par.instanceOfModalController)
 	{
 		if (wnd.tabSelectingButton)
-			// tabs
+
 			TabButton_Click(wnd.tabSelectingButton, wnd);
 		else
-			// root
+
 			par.initializeDialog(par, wnd);
 	}
 	else if (par.instanceOfNexposee)
 	{
-		// nexposee (sorry for violating abstraction here)
+
 		par.selectedChild = wnd;
 		par.animationState = 1;
 		Container_setFocus(par, NULL);
 	}
 	else if (par.instanceOfContainer)
 	{
-		// other containers
+
 		if (par.focused) par.setFocus(par, wnd);
 	}
 }
@@ -970,7 +956,7 @@ void m_goto(string itemname)
 		strcpy(m_goto_buffer, itemname);
 		return;
 	}
-	if (itemname == "")  // this can be called by GameCommand
+	if (itemname == "")
 	{
 		if (gamestatus & (GAME_ISSERVER | GAME_CONNECTED))
 		{
@@ -982,7 +968,7 @@ void m_goto(string itemname)
 
 	if (itemname == "nexposee")
 	{
-		// unlike 'togglemenu 1', this closes modal and root dialogs if opened
+
 		m_activate_window(main.mainNexposee);
 		m_display();
 	}

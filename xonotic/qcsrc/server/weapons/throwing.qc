@@ -18,7 +18,6 @@
 #include <server/weapons/weaponsystem.qh>
 #include <server/world.qh>
 
-// returns amount of ammo used, or -1 for failure, or 0 for no ammo count
 float W_ThrowNewWeapon(entity own, float wpn, float doreduce, vector org, vector velo, .entity weaponentity)
 {
 	Weapon info = REGISTRY_GET(Weapons, wpn);
@@ -31,7 +30,7 @@ float W_ThrowNewWeapon(entity own, float wpn, float doreduce, vector org, vector
 	wep.owner = wep.enemy = own;
 	wep.flags |= FL_TOSSED;
 	wep.colormap = own.colormap;
-	// wep.glowmod will be set in weapon_defaultspawnfunc
+
 	navigation_dynamicgoal_init(wep, false);
 
 	W_DropEvent(wr_drop,own,wpn,wep,weaponentity);
@@ -62,7 +61,7 @@ float W_ThrowNewWeapon(entity own, float wpn, float doreduce, vector org, vector
 				wep.superweapons_finished = time + weptimeleft;
 				if(own.statuseffects)
 				{
-					// TODO: this doesn't explicitly enable the effect, use apply here?
+
 					own.statuseffects.statuseffect_time[STATUSEFFECT_Superweapons.m_id] -= weptimeleft;
 					StatusEffects_update(own);
 				}
@@ -74,9 +73,8 @@ float W_ThrowNewWeapon(entity own, float wpn, float doreduce, vector org, vector
 	if(startitem_failed)
 		return -1;
 
-	wep.pickup_anyway = true; // these are ALWAYS pickable
+	wep.pickup_anyway = true;
 
-	//wa = W_AmmoItemCode(wpn);
 	if(ammotype == RES_NONE)
 	{
 		return 0;
@@ -85,23 +83,23 @@ float W_ThrowNewWeapon(entity own, float wpn, float doreduce, vector org, vector
 	{
 		if(doreduce && g_weapon_stay == 2)
 		{
-			// if our weapon is loaded, give its load back to the player
+
 			int i = own.(weaponentity).m_weapon.m_id;
 			if(own.(weaponentity).(weapon_load[i]) > 0)
 			{
 				GiveResource(own, ammotype, own.(weaponentity).(weapon_load[i]));
-				own.(weaponentity).(weapon_load[i]) = -1; // schedule the weapon for reloading
+				own.(weaponentity).(weapon_load[i]) = -1;
 			}
 			SetResource(wep, ammotype, 0);
 		}
 		else if(doreduce)
 		{
-			// if our weapon is loaded, give its load back to the player
+
 			int i = own.(weaponentity).m_weapon.m_id;
 			if(own.(weaponentity).(weapon_load[i]) > 0)
 			{
 				GiveResource(own, ammotype, own.(weaponentity).(weapon_load[i]));
-				own.(weaponentity).(weapon_load[i]) = -1; // schedule the weapon for reloading
+				own.(weaponentity).(weapon_load[i]) = -1;
 			}
 
 			float ownderammo = GetResource(own, ammotype);
@@ -129,12 +127,11 @@ bool W_IsWeaponThrowable(entity this, int w)
 	return (REGISTRY_GET(Weapons, w)).weaponthrowable;
 }
 
-// toss current weapon
 void W_ThrowWeapon(entity this, .entity weaponentity, vector velo, vector delta, float doreduce)
 {
 	Weapon w = this.(weaponentity).m_weapon;
 	if (w == WEP_Null)
-		return; // just in case
+		return;
 	if (time < game_starttime)
 		return;
 	if(MUTATOR_CALLHOOK(ForbidThrowCurrentWeapon, this, this.(weaponentity)))
@@ -159,7 +156,6 @@ void W_ThrowWeapon(entity this, .entity weaponentity, vector velo, vector delta,
 
 void SpawnThrownWeapon(entity this, vector org, Weapon wep, .entity weaponentity)
 {
-	//entity wep = this.(weaponentity).m_weapon;
 
 	if(STAT(WEAPONS, this) & WepSet_FromWeapon(wep))
 		if(W_IsWeaponThrowable(this, wep.m_id))

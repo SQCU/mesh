@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <ecs/systems/input.qc>
 #include <ecs/systems/physics.qc>
 #ifdef CSQC

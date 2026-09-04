@@ -17,10 +17,7 @@ CLASS(RaceCTS, Gametype)
     }
     METHOD(RaceCTS, m_setTeams, void(string sa))
     {
-        // this is the skill of the map
-        // not parsed by anything yet
-        // for map databases
-        //  cvar_set("fraglimit", sa);
+
     }
     METHOD(RaceCTS, m_configuremenu, void(Gametype this, entity menu, void(entity me, string pLabel, float pMin, float pMax, float pStep, string pCvar, string tCvar, string pTooltip) returns))
     {

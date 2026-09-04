@@ -43,7 +43,7 @@ REGISTER_ITEM(HealthSmall, Health) {
     this.m_icon                 =   "health_small";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "health"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "health";
 #endif
 #ifdef SVQC
     this.m_itemid               =   IT_RESOURCE;
@@ -85,7 +85,7 @@ REGISTER_ITEM(HealthMedium, Health) {
     this.m_icon                 =   "health_medium";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "health"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "health";
 #endif
 #ifdef SVQC
     this.m_itemid               =   IT_RESOURCE;
@@ -129,7 +129,7 @@ REGISTER_ITEM(HealthBig, Health) {
     this.m_waypoint             =   _("Big health");
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "health"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "health";
 #endif
 #ifdef SVQC
     this.m_itemid               =   IT_RESOURCE;
@@ -171,7 +171,7 @@ REGISTER_ITEM(HealthMega, Health) {
     this.m_icon                 =   "health_mega";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "item_mega_health"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "item_mega_health";
 #endif
     this.m_color                =   '1 0 0';
     this.m_waypoint             =   _("Mega health");

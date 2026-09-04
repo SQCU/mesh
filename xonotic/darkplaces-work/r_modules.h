@@ -12,4 +12,3 @@ void R_Modules_DeviceLost(void);
 void R_Modules_DeviceRestored(void);
 
 #endif
-

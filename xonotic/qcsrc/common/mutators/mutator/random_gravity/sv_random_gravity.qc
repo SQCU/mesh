@@ -1,10 +1,5 @@
 #include "sv_random_gravity.qh"
 
-// Random Gravity
-
-// Mutator by Mario
-// Inspired by Player 2
-
 float autocvar_g_random_gravity_negative_chance;
 float autocvar_g_random_gravity_min;
 float autocvar_g_random_gravity_max;
@@ -16,7 +11,7 @@ REGISTER_MUTATOR(random_gravity, cvar("g_random_gravity"))
 {
 	MUTATOR_ONADD
 	{
-		cvar_settemp("sv_gravity", cvar_string("sv_gravity")); // settemp current gravity so it's restored on match end
+		cvar_settemp("sv_gravity", cvar_string("sv_gravity"));
 	}
 }
 

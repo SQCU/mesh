@@ -43,7 +43,7 @@ REGISTER_ITEM(ArmorSmall, Armor) {
     this.m_icon                 =   "armor_small";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "armor"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "armor";
 #endif
 #ifdef SVQC
     this.m_itemid               =   IT_RESOURCE;
@@ -85,7 +85,7 @@ REGISTER_ITEM(ArmorMedium, Armor) {
     this.m_icon                 =   "armor_medium";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "armor"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "armor";
 #endif
 #ifdef SVQC
     this.m_itemid               =   IT_RESOURCE;
@@ -127,7 +127,7 @@ REGISTER_ITEM(ArmorBig, Armor) {
     this.m_icon                 =   "armor_big";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "armor"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "armor";
 #endif
     this.m_color                =   '0 1 0';
     this.m_waypoint             =   _("Big armor");
@@ -171,7 +171,7 @@ REGISTER_ITEM(ArmorMega, Armor) {
     this.m_icon                 =   "armor_mega";
 #ifdef CSQC
     if(precache_pic(strcat("gfx/hud/luma/", this.m_icon)) == "")
-    	this.m_icon             =   "item_large_armor"; // compatible with Xonotic v0.8.2 or lower
+	this.m_icon             =   "item_large_armor";
 #endif
     this.m_color                =   '0 1 0';
     this.m_waypoint             =   _("Mega armor");

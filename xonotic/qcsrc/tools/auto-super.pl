@@ -31,7 +31,7 @@ for my $f(@ARGV)
 	close $fh;
 }
 
-# propagate down methods etc.
+
 print STDERR "Propagating...\n";
 for my $class(keys %classes)
 {
@@ -56,7 +56,7 @@ for my $class(keys %classes)
 	print STDERR "\n";
 }
 
-# change all calls to base method to super, complain about skipping
+
 print STDERR "Fixing...\n";
 for my $f(@ARGV)
 {

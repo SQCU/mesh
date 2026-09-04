@@ -57,7 +57,7 @@ float autocvar_crosshair_size;
 bool autocvar_crosshair_chase = true;
 float autocvar_crosshair_chase_playeralpha = 0.25;
 
-float vortex_charge_movingavg; // WEAPONTODO
+float vortex_charge_movingavg;
 
 vector crosshair_getcolor(entity this, float health_stat);
 void TrueAim_Init();

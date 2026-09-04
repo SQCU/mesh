@@ -16,11 +16,9 @@
 #include <common/teams.qh>
 #include <common/items/inventory.qh>
 
-// Scoreboard (#24)
-
 void Scoreboard_Draw_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
+
 	HUD_Write_Cvar("hud_panel_scoreboard_fadeinspeed");
 	HUD_Write_Cvar("hud_panel_scoreboard_fadeoutspeed");
 	HUD_Write_Cvar("hud_panel_scoreboard_respawntime_decimals");
@@ -57,8 +55,6 @@ float sbt_highlight_alpha;
 float sbt_highlight_alpha_self;
 float sbt_highlight_alpha_eliminated;
 
-// provide basic panel cvars to old clients
-// TODO remove them after a future release (0.8.2+)
 noref string autocvar_hud_panel_scoreboard_pos = "0.150000 0.150000";
 noref string autocvar_hud_panel_scoreboard_size = "0.700000 0.700000";
 noref string autocvar_hud_panel_scoreboard_bg = "border_default";
@@ -93,7 +89,7 @@ bool autocvar_hud_panel_scoreboard_itemstats = true;
 bool autocvar_hud_panel_scoreboard_itemstats_doublerows = false;
 int autocvar_hud_panel_scoreboard_itemstats_filter = 1;
 int autocvar_hud_panel_scoreboard_itemstats_filter_mask = 12;
-float autocvar_hud_panel_scoreboard_itemstats_showdelay = 2.2; // slightly more delayed than accuracy
+float autocvar_hud_panel_scoreboard_itemstats_showdelay = 2.2;
 float autocvar_hud_panel_scoreboard_itemstats_showdelay_minpos = 0.75;
 
 bool autocvar_hud_panel_scoreboard_dynamichud = false;
@@ -116,12 +112,10 @@ SHUTDOWN(scoreboard)
 		cvar_set("hud_panel_scoreboard_scores_per_round", "0");
 }
 
-// mode 0: returns translated label
-// mode 1: prints name and description of all the labels
 string Label_getInfo(string label, int mode)
 {
 	if (mode == 1)
-		label = "bckills"; // first case in the switch
+		label = "bckills";
 
 	switch(label)
 	{
@@ -191,7 +185,6 @@ void HUD_Scoreboard_UI_Disable_Instantly()
 	scoreboard_selected_team = NULL;
 }
 
-// mode: 0 normal, 1 team selection
 void Scoreboard_UI_Enable(int mode)
 {
 	if(isdemo()) return;
@@ -201,9 +194,6 @@ void Scoreboard_UI_Enable(int mode)
 		if (scoreboard_ui_enabled == 2 || !teamplay || intermission)
 			return;
 
-		// release player's pressed keys as they aren't released elsewhere
-		// in particular jump needs to be released as it may open the team selection
-		// (when server detects jump has been pressed it sends the command to open the team selection)
 		Release_Common_Keys();
 		scoreboard_ui_enabled = 2;
 		scoreboard_selected_panel = SB_PANEL_SCOREBOARD;
@@ -241,10 +231,8 @@ float HUD_Scoreboard_InputEvent(float bInputType, float nPrimary, float nSeconda
 	if(bInputType == 2)
 		return false;
 
-	// at this point bInputType can only be 0 or 1 (key pressed or released)
 	bool key_pressed = (bInputType == 0);
 
-	// ESC to exit (TAB-ESC works too)
 	if(nPrimary == K_ESCAPE)
 	{
 		if (!key_pressed)
@@ -253,16 +241,14 @@ float HUD_Scoreboard_InputEvent(float bInputType, float nPrimary, float nSeconda
 		return true;
 	}
 
-	// block any input while a menu dialog is fading
 	if(autocvar__menu_alpha)
 	{
 		hudShiftState = 0;
 		return true;
 	}
 
-	// allow console bind to work
 	string con_keys = findkeysforcommand("toggleconsole", 0);
-	int keys = tokenize(con_keys); // findkeysforcommand returns data for this
+	int keys = tokenize(con_keys);
 
 	bool hit_con_bind = false;
 	int i;
@@ -341,7 +327,7 @@ float HUD_Scoreboard_InputEvent(float bInputType, float nPrimary, float nSeconda
 						scoreboard_selected_team_found = true;
 				}
 				LABEL(ok_team);
-				if (curr_team == scoreboard_selected_team) // loop reached the last team
+				if (curr_team == scoreboard_selected_team)
 					curr_team = NULL;
 				scoreboard_selected_team = curr_team;
 			}
@@ -368,7 +354,7 @@ float HUD_Scoreboard_InputEvent(float bInputType, float nPrimary, float nSeconda
 					}
 				}
 				LABEL(ok_done);
-				if (curr_pl == scoreboard_selected_player) // loop reached the last player
+				if (curr_pl == scoreboard_selected_player)
 					curr_pl = NULL;
 				scoreboard_selected_player = curr_pl;
 			}
@@ -461,11 +447,11 @@ float HUD_Scoreboard_InputEvent(float bInputType, float nPrimary, float nSeconda
 				case 0:
 					if (autocvar_scoreboard_columns != "" && autocvar_scoreboard_columns != "all" && autocvar_scoreboard_columns != "default")
 					{
-						localcmd(sprintf("scoreboard_columns_set\n")); // sets the layout saved in scoreboard_columns
+						localcmd(sprintf("scoreboard_columns_set\n"));
 						scoreboard_selected_columns_layout = 1;
 						break;
 					}
-					// fallthrough
+
 				case 1:
 					localcmd(sprintf("scoreboard_columns_set default\n"));
 					scoreboard_selected_columns_layout = 2;
@@ -548,7 +534,6 @@ void Scoreboard_InitScores()
 	Cmd_Scoreboard_SetFields(0);
 }
 
-//float lastpnum;
 void Scoreboard_UpdatePlayerTeams()
 {
 	static float update_time;
@@ -558,11 +543,11 @@ void Scoreboard_UpdatePlayerTeams()
 
 	entity pl, tmp;
 	numplayers = 0;
-	//int num = 0;
+
 	for(pl = players.sort_next; pl; pl = pl.sort_next)
 	{
 		numplayers += pl.team != NUM_SPECTATOR;
-		//num += 1;
+
 		int Team = entcs_GetScoreTeam(pl.sv_entnum);
 		if(SetTeam(pl, Team))
 		{
@@ -574,11 +559,7 @@ void Scoreboard_UpdatePlayerTeams()
 				pl = players.sort_next;
 		}
 	}
-	/*
-	if(num != lastpnum)
-		print(strcat("PNUM: ", ftos(num), "\n"));
-	lastpnum = num;
-	*/
+
 }
 
 int Scoreboard_CompareScore(int vl, int vr, int f)
@@ -610,8 +591,7 @@ float Scoreboard_ComparePlayerScores(entity left, entity right)
 
 	if(vl == NUM_SPECTATOR)
 	{
-		// FIRST the one with scores (spectators), THEN the ones without (downloaders)
-		// no other sorting
+
 		if(!left.gotscores && right.gotscores)
 			return true;
 		return false;
@@ -729,17 +709,13 @@ void Cmd_Scoreboard_Help()
 			"other gamemodes except DM."));
 }
 
-// NOTE: adding a gametype with ? to not warn for an optional field
-// make sure it's excluded in a previous exclusive rule, if any
-// otherwise the previous exclusive rule warns anyway
-// e.g. -teams,rc,cts,lms/kills ?+rc/kills
 #define SCOREBOARD_DEFAULT_COLUMNS \
 "ping pl fps name |" \
 " -teams,rc,cts,surv,inv,lms/kills +ft,tdm,tmayhem/kills ?+rc,inv/kills" \
 " -teams,surv,lms/deaths +ft,tdm,tmayhem/deaths" \
 " +tdm/sum" \
 " -teams,lms,rc,cts,surv,inv,ka/suicides +ft,tdm,tmayhem/suicides ?+rc,inv/suicides" \
-" -cts,dm,tdm,surv,ka,ft,mayhem,tmayhem/frags" /* tdm already has this in "score" */ \
+" -cts,dm,tdm,surv,ka,ft,mayhem,tmayhem/frags"                                       \
 " +tdm,ft,dom,ons,as,tmayhem/teamkills"\
 " -rc,cts,surv,nb/dmg -rc,cts,surv,nb/dmgtaken" \
 " +surv/survivals +surv/hunts" \
@@ -761,15 +737,13 @@ void Cmd_Scoreboard_SetFields(int argc)
 	int missing;
 
 	if(!gametype)
-		return; // do nothing, we don't know gametype and scores yet
+		return;
 
-	// sbt_fields uses strunzone on the titles!
 	if(!sbt_field_title[0])
 		for(i = 0; i < MAX_SBT_FIELDS; ++i)
 			sbt_field_title[i] = strzone("(null)");
 
-	// TODO: re enable with gametype dependant cvars?
-	if(argc < 3) // no arguments provided
+	if(argc < 3)
 		argc = tokenizebyseparator(strcat("0 1 ", autocvar_scoreboard_columns), " ");
 
 	if(argc < 3)
@@ -785,10 +759,10 @@ void Cmd_Scoreboard_SetFields(int argc)
 		}
 		else if(argv(2) == "all" || argv(2) == "ALL")
 		{
-			string s = "ping pl name |"; // scores without label (not really scores)
+			string s = "ping pl name |";
 			if(argv(2) == "ALL")
 			{
-				// scores without label
+
 				s = strcat(s, " ", "sum");
 				s = strcat(s, " ", "kdratio");
 				s = strcat(s, " ", "frags");
@@ -805,7 +779,6 @@ void Cmd_Scoreboard_SetFields(int argc)
 			argc = tokenizebyseparator(strcat("0 1 ", s), " ");
 		}
 	}
-
 
 	sbt_num_fields = 0;
 
@@ -838,7 +811,7 @@ void Cmd_Scoreboard_SetFields(int argc)
 		PlayerScoreField j;
 		switch(str)
 		{
-			// fields without a label (not networked via the score system)
+
 			case "ping": sbt_field[sbt_num_fields] = SP_PING; break;
 			case "pl": sbt_field[sbt_num_fields] = SP_PL; break;
 			case "name": case "nick": sbt_field[sbt_num_fields] = SP_NAME; have_name = true; break;
@@ -846,21 +819,20 @@ void Cmd_Scoreboard_SetFields(int argc)
 			case "kd": case "kdr": case "kdratio": sbt_field[sbt_num_fields] = SP_KDRATIO; break;
 			case "sum": case "diff": case "k-d": sbt_field[sbt_num_fields] = SP_SUM; break;
 			case "frags": sbt_field[sbt_num_fields] = SP_FRAGS; break;
-			default: // fields with a label
+			default:
 			{
-				// map alternative labels
+
 				if (str == "damage") str = "dmg";
 				if (str == "damagetaken") str = "dmgtaken";
 
 				FOREACH(Scores, true, {
 					if (str == strtolower(scores_label(it))) {
 						j = it;
-						goto found; // sorry, but otherwise fteqcc -O3 miscompiles this and warns about "unreachable code"
+						goto found;
 					}
 				});
 
-				// NOTE: can't check STAT(SHOWFPS) here, if checked too early it returns false anyway
-				if(!nocomplain && str != "fps") // server can disable the fps field
+				if(!nocomplain && str != "fps")
 					LOG_INFOF("^1Error:^7 Unknown score field: '%s'", str);
 
 				strfree(sbt_field_title[sbt_num_fields]);
@@ -957,7 +929,6 @@ string Scoreboard_AddPlayerId(string pl_name, entity pl)
 	return strcat(pref, itos(pl.sv_entnum + 1), suf, pl_name);
 }
 
-// MOVEUP::
 vector sbt_field_rgb;
 string sbt_field_icon0;
 string sbt_field_icon1;
@@ -974,9 +945,9 @@ string Scoreboard_GetName(entity pl)
 	else if(!teamplay)
 	{
 		int f;
-		// NOTE: always adding 1024 allows saving the colormap 0 as a value != 0
+
 		if (playerslots[pl.sv_entnum].colormap >= 1024)
-			f = playerslots[pl.sv_entnum].colormap - 1024; // override server-side player colors
+			f = playerslots[pl.sv_entnum].colormap - 1024;
 		else
 			f = entcs_GetClientColors(pl.sv_entnum);
 
@@ -1026,8 +997,8 @@ string Scoreboard_GetField(entity pl, PlayerScoreField field, bool per_round)
 	{
 		case SP_PING:
 			if (!pl.gotscores)
-				return "\xE2\x96\xB6\xE2\x96\xB6\xE2\x96\xB6"; // >>> sign using U+25B6 (Black Right-Pointing Triangle)
-			//str = getplayerkeyvalue(pl.sv_entnum, "ping");
+				return "\xE2\x96\xB6\xE2\x96\xB6\xE2\x96\xB6";
+
 			f = pl.ping;
 			if(f == 0)
 				return _("N/A");
@@ -1053,7 +1024,7 @@ string Scoreboard_GetField(entity pl, PlayerScoreField field, bool per_round)
 			str = ftos(ceil(f * 100));
 			if(tmp != 0)
 				str = strcat(str, "~", ftos(ceil(tmp * 100)));
-			tmp = bound(0, f / 0.2 + tmp / 0.04, 1); // 20% is REALLY BAD pl
+			tmp = bound(0, f / 0.2 + tmp / 0.04, 1);
 			sbt_field_rgb = '1 0.5 0.5' - '0 0.5 0.5' * tmp;
 			return str;
 
@@ -1126,9 +1097,9 @@ string Scoreboard_GetField(entity pl, PlayerScoreField field, bool per_round)
 			if(fps == 0)
 			{
 				sbt_field_rgb = '1 1 1';
-				return ((pl.ping == 0) ? _("N/A") : "..."); // if 0 ping, either connecting or bot (either case can't show proper score)
+				return ((pl.ping == 0) ? _("N/A") : "...");
 			}
-			//sbt_field_rgb = HUD_Get_Num_Color(fps, 200, true);
+
 			sbt_field_rgb = '1 0 0' + '0 1 1' * (bound(0, fps, 60) / 60);
 			return ftos(fps);
 		}
@@ -1152,7 +1123,7 @@ string Scoreboard_GetField(entity pl, PlayerScoreField field, bool per_round)
 				sbt_field_rgb = '1 1 1';
 			return ScoreString(f, tmp, rounds_played);
 	}
-	//return "error";
+
 }
 
 float sbt_fixcolumnwidth_len;
@@ -1193,13 +1164,13 @@ string Scoreboard_FixColumnWidth(int i, string str)
 
 	if(sbt_fixcolumnwidth_iconlen != 0)
 	{
-		sbt_fixcolumnwidth_iconlen *= hud_fontsize.y / hud_fontsize.x; // fix icon aspect
+		sbt_fixcolumnwidth_iconlen *= hud_fontsize.y / hud_fontsize.x;
 		sbt_fixcolumnwidth_marginlen = stringwidth(" ", false, hud_fontsize);
 	}
 	else
 		sbt_fixcolumnwidth_marginlen = 0;
 
-	if(sbt_field[i] == SP_NAME) // name gets all remaining space
+	if(sbt_field[i] == SP_NAME)
 	{
 		int j;
 		float remaining_space = 0;
@@ -1291,7 +1262,7 @@ void Scoreboard_DrawItem(vector item_pos, vector rgb, entity pl, bool is_self, i
 
 	vector h_pos = item_pos;
 	vector h_size = vec2(panel_size.x, hud_fontsize.y * 1.25);
-	// alternated rows highlighting
+
 	if (scoreboard_selected_panel == SB_PANEL_SCOREBOARD && scoreboard_ui_enabled == 1)
 	{
 		if (pl == scoreboard_selected_player)
@@ -1305,12 +1276,12 @@ void Scoreboard_DrawItem(vector item_pos, vector rgb, entity pl, bool is_self, i
 	float fg_alpha = (is_self ? sbt_fg_alpha_self : sbt_fg_alpha);
 
 	vector pos = item_pos;
-	// put a "self indicator" beside the self row, unicode U+25C0 (black left-pointing triangle)
+
 	if (is_self)
 		drawstring(pos + eX * (panel_size.x + 0.5 * hud_fontsize.x) + eY, "\xE2\x97\x80", hud_fontsize, rgb, panel_fg_alpha, DRAWFLAG_NORMAL);
 
 	pos.x += hud_fontsize.x * 0.5;
-	pos.y += (1.25 - 1) / 2 * hud_fontsize.y; // center text vertically
+	pos.y += (1.25 - 1) / 2 * hud_fontsize.y;
 	vector tmp = '0 0 0';
 	int i;
 	PlayerScoreField field;
@@ -1364,7 +1335,7 @@ void Scoreboard_DrawItem(vector item_pos, vector rgb, entity pl, bool is_self, i
 			str = Scoreboard_FixColumnWidth(i, str);
 
 			if(field == SP_NAME) {
-				tmp.x = sbt_fixcolumnwidth_len; // left or right aligned? let's put it right...
+				tmp.x = sbt_fixcolumnwidth_len;
 				drawcolorcodedstring(pos - tmp, str, hud_fontsize, fg_alpha, DRAWFLAG_NORMAL);
 			} else {
 				tmp.x = sbt_fixcolumnwidth_len;
@@ -1400,7 +1371,7 @@ vector Scoreboard_DrawOthers(vector item_pos, vector rgb, int this_team, entity 
 
 	vector pos = item_pos;
 	pos.x += hud_fontsize.x * 0.5;
-	pos.y += (1.25 - 1) / 2 * hud_fontsize.y; // center text vertically
+	pos.y += (1.25 - 1) / 2 * hud_fontsize.y;
 
 	float width_limit = item_pos.x + panel_size.x - hud_fontsize.x;
 	if(!complete)
@@ -1512,12 +1483,12 @@ vector Scoreboard_MakeTable(vector pos, entity tm, vector rgb, vector bg_size)
 		float height = autocvar_hud_panel_scoreboard_maxheight * vid_conheight;
 		if(teamplay)
 		{
-			height -= (panel_bg_padding * 2 + hud_fontsize.y * 1.25) * team_count; // - padding and header
-			height -= hud_fontsize.y * (team_count - 1); // - spacing between tables
+			height -= (panel_bg_padding * 2 + hud_fontsize.y * 1.25) * team_count;
+			height -= hud_fontsize.y * (team_count - 1);
 			height /= team_count;
 		}
 		else
-			height -= panel_bg_padding * 2; // - padding
+			height -= panel_bg_padding * 2;
 		max_players = floor(height / (hud_fontsize.y * 1.25));
 		if(max_players <= 1)
 			max_players = 1;
@@ -1551,22 +1522,17 @@ vector Scoreboard_MakeTable(vector pos, entity tm, vector rgb, vector bg_size)
 	pos = panel_pos;
 	vector tmp = vec2(panel_size.x, 1.25 * hud_fontsize.y);
 
-	// rounded header
 	if (sbt_bg_alpha)
 		drawpic(pos, "gfx/scoreboard/scoreboard_tableheader", tmp, rgb + '0.5 0.5 0.5', sbt_bg_alpha, DRAWFLAG_NORMAL);
 
 	pos.y += 1.25 * hud_fontsize.y;
 
-	// table background
 	tmp.y = panel_size.y - 1.25 * hud_fontsize.y;
 	if (sbt_bg_alpha)
 		drawpic_tiled(pos, "gfx/scoreboard/scoreboard_bg", bg_size, tmp, rgb, sbt_bg_alpha, DRAWFLAG_NORMAL);
 
-
-	// print header row and highlight columns
 	pos = Scoreboard_DrawHeader(panel_pos, rgb, (max_players < tm.team_size));
 
-	// fill the table and draw the rows
 	bool is_self = false;
 	bool self_shown = false;
 	int i = 0;
@@ -1608,7 +1574,7 @@ vector Scoreboard_MakeTable(vector pos, entity tm, vector rgb, vector bg_size)
 		}
 	}
 
-	panel_size.x += panel_bg_padding * 2; // restore initial width
+	panel_size.x += panel_bg_padding * 2;
 	return end_pos;
 }
 
@@ -1635,7 +1601,7 @@ bool Scoreboard_WouldDraw()
 		return false;
 	else if (HUD_Radar_Clickable())
 		return false;
-	else if (sb_showscores) // set by +showscores engine command
+	else if (sb_showscores)
 		return true;
 	else if (intermission == 1)
 		return true;
@@ -1724,12 +1690,11 @@ vector Scoreboard_AccuracyStats_Draw(vector pos, vector rgb, vector bg_size)
 
 	if(sbt_highlight)
 	{
-		// column highlighting
+
 		for (int i = 0; i < columns; ++i)
 			if ((i % 2) == 0)
 				drawfill(pos + eX * weapon_width * rows * i, vec2(weapon_width * rows, height * rows), '0 0 0', sbt_highlight_alpha * scoreboard_acc_fade_alpha, DRAWFLAG_NORMAL);
 
-		// row highlighting
 		for (int i = 0; i < rows; ++i)
 			drawfill(pos + eY * (weapon_height + height * i), vec2(tmp.x, hud_fontsize.y), rgb, sbt_highlight_alpha * scoreboard_acc_fade_alpha, DRAWFLAG_NORMAL);
 	}
@@ -1763,12 +1728,11 @@ vector Scoreboard_AccuracyStats_Draw(vector pos, vector rgb, vector bg_size)
 		else
 			weapon_alpha = 0.2 * sbt_fg_alpha;
 
-		// weapon icon
 		drawpic_aspect_skin(tmpos, it.model2, vec2(weapon_width, weapon_height), '1 1 1', weapon_alpha * scoreboard_acc_fade_alpha, DRAWFLAG_NORMAL);
-		// the accuracy
+
 		if (weapon_stats >= 0) {
 			weapons_with_stats += 1;
-			average_accuracy += weapon_stats; // store sum of all accuracies in average_accuracy
+			average_accuracy += weapon_stats;
 
 			string s = sprintf("%d%%", weapon_stats * 100);
 			float padding = (weapon_width - stringwidth(s, false, hud_fontsize)) / 2;
@@ -1791,7 +1755,7 @@ vector Scoreboard_AccuracyStats_Draw(vector pos, vector rgb, vector bg_size)
 	if (weapons_with_stats)
 		average_accuracy = floor((average_accuracy * 100 / weapons_with_stats) + 0.5);
 
-	panel_size.x += panel_bg_padding * 2; // restore initial width
+	panel_size.x += panel_bg_padding * 2;
 
 	return end_pos;
 }
@@ -1809,10 +1773,10 @@ bool is_item_filtered(entity it)
 		switch (ha_mask)
 		{
 			default: return false;
-			case 4: if (it == ITEM_HealthMega || it == ITEM_ArmorMega) return true; // else fallthrough
-			case 3: if (it == ITEM_HealthBig || it == ITEM_ArmorBig) return true; // else fallthrough
-			case 2: if (it == ITEM_HealthMedium || it == ITEM_ArmorMedium) return true; // else fallthrough
-			case 1: if (it == ITEM_HealthSmall || it == ITEM_ArmorSmall) return true; // else fallthrough
+			case 4: if (it == ITEM_HealthMega || it == ITEM_ArmorMega) return true;
+			case 3: if (it == ITEM_HealthBig || it == ITEM_ArmorBig) return true;
+			case 2: if (it == ITEM_HealthMedium || it == ITEM_ArmorMedium) return true;
+			case 1: if (it == ITEM_HealthSmall || it == ITEM_ArmorSmall) return true;
 		}
 	}
 	if (it.instanceOfAmmo)
@@ -1831,7 +1795,7 @@ vector Scoreboard_ItemStats_Draw(vector pos, vector rgb, vector bg_size)
 	int uninteresting_cnt = 0;
 	IL_EACH(default_order_items, true, {
 		int q = g_inventory.inv_items[it.m_id];
-		//q = 1; // debug: display all items
+
 		if (is_item_filtered(it))
 			++uninteresting_cnt;
 		else if (!q)
@@ -1881,12 +1845,11 @@ vector Scoreboard_ItemStats_Draw(vector pos, vector rgb, vector bg_size)
 
 	if(sbt_highlight)
 	{
-		// column highlighting
+
 		for (int i = 0; i < columns; ++i)
 			if ((i % 2) == 0)
 				drawfill(pos + eX * item_width * rows * i, vec2(item_width * rows, height * rows), '0 0 0', sbt_highlight_alpha * scoreboard_itemstats_fade_alpha, DRAWFLAG_NORMAL);
 
-		// row highlighting
 		for (int i = 0; i < rows; ++i)
 			drawfill(pos + eY * (item_height + height * i), vec2(panel_size.x, hud_fontsize.y), rgb, sbt_highlight_alpha * scoreboard_itemstats_fade_alpha, DRAWFLAG_NORMAL);
 	}
@@ -1900,7 +1863,7 @@ vector Scoreboard_ItemStats_Draw(vector pos, vector rgb, vector bg_size)
 	int column = 0;
 	IL_EACH(default_order_items, !is_item_filtered(it), {
 		int n = g_inventory.inv_items[it.m_id];
-		//n = 1 + floor(i * 3 + 4.8) % 7; // debug: display a value for each item
+
 		if (n <= 0) continue;
 		drawpic_aspect_skin(tmpos, it.m_icon, eX * item_width + eY * item_height, '1 1 1', panel_fg_alpha * scoreboard_itemstats_fade_alpha, DRAWFLAG_NORMAL);
 		string s = ftos(n);
@@ -1916,7 +1879,7 @@ vector Scoreboard_ItemStats_Draw(vector pos, vector rgb, vector bg_size)
 		++column;
 	});
 
-	panel_size.x += panel_bg_padding * 2; // restore initial width
+	panel_size.x += panel_bg_padding * 2;
 
 	return end_pos;
 }
@@ -1939,25 +1902,20 @@ vector Scoreboard_MapStats_Draw(vector pos, vector rgb, vector bg_size) {
 	float rows = 0;
 	string val;
 
-	// get monster stats
 	stat_monsters_killed = STAT(MONSTERS_KILLED);
 	stat_monsters_total = STAT(MONSTERS_TOTAL);
 
-	// get secrets stats
 	stat_secrets_found = STAT(SECRETS_FOUND);
 	stat_secrets_total = STAT(SECRETS_TOTAL);
 
-	// get number of rows
 	if(stat_secrets_total)
 		rows += 1;
 	if(stat_monsters_total)
 		rows += 1;
 
-	// if no rows, return
 	if (!rows)
 		return pos;
 
-	//  draw table header
 	drawstring(pos + eX * panel_bg_padding, _("Map stats:"), hud_fontsize, '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 	pos.y += 1.25 * hud_fontsize.y;
 	if(panel.current_panel_bg != "0")
@@ -1984,21 +1942,19 @@ vector Scoreboard_MapStats_Draw(vector pos, vector rgb, vector bg_size) {
 	if (sbt_bg_alpha)
 		drawpic_tiled(pos, "gfx/scoreboard/scoreboard_bg", bg_size, tmp, rgb, sbt_bg_alpha, DRAWFLAG_NORMAL);
 
-	// draw monsters
 	if(stat_monsters_total)
 	{
 		val = sprintf("%d/%d", stat_monsters_killed, stat_monsters_total);
 		pos = MapStats_DrawKeyValue(pos, _("Monsters killed:"), val);
 	}
 
-	// draw secrets
 	if(stat_secrets_total)
 	{
 		val = sprintf("%d/%d", stat_secrets_found, stat_secrets_total);
 		pos = MapStats_DrawKeyValue(pos, _("Secrets found:"), val);
 	}
 
-	panel_size.x += panel_bg_padding * 2; // restore initial width
+	panel_size.x += panel_bg_padding * 2;
 	return end_pos;
 }
 
@@ -2053,7 +2009,6 @@ vector Scoreboard_Rankings_Draw(vector pos, string ranktitle, entity pl, vector 
 		rankings_rows = ceil(rankings_cnt / rankings_columns);
 	}
 
-	// expand name column to fill the entire row
 	float available_space = (panel_size.x - 2 * panel_bg_padding - columnsize.x * rankings_columns) / rankings_columns;
 	namesize += available_space;
 	columnsize.x += available_space;
@@ -2079,7 +2034,7 @@ vector Scoreboard_Rankings_Draw(vector pos, string ranktitle, entity pl, vector 
 	if (sbt_bg_alpha)
 		drawpic_tiled(pos, "gfx/scoreboard/scoreboard_bg", bg_size, panel_size, rgb, sbt_bg_alpha, DRAWFLAG_NORMAL);
 
-	vector text_ofs = vec2(0.5 * hud_fontsize.x, (1.25 - 1) / 2 * hud_fontsize.y); // center text vertically
+	vector text_ofs = vec2(0.5 * hud_fontsize.x, (1.25 - 1) / 2 * hud_fontsize.y);
 	string str = "";
 	int column = 0, j = 0;
 	string zoned_name_self = strzone(strdecolorize(entcs_GetName(player_localnum)));
@@ -2121,7 +2076,7 @@ vector Scoreboard_Rankings_Draw(vector pos, string ranktitle, entity pl, vector 
 		drawfill(scoreboard_selected_hl_pos, scoreboard_selected_hl_size, '1 1 1', fade * 0.44, DRAWFLAG_NORMAL);
 	}
 
-	panel_size.x += panel_bg_padding * 2; // restore initial width
+	panel_size.x += panel_bg_padding * 2;
 	return end_pos;
 }
 
@@ -2178,7 +2133,7 @@ bool Scoreboard_ItemStats_WouldDraw(float ypos)
 			if (!is_item_filtered(it))
 			{
 				int q = g_inventory.inv_items[it.m_id];
-				//q = 1; // debug: display all items
+
 				if (q)
 				{
 					have_item_stats = true;
@@ -2217,7 +2172,7 @@ vector Scoreboard_Spectators_Draw(vector pos) {
 			break;
 		}
 	}
-	if (str != "") // if there's at least one spectator
+	if (str != "")
 		pos.y += 0.5 * hud_fontsize.y;
 
 	return pos;
@@ -2238,7 +2193,6 @@ void Scoreboard_Draw()
 	{
 		if(!hud_draw_maximized) return;
 
-		// frametime checks allow to toggle the scoreboard even when the game is paused
 		if(scoreboard_active) {
 			if (scoreboard_fade_alpha == 0)
 				scoreboard_time = time;
@@ -2292,7 +2246,6 @@ void Scoreboard_Draw()
 	sbt_fg_alpha = autocvar_hud_panel_scoreboard_table_fg_alpha * panel_fg_alpha;
 	sbt_fg_alpha_self = autocvar_hud_panel_scoreboard_table_fg_alpha_self * panel_fg_alpha;
 
-	// don't overlap with con_notify
 	if(!autocvar__hud_configure)
 		panel_pos.y = max((autocvar_con_notify * autocvar_con_notifysize), panel_pos.y);
 
@@ -2313,11 +2266,9 @@ void Scoreboard_Draw()
 
 	vector sb_gameinfo_type_fontsize, sb_gameinfo_detail_fontsize;
 
-	// Begin of Game Info Section
 	sb_gameinfo_type_fontsize = hud_fontsize * 2.5;
 	sb_gameinfo_detail_fontsize = hud_fontsize * 1.3;
 
-	// Game Info: Game Type
 	if (scoreboard_ui_enabled == 2)
 		str = _("Team Selection");
 	else
@@ -2327,7 +2278,7 @@ void Scoreboard_Draw()
 	draw_endBoldFont();
 
 	pos.y += sb_gameinfo_type_fontsize.y;
-	// Game Info: Game Detail
+
 	if (scoreboard_ui_enabled == 2)
 	{
 		if (scoreboard_selected_team)
@@ -2354,14 +2305,14 @@ void Scoreboard_Draw()
 			if(fl > 0)
 			{
 				if(tl > 0)
-					str = strcat(str, "^7 / "); // delimiter
+					str = strcat(str, "^7 / ");
 				str = strcat(str, Scoreboard_Fraglimit_Draw(fl, false));
 			}
 			if(ll > 0)
 			{
 				if(tl > 0 || fl > 0)
 				{
-					// delimiter
+
 					if (ll_and_fl && fl > 0)
 						str = strcat(str, "^7 & ");
 					else
@@ -2370,22 +2321,20 @@ void Scoreboard_Draw()
 				str = strcat(str, Scoreboard_Fraglimit_Draw(ll, true));
 			}
 		}
-		drawcolorcodedstring(pos + '1 0 0' * (panel_size.x - stringwidth(str, true, sb_gameinfo_detail_fontsize)), str, sb_gameinfo_detail_fontsize, panel_fg_alpha, DRAWFLAG_NORMAL); // align right
-		// map name and player count
+		drawcolorcodedstring(pos + '1 0 0' * (panel_size.x - stringwidth(str, true, sb_gameinfo_detail_fontsize)), str, sb_gameinfo_detail_fontsize, panel_fg_alpha, DRAWFLAG_NORMAL);
+
 		if (campaign)
 			str = "";
 		else
 			str = sprintf(_("^5%d^7/^5%d ^7players"), numplayers, srv_maxplayers ? srv_maxplayers : maxclients);
-		str = strcat("^7", _("Map:"), " ^2", mi_shortname, "    ", str); // reusing "Map:" translatable string
-		drawcolorcodedstring(pos, str, sb_gameinfo_detail_fontsize, panel_fg_alpha, DRAWFLAG_NORMAL); // align left
+		str = strcat("^7", _("Map:"), " ^2", mi_shortname, "    ", str);
+		drawcolorcodedstring(pos, str, sb_gameinfo_detail_fontsize, panel_fg_alpha, DRAWFLAG_NORMAL);
 	}
-	// End of Game Info Section
 
-	pos.y += sb_gameinfo_detail_fontsize.y + hud_fontsize.y * 0.3; // space between Game Info Section and score table
+	pos.y += sb_gameinfo_detail_fontsize.y + hud_fontsize.y * 0.3;
 	if(panel.current_panel_bg != "0")
 		pos.y += panel_bg_border;
 
-	// Draw the scoreboard
 	float scale = autocvar_hud_panel_scoreboard_table_bg_scale;
 	if(scale <= 0)
 		scale = 0.25;
@@ -2396,9 +2345,9 @@ void Scoreboard_Draw()
 		vector panel_bg_color_save = panel_bg_color;
 		vector team_score_baseoffset;
 		vector team_size_baseoffset;
-		if (autocvar_hud_panel_scoreboard_team_size_position != 1) // team size not on left
+		if (autocvar_hud_panel_scoreboard_team_size_position != 1)
 		{
-			// put team score to the left of scoreboard (and team size to the right)
+
 			team_score_baseoffset = eY * hud_fontsize.y - eX * hud_fontsize.x * 0.5;
 			team_size_baseoffset = eY * hud_fontsize.y + eX * hud_fontsize.x * 0.5;
 			if(panel.current_panel_bg != "0")
@@ -2409,7 +2358,7 @@ void Scoreboard_Draw()
 		}
 		else
 		{
-			// put team score to the right of scoreboard (and team size to the left)
+
 			team_score_baseoffset = eY * hud_fontsize.y + eX * hud_fontsize.x * 0.5;
 			team_size_baseoffset = eY * hud_fontsize.y - eX * hud_fontsize.x * 0.5;
 			if(panel.current_panel_bg != "0")
@@ -2420,9 +2369,9 @@ void Scoreboard_Draw()
 		}
 
 		int team_size_total = 0;
-		if (autocvar_hud_panel_scoreboard_team_size_position != 0) // team size not off
+		if (autocvar_hud_panel_scoreboard_team_size_position != 0)
 		{
-			// calculate team size total (sum of all team sizes)
+
 			for(tm = teams.sort_next; tm; tm = tm.sort_next)
 				if(tm.team != NUM_SPECTATOR)
 					team_size_total += tm.team_size;
@@ -2438,31 +2387,30 @@ void Scoreboard_Draw()
 			draw_beginBoldFont();
 			vector rgb = Team_ColorRGB(tm.team);
 			str = ftos(tm.(teamscores(ts_primary)));
-			if (autocvar_hud_panel_scoreboard_team_size_position != 1) // team size not on left
+			if (autocvar_hud_panel_scoreboard_team_size_position != 1)
 			{
-				// team score on the left (default)
+
 				str_pos = pos + team_score_baseoffset - eX * stringwidth(str, false, hud_fontsize * 1.5);
 			}
 			else
 			{
-				// team score on the right
+
 				str_pos = pos + team_score_baseoffset + eX * (panel_size.x + hud_fontsize.x * 1.5);
 			}
 			drawstring(str_pos, str, hud_fontsize * 1.5, rgb, panel_fg_alpha, DRAWFLAG_NORMAL);
 
-			// team size (if set to show on the side)
-			if (autocvar_hud_panel_scoreboard_team_size_position != 0) // team size not off
+			if (autocvar_hud_panel_scoreboard_team_size_position != 0)
 			{
-				// calculate the starting position for the whole team size info string
+
 				str = sprintf("%d/%d", tm.team_size, team_size_total);
 				if (autocvar_hud_panel_scoreboard_team_size_position == 1)
 				{
-					// team size on the left
+
 					str_pos = pos + team_size_baseoffset - eX * stringwidth(str, false, hud_fontsize * 1.5);
 				}
 				else
 				{
-					// team size on the right
+
 					str_pos = pos + team_size_baseoffset + eX * (panel_size.x + hud_fontsize.x * 1.5);
 				}
 				str = sprintf("%d", tm.team_size);
@@ -2472,19 +2420,17 @@ void Scoreboard_Draw()
 				drawstring(str_pos, str, hud_fontsize, '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 			}
 
-
-			// secondary score, e.g. keyhunt
 			if(ts_primary != ts_secondary)
 			{
 				str = ftos(tm.(teamscores(ts_secondary)));
-				if (autocvar_hud_panel_scoreboard_team_size_position != 1) // team size not on left
+				if (autocvar_hud_panel_scoreboard_team_size_position != 1)
 				{
-					// left
+
 					str_pos = pos + team_score_baseoffset - vec2(stringwidth(str, false, hud_fontsize), hud_fontsize.y * -1.5);
 				}
 				else
 				{
-					// right
+
 					str_pos = pos + team_score_baseoffset + vec2(panel_size.x + hud_fontsize.x * 1.5, hud_fontsize.y * 1.5);
 				}
 
@@ -2507,22 +2453,18 @@ void Scoreboard_Draw()
 			if(tm.team != NUM_SPECTATOR)
 				break;
 
-		// display it anyway
 		pos = Scoreboard_MakeTable(pos, tm, panel_bg_color, bg_size);
 	}
 
-	// draw scoreboard spectators before accuracy and item stats
 	if (autocvar_hud_panel_scoreboard_spectators_position == 0) {
 		pos = Scoreboard_Spectators_Draw(pos);
 	}
 
-	// draw accuracy and item stats
 	if (Scoreboard_AccuracyStats_WouldDraw(pos.y))
 		pos = Scoreboard_AccuracyStats_Draw(pos, panel_bg_color, bg_size);
 	if (Scoreboard_ItemStats_WouldDraw(pos.y))
 		pos = Scoreboard_ItemStats_Draw(pos, panel_bg_color, bg_size);
 
-	// draw scoreboard spectators after accuracy and item stats and before rankings
 	if (autocvar_hud_panel_scoreboard_spectators_position == 1) {
 		pos = Scoreboard_Spectators_Draw(pos);
 	}
@@ -2545,37 +2487,33 @@ void Scoreboard_Draw()
 			name = textShortenToWidth(ColorTranslateRGB(race_speedaward_alltimebest_holder), namesize, hud_fontsize, stringwidth_colors);
 			str = strcat(str, sprintf(_("All-time fastest: %d%s ^7(%s^7)"), race_speedaward_alltimebest * conversion_factor, unit, name));
 			drawcolorcodedstring(pos, str, hud_fontsize, panel_fg_alpha, DRAWFLAG_NORMAL);
-			pos.y += 1.25 * hud_fontsize.y; // line height + line spacing
+			pos.y += 1.25 * hud_fontsize.y;
 		}
 		pos = Scoreboard_Rankings_Draw(pos, ranktitle, playerslots[player_localnum], panel_bg_color, bg_size);
 	}
 	else
 		rankings_cnt = 0;
 
-	// draw scoreboard spectators after rankings
 	if (autocvar_hud_panel_scoreboard_spectators_position == 2) {
 		pos = Scoreboard_Spectators_Draw(pos);
 	}
 
 	pos = Scoreboard_MapStats_Draw(pos, panel_bg_color, bg_size);
 
-	// draw scoreboard spectators after mapstats
 	if (autocvar_hud_panel_scoreboard_spectators_position == 3) {
 		pos = Scoreboard_Spectators_Draw(pos);
 	}
 
-
-	// print information about respawn status
 	float respawn_time = STAT(RESPAWN_TIME);
 	if(!intermission && respawn_time)
 	{
 		if(respawn_time < 0)
 		{
-			// a negative number means we are awaiting respawn, time value is still the same
-			respawn_time *= -1; // remove mark now that we checked it
 
-			if(respawn_time < time) // it happens for a few frames when server is respawning the player
-				str = ""; // draw an empty string to not change suddenly scoreboard_bottom
+			respawn_time *= -1;
+
+			if(respawn_time < time)
+				str = "";
 			else
 				str = sprintf(_("^1Respawning in ^3%s^1..."),
 					(autocvar_hud_panel_scoreboard_respawntime_decimals ?

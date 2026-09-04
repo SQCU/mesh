@@ -29,35 +29,6 @@ void XonoticUserSettingsTab_fill(entity me)
 			e.onClick = SetSkin_Click;
 			e.onClickEntity = sk;
 
-	/* AFTER 0.6 RELEASE TODO: Add a listbox which has fonts too, this way user can select the font they want.
-	me.gotoRC(me, 0, 2.2); me.setFirstColumn(me, me.currentColumn);
-		me.TD(me, 1, 1, e = makeXonoticTextLabel(0, _("Text language:")));
-	me.TR(me);
-		me.TD(me, 6, 1, sk = makeXonoticLanguageList());
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-		me.TD(me, 1, 1, e = makeXonoticButton(_("Set language"), '0 0 0'));
-			e.onClick = SetLanguage_Click;
-			e.onClickEntity = sk;
-
-	me.gotoRC(me, 0, 3.3); me.setFirstColumn(me, me.currentColumn);
-		me.TD(me, 1, 1.5, e = makeXonoticTextLabel(0, _("Font:")));
-	me.TR(me);
-		me.TD(me, 2, 1.5, sk = makeXonoticLanguageList());
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-	me.TR(me);
-		me.TD(me, 1, 1.5, e = makeXonoticButton(_("Set font"), '0 0 0'));
-			e.onClick = SetLanguage_Click;
-			e.onClickEntity = sk;*/
-
 	me.gotoRC(me, 0, 3.75); me.setFirstColumn(me, me.currentColumn);
 		me.TD(me, 1, 1.5, e = makeXonoticHeaderLabel(_("Text Language")));
 	me.TR(me);

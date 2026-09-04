@@ -85,7 +85,7 @@ STATIC_METHOD(Client, Add, void(Client this, int _team))
 {
     ClientConnect(this);
     TRANSMUTE(Player, this);
-    this.frame = 12; // 7
+    this.frame = 12;
     this.team = _team;
     PutClientInServer(this);
 }
@@ -103,7 +103,7 @@ void send_CSQC_teamnagger() {
 
 int CountSpectators(entity player, entity to)
 {
-	if(!player) { return 0; } // not sure how, but best to be safe
+	if(!player) { return 0; }
 
 	int spec_count = 0;
 
@@ -117,7 +117,7 @@ int CountSpectators(entity player, entity to)
 
 void WriteSpectators(entity player, entity to)
 {
-	if(!player) { return; } // not sure how, but best to be safe
+	if(!player) { return; }
 
 	int spec_count = 0;
 	FOREACH_CLIENT(IS_REAL_CLIENT(it) && IS_SPEC(it) && it != to && it.enemy == player,
@@ -137,13 +137,13 @@ bool ClientData_Send(entity this, entity to, int sf)
 	if (IS_SPEC(e)) e = e.enemy;
 
 	sf = 0;
-	if (CS(e).race_completed)       sf |= BIT(0); // forced scoreboard
-	if (CS(to).spectatee_status)    sf |= BIT(1); // spectator ent number follows
-	if (CS(e).zoomstate)            sf |= BIT(2); // zoomed
+	if (CS(e).race_completed)       sf |= BIT(0);
+	if (CS(to).spectatee_status)    sf |= BIT(1);
+	if (CS(e).zoomstate)            sf |= BIT(2);
 	if (observe_blocked_if_eliminated && INGAME(to))
-	                                sf |= BIT(3); // observing blocked
+	                                sf |= BIT(3);
 	if (autocvar_sv_showspectators == 1 || (autocvar_sv_showspectators && IS_SPEC(to)))
-	                                sf |= BIT(4); // show spectators
+	                                sf |= BIT(4);
 
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_CLIENTDATA);
 	WriteByte(MSG_ENTITY, sf);
@@ -179,7 +179,6 @@ void ClientData_Touch(entity e)
 	entity cd = CS(e).clientdata;
 	if (cd) { cd.SendFlags = 1; }
 
-	// make it spectatable
 	FOREACH_CLIENT(IS_REAL_CLIENT(it) && it != e && IS_SPEC(it) && it.enemy == e,
 	{
 		entity cd = CS(it).clientdata;
@@ -187,28 +186,17 @@ void ClientData_Touch(entity e)
 	});
 }
 
-
-/*
-=============
-CheckPlayerModel
-
-Checks if the argument string can be a valid playermodel.
-Returns a valid one in doubt.
-=============
-*/
 string FallbackPlayerModel;
 string CheckPlayerModel(string plyermodel) {
 	if(FallbackPlayerModel != cvar_defstring("_cl_playermodel"))
 	{
-		// note: we cannot summon Don Strunzone here, some player may
-		// still have the model string set. In case anyone manages how
-		// to change a cvar default, we'll have a small leak here.
+
 		FallbackPlayerModel = strzone(cvar_defstring("_cl_playermodel"));
 	}
-	// only in right path
+
 	if(substring(plyermodel, 0, 14) != "models/player/")
 		return FallbackPlayerModel;
-	// only good file extensions
+
 	if(substring(plyermodel, -4, 4) != ".iqm"
 		&& substring(plyermodel, -4, 4) != ".zym"
 		&& substring(plyermodel, -4, 4) != ".dpm"
@@ -217,12 +205,12 @@ string CheckPlayerModel(string plyermodel) {
 	{
 		return FallbackPlayerModel;
 	}
-	// forbid the LOD models
+
 	if(substring(plyermodel, -9, 5) == "_lod1" || substring(plyermodel, -9, 5) == "_lod2")
 		return FallbackPlayerModel;
 	if(plyermodel != strtolower(plyermodel))
 		return FallbackPlayerModel;
-	// also, restrict to server models
+
 	if(autocvar_sv_servermodelsonly)
 	{
 		if(!fexists(plyermodel))
@@ -240,7 +228,6 @@ void setplayermodel(entity e, string modelname)
 		UpdatePlayerSounds(e);
 }
 
-/** putting a client as observer in the server */
 void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 {
 	bool mutator_returnvalue = MUTATOR_CALLHOOK(MakePlayerObserver, this, is_forced);
@@ -251,11 +238,10 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 	{
 		if(GetResource(this, RES_HEALTH) >= 1)
 		{
-			// despawn effect
+
 			Send_Effect(EFFECT_SPAWN_NEUTRAL, this.origin, '0 0 0', 1);
 		}
 
-		// was a player, recount votes and ready status
 		if(IS_REAL_CLIENT(this))
 		{
 			if (vote_called) { VoteCount(false); }
@@ -270,10 +256,10 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 		entity spot = SelectSpawnPoint(this, true);
 		if (!spot) LOG_FATAL("No spawnpoints for observers?!?");
 		this.angles = vec2(spot.angles);
-		// offset it so that the spectator spawns higher off the ground, looks better this way
+
 		setorigin(this, spot.origin + STAT(PL_VIEW_OFS, this));
 	}
-	else // change origin to restore previous view origin
+	else
 		setorigin(this, this.origin + STAT(PL_VIEW_OFS, this) - STAT(PL_CROUCH_VIEW_OFS, this));
 	this.fixangle = true;
 
@@ -283,11 +269,10 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 		WriteByte(MSG_ONE, SVC_SETVIEW);
 		WriteEntity(MSG_ONE, this);
 	}
-	// give the spectator some space between walls for MOVETYPE_FLY_WORLDONLY
-	// so that your view doesn't go into the ceiling with MOVETYPE_FLY_WORLDONLY, previously "PL_VIEW_OFS"
+
 	if(!autocvar_g_debug_globalsounds)
 	{
-		// needed for player sounds
+
 		this.model = "";
 		FixPlayermodel(this);
 	}
@@ -311,7 +296,7 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 
 	TRANSMUTE(Observer, this);
 
-	if(recount_ready) ReadyCount(); // FIXME: please add comment about why this is delayed
+	if(recount_ready) ReadyCount();
 
 	WaypointSprite_PlayerDead(this);
 	accuracy_resend(this);
@@ -336,10 +321,10 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 	SetSpectatee_status(this, etof(this));
 	this.takedamage = DAMAGE_NO;
 	this.solid = SOLID_NOT;
-	set_movetype(this, MOVETYPE_FLY_WORLDONLY); // user preference is controlled by playerprethink
+	set_movetype(this, MOVETYPE_FLY_WORLDONLY);
 	this.flags = FL_CLIENT | FL_NOTARGET;
 	this.effects = 0;
-	SetResourceExplicit(this, RES_ARMOR, autocvar_g_balance_armor_start); // was 666?!
+	SetResourceExplicit(this, RES_ARMOR, autocvar_g_balance_armor_start);
 	this.pauserotarmor_finished = 0;
 	this.pauserothealth_finished = 0;
 	this.pauseregen_finished = 0;
@@ -353,7 +338,7 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 	this.fade_time = 0;
 	this.pain_finished = 0;
 	STAT(AIR_FINISHED, this) = 0;
-	//this.dphitcontentsmask = 0;
+
 	this.dphitcontentsmask = DPCONTENTS_SOLID;
 	if (autocvar_g_playerclip_collisions)
 		this.dphitcontentsmask |= DPCONTENTS_PLAYERCLIP;
@@ -373,8 +358,6 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 	this.drawonlytoclient = this;
 
 	this.viewloc = NULL;
-
-	//this.spawnpoint_targ = NULL; // keep it so they can return to where they were?
 
 	this.weaponmodel = "";
 	for (int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
@@ -402,11 +385,11 @@ void PutObserverInServer(entity this, bool is_forced, bool use_spawnpoint)
 
 	if (mutator_returnvalue)
 	{
-		// mutator prevents resetting teams+score
+
 	}
 	else
 	{
-		SetPlayerTeam(this, -1, TEAM_CHANGE_SPECTATOR); // clears scores too in game modes without teams
+		SetPlayerTeam(this, -1, TEAM_CHANGE_SPECTATOR);
 		this.frags = FRAGS_SPECTATOR;
 	}
 
@@ -440,6 +423,7 @@ void FixPlayermodel(entity player)
 				case NUM_TEAM_2: defaultmodel = autocvar_sv_defaultplayermodel_blue; defaultskin = autocvar_sv_defaultplayerskin_blue; break;
 				case NUM_TEAM_3: defaultmodel = autocvar_sv_defaultplayermodel_yellow; defaultskin = autocvar_sv_defaultplayerskin_yellow; break;
 				case NUM_TEAM_4: defaultmodel = autocvar_sv_defaultplayermodel_pink; defaultskin = autocvar_sv_defaultplayerskin_pink; break;
+				case NUM_TEAM_5: defaultmodel = autocvar_sv_defaultplayermodel_green; defaultskin = autocvar_sv_defaultplayerskin_green; break;
 			}
 		}
 
@@ -453,7 +437,7 @@ void FixPlayermodel(entity player)
 		if(n > 0)
 		{
 			defaultmodel = argv(floor(n * CS(player).model_randomizer));
-			// However, do NOT randomize if the player-selected model is in the list.
+
 			for (int i = 0; i < n; ++i)
 				if ((argv(i) == player.playermodel && defaultskin == stof(player.playerskin)) || argv(i) == strcat(player.playermodel, ":", player.playerskin))
 					defaultmodel = argv(i);
@@ -476,6 +460,7 @@ void FixPlayermodel(entity player)
 				case NUM_TEAM_2: defaultskin = autocvar_sv_defaultplayerskin_blue; break;
 				case NUM_TEAM_3: defaultskin = autocvar_sv_defaultplayerskin_yellow; break;
 				case NUM_TEAM_4: defaultskin = autocvar_sv_defaultplayerskin_pink; break;
+				case NUM_TEAM_5: defaultskin = autocvar_sv_defaultplayerskin_green; break;
 			}
 		}
 
@@ -505,7 +490,7 @@ void FixPlayermodel(entity player)
 	} else {
 		if (player.playermodel != player.model || player.playermodel == "")
 		{
-			player.playermodel = CheckPlayerModel(player.playermodel); // this is never "", so no endless loop
+			player.playermodel = CheckPlayerModel(player.playermodel);
 			vector m1 = player.mins;
 			vector m2 = player.maxs;
 			setplayermodel (player, player.playermodel);
@@ -525,11 +510,11 @@ void FixPlayermodel(entity player)
 		}
 	}
 
-	if(chmdl || oldskin != player.skin) // model or skin has changed
+	if(chmdl || oldskin != player.skin)
 	{
-		player.species = player_getspecies(player); // update species
+		player.species = player_getspecies(player);
 		if(!autocvar_g_debug_globalsounds)
-			UpdatePlayerSounds(player); // update skin sounds
+			UpdatePlayerSounds(player);
 	}
 
 	if(!teamplay)
@@ -567,7 +552,7 @@ void PutPlayerInServer(entity this)
 	entity spot = SelectSpawnPoint(this, false);
 	if (!spot) {
 		Send_Notification(NOTIF_ONE_ONLY, this, MSG_CENTER, CENTER_JOIN_NOSPAWNS);
-		return; // spawn failed
+		return;
 	}
 
 	TRANSMUTE(Player, this);
@@ -643,12 +628,12 @@ void PutPlayerInServer(entity this)
 	this.respawn_flags = 0;
 	this.respawn_time = 0;
 	STAT(RESPAWN_TIME, this) = 0;
-	// DP model scaling uses 1/16 accuracy and 13/16 is closest to 56/69
+
 	this.scale = ((q3compat && autocvar_sv_q3compat_changehitbox) ? 0.8125 : autocvar_sv_player_scale);
 	this.fade_time = 0;
 	this.pain_finished = 0;
 	this.pushltime = 0;
-	setthink(this, func_null); // players have no think function
+	setthink(this, func_null);
 	this.nextthink = 0;
 	this.dmg_team = 0;
 	PS(this).ballistics_density = autocvar_g_ballistics_density_player;
@@ -656,13 +641,13 @@ void PutPlayerInServer(entity this)
 	this.deadflag = DEAD_NO;
 
 	this.angles = spot.angles;
-	this.angles_z = 0; // never spawn tilted even if the spot says to
+	this.angles_z = 0;
 	if (IS_BOT_CLIENT(this))
 	{
 		this.v_angle = this.angles;
 		bot_aim_reset(this);
 	}
-	this.fixangle = true; // turn this way immediately
+	this.fixangle = true;
 	this.oldvelocity = this.velocity = '0 0 0';
 	this.avelocity = '0 0 0';
 	this.punchangle = '0 0 0';
@@ -679,7 +664,6 @@ void PutPlayerInServer(entity this)
 	spawnevent.owner = this;
 	Net_LinkEntity(spawnevent, false, 0.5, SpawnEvent_Send);
 
-	// Cut off any still running player sounds.
 	stopsound(this, CH_PLAYER_SINGLE);
 
 	this.model = "";
@@ -704,11 +688,11 @@ void PutPlayerInServer(entity this)
 	setsize(this, STAT(PL_MIN, this), STAT(PL_MAX, this));
 	this.spawnorigin = spot.origin;
 	setorigin(this, spot.origin + '0 0 1' * (1 - this.mins.z - 24));
-	// don't reset back to last position, even if new position is stuck in solid
+
 	this.oldorigin = this.origin;
 	if(this.conveyor)
 		IL_REMOVE(g_conveyed, this);
-	this.conveyor = NULL; // prevent conveyors at the previous location from moving a freshly spawned player
+	this.conveyor = NULL;
 	if(this.swampslug)
 		IL_REMOVE(g_swamped, this);
 	this.swampslug = NULL;
@@ -737,7 +721,6 @@ void PutPlayerInServer(entity this)
 
 	PHYS_INPUT_BUTTON_ATCK(this) = PHYS_INPUT_BUTTON_JUMP(this) = PHYS_INPUT_BUTTON_ATCK2(this) = false;
 
-	// player was spectator
 	if (CS(this).killcount == FRAGS_SPECTATOR) {
 		PlayerScore_Clear(this);
 		CS(this).killcount = 0;
@@ -760,10 +743,9 @@ void PutPlayerInServer(entity this)
 
 	target_voicescript_clear(this);
 
-	// reset fields the weapons may use
 	FOREACH(Weapons, true, {
 		it.wr_resetplayer(it, this);
-			// reload all reloadable weapons
+
 		if (it.spawnflags & WEP_FLAG_RELOADABLE) {
 			for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 			{
@@ -778,7 +760,7 @@ void PutPlayerInServer(entity this)
 	MUTATOR_CALLHOOK(PlayerSpawn, this, spot);
 	{
 		string s = spot.target;
-		if(g_assault || g_race) // TODO: make targeting work in assault & race without this hack
+		if(g_assault || g_race)
 			spot.target = string_null;
 		SUB_UseTargets(spot, this, NULL);
 		if(g_assault || g_race)
@@ -788,7 +770,7 @@ void PutPlayerInServer(entity this)
 	if (autocvar_spawn_debug)
 	{
 		sprint(this, strcat("spawnpoint origin:  ", vtos(spot.origin), "\n"));
-		delete(spot); // usefull for checking if there are spawnpoints, that let drop through the floor
+		delete(spot);
 	}
 
 	for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
@@ -825,7 +807,6 @@ void PutPlayerInServer(entity this)
 		ReadyCount();
 }
 
-/** Called when a client spawns in the server */
 void PutClientInServer(entity this)
 {
 	if (IS_REAL_CLIENT(this)) {
@@ -836,10 +817,9 @@ void PutClientInServer(entity this)
 	if (game_stopped)
 		TRANSMUTE(Observer, this);
 
-	bool use_spawnpoint = (!this.enemy); // check this.enemy here since SetSpectatee will clear it
+	bool use_spawnpoint = (!this.enemy);
 	SetSpectatee(this, NULL);
 
-	// reset player keys
 	if(PS(this))
 		PS(this).itemkeys = 0;
 
@@ -854,15 +834,12 @@ void PutClientInServer(entity this)
 	bot_relinkplayerlist();
 }
 
-// TODO do we need all these fields, or should we stop autodetecting runtime
-// changes and just have a console command to update this?
 bool ClientInit_SendEntity(entity this, entity to, int sf)
 {
 	WriteHeader(MSG_ENTITY, _ENT_CLIENT_INIT);
 	return = true;
 	msg_entity = to;
-	// MSG_INIT replacement
-	// TODO: make easier to use
+
 	Registry_send_all();
 	W_PROP_reload(MSG_ONE, to);
 	ClientInit_misc(this);
@@ -886,8 +863,8 @@ void ClientInit_misc(entity this)
 		WriteString(channel, world.fog);
 	else
 		WriteString(channel, "");
-	WriteByte(channel, this.count * 255.0); // g_balance_armor_blockpercent
-	WriteByte(channel, this.cnt * 255.0); // g_balance_damagepush_speedfactor
+	WriteByte(channel, this.count * 255.0);
+	WriteByte(channel, this.cnt * 255.0);
 	WriteByte(channel, serverflags);
 	WriteCoord(channel, autocvar_g_trueaim_minrange);
 }
@@ -916,45 +893,29 @@ void ClientInit_Spawn()
 	ClientInit_CheckUpdate(e);
 }
 
-/*
-=============
-SetNewParms
-=============
-*/
 void SetNewParms ()
 {
-	// initialize parms for a new player
+
 	parm1 = -(86400 * 366);
 
 	MUTATOR_CALLHOOK(SetNewParms);
 }
 
-/*
-=============
-SetChangeParms
-=============
-*/
 void SetChangeParms (entity this)
 {
-	// save parms for level change
+
 	parm1 = CS(this).parm_idlesince - time;
 
 	MUTATOR_CALLHOOK(SetChangeParms);
 }
 
-/*
-=============
-DecodeLevelParms
-=============
-*/
 void DecodeLevelParms(entity this)
 {
-	// load parms
+
 	CS(this).parm_idlesince = parm1;
 	if (CS(this).parm_idlesince == -(86400 * 366))
 		CS(this).parm_idlesince = time;
 
-	// whatever happens, allow 60 seconds of idling directly after connect for map loading
 	CS(this).parm_idlesince = max(CS(this).parm_idlesince, time - autocvar_sv_maxidle + 60);
 
 	MUTATOR_CALLHOOK(DecodeLevelParms);
@@ -962,8 +923,8 @@ void DecodeLevelParms(entity this)
 
 void FixClientCvars(entity e)
 {
-	// send prediction settings to the client
-	if(autocvar_g_antilag == 3) // client side hitscan
+
+	if(autocvar_g_antilag == 3)
 		stuffcmd(e, "cl_cmd settemp cl_prydoncursor_notrace 0\n");
 	if(autocvar_sv_gentle)
 		stuffcmd(e, "cl_cmd settemp cl_gentle 1\n");
@@ -979,9 +940,8 @@ void FixClientCvars(entity e)
 bool findinlist_abbrev(string tofind, string list)
 {
 	if(list == "" || tofind == "")
-		return false; // empty list or search, just return
+		return false;
 
-	// this function allows abbreviated strings!
 	FOREACH_WORD(list, it != "" && it == substring(tofind, 0, strlen(it)),
 	{
 		return true;
@@ -992,7 +952,7 @@ bool findinlist_abbrev(string tofind, string list)
 
 bool PlayerInIPList(entity p, string iplist)
 {
-	// some safety checks (never allow local?)
+
 	if(p.netaddress == "local" || p.netaddress == "" || !IS_REAL_CLIENT(p))
 		return false;
 
@@ -1001,7 +961,7 @@ bool PlayerInIPList(entity p, string iplist)
 
 bool PlayerInIDList(entity p, string idlist)
 {
-	// NOTE: we do NOT check crypto_idfp_signed here, an unsigned ID is fine too for this
+
 	if(!p.crypto_idfp)
 		return false;
 
@@ -1016,13 +976,7 @@ bool PlayerInList(entity player, string list)
 }
 
 #ifdef DP_EXT_PRECONNECT
-/*
-=============
-ClientPreConnect
 
-Called once (not at each match start) when a client begins a connection to the server
-=============
-*/
 void ClientPreConnect(entity this)
 {
 	if(autocvar_sv_eventlog)
@@ -1036,9 +990,6 @@ void ClientPreConnect(entity this)
 }
 #endif
 
-// NOTE csqc uses the active mutators list sent by this function
-// to understand which mutators are enabled
-// also note that they aren't all registered mutators, e.g. jetpack, low gravity
 void SendWelcomeMessage(entity this, int msg_type)
 {
 	WriteByte(msg_type, boolean(autocvar_g_campaign));
@@ -1082,13 +1033,6 @@ void SendWelcomeMessage(entity this, int msg_type)
 	WriteString(msg_type, strreplace("\\n", "\n", autocvar_sv_motd));
 }
 
-/**
-=============
-ClientConnect
-
-Called when a client connects to the server
-=============
-*/
 void ClientConnect(entity this)
 {
 	if (Ban_MaybeEnforceBanOnce(this)) return;
@@ -1109,7 +1053,6 @@ void ClientConnect(entity this)
 
 	PlayerStats_GameReport_AddEvent(sprintf("kills-%d", this.playerid));
 
-	// always track bots, don't ask for cl_allow_uidtracking
 	if (IS_BOT_CLIENT(this))
 		PlayerStats_GameReport_AddPlayer(this);
 	else
@@ -1118,27 +1061,26 @@ void ClientConnect(entity this)
 	if (autocvar_sv_eventlog)
 		GameLogEcho(strcat(":join:", ftos(this.playerid), ":", ftos(etof(this)), ":", ((IS_REAL_CLIENT(this)) ? GameLog_ProcessIP(this.netaddress) : "bot"), ":", playername(this.netname, this.team, false)));
 
-	CS(this).just_joined = true;  // stop spamming the eventlog with additional lines when the client connects
+	CS(this).just_joined = true;
 
 	stuffcmd(this, clientstuff, "\n");
-	stuffcmd(this, "cl_particles_reloadeffects\n"); // TODO do we still need this?
+	stuffcmd(this, "cl_particles_reloadeffects\n");
 
 	FixClientCvars(this);
 
-	// get version info from player
 	stuffcmd(this, "cmd clientversion $gameversion\n");
 
-	// notify about available teams
 	if (teamplay)
 	{
 		entity balance = TeamBalance_CheckAllowedTeams(this);
-		int t = TeamBalance_GetAllowedTeams(balance);
+		int n = TeamBalance_GetAllowedTeamCount(balance);
+		string rows = TeamBalance_GetAllowedTeamRows(balance);
 		TeamBalance_Destroy(balance);
-		stuffcmd(this, sprintf("set _teams_available %d\n", t));
+		stuffcmd(this, sprintf("set _teams_available_count %d; set _teams_available_rows \"%s\"\n", n, rows));
 	}
 	else
 	{
-		stuffcmd(this, "set _teams_available 0\n");
+		stuffcmd(this, "set _teams_available_count 0; set _teams_available_rows \"\"\n");
 	}
 
 	bot_relinkplayerlist();
@@ -1155,8 +1097,7 @@ void ClientConnect(entity this)
 	{
 		if (g_weaponarena_weapons == WEPSET(TUBA))
 			stuffcmd(this, "cl_cmd settemp chase_active 1\n");
-		// quickmenu file must be put in a subfolder with an unique name
-		// to reduce chances of overriding custom client quickmenus
+
 		if (waypointeditor_enabled)
 			stuffcmd(this, sprintf("cl_cmd settemp _hud_panel_quickmenu_file_from_server %s\n", "wpeditor.txt"));
 		else if (autocvar_sv_quickmenu_file != "" && strstrofs(autocvar_sv_quickmenu_file, "/", 0) && fexists(autocvar_sv_quickmenu_file))
@@ -1179,7 +1120,6 @@ void ClientConnect(entity this)
 
 	this.move_qcphysics = true;
 
-	// update physics stats (players can spawn before physics runs)
 	Physics_UpdateStats(this);
 
 	IL_EACH(g_initforplayer, it.init_for_player, {
@@ -1188,11 +1128,10 @@ void ClientConnect(entity this)
 
 	Handicap_Initialize(this);
 
-	// playban
 	if (PlayerInList(this, autocvar_g_playban_list))
 		TRANSMUTE(Observer, this);
 
-	if (PlayerInList(this, autocvar_g_chatban_list)) // chatban
+	if (PlayerInList(this, autocvar_g_chatban_list))
 		CS(this).muted = true;
 
 	MUTATOR_CALLHOOK(ClientConnect, this);
@@ -1204,13 +1143,7 @@ void ClientConnect(entity this)
 		localcmd("\nsv_hook_firstjoin\n");
 	}
 }
-/*
-=============
-ClientDisconnect
 
-Called when a client disconnects from the server
-=============
-*/
 .entity chatbubbleentity;
 void player_powerups_remove_all(entity this);
 
@@ -1218,7 +1151,6 @@ void ClientDisconnect(entity this)
 {
 	assert(IS_CLIENT(this), return);
 
-	/* from "ignore" command */
 	strfree(this.ignore_list);
 	FOREACH_CLIENT(IS_REAL_CLIENT(it) && it.ignore_list,
 	{
@@ -1230,7 +1162,6 @@ void ClientDisconnect(entity this)
 
 		it.ignore_list = strzone(mylist);
 	});
-	/* from "ignore" command */
 
 	PlayerStats_GameReport_FinalizePlayer(this);
 	if (this.vehicle) vehicles_exit(this.vehicle, VHEF_RELEASE);
@@ -1247,7 +1178,7 @@ void ClientDisconnect(entity this)
 
 	MUTATOR_CALLHOOK(ClientDisconnect, this);
 
-	strfree(CS(this).netname_previous); // needs to be before the CS entity is removed!
+	strfree(CS(this).netname_previous);
 	strfree(CS_CVAR(this).weaponorder_byimpulse);
 	ClientState_detach(this);
 
@@ -1256,8 +1187,6 @@ void ClientDisconnect(entity this)
 	Unfreeze(this, false);
 
 	RemoveGrapplingHooks(this);
-
-	// Here, everything has been done that requires this player to be a client.
 
 	this.flags &= ~FL_CLIENT;
 
@@ -1280,7 +1209,7 @@ void ClientDisconnect(entity this)
 	if (warmup_stage || game_starttime > time) ReadyCount();
 	if (vote_called && IS_REAL_CLIENT(this)) VoteCount(false);
 
-	player_powerups_remove_all(this); // stop powerup sound
+	player_powerups_remove_all(this);
 
 	ONREMOVE(this);
 
@@ -1293,7 +1222,7 @@ void ChatBubbleThink(entity this)
 	this.nextthink = time;
 	if ((this.owner.alpha < 0) || this.owner.chatbubbleentity != this)
 	{
-		if(this.owner) // but why can that ever be NULL?
+		if(this.owner)
 			this.owner.chatbubbleentity = NULL;
 		delete(this);
 		return;
@@ -1318,7 +1247,7 @@ void UpdateChatBubble(entity this)
 {
 	if (this.alpha < 0)
 		return;
-	// spawn a chatbubble entity if needed
+
 	if (!this.chatbubbleentity)
 	{
 		this.chatbubbleentity = new(chatbubbleentity);
@@ -1326,12 +1255,12 @@ void UpdateChatBubble(entity this)
 		this.chatbubbleentity.exteriormodeltoclient = this;
 		setthink(this.chatbubbleentity, ChatBubbleThink);
 		this.chatbubbleentity.nextthink = time;
-		setmodel(this.chatbubbleentity, MDL_CHAT); // precision set below
-		//setorigin(this.chatbubbleentity, this.origin + '0 0 15' + this.maxs_z * '0 0 1');
+		setmodel(this.chatbubbleentity, MDL_CHAT);
+
 		setorigin(this.chatbubbleentity, '0 0 15' + this.maxs_z * '0 0 1');
-		setattachment(this.chatbubbleentity, this, "");  // sticks to moving player better, also conserves bandwidth
+		setattachment(this.chatbubbleentity, this, "");
 		this.chatbubbleentity.mdl = this.chatbubbleentity.model;
-		//this.chatbubbleentity.model = "";
+
 		this.chatbubbleentity.effects = EF_LOWPRECISION;
 	}
 }
@@ -1349,7 +1278,7 @@ void calculate_player_respawn_time(entity this)
 	float sdelay_large_count = GAMETYPE_DEFAULTED_SETTING(respawn_delay_large_count);
 	float waves = GAMETYPE_DEFAULTED_SETTING(respawn_waves);
 
-	float pcount = 1;  // Include myself whether or not team is already set right and I'm a "player".
+	float pcount = 1;
 	if (teamplay)
 	{
 		FOREACH_CLIENT(IS_PLAYER(it) && it != this, {
@@ -1370,12 +1299,12 @@ void calculate_player_respawn_time(entity this)
 		{
 			if (IS_INDEPENDENT_PLAYER(this))
 			{
-				// Players play independently. No point in requiring enemies.
+
 				sdelay_small_count = 1;
 			}
 			else
 			{
-				// Players play AGAINST each other. Enemies required.
+
 				sdelay_small_count = 2;
 			}
 		}
@@ -1383,12 +1312,12 @@ void calculate_player_respawn_time(entity this)
 		{
 			if (IS_INDEPENDENT_PLAYER(this))
 			{
-				// Players play independently. No point in requiring enemies.
+
 				sdelay_large_count = 1;
 			}
 			else
 			{
-				// Players play AGAINST each other. Enemies required.
+
 				sdelay_large_count = 2;
 			}
 		}
@@ -1400,7 +1329,7 @@ void calculate_player_respawn_time(entity this)
 		sdelay = sdelay_small;
 	else if (pcount >= sdelay_large_count)
 		sdelay = sdelay_large;
-	else  // NOTE: this case implies sdelay_large_count > sdelay_small_count.
+	else
 		sdelay = sdelay_small + (sdelay_large - sdelay_small) * (pcount - sdelay_small_count) / (sdelay_large_count - sdelay_small_count);
 
 	if(waves)
@@ -1413,30 +1342,17 @@ void calculate_player_respawn_time(entity this)
 	else
 		this.respawn_time_max = this.respawn_time;
 
+	this.respawn_time = Spawn_SwizzleTime(this, this.respawn_time);
+	this.respawn_time_max = max(this.respawn_time_max, this.respawn_time);
+
 	if((sdelay + waves >= 5.0) && (this.respawn_time - time > 1.75))
-		this.respawn_countdown = 10; // first number to count down from is 10
+		this.respawn_countdown = 10;
 	else
-		this.respawn_countdown = -1; // do not count down
+		this.respawn_countdown = -1;
 
 	if(autocvar_g_forced_respawn)
 		this.respawn_flags = this.respawn_flags | RESPAWN_FORCE;
 }
-
-// LordHavoc: this hack will be removed when proper _pants/_shirt layers are
-// added to the model skins
-/*void UpdateColorModHack()
-{
-	float c;
-	c = this.clientcolors & 15;
-	// LordHavoc: only bothering to support white, green, red, yellow, blue
-	     if (!teamplay) this.colormod = '0 0 0';
-	else if (c ==  0) this.colormod = '1.00 1.00 1.00';
-	else if (c ==  3) this.colormod = '0.10 1.73 0.10';
-	else if (c ==  4) this.colormod = '1.73 0.10 0.10';
-	else if (c == 12) this.colormod = '1.22 1.22 0.10';
-	else if (c == 13) this.colormod = '0.10 0.10 1.73';
-	else this.colormod = '1 1 1';
-}*/
 
 void respawn(entity this)
 {
@@ -1458,13 +1374,13 @@ void respawn(entity this)
 				SUB_SetFade(this, time + autocvar_g_respawn_ghosts_time, autocvar_g_respawn_ghosts_fadetime);
 		}
 		else
-			SUB_SetFade (this, time, 1); // fade out the corpse immediately
+			SUB_SetFade (this, time, 1);
 	}
 
 	CopyBody(this, 1);
 	this.damagedbycontents = damagedbycontents_prev;
 
-	this.effects |= EF_NODRAW; // prevent another CopyBody
+	this.effects |= EF_NODRAW;
 	PutClientInServer(this);
 }
 
@@ -1476,19 +1392,18 @@ void play_countdown(entity this, float finished, Sound samp)
 		sound(this, CH_INFO, samp, VOL_BASE, ATTEN_NORM);
 }
 
-// it removes special powerups not handled by StatusEffects
 void player_powerups_remove_all(entity this)
 {
 	if (this.items & (IT_SUPERWEAPON | IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS))
 	{
-		// don't play the poweroff sound when the game restarts or the player disconnects
+
 		if (time > game_starttime + 1 && IS_CLIENT(this)
 			&& !(start_items & (IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS)))
 		{
 			sound(this, CH_INFO, SND_POWEROFF, VOL_BASE, ATTEN_NORM);
 		}
 		if (this.items & (IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS))
-			stopsound(this, CH_TRIGGER_SINGLE); // get rid of the pickup sound
+			stopsound(this, CH_TRIGGER_SINGLE);
 		this.items -= (this.items & (IT_SUPERWEAPON | IT_UNLIMITED_AMMO | IT_UNLIMITED_SUPERWEAPONS));
 	}
 }
@@ -1505,27 +1420,26 @@ void player_powerups(entity this)
 	if (IS_DEAD(this))
 		player_powerups_remove_all(this);
 
-	if((this.alpha < 0 || IS_DEAD(this)) && !this.vehicle) // don't apply the flags if the player is gibbed
+	if((this.alpha < 0 || IS_DEAD(this)) && !this.vehicle)
 		return;
 
-	// add a way to see what the items were BEFORE all of these checks for the mutator hook
 	int items_prev = this.items;
 
 	if (!MUTATOR_IS_ENABLED(mutator_instagib))
 	{
-		// NOTE: superweapons are a special case and as such are handled here instead of the status effects system
+
 		if (this.items & IT_SUPERWEAPON)
 		{
 			if (!(STAT(WEAPONS, this) & WEPSET_SUPERWEAPONS))
 			{
 				StatusEffects_remove(STATUSEFFECT_Superweapons, this, STATUSEFFECT_REMOVE_NORMAL);
 				this.items = this.items - (this.items & IT_SUPERWEAPON);
-				//Send_Notification(NOTIF_ALL, NULL, MSG_INFO, INFO_SUPERWEAPON_LOST, this.netname);
+
 				Send_Notification(NOTIF_ONE, this, MSG_CENTER, CENTER_SUPERWEAPON_LOST);
 			}
 			else if (this.items & IT_UNLIMITED_SUPERWEAPONS)
 			{
-				// don't let them run out
+
 			}
 			else
 			{
@@ -1534,7 +1448,7 @@ void player_powerups(entity this)
 				{
 					this.items = this.items - (this.items & IT_SUPERWEAPON);
 					STAT(WEAPONS, this) &= ~WEPSET_SUPERWEAPONS;
-					//Send_Notification(NOTIF_ALL, NULL, MSG_INFO, INFO_SUPERWEAPON_BROKEN, this.netname);
+
 					Send_Notification(NOTIF_ONE, this, MSG_CENTER, CENTER_SUPERWEAPON_BROKEN);
 				}
 			}
@@ -1558,7 +1472,7 @@ void player_powerups(entity this)
 				STAT(WEAPONS, this) &= ~WEPSET_SUPERWEAPONS;
 			}
 		}
-		else if(StatusEffects_active(STATUSEFFECT_Superweapons, this)) // cheaper to check than to update each frame!
+		else if(StatusEffects_active(STATUSEFFECT_Superweapons, this))
 		{
 			StatusEffects_remove(STATUSEFFECT_Superweapons, this, STATUSEFFECT_REMOVE_CLEAR);
 		}
@@ -1577,7 +1491,7 @@ float CalcRegen(float current, float stable, float regenfactor, float regenframe
 {
 	if(current > stable)
 		return current;
-	else if(current > stable - 0.25) // when close enough, "snap"
+	else if(current > stable - 0.25)
 		return stable;
 	else
 		return min(stable, current + (stable - current) * regenfactor * regenframetime);
@@ -1587,7 +1501,7 @@ float CalcRot(float current, float stable, float rotfactor, float rotframetime)
 {
 	if(current < stable)
 		return current;
-	else if(current < stable + 0.25) // when close enough, "snap"
+	else if(current < stable + 0.25)
 		return stable;
 	else
 		return max(stable, current + (stable - current) * rotfactor * rotframetime);
@@ -1661,7 +1575,6 @@ void player_regen(entity this)
 			regenstable, autocvar_g_balance_armor_regen, autocvar_g_balance_armor_regenlinear, regenframetime,
 			rotstable, autocvar_g_balance_armor_rot, autocvar_g_balance_armor_rotlinear, rotframetime);
 
-		// NOTE: max_mod is only applied to health
 		regenstable = regen_health_stable * max_mod;
 		rotstable = regen_health_rotstable * max_mod;
 		regenframetime = (time > this.pauseregen_finished) ? (regen_mod * frametime) : 0;
@@ -1671,8 +1584,6 @@ void player_regen(entity this)
 			rotstable, regen_health_rot, regen_health_rotlinear, rotframetime);
 	}
 
-	// if player rotted to death...  die!
-	// check this outside above checks, as player may still be able to rot to death
 	if(GetResource(this, RES_HEALTH) < 1)
 	{
 		if(this.vehicle)
@@ -1714,7 +1625,6 @@ void GetPressedKeys(entity this)
 		return;
 	}
 
-	// NOTE: GetPressedKeys and PM_dodging_GetPressedKeys use similar code
 	int keys = STAT(PRESSED_KEYS, this);
 	keys = BITSET(keys, KEY_FORWARD, 	CS(this).movement.x > 0);
 	keys = BITSET(keys, KEY_BACKWARD, 	CS(this).movement.x < 0);
@@ -1722,19 +1632,13 @@ void GetPressedKeys(entity this)
 	keys = BITSET(keys, KEY_LEFT, 		CS(this).movement.y < 0);
 
 	keys = BITSET(keys, KEY_JUMP, 		PHYS_INPUT_BUTTON_JUMP(this));
-	keys = BITSET(keys, KEY_CROUCH, 	IS_DUCKED(this)); // workaround: player can't un-crouch until their path is clear, so we keep the button held here
+	keys = BITSET(keys, KEY_CROUCH, 	IS_DUCKED(this));
 	keys = BITSET(keys, KEY_ATCK, 		PHYS_INPUT_BUTTON_ATCK(this));
 	keys = BITSET(keys, KEY_ATCK2, 		PHYS_INPUT_BUTTON_ATCK2(this));
-	CS(this).pressedkeys = keys; // store for other users
+	CS(this).pressedkeys = keys;
 
 	STAT(PRESSED_KEYS, this) = keys;
 }
-
-/*
-======================
-spectate mode routines
-======================
-*/
 
 void SpectateCopy(entity this, entity spectatee)
 {
@@ -1750,10 +1654,10 @@ void SpectateCopy(entity this, entity spectatee)
 	SetResourceExplicit(this, RES_BULLETS, GetResource(spectatee, RES_BULLETS));
 	SetResourceExplicit(this, RES_ROCKETS, GetResource(spectatee, RES_ROCKETS));
 	SetResourceExplicit(this, RES_FUEL, GetResource(spectatee, RES_FUEL));
-	this.effects = spectatee.effects & EFMASK_CHEAP; // eat performance
+	this.effects = spectatee.effects & EFMASK_CHEAP;
 	SetResourceExplicit(this, RES_HEALTH, GetResource(spectatee, RES_HEALTH));
 	CS(this).impulse = 0;
-	this.disableclientprediction = 1; // no need to run prediction on a spectator
+	this.disableclientprediction = 1;
 	this.items = spectatee.items;
 	STAT(LAST_PICKUP, this) = STAT(LAST_PICKUP, spectatee);
 	STAT(HIT_TIME, this) = STAT(HIT_TIME, spectatee);
@@ -1783,8 +1687,6 @@ void SpectateCopy(entity this, entity spectatee)
     {
     	this.angles = spectatee.v_angle;
 
-        //this.fixangle = false;
-        //this.velocity = spectatee.vehicle.velocity;
         this.vehicle_health = spectatee.vehicle_health;
         this.vehicle_shield = spectatee.vehicle_shield;
         this.vehicle_energy = spectatee.vehicle_energy;
@@ -1793,17 +1695,6 @@ void SpectateCopy(entity this, entity spectatee)
         this.vehicle_reload1 = spectatee.vehicle_reload1;
         this.vehicle_reload2 = spectatee.vehicle_reload2;
 
-        //msg_entity = this;
-
-       // WriteByte (MSG_ONE, SVC_SETVIEWANGLES);
-            //WriteAngle(MSG_ONE,  spectatee.v_angle.x);
-           // WriteAngle(MSG_ONE,  spectatee.v_angle.y);
-           // WriteAngle(MSG_ONE,  spectatee.v_angle.z);
-
-        //WriteByte (MSG_ONE, SVC_SETVIEW);
-        //    WriteEntity(MSG_ONE, this);
-        //makevectors(spectatee.v_angle);
-        //setorigin(this, spectatee.origin - v_forward * 400 + v_up * 300);*/
     }
 }
 
@@ -1862,14 +1753,12 @@ void SetSpectatee_status(entity this, int spectatee_num)
 void SetSpectatee(entity this, entity spectatee)
 {
 	if(IS_BOT_CLIENT(this))
-		return; // bots abuse .enemy, this code is useless to them
+		return;
 
 	entity old_spectatee = this.enemy;
 
 	this.enemy = spectatee;
 
-	// WEAPONTODO
-	// these are required to fix the spectator bug with arc
 	if(old_spectatee)
 	{
 		for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
@@ -1892,7 +1781,6 @@ void SetSpectatee(entity this, entity spectatee)
 	if (spectatee)
 		SetSpectatee_status(this, etof(spectatee));
 
-	// needed to update spectator list
 	if(old_spectatee) { ClientData_Touch(old_spectatee); }
 }
 
@@ -1922,13 +1810,13 @@ bool SpectateNext(entity this)
 
 bool SpectatePrev(entity this)
 {
-	// NOTE: chain order is from the highest to the lower entnum (unlike find)
+
 	entity ent = findchain(classname, STR_PLAYER);
-	if (!ent) // no player
+	if (!ent)
 		return false;
 
 	entity first = ent;
-	// skip players until current spectated player
+
 	if(this.enemy)
 	while(ent && ent != this.enemy)
 		ent = ent.chain;
@@ -1955,17 +1843,10 @@ bool SpectatePrev(entity this)
 	return SpectateSet(this);
 }
 
-/*
-=============
-ShowRespawnCountdown()
-
-Update a respawn countdown display.
-=============
-*/
 void ShowRespawnCountdown(entity this)
 {
 	float number;
-	if(!IS_DEAD(this)) // just respawned?
+	if(!IS_DEAD(this))
 		return;
 	else
 	{
@@ -1975,7 +1856,7 @@ void ShowRespawnCountdown(entity this)
 		if(number <= this.respawn_countdown)
 		{
 			this.respawn_countdown = number - 1;
-			if(ceil(this.respawn_time - (time + 0.5)) == number) // only say it if it is the same number even in 0.5s; to prevent overlapping sounds
+			if(ceil(this.respawn_time - (time + 0.5)) == number)
 				{ Send_Notification(NOTIF_ONE, this, MSG_ANNCE, Announcer_PickNumber(CNT_RESPAWN, number)); }
 		}
 	}
@@ -1986,7 +1867,7 @@ bool ShowTeamSelection(entity this)
 {
 	if (!teamplay || autocvar_g_campaign || autocvar_g_balance_teams || this.team_selected || (CS(this).wasplayer && autocvar_g_changeteam_banned) || Player_HasRealForcedTeam(this))
 		return false;
-	if (frametime) // once per frame is more than enough
+	if (frametime)
 		stuffcmd(this, "_scoreboard_team_selection 1\n");
 	return true;
 }
@@ -2020,25 +1901,18 @@ void Join(entity this)
 int GetPlayerLimit()
 {
 	if(g_duel)
-		return 2; // TODO: this workaround is needed since the mutator hook from duel can't be activated before the gametype is loaded (e.g. switching modes via gametype vote screen)
-	// don't return map_maxplayers during intermission as it would interfere with MapHasRightSize()
+		return 2;
+
 	int player_limit = (autocvar_g_maxplayers >= 0 || intermission_running) ? autocvar_g_maxplayers : map_maxplayers;
 	MUTATOR_CALLHOOK(GetPlayerLimit, player_limit);
 	player_limit = M_ARGV(0, int);
 	return player_limit < maxclients ? player_limit : 0;
 }
 
-/**
- * Determines whether the player is allowed to join. This depends on cvar
- * g_maxplayers, if it isn't used this function always return true, otherwise
- * it checks whether the number of currently playing players exceeds g_maxplayers.
- * @return int number of free slots for players, 0 if none
- */
 int nJoinAllowed(entity this, entity ignore)
 {
 	if(!ignore)
-	// this is called that way when checking if anyone may be able to join (to build qcstatus)
-	// so report 0 free slots if restricted
+
 	{
 		if(autocvar_g_forced_team_otherwise == "spectate")
 			return 0;
@@ -2047,7 +1921,7 @@ int nJoinAllowed(entity this, entity ignore)
 	}
 
 	if(this && (Player_GetForcedTeamIndex(this) == TEAM_FORCE_SPECTATOR))
-		return 0; // forced spectators can never join
+		return 0;
 
 	static float msg_time = 0;
 	if(this && !INGAME(this) && ignore && PlayerInList(this, autocvar_g_playban_list))
@@ -2060,7 +1934,6 @@ int nJoinAllowed(entity this, entity ignore)
 		return 0;
 	}
 
-	// TODO simplify this
 	int totalClients = 0;
 	int currentlyPlaying = 0;
 	FOREACH_CLIENT(true, {
@@ -2100,7 +1973,7 @@ bool joinAllowed(entity this)
 
 void show_entnum(entity this)
 {
-	// waypoint editor implements a similar feature for waypoints
+
 	if (waypointeditor_enabled)
 		return;
 
@@ -2136,8 +2009,7 @@ bool PlayerThink(entity this)
 	}
 
 	if (timeout_status == TIMEOUT_ACTIVE) {
-		// don't allow the player to turn around while game is paused
-		// FIXME turn this into CSQC stuff
+
 		this.v_angle = this.lastV_angle;
 		this.angles = this.lastV_angle;
 		this.fixangle = true;
@@ -2150,7 +2022,7 @@ bool PlayerThink(entity this)
 	if (IS_DEAD(this)) {
 		if (this.personal && g_race_qualifying) {
 			if (time > this.respawn_time) {
-				STAT(RESPAWN_TIME, this) = this.respawn_time = time + 1; // only retry once a second
+				STAT(RESPAWN_TIME, this) = this.respawn_time = time + 1;
 				respawn(this);
 				CS(this).impulse = CHIMPULSE_SPEEDRUN.impulse;
 			}
@@ -2193,7 +2065,7 @@ bool PlayerThink(entity this)
 				{
 					if (time > this.respawn_time)
 					{
-						this.respawn_time = time + 1; // only retry once a second
+						this.respawn_time = time + 1;
 						this.respawn_time_max = this.respawn_time;
 						respawn(this);
 					}
@@ -2216,7 +2088,6 @@ bool PlayerThink(entity this)
 				STAT(RESPAWN_TIME, this) = this.respawn_time;
 		}
 
-		// if respawning, invert stat_respawn_time to indicate this, the client translates it
 		if (this.deadflag == DEAD_RESPAWNING && STAT(RESPAWN_TIME, this) > 0)
 			STAT(RESPAWN_TIME, this) *= -1;
 
@@ -2230,8 +2101,6 @@ bool PlayerThink(entity this)
 		stuffcmd(this, sprintf("\ncl_shootfromfixedorigin \"%s\"\n", autocvar_g_shootfromfixedorigin));
 	}
 
-	// reset gun alignment when dual wielding status changes
-	// to ensure guns are always aligned right and left
 	bool dualwielding = W_DualWielding(this);
 	if(this.dualwielding_prev != dualwielding)
 	{
@@ -2239,8 +2108,6 @@ bool PlayerThink(entity this)
 		this.dualwielding_prev = dualwielding;
 	}
 
-	// LordHavoc: allow firing on move frames (sub-ticrate), this gives better timing on slow servers
-	//if(frametime)
 	{
 		for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 		{
@@ -2253,8 +2120,7 @@ bool PlayerThink(entity this)
 
 	if (frametime)
 	{
-		// WEAPONTODO: Add a weapon request for this
-		// rot vortex charge to the charge limit
+
 		for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 		{
 			.entity weaponentity = weaponentities[slot];
@@ -2273,7 +2139,7 @@ bool PlayerThink(entity this)
 }
 
 .bool would_spectate;
-// merged SpectatorThink and ObserverThink (old names are here so you can grep for them)
+
 void ObserverOrSpectatorThink(entity this)
 {
 	bool is_spec = IS_SPEC(this);
@@ -2320,7 +2186,7 @@ void ObserverOrSpectatorThink(entity this)
 				PutClientInServer(this);
 			}
 			else
-				this.would_spectate = false; // unable to spectate anyone
+				this.would_spectate = false;
 			if (is_spec)
 				CS(this).impulse = 0;
 		} else if (is_spec) {
@@ -2352,11 +2218,11 @@ void ObserverOrSpectatorThink(entity this)
 			int preferred_movetype = (wouldclip ? MOVETYPE_FLY_WORLDONLY : MOVETYPE_NOCLIP);
 			set_movetype(this, preferred_movetype);
 		}
-	} else { // jump pressed
+	} else {
 		if ((is_spec && !(PHYS_INPUT_BUTTON_ATCK(this) || PHYS_INPUT_BUTTON_ATCK2(this)))
 			|| (!is_spec && !(PHYS_INPUT_BUTTON_ATCK(this) || PHYS_INPUT_BUTTON_JUMP(this)))) {
 			this.flags |= FL_JUMPRELEASED;
-			// primary attack pressed
+
 			if(this.flags & FL_SPAWNING)
 			{
 				this.flags &= ~FL_SPAWNING;
@@ -2394,7 +2260,7 @@ void PlayerUseKey(entity this)
 			entity head, closest_target = NULL;
 			head = WarpZone_FindRadius(this.origin, autocvar_g_vehicles_enter_radius, true);
 
-			while(head) // find the closest acceptable target to enter
+			while(head)
 			{
 				if(IS_VEHICLE(head) && !IS_DEAD(head) && head.takedamage != DAMAGE_NO)
 				if(!head.owner || ((head.vehicle_flags & VHF_MULTISLOT) && SAME_TEAM(head.owner, this)))
@@ -2414,32 +2280,21 @@ void PlayerUseKey(entity this)
 		}
 	}
 
-	// a use key was pressed; call handlers
 	MUTATOR_CALLHOOK(PlayerUseKey, this);
 }
 
-
-/*
-=============
-PlayerPreThink
-
-Called every frame for each client before the physics are run
-=============
-*/
 .float last_vehiclecheck;
 void PlayerPreThink (entity this)
 {
-	STAT(GUNALIGN, this) = CS_CVAR(this).cvar_cl_gunalign; // TODO
+	STAT(GUNALIGN, this) = CS_CVAR(this).cvar_cl_gunalign;
 	STAT(MOVEVARS_CL_TRACK_CANJUMP, this) = CS_CVAR(this).cvar_cl_movement_track_canjump;
 
 	WarpZone_PlayerPhysics_FixVAngle(this);
 
 	if (frametime) {
-		// physics frames: update anticheat stuff
+
 		anticheat_prethink(this);
 
-		// WORKAROUND: only use dropclient in server frames (frametime set).
-		// Never use it in cl_movement frames (frametime zero).
 		if (blockSpectators && IS_REAL_CLIENT(this)
 			&& (IS_SPEC(this) || IS_OBSERVER(this)) && !INGAME(this)
 			&& time > (CS(this).spectatortime + autocvar_g_maxplayers_spectator_blocktime))
@@ -2451,7 +2306,6 @@ void PlayerPreThink (entity this)
 
 	zoomstate_set = false;
 
-	// Check for nameless players
 	if (this.netname == "" || this.netname != CS(this).netname_previous)
 	{
 		bool assume_unchanged = (CS(this).netname_previous == "");
@@ -2461,39 +2315,37 @@ void PlayerPreThink (entity this)
 			this.netname = strzone(strcat(substring(this.netname, 0, new_length), "^7"));
 			sprint(this, sprintf("Warning: your name is longer than %d characters, it has been truncated.\n", autocvar_sv_name_maxlength));
 			assume_unchanged = false;
-			// stuffcmd(this, strcat("name ", this.netname, "\n")); // maybe?
+
 		}
 		if (isInvisibleString(this.netname))
 		{
 			this.netname = strzone(sprintf("Player#%d", this.playerid));
 			sprint(this, "Warning: invisible names are not allowed.\n");
 			assume_unchanged = false;
-			// stuffcmd(this, strcat("name ", this.netname, "\n")); // maybe?
+
 		}
 		if (!assume_unchanged && autocvar_sv_eventlog)
 			GameLogEcho(strcat(":name:", ftos(this.playerid), ":", playername(this.netname, this.team, false)));
 		strcpy(CS(this).netname_previous, this.netname);
 	}
 
-	// version nagging
 	if (CS(this).version_nagtime && CS_CVAR(this).cvar_g_xonoticversion && time > CS(this).version_nagtime) {
         CS(this).version_nagtime = 0;
         if (strstrofs(CS_CVAR(this).cvar_g_xonoticversion, "git", 0) >= 0 || strstrofs(CS_CVAR(this).cvar_g_xonoticversion, "autobuild", 0) >= 0) {
-            // git client
+
         } else if (strstrofs(autocvar_g_xonoticversion, "git", 0) >= 0 || strstrofs(autocvar_g_xonoticversion, "autobuild", 0) >= 0) {
-            // git server
+
             Send_Notification(NOTIF_ONE_ONLY, this, MSG_INFO, INFO_VERSION_BETA, autocvar_g_xonoticversion, CS_CVAR(this).cvar_g_xonoticversion);
         } else {
             int r = vercmp(CS_CVAR(this).cvar_g_xonoticversion, autocvar_g_xonoticversion);
-            if (r < 0) { // old client
+            if (r < 0) {
                 Send_Notification(NOTIF_ONE_ONLY, this, MSG_INFO, INFO_VERSION_OUTDATED, autocvar_g_xonoticversion, CS_CVAR(this).cvar_g_xonoticversion);
-            } else if (r > 0) { // old server
+            } else if (r > 0) {
                 Send_Notification(NOTIF_ONE_ONLY, this, MSG_INFO, INFO_VERSION_OLD, autocvar_g_xonoticversion, CS_CVAR(this).cvar_g_xonoticversion);
             }
         }
     }
 
-	// GOD MODE info
 	if (!(this.flags & FL_GODMODE) && this.max_armorvalue)
 	{
 		Send_Notification(NOTIF_ONE_ONLY, this, MSG_INFO, INFO_GODMODE_OFF, this.max_armorvalue);
@@ -2571,8 +2423,7 @@ void PlayerPreThink (entity this)
 	{
 		bool early_join_requested = (CS(this).autojoin_checked < 0);
 		CS(this).autojoin_checked = 1;
-		// don't do this in ClientConnect
-		// many things can go wrong if a client is spawned as player on connection
+
 		if (early_join_requested || MUTATOR_CALLHOOK(AutoJoinOnConnection, this)
 			|| (!(autocvar_sv_spectate || autocvar_g_campaign || (Player_GetForcedTeamIndex(this) == TEAM_FORCE_SPECTATOR))
 				&& (!teamplay || autocvar_g_balance_teams)))
@@ -2586,7 +2437,6 @@ void PlayerPreThink (entity this)
 		ObserverOrSpectatorThink(this);
 	}
 
-	// WEAPONTODO: Add weapon request for this
 	if (!zoomstate_set) {
 		bool wep_zoomed = false;
 		for(int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
@@ -2638,7 +2488,7 @@ void DrownPlayer(entity this)
 		if (!STAT(AIR_FINISHED, this))
 			STAT(AIR_FINISHED, this) = time + autocvar_g_balance_contents_drowndelay;
 		if (STAT(AIR_FINISHED, this) < time)
-		{	// drown!
+		{
 			if (this.pain_finished < time)
 			{
 				Damage (this, NULL, NULL, autocvar_g_balance_contents_playerdamage_drowning * autocvar_g_balance_contents_damagerate, DEATH_DROWN.m_id, DMG_NOWEP, this.origin, '0 0 0');
@@ -2665,27 +2515,20 @@ void Player_Physics(entity this)
 	CS(this).pm_frametime = 0;
 }
 
-/*
-=============
-PlayerPostThink
-
-Called every frame for each client after the physics are run
-=============
-*/
 void PlayerPostThink (entity this)
 {
 	Player_Physics(this);
 
 	if (autocvar_sv_maxidle > 0 || (IS_PLAYER(this) && autocvar_sv_maxidle_playertospectator > 0))
-	if (frametime) // WORKAROUND: only use dropclient in server frames (frametime set). Never use it in cl_movement frames (frametime zero).
+	if (frametime)
 	if (IS_REAL_CLIENT(this))
 	if (IS_PLAYER(this) || autocvar_sv_maxidle_alsokickspectators)
-	if (!intermission_running) // NextLevel() kills all centerprints after setting this true
+	if (!intermission_running)
 	{
 		int totalClients = 0;
 		if(autocvar_sv_maxidle > 0 && autocvar_sv_maxidle_slots > 0)
 		{
-			// maxidle disabled in local matches by not counting clients (totalClients 0)
+
 			if (server_is_dedicated)
 			{
 				FOREACH_CLIENT(IS_REAL_CLIENT(it) || autocvar_sv_maxidle_slots_countbots,
@@ -2706,10 +2549,10 @@ void PlayerPostThink (entity this)
 
 		if (totalClients < autocvar_sv_maxidle_minplayers)
 		{
-			// idle kick disabled
+
 			CS(this).parm_idlesince = time;
 		}
-		else if (time - CS(this).parm_idlesince < 1) // instead of (time == this.parm_idlesince) to support sv_maxidle <= 10
+		else if (time - CS(this).parm_idlesince < 1)
 		{
 			if (CS(this).idlekick_lasttimeleft)
 			{
@@ -2723,7 +2566,7 @@ void PlayerPostThink (entity this)
 			if (IS_PLAYER(this) && autocvar_sv_maxidle_playertospectator > 0)
 				maxidle_time = autocvar_sv_maxidle_playertospectator;
 			float timeleft = ceil(maxidle_time - (time - CS(this).parm_idlesince));
-			float countdown_time = max(min(10, maxidle_time - 1), ceil(maxidle_time * 0.33)); // - 1 to support maxidle_time <= 10
+			float countdown_time = max(min(10, maxidle_time - 1), ceil(maxidle_time * 0.33));
 			if (timeleft == countdown_time && !CS(this).idlekick_lasttimeleft)
 			{
 				if (IS_PLAYER(this) && autocvar_sv_maxidle_playertospectator > 0)
@@ -2767,8 +2610,7 @@ void PlayerPostThink (entity this)
 	if (IS_PLAYER(this)) {
 		if(this.death_time == time && IS_DEAD(this))
 		{
-			// player's bbox gets resized now, instead of in the damage event that killed the player,
-			// once all the damage events of this frame have been processed with normal size
+
 			this.maxs.z = 5;
 			setsize(this, this.mins, this.maxs);
 		}
@@ -2796,7 +2638,6 @@ void PlayerPostThink (entity this)
 	CSQCMODEL_AUTOUPDATE(this);
 }
 
-// hack to copy the button fields from the client entity to the Client State
 void PM_UpdateButtons(entity this, entity store)
 {
 	if(this.impulse)
@@ -2806,7 +2647,7 @@ void PM_UpdateButtons(entity this, entity store)
 	bool typing = this.buttonchat || this.button12;
 
 	store.button0 = (typing) ? 0 : this.button0;
-	//button1?!
+
 	store.button2 = (typing) ? 0 : this.button2;
 	store.button3 = (typing) ? 0 : this.button3;
 	store.button4 = this.button4;

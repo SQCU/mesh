@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "observed_at": 1788504857,
+  "definition": "batched convex-halfspace reconciliation with explicit SPD3 proximal solve and Morton-BVH packet traversal",
+  "environment": {
+    "host": "Ms-MacBook-Pro.local",
+    "architecture": "arm64",
+    "numpy": "2.5.2",
+    "dtype": "float64"
+  },
+  "working_set_measure": {
+    "contact_row_product_scratch_stream_mass": 1,
+    "materialized_spd_tensor_mass": 0,
+    "retained_prior_interval_row_mass_per_front": 0
+  },
+  "proximal_system_measure": {
+    "system_mass": 8192,
+    "constraint_row_mass": 32768,
+    "median_seconds": 0.0007762080058455467,
+    "maximum_unit_direction_residual": 3.3306690738754696e-16
+  },
+  "spatially_sparse_measure": {
+    "solid_mass": 10000,
+    "point_mass": 256,
+    "median_seconds": 0.001637083973037079,
+    "projection_sweep_mass": 1,
+    "candidate_pair_mass": 512,
+    "plane_evaluation_mass": 3072,
+    "residual_penetration_point_mass": 0
+  },
+  "connected_horizon_measure": {
+    "solid_mass": 4096,
+    "point_mass": 1,
+    "median_seconds": 0.004944417014485225,
+    "projection_sweep_mass": 13,
+    "candidate_pair_mass": 4097,
+    "plane_evaluation_mass": 24582,
+    "residual_penetration_point_mass": 0
+  }
+}

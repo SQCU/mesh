@@ -3,24 +3,24 @@
 #include <common/weapons/all.qh>
 
 CLASS(OverkillRocketPropelledChainsaw, Weapon)
-/* spawnfunc */ ATTRIB(OverkillRocketPropelledChainsaw, m_canonical_spawnfunc, string, "weapon_okrpc");
-/* ammotype  */ ATTRIB(OverkillRocketPropelledChainsaw, ammo_type, Resource, RES_ROCKETS);
-/* impulse   */ ATTRIB(OverkillRocketPropelledChainsaw, impulse, int, 9);
-/* flags     */ ATTRIB(OverkillRocketPropelledChainsaw, spawnflags, int, WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_HIDDEN | WEP_FLAG_CANCLIMB | WEP_FLAG_RELOADABLE | WEP_TYPE_SPLASH | WEP_FLAG_SUPERWEAPON);
-/* rating    */ ATTRIB(OverkillRocketPropelledChainsaw, bot_pickupbasevalue, float, 10000);
-/* color     */ ATTRIB(OverkillRocketPropelledChainsaw, wpcolor, vector, '0.5 0.5 0');
-/* modelname */ ATTRIB(OverkillRocketPropelledChainsaw, mdl, string, "ok_rl");
+                ATTRIB(OverkillRocketPropelledChainsaw, m_canonical_spawnfunc, string, "weapon_okrpc");
+                ATTRIB(OverkillRocketPropelledChainsaw, ammo_type, Resource, RES_ROCKETS);
+                ATTRIB(OverkillRocketPropelledChainsaw, impulse, int, 9);
+                ATTRIB(OverkillRocketPropelledChainsaw, spawnflags, int, WEP_FLAG_MUTATORBLOCKED | WEP_FLAG_HIDDEN | WEP_FLAG_CANCLIMB | WEP_FLAG_RELOADABLE | WEP_TYPE_SPLASH | WEP_FLAG_SUPERWEAPON);
+                ATTRIB(OverkillRocketPropelledChainsaw, bot_pickupbasevalue, float, 10000);
+                ATTRIB(OverkillRocketPropelledChainsaw, wpcolor, vector, '0.5 0.5 0');
+                ATTRIB(OverkillRocketPropelledChainsaw, mdl, string, "ok_rl");
 #ifdef GAMEQC
-/* model     */ ATTRIB(OverkillRocketPropelledChainsaw, m_model, Model, MDL_RPC_ITEM);
-/* flash mdl */ ATTRIB(OverkillRocketPropelledChainsaw, m_muzzlemodel, Model, MDL_RPC_MUZZLEFLASH);
-/* flash eff */ ATTRIB(OverkillRocketPropelledChainsaw, m_muzzleeffect, entity, EFFECT_ROCKET_MUZZLEFLASH);
+                ATTRIB(OverkillRocketPropelledChainsaw, m_model, Model, MDL_RPC_ITEM);
+                ATTRIB(OverkillRocketPropelledChainsaw, m_muzzlemodel, Model, MDL_RPC_MUZZLEFLASH);
+                ATTRIB(OverkillRocketPropelledChainsaw, m_muzzleeffect, entity, EFFECT_ROCKET_MUZZLEFLASH);
 #endif
-/* crosshair */ ATTRIB(OverkillRocketPropelledChainsaw, w_crosshair, string, "gfx/crosshairrocketlauncher");
-/* crosshair */ ATTRIB(OverkillRocketPropelledChainsaw, w_crosshair_size, float, 0.6);
-/* wepimg    */ ATTRIB(OverkillRocketPropelledChainsaw, model2, string, "weaponrpc");
-/* refname   */ ATTRIB(OverkillRocketPropelledChainsaw, netname, string, "okrpc");
-/* wepname   */ ATTRIB(OverkillRocketPropelledChainsaw, m_name, string, _("Overkill Rocket Propelled Chainsaw"));
-/* legacy    */ ATTRIB(OverkillRocketPropelledChainsaw, m_deprecated_netname, string, "rpc");
+                ATTRIB(OverkillRocketPropelledChainsaw, w_crosshair, string, "gfx/crosshairrocketlauncher");
+                ATTRIB(OverkillRocketPropelledChainsaw, w_crosshair_size, float, 0.6);
+                ATTRIB(OverkillRocketPropelledChainsaw, model2, string, "weaponrpc");
+                ATTRIB(OverkillRocketPropelledChainsaw, netname, string, "okrpc");
+                ATTRIB(OverkillRocketPropelledChainsaw, m_name, string, _("Overkill Rocket Propelled Chainsaw"));
+                ATTRIB(OverkillRocketPropelledChainsaw, m_deprecated_netname, string, "rpc");
 
 #define X(BEGIN, P, END, class, prefix) \
 	BEGIN(class) \
@@ -65,6 +65,3 @@ CLASS(OverkillRocketPropelledChainsaw, Weapon)
 
 ENDCLASS(OverkillRocketPropelledChainsaw)
 REGISTER_WEAPON(OVERKILL_RPC, okrpc, NEW(OverkillRocketPropelledChainsaw));
-
-//SPAWNFUNC_WEAPON(weapon_okrpc, WEP_OVERKILL_RPC)
-//SPAWNFUNC_WEAPON(weapon_rpc, WEP_OVERKILL_RPC)

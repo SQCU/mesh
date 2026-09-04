@@ -1,7 +1,5 @@
 #include "anglestransform.qh"
 
-// angles transforms
-// angles in fixedmakevectors/fixedvectoangles space
 vector AnglesTransform_Apply(vector transform, vector v)
 {
 	vector forward, right, up;
@@ -23,10 +21,7 @@ vector AnglesTransform_Invert(vector transform)
 	vector i_forward, i_up;
 	vector forward, right, up;
 	FIXED_MAKE_VECTORS(transform, forward, right, up);
-	// we want angles that turn forward into '1 0 0', right into '0 1 0' and up into '0 0 1'
-	// but these are orthogonal unit vectors!
-	// so to invert, we can simply fixedvectoangles the TRANSPOSED matrix
-	// TODO is this always -transform?
+
 	i_forward.x = forward.x;
 	i_forward.y = -right.x;
 	i_forward.z = up.x;
@@ -38,25 +33,17 @@ vector AnglesTransform_Invert(vector transform)
 
 vector AnglesTransform_TurnDirectionFR(vector transform)
 {
-	// turn 180 degrees around v_up
-	// changes in-direction to out-direction
-	//fixedmakevectors(transform);
-	//return fixedvectoangles2(-1 * v_forward, 1 * v_up);
+
 	transform.x = -transform.x;
 	transform.y = 180 + transform.y;
 	transform.z = -transform.z;
-	// pitch: -s +c
-	// yaw:   -s -c
-	// roll:  -s +c
+
 	return transform;
 }
 
 vector AnglesTransform_TurnDirectionFU(vector transform)
 {
-	// turn 180 degrees around v_up
-	// changes in-direction to out-direction
-	//fixedmakevectors(transform);
-	//return fixedvectoangles2(-1 * v_forward, 1 * v_up);
+
 	transform.x = -transform.x;
 	transform.y = 180 + transform.y;
 	transform.z = 180 - transform.z;
@@ -76,14 +63,14 @@ vector AnglesTransform_LeftDivide(vector from_transform, vector to_transform)
 vector AnglesTransform_Normalize(vector t, float minimize_roll)
 {
 	float need_flip;
-	// first, bring all angles in their range...
+
 	t.x = t.x - 360 * rint(t.x / 360);
 	t.y = t.y - 360 * rint(t.y / 360);
 	t.z = t.z - 360 * rint(t.z / 360);
 	if(minimize_roll)
 		need_flip = (t.z > 90 || t.z <= -90);
 	else
-		need_flip = (t.x > 90 || t.x < -90); // for pitch we prefer to allow exactly -90 degrees for looking straight down
+		need_flip = (t.x > 90 || t.x < -90);
 	if(need_flip)
 	{
 		if(t.x >= 0) t.x = 180 - t.x; else t.x = -180 - t.x;
@@ -98,17 +85,10 @@ vector AnglesTransform_CancelRoll(vector t)
 	const float epsilon = 30;
 	float f;
 
-	// constraints:
-	// forward vector (NOT SO important)
-	// right vector, up vector: screen rotation (MORE important)
-	// choose best match among all pitch-yaw only rotations
-
-	// FIXME find a better method
-
 	f = fabs(t.x - (-90)) / epsilon;
 	if(f < 1)
 	{
-		//t_x = -90;
+
 		t.y += t.z;
 		t.z = 0;
 	}
@@ -117,7 +97,7 @@ vector AnglesTransform_CancelRoll(vector t)
 		f = fabs(t.x - 90) / epsilon;
 		if(f < 1)
 		{
-			//t_x = 90;
+
 			t.y -= t.z;
 			t.z = 0;
 		}
@@ -191,9 +171,7 @@ vector AnglesTransform_ToVAngles(vector v)
 
 vector AnglesTransform_Multiply_GetPostShift(vector t0, vector st0, vector t1, vector st1)
 {
-	// we want the result of:
-	//   t0 * (t1 * p + st1) + st0
-	//   t0 * t1 * p + t0 * st1 + st0
+
 	return st0 + AnglesTransform_Apply(t0, st1);
 }
 vector AnglesTransform_PrePostShift_GetPostShift(vector sf, vector t, vector st)

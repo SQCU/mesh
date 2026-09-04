@@ -7,11 +7,8 @@
 #include <common/mapinfo.qh>
 #include <common/scores.qh>
 
-// Mod icons (#10)
-
 void HUD_ModIcons_Export(int fh)
 {
-	// allow saving cvars that aesthetically change the panel into hud skin files
 
 	FOREACH(Gametypes, it.m_modicons_export, it.m_modicons_export(fh));
 }
@@ -36,8 +33,6 @@ void HUD_ModIcons()
 	else
 		mod_alpha = max(mod_alpha - frametime * 2, 0);
 
-	//if(mod_alpha <= 0)
-	//	return;
 	panel_fade_alpha *= mod_alpha;
 	HUD_Panel_LoadCvars();
 

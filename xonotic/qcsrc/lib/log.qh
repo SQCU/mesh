@@ -33,16 +33,14 @@ void print_assertfailed_fatal(string expr);
 
 #define ASSERT_LESS(name, var, const) noref int name[(const - var + 1)];
 
-
 #if defined(MENUQC)
 string(string, string...) strcat1n = #53;
 #else
 string(string, string...) strcat1n = #115;
 #endif
 
-// would be nice if __FUNC__ could be concatenated at compile time
 #if 0
-	// less work, bigger binary
+
 	#define __SOURCELOC__ (sprintf("^7%s^9(^9"__FILE__"^7:^9"STR(__LINE__)"^7)", __FUNC__))
 #else
 	#define __SOURCELOC__ (sprintf("^7%s^9(^9%s^7:^9%s^7)", __FUNC__, __FILE__, STR(__LINE__)))
@@ -74,7 +72,7 @@ string(string, string...) strcat1n = #115;
 		if (autocvar_developer > 1) dprint(strcat1n(_LOG_HEADER("^5INFO"), "\n")); \
 		string __s = s; \
 		print("^7", __s); \
-		/* TODO: unconditionally add a newline when possible */ \
+		                                                        \
 		if (str2chr(__s, strlen(__s) - 1) != '\n') { print("\n"); } \
 	MACRO_END
 
@@ -91,7 +89,6 @@ string(string, string...) strcat1n = #115;
 		if (autocvar_developer > 1) dprint(msg); \
 	MACRO_END
 
-// same as LOG_INFO but without any debug information that bloats console output and compiled program files
 #define  LOG_HELP(...) _LOG_HELP(strcat1n(__VA_ARGS__))
 #define  LOG_HELPF(...) _LOG_HELP(sprintf(__VA_ARGS__))
 #define _LOG_HELP(s) \
@@ -100,7 +97,6 @@ string(string, string...) strcat1n = #115;
 		print("^7", __s, (str2chr(__s, strlen(__s) - 1) != '\n') ? "\n" : ""); \
 	MACRO_END
 
-// TODO: this sucks, lets find a better way to do backtraces?
 #define _backtrace() builtin_remove(NULL)
 
 noref int autocvar_developer;
@@ -121,12 +117,12 @@ noref bool autocvar_prvm_backtraceforwarnings;
 
 void print_assertfailed_severe(string expr)
 {
-	// this is inside a function to avoid expanding it on compilation everytime
+
 	LOG_SEVERE("assertion failed: `", expr, "`\n");
 }
 
 void print_assertfailed_fatal(string expr)
 {
-	// this is inside a function to avoid expanding it on compilation everytime
+
 	LOG_FATAL("assertion failed: `", expr, "`\n");
 }

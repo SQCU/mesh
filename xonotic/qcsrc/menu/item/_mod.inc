@@ -1,4 +1,4 @@
-// generated file; do not modify
+
 #include <menu/item/borderimage.qc>
 #include <menu/item/button.qc>
 #include <menu/item/checkbox.qc>

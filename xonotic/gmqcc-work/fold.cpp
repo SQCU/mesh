@@ -10,22 +10,9 @@
 #define FOLD_STRING_UNTRANSLATE_HTSIZE 1024
 #define FOLD_STRING_DOTRANSLATE_HTSIZE 1024
 
-/* The options to use for inexact and arithmetic exceptions */
 #define FOLD_ROUNDING SFLOAT_ROUND_NEAREST_EVEN
 #define FOLD_TINYNESS SFLOAT_TBEFORE
 
-/*
- * Comparing float values is an unsafe operation when the operands to the
- * comparison are floating point values that are inexact. For instance 1/3 is an
- * inexact value. The FPU is meant to raise exceptions when these sorts of things
- * happen, including division by zero, underflows and overflows. The C standard
- * library provides us with the <fenv.h> header to gain access to the floating-
- * point environment and lets us set the rounding mode and check for these exceptions.
- * The problem is the standard C library allows an implementation to leave these
- * stubbed out and does not require they be implemented. Furthermore, depending
- * on implementations there is no control over the FPU. This is an IEE 754
- * conforming implementation in software to compensate.
- */
 typedef uint32_t sfloat_t;
 
 union sfloat_cast_t {
@@ -33,7 +20,6 @@ union sfloat_cast_t {
     sfloat_t s;
 };
 
-/* Exception flags */
 enum sfloat_exceptionflags_t {
     SFLOAT_NOEXCEPT  = 0,
     SFLOAT_INVALID   = 1,
@@ -43,7 +29,6 @@ enum sfloat_exceptionflags_t {
     SFLOAT_INEXACT   = 32
 };
 
-/* Rounding modes */
 enum sfloat_roundingmode_t {
     SFLOAT_ROUND_NEAREST_EVEN,
     SFLOAT_ROUND_DOWN,
@@ -51,7 +36,6 @@ enum sfloat_roundingmode_t {
     SFLOAT_ROUND_TO_ZERO
 };
 
-/* Underflow tininess-detection mode */
 enum sfloat_tdetect_t {
     SFLOAT_TAFTER,
     SFLOAT_TBEFORE
@@ -63,9 +47,8 @@ struct sfloat_state_t {
     sfloat_tdetect_t tiny;
 };
 
-/* Counts the number of leading zero bits before the most-significand one bit. */
 #ifdef _MSC_VER
-/* MSVC has an intrinsic for this */
+
     static GMQCC_INLINE uint32_t sfloat_clz(uint32_t x) {
         int r = 0;
         _BitScanForward(&r, x);
@@ -74,11 +57,11 @@ struct sfloat_state_t {
 #   define SFLOAT_CLZ(X, SUB) \
         (sfloat_clz((X)) - (SUB))
 #elif defined(__GNUC__) || defined(__CLANG__)
-/* Clang and GCC have a builtin for this */
+
 #   define SFLOAT_CLZ(X, SUB) \
         (__builtin_clz((X)) - (SUB))
 #else
-/* Native fallback */
+
     static GMQCC_INLINE uint32_t sfloat_popcnt(uint32_t x) {
         x -= ((x >> 1) & 0x55555555);
         x  = (((x >> 2) & 0x33333333) + (x & 0x33333333));
@@ -99,25 +82,17 @@ struct sfloat_state_t {
         (sfloat_clz((X) - (SUB)))
 #endif
 
-/* The value of a NaN */
 #define SFLOAT_NAN 0xFFFFFFFF
-/* Test if NaN */
+
 #define SFLOAT_ISNAN(A) \
     (0xFF000000 < (uint32_t)((A) << 1))
-/* Test if signaling NaN */
+
 #define SFLOAT_ISSNAN(A) \
     (((((A) >> 22) & 0x1FF) == 0x1FE) && ((A) & 0x003FFFFF))
-/* Raise exception */
+
 #define SFLOAT_RAISE(STATE, FLAGS) \
     ((STATE)->exceptionflags = (sfloat_exceptionflags_t)((STATE)->exceptionflags | (FLAGS)))
-/*
- * Shifts `A' right by the number of bits given in `COUNT'. If any non-zero bits
- * are shifted off they are forced into the least significand bit of the result
- * by setting it to one. As a result of this, the value of `COUNT' can be
- * arbitrarily large; if `COUNT' is greater than 32, the result will be either
- * zero or one, depending on whether `A' is a zero or non-zero. The result is
- * stored into the value pointed by `Z'.
- */
+
 #define SFLOAT_SHIFT(SIZE, A, COUNT, Z)                                      \
     *(Z) = ((COUNT) == 0)                                                    \
         ? 1                                                                  \
@@ -125,41 +100,21 @@ struct sfloat_state_t {
             ? ((A) >> (COUNT)) | (((A) << ((-(COUNT)) & ((SIZE) - 1))) != 0) \
             : ((A) != 0))
 
-/* Extract fractional component */
 #define SFLOAT_EXTRACT_FRAC(X) \
     ((uint32_t)((X) & 0x007FFFFF))
-/* Extract exponent component */
+
 #define SFLOAT_EXTRACT_EXP(X) \
     ((int16_t)((X) >> 23) & 0xFF)
-/* Extract sign bit */
+
 #define SFLOAT_EXTRACT_SIGN(X) \
     ((X) >> 31)
-/*
- * Normalizes the subnormal value represented by the denormalized significand
- * `SA'. The normalized exponent and significand are stored at the locations
- * pointed by `Z' and `SZ' respectively.
- */
+
 #define SFLOAT_SUBNORMALIZE(SA, Z, SZ) \
     (void)(*(SZ) = (SA) << SFLOAT_CLZ((SA), 8), *(Z) = 1 - SFLOAT_CLZ((SA), 8))
-/*
- * Packs the sign `SIGN', exponent `EXP' and significand `SIG' into the value
- * giving the result.
- *
- * After the shifting into their proper positions, the fields are added together
- * to form the result. This means any integer portion of `SIG' will be added
- * to the exponent. Similarly, because a properly normalized significand will
- * always have an integer portion equal to one, the exponent input `EXP' should
- * be one less than the desired result exponent whenever the significant input
- * `SIG' is a complete, normalized significand.
- */
+
 #define SFLOAT_PACK(SIGN, EXP, SIG) \
     (sfloat_t)((((uint32_t)(SIGN)) << 31) + (((uint32_t)(EXP)) << 23) + (SIG))
 
-/*
- * Takes two values `a' and `b', one of which is a NaN, and returns the appropriate
- * NaN result. If either `a' or `b' is a signaling NaN than an invalid exception is
- * raised.
- */
 static sfloat_t sfloat_propagate_nan(sfloat_state_t *state, sfloat_t a, sfloat_t b) {
     bool isnan_a  = SFLOAT_ISNAN(a);
     bool issnan_a = SFLOAT_ISSNAN(a);
@@ -176,27 +131,6 @@ static sfloat_t sfloat_propagate_nan(sfloat_state_t *state, sfloat_t a, sfloat_t
     return b;
 }
 
-/*
- * Takes an abstract value having sign `sign_z', exponent `exp_z', and significand
- * `sig_z' and returns the appropriate value corresponding to the abstract input.
- *
- * The abstract value is simply rounded and packed into the format. If the abstract
- * input cannot be represented exactly an inexact exception is raised. If the
- * abstract input is too large, the overflow and inexact exceptions are both raised
- * and an infinity or maximal finite value is returned. If the abstract value is
- * too small, the value is rounded to a subnormal and the underflow and inexact
- * exceptions are only raised if the value cannot be represented exactly with
- * a subnormal.
- *
- * The input significand `sig_z' has it's binary point between bits 30 and 29,
- * this is seven bits to the left of its usual location. The shifted significand
- * must be normalized or smaller than this. If it's not normalized then the exponent
- * `exp_z' must be zero; in that case, the result returned is a subnormal number
- * which must not require rounding. In the more usual case where the significand
- * is normalized, the exponent must be one less than the *true* exponent.
- *
- * The handling of underflow and overflow is otherwise in alignment with IEC/IEEE.
- */
 static sfloat_t SFLOAT_PACK_round(sfloat_state_t *state, bool sign_z, int16_t exp_z, uint32_t sig_z) {
     sfloat_roundingmode_t mode      = state->roundingmode;
     bool                  even      = !!(mode == SFLOAT_ROUND_NEAREST_EVEN);
@@ -224,7 +158,7 @@ static sfloat_t SFLOAT_PACK_round(sfloat_state_t *state, bool sign_z, int16_t ex
             return SFLOAT_PACK(sign_z, 0xFF, 0) - (increment == 0);
         }
         if (exp_z < 0) {
-            /* Check for underflow */
+
             bool tiny = (state->tiny == SFLOAT_TBEFORE) || (exp_z < -1) || (sig_z + increment < 0x80000000);
             SFLOAT_SHIFT(32, sig_z, -exp_z, &sig_z);
             exp_z = 0;
@@ -242,24 +176,11 @@ static sfloat_t SFLOAT_PACK_round(sfloat_state_t *state, bool sign_z, int16_t ex
     return SFLOAT_PACK(sign_z, exp_z, sig_z);
 }
 
-/*
- * Takes an abstract value having sign `sign_z', exponent `exp_z' and significand
- * `sig_z' and returns the appropriate value corresponding to the abstract input.
- * This function is exactly like `PACK_round' except the significand does not have
- * to be normalized.
- *
- * Bit 31 of the significand must be zero and the exponent must be one less than
- * the *true* exponent.
- */
 static sfloat_t SFLOAT_PACK_normal(sfloat_state_t *state, bool sign_z, int16_t exp_z, uint32_t sig_z) {
     unsigned char c = SFLOAT_CLZ(sig_z, 1);
     return SFLOAT_PACK_round(state, sign_z, exp_z - c, sig_z << c);
 }
 
-/*
- * Returns the result of adding the absolute values of `a' and `b'. The sign
- * `sign_z' is ignored if the result is a NaN.
- */
 static sfloat_t sfloat_add_impl(sfloat_state_t *state, sfloat_t a, sfloat_t b, bool sign_z) {
     int16_t  exp_a = SFLOAT_EXTRACT_EXP(a);
     int16_t  exp_b = SFLOAT_EXTRACT_EXP(b);
@@ -307,11 +228,6 @@ end:
     return SFLOAT_PACK_round(state, sign_z, exp_z, sig_z);
 }
 
-/*
- * Returns the result of subtracting the absolute values of `a' and `b'. If the
- * sign `sign_z' is one, the difference is negated before being returned. The
- * sign is ignored if the result is a NaN.
- */
 static sfloat_t sfloat_sub_impl(sfloat_state_t *state, sfloat_t a, sfloat_t b, bool sign_z) {
     int16_t  exp_a = SFLOAT_EXTRACT_EXP(a);
     int16_t  exp_b = SFLOAT_EXTRACT_EXP(b);
@@ -498,7 +414,7 @@ static sfloat_t sfloat_neg(sfloat_state_t *state, sfloat_t a) {
 }
 
 static GMQCC_INLINE void sfloat_check(lex_ctx_t ctx, sfloat_state_t *state, const char *vec) {
-    /* Exception comes from vector component */
+
     if (vec) {
         if (state->exceptionflags & SFLOAT_DIVBYZERO)
             compile_error(ctx, "division by zero in `%s' component", vec);
@@ -526,27 +442,12 @@ static GMQCC_INLINE void sfloat_init(sfloat_state_t *state) {
     state->tiny           = FOLD_TINYNESS;
 }
 
-/*
- * There is two stages to constant folding in GMQCC: there is the parse
- * stage constant folding, where, with the help of the AST, operator
- * usages can be constant folded. Then there is the constant folding
- * in the IR for things like eliding if statements, can occur.
- *
- * This file is thus, split into two parts.
- */
-
 #define isfloat(X)      (((X))->m_vtype == TYPE_FLOAT)
 #define isvector(X)     (((X))->m_vtype == TYPE_VECTOR)
 #define isstring(X)     (((X))->m_vtype == TYPE_STRING)
 #define isarray(X)      (((X))->m_vtype == TYPE_ARRAY)
 #define isfloats(X,Y)   (isfloat  (X) && isfloat (Y))
 
-/*
- * Implementation of basic vector math for vec3_t, for trivial constant
- * folding.
- *
- * TODO: gcc/clang hinting for autovectorization
- */
 enum vec3_comp_t {
     VEC_COMP_X = 1 << 0,
     VEC_COMP_Y = 1 << 1,
@@ -900,7 +801,6 @@ bool fold::immediate_true(ast_value *v) {
     return !!v->m_constval.vfunc;
 }
 
-/* Handy macros to determine if an ast_value can be constant folded. */
 #define fold_can_1(X)  \
     (ast_istype(((X)), ast_value) && (X)->m_hasvalue && ((X)->m_cvq == CV_CONST) && \
                 ((X))->m_vtype != TYPE_FUNCTION)
@@ -928,7 +828,7 @@ fold::fold(parser_t *parser)
 }
 
 bool fold::generate(ir_builder *ir) {
-    // generate globals for immediate folded values
+
     ast_value *cur;
     for (auto &it : m_imm_float)
         if (!(cur = it)->generateGlobal(ir, false)) goto err;
@@ -944,7 +844,7 @@ err:
 }
 
 fold::~fold() {
-// TODO: parser lifetime so this is called when it should be
+
 #if 0
     for (auto &it : m_imm_float) ast_delete(it);
     for (auto &it : m_imm_vector) ast_delete(it);
@@ -998,7 +898,7 @@ ast_expression *fold::constgen_string(const char *str, bool translate) {
         char name[32];
         util_snprintf(name, sizeof(name), "dotranslate_%zu", m_parser->translated++);
         out = new ast_value(ctx(), name, TYPE_STRING);
-        out->m_flags |= AST_FLAG_INCLUDE_DEF; /* def needs to be included for translatables */
+        out->m_flags |= AST_FLAG_INCLUDE_DEF;
     } else {
         out = new ast_value(ctx(), "#IMMEDIATE", TYPE_STRING);
     }
@@ -1067,15 +967,14 @@ bool fold::check_inexact_float(ast_value *a, ast_value *b) {
 }
 
 uint32_t fold::cond(ast_value* condval, ast_ifthen *branch) {
-    // Optimization is disabled.
+
     if (!OPTS_OPTIMIZATION(OPTIM_CONST_FOLD_DCE)) {
-        // Generate code for both.
+
         return ON_TRUE | ON_FALSE;
     }
 
-    // Only float literals can be DCE in conditions.
     if (!isfloat(condval) || !fold_can_1(condval)) {
-        // Generate code for both.
+
         return ON_TRUE | ON_FALSE;
     }
 
@@ -1086,16 +985,14 @@ uint32_t fold::cond(ast_value* condval, ast_ifthen *branch) {
 
     ++opts_optimizationcount[OPTIM_CONST_FOLD_DCE];
 
-    // Determine which path we want to take based on constant fold.
     if (is_true) {
-        // Generate code only for true path.
+
         return ON_TRUE;
     } else if (is_false) {
-        // Generate code only for false path.
+
         return ON_FALSE;
     }
 
-    // Generate code for no paths.
     return 0;
 }
 
@@ -1126,7 +1023,7 @@ ast_expression *fold::op_mul_vec(vec3_t vec, ast_value *sel, const char *set) {
 ast_expression *fold::op_neg(ast_value *a) {
     if (isfloat(a)) {
         if (fold_can_1(a)) {
-            /* Negation can produce inexact as well */
+
             bool inexact = check_except_float(&sfloat_neg, a, nullptr);
             return constgen_float(-immvalue_float(a), inexact);
         }
@@ -1427,7 +1324,6 @@ ast_expression *fold::op(const oper_info *info, ast_expression **opexprs) {
     ast_value *c = (ast_value*)opexprs[2];
     ast_expression *e = nullptr;
 
-    /* can a fold operation be applied to this operator usage? */
     if (!info->folds)
         return nullptr;
 
@@ -1479,11 +1375,6 @@ ast_expression *fold::op(const oper_info *info, ast_expression **opexprs) {
     return nullptr;
 }
 
-/*
- * Constant folding for compiler intrinsics, similar approach to operator
- * folding, primarily: individual functions for each intrinsics to fold,
- * and a generic selection function.
- */
 ast_expression *fold::intrinsic_isfinite(ast_value *a) {
     return constgen_float(isfinite(immvalue_float(a)), false);
 }
@@ -1578,12 +1469,6 @@ ast_expression *fold::intrinsic(const char *intrinsic, size_t n_args, ast_expres
     return ret;
 }
 
-/*
- * These are all the actual constant folding methods that happen in between
- * the AST/IR stage of the compiler , i.e eliminating branches for const
- * expressions, which is the only supported thing so far. We undefine the
- * testing macros here because an ir_value is differant than an ast_value.
- */
 #undef expect
 #undef isfloat
 #undef isstring
@@ -1595,10 +1480,8 @@ ast_expression *fold::intrinsic(const char *intrinsic, size_t n_args, ast_expres
 #undef fold_can_2
 
 #define isfloat(X)              ((X)->m_vtype == TYPE_FLOAT)
-/*#define isstring(X)             ((X)->m_vtype == TYPE_STRING)*/
-/*#define isvector(X)             ((X)->m_vtype == TYPE_VECTOR)*/
+
 #define fold_can_1(X)           ((X)->m_hasvalue && (X)->m_cvq == CV_CONST)
-/*#define fold_can_2(X,Y)         (fold_can_1(X) && fold_can_1(Y))*/
 
 qcfloat_t fold::immvalue_float(ir_value *value) {
     return value->m_constval.vfloat;
@@ -1609,7 +1492,7 @@ vec3_t fold::immvalue_vector(ir_value *value) {
 }
 
 ast_expression *fold::superfluous(ast_expression *left, ast_expression *right, int op) {
-    ast_expression *swapped = nullptr; /* using this as bool */
+    ast_expression *swapped = nullptr;
     ast_value *load;
 
     if (!ast_istype(right, ast_value) || !fold_can_1((load = (ast_value*)right))) {
@@ -1633,7 +1516,6 @@ ast_expression *fold::superfluous(ast_expression *left, ast_expression *right, i
                 return left;
             }
             break;
-
 
         case INSTR_SUB_F:
             if (swapped)

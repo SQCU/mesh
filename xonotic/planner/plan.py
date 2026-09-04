@@ -1,14 +1,3 @@
-"""Bot planning as a linear-algebra problem, solved across the mesh.
-
-The server holds bot state. Every tick it sends one feature row per bot to the
-coprocessor node, which holds the routed expert weights and the objective basis
-resident, and returns each bot's chosen objective. Behaviour is therefore
-conditioned on a matrix solve that does not happen on the machine running the
-game.
-
-    coprocessor:  python3 plan.py solve  <peer> [secs]
-    server:       python3 plan.py play   <peer> [secs] [bots]
-"""
 import sys, time
 import numpy as np
 import mlx.core as mx
@@ -20,8 +9,8 @@ PEER = int(sys.argv[2])
 SECS = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 BOTS = int(sys.argv[4]) if len(sys.argv) > 4 else 480
 
-TEAMS   = 5      # objectives: one payload lane per team
-EXPERTS = 8      # routed experts
+TEAMS   = 5
+EXPERTS = 8
 FF      = 2048
 
 m = Mesh(1.0e9)
@@ -29,17 +18,11 @@ D = m.usable // 4
 SEED = 20260828
 
 def model(d):
-    """Deterministic on both sides so the server can audit any row it likes."""
     g = np.random.default_rng(SEED)
     f = lambda *s: mx.array(g.standard_normal(s).astype(np.float32) * (1.0 / np.sqrt(s[-2])))
     return (f(d, EXPERTS), f(EXPERTS, d, FF), f(EXPERTS, FF, d), f(d, TEAMS))
 
 def solve(Xn, R, W1, W2, O):
-    """Route each bot to an expert, apply that expert, score the objectives.
-
-    Experts are applied by grouping rows per expert rather than gathering a
-    weight matrix per row: gathering would materialise one (D, FF) matrix per
-    bot, which is gigabytes for a few hundred bots."""
     n = Xn.shape[0]
     X = mx.array(Xn)
     e = mx.argmax(X @ R, axis=1)
@@ -53,7 +36,7 @@ def solve(Xn, R, W1, W2, O):
         Yi = mx.maximum(mx.array(Xn[sel]) @ W1[i], 0.0) @ W2[i]
         mx.eval(Yi)
         Y[sel] = np.asarray(memoryview(Yi))
-    G = mx.array(Y) @ O                            # (n, TEAMS) objective scores
+    G = mx.array(Y) @ O
     pick = mx.argmax(G, axis=1)
     mx.eval(pick, G)
     return pick, G
@@ -73,7 +56,7 @@ if ROLE == "solve":
         if n == 0: continue
         pick, G = solve(stage[:n], R, W1, W2, O)
         out = np.zeros((n, D), dtype=np.float32)
-        out[:, 0] = stage[:n, 0]                       # echo the bot id
+        out[:, 0] = stage[:n, 0]
         out[:, 1] = np.asarray(memoryview(pick)).astype(np.float32)
         out[:, 2:2+TEAMS] = np.asarray(memoryview(G))
         if cur + n > ring: cur = 0
@@ -89,9 +72,9 @@ if ROLE == "solve":
 else:
     rng = np.random.default_rng(7)
     pos = rng.standard_normal((BOTS, D)).astype(np.float32) * 0.1
-    pos[:, 0] = np.arange(BOTS)                        # bot id in element 0
+    pos[:, 0] = np.arange(BOTS)
     m.block(0, BOTS)[:, :D*4] = pos.view(np.uint8).reshape(BOTS, D*4)
-    On = np.asarray(memoryview(O))                     # same basis as the solver
+    On = np.asarray(memoryview(O))
     objective = np.full(BOTS, -1, dtype=np.int32)
     ticks = planned = switched = 0
     t0 = time.time()
@@ -109,8 +92,7 @@ else:
                 if objective[b] != pick:
                     switched += 1
                 objective[b] = pick
-                # The plan moves the bot. Its new state is what gets planned on
-                # next tick, so behaviour and the solve condition each other.
+
                 pos[b, 1:] += 0.35 * On[1:, pick]
                 pos[b, 1:] *= 0.98
             got += 1; planned += 1

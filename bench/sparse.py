@@ -14,7 +14,7 @@ for d in (0.30, 0.10, 0.03, 0.01):
     Av  = mx.random.normal((N, nnz)).astype(mx.float32)
     mx.eval(idx, Av)
     def spmm():
-        G = X[idx]                      # (N, nnz, K) gather
+        G = X[idx]
         return mx.sum(G * Av[:,:,None], axis=1)
     mx.eval(spmm())
     it2 = 10 if d>=0.1 else 20

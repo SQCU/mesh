@@ -1,26 +1,5 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-// Quake is a trademark of Id Software, Inc., (c) 1996 Id Software, Inc. All
-// rights reserved.
-
-// suggested by Zero_Dogg to fix a compile problem on Mandriva Linux
 #include "quakedef.h"
 
 #include <linux/cdrom.h>
@@ -33,10 +12,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "cdaudio.h"
 
-
 static int cdfile = -1;
 static char cd_dev[64] = "/dev/cdrom";
-
 
 void CDAudio_SysEject (void)
 {
@@ -46,7 +23,6 @@ void CDAudio_SysEject (void)
 	if (ioctl(cdfile, CDROMEJECT) == -1)
 		Con_Print("ioctl CDROMEJECT failed\n");
 }
-
 
 void CDAudio_SysCloseDoor (void)
 {
@@ -79,7 +55,6 @@ int CDAudio_SysGetAudioDiskInfo (void)
 	return tochdr.cdth_trk1;
 }
 
-
 float CDAudio_SysGetVolume (void)
 {
 	struct cdrom_volctrl vol;
@@ -96,7 +71,6 @@ float CDAudio_SysGetVolume (void)
 	return (vol.channel0 + vol.channel1) / 2.0f / 255.0f;
 }
 
-
 void CDAudio_SysSetVolume (float volume)
 {
 	struct cdrom_volctrl vol;
@@ -111,7 +85,6 @@ void CDAudio_SysSetVolume (float volume)
 		Con_Print("ioctl CDROMVOLCTRL failed\n");
 }
 
-
 int CDAudio_SysPlay (int track)
 {
 	struct cdrom_tocentry entry;
@@ -120,7 +93,6 @@ int CDAudio_SysPlay (int track)
 	if (cdfile == -1)
 		return -1;
 
-	// don't try to play a non-audio track
 	entry.cdte_track = track;
 	entry.cdte_format = CDROM_MSF;
 	if (ioctl(cdfile, CDROMREADTOCENTRY, &entry) == -1)
@@ -157,7 +129,6 @@ int CDAudio_SysPlay (int track)
 	return 0;
 }
 
-
 int CDAudio_SysStop (void)
 {
 	if (cdfile == -1)
@@ -186,7 +157,6 @@ int CDAudio_SysPause (void)
 	return 0;
 }
 
-
 int CDAudio_SysResume (void)
 {
 	if (cdfile == -1)
@@ -205,7 +175,7 @@ int CDAudio_SysUpdate (void)
 
 	if (cdPlaying && lastchk < time(NULL) && cdfile != -1)
 	{
-		lastchk = time(NULL) + 2; //two seconds between chks
+		lastchk = time(NULL) + 2;
 		subchnl.cdsc_format = CDROM_MSF;
 		if (ioctl(cdfile, CDROMSUBCHNL, &subchnl) == -1)
 		{
@@ -231,7 +201,6 @@ void CDAudio_SysInit (void)
 {
 	int i;
 
-// COMMANDLINEOPTION: Linux Sound: -cddev <devicepath> chooses which CD drive to use
 	if ((i = COM_CheckParm("-cddev")) != 0 && i < com_argc - 1)
 		strlcpy(cd_dev, com_argv[i + 1], sizeof(cd_dev));
 }

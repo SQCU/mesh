@@ -18,7 +18,7 @@ for i in opts.def          \
          gmqcc.ini.example
 do want "$i"; done
 
-# y/_ABCDEFGHIJKLMNOPQRSTUVWXYZ/-abcdefghijklmnopqrstuvwxyz/;
+
 check_opt() {
 	opt_def_name=$1
 	arg_char=$2
@@ -42,7 +42,7 @@ check_opt FLAGS f
 check_opt WARNS W
 check_opt OPTIMIZATIONS O
 
-# TODO: linux version
+
 if [ "$(uname -s)" != "Linux" ]; then
     for i in doc/*.1;
     do

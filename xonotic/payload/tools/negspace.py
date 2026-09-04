@@ -1,77 +1,15 @@
-#!/usr/bin/env python3
-"""negspace -- the COMPUTED negative space of a map, and the only definition of
-solidity in this toolchain.
-
-WHY THIS EXISTS
----------------
-A BSP is already an exact partition of space.  Everything that used to be done in
-these tools by poking `solid_brush_at(p)` at arbitrary operands was re-deriving,
-lossily and by point-sampling, a structure the file already contains -- and a
-sample can never be complete, so the failures were patched forever: spawnpoints
-shipped inside walls, carts burrowed through terrain along smooth waypoint
-curves, corridors reported phantom "no floor".
-
-This module computes the structure instead.  `NegSpace` is the free volume of a
-map as an explicit set of CONVEX CELLS with exact face adjacency, obtained from
-the BSP tree's empty leaves with their solid (detail) brushes subtracted.  It is
-the object the rest of the pipeline CONSUMES:
-
-    map BSP -> NegSpace (free volume, exact)
-            -> navmesh (stock waypoint graph)  [navmesh.py]
-            -> Voronoi cells over the navmesh  [navmesh.py]
-            -> cart path solver constrained to stay inside NegSpace  [navmesh.py]
-
-Because a point that is a member of a cell is by construction not in solid, and
-because a segment's intersection with a convex cell is an exact interval, there
-is no sampling anywhere below and no "is this solid?" probe to get wrong.
-
-THE ONE DEFINITION OF SOLIDITY
-------------------------------
-    solid(p)  ==  ns.cell_at(p) < 0
-
-Nothing else in `tools/` may define it.  `mapfuse.Src.solid_brush_at`,
-`mapfuse.Src.clip_brush_at`, their brush grids, `mapfuse.blockage` /
-`corridor_samples` / `arc_samples` / `ray_runs` / `free_slab` and
-`mkentfile.Bsp` were all deleted in favour of this.
-
-STRUCTURE
----------
-`cells[i]` is a convex polytope in the half-space form `n . p <= d`:
-
-    H[i]      float64 (k,4) rows (nx,ny,nz,d)
-    lo/hi[i]  exact axis-aligned bounds (interval propagation to a fixed point)
-    leaf[i]   the BSP leaf it came from
-    kind      OPEN
-
-`portals` are the exact 2-D faces shared by two cells, each with the radius of
-its largest inscribed circle -- so "can a player fit through this opening" is a
-number read off the structure, never a trace.
-
-`shrink(mins, maxs)` returns the CONFIGURATION-SPACE complex for a box: cell
-half-spaces pushed in by the box's support.  A point of the shrunk complex is a
-placement where the whole box is in free space.  That is why a spawnpoint or a
-cart node produced from this module cannot be in solid -- being in solid is not
-representable.
-
-Rigid placement: `translated(t)` shifts a complex exactly (`d -> d + n.t`), so a
-per-tile complex stays exact after the fused world's 3-D pack, Z levels included.
-"""
-
+#!/usr/bin/env mesh-python
 import math
 import os
+import re
 import struct
 
-# One BLAS thread per process.  The survey runs one process per candidate map and
-# every one of them is doing small dense linear algebra; letting Accelerate spawn
-# a thread pool inside each oversubscribes the machine by an order of magnitude
-# and the wall time goes up, not down.  Set before numpy is imported.
 for _v in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
            'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
     os.environ.setdefault(_v, '1')
 
 import numpy as np
 
-# Q3/Xonotic contents bits (texture lump word 2)
 CONTENTS_SOLID = 0x1
 CONTENTS_PLAYERCLIP = 0x10000
 CONTENTS_MONSTERCLIP = 0x20000
@@ -79,32 +17,80 @@ CONTENTS_BOTCLIP = 0x400000
 MASK_PLAYERSOLID = CONTENTS_SOLID | CONTENTS_PLAYERCLIP
 MASK_BOTSOLID = MASK_PLAYERSOLID | CONTENTS_MONSTERCLIP | CONTENTS_BOTCLIP
 
-# Xonotic standing player hull (PL_MIN_CONST / PL_MAX_CONST)
+NEGSPACE_SCHEMA = 3
+SERVER_SOLID_BSP_CLASSES = frozenset({
+    'func_bobbing', 'func_breakable', 'func_button', 'func_clientwall',
+    'func_conveyor', 'func_door', 'func_door_rotating', 'func_door_secret',
+    'func_fourier', 'func_pendulum', 'func_plat', 'func_rotating', 'func_static',
+    'func_train', 'func_vectormamamam', 'func_wall',
+})
+DOOR_NONSOLID_SPAWNFLAG = 1 << 10
+PATCH_COLLISION_TOLERANCE = 15.0
+PATCH_COLLISION_SNAP = 1.0
+
 PL_MIN = (-16.0, -16.0, -24.0)
 PL_MAX = (16.0, 16.0, 45.0)
-# the payload cart hull that mkentfile lays track for
-# Must equal PLC_CART_MIN/PLC_CART_MAX in qcsrc/.../payload/payload.qh. The engine
-# spawns that hull; validating clearance for any other one certifies a cart that
-# does not exist. These disagreed (z=56 here, z=40 there) until the QC gained a
-# single constant.
+
 CART_MIN = (-32.0, -32.0, -24.0)
 CART_MAX = (32.0, 32.0, 56.0)
+CART_RIDER_MIN = CART_MIN
+CART_RIDER_MAX = (32.0, 32.0, CART_MAX[2] + PL_MAX[2] - PL_MIN[2])
 
-FLOOR_NZ = 0.7          # what the engine calls walkable
+FLOOR_NZ = 0.7
 EPS = 1e-4
+COLLISION_EPSILON = 1.0 / 32.0
 
+class _PlaneBlocks(object):
+    def __init__(self, flat, offsets):
+        self.flat = flat
+        self.offsets = offsets
+
+    def __len__(self):
+        return len(self.offsets) - 1
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[value] for value in range(*index.indices(len(self)))]
+        index = int(index)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self.flat[self.offsets[index]:self.offsets[index + 1]]
+
+    def __iter__(self):
+        for index in range(len(self)):
+            yield self[index]
 
 def _lump(d, i):
     return struct.unpack_from('<ii', d, 8 + i * 8)
 
+def _solid_model_indices(d, model):
+    if model is not None:
+        return (int(model),)
+    offset, length = _lump(d, 0)
+    text = d[offset:offset + length].split(b'\0')[0].decode('latin-1')
+    indices = {0}
+    for block in re.findall(r'\{[^{}]*\}', text):
+        values = dict(re.findall(r'"([^"]+)"\s+"([^"]*)"', block))
+        classname = values.get('classname', '')
+        if classname not in SERVER_SOLID_BSP_CLASSES:
+            continue
+        try:
+            spawnflags = int(float(values.get('spawnflags', '0')))
+        except ValueError:
+            spawnflags = 0
+        if classname == 'func_door' and spawnflags & DOOR_NONSOLID_SPAWNFLAG:
+            continue
+        value = values.get('model', '')
+        if value.startswith('*'):
+            try:
+                indices.add(int(value[1:]))
+            except ValueError:
+                pass
+    return tuple(sorted(indices))
 
 def bounds_of(H, seed_lo, seed_hi, iters=4):
-    """Exact AABB of {p : H p <= d} by interval propagation to a fixed point.
-
-    This is the replacement for "read the distance off any plane that looks
-    axial", which is only valid for an exactly axis-aligned plane and which is
-    what indexed a corridor whose real x-span is [-5504,-5152] at [-5843,-5491].
-    An entirely oblique cell gets a finite, correct box here."""
     n = H[:, :3]
     d = H[:, 3]
     lo = np.array(seed_lo, dtype=np.float64)
@@ -126,20 +112,9 @@ def bounds_of(H, seed_lo, seed_hi, iters=4):
         hi, lo = nhi, nlo
     return lo, hi
 
-
 PRUNE_ON = True
 
-
 def prune(H, lo, hi):
-    """Drop half-spaces that cannot be active, KEEPING the AABB that justified it.
-
-    A constraint whose support over the cell's AABB is below its own distance is
-    redundant *given that AABB*.  Dropping it while not carrying the AABB in the
-    constraint set is unsound, and measurably so: on warfare it grew cells to
-    1900-unit extents with two surviving planes, and 196 of 12 275 sampled points
-    that those cells called free were inside a solid brush.  So the six axial
-    planes of the AABB are appended: the result is exactly the same point set as
-    H, with the redundant members replaced by the box that implies them."""
     if not PRUNE_ON:
         return H
     n = H[:, :3]
@@ -156,57 +131,192 @@ def prune(H, lo, hi):
                    [0.0, 0.0, 1.0, float(hi[2])], [0.0, 0.0, -1.0, float(-lo[2])]])
     return np.vstack([H[keep], bx])
 
+def _curve_tessellation(control, axis):
+    if axis == 1:
+        middle = control[:, 1:-1:2]
+        left = control[:, 0:-2:2] - middle
+        right = control[:, 2::2] - middle
+    else:
+        middle = control[1:-1:2]
+        left = control[0:-2:2] - middle
+        right = control[2::2] - middle
+    left2 = np.einsum('...i,...i->...', left, left)
+    right2 = np.einsum('...i,...i->...', right, right)
+    product = np.einsum('...i,...i->...', left, right)
+    largest = float(np.max(np.maximum(0.0, left2 * right2 - product * product), initial=0.0))
+    factor = (largest / 64.0) ** 0.25 / PATCH_COLLISION_TOLERANCE
+    if factor < 0.0001:
+        return 0
+    if factor < 2.0:
+        return 1
+    return min(1024, int(math.floor(math.log(factor) / math.log(2.0))) + 1)
+
+def _patch_collision_grid(control):
+    height, width = control.shape[:2]
+    xtess = _curve_tessellation(control, 1)
+    ytess = _curve_tessellation(control, 0)
+    xmax = max(1, 2 * xtess)
+    ymax = max(1, 2 * ytess)
+    out_width = (width - 1) * xtess + 1 if xtess else (width - 1) // 2 + 1
+    out_height = (height - 1) * ytess + 1 if ytess else (height - 1) // 2 + 1
+    out = np.zeros((out_height, out_width, 3), dtype=np.float64)
+    py = np.arange(ymax + 1, dtype=np.float64) / ymax
+    px = np.arange(xmax + 1, dtype=np.float64) / xmax
+    wy = np.column_stack(((1.0 - py) ** 2, 2.0 * (1.0 - py) * py, py ** 2))
+    wx = np.column_stack(((1.0 - px) ** 2, 2.0 * (1.0 - px) * px, px ** 2))
+    for row in range(0, height - 1, 2):
+        for column in range(0, width - 1, 2):
+            patch = control[row:row + 3, column:column + 3]
+            middle = np.tensordot(wy, patch, axes=(1, 0))
+            block = np.einsum('xb,ybk->yxk', wx, middle)
+            y0 = row * ymax // 2
+            x0 = column * xmax // 2
+            out[y0:y0 + ymax + 1, x0:x0 + xmax + 1] = block
+    return np.floor(out / PATCH_COLLISION_SNAP) * PATCH_COLLISION_SNAP
+
+def _patch_triangles(grid):
+    height, width = grid.shape[:2]
+    for y in range(height - 1):
+        if y % 2:
+            for x in range(width - 2, -1, -1):
+                yield grid[y + 1, x], grid[y + 1, x + 1], grid[y, x + 1]
+                yield grid[y, x], grid[y + 1, x], grid[y, x + 1]
+        else:
+            for x in range(width - 1):
+                yield grid[y, x], grid[y + 1, x], grid[y, x + 1]
+                yield grid[y + 1, x], grid[y + 1, x + 1], grid[y, x + 1]
+
+def _triangle_prism(a, b, c):
+    normal = np.cross(b - a, c - a)
+    length = float(np.linalg.norm(normal))
+    if length * length < 0.001:
+        return None
+    normal /= length
+    planes = [[*normal, float(np.dot(normal, a) + PATCH_COLLISION_SNAP)],
+              [*(-normal), float(np.dot(-normal, a) + PATCH_COLLISION_SNAP)]]
+    for left, right, other in ((a, b, c), (b, c, a), (c, a, b)):
+        side = np.cross(right - left, normal)
+        side_length = float(np.linalg.norm(side))
+        if side_length <= EPS:
+            return None
+        side /= side_length
+        distance = float(np.dot(side, left))
+        if np.dot(side, other) > distance:
+            side = -side
+            distance = -distance
+        planes.append([*side, distance])
+    return np.asarray(planes, dtype=np.float64)
+
+def _compiled_collision_solids(d, mask, model, world_lo, world_hi):
+    to, tl = _lump(d, 1)
+    po, pl = _lump(d, 2)
+    mo, ml = _lump(d, 7)
+    bo, bl = _lump(d, 8)
+    so, sl = _lump(d, 9)
+    vo, vl = _lump(d, 10)
+    fo, fl = _lump(d, 13)
+    contents = np.frombuffer(d, '<i4', (tl // 72) * 18, to).reshape(-1, 18)[:, 17]
+    planes = np.frombuffer(d, '<f4', (pl // 16) * 4, po).reshape(-1, 4).astype(np.float64)
+    models = np.frombuffer(d, '<i4', (ml // 40) * 10, mo).reshape(-1, 10)
+    brushes = np.frombuffer(d, '<i4', (bl // 12) * 3, bo).reshape(-1, 3)
+    sides = np.frombuffer(d, '<i4', (sl // 8) * 2, so).reshape(-1, 2)
+    vertices = np.frombuffer(d, dtype=np.dtype([('p', '<f4', 3), ('tail', 'V32')]),
+                             count=vl // 44, offset=vo)['p'].astype(np.float64)
+    faces = np.frombuffer(d, dtype=np.dtype([('head', '<i4', 12), ('tail', 'V56')]),
+                          count=fl // 104, offset=fo)
+    scopes = [index for index in _solid_model_indices(d, model)
+              if 0 <= index < len(models)]
+    brush_indices = []
+    face_indices = []
+    for index in scopes:
+        first_face, face_count = int(models[index, 6]), int(models[index, 7])
+        first_brush, brush_count = int(models[index, 8]), int(models[index, 9])
+        face_indices.extend(range(first_face, first_face + face_count))
+        brush_indices.extend(range(first_brush, first_brush + brush_count))
+    blocks = []
+    bounds = []
+    brush_mass = 0
+    patch_triangle_mass = 0
+    for index in brush_indices:
+        first, count, texture = brushes[index]
+        if (count <= 0 or first < 0 or first + count > len(sides)
+                or texture < 0 or texture >= len(contents)
+                or not contents[texture] & mask):
+            continue
+        block = planes[sides[first:first + count, 0]]
+        lo, hi = bounds_of(block, world_lo - 512.0, world_hi + 512.0)
+        if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi)) and np.all(lo <= hi)):
+            continue
+        blocks.append(block)
+        bounds.append((lo, hi))
+        brush_mass += 1
+    for index in face_indices:
+        head = faces[index]['head']
+        texture, face_type = int(head[0]), int(head[2])
+        first, count = int(head[3]), int(head[4])
+        if (face_type != 2 or texture < 0 or texture >= len(contents)
+                or not contents[texture] & mask or first < 0 or count <= 0
+                or first + count > len(vertices)):
+            continue
+        width, height = struct.unpack_from('<2i', faces[index]['tail'], 48)
+        if width < 3 or height < 3 or width * height != count:
+            continue
+        control = vertices[first:first + count].reshape(height, width, 3)
+        for triangle in _patch_triangles(_patch_collision_grid(control)):
+            block = _triangle_prism(*triangle)
+            if block is None:
+                continue
+            points = np.asarray(triangle)
+            blocks.append(block)
+            bounds.append((points.min(axis=0) - PATCH_COLLISION_SNAP,
+                           points.max(axis=0) + PATCH_COLLISION_SNAP))
+            patch_triangle_mass += 1
+    return blocks, bounds, brush_mass, patch_triangle_mass
 
 def nonempty(H, lo=None, hi=None):
-    """Is {p : H p <= d} non-empty?  Exact for a bounded polytope: enumerate the
-    vertices as triple-plane intersections and keep the feasible ones."""
     v = vertices(H, lo, hi)
     return len(v) > 0
 
-
-def vertices(H, lo=None, hi=None, cap=24):
-    """Exact vertex set of a bounded convex polytope given as n.p <= d."""
+def vertices(H, lo=None, hi=None):
+    H = np.asarray(H, dtype=np.float64)
     k = len(H)
-    if k > cap:
-        # keep the tightest `cap` constraints relative to the cell centre; the
-        # rest are provably inactive after prune(), this is only a safety valve
-        H = H[:cap]
-        k = cap
     if k < 4:
         return np.zeros((0, 3))
-    idx = np.array([(a, b, c) for a in range(k) for b in range(a + 1, k)
-                    for c in range(b + 1, k)], dtype=np.int64)
-    if not len(idx):
+    chunks = []
+    for a in range(k - 2):
+        b, c = np.triu_indices(k - a - 1, 1)
+        b += a + 1
+        c += a + 1
+        A = H[np.column_stack((np.full(len(b), a, dtype=np.int64), b, c))]
+        n0, n1, n2 = A[:, 0, :3], A[:, 1, :3], A[:, 2, :3]
+        x12 = np.cross(n1, n2)
+        x20 = np.cross(n2, n0)
+        x01 = np.cross(n0, n1)
+        det = np.einsum('ij,ij->i', n0, x12)
+        live = np.abs(det) > 1e-7
+        if not live.any():
+            continue
+        A = A[live]
+        det = det[live]
+        P = (A[:, 0, 3, None] * x12[live]
+             + A[:, 1, 3, None] * x20[live]
+             + A[:, 2, 3, None] * x01[live]) / det[:, None]
+        P = P[np.isfinite(P).all(axis=1)]
+        if not len(P):
+            continue
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            viol = P @ H[:, :3].T - H[:, 3]
+        P = P[(viol <= 0.05).all(axis=1)]
+        if len(P):
+            chunks.append(P)
+    if not chunks:
         return np.zeros((0, 3))
-    A = H[idx][:, :, :3]
-    B = H[idx][:, :, 3]
-    det = np.linalg.det(A)
-    ok = np.abs(det) > 1e-7
-    if not ok.any():
-        return np.zeros((0, 3))
-    A = A[ok]
-    B = B[ok]
-    try:
-        P = np.linalg.solve(A, B[..., None])[..., 0]
-    except np.linalg.LinAlgError:
-        return np.zeros((0, 3))
-    good = np.isfinite(P).all(axis=1)
-    P = P[good]
-    if not len(P):
-        return P
-    viol = P @ H[:, :3].T - H[:, 3]
-    P = P[(viol <= 0.05).all(axis=1)]
+    P = np.vstack(chunks)
     if len(P) > 1:
         P = np.unique(np.round(P, 3), axis=0)
     return P
 
-
 def shrink_H(H, mins, maxs):
-    """Configuration-space half-spaces for an axis-aligned box.
-
-    `p` satisfies the result iff the whole box [p+mins, p+maxs] satisfies H.
-    Support of the box along n is max over corners of n.c, i.e.
-    sum_a (maxs[a] if n[a]>0 else mins[a]) * n[a]."""
     n = H[:, :3]
     mn = np.asarray(mins, dtype=np.float64)
     mx = np.asarray(maxs, dtype=np.float64)
@@ -215,15 +325,7 @@ def shrink_H(H, mins, maxs):
     out[:, 3] = H[:, 3] - sup
     return out
 
-
-def subtract(pieces, B, seed_lo, seed_hi, cap=64, exact_empty=True, minext=0.05):
-    r"""EXACT convex decomposition of (union of `pieces`) \ (convex B).
-
-    For a convex region C and a convex B = {h_1..h_k}:
-        C \ B  =  U_q  ( C & ~h_q & h_1 & .. & h_{q-1} )
-    every term convex by construction.  This is the one routine that removes
-    volume anywhere in this module -- detail brushes, and the coverage test.
-    Returns (pieces_out, overflowed)."""
+def subtract(pieces, B, seed_lo, seed_hi, exact_empty=True, minext=0.05):
     out = []
     for C in pieces:
         clo, chi = bounds_of(C, seed_lo, seed_hi)
@@ -231,7 +333,7 @@ def subtract(pieces, B, seed_lo, seed_hi, cap=64, exact_empty=True, minext=0.05)
         ce = 0.5 * (chi - clo)
         lowv = B[:, :3] @ cc - np.abs(B[:, :3]) @ ce - B[:, 3]
         if np.any(lowv > 0.0):
-            out.append(C)                       # B cannot meet this piece
+            out.append(C)
             continue
         highv = B[:, :3] @ cc + np.abs(B[:, :3]) @ ce - B[:, 3]
         acc = []
@@ -245,20 +347,13 @@ def subtract(pieces, B, seed_lo, seed_hi, cap=64, exact_empty=True, minext=0.05)
             rlo, rhi = bounds_of(R, clo, chi)
             if np.all(rhi - rlo > minext):
                 Rp = prune(R, rlo, rhi)
-                # `exact_empty` enumerates the remainder's vertices to prove it is
-                # non-empty.  Skipping it can only KEEP an empty piece, i.e. report
-                # a region as not-covered when it is covered -- restrictive, never
-                # unsafe -- and it is the difference between 9 ms and 1 ms per query.
+
                 if (not exact_empty) or len(vertices(Rp)) >= 4:
                     out.append(Rp)
             acc.append(B[q])
-        if len(out) > cap:
-            return out, True
-    return out, False
-
+    return out
 
 def box_H(lo, hi):
-    """Axis-aligned box as half-spaces n.p <= d."""
     rows = []
     for a in range(3):
         e = [0.0, 0.0, 0.0]
@@ -268,7 +363,6 @@ def box_H(lo, hi):
         e2[a] = -1.0
         rows.append(e2 + [float(-lo[a])])
     return np.array(rows, dtype=np.float64)
-
 
 class Portal(object):
     __slots__ = ('a', 'b', 'n', 'd', 'poly', 'area', 'radius', 'centre')
@@ -281,7 +375,6 @@ class Portal(object):
         self.radius = radius
         self.centre = centre
 
-
 def _basis(n):
     n = np.asarray(n, dtype=np.float64)
     a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
@@ -290,9 +383,7 @@ def _basis(n):
     v = np.cross(n, u)
     return u, v
 
-
 def _clip2(poly, a, b, c):
-    """Clip convex polygon (list of (u,v)) by a*u + b*v <= c."""
     out = []
     m = len(poly)
     for i in range(m):
@@ -306,7 +397,6 @@ def _clip2(poly, a, b, c):
             out.append((p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])))
     return out
 
-
 def _area2(poly):
     s = 0.0
     for i in range(len(poly)):
@@ -315,10 +405,7 @@ def _area2(poly):
         s += x1 * y2 - x2 * y1
     return abs(s) * 0.5
 
-
 def _inradius(poly, edges):
-    """Largest inscribed circle of a convex polygon, by shrinking its own edge
-    half-planes and bisecting on the radius.  Exact to 2^-8 of the extent."""
     if len(poly) < 3:
         return 0.0
     ext = max(max(abs(p[0]) for p in poly), max(abs(p[1]) for p in poly)) or 1.0
@@ -342,91 +429,86 @@ def _inradius(poly, edges):
             hi = mid
     return lo
 
+def _interval_pair_count(left_lo, left_hi, right_lo, right_hi):
+    events = []
+    events.extend((float(value), 0, 0) for value in left_lo)
+    events.extend((float(value) + 0.25, 1, 0) for value in left_hi)
+    events.extend((float(value), 0, 1) for value in right_lo)
+    events.extend((float(value) + 0.25, 1, 1) for value in right_hi)
+    active = [0, 0]
+    count = 0
+    for _, end, side in sorted(events):
+        if end:
+            active[side] -= 1
+        else:
+            count += active[1 - side]
+            active[side] += 1
+    return count
+
+def _indexed_face_pairs(lo, hi, left, right):
+    left_lo = lo[[face[0] for face in left]]
+    left_hi = hi[[face[0] for face in left]]
+    right_lo = lo[[face[0] for face in right]]
+    right_hi = hi[[face[0] for face in right]]
+    axis = min(range(3), key=lambda value: _interval_pair_count(
+        left_lo[:, value], left_hi[:, value], right_lo[:, value], right_hi[:, value],
+    ))
+    events = []
+    events.extend((float(left_lo[index, axis]), 0, 0, index) for index in range(len(left)))
+    events.extend((float(left_hi[index, axis]) + 0.25, 1, 0, index) for index in range(len(left)))
+    events.extend((float(right_lo[index, axis]), 0, 1, index) for index in range(len(right)))
+    events.extend((float(right_hi[index, axis]) + 0.25, 1, 1, index) for index in range(len(right)))
+    active = [set(), set()]
+    for _, end, side, index in sorted(events):
+        if end:
+            active[side].discard(index)
+            continue
+        other = 1 - side
+        candidates = np.fromiter(active[other], dtype=np.int64, count=len(active[other]))
+        if len(candidates):
+            source_lo = left_lo[index] if side == 0 else right_lo[index]
+            source_hi = left_hi[index] if side == 0 else right_hi[index]
+            candidate_lo = right_lo[candidates] if side == 0 else left_lo[candidates]
+            candidate_hi = right_hi[candidates] if side == 0 else left_hi[candidates]
+            mask = np.all((source_lo <= candidate_hi + 0.25)
+                          & (candidate_lo <= source_hi + 0.25), axis=1)
+            for candidate in candidates[mask]:
+                yield (left[index], right[int(candidate)]) if side == 0 else (left[int(candidate)], right[index])
+        active[side].add(index)
 
 class NegSpace(object):
-    """The free volume of one assembled world, as convex cells with exact faces."""
 
-    def __init__(self, src, mask=MASK_PLAYERSOLID, model=0, cell=512.0,
-                 max_split=256, verbose=False):
+    def __init__(self, src, mask=MASK_PLAYERSOLID, model=None, cell=512.0,
+                 verbose=False):
         if isinstance(src, (bytes, bytearray)):
             d = bytes(src)
         else:
             d = open(src, 'rb').read()
-        assert d[:4] == b'IBSP' and struct.unpack_from('<i', d, 4)[0] == 46
         self.mask = mask
         self.gridcell = float(cell)
 
-        to, tl = _lump(d, 1)
         po, pl = _lump(d, 2)
         no, nl = _lump(d, 3)
         lo_, ll = _lump(d, 4)
-        lbo, lbl = _lump(d, 6)
         mo, ml = _lump(d, 7)
-        bo, bl = _lump(d, 8)
-        so, sl = _lump(d, 9)
-        ntex = tl // 72
-        contents = np.frombuffer(d, '<i4', ntex * 18, to).reshape(ntex, 18)[:, 17]
         planes = np.frombuffer(d, '<f4', (pl // 16) * 4, po).reshape(-1, 4).astype(np.float64)
         nodes = np.frombuffer(d, '<i4', (nl // 36) * 9, no).reshape(-1, 9)
         leafs = np.frombuffer(d, '<i4', (ll // 48) * 12, lo_).reshape(-1, 12)
-        leafbrushes = np.frombuffer(d, '<i4', lbl // 4, lbo)
-        brushes = np.frombuffer(d, '<i4', (bl // 12) * 3, bo).reshape(-1, 3)
-        sides = np.frombuffer(d, '<i4', (sl // 8) * 2, so).reshape(-1, 2)
         modf = np.frombuffer(d, '<f4', (ml // 40) * 10, mo).reshape(-1, 10)
-        modi = np.frombuffer(d, '<i4', (ml // 40) * 10, mo).reshape(-1, 10)
 
-        self.world_lo = modf[model, 0:3].astype(np.float64) - 64.0
-        self.world_hi = modf[model, 3:6].astype(np.float64) + 64.0
-        head = 0 if model == 0 else None
+        world_model = 0 if model is None else int(model)
+        self.world_lo = modf[world_model, 0:3].astype(np.float64) - 64.0
+        self.world_hi = modf[world_model, 3:6].astype(np.float64) + 64.0
+        head = 0 if world_model == 0 else None
         self.planes = planes
 
-        tx = brushes[:, 2]
-        okt = (tx >= 0) & (tx < ntex)
-        bcont = np.zeros(len(brushes), dtype=np.int64)
-        bcont[okt] = contents[tx[okt]]
-        self.brush_blocks = (bcont & mask) != 0
+        self.blk_H, block_bounds, self.compiled_brush_mass, self.patch_triangle_mass = (
+            _compiled_collision_solids(d, mask, model, self.world_lo, self.world_hi)
+        )
+        self.blk_lo = np.asarray([value[0] for value in block_bounds])
+        self.blk_hi = np.asarray([value[1] for value in block_bounds])
+        self._index_blocks(True)
 
-        # ---- BLOCKING-BRUSH INDEX.
-        # Free space is defined as the world minus the brushes the ENGINE collides
-        # with, and the engine collides with a BIH over brushes
-        # (Mod_CollisionBIH_TraceBrush), not with the BSP tree.  The tree is used
-        # here only as an accelerator that hands out convex regions to subtract
-        # from; which brushes to subtract is decided by an actual overlap query,
-        # NOT by the leaf's `leafbrushes` list.  That list is not complete for
-        # opaque leaves -- measured on warfare: 78 sampled points inside a solid
-        # brush landed in a "free" cell because the brush was not listed in the
-        # leaf it fills -- and a structure that trusts it is unsound in exactly
-        # the direction that must never happen.
-        bl_lo, bl_hi, bl_H = [], [], []
-        for bi in np.nonzero(self.brush_blocks)[0]:
-            fs, nb2, _ = brushes[bi]
-            if nb2 <= 0 or fs < 0 or fs + nb2 > len(sides):
-                continue
-            Hb = planes[sides[fs:fs + nb2, 0]]
-            l2, h2 = bounds_of(Hb, self.world_lo - 512.0, self.world_hi + 512.0)
-            bl_lo.append(l2)
-            bl_hi.append(h2)
-            bl_H.append(Hb)
-        self.blk_H = bl_H
-        self.blk_lo = np.array(bl_lo) if bl_lo else np.zeros((0, 3))
-        self.blk_hi = np.array(bl_hi) if bl_hi else np.zeros((0, 3))
-        bgrid = {}
-        BC = 512.0
-        for i in range(len(bl_H)):
-            g0 = np.floor(self.blk_lo[i] / BC).astype(np.int64)
-            g1 = np.floor(self.blk_hi[i] / BC).astype(np.int64)
-            if np.prod(g1 - g0 + 1) > 20000:
-                bgrid.setdefault('big', []).append(i)
-                continue
-            for x in range(g0[0], g1[0] + 1):
-                for y in range(g0[1], g1[1] + 1):
-                    for z in range(g0[2], g1[2] + 1):
-                        bgrid.setdefault((x, y, z), []).append(i)
-        self.blk_grid = bgrid
-        self.blk_cell = BC
-
-        # ---- walk the tree; every leaf gets the exact half-space list of the
-        # convex region the tree carved for it, plus the world box so it is bounded
         wb = []
         for a in range(3):
             e = [0.0, 0.0, 0.0]
@@ -437,30 +519,20 @@ class NegSpace(object):
             wb.append(e2 + [float(-self.world_lo[a])])
         wb = np.array(wb, dtype=np.float64)
 
-        self.cells = []          # list of (k,4) float64 half-space arrays
+        self.cells = []
         self.cell_leaf = []
-        self.cell_node_faces = []   # per cell: list of (planeidx, sign) from tree nodes
+        self.cell_node_faces = []
         stack = [(head, [])]
         nleaf_open = 0
         nleaf_solid = 0
         nsplit = 0
-        self.dropped_leaves = 0
         while stack:
             ni, path = stack.pop()
             if ni < 0:
                 li = -1 - ni
                 if li >= len(leafs):
                     continue
-                # EVERY leaf is processed, not only the ones the compiler left in
-                # the PVS.  The engine's collision is a BIH over BRUSHES
-                # (Mod_CollisionBIH_TraceBrush), so a leaf that q3map2's
-                # fill-outside marked opaque but that contains no brush is space a
-                # player can actually stand in -- and on a sealed map that region
-                # is exactly where a fusion connector gets built.  Defining free
-                # space as "open leaf" would have disagreed with the engine there,
-                # which is the whole reason this module exists.  Free space is
-                # therefore: the leaf's own convex region MINUS its blocking
-                # brushes; a leaf buried in rock subtracts to nothing on its own.
+
                 if leafs[li][0] < 0:
                     nleaf_solid += 1
                 else:
@@ -471,24 +543,13 @@ class NegSpace(object):
                 if np.any(hi - lo < 1.0):
                     continue
                 H = prune(H, lo, hi)
-                # subtract the leaf's own blocking (detail) brushes: exact convex
-                # decomposition C \ B = U_i ( C & ~h_i & h_1..h_{i-1} )
+
                 blk = self._blocking_in(lo, hi)
                 pieces = [H]
-                overflow = False
                 for bi in blk:
-                    pieces, overflow = subtract(pieces, self.blk_H[bi], lo, hi,
-                                                cap=max_split, exact_empty=False,
-                                                minext=0.25)
+                    pieces = subtract(pieces, self.blk_H[bi], lo, hi,
+                                      exact_empty=False, minext=0.25)
                     nsplit += 1
-                    if overflow:
-                        break
-                if overflow:
-                    # Never leave a brush unsubtracted: that would make solid space
-                    # representable as free, which is the one thing this structure
-                    # must not do.  Give the leaf up whole instead, and count it.
-                    self.dropped_leaves += 1
-                    continue
                 for C in pieces:
                     clo, chi = bounds_of(C, lo, hi)
                     if np.any(chi - clo < 1.0):
@@ -503,8 +564,7 @@ class NegSpace(object):
             if not (0 <= pi < len(planes)):
                 continue
             pn = planes[pi]
-            # child 0 = front (n.p >= d)  -> half-space (-n, -d)
-            # child 1 = back  (n.p <= d)  -> half-space ( n,  d)
+
             stack.append((int(nd[1]), path + [(np.array([-pn[0], -pn[1], -pn[2], -pn[3]]), (pi, -1))]))
             stack.append((int(nd[2]), path + [(np.array([pn[0], pn[1], pn[2], pn[3]]), (pi, 1))]))
 
@@ -512,11 +572,179 @@ class NegSpace(object):
         self.n_solid_leaves = nleaf_solid
         self.n_detail_splits = nsplit
         self._finish(verbose)
+        self.schema = NEGSPACE_SCHEMA
+
+    def _index_blocks(self, build_grid=False):
+        bgrid = {}
+        BC = self.gridcell
+        if build_grid:
+            g0 = np.floor(self.blk_lo / BC).astype(np.int64)
+            g1 = np.floor(self.blk_hi / BC).astype(np.int64)
+            extents = g1 - g0 + 1
+            volume = np.prod(extents, axis=1)
+            incidence_capacity = max(1, len(self.blk_H))
+            indexed = np.flatnonzero(volume <= incidence_capacity)
+            if len(indexed):
+                counts = volume[indexed]
+                offsets = np.zeros(len(indexed) + 1, dtype=np.int64)
+                np.cumsum(counts, out=offsets[1:])
+                owners = np.repeat(indexed, counts)
+                local = np.arange(offsets[-1], dtype=np.int64) - np.repeat(offsets[:-1], counts)
+                owner_extents = extents[owners]
+                keys = g0[owners].copy()
+                keys[:, 2] += local % owner_extents[:, 2]
+                local //= owner_extents[:, 2]
+                keys[:, 1] += local % owner_extents[:, 1]
+                keys[:, 0] += local // owner_extents[:, 1]
+                order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+                keys = keys[order]
+                values = owners[order]
+                starts = np.r_[0, np.flatnonzero(np.any(keys[1:] != keys[:-1], axis=1)) + 1]
+                ends = np.r_[starts[1:], len(keys)]
+                for start, end in zip(starts, ends):
+                    bgrid[tuple(int(value) for value in keys[start])] = values[start:end].tolist()
+            bgrid['big'] = np.flatnonzero(volume > incidence_capacity).tolist()
+        self.blk_grid = bgrid
+        self.blk_cell = BC
+        self._index_solid_bvh('blk', self.blk_lo, self.blk_hi)
+        self._index_solid_planes(self.blk_H)
+
+    @staticmethod
+    def _morton_dilate(values):
+        values = np.asarray(values, dtype=np.uint64) & np.uint64(0x1fffff)
+        values = (values | values << np.uint64(32)) & np.uint64(0x1f00000000ffff)
+        values = (values | values << np.uint64(16)) & np.uint64(0x1f0000ff0000ff)
+        values = (values | values << np.uint64(8)) & np.uint64(0x100f00f00f00f00f)
+        values = (values | values << np.uint64(4)) & np.uint64(0x10c30c30c30c30c3)
+        return (values | values << np.uint64(2)) & np.uint64(0x1249249249249249)
+
+    def _index_solid_bvh(self, prefix, lo, hi):
+        lo = np.asarray(lo, dtype=np.float64).reshape((-1, 3))
+        hi = np.asarray(hi, dtype=np.float64).reshape((-1, 3))
+        if not len(lo):
+            setattr(self, prefix + '_bvh_order', np.zeros(0, dtype=np.int64))
+            setattr(self, prefix + '_bvh_lo', ())
+            setattr(self, prefix + '_bvh_hi', ())
+            return
+        centroids = 0.5 * (lo + hi)
+        lower = centroids.min(axis=0)
+        extent = np.maximum(centroids.max(axis=0) - lower, np.finfo(np.float64).eps)
+        scale = np.float64((1 << 21) - 1)
+        quantized = np.minimum(
+            np.floor((centroids - lower) * (scale / extent)), scale,
+        ).astype(np.uint64)
+        codes = (self._morton_dilate(quantized[:, 0])
+                 | self._morton_dilate(quantized[:, 1]) << np.uint64(1)
+                 | self._morton_dilate(quantized[:, 2]) << np.uint64(2))
+        order = np.argsort(codes, kind='stable')
+        levels_lo = [lo[order]]
+        levels_hi = [hi[order]]
+        while len(levels_lo[-1]) > 1:
+            child_lo = levels_lo[-1]
+            child_hi = levels_hi[-1]
+            parent_lo = child_lo[::2].copy()
+            parent_hi = child_hi[::2].copy()
+            pairs = len(child_lo) // 2
+            parent_lo[:pairs] = np.minimum(parent_lo[:pairs], child_lo[1::2])
+            parent_hi[:pairs] = np.maximum(parent_hi[:pairs], child_hi[1::2])
+            levels_lo.append(parent_lo)
+            levels_hi.append(parent_hi)
+        setattr(self, prefix + '_bvh_order', order)
+        setattr(self, prefix + '_bvh_lo', tuple(levels_lo))
+        setattr(self, prefix + '_bvh_hi', tuple(levels_hi))
+
+    def _solid_bvh_relation_rows(self, prefix, query_mass, intersects):
+        levels_lo = getattr(self, prefix + '_bvh_lo')
+        levels_hi = getattr(self, prefix + '_bvh_hi')
+        if not levels_lo or not query_mass:
+            return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+        owners = np.arange(query_mass, dtype=np.int64)
+        nodes = np.zeros(query_mass, dtype=np.int64)
+        present = intersects(owners, levels_lo[-1][nodes], levels_hi[-1][nodes])
+        owners = owners[present]
+        nodes = nodes[present]
+        for level in range(len(levels_lo) - 2, -1, -1):
+            left = nodes * 2
+            right = left + 1
+            child_owners = np.repeat(owners, 2)
+            child_nodes = np.column_stack((left, right)).reshape(-1)
+            valid = child_nodes < len(levels_lo[level])
+            child_owners = child_owners[valid]
+            child_nodes = child_nodes[valid]
+            present = intersects(
+                child_owners,
+                levels_lo[level][child_nodes],
+                levels_hi[level][child_nodes],
+            )
+            owners = child_owners[present]
+            nodes = child_nodes[present]
+            if not len(owners):
+                break
+        order = getattr(self, prefix + '_bvh_order')
+        return owners, order[nodes]
+
+    def _solid_relation_rows(self, lo, hi):
+        lo = np.asarray(lo, dtype=np.float64).reshape((-1, 3))
+        hi = np.asarray(hi, dtype=np.float64).reshape((-1, 3))
+        prefix = 's' if getattr(self, 'solids', None) is not None else 'blk'
+        return self._solid_bvh_relation_rows(
+            prefix, len(lo),
+            lambda owners, box_lo, box_hi: np.all(
+                (hi[owners] > box_lo) & (lo[owners] < box_hi), axis=1,
+            ),
+        )
+
+    def _solid_ray_relation_rows(self, starts, ends, mins, maxs, padding):
+        starts = np.asarray(starts, dtype=np.float64).reshape((-1, 3))
+        ends = np.asarray(ends, dtype=np.float64).reshape((-1, 3))
+        prefix = 's' if getattr(self, 'solids', None) is not None else 'blk'
+        minimum = np.asarray(mins, dtype=np.float64)
+        maximum = np.asarray(maxs, dtype=np.float64)
+        return self._solid_bvh_relation_rows(
+            prefix, len(starts),
+            lambda owners, box_lo, box_hi: self._ray_box_rows(
+                starts[owners], ends[owners],
+                box_lo - maximum - padding,
+                box_hi - minimum + padding,
+            ),
+        )
+
+    @staticmethod
+    def _ray_box_rows(starts, ends, lo, hi):
+        delta = ends - starts
+        stationary = delta == 0.0
+        contained = (~stationary
+                     | ((starts >= lo) & (starts <= hi))).all(axis=1)
+        inverse = np.zeros_like(delta)
+        np.divide(1.0, delta, out=inverse, where=~stationary)
+        first = (lo - starts) * inverse
+        last = (hi - starts) * inverse
+        lower = np.where(stationary, -np.inf, np.minimum(first, last)).max(axis=1)
+        upper = np.where(stationary, np.inf, np.maximum(first, last)).min(axis=1)
+        return contained & (np.maximum(lower, 0.0) <= np.minimum(upper, 1.0))
+
+    def _index_solid_planes(self, solids):
+        if isinstance(solids, _PlaneBlocks):
+            planes = solids.flat
+            self.solid_plane_counts = np.diff(solids.offsets)
+        else:
+            values = [value[0] if isinstance(value, tuple) else value for value in solids]
+            self.solid_plane_counts = np.asarray([len(value) for value in values], dtype=np.int64)
+            planes = np.vstack(values) if values else np.zeros((0, 4), dtype=np.float64)
+        self.solid_plane_offsets = np.zeros(len(self.solid_plane_counts) + 1, dtype=np.int64)
+        np.cumsum(self.solid_plane_counts, out=self.solid_plane_offsets[1:])
+        lengths = np.linalg.norm(planes[:, :3], axis=1)
+        lengths = np.where(lengths > 0.0, lengths, 1.0)
+        planes[:, :3] /= lengths[:, None]
+        planes[:, 3] /= lengths
+        self.solid_plane_n0 = np.ascontiguousarray(planes[:, 0])
+        self.solid_plane_n1 = np.ascontiguousarray(planes[:, 1])
+        self.solid_plane_n2 = np.ascontiguousarray(planes[:, 2])
+        self.solid_plane_distances = np.ascontiguousarray(planes[:, 3])
+        if solids is getattr(self, 'blk_H', None) and not isinstance(solids, _PlaneBlocks):
+            self.blk_H = _PlaneBlocks(planes, self.solid_plane_offsets)
 
     def _blocking_in(self, lo, hi):
-        """Every blocking brush whose AABB meets [lo,hi] -- the set that must be
-        subtracted from a region for the result to be free space the engine
-        agrees with."""
         BC = self.blk_cell
         out = []
         seen = set()
@@ -539,9 +767,9 @@ class NegSpace(object):
              (self.blk_lo[idx, 2] < hi[2]) & (self.blk_hi[idx, 2] > lo[2]))
         return [int(v) for v in idx[m]]
 
-    # ------------------------------------------------------------------ setup
     def _finish(self, verbose=False):
         N = len(self.cells)
+        self.counts = np.asarray([len(cell) for cell in self.cells], dtype=np.int32)
         self.lo = np.zeros((N, 3))
         self.hi = np.zeros((N, 3))
         for i, H in enumerate(self.cells):
@@ -554,10 +782,10 @@ class NegSpace(object):
         if verbose:
             v = self.volume()
             print('negspace: %d convex free cells from %d open leaves (%d solid leaves, '
-                  '%d detail-brush subtractions, %d leaves given up as too split to '
-                  'subtract exactly), free-cell AABB volume %.3g u^3, %d grid cells'
-                  % (N, self.n_open_leaves, self.n_solid_leaves, self.n_detail_splits,
-                     getattr(self, 'dropped_leaves', 0), v, len(self.grid)))
+                  '%d detail-brush subtractions), free-cell AABB volume %.3g u^3, '
+                  '%d grid cells'
+                  % (N, self.n_open_leaves, self.n_solid_leaves,
+                     self.n_detail_splits, v, len(self.grid)))
 
     def _index(self):
         c = self.gridcell
@@ -572,14 +800,10 @@ class NegSpace(object):
         self.grid = {k: np.array(v, dtype=np.int64) for k, v in g.items()}
 
     def volume(self):
-        """Free volume, as the sum of the cells' AABB volumes clipped to the
-        world -- an upper bound used only for reporting scale."""
         e = np.maximum(self.hi - self.lo, 0.0)
         return float((e[:, 0] * e[:, 1] * e[:, 2]).sum())
 
-    # -------------------------------------------------------------- placement
     def translated(self, t):
-        """Exact rigid placement of the whole complex: n.p <= d  ->  n.p <= d+n.t."""
         out = NegSpace.__new__(NegSpace)
         out.mask = self.mask
         out.gridcell = self.gridcell
@@ -595,15 +819,14 @@ class NegSpace(object):
         out.n_open_leaves = self.n_open_leaves
         out.n_solid_leaves = self.n_solid_leaves
         out.n_detail_splits = self.n_detail_splits
-        out.dropped_leaves = getattr(self, 'dropped_leaves', 0)
         out.portals = None
         out.adj = None
         out._finish()
+        out.schema = NEGSPACE_SCHEMA
         return out
 
     @staticmethod
     def union(parts):
-        """Assemble placed per-tile complexes into one world complex."""
         out = NegSpace.__new__(NegSpace)
         out.mask = parts[0].mask
         out.gridcell = parts[0].gridcell
@@ -620,10 +843,10 @@ class NegSpace(object):
         out.n_solid_leaves = sum(p.n_solid_leaves for p in parts)
         out.n_detail_splits = sum(p.n_detail_splits for p in parts)
         out._finish()
+        out.schema = NEGSPACE_SCHEMA
         return out
 
     def add_cells(self, Hs, tile=-1):
-        """Register procedurally generated free volume (a connector's interior)."""
         if not hasattr(self, 'cell_tile'):
             self.cell_tile = [-1] * len(self.cells)
         for H in Hs:
@@ -635,22 +858,7 @@ class NegSpace(object):
              for H in Hs], axis=0)) if Hs else self.world_lo
         self._finish()
 
-
     def edit(self, add=(), remove=(), verbose=False):
-        """Apply the procedural geometry's own edits to the free volume.
-
-        `remove` are convex solids the generator ADDS to the world (a corridor's
-        wall, floor and ceiling slabs; a doorway's threshold, jambs and header):
-        the free volume loses them exactly, by convex subtraction.  `add` are the
-        regions the generator OPENS (a cut aperture, a corridor's interior, the
-        throat between them).  Geometry and free space are edited in the same
-        operation, so the complex describes the world after the fusion rather than
-        before it -- which is the difference between a structure you can place a
-        spawnpoint in and a structure you have to check one afterwards.
-
-        Every solid that touches a given cell is subtracted from it in one pass,
-        and the index is rebuilt once, so the cost is linear in cells rather than
-        in cells times solids."""
         rem = [np.asarray(B, dtype=np.float64) for B in remove]
         touch = {}
         for bi, B in enumerate(rem):
@@ -662,14 +870,9 @@ class NegSpace(object):
         nrem = 0
         for i, bis in touch.items():
             pieces = [self.cells[i]]
-            over = False
             for bi in bis:
-                pieces, over = subtract(pieces, rem[bi], self.lo[i], self.hi[i],
-                                        cap=64, exact_empty=False)
-                if over:
-                    break
-            if over:
-                continue                     # keep the cell whole rather than guess
+                pieces = subtract(pieces, rem[bi], self.lo[i], self.hi[i],
+                                  exact_empty=False)
             keep[i] = False
             newc += pieces
             nrem += 1
@@ -690,7 +893,6 @@ class NegSpace(object):
             lo2, hi2 = bounds_of(H, self.world_lo - 16384.0, self.world_hi + 16384.0)
             self.world_lo = np.minimum(self.world_lo, lo2)
             self.world_hi = np.maximum(self.world_hi, hi2)
-        self._CROSS_CACHE = None
         self.portals = None
         self.adj = None
         self._finish()
@@ -700,44 +902,35 @@ class NegSpace(object):
                   % (nrem, len(rem), nadd, len(self.cells)))
         return nrem, nadd
 
-    # ------------------------------------------------------------- membership
     def _cands(self, p):
         c = self.gridcell
         k = (int(math.floor(p[0] / c)), int(math.floor(p[1] / c)), int(math.floor(p[2] / c)))
         return self.grid.get(k)
 
     def _solid_cands(self, lo, hi):
-        """Solid brushes whose AABB meets [lo,hi] (source representation)."""
-        c = self.gridcell
-        out = []
-        seen = set()
-        for x in range(int(math.floor(lo[0] / c)), int(math.floor(hi[0] / c)) + 1):
-            for y in range(int(math.floor(lo[1] / c)), int(math.floor(hi[1] / c)) + 1):
-                for z in range(int(math.floor(lo[2] / c)), int(math.floor(hi[2] / c)) + 1):
-                    for i in self.sgrid.get((x, y, z), ()):
-                        if i not in seen:
-                            seen.add(i)
-                            out.append(i)
-        for i in self.sgrid.get('big', ()):
-            if i not in seen:
-                seen.add(i)
-                out.append(i)
-        return out
+        _, solids = self._solid_relation_rows(
+            np.asarray(lo, dtype=np.float64).reshape((1, 3)),
+            np.asarray(hi, dtype=np.float64).reshape((1, 3)),
+        )
+        return solids
+
+    def _solid_geom(self, i):
+        if getattr(self, 'solids', None) is not None:
+            return self.solids[i]
+        return self.blk_H[i], self.blk_lo[i], self.blk_hi[i]
 
     def cell_at(self, p, tol=0.25):
-        """Index of the free cell containing p, or -1.
+        if (getattr(self, 'solids', None) is not None
+                or getattr(self, 'blk_H', None) is not None and not self.cells):
 
-        THE definition of solidity: `solid(p) == cell_at(p) < 0`."""
-        if getattr(self, 'solids', None) is not None:
-            # SOURCE representation: free is "inside no solid brush".
             px = np.array([float(p[0]), float(p[1]), float(p[2])])
+            if np.any(px < self.world_lo - tol) or np.any(px > self.world_hi + tol):
+                return -1
             for i in self._solid_cands(px - 0.5, px + 0.5):
-                H, blo, bhi = self.solids[i]
+                H, blo, bhi = self._solid_geom(i)
                 if np.any(px < blo - tol) or np.any(px > bhi + tol):
                     continue
-                # Generous toward SOLID by `tol`, matching the convention the
-                # rest of the toolchain uses: a marginal point is called solid,
-                # which refuses a placement rather than admitting a bad one.
+
                 if (H[:, :3] @ px - H[:, 3]).max() <= tol:
                     return -1
             return 0
@@ -758,68 +951,629 @@ class NegSpace(object):
         return self.cell_at(p) >= 0
 
     def covered(self, H, lo=None, hi=None, tol=1.0):
-        """Is the convex region H inside the union of free cells, to within `tol`?
-
-        Subtract every overlapping free cell from H and see whether any volume
-        survives.  The union of the cells is NOT convex, so this is the only
-        correct way to ask -- testing containment in a single cell would say no
-        for every box that straddles an open doorway.
-
-        `tol` is a real tolerance and is stated rather than hidden: a leftover
-        piece thinner than `tol` in any axis is not treated as uncovered.  It
-        exists because the cell decomposition drops sub-0.05-unit slivers, and
-        because a sliver that thin cannot hold anything this toolchain places.
-        The error is one-sided in the safe direction everywhere it matters: a
-        false "covered" is bounded by `tol` units of geometry, while nothing is
-        ever reported free that lies inside a brush -- that is a property of the
-        cells themselves, not of this query."""
         if lo is None:
             lo, hi = bounds_of(H, self.world_lo - 4096.0, self.world_hi + 4096.0)
+        if (getattr(self, 'solids', None) is not None
+                or getattr(self, 'blk_H', None) is not None):
+            if np.any(lo < self.world_lo) or np.any(hi > self.world_hi):
+                return False
+            for index in self._solid_cands(lo, hi):
+                solid, slo, shi = self._solid_geom(index)
+                if np.any(hi <= slo) or np.any(lo >= shi):
+                    continue
+                combined = np.vstack([H, solid])
+                rlo, rhi = bounds_of(combined, np.maximum(lo, slo), np.minimum(hi, shi))
+                if np.all(rhi - rlo > tol) and len(vertices(prune(combined, rlo, rhi))) >= 4:
+                    return False
+            return True
         cand = self._cells_in_box(lo, hi)
         pieces = [H]
         for i in cand:
-            pieces, over = subtract(pieces, self.cells[i], lo, hi,
-                                    exact_empty=False, minext=tol)
-            if over:
-                return False
+            pieces = subtract(pieces, self.cells[i], lo, hi,
+                              exact_empty=False, minext=tol)
             if not pieces:
                 return True
         return not pieces
 
-    def _fits_source(self, p, mins, maxs, tol=0.03125):
-        """Box at p free of every solid brush (source representation).
+    def solid_incidence(self, H, lo=None, hi=None, tol=0.25):
+        if lo is None:
+            lo, hi = bounds_of(H, self.world_lo - 4096.0, self.world_hi + 4096.0)
+        query_lo = np.asarray(lo, dtype=np.float64).reshape((1, 3))
+        query_hi = np.asarray(hi, dtype=np.float64).reshape((1, 3))
+        _, candidates = self._solid_relation_rows(query_lo, query_hi)
+        for index in candidates:
+            solid, slo, shi = self._solid_geom(index)
+            lower = np.maximum(query_lo[0], slo)
+            upper = np.minimum(query_hi[0], shi)
+            points = vertices(np.vstack((H, solid)), lower, upper)
+            if len(points) >= 4 and np.all(points.max(axis=0) - points.min(axis=0) > tol):
+                return {'incidence_mass': 1, 'source_solid_candidate_mass': len(candidates)}
+        return {'incidence_mass': 0, 'source_solid_candidate_mass': len(candidates)}
 
-        Uses the plane-offset construction the ENGINE uses for a box trace: each
-        brush plane is pushed out by the box's support along that normal, and the
-        box centre is tested as a point.  Conservative at edges in the safe
-        direction (it may call a marginal placement blocked), and it is the same
-        arithmetic DarkPlaces applies, so a `fits` answer here is the answer the
-        server would give."""
+    def _fits_source(self, p, mins, maxs, tol=COLLISION_EPSILON):
         px = np.array([float(p[0]), float(p[1]), float(p[2])])
         mn = np.asarray(mins, dtype=float)
         mx = np.asarray(maxs, dtype=float)
         blo = px + mn
         bhi = px + mx
+        if np.any(blo < self.world_lo) or np.any(bhi > self.world_hi):
+            return False
         for i in self._solid_cands(blo, bhi):
-            H, slo, shi = self.solids[i]
+            H, slo, shi = self._solid_geom(i)
             if np.any(bhi <= slo) or np.any(blo >= shi):
                 continue
             n = H[:, :3]
-            # Push each plane OUT by the box's support along that normal, which
-            # for interior `n.x <= d` means picking the MIN corner where n>0:
-            #   dist = d - n.off,  off = (n>0 ? mins : maxs)
-            # Choosing the max corner instead shrinks the brush, and a box
-            # centred on a point the module itself called solid then "fitted".
+
             off = np.where(n > 0, mn, mx)
             dist = H[:, 3] - (off * n).sum(axis=1)
             if (n @ px - dist).max() <= -tol:
                 return False
         return True
 
+    def _source_pair_rows(self, points, mins, maxs):
+        return self._solid_relation_rows(points + mins, points + maxs)
+
+    def _source_segment_pair_rows(self, starts, ends, mins, maxs, padding):
+        return self._solid_ray_relation_rows(
+            starts, ends, mins, maxs, padding,
+        )
+
+    def _source_plane_rows(self, pair_solids):
+        counts = self.solid_plane_counts[pair_solids]
+        offsets = np.zeros(len(counts) + 1, dtype=np.int64)
+        np.cumsum(counts, out=offsets[1:])
+        pair_rows = np.repeat(np.arange(len(counts), dtype=np.int64), counts)
+        local_rows = np.arange(offsets[-1], dtype=np.int64) - np.repeat(offsets[:-1], counts)
+        plane_rows = self.solid_plane_offsets[pair_solids[pair_rows]] + local_rows
+        return counts, offsets, pair_rows, plane_rows
+
+    def _solid_plane_streams(self, rows):
+        return (
+            self.solid_plane_n0[rows], self.solid_plane_n1[rows],
+            self.solid_plane_n2[rows], self.solid_plane_distances[rows],
+        )
+
+    @staticmethod
+    def _plane_dot_rows(n0, n1, n2, points, owners):
+        result = np.empty_like(n0)
+        work = np.empty_like(n0)
+        np.multiply(n0, points[owners, 0], out=result)
+        np.multiply(n1, points[owners, 1], out=work)
+        np.add(result, work, out=result)
+        np.multiply(n2, points[owners, 2], out=work)
+        np.add(result, work, out=result)
+        return result
+
+    @staticmethod
+    def _plane_support(n0, n1, n2, positive, negative):
+        center = 0.5 * (positive + negative)
+        extent = 0.5 * (positive - negative)
+        result = np.empty_like(n0)
+        work = np.empty_like(n0)
+        np.multiply(n0, center[0], out=result)
+        np.abs(n0, out=work)
+        work *= extent[0]
+        result += work
+        for normal, axis in ((n1, 1), (n2, 2)):
+            np.multiply(normal, center[axis], out=work)
+            result += work
+            np.abs(normal, out=work)
+            work *= extent[axis]
+            result += work
+        return result
+
+    def _source_penetrations(self, points, mins, maxs, tol):
+        pair_owners, pair_solids = self._source_pair_rows(points, mins, maxs)
+        if not len(pair_owners):
+            return {
+                'owners': pair_owners,
+                'solids': pair_owners,
+                'n0': np.zeros(0, dtype=np.float64),
+                'n1': np.zeros(0, dtype=np.float64),
+                'n2': np.zeros(0, dtype=np.float64),
+                'signed': np.zeros(0, dtype=np.float64),
+                'pair_mass': 0,
+                'plane_mass': 0,
+            }
+        counts, offsets, pair_rows, plane_rows = self._source_plane_rows(pair_solids)
+        n0, n1, n2, plane_distances = self._solid_plane_streams(plane_rows)
+        distances = plane_distances - self._plane_support(
+            n0, n1, n2, mins, maxs,
+        )
+        owner_rows = pair_owners[pair_rows]
+        signed = self._plane_dot_rows(
+            n0, n1, n2, points, owner_rows,
+        ) - distances
+        pair_maximum = np.maximum.reduceat(signed, offsets[:-1])
+        repeated_maximum = np.repeat(pair_maximum, counts)
+        row_ids = np.arange(len(signed), dtype=np.int64)
+        selected = np.where(signed == repeated_maximum, row_ids, len(signed))
+        selected = np.minimum.reduceat(selected, offsets[:-1])
+        active = pair_maximum <= -tol
+        return {
+            'owners': pair_owners[active],
+            'solids': pair_solids[active],
+            'n0': n0[selected[active]],
+            'n1': n1[selected[active]],
+            'n2': n2[selected[active]],
+            'signed': pair_maximum[active],
+            'pair_mass': len(pair_owners),
+            'plane_mass': len(signed),
+        }
+
+    @staticmethod
+    def _solve_spd3(a00, a01, a02, a11, a12, a22, b0, b1, b2):
+        l00 = np.sqrt(a00)
+        l10 = a01 / l00
+        l20 = a02 / l00
+        l11 = np.sqrt(a11 - l10 * l10)
+        l21 = (a12 - l20 * l10) / l11
+        l22 = np.sqrt(a22 - l20 * l20 - l21 * l21)
+        y0 = b0 / l00
+        y1 = (b1 - l10 * y0) / l11
+        y2 = (b2 - l20 * y0 - l21 * y1) / l22
+        x2 = y2 / l22
+        x1 = (y1 - l21 * x2) / l11
+        x0 = (y0 - l10 * x1 - l20 * x2) / l00
+        return np.column_stack((x0, x1, x2))
+
+    def _source_directions(self, owners, n0, n1, n2, depths):
+        starts = np.r_[0, np.flatnonzero(owners[1:] != owners[:-1]) + 1]
+        work = np.empty_like(n0)
+        def product_sum(left, right):
+            np.multiply(left, right, out=work)
+            return np.add.reduceat(work, starts)
+        delta = self._solve_spd3(
+            1.0 + product_sum(n0, n0), product_sum(n0, n1), product_sum(n0, n2),
+            1.0 + product_sum(n1, n1), product_sum(n1, n2),
+            1.0 + product_sum(n2, n2), product_sum(n0, depths),
+            product_sum(n1, depths), product_sum(n2, depths),
+        )
+        lengths = np.linalg.norm(delta, axis=1)
+        missing = lengths <= np.finfo(np.float64).eps
+        if np.any(missing):
+            order = np.lexsort((np.arange(len(owners)), depths, owners))
+            ordered_owners = owners[order]
+            first = np.r_[True, ordered_owners[1:] != ordered_owners[:-1]]
+            chosen = order[first]
+            use = missing[owners[chosen]]
+            targets = owners[chosen[use]]
+            scales = depths[chosen[use]]
+            delta[targets, 0] = n0[chosen[use]] * scales
+            delta[targets, 1] = n1[chosen[use]] * scales
+            delta[targets, 2] = n2[chosen[use]] * scales
+            lengths = np.linalg.norm(delta, axis=1)
+        directions = np.zeros_like(delta)
+        active = lengths > 0.0
+        directions[active] = delta[active] / lengths[active, None]
+        return directions
+
+    def _source_line_intervals(self, points, directions, pair_owners,
+                               pair_solids, mins, maxs, tol):
+        counts, offsets, pair_rows, plane_rows = self._source_plane_rows(pair_solids)
+        n0, n1, n2, plane_distances = self._solid_plane_streams(plane_rows)
+        distances = (plane_distances
+                     - self._plane_support(n0, n1, n2, mins, maxs) + tol)
+        owner_rows = pair_owners[pair_rows]
+        signed = self._plane_dot_rows(
+            n0, n1, n2, points, owner_rows,
+        ) - distances
+        slopes = self._plane_dot_rows(
+            n0, n1, n2, directions, owner_rows,
+        )
+        stationary = slopes == 0.0
+        outside = np.logical_or.reduceat(stationary & (signed > 0.0), offsets[:-1])
+        parameters = np.zeros_like(signed)
+        np.divide(-signed, slopes, out=parameters, where=~stationary)
+        lower = np.maximum.reduceat(
+            np.where(slopes < 0.0, parameters, -np.inf), offsets[:-1],
+        )
+        upper = np.minimum.reduceat(
+            np.where(slopes > 0.0, parameters, np.inf), offsets[:-1],
+        )
+        return lower, upper, ~outside & (upper >= np.maximum(lower, 0.0)), len(signed)
+
+    @staticmethod
+    def _source_component_extend(component, owners, lower, upper, capacity):
+        result = component.copy()
+        if not len(owners):
+            return result
+        lower = np.maximum(lower, 0.0)
+        upper = np.minimum(upper, capacity[owners])
+        order = np.lexsort((upper, lower, owners))
+        owners = owners[order]
+        lower = lower[order]
+        upper = upper[order]
+        starts = np.r_[0, np.flatnonzero(owners[1:] != owners[:-1]) + 1]
+        ends = np.r_[starts[1:], len(owners)]
+        groups = np.cumsum(np.r_[True, owners[1:] != owners[:-1]]) - 1
+        stride = np.nextafter(float(np.max(capacity)), np.inf)
+        prefix = np.maximum.accumulate(upper + groups * stride) - groups * stride
+        previous = np.r_[0.0, prefix[:-1]]
+        previous[starts] = component[owners[starts]]
+        gaps = lower > previous + EPS
+        cumulative = np.cumsum(gaps)
+        baseline = np.zeros(len(starts), dtype=np.int64)
+        baseline[1:] = cumulative[starts[1:] - 1]
+        connected = cumulative - np.repeat(baseline, ends - starts) == 0
+        values = component[owners]
+        np.copyto(values, upper, where=connected)
+        extended = np.maximum.reduceat(values, starts)
+        result[owners[starts]] = extended
+        return result
+
+    def _source_ray_component_steps(self, points, directions, mins, maxs,
+                                    domain_lo, domain_hi, tol,
+                                    seed_owners, seed_solids):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            capacity = np.where(
+                directions > 0.0,
+                (domain_hi - points) / directions,
+                np.where(directions < 0.0, (domain_lo - points) / directions, np.inf),
+            ).min(axis=1)
+        solid_mass = len(self.solid_plane_counts)
+        seed_keys = np.unique(seed_owners * solid_mass + seed_solids)
+        seen = seed_keys
+        owners = seed_keys // solid_mass
+        solids = seed_keys % solid_mass
+        lower, upper, present, plane_mass = self._source_line_intervals(
+            points, directions, owners, solids, mins, maxs, tol,
+        )
+        interval_owners = owners[present]
+        interval_lower = lower[present]
+        interval_upper = upper[present]
+        component = self._source_component_extend(
+            np.zeros(len(points), dtype=np.float64), interval_owners,
+            interval_lower, interval_upper, capacity,
+        )
+        front = np.zeros(len(points), dtype=np.float64)
+        active = np.flatnonzero(component > 0.0)
+        sweep_mass = 0
+        while len(active):
+            target = np.minimum(
+                np.maximum(2.0 * component[active], component[active] + tol),
+                capacity[active],
+            )
+            starts = points[active] + directions[active] * front[active, None]
+            ends = points[active] + directions[active] * target[:, None]
+            local_owners, local_solids = self._solid_ray_relation_rows(
+                starts, ends, mins, maxs, tol,
+            )
+            fresh_owners = active[local_owners]
+            keys = np.unique(fresh_owners * solid_mass + local_solids)
+            indices = np.searchsorted(seen, keys)
+            fresh = (indices == len(seen))
+            bounded = ~fresh
+            fresh[bounded] = seen[indices[bounded]] != keys[bounded]
+            fresh_keys = keys[fresh]
+            previous = component.copy()
+            if len(fresh_keys):
+                new_owners = fresh_keys // solid_mass
+                new_solids = fresh_keys % solid_mass
+                lower, upper, present, evaluated = self._source_line_intervals(
+                    points, directions, new_owners, new_solids, mins, maxs, tol,
+                )
+                plane_mass += evaluated
+                seen = np.union1d(seen, fresh_keys)
+                component = self._source_component_extend(
+                    component, new_owners[present], lower[present], upper[present], capacity,
+                )
+            front[active] = target
+            grew = component > previous + EPS
+            active = np.flatnonzero(
+                grew & (component >= front - EPS) & (front < capacity - EPS)
+            )
+            sweep_mass += 1
+        successful = component < capacity - EPS
+        component[successful] = np.nextafter(component[successful], np.inf)
+        return component, successful, len(seen), plane_mass, sweep_mass
+
+    def project_many(self, points, mins=PL_MIN, maxs=PL_MAX,
+                     tolerance=COLLISION_EPSILON):
+        origin = np.asarray(points, dtype=np.float64).reshape((-1, 3))
+        if not len(origin):
+            return origin.copy(), np.zeros(0, dtype=np.float64), {
+                'input_point_mass': 0,
+                'input_penetration_point_mass': 0,
+                'input_penetration_pair_mass': 0,
+                'projection_sweep_mass': 0,
+                'candidate_pair_mass': 0,
+                'plane_evaluation_mass': 0,
+                'directional_null_pair_mass': 0,
+                'world_boundary_reconciliation_mass': 0,
+                'residual_penetration_point_mass': 0,
+            }
+        mn = np.zeros(3) if mins is None else np.asarray(mins, dtype=np.float64)
+        mx = np.zeros(3) if maxs is None else np.asarray(maxs, dtype=np.float64)
+        domain_lo = self.world_lo - mn + tolerance
+        domain_hi = self.world_hi - mx - tolerance
+        current = np.minimum(np.maximum(origin, domain_lo), domain_hi)
+        candidate_pair_mass = 0
+        plane_evaluation_mass = 0
+        directional_null_pair_mass = 0
+        boundary_mass = int(np.count_nonzero(np.any(current != origin, axis=1)))
+        sweep_mass = 0
+        initial_points = 0
+        initial_pairs = 0
+        center = 0.5 * (domain_lo + domain_hi)
+        penetration = self._source_penetrations(current, mn, mx, COLLISION_EPSILON)
+        candidate_pair_mass += penetration['pair_mass']
+        plane_evaluation_mass += penetration['plane_mass']
+        owners = penetration['owners']
+        initial_points = len(np.unique(owners))
+        initial_pairs = len(owners)
+        if len(owners):
+            active_points = np.unique(owners)
+            depths = tolerance - penetration['signed']
+            active_owners = np.searchsorted(active_points, owners)
+            directions = self._source_directions(
+                active_owners,
+                penetration['n0'], penetration['n1'], penetration['n2'], depths,
+            )
+            steps, successful, pair_mass, plane_mass, ray_sweeps = self._source_ray_component_steps(
+                current[active_points], directions, mn, mx,
+                domain_lo, domain_hi, tolerance,
+                active_owners, penetration['solids'],
+            )
+            candidate_pair_mass += pair_mass
+            plane_evaluation_mass += plane_mass
+            current[active_points[successful]] += (
+                directions[successful] * steps[successful, None]
+            )
+            bounded_points = active_points[~successful]
+            directional_null_pair_mass += len(bounded_points)
+            boundary_mass += len(bounded_points)
+            sweep_mass = ray_sweeps
+            if len(bounded_points):
+                inward = center[None, :] - current[bounded_points]
+                inward_length = np.linalg.norm(inward, axis=1)
+                centered = inward_length <= np.finfo(np.float64).eps
+                if np.any(centered):
+                    spans = domain_hi - domain_lo
+                    axis = int(np.argmax(spans))
+                    inward[centered] = 0.0
+                    inward[centered, axis] = 1.0
+                    inward_length[centered] = 1.0
+                inward /= inward_length[:, None]
+                bounded_local = np.flatnonzero(~successful)
+                seed_mask = ~successful[active_owners]
+                fallback_owners = np.searchsorted(
+                    bounded_local, active_owners[seed_mask],
+                )
+                steps, successful, pair_mass, plane_mass, ray_sweeps = (
+                    self._source_ray_component_steps(
+                        current[bounded_points], inward, mn, mx,
+                        domain_lo, domain_hi, tolerance,
+                        fallback_owners, penetration['solids'][seed_mask],
+                    )
+                )
+                candidate_pair_mass += pair_mass
+                plane_evaluation_mass += plane_mass
+                current[bounded_points[successful]] += (
+                    inward[successful] * steps[successful, None]
+                )
+                directional_null_pair_mass += int((~successful).sum())
+                sweep_mass += ray_sweeps
+            residual = self._source_penetrations(current, mn, mx, COLLISION_EPSILON)
+            candidate_pair_mass += residual['pair_mass']
+            plane_evaluation_mass += residual['plane_mass']
+        else:
+            residual = penetration
+        residual_point_mass = len(np.unique(residual['owners']))
+        delta = current - origin
+        distances = np.linalg.norm(delta, axis=1)
+        return current, distances, {
+            'input_point_mass': len(origin),
+            'input_penetration_point_mass': initial_points,
+            'input_penetration_pair_mass': initial_pairs,
+            'projection_sweep_mass': sweep_mass,
+            'candidate_pair_mass': candidate_pair_mass,
+            'plane_evaluation_mass': plane_evaluation_mass,
+            'directional_null_pair_mass': directional_null_pair_mass,
+            'world_boundary_reconciliation_mass': boundary_mass,
+            'residual_penetration_point_mass': residual_point_mass,
+        }
+
+    @staticmethod
+    def _linear_interval_rows(left, right, offsets):
+        outside = np.logical_or.reduceat((left > 0.0) & (right > 0.0), offsets[:-1])
+        entry = (left > 0.0) & (right <= 0.0)
+        leave = (left <= 0.0) & (right > 0.0)
+        crossing = entry | leave
+        denominator = np.ones_like(left)
+        np.subtract(left, right, out=denominator, where=crossing)
+        parameter = np.divide(left, denominator, out=np.zeros_like(left), where=crossing)
+        lower = np.maximum.reduceat(np.where(entry, parameter, 0.0), offsets[:-1])
+        upper = np.minimum.reduceat(np.where(leave, parameter, 1.0), offsets[:-1])
+        return lower, upper, outside
+
+    def _segment_relations_batch(self, starts, ends, mins, maxs,
+                                 activation, minimum_normal):
+        starts = np.asarray(starts, dtype=np.float64).reshape((-1, 3))
+        ends = np.asarray(ends, dtype=np.float64).reshape((-1, 3))
+        mins = np.asarray(mins, dtype=np.float64)
+        maxs = np.asarray(maxs, dtype=np.float64)
+        free = np.ones(len(starts), dtype=bool)
+        supported = np.zeros(len(starts), dtype=bool)
+        pair_owners, pair_solids = self._source_segment_pair_rows(
+            starts, ends, mins, maxs, activation + EPS,
+        )
+        measures = {
+            'segment_mass': len(starts),
+            'candidate_pair_mass': len(pair_owners),
+            'plane_evaluation_mass': 0,
+            'support_face_mass': 0,
+            'support_constraint_mass': 0,
+        }
+        if not len(pair_owners):
+            return free, supported, measures
+        counts, offsets, pair_rows, plane_rows = self._source_plane_rows(pair_solids)
+        n0, n1, n2, plane_distances = self._solid_plane_streams(plane_rows)
+        distances = plane_distances - self._plane_support(
+            n0, n1, n2, mins, maxs,
+        )
+        segment_rows = pair_owners[pair_rows]
+        left = (self._plane_dot_rows(n0, n1, n2, starts, segment_rows) - distances
+                + COLLISION_EPSILON)
+        right = (self._plane_dot_rows(n0, n1, n2, ends, segment_rows) - distances
+                 + COLLISION_EPSILON)
+        lower, upper, outside = self._linear_interval_rows(left, right, offsets)
+        collision = ~outside & (upper > lower)
+        free[np.unique(pair_owners[collision])] = False
+        measures['plane_evaluation_mass'] += len(left)
+
+        upward = n2 >= minimum_normal
+        if not np.any(upward):
+            return free, supported, measures
+        face_plane_rows = plane_rows[upward]
+        face_pairs = pair_rows[upward]
+        face_owners = pair_owners[face_pairs]
+        face_rows = np.flatnonzero(upward)
+        fn0, fn1, fn2, face_distances = self._solid_plane_streams(face_plane_rows)
+        face_support = self._plane_support(fn0, fn1, fn2, mins, maxs)
+        face_left = self._plane_dot_rows(
+            fn0, fn1, fn2, starts, face_owners,
+        ) + face_support - face_distances
+        face_right = self._plane_dot_rows(
+            fn0, fn1, fn2, ends, face_owners,
+        ) + face_support - face_distances
+        constraint_left = np.column_stack((
+            -face_left - COLLISION_EPSILON,
+            face_left - activation - COLLISION_EPSILON,
+        ))
+        constraint_right = np.column_stack((
+            -face_right - COLLISION_EPSILON,
+            face_right - activation - COLLISION_EPSILON,
+        ))
+        face_lower = np.zeros(len(face_pairs), dtype=np.float64)
+        face_upper = np.ones(len(face_pairs), dtype=np.float64)
+        face_outside = np.any((constraint_left > 0.0) & (constraint_right > 0.0), axis=1)
+        face_entry = (constraint_left > 0.0) & (constraint_right <= 0.0)
+        face_leave = (constraint_left <= 0.0) & (constraint_right > 0.0)
+        face_crossing = face_entry | face_leave
+        face_denominator = np.ones_like(constraint_left)
+        np.subtract(constraint_left, constraint_right, out=face_denominator, where=face_crossing)
+        face_parameter = np.divide(
+            constraint_left, face_denominator,
+            out=np.zeros_like(constraint_left), where=face_crossing,
+        )
+        face_lower = np.maximum(face_lower, np.max(np.where(face_entry, face_parameter, 0.0), axis=1))
+        face_upper = np.minimum(face_upper, np.min(np.where(face_leave, face_parameter, 1.0), axis=1))
+
+        general_support = (
+            np.where(n0 > 0.0, maxs[0], mins[0]) * n0
+            + np.where(n1 > 0.0, maxs[1], mins[1]) * n1
+            + n2 * mins[2]
+        )
+        general_left = (self._plane_dot_rows(
+            n0, n1, n2, starts, segment_rows,
+        ) + general_support - plane_distances)
+        general_right = (self._plane_dot_rows(
+            n0, n1, n2, ends, segment_rows,
+        ) + general_support - plane_distances)
+        general_outside = (general_left > 0.0) & (general_right > 0.0)
+        general_entry = (general_left > 0.0) & (general_right <= 0.0)
+        general_leave = (general_left <= 0.0) & (general_right > 0.0)
+        general_crossing = general_entry | general_leave
+        general_denominator = np.ones_like(general_left)
+        np.subtract(
+            general_left, general_right,
+            out=general_denominator, where=general_crossing,
+        )
+        general_parameter = np.divide(
+            general_left, general_denominator,
+            out=np.zeros_like(general_left), where=general_crossing,
+        )
+        lower_rows = np.where(general_entry, general_parameter, 0.0)
+        upper_rows = np.where(general_leave, general_parameter, 1.0)
+        lower_first = np.maximum.reduceat(lower_rows, offsets[:-1])
+        upper_first = np.minimum.reduceat(upper_rows, offsets[:-1])
+        repeated_lower = np.repeat(lower_first, counts)
+        repeated_upper = np.repeat(upper_first, counts)
+        lower_first_mass = np.add.reduceat(lower_rows == repeated_lower, offsets[:-1])
+        upper_first_mass = np.add.reduceat(upper_rows == repeated_upper, offsets[:-1])
+        lower_second = np.maximum.reduceat(
+            np.where(lower_rows < repeated_lower, lower_rows, 0.0), offsets[:-1],
+        )
+        upper_second = np.minimum.reduceat(
+            np.where(upper_rows > repeated_upper, upper_rows, 1.0), offsets[:-1],
+        )
+        outside_mass = np.add.reduceat(general_outside, offsets[:-1])
+        other_lower = lower_first[face_pairs].copy()
+        other_upper = upper_first[face_pairs].copy()
+        unique_lower = ((lower_rows[face_rows] == lower_first[face_pairs])
+                        & (lower_first_mass[face_pairs] == 1))
+        unique_upper = ((upper_rows[face_rows] == upper_first[face_pairs])
+                        & (upper_first_mass[face_pairs] == 1))
+        other_lower[unique_lower] = lower_second[face_pairs[unique_lower]]
+        other_upper[unique_upper] = upper_second[face_pairs[unique_upper]]
+        other_outside = outside_mass[face_pairs] - general_outside[face_rows] > 0
+        face_lower = np.maximum(face_lower, other_lower)
+        face_upper = np.minimum(face_upper, other_upper)
+        face_outside |= other_outside
+        face_active = ~face_outside & (face_upper >= face_lower)
+        measures['plane_evaluation_mass'] += 2 * len(face_left) + len(general_left)
+        measures['support_face_mass'] = int(face_active.sum())
+        measures['support_constraint_mass'] = int(2 * len(face_left) + len(general_left))
+        if not np.any(face_active):
+            return free, supported, measures
+        interval_owner = face_owners[face_active]
+        interval_lower = face_lower[face_active]
+        interval_upper = face_upper[face_active]
+        order = np.lexsort((interval_upper, interval_lower, interval_owner))
+        interval_owner = interval_owner[order]
+        interval_lower = interval_lower[order]
+        interval_upper = interval_upper[order]
+        group_starts = np.r_[0, np.flatnonzero(interval_owner[1:] != interval_owner[:-1]) + 1]
+        group_ends = np.r_[group_starts[1:], len(interval_owner)]
+        groups = np.cumsum(np.r_[True, interval_owner[1:] != interval_owner[:-1]]) - 1
+        stride = np.nextafter(float(np.max(interval_upper)), np.inf)
+        shifted_upper = interval_upper + groups * stride
+        prefix_upper = np.maximum.accumulate(shifted_upper) - groups * stride
+        previous_upper = np.r_[0.0, prefix_upper[:-1]]
+        previous_upper[group_starts] = 0.0
+        discontinuity = interval_lower > previous_upper + EPS
+        discontinuity_mass = np.add.reduceat(discontinuity, group_starts)
+        reaches_end = prefix_upper[group_ends - 1] >= 1.0 - EPS
+        supported[interval_owner[group_starts]] = (discontinuity_mass == 0) & reaches_end
+        return free, supported, measures
+
+    def segment_relations(self, starts, ends, mins=PL_MIN, maxs=PL_MAX,
+                          activation=1.0, minimum_normal=FLOOR_NZ):
+        starts = np.asarray(starts, dtype=np.float64).reshape((-1, 3))
+        ends = np.asarray(ends, dtype=np.float64).reshape((-1, 3))
+        free = np.ones(len(starts), dtype=bool)
+        supported = np.zeros(len(starts), dtype=bool)
+        measures = {
+            'segment_mass': len(starts),
+            'working_set_mass': 0,
+            'candidate_pair_mass': 0,
+            'plane_evaluation_mass': 0,
+            'support_face_mass': 0,
+            'support_constraint_mass': 0,
+        }
+        if not len(starts):
+            return free, supported, measures
+        working_set_mass = min(
+            len(starts), max(os.cpu_count() or 1, math.isqrt(len(starts))),
+        )
+        bounds = np.linspace(0, len(starts), working_set_mass + 1, dtype=np.int64)
+        measures['working_set_mass'] = working_set_mass
+        for begin, end in zip(bounds[:-1], bounds[1:]):
+            batch_free, batch_supported, batch_measures = self._segment_relations_batch(
+                starts[begin:end], ends[begin:end], mins, maxs,
+                activation, minimum_normal,
+            )
+            free[begin:end] = batch_free
+            supported[begin:end] = batch_supported
+            for name in ('candidate_pair_mass', 'plane_evaluation_mass',
+                         'support_face_mass', 'support_constraint_mass'):
+                measures[name] += batch_measures[name]
+        return free, supported, measures
+
     def fits(self, p, mins=PL_MIN, maxs=PL_MAX):
-        """Is the whole box placed at p inside free space?  Exact, and true across
-        cell boundaries -- a box spanning an open portal fits."""
-        if getattr(self, 'solids', None) is not None:
+        if (getattr(self, 'solids', None) is not None
+                or getattr(self, 'blk_H', None) is not None):
             return self._fits_source(p, mins, maxs)
         lo = (p[0] + mins[0] + 0.03, p[1] + mins[1] + 0.03, p[2] + mins[2] + 0.03)
         hi = (p[0] + maxs[0] - 0.03, p[1] + maxs[1] - 0.03, p[2] + maxs[2] - 0.03)
@@ -827,11 +1581,27 @@ class NegSpace(object):
             return False
         return self.covered(box_H(lo, hi), np.asarray(lo), np.asarray(hi))
 
+    def fits_many(self, points, mins=PL_MIN, maxs=PL_MAX):
+        points = np.asarray(points, dtype=np.float64).reshape((-1, 3))
+        if not len(points):
+            return np.ones(0, dtype=bool)
+        if (getattr(self, 'solids', None) is None
+                and getattr(self, 'blk_H', None) is None):
+            return np.asarray([self.fits(point, mins, maxs) for point in points], dtype=bool)
+        mn = np.asarray(mins, dtype=np.float64)
+        mx = np.asarray(maxs, dtype=np.float64)
+        present = np.all((points + mn >= self.world_lo)
+                         & (points + mx <= self.world_hi), axis=1)
+        rows = np.flatnonzero(present)
+        if len(rows):
+            penetration = self._source_penetrations(
+                points[rows], mn, mx, COLLISION_EPSILON,
+            )
+            if len(penetration['owners']):
+                present[rows[np.unique(penetration['owners'])]] = False
+        return present
+
     def intersects_free(self, H, lo=None, hi=None):
-        """Does the convex region H meet ANY free cell?  Exact (vertex
-        enumeration of the intersection polytope).  `not intersects_free(H)` is
-        the structural statement "H is entirely solid" -- which is how a wall
-        PANEL is recognised, as opposed to a corner or an already-open gap."""
         if lo is None:
             lo, hi = bounds_of(H, self.world_lo - 4096.0, self.world_hi + 4096.0)
         for i in self._cells_in_box(lo, hi):
@@ -860,15 +1630,7 @@ class NegSpace(object):
              (self.lo[cand, 2] < hi[2]) & (self.hi[cand, 2] > lo[2]))
         return cand[m]
 
-    # ---------------------------------------------------------------- segment
     def _segment_intervals_source(self, a, b, mins=None, maxs=None):
-        """Free parametric intervals of [a,b], from the SOLID brushes.
-
-        A ray's intersection with a convex brush is a closed interval (slab
-        clipping), so the solid runs are exact; the free runs are their
-        complement.  No step size anywhere -- which is the whole reason the
-        marched version disagreed with the closed-form one on points that were
-        never navigable."""
         A = np.asarray(a, dtype=float)
         B = np.asarray(b, dtype=float)
         blo = np.minimum(A, B)
@@ -876,9 +1638,27 @@ class NegSpace(object):
         if mins is not None:
             blo = blo + np.asarray(mins, dtype=float)
             bhi = bhi + np.asarray(maxs, dtype=float)
+            domain_lo = self.world_lo - np.asarray(mins, dtype=float)
+            domain_hi = self.world_hi - np.asarray(maxs, dtype=float)
+        else:
+            domain_lo = self.world_lo
+            domain_hi = self.world_hi
+        domain_start, domain_end = 0.0, 1.0
+        delta = B - A
+        for axis in range(3):
+            if abs(delta[axis]) < 1e-12:
+                if A[axis] < domain_lo[axis] or A[axis] > domain_hi[axis]:
+                    return []
+                continue
+            first = (domain_lo[axis] - A[axis]) / delta[axis]
+            second = (domain_hi[axis] - A[axis]) / delta[axis]
+            domain_start = max(domain_start, min(first, second))
+            domain_end = min(domain_end, max(first, second))
+            if domain_end <= domain_start:
+                return []
         solid = []
         for i in self._solid_cands(blo, bhi):
-            H, slo, shi = self.solids[i]
+            H, slo, shi = self._solid_geom(i)
             if np.any(bhi <= slo) or np.any(blo >= shi):
                 continue
             n = H[:, :3]
@@ -890,6 +1670,8 @@ class NegSpace(object):
                 dist = H[:, 3] - (off * n).sum(axis=1)
             da = n @ A - dist
             db = n @ B - dist
+            da += COLLISION_EPSILON
+            db += COLLISION_EPSILON
             t0, t1, ok = 0.0, 1.0, True
             for k in range(len(H)):
                 x, y = da[k], db[k]
@@ -899,10 +1681,7 @@ class NegSpace(object):
                 if x <= 0 and y <= 0:
                     continue
                 t = x / (x - y)
-                # x > 0 means the ray STARTS outside this half-space and crosses
-                # in: that is an ENTRY, so it raises the near bound.  Having these
-                # two branches the wrong way round made every downward ray report
-                # the whole drop as free, so nothing was ever standable.
+
                 if x > y:
                     t0 = max(t0, t)
                 else:
@@ -913,7 +1692,7 @@ class NegSpace(object):
             if ok and t1 > t0:
                 solid.append((t0, t1))
         if not solid:
-            return [(0.0, 1.0)]
+            return [(domain_start, domain_end)]
         solid.sort()
         merged = [list(solid[0])]
         for s0, e0 in solid[1:]:
@@ -922,55 +1701,69 @@ class NegSpace(object):
             else:
                 merged.append([s0, e0])
         free = []
-        t = 0.0
+        t = domain_start
         for s0, e0 in merged:
+            if e0 <= domain_start or s0 >= domain_end:
+                continue
+            s0 = max(s0, domain_start)
+            e0 = min(e0, domain_end)
             if s0 > t + 1e-9:
                 free.append((t, s0))
             t = max(t, e0)
-        if t < 1.0 - 1e-9:
-            free.append((t, 1.0))
+        if t < domain_end - 1e-9:
+            free.append((t, domain_end))
         return free
 
     def segment_intervals(self, a, b, mins=None, maxs=None):
-        """EXACT parametric intervals of [a,b] that lie inside free cells.
-
-        Convex cell ∩ segment is a closed interval computed in closed form, so
-        this is the whole answer, not a sampling of it.  Returns a merged,
-        sorted list of (t0,t1)."""
-        if getattr(self, 'solids', None) is not None:
+        if (getattr(self, 'solids', None) is not None
+                or getattr(self, 'blk_H', None) is not None):
             return self._segment_intervals_source(a, b, mins, maxs)
         a = np.asarray(a, dtype=np.float64)
         b = np.asarray(b, dtype=np.float64)
-        dv = b - a
         cand = self._cells_along(a, b)
         segs = []
-        for i in cand:
-            H = self.cells[i]
-            if mins is not None:
-                H = shrink_H(H, mins, maxs)
+        mn = None if mins is None else np.asarray(mins, dtype=np.float64)
+        mx = None if maxs is None else np.asarray(maxs, dtype=np.float64)
+
+        def consume(H, starts):
             n = H[:, :3]
             d = H[:, 3]
+            if mn is not None:
+                d = d - (np.where(n > 0, mx, mn) * n).sum(axis=1)
             da = n @ a - d
             db = n @ b - d
-            t0, t1 = 0.0, 1.0
-            ok = True
-            for k in range(len(H)):
-                x, y = da[k], db[k]
-                if x > 0 and y > 0:
-                    ok = False
-                    break
-                if x <= 0 and y <= 0:
-                    continue
-                t = x / (x - y)
-                if x > y:
-                    t0 = max(t0, t)
-                else:
-                    t1 = min(t1, t)
-                if t0 > t1:
-                    ok = False
-                    break
-            if ok and t1 > t0:
-                segs.append((t0, t1))
+            entry = (da > 0) & (db <= 0)
+            leave = (da <= 0) & (db > 0)
+            crossing = entry | leave
+            denominator = np.ones_like(da)
+            np.subtract(da, db, out=denominator, where=crossing)
+            t = np.divide(da, denominator, out=np.zeros_like(da), where=crossing)
+            t0 = np.maximum.reduceat(np.where(entry, t, 0.0), starts)
+            t1 = np.minimum.reduceat(np.where(leave, t, 1.0), starts)
+            outside = np.logical_or.reduceat((da > 0) & (db > 0), starts)
+            ok = ~outside & (t1 > t0)
+            segs.extend(zip(t0[ok].tolist(), t1[ok].tolist()))
+
+        flat = getattr(self, '_flat', None)
+        offsets = getattr(self, '_offsets', None)
+        for base in range(0, len(cand), 16384):
+            batch = cand[base:base + 16384]
+            counts = self.counts[batch].astype(np.int64)
+            starts = np.empty(len(batch), dtype=np.int64)
+            starts[0] = 0
+            np.cumsum(counts[:-1], out=starts[1:])
+            if flat is not None and offsets is not None:
+                rows = np.arange(int(counts.sum()), dtype=np.int64)
+                rows += np.repeat(offsets[batch] - starts, counts)
+                consume(flat[rows], starts)
+            else:
+                width = int(counts.max())
+                H = np.zeros((len(batch), width, 4), dtype=np.float64)
+                H[:, :, 3] = np.inf
+                for slot, index in enumerate(batch):
+                    cell = self.cells[int(index)]
+                    H[slot, :len(cell)] = cell
+                consume(H.reshape(-1, 4), np.arange(len(batch), dtype=np.int64) * width)
         if not segs:
             return []
         segs.sort()
@@ -983,7 +1776,6 @@ class NegSpace(object):
         return [(s, e) for s, e in out]
 
     def segment_gaps(self, a, b, mins=None, maxs=None):
-        """The parts of [a,b] NOT in free space.  Empty list == fully navigable."""
         iv = self.segment_intervals(a, b, mins, maxs)
         gaps = []
         t = 0.0
@@ -997,6 +1789,156 @@ class NegSpace(object):
 
     def segment_free(self, a, b, mins=None, maxs=None):
         return not self.segment_gaps(a, b, mins, maxs)
+
+    def support_intervals(self, a, b, mins=PL_MIN, maxs=PL_MAX,
+                          activation=1.0, minimum_normal=FLOOR_NZ):
+        if (getattr(self, 'solids', None) is not None
+                or getattr(self, 'blk_H', None) is not None):
+            return self._support_intervals_source(
+                a, b, mins, maxs, activation, minimum_normal,
+            )
+        if not self.cells:
+            return []
+        if self.portals is None:
+            self.build_portals()
+        used = set()
+        for portal in self.portals:
+            key = tuple(round(float(value), 4) for value in portal.n) + (round(float(portal.d), 3),)
+            used.add((portal.a, key))
+            used.add((portal.b, tuple(-value for value in key)))
+        A = np.asarray(a, dtype=np.float64)
+        B = np.asarray(b, dtype=np.float64)
+        mn = np.asarray(mins, dtype=np.float64)
+        mx = np.asarray(maxs, dtype=np.float64)
+        lo = np.minimum(A, B) + mn - activation - EPS
+        hi = np.maximum(A, B) + mx + activation + EPS
+        intervals = []
+        for index in self._cells_in_box(lo, hi):
+            H = self.cells[int(index)]
+            S = shrink_H(H, mn, mx)
+            da = S[:, :3] @ A - S[:, 3]
+            db = S[:, :3] @ B - S[:, 3]
+            t0, t1 = 0.0, 1.0
+            outside = False
+            for left, right in zip(da, db):
+                if left > 0.0 and right > 0.0:
+                    outside = True
+                    break
+                if left > 0.0 or right > 0.0:
+                    crossing = left / (left - right)
+                    if left > right:
+                        t0 = max(t0, float(crossing))
+                    else:
+                        t1 = min(t1, float(crossing))
+            if outside or t1 < t0:
+                continue
+            for row, plane in enumerate(H):
+                if plane[2] > -minimum_normal:
+                    continue
+                key = tuple(round(float(value), 4) for value in plane[:3]) + (round(float(plane[3]), 3),)
+                if (int(index), key) in used:
+                    continue
+                normal = float(np.linalg.norm(plane[:3]))
+                lower = -activation * normal
+                left = float(da[row])
+                right = float(db[row])
+                s0, s1 = t0, t1
+                if left < lower and right < lower:
+                    continue
+                if left < lower or right < lower:
+                    crossing = (left - lower) / (left - right)
+                    if left < right:
+                        s0 = max(s0, crossing)
+                    else:
+                        s1 = min(s1, crossing)
+                if s1 >= s0:
+                    intervals.append((s0, s1))
+        if not intervals:
+            return []
+        intervals.sort()
+        merged = [list(intervals[0])]
+        for start, end in intervals[1:]:
+            if start <= merged[-1][1] + 1e-6:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return [(start, end) for start, end in merged]
+
+    def _support_intervals_source(self, a, b, mins, maxs,
+                                  activation, minimum_normal):
+        A = np.asarray(a, dtype=np.float64)
+        B = np.asarray(b, dtype=np.float64)
+        mn = np.asarray(mins, dtype=np.float64)
+        mx = np.asarray(maxs, dtype=np.float64)
+        lo = np.minimum(A, B) + mn - activation - EPS
+        hi = np.maximum(A, B) + mx + activation + EPS
+        intervals = []
+        for index in self._solid_cands(lo, hi):
+            H, slo, shi = self._solid_geom(index)
+            if np.any(hi <= slo) or np.any(lo >= shi):
+                continue
+            for face, plane in enumerate(H):
+                n = plane[:3]
+                normal = float(np.linalg.norm(n))
+                if normal == 0.0 or n[2] / normal < minimum_normal:
+                    continue
+                low_offset = np.where(n > 0, mn, mx)
+                va = float(n @ A + n @ low_offset - plane[3])
+                vb = float(n @ B + n @ low_offset - plane[3])
+                tolerance = COLLISION_EPSILON * normal
+                constraints = [(-va - tolerance, -vb - tolerance),
+                               (va - activation * normal - tolerance,
+                                vb - activation * normal - tolerance)]
+                for other, row in enumerate(H):
+                    if other == face:
+                        continue
+                    horizontal = np.where(row[:2] > 0, mx[:2], mn[:2])
+                    offset = float(row[:2] @ horizontal + row[2] * mn[2])
+                    constraints.append((float(row[:3] @ A + offset - row[3]),
+                                        float(row[:3] @ B + offset - row[3])))
+                t0, t1 = 0.0, 1.0
+                for left, right in constraints:
+                    if left > 0.0 and right > 0.0:
+                        t0, t1 = 1.0, 0.0
+                        break
+                    if left > 0.0 or right > 0.0:
+                        crossing = left / (left - right)
+                        if left > right:
+                            t0 = max(t0, crossing)
+                        else:
+                            t1 = min(t1, crossing)
+                    if t1 < t0:
+                        break
+                if t1 >= t0:
+                    intervals.append((t0, t1))
+        if not intervals:
+            return []
+        intervals.sort()
+        merged = [list(intervals[0])]
+        for start, end in intervals[1:]:
+            if start <= merged[-1][1] + 1e-6:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return [(start, end) for start, end in merged]
+
+    def support_gaps(self, a, b, mins=PL_MIN, maxs=PL_MAX,
+                     activation=1.0, minimum_normal=FLOOR_NZ):
+        intervals = self.support_intervals(a, b, mins, maxs, activation, minimum_normal)
+        gaps = []
+        cursor = 0.0
+        for start, end in intervals:
+            if start > cursor + 1e-6:
+                gaps.append((cursor, start))
+            cursor = max(cursor, end)
+        if cursor < 1.0 - 1e-6:
+            gaps.append((cursor, 1.0))
+        return gaps
+
+    def segment_supported(self, a, b, mins=PL_MIN, maxs=PL_MAX,
+                          activation=1.0, minimum_normal=FLOOR_NZ):
+        return (self.segment_free(a, b, mins, maxs)
+                and not self.support_gaps(a, b, mins, maxs, activation, minimum_normal))
 
     def _cells_along(self, a, b):
         c = self.gridcell
@@ -1024,81 +1966,96 @@ class NegSpace(object):
             return np.zeros(0, dtype=np.int64)
         return np.unique(np.concatenate(out))
 
-    # --------------------------------------------------- projection into free
-    def project(self, p, mins=PL_MIN, maxs=PL_MAX, radius=512.0, iters=14):
-        """Closest legal placement of the box inside the free complex, and its
-        distance.  This is the ACTIVATION-DISTANCE operator of NAV-SPEC §3: it
-        does not ask whether a point is legal, it returns the legal point nearest
-        to it, so a solver can be CONSTRAINED instead of a plan tested.
+    def project(self, p, mins=PL_MIN, maxs=PL_MAX,
+                tolerance=COLLISION_EPSILON):
+        projected, distances, _ = self.project_many(
+            np.asarray(p, dtype=np.float64)[None, :], mins, maxs, tolerance,
+        )
+        return projected[0].tolist(), float(distances[0])
 
-        Candidates are ordered by the distance to their cell's AABB, which lower-
-        bounds the distance to the cell itself, so the scan stops as soon as no
-        remaining candidate can beat the best placement found."""
-        p0 = np.array([float(p[0]), float(p[1]), float(p[2])])
-        if mins is None:
-            # already a member of the free volume: the nearest legal point is itself
-            if self.cell_at(p) >= 0:
-                return [float(p[0]), float(p[1]), float(p[2])], 0.0
-        c = self.gridcell
-        r = int(math.ceil(radius / c))
-        cx, cy, cz = (int(math.floor(p[0] / c)), int(math.floor(p[1] / c)),
-                      int(math.floor(p[2] / c)))
-        cand = []
-        for dx in range(-r, r + 1):
-            for dy in range(-r, r + 1):
-                for dz in range(-r, r + 1):
-                    g = self.grid.get((cx + dx, cy + dy, cz + dz))
-                    if g is not None:
-                        cand.append(g)
-        if not cand:
-            return None, float('inf')
-        cand = np.unique(np.concatenate(cand))
-        near = np.maximum(np.maximum(self.lo[cand] - p0, p0 - self.hi[cand]), 0.0)
-        lb = np.linalg.norm(near, axis=1)
-        keep = lb <= radius
-        cand, lb = cand[keep], lb[keep]
-        order = np.argsort(lb)
-        best, bestd = None, float('inf')
-        for oi in order:
-            if lb[oi] >= bestd:
-                break
-            i = int(cand[oi])
-            S = self.cells[i] if mins is None else shrink_H(self.cells[i], mins, maxs)
-            n = S[:, :3]
-            d = S[:, 3]
-            q = p0.copy()
-            for _ in range(iters):
-                v = n @ q - d
-                k = int(v.argmax())
-                if v[k] <= 1e-6:
-                    break
-                nn = n[k]
-                q = q - nn * (v[k] / max(1e-12, float(nn @ nn)))
-            if (n @ q - d).max() > 0.5:
-                continue                    # the box does not fit in this cell
-            dd = float(np.linalg.norm(q - p0))
-            if dd < bestd:
-                bestd, best = dd, q
-        if best is None:
-            return None, float('inf')
-        return [float(x) for x in best], bestd
+    def floor_under_many(self, points, maxdrop=512.0, footprint=None):
+        points = np.asarray(points, dtype=np.float64).reshape((-1, 3))
+        floors = np.full(len(points), np.nan, dtype=np.float64)
+        measures = {
+            'point_mass': len(points),
+            'ray_mass': 0,
+            'working_set_mass': 0,
+            'candidate_pair_mass': 0,
+            'plane_evaluation_mass': 0,
+            'support_point_mass': 0,
+        }
+        if not len(points):
+            return floors, measures
+        if (getattr(self, 'solids', None) is None
+                and getattr(self, 'blk_H', None) is None):
+            for index, point in enumerate(points):
+                value = self.floor_under(point, maxdrop, footprint)
+                if value is not None:
+                    floors[index] = value
+            measures['support_point_mass'] = int(np.isfinite(floors).sum())
+            return floors, measures
+        offsets = [(0.0, 0.0, 0.0)]
+        if footprint:
+            hx, hy = footprint
+            offsets += [(sx * hx, sy * hy, 0.0) for sx in (-1, 1) for sy in (-1, 1)]
+            offsets += [(sx * hx, 0.0, 0.0) for sx in (-1, 1)]
+            offsets += [(0.0, sy * hy, 0.0) for sy in (-1, 1)]
+        offsets = np.asarray(offsets, dtype=np.float64)
+        measures['ray_mass'] = len(points) * len(offsets)
+        working_set_mass = min(len(points), os.cpu_count() or 1)
+        measures['working_set_mass'] = working_set_mass
+        bounds = np.linspace(0, len(points), working_set_mass + 1, dtype=np.int64)
+        zero = np.zeros(3, dtype=np.float64)
+        drop = float(maxdrop)
+        for begin, end in zip(bounds[:-1], bounds[1:]):
+            starts = (points[begin:end, None, :] + offsets[None, :, :]).reshape((-1, 3))
+            ends = starts.copy()
+            ends[:, 2] -= drop
+            pair_owners, pair_solids = self._source_segment_pair_rows(
+                starts, ends, zero, zero, 0.0,
+            )
+            hit = np.full(len(starts), np.inf, dtype=np.float64)
+            if len(pair_owners):
+                counts, plane_offsets, pair_rows, plane_rows = self._source_plane_rows(pair_solids)
+                n0, n1, n2, distances = self._solid_plane_streams(plane_rows)
+                ray_rows = pair_owners[pair_rows]
+                left = self._plane_dot_rows(
+                    n0, n1, n2, starts, ray_rows,
+                ) - distances
+                right = self._plane_dot_rows(
+                    n0, n1, n2, ends, ray_rows,
+                ) - distances
+                lower, upper, outside = self._linear_interval_rows(
+                    left, right, plane_offsets,
+                )
+                collision = ~outside & (upper > lower) & (lower > COLLISION_EPSILON)
+                np.minimum.at(hit, pair_owners[collision], lower[collision])
+                measures['candidate_pair_mass'] += len(pair_owners)
+                measures['plane_evaluation_mass'] += len(left)
+            inside = np.all((starts >= self.world_lo) & (starts <= self.world_hi), axis=1)
+            boundary = np.divide(
+                starts[:, 2] - self.world_lo[2], drop,
+                out=np.full(len(starts), np.inf, dtype=np.float64),
+                where=drop > 0.0,
+            )
+            boundary = np.where(inside & (boundary > 0.0) & (boundary < 1.0),
+                                boundary, np.inf)
+            hit = np.minimum(hit, boundary)
+            height = np.where(np.isfinite(hit), starts[:, 2] - hit * drop, -np.inf)
+            height = height.reshape((end - begin, len(offsets)))
+            maximum = np.max(height, axis=1)
+            present = np.isfinite(maximum)
+            floors[np.arange(begin, end)[present]] = maximum[present]
+        measures['support_point_mass'] = int(np.isfinite(floors).sum())
+        return floors, measures
 
-    # ------------------------------------------------------------------ floor
     def floor_under(self, p, maxdrop=512.0, footprint=None):
-        """Z at which a body dropped from p comes to rest, or None.
-
-        Read off the exact free run below p -- closed form, no march and no step
-        size, so there is no quantisation to bisect away.
-
-        `footprint` makes this a BOX question rather than a point question: a
-        standing player rests on the HIGHEST surface any part of its footprint
-        touches, so the floor is taken as the max over the nine offsets (centre,
-        four corners, four edge midpoints).  Probing only the centre reports a
-        floor the box would intersect wherever the ground rises under one
-        corner, which condemns walkable ground as unstandable -- measured at 36%
-        of a walkable helical corridor in the sibling generator's oracle, which
-        is where this model comes from.
-        """
+        if (getattr(self, 'solids', None) is not None
+                or getattr(self, 'blk_H', None) is not None):
+            floors, _ = self.floor_under_many(
+                np.asarray(p, dtype=np.float64)[None, :], maxdrop, footprint,
+            )
+            return float(floors[0]) if np.isfinite(floors[0]) else None
         offs = [(0.0, 0.0)]
         if footprint:
             hx, hy = footprint
@@ -1114,39 +2071,22 @@ class NegSpace(object):
                     run = (s0, e0)
                     break
             if run is None or run[1] >= 1.0 - 1e-9:
-                continue                     # nothing under this offset
+                continue
             z = float(a[2] - run[1] * maxdrop)
             if best is None or z > best:
-                best = z                     # rest on the HIGHEST ground touched
+                best = z
         return best
 
-    RELOC = None
-
     def solid_at(self, p):
-        """THE definition of solidity.  `solid_at(p) == cell_at(p) < 0`."""
         return self.cell_at(p) < 0
 
     def standable(self, p, mins=PL_MIN, maxs=PL_MAX, hover=64.0, lift=2.0):
-        """Can a player STAND at p: floor under the whole FOOTPRINT, head room
-        above it, and the box itself free.
-
-        The box rests on the highest surface its footprint touches (see
-        `floor_under`), and only the volume ABOVE that rest height is required to
-        be free -- testing a box centred at an arbitrary probe height instead is
-        what condemns walkable ground."""
         fz = self.floor_under(p, hover, footprint=(abs(mins[0]), abs(mins[1])))
         if fz is None:
             return False
         return self.fits([p[0], p[1], fz - mins[2] + lift], mins, maxs)
 
     def clearance(self, p, cap=512.0, mins=PL_MIN, maxs=PL_MAX, tol=1.0):
-        """How much room is there at p: the largest lateral half-extent, up to
-        `cap`, at which the player-height box still fits.
-
-        NOT the distance to the nearest legal placement -- that is `project`, and
-        it is 0 for any point that is already legal, which makes it useless as a
-        room measure.  This grows the body instead of moving it, so an open hall
-        and a body-width corridor give different answers."""
         h0, h1 = abs(mins[0]), abs(maxs[0])
         if not self.fits(p, mins, maxs):
             return 0.0
@@ -1164,18 +2104,10 @@ class NegSpace(object):
         return float(lo)
 
     def trace_fraction(self, a, b, mins=None, maxs=None):
-        """Fraction of [a,b] traversable before the first obstruction (1.0 clear).
-        Closed form from the segment's free intervals -- no step size."""
         gaps = self.segment_gaps(a, b, mins, maxs)
         return 1.0 if not gaps else float(gaps[0][0])
 
     def trace(self, a, b, mins=None, maxs=None):
-        """First solid POINT along a->b, or None if the line is clear.
-
-        This is the sightline contract the generator's e2e uses (`hit is None`
-        means clear).  Exact: the first gap in the segment's free intervals is
-        where solidity begins, so unlike a stepped march it cannot skip a thin
-        obstruction between samples."""
         f = self.trace_fraction(a, b, mins, maxs)
         if f >= 1.0:
             return None
@@ -1183,62 +2115,48 @@ class NegSpace(object):
                 a[1] + f * (b[1] - a[1]),
                 a[2] + f * (b[2] - a[2]))
 
+    def standing_points(self, points, mins=PL_MIN, maxs=PL_MAX, maxdrop=512.0,
+                        lift=(1.0, 4.0, 12.0, 26.0)):
+        points = np.asarray(points, dtype=np.float64).reshape((-1, 3))
+        projected, _, projection = self.project_many(points, mins, maxs)
+        floors, floor_measures = self.floor_under_many(
+            projected, maxdrop, footprint=(abs(mins[0]), abs(mins[1])),
+        )
+        lifts = np.asarray(lift, dtype=np.float64).reshape(-1)
+        realized = np.full_like(projected, np.nan)
+        present = np.isfinite(floors)
+        if len(lifts) and np.any(present):
+            rows = np.flatnonzero(present)
+            candidates = np.repeat(projected[rows, None, :], len(lifts), axis=1)
+            candidates[:, :, 2] = (floors[rows, None] - float(mins[2])
+                                    + lifts[None, :])
+            relation = self.fits_many(candidates.reshape((-1, 3)), mins, maxs).reshape(
+                (len(rows), len(lifts))
+            )
+            available = np.any(relation, axis=1)
+            first = np.argmax(relation, axis=1)
+            realized[rows[available]] = candidates[
+                np.flatnonzero(available), first[available], :
+            ]
+            present[rows] = available
+        measures = {
+            'input_point_mass': len(points),
+            'realized_point_mass': int(present.sum()),
+            'unrealized_point_mass': int((~present).sum()),
+            'lift_coordinate_mass': len(lifts),
+            'projection': projection,
+            'floor': floor_measures,
+        }
+        return realized, present, measures
+
     def standing_point(self, p, mins=PL_MIN, maxs=PL_MAX, maxdrop=512.0,
-                       lift=(1.0, 4.0, 12.0, 26.0), search=192.0):
-        """A legal STANDING placement for p, or None.
+                       lift=(1.0, 4.0, 12.0, 26.0)):
+        realized, present, _ = self.standing_points(
+            np.asarray(p, dtype=np.float64)[None, :], mins, maxs, maxdrop, lift,
+        )
+        return realized[0].tolist() if present[0] else None
 
-        Tried at p first, then on an expanding lattice around it -- the offline,
-        structural form of what the engine's `relocate_spawnpoint` does at run
-        time inside the 10M-jump budget of a live worldspawn.  Doing it here means
-        the engine never has to: what ships is already standable."""
-        r = self._stand_at(p, mins, maxs, maxdrop, lift)
-        if r is not None:
-            return r
-        if NegSpace.RELOC is None:
-            steps = []
-            for rad in (24.0, 48.0, 96.0, 144.0, 192.0):
-                for k in range(8):
-                    ang = k * math.pi / 4.0
-                    for dz in (0.0, 24.0, -24.0, 64.0):
-                        steps.append((rad * math.cos(ang), rad * math.sin(ang), dz))
-            steps.sort(key=lambda t: math.hypot(math.hypot(t[0], t[1]), t[2]))
-            NegSpace.RELOC = steps
-        for dx, dy, dz in NegSpace.RELOC:
-            if math.hypot(dx, dy) > search:
-                continue
-            r = self._stand_at([p[0] + dx, p[1] + dy, p[2] + dz], mins, maxs, maxdrop, lift)
-            if r is not None:
-                return r
-        return None
-
-    def _stand_at(self, p, mins=PL_MIN, maxs=PL_MAX, maxdrop=512.0, lift=(1.0, 4.0, 12.0, 26.0)):
-        """A legal STANDING placement at or below p, or None.
-
-        The result is a point of the free volume at which the whole player box is
-        covered by free cells and which has the free volume's own floor beneath
-        it.  Because the point is CONSTRUCTED in free space rather than tested
-        after the fact, `spawn inside a wall` is not representable here."""
-        q, _ = self.project(p, None, None, radius=self.gridcell * 2)
-        if q is None:
-            return None
-        fz = self.floor_under(q, maxdrop, footprint=(abs(mins[0]), abs(mins[1])))
-        if fz is None:
-            return None
-        for dz in lift:
-            r = [q[0], q[1], fz - mins[2] + dz]
-            if self.fits(r, mins, maxs):
-                return r
-        return None
-
-    # ---------------------------------------------------------------- portals
     def build_portals(self, min_radius=0.0, verbose=False):
-        """Exact shared faces between free cells.
-
-        Two cells share a face iff one holds half-space (n,d) and the other holds
-        (-n,-d); the face is the intersection of their cross-sections on that
-        plane.  The inscribed radius of that 2-D polygon is how wide the opening
-        actually is -- the number `can a player get through here` is read from,
-        with no trace anywhere."""
         key = {}
         for i, H in enumerate(self.cells):
             for k in range(len(H)):
@@ -1250,17 +2168,6 @@ class NegSpace(object):
         portals = []
         adj = [[] for _ in range(len(self.cells))]
         done = set()
-        # NOTE ON COST.  This is the exact construction and it is quadratic in the
-        # number of cells that share one plane.  That is fine at the scale it is
-        # meant for (dance: 3 794 cells, 7 s) and pathological on a large fused
-        # complex, where co-planar axis-aligned architecture puts hundreds of cells
-        # on a single plane.  Two attempts to prune it spatially -- bucketing the
-        # opposite side per plane group, and querying the existing grid per
-        # cell-face -- both came out SLOWER on dance (>2 min vs 7 s), because the
-        # cells' AABBs span many grid cells and the pruning cost more than the
-        # pairing it saved.  Left exact and unpruned rather than left broken; the
-        # caller that needed it at fused scale (the Voronoi diagnostic) no longer
-        # runs by default.  A real fix is a proper 2-D index within each plane.
         for kk, lst in key.items():
             nk = (round(-kk[0], 4), round(-kk[1], 4), round(-kk[2], 4), round(-kk[3], 3))
             other = key.get(nk)
@@ -1269,21 +2176,24 @@ class NegSpace(object):
             if (nk, kk) in done:
                 continue
             done.add((kk, nk))
-            for (i, ki) in lst:
-                for (j, kj) in other:
+            sections = {}
+            for (i, ki), (j, kj) in _indexed_face_pairs(self.lo, self.hi, lst, other):
                     if i == j:
                         continue
-                    if np.any(self.lo[i] > self.hi[j] + 0.25) or np.any(self.lo[j] > self.hi[i] + 0.25):
-                        continue
-                    pg, edges = self._cross(i, ki)
+                    if (i, ki) not in sections:
+                        sections[(i, ki)] = self._cross(i, ki)
+                    if (j, kj) not in sections:
+                        sections[(j, kj)] = self._cross(j, kj)
+                    pg, edges = sections[(i, ki)]
                     if len(pg) < 3:
                         continue
-                    pg2, e2 = self._cross(j, kj)
+                    pg2, e2 = sections[(j, kj)]
                     n = self.cells[i][ki, :3]
                     d = self.cells[i][ki, 3]
                     if len(pg2) < 3:
                         continue
                     u, v, o = self._frame(n, d)
+                    pg = list(pg)
                     ed = list(edges)
                     for (a2, b2, c2) in e2:
                         pg = _clip2(pg, a2, b2, c2)
@@ -1323,13 +2233,7 @@ class NegSpace(object):
         o[a] = d / n[a]
         return o
 
-    _CROSS_CACHE = None
-
     def _frame(self, n, d):
-        """Canonical 2-D frame of an (unsigned) plane.  BOTH cells sharing a face
-        must be sectioned in the SAME frame or the two polygons cannot be
-        intersected; the frame is therefore derived from the plane with its
-        normal canonicalised, not from each cell's own outward normal."""
         n = np.asarray(n, dtype=np.float64)
         if (n[0], n[1], n[2]) < (0.0, 0.0, 0.0):
             n, d = -n, -d
@@ -1338,14 +2242,6 @@ class NegSpace(object):
         return u, v, o
 
     def _cross(self, i, k):
-        """Cross-section of cell i on its own k-th half-space plane, in that
-        plane's CANONICAL frame, as (polygon, edge half-planes)."""
-        if self._CROSS_CACHE is None:
-            self._CROSS_CACHE = {}
-        ck = (i, k)
-        r = self._CROSS_CACHE.get(ck)
-        if r is not None:
-            return r
         H = self.cells[i]
         u, v, o = self._frame(H[k, :3], H[k, 3])
         ext = float(max(np.max(self.hi[i] - self.lo[i]), 64.0)) * 2.0 + 512.0
@@ -1363,7 +2259,6 @@ class NegSpace(object):
             c = float(dq - np.dot(nq, o))
             if abs(a) < 1e-9 and abs(b) < 1e-9:
                 if c < -1e-6:
-                    self._CROSS_CACHE[ck] = ([], [])
                     return [], []
                 continue
             nrm = math.hypot(a, b)
@@ -1371,17 +2266,10 @@ class NegSpace(object):
             edges.append((a, b, c))
             pg = _clip2(pg, a, b, c)
             if len(pg) < 3:
-                self._CROSS_CACHE[ck] = ([], [])
                 return [], []
-        self._CROSS_CACHE[ck] = (pg, edges)
         return pg, edges
 
-    # ------------------------------------------------------- boundary / walls
     def boundary_faces(self, min_radius=48.0):
-        """Faces of free cells that are NOT portals -- i.e. the cell's own walls,
-        floors and ceilings.  A connection site is chosen from these, so a
-        doorway candidate is a real wall panel of the free volume rather than a
-        ray that happened to hit something."""
         if self.portals is None:
             self.build_portals()
         used = set()
@@ -1417,7 +2305,6 @@ class NegSpace(object):
         return out
 
     def components(self):
-        """Connected components of the free volume under portal adjacency."""
         if self.adj is None:
             self.build_portals()
         seen = [-1] * len(self.cells)
@@ -1440,18 +2327,14 @@ class NegSpace(object):
         self.comp_of = seen
         return comps
 
-
 def pack(ns):
-    """Serialise a complex into plain arrays (for handing between processes)."""
     counts = np.array([len(c) for c in ns.cells], dtype=np.int64)
     flat = np.vstack(ns.cells) if ns.cells else np.zeros((0, 4))
     return (counts, flat, ns.world_lo, ns.world_hi, ns.gridcell, ns.mask,
-            ns.n_open_leaves, ns.n_solid_leaves, ns.n_detail_splits,
-            getattr(ns, 'dropped_leaves', 0))
-
+            ns.n_open_leaves, ns.n_solid_leaves, ns.n_detail_splits)
 
 def unpack(t):
-    counts, flat, wlo, whi, gc, mask, nol, nsl, nds, dl = t
+    counts, flat, wlo, whi, gc, mask, nol, nsl, nds = t
     ns = NegSpace.__new__(NegSpace)
     off = np.zeros(len(counts) + 1, dtype=np.int64)
     np.cumsum(counts, out=off[1:])
@@ -1460,43 +2343,13 @@ def unpack(t):
     ns.world_lo, ns.world_hi = wlo, whi
     ns.gridcell, ns.mask = gc, mask
     ns.n_open_leaves, ns.n_solid_leaves = nol, nsl
-    ns.n_detail_splits, ns.dropped_leaves = nds, dl
+    ns.n_detail_splits = nds
     ns.portals = None
     ns.adj = None
     ns._finish()
+    ns.schema = NEGSPACE_SCHEMA
     return ns
 
-
-
-# ---------------------------------------------------------------------------
-# SOURCE-BRUSH FRONT END
-# ---------------------------------------------------------------------------
-# One definition of solidity, two entry points.  `NegSpace(bsp)` reads a COMPILED
-# world; `from_brushes()` reads AUTHORED SOURCE, before any compile exists.  Both
-# produce the same object -- convex free cells with `solid(p) == cell_at(p) < 0`
-# -- so a generator validating what it just authored and a fuser validating what
-# shipped are answering with the same law rather than with two oracles that
-# agree until they do not.
-#
-# The pre-compile path is load-bearing: catching a bad seed costs a fraction of a
-# second here against ~124 s to compile it first, and a sweep pays that per seed.
-#
-# METHOD.  A compiled world hands us bounded convex regions for free (the BSP
-# leaves).  Authored source has no tree, so the bounding regions come from a
-# uniform grid: free space is the union over grid boxes of (box MINUS the solid
-# brushes overlapping it), each decomposed convexly by the same `subtract` the
-# leaf path uses.  That is exact -- a grid box is a bounded convex region like a
-# leaf, and nothing about the decomposition depends on where the box came from.
-
-
-# Source has no contents lump, only shader names, so the compiled path's
-# `contents & MASK_PLAYERSOLID` filter has a name-based counterpart here.  These
-# are the `common/` tool shaders that do NOT stop a player: compile hints, vis
-# helpers, and clips aimed at other entity classes.  Omitting this made every
-# tool brush solid and reported 16 of 23 stock spawnpoints as buried, against 5
-# in the compiled world -- a generator that trusted it would delete good spawns.
-# `common/caulk`, `common/clip` and `common/nodraw` are NOT here: they are solid
-# to a player and must keep blocking.
 NONSOLID_SHADERS = frozenset((
     'common/hint', 'common/skip', 'common/areaportal', 'common/nodrawnonsolid',
     'common/origin', 'common/lightgrid', 'common/trigger', 'common/weapclip',
@@ -1504,11 +2357,7 @@ NONSOLID_SHADERS = frozenset((
     'common/clusterportal', 'common/antiportal', 'common/full_clip',
 ))
 
-
 def brush_is_solid(br, nonsolid=NONSOLID_SHADERS):
-    """Does this authored brush stop a PLAYER?  Name-based mirror of the
-    compiled path's contents mask.  A brush is judged by the shaders on its
-    faces; a tool brush is uniformly one shader."""
     faces = getattr(br, 'faces', None)
     if faces is not None:
         texs = {f[1] for f in faces}
@@ -1521,15 +2370,7 @@ def brush_is_solid(br, nonsolid=NONSOLID_SHADERS):
         return True
     return not texs.issubset(nonsolid)
 
-
 def brush_points(br, off=(0.0, 0.0, 0.0)):
-    """Every vertex of an authored brush, placed at `off`.
-
-    An authored brush carries its polygons, so its AABB is exactly the range of
-    those points.  Deriving it by interval propagation instead is not merely
-    looser -- propagation cannot bound an oblique prism at all, and a front end
-    that skipped what it could not bound silently DROPPED every plug brush,
-    reporting sealed mouths as open."""
     faces = getattr(br, 'faces', None)
     if faces is not None:
         polys = [list(f[0]) for f in faces]
@@ -1539,24 +2380,7 @@ def brush_points(br, off=(0.0, 0.0, 0.0)):
         return []
     return [[p[i] + off[i] for i in range(3)] for poly in polys for p in poly]
 
-
 def brush_planes(br, off=(0.0, 0.0, 0.0)):
-    """Outward half-spaces (n.p <= d) of an authored brush, placed at `off`.
-
-    TWO input kinds, and they need DIFFERENT orientation rules:
-
-    * a `Brush` (spiralgen/mapsrc) holds real POLYGONS, so the outward direction
-      is resolved numerically against the vertex centroid -- correct for any
-      convex solid and not dependent on winding discipline;
-    * a list of parsed `.map` `Face`s holds three PLANE-DEFINING points per face,
-      which are NOT the brush's vertices.  Their centroid is meaningless and can
-      sit outside the brush, so the centroid rule flips faces at random.  The
-      .map convention already fixes orientation -- (p1-p0)x(p2-p0) points INTO
-      the brush -- so the outward plane is simply its negation.
-
-    Using the centroid rule on parsed faces made single points test "inside" 50-90
-    brushes of thousands of units each, and reported 16 of 23 stock spawnpoints
-    as buried when the compiled world had 5."""
     if isinstance(br, np.ndarray):
         H = br.astype(np.float64)
         return [((float(H[i, 0]), float(H[i, 1]), float(H[i, 2])),
@@ -1565,13 +2389,13 @@ def brush_planes(br, off=(0.0, 0.0, 0.0)):
     faces = getattr(br, 'faces', None)
     if faces is None and br and hasattr(br[0], 'p'):
         out = []
-        for f in br:                              # parsed .map faces
+        for f in br:
             p0, p1, p2 = [np.asarray(x, dtype=float) for x in f.p]
             n = np.cross(p1 - p0, p2 - p0)
             L = float(np.linalg.norm(n))
             if L < 1e-9:
                 continue
-            n = -n / L                            # inward -> outward
+            n = -n / L
             d = float(n @ p0)
             out.append(((float(n[0]), float(n[1]), float(n[2])),
                         d + n[0] * off[0] + n[1] * off[1] + n[2] * off[2]))
@@ -1596,30 +2420,14 @@ def brush_planes(br, off=(0.0, 0.0, 0.0)):
             continue
         n = [x / L for x in n]
         d = sum(n[i] * a[i] for i in range(3))
-        if sum(n[i] * c[i] for i in range(3)) > d:        # flip to face outward
+        if sum(n[i] * c[i] for i in range(3)) > d:
             n = [-x for x in n]
             d = -d
         out.append(((n[0], n[1], n[2]),
                     d + n[0] * off[0] + n[1] * off[1] + n[2] * off[2]))
     return out
 
-
 def from_brushes(tiles, cell=512.0, pad=64.0, mask=MASK_PLAYERSOLID, verbose=False):
-    """Build a NegSpace from AUTHORED SOURCE brushes.
-
-    `tiles` is [(brushes, offset)] exactly as placement decides, so one call
-    serves a single generated tile and a placed fusion alike.
-
-    REPRESENTATION.  The compiled path materialises the free volume as convex
-    cells, because a BSP hands it bounded convex regions for free.  Authored
-    source has no tree, and decomposing free space out of a grid is the wrong
-    shape -- a 512-unit box over a spiral corridor overlaps dozens of brushes and
-    the convex subtraction explodes.  So this path keeps the SOLID brushes and
-    answers the law directly: `solid_at(p)` is "p is inside some brush", which is
-    exact, and every other query is derived from exact ray/box arithmetic against
-    those same brushes.  One definition, two exact implementations -- not two
-    definitions -- and they can be checked against each other, which is the point
-    of having one law rather than one data structure."""
     solids = []
     lo = [1e30] * 3
     hi = [-1e30] * 3
@@ -1646,12 +2454,13 @@ def from_brushes(tiles, cell=512.0, pad=64.0, mask=MASK_PLAYERSOLID, verbose=Fal
                 lo[a2] = min(lo[a2], float(blo[a2]))
                 hi[a2] = max(hi[a2], float(bhi[a2]))
     ns = NegSpace.__new__(NegSpace)
+    ns.schema = NEGSPACE_SCHEMA
     ns.mask = mask
     ns.gridcell = float(cell)
     ns.cells = []
     ns.cell_leaf = []
     ns.cell_tile = []
-    ns.n_open_leaves = ns.n_solid_leaves = ns.n_detail_splits = ns.dropped_leaves = 0
+    ns.n_open_leaves = ns.n_solid_leaves = ns.n_detail_splits = 0
     ns.portals = None
     ns.adj = None
     ns.lo = np.zeros((0, 3))
@@ -1662,48 +2471,77 @@ def from_brushes(tiles, cell=512.0, pad=64.0, mask=MASK_PLAYERSOLID, verbose=Fal
         ns.world_lo = np.array([-pad] * 3)
         ns.world_hi = np.array([pad] * 3)
         ns.sgrid = {}
+        ns._index_solid_bvh('s', np.zeros((0, 3)), np.zeros((0, 3)))
+        ns._index_solid_planes(solids)
         return ns
     ns.world_lo = np.array([lo[a2] - pad for a2 in range(3)])
     ns.world_hi = np.array([hi[a2] + pad for a2 in range(3)])
-    g = {}
-    for i, (H, blo, bhi) in enumerate(solids):
-        c0 = np.floor(blo / cell).astype(np.int64)
-        c1 = np.floor(bhi / cell).astype(np.int64)
-        if np.prod(c1 - c0 + 1) > 20000:
-            g.setdefault('big', []).append(i)
-            continue
-        for x in range(c0[0], c1[0] + 1):
-            for y in range(c0[1], c1[1] + 1):
-                for z in range(c0[2], c1[2] + 1):
-                    g.setdefault((x, y, z), []).append(i)
-    ns.sgrid = g
+    ns.sgrid = {}
+    ns._index_solid_bvh(
+        's',
+        np.asarray([value[1] for value in solids], dtype=np.float64),
+        np.asarray([value[2] for value in solids], dtype=np.float64),
+    )
+    ns._index_solid_planes(solids)
     if verbose:
         print('negspace(source): %d solid brushes, world %s..%s'
               % (len(solids), [int(x) for x in ns.world_lo], [int(x) for x in ns.world_hi]))
     return ns
 
+def from_bsp(src, mask=MASK_PLAYERSOLID, model=None, cell=512.0, verbose=False):
+    d = bytes(src) if isinstance(src, (bytes, bytearray)) else open(src, 'rb').read()
+    mo, ml = _lump(d, 7)
+    modf = np.frombuffer(d, '<f4', (ml // 40) * 10, mo).reshape(-1, 10)
+    world_model = 0 if model is None else int(model)
+    world_lo = modf[world_model, 0:3].astype(np.float64) - 64.0
+    world_hi = modf[world_model, 3:6].astype(np.float64) + 64.0
+    blocks, bounds, brush_mass, patch_triangle_mass = _compiled_collision_solids(
+        d, mask, model, world_lo, world_hi,
+    )
+    ns = NegSpace.__new__(NegSpace)
+    ns.mask = mask
+    ns.gridcell = float(cell)
+    ns.cells = []
+    ns.cell_leaf = []
+    ns.world_lo = world_lo
+    ns.world_hi = world_hi
+    ns.n_open_leaves = 0
+    ns.n_solid_leaves = 0
+    ns.n_detail_splits = 0
+    ns.blk_H = blocks
+    ns.compiled_brush_mass = brush_mass
+    ns.patch_triangle_mass = patch_triangle_mass
+    ns.blk_lo = np.asarray([value[0] for value in bounds]) if bounds else np.zeros((0, 3))
+    ns.blk_hi = np.asarray([value[1] for value in bounds]) if bounds else np.zeros((0, 3))
+    ns._index_blocks()
+    ns._finish(verbose)
+    ns.schema = NEGSPACE_SCHEMA
+    return ns
 
 def save(ns, path):
-    """Persist the assembled free volume as a real artifact.
-
-    The fused world's BSP tree does NOT spatially contain the connector geometry:
-    mapfuse attaches connector leaves under a degenerate router chain, and the
-    engine still collides with them because DarkPlaces traces a BIH over BRUSHES
-    (`Mod_CollisionBIH_TraceBrush`), not the tree.  So the assembled free volume
-    cannot be recovered from fused.bsp alone.  It is written out instead, and
-    every downstream tool loads THIS -- which is how there comes to be exactly one
-    answer to "is this solid" rather than one per tool."""
     cells = ns.cells
     counts = np.array([len(c) for c in cells], dtype=np.int64)
     flat = np.vstack(cells) if cells else np.zeros((0, 4))
-    np.savez_compressed(path, counts=counts, flat=flat,
+    blocks = getattr(ns, 'blk_H', ())
+    if isinstance(blocks, _PlaneBlocks):
+        block_counts = np.diff(blocks.offsets)
+        block_flat = blocks.flat
+    else:
+        block_counts = np.array([len(block) for block in blocks], dtype=np.int64)
+        block_flat = np.vstack(blocks) if blocks else np.zeros((0, 4))
+    np.savez_compressed(path, schema=np.array([NEGSPACE_SCHEMA]),
+                        compiled_brush_mass=np.array([getattr(ns, 'compiled_brush_mass', 0)]),
+                        patch_triangle_mass=np.array([getattr(ns, 'patch_triangle_mass', 0)]),
+                        counts=counts, flat=flat,
                         world_lo=ns.world_lo, world_hi=ns.world_hi,
                         gridcell=np.array([ns.gridcell]),
                         mask=np.array([ns.mask]),
                         tile=np.array(getattr(ns, 'cell_tile', [-1] * len(cells)),
-                                      dtype=np.int64))
+                                      dtype=np.int64),
+                        block_counts=block_counts, block_flat=block_flat,
+                        block_lo=np.asarray(getattr(ns, 'blk_lo', np.zeros((0, 3)))),
+                        block_hi=np.asarray(getattr(ns, 'blk_hi', np.zeros((0, 3)))))
     return path if path.endswith('.npz') else path + '.npz'
-
 
 def load_saved(path):
     z = np.load(path)
@@ -1713,21 +2551,34 @@ def load_saved(path):
     off = np.zeros(len(counts) + 1, dtype=np.int64)
     np.cumsum(counts, out=off[1:])
     ns.cells = [flat[off[i]:off[i + 1]] for i in range(len(counts))]
+    ns._flat = flat
+    ns._offsets = off
     ns.cell_leaf = [-1] * len(counts)
     ns.cell_tile = list(z['tile'])
     ns.world_lo = z['world_lo']
     ns.world_hi = z['world_hi']
     ns.gridcell = float(z['gridcell'][0])
     ns.mask = int(z['mask'][0])
+    schema = int(z['schema'][0]) if 'schema' in z else 1
+    ns.compiled_brush_mass = int(z['compiled_brush_mass'][0]) if 'compiled_brush_mass' in z else 0
+    ns.patch_triangle_mass = int(z['patch_triangle_mass'][0]) if 'patch_triangle_mass' in z else 0
     ns.n_open_leaves = 0
     ns.n_solid_leaves = 0
     ns.n_detail_splits = 0
-    ns.dropped_leaves = 0
     ns.portals = None
     ns.adj = None
+    if 'block_counts' in z:
+        block_counts = z['block_counts']
+        block_flat = z['block_flat']
+        block_offsets = np.r_[0, np.cumsum(block_counts)]
+        ns.blk_H = _PlaneBlocks(block_flat, block_offsets)
+        ns.blk_lo = z['block_lo']
+        ns.blk_hi = z['block_hi']
+        ns._index_blocks()
     ns._finish()
+    ns.schema = schema
+    z.close()
     return ns
-
 
 if __name__ == '__main__':
     import sys

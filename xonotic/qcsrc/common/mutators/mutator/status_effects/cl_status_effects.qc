@@ -20,6 +20,5 @@ MUTATOR_HOOKFUNCTION(status_effects, HUD_Powerups_add)
 {
 	if(!g_statuseffects && !autocvar__hud_configure) return;
 
-	// NOTE: the passed entity may be null here if we're in configure mode
 	StatusEffects_tick(g_statuseffects);
 }

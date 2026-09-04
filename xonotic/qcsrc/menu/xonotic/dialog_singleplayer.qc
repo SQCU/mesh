@@ -61,8 +61,8 @@ void InstantAction_LoadMap(entity btn, entity dummy)
 		MapInfo_SwitchGameType(MAPINFO_TYPE_KEYHUNT);
 		pmin = 6;
 		pmax = 6;
-		pstep = 6; // works both for 2 and 3 teams
-		// TODO find team count of map, set pstep=2 or 3, and use 2v2(v2) games at least
+		pstep = 6;
+
 	}
 	else
 	{
@@ -106,7 +106,6 @@ void InstantAction_LoadMap(entity btn, entity dummy)
 		}
 	}
 
-	// find random map
 	MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 0);
 	string s;
 	do
@@ -117,8 +116,6 @@ void InstantAction_LoadMap(entity btn, entity dummy)
 	}
 	while(!fexists(sprintf("maps/%s.waypoints", s)));
 
-	// these commands are also executed when starting a map from Multiplayer / Create
-	// in the menu_loadmap_prepare alias
 	localcmd("disconnect\n");
 	localcmd("g_campaign 0\n");
 
@@ -126,17 +123,13 @@ void InstantAction_LoadMap(entity btn, entity dummy)
 
 	MapInfo_LoadMap(s, 1);
 
-	// configure bots
 	float p;
 	pmin = pstep * ceil(pmin / pstep);
 	pmax = pstep * floor(pmax / pstep);
 	p = pmin + pstep * floor(random() * ((pmax - pmin) / pstep + 1));
 
-	// cvar_set doesn't always work starting an InstantAction game while playing the campaign
-	//cvar_set("bot_number", ftos(p - 1));
 	localcmd(strcat("bot_number ", ftos(p - 1), "\n"));
 
-	// make sure we go back to menu
 	cvar_set("lastlevel", "1");
 }
 

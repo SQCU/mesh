@@ -9,18 +9,10 @@
     #include <common/deathtypes/all.qh>
 #endif
 
-/*
-*		t_swamp.c
-*		Adds spawnfunc_trigger_swamp and support routines for nexuiz 1.2.1+ and xonotic
-*		Author tZork (Jakob MG)
-*		jakob@games43.se
-*		2005 11 29
-*/
-
 #ifdef SVQC
 void swamp_think(entity this)
 {
-	// set myself as current swampslug where possible
+
 	IL_EACH(g_swamped, it.swampslug == this,
 	{
 		it.swampslug = NULL;
@@ -38,8 +30,8 @@ void swamp_think(entity this)
 				emin -= '1 1 1';
 				emax += '1 1 1';
 			}
-			if(boxesoverlap(emin, emax, this.absmin, this.absmax)) // quick
-				if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it)) // accurate
+			if(boxesoverlap(emin, emax, this.absmin, this.absmax))
+				if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it))
 				{
 					if(!it.swampslug)
 						IL_PUSH(g_swamped, it);
@@ -60,19 +52,14 @@ void swamp_think(entity this)
 	this.nextthink = time;
 }
 
-/*QUAKED spawnfunc_trigger_swamp (.5 .5 .5) ?
-Players in the swamp will be
-slowed down and damaged over time
-*/
 spawnfunc(trigger_swamp)
 {
-	// Init stuff
+
 	EXACTTRIGGER_INIT;
 	this.active = ACTIVE_ACTIVE;
 	setthink(this, swamp_think);
 	this.nextthink = time;
 
-	// Setup default keys, if missing
 	if(!this.dmg)
 		this.dmg = 5;
 	if(!this.swamp_interval)

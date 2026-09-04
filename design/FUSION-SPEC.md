@@ -1,1997 +1,356 @@
-# Fusion specification — the quote index (map fusion / megamaps)
+# Map-fusion specification
 
-Companion to `SPECIFICATION.md`, under the same content rule: **every normative
-sentence in §1–§3 is a verbatim user-authored transcript block quote**, cited by
-session prefix + timestamp. Everything outside a block quote is provenance, a
-section title, or a pointer. Where a `design/` doc or a tool disagrees with a
-quote here, the quote governs.
+Map fusion constructs one runnable Xonotic world from authored stock map sources and
+generated bridge sources. Its purpose is to make traversal and cart commitment span
+larger-than-Quake-scale spaces while preserving the stock playerbot navigation relation.
 
-Source: raw transcript `~/.claude-personal/projects/-Users-mdot/d3ad4328-….jsonl`
-(session prefix `d3ad4328`), user-authored turns only. Quotes copied verbatim,
-user typos preserved. §4 is explicitly **level-3** (implementation description)
-and is written in code and artifacts, not in quotes.
+The implementation claim for this specification is indexed by
+[`claims/GEOMETRY.md`](claims/GEOMETRY.md). Continuous navigation and cart-path semantics
+are further specified by [`NAV-SPEC.md`](NAV-SPEC.md).
 
-This document exists because the fusion requirement was never transcribed. The
-shipped status line read *"3 maps, 3 joins"*, and the owner rejected it:
+## Inputs
 
-`d3ad4328`, 2026-08-31T02:37:08Z:
+The constructor receives:
 
-> "- Fusion runs [x] — fused.bsp 8.9 MB / fused.pk3 2.4 MB, 3 maps, 3 joins
-> (corridor 2151u, teleporters 3899u/4062u)." find the actual requirements from the
-> transcripts involved and finish the fight. by subagent. '3 maps' is not the fusion
-> spec or anything close to it, so the fusion spec was not transcribed,
-> mistranscribed, etc
+- a stock map archive containing authored `.map` members and waypoint material;
+- either every navigable stock source, an explicit source-name relation, or a sampled
+  source relation;
+- a requested generated-bridge count or a count derived from the measured socket-direction
+  relation and transfer demand;
+- requested team and cart cardinalities;
+- an output directory, compiler work directory, and deterministic random seed;
+- the q3map2 executable and runtime asset root used by both bridge-source and fused-world
+  compilation.
 
----
+`--maps=all` means the complete navigable stock source relation discovered in the input
+archive. `--names` preserves the literal named relation. A source that cannot be realized
+remains in `requested_map_names`, contributes to unfinished and missing-source measures,
+and is never silently removed from the request's accounting.
 
-## 1. The fusion requirement itself
+Team and cart cardinalities define generated gameplay objects. They do not alter which
+stock sources can be represented and are not transport limits.
 
-The single controlling turn. Everything about j, k, the tileset structure, the
-combinatorics, and the cart-navigability exemption comes from here.
+## Construction flow
 
-`d3ad4328`, 2026-08-29T08:26:14Z:
-
-> remember that you can use procedural geometry programming and similar to glue
-> multiple xonotic maps together if you want to make payload multicart
-> highteamcount environments, and that this can be done procedurally to compose
-> extremely high combinatorics of maps, e.g. using k-many bridge maps to allow
-> j-many of all of the maps in the game to socketed together like tilesets in a
-> roguelike level generator. make sure to think of ways to use the portal and jump
-> pad and verticality in the xonotic levelset here. not all level-level connections
-> (at least one maximum per map) need to even be cart-path-navigable
-
-Reading, clause by clause — each clause is normative:
-
-- **"procedural geometry programming"** — the glue is generated geometry, not
-  hand-authored. Not a synonym for "BSP lump concatenation"; the sibling clause
-  "compose extremely high combinatorics" makes it a generator.
-- **"k-many bridge maps"** — a *bridge map* is a distinct class of tile, plural
-  and parameterised by k. It is not the same object as a corridor between two
-  stock maps.
-- **"j-many of all of the maps in the game"** — the pool is *all of the maps in
-  the game*; j is how many of them are drawn. j is a parameter, and its ceiling is
-  the whole pool. It is not 3.
-- **"socketed together like tilesets in a roguelike level generator"** — a lattice
-  of tiles with sockets, drawn per seed; per-run regeneration, not one fixed world.
-- **"portal and jump pad and verticality"** — the connector vocabulary must
-  include teleporters, jump pads, and vertical structure, not corridors alone.
-- **"not all level-level connections (at least one maximum per map) need to even
-  be cart-path-navigable"** — a cart-navigability constraint with an explicit
-  budget: **at most one** non-cart-navigable connection **per map**. Every other
-  connection must be cart-path-navigable. (A corridor is cart-navigable; a
-  teleporter or jump pad is not — a payload cart cannot ride one.)
-
-The pool is named in the immediately preceding geometry thread:
-
-`d3ad4328`, 2026-08-29T07:25:55Z:
-
-> ideally we can render or represent a payload map for any map navigable by
-> playerbots at all, whihc ideally is all default maps for the game
-
-## 2. What the megamap is FOR — the commitment cost
-
-`d3ad4328`, 2026-08-31T01:59:15Z:
-
-> 'are multiple xonotic maps being glued tgoether to form megamaps which require
-> bots ot navigate long distances (literally illustrating commitment to strategy
-> related to cartstates) and integrate informatino from the observation mapreduce
-> paremetric featurization function (did this get forgotten too)' should also be
-> answerable along each subcomponent in around the same timespan.
-
-The scale the megamap has to serve:
-
-`d3ad4328`, 2026-08-29T08:23:54Z:
-
-> i think every cart is stuck...? anyways lets focus on the major interesting
-> theaters of interaciton here: 1: higher botcount, 2: higher teamcount, 3: higher
-> cartcount (e.g. 5te, 3ca) 4: more planning or strategic chocie content in the
-> playerbot-level strategy computatino so that there can be e.g. distributional
-> strategies besides 'everyone in the team commits to whatever the strongest player
-> is doing'
-
-Why fusion in particular is the lever on track placement:
-
-`d3ad4328`, 2026-08-29T08:43:22Z:
-
-> we probably need a track palcement algorithmic which avoids putting all of the
-> cart tracks in the same place and in the same direction, evne though this is
-> pretty funny. the map gluing exercise should help a lot with that, as would
-> trying to assemble cahins of control points that could counterfactually form a
-> cart track, ahve a branching factor of at least 1.5 in expectation, and can then
-> have a combinatorics of realized track spans sampeld, then a track directionality
-> and starting point configuration that avoids a cart vector field all moving in
-> the same direction on the map (winning one cart means winning every cart)
-
-And the equidistance requirement the fused world has to be able to satisfy:
-
-`d3ad4328`, 2026-08-29T07:21:53Z:
-
-> procedural geometry computing navmeshes from each map and ensuring that at least
-> 3 different cart starting points, no matter the map or the level of tangling of
-> the cart paths overall, are at least approximately equidistant from each other in
-> map-navmesh-walking-distance from each other, no matter how many carts are
-> sampled or teams are used.
-
-## 3. Navigability, signposting, prominence, and the diagnostics
-
-`d3ad4328`, 2026-08-29T20:19:10Z (the whole normative turn; it is simultaneously
-the viewer requirement, the fuzzing requirement, the corridor-length complaint, the
-navmesh requirement, and the prominence rule):
-
-> almost enitrely visible players now, so if there was a rendering error that came
-> from scaling to 256 adn beyond players... we should fix that in the client build
-> and so on i think, or fix whatever it is we're doing that leads to densely
-> materialized entities-acting-as-pairs-for-other-entities... also you might need to
-> make a 3d viewer or renderer tool which renders the floorplans of procedural
-> levels and their level fusions at each of their joins, with some fuzzing tools to
-> quickly measure and demonstrate how contorted of a path a player agent has to wind
-> through a level<->level edge to cross it, and actually rendering the egocentric
-> player view through each side of the edge to look for culling, occlusion, or
-> clutter errors where map graphics conceal map transitions, where map transitions
-> are physically blocked by clipping planes or objects, etc. also the first corridor
-> i found connecting two levels was really long... finally, we should make sure that
-> procedural remappings have playbot navmesh navigability allowing net playerbot
-> transport between maps. it's okay if some map connectinos are subtle or weakly
-> signposted, but only if that's because that's a 'connector' map which has multiple
-> edges connecting it to multiple other map node; the exclusive mode of entry or
-> exit to a gameplay objective should be easy for both playerbots and players to
-> notice, fight over, have tug of wars through, etc.
-
-The navigation-ownership boundary the fusion code must respect:
-
-`d3ad4328`, 2026-08-30T23:54:51Z:
-
-> even though we have a bunch of required features liek custom map objects and
-> map-map procedural fusion, all of *that* code is required to be compliant with
-> ordinary navmesh stuff as usedby normal playerbots, not require or use a second
-> definition of navigation which is inlined inside of our playerbot strategy adapter
-> code...
-
-Reactions that fixed defect classes (each is why a mechanism exists):
-
-`d3ad4328`, 2026-08-29T08:58:34Z:
-
-> intriguing im curous about that fused multimap
-
-`d3ad4328`, 2026-08-29T09:03:15Z:
-
-> oh uh oh the added map has no textures or lighting in the spawn area lol
-
-`d3ad4328`, 2026-08-29T19:25:44Z:
-
-> the fused map looks like its joined in a few ways! interesting error in the
-> runtime: at least some playerbots are invisible (?) but this can be fixed pretty
-> easily i'm sure
-
-And the standing statement of what was still missing, delivered with an in-client
-screenshot of the fused map running on a live server
-(`[this session, unflushed]` — relayed verbatim by the coordinating agent, not yet
-present in the on-disk jsonl):
-
-> the map fusion code was also clearly unfinished and didn't satisfy any written
-> constraint in a few obvious ways, incl. missing viewers, msising client
-> renderers, missing features related to geometry fusion, total absence of
-> procedural geometry, and no connectivity solvers or trivial visualizers or
-> metrics over connectivity and navmesh solutions
-
-### 3.1 Ambiguities, flagged rather than invented
-
-- **"at least one maximum per map"** is read as *at most one* non-cart-navigable
-  connection per map. The alternative reading ("at least one connection per map may
-  be non-cart-navigable, and that is a floor") would make the clause vacuous, since
-  a floor on permission constrains nothing. The implemented reading is the
-  constraining one.
-- **j and k are not given numeric values anywhere.** The only numeric anchors are
-  "all of the maps in the game" (the pool ceiling) and "extremely high
-  combinatorics". Implemented as parameters whose default j is the whole navigable
-  stock pool and whose default k is one bridge per three stock maps.
-- **"the first corridor i found connecting two levels was really long"** is read as
-  a defect report (corridors should be short), which sits alongside §2's demand that
-  the *megamap* impose long traversals. The implemented reconciliation: long distance
-  comes from tiles in series (walking diameter), short corridors come from joining
-  only lattice-adjacent tiles. Both are measured separately and reported.
-
----
-
-## 4. LEVEL 3 — what the implementation does (code and artifacts, not quotes)
-
-> **§4.1 (fixed lattice), §4.3 (refusal-based budget) and §6.3 are superseded by §7.**
-> The joins are no longer tubes between intact maps: the maps' own geometry is edited.
-
-This section is **not** normative and is **not** quoted from the user. It block
-quotes real code in `xonotic/payload/tools/` and real generated artifacts.
-
-### 4.1 The lattice, the bridge tiles, and the draw
-
-`mapfuse.py` places `T = j + k` tiles on a rectangular lattice with non-uniform
-bands, picks k bridge cells by greedy max-coverage over lattice neighbours, and
-only ever joins lattice-**adjacent** cells:
-
-```python
-def plan_tiles(nsrc, k):
-    T = nsrc + k
-    cols = max(1, int(math.ceil(math.sqrt(T))))
-    rows = int(math.ceil(T / cols))
-    cells = [(i % cols, i // cols) for i in range(T)]
-    ...
-        best = max(rest, key=lambda c: (len(set(nbr[c]) - covered - set(bridges)), len(nbr[c]), ...))
+```text
+authored stock .map + waypoints       generated bridge .map + ports
+                  \                    /
+                   source survey relation
+                            |
+             direction-constrained tree placement
+                            |
+             tile-local entity and target translation
+                            |
+                portal carve + connector chains
+                      /                 \
+             fused authored map      fused waypoint graph
+                      |                 |
+                   q3map2          weighted nav/Voronoi
+                      |                 |
+               compiled BSP ---- continuous solid domain
+                      \                 /
+                feasible cart curves + spawn pools
+                            |
+             entity overlay + measures + runtime package
 ```
 
-The default draw is the whole navigable stock pool, shuffled by seed:
+Each arrow names a serialized or reconstructible relation. No stage replaces a missing
+relation with a topology label, fixed score, or sampled collision guess.
 
-```python
-        if nmaps in (None, 'all'):
-            names = list(pool)
-            random.Random(seed).shuffle(names)
-        else:
-            names = random.Random(seed).sample(pool, min(int(nmaps), len(pool)))
+The requested BSP model owns the brush range admitted to the compiled solid domain.
+World-static feasibility uses model zero; inline mover models retain their own local
+coordinate spaces and cannot be folded into world coordinates as phantom solids.
+
+## Authored source realization
+
+Fusion reads the authored `.map` member for every stock tile. It does not decompile a BSP
+or ask q3map2 to invent source geometry. The common parser accepts stock brush primitives,
+generated Quake faces, Valve-220 faces, and patches, then writes one brush-primitive
+dialect.
+
+Every source brush, patch, and semantically realized non-world entity is translated into
+fused coordinates.
+Point entities without an explicit origin carry map-format origin zero and are translated
+from that value; they cannot remain at the fused world's global zero. Brush-primitive
+texture coordinates use the same plane-derived basis as q3map2 so geometry placement does
+not detach its material coordinates.
+
+The fused world has one worldspawn. Displaced worldspawn properties and the source and
+placed masses of all other entities are measured. `target`, numbered target, `targetname`,
+and `killtarget` values receive the same tile-local namespace mapping so symbolic chains
+remain inside their source tile.
+
+Runtime launch derives `g_max_info_autoscreenshot` from the realized entity relation and
+removes DarkPlaces' fixed VM-jump ceiling. Neither an authored camera nor a finite
+world-construction traversal may be discarded because a stock-map multiplicity exceeded a
+single-map default or an engine-global magic number.
+
+An `_decal` row with no patch and no brush has no visual or runtime realization. q3map2
+otherwise clears that row's keys and incorrectly introduces an anonymous flood occupant at
+global origin. Fusion removes precisely that empty relation and reports
+`compiler_inert_empty_decal_mass`; decals carrying geometry remain ordinary translated
+entities.
+
+## Placement and topology
+
+Every stock source with at least one supported wall socket is a physical degree-one leaf.
+Generated direction-complete bridge tiles form a rectilinear tree backbone. Its turn
+sequence leaves a measured relation of unused directed bridge sockets. Bipartite matching
+assigns every physical stock leaf to a distinct unused socket whose opposite direction is
+literally present on that stock source. Backbone edges consume their literal bridge
+sockets once. The generated bridge count is the first cardinality for which that exact
+matching exists and the physical-node relation is large enough to give every transfer leaf
+a distinct counterpart. Increasing the requested bridge count adds capacity; requesting
+fewer cannot remove the computed relation.
+
+Backbone cells are separated to leave leaf cells and connector corridors disjoint. Maps
+without sockets occupy a separate placement region because their graph edges are
+teleporters rather than physical halls. Every tile translation is realized on the same
+four-unit lattice used by portal apertures, including transfer-only tiles and vertical
+alignment, so q3map2 receives one translated plane representation instead of fractional
+copies whose rounding can diverge across a large combined BSP. The output records tile
+cells, offsets, placement
+shape, source extents, absolute BSP coordinate extent, and per-axis excess beyond the
+format extent. Observed socket count remains a measure; topology never pretends that a
+socket exists or faces a direction it does not face.
+
+Each generated bridge tile exposes four ground-tier physical arms around a traversable
+hub. Its internal gallery is vertically separated from the cart tier and connected by a
+stock jump-pad/teleporter pair. Bridge-source compilation and waypoint generation happen
+before the tile enters the same survey relation as stock maps; a written `.map` without
+its compiled BSP and navigation members is not a realized bridge source.
+
+Portal endpoints derive from source negative-space and navigation sites. Portal width,
+height, and floor offset derive from the canonical cart-and-rider swept hull. Rounding
+outward to the map coordinate quantum supplies positive clearance and keeps the waypoint
+origin exactly one player-bottom offset above the corridor floor. Each endpoint has a
+collision-free source approach for the full cart-and-rider swept body. A generated floor
+brush supplies continuous support from the source waypoint to the aperture. Past the wall,
+the full cart-and-rider cross-section has zero solid incidence all the way to the source
+extent; the connector sleeve supplies the new exterior floor. Its source wall has positive
+shared-volume incidence with four measured support prisms around the clear aperture:
+left, right, floor, and ceiling. Their missing-incidence mass is zero for every realized
+endpoint; no inferred boundary, point sample, extremal waypoint, or general convex
+subtraction search substitutes for that relation. Tree propagation aligns source-relative elevations exactly. Each endpoint
+sleeve follows its measured outward normal from aperture to the outside of the source
+extent. Fusion cuts the complete swept route from each stock navigation endpoint through
+both sleeves and the hall. The cut is applied to every placed brush and patch owner before
+generated floor and shell brushes enter the same owners. Convex brushes are differenced
+by half-space incidence. Odd patch grids are decomposed into exact quadratic control
+blocks, and blocks whose compiled collision triangles intersect the cutter are removed
+with their shader and texture coordinates otherwise unchanged. Editor groups,
+moving-brush entities, triggers, curved walls, and authored exterior seals cannot survive
+as an unmeasured obstruction inside the route. Between direction-compatible tree cells,
+an axis-aligned hall spans the two
+sleeve mouths and has one literal cart-width opening at each end; its cross-axis extent is
+computed from both mouths. Cutter cross-sections extend beyond the clear playable
+cross-section by less than one wall thickness. Supported sleeves overlap
+measured intact source solid laterally, above, and below while preserving the requested
+playable width and height. Their shells embed one wall thickness beyond each cutter.
+Fusion schedules candidate brushes and patch blocks by route bounds, then cuts only
+geometry whose compiled solid intersects the swept route; bounds never substitute for
+solid incidence. It adds the
+connector waypoint chain and records direction residual, hall cross-span, horizontal span,
+rise, grade, width, height, carve clearance, carve depth, embed depth, longitudinal
+overlap, transverse overlap, and their positive minimum seal overlap.
+Half-space realization enumerates the complete plane-triple relation in vectorized work
+slices. Convex difference retains the complete dynamically sized fragment relation; no
+plane prefix, fragment ceiling, or dropped-leaf path changes the realized geometry.
+Planar coordinate descent aligns only the cross-axis coordinate of paired mouths. It
+preserves the extent pack's positive axial separation rather than moving opposing mouths
+onto one plane. Inside the hall, the waypoint chain travels straight beyond each end jamb
+by one wall thickness, carve clearance, and cart-hull radius before changing its
+cross-axis coordinate. Approach-floor longitudinal overlap is one wall thickness plus the
+cart-hull radius, so support extends beyond the complete body at the source waypoint.
+Generated bridge hub openings carry the complete clear arm width plus both arm walls;
+hub jambs and arm shells meet without coplanar overlap.
+Maps without a supported source-wall socket enter the topology through one bidirectional
+teleporter edge anchored at a stock navigation node whose complete player hull occupies
+source negative space. Such maps are degree-one leaves. Every counterpart is distinct,
+so each transfer leaf and counterpart has one transfer incidence. Corridor topology consumes only
+observed supported-socket capacity; it does not extend that capacity to fit a desired
+graph. Teleporter trigger volume and per-map non-cart incidence are serialized measures;
+no incidence limit changes construction or release state.
+Supported-site count is the literal socket capacity. The physical tree consumes only its
+incident directional sockets, without redefining maps containing additional sockets or
+adding elevation cycles.
+Derived split faces serialize enough significant digits to preserve their shared plane
+at the full BSP coordinate extent. Opposing faces are reconstructed from the same plane
+coefficients, so repeated convex splitting cannot turn numerical formatting into an
+exterior seam.
+
+Region-graph connected components, articulation tiles, cut edges, degrees, and hop
+diameter derive from the realized edge relation. Join exclusivity is cut-edge or leaf-edge
+incidence; prominence copies that computed property. These are graph measures, not author
+labels.
+
+## Compiler asset closure
+
+q3map2 sees the complete stock runtime archive relation, the matching mapping-support
+source-image archive, and the paint/PBR overlay. Its shader relation is the union of
+concrete shader modules and shader-list declarations. A declared shader without a module
+is represented by an empty compiler module so the name remains present.
+
+Archive-native symbolic image aliases are followed by the compiler VFS using their
+relative archive targets, matching runtime VFS semantics.
+When q3map2 names a missing image, the asset relation is searched by logical stem,
+basename, and basename suffix. A discovered source is materialized at the requested
+logical path and bundled at that runtime path. Available default skins are materialized
+through their stock skin relation. Referenced ASE models retain faces and texture
+coordinates in compiler-only copies while unusable exported normal blocks are removed
+and an object transform's node name is made identical to the object name it transforms;
+the compiler derives normals from the face relation. Referenced OBJ compiler copies carry
+an object row before mesh creation and a material library containing every literal
+`usemtl` name. Runtime archives retain the stock model bytes.
+
+The compile record contains every archive, concrete module, declaration-only module,
+resolved alias, model skin, missing image, missing file, stage return code, leak-line
+mass, and draw-surface capacity used. If q3map2 exhausts a draw-surface allocation, the
+next compile doubles that resident compiler capacity. This is compile scheduling, not a
+map or workload cardinality ceiling.
+
+Visibility storage is sized from the realized portal-cluster relation. Directed-portal
+ordering, leaf incidence, traversal vectors, cluster merge vectors, and histograms are
+dynamic. Preliminary portal-front vectors exist only for the duration of their parallel
+flood. Passage visibility is a sorted sparse relation of nonzero 32-bit words, and the
+portal-flow state is an explicit heap worklist carrying that same sparse representation;
+neither a dense passage matrix nor process-stack recursion represents causal reach.
+Passage-memory accounting covers every
+directed portal and stored word without narrowing its byte total to an integer. Grid-light
+contributions are dynamically sized from the realized light relation rather than a fixed
+per-worker stack array or a truncated prefix. Quadratic-patch lightmap tessellation derives
+its working extent from the input grid and subdivision relation, stores that extent on the
+heap, and compacts linear rows and columns into a separately sized result. It does not place
+a fixed 128-by-128 draw-vertex matrix on every worker stack or stop subdivision at that
+matrix boundary. The compiler does not
+compare these allocations to legacy fixed cluster, portal, or portals-per-leaf counts.
+The serialized BSP lump and the engine's dynamic PVS allocation are the actual
+representation boundary.
+
+Release visibility serializes the conservative portal-flood upper bound. It can retain an
+occluded cluster but cannot omit a cluster from the exact portal-flow relation. On the
+33,382-cluster fused world it realizes 33,135,853 visible cluster pairs, 2.974 percent of
+the complete relation, in 20 seconds. Exact passage-portal refinement remains an offline
+measurement over the same sparse heap worklist; it is not placed on the release build path.
+
+## Canonical navigation object
+
+Each source contributes every node in its largest stock walking component, its weighted
+adjacency, link flags when present, and waypoint-cache links. Connector nodes and
+bidirectional links join those translated stock graphs. Coordinate proximity never
+creates an edge.
+
+The realized graph records walking diameter, walking-distance distribution, unreachable
+pair mass, per-tile reachable-node mass, and tile-to-tile walking distances. Join cart
+navigability is the conjunction of:
+
+- complete bidirectional incidence along the connector chain;
+- attachment of both chain ends to their source regions;
+- width and height aperture incidence for the complete cart-and-rider hull;
+- zero exact swept-hull clearance gaps, support gaps, and portal-direction residual over
+  every segment of the compiled connector chain.
+
+The same weighted graph produces the shortest-path Voronoi relation consumed by cart
+origins, spawn access, belief integration, and causal V-cell working sets. There is no
+strategy-private second navigation graph.
+
+## Continuous cart-curve domain
+
+The compiled BSP supplies the indexed solid-brush half-space domain. That domain is the
+union of the world model and every brush submodel whose server spawn contract realizes
+`SOLID_BSP`; trigger, illusionary, ladder, particle, camera, and game-mode-deleted models
+do not become fictional walls. Compiled quadratic patches use the renderer's collision
+tessellation contract, including its curvature-derived subdivision, integer vertex snap,
+and collision-triangle topology; thin triangle prisms add those surfaces to the same
+half-space index used by swept hulls and support. Cache identity includes this
+geometry-interface schema so a world-model-only or brush-only cache is reconstructed
+rather than reused. Map measurement schema 11 publishes that interface schema and the
+masses of compiled brush and tessellated patch-triangle collision atoms used by
+placement. Cart paths are represented
+as tangent-energy curves over stock-navmesh-derived origin components. A
+component enters the origin relation when its exact weighted shortest-path horizon
+reaches the required physical travel horizon. Node count, bounding-box span, relative
+component size, and short-dangle pruning are not substitutes for that distance.
+
+Every curve segment must have complete parameter-interval coverage for both:
+
+- collision-free swept volume of the full cart-and-rider hull;
+- continuous floor support under the cart's push surface after shrinking every support
+  face by the horizontal cart hull.
+
+These interval relations define the feasible domain for the entire segment. Candidate
+sampling searches within that domain; it does not establish feasibility by checking a
+finite set of points. Jump-pad, teleporter, and other cart-incompatible stock link
+semantics do not become cart curves, though ordinary player walking distance may use
+them when the stock graph permits it.
+
+Cart-origin selection and spawn-pool construction consume shared precomputed
+cart-to-waypoint distances, vectorized nearest-node attachment, and literal
+point-to-waypoint attachment distance. Track orientation maximizes the minimum
+start-to-start walking distance after direction-coupling measures. The entity overlay
+emits only represented curves and records construction residuals for the requested cart
+and team relation.
+
+The generic spawn pool is constructed in the compiled negative-space domain eroded by
+the stock player hull plus one complete player-body width on every horizontal side. Its
+standing origins are lifted by one stock player lower-half height, and their coordinates
+retain enough significant digits to preserve the constructed incidence relation when
+parsed by the engine. This surrounding body-width realizes relocation and
+simultaneous-occupancy clearance; it is not a sampled collision guess. Runtime engine
+traces report spawn-origin solid incidence and intrusive entity-list errors as separate
+measures of the realized map.
+
+## Runtime artifacts
+
+The fused package contains the realized members from this relation:
+
+```text
+maps/fused.map
+maps/fused.bsp
+maps/fused.ent
+maps/fused.waypoints
+maps/fused.waypoints.cache
+maps/fused.mapinfo
+maps/fused.joins.json
+maps/fused.metrics.json
+maps/fused.measurements.json
+maps/fused.compile.json
 ```
 
-The pool is read out of the stock map pk3 and is 29 maps:
-
-```
-$ python3 -c "... mapfuse.navigable_names(pk3)"
-29
-['afterslime','atelier','boil','bromine','catharsis','courtfun','dance','darkzone',
- 'erbium','finalrage','fuse','geoplanetary','glowplant','go','implosion',
- 'leave_em_behind','nexballarena','opium','runningman','runningmanctf','silentsiege',
- 'solarium','space-elevator','stormkeep','techassault','trident','vorix','warfare','xoylent']
-```
-
-### 4.2 Procedural geometry — the bridge tiles are generated and q3map2-compiled
-
-`mapgen.bridge_tile()` emits a two-tier hub in `.map` source and compiles it with
-the real `q3map2` (`-meta`, `-vis`, `-light`), then writes its own
-`.waypoints`/`.waypoints.cache`. Every port is a real node of the tile's waypoint
-graph, and the gallery ring above the hub floor is reached by a jump pad and left
-by a teleporter (the "portal and jump pad and verticality" clause):
-
-```python
-    arms_lo = list(arms_lo) + list(arms_hi)      # all ports on the ground tier:
-    arms_hi = []                                 # a port must be cart-navigable
-    ...
-    padat = [0.0, -(h - 200.0), 0.0]
-    land = [0.0, h - gw / 2, TIER]
-    g.jumppad(padat, land, 0)
-    g.teleporter(land, [0.0, -(h - 400.0), 0.0], 90, 0)
-```
-
-Each arm is capped with a thin caulk plug so q3map2 sees a sealed hull; the plug is
-small enough that the fusion's corridor carver removes it when the join punches
-through — the same carve path that was already proven on stock geometry.
-
-### 4.3 Cart-navigability budget
-
-```python
-    noncart_used = [0] * j
-    noncart_budget = 1
-    ...
-        may_noncart = noncart_used[a] < noncart_budget and noncart_used[b] < noncart_budget
-```
-
-Corridors are tried first and always; the teleporter/jump-pad fallback is rationed.
-A redundant (non-cut) edge that can be neither a corridor nor a rationed portal is
-**dropped**, guarded by a union-find connectivity test, so the budget is a hard rule
-wherever the region graph allows it.
-
-### 4.4 Prominence
-
-The proven degree-1 rule is kept and extended to cut edges, which are the exclusive
-mode of entry to everything behind them:
-
-```python
-    PRE = region_graph_solve(j, edges)
-    cutset = set(PRE['cutedges'])
-    exclusive = [min(degree[a], degree[b]) == 1 or ei in cutset for ei, (a, b) in enumerate(edges)]
-```
-
-### 4.5 Connectivity solver and navmesh metrics
-
-`region_graph_solve()` is an iterative Hopcroft–Tarjan over the region graph:
-components, articulation points (chokepoint tiles), cut edges (chokepoint joins),
-degrees, hop-diameter. `navmesh_solve()` is a heap Dijkstra over the *real* fused
-bot-waypoint graph: per-region reachable coverage, the region-to-region walking
-distance matrix, the walking diameter (the commitment cost), and the count of
-unreachable region pairs. Both are printed and written to `fused.metrics.json`.
-
-### 4.6 A bug in a sibling-owned file that this work depends on
-
-`mkentfile.Bsp` derives a brush AABB from the plane distance of any plane within
-`0.999` of an axis:
-
-```python
-            for nx, ny, nz, dd in bp:
-                for a, c in enumerate((nx, ny, nz)):
-                    if c > 0.999:
-                        hi[a] = min(hi[a], dd)
-```
-
-For an *oblique* plane (a join corridor is oblique by construction) `dd` is not an
-axis-aligned bound, so the AABB is shifted. Measured on `fuse_b16`: a corridor whose
-real x-span is `[-5504,-5152]` is indexed at `[-5843,-5491]`, and `Bsp.floor()`
-then reports phantom "no floor" violations along a corridor that is in fact clear.
-`mapfuse` no longer routes its clearance check through `Bsp`; the one-line change
-needed in the sibling-owned file is reported separately.
-
----
-
-## 5. GAP TABLE
-
-| # | Requirement (verbatim) | Cite | Before this work | Now |
-|---|---|---|---|---|
-| F1 | "j-many of all of the maps in the game" | 08-29T08:26 | `names = random.Random(seed).sample(pool, 3)` — hard-coded 3 | `--maps=N`/`--maps=all`; default = whole 29-map navigable pool, seed-shuffled |
-| F2 | "using k-many bridge maps" | 08-29T08:26 | no bridge-map class at all; only stock maps + raw corridors | `--bridges=k`; k procedurally generated, q3map2-compiled hub tiles placed as lattice cells |
-| F3 | "procedural geometry programming" | 08-29T08:26 | `mapgen.py` existed but nothing it produced was ever in a fused world ("total absence of procedural geometry") | `mapgen.bridge_tile()` → `.map` → q3map2 → BSP → ingested by `mapfuse` as a first-class tile |
-| F4 | "socketed together like tilesets in a roguelike level generator" | 08-29T08:26 | random spanning tree over arbitrary map pairs | lattice with 4-neighbour sockets; per-seed draw, bridge placement, topology, socket assignment |
-| F5 | "extremely high combinatorics of maps" | 08-29T08:26 | 1 shape (3 maps, 3 joins) | draw × lattice assignment × bridge cells × loop edges, all seed-driven |
-| F6 | "portal and jump pad and verticality" | 08-29T08:26 | teleporter + jump pad connectors existed; no vertical structure was generated | kept, plus a generated two-tier hub: gallery ring, jump pad up, teleporter down |
-| F7 | "at least one maximum per map ... cart-path-navigable" | 08-29T08:26 | inverted: `if corridor_used[a] == 0 and corridor_used[b] == 0` capped corridors at **one per map**, so most joins were non-cart-navigable | per-tile budget of **one** non-cart join; corridors tried first and always; redundant unsatisfiable edges dropped under a connectivity guard |
-| F8 | "megamaps which require bots ot navigate long distances" | 08-31T01:59 | never measured | `navmesh_solve()` prints and stores region-to-region walking distances, median and diameter |
-| F9 | "the first corridor i found connecting two levels was really long" | 08-29T20:19 | uniform cells sized to the largest map in the pool; sockets picked by distance from map centroid with no reference to the partner | non-uniform lattice bands + in-band nudge toward joined neighbours + `pick_sockets_toward()` aiming at the shared band boundary |
-| F10 | "playbot navmesh navigability allowing net playerbot transport between maps" | 08-29T20:19 | flood-fill existed and passed at 3 maps | kept; plus per-region coverage and unreachable-pair counts at every scale |
-| F11 | "subtle or weakly signposted ... only if that's ... a 'connector' map which has multiple edges" | 08-29T20:19 | prominence keyed on degree-1 only | degree-1 **or cut edge**; bridge tiles are the connector class by construction and carry the multi-edge, may-be-subtle role |
-| F12 | "3d viewer or renderer tool which renders the floorplans ... and their level fusions at each of their joins" | 08-29T20:19 | `joinview.py` floorplan SVG only | `fusegraph.py`: region-graph + navmesh + metrics viewer; floorplan retained |
-| F13 | "fuzzing tools to quickly measure ... how contorted of a path" | 08-29T20:19 | `joinview.contortion()` existed | retained and reported per join in the new viewer |
-| F14 | "actually rendering the egocentric player view through each side of the edge" | 08-29T20:19 | `joinshot.py` rendered joins only | plus per-region vantage cameras and an automated **void audit** over the rendered frames |
-| F15 | "no connectivity solvers or ... metrics over connectivity and navmesh solutions" | [this session, unflushed] | one boolean flood-fill | Hopcroft–Tarjan components/articulation/cut-edges/hop-diameter + Dijkstra walking-distance matrix, coverage, diameter |
-| F16 | single-cluster PVS fix, `fused.pk3` client distribution, clip-brush carving, canonical pad/teleporter entities, region flood-fill, corridor sizing | prior proven work | present | preserved unchanged; all re-verified at every scale below |
-| F17 | "missing client renderers ... the world is almost entirely black void" | [this session, unflushed] | join cameras only; no grading of what was rendered | region vantage + overhead cameras, Adam7 PNG reader, automated void audit; 166 real frames, PASS |
-| F18 | the megamap must actually run | implied by all of the above | 3-map fusion ran; anything larger died with `server runaway loop counter hit limit of 10000000 jumps` | diagnosed (compiled-in limit + linear IntrusiveList ops) and lifted by an entity budget + orphan sweep inside `mapfuse`; the 39-tile world boots and soaks with 8 bots |
-
----
-
-## 6. Evidence — real generated artifacts
-
-No unit test, no simulator. Every number below is printed by a real run of
-`mapfuse.py` / `fusegraph.py` / `joinshot.py` on this machine, or is a real file
-size on disk. Nothing was re-simulated.
-
-### 6.1 The full-pool megamap — all 29 navigable stock maps + 10 procedural bridge tiles
-
-```
-$ python3 xonotic/payload/tools/mapfuse.py 21 --maps=all --bridges=10 --out=/private/tmp/fuse_all29
-mapfuse seed=21 j=29 stock maps + k=10 procedural bridge tiles (pool=29) pk3=xonotic-20230620-maps.pk3
-lattice: 7x6, 39 tiles (29 stock maps + 10 procedural bridge tiles), 48 lattice edges
-topology: 39 tiles (29 stock + 10 procedural bridge), 48 edges (38 tree + 10 loops),
-          corridors=26 jumppads=6 teleport-triggers=22
-prominence: 13 exclusive/objective edges (prominent+lit), 27 redundant edges (subtle)
-corridor length: n=26 min=1604 median=4791 max=5938 (cap 6000)
-cart-navigability: 26/40 joins cart-navigable (corridor); non-cart joins per tile max=3
-          (budget 1); 8 loop edges dropped -> VIOLATED on 4 edges (see 6.3)
-entity budget 1800: swept 1622 orphaned target-only entities; dropped {'light': 4149,
-          'dom_team': 60, 'dom_controlpoint': 48, 'trigger_race_checkpoint': 25,
-          'info_player_race': 14, 'func_pointparticles': 47, 'misc_gamemodel': 197,
-          'misc_breakablemodel': 108, 'item_armor_small': 579, 'item_health_small': 489,
-          'item_shells': 47, 'item_bullets': 99, 'item_rockets': 155, 'item_cells': 152,
-          'item_health_medium': 171, 'item_armor_medium': 39}
-entities: dropped 7 source spawnpoints in solid, 309 over the per-tile spawn budget of 10
-wrote /private/tmp/fuse_all29/fused.bsp (165914944 bytes, 69132 nodes 69704 leafs 561 models)
-connector clearance check (exact planes, un-carved source solids): PASS (0 obstructed samples)
-bot flood-fill: regions reached [0..38] / [0..38] -> PASS
-connectivity: 1 component(s) [39]; hop-diameter=19; 21 chokepoint tiles; 32 cut edges
-navmesh: 5162 fused waypoints; bot-reachable from seed = 5152 (99.8%);
-         regions with zero reachable waypoints: none
-navmesh: region<->region WALKING distance median=58556u diameter=152281u unreachable_pairs=0
-fuse wall time 72.7s   peak RSS 5.35 GB
-```
-
-Files on disk:
-
-```
--rw-r--r--  1 mdot  wheel  165914944  /private/tmp/fuse_all29/fused.bsp
--rw-r--r--  1 mdot  wheel   48924307  /private/tmp/fuse_all29/fused.pk3
--rw-r--r--  1 mdot  wheel      57438  /private/tmp/fuse_all29/fused.connectivity.json
--rw-r--r--  1 mdot  wheel      24244  /private/tmp/fuse_all29/fused.graph.svg
--rw-r--r--  1 mdot  wheel    2522908  /private/tmp/fuse_all29/fused.navmesh.svg
-```
-
-And it **runs**, on the real dedicated server, in the real payload gametype, with bots:
-
-```
-$ darkplaces-dedicated -xonotic ... +g_payload 1 +bot_number 8 +skill 5 +timelimit 2 +map fused
-Server listening on address 0.0.0.0:26014
-payload: teams mask 31, carts 0
-payload: cart 0: 30 path nodes, length 21293.392578
-payload: cart 1: 15 path nodes, length 7036.235840
-payload: cart 2: 12 path nodes, length 7863.403320
-execing post-config.cfg
-$ grep -cE "Host_Error|Quake Error" soak.log
-0
-(94 s soak, 8 bots, steady RSS 2.55 GB)
-```
-
-Cost envelope on the shared machine (this is the right-sizing datum): **5.35 GB peak
-RSS, 73 s wall** to generate the whole 29-map pool; **2.55 GB** for the dedicated
-server to run it. The 22-tile run costs 3.0 GB / 31 s and the 8-tile run 0.9 GB / 7 s,
-so generation cost is roughly linear in fused brush count and the whole pool fits
-inside the ~32 GiB ceiling with a wide margin.
-
-### 6.2 The scaling ladder (each row is one real run)
-
-| tiles | stock + bridges | joins | corridors | cart-nav | flood-fill | navmesh reachable | walking diameter | fused.bsp | fuse wall | fuse peak RSS | dedicated server |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 3 | 3 + 0 | 2 | 1 | 1/2 | PASS 3/3 | 438/438 = 100% | 12 544u | 45.3 MB | 9.3 s | — | — |
-| 4 | 3 + 1 | 3 | 3 | 3/3 | PASS 4/4 | 563/563 = 100% | 15 874u | 45.3 MB | 4.4 s | — | — |
-| 8 | 6 + 2 | 9 | 9 | 9/9 | PASS 8/8 | 979/979 = 100% | 22 154u | 54.5 MB | 7.2 s | 0.9 GB | boots (client render, 166 frames) |
-| 22 | 16 + 6 | 23 | 11 | 11/23 | PASS 22/22 | 2768/2772 = 99.9% | 97 219u | 95.6 MB | 31.4 s | 3.0 GB | boots payload match |
-| **39** | **29 + 10** | **40** | **26** | **26/40** | **PASS 39/39** | **5152/5162 = 99.8%** | **152 281u** | **165.9 MB** | **72.7 s** | **5.35 GB** | **boots + 94 s soak, 8 bots, 0 errors** |
-
-The commitment cost the spec asks for is the walking-diameter column: at full pool a bot
-crossing the megamap between the two furthest regions walks **152 281 units** of real
-bot-waypoint graph, versus 12 544 units for the old three-map fusion — a **12.1×**
-increase in the distance a strategy has to commit to.
-
-### 6.3 Where the cart-navigability budget still fails, honestly
-
-> **SUPERSEDED by §7.5.** The refusal described below is deleted; the budget now holds
-> at full pool with zero refusals and zero dropped edges. Kept for the record.
-
-
-At 8 tiles the budget holds outright (`9/9 joins cart-navigable, max=0 non-cart per
-tile, HELD`). At 22 and 39 tiles it is violated on a handful of tiles
-(4 edges at 39 tiles). The cause is measured, not guessed: a corridor is refused when
-the two facing sockets are more than `MAXCORLEN = 6000` apart, and the widest stock
-maps (`space-elevator`, `xoylent`, `catharsis`) put their walkable interiors far from
-their bounding-box faces, so their band-adjacent joins exceed the cap. Raising the cap
-would satisfy the budget by building exactly the kilometre-long tunnels the owner
-complained about at 08-29T20:19. The tension is left visible and reported per run
-rather than resolved by silently widening the cap.
-
-### 6.4 Joins are cart-navigable, near-straight and unblocked
-
-`joinview.py` on the 8-tile fusion, every join a corridor:
-
-```
-$ python3 xonotic/payload/tools/joinview.py /private/tmp/fuse_r8
-wrote fused.floorplan.svg (8 maps, 979 nav nodes, 9 joins, 878 lights, 739 clip brushes)
-  bridge7_0<->silentsiege corridor [EXCL/prominent] len=877 : contortion min=0.33 mean=0.82 max=1.12 | clip-blocked=no
-  bridge7_1<->catharsis   corridor [EXCL/prominent] len=3540: contortion min=0.87 mean=0.96 max=1.03 | clip-blocked=no
-  bridge7_1<->bridge7_0   corridor [redundant]      len=2460: contortion min=0.90 mean=1.04 max=1.13 | clip-blocked=no
-  glowplant<->bridge7_0   corridor [redundant]      len=2219: contortion min=0.78 mean=0.93 max=1.03 | clip-blocked=no
-  atelier<->boil          corridor [redundant]      len=1284: contortion min=0.60 mean=1.03 max=1.86 | clip-blocked=no
-  glowplant<->atelier     corridor [redundant]      len=1374: contortion min=0.67 mean=0.91 max=1.08 | clip-blocked=no
-  bridge7_0<->boil        corridor [redundant]      len=2910: contortion min=0.83 mean=0.95 max=1.03 | clip-blocked=no
-  fuse<->bridge7_1        corridor [redundant]      len=1792: contortion min=0.75 mean=0.93 max=1.05 | clip-blocked=no
-  fuse<->glowplant        corridor [redundant]      len=3294: contortion min=0.86 mean=1.00 max=1.25 | clip-blocked=no
-```
-
-Mean contortion 0.82–1.04 means a bot's real walked path across a level-to-level edge
-is within a few percent of the straight line: no join is a maze.
-
-### 6.5 Chokepoint / betweenness solve (`fusegraph.py`, 8-tile fusion)
-
-```
-== region graph ==
-tiles 8 (2 procedural bridge)  joins 9
-components [8]  hop-diameter 4
-chokepoint TILES  (articulation): ['bridge7_1', 'bridge7_0']
-chokepoint JOINS  (cut edges)   : ['bridge7_0<->silentsiege', 'bridge7_1<->catharsis']
-2-edge-connected blocks (sizes) : [6, 1, 1]
-== navmesh ==
-waypoints 979  region-pairs solved 28  unreachable pairs 0
-walking distance median 9351u  DIAMETER 20643u
-== joins ==
-  bridge7_0<->silentsiege corridor len=877  cart=True prominent=True  cut=True  betweenness=0.25
-  bridge7_1<->catharsis   corridor len=3540 cart=True prominent=True  cut=True  betweenness=0.25
-  bridge7_1<->bridge7_0   corridor len=2460 cart=True prominent=False cut=False betweenness=0.32
-  ...
-```
-
-Both chokepoint tiles are the procedural bridge tiles, and both chokepoint joins are
-exactly the two prominent/exclusive edges — the prominence rule and the connectivity
-solve agree without being told to.
-
-### 6.6 Files this work owns
-
-- `xonotic/payload/tools/mapfuse.py` — lattice + bridge tiles + budget + solvers
-- `xonotic/payload/tools/mapgen.py` — `bridge_tile()` / `build_bridge_tile()`
-- `xonotic/payload/tools/fusegraph.py` — **new**: connectivity solvers, navmesh
-  metrics, region-graph and navmesh SVG viewers
-- `xonotic/payload/tools/joinshot.py` — region vantage cameras, overview cameras,
-  Adam7-capable PNG reader, void audit
-- `xonotic/payload/tools/joinview.py` — unchanged, still the contortion/occlusion fuzzer
-
-### 6.7 The engine ceiling, diagnosed and lifted
-
-The first attempt to boot the megamap failed, and the failure is worth recording
-because it is the real reason "3 maps" had never been exceeded:
-
-```
-Host_Error: server runaway loop counter hit limit of 10000000 jumps
-   ./lib/log.qh : print_assertfailed_severe : statement 56
-        rametime : IL_PUSH : statement 9
-   race_endpos_z : relocate_spawnpoint : statement 81
-   race_endpos_z : __spawnfunc_info_player_deathmatch : statement 4
-        thmatch : __spawnfunc_spawn : statement 49
-                : __spawnfunc_worldspawn : statement 814
-                : StartFrame : statement 10
-server Profile:
-   948212  16119604   100.00%  il_links_flds##GETFP
-     5643   7629864    32.13%  IL_REMOVE_RAW
-     1538   6693370    99.91%  InitializeEntity
-     1787   3897707    52.19%  ONREMOVE
-   226087   3391305   100.00%  il_links##GET
-     3704    185143 ... 40072842 total  __spawnfunc_spawn
-```
-
-Diagnosis, all measured:
-
-- the 10 000 000-jump limit is **compiled into this DarkPlaces build** —
-  `cvarlist prvm_runaway` returns `0 cvar beginning with "prvm_runaway"`, so it cannot
-  be raised from the command line;
-- stock Xonotic's IntrusiveList primitives (`IL_CONTAINS`, `IL_REMOVE_RAW`,
-  `il_links_flds##GETFP`) are **linear scans**, so worldspawn's spawnfunc chain is
-  superlinear in merged entity count;
-- measured threshold: **1805 entities (8 tiles) boots; 5780 entities (22 tiles) does
-  not**, with `il_links_flds##GETFP` alone burning 16.1 M of the 10 M budget.
-
-Lifted inside `mapfuse` (owned code), not by touching the engine or the QC:
-
-1. per-tile spawnpoint budget (10), plus dropping source spawnpoints that test
-   in-solid — these are what drive `relocate_spawnpoint`'s expanding search;
-2. an entity budget with an explicit drop order. `light` goes first and costs nothing:
-   `mapfuse` flattens the lightmap lump to a single grey block, so not one source
-   `light` entity affects the fused world;
-3. an **orphan sweep** over target-only classes (`target_position`, `info_null`,
-   `misc_teleporter_dest`, `target_location`), repeated to a fixed point, protecting
-   anything still pointed at by name — 1622 swept at full pool;
-4. a name-reference guard so nothing that is still targeted is ever dropped (the fix
-   for `follow: could not find target/killtarget`).
-
-Result: 39-tile `fused.ent` goes **3755 → 1714 entities** and the megamap boots.
-
-### 6.8 Real client renders + the void audit
-
-166 real DPSOFTRAST frames were captured on the 8-tile fusion across two runs (92 + 74),
-standing on real bot-reachable waypoints inside every region on four yaws, plus
-overhead cameras, plus both sides of every join:
-
-```
-$ python3 xonotic/payload/tools/joinshot.py /private/tmp/fuse_r8 --regions --overview
-9 joins, 8 regions -> 92 camera frames
-spawned after 63s; capturing 92 frames...
-captured 92/92 frames
-void audit: 92 frames graded, 0 void/missing
-  r05_silentsiege_v0_y0                    void=0.00 levels= 58 320x200
-  r04_bridge7_0_v1_y0                      void=0.00 levels= 58 320x200
-  ov_world                                 void=0.62 levels= 15 320x200
-  ...
-void audit: PASS (wrote voidaudit.json)
-```
-
-The audit is the thing that would have caught the reported screenshot: a camera
-standing on real walkable geometry whose frame is near-black with almost no distinct
-luma levels is graded VOID and fails the run offline. It needed an Adam7-capable PNG
-reader, because DarkPlaces writes interlaced PNGs and there is no PIL on this box —
-the first version of the audit could not read a single engine frame.
-
-**Scope of the render evidence:** the 8-tile fusion, in the software rasterizer. The
-22- and 39-tile worlds are proven only through the real dedicated server (§6.1), not
-through a client render; a 166 MB BSP under DPSOFTRAST was not attempted on a shared
-machine.
-
----
-
-## 7. LEVEL 3 (second pass) — the joins are now CUT INTO THE MAPS
-
-Not normative. This section supersedes §4.1's fixed grid, §4.3's refusal-based
-budget and §6.3's honest failure. It block quotes real code and real run output.
-
-The controlling re-statement of the requirement (owner, this session, relayed
-verbatim by the coordinating agent):
-
-> i think the constraint was simpler: pick a list of maps that seem well suited to
-> having geometry edited to make them diegetically connect to other neighboring maps
-> by litearlly changing their geometry to have doors, galleries, passageways, etc.,
-> which either continue or newly appear in existing maps in plausible spots. then
-> solve a 3d bin packing problem, evne poorly, where 'bridge maps' (more than 3
-> connection sites) are joined by procedural geometry to 'stub maps' (fewer than 3,
-> more than 1 connection sites).
-
-Everything below follows that sentence clause by clause.
-
-### 7.1 "maps that seem well suited to having geometry edited" — a measured criterion
-
-`mapfuse.map_sites()` looks for the places a door could honestly be cut. From each
-node of a map's largest **bot-reachable, stand-on-able** waypoint component that is
-extreme in one of the four cardinal directions, it marches a ray outward
-(`ray_runs`, the same exact-plane solid predicate the carver uses) and requires:
-
-* the first solid is **24–640 u** away — a wall at the walkable frontier, not a
-  tunnel through the middle of the level;
-* that solid is **8–384 u thick** — a wall panel, not bedrock or a terrain skirt;
-* nothing else within 224 u behind it — one facade, not stacked scenery;
-* an oriented door-sized volume of **standing room in front of it** (`free_slab`);
-* **open space on the far side** for the connector to meet.
-
-Two consequences are worth stating because they are the criterion doing its job:
-
-* A map whose shell is patch-mesh curvature rather than brushwork yields **no ray
-  hits at all** and is scored 0 — `dance`'s east frontier has no brush between
-  x=1872 and x=3072. That is not a bug to route around; a curved patch shell is
-  exactly a map whose geometry cannot honestly be edited into a doorway.
-* A site is classed **`continue`** when the standing room in front of the wall is
-  narrow (a passage or alcove running into it) or the nav node is a graph dead-end —
-  the opening then continues a feature the level already has, which is the most
-  diegetic edit available. Otherwise it is a **`newcut`** on a broad exterior-reading
-  wall, and gets the jamb/header architrave so it reads as deliberate.
-
-### 7.2 The taxonomy is counted, not assumed
-
-```python
-def classify(nsites):
-    if nsites > 3:  return 'bridge'
-    if nsites > 1:  return 'stub'
-    return 'unsuitable'
-```
-
-Over the whole 29-map navigable pool (real run, seed 1):
-
-```
-selection: REJECTED 1 map(s) with fewer than 2 connection sites: nexballarena(1)
-selection: 29 maps kept -- 25 BRIDGE maps (>3 connection sites), 4 STUB maps (2-3 sites); 1 rejected
-```
-
-Per-map site counts and classes are printed for every candidate and stored in
-`fused.metrics.json` under `selection`.
-
-### 7.3 "solve a 3d bin packing problem, evne poorly"
-
-Taken literally. `pack_offsets` is a shelf pack: a lattice column is only as wide as
-the widest hull in it, a row only as deep, and a **level only as tall** — the pack is
-three-dimensional, `levels=2` by default above 12 tiles. Cells are ranked by how many
-lattice neighbours they have, tiles by how many connection sites they have, and the
-two rankings are zipped: bridge maps land in the cells with the most adjacencies, stub
-maps in corners. Non-overlap is structural (each hull is clamped inside its own slot),
-and `split_tree()` reads the BSP router's binary partition straight off the pack —
-including on Z, which the old fixed 2-D grid could not express.
-
-Each tile is anchored on its **walkable** centre in x/y and on its walkable **median
-floor** in z, not on its bounding box: a stock map's playable floor can sit hundreds
-of units inside a hull padded out by sky and terrain, and packing the hull is what
-produced kilometre corridors.
-
-The one search that survives is the cheap one that pays: after the joins and their
-site pairs are chosen, each tile's real-valued offset is coordinate-descended inside
-its own slot against the sum of door-to-door gaps.
-
-```
-pack: 4x4x2 lattice, 29 cells for 29 tiles; cell adjacency [2, 3, 4, 5]
-placement: door-gap objective over 28 planned joins 190995 -> 117234 (38.6% shorter)
-```
-
-### 7.4 The edit itself — `Fuser.cut_portal`
-
-This is the part that did not exist before. For each end of each join:
-
-1. **`split_brushes`** subtracts an axis-aligned, door-sized aperture box from every
-   source brush occupying it, replacing each with up to six convex remainders (itself
-   intersected with each half-space outside the box). The wall stays exactly where it
-   was and exactly as thick as it was, minus a doorway. This is not the old carve,
-   which switched a whole brush's contents to empty and dissolved a wall panel.
-2. **`clip_faces`** cuts the aperture out of the rendered surfaces too: a wall face
-   square to the door axis is dropped and re-issued as the up-to-four rectangles that
-   survive the cut, **keeping its own texture**, so the wall around the new doorway is
-   still the level's own wall.
-3. The **reveal** (the four surfaces of the cut through the wall's thickness) is
-   surfaced in the wall's own texture, and a threshold slab is laid so the opening
-   never gives onto a drop.
-4. A **jamb/header architrave** is set into the outer face — this is what makes the
-   result read as architecture rather than damage.
-5. Waypoints are chained from the map's own nav node, through the opening, to the
-   outer mouth, so a bot walks the door.
-
-At full pool:
-
-```
-GEOMETRY EDIT: cut 56 doorways (46 continuing an existing passage, 10 new openings on
-an exterior wall); split 444 source brushes into 825 convex remainders; re-cut 417
-wall surfaces into 479 clipped surfaces; wall thickness cut through: min=8 median=64 max=256
-```
-
-### 7.5 The refusal is deleted
-
-`MAXCORLEN` and `if math.dist(sa, sb) > MAXCORLEN: continue` are **gone from the
-file**. There is no length test anywhere in the join loop, no dropped edge and no
-budget violation: the openings are cut where the pack wants them and the connector is
-generated to fit whatever gap is left. Small solids in the connector's way are carved;
-anything too big to carve is split around the tube by the same edit the doorway uses.
-
-|  | before (§6.1, 39 tiles) | now (29 tiles, all suitable stock maps + 1 hub) |
-|---|---|---|
-| cart-navigable joins | 26/40 | **28/36** |
-| non-cart joins per tile | max **3** (budget 1) — VIOLATED on 4 edges | max **1** — **HELD** |
-| edges dropped | 8 | **0** |
-| joins refused for length | yes (`cap 6000`) | **0 — no cap exists** |
-| corridor length | median 4791, max 5938 (clipped by the cap) | min 32, p25 1223, median **3295**, p75 7196, max 10491 |
-
-The corridor distribution is the honest trade: with the cap deleted nothing is
-refused, so the joins that the cap used to hide now appear in the tail. The median is
-still **31% shorter** than the capped run's, because the doors are cut at the walkable
-frontier facing the neighbour instead of tunnelling from a socket deep inside the map.
-
-### 7.6 Two loader defects found and fixed on the way
-
-Both were found by watching RSS on a shared machine, not by reading code.
-
-* `Src.__init__` called `mkentfile.Bsp(data)` and never used the result. That helper
-  grids every brush AABB with an unguarded `range()` over cell indices, so one brush
-  bounded only by oblique planes — stock `catharsis` has twelve — expands to a
-  ~1e15-iteration loop. The loader ate **75 GB of RSS** and never returned. The call
-  is deleted; loading `catharsis` now takes 0.8 s and 0.7 GB.
-* The same defect then hit the fused artifact from the other side, in the entity pass,
-  taking it past **33 GB**. `Fuser.axialize()` re-emits the eighteen offending stock
-  brushes (catharsis 12, xoylent 3, finalrage 3) inside six axial clamp planes at
-  their tile's hull plus 4096 u of slop — far outside any playable space, so the
-  brush's shape is untouched and its AABB is finite for every consumer. The fused
-  world's peak is back inside the machine's budget.
-
-### 7.7 A second engine ceiling, found by booting the thing
-
-The entity budget of §6.7 lifted the runaway limit at *worldspawn*. Editing the maps
-moved the ceiling: a fused world now carries connector and doorway waypoints on top of
-29 stock waypoint sets, and stock `waypoint_loadall` spawns each saved waypoint through
-`waypoint_get`, which linear-scans the waypoints already spawned and `boxesoverlap`-tests
-each one — O(n²) inside one server frame. Measured, on a real boot of the 29-tile world:
-
-```
-d : boxesoverlap : statement 7
-m3 : waypoint_get : statement 21
-m3 : waypoint_spawn : statement 9
-m3 : waypoint_loadall : statement 218
-   : bot_serverframe : statement 220
-Quake Error: Host_Error: server runaway loop counter hit limit of 10000000 jumps
-```
-
-So the saved waypoint count gets the same treatment the entity count got — a hard
-budget (`--wpcap`, default 600) spent where it buys the most navigation. Connector and
-doorway waypoints are mandatory (they are the only nodes that carry a bot between
-tiles), portal pads are anchored so they can never be decimated, each tile's stationary
-waypoints are farthest-point decimated to its share of what is left, and **the link
-graph is contracted onto the survivors** rather than shredded — every dropped node's
-links are re-attached to its nearest surviving neighbour, so reachability is preserved.
-The flood-fill and the walking-distance solve are then run on the contracted graph, and
-both still pass at 100 % coverage.
-
-The number is empirical. 900 cleared `waypoint_loadall` and then blew the same ceiling
-one layer up, in `navigation_markroutes -> navigation_markroutes_nearestwaypoints`,
-which walks the whole `g_waypoints` list inside its own per-waypoint loop — O(n²) again,
-per bot, per goal rating, and mkentfile's 175 trigger waypoints count towards n too.
-600 clears both.
-
-### 7.8 Evidence
-
-**Full pool, 29 tiles** (`mapfuse.py 1 --bridges=1`, seed 1, one real run):
-
-```
-selection: REJECTED 1 map(s) with fewer than 2 connection sites: nexballarena(1)
-selection: 29 maps kept -- 25 BRIDGE maps (>3 connection sites), 4 STUB maps (2-3 sites); 1 rejected
-pack: 4x4x2 lattice, 29 cells for 29 tiles; cell adjacency [2, 3, 4, 5]
-topology: 36 joins over 29 tiles (8 vertical level-to-level), 1 component(s)
-placement: door-gap objective over 28 planned joins 190995 -> 117234 (38.6% shorter)
-GEOMETRY EDIT: cut 56 doorways (46 continuing an existing passage, 10 new openings on an
-  exterior wall); split 444 source brushes into 825 convex remainders; re-cut 417 wall
-  surfaces into 479 clipped surfaces; wall thickness cut through: min=8 median=64 max=256
-well-formedness: re-emitted 18 source brush(es) with no derivable axial AABB
-corridor length: n=28 min=32 p25=1223 median=3295 p75=7196 max=10491 (NO length cap exists)
-cart-navigability: 28/36 joins cart-navigable (door+corridor); non-cart joins per tile
-  max=1 (budget 1) -> HELD; joins refused: 0; joins dropped: 0
-waypoint budget 600: 3325 source + 433 connector waypoints -> 613 written
-parse-back: OK
-connector clearance check (exact planes, un-carved source solids): PASS (0 obstructed samples)
-bot flood-fill: regions reached 29 / 29 -> PASS
-navmesh: region<->region WALKING distance median=38621u diameter=86823u unreachable_pairs=0
-connectivity: 1 component(s) [29]; hop-diameter=9
-wrote fused.bsp (166 MB) / fused.pk3 (48 MB)
-```
-
-**Real boot** — stock `darkplaces-dedicated`, port 26071, `+g_payload 1 +bot_number 8`:
-
-```
-payload: cart 0: 485 path nodes, length 10997.6
-payload: cart 1: 383 path nodes, length 8786.1
-payload: cart 2: 425 path nodes, length 9666.1
-[BOT]Resurrection is now playing on the RED team      ... 8 bots over 5 teams
-[BOT]Dominator picked up Strength
-```
-
-Zero `runaway loop counter` errors, server alive and playing through the soak. Four
-`relocate_spawnpoint: could not get out of solid` object errors remain — stock spawn
-points inside newly adjacent geometry; non-fatal, and reported.
-
-**Renders of the edits** (`joinshot.py`, 8-tile fusion, DPSOFTRAST, 480x300): 42/42
-frames captured, **void audit PASS**, including a new camera pair per cut doorway —
-one standing back inside the host map looking at the new opening in its own wall, one
-outside the wall looking back at it. `p04_erbium_continue_in` shows a framed doorway cut
-into erbium's stone wall with the connector visible beyond; `p11_geoplanetary_newcut_in`
-shows a new opening with its jamb/header architrave in geoplanetary's exterior facade;
-`p01_silentsiege_continue_out` shows the same doorway from the connector side.
-Frames in `/private/tmp/fz8/shots/`.
-## 8. LEVEL 3 (third pass) — THE PIPELINE IS COMPUTED, NOT PROBED
-
-Both earlier passes ended the same way: geometry was emitted, a point-sampled
-predicate was asked about it afterwards, and whatever the samples happened to
-notice was patched.  That is why spawnpoints shipped buried in solid and the
-first thing to notice was the running engine:
-
-```
-SVQC OBJECT ERROR in relocate_spawnpoint: could not get out of solid at all!
-NOTE: Spawnpoint at '8202.0 -11548.0 4342.0' needs to be moved out of solid
-```
-
-`design/NAV-SPEC.md` §10 names the flow that should have existed instead.  This
-pass builds it.  The governing observation is that a BSP already partitions
-space: every `solid_brush_at(p)` was re-deriving, lossily and by sampling, a
-structure the file already contains — and a sample can never be complete, so the
-failures could only ever be patched, never removed.
-
-### 8.1 What was DELETED
-
-Nothing here was demoted, flagged or kept for reference.
-
-| deleted | what it was | lines |
-|---|---|---|
-| `mapfuse.Src.solid_brush_at`, `.clip_brush_at`, `.bgrid`, `.cgrid` | the SOURCE map's brush predicate at SOURCE coordinates, consulted to decide things about the assembled world | 67 |
-| `mapfuse.corridor_samples`, `arc_samples`, `blockage` | a 9x6 probe lattice per 48 units of corridor tube, run through the above over every tile | 47 |
-| `mapfuse.ray_runs`, `free_slab`, `probe_site`, and the ray-probe `map_sites` | connection-site detection by marching rays in 8-unit steps and sampling 3-D lattices of points | 117 |
-| `mapfuse.brush_volume_ok`, `Fuser.carve` | the "small enough to dissolve" rule that let a whole wall panel vanish to make room for a tube | 20 |
-| `mkentfile.Bsp` | AABB-from-plane-distance brush grid; source of a 75 GB unguarded `range()` and of phantom "no floor" reports along clear corridors | 113 |
-| `mkentfile.Corridor`, `seg_bad`, `standable_set` | the push-grid and the 24-unit-step link sampler built on `Bsp.inside` | 95 |
-| `mkentfile.medial_smooth`, `feasible`, `refine`, `chord_clean`, `adaptive_nodes`, `seg_valid`, `polish_chain`, `validate_chain`, `lipschitz_env`, `bending_energy`, `resample_marked`, `botwalk_chain` | the emit-then-poke-then-patch repair stack for cart paths, and its "bot walk" fallback for when the repairs failed | 264 |
-| `joinview.occlusion_probe` | nine rays stepped 24 units at a time through `Bsp.inside` | 30 |
-| `mapgen`'s waypoint standable check via `M.Bsp` | same predicate, same class of answer | — |
-
-`mkentfile.py` went from 1350 to ~936 lines; ~750 lines of sampling and repair
-were removed in total.  After this change there is exactly ONE definition of
-solidity in `payload/tools/`:
-
-```
-solid(p)  ==  negspace.NegSpace.cell_at(p) < 0
-```
-
-Two things survive under their true names and gate nothing: the void audit
-(`joinshot.py`) measures that the world renders non-black, and the flood-fill
-measures that the waypoint graph is one component.  Neither is cited as evidence
-about geometry and no geometry decision depends on either.
-
-### 8.2 `negspace.py` — the computed free volume
-
-`NegSpace` is a map's free volume as an explicit set of CONVEX CELLS with exact
-faces.  It is obtained by walking the BSP tree, giving every leaf the exact
-half-space list of the region the tree carved for it, and then subtracting the
-blocking brushes that overlap that region.
-
-Three decisions in it are load-bearing and each was forced by a measurement:
-
-**Free space is defined by BRUSHES, not by the leaf's PVS flag.** DarkPlaces
-collides against a BIH over brushes (`Mod_CollisionBIH_TraceBrush`,
-`model_brush.c:4948`), not against the BSP tree. A leaf that q3map2's
-fill-outside marked opaque but that contains no brush is space a player can
-stand in — and on a sealed map that is exactly the region a fusion connector
-gets built in. Defining free space as "open leaf" disagreed with the engine
-there.
-
-**Which brushes to subtract is decided by an overlap query, not by the leaf's
-`leafbrushes` list.** That list is not complete for opaque leaves: measured on
-`warfare`, 78 of 12 275 sampled points that the resulting cells called free were
-inside a solid brush, because the brush filling the leaf was not listed in it.
-
-**Redundant half-spaces may only be pruned if the AABB that justified the
-pruning is kept.** Pruning against a cell's own AABB and then not carrying that
-AABB in the constraint set is unsound: on `warfare` it produced cells with two
-surviving planes and 1900-unit extents, and 196 of 12 275 sampled free points
-were inside a brush. The fix appends the six axial planes of the AABB, which is
-the same point set with the redundant members replaced by the box implying them.
-
-Soundness is measured, not asserted. Uniform random points over each map's world
-box, comparing cell membership against an exact test over every blocking brush:
-
-| map | free cells | points called free | of those, inside a solid brush |
-|---|---|---|---|
-| dance | 9 384 | 13 997 / 15 000 | **0** |
-| warfare | 31 375 | 11 584 / 15 000 | **0** |
-| runningman | 6 243 | (20 000-sample run) | **0** |
-
-The error is one-sided by construction and the remaining error is in the safe
-direction: free volume is LOST, never invented. Two sources, both stated —
-remainder pieces thinner than 0.25 units are dropped, and a leaf whose brush
-subtraction exceeds the convex-piece cap is given up whole rather than left
-partly subtracted (70 of warfare's 3 455 leaves).
-
-API:
-
-```
-cell_at(p) -> int         the containing free cell, or -1.  THE definition of solidity
-covered(H, tol=1.0)       is a convex region inside the union of free cells?
-fits(p, mins, maxs)       does the whole box at p lie in free space?  (exact across
-                          cell boundaries -- a box spanning a doorway fits)
-segment_intervals(a,b)    the EXACT parametric intervals of a segment that are free
-segment_gaps(a,b)         the complement: what a segment burrows through
-project(p, mins, maxs)    the nearest LEGAL placement, and its distance
-                          (the activation-distance operator of NAV-SPEC §3)
-floor_under(p)            the free volume's own lower boundary under p
-standing_point(p)         a constructed standing placement, or None
-translated(t)             exact rigid placement:  n.p <= d  ->  n.p <= d + n.t
-union(parts) / edit(add, remove)   assembly, and the fusion's own geometry edits
-build_portals()           the exact shared faces between cells, each with the
-                          radius of its largest inscribed circle
-```
-
-Rigid placement is exact for a translation, so a per-tile complex survives the
-3-D pack and the Z stacking without being recomputed. `edit()` applies the
-fusion's own geometry: the corridor slabs, thresholds, jambs and headers the
-generator ADDS are subtracted from the free volume, and the apertures and
-corridor interiors it OPENS are added — in the same operation, so the structure
-describes the world after the fusion rather than before it.
-
-The assembled free volume is written out as `fused.negspace.npz`. It has to be:
-`fused.bsp` cannot express it, because mapfuse attaches connector leaves under a
-degenerate router chain and the engine only reaches them through the brush BIH.
-Every downstream tool loads that file rather than deriving a second answer.
-
-### 8.3 `navmesh.py` — Voronoi over the stock navmesh, and a constrained path placer
-
-Per NAV-SPEC §5 the navigation definition is the STOCK waypoint graph, the one
-playerbots use; this module does not introduce a second one. On top of it:
-
-**Semantic edge classification (§4).** A waypoint link that encodes a jump-pad or
-teleport trajectory is not a cart segment. Those are recognised from the saved
-waypoint flags and from endpoints inside a `trigger_push` / `trigger_teleport`
-volume — never from geometry. This is the classification that was missing when
-"carts burrow into level geometry along very smooth waypoint following curves".
-
-**Geometric edge validity (§2).** Whether a link's straight segment burrows
-through solid is answered by `segment_gaps`: the intersection of a segment with a
-convex free cell is a closed-form interval, so the parts of the link that are NOT
-in free space are computed, not sampled. The deleted `seg_bad` walked the link in
-24-unit steps and could not see a thinner obstruction than its own step.
-
-**Voronoi over the navmesh (§2, §8).** Free cells are assigned to navmesh sites by
-growing along PORTAL adjacency — through openings whose inscribed radius admits a
-body — rather than by straight-line proximity, so the partition follows
-navigability. Cells no navmesh node can reach are reported rather than hidden.
-
-**k-center origins (§1).** `equidistant_origins` maximises the minimum pairwise
-navmesh-WALKING distance between cart origins and reports the achieved spread
-ratio (max/min; 1.00 is exactly equidistant) against the k-center optimum for
-that navmesh.
-
-**The path placer (§2 tangent-energy, §3 activation distance).** `PathSolver`
-minimises the discrete bending energy `Σ|p_{i-1} - 2p_i + p_{i+1}|²` and, after
-every gradient block, PROJECTS each free point back into the computed free volume
-and settles it onto the free volume's own floor. The feasible set is
-`negspace.fits(p, CART_MIN, CART_MAX)` — exact, and true across cell boundaries.
-Every iterate is therefore a motion plan inside negative space, so the result
-cannot burrow and there is no unstick. Two numbers are reported and both must be
-zero for the constraint to have held: points off the free volume, and the maximum
-activation distance to a legal placement.
-
-One measured detail worth keeping: the 4th-difference operator's spectral radius
-is 16, so the gradient of the squared second difference is bounded by 32 and any
-step above 2/32 diverges. It first shipped at step/4 and the energy ran to 1e76.
-
-### 8.4 Spawnpoints are PLACED, not tested
-
-The old code (`mapfuse.py` ~763-779) asked `src.solid_brush_at([x, y, z+dz])` for
-three `dz` straight up — the SOURCE map's brushes at SOURCE coordinates. The
-spawn's real position is `o + off` in the assembled world, after the 3-D pack
-(Z levels included), after the doorway cuts split the brushwork, and alongside
-connector floor and wall slabs that did not exist when the question was asked.
-
-The origin is now CONSTRUCTED: `NegSpace.standing_point` returns a point at which
-the whole player box is covered by free cells and which has the free volume's own
-floor beneath it, searching an expanding lattice if the mapper's own origin does
-not qualify — the offline form of what `relocate_spawnpoint` does at run time
-inside a live worldspawn's 10M-jump budget. "In solid" is not a state this can
-produce, so there is nothing left to test afterwards and the engine never has to
-run its own search.
-
-### 8.5 Connection sites, doorways and connectors are DERIVED
-
-**A connection site is a place where two free regions are separated by a thin
-barrier**, and all three parts of that are statements about VOLUME, so all three
-are answered as exact coverage of a box by the computed free cells:
-
-* a player-sized free approach standing against the inner face;
-* a player-sized free landing on the far side, for the connector to meet;
-* and no already-open route between them across the door's own footprint —
-  otherwise there is nothing to cut and the "door" would be a hole in mid air.
-
-The wall's own thickness comes from `solid_runs`, which reads the solid spans
-along a ray off the free-cell intervals in closed form. `probe_site` marched that
-ray in 8-unit steps through `solid_brush_at` and `free_slab` sampled a 3-D
-lattice of points in front of and behind the wall; both are deleted. A wall
-thinner than the old step size can no longer be missed, and a probe can no longer
-land on a pillar and condemn a good site.
-
-**The doorway edit registers itself with the free volume.** `cut_portal` adds the
-threshold, the two jambs and the header as solids the complex must lose, and adds
-the aperture as free volume the complex gains. `build_corridor` does the same for
-its floor, wall and ceiling slabs and its interior. `NegSpace.edit` applies all of
-it in one pass, so after a fusion the structure describes the fused world.
-
-**Connector clearance is by construction, then confirmed structurally.** The old
-check re-ran the deleted probe lattice against the UN-CARVED source brushes and
-counted "obstructed samples" — it asked about source geometry, it could only see
-what a probe landed on, and it had to special-case its own carve set to avoid
-reporting the holes it had just made. What replaces it subtracts the assembled
-free volume from each corridor's interior and reports the residue in CUBIC UNITS.
-Zero means the corridor is open; a non-zero number is real solid inside a
-corridor, measured, not counted in probes.
-
-**Doorway traversability** is the exact coverage of the swept
-approach → aperture → connector-mouth volume by the assembled free cells — not a
-render, and not a trace.
-
-### 8.6 The budgets, DERIVED
-
-The waypoint cap of 600 and the entity cap of 1800 were both tuned until a boot
-stopped failing.  They are now measured, on the real dedicated server, against
-the real fused megamap, with the bot count as an explicit input.
-
-**Bots do NOT share one 10M-jump budget.**  `jumpcount` is zeroed per
-`PRVM_ExecuteProgram` call (`prvm_exec.c:789`), and the entry point the failure
-actually occurs in is per-client: the captured runaway stack is
-
-```
-SV_PlayerPhysics -> _SV_PlayerPhysics -> sys_phys_update -> sys_phys_ai
-  -> bot_think -> havocbot_ai -> havocbot_role_generic
-  -> navigation_goalrating_start -> navigation_markroutes
-  -> navigation_markroutes_nearestwaypoints -> tracewalk
-```
-
-`SV_PlayerPhysics` is invoked per client (`sv_user.c:383`, from `SV_Physics`'s
-`for i=1..maxclients` loop with no netconnection check, so bots are included), so
-each bot gets its OWN 10,000,000 jumps.  Confirmed from a HEALTHY run rather than
-a crash: `SV_PlayerPhysics` callcount is exactly 12x the `StartFrame` callcount
-at both n=604 (21 948 / 1 829) and n=1100 (22 392 / 1 866) — one entry point per
-bot per frame, one budget each.  Those holds ran at 30.4 and 31.0 fps, so none
-was CPU-starved despite a third workload on the box; a starved hold would have
-silently weakened every pass.  Independently, the expensive goal search
-is serialised to ONE bot per frame by the global strategy token
-(`havocbot.qc:52,103`; `bot.qc:789-810` — "prevents them from all doing waypoint
-searches on the same frame").  Bot count cannot multiply the term either way.
-
-**Ladder A — waypoint count n at fixed B=12**, 300 s hold each:
-
-| n | links | result |
-|---|---|---|
-| 300 | 983 | boots, survives 300 s |
-| 450 | 1297 | boots, survives 300 s |
-| **604** | 1599 | boots, survives 300 s — the shipped set |
-| 750 | 1877 | boots, survives 300 s |
-| 900 | 2175 | boots, survives 300 s |
-| 1000 | 2366 | boots, survives 300 s |
-| 1100 | 2560 | boots, survives 300 s |
-| 1200 | 2759 | **RUNAWAY at 25.1 s and 30.1 s** (two independent samples, same crash site), `navigation_markroutes_nearestwaypoints -> tracewalk` |
-| 1600 | 3543 | **RUNAWAY at 7.0 s, before the match starts**, `waypoint_loadall -> waypoint_spawn -> waypoint_get` |
-
-**Ladder B — bot count at n=900**, 300 s hold each: B = 2, 8, 12, 16, 24 all boot
-and survive.  **Flat.**  Twelve times the bot count changes nothing.
-
-And the control at the MARGINAL n=1200 is **non-monotonic in bot count**:
-
-| B | 2 | 12 | 24 |
-|---|---|---|---|
-| n=1200 | boots, 300 s clean | **RUNAWAY** (25.1 s, and 30.1 s on repeat) | boots, 300 s clean |
-
-More bots is not worse.  That kills the "it scales with bots" story outright: the
-failure is a PER-BOT, POSITION-DEPENDENT event.  A bot that happens to stand far
-from every waypoint drives the expansion at `navigation.qc:1119` through its ~66
-walks inside its own private budget.  It reproduces at B=12 because the roster is
-deterministic for a given `bot_number`, so the same unlucky bot lands in the same
-unlucky place; B=24 draws a different roster with nobody there.  The right way to
-state it is **bot-count-independent with a roster-dependent stochastic term** —
-which is also why a cap must sit well below the marginal n rather than at it.
-
-**The mechanism is two opposing terms in n.**  `navigation_markroutes` only
-enters the expensive expanding search when it gets a NULL fixed source waypoint,
-i.e. when the bot is not near a known waypoint.  Measured per 60 s at B=12:
-
-| n | markroutes calls | of which nearestwaypoints |
-|---|---|---|
-| 604 | 26 | **67** |
-| 1100 | 24 | **8** |
-
-Adding waypoints makes each expensive call cost more (longer O(n) walks) but
-makes the expensive branch fire far less often (a denser graph means the bot is
-more often already near a waypoint).  That product is why the edge is a
-distribution rather than a threshold, and why B=12 can fail where B=2 and B=24
-pass.
-
-**The relationship.**  `n_max(B) = n_max`, independent of B over [2, 24].  There
-are two ceilings and neither scales with bots:
-
-* **Load time, O(n^2)** — `waypoint_loadall` spawns each saved waypoint through
-  `waypoint_get`, which linear-scans `g_waypoints` with `boxesoverlap`
-  (`waypoints.qc:418`).  Measured `boxesoverlap` calls ~= 1.08 n^2 (1 553 976 at
-  n=1200).  Fires once, ~2.5 s after the first bot connects.  Ceiling between
-  1200 and 1600.
-* **AI time, O(n) per roll with a very large constant** — the expanding search in
-  `navigation_markroutes_nearestwaypoints` (`navigation.qc:1119`,
-  `for(j=increment; !found && j<maxdistance; j+=increment)`, increment 750,
-  maxdistance 50000 on ground) walks the whole list up to ~66 times with a
-  `tracewalk` per candidate.  Ceiling between **1100 and 1200** at B=12.  **This
-  is the binding one.**
-
-B enters only as a GATE and a TRIAL COUNT: `waypoint_loadall` runs at all only
-when `currentbots > 0` (`bot.qc:759`), and each bot rolls `markroutes` about once
-per `bot_ai_strategyinterval` inside its own private budget, so more bots shorten
-the expected time to an unlucky roll without moving the per-roll ceiling.
-
-**Therefore the cap is n <= 900 for any bot count in [2, 24]**, and the shipped
-604 (685 in the seed-7 build) sits at about two thirds of it.  The old 600 was
-not wrong — but it was right by accident, and it was justified by a story about
-bot count that the measurement disproves twice over: the bot ladder is flat, and
-at the marginal n the failure is not even monotonic in B.
-
-**Does the 29-tile pool hold 12 bots?  It BOOTS AND SURVIVES with 12 bots — it
-does not PLAY with them.**  Both halves are measured and the distinction is not
-pedantry.
-
-Survives: the shipped n=604 set ran a 300 s and then a **600 s clean soak** at
-B=12, 12 bots connected, no runaway; the seed-7 rebuild at n=685 held 10 min 29 s
-the same way.
-
-Does not play, and the sharpest measure of it is not a combat count at all.
-`navigation_goalrating_start` returns immediately when the bot is already flagged
-stuck (`navigation.qc:1832`, `if(this.aistatus & AI_STATUS_STUCK) return;`),
-before it ever reaches `navigation_markroutes`.  So the ratio
-markroutes/goalrating_start IS the fraction of goal-planning attempts that
-actually happen:
-
-| world | decimation | proceed | **aborted STUCK** |
-|---|---|---|---|
-| k=2 (2 tiles) | 0 % | 256/293 = 87 % | 13 % |
-| k=6 (6 tiles) | 0 % | 137/163 = 84 % | 16 % |
-| 29-tile shipped (n=604) | 96 % | 26/189 = 14 % | **86 %** |
-| 29-tile n=1100 | 67 % | 24/165 = 15 % | **85 %** |
-
-**On the 29-tile world 86 % of every bot's attempts to pick a goal are discarded
-because it is already stuck.**  That is the boots-versus-plays gap as a direct
-measurement at the decision point, and unlike a frag count it cannot be gamed by
-a bad grep — which, given that a bad grep is exactly what inflated this
-section's first draft, is the reason it leads.
-
-The rate measurements agree.  `navigation_unstuck` fires **12 099 times per 60 s at n=604/B=12,
-burning 71.9M statements** — about 17 unstuck calls per bot per second,
-continuously (exact `prvm_profile` deltas over a bracketed live window, not an
-estimate).  At n=1100 it is 11 815 / 70.2M, so it is the megamap and not an
-artifact of densification.  The corroborating symptom is in every log: **0-3
-combat events per 300 s** across all 22 valid budget runs, 2 in the 600 s soak,
-and **9 in the seed-7 rebuild's 10 min 29 s** hold.  The bots are pathologically
-stuck.
-
-**The cause is the budget itself, and it is specific to the stress case.**  The
-29-tile world has 3325 source waypoints and ships 685 — **96 % of the navmesh is
-decimated** to stay under the cap.  A bot on a sparse graph is usually NOT near a
-waypoint, which is exactly the condition that drives both the unstuck loop and
-the expensive search branch.  At the 2-6 tile target NOTHING is decimated:
-
-| world | source waypoints | decimated | combat events / min at B=12 |
-|---|---|---|---|
-| 29-tile | 3325 | **3203 (96 %)** | 0.86 |
-| k=2 | 260 | **0** | 4.20 |
-| k=4 | 210 | **0** | — |
-| k=6 | 740 | **0** | — |
-
-**The combat column is DENSITY-CONFOUNDED across scales and must not be read as a
-navigation metric.**  k=6 is a 57.9 MB world against k=2's 11.3 MB with the same
-12 bots, so encounters are rarer by construction: k=6 logs 41 frags to k=2's 130
-while being healthier than k=2 on every direct navigation measure.  World volume,
-not navigability, dominates that number.  It is kept here only because the
-29-tile figure is a within-world before/after against its own corrected count,
-which is a valid comparison; the cross-scale rows are not, and the per-decision
-`markroutes/goalrating_start` ratio above is the metric that survives because it
-is scale-free.
-
-Measured at target scale rather than inferred (120 s settle, 60 s bracketed
-window, B=12, fresh userdir per run, every map verified distinct on every
-counter):
-
-| world | src wp | used | decim | unstuck / 60 s | statements | **stmt/call** | markroutes/goalrating | **% proceed** |
-|---|---|---|---|---|---|---|---|---|
-| k=2 | 268 | 268 | 0 % | 1 266 | 0.80M | 630 | 256/293 | **87 %** |
-| k=6 | 816 | 816 | 0 % | **612** | 0.55M | 897 | 193/198 | **97 %** |
-| 29-tile | 3325 | 604 | 96 % | 12 099 | 71.94M | 5 946 | 26/189 | **14 %** |
-| 29-tile | 3325 | 1100 | 67 % | 11 815 | 70.24M | 5 945 | 24/165 | **15 %** |
-
-**Decimation is the SOLE identified driver.**  An earlier draft of this section
-claimed a second, independent tile-count term, on the evidence that k=6 was 2.4x
-k=2's unstuck rate at 0 % decimation.  That was wrong, and it was wrong because
-of a defect of mine: k=6 was then carrying 28 305 degenerate brushes (§8.11).
-Re-profiled after the fix, k=6's unstuck rate fell **3 011 -> 612, a drop of
-80 %, landing at 48 % of k=2's**, and its goal-planning proceed rate rose to
-97 % — the best of any world measured, k=2 included.  There is no positive
-tile-count penalty detectable at k=6 at all.  The honest claim is now simpler and
-stronger than the one it replaces: **0 %-decimated worlds proceed on 87-97 % of
-goal-planning attempts; the 96 %-decimated 29-tile world proceeds on 14 %.**
-Nothing else in the measured set moves that number.
-
-**Severity is a decimation effect too, and it is the larger half.**  Cost per
-unstuck call is 630 / 897 / 5 946 statements at k=2 / k=6 / 29-tile: the 29-tile
-world is ~7x more expensive PER CALL on top of being ~10-20x more frequent, and
-that product is the 90x statement gap.  A sparser graph makes each unstuck search
-longer — the same mechanism as the NULL-`fixed_source_waypoint` branch above, not
-an independent finding.
-
-(Stated conservatively: the 612 figure is one 60 s window and carries the same
-roster-dependent variance as the markroutes edge.  The direction is 5x and far
-too large to be noise, but this is recorded as "no tile-count penalty is
-detectable at k=6", not as the positive claim "6 tiles beats 2 tiles".)
-
-**The entity budget is not the binding constraint.**  At n=604/B=12, with the
-`.ent` taken from the installed pk3 rather than from a mismatched artifact:
-
-| N_ent | 2400 | 2872 (shipped) | 3200 | 3400 | 3600 | 4000 |
-|---|---|---|---|---|---|---|
-| | ok 300 s | ok 300 s | ok 300 s | **runaway 6.0 s** | **runaway 6.0 s** | **runaway 5.0 s** |
-
-The ceiling is between **3200 and 3400**.  The mechanism is `InitializeEntity`
-(`server/world.qc`) — a linear-scan sorted-list insert called once per deferring
-map entity inside the single worldspawn spawn loop, so O(N_ent^2) in ONE entry
-point (1547 calls / 8.43M self statements at N_ent=3600, alongside
-`il_links_flds##GETFP` 14.6M and `IL_REMOVE_RAW` 6.9M).  Unlike the waypoint
-terms this ceiling genuinely IS shared — every entity spawns in one call.  The
-old `Fuser.ent_budget = 1800` was about 1.8x conservative.
-
-**Caps set from the above:** `wpcap` 600 → **900**, `Fuser.ent_budget` 1800 →
-**3000**.
-
-The margins are deliberately UNEQUAL, and the asymmetry is the decision, not an
-accident of where the rungs fell:
-
-| cap | nearest measured failure | headroom |
-|---|---|---|
-| wpcap 900 | 1200 | 1.33x |
-| ent 3000 | 3400 | 1.13x |
-
-The waypoint cap gets more margin because its failure carries a **stochastic,
-roster-dependent term** — at n=1200 it fires at B=12 and not at B=2 or B=24, so
-the edge is a distribution rather than a line and a cap must stand clear of it.
-The entity failure has no such term: `InitializeEntity` is a deterministic
-O(N^2) walk in a fixed spawn loop, the same every boot, and its edge is bracketed
-to 6% (3200 ok / 3400 fail) rather than to 33% (900 ok / 1200 fail).  A tighter
-margin on a deterministic, finely-bracketed edge is worth more than a wider one
-on a stochastic, coarsely-bracketed edge.  If that judgement is wrong, ent 2900
-or lower restores parity at the cost of ~270 entities of map content.
-
-**The pass evidence near the edge is thinner than the run count suggests, and
-biased optimistically.**  The right unit for these runs is EXPENSIVE ROLLS, not
-seconds.  Extrapolating the measured rates, a 300 s hold buys about **335**
-`nearestwaypoints` calls at n=604 but only about **40** at n=1100 — 8x fewer
-expensive rolls precisely in the region nearest the edge.  The failure side is
-robust by contrast: n=1200 died inside its first handful of rolls, at 25 s and
-30 s.  So the 1100-1200 ceiling is **biased high**, and n=1100 must NOT be read
-as a verified-safe number — it is a rung that passed on thin evidence.  This
-argues for the 900 cap rather than against it: 900 passed across five bot counts
-and hundreds of cumulative rolls, and sits below the uncertainty.
-
-**Caveat on the rungs above n=604.**  The shipped waypoint set has only 604
-saved waypoints, so the 750/900/1000/1100/1200/1600 rungs were SYNTHESIZED by
-subdividing existing links at their midpoints — real segments the map's own
-linker had already declared walkable, with the largest weakly-connected component
-holding at 61-65% of nodes at every n (matching the original's 397/604), but not
-human-placed waypoints.  The n <= 604 rungs are pure original coordinates.  So
-the 1100-1200 AI-time ceiling is measured on a synthesized graph, and a real
-1100-waypoint set could sit differently.  The 900 cap is below that uncertainty
-either way, which is a further reason not to push it to 1100.
-
-**Two measurement artifacts worth recording:** `+developer 1` itself causes a
-runaway on this map, because each spawnpoint-in-solid assert dumps a full VM
-statement trace inside `__spawnfunc_worldspawn`.  The identical configuration at
-`+developer 0` boots.  Any budget number taken at `developer 1` is an artifact of
-the logging, not of the map.
-
-And a harness artifact that bit BOTH of us independently: a server launched from
-a tool call and left to a later call gets reaped with its process group, and a
-second server started before the first releases its port and userdir dies on
-`bind: Address already in use` / `session lock could not be acquired` without
-ever reaching a match.  Three early "soak" numbers on this work were that, not
-the engine.  A soak must own a fresh userdir, a unique `-sessionid` and a
-verified-free port, and be held inside one call — and the port check and the bind
-must be in the SAME call, because a check-then-launch gap on a busy box is
-exactly what produces `Address already in use`.  7 of 29 budget runs were marked
-invalid on these grounds and excluded rather than reported.
-
-A related trap on a shared box: this work ran alongside a third, unrelated
-workload that was also binding ports in the 261xx range from a userdir inside the
-same scratchpad tree.  Port collisions between concurrent agents are not
-hypothetical, and a process found holding "your" port may belong to neither you
-nor the peer you assume.  Attribute by userdir and by the launching tool's own
-port range before blaming anyone — including yourself.
-
-### 8.6b Cost, and what it bought
-
-The survey — an exact convex decomposition per candidate map, then the structural
-site solve on top of it — is the expensive half of a fusion, and it is per-map
-independent, so it runs across processes. One BLAS thread is pinned per process:
-every worker is doing small dense linear algebra, and letting Accelerate spawn a
-pool inside each oversubscribes an 18-core machine by an order of magnitude.
-
-Measured, single map, on this hardware:
-
-| map | brushes | free cells | complex build |
-|---|---|---|---|
-| dance | 1 605 | 9 384 | 4.0 s |
-| warfare | 5 381 | 31 375 | 26.7 s |
-| catharsis | 75 762 | — | (in the parallel survey) |
-
-The old pipeline's equivalent cost was near zero, because it was not computing
-anything — it was sampling. That is the trade: the structure costs minutes per
-fusion and in exchange the failure mode it was built to remove is not
-representable rather than merely unobserved.
-
-### 8.7 What this pass does NOT do — measured, not hand-waved
-
-Two requirements arrived late and are NOT implemented here. Both are scoped with
-real numbers from the shipped BSP so the next pass starts from measurement.
-
-**VIS, lighting and the lump writer.** `mapfuse` still writes BSP lumps directly
-and therefore has to synthesise the tree, the PVS and the lightmaps itself. It
-does not. Measured on the 29-tile `fused.bsp` (169 MB):
-
-| lump | value |
-|---|---|
-| visdata | **0 bytes** — no PVS at all |
-| lightvols (lightgrid) | **0** — dynamic models get no light sample |
-| lightmaps | 49 152 bytes = **one** 128x128 grey block for the whole world |
-| leaf clusters | **2 distinct** (-1 solid, 0) over 67 371 leafs |
-| faces | 200 946 — all of them candidates from every position |
-| face types | 177 742 polygon, 13 091 **patch**, 9 746 mesh |
-| sky shaders | **14** distinct, 531 faces, two surfaceflag classes (0xc34, 0x20c34) |
-| texture sets | 55 over 652 shader refs |
-
-Nothing can be culled, so every face is submitted every frame: that is one fact
-with two symptoms (occlusion and draw-call latency). The single-cluster collapse
-made it deliberate and it cannot be undone without real VIS to replace it.
-
-The fix — emit `.map` source and let q3map2 compute tree, VIS, lightmaps and
-collision — is right, and it is DONE; see §8.12.
-
-**The obstacle this section originally claimed does not exist, and the claim was
-wrong.**  It said the route was blocked for the fused world because 13 091 patch
-faces have no brush representation and would be lost, and because brush-face
-texture alignment is not recoverable from a BSP.  Both are false: q3map2
-decompiles its own format.  `-convert -format map_220 -readbsp` returns
-Valve-220 source with explicit texture AXES — alignment is exact, not defaulted —
-and real `patchDef2` blocks.  Verified on trident: **599 brushes -> 599 brushes,
-177 patch faces -> 177 patchDefs, 97 entities**, and the recompiled source yields
-484 clusters / 30 920 bytes visdata / 56 749 light-grid entries against the stock
-map's 489 / 31 240 / 56 749.  I asserted a blocking obstacle without testing the
-tool that removes it, and that assertion would have deferred the single most
-valuable fix in this document.
-
-**Skybox / distant-LOD tweening.** Not implemented. What the engine actually
-offers, checked in this DarkPlaces tree rather than assumed:
-
-* **No compute shaders.** `glDispatchCompute` and `GL_COMPUTE_SHADER` do not
-  appear anywhere in the source. A compute-shader design is not available here.
-* Q3 shader stages DO carry per-entity blend inputs: `Q3RGBGEN_ENTITY`,
-  `Q3RGBGEN_ONEMINUSENTITY`, `Q3ALPHAGEN_ENTITY`, `Q3ALPHAGEN_ONEMINUSENTITY`
-  and `Q3ALPHAGEN_PORTAL` (`model_shared.h:320-342`). An entity's alpha is a
-  per-frame blend parameter the renderer already honours.
-* CSQC can drive it: `VM_CL_R_SetView` (`clvm_cmds.c:798`) plus per-frame entity
-  alpha gives a cross-fade between two sky domes / two distant-LOD shells with
-  the blend factor computed from the player's position relative to the aperture
-  being traversed, and the transition TYPE (corridor / teleporter / vertical
-  shaft) can select which shader pair is used.
-
-That is the shape a real implementation should take here. It is also strictly
-downstream of VIS: cross-fading on an unculled world adds fill cost to a frame
-that is already submitting every face in the map.
-
-
-### 8.8 Evidence
-
-Durable build output (nothing in a temp dir this time):
-
-```
-/Users/mdot/dox/xonotic/fusebuild/
-  full/data/maps/    29-tile megamap: fused.bsp (169 MB), fused.pk3, fused.ent,
-                     fused.waypoints(.cache), fused.joins.json, fused.metrics.json,
-                     fused.negspace.npz (19.6 MB, 447 174 convex free cells)
-  full/build.log     the whole run
-  full/fusecheck2.log  the verifier's output on those artifacts
-  full2/             the rebuild at the DERIVED caps (wpcap 900, ent 2600)
-  t3/                a 4-tile fusion used to validate the pipeline end to end
-  prev/              the previous pipeline's 29-tile artifacts, kept for comparison
-  budget/            every budget run's server.log and machine-readable results
-  boot12/boot12.log  the 12-bot dedicated-server boot and soak
-```
-
-The 29-tile fusion (seed 7): 30 candidates surveyed in 139 s across 8 processes,
-29 kept (23 bridge, 6 stub, `nexballarena` rejected with 0 sites), 39 joins (32
-corridors, 7 vertical teleporters), 64 doorways cut, 635 source brushes split
-into 1072 convex remainders, fuse wall time 321 s.
-
-`fusecheck.py` against the shipped artifacts:
-
-```
-free volume: 447174 convex cells, world [-20505,-19548,-6432]..[16731,19589,6015]
-spawnpoints: 243 shipped | origin inside solid: 0 | player box does not fit: 0
-                         | no floor beneath within 512u: 0
-doorways:    61/64 admit a player-sized body end to end
-```
-
-Real dedicated server, port 26150, `+bot_number 12 +skill 5 +g_payload 1
-+developer 0`, 29-tile megamap: **the match starts, all 12 bots connect, join
-teams, and the 10,000,000-jump runaway does not fire** — but only **9 real combat
-events** occur in 10 min 29 s, because the bots are stuck (see §8.6).  An earlier
-draft of this section said 152; that figure was wrong, and wrong in a way worth
-recording: the grep counted `"new portal was clipped away"` as a frag, and 145 of
-the 153 matches were that warning.  A pattern containing a bare `was ` is not a
-combat filter.  Two of the 243 spawnpoints still tripped the engine's own
-`relocate_spawnpoint` — root-caused to generator-added brushes that the free
-volume had not been told about, which is why `Fuser.add_brush` now registers
-every solid it creates with the complex at the single place solids come into
-existence.
-
-
-### 8.9 The target is 2-6 tiles, and the slots are the deliverable
-
-A single 29-tile world is a training distribution of cardinality one.  What the
-fusion is for is a DISTRIBUTION of worlds, so the unit is a 2-6 tile assembly and
-the thing worth counting is how many distinct assemblies the slot structure
-admits.  Measured on the surveyed pool (structural detector, `map_sites`):
-
-| | |
-|---|---|
-| stock maps surveyed | 29 |
-| usable (>= 2 slots) | **28** (`nexballarena` has 0 and is refused) |
-| **BRIDGE, > 3 slots — can sit MID-CHAIN** | **22** |
-| STUB, 2-3 slots — endpoint or pass-through only | 6 |
-| slots per map | min 2, median 5, max 12; **163 in total** |
-
-That is the combinatorial width: 22 of 28 maps can carry a chain through
-themselves rather than terminate it.
-
-| k | subsets of the usable pool |
-|---|---|
-| 2 | 378 |
-| 3 | 3 276 |
-| 4 | 20 475 |
-| 5 | 98 280 |
-| 6 | 376 740 |
-| **2-6 total** | **499 149** |
-
-Times chain ordering (reversal-symmetric, k!/2) that is **141 779 106 distinct
-linear worlds**, and it is a lower bound: the packer also builds loop edges and
-vertical level-to-level joins, and each is seeded.
-
-The structural site detector did not cost coverage relative to the deleted
-ray-probe one: 163 slots over 29 maps versus 158, same median (5), same maximum
-(12), same single refusal (`nexballarena`).  It moved two maps from BRIDGE to
-STUB and refused `nexballarena` on 0 sites rather than 1 — and every site it
-reports is now a place where two free regions are provably separated by a thin
-barrier with a player-sized approach and landing, rather than a place where a
-ray happened to strike something.
-
-The 29-tile artifact in §8.8 should therefore be read as an extreme stress case,
-not as the goal, and the budgets in §8.6 are the ceilings that scale case hits.
-At 2-6 tiles they are far from binding: the 4-tile `t3` build carries 399 saved
-waypoints (cap 900), 12 011 faces and 125 shader refs against the 29-tile world's
-685 / 200 946 / 652, and fuses in 50 s.
-
-Measured across scale, from the shipped BSPs:
-
-| world | size | faces | shader refs | texture sets | **sky shaders** | leafs |
-|---|---|---|---|---|---|---|
-| k=2 (implosion+warfare) | 10.8 MB | 17 748 | 96 | 11 | **2** | 5 599 |
-| k=4 (dance+trident+runningman+bridge) | 7.6 MB | 12 011 | 125 | 18 | **2** | 5 041 |
-| k=29 (full pool) | 161 MB | 201 167 | 652 | 55 | **14** | 67 452 |
-
-Every quantity that made the maximal build pathological is one to two orders of
-magnitude smaller at the real target: an order of magnitude fewer faces for VIS
-to cull, a texture-set count a cache can hold, and two skies instead of fourteen.
-The co-visible-sky problem and the multi-sun problem are both problems of the
-configuration nobody asked for; at 2-6 tiles a region cross-fade has two or three
-looks to blend, not fourteen.
-
-### 8.10 The target scale, verified end to end
-
-Three sampled worlds at k = 2, 4, 6, each fused and then checked by `fusecheck.py`
-against its own shipped artifacts:
-
-| k | fuse | peak RSS | free cells | spawns shipped / **in solid** | doorways | connector residue | cart nodes / **illegal** |
-|---|---|---|---|---|---|---|---|
-| 2 | 55.3 s | — | 42 116 | 19 / **0** | 2/2 | **0 u^3** (0/1) | 388 / **0** |
-| 4 | 41.5 s | 0.62 GB | 32 572 | 27 / **0** | 3/4 | **0 u^3** (0/2) | 215 / **0** |
-| 6 | 79.1 s | 2.41 GB | 88 282 | 54 / **0** | 10/10 | **0 u^3** (0/5) | 243 / **0** |
-
-**Zero in-solid spawnpoints, zero uncovered connector interior and zero illegal
-cart placements at every sampled size**, and the path solver reports CONSTRAINT
-HELD (0 points off the free volume, max activation distance 0.00 u) on all three.
-The 29-tile world's residue — 13 of 32 corridors with uncovered interior, 2
-spawns the engine's own `relocate_spawnpoint` still caught — does not appear at
-the scale the fusion is actually for.  Remaining honest residuals at target
-scale: one doorway on `solarium` at k=4 with 13.2 % of its swept approach
-uncovered, and 1 / 2 / 6 cart-path segments that leave the free volume between
-nodes (the nodes themselves are all legal placements).
-
-Real dedicated server, k=2, fresh userdir, `-sessionid`, port 26160,
-`+bot_number 12 +skill 5 +g_payload 1 +developer 0`, held 200 s in-process:
-
-```
-ALIVE at 200s, rss=2.0 GB      port bind ok, no session-lock error
-bots_playing=12
-runaway=0   OBJECT ERROR=0   could-not-get-out-of-solid=0
-combat events=14 in 200 s  (4.2/min, vs 0.86/min on the 29-tile world)
-```
-
-Read that last line with §8.6's stuck-bot finding: k=2 decimates none of its
-navmesh where the 29-tile world decimates 96 % of it, and its bots are about five
-times as active.  That is consistent with decimation being the cause and with the
-target scale not suffering it — but it is a symptom count, not a diagnosis.  The
-`navigation_unstuck` rate has NOT been profiled at 2-6 tiles, and until it is,
-"the bots are less stuck here" is an inference from combat frequency, not a
-measurement.  It is the first thing the next pass should measure.
-
-Two earlier soak attempts died early and neither was the map: the first was a
-`nohup`'d server torn down with its launching shell, and the second hit
-`bind: Address already in use` plus `session lock could not be acquired` because
-the first still held the port and the userdir.  A soak run must own a fresh
-userdir, a unique `-sessionid` and a verified-free port, and must be held inside
-one call — otherwise the number measures the harness, not the world.
-
-### 8.11 A defect the profiling exposed: degenerate brushes from the oblique carve
-
-Profiling at target scale turned up something no boot test had: k=6 emitted
-**56 632 `Collision_ValidateBrush` errors** in a 180 s run — 28 311 each of
-"brush with no points!" and "all points lie on all planes (degenerate, no brush
-volume!)". That cadence is the engine revalidating broken brushes every frame,
-not a one-time load complaint. Counted straight out of the BSP: **28 305 of
-k=6's 129 323 solid brushes have a crossed AABB**; k=2 has 0.
-
-The cause is in `Fuser.split_brushes`, and it is mine. When the corridor carve
-was generalised from an axis-aligned aperture box to the tube's own OBLIQUE
-half-spaces (§8.5), the emptiness guard was not generalised with it. It asked
-whether the brush's BOUNDING BOX reached past the current region plane. Two
-separate errors in one line:
-
-* the bounding box is not the brush — exact only when every plane is
-  axis-aligned, so the moment the region went oblique this became a superset
-  test and empty remainders shipped as brushes; and
-* it tested only the middle term. A remainder is
-  `brush AND outside-this-face AND inside-every-previously-accounted-face`, and
-  `acc` was ignored, so even the axial case could emit empty pieces.
-
-The replacement is exact: enumerate the plane triples, keep the points satisfying
-every half-space, and require four affinely independent ones with real extent.
-Three refinements were needed on top of the first version:
-
-1. **Test what is actually emitted.** `add_brush` appends six clamp planes for
-   its `bounds=` argument, and the test omitted them. A brush bounded only by
-   oblique planes — exactly the case `axialize()` exists for — is then an
-   UNBOUNDED region with fewer than four plane-triple vertices, so a legitimate
-   remainder is dropped and a hole is left in a wall. Verified on an open wedge:
-   empty when tested alone, non-empty when tested clamped.
-2. **A one-sided AABB fast reject.** The interval-propagated box CONTAINS the
-   volume, so an empty box PROVES the volume empty; the converse proves nothing
-   and is the very error being removed. The box may therefore only REJECT, and
-   anything it admits still goes through exact enumeration. 3.2 ms -> 0.035 ms on
-   the empty pieces, which are the common case.
-3. **Early exit at powers of two.** More vertices can only raise the rank, so the
-   answer is settled once four independent ones exist. Checking on every point
-   cost more in rank tests than it saved (1.84 ms vs 1.61); checking at 4, 8,
-   16... keeps the safety net for free.
-
-**This is the third instance of one failure family in this codebase**, and it is
-worth naming as such: approximate a convex volume by its AABB, then decide
-something with the approximation. The other two were `mkentfile.Bsp` deriving an
-AABB from oblique planes (the ~1e15-iteration, 75 GB indexing loop) and
-`solid_brush_at` point-sampling occupancy. Any AABB standing in for a convex
-volume in this toolchain should be treated as suspect until its direction is
-checked — containment is sound for proving emptiness and unsound for proving
-anything else.
-
-**Confirmed by re-profiling after the fix:** k=6's `navigation_unstuck` rate fell
-**3 011 -> 612 per 60 s (-80 %)** and its goal-planning proceed rate rose
-**84 % -> 97 %**, on a rebuilt pk3 logging 3 `Collision_ValidateBrush` lines in a
-whole run against 56 632 before.  So the degenerate brushes were not a cosmetic
-warning: they were degrading bot navigation measurably, and they were the entire
-content of what §8.6 had briefly attributed to tile count.
-
-**A second bug the first one was hiding.** With the exact guard in place the carve
-became unaffordably slow, and the reason was not the guard. `split_brushes` was
-called once per 512-unit corridor SLAB, and the slab bounding boxes overlap, so a
-wall crossing ten of them was carved ten times — each pass working from the
-ORIGINAL brush planes and emitting its own full set of up-to-six remainders on
-top of the previous pass's. The exact test was simply being asked the same
-question ten times over. The tube is a single convex region, so it is now carved
-ONCE per brush; slabs survive only as a way to find candidates. Measured on k=6:
-
-| | solid brushes | degenerate | BSP | fuse |
-|---|---|---|---|---|
-| before | 129 323 | **28 305 (21.9 %)** | 89.5 MB | 79.1 s |
-| after | 61 191 | **0** | 55.2 MB | 101.8 s |
-
-`GEOMETRY EDIT` now reports 98 source brushes split into **165** convex
-remainders. Verified by `fusecheck` against the rebuilt artifacts that nothing
-was lost: 54 spawnpoints with 0 in solid / 0 box-does-not-fit / 0 without floor,
-**10/10** doorways traversable, **0/5** corridors with any uncovered interior
-(0 u^3), 243 cart nodes with 0 illegal placements — every figure identical to the
-pre-fix build. So 28 305 degenerate and 68 132 duplicate brushes were removed,
-the BSP shrank 38 %, and no verified property changed. The exactness costs 29 %
-of fuse time, not the 30x an early measurement suggested; that measurement was an
-artifact of my own background jobs restarting one another.
-
-Two lessons worth keeping. First, the duplicate-carve bug had been shipping since
-the oblique carve landed and no boot test could see it — it took profiling at
-target scale to surface, and then only as a symptom (56 632 per-frame engine
-warnings) whose cause was two levels down. Second, a correctness fix that looks
-unaffordable is worth one round of asking WHY before it is weakened: here the
-guard was innocent and the real defect was a 10x redundancy that had been
-inflating every brush count in this document.
-
-### 8.12 The lump writer is replaced: real VIS, lighting and light grid
-
-`mapsrc.py` assembles a fused world as q3map2 `.map` SOURCE and compiles it,
-instead of writing BSP lumps. Three stages, each verified before the next:
-
-**1. Stock BSP -> source, losslessly.** `q3map2 -convert -format map_220
--readbsp` (trident): 599 brushes -> 599, 177 patch faces -> 177 `patchDef2`, 97
-entities. Recompiled it gives 484 clusters / 30 920 visdata / 56 749 lightvols
-against stock's 489 / 31 240 / 56 749.
-
-**2. A parser that is provably lossless.** `parse_map` -> `write_map` ->
-q3map2 reproduces the direct compile EXACTLY: 599 brushes, 1623 faces, 484
-clusters, 30 920 visdata on both paths. Two structural traps were found by
-testing rather than by reading: `patchDef2` carries an inner brace block, and its
-dimension line `( 9 3 0 0 0 )` is a 5-tuple indistinguishable from a control
-point, so a naive rewrite corrupts it. Patches are therefore preserved VERBATIM
-and only lines holding nested tuples are translated.
-
-**3. Placement, including texture alignment.** In Valve 220,
-`u = (P . axis_u)/scale_u + shift_u`, so translating geometry by `t` requires
-`shift_u' = shift_u - (axis_u . t)/scale_u`. Getting that wrong is invisible in
-geometry and glaring in game, so it lives in `Face.translate` and nowhere else.
-
-**Result, k=2 (implosion + warfare) at the same pack offsets as the lump build:**
-
-| | visdata | lightvols | lightmaps | clusters | faces | shaders | size | server RSS |
-|---|---|---|---|---|---|---|---|---|
-| lump writer | **0** | **0** | 49 152 (one grey block) | **2** | 17 748 | 96 | 10.8 MB | 2.0 GB |
-| via q3map2 | **1 315 400** | **136 620** | **5 308 416** | **3 225** | 16 415 | 92 | 16.7 MB | **792 MB** |
-
-Compile: meta 3 s + vis 43 s + light 47 s = **93 s**, leak-free, 10 722
-worldspawn brushes and 822 patches from two tiles. VIS reports **average clusters
-visible 530.58, 16.46 % of total** — i.e. the renderer can now discard 83.5 % of
-the world from a typical viewpoint, where before it could discard none.
-
-**Real boot:** dedicated server, fresh userdir, `-sessionid`, verified-free port
-26170, `+bot_number 12 +skill 5`, held 180 s in-process: **alive at 180 s, 12
-bots connected and fighting, runaway=0, OBJECT ERROR=0,
-`Collision_ValidateBrush`=0**, 58 combat events, resident set **792 MB against
-the lump build's 2.0 GB**.
-
-**What is NOT yet done here, stated plainly.** This assembles and compiles the
-TILES at their packed offsets; it does not yet cut the doorways or emit the
-connector into `.map` source, so the two tiles are separate sealed hulls in one
-world and a bot cannot cross between them. The 58 combat events are therefore
-NOT comparable to the lump build's 14 — the topology differs, and per §8.6 that
-count is confounded anyway. What is established is placement, lossless source
-round-trip, texture-correct translation, a leak-free compile with full VIS and
-lighting, and a clean 12-bot boot. The carve and connector emission are the
-remaining work, and they are the part that must not leak: a corridor whose ends
-do not mate flush with the cut apertures opens the sealed hull to the void and
-q3map2 will refuse to run VIS at all.
-
-### 8.13 The cut moves into source — proven, and one honest failure
-
-The framing correction is right: `q3map2` is a functor from source to compiled
-and `-convert -readbsp` is a section of it, so cutting a doorway as an
-endomorphism on BSP means re-deriving by hand everything the functor produces.
-That is why the lump writer shipped `Visdata len = 0`. `mapsrc.py` (~400 lines)
-moves the cut into source.
-
-**What is proven.**
-
-* Decompile is lossless (trident): 599 brushes -> 599, 177 patch faces -> 177
-  `patchDef2`, 97 entities; recompiled it yields 484 clusters / 30 920 visdata /
-  56 749 lightvols against stock's 489 / 31 240 / 56 749.
-* The parser is byte-equivalent: `parse -> write -> compile` reproduces the
-  direct compile exactly (599 brushes, 1623 faces, 484 clusters, 30 920 visdata).
-* Source CSG is volumetrically correct: subtracting an interior box from a box
-  gives 6 pieces, and over 20 000 random points **0** remain covered inside the
-  cut and **0** holes appear outside it.
-* Placement is texture-correct: Valve 220 needs
-  `shift' = shift - (axis . t)/scale`, applied in `Face.translate` alone.
-* k=2 placement compiles with real VIS and lighting, and boots clean:
-
-| k=2 | visdata | lightvols | lightmaps | clusters | server RSS |
-|---|---|---|---|---|---|
-| lump writer | **0** | **0** | 49 152 grey | **2** | 2.0 GB |
-| via q3map2 | **1 315 400** | **136 620** | **5 308 416** | **3 225** | **792 MB** |
-
-  93 s compile, leak-free; VIS reports **average clusters visible 16.46 %**, so
-  83.5 % of the world is now cullable where none was before. 180 s boot, 12 bots,
-  runaway=0, OBJECT ERROR=0, `Collision_ValidateBrush`=0.
-
-**Two bugs found by testing, not reading.** `box_brush` had four of six faces
-wound inside-out, so the connector tube was not solid at all and failed to seal —
-surfacing as a leak reported against an unrelated entity 1400 units away. And the
-connector requires cutting the whole CHANNEL through the tiles, not just the two
-aperture boxes: implosion ends at x=1752 and warfare starts at x=1816, so the
-tube's interior ran through ~1200 units of uncut geometry.
-
-**The honest failure: the join is sealed but NOT traversable.** The joined k=2
-world compiles leak-free (3 238 clusters, 16.54 % average visible, 54 lightmaps,
-87 s) and holds a 180 s / 12-bot boot with 102 combat events. But checking the
-SHIPPED BSP rather than trusting the compile:
-
-* a player box fits at only **7 of 29** points along the channel centreline,
-  blocked from x=1820 onward;
-* every free cell in the compiled world lies in **x -4584..1752 — implosion
-  only**;
-* the world model bbox is implosion's bbox, while warfare's brushes sit in the
-  lump OUTSIDE it.
-
-q3map2 filled warfare as "outside". So the leak-free result was in part sealing a
-world that had already lost a tile, and requirement 4 — bots crossing between
-tiles — is **not met**. The 102 combat events are implosion-internal.
-
-**Why warfare fills is not yet established.** The obvious hypothesis, that its
-sealing brushes come back as `detail` (which does not seal), is NOT supported:
-trident round-trips perfectly at 89 % detail faces while warfare fails at 38 %.
-So per-map decompilation fidelity varies for a reason still unidentified, and
-that is the next thing to measure — not more connector geometry.
-
-**Therefore the deletions are NOT performed.** `split_brushes`, `clip_faces`,
-`_convex_nonempty`, the lump writer and the single-cluster PVS collapse all
-remain. Deleting them now would leave the project with no path that produces a
-joined, traversable world: the BSP path makes one that is traversable but
-unrenderable, and the source path makes one that is renderable but not yet
-joined. Deleting the working half before the replacement is complete is how a
-project ends up with zero working paths rather than one. They should be deleted
-in the same change that first produces a traversable q3map2-compiled join, and
-that change is one diagnosis away.
-
-### 8.13a MERGE INVARIANT: no per-tile `common/lightgrid` brush may survive
-
-**A `common/lightgrid` brush CLIPS the compiled world to its own volume.  In a
-merged world every one of them must be dropped.**
-
-This is an invariant, not a workaround, and it fails silently and totally:
-implosion's lightgrid brush, once offset, spans exactly
-`[-4584,-3031,-590]..[1752,2857,1394]`, which is precisely the world-model bbox
-of every failing compile.  The other tile's brushes are still in the brush lump;
-its VOLUME is culled, q3map2 reports NO leak, and the map boots.  A tile
-disappears and nothing in the build log says so.  Anything that reintroduces a
-per-tile lightgrid brush loses a tile again, so the drop belongs in the
-placement step, unconditionally, for every tile.
-
-If a merged world wants a light grid it needs ONE brush spanning the fused
-bounds, authored after placement -- never the inherited per-tile boxes.
-
-The drop is therefore UNCONDITIONAL in `mapsrc.place_tile`, which is the single
-entry point for putting a map into a fused world.  Anything that places a tile by
-another route reintroduces the failure, so there should not be another route.
-
-### 8.14 One authored primitive, and the acceptance test
-
-**Consolidation.** `mapsrc.box_brush`/`tube` and `spiralgen.Brush`/`tri_prism`/
-`quad_prism` were two implementations of one insight, and their docstrings said
-the same sentence twice — spiralgen's "point winding is never trusted: normals
-are derived and then flipped to point away from the brush centroid", and
-mapsrc's, written only after a hand-ordered winding shipped four of six faces
-inside-out, "the winding is verified directly rather than trusted". Deriving the
-sign numerically is correct for any convex solid, so the general primitive
-absorbs the axis-aligned special case; `box_brush` and `tube` are deleted.
-
-The interface question was real: **spiralgen emitted the standard Quake face
-format** (`tex 0 0 0 sx sy flags`), not Valve 220, and a `.map` is one format
-throughout. Since the placed tiles are Valve 220, the primitive emits Valve 220,
-and the per-face texture-axis choice (by the normal's dominant axis, so no face
-gets a degenerate projection) now lives in `Brush.to_faces` once instead of at
-each call site.
-
-**The connector is a swept prism**, authored sealed: floor, ceiling and two walls
-offset along their own normals by `overlap * thickness` (default 2.0, per
-spiralgen — exact abutment leaves sub-unit slivers q3map2 reports as leaks). Its
-cross-section IS the aperture, so the opening is a parameter of the sweep.
-
-**`fused.joins.json` is emitted by the generator**, by construction rather than
-by archaeology. Contract taken from the four consumers rather than assumed:
-`maps[]` with `name/mins/maxs/bridge/degree/vantages`, `joins[]` with
-`a/b/kind/sa/sb/length/exclusive/prominent/cart_navigable`, `portals[]` with
-`tile/name/kind/axis/sgn/node/mouth/aperture`, and `bot_jumps`. Vantages are
-verified through `negspace.standing_point` — the same single definition of
-solidity, not a second one.
-
-**A merge rule found the hard way.** A per-tile `common/lightgrid` brush CLIPS
-the compiled world to its own volume. implosion's, once offset, is exactly
-`[-4584,-3031,-590]..[1752,2857,1394]` — precisely the model bbox every failing
-compile produced, with warfare's brushes present in the lump but culled from the
-world. Any merged world must drop them. This cost several cycles chasing
-"warfare's decompile fidelity", which was never the problem: warfare round-trips
-alone at 1366 clusters against stock's 1362.
-
-**Acceptance, k=2 (implosion + warfare):**
-
-| check | result |
-|---|---|
-| compile | leak-free, 124 s (meta+vis+light) |
-| visdata / lightvols / lightmaps | 1.3 MB / 387 600 / 5.4 MB |
-| clusters | **3 236** (lump writer: 2) |
-| average clusters visible | **16.43 %** — 83.6 % of the world cullable |
-| `fused.joins.json` | emitted: 2 maps (3 vantages each), 1 join, 2 portals |
-| **player box along the channel** | **35/35 points, 0 gaps — CONTINUOUS** |
-| **bots cross** | one navmesh component over both tiles (159 + 64 nodes); crossing path **6 waypoints, 1891 u, 6/6 admit a player box** |
-| 12-bot boot, 180 s | alive, runaway=0, OBJECT ERROR=2, `Collision_ValidateBrush`=**0**, 141 combat events |
-
-The connector waypoints are authored from the sweep too: reusing the previous
-build's waypoints put only 3 of 8 crossing nodes in free space, because they were
-laid for a 192x208 corridor and the sealed sweep is 128x112.
-
-**Not met: joinshot frames.** 0 of 6 captured. The client launches, takes a
-320x200 video mode and loads `maps/joinshotmap.bsp`, but never connects — the log
-ends in `Can't "join", not connected` and the step config sits at
-`// waiting for spawn`, so no frame is ever rendered and `screenshot` writes
-nothing. Two spawnpoints do still trip `relocate_spawnpoint` on this map, which
-a dedicated server survives and a listen server may not, but that is a
-hypothesis, not a diagnosis — I did not isolate it. Relocating those spawns is
-NOT the fix: `standing_point` legitimately found free space at z=-305, far below
-the play area, and a spawn moved there opened the hull. Dropping them is safe;
-testing `fits()` against a leaked BSP is not, because an unsealed compile skips
-fill-outside and the void then reads as free.
-
-
-### 8.15 joinshot: three stacked causes, and the frames
-
-The 0/6 capture was never one bug.  Peeling them in order:
-
-1. **Video.** The documented mechanism (`SDL_VIDEODRIVER=dummy` + `vid_soft 1`
-   -> DPSOFTRAST) cannot work with this build: the software surface in
-   `vid_sdl.c` is SDL 1.2 API against a binary linking SDL 2.32.70, and the dummy
-   driver has no GL to fall back to.  Fixed upstream in `bf36ab5` by taking a
-   real driver and a small window.
-2. **Wrong client.** joinshot launched the stock 2023 `Xonotic.app` binary, but
-   the basedir carries the project's `zzz-mesh-payload.pk3`, whose csprogs calls
-   builtins that binary lacks:
-   `Host_Error: No such builtin #656 in client; ... outdated engine build`.
-   It rendered fine and died on connect -- the SAME symptom as the dead video
-   path, from an unrelated cause.  Now prefers `darkplaces-work/darkplaces-sdl`,
-   overridable with `JOINSHOT_CLIENT`.
-3. **Wrong game.** That binary is generic DarkPlaces and boots `id1` without
-   `-xonotic`; the stock one defaults to Xonotic.  Added.
-4. **Wrong format.** This build has no PNG writer, so `scr_screenshot_png 1`
-   silently emits TGA -- 320x200x24 is 192 018 bytes EVERY time, content
-   independent, which both broke the void audit ("not a png") and made file size
-   meaningless as a black-frame signal.  Frames are now transcoded to real PNG.
-
-**Result: 6/6 frames, void audit PASS, 0 void/missing** -- both ways through the
-join and both ways through each of the two cut doorways:
-
-| frame | void | levels | size |
-|---|---|---|---|
-| j00_corridor_a_through | 0.49 | 13 | 43.0 KB |
-| j00_corridor_b_through | 0.18 | 18 | 54.7 KB |
-| p00_implosion_continue_in | 0.35 | 52 | 76.5 KB |
-| p00_implosion_continue_out | 0.89 | 43 | 34.2 KB |
-| p01_warfare_continue_in | 0.48 | 54 | 73.7 KB |
-| p01_warfare_continue_out | 0.77 | 43 | 45.3 KB |
-
-Against the committed samples' 77-87 KB: the two portal-interior frames land in
-band (76.5, 73.7).  The corridor frames were 16.5 and 38.5 KB while the connector
-was `common/caulk`; giving it real textures (`exx/floor-tread01`,
-`exx/base-crete03`, `exx/base-metal04`) took them to 54.7 and 43.0.  They remain
-below band because a swept box corridor genuinely has less to look at than a
-stock map's interior -- that is a content observation, not a rendering failure,
-and the void audit grades them 0.18/0.49 with 13-18 distinct levels.
-
-### 8.16 One oracle: `negspace` survives, `mapgen/oracle.py` retires
-
-Both answer solid_at / fits / floor_under / clearance / standable / trace.  They
-differ in method and in player model, and each was better at one:
-
-* **Method.** `mapgen/oracle.py` marches (`step=8.0` for trace, `step=4.0` plus
-  bisection for floor).  `negspace` is closed form -- a segment's intersection
-  with a convex cell is an interval, so there is no step size to quantise and
-  nothing to bisect away.  NAV-SPEC 10 is explicit that a point-sampled
-  is-this-solid check is a symptom of a missing stage, and soundness is measured:
-  0 false-free over ~26 000 sampled points on dance and warfare.
-* **Player model.** `mapgen/oracle.py` was better, and materially: it rests the
-  box on the MAX floor over nine footprint offsets, where `negspace` probed only
-  the centre.  Probing the centre reports a floor the box would intersect
-  wherever ground rises under a corner -- 36 % of a walkable helical corridor
-  condemned in the sibling's measurement.
-
-**Keep `negspace`, port the player model.**  Exactness cannot be retrofitted onto
-a marching oracle without rewriting it into `negspace`; the nine-point footprint
-is thirty lines and moves.  It is now in `negspace.floor_under(footprint=...)`,
-used by `standable` and `standing_point`, and `clearance` grows the BODY rather
-than reporting a displacement (which is 0 for any already-legal point and so
-useless as a room measure): 64 u in the 128-wide corridor, 325 u in implosion's
-open interior.
-
-The cost of the choice, stated: `negspace` reads the COMPILED bsp, so a
-source-side pre-check now needs a compile (124 s at k=2).  If pre-compile
-validation becomes load-bearing, the fix is to build the cell complex from
-authored source brushes in `negspace` -- not to reintroduce a second, sampled
-oracle.
-
-
-### 8.17 One oracle, two entry points -- and four bugs the fold exposed
-
-`mapgen/oracle.py` is DELETED.  `negspace` gained a SOURCE entry point
-(`from_brushes`) beside its compiled one, so `solid(p) == ns.cell_at(p) < 0`
-stays the only law and a generator validating what it just authored uses the same
-definition the fuser applies to what shipped.
-
-The two entry points differ only in representation, and deliberately:
-
-* **compiled** -- the BSP hands over bounded convex regions (leaves), so the free
-  volume is materialised as convex cells;
-* **source** -- there is no tree, and decomposing free space out of a grid is the
-  wrong shape (a 512-unit box over a spiral corridor meets dozens of brushes and
-  the convex subtraction explodes), so the SOLID brushes are kept and the law is
-  answered directly.  Every derived query is exact ray/box arithmetic against
-  them: a ray's intersection with a convex brush is an interval, a box test is
-  the engine's own plane-offset construction.
-
-**The pre-compile path is load-bearing, measured:** validating the assembled k=2
-source takes **1.4 s** and catches exactly the **2** spawnpoints that the engine
-otherwise reports as `relocate_spawnpoint` OBJECT ERRORs -- against **108 s** to
-compile first and find out.  After filtering, the 12-bot boot logs
-**OBJECT ERROR = 0**.
-
-Folding it exposed four bugs in code I had just written, each found by
-DIFFERENTIAL TESTING against the oracle being retired rather than by reading:
-
-1. **Brush bounds by interval propagation silently dropped brushes.**  Propagation
-   cannot bound an oblique prism, and the front end skipped what it could not
-   bound -- which was every plug brush, so sealed mouths read as open.  An
-   authored brush carries its polygons; its AABB is the range of those points.
-2. **Ray enter/leave branches inverted** relative to the (validated) compiled
-   path, so every downward ray reported the whole drop as free and nothing was
-   ever standable.
-3. **Box expansion sign inverted.**  The plane-offset test SHRANK each brush
-   instead of expanding it, so a box centred on a point the module itself called
-   solid still "fitted" -- a contradiction inside one module.
-4. **Orientation rule applied to the wrong input kind.**  A `Brush` holds real
-   polygons, so outward is resolved against the vertex centroid; a parsed `.map`
-   `Face` holds three PLANE-DEFINING points that are not vertices, whose centroid
-   is meaningless.  Using the centroid rule on parsed faces made single points
-   test inside 50-90 brushes of thousands of units each, and reported 16 of 23
-   stock spawnpoints as buried when the compiled world had 5.
-
-A fifth difference was not a bug but a missing model: source has no contents
-lump, so the compiled path's `contents & MASK_PLAYERSOLID` needed a name-based
-counterpart (`NONSOLID_SHADERS`).  `common/hint`, `skip`, `weapclip`, `botclip`,
-`donotenter`, `nodrawnonsolid` do not stop a player; `caulk`, `clip` and `nodraw`
-do and must keep blocking.
-
-**Agreement, measured.**  On spiral seeds 5/11/23, against the retired oracle:
-`solid_at` disagrees on **9 of 20 000** uniform random points, all in the
-0.10-0.25 unit band at brush surfaces where the two tolerances differ (ref
-`EPS=0.1`, negspace `tol=0.25`), and the direction is uniform -- **9 ref-free /
-negspace-solid, 0 the reverse**, so negspace is strictly the more conservative,
-which refuses a marginal placement rather than admitting a bad one.
-`floor_under` agrees 193/193 on both seeds.  `standable` differs by 2/193 because
-negspace models the TRUE Xonotic hull (32x32x**69**, mins -24 / maxs +45) where
-the oracle used a symmetric 32x32x48.  `e2e.py` passes on seeds 5, 11, 23 and 37
-with apertures, including the sightline and mouth-seal tests.
-
-**One semantic difference to know:** the compiled path sees what q3map2 SEALED
-(fill-outside makes the void solid), the source path cannot.  So a spawn outside
-the hull reads solid on the compiled side and free on the source side.  Neither
-is wrong; they are answering about different worlds, and the compiled answer is
-the one that ships.
-
-### 8.18 Two corrections to how this work is judged
-
-**File size cannot grade a frame on this engine.**  The acceptance criterion
-"sized like the committed samples, 77-87 KB" could not have distinguished a black
-frame from a good one: this build has no PNG writer, so `scr_screenshot_png 1`
-emits TGA, and 320x200x24 TGA is **192 018 bytes every single time**, content
-independent.  The void-fraction plus distinct-level audit is the measurement that
-works, and it should replace file size wherever the docs still cite it.  Current
-frames: 6/6, audit PASS, void 0.18-0.89, levels 13-54.
-
-**Any tool that launches a client must use the PROJECT build.**  joinshot reached
-`Xonotic.app/Contents/MacOS/xonotic-osx-sdl-bin` -- a fourth binary outside the
-tree -- while the basedir carries the project's `zzz-mesh-payload.pk3`, whose
-csprogs calls builtins that binary lacks (`No such builtin #656`).  It rendered,
-then died on connect, which is indistinguishable from a join bug.  Checking which
-binaries EXIST is not enough; what matters is which one a tool actually launches.
+Compiler-resolved asset aliases are included at their runtime logical paths. Stock game
+assets and the PBR material overlay remain separately staged runtime archives, so the
+client sees their union without duplicating every stock byte into `fused.pk3`.
+
+`fused.joins.json` carries tiles, portals, joins, vantages, graph-derived prominence, and
+cart-navigability measures. Each corridor records its portal carve clearance and depth,
+solid-shell embed depth, longitudinal overlap, transverse overlap, and the minimum of
+those positive overlaps. The shell and intact source solid have shared volume around
+the entire opening, so a sloped connector cannot meet a source aperture at a merely
+coplanar edge. `fused.measurements.json` carries cart construction, spawn
+access, path, and team/cart reachability measures. `fused.metrics.json` joins source,
+placement, compiler, BSP, navigation, geometry, artifact, and wall-time measures.
+Resuming a geometry-only compile executes its missing VIS and light stages against the
+already-realized fused source before reconstructing measurements and the release bundle.
+
+## Residual measure
+
+Incomplete work is represented as a nonnegative residual vector, not a judgment or a
+filter. Its coordinates include unfinished sources, missing stock maps, compiler-stage
+residuals, leak lines, unresolved compiler assets, missing BSP or bundle artifacts,
+source-translation error, coordinate excess, negative-space error, overlay error,
+region-component residual, non-cart-navigable joins, cart-construction residual, and
+team/cart nonadvanceable pairs.
+
+`release_residual_mass` is the sum of those coordinates. A finished realization has zero
+mass while retaining every component measure that produced the sum. A nonzero coordinate
+does not authorize dropping a source, team, cart, artifact, or compiler stage; it names
+the remaining work.
+
+Resume reuses the authored and compiled artifacts but reconstructs the complete measure
+record, negative-space object, entity overlay, compiler overlays, and package. It does not
+replace the original source relation with whatever files happened to finish first.
+
+Join and region observation tools consume `fused.joins.json` and the runtime package.
+They emit requested, observed, missing, and unreadable frame masses plus luminance-support
+measures for the literal captured pixels. Those observations do not decide which geometry
+is emitted and do not collapse image content into an acceptance label.

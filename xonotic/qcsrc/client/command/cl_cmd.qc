@@ -1,10 +1,5 @@
 #include "cl_cmd.qh"
 
-// ==============================================
-//  CSQC client commands code, written by Samual
-//  Last updated: December 28th, 2011
-// ==============================================
-
 #include <client/draw.qh>
 #include <client/hud/_mod.qh>
 #include <client/hud/panel/quickmenu.qh>
@@ -32,16 +27,9 @@ void DrawDebugModel(entity this)
 	}
 }
 
-
-// =======================
-//  Command Sub-Functions
-// =======================
-
 void LocalCommand_blurtest(int request)
 {
 	TC(int, request);
-	// Simple command to work with postprocessing temporarily... possibly completely pointless, the glsl shader is used for a real feature now...
-	// Anyway, to enable it, just compile the client with -DBLURTEST and then you can use the command.
 
 	#ifdef BLURTEST
 	switch (request)
@@ -187,7 +175,7 @@ void LocalCommand_debugmodel(int request, int argc)
 				IL_PUSH(g_drawables, debugmodel_entity);
 				return;
 			}
-			// fall through
+
 		}
 
 		default:
@@ -223,7 +211,7 @@ void LocalCommand_handlevote(int request, int argc)
 
 			if (vote_selection)
 			{
-				if (uid2name_dialog)  // handled by "uid2name" option
+				if (uid2name_dialog)
 				{
 					vote_active = 0;
 					vote_prev = 0;
@@ -280,7 +268,7 @@ void LocalCommand_hud(int request, int argc)
 					if (QuickMenu_IsOpened())
 						QuickMenu_Close();
 					else
-						QuickMenu_Open(argv(2), argv(3), file);  // mode, submenu
+						QuickMenu_Open(argv(2), argv(3), file);
 					return;
 				}
 
@@ -293,7 +281,7 @@ void LocalCommand_hud(int request, int argc)
 					}
 					else
 					{
-						break;  // go to usage, we're missing the paramater needed here.
+						break;
 					}
 				}
 
@@ -401,7 +389,7 @@ void LocalCommand_sendcvar(int request, int argc)
 		{
 			if (argv(1))
 			{
-				// W_FixWeaponOrder will trash argv, so save what we need.
+
 				string thiscvar = string_null; strcpy(thiscvar, argv(1));
 				string s = cvar_string(thiscvar);
 
@@ -427,35 +415,6 @@ void LocalCommand_sendcvar(int request, int argc)
 	}
 }
 
-/* use this when creating a new command, making sure to place it in alphabetical order... also,
-** ADD ALL NEW COMMANDS TO commands.cfg WITH PROPER ALIASES IN THE SAME FASHION!
-void LocalCommand_(int request)
-{
-    switch(request)
-    {
-        case CMD_REQUEST_COMMAND:
-        {
-
-            return;
-        }
-
-        default:
-        case CMD_REQUEST_USAGE:
-        {
-            LOG_HELP("Usage:^3 cl_cmd ");
-            LOG_HELP("  No arguments required.");
-            return;
-        }
-    }
-}
-*/
-
-
-// ==================================
-//  Macro system for client commands
-// ==================================
-
-// Normally do not hard code aliases for these, instead create them in commands.cfg... also: keep in alphabetical order, please ;)
 CLIENT_COMMAND(blurtest, "Feature for testing blur postprocessing") { LocalCommand_blurtest(request); }
 CLIENT_COMMAND(boxparticles, "Spawn particles manually") { LocalCommand_boxparticles(request, arguments); }
 CLIENT_COMMAND(create_scrshot_ent, "Create an entity at this location for automatic screenshots") { LocalCommand_create_scrshot_ent(request); }
@@ -496,20 +455,10 @@ void LocalCommand_macro_write_aliases(int fh)
 	FOREACH(CLIENT_COMMANDS, true, CMD_Write_Alias("qc_cmd_cl", it.m_name, it.m_description));
 }
 
-
-// =========================================
-//  Main Function Called By Engine (cl_cmd)
-// =========================================
-// If this function exists, client code handles gamecommand instead of the engine code.
-
 void GameCommand(string command)
 {
 	int argc = tokenize_console(command);
 
-	// Guide for working with argc arguments by example:
-	// argc:   1    - 2      - 3     - 4
-	// argv:   0    - 1      - 2     - 3
-	// cmd     vote - master - login - password
 	string s = strtolower(argv(0));
 	if (s == "help")
 	{
@@ -526,37 +475,27 @@ void GameCommand(string command)
 
 			return;
 		}
-		else if (GenericCommand_macro_usage(argc))  // Instead of trying to call a command, we're going to see detailed information about it
+		else if (GenericCommand_macro_usage(argc))
 		{
 			return;
 		}
-		else if (LocalCommand_macro_usage(argc))  // now try for normal commands too
+		else if (LocalCommand_macro_usage(argc))
 		{
 			return;
 		}
 	}
-	// continue as usual and scan for normal commands
-	if (GenericCommand(command)                                    // handled by common/command/generic.qc
-	    || LocalCommand_macro_command(argc, command)               // handled by one of the above LocalCommand_* functions
-	    || MUTATOR_CALLHOOK(CSQC_ConsoleCommand, s, argc, command) // handled by a mutator
+
+	if (GenericCommand(command)
+	    || LocalCommand_macro_command(argc, command)
+	    || MUTATOR_CALLHOOK(CSQC_ConsoleCommand, s, argc, command)
 	   ) return;
 
-	// nothing above caught the command, must be invalid
 	LOG_INFO(((command != "") ? strcat("Unknown client command \"", command, "\"") : "No command provided"), ". For a list of supported commands, try cl_cmd help.");
 }
 
-
-// ===================================
-//  Macro system for console commands
-// ===================================
-
-// These functions are here specifically to add special + - commands to the game, and are not really normal commands.
-// Please add client commands to the function above this, as this is only for special reasons.
-// NOTE: showaccuracy is kept as legacy command
 #define CONSOLE_COMMANDS_NORMAL() \
 	CONSOLE_COMMAND("+showaccuracy", { }) \
 	CONSOLE_COMMAND("-showaccuracy", { }) \
-	/* nothing */
 
 #define CONSOLE_COMMANDS_MOVEMENT() \
 	CONSOLE_COMMAND("+forward", { ++camera_direction.x; }) \
@@ -575,18 +514,16 @@ void GameCommand(string command)
 	CONSOLE_COMMAND("-roll_right", { --camera_roll; }) \
 	CONSOLE_COMMAND("+roll_left", { --camera_roll; }) \
 	CONSOLE_COMMAND("-roll_left", { ++camera_roll; }) \
-	/* nothing */
 
 void ConsoleCommand_macro_init()
 {
-	// first init normal commands
+
 	#define CONSOLE_COMMAND(name, execution) \
 		{ registercommand(name); }
 
 	CONSOLE_COMMANDS_NORMAL();
 	#undef CONSOLE_COMMAND
 
-	// then init movement commands
 	#ifndef CAMERATEST
 	if (isdemo())
 	{
@@ -626,17 +563,11 @@ bool ConsoleCommand_macro_movement(string s, int argc)
 	return false;
 }
 
-
-// ======================================================
-//  Main Function Called By Engine (registered commands)
-// ======================================================
-// Used to parse commands in the console that have been registered with the "registercommand" function
-
 bool CSQC_ConsoleCommand(string command)
 {
 	int argc = tokenize_console(command);
 	string s = strtolower(argv(0));
-	// Return value should be true if CSQC handled the command, otherwise return false to have the engine handle it.
+
 	return ConsoleCommand_macro_normal(s, argc)
 	       || ConsoleCommand_macro_movement(s, argc)
 	;

@@ -13,7 +13,7 @@ void sv_notice_join_think(entity this)
 
 void sv_notice_join(entity _to)
 {
-    // to-do: make sv_join_notices support per-entry times
+
     if (autocvar_sv_join_notices == "") return;
     defer(_to, 1, sv_notice_join_think);
 }
@@ -32,7 +32,7 @@ void sv_notice_toall(string _notice, float _howlong, float _modal)
     FOREACH_CLIENT(IS_REAL_CLIENT(it), sv_notice_to(it, _notice, _howlong, _modal));
 }
 
-#endif // SVQC
+#endif
 
 #ifdef CSQC
 NET_HANDLE(TE_CSQC_SVNOTICE, bool isNew)
@@ -101,4 +101,4 @@ void cl_notice_run()
     #undef OUT
 }
 
-#endif // CSQC
+#endif

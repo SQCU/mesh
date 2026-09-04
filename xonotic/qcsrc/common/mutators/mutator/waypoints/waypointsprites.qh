@@ -2,7 +2,6 @@
 
 #include "all.qh"
 
-/** Additional networked waypoint state, used for items, weapons, buffs */
 .int wp_extra;
 
 const int SPRITERULE_DEFAULT = 0;
@@ -13,10 +12,10 @@ const int SPRITERULE_SPECTATOR = 2;
 entityclass(WaypointSprite);
 classfield(WaypointSprite) .float helpme;
 classfield(WaypointSprite) .float rule;
-classfield(WaypointSprite) .string netname; // primary picture
-classfield(WaypointSprite) .string netname2; // secondary picture
-classfield(WaypointSprite) .string netname3; // tertiary picture
-classfield(WaypointSprite) .int team; // team that gets netname2
+classfield(WaypointSprite) .string netname;
+classfield(WaypointSprite) .string netname2;
+classfield(WaypointSprite) .string netname3;
+classfield(WaypointSprite) .int team;
 classfield(WaypointSprite) .float lifetime;
 classfield(WaypointSprite) .float fadetime;
 classfield(WaypointSprite) .float maxdistance;
@@ -101,10 +100,8 @@ void drawquad(vector o, vector ri, vector up, string pic, vector rgb, float a, f
 
 void drawhealthbar(vector org, float rot, float h, vector sz, vector hotspot, float width, float height, float margin, float border, float align, vector rgb, float a, vector hrgb, float ha, float f);
 
-// returns location of sprite text
 vector drawspritearrow(vector o, float ang, vector rgb, float a, float t);
 
-// returns location of sprite healthbar
 vector drawsprite_TextOrIcon(bool is_text, vector o, float ang, float minwidth, vector rgb, float a, vector sz, string str);
 
 float spritelookupblinkvalue(entity this, string s);
@@ -113,8 +110,6 @@ string spritelookuptext(entity this, string s);
 
 vector fixrgbexcess_move(vector rgb, vector src, vector dst);
 vector fixrgbexcess(vector rgb);
-
-// they are drawn using a .draw function
 
 void Ent_RemoveWaypointSprite(entity this);
 
@@ -187,13 +182,13 @@ bool WaypointSprite_SendEntity(entity this, entity to, float sendflags);
 void WaypointSprite_Reset(entity this);
 
 entity WaypointSprite_Spawn(
-    entity spr, // sprite
-    float lifetime, float maxdistance, // lifetime, max distance
-    entity ref, vector ofs, // position
-    entity showto, float t, // show to whom? Use a flag to indicate a team
-    entity own, .entity ownfield, // remove when own gets killed
-    float hideable, // true when it should be controlled by cl_hidewaypoints
-    entity icon // initial icon
+    entity spr,
+    float lifetime, float maxdistance,
+    entity ref, vector ofs,
+    entity showto, float t,
+    entity own, .entity ownfield,
+    float hideable,
+    entity icon
 );
 
 entity WaypointSprite_SpawnFixed(
@@ -201,7 +196,7 @@ entity WaypointSprite_SpawnFixed(
     vector ofs,
     entity own,
     .entity ownfield,
-    entity icon // initial icon
+    entity icon
 );
 
 .entity waypointsprite_deployed_fixed;
@@ -210,7 +205,7 @@ entity WaypointSprite_DeployFixed(
     bool limited_range,
     entity player,
     vector ofs,
-    entity icon // initial icon
+    entity icon
 );
 
 .entity waypointsprite_deployed_personal;
@@ -218,7 +213,7 @@ entity WaypointSprite_DeployPersonal(
     entity spr,
     entity player,
     vector ofs,
-    entity icon // initial icon
+    entity icon
 );
 
 .entity waypointsprite_attached;
@@ -227,13 +222,13 @@ entity WaypointSprite_Attach(
     entity spr,
     entity player,
     bool limited_range,
-    entity icon // initial icon
+    entity icon
 );
 
 entity WaypointSprite_AttachCarrier(
     entity spr,
     entity carrier,
-    entity icon // initial icon
+    entity icon
 );
 
 void WaypointSprite_DetachCarrier(entity carrier);

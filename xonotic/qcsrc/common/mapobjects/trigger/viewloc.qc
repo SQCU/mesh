@@ -15,9 +15,7 @@ REGISTER_NET_LINKED(ENT_CLIENT_VIEWLOC_TRIGGER)
 
 void viewloc_think(entity this)
 {
-	// we abuse this method, rather than using normal .touch, because touch isn't reliable with multiple clients inside the same trigger, and can't "untouch" entities
 
-	// set myself as current viewloc where possible
 #if 1
 	FOREACH_CLIENT(IS_PLAYER(it) && it.viewloc == this,
 	{
@@ -39,9 +37,9 @@ void viewloc_think(entity this)
 			emin -= '1 1 1';
 			emax += '1 1 1';
 		}
-		if(boxesoverlap(emin, emax, this.absmin, this.absmax)) // quick
+		if(boxesoverlap(emin, emax, this.absmin, this.absmax))
 		{
-			if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it)) // accurate
+			if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, it))
 				it.viewloc = this;
 		}
 	});
@@ -49,8 +47,8 @@ void viewloc_think(entity this)
 
 		for(e = findradius((this.absmin + this.absmax) * 0.5, vlen(this.absmax - this.absmin) * 0.5 + 1); e; e = e.chain)
 			if(!e.viewloc)
-				if(IS_PLAYER(e)) // should we support non-player entities with this?
-				//if(!IS_DEAD(e)) // death view is handled separately, we can't override this just yet
+				if(IS_PLAYER(e))
+
 				{
 					vector emin = e.absmin;
 					vector emax = e.absmax;
@@ -59,8 +57,8 @@ void viewloc_think(entity this)
 						emin -= '1 1 1';
 						emax += '1 1 1';
 					}
-					if(boxesoverlap(emin, emax, this.absmin, this.absmax)) // quick
-						if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, e)) // accurate
+					if(boxesoverlap(emin, emax, this.absmin, this.absmax))
+						if(WarpZoneLib_BoxTouchesBrush(emin, emax, this, e))
 							e.viewloc = this;
 				}
 #endif
@@ -70,7 +68,7 @@ void viewloc_think(entity this)
 
 bool trigger_viewloc_send(entity this, entity to, int sf)
 {
-	// CSQC doesn't need to know our origin (yet), as we're only available for referencing
+
 	WriteHeader(MSG_ENTITY, ENT_CLIENT_VIEWLOC_TRIGGER);
 
 	WriteByte(MSG_ENTITY, this.spawnflags);
@@ -102,7 +100,7 @@ void viewloc_init(entity this)
 	if(!this.enemy) { LOG_INFO("^1FAIL!"); delete(this); return; }
 
 	if(!this.goalentity)
-		this.goalentity = this.enemy; // make them match so CSQC knows what to do
+		this.goalentity = this.enemy;
 
 	Net_LinkEntity(this, false, 0, trigger_viewloc_send);
 
@@ -112,7 +110,7 @@ void viewloc_init(entity this)
 
 spawnfunc(trigger_viewlocation)
 {
-	// we won't check target2 here yet, as it may not even need to exist
+
 	if(this.target == "") { LOG_INFO("^1FAIL!"); delete(this); return; }
 
 	WarpZoneLib_ExactTrigger_Init(this, false);
@@ -151,7 +149,6 @@ spawnfunc(target_viewlocation_end)
 	viewloc_link(this);
 }
 
-// compatibility
 spawnfunc(target_viewlocation)
 {
 	spawnfunc_target_viewlocation_start(this);
@@ -185,9 +182,9 @@ NET_HANDLE(ENT_CLIENT_VIEWLOC_TRIGGER, bool isnew)
 	this.count = point2;
 
 	setthink(this, trigger_viewloc_updatelink);
-	this.nextthink = time + 1; // we need to delay this or else
+	this.nextthink = time + 1;
 
-	this.drawmask = MASK_NORMAL; // not so concerned, but better keep it alive
+	this.drawmask = MASK_NORMAL;
 }
 
 NET_HANDLE(ENT_CLIENT_VIEWLOC, bool isnew)
@@ -202,7 +199,7 @@ NET_HANDLE(ENT_CLIENT_VIEWLOC, bool isnew)
 	return = true;
 
 	this.classname = ((this.cnt == 2) ? "target_viewlocation_end" : "target_viewlocation_start");
-	this.drawmask = MASK_NORMAL; // don't cull it
+	this.drawmask = MASK_NORMAL;
 }
 
 #endif

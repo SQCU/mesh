@@ -138,7 +138,6 @@
     ,{ demand(n == 3 && "velocityoffset");          MY(velocityoffset) = vec3(stof(argv(1)), stof(argv(2)), stof(argv(3))); \
     }, sprintf(" %v",                               (MY(velocityoffset)) \
     )) \
-    /**/
 
 CLASS(EffectInfo, Object)
     ATTRIB(EffectInfo, effectinfo_name, string);
@@ -194,7 +193,6 @@ CLASS(EffectInfo, Object)
     MY(velocityjitter, vector, '0 0 0') \
     MY(velocitymultiplier, float, 0) \
     MY(velocityoffset, vector, '0 0 0') \
-    /**/
 
     #define MY(f, type, val) ATTRIB(EffectInfo, effectinfo_##f, type, val);
     FIELDS(MY)
@@ -288,7 +286,7 @@ void effectinfo_dump(int fh, bool alsoprint)
 }
 
 #define DEFAULT_FILENAME "effectinfo_dump.txt"
-// NOTE: dumpeffectinfo, dumpnotifs, dumpturrets and dumpweapons use similar code
+
 GENERIC_COMMAND(dumpeffectinfo, "Dump all effectinfo into " DEFAULT_FILENAME, false)
 {
     switch (request) {
@@ -324,7 +322,6 @@ GENERIC_COMMAND(dumpeffectinfo, "Dump all effectinfo into " DEFAULT_FILENAME, fa
     }
 }
 #undef DEFAULT_FILENAME
-
 
 REGISTRY(EffectInfos, BITS(9))
 REGISTER_REGISTRY(EffectInfos)

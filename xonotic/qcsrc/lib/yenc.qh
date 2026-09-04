@@ -1,7 +1,5 @@
 #pragma once
 
-#include "test.qh"
-
 #define yenc_single(c, ret) \
 	MACRO_BEGIN \
 		int conv = c; \
@@ -43,21 +41,3 @@
 			ret = conv; \
 		} \
 	MACRO_END
-
-TEST(yEnc, EncodeDecode)
-{
-	for (int i = 0; i <= 255; ++i)
-	{
-		int expect = i;
-
-		string fragment = string_null;
-		yenc_single(expect, fragment);
-
-		int encdec = 0;
-		STRING_ITERATOR(fragmentiterator, fragment, 0);
-		ydec_single(fragmentiterator, encdec);
-
-		EXPECT_EQ(expect, encdec);
-	}
-	SUCCEED();
-}

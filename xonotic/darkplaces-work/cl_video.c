@@ -3,7 +3,6 @@
 #include "cl_dyntexture.h"
 #include "cl_video.h"
 
-// cvars
 cvar_t cl_video_subtitles = {CVAR_SAVE, "cl_video_subtitles", "0", "show subtitles for videos (if they are present)"};
 cvar_t cl_video_subtitles_lines = {CVAR_SAVE, "cl_video_subtitles_lines", "4", "how many lines to occupy for subtitles"};
 cvar_t cl_video_subtitles_textsize = {CVAR_SAVE, "cl_video_subtitles_textsize", "16", "textsize for subtitles"};
@@ -17,18 +16,14 @@ cvar_t cl_video_fadeout = {CVAR_SAVE, "cl_video_fadeout", "0", "fading-to-black 
 
 cvar_t v_glslgamma_video = {CVAR_SAVE, "v_glslgamma_video", "1", "applies GLSL gamma to played video, could be a fraction, requires r_glslgamma_2d 1."};
 
-// DPV stream decoder
 #include "dpvsimpledecode.h"
 
-// VorteX: libavcodec implementation
 #include "cl_video_libavw.c"
 
-// JAM video decoder used by Blood Omnicide
 #ifdef JAMVIDEO
 #include "cl_video_jamdecode.c"
 #endif
 
-// constants (and semi-constants)
 static int  cl_videormask;
 static int  cl_videobmask;
 static int  cl_videogmask;
@@ -85,10 +80,10 @@ static void LinkVideoTexture( clvideo_t *video )
 static void UnlinkVideoTexture( clvideo_t *video )
 {
 	CL_UnlinkDynTexture( video->cpif.name );
-	// free the texture
+
 	R_FreeTexture( video->cpif.tex );
 	video->cpif.tex = NULL;
-	// free the image data
+
 	Mem_Free( video->imagedata );
 }
 
@@ -98,7 +93,7 @@ static void SuspendVideo( clvideo_t * video )
 		return;
 	video->suspended = true;
 	UnlinkVideoTexture(video);
-	// if we are in firstframe mode, also close the stream
+
 	if (video->state == CLVIDEO_FIRSTFRAME)
 	{
 		if (video->stream)
@@ -122,7 +117,6 @@ static qboolean WakeVideo( clvideo_t * video )
 	video->imagedata = Mem_Alloc( cls.permanentmempool, video->cpif.width * video->cpif.height * cl_videobytesperpixel );
 	LinkVideoTexture( video );
 
-	// update starttime
 	video->starttime += realtime - video->lasttime;
 
 	return true;
@@ -160,11 +154,6 @@ static void LoadSubtitles( clvideo_t *video, const char *subtitlesfile )
 		return;
 	}
 
-	// parse subtitle_text
-	// line is: x y "text" where
-	//    x - start time
-	//    y - seconds last (if 0 - last thru next sub, if negative - last to next sub - this amount of seconds)
-
 	data = subtitle_text;
 	for (;;)
 	{
@@ -178,18 +167,18 @@ static void LoadSubtitles( clvideo_t *video, const char *subtitlesfile )
 			break;
 		if (!com_token[0])
 			continue;
-		// check limits
+
 		if (video->subtitles == CLVIDEO_MAX_SUBTITLES)
 		{
 			Con_Printf("WARNING: CLVIDEO_MAX_SUBTITLES = %i reached when reading subtitles from '%s'\n", CLVIDEO_MAX_SUBTITLES, subtitlesfile);
-			break;	
+			break;
 		}
-		// add a sub
+
 		video->subtitle_text[numsubs] = (char *) Mem_Alloc(cls.permanentmempool, strlen(com_token) + 1);
 		memcpy(video->subtitle_text[numsubs], com_token, strlen(com_token) + 1);
 		video->subtitle_start[numsubs] = subtime;
 		video->subtitle_end[numsubs] = sublen;
-		if (numsubs > 0) // make true len for prev sub, autofix overlapping subtitles
+		if (numsubs > 0)
 		{
 			if (video->subtitle_end[numsubs-1] <= 0)
 				video->subtitle_end[numsubs-1] = max(video->subtitle_start[numsubs-1], video->subtitle_start[numsubs] + video->subtitle_end[numsubs-1]);
@@ -197,22 +186,18 @@ static void LoadSubtitles( clvideo_t *video, const char *subtitlesfile )
 				video->subtitle_end[numsubs-1] = min(video->subtitle_start[numsubs-1] + video->subtitle_end[numsubs-1], video->subtitle_start[numsubs]);
 		}
 		numsubs++;
-		// todo: check timing for consistency?
+
 	}
-	if (numsubs > 0) // make true len for prev sub, autofix overlapping subtitles
+	if (numsubs > 0)
 	{
 		if (video->subtitle_end[numsubs-1] <= 0)
-			video->subtitle_end[numsubs-1] = 99999999; // fixme: make it end when video ends?
+			video->subtitle_end[numsubs-1] = 99999999;
 		else
 			video->subtitle_end[numsubs-1] = video->subtitle_start[numsubs-1] + video->subtitle_end[numsubs-1];
 	}
 	Z_Free( subtitle_text );
 	video->subtitles = numsubs;
-/*
-	Con_Printf( "video->subtitles: %i\n", video->subtitles );
-	for (numsubs = 0; numsubs < video->subtitles; numsubs++)
-		Con_Printf( "  %03.2f %03.2f : %s\n", video->subtitle_start[numsubs], video->subtitle_end[numsubs], video->subtitle_text[numsubs] );
-*/
+
 }
 
 static clvideo_t* OpenVideo( clvideo_t *video, const char *filename, const char *name, int owner, const char *subtitlesfile )
@@ -237,7 +222,6 @@ static clvideo_t* OpenVideo( clvideo_t *video, const char *filename, const char 
 	video->imagedata = Mem_Alloc( cls.permanentmempool, video->cpif.width * video->cpif.height * cl_videobytesperpixel );
 	LinkVideoTexture( video );
 
-	// VorteX: load simple subtitle_text file
 	if (subtitlesfile[0])
 		LoadSubtitles( video, subtitlesfile );
 
@@ -247,7 +231,7 @@ static clvideo_t* OpenVideo( clvideo_t *video, const char *filename, const char 
 clvideo_t* CL_OpenVideo( const char *filename, const char *name, int owner, const char *subtitlesfile )
 {
 	clvideo_t *video;
-	// sanity check
+
 	if( !name || !*name || strncmp( name, CLVIDEOPREFIX, sizeof( CLVIDEOPREFIX ) - 1 ) != 0 ) {
 		Con_DPrintf( "CL_OpenVideo: Bad video texture name '%s'!\n", name );
 		return NULL;
@@ -259,7 +243,7 @@ clvideo_t* CL_OpenVideo( const char *filename, const char *name, int owner, cons
 		return NULL;
 	}
 	video = OpenVideo( video, filename, name, owner, subtitlesfile );
-	// expand the active range to include the new entry
+
 	if (video) {
 		cl_num_videos = max(cl_num_videos, (int)(video - cl_videos) + 1);
 	}
@@ -313,11 +297,9 @@ void CL_RestartVideo(clvideo_t *video)
 	if (!video)
 		return;
 
-	// reset time
 	video->starttime = video->lasttime = realtime;
 	video->framenum = -1;
 
-	// reopen stream
 	if (video->stream)
 		video->close(video->stream);
 	video->stream = NULL;
@@ -325,7 +307,6 @@ void CL_RestartVideo(clvideo_t *video)
 		video->state = CLVIDEO_UNUSED;
 }
 
-// close video
 void CL_CloseVideo(clvideo_t * video)
 {
 	int i;
@@ -333,17 +314,16 @@ void CL_CloseVideo(clvideo_t * video)
 	if (!video || video->state == CLVIDEO_UNUSED)
 		return;
 
-	// close stream
 	if (!video->suspended || video->state != CLVIDEO_FIRSTFRAME)
 	{
 		if (video->stream)
 			video->close(video->stream);
 		video->stream = NULL;
 	}
-	// unlink texture
+
 	if (!video->suspended)
 		UnlinkVideoTexture(video);
-	// purge subtitles
+
 	if (video->subtitles)
 	{
 		for (i = 0; i < video->subtitles; i++)
@@ -353,8 +333,7 @@ void CL_CloseVideo(clvideo_t * video)
 	video->state = CLVIDEO_UNUSED;
 }
 
-// update all videos
-void CL_Video_Frame(void) 
+void CL_Video_Frame(void)
 {
 	clvideo_t *video;
 	int destframe;
@@ -376,7 +355,7 @@ void CL_Video_Frame(void)
 				video->starttime = realtime - video->framenum * video->framerate;
 				continue;
 			}
-			// read video frame from stream if time has come
+
 			if (video->state == CLVIDEO_FIRSTFRAME )
 				destframe = 0;
 			else
@@ -388,8 +367,8 @@ void CL_Video_Frame(void)
 				do {
 					video->framenum++;
 					if (video->decodeframe(video->stream, video->imagedata, cl_videormask, cl_videogmask, cl_videobmask, cl_videobytesperpixel, cl_videobytesperpixel * video->cpif.width))
-					{ 
-						// finished?
+					{
+
 						CL_RestartVideo(video);
 						if (video->state == CLVIDEO_PLAY)
 							video->state = CLVIDEO_FIRSTFRAME;
@@ -401,11 +380,9 @@ void CL_Video_Frame(void)
 		}
 	}
 
-	// stop main video
 	if (cl_videos->state == CLVIDEO_FIRSTFRAME)
 		CL_VideoStop();
 
-	// reduce range to exclude unnecessary entries
 	while(cl_num_videos > 0 && cl_videos[cl_num_videos-1].state == CLVIDEO_UNUSED)
 		cl_num_videos--;
 }
@@ -426,7 +403,7 @@ typedef struct
 	float y;
 	float width;
 	float height;
-	float alignment; // 0 = left, 0.5 = center, 1 = right
+	float alignment;
 	float fontsize;
 	float textalpha;
 }
@@ -439,7 +416,7 @@ static float CL_DrawVideo_WordWidthFunc(void *passthrough, const char *w, size_t
 	if(w == NULL)
 		return si->fontsize * si->font->maxwidth;
 	if(maxWidth >= 0)
-		return DrawQ_TextWidth_UntilWidth(w, length, si->fontsize, si->fontsize, false, si->font, -maxWidth); // -maxWidth: we want at least one char
+		return DrawQ_TextWidth_UntilWidth(w, length, si->fontsize, si->fontsize, false, si->font, -maxWidth);
 	else if(maxWidth == -1)
 		return DrawQ_TextWidth(w, *length, si->fontsize, si->fontsize, false, si->font);
 	else
@@ -457,7 +434,7 @@ static int CL_DrawVideo_DisplaySubtitleLine(void *passthrough, const char *line,
 	return 1;
 }
 
-int cl_videoplaying = false; // old, but still supported
+int cl_videoplaying = false;
 
 void CL_DrawVideo(void)
 {
@@ -471,44 +448,42 @@ void CL_DrawVideo(void)
 
 	video = CL_GetVideoBySlot( 0 );
 
-	// fix cvars
 	if (cl_video_scale.value <= 0 || cl_video_scale.value > 1)
 		Cvar_SetValueQuick( &cl_video_scale, 1);
 	if (cl_video_brightness.value <= 0 || cl_video_brightness.value > 10)
 		Cvar_SetValueQuick( &cl_video_brightness, 1);
 
-	// calc video proportions
 	px = 0;
 	py = 0;
 	sx = vid_conwidth.integer;
 	sy = vid_conheight.integer;
-	st[0] = 0.0; st[1] = 0.0; 
-	st[2] = 1.0; st[3] = 0.0; 
-	st[4] = 0.0; st[5] = 1.0; 
-	st[6] = 1.0; st[7] = 1.0; 
+	st[0] = 0.0; st[1] = 0.0;
+	st[2] = 1.0; st[3] = 0.0;
+	st[4] = 0.0; st[5] = 1.0;
+	st[6] = 1.0; st[7] = 1.0;
 	if (cl_video_keepaspectratio.integer)
 	{
 		float a = video->getaspectratio(video->stream) / ((float)vid.width / (float)vid.height);
 		if (cl_video_keepaspectratio.integer >= 2)
 		{
-			// clip instead of scale
-			if (a < 1.0) // clip horizontally
+
+			if (a < 1.0)
 			{
 				st[1] = st[3] = (1 - a)*0.5;
 				st[5] = st[7] = 1 - (1 - a)*0.5;
 			}
-			else if (a > 1.0) // clip vertically
+			else if (a > 1.0)
 			{
 				st[0] = st[4] = (1 - 1/a)*0.5;
 				st[2] = st[6] = (1/a)*0.5;
 			}
 		}
-		else if (a < 1.0) // scale horizontally
+		else if (a < 1.0)
 		{
 			px += sx * (1 - a) * 0.5;
 			sx *= a;
 		}
-		else if (a > 1.0) // scale vertically
+		else if (a > 1.0)
 		{
 			a = 1 / a;
 			py += sy * (1 - a);
@@ -524,28 +499,26 @@ void CL_DrawVideo(void)
 		sy *= cl_video_scale.value;
 	}
 
-	// calc brightness for fadein and fadeout effects
 	b = cl_video_brightness.value;
 	if (cl_video_fadein.value && (realtime - video->starttime) < cl_video_fadein.value)
 		b = pow((realtime - video->starttime)/cl_video_fadein.value, 2);
 	else if (cl_video_fadeout.value && ((video->starttime + video->framenum * video->framerate) - realtime) < cl_video_fadeout.value)
 		b = pow(((video->starttime + video->framenum * video->framerate) - realtime)/cl_video_fadeout.value, 2);
 
-	// draw black bg in case stipple is active or video is scaled
 	if (cl_video_stipple.integer || px != 0 || py != 0 || sx != vid_conwidth.integer || sy != vid_conheight.integer)
 		DrawQ_Fill(0, 0, vid_conwidth.integer, vid_conheight.integer, 0, 0, 0, 1, 0);
 
 #ifndef USE_GLES2
-	// enable video-only polygon stipple (of global stipple is not active)
+
 	if (qglPolygonStipple && !scr_stipple.integer && cl_video_stipple.integer)
 	{
 		GLubyte stipple[128];
 		int s, width, parts;
-	
+
 		s = cl_video_stipple.integer;
 		parts = (s & 007);
 		width = (s & 070) >> 3;
-		qglEnable(GL_POLYGON_STIPPLE);CHECKGLERROR // 0x0B42
+		qglEnable(GL_POLYGON_STIPPLE);CHECKGLERROR
 		for(i = 0; i < 128; ++i)
 		{
 			int line = i/4;
@@ -555,7 +528,6 @@ void CL_DrawVideo(void)
 	}
 #endif
 
-	// draw video
 	if (v_glslgamma_video.value >= 1)
 		DrawQ_SuperPic(px, py, &video->cpif, sx, sy, st[0], st[1], b, b, b, 1, st[2], st[3], b, b, b, 1, st[4], st[5], b, b, b, 1, st[6], st[7], b, b, b, 1, 0);
 	else
@@ -566,24 +538,22 @@ void CL_DrawVideo(void)
 	}
 
 #ifndef USE_GLES2
-	// disable video-only stipple
+
 	if (qglPolygonStipple && !scr_stipple.integer && cl_video_stipple.integer)
 	{
 		qglDisable(GL_POLYGON_STIPPLE);CHECKGLERROR
 	}
 #endif
 
-	// VorteX: draw subtitle_text
 	if (!video->subtitles || !cl_video_subtitles.integer)
 		return;
 
-	// find current subtitle
 	videotime = realtime - video->starttime;
 	for (i = 0; i < video->subtitles; i++)
 	{
 		if (videotime >= video->subtitle_start[i] && videotime <= video->subtitle_end[i])
 		{
-			// found, draw it
+
 			si.font = FONT_NOTIFY;
 			si.x = vid_conwidth.integer * 0.1;
 			si.y = vid_conheight.integer - (max(1, cl_video_subtitles_lines.value) * cl_video_subtitles_textsize.value);
@@ -591,7 +561,7 @@ void CL_DrawVideo(void)
 			si.height = max(1, cl_video_subtitles_lines.integer) * cl_video_subtitles_textsize.value;
 			si.alignment = 0.5;
 			si.fontsize = cl_video_subtitles_textsize.value;
-			si.textalpha = min(1, (videotime - video->subtitle_start[i])/0.5) * min(1, ((video->subtitle_end[i] - videotime)/0.3)); // fade in and fade out
+			si.textalpha = min(1, (videotime - video->subtitle_start[i])/0.5) * min(1, ((video->subtitle_end[i] - videotime)/0.3));
 			COM_Wordwrap(video->subtitle_text[i], strlen(video->subtitle_text[i]), 0, si.width, CL_DrawVideo_WordWidthFunc, &si, CL_DrawVideo_DisplaySubtitleLine, &si);
 			break;
 		}
@@ -605,10 +575,10 @@ void CL_VideoStart(char *filename, const char *subtitlesfile)
 
 	if( cl_videos->state != CLVIDEO_UNUSED )
 		CL_CloseVideo( cl_videos );
-	// already contains video/
+
 	if( !OpenVideo( cl_videos, filename, va(vabuf, sizeof(vabuf),  CLDYNTEXTUREPREFIX "%s", filename ), 0, subtitlesfile ) )
 		return;
-	// expand the active range to include the new entry
+
 	cl_num_videos = max(cl_num_videos, 1);
 
 	cl_videoplaying = true;
@@ -617,9 +587,9 @@ void CL_VideoStart(char *filename, const char *subtitlesfile)
 	CL_RestartVideo( cl_videos );
 }
 
-void CL_Video_KeyEvent( int key, int ascii, qboolean down ) 
+void CL_Video_KeyEvent( int key, int ascii, qboolean down )
 {
-	// only react to up events, to allow the user to delay the abortion point if it suddenly becomes interesting..
+
 	if( !down ) {
 		if( key == K_ESCAPE || key == K_ENTER || key == K_SPACE ) {
 			CL_VideoStop();
@@ -708,7 +678,6 @@ void CL_Video_Init( void )
 	cl_num_videos = 0;
 	cl_videobytesperpixel = 4;
 
-	// set masks in an endian-independent way (as they really represent bytes)
 	bgra.i = 0;bgra.b[0] = 0xFF;cl_videobmask = bgra.i;
 	bgra.i = 0;bgra.b[1] = 0xFF;cl_videogmask = bgra.i;
 	bgra.i = 0;bgra.b[2] = 0xFF;cl_videormask = bgra.i;

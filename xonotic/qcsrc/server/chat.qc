@@ -17,13 +17,6 @@
 #include <server/weapons/tracing.qh>
 #include <server/world.qh>
 
-/**
- * message "": do not say, just test flood control
- * return value:
- *   1 = accept
- *   0 = reject
- *  -1 = fake accept
- */
 int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodcontrol)
 {
 	if(!autocvar_g_chat_allowed && IS_REAL_CLIENT(source))
@@ -51,14 +44,14 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 	}
 
 	if (!teamsay && !privatesay && substring(msgin, 0, 1) == " ")
-		msgin = substring(msgin, 1, -1); // work around DP say bug (say_team does not have this!)
+		msgin = substring(msgin, 1, -1);
 
 	if (source)
 		msgin = formatmessage(source, msgin);
 
 	string colorstr;
 	if (!(IS_PLAYER(source) || INGAME(source)))
-		colorstr = "^0"; // black for spectators
+		colorstr = "^0";
 	else if(teamplay)
 		colorstr = Team_ColorCode(source.team);
 	else
@@ -74,17 +67,6 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 
 	if(msgin != "")
 		msgin = trigger_magicear_processmessage_forallears(source, teamsay, privatesay, msgin);
-
-	/*
-	 * using bprint solves this... me stupid
-	// how can we prevent the message from appearing in a listen server?
-	// for now, just give "say" back and only handle say_team
-	if(!teamsay)
-	{
-		clientcommand(source, strcat("say ", msgin));
-		return;
-	}
-	*/
 
 	string namestr = "";
 	if (source)
@@ -127,9 +109,7 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 		{
 			if(found_me)
 			{
-				//msgin = strreplace("/me", "", msgin);
-				//msgin = substring(msgin, 3, strlen(msgin));
-				//msgin = strreplace("/me", strcat(colorstr, "(", colorprefix, namestr, colorstr, ")^7"), msgin);
+
 				msgstr = strcat("\{1}\{13}^4* ", "^7", msgin);
 			}
 			else
@@ -140,9 +120,7 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 		{
 			if(found_me)
 			{
-				//msgin = strreplace("/me", "", msgin);
-				//msgin = substring(msgin, 3, strlen(msgin));
-				//msgin = strreplace("/me", strcat(colorprefix, namestr), msgin);
+
 				msgstr = strcat("\{1}^4* ^7", msgin);
 			}
 			else {
@@ -152,13 +130,12 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 			}
 			cmsgstr = "";
 		}
-		msgstr = strcat(strreplace("\n", " ", msgstr), "\n"); // newlines only are good for centerprint
+		msgstr = strcat(strreplace("\n", " ", msgstr), "\n");
 	}
 
 	string fullmsgstr = msgstr;
 	string fullcmsgstr = cmsgstr;
 
-	// FLOOD CONTROL
 	int flood = 0;
 	var .float flood_field = floodcontrol_chat;
 	if(floodcontrol && source)
@@ -186,9 +163,7 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 			flood_field = floodcontrol_chat;
 		}
 		flood_burst = max(0, flood_burst - 1);
-		// to match explanation in default.cfg, a value of 3 must allow three-line bursts and not four!
 
-		// do flood control for the default line size
 		if(msgstr != "")
 		{
 			getWrappedLine_remaining = msgstr;
@@ -196,7 +171,7 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 			int lines = 0;
 			while(getWrappedLine_remaining && (!flood_lmax || lines <= flood_lmax))
 			{
-				msgstr = strcat(msgstr, " ", getWrappedLineLen(82.4289758859709, strlennocol)); // perl averagewidth.pl < gfx/vera-sans.width
+				msgstr = strcat(msgstr, " ", getWrappedLineLen(82.4289758859709, strlennocol));
 				++lines;
 			}
 			msgstr = substring(msgstr, 1, strlen(msgstr) - 1);
@@ -225,12 +200,12 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 				flood = 1;
 		}
 
-		if (timeout_status == TIMEOUT_ACTIVE) // when game is paused, no flood protection
+		if (timeout_status == TIMEOUT_ACTIVE)
 			source.(flood_field) = flood = 0;
 	}
 
 	string sourcemsgstr, sourcecmsgstr;
-	if(flood == 2) // cannot happen for empty msgstr
+	if(flood == 2)
 	{
 		if(autocvar_g_chat_flood_notify_flooder)
 		{
@@ -253,20 +228,19 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 	if (!privatesay && source && !(IS_PLAYER(source) || INGAME(source)) && !game_stopped
 		&& (teamsay || CHAT_NOSPECTATORS()))
 	{
-		teamsay = -1; // spectators
+		teamsay = -1;
 	}
 
 	if(flood)
 		LOG_INFO("NOTE: ", playername(source.netname, source.team, IS_PLAYER(source)), "^7 is flooding.");
 
-	// build sourcemsgstr by cutting off a prefix and replacing it by the other one
 	if(privatesay)
 		sourcemsgstr = strcat(privatemsgprefix, substring(sourcemsgstr, privatemsgprefixlen, -1));
 
 	int ret;
 	if(source && CS(source).muted)
 	{
-		// always fake the message
+
 		ret = -1;
 	}
 	else if(flood == 1)
@@ -287,7 +261,7 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 	if (privatesay && source && !(IS_PLAYER(source) || INGAME(source)) && !game_stopped
 		&& (IS_PLAYER(privatesay) || INGAME(privatesay)) && CHAT_NOSPECTATORS())
 	{
-		ret = -1; // just hide the message completely
+		ret = -1;
 	}
 
 	MUTATOR_CALLHOOK(ChatMessage, source, ret);
@@ -297,20 +271,20 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 
 	if(sourcemsgstr != "" && ret != 0)
 	{
-		if(ret < 0) // faked message, because the player is muted
+		if(ret < 0)
 		{
 			sprint(source, sourcemsgstr);
 			if(sourcecmsgstr != "" && !privatesay)
 				centerprint(source, sourcecmsgstr);
 		}
-		else if(privatesay) // private message, between 2 people only
+		else if(privatesay)
 		{
 			sprint(source, sourcemsgstr);
-			if (!autocvar_g_chat_tellprivacy) { dedicated_print(msgstr); } // send to server console too if "tellprivacy" is disabled
+			if (!autocvar_g_chat_tellprivacy) { dedicated_print(msgstr); }
 			if(!MUTATOR_CALLHOOK(ChatMessageTo, privatesay, source))
 			{
-				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, privatesay)) // check ignored players from personal chat log (from "ignore" command)
-					return -1; // no sending to this player, thank you very much
+				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, privatesay))
+					return -1;
 
 				sprint(privatesay, msgstr);
 				if(cmsgstr != "")
@@ -320,25 +294,25 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 		else if ( teamsay && CS(source).active_minigame )
 		{
 			sprint(source, sourcemsgstr);
-			dedicated_print(msgstr); // send to server console too
+			dedicated_print(msgstr);
 			FOREACH_CLIENT(IS_REAL_CLIENT(it) && it != source && CS(it).active_minigame == CS(source).active_minigame && !MUTATOR_CALLHOOK(ChatMessageTo, it, source), {
-				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it)) // check ignored players from personal chat log (from "ignore" command)
-					continue; // no sending to this player, thank you very much
+				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it))
+					continue;
 
 				sprint(it, msgstr);
 			});
 			event_log_msg = sprintf(":chat_minigame:%d:%s:%s", source.playerid, CS(source).active_minigame.netname, msgin);
 
 		}
-		else if(teamsay > 0) // team message, only sent to team mates
+		else if(teamsay > 0)
 		{
 			sprint(source, sourcemsgstr);
-			dedicated_print(msgstr); // send to server console too
+			dedicated_print(msgstr);
 			if(sourcecmsgstr != "")
 				centerprint(source, sourcecmsgstr);
 			FOREACH_CLIENT((IS_PLAYER(it) || INGAME(it)) && IS_REAL_CLIENT(it) && it != source && it.team == source.team && !MUTATOR_CALLHOOK(ChatMessageTo, it, source), {
-				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it)) // check ignored players from personal chat log (from "ignore" command)
-					continue; // no sending to this player, thank you very much
+				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it))
+					continue;
 
 				sprint(it, msgstr);
 				if(cmsgstr != "")
@@ -346,13 +320,13 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 			});
 			event_log_msg = sprintf(":chat_team:%d:%d:%s", source.playerid, source.team, strreplace("\n", " ", msgin));
 		}
-		else if(teamsay < 0) // spectator message, only sent to spectators
+		else if(teamsay < 0)
 		{
 			sprint(source, sourcemsgstr);
-			dedicated_print(msgstr); // send to server console too
+			dedicated_print(msgstr);
 			FOREACH_CLIENT(!(IS_PLAYER(it) || INGAME(it)) && IS_REAL_CLIENT(it) && it != source && !MUTATOR_CALLHOOK(ChatMessageTo, it, source), {
-				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it)) // check ignored players from personal chat log (from "ignore" command)
-					continue; // no sending to this player, thank you very much
+				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it))
+					continue;
 
 				sprint(it, msgstr);
 			});
@@ -362,12 +336,12 @@ int Say(entity source, int teamsay, entity privatesay, string msgin, bool floodc
 		{
 			if (source) {
 				sprint(source, sourcemsgstr);
-				dedicated_print(msgstr); // send to server console too
+				dedicated_print(msgstr);
 				MX_Say(strcat(playername(source.netname, source.team, IS_PLAYER(source)), "^7: ", msgin));
 			}
 			FOREACH_CLIENT(IS_REAL_CLIENT(it) && it != source && !MUTATOR_CALLHOOK(ChatMessageTo, it, source), {
-				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it)) // check ignored players from personal chat log (from "ignore" command)
-					continue; // no sending to this player, thank you very much
+				if(IS_REAL_CLIENT(source) && ignore_playerinlist(source, it))
+					continue;
 
 				sprint(it, msgstr);
 			});
@@ -404,8 +378,6 @@ entity findnearest(vector point, bool checkitems, vector axismod)
                 break;
         }
 
-        // now i tells us where to insert at
-        //   INSERTION SORT! YOU'VE SEEN IT! RUN!
         if (l < NUM_NEAREST_ENTITIES)
         {
             for (int j = NUM_NEAREST_ENTITIES - 1; j >= l; --j)
@@ -420,7 +392,6 @@ entity findnearest(vector point, bool checkitems, vector axismod)
         }
     });
 
-    // now use the first one from our list that we can see
     for (int j = 0; j < num_nearest; ++j)
     {
         traceline(point, nearest_entity[j].origin, true, NULL);
@@ -436,16 +407,6 @@ entity findnearest(vector point, bool checkitems, vector axismod)
         return NULL;
 
     LOG_TRACE("Not seeing any location point, using nearest as fallback.");
-    /* DEBUGGING CODE:
-    dprint("Candidates were: ");
-    for(j = 0; j < num_nearest; ++j)
-    {
-    	if(j != 0)
-    		dprint(", ");
-    	dprint(nearest_entity[j].netname);
-    }
-    dprint("\n");
-    */
 
     return nearest_entity[0];
 }
@@ -486,7 +447,7 @@ string WeaponNameFromWeaponentity(entity this, .entity weaponentity)
 		return wepent.m_weapon.m_name;
 	else if(wepent.m_switchweapon != WEP_Null)
 		return wepent.m_switchweapon.m_name;
-	return "none"; //REGISTRY_GET(Weapons, wepent.cnt).m_name;
+	return "none";
 }
 
 string formatmessage(entity this, string msg)
@@ -506,11 +467,11 @@ string formatmessage(entity this, string msg)
 
 	while (1) {
 		if (n < 1)
-			break; // too many replacements
+			break;
 
 		n = n - 1;
-		p1 = strstrofs(msg, "%", p); // NOTE: this destroys msg as it's a tempstring!
-		p2 = strstrofs(msg, "\\", p); // NOTE: this destroys msg as it's a tempstring!
+		p1 = strstrofs(msg, "%", p);
+		p2 = strstrofs(msg, "\\", p);
 
 		if (p1 < 0)
 			p1 = p2;
@@ -534,7 +495,7 @@ string formatmessage(entity this, string msg)
 		replacement = substring(msg, p, 2);
 		escape = substring(msg, p + 1, 1);
 
-		.entity weaponentity = weaponentities[0]; // TODO: unhardcode
+		.entity weaponentity = weaponentities[0];
 
 		switch(escape)
 		{

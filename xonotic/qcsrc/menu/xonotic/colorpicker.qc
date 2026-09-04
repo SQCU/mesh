@@ -22,7 +22,6 @@ METHOD(XonoticColorpicker, mousePress, bool(XonoticColorpicker this, vector pos)
 	return true;
 }
 
-// must match hslimage.c
 vector hslimage_color(vector v, vector margin)
 {
     v_x = (v.x - margin.x) / (1 - 2 * margin.x);
@@ -31,7 +30,7 @@ vector hslimage_color(vector v, vector margin)
     if(v.y < 0) v_y = 0;
     if(v.x > 1) v_x = 1;
     if(v.y > 1) v_y = 1;
-    if(v.y > 0.875) // grey bar
+    if(v.y > 0.875)
         return hsl_to_rgb(eZ * v.x);
     else
         return hsl_to_rgb(v.x * 6 * eX + eY + v.y / 0.875 * eZ);
@@ -46,7 +45,7 @@ vector color_hslimage(vector v, vector margin)
 		pos_x = v.x / 6;
 		pos_y = v.z * 0.875;
 	}
-	else // grey scale
+	else
 	{
 		pos_x = v.z;
 		pos_y = 0.875 + 0.07;
@@ -77,7 +76,7 @@ float XonoticColorpicker_mouseDrag(entity me, vector coords)
 	if(substring(me.controlledTextbox.text, i-1, 1) == "^")
 	{
 		if(!isCaretEscaped(me.controlledTextbox.text, i-1))
-			me.controlledTextbox.enterText(me.controlledTextbox, "^"); // escape previous caret
+			me.controlledTextbox.enterText(me.controlledTextbox, "^");
 	}
 
 	vector margin;
@@ -113,10 +112,6 @@ void XonoticColorpicker_draw(entity me)
 	float B, C, aC;
 	C = cvar("r_textcontrast");
 	B = cvar("r_textbrightness");
-
-	// for this to work, C/(1-B) must be in 0..1
-	// B must be < 1
-	// C must be < 1-B
 
 	B = bound(0, B, 1);
 	C = bound(0, C, 1-B);

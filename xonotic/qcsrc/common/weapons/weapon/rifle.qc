@@ -12,7 +12,7 @@ void W_Rifle_FireBullet(Weapon thiswep, .entity weaponentity, float pSpread, flo
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir * 2);
 
-	if(PHYS_INPUT_BUTTON_ZOOM(actor) | PHYS_INPUT_BUTTON_ZOOMSCRIPT(actor)) // if zoomed, shoot from the eye
+	if(PHYS_INPUT_BUTTON_ZOOM(actor) | PHYS_INPUT_BUTTON_ZOOMSCRIPT(actor))
 	{
 		w_shotdir = v_forward;
 		w_shotorg = actor.origin + actor.view_ofs + ((w_shotorg - actor.origin - actor.view_ofs) * v_forward) * v_forward;
@@ -23,7 +23,7 @@ void W_Rifle_FireBullet(Weapon thiswep, .entity weaponentity, float pSpread, flo
 
 	if(autocvar_g_casings >= 2)
 	{
-		makevectors(actor.v_angle); // for some reason, this is lost
+		makevectors(actor.v_angle);
 		SpawnCasing(((random() * 50 + 50) * v_right) - (v_forward * (random() * 25 + 25)) - ((random() * 5 - 70) * v_up), vectoangles(v_forward), 3, actor, weaponentity);
 	}
 }
@@ -46,7 +46,7 @@ void W_Rifle_BulletHail_Continue(Weapon thiswep, entity actor, .entity weaponent
 {
 	float r, af;
 
-	Weapon sw = actor.(weaponentity).m_switchweapon; // make it not detect weapon changes as reason to abort firing
+	Weapon sw = actor.(weaponentity).m_switchweapon;
 	af = ATTACK_FINISHED(actor, weaponentity);
 	actor.(weaponentity).m_switchweapon = actor.(weaponentity).m_weapon;
 	ATTACK_FINISHED(actor, weaponentity) = time;
@@ -60,17 +60,17 @@ void W_Rifle_BulletHail_Continue(Weapon thiswep, entity actor, .entity weaponent
 	}
 	else
 	{
-		ATTACK_FINISHED(actor, weaponentity) = af; // reset attack_finished if we didn't fire, so the last shot enforces the refire time
+		ATTACK_FINISHED(actor, weaponentity) = af;
 	}
 }
 
 void W_Rifle_BulletHail(Weapon thiswep, entity actor, .entity weaponentity, float mode, void(Weapon thiswep, entity actor, .entity weaponentity) AttackFunc, WFRAME fr, float animtime, float refire)
 {
-	// if we get here, we have at least one bullet to fire
+
 	AttackFunc(thiswep, actor, weaponentity);
 	if(mode)
 	{
-		// continue hail
+
 		actor.rifle_bullethail_attackfunc = AttackFunc;
 		actor.rifle_bullethail_frame = fr;
 		actor.rifle_bullethail_animtime = animtime;
@@ -79,7 +79,7 @@ void W_Rifle_BulletHail(Weapon thiswep, entity actor, .entity weaponentity, floa
 	}
 	else
 	{
-		// just one shot
+
 		weapon_thinkf(actor, weaponentity, fr, animtime, w_ready);
 	}
 }
@@ -111,7 +111,7 @@ METHOD(Rifle, wr_aim, void(entity thiswep, entity actor, .entity weaponentity))
 }
 METHOD(Rifle, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    if(autocvar_g_balance_rifle_reload_ammo && actor.(weaponentity).clip_load < min(WEP_CVAR_PRI(rifle, ammo), WEP_CVAR_SEC(rifle, ammo))) { // forced reload
+    if(autocvar_g_balance_rifle_reload_ammo && actor.(weaponentity).clip_load < min(WEP_CVAR_PRI(rifle, ammo), WEP_CVAR_SEC(rifle, ammo))) {
         thiswep.wr_reload(thiswep, actor, weaponentity);
     } else
     {
@@ -221,7 +221,7 @@ METHOD(Rifle, wr_zoom, bool(entity thiswep, entity actor))
     }
     else
     {
-        // no weapon specific image for this weapon
+
         return false;
     }
 }

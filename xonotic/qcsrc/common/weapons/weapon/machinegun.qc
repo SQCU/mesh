@@ -10,7 +10,7 @@ void W_MachineGun_Attack(Weapon thiswep, int deathtype, entity actor, .entity we
 		actor.punchangle_x = random() - 0.5;
 		actor.punchangle_y = random() - 0.5;
 	}
-	// this attack_finished just enforces a cooldown at the end of a burst
+
 	ATTACK_FINISHED(actor, weaponentity) = time + WEP_CVAR(machinegun, first_refire) * W_WeaponRateFactor(actor);
 
 	if(actor.(weaponentity).misc_bulletcounter == 1)
@@ -20,10 +20,9 @@ void W_MachineGun_Attack(Weapon thiswep, int deathtype, entity actor, .entity we
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir);
 
-	// casing code
 	if(autocvar_g_casings >= 2)
 	{
-		makevectors(actor.v_angle); // for some reason, this is lost
+		makevectors(actor.v_angle);
 		SpawnCasing(((random() * 50 + 50) * v_right) - (v_forward * (random() * 25 + 25)) - ((random() * 5 - 70) * v_up), vectoangles(v_forward), 3, actor, weaponentity);
 	}
 
@@ -33,10 +32,9 @@ void W_MachineGun_Attack(Weapon thiswep, int deathtype, entity actor, .entity we
 		W_DecreaseAmmo(thiswep, actor, WEP_CVAR(machinegun, sustained_ammo), weaponentity);
 }
 
-// weapon frames
 void W_MachineGun_Attack_Frame(Weapon thiswep, entity actor, .entity weaponentity, int fire)
 {
-	if(actor.(weaponentity).m_weapon != actor.(weaponentity).m_switchweapon || !weapon_prepareattack_check(thiswep, actor, weaponentity, (fire & 2), -1)) // abort immediately if switching
+	if(actor.(weaponentity).m_weapon != actor.(weaponentity).m_switchweapon || !weapon_prepareattack_check(thiswep, actor, weaponentity, (fire & 2), -1))
 	{
 		w_ready(thiswep, actor, weaponentity, fire);
 		return;
@@ -57,7 +55,6 @@ void W_MachineGun_Attack_Frame(Weapon thiswep, entity actor, .entity weaponentit
 	else
 		weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, WEP_CVAR(machinegun, sustained_refire), w_ready);
 }
-
 
 void W_MachineGun_Attack_Auto(Weapon thiswep, entity actor, .entity weaponentity, int fire)
 {
@@ -93,9 +90,9 @@ void W_MachineGun_Attack_Auto(Weapon thiswep, entity actor, .entity weaponentity
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir);
 
-	if(autocvar_g_casings >= 2) // casing code
+	if(autocvar_g_casings >= 2)
 	{
-		makevectors(actor.v_angle); // for some reason, this is lost
+		makevectors(actor.v_angle);
 		SpawnCasing(((random() * 50 + 50) * v_right) - (v_forward * (random() * 25 + 25)) - ((random() * 5 - 70) * v_up), vectoangles(v_forward), 3, actor, weaponentity);
 	}
 
@@ -116,9 +113,9 @@ void W_MachineGun_Attack_Burst(Weapon thiswep, entity actor, .entity weaponentit
 
 	W_MuzzleFlash(thiswep, actor, weaponentity, w_shotorg, w_shotdir);
 
-	if(autocvar_g_casings >= 2) // casing code
+	if(autocvar_g_casings >= 2)
 	{
-		makevectors(actor.v_angle); // for some reason, this is lost
+		makevectors(actor.v_angle);
 		SpawnCasing(((random() * 50 + 50) * v_right) - (v_forward * (random() * 25 + 25)) - ((random() * 5 - 70) * v_up), vectoangles(v_forward), 3, actor, weaponentity);
 	}
 
@@ -144,7 +141,7 @@ METHOD(MachineGun, wr_aim, void(entity thiswep, entity actor, .entity weaponenti
 }
 METHOD(MachineGun, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    // forced reload - wait until the bulletcounter is 0 so a burst loop can finish
+
     if(WEP_CVAR(machinegun, reload_ammo)
         && actor.(weaponentity).clip_load < min(max(WEP_CVAR(machinegun, sustained_ammo), WEP_CVAR(machinegun, first_ammo)), WEP_CVAR(machinegun, burst_ammo))
         && actor.(weaponentity).misc_bulletcounter >= 0)
@@ -160,7 +157,6 @@ METHOD(MachineGun, wr_think, void(entity thiswep, entity actor, .entity weaponen
             W_MachineGun_Attack_Auto(thiswep, actor, weaponentity, fire);
         }
 
-        // You can "shoot" more rounds than what's "used", and vice versa.
         if(fire & 2)
         if(weapon_prepareattack(thiswep, actor, weaponentity, true, 0))
         {
@@ -182,16 +178,12 @@ METHOD(MachineGun, wr_think, void(entity thiswep, entity actor, .entity weaponen
                 ammo_available = GetResource(actor, thiswep.ammo_type);
             }
 
-            // We don't want to shoot 3 rounds if there's 2 left in the mag, so we'll use a fraction.
-            // Also keep the fraction <= 1 otherwise we'd mag dump in one burst.
             float burst_fraction = min(1, ammo_available / WEP_CVAR(machinegun, burst_ammo));
             int to_shoot = floor(WEP_CVAR(machinegun, burst) * burst_fraction);
 
-            // We also don't want to use 3 rounds if there's only 2 left.
             int to_use = min(WEP_CVAR(machinegun, burst_ammo), ammo_available);
             W_DecreaseAmmo(thiswep, actor, to_use, weaponentity);
 
-            // Bursting counts up to 0 from a negative.
             actor.(weaponentity).misc_bulletcounter = -to_shoot;
             W_MachineGun_Attack_Burst(thiswep, actor, weaponentity, fire);
         }
@@ -203,7 +195,7 @@ METHOD(MachineGun, wr_think, void(entity thiswep, entity actor, .entity weaponen
         if(weapon_prepareattack(thiswep, actor, weaponentity, false, 0))
         {
             actor.(weaponentity).misc_bulletcounter = 1;
-            W_MachineGun_Attack(thiswep, thiswep.m_id, actor, weaponentity); // sets attack_finished
+            W_MachineGun_Attack(thiswep, thiswep.m_id, actor, weaponentity);
             weapon_thinkf(actor, weaponentity, WFRAME_FIRE1, WEP_CVAR(machinegun, sustained_refire), W_MachineGun_Attack_Frame);
         }
 
@@ -211,7 +203,7 @@ METHOD(MachineGun, wr_think, void(entity thiswep, entity actor, .entity weaponen
         if(weapon_prepareattack(thiswep, actor, weaponentity, true, 0))
         {
             actor.(weaponentity).misc_bulletcounter = 1;
-            W_MachineGun_Attack(thiswep, thiswep.m_id | HITTYPE_SECONDARY, actor, weaponentity); // sets attack_finished
+            W_MachineGun_Attack(thiswep, thiswep.m_id | HITTYPE_SECONDARY, actor, weaponentity);
             weapon_thinkf(actor, weaponentity, WFRAME_FIRE2, WEP_CVAR(machinegun, first_refire), w_ready);
         }
     }

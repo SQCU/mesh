@@ -1,6 +1,5 @@
 #include "cl_minigames.qh"
 
-// Draw a square in the center of the avaliable area
 void minigame_hud_simpleboard(vector pos, vector mySize, string board_texture)
 {
 	if(panel.current_panel_bg != "0" && panel.current_panel_bg != "")
@@ -12,14 +11,13 @@ void minigame_hud_simpleboard(vector pos, vector mySize, string board_texture)
 	drawpic(pos, board_texture, mySize, '1 1 1', panel_bg_alpha, DRAWFLAG_NORMAL);
 }
 
-// De-normalize (2D vector) v from relative coordinate inside pos mySize
 vector minigame_hud_denormalize(vector v, vector pos, vector mySize)
 {
 	v_x = pos_x + v_x * mySize_x;
 	v_y = pos_y + v_y * mySize_y;
 	return v;
 }
-// De-normalize (2D vector) v from relative size inside pos mySize
+
 vector minigame_hud_denormalize_size(vector v, vector pos, vector mySize)
 {
 	v_x = v_x * mySize_x;
@@ -27,7 +25,6 @@ vector minigame_hud_denormalize_size(vector v, vector pos, vector mySize)
 	return v;
 }
 
-// Normalize (2D vector) v to relative coordinate inside pos mySize
 vector minigame_hud_normalize(vector v, vector pos, vector mySize)
 {
 	v_x = ( v_x - pos_x ) / mySize_x;
@@ -35,7 +32,6 @@ vector minigame_hud_normalize(vector v, vector pos, vector mySize)
 	return v;
 }
 
-// Check if the mouse is inside the given area
 bool minigame_hud_mouse_in(vector pos, vector sz)
 {
 	return mousepos_x >= pos_x && mousepos_x < pos_x + sz_x &&
@@ -220,13 +216,13 @@ NET_HANDLE(ENT_CLIENT_MINIGAME, bool isnew)
 		minigame_ent = this.owner;
 
 		if ( sf & MINIG_SF_UPDATE )
-			this.team = ReadByte();
+			this.team = ReadShort();
 
 		if ( activate )
 		{
 			minigame_self = this;
 			activate_minigame(this.owner);
-			minigame_self = this; // set it again (needed before, but may also be reset)
+			minigame_self = this;
 		}
 	}
 	MINIGAME_SIMPLELINKED_ENTITIES
@@ -253,7 +249,7 @@ string minigame_getWrappedLine(float w, vector theFontSize, textLengthUpToWidth_
 	if(w <= 0)
 	{
 		getWrappedLine_remaining = string_null;
-		return s; // the line has no size ANYWAY, nothing would be displayed.
+		return s;
 	}
 
 	int take_until = textLengthUpToWidth(s, w, theFontSize, tw);
@@ -357,8 +353,6 @@ void minigame_drawpic_centered( vector pos, string texture, vector sz,
 	drawpic( pos-sz/2, texture, sz, color, thealpha, drawflags );
 }
 
-// Workaround because otherwise variadic arguments won't work properly
-// It could be a bug in the compiler or in darkplaces
 void minigame_cmd_workaround(float dummy, string...cmdargc)
 {
 	string cmd;
@@ -369,8 +363,6 @@ void minigame_cmd_workaround(float dummy, string...cmdargc)
 	localcmd(strcat(cmd,"\n"));
 }
 
-// Prompt the player to play in the current minigame
-// (ie: it's their turn and they should get back to the minigame)
 void minigame_prompt()
 {
 	if ( active_minigame && ! HUD_MinigameMenu_IsOpened() )
@@ -380,17 +372,16 @@ void minigame_prompt()
 	}
 }
 
-// handle commands etc.
 REGISTER_MUTATOR(minigames, true);
 
 MUTATOR_HOOKFUNCTION(minigames, HUD_Command)
 {
-	if(MUTATOR_RETURNVALUE) { return false; } // command was already handled
+	if(MUTATOR_RETURNVALUE) { return false; }
 
 	if(argv(1) == "minigame")
 	{
 		if (isdemo())
-			return true; // minigames can't function properly in demo mode
+			return true;
 		if (HUD_MinigameMenu_IsOpened())
 			HUD_MinigameMenu_Close(NULL, NULL, NULL);
 		else

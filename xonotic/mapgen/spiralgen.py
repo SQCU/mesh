@@ -1,22 +1,5 @@
-"""spiralgen.py -- procedural helical-tunnel .map generator for Xonotic / idTech3.
-
-Geometry kernel is deliberately tiny: every solid is a *convex brush built by
-construction*, so no CSG library and no convex decomposition are ever needed.
-
-    swept surface -> quad strip -> 2 triangles -> extrude each triangle
-                  along a fixed offset vector -> triangular prism (5 planes)
-
-A triangular prism extruded along a constant vector is convex for ANY input
-triangle, so an arbitrarily curved sweep (helix, cone, torus knot, ...) becomes
-a pile of legal brushes with zero geometric failure modes.  Everything else in
-this file is bookkeeping.
-
-Output is a plain .map for q3map2 (-game xonotic).  q3map2 then supplies BSP,
-VIS, lightmaps and collision -- none of which we have to synthesize ourselves.
-"""
 import argparse, json, math, os, random, sys
 
-# ---------------------------------------------------------------- vector math
 def vadd(a, b):  return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 def vsub(a, b):  return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 def vmul(a, s):  return (a[0] * s, a[1] * s, a[2] * s)
@@ -28,24 +11,11 @@ def vnorm(a):
     L = vlen(a)
     return (a[0] / L, a[1] / L, a[2] / L) if L > 1e-9 else (0.0, 0.0, 0.0)
 
-
-# ---------------------------------------------------------------- .map writing
 def fmt(x):
-    """idTech .map wants integers where possible; q3map2 snaps planes anyway."""
     r = round(x, 4)
     return str(int(r)) if abs(r - round(r)) < 1e-6 else ('%.4f' % r)
 
-
 class Brush:
-    """A convex solid, stored as faces.  Faces are (points, texture).
-
-    Point winding is never trusted: normals are derived and then flipped to
-    point away from the brush centroid, which is correct for any convex solid.
-    q3map2 computes  n = (p2 - p0) x (p1 - p0)  and treats the interior as the
-    negative halfspace (see netradiant-custom tools/quake3/common/qmath.h:196),
-    so an outward-facing plane is emitted as (v0, v2, v1) for CCW-from-outside
-    input -- we just resolve the sign numerically instead of reasoning about it.
-    """
 
     def __init__(self, detail=False):
         self.faces = []
@@ -61,15 +31,15 @@ class Brush:
         return (sum(p[0] for p in allp) / n, sum(p[1] for p in allp) / n, sum(p[2] for p in allp) / n)
 
     def to_map(self, scale=0.5):
-        cflags = 134217728 if self.detail else 0   # CONTENTS_DETAIL
+        cflags = 134217728 if self.detail else 0
         c = self.centroid()
         out = ['{']
         for pts, tex in self.faces:
             p0, p1, p2 = pts[0], pts[1], pts[2]
             n = vnorm(vcross(vsub(p2, p0), vsub(p1, p0)))
             if vlen(n) < 1e-9:
-                continue                                  # degenerate, drop it
-            if vdot(n, vsub(c, p0)) > 0:                   # normal points inward
+                continue
+            if vdot(n, vsub(c, p0)) > 0:
                 p1, p2 = p2, p1
             out.append('( %s %s %s ) ( %s %s %s ) ( %s %s %s ) %s 0 0 0 %g %g %d 0 0' % (
                 fmt(p0[0]), fmt(p0[1]), fmt(p0[2]),
@@ -78,15 +48,9 @@ class Brush:
         out.append('}')
         return '\n'.join(out)
 
-
 def tri_prism(a, b, c, v, tex_cap, tex_side, detail=False):
-    """Triangle (a,b,c) extruded by vector v -> a convex 5-sided brush.
-
-    Convex for any non-degenerate triangle and any non-parallel v, which is the
-    whole reason this is the only primitive the generator needs.
-    """
     if vlen(vcross(vsub(b, a), vsub(c, a))) < 1e-6:
-        return None                                        # slivers help nobody
+        return None
     a2, b2, c2 = vadd(a, v), vadd(b, v), vadd(c, v)
     br = Brush(detail)
     br.add_face([a, b, c], tex_cap)
@@ -96,9 +60,7 @@ def tri_prism(a, b, c, v, tex_cap, tex_side, detail=False):
     br.add_face([c, a, a2, c2], tex_side)
     return br
 
-
 def quad_prism(a, b, c, d, v, tex_cap, tex_side, detail=False):
-    """Planar quad (a,b,c,d) extruded by v -> a convex 6-sided brush."""
     a2, b2, c2, d2 = vadd(a, v), vadd(b, v), vadd(c, v), vadd(d, v)
     br = Brush(detail)
     br.add_face([a, b, c, d], tex_cap)
@@ -107,24 +69,15 @@ def quad_prism(a, b, c, d, v, tex_cap, tex_side, detail=False):
         br.add_face([p, q, q2, p2], tex_side)
     return br
 
-
 def coplanar(a, b, c, d, eps=0.01):
     n = vcross(vsub(b, a), vsub(c, a))
     L = vlen(n)
     return L > 1e-9 and abs(vdot(n, vsub(d, a))) / L < eps
 
-
 def strip(ring_lo, ring_hi, offset_fn, tex_cap, tex_side, detail=False, skip=()):
-    """Quad strip between two vertex rings.
-
-    A planar quad becomes one 6-sided brush; a non-planar one (which is what a
-    helical floor always produces -- two radial edges at different heights are
-    skew, so their quad cannot be flat) is split into two triangles first.  The
-    extrusion keeps both cases convex by construction.
-    """
     out = []
     for i in range(len(ring_lo) - 1):
-        if i in skip:            # an APERTURE: this segment of shell is simply absent
+        if i in skip:
             continue
         p00, p01 = ring_lo[i], ring_lo[i + 1]
         p10, p11 = ring_hi[i], ring_hi[i + 1]
@@ -138,40 +91,28 @@ def strip(ring_lo, ring_hi, offset_fn, tex_cap, tex_side, detail=False, skip=())
                     out.append(br)
     return out
 
-
-# ---------------------------------------------------------------- the spiral
 class Spiral:
     def __init__(self, args):
         self.a = args
         self.rng = random.Random(args.seed)
 
     def frame(self, t):
-        """Centerline point + local radial/tangent basis at parameter t in [0,1]."""
         a = self.a
         th = 2.0 * math.pi * a.turns * t * (1 if a.handed > 0 else -1)
-        # seeded wobble keeps a randomizer honest without breaking convexity
+
         wob = 1.0 + a.wobble * math.sin(th * a.wobble_freq + self.phase)
         r = (a.radius + a.radius_growth * a.turns * t) * wob
         z = a.rise * a.turns * t
-        u = (math.cos(th), math.sin(th), 0.0)               # outward radial
+        u = (math.cos(th), math.sin(th), 0.0)
         c = (r * u[0], r * u[1], z)
         return c, u
 
     def aperture_spans(self, n):
-        """Segment ranges where the OUTER shell is absent -- the connection sites.
-
-        An aperture is a parameter of the sweep, not a volume carved out of a
-        compiled artifact afterwards (design/MAPGEN-ROADMAP.md stage 2). Because
-        it is chosen here, its facing, its free volume and the vantage points
-        looking through it are all known by construction -- there is nothing to
-        recover later by ray marching, and nothing that can disagree with the
-        geometry, because it IS the geometry.
-        """
         k = int(self.a.apertures)
         if k <= 0:
             return []
         w = max(1, int(self.a.aperture_segments))
-        lo, hi = 2, n - 2 - w                      # never on an end cap
+        lo, hi = 2, n - 2 - w
         if hi <= lo:
             return []
         return [(lo + int((hi - lo) * (j + 0.5) / k), w) for j in range(k)]
@@ -182,8 +123,7 @@ class Spiral:
         n = int(a.turns * a.segments) + 1
         hw, T = a.width * 0.5, a.thickness
 
-        # four vertex rings: the tube's interior corners, plus outer shells
-        ib, ob, it_, ot = [], [], [], []                    # in/out x bottom/top
+        ib, ob, it_, ot = [], [], [], []
         centers, radials = [], []
         for i in range(n):
             t = i / float(n - 1)
@@ -200,10 +140,7 @@ class Spiral:
         TEXF, TEXW, TEXC = a.tex_floor, a.tex_wall, a.tex_ceil
         CAULK = 'common/caulk'
 
-        # floor slab: spans the full width incl. wall thickness, extruded down.
-        # The deliberate corner overlap with the walls is what makes the shell
-        # leak-proof without any mitre logic.
-        OV = T * a.overlap          # generous overrun, see note below
+        OV = T * a.overlap
         fb = [vadd(p, vmul(radials[i], -OV)) for i, p in enumerate(ib)]
         fo = [vadd(p, vmul(radials[i], +OV)) for i, p in enumerate(ob)]
         brushes += strip(fb, fo, lambda i: (0, 0, -T), TEXF, CAULK)
@@ -212,7 +149,6 @@ class Spiral:
         co = [vadd(p, vmul(radials[i], +OV)) for i, p in enumerate(ot)]
         brushes += strip(cb, co, lambda i: (0, 0, T), TEXC, CAULK)
 
-        # walls: full height (z-T .. z+H+T) so they cover the floor/ceiling corners
         wb = [vadd(p, (0, 0, -OV)) for p in ib]
         wt = [vadd(p, (0, 0, OV)) for p in it_]
         brushes += strip(wb, wt, lambda i: vmul(radials[i], -T), TEXW, CAULK)
@@ -222,37 +158,25 @@ class Spiral:
         holes = set(i for s0, w in spans for i in range(s0, s0 + w))
         brushes += strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK, skip=holes)
 
-        # Each aperture gets a PLUG built from the identical strip, kept in a
-        # separate list. Standalone the plug ships and the shell is sealed; a join
-        # drops the plug and mates a connector to the mouth. Same geometry either
-        # way, so a joined map cannot differ from the one that was validated.
         self.plugs = [strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK,
                             skip=set(range(n - 1)) - set(range(s0, s0 + w)))
                       for s0, w in spans]
         self.apertures = []
         for j, (s0, w) in enumerate(spans):
-            # Aim at the CENTRE of a segment, not at a ring vertex. centers[i] is
-            # the boundary between strip segments i-1 and i, so a purely radial
-            # ray cast there runs exactly along the shared face of two abutting
-            # brushes -- and an exact solidity test can pass straight through
-            # that seam. It did: seed 23 aperture 3 reported its mouth correctly
-            # sealed while the sightline through it stayed clear, because the
-            # ray threaded the crack between the two plug brushes rather than
-            # missing the plug. Sampling hid this; exactness exposed it.
+
             mid = s0 + w // 2
             nxt = min(mid + 1, len(centers) - 1)
             c = tuple(0.5 * (centers[mid][k] + centers[nxt][k]) for k in range(3))
             u = vnorm(tuple(0.5 * (radials[mid][k] + radials[nxt][k]) for k in range(3)))
-            mouth = vadd(c, vmul(u, hw + T))            # centre of the opening
+            mouth = vadd(c, vmul(u, hw + T))
             self.apertures.append({
                 'id': j,
                 'origin': [round(v, 2) for v in mouth],
-                'normal': [round(v, 4) for v in u],     # outward, into free space
+                'normal': [round(v, 4) for v in u],
                 'width': round(vlen(vsub(centers[s0 + w], centers[s0])), 2),
                 'height': round(a.height, 2),
                 'segments': [s0, s0 + w],
-                # vantages: eye inside looking out, and outside looking in. These
-                # are what joinshot turns into info_autoscreenshot entities.
+
                 'vantages': [
                     {'origin': [round(v, 2) for v in vadd(vadd(c, vmul(u, -hw * 0.5)), (0, 0, 40.0))],
                      'angles': [0.0, round(math.degrees(math.atan2(u[1], u[0])) % 360.0, 2), 0.0],
@@ -263,7 +187,6 @@ class Spiral:
                 ],
             })
 
-        # end caps seal the tube; without these the map leaks at both mouths
         for idx, sgn in ((0, -1), (n - 1, +1)):
             c, u = centers[idx], radials[idx]
             tan = vnorm(vsub(centers[min(idx + 1, n - 1)], centers[max(idx - 1, 0)]))
@@ -298,7 +221,7 @@ class Spiral:
             ents.append(('light',
                          {'origin': '%s %s %s' % (fmt(c[0]), fmt(c[1]), fmt(c[2] + a.height - 24)),
                           'light': str(a.light_intensity)}))
-        # weapons/items sprinkled along the climb so the tunnel plays as a route
+
         pool = ['weapon_machinegun', 'weapon_grenadelauncher', 'weapon_electro',
                 'weapon_vortex', 'item_armor_small', 'item_health_medium',
                 'weapon_rocketlauncher', 'item_bullets', 'item_rockets']
@@ -309,15 +232,7 @@ class Spiral:
                          {'origin': '%s %s %s' % (fmt(c[0]), fmt(c[1]), fmt(c[2] + 24))}))
         return ents
 
-
-# ---------------------------------------------------------------- emit
 def write_waypoints(path, centers, spacing=320.0):
-    """Xonotic bot waypoints: 3 lines each (min origin, max origin, flags).
-
-    A corridor's waypoint graph is just its centerline resampled, so a swept
-    tunnel gets bot navigation for free -- the engine links consecutive
-    waypoints itself when no .waypoints.cache is present.
-    """
     pts, acc = [centers[0]], 0.0
     for i in range(1, len(centers)):
         acc += vlen(vsub(centers[i], centers[i - 1]))
@@ -333,10 +248,7 @@ def write_waypoints(path, centers, spacing=320.0):
         f.write('\n'.join(L) + '\n')
     return len(pts)
 
-
 def write_svg(path, centers, args):
-    """Top view + elevation of the centerline, so a randomizer sweep can be
-    eyeballed without launching the game."""
     xs = [c[0] for c in centers]; ys = [c[1] for c in centers]; zs = [c[2] for c in centers]
     R = max(max(map(abs, xs)), max(map(abs, ys))) * 1.1 or 1.0
     H = (max(zs) - min(zs)) or 1.0
@@ -361,7 +273,6 @@ def write_svg(path, centers, args):
     with open(path, 'w') as f:
         f.write('\n'.join(svg))
 
-
 def write_map(path, brushes, ents, args):
     L = ['// generated by spiralgen.py  seed=%d turns=%g' % (args.seed, args.turns),
          '{', '"classname" "worldspawn"',
@@ -380,11 +291,7 @@ def write_map(path, brushes, ents, args):
     with open(path, 'w') as f:
         f.write('\n'.join(L))
 
-
 def randomize(a):
-    """Draw shape parameters from the seed. ONE definition: main() and e2e.py both
-    call this, so a sweep actually varies the geometry. It previously lived inside
-    main(), which meant any other caller silently got eight identical maps."""
     if not a.randomize:
         return a
     r = random.Random(a.seed)
@@ -398,7 +305,6 @@ def randomize(a):
     a.wobble = r.choice([0.0, 0.0, 0.05, 0.1])
     a.segments = r.choice([24, 32, 48])
     return a
-
 
 def build_parser():
     p = argparse.ArgumentParser(description='Procedural helical-tunnel map generator for Xonotic.')
@@ -441,7 +347,6 @@ def build_parser():
                    help='draw the shape parameters from the seed instead of the flags')
     return p
 
-
 def main():
     p = build_parser()
     a = p.parse_args()
@@ -452,16 +357,13 @@ def main():
     brushes, centers, radials = s.build()
     ents = s.entities(centers, radials)
     os.makedirs(a.out, exist_ok=True)
-    # plugs ship with the standalone map, so what compiles here is what a join
-    # mates to, minus the plug it removes.
+
     plugged = brushes + [b for plug in getattr(s, 'plugs', []) for b in plug]
     mp = os.path.join(a.out, a.name + '.map')
     write_map(mp, plugged, ents, a)
     aps = getattr(s, 'apertures', [])
     if aps:
-        # The contract tools/joinshot.py, joinview.py, fusecheck.py and
-        # fusegraph.py read. Written by the generator because every field is a
-        # property of the sweep -- not recovered from a compiled artifact.
+
         joins = {'tiles': [{'name': a.name, 'offset': [0, 0, 0], 'apertures': aps}],
                  'joins': [], 'generator': 'spiralgen', 'seed': a.seed}
         with open(os.path.join(a.out, a.name + '.joins.json'), 'w') as fh:
@@ -484,7 +386,6 @@ def main():
         json.dump(meta, f, indent=2)
     print(json.dumps(meta, indent=2))
     print('wrote', mp)
-
 
 if __name__ == '__main__':
     main()

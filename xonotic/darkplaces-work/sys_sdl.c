@@ -34,10 +34,6 @@
 
 #include "quakedef.h"
 
-// =======================================================================
-// General routines
-// =======================================================================
-
 void Sys_Shutdown (void)
 {
 #ifdef __ANDROID__
@@ -50,13 +46,11 @@ void Sys_Shutdown (void)
 	SDL_Quit();
 }
 
-
 void Sys_Error (const char *error, ...)
 {
 	va_list argptr;
 	char string[MAX_INPUTLINE];
 
-// change stdin to non blocking
 #ifndef WIN32
 	fcntl (0, F_SETFL, fcntl (0, F_GETFL, 0) & ~FNDELAY);
 #endif
@@ -87,8 +81,7 @@ void Sys_PrintToTerminal(const char *text)
 	if(outfd < 0)
 		return;
 #ifdef FNDELAY
-	// BUG: for some reason, NDELAY also affects stdout (1) when used on stdin (0).
-	// this is because both go to /dev/tty by default!
+
 	{
 		int origflags = fcntl (outfd, F_GETFL, 0);
 		fcntl (outfd, F_SETFL, origflags & ~FNDELAY);
@@ -100,27 +93,26 @@ void Sys_PrintToTerminal(const char *text)
 		{
 			fs_offset_t written = (fs_offset_t)write(outfd, text, (int)strlen(text));
 			if(written <= 0)
-				break; // sorry, I cannot do anything about this error - without an output
+				break;
 			text += written;
 		}
 #ifdef FNDELAY
 		fcntl (outfd, F_SETFL, origflags);
 	}
 #endif
-	//fprintf(stdout, "%s", text);
+
 #endif
 }
 
 char *Sys_ConsoleInput(void)
 {
-//	if (cls.state == ca_dedicated)
+
 	{
 		static char text[MAX_INPUTLINE];
 		int len = 0;
 #ifdef WIN32
 		int c;
 
-		// read a line out
 		while (_kbhit ())
 		{
 			c = _getch ();
@@ -153,7 +145,7 @@ char *Sys_ConsoleInput(void)
 		fd_set fdset;
 		struct timeval timeout;
 		FD_ZERO(&fdset);
-		FD_SET(0, &fdset); // stdin
+		FD_SET(0, &fdset);
 		timeout.tv_sec = 0;
 		timeout.tv_usec = 0;
 		if (select (1, &fdset, NULL, NULL, &timeout) != -1 && FD_ISSET(0, &fdset))
@@ -161,7 +153,7 @@ char *Sys_ConsoleInput(void)
 			len = read (0, text, sizeof(text));
 			if (len >= 1)
 			{
-				// rip off the \n and terminate
+
 				text[len-1] = 0;
 				return text;
 			}
@@ -230,10 +222,9 @@ int main (int argc, char *argv[])
 	com_argv = (const char **)argv;
 	Sys_ProvideSelfFD();
 
-	// COMMANDLINEOPTION: sdl: -noterminal disables console output on stdout
 	if(COM_CheckParm("-noterminal"))
 		outfd = -1;
-	// COMMANDLINEOPTION: sdl: -stderr moves console output to stderr
+
 	else if(COM_CheckParm("-stderr"))
 		outfd = 2;
 	else
@@ -243,7 +234,6 @@ int main (int argc, char *argv[])
 	fcntl(0, F_SETFL, fcntl (0, F_GETFL, 0) | FNDELAY);
 #endif
 
-	// we don't know which systems we'll want to init, yet...
 	SDL_Init(0);
 
 	Host_Main();

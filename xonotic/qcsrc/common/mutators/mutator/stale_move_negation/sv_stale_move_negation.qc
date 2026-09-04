@@ -39,7 +39,7 @@ MUTATOR_HOOKFUNCTION(mutator_smneg, Damage_Calculate) {
     float weight = c.x_smneg_weight[w.m_id];
     float f = smneg_multiplier(weight);
     float frag_damage = M_ARGV(4, float) = f * M_ARGV(4, float);
-    M_ARGV(6, vector) = f * M_ARGV(6, vector); // force
+    M_ARGV(6, vector) = f * M_ARGV(6, vector);
 
     c.x_smneg_weight[w.m_id] = weight + frag_damage;
     float restore = frag_damage * autocvar_g_smneg_cooldown_factor;

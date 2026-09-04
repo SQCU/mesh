@@ -7,7 +7,6 @@ float autocvar_g_triggerimpulse_directional_multiplier;
 float autocvar_g_triggerimpulse_radial_multiplier;
 #endif
 
-// tZorks trigger impulse / gravity
 .float radius;
 .int falloff;
 .float strength;

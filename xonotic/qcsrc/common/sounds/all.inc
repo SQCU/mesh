@@ -1,8 +1,5 @@
 #pragma once
 
-// Global list of sounds
-// TODO: remove uses of _sound
-
 #include "../teams.qh"
 string W_Sound(string w_snd);
 string Item_Sound(string it_snd);
@@ -76,7 +73,7 @@ SOUND(NEXWHOOSH3, W_Sound("nexwhoosh3"));
 Sound SND_NEXWHOOSH_RANDOM() {
     return REGISTRY_GET(Sounds, SND_NEXWHOOSH1.m_id + rint(random() * 2));
 }
-SOUND(RELOAD, W_Sound("reload")); // until weapons have individual reload sounds, precache the reload sound here
+SOUND(RELOAD, W_Sound("reload"));
 
 SOUND(RIC1, W_Sound("ric1"));
 SOUND(RIC2, W_Sound("ric2"));
@@ -199,7 +196,7 @@ SOUND(ONS_CONTROLPOINT_UNDERATTACK, "onslaught/controlpoint_underattack");
 SOUND(ONS_DAMAGEBLOCKEDBYSHIELD, "onslaught/damageblockedbyshield");
 SOUND(ONS_ELECTRICITY_EXPLODE, "onslaught/electricity_explode");
 #define SND_ONS_GENERATOR_ALARM SND_KH_ALARM
-//SOUND(ONS_GENERATOR_ALARM, "kh/alarm"); // FIXME: unique sound
+
 SOUND(ONS_GENERATOR_DECAY, "onslaught/generator_decay");
 SOUND(ONS_GENERATOR_UNDERATTACK, "onslaught/generator_underattack");
 SOUND(ONS_HIT1, "onslaught/ons_hit1");
@@ -239,7 +236,6 @@ SOUND(VEH_SPIDERBOT_WALK, "vehicles/spiderbot_walk");
 
 SOUND(NADE_BEEP, "overkill/grenadebip");
 #define SND_NADE_BONUS SND_KH_ALARM
-//SOUND(NADE_BONUS, "kh/alarm"); // FIXME: unique sound
 
 SOUND(BUFF_LOST, "relics/relic_effect");
 

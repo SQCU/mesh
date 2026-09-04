@@ -25,7 +25,7 @@ qboolean hmac(
 
 	if(k > hblock)
 	{
-		// hash the key if it is too long
+
 		hfunc(k_xor_opad, key, k);
 		key = k_xor_opad;
 		k = hlen;
@@ -33,7 +33,7 @@ qboolean hmac(
 
 	if(k < hblock)
 	{
-		// zero pad the key if it is too short
+
 		if(key != k_xor_opad)
 			memcpy(k_xor_opad, key, k);
 		for(i = k; i < hblock; ++i)

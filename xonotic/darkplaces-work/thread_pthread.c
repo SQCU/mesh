@@ -6,7 +6,6 @@
 #endif
 #include <stdint.h>
 
-
 int Thread_Init(void)
 {
 	return 0;
@@ -173,8 +172,7 @@ void _Thread_WaitBarrier(void *barrier, const char *filename, int fileline)
 	pthread_barrier_wait(b);
 }
 #else
-// standard barrier implementation using conds and mutexes
-// see: http://www.howforge.com/implementing-barrier-in-pthreads
+
 typedef struct {
 	unsigned int needed;
 	unsigned int called;

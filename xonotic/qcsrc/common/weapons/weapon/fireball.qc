@@ -13,7 +13,6 @@ void W_Fireball_Explode(entity this, entity directhitentity)
 	this.event_damage = func_null;
 	this.takedamage = DAMAGE_NO;
 
-	// 1. dist damage
 	d = (GetResource(this.realowner, RES_HEALTH) + GetResource(this.realowner, RES_ARMOR));
 
 	RadiusDamage(
@@ -34,22 +33,19 @@ void W_Fireball_Explode(entity this, entity directhitentity)
 	{
 		modeleffect_spawn("models/sphere/sphere.md3", 0, 0, this.origin, '0 0 0', '0 0 0', '0 0 0', 0, WEP_CVAR_PRI(fireball, bfgradius), 0.2, 0.05, 0.25);
 
-		// 2. bfg effect
-		// NOTE: this cannot be made warpzone aware by design. So, better intentionally ignore warpzones here.
 		for(e = findradius(this.origin, WEP_CVAR_PRI(fireball, bfgradius)); e; e = e.chain)
 		{
 			if(e != this.realowner && e.takedamage == DAMAGE_AIM && !IS_INDEPENDENT_PLAYER(e))
 			if(!IS_PLAYER(e) || !this.realowner || DIFF_TEAM(e, this))
 			{
 
-				// can we see fireball?
 				traceline(e.origin + e.view_ofs, this.origin, MOVE_NORMAL, e);
-				if(/* trace_startsolid || */ trace_fraction != 1) // startsolid should be never happening anyway
+				if(                          trace_fraction != 1)
 					continue;
-				// can we see player who shot fireball?
+
 				traceline(e.origin + e.view_ofs, this.realowner.origin + this.realowner.view_ofs, MOVE_NORMAL, e);
 				if(trace_ent != this.realowner)
-				if(/* trace_startsolid || */ trace_fraction != 1)
+				if(                          trace_fraction != 1)
 					continue;
 				dist = vlen(this.origin - e.origin - e.view_ofs);
 				points = (1 - sqrt(dist / WEP_CVAR_PRI(fireball, bfgradius)));
@@ -129,7 +125,7 @@ void W_Fireball_LaserPlay(entity this, float dt, float dist, float damage, float
 		d = vlen(WarpZone_UnTransformOrigin(RandomSelection_chosen_ent, this.origin) - RandomSelection_chosen_ent.fireball_impactvec);
 		d = damage + (edgedamage - damage) * (d / dist);
 		Fire_AddDamage(RandomSelection_chosen_ent, this.realowner, d * burntime, burntime, this.projectiledeathtype | HITTYPE_BOUNCE);
-		//trailparticles(this, particleeffectnum(EFFECT_FIREBALL_LASER), this.origin, RandomSelection_chosen_ent.fireball_impactvec);
+
 		Send_Effect(EFFECT_FIREBALL_LASER, this.origin, RandomSelection_chosen_ent.fireball_impactvec - this.origin, 1);
 	}
 }
@@ -154,8 +150,8 @@ void W_Fireball_Damage(entity this, entity inflictor, entity attacker, float dam
 	if(GetResource(this, RES_HEALTH) <= 0)
 		return;
 
-	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1)) // no exceptions
-		return; // g_projectiles_damage says to halt
+	if(!W_CheckProjectileDamage(inflictor.realowner, this.realowner, deathtype, -1))
+		return;
 
 	TakeResource(this, RES_HEALTH, damage);
 	if(GetResource(this, RES_HEALTH) <= 0)
@@ -206,7 +202,7 @@ void W_Fireball_Attack1(entity actor, .entity weaponentity)
 
 void W_Fireball_AttackEffect(entity actor, .entity weaponentity, float i, vector f_diff)
 {
-	W_SetupShot_ProjectileSize(actor, weaponentity, '-16 -16 -16', '16 16 16', false, 0, SND_Null, 0, 0, WEP_FIREBALL.m_id); // TODO: probably doesn't need deathtype, just a prefire effect
+	W_SetupShot_ProjectileSize(actor, weaponentity, '-16 -16 -16', '16 16 16', false, 0, SND_Null, 0, 0, WEP_FIREBALL.m_id);
 	w_shotorg += f_diff.x * v_up + f_diff.y * v_right;
 	Send_Effect(EFFECT_FIREBALL_PRE_MUZZLEFLASH, w_shotorg, w_shotdir * 1000, 1);
 }
@@ -250,7 +246,6 @@ void W_Fireball_Firemine_Think(entity this)
 		return;
 	}
 
-	// make it "hot" once it leaves its owner
 	if(this.owner)
 	{
 		if(vdist(this.origin - this.owner.origin - this.owner.view_ofs, >, WEP_CVAR_SEC(fireball, laserradius)))
@@ -379,11 +374,11 @@ METHOD(Fireball, wr_think, void(entity thiswep, entity actor, .entity weaponenti
 }
 METHOD(Fireball, wr_checkammo1, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    return true; // infinite ammo
+    return true;
 }
 METHOD(Fireball, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    return true; // fireball has infinite ammo
+    return true;
 }
 METHOD(Fireball, wr_resetplayer, void(entity thiswep, entity actor))
 {
@@ -415,14 +410,14 @@ METHOD(Fireball, wr_impacteffect, void(entity thiswep, entity actor))
 {
     if(w_deathtype & HITTYPE_SECONDARY)
     {
-        // firemine goes out silently
+
     }
     else
     {
         vector org2 = w_org + w_backoff * 2;
         pointparticles(EFFECT_FIREBALL_EXPLODE, org2, '0 0 0', 1);
         if(!w_issilent)
-            sound(actor, CH_SHOTS, SND_FIREBALL_IMPACT2, VOL_BASE, ATTEN_NORM * 0.25); // long range boom
+            sound(actor, CH_SHOTS, SND_FIREBALL_IMPACT2, VOL_BASE, ATTEN_NORM * 0.25);
     }
 }
 

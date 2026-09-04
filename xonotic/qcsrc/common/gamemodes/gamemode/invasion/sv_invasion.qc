@@ -20,7 +20,7 @@ float autocvar_g_invasion_spawn_delay;
 bool victent_present;
 .bool inv_endreached;
 
-bool inv_warning_shown; // spammy
+bool inv_warning_shown;
 
 void target_invasion_roundend_use(entity this, entity actor, entity trigger)
 {
@@ -30,13 +30,13 @@ void target_invasion_roundend_use(entity this, entity actor, entity trigger)
 
 	int plnum = 0;
 	int realplnum = 0;
-	// let's not count bots
+
 	FOREACH_CLIENT(IS_PLAYER(it) && IS_REAL_CLIENT(it), {
 		++realplnum;
 		if(it.inv_endreached)
 			++plnum;
 	});
-	if(plnum < ceil(realplnum * min(1, this.count))) // 70% of players
+	if(plnum < ceil(realplnum * min(1, this.count)))
 		return;
 
 	this.winning = true;
@@ -46,9 +46,9 @@ spawnfunc(target_invasion_roundend)
 {
 	if(!g_invasion) { delete(this); return; }
 
-	victent_present = true; // a victory entity is present, we don't need to rely on monster count TODO: merge this with the intrusive list (can check empty)
+	victent_present = true;
 
-	if(!this.count) { this.count = 0.7; } // require at least 70% of the players to reach the end before triggering victory
+	if(!this.count) { this.count = 0.7; }
 
 	this.use = target_invasion_roundend_use;
 
@@ -71,11 +71,9 @@ spawnfunc(invasion_spawnpoint)
 
 void ClearWinners();
 
-// Invasion stage mode winning condition: If the attackers triggered a round end (by fulfilling all objectives)
-// they win.
 int WinningCondition_Invasion()
 {
-	WinningConditionHelper(NULL); // set worldstatus
+	WinningConditionHelper(NULL);
 
 	int status = WINNING_NO;
 
@@ -90,7 +88,6 @@ int WinningCondition_Invasion()
 			if(it.winning)
 			{
 				bprint("Invasion: round completed.\n");
-				// winners already set
 
 				status = WINNING_YES;
 				break;
@@ -98,13 +95,13 @@ int WinningCondition_Invasion()
 		});
 
 		if(!found)
-			status = WINNING_YES; // just end it? TODO: should warn mapper!
+			status = WINNING_YES;
 	}
 	else if(autocvar_g_invasion_type == INV_TYPE_HUNT)
 	{
 		ClearWinners();
 
-		int found = 0; // NOTE: this ends the round if no monsters are placed
+		int found = 0;
 		IL_EACH(g_monsters, !(it.spawnflags & MONSTERFLAG_RESPAWNED),
 		{
 			++found;
@@ -146,7 +143,7 @@ entity invasion_PickSpawn()
 
 	IL_EACH(g_invasion_spawns, true,
 	{
-		RandomSelection_AddEnt(it, 1, ((time < it.spawnshieldtime) ? 0.2 : 1)); // give recently used spawnpoints a very low rating
+		RandomSelection_AddEnt(it, 1, ((time < it.spawnshieldtime) ? 0.2 : 1));
 		it.spawnshieldtime = time + autocvar_g_invasion_spawnpoint_spawn_delay;
 	});
 
@@ -157,10 +154,9 @@ entity invasion_GetWaveEntity(int wavenum)
 {
 	IL_EACH(g_invasion_waves, it.cnt == wavenum,
 	{
-		return it; // found one
+		return it;
 	});
 
-	// if no specific one is found, find the last existing wave ent
 	entity best = NULL;
 	IL_EACH(g_invasion_waves, it.cnt <= wavenum,
 	{
@@ -210,7 +206,7 @@ void invasion_SpawnChosenMonster(Monster mon)
 			return;
 		}
 	}
-	else // if spawnmob field falls through (unset), fallback to mon (relying on spawnmonster for that behaviour)
+	else
 		monster = spawnmonster(spawn(), ((spawn_point.spawnmob && spawn_point.spawnmob != "") ? spawn_point.spawnmob : tospawn), mon, spawn_point, spawn_point, spawn_point.origin, false, false, 2);
 
 	if(!monster)
@@ -227,10 +223,10 @@ void invasion_SpawnChosenMonster(Monster mon)
 
 	if(monster.monster_attack)
 		IL_REMOVE(g_monster_targets, monster);
-	monster.monster_attack = false; // it's the player's job to kill all the monsters
+	monster.monster_attack = false;
 
 	if(inv_roundcnt >= inv_maxrounds)
-		monster.spawnflags |= MONSTERFLAG_MINIBOSS; // last round spawns minibosses
+		monster.spawnflags |= MONSTERFLAG_MINIBOSS;
 }
 
 void invasion_SpawnMonsters(int supermonster_count)
@@ -277,7 +273,7 @@ bool Invasion_CheckWinner()
 	}
 
 	if(inv_numspawned < 1)
-		return 0; // nothing has spawned yet
+		return 0;
 
 	if(inv_numkilled < inv_maxspawned)
 		return 0;
@@ -325,7 +321,7 @@ void Invasion_RoundStart()
 	});
 
 	if(inv_roundcnt < inv_maxrounds)
-		inv_roundcnt += 1; // a limiter to stop crazy counts
+		inv_roundcnt += 1;
 
 	inv_monsterskill = inv_roundcnt + max(1, numplayers * 0.3);
 
@@ -365,7 +361,7 @@ MUTATOR_HOOKFUNCTION(inv, MonsterSpawn)
 	mon.dphitcontentsmask = DPCONTENTS_SOLID | DPCONTENTS_BODY | DPCONTENTS_BOTCLIP | DPCONTENTS_MONSTERCLIP;
 
 	if(autocvar_g_invasion_type == INV_TYPE_HUNT)
-		return false; // allowed
+		return false;
 
 	if(!(mon.spawnflags & MONSTERFLAG_SPAWNED))
 		return true;
@@ -385,15 +381,15 @@ MUTATOR_HOOKFUNCTION(inv, MonsterSpawn)
 MUTATOR_HOOKFUNCTION(inv, SV_StartFrame)
 {
 	if(autocvar_g_invasion_type != INV_TYPE_ROUND)
-		return; // uses map spawned monsters
+		return;
 
-	monsters_total = inv_maxspawned; // TODO: make sure numspawned never exceeds maxspawned
+	monsters_total = inv_maxspawned;
 	monsters_killed = inv_numkilled;
 }
 
 MUTATOR_HOOKFUNCTION(inv, PlayerRegen)
 {
-	// no regeneration in invasion, regardless of the game type
+
 	return true;
 }
 
@@ -451,7 +447,7 @@ MUTATOR_HOOKFUNCTION(inv, AccuracyTargetValid)
 
 MUTATOR_HOOKFUNCTION(inv, AllowMobSpawning)
 {
-	// monster spawning disabled during an invasion
+
 	M_ARGV(1, string) = "You cannot spawn monsters during an invasion!";
 	return true;
 }
@@ -484,7 +480,7 @@ void invasion_DelayedInit(entity this)
 	if(autocvar_g_invasion_type == INV_TYPE_HUNT || autocvar_g_invasion_type == INV_TYPE_STAGE)
 		cvar_set("fraglimit", "0");
 
-	independent_players = 1; // to disable extra useless scores
+	independent_players = 1;
 
 	invasion_ScoreRules();
 
@@ -496,7 +492,7 @@ void invasion_DelayedInit(entity this)
 		round_handler_Init(5, autocvar_g_invasion_warmup, autocvar_g_invasion_round_timelimit);
 
 		inv_roundcnt = 0;
-		inv_maxrounds = 15; // 15?
+		inv_maxrounds = 15;
 	}
 }
 

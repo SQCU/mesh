@@ -13,9 +13,7 @@ bool Damage_DamageInfo_SendEntity(entity this, entity to, int sf)
 	WriteByte(MSG_ENTITY, bound(1, this.dmg, 255));
 	WriteByte(MSG_ENTITY, bound(0, this.dmg_radius, 255));
 	WriteByte(MSG_ENTITY, bound(1, this.dmg_edge, 255));
-	// we can't send the force vector compressed with compressShortVector as it's too inaccurate
-	// it would break decals when hit angle on a surface is small
-	// (the traceline performed by the client to spawn a decal wouldn't hit the surface at all)
+
 	WriteShort(MSG_ENTITY, floor(this.velocity.x / 4));
 	WriteShort(MSG_ENTITY, floor(this.velocity.y / 4));
 	WriteShort(MSG_ENTITY, floor(this.velocity.z / 4));
@@ -25,15 +23,12 @@ bool Damage_DamageInfo_SendEntity(entity this, entity to, int sf)
 
 void Damage_DamageInfo(vector org, float coredamage, float edgedamage, float rad, vector force, int deathtype, float bloodtype, entity dmgowner)
 {
-	// TODO maybe call this from non-edgedamage too?
-	// TODO maybe make the client do the particle effects for the weapons and the impact sounds using this info?
 
 	if(!sound_allowed(MSG_BROADCAST, dmgowner))
 		deathtype |= 0x8000;
 
 	entity e = new_pure(damageinfo);
-	// origin is just data to be sent
-	//setorigin(e, org);
+
 	e.origin = org;
 	e.projectiledeathtype = deathtype;
 	e.dmg = coredamage;
@@ -41,7 +36,7 @@ void Damage_DamageInfo(vector org, float coredamage, float edgedamage, float rad
 	bool rad_negative = false;
 	if(rad < 0)
 	{
-		// make it positive (unsigned) so it can be sent as byte
+
 		rad_negative = true;
 		rad = -rad;
 	}
@@ -49,7 +44,7 @@ void Damage_DamageInfo(vector org, float coredamage, float edgedamage, float rad
 	e.dmg_force = vlen(force);
 	e.velocity = force;
 
-	e.species = bloodtype & BITS(4); // it only uses bits from 0 to 3, see SPECIES_* constants
+	e.species = bloodtype & BITS(4);
 	if(rad_negative)
 		e.species |= BIT(7);
 
@@ -60,7 +55,6 @@ void Damage_DamageInfo(vector org, float coredamage, float edgedamage, float rad
 
 #ifdef CSQC
 
-/** number of effects which currently are attached to a player */
 .int total_damages;
 
 .entity tag_entity;
@@ -72,7 +66,7 @@ void Damage_DamageInfo(vector org, float coredamage, float edgedamage, float rad
 
 void DamageEffect_Think(entity this)
 {
-	// if particle distribution is enabled, slow ticrate by total number of damages
+
 	if(autocvar_cl_damageeffect_distribute)
 		this.nextthink = time + autocvar_cl_damageeffect_ticrate * this.owner.total_damages;
 	else
@@ -80,25 +74,23 @@ void DamageEffect_Think(entity this)
 
 	if(time >= this.cnt || !this.owner || !this.owner.modelindex || !this.owner.drawmask)
 	{
-		// time is up or the player got gibbed / disconnected
+
 		this.owner.total_damages = max(0, this.owner.total_damages - 1);
 		delete(this);
 		return;
 	}
 	if(this.state && !this.owner.csqcmodel_isdead)
 	{
-		// if the player was dead but is now alive, it means they respawned
-		// if so, clear their damage effects, or damages from their dead body will be copied back
+
 		this.owner.total_damages = max(0, this.owner.total_damages - 1);
 		delete(this);
 		return;
 	}
 	this.state = this.owner.csqcmodel_isdead;
 	if((this.owner.isplayermodel & ISPLAYER_LOCAL) && !autocvar_chase_active)
-		return; // if we aren't using a third person camera, hide our own effects
+		return;
 
-	// now generate the particles
-	vector org = gettaginfo(this, 0); // origin at attached location
+	vector org = gettaginfo(this, 0);
 	__pointparticles(this.team, org, '0 0 0', 1);
 }
 
@@ -109,8 +101,8 @@ string species_prefix(int specnum)
 		case SPECIES_HUMAN:       return "";
 		case SPECIES_ALIEN:       return "alien_";
 		case SPECIES_ROBOT_SHINY: return "robot_";
-		case SPECIES_ROBOT_RUSTY: return "robot_"; // use the same effects, only different gibs
-		case SPECIES_ROBOT_SOLID: return "robot_"; // use the same effects, only different gibs
+		case SPECIES_ROBOT_RUSTY: return "robot_";
+		case SPECIES_ROBOT_SOLID: return "robot_";
 		case SPECIES_ANIMAL:      return "animal_";
 		case SPECIES_RESERVED:    return "reserved_";
 		default:         return "";
@@ -119,7 +111,6 @@ string species_prefix(int specnum)
 
 void DamageEffect(entity this, vector hitorg, float thedamage, int type, int specnum)
 {
-	// particle effects for players and objects damaged by weapons (eg: flames coming out of victims shot with rockets)
 
 	int nearestbone = 0;
 	float life;
@@ -131,35 +122,28 @@ void DamageEffect(entity this, vector hitorg, float thedamage, int type, int spe
 	if(!this || !this.modelindex || !this.drawmask)
 		return;
 
-	// if this is a rigged mesh, the effect will show on the bone where damage was dealt
-	// we do this by choosing the skeletal bone closest to the impact, and attaching our entity to it
-	// if there's no skeleton, object origin will automatically be selected
 	FOR_EACH_TAG(this)
 	{
 		if(!tagnum)
-			continue; // skip empty bones
-		// blacklist bones positioned outside the mesh, or the effect will be floating
-		// TODO: Do we have to do it this way? Why do these bones exist at all?
-		if(gettaginfo_name == "master" || gettaginfo_name == "knee_L" || gettaginfo_name == "knee_R" || gettaginfo_name == "leg_L" || gettaginfo_name == "leg_R")
-			continue; // player model bone blacklist
+			continue;
 
-		// now choose the bone closest to impact origin
+		if(gettaginfo_name == "master" || gettaginfo_name == "knee_L" || gettaginfo_name == "knee_R" || gettaginfo_name == "leg_L" || gettaginfo_name == "leg_R")
+			continue;
+
 		if(nearestbone == 0 || vlen2(hitorg - gettaginfo(this, tagnum)) <= vlen2(hitorg - gettaginfo(this, nearestbone)))
 			nearestbone = tagnum;
 	}
-	gettaginfo(this, nearestbone); // set gettaginfo_name
+	gettaginfo(this, nearestbone);
 
-	// return if we reached our damage effect limit or damages are disabled
-	// TODO: When the limit is reached, it would be better if the oldest damage was removed instead of not adding a new one
 	if(nearestbone)
 	{
 		if(this.total_damages >= autocvar_cl_damageeffect_bones)
-			return; // allow multiple damages on skeletal models
+			return;
 	}
 	else
 	{
 		if(autocvar_cl_damageeffect < 2 || this.total_damages)
-			return; // allow a single damage on non-skeletal models
+			return;
 	}
 
 	life = bound(autocvar_cl_damageeffect_lifetime_min, thedamage * autocvar_cl_damageeffect_lifetime, autocvar_cl_damageeffect_lifetime_max);
@@ -168,18 +152,18 @@ void DamageEffect(entity this, vector hitorg, float thedamage, int type, int spe
 	effectname = strcat("damage_", wep.netname);
 	if((wep.spawnflags & WEP_FLAG_BLEED))
 	{
-		// if this weapon induces bleeding, use the effect name with the proper species prefix (blood type)
+
 		if((this.isplayermodel & ISPLAYER_MODEL))
 		{
 			string specstr = species_prefix(specnum);
 			effectname = strcat(specstr, effectname);
 		}
-		else { return; } // objects don't bleed
+		else { return; }
 	}
 
 	e = new(damage);
-	setmodel(e, MDL_Null); // necessary to attach and read origin
-	setattachment(e, this, gettaginfo_name); // attach to the given bone
+	setmodel(e, MDL_Null);
+	setattachment(e, this, gettaginfo_name);
 	e.owner = this;
 	e.cnt = time + life;
 	e.team = _particleeffectnum(effectname);
@@ -264,7 +248,7 @@ NET_HANDLE(ENT_CLIENT_DAMAGEINFO, bool isNew)
 		DamageEffect(it, w_org, thisdmg, w_deathtype, species);
 
 		if(it != csqcplayer && (it.isplayermodel & ISPLAYER_MODEL))
-			hitplayer = true; // this impact damaged another player
+			hitplayer = true;
 	});
 
 	if(DEATH_ISVEHICLE(w_deathtype))
@@ -276,14 +260,13 @@ NET_HANDLE(ENT_CLIENT_DAMAGEINFO, bool isNew)
 		else
 			w_backoff = -1 * normalize(w_org - (w_org + force_dir * 16));
 
-		setorigin(this, w_org + w_backoff * 2); // for sound() calls
+		setorigin(this, w_org + w_backoff * 2);
 
 		switch(DEATH_ENT(w_deathtype))
 		{
 			case DEATH_VH_CRUSH:
 				break;
 
-			// spiderbot
 			case DEATH_VH_SPID_MINIGUN:
 				sound(this, CH_SHOTS, SND_RIC_RANDOM(), VOL_BASE, ATTEN_NORM);
 				pointparticles(EFFECT_SPIDERBOT_MINIGUN_IMPACT, this.origin, w_backoff * 1000, 1);
@@ -341,7 +324,6 @@ NET_HANDLE(ENT_CLIENT_DAMAGEINFO, bool isNew)
 		}
 	}
 
-
 	if(DEATH_ISTURRET(w_deathtype))
 	{
 		vector force_dir = normalize(force);
@@ -351,7 +333,7 @@ NET_HANDLE(ENT_CLIENT_DAMAGEINFO, bool isNew)
 		else
 			w_backoff = -1 * normalize(w_org - (w_org + force_dir * 16));
 
-		setorigin(this, w_org + w_backoff * 2); // for sound() calls
+		setorigin(this, w_org + w_backoff * 2);
 
 		switch(DEATH_ENT(w_deathtype))
 		{
@@ -400,16 +382,14 @@ NET_HANDLE(ENT_CLIENT_DAMAGEINFO, bool isNew)
 
 	MUTATOR_CALLHOOK(DamageInfo, this, w_deathtype, w_org);
 
-	// TODO spawn particle effects and sounds based on w_deathtype
 	if(!DEATH_ISSPECIAL(w_deathtype))
-	if(!hitplayer || rad) // don't show ground impacts for hitscan weapons if a player was hit
+	if(!hitplayer || rad)
 	{
 		Weapon hitwep = DEATH_WEAPONOF(w_deathtype);
 		w_random = prandom();
 
 		vector force_dir = normalize(force);
-		// this traceline usually starts in solid when a hitscan shot hits a surface with a very small angle
-		// if so, try another traceline starting further back (may still start in solid but only with extremely small angles)
+
 		traceline(w_org - force_dir * 16, w_org + force_dir * 16, MOVE_NOMONSTERS, NULL);
 		if(trace_startsolid)
 			traceline(w_org - force_dir * 40, w_org + force_dir * 16, MOVE_NOMONSTERS, NULL);
@@ -417,7 +397,7 @@ NET_HANDLE(ENT_CLIENT_DAMAGEINFO, bool isNew)
 			w_backoff = trace_plane_normal;
 		else
 			w_backoff = -force_dir;
-		setorigin(this, w_org + w_backoff * 2); // for sound() calls
+		setorigin(this, w_org + w_backoff * 2);
 
 		if(!(trace_dphitq3surfaceflags & Q3SURFACEFLAG_SKY))
 		{

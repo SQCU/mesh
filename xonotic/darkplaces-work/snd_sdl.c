@@ -1,21 +1,5 @@
-/*
-Copyright (C) 2004 Andreas Kirsch
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-*/
 #include <math.h>
 #include <SDL.h>
 
@@ -23,12 +7,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "snd_main.h"
 
-
 static unsigned int sdlaudiotime = 0;
 static int audio_device = 0;
 
-
-// Note: SDL calls SDL_LockAudio() right before this function, so no need to lock the audio data here
 static void Buffer_Callback (void *userdata, Uint8 *stream, int len)
 {
 	unsigned int factor, RequestedFrames, MaxFrames, FrameCount;
@@ -51,7 +32,6 @@ static void Buffer_Callback (void *userdata, Uint8 *stream, int len)
 			return;
 		}
 
-		// Transfert up to a chunk of samples from snd_renderbuffer to stream
 		MaxFrames = snd_renderbuffer->endframe - snd_renderbuffer->startframe;
 		if (MaxFrames > RequestedFrames)
 			FrameCount = RequestedFrames;
@@ -59,7 +39,7 @@ static void Buffer_Callback (void *userdata, Uint8 *stream, int len)
 			FrameCount = MaxFrames;
 		StartOffset = snd_renderbuffer->startframe % snd_renderbuffer->maxframes;
 		EndOffset = (snd_renderbuffer->startframe + FrameCount) % snd_renderbuffer->maxframes;
-		if (StartOffset > EndOffset)  // if the buffer wraps
+		if (StartOffset > EndOffset)
 		{
 			unsigned int PartialLength1, PartialLength2;
 
@@ -69,16 +49,12 @@ static void Buffer_Callback (void *userdata, Uint8 *stream, int len)
 			PartialLength2 = FrameCount * factor - PartialLength1;
 			memcpy(&stream[PartialLength1], &snd_renderbuffer->ring[0], PartialLength2);
 
-			// As of SDL 2.0 buffer needs to be fully initialized, so fill leftover part with silence
-			// FIXME this is another place that assumes 8bit is always unsigned and others always signed
 			memset(&stream[PartialLength1 + PartialLength2], snd_renderbuffer->format.width == 1 ? 0x80 : 0, len - (PartialLength1 + PartialLength2));
 		}
 		else
 		{
 			memcpy(stream, &snd_renderbuffer->ring[StartOffset * factor], FrameCount * factor);
 
-			// As of SDL 2.0 buffer needs to be fully initialized, so fill leftover part with silence
-			// FIXME this is another place that assumes 8bit is always unsigned and others always signed
 			memset(&stream[FrameCount * factor], snd_renderbuffer->format.width == 1 ? 0x80 : 0, len - (FrameCount * factor));
 		}
 
@@ -93,15 +69,6 @@ static void Buffer_Callback (void *userdata, Uint8 *stream, int len)
 	}
 }
 
-
-/*
-====================
-SndSys_Init
-
-Create "snd_renderbuffer" with the proper sound format if the call is successful
-May return a suggested format if the requested format isn't available
-====================
-*/
 qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 {
 	unsigned int buffersize;
@@ -112,21 +79,19 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 
 	Con_DPrint ("SndSys_Init: using the SDL module\n");
 
-	// Init the SDL Audio subsystem
 	if( SDL_InitSubSystem( SDL_INIT_AUDIO ) ) {
 		Con_Print( "Initializing the SDL Audio subsystem failed!\n" );
 		return false;
 	}
 
-	buffersize = (unsigned int)ceil((double)requested->speed / 25.0); // 2048 bytes on 24kHz to 48kHz
+	buffersize = (unsigned int)ceil((double)requested->speed / 25.0);
 
-	// Init the SDL Audio subsystem
 	wantspec.callback = Buffer_Callback;
 	wantspec.userdata = NULL;
 	wantspec.freq = requested->speed;
 	wantspec.format = ((requested->width == 1) ? AUDIO_U8 : AUDIO_S16SYS);
 	wantspec.channels = requested->channels;
-	wantspec.samples = CeilPowerOf2(buffersize);  // needs to be a power of 2 on some platforms.
+	wantspec.samples = CeilPowerOf2(buffersize);
 
 	Con_Printf("Wanted audio Specification:\n"
 				"\tChannels  : %i\n"
@@ -148,18 +113,16 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 				"\tSamples   : %i\n",
 				obtainspec.channels, obtainspec.format, obtainspec.freq, obtainspec.samples);
 
-	// If we haven't obtained what we wanted
 	if (wantspec.freq != obtainspec.freq ||
 		wantspec.format != obtainspec.format ||
 		wantspec.channels != obtainspec.channels)
 	{
 		SDL_CloseAudioDevice(audio_device);
 
-		// Pass the obtained format as a suggested format
 		if (suggested != NULL)
 		{
 			suggested->speed = obtainspec.freq;
-			// FIXME: check the format more carefully. There are plenty of unsupported cases
+
 			suggested->width = ((obtainspec.format == AUDIO_U8) ? 1 : 2);
 			suggested->channels = obtainspec.channels;
 		}
@@ -179,14 +142,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	return true;
 }
 
-
-/*
-====================
-SndSys_Shutdown
-
-Stop the sound card, delete "snd_renderbuffer" and free its other resources
-====================
-*/
 void SndSys_Shutdown(void)
 {
 	if (audio_device > 0) {
@@ -201,67 +156,28 @@ void SndSys_Shutdown(void)
 	}
 }
 
-
-/*
-====================
-SndSys_Submit
-
-Submit the contents of "snd_renderbuffer" to the sound card
-====================
-*/
 void SndSys_Submit (void)
 {
-	// Nothing to do here (this sound module is callback-based)
+
 }
 
-
-/*
-====================
-SndSys_GetSoundTime
-
-Returns the number of sample frames consumed since the sound started
-====================
-*/
 unsigned int SndSys_GetSoundTime (void)
 {
 	return sdlaudiotime;
 }
 
-
-/*
-====================
-SndSys_LockRenderBuffer
-
-Get the exclusive lock on "snd_renderbuffer"
-====================
-*/
 qboolean SndSys_LockRenderBuffer (void)
 {
 	SDL_LockAudioDevice(audio_device);
 	return true;
 }
 
-
-/*
-====================
-SndSys_UnlockRenderBuffer
-
-Release the exclusive lock on "snd_renderbuffer"
-====================
-*/
 void SndSys_UnlockRenderBuffer (void)
 {
 	SDL_UnlockAudioDevice(audio_device);
 }
 
-/*
-====================
-SndSys_SendKeyEvents
-
-Send keyboard events originating from the sound system (e.g. MIDI)
-====================
-*/
 void SndSys_SendKeyEvents(void)
 {
-	// not supported
+
 }

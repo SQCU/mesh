@@ -1,6 +1,6 @@
-// cl_gentle impact effect indicating damage
+
 DEF(particlegibs_damage_hit);
-// core decal
+
 SUB(particlegibs_damage_hit) {
     MY(airfriction) = 3;
     MY(alpha_min) = 256;
@@ -22,7 +22,7 @@ SUB(particlegibs_damage_hit) {
     MY(type) = "blood";
     MY(velocityjitter) = '156.0 156.0 212.0';
 }
-// front blood
+
 SUB(particlegibs_damage_hit) {
     MY(airfriction) = 1;
     MY(alpha_min) = 256;
@@ -47,7 +47,7 @@ SUB(particlegibs_damage_hit) {
     MY(velocityjitter) = '6.0 6.0 30.0';
     MY(velocitymultiplier) = -1;
 }
-// back blood
+
 SUB(particlegibs_damage_hit) {
     MY(airfriction) = 1;
     MY(alpha_min) = 256;
@@ -74,9 +74,8 @@ SUB(particlegibs_damage_hit) {
     MY(velocitymultiplier) = 2;
 }
 
-// effect for removing player model
 DEF(particlegibs_damage_dissolve);
-// small core blood no decals
+
 SUB(particlegibs_damage_dissolve) {
     MY(airfriction) = 3;
     MY(alpha_min) = 256;
@@ -98,7 +97,7 @@ SUB(particlegibs_damage_dissolve) {
     MY(type) = "blood";
     MY(velocityjitter) = '256.0 256.0 312.0';
 }
-// core decal
+
 SUB(particlegibs_damage_dissolve) {
     MY(airfriction) = 2;
     MY(alpha_min) = 256;
@@ -121,7 +120,7 @@ SUB(particlegibs_damage_dissolve) {
     MY(type) = "blood";
     MY(velocityjitter) = '356.0 356.0 412.0';
 }
-// front blood
+
 SUB(particlegibs_damage_dissolve) {
     MY(airfriction) = 1;
     MY(alpha_min) = 256;
@@ -147,7 +146,7 @@ SUB(particlegibs_damage_dissolve) {
     MY(velocityjitter) = '56.0 56.0 212.0';
     MY(velocitymultiplier) = -0.300000;
 }
-// back blood
+
 SUB(particlegibs_damage_dissolve) {
     MY(airfriction) = 1;
     MY(alpha_min) = 256;
@@ -173,7 +172,7 @@ SUB(particlegibs_damage_dissolve) {
     MY(velocityjitter) = '56.0 56.0 212.0';
     MY(velocitymultiplier) = 0.500000;
 }
-// small bits
+
 SUB(particlegibs_damage_dissolve) {
     MY(airfriction) = 1.500000;
     MY(alpha_min) = 256;

@@ -16,8 +16,8 @@ CLASS(InputBox, Label)
 
 	ATTRIB(InputBox, src, string);
 
-	ATTRIB(InputBox, cursorPos, float, 0);  // characters
-	ATTRIB(InputBox, scrollPos, float, 0);  // widths
+	ATTRIB(InputBox, cursorPos, float, 0);
+	ATTRIB(InputBox, scrollPos, float, 0);
 
 	ATTRIB(InputBox, focusable, float, 1);
 	ATTRIB(InputBox, allowFocusSound, float, 1);
@@ -30,7 +30,7 @@ CLASS(InputBox, Label)
 	ATTRIB(InputBox, forbiddenCharacters, string, "");
 	ATTRIB(InputBox, color, vector, '1 1 1');
 	ATTRIB(InputBox, colorF, vector, '1 1 1');
-	ATTRIB(InputBox, maxLength, float, 255);  // if negative, it counts bytes, not chars
+	ATTRIB(InputBox, maxLength, float, 255);
 	ATTRIB(InputBox, applyButton, entity);
 
 	ATTRIB(InputBox, enableClearButton, float, 1);

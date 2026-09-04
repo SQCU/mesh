@@ -3,16 +3,12 @@
 #include <client/draw.qh>
 #include <client/hud/panel/modicons.qh>
 
-// Keepaway HUD mod icon
-int tkaball_prevstatus; // last remembered status
-float tkaball_statuschange_time; // time when the status changed
-
-// we don't need to reset for team keepaway since it immediately
-// autocorrects prevstatus as to if the player has the ball or not
+int tkaball_prevstatus;
+float tkaball_statuschange_time;
 
 void HUD_Mod_TeamKeepaway(vector pos, vector mySize)
 {
-	mod_active = 1; // team keepaway should always show the mod HUD
+	mod_active = 1;
 
 	float tkaball_alpha = blink(0.85, 0.15, 5);
 
@@ -41,7 +37,7 @@ void HUD_Mod_TeamKeepaway(vector pos, vector mySize)
 	if(tkaball_prevstatus && f < 1)
 		drawpic_aspect_skin_expanding(tkaball_pos, "keepawayball_carrying", tkaball_size, '1 1 1', panel_fg_alpha * tkaball_alpha, DRAWFLAG_NORMAL, f);
 
-	if(stat_items & TKA_BALL_CARRYING) // TODO: unique team based icon while carrying
+	if(stat_items & TKA_BALL_CARRYING)
 		drawpic_aspect_skin(pos, "keepawayball_carrying", vec2(mySize.x, mySize.y), '1 1 1', panel_fg_alpha * tkaball_alpha * f, DRAWFLAG_NORMAL);
 	else if(stat_items & TKA_BALL_TAKEN_RED)
 		drawpic_aspect_skin(pos, "tka_taken_red", vec2(mySize.x, mySize.y), '1 1 1', panel_fg_alpha * tkaball_alpha * f, DRAWFLAG_NORMAL);

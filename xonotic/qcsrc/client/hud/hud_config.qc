@@ -6,7 +6,6 @@
 #include <client/hud/panel/scoreboard.qh>
 #include <client/view.qh>
 
-// Save the config
 void HUD_Panel_ExportCfg(string cfgname)
 {
 	float fh;
@@ -58,7 +57,6 @@ void HUD_Panel_ExportCfg(string cfgname)
 		HUD_Write_Cvar("hud_configure_grid_ysize");
 		HUD_Write("\n");
 
-		// common cvars for all panels
 		for (int i = 0; i < REGISTRY_COUNT(hud_panels); ++i)
 		{
 			panel = REGISTRY_GET(hud_panels, i);
@@ -75,7 +73,7 @@ void HUD_Panel_ExportCfg(string cfgname)
 			HUD_Write("\n");
 		}
 
-		HUD_Write("menu_sync\n"); // force the menu to reread the cvars, so that the dialogs are updated
+		HUD_Write("menu_sync\n");
 
 		LOG_INFOF(_("^2Successfully exported to %s! (Note: It's saved in data/data/)"), filename);
 		fclose(fh);
@@ -95,7 +93,6 @@ void HUD_Configure_Exit_Force()
 	cvar_set("_hud_configure", "0");
 }
 
-// check if move will result in panel being moved into another panel. If so, return snapped vector, otherwise return the given vector
 vector HUD_Panel_CheckMove(vector myPos, vector mySize)
 {
 	vector myCenter, targCenter;
@@ -121,44 +118,41 @@ vector HUD_Panel_CheckMove(vector myPos, vector mySize)
 		if(myPos.x > panel_pos.x + panel_size.x)
 			continue;
 
-		// OK, there IS a collision.
-
 		myCenter.x = myPos.x + 0.5 * mySize.x;
 		myCenter.y = myPos.y + 0.5 * mySize.y;
 
 		targCenter.x = panel_pos.x + 0.5 * panel_size.x;
 		targCenter.y = panel_pos.y + 0.5 * panel_size.y;
 
-		if(myCenter.x < targCenter.x && myCenter.y < targCenter.y) // top left (of the target panel)
+		if(myCenter.x < targCenter.x && myCenter.y < targCenter.y)
 		{
-			if(myPos.x + mySize.x - panel_pos.x < myPos.y + mySize.y - panel_pos.y) // push it to the side
+			if(myPos.x + mySize.x - panel_pos.x < myPos.y + mySize.y - panel_pos.y)
 				myTarget.x = panel_pos.x - mySize.x;
-			else // push it upwards
+			else
 				myTarget.y = panel_pos.y - mySize.y;
 		}
-		else if(myCenter.x > targCenter.x && myCenter.y < targCenter.y) // top right
+		else if(myCenter.x > targCenter.x && myCenter.y < targCenter.y)
 		{
-			if(panel_pos.x + panel_size.x - myPos.x < myPos.y + mySize.y - panel_pos.y) // push it to the side
+			if(panel_pos.x + panel_size.x - myPos.x < myPos.y + mySize.y - panel_pos.y)
 				myTarget.x = panel_pos.x + panel_size.x;
-			else // push it upwards
+			else
 				myTarget.y = panel_pos.y - mySize.y;
 		}
-		else if(myCenter.x < targCenter.x && myCenter.y > targCenter.y) // bottom left
+		else if(myCenter.x < targCenter.x && myCenter.y > targCenter.y)
 		{
-			if(myPos.x + mySize.x - panel_pos.x < panel_pos.y + panel_size.y - myPos.y) // push it to the side
+			if(myPos.x + mySize.x - panel_pos.x < panel_pos.y + panel_size.y - myPos.y)
 				myTarget.x = panel_pos.x - mySize.x;
-			else // push it downwards
+			else
 				myTarget.y = panel_pos.y + panel_size.y;
 		}
-		else if(myCenter.x > targCenter.x && myCenter.y > targCenter.y) // bottom right
+		else if(myCenter.x > targCenter.x && myCenter.y > targCenter.y)
 		{
-			if(panel_pos.x + panel_size.x - myPos.x < panel_pos.y + panel_size.y - myPos.y) // push it to the side
+			if(panel_pos.x + panel_size.x - myPos.x < panel_pos.y + panel_size.y - myPos.y)
 				myTarget.x = panel_pos.x + panel_size.x;
-			else // push it downwards
+			else
 				myTarget.y = panel_pos.y + panel_size.y;
 		}
-		//if(cvar("hud_configure_checkcollisions_debug"))
-			//drawfill(panel_pos, panel_size, '1 1 0', .3, DRAWFLAG_NORMAL);
+
 	}
 
 	return myTarget;
@@ -170,9 +164,6 @@ void HUD_Panel_SetPos(vector pos)
 	HUD_Panel_UpdatePosSize();
 	vector mySize;
 	mySize = panel_size;
-
-	//if(cvar("hud_configure_checkcollisions_debug"))
-		//drawfill(pos, mySize, '1 1 1', .2, DRAWFLAG_NORMAL);
 
 	if(autocvar_hud_configure_grid)
 	{
@@ -192,7 +183,6 @@ void HUD_Panel_SetPos(vector pos)
 	cvar_set(strcat("hud_panel_", highlightedPanel.panel_name, "_pos"), s);
 }
 
-// check if resize will result in panel being moved into another panel. If so, return snapped vector, otherwise return the given vector
 vector HUD_Panel_CheckResize(vector mySize, vector resizeorigin) {
 	vector targEndPos;
 	vector dist;
@@ -210,13 +200,12 @@ vector HUD_Panel_CheckResize(vector mySize, vector resizeorigin) {
 
 		targEndPos = panel_pos + panel_size;
 
-		// resizeorigin is WITHIN target panel, just abort any collision testing against that particular panel to produce expected behaviour!
 		if(resizeorigin.x > panel_pos.x && resizeorigin.x < targEndPos.x && resizeorigin.y > panel_pos.y && resizeorigin.y < targEndPos.y)
 			continue;
 
 		if (resizeCorner == 1)
 		{
-			// check if this panel is on our way
+
 			if (resizeorigin.x <= panel_pos.x)
 				continue;
 			if (resizeorigin.y <= panel_pos.y)
@@ -226,12 +215,6 @@ vector HUD_Panel_CheckResize(vector mySize, vector resizeorigin) {
 			if (targEndPos.y <= resizeorigin.y - mySize.y)
 				continue;
 
-			// there is a collision:
-			// detect which side of the panel we are facing is actually limiting the resizing
-			// (which side the resize direction finds for first) and reduce the size up to there
-			//
-			// dist is the distance between resizeorigin and the "analogous" point of the panel
-			// in this case between resizeorigin (bottom-right point) and the bottom-right point of the panel
 			dist.x = resizeorigin.x - targEndPos.x;
 			dist.y = resizeorigin.y - targEndPos.y;
 			if (dist.y <= 0 || dist.x / dist.y > ratio)
@@ -293,8 +276,7 @@ vector HUD_Panel_CheckResize(vector mySize, vector resizeorigin) {
 			else
 				mySize.y = min(mySize.y, dist.y);
 		}
-		//if(cvar("hud_configure_checkcollisions_debug"))
-			//drawfill(panel_pos, panel_size, '1 1 0', .3, DRAWFLAG_NORMAL);
+
 	}
 
 	return mySize;
@@ -307,20 +289,15 @@ void HUD_Panel_SetPosSize(vector mySize)
 	vector resizeorigin = panel_click_resizeorigin;
 	vector myPos;
 
-	// minimum panel size cap
 	mySize.x = max(0.025 * vid_conwidth, mySize.x);
 	mySize.y = max(0.025 * vid_conheight, mySize.y);
 
-	if(highlightedPanel == HUD_PANEL(CHAT)) // some panels have their own restrictions, like the chat panel (which actually only moves the engine chat print around). Looks bad if it's too small.
+	if(highlightedPanel == HUD_PANEL(CHAT))
 	{
 		mySize.x = max(17 * autocvar_con_chatsize, mySize.x);
 		mySize.y = max(2 * autocvar_con_chatsize + 2 * panel_bg_padding, mySize.y);
 	}
 
-	// collision testing|
-	// -----------------+
-
-	// we need to know pos at this stage, but it might still change later if we hit a screen edge/other panel (?)
 	if(resizeCorner == 1) {
 		myPos.x = resizeorigin.x - mySize.x;
 		myPos.y = resizeorigin.y - mySize.y;
@@ -330,27 +307,21 @@ void HUD_Panel_SetPosSize(vector mySize)
 	} else if(resizeCorner == 3) {
 		myPos.x = resizeorigin.x - mySize.x;
 		myPos.y = resizeorigin.y;
-	} else { // resizeCorner == 4
+	} else {
 		myPos.x = resizeorigin.x;
 		myPos.y = resizeorigin.y;
 	}
 
-	// left/top screen edges
 	if(myPos.x < 0)
 		mySize.x = mySize.x + myPos.x;
 	if(myPos.y < 0)
 		mySize.y = mySize.y + myPos.y;
 
-	// bottom/right screen edges
 	if(myPos.x + mySize.x > vid_conwidth)
 		mySize.x = vid_conwidth - myPos.x;
 	if(myPos.y + mySize.y > vid_conheight)
 		mySize.y = vid_conheight - myPos.y;
 
-	//if(cvar("hud_configure_checkcollisions_debug"))
-		//drawfill(myPos, mySize, '1 1 1', .2, DRAWFLAG_NORMAL);
-
-	// before checkresize, otherwise panel can be snapped partially inside another panel or panel aspect ratio can be broken
 	if(autocvar_hud_configure_grid)
 	{
 		mySize.x = floor((mySize.x/vid_conwidth)/hud_configure_gridSize.x + 0.5) * hud_configure_realGridSize.x;
@@ -360,11 +331,9 @@ void HUD_Panel_SetPosSize(vector mySize)
 	if(hud_configure_checkcollisions)
 		mySize = HUD_Panel_CheckResize(mySize, resizeorigin);
 
-	// minimum panel size cap, do this once more so we NEVER EVER EVER have a panel smaller than this, JUST IN CASE above code still makes the panel eg negative (impossible to resize back without changing cvars manually then)
 	mySize.x = max(0.025 * vid_conwidth, mySize.x);
 	mySize.y = max(0.025 * vid_conheight, mySize.y);
 
-	// do another pos check, as size might have changed by now
 	if(resizeCorner == 1) {
 		myPos.x = resizeorigin.x - mySize.x;
 		myPos.y = resizeorigin.y - mySize.y;
@@ -374,13 +343,10 @@ void HUD_Panel_SetPosSize(vector mySize)
 	} else if(resizeCorner == 3) {
 		myPos.x = resizeorigin.x - mySize.x;
 		myPos.y = resizeorigin.y;
-	} else { // resizeCorner == 4
+	} else {
 		myPos.x = resizeorigin.x;
 		myPos.y = resizeorigin.y;
 	}
-
-	//if(cvar("hud_configure_checkcollisions_debug"))
-		//drawfill(myPos, mySize, '0 1 0', .3, DRAWFLAG_NORMAL);
 
 	string s;
 	s = strcat(ftos(mySize.x/vid_conwidth), " ", ftos(mySize.y/vid_conheight));
@@ -424,7 +390,7 @@ void HUD_Panel_Arrow_Action(float nPrimary)
 		else
 			step = vid_conwidth;
 		if (hudShiftState & S_SHIFT)
-			step = (step / 256); // more precision
+			step = (step / 256);
 		else
 			step = (step / 64) * (1 + 2 * (time - pressed_key_time));
 	}
@@ -435,7 +401,7 @@ void HUD_Panel_Arrow_Action(float nPrimary)
 	highlightedPanel_initial_pos = panel_pos;
 	highlightedPanel_initial_size = panel_size;
 
-	if (hudShiftState & S_ALT) // resize
+	if (hudShiftState & S_ALT)
 	{
 		if(nPrimary == K_UPARROW)
 			resizeCorner = 1;
@@ -443,12 +409,9 @@ void HUD_Panel_Arrow_Action(float nPrimary)
 			resizeCorner = 2;
 		else if(nPrimary == K_LEFTARROW)
 			resizeCorner = 3;
-		else // if(nPrimary == K_DOWNARROW)
+		else
 			resizeCorner = 4;
 
-		// ctrl+arrow reduces the size, instead of increasing it
-		// Note that ctrl disables collisions check too, but it's fine
-		// since we don't collide with anything reducing the size
 		if (hudShiftState & S_CTRL) {
 			step = -step;
 			resizeCorner = 5 - resizeCorner;
@@ -466,12 +429,12 @@ void HUD_Panel_Arrow_Action(float nPrimary)
 		} else if(resizeCorner == 3) {
 			panel_click_resizeorigin.x += mySize.x;
 			mySize.x += step;
-		} else { // resizeCorner == 4
+		} else {
 			mySize.y += step;
 		}
 		HUD_Panel_SetPosSize(mySize);
 	}
-	else // move
+	else
 	{
 		vector pos;
 		pos = panel_pos;
@@ -481,7 +444,7 @@ void HUD_Panel_Arrow_Action(float nPrimary)
 			pos.y += step;
 		else if(nPrimary == K_LEFTARROW)
 			pos.x -= step;
-		else // if(nPrimary == K_RIGHTARROW)
+		else
 			pos.x += step;
 
 		HUD_Panel_SetPos(pos);
@@ -492,7 +455,7 @@ void HUD_Panel_Arrow_Action(float nPrimary)
 
 	if (highlightedPanel_initial_pos != panel_pos || highlightedPanel_initial_size != panel_size)
 	{
-		// backup!
+
 		panel_pos_backup = highlightedPanel_initial_pos;
 		panel_size_backup = highlightedPanel_initial_size;
 		highlightedPanel_backup = highlightedPanel;
@@ -526,11 +489,8 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 	if(bInputType == 2)
 		return false;
 
-	// at this point bInputType can only be 0 or 1 (key pressed or released)
 	bool key_pressed = (bInputType == 0);
 
-	// block any input while a menu dialog is fading
-	// don't block mousepos read as it leads to cursor jumps in the interaction with the menu
 	if(autocvar__menu_alpha)
 	{
 		hudShiftState = 0;
@@ -557,11 +517,11 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 
 	if(nPrimary == K_CTRL)
 	{
-		if (!key_pressed) //ctrl has been released
+		if (!key_pressed)
 		{
 			if (tab_panel)
 			{
-				//switch to selected panel
+
 				highlightedPanel = tab_panel;
 				highlightedAction = 0;
 				HUD_Panel_FirstInDrawQ(highlightedPanel.panel_id);
@@ -585,18 +545,14 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		if (!hud_configure_menu_open)
 			HUD_Configure_Exit_Force();
 	}
-	else if(nPrimary == K_TAB && hudShiftState & S_CTRL) // switch panel
+	else if(nPrimary == K_TAB && hudShiftState & S_CTRL)
 	{
 		if (!key_pressed || mouseClicked)
 			return true;
 
-		// FIXME minor bug: if a panel is highlighted, has the same pos_x and
-		// lays in the same level of another panel then the next consecutive
-		// CTRL TAB presses will reselect once more the highlighted panel
-
 		entity starting_panel;
 		entity old_tab_panel = tab_panel;
-		if (!tab_panel) //first press of TAB
+		if (!tab_panel)
 		{
 			if (highlightedPanel)
 			{
@@ -606,11 +562,11 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 			else
 				panel_pos = '0 0 0';
 			starting_panel = highlightedPanel;
-			tab_panel_pos = panel_pos; //to compute level
+			tab_panel_pos = panel_pos;
 		}
 		else
 		{
-			if ( ((!tab_backward) && (hudShiftState & S_SHIFT)) || (tab_backward && !(hudShiftState & S_SHIFT)) ) //tab direction changed?
+			if ( ((!tab_backward) && (hudShiftState & S_SHIFT)) || (tab_backward && !(hudShiftState & S_SHIFT)) )
 				reset_tab_panels();
 			starting_panel = tab_panel;
 		}
@@ -621,7 +577,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		const float LEVELS_NUM = 4;
 		float level_height = vid_conheight / LEVELS_NUM;
 		LABEL(find_tab_panel)
-		level = floor(tab_panel_pos.y / level_height) * level_height; //starting level
+		level = floor(tab_panel_pos.y / level_height) * level_height;
 		candidate_pos.x = (!tab_backward) ? vid_conwidth : 0;
 		start_posX = tab_panel_pos.x;
 		tab_panel = NULL;
@@ -646,7 +602,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 			}
 			if (tab_panel)
 				break;
-			if (k == LEVELS_NUM) //tab_panel not found
+			if (k == LEVELS_NUM)
 			{
 				reset_tab_panels();
 				if (!old_tab_panel)
@@ -656,7 +612,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 				}
 				starting_panel = old_tab_panel;
 				old_tab_panel = NULL;
-				goto find_tab_panel; //u must find tab_panel!
+				goto find_tab_panel;
 			}
 			if (!tab_backward)
 			{
@@ -674,7 +630,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 
 		tab_panels[tab_panel.panel_id] = tab_panel;
 	}
-	else if(nPrimary == K_SPACE && hudShiftState & S_CTRL) // enable/disable highlighted panel or dock
+	else if(nPrimary == K_SPACE && hudShiftState & S_CTRL)
 	{
 		if (!key_pressed || mouseClicked)
 			return true;
@@ -687,7 +643,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		else
 			cvar_set(strcat("hud_dock"), (autocvar_hud_dock == "") ? "dock" : "");
 	}
-	else if(nPrimary == 'c' && hudShiftState & S_CTRL) // copy highlighted panel size
+	else if(nPrimary == 'c' && hudShiftState & S_CTRL)
 	{
 		if (!key_pressed || mouseClicked)
 			return true;
@@ -699,7 +655,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 			panel_size_copied = panel_size;
 		}
 	}
-	else if(nPrimary == 'v' && hudShiftState & S_CTRL) // past copied size on the highlighted panel
+	else if(nPrimary == 'v' && hudShiftState & S_CTRL)
 	{
 		if (!key_pressed || mouseClicked)
 			return true;
@@ -710,7 +666,6 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		panel = highlightedPanel;
 		HUD_Panel_UpdatePosSize();
 
-		// reduce size if it'd go beyond screen boundaries
 		vector tmp_size = panel_size_copied;
 		if (panel_pos.x + panel_size_copied.x > vid_conwidth)
 			tmp_size.x = vid_conwidth - panel_pos.x;
@@ -720,7 +675,6 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		if (panel_size == tmp_size)
 			return true;
 
-		// backup first!
 		panel_pos_backup = panel_pos;
 		panel_size_backup = panel_size;
 		highlightedPanel_backup = highlightedPanel;
@@ -728,11 +682,11 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		s = strcat(ftos(tmp_size.x/vid_conwidth), " ", ftos(tmp_size.y/vid_conheight));
 		cvar_set(strcat("hud_panel_", highlightedPanel.panel_name, "_size"), s);
 	}
-	else if(nPrimary == 'z' && hudShiftState & S_CTRL) // undo last action
+	else if(nPrimary == 'z' && hudShiftState & S_CTRL)
 	{
 		if (!key_pressed || mouseClicked)
 			return true;
-		//restore previous values
+
 		if (highlightedPanel_backup)
 		{
 			s = strcat(ftos(panel_pos_backup.x/vid_conwidth), " ", ftos(panel_pos_backup.y/vid_conheight));
@@ -742,7 +696,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 			highlightedPanel_backup = NULL;
 		}
 	}
-	else if(nPrimary == 's' && hudShiftState & S_CTRL) // save config
+	else if(nPrimary == 's' && hudShiftState & S_CTRL)
 	{
 		if (!key_pressed || mouseClicked)
 			return true;
@@ -759,7 +713,7 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 			pressed_key_time = time;
 
 		if (!mouseClicked)
-			HUD_Panel_Arrow_Action(nPrimary); //move or resize panel
+			HUD_Panel_Arrow_Action(nPrimary);
 	}
 	else if(nPrimary == K_ENTER || nPrimary == K_SPACE || nPrimary == K_KP_ENTER)
 	{
@@ -772,13 +726,13 @@ float HUD_Panel_InputEvent(float bInputType, float nPrimary, float nSecondary)
 		return false;
 	else if (hudShiftState_prev == hudShiftState && mouseClicked_prev == mouseClicked)
 	{
-		// allow console bind to work
+
 		string con_keys = findkeysforcommand("toggleconsole", 0);
-		int keys = tokenize(con_keys); // findkeysforcommand returns data for this
+		int keys = tokenize(con_keys);
 		for (int i = 0; i < keys; ++i)
 		{
 			if(nPrimary == stof(argv(i)))
-				return false; // hit console bind
+				return false;
 		}
 	}
 
@@ -797,29 +751,28 @@ int HUD_Panel_Check_Mouse_Pos(bool allow_move)
 		if(!(panel.panel_configflags & PANEL_CONFIG_MAIN)) continue;
 		HUD_Panel_UpdatePosSize();
 
-		float border = max(8, panel_bg_border); // FORCED border so a small border size doesn't mean you can't resize
+		float border = max(8, panel_bg_border);
 
-		// move
 		if(allow_move && mousepos.x > panel_pos.x && mousepos.y > panel_pos.y && mousepos.x < panel_pos.x + panel_size.x && mousepos.y < panel_pos.y + panel_size.y)
 		{
 			return CURSOR_MOVE;
 		}
-		// resize from topleft border
+
 		else if(mousepos.x >= panel_pos.x - border && mousepos.y >= panel_pos.y - border && mousepos.x <= panel_pos.x + 0.5 * panel_size.x && mousepos.y <= panel_pos.y + 0.5 * panel_size.y)
 		{
 			return CURSOR_RESIZE;
 		}
-		// resize from topright border
+
 		else if(mousepos.x >= panel_pos.x + 0.5 * panel_size.x && mousepos.y >= panel_pos.y - border && mousepos.x <= panel_pos.x + panel_size.x + border && mousepos.y <= panel_pos.y + 0.5 * panel_size.y)
 		{
 			return CURSOR_RESIZE2;
 		}
-		// resize from bottomleft border
+
 		else if(mousepos.x >= panel_pos.x - border && mousepos.y >= panel_pos.y + 0.5 * panel_size.y && mousepos.x <= panel_pos.x + 0.5 * panel_size.x && mousepos.y <= panel_pos.y + panel_size.y + border)
 		{
 			return CURSOR_RESIZE2;
 		}
-		// resize from bottomright border
+
 		else if(mousepos.x >= panel_pos.x + 0.5 * panel_size.x && mousepos.y >= panel_pos.y + 0.5 * panel_size.y && mousepos.x <= panel_pos.x + panel_size.x + border && mousepos.y <= panel_pos.y + panel_size.y + border)
 		{
 			return CURSOR_RESIZE;
@@ -828,12 +781,11 @@ int HUD_Panel_Check_Mouse_Pos(bool allow_move)
 	return CURSOR_NORMAL;
 }
 
-// move a panel to the beginning of the panel order array (which means it gets drawn last, on top of everything else)
 void HUD_Panel_FirstInDrawQ(float id)
 {
 	int i;
 	int place = -1;
-	// find out where in the array our current id is, save into place
+
 	for(i = 0; i < REGISTRY_COUNT(hud_panels); ++i)
 	{
 		if(panel_order[i] == id)
@@ -842,26 +794,24 @@ void HUD_Panel_FirstInDrawQ(float id)
 			break;
 		}
 	}
-	// place last if we didn't find a place for it yet (probably new panel, or screwed up cvar)
+
 	if(place == -1)
 		place = REGISTRY_COUNT(hud_panels) - 1;
 
-	// move all ids up by one step in the array until "place"
 	for(i = place; i > 0; --i)
 	{
 		panel_order[i] = panel_order[i-1];
 	}
-	// now save the new top id
+
 	panel_order[0] = id;
 
-	// let's save them into the cvar by some strcat trickery
 	string s = "";
 	for(i = 0; i < REGISTRY_COUNT(hud_panels); ++i)
 	{
 		s = strcat(s, ftos(panel_order[i]), " ");
 	}
 	cvar_set("_hud_panelorder", s);
-	strcpy(hud_panelorder_prev, autocvar__hud_panelorder); // prevent HUD_Main from doing useless update, we already updated here
+	strcpy(hud_panelorder_prev, autocvar__hud_panelorder);
 }
 
 void HUD_Panel_Highlight(float allow_move)
@@ -878,9 +828,8 @@ void HUD_Panel_Highlight(float allow_move)
 			continue;
 		HUD_Panel_UpdatePosSize();
 
-		float border = max(8, panel_bg_border); // FORCED border so a small border size doesn't mean you can't resize
+		float border = max(8, panel_bg_border);
 
-		// move
 		if(allow_move && mousepos.x > panel_pos.x && mousepos.y > panel_pos.y && mousepos.x < panel_pos.x + panel_size.x && mousepos.y < panel_pos.y + panel_size.y)
 		{
 			highlightedPanel = REGISTRY_GET(hud_panels, i);
@@ -889,7 +838,7 @@ void HUD_Panel_Highlight(float allow_move)
 			panel_click_distance = mousepos - panel_pos;
 			return;
 		}
-		// resize from topleft border
+
 		else if(mousepos.x >= panel_pos.x - border && mousepos.y >= panel_pos.y - border && mousepos.x <= panel_pos.x + 0.5 * panel_size.x && mousepos.y <= panel_pos.y + 0.5 * panel_size.y)
 		{
 			highlightedPanel = REGISTRY_GET(hud_panels, i);
@@ -900,7 +849,7 @@ void HUD_Panel_Highlight(float allow_move)
 			panel_click_resizeorigin = panel_pos + panel_size;
 			return;
 		}
-		// resize from topright border
+
 		else if(mousepos.x >= panel_pos.x + 0.5 * panel_size.x && mousepos.y >= panel_pos.y - border && mousepos.x <= panel_pos.x + panel_size.x + border && mousepos.y <= panel_pos.y + 0.5 * panel_size.y)
 		{
 			highlightedPanel = REGISTRY_GET(hud_panels, i);
@@ -912,7 +861,7 @@ void HUD_Panel_Highlight(float allow_move)
 			panel_click_resizeorigin = panel_pos + eY * panel_size.y;
 			return;
 		}
-		// resize from bottomleft border
+
 		else if(mousepos.x >= panel_pos.x - border && mousepos.y >= panel_pos.y + 0.5 * panel_size.y && mousepos.x <= panel_pos.x + 0.5 * panel_size.x && mousepos.y <= panel_pos.y + panel_size.y + border)
 		{
 			highlightedPanel = REGISTRY_GET(hud_panels, i);
@@ -924,7 +873,7 @@ void HUD_Panel_Highlight(float allow_move)
 			panel_click_resizeorigin = panel_pos + eX * panel_size.x;
 			return;
 		}
-		// resize from bottomright border
+
 		else if(mousepos.x >= panel_pos.x + 0.5 * panel_size.x && mousepos.y >= panel_pos.y + 0.5 * panel_size.y && mousepos.x <= panel_pos.x + panel_size.x + border && mousepos.y <= panel_pos.y + panel_size.y + border)
 		{
 			highlightedPanel = REGISTRY_GET(hud_panels, i);
@@ -957,21 +906,21 @@ void HUD_Panel_Mouse()
 		{
 			if (tab_panel)
 			{
-				//stop ctrl-tab selection
+
 				tab_panel = NULL;
 				reset_tab_panels();
 			}
-			HUD_Panel_Highlight(mouseClicked & S_MOUSE1); // sets highlightedPanel, highlightedAction, panel_click_distance, panel_click_resizeorigin
-									// and calls HUD_Panel_UpdatePosSize() for the highlighted panel
+			HUD_Panel_Highlight(mouseClicked & S_MOUSE1);
+
 			if (highlightedPanel)
 			{
 				highlightedPanel_initial_pos = panel_pos;
 				highlightedPanel_initial_size = panel_size;
 			}
-			// doubleclick check
+
 			if ((mouseClicked & S_MOUSE1) && time - prevMouseClickedTime < 0.4 && highlightedPanel && prevMouseClickedPos == mousepos)
 			{
-				mouseClicked = 0; // to prevent spam, I guess.
+				mouseClicked = 0;
 				HUD_Panel_EnableMenu();
 			}
 			else
@@ -996,18 +945,16 @@ void HUD_Panel_Mouse()
 			if (highlightedPanel_initial_pos != panel_pos || highlightedPanel_initial_size != panel_size)
 			{
 				hud_configure_checkcollisions = (!(hudShiftState & S_CTRL) && autocvar_hud_configure_checkcollisions);
-				// backup!
+
 				panel_pos_backup = highlightedPanel_initial_pos;
 				panel_size_backup = highlightedPanel_initial_size;
 				highlightedPanel_backup = highlightedPanel;
 			}
 			else
-				// in case the clicked panel is inside another panel and we aren't
-				// moving it, avoid the immediate "fix" of its position/size
-				// (often unwanted and hateful) by disabling collisions check
+
 				hud_configure_checkcollisions = false;
 
-			if (time - prevMouseClickedTime > 0.25) // avoid showing the center line immediately on mouse click
+			if (time - prevMouseClickedTime > 0.25)
 				hud_configure_centerline_time = time + 0.5;
 		}
 
@@ -1025,7 +972,7 @@ void HUD_Panel_Mouse()
 			} else if(resizeCorner == 3) {
 				mySize.x = panel_click_resizeorigin.x + panel_click_distance.x - mousepos.x;
 				mySize.y = mousepos.y + panel_click_distance.y - panel_click_resizeorigin.y;
-			} else { // resizeCorner == 4
+			} else {
 				mySize.x = mousepos.x - (panel_click_resizeorigin.x - panel_click_distance.x);
 				mySize.y = mousepos.y - (panel_click_resizeorigin.y - panel_click_distance.y);
 			}
@@ -1040,7 +987,7 @@ void HUD_Panel_Mouse()
 			cursor_type = CURSOR_NORMAL;
 		else
 			cursor_type = HUD_Panel_Check_Mouse_Pos(true);
-		if (cursor_type != CURSOR_NORMAL && !tab_panel) // mouse over a panel?
+		if (cursor_type != CURSOR_NORMAL && !tab_panel)
 			drawfill(panel_pos - '1 1 0' * panel_bg_border, panel_size + '2 2 0' * panel_bg_border, '1 1 1', .1, DRAWFLAG_NORMAL);
 	}
 }
@@ -1054,19 +1001,18 @@ void HUD_Configure_DrawGrid()
 		hud_configure_realGridSize.x = hud_configure_gridSize.x * vid_conwidth;
 		hud_configure_realGridSize.y = hud_configure_gridSize.y * vid_conheight;
 		vector s;
-		// vertical center line, wider than vertical grid lines so that it's more visible
-		// NOTE: depending on grid size the vertical center line may not overlap any vertical grid line
+
 		int n = tokenize(autocvar_hud_configure_vertical_lines);
 		for (i = 0; i < n; ++i)
 		{
 			float xpos_rel = stof(argv(i));
 			drawfill(eX * (xpos_rel * vid_conwidth - 1), vec2(3, vid_conheight), '0.5 0.5 0.5', autocvar_hud_configure_grid_alpha, DRAWFLAG_NORMAL);
 		}
-		// x-axis
+
 		s = vec2(1, vid_conheight);
 		for(i = 1; i < 1/hud_configure_gridSize.x; ++i)
 			drawfill(eX * i * hud_configure_realGridSize.x, s, '0.5 0.5 0.5', autocvar_hud_configure_grid_alpha, DRAWFLAG_NORMAL);
-		// y-axis
+
 		s = vec2(vid_conwidth, 1);
 		for(i = 1; i < 1/hud_configure_gridSize.y; ++i)
 			drawfill(eY * i * hud_configure_realGridSize.y, s, '0.5 0.5 0.5', autocvar_hud_configure_grid_alpha, DRAWFLAG_NORMAL);
@@ -1092,7 +1038,6 @@ void HUD_Configure_Frame()
 				REGISTRY_GET(hud_panels, panel_order[i]).update_time = time;
 		}
 
-		// NOTE this check is necessary because _menu_alpha isn't updated the frame the menu gets enabled
 		if(autocvar__menu_alpha != _menu_alpha_prev)
 		{
 			if(autocvar__menu_alpha == 0)
@@ -1136,12 +1081,12 @@ void HUD_Panel_HlCenterLine(float myBorder)
 		if (xpos_rel <= 0 || xpos_rel >= 1)
 			continue;
 		float ofs = fabs(panel_centerpos_x / vid_conwidth - xpos_rel);
-		if (ofs < 0.02) // don't bother showing the center line if it's evident that the panel is not centered
+		if (ofs < 0.02)
 		{
 			float f = map_bound_ranges(ofs, 0.001, 0.01, 0, 1);
-			vector col = '1 0 0' * f + '0 1 0' * (1 - f); // from red (far) to green (close)
-			float theAlpha = 0.3 + 0.1 * sin(6 * time); // blink
-			theAlpha *= (1 - autocvar__menu_alpha) * bound(0, hud_configure_centerline_time - time, 0.5) * 2; // fade
+			vector col = '1 0 0' * f + '0 1 0' * (1 - f);
+			float theAlpha = 0.3 + 0.1 * sin(6 * time);
+			theAlpha *= (1 - autocvar__menu_alpha) * bound(0, hud_configure_centerline_time - time, 0.5) * 2;
 			vector pos = vec2(panel_centerpos_x - 1, panel_pos.y - myBorder);
 			drawfill(pos, vec2(3, panel_size.y + 2 * myBorder), col, theAlpha, DRAWFLAG_NORMAL);
 		}

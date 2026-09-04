@@ -1,6 +1,5 @@
 #pragma once
 
-// convenience
 #include "skin.qh"
 #include "draw.qh"
 #include "menu.qh"

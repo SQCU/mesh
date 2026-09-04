@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #ifndef GLQUAKE_H
 #define GLQUAKE_H
@@ -27,7 +9,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #else
 #include <SDL_opengles2.h>
 #endif
-// used in R_SetupShader_Generic calls, not actually passed to GL
+
 #ifndef GL_MODULATE
 #define GL_MODULATE				0x2100
 #define GL_DECAL                          0x2101
@@ -35,32 +17,19 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #endif
 #endif
 
-// disable data conversion warnings
-
 #ifdef _MSC_VER
-#pragma warning(disable : 4310) // LordHavoc: MSVC++ 2008 x86: cast truncates constant value
-#pragma warning(disable : 4245) // LordHavoc: MSVC++ 2008 x86: 'initializing' : conversion from 'int' to 'unsigned char', signed/unsigned mismatch
-#pragma warning(disable : 4204) // LordHavoc: MSVC++ 2008 x86: nonstandard extension used : non-constant aggregate initializer
-//#pragma warning(disable : 4267) // LordHavoc: MSVC++ 2008 x64, conversion from 'size_t' to 'int', possible loss of data
-//#pragma warning(disable : 4244)     // LordHavoc: MSVC++ 4 x86, double/float
-//#pragma warning(disable : 4305)		// LordHavoc: MSVC++ 6 x86, double/float
-//#pragma warning(disable : 4706)		// LordHavoc: MSVC++ 2008 x86, assignment within conditional expression
-//#pragma warning(disable : 4127)		// LordHavoc: MSVC++ 2008 x86, conditional expression is constant
-//#pragma warning(disable : 4100)		// LordHavoc: MSVC++ 2008 x86, unreferenced formal parameter
-//#pragma warning(disable : 4055)		// LordHavoc: MSVC++ 2008 x86, 'type cast' from data pointer   to function pointer
-//#pragma warning(disable : 4054)		// LordHavoc: MSVC++ 2008 x86, 'type cast' from function pointer   to data pointer
+#pragma warning(disable : 4310)
+#pragma warning(disable : 4245)
+#pragma warning(disable : 4204)
+
 #endif
 
-
-//====================================================
-
 #ifndef USE_GLES2
-// wgl uses APIENTRY
+
 #ifndef APIENTRY
 #define APIENTRY
 #endif
 
-// for platforms (wgl) that do not use GLAPIENTRY
 #ifndef GLAPIENTRY
 #define GLAPIENTRY APIENTRY
 #endif
@@ -72,31 +41,31 @@ typedef unsigned int GLenum;
 typedef unsigned char GLboolean;
 typedef unsigned int GLbitfield;
 typedef void GLvoid;
-// 1-byte signed
+
 typedef signed char GLbyte;
-// 2-byte signed
+
 typedef short GLshort;
-// 4-byte signed
+
 typedef int GLint;
-// 1-byte unsigned
+
 typedef unsigned char GLubyte;
-// 2-byte unsigned
+
 typedef unsigned short GLushort;
-// 4-byte unsigned
+
 typedef unsigned int GLuint;
-// 4-byte signed
+
 typedef int GLsizei;
-// single precision float
+
 typedef float GLfloat;
-// single precision float in [0,1]
+
 typedef float GLclampf;
-// double precision float
+
 typedef double GLdouble;
-// double precision float in [0,1]
+
 typedef double GLclampd;
-// int whose size is the same as a pointer (?)
+
 typedef ptrdiff_t GLintptrARB;
-// int whose size is the same as a pointer (?)
+
 typedef ptrdiff_t GLsizeiptrARB;
 
 #define GL_STEREO					0x0C33
@@ -202,9 +171,8 @@ typedef ptrdiff_t GLsizeiptrARB;
 #define GL_VERTEX_ARRAY				0x8074
 #define GL_NORMAL_ARRAY				0x8075
 #define GL_COLOR_ARRAY				0x8076
-//#define GL_INDEX_ARRAY				0x8077
+
 #define GL_TEXTURE_COORD_ARRAY			0x8078
-//#define GL_EDGE_FLAG_ARRAY			0x8079
 
 #define GL_NONE					0
 #define GL_FRONT_LEFT			0x0400
@@ -295,13 +263,11 @@ typedef ptrdiff_t GLsizeiptrARB;
 
 #endif
 
-//GL_EXT_texture_filter_anisotropic
 #ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
 #define GL_TEXTURE_MAX_ANISOTROPY_EXT       0x84FE
 #define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT   0x84FF
 #endif
 
-// GL_ARB_depth_texture
 #ifndef GL_DEPTH_COMPONENT32_ARB
 #define GL_DEPTH_COMPONENT16_ARB          0x81A5
 #define GL_DEPTH_COMPONENT24_ARB          0x81A6
@@ -310,14 +276,12 @@ typedef ptrdiff_t GLsizeiptrARB;
 #define GL_DEPTH_TEXTURE_MODE_ARB         0x884B
 #endif
 
-// GL_ARB_shadow
 #ifndef GL_TEXTURE_COMPARE_MODE_ARB
 #define GL_TEXTURE_COMPARE_MODE_ARB       0x884C
 #define GL_TEXTURE_COMPARE_FUNC_ARB       0x884D
 #define GL_COMPARE_R_TO_TEXTURE_ARB       0x884E
 #endif
 
-// GL_ARB_multitexture
 extern void (GLAPIENTRY *qglMultiTexCoord1f) (GLenum, GLfloat);
 extern void (GLAPIENTRY *qglMultiTexCoord2f) (GLenum, GLfloat, GLfloat);
 extern void (GLAPIENTRY *qglMultiTexCoord3f) (GLenum, GLfloat, GLfloat, GLfloat);
@@ -362,7 +326,6 @@ extern void (GLAPIENTRY *qglClientActiveTexture) (GLenum);
 #define GL_TEXTURE31				0x84DF
 #endif
 
-// GL_ARB_texture_env_combine
 #ifndef GL_COMBINE
 #define GL_COMBINE					0x8570
 #define GL_COMBINE_RGB				0x8571
@@ -394,7 +357,6 @@ extern void (GLAPIENTRY *qglClientActiveTexture) (GLenum);
 #ifndef GL_MAX_ELEMENTS_INDICES
 #define GL_MAX_ELEMENTS_INDICES			0x80E9
 #endif
-
 
 #ifndef GL_TEXTURE_3D
 #define GL_PACK_SKIP_IMAGES			0x806B
@@ -440,12 +402,10 @@ extern void (GLAPIENTRY *qglCopyTexSubImage3D)(GLenum target, GLint level, GLint
 #define GL_SCISSOR_BOX				0x0C10
 #endif
 
-// GL_SGIS_texture_edge_clamp or GL_EXT_texture_edge_clamp
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
-//GL_ATI_separate_stencil
 #ifndef GL_STENCIL_BACK_FUNC
 #define GL_STENCIL_BACK_FUNC              0x8800
 #define GL_STENCIL_BACK_FAIL              0x8801
@@ -455,30 +415,24 @@ extern void (GLAPIENTRY *qglCopyTexSubImage3D)(GLenum target, GLint level, GLint
 extern void (GLAPIENTRY *qglStencilOpSeparate)(GLenum, GLenum, GLenum, GLenum);
 extern void (GLAPIENTRY *qglStencilFuncSeparate)(GLenum, GLenum, GLint, GLuint);
 
-//GL_EXT_stencil_two_side
 #define GL_STENCIL_TEST_TWO_SIDE_EXT      0x8910
 #define GL_ACTIVE_STENCIL_FACE_EXT        0x8911
 extern void (GLAPIENTRY *qglActiveStencilFaceEXT)(GLenum);
 
-//GL_EXT_blend_minmax
 #ifndef GL_FUNC_ADD
-#define GL_FUNC_ADD                   0x8006 // also supplied by GL_blend_subtract
+#define GL_FUNC_ADD                   0x8006
 #define GL_MIN                        0x8007
 #define GL_MAX                        0x8008
-#define GL_BLEND_EQUATION             0x8009 // also supplied by GL_blend_subtract
-extern void (GLAPIENTRY *qglBlendEquationEXT)(GLenum); // also supplied by GL_blend_subtract
+#define GL_BLEND_EQUATION             0x8009
+extern void (GLAPIENTRY *qglBlendEquationEXT)(GLenum);
 #endif
 
-//GL_EXT_blend_subtract
 #ifndef GL_FUNC_SUBTRACT
 #define GL_FUNC_SUBTRACT              0x800A
 #define GL_FUNC_REVERSE_SUBTRACT      0x800B
-extern void (GLAPIENTRY *qglBlendEquationEXT)(GLenum); // also supplied by GL_blend_subtract
+extern void (GLAPIENTRY *qglBlendEquationEXT)(GLenum);
 #endif
 
-//GL_ARB_texture_non_power_of_two
-
-//GL_ARB_vertex_buffer_object
 #ifndef GL_ARRAY_BUFFER
 #define GL_ARRAY_BUFFER               0x8892
 #define GL_ELEMENT_ARRAY_BUFFER       0x8893
@@ -521,8 +475,6 @@ extern GLboolean (GLAPIENTRY *qglUnmapBufferARB) (GLenum target);
 extern void (GLAPIENTRY *qglBufferDataARB) (GLenum target, GLsizeiptrARB size, const GLvoid *data, GLenum usage);
 extern void (GLAPIENTRY *qglBufferSubDataARB) (GLenum target, GLintptrARB offset, GLsizeiptrARB size, const GLvoid *data);
 
-//GL_ARB_framebuffer_object
-// (slight differences from GL_EXT_framebuffer_object as this integrates GL_EXT_packed_depth_stencil)
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER                     0x8D40
 #define GL_READ_FRAMEBUFFER                0x8CA8
@@ -587,7 +539,7 @@ extern void (GLAPIENTRY *qglBufferSubDataARB) (GLenum target, GLintptrARB offset
 #define GL_FRAMEBUFFER_UNSUPPORTED                       0x8CDD
 #define GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE            0x8D56
 #define GL_FRAMEBUFFER_UNDEFINED                         0x8219
-#define GL_FRAMEBUFFER_BINDING             0x8CA6 // alias DRAW_FRAMEBUFFER_BINDING
+#define GL_FRAMEBUFFER_BINDING             0x8CA6
 #define GL_DRAW_FRAMEBUFFER_BINDING        0x8CA6
 #define GL_READ_FRAMEBUFFER_BINDING        0x8CAA
 #define GL_RENDERBUFFER_BINDING            0x8CA7
@@ -620,7 +572,6 @@ extern GLvoid (GLAPIENTRY *qglGetFramebufferAttachmentParameteriv)(GLenum target
 extern GLvoid (GLAPIENTRY *qglBlitFramebuffer)(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
 extern GLvoid (GLAPIENTRY *qglGenerateMipmap)(GLenum target);
 
-// GL_ARB_draw_buffers
 #ifndef GL_MAX_DRAW_BUFFERS_ARB
 #define GL_MAX_DRAW_BUFFERS_ARB                              0x8824
 #define GL_DRAW_BUFFER0_ARB                                  0x8825
@@ -642,7 +593,6 @@ extern GLvoid (GLAPIENTRY *qglGenerateMipmap)(GLenum target);
 #endif
 extern void (GLAPIENTRY *qglDrawBuffersARB)(GLsizei n, const GLenum *bufs);
 
-// GL_ARB_texture_float
 #ifndef GL_RGBA32F_ARB
 #define GL_RGBA32F_ARB                                       0x8814
 #define GL_RGB32F_ARB                                        0x8815
@@ -658,13 +608,11 @@ extern void (GLAPIENTRY *qglDrawBuffersARB)(GLsizei n, const GLenum *bufs);
 #define GL_LUMINANCE_ALPHA16F_ARB                            0x881F
 #endif
 
-// GL_ARB_half_float_pixel
 #ifndef GL_HALF_FLOAT_ARB
 typedef unsigned short GLhalfARB;
 #define GL_HALF_FLOAT_ARB                                    0x140B
 #endif
 
-// GL_EXT_texture_sRGB
 #ifndef GL_SRGB_EXT
 #define GL_SRGB_EXT                                          0x8C40
 #define GL_SRGB8_EXT                                         0x8C41
@@ -684,7 +632,6 @@ typedef unsigned short GLhalfARB;
 #define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT               0x8C4F
 #endif
 
-// GL_ARB_uniform_buffer_object
 #ifndef GL_UNIFORM_BUFFER
 #define GL_UNIFORM_BUFFER                                    0x8A11
 #define GL_UNIFORM_BUFFER_BINDING                            0x8A28
@@ -789,22 +736,12 @@ extern void (GLAPIENTRY *qglBegin)(GLenum mode);
 extern void (GLAPIENTRY *qglEnd)(void);
 
 extern void (GLAPIENTRY *qglMatrixMode)(GLenum mode);
-//extern void (GLAPIENTRY *qglOrtho)(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
-//extern void (GLAPIENTRY *qglFrustum)(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near_val, GLdouble far_val);
+
 extern void (GLAPIENTRY *qglViewport)(GLint x, GLint y, GLsizei width, GLsizei height);
-//extern void (GLAPIENTRY *qglPushMatrix)(void);
-//extern void (GLAPIENTRY *qglPopMatrix)(void);
+
 extern void (GLAPIENTRY *qglLoadIdentity)(void);
-//extern void (GLAPIENTRY *qglLoadMatrixd)(const GLdouble *m);
+
 extern void (GLAPIENTRY *qglLoadMatrixf)(const GLfloat *m);
-//extern void (GLAPIENTRY *qglMultMatrixd)(const GLdouble *m);
-//extern void (GLAPIENTRY *qglMultMatrixf)(const GLfloat *m);
-//extern void (GLAPIENTRY *qglRotated)(GLdouble angle, GLdouble x, GLdouble y, GLdouble z);
-//extern void (GLAPIENTRY *qglRotatef)(GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
-//extern void (GLAPIENTRY *qglScaled)(GLdouble x, GLdouble y, GLdouble z);
-//extern void (GLAPIENTRY *qglScalef)(GLfloat x, GLfloat y, GLfloat z);
-//extern void (GLAPIENTRY *qglTranslated)(GLdouble x, GLdouble y, GLdouble z);
-//extern void (GLAPIENTRY *qglTranslatef)(GLfloat x, GLfloat y, GLfloat z);
 
 extern void (GLAPIENTRY *qglReadPixels)(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels);
 
@@ -829,39 +766,30 @@ extern void (GLAPIENTRY *qglHint)(GLenum target, GLenum mode);
 extern void (GLAPIENTRY *qglGenTextures)(GLsizei n, GLuint *textures);
 extern void (GLAPIENTRY *qglDeleteTextures)(GLsizei n, const GLuint *textures);
 extern void (GLAPIENTRY *qglBindTexture)(GLenum target, GLuint texture);
-//extern void (GLAPIENTRY *qglPrioritizeTextures)(GLsizei n, const GLuint *textures, const GLclampf *priorities);
-//extern GLboolean (GLAPIENTRY *qglAreTexturesResident)(GLsizei n, const GLuint *textures, GLboolean *residences);
-//extern GLboolean (GLAPIENTRY *qglIsTexture)(GLuint texture);
-//extern void (GLAPIENTRY *qglPixelStoref)(GLenum pname, GLfloat param);
+
 extern void (GLAPIENTRY *qglPixelStorei)(GLenum pname, GLint param);
 
-//extern void (GLAPIENTRY *qglTexImage1D)(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 extern void (GLAPIENTRY *qglTexImage2D)(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels);
-//extern void (GLAPIENTRY *qglTexSubImage1D)(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const GLvoid *pixels);
+
 extern void (GLAPIENTRY *qglTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels);
-//extern void (GLAPIENTRY *qglCopyTexImage1D)(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border);
+
 extern void (GLAPIENTRY *qglCopyTexImage2D)(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
-//extern void (GLAPIENTRY *qglCopyTexSubImage1D)(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+
 extern void (GLAPIENTRY *qglCopyTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
 
 extern void (GLAPIENTRY *qglPolygonOffset)(GLfloat factor, GLfloat units);
 extern void (GLAPIENTRY *qglPolygonMode)(GLenum face, GLenum mode);
 
-//extern void (GLAPIENTRY *qglClipPlane)(GLenum plane, const GLdouble *equation);
-//extern void (GLAPIENTRY *qglGetClipPlane)(GLenum plane, GLdouble *equation);
-
-//[515]: added on 29.07.2005
 extern void (GLAPIENTRY *qglLineWidth)(GLfloat width);
 extern void (GLAPIENTRY *qglPointSize)(GLfloat size);
 
-// GL 2.0 shader objects
 #ifndef GL_PROGRAM_OBJECT
-// 1-byte character string
+
 typedef char GLchar;
 #endif
 extern void (GLAPIENTRY *qglDeleteShader)(GLuint obj);
 extern void (GLAPIENTRY *qglDeleteProgram)(GLuint obj);
-//extern GLuint (GLAPIENTRY *qglGetHandle)(GLenum pname);
+
 extern void (GLAPIENTRY *qglDetachShader)(GLuint containerObj, GLuint attachedObj);
 extern GLuint (GLAPIENTRY *qglCreateShader)(GLenum shaderType);
 extern void (GLAPIENTRY *qglShaderSource)(GLuint shaderObj, GLsizei count, const GLchar **string, const GLint *length);
@@ -939,7 +867,6 @@ extern void (GLAPIENTRY *qglPolygonStipple)(const GLubyte *mask);
 #define GL_SAMPLER_2D_RECT_SHADOW			0x8B64
 #endif
 
-// GL 2.0 vertex shader
 extern void (GLAPIENTRY *qglVertexAttrib1f)(GLuint index, GLfloat v0);
 extern void (GLAPIENTRY *qglVertexAttrib1s)(GLuint index, GLshort v0);
 extern void (GLAPIENTRY *qglVertexAttrib1d)(GLuint index, GLdouble v0);
@@ -1016,7 +943,6 @@ extern void (GLAPIENTRY *qglGetVertexAttribPointerv)(GLuint index, GLenum pname,
 #define GL_FLOAT_MAT4							0x8B5C
 #endif
 
-// GL 2.0 fragment shader
 #ifndef GL_FRAGMENT_SHADER
 #define GL_FRAGMENT_SHADER						0x8B30
 #define GL_MAX_FRAGMENT_UNIFORM_COMPONENTS		0x8B49
@@ -1025,18 +951,16 @@ extern void (GLAPIENTRY *qglGetVertexAttribPointerv)(GLuint index, GLenum pname,
 #define GL_FRAGMENT_SHADER_DERIVATIVE_HINT		0x8B8B
 #endif
 
-// GL 2.0 shading language 100
 #ifndef GL_SHADING_LANGUAGE_VERSION
 #define GL_SHADING_LANGUAGE_VERSION				0x8B8C
 #endif
 
-// GL_ARB_texture_compression
 extern void (GLAPIENTRY *qglCompressedTexImage3DARB)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data);
 extern void (GLAPIENTRY *qglCompressedTexImage2DARB)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border,  GLsizei imageSize, const void *data);
-//extern void (GLAPIENTRY *qglCompressedTexImage1DARB)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data);
+
 extern void (GLAPIENTRY *qglCompressedTexSubImage3DARB)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data);
 extern void (GLAPIENTRY *qglCompressedTexSubImage2DARB)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data);
-//extern void (GLAPIENTRY *qglCompressedTexSubImage1DARB)(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data);
+
 extern void (GLAPIENTRY *qglGetCompressedTexImageARB)(GLenum target, GLint lod, void *img);
 #ifndef GL_COMPRESSED_RGB_ARB
 #define GL_COMPRESSED_ALPHA_ARB						0x84E9
@@ -1052,7 +976,6 @@ extern void (GLAPIENTRY *qglGetCompressedTexImageARB)(GLenum target, GLint lod, 
 #define GL_COMPRESSED_TEXTURE_FORMATS_ARB			0x86A3
 #endif
 
-// GL_EXT_texture_compression_s3tc
 #ifndef GL_COMPRESSED_RGB_S3TC_DXT1_EXT
 #define GL_COMPRESSED_RGB_S3TC_DXT1_EXT                   0x83F0
 #define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT                  0x83F1
@@ -1060,7 +983,6 @@ extern void (GLAPIENTRY *qglGetCompressedTexImageARB)(GLenum target, GLint lod, 
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT                  0x83F3
 #endif
 
-// GL_ARB_occlusion_query
 extern void (GLAPIENTRY *qglGenQueriesARB)(GLsizei n, GLuint *ids);
 extern void (GLAPIENTRY *qglDeleteQueriesARB)(GLsizei n, const GLuint *ids);
 extern GLboolean (GLAPIENTRY *qglIsQueryARB)(GLuint qid);
@@ -1077,7 +999,6 @@ extern void (GLAPIENTRY *qglGetQueryObjectuivARB)(GLuint qid, GLenum pname, GLui
 #define GL_QUERY_RESULT_AVAILABLE_ARB                     0x8867
 #endif
 
-// GL_ARB_query_buffer_object
 #ifndef GL_QUERY_BUFFER_ARB
 #define GL_QUERY_BUFFER_ARB                               0x9192
 #define GL_QUERY_BUFFER_BINDING_ARB                       0x9193
@@ -1085,17 +1006,10 @@ extern void (GLAPIENTRY *qglGetQueryObjectuivARB)(GLuint qid, GLenum pname, GLui
 #define GL_QUERY_BUFFER_BARRIER_BIT_ARB                   0x00008000
 #endif
 
-// GL_EXT_bgr
 #define GL_BGR					0x80E0
 
-// GL_EXT_bgra
 #define GL_BGRA					0x80E1
 
-//GL_AMD_texture_texture4
-
-//GL_ARB_texture_gather
-
-//GL_ARB_multisample
 #define GL_MULTISAMPLE_ARB              0x809D
 #define GL_SAMPLE_ALPHA_TO_COVERAGE_ARB 0x809E
 #define GL_SAMPLE_ALPHA_TO_ONE_ARB      0x809F
@@ -1109,12 +1023,10 @@ extern void (GLAPIENTRY *qglSampleCoverageARB)(GLclampf value, GLboolean invert)
 
 extern void (GLAPIENTRY *qglPointSize)(GLfloat size);
 
-//GL_EXT_packed_depth_stencil
 #define GL_DEPTH_STENCIL_EXT            0x84F9
 #define GL_UNSIGNED_INT_24_8_EXT        0x84FA
 #define GL_DEPTH24_STENCIL8_EXT         0x88F0
 
-//GL_EXT_blend_func_separate
 #ifndef GL_BLEND_DST_RGB
 #define GL_BLEND_DST_RGB                  0x80C8
 #define GL_BLEND_SRC_RGB                  0x80C9
@@ -1143,27 +1055,26 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglIsBufferARB glIsBuffer
 #define qglIsEnabled glIsEnabled
 #define qglIsFramebufferEXT glIsFramebuffer
-//#define qglIsQueryARB glIsQuery
+
 #define qglIsRenderbufferEXT glIsRenderbuffer
-//#define qglUnmapBufferARB glUnmapBuffer
+
 #define qglCheckFramebufferStatus glCheckFramebufferStatus
 #define qglGetError glGetError
 #define qglCreateProgram glCreateProgram
 #define qglCreateShader glCreateShader
-//#define qglGetHandleARB glGetHandle
+
 #define qglGetAttribLocation glGetAttribLocation
 #define qglGetUniformLocation glGetUniformLocation
-//#define qglMapBufferARB glMapBuffer
+
 #define qglGetString glGetString
-//#define qglActiveStencilFaceEXT glActiveStencilFace
+
 #define qglActiveTexture glActiveTexture
 #define qglAlphaFunc glAlphaFunc
 #define qglArrayElement glArrayElement
 #define qglAttachShader glAttachShader
-//#define qglBegin glBegin
-//#define qglBeginQueryARB glBeginQuery
+
 #define qglBindAttribLocation glBindAttribLocation
-//#define qglBindFragDataLocation glBindFragDataLocation
+
 #define qglBindBufferARB glBindBuffer
 #define qglBindFramebuffer glBindFramebuffer
 #define qglBindRenderbuffer glBindRenderbuffer
@@ -1195,7 +1106,7 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglDeleteFramebuffers glDeleteFramebuffers
 #define qglDeleteProgram glDeleteProgram
 #define qglDeleteShader glDeleteShader
-//#define qglDeleteQueriesARB glDeleteQueries
+
 #define qglDeleteRenderbuffers glDeleteRenderbuffers
 #define qglDeleteTextures glDeleteTextures
 #define qglDepthFunc glDepthFunc
@@ -1206,15 +1117,13 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglDisableClientState glDisableClientState
 #define qglDisableVertexAttribArray glDisableVertexAttribArray
 #define qglDrawArrays glDrawArrays
-//#define qglDrawBuffer glDrawBuffer
-//#define qglDrawBuffersARB glDrawBuffers
+
 #define qglDrawElements glDrawElements
-//#define qglDrawRangeElements glDrawRangeElements
+
 #define qglEnable glEnable
 #define qglEnableClientState glEnableClientState
 #define qglEnableVertexAttribArray glEnableVertexAttribArray
-//#define qglEnd glEnd
-//#define qglEndQueryARB glEndQuery
+
 #define qglFinish glFinish
 #define qglFlush glFlush
 #define qglFramebufferRenderbuffer glFramebufferRenderbuffer
@@ -1222,7 +1131,7 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglFramebufferTexture3DEXT glFramebufferTexture3D
 #define qglGenBuffersARB glGenBuffers
 #define qglGenFramebuffers glGenFramebuffers
-//#define qglGenQueriesARB glGenQueries
+
 #define qglGenRenderbuffers glGenRenderbuffers
 #define qglGenTextures glGenTextures
 #define qglGenerateMipmapEXT glGenerateMipmap
@@ -1230,7 +1139,7 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglGetActiveUniform glGetActiveUniform
 #define qglGetAttachedShaders glGetAttachedShaders
 #define qglGetBooleanv glGetBooleanv
-//#define qglGetCompressedTexImageARB glGetCompressedTexImage
+
 #define qglGetDoublev glGetDoublev
 #define qglGetFloatv glGetFloatv
 #define qglGetFramebufferAttachmentParameterivEXT glGetFramebufferAttachmentParameteriv
@@ -1239,9 +1148,7 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglGetIntegerv glGetIntegerv
 #define qglGetShaderiv glGetShaderiv
 #define qglGetProgramiv glGetProgramiv
-//#define qglGetQueryObjectivARB glGetQueryObjectiv
-//#define qglGetQueryObjectuivARB glGetQueryObjectuiv
-//#define qglGetQueryivARB glGetQueryiv
+
 #define qglGetRenderbufferParameterivEXT glGetRenderbufferParameteriv
 #define qglGetShaderSource glGetShaderSource
 #define qglGetTexImage glGetTexImage
@@ -1264,9 +1171,9 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglNormalPointer glNormalPointer
 #define qglPixelStorei glPixelStorei
 #define qglPointSize glPointSize
-//#define qglPolygonMode glPolygonMode
+
 #define qglPolygonOffset glPolygonOffset
-//#define qglPolygonStipple glPolygonStipple
+
 #define qglReadBuffer glReadBuffer
 #define qglReadPixels glReadPixels
 #define qglRenderbufferStorage glRenderbufferStorage
@@ -1320,42 +1227,21 @@ void GL_PrintError(int errornumber, const char *filename, int linenumber);
 #define qglVertexPointer glVertexPointer
 #define qglViewport glViewport
 #define qglVertexAttrib1f glVertexAttrib1f
-//#define qglVertexAttrib1s glVertexAttrib1s
-//#define qglVertexAttrib1d glVertexAttrib1d
+
 #define qglVertexAttrib2f glVertexAttrib2f
-//#define qglVertexAttrib2s glVertexAttrib2s
-//#define qglVertexAttrib2d glVertexAttrib2d
+
 #define qglVertexAttrib3f glVertexAttrib3f
-//#define qglVertexAttrib3s glVertexAttrib3s
-//#define qglVertexAttrib3d glVertexAttrib3d
+
 #define qglVertexAttrib4f glVertexAttrib4f
-//#define qglVertexAttrib4s glVertexAttrib4s
-//#define qglVertexAttrib4d glVertexAttrib4d
-//#define qglVertexAttrib4Nub glVertexAttrib4Nub
+
 #define qglVertexAttrib1fv glVertexAttrib1fv
-//#define qglVertexAttrib1sv glVertexAttrib1sv
-//#define qglVertexAttrib1dv glVertexAttrib1dv
+
 #define qglVertexAttrib2fv glVertexAttrib2fv
-//#define qglVertexAttrib2sv glVertexAttrib2sv
-//#define qglVertexAttrib2dv glVertexAttrib2dv
+
 #define qglVertexAttrib3fv glVertexAttrib3fv
-//#define qglVertexAttrib3sv glVertexAttrib3sv
-//#define qglVertexAttrib3dv glVertexAttrib3dv
+
 #define qglVertexAttrib4fv glVertexAttrib4fv
-//#define qglVertexAttrib4sv glVertexAttrib4sv
-//#define qglVertexAttrib4dv glVertexAttrib4dv
-//#define qglVertexAttrib4iv glVertexAttrib4iv
-//#define qglVertexAttrib4bv glVertexAttrib4bv
-//#define qglVertexAttrib4ubv glVertexAttrib4ubv
-//#define qglVertexAttrib4usv glVertexAttrib4usv
-//#define qglVertexAttrib4uiv glVertexAttrib4uiv
-//#define qglVertexAttrib4Nbv glVertexAttrib4Nbv
-//#define qglVertexAttrib4Nsv glVertexAttrib4Nsv
-//#define qglVertexAttrib4Niv glVertexAttrib4Niv
-//#define qglVertexAttrib4Nubv glVertexAttrib4Nubv
-//#define qglVertexAttrib4Nusv glVertexAttrib4Nusv
-//#define qglVertexAttrib4Nuiv glVertexAttrib4Nuiv
-//#define qglGetVertexAttribdv glGetVertexAttribdv
+
 #define qglGetVertexAttribfv glGetVertexAttribfv
 #define qglGetVertexAttribiv glGetVertexAttribiv
 #define qglGetVertexAttribPointerv glGetVertexAttribPointerv

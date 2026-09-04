@@ -27,7 +27,6 @@
 #include <server/teamplay.qh>
 #include <server/world.qh>
 
-//  used by GameCommand_make_mapinfo()
 void make_mapinfo_Think(entity this)
 {
 	if (_MapInfo_FilterGametype(MAPINFO_TYPE_ALL, 0, 0, 0, 1))
@@ -43,7 +42,6 @@ void make_mapinfo_Think(entity this)
 	}
 }
 
-//  used by GameCommand_extendmatchtime() and GameCommand_reducematchtime()
 void changematchtime(float delta, float mi, float ma)
 {
 	float cur;
@@ -53,36 +51,31 @@ void changematchtime(float delta, float mi, float ma)
 	if (delta == 0) return;
 	if (autocvar_timelimit < 0) return;
 
-	if (mi <= 10) mi = 10;  // at least ten sec in the future
+	if (mi <= 10) mi = 10;
 	cur = time - game_starttime;
-	if (cur > 0) mi += cur; // from current time!
+	if (cur > 0) mi += cur;
 
 	lim = autocvar_timelimit * 60;
 
 	if (delta > 0)
 	{
-		if (lim == 0) return; // cannot increase any further
+		if (lim == 0) return;
 		else if (lim < ma) update = min(ma, lim + delta);
-		else                  // already above maximum: FAIL
+		else
 			return;
 	}
 	else
 	{
-		if (lim == 0)      // infinite: try reducing to max, if we are allowed to
+		if (lim == 0)
 			update = max(mi, ma);
-		else if (lim > mi) // above minimum: decrease
+		else if (lim > mi)
 			update = max(mi, lim + delta);
-		else               // already below minimum: FAIL
+		else
 			return;
 	}
 
 	cvar_set("timelimit", ftos(update / 60));
 }
-
-
-// =======================
-//  Command Sub-Functions
-// =======================
 
 void GameCommand_adminmsg(int request, int argc)
 {
@@ -113,7 +106,6 @@ void GameCommand_adminmsg(int request, int argc)
 					t = car(targets);
 					targets = cdr(targets);
 
-					// Check to see if the player is a valid target
 					client = GetFilteredEntity(t);
 					accepted = VerifyClientEntity(client, true, false);
 
@@ -123,7 +115,6 @@ void GameCommand_adminmsg(int request, int argc)
 						continue;
 					}
 
-					// send the centerprint/console print or infomessage
 					if (infobartime)
 					{
 						stuffcmd(client, sprintf("\ninfobar %f \"%s\"\n", infobartime, MakeConsoleSafe(admin_message)));
@@ -358,7 +349,7 @@ void GameCommand_bot_cmd(int request, int argc, string command)
 				cvar_settemp("minplayers", "0");
 				cvar_settemp("minplayers_per_team", "0");
 				cvar_settemp("bot_number", "0");
-				bot_fixcount(false);  // Kill all bots.
+				bot_fixcount(false);
 				cvar_settemp("bot_number", argv(2));
 				if (!bot_fixcount(true)) LOG_INFO("Sorry, could not set requested bot count");
 				return;
@@ -391,7 +382,7 @@ void GameCommand_bot_cmd(int request, int argc, string command)
 							cvar_settemp("minplayers", "0");
 							cvar_settemp("minplayers_per_team", "0");
 							cvar_settemp("bot_number", "0");
-							bot_fixcount(false);  // Kill all bots.
+							bot_fixcount(false);
 							cvar_settemp("bot_number", argv(3));
 							if (!bot_fixcount(true)) LOG_INFO("Sorry, could not set requested bot count");
 						}
@@ -426,7 +417,7 @@ void GameCommand_bot_cmd(int request, int argc, string command)
 				else bot_list_commands();
 				return;
 			}
-			else if (argc >= 3)  // this comes last
+			else if (argc >= 3)
 			{
 				if(argv(1) == "*" || argv(1) == "all")
 				{
@@ -451,7 +442,7 @@ void GameCommand_bot_cmd(int request, int argc, string command)
 					}
 					else
 					{
-						LOG_INFO("Error: Can't find bot with the name or id '", argv(1), "' - Did you mistype the command?");  // don't return so that usage is shown
+						LOG_INFO("Error: Can't find bot with the name or id '", argv(1), "' - Did you mistype the command?");
 					}
 				}
 			}
@@ -519,7 +510,7 @@ void GameCommand_database(int request, int argc)
 				else if (argv(1) == "dump")
 				{
 					db_dump(ServerProgsDB, argv(2));
-					LOG_INFO("DB dumped.");  // wtf does this do?
+					LOG_INFO("DB dumped.");
 					return;
 				}
 				else if (argv(1) == "load")
@@ -606,7 +597,7 @@ void GameCommand_defer_clear_all(int request)
 				GameCommand_defer_clear(CMD_REQUEST_COMMAND, argc);
 				++n;
 			});
-			if (n)   LOG_INFO("Successfully stuffed defer clear to all clients (", ftos(n), ")");  // should a message be added if no players were found?
+			if (n)   LOG_INFO("Successfully stuffed defer clear to all clients (", ftos(n), ")");
 			return;
 		}
 
@@ -621,7 +612,7 @@ void GameCommand_defer_clear_all(int request)
 	}
 }
 
-void GameCommand_delrec(int request, int argc)  // perhaps merge later with records and printstats and such?
+void GameCommand_delrec(int request, int argc)
 {
 	switch (request)
 	{
@@ -649,8 +640,8 @@ void GameCommand_delrec(int request, int argc)  // perhaps merge later with reco
 }
 
 void print_Effect_Index(int d, string effect_name)
-{ 
-	// this is inside a function to avoid expanding it on compilation everytime
+{
+
 	LOG_INFO("effect ", effect_name, " is ", ftos(_particleeffectnum(effect_name)), "\n");
 	db_put(d, effect_name, "1");
 }
@@ -782,7 +773,7 @@ void GameCommand_gametype(int request, int argc)
 					MapInfo_FilterGametype(MapInfo_CurrentGametype(), MapInfo_CurrentFeatures(), MapInfo_RequiredFlags(), MapInfo_ForbiddenFlags(), 0);
 					if (MapInfo_count > 0)
 					{
-						// update lsmaps in case the gametype changed, this way people can easily list maps for it
+
 						if (lsmaps_reply != "")   strunzone(lsmaps_reply);
 						lsmaps_reply = strzone(getlsmaps());
 						bprint("Game type successfully switched to ", s, "\n");
@@ -1057,7 +1048,6 @@ void GameCommand_moveplayer(int request, int argc)
 					t = car(targets);
 					targets = cdr(targets);
 
-					// Check to see if the player is a valid target
 					client = GetFilteredEntity(t);
 					accepted = VerifyClientEntity(client, false, false);
 					string client_num_str = ftos(etof(client));
@@ -1091,25 +1081,23 @@ void GameCommand_moveplayer(int request, int argc)
 						string pl_name = playername(client.netname, client.team, false);
 						if (IS_SPEC(client) || IS_OBSERVER(client))
 						{
-							// well technically we could, but should we allow that? :P
+
 							LOG_INFO("Player #", client_num_str, " (", pl_name, ") is not in the game.");
 							continue;
 						}
 
-						// set up
 						int save = Player_GetForcedTeamIndex(client);
 						Player_SetForcedTeamIndex(client, TEAM_FORCE_DEFAULT);
 
-						// find the team to move the player to
 						int team_num = Team_ColorToTeam(destination);
 						entity balance;
-						if (team_num == client.team)  // already on the destination team
+						if (team_num == client.team)
 						{
-							// keep the forcing undone
+
 							LOG_INFO("Player #", client_num_str, " (", pl_name, ") is already on the ", Team_ColoredFullName(team_num), "^7.");
 							continue;
 						}
-						else if (team_num == 0)  // auto team
+						else if (team_num == 0)
 						{
 							balance = TeamBalance_CheckAllowedTeams(client);
 							team_num = Team_IndexToTeam(TeamBalance_FindBestTeam(balance, client, false));
@@ -1120,7 +1108,6 @@ void GameCommand_moveplayer(int request, int argc)
 						}
 						Player_SetForcedTeamIndex(client, save);
 
-						// Check to see if the destination team is even available
 						int team_id = Team_TeamToIndex(team_num);
 						if (team_id == -1)
 						{
@@ -1142,7 +1129,6 @@ void GameCommand_moveplayer(int request, int argc)
 						}
 						TeamBalance_Destroy(balance);
 
-						// If so, lets continue and finally move the player
 						Player_SetForcedTeamIndex(client, TEAM_FORCE_DEFAULT);
 						if (MoveToTeam(client, team_id, 6))
 						{
@@ -1154,12 +1140,12 @@ void GameCommand_moveplayer(int request, int argc)
 							LOG_INFO("Unable to move player #", client_num_str, " (", pl_name, ")");
 						}
 					}
-				} // loop end
+				}
 
 				if (successful) bprint("Successfully moved players ", successful, " to destination ", destination, ".\n");
 				else LOG_INFO("No players given (", original_targets, ") are able to move.");
 
-				return;  // still correct parameters so return to avoid usage print
+				return;
 			}
 		}
 
@@ -1191,7 +1177,7 @@ void GameCommand_nospectators(int request)
 				return;
 			}
 			blockSpectators = 1;
-			// give every spectator <g_maxplayers_spectator_blocktime> seconds time to become a player
+
 			FOREACH_CLIENT(IS_REAL_CLIENT(it) && (IS_SPEC(it) || IS_OBSERVER(it)) && !INGAME(it), {
 				CS(it).spectatortime = time;
 				Send_Notification(NOTIF_ONE_ONLY, it, MSG_INFO, INFO_SPECTATE_WARNING, autocvar_g_maxplayers_spectator_blocktime);
@@ -1322,9 +1308,7 @@ void shuffleteams()
 
 	FOREACH_CLIENT(IS_PLAYER(it) || INGAME(it), {
 		if (Player_HasRealForcedTeam(it)) {
-			// we could theoretically assign forced players to their teams
-			// and shuffle the rest to fill the empty spots but in practise
-			// either all players or none are gonna have forced teams
+
 			LOG_INFO("Can't shuffle teams because at least one player has a forced team.");
 			return;
 		}
@@ -1413,9 +1397,6 @@ void GameCommand_resetmatch(int request)
 
 void GameCommand_stuffto(int request, int argc)
 {
-	// This... is a fairly dangerous and powerful command... - It allows any arguments to be sent to a client via rcon.
-	// Because of this, it is disabled by default and must be enabled by the server owner when doing compilation. That way,
-	// we can be certain they understand the risks of it... So to enable, compile server with -DSTUFFTO_ENABLED argument.
 
 #ifdef STUFFTO_ENABLED
 		switch (request)
@@ -1505,10 +1486,9 @@ void GameCommand_trace(int request, int argc)
 							tracebox(p, PL_MIN_CONST, PL_MAX_CONST, p, MOVE_NOMONSTERS, NULL);
 							if (trace_startsolid)
 							{
-								rint(42);  // do an engine breakpoint on VM_rint so you can get the trace that errnoeously returns startsolid
+								rint(42);
 								tracebox(start, PL_MIN_CONST, PL_MAX_CONST, end, MOVE_NOMONSTERS, NULL);
 
-								// how much do we need to back off?
 								safe = 1;
 								unsafe = 0;
 								for ( ; ; )
@@ -1623,7 +1603,6 @@ void GameCommand_trace(int request, int argc)
 					}
 				}
 
-				// no default case, just go straight to invalid
 			}
 		}
 
@@ -1717,40 +1696,6 @@ void GameCommand_warp(int request, int argc)
 	}
 }
 
-/* use this when creating a new command, making sure to place it in alphabetical order... also,
-** ADD ALL NEW COMMANDS TO commands.cfg WITH PROPER ALIASES IN THE SAME FASHION!
-void GameCommand_(int request)
-{
-    switch(request)
-    {
-        case CMD_REQUEST_COMMAND:
-        {
-		    if (!world_initialized)
-		    {
-		        LOG_HELPF("This command works only when the server is running.");
-		        return;
-		    }
-
-            return;
-        }
-
-        default:
-        case CMD_REQUEST_USAGE:
-        {
-            LOG_HELP("Usage:^3 sv_cmd ");
-            LOG_HELP("  No arguments required.");
-            return;
-        }
-    }
-}
-*/
-
-
-// ==================================
-//  Macro system for server commands
-// ==================================
-
-// Do not hard code aliases for these, instead create them in commands.cfg... also: keep in alphabetical order, please ;)
 SERVER_COMMAND(adminmsg, "Send an admin message to a client directly") { GameCommand_adminmsg(request, arguments); }
 SERVER_COMMAND(allready, "Ends warmup and starts the match") { GameCommand_allready(request); }
 SERVER_COMMAND(allspec, "Force all players to spectate") { GameCommand_allspec(request, arguments); }
@@ -1813,20 +1758,9 @@ void GameCommand_macro_write_aliases(float fh)
 	FOREACH(SERVER_COMMANDS, true, { CMD_Write_Alias("qc_cmd_sv", it.m_name, it.m_description); });
 }
 
-
-// =========================================
-//  Main Function Called By Engine (sv_cmd)
-// =========================================
-// If this function exists, game code handles gamecommand instead of the engine code.
-
 void GameCommand(string command)
 {
 	int argc = tokenize_console(command);
-
-	// Guide for working with argc arguments by example:
-	// argc:   1    - 2      - 3     - 4
-	// argv:   0    - 1      - 2     - 3
-	// cmd     vote - master - login - password
 
 	if (strtolower(argv(0)) == "help")
 	{
@@ -1849,44 +1783,43 @@ void GameCommand(string command)
 
 			return;
 		}
-		else if (BanCommand_macro_usage(argc))  // Instead of trying to call a command, we're going to see detailed information about it
+		else if (BanCommand_macro_usage(argc))
 		{
 			return;
 		}
-		else if (CommonCommand_macro_usage(argc, NULL))  // same here, but for common commands instead
+		else if (CommonCommand_macro_usage(argc, NULL))
 		{
 			return;
 		}
-		else if (GenericCommand_macro_usage(argc))  // same here, but for generic commands instead
+		else if (GenericCommand_macro_usage(argc))
 		{
 			return;
 		}
-		else if (GameCommand_macro_usage(argc))  // finally try for normal commands too
+		else if (GameCommand_macro_usage(argc))
 		{
 			return;
 		}
 	}
 	else if (MUTATOR_CALLHOOK(SV_ParseServerCommand, strtolower(argv(0)), argc, command))
 	{
-		return;  // handled by a mutator
+		return;
 	}
 	else if (BanCommand(command))
 	{
-		return;  // handled by server/command/ipban.qc
+		return;
 	}
 	else if (CommonCommand_macro_command(argc, NULL, command))
 	{
-		return;  // handled by server/command/common.qc
+		return;
 	}
 	else if (GenericCommand(command))
 	{
-		return;                                        // handled by common/command/generic.qc
+		return;
 	}
-	else if (GameCommand_macro_command(argc, command)) // continue as usual and scan for normal commands
+	else if (GameCommand_macro_command(argc, command))
 	{
-		return;                                        // handled by one of the above GameCommand_* functions
+		return;
 	}
 
-	// nothing above caught the command, must be invalid
 	LOG_INFO(((command != "") ? strcat("Unknown server command \"", command, "\"") : "No command provided"), ". For a list of supported commands, try sv_cmd help.");
 }

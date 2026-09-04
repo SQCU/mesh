@@ -9,7 +9,6 @@
 	classfield(Defer).entity owner;
 	classfield(Defer).void(entity) defer_func;
 
-	/** Remove entity */
 	void SUB_Remove(entity this)
 	{
 		delete(this);
@@ -22,10 +21,6 @@
 		this.defer_func(this.owner);
 	}
 
-    /**
-     * Execute func() after time + fdelay.
-     * self when func is executed = self when defer is called
-     */
 	void defer(entity this, float fdelay, void(entity) func)
 	{
 		entity e    = new_pure(deferred);

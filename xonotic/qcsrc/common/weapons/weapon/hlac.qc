@@ -50,7 +50,6 @@ void W_HLAC_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 	setsize(missile, '0 0 0', '0 0 0');
 
 	W_SetupProjVelocity_Basic(missile, WEP_CVAR_PRI(hlac, speed), spread);
-	//missile.angles = vectoangles(missile.velocity); // csqc
 
 	settouch(missile, W_HLAC_Touch);
 	setthink(missile, SUB_Remove);
@@ -95,7 +94,6 @@ void W_HLAC_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 		setsize(missile, '0 0 0', '0 0 0');
 
 		W_SetupProjVelocity_Basic(missile, WEP_CVAR_SEC(hlac, speed), spread);
-		//missile.angles = vectoangles(missile.velocity); // csqc
 
 		settouch(missile, W_HLAC_Touch);
 		setthink(missile, SUB_Remove);
@@ -121,10 +119,9 @@ void W_HLAC_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 	}
 }
 
-// weapon frames
 void W_HLAC_Attack_Frame(Weapon thiswep, entity actor, .entity weaponentity, int fire)
 {
-	if(actor.(weaponentity).m_weapon != actor.(weaponentity).m_switchweapon) // abort immediately if switching
+	if(actor.(weaponentity).m_weapon != actor.(weaponentity).m_switchweapon)
 	{
 		w_ready(thiswep, actor, weaponentity, fire);
 		return;
@@ -157,7 +154,7 @@ METHOD(HLAC, wr_aim, void(entity thiswep, entity actor, .entity weaponentity))
 }
 METHOD(HLAC, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    if(autocvar_g_balance_hlac_reload_ammo && actor.(weaponentity).clip_load < min(WEP_CVAR_PRI(hlac, ammo), WEP_CVAR_SEC(hlac, ammo))) { // forced reload
+    if(autocvar_g_balance_hlac_reload_ammo && actor.(weaponentity).clip_load < min(WEP_CVAR_PRI(hlac, ammo), WEP_CVAR_SEC(hlac, ammo))) {
         thiswep.wr_reload(thiswep, actor, weaponentity);
     } else if(fire & 1)
     {

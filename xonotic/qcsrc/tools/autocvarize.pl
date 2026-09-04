@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# this tool generates JUST the autocvar declarations for cvars
+
 use strict;
 use warnings;
 
@@ -19,13 +19,13 @@ sub found($$$$)
 		$type = 'cvar_toolong';
 		return;
 	}
-#	$old{$name} = 1
-#		if $force;
-#	$menu{$name} = 1
-#		if $force > 1;
+
+
+
+
 	if(exists $cvars{$name} and not defined $cvars{name})
 	{
-		# have already warned
+
 	}
 	elsif(exists $cvars{$name} and $type ne $cvars{$name})
 	{
@@ -214,11 +214,11 @@ for my $name(sort keys %cvars)
 	{
 		print "#define autocvar_$name cvar_or(\"$name\", \"$default\")\n";
 	}
-	elsif($type eq 'cvar_string' and $menu) # sorry, no cvar_or for these
+	elsif($type eq 'cvar_string' and $menu)
 	{
 		print "#define autocvar_$name cvar_string(\"$name\")\n";
 	}
-	elsif($type eq 'cvar_vector' and $menu) # sorry, no cvar_or for these
+	elsif($type eq 'cvar_vector' and $menu)
 	{
 		print "#define autocvar_$name cvar_vector(\"$name\")\n";
 	}

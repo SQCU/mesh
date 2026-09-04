@@ -20,7 +20,7 @@ void orb_draw(entity this)
 	this.angles = this.angles + dt * this.avelocity;
 }
 
-float orb_drawtime; // global storage of last drawn orb frame, to counter overlapping orbs
+float orb_drawtime;
 void orb_draw2d(entity this)
 {
 	if(time <= orb_drawtime)
@@ -28,7 +28,7 @@ void orb_draw2d(entity this)
 
 	if(boxesoverlap(view_origin - '1 1 1', view_origin + '1 1 1', this.absmin, this.absmax))
 	{
-		orb_drawtime = time; // prevent rendering more than one of these per frame!
+		orb_drawtime = time;
 		float orb_alpha = 0.65 * (this.ltime - time) / this.orb_lifetime;
 		drawfill('0 0 0', vec2(vid_conwidth, vid_conheight), this.colormod, autocvar_hud_colorflash_alpha * orb_alpha, DRAWFLAG_ADDITIVE);
 	}
@@ -74,7 +74,7 @@ NET_HANDLE(Nade_Orb, bool isNew)
 		this.orb_lifetime = ReadByte();
 		this.orb_radius = ReadShort();
 		this.ltime = time + ReadByte()/10.0;
-		// this.ltime = time + this.orb_lifetime;
+
 		orb_setup(this);
 	}
 	return true;
@@ -93,9 +93,9 @@ bool orb_send(entity this, entity to, int sf)
 		WriteVector(channel, this.colormod);
 
 		WriteByte(channel, this.orb_lifetime);
-		//WriteByte(MSG_ENTITY, this.ltime - time + 1);
+
 		WriteShort(channel, this.orb_radius);
-		// round time delta to a 1/10th of a second
+
 		WriteByte(channel, (this.ltime - time)*10.0+0.5);
 	}
 	return true;

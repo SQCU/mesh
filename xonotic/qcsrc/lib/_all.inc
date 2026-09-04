@@ -104,7 +104,6 @@
 
 #include "warpzone/mathlib.qc"
 
-// needs to be included before any of the functions which use globals are called
 #include "deglobalization.qh"
 
 #include "accumulate.qh"
@@ -149,7 +148,6 @@
 #include "stats.qh"
 #include "string.qh"
 #include "struct.qh"
-#include "test.qc"
 #include "unsafe.qh"
 #include "urllib.qc"
 #include "vector.qh"

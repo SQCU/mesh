@@ -16,7 +16,7 @@ cvar_t collision_extendtraceboxlength = {0, "collision_extendtraceboxlength", "1
 cvar_t collision_extendtracelinelength = {0, "collision_extendtracelinelength", "1", "internal bias for traceline() qc builtin to account for collision_impactnudge (this does not alter the final trace length)"};
 cvar_t collision_debug_tracelineasbox = {0, "collision_debug_tracelineasbox", "0", "workaround for any bugs in Collision_TraceLineBrushFloat by using Collision_TraceBrushBrushFloat"};
 cvar_t collision_cache = {0, "collision_cache", "1", "store results of collision traces for next frame to reuse if possible (optimization)"};
-//cvar_t collision_triangle_neighborsides = {0, "collision_triangle_neighborsides", "1", "override automatic side generation if triangle has neighbors with face planes that form a convex edge (perfect solution, but can not work for all edges)"};
+
 cvar_t collision_triangle_bevelsides = {0, "collision_triangle_bevelsides", "0", "generate sloped edge planes on triangles - if 0, see axialedgeplanes"};
 cvar_t collision_triangle_axialsides = {0, "collision_triangle_axialsides", "1", "generate axially-aligned edge planes on triangles - otherwise use perpendicular edge planes"};
 cvar_t collision_bih_fullrecursion = { 0, "collision_bih_fullrecursion", "0", "debugging option to disable the bih recursion optimizations by iterating the entire tree" };
@@ -31,7 +31,7 @@ void Collision_Init (void)
 	Cvar_RegisterVariable(&collision_extendtraceboxlength);
 	Cvar_RegisterVariable(&collision_debug_tracelineasbox);
 	Cvar_RegisterVariable(&collision_cache);
-//	Cvar_RegisterVariable(&collision_triangle_neighborsides);
+
 	Cvar_RegisterVariable(&collision_triangle_bevelsides);
 	Cvar_RegisterVariable(&collision_triangle_axialsides);
 	Cvar_RegisterVariable(&collision_bih_fullrecursion);
@@ -39,26 +39,13 @@ void Collision_Init (void)
 	Collision_Cache_Init(collision_mempool);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 static void Collision_PrintBrushAsQHull(colbrushf_t *brush, const char *name)
 {
 	int i;
 	Con_Printf("3 %s\n%i\n", name, brush->numpoints);
 	for (i = 0;i < brush->numpoints;i++)
 		Con_Printf("%f %f %f\n", brush->points[i].v[0], brush->points[i].v[1], brush->points[i].v[2]);
-	// FIXME: optimize!
+
 	Con_Printf("4\n%i\n", brush->numplanes);
 	for (i = 0;i < brush->numplanes;i++)
 		Con_Printf("%f %f %f %f\n", brush->planes[i].normal[0], brush->planes[i].normal[1], brush->planes[i].normal[2], brush->planes[i].dist);
@@ -75,7 +62,7 @@ static void Collision_ValidateBrush(colbrushf_t *brush)
 		printbrush = true;
 	}
 #if 0
-	// it's ok for a brush to have one point and no planes...
+
 	if (brush->numplanes == 0 && brush->numpoints != 1)
 	{
 		Con_Print("Collision_ValidateBrush: brush with no planes and more than one point!\n");
@@ -113,7 +100,7 @@ static void Collision_ValidateBrush(colbrushf_t *brush)
 			Con_Print("Collision_ValidateBrush: some points have insufficient planes, every point must be on at least 3 planes to form a corner.\n");
 			printbrush = true;
 		}
-		if (pointsoffplanes == 0) // all points are on all planes
+		if (pointsoffplanes == 0)
 		{
 			Con_Print("Collision_ValidateBrush: all points lie on all planes (degenerate, no brush volume!)\n");
 			printbrush = true;
@@ -164,7 +151,7 @@ static void Collision_CalcEdgeDirsForPolygonBrushFloat(colbrushf_t *brush)
 
 colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalplanes, const colplanef_t *originalplanes, int supercontents, int q3surfaceflags, const texture_t *texture, int hasaabbplanes)
 {
-	// TODO: planesbuf could be replaced by a remapping table
+
 	int j, k, w, xyzflags;
 	int numpointsbuf = 0, maxpointsbuf = 256, numedgedirsbuf = 0, maxedgedirsbuf = 256, numplanesbuf = 0, maxplanesbuf = 256, numelementsbuf = 0, maxelementsbuf = 256;
 	int isaabb = true;
@@ -179,7 +166,7 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 	int pnumpoints;
 	double p[2][3*64];
 #if 0
-	// enable these if debugging to avoid seeing garbage in unused data-
+
 	memset(pointsbuf, 0, sizeof(pointsbuf));
 	memset(edgedirsbuf, 0, sizeof(edgedirsbuf));
 	memset(planesbuf, 0, sizeof(planesbuf));
@@ -188,54 +175,46 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 	memset(p, 0, sizeof(p));
 #endif
 
-	// check if there are too many planes and skip the brush
 	if (numoriginalplanes >= maxplanesbuf)
 	{
 		Con_DPrint("Collision_NewBrushFromPlanes: failed to build collision brush: too many planes for buffer\n");
 		return NULL;
 	}
 
-	// figure out how large a bounding box we need to properly compute this brush
 	maxdist = 0;
 	for (j = 0;j < numoriginalplanes;j++)
 		maxdist = max(maxdist, fabs(originalplanes[j].dist));
-	// now make it large enough to enclose the entire brush, and round it off to a reasonable multiple of 1024
+
 	maxdist = floor(maxdist * (4.0 / 1024.0) + 2) * 1024.0;
-	// construct a collision brush (points, planes, and renderable mesh) from
-	// a set of planes, this also optimizes out any unnecessary planes (ones
-	// whose polygon is clipped away by the other planes)
+
 	for (j = 0;j < numoriginalplanes;j++)
 	{
 		int n;
-		// add the new plane
+
 		VectorCopy(originalplanes[j].normal, planesbuf[numplanesbuf].normal);
 		planesbuf[numplanesbuf].dist = originalplanes[j].dist;
 		planesbuf[numplanesbuf].q3surfaceflags = originalplanes[j].q3surfaceflags;
 		planesbuf[numplanesbuf].texture = originalplanes[j].texture;
 		numplanesbuf++;
 
-		// create a large polygon from the plane
 		w = 0;
 		PolygonD_QuadForPlane(p[w], originalplanes[j].normal[0], originalplanes[j].normal[1], originalplanes[j].normal[2], originalplanes[j].dist, maxdist);
 		pnumpoints = 4;
-		// clip it by all other planes
+
 		for (k = 0;k < numoriginalplanes && pnumpoints >= 3 && pnumpoints <= pmaxpoints;k++)
 		{
-			// skip the plane this polygon
-			// (nothing happens if it is processed, this is just an optimization)
+
 			if (k != j)
 			{
-				// we want to keep the inside of the brush plane so we flip
-				// the cutting plane
+
 				PolygonD_Divide(pnumpoints, p[w], -originalplanes[k].normal[0], -originalplanes[k].normal[1], -originalplanes[k].normal[2], -originalplanes[k].dist, COLLISION_PLANE_DIST_EPSILON, pmaxpoints, p[!w], &pnumpoints, 0, NULL, NULL, NULL);
 				w = !w;
 			}
 		}
 
-		// if nothing is left, skip it
 		if (pnumpoints < 3)
 		{
-			//Con_DPrintf("Collision_NewBrushFromPlanes: warning: polygon for plane %f %f %f %f clipped away\n", originalplanes[j].normal[0], originalplanes[j].normal[1], originalplanes[j].normal[2], originalplanes[j].dist);
+
 			continue;
 		}
 
@@ -252,56 +231,48 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 		if (k < pnumpoints)
 		{
 			Con_DPrintf("Collision_NewBrushFromPlanes: warning: polygon point does not lie on at least 3 planes\n");
-			//return NULL;
+
 		}
 
-		// check if there are too many polygon vertices for buffer
 		if (pnumpoints > pmaxpoints)
 		{
 			Con_DPrint("Collision_NewBrushFromPlanes: failed to build collision brush: too many points for buffer\n");
 			return NULL;
 		}
 
-		// check if there are too many triangle elements for buffer
 		if (numelementsbuf + (pnumpoints - 2) * 3 > maxelementsbuf)
 		{
 			Con_DPrint("Collision_NewBrushFromPlanes: failed to build collision brush: too many triangle elements for buffer\n");
 			return NULL;
 		}
 
-		// add the unique points for this polygon
 		for (k = 0;k < pnumpoints;k++)
 		{
 			int m;
 			float v[3];
-			// downgrade to float precision before comparing
+
 			VectorCopy(&p[w][k*3], v);
 
-			// check if there is already a matching point (no duplicates)
 			for (m = 0;m < numpointsbuf;m++)
 				if (VectorDistance2(v, pointsbuf[m].v) < COLLISION_SNAP2)
 					break;
 
-			// if there is no match, add a new one
 			if (m == numpointsbuf)
 			{
-				// check if there are too many and skip the brush
+
 				if (numpointsbuf >= maxpointsbuf)
 				{
 					Con_DPrint("Collision_NewBrushFromPlanes: failed to build collision brush: too many points for buffer\n");
 					return NULL;
 				}
-				// add the new one
+
 				VectorCopy(&p[w][k*3], pointsbuf[numpointsbuf].v);
 				numpointsbuf++;
 			}
 
-			// store the index into a buffer
 			polypointbuf[k] = m;
 		}
 
-		// add the triangles for the polygon
-		// (this particular code makes a triangle fan)
 		for (k = 0;k < pnumpoints - 2;k++)
 		{
 			elementsbuf[numelementsbuf++] = polypointbuf[0];
@@ -309,61 +280,54 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 			elementsbuf[numelementsbuf++] = polypointbuf[k + 2];
 		}
 
-		// add the unique edgedirs for this polygon
 		for (k = 0, n = pnumpoints-1;k < pnumpoints;n = k, k++)
 		{
 			int m;
 			float dir[3];
-			// downgrade to float precision before comparing
+
 			VectorSubtract(&p[w][k*3], &p[w][n*3], dir);
 			VectorNormalize(dir);
 
-			// check if there is already a matching edgedir (no duplicates)
 			for (m = 0;m < numedgedirsbuf;m++)
 				if (DotProduct(dir, edgedirsbuf[m].v) >= COLLISION_EDGEDIR_DOT_EPSILON)
 					break;
-			// skip this if there is
+
 			if (m < numedgedirsbuf)
 				continue;
 
-			// try again with negated edgedir
 			VectorNegate(dir, dir);
-			// check if there is already a matching edgedir (no duplicates)
+
 			for (m = 0;m < numedgedirsbuf;m++)
 				if (DotProduct(dir, edgedirsbuf[m].v) >= COLLISION_EDGEDIR_DOT_EPSILON)
 					break;
-			// if there is no match, add a new one
+
 			if (m == numedgedirsbuf)
 			{
-				// check if there are too many and skip the brush
+
 				if (numedgedirsbuf >= maxedgedirsbuf)
 				{
 					Con_DPrint("Collision_NewBrushFromPlanes: failed to build collision brush: too many edgedirs for buffer\n");
 					return NULL;
 				}
-				// add the new one
+
 				VectorCopy(dir, edgedirsbuf[numedgedirsbuf].v);
 				numedgedirsbuf++;
 			}
 		}
 
-		// if any normal is not purely axial, it's not an axis-aligned box
 		if (isaabb && (originalplanes[j].normal[0] == 0) + (originalplanes[j].normal[1] == 0) + (originalplanes[j].normal[2] == 0) < 2)
 			isaabb = false;
 	}
 
-	// if nothing is left, there's nothing to allocate
 	if (numplanesbuf < 4)
 	{
 		Con_DPrintf("Collision_NewBrushFromPlanes: failed to build collision brush: %i triangles, %i planes (input was %i planes), %i vertices\n", numelementsbuf / 3, numplanesbuf, numoriginalplanes, numpointsbuf);
 		return NULL;
 	}
 
-	// if no triangles or points could be constructed, then this routine failed but the brush is not discarded
 	if (numelementsbuf < 12 || numpointsbuf < 4)
 		Con_DPrintf("Collision_NewBrushFromPlanes: unable to rebuild triangles/points for collision brush: %i triangles, %i planes (input was %i planes), %i vertices\n", numelementsbuf / 3, numplanesbuf, numoriginalplanes, numpointsbuf);
 
-	// validate plane distances
 	for (j = 0;j < numplanesbuf;j++)
 	{
 		float d = furthestplanedist_float(planesbuf[j].normal, pointsbuf, numpointsbuf);
@@ -371,7 +335,6 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 			Con_DPrintf("plane %f %f %f %f mismatches dist %f\n", planesbuf[j].normal[0], planesbuf[j].normal[1], planesbuf[j].normal[2], planesbuf[j].dist, d);
 	}
 
-	// allocate the brush and copy to it
 	brush = (colbrushf_t *)Mem_Alloc(mempool, sizeof(colbrushf_t) + sizeof(colpointf_t) * numpointsbuf + sizeof(colpointf_t) * numedgedirsbuf + sizeof(colplanef_t) * numplanesbuf + sizeof(int) * numelementsbuf);
 	brush->isaabb = isaabb;
 	brush->hasaabbplanes = hasaabbplanes;
@@ -422,8 +385,7 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 		else if (originalplanes[j].normal[2] ==  1) {xyzflags |= 16;brush->maxs[2] =  originalplanes[j].dist;}
 		else if (originalplanes[j].normal[2] == -1) {xyzflags |= 32;brush->mins[2] = -originalplanes[j].dist;}
 	}
-	// if not all xyzflags were set, then this is not a brush from q3map/q3map2, and needs reconstruction of the bounding box
-	// (this case works for any brush with valid points, but sometimes brushes are not reconstructed properly and hence the points are not valid, so this is reserved as a fallback case)
+
 	if (xyzflags != 63)
 	{
 		VectorCopy(brush->points[0].v, brush->mins);
@@ -448,8 +410,6 @@ colbrushf_t *Collision_NewBrushFromPlanes(mempool_t *mempool, int numoriginalpla
 	return brush;
 }
 
-
-
 void Collision_CalcPlanesForTriangleBrushFloat(colbrushf_t *brush)
 {
 	float edge0[3], edge1[3], edge2[3];
@@ -458,30 +418,28 @@ void Collision_CalcPlanesForTriangleBrushFloat(colbrushf_t *brush)
 	TriangleNormal(brush->points[0].v, brush->points[1].v, brush->points[2].v, brush->planes[0].normal);
 	if (DotProduct(brush->planes[0].normal, brush->planes[0].normal) < 0.0001f)
 	{
-		// there's no point in processing a degenerate triangle (GIGO - Garbage In, Garbage Out)
-		// note that some of these exist in q3bsp bspline patches
+
 		brush->numplanes = 0;
 		return;
 	}
 
-	// there are 5 planes (front, back, sides) and 3 edges
 	brush->numplanes = 5;
 	brush->numedgedirs = 3;
 	VectorNormalize(brush->planes[0].normal);
 	brush->planes[0].dist = DotProduct(brush->points->v, brush->planes[0].normal);
 	VectorNegate(brush->planes[0].normal, brush->planes[1].normal);
 	brush->planes[1].dist = -brush->planes[0].dist;
-	// edge directions are easy to calculate
+
 	VectorSubtract(brush->points[2].v, brush->points[0].v, edge0);
 	VectorSubtract(brush->points[0].v, brush->points[1].v, edge1);
 	VectorSubtract(brush->points[1].v, brush->points[2].v, edge2);
 	VectorCopy(edge0, brush->edgedirs[0].v);
 	VectorCopy(edge1, brush->edgedirs[1].v);
 	VectorCopy(edge2, brush->edgedirs[2].v);
-	// now select an algorithm to generate the side planes
+
 	if (collision_triangle_bevelsides.integer)
 	{
-		// use 45 degree slopes at the edges of the triangle to make a sinking trace error turn into "riding up" the slope rather than getting stuck
+
 		CrossProduct(edge0, brush->planes->normal, brush->planes[2].normal);
 		CrossProduct(edge1, brush->planes->normal, brush->planes[3].normal);
 		CrossProduct(edge2, brush->planes->normal, brush->planes[4].normal);
@@ -545,7 +503,7 @@ void Collision_CalcPlanesForTriangleBrushFloat(colbrushf_t *brush)
 	if (developer_extra.integer)
 	{
 		int i;
-		// validity check - will be disabled later
+
 		Collision_ValidateBrush(brush);
 		for (i = 0;i < brush->numplanes;i++)
 		{
@@ -557,12 +515,11 @@ void Collision_CalcPlanesForTriangleBrushFloat(colbrushf_t *brush)
 	}
 }
 
-// NOTE: start and end of each brush pair must have same numplanes/numpoints
 void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_start, const colbrushf_t *trace_end, const colbrushf_t *other_start, const colbrushf_t *other_end)
 {
 	int nplane, nplane2, nedge1, nedge2, hitq3surfaceflags = 0;
 	int tracenumedgedirs = trace_start->numedgedirs;
-	//int othernumedgedirs = other_start->numedgedirs;
+
 	int tracenumpoints = trace_start->numpoints;
 	int othernumpoints = other_start->numpoints;
 	int numplanes1 = other_start->numplanes;
@@ -580,20 +537,9 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 	VectorClear(startdepthnormal);
 	Vector4Clear(newimpactplane);
 
-	// fast case for AABB vs compiled brushes (which begin with AABB planes and also have precomputed bevels for AABB collisions)
 	if (trace_start->isaabb && other_start->hasaabbplanes)
 		numplanes3 = numplanes2 = numplanes1;
 
-	// Separating Axis Theorem:
-	// if a supporting vector (plane normal) can be found that separates two
-	// objects, they are not colliding.
-	//
-	// Minkowski Sum:
-	// reduce the size of one object to a point while enlarging the other to
-	// represent the space that point can not occupy.
-	//
-	// try every plane we can construct between the two brushes and measure
-	// the distance between them.
 	for (nplane = 0;nplane < numplanes3;nplane++)
 	{
 		if (nplane < numplanes1)
@@ -610,7 +556,7 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 		}
 		else
 		{
-			// pick an edgedir from each brush and cross them
+
 			nplane2 = nplane - numplanes2;
 			nedge1 = nplane2 >> 1;
 			nedge2 = nedge1 / tracenumedgedirs;
@@ -626,7 +572,7 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 				CrossProduct(other_end->edgedirs[nedge2].v, trace_end->edgedirs[nedge1].v, endplane);
 			}
 			if (VectorLength2(startplane) < COLLISION_EDGECROSS_MINLENGTH2 || VectorLength2(endplane) < COLLISION_EDGECROSS_MINLENGTH2)
-				continue; // degenerate crossproducts
+				continue;
 			VectorNormalize(startplane);
 			VectorNormalize(endplane);
 		}
@@ -634,9 +580,7 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 		endplane[3] = furthestplanedist_float(endplane, other_end->points, othernumpoints);
 		startdist = nearestplanedist_float(startplane, trace_start->points, tracenumpoints) - startplane[3];
 		enddist = nearestplanedist_float(endplane, trace_end->points, tracenumpoints) - endplane[3];
-		//Con_Printf("%c%i: startdist = %f, enddist = %f, startdist / (startdist - enddist) = %f\n", nplane2 != nplane ? 'b' : 'a', nplane2, startdist, enddist, startdist / (startdist - enddist));
 
-		// aside from collisions, this is also used for error correction
 		if (startdist <= 0.0f && nplane < numplanes1 && (startdepth < startdist || startdepth == 1))
 		{
 			startdepth = startdist;
@@ -646,28 +590,25 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 
 		if (startdist > enddist)
 		{
-			// moving into brush
+
 			if (enddist > 0.0f)
 				return;
 			if (startdist >= 0)
 			{
-				// enter
+
 				imove = 1 / (startdist - enddist);
 				f = startdist * imove;
-				// check if this will reduce the collision time range
+
 				if (enterfrac < f)
 				{
-					// reduced collision time range
+
 					enterfrac = f;
-					// if the collision time range is now empty, no collision
+
 					if (enterfrac > leavefrac)
 						return;
-					// calculate the nudged fraction and impact normal we'll
-					// need if we accept this collision later
+
 					enterfrac2 = (startdist - collision_impactnudge.value) * imove;
-					// if the collision would be further away than the trace's
-					// existing collision data, we don't care about this
-					// collision
+
 					if (enterfrac2 >= trace->fraction)
 						return;
 					ie = 1.0f - enterfrac;
@@ -677,14 +618,14 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 					newimpactplane[3] = startplane[3] * ie + endplane[3] * enterfrac;
 					if (nplane < numplanes1)
 					{
-						// use the plane from other
+
 						nplane2 = nplane;
 						hitq3surfaceflags = other_start->planes[nplane2].q3surfaceflags;
 						hittexture = other_start->planes[nplane2].texture;
 					}
 					else if (nplane < numplanes2)
 					{
-						// use the plane from trace
+
 						nplane2 = nplane - numplanes1;
 						hitq3surfaceflags = trace_start->planes[nplane2].q3surfaceflags;
 						hittexture = trace_start->planes[nplane2].texture;
@@ -699,19 +640,19 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 		}
 		else
 		{
-			// moving out of brush
+
 			if (startdist >= 0)
 				return;
 			if (enddist > 0)
 			{
-				// leave
+
 				f = startdist / (startdist - enddist);
-				// check if this will reduce the collision time range
+
 				if (leavefrac > f)
 				{
-					// reduced collision time range
+
 					leavefrac = f;
-					// if the collision time range is now empty, no collision
+
 					if (enterfrac > leavefrac)
 						return;
 				}
@@ -719,14 +660,9 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 		}
 	}
 
-	// at this point we know the trace overlaps the brush because it was not
-	// rejected at any point in the loop above
-
-	// see if the trace started outside the brush or not
 	if (enterfrac > -1)
 	{
-		// started outside, and overlaps, therefore there is a collision here
-		// store out the impact information
+
 		if ((trace->hitsupercontentsmask & other_start->supercontents) && !(trace->skipsupercontentsmask & other_start->supercontents) && !(trace->skipmaterialflagsmask & (hittexture ? hittexture->currentmaterialflags : 0)))
 		{
 			trace->hitsupercontents = other_start->supercontents;
@@ -739,7 +675,7 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 	}
 	else
 	{
-		// started inside, update startsolid and friends
+
 		trace->startsupercontents |= other_start->supercontents;
 		if ((trace->hitsupercontentsmask & other_start->supercontents) && !(trace->skipsupercontentsmask & other_start->supercontents) && !(trace->skipmaterialflagsmask & (starttexture ? starttexture->currentmaterialflags : 0)))
 		{
@@ -758,7 +694,6 @@ void Collision_TraceBrushBrushFloat(trace_t *trace, const colbrushf_t *trace_sta
 	}
 }
 
-// NOTE: start and end of each brush pair must have same numplanes/numpoints
 void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const vec3_t lineend, const colbrushf_t *other_start, const colbrushf_t *other_end)
 {
 	int nplane, hitq3surfaceflags = 0;
@@ -784,16 +719,6 @@ void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const
 	VectorClear(startdepthnormal);
 	Vector4Clear(newimpactplane);
 
-	// Separating Axis Theorem:
-	// if a supporting vector (plane normal) can be found that separates two
-	// objects, they are not colliding.
-	//
-	// Minkowski Sum:
-	// reduce the size of one object to a point while enlarging the other to
-	// represent the space that point can not occupy.
-	//
-	// try every plane we can construct between the two brushes and measure
-	// the distance between them.
 	for (nplane = 0;nplane < numplanes;nplane++)
 	{
 		VectorCopy(other_start->planes[nplane].normal, startplane);
@@ -802,9 +727,7 @@ void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const
 		endplane[3] = other_end->planes[nplane].dist;
 		startdist = DotProduct(linestart, startplane) - startplane[3];
 		enddist = DotProduct(lineend, endplane) - endplane[3];
-		//Con_Printf("%c%i: startdist = %f, enddist = %f, startdist / (startdist - enddist) = %f\n", nplane2 != nplane ? 'b' : 'a', nplane2, startdist, enddist, startdist / (startdist - enddist));
 
-		// aside from collisions, this is also used for error correction
 		if (startdist <= 0.0f && (startdepth < startdist || startdepth == 1))
 		{
 			startdepth = startdist;
@@ -814,28 +737,25 @@ void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const
 
 		if (startdist > enddist)
 		{
-			// moving into brush
+
 			if (enddist > 0.0f)
 				return;
 			if (startdist > 0)
 			{
-				// enter
+
 				imove = 1 / (startdist - enddist);
 				f = startdist * imove;
-				// check if this will reduce the collision time range
+
 				if (enterfrac < f)
 				{
-					// reduced collision time range
+
 					enterfrac = f;
-					// if the collision time range is now empty, no collision
+
 					if (enterfrac > leavefrac)
 						return;
-					// calculate the nudged fraction and impact normal we'll
-					// need if we accept this collision later
+
 					enterfrac2 = (startdist - collision_impactnudge.value) * imove;
-					// if the collision would be further away than the trace's
-					// existing collision data, we don't care about this
-					// collision
+
 					if (enterfrac2 >= trace->fraction)
 						return;
 					ie = 1.0f - enterfrac;
@@ -850,19 +770,19 @@ void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const
 		}
 		else
 		{
-			// moving out of brush
+
 			if (startdist > 0)
 				return;
 			if (enddist > 0)
 			{
-				// leave
+
 				f = startdist / (startdist - enddist);
-				// check if this will reduce the collision time range
+
 				if (leavefrac > f)
 				{
-					// reduced collision time range
+
 					leavefrac = f;
-					// if the collision time range is now empty, no collision
+
 					if (enterfrac > leavefrac)
 						return;
 				}
@@ -870,14 +790,9 @@ void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const
 		}
 	}
 
-	// at this point we know the trace overlaps the brush because it was not
-	// rejected at any point in the loop above
-
-	// see if the trace started outside the brush or not
 	if (enterfrac > -1)
 	{
-		// started outside, and overlaps, therefore there is a collision here
-		// store out the impact information
+
 		if ((trace->hitsupercontentsmask & other_start->supercontents) && !(trace->skipsupercontentsmask & other_start->supercontents) && !(trace->skipmaterialflagsmask & (hittexture ? hittexture->currentmaterialflags : 0)))
 		{
 			trace->hitsupercontents = other_start->supercontents;
@@ -890,7 +805,7 @@ void Collision_TraceLineBrushFloat(trace_t *trace, const vec3_t linestart, const
 	}
 	else
 	{
-		// started inside, update startsolid and friends
+
 		trace->startsupercontents |= other_start->supercontents;
 		if ((trace->hitsupercontentsmask & other_start->supercontents) && !(trace->skipsupercontentsmask & other_start->supercontents) && !(trace->skipmaterialflagsmask & (starttexture ? starttexture->currentmaterialflags : 0)))
 		{
@@ -936,16 +851,6 @@ void Collision_TracePointBrushFloat(trace_t *trace, const vec3_t linestart, cons
 	VectorClear(startdepthnormal);
 	Vector4Clear(newimpactplane);
 
-	// Separating Axis Theorem:
-	// if a supporting vector (plane normal) can be found that separates two
-	// objects, they are not colliding.
-	//
-	// Minkowski Sum:
-	// reduce the size of one object to a point while enlarging the other to
-	// represent the space that point can not occupy.
-	//
-	// try every plane we can construct between the two brushes and measure
-	// the distance between them.
 	for (nplane = 0; nplane < numplanes; nplane++)
 	{
 		VectorCopy(other_start->planes[nplane].normal, startplane);
@@ -955,7 +860,6 @@ void Collision_TracePointBrushFloat(trace_t *trace, const vec3_t linestart, cons
 		if (startdist > 0)
 			return;
 
-		// aside from collisions, this is also used for error correction
 		if (startdepth < startdist || startdepth == 1)
 		{
 			startdepth = startdist;
@@ -964,10 +868,6 @@ void Collision_TracePointBrushFloat(trace_t *trace, const vec3_t linestart, cons
 		}
 	}
 
-	// at this point we know the trace overlaps the brush because it was not
-	// rejected at any point in the loop above
-
-	// started inside, update startsolid and friends
 	trace->startsupercontents |= other_start->supercontents;
 	if ((trace->hitsupercontentsmask & other_start->supercontents) && !(trace->skipsupercontentsmask & other_start->supercontents) && !(trace->skipmaterialflagsmask & (starttexture ? starttexture->currentmaterialflags : 0)))
 	{
@@ -1038,7 +938,7 @@ void Collision_TraceBrushTriangleMeshFloat(trace_t *trace, const colbrushf_t *th
 					Collision_SnapCopyPoints(brush.numpoints, points, points, COLLISION_SNAPSCALE, COLLISION_SNAP);
 					Collision_CalcEdgeDirsForPolygonBrushFloat(&brush);
 					Collision_CalcPlanesForTriangleBrushFloat(&brush);
-					//Collision_PrintBrushAsQHull(&brush, "brush");
+
 					Collision_TraceBrushBrushFloat(trace, thisbrush_start, thisbrush_end, &brush, &brush);
 				}
 			}
@@ -1056,7 +956,7 @@ void Collision_TraceBrushTriangleMeshFloat(trace_t *trace, const colbrushf_t *th
 				Collision_SnapCopyPoints(brush.numpoints, points, points, COLLISION_SNAPSCALE, COLLISION_SNAP);
 				Collision_CalcEdgeDirsForPolygonBrushFloat(&brush);
 				Collision_CalcPlanesForTriangleBrushFloat(&brush);
-				//Collision_PrintBrushAsQHull(&brush, "brush");
+
 				Collision_TraceBrushBrushFloat(trace, thisbrush_start, thisbrush_end, &brush, &brush);
 			}
 		}
@@ -1071,7 +971,7 @@ void Collision_TraceBrushTriangleMeshFloat(trace_t *trace, const colbrushf_t *th
 			Collision_SnapCopyPoints(brush.numpoints, points, points, COLLISION_SNAPSCALE, COLLISION_SNAP);
 			Collision_CalcEdgeDirsForPolygonBrushFloat(&brush);
 			Collision_CalcPlanesForTriangleBrushFloat(&brush);
-			//Collision_PrintBrushAsQHull(&brush, "brush");
+
 			Collision_TraceBrushBrushFloat(trace, thisbrush_start, thisbrush_end, &brush, &brush);
 		}
 	}
@@ -1080,7 +980,7 @@ void Collision_TraceBrushTriangleMeshFloat(trace_t *trace, const colbrushf_t *th
 void Collision_TraceLineTriangleMeshFloat(trace_t *trace, const vec3_t linestart, const vec3_t lineend, int numtriangles, const int *element3i, const float *vertex3f, int stride, float *bbox6f, int supercontents, int q3surfaceflags, const texture_t *texture, const vec3_t segmentmins, const vec3_t segmentmaxs)
 {
 	int i;
-	// FIXME: snap vertices?
+
 	if(stride > 0)
 	{
 		int k, cnt, tri;
@@ -1136,7 +1036,7 @@ void Collision_TraceBrushTriangleFloat(trace_t *trace, const colbrushf_t *thisbr
 	Collision_SnapCopyPoints(brush.numpoints, points, points, COLLISION_SNAPSCALE, COLLISION_SNAP);
 	Collision_CalcEdgeDirsForPolygonBrushFloat(&brush);
 	Collision_CalcPlanesForTriangleBrushFloat(&brush);
-	//Collision_PrintBrushAsQHull(&brush, "brush");
+
 	Collision_TraceBrushBrushFloat(trace, thisbrush_start, thisbrush_end, &brush, &brush);
 }
 
@@ -1154,7 +1054,7 @@ void Collision_BrushForBox(colboxbrushf_t *boxbrush, const vec3_t mins, const ve
 	boxbrush->brush.texture = texture;
 	if (VectorCompare(mins, maxs))
 	{
-		// point brush
+
 		boxbrush->brush.numpoints = 1;
 		boxbrush->brush.numedgedirs = 0;
 		boxbrush->brush.numplanes = 0;
@@ -1165,9 +1065,7 @@ void Collision_BrushForBox(colboxbrushf_t *boxbrush, const vec3_t mins, const ve
 		boxbrush->brush.numpoints = 8;
 		boxbrush->brush.numedgedirs = 3;
 		boxbrush->brush.numplanes = 6;
-		// there are 8 points on a box
-		// there are 3 edgedirs on a box (both signs are tested in collision)
-		// there are 6 planes on a box
+
 		VectorSet(boxbrush->brush.points[0].v, mins[0], mins[1], mins[2]);
 		VectorSet(boxbrush->brush.points[1].v, maxs[0], mins[1], mins[2]);
 		VectorSet(boxbrush->brush.points[2].v, mins[0], maxs[1], mins[2]);
@@ -1196,57 +1094,46 @@ void Collision_BrushForBox(colboxbrushf_t *boxbrush, const vec3_t mins, const ve
 	boxbrush->brush.texture = texture;
 	VectorSet(boxbrush->brush.mins, mins[0] - 1, mins[1] - 1, mins[2] - 1);
 	VectorSet(boxbrush->brush.maxs, maxs[0] + 1, maxs[1] + 1, maxs[2] + 1);
-	//Collision_ValidateBrush(&boxbrush->brush);
+
 }
 
-//pseudocode for detecting line/sphere overlap without calculating an impact point
-//linesphereorigin = sphereorigin - linestart;linediff = lineend - linestart;linespherefrac = DotProduct(linesphereorigin, linediff) / DotProduct(linediff, linediff);return VectorLength2(linesphereorigin - bound(0, linespherefrac, 1) * linediff) >= sphereradius*sphereradius;
-
-// LordHavoc: currently unused, but tested
-// note: this can be used for tracing a moving sphere vs a stationary sphere,
-// by simply adding the moving sphere's radius to the sphereradius parameter,
-// all the results are correct (impactpoint, impactnormal, and fraction)
 float Collision_ClipTrace_Line_Sphere(double *linestart, double *lineend, double *sphereorigin, double sphereradius, double *impactpoint, double *impactnormal)
 {
 	double dir[3], scale, v[3], deviationdist2, impactdist, linelength;
-	// make sure the impactpoint and impactnormal are valid even if there is
-	// no collision
+
 	VectorCopy(lineend, impactpoint);
 	VectorClear(impactnormal);
-	// calculate line direction
+
 	VectorSubtract(lineend, linestart, dir);
-	// normalize direction
+
 	linelength = VectorLength(dir);
 	if (linelength)
 	{
 		scale = 1.0 / linelength;
 		VectorScale(dir, scale, dir);
 	}
-	// this dotproduct calculates the distance along the line at which the
-	// sphere origin is (nearest point to the sphere origin on the line)
+
 	impactdist = DotProduct(sphereorigin, dir) - DotProduct(linestart, dir);
-	// calculate point on line at that distance, and subtract the
-	// sphereorigin from it, so we have a vector to measure for the distance
-	// of the line from the sphereorigin (deviation, how off-center it is)
+
 	VectorMA(linestart, impactdist, dir, v);
 	VectorSubtract(v, sphereorigin, v);
 	deviationdist2 = sphereradius * sphereradius - VectorLength2(v);
-	// if squared offset length is outside the squared sphere radius, miss
+
 	if (deviationdist2 < 0)
-		return 1; // miss (off to the side)
-	// nudge back to find the correct impact distance
+		return 1;
+
 	impactdist -= sqrt(deviationdist2);
 	if (impactdist >= linelength)
-		return 1; // miss (not close enough)
+		return 1;
 	if (impactdist < 0)
-		return 1; // miss (linestart is past or inside sphere)
-	// calculate new impactpoint
+		return 1;
+
 	VectorMA(linestart, impactdist, dir, impactpoint);
-	// calculate impactnormal (surface normal at point of impact)
+
 	VectorSubtract(impactpoint, sphereorigin, impactnormal);
-	// normalize impactnormal
+
 	VectorNormalize(impactnormal);
-	// return fraction of movement distance
+
 	return impactdist / linelength;
 }
 
@@ -1254,109 +1141,55 @@ void Collision_TraceLineTriangleFloat(trace_t *trace, const vec3_t linestart, co
 {
 	float d1, d2, d, f, f2, impact[3], edgenormal[3], faceplanenormal[3], faceplanedist, faceplanenormallength2, edge01[3], edge21[3], edge02[3];
 
-	// this function executes:
-	// 32 ops when line starts behind triangle
-	// 38 ops when line ends infront of triangle
-	// 43 ops when line fraction is already closer than this triangle
-	// 72 ops when line is outside edge 01
-	// 92 ops when line is outside edge 21
-	// 115 ops when line is outside edge 02
-	// 123 ops when line impacts triangle and updates trace results
-
-	// this code is designed for clockwise triangles, conversion to
-	// counterclockwise would require swapping some things around...
-	// it is easier to simply swap the point0 and point2 parameters to this
-	// function when calling it than it is to rewire the internals.
-
-	// calculate the faceplanenormal of the triangle, this represents the front side
-	// 15 ops
 	VectorSubtract(point0, point1, edge01);
 	VectorSubtract(point2, point1, edge21);
 	CrossProduct(edge01, edge21, faceplanenormal);
-	// there's no point in processing a degenerate triangle (GIGO - Garbage In, Garbage Out)
-	// 6 ops
+
 	faceplanenormallength2 = DotProduct(faceplanenormal, faceplanenormal);
 	if (faceplanenormallength2 < 0.0001f)
 		return;
-	// calculate the distance
-	// 5 ops
+
 	faceplanedist = DotProduct(point0, faceplanenormal);
 
-	// if start point is on the back side there is no collision
-	// (we don't care about traces going through the triangle the wrong way)
-
-	// calculate the start distance
-	// 6 ops
 	d1 = DotProduct(faceplanenormal, linestart);
 	if (d1 <= faceplanedist)
 		return;
 
-	// calculate the end distance
-	// 6 ops
 	d2 = DotProduct(faceplanenormal, lineend);
-	// if both are in front, there is no collision
+
 	if (d2 >= faceplanedist)
 		return;
 
-	// from here on we know d1 is >= 0 and d2 is < 0
-	// this means the line starts infront and ends behind, passing through it
-
-	// calculate the recipricol of the distance delta,
-	// so we can use it multiple times cheaply (instead of division)
-	// 2 ops
 	d = 1.0f / (d1 - d2);
-	// calculate the impact fraction by taking the start distance (> 0)
-	// and subtracting the face plane distance (this is the distance of the
-	// triangle along that same normal)
-	// then multiply by the recipricol distance delta
-	// 4 ops
+
 	f = (d1 - faceplanedist) * d;
 	f2  = f - collision_impactnudge.value * d;
-	// skip out if this impact is further away than previous ones
-	// 1 ops
+
 	if (f2 >= trace->fraction)
 		return;
-	// calculate the perfect impact point for classification of insidedness
-	// 9 ops
+
 	impact[0] = linestart[0] + f * (lineend[0] - linestart[0]);
 	impact[1] = linestart[1] + f * (lineend[1] - linestart[1]);
 	impact[2] = linestart[2] + f * (lineend[2] - linestart[2]);
 
-	// calculate the edge normal and reject if impact is outside triangle
-	// (an edge normal faces away from the triangle, to get the desired normal
-	//  a crossproduct with the faceplanenormal is used, and because of the way
-	// the insidedness comparison is written it does not need to be normalized)
-
-	// first use the two edges from the triangle plane math
-	// the other edge only gets calculated if the point survives that long
-
-	// 20 ops
 	CrossProduct(edge01, faceplanenormal, edgenormal);
 	if (DotProduct(impact, edgenormal) > DotProduct(point1, edgenormal))
 		return;
 
-	// 20 ops
 	CrossProduct(faceplanenormal, edge21, edgenormal);
 	if (DotProduct(impact, edgenormal) > DotProduct(point2, edgenormal))
 		return;
 
-	// 23 ops
 	VectorSubtract(point0, point2, edge02);
 	CrossProduct(faceplanenormal, edge02, edgenormal);
 	if (DotProduct(impact, edgenormal) > DotProduct(point0, edgenormal))
 		return;
 
-	// 8 ops (rare)
-
-	// skip if this trace should not be blocked by these contents
 	if (!(supercontents & trace->hitsupercontentsmask) || (supercontents & trace->skipsupercontentsmask) || (texture->currentmaterialflags & trace->skipmaterialflagsmask))
 		return;
 
-	// store the new trace fraction
 	trace->fraction = f2;
 
-	// store the new trace plane (because collisions only happen from
-	// the front this is always simply the triangle normal, never flipped)
 	d = 1.0 / sqrt(faceplanenormallength2);
 	VectorScale(faceplanenormal, d, trace->plane.normal);
 	trace->plane.dist = faceplanedist * d;
@@ -1392,12 +1225,10 @@ void Collision_BoundingBoxOfBrushTraceSegment(const colbrushf_t *start, const co
 	maxs[2] += 1;
 }
 
-//===========================================
-
 static void Collision_TranslateBrush(const vec3_t shift, colbrushf_t *brush)
 {
 	int i;
-	// now we can transform the data
+
 	for(i = 0; i < brush->numplanes; ++i)
 	{
 		brush->planes[i].dist += DotProduct(shift, brush->planes[i].normal);
@@ -1414,10 +1245,10 @@ static void Collision_TransformBrush(const matrix4x4_t *matrix, colbrushf_t *bru
 {
 	int i;
 	vec3_t v;
-	// we're breaking any AABB properties here...
+
 	brush->isaabb = false;
 	brush->hasaabbplanes = false;
-	// now we can transform the data
+
 	for(i = 0; i < brush->numplanes; ++i)
 	{
 		Matrix4x4_TransformPositivePlane(matrix, brush->planes[i].normal[0], brush->planes[i].normal[1], brush->planes[i].normal[2], brush->planes[i].dist, brush->planes[i].normal_and_dist);
@@ -1559,7 +1390,7 @@ void Collision_Cache_NewFrame(void)
 		if (collision_cachedtrace_max > 1)
 			Collision_Cache_Reset(true);
 	}
-	// rebuild hash if sequence would overflow byte, otherwise increment
+
 	if (collision_cachedtrace_sequence == 255)
 	{
 		Collision_Cache_RebuildHash();
@@ -1576,7 +1407,7 @@ static unsigned int Collision_Cache_HashIndexForArray(unsigned int *array, unsig
 {
 	unsigned int i;
 	unsigned int hashindex = 0;
-	// this is a super-cheesy checksum, designed only for speed
+
 	for (i = 0;i < size;i++)
 		hashindex += array[i] * (1 + i);
 	return hashindex;
@@ -1594,12 +1425,12 @@ static collision_cachedtrace_t *Collision_Cache_Lookup(dp_model_t *model, const 
 	unsigned int *arraynext = collision_cachedtrace_arraynext;
 	collision_cachedtrace_t *cached = collision_cachedtrace_array + index;
 	collision_cachedtrace_parameters_t params;
-	// all non-cached traces use the same index
+
 	if (!collision_cache.integer)
 		r_refdef.stats[r_stat_photoncache_traced]++;
 	else
 	{
-		// cached trace lookup
+
 		memset(&params, 0, sizeof(params));
 		params.model = model;
 		VectorCopy(start, params.start);
@@ -1615,7 +1446,7 @@ static collision_cachedtrace_t *Collision_Cache_Lookup(dp_model_t *model, const 
 			if (arrayfullhashindex[index] != fullhashindex)
 				continue;
 			cached = collision_cachedtrace_array + index;
-			//if (memcmp(&cached->p, &params, sizeof(params)))
+
 			if (cached->p.model != params.model
 			 || cached->p.end[0] != params.end[0]
 			 || cached->p.end[1] != params.end[1]
@@ -1644,37 +1475,37 @@ static collision_cachedtrace_t *Collision_Cache_Lookup(dp_model_t *model, const 
 			 || cached->p.matrix.m[3][3] != params.matrix.m[3][3]
 			)
 				continue;
-			// found a matching trace in the cache
+
 			r_refdef.stats[r_stat_photoncache_cached]++;
 			cached->valid = true;
 			collision_cachedtrace_arrayused[index] = collision_cachedtrace_sequence;
 			return cached;
 		}
 		r_refdef.stats[r_stat_photoncache_traced]++;
-		// find an unused cache entry
+
 		for (index = collision_cachedtrace_firstfree, range = collision_cachedtrace_max;index < range;index++)
 			if (collision_cachedtrace_arrayused[index] == 0)
 				break;
 		if (index == range)
 		{
-			// all claimed, but probably some are stale...
+
 			for (index = 1, range = collision_cachedtrace_max;index < range;index++)
 				if (collision_cachedtrace_arrayused[index] != sequence)
 					break;
 			if (index < range)
 			{
-				// found a stale one, rebuild the hash
+
 				Collision_Cache_RebuildHash();
 			}
 			else
 			{
-				// we need to grow the cache
+
 				collision_cachedtrace_max *= 2;
 				Collision_Cache_Reset(false);
 				index = 1;
 			}
 		}
-		// link the new cache entry into the hash bucket
+
 		collision_cachedtrace_firstfree = index + 1;
 		if (collision_cachedtrace_lastused < index)
 			collision_cachedtrace_lastused = index;
@@ -1751,7 +1582,6 @@ static void Collision_ClipExtendPrepare(extendtraceinfo_t *extendtraceinfo, trac
 	extendtraceinfo->scaletoextend = 1.0f;
 	extendtraceinfo->extend = textend;
 
-	// make the trace longer according to the extend parameter
 	if (extendtraceinfo->reallength && extendtraceinfo->extend)
 	{
 		extendtraceinfo->extendlength = extendtraceinfo->reallength + extendtraceinfo->extend;
@@ -1767,13 +1597,12 @@ static void Collision_ClipExtendFinish(extendtraceinfo_t *extendtraceinfo)
 
 	if (trace->fraction != 1.0f)
 	{
-		// undo the extended trace length
+
 		trace->fraction *= extendtraceinfo->scaletoextend;
 
-		// if the extended trace hit something that the unextended trace did not hit (even considering the collision_impactnudge), then we have to clear the hit information
 		if (trace->fraction > 1.0f)
 		{
-			// note that ent may refer to either startsolid or fraction<1, we can't restore the startsolid ent unfortunately
+
  			trace->ent = NULL;
 			trace->hitq3surfaceflags = 0;
 			trace->hitsupercontents = 0;
@@ -1783,10 +1612,8 @@ static void Collision_ClipExtendFinish(extendtraceinfo_t *extendtraceinfo)
 		}
 	}
 
-	// clamp things
 	trace->fraction = bound(0, trace->fraction, 1);
 
-	// calculate the end position
 	VectorMA(extendtraceinfo->realstart, trace->fraction, extendtraceinfo->realdelta, trace->endpos);
 }
 
@@ -1806,9 +1633,7 @@ void Collision_ClipToGenericEntity(trace_t *trace, dp_model_t *model, const fram
 	{
 		if(model->TraceBrush && (inversematrix->m[0][1] || inversematrix->m[0][2] || inversematrix->m[1][0] || inversematrix->m[1][2] || inversematrix->m[2][0] || inversematrix->m[2][1]))
 		{
-			// we get here if TraceBrush exists, AND we have a rotation component (SOLID_BSP case)
-			// using starttransformed, endtransformed is WRONG in this case!
-			// should rather build a brush and trace using it
+
 			colboxbrushf_t thisbrush_start, thisbrush_end;
 			Collision_BrushForBox(&thisbrush_start, mins, maxs, 0, 0, NULL);
 			Collision_BrushForBox(&thisbrush_end, mins, maxs, 0, 0, NULL);
@@ -1816,20 +1641,17 @@ void Collision_ClipToGenericEntity(trace_t *trace, dp_model_t *model, const fram
 			Collision_TranslateBrush(extendtraceinfo.extendend, &thisbrush_end.brush);
 			Collision_TransformBrush(inversematrix, &thisbrush_start.brush);
 			Collision_TransformBrush(inversematrix, &thisbrush_end.brush);
-			//Collision_TranslateBrush(starttransformed, &thisbrush_start.brush);
-			//Collision_TranslateBrush(endtransformed, &thisbrush_end.brush);
+
 			model->TraceBrush(model, frameblend, skeleton, trace, &thisbrush_start.brush, &thisbrush_end.brush, hitsupercontentsmask, skipsupercontentsmask, skipmaterialflagsmask);
 		}
-		else // this is only approximate if rotated, quite useless
+		else
 			model->TraceBox(model, frameblend, skeleton, trace, starttransformed, mins, maxs, endtransformed, hitsupercontentsmask, skipsupercontentsmask, skipmaterialflagsmask);
 	}
-	else // and this requires that the transformation matrix doesn't have angles components, like SV_TraceBox ensures; FIXME may get called if a model is SOLID_BSP but has no TraceBox function
+	else
 		Collision_ClipTrace_Box(trace, bodymins, bodymaxs, starttransformed, mins, maxs, endtransformed, hitsupercontentsmask, skipsupercontentsmask, skipmaterialflagsmask, bodysupercontents, 0, NULL);
 
 	Collision_ClipExtendFinish(&extendtraceinfo);
 
-	// transform plane
-	// NOTE: this relies on plane.dist being directly after plane.normal
 	Matrix4x4_TransformPositivePlane(matrix, trace->plane.normal[0], trace->plane.normal[1], trace->plane.normal[2], trace->plane.dist, trace->plane.normal_and_dist);
 }
 
@@ -1837,7 +1659,7 @@ void Collision_ClipToWorld(trace_t *trace, dp_model_t *model, const vec3_t tstar
 {
 	extendtraceinfo_t extendtraceinfo;
 	Collision_ClipExtendPrepare(&extendtraceinfo, trace, tstart, tend, extend);
-	// ->TraceBox: TraceBrush not needed here, as worldmodel is never rotated
+
 	if (model && model->TraceBox)
 		model->TraceBox(model, NULL, NULL, trace, extendtraceinfo.extendstart, mins, maxs, extendtraceinfo.extendend, hitsupercontentsmask, skipsupercontentsmask, skipmaterialflagsmask);
 	Collision_ClipExtendFinish(&extendtraceinfo);
@@ -1864,8 +1686,6 @@ void Collision_ClipLineToGenericEntity(trace_t *trace, dp_model_t *model, const 
 
 	Collision_ClipExtendFinish(&extendtraceinfo);
 
-	// transform plane
-	// NOTE: this relies on plane.dist being directly after plane.normal
 	Matrix4x4_TransformPositivePlane(matrix, trace->plane.normal[0], trace->plane.normal[1], trace->plane.normal[2], trace->plane.dist, trace->plane.normal_and_dist);
 }
 
@@ -1899,8 +1719,7 @@ void Collision_ClipPointToGenericEntity(trace_t *trace, dp_model_t *model, const
 		Collision_ClipTrace_Point(trace, bodymins, bodymaxs, starttransformed, hitsupercontentsmask, skipsupercontentsmask, skipmaterialflagsmask, bodysupercontents, 0, NULL);
 
 	VectorCopy(start, trace->endpos);
-	// transform plane
-	// NOTE: this relies on plane.dist being directly after plane.normal
+
 	Matrix4x4_TransformPositivePlane(matrix, trace->plane.normal[0], trace->plane.normal[1], trace->plane.normal[2], trace->plane.dist, trace->plane.normal_and_dist);
 }
 
@@ -1915,7 +1734,7 @@ void Collision_ClipPointToWorld(trace_t *trace, dp_model_t *model, const vec3_t 
 
 void Collision_CombineTraces(trace_t *cliptrace, const trace_t *trace, void *touch, qboolean isbmodel)
 {
-	// take the 'best' answers from the new trace and combine with existing data
+
 	if (trace->allsolid)
 		cliptrace->allsolid = true;
 	if (trace->startsolid)
@@ -1931,11 +1750,7 @@ void Collision_CombineTraces(trace_t *cliptrace, const trace_t *trace, void *tou
 			VectorCopy(trace->startdepthnormal, cliptrace->startdepthnormal);
 		}
 	}
-	// don't set this except on the world, because it can easily confuse
-	// monsters underwater if there's a bmodel involved in the trace
-	// (inopen && inwater is how they check water visibility)
-	//if (trace->inopen)
-	//	cliptrace->inopen = true;
+
 	if (trace->inwater)
 		cliptrace->inwater = true;
 	if ((trace->fraction < cliptrace->fraction) && (VectorLength2(trace->plane.normal) > 0))

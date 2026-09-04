@@ -1,9 +1,6 @@
 #ifndef __CLVM_CMDS_H__
 #define __CLVM_CMDS_H__
 
-/* These are VM built-ins that originate in the client-side programs support
-   but are reused by the other programs (usually the menu). */
-
 void VM_CL_setmodel (void);
 void VM_CL_precache_model (void);
 void VM_CL_setorigin (void);
@@ -24,4 +21,4 @@ void VM_CL_setattachment(void);
 void VM_CL_gettagindex(void);
 void VM_CL_gettaginfo(void);
 
-#endif /* __CLVM_CMDS_H__ */
+#endif

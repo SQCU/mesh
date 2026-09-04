@@ -55,7 +55,6 @@ void W_Crylink_Reset(entity this)
 	delete(this);
 }
 
-// force projectile to explode
 void W_Crylink_LinkExplode(entity e, entity e2, entity directhitentity)
 {
 	float a;
@@ -80,12 +79,6 @@ void W_Crylink_LinkExplode(entity e, entity e2, entity directhitentity)
 	delete(e);
 }
 
-// adjust towards center
-// returns the origin where they will meet... and the time till the meeting is
-// stored in w_crylink_linkjoin_time.
-// could possibly network this origin and time, and display a special particle
-// effect when projectiles meet there :P
-// jspeed: joining speed (calculate this as join spread * initial speed)
 float w_crylink_linkjoin_time;
 vector W_Crylink_LinkJoin(entity e, float jspeed)
 {
@@ -94,7 +87,6 @@ vector W_Crylink_LinkJoin(entity e, float jspeed)
 	float avg_dist, n;
 	entity p;
 
-	// FIXME remove this debug code
 	W_Crylink_CheckLinks(e);
 
 	w_crylink_linkjoin_time = 0;
@@ -112,9 +104,8 @@ vector W_Crylink_LinkJoin(entity e, float jspeed)
 	avg_velocity *= (1.0 / n);
 
 	if(n < 2)
-		return avg_origin; // nothing to do
+		return avg_origin;
 
-	// yes, mathematically we can do this in ONE step, but beware of 32bit floats...
 	avg_dist = (vlen(e.origin - avg_origin) ** 2);
 	for(p = e; (p = p.queuenext) != e; )
 		avg_dist += (vlen(WarpZone_RefSys_TransformOrigin(p, e, p.origin) - avg_origin) ** 2);
@@ -122,7 +113,7 @@ vector W_Crylink_LinkJoin(entity e, float jspeed)
 	avg_dist = sqrt(avg_dist);
 
 	if(avg_dist == 0)
-		return avg_origin; // no change needed
+		return avg_origin;
 
 	if(jspeed == 0)
 	{
@@ -133,7 +124,7 @@ vector W_Crylink_LinkJoin(entity e, float jspeed)
 			p.velocity = WarpZone_RefSys_TransformVelocity(e, p, avg_velocity);
 			UpdateCSQCProjectile(p);
 		}
-		targ_origin = avg_origin + 1000000000 * normalize(avg_velocity); // HUUUUUUGE
+		targ_origin = avg_origin + 1000000000 * normalize(avg_velocity);
 	}
 	else
 	{
@@ -148,19 +139,6 @@ vector W_Crylink_LinkJoin(entity e, float jspeed)
 			UpdateCSQCProjectile(p);
 		}
 
-		// analysis:
-		//   jspeed -> +infinity:
-		//      w_crylink_linkjoin_time -> +0
-		//      targ_origin -> avg_origin
-		//      p->velocity -> HUEG towards center
-		//   jspeed -> 0:
-		//      w_crylink_linkjoin_time -> +/- infinity
-		//      targ_origin -> avg_velocity * +/- infinity
-		//      p->velocity -> avg_velocity
-		//   jspeed -> -infinity:
-		//      w_crylink_linkjoin_time -> -0
-		//      targ_origin -> avg_origin
-		//      p->velocity -> HUEG away from center
 	}
 
 	W_Crylink_CheckLinks(e);
@@ -170,7 +148,7 @@ vector W_Crylink_LinkJoin(entity e, float jspeed)
 
 void W_Crylink_LinkJoinEffect_Think(entity this)
 {
-	// is there at least 2 projectiles very close?
+
 	entity e, p;
 	float n;
 	.entity weaponentity = this.weaponentity_fld;
@@ -234,7 +212,6 @@ float W_Crylink_Touch_WouldHitFriendly(entity projectile, float rad)
 	return (hit_enemy ? false : hit_friendly);
 }
 
-// NO bounce protection, as bounces are limited!
 void W_Crylink_Touch(entity this, entity toucher)
 {
 	float finalhit;
@@ -268,7 +245,7 @@ void W_Crylink_Touch(entity this, entity toucher)
 	}
 	else if(finalhit)
 	{
-		// just unlink
+
 		delete(this);
 		return;
 	}
@@ -276,9 +253,7 @@ void W_Crylink_Touch(entity this, entity toucher)
 	this.angles = vectoangles(this.velocity);
 	this.owner = NULL;
 	this.projectiledeathtype |= HITTYPE_BOUNCE;
-	// commented out as it causes a little hitch...
-	//if(proj.cnt == 0)
-	//	CSQCProjectile(proj, true, PROJECTILE_CRYLINK, true);
+
 }
 
 void W_Crylink_Fadethink(entity this)
@@ -323,16 +298,16 @@ void W_Crylink_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 			proj.queuenext = proj;
 			proj.queueprev = proj;
 		}
-		else if(counter == 0) { // first projectile, store in firstproj for now
+		else if(counter == 0) {
 			firstproj = proj;
 		}
-		else if(counter == shots - 1) { // last projectile, link up with first projectile
+		else if(counter == shots - 1) {
 			prevproj.queuenext = proj;
 			firstproj.queueprev = proj;
 			proj.queuenext = firstproj;
 			proj.queueprev = prevproj;
 		}
-		else { // else link up with previous projectile
+		else {
 			prevproj.queuenext = proj;
 			proj.queueprev = prevproj;
 		}
@@ -342,11 +317,9 @@ void W_Crylink_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 		set_movetype(proj, MOVETYPE_BOUNCEMISSILE);
 		PROJECTILE_MAKETRIGGER(proj);
 		proj.projectiledeathtype = thiswep.m_id;
-		//proj.gravity = 0.001;
 
 		setorigin(proj, w_shotorg);
 		setsize(proj, '0 0 0', '0 0 0');
-
 
 		s = '0 0 0';
 		if(counter == 0)
@@ -376,11 +349,8 @@ void W_Crylink_Attack(Weapon thiswep, entity actor, .entity weaponentity)
 		}
 		proj.teleport_time = time + WEP_CVAR_PRI(crylink, joindelay);
 		proj.cnt = WEP_CVAR_PRI(crylink, bounces);
-		//proj.scale = 1 + 1 * proj.cnt;
 
 		proj.angles = vectoangles(proj.velocity);
-
-		//proj.glow_size = 20;
 
 		proj.flags = FL_PROJECTILE;
 		IL_PUSH(g_projectiles, proj);
@@ -436,16 +406,16 @@ void W_Crylink_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 			proj.queuenext = proj;
 			proj.queueprev = proj;
 		}
-		else if(counter == 0) { // first projectile, store in firstproj for now
+		else if(counter == 0) {
 			firstproj = proj;
 		}
-		else if(counter == shots - 1) { // last projectile, link up with first projectile
+		else if(counter == shots - 1) {
 			prevproj.queuenext = proj;
 			firstproj.queueprev = proj;
 			proj.queuenext = firstproj;
 			proj.queueprev = prevproj;
 		}
-		else { // else link up with previous projectile
+		else {
 			prevproj.queuenext = proj;
 			proj.queueprev = prevproj;
 		}
@@ -455,7 +425,6 @@ void W_Crylink_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 		set_movetype(proj, MOVETYPE_BOUNCEMISSILE);
 		PROJECTILE_MAKETRIGGER(proj);
 		proj.projectiledeathtype = thiswep.m_id | HITTYPE_SECONDARY;
-		//proj.gravity = 0.001;
 
 		setorigin(proj, w_shotorg);
 		setsize(proj, '0 0 0', '0 0 0');
@@ -496,11 +465,8 @@ void W_Crylink_Attack2(Weapon thiswep, entity actor, .entity weaponentity)
 		}
 		proj.teleport_time = time + WEP_CVAR_SEC(crylink, joindelay);
 		proj.cnt = WEP_CVAR_SEC(crylink, bounces);
-		//proj.scale = 1 + 1 * proj.cnt;
 
 		proj.angles = vectoangles(proj.velocity);
-
-		//proj.glow_size = 20;
 
 		proj.flags = FL_PROJECTILE;
 		IL_PUSH(g_projectiles, proj);
@@ -528,7 +494,7 @@ METHOD(Crylink, wr_aim, void(entity thiswep, entity actor, .entity weaponentity)
 }
 METHOD(Crylink, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire))
 {
-    if(autocvar_g_balance_crylink_reload_ammo && actor.(weaponentity).clip_load < min(WEP_CVAR_PRI(crylink, ammo), WEP_CVAR_SEC(crylink, ammo))) { // forced reload
+    if(autocvar_g_balance_crylink_reload_ammo && actor.(weaponentity).clip_load < min(WEP_CVAR_PRI(crylink, ammo), WEP_CVAR_SEC(crylink, ammo))) {
         thiswep.wr_reload(thiswep, actor, weaponentity);
     }
 
@@ -556,7 +522,7 @@ METHOD(Crylink, wr_think, void(entity thiswep, entity actor, .entity weaponentit
     {
         if(!actor.(weaponentity).crylink_lastgroup || time > actor.(weaponentity).crylink_lastgroup.teleport_time)
         {
-            // fired and released now!
+
             if(actor.(weaponentity).crylink_lastgroup)
             {
                 vector pos;
@@ -576,7 +542,7 @@ METHOD(Crylink, wr_think, void(entity thiswep, entity actor, .entity weaponentit
             if(!thiswep.wr_checkammo1(thiswep, actor, weaponentity) && !thiswep.wr_checkammo2(thiswep, actor, weaponentity))
             if(!(actor.items & IT_UNLIMITED_AMMO))
             {
-                // ran out of ammo!
+
                 actor.cnt = thiswep.m_id;
                 actor.(weaponentity).m_switchweapon = w_getbestweapon(actor, weaponentity);
             }
@@ -585,7 +551,7 @@ METHOD(Crylink, wr_think, void(entity thiswep, entity actor, .entity weaponentit
 }
 METHOD(Crylink, wr_checkammo1, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    // don't "run out of ammo" and switch weapons while waiting for release
+
     if(actor.(weaponentity).crylink_lastgroup && actor.(weaponentity).crylink_waitrelease)
         return true;
 
@@ -595,7 +561,7 @@ METHOD(Crylink, wr_checkammo1, bool(entity thiswep, entity actor, .entity weapon
 }
 METHOD(Crylink, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    // don't "run out of ammo" and switch weapons while waiting for release
+
     if(actor.(weaponentity).crylink_lastgroup && actor.(weaponentity).crylink_waitrelease)
         return true;
 

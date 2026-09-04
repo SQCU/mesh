@@ -67,9 +67,6 @@ void W_Blaster_Attack(
 
 	missile.angles = vectoangles(missile.velocity);
 
-	//missile.glow_color = 250; // 244, 250
-	//missile.glow_size = 120;
-
 	settouch(missile, W_Blaster_Touch);
 	missile.flags = FL_PROJECTILE;
 	IL_PUSH(g_projectiles, missile);
@@ -115,14 +112,14 @@ METHOD(Blaster, wr_think, void(Blaster thiswep, entity actor, .entity weaponenti
     {
         switch(WEP_CVAR(blaster, secondary))
         {
-            case 0: // switch to last used weapon
+            case 0:
             {
-                if(actor.(weaponentity).m_switchweapon == WEP_BLASTER) // don't do this if already switching
+                if(actor.(weaponentity).m_switchweapon == WEP_BLASTER)
                     W_LastWeapon(actor, weaponentity);
                 break;
             }
 
-            case 1: // normal projectile secondary
+            case 1:
             {
                 if(weapon_prepareattack(thiswep, actor, weaponentity, true, WEP_CVAR_SEC(blaster, refire)))
                 {
@@ -138,12 +135,12 @@ METHOD(Blaster, wr_think, void(Blaster thiswep, entity actor, .entity weaponenti
 
 METHOD(Blaster, wr_checkammo1, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    return true; // infinite ammo
+    return true;
 }
 
 METHOD(Blaster, wr_checkammo2, bool(entity thiswep, entity actor, .entity weaponentity))
 {
-    return true; // blaster has infinite ammo
+    return true;
 }
 
 METHOD(Blaster, wr_suicidemessage, Notification(entity thiswep))

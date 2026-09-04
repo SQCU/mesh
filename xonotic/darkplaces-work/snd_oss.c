@@ -1,24 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
-
-// OSS module, used by Linux and FreeBSD
 
 #include "quakedef.h"
 
@@ -30,22 +10,12 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "snd_main.h"
 
-
 #define NB_FRAGMENTS 4
 
 static int audio_fd = -1;
 static int old_osstime = 0;
 static unsigned int osssoundtime;
 
-
-/*
-====================
-SndSys_Init
-
-Create "snd_renderbuffer" with the proper sound format if the call is successful
-May return a suggested format if the requested format isn't available
-====================
-*/
 qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 {
 	int flags, ioctl_param, prev_value;
@@ -53,7 +23,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 
 	Con_DPrint("SndSys_Init: using the OSS module\n");
 
-	// Check the requested sound format
 	if (requested->width < 1 || requested->width > 2)
 	{
 		Con_Printf("SndSys_Init: invalid sound width (%hu)\n",
@@ -68,11 +37,10 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 			else
 				suggested->width = 2;
 		}
-		
+
 		return false;
     }
 
-	// Open /dev/dsp
     audio_fd = open("/dev/dsp", O_WRONLY);
 	if (audio_fd < 0)
 	{
@@ -80,8 +48,7 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 		Con_Print("SndSys_Init: could not open /dev/dsp\n");
 		return false;
 	}
-	
-	// Use non-blocking IOs if possible
+
 	flags = fcntl(audio_fd, F_GETFL);
 	if (flags != -1)
 	{
@@ -90,8 +57,7 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	}
 	else
 		Con_Print("SndSys_Init: fcntl(F_GETFL) failed!\n");
-	
-	// Set the fragment size (up to "NB_FRAGMENTS" fragments of "fragmentsize" bytes)
+
 	fragmentsize = requested->speed * requested->channels * requested->width / 10;
 	fragmentsize = (unsigned int)ceilf((float)fragmentsize / (float)NB_FRAGMENTS);
 	fragmentsize = CeilPowerOf2(fragmentsize);
@@ -105,7 +71,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	Con_Printf ("SndSys_Init: using %u fragments of %u bytes\n",
 				ioctl_param >> 16, 1 << (ioctl_param & 0xFFFF));
 
-	// Set the sound width
 	if (requested->width == 1)
 		ioctl_param = AFMT_U8;
 	else
@@ -130,7 +95,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 		return false;
 	}
 
-	// Set the sound channels
 	ioctl_param = requested->channels;
 	if (ioctl(audio_fd, SNDCTL_DSP_CHANNELS, &ioctl_param) == -1 ||
 		ioctl_param != requested->channels)
@@ -147,7 +111,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 		return false;
 	}
 
-	// Set the sound speed
 	ioctl_param = requested->speed;
 	if (ioctl(audio_fd, SNDCTL_DSP_SPEED, &ioctl_param) == -1 ||
 		(unsigned int)ioctl_param != requested->speed)
@@ -164,7 +127,6 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 		return false;
 	}
 
-	// TOCHECK: I'm not sure which channel layout OSS uses for 5.1 and 7.1
 	if (snd_channellayout.integer == SND_CHANNELLAYOUT_AUTO)
 		Cvar_SetValueQuick (&snd_channellayout, SND_CHANNELLAYOUT_ALSA);
 
@@ -174,17 +136,9 @@ qboolean SndSys_Init (const snd_format_t* requested, snd_format_t* suggested)
 	return true;
 }
 
-
-/*
-====================
-SndSys_Shutdown
-
-Stop the sound card, delete "snd_renderbuffer" and free its other resources
-====================
-*/
 void SndSys_Shutdown (void)
 {
-	// Stop the sound and close the device
+
 	if (audio_fd >= 0)
 	{
 		ioctl(audio_fd, SNDCTL_DSP_RESET, NULL);
@@ -200,12 +154,6 @@ void SndSys_Shutdown (void)
 	}
 }
 
-
-/*
-====================
-SndSys_Write
-====================
-*/
 static int SndSys_Write (const unsigned char* buffer, unsigned int nb_bytes)
 {
 	int written;
@@ -236,19 +184,11 @@ static int SndSys_Write (const unsigned char* buffer, unsigned int nb_bytes)
 	return written;
 }
 
-
-/*
-====================
-SndSys_Submit
-
-Submit the contents of "snd_renderbuffer" to the sound card
-====================
-*/
 void SndSys_Submit (void)
 {
 	unsigned int startoffset, factor, limit, nbframes;
 	int written;
-	
+
 	if (audio_fd < 0 ||
 		snd_renderbuffer->startframe == snd_renderbuffer->endframe)
 		return;
@@ -262,7 +202,7 @@ void SndSys_Submit (void)
 		written = SndSys_Write (&snd_renderbuffer->ring[startoffset * factor], limit * factor);
 		if (written < 0 || (unsigned int)written < limit * factor)
 			return;
-		
+
 		nbframes -= limit;
 		startoffset = 0;
 	}
@@ -270,14 +210,6 @@ void SndSys_Submit (void)
 	SndSys_Write (&snd_renderbuffer->ring[startoffset * factor], nbframes * factor);
 }
 
-
-/*
-====================
-SndSys_GetSoundTime
-
-Returns the number of sample frames consumed since the sound started
-====================
-*/
 unsigned int SndSys_GetSoundTime (void)
 {
 	struct count_info count;
@@ -304,41 +236,18 @@ unsigned int SndSys_GetSoundTime (void)
 	return osssoundtime;
 }
 
-
-/*
-====================
-SndSys_LockRenderBuffer
-
-Get the exclusive lock on "snd_renderbuffer"
-====================
-*/
 qboolean SndSys_LockRenderBuffer (void)
 {
-	// Nothing to do
+
 	return true;
 }
 
-
-/*
-====================
-SndSys_UnlockRenderBuffer
-
-Release the exclusive lock on "snd_renderbuffer"
-====================
-*/
 void SndSys_UnlockRenderBuffer (void)
 {
-	// Nothing to do
+
 }
 
-/*
-====================
-SndSys_SendKeyEvents
-
-Send keyboard events originating from the sound system (e.g. MIDI)
-====================
-*/
 void SndSys_SendKeyEvents(void)
 {
-	// not supported
+
 }

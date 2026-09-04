@@ -1,22 +1,4 @@
-/*
-Copyright (C) 1996-1997 Id Software, Inc.
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
-See the GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-*/
 
 #include "quakedef.h"
 #include "image.h"
@@ -41,12 +23,9 @@ cvar_t r_font_postprocess_shadow_x = {CVAR_SAVE, "r_font_postprocess_shadow_x", 
 cvar_t r_font_postprocess_shadow_y = {CVAR_SAVE, "r_font_postprocess_shadow_y", "0", "font shadow Y shift amount, applied during outlining"};
 cvar_t r_font_postprocess_shadow_z = {CVAR_SAVE, "r_font_postprocess_shadow_z", "0", "font shadow Z shift amount, applied during blurring"};
 cvar_t r_font_hinting = {CVAR_SAVE, "r_font_hinting", "3", "0 = no hinting, 1 = light autohinting, 2 = full autohinting, 3 = full hinting"};
-cvar_t r_font_antialias = {CVAR_SAVE, "r_font_antialias", "1", "0 = monochrome, 1 = grey" /* , 2 = rgb, 3 = bgr" */};
+cvar_t r_font_antialias = {CVAR_SAVE, "r_font_antialias", "1", "0 = monochrome, 1 = grey"                          };
 cvar_t r_nearest_2d = {CVAR_SAVE, "r_nearest_2d", "0", "use nearest filtering on all 2d textures (including conchars)"};
 cvar_t r_nearest_conchars = {CVAR_SAVE, "r_nearest_conchars", "0", "use nearest filtering on conchars texture"};
-
-//=============================================================================
-/* Support Routines */
 
 #define FONT_FILESIZE 13468
 static cachepic_t *cachepichash[CACHEPICHASHSIZE];
@@ -68,7 +47,7 @@ static rtexture_t *draw_generateconchars(void)
 	rtexture_t *tex;
 
 	data = LoadTGA_BGRA (concharimage, FONT_FILESIZE, NULL);
-// Gold numbers
+
 	for (i = 0;i < 8192;i++)
 	{
 		random = lhrandom (0.0,1.0);
@@ -77,7 +56,7 @@ static rtexture_t *draw_generateconchars(void)
 		data[i*4+1] = 71 + (unsigned char)(random * 32);
 		data[i*4+0] = 23 + (unsigned char)(random * 16);
 	}
-// White chars
+
 	for (i = 8192;i < 32768;i++)
 	{
 		random = lhrandom (0.0,1.0);
@@ -86,7 +65,7 @@ static rtexture_t *draw_generateconchars(void)
 		data[i*4+1] = 95 + (unsigned char)(random * 64);
 		data[i*4+0] = 95 + (unsigned char)(random * 64);
 	}
-// Gold numbers
+
 	for (i = 32768;i < 40960;i++)
 	{
 		random = lhrandom (0.0,1.0);
@@ -95,7 +74,7 @@ static rtexture_t *draw_generateconchars(void)
 		data[i*4+1] = 71 + (unsigned char)(random * 32);
 		data[i*4+0] = 23 + (unsigned char)(random * 16);
 	}
-// Red chars
+
 	for (i = 40960;i < 65536;i++)
 	{
 		random = lhrandom (0.0,1.0);
@@ -304,12 +283,6 @@ static rtexture_t *draw_generatepic(const char *name, qboolean quiet)
 
 int draw_frame = 1;
 
-/*
-================
-Draw_CachePic
-================
-*/
-// FIXME: move this to client somehow
 cachepic_t *Draw_CachePic_Flags(const char *path, unsigned int cachepicflags)
 {
 	int crc, hashkey;
@@ -335,24 +308,23 @@ cachepic_t *Draw_CachePic_Flags(const char *path, unsigned int cachepicflags)
 	if ((cachepicflags & CACHEPICFLAG_NEAREST) || r_nearest_2d.integer)
 		texflags |= TEXF_FORCENEAREST;
 
-	// check whether the picture has already been cached
 	crc = CRC_Block((unsigned char *)path, strlen(path));
 	hashkey = ((crc >> 8) ^ crc) % CACHEPICHASHSIZE;
 	for (pic = cachepichash[hashkey];pic;pic = pic->chain)
 	{
 		if (!strcmp (path, pic->name))
 		{
-			// if it was created (or replaced) by Draw_NewPic, just return it
+
 			if(pic->flags & CACHEPICFLAG_NEWPIC)
 				return pic;
-			if (!((pic->texflags ^ texflags) & ~(TEXF_COMPRESS | TEXF_MIPMAP))) // ignore TEXF_COMPRESS when comparing, because fallback pics remove the flag, and ignore TEXF_MIPMAP because QC specifies that
+			if (!((pic->texflags ^ texflags) & ~(TEXF_COMPRESS | TEXF_MIPMAP)))
 			{
 				if(!(cachepicflags & CACHEPICFLAG_NOTPERSISTENT))
 				{
 					if(pic->tex)
-						pic->autoload = false; // persist it
+						pic->autoload = false;
 					else
-						goto reload; // load it below, and then persist
+						goto reload;
 				}
 				return pic;
 			}
@@ -362,44 +334,42 @@ cachepic_t *Draw_CachePic_Flags(const char *path, unsigned int cachepicflags)
 	if (numcachepics == MAX_CACHED_PICS)
 	{
 		Con_Printf ("Draw_CachePic: numcachepics == MAX_CACHED_PICS\n");
-		// FIXME: support NULL in callers?
-		return cachepics; // return the first one
+
+		return cachepics;
 	}
 	pic = cachepics + (numcachepics++);
 	memset(pic, 0, sizeof(*pic));
 	strlcpy (pic->name, path, sizeof(pic->name));
-	// link into list
+
 	pic->chain = cachepichash[hashkey];
 	cachepichash[hashkey] = pic;
 
 reload:
-	// TODO why does this crash?
+
 	if(pic->allow_free_tex && pic->tex)
 		R_PurgeTexture(pic->tex);
 
-	// check whether it is an dynamic texture (if so, we can directly use its texture handler)
 	pic->flags = cachepicflags;
 	pic->tex = CL_GetDynTexture( path );
-	// if so, set the width/height, too
+
 	if( pic->tex ) {
 		pic->allow_free_tex = false;
 		pic->width = R_TextureWidth(pic->tex);
 		pic->height = R_TextureHeight(pic->tex);
-		// we're done now (early-out)
+
 		return pic;
 	}
 
 	pic->allow_free_tex = true;
 
-	pic->hasalpha = true; // assume alpha unless we know it has none
+	pic->hasalpha = true;
 	pic->texflags = texflags;
 	pic->autoload = (cachepicflags & CACHEPICFLAG_NOTPERSISTENT);
 	pic->lastusedframe = draw_frame;
 
-	// load a high quality image from disk if possible
 	if (!loaded && r_texture_dds_load.integer != 0 && (pic->tex = R_LoadTextureDDSFile(drawtexturepool, va(vabuf, sizeof(vabuf), "dds/%s.dds", pic->name), vid.sRGB2D, pic->texflags, &ddshasalpha, ddsavgcolor, 0, false)))
 	{
-		// note this loads even if autoload is true, otherwise we can't get the width/height
+
 		loaded = true;
 		pic->hasalpha = ddshasalpha;
 		pic->width = R_TextureWidth(pic->tex);
@@ -435,14 +405,10 @@ reload:
 	if (!loaded)
 	{
 		pic->autoload = false;
-		// never compress the fallback images
+
 		pic->texflags &= ~TEXF_COMPRESS;
 	}
 
-	// now read the low quality version (wad or lmp file), and take the pic
-	// size from that even if we don't upload the texture, this way the pics
-	// show up the right size in the menu even if they were replaced with
-	// higher or lower resolution versions
 	dpsnprintf(lmpname, sizeof(lmpname), "%s.lmp", pic->name);
 	if ((!strncmp(pic->name, "gfx/", 4) || (gamemode == GAME_BLOODOMNICIDE && !strncmp(pic->name, "locale/", 6))) && (lmpdata = FS_LoadFile(lmpname, tempmempool, false, &lmpsize)))
 	{
@@ -453,7 +419,7 @@ reload:
 		{
 			pic->width = lmpdata[0] + lmpdata[1] * 256 + lmpdata[2] * 65536 + lmpdata[3] * 16777216;
 			pic->height = lmpdata[4] + lmpdata[5] * 256 + lmpdata[6] * 65536 + lmpdata[7] * 16777216;
-			// if no high quality replacement image was found, upload the original low quality texture
+
 			if (!loaded)
 			{
 				loaded = true;
@@ -469,10 +435,10 @@ reload:
 
 		if (!strcmp(pic->name, "gfx/conchars"))
 		{
-			// conchars is a raw image and with color 0 as transparent instead of 255
+
 			pic->width = 128;
 			pic->height = 128;
-			// if no high quality replacement image was found, upload the original low quality texture
+
 			if (!loaded)
 			{
 				loaded = true;
@@ -483,7 +449,7 @@ reload:
 		{
 			pic->width = lmpdata[0] + lmpdata[1] * 256 + lmpdata[2] * 65536 + lmpdata[3] * 16777216;
 			pic->height = lmpdata[4] + lmpdata[5] * 256 + lmpdata[6] * 65536 + lmpdata[7] * 16777216;
-			// if no high quality replacement image was found, upload the original low quality texture
+
 			if (!loaded)
 			{
 				loaded = true;
@@ -499,7 +465,7 @@ reload:
 	}
 	if (!loaded)
 	{
-		// if it's not found on disk, generate an image
+
 		pic->tex = draw_generatepic(pic->name, (cachepicflags & CACHEPICFLAG_QUIET) != 0);
 		pic->width = R_TextureWidth(pic->tex);
 		pic->height = R_TextureHeight(pic->tex);
@@ -511,7 +477,7 @@ reload:
 
 cachepic_t *Draw_CachePic (const char *path)
 {
-	return Draw_CachePic_Flags (path, 0); // default to persistent!
+	return Draw_CachePic_Flags (path, 0);
 }
 
 rtexture_t *Draw_GetPicTexture(cachepic_t *pic)
@@ -591,18 +557,18 @@ cachepic_t *Draw_NewPic(const char *picname, int width, int height, int alpha, u
 		if (numcachepics == MAX_CACHED_PICS)
 		{
 			Con_Printf ("Draw_NewPic: numcachepics == MAX_CACHED_PICS\n");
-			// FIXME: support NULL in callers?
-			return cachepics; // return the first one
+
+			return cachepics;
 		}
 		pic = cachepics + (numcachepics++);
 		memset(pic, 0, sizeof(*pic));
 		strlcpy (pic->name, picname, sizeof(pic->name));
-		// link into list
+
 		pic->chain = cachepichash[hashkey];
 		cachepichash[hashkey] = pic;
 	}
 
-	pic->flags = CACHEPICFLAG_NEWPIC; // disable texflags checks in Draw_CachePic
+	pic->flags = CACHEPICFLAG_NEWPIC;
 	pic->width = width;
 	pic->height = height;
 	if (pic->allow_free_tex && pic->tex)
@@ -616,7 +582,7 @@ void Draw_FreePic(const char *picname)
 	int crc;
 	int hashkey;
 	cachepic_t *pic;
-	// this doesn't really free the pic, but does free it's texture
+
 	crc = CRC_Block((unsigned char *)picname, strlen(picname));
 	hashkey = ((crc >> 8) ^ crc) % CACHEPICHASHSIZE;
 	for (pic = cachepichash[hashkey];pic;pic = pic->chain)
@@ -633,7 +599,7 @@ void Draw_FreePic(const char *picname)
 }
 
 static float snap_to_pixel_x(float x, float roundUpAt);
-extern int con_linewidth; // to force rewrapping
+extern int con_linewidth;
 void LoadFont(qboolean override, const char *name, dp_font_t *fnt, float scale, float voffset)
 {
 	int i, ch;
@@ -645,7 +611,7 @@ void LoadFont(qboolean override, const char *name, dp_font_t *fnt, float scale, 
 	if(override || !fnt->texpath[0])
 	{
 		strlcpy(fnt->texpath, name, sizeof(fnt->texpath));
-		// load the cvars when the font is FIRST loader
+
 		fnt->settings.scale = scale;
 		fnt->settings.voffset = voffset;
 		fnt->settings.antialias = r_font_antialias.integer;
@@ -656,16 +622,16 @@ void LoadFont(qboolean override, const char *name, dp_font_t *fnt, float scale, 
 		fnt->settings.shadowy = r_font_postprocess_shadow_y.value;
 		fnt->settings.shadowz = r_font_postprocess_shadow_z.value;
 	}
-	// fix bad scale
+
 	if (fnt->settings.scale <= 0)
 		fnt->settings.scale = 1;
 
 	if(drawtexturepool == NULL)
-		return; // before gl_draw_start, so will be loaded later
+		return;
 
 	if(fnt->ft2)
 	{
-		// clear freetype font
+
 		Font_UnloadFont(fnt->ft2);
 		Mem_Free(fnt->ft2);
 		fnt->ft2 = NULL;
@@ -699,11 +665,9 @@ void LoadFont(qboolean override, const char *name, dp_font_t *fnt, float scale, 
 	else
 		dpsnprintf(widthfile, sizeof(widthfile), "%s.width", fnt->texpath);
 
-	// unspecified width == 1 (base width)
 	for(ch = 0; ch < 256; ++ch)
 		fnt->width_of[ch] = 1;
 
-	// FIXME load "name.width", if it fails, fill all with 1
 	if((widthbuf = (char *) FS_LoadFile(widthfile, tempmempool, true, &widthbufsize)))
 	{
 		float extraspacing = 0;
@@ -776,11 +740,10 @@ void LoadFont(qboolean override, const char *name, dp_font_t *fnt, float scale, 
 		maxwidth = max(maxwidth, fnt->width_of[i]);
 	fnt->maxwidth = maxwidth;
 
-	// fix up maxwidth for overlap
 	fnt->maxwidth *= fnt->settings.scale;
 
 	if(fnt == FONT_CONSOLE)
-		con_linewidth = -1; // rewrap console in next frame
+		con_linewidth = -1;
 }
 
 extern cvar_t developer_font;
@@ -788,14 +751,13 @@ dp_font_t *FindFont(const char *title, qboolean allocate_new)
 {
 	int i, oldsize;
 
-	// find font
 	for(i = 0; i < dp_fonts.maxsize; ++i)
 		if(!strcmp(dp_fonts.f[i].title, title))
 			return &dp_fonts.f[i];
-	// if not found - try allocate
+
 	if (allocate_new)
 	{
-		// find any font with empty title
+
 		for(i = 0; i < dp_fonts.maxsize; ++i)
 		{
 			if(!strcmp(dp_fonts.f[i].title, ""))
@@ -804,17 +766,17 @@ dp_font_t *FindFont(const char *title, qboolean allocate_new)
 				return &dp_fonts.f[i];
 			}
 		}
-		// if no any 'free' fonts - expand buffer
+
 		oldsize = dp_fonts.maxsize;
 		dp_fonts.maxsize = dp_fonts.maxsize + FONTS_EXPAND;
 		if (developer_font.integer)
 			Con_Printf("FindFont: enlarging fonts buffer (%i -> %i)\n", oldsize, dp_fonts.maxsize);
 		dp_fonts.f = (dp_font_t *)Mem_Realloc(fonts_mempool, dp_fonts.f, sizeof(dp_font_t) * dp_fonts.maxsize);
-		// relink ft2 structures
+
 		for(i = 0; i < oldsize; ++i)
 			if (dp_fonts.f[i].ft2)
 				dp_fonts.f[i].ft2->settings = &dp_fonts.f[i].settings;
-		// register a font in first expanded slot
+
 		strlcpy(dp_fonts.f[oldsize].title, title, sizeof(dp_fonts.f[oldsize].title));
 		return &dp_fonts.f[oldsize];
 	}
@@ -827,11 +789,7 @@ static float snap_to_pixel_x(float x, float roundUpAt)
 	int snap = (int) pixelpos;
 	if (pixelpos - snap >= roundUpAt) ++snap;
 	return ((float)snap * vid_conwidth.value / vid.width);
-	/*
-	x = (int)(x * vid.width / vid_conwidth.value);
-	x = (x * vid_conwidth.value / vid.width);
-	return x;
-	*/
+
 }
 
 static float snap_to_pixel_y(float y, float roundUpAt)
@@ -840,11 +798,7 @@ static float snap_to_pixel_y(float y, float roundUpAt)
 	int snap = (int) pixelpos;
 	if (pixelpos - snap > roundUpAt) ++snap;
 	return ((float)snap * vid_conheight.value / vid.height);
-	/*
-	y = (int)(y * vid.height / vid_conheight.value);
-	y = (y * vid_conheight.value / vid.height);
-	return y;
-	*/
+
 }
 
 static void LoadFont_f(void)
@@ -890,7 +844,6 @@ static void LoadFont_f(void)
 	memset(f->fallbacks, 0, sizeof(f->fallbacks));
 	memset(f->fallback_faces, 0, sizeof(f->fallback_faces));
 
-	// first font is handled "normally"
 	c = strchr(filelist, ':');
 	cm = strchr(filelist, ',');
 	if(c && (!cm || c < cm))
@@ -923,7 +876,7 @@ static void LoadFont_f(void)
 			f->fallback_faces[i] = atoi(c+1);
 		else
 		{
-			f->fallback_faces[i] = 0; // f->req_face; could make it stick to the default-font's face index
+			f->fallback_faces[i] = 0;
 			c = cm;
 		}
 		if(!c || (c-filelist) > MAX_QPATH)
@@ -937,7 +890,6 @@ static void LoadFont_f(void)
 		}
 	}
 
-	// for now: by default load only one size: the default size
 	f->req_sizes[0] = 0;
 	for(i = 1; i < MAX_FONT_SIZES; ++i)
 		f->req_sizes[i] = -1;
@@ -948,7 +900,7 @@ static void LoadFont_f(void)
 	{
 		for(sizes = 0, i = 3; i < Cmd_Argc(); ++i)
 		{
-			// special switches
+
 			if (!strcmp(Cmd_Argv(i), "scale"))
 			{
 				i++;
@@ -965,19 +917,18 @@ static void LoadFont_f(void)
 			}
 
 			if (sizes == -1)
-				continue; // no slot for other sizes
+				continue;
 
-			// parse one of sizes
 			sz = atof(Cmd_Argv(i));
-			if (sz > 0.001f && sz < 1000.0f) // do not use crap sizes
+			if (sz > 0.001f && sz < 1000.0f)
 			{
-				// search for duplicated sizes
+
 				int j;
 				for (j=0; j<sizes; j++)
 					if (f->req_sizes[j] == sz)
 						break;
 				if (j != sizes)
-					continue; // sz already in req_sizes, don't add it again
+					continue;
 
 				if (sizes == MAX_FONT_SIZES)
 				{
@@ -994,11 +945,6 @@ static void LoadFont_f(void)
 	LoadFont(true, mainfont, f, scale, voffset);
 }
 
-/*
-===============
-Draw_Init
-===============
-*/
 static void gl_draw_start(void)
 {
 	int i;
@@ -1010,12 +956,10 @@ static void gl_draw_start(void)
 
 	font_start();
 
-	// load default font textures
 	for(i = 0; i < dp_fonts.maxsize; ++i)
 		if (dp_fonts.f[i].title[0])
 			LoadFont(false, va(vabuf, sizeof(vabuf), "gfx/font_%s", dp_fonts.f[i].title), &dp_fonts.f[i], 1, 0);
 
-	// draw the loading screen so people have something to see in the newly opened window
 	SCR_UpdateLoadingScreen(true, true);
 }
 
@@ -1051,13 +995,11 @@ void GL_Draw_Init (void)
 	Cvar_RegisterVariable(&r_nearest_2d);
 	Cvar_RegisterVariable(&r_nearest_conchars);
 
-	// allocate fonts storage
 	fonts_mempool = Mem_AllocPool("FONTS", 0, NULL);
 	dp_fonts.maxsize = MAX_FONTS;
 	dp_fonts.f = (dp_font_t *)Mem_Alloc(fonts_mempool, sizeof(dp_font_t) * dp_fonts.maxsize);
 	memset(dp_fonts.f, 0, sizeof(dp_font_t) * dp_fonts.maxsize);
 
-	// assign starting font names
 	strlcpy(FONT_DEFAULT->title, "default", sizeof(FONT_DEFAULT->title));
 	strlcpy(FONT_DEFAULT->texpath, "gfx/conchars", sizeof(FONT_DEFAULT->texpath));
 	strlcpy(FONT_CONSOLE->title, "console", sizeof(FONT_CONSOLE->title));
@@ -1075,7 +1017,7 @@ void GL_Draw_Init (void)
 	R_RegisterModule("GL_Draw", gl_draw_start, gl_draw_shutdown, gl_draw_newmap, NULL, NULL);
 }
 
-static void _DrawQ_Setup(void) // see R_ResetViewRendering2D
+static void _DrawQ_Setup(void)
 {
 	if (r_refdef.draw2dstage == 1)
 		return;
@@ -1134,7 +1076,6 @@ void DrawQ_Pic(float x, float y, cachepic_t *pic, float width, float height, flo
 	if(!r_draw2d.integer && !r_draw2d_force)
 		return;
 
-//	R_Mesh_ResetTextureState();
 	floats[12] = 0.0f;floats[13] = 0.0f;
 	floats[14] = 1.0f;floats[15] = 0.0f;
 	floats[16] = 1.0f;floats[17] = 1.0f;
@@ -1152,7 +1093,7 @@ void DrawQ_Pic(float x, float y, cachepic_t *pic, float width, float height, flo
 		R_SetupShader_Generic(Draw_GetPicTexture(pic), NULL, GL_MODULATE, 1, (flags & DRAWFLAGS_BLEND) ? false : true, true, false);
 
 #if 0
-      // AK07: lets be texel correct on the corners
+
       {
          float horz_offset = 0.5f / pic->width;
          float vert_offset = 0.5f / pic->height;
@@ -1180,8 +1121,8 @@ void DrawQ_Pic(float x, float y, cachepic_t *pic, float width, float height, flo
 void DrawQ_RotPic(float x, float y, cachepic_t *pic, float width, float height, float org_x, float org_y, float angle, float red, float green, float blue, float alpha, int flags)
 {
 	float floats[36];
-	float af = DEG2RAD(-angle); // forward
-	float ar = DEG2RAD(-angle + 90); // right
+	float af = DEG2RAD(-angle);
+	float ar = DEG2RAD(-angle + 90);
 	float sinaf = sin(af);
 	float cosaf = cos(af);
 	float sinar = sin(ar);
@@ -1191,7 +1132,6 @@ void DrawQ_RotPic(float x, float y, cachepic_t *pic, float width, float height, 
 	if(!r_draw2d.integer && !r_draw2d_force)
 		return;
 
-//	R_Mesh_ResetTextureState();
 	if (pic)
 	{
 		if (width == 0)
@@ -1205,19 +1145,15 @@ void DrawQ_RotPic(float x, float y, cachepic_t *pic, float width, float height, 
 
 	floats[2] = floats[5] = floats[8] = floats[11] = 0;
 
-// top left
 	floats[0] = x - cosaf*org_x - cosar*org_y;
 	floats[1] = y - sinaf*org_x - sinar*org_y;
 
-// top right
 	floats[3] = x + cosaf*(width-org_x) - cosar*org_y;
 	floats[4] = y + sinaf*(width-org_x) - sinar*org_y;
 
-// bottom right
 	floats[6] = x + cosaf*(width-org_x) + cosar*(height-org_y);
 	floats[7] = y + sinaf*(width-org_x) + sinar*(height-org_y);
 
-// bottom left
 	floats[9]  = x - cosaf*org_x + cosar*(height-org_y);
 	floats[10] = y - sinaf*org_x + sinar*(height-org_y);
 
@@ -1242,7 +1178,6 @@ void DrawQ_Fill(float x, float y, float width, float height, float red, float gr
 	if(!r_draw2d.integer && !r_draw2d_force)
 		return;
 
-//	R_Mesh_ResetTextureState();
 	R_SetupShader_Generic_NoTexture((flags & DRAWFLAGS_BLEND) ? false : true, true);
 
 	floats[2] = floats[5] = floats[8] = floats[11] = 0;
@@ -1263,32 +1198,21 @@ void DrawQ_Fill(float x, float y, float width, float height, float red, float gr
 	R_Mesh_Draw(0, 4, 0, 2, polygonelement3i, NULL, 0, polygonelement3s, NULL, 0);
 }
 
-/// color tag printing
 static const vec4_t string_colors[] =
 {
-	// Quake3 colors
-	// LordHavoc: why on earth is cyan before magenta in Quake3?
-	// LordHavoc: note: Doom3 uses white for [0] and [7]
-	{0.0, 0.0, 0.0, 1.0}, // black
-	{1.0, 0.0, 0.0, 1.0}, // red
-	{0.0, 1.0, 0.0, 1.0}, // green
-	{1.0, 1.0, 0.0, 1.0}, // yellow
-	{0.0, 0.0, 1.0, 1.0}, // blue
-	{0.0, 1.0, 1.0, 1.0}, // cyan
-	{1.0, 0.0, 1.0, 1.0}, // magenta
-	{1.0, 1.0, 1.0, 1.0}, // white
-	// [515]'s BX_COLOREDTEXT extension
-	{1.0, 1.0, 1.0, 0.5}, // half transparent
-	{0.5, 0.5, 0.5, 1.0}  // half brightness
-	// Black's color table
-	//{1.0, 1.0, 1.0, 1.0},
-	//{1.0, 0.0, 0.0, 1.0},
-	//{0.0, 1.0, 0.0, 1.0},
-	//{0.0, 0.0, 1.0, 1.0},
-	//{1.0, 1.0, 0.0, 1.0},
-	//{0.0, 1.0, 1.0, 1.0},
-	//{1.0, 0.0, 1.0, 1.0},
-	//{0.1, 0.1, 0.1, 1.0}
+
+	{0.0, 0.0, 0.0, 1.0},
+	{1.0, 0.0, 0.0, 1.0},
+	{0.0, 1.0, 0.0, 1.0},
+	{1.0, 1.0, 0.0, 1.0},
+	{0.0, 0.0, 1.0, 1.0},
+	{0.0, 1.0, 1.0, 1.0},
+	{1.0, 0.0, 1.0, 1.0},
+	{1.0, 1.0, 1.0, 1.0},
+
+	{1.0, 1.0, 1.0, 0.5},
+	{0.5, 0.5, 0.5, 1.0}
+
 };
 
 #define STRING_COLORS_COUNT	(sizeof(string_colors) / sizeof(vec4_t))
@@ -1297,7 +1221,7 @@ static void DrawQ_GetTextColor(float color[4], int colorindex, float r, float g,
 {
 	float C = r_textcontrast.value;
 	float B = r_textbrightness.value;
-	if (colorindex & 0x10000) // that bit means RGB color
+	if (colorindex & 0x10000)
 	{
 		color[0] = ((colorindex >> 12) & 0xf) / 15.0;
 		color[1] = ((colorindex >> 8) & 0xf) / 15.0;
@@ -1314,7 +1238,6 @@ static void DrawQ_GetTextColor(float color[4], int colorindex, float r, float g,
 	}
 }
 
-// NOTE: this function always draws exactly one character if maxwidth <= 0
 float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *maxlen, float w, float h, float sw, float sh, int *outcolor, qboolean ignorecolorcodes, const dp_font_t *fnt, float maxwidth)
 {
 	const char *text_start = text;
@@ -1322,20 +1245,20 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 	size_t i;
 	float x = 0;
 	Uchar ch, mapch, nextch;
-	Uchar prevch = 0; // used for kerning
+	Uchar prevch = 0;
 	int tempcolorindex;
 	float kx;
 	int map_index = 0;
 	size_t bytes_left;
 	ft2_font_map_t *fontmap = NULL;
 	ft2_font_map_t *map = NULL;
-	//ft2_font_map_t *prevmap = NULL;
+
 	ft2_font_t *ft2 = fnt->ft2;
-	// float ftbase_x;
+
 	qboolean snap = true;
 	qboolean least_one = false;
-	float dw; // display w
-	//float dh; // display h
+	float dw;
+
 	const float *width_of;
 
 	if (!h) h = w;
@@ -1343,11 +1266,10 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 		w = h = 1;
 		snap = false;
 	}
-	// do this in the end
+
 	w *= fnt->settings.scale;
 	h *= fnt->settings.scale;
 
-	// find the most fitting size:
 	if (ft2 != NULL)
 	{
 		if (snap)
@@ -1358,7 +1280,6 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 	}
 
 	dw = w * sw;
-	//dh = h * sh;
 
 	if (*maxlen < 1)
 		*maxlen = 1<<30;
@@ -1368,17 +1289,11 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 	else
 		colorindex = *outcolor;
 
-	// maxwidth /= fnt->scale; // w and h are multiplied by it already
-	// ftbase_x = snap_to_pixel_x(0);
-	
 	if(maxwidth <= 0)
 	{
 		least_one = true;
 		maxwidth = -maxwidth;
 	}
-
-	//if (snap)
-	//	x = snap_to_pixel_x(x, 0.4); // haha, it's 0 anyway
 
 	if (fontmap)
 		width_of = fontmap->width_of;
@@ -1395,34 +1310,32 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 			break;
 		if (ch == ' ' && !fontmap)
 		{
-			if(!least_one || i0) // never skip the first character
+			if(!least_one || i0)
 			if(x + width_of[(int) ' '] * dw > maxwidth)
 			{
 				i = i0;
-				break; // oops, can't draw this
+				break;
 			}
 			x += width_of[(int) ' '] * dw;
 			continue;
 		}
-		// i points to the char after ^
+
 		if (ch == STRING_COLOR_TAG && !ignorecolorcodes && i < *maxlen)
 		{
-			ch = *text; // colors are ascii, so no u8_ needed
-			if (ch <= '9' && ch >= '0') // ^[0-9] found
+			ch = *text;
+			if (ch <= '9' && ch >= '0')
 			{
 				colorindex = ch - '0';
 				++text;
 				++i;
 				continue;
 			}
-			// i points to the char after ^...
-			// i+3 points to 3 in ^x123
-			// i+3 == *maxlen would mean that char is missing
-			else if (ch == STRING_COLOR_RGB_TAG_CHAR && i + 3 < *maxlen ) // ^x found
+
+			else if (ch == STRING_COLOR_RGB_TAG_CHAR && i + 3 < *maxlen )
 			{
-				// building colorindex...
+
 				ch = tolower(text[1]);
-				tempcolorindex = 0x10000; // binary: 1,0000,0000,0000,0000
+				tempcolorindex = 0x10000;
 				if (ch <= '9' && ch >= '0') tempcolorindex |= (ch - '0') << 12;
 				else if (ch >= 'a' && ch <= 'f') tempcolorindex |= (ch - 87) << 12;
 				else tempcolorindex = 0;
@@ -1441,7 +1354,7 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 						if (tempcolorindex)
 						{
 							colorindex = tempcolorindex | 0xf;
-							// ...done! now colorindex has rgba codes (1,rrrr,gggg,bbbb,aaaa)
+
 							i+=4;
 							text += 4;
 							continue;
@@ -1449,7 +1362,7 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 					}
 				}
 			}
-			else if (ch == STRING_COLOR_TAG) // ^^ found, ignore the first ^ and go to print the second
+			else if (ch == STRING_COLOR_TAG)
 			{
 				i++;
 				text++;
@@ -1467,11 +1380,11 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 			if (fontmap)
 				map = ft2_oldstyle_map;
 			prevch = 0;
-			if(!least_one || i0) // never skip the first character
+			if(!least_one || i0)
 			if(x + width_of[ch] * dw > maxwidth)
 			{
 				i = i0;
-				break; // oops, can't draw this
+				break;
 			}
 			x += width_of[ch] * dw;
 		} else {
@@ -1490,7 +1403,7 @@ float DrawQ_TextWidth_UntilWidth_TrackColors_Scale(const char *text, size_t *max
 			if (prevch && Font_GetKerningForMap(ft2, map_index, w, h, prevch, ch, &kx, NULL))
 				x += kx * dw;
 			x += map->glyphs[mapch].advance_x * dw;
-			//prevmap = map;
+
 			prevch = ch;
 		}
 	}
@@ -1515,12 +1428,12 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 	static float texcoord2f[QUADELEMENTS_MAXQUADS*4*2];
 	static float color4f[QUADELEMENTS_MAXQUADS*4*4];
 	Uchar ch, mapch, nextch;
-	Uchar prevch = 0; // used for kerning
+	Uchar prevch = 0;
 	int tempcolorindex;
 	int map_index = 0;
-	//ft2_font_map_t *prevmap = NULL; // the previous map
-	ft2_font_map_t *map = NULL;     // the currently used map
-	ft2_font_map_t *fontmap = NULL; // the font map for the size
+
+	ft2_font_map_t *map = NULL;
+	ft2_font_map_t *fontmap = NULL;
 	float ftbase_y;
 	const char *text_start = text;
 	float kx, ky;
@@ -1541,7 +1454,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 		snap = false;
 	}
 
-	starty -= (fnt->settings.scale - 1) * h * 0.5 - fnt->settings.voffset*h; // center & offset
+	starty -= (fnt->settings.scale - 1) * h * 0.5 - fnt->settings.voffset*h;
 	w *= fnt->settings.scale;
 	h *= fnt->settings.scale;
 
@@ -1557,8 +1470,6 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 	dw = w * sw;
 	dh = h * sh;
 
-	// draw the font at its baseline when using freetype
-	//ftbase_x = 0;
 	ftbase_y = dh * (4.5/6.0);
 
 	if (maxlen < 1)
@@ -1568,7 +1479,6 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 	if(!r_draw2d.integer && !r_draw2d_force)
 		return startx + DrawQ_TextWidth_UntilWidth_TrackColors_Scale(text, &maxlen, w, h, sw, sh, NULL, ignorecolorcodes, fnt, 1000000000);
 
-//	R_Mesh_ResetTextureState();
 	if (!fontmap)
 		R_Mesh_TexBind(0, fnt->tex);
 	R_SetupShader_Generic(fnt->tex, NULL, GL_MODULATE, 1, (flags & DRAWFLAGS_BLEND) ? false : true, true, false);
@@ -1578,7 +1488,6 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 	av = vertex3f;
 	batchcount = 0;
 
-	//ftbase_x = snap_to_pixel_x(ftbase_x);
 	if(snap)
 	{
 		startx = snap_to_pixel_x(startx, 0.4);
@@ -1608,13 +1517,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 
 		x = startx;
 		y = starty;
-		/*
-		if (shadow)
-		{
-			x += r_textshadow.value * vid.width / vid_conwidth.value;
-			y += r_textshadow.value * vid.height / vid_conheight.value;
-		}
-		*/
+
 		while (((bytes_left = maxlen - (text - text_start)) > 0) && *text)
 		{
 			nextch = ch = u8_getnchar(text, &text, bytes_left);
@@ -1628,8 +1531,8 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 			}
 			if (ch == STRING_COLOR_TAG && !ignorecolorcodes && i < maxlen)
 			{
-				ch = *text; // colors are ascii, so no u8_ needed
-				if (ch <= '9' && ch >= '0') // ^[0-9] found
+				ch = *text;
+				if (ch <= '9' && ch >= '0')
 				{
 					colorindex = ch - '0';
 					DrawQ_GetTextColor(DrawQ_Color, colorindex, basered, basegreen, baseblue, basealpha, shadow != 0);
@@ -1637,11 +1540,11 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 					++i;
 					continue;
 				}
-				else if (ch == STRING_COLOR_RGB_TAG_CHAR && i+3 < maxlen ) // ^x found
+				else if (ch == STRING_COLOR_RGB_TAG_CHAR && i+3 < maxlen )
 				{
-					// building colorindex...
+
 					ch = tolower(text[1]);
-					tempcolorindex = 0x10000; // binary: 1,0000,0000,0000,0000
+					tempcolorindex = 0x10000;
 					if (ch <= '9' && ch >= '0') tempcolorindex |= (ch - '0') << 12;
 					else if (ch >= 'a' && ch <= 'f') tempcolorindex |= (ch - 87) << 12;
 					else tempcolorindex = 0;
@@ -1660,8 +1563,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 							if (tempcolorindex)
 							{
 								colorindex = tempcolorindex | 0xf;
-								// ...done! now colorindex has rgba codes (1,rrrr,gggg,bbbb,aaaa)
-								//Con_Printf("^1colorindex:^7 %x\n", colorindex);
+
 								DrawQ_GetTextColor(DrawQ_Color, colorindex, basered, basegreen, baseblue, basealpha, shadow != 0);
 								i+=4;
 								text+=4;
@@ -1677,11 +1579,9 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 				}
 				i--;
 			}
-			// get the backup
+
 			ch = nextch;
-			// using a value of -1 for the oldstyle map because NULL means uninitialized...
-			// this way we don't need to rebind fnt->tex for every old-style character
-			// E000..E0FF: emulate old-font characters (to still have smileys and such available)
+
 			if (shadow)
 			{
 				x += 1.0/pix_x * r_textshadow.value;
@@ -1699,7 +1599,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 					{
 						if (batchcount)
 						{
-							// switching from freetype to non-freetype rendering
+
 							R_Mesh_PrepareVertices_Generic_Arrays(batchcount * 4, vertex3f, color4f, texcoord2f);
 							R_Mesh_Draw(0, batchcount * 4, 0, batchcount * 2, quadelement3i, NULL, 0, quadelement3s, NULL, 0);
 							batchcount = 0;
@@ -1712,10 +1612,9 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 					}
 				}
 				prevch = 0;
-				//num = (unsigned char) text[i];
-				//thisw = fnt->width_of[num];
+
 				thisw = fnt->width_of[ch];
-				// FIXME make these smaller to just include the occupied part of the character for slightly faster rendering
+
 				if (r_nearest_conchars.integer)
 				{
 					s = (ch & 15)*0.0625f;
@@ -1759,10 +1658,10 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 			} else {
 				if (!map || map == ft2_oldstyle_map || ch < map->start || ch >= map->start + FONT_CHARS_PER_MAP)
 				{
-					// new charmap - need to render
+
 					if (batchcount)
 					{
-						// we need a different character map, render what we currently have:
+
 						R_Mesh_PrepareVertices_Generic_Arrays(batchcount * 4, vertex3f, color4f, texcoord2f);
 						R_Mesh_Draw(0, batchcount * 4, 0, batchcount * 2, quadelement3i, NULL, 0, quadelement3s, NULL, 0);
 						batchcount = 0;
@@ -1770,7 +1669,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 						at = texcoord2f;
 						av = vertex3f;
 					}
-					// find the new map
+
 					map = FontMap_FindForChar(fontmap, ch);
 					if (!map)
 					{
@@ -1781,7 +1680,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 						}
 						if (!map)
 						{
-							// this shouldn't happen
+
 							shadow = -1;
 							break;
 						}
@@ -1792,7 +1691,6 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 				mapch = ch - map->start;
 				thisw = map->glyphs[mapch].advance_x;
 
-				//x += ftbase_x;
 				y += ftbase_y;
 				if (prevch && Font_GetKerningForMap(ft2, map_index, w, h, prevch, ch, &kx, &ky))
 				{
@@ -1813,7 +1711,7 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 				av[ 3] = x + dw * map->glyphs[mapch].vxmax; av[ 4] = y + dh * map->glyphs[mapch].vymin; av[ 5] = 10;
 				av[ 6] = x + dw * map->glyphs[mapch].vxmax; av[ 7] = y + dh * map->glyphs[mapch].vymax; av[ 8] = 10;
 				av[ 9] = x + dw * map->glyphs[mapch].vxmin; av[10] = y + dh * map->glyphs[mapch].vymax; av[11] = 10;
-				//x -= ftbase_x;
+
 				y -= ftbase_y;
 
 				x += thisw * dw;
@@ -1831,7 +1729,6 @@ float DrawQ_String_Scale(float startx, float starty, const char *text, size_t ma
 					av = vertex3f;
 				}
 
-				//prevmap = map;
 				prevch = ch;
 			}
 out:
@@ -1850,8 +1747,7 @@ out:
 
 	if (outcolor)
 		*outcolor = colorindex;
-	
-	// note: this relies on the proper text (not shadow) being drawn last
+
 	return x;
 }
 
@@ -1876,8 +1772,7 @@ float DrawQ_TextWidth_UntilWidth(const char *text, size_t *maxlen, float w, floa
 }
 
 #if 0
-// not used
-// no ^xrgb management
+
 static int DrawQ_BuildColoredText(char *output2c, size_t maxoutchars, const char *text, int maxreadchars, qboolean ignorecolorcodes, int *outcolor)
 {
 	int color, numchars = 0;
@@ -1923,7 +1818,6 @@ void DrawQ_SuperPic(float x, float y, cachepic_t *pic, float width, float height
 	if(!r_draw2d.integer && !r_draw2d_force)
 		return;
 
-//	R_Mesh_ResetTextureState();
 	if (pic)
 	{
 		if (width == 0)
@@ -1960,7 +1854,6 @@ void DrawQ_Mesh (drawqueuemesh_t *mesh, int flags, qboolean hasalpha)
 		return;
 	DrawQ_ProcessDrawFlag(flags, hasalpha);
 
-//	R_Mesh_ResetTextureState();
 	R_SetupShader_Generic(mesh->texture, NULL, GL_MODULATE, 1, (flags & DRAWFLAGS_BLEND) ? false : true, true, false);
 
 	R_Mesh_PrepareVertices_Generic_Arrays(mesh->num_vertices, mesh->data_vertex3f, mesh->data_color4f, mesh->data_texcoord2f);
@@ -1996,7 +1889,7 @@ void DrawQ_LineLoop (drawqueuemesh_t *mesh, int flags)
 #endif
 		break;
 	case RENDERPATH_D3D9:
-		//Con_DPrintf("FIXME D3D9 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_D3D10:
 		Con_DPrintf("FIXME D3D10 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
@@ -2005,16 +1898,15 @@ void DrawQ_LineLoop (drawqueuemesh_t *mesh, int flags)
 		Con_DPrintf("FIXME D3D11 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 		break;
 	case RENDERPATH_SOFT:
-		//Con_DPrintf("FIXME SOFT %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		//Con_DPrintf("FIXME GLES2 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		return;
 	}
 }
 
-//[515]: this is old, delete
 void DrawQ_Line (float width, float x1, float y1, float x2, float y2, float r, float g, float b, float alpha, int flags)
 {
 	_DrawQ_SetupAndProcessDrawFlag(flags, NULL, alpha);
@@ -2031,8 +1923,6 @@ void DrawQ_Line (float width, float x1, float y1, float x2, float y2, float r, f
 #ifndef USE_GLES2
 		CHECKGLERROR
 
-		//qglLineWidth(width);CHECKGLERROR
-
 		GL_Color(r,g,b,alpha);
 		CHECKGLERROR
 		qglBegin(GL_LINES);
@@ -2043,7 +1933,7 @@ void DrawQ_Line (float width, float x1, float y1, float x2, float y2, float r, f
 #endif
 		break;
 	case RENDERPATH_D3D9:
-		//Con_DPrintf("FIXME D3D9 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_D3D10:
 		Con_DPrintf("FIXME D3D10 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
@@ -2052,11 +1942,11 @@ void DrawQ_Line (float width, float x1, float y1, float x2, float y2, float r, f
 		Con_DPrintf("FIXME D3D11 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 		break;
 	case RENDERPATH_SOFT:
-		//Con_DPrintf("FIXME SOFT %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		//Con_DPrintf("FIXME GLES2 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		return;
 	}
 }
@@ -2077,14 +1967,12 @@ void DrawQ_Lines (float width, int numlines, int flags, qboolean hasalpha)
 
 		R_SetupShader_Generic_NoTexture((flags & DRAWFLAGS_BLEND) ? false : true, true);
 
-		//qglLineWidth(width);CHECKGLERROR
-
 		CHECKGLERROR
 		qglDrawArrays(GL_LINES, 0, numlines*2);
 		CHECKGLERROR
 		break;
 	case RENDERPATH_D3D9:
-		//Con_DPrintf("FIXME D3D9 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_D3D10:
 		Con_DPrintf("FIXME D3D10 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
@@ -2093,11 +1981,11 @@ void DrawQ_Lines (float width, int numlines, int flags, qboolean hasalpha)
 		Con_DPrintf("FIXME D3D11 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
 		break;
 	case RENDERPATH_SOFT:
-		//Con_DPrintf("FIXME SOFT %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		break;
 	case RENDERPATH_GLES1:
 	case RENDERPATH_GLES2:
-		//Con_DPrintf("FIXME GLES2 %s:%i %s\n", __FILE__, __LINE__, __FUNCTION__);
+
 		return;
 	}
 }
@@ -2107,8 +1995,6 @@ void DrawQ_SetClipArea(float x, float y, float width, float height)
 	int ix, iy, iw, ih;
 	_DrawQ_Setup();
 
-	// We have to convert the con coords into real coords
-	// OGL uses top to bottom
 	ix = (int)(0.5 + x * ((float)r_refdef.view.width / vid_conwidth.integer)) + r_refdef.view.x;
 	iy = (int)(0.5 + y * ((float)r_refdef.view.height / vid_conheight.integer)) + r_refdef.view.y;
 	iw = (int)(0.5 + width * ((float)r_refdef.view.width / vid_conwidth.integer));
@@ -2151,6 +2037,5 @@ void DrawQ_Finish(void)
 void DrawQ_RecalcView(void)
 {
 	if(r_refdef.draw2dstage)
-		r_refdef.draw2dstage = -1; // next draw call will set viewport etc. again
+		r_refdef.draw2dstage = -1;
 }
-

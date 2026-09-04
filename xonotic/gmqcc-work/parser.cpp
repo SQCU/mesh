@@ -40,7 +40,6 @@ static inline void parseerror(parser_t *parser, const char *fmt, const Ts&... ts
     return parseerror_(parser, fmt, formatNormalize(ts)...);
 }
 
-// returns true if it counts as an error
 static bool GMQCC_WARN parsewarning_(parser_t *parser, int warntype, const char *fmt, ...)
 {
     bool    r;
@@ -56,13 +55,9 @@ static inline bool GMQCC_WARN parsewarning(parser_t *parser, int warntype, const
     return parsewarning_(parser, warntype, fmt, formatNormalize(ts)...);
 }
 
-/**********************************************************************
- * parsing
- */
-
 static bool parser_next(parser_t *parser)
 {
-    /* lex_do kills the previous token */
+
     parser->tok = lex_do(parser->lex);
     if (parser->tok == TOKEN_EOF)
         return true;
@@ -79,7 +74,7 @@ static bool parser_next(parser_t *parser)
 char *parser_strdup(const char *str)
 {
     if (str && !*str) {
-        /* actually dup empty strings */
+
         char *out = (char*)mem_a(1);
         *out = 0;
         return out;
@@ -183,11 +178,11 @@ static ast_value* parser_find_typedef(parser_t *parser, const std::string &name,
 }
 
 struct sy_elem {
-    size_t etype; /* 0 = expression, others are operators */
+    size_t etype;
     bool isparen;
     size_t off;
     ast_expression *out;
-    ast_block *block; /* for commas and function calls */
+    ast_block *block;
     lex_ctx_t ctx;
 };
 
@@ -250,9 +245,6 @@ static sy_elem syparen(lex_ctx_t ctx, size_t off) {
     return e;
 }
 
-/* With regular precedence rules, ent.foo[n] is the same as (ent.foo)[n],
- * so we need to rotate it to become ent.(foo[n]).
- */
 static bool rotate_entfield_array_index_nodes(ast_expression **out)
 {
     ast_array_index *index, *oldindex;
@@ -322,10 +314,7 @@ static bool check_write_to(lex_ctx_t ctx, ast_expression *expr)
                 compile_error(ctx, "invalid assignment to a literal constant");
                 return false;
             }
-            /*
-             * To work around quakeworld we must elide the error and make it
-             * a warning instead.
-             */
+
             if (OPTS_OPTION_U32(OPTION_STANDARD) != COMPILER_QCC)
                 compile_error(ctx, "assignment to constant `%s`", val->m_name);
             else
@@ -366,14 +355,13 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
     if (sy->out.size() < op->operands) {
         if (op->flags & OP_PREFIX)
             compile_error(ctx, "expected expression after unary operator `%s`", op->op, (int)op->id);
-        else /* this should have errored previously already */
+        else
             compile_error(ctx, "expected expression after operator `%s`", op->op, (int)op->id);
         return false;
     }
 
     sy->ops.pop_back();
 
-    /* op(:?) has no input and no output */
     if (!op->operands)
         return true;
 
@@ -516,7 +504,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                         else
                             out = ast_unary::make(ctx, INSTR_NOT_S, exprs[0]);
                         break;
-                    /* we don't constant-fold NOT for these types */
+
                     case TYPE_ENTITY:
                         out = ast_unary::make(ctx, INSTR_NOT_ENT, exprs[0]);
                         break;
@@ -643,10 +631,10 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                     type_name[exprs[1]->m_vtype]);
                 return false;
             } else if (!(out = parser->m_fold.op(op, exprs))) {
-                /* generate a call to __builtin_mod */
+
                 ast_expression *mod  = parser->m_intrin.func("mod");
                 ast_call       *call = nullptr;
-                if (!mod) return false; /* can return null for missing floor */
+                if (!mod) return false;
 
                 call = ast_call::make(parser_ctx(parser), mod);
                 call->m_params.push_back(exprs[0]);
@@ -674,24 +662,15 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
             }
 
             if (!(out = parser->m_fold.op(op, exprs))) {
-                /*
-                 * IF the first expression is float, the following will be too
-                 * since scalar ^ vector is not allowed.
-                 */
+
                 if (exprs[0]->m_vtype == TYPE_FLOAT) {
                     out = fold::binary(ctx,
                         (op->id == opid1('^') ? VINSTR_BITXOR : op->id == opid1('|') ? INSTR_BITOR : INSTR_BITAND),
                         exprs[0], exprs[1]);
                 } else {
-                    /*
-                     * The first is a vector: vector is allowed to bitop with vector and
-                     * with scalar, branch here for the second operand.
-                     */
+
                     if (exprs[1]->m_vtype == TYPE_VECTOR) {
-                        /*
-                         * Bitop all the values of the vector components against the
-                         * vectors components in question.
-                         */
+
                         out = fold::binary(ctx,
                             (op->id == opid1('^') ? VINSTR_BITXOR_V : op->id == opid1('|') ? VINSTR_BITOR_V : VINSTR_BITAND_V),
                             exprs[0], exprs[1]);
@@ -747,7 +726,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
             break;
 
         case opid2('|','|'):
-            generated_op += 1; /* INSTR_OR */
+            generated_op += 1;
             [[fallthrough]];
         case opid2('&','&'):
             generated_op += INSTR_AND;
@@ -766,7 +745,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                         if (!out) break;
                         exprs[i] = out; out = nullptr;
                         if (OPTS_FLAG(PERL_LOGIC)) {
-                            /* here we want to keep the right expressions' type */
+
                             break;
                         }
                     }
@@ -777,7 +756,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                         if (!out) break;
                         exprs[i] = out; out = nullptr;
                         if (OPTS_FLAG(PERL_LOGIC)) {
-                            /* here we want to keep the right expressions' type */
+
                             break;
                         }
                     }
@@ -839,7 +818,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
 
             break;
 
-        case opid3('<','=','>'): /* -1, 0, or 1 */
+        case opid3('<','=','>'):
             if (NotSameType(TYPE_FLOAT)) {
                 ast_type_to_string(exprs[0], ty1, sizeof(ty1));
                 ast_type_to_string(exprs[1], ty2, sizeof(ty2));
@@ -850,40 +829,37 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
             }
 
             if (!(out = parser->m_fold.op(op, exprs))) {
-                /* This whole block is NOT fold_binary safe */
+
                 ast_binary *eq = new ast_binary(ctx, INSTR_EQ_F, exprs[0], exprs[1]);
 
                 eq->m_refs = AST_REF_NONE;
 
-                    /* if (lt) { */
                 out = new ast_ternary(ctx,
                         new ast_binary(ctx, INSTR_LT, exprs[0], exprs[1]),
-                        /* out = -1 */
+
                         parser->m_fold.imm_float(2),
-                    /* } else { */
-                        /* if (eq) { */
+
                         new ast_ternary(ctx, eq,
-                            /* out = 0 */
+
                             parser->m_fold.imm_float(0),
-                        /* } else { */
-                            /* out = 1 */
+
                             parser->m_fold.imm_float(1)
-                        /* } */
+
                         )
-                    /* } */
+
                     );
 
             }
             break;
 
         case opid1('>'):
-            generated_op += 1; /* INSTR_GT */
+            generated_op += 1;
             [[fallthrough]];
         case opid1('<'):
-            generated_op += 1; /* INSTR_LT */
+            generated_op += 1;
             [[fallthrough]];
         case opid2('>', '='):
-            generated_op += 1; /* INSTR_GE */
+            generated_op += 1;
             [[fallthrough]];
         case opid2('<', '='):
             generated_op += INSTR_LE;
@@ -965,14 +941,14 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                 }
             }
             (void)check_write_to(ctx, exprs[0]);
-            /* When we're a vector of part of an entity field we use STOREP */
+
             if (ast_istype(exprs[0], ast_member) && ast_istype(((ast_member*)exprs[0])->m_owner, ast_entfield))
                 assignop = INSTR_STOREP_F;
             out = new ast_store(ctx, assignop, exprs[0], exprs[1]);
             break;
         case opid3('+','+','P'):
         case opid3('-','-','P'):
-            /* prefix ++ */
+
             if (exprs[0]->m_vtype != TYPE_FLOAT) {
                 ast_type_to_string(exprs[0], ty1, sizeof(ty1));
                 compile_error(exprs[0]->m_context, "invalid type for prefix increment: %s", ty1);
@@ -995,7 +971,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
             break;
         case opid3('S','+','+'):
         case opid3('S','-','-'):
-            /* prefix ++ */
+
             if (exprs[0]->m_vtype != TYPE_FLOAT) {
                 ast_type_to_string(exprs[0], ty1, sizeof(ty1));
                 compile_error(exprs[0]->m_context, "invalid type for suffix increment: %s", ty1);
@@ -1121,10 +1097,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                                        exprs[0], exprs[1]);
             break;
         case opid3('&','~','='):
-            /* This is like: a &= ~(b);
-             * But QC has no bitwise-not, so we implement it as
-             * a -= a & (b);
-             */
+
             if (NotSameType(TYPE_FLOAT) && NotSameType(TYPE_VECTOR)) {
                 ast_type_to_string(exprs[0], ty1, sizeof(ty1));
                 ast_type_to_string(exprs[1], ty2, sizeof(ty2));
@@ -1154,7 +1127,7 @@ static bool parser_sy_apply_operator(parser_t *parser, shunt *sy)
                 compile_error(exprs[0]->m_context, "invalid type for length operator: %s", ty1);
                 return false;
             }
-            /* strings must be const, arrays are statically sized */
+
             if (exprs[0]->m_vtype == TYPE_STRING &&
                 !(((ast_value*)exprs[0])->m_hasvalue && ((ast_value*)exprs[0])->m_cvq == CV_CONST))
             {
@@ -1197,7 +1170,6 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
         return false;
     }
 
-    /* was a function call */
     ast_expression *fun;
     ast_value      *funval = nullptr;
     ast_call       *call;
@@ -1209,9 +1181,6 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
     fid = sy->ops.back().off;
     sy->ops.pop_back();
 
-    /* out[fid] is the function
-     * everything above is parameters...
-     */
     if (sy->argc.empty()) {
         parseerror(parser, "internal error: no argument counter available");
         return false;
@@ -1228,10 +1197,6 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
         return false;
     }
 
-    /*
-     * TODO handle this at the intrinsic level with an ast_intrinsic
-     * node and codegen.
-     */
     if ((fun = sy->out[fid].out) == parser->m_intrin.debug_typestring()) {
         char ty[1024];
         if (fid+2 != sy->out.size() || sy->out.back().block) {
@@ -1246,11 +1211,6 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
         return true;
     }
 
-    /*
-     * Now we need to determine if the function that is being called is
-     * an intrinsic so we can evaluate if the arguments to it are constant
-     * and than fruitfully fold them.
-     */
 #define fold_can_1(X)  \
     (ast_istype(((X)), ast_value) && (X)->m_hasvalue && ((X)->m_cvq == CV_CONST) && \
                 ((X))->m_vtype != TYPE_FUNCTION)
@@ -1265,10 +1225,6 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
         }
     }
 
-    /*
-     * All is well which ends well, if we make it into here we can ignore the
-     * intrinsic call and just evaluate it i.e constant fold it.
-     */
     if (fold && ast_istype(fun, ast_value) && ((ast_value*)fun)->m_intrinsic) {
         std::vector<ast_expression*> exprs;
         ast_expression *foldval = nullptr;
@@ -1281,10 +1237,6 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
             goto fold_leave;
         }
 
-        /*
-         * Blub: what sorts of unreffing and resizing of
-         * sy->out should I be doing here?
-         */
         sy->out[fid] = syexp(foldval->m_context, foldval);
         sy->out.erase(sy->out.end() - paramcount, sy->out.end());
 
@@ -1315,13 +1267,12 @@ static bool parser_close_call(parser_t *parser, shunt *sy)
     if (ast_istype(fun, ast_value)) {
         funval = (ast_value*)fun;
         if ((fun->m_flags & AST_FLAG_VARIADIC) &&
-            !(/*funval->m_cvq == CV_CONST && */ funval->m_hasvalue && funval->m_constval.vfunc->m_builtin))
+            !(                                  funval->m_hasvalue && funval->m_constval.vfunc->m_builtin))
         {
             call->m_va_count = parser->m_fold.constgen_float((qcfloat_t)paramcount, false);
         }
     }
 
-    /* overwrite fid, the function, with a call */
     sy->out[fid] = syexp(call->m_context, call);
 
     if (fun->m_vtype != TYPE_FUNCTION) {
@@ -1405,16 +1356,16 @@ static bool parser_close_paren(parser_t *parser, shunt *sy)
             }
             if (sy->paren.back() == PAREN_INDEX) {
                 sy->paren.pop_back();
-                // pop off the parenthesis
+
                 sy->ops.pop_back();
-                /* then apply the index operator */
+
                 if (!parser_sy_apply_operator(parser, sy))
                     return false;
                 break;
             }
             if (sy->paren.back() == PAREN_TERNARY1) {
                 sy->paren.back() = PAREN_TERNARY2;
-                // pop off the parenthesis
+
                 sy->ops.pop_back();
                 break;
             }
@@ -1471,7 +1422,7 @@ static ast_expression* parse_vararg_do(parser_t *parser)
             parseerror(parser, "expected comma after parameter index");
             return nullptr;
         }
-        // vararg piping: ...(start)
+
         out = new ast_argpipe(ctx, idx);
         return out;
     }
@@ -1526,7 +1477,6 @@ static ast_expression* parse_vararg(parser_t *parser)
     return out;
 }
 
-/* not to be exposed */
 bool ftepp_predef_exists(const char *name);
 static bool parse_sya_operand(parser_t *parser, shunt *sy, bool with_labels)
 {
@@ -1534,7 +1484,7 @@ static bool parse_sya_operand(parser_t *parser, shunt *sy, bool with_labels)
         parser->tok == TOKEN_IDENT &&
         !strcmp(parser_tokval(parser), "_"))
     {
-        /* a translatable string */
+
         ast_value *val;
 
         parser->lex->flags.noops = true;
@@ -1604,12 +1554,12 @@ static bool parse_sya_operand(parser_t *parser, shunt *sy, bool with_labels)
         const char     *ctoken = parser_tokval(parser);
         ast_expression *prev = sy->out.size() ? sy->out.back().out : nullptr;
         ast_expression *var;
-        /* a_vector.{x,y,z} */
+
         if (sy->ops.empty() ||
             !sy->ops.back().etype ||
             operators[sy->ops.back().etype-1].id != opid1('.'))
         {
-            /* When adding more intrinsics, fix the above condition */
+
             prev = nullptr;
         }
         if (prev && prev->m_vtype == TYPE_VECTOR && ctoken[0] >= 'x' && ctoken[0] <= 'z' && !ctoken[1])
@@ -1631,19 +1581,11 @@ static bool parse_sya_operand(parser_t *parser, shunt *sy, bool with_labels)
         if (!var && !strcmp(parser_tokval(parser), "__FUNC__"))
             var = parser->m_fold.constgen_string(parser->function->m_name, false);
         if (!var) {
-            /*
-             * now we try for the real intrinsic hashtable. If the string
-             * begins with __builtin, we simply skip past it, otherwise we
-             * use the identifier as is.
-             */
+
             if (!strncmp(parser_tokval(parser), "__builtin_", 10)) {
                 var = parser->m_intrin.func(parser_tokval(parser));
             }
 
-            /*
-             * Try it again, intrin_func deals with the alias method as well
-             * the first one masks for __builtin though, we emit warning here.
-             */
             if (!var) {
                 if ((var = parser->m_intrin.func(parser_tokval(parser)))) {
                     (void)!compile_warning(
@@ -1656,13 +1598,8 @@ static bool parse_sya_operand(parser_t *parser, shunt *sy, bool with_labels)
                 }
             }
 
-
             if (!var) {
-                /*
-                 * sometimes people use preprocessing predefs without enabling them
-                 * i've done this thousands of times already myself.  Lets check for
-                 * it in the predef table.  And diagnose it better :)
-                 */
+
                 if (!OPTS_FLAG(FTEPP_PREDEFS) && ftepp_predef_exists(parser_tokval(parser))) {
                     parseerror(parser, "unexpected identifier: %s (use -fftepp-predef to enable pre-defined macros)", parser_tokval(parser));
                     return false;
@@ -1674,7 +1611,7 @@ static bool parse_sya_operand(parser_t *parser, shunt *sy, bool with_labels)
         }
         else
         {
-            // promote these to norefs
+
             if (ast_istype(var, ast_value))
             {
                 ((ast_value *)var)->m_flags |= AST_FLAG_NOREF;
@@ -1698,14 +1635,9 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
     ast_expression *expr = nullptr;
     shunt sy;
     bool wantop = false;
-    /* only warn once about an assignment in a truth value because the current code
-     * would trigger twice on: if(a = b && ...), once for the if-truth-value, once for the && part
-     */
+
     bool warn_parenthesis = true;
 
-    /* count the parens because an if starts with one, so the
-     * end of a condition is an unmatched closing paren
-     */
     int ternaries = 0;
 
     memset(&sy, 0, sizeof(sy));
@@ -1723,13 +1655,13 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
 
         if (parser->tok == TOKEN_OPERATOR)
         {
-            /* classify the operator */
+
             const oper_info *op;
             const oper_info *olast = nullptr;
             size_t o;
             for (o = 0; o < operator_count; ++o) {
                 if (((!(operators[o].flags & OP_PREFIX) == !!wantop)) &&
-                    /* !(operators[o].flags & OP_SUFFIX) && / * remove this */
+
                     !strcmp(parser_tokval(parser), operators[o].op))
                 {
                     break;
@@ -1739,17 +1671,15 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
                 compile_error(parser_ctx(parser), "unexpected operator: %s", parser_tokval(parser));
                 goto onerr;
             }
-            /* found an operator */
+
             op = &operators[o];
 
-            /* when declaring variables, a comma starts a new variable */
             if (op->id == opid1(',') && sy.paren.empty() && stopatcomma) {
-                /* fixup the token */
+
                 parser->tok = ',';
                 break;
             }
 
-            /* a colon without a pervious question mark cannot be a ternary */
             if (!ternaries && op->id == opid2(':','?')) {
                 parser->tok = ':';
                 break;
@@ -1764,7 +1694,6 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
             if (sy.ops.size() && !sy.ops.back().isparen)
                 olast = &operators[sy.ops.back().etype-1];
 
-            /* first only apply higher precedences, assoc_left+equal comes after we warn about precedence rules */
             while (olast && op->prec < olast->prec)
             {
                 if (!parser_sy_apply_operator(parser, &sy))
@@ -1827,7 +1756,7 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
             if (op->id == opid1('(')) {
                 if (wantop) {
                     size_t sycount = sy.out.size();
-                    /* we expected an operator, this is the function-call operator */
+
                     sy.paren.push_back(PAREN_FUNC);
                     sy.ops.push_back(syparen(parser_ctx(parser), sycount-1));
                     sy.argc.push_back(0);
@@ -1842,7 +1771,7 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
                     goto onerr;
                 }
                 sy.paren.push_back(PAREN_INDEX);
-                /* push both the operator and the paren, this makes life easier */
+
                 sy.ops.push_back(syop(parser_ctx(parser), op));
                 sy.ops.push_back(syparen(parser_ctx(parser), 0));
                 wantop = false;
@@ -1886,7 +1815,7 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
                 if (!parser_close_paren(parser, &sy))
                     goto onerr;
             } else {
-                /* must be a function call without parameters */
+
                 if (sy.paren.back() != PAREN_FUNC) {
                     parseerror(parser, "closing paren in invalid position");
                     goto onerr;
@@ -1925,7 +1854,7 @@ static ast_expression* parse_expression_leave(parser_t *parser, bool stopatcomma
             wantop = true;
         }
         else {
-            /* in this case we might want to allow constant string concatenation */
+
             bool concatenated = false;
             if (parser->tok == TOKEN_STRINGCONST && sy.out.size()) {
                 ast_expression *lexpr = sy.out.back().out;
@@ -2084,11 +2013,11 @@ static ast_expression* process_condition(parser_t *parser, ast_expression *cond,
     }
     else if (OPTS_FLAG(CORRECT_LOGIC) && cond->m_vtype == TYPE_VECTOR)
     {
-        /* vector types need to be cast to true booleans */
+
         ast_binary *bin = (ast_binary*)cond;
         if (!OPTS_FLAG(PERL_LOGIC) || !ast_istype(cond, ast_binary) || !(bin->m_op == INSTR_AND || bin->m_op == INSTR_OR))
         {
-            /* in perl-logic, AND and OR take care of the -fcorrect-logic */
+
             prev = cond;
             cond = ast_unary::make(cond->m_context, INSTR_NOT_V, cond);
             if (!cond) {
@@ -2101,7 +2030,7 @@ static ast_expression* process_condition(parser_t *parser, ast_expression *cond,
     }
 
     unary = (ast_unary*)cond;
-    /* ast_istype dereferences cond, should test here for safety */
+
     while (cond && ast_istype(cond, ast_unary) && unary->m_op == INSTR_NOT_F)
     {
         cond = unary->m_operand;
@@ -2126,9 +2055,8 @@ static bool parse_if(parser_t *parser, ast_block *block, ast_expression **out)
 
     lex_ctx_t ctx = parser_ctx(parser);
 
-    (void)block; /* not touching */
+    (void)block;
 
-    /* skip the 'if', parse an optional 'not' and check for an opening paren */
     if (!parser_next(parser)) {
         parseerror(parser, "expected condition or 'not'");
         return false;
@@ -2144,22 +2072,22 @@ static bool parse_if(parser_t *parser, ast_block *block, ast_expression **out)
         parseerror(parser, "expected 'if' condition in parenthesis");
         return false;
     }
-    /* parse into the expression */
+
     if (!parser_next(parser)) {
         parseerror(parser, "expected 'if' condition after opening paren");
         return false;
     }
-    /* parse the condition */
+
     cond = parse_expression_leave(parser, false, true, false);
     if (!cond)
         return false;
-    /* closing paren */
+
     if (parser->tok != ')') {
         parseerror(parser, "expected closing paren after 'if' condition");
         ast_unref(cond);
         return false;
     }
-    /* parse into the 'then' branch */
+
     if (!parser_next(parser)) {
         parseerror(parser, "expected statement for on-true branch of 'if'");
         ast_unref(cond);
@@ -2171,9 +2099,9 @@ static bool parse_if(parser_t *parser, ast_block *block, ast_expression **out)
     }
     if (!ontrue)
         ontrue = new ast_block(parser_ctx(parser));
-    /* check for an else */
+
     if (!strcmp(parser_tokval(parser), "else")) {
-        /* parse into the 'else' branch */
+
         if (!parser_next(parser)) {
             parseerror(parser, "expected on-false branch after 'else'");
             delete ontrue;
@@ -2208,7 +2136,6 @@ static bool parse_while(parser_t *parser, ast_block *block, ast_expression **out
     bool rv;
     char *label = nullptr;
 
-    /* skip the 'while' and get the body */
     if (!parser_next(parser)) {
         if (OPTS_FLAG(LOOP_LABELS))
             parseerror(parser, "expected loop label or 'while' condition in parenthesis");
@@ -2265,24 +2192,23 @@ static bool parse_while_go(parser_t *parser, ast_block *block, ast_expression **
 
     lex_ctx_t ctx = parser_ctx(parser);
 
-    (void)block; /* not touching */
+    (void)block;
 
-    /* parse into the expression */
     if (!parser_next(parser)) {
         parseerror(parser, "expected 'while' condition after opening paren");
         return false;
     }
-    /* parse the condition */
+
     cond = parse_expression_leave(parser, false, true, false);
     if (!cond)
         return false;
-    /* closing paren */
+
     if (parser->tok != ')') {
         parseerror(parser, "expected closing paren after 'while' condition");
         ast_unref(cond);
         return false;
     }
-    /* parse into the 'then' branch */
+
     if (!parser_next(parser)) {
         parseerror(parser, "expected while-loop body");
         ast_unref(cond);
@@ -2309,7 +2235,6 @@ static bool parse_dowhile(parser_t *parser, ast_block *block, ast_expression **o
     bool rv;
     char *label = nullptr;
 
-    /* skip the 'do' and get the body */
     if (!parser_next(parser)) {
         if (OPTS_FLAG(LOOP_LABELS))
             parseerror(parser, "expected loop label or body");
@@ -2361,12 +2286,11 @@ static bool parse_dowhile_go(parser_t *parser, ast_block *block, ast_expression 
 
     lex_ctx_t ctx = parser_ctx(parser);
 
-    (void)block; /* not touching */
+    (void)block;
 
     if (!parse_statement_or_block(parser, &ontrue))
         return false;
 
-    /* expect the "while" */
     if (parser->tok != TOKEN_KEYWORD ||
         strcmp(parser_tokval(parser), "while"))
     {
@@ -2375,30 +2299,29 @@ static bool parse_dowhile_go(parser_t *parser, ast_block *block, ast_expression 
         return false;
     }
 
-    /* skip the 'while' and check for opening paren */
     if (!parser_next(parser) || parser->tok != '(') {
         parseerror(parser, "expected 'while' condition in parenthesis");
         delete ontrue;
         return false;
     }
-    /* parse into the expression */
+
     if (!parser_next(parser)) {
         parseerror(parser, "expected 'while' condition after opening paren");
         delete ontrue;
         return false;
     }
-    /* parse the condition */
+
     cond = parse_expression_leave(parser, false, true, false);
     if (!cond)
         return false;
-    /* closing paren */
+
     if (parser->tok != ')') {
         parseerror(parser, "expected closing paren after 'while' condition");
         delete ontrue;
         ast_unref(cond);
         return false;
     }
-    /* parse on */
+
     if (!parser_next(parser) || parser->tok != ';') {
         parseerror(parser, "expected semicolon after condition");
         delete ontrue;
@@ -2429,7 +2352,6 @@ static bool parse_for(parser_t *parser, ast_block *block, ast_expression **out)
     bool rv;
     char *label = nullptr;
 
-    /* skip the 'for' and check for opening paren */
     if (!parser_next(parser)) {
         if (OPTS_FLAG(LOOP_LABELS))
             parseerror(parser, "expected loop label or 'for' expressions in parenthesis");
@@ -2493,7 +2415,6 @@ static bool parse_for_go(parser_t *parser, ast_block *block, ast_expression **ou
     increment = nullptr;
     ontrue    = nullptr;
 
-    /* parse into the expression */
     if (!parser_next(parser)) {
         parseerror(parser, "expected 'for' initializer after opening paren");
         goto onerr;
@@ -2512,7 +2433,7 @@ static bool parse_for_go(parser_t *parser, ast_block *block, ast_expression **ou
         initexpr = parse_expression_leave(parser, false, false, false);
         if (!initexpr)
             goto onerr;
-        /* move on to condition */
+
         if (parser->tok != ';') {
             parseerror(parser, "expected semicolon after for-loop initializer");
             goto onerr;
@@ -2526,13 +2447,12 @@ static bool parse_for_go(parser_t *parser, ast_block *block, ast_expression **ou
         goto onerr;
     }
 
-    /* parse the condition */
     if (parser->tok != ';') {
         cond = parse_expression_leave(parser, false, true, false);
         if (!cond)
             goto onerr;
     }
-    /* move on to incrementor */
+
     if (parser->tok != ';') {
         parseerror(parser, "expected semicolon after for-loop initializer");
         goto onerr;
@@ -2542,7 +2462,6 @@ static bool parse_for_go(parser_t *parser, ast_block *block, ast_expression **ou
         goto onerr;
     }
 
-    /* parse the incrementor */
     if (parser->tok != ')') {
         lex_ctx_t condctx = parser_ctx(parser);
         increment = parse_expression_leave(parser, false, false, false);
@@ -2554,12 +2473,11 @@ static bool parse_for_go(parser_t *parser, ast_block *block, ast_expression **ou
         }
     }
 
-    /* closing paren */
     if (parser->tok != ')') {
         parseerror(parser, "expected closing paren after 'for-loop' incrementor");
         goto onerr;
     }
-    /* parse into the 'then' branch */
+
     if (!parser_next(parser)) {
         parseerror(parser, "expected for-loop body");
         goto onerr;
@@ -2598,14 +2516,13 @@ static bool parse_return(parser_t *parser, ast_block *block, ast_expression **ou
 
     lex_ctx_t ctx = parser_ctx(parser);
 
-    (void)block; /* not touching */
+    (void)block;
 
     if (!parser_next(parser)) {
         parseerror(parser, "expected return expression");
         return false;
     }
 
-    /* return assignments */
     if (parser->tok == '=') {
         if (!OPTS_FLAG(RETURN_ASSIGNMENTS)) {
             parseerror(parser, "return assignments not activated, try using -freturn-assigments");
@@ -2627,7 +2544,6 @@ static bool parse_return(parser_t *parser, ast_block *block, ast_expression **ou
         if (!(exp = parse_expression_leave(parser, false, false, false)))
             return false;
 
-        /* prepare the return value */
         if (!retval) {
             retval = new ast_value(ctx, "#LOCAL_RETURN", TYPE_VOID);
             retval->adoptType(*expected->m_next);
@@ -2642,7 +2558,6 @@ static bool parse_return(parser_t *parser, ast_block *block, ast_expression **ou
             parseerror(parser, "invalid type for return value: `%s', expected `%s'", ty1, ty2);
         }
 
-        /* store to 'return' local variable */
         var = new ast_store(
             ctx,
             type_store_instr[expected->m_next->m_vtype],
@@ -2699,7 +2614,7 @@ static bool parse_break_continue(parser_t *parser, ast_block *block, ast_express
     lex_ctx_t ctx = parser_ctx(parser);
     auto &loops = (is_continue ? parser->continues : parser->breaks);
 
-    (void)block; /* not touching */
+    (void)block;
     if (!parser_next(parser)) {
         parseerror(parser, "expected semicolon or loop label");
         return false;
@@ -2745,9 +2660,6 @@ static bool parse_break_continue(parser_t *parser, ast_block *block, ast_express
     return true;
 }
 
-/* returns true when it was a variable qualifier, false otherwise!
- * on error, cvq is set to CV_WRONG
- */
 struct attribute_t {
     const char *name;
     size_t      flag;
@@ -2777,7 +2689,7 @@ static bool parse_qualifiers(parser_t *parser, bool with_local, int *cvq, bool *
         size_t i;
         if (parser->tok == TOKEN_ATTRIBUTE_OPEN) {
             had_attrib = true;
-            /* parse an attribute */
+
             if (!parser_next(parser)) {
                 parseerror(parser, "expected attribute after `[[`");
                 *cvq = CV_WRONG;
@@ -2878,11 +2790,11 @@ static bool parse_qualifiers(parser_t *parser, bool with_local, int *cvq, bool *
                         goto argerr;
                     }
                 }
-                /* no message */
+
                 if (parser->tok != TOKEN_ATTRIBUTE_CLOSE) {
                     parseerror(parser, "`deprecated` attribute expected `]]`");
 
-                    argerr: /* ugly */
+                    argerr:
                     if (*message) mem_d(*message);
                     *message = nullptr;
                     *cvq     = CV_WRONG;
@@ -2926,13 +2838,13 @@ static bool parse_qualifiers(parser_t *parser, bool with_local, int *cvq, bool *
                     if (parser->tok != ')' || !parser_next(parser))
                         goto error_in_coverage;
                 } else {
-                    /* without parameter [[coverage]] equals [[coverage(block)]] */
+
                     flags |= AST_FLAG_BLOCK_COVERAGE;
                 }
             }
             else
             {
-                /* Skip tokens until we hit a ]] */
+
                 (void)!parsewarning(parser, WARN_UNKNOWN_ATTRIBUTE, "unknown attribute starting with `%s`", parser_tokval(parser));
                 while (parser->tok != TOKEN_ATTRIBUTE_CLOSE) {
                     if (!parser_next(parser)) {
@@ -2985,7 +2897,6 @@ static bool parse_switch(parser_t *parser, ast_block *block, ast_expression **ou
     bool rv;
     char *label = nullptr;
 
-    /* skip the 'while' and get the body */
     if (!parser_next(parser)) {
         if (OPTS_FLAG(LOOP_LABELS))
             parseerror(parser, "expected loop label or 'switch' operand in parenthesis");
@@ -3045,29 +2956,26 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
 
     lex_ctx_t ctx = parser_ctx(parser);
 
-    (void)block; /* not touching */
+    (void)block;
     (void)opval;
 
-    /* parse into the expression */
     if (!parser_next(parser)) {
         parseerror(parser, "expected switch operand");
         return false;
     }
-    /* parse the operand */
+
     operand = parse_expression_leave(parser, false, false, false);
     if (!operand)
         return false;
 
     switchnode = new ast_switch(ctx, operand);
 
-    /* closing paren */
     if (parser->tok != ')') {
         delete switchnode;
         parseerror(parser, "expected closing paren after 'switch' operand");
         return false;
     }
 
-    /* parse over the opening paren */
     if (!parser_next(parser) || parser->tok != '{') {
         delete switchnode;
         parseerror(parser, "expected list of cases");
@@ -3080,7 +2988,6 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
         return false;
     }
 
-    /* new block; allow some variables to be declared here */
     parser_enterblock(parser);
     while (true) {
         typevar = nullptr;
@@ -3108,7 +3015,6 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
         break;
     }
 
-    /* case list! */
     while (parser->tok != '}') {
         ast_block *caseblock;
 
@@ -3171,7 +3077,7 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
                 return false;
             }
             if (!OPTS_FLAG(RELAXED_SWITCH)) {
-                if (!ast_istype(swcase.m_value, ast_value)) { /* || ((ast_value*)swcase.m_value)->m_cvq != CV_CONST) { */
+                if (!ast_istype(swcase.m_value, ast_value)) {
                     delete switchnode;
                     parseerror(parser, "case on non-constant values need to be explicitly enabled via -frelaxed-switch");
                     ast_unref(operand);
@@ -3193,7 +3099,6 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
             return false;
         }
 
-        /* Now the colon and body */
         if (parser->tok != ':') {
             if (swcase.m_value) ast_unref(swcase.m_value);
             delete switchnode;
@@ -3241,7 +3146,6 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
 
     parser_leaveblock(parser);
 
-    /* closing paren */
     if (parser->tok != '}') {
         delete switchnode;
         parseerror(parser, "expected closing paren of case list");
@@ -3256,7 +3160,6 @@ static bool parse_switch_go(parser_t *parser, ast_block *block, ast_expression *
     return true;
 }
 
-/* parse computed goto sides */
 static ast_expression *parse_goto_computed(parser_t *parser, ast_expression **side) {
     ast_expression *on_true;
     ast_expression *on_false;
@@ -3302,13 +3205,11 @@ static bool parse_goto(parser_t *parser, ast_expression **out)
     if (parser->tok != TOKEN_IDENT) {
         ast_expression *expression;
 
-        /* could be an expression i.e computed goto :-) */
         if (parser->tok != '(') {
             parseerror(parser, "expected label name after `goto`");
             return false;
         }
 
-        /* failed to parse expression for goto */
         if (!(expression = parse_expression(parser, false, true)) ||
             !(*out = parse_goto_computed(parser, &expression))) {
             parseerror(parser, "invalid goto expression");
@@ -3320,7 +3221,6 @@ static bool parse_goto(parser_t *parser, ast_expression **out)
         return true;
     }
 
-    /* not computed goto */
     gt = new ast_goto(parser_ctx(parser), parser_tokval(parser));
     lbl = parser_find_label(parser, gt->m_name);
     if (lbl) {
@@ -3392,7 +3292,6 @@ static bool parse_pragma_do(parser_t *parser)
     {
         (void)!parsewarning(parser, WARN_UNKNOWN_PRAGMAS, "ignoring #pragma %s", parser_tokval(parser));
 
-        /* skip to eol */
         while (!parse_eol(parser)) {
             parser_next(parser);
         }
@@ -3437,7 +3336,7 @@ static bool parse_statement(parser_t *parser, ast_block *block, ast_expression *
 
     if (typevar || parser->tok == TOKEN_TYPENAME || parser->tok == '.' || parser->tok == TOKEN_DOTS)
     {
-        /* local variable */
+
         if (!block) {
             parseerror(parser, "cannot declare a variable from here");
             return false;
@@ -3632,14 +3531,12 @@ static bool parse_enum(parser_t *parser)
         return false;
     }
 
-    /* enumeration attributes (can add more later) */
     if (parser->tok == ':') {
         if (!parser_next(parser) || parser->tok != TOKEN_IDENT){
             parseerror(parser, "expected `flag` or `reverse` for enumeration attribute");
             return false;
         }
 
-        /* attributes? */
         if (!strcmp(parser_tokval(parser), "flag")) {
             num  = 1;
             flag = true;
@@ -3661,7 +3558,7 @@ static bool parse_enum(parser_t *parser)
     while (true) {
         if (!parser_next(parser) || parser->tok != TOKEN_IDENT) {
             if (parser->tok == '}') {
-                /* allow an empty enum */
+
                 break;
             }
             parseerror(parser, "expected identifier or `}`");
@@ -3682,7 +3579,6 @@ static bool parse_enum(parser_t *parser)
         var->m_cvq             = CV_CONST;
         var->m_hasvalue        = true;
 
-        /* for flagged enumerations increment in POTs of TWO */
         var->m_constval.vfloat = (flag) ? (num *= 2) : (num ++);
         parser_addglobal(parser, var->m_name, var);
 
@@ -3705,7 +3601,6 @@ static bool parse_enum(parser_t *parser)
             return false;
         }
 
-        /* We got a value! */
         old = parse_expression_leave(parser, true, false, false);
         asvalue = (ast_value*)old;
         if (!ast_istype(old, ast_value) || asvalue->m_cvq != CV_CONST || !asvalue->m_hasvalue) {
@@ -3722,7 +3617,6 @@ static bool parse_enum(parser_t *parser)
         }
     }
 
-    /* patch them all (for reversed attribute) */
     if (reverse) {
         size_t i;
         for (i = 0; i < values.size(); i++)
@@ -3753,7 +3647,7 @@ static bool parse_block_into(parser_t *parser, ast_block *block)
 
     parser_enterblock(parser);
 
-    if (!parser_next(parser)) { /* skip the '{' */
+    if (!parser_next(parser)) {
         parseerror(parser, "expected function body");
         goto cleanup;
     }
@@ -3765,7 +3659,7 @@ static bool parse_block_into(parser_t *parser, ast_block *block)
             break;
 
         if (!parse_statement(parser, block, &expr, false)) {
-            /* parseerror(parser, "parse error"); */
+
             block = nullptr;
             goto cleanup;
         }
@@ -3842,7 +3736,6 @@ static bool create_vector_members(ast_value *var, ast_member **me)
     if (i == 3)
         return true;
 
-    /* unroll */
     do { delete me[--i]; } while(i);
     return false;
 }
@@ -3855,7 +3748,7 @@ static bool parse_function_body(parser_t *parser, ast_value *var)
 
     ast_expression *framenum  = nullptr;
     ast_expression *nextthink = nullptr;
-    /* None of the following have to be deleted */
+
     ast_expression *fld_think = nullptr, *fld_nextthink = nullptr, *fld_frame = nullptr;
     ast_expression *gbl_time = nullptr, *gbl_self = nullptr;
     bool has_frame_think;
@@ -3884,12 +3777,7 @@ static bool parse_function_body(parser_t *parser, ast_value *var)
     }
 
     if (parser->tok == '[') {
-        /* got a frame definition: [ framenum, nextthink ]
-         * this translates to:
-         * self.frame = framenum;
-         * self.nextthink = time + 0.1;
-         * self.think = nextthink;
-         */
+
         nextthink = nullptr;
 
         fld_think     = parser_find_field(parser, "think");
@@ -3936,13 +3824,12 @@ static bool parse_function_body(parser_t *parser, ast_value *var)
 
         if (parser->tok == TOKEN_IDENT && !parser_find_var(parser, parser_tokval(parser)))
         {
-            /* qc allows the use of not-yet-declared functions here
-             * - this automatically creates a prototype */
+
             ast_value      *thinkfunc;
             ast_expression *functype = fld_think->m_next;
 
             thinkfunc = new ast_value(parser_ctx(parser), parser_tokval(parser), functype->m_vtype);
-            if (!thinkfunc) { /* || !thinkfunc->adoptType(*functype)*/
+            if (!thinkfunc) {
                 ast_unref(framenum);
                 parseerror(parser, "failed to create implicit prototype for `%s`", parser_tokval(parser));
                 return false;
@@ -4017,7 +3904,7 @@ static bool parse_function_body(parser_t *parser, ast_value *var)
                 return false;
             }
         } else {
-            /* emulate OP_STATE in code: */
+
             lex_ctx_t ctx;
             ast_expression *self_frame;
             ast_expression *self_nextthink;
@@ -4190,8 +4077,6 @@ enderrfn:
 
     delete func;
 
-    // Remove |func| from |parser->functions|. It may not actually be at the
-    // back of the vector for accumulated functions.
     for (auto it = parser->functions.begin(); it != parser->functions.end(); it++) {
         if (*it == func) {
             parser->functions.erase(it, it + 1);
@@ -4238,7 +4123,7 @@ static ast_expression *array_accessor_split(
 
     ifthen = new ast_ifthen(ctx, cmp, left, right);
     if (!ifthen) {
-        delete cmp; /* will delete left and right */
+        delete cmp;
         parseerror(parser, "internal error: failed to create conditional jump for array setter");
         return nullptr;
     }
@@ -4251,7 +4136,7 @@ static ast_expression *array_setter_node(parser_t *parser, ast_value *array, ast
     lex_ctx_t ctx = array->m_context;
 
     if (from+1 == afterend) {
-        /* set this value */
+
         ast_block       *block;
         ast_return      *ret;
         ast_array_index *subscript;
@@ -4316,7 +4201,7 @@ static ast_expression *array_field_setter_node(
     lex_ctx_t ctx = array->m_context;
 
     if (from+1 == afterend) {
-        /* set this value */
+
         ast_block       *block;
         ast_return      *ret;
         ast_entfield    *entfield;
@@ -4468,7 +4353,7 @@ static ast_value* parser_create_array_setter_proto(parser_t *parser, ast_value *
         parseerror(parser, "failed to create locals for array accessor");
         goto cleanup;
     }
-    value->m_name = "value"; // not important
+    value->m_name = "value";
     fval->m_type_params.emplace_back(index);
     fval->m_type_params.emplace_back(value);
 
@@ -4533,7 +4418,7 @@ static bool parser_create_array_field_setter(parser_t *parser, ast_value *array,
         parseerror(parser, "failed to create locals for array accessor");
         goto cleanup;
     }
-    value->m_name = "value"; // not important
+    value->m_name = "value";
     fval->m_type_params.emplace_back(entity);
     fval->m_type_params.emplace_back(index);
     fval->m_type_params.emplace_back(value);
@@ -4562,9 +4447,6 @@ static ast_value* parser_create_array_getter_proto(parser_t *parser, ast_value *
     ast_value      *fval;
     ast_function   *func;
 
-    /* NOTE: checking array->m_next rather than elemtype since
-     * for fields elemtype is a temporary fieldtype.
-     */
     if (!ast_istype(array->m_next, ast_value)) {
         parseerror(parser, "internal error: array accessor needs to build an ast_value with a copy of the element type");
         return nullptr;
@@ -4625,19 +4507,17 @@ static ast_value *parse_parameter_list(parser_t *parser, ast_value *var)
     ast_value *varparam = nullptr;
     char *argcounter = nullptr;
 
-    /* for the sake of less code we parse-in in this function */
     if (!parser_next(parser)) {
         delete var;
         parseerror(parser, "expected parameter list");
         return nullptr;
     }
 
-    /* parse variables until we hit a closing paren */
     while (parser->tok != ')') {
         bool is_varargs = false;
 
         if (!first) {
-            /* there must be commas between them */
+
             if (parser->tok != ',') {
                 parseerror(parser, "expected comma or end of parameter list");
                 goto on_error;
@@ -4653,7 +4533,7 @@ static ast_value *parse_parameter_list(parser_t *parser, ast_value *var)
         if (!param && !is_varargs)
             goto on_error;
         if (is_varargs) {
-            /* '...' indicates a varargs function */
+
             variadic = true;
             if (parser->tok != ')' && parser->tok != TOKEN_IDENT) {
                 parseerror(parser, "`...` must be the last parameter of a variadic function declaration");
@@ -4669,12 +4549,12 @@ static ast_value *parse_parameter_list(parser_t *parser, ast_value *var)
         } else {
             params.emplace_back(param);
             if (param->m_vtype >= TYPE_VARIANT) {
-                char tname[1024]; /* typename is reserved in C++ */
+                char tname[1024];
                 ast_type_to_string(param, tname, sizeof(tname));
                 parseerror(parser, "type not supported as part of a parameter list: %s", tname);
                 goto on_error;
             }
-            /* type-restricted varargs */
+
             if (parser->tok == TOKEN_DOTS) {
                 variadic = true;
                 varparam = params.back().release();
@@ -4702,17 +4582,14 @@ static ast_value *parse_parameter_list(parser_t *parser, ast_value *var)
     if (params.size() == 1 && params[0]->m_vtype == TYPE_VOID)
         params.clear();
 
-    /* sanity check */
     if (params.size() > 8 && OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_QCC)
         (void)!parsewarning(parser, WARN_EXTENSIONS, "more than 8 parameters are not supported by this standard");
 
-    /* parse-out */
     if (!parser_next(parser)) {
         parseerror(parser, "parse error after typename");
         goto on_error;
     }
 
-    /* now turn 'var' into a function type */
     fval = new ast_value(ctx, "<type()>", TYPE_FUNCTION);
     fval->m_next = var;
     if (variadic)
@@ -4800,25 +4677,6 @@ static ast_value *parse_arraysize(parser_t *parser, ast_value *var)
     return var;
 }
 
-/* Parse a complete typename.
- * for single-variables (ie. function parameters or typedefs) storebase should be nullptr
- * but when parsing variables separated by comma
- * 'storebase' should point to where the base-type should be kept.
- * The base type makes up every bit of type information which comes *before* the
- * variable name.
- *
- * NOTE: The value must either be named, have a nullptr name, or a name starting
- *       with '<'. In the first case, this will be the actual variable or type
- *       name, in the other cases it is assumed that the name will appear
- *       later, and an error is generated otherwise.
- *
- * The following will be parsed in its entirety:
- *     void() foo()
- * The 'basetype' in this case is 'void()'
- * and if there's a comma after it, say:
- *     void() foo(), bar
- * then the type-information 'void()' can be stored in 'storebase'
- */
 static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_value *cached_typedef, bool *is_vararg)
 {
     ast_value *var, *tmp;
@@ -4833,20 +4691,16 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
 
     ctx = parser_ctx(parser);
 
-    /* types may start with a dot */
     if (parser->tok == '.' || parser->tok == TOKEN_DOTS) {
         isfield = true;
         if (parser->tok == TOKEN_DOTS)
             morefields += 2;
-        /* if we parsed a dot we need a typename now */
+
         if (!parser_next(parser)) {
             parseerror(parser, "expected typename for field definition");
             return nullptr;
         }
 
-        /* Further dots are handled seperately because they won't be part of the
-         * basetype
-         */
         while (true) {
             if (parser->tok == '.')
                 ++morefields;
@@ -4872,7 +4726,6 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
         return nullptr;
     }
 
-    /* generate the basic type value */
     if (cached_typedef) {
         var = new ast_value(ast_copy_type, *cached_typedef);
         var->m_name = "<type(from_def)>";
@@ -4885,30 +4738,18 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
         var = tmp;
     }
 
-    /* do not yet turn into a field - remember:
-     * .void() foo; is a field too
-     * .void()() foo; is a function
-     */
-
-    /* parse on */
     if (!parser_next(parser)) {
         delete var;
         parseerror(parser, "parse error after typename");
         return nullptr;
     }
 
-    /* an opening paren now starts the parameter-list of a function
-     * this is where original-QC has parameter lists.
-     * We allow a single parameter list here.
-     * Much like fteqcc we don't allow `float()() x`
-     */
     if (parser->tok == '(') {
         var = parse_parameter_list(parser, var);
         if (!var)
             return nullptr;
     }
 
-    /* store the base if requested */
     if (storebase) {
         *storebase = new ast_value(ast_copy_type, *var);
         if (isfield) {
@@ -4918,7 +4759,6 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
         }
     }
 
-    /* there may be a name now */
     if (parser->tok == TOKEN_IDENT || parser->tok == TOKEN_KEYWORD) {
         if (!strcmp(parser_tokval(parser), "break"))
             (void)!parsewarning(parser, WARN_BREAKDEF, "break definition ignored (suggest removing it)");
@@ -4927,7 +4767,6 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
 
         name = util_strdup(parser_tokval(parser));
 
-        /* parse on */
         if (!parser_next(parser)) {
             delete var;
             mem_d(name);
@@ -4937,7 +4776,7 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
     }
 
     leave:
-    /* now this may be an array */
+
     if (parser->tok == '[') {
         wasarray = true;
         var = parse_arraysize(parser, var);
@@ -4947,15 +4786,13 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
         }
     }
 
-    /* This is the point where we can turn it into a field */
     if (isfield) {
-        /* turn it into a field if desired */
+
         tmp = new ast_value(ctx, "<type:f>", TYPE_FIELD);
         tmp->m_next = var;
         var = tmp;
     }
 
-    /* now there may be function parens again */
     if (parser->tok == '(' && OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_QCC)
         parseerror(parser, "C-style function syntax is not allowed in -std=qcc");
     if (parser->tok == '(' && wasarray)
@@ -4968,10 +4805,9 @@ static ast_value *parse_typename(parser_t *parser, ast_value **storebase, ast_va
         }
     }
 
-    /* finally name it */
     if (name) {
         var->m_name = name;
-        // free the name, ast_value_set_name duplicates
+
         mem_d(name);
     }
 
@@ -4988,7 +4824,6 @@ static bool parse_typedef(parser_t *parser)
     if (!typevar)
         return false;
 
-    // while parsing types, the ast_value's get named '<something>'
     if (!typevar->m_name.length() || typevar->m_name[0] == '<') {
         parseerror(parser, "missing name in typedef");
         delete typevar;
@@ -5113,12 +4948,6 @@ static bool parse_array(parser_t *parser, ast_value *array)
         parseerror(parser, "expected semicolon after initializer, got %s");
         return false;
     }
-    /*
-    if (!parser_next(parser)) {
-        parseerror(parser, "parse error after initializer");
-        return false;
-    }
-    */
 
     if (array->m_flags & AST_FLAG_ARRAY_INIT) {
         if (array->m_count != (size_t)-1) {
@@ -5153,7 +4982,6 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
     if (!localblock && is_static)
         parseerror(parser, "`static` qualifier is not supported in global scope");
 
-    /* get the first complete variable */
     var = parse_typename(parser, &basetype, cached_typedef, nullptr);
     if (!var) {
         if (basetype)
@@ -5161,7 +4989,6 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
         return false;
     }
 
-    /* while parsing types, the ast_value's get named '<something>' */
     if (!var->m_name.length() || var->m_name[0] == '<') {
         parseerror(parser, "declaration does not declare anything");
         if (basetype)
@@ -5173,7 +5000,6 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
         proto = nullptr;
         wasarray = false;
 
-        /* Part 0: finish the type */
         if (parser->tok == '(') {
             if (OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_QCC)
                 parseerror(parser, "C-style function syntax is not allowed in -std=qcc");
@@ -5183,7 +5009,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                 goto cleanup;
             }
         }
-        /* we only allow 1-dimensional arrays */
+
         if (var->m_vtype != TYPE_FUNCTION && parser->tok == '[') {
             wasarray = true;
             var = parse_arraysize(parser, var);
@@ -5194,9 +5020,9 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
         }
         if (parser->tok == '(' && wasarray) {
             parseerror(parser, "arrays as part of a return type is not supported");
-            /* we'll still parse the type completely for now */
+
         }
-        /* for functions returning functions */
+
         while (parser->tok == '(') {
             if (OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_QCC)
                 parseerror(parser, "C-style function syntax is not allowed in -std=qcc");
@@ -5208,14 +5034,10 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
         }
 
         var->m_cvq = qualifier;
-        if (qflags & AST_FLAG_COVERAGE) /* specified in QC, drop our default */
+        if (qflags & AST_FLAG_COVERAGE)
             var->m_flags &= ~(AST_FLAG_COVERAGE_MASK);
         var->m_flags |= qflags;
 
-        /*
-         * store the vstring back to var for alias and
-         * deprecation messages.
-         */
         if (var->m_flags & AST_FLAG_DEPRECATED || var->m_flags & AST_FLAG_ALIAS)
             var->m_desc = vstring;
 
@@ -5225,12 +5047,6 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
             goto cleanup;
         }
 
-
-        /* Part 1:
-         * check for validity: (end_sys_..., multiple-definitions, prototypes, ...)
-         * Also: if there was a prototype, `var` will be deleted and set to `proto` which
-         * is then filled with the previous definition and the parameter-names replaced.
-         */
         if (var->m_name == "nil") {
             if (OPTS_FLAG(UNTYPED_NIL)) {
                 if (!localblock || !OPTS_FLAG(PERMISSIVE))
@@ -5239,7 +5055,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                 (void)!parsewarning(parser, WARN_RESERVED_NAMES, "variable name `nil` is reserved");
         }
         if (!localblock) {
-            /* Deal with end_sys_ vars */
+
             was_end = false;
             if (var->m_name == "end_sys_globals") {
                 var->m_flags |= AST_FLAG_NOREF;
@@ -5263,7 +5079,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
 
             if (!nofields && var->m_vtype == TYPE_FIELD)
             {
-                /* deal with field declarations */
+
                 old = parser_find_field(parser, var->m_name);
                 if (old) {
                     if (parsewarning(parser, WARN_FIELD_REDECLARED, "field `%s` already declared here: %s:%i",
@@ -5275,12 +5091,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                     delete var;
                     var = nullptr;
                     goto skipvar;
-                    /*
-                    parseerror(parser, "field `%s` already declared here: %s:%i",
-                               var->m_name, old->m_context.file, old->m_context.line);
-                    retval = false;
-                    goto cleanup;
-                    */
+
                 }
                 if ((OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_QCC || OPTS_OPTION_U32(OPTION_STANDARD) == COMPILER_FTEQCC) &&
                     (old = parser_find_global(parser, var->m_name)))
@@ -5294,11 +5105,11 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
             }
             else
             {
-                /* deal with other globals */
+
                 old = parser_find_global(parser, var->m_name);
                 if (old && var->m_vtype == TYPE_FUNCTION && old->m_vtype == TYPE_FUNCTION)
                 {
-                    /* This is a function which had a prototype */
+
                     if (!ast_istype(old, ast_value)) {
                         parseerror(parser, "internal error: prototype is not an ast_value");
                         retval = false;
@@ -5313,7 +5124,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                         retval = false;
                         goto cleanup;
                     }
-                    /* we need the new parameter-names */
+
                     for (i = 0; i < proto->m_type_params.size(); ++i)
                         proto->m_type_params[i]->m_name = var->m_type_params[i]->m_name;
                     if (!parser_check_qualifiers(parser, var, proto)) {
@@ -5327,7 +5138,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                 }
                 else
                 {
-                    /* other globals */
+
                     if (old) {
                         if (parsewarning(parser, WARN_DOUBLE_DECLARATION,
                                          "global `%s` already declared here: %s:%i",
@@ -5355,9 +5166,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                             goto cleanup;
                         }
                         proto->m_flags |= var->m_flags;
-                        /* copy the context for finals,
-                         * so the error can show where it was actually made 'final'
-                         */
+
                         if (proto->m_flags & AST_FLAG_FINAL_DECL)
                             old->m_context = var->m_context;
                         delete var;
@@ -5375,7 +5184,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                 }
             }
         }
-        else /* it's not a global */
+        else
         {
             old = parser_find_local(parser, var->m_name, parser->variables.size()-1, &isparam);
             if (old && !isparam) {
@@ -5384,7 +5193,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                 retval = false;
                 goto cleanup;
             }
-            /* doing this here as the above is just for a single scope */
+
             old = parser_find_local(parser, var->m_name, 0, &isparam);
             if (old && isparam) {
                 if (parsewarning(parser, WARN_LOCAL_SHADOWS,
@@ -5410,9 +5219,6 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
         if (noref || parser->noref)
             var->m_flags |= AST_FLAG_NOREF;
 
-        /* Part 2:
-         * Create the global/local, and deal with vector types.
-         */
         if (!proto) {
             if (var->m_vtype == TYPE_VECTOR)
                 isvector = true;
@@ -5428,7 +5234,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
             }
 
             if (!localblock) {
-                /* deal with global variables, fields, functions */
+
                 if (!nofields && var->m_vtype == TYPE_FIELD && parser->tok != '=') {
                     var->m_isfield = true;
                     parser->fields.push_back(var);
@@ -5471,7 +5277,6 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
 
                         util_htset(parser->aliases, var->m_name.c_str(), find);
 
-                        /* generate aliases for vector components */
                         if (isvector) {
                             char *buffer[3];
 
@@ -5491,8 +5296,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                 }
             } else {
                 if (is_static) {
-                    // a static adds itself to be generated like any other global
-                    // but is added to the local namespace instead
+
                     std::string defname;
                     size_t  prefix_len;
                     size_t  sn, sn_size;
@@ -5500,17 +5304,12 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                     defname = parser->function->m_name;
                     defname.append(2, ':');
 
-                    // remember the length up to here
                     prefix_len = defname.length();
 
-                    // Add it to the local scope
                     util_htset(parser->variables.back(), var->m_name.c_str(), (void*)var);
 
-                    // now rename the global
                     defname.append(var->m_name);
-                    // if a variable of that name already existed, add the
-                    // counter value.
-                    // The counter is incremented either way.
+
                     sn_size = parser->function->m_static_names.size();
                     for (sn = 0; sn != sn_size; ++sn) {
                         if (parser->function->m_static_names[sn] == var->m_name.c_str())
@@ -5527,10 +5326,8 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
                     parser->function->m_static_count++;
                     var->m_name = defname;
 
-                    // push it to the to-be-generated globals
                     parser->globals.push_back(var);
 
-                    // same game for the vector members
                     if (isvector) {
                         defname.erase(prefix_len);
                         for (i = 0; i < 3; ++i) {
@@ -5554,9 +5351,7 @@ static bool parse_variable(parser_t *parser, ast_block *localblock, bool nofield
         memcpy(last_me, me, sizeof(me));
         me[0] = me[1] = me[2] = nullptr;
         cleanvar = false;
-        /* Part 2.2
-         * deal with arrays
-         */
+
         if (var->m_vtype == TYPE_ARRAY) {
             if (var->m_count != (size_t)-1) {
                 if (!create_array_accessors(parser, var))
@@ -5605,9 +5400,6 @@ skipvar:
         if (parser->tok == ',')
             goto another;
 
-        /*
-        if (!var || (!localblock && !nofields && basetype->m_vtype == TYPE_FIELD)) {
-        */
         if (!var) {
             parseerror(parser, "missing comma or semicolon while parsing variables");
             break;
@@ -5686,7 +5478,6 @@ skipvar:
                     break;
                 }
 
-                /* we only want the integral part anyways */
                 builtin_num = integral;
             } else if (parser->tok == TOKEN_INTCONST) {
                 builtin_num = parser_token(parser)->constval.i;
@@ -5726,9 +5517,7 @@ skipvar:
         else if (var->m_vtype == TYPE_ARRAY && parser->tok == '{')
         {
             if (localblock) {
-                /* Note that fteqcc and most others don't even *have*
-                 * local arrays, so this is not a high priority.
-                 */
+
                 parseerror(parser, "TODO: initializers for local arrays");
                 break;
             }
@@ -5765,18 +5554,17 @@ skipvar:
                 break;
             cval = ast_istype(cexp, ast_value) ? (ast_value*)cexp : nullptr;
 
-            /* deal with foldable constants: */
             if (localblock &&
                 var->m_cvq == CV_CONST && cval && cval->m_hasvalue && cval->m_cvq == CV_CONST && !cval->m_isfield)
             {
-                /* remove it from the current locals */
+
                 if (isvector) {
                     for (i = 0; i < 3; ++i) {
                         parser->_locals.pop_back();
                         localblock->m_collect.pop_back();
                     }
                 }
-                /* do sanity checking, this function really needs refactoring */
+
                 if (parser->_locals.back() != var)
                     parseerror(parser, "internal error: unexpected change in local variable handling");
                 else
@@ -5785,7 +5573,7 @@ skipvar:
                     parseerror(parser, "internal error: unexpected change in local variable handling (2)");
                 else
                     localblock->m_locals.pop_back();
-                /* push it to the to-be-generated globals */
+
                 parser->globals.push_back(var);
                 if (isvector)
                     for (i = 0; i < 3; ++i)
@@ -5843,9 +5631,7 @@ skipvar:
                 }
                 var->m_cvq = cvq;
             }
-            /* a constant initialized to an inexact value should be marked inexact:
-             * const float x = <inexact>; should propagate the inexact flag
-             */
+
             if (var->m_cvq == CV_CONST && var->m_vtype == TYPE_FLOAT) {
                 if (cval && cval->m_hasvalue && cval->m_cvq == CV_CONST)
                     var->m_inexact = cval->m_inexact;
@@ -5966,7 +5752,7 @@ static uint16_t progdefs_crc_sum(uint16_t old, const char *str)
 
 static void progdefs_crc_file(const char *str)
 {
-    /* write to progdefs.h here */
+
     (void)str;
 }
 
@@ -5985,18 +5771,7 @@ static void generate_checksum(parser_t *parser, ir_builder *ir)
 
     crc = progdefs_crc_both(crc, "\n/* file generated by qcc, do not modify */\n\ntypedef struct\n{");
     crc = progdefs_crc_sum(crc, "\tint\tpad[28];\n");
-    /*
-    progdefs_crc_file("\tint\tpad;\n");
-    progdefs_crc_file("\tint\tofs_return[3];\n");
-    progdefs_crc_file("\tint\tofs_parm0[3];\n");
-    progdefs_crc_file("\tint\tofs_parm1[3];\n");
-    progdefs_crc_file("\tint\tofs_parm2[3];\n");
-    progdefs_crc_file("\tint\tofs_parm3[3];\n");
-    progdefs_crc_file("\tint\tofs_parm4[3];\n");
-    progdefs_crc_file("\tint\tofs_parm5[3];\n");
-    progdefs_crc_file("\tint\tofs_parm6[3];\n");
-    progdefs_crc_file("\tint\tofs_parm7[3];\n");
-    */
+
     for (i = 0; i < parser->crc_globals; ++i) {
         if (!ast_istype(parser->globals[i], ast_value))
             continue;
@@ -6048,8 +5823,7 @@ parser_t::parser_t()
     , assign_op(nullptr)
     , noref(false)
     , max_param_count(1)
-    // finish initializing the rest of the parser before initializing
-    // m_fold and m_intrin with the parser passed along
+
     , m_fold()
     , m_intrin()
 {
@@ -6117,7 +5891,7 @@ parser_t *parser_create()
 
 static bool parser_compile(parser_t *parser)
 {
-    /* initial lexer/parser state */
+
     parser->lex->flags.noops = true;
 
     if (parser_next(parser))
@@ -6300,9 +6074,7 @@ bool parser_finish(parser_t *parser, const char *output)
             return false;
         }
     }
-    /* Build function vararg accessor ast tree now before generating
-     * immediates, because the accessors may add new immediates
-     */
+
     for (auto &f : parser->functions) {
         if (f->m_varargs) {
             if (parser->max_param_count > f->m_function_type->m_type_params.size()) {
@@ -6322,11 +6094,10 @@ bool parser_finish(parser_t *parser, const char *output)
             }
         }
     }
-    /* Now we can generate immediates */
+
     if (!parser->m_fold.generate(ir))
         return false;
 
-    /* before generating any functions we need to set the coverage_func */
     if (!parser_set_coverage_func(parser, ir))
         return false;
     for (auto &it : parser->globals) {
@@ -6408,7 +6179,6 @@ bool parser_finish(parser_t *parser, const char *output)
             return false;
         }
 
-        // ir->generate can generate compiler warnings
         fnCheckWErrors();
     }
     delete ir;

@@ -43,8 +43,6 @@ void Drag_MoveDrag(entity from, entity to) { }
 .bool maycheat;
 float gamestart_sv_cheats;
 
-
-
 void CheatInit()
 {
 	gamestart_sv_cheats = autocvar_sv_cheats;
@@ -54,7 +52,7 @@ void CheatShutdown()
 {
 }
 
-float CheatsAllowed(entity this, float i, int argc, float fr) // the cheat gets passed as argument for possible future ACL checking
+float CheatsAllowed(entity this, float i, int argc, float fr)
 {
 	if(IS_DEAD(this))
 		return 0;
@@ -65,14 +63,12 @@ float CheatsAllowed(entity this, float i, int argc, float fr) // the cheat gets 
 		if(this.lip < autocvar_sv_clones)
 			return 1;
 
-	// haha
 	if(this.maycheat)
 		return 1;
 
 	if(gamestart_sv_cheats && autocvar_sv_cheats)
 		return 1;
 
-	// if we get here, player is not allowed to cheat. Log it.
 	if(i)
 		bprintf("Player %s^7 tried to use cheat 'impulse %d'\n", playername(this.netname, this.team, false), i);
 	else if(argc)
@@ -110,14 +106,14 @@ void info_autoscreenshot_findtarget(entity this)
 		return;
 	}
 	vector a = vectoangles(e.origin - this.origin);
-	a.x = -a.x; // don't ask
+	a.x = -a.x;
 	this.angles_x = a.x;
 	this.angles_y = a.y;
-	// we leave Rick Roll alone
+
 }
 spawnfunc(info_autoscreenshot)
 {
-	// this one just has to exist
+
 	if(++num_autoscreenshot > autocvar_g_max_info_autoscreenshot)
 	{
 		objerror(this, "Too many info_autoscreenshot entitites. FAIL!");
@@ -134,8 +130,8 @@ float CheatImpulse(entity this, int imp)
 	{
 		entity e, e2;
 
-		case CHIMPULSE_SPEEDRUN_INIT.impulse: // deploy personal waypoint
-			// shared with regular waypoint init, so this is not a cheat by itself
+		case CHIMPULSE_SPEEDRUN_INIT.impulse:
+
 			if(!this.personal)
 			{
 				this.personal = new(personal_wp);
@@ -159,7 +155,7 @@ float CheatImpulse(entity this, int imp)
 			this.personal.pauserotfuel_finished = this.pauserotfuel_finished;
 			this.personal.pauseregen_finished = this.pauseregen_finished;
 			this.personal.teleport_time = time;
-			break; // this part itself doesn't cheat, so let's not count this
+			break;
 		case CHIMPULSE_CLONE_MOVING.impulse:
 			IS_CHEAT(this, imp, 0, 0);
 			makevectors (this.v_angle);
@@ -178,7 +174,7 @@ float CheatImpulse(entity this, int imp)
 		case CHIMPULSE_GIVE_ALL.impulse:
 			IS_CHEAT(this, imp, 0, 0);
 			CheatCommand(this, tokenize_console("give all"));
-			break; // already counted as cheat
+			break;
 		case CHIMPULSE_SPEEDRUN.impulse:
 			if(!autocvar_g_allow_checkpoints)
 				IS_CHEAT(this, imp, 0, 0);
@@ -192,7 +188,7 @@ float CheatImpulse(entity this, int imp)
 				}
 				else
 				{
-					// Abort speedrun, teleport back
+
 					setorigin(this, this.personal.origin);
 					this.oldvelocity = this.velocity = this.personal.velocity;
 					this.angles = this.personal.v_angle;
@@ -238,7 +234,7 @@ float CheatImpulse(entity this, int imp)
 					setorigin(this, e.origin);
 					this.angles = e.angles;
 					delete(e);
-					// should we? this.angles_x = -this.angles_x;
+
 					this.fixangle = true;
 					this.velocity = '0 0 0';
 					DID_CHEAT();
@@ -313,8 +309,7 @@ float CheatCommand(entity this, int argc)
 			IS_CHEAT(this, 0, argc, 0);
 			if(argc == 2)
 			{
-				// arguments:
-				//   effectname
+
 				effectnum = _particleeffectnum(argv(1));
 				W_SetupShot(this, weaponentities[0], false, false, SND_Null, CH_WEAPON_A, 0, 0);
 				traceline(w_shotorg, w_shotorg + w_shotdir * max_shot_distance, MOVE_NORMAL, this);
@@ -346,10 +341,10 @@ float CheatCommand(entity this, int argc)
 					if(f == 1)
 					{
 						e.angles = fixedvectoangles2(trace_plane_normal, v_forward);
-						e.angles = AnglesTransform_ApplyToAngles(e.angles, '-90 0 0'); // so unrotated models work
+						e.angles = AnglesTransform_ApplyToAngles(e.angles, '-90 0 0');
 					}
 					func_breakable_setup(e);
-					// now, is it valid?
+
 					if(f == 0)
 					{
 						tracebox(e.origin, e.mins, e.maxs, e.origin, MOVE_NORMAL, e);
@@ -386,8 +381,8 @@ float CheatCommand(entity this, int argc)
 			entity e = new(dragbox_box);
 			setthink(e, DragBox_Think);
 			e.nextthink = time;
-			e.solid = -1; // black
-			setmodel(e, MDL_Null); // network it
+			e.solid = -1;
+			setmodel(e, MDL_Null);
 			if(argc == 4)
 				e.cnt = stof(argv(1));
 			else
@@ -436,7 +431,7 @@ float CheatCommand(entity this, int argc)
 			entity e = new(dragpoint);
 			setthink(e, DragBox_Think);
 			e.nextthink = time;
-			e.solid = 0; // nothing special
+			e.solid = 0;
 			setmodel(e, MDL_MARKER);
 			setsize(e, STAT(PL_MIN, this), STAT(PL_MAX, this));
 			e.skin = 2;
@@ -573,8 +568,7 @@ float CheatCommand(entity this, int argc)
 						fputs(f, strcat("\"target\" \"checkpoint", ftos(e.cnt), "\"\n"));
 						if(e.cnt == 0)
 						{
-							// these need race_place
-							// counting...
+
 							effectnum = 1;
 							for(entity ent = NULL; (ent = find(ent, classname, "dragpoint")); )
 							if(ent.cnt == 0)
@@ -704,24 +698,17 @@ float CheatFrame(entity this)
 {
 	BEGIN_CHEAT_FUNCTION();
 
-	// Dragging can be used as either a cheat, or a function for some objects. If sv_cheats is active,
-	// the cheat dragging is used (unlimited pickup range and any entity can be carried). If sv_cheats
-	// is disabled, normal dragging is used (limited pickup range and only dragable objects can be carried),
-	// grabbing itself no longer being accounted as cheating.
-
 	switch(0)
 	{
 		default:
 			if(this.maycheat || (gamestart_sv_cheats && autocvar_sv_cheats))
 			{
-				// use cheat dragging if cheats are enabled
-				//if(Drag_IsDragging(this))
-					//crosshair_trace_plusvisibletriggers(this);
+
 				Drag(this, true, true);
 			}
 			else
 			{
-				Drag(this, false, false); // execute dragging
+				Drag(this, false, false);
 			}
 			break;
 	}
@@ -729,29 +716,18 @@ float CheatFrame(entity this)
 	END_CHEAT_FUNCTION();
 }
 
-
-
-
-
-// ENTITY DRAGGING
-
-// on dragger:
 .float draggravity;
-.float dragspeed; // speed of mouse wheel action
-.float dragdistance; // distance of dragentity's draglocalvector from view_ofs
-.vector draglocalvector; // local attachment vector of the dragentity
+.float dragspeed;
+.float dragdistance;
+.vector draglocalvector;
 .float draglocalangle;
-// on draggee:
+
 .entity draggedby;
 .float dragmovetype;
 
 float Drag(entity this, float force_allow_pick, float ischeat)
 {
 	BEGIN_CHEAT_FUNCTION();
-
-	// returns true when an entity has been picked up
-	// If pick is true, the object can also be picked up if it's not being held already
-	// If pick is false, only keep dragging the object if it's already being held
 
 	switch(0)
 	{
@@ -794,31 +770,27 @@ float Drag(entity this, float force_allow_pick, float ischeat)
 				float pick = force_allow_pick;
 				if (e && !pick && vdist(this.origin - e.origin, <=, autocvar_g_grab_range))
 				{
-					// pick is true if the object can be picked up. While an object is being carried, the Drag() function
-					// must execute for it either way, otherwise it would cause bugs if it went out of the player's trace.
-					// This also makes sure that an object can only pe picked up if in range, but does not get dropped if
-					// it goes out of range while slinging it around.
 
 					switch(e.grab)
 					{
-						case 0: // can't grab
+						case 0:
 							break;
-						case 1: // owner can grab
+						case 1:
 							if(e.owner == this || e.realowner == this)
 								pick = true;
 							break;
-						case 2: // owner and team mates can grab
+						case 2:
 							if(SAME_TEAM(e.owner, this) || SAME_TEAM(e.realowner, this) || e.team == this.team)
 								pick = true;
 							break;
-						case 3: // anyone can grab
+						case 3:
 							pick = true;
 							break;
 						default:
 							break;
 					}
 				}
-				// Find e and pick
+
 				if(e && pick && Drag_IsDraggable(e, this))
 				{
 					if(ischeat)
@@ -890,33 +862,30 @@ void Drag_Finish(entity dragger)
 	if((draggee.flags & FL_ITEM) && (vdist(draggee.velocity, <, 32)))
 	{
 		draggee.velocity = '0 0 0';
-		SET_ONGROUND(draggee); // floating items are FUN
+		SET_ONGROUND(draggee);
 	}
 }
 
 bool drag_undraggable(entity draggee, entity dragger)
 {
-	// stuff probably shouldn't need this, we should figure out why they do!
-	// exceptions of course are observers and weapon entities, where things mess up
+
 	return false;
 }
 
 float Drag_IsDraggable(entity draggee, entity dragger)
 {
-	// TODO add more checks for bad stuff here
+
 	if(draggee == NULL)
 		return false;
-	if(draggee.classname == "door") // FIXME find out why these must be excluded, or work around the problem (trying to drag these causes like 4 fps)
-		return false; // probably due to BSP collision
-	//if(draggee.model == "")
-	//	return false;
+	if(draggee.classname == "door")
+		return false;
 
 	return ((draggee.draggable) ? draggee.draggable(draggee, dragger) : true);
 }
 
 float Drag_MayChangeAngles(entity draggee)
 {
-	// TODO add more checks for bad stuff here
+
 	if(substring(draggee.model, 0, 1) == "*")
 		return false;
 	return true;
@@ -963,10 +932,10 @@ void Drag_Update(entity dragger)
 	if(Drag_MayChangeAngles(draggee))
 		draggee.angles_y = draggee.angles.y * (1 - f) + (dragger.v_angle.y + dragger.draglocalangle) * f;
 
-	draggee.ltime = max(servertime + serverframetime, draggee.ltime); // fixes func_train breakage
+	draggee.ltime = max(servertime + serverframetime, draggee.ltime);
 
 	vector vecs = '0 0 0';
-	.entity weaponentity = weaponentities[0]; // TODO: unhardcode
+	.entity weaponentity = weaponentities[0];
 	if(dragger.(weaponentity).movedir.x > 0)
 		vecs = dragger.(weaponentity).movedir;
 
@@ -1019,18 +988,18 @@ void DragBox_Think(entity this)
 		this.maxs_z = fabs(this.aiment.origin.z - this.enemy.origin.z) * 0.5;
 		this.mins = -1 * this.maxs;
 		setorigin(this, this.origin);
-		setsize(this, this.mins, this.maxs); // link edict
+		setsize(this, this.mins, this.maxs);
 	}
 
-	if(this.cnt == -1) // actually race_place -1
+	if(this.cnt == -1)
 	{
-		// show "10 10" for qualifying spawns
+
 		setmodel(this.killindicator, MDL_NUM(10));
 		setmodel(this.killindicator.killindicator, MDL_NUM(10));
 	}
-	else if(this.cnt == -2) // actually race_place 0
+	else if(this.cnt == -2)
 	{
-		// show "10 0" for loser spawns
+
 		setmodel(this.killindicator, MDL_NUM(10));
 		setmodel(this.killindicator.killindicator, MDL_NUM(0));
 	}

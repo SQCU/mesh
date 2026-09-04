@@ -1,8 +1,6 @@
 #include "monoflop.qh"
 #ifdef SVQC
-/*QUAKED spawnfunc_trigger_monoflop (.5 .5 .5) (-8 -8 -8) (8 8 8)
-"Mono-flop" trigger gate... turns one trigger event into one "on" and one "off" event, separated by a delay of "wait"
-*/
+
 void monoflop_use(entity this, entity actor, entity trigger)
 {
 	this.nextthink = time + this.wait;

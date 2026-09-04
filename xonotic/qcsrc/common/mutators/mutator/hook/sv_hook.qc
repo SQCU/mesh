@@ -1,7 +1,5 @@
 #include "sv_hook.qh"
 
-// can't use the autocvar as it doesn't work in the campaign
-//AUTOCVAR(g_grappling_hook, bool, false, "let players spawn with the grappling hook which allows them to pull themselves up");
 #ifdef SVQC
 AUTOCVAR(g_grappling_hook_useammo, bool, false, "Use ammunition with the off-hand grappling hook");
 
@@ -14,7 +12,7 @@ REGISTER_MUTATOR(hook, expr_evaluate(cvar_string("g_grappling_hook"))) {
     MUTATOR_ONROLLBACK_OR_REMOVE {
         g_grappling_hook = false;
         if(!autocvar_g_grappling_hook_useammo)
-            WEP_HOOK.ammo_factor = 1; // we don't need to change it
+            WEP_HOOK.ammo_factor = 1;
     }
 
     return false;

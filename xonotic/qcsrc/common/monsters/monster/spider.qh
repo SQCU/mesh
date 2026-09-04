@@ -22,10 +22,10 @@ REGISTER_MONSTER(SPIDER, NEW(Spider));
 #include <common/weapons/_all.qh>
 
 CLASS(SpiderAttack, PortoLaunch)
-/* flags     */ ATTRIB(SpiderAttack, spawnflags, int, WEP_FLAG_HIDDEN | WEP_FLAG_SPECIALATTACK);
-/* impulse   */ ATTRIB(SpiderAttack, impulse, int, 9);
-/* refname   */ ATTRIB(SpiderAttack, netname, string, "spider");
-/* wepname   */ ATTRIB(SpiderAttack, m_name, string, _("Spider attack"));
+                ATTRIB(SpiderAttack, spawnflags, int, WEP_FLAG_HIDDEN | WEP_FLAG_SPECIALATTACK);
+                ATTRIB(SpiderAttack, impulse, int, 9);
+                ATTRIB(SpiderAttack, netname, string, "spider");
+                ATTRIB(SpiderAttack, m_name, string, _("Spider attack"));
 ENDCLASS(SpiderAttack)
 REGISTER_WEAPON(SPIDER_ATTACK, NEW(SpiderAttack));
 
@@ -34,8 +34,7 @@ REGISTER_WEAPON(SPIDER_ATTACK, NEW(SpiderAttack));
 CLASS(Webbed, StatusEffects)
     ATTRIB(Webbed, netname, string, "webbed");
 #if 0
-    // NOTE: status effect name and icon disabled as they are not displayed
-    // re-enable if status effects are given a visual element
+
     ATTRIB(Webbed, m_name, string, _("Webbed"));
     ATTRIB(Webbed, m_icon, string, "buff_disability");
 #endif

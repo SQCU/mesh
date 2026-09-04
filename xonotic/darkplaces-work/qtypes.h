@@ -20,13 +20,10 @@ typedef bool qboolean;
 #define TRUE true
 #endif
 
-// up / down
 #define	PITCH	0
 
-// left / right
 #define	YAW		1
 
-// fall over
 #define	ROLL	2
 
 #if defined(__GNUC__) || (defined(_MSC_VER) && _MSC_VER >= 1400)
@@ -38,9 +35,6 @@ typedef bool qboolean;
 typedef long long dpint64;
 typedef unsigned long long dpuint64;
 
-// LordHavoc: upgrade the prvm to double precision for better time values
-// LordHavoc: to be enabled when bugs are worked out...
-//#define PRVM_64
 #ifdef PRVM_64
 typedef double prvm_vec_t;
 typedef long long prvm_int_t;

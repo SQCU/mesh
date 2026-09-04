@@ -1,0 +1,181 @@
+{
+  "definition": "owned relaxed-FP32 matrix boundary and DPP compared with an FP64 dense reference",
+  "rows": 129,
+  "inner": 97,
+  "columns": 83,
+  "samples": 2,
+  "products": {
+    "ab": {
+      "forward": {
+        "shape": [
+          129,
+          83
+        ],
+        "coordinate_mass": 10707,
+        "finite_coordinate_mass": 10707,
+        "reference_finite_coordinate_mass": 10707,
+        "maximum_absolute_residual": 0.03207990199899058,
+        "maximum_relative_residual": 0.0007662993362063711,
+        "residual_square_integral": 0.6398670293953082
+      },
+      "reverse_left": {
+        "shape": [
+          129,
+          97
+        ],
+        "coordinate_mass": 12513,
+        "finite_coordinate_mass": 12513,
+        "reference_finite_coordinate_mass": 12513,
+        "maximum_absolute_residual": 0.02723672175309133,
+        "maximum_relative_residual": 0.0007744107284039785,
+        "residual_square_integral": 0.6108892083782012
+      },
+      "reverse_right": {
+        "shape": [
+          97,
+          83
+        ],
+        "coordinate_mass": 8051,
+        "finite_coordinate_mass": 8051,
+        "reference_finite_coordinate_mass": 8051,
+        "maximum_absolute_residual": 0.03642084356542341,
+        "maximum_relative_residual": 0.0006782267126976642,
+        "residual_square_integral": 0.6125681906598492
+      },
+      "elapsed_s": {
+        "mass": 2,
+        "minimum": 0.00015725000412203372,
+        "maximum": 0.00027450002380646765,
+        "mean": 0.00021587501396425068,
+        "variance": 3.4368917790000364e-09
+      },
+      "flops_per_sample": 2077158,
+      "execution": {
+        "forward": "mpp_wide",
+        "reverse_left": "mpp_wide",
+        "reverse_right": "mpp_wide"
+      }
+    },
+    "atb": {
+      "forward": {
+        "shape": [
+          129,
+          83
+        ],
+        "coordinate_mass": 10707,
+        "finite_coordinate_mass": 10707,
+        "reference_finite_coordinate_mass": 10707,
+        "maximum_absolute_residual": 0.03564245180127301,
+        "maximum_relative_residual": 0.000891332617431895,
+        "residual_square_integral": 0.6140124862824525
+      },
+      "reverse_left": {
+        "shape": [
+          97,
+          129
+        ],
+        "coordinate_mass": 12513,
+        "finite_coordinate_mass": 12513,
+        "reference_finite_coordinate_mass": 12513,
+        "maximum_absolute_residual": 0.03028541454580136,
+        "maximum_relative_residual": 0.0007937918613042492,
+        "residual_square_integral": 0.6264609121655674
+      },
+      "reverse_right": {
+        "shape": [
+          97,
+          83
+        ],
+        "coordinate_mass": 8051,
+        "finite_coordinate_mass": 8051,
+        "reference_finite_coordinate_mass": 8051,
+        "maximum_absolute_residual": 0.03654292974164264,
+        "maximum_relative_residual": 0.0006939214094808819,
+        "residual_square_integral": 0.5971110321372064
+      },
+      "elapsed_s": {
+        "mass": 2,
+        "minimum": 0.00017512499471195042,
+        "maximum": 0.00021929098875261843,
+        "mean": 0.00019720799173228443,
+        "variance": 4.876587574000806e-10
+      },
+      "flops_per_sample": 2077158,
+      "execution": {
+        "forward": "mpp_wide",
+        "reverse_left": "mpp_wide",
+        "reverse_right": "mpp_wide"
+      }
+    },
+    "abt": {
+      "forward": {
+        "shape": [
+          129,
+          83
+        ],
+        "coordinate_mass": 10707,
+        "finite_coordinate_mass": 10707,
+        "reference_finite_coordinate_mass": 10707,
+        "maximum_absolute_residual": 0.044573521307995634,
+        "maximum_relative_residual": 0.0009383939404803157,
+        "residual_square_integral": 0.6158882434732627
+      },
+      "reverse_left": {
+        "shape": [
+          129,
+          97
+        ],
+        "coordinate_mass": 12513,
+        "finite_coordinate_mass": 12513,
+        "reference_finite_coordinate_mass": 12513,
+        "maximum_absolute_residual": 0.03478344137664635,
+        "maximum_relative_residual": 0.000868833471294561,
+        "residual_square_integral": 0.6008948690336129
+      },
+      "reverse_right": {
+        "shape": [
+          83,
+          97
+        ],
+        "coordinate_mass": 8051,
+        "finite_coordinate_mass": 8051,
+        "reference_finite_coordinate_mass": 8051,
+        "maximum_absolute_residual": 0.03203536146180852,
+        "maximum_relative_residual": 0.0007403137425618224,
+        "residual_square_integral": 0.6193848442736433
+      },
+      "elapsed_s": {
+        "mass": 2,
+        "minimum": 0.0002078329853247851,
+        "maximum": 0.0004576250212267041,
+        "mean": 0.0003327290032757446,
+        "variance": 1.55990153000064e-08
+      },
+      "flops_per_sample": 2077158,
+      "execution": {
+        "forward": "mpp_wide",
+        "reverse_left": "mpp_wide",
+        "reverse_right": "mpp_wide"
+      }
+    }
+  },
+  "dpp": {
+    "shape": [
+      129
+    ],
+    "coordinate_mass": 129,
+    "finite_coordinate_mass": 129,
+    "reference_finite_coordinate_mass": 129,
+    "maximum_absolute_residual": 0.002147254109313379,
+    "maximum_relative_residual": 0.0021845748173209938,
+    "residual_square_integral": 0.00018922104852102736,
+    "elapsed_s": {
+      "mass": 2,
+      "minimum": 0.004427915991982445,
+      "maximum": 0.004622541018761694,
+      "mean": 0.00452522850537207,
+      "variance": 9.469725262205878e-09
+    },
+    "feature_dimension_iterations": 97
+  }
+}

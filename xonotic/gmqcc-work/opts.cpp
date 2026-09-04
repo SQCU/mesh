@@ -32,13 +32,12 @@ const opts_flag_def_t opts_flag_list[COUNT_FLAGS+1] = {
 };
 
 unsigned int opts_optimizationcount[COUNT_OPTIMIZATIONS];
-opts_cmd_t   opts; /* command line options */
+opts_cmd_t   opts;
 
 static void opts_setdefault(void) {
     memset(&opts, 0, sizeof(opts_cmd_t));
     OPTS_OPTION_STR(OPTION_PROGSRC)     = "progs.src";
 
-    /* warnings */
     opts_set(opts.warn,  WARN_UNUSED_VARIABLE,           true);
     opts_set(opts.warn,  WARN_USED_UNINITIALIZED,        true);
     opts_set(opts.warn,  WARN_UNKNOWN_CONTROL_SEQUENCE,  true);
@@ -71,14 +70,12 @@ static void opts_setdefault(void) {
     opts_set(opts.warn,  WARN_BUILTINS,                  true);
     opts_set(opts.warn,  WARN_INEXACT_COMPARES,          true);
 
-    /* flags */
     opts_set(opts.flags, ADJUST_VECTOR_FIELDS,           true);
     opts_set(opts.flags, CORRECT_TERNARY,                true);
     opts_set(opts.flags, BAIL_ON_WERROR,                 true);
     opts_set(opts.flags, LEGACY_VECTOR_MATHS,            true);
     opts_set(opts.flags, DARKPLACES_STRING_TABLE_BUG,    true);
 
-    /* options */
     OPTS_OPTION_U32(OPTION_STATE_FPS) = 10;
 }
 
@@ -163,13 +160,6 @@ void opts_setoptimlevel(unsigned int level) {
         opts.optimizeoff = true;
 }
 
-/*
- * Standard configuration parser and subsystem.  Yes, optionally you may
- * create ini files or cfg (the driver accepts both) for a project opposed
- * to supplying just a progs.src (since you also may need to supply command
- * line arguments or set the options of the compiler) [which cannot be done
- * from a progs.src.
- */
 static char *opts_ini_rstrip(char *s) {
     char *p = s + strlen(s) - 1;
     while (p > s && util_isspace(*p))
@@ -204,7 +194,6 @@ static size_t opts_ini_parse (
     char   section_data[2048] = "";
     char   oldname_data[2048] = "";
 
-    /* parsing and reading variables */
     char *parse_beg;
     char *parse_end;
     char *read_name;
@@ -213,52 +202,50 @@ static size_t opts_ini_parse (
     while (util_getline(&line, &linesize, filehandle) != EOF) {
         parse_beg = line;
 
-        /* handle BOM */
         if (lineno == 1 && (
                 (unsigned char)parse_beg[0] == 0xEF &&
                 (unsigned char)parse_beg[1] == 0xBB &&
                 (unsigned char)parse_beg[2] == 0xBF
             )
         ) {
-            parse_beg ++; /* 0xEF */
-            parse_beg ++; /* 0xBB */
-            parse_beg ++; /* 0xBF */
+            parse_beg ++;
+            parse_beg ++;
+            parse_beg ++;
         }
 
         if (*(parse_beg = opts_ini_lskip(opts_ini_rstrip(parse_beg))) == ';' || *parse_beg == '#') {
-            /* ignore '#' is a perl extension */
+
         } else if (*parse_beg == '[') {
-            /* section found */
+
             if (*(parse_end = opts_ini_next(parse_beg + 1, ']')) == ']') {
-                * parse_end = '\0'; /* terminate bro */
+                * parse_end = '\0';
                 util_strncpy(section_data, parse_beg + 1, sizeof(section_data));
                 section_data[sizeof(section_data) - 1] = '\0';
                 *oldname_data                          = '\0';
             } else if (!error) {
-                /* otherwise set error to the current line number */
+
                 error = lineno;
             }
         } else if (*parse_beg && *parse_beg != ';') {
-            /* not a comment, must be a name value pair :) */
+
             if (*(parse_end = opts_ini_next(parse_beg, '=')) != '=')
                 parse_end = opts_ini_next(parse_beg, ':');
 
             if (*parse_end == '=' || *parse_end == ':') {
-                *parse_end = '\0'; /* terminate bro */
+                *parse_end = '\0';
                 read_name  = opts_ini_rstrip(parse_beg);
                 read_value = opts_ini_lskip(parse_end + 1);
                 if (*(parse_end = opts_ini_next(read_value, '\0')) == ';')
                     * parse_end = '\0';
                 opts_ini_rstrip(read_value);
 
-                /* valid name value pair, lets call down to handler */
                 util_strncpy(oldname_data, read_name, sizeof(oldname_data));
                 oldname_data[sizeof(oldname_data) - 1] ='\0';
 
                 if ((*errorhandle = loadhandle(section_data, read_name, read_value, parse_file)) && !error)
                     error = lineno;
             } else if (!strcmp(section_data, "includes")) {
-                /* Includes are special */
+
                 if (*(parse_end = opts_ini_next(parse_beg, '=')) == '='
                 ||  *(parse_end = opts_ini_next(parse_beg, ':')) == ':') {
                     static const char *invalid_include = "invalid use of include";
@@ -270,7 +257,7 @@ static size_t opts_ini_parse (
                         error = lineno;
                 }
             } else if (!error) {
-                /* otherwise set error to the current line number */
+
                 error = lineno;
             }
         }
@@ -281,9 +268,6 @@ static size_t opts_ini_parse (
 
 }
 
-/*
- * returns true/false for a char that contains ("true" or "false" or numeric 0/1)
- */
 static bool opts_ini_bool(const char *value) {
     if (!strcmp(value, "true"))  return true;
     if (!strcmp(value, "false")) return false;
@@ -294,15 +278,10 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
     char *error = nullptr;
     bool  found = false;
 
-    /*
-     * undef all of these because they may still be defined like in my
-     * case they where.
-     */
     #undef GMQCC_TYPE_FLAGS
     #undef GMQCC_TYPE_OPTIMIZATIONS
     #undef GMQCC_TYPE_WARNS
 
-    /* deal with includes */
     if (!strcmp(section, "includes")) {
         static const char *include_error_beg = "failed to open file `";
         static const char *include_error_end = "' for inclusion";
@@ -315,14 +294,13 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
         } else {
             if (opts_ini_parse(file, &opts_ini_load, &error, parse_file) != 0)
                 found = false;
-            /* Change the file name */
+
             mem_d(*parse_file);
             *parse_file = util_strdup(value);
             fclose(file);
         }
     }
 
-    /* flags */
     #define GMQCC_TYPE_FLAGS
     #define GMQCC_DEFINE_FLAG(X)                                       \
     if (!strcmp(section, "flags") && !strcmp(name, #X)) {              \
@@ -331,7 +309,6 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
     }
     #include "opts.def"
 
-    /* warnings */
     #define GMQCC_TYPE_WARNS
     #define GMQCC_DEFINE_FLAG(X)                                       \
     if (!strcmp(section, "warnings") && !strcmp(name, #X)) {           \
@@ -340,7 +317,6 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
     }
     #include "opts.def"
 
-    /* Werror-individuals */
     #define GMQCC_TYPE_WARNS
     #define GMQCC_DEFINE_FLAG(X)                                       \
     if (!strcmp(section, "errors") && !strcmp(name, #X)) {             \
@@ -349,7 +325,6 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
     }
     #include "opts.def"
 
-    /* optimizations */
     #define GMQCC_TYPE_OPTIMIZATIONS
     #define GMQCC_DEFINE_FLAG(X,Y)                                     \
     if (!strcmp(section, "optimizations") && !strcmp(name, #X)) {      \
@@ -358,7 +333,6 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
     }
     #include "opts.def"
 
-    /* nothing was found ever! */
     if (!found) {
         if (strcmp(section, "includes") &&
             strcmp(section, "flags")    &&
@@ -386,25 +360,17 @@ static char *opts_ini_load(const char *section, const char *name, const char *va
     return error;
 }
 
-/*
- * Actual loading subsystem, this finds the ini or cfg file, and properly
- * loads it and executes it to set compiler options.
- */
 void opts_ini_init(const char *file) {
-    /*
-     * Possible matches are:
-     *  gmqcc.ini
-     *  gmqcc.cfg
-     */
+
     char       *error = nullptr;
     char       *parse_file = nullptr;
     size_t     line;
     FILE  *ini;
 
     if (!file) {
-        /* try ini */
+
         if (!(ini = fopen((file = "gmqcc.ini"), "r")))
-            /* try cfg */
+
             if (!(ini = fopen((file = "gmqcc.cfg"), "r")))
                 return;
     } else if (!(ini = fopen(file, "r")))
@@ -414,8 +380,8 @@ void opts_ini_init(const char *file) {
 
     parse_file = util_strdup(file);
     if ((line = opts_ini_parse(ini, &opts_ini_load, &error, &parse_file)) != 0) {
-        /* there was a parse error with the ini file */
-        con_printmsg(LVL_ERROR, parse_file, line, 0 /*TODO: column for ini error*/, "error", error);
+
+        con_printmsg(LVL_ERROR, parse_file, line, 0                               , "error", error);
         vec_free(error);
     }
     mem_d(parse_file);

@@ -7,9 +7,8 @@
 
 	void ListBox_scrollToItem(entity me, int i)
 	{
-		// scroll doesn't work properly until itemHeight is set to the correct value
-		// at the first resizeNotify call
-		if (me.itemHeight == 1)  // initial temporary value of itemHeight is 1
+
+		if (me.itemHeight == 1)
 		{
 			me.needScrollToItem = i;
 			return;
@@ -17,16 +16,14 @@
 
 		i = bound(0, i, me.nItems - 1);
 
-		// scroll the list to make sure the selected item is visible
-		// (even if the selected item doesn't change).
 		if (i < me.getFirstFullyVisibleItemAtScrollPos(me, me.scrollPos))
 		{
-			// above visible area
+
 			me.scrollPosTarget = me.getItemStart(me, i);
 		}
 		else if (i > me.getLastFullyVisibleItemAtScrollPos(me, me.scrollPos))
 		{
-			// below visible area
+
 			if (i == me.nItems - 1) me.scrollPosTarget = me.getTotalHeight(me) - 1;
 			else me.scrollPosTarget = me.getItemStart(me, i + 1) - 1;
 		}
@@ -188,7 +185,7 @@
 			if (pos.y >= 1 + me.tolerance.y) hit = 0;
 			if (hit)
 			{
-				// calculate new pos to v
+
 				float d;
 				d = (pos.y - me.pressOffset) / (1 - (me.controlBottom - me.controlTop)) * (me.getTotalHeight(me) - 1);
 				me.scrollPosTarget = me.previousValue + d;
@@ -219,15 +216,15 @@
 		this.updateControlTopBottom(this);
 		if (pos.x >= 1 - this.controlWidth)
 		{
-			// if hit, set this.pressed, otherwise scroll by one page
+
 			if (pos.y < this.controlTop)
 			{
-				// page up
+
 				this.scrollPosTarget = max(this.scrollPosTarget - 1, 0);
 			}
 			else if (pos.y > this.controlBottom)
 			{
-				// page down
+
 				this.scrollPosTarget = min(this.scrollPosTarget + 1, this.getTotalHeight(this) - 1);
 			}
 			else
@@ -239,9 +236,9 @@
 		}
 		else
 		{
-			// continue doing that while dragging (even when dragging outside). When releasing, forward the click to the then selected item.
+
 			this.pressed = 2;
-			// an item has been clicked. Select it, ...
+
 			int clickeditem = this.getItemAtPos(this, this.scrollPos + pos.y);
 			this.setSelected(this, clickeditem);
 			this.setFocusedItem(this, clickeditem);
@@ -262,18 +259,16 @@
 	{
 		if (me.pressed == 1)
 		{
-			// slider dragging mode
-			// in that case, nothing happens on releasing
+
 		}
 		else if (me.pressed == 2)
 		{
-			me.pressed = 3;  // do that here, so setSelected can know the mouse has been released
-			// item dragging mode
-			// select current one one last time...
+			me.pressed = 3;
+
 			int clickeditem = me.getItemAtPos(me, me.scrollPos + pos.y);
 			me.setSelected(me, clickeditem);
 			me.setFocusedItem(me, clickeditem);
-			// and give it a nice click event
+
 			if (me.nItems > 0)
 			{
 				vector where = globalToBox(pos, eY * (me.getItemStart(me, me.selectedItem) - me.scrollPos), eX * (1 - me.controlWidth) + eY * me.getItemHeight(me, me.selectedItem));
@@ -292,9 +287,7 @@
 	}
 	void ListBox_focusLeave(entity me)
 	{
-		// Reset the var pressed in case listbox loses focus
-		// by a mouse click on an item of the list
-		// for example showing a dialog on right click
+
 		me.pressed = 0;
 		me.setFocusedItem(me, -1);
 		me.mouseMoveOffset = -1;
@@ -302,33 +295,30 @@
 	void ListBox_updateControlTopBottom(entity me)
 	{
 		float f;
-		// scrollPos is in 0..1 and indicates where the "page" currently shown starts.
+
 		if (me.getTotalHeight(me) <= 1)
 		{
-			// we don't need no stinkin' scrollbar, we don't need no view control...
+
 			me.controlTop = 0;
 			me.controlBottom = 1;
 			me.scrollPos = 0;
 		}
 		else
 		{
-			// if scroll pos is below end of list, fix it
+
 			me.scrollPos = min(me.scrollPos, me.getTotalHeight(me) - 1);
-			// if scroll pos is above beginning of list, fix it
+
 			me.scrollPos = max(me.scrollPos, 0);
-			// now that we know where the list is scrolled to, find out where to draw the control
+
 			me.controlTop = max(0, me.scrollPos / me.getTotalHeight(me));
 			me.controlBottom = min((me.scrollPos + 1) / me.getTotalHeight(me), 1);
 
 			float minfactor;
 			minfactor = 2 * me.controlWidth / me.size.y * me.size.x;
 			f = me.controlBottom - me.controlTop;
-			if (f < minfactor)  // FIXME good default?
+			if (f < minfactor)
 			{
-				// f * X + 1 * (1-X) = minfactor
-				// (f - 1) * X + 1 = minfactor
-				// (f - 1) * X = minfactor - 1
-				// X = (minfactor - 1) / (f - 1)
+
 				f = (minfactor - 1) / (f - 1);
 				me.controlTop = me.controlTop * f + 0 * (1 - f);
 				me.controlBottom = me.controlBottom * f + 1 * (1 - f);
@@ -336,13 +326,12 @@
 		}
 	}
 	AUTOCVAR(menu_scroll_averaging_time, float, 0.16, "smooth scroll averaging time");
-	// scroll faster while dragging the scrollbar
+
 	AUTOCVAR(menu_scroll_averaging_time_pressed, float, 0.06, "smooth scroll averaging time when dragging the scrollbar");
 	void ListBox_draw(entity me)
 	{
 		vector fillSize = '0 0 0';
 
-		// we can't do this in mouseMove as the list can scroll without moving the cursor
 		if (me.mouseMoveOffset != -1) me.setFocusedItem(me, me.getItemAtPos(me, me.scrollPos + me.mouseMoveOffset));
 
 		if (me.needScrollToItem >= 0)
@@ -355,13 +344,13 @@
 			float averaging_time = (me.pressed == 1)
 				? autocvar_menu_scroll_averaging_time_pressed
 				: autocvar_menu_scroll_averaging_time;
-			// this formula works with whatever framerate
+
 			float f = averaging_time ? exp(-frametime / averaging_time) : 0;
 			me.scrollPos = me.scrollPos * f + me.scrollPosTarget * (1 - f);
 			if (fabs(me.scrollPos - me.scrollPosTarget) < 0.001) me.scrollPos = me.scrollPosTarget;
 		}
 
-		if (me.pressed == 2) me.mouseDrag(me, me.dragScrollPos);  // simulate mouseDrag event
+		if (me.pressed == 2) me.mouseDrag(me, me.dragScrollPos);
 		me.updateControlTopBottom(me);
 		fillSize.x = (1 - me.controlWidth);
 		if (me.alphaBG) draw_Fill('0 0 0', '0 1 0' + fillSize, me.colorBG, me.alphaBG);
@@ -405,12 +394,12 @@
 
 	void ListBox_clickListBoxItem(entity me, float i, vector where)
 	{
-		// template method
+
 	}
 
 	void ListBox_doubleClickListBoxItem(entity me, float i, vector where)
 	{
-		// template method
+
 	}
 
 	void ListBox_drawListBoxItem(entity me, int i, vector absSize, bool isSelected, bool isFocused)

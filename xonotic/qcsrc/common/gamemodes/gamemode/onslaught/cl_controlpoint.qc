@@ -108,7 +108,7 @@ void cpicon_construct(entity this, bool isnew)
 {
 	this.netname = "Control Point Icon";
 
-	this.solid = SOLID_NOT; // before setmodel/setsize to prevent area grid linking
+	this.solid = SOLID_NOT;
 	setmodel(this, MDL_ONS_CP);
 	setsize(this, CPICON_MIN, CPICON_MAX);
 
@@ -125,7 +125,7 @@ void cpicon_construct(entity this, bool isnew)
 	if(this.iscaptured)
 	{
 		this.icon_realmodel.solid = SOLID_BBOX;
-		setorigin(this.icon_realmodel, this.icon_realmodel.origin); // link
+		setorigin(this.icon_realmodel, this.icon_realmodel.origin);
 	}
 
 	set_movetype(this, MOVETYPE_NOCLIP);
@@ -171,7 +171,7 @@ NET_HANDLE(ENT_CLIENT_CONTROLPOINT_ICON, bool isnew)
 		SetResourceExplicit(this, RES_HEALTH, ReadByte());
 		this.max_health = ReadByte();
 		this.count = ReadByte();
-		this.team = ReadByte();
+		this.team = ReadShort();
 		this.iscaptured = ReadByte();
 
 		if(!this.count)
@@ -190,7 +190,7 @@ NET_HANDLE(ENT_CLIENT_CONTROLPOINT_ICON, bool isnew)
 			cpicon_changeteam(this);
 		}
 
-		_tmp = ReadByte();
+		_tmp = ReadShort();
 
 		if(_tmp != GetResource(this, RES_HEALTH))
 			cpicon_damage(this, _tmp);

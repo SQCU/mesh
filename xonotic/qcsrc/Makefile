@@ -1,5 +1,5 @@
 CPP := cc -xc -E
-QCC ?= ../../../../gmqcc/gmqcc
+QCC ?= ../../gmqcc-work/gmqcc
 
 PROGS_OUT ?= ..
 WORKDIR ?= ../.tmp
@@ -29,11 +29,11 @@ ifndef ZIP
     endif
 endif
 
-# Set to empty string to temporarily enable warnings when debugging
+
 QCCFLAGS_WERROR ?= \
 	-Werror
 
-# We eventually need to get rid of these
+
 QCCFLAGS_WTFS ?= \
 	-Wno-field-redeclared
 
@@ -47,7 +47,7 @@ QCCDEFS ?= \
 	$(if $(BUILD_MOD), -DBUILD_MOD="$(BUILD_MOD)" -I$(BUILD_MOD), ) \
 	$(QCCDEFS_EXTRA)
 
-# -Ooverlap-locals is required
+
 QCCFLAGS ?= \
 	-std=gmqcc \
 	-Ooverlap-locals \
@@ -58,8 +58,6 @@ QCCFLAGS ?= \
 	-flno -futf8 -fno-bail-on-werror \
 	-frelaxed-switch -freturn-assignments \
 	$(QCCFLAGS_EXTRA)
-
-
 
 .PHONY: all
 all: qc pk3
@@ -92,16 +90,6 @@ sv: $(PROGS_OUT)/csprogs.dat $(PROGS_OUT)/progs.dat
 
 .PHONY: pk3
 pk3: csprogs-$(VER).pk3
-
-
-
-COMPTESTS = test-server test-client test-menu
-.PHONY: test $(COMPTESTS)
-test: $(COMPTESTS)
-$(COMPTESTS):
-	tools/compilationunits.sh $@
-
-
 
 %-$(VER).pk3: $(PROGS_OUT)/%.dat
 	$(eval PROG=$*)

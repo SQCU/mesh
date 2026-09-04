@@ -4,7 +4,7 @@ best={}
 for K in (2048,4096,8192):
     A=mx.random.normal((N,N)).astype(mx.float32); X=mx.random.normal((N,K)).astype(mx.float32)
     mx.eval(A,X)
-    for _ in range(3): mx.eval(A@X)          # warmup
+    for _ in range(3): mx.eval(A@X)
     ts=[]
     for _ in range(7):
         t=time.perf_counter()

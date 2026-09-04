@@ -73,7 +73,6 @@ void R_MeshQueue_RenderTransparent(void)
 	if (!mqt_count)
 		return;
 
-	// check for bad cvars
 	if (r_transparent_sortarraysize.integer < 1 || r_transparent_sortarraysize.integer > 32768)
 		Cvar_SetValueQuick(&r_transparent_sortarraysize, bound(1, r_transparent_sortarraysize.integer, 32768));
 	if (r_transparent_sortmindist.integer < 1 || r_transparent_sortmindist.integer >= r_transparent_sortmaxdist.integer)
@@ -81,19 +80,17 @@ void R_MeshQueue_RenderTransparent(void)
 	if (r_transparent_sortmaxdist.integer < r_transparent_sortmindist.integer || r_transparent_sortmaxdist.integer > 32768)
 		Cvar_SetValueQuick(&r_transparent_sortmaxdist, bound(r_transparent_sortmindist.integer, r_transparent_sortmaxdist.integer, 32768));
 
-	// update hash array
 	if (trans_sortarraysize != r_transparent_sortarraysize.integer)
 	{
 		trans_sortarraysize = r_transparent_sortarraysize.integer;
 		if (trans_hash)
 			Mem_Free(trans_hash);
-		trans_hash = (meshqueue_t **)Mem_Alloc(cls.permanentmempool, sizeof(meshqueue_t *) * trans_sortarraysize); 
+		trans_hash = (meshqueue_t **)Mem_Alloc(cls.permanentmempool, sizeof(meshqueue_t *) * trans_sortarraysize);
 		if (trans_hashpointer)
 			Mem_Free(trans_hashpointer);
-		trans_hashpointer = (meshqueue_t ***)Mem_Alloc(cls.permanentmempool, sizeof(meshqueue_t **) * trans_sortarraysize); 
+		trans_hashpointer = (meshqueue_t ***)Mem_Alloc(cls.permanentmempool, sizeof(meshqueue_t **) * trans_sortarraysize);
 	}
 
-	// build index
 	memset(trans_hash, 0, sizeof(meshqueue_t *) * trans_sortarraysize);
 	for (i = 0; i < trans_sortarraysize; i++)
 		trans_hashpointer[i] = &trans_hash[i];
@@ -108,14 +105,14 @@ void R_MeshQueue_RenderTransparent(void)
 			hashindex = 0;
 			break;
 		case TRANSPARENTSORT_DISTANCE:
-			// this could use a reduced range if we need more categories
+
 			hashindex = bound(0, (int)(bound(0, mqt->dist - r_transparent_sortmindist.integer, r_transparent_sortmaxdist.integer) * distscale), maxhashindex);
 			break;
 		case TRANSPARENTSORT_SKY:
 			hashindex = maxhashindex;
 			break;
 		}
-		// link to tail of hash chain (to preserve render order)
+
 		mqt->next = NULL;
 		*trans_hashpointer[hashindex] = mqt;
 		trans_hashpointer[hashindex] = &mqt->next;
@@ -125,7 +122,6 @@ void R_MeshQueue_RenderTransparent(void)
 	rtlight = NULL;
 	batchnumsurfaces = 0;
 
-	// draw
 	for (i = maxhashindex; i >= 0; i--)
 	{
 		if (trans_hash[i])

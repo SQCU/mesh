@@ -25,7 +25,7 @@ WepSet ReadWepSet();
 
 #include <common/util.qh>
 
-REGISTRY(Weapons, 72) // Increase as needed. Can be up to 72.
+REGISTRY(Weapons, 72)
 REGISTER_REGISTRY(Weapons)
 STATIC_INIT(WeaponPickup) { FOREACH(Weapons, true, it.m_pickup = NEW(WeaponPickup, it)); }
 
@@ -39,8 +39,8 @@ STATIC_INIT(WeaponPickup) { FOREACH(Weapons, true, it.m_pickup = NEW(WeaponPicku
 WepSet _WepSet_FromWeapon(int i);
 
 #define DEFAULT_FILENAME "weapons_dump.cfg"
-// NOTE: dumpeffectinfo, dumpnotifs, dumpturrets and dumpweapons use similar code
-GENERIC_COMMAND(dumpweapons, "Dump all turrets into " DEFAULT_FILENAME, false) // WEAPONTODO: make this work with other progs than just server
+
+GENERIC_COMMAND(dumpweapons, "Dump all turrets into " DEFAULT_FILENAME, false)
 {
     switch(request)
     {
@@ -123,7 +123,7 @@ STATIC_INIT_LATE(W_PROP_reloader)
 #define REGISTER_WEAPON(...) EVAL_REGISTER_WEAPON(OVERLOAD(REGISTER_WEAPON, __VA_ARGS__))
 #define EVAL_REGISTER_WEAPON(...) __VA_ARGS__
 #define REGISTER_WEAPON_2(id, inst) REGISTER(Weapons, WEP, id, m_id, inst)
-/** TODO: deprecated - remove */
+
 #define REGISTER_WEAPON_3(id, sname, inst) \
     REGISTER_WEAPON_2(id, inst); \
     [[alias("WEP_" #id)]] Weapon _wep_##sname
@@ -137,10 +137,8 @@ Weapon Weapon_from_name(string s)
     return WEP_Null;
 }
 
-
 #ifdef GAMEQC
 
-// legacy w_prop mappings
 #define X(fld, T) .T fld; .T wepvar_##fld = fld;
 X(switchdelay_drop, float)
 X(switchdelay_raise, float)
@@ -158,15 +156,12 @@ const .float reloading_time = reload_time;
 
 #endif
 
-
-
 #define W_PROPS(L, class, prefix) \
     L(W_PROP_BEGIN, W_PROP, W_PROP_END, class, prefix) \
     L(W_CONFIG_BEGIN, W_CONFIG, W_CONFIG_END, class, prefix) \
     L(W_UPDATE_BEGIN, W_UPDATE, W_UPDATE_END, class, prefix) \
     L(W_NET_BEGIN, W_NET, W_NET_END, class, prefix) \
-    /**/ \
-
+         \
 
     #define W_PROP(class, wepname, fld, T, m)       W_PROP_##m(class, fld, T, wepname)
     #define W_PROP_NONE(class, fld, T, wepname)     _W_PROP(class, fld, T, wepname)
@@ -178,7 +173,7 @@ const .float reloading_time = reload_time;
 	#define W_PROP_BEGIN(class)
 		#ifdef GAMEQC
 			#define _W_PROP(class, fld, T, wepname) \
-				/* static */ T _W_PROP_CVAR(wepname, fld); \
+				             T _W_PROP_CVAR(wepname, fld); \
 				ATTRIB(class, wepvar_##fld, T, _W_PROP_CVAR(wepname, fld));
 			#define _W_PROP_CVAR(wepname, fld) autocvar_g_balance_##wepname##_##fld
 		#else
@@ -186,8 +181,6 @@ const .float reloading_time = reload_time;
 			#define _W_PROP_CVAR(wepname, fld)
 		#endif
 	#define W_PROP_END()
-
-
 
     #define W_CONFIG(class, wepname, fld, T, m)     W_CONFIG_##m(class, fld, T, wepname)
     #define W_CONFIG_NONE(class, fld, T, wepname)   _W_CONFIG(class, fld, T, wepname)
@@ -205,7 +198,6 @@ const .float reloading_time = reload_time;
 			#define _W_CONFIG(class, fld, T, wepname)
 		#define W_CONFIG_END()
 	#endif
-
 
     #define W_UPDATE(class, wepname, fld, T, m)     W_UPDATE_##m(class, fld, T, wepname)
     #define W_UPDATE_NONE(class, fld, T, wepname)   _W_UPDATE(class, fld, T, wepname)
@@ -241,7 +233,6 @@ const .float reloading_time = reload_time;
 			#define _W_UPDATE(class, fld, T, wepname)
 		#define W_UPDATE_END()
 	#endif
-
 
     #define W_NET(class, wepname, fld, T, m)     W_NET_##m(class, fld, T, wepname)
     #define W_NET_NONE(class, fld, T, wepname)   _W_NET(class, fld, T, wepname)
@@ -292,10 +283,6 @@ const .float reloading_time = reload_time;
         #define W_NET_END()
     #endif
 
-
-
-// read cvars from weapon settings
-// cvars are created as such: g_balance_wepname_name
 #define WEP_CVAR(wepname, name) (_wep_##wepname.wepvar_##name)
 #define WEP_CVAR_PRI(wepname, name) WEP_CVAR(wepname, primary_##name)
 #define WEP_CVAR_SEC(wepname, name) WEP_CVAR(wepname, secondary_##name)
@@ -308,7 +295,6 @@ WepSet WEPSET_SUPERWEAPONS;
 
 #include "all.inc"
 
-// TODO: invert after changes have been made to the hardcoded weapon impulses. Will require moving 'best weapon' impulses
 #define WEP_IMPULSE_BEGIN 230
 #define WEP_IMPULSE_END bound(WEP_IMPULSE_BEGIN, WEP_IMPULSE_BEGIN + (REGISTRY_COUNT(Weapons) - 1) - 1, 253)
 
@@ -353,24 +339,20 @@ vector weaponentity_glowmod(Weapon wep, int c, entity wepent)
 
 .int m_gunalign;
 
-//.int weapon; // current weapon
-.string weaponname; // name of .weapon
+.string weaponname;
 
 #ifdef SVQC
-.vector spawnorigin; // for casings
+.vector spawnorigin;
 #endif
 
-.vector movedir_aligned; // shot origin based on weapon alignment (unaffected by shootfromeye)
+.vector movedir_aligned;
 
-// weapon animation vectors:
 .vector anim_fire1;
 .vector anim_fire2;
 .vector anim_idle;
 .vector anim_reload;
 
 .entity muzzle_flash;
-
-// static frame globals
 
 ENUMCLASS(WFRAME)
 CASE(WFRAME, DONTCHANGE)

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "source": "design/mesh-coprocessor-demo.md",
+  "models": {
+    "Mac17,6": {
+      "chip": "Apple M5 Max",
+      "gpu_cores": 40,
+      "gpu_fp32_gflops": 41288,
+      "gpu_bf16_gflops": 59054,
+      "cpu_gflops": 1695,
+      "memory_gbs": 362,
+      "fabric_gbs": 8.7
+    },
+    "Mac16,11": {
+      "chip": "Apple M4 Pro",
+      "gpu_cores": 16,
+      "gpu_fp32_gflops": 5377,
+      "gpu_bf16_gflops": 6047,
+      "cpu_gflops": 3488.27664,
+      "memory_gbs": 238,
+      "fabric_gbs": 8.7
+    }
+  }
+}

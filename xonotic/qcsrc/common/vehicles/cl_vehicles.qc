@@ -71,8 +71,6 @@ NET_HANDLE(TE_CSQC_VEHICLESETUP, bool isnew)
 	int hud_id = ReadByte();
 	return = true;
 
-	// hud_id == 0 means we exited a vehicle, so stop alarm sound/s
-	// note: HUD_NORMAL is set to 0 currently too, but we'll check both just in case
 	if(hud_id == 0 || hud_id == HUD_NORMAL)
 	{
 		sound(this, CH_TRIGGER_SINGLE, SND_Null, VOL_BASEVOICE, ATTEN_NONE);
@@ -91,12 +89,11 @@ NET_HANDLE(TE_CSQC_VEHICLESETUP, bool isnew)
 		return;
 	}
 
-	// Init auxiliary crosshairs
 	for(int i = 0; i < MAX_AXH; ++i)
 	{
 		entity axh = AuxiliaryXhair[i];
 
-		if(axh != NULL && !wasfreed(axh))  // MADNESS? THIS IS QQQQCCCCCCCCC (wasfreed, why do you exsist?)
+		if(axh != NULL && !wasfreed(axh))
 			delete(axh);
 
 		axh              = new(AuxiliaryXhair);
@@ -112,8 +109,8 @@ NET_HANDLE(TE_CSQC_VEHICLESETUP, bool isnew)
 
 	if(hud_id == HUD_BUMBLEBEE_GUN)
 	{
-		AuxiliaryXhair[0].axh_image = vCROSS_BURST; // Plasma cannons
-		AuxiliaryXhair[1].axh_image = vCROSS_BURST; // Raygun
+		AuxiliaryXhair[0].axh_image = vCROSS_BURST;
+		AuxiliaryXhair[1].axh_image = vCROSS_BURST;
 	} else {
 		Vehicle info = REGISTRY_GET(Vehicles, hud_id);
     	info.vr_setup(info, NULL);
@@ -129,7 +126,7 @@ void Vehicles_drawHUD(
 	string iconAmmo2,
 	vector colorAmmo2)
 {
-	// Initialize
+
 	vector tmpSize = '0 0 0';
 	vector tmpPos  = '0 0 0';
 
@@ -145,10 +142,8 @@ void Vehicles_drawHUD(
 	float ammo2   = STAT(VEHICLESTAT_AMMO2)   * 0.01;
 	float reload2 = STAT(VEHICLESTAT_RELOAD2) * 0.01;
 
-	// HACK to deal with the inconsistent use of the vehicle stats
 	ammo1 = (ammo1) ? ammo1 : energy;
 
-	// Frame
 	string frame = strcat(hud_skin_path, "/vehicle_frame");
 	if (precache_pic(frame) == "")
 		frame = "gfx/hud/default/vehicle_frame";
@@ -171,7 +166,6 @@ void Vehicles_drawHUD(
 		drawstring(tmpPos, sprintf(_("Press %s"), getcommandkey(_("drop weapon"), "dropweapon")), tmpSize, '1 0 0' + '0 1 1' * tmpblinkValue, hudAlpha, DRAWFLAG_NORMAL);
 	}
 
-	// Model
 	tmpSize.x = vehicleHud_Size.x / 3;
 	tmpSize.y = vehicleHud_Size.y;
 	tmpPos.x  = vehicleHud_Pos.x + vehicleHud_Size.x / 3;
@@ -189,7 +183,6 @@ void Vehicles_drawHUD(
 
 	drawpic_skin(tmpPos, "vehicle_shield", tmpSize, '1 1 1' * shield + '1 0 0' * (1 - shield), hudAlpha * shield, DRAWFLAG_NORMAL);
 
-	// Health bar
 	tmpSize.y = vehicleHud_Size.y / 2;
 	tmpPos.x  = vehicleHud_Pos.x + vehicleHud_Size.x * (32/768);
 	tmpPos.y  = vehicleHud_Pos.y;
@@ -197,13 +190,11 @@ void Vehicles_drawHUD(
 	drawsetcliparea(tmpPos.x + (tmpSize.x * (1 - health)), tmpPos.y, tmpSize.x, tmpSize.y);
 	drawpic_skin(tmpPos, "vehicle_bar_northwest", tmpSize, autocvar_hud_progressbar_health_color, barAlpha, DRAWFLAG_NORMAL);
 
-	// Shield bar
 	tmpPos.y = vehicleHud_Pos.y + vehicleHud_Size.y / 2;
 
 	drawsetcliparea(tmpPos.x + (tmpSize.x * (1 - shield)), tmpPos.y, tmpSize.x, tmpSize.y);
 	drawpic_skin(tmpPos, "vehicle_bar_southwest", tmpSize, autocvar_hud_progressbar_armor_color, barAlpha, DRAWFLAG_NORMAL);
 
-	// Ammo1 bar
 	tmpPos.x = vehicleHud_Pos.x + vehicleHud_Size.x * (480/768);
 	tmpPos.y = vehicleHud_Pos.y;
 
@@ -214,7 +205,6 @@ void Vehicles_drawHUD(
 
 	drawpic_skin(tmpPos, "vehicle_bar_northeast", tmpSize, colorAmmo1, barAlpha, DRAWFLAG_NORMAL);
 
-	// Ammo2 bar
 	tmpPos.y = vehicleHud_Pos.y + vehicleHud_Size.y / 2;
 
 	if(ammo2)
@@ -225,7 +215,6 @@ void Vehicles_drawHUD(
 	drawpic_skin(tmpPos, "vehicle_bar_southeast", tmpSize, colorAmmo2, barAlpha, DRAWFLAG_NORMAL);
 	drawresetcliparea();
 
-	// Health icon
 	tmpSize.x = vehicleHud_Size.x * (80/768);
 	tmpSize.y = vehicleHud_Size.y * (80/256);
 	tmpPos.x  = vehicleHud_Pos.x + vehicleHud_Size.x * (64/768);
@@ -250,7 +239,6 @@ void Vehicles_drawHUD(
 		drawpic_skin(tmpPos, "vehicle_icon_health", tmpSize, '1 1 1', hudAlpha, DRAWFLAG_NORMAL);
 	}
 
-	// Shield icon
 	tmpPos.y = vehicleHud_Pos.y + vehicleHud_Size.y / 2;
 
 	if(shield < 0.25)
@@ -272,7 +260,6 @@ void Vehicles_drawHUD(
 		drawpic_skin(tmpPos, "vehicle_icon_shield", tmpSize, '1 1 1', hudAlpha, DRAWFLAG_NORMAL);
 	}
 
-	// Ammo1 icon
 	tmpPos.x = vehicleHud_Pos.x + vehicleHud_Size.x * (624/768);
 	tmpPos.y = vehicleHud_Pos.y + vehicleHud_Size.y * (48/256);
 
@@ -284,7 +271,6 @@ void Vehicles_drawHUD(
 			drawpic_skin(tmpPos, iconAmmo1, tmpSize, '1 1 1', hudAlpha * 0.2, DRAWFLAG_NORMAL);
 	}
 
-	// Ammo2 icon
 	tmpPos.y = vehicleHud_Pos.y + vehicleHud_Size.y / 2;
 
 	if(iconAmmo2)
@@ -301,7 +287,6 @@ void Vehicles_drawCrosshair(string crosshair)
 	vector tmpSize = '0 0 0';
 	vector tmpPos  = '0 0 0';
 
-	// Crosshair
 	if(crosshair)
 	{
 		tmpSize  = draw_getimagesize(crosshair) * autocvar_cl_vehicles_crosshair_size;

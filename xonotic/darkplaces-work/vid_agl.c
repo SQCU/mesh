@@ -1,24 +1,3 @@
-/*
-	vid_agl.c
-
-	Mac OS X OpenGL and input module, using Carbon and AGL
-
-	Copyright (C) 2005-2006  Mathieu Olivier
-
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software
-	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-*/
 
 
 #include <dlfcn.h>
@@ -30,18 +9,16 @@
 #include <IOKit/hidsystem/IOHIDParameter.h>
 #include <IOKit/hidsystem/event_status_driver.h>
 #include "quakedef.h"
-#include "vid_agl_mackeys.h" // this is SDL/src/video/maccommon/SDL_mackeys.h
+#include "vid_agl_mackeys.h"
 
 #ifndef kCGLCEMPEngine
 #define kCGLCEMPEngine 313
 #endif
 
-// Tell startup code that we have a client
 int cl_available = true;
 
 qboolean vid_supportrefreshrate = true;
 
-// AGL prototypes
 AGLPixelFormat (*qaglChoosePixelFormat) (const AGLDevice *gdevs, GLint ndev, const GLint *attribList);
 AGLContext (*qaglCreateContext) (AGLPixelFormat pix, AGLContext share);
 GLboolean (*qaglDestroyContext) (AGLContext ctx);
@@ -105,7 +82,7 @@ void VID_SetMouse(qboolean fullscreengrab, qboolean relative, qboolean hidecurso
 	if (relative)
 	{
 		if(vid_usingmouse && (vid_usingnoaccel != !!apple_mouse_noaccel.integer))
-			VID_SetMouse(false, false, false); // ungrab first!
+			VID_SetMouse(false, false, false);
 		if (!vid_usingmouse)
 		{
 			Rect winBounds;
@@ -113,17 +90,14 @@ void VID_SetMouse(qboolean fullscreengrab, qboolean relative, qboolean hidecurso
 
 			SelectWindow(window);
 
-			// Put the mouse cursor at the center of the window
 			GetWindowBounds (window, kWindowContentRgn, &winBounds);
 			winCenter.x = (winBounds.left + winBounds.right) / 2;
 			winCenter.y = (winBounds.top + winBounds.bottom) / 2;
 			CGWarpMouseCursorPosition(winCenter);
 
-			// Lock the mouse pointer at its current position
 			CGAssociateMouseAndMouseCursorPosition(false);
 
-			// Save the status of mouse acceleration
-			originalMouseSpeed = -1.0; // in case of error
+			originalMouseSpeed = -1.0;
 			if(apple_mouse_noaccel.integer)
 			{
 				io_connect_t mouseDev = IN_GetIOHandle();
@@ -194,7 +168,6 @@ void VID_Finish (void)
 {
 	qboolean vid_usevsync;
 
-	// handle changes of the vsync option
 	vid_usevsync = (vid_vsync.integer && !cls.timedemo);
 	if (vid_usingvsync != vid_usevsync)
 	{
@@ -276,10 +249,10 @@ void InitSig(void)
 
 void VID_Init(void)
 {
-	InitSig(); // trap evil signals
+	InitSig();
 	Cvar_RegisterVariable(&apple_multithreadedgl);
 	Cvar_RegisterVariable(&apple_mouse_noaccel);
-// COMMANDLINEOPTION: Input: -nomouse disables mouse support (see also vid_mouse cvar)
+
 	if (COM_CheckParm ("-nomouse"))
 		mouse_avail = false;
 }
@@ -363,7 +336,6 @@ void VID_Shutdown(void)
 	GL_CloseLibrary();
 }
 
-// Since the event handler can be called at any time, we store the events for later processing
 static qboolean AsyncEvent_Quitting = false;
 static qboolean AsyncEvent_Collapsed = false;
 static OSStatus MainWindowEventHandler (EventHandlerCallRef nextHandler, EventRef event, void *userData)
@@ -376,12 +348,10 @@ static OSStatus MainWindowEventHandler (EventHandlerCallRef nextHandler, EventRe
 			AsyncEvent_Quitting = true;
 			break;
 
-		// Docked (start)
 		case kEventWindowCollapsing:
 			AsyncEvent_Collapsed = true;
 			break;
 
-		// Undocked / restored (end)
 		case kEventWindowExpanded:
 			AsyncEvent_Collapsed = false;
 			break;
@@ -419,14 +389,13 @@ static void VID_AppFocusChanged(qboolean windowIsActive)
 
 static void VID_ProcessPendingAsyncEvents (void)
 {
-	// Collapsed / expanded
+
 	if (AsyncEvent_Collapsed != vid_hidden)
 	{
 		vid_hidden = !vid_hidden;
 		VID_AppFocusChanged(!vid_hidden);
 	}
 
-	// Closed
 	if (AsyncEvent_Quitting)
 		Sys_Quit(0);
 }
@@ -440,7 +409,6 @@ static void VID_BuildAGLAttrib(GLint *attrib, qboolean stencil, qboolean fullscr
 	*attrib++ = AGL_DOUBLEBUFFER;
 	*attrib++ = AGL_DEPTH_SIZE;*attrib++ = stencil ? 24 : 16;
 
-	// if stencil is enabled, ask for alpha too
 	if (stencil)
 	{
 		*attrib++ = AGL_STENCIL_SIZE;*attrib++ = 8;
@@ -510,11 +478,9 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 	if(!qCGLEnable || !qCGLDisable || !qCGLGetCurrentContext)
 		Con_Printf("CGL functions not found; disabling multithreaded OpenGL\n");
 
-	// Ignore the events from the previous window
 	AsyncEvent_Quitting = false;
 	AsyncEvent_Collapsed = false;
 
-	// Create the window, a bit towards the center of the screen
 	windowBounds.left = 100;
 	windowBounds.top = 100;
 	windowBounds.right = mode->width + 100;
@@ -526,21 +492,17 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 		return false;
 	}
 
-	// Set the window title
 	windowTitle = CFSTR("DarkPlaces AGL");
 	SetWindowTitleWithCFString(window, windowTitle);
 
-	// Install the callback function for the window events we can't get
-	// through ReceiveNextEvent (i.e. close, collapse, and expand)
 	InstallWindowEventHandler (window, NewEventHandlerUPP (MainWindowEventHandler),
 							   GetEventTypeCount(winEvents), winEvents, window, NULL);
 
-	// Create the desired attribute list
 	VID_BuildAGLAttrib(attributes, mode->bitsperpixel == 32, mode->fullscreen, mode->stereobuffer, mode->samples);
 
 	if (!mode->fullscreen)
 	{
-		// Output to Window
+
 		pixelFormat = qaglChoosePixelFormat(NULL, 0, attributes);
 		error = qaglGetError();
 		if (error != AGL_NO_ERROR)
@@ -551,24 +513,19 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 			return false;
 		}
 	}
-	else  // Output is fullScreen
+	else
 	{
 		CGDirectDisplayID mainDisplay;
 		CFDictionaryRef refDisplayMode;
 		GDHandle gdhDisplay;
 
-		// Get the mainDisplay and set resolution to current
 		mainDisplay = CGMainDisplayID();
 		CGDisplayCapture(mainDisplay);
 
-		// TOCHECK: not sure whether or not it's necessary to change the resolution
-		// "by hand", or if aglSetFullscreen does the job anyway
 		refDisplayMode = CGDisplayBestModeForParametersAndRefreshRateWithProperty(mainDisplay, mode->bitsperpixel, mode->width, mode->height, mode->refreshrate, kCGDisplayModeIsSafeForHardware, NULL);
 		CGDisplaySwitchToMode(mainDisplay, refDisplayMode);
 		DMGetGDeviceByDisplayID((DisplayIDType)mainDisplay, &gdhDisplay, false);
 
-		// Set pixel format with built attribs
-		// Note: specifying a device is *required* for AGL_FullScreen
 		pixelFormat = qaglChoosePixelFormat(&gdhDisplay, 1, attributes);
 		error = qaglGetError();
 		if (error != AGL_NO_ERROR)
@@ -580,7 +537,6 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 		}
 	}
 
-	// Create a context using the pform
 	context = qaglCreateContext(pixelFormat, NULL);
 	error = qaglGetError();
 	if (error != AGL_NO_ERROR)
@@ -589,7 +545,6 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 					(char *)qaglErrorString(error));
 	}
 
-	// Make the context the current one ('enable' it)
 	qaglSetCurrentContext(context);
 	error = qaglGetError();
 	if (error != AGL_NO_ERROR)
@@ -600,10 +555,8 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 		return false;
 	}
 
-	// Discard pform
 	qaglDestroyPixelFormat(pixelFormat);
 
-	// Attempt fullscreen if requested
 	if (mode->fullscreen)
 	{
 		qaglSetFullScreen (context, mode->width, mode->height, mode->refreshrate, 0);
@@ -617,7 +570,7 @@ qboolean VID_InitMode(viddef_mode_t *mode)
 	}
 	else
 	{
-		// Set Window as Drawable
+
 		qaglSetDrawable(context, GetWindowPort(window));
 		error = qaglGetError();
 		if (error != AGL_NO_ERROR)
@@ -835,12 +788,12 @@ static void Handle_Key(unsigned char charcode, UInt32 mackeycode, qboolean keypr
 					break;
 				case 0:
 				case 191:
-					// characters 0 and 191 are sent by the mouse buttons (?!)
+
 					break;
 				default:
 					if ('A' <= charcode && charcode <= 'Z')
 					{
-						keycode = charcode + ('a' - 'A');  // lowercase it
+						keycode = charcode + ('a' - 'A');
 						ascii = charcode;
 					}
 					else if (charcode >= 32)
@@ -862,7 +815,6 @@ void Sys_SendKeyEvents(void)
 	EventRef theEvent;
 	EventTargetRef theTarget;
 
-	// Start by processing the asynchronous events we received since the previous frame
 	VID_ProcessPendingAsyncEvents();
 
 	theTarget = GetEventDispatcherTarget();
@@ -899,8 +851,6 @@ void Sys_SendKeyEvents(void)
 						Key_Event(key, '\0', eventKind == kEventMouseDown);
 						break;
 
-					// Note: These two events are mutual exclusives
-					// Treat MouseDragged in the same statement, so we don't block MouseMoved while a mousebutton is held
 					case kEventMouseMoved:
 					case kEventMouseDragged:
 					{
@@ -1036,10 +986,7 @@ void Sys_SendKeyEvents(void)
 				break;
 
 			default:
-				/*Con_Printf(">> UNKNOWN eventClass: %c%c%c%c, eventKind: %d <<\n",
-							eventClass >> 24, (eventClass >> 16) & 0xFF,
-							(eventClass >> 8) & 0xFF, eventClass & 0xFF,
-							eventKind);*/
+
 				break;
 		}
 
@@ -1063,7 +1010,6 @@ void VID_EnableJoystick(qboolean enable)
 	if (index >= 0 && index < sharedcount)
 		success = true;
 
-	// update cvar containing count of XInput joysticks
 	if (joy_detected.integer != sharedcount)
 		Cvar_SetValueQuick(&joy_detected, sharedcount);
 
@@ -1097,7 +1043,7 @@ long GetDictionaryLong(CFDictionaryRef d, const void *key)
 
 vid_mode_t *VID_GetDesktopMode(void)
 {
-	return NULL; // FIXME add desktopfullscreen
+	return NULL;
 }
 
 size_t VID_ListModes(vid_mode_t *modes, size_t maxcount)
@@ -1123,7 +1069,7 @@ size_t VID_ListModes(vid_mode_t *modes, size_t maxcount)
 		modes[k].bpp = GetDictionaryLong(thismode, kCGDisplayBitsPerPixel);
 		modes[k].refreshrate = GetDictionaryLong(thismode, kCGDisplayRefreshRate);
 		modes[k].pixelheight_num = 1;
-		modes[k].pixelheight_denom = 1; // OS X doesn't expose this either
+		modes[k].pixelheight_denom = 1;
 		++k;
 	}
 	return k;

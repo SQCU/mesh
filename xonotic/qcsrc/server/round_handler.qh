@@ -1,11 +1,11 @@
 #pragma once
 
 entity round_handler;
-.float delay; // stores delay from round end to countdown start
-.float count; // stores initial number of the countdown
-.bool wait; // it's set to true when round ends, to false when countdown starts
-.float cnt;	// its initial value is .count + 1, then decreased while counting down
-			// reaches 0 when the round starts
+.float delay;
+.float count;
+.bool wait;
+.float cnt;
+
 .float round_timelimit;
 .float round_endtime;
 .bool() canRoundStart;

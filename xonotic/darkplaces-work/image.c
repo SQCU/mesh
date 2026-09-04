@@ -13,11 +13,11 @@ static void Image_CopyAlphaFromBlueBGRA(unsigned char *outpixels, const unsigned
 	int i, n;
 	n = w * h;
 	for(i = 0; i < n; ++i)
-		outpixels[4*i+3] = inpixels[4*i]; // blue channel
+		outpixels[4*i+3] = inpixels[4*i];
 }
 
 #if 1
-// written by LordHavoc in a readable way, optimized by Vic, further optimized by LordHavoc (the non-special index case), readable version preserved below this
+
 void Image_CopyMux(unsigned char *outpixels, const unsigned char *inpixels, int inputwidth, int inputheight, qboolean inputflipx, qboolean inputflipy, qboolean inputflipdiagonal, int numoutputcomponents, int numinputcomponents, int *outputinputcomponentindices)
 {
 	int index, c, x, y;
@@ -30,7 +30,7 @@ void Image_CopyMux(unsigned char *outpixels, const unsigned char *inpixels, int 
 			break;
 	if (c < numoutputcomponents)
 	{
-		// special indices used
+
 		if (inputflipdiagonal)
 		{
 			for (x = 0, line = inpixels + col_ofs; x < inputwidth; x++, line += col_inc)
@@ -48,7 +48,7 @@ void Image_CopyMux(unsigned char *outpixels, const unsigned char *inpixels, int 
 	}
 	else
 	{
-		// special indices not used
+
 		if (inputflipdiagonal)
 		{
 			for (x = 0, line = inpixels + col_ofs; x < inputwidth; x++, line += col_inc)
@@ -66,7 +66,7 @@ void Image_CopyMux(unsigned char *outpixels, const unsigned char *inpixels, int 
 	}
 }
 #else
-// intentionally readable version
+
 void Image_CopyMux(unsigned char *outpixels, const unsigned char *inpixels, int inputwidth, int inputheight, qboolean inputflipx, qboolean inputflipy, qboolean inputflipdiagonal, int numoutputcomponents, int numinputcomponents, int *outputinputcomponentindices)
 {
 	int index, c, x, y;
@@ -122,7 +122,6 @@ void Image_GammaRemapRGB(const unsigned char *in, unsigned char *out, int pixels
 	}
 }
 
-// note: pal must be 32bit color
 void Image_Copy8bitBGRA(const unsigned char *in, unsigned char *out, int pixels, const unsigned int *pal)
 {
 	int *iout = (int *)out;
@@ -160,14 +159,6 @@ void Image_Copy8bitBGRA(const unsigned char *in, unsigned char *out, int pixels,
 		iout[0] = pal[in[0]];
 }
 
-/*
-=================================================================
-
-  PCX Loading
-
-=================================================================
-*/
-
 typedef struct pcx_s
 {
     char	manufacturer;
@@ -184,11 +175,6 @@ typedef struct pcx_s
     char	filler[58];
 } pcx_t;
 
-/*
-============
-LoadPCX
-============
-*/
 static unsigned char* LoadPCX_BGRA (const unsigned char *f, int filesize, int *miplevel)
 {
 	pcx_t pcx;
@@ -207,7 +193,6 @@ static unsigned char* LoadPCX_BGRA (const unsigned char *f, int filesize, int *m
 	memcpy(&pcx, fin, sizeof(pcx));
 	fin += sizeof(pcx);
 
-	// LordHavoc: big-endian support ported from QF newtree
 	pcx.xmax = LittleShort (pcx.xmax);
 	pcx.xmin = LittleShort (pcx.xmin);
 	pcx.ymax = LittleShort (pcx.ymax);
@@ -249,7 +234,7 @@ static unsigned char* LoadPCX_BGRA (const unsigned char *f, int filesize, int *m
 				x2 = x + (dataByte & 0x3F);
 				dataByte = *fin++;
 				if (x2 > image_width)
-					x2 = image_width; // technically an error
+					x2 = image_width;
 				while(x < x2)
 					a[x++] = dataByte;
 			}
@@ -275,11 +260,6 @@ static unsigned char* LoadPCX_BGRA (const unsigned char *f, int filesize, int *m
 	return image_buffer;
 }
 
-/*
-============
-LoadPCX
-============
-*/
 qboolean LoadPCX_QWSkin(const unsigned char *f, int filesize, unsigned char *pixels, int outwidth, int outheight)
 {
 	pcx_t pcx;
@@ -297,7 +277,6 @@ qboolean LoadPCX_QWSkin(const unsigned char *f, int filesize, unsigned char *pix
 	memcpy(&pcx, fin, sizeof(pcx));
 	fin += sizeof(pcx);
 
-	// LordHavoc: big-endian support ported from QF newtree
 	pcx.xmax = LittleShort (pcx.xmax);
 	pcx.xmin = LittleShort (pcx.xmin);
 	pcx.ymax = LittleShort (pcx.ymax);
@@ -317,7 +296,7 @@ qboolean LoadPCX_QWSkin(const unsigned char *f, int filesize, unsigned char *pix
 	for (y = 0;y < outheight && fin < enddata;y++)
 	{
 		a = pixels + y * outwidth;
-		// pad the output with blank lines if needed
+
 		if (y >= pcxheight)
 		{
 			memset(a, 0, outwidth);
@@ -342,7 +321,7 @@ qboolean LoadPCX_QWSkin(const unsigned char *f, int filesize, unsigned char *pix
 			}
 			else
 			{
-				if (x < outwidth) // truncate to destination width
+				if (x < outwidth)
 					a[x] = dataByte;
 				x++;
 			}
@@ -354,11 +333,6 @@ qboolean LoadPCX_QWSkin(const unsigned char *f, int filesize, unsigned char *pix
 	return true;
 }
 
-/*
-============
-LoadPCX
-============
-*/
 qboolean LoadPCX_PaletteOnly(const unsigned char *f, int filesize, unsigned char *palette768b)
 {
 	if (filesize < 768)
@@ -366,14 +340,6 @@ qboolean LoadPCX_PaletteOnly(const unsigned char *f, int filesize, unsigned char
 	memcpy(palette768b, f + filesize - 768, 768);
 	return true;
 }
-
-/*
-=========================================================
-
-TARGA LOADING
-
-=========================================================
-*/
 
 typedef struct _TargaHeader
 {
@@ -390,11 +356,6 @@ static void PrintTargaHeader(TargaHeader *t)
 	Con_Printf("TargaHeader:\nuint8 id_length = %i;\nuint8 colormap_type = %i;\nuint8 image_type = %i;\nuint16 colormap_index = %i;\nuint16 colormap_length = %i;\nuint8 colormap_size = %i;\nuint16 x_origin = %i;\nuint16 y_origin = %i;\nuint16 width = %i;\nuint16 height = %i;\nuint8 pixel_size = %i;\nuint8 attributes = %i;\n", t->id_length, t->colormap_type, t->image_type, t->colormap_index, t->colormap_length, t->colormap_size, t->x_origin, t->y_origin, t->width, t->height, t->pixel_size, t->attributes);
 }
 
-/*
-=============
-LoadTGA
-=============
-*/
 unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel)
 {
 	int x, y, pix_inc, row_inci, runlen, alphabits;
@@ -438,15 +399,10 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 
 	memset(palettei, 0, sizeof(palettei));
 
-	// advance to end of header
 	fin = f + 18;
 
-	// skip TARGA image comment (usually 0 bytes)
 	fin += targa_header.id_length;
 
-	// read/skip the colormap if present (note: according to the TARGA spec it
-	// can be present even on truecolor or greyscale images, just not used by
-	// the image data)
 	if (targa_header.colormap_type)
 	{
 		if (targa_header.colormap_length > 256)
@@ -485,7 +441,6 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 		}
 	}
 
-	// check our pixel_size restrictions according to image_type
 	switch (targa_header.image_type & ~8)
 	{
 	case 2:
@@ -497,14 +452,14 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 		}
 		break;
 	case 3:
-		// set up a palette to make the loader easier
+
 		for (x = 0;x < 256;x++)
 		{
 			bgra.b[0] = bgra.b[1] = bgra.b[2] = x;
 			bgra.b[3] = 255;
 			palettei[x] = bgra.i;
 		}
-		// fall through to colormap case
+
 	case 1:
 		if (targa_header.pixel_size != 8)
 		{
@@ -525,7 +480,6 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 		return NULL;
 	}
 
-	// number of attribute bits per pixel, we only support 0 or 8
 	alphabits = targa_header.attributes & 0x0F;
 	if (alphabits != 8 && alphabits != 0)
 	{
@@ -540,7 +494,6 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 		return NULL;
 	}
 
-	// If bit 5 of attributes isn't set, the image has been stored from bottom to top
 	if ((targa_header.attributes & 0x20) == 0)
 	{
 		pixbufi = (unsigned int*)image_buffer + (image_height - 1)*image_width;
@@ -557,8 +510,8 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 		pix_inc = (targa_header.pixel_size + 7) / 8;
 	switch (targa_header.image_type)
 	{
-	case 1: // colormapped, uncompressed
-	case 3: // greyscale, uncompressed
+	case 1:
+	case 3:
 		if (fin + image_width * image_height * pix_inc > enddata)
 			break;
 		for (y = 0;y < image_height;y++, pixbufi += row_inci)
@@ -566,7 +519,7 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 				*pixbufi++ = palettei[*fin++];
 		break;
 	case 2:
-		// BGR or BGRA, uncompressed
+
 		if (fin + image_width * image_height * pix_inc > enddata)
 			break;
 		if (targa_header.pixel_size == 32 && alphabits)
@@ -589,35 +542,35 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 			}
 		}
 		break;
-	case 9: // colormapped, RLE
-	case 11: // greyscale, RLE
+	case 9:
+	case 11:
 		for (y = 0;y < image_height;y++, pixbufi += row_inci)
 		{
 			for (x = 0;x < image_width;)
 			{
 				if (fin >= enddata)
-					break; // error - truncated file
+					break;
 				runlen = *fin++;
 				if (runlen & 0x80)
 				{
-					// RLE - all pixels the same color
+
 					runlen += 1 - 0x80;
 					if (fin + pix_inc > enddata)
-						break; // error - truncated file
+						break;
 					if (x + runlen > image_width)
-						break; // error - line exceeds width
+						break;
 					bgra.i = palettei[*fin++];
 					for (;runlen--;x++)
 						*pixbufi++ = bgra.i;
 				}
 				else
 				{
-					// uncompressed - all pixels different color
+
 					runlen++;
 					if (fin + pix_inc * runlen > enddata)
-						break; // error - truncated file
+						break;
 					if (x + runlen > image_width)
-						break; // error - line exceeds width
+						break;
 					for (;runlen--;x++)
 						*pixbufi++ = palettei[*fin++];
 				}
@@ -625,14 +578,14 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 
 			if (x != image_width)
 			{
-				// pixbufi is useless now
+
 				Con_Printf("LoadTGA: corrupt file\n");
 				break;
 			}
 		}
 		break;
 	case 10:
-		// BGR or BGRA, RLE
+
 		if (targa_header.pixel_size == 32 && alphabits)
 		{
 			for (y = 0;y < image_height;y++, pixbufi += row_inci)
@@ -640,16 +593,16 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 				for (x = 0;x < image_width;)
 				{
 					if (fin >= enddata)
-						break; // error - truncated file
+						break;
 					runlen = *fin++;
 					if (runlen & 0x80)
 					{
-						// RLE - all pixels the same color
+
 						runlen += 1 - 0x80;
 						if (fin + pix_inc > enddata)
-							break; // error - truncated file
+							break;
 						if (x + runlen > image_width)
-							break; // error - line exceeds width
+							break;
 						bgra.b[0] = fin[0];
 						bgra.b[1] = fin[1];
 						bgra.b[2] = fin[2];
@@ -660,12 +613,12 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 					}
 					else
 					{
-						// uncompressed - all pixels different color
+
 						runlen++;
 						if (fin + pix_inc * runlen > enddata)
-							break; // error - truncated file
+							break;
 						if (x + runlen > image_width)
-							break; // error - line exceeds width
+							break;
 						for (;runlen--;x++)
 						{
 							bgra.b[0] = fin[0];
@@ -680,7 +633,7 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 
 				if (x != image_width)
 				{
-					// pixbufi is useless now
+
 					Con_Printf("LoadTGA: corrupt file\n");
 					break;
 				}
@@ -693,16 +646,16 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 				for (x = 0;x < image_width;)
 				{
 					if (fin >= enddata)
-						break; // error - truncated file
+						break;
 					runlen = *fin++;
 					if (runlen & 0x80)
 					{
-						// RLE - all pixels the same color
+
 						runlen += 1 - 0x80;
 						if (fin + pix_inc > enddata)
-							break; // error - truncated file
+							break;
 						if (x + runlen > image_width)
-							break; // error - line exceeds width
+							break;
 						bgra.b[0] = fin[0];
 						bgra.b[1] = fin[1];
 						bgra.b[2] = fin[2];
@@ -713,12 +666,12 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 					}
 					else
 					{
-						// uncompressed - all pixels different color
+
 						runlen++;
 						if (fin + pix_inc * runlen > enddata)
-							break; // error - truncated file
+							break;
 						if (x + runlen > image_width)
-							break; // error - line exceeds width
+							break;
 						for (;runlen--;x++)
 						{
 							bgra.b[0] = fin[0];
@@ -733,7 +686,7 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 
 				if (x != image_width)
 				{
-					// pixbufi is useless now
+
 					Con_Printf("LoadTGA: corrupt file\n");
 					break;
 				}
@@ -741,7 +694,7 @@ unsigned char *LoadTGA_BGRA (const unsigned char *f, int filesize, int *miplevel
 		}
 		break;
 	default:
-		// unknown image_type
+
 		break;
 	}
 
@@ -752,8 +705,8 @@ typedef struct q2wal_s
 {
 	char		name[32];
 	unsigned	width, height;
-	unsigned	offsets[MIPLEVELS];		// four mip maps stored
-	char		animname[32];			// next frame in animation chain
+	unsigned	offsets[MIPLEVELS];
+	char		animname[32];
 	int			flags;
 	int			contents;
 	int			value;
@@ -834,7 +787,6 @@ qboolean LoadWAL_GetMetadata(const unsigned char *f, int filesize, int *retwidth
 	return true;
 }
 
-
 void Image_StripImageExtension (const char *in, char *out, size_t size_out)
 {
 	const char *ext;
@@ -855,7 +807,7 @@ static unsigned char image_srgbfromlinear_lightmap[256];
 void Image_MakeLinearColorsFromsRGB(unsigned char *pout, const unsigned char *pin, int numpixels)
 {
 	int i;
-	// this math from http://www.opengl.org/registry/specs/EXT/texture_sRGB.txt
+
 	if (!image_linearfromsrgb[255])
 		for (i = 0;i < 256;i++)
 			image_linearfromsrgb[i] = (unsigned char)floor(Image_LinearFloatFromsRGB(i) * 255.0f + 0.5f);
@@ -871,7 +823,7 @@ void Image_MakeLinearColorsFromsRGB(unsigned char *pout, const unsigned char *pi
 void Image_MakesRGBColorsFromLinear_Lightmap(unsigned char *pout, const unsigned char *pin, int numpixels)
 {
 	int i;
-	// this math from http://www.opengl.org/registry/specs/EXT/texture_sRGB.txt
+
 	if (!image_srgbfromlinear_lightmap[255])
 		for (i = 0;i < 256;i++)
 			image_srgbfromlinear_lightmap[i] = (unsigned char)floor(bound(0.0f, Image_sRGBFloatFromLinear_Lightmap(i), 1.0f) * 255.0f + 0.5f);
@@ -891,7 +843,6 @@ typedef struct imageformat_s
 }
 imageformat_t;
 
-// GAME_TENEBRAE only
 imageformat_t imageformats_tenebrae[] =
 {
 	{"override/%s.tga", LoadTGA_BGRA},
@@ -920,11 +871,6 @@ imageformat_t imageformats_nopath[] =
 	{NULL, NULL}
 };
 
-// GAME_DELUXEQUAKE only
-// VorteX: the point why i use such messy texture paths is
-// that GtkRadiant can't detect normal/gloss textures
-// and exclude them from texture browser
-// so i just use additional folder to store this textures
 imageformat_t imageformats_dq[] =
 {
 	{"%s.tga", LoadTGA_BGRA},
@@ -970,12 +916,11 @@ unsigned char *loadimagepixelsbgra (const char *filename, qboolean complain, qbo
 	unsigned char *f, *data = NULL, *data2 = NULL;
 	char basename[MAX_QPATH], name[MAX_QPATH], name2[MAX_QPATH], *c;
 	char vabuf[1024];
-	//if (developer_memorydebug.integer)
-	//	Mem_CheckSentinelsGlobal();
+
 	if (developer_texturelogging.integer)
 		Log_Printf("textures.log", "%s\n", filename);
-	Image_StripImageExtension(filename, basename, sizeof(basename)); // strip filename extensions to allow replacement by other types
-	// replace *'s with #, so commandline utils don't get confused when dealing with the external files
+	Image_StripImageExtension(filename, basename, sizeof(basename));
+
 	for (c = basename;*c;c++)
 		if (*c == '*')
 			*c = '#';
@@ -999,7 +944,7 @@ unsigned char *loadimagepixelsbgra (const char *filename, qboolean complain, qbo
 		firstformat = imageformats_nopath;
 	else
 		firstformat = imageformats_other;
-	// now try all the formats in the selected list
+
 	for (format = firstformat;format->formatstring;format++)
 	{
 		dpsnprintf (name, sizeof(name), format->formatstring, basename);
@@ -1013,7 +958,7 @@ unsigned char *loadimagepixelsbgra (const char *filename, qboolean complain, qbo
 			Mem_Free(f);
 			if (data)
 			{
-				if(format->loadfunc == JPEG_LoadImage_BGRA) // jpeg can't do alpha, so let's simulate it by loading another jpeg
+				if(format->loadfunc == JPEG_LoadImage_BGRA)
 				{
 					dpsnprintf (name2, sizeof(name2), format->formatstring, va(vabuf, sizeof(vabuf), "%s_alpha", basename));
 					f = FS_LoadFile(name2, tempmempool, true, &filesize);
@@ -1038,8 +983,7 @@ unsigned char *loadimagepixelsbgra (const char *filename, qboolean complain, qbo
 					Con_DPrintf("loaded image %s (%dx%d)\n", name, image_width, image_height);
 				if(miplevel)
 					*miplevel = mymiplevel;
-				//if (developer_memorydebug.integer)
-				//	Mem_CheckSentinelsGlobal();
+
 				if(allowFixtrans && r_fixtrans_auto.integer)
 				{
 					int n = fixtransparentpixels(data, image_width, image_height);
@@ -1074,11 +1018,8 @@ unsigned char *loadimagepixelsbgra (const char *filename, qboolean complain, qbo
 		}
 	}
 
-	// texture loading can take a while, so make sure we're sending keepalives
 	CL_KeepaliveMessage(false);
 
-	//if (developer_memorydebug.integer)
-	//	Mem_CheckSentinelsGlobal();
 	return NULL;
 }
 
@@ -1132,7 +1073,7 @@ int fixtransparentpixels(unsigned char *data, int w, int h)
 			}
 		}
 	if(fixPixels == w * h)
-		return 0; // sorry, can't do anything about this
+		return 0;
 	while(fixPixels)
 	{
 		for(y = 0; y < h; ++y)
@@ -1180,14 +1121,14 @@ int fixtransparentpixels(unsigned char *data, int w, int h)
 					b0 = data[FIXTRANS_PIXEL * 4 + 0];
 					if(sumA)
 					{
-						// there is a surrounding non-alpha pixel
+
 						r = (sumRA + sumA / 2) / sumA;
 						g = (sumGA + sumA / 2) / sumA;
 						b = (sumBA + sumA / 2) / sumA;
 					}
 					else
 					{
-						// need to use a "regular" average
+
 						r = (sumR + cnt / 2) / cnt;
 						g = (sumG + cnt / 2) / cnt;
 						b = (sumB + cnt / 2) / cnt;
@@ -1258,12 +1199,12 @@ qboolean Image_WriteTGABGR_preflipped (const char *filename, int width, int heig
 	fs_offset_t sizes[2];
 
 	memset (buffer, 0, 18);
-	buffer[2] = 2;		// uncompressed type
+	buffer[2] = 2;
 	buffer[12] = (width >> 0) & 0xFF;
 	buffer[13] = (width >> 8) & 0xFF;
 	buffer[14] = (height >> 0) & 0xFF;
 	buffer[15] = (height >> 8) & 0xFF;
-	buffer[16] = 24;	// pixel size
+	buffer[16] = 24;
 
 	buffers[0] = buffer;
 	sizes[0] = 18;
@@ -1284,7 +1225,7 @@ qboolean Image_WriteTGABGRA (const char *filename, int width, int height, const 
 	buffer = (unsigned char *)Mem_Alloc(tempmempool, width*height*4 + 18);
 
 	memset (buffer, 0, 18);
-	buffer[2] = 2;		// uncompressed type
+	buffer[2] = 2;
 	buffer[12] = (width >> 0) & 0xFF;
 	buffer[13] = (width >> 8) & 0xFF;
 	buffer[14] = (height >> 0) & 0xFF;
@@ -1296,11 +1237,10 @@ qboolean Image_WriteTGABGRA (const char *filename, int width, int height, const 
 
 	if (y < width*height*4)
 	{
-		// save the alpha channel
-		buffer[16] = 32;	// pixel size
-		buffer[17] = 8; // 8 bits of alpha
 
-		// flip upside down
+		buffer[16] = 32;
+		buffer[17] = 8;
+
 		out = buffer + 18;
 		for (y = height - 1;y >= 0;y--)
 		{
@@ -1310,11 +1250,10 @@ qboolean Image_WriteTGABGRA (const char *filename, int width, int height, const 
 	}
 	else
 	{
-		// save only the color channels
-		buffer[16] = 24;	// pixel size
-		buffer[17] = 0; // 8 bits of alpha
 
-		// truncate bgra to bgr and flip upside down
+		buffer[16] = 24;
+		buffer[17] = 0;
+
 		out = buffer + 18;
 		for (y = height - 1;y >= 0;y--)
 		{
@@ -1356,7 +1295,7 @@ static void Image_Resample32LerpLine (const unsigned char *in, unsigned char *ou
 			*out++ = (unsigned char) ((((in[6] - in[2]) * lerp) >> 16) + in[2]);
 			*out++ = (unsigned char) ((((in[7] - in[3]) * lerp) >> 16) + in[3]);
 		}
-		else // last pixel of the line has no pixel to lerp to
+		else
 		{
 			*out++ = in[0];
 			*out++ = in[1];
@@ -1475,7 +1414,7 @@ static void Image_Resample32Nolerp(const void *indata, int inwidth, int inheight
 {
 	int i, j;
 	unsigned frac, fracstep;
-	// relies on int being 4 bytes
+
 	int *inrow, *out;
 	out = (int *)outdata;
 
@@ -1508,11 +1447,6 @@ static void Image_Resample32Nolerp(const void *indata, int inwidth, int inheight
 	}
 }
 
-/*
-================
-Image_Resample
-================
-*/
 void Image_Resample32(const void *indata, int inwidth, int inheight, int indepth, void *outdata, int outwidth, int outheight, int outdepth, int quality)
 {
 	if (indepth != 1 || outdepth != 1)
@@ -1526,7 +1460,6 @@ void Image_Resample32(const void *indata, int inwidth, int inheight, int indepth
 		Image_Resample32Nolerp(indata, inwidth, inheight, outdata, outwidth, outheight);
 }
 
-// in can be the same as out
 void Image_MipReduce32(const unsigned char *in, unsigned char *out, int *width, int *height, int *depth, int destwidth, int destheight, int destdepth)
 {
 	const unsigned char *inrow;
@@ -1542,8 +1475,7 @@ void Image_MipReduce32(const unsigned char *in, unsigned char *out, int *width, 
 			*depth >>= 1;
 		return;
 	}
-	// note: if given odd width/height this discards the last row/column of
-	// pixels, rather than doing a proper box-filter scale down
+
 	inrow = in;
 	nextrow = *width * 4;
 	if (*width > destwidth)
@@ -1551,7 +1483,7 @@ void Image_MipReduce32(const unsigned char *in, unsigned char *out, int *width, 
 		*width >>= 1;
 		if (*height > destheight)
 		{
-			// reduce both
+
 			*height >>= 1;
 			for (y = 0;y < *height;y++, inrow += nextrow * 2)
 			{
@@ -1568,7 +1500,7 @@ void Image_MipReduce32(const unsigned char *in, unsigned char *out, int *width, 
 		}
 		else
 		{
-			// reduce width
+
 			for (y = 0;y < *height;y++, inrow += nextrow)
 			{
 				for (in = inrow, x = 0;x < *width;x++)
@@ -1587,7 +1519,7 @@ void Image_MipReduce32(const unsigned char *in, unsigned char *out, int *width, 
 	{
 		if (*height > destheight)
 		{
-			// reduce height
+
 			*height >>= 1;
 			for (y = 0;y < *height;y++, inrow += nextrow * 2)
 			{
@@ -1625,20 +1557,20 @@ void Image_HeightmapToNormalmap_BGRA(const unsigned char *inpixels, unsigned cha
 		for (x = 0, x1 = width-1;x < width;x1 = x, x++)
 		{
 			x2 = x + 1;if (x2 >= width) x2 = 0;
-			// left, right
+
 			b = row[1] + x1 * 4;p[0] = (b[0] + b[1] + b[2]);
 			b = row[1] + x2 * 4;p[1] = (b[0] + b[1] + b[2]);
-			// above, below
+
 			b = row[0] + x  * 4;p[2] = (b[0] + b[1] + b[2]);
 			b = row[2] + x  * 4;p[3] = (b[0] + b[1] + b[2]);
-			// center
+
 			b = row[1] + x  * 4;p[4] = (b[0] + b[1] + b[2]);
-			// calculate a normal from the slopes
+
 			n[0] = p[0] - p[1];
 			n[1] = p[3] - p[2];
 			n[2] = ibumpscale;
 			VectorNormalize(n);
-			// turn it into a dot3 rgb vector texture
+
 			out[2] = (int)(128.0f + n[0] * 127.0f);
 			out[1] = (int)(128.0f + n[1] * 127.0f);
 			out[0] = (int)(128.0f + n[2] * 127.0f);

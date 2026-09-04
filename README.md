@@ -10,7 +10,7 @@ different position in the mesh. Nothing here encodes cable position.
 **The threat is the false negative** — a node that should be working and reachable
 and silently is not, for any reason, however locally sensible. Stock macOS ships in
 exactly that vulnerable mode: it sleeps, it locks, it waits for consent, and it
-reboots itself when it judges that wise. Correcting that default is the only work
+reboots itself on an internal policy. Correcting that default is the only work
 that justifies a human being physically present. See [THREAT-MODEL.md](THREAT-MODEL.md)
 before changing settings that look wrong.
 
@@ -361,7 +361,6 @@ the node's uplink.
 | `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon. |
-| `hmi-epilogue.sh` | post-provision operator override for power + firewall on a human-used machine. Never affects reachability. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
@@ -485,36 +484,13 @@ mesh-peers          BRANCH / CONVERGED columns across the whole fabric
 A node that has not converged recently is the thing worth noticing, and now you can
 see it from any machine.
 
-## HMI epilogue
-
-Provisioning gives every node the same policy: never sleep, firewall off, no screen
-lock. That is correct for a machine in a rack and wrong for one someone is typing on.
-
-`hmi-epilogue.sh` is an operator action run *after* provisioning, on a machine a human
-uses:
-
-```
-sudo ./hmi-epilogue.sh
-MESH_HMI_SLEEP=30 MESH_HMI_DISPLAYSLEEP=10 sudo ./hmi-epilogue.sh
-```
-
-It writes `/usr/local/mesh/policy`. The keeper does not consult a flag and decide
-whether to act — it always asserts whatever that file says. `install.sh` writes the
-fleet default; the epilogue overwrites it; the keeper converges on it either way. So
-there is no branch anywhere that can skip a capability, only one policy the keeper
-always enforces. Return to fleet policy by re-running `sudo ./install.sh`.
-
-Everything governing *reachability* is outside the policy file entirely and is
-asserted unconditionally every pass: sshd, screen sharing, the beacon, the Thunderbolt
-fabric, routing, network time, and the RDMA alarm.
-
 ## Reading the docs
 
 ```
 ./serve.sh          # http://localhost:8080
 ```
 
-No venv, no dependencies — `uv run --no-project python -m http.server`.
+The same locked mesh runtime serves these docs through `mesh-python`.
 
 ## Adding a workload
 
@@ -529,26 +505,33 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
 ## Using the mesh
 
-The API is sealed. Three functions, in `rdma/mesh.h`, and nothing below a page appears in
-them. Changing this surface is a design event, not an edit.
+The page API and its one shared submission scheduler live in `rdma/mesh-client.c` and are
+declared in `rdma/mesh.h`. Changing this surface is a design event, not an edit.
 
 ```c
-void  *mesh_open(size_t bytes, size_t *stride, size_t *usable);
+void  *mesh_open(size_t *nslots, size_t *stride, size_t *usable);
 size_t mesh_write(const void *p, size_t nbytes, int node);
+size_t mesh_write_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node);
+size_t mesh_queue_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node);
+size_t mesh_pump(void);
 size_t mesh_read(void **p, int *from);
 ```
 
-`mesh_open` maps your share of this node's arena and returns the first slot; slots are
-`stride` apart and `usable` bytes of each are yours. `mesh_write` hands slot-aligned bytes to
-another node and returns how much it took — loop on the remainder; there is no size at which
-it refuses. `mesh_read` returns one arrived slot and recycles the previous one, which is why
-there is no release call.
+`mesh_open` maps this node's application arena and returns the first slot; slots are `stride`
+apart and `usable` bytes of each are yours. `mesh_write` is the zero-copy operation for
+slot-aligned arena pages. `mesh_write_copy` copies and submits as many strided frames as live
+credits permit. `mesh_queue_copy` accepts any number of strided frames into the same scheduler's
+dynamic pending store and continues across as many arena revolutions as they require.
+`mesh_pump` reclaims send completions and feeds that store; its return value is queued plus
+in-flight frames. `mesh_read` returns one arrived slot, recycles the previous one, and pumps
+outgoing work.
 
 What the transport promises, exactly: bytes that arrive are intact and whole pages; bytes
 that do not arrive are gone, and the application, which knows what it asked for, is the layer
-that asks again. Rotate through your arena rather than reusing the head — the transport does
-not say when a send has completed. The bridge accepts only arena slots from a client;
-anything else is counted as `bad` and dropped.
+that asks again. Direct writers rotate through the arena. Queued writers do not manage arena
+positions: the shared scheduler marks a page busy at submission and makes it reusable only
+after the bridge returns that page's completion descriptor. The bridge accepts only arena
+slots from a client; anything else is counted as `bad` and dropped.
 
 On top of the pages sit the two streaming verbs, for callers who want bytes moved and nothing
 else:
@@ -577,10 +560,10 @@ holds no device, so killing it is always safe and the bridge reclaims its pages 
 second; and `mesh_yell` returns n only when the receiver has confirmed every byte, 0 when it
 cannot confirm, so it never reports delivery it did not see.
 
-Nothing blocks and nothing is enclosed. All client state lives in a `mesh_ctx` the caller
-owns — the slot semaphore is visible arithmetic, `credit = arena − (sub − ack)` — and a
+No tensor extent is enclosed by the resident page count. All client state lives in a
+`mesh_ctx` the caller owns — page ownership is explicit in the arena bitmap — and a
 stream is plain data: `off` is bytes offered, `done` is bytes proven, `hole` is the first
-unproven chunk. `mesh_turn(ctx, streams, k)` is one dependency-ordered pass — harvest acks,
+unproven page offset. `mesh_turn(ctx, streams, k)` is one dependency-ordered pass — harvest acks,
 dispatch arrivals by stream id, emit under credit — that advances every stream the caller
 hands it, any number of yells and lissens concurrently, which is what a node with several
 cables needs; a second context is a second bridge. `mesh_scatter` and `mesh_gather` start k
@@ -589,8 +572,9 @@ streams over k shards of one buffer, which with a map on the far side is map-red
 completion. While streams are being turned the inbound ring carries stream-formatted pages;
 page-level `mesh_read` and streams do not interleave in one context.
 
-From Python, `rdma/mesh.py` binds the page-level functions and returns numpy views of mesh
-memory, so MLX computes on pages the NIC wrote without a copy.
+From Python, `rdma/mesh.py` binds the page-level functions. `Mesh.send` submits under currently
+available credits, `Mesh.queue` transfers an arbitrary pending extent, and both use the one C
+scheduler that owns page selection and completion. Reads return numpy arrays of received pages.
 
 ### Running it
 
@@ -600,10 +584,9 @@ bin/mesh-bridge.sh start | stop | restart | status
 
 It is a launchd service, like `io.mesh.beacon` and `io.mesh.router`. Settings come from
 `etc/bridge.conf`: how much of the node the mesh holds, and how much your own programs expect
-to use. The wire limit is raised to match, and startup is refused above 90% of RAM, because
-wiring past that can leave a node that cannot boot without someone physically present.
-Changing the file and restarting is the supported way to change how much of a node the mesh
-holds; nothing is tuned while it runs.
+to use. The wire limit is raised to match the complete requested region. Changing the file
+and restarting is the supported way to change how much of a node the mesh holds; nothing is
+tuned while it runs.
 
 Never reach for `pkill`. A process holding a verbs device does not die from SIGKILL — it sits
 in uninterruptible kernel sleep still holding the device, every other process on the machine
@@ -618,10 +601,9 @@ can. Running as root there means the region is created world-readable on purpose
 only root can open is a mesh no application can attach to.
 
 The bridge itself takes only what it cannot infer: `-I` node index, `-M` share of the machine,
-`-s` region, `-T` duration, and a peer. There is no switch for the page size, the registration
-chunk, the send window or the device — each of those can select a run that looks healthy and
-moves corrupt data. Unknown options are refused, and the link is found by looking for the port
-that is up.
+`-s` region, and a peer. Page size and registration extent are transport properties, and the
+link is found by looking for the port that is up. Unknown switches are reported and ignored;
+they do not withhold the configured bridge.
 
 ### Building, and keeping nodes identical
 
@@ -638,12 +620,89 @@ during this bridge's development.
 ### Measuring
 
 There is one instrument. The bridge publishes a census of the page table and its variance to
-the region once a second; `rdma/mesh-stat` reads it; `viz/serve.py` polls it and serves the
-viewer. Rates come from differencing `sent` and `recvd` against `uptime_ms`.
+the region once a second; `rdma/mesh-stat` reads it; `mesh-observe` merges that census with
+machine telemetry and generic workload envelopes; `viz/serve.py` starts from the durable
+fleet in `etc/mesh-nodes.json`, augments it with live `mesh-peers` discovery, polls the nodes
+concurrently over their available fabric paths, and serves the viewer. Rates come from
+differencing `sent` and `recvd` against `uptime_ms`. A partitioned node therefore remains a
+dim, named object at its last page-table coordinate instead of disappearing from the mesh.
 
-Applications do not measure. A second measurement path only disagrees with the first, and
-reading a rate off an application whose peer had silently failed to start is how several wrong
-numbers were reported here.
+Applications do not measure hardware counters or fabric traffic. They publish their
+shape-derived compulsory and maximal FLOP/byte counts through `rdma/workload.py` to the node's
+resident telemetry service; the service divides those monotonically defined counts by elapsed
+time and aggregates every fresh producer without inspecting its name or payload. Xonotic and an
+OCR job use the same record: elapsed seconds, rows, deadline, FLOP interval, byte interval, and
+opaque operation dimensions. Bridge and IOReport counters remain the independent physical
+measurement paths.
+
+`io.mesh.telemetry` runs continuously on every node. It owns `powermetrics`, bridge, I/O Registry,
+IOReport, and workload-producer observations and stores versioned samples in a bounded in-memory
+ring. TCP port 8788 exposes `/v1/latest` and `/v1/history?since=SEQUENCE`; workload producers use
+the loopback ingress on the same numeric port. Sequence, monotonic time, oldest retained sample,
+gaps, and service restarts are explicit protocol state. The mesh-wide 8787 observer keeps one
+connection per node, resumes from its last sequence after a partition, and retains the durable
+roster even when no current sample is reachable. Direct addresses and stable SSH aliases are
+equivalent routes to the same 8788 in-memory ring; the SSH route carries one persistent HTTP
+connection over `ssh -W`, including any configured ProxyJump, and is recreated after a
+partition. It does not discover producers through files, poll a cache path, or start an SSH
+process for each healthy sampling interval.
+
+The stream reports CPU-cluster and GPU active residency and frequency, subsystem power, thermal
+pressure, memory-bandwidth intervals, and bridge state without inspecting application data. A
+node whose sampler or stream is unavailable remains in inventory with that source state explicit.
+Files are reserved for static fleet and capacity configuration, release artifacts, checkpoints,
+and deliberately exported study results; they are not the live telemetry bus.
+
+The observer also reads AGX device, renderer, tiler, and GPU-memory counters from I/O Registry.
+Those counters need no privilege, so live GPU utilization remains visible while a node is being
+converged or if its root sampler is unhealthy; the missing root-only fields stay visibly missing.
+
+The viewer labels three different kinds of number instead of conflating them:
+
+| kind | values |
+|---|---|
+| measured live | page ownership, page traffic, derived fabric Gbit/s, CPU/GPU residency and frequency, power, thermal pressure, AMCC/AGX bandwidth histograms |
+| characterized capacity | fp32/bf16 throughput, memory bandwidth, and one-link fabric bandwidth from `etc/mesh-capacity.json` |
+| bounded generically | published analytic workload FLOP/byte intervals, or GPU FP32 use as `0 … characterized peak × active fraction` when no producer publishes, with rolling mean, variance, and standard deviation |
+| unavailable directly | an exact achieved workload FLOP/s scalar when operation semantics are absent; exact DRAM byte/s when the version-sensitive IOReport histogram is absent |
+
+GPU active residency is utilization, not achieved FLOP/s. The FP32 interval therefore keeps a
+zero lower bound when no workload producer is present. A producer narrows that interval using
+the operations its actual execution path necessarily and maximally performs; the observer then
+reports achieved-rate bounds and the deadline-slack distribution, while still displaying active residency as
+an independent physical check. Memory uses the private
+IOReport `PMP0 / DCS BW` residency histogram: the previous state edge and named state edge bracket
+each bucket, producing cheap residency-weighted lower and upper GB/s estimates plus variance for
+whole-machine AMCC and GPU-specific AGX reads and writes. If that version-sensitive interface is
+missing, the observer falls back to the wider `0 … characterized ceiling` interval.
+Published byte bounds are displayed separately from the whole-machine histogram, so a semantic
+work estimate cannot impersonate a DRAM counter. Neither the page-table instrument nor its fleet
+reporter depends on any workload-specific schema.
+
+The Three.js phase view is a tetrahedral simplex whose vertices are free, receive-posted,
+send-forwarding, and application-owned pages. A small anchor and its faint trail remain at each
+node's exact four-way allocation mixture. A labeled satellite is tethered to that anchor and
+separates stable node identity from an automatically magnified inter-node phase delta, so nodes
+with nearly equal large pools remain individually visible without falsifying their allocation.
+Discovered fabric adjacency connects the satellites, and directed stream density and motion
+follow measured bridge traffic and link saturation. Head size is allocation variance,
+compute-halo radius is characterized FP32 capacity, halo light is live GPU activity, and halo
+pulse is rolling upper-envelope variance. When a workload publishes an analytic envelope, halo
+light is its upper achieved rate divided by characterized capacity; otherwise it remains live GPU
+activity. The HUD reports both the entire-mesh sum and every node separately.
+The four independently truncated interval means can differ from
+the pool by up to three pages, so the HUD prints that rounding delta beside the census.
+
+Run `mesh-observe` for one node, or run `mesh-python viz/serve.py` and open
+`http://localhost:8787` for the whole currently meshed fleet. Converging with `install.sh`
+installs the observer, capacity table, root sampler, and `io.mesh.telemetry` launch daemon on
+every node. Add fleet members to `etc/mesh-nodes.json`; live discovery can add more, but absence
+from the network never deletes a rostered node.
+
+Every Python service and executable tool enters through `mesh-python`. `install.sh` realizes the
+locked Python 3.12 runtime at `/usr/local/mesh/.venv`; the rootless installer realizes the same
+lock under `~/.local/mesh/.venv`. `mesh-runtime-id.py` reports that lock and is embedded in
+curriculum match records. There is no system-Python or ambient interpreter fallback.
 
 ### What runs today
 
@@ -661,9 +720,11 @@ real and unexplained: the mini reports sending more than the MacBook reports rec
 the same interval, which is either a sampling artefact of two clocks a second apart or
 something worth chasing.
 
-Removing the 50 us idle sleep from the data plane did **not** change these numbers. It was a
-latency floor, not a bandwidth limit, and it is worth being clear that deleting it bought
-responsiveness rather than throughput.
+Removing the old unconditional 50 us sleep did **not** change these throughput numbers.
+The bridge now sleeps for that measured interval only when an iteration moved no ring or
+completion work and has no send in flight. Active work therefore runs continuously while an
+idle bridge does not reserve a complete CPU core from the game, audio, renderer, or policy
+runtime.
 
 `rdma/mesh_coproc.py` holds a weight matrix resident on one node and applies it to rows
 streamed from the other, using `rdma/mesh.py` so MLX computes on pages the NIC wrote without a
@@ -673,7 +734,6 @@ been repeated since**; the API it uses is unchanged, but treat the number as his
 
 The census closes exactly on both nodes, including after an application dies holding pages.
 The bridge marks delivered pages in a bitmap and, on the once-a-second census tick, reclaims
-them if the client is gone. Measured: `held=4055` at the moment of death, `held=0` and
-244140/244140 one tick later.
-
-
+them if the client is gone. The historical capped-pool measurement observed `held=4055` at
+the moment of death and `held=0` with `244140/244140` pages one tick later. Current pool mass
+is derived from the configured region rather than capped at that historical value.

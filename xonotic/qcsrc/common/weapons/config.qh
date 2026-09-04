@@ -1,9 +1,6 @@
 #pragma once
 
 #ifdef SVQC
-// ==========================
-//  Balance Config Generator
-// ==========================
 
 void Dump_Weapon_Settings();
 int wep_config_file;

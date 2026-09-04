@@ -30,18 +30,16 @@ int autocvar_g_lms_dynamic_vampire_min_lives_diff = 2;
 .float lms_leader;
 int lms_leaders;
 float lms_visible_leaders_time;
-bool lms_visible_leaders = true; // triggers lms_visible_leaders_time update in the first frame
+bool lms_visible_leaders = true;
 bool lms_visible_leaders_prev;
 bool autocvar_g_lms_rot;
 
-// main functions
 int LMS_NewPlayerLives()
 {
 	int fl = floor(autocvar_fraglimit);
 	if(fl == 0 || fl > 999)
 		fl = 999;
 
-	// first player has left the game for dying too much? Nobody else can get in.
 	if(lms_lowest_lives < 1)
 		return 0;
 
@@ -54,9 +52,6 @@ int LMS_NewPlayerLives()
 
 void ClearWinners();
 
-// LMS winning condition: game terminates if and only if there's at most one
-// one player who's living lives. Top two scores being equal cancels the time
-// limit.
 int WinningCondition_LMS()
 {
 	if (warmup_stage || time <= game_starttime)
@@ -80,39 +75,36 @@ int WinningCondition_LMS()
 	{
 		if (totalplayers > 1)
 		{
-			// two or more active players - continue with the game
 
 			if (autocvar_g_campaign && campaign_bots_may_start)
 			{
 				FOREACH_CLIENT(IS_REAL_CLIENT(it), {
 					float pl_lives = GameRules_scoring_add(it, LMS_LIVES, 0);
 					if (!pl_lives)
-						return WINNING_YES; // human player lost, game over
+						return WINNING_YES;
 					break;
 				});
 			}
 		}
 		else
 		{
-			// exactly one player?
 
 			ClearWinners();
 
 			if (LMS_NewPlayerLives())
 			{
-				if (totalplayed && game_starttime > 0 && time > game_starttime + autocvar_g_lms_forfeit_min_match_time) // give players time to join
+				if (totalplayed && game_starttime > 0 && time > game_starttime + autocvar_g_lms_forfeit_min_match_time)
 				{
 					GameRules_scoring_add(first_player, LMS_RANK, 1);
 					first_player.winning = 1;
 					return WINNING_YES;
 				}
-				// game still running (that is, nobody got removed from the game by a frag yet)? then continue
+
 				return WINNING_NO;
 			}
 			else
 			{
-				// a winner!
-				// and assign them their first place
+
 				GameRules_scoring_add(first_player, LMS_RANK, 1);
 				first_player.winning = 1;
 				return WINNING_YES;
@@ -121,27 +113,25 @@ int WinningCondition_LMS()
 	}
 	else
 	{
-		// nobody is playing at all...
+
 		if (LMS_NewPlayerLives())
 		{
-			if (totalplayed && game_starttime > 0 && time > game_starttime + autocvar_g_lms_forfeit_min_match_time) // give players time to join
+			if (totalplayed && game_starttime > 0 && time > game_starttime + autocvar_g_lms_forfeit_min_match_time)
 			{
 				ClearWinners();
 				return WINNING_YES;
 			}
-			// wait for players...
+
 		}
 		else
 		{
-			// SNAFU (maybe a draw game?)
+
 			ClearWinners();
 			LOG_TRACE("No players, ending game.");
 			return WINNING_YES;
 		}
 	}
 
-	// When we get here, we have at least two players who are actually LIVING,
-	// now check if the top two players have equal score.
 	WinningConditionHelper(NULL);
 
 	ClearWinners();
@@ -150,16 +140,14 @@ int WinningCondition_LMS()
 	if(WinningConditionHelper_topscore == WinningConditionHelper_secondscore)
 		return WINNING_NEVER;
 
-	// Top two have different scores? Way to go for our beloved TIMELIMIT!
 	return WINNING_NO;
 }
 
-// runs on waypoints which are attached to leaders, updates once per frame
 bool lms_waypointsprite_visible_for_player(entity this, entity player, entity view)
 {
 	if(view.lms_leader)
 		if(IS_SPEC(player))
-			return false; // we don't want spectators of leaders to see the attached waypoint on the top of their screen
+			return false;
 
 	if (!lms_visible_leaders)
 		return false;
@@ -213,7 +201,6 @@ void lms_UpdateLeaders()
 		});
 }
 
-// mutator hooks
 MUTATOR_HOOKFUNCTION(lms, reset_map_global)
 {
 	lms_lowest_lives = 999;
@@ -242,15 +229,12 @@ MUTATOR_HOOKFUNCTION(lms, reset_map_players)
 	});
 }
 
-// FIXME add support for sv_ready_restart_after_countdown
-// that is find a way to respawn/reset players IN GAME without setting lives to 0
 MUTATOR_HOOKFUNCTION(lms, ReadLevelCvars)
 {
-	// incompatible
+
 	sv_ready_restart_after_countdown = 0;
 }
 
-// returns true if player is added to the game
 bool lms_AddPlayer(entity player)
 {
 	if (!INGAME(player))
@@ -261,7 +245,7 @@ bool lms_AddPlayer(entity player)
 		if (time < game_starttime)
 			INGAME_STATUS_SET(player, INGAME_STATUS_JOINED);
 		else
-			INGAME_STATUS_SET(player, INGAME_STATUS_JOINING); // this is just to delay setting health and armor that can't be done here
+			INGAME_STATUS_SET(player, INGAME_STATUS_JOINING);
 	}
 	if (warmup_stage || time <= game_starttime)
 	{
@@ -304,8 +288,7 @@ MUTATOR_HOOKFUNCTION(lms, PlayerSpawn)
 
 	if (INGAME_JOINING(player))
 	{
-		// spawn player with the same amount of health / armor
-		// as the least healthy player with the least number of lives
+
 		int pl_lives = GameRules_scoring_add(player, LMS_LIVES, 0);
 		float min_health = start_health;
 		float min_armorvalue = start_armorvalue;
@@ -358,7 +341,7 @@ void lms_RemovePlayer(entity player)
 		else if (INGAME(player))
 		{
 			FOREACH_CLIENT(it != player, {
-				// update rank of other players
+
 				if (it.frags == FRAGS_PLAYER_OUT_OF_GAME)
 					GameRules_scoring_add(it, LMS_RANK, -1);
 			});
@@ -377,7 +360,7 @@ void lms_RemovePlayer(entity player)
 				}
 				else if (pl_lives == last_forfeiter_lives)
 				{
-					// these values actually can belong to a different forfeiter
+
 					last_forfeiter_health = min(last_forfeiter_health, pl_health);
 					last_forfeiter_armorvalue = min(last_forfeiter_armorvalue, pl_armor);
 				}
@@ -427,12 +410,12 @@ MUTATOR_HOOKFUNCTION(lms, MakePlayerObserver)
 	}
 	else
 	{
-		if (is_forced || player.killindicator_teamchange == -2) // player is forced or wants to spectate
+		if (is_forced || player.killindicator_teamchange == -2)
 			player.lms_spectate = true;
 		if (!GameRules_scoring_add(player, LMS_RANK, 0))
 			lms_RemovePlayer(player);
 	}
-	return true;  // prevent team reset
+	return true;
 }
 
 MUTATOR_HOOKFUNCTION(lms, ClientConnect)
@@ -445,7 +428,6 @@ MUTATOR_HOOKFUNCTION(lms, PlayerPreThink)
 {
 	entity player = M_ARGV(0, entity);
 
-	// recycled REDALIVE and BLUEALIVE to avoid adding a dedicated stat
 	STAT(REDALIVE, player) = lms_leaders;
 	STAT(BLUEALIVE, player) = lms_leaders_lives_diff;
 
@@ -489,7 +471,7 @@ MUTATOR_HOOKFUNCTION(lms, SV_StartFrame)
 				if (!lms_visible_leaders_prev && lms_visible_leaders && IS_REAL_CLIENT(it))
 					Send_Notification(NOTIF_ONE, it, MSG_CENTER, CENTER_LMS_VISIBLE_LEADER);
 			}
-			else // if (!it.lms_leader)
+			else
 			{
 				if (IS_PLAYER(it) && it.frags != FRAGS_PLAYER_OUT_OF_GAME)
 				{
@@ -523,7 +505,7 @@ MUTATOR_HOOKFUNCTION(lms, PlayerPowerups)
 
 MUTATOR_HOOKFUNCTION(lms, ForbidThrowCurrentWeapon)
 {
-	// forbode!
+
 	return true;
 }
 
@@ -571,7 +553,7 @@ MUTATOR_HOOKFUNCTION(lms, CalculateRespawnTime)
 	if (pl_lives <= 0)
 	{
 		player.respawn_flags = RESPAWN_SILENT;
-		// prevent unwanted sudden rejoin as spectator and movement of spectator camera
+
 		player.respawn_time = time + 2;
 		return true;
 	}
@@ -588,8 +570,7 @@ MUTATOR_HOOKFUNCTION(lms, CalculateRespawnTime)
 		pl_cnt++;
 	});
 
-	// min delay with only 2 players
-	if (pl_cnt == 1) // player wasn't counted
+	if (pl_cnt == 1)
 		max_lives = 0;
 
 	float dlay = autocvar_g_lms_dynamic_respawn_delay_base +
@@ -604,7 +585,7 @@ MUTATOR_HOOKFUNCTION(lms, GiveFragsForKill)
 
 	if (!warmup_stage && time > game_starttime)
 	{
-		// remove a life
+
 		int tl = GameRules_scoring_add(frag_target, LMS_LIVES, -1);
 		if(tl < lms_lowest_lives)
 			lms_lowest_lives = tl;
@@ -618,7 +599,7 @@ MUTATOR_HOOKFUNCTION(lms, GiveFragsForKill)
 			GameRules_scoring_add(frag_target, LMS_RANK, pl_cnt);
 		}
 	}
-	M_ARGV(2, float) = 0; // frag score
+	M_ARGV(2, float) = 0;
 
 	return true;
 }
@@ -641,7 +622,7 @@ MUTATOR_HOOKFUNCTION(lms, SetStartItems)
 
 MUTATOR_HOOKFUNCTION(lms, ForbidPlayerScore_Clear)
 {
-	// don't clear player score
+
 	return true;
 }
 
@@ -701,8 +682,8 @@ MUTATOR_HOOKFUNCTION(lms, Bot_FixCount, CBC_ORDER_EXCLUSIVE)
 {
 	FOREACH_CLIENT(IS_REAL_CLIENT(it), {
 		if (INGAME(it))
-			++M_ARGV(0, int); // activerealplayers
-		++M_ARGV(1, int); // realplayers
+			++M_ARGV(0, int);
+		++M_ARGV(1, int);
 	});
 
 	return true;
@@ -713,7 +694,7 @@ MUTATOR_HOOKFUNCTION(lms, ClientCommand_Spectate)
 	entity player = M_ARGV(0, entity);
 	if(player.frags != FRAGS_SPECTATOR && player.frags != FRAGS_PLAYER_OUT_OF_GAME)
 		return MUT_SPECCMD_CONTINUE;
-	// ranked players (out of game) can no longer become real spectators
+
 	return MUT_SPECCMD_RETURN;
 }
 
@@ -732,8 +713,8 @@ MUTATOR_HOOKFUNCTION(lms, SetWeaponArena)
 MUTATOR_HOOKFUNCTION(lms, AddPlayerScore)
 {
 	if(game_stopped)
-	if(M_ARGV(0, entity) == SP_LMS_RANK) // score field
-		return true; // allow writing to this field in intermission as it is needed for newly joining players
+	if(M_ARGV(0, entity) == SP_LMS_RANK)
+		return true;
 }
 
 void lms_Initialize()

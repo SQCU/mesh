@@ -36,6 +36,6 @@ int inv_maxcurrent;
 
 float inv_monsterskill;
 
-const int INV_TYPE_ROUND = 0; // round-based waves of enemies
-const int INV_TYPE_HUNT = 1; // clear the map of placed enemies
-const int INV_TYPE_STAGE = 2; // reach the end of the level
+const int INV_TYPE_ROUND = 0;
+const int INV_TYPE_HUNT = 1;
+const int INV_TYPE_STAGE = 2;

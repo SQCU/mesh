@@ -26,9 +26,6 @@ entity kh_worldkeylist;
 
 #define FOR_EACH_KH_KEY(v) for(v = kh_worldkeylist; v; v = v.kh_worldkeynext )
 
-// ALL OF THESE should be removed in the future, as other code should not have to care
-
-// used by bots:
 bool kh_tracking_enabled;
 .entity kh_next;
 

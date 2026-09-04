@@ -21,7 +21,6 @@ METHOD(Superweapons, m_tick, void(StatusEffects this, entity actor))
 
     int allItems = STAT(ITEMS);
 
-    // Prevent stuff to show up on mismatch that will be fixed next frame
     if(!(allItems & IT_SUPERWEAPON) && !autocvar__hud_configure)
         return;
 

@@ -1,13 +1,13 @@
 #include "c4.qh"
 REGISTER_MINIGAME(c4, _("Connect Four"));
 
-const float C4_TURN_PLACE = 0x0100; // player has to place a piece on the board
-const float C4_TURN_WIN   = 0x0200; // player has won
-const float C4_TURN_DRAW  = 0x0400; // no moves are possible
+const float C4_TURN_PLACE = 0x0100;
+const float C4_TURN_WIN   = 0x0200;
+const float C4_TURN_DRAW  = 0x0400;
 
 const float C4_TURN_TEAM1 = 0x0001;
 const float C4_TURN_TEAM2 = 0x0002;
-const float C4_TURN_TEAM  = 0x000f; // turn team mask
+const float C4_TURN_TEAM  = 0x000f;
 
 const int C4_LET_CNT = 7;
 const int C4_NUM_CNT = 6;
@@ -18,12 +18,11 @@ const int C4_MAX_TILES = 42;
 const int C4_TILE_SIZE = 8;
 
 const int C4_TEAMS = 2;
-const int C4_SPECTATOR_TEAM = 255; // must be above max teams and equal to or below 255
+const int C4_SPECTATOR_TEAM = 255;
 
-.int c4_npieces; // (minigame) number of pieces on the board (simplifies checking a draw)
-.int c4_nexteam; // (minigame) next team (used to change the starting team on following matches)
+.int c4_npieces;
+.int c4_nexteam;
 
-// find connect 4 piece given its tile name
 entity c4_find_piece(entity minig, string tile)
 {
 	entity e = NULL;
@@ -33,7 +32,6 @@ entity c4_find_piece(entity minig, string tile)
 	return NULL;
 }
 
-// Checks if the given piece completes a row
 bool c4_winning_piece(entity piece)
 {
 	int number = minigame_tile_number(piece.netname);
@@ -76,7 +74,6 @@ bool c4_winning_piece(entity piece)
 		else break;
 	}
 
-	// down
 	int found = 0;
 	for(i = minigame_tile_number(top.netname); i >= 0; --i)
 	{
@@ -88,7 +85,6 @@ bool c4_winning_piece(entity piece)
 	if(found >= C4_WIN_CNT)
 		return true;
 
-	// right
 	found = 0;
 	for(i = minigame_tile_letter(left.netname); i < C4_LET_CNT; ++i)
 	{
@@ -100,7 +96,6 @@ bool c4_winning_piece(entity piece)
 	if(found >= C4_WIN_CNT)
 		return true;
 
-	// diagright down
 	found = 0;
 	for(i = minigame_tile_letter(topleft.netname), j = minigame_tile_number(topleft.netname); i < C4_LET_CNT, j >= 0; ++i, --j)
 	{
@@ -112,7 +107,6 @@ bool c4_winning_piece(entity piece)
 	if(found >= C4_WIN_CNT)
 		return true;
 
-	// diagright up
 	found = 0;
 	for(i = minigame_tile_letter(botleft.netname), j = minigame_tile_number(botleft.netname); i < C4_LET_CNT, j < C4_NUM_CNT; ++i, ++j)
 	{
@@ -127,7 +121,6 @@ bool c4_winning_piece(entity piece)
 	return false;
 }
 
-// check if the tile name is valid (6x7 grid)
 bool c4_valid_tile(string tile)
 {
 	if ( !tile )
@@ -153,7 +146,6 @@ string c4_get_lowest_tile(entity minigame, string s)
 	return minigame_tile_buildname(minigame_tile_letter(s), end);
 }
 
-// make a move
 void c4_move(entity minigame, entity player, string pos )
 {
 	pos = c4_get_lowest_tile(minigame, pos);
@@ -185,8 +177,6 @@ void c4_move(entity minigame, entity player, string pos )
 
 #ifdef SVQC
 
-
-// required function, handle server side events
 int c4_server_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -211,14 +201,11 @@ int c4_server_event(entity minigame, string event, ...)
 		{
 			int pl_num = minigame_count_players(minigame);
 
-			// Don't allow more than 2 players
 			if(pl_num >= C4_TEAMS) { return C4_SPECTATOR_TEAM; }
 
-			// Get the right team
 			if(minigame.minigame_players)
 				return minigame_next_team(minigame.minigame_players.team, C4_TEAMS);
 
-			// Team 1 by default
 			return 1;
 		}
 		case "cmd":
@@ -241,15 +228,13 @@ int c4_server_event(entity minigame, string event, ...)
 	return false;
 }
 
-
 #elif defined(CSQC)
 
-string c4_curr_pos; // identifier of the tile under the mouse
-vector c4_boardpos; // HUD board position
-vector c4_boardsize;// HUD board size
-.int c4_checkwin; // Used to optimize checks to display a win
+string c4_curr_pos;
+vector c4_boardpos;
+vector c4_boardsize;
+.int c4_checkwin;
 
-// Required function, draw the game board
 void c4_hud_board(vector pos, vector mySize)
 {
 	minigame_hud_fitsqare(pos, mySize);
@@ -324,8 +309,6 @@ void c4_hud_board(vector pos, vector mySize)
 	}
 }
 
-
-// Required function, draw the game status panel
 void c4_hud_status(vector pos, vector mySize)
 {
 	HUD_Panel_DrawBg();
@@ -374,7 +357,6 @@ void c4_hud_status(vector pos, vector mySize)
 	}
 }
 
-// Turn a set of flags into a help message
 string c4_turn_to_string(int turnflags)
 {
 	if(minigame_self.team == C4_SPECTATOR_TEAM)
@@ -399,7 +381,6 @@ string c4_turn_to_string(int turnflags)
 	return "";
 }
 
-// Make the correct move
 void c4_make_move(entity minigame)
 {
 	if ( minigame.minigame_flags == (C4_TURN_PLACE|minigame_self.team) )
@@ -416,7 +397,6 @@ void c4_set_curr_pos(string s)
 	c4_curr_pos = s;
 }
 
-// Required function, handle client events
 int c4_client_event(entity minigame, string event, ...)
 {
 	switch(event)
@@ -464,24 +444,7 @@ int c4_client_event(entity minigame, string event, ...)
 					case K_DOWNARROW:
 					case K_KP_DOWNARROW:
 						return true;
-					/*case K_UPARROW:
-					case K_KP_UPARROW:
-						if (event_blocked)
-							return true;
-						if ( ! c4_curr_pos )
-							c4_set_curr_pos("a1");
-						else
-							c4_set_curr_pos(minigame_relative_tile(c4_curr_pos,0,1,6,7));
-						return true;
-					case K_DOWNARROW:
-					case K_KP_DOWNARROW:
-						if (event_blocked)
-							return true;
-						if ( ! c4_curr_pos )
-							c4_set_curr_pos("a3");
-						else
-							c4_set_curr_pos(minigame_relative_tile(c4_curr_pos,0,-1,6,7));
-						return true;*/
+
 					case K_ENTER:
 					case K_KP_ENTER:
 					case K_SPACE:

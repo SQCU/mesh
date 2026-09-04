@@ -1,10 +1,5 @@
 #include "sv_resources.qh"
 
-/// \file
-/// \brief Source file that contains implementation of the resource system.
-/// \author Lyberta
-/// \copyright GNU GPLv2 or any later version.
-
 #include <common/resources/resources.qh>
 #include <server/mutators/_mod.qh>
 #include <server/world.qh>
@@ -12,10 +7,10 @@
 float GetResourceLimit(entity e, Resource res_type)
 {
 	if(!IS_PLAYER(e))
-		return RES_LIMIT_NONE; // no limits on non-players
+		return RES_LIMIT_NONE;
 
 	float limit;
-	// TODO: registry handles
+
 	switch (res_type)
 	{
 		case RES_HEALTH:
@@ -98,7 +93,7 @@ void SetResource(entity e, Resource res_type, float amount)
 	}
 	res_type = M_ARGV(8, entity);
 	amount = M_ARGV(9, float);
-	float max_amount = GetResourceLimit(e, res_type); // TODO: should allow overriding these limits if cheats are enabled!
+	float max_amount = GetResourceLimit(e, res_type);
 	float amount_wasted = 0;
 	if (amount > max_amount && max_amount != RES_LIMIT_NONE)
 	{
@@ -135,7 +130,7 @@ void GiveResource(entity receiver, Resource res_type, float amount)
 		return;
 	}
 	SetResource(receiver, res_type, GetResource(receiver, res_type) + amount);
-	// TODO: registry handles
+
 	switch (res_type)
 	{
 		case RES_HEALTH:

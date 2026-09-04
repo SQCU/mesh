@@ -3,8 +3,6 @@
 #include <common/mutators/base.qh>
 #include <common/scores.qh>
 
-// set before a lms_RemovePlayer call, if true player becomes a real spectator
-// otherwise it gets eliminated becoming spectator but as player out of game with a rank
 .bool lms_spectate;
 
 #define autocvar_g_lms_lives_override cvar("g_lms_lives_override")
@@ -30,6 +28,5 @@ REGISTER_MUTATOR(lms, false)
 	return 0;
 }
 
-// lives related defs
 int lms_lowest_lives;
 int LMS_NewPlayerLives();

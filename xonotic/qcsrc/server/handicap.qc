@@ -1,14 +1,9 @@
 #include "handicap.qh"
 
-/// \file
-/// \brief Source file that contains implementation of the handicap system.
-/// \author Lyberta
-/// \copyright GNU GPLv2 or any later version.
-
 #include <common/state.qh>
 #include <server/client.qh>
 
-.float m_handicap; ///< Holds the handicap value.
+.float m_handicap;
 
 void Handicap_Initialize(entity player)
 {

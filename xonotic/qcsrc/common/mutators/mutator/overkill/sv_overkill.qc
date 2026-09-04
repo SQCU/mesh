@@ -11,9 +11,6 @@ bool autocvar_g_overkill_blaster_keepdamage = false;
 
 .Weapon ok_lastwep[MAX_WEAPONSLOTS];
 
-/// \brief Returns a random classname of the overkill item.
-/// \param[in] prefix Prefix of the cvars that hold probabilities.
-/// \return Random classname of the overkill item.
 string RandomItems_GetRandomOverkillItemClassName(string prefix)
 {
 	RandomSelection_Init();
@@ -50,7 +47,6 @@ string RandomItems_GetRandomOverkillItemClassName(string prefix)
 	return RandomSelection_chosen_string;
 }
 
-
 MUTATOR_HOOKFUNCTION(ok, RandomItems_GetRandomItemClassName)
 {
 	M_ARGV(1, string) = RandomItems_GetRandomOverkillItemClassName(
@@ -71,10 +67,10 @@ MUTATOR_HOOKFUNCTION(ok, Damage_Calculate, CBC_ORDER_LAST)
 		if(!STAT(FROZEN, frag_target))
 		if(!IS_DEAD(frag_target))
 		if(!autocvar_g_overkill_blaster_keepforce)
-			M_ARGV(6, vector) = '0 0 0'; // force
+			M_ARGV(6, vector) = '0 0 0';
 
 		if(!autocvar_g_overkill_blaster_keepdamage)
-			M_ARGV(4, float) = 0; // damage
+			M_ARGV(4, float) = 0;
 	}
 }
 
@@ -137,7 +133,7 @@ MUTATOR_HOOKFUNCTION(ok, PlayerPreThink)
 	{
 		return;
 	}
-	// Allow secondary blaster during countdown.
+
 	for (int slot = 0; slot < MAX_WEAPONSLOTS; ++slot)
 	{
 		.entity weaponentity = weaponentities[slot];
@@ -181,7 +177,7 @@ MUTATOR_HOOKFUNCTION(ok, PlayerWeaponSelect)
 bool ok_HandleItemWaypoints(entity e)
 {
 	if(!autocvar_g_overkill_itemwaypoints)
-		return false; // don't handle it
+		return false;
 
 	switch(e.itemdef)
 	{
@@ -232,7 +228,7 @@ MUTATOR_HOOKFUNCTION(ok, FilterItem)
 		wep.ok_item = true;
 		wep.respawntime = g_pickup_respawntime_superweapon;
 		wep.pickup_anyway = true;
-		Item_Initialize(wep, "weapon_okhmg"); // doesn't actually use spawnfunc
+		Item_Initialize(wep, "weapon_okhmg");
 		return true;
 	}
 	else if (item.classname == "item_shield")
@@ -242,7 +238,7 @@ MUTATOR_HOOKFUNCTION(ok, FilterItem)
 		wep.ok_item = true;
 		wep.respawntime = g_pickup_respawntime_superweapon;
 		wep.pickup_anyway = true;
-		Item_Initialize(wep, "weapon_okrpc"); // doesn't actually use spawnfunc
+		Item_Initialize(wep, "weapon_okrpc");
 		return true;
 	}
 	return true;
@@ -262,7 +258,7 @@ MUTATOR_HOOKFUNCTION(ok, SetStartItems, CBC_ORDER_LAST)
 
 MUTATOR_HOOKFUNCTION(ok, SetWeaponArena)
 {
-	// turn weapon arena off
+
 	M_ARGV(0, string) = "off";
 }
 
@@ -281,4 +277,3 @@ MUTATOR_HOOKFUNCTION(ok, SetModname)
 	M_ARGV(0, string) = "Overkill";
 	return true;
 }
-

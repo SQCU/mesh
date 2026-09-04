@@ -2,12 +2,6 @@
 
 #include <common/command/command.qh>
 
-
-// ========================================
-//  RPN command code, written by divVerent
-//  Last updated: December 28th, 2011
-// ========================================
-
 string rpn_pop()
 {
 	if(rpn_sp > 0) {
@@ -67,7 +61,7 @@ void GenericCommand_rpn(int request, int argc, string command)
 		case CMD_REQUEST_COMMAND:
 		{
 			float i, j, f, f2, f3, rpnpos;
-			//vector rgb;
+
 			string s, s2, rpncmd;
 
 			if(!rpn_db)
@@ -109,7 +103,7 @@ void GenericCommand_rpn(int request, int argc, string command)
 							#else
 							registercvar(s2, "");
 							#endif
-							if(!rpn_error) // don't change cvars if a stack error had happened!
+							if(!rpn_error)
 								cvar_set(s2, s);
 						}
 						else
@@ -134,7 +128,7 @@ void GenericCommand_rpn(int request, int argc, string command)
 							#else
 							registercvar(s2, "");
 							#endif
-							if(!rpn_error) // don't change cvars if a stack error had happened!
+							if(!rpn_error)
 								cvar_set(s2, s);
 						}
 						else
@@ -328,7 +322,7 @@ void GenericCommand_rpn(int request, int argc, string command)
 					} else if(rpncmd == "dbins") {
 						s = rpn_pop();
 						if(!rpn_error)
-							//if(rpn_sp > 0)
+
 						{
 							j = stof(db_get(rpn_db, "stack.pointer"));
 							i = stof(db_get(rpn_db, "stack.pos"));
@@ -428,14 +422,12 @@ void GenericCommand_rpn(int request, int argc, string command)
 							}
 						}
 					} else if(rpncmd == "union") {
-						// s s2 union
+
 						s2 = rpn_pop();
 						s = rpn_get();
 						f = tokenize_console(s);
 						f2 = tokenize_console(strcat(s, " ", s2));
-						// tokens 0..(f-1) represent s
-						// tokens f..f2 represent s2
-						// UNION: add all tokens to s that are in s2 but not in s
+
 						s = "";
 						for(i = 0; i < f; ++i)
 							s = strcat(s, " ", argv(i));
@@ -451,14 +443,12 @@ LABEL(skip_union)
 						rpn_set(s);
 						tokenize_console(command);
 					} else if(rpncmd == "intersection") {
-						// s s2 intersection
+
 						s2 = rpn_pop();
 						s = rpn_get();
 						f = tokenize_console(s);
 						f2 = tokenize_console(strcat(s, " ", s2));
-						// tokens 0..(f-1) represent s
-						// tokens f..f2 represent s2
-						// INTERSECTION: keep only the tokens from s that are also in s2
+
 						s = "";
 						for(i = 0; i < f; ++i) {
 							for(j = f; j < f2; ++j)
@@ -473,14 +463,12 @@ LABEL(skip_union)
 						rpn_set(s);
 						tokenize_console(command);
 					} else if(rpncmd == "difference") {
-						// s s2 difference
+
 						s2 = rpn_pop();
 						s = rpn_get();
 						f = tokenize_console(s);
 						f2 = tokenize_console(strcat(s, " ", s2));
-						// tokens 0..(f-1) represent s
-						// tokens f..f2 represent s2
-						// DIFFERENCE: keep only the tokens from s that are not in s2
+
 						s = "";
 						for(i = 0; i < f; ++i) {
 							for(j = f; j < f2; ++j)
@@ -494,12 +482,12 @@ LABEL(skip_difference)
 						rpn_set(s);
 						tokenize_console(command);
 					} else if(rpncmd == "shuffle") {
-						// s shuffle
+
 						s = rpn_get();
 						f = tokenize_console(s);
 
 						for(i = 0; i < f - 1; ++i) {
-							// move a random item from i..f-1 to position i
+
 							s = "";
 							f2 = floor(random() * (f - i) + i);
 							for(j = 0; j < i; ++j)

@@ -3,12 +3,12 @@
 #include "listbox.qh"
 #include "tab.qh"
 CLASS(XonoticScrollPanel, XonoticListBox)
-	/** container for single child panel */
+
 	ATTRIB(XonoticScrollPanel, currentPanel, entity, NEW(XonoticTab));
 	ATTRIB(XonoticScrollPanel, nItems, int, 1);
 	ATTRIB(XonoticScrollPanel, selectionDoesntMatter, bool, true);
 	ATTRIB(XonoticScrollPanel, itemHeight, float, 1);
-	/** number of rows to show at once */
+
 	ATTRIB(XonoticScrollPanel, viewportHeight, float, 12);
 	ATTRIB(XonoticScrollPanel, alphaBG, float, 0);
 

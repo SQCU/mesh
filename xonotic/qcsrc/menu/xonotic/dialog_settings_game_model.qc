@@ -20,11 +20,6 @@ entity makeXonoticGameModelSettingsTab()
 void XonoticGameModelSettingsTab_fill(entity me)
 {
 	entity e;
-	//float i;
-
-	// Note that this is pretty terrible currently due to the lack of options for this tab...
-	// There is really not many other decent places for these options, additionally
-	// later I would like quite a few more options in this tab.
 
 	me.gotoRC(me, 0, 1); me.setFirstColumn(me, me.currentColumn);
 		me.TD(me, 1, 3, e = makeXonoticHeaderLabel(_("Items")));

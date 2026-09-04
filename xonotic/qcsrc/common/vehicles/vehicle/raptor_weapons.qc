@@ -6,7 +6,7 @@ METHOD(RaptorCannon, wr_think, void(entity thiswep, entity actor, .entity weapon
     bool isPlayer = IS_PLAYER(actor);
     entity player = isPlayer ? actor : actor.owner;
     entity veh = player.vehicle;
-    // 1 [wait] 1 [wait] 2 [wait] 2 [wait] [wait]
+
     float t = autocvar_g_vehicle_raptor_cannon_refire * (1 + ((veh.misc_bulletcounter + 1) >= 4));
     if (fire & 1)
     if (weapon_prepareattack(thiswep, player, weaponentity, false, t)) {
@@ -34,7 +34,6 @@ METHOD(RaptorCannon, wr_checkammo1, bool(RacerAttack thiswep, entity actor, .ent
     entity veh = player.vehicle;
     return isPlayer || veh.vehicle_energy >= autocvar_g_vehicle_raptor_cannon_cost;
 }
-
 
 void raptor_bombdrop(entity this);
 METHOD(RaptorBomb, wr_think, void(entity thiswep, entity actor, .entity weaponentity, int fire)) {
@@ -66,7 +65,7 @@ METHOD(RaptorFlare, wr_think, void(entity thiswep, entity actor, .entity weapone
             setmodel(_flare, MDL_VEH_RAPTOR_FLARE);
             _flare.effects = EF_LOWPRECISION | EF_FLAME;
             _flare.scale = 0.5;
-            _flare.solid = SOLID_CORPSE; // before setorigin so it will be linked to the area grid
+            _flare.solid = SOLID_CORPSE;
             setorigin(_flare, actor.origin - '0 0 16');
             set_movetype(_flare, MOVETYPE_TOSS);
             _flare.gravity = 0.15;
@@ -83,7 +82,6 @@ METHOD(RaptorFlare, wr_think, void(entity thiswep, entity actor, .entity weapone
         weapon_thinkf(player, weaponentity, WFRAME_FIRE2, 0, w_ready);
     }
 }
-
 
 void raptor_bomblet_boom(entity this)
 {
@@ -154,7 +152,7 @@ void raptor_bombdrop(entity this)
     entity bomb_2 = new(bombmount_right);
 
     vector org = gettaginfo(this, gettagindex(this, "bombmount_left"));
-    bomb_1.solid	 = bomb_2.solid	  = SOLID_BBOX; // before setorigin to ensure area grid linking
+    bomb_1.solid	 = bomb_2.solid	  = SOLID_BBOX;
     setorigin(bomb_1, org);
     org = gettaginfo(this, gettagindex(this, "bombmount_right"));
     setorigin(bomb_2, org);
@@ -234,7 +232,7 @@ void RaptorCBShellfragToss(vector _org, vector _vel, vector _ang)
 {
     entity sfrag = new(RaptorCBShellfrag);
     setmodel(sfrag, MDL_VEH_RAPTOR_CB_FRAGMENT);
-    sfrag.solid = SOLID_CORPSE; // before setorigin to ensure area grid linking
+    sfrag.solid = SOLID_CORPSE;
     setorigin(sfrag, _org);
 
     set_movetype(sfrag, MOVETYPE_BOUNCE);

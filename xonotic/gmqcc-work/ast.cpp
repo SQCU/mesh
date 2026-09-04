@@ -6,11 +6,9 @@
 #include "gmqcc.h"
 #include "ast.h"
 #include "fold.h"
-//#include "parser.h"
 
 #include "algo.h"
 
-/* Initialize main ast node aprts */
 ast_node::ast_node(lex_ctx_t ctx, int node_type)
     : m_context(ctx)
     , m_node_type(node_type)
@@ -23,14 +21,12 @@ ast_node::~ast_node()
 {
 }
 
-/* weight and side effects */
 void ast_node::propagateSideEffects(const ast_node *other)
 {
     if (other->m_side_effects)
         m_side_effects = true;
 }
 
-/* General expression initialization */
 ast_expression::ast_expression(lex_ctx_t ctx, int nodetype, qc_type type)
     : ast_node(ctx, nodetype)
     , m_vtype(type)
@@ -76,7 +72,6 @@ ast_expression::ast_expression(ast_copy_type_t, int nodetype, lex_ctx_t ctx, con
     for (auto &it : other.m_type_params)
         m_type_params.emplace_back(new ast_value(ast_copy_type, *it));
 }
-
 
 ast_expression *ast_expression::shallowType(lex_ctx_t ctx, qc_type vtype) {
     auto expr = new ast_expression(ctx, TYPE_ast_expression);
@@ -134,14 +129,14 @@ bool ast_expression::codegen(ast_function*, bool, ir_value**) {
 ast_value::ast_value(ast_copy_type_t, const ast_value &other, const std::string &name)
     : ast_value(ast_copy_type, static_cast<const ast_expression&>(other), name)
 {
-    m_keep_node = true; // keep values, always
+    m_keep_node = true;
     memset(&m_constval, 0, sizeof(m_constval));
 }
 
 ast_value::ast_value(ast_copy_type_t, const ast_value &other)
     : ast_value(ast_copy_type, static_cast<const ast_expression&>(other), other.m_name)
 {
-    m_keep_node = true; // keep values, always
+    m_keep_node = true;
     memset(&m_constval, 0, sizeof(m_constval));
 }
 
@@ -149,7 +144,7 @@ ast_value::ast_value(ast_copy_type_t, const ast_expression &other, const std::st
     : ast_expression(ast_copy_type, TYPE_ast_value, other)
     , m_name(name)
 {
-    m_keep_node = true; // keep values, always
+    m_keep_node = true;
     memset(&m_constval, 0, sizeof(m_constval));
 }
 
@@ -157,7 +152,7 @@ ast_value::ast_value(lex_ctx_t ctx, const std::string &name, qc_type t)
     : ast_expression(ctx, TYPE_ast_value, t)
     , m_name(name)
 {
-    m_keep_node = true; // keep values, always
+    m_keep_node = true;
     memset(&m_constval, 0, sizeof(m_constval));
 }
 
@@ -172,17 +167,15 @@ ast_value::~ast_value()
             mem_d((void*)m_constval.vstring);
             break;
         case TYPE_FUNCTION:
-            // unlink us from the function node
+
             m_constval.vfunc->m_function_type = nullptr;
             break;
-        // NOTE: delete function? currently collected in
-        // the parser structure
+
         default:
             break;
         }
     }
 
-    // initlist imples an array which implies .next in the expression exists.
     if (m_initlist.size() && m_next->m_vtype == TYPE_STRING) {
         for (auto &it : m_initlist)
             if (it.vstring)
@@ -291,14 +284,13 @@ ast_binary::ast_binary(lex_ctx_t ctx, int op,
                        ast_expression* left, ast_expression* right)
     : ast_expression(ctx, TYPE_ast_binary)
     , m_op(op)
-    // m_left/m_right happen after the peephole step right below
+
     , m_right_first(false)
 {
     if (ast_istype(right, ast_unary) && OPTS_OPTIMIZATION(OPTIM_PEEPHOLE)) {
         ast_unary      *unary  = ((ast_unary*)right);
         ast_expression *normal = unary->m_operand;
 
-        /* make a-(-b) => a + b */
         if (unary->m_op == VINSTR_NEG_F || unary->m_op == VINSTR_NEG_V) {
             if (op == INSTR_SUB_F) {
                 op = m_op = INSTR_ADD_F;
@@ -335,7 +327,6 @@ ast_binary::ast_binary(lex_ctx_t ctx, int op,
     else
         m_vtype = left->m_vtype;
 
-    // references all
     m_refs = AST_REF_ALL;
 }
 
@@ -367,7 +358,7 @@ ast_binstore::~ast_binstore()
 
 ast_unary* ast_unary::make(lex_ctx_t ctx, int op, ast_expression *expr)
 {
-    // handle double negation, double bitwise or logical not
+
     if (op == opid2('!','P') ||
         op == opid2('~','P') ||
         op == opid2('-','P'))
@@ -488,20 +479,14 @@ ast_member::ast_member(lex_ctx_t ctx, ast_expression *owner, unsigned int field,
 
 ast_member::~ast_member()
 {
-    // The owner is always an ast_value, which has .keep_node=true,
-    // also: ast_members are usually deleted after the owner, thus
-    // this will cause invalid access
-        //ast_unref(self->m_owner);
-    // once we allow (expression).x to access a vector-member, we need
-    // to change this: preferably by creating an alternate ast node for this
-    // purpose that is not garbage-collected.
+
 }
 
 ast_array_index* ast_array_index::make(lex_ctx_t ctx, ast_expression *array, ast_expression *index)
 {
     ast_expression *outtype = array->m_next;
     if (!outtype) {
-        // field has no type
+
         return nullptr;
     }
 
@@ -520,12 +505,6 @@ ast_array_index::ast_array_index(lex_ctx_t ctx, ast_expression *array, ast_expre
     adoptType(*outtype);
 
     if (array->m_vtype == TYPE_FIELD && outtype->m_vtype == TYPE_ARRAY) {
-        // FIXME: investigate - this is not possible after adoptType
-        //if (m_vtype != TYPE_ARRAY) {
-        //    compile_error(self->m_context, "array_index node on type");
-        //    ast_array_index_delete(self);
-        //    return nullptr;
-        //}
 
         m_array = outtype;
         m_vtype = TYPE_FIELD;
@@ -609,9 +588,7 @@ ast_ternary::ast_ternary(lex_ctx_t ctx, ast_expression *cond, ast_expression *on
 
 ast_ternary::~ast_ternary()
 {
-    /* the if()s are only there because computed-gotos can set them
-     * to nullptr
-     */
+
     if (m_cond)     ast_unref(m_cond);
     if (m_on_true)  ast_unref(m_on_true);
     if (m_on_false) ast_unref(m_on_false);
@@ -823,7 +800,7 @@ bool ast_call::checkTypes(ast_expression *va_type) const
 
     for (i = 0; i < count; ++i) {
         if (ast_istype(m_params[i], ast_argpipe)) {
-            /* warn about type safety instead */
+
             if (i+1 != count) {
                 compile_error(m_context, "argpipe must be the last parameter to a function call");
                 return false;
@@ -837,7 +814,7 @@ bool ast_call::checkTypes(ast_expression *va_type) const
             ast_type_to_string(m_func->m_type_params[i].get(), texp, sizeof(texp));
             compile_error(m_context, "invalid type for parameter %u in function call: expected %s, got %s",
                      (unsigned int)(i+1), texp, tgot);
-            /* we don't immediately return */
+
             retval = false;
         }
     }
@@ -845,7 +822,7 @@ bool ast_call::checkTypes(ast_expression *va_type) const
     if (count > m_func->m_type_params.size() && m_func->m_varparam) {
         for (; i < count; ++i) {
             if (ast_istype(m_params[i], ast_argpipe)) {
-                /* warn about type safety instead */
+
                 if (i+1 != count) {
                     compile_error(m_context, "argpipe must be the last parameter to a function call");
                     return false;
@@ -859,7 +836,7 @@ bool ast_call::checkTypes(ast_expression *va_type) const
                 ast_type_to_string(m_func->m_varparam, texp, sizeof(texp));
                 compile_error(m_context, "invalid type for variadic parameter %u in function call: expected %s, got %s",
                          (unsigned int)(i+1), texp, tgot);
-                /* we don't immediately return */
+
                 retval = false;
             }
         }
@@ -885,7 +862,6 @@ void ast_block::setType(const ast_expression &from)
         delete m_next;
     adoptType(from);
 }
-
 
 bool ast_block::addExpr(ast_expression *e)
 {
@@ -941,11 +917,10 @@ ast_function::ast_function(lex_ctx_t ctx, const std::string &name, ast_value *vt
 ast_function::~ast_function()
 {
     if (m_function_type) {
-        // ast_value_delete(m_function_type);
+
         m_function_type->m_hasvalue = false;
         m_function_type->m_constval.vfunc = nullptr;
-        // We use unref - if it was stored in a global table it is supposed
-        // to be deleted from *there*
+
         ast_unref(m_function_type);
     }
 
@@ -954,8 +929,6 @@ ast_function::~ast_function()
     if (m_return_value)
         ast_unref(m_return_value);
 
-    // force this to be cleared before m_varargs/m_argc as blocks might
-    // try to access them via ast_unref()
     m_blocks.clear();
 }
 
@@ -986,13 +959,6 @@ const char* ast_function::makeLabel(const char *prefix)
     return from - len;
 }
 
-/*********************************************************************/
-/* AST codegen part
- * by convention you must never pass nullptr to the 'ir_value **out'
- * parameter. If you really don't care about the output, pass a dummy.
- * But I can't imagine a pituation where the output is truly unnecessary.
- */
-
 static void codegen_output_type(ast_expression *self, ir_value *out)
 {
     if (out->m_vtype == TYPE_FIELD)
@@ -1009,14 +975,9 @@ bool ast_value::codegen(ast_function *func, bool lvalue, ir_value **out)
         *out = func->m_ir_func->m_owner->m_nil;
         return true;
     }
-    // NOTE: This is the codegen for a variable used in an expression.
-    // It is not the codegen to generate the value storage. For this purpose,
-    // generateLocal and generateGlobal are to be used before this
-    // is executed. ast_function::generateFunction should take care of its
-    // locals, and the ast-user should take care of generateGlobal to be used
-    // on all the globals.
+
     if (!m_ir_v) {
-        char tname[1024]; /* typename is reserved in C++ */
+        char tname[1024];
         ast_type_to_string(this, tname, sizeof(tname));
         compile_error(m_context, "ast_value used before generated %s %s", tname, m_name);
         return false;
@@ -1035,9 +996,7 @@ bool ast_value::setGlobalArray()
         count = m_count;
     }
     else if (count < m_count) {
-        /* add this?
-        compile_warning(m_context, "not all elements are initialized");
-        */
+
     }
 
     for (i = 0; i != count; ++i) {
@@ -1055,11 +1014,11 @@ bool ast_value::setGlobalArray()
                     return false;
                 break;
             case TYPE_ARRAY:
-                /* we don't support them in any other place yet either */
+
                 compile_error(m_context, "TODO: nested arrays");
                 return false;
             case TYPE_FUNCTION:
-                /* this requiers a bit more work - similar to the fields I suppose */
+
                 compile_error(m_context, "global of type function not properly generated");
                 return false;
             case TYPE_FIELD:
@@ -1088,7 +1047,7 @@ bool ast_value::checkArray(const ast_value &array) const
         compile_error(m_context, "array without size: %s", m_name);
         return false;
     }
-    // we are lame now - considering the way QC works we won't tolerate arrays > 1024 elements
+
     if (!array.m_count || array.m_count > OPTS_OPTION_U32(OPTION_MAX_ARRAY_SIZE)) {
         compile_error(m_context, "Invalid array of size %lu", (unsigned long)array.m_count);
         return false;
@@ -1115,8 +1074,7 @@ bool ast_value::generateGlobal(ir_builder *ir, bool isfield)
         if (!v)
             return false;
     } else {
-        // Arrays don't do this since there's no "array" value which spans across the
-        // whole thing.
+
         v = ir->createGlobal(m_name, m_vtype);
         if (!v) {
             compile_error(m_context, "ir_builder::createGlobal failed on `%s`", m_name);
@@ -1126,7 +1084,6 @@ bool ast_value::generateGlobal(ir_builder *ir, bool isfield)
         v->m_context = m_context;
     }
 
-    /* link us to the ir_value */
     v->m_cvq = m_cvq;
     m_ir_v = v;
 
@@ -1137,7 +1094,6 @@ bool ast_value::generateGlobal(ir_builder *ir, bool isfield)
     if (m_flags & AST_FLAG_NOREF)
         m_ir_v->m_flags |= IR_FLAG_NOREF;
 
-    /* initialize */
     if (m_hasvalue) {
         switch (m_vtype)
         {
@@ -1160,9 +1116,7 @@ bool ast_value::generateGlobal(ir_builder *ir, bool isfield)
             case TYPE_FUNCTION:
                 compile_error(m_context, "global of type function not properly generated");
                 return false;
-                /* Cannot generate an IR value for a function,
-                 * need a pointer pointing to a function rather.
-                 */
+
             case TYPE_FIELD:
                 if (!m_constval.vfield) {
                     compile_error(m_context, "field constant without vfield set");
@@ -1200,7 +1154,7 @@ bool ast_value::generateGlobalFunction(ir_builder *ir)
         m_ir_v->m_flags |= IR_FLAG_ERASABLE;
     if (m_flags & AST_FLAG_BLOCK_COVERAGE)
         func->m_flags |= IR_FLAG_BLOCK_COVERAGE;
-    // The function is filled later on ast_function::generateFunction...
+
     return true;
 }
 
@@ -1292,7 +1246,6 @@ ir_value *ast_value::prepareGlobalArray(ir_builder *ir)
         return nullptr;
     }
 
-    /* same as with field arrays */
     if (!checkArray(*this))
         return nullptr;
 
@@ -1346,9 +1299,7 @@ bool ast_value::generateLocal(ir_function *func, bool param)
 
     if (m_hasvalue && m_vtype == TYPE_FUNCTION)
     {
-        /* Do we allow local functions? I think not...
-         * this is NOT a function pointer atm.
-         */
+
         return false;
     }
 
@@ -1364,7 +1315,6 @@ bool ast_value::generateLocal(ir_function *func, bool param)
             return false;
         }
 
-        /* we are lame now - considering the way QC works we won't tolerate arrays > 1024 elements */
         if (!checkArray(*this))
             return false;
 
@@ -1410,8 +1360,6 @@ bool ast_value::generateLocal(ir_function *func, bool param)
         v->m_context = m_context;
     }
 
-    // A constant local... hmmm...
-    // I suppose the IR will have to deal with this
     if (m_hasvalue) {
         switch (m_vtype)
         {
@@ -1433,7 +1381,6 @@ bool ast_value::generateLocal(ir_function *func, bool param)
         }
     }
 
-    // link us to the ir_value
     v->m_cvq = m_cvq;
     m_ir_v = v;
 
@@ -1444,7 +1391,7 @@ bool ast_value::generateLocal(ir_function *func, bool param)
         return false;
     return true;
 
-error: /* clean up */
+error:
     delete v;
     return false;
 }
@@ -1509,7 +1456,6 @@ bool ast_function::generateFunction(ir_builder *ir)
         return false;
     }
 
-    /* fill the parameter list */
     for (auto &it : m_function_type->m_type_params) {
         if (it->m_vtype == TYPE_FIELD)
             irf->m_params.push_back(it->m_next->m_vtype);
@@ -1532,7 +1478,6 @@ bool ast_function::generateFunction(ir_builder *ir)
         return true;
     }
 
-    /* have a local return value variable? */
     if (m_return_value) {
         if (!m_return_value->generateLocal(m_ir_func, false))
             return false;
@@ -1576,7 +1521,6 @@ bool ast_function::generateFunction(ir_builder *ir)
           return false;
     }
 
-    /* TODO: check return types */
     if (!m_curblock->m_final)
     {
         if (!m_function_type->m_next ||
@@ -1614,18 +1558,9 @@ static bool starts_a_label(const ast_expression *ex)
     return ast_istype(ex, ast_label);
 }
 
-/* Note, you will not see ast_block_codegen generate ir_blocks.
- * To the AST and the IR, blocks are 2 different things.
- * In the AST it represents a block of code, usually enclosed in
- * curly braces {...}.
- * While in the IR it represents a block in terms of control-flow.
- */
 bool ast_block::codegen(ast_function *func, bool lvalue, ir_value **out)
 {
-    /* We don't use this
-     * Note: an ast-representation using the comma-operator
-     * of the form: (a, b, c) = x should not assign to c...
-     */
+
     if (lvalue) {
         compile_error(m_context, "not an l-value (code-block)");
         return false;
@@ -1636,15 +1571,8 @@ bool ast_block::codegen(ast_function *func, bool lvalue, ir_value **out)
         return true;
     }
 
-    /* output is nullptr at first, we'll have each expression
-     * assign to out output, thus, a comma-operator represention
-     * using an ast_block will return the last generated value,
-     * so: (b, c) + a  executed both b and c, and returns c,
-     * which is then added to a.
-     */
     *out = nullptr;
 
-    /* generate locals */
     for (auto &it : m_locals) {
         if (!it->generateLocal(func->m_ir_func, false)) {
             if (OPTS_OPTION_BOOL(OPTION_DEBUG))
@@ -1697,7 +1625,7 @@ bool ast_store::codegen(ast_function *func, bool lvalue, ir_value **out)
     }
 
     if (ai) {
-        /* we need to call the setter */
+
         ir_value  *iridx, *funval;
         ir_instr  *call;
 
@@ -1730,14 +1658,11 @@ bool ast_store::codegen(ast_function *func, bool lvalue, ir_value **out)
     }
     else
     {
-        // regular code
 
-        // lvalue!
         if (!m_dest->codegen(func, true, &left))
             return false;
         m_outl = left;
 
-        /* rvalue! */
         if (!m_source->codegen(func, false, &right))
             return false;
 
@@ -1746,13 +1671,6 @@ bool ast_store::codegen(ast_function *func, bool lvalue, ir_value **out)
         m_outr = right;
     }
 
-    /* Theoretically, an assinment returns its left side as an
-     * lvalue, if we don't need an lvalue though, we return
-     * the right side as an rvalue, otherwise we have to
-     * somehow know whether or not we need to dereference the pointer
-     * on the left side - that is: OP_LOAD if it was an address.
-     * Also: in original QC we cannot OP_LOADP *anyway*.
-     */
     *out = (lvalue ? left : right);
 
     return true;
@@ -1762,7 +1680,6 @@ bool ast_binary::codegen(ast_function *func, bool lvalue, ir_value **out)
 {
     ir_value *left, *right;
 
-    /* A binary operation cannot yield an l-value */
     if (lvalue) {
         compile_error(m_context, "not an l-value (binop)");
         return false;
@@ -1776,56 +1693,45 @@ bool ast_binary::codegen(ast_function *func, bool lvalue, ir_value **out)
     if ((OPTS_FLAG(SHORT_LOGIC) || OPTS_FLAG(PERL_LOGIC)) &&
         (m_op == INSTR_AND || m_op == INSTR_OR))
     {
-        /* NOTE: The short-logic path will ignore right_first */
 
-        /* short circuit evaluation */
         ir_block *other, *merge;
         ir_block *from_left, *from_right;
         ir_instr *phi;
         size_t    merge_id;
 
-        /* prepare end-block */
         merge_id = func->m_ir_func->m_blocks.size();
         merge    = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("sce_merge"));
 
-        /* generate the left expression */
         if (!m_left->codegen(func, false, &left))
             return false;
-        /* remember the block */
+
         from_left = func->m_curblock;
 
-        /* create a new block for the right expression */
         other = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("sce_other"));
         if (m_op == INSTR_AND) {
-            /* on AND: left==true -> other */
+
             if (!ir_block_create_if(func->m_curblock, m_context, left, other, merge))
                 return false;
         } else {
-            /* on OR: left==false -> other */
+
             if (!ir_block_create_if(func->m_curblock, m_context, left, merge, other))
                 return false;
         }
-        /* use the likely flag */
+
         func->m_curblock->m_instr.back()->m_likely = true;
 
-        /* enter the right-expression's block */
         func->m_curblock = other;
-        /* generate */
+
         if (!m_right->codegen(func, false, &right))
             return false;
-        /* remember block */
+
         from_right = func->m_curblock;
 
-        /* jump to the merge block */
         if (!ir_block_create_jump(func->m_curblock, m_context, merge))
             return false;
 
         algo::shiftback(func->m_ir_func->m_blocks.begin() + merge_id,
                         func->m_ir_func->m_blocks.end());
-        // FIXME::DELME::
-        //func->m_ir_func->m_blocks[merge_id].release();
-        //func->m_ir_func->m_blocks.erase(func->m_ir_func->m_blocks.begin() + merge_id);
-        //func->m_ir_func->m_blocks.emplace_back(merge);
 
         func->m_curblock = merge;
         phi = ir_block_create_phi(func->m_curblock, m_context,
@@ -1838,7 +1744,7 @@ bool ast_binary::codegen(ast_function *func, bool lvalue, ir_value **out)
             return false;
 
         if (!OPTS_FLAG(PERL_LOGIC)) {
-            /* cast-to-bool */
+
             if (OPTS_FLAG(CORRECT_LOGIC) && (*out)->m_vtype == TYPE_VECTOR) {
                 *out = ir_block_create_unary(func->m_curblock, m_context,
                                              func->makeLabel("sce_bool_v"),
@@ -1928,8 +1834,6 @@ bool ast_binstore::codegen(ast_function *func, bool lvalue, ir_value **out)
             ai = nullptr;
     }
 
-    /* for a binstore we need both an lvalue and an rvalue for the left side */
-    /* rvalue of destination! */
     if (ai) {
         if (!idx->codegen(func, false, &iridx))
             return false;
@@ -1938,17 +1842,15 @@ bool ast_binstore::codegen(ast_function *func, bool lvalue, ir_value **out)
     if (!m_dest->codegen(func, false, &leftr))
         return false;
 
-    /* source as rvalue only */
     if (!m_source->codegen(func, false, &right))
         return false;
 
-    /* now the binary */
     bin = ir_block_create_binop(func->m_curblock, m_context, func->makeLabel("binst"),
                                 m_opbin, leftr, right);
     m_outr = bin;
 
     if (ai) {
-        /* we need to call the setter */
+
         ir_value  *funval;
         ir_instr  *call;
 
@@ -1973,8 +1875,7 @@ bool ast_binstore::codegen(ast_function *func, bool lvalue, ir_value **out)
         ir_call_param(call, bin);
         m_outr = bin;
     } else {
-        // now store them
-        // lvalue of destination
+
         if (!m_dest->codegen(func, true, &leftl))
             return false;
         m_outl = leftl;
@@ -1984,13 +1885,6 @@ bool ast_binstore::codegen(ast_function *func, bool lvalue, ir_value **out)
         m_outr = bin;
     }
 
-    /* Theoretically, an assinment returns its left side as an
-     * lvalue, if we don't need an lvalue though, we return
-     * the right side as an rvalue, otherwise we have to
-     * somehow know whether or not we need to dereference the pointer
-     * on the left side - that is: OP_LOAD if it was an address.
-     * Also: in original QC we cannot OP_LOADP *anyway*.
-     */
     *out = (lvalue ? leftl : bin);
 
     return true;
@@ -2000,7 +1894,6 @@ bool ast_unary::codegen(ast_function *func, bool lvalue, ir_value **out)
 {
     ir_value *operand;
 
-    /* An unary operation cannot yield an l-value */
     if (lvalue) {
         compile_error(m_context, "not an l-value (binop)");
         return false;
@@ -2011,7 +1904,6 @@ bool ast_unary::codegen(ast_function *func, bool lvalue, ir_value **out)
         return true;
     }
 
-    /* lvalue! */
     if (!m_operand->codegen(func, false, &operand))
         return false;
 
@@ -2030,9 +1922,6 @@ bool ast_return::codegen(ast_function *func, bool lvalue, ir_value **out)
 
     *out = nullptr;
 
-    /* In the context of a return operation, we don't actually return
-     * anything...
-     */
     if (lvalue) {
         compile_error(m_context, "return-expression is not an l-value");
         return false;
@@ -2045,7 +1934,7 @@ bool ast_return::codegen(ast_function *func, bool lvalue, ir_value **out)
     m_outr = (ir_value*)1;
 
     if (m_operand) {
-        /* lvalue! */
+
         if (!m_operand->codegen(func, false, &operand))
             return false;
 
@@ -2062,10 +1951,6 @@ bool ast_return::codegen(ast_function *func, bool lvalue, ir_value **out)
 bool ast_entfield::codegen(ast_function *func, bool lvalue, ir_value **out)
 {
     ir_value *ent, *field;
-
-    // This function needs to take the 'lvalue' flag into account!
-    // As lvalue we provide a field-pointer, as rvalue we provide the
-    // value in a temp.
 
     if (lvalue && m_outl) {
         *out = m_outl;
@@ -2084,15 +1969,13 @@ bool ast_entfield::codegen(ast_function *func, bool lvalue, ir_value **out)
         return false;
 
     if (lvalue) {
-        /* address! */
+
         *out = ir_block_create_fieldaddress(func->m_curblock, m_context, func->makeLabel("efa"),
                                             ent, field);
     } else {
         *out = ir_block_create_load_from_ent(func->m_curblock, m_context, func->makeLabel("efv"),
                                              ent, field, m_vtype);
-        /* Done AFTER error checking:
-        codegen_output_type(this, *out);
-        */
+
     }
     if (!*out) {
         compile_error(m_context, "failed to create %s instruction (output type %s)",
@@ -2108,7 +1991,6 @@ bool ast_entfield::codegen(ast_function *func, bool lvalue, ir_value **out)
     else
         m_outr = *out;
 
-    // Hm that should be it...
     return true;
 }
 
@@ -2116,7 +1998,6 @@ bool ast_member::codegen(ast_function *func, bool lvalue, ir_value **out)
 {
     ir_value *vec;
 
-    /* in QC this is always an lvalue */
     if (lvalue && m_rvalue) {
         compile_error(m_context, "not an l-value (member access)");
         return false;
@@ -2158,7 +2039,6 @@ bool ast_member::codegen(ast_function *func, bool lvalue, ir_value **out)
         return (*out != nullptr);
     }
 
-    // Vector member access
     if (!m_owner->codegen(func, lvalue, &vec))
         return false;
 
@@ -2198,11 +2078,7 @@ bool ast_array_index::codegen(ast_function *func, bool lvalue, ir_value **out)
 
     if (!ast_istype(m_array, ast_value)) {
         compile_error(m_context, "array indexing this way is not supported");
-        /* note this would actually be pointer indexing because the left side is
-         * not an actual array but (hopefully) an indexable expression.
-         * Once we get integer arithmetic, and GADDRESS/GSTORE/GLOAD instruction
-         * support this path will be filled.
-         */
+
         return false;
     }
 
@@ -2210,7 +2086,7 @@ bool ast_array_index::codegen(ast_function *func, bool lvalue, ir_value **out)
     idx = reinterpret_cast<ast_value*>(m_index);
 
     if (!ast_istype(m_index, ast_value) || !idx->m_hasvalue || idx->m_cvq != CV_CONST) {
-        /* Time to use accessor functions */
+
         ir_value               *iridx, *funval;
         ir_instr               *call;
 
@@ -2294,7 +2170,6 @@ bool ast_ifthen::codegen(ast_function *func, bool lvalue, ir_value **out)
     ir_block *onfalse_endblock = nullptr;
     ir_block *merge = nullptr;
 
-    /* We don't output any value, thus also don't care about r/lvalue */
     (void)out;
     (void)lvalue;
 
@@ -2304,7 +2179,6 @@ bool ast_ifthen::codegen(ast_function *func, bool lvalue, ir_value **out)
     }
     m_outr = (ir_value*)1;
 
-    /* try constant folding away the condition */
     switch (fold::cond_ifthen((ast_value*)m_cond, this)) {
     case 0:
         return true;
@@ -2314,67 +2188,55 @@ bool ast_ifthen::codegen(ast_function *func, bool lvalue, ir_value **out)
         return m_on_false->codegen(func, false, out);
     }
 
-    /* generate the condition */
     if (!m_cond->codegen(func, false, &condval))
         return false;
-    /* update the block which will get the jump - because short-logic or ternaries may have changed this */
+
     cond = func->m_curblock;
 
     if (m_on_true) {
-        /* create on-true block */
+
         ontrue = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("ontrue"));
         if (!ontrue)
             return false;
 
-        /* enter the block */
         func->m_curblock = ontrue;
 
-        /* generate */
         if (!m_on_true->codegen(func, false, &dummy))
             return false;
 
-        /* we now need to work from the current endpoint */
         ontrue_endblock = func->m_curblock;
     } else
         ontrue = nullptr;
 
-    /* on-false path */
     if (m_on_false) {
-        /* create on-false block */
+
         onfalse = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("onfalse"));
         if (!onfalse)
             return false;
 
-        /* enter the block */
         func->m_curblock = onfalse;
 
-        /* generate */
         if (!m_on_false->codegen(func, false, &dummy))
             return false;
 
-        /* we now need to work from the current endpoint */
         onfalse_endblock = func->m_curblock;
     } else
         onfalse = nullptr;
 
-    /* Merge block were they all merge in to */
     if (!ontrue || !onfalse || !ontrue_endblock->m_final || !onfalse_endblock->m_final)
     {
         merge = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("endif"));
         if (!merge)
             return false;
-        /* add jumps ot the merge block */
+
         if (ontrue && !ontrue_endblock->m_final && !ir_block_create_jump(ontrue_endblock, m_context, merge))
             return false;
         if (onfalse && !onfalse_endblock->m_final && !ir_block_create_jump(onfalse_endblock, m_context, merge))
             return false;
 
-        /* Now enter the merge block */
         func->m_curblock = merge;
     }
 
-    /* we create the if here, that way all blocks are ordered :)
-     */
     if (!ir_block_create_if(cond, m_context, condval,
                             (ontrue  ? ontrue  : merge),
                             (onfalse ? onfalse : merge)))
@@ -2397,21 +2259,14 @@ bool ast_ternary::codegen(ast_function *func, bool lvalue, ir_value **out)
     ir_block *onfalse, *onfalse_out = nullptr;
     ir_block *merge;
 
-    /* Ternary can never create an lvalue... */
     if (lvalue)
         return false;
 
-    /* In theory it shouldn't be possible to pass through a node twice, but
-     * in case we add any kind of optimization pass for the AST itself, it
-     * may still happen, thus we remember a created ir_value and simply return one
-     * if it already exists.
-     */
     if (m_outr) {
         *out = m_outr;
         return true;
     }
 
-    /* try constant folding away the condition */
     switch (fold::cond_ternary((ast_value*)m_cond, this)) {
     case 0:
         return true;
@@ -2421,73 +2276,59 @@ bool ast_ternary::codegen(ast_function *func, bool lvalue, ir_value **out)
         return m_on_false->codegen(func, false, out);
     }
 
-    /* In the following, contraty to ast_ifthen, we assume both paths exist. */
-
-    /* generate the condition */
     func->m_curblock = cond;
     if (!m_cond->codegen(func, false, &condval))
         return false;
     cond_out = func->m_curblock;
 
-    /* create on-true block */
     ontrue = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("tern_T"));
     if (!ontrue)
         return false;
     else
     {
-        /* enter the block */
+
         func->m_curblock = ontrue;
 
-        /* generate */
         if (!m_on_true->codegen(func, false, &trueval))
             return false;
 
         ontrue_out = func->m_curblock;
     }
 
-    /* create on-false block */
     onfalse = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("tern_F"));
     if (!onfalse)
         return false;
     else
     {
-        /* enter the block */
+
         func->m_curblock = onfalse;
 
-        /* generate */
         if (!m_on_false->codegen(func, false, &falseval))
             return false;
 
         onfalse_out = func->m_curblock;
     }
 
-    /* create merge block */
     merge = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("tern_out"));
     if (!merge)
         return false;
-    /* jump to merge block */
+
     if (!ir_block_create_jump(ontrue_out, m_context, merge))
         return false;
     if (!ir_block_create_jump(onfalse_out, m_context, merge))
         return false;
 
-    /* create if instruction */
     if (!ir_block_create_if(cond_out, m_context, condval, ontrue, onfalse))
         return false;
 
-    /* Now enter the merge block */
     func->m_curblock = merge;
 
-    /* Here, now, we need a PHI node
-     * but first some sanity checking...
-     */
     if (trueval->m_vtype != falseval->m_vtype && trueval->m_vtype != TYPE_NIL && falseval->m_vtype != TYPE_NIL) {
-        /* error("ternary with different types on the two sides"); */
+
         compile_error(m_context, "internal error: ternary operand types invalid");
         return false;
     }
 
-    /* create PHI */
     phi = ir_block_create_phi(merge, m_context, func->makeLabel("phi"), m_vtype);
     if (!phi) {
         compile_error(m_context, "internal error: failed to generate phi node");
@@ -2510,20 +2351,14 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
     ir_value *precond    = nullptr;
     ir_value *postcond   = nullptr;
 
-    /* Since we insert some jumps "late" so we have blocks
-     * ordered "nicely", we need to keep track of the actual end-blocks
-     * of expressions to add the jumps to.
-     */
     ir_block *bbody      = nullptr, *end_bbody      = nullptr;
     ir_block *bprecond   = nullptr, *end_bprecond   = nullptr;
     ir_block *bpostcond  = nullptr, *end_bpostcond  = nullptr;
     ir_block *bincrement = nullptr, *end_bincrement = nullptr;
     ir_block *bout       = nullptr, *bin            = nullptr;
 
-    /* let's at least move the outgoing block to the end */
     size_t    bout_id;
 
-    /* 'break' and 'continue' need to be able to find the right blocks */
     ir_block *bcontinue     = nullptr;
     ir_block *bbreak        = nullptr;
 
@@ -2538,40 +2373,24 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
     }
     m_outr = (ir_value*)1;
 
-    /* NOTE:
-     * Should we ever need some kind of block ordering, better make this function
-     * move blocks around than write a block ordering algorithm later... after all
-     * the ast and ir should work together, not against each other.
-     */
-
-    /* initexpr doesn't get its own block, it's pointless, it could create more blocks
-     * anyway if for example it contains a ternary.
-     */
     if (m_initexpr)
     {
         if (!m_initexpr->codegen(func, false, &dummy))
             return false;
     }
 
-    /* Store the block from which we enter this chaos */
     bin = func->m_curblock;
 
-    /* The pre-loop condition needs its own block since we
-     * need to be able to jump to the start of that expression.
-     */
     if (m_precond)
     {
         bprecond = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("pre_loop_cond"));
         if (!bprecond)
             return false;
 
-        /* the pre-loop-condition the least important place to 'continue' at */
         bcontinue = bprecond;
 
-        /* enter */
         func->m_curblock = bprecond;
 
-        /* generate */
         if (!m_precond->codegen(func, false, &precond))
             return false;
 
@@ -2580,14 +2399,11 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
         bprecond = end_bprecond = nullptr;
     }
 
-    /* Now the next blocks won't be ordered nicely, but we need to
-     * generate them this early for 'break' and 'continue'.
-     */
     if (m_increment) {
         bincrement = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("loop_increment"));
         if (!bincrement)
             return false;
-        bcontinue = bincrement; /* increment comes before the pre-loop-condition */
+        bcontinue = bincrement;
     } else {
         bincrement = end_bincrement = nullptr;
     }
@@ -2596,7 +2412,7 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
         bpostcond = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("post_loop_cond"));
         if (!bpostcond)
             return false;
-        bcontinue = bpostcond; /* postcond comes before the increment */
+        bcontinue = bpostcond;
     } else {
         bpostcond = end_bpostcond = nullptr;
     }
@@ -2607,14 +2423,11 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
         return false;
     bbreak = bout;
 
-    /* The loop body... */
-    /* if (m_body) */
     {
         bbody = ir_function_create_block(m_context, func->m_ir_func, func->makeLabel("loop_body"));
         if (!bbody)
             return false;
 
-        /* enter */
         func->m_curblock = bbody;
 
         func->m_breakblocks.push_back(bbreak);
@@ -2623,7 +2436,6 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
         else
             func->m_continueblocks.push_back(bbody);
 
-        /* generate */
         if (m_body) {
             if (!m_body->codegen(func, false, &dummy))
                 return false;
@@ -2634,58 +2446,40 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
         func->m_continueblocks.pop_back();
     }
 
-    /* post-loop-condition */
     if (m_postcond)
     {
-        /* enter */
+
         func->m_curblock = bpostcond;
 
-        /* generate */
         if (!m_postcond->codegen(func, false, &postcond))
             return false;
 
         end_bpostcond = func->m_curblock;
     }
 
-    /* The incrementor */
     if (m_increment)
     {
-        /* enter */
+
         func->m_curblock = bincrement;
 
-        /* generate */
         if (!m_increment->codegen(func, false, &dummy))
             return false;
 
         end_bincrement = func->m_curblock;
     }
 
-    /* In any case now, we continue from the outgoing block */
     func->m_curblock = bout;
 
-    /* Now all blocks are in place */
-    /* From 'bin' we jump to whatever comes first */
     if      (bprecond)   tmpblock = bprecond;
-    else                 tmpblock = bbody;    /* can never be null */
-
-    /* DEAD CODE
-    else if (bpostcond)  tmpblock = bpostcond;
-    else                 tmpblock = bout;
-    */
+    else                 tmpblock = bbody;
 
     if (!ir_block_create_jump(bin, m_context, tmpblock))
         return false;
 
-    /* From precond */
     if (bprecond)
     {
         ir_block *ontrue, *onfalse;
-        ontrue = bbody; /* can never be null */
-
-        /* all of this is dead code
-        else if (bincrement) ontrue = bincrement;
-        else                 ontrue = bpostcond;
-        */
+        ontrue = bbody;
 
         onfalse = bout;
         if (m_pre_not) {
@@ -2697,7 +2491,6 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
             return false;
     }
 
-    /* from body */
     if (bbody)
     {
         if      (bincrement) tmpblock = bincrement;
@@ -2708,7 +2501,6 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
             return false;
     }
 
-    /* from increment */
     if (bincrement)
     {
         if      (bpostcond)  tmpblock = bpostcond;
@@ -2719,17 +2511,11 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
             return false;
     }
 
-    /* from postcond */
     if (bpostcond)
     {
         ir_block *ontrue, *onfalse;
         if      (bprecond)   ontrue = bprecond;
-        else                 ontrue = bbody; /* can never be null */
-
-        /* all of this is dead code
-        else if (bincrement) ontrue = bincrement;
-        else                 ontrue = bpostcond;
-        */
+        else                 ontrue = bbody;
 
         onfalse = bout;
         if (m_post_not) {
@@ -2741,13 +2527,8 @@ bool ast_loop::codegen(ast_function *func, bool lvalue, ir_value **out)
             return false;
     }
 
-    /* Move 'bout' to the end */
     algo::shiftback(func->m_ir_func->m_blocks.begin() + bout_id,
                     func->m_ir_func->m_blocks.end());
-    // FIXME::DELME::
-    //func->m_ir_func->m_blocks[bout_id].release(); // it's a vector<std::unique_ptr<>>
-    //func->m_ir_func->m_blocks.erase(func->m_ir_func->m_blocks.begin() + bout_id);
-    //func->m_ir_func->m_blocks.emplace_back(bout);
 
     return true;
 }
@@ -2832,10 +2613,8 @@ bool ast_switch::codegen(ast_function *func, bool lvalue, ir_value **out)
     if (!bout)
         return false;
 
-    /* setup the break block */
     func->m_breakblocks.push_back(bout);
 
-    /* Now create all cases */
     for (auto &it : m_cases) {
         ir_value *cond, *val;
         ir_block *bcase, *bnot;
@@ -2844,11 +2623,10 @@ bool ast_switch::codegen(ast_function *func, bool lvalue, ir_value **out)
         ast_switch_case *swcase = &it;
 
         if (swcase->m_value) {
-            /* A regular case */
-            /* generate the condition operand */
+
             if (!swcase->m_value->codegen(func, false, &val))
                 return false;
-            /* generate the condition */
+
             cond = ir_block_create_binop(func->m_curblock, m_context, func->makeLabel("switch_eq"), cmpinstr, irop, val);
             if (!cond)
                 return false;
@@ -2865,66 +2643,50 @@ bool ast_switch::codegen(ast_function *func, bool lvalue, ir_value **out)
             if (!ir_block_create_if(func->m_curblock, m_context, cond, bcase, bnot))
                 return false;
 
-            /* Make the previous case-end fall through */
             if (bfall && !bfall->m_final) {
                 if (!ir_block_create_jump(bfall, m_context, bcase))
                     return false;
             }
 
-            /* enter the case */
             func->m_curblock = bcase;
             if (!swcase->m_code->codegen(func, false, &dummy))
                 return false;
 
-            /* remember this block to fall through from */
             bfall = func->m_curblock;
 
-            /* enter the else and move it down */
             func->m_curblock = bnot;
             algo::shiftback(func->m_ir_func->m_blocks.begin() + bnot_id,
                             func->m_ir_func->m_blocks.end());
-            // FIXME::DELME::
-            //func->m_ir_func->m_blocks[bnot_id].release();
-            //func->m_ir_func->m_blocks.erase(func->m_ir_func->m_blocks.begin() + bnot_id);
-            //func->m_ir_func->m_blocks.emplace_back(bnot);
+
         } else {
-            /* The default case */
-            /* Remember where to fall through from: */
+
             def_bfall = bfall;
             bfall     = nullptr;
-            /* remember which case it was */
+
             def_case  = swcase;
-            /* And the next case will be remembered */
+
             set_def_bfall_to = true;
         }
     }
 
-    /* Jump from the last bnot to bout */
     if (bfall && !bfall->m_final && !ir_block_create_jump(bfall, m_context, bout)) {
-        /*
-        astwarning(bfall->m_context, WARN_???, "missing break after last case");
-        */
+
         return false;
     }
 
-    /* If there was a default case, put it down here */
     if (def_case) {
         ir_block *bcase;
 
-        /* No need to create an extra block */
         bcase = func->m_curblock;
 
-        /* Insert the fallthrough jump */
         if (def_bfall && !def_bfall->m_final) {
             if (!ir_block_create_jump(def_bfall, m_context, bcase))
                 return false;
         }
 
-        /* Now generate the default code */
         if (!def_case->m_code->codegen(func, false, &dummy))
             return false;
 
-        /* see if we need to fall through */
         if (def_bfall_to && !func->m_curblock->m_final)
         {
             if (!ir_block_create_jump(func->m_curblock, m_context, def_bfall_to))
@@ -2932,22 +2694,15 @@ bool ast_switch::codegen(ast_function *func, bool lvalue, ir_value **out)
         }
     }
 
-    /* Jump from the last bnot to bout */
     if (!func->m_curblock->m_final && !ir_block_create_jump(func->m_curblock, m_context, bout))
         return false;
-    /* enter the outgoing block */
+
     func->m_curblock = bout;
 
-    /* restore the break block */
     func->m_breakblocks.pop_back();
 
-    /* Move 'bout' to the end, it's nicer */
     algo::shiftback(func->m_ir_func->m_blocks.begin() + bout_id,
                     func->m_ir_func->m_blocks.end());
-    // FIXME::DELME::
-    //func->m_ir_func->m_blocks[bout_id].release();
-    //func->m_ir_func->m_blocks.erase(func->m_ir_func->m_blocks.begin() + bout_id);
-    //func->m_ir_func->m_blocks.emplace_back(bout);
 
     return true;
 }
@@ -2967,7 +2722,6 @@ bool ast_label::codegen(ast_function *func, bool lvalue, ir_value **out)
         return false;
     }
 
-    /* simply create a new block and jump to it */
     m_irblock = ir_function_create_block(m_context, func->m_ir_func, m_name.c_str());
     if (!m_irblock) {
         compile_error(m_context, "failed to allocate label block `%s`", m_name);
@@ -2978,10 +2732,8 @@ bool ast_label::codegen(ast_function *func, bool lvalue, ir_value **out)
             return false;
     }
 
-    /* enter the new block */
     func->m_curblock = m_irblock;
 
-    /* Generate all the leftover gotos */
     for (auto &it : m_gotos) {
         if (!it->codegen(func, false, &dummy))
             return false;
@@ -3000,7 +2752,7 @@ bool ast_goto::codegen(ast_function *func, bool lvalue, ir_value **out)
 
     if (m_target->m_irblock) {
         if (m_irblock_from) {
-            /* we already tried once, this is the callback */
+
             m_irblock_from->m_final = false;
             if (!ir_block_create_goto(m_irblock_from, m_context, m_target->m_irblock)) {
                 compile_error(m_context, "failed to generate goto to `%s`", m_name);
@@ -3017,9 +2769,7 @@ bool ast_goto::codegen(ast_function *func, bool lvalue, ir_value **out)
     }
     else
     {
-        /* the target has not yet been created...
-         * close this block in a sneaky way:
-         */
+
         func->m_curblock->m_final = true;
         m_irblock_from = func->m_curblock;
         m_target->registerGoto(this);
@@ -3068,7 +2818,6 @@ bool ast_call::codegen(ast_function *func, bool lvalue, ir_value **out)
 
     ir_value *funval = nullptr;
 
-    /* return values are never lvalues */
     if (lvalue) {
         compile_error(m_context, "not an l-value (function call)");
         return false;
@@ -3084,7 +2833,6 @@ bool ast_call::codegen(ast_function *func, bool lvalue, ir_value **out)
     if (!funval)
         return false;
 
-    /* parameters */
     for (auto &it : m_params) {
         ir_value *param;
         if (!it->codegen(func, false, &param))
@@ -3094,7 +2842,6 @@ bool ast_call::codegen(ast_function *func, bool lvalue, ir_value **out)
         params.push_back(param);
     }
 
-    /* varargs counter */
     if (m_va_count) {
         ir_value   *va_count;
         ir_builder *builder = func->m_curblock->m_owner->m_owner;

@@ -1,7 +1,6 @@
 #pragma once
 
-
-const int VIEWLOC_NOSIDESCROLL = BIT(0); // NOTE: currently unimplemented
+const int VIEWLOC_NOSIDESCROLL = BIT(0);
 const int VIEWLOC_FREEAIM = BIT(1);
 const int VIEWLOC_FREEMOVE = BIT(2);
 const int VIEWLOC_CAM_TRACK = BIT(3);

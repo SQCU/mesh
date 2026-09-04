@@ -14,14 +14,10 @@
 	#endif
 
 	#ifdef SVQC
-		/**
-		 * @param from the source entity, its position is sent
-		 * @param gs the global sound def
-		 * @param r a random number in 0..1
-		 */
+
 		void globalsound(int channel, entity from, entity gs, float r, int chan, float _vol, float _atten, float _pitch)
 		{
-			//assert(IS_PLAYER(from), eprint(from));
+
 			if (channel == MSG_ONE && !IS_REAL_CLIENT(msg_entity)) return;
 			if (!autocvar_g_debug_globalsounds) {
 				string sample = GlobalSound_sample(gs.m_globalsoundstr, r);
@@ -36,11 +32,11 @@
 				}
 				return;
 			}
-			// FIXME: pitch not implemented
+
 			WriteHeader(channel, globalsound);
 			WriteByte(channel, gs.m_id);
 			WriteByte(channel, r * 255);
-			WriteByte(channel, etof(from));
+			WriteShort(channel, etof(from));
 			WriteByte(channel, chan);
 			WriteByte(channel, floor(_vol * 255));
 			WriteByte(channel, floor(_atten * 64));
@@ -49,17 +45,12 @@
 			WriteVector(channel, o);
 		}
 
-		/**
-		* @param from the source entity, its position is sent
-		* @param ps the player sound def
-		* @param r a random number in 0..1
-		*/
 		void playersound(int channel, entity from, entity ps, float r, int chan, float _vol, float _atten, float _pitch)
 		{
-			//assert(IS_PLAYER(from), eprint(from));
+
 			if (channel == MSG_ONE && !IS_REAL_CLIENT(msg_entity)) return;
 			if (!autocvar_g_debug_globalsounds) {
-				//UpdatePlayerSounds(from);
+
 				string s = from.(ps.m_playersoundfld);
 				string sample = GlobalSound_sample(s, r);
 				switch (channel) {
@@ -73,11 +64,11 @@
 				}
 				return;
 			}
-			// FIXME: pitch not implemented
+
 			WriteHeader(channel, playersound);
 			WriteByte(channel, ps.m_id);
 			WriteByte(channel, r * 255);
-			WriteByte(channel, etof(from));
+			WriteShort(channel, etof(from));
 			WriteByte(channel, chan);
 			WriteByte(channel, floor(_vol * 255));
 			WriteByte(channel, floor(_atten * 64));
@@ -94,14 +85,14 @@
 			entity gs = REGISTRY_GET(GlobalSounds, ReadByte());
 			float r = ReadByte() / 255;
 			string sample = GlobalSound_sample(gs.m_globalsoundstr, r);
-			int who = ReadByte();
+			int who = ReadShort();
 			entity e = entcs_receiver(who - 1);
 			int chan = ReadSByte();
 			float vol = ReadByte() / 255;
 			float atten = ReadByte() / 64;
 			vector o = ReadVector();
-			// TODO: is this really what we want to be doing? Footsteps that follow the player at head height?
-			if (who == player_currententnum) e = findfloat(NULL, entnum, who);  // play at camera position for full volume
+
+			if (who == player_currententnum) e = findfloat(NULL, entnum, who);
 			else if (e) e.origin = o;
 			if (e)
 			{
@@ -109,7 +100,7 @@
 			}
 			else
 			{
-				// Can this happen?
+
 				LOG_WARNF("Missing entcs data for player %d", who);
 				sound8(e, o, chan, sample, vol, atten, 0, 0);
 			}
@@ -120,7 +111,7 @@
 		{
 			entity ps = REGISTRY_GET(PlayerSounds, ReadByte());
 			float r = ReadByte() / 255;
-			int who = ReadByte();
+			int who = ReadShort();
 			entity e = entcs_receiver(who - 1);
 			UpdatePlayerSounds(e);
 			string s = e.(ps.m_playersoundfld);
@@ -129,16 +120,16 @@
 			float vol = ReadByte() / 255;
 			float atten = ReadByte() / 64;
 			vector o = ReadVector();
-			if (who == player_currententnum) e = findfloat(NULL, entnum, who);  // play at camera position for full volume
+			if (who == player_currententnum) e = findfloat(NULL, entnum, who);
 			else if (e) e.origin = o;
 			if (e)
 			{
-				// TODO: for non-visible players, origin should probably continue to be updated as long as the sound is playing
+
 				sound7(e, chan, sample, vol, atten, 0, 0);
 			}
 			else
 			{
-				// Can this happen?
+
 				LOG_WARNF("Missing entcs data for player %d", who);
 				sound8(e, o, chan, sample, vol, atten, 0, 0);
 			}
@@ -156,17 +147,17 @@
 			else n = 0;
 		}
 		string sample = car(pair);
-		if (n > 0) sample = sprintf("%s%d.wav", sample, floor(r * n + 1));  // randomization
+		if (n > 0) sample = sprintf("%s%d.wav", sample, floor(r * n + 1));
 		else sample = sprintf("%s.wav", sample);
 		return sample;
 	}
 
 	float GlobalSound_pitch(float _pitch)
 	{
-		// customizable gradient function that crosses (0,a), (c,1) and asymptotically approaches b
-		float a = 1.5; // max pitch
-		float b = 0.75; // min pitch
-		float c = 100; // standard pitch (scale * 100)
+
+		float a = 1.5;
+		float b = 0.75;
+		float c = 100;
 		float d = _pitch;
 		float pitch_shift = (b*d*(a-1) + a*c*(1-b)) / (d*(a-1) + c*(1-b));
 
@@ -242,8 +233,6 @@
 		fclose(fh);
 	}
 
-	//#ifdef CSQC
-
 		.string GetPlayerSoundSampleField(string type)
 		{
 			return _GetPlayerSoundSampleField(type, false);
@@ -314,8 +303,6 @@
 			LoadPlayerSounds(this, get_model_datafilename(this.model, 0, "sounds"), true);
 		}
 
-	//#endif
-
 	#ifdef SVQC
 
 		void _GlobalSound(entity this, entity gs, entity ps, string sample, int chan, float vol, int voicetype, bool fake)
@@ -323,7 +310,7 @@
 			if (gs == NULL && ps == NULL && sample == "") return;
 			if(this.classname == "body") return;
 			float r = random();
-			float myscale = ((this.scale) ? this.scale : 1); // safety net
+			float myscale = ((this.scale) ? this.scale : 1);
 			float thepitch = ((myscale == 1) ? 0 : GlobalSound_pitch(myscale * 100));
 			if (sample != "") sample = GlobalSound_sample(sample, r);
 			switch (voicetype)
