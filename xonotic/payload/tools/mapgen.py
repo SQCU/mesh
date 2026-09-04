@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
 from placement import fnum, vstr, check_bsp, vadd, vscale, vnorm, vcross
 
-Q3MAP2 = os.environ.get('Q3MAP2', os.path.expanduser('~/dox/xonotic/netradiant-custom/install/q3map2'))
+Q3MAP2 = os.environ.get('Q3MAP2', os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'bin', 'mesh-q3map2')))
 BASEPATH = os.environ.get('XON_BASEPATH', os.path.expanduser('~/dox/xonotic/Xonotic'))
 TEX = dict(floor='exx/floor-tread01', wall='exx/wall-bigrib02', ceil='exx/panel-metalbig04',
            trim='exx/trim-01', pad='exx/floor-clang01', light='exx/light-panel01',

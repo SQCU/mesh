@@ -1,0 +1,1330 @@
+diff --git a/tools/quake3/common/threads.cpp b/tools/quake3/common/threads.cpp
+index c292ee8..f5f7669 100644
+--- a/tools/quake3/common/threads.cpp
++++ b/tools/quake3/common/threads.cpp
+@@ -24,7 +24,6 @@
+ #include "qthreads.h"
+ #include "timer.h"
+ 
+-#define MAX_THREADS 64
+ int numthreads = -1;
+ bool threaded;
+ 
+@@ -113,6 +112,7 @@ void RunThreadsOnIndividual( int workcnt, bool showpacifier, void ( *func )( int
+ 
+ #include <thread>
+ #include <mutex>
++#include <vector>
+ 
+ std::mutex crit;
+ static bool enter;
+@@ -121,6 +121,7 @@ void ThreadSetDefault(){
+ 	if ( numthreads == -1 ) { // not set manually
+ 		numthreads = std::max( std::thread::hardware_concurrency(), 1u );
+ 	}
++	numthreads = std::max( numthreads, 1 );
+ 
+ 	Sys_Printf( "%i threads\n", numthreads );
+ }
+@@ -159,13 +160,14 @@ void RunThreadsOn( void ( *func )( int ) ){
+ 	{
+ 		threaded = true;
+ 
+-		std::thread threads[MAX_THREADS];
++		std::vector<std::thread> threads;
++		threads.reserve( numthreads );
+ 
+ 		for ( int i = 0; i < numthreads; ++i )
+-			threads[i] = std::thread( func, i );
++			threads.emplace_back( func, i );
+ 
+-		for ( int i = 0; i < numthreads; ++i )
+-			threads[i].join();
++		for ( std::thread& thread : threads )
++			thread.join();
+ 
+ 		threaded = false;
+ 	}
+diff --git a/tools/quake3/common/vfs.cpp b/tools/quake3/common/vfs.cpp
+index ca16e9a..12b52dc 100644
+--- a/tools/quake3/common/vfs.cpp
++++ b/tools/quake3/common/vfs.cpp
+@@ -70,6 +70,8 @@
+ #include "stream/stringstream.h"
+ #include "stream/textstream.h"
+ #include <forward_list>
++#include <string>
++#include <vector>
+ 
+ struct VFS_PAK
+ {
+@@ -88,6 +90,7 @@ struct VFS_PAKFILE
+ 	const unz_s zipinfo;
+ 	VFS_PAK& pak;
+ 	const unsigned long size;
++	const bool symlink;
+ };
+ 
+ // =============================================================================
+@@ -100,6 +103,33 @@ std::vector<CopiedString> g_strForbiddenDirs;
+ static constexpr bool g_bUsePak = true;
+ StringOutputStream g_loadedScriptLocation;
+ 
++static std::string vfsLinkPath( const char *source, const char *target ){
++	std::string path = target;
++	if ( path.empty() || path.front() != '/' )
++		path.insert( 0, StringStream<256>( PathFilenameless( source ) ).c_str() );
++	else
++		path.erase( 0, 1 );
++	for ( char& value : path )
++		if ( value == '\\' ) value = '/';
++	std::vector<std::string> parts;
++	for ( size_t begin = 0; begin <= path.size(); ) {
++		const size_t end = path.find( '/', begin );
++		const std::string part = path.substr( begin, end - begin );
++		if ( part == ".." ) {
++			if ( !parts.empty() ) parts.pop_back();
++		}
++		else if ( !part.empty() && part != "." ) parts.push_back( part );
++		if ( end == std::string::npos ) break;
++		begin = end + 1;
++	}
++	std::string resolved;
++	for ( const std::string& part : parts ) {
++		if ( !resolved.empty() ) resolved += '/';
++		resolved += part;
++	}
++	return resolved;
++}
++
+ // =============================================================================
+ // Static functions
+ 
+@@ -125,7 +155,8 @@ static void vfsInitPakFile( const char *filename ){
+ 						filename_inzip,
+ 						*(unz_s*)uf,
+ 						pak,
+-						file_info.uncompressed_size
++						file_info.uncompressed_size,
++						( ( file_info.external_fa >> 16 ) & 0170000 ) == 0120000
+ 					} );
+ 				}
+ 			} while( unzGoToNextFile( uf ) == UNZ_OK );
+@@ -317,6 +348,12 @@ MemBuffer vfsLoadFile( const char *filename, int index /* = 0 */, bool script /*
+ 				}
+ 				unzCloseCurrentFile( zipfile );
+ 			}
++			if ( file.symlink && buffer ) {
++				const char *bytes = buffer.data();
++				const std::string target( bytes, buffer.size() );
++				const std::string resolved = vfsLinkPath( fixedname.c_str(), target.c_str() );
++				return vfsLoadFile( resolved.c_str(), 0, script );
++			}
+ 			return buffer;
+ 		}
+ 	}
+diff --git a/tools/quake3/q3map2/image.cpp b/tools/quake3/q3map2/image.cpp
+index 201501f..fece73a 100644
+--- a/tools/quake3/q3map2/image.cpp
++++ b/tools/quake3/q3map2/image.cpp
+@@ -340,6 +340,10 @@ const image_t *ImageLoad( const char *name ){
+ 		}
+ 		#endif
+ 	}
++	else if( sprintf( filename, "dds/%s.dds", name ); ( buffer = vfsLoadFile( filename ) ) )
++	{
++		LoadDDSBuffer( buffer.data(), buffer.size(), &pixels, &width, &height );
++	}
+ 	else if( path_set_extension( filename, ".ktx" ); ( buffer = vfsLoadFile( filename ) ) )
+ 	{
+ 		LoadKTXBufferFirstImage( buffer.data(), buffer.size(), &pixels, &width, &height );
+diff --git a/tools/quake3/q3map2/light.cpp b/tools/quake3/q3map2/light.cpp
+index cffe36c..fa66705 100644
+--- a/tools/quake3/q3map2/light.cpp
++++ b/tools/quake3/q3map2/light.cpp
+@@ -1446,8 +1446,6 @@ static bool LightContributionToPoint( trace_t *trace ){
+    of dynamically placed entities in the world
+  */
+ 
+-#define MAX_CONTRIBUTIONS   32768
+-
+ struct contribution_t
+ {
+ 	Vector3 dir;
+@@ -1457,9 +1455,9 @@ struct contribution_t
+ };
+ 
+ static void TraceGrid( int num ){
+-	int i, j, x, y, z, mod, numCon, numStyles;
++	int i, j, x, y, z, mod, numStyles;
+ 	Vector3 cheapColor, thisdir;
+-	contribution_t contributions[ MAX_CONTRIBUTIONS ];
++	std::vector<contribution_t> contributions;
+ 	trace_t trace;
+ 
+ 	/* get grid points */
+@@ -1515,7 +1513,6 @@ static void TraceGrid( int num ){
+ 	trace.lights = nullptr;
+ 
+ 	/* clear */
+-	numCon = 0;
+ 	cheapColor.set( 0 );
+ 
+ 	/* trace to all the lights, find the major light direction, and divide the
+@@ -1537,21 +1534,14 @@ static void TraceGrid( int num ){
+ 		}
+ 
+ 		/* add a contribution */
+-		contributions[ numCon ].color = trace.color;
+-		contributions[ numCon ].dir = trace.direction;
+-		contributions[ numCon ].ambient.set( 0 );
+-		contributions[ numCon ].style = trace.light->style;
+-		numCon++;
++		contributions.push_back( {
++			trace.direction, trace.color, Vector3( 0 ), trace.light->style,
++		} );
+ 
+ 		/* push average direction around */
+ 		addSize = vector3_length( trace.color );
+ 		gp.dir += trace.direction * addSize;
+ 
+-		/* stop after a while */
+-		if ( numCon >= ( MAX_CONTRIBUTIONS - 1 ) ) {
+-			break;
+-		}
+-
+ 		/* ydnar: cheap mode */
+ 		cheapColor += trace.color;
+ 		if ( cheapgrid && cheapColor[ 0 ] >= 255.0f && cheapColor[ 1 ] >= 255.0f && cheapColor[ 2 ] >= 255.0f ) {
+@@ -1585,19 +1575,16 @@ static void TraceGrid( int num ){
+ 			f = FloodLightForSample( &trace, floodlightDistance, floodlight_lowquality );
+ 
+ 			/* add a fraction as pure ambient, half as top-down direction */
+-			contributions[ numCon ].color = floodlightRGB * ( floodlightIntensity * f * ( 1.0f - ambientFrac ) );
+-
+-			contributions[ numCon ].ambient = floodlightRGB * ( floodlightIntensity * f * ambientFrac );
+-
+-			contributions[ numCon ].dir = dir;
+-
+-			contributions[ numCon ].style = 0;
++			contributions.push_back( {
++				dir,
++				floodlightRGB * ( floodlightIntensity * f * ( 1.0f - ambientFrac ) ),
++				floodlightRGB * ( floodlightIntensity * f * ambientFrac ),
++				0,
++			} );
+ 
+ 			/* push average direction around */
+-			addSize = vector3_length( contributions[ numCon ].color );
++			addSize = vector3_length( contributions.back().color );
+ 			gp.dir += dir * addSize;
+-
+-			numCon++;
+ 		}
+ 	}
+ 	/////////////////////
+@@ -1609,7 +1596,7 @@ static void TraceGrid( int num ){
+ 	   go back and separate all the light into directed and ambient */
+ 
+ 	numStyles = 1;
+-	for ( i = 0; i < numCon; ++i )
++	for ( i = 0; i < int( contributions.size() ); ++i )
+ 	{
+ 		/* get relative directed strength */
+ 		float d = vector3_dot( contributions[ i ].dir, thisdir );
+diff --git a/tools/quake3/q3map2/mesh.cpp b/tools/quake3/q3map2/mesh.cpp
+index 7a414ea..4940bfe 100644
+--- a/tools/quake3/q3map2/mesh.cpp
++++ b/tools/quake3/q3map2/mesh.cpp
+@@ -416,13 +416,20 @@ int IterationsForCurve( float len, int subdivisions ){
+  */
+ 
+ mesh_t SubdivideMesh2( const mesh_view_t in, int iterations ){
+-	bspDrawVert_t expand[ MAX_EXPANDED_AXIS ][ MAX_EXPANDED_AXIS ];
++	const auto expandedAxis = []( int extent, int passes ){
++		for ( ; passes > 0; --passes )
++			extent += 2 * ( ( extent - 1 ) / 2 );
++		return extent;
++	};
++	const int capacityWidth = expandedAxis( in.width, iterations );
++	const int capacityHeight = expandedAxis( in.height, iterations );
++	std::vector<bspDrawVert_t> expand( size_t( capacityWidth ) * capacityHeight );
++	const auto row = [&]( int y ){ return expand.data() + size_t( y ) * capacityWidth; };
+ 	int width = in.width;
+ 	int height = in.height;
+ 
+-	/* copy each row */
+ 	for ( int h = 0; h < in.height; ++h )
+-		std::copy_n( in[h], in.width, expand[h] );
++		std::copy_n( in[h], in.width, row( h ) );
+ 
+ 	/* keep chopping */
+ 	for ( ; iterations > 0; --iterations )
+@@ -430,52 +437,35 @@ mesh_t SubdivideMesh2( const mesh_view_t in, int iterations ){
+ 		/* horizontal subdivisions */
+ 		for ( int j = 0; j + 2 < width; j += 4 )
+ 		{
+-			/* check size limit */
+-			if ( width + 2 >= MAX_EXPANDED_AXIS ) {
+-				break;
+-			}
+-
+-			/* insert two columns and replace the peak */
+ 			width += 2;
+ 			for ( int i = 0; i < height; ++i )
+ 			{
+ 				for ( int k = width - 1; k > j + 3; --k )
+-					expand [ i ][ k ] = expand[ i ][ k - 2 ];
++					row( i )[ k ] = row( i )[ k - 2 ];
+ 
+-				expand[ i ][ j + 3 ] = LerpDrawVert( expand[ i ][ j + 1 ], expand[ i ][ j + 2 ] );
+-				expand[ i ][ j + 1 ] = LerpDrawVert( expand[ i ][ j + 0 ], expand[ i ][ j + 1 ] );
+-				expand[ i ][ j + 2 ] = LerpDrawVert( expand[ i ][ j + 1 ], expand[ i ][ j + 3 ] );
++				row( i )[ j + 3 ] = LerpDrawVert( row( i )[ j + 1 ], row( i )[ j + 2 ] );
++				row( i )[ j + 1 ] = LerpDrawVert( row( i )[ j + 0 ], row( i )[ j + 1 ] );
++				row( i )[ j + 2 ] = LerpDrawVert( row( i )[ j + 1 ], row( i )[ j + 3 ] );
+ 			}
+ 		}
+ 
+ 		/* vertical subdivisions */
+ 		for ( int j = 0; j + 2 < height; j += 4 )
+ 		{
+-			/* check size limit */
+-			if ( height + 2 >= MAX_EXPANDED_AXIS ) {
+-				break;
+-			}
+-
+-			/* insert two columns and replace the peak */
+ 			height += 2;
+ 			for ( int i = 0; i < width; ++i )
+ 			{
+ 				for ( int k = height - 1; k > j + 3; --k )
+-					expand[ k ][ i ] = expand[ k - 2 ][ i ];
++					row( k )[ i ] = row( k - 2 )[ i ];
+ 
+-				expand[ j + 3 ][ i ] = LerpDrawVert( expand[ j + 1 ][ i ], expand[ j + 2 ][ i ] );
+-				expand[ j + 1 ][ i ] = LerpDrawVert( expand[ j + 0 ][ i ], expand[ j + 1 ][ i ] );
+-				expand[ j + 2 ][ i ] = LerpDrawVert( expand[ j + 1 ][ i ], expand[ j + 3 ][ i ] );
++				row( j + 3 )[ i ] = LerpDrawVert( row( j + 1 )[ i ], row( j + 2 )[ i ] );
++				row( j + 1 )[ i ] = LerpDrawVert( row( j + 0 )[ i ], row( j + 1 )[ i ] );
++				row( j + 2 )[ i ] = LerpDrawVert( row( j + 1 )[ i ], row( j + 3 )[ i ] );
+ 			}
+ 		}
+ 	}
+ 
+-	/* collapse the verts */
+-	for ( int i = 1; i < height; ++i )
+-		memmove( expand[0] + width * i, expand[ i ], width * sizeof( bspDrawVert_t ) );
+-
+-	/* return to sender */
+-	return mesh_t( width, height, expand[0] );
++	return mesh_t( width, height, expand.data() );
+ }
+ 
+ 
+@@ -502,14 +492,10 @@ inline Vector3 ProjectPointOntoVector( const Vector3& point, const Vector3& vSta
+    ================
+  */
+ mesh_t RemoveLinearMeshColumnsRows( const mesh_t& in ) {
+-	bspDrawVert_t expand[MAX_EXPANDED_AXIS][MAX_EXPANDED_AXIS];
++	mesh_t expand( in );
+ 	int width = in.width;
+ 	int height = in.height;
+ 
+-	/* copy each row */
+-	for ( int h = 0; h < in.height; ++h )
+-		std::copy_n( in[h], in.width, expand[h] );
+-
+ 	for ( int j = 1; j < width - 1; ++j ) {
+ 		double maxLength = 0;
+ 		for ( int i = 0; i < height; ++i ) {
+@@ -540,12 +526,10 @@ mesh_t RemoveLinearMeshColumnsRows( const mesh_t& in ) {
+ 			j--;
+ 		}
+ 	}
+-	// collapse the verts
+-	for ( int i = 1; i < height; ++i ) {
+-		memmove( expand[0] + width * i, expand[i], width * sizeof( bspDrawVert_t ) );
+-	}
+-
+-	return mesh_t( width, height, expand[0] );
++	mesh_t result( width, height );
++	for ( int i = 0; i < height; ++i )
++		std::copy_n( expand[ i ], width, result[ i ] );
++	return result;
+ }
+ 
+ 
+diff --git a/tools/quake3/q3map2/q3map2.h b/tools/quake3/q3map2/q3map2.h
+index 72fe481..e8ee52b 100644
+--- a/tools/quake3/q3map2/q3map2.h
++++ b/tools/quake3/q3map2/q3map2.h
+@@ -149,10 +149,8 @@ enum class EBrushType
+ 
+ #define PORTALFILE              "PRT1"
+ 
+-#define MAX_PORTALS             0x20000 /* same as MAX_MAP_PORTALS */
+ #define MAX_SEPERATORS          MAX_POINTS_ON_WINDING
+ #define MAX_POINTS_ON_FIXED_WINDING 24  /* ydnar: increased this from 12 at the expense of more memory */
+-#define MAX_PORTALS_ON_LEAF     1024
+ 
+ 
+ /* light */
+@@ -203,12 +201,8 @@ inline bool style_is_valid( int style ){ return LS_NORMAL <= style && style < LS
+ /* MAX_MAP_FOGS is technically unlimited in engine, but drawsurf sorting code only has 5 bits for fogs */
+ #define MAX_IBSP_FOGS           31          /* (2^5 - world fog) */
+ #define MAX_RBSP_FOGS           30          /* (2^5 - world fog - goggles) */
+-#define MAX_MAP_LEAFS           0x20000
+-#define MAX_MAP_PORTALS         0x20000
+ #define MAX_MAP_LIGHTING        0x800000
+ #define MAX_MAP_LIGHTGRID       0x100000    //%	0x800000 /* ydnar: set to points, not bytes */
+-#define MAX_MAP_VISCLUSTERS     0x4000 // <= MAX_MAP_LEAFS
+-#define MAX_MAP_VISIBILITY      ( VIS_HEADER_SIZE + MAX_MAP_VISCLUSTERS * ( ( ( MAX_MAP_VISCLUSTERS + 63 ) & ~63 ) >> 3 ) )
+ 
+ /* the editor uses these predefined yaw angles to orient entities up or down */
+ #define ANGLE_UP                -1
+@@ -2305,7 +2299,7 @@ inline std::vector<bspShader_t> bspShaders;
+ 
+ inline std::vector<char> bspEntData;
+ 
+-inline std::vector<bspLeaf_t> bspLeafs; // MAX_MAP_LEAFS
++inline std::vector<bspLeaf_t> bspLeafs;
+ 
+ inline std::vector<bspPlane_t> bspPlanes;
+ 
+@@ -2323,7 +2317,7 @@ inline std::vector<byte> bspLightBytes;
+ 
+ inline std::vector<bspGridPoint_t> bspGridPoints;
+ 
+-inline std::vector<byte> bspVisBytes; // MAX_MAP_VISIBILITY
++inline std::vector<byte> bspVisBytes;
+ 
+ inline DrawVerts bspDrawVerts;
+ 
+diff --git a/tools/quake3/q3map2/vis.cpp b/tools/quake3/q3map2/vis.cpp
+index 60ccd26..f52970b 100644
+--- a/tools/quake3/q3map2/vis.cpp
++++ b/tools/quake3/q3map2/vis.cpp
+@@ -33,7 +33,7 @@
+ #include "vis.h"
+ #include "visflow.h"
+ 
+-vportal_t          *sorted_portals[ MAX_MAP_PORTALS * 2 ];
++std::vector<vportal_t *> sorted_portals;
+ 
+ 
+ static visPlane_t PlaneFromWinding( const fixedWinding_t *w ){
+@@ -60,7 +60,7 @@ static fixedWinding_t *NewFixedWinding( int numpoints ){
+ 
+ 
+ static void print_leaf( const leaf_t *l ){
+-	for ( const vportal_t *p : Span( l->portals, l->numportals ) )
++	for ( const vportal_t *p : l->portals )
+ 	{
+ 		const visPlane_t pl = p->plane;
+ 		Sys_Printf( "portal %4i to leaf %4i : %7.1f : (%4.1f, %4.1f, %4.1f)\n", (int)( p - portals ), p->leaf, pl.dist(), pl.normal()[0], pl.normal()[1], pl.normal()[2] );
+@@ -79,11 +79,12 @@ static void print_leaf( const leaf_t *l ){
+    =============
+  */
+ static void SortPortals(){
++	sorted_portals.resize( numportals * 2 );
+ 	for ( int i = 0; i < numportals * 2; ++i )
+ 		sorted_portals[i] = &portals[i];
+ 
+ 	if ( !nosort )
+-		std::ranges::sort( Span( sorted_portals, numportals * 2 ), {}, &vportal_t::nummightsee );
++		std::ranges::sort( sorted_portals, {}, &vportal_t::nummightsee );
+ }
+ 
+ 
+@@ -122,11 +123,11 @@ static int LeafVectorFromPortalVector( byte *portalbits, byte *leafbits ){
+    Merges the portal visibility for a leaf
+    ===============
+  */
+-static int clustersizehistogram[MAX_MAP_LEAFS] = {0};
++static std::vector<int> clustersizehistogram;
+ 
+ static void ClusterMerge( int leafnum ){
+-	byte portalvector[MAX_PORTALS / 8];
+-	byte uncompressed[MAX_MAP_LEAFS / 8];
++	std::vector<long> portalvector( portallongs );
++	std::vector<byte> uncompressed( leafbytes );
+ 	int numvis, mergedleafnum;
+ 
+ 	// OR together all the portalvis bits
+@@ -135,9 +136,7 @@ static void ClusterMerge( int leafnum ){
+ 	while ( leafs[mergedleafnum].merged >= 0 )
+ 		mergedleafnum = leafs[mergedleafnum].merged;
+ 
+-	memset( portalvector, 0, portalbytes );
+-
+-	for ( const vportal_t *p : Span( leafs[mergedleafnum].portals, leafs[mergedleafnum].numportals ) )
++	for ( const vportal_t *p : leafs[mergedleafnum].portals )
+ 	{
+ 		if ( p->removed ) {
+ 			continue;
+@@ -147,15 +146,13 @@ static void ClusterMerge( int leafnum ){
+ 			Error( "portal not done" );
+ 		}
+ 		for ( int j = 0; j < portallongs; ++j )
+-			( (long *)portalvector )[j] |= ( (long *)p->portalvis )[j];
+-		bit_enable( portalvector, p - portals );
++			portalvector[j] |= ( (long *)p->portalvis )[j];
++		bit_enable( reinterpret_cast<byte *>( portalvector.data() ), p - portals );
+ 	}
+ 
+-	memset( uncompressed, 0, leafbytes );
+-
+-	bit_enable( uncompressed, mergedleafnum );
++	bit_enable( uncompressed.data(), mergedleafnum );
+ 	// convert portal bits to leaf bits
+-	numvis = LeafVectorFromPortalVector( portalvector, uncompressed );
++	numvis = LeafVectorFromPortalVector( reinterpret_cast<byte *>( portalvector.data() ), uncompressed.data() );
+ 
+ //	if ( uncompressed[leafnum >> 3] & ( 1 << ( leafnum & 7 ) ) )
+ //		Sys_Warning( "Leaf portals saw into leaf\n" );
+@@ -167,7 +164,7 @@ static void ClusterMerge( int leafnum ){
+ 	//Sys_FPrintf( SYS_VRB, "cluster %4i : %4i visible\n", leafnum, numvis );
+ 	++clustersizehistogram[numvis];
+ 
+-	memcpy( bspVisBytes.data() + VIS_HEADER_SIZE + leafnum * leafbytes, uncompressed, leafbytes );
++	memcpy( bspVisBytes.data() + VIS_HEADER_SIZE + leafnum * leafbytes, uncompressed.data(), leafbytes );
+ }
+ 
+ /*
+@@ -191,11 +188,10 @@ static void CalcPortalVis(){
+    ==================
+  */
+ static void CalcPassageVis(){
+-	PassageMemory();
+-
+ #ifdef MREDEBUG
+ 	_printf( "%6d portals out of %d", 0, numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, false, CreatePassages );
++	PassageMemory();
+ 	_printf( "\n" );
+ 	_printf( "%6d portals out of %d", 0, numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, false, PassageFlow );
+@@ -203,6 +199,7 @@ static void CalcPassageVis(){
+ #else
+ 	Sys_Printf( "\n--- CreatePassages (%d) ---\n", numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, true, CreatePassages );
++	PassageMemory();
+ 
+ 	Sys_Printf( "\n--- PassageFlow (%d) ---\n", numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, true, PassageFlow );
+@@ -215,11 +212,10 @@ static void CalcPassageVis(){
+    ==================
+  */
+ static void CalcPassagePortalVis(){
+-	PassageMemory();
+-
+ #ifdef MREDEBUG
+ 	Sys_Printf( "%6d portals out of %d", 0, numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, false, CreatePassages );
++	PassageMemory();
+ 	Sys_Printf( "\n" );
+ 	Sys_Printf( "%6d portals out of %d", 0, numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, false, PassagePortalFlow );
+@@ -227,6 +223,7 @@ static void CalcPassagePortalVis(){
+ #else
+ 	Sys_Printf( "\n--- CreatePassages (%d) ---\n", numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, true, CreatePassages );
++	PassageMemory();
+ 
+ 	Sys_Printf( "\n--- PassagePortalFlow (%d) ---\n", numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, true, PassagePortalFlow );
+@@ -277,6 +274,7 @@ static void CalcVis(){
+ 
+ 	Sys_Printf( "\n--- BasePortalVis (%d) ---\n", numportals * 2 );
+ 	RunThreadsOnIndividual( numportals * 2, true, BasePortalVis );
++	clustersizehistogram.assign( portalclusters + 1, 0 );
+ 
+ //	RunThreadsOnIndividual( numportals * 2, true, BetterPortalVis );
+ 
+@@ -305,7 +303,7 @@ static void CalcVis(){
+ 	totalvis2 = 0;
+ 	minvis = -1;
+ 	maxvis = -1;
+-	for ( i = 0; i < MAX_MAP_LEAFS; ++i )
++	for ( i = 0; i < int( clustersizehistogram.size() ); ++i )
+ 		if ( clustersizehistogram[i] ) {
+ 			if ( debugCluster ) {
+ 				Sys_FPrintf( SYS_VRB, "%4i clusters have exactly %4i visible clusters\n", clustersizehistogram[i], i );
+@@ -392,18 +390,18 @@ static bool Winding_PlanesConcave( const fixedWinding_t *w1, const fixedWinding_
+    ============
+  */
+ static bool TryMergeLeaves( int l1num, int l2num ){
+-	vportal_t *portals[MAX_PORTALS_ON_LEAF];
++	std::vector<vportal_t *> merged;
+ 
+ 	for ( const leaf_t *l1 : { &faceleafs[l1num], &leafs[l1num] } )
+ 	{
+-		for ( const vportal_t *p1 : Span( l1->portals, l1->numportals ) )
++		for ( const vportal_t *p1 : l1->portals )
+ 		{
+ 			if ( p1->leaf == l2num ) {
+ 				continue;
+ 			}
+ 			for ( const leaf_t *l2 : { &faceleafs[l2num], &leafs[l2num] } )
+ 			{
+-				for ( const vportal_t *p2 : Span( l2->portals, l2->numportals ) )
++				for ( const vportal_t *p2 : l2->portals )
+ 				{
+ 					if ( p2->leaf == l1num ) {
+ 						continue;
+@@ -420,26 +418,25 @@ static bool TryMergeLeaves( int l1num, int l2num ){
+ 	{
+ 		leaf_t& l1 = lfs[l1num];
+ 		leaf_t& l2 = lfs[l2num];
+-		int numportals = 0;
++		merged.clear();
+ 		//the leaves can be merged now
+-		for ( vportal_t *p1 : Span( l1.portals, l1.numportals ) )
++		for ( vportal_t *p1 : l1.portals )
+ 		{
+ 			if ( p1->leaf == l2num ) {
+ 				p1->removed = true;
+ 				continue;
+ 			}
+-			portals[numportals++] = p1;
++			merged.push_back( p1 );
+ 		}
+-		for ( vportal_t *p2 : Span( l2.portals, l2.numportals ) )
++		for ( vportal_t *p2 : l2.portals )
+ 		{
+ 			if ( p2->leaf == l1num ) {
+ 				p2->removed = true;
+ 				continue;
+ 			}
+-			portals[numportals++] = p2;
++			merged.push_back( p2 );
+ 		}
+-		std::copy_n( portals, numportals, l2.portals );
+-		l2.numportals = numportals;
++		l2.portals = std::move( merged );
+ 		l1.merged = l2num;
+ 	}
+ 	return true;
+@@ -481,7 +478,7 @@ static void MergeLeaves(){
+ 			}
+ 
+ 
+-			for ( const vportal_t *p : Span( leaf.portals, leaf.numportals ) )
++			for ( const vportal_t *p : leaf.portals )
+ 			{
+ 				//never merge through hint portals
+ 				if ( !p->removed && !p->hint ) {
+@@ -621,13 +618,13 @@ static void MergeLeafPortals(){
+ 		if ( leaf->merged >= 0 ) {
+ 			continue;
+ 		}
+-		for ( j = 0; j < leaf->numportals; ++j )
++		for ( j = 0; j < int( leaf->portals.size() ); ++j )
+ 		{
+ 			p1 = leaf->portals[j];
+ 			if ( p1->removed ) {
+ 				continue;
+ 			}
+-			for ( k = j + 1; k < leaf->numportals; ++k )
++			for ( k = j + 1; k < int( leaf->portals.size() ); ++k )
+ 			{
+ 				p2 = leaf->portals[k];
+ 				if ( p2->removed ) {
+@@ -650,7 +647,7 @@ static void MergeLeafPortals(){
+ 					}
+ 				}
+ 			}
+-			if ( k < leaf->numportals ) {
++			if ( k < int( leaf->portals.size() ) ) {
+ 				break;
+ 			}
+ 		}
+@@ -710,10 +707,6 @@ static void LoadPortals( char *name ){
+ 	Sys_Printf( "%6i numportals\n", numportals );
+ 	Sys_Printf( "%6i numfaces\n", numfaces );
+ 
+-	if ( numportals > MAX_PORTALS ) {
+-		Error( "MAX_PORTALS" );
+-	}
+-
+ 	// these counts should take advantage of 64 bit systems automatically
+ 	leafbytes = ( ( portalclusters + 63 ) & ~63 ) >> 3;
+ 
+@@ -722,16 +715,9 @@ static void LoadPortals( char *name ){
+ 
+ 	// each file portal is split into two memory portals
+ 	portals = safe_calloc( 2 * numportals * sizeof( vportal_t ) );
+-	leafs = safe_calloc( portalclusters * sizeof( leaf_t ) );
++	leafs = new leaf_t[portalclusters];
+ 
+-	for ( leaf_t& leaf : Span( leafs, portalclusters ) )
+-		leaf.merged = -1;
+-
+-	bspVisBytes.resize( VIS_HEADER_SIZE + portalclusters * leafbytes );
+-
+-	if ( bspVisBytes.size() > MAX_MAP_VISIBILITY ) {
+-		Error( "MAX_MAP_VISIBILITY exceeded" );
+-	}
++	bspVisBytes.resize( VIS_HEADER_SIZE + std::size_t( portalclusters ) * std::size_t( leafbytes ) );
+ 
+ 	( (int *)bspVisBytes.data() )[0] = portalclusters;
+ 	( (int *)bspVisBytes.data() )[1] = leafbytes;
+@@ -781,11 +767,7 @@ static void LoadPortals( char *name ){
+ 			SetPortalSphere( p );
+ 
+ 			leaf_t& l = leafs[leafnums[0]];
+-			if ( l.numportals == MAX_PORTALS_ON_LEAF ) {
+-				Error( "Leaf with too many portals" );
+-			}
+-			l.portals[l.numportals] = &p;
+-			l.numportals++;
++			l.portals.push_back( &p );
+ 		}
+ 
+ 		// create backwards portal
+@@ -802,16 +784,12 @@ static void LoadPortals( char *name ){
+ 			SetPortalSphere( p );
+ 
+ 			leaf_t& l = leafs[leafnums[1]];
+-			if ( l.numportals == MAX_PORTALS_ON_LEAF ) {
+-				Error( "Leaf with too many portals" );
+-			}
+-			l.portals[l.numportals] = &p;
+-			l.numportals++;
++			l.portals.push_back( &p );
+ 		}
+ 	}
+ 
+ 	faces = safe_calloc( numfaces * sizeof( vportal_t ) );
+-	faceleafs = safe_calloc( portalclusters * sizeof( leaf_t ) );
++	faceleafs = new leaf_t[portalclusters];
+ 
+ 	for ( int i = 0; i < numfaces; ++i )
+ 	{
+@@ -843,11 +821,7 @@ static void LoadPortals( char *name ){
+ 
+ 		leaf_t& l = faceleafs[leafnums[0]];
+ 		l.merged = -1;
+-		if ( l.numportals == MAX_PORTALS_ON_LEAF ) {
+-			Error( "Leaf with too many faces" );
+-		}
+-		l.portals[l.numportals] = &p;
+-		l.numportals++;
++		l.portals.push_back( &p );
+ 	}
+ 
+ 	fclose( f );
+diff --git a/tools/quake3/q3map2/vis.h b/tools/quake3/q3map2/vis.h
+index 5575ec5..4850c0d 100644
+--- a/tools/quake3/q3map2/vis.h
++++ b/tools/quake3/q3map2/vis.h
+@@ -35,10 +35,16 @@ struct fixedWinding_t
+ };
+ 
+ 
++struct passage_word_t
++{
++	unsigned int index;
++	unsigned int bits;
++};
++
+ struct passage_t
+ {
+ 	struct passage_t    *next;
+-	byte cansee[ 1 ];                   /* all portals that can be seen through this passage */
++	std::vector<passage_word_t> cansee;
+ };
+ 
+ 
+@@ -76,15 +82,14 @@ struct vportal_t
+ 
+ struct leaf_t
+ {
+-	int numportals;
+-	int merged;
+-	vportal_t           *portals[MAX_PORTALS_ON_LEAF];
++	int merged = -1;
++	std::vector<vportal_t *> portals;
+ };
+ 
+ 
+ struct pstack_t
+ {
+-	byte mightsee[ MAX_PORTALS / 8 ];
++	std::vector<long> mightsee;
+ 	pstack_t            *next;
+ 	leaf_t              *leaf;
+ 	vportal_t           *portal;        /* portal exiting */
+@@ -102,6 +107,14 @@ struct pstack_t
+ #endif
+ };
+ 
++inline byte *pstack_bits( pstack_t& stack ){
++	return reinterpret_cast<byte *>( stack.mightsee.data() );
++}
++
++inline const byte *pstack_bits( const pstack_t& stack ){
++	return reinterpret_cast<const byte *>( stack.mightsee.data() );
++}
++
+ 
+ struct threaddata_t
+ {
+@@ -140,4 +153,4 @@ inline int numfaces;
+ inline int leafbytes;
+ inline int portalbytes, portallongs;
+ 
+-extern vportal_t          *sorted_portals[ MAX_MAP_PORTALS * 2 ];
++extern std::vector<vportal_t *> sorted_portals;
+diff --git a/tools/quake3/q3map2/visflow.cpp b/tools/quake3/q3map2/visflow.cpp
+index c237930..8194591 100644
+--- a/tools/quake3/q3map2/visflow.cpp
++++ b/tools/quake3/q3map2/visflow.cpp
+@@ -31,6 +31,7 @@
+ /* dependencies */
+ #include "q3map2.h"
+ #include "vis.h"
++#include <deque>
+ 
+ 
+ 
+@@ -96,15 +97,8 @@ static fixedWinding_t *AllocStackWinding( pstack_t *stack ){
+ }
+ 
+ static void FreeStackWinding( fixedWinding_t *w, pstack_t *stack ){
+-	const int i = w - stack->windings;
+-
+-	if ( i < 0 || i > 2 ) {
+-		return;     // not from local
+-	}
+-	if ( stack->freewindings[i] ) {
+-		Error( "FreeStackWinding: already free" );
+-	}
+-	stack->freewindings[i] = 1;
++	for ( int i = 0; i < 3; ++i )
++		if ( w == &stack->windings[i] ) stack->freewindings[i] = 1;
+ }
+ 
+ /*
+@@ -372,7 +366,7 @@ static fixedWinding_t  *ClipToSeperators( fixedWinding_t *source, fixedWinding_t
+    ==================
+  */
+ static void RecursiveLeafFlow( int leafnum, threaddata_t *thread, pstack_t *prevstack ){
+-	pstack_t stack;
++	pstack_t stack{};
+ 	visPlane_t backplane;
+ 	leaf_t      *leaf;
+ 	int j, n;
+@@ -389,17 +383,18 @@ static void RecursiveLeafFlow( int leafnum, threaddata_t *thread, pstack_t *prev
+ 	stack.leaf = leaf;
+ 	stack.portal = nullptr;
+ 	stack.depth = prevstack->depth + 1;
++	stack.mightsee.resize( portallongs );
+ 
+ #ifdef SEPERATORCACHE
+ 	stack.numseperators[0] = 0;
+ 	stack.numseperators[1] = 0;
+ #endif
+ 
+-	might = (long *)stack.mightsee;
++	might = stack.mightsee.data();
+ 	vis = (long *)thread->base->portalvis;
+ 
+ 	// check all portals for flowing into other leafs
+-	for ( vportal_t *p : Span( leaf->portals, leaf->numportals ) )
++	for ( vportal_t *p : leaf->portals )
+ 	{
+ 		if ( p->removed ) {
+ 			continue;
+@@ -425,7 +420,7 @@ static void RecursiveLeafFlow( int leafnum, threaddata_t *thread, pstack_t *prev
+ 		   }
+ 		 */
+ 
+-		if ( !bit_is_enabled( prevstack->mightsee, pnum ) ) {
++		if ( !bit_is_enabled( pstack_bits( *prevstack ), pnum ) ) {
+ 			continue;   // can't possibly see it
+ 		}
+ 
+@@ -439,7 +434,7 @@ static void RecursiveLeafFlow( int leafnum, threaddata_t *thread, pstack_t *prev
+ 		}
+ 
+ 		more = 0;
+-		prevmight = (long *)prevstack->mightsee;
++		prevmight = prevstack->mightsee.data();
+ 		for ( j = 0; j < portallongs; ++j )
+ 		{
+ 			might[j] = prevmight[j] & test[j];
+@@ -587,7 +582,7 @@ static void RecursiveLeafFlow( int leafnum, threaddata_t *thread, pstack_t *prev
+    ===============
+  */
+ void PortalFlow( int portalnum ){
+-	threaddata_t data;
++	threaddata_t data{};
+ 	vportal_t       *p;
+ 	int c_might, c_can;
+ 
+@@ -606,14 +601,14 @@ void PortalFlow( int portalnum ){
+ 
+ 	c_might = CountBits( p->portalflood, numportals * 2 );
+ 
+-	memset( &data, 0, sizeof( data ) );
+ 	data.base = p;
+ 
+ 	data.pstack_head.portal = p;
+ 	data.pstack_head.source = p->winding;
+ 	data.pstack_head.portalplane = p->plane;
+ 	data.pstack_head.depth = 0;
+-	memcpy( data.pstack_head.mightsee, p->portalflood, portalbytes );
++	data.pstack_head.mightsee.resize( portallongs );
++	memcpy( pstack_bits( data.pstack_head ), p->portalflood, portalbytes );
+ 
+ 	RecursiveLeafFlow( p->leaf, &data, &data.pstack_head );
+ 
+@@ -631,12 +626,13 @@ void PortalFlow( int portalnum ){
+    ==================
+  */
+ static void RecursivePassageFlow( vportal_t *portal, threaddata_t *thread, pstack_t *prevstack ){
+-	pstack_t stack;
++	pstack_t stack{};
+ 	vportal_t   *p;
+ 	leaf_t      *leaf;
+ 	passage_t   *passage, *nextpassage;
+-	int i, j;
+-	long        *might, *vis, *prevmight, *cansee, *portalvis, more;
++	int i;
++	unsigned int *vis, *prevmight, *portalvis, more;
++	std::vector<unsigned int> touched;
+ 
+ 	leaf = &leafs[portal->leaf];
+ 
+@@ -644,14 +640,18 @@ static void RecursivePassageFlow( vportal_t *portal, threaddata_t *thread, pstac
+ 
+ 	stack.next = nullptr;
+ 	stack.depth = prevstack->depth + 1;
++	stack.mightsee.resize( portallongs );
+ 
+-	vis = (long *)thread->base->portalvis;
++	vis = reinterpret_cast<unsigned int *>( thread->base->portalvis );
+ 
+ 	passage = portal->passages;
+ 	nextpassage = passage;
+ 	// check all portals for flowing into other leafs
+-	for ( i = 0; i < leaf->numportals; ++i, passage = nextpassage )
++	for ( i = 0; i < int( leaf->portals.size() ); ++i, passage = nextpassage )
+ 	{
++		for ( const unsigned int word : touched )
++			reinterpret_cast<unsigned int *>( stack.mightsee.data() )[word] = 0;
++		touched.clear();
+ 		p = leaf->portals[i];
+ 		if ( p->removed ) {
+ 			continue;
+@@ -659,33 +659,28 @@ static void RecursivePassageFlow( vportal_t *portal, threaddata_t *thread, pstac
+ 		nextpassage = passage->next;
+ 		const int pnum = p - portals;
+ 
+-		if ( !bit_is_enabled( prevstack->mightsee, pnum ) ) {
++		if ( !bit_is_enabled( pstack_bits( *prevstack ), pnum ) ) {
+ 			continue;   // can't possibly see it
+ 		}
+ 
+ 		// mark the portal as visible
+ 		bit_enable( thread->base->portalvis, pnum );
+ 
+-		prevmight = (long *)prevstack->mightsee;
+-		cansee = (long *)passage->cansee;
+-		might = (long *)stack.mightsee;
+-		memcpy( might, prevmight, portalbytes );
++		prevmight = reinterpret_cast<unsigned int *>( prevstack->mightsee.data() );
+ 		if ( p->status == EVStatus::Done ) {
+-			portalvis = (long *) p->portalvis;
++			portalvis = reinterpret_cast<unsigned int *>( p->portalvis );
+ 		}
+ 		else{
+-			portalvis = (long *) p->portalflood;
++			portalvis = reinterpret_cast<unsigned int *>( p->portalflood );
+ 		}
+ 		more = 0;
+-		for ( j = 0; j < portallongs; ++j )
++		for ( const passage_word_t& word : passage->cansee )
+ 		{
+-			if ( *might ) {
+-				*might &= *cansee & *portalvis;
+-				more |= ( *might & ~vis[j] );
+-			}
+-			cansee++;
+-			portalvis++;
+-			might++;
++			const unsigned int value = (prevmight[word.index] & word.bits
++			                                & portalvis[word.index]);
++			reinterpret_cast<unsigned int *>( stack.mightsee.data() )[word.index] = value;
++			touched.push_back( word.index );
++			more |= value & ~vis[word.index];
+ 		}
+ 
+ 		if ( !more ) {
+@@ -706,7 +701,7 @@ static void RecursivePassageFlow( vportal_t *portal, threaddata_t *thread, pstac
+    ===============
+  */
+ void PassageFlow( int portalnum ){
+-	threaddata_t data;
++	threaddata_t data{};
+ 	vportal_t       *p;
+ //	int             c_might, c_can;
+ 
+@@ -725,14 +720,14 @@ void PassageFlow( int portalnum ){
+ 
+ //	c_might = CountBits( p->portalflood, numportals * 2 );
+ 
+-	memset( &data, 0, sizeof( data ) );
+ 	data.base = p;
+ 
+ 	data.pstack_head.portal = p;
+ 	data.pstack_head.source = p->winding;
+ 	data.pstack_head.portalplane = p->plane;
+ 	data.pstack_head.depth = 0;
+-	memcpy( data.pstack_head.mightsee, p->portalflood, portalbytes );
++	data.pstack_head.mightsee.resize( portallongs );
++	memcpy( pstack_bits( data.pstack_head ), p->portalflood, portalbytes );
+ 
+ 	RecursivePassageFlow( p, &data, &data.pstack_head );
+ 
+@@ -746,75 +741,93 @@ void PassageFlow( int portalnum ){
+ 	 */
+ }
+ 
+-/*
+-   ==================
+-   RecursivePassagePortalFlow
+-   ==================
+- */
+-static void RecursivePassagePortalFlow( vportal_t *portal, threaddata_t *thread, pstack_t *prevstack ){
+-	pstack_t stack;
+-	vportal_t   *p;
+-	leaf_t      *leaf;
+-	visPlane_t backplane;
+-	passage_t   *passage, *nextpassage;
+-	int i, j, n;
+-	long        *might, *vis, *prevmight, *cansee, *portalvis, more;
+-
+-//	thread->c_chains++;
+-
+-	leaf = &leafs[portal->leaf];
+-//	CheckStack( leaf, thread );
+-
+-	prevstack->next = &stack;
++static std::vector<passage_word_t> SparsePortalWords( const byte *bits ){
++	std::vector<passage_word_t> result;
++	const unsigned int *words = reinterpret_cast<const unsigned int *>( bits );
++	for ( unsigned int index = 0; index < unsigned( portalbytes / sizeof( *words ) ); ++index )
++		if ( words[index] ) result.push_back( { index, words[index] } );
++	return result;
++}
+ 
+-	stack.next = nullptr;
+-	stack.leaf = leaf;
+-	stack.portal = nullptr;
+-	stack.depth = prevstack->depth + 1;
++static bool SparsePortalBit( const std::vector<passage_word_t>& words, int bit ){
++	const unsigned int index = unsigned( bit ) / 32;
++	const auto found = std::ranges::lower_bound( words, index, {}, &passage_word_t::index );
++	return found != words.end() && found->index == index && ( found->bits & ( 1U << ( unsigned( bit ) % 32 ) ) );
++}
+ 
++struct passage_portal_frame_t
++{
++	pstack_t *previous;
++	const std::vector<passage_word_t> *previous_mightsee;
++	pstack_t stack{};
++	std::vector<passage_word_t> mightsee;
++	leaf_t *leaf;
++	passage_t *passage;
++	std::size_t portal_index = 0;
++
++	passage_portal_frame_t( vportal_t *portal_, pstack_t *previous_,
++	                        const std::vector<passage_word_t> *previous_mightsee_ )
++		: previous( previous_ ),
++		  previous_mightsee( previous_mightsee_ ), leaf( &leafs[portal_->leaf] ),
++		  passage( portal_->passages ){
++		previous->next = &stack;
++		stack.next = nullptr;
++		stack.leaf = leaf;
++		stack.portal = nullptr;
++		stack.depth = previous->depth + 1;
+ #ifdef SEPERATORCACHE
+-	stack.numseperators[0] = 0;
+-	stack.numseperators[1] = 0;
++		stack.numseperators[0] = 0;
++		stack.numseperators[1] = 0;
+ #endif
+-
+-	vis = (long *)thread->base->portalvis;
+-
+-	passage = portal->passages;
+-	nextpassage = passage;
+-	// check all portals for flowing into other leafs
+-	for ( i = 0; i < leaf->numportals; ++i, passage = nextpassage )
++	}
++};
++
++static void PassagePortalFlowWorklist( vportal_t *root, threaddata_t *thread,
++	                                   pstack_t *previous,
++	                                   const std::vector<passage_word_t>& root_mightsee ){
++	std::deque<passage_portal_frame_t> frames;
++	frames.emplace_back( root, previous, &root_mightsee );
++	unsigned int *vis = reinterpret_cast<unsigned int *>( thread->base->portalvis );
++	int n;
++	while ( !frames.empty() )
+ 	{
+-		p = leaf->portals[i];
+-		if ( p->removed ) {
++		passage_portal_frame_t& frame = frames.back();
++		pstack_t& stack = frame.stack;
++		pstack_t *prevstack = frame.previous;
++		if ( frame.portal_index >= frame.leaf->portals.size() ) {
++			prevstack->next = nullptr;
++			frames.pop_back();
+ 			continue;
+ 		}
+-		nextpassage = passage->next;
++		vportal_t *p = frame.leaf->portals[frame.portal_index++];
++		if ( p->removed ) continue;
++		passage_t *passage = frame.passage;
++		frame.passage = passage->next;
+ 		const int pnum = p - portals;
+ 
+-		if ( !bit_is_enabled( prevstack->mightsee, pnum ) ) {
++		if ( !SparsePortalBit( *frame.previous_mightsee, pnum ) ) {
+ 			continue;   // can't possibly see it
+ 		}
+-		prevmight = (long *)prevstack->mightsee;
+-		cansee = (long *)passage->cansee;
+-		might = (long *)stack.mightsee;
+-		memcpy( might, prevmight, portalbytes );
+-		if ( p->status == EVStatus::Done ) {
+-			portalvis = (long *) p->portalvis;
+-		}
+-		else{
+-			portalvis = (long *) p->portalflood;
+-		}
+-		more = 0;
+-		for ( j = 0; j < portallongs; ++j )
++		frame.mightsee.clear();
++		frame.mightsee.reserve( std::min(
++			frame.previous_mightsee->size(), passage->cansee.size() ) );
++		const unsigned int *portalvis = reinterpret_cast<const unsigned int *>(
++			p->status == EVStatus::Done ? p->portalvis : p->portalflood );
++		unsigned int more = 0;
++		std::size_t left = 0, right = 0;
++		while ( left < frame.previous_mightsee->size() && right < passage->cansee.size() )
+ 		{
+-			if ( *might ) {
+-				*might &= *cansee & *portalvis;
+-				more |= ( *might & ~vis[j] );
+-			}
+-			cansee++;
+-			portalvis++;
+-			might++;
++			const passage_word_t& a = ( *frame.previous_mightsee )[left];
++			const passage_word_t& b = passage->cansee[right];
++			if ( a.index < b.index ) { ++left; continue; }
++			if ( b.index < a.index ) { ++right; continue; }
++			const unsigned int value = a.bits & b.bits & portalvis[a.index];
++			if ( value ) frame.mightsee.push_back( { a.index, value } );
++			more |= value & ~vis[a.index];
++			++left;
++			++right;
+ 		}
++		stack.next = nullptr;
+ 
+ 		if ( !more && bit_is_enabled( thread->base->portalvis, pnum ) ) { // can't see anything new
+ 			continue;
+@@ -822,7 +835,7 @@ static void RecursivePassagePortalFlow( vportal_t *portal, threaddata_t *thread,
+ 
+ 		// get plane of portal, point normal into the neighbor leaf
+ 		stack.portalplane = p->plane;
+-		backplane = plane3_flipped( p->plane );
++		const visPlane_t backplane = plane3_flipped( p->plane );
+ 
+ 		stack.portal = p;
+ 		stack.next = nullptr;
+@@ -889,7 +902,7 @@ static void RecursivePassagePortalFlow( vportal_t *portal, threaddata_t *thread,
+ 			// mark the portal as visible
+ 			bit_enable( thread->base->portalvis, pnum );
+ 
+-			RecursivePassagePortalFlow( p, thread, &stack );
++			frames.emplace_back( p, &stack, &frame.mightsee );
+ 			continue;
+ 		}
+ 
+@@ -942,9 +955,7 @@ static void RecursivePassagePortalFlow( vportal_t *portal, threaddata_t *thread,
+ 		bit_enable( thread->base->portalvis, pnum );
+ 
+ 		// flow through it for real
+-		RecursivePassagePortalFlow( p, thread, &stack );
+-		//
+-		stack.next = nullptr;
++		frames.emplace_back( p, &stack, &frame.mightsee );
+ 	}
+ }
+ 
+@@ -954,7 +965,7 @@ static void RecursivePassagePortalFlow( vportal_t *portal, threaddata_t *thread,
+    ===============
+  */
+ void PassagePortalFlow( int portalnum ){
+-	threaddata_t data;
++	threaddata_t data{};
+ 	vportal_t       *p;
+ //	int				c_might, c_can;
+ 
+@@ -973,16 +984,14 @@ void PassagePortalFlow( int portalnum ){
+ 
+ //	c_might = CountBits( p->portalflood, numportals * 2 );
+ 
+-	memset( &data, 0, sizeof( data ) );
+ 	data.base = p;
+ 
+ 	data.pstack_head.portal = p;
+ 	data.pstack_head.source = p->winding;
+ 	data.pstack_head.portalplane = p->plane;
+ 	data.pstack_head.depth = 0;
+-	memcpy( data.pstack_head.mightsee, p->portalflood, portalbytes );
+-
+-	RecursivePassagePortalFlow( p, &data, &data.pstack_head );
++	const std::vector<passage_word_t> root_mightsee = SparsePortalWords( p->portalflood );
++	PassagePortalFlowWorklist( p, &data, &data.pstack_head, root_mightsee );
+ 
+ 	p->status = EVStatus::Done;
+ 
+@@ -1217,7 +1226,7 @@ static int AddSeperators( const fixedWinding_t *source, const fixedWinding_t *pa
+    ===============
+  */
+ void CreatePassages( int portalnum ){
+-	int j, k, n, numseperators, numsee;
++	int j, k, n, numseperators;
+ 	vportal_t       *portal, *p;
+ 	passage_t       *passage, *lastpassage;
+ 	visPlane_t seperators[MAX_SEPERATORS * 2];
+@@ -1237,13 +1246,13 @@ void CreatePassages( int portalnum ){
+ 	}
+ 
+ 	lastpassage = nullptr;
+-	for ( const vportal_t *target : Span( leafs[portal->leaf].portals, leafs[portal->leaf].numportals ) )
++	for ( const vportal_t *target : leafs[portal->leaf].portals )
+ 	{
+ 		if ( target->removed ) {
+ 			continue;
+ 		}
+ 
+-		passage = safe_calloc( sizeof( passage_t ) + portalbytes );
++		passage = new passage_t{};
+ 		numseperators = AddSeperators( portal->winding, target->winding, false, seperators, MAX_SEPERATORS * 2 );
+ 		numseperators += AddSeperators( target->winding, portal->winding, true, &seperators[numseperators], MAX_SEPERATORS * 2 - numseperators );
+ 
+@@ -1256,7 +1265,6 @@ void CreatePassages( int portalnum ){
+ 		}
+ 		lastpassage = passage;
+ 
+-		numsee = 0;
+ 		//create the passage->cansee
+ 		for ( j = 0; j < numportals * 2; ++j )
+ 		{
+@@ -1325,31 +1333,34 @@ void CreatePassages( int portalnum ){
+ 			if ( k < numseperators ) {
+ 				continue;
+ 			}
+-			bit_enable( passage->cansee, j );
+-			numsee++;
++			const unsigned int word = j / 32;
++			const unsigned int bit = 1U << ( j % 32 );
++			if ( passage->cansee.empty() || passage->cansee.back().index != word )
++				passage->cansee.push_back( { word, 0 } );
++			passage->cansee.back().bits |= bit;
+ 		}
+ 	}
+ }
+ 
+ void PassageMemory(){
+-	int totalmem = 0, totalportals = 0;
++	std::size_t totalmem = 0, totalportals = 0, totalwords = 0;
+ 
+-	for ( const vportal_t *portal : Span( sorted_portals, numportals ) )
++	for ( const vportal_t *portal : sorted_portals )
+ 	{
+ 		if ( portal->removed ) {
+ 			continue;
+ 		}
+-		for ( const vportal_t *target : Span( leafs[portal->leaf].portals, leafs[portal->leaf].numportals ) )
++		for ( const passage_t *passage = portal->passages; passage; passage = passage->next )
+ 		{
+-			if ( target->removed ) {
+-				continue;
+-			}
+-			totalmem += sizeof( passage_t ) + portalbytes;
++			totalmem += sizeof( passage_t )
++			          + passage->cansee.capacity() * sizeof( passage->cansee.front() );
++			totalwords += passage->cansee.size();
+ 			totalportals++;
+ 		}
+ 	}
+-	Sys_Printf( "%7i average number of passages per leaf\n", totalportals / numportals );
+-	Sys_Printf( "%7i MB required passage memory\n", totalmem >> 10 >> 10 );
++	Sys_Printf( "%7zu average number of passages per leaf\n", totalportals / ( numportals * 2 ) );
++	Sys_Printf( "%7zu compressed passage words\n", totalwords );
++	Sys_Printf( "%7zu MB required passage memory\n", totalmem >> 10 >> 10 );
+ }
+ 
+ /*
+@@ -1403,7 +1414,7 @@ void PassageMemory(){
+    ==================
+  */
+ static void SimpleFlood( vportal_t *srcportal, int leafnum ){
+-	for ( const vportal_t *p : Span( leafs[leafnum].portals, leafs[leafnum].numportals ) )
++	for ( const vportal_t *p : leafs[leafnum].portals )
+ 	{
+ 		if ( p->removed ) {
+ 			continue;
+@@ -1508,6 +1519,8 @@ void BasePortalVis( int portalnum ){
+ 	}
+ 
+ 	SimpleFlood( p, p->leaf );
++	free( p->portalfront );
++	p->portalfront = nullptr;
+ 
+ 	p->nummightsee = CountBits( p->portalflood, numportals * 2 );
+ //	Sys_Printf( "portal %i: %i mightsee\n", portalnum, p->nummightsee );
+@@ -1536,11 +1549,11 @@ void BasePortalVis( int portalnum ){
+    ==================
+  */
+ static void RecursiveLeafBitFlow( int leafnum, byte *mightsee, byte *cansee ){
+-	byte newmight[MAX_PORTALS / 8];
++	std::vector<long> newmight( portallongs );
+ 
+ 
+ 	// check all portals for flowing into other leafs
+-	for ( const vportal_t *p : Span( leafs[leafnum].portals, leafs[leafnum].numportals ) )
++	for ( const vportal_t *p : leafs[leafnum].portals )
+ 	{
+ 		if ( p->removed ) {
+ 			continue;
+@@ -1556,9 +1569,9 @@ static void RecursiveLeafBitFlow( int leafnum, byte *mightsee, byte *cansee ){
+ 		long more = 0;
+ 		for ( int i = 0; i < portallongs; ++i )
+ 		{
+-			( (long *)newmight )[i] = ( (long *)mightsee )[i]
++			newmight[i] = ( (long *)mightsee )[i]
+ 			                          & ( (long *)p->portalflood )[i];
+-			more |= ( (long *)newmight )[i] & ~( (long *)cansee )[i];
++			more |= newmight[i] & ~( (long *)cansee )[i];
+ 		}
+ 
+ 		if ( !more ) {
+@@ -1566,7 +1579,7 @@ static void RecursiveLeafBitFlow( int leafnum, byte *mightsee, byte *cansee ){
+ 		}
+ 		bit_enable( cansee, pnum );
+ 
+-		RecursiveLeafBitFlow( p->leaf, newmight, cansee );
++		RecursiveLeafBitFlow( p->leaf, reinterpret_cast<byte *>( newmight.data() ), cansee );
+ 	}
+ }
+ 

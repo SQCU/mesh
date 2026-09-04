@@ -50,12 +50,13 @@ The M4 Pro trajectory reached its requested interval at square order 8192 and me
 characterization stream remains the measurement artifact rather than a preset workload
 size.
 
-Ports 8788 and 8787 each have one live provider. A system-domain installation owns the
-canonical port when it is listening and answering the interface; the user-domain service is
-the same interface fallback when the system provider is absent. Installation measures both
-socket ownership and the response before transferring ownership, and restores the user
-provider if the system-domain handoff does not answer. Launch-domain identity is never allowed
-to create two supervisors contending for one socket.
+Ports 8788 and 8787 should each have one answering provider. Installation retains a
+loaded system job or an answering userspace provider rather than forcing an ownership
+transfer. User installation measures the system job's socket ownership and response
+before relying on it. It can bootstrap the same userspace interface when the system
+provider is absent. Definition refresh and any pre-existing supervisor overlap require
+a continuity-preserving handoff; routine installation no longer resolves them by stopping
+the working provider. Retained jobs are not reported as newly deployed generations.
 
 The Xonotic operating profile is indexed by the literal player, team, and cart counts
 reported by the workload. Runtime bot changes trace a player-count slice at fixed team

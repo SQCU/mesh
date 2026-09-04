@@ -25,7 +25,9 @@ static struct ibv_context *ctx; static struct ibv_pd *pd; static struct ibv_cq *
 static struct ibv_qp *qp; static struct ibv_mr **mr; static int nmr;
 static const char *shm; static volatile sig_atomic_t stop;
 static int lsock=-1; static uint64_t mynonce, peernonce;
-static void down_pair(void){ if(qp){ibv_destroy_qp(qp);qp=0;} if(cq){ibv_destroy_cq(cq);cq=0;} }
+static void down_pair(void){
+  while(qp && ibv_destroy_qp(qp)){ fprintf(stderr,"queue retirement pending\n"); usleep(200000); } qp=0;
+  while(cq && ibv_destroy_cq(cq)){ fprintf(stderr,"completion retirement pending\n"); usleep(200000); } cq=0; }
 static void down_verbs(void){ down_pair();
   while(nmr) ibv_dereg_mr(mr[--nmr]); free(mr); mr=0;
   if(pd){ibv_dealloc_pd(pd);pd=0;} if(ctx){ibv_close_device(ctx);ctx=0;} }
@@ -95,7 +97,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   mr=calloc((span+CHUNK-1)/CHUNK,sizeof *mr); if(!mr) die("alloc regions");
   for(size_t o=0;o<span;o+=CHUNK){ size_t n=span-o<CHUNK?span-o:CHUNK;
     mr[nmr]=ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
-    if(!mr[nmr++]){ close(f); down_verbs(); return -1; } }
+    if(!mr[nmr]){ close(f); down_verbs(); return -1; } nmr++; }
   }
   ibv_query_port(ctx,1,&pa);
   { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
@@ -154,7 +156,8 @@ int main(int argc,char**argv){
     else if(argv[i][0]=='-') fprintf(stderr,"ignoring unknown %s\n",argv[i]);
     else peer=argv[i];
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
-  sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL);
+  sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL);
+  signal(SIGPIPE,SIG_IGN);
   srand48((long)getpid()^(long)time(NULL));
   mynonce=((uint64_t)lrand48()<<32)^(uint64_t)lrand48(); if(!mynonce) mynonce=1;
   listener_up();
@@ -163,7 +166,7 @@ int main(int argc,char**argv){
   const int pg=4096; int np=(int)(pct/100*(double)ram/pg); if(np<NOWN) np=NOWN;
   size_t d0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+65535)/65536*65536;
   int pool; size_t span; int rf; void *base; struct hdr *M; char *mem;
-  int *fl; unsigned char *own;
+  int *fl; unsigned char *own, *submitted;
   pool = np/NOWN;
   span=(size_t)pg*np;
   shm_unlink(name); rf=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(rf<0) die("shm");
@@ -178,8 +181,8 @@ int main(int argc,char**argv){
   fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d\n",
           name,span/1e9,100.0*span/(double)ram,pool);
 
-  fl=malloc(pool*sizeof(int)); own=calloc(pool,1);
-  if(!fl||!own) die("alloc");
+  fl=malloc(pool*sizeof(int)); own=calloc(pool,1); submitted=calloc(np-pool,1);
+  if(!fl||!own||!submitted) die("alloc");
   int n[NOWN]={0}; n[FREE]=pool; for(int i=0;i<pool;i++) fl[i]=i;
   int sends=0;
   struct wf w[NOWN]={{0}}; double t0=now(), tel=t0;
@@ -224,8 +227,9 @@ int main(int argc,char**argv){
         struct wire *w2=(struct wire*)mesh_at(M,p);
         w2->src=me; w2->dst=d.node; w2->hops=0;
         uint32_t len=mesh_pay(M); if(d.bytes<len) len=d.bytes;
-        if(POST_SEND(p,(uint32_t)sizeof(struct wire)+len)){ BUMP(bad); break; }
-        sends++; BUMP(sent); }
+        if(POST_SEND(p,(uint32_t)sizeof(struct wire)+len)){
+          struct desc a={.page=p}; push(M,ACK,&a); BUMP(bad); alive=0; break; }
+        submitted[p-pool]=1; sends++; BUMP(sent); }
     struct ibv_wc wc[32]; int k=ibv_poll_cq(cq,32,wc);
     if(k>0) activity=1;
     wcs+=(uint64_t)(k>0?k:0);
@@ -233,7 +237,7 @@ int main(int argc,char**argv){
       if(!VALID(i)) die("wr_id outside the pool");
       if(!POOL(i) || own[i]!=RECV){ sends--;
         if(POOL(i)) GIVE(i);
-        else { struct desc a={.page=(uint32_t)i}; push(M,ACK,&a); }
+        else { struct desc a={.page=(uint32_t)i}; submitted[i-pool]=0; push(M,ACK,&a); }
         continue; }
       if(wc[j].status!=IBV_WC_SUCCESS){ GIVE(i); continue; }
       uint32_t bl=wc[j].byte_len;
@@ -251,10 +255,12 @@ int main(int argc,char**argv){
     double tn=now();
     if(tn-tel>=1){
       if(who && kill((pid_t)who,0) && errno==ESRCH){
+        down_pair(); alive=0;
         uint64_t old=who;
         if(atomic_compare_exchange_strong_explicit(&M->client,&old,0,
               memory_order_acq_rel,memory_order_acquire)){
           for(int i=0;i<pool;i++) if(own[i]==APP) GIVE(i);
+          memset(submitted,0,np-pool);
           for(int k=0;k<NRING;k++)
             atomic_store_explicit(&M->r[k].tail,M->r[k].head,memory_order_release); } }
       for(int s=0;s<NOWN;s++){
@@ -265,7 +271,7 @@ int main(int argc,char**argv){
       { int nf2=accept(lsock,NULL,NULL);
         if(nf2>=0){ close(nf2); fprintf(stderr,"peer re-pairing\n"); alive=0; } }
       if(alive && (ibv_query_port(ctx,1,&pa) || pa.state!=IBV_PORT_ACTIVE)) alive=0;
-      else if(wcs==0){
+      if(alive && wcs==0){
         if(sends>0) dry++;
         else if(n[FREE]){ int i=fl[n[FREE]-1];
           struct wire *pr=(struct wire*)mesh_at(M,(uint32_t)i);
@@ -276,5 +282,11 @@ int main(int argc,char**argv){
       wcs=0;
       if(!alive) fprintf(stderr,"pair down\n");
       tel=tn; }
-    if(!activity && sends==0) usleep(IDLE_POLL_US); } }
+    if(!activity && sends==0) usleep(IDLE_POLL_US); }
+    down_pair();
+    int retired=0;
+    for(int i=pool;i<np;i++) if(submitted[i-pool]){
+      struct desc a={.page=(uint32_t)i}; push(M,ACK,&a); submitted[i-pool]=0; retired++; }
+    fprintf(stderr,"pair retired: %d arena pages returned\n",retired);
+  }
   return 0; }

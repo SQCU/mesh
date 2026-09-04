@@ -6,13 +6,17 @@ KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw
 
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+launchctl enable system/com.openssh.sshd 2>/dev/null
+launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
 ADMIN_USER="${MESH_USER:-${SUDO_USER:-$(stat -f%Su /dev/console)}}"
+id "$ADMIN_USER" >/dev/null 2>&1 || ADMIN_USER=$(stat -f%Su /dev/console)
 id "$ADMIN_USER" >/dev/null 2>&1 || ADMIN_USER=$(dscl . -read /Groups/admin GroupMembership \
   | tr ' ' '\n' | grep -v 'GroupMembership:\|^root$\|^_\|^$' | head -1)
 
 sec(){ printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok(){  printf '  \033[32mOK  \033[0m %s\n' "$*"; }
-bad(){ printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+failures=0; retained=0
+bad(){ failures=$((failures+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 try(){ d="$1"; shift; "$@" >/dev/null 2>&1 && ok "$d" || bad "$d"; }
 keys(){ grep -cve '^[[:space:]]*#' -e '^[[:space:]]*$' "$1"; }
 
@@ -45,8 +49,7 @@ ok "$MESH_ROOT; mesh-status, mesh-peers and mesh-observe on PATH"
 printf 'sleep 0\ndisplaysleep 0\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
 cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
 ok "policy: uniform fleet default"
-printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MESH_ROOT/revision"
-ok "converged from branch $(awk '{print $1}' "$MESH_ROOT/revision") at $(awk '{print $2}' "$MESH_ROOT/revision")"
+printf '%s\n' "${MESH_BRANCH:-main}" > "$MESH_ROOT/branch"
 
 sec "2. Power"
 for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
@@ -76,7 +79,6 @@ nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1 && ok "screensharing :5900" || bad "sc
 "$KS" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
 "$KS" -configure -users "$ADMIN_USER" -access -on -privs -all >/dev/null 2>&1 \
   && ok "ARD for $ADMIN_USER" || bad "ARD"
-"$KS" -restart -agent >/dev/null 2>&1
 
 sec "5. Pubkey roster"
 H=$(eval echo "~$ADMIN_USER"); AK="$H/.ssh/authorized_keys"
@@ -173,16 +175,22 @@ mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" " 
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.telemetry io.mesh.observer; do
-  launchctl bootout "gui/$ADMIN_UID/$L" >/dev/null 2>&1
-done
 for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
-  launchctl bootout system/$L >/dev/null 2>&1
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    launchctl print system/$L >/dev/null 2>&1 || break
-    sleep 1
-  done
   launchctl enable system/$L >/dev/null 2>&1
+  if launchctl print "system/$L" >/dev/null 2>&1; then
+    retained=$((retained+1)); ok "$L retained; launchd definition refresh pending"
+    continue
+  fi
+  endpoint=
+  case "$L" in
+    io.mesh.telemetry) endpoint=http://127.0.0.1:8788/v1/latest ;;
+    io.mesh.observer) endpoint=http://127.0.0.1:8787/latest.json ;;
+  esac
+  if [ -n "$endpoint" ] && launchctl print "gui/$ADMIN_UID/$L" >/dev/null 2>&1 \
+      && curl -fsS --max-time 3 "$endpoint" >/dev/null 2>&1; then
+    retained=$((retained+1)); ok "$L answering; userspace provider retained"
+    continue
+  fi
   for _ in 1 2 3; do
     launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1
     launchctl print system/$L >/dev/null 2>&1 && break
@@ -204,3 +212,6 @@ printf '  waiting for resident daemons'
 for _ in $(seq 1 20); do pgrep -qf "dns-sd -R" && break; printf '.'; sleep 1; done
 echo
 "$MESH_ROOT/bin/mesh-status.sh"
+printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MESH_ROOT/revision"
+printf 'reported_failures=%s retained_jobs=%s\n' "$failures" "$retained" > "$MESH_ROOT/install-status"
+echo "installer completed: $failures reported failures; $retained loaded jobs retained; live-generation convergence not asserted"

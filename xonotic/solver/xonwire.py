@@ -36,10 +36,10 @@ def expert_meta_width(experts):
 def values_per_slot(usable):
     return (usable - HDRSZ) // 4
 
-def pack_hdr(kind, req_id, tick, width, values, offset, values_total):
+def pack_hdr(kind, req_id, tick, width, values, offset, values_total, session=0):
     return np.frombuffer(
         HDR.pack(MAGIC, VERSION, kind, offset, values_total, req_id, tick,
-                 width, values, 0, 0),
+                 width, values, session & 0xffffffff, session >> 32),
         np.uint8,
     )
 
@@ -47,7 +47,7 @@ def parse_hdr(buf):
     if buf.size < HDRSZ:
         return None
     fields = HDR.unpack(buf[:HDRSZ].tobytes())
-    magic, version, kind, offset, values_total, req_id, tick, width, values, _, _ = fields
+    magic, version, kind, offset, values_total, req_id, tick, width, values, session_lo, session_hi = fields
     valid = (
         magic == MAGIC
         and version == VERSION
@@ -60,7 +60,7 @@ def parse_hdr(buf):
         return None
     return dict(
         kind=kind, req_id=req_id, tick=tick, width=width, values=values,
-        offset=offset, values_total=values_total,
+        offset=offset, values_total=values_total, session=session_lo | (session_hi << 32),
     )
 
 def payload(buf, header):
@@ -71,7 +71,7 @@ def frame_count(rows, usable):
     vps = values_per_slot(usable)
     return (values + vps - 1) // vps
 
-def frame_waves(kind, req_id, tick, rows, usable, wave_slots):
+def frame_waves(kind, req_id, tick, rows, usable, wave_slots, session=0):
     rows = np.ascontiguousarray(rows, dtype=np.float32)
     if rows.ndim != 2 or not rows.size:
         return
@@ -92,19 +92,21 @@ def frame_waves(kind, req_id, tick, rows, usable, wave_slots):
             offset = (first + local) * vps
             nvalues = min(vps, flat.size - offset)
             frames[local, :HDRSZ] = pack_hdr(
-                kind, req_id, tick, width, nvalues, offset, flat.size,
+                kind, req_id, tick, width, nvalues, offset, flat.size, session,
             )
         yield frames
         first += wave
 
-def send_datagram_rows(service, address, node, usable, kind, req_id, tick, rows):
+def send_datagram_rows(service, address, node, usable, kind, req_id, tick, rows, session=0, cancel=None):
     rows = np.ascontiguousarray(rows, dtype=np.float32)
     frame_mass = frame_count(rows, usable)
     socket_slots = max(1, service.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) // usable)
-    for frames in frame_waves(kind, req_id, tick, rows, usable, socket_slots):
+    for frames in frame_waves(kind, req_id, tick, rows, usable, socket_slots, session):
         first = 0
         measured_slots = len(frames)
         while first < len(frames):
+            if cancel is not None and cancel():
+                raise InterruptedError("datagram transmission stopped by owner")
             count = min(len(frames) - first, measured_slots)
             header = LOCAL_HDR.pack(int(node), usable, count)
             try:
@@ -139,6 +141,7 @@ class Reassembler:
         self.vps = values_per_slot(usable)
         self.stage = np.empty((0, width), np.float32)
         self.id, self.tick = 0, 0
+        self.session = 0
         self.want, self.have, self.seen = 0, 0, bytearray()
         self.dropped, self.resync = 0, 0
 
@@ -151,6 +154,7 @@ class Reassembler:
         if total == 0:
             self.id = header["req_id"]
             self.tick = header["tick"]
+            self.session = header["session"]
             self.want = self.have = 1
             self.seen = bytearray((1,))
             self.stage = np.empty((0, self.width), np.float32)
@@ -164,7 +168,7 @@ class Reassembler:
         if header["values"] != expected or index >= want:
             self.dropped += 1
             return None
-        if header["req_id"] != self.id:
+        if (header["session"], header["req_id"], header["tick"]) != (self.session, self.id, self.tick):
             if self.id and self.have != self.want and offset:
                 self.dropped += 1
                 return None
@@ -174,6 +178,7 @@ class Reassembler:
                 self.resync += 1
             self.id = header["req_id"]
             self.tick = header["tick"]
+            self.session = header["session"]
             self.want = want
             self.have = 0
             self.seen = bytearray((want + 7) // 8)
@@ -194,6 +199,56 @@ class Reassembler:
 class FrameStream:
     def __init__(self, mesh):
         self.mesh = mesh
+        self.session = int.from_bytes(os.urandom(8), "little")
+
+    def exchange(self, kind, req_id, tick, rows, node, receivers, *, cancel, backlog, retry_s):
+        rows = np.ascontiguousarray(rows, dtype=np.float32)
+        received = {}
+        wave = None
+        pending = None
+        retry_at = 0.0
+        offers = 0
+        retries = 0
+        while not cancel():
+            now = time.monotonic()
+            if pending is None and now >= retry_at:
+                pending = iter(frame_waves(
+                    kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session,
+                ))
+                retries += int(offers > 0)
+            if pending is not None:
+                if wave is None:
+                    wave = next(pending, None)
+                    offset = 0
+                if wave is None:
+                    pending = None
+                    retry_at = now + retry_s
+                else:
+                    count = self.mesh.send(wave[offset:], node)
+                    offset += count
+                    offers += count
+                    if offset == len(wave):
+                        wave = None
+            activity = False
+            for buf, source in self.mesh.read(np.uint8):
+                activity = True
+                header = parse_hdr(buf)
+                if header is not None and source == node and header["kind"] in receivers:
+                    if (header["session"] not in (0, self.session)
+                            or header["req_id"] != req_id or header["tick"] != tick):
+                        continue
+                    reassembler = receivers[header["kind"]]
+                    record = reassembler.feed(buf)
+                    if record is not None:
+                        received[header["kind"]] = (record, reassembler.stage[:record["rows"]].copy())
+                    retry_at = time.monotonic() + retry_s
+                else:
+                    backlog.append((buf.copy(), source))
+            if len(received) == len(receivers):
+                return received, {"request_frame_offers": offers, "request_replays": retries}
+            if not activity:
+                time.sleep(0.0005)
+        return None, {"request_frame_offers": offers, "request_replays": retries}
 
     def send(self, kind, req_id, tick, rows, node, cancel=None):
         rows = np.ascontiguousarray(rows, dtype=np.float32)
@@ -202,7 +257,7 @@ class FrameStream:
         frame_mass = frame_count(rows, self.mesh.usable)
         sent = 0
         for frames in frame_waves(
-            kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots,
+            kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session,
         ):
             took = 0
             while took < len(frames):

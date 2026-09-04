@@ -3,7 +3,8 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 LOG=/usr/local/mesh/log/update.log
 [ -d /usr/local/mesh/log ] && exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
-BRANCH=$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null)
+BRANCH=$(cat /usr/local/mesh/branch 2>/dev/null)
+[ -n "$BRANCH" ] || BRANCH=$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null)
 BRANCH=${BRANCH:-main}
 echo "[$(ts)] converging from $BRANCH"
 curl -fsSL "https://raw.githubusercontent.com/SQCU/mesh/$BRANCH/bootstrap.sh" \

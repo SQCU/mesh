@@ -13,7 +13,7 @@ import sys
 from functools import lru_cache
 
 Q3MAP2 = os.environ.get(
-    'Q3MAP2', os.path.expanduser('~/dox/xonotic/netradiant-custom/install/q3map2.arm64'),
+    'Q3MAP2', os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'bin', 'mesh-q3map2')),
 )
 XONDIR = os.environ.get('XON_BASEPATH', os.path.expanduser('~/dox/xonotic/Xonotic'))
 

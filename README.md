@@ -7,6 +7,12 @@ decide on its own to stop executing.**
 Nodes are expected to be unplugged, carried to another room, and replugged into a
 different position in the mesh. Nothing here encodes cable position.
 
+The Xonotic runtime already demonstrates mesh computation in high-teamcount strategy
+game variants, with the sealed API reused by project code. That integration milestone
+is distinct from completing the strategy solver or establishing a comparative learning
+result. See the [current release ledger](design/RELEASE-CLOSURE.md) for achievements,
+review repairs, source reconstruction, and the remaining measurement boundaries.
+
 **The threat is the false negative** — a node that should be working and reachable
 and silently is not, for any reason, however locally sensible. Stock macOS ships in
 exactly that vulnerable mode: it sleeps, it locks, it waits for consent, and it

@@ -70,7 +70,8 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] A3 Self-healing across unplug/replug/sleep/reboot with no out-of-channel restart (R1)
 - [x] A4 Never reboot a node for availability (capacity is an operator decision) (R1)
 - [~] A5 Nonblocking streams as closure-converted state machines (R1)
-- [~] A6 The strategy op must saturate multiple M-series SoCs (blocked by C2 width) (R14)
+- [~] A6 The strategy op must saturate multiple M-series SoCs — C2 width landed; current multi-host saturation/necessity remains to be measured (R14, R24, R41)
+- [x] A7 Reusable sealed mesh API incorporated into real high-teamcount game projects, with sustained integration experience distinct from solver completeness (R41)
 
 ### B. The cart subgame (Game 1 — the tractable shadow)
 - [x] B1 Explicit multicart: k carts, j teams (R2)
@@ -159,13 +160,13 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [ ] H3 Cross-team focus/attrition matrix — is damage concentrated on the key rival? (—)
 - [ ] H4 Multipolar dynamics visualizer (tug trajectories, PW timeline, focus matrix) (—)
 - [~] H5 Web view of the run (three.js phase space + live mesh table) (R16)
-- [~] H6 **A supervised demonstration server+client pair that outlives any agent** — client supervised; server still agent-owned (R27)
+- [~] H6 **A supervised demonstration server+client pair that outlives any agent** — integrated demo already demonstrated; current curriculum ownership and unattended release lifecycle remain separately accountable (R27, R40, R41)
 
 ### I. Method / process laws
 - [x] I1 SPEC is a verbatim user-quote index under the provenance law (R17)
 - [x] I2 AGENDA checklist + append-only Record (this file) (R17)
 - [x] I3 No unit tests; evidence is artifacts/proofs/real runs (R13)
-- [~] I10 **uv manages every Python environment** — env created and demo.sh switched, but the RUNNING responders are still system-python 3.9 (R29)
+- [~] I10 **uv manages every Python environment** — both installed node runtimes now report UV/Python 3.12.14 and matching locks; every future workload's launcher still requires runtime evidence (R29, R41)
 - [x] I4 No stubs, no pseudodocumentation claiming false completeness (R10, R12)
 - [~] I5 No repeated inlining — one canonical definition per algorithm (R10, R11)
 - [~] I6 No fake re-simulation anywhere (D7 outstanding) (R13)
@@ -175,7 +176,15 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 
 ---
 
-## Work order — the discrete list (opened 2026-08-31)
+## Current work order
+
+R41 and [RELEASE-CLOSURE.md](RELEASE-CLOSURE.md) govern current work: availability
+repairs, reconstructible branches/dependencies, and reconciled closure first; then
+define the next learning-transaction and behavioral measurements. Mesh integration is
+already demonstrated. C2 is no longer an unimplemented prerequisite, and the old
+system-Python-3.9 observation is not the current installed-runtime state.
+
+## Historical work order — opened 2026-08-31, superseded by R41
 
 Ordering is forced by R19/R20: the input is rank-4 with per-player state zeroed and
 the belief map-reduce is a constant-Φ substitute, so **widening the operator before
@@ -1486,3 +1495,55 @@ with unrelated transformer, WebKit GPU, bridge, and window-server work; the Mini
 one fully occupied performance cluster. The distributed release has therefore not been
 started into the user's audio/render deadline. Its empirical workload mass remains the
 next state transition, not a static claim.
+
+### R41 — 2026-09-04 — credit the integration result; separate repairs, builds, and rollout
+
+**E:run (historical), E:code, E:build, operator observation.**
+
+> the project runtime actually demonstrates the mesh computation being used, and in fact being used for dozens of variations of a game-playing team-up-and-take-down high teamcount strategy puzzle, even if the strategy solver was never workign to feature spec...
+
+> basically confirming that the RDMA api actually became usable as something like an importable header which is safely used and incorporated into projects by subagents without patterns of  tampering and meddling that corrupted host or device kernel memory state or repeatedly crashed or softlocked either machine.
+
+— Operator, 2026-09-04, review follow-up.
+
+The existing `xonotic/README.md` execution record independently states:
+
+> MLX on node 1 consumed 223 observation/cart/event snapshots, emitted
+> 83 responses, and completed 82 online updates in 45 seconds.
+
+A7 records achieved integration, not universal freedom from defects. A6 remains partial,
+but C2 is no longer its implementation blocker. H6 remains partial: the demonstrated
+game integration and R40's unified curriculum owner do not establish every unattended
+release-lifecycle property. I10 remains partial for its universal scope, but the old
+running-system-Python-3.9 description is superseded by both node runtime reports:
+
+> "python": "3.12.14"
+>
+> "uv": "0.12.6"
+>
+> "packages": {"mlx": "0.32.2", "mlx-metal": "0.32.2", "numpy": "2.5.2"}
+
+The pre-review September work is preserved as `codex/september-runtime`; the repair
+branch is `codex/availability-closure`. The neighboring compiler's existing capacity
+repair is named `codex/mesh-capacity` and also carried as the mesh-owned
+`vendor/netradiant-capacity.patch`. A fresh named-upstream-branch reconstruction built
+the compiler, rather than relying on the neighboring checkout's existing binary.
+
+The bridge repair maintains the published header and ABI. Its submitted-page bitmap
+returns arena ownership after queue retirement, failed posts return their descriptors,
+and HUP reaches the normal teardown. Expert request replay uses session/operation
+identity and cached replies without replaying completed gradient updates. Provisioning
+retains loaded providers and stages source/Python generations instead of routinely
+stopping services or mutating a working environment in place.
+
+Both Macs built the bridge and client library. Shell syntax and Python imports passed;
+the isolated Python realization reported `mesh runtime ready`, then `mesh runtime
+retained` on the second run. No live bridge was restarted and no study was launched.
+The current sampled zero traffic is not the historical workload's empirical sample mass.
+
+[RELEASE-CLOSURE.md](RELEASE-CLOSURE.md) now maps all seventeen goal obligations to
+their implementation/evidence surfaces. It leaves deployment and current-generation
+measurements explicit, including the stale-local-model counterfactual defect. The next
+learning episode would measure the complete current split-expert transaction and its
+recovery; the comparative study would measure solver behavior and causal benefit.
+Neither would be the first demonstration that the mesh API is usable.

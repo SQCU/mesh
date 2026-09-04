@@ -3,10 +3,7 @@ set -e
 SP=${0:A:h}
 X=${XONOTIC_DIR:-}
 [[ -z $X ]] && for c in $SP/../Xonotic ~/dox/xonotic/Xonotic; do [[ -d $c ]] && X=$c && break; done
-Q=${Q3MAP2:-}
-[[ -z $Q ]] && for c in $SP/../netradiant-custom ~/dox/xonotic/netradiant-custom; do
-  [[ -x $c/install/q3map2.arm64 ]] && Q=$c/install/q3map2.arm64 && break; done
-[[ -x $Q ]] || { echo "q3map2 not found (set Q3MAP2=)"; exit 1; }
+Q=${Q3MAP2:-$SP/../../bin/mesh-q3map2}
 [[ -d $X ]] || { echo "Xonotic not found (set XONOTIC_DIR=)"; exit 1; }
 NAME=${1:-spiral}; shift || true
 FS=$SP/fs

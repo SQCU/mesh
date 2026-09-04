@@ -6,11 +6,12 @@ if [ -L "$mesh_script" ]; then
 fi
 mesh_bin=$(cd "$(dirname "$mesh_script")" && pwd)
 mesh_project=$(cd "$mesh_bin/.." && pwd)
+[ -x "$mesh_project/runtime-current/.venv/bin/python" ] && mesh_project=$(cd "$mesh_project/runtime-current" && pwd -P)
 mesh_python_version=$(cat "$mesh_project/.python-version" 2>/dev/null || printf 3.12.14)
 PATH=$mesh_bin:$PATH
 export PATH MESH_PYTHON_LAUNCHER=mesh-python MESH_RUNTIME_ROOT=$mesh_project
-for mesh_python in "$mesh_project/.venv/bin/python" /usr/local/mesh/.venv/bin/python "${HOME:-}/.local/mesh/.venv/bin/python"; do
-  [ -x "$mesh_python" ] && exec "$mesh_python" "$@"
+for mesh_runtime in "$mesh_project" /usr/local/mesh/runtime-current /usr/local/mesh "${HOME:-}/.local/mesh/runtime-current" "${HOME:-}/.local/mesh"; do
+  [ -x "$mesh_runtime/.venv/bin/python" ] && MESH_RUNTIME_ROOT="$mesh_runtime" exec "$mesh_runtime/.venv/bin/python" "$@"
 done
 for mesh_uv in "$mesh_project/bin/uv" /usr/local/mesh/bin/uv "${HOME:-}/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
   [ -x "$mesh_uv" ] || continue

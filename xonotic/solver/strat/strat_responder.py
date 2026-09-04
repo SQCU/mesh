@@ -19,7 +19,7 @@ from solver.xonwire import (
     EXPERT_GRAD_REQ, EXPERT_GRAD_RESP,
     EXPERT_META, EXPERT_META_VALUE_WIDTH, EXPERT_META_KIND, EXPERT_REQ,
     EXPERT_RESP, EXPERT_TRAIN_REQ, Mesh, Reassembler, FrameStream,
-    expert_meta_width, parse_hdr,
+    expert_meta_width, frame_count, parse_hdr,
     CART_KIND, EVENT_KIND, OBSERVATION_KIND, STRATEGY_KIND,
 )
 from solver.strat.instruments import (
@@ -363,91 +363,71 @@ class RemoteScale:
     def stopped(self):
         return self.stopping["signal"] is not None
 
+    def request(self, kind, sequence, tick, rows, receivers):
+        result, measures = self.tx.exchange(
+            kind, sequence, tick, rows, self.node, receivers,
+            cancel=self.stopped, backlog=self.backlog, retry_s=STRATEGY_DEADLINE_S,
+        )
+        self.last = {**self.last, **measures}
+        return result
+
     def __call__(self, ir, residual_fusion_scale=1.0):
         rows = np.asarray(ir, dtype=np.float32).reshape(-1, self.widths.d_ir)
         self.sequence += 1
+        self.last = {"request_row_mass": len(rows), "output_row_mass": 0}
         started = time.perf_counter()
         training_call = self.training and self.gradient_open
         kind = EXPERT_TRAIN_REQ if training_call else EXPERT_REQ
         tick = self.gradient_batch if training_call else self.sequence
-        took, frame_mass = self.tx.send(kind, self.sequence, tick, rows,
-                                       self.node, cancel=self.stopped)
-        if took != frame_mass:
+        response = self.request(kind, self.sequence, tick, rows, {
+            EXPERT_RESP: self.reassembler, EXPERT_META_KIND: self.meta_reassembler,
+        })
+        frame_mass = frame_count(rows, self.mesh.usable)
+        if response is not None:
+            response_record, output = response[EXPERT_RESP]
+            metadata_record, metadata_rows = response[EXPERT_META_KIND]
+            metadata = metadata_rows[0]
+            if len(output) != len(rows):
+                self.last = {**self.last, "sequence": self.sequence,
+                             "request_row_mass": len(rows), "output_row_mass": len(output)}
+                return None
             elapsed = time.perf_counter() - started
-            self.last = {"sequence": self.sequence, "request_row_mass": len(rows),
-                         "output_row_mass": 0, "request_frame_mass": frame_mass,
-                         "written_frame_mass": took, "attempt_elapsed_s": elapsed}
-            return None
-        response_record = None
-        metadata_record = None
-        while not self.stopped():
-            received = False
-            for buf, src in self.mesh.read(np.uint8):
-                received = True
-                header = parse_hdr(buf)
-                if (header is not None and header["kind"] in (EXPERT_RESP, EXPERT_META_KIND)
-                        and src == self.node):
-                    if header["req_id"] != self.sequence:
-                        continue
-                    if header["kind"] == EXPERT_RESP:
-                        response_record = self.reassembler.feed(buf) or response_record
-                    else:
-                        metadata_record = self.meta_reassembler.feed(buf) or metadata_record
-                    continue
-                self.backlog.append((buf.copy(), src))
-            if response_record is not None and metadata_record is not None:
-                metadata = self.meta_reassembler.stage[0]
-                output = self.reassembler.stage[:response_record["rows"]].copy()
-                if len(output) != len(rows):
-                    self.last = {"sequence": self.sequence,
-                                 "request_row_mass": len(rows),
-                                 "output_row_mass": len(output)}
-                    return None
-                elapsed = time.perf_counter() - started
-                worker_rows = int(metadata[EXPERT_META["ROWS"]])
-                self.last = {
-                    "sequence": self.sequence,
-                    "request_row_mass": len(rows),
-                    "output_row_mass": len(output), "request_frame_mass": frame_mass,
-                    "response_frame_mass": response_record.get("frame_mass"),
-                    "metadata_frame_mass": metadata_record.get("frame_mass"),
-                    "roundtrip_s": elapsed,
-                    "attempt_elapsed_s": elapsed,
-                    "worker_compute_s": float(metadata[EXPERT_META["ELAPSED"]]),
-                    "worker_rows": worker_rows,
-                    "useful_rows": len(rows),
-                    "worker_minus_request_rows": worker_rows - len(rows),
-                    "transport_queued_frames": int(self.mesh.queued()),
-                    "transport_inflight_frames": int(self.mesh.inflight()),
-                    "deadline_s": STRATEGY_DEADLINE_S,
-                    "deadline_slack_s": STRATEGY_DEADLINE_S - elapsed,
-                }
-                if time.monotonic() >= self.next_counterfactual:
-                    self.pending = (rows.copy(), output.copy(), dict(self.last), float(residual_fusion_scale))
-                    self.last["local_counterfactual"] = {"observed": False}
-                    self.next_counterfactual = time.monotonic() + self.counterfactual_interval
-                if training_call:
-                    sequence = self.sequence
+            worker_rows = int(metadata[EXPERT_META["ROWS"]])
+            self.last = {
+                **self.last, "sequence": self.sequence,
+                "request_row_mass": len(rows),
+                "output_row_mass": len(output), "request_frame_mass": frame_mass,
+                "response_frame_mass": response_record.get("frame_mass"),
+                "metadata_frame_mass": metadata_record.get("frame_mass"),
+                "roundtrip_s": elapsed, "attempt_elapsed_s": elapsed,
+                "worker_compute_s": float(metadata[EXPERT_META["ELAPSED"]]),
+                "worker_rows": worker_rows, "useful_rows": len(rows),
+                "worker_minus_request_rows": worker_rows - len(rows),
+                "transport_queued_frames": int(self.mesh.queued()),
+                "transport_inflight_frames": int(self.mesh.inflight()),
+                "deadline_s": STRATEGY_DEADLINE_S,
+                "deadline_slack_s": STRATEGY_DEADLINE_S - elapsed,
+            }
+            if time.monotonic() >= self.next_counterfactual:
+                self.pending = (rows.copy(), output.copy(), dict(self.last), float(residual_fusion_scale))
+                self.last["local_counterfactual"] = {"observed": False}
+                self.next_counterfactual = time.monotonic() + self.counterfactual_interval
+            if training_call:
+                sequence = self.sequence
 
-                    @mx.custom_function
-                    def distributed_scale(source):
-                        return mx.array(output.reshape(source.shape))
+                @mx.custom_function
+                def distributed_scale(source):
+                    return mx.array(output.reshape(source.shape))
 
-                    @distributed_scale.vjp
-                    def distributed_scale_vjp(source, cotangent, _output):
-                        gradient = self.backward(sequence, source, cotangent)
-                        return mx.array(gradient).reshape(source.shape)
+                @distributed_scale.vjp
+                def distributed_scale_vjp(source, cotangent, _output):
+                    gradient = self.backward(sequence, source, cotangent)
+                    return mx.array(gradient).reshape(source.shape)
 
-                    delta = distributed_scale(ir)
-                else:
-                    delta = mx.array(output.reshape(ir.shape))
-                return (
-                    delta,
-                    mx.array(metadata[:3]),
-                    mx.array(metadata[EXPERT_META_VALUE_WIDTH:]),
-                )
-            if not received:
-                time.sleep(0.0005)
+                delta = distributed_scale(ir)
+            else:
+                delta = mx.array(output.reshape(ir.shape))
+            return delta, mx.array(metadata[:3]), mx.array(metadata[EXPERT_META_VALUE_WIDTH:])
         elapsed = time.perf_counter() - started
         self.last = {"sequence": self.sequence, "request_row_mass": len(rows),
                      "output_row_mass": 0, "cancelled": self.stopped(),
@@ -479,51 +459,33 @@ class RemoteScale:
         cotangent_rows = np.asarray(cotangent, dtype=np.float32).reshape(-1, self.widths.d_ir)
         packed = np.concatenate((rows, cotangent_rows), axis=1)
         started = time.perf_counter()
-        took, frame_mass = self.tx.send(
-            EXPERT_GRAD_REQ, sequence, self.gradient_batch, packed,
-            self.node, cancel=self.stopped,
-        )
-        if took == frame_mass:
-            response_record = None
-            metadata_record = None
-            while not self.stopped():
-                received = False
-                for buf, src in self.mesh.read(np.uint8):
-                    received = True
-                    header = parse_hdr(buf)
-                    if (header is not None
-                            and header["kind"] in (EXPERT_GRAD_RESP, EXPERT_GRAD_META_KIND)
-                            and src == self.node and header["req_id"] == sequence):
-                        if header["kind"] == EXPERT_GRAD_RESP:
-                            response_record = self.gradient_reassembler.feed(buf) or response_record
-                        else:
-                            metadata_record = self.gradient_meta_reassembler.feed(buf) or metadata_record
-                        continue
-                    self.backlog.append((buf.copy(), src))
-                if response_record is not None and metadata_record is not None:
-                    output = self.gradient_reassembler.stage[:response_record["rows"]].copy()
-                    metadata = self.gradient_meta_reassembler.stage[0].copy()
-                    if len(output) == len(rows):
-                        backward = {
-                            "backward_row_mass": len(output),
-                            "backward_roundtrip_s": time.perf_counter() - started,
-                            "backward_worker_compute_s": float(metadata[EXPERT_GRAD_META["ELAPSED"]]),
-                            "backward_gradient_norm": float(metadata[EXPERT_GRAD_META["GRADIENT_NORM"]]),
-                            "remote_scale_updates": int(metadata[EXPERT_GRAD_META["UPDATES"]]),
-                            "backward_local_fallback": False,
-                        }
-                        self.last = {**self.last, **backward}
-                        return output
-                if not received:
-                    time.sleep(0.0005)
+        self.sequence += 1
+        response = self.request(EXPERT_GRAD_REQ, self.sequence, self.gradient_batch, packed, {
+            EXPERT_GRAD_RESP: self.gradient_reassembler,
+            EXPERT_GRAD_META_KIND: self.gradient_meta_reassembler,
+        })
+        if response is not None:
+            _, output = response[EXPERT_GRAD_RESP]
+            _, metadata_rows = response[EXPERT_GRAD_META_KIND]
+            metadata = metadata_rows[0]
+            if len(output) == len(rows):
+                self.last = {
+                    **self.last, "backward_row_mass": len(output),
+                    "forward_sequence": sequence, "backward_sequence": self.sequence,
+                    "backward_roundtrip_s": time.perf_counter() - started,
+                    "backward_worker_compute_s": float(metadata[EXPERT_GRAD_META["ELAPSED"]]),
+                    "backward_gradient_norm": float(metadata[EXPERT_GRAD_META["GRADIENT_NORM"]]),
+                    "remote_scale_updates": int(metadata[EXPERT_GRAD_META["UPDATES"]]),
+                    "backward_local_fallback": False,
+                }
+                return output
         gradient = self.local_backward(rows, cotangent_rows)
         self.last = {
             **self.last,
             "backward_row_mass": len(gradient),
             "backward_roundtrip_s": time.perf_counter() - started,
             "backward_local_fallback": True,
-            "backward_request_frame_mass": frame_mass,
-            "backward_written_frame_mass": took,
+            "backward_request_frame_mass": frame_count(packed, self.mesh.usable),
         }
         return gradient
 
@@ -532,35 +494,20 @@ class RemoteScale:
         batch = self.gradient_batch
         row = np.asarray([[batch]], dtype=np.float32)
         started = time.perf_counter()
-        took, frame_mass = self.tx.send(
-            kind, self.sequence, batch, row, self.node, cancel=self.stopped,
-        )
-        if took != frame_mass:
-            return None
-        record = None
-        while not self.stopped():
-            received = False
-            for buf, src in self.mesh.read(np.uint8):
-                received = True
-                header = parse_hdr(buf)
-                if (header is not None and header["kind"] == EXPERT_BATCH_RESP
-                        and src == self.node and header["req_id"] == self.sequence):
-                    record = self.batch_reassembler.feed(buf) or record
-                    continue
-                self.backlog.append((buf.copy(), src))
-            if record is not None:
-                values = self.batch_reassembler.stage[0].copy()
-                self.last = {
-                    **self.last,
-                    "gradient_batch": int(values[0]),
-                    "gradient_batch_atoms": int(values[1]),
-                    "gradient_batch_norm": float(values[2]),
-                    "remote_scale_updates": int(values[3]),
-                    "gradient_batch_roundtrip_s": time.perf_counter() - started,
-                }
-                return values
-            if not received:
-                time.sleep(0.0005)
+        response = self.request(kind, self.sequence, batch, row, {
+            EXPERT_BATCH_RESP: self.batch_reassembler,
+        })
+        if response is not None:
+            _, values = response[EXPERT_BATCH_RESP]
+            values = values[0]
+            self.last = {
+                **self.last, "gradient_batch": int(values[0]),
+                "gradient_batch_atoms": int(values[1]),
+                "gradient_batch_norm": float(values[2]),
+                "remote_scale_updates": int(values[3]),
+                "gradient_batch_roundtrip_s": time.perf_counter() - started,
+            }
+            return values
         return None
 
     def begin_gradient_batch(self):

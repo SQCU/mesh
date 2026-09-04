@@ -21,7 +21,8 @@ Implementation surfaces:
 - `xonotic/darkplaces-work/netconn.c` treats `sv_public` only as master-server
   advertisement state. Direct challenge, status, discovery, and compatible connection
   handling remain active for every value, including during server redirection.
-- `serve.sh` replaces the single 8787 page-table service.
+- `serve.sh` serves the static `docs/` directory on port 8080 by default;
+  `viz/serve.py` supplies the 8787 live page-table service.
 
 Every step proceeds independently after reporting failure. Repository fetches select a
 named branch head, authorized access is merged rather than truncated, and no machine
@@ -33,6 +34,16 @@ policy. No post-install epilogue can turn a machine into a less reachable node c
 An idle bridge yields its CPU only after an iteration observes no ring transfer, no
 completion, and no send in flight. This preserves active data-plane service while returning
 idle host capacity to the renderer, audio deadline, telemetry, and policy processes.
+
+Routine installation retains loaded jobs; it does not boot out routing, discovery,
+telemetry, or the observer to refresh a plist. A retained launchd definition is reported
+as pending refresh, not advertised as live-generation convergence. `revision` records
+the branch and time of a completed installer attempt; `install-status` reports counted
+failures and retained jobs, not a proof that every step or live handoff succeeded.
+Downloaded source extracts into separate generations, and a newly realized Python
+environment becomes current only after imports succeed. Previous generations remain
+available to their existing processes. See the [review invariants and deployment
+boundary](../RELEASE-CLOSURE.md).
 
 Network credentials are ordinary availability configuration. They are stored in the
 gitignored inventory and installed at mode `0600`; no provisioning control flow retrieves

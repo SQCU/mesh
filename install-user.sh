@@ -5,12 +5,16 @@ set -u
 R="$(cd "$(dirname "$0")" && pwd)"
 D="$HOME/.local/mesh"; A="$HOME/Library/LaunchAgents"
 ok(){ printf '  \033[32mOK  \033[0m %s\n' "$*"; }
-bad(){ printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+failures=0; retained=0
+bad(){ failures=$((failures+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 try(){ d="$1"; shift; "$@" >/dev/null 2>&1 && ok "$d" || bad "$d"; }
 load(){
   label=$1
-  launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
-  for _ in 1 2 3 4 5; do launchctl print "gui/$UID/$label" >/dev/null 2>&1 || break; sleep 1; done
+  launchctl enable "gui/$UID/$label" >/dev/null 2>&1
+  if launchctl print "gui/$UID/$label" >/dev/null 2>&1; then
+    retained=$((retained+1)); ok "$label retained; launchd definition refresh pending"
+    return
+  fi
   for _ in 1 2 3; do launchctl bootstrap "gui/$UID" "$A/$label.plist" >/dev/null 2>&1; launchctl print "gui/$UID/$label" >/dev/null 2>&1 && break; sleep 1; done
   launchctl print "gui/$UID/$label" >/dev/null 2>&1 && ok "$label" || bad "$label"
 }
@@ -23,7 +27,7 @@ system_owns(){
 provide_http(){
   label=$1; port=$2; url=$3
   if system_owns "$label" "$port" "$url"; then
-    launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
+    retained=$((retained+1))
     ok "$label provided by system domain on :$port"
   else
     load "$label"
@@ -47,7 +51,7 @@ try "mesh-stat installed" install -m 755 "$R/rdma/mesh-stat" "$D/bin/mesh-stat"
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$R/user/mesh-bandwidth.m" -o "$R/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 "$R/user/mesh-bandwidth" "$D/bin/mesh-bandwidth"
 install -m 755 "$R/bin/mesh-runtime-install.sh" "$D/bin/mesh-runtime-install.sh"
-"$D/bin/mesh-runtime-install.sh" "$D" "$R"
+try "UV runtime realized" "$D/bin/mesh-runtime-install.sh" "$D" "$R"
 ln -sf "$D/bin/mesh-python" "$HOME/.local/bin/mesh-python"
 ln -sf "$D/bin/mesh-observe.py" "$HOME/.local/bin/mesh-observe"
 ok "$D/bin populated"
@@ -113,3 +117,7 @@ cat > "$A/io.mesh.update.user.plist" <<PL
 PL
 load io.mesh.update.user
 ok "mesh-peers: $D/bin/mesh-peers.sh"
+printf '%s\n' "${MESH_BRANCH:-main}" > "$D/branch"
+printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"
+printf 'reported_failures=%s retained_jobs=%s\n' "$failures" "$retained" > "$D/install-status"
+echo "installer completed: $failures reported failures; $retained loaded jobs retained; live-generation convergence not asserted"

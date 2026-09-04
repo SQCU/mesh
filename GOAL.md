@@ -1,5 +1,10 @@
 # Mesh release closure
 
+Current status and evidence boundaries: [release ledger](design/RELEASE-CLOSURE.md).
+The existing game runtime is already a demonstrated consumer of the reusable mesh API;
+unfinished strategy features do not erase that integration result. The operator's
+September 4 correction is quoted in the ledger and `design/AGENDA.md` R41.
+
 The release goal is to repair the seventeen defects found by the whole-repository
 algorithm review without narrowing the demonstrated workload, fabric, game, or
 policy scope.

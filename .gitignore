@@ -10,6 +10,7 @@ user/mesh-bandwidth
 !.claude/settings.json
 __pycache__/
 .venv/
+.build/
 cmux-assets/
 xonotic/payload-build/run*/
 xonotic/payload-build/.tmp/

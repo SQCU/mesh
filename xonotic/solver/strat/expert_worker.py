@@ -124,6 +124,8 @@ def transmit_response(service, outbound):
         send_datagram_rows(
             service, outbound["address"], outbound["node"], outbound["usable"],
             kind, outbound["req_id"], outbound["tick"], rows,
+            session=outbound["session"],
+            cancel=outbound["cancel"],
         )
         for kind, rows in outbound["parts"]
     ]
@@ -180,6 +182,8 @@ def main():
     gradient_accumulator = None
     outbound = None
     response_replays = 0
+    completed_requests = {}
+    duplicate_requests = 0
     print(json.dumps({"event": "expert_worker_live", "host": socket.gethostname(), "socket": args.socket,
                       "checkpoint": args.checkpoint, "initial_scale_model_digest": initial_model_digest,
                       "output_checkpoint": args.output_checkpoint,
@@ -226,6 +230,18 @@ def main():
             header = next((parse_hdr(raw) for raw in frames if parse_hdr(raw) is not None), None)
             if header is None or header["kind"] not in reassemblers:
                 continue
+            owner = (node, header["session"])
+            request = (owner, header["req_id"])
+            if header["session"] and header["req_id"] <= completed_requests.get(owner, -1):
+                duplicate_requests += 1
+                if outbound is not None and outbound["request"] == request and header["offset"] == 0:
+                    try:
+                        transmit_response(service, outbound)
+                        response_replays += 1
+                    except OSError as exc:
+                        print(json.dumps({"event": "scale_response_replay_error", "req_id": header["req_id"],
+                                          "error": f"{type(exc).__name__}: {exc}"}), flush=True)
+                continue
             reassembler = reassemblers[header["kind"]]
             record = None
             for raw in frames:
@@ -237,6 +253,18 @@ def main():
                 started = time.perf_counter()
                 rows = record["rows"]
                 work = scale_work(widths, rows)
+
+                def respond(parts):
+                    nonlocal outbound
+                    outbound = {
+                        "address": address, "node": node, "usable": usable,
+                        "req_id": record["req_id"], "tick": record["tick"],
+                        "session": header["session"], "request": request, "parts": parts,
+                        "cancel": lambda: stopping["signal"] is not None,
+                    }
+                    completed_requests[owner] = record["req_id"]
+                    return transmit_response(service, outbound)
+
                 if header["kind"] in (EXPERT_REQ, EXPERT_TRAIN_REQ):
                     source = mx.array(reassembler.stage[:rows])
                     delta, stats, load = scale_fuse(
@@ -250,12 +278,9 @@ def main():
                     metadata[0, EXPERT_META["ROWS"]] = rows
                     metadata[0, EXPERT_META["ELAPSED"]] = elapsed
                     metadata[0, EXPERT_META_VALUE_WIDTH:] = np.asarray(load, dtype=np.float32)
-                    outbound = {
-                        "address": address, "node": node, "usable": usable,
-                        "req_id": record["req_id"], "tick": record["tick"],
-                        "parts": ((EXPERT_RESP, output), (EXPERT_META_KIND, metadata)),
-                    }
-                    response_frame_mass, metadata_frame_mass = transmit_response(service, outbound)
+                    response_frame_mass, metadata_frame_mass = respond(
+                        ((EXPERT_RESP, output), (EXPERT_META_KIND, metadata)),
+                    )
                     completed += 1
                     training_forward = header["kind"] == EXPERT_TRAIN_REQ
                     event = "scale_train_forward_complete" if training_forward else "scale_complete"
@@ -303,12 +328,9 @@ def main():
                     metadata[0, EXPERT_GRAD_META["ELAPSED"]] = elapsed
                     metadata[0, EXPERT_GRAD_META["GRADIENT_NORM"]] = float(np.asarray(gradient_norm))
                     metadata[0, EXPERT_GRAD_META["UPDATES"]] = updates
-                    outbound = {
-                        "address": address, "node": node, "usable": usable,
-                        "req_id": record["req_id"], "tick": record["tick"],
-                        "parts": ((EXPERT_GRAD_RESP, output), (EXPERT_GRAD_META_KIND, metadata)),
-                    }
-                    response_frame_mass, metadata_frame_mass = transmit_response(service, outbound)
+                    response_frame_mass, metadata_frame_mass = respond(
+                        ((EXPERT_GRAD_RESP, output), (EXPERT_GRAD_META_KIND, metadata)),
+                    )
                     print(json.dumps({"event": "scale_backward_complete", "req_id": record["req_id"],
                                       "rows": rows, "elapsed_s": elapsed,
                                       "gradient_norm": float(np.asarray(gradient_norm)),
@@ -340,8 +362,6 @@ def main():
                             optimizer.update(model, accumulated)
                             mx.eval(model.parameters(), optimizer.state, gradient_norm)
                             updates += 1
-                            if args.output_checkpoint and updates % max(1, args.save_every) == 0:
-                                save_checkpoint(model, optimizer, args.output_checkpoint, updates)
                         gradient_atoms = 0
                         gradient_accumulator = None
                         operation = "gradient_batch_commit"
@@ -349,12 +369,9 @@ def main():
                     metadata = np.asarray([[
                         batch, committed_atoms, float(np.asarray(gradient_norm)), updates,
                     ]], dtype=np.float32)
-                    outbound = {
-                        "address": address, "node": node, "usable": usable,
-                        "req_id": record["req_id"], "tick": record["tick"],
-                        "parts": ((EXPERT_BATCH_RESP, metadata),),
-                    }
-                    response_frame_mass = transmit_response(service, outbound)[0]
+                    response_frame_mass = respond(((EXPERT_BATCH_RESP, metadata),))[0]
+                    if committed_atoms and args.output_checkpoint and updates % max(1, args.save_every) == 0:
+                        save_checkpoint(model, optimizer, args.output_checkpoint, updates)
                     print(json.dumps({
                         "event": operation, "gradient_batch": batch,
                         "gradient_atoms": committed_atoms, "updates": updates,
@@ -395,6 +412,7 @@ def main():
         print(json.dumps({"event": "expert_worker_stopped", "signal": stopping["signal"],
                           "completed": completed, "updates": updates,
                           "response_replays": response_replays,
+                          "duplicate_request_frames": duplicate_requests,
                           "output_checkpoint": args.output_checkpoint}), flush=True)
 
 if __name__ == "__main__":

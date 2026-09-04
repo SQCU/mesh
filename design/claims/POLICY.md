@@ -118,6 +118,21 @@ socket timeouts until the following request implicitly acknowledges delivery. Re
 perform no model or optimizer operation and retain the original request, tick, kind,
 shape, and values.
 
+Request waves also replay while the sender drains responses and credits. The reserved
+header words carry a requester session, and every operation has a monotonically advancing
+request ID, including gradient calls. The resident worker retains completed-session
+watermarks and replays its most recent response instead of reapplying a completed
+operation. This is loss recovery for a serial requester, not a durable transaction across
+worker crashes. The proof and mixed-generation boundary are in
+[`../RELEASE-CLOSURE.md`](../RELEASE-CLOSURE.md).
+
+The existing local scale counterfactual is not yet a same-parameter comparison after
+remote training or an independently restored expert checkpoint. The local tree is frozen,
+while the worker updates its tree. Its output difference and duration are observations;
+hardware necessity or same-checkpoint speedup remains unsubstantiated until parameter
+identity is synchronized and recorded for both sides. This limitation does not retract
+the demonstrated mesh integration or earlier two-host computation.
+
 Checkpoint realization attempts the complete finite source parameter tree through the
 strict module interface and restores the complete preceding tree if that attempt raises.
 Optimizer restoration likewise assigns only the complete named source tree after exact
