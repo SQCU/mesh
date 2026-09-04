@@ -1,7 +1,7 @@
 import argparse, copy, datetime, glob, hashlib, itertools, json, math, os, random, re, shlex, shutil, signal, subprocess, sys, time, zipfile
 
 from solver.strat.scale_config import SCALE_EXPERTS, SCALE_HIDDEN, SCALE_RANK, SCALE_TOPK
-from solver.strat.policy_contract import MATRIX_FUSION_INTERVENTION_ARMS, OPTIMIZATION_ARMS, is_matrix_fusion_arm
+from solver.strat.policy_contract import MATRIX_FUSION_INTERVENTION_ARMS, OPTIMIZATION_ARMS, JOINT_TRAINING_ARMS, is_matrix_fusion_arm, checkpoint_path
 from solver.strat.capacity import cart_capacity, engine_player_capacity, team_capacity
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -252,7 +252,7 @@ def study_schedule(repetitions, seed, maps, teams, players, carts, skills, pertu
                         "policy_arm": "mixed",
                         "team_policy_arms": [pair[team % 2] for team in range(team_count)],
                         "arm_checkpoints": checkpoints,
-                        "distributed_scale": set(pair) != {"matrix_fusion", "initial_policy"},
+                        "distributed_scale": True,
                         "pair": index,
                         "study_repetition": repetition + 1,
                         "leg": leg + 1,
@@ -390,6 +390,7 @@ def telemetry_summary(path):
         "controllers": controllers,
         "policy_arms": arms,
         "policy_provenance": (last or {}).get("policy_provenance", {}),
+        "learning": (last or {}).get("learning", {}),
         "updates": int((last or {}).get("updates", 0)),
     }
 
@@ -425,7 +426,7 @@ class Curriculum:
         self.run_dir = os.path.abspath(os.path.expanduser(args.run_dir))
         self.server_prefix = command(args.server_command) or [os.path.abspath(os.path.expanduser(args.engine))]
         self.responder_prefix = command(args.responder_command) or [args.python, "-m", "solver.strat.strat_responder"]
-        self.expert_prefix = command(args.expert_command) or [args.python, "-m", "solver.strat.expert_worker"]
+        self.expert_prefix = command(args.expert_command) or [args.python, "-m", "solver.strat.matrix_worker"]
         self.ssh_prefix = command(args.ssh_command) or ["ssh"]
         self.basedir = os.path.abspath(os.path.expanduser(args.basedir))
         self.entity_tool = os.path.abspath(os.path.expanduser(args.entity_tool))
@@ -438,7 +439,6 @@ class Curriculum:
         self.build_command = command(args.build_command)
         self.runtime = runtime_identity(args.python)
         self.previous_checkpoints = {}
-        self.previous_scale_checkpoints = {}
         self.initial_checkpoints = {}
         self.capacity_observations = []
         self.artifact_cache = {}
@@ -485,15 +485,16 @@ class Curriculum:
         except OSError as error:
             print(json.dumps({"event":"history_read_error","path":self.index_path,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr)
         self.next_ordinal = max((int(row.get("ordinal", -1)) for row in rows), default=-1) + 1
-        self.next_cycle = max((int(row.get("cycle", -1)) for row in rows), default=-1) + 1
+        self.next_cycle = max((int(row.get("cycle", row.get("configuration", {}).get("cycle", -1))) for row in rows), default=-1) + 1
         for record in reversed(rows):
             cfg = record.get("configuration") or {}
             checkpoint = ((record.get("artifacts") or {}).get("checkpoint_out") or {}).get("path")
             if cfg.get("split") != "heldout" and checkpoint and os.path.isfile(checkpoint):
                 self.previous_checkpoints.setdefault(str(cfg.get("policy_arm", "matrix_fusion")), checkpoint)
-            scale_checkpoint = ((record.get("artifacts") or {}).get("scale_checkpoint_out") or {}).get("path")
-            if cfg.get("split") != "heldout" and scale_checkpoint and os.path.isfile(scale_checkpoint):
-                self.previous_scale_checkpoints.setdefault(str(cfg.get("policy_arm", "matrix_fusion")), scale_checkpoint)
+            for arm, saved in (record.get("artifacts", {}).get("policy_checkpoints") or {}).items():
+                path = saved.get("path")
+                if cfg.get("split") != "heldout" and path and os.path.isfile(path):
+                    self.previous_checkpoints.setdefault(arm, path)
             profile = (record.get("execution") or {}).get("operating_profile") or {}
             point = profile.get("target_center_observation")
             if point:
@@ -788,7 +789,6 @@ class Curriculum:
         ] + cvar_args(cvars) + command(cfg.get("server_args")) + ["+map", cfg["map"]]
         telemetry = os.path.join(directory, "telemetry.jsonl")
         checkpoint_out = os.path.join(directory, "checkpoint.npz")
-        scale_checkpoint_out = os.path.join(directory, "checkpoint.scale.npz")
         checkpoint_initial = os.path.join(directory, "checkpoint.initial.npz")
         learning_rate = 0.0 if cfg["split"] == "heldout" else float(cfg.get("learning_rate", self.args.learning_rate))
         responder = ["env", f"MESH_REGION={responder_region}"] + self.responder_prefix + [
@@ -806,14 +806,21 @@ class Curriculum:
             "--seed", str(cfg["seed"]),
             "--environment", str(cfg.get("environment", cfg["id"])),
             "--navigation-realization", entity["measurements_path"],
+            "--match-metadata", json.dumps({"match_id": cfg["id"], "configuration": {key: cfg.get(key) for key in ("map", "teams", "carts", "perturbation")}, "seed": cfg["seed"], "team_policy_arms": cfg["team_policy_arms"]}),
+            "--replay-batch", str(self.args.replay_batch),
+            "--replay-steps", str(self.args.replay_steps),
+            "--replay-weight", str(self.args.replay_weight),
         ]
+        training_arms = cfg.get("train_arms", [])
+        if training_arms:
+            responder += ["--train-arms", ",".join(training_arms)]
         if cfg["team_policy_arms"]:
             responder += ["--team-policy-arms", ",".join(cfg["team_policy_arms"])]
             checkpoint_in = {}
             requested = cfg.get("arm_checkpoints", {})
             intervention_arms = MATRIX_FUSION_INTERVENTION_ARMS
             realizes_intervention = any(
-                arm in intervention_arms for arm in cfg["team_policy_arms"]
+                arm in intervention_arms and arm != "matrix_fusion" for arm in cfg["team_policy_arms"]
             )
             canonical_matrix_source = (
                 requested.get("matrix_fusion")
@@ -862,17 +869,8 @@ class Curriculum:
                 responder += ["--checkpoint", checkpoint_in]
                 if cfg["split"] != "heldout":
                     responder += ["--resume-checkpoint", checkpoint_in]
-        expert_collect = []
         if distributed_scale and remote_scale_arm_mass(cfg):
-            worker_checkpoint = (
-                self.args.scale_worker_checkpoint
-                or self.previous_scale_checkpoints.get("matrix_fusion")
-                or self.previous_scale_checkpoints.get(cfg["policy_arm"])
-            )
-            if not worker_checkpoint:
-                worker_checkpoint = checkpoint_in.get("matrix_fusion") if isinstance(checkpoint_in, dict) else checkpoint_in
             responder += ["--distributed-scale"]
-            expert_checkpoint = worker_checkpoint
             expert_prefix = ["env", f"MESH_REGION={server_region}"] + self.expert_prefix
             expert_pid = os.path.join(self.run_dir, "expert.pid")
             if self.server_host:
@@ -884,46 +882,19 @@ class Curriculum:
                     ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), "--exclude", "__pycache__", os.path.join(ROOT, "payload", "tools"), f"{self.server_host}:{os.path.join(remote_xonotic, 'payload')}/"],
                     ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), "--exclude", "__pycache__", os.path.abspath(os.path.join(ROOT, "..", "rdma")) + "/", f"{self.server_host}:{os.path.join(remote_runtime, 'rdma')}/"],
                 ])
-                if expert_checkpoint:
-                    checkpoint_key = hashlib.sha256(os.path.realpath(expert_checkpoint).encode()).hexdigest()[:16]
-                    remote_checkpoint = os.path.join(self.remote_run_root, "checkpoints", checkpoint_key + ".npz")
-                    stage.extend([
-                        self.ssh_prefix + [self.server_host, "--", "mkdir", "-p", os.path.dirname(remote_checkpoint)],
-                        ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), expert_checkpoint, f"{self.server_host}:{remote_checkpoint}"],
-                    ])
-                    expert_checkpoint = remote_checkpoint
                 expert_prefix = [
                     "env",
                     f"MESH_REGION={server_region}",
                     f"PYTHONPATH={remote_xonotic}:{os.path.join(remote_xonotic, 'payload', 'tools')}",
-                    self.args.remote_python, "-m", "solver.strat.expert_worker",
+                    self.args.remote_python, "-m", "solver.strat.matrix_worker",
                 ]
                 expert_pid = os.path.join(self.remote_run_root, "runtime", "expert.pid")
-                remote_scale_checkpoint_out = os.path.join(remote_directory, "checkpoint.scale.npz")
-                expert_collect = [
-                    "rsync", "-a", "-e", shlex.join(self.ssh_prefix),
-                    f"{self.server_host}:{remote_scale_checkpoint_out}", scale_checkpoint_out,
-                ] if cfg["split"] != "heldout" else []
-            else:
-                remote_scale_checkpoint_out = scale_checkpoint_out
             expert = expert_prefix + [
                 "--socket", self.args.expert_socket,
-                "--scale-rank", str(self.args.scale_rank),
-                "--scale-hidden", str(self.args.scale_hidden),
-                "--scale-experts", str(self.args.scale_experts),
-                "--scale-topk", str(self.args.scale_topk),
-                "--seed", str(cfg["seed"]),
                 "--environment", str(cfg.get("environment", cfg["id"])),
-                "--learning-rate", str(learning_rate),
-                "--gradient-clip", str(self.args.gradient_clip),
-                "--save-every", str(self.args.save_every),
             ]
-            if expert_checkpoint:
-                expert += ["--checkpoint", expert_checkpoint]
-            if cfg["split"] != "heldout":
-                expert += ["--output-checkpoint", remote_scale_checkpoint_out]
             if expert_pid:
-                transition = f"p={shlex.quote(expert_pid)}; if [ -f \"$p\" ]; then n=$(sed -n '1p' \"$p\"); case $(ps -p \"$n\" -o command= 2>/dev/null) in *solver.strat.expert_worker*) kill -TERM \"$n\"; i=0; while kill -0 \"$n\" 2>/dev/null && [ \"$i\" -lt 30 ]; do sleep 1; i=$((i + 1)); done; if kill -0 \"$n\" 2>/dev/null; then exit 1; fi;; esac; fi"
+                transition = f"p={shlex.quote(expert_pid)}; if [ -f \"$p\" ]; then n=$(sed -n '1p' \"$p\"); case $(ps -p \"$n\" -o command= 2>/dev/null) in *solver.strat.expert_worker*|*solver.strat.matrix_worker*) kill -TERM \"$n\"; i=0; while kill -0 \"$n\" 2>/dev/null && [ \"$i\" -lt 30 ]; do sleep 1; i=$((i + 1)); done; if kill -0 \"$n\" 2>/dev/null; then exit 1; fi;; esac; fi"
                 wrapped = f"echo $$ > {shlex.quote(expert_pid)}; exec {shlex.join(expert)}"
                 if self.server_host:
                     expert = self.ssh_prefix + [self.server_host, "--", "sh", "-c", shlex.quote(wrapped)]
@@ -937,9 +908,8 @@ class Curriculum:
         else:
             expert = []
             expert_stop = []
-            expert_collect = []
         responder += command(cfg.get("responder_args"))
-        context = {"port": port, "map": cfg["map"], "seed": cfg["seed"], "match": cfg["id"]}
+        context = {"port": port, "map": cfg["map"], "seed": cfg["seed"], "match": cfg["id"], "directory": directory}
         clients = [client_command(item, context, index) for index, item in enumerate(cfg.get("client_commands", []))]
         return {
             "server": server,
@@ -947,13 +917,12 @@ class Curriculum:
             "responder": responder,
             "expert": expert,
             "expert_stop": expert_stop,
-            "expert_collect": expert_collect,
             "clients": clients,
             "telemetry": telemetry,
             "checkpoint_in": checkpoint_in,
             "checkpoint_out": checkpoint_out,
-            "scale_checkpoint_out": scale_checkpoint_out,
             "checkpoint_initial": checkpoint_initial,
+            "policy_checkpoints": {arm: checkpoint_path(checkpoint_out, arm) for arm in training_arms},
             "port": port,
             "maxplayers": maxplayers,
             "initial_bots": initial_bots,
@@ -1019,7 +988,6 @@ class Curriculum:
                 "responder": {"command": commands["responder"], "launched": False},
                 "expert": {"command": commands["expert"], "launched": False},
                 "expert_stop": {"command": commands["expert_stop"], "launched": False},
-                "expert_collect": {"command": commands["expert_collect"], "launched": False},
                 "clients": [{"command": cmd, "launched": False} for cmd in commands["clients"]],
                 "dry_run": True,
             }
@@ -1059,11 +1027,16 @@ class Curriculum:
         expert_restarts = []
         expert_retired = []
         deadline = time.monotonic() + cfg["duration"] + self.args.round_grace
-        while time.monotonic() < deadline and not self.stopping:
-            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+        outcome_path = os.path.join(directory, "outcome.json")
+        while not self.stopping and (time.monotonic() < deadline or (cfg.get("train_arms") and not os.path.isfile(outcome_path))):
+            time.sleep(0.5)
             if profile is not None:
                 profile.poll(server)
             if self.stopping:
+                break
+            server_proc = server.get("process")
+            if server_proc is None or server_proc.poll() is not None:
+                self.event("server_exit", match=cfg["id"], returncode=None if server_proc is None else server_proc.poll())
                 break
             expert_proc = expert.get("process")
             if commands["expert"] and (expert_proc is None or expert_proc.poll() is not None):
@@ -1128,16 +1101,6 @@ class Curriculum:
         expert_result = self.finish(
             expert, time.monotonic() + self.args.quit_grace,
         )
-        expert_collect = None
-        if commands["expert_collect"]:
-            started = utcnow()
-            try:
-                result = subprocess.run(commands["expert_collect"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                expert_collect = {"command": commands["expert_collect"], "returncode": result.returncode,
-                                  "output": result.stdout, "started": started, "ended": utcnow()}
-            except Exception as exc:
-                expert_collect = {"command": commands["expert_collect"], "returncode": None,
-                                  "error": f"{type(exc).__name__}: {exc}", "started": started, "ended": utcnow()}
         for client in clients:
             self.stop(client)
         self.stop(server)
@@ -1155,7 +1118,6 @@ class Curriculum:
             "expert_restarts": expert_restarts,
             "expert_retired": expert_retired,
             "expert_stop": expert_stop,
-            "expert_collect": expert_collect,
             "clients": [self.finish(client, grace) for client in clients],
         }
         if profile is not None:
@@ -1251,7 +1213,7 @@ class Curriculum:
             "started": started, "ended": utcnow(),
             "configuration": cfg, "build": self.build, "entity": entity,
             "runtime": self.runtime,
-            "commands": {key: commands[key] for key in ("stage", "server", "responder", "expert", "expert_stop", "expert_collect", "clients")},
+            "commands": {key: commands[key] for key in ("stage", "server", "responder", "expert", "expert_stop", "clients")},
             "execution": execution,
             "realized": realized, "runtime_logs": runtime_logs,
             "realization_measures": realization_measures,
@@ -1264,8 +1226,8 @@ class Curriculum:
                                   if isinstance(commands["checkpoint_in"], dict)
                                   else artifact(commands["checkpoint_in"], self.artifact_cache) if commands["checkpoint_in"] else None),
                 "checkpoint_out": artifact(commands["checkpoint_out"], self.artifact_cache),
-                "scale_checkpoint_out": artifact(commands["scale_checkpoint_out"], self.artifact_cache),
                 "checkpoint_initial": artifact(commands["checkpoint_initial"], self.artifact_cache),
+                "policy_checkpoints": {arm: artifact(path, self.artifact_cache) for arm, path in commands["policy_checkpoints"].items()},
                 "server_log": artifact(os.path.join(directory, "server.log"), self.artifact_cache),
                 "responder_log": artifact(os.path.join(directory, "responder.log"), self.artifact_cache),
                 "expert_log": artifact(os.path.join(directory, "expert.log"), self.artifact_cache),
@@ -1281,8 +1243,10 @@ class Curriculum:
         if cfg["split"] != "heldout" and (self.args.dry_run or os.path.exists(commands["checkpoint_out"])):
             self.previous_checkpoints[cfg["policy_arm"]] = commands["checkpoint_out"]
             self.initial_checkpoints.setdefault(cfg["policy_arm"], commands["checkpoint_initial"])
-        if cfg["split"] != "heldout" and (self.args.dry_run or os.path.exists(commands["scale_checkpoint_out"])):
-            self.previous_scale_checkpoints[cfg["policy_arm"]] = commands["scale_checkpoint_out"]
+        for arm, path in commands["policy_checkpoints"].items():
+            if os.path.exists(path):
+                self.previous_checkpoints[arm] = path
+                self.initial_checkpoints.setdefault(arm, checkpoint_path(commands["checkpoint_initial"], arm))
         print(json.dumps({"id": cfg["id"], "record": record_path}), flush=True)
         return record
 
@@ -1381,6 +1345,10 @@ def parser():
     ap.add_argument("--off-policy-counts", default="0,1,2")
     ap.add_argument("--policy-arms", default="matrix_fusion,ffn,linear,default")
     ap.add_argument("--study-repetitions", type=int, default=0)
+    ap.add_argument("--joint-training", action="store_true")
+    ap.add_argument("--replay-batch", type=int, default=8)
+    ap.add_argument("--replay-steps", type=int, default=4)
+    ap.add_argument("--replay-weight", type=float, default=0.5)
     ap.add_argument("--cycles", type=int, default=0)
     ap.add_argument("--human-counts", default="0")
     ap.add_argument("--human-client-command")
@@ -1427,7 +1395,6 @@ def parser():
     ap.add_argument("--peer-node", type=int)
     ap.add_argument("--strategy-node", type=int)
     ap.add_argument("--distributed-scale", action="store_true")
-    ap.add_argument("--scale-worker-checkpoint")
     ap.add_argument("--port-base", type=int, default=26100)
     ap.add_argument("--startup-secs", type=float, default=2)
     ap.add_argument("--quit-grace", type=float, default=10)
@@ -1455,7 +1422,7 @@ def main(argv=None):
                 row.setdefault("entity_file", source)
         for row in rows:
             required_roles = (
-                ["expert", "responder"]
+                ["matrix", "responder"]
                 if args.distributed_scale and row.get("distributed_scale", True)
                 and remote_scale_arm_mass(row)
                 else ["responder"]
@@ -1473,6 +1440,20 @@ def main(argv=None):
             csv(args.team_counts, int), csv(args.players_per_team, int),
             csv(args.cart_counts, int),
         )
+        if args.joint_training:
+            rows = generated_schedule(
+                args.generate or 1, args.seed + cycle, maps, teams, players, carts,
+                csv(args.skills, float), csv(args.perturbations), [0],
+                [JOINT_TRAINING_ARMS[0]], 0.0, csv(args.human_counts, int),
+                args.human_client_command, include_comparisons=False,
+            )
+            rng = random.Random(args.seed + cycle)
+            for index, row in enumerate(rows):
+                count = rng.randrange(1, row["teams"])
+                arms = [JOINT_TRAINING_ARMS[0]] * count + [JOINT_TRAINING_ARMS[1]] * (row["teams"] - count)
+                rng.shuffle(arms)
+                row.update(id=f"joint-{cycle:05d}-{index:05d}", team_policy_arms=arms, train_arms=list(JOINT_TRAINING_ARMS))
+            return schedule_defaults(rows)
         if args.study_repetitions > 0:
             policy_arms = csv(args.policy_arms)
             perturbations = csv(args.perturbations)

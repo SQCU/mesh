@@ -4,6 +4,11 @@ This document describes the executable strategy runtime. The verbatim requiremen
 remain in `SPECIFICATION.md`; realized behavior is measured from the running server and
 responder.
 
+The September 4 [joint-policy learning contract](JOINT-POLICY-LEARNING.md) adds
+architecture-matched stratCGT-PPO and terminal-win PPO training within the same live
+match, with separate complete optimization states and shared implementation. It also
+defines the fresh-actor/historical-value data mixture and its predictive-target limits.
+
 ## Runtime
 
 Training is the process that answers a running Xonotic payload server. The server
@@ -20,7 +25,7 @@ recorded match failure rather than silent stock gamecode.
 Successive study cycles advance the map coordinate by the complete
 repetition-by-perturbation span. The finite map catalog is therefore traversed rather
 than resetting to the same prefix when a cycle changes only its random seed.
-The optimization batch contains only `matrix_fusion`, FFN, and linear records; the fixed default
+The optimization arms are `matrix_fusion`, `terminal_win`, FFN, and linear; the fixed default
 and matrix-fusion intervention arms exist only in the separately mirrored study schedule, so
 training does not duplicate held-out pairs or label a parameterless default as updated.
 
@@ -182,10 +187,12 @@ composition and remains live until the action tensor is transmitted. Its in-prog
 records carry a zero lower bound and an unknown upper bound; the completed response
 record replaces those bounds with the analytic interval. The optimization producer
 lease then covers the preceding transition update independently.
-Replay retention is bounded by its configured byte mass so that training coexists with
-the game and audio workloads. Its default has no second transition-count ceiling;
-`--replay-capacity` is an optional operator coordinate rather than a mesh or workload
-extent.
+Replay retention is bounded by configured byte mass so training coexists with game and
+audio workloads. The operator-requested initial count budget is 1,024 retained states;
+`--replay-capacity 0` leaves retention to byte mass. Neither is a mesh workload extent.
+Historical value sampling selects configuration, match and state. Completed observed
+returns replace stale predictions as replay targets; ordinary zero-reward states are
+retained alongside consequential states.
 
 Policy comparisons are mirrored: two policies exchange team sides under the same map,
 seed, roster, skill, and perturbation. A delivered cart is one observed round outcome.
@@ -288,9 +295,9 @@ Every later trained checkpoint carries that initial artifact's SHA-256, and the 
 `initial_policy` arm loads the retained parameter tree strictly while using the same matrix-fusion
 architecture and policy function as `matrix_fusion`. Mirrored matrix-fusion/initial legs therefore measure
 the realized behavioral effect of the actual optimization lineage rather than comparing
-training with a newly sampled random model. Their remote residual execution is disabled
-symmetrically because one expert process realizes one checkpoint; other matrix-fusion study pairs
-retain the distributed responder/expert placement used for the two-host measurement.
+training with a newly sampled random model. Both arms can use the same stateless Gram
+worker: each call supplies its own residual rows and probe, without loading a second
+model or sharing a separately trained parameter tree.
 The study emits one direct lineage atom per matrix-fusion/initial record containing the trained
 checkpoint hash, the initial hash embedded in that trained checkpoint, and the hash of
 the initial checkpoint actually loaded by `initial_policy`.
@@ -327,62 +334,34 @@ and actuator log scale occupy distinct learned output coordinates. Native J, bel
 pooled widths are tagged by arm and coordinate labels in mixed matches; they are never
 broadcast or padded to the matrix-fusion width.
 
-Scale placement is measured per call: responder and expert host identity, logical and
-physical row mass, dynamic residual and hidden widths, expert loads, transfer bytes,
-worker compute time, end-to-end time, and deadline slack. Low-cadence local substitutions
-publish measured duration,
-local-only plan estimate and lower/upper interval, deadline load, and observation age
-after the live response has returned. The response deadline is a signed measure, not a
-transport cutoff: request, gradient, and batch extents remain live until their response or
-an orderly process stop. A completely remote plan has an exact measured non-scale
-remainder; an interrupted plan retains the wider interval. The expert boundary retains
-the exact completed response tensors and retransmits them at the
-response cadence until the next request supplies an implicit acknowledgement. A replay
-does not execute the forward, reverse, gradient accumulation, or optimizer operation
-again, and it introduces no new RDMA kind or tensor representation.
-The 8787
-whole-mesh stream supplies host FLOP/s and byte/s bounds and their variance. Player, team,
-cart, and instrument counts are sampled around the measured minimum-distance point whose
-coordinates are per-host roofline use, MacBook bandwidth fraction, distributed deadline
-load, local-only deadline load, observed responder/expert roles, and distinct producer
-node mass. Distributed points retain each role's node set and target at least two
-producer nodes, so two labels on one machine do not occupy the same coordinate.
-The current action is materialized and transmitted before the preceding action's
-successor transition enters optimization. Responder telemetry publishes the inference
-envelope with the response deadline and the post-response optimization envelope without
-a response deadline as distinct workload records. Lower and upper FLOP/byte bounds,
-elapsed time, stage identity, and sample mass remain separate for both records.
-The remote scale executor opens differentiable forwarding only between one gradient-batch
-begin and its matching commit. Action-response forwarding outside that interval is an
-ordinary remote forward. Its expert record carries the action deadline; training
-forwards, reverses, and commits carry no action-response deadline.
-While response computation or optimization is in flight, its cadence span renews the
-responder's in-memory workload lease with zero known lower work and an unknown upper
-extent. The corresponding terminal record replaces that open extent with the counted
-bounds and measured elapsed time.
-The engine relay and expert worker receive the same `MESH_EXPERT_SOCKET` realization;
-the curriculum's socket setting cannot name a worker endpoint that the relay ignores.
-Remote worker launch and retirement preserve the complete shell program as one quoted SSH
-argument, so the PID written by the worker wrapper identifies the process subsequently sent
-`SIGTERM`. The expert endpoint has one advisory ownership lease acquired before model
-allocation. A live lease remains the service owner; a lease released by process death lets
-the successor reclaim the stale Unix-socket pathname and resume service.
-At match retirement the responder finishes its checkpoint before the expert is retired;
-the expert finishes its checkpoint before the game server closes the Unix-datagram relay.
-Thus retirement preserves the response path of every operation that precedes the orderly
-responder stop.
-Responder and expert publish SHA-256 digests of their realized scale parameters as host
-telemetry. Model identity is not packed into float feature or response cells; the expert
-wire carries only residual rows, residual-feature Gram-matrix measures, row/time measures, and literal expert load.
-The study retains those digests as a per-record node/host/role/digest relation with
-multiplicity, preserving unlabeled atoms and the responder and expert producers instead
-of reducing model identity across hosts.
-The cumulative `study.json` fabric measure integrates those points without selecting a
-release category: it reports realized team/player/cart/rank/hidden/expert/top-k atoms,
-producer node and host identities, responder/expert role placement, distinct-role node
-and host pair mass, remote row conservation, per-node compute and byte intervals,
-distributed deadline margin, and the lower/upper local-only deadline loads. An absent
-counter has zero observation mass and a null value rather than a fabricated numeric zero.
+The [single-policy manifest](POLICY-STATE-CONTRACT.md) specifies current placement,
+tensor framing, pullbacks, one optimizer/checkpoint owner, lifecycle and counterfactual
+identity. It supersedes the former frozen-local/independently-trained-worker arrangement.
+The loss and policy definitions above are unchanged.
+
+The responder executes the parameterized policy and the matrix worker executes the
+Gram contraction and its pullback. Runtime records retain distinct host/node roles,
+full requested/processed input extents, returned context rows, widths, routed-bank load,
+transfer bytes, compute time and deadline slack. The input/output row ratio is not a
+completion fraction for a contraction; `remote_processed_row_fraction` records coverage.
+No model identity is placed in floating-point feature or response cells.
+
+The action is transmitted before optimizing the preceding transition. Response and
+optimization work retain separate envelopes. Worker action forwards carry the action
+deadline; background forwards and pullbacks do not. Cadence spans retain live workload
+leases during long computation with zero known lower work and unknown upper work,
+replaced by counted terminal records. Replay/retry intervals do not truncate tensors.
+
+The 8787 stream supplies host FLOP/byte bounds and variance. Operating-point sampling
+uses supported player/team/cart/instrument and per-host capacity coordinates, action
+deadline loads and estimated local-only loads. Distributed points require distinct
+responder and matrix producer nodes. Missing counters retain zero observation mass and
+null values, not invented throughput or pressure toward a population ceiling.
+
+The curriculum gives the engine relay and worker the same `MESH_EXPERT_SOCKET`.
+The existing `--expert-command`/`--expert-socket` names and execution-log slot remain
+launch-interface labels, not a second policy. The worker owns only an advisory socket
+lease, reassembly buffers and a response cache. No scale checkpoint is staged or collected.
 
 ## Telemetry
 

@@ -130,9 +130,7 @@ static int meshx_relay_request(const unsigned char *q, size_t b, int from)
 		return 0;
 	memcpy(&w, q, MESH_XON_HDRBYTES);
 	if (w.magic != MESH_XON_MAGIC || w.version != MESH_XON_VERSION ||
-		(w.kind != MESH_XON_EXPERT_REQ && w.kind != MESH_XON_EXPERT_TRAIN_REQ &&
-		 w.kind != MESH_XON_EXPERT_GRAD_REQ && w.kind != MESH_XON_EXPERT_BATCH_BEGIN &&
-		 w.kind != MESH_XON_EXPERT_BATCH_COMMIT))
+		(w.kind != MESH_XON_GRAM_REQ && w.kind != MESH_XON_GRAM_GRAD_REQ))
 		return 0;
 	meshx_relay_init();
 	if (meshx_relay_fd >= 0)
@@ -218,9 +216,8 @@ static void meshx_relay_pump(void)
 			unsigned char *q = frame + (size_t)i * relay.framebytes;
 			memcpy(&w, q, MESH_XON_HDRBYTES);
 			if (w.magic != MESH_XON_MAGIC || w.version != MESH_XON_VERSION ||
-				(w.kind != MESH_XON_EXPERT_RESP && w.kind != MESH_XON_EXPERT_META &&
-				 w.kind != MESH_XON_EXPERT_GRAD_RESP && w.kind != MESH_XON_EXPERT_GRAD_META &&
-				 w.kind != MESH_XON_EXPERT_BATCH_RESP) ||
+				(w.kind != MESH_XON_GRAM_RESP && w.kind != MESH_XON_GRAM_META &&
+				 w.kind != MESH_XON_GRAM_GRAD_RESP) ||
 				!w.values || !w.values_total ||
 				w.offset >= w.values_total || w.values > w.values_total - w.offset ||
 				relay.framebytes < MESH_XON_HDRBYTES + (size_t)w.values * sizeof(float))

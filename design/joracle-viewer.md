@@ -41,7 +41,7 @@ or reinterpret these values.
 
 Every policy output has one actuator mean tensor `(participants, instruments, 3)`, one
 log-scale tensor of the same shape, and one participant-indexed density mass. Learned
-`matrix_fusion`, `initial_policy`, `participant_fusion_ablated`,
+`matrix_fusion`, `terminal_win`, `initial_policy`, `participant_fusion_ablated`,
 `residual_fusion_ablated`, linear, and FFN arms have density mass one; the literal default arm
 has density mass zero and emits its mean without noise. No tensor width selects policy
 semantics. In a mixed-arm match, every reported participant row is gathered from the
@@ -288,18 +288,24 @@ objects never occupies the solver response path. The mesh observer does not impo
 Xonotic schema: it transports every producer's `measures` dictionary and the phase-space
 HUD renders every top-level scalar coordinate generically.
 
-The full live measure is available at:
+The full node measure is available on each node at:
 
 ```
 http://127.0.0.1:8788/v1/latest
-http://127.0.0.1:8787/latest.json
 ```
 
-under `workload.producers[].measures`. `/v1/visualization` carries the same newest
-producer object for each node while compacting older phase-space samples. Consequently
+under `record.sample.workload.producers[].measures`. Adding `?measures=scalars`
+requests a labelled projection containing scalar coordinates and array lengths.
+The mesh observer requests that projection: `http://127.0.0.1:8787/latest.json` and
+`/v1/visualization` carry the newest scalar producer measures per node, without repeatedly
+transmitting large covariance matrices. Node and observer histories retain full measure
+payloads only in the latest sample and label older samples' retention domain. Consequently
 both laptop and Mini measures appear in one 8787 response whenever both nodes are
 meshed, and either remains a named stale node through a partition.
 The curriculum's generic roofline sampler retains the newest nonempty `measures` object
 for every matching producer on every node as `producer_measure_records` in the match
-artifact. It copies the dictionary without importing this schema, so the exact J measure
-remains available after the live in-memory ring advances.
+artifact. It copies that projected dictionary without importing this schema. The existing
+J measurement thread separately retains complete reports as
+`j-measures.PID.GENERATION.json` in the match directory, atomically replacing the latest
+report within each responder episode. This preserves exact numerical artifacts after
+the live ring advances without making them the interactive polling payload.

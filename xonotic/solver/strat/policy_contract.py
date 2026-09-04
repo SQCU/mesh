@@ -1,5 +1,6 @@
 MATRIX_FUSION_ARMS = (
     "matrix_fusion",
+    "terminal_win",
     "initial_policy",
     "participant_fusion_ablated",
     "residual_fusion_ablated",
@@ -10,8 +11,13 @@ MATRIX_FUSION_INTERVENTION_ARMS = (
     "residual_fusion_ablated",
 )
 PARAMETERIZED_ARMS = (*MATRIX_FUSION_ARMS, "ffn", "linear")
-OPTIMIZATION_ARMS = ("matrix_fusion", "ffn", "linear")
-STUDY_ARMS = ("matrix_fusion", "initial_policy", "ffn", "linear", "default")
+OPTIMIZATION_ARMS = ("matrix_fusion", "terminal_win", "ffn", "linear")
+STUDY_ARMS = ("matrix_fusion", "terminal_win", "initial_policy", "ffn", "linear", "default")
+JOINT_TRAINING_ARMS = ("matrix_fusion", "terminal_win")
+
+def checkpoint_path(path, arm):
+    stem, extension = path.rsplit(".", 1)
+    return f"{stem}.{arm}.{extension}"
 
 def architecture_arm(arm):
     return "matrix_fusion" if arm in MATRIX_FUSION_ARMS else arm

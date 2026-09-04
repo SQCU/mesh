@@ -145,7 +145,7 @@ def node_sample(name, host, tunneled=False):
         connections[key] = connection
     try:
         sequence = stream_sequences.get(name)
-        path = "/v1/latest" if sequence is None else f"/v1/history?since={sequence}"
+        path = "/v1/latest?measures=scalars" if sequence is None else f"/v1/history?since={sequence}&measures=scalars"
         connection.request("GET", path, headers={"Accept":"application/json","Connection":"keep-alive"})
         response = connection.getresponse()
         payload = json.loads(response.read())
@@ -422,6 +422,9 @@ def poll():
                         if s.get("up"): previous[name] = s
                         h = hist.setdefault(name, [])
                         estimate(s, h)
+                        if h:
+                            workload = h[-1].get("workload", {})
+                            h[-1] = {**h[-1], "workload": {**workload, "measures_retention": "latest_sample", "producers": [{**row, "measures": {}} for row in workload.get("producers", [])]}}
                         h.append(s)
                         del h[:-KEEP]
         time.sleep(max(0.05, PERIOD - (time.time() - started)))

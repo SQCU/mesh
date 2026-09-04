@@ -68,8 +68,22 @@ def scale_work(widths, rows, gradient_steps=0, gradient_batch=0):
         "residual_rank": widths.d_scale,
         "experts": widths.scale_experts,
         "topk": topk,
+        "local": _envelope(
+            forward - mm(widths.d_scale, physical, widths.d_scale) - mm(widths.d_scale, widths.d_scale, 1),
+            parameter_words, inputs + widths.d_scale,
+            intermediates - widths.d_scale * widths.d_scale,
+            outputs + (physical + 1) * widths.d_scale,
+            gradient_steps, gradient_batch,
+        ),
     })
     return out
+
+def gram_work(rank, rows, gradient_steps=0, gradient_batch=0):
+    return _envelope(
+        mm(rank, rows, rank) + mm(rank, rank, 1), 0,
+        (int(rows) + 1) * int(rank), int(rank) ** 2, int(rank) + 5,
+        gradient_steps, gradient_batch,
+    )
 
 def strategy_work(arm, widths, players, instruments, cells, baseline_hidden=256,
                   gradient_steps=0, gradient_batch=0):
@@ -79,7 +93,6 @@ def strategy_work(arm, widths, players, instruments, cells, baseline_hidden=256,
         n = l * m
         scale = scale_work(w, n, gradient_steps, gradient_batch)
         dpp = dpp_work(m, w.d)
-        topk = scale["topk"]
         forward = (
             mm(c, w.d_c, w.d_beta)
             + mm(l, c, w.d_beta)
@@ -128,6 +141,8 @@ def strategy_work(arm, widths, players, instruments, cells, baseline_hidden=256,
             for key in ("lower_flops", "upper_flops", "lower_bytes", "upper_bytes",
                         "forward_flops", "parameter_bytes")
         }
+        remote = gram_work(w.d_scale, n, gradient_steps, gradient_batch)
+        local.update({key: local[key] + scale["local"][key] for key in combined})
     else:
         input_width = widths.d_x + widths.d_sem + widths.d_c
         kind_width = len(KINDS)
@@ -155,6 +170,7 @@ def strategy_work(arm, widths, players, instruments, cells, baseline_hidden=256,
             "intermediate_words": 0,
         }
         combined = dict(local)
+        remote = dict(scale)
     return {
         **combined,
         "training_forwards": local["training_forwards"],
@@ -164,7 +180,8 @@ def strategy_work(arm, widths, players, instruments, cells, baseline_hidden=256,
         "topk": widths.scale_topk if is_matrix_fusion_arm(arm) else 0,
         "local": local,
         "scale": scale,
+        "remote": remote,
         "dpp": dpp,
     }
 
-__all__ = ["dpp_work", "scale_work", "strategy_work"]
+__all__ = ["dpp_work", "gram_work", "scale_work", "strategy_work"]

@@ -77,6 +77,10 @@ def node_measurement(sample, environment):
         (row.get("operations") or {}).get("remote_output_row_mass")
         for row in producers
     )
+    remote_processed_rows = _sum(
+        (row.get("operations") or {}).get("remote_processed_row_mass")
+        for row in producers
+    )
     memory_lower = machine.get("memory_total_lower_gbs")
     memory_upper = machine.get("memory_total_upper_gbs")
     roles = sorted({role for row in producers if (role := (row.get("labels") or {}).get("host_role"))})
@@ -112,6 +116,8 @@ def node_measurement(sample, environment):
         "remote_request_row_mass": remote_request_rows,
         "remote_output_row_mass": remote_output_rows,
         "remote_output_row_fraction": remote_output_rows / remote_request_rows if remote_output_rows is not None and remote_request_rows else None,
+        "remote_processed_row_mass": remote_processed_rows,
+        "remote_processed_row_fraction": remote_processed_rows / remote_request_rows if remote_processed_rows is not None and remote_request_rows else None,
         "capacity": capacity,
         "roles": roles,
         "producer_hosts": producer_hosts,

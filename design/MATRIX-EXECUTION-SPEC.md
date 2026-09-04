@@ -19,12 +19,25 @@ plumbing; neither `mlx.linalg` nor an MLX matrix-multiplication operator supplie
 operation. Shapes determine dispatch extent. No player, team, cart, instrument, or row
 count is a kernel limit.
 
-The large-output kernels map FP32 operands into 16-by-32 Metal Performance Primitive
-products, accumulate in FP32 cooperative tensors, and cover the output with 32-by-32 or
-64-by-32 tiles according to row extent. The small-output kernel covers the same operation
+One shared Metal Performance Primitive implementation supplies dense products and
+homogeneous routed tiles. It constructs physical tensor views and selects transposition
+in the operation descriptor, covering dense output with 32-by-32 or 64-by-32 tiles
+according to row extent. The small-output kernel covers the same operation
 with 16-by-16 threadgroup tiles.
 Both paths compute the complete requested product. Their selection is an execution-shape
 schedule, not a capability gate.
+
+The implementation imports MPP's tensor layout, loading and storage instead of spelling
+out a lane-to-coordinate map. That assignment is hardware-dependent, as documented in
+[Apple's MPP programming guide](https://developer.apple.com/download/files/Metal-Performance-Primitives-Programming-Guide.pdf),
+section 3.1. The previous assumed layout produced order-one errors on the Mini despite
+working on the MacBook. The MPP interface accepts mutable tensor-view element types;
+its source views are read-only operands and the destination is a separately allocated
+output. No source operand is written through those views.
+
+The fused `gram_context(R, p)` operation and its remote pullback are specified in the
+[single-policy manifest](POLICY-STATE-CONTRACT.md). Its local and remote callers import
+the same implementation. There is no remote model or independently trained "expert".
 
 Reverse execution is part of the interface:
 

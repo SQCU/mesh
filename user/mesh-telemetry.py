@@ -175,6 +175,7 @@ class TelemetryRing:
                     row = dict(payload)
                     if "measures" not in row and current is not None:
                         row["measures"] = current.get("measures", {})
+                        row["measures_sampled_at"] = current.get("measures_sampled_at")
                     self.producers[key] = row
         except Exception:
             with self.lock:
@@ -189,7 +190,8 @@ class TelemetryRing:
             sequence = self.ingest_sequence
             key = (int(payload["pid"]), float(payload["started_at"]), str(payload["name"]))
             current = dict(self.producers.get(key) or payload)
-            current["measures"] = dict(payload.get("measures") or {})
+            current["measures"] = {**current.get("measures", {}), **(payload.get("measures") or {})}
+            current["measures_sampled_at"] = payload.get("sampled_at")
             self.producers[key] = current
             return sequence
 
@@ -232,6 +234,11 @@ class TelemetryRing:
 
     def append(self, sample):
         with self.lock:
+            if self.records:
+                previous = self.records[-1]
+                workload = previous["sample"].get("workload", {})
+                compact = {**workload, "measures_retention": "latest_sample", "producers": [{**row, "measures": {}} for row in workload.get("producers", [])]}
+                self.records[-1] = {**previous, "sample": {**previous["sample"], "workload": compact}}
             self.sequence += 1
             sample = dict(sample)
             sample["stream"] = {"schema": 1, "sequence": self.sequence, "sampled_at": time.time(), "monotonic_ns": time.monotonic_ns()}
@@ -401,6 +408,15 @@ class TelemetryHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def send_json(self, payload, status=200):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        if query.get("measures") == ["scalars"]:
+            def scalars(value):
+                return {key: scalars(child) for key, child in value.items()} if isinstance(value, dict) else {"array_length": len(value)} if isinstance(value, list) else value
+            def project(record):
+                sample = record["sample"]
+                workload = sample.get("workload", {})
+                return {**record, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}}
+            payload = {**payload, **({"record": project(payload["record"])} if payload.get("record") else {}), **({"records": [project(record) for record in payload["records"]]} if "records" in payload else {})}
         body = json.dumps(payload, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")

@@ -10,6 +10,7 @@
  td.k{color:var(--dim);width:84px}td.v{color:var(--fg)}.down{color:var(--warn)}
  .title{flex-basis:100%}.node{flex:1 1 0;min-width:280px;max-width:700px;padding:6px 8px;background:#07080bd9;border:1px solid #1b2430}.name{color:var(--hi);letter-spacing:.1em;font-size:10px}
  td.v.exact{color:#9effa0}td.v.capacity{color:#c4a6ff}td.v.na{color:var(--dim)}
+ details{margin:4px 0}summary{cursor:pointer;color:var(--hi)}.measure{overflow-wrap:anywhere}.coordinate{padding:2px 0;border-bottom:1px solid #1b2430}
  #foot{position:fixed;bottom:0;left:0;right:0;padding:12px 16px;color:var(--dim);pointer-events:none;background:linear-gradient(transparent,#07080bea)}
  @media(max-width:700px){#hud{max-height:52vh}.node{min-width:100%}#foot{font-size:9px;line-height:1.35}}
 </style></head><body>
@@ -152,11 +153,22 @@ const scalarLeaves=(value,path=[],out=[])=>{
   if(!value||typeof value!=='object'||Array.isArray(value)) return out;
   for(const [key,child] of Object.entries(value)){
     const next=[...path,key];
-    if(typeof child==='number') out.push([next.join('.'),child]);
+    if(child===null||['number','string','boolean'].includes(typeof child)) out.push([next.join('.'),child]);
     else if(child&&typeof child==='object'&&!Array.isArray(child)) scalarLeaves(child,next,out);
   }
   return out;
 };
+const openedMeasures=new Set();
+const coordinateValue=value=>value===null?'unavailable':typeof value==='number'?fmt(value):esc(value);
+document.getElementById('hud').addEventListener('click',event=>{
+  const summary=event.target.closest('summary[data-measure]');
+  if(summary){
+    const key=summary.dataset.measure;
+    if(openedMeasures.has(key)) openedMeasures.delete(key); else openedMeasures.add(key);
+    event.preventDefault();
+    hud();
+  }
+});
 function hud(){
   let h=`<h1 class="title">mesh page-table phase space / whole-fabric observatory / phase lens ×${num(S.zoom||1,1)}</h1>`;
   const f=S.fabric||{}, fe=f.estimates||{}, ff=fe.fp32||{}, fm=fe.memory||{}, fwm=fe.workload_memory||{}, fw=f.workload||{}, fd=fw.deadlines||{};
@@ -185,9 +197,11 @@ function hud(){
       const producerRows=s.workload?.producers||[];
       const producers=producerRows.map(p=>`${esc(p.name||'workload')}#${p.pid??'?'} ${fmt(p.rows)} rows`).join('; ');
       const measures=producerRows.flatMap(p=>Object.entries(p.measures||{}).map(([name,measure])=>{
-        const scalars=scalarLeaves(measure).map(([key,value])=>`${esc(key)} ${fmt(value)}`).join('  ');
-        return `${esc(p.name||'workload')}.${esc(name)} ${scalars}`;
-      })).join('; ');
+        const key=JSON.stringify([s.name,p.name,name]), opened=openedMeasures.has(key);
+        const scalars=opened?scalarLeaves(measure):Object.entries(measure||{}).filter(([,value])=>value===null||typeof value!=='object');
+        const coordinates=scalars.map(([key,value])=>`<div class="coordinate">${esc(key)} ${coordinateValue(value)}</div>`).join('');
+        return `<div class="measure"><details ${opened?'open':''}><summary data-measure="${esc(key)}">${esc(p.name||'workload')}.${esc(name)} / producer #${p.pid??'?'} / measure ${p.measures_sampled_at?num((Date.now()/1000)-p.measures_sampled_at,1)+'s ago':'age unavailable'}</summary>${opened?coordinates:''}</details>${opened?'':coordinates}</div>`;
+      })).join('');
       const clusters=Object.entries(m.cpu_clusters||{}).map(([k,v])=>`${k} ${num(v.active_pct,0)}% @ ${num(v.frequency_mhz,0)}MHz`).join('; ');
       const rows=[];
       const census=(s.free||0)+(s.recv||0)+(s.send||0)+(s.app||0);
@@ -280,10 +294,9 @@ let pollTimer=0,renderTimer=0,lastRender=performance.now(),animationDeadline=0;
 const FRAME_PERIOD=50,TWEEN_RATE=7,TWEEN_EPSILON=1e-7;
 async function poll(){
   pollTimer=0;
-  if(document.hidden) return;
   try{ const r=await fetch('/v1/visualization'); if(!r.ok) throw new Error(`HTTP ${r.status}`); const j=await r.json(); S.nodes=j.nodes; S.inventory=j.inventory||{}; S.fabric=j.fabric||{}; S.period=j.period; S.connectionError=''; apply(); }
   catch(e){ S.connectionError=`telemetry unavailable: ${e?.message||e}`; hud(); wakeRenderer(); }
-  pollTimer=setTimeout(poll,Math.max(1000,Number(S.period||1)*1000));
+  pollTimer=setTimeout(poll,Math.max(document.hidden?10000:1000,Number(S.period||1)*1000));
 }
 
 function wakeRenderer(){
@@ -319,8 +332,8 @@ function renderFrame(){
   if(moving||now<animationDeadline) renderTimer=setTimeout(renderFrame,FRAME_PERIOD);
 }
 document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){ clearTimeout(pollTimer); clearTimeout(renderTimer); pollTimer=renderTimer=0; }
-  else{ lastRender=performance.now(); poll(); wakeRenderer(); }
+  if(document.hidden){ clearTimeout(renderTimer); renderTimer=0; }
+  else{ clearTimeout(pollTimer); lastRender=performance.now(); poll(); wakeRenderer(); }
 });
 poll(); wakeRenderer();
 </script></body></html>

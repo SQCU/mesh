@@ -3,6 +3,8 @@
 Updated 2026-09-04. This is the current implementation/verification/deployment ledger,
 not a replacement specification. Requirements remain in `GOAL.md`, `SPECIFICATION.md`,
 and the operator quotes. Historical observations in `AGENDA.md` remain historical.
+The current working branch is `codex/policy-collapse`; its [single-policy manifest](POLICY-STATE-CONTRACT.md)
+supersedes the split-model implementation without changing the running demo.
 
 ## 1. Preserve the achieved result; repair the availability defects
 
@@ -28,9 +30,13 @@ The operator's dozens-of-variants observation must not be reduced to that one wi
 | Arena credits lost on failed post or discarded CQ | Failed posts return ownership immediately; successfully posted arena pages are tracked privately and returned after QP/CQ retirement. | Bridge and client library built on both Macs; public header and ABI unchanged. Live replacement not performed. |
 | Allowed HUP skipped teardown; failed MR counted as registered | HUP uses the TERM/INT cleanup path, SIGPIPE becomes a reported I/O failure, and the registered-MR count advances only after success. | Two-host builds. No signals sent to live bridges. |
 | Periodic install booted out working services and declared convergence early | No routine daemon bootout or ARD restart; loaded jobs and answering userspace providers are retained. Source and Python generations are staged beside working generations. Revision is written after the run; failures and retained jobs are explicit. | Shell syntax; isolated Python realization and repeat realization. Live installer run and launchd-definition handoff remain pending. |
-| Local counterfactual becomes a different model after remote training | **Open measurement defect.** Local scale parameters remain frozen while the expert updates/restores its own tree. | Do not call the current local substitution a same-checkpoint speedup measurement. Both outputs may still be recorded as observations. |
+| Local counterfactual becomes a different model after remote training | Repaired in `codex/policy-collapse`: a stateless Gram worker receives actual operands; the local sample retains those same operands. No frozen scale parameters or worker optimizer remain. | Mathematical and two-host pullbacks measured; current whole-game performance/study still pending. |
 
-### Request replay invariant
+### Published availability-closure request replay invariant
+
+This subsection records the published stateful-worker repair. On `codex/policy-collapse`,
+the worker is pure and owns no optimizer; cache loss can cause recomputation but cannot
+repeat a parameter update. The [manifest](POLICY-STATE-CONTRACT.md) is the current protocol.
 
 The transport remains UC and lossy. Replay lives in `xonwire.py` / the expert application,
 not in the sealed verbs implementation. The 48-byte frame header and wire version stay
@@ -87,7 +93,8 @@ compiler. No new branch rejects a node because of its type, location, or workloa
 | Named branch | Contents | Publication |
 |---|---|---|
 | `codex/september-runtime` in mesh | Preserved pre-review September work: 1,800 changed files, including the existing comment/harness removals and runtime/geometry/policy work. | Local; not pushed. |
-| `codex/availability-closure` in mesh | The above plus the review repairs, compiler reconstruction recipe, and this ledger. | Local; not pushed. |
+| `codex/availability-closure` in mesh | The above plus the review repairs, compiler reconstruction recipe, and this ledger. | Published to `origin/codex/availability-closure`. |
+| `codex/policy-collapse` in mesh | Single-policy state ownership, stateless Gram execution, shared portable MPP tensor views. | Local working branch; not published. |
 | `codex/mesh-capacity` in the neighboring NetRadiant checkout | Names the existing compiler-capacity repair without changing its worktree. | Local; its only remote is upstream. |
 
 `vendor/netradiant-capacity.patch` also carries that compiler repair inside the mesh
@@ -106,8 +113,8 @@ Root and user updaters still fetch the newest selected branch on every run. Equa
 downloaded archives reuse the prior generation; changed archives extract elsewhere.
 Existing generations remain available to processes using them. Generation reclamation
 needs an ownership-aware policy; neither age-based deletion nor overwriting a live
-environment is introduced here. Publication is still required before another node can
-fetch these mesh branches from GitHub.
+environment is introduced here. The availability repair is published; the new policy-collapse
+branch still needs publication before another node can fetch it from GitHub.
 
 ## 3. Reconcile closure without erasing either accomplishments or gaps
 
@@ -120,7 +127,7 @@ evidence remains credited, and current-generation measurements remain separately
 | 1–6: rewards, Gram construction, independent interventions, formal game semantics, travel horizon, distinct actuators | [Policy](claims/POLICY.md), historical R24–R38 | Same-run reward/coordinate/intervention and realized actuator records. |
 | 7, 13, 17: feasible paths, shared navigation object, stock-map/bridge fusion | [Geometry](claims/GEOMETRY.md), [reconciliation](GEOMETRY-RECONCILIATION.md), reconstructed compiler | Match the built compiler, generated geometry, engine collision/path observations, and requested composition in one artifact lineage. |
 | 8, 16: identity succession and velocity cadence | [Policy](claims/POLICY.md) | Joined/departed/successor support and emitted/persisted coordinate equality. |
-| 9: optimization on assigned mesh hosts | Expert, responder, curriculum; historical two-host inference/updates are already demonstrated | Current split-expert batch: input cotangent, gradient atoms, update count, checkpoint lineage, distinct host work, and resume continuity. |
+| 9: optimization on assigned mesh hosts | One policy/optimizer, stateless Gram worker; real two-host forward and full residual parameter pullback measured | Whole current learning episode, checkpoint/resume continuity and per-host work at real game extents. |
 | 10–11: supported operating-point search and exact leased fabric aggregate | [Mesh telemetry](claims/MESH-TELEMETRY.md); both nodes reachable in September 4 observation | Workload records with explicit missing support, retained membership, and no invented throughput. |
 | 12, 14: causally independent controller scatter/gather and 256-team interfaces | [Engine scale](claims/ENGINE-SCALE.md), R36–R37 gameplay evidence | Current engine's complete transaction and team-incidence records, not only row-buffer counts. |
 | 15: tensor-path DPP and measured utilization | [Policy](claims/POLICY.md), matrix execution measurements | DPP work and utilization on the same current workload interval. |
@@ -128,10 +135,11 @@ evidence remains credited, and current-generation measurements remain separately
 The immediate order is repairs → branch/source reconstruction → ledger reconciliation.
 Items 4 and 5 are intentionally not launched by this review:
 
-4. A current distributed learning episode would measure the **complete split-expert
-   learning transaction and its recovery**, not discover whether mesh computation has
-   ever worked. A hardware-necessity comparison additionally needs synchronized parameter
-   identity and corresponding inputs; the current frozen-local comparison does not supply it.
+4. A current distributed learning episode would measure the **whole-policy learning
+   transaction and its recovery**, not discover whether mesh computation has ever worked.
+   The removed frozen-local/independent-worker design is not the target architecture.
+   Exact-input Gram substitutions now have a coherent identity; a hardware-necessity claim
+   still needs complete workload timing and supported local-plan measurements.
 5. A comparative study would measure **solver behavior and causal benefit**: mirrored
    policies/interventions, realized team-up/take-down play, objective conversion,
    robustness, held-out support, and the specification's requested controls. It is not
@@ -162,3 +170,40 @@ sampled RDMA rates were zero and workload producer support absent. That describe
 sampled interval only; it does not revoke the historical or operator-attested runs.
 No live bridge was restarted, no new verbs device was opened, no fault was injected,
 and no strategy study was launched. Source/build closure and fleet rollout are distinct.
+
+### Policy-collapse verification, September 4
+
+The new [source manifest](POLICY-STATE-CONTRACT.md) records the operator's correction,
+whole-tree optimization pseudocode, exact tensor boundary and placement tradeoff.
+
+- Before removing the hardcoded cooperative layout, the published Mini matrix kernel's
+  maximum absolute error divided by reference magnitude was 1.4718 at (32,31,17) and
+  1.3525 at (129,127,65). Finite output alone did not establish correct computation.
+- Shared MPP tensor views now produce maximum relative matrix/operand-pullback residuals
+  of 2.372e-7 and 4.699e-7 on the Mini at those shapes. The MacBook retains its existing
+  relaxed-precision residuals, at most 9.943e-4 in these measurements. DPP outputs are
+  finite at every measured coordinate on both hosts; DPP remains a numerical approximation.
+- Routed-product measures include homogeneous, mixed, tail and unused-bank assignments.
+  Maximum forward/input-gradient/weight-gradient relative residuals are
+  (6.957e-4, 9.057e-4, 1.876e-7) on the MacBook and
+  (1.691e-7, 1.675e-7, 1.876e-7) on the Mini. The unused bank's gradient is zero.
+- A bounded real mesh exchange used the existing bridges and the game's imported C relay
+  core. A complete residual forward and full parameter pullback reached the Mini through
+  `RemoteGram`, including one request replay. All six residual parameter groups had
+  positive gradient mass; no local fallback or cancellation occurred. The two hosts'
+  relaxed-precision difference was recorded: loss absolute difference 0.007351 and maximum
+  parameter-gradient absolute difference 0.037526. This is not bit-identical execution.
+- Both temporary measurement processes exited successfully. Both bridges then reported
+  `up=true`, `bad=0`, `client=0`, and zero submission/completion/release/ack depths.
+  No bridge signal, verbs-device open, live installer or game-service replacement occurred.
+- The updated dedicated engine built separately as
+  `.build/policy-collapse/mesh-gram-dedicated`. It did not overwrite the demo binary.
+  The second-node source measurement generation is `/tmp/mesh-policy-collapse.U1YJYz`.
+- Python syntax/import checks, Pyflakes on changed Python modules and diff whitespace
+  checks passed. The production Python/C/wire-definition diff removes a net 798 lines;
+  documentation and generated measurement/build artifacts are excluded from that count.
+
+Cold compilation was included in the mesh measurement (approximately 0.28 s forward,
+0.52 s pullback on the worker). These durations are not a warmed throughput or gameplay
+deadline result. Default activation transfer is wider; a full current episode, resume,
+operating-point measurement and comparative behavioral study remain due.

@@ -1547,3 +1547,85 @@ measurements explicit, including the stale-local-model counterfactual defect. Th
 learning episode would measure the complete current split-expert transaction and its
 recovery; the comparative study would measure solver behavior and causal benefit.
 Neither would be the first demonstration that the mesh API is usable.
+
+### R42 — 2026-09-04 — remove the invented training split; import the tensor layout
+
+**E:code, E:build, E:math, E:run (bounded real mesh mathematical exchange).**
+
+The operator rejected interpreting a routed FFN as an independently trained policy,
+and asked to collapse duplicated implementation and wrapper state. The controlling
+correction and source/optimization pseudocode are retained in
+[POLICY-STATE-CONTRACT.md](POLICY-STATE-CONTRACT.md).
+
+On `codex/policy-collapse`, there is one policy parameter tree, one global clipping
+operation, one AdamW state and one checkpoint owner. The worker imports the pure
+residual-feature Gram contraction and its full operand pullback. Host-dependent
+freezing, worker model construction, optimizer accumulation/commit, checkpoint save/load,
+scale-checkpoint collection and submodel digest identity have been removed. The
+initial-policy comparator can use the same worker with its own tensor operands.
+
+Cross-node mathematical measurement found a pre-existing MPP defect: manual cooperative
+lane indexing worked on the MacBook but produced order-one errors on the Mini. Dense
+and homogeneous routed products now use one shared MPP tensor-view implementation.
+Both machines' forward and operand-pullback residuals, DPP finite mass, and routed
+assignment measures are recorded in [RELEASE-CLOSURE.md](RELEASE-CLOSURE.md). The Mini's
+measured dense residuals are now below 5e-7; the MacBook retains its existing relaxed
+precision. Agreement with the previous implementation was not sufficient verification.
+
+A full residual parameter pullback crossed the actual mesh through the game's imported
+C relay, with positive derivative mass in all six residual parameter groups and no
+local fallback. This was a mathematical measurement, not a fake game or a behavioral
+study. The temporary callers exited; both unchanged bridges reported `bad=0`, no client
+and empty application queues. A separate dedicated-engine binary built successfully.
+
+The physical cut moves the parameterized FFN to the responder and keeps Gram forward
+and reverse work on the peer. It avoids sending 2 GiB of FFN banks per call but widens
+activation transfer. The branch is not published or rolled into the game service.
+Full current-game optimization/resume, warmed operating-point measurements and the
+comparative behavioral study remain the next evidence, not inferred achievements.
+
+### R43 — 2026-09-04 — two objectives learn in the same persistent game curriculum
+
+**E:code, E:build, E:run (real games, complete policy updates and cross-match resume).**
+
+The operator requested one explicit distinction between value learning, policy
+learning and actual competitive evaluation, then asked for mixed-team stratCGT-PPO
+and terminal-win PPO training. [JOINT-POLICY-LEARNING.md](JOINT-POLICY-LEARNING.md)
+records that contract, the shared implementation, historical observed-return targets,
+sampling/retention, actor eligibility and the remaining evaluation limitations.
+
+Both objectives use identical Wally shapes and initialization: all 30 initial parameter
+leaves compare exactly, with maximum absolute difference zero. The same OnlineLearner
+implements both; the obsolete update/observe/flush entry points were removed. Value
+learning includes both policies' teams; direct PPO credit uses each policy's own
+actions with server-confirmed application. Both invoke the same remote Gram operation
+and pullback through the real game's relay.
+
+An initial run exposed queued-observation training: request 146 was being processed
+while observed players still used response 58. Its artifacts remain under
+`xonotic/solver/strat/runs/joint-20260904`, but the corrected rollout started a fresh
+lineage under `xonotic/solver/strat/runs/joint-live-20260904`. Newest complete states
+drive action selection, older observation coalescing is counted, and all intervening
+perception/outcome events are retained. Application-sequence matching is explicit.
+
+The first four completed launches were dance with 4 teams/4 carts, dance with
+8 teams/3 carts, runningmanctf with 8 teams/3 carts, and runningmanctf with 4 teams/1
+cart. Team ownership was shuffled with unequal policy-team counts in each match.
+Five actual server rounds completed across these launches. Strategy updates progressed
+23 → 49 → 63 → 74; terminal-win updates progressed 4 → 8 → 12 → 20. Both historical
+pools progressed 21 → 47 → 61 → 72 retained states across four configurations.
+
+At the third completed launch, observed-return variance in the retained pools was
+0.527406 for strategy and 0.0780001 for terminal-win. The pools contained respectively
+261 and 33 nonzero target coordinates, and 57 and 59 actor-eligible row coordinates.
+These are empirical pool coordinates, not generated data or proof of strategic skill.
+Cross-match restoration loaded all 30 parameter and all 62 optimizer-state leaves for
+both policies, with zero missing, shape-different or nonfinite leaves and no restore
+exception. The first four launches had no responder restart.
+
+At 22:36 UTC the detached supervisor was still running. Both bridges remained up with
+bad counters zero; no bridge, driver, access policy or machine service was restarted.
+Per-match learning.json and outcome.json, full telemetry, matches.jsonl and both
+checkpoint artifacts remain available in the run directory. The run is integration
+scale, uses different optimization cadences, and is not a budget-matched held-out Elo
+or generalization result. Source changes remain uncommitted and unpublished.

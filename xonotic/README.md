@@ -8,6 +8,14 @@ advisory signal.
 
 ## Online policy training
 
+The mixed-team training entry point is `solver.strat.curriculum --joint-training`.
+It assigns teams randomly between stratCGT-PPO (`matrix_fusion`) and `terminal_win`,
+and carries both full policy/optimizer/replay checkpoints across matches. The two use
+the same architecture and learner implementation. Current per-policy learning measures
+are in each match's `learning.json`; actual round outcomes are in `outcome.json`.
+See [the objective, replay and evaluation contract](../design/JOINT-POLICY-LEARNING.md)
+for what these measures establish, and what they do not.
+
 The real training environment is the dedicated server. Run the server with a sampled
 map/roster/cart/controller configuration and run the strategy responder with training
 enabled on the mesh peer:
@@ -90,7 +98,7 @@ coordinates, every behavior coordinate overall and by perturbation, baseline-cen
 perturbation displacements, per-arm spawn-wave timing, the independent participant-fusion
 and residual-fusion intervention tensors
 intervention, checkpoint/update realization, map advanceability, and whole-fabric
-operating coordinates. The fabric section retains the identities of responder and expert
+operating coordinates. The fabric section retains the identities of responder and matrix
 nodes and hosts, rank/hidden/expert/top-k coordinates, remote request and output row mass,
 FLOP/s and byte/s intervals, distributed deadline load, and the measured local-only
 deadline interval. Missing telemetry remains `null`; it is not converted to zero.
@@ -255,13 +263,25 @@ Post-training release evaluation can run the release-rank matrix-fusion/MoE oper
 xonotic/solver/strat/joracle/evaluate-distributed.sh
 ```
 
-The command resolves the live Mini address, then delegates the entire release to the curriculum instead of running a second responder/expert supervisor. The curriculum incrementally realizes the remote dedicated engine, complete Xonotic data path, matching gamecode userdir, strategy source, RDMA runtime, and managed Python environment. One stable expert PID owns the fixed relay socket across match transitions; every launch starts with a verified TERM transition and every match ends through the same path.
+The command resolves the live Mini address and uses the curriculum's single lifecycle
+owner. The game host remains the bridge client and relays tensor frames to its local
+matrix worker. The worker imports the canonical Gram contraction and its pullback; it
+does not construct a policy, freeze parameters, train independently or save a checkpoint.
+The responder owns the complete policy and optimizer.
 
-The game host remains the bridge client and relays expert slots to its local MLX worker;
-the responder host runs the rest of the policy and records every scale call, round-trip,
-worker compute interval, logical and physical row mass, dynamic tensor widths, expert
-loads, and both checkpoint tags. The curriculum keeps the expert available across match
-transitions and samples a low-cadence local substitution after returning the live
-response. The 8787 stream reports both host roles, local/remote output differences,
-distributed and local-only deadline loads, achieved FLOP/s bounds, achieved byte/s
-bounds, and their sample variances without turning any coordinate into a release gate.
+The [single-policy source manifest](../design/POLICY-STATE-CONTRACT.md) defines the
+parameter/optimizer boundary, wire tensors, checkpoint lineage and exact-input local
+counterfactual. The new application kinds require the matching engine relay, worker and
+responder. The previous running demo is not changed by this source refactor. Current
+whole-game deadlines, resume continuity and behavioral benefit remain measurements,
+not consequences inferred from source reduction.
+
+The [joint-learning runtime](../design/JOINT-POLICY-LEARNING.md) now runs both objective-defined
+policies and honors `--human-counts` / `--human-client-command` in joint schedules.
+Client templates substitute `{port}`, `{map}`, `{seed}`, `{match}`, `{directory}` and
+`{client}`; use the game host's reachable address with `{port}` to follow each match.
+Server-observed human rows remain value-learning data but are excluded from direct
+PPO actor credit. The shared dashboard at `http://127.0.0.1:8787/` exposes expandable
+per-policy learning and observed-outcome measures. Full J matrices remain in the node's
+latest record and the match's `j-measures.PID.GENERATION.json` artifacts; they are not
+repeated in the interactive polling payload.

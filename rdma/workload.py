@@ -28,6 +28,7 @@ class WorkloadMeter:
             "measures": dict(measures),
         }
         with self.measure_condition:
+            payload["measures"] = {**(self.pending_measures or {}).get("measures", {}), **payload["measures"]}
             self.pending_measures = payload
             if self.measure_thread is None:
                 self.measure_thread = threading.Thread(
@@ -49,7 +50,7 @@ class WorkloadMeter:
                     self.pending_measures = None
             body = json.dumps(payload, separators=(",", ":")).encode()
             try:
-                connection = http.client.HTTPConnection(self.address[0], self.address[1], timeout=0.5)
+                connection = http.client.HTTPConnection(self.address[0], self.address[1], timeout=30)
                 connection.request("POST", "/v1/workload-measures", body, {"Content-Type": "application/json"})
                 response = connection.getresponse()
                 response.read()

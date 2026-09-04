@@ -49,6 +49,11 @@ owned by the node executing the parameters. The RDMA link transports literal ten
 rows and structural framing only. Workload size is determined by current rows and
 available mesh memory, not an application constant.
 
+Placement does not freeze policy parameters or create another optimizer/checkpoint.
+The current [single-policy implementation manifest](POLICY-STATE-CONTRACT.md) places
+the pure residual-feature Gram contraction and its full operand pullback on the peer;
+the responder owns the complete parameter tree and performs one globally clipped update.
+
 ## Geometry data flow
 
 Each stock BSP produces the stock playerbot navigation metric graph. Its weighted edges

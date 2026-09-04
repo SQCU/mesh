@@ -8,18 +8,16 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "..", "rdma"))
 sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 
-from solver.strat.cast_header import Wally, parameter_seed, scale_fuse
+from solver.strat.cast_header import Wally, parameter_seed
+from solver.strat.matmul import gram_context
 from solver.strat.baselines import BaselinePolicy, baseline_strategy, default_strategy
 from solver.strat.featurize import SLOT_DIM
 from solver.strat.inputs import assemble, player_features, scatter_gather_participants
 from solver.strat.strategy import strategy, act, logp_of, sample_controls
 from solver.xonwire import (
-    EXPERT_BATCH_BEGIN, EXPERT_BATCH_COMMIT, EXPERT_BATCH_RESP,
-    EXPERT_GRAD_META, EXPERT_GRAD_META_KIND, EXPERT_GRAD_META_WIDTH,
-    EXPERT_GRAD_REQ, EXPERT_GRAD_RESP,
-    EXPERT_META, EXPERT_META_VALUE_WIDTH, EXPERT_META_KIND, EXPERT_REQ,
-    EXPERT_RESP, EXPERT_TRAIN_REQ, Mesh, Reassembler, FrameStream,
-    expert_meta_width, frame_count, parse_hdr,
+    GRAM_REQ, GRAM_RESP, GRAM_GRAD_REQ, GRAM_GRAD_RESP,
+    GRAM_META, GRAM_META_KIND, GRAM_META_WIDTH,
+    Reassembler, FrameStream, frame_count, parse_hdr,
     CART_KIND, EVENT_KIND, OBSERVATION_KIND, STRATEGY_KIND,
 )
 from solver.strat.instruments import (
@@ -32,21 +30,22 @@ from solver.strat.joracle.probe import (
 )
 from solver.strat.live_belief import LiveBelief
 from solver.strat.row_window import RowWindow
-from solver.strat.policy_contract import MATRIX_FUSION_ARMS, MATRIX_FUSION_INTERVENTION_ARMS, architecture_arm, is_matrix_fusion_arm
+from solver.strat.policy_contract import MATRIX_FUSION_ARMS, MATRIX_FUSION_INTERVENTION_ARMS, architecture_arm, is_matrix_fusion_arm, checkpoint_path
 from solver.strat.runtime import (
-    SPARSE_REWARD_CONTRACT,
-    SPARSE_REWARD_FINGERPRINT,
     build_runtime_frame,
     formal_projection_record,
     formal_value_record,
     role_rewards,
+    reward_contract,
+    reward_fingerprint,
 )
 from solver.strat.work_estimate import strategy_work
 from solver.strat.scale_config import (
     SCALE_EXPERTS, SCALE_HIDDEN, SCALE_RANK, SCALE_TOPK,
-    scale_model_digest, strategy_widths,
+    strategy_widths,
 )
 from workload import WorkloadMeter
+from mesh import Mesh
 
 from payload.tools.strategy_io_schema import (
     CART_WIDTH,
@@ -103,7 +102,7 @@ def load_policy(module, checkpoint, policy_arm):
     from solver.strat.checkpoint_state import load_module_checkpoint
 
     measurement = load_module_checkpoint(
-        module, checkpoint, policy_arm, SPARSE_REWARD_FINGERPRINT,
+        module, checkpoint, policy_arm, reward_fingerprint(policy_arm),
     )
     print(json.dumps({"event": "checkpoint_measurement", **measurement}), flush=True)
     return module
@@ -136,7 +135,7 @@ def policy_source(arm, model, checkpoint, mode):
         "live_architecture": None if model is None else getattr(model, "checkpoint_live_architecture", None),
         "source_reward_contract": None if model is None else getattr(model, "checkpoint_source_reward_contract", None),
         "lineage_initial_sha256": None if model is None else getattr(model, "checkpoint_lineage_initial_sha256", None),
-        "live_reward_contract": "fixed_default" if arm == "default" else SPARSE_REWARD_FINGERPRINT,
+        "live_reward_contract": "fixed_default" if arm == "default" else reward_fingerprint(arm),
         "parameter_seed": None if model is None else getattr(model, "parameter_seed", None),
     }
 
@@ -300,7 +299,7 @@ def distributed_scale_summary(calls, counterfactual_interval=0):
     return out
 
 def make_policy(arm, widths, hidden):
-    if arm in ("matrix_fusion", "initial_policy"):
+    if arm in ("matrix_fusion", "terminal_win", "initial_policy"):
         return Wally(widths), strategy
     if arm in ("participant_fusion_ablated", "residual_fusion_ablated"):
         model = Wally(widths)
@@ -325,229 +324,110 @@ def residual_fusion_ablated_strategy(model, *args):
         execute_remote_scale=True,
     )
 
-def freeze_local_scale_parameters(model):
-    for name in ("scale_in", "scale_router", "scale_out"):
-        getattr(model, name).freeze()
-    model.freeze(keys=["scale_w1", "scale_w2", "scale_probe"], strict=True)
-
-class RemoteScale:
-    def __init__(self, mesh, tx, node, widths, backlog,
-                 counterfactual_interval, training=False, local_model=None,
-                 stopping=None):
-        self.mesh = mesh
-        self.tx = tx
-        self.node = node
-        self.widths = widths
+class RemoteGram:
+    def __init__(self, mesh, tx, node, widths, backlog, counterfactual_interval, stopping=None):
+        self.mesh, self.tx, self.node = mesh, tx, node
         self.backlog = backlog
+        self.stopping = stopping if stopping is not None else {"signal": None}
         self.counterfactual_interval = float(counterfactual_interval)
         self.next_counterfactual = 0.0
-        self.last_counterfactual = None
-        self.training = bool(training)
-        self.local_model = local_model
-        self.stopping = stopping if stopping is not None else {"signal": None}
+        self.last_counterfactual = self.pending = None
+        self.sample = False
         self.sequence = 0
-        self.gradient_batch = 0
-        self.gradient_open = False
-        self.pending = None
-        self.reassembler = Reassembler(EXPERT_RESP, widths.d_ir, mesh.usable)
-        self.meta_reassembler = Reassembler(
-            EXPERT_META_KIND, expert_meta_width(widths.scale_experts), mesh.usable,
-        )
-        self.gradient_reassembler = Reassembler(EXPERT_GRAD_RESP, widths.d_ir, mesh.usable)
-        self.gradient_meta_reassembler = Reassembler(
-            EXPERT_GRAD_META_KIND, EXPERT_GRAD_META_WIDTH, mesh.usable,
-        )
-        self.batch_reassembler = Reassembler(EXPERT_BATCH_RESP, 4, mesh.usable)
+        self.receivers = {
+            kind: Reassembler(kind, widths.d_scale, mesh.usable)
+            for kind in (GRAM_RESP, GRAM_GRAD_RESP)
+        }
+        self.receivers[GRAM_META_KIND] = Reassembler(GRAM_META_KIND, GRAM_META_WIDTH, mesh.usable)
         self.last = {"request_row_mass": 0, "output_row_mass": 0}
 
-    def stopped(self):
-        return self.stopping["signal"] is not None
-
-    def request(self, kind, sequence, tick, rows, receivers):
-        result, measures = self.tx.exchange(
-            kind, sequence, tick, rows, self.node, receivers,
-            cancel=self.stopped, backlog=self.backlog, retry_s=STRATEGY_DEADLINE_S,
+    def request(self, kind, packed, response_kind, source_rows, response_rows):
+        self.sequence += 1
+        started = time.perf_counter()
+        response, measures = self.tx.exchange(
+            kind, self.sequence, int(self.sample), packed, self.node,
+            {key: self.receivers[key] for key in (response_kind, GRAM_META_KIND)},
+            cancel=lambda: self.stopping["signal"] is not None,
+            backlog=self.backlog, retry_s=STRATEGY_DEADLINE_S,
         )
-        self.last = {**self.last, **measures}
-        return result
-
-    def __call__(self, ir, residual_fusion_scale=1.0):
-        rows = np.asarray(ir, dtype=np.float32).reshape(-1, self.widths.d_ir)
-        self.sequence += 1
-        self.last = {"request_row_mass": len(rows), "output_row_mass": 0}
-        started = time.perf_counter()
-        training_call = self.training and self.gradient_open
-        kind = EXPERT_TRAIN_REQ if training_call else EXPERT_REQ
-        tick = self.gradient_batch if training_call else self.sequence
-        response = self.request(kind, self.sequence, tick, rows, {
-            EXPERT_RESP: self.reassembler, EXPERT_META_KIND: self.meta_reassembler,
-        })
-        frame_mass = frame_count(rows, self.mesh.usable)
-        if response is not None:
-            response_record, output = response[EXPERT_RESP]
-            metadata_record, metadata_rows = response[EXPERT_META_KIND]
-            metadata = metadata_rows[0]
-            if len(output) != len(rows):
-                self.last = {**self.last, "sequence": self.sequence,
-                             "request_row_mass": len(rows), "output_row_mass": len(output)}
-                return None
-            elapsed = time.perf_counter() - started
-            worker_rows = int(metadata[EXPERT_META["ROWS"]])
-            self.last = {
-                **self.last, "sequence": self.sequence,
-                "request_row_mass": len(rows),
-                "output_row_mass": len(output), "request_frame_mass": frame_mass,
-                "response_frame_mass": response_record.get("frame_mass"),
-                "metadata_frame_mass": metadata_record.get("frame_mass"),
-                "roundtrip_s": elapsed, "attempt_elapsed_s": elapsed,
-                "worker_compute_s": float(metadata[EXPERT_META["ELAPSED"]]),
-                "worker_rows": worker_rows, "useful_rows": len(rows),
-                "worker_minus_request_rows": worker_rows - len(rows),
-                "transport_queued_frames": int(self.mesh.queued()),
-                "transport_inflight_frames": int(self.mesh.inflight()),
-                "deadline_s": STRATEGY_DEADLINE_S,
-                "deadline_slack_s": STRATEGY_DEADLINE_S - elapsed,
-            }
-            if time.monotonic() >= self.next_counterfactual:
-                self.pending = (rows.copy(), output.copy(), dict(self.last), float(residual_fusion_scale))
-                self.last["local_counterfactual"] = {"observed": False}
-                self.next_counterfactual = time.monotonic() + self.counterfactual_interval
-            if training_call:
-                sequence = self.sequence
-
-                @mx.custom_function
-                def distributed_scale(source):
-                    return mx.array(output.reshape(source.shape))
-
-                @distributed_scale.vjp
-                def distributed_scale_vjp(source, cotangent, _output):
-                    gradient = self.backward(sequence, source, cotangent)
-                    return mx.array(gradient).reshape(source.shape)
-
-                delta = distributed_scale(ir)
-            else:
-                delta = mx.array(output.reshape(ir.shape))
-            return delta, mx.array(metadata[:3]), mx.array(metadata[EXPERT_META_VALUE_WIDTH:])
         elapsed = time.perf_counter() - started
-        self.last = {"sequence": self.sequence, "request_row_mass": len(rows),
-                     "output_row_mass": 0, "cancelled": self.stopped(),
-                     "attempt_elapsed_s": elapsed,
-                     "request_frame_mass": frame_mass,
-                     "transport_queued_frames": int(self.mesh.queued()),
-                     "transport_inflight_frames": int(self.mesh.inflight())}
-        return None
-
-    def local_backward(self, source, cotangent):
-        if self.local_model is None:
-            return np.zeros_like(source, dtype=np.float32)
-        source_mx = mx.array(source)
-        cotangent_mx = mx.array(cotangent)
-
-        def forward(value):
-            return scale_fuse(
-                self.local_model,
-                value.reshape(len(source), 1, self.widths.d_ir),
-                execute_remote=False,
-            )[0].reshape(len(source), self.widths.d_ir)
-
-        _, gradients = mx.vjp(forward, (source_mx,), (cotangent_mx,))
-        mx.eval(gradients[0])
-        return np.asarray(gradients[0], dtype=np.float32)
-
-    def backward(self, sequence, source, cotangent):
-        rows = np.asarray(source, dtype=np.float32).reshape(-1, self.widths.d_ir)
-        cotangent_rows = np.asarray(cotangent, dtype=np.float32).reshape(-1, self.widths.d_ir)
-        packed = np.concatenate((rows, cotangent_rows), axis=1)
-        started = time.perf_counter()
-        self.sequence += 1
-        response = self.request(EXPERT_GRAD_REQ, self.sequence, self.gradient_batch, packed, {
-            EXPERT_GRAD_RESP: self.gradient_reassembler,
-            EXPERT_GRAD_META_KIND: self.gradient_meta_reassembler,
-        })
-        if response is not None:
-            _, output = response[EXPERT_GRAD_RESP]
-            _, metadata_rows = response[EXPERT_GRAD_META_KIND]
-            metadata = metadata_rows[0]
-            if len(output) == len(rows):
-                self.last = {
-                    **self.last, "backward_row_mass": len(output),
-                    "forward_sequence": sequence, "backward_sequence": self.sequence,
-                    "backward_roundtrip_s": time.perf_counter() - started,
-                    "backward_worker_compute_s": float(metadata[EXPERT_GRAD_META["ELAPSED"]]),
-                    "backward_gradient_norm": float(metadata[EXPERT_GRAD_META["GRADIENT_NORM"]]),
-                    "remote_scale_updates": int(metadata[EXPERT_GRAD_META["UPDATES"]]),
-                    "backward_local_fallback": False,
-                }
-                return output
-        gradient = self.local_backward(rows, cotangent_rows)
         self.last = {
-            **self.last,
-            "backward_row_mass": len(gradient),
-            "backward_roundtrip_s": time.perf_counter() - started,
-            "backward_local_fallback": True,
-            "backward_request_frame_mass": frame_count(packed, self.mesh.usable),
+            **measures, "operation": "gram_context" if kind == GRAM_REQ else "gram_vjp",
+            "sequence": self.sequence,
+            "request_row_mass": source_rows, "request_tensor_rows": len(packed),
+            "output_row_mass": 0, "processed_row_mass": 0, "completed": False,
+            "request_frame_mass": frame_count(packed, self.mesh.usable),
+            "attempt_elapsed_s": elapsed, "roundtrip_s": elapsed,
+            "transport_queued_frames": int(self.mesh.queued()),
+            "transport_inflight_frames": int(self.mesh.inflight()),
+            "deadline_s": STRATEGY_DEADLINE_S if self.sample else None,
+            "deadline_slack_s": STRATEGY_DEADLINE_S - elapsed if self.sample else None,
+            "cancelled": self.stopping["signal"] is not None,
         }
-        return gradient
-
-    def batch_signal(self, kind):
-        self.sequence += 1
-        batch = self.gradient_batch
-        row = np.asarray([[batch]], dtype=np.float32)
-        started = time.perf_counter()
-        response = self.request(kind, self.sequence, batch, row, {
-            EXPERT_BATCH_RESP: self.batch_reassembler,
-        })
         if response is not None:
-            _, values = response[EXPERT_BATCH_RESP]
-            values = values[0]
-            self.last = {
-                **self.last, "gradient_batch": int(values[0]),
-                "gradient_batch_atoms": int(values[1]),
-                "gradient_batch_norm": float(values[2]),
-                "remote_scale_updates": int(values[3]),
-                "gradient_batch_roundtrip_s": time.perf_counter() - started,
-            }
-            return values
+            record, output = response[response_kind]
+            meta_record, metadata = response[GRAM_META_KIND]
+            valid = len(output) == response_rows and int(metadata[0, GRAM_META["ROWS"]]) == source_rows
+            self.last.update(
+                output_row_mass=len(output), completed=valid,
+                processed_row_mass=source_rows if valid else 0,
+                response_frame_mass=record.get("frame_mass"),
+                metadata_frame_mass=meta_record.get("frame_mass"),
+                worker_rows=int(metadata[0, GRAM_META["ROWS"]]),
+                worker_compute_s=float(metadata[0, GRAM_META["ELAPSED"]]),
+            )
+            if valid:
+                return output, metadata[0, :3]
+        self.last["local_fallback"] = True
         return None
 
-    def begin_gradient_batch(self):
-        if not self.training:
-            return None
-        self.gradient_batch += 1
-        response = self.batch_signal(EXPERT_BATCH_BEGIN)
-        self.gradient_open = True
-        return response
+    def __call__(self, rows, probe):
+        @mx.custom_function
+        def operation(source, vector):
+            packed = np.concatenate((np.asarray(vector)[None, :], np.asarray(source)), axis=0)
+            response = self.request(GRAM_REQ, packed, GRAM_RESP, len(source), 1)
+            if response is None:
+                return gram_context(source, vector)
+            output, statistics = response
+            if self.sample and self.pending is None and time.monotonic() >= self.next_counterfactual:
+                self.pending = (packed.copy(), output[0].copy(), dict(self.last))
+                self.next_counterfactual = time.monotonic() + self.counterfactual_interval
+            return mx.array(output[0]), mx.array(statistics)
 
-    def commit_gradient_batch(self):
-        if not self.training:
-            return None
-        response = self.batch_signal(EXPERT_BATCH_COMMIT)
-        self.gradient_open = False
-        return response
+        @operation.vjp
+        def operation_vjp(primals, cotangents, output):
+            source, vector = primals
+            cotangent = cotangents[0]
+            packed = np.concatenate((
+                np.asarray(vector)[None, :], np.asarray(cotangent)[None, :],
+                np.asarray(source),
+            ), axis=0)
+            response = self.request(GRAM_GRAD_REQ, packed, GRAM_GRAD_RESP, len(source), len(source) + 1)
+            if response is None:
+                return mx.vjp(gram_context, primals, cotangents)[1]
+            gradients, _ = response
+            return mx.array(gradients[1:]), mx.array(gradients[0])
 
-    def measure_local_counterfactual(self, model, deadline, distributed_elapsed, calls):
-        pending = self.pending
-        self.pending = None
+        return operation(rows, probe)
+
+    def measure_local_counterfactual(self, deadline, distributed_elapsed, calls):
+        pending, self.pending = self.pending, None
         if pending is None:
             return
-        rows, remote, remote_call, residual_fusion_scale = pending
-        remote = remote * residual_fusion_scale
+        packed, remote, remote_call = pending
+        source, probe = mx.array(packed[1:]), mx.array(packed[0])
+        mx.eval(source, probe)
         started = time.perf_counter()
-        source = mx.array(rows).reshape(len(rows), 1, self.widths.d_ir)
-        delta, stats, load = scale_fuse(
-            model, source, execute_remote=False,
-            residual_fusion_scale=residual_fusion_scale,
-        )
-        mx.eval(delta, stats, load)
+        context, statistics = gram_context(source, probe)
+        mx.eval(context, statistics)
         elapsed = time.perf_counter() - started
-        local = np.asarray(delta, dtype=np.float32).reshape(len(rows), self.widths.d_ir)
+        local = np.asarray(context, dtype=np.float32)
         difference = np.abs(local - remote)
         maximum = float(np.max(difference)) if difference.size else 0.0
         scale = float(np.max(np.abs(remote))) if remote.size else 0.0
         remote_elapsed = sum(float(call.get("attempt_elapsed_s") or 0.0) for call in calls)
         successful_calls = sum(
-            int(call.get("request_row_mass") == call.get("output_row_mass")
-                and int(call.get("request_row_mass") or 0) > 0)
+            int(bool(call.get("completed")))
             for call in calls
         )
         fallback_calls = len(calls) - successful_calls
@@ -563,6 +443,7 @@ class RemoteScale:
         )
         counterfactual = {
             "observed": True,
+            "operation": "gram_context", "same_input_snapshot": True,
             "sampled_at": time.time(),
             "sequence": remote_call.get("sequence"),
             "elapsed_s": elapsed,
@@ -586,19 +467,16 @@ class RemoteScale:
             "output_finite_fraction": float(np.isfinite(local).sum() / local.size),
         }
         self.last_counterfactual = dict(counterfactual)
-        matched = False
         for index, call in enumerate(calls):
             if call.get("sequence") == remote_call.get("sequence"):
                 calls[index] = {**call, "local_counterfactual": counterfactual}
-                matched = True
-        if not matched:
-            calls.append({**remote_call, "local_counterfactual": counterfactual})
-        self.last = dict(calls[-1])
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--peer-node", type=int, default=0)
     ap.add_argument("--train", action="store_true")
+    ap.add_argument("--train-arms")
+    ap.add_argument("--match-metadata", default="{}")
     ap.add_argument("--policy-arm", default="matrix_fusion")
     ap.add_argument("--baseline-hidden", type=int, default=256)
     ap.add_argument("--scale-rank", type=int, default=SCALE_RANK)
@@ -627,17 +505,19 @@ def main():
     ap.add_argument("--seed", type=int, default=20260829)
     ap.add_argument("--control-weight", type=float, default=0.5)
     ap.add_argument("--exploration-weight", type=float, default=0.05)
-    ap.add_argument("--replay-capacity", type=int, default=0,
+    ap.add_argument("--replay-capacity", type=int, default=1024,
                     help="optional transition-count bound; zero leaves retention to the memory budget")
     ap.add_argument("--replay-precision", default="float32",
                     help="storage precision label recorded with the replay run")
     ap.add_argument("--replay-memory-mb", type=float, default=256.0,
-                    help="memory ceiling for the replay ring; evicts oldest when exceeded")
+                    help="byte budget for each retained-history and current-episode pool")
     ap.add_argument("--replay-batch", type=int, default=8,
                     help="transitions per replayed gradient step")
+    ap.add_argument("--replay-weight", type=float, default=0.5)
     ap.add_argument("--replay-steps", type=int, default=4,
                     help="replayed gradient steps taken after each fresh segment")
     args = ap.parse_args()
+    train_arms = tuple(filter(None, (args.train_arms or args.policy_arm).split(","))) if args.train else ()
     team_policy_arms = tuple(
         arm for arm in (value.strip() for value in (args.team_policy_arms or "").split(","))
         if arm
@@ -680,8 +560,12 @@ def main():
     )
     j_reporter = LiteralJReporter(
         args.measure_rows, args.measure_interval,
+        os.path.join(os.path.dirname(args.telemetry), f"j-measures.{os.getpid()}"),
     ).start()
+    learning_measures = {}
     published_measure_revision = -1
+    latest_policy_updates = {}
+    outcome_measure = {"scope": "responder_session", "attribution": "assigned_team_arm_not_causal_policy_credit", "rounds": 0, "draws": 0, "wins": {}, "team_rounds": {}}
     mx.random.seed(parameter_seed(args.seed, architecture_arm(args.policy_arm)))
     wally, policy_forward = (None, None) if team_policy_arms else make_policy(args.policy_arm, widths, args.baseline_hidden)
     if wally is not None:
@@ -700,7 +584,7 @@ def main():
             if arm_checkpoints.get(arm)
         ]
         measures_matrix_fusion = any(
-            arm in intervention_arms for arm in assigned_arms
+            arm in intervention_arms and arm != "matrix_fusion" for arm in assigned_arms
         )
         shared_matrix_fusion_checkpoint = matrix_fusion_checkpoint or next(
             iter(intervention_checkpoints), None,
@@ -739,7 +623,7 @@ def main():
                 model, forward = make_policy(arm, widths, args.baseline_hidden)
                 if model is not None:
                     model.parameter_seed = seed_value
-                if model is not None and checkpoint:
+                if model is not None and checkpoint and arm not in train_arms:
                     model = load_policy(
                         model, checkpoint, arm,
                     )
@@ -749,21 +633,17 @@ def main():
         if args.train:
             wally = policy_models.get(args.policy_arm)
             policy_forward = policy_forwards.get(args.policy_arm)
-    if (args.train and args.distributed_scale and wally is not None
-            and is_matrix_fusion_arm(args.policy_arm)):
-        freeze_local_scale_parameters(wally)
-    learner = None
-    if args.train and wally is not None:
+    learners = {}
+    for arm in train_arms:
         from solver.strat.online import OnlineLearner
 
-        learner_source = args.resume_checkpoint or arm_checkpoints.get(args.policy_arm) or args.online_checkpoint
-        if learner_source and not team_policy_arms:
-            wally = load_policy(wally, learner_source, args.policy_arm)
+        target = checkpoint_path(args.online_checkpoint, arm) if len(train_arms) > 1 else args.online_checkpoint
+        learner_source = arm_checkpoints.get(arm) or (args.resume_checkpoint if len(train_arms) == 1 else None) or target
         learner = OnlineLearner(
-            wally,
+            policy_models[arm] if team_policy_arms else wally,
             learning_rate=args.learning_rate,
             gradient_clip=args.gradient_clip,
-            checkpoint=args.online_checkpoint,
+            checkpoint=target,
             load_checkpoint=learner_source,
             replay_capacity=args.replay_capacity,
             replay_memory_mb=args.replay_memory_mb,
@@ -771,19 +651,24 @@ def main():
             replay_batch=args.replay_batch,
             replay_steps=args.replay_steps,
             seed=args.seed,
-            policy_forward=policy_forward,
-            policy_arm=args.policy_arm,
+            policy_forward=policy_forwards[arm] if team_policy_arms else policy_forward,
+            policy_arm=arm,
+            match_metadata=json.loads(args.match_metadata),
+            replay_weight=args.replay_weight,
         )
+        learners[arm] = learner
         if args.initial_checkpoint:
-            learner.save(args.initial_checkpoint)
+            initial_path = checkpoint_path(args.initial_checkpoint, arm) if len(train_arms) > 1 else args.initial_checkpoint
+            learner.save(initial_path)
             if not learner.initial_checkpoint_sha256:
-                learner.initial_checkpoint_sha256 = checkpoint_sha256(args.initial_checkpoint)
+                learner.initial_checkpoint_sha256 = checkpoint_sha256(initial_path)
         if team_policy_arms:
-            policy_models[args.policy_arm] = learner.wally
-            policy_provenance[args.policy_arm] = policy_source(
-                args.policy_arm, learner.wally, learner_source, "online_train",
+            policy_models[arm] = learner.wally
+            policy_provenance[arm] = policy_source(
+                arm, learner.wally, learner_source, "online_train",
             )
-    elif wally is not None and not team_policy_arms:
+    learner = next(iter(learners.values()), None)
+    if not learners and wally is not None and not team_policy_arms:
         wally = load_policy(wally, args.resume_checkpoint or args.checkpoint, args.policy_arm)
     if not team_policy_arms:
         checkpoint = args.resume_checkpoint or (args.online_checkpoint if learner is not None else args.checkpoint)
@@ -804,20 +689,15 @@ def main():
     tx = FrameStream(m)
     backlog = deque()
     remote_scale = None
-    local_scale_model_digest = None
     if args.distributed_scale:
-        scale_model = next((policy_models.get(arm) for arm in MATRIX_FUSION_ARMS if policy_models.get(arm) is not None), None) if team_policy_arms else wally
-        local_scale_model_digest = scale_model_digest(scale_model)
-        remote_scale = RemoteScale(m, tx, args.peer_node, widths, backlog,
-                                   args.measure_interval,
-                                   training=learner is not None,
-                                   local_model=scale_model, stopping=stopping)
+        remote_scale = RemoteGram(m, tx, args.peer_node, widths, backlog,
+                                  args.measure_interval, stopping=stopping)
         if is_matrix_fusion_arm(args.policy_arm) and wally is not None:
-            wally.scale_executor = remote_scale
+            wally.gram_executor = remote_scale
         if team_policy_arms:
             for arm in MATRIX_FUSION_ARMS:
                 if policy_models.get(arm) is not None:
-                    policy_models[arm].scale_executor = remote_scale
+                    policy_models[arm].gram_executor = remote_scale
 
     def incoming():
         while backlog:
@@ -836,9 +716,9 @@ def main():
     pending_evt = {}
     belief_depths = None
     belief_episode = 0
+    observed_outcomes = set()
     decision_history = RowWindow(args.measure_rows, len)
     nt_written = 0
-    resumed_runstate = False
     if args.append_telemetry and os.path.exists(runstate_path):
         try:
             with open(runstate_path) as fh:
@@ -847,7 +727,6 @@ def main():
             model_key = mx.array(rs["model_key"], dtype=mx.uint32)
             resp_id = int(rs.get("resp_id", 0))
             nt_written = int(rs.get("nt_written", 0))
-            resumed_runstate = True
             print(f"[responder] resumed runstate: resp_id={resp_id} nt_written={nt_written} "
                   f"updates={rs.get('updates')}", flush=True)
         except Exception as exc:
@@ -906,10 +785,14 @@ def main():
 
             ready_ticks = pending_obs.keys() & pending_cart.keys() & pending_evt.keys()
             if ready_ticks:
-                ready_tick = min(ready_ticks)
+                ready_tick = max(ready_ticks)
+                coalesced_observations = sum(tick < ready_tick for tick in pending_obs)
                 last_obs = pending_obs.pop(ready_tick)
                 last_cart = pending_cart.pop(ready_tick)
-                last_evt = pending_evt.pop(ready_tick)
+                event_ticks = sorted(tick for tick in pending_evt if tick <= ready_tick)
+                last_evt = pending_evt[ready_tick][0], np.concatenate([pending_evt.pop(tick)[1] for tick in event_ticks])
+                pending_obs = {tick: value for tick, value in pending_obs.items() if tick > ready_tick}
+                pending_cart = {tick: value for tick, value in pending_cart.items() if tick > ready_tick}
                 ch, cart_rows = last_cart
                 oh, obs_rows = last_obs
                 all_teams = array(obs_rows[:, OBS["TEAM"]], int)
@@ -938,8 +821,6 @@ def main():
                             "host_role": "responder",
                         },
                     ).start()
-                    team_of = (teams_present - 1).tolist()
-                    key = (k, j, tuple(participant_ids.tolist()), tuple(team_of))
                     map_key = tuple(
                         (int(cart_rows[c, CS["ID"]]),
                          float(cart_rows[c, CS["PATH_LENGTH"]]))
@@ -984,6 +865,11 @@ def main():
                             "response_seq": int(event[EVT["RESPONSE_SEQ"]]),
                         })
 
+                    if belief_reset and not any(event["kind"] in ("capture", "tie") for event in realized_events):
+                        for arm, learning in learners.items():
+                            if len(learning.episode):
+                                print(json.dumps({"event": "learning_truncation", "arm": arm, **learning.end_episode()}), flush=True)
+
                     cell_slots, gigi = live_belief.chorus(rows, OBS)
                     belief_diag = live_belief.diagnostics()
                     targets = live_belief.instrument_targets(rows, OBS)
@@ -1003,6 +889,7 @@ def main():
                         for team in teams_present
                     ]) if team_policy_arms else np.full(l, args.policy_arm)
                     online_metrics = None
+                    policy_updates = {}
                     frame = None
                     if learner is not None:
                         frame = learner.replay.intern(chorus)
@@ -1011,8 +898,13 @@ def main():
                     model_key, action_key = mx.random.split(model_key)
                     model_key, control_key = mx.random.split(model_key)
                     arm_outputs = {}
+                    counterfactual_predictions = {}
+                    behavior_versions = {arm: learning.updates for arm, learning in learners.items()}
                     scale_calls = []
                     remote_arms = []
+                    if remote_scale is not None:
+                        remote_scale.sample = True
+                        remote_scale.pending = None
                     if team_policy_arms:
                         actions = np.zeros(l, dtype=np.int64)
                         w_next = np.zeros_like(w_in)
@@ -1021,12 +913,14 @@ def main():
                             arm_out = policy_forwards[arm](policy_models[arm], *chorus_mx)
                             if remote_scale is not None and remote_scale.sequence > remote_sequence:
                                 scale_calls.append(dict(remote_scale.last))
-                                if remote_scale.last.get("output_row_mass") == remote_scale.last.get("request_row_mass"):
+                                if remote_scale.last.get("completed"):
                                     remote_arms.append(arm)
                             arm_outputs[arm] = arm_out
                             arm_actions_mx, _, _ = act(arm_out, action_key)
+                            arm_actions = array(arm_actions_mx, np.int64).reshape(l)
+                            counterfactual_predictions[arm] = {"actions": arm_actions.tolist(), "winner_value": array(arm_out.value_winnie).tolist(), "loser_value": array(arm_out.value_lou).tolist(), "behavior_updates": behavior_versions.get(arm)}
                             selected = row_policy_arms == arm
-                            actions[selected] = array(arm_actions_mx, np.int64).reshape(l)[selected]
+                            actions[selected] = arm_actions[selected]
                             w_next[selected] = array(arm_out.weights, np.float32)[selected]
                         out = arm_outputs.get("matrix_fusion", next(iter(arm_outputs.values())))
                     else:
@@ -1034,12 +928,14 @@ def main():
                         out = policy_forward(wally, *chorus_mx)
                         if remote_scale is not None and remote_scale.sequence > remote_sequence:
                             scale_calls.append(dict(remote_scale.last))
-                            if remote_scale.last.get("output_row_mass") == remote_scale.last.get("request_row_mass"):
+                            if remote_scale.last.get("completed"):
                                 remote_arms.append(args.policy_arm)
                         actions_mx, _, _ = act(out, action_key)
                         actions = array(actions_mx, np.int64).reshape(l)
                         w_next = array(out.weights, np.float32)
 
+                    if remote_scale is not None:
+                        remote_scale.sample = False
                     realized_outputs = arm_outputs or {args.policy_arm: out}
                     behavior_discrete = np.zeros(l, dtype=np.float32)
                     candidates = np.flatnonzero(row_policy_arms == args.policy_arm)
@@ -1060,6 +956,8 @@ def main():
                             behavior_discrete[player] = -np.log(len(groups) * len(group))
                         off_policy[chosen] = True
                     n_off_policy = int(off_policy.sum())
+                    policy_controlled = rows[:, OBS["CONTROL"]] >= 0.5
+                    behavior_arms = np.where(policy_controlled, np.where(off_policy, "uniform", row_policy_arms), "human")
                     controls = np.zeros((l, CONTROL_WIDTH), dtype=np.float32)
                     target_logp = np.zeros(l, dtype=np.float32)
                     control_logp = np.zeros(l, dtype=np.float32)
@@ -1126,7 +1024,9 @@ def main():
                                 chorus, participant_ids, previous["participant_ids"],
                             )
                             successor_frame = learner.replay.intern(aligned_chorus)
-                            train_mask = previous["train_mask"]
+                            train_mask = np.ones(previous["players"], dtype=bool)
+                            applied_by_id = dict(zip(participant_ids.tolist(), rows[:, OBS["ROUTE_SEQ"]].astype(np.int64).tolist()))
+                            applied_mask = np.asarray([applied_by_id.get(int(participant), -1) == previous["request_seq"] for participant in previous["participant_ids"]])
                             with work_meter.span(
                                 "policy_optimization", rows=int(train_mask.sum()),
                                 operations={
@@ -1136,23 +1036,28 @@ def main():
                                     "host_role": "responder",
                                 },
                             ):
-                                online_metrics = learner.observe_attributed([{
+                                for arm, learning in learners.items():
+                                    policy_updates[arm] = learning.observe_attributed([{
                                     "context": previous["context"],
                                     "frame": previous["frame"],
                                     "next_frame": successor_frame,
-                                    "dyn_frame": successor_frame,
                                     "snapshot": previous["snapshot"],
                                     "next_snapshot": cartstate,
                                     "actions": previous["actions"],
                                     "controls": previous["controls"],
                                     "behavior_logp": previous["behavior_logp"],
                                     "train_mask": train_mask,
-                                    "dynamics_mask": train_mask & successor_present,
+                                    "actor_mask": (previous["behavior_arms"] == arm) & applied_mask,
+                                    "behavior_updates": previous["policy_updates"][arm],
+                                    "behavior_arms": previous["behavior_arms"],
+                                    "behavior_versions": previous["policy_updates"],
+                                    "dynamics_mask": applied_mask & successor_present & previous["policy_controlled"],
                                     "sparse_return": role_rewards(
                                         previous["context"], previous["snapshot"], cartstate,
                                     ),
-                                    "bootstrap_discount": learner.gamma * successor_present.astype(np.float32),
+                                    "bootstrap_discount": learning.gamma * successor_present.astype(np.float32),
                                 }])
+                            online_metrics = policy_updates.get(next(iter(learners)))
                             if online_metrics is None:
                                 online_metrics = {}
                             online_metrics["causal_attribution"] = {
@@ -1165,22 +1070,47 @@ def main():
                                 "successor_source_row_mass": len(successor_present),
                                 "successor_present_row_mass": int(successor_present.sum()),
                                 "departed_row_mass": int((~successor_present).sum()),
+                                "applied_actor_source_rows": int(applied_mask.sum()),
                             }
-                        stats["updates"] = learner.updates
+                        for event in realized_events:
+                            outcome_key = (event["kind"], event["time"], event["actor_team"], map_key)
+                            if event["kind"] in ("capture", "tie") and outcome_key not in observed_outcomes:
+                                observed_outcomes.add(outcome_key)
+                                winner = int(event["actor_team"])
+                                outcome_measure["rounds"] += 1
+                                outcome_measure["draws"] += int(winner == 0)
+                                for arm in team_policy_arms:
+                                    outcome_measure["team_rounds"][arm] = outcome_measure["team_rounds"].get(arm, 0) + 1
+                                if winner > 0 and team_policy_arms:
+                                    arm = team_policy_arms[winner - 1]
+                                    outcome_measure["wins"][arm] = outcome_measure["wins"].get(arm, 0) + 1
+                                outcome_measure["last_winning_team"] = winner
+                                for arm, learning in learners.items():
+                                    result = learning.end_episode(event["actor_team"])
+                                    update = policy_updates.get(arm) or {}
+                                    policy_updates[arm] = {**update, **result, "gradient_steps": update.get("gradient_steps", 0) + result.get("gradient_steps", 0)}
+                                outcome = {"event": "learning_outcome", "at": time.time(), "server_event": event, "team_policy_arms": team_policy_arms, "policies": policy_updates}
+                                outcome_path = os.path.join(os.path.dirname(args.telemetry), "outcome.json")
+                                with open(outcome_path + ".new", "w") as handle:
+                                    json.dump(outcome, handle)
+                                os.replace(outcome_path + ".new", outcome_path)
+                                print(json.dumps(outcome), flush=True)
+                        stats["updates"] = sum(learning.updates for learning in learners.values())
                         due_updates = (
                             args.save_every > 0
-                            and learner.updates > last_saved_update
-                            and learner.updates % args.save_every == 0
+                            and stats["updates"] > last_saved_update
+                            and stats["updates"] % args.save_every == 0
                         )
                         due_time = (
                             args.save_secs > 0
-                            and learner.updates > last_saved_update
+                            and stats["updates"] > last_saved_update
                             and time.time() - last_save_time >= args.save_secs
                         )
                         if due_updates or due_time:
-                            learner.save()
-                            save_runstate(rng, model_key, resp_id, nt_written, learner.updates)
-                            last_saved_update = learner.updates
+                            for learning in learners.values():
+                                learning.save()
+                            save_runstate(rng, model_key, resp_id, nt_written, stats["updates"])
+                            last_saved_update = stats["updates"]
                             last_save_time = time.time()
                     training_elapsed = max(0.0, time.perf_counter() - training_started)
                     cart_state_width = cart_rows.size
@@ -1308,13 +1238,13 @@ def main():
                             "experts": widths.scale_experts,
                             "topk": widths.scale_topk,
                             "expert_load": np.round(scale_load, 3).tolist(),
-                            "local_scale_model_digest": local_scale_model_digest,
                             "active_experts": int(np.count_nonzero(scale_load)) if scale_active else 0,
                             "arms": {
                                 arm: {
                                     "participant_fusion_scale": 0.0 if arm == "participant_fusion_ablated" else 1.0,
                                     "residual_fusion_scale": 0.0 if arm == "residual_fusion_ablated" else 1.0,
-                                    "host_role": "expert" if arm in remote_arms else "responder",
+                                    "host_role": "matrix" if arm in remote_arms else "responder",
+                                    "operation": "gram_context",
                                     "rows": l * len(batch.instruments),
                                     "matrix_finite_coordinate_mass": int(scale_stats_by_arm[arm][2]),
                                     "matrix_coordinate_mass": widths.d_scale * widths.d_scale,
@@ -1467,7 +1397,7 @@ def main():
                             dict(
                                 row=int(row_index), edict=edict, team=team,
                                 controller="bot" if rows[local, OBS["CONTROL"]] >= 0.5 else "human",
-                                behavior="uniform" if off_policy[local] else str(row_policy_arms[local]),
+                                behavior=str(behavior_arms[local]),
                                 policy_arm=str(row_policy_arms[local]),
                                 action=action, kind=kind, subject=instrument.subject,
                                 target_kind=target_kind_id, target_id=target_id,
@@ -1545,7 +1475,7 @@ def main():
                                 outcome_totals=totals,
                                 routed_outcomes=routed_outcomes,
                                 target_logp=float(target_logp[local]),
-                                behavior_logp=float(behavior_logp[local]),
+                                behavior_logp=float(behavior_logp[local]) if policy_controlled[local] else None,
                             )
                         )
                     for event in realized_events:
@@ -1580,33 +1510,21 @@ def main():
                         }
                         for local, item in enumerate(assignments)
                     }
-                    matrix_fusion_model = next((policy_models.get(arm) for arm in MATRIX_FUSION_ARMS if policy_models.get(arm) is not None), None)
-                    if remote_scale is not None and matrix_fusion_model is not None:
-                        remote_scale.measure_local_counterfactual(
-                            matrix_fusion_model, STRATEGY_DEADLINE_S, work_elapsed, scale_calls,
-                        )
-                        if scale_calls:
-                            scale_calls[-1] = dict(remote_scale.last)
-                        model["scale_operator"]["distributed"] = distributed_scale_summary(
-                            scale_calls, remote_scale.counterfactual_interval,
-                        )
-                    elif remote_scale is not None and is_matrix_fusion_arm(args.policy_arm) and wally is not None:
-                        remote_scale.measure_local_counterfactual(wally, STRATEGY_DEADLINE_S, work_elapsed, scale_calls)
-                        if scale_calls:
-                            scale_calls[-1] = dict(remote_scale.last)
+                    if remote_scale is not None:
+                        remote_scale.measure_local_counterfactual(STRATEGY_DEADLINE_S, work_elapsed, scale_calls)
                         model["scale_operator"]["distributed"] = distributed_scale_summary(
                             scale_calls, remote_scale.counterfactual_interval,
                         )
                     stats["resp"] += 1
                     measured_arms = tuple(arm_outputs) if arm_outputs else (args.policy_arm,)
-                    gradient_steps = int((online_metrics or {}).get("gradient_steps", 0))
-                    gradient_batch = int((online_metrics or {}).get("batch", 0))
+                    gradient_steps = sum(int((update or {}).get("gradient_steps", 0)) for update in policy_updates.values())
+                    gradient_batch = sum(int((update or {}).get("batch", 0)) + int((update or {}).get("replay_batch", 0)) for update in policy_updates.values())
                     full_work_parts = [
                         strategy_work(
                             arm, widths, l, len(batch.instruments),
                             len(cell_slots), args.baseline_hidden,
-                            gradient_steps if learner is not None else 0,
-                            gradient_batch if learner is not None else 0,
+                            int((policy_updates.get(arm) or {}).get("gradient_steps", 0)),
+                            int((policy_updates.get(arm) or {}).get("batch", 0)) + int((policy_updates.get(arm) or {}).get("replay_batch", 0)),
                         )
                         for arm in measured_arms
                     ]
@@ -1680,9 +1598,15 @@ def main():
                         },
                     })
                     measure_revision, current_measures = j_reporter.snapshot()
-                    published_measures = (
-                        current_measures if measure_revision != published_measure_revision else None
-                    )
+                    learning_state = {arm: {"updates": learning.updates, "completed_episodes": learning.completed_episodes, "truncated_episodes": learning.truncated_episodes, "pending_states": len(learning.episode), "replay_size": len(learning.replay), **learning.replay.report(), "reward_contract": reward_contract(arm)} for arm, learning in learners.items()}
+                    latest_policy_updates.update({arm: {**update, "sampled_at": time.time(), "response": resp_id, "row_scope": "last_optimizer_step", "gradient_steps_scope": "response"} for arm, update in policy_updates.items() if (update or {}).get("gradient_steps", 0)})
+                    learning_measures = {
+                        "match": {"environment": args.environment, "teams": k, "carts": j, "players": l, "human_rows": int((~policy_controlled).sum()), "bot_rows": int(policy_controlled.sum()), "responses": resp_id, "sampled_at": time.time(), "team_policy_arms": dict(enumerate(team_policy_arms, 1))},
+                        "outcomes": dict(outcome_measure),
+                        **{f"learning.{arm}": {**state, "last_update": latest_policy_updates.get(arm, {})} for arm, state in learning_state.items()},
+                    }
+                    published_measures = {**(current_measures if measure_revision != published_measure_revision else {}), **learning_measures}
+                    published_measure_revision = measure_revision
                     post_response_measure_elapsed = time.perf_counter() - post_response_started
                     if gradient_steps:
                         work_meter.record(
@@ -1699,7 +1623,6 @@ def main():
                                 "gradient_steps": gradient_steps,
                                 "gradient_batch": gradient_batch,
                                 "host_role": "responder",
-                                "scale_model_digest": local_scale_model_digest,
                             },
                         )
                     work_meter.record(
@@ -1723,11 +1646,12 @@ def main():
                             "experts": work["experts"],
                             "topk": work["topk"],
                             "parameter_bytes": local_parameter_bytes,
-                            "scale_model_digest": local_scale_model_digest,
                             "host_role": "responder",
                             "remote_call_mass": len(scale_calls),
                             "remote_request_row_mass": sum(int(call.get("request_row_mass") or 0) for call in scale_calls),
                             "remote_output_row_mass": sum(int(call.get("output_row_mass") or 0) for call in scale_calls),
+                            "remote_processed_row_mass": sum(int(call.get("processed_row_mass") or 0) for call in scale_calls),
+                            "remote_operation": "gram_context",
                             "local_only_plan_elapsed_s": None if local_counterfactual is None else local_counterfactual["local_plan_counterfactual_s"],
                             "local_only_plan_lower_s": None if local_counterfactual is None else local_counterfactual["local_plan_counterfactual_lower_s"],
                             "local_only_plan_upper_s": None if local_counterfactual is None else local_counterfactual["local_plan_counterfactual_upper_s"],
@@ -1737,21 +1661,24 @@ def main():
                         },
                         measures=published_measures,
                     )
-                    if published_measures is not None:
-                        published_measure_revision = measure_revision
-
                     previous = dict(
                         context=context, snapshot=cartstate, cartstate=cartstate,
+                        request_seq=int(ch["req_id"]),
                         frame=frame, players=l, actions=actions.copy(),
                         controls=controls.copy(),
                         behavior_logp=behavior_logp.copy(),
+                        row_policy_arms=row_policy_arms.copy(),
+                        behavior_arms=behavior_arms.copy(),
+                        policy_controlled=policy_controlled.copy(),
+                        off_policy=off_policy.copy(),
+                        policy_updates=behavior_versions,
                         train_mask=(row_policy_arms == args.policy_arm).copy(),
                         teams_present=teams_present.copy(),
                         participant_ids=participant_ids.copy(),
                     )
                     live_provenance = {arm: dict(source) for arm, source in policy_provenance.items()}
-                    if learner is not None:
-                        live_provenance[args.policy_arm]["updates"] = int(learner.updates)
+                    for arm, learning in learners.items():
+                        live_provenance[arm]["updates"] = int(learning.updates)
                     line = dict(
                         environment=args.environment,
                         policy_arm=active_policy,
@@ -1761,6 +1688,7 @@ def main():
                         mode="online_train" if learner is not None else "inference",
                         updates=learner.updates if learner is not None else 0,
                         resp_id=resp_id, request_seq=int(ch["req_id"]),
+                        coalesced_observations=coalesced_observations,
                         req_tick=int(ch["tick"]), obs_tick=int(oh["tick"]),
                         k=k, j=j, l=l,
                         off_policy_players=n_off_policy,
@@ -1801,7 +1729,11 @@ def main():
                         },
                         server_state_labels=server_state_labels,
                         assignments=assignments, update=online_metrics,
-                        reward_contract=SPARSE_REWARD_CONTRACT,
+                        policy_updates=policy_updates,
+                        counterfactual_predictions=counterfactual_predictions,
+                        learning=learning_state,
+                        reward_contract=reward_contract(args.policy_arm),
+                        reward_contracts={arm: reward_contract(arm) for arm in realized_outputs},
                         work=work,
                         realized_events=realized_events,
                         dynamics_guidance=None if online_metrics is None else {
@@ -1867,6 +1799,10 @@ def main():
                     ))
                     telem.write(json.dumps(line) + "\n")
                     telem.flush()
+                    learning_path = os.path.join(os.path.dirname(args.telemetry), "learning.json")
+                    with open(learning_path + ".new", "w") as handle:
+                        json.dump({"at": time.time(), "environment": args.environment, "teams": k, "carts": j, "players": l, "responses": resp_id, "team_policy_arms": team_policy_arms, "learning": line["learning"], "policy_updates": policy_updates}, handle)
+                    os.replace(learning_path + ".new", learning_path)
                     nt_written += 1
 
             if not got_any:
@@ -1882,10 +1818,12 @@ def main():
     finally:
         j_reporter.stop()
         _, final_measures = j_reporter.snapshot()
-        work_meter.close(final_measures)
-        if learner is not None:
-            learner.save()
-            save_runstate(rng, model_key, resp_id, nt_written, learner.updates)
+        work_meter.close({**final_measures, **learning_measures})
+        for arm, learning in learners.items():
+            print(json.dumps({"event": "learning_truncation", "arm": arm, **learning.end_episode()}), flush=True)
+            learning.save()
+        if learners:
+            save_runstate(rng, model_key, resp_id, nt_written, sum(learning.updates for learning in learners.values()))
         telem.close()
     print(f"[responder] STOPPED (signal {stopping['signal']}) stats={stats} "
           f"telem_lines={nt_written}", flush=True)

@@ -11,7 +11,7 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 
-from .cast_header import Wally, Widths, dina_state, elle
+from .cast_header import dina_state, elle
 from .checkpoint_state import (
     ARCH_KEY, ARCH_SPEC_KEY, POLICY_KEY, POLICY_VERSION_KEY, RNG_KEY,
     REWARD_CONTRACT_KEY, LINEAGE_INITIAL_KEY, POLICY_VERSIONS, architecture_fingerprint,
@@ -19,7 +19,7 @@ from .checkpoint_state import (
     load_module_checkpoint,
 )
 from .runtime import (
-    SPARSE_REWARD_FINGERPRINT,
+    reward_fingerprint,
     POLICY_ACTOR_WEIGHT,
     POLICY_ENTROPY_FLOOR,
     POLICY_ENTROPY_WEIGHT,
@@ -28,6 +28,7 @@ from .runtime import (
     winner,
 )
 from .matmul import matrix_multiply
+from .policy_contract import is_matrix_fusion_arm
 
 LOSS_WEIGHTS = {
     "actor":  POLICY_ACTOR_WEIGHT,
@@ -60,12 +61,9 @@ class OnlineLearner:
         learning_rate: float = 3e-4,
         gradient_clip: float = 1.0,
         gamma: float = 0.95,
-        importance_clip: float = 2.0,
-        dynamics=None,
         checkpoint=None,
         load_checkpoint=None,
-        credit_horizon: int = 5,
-        replay_capacity: int = 0,
+        replay_capacity: int = 1024,
         replay_memory_mb: float = 256.0,
         replay_precision: str = "float32",
         replay_batch: int = 8,
@@ -73,18 +71,21 @@ class OnlineLearner:
         seed: int = 20260831,
         policy_forward=strategy,
         policy_arm: str = "matrix_fusion",
+        match_metadata=None,
+        replay_weight=0.5,
     ):
         self.wally = wally
         self.gamma = float(gamma)
-        self.importance_clip = float(importance_clip)
         self.gradient_clip = abs(float(gradient_clip))
-        self.bundle = wally
         self.optimizer = optim.AdamW(learning_rate=learning_rate, weight_decay=1e-4)
         self.checkpoint = checkpoint
         self.updates = 0
-        self.credit_horizon = max(1, int(credit_horizon))
-        self.pending = []
         self.replay = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
+        self.episode = Replay(replay_capacity, int(replay_memory_mb * (1 << 20)))
+        self.match_metadata = dict(match_metadata or {})
+        self.replay_weight = float(replay_weight)
+        self.completed_episodes = 0
+        self.truncated_episodes = 0
         self.replay_precision = replay_precision
         self.replay_batch = max(1, int(replay_batch))
         self.replay_steps = max(0, int(replay_steps))
@@ -98,9 +99,10 @@ class OnlineLearner:
         self._ratio_sink = []
         self.policy_forward = policy_forward
         self.policy_arm = policy_arm
-        self.architecture = architecture_fingerprint(self.bundle)
+        self.reward_fingerprint = reward_fingerprint(policy_arm)
+        self.architecture = architecture_fingerprint(self.wally)
         self.loaded_weight_mass = 0
-        self.live_weight_mass = len(tree_flatten(self.bundle.parameters()))
+        self.live_weight_mass = len(tree_flatten(self.wally.parameters()))
         self.loaded_optimizer_moment_mass = 0
         self.live_optimizer_moment_mass = 0
         self.optimizer_moment_measurement = {}
@@ -111,7 +113,7 @@ class OnlineLearner:
 
     def _load_full(self, source):
         state = load_module_checkpoint(
-            self.bundle, source, self.policy_arm, SPARSE_REWARD_FINGERPRINT,
+            self.wally, source, self.policy_arm, self.reward_fingerprint,
         )
         self.loaded_weight_mass = state["loaded_weight_mass"]
         self.initial_checkpoint_sha256 = state["lineage_initial_sha256"]
@@ -127,10 +129,12 @@ class OnlineLearner:
                 self.transitions = int(np.asarray(data["__transitions__"]))
             if "__gradient_steps__" in keys:
                 self.gradient_steps = int(np.asarray(data["__gradient_steps__"]))
-            self.optimizer.init(self.bundle.trainable_parameters())
+            self.completed_episodes = int(data["__completed_episodes__"]) if "__completed_episodes__" in keys else 0
+            self.truncated_episodes = int(data["__truncated_episodes__"]) if "__truncated_episodes__" in keys else 0
+            self.optimizer.init(self.wally.trainable_parameters())
             live_moments = dict(tree_flatten(self.optimizer.state))
             source_moments = {
-                key[7:]: np.asarray(data[key]).copy() for key in keys if key.startswith("__opt__")
+                key[7:]: np.asarray(data[key]) for key in keys if key.startswith("__opt__")
             }
             moment_measurement = tensor_tree_measurement(
                 live_moments.items(), source_moments.items(),
@@ -159,7 +163,7 @@ class OnlineLearner:
             "source_architecture": state["source_architecture"], "live_arm": self.policy_arm,
             "live_version": state["live_version"], "live_architecture": self.architecture,
             "source_reward_contract": state["source_reward_contract"],
-            "live_reward_contract": SPARSE_REWARD_FINGERPRINT,
+            "live_reward_contract": self.reward_fingerprint,
             "source_weight_mass": state["source_weight_mass"],
             "live_weight_mass": self.live_weight_mass,
             "loaded_weight_mass": self.loaded_weight_mass,
@@ -184,7 +188,6 @@ class OnlineLearner:
         context,
         frame,
         next_frame,
-        dyn_frame,
         snapshot,
         next_snapshot,
         actions,
@@ -194,6 +197,10 @@ class OnlineLearner:
         dynamics_mask=None,
         sparse_return=None,
         bootstrap_discount=None,
+        actor_mask=None,
+        behavior_updates=0,
+        behavior_arms=None,
+        behavior_versions=None,
     ):
         players = np.asarray(self.replay.frame(frame).xan).shape[0]
         reward = (role_rewards(context, snapshot, next_snapshot)
@@ -218,9 +225,16 @@ class OnlineLearner:
             "winner_mask": teams == before_winner,
             "next_winner_mask": teams == after_winner,
             "discount": discount,
+            "teams": teams,
+            "actor_mask": np.ones(players, dtype=bool) if actor_mask is None else np.asarray(actor_mask, dtype=bool),
+            "behavior_updates": int(behavior_updates),
+            "behavior_arms": np.asarray(behavior_arms if behavior_arms is not None else [self.policy_arm] * players),
+            "behavior_versions": dict(behavior_versions or {}),
+            "configuration": json.dumps(self.match_metadata.get("configuration", {}), sort_keys=True),
+            "match_id": self.match_metadata.get("match_id", "unspecified"),
         }
 
-    def _item_loss(self, item):
+    def _item_loss(self, item, value_scale=1.0, actor_scale=1.0):
         actions_mx = mx.array(item["actions"])
         controls_mx = mx.array(item["controls"])
         behavior_logp_mx = mx.array(item["behavior_logp"])
@@ -228,13 +242,15 @@ class OnlineLearner:
         train_weight = train_mask.astype(mx.float32)
         dynamics_mask = mx.array(item.get("dynamics_mask", np.ones_like(item["actions"], dtype=bool))).astype(mx.bool_)
         train_count = mx.maximum(mx.sum(train_weight), 1.0)
+        actor_weight = train_weight * mx.array(item.get("actor_mask", item["train_mask"])).astype(mx.float32)
+        actor_count = mx.maximum(mx.sum(actor_weight), 1.0)
         reward = mx.array(item["reward"])
         winner_mask = mx.array(item["winner_mask"]).astype(mx.bool_)
         next_winner_mask = mx.array(item["next_winner_mask"]).astype(mx.bool_)
         current_action_mass = mx.array(item["chorus_in"].action_mass)
 
         current = self.policy_forward(self.wally, *(mx.array(a) for a in item["chorus_in"]))
-        following = self.policy_forward(self.wally, *(mx.array(a) for a in item["chorus_out"]))
+        following = current if "value_target" in item and not actor_scale else self.policy_forward(self.wally, *(mx.array(a) for a in item["chorus_out"]))
 
         logpi = logp_of(current, actions_mx, controls_mx)
 
@@ -245,19 +261,21 @@ class OnlineLearner:
             mx.where(next_winner_mask, 0.0, following.value_lou),
         )
         target = reward + item["discount"] * mx.stop_gradient(bootstrap)
+        if "value_target" in item:
+            target = mx.array(item["value_target"])
         error = target - value
 
-        ratio = mx.exp(logpi - behavior_logp_mx)
+        ratio = mx.exp(logpi - behavior_logp_mx) if actor_scale else mx.ones_like(logpi)
         self._ratio_sink.append((
             mx.stop_gradient(ratio),
             np.asarray(item.get(
-                "train_mask", np.ones_like(item["actions"], dtype=bool),
-            )),
+                "actor_mask", np.ones_like(item["actions"], dtype=bool),
+            )) & bool(actor_scale),
         ))
         td_advantage = mx.stop_gradient(error)
         actor = -mx.sum(
-            clipped_policy_surrogate(ratio, td_advantage) * train_weight
-        ) / train_count
+            clipped_policy_surrogate(ratio, td_advantage) * actor_weight
+        ) / actor_count
 
         probabilities = mx.exp(log_probs(current))
         kind_probabilities = matrix_multiply(
@@ -280,7 +298,7 @@ class OnlineLearner:
             mx.sum(mx.square(current.aux_winnie - mx.stop_gradient(current.value_winnie)) * train_weight) / train_count
             + mx.sum(mx.square(current.aux_lou - mx.stop_gradient(current.value_lou)) * train_weight) / train_count
         )
-        if self.policy_arm == "matrix_fusion":
+        if is_matrix_fusion_arm(self.policy_arm) and actor_scale:
             y = mx.stop_gradient(current.query)
             u = mx.stop_gradient(mx.take_along_axis(
                 current.ir, actions_mx[:, None, None], axis=1
@@ -308,13 +326,13 @@ class OnlineLearner:
         )
 
         total = (
-            LOSS_WEIGHTS["actor"] * actor
+            actor_scale * (LOSS_WEIGHTS["actor"] * actor
             + LOSS_WEIGHTS["entropy"] * entropy_penalty
-            + LOSS_WEIGHTS["winnie"] * winner_loss
-            + LOSS_WEIGHTS["lou"] * loser_loss
-            + LOSS_WEIGHTS["vera"] * aux
             + LOSS_WEIGHTS["dina"] * dynamics_value
-            + LOSS_WEIGHTS["elle"] * regularization
+            + LOSS_WEIGHTS["elle"] * regularization)
+            + value_scale * (LOSS_WEIGHTS["winnie"] * winner_loss
+            + LOSS_WEIGHTS["lou"] * loser_loss
+            + LOSS_WEIGHTS["vera"] * aux)
         )
 
         advantage = mx.sum(mx.stop_gradient(error) * train_weight) / train_count
@@ -334,25 +352,28 @@ class OnlineLearner:
                                 dynamics_disagreement, semantic_entropy,
                                 entropy_penalty])
 
-    def learn(self, items):
+    def learn(self, items, replay_items=()):
         items = list(items)
         if not items:
             return None
         rebuild_t0 = time.perf_counter()
         items = [self.replay.materialize(item) for item in items]
+        replay_items = [self.replay.materialize(item) for item in replay_items]
         self.rebuild_seconds += time.perf_counter() - rebuild_t0
         self.rebuild_calls += 1
 
         def loss_fn():
-            losses, parts = zip(*(self._item_loss(item) for item in items))
-            return mx.mean(mx.stack(losses)), mx.mean(mx.stack(parts), axis=0)
+            replay_weight = self.replay_weight if replay_items else 0.0
+            losses, parts = zip(*(self._item_loss(item, 1.0 - replay_weight) for item in items))
+            total = mx.mean(mx.stack(losses))
+            if replay_items:
+                historical, _ = zip(*(self._item_loss(item, replay_weight, 0.0) for item in replay_items))
+                total = total + mx.mean(mx.stack(historical))
+            return total, mx.mean(mx.stack(parts), axis=0)
 
         self._ratio_sink = []
-        scale_executor = getattr(self.wally, "scale_executor", None)
-        if scale_executor is not None:
-            scale_executor.begin_gradient_batch()
-        (total, parts), gradients = nn.value_and_grad(self.bundle, loss_fn)()
-        remote_batch = None if scale_executor is None else scale_executor.commit_gradient_batch()
+        (total, parts), gradients = nn.value_and_grad(self.wally, loss_fn)()
+        self._ratio_sink = [(ratio, mask) for ratio, mask in self._ratio_sink if np.any(mask)]
         if self._ratio_sink:
             mx.eval(*(ratio for ratio, _ in self._ratio_sink))
             self.ratios.append(np.concatenate(
@@ -360,8 +381,8 @@ class OnlineLearner:
                  for ratio, mask in self._ratio_sink]))
             self._ratio_sink = []
         gradients, gradient_norm = optim.clip_grad_norm(gradients, self.gradient_clip)
-        self.optimizer.update(self.bundle, gradients)
-        mx.eval(self.bundle.parameters(), self.optimizer.state, total, parts, gradient_norm)
+        self.optimizer.update(self.wally, gradients)
+        mx.eval(self.wally.parameters(), self.optimizer.state, total, parts, gradient_norm)
         self.updates += 1
         self.gradient_steps += 1
         names = ("loss_pg", "loss_w", "loss_l", "loss_dynamics", "loss_reg",
@@ -374,20 +395,24 @@ class OnlineLearner:
         metrics = {name: float(parts[i]) for i, name in enumerate(names)}
         metrics["gradient_norm"] = float(np.asarray(gradient_norm))
         metrics["gradient_clip"] = self.gradient_clip
-        if remote_batch is not None:
-            metrics["remote_scale_gradient_atoms"] = int(remote_batch[1])
-            metrics["remote_scale_gradient_norm"] = float(remote_batch[2])
-            metrics["remote_scale_updates"] = int(remote_batch[3])
         metrics["local_control_sigma_min"] = self._control_sigma(items)
         metrics.update(
             loss=float(np.asarray(total)),
             updates=self.updates,
+            gradient_steps=1,
             batch=len(items),
+            replay_batch=len(replay_items),
+            replay_behavior_age_updates=float(np.mean([self.updates - item.get("behavior_updates", self.updates) for item in replay_items])) if replay_items else None,
+            actor_rows=sum(int(np.asarray(item.get("actor_mask", item["train_mask"])).sum()) for item in items),
+            value_rows=sum(int(np.asarray(item["train_mask"]).sum()) for item in items + replay_items),
+            behavior_age_updates=float(np.mean([self.updates - item.get("behavior_updates", self.updates) for item in items])),
+            value_target_variance=float(np.mean([np.var(item.get("value_target", item["reward"])) for item in items + replay_items])),
+            value_target_semantics="observed_behavior_return" if all("value_target" in item for item in items) else "fresh_td_and_historical_behavior_return",
         )
         return metrics
 
     def _control_sigma(self, items):
-        if self.policy_arm != "matrix_fusion":
+        if not is_matrix_fusion_arm(self.policy_arm):
             return float("nan")
         values = []
         for item in items[:1]:
@@ -406,51 +431,21 @@ class OnlineLearner:
                     continue
         return float(np.mean(values)) if values else float("nan")
 
-    def update(self, *args, **kwargs):
-        item = self.replay.push(self.transition(*args, **kwargs))
-        self.transitions += 1
-        return self.learn([item])
-
-    def observe(
-        self, previous, next_frame, next_snapshot, *, terminal=False,
-    ):
-        reward = role_rewards(previous["context"], previous["snapshot"], next_snapshot)
-        self.pending.append({
-            "previous": previous,
-            "reward": reward,
-            "immediate_next_frame": next_frame,
-            "immediate_next_snapshot": next_snapshot,
-        })
-        changed = self._cart_signature(previous["snapshot"]) != self._cart_signature(next_snapshot)
-        return self.flush(next_frame, next_snapshot, terminal=terminal) if terminal or changed or len(self.pending) >= self.credit_horizon else None
-
-    def flush(self, next_frame, next_snapshot, *, terminal=False):
-        if not self.pending:
-            self.replay.release_unreferenced()
-            return None
-        rewards = [item["reward"] for item in self.pending]
-        fresh = []
-        for start, item in enumerate(self.pending):
-            total = np.zeros_like(rewards[start])
-            factor = 1.0
-            for reward in rewards[start:]:
-                total += factor * reward
-                factor *= self.gamma
-            previous = item["previous"]
-            fresh.append(self.replay.push(self.transition(
-                previous["context"], previous["frame"], next_frame,
-                item["immediate_next_frame"],
-                previous["snapshot"], next_snapshot,
-                previous["actions"], previous["controls"], previous["behavior_logp"], sparse_return=total,
-                train_mask=previous.get("train_mask"),
-                bootstrap_discount=0.0 if terminal else factor,
-            )))
-        self.pending.clear()
-        return self._train_fresh(fresh)
-
     def observe_attributed(self, records):
-        fresh = [self.replay.push(self.transition(**record)) for record in records]
-        out = self._train_fresh(fresh)
+        fresh = [self.transition(**record) for record in records]
+        for item in fresh:
+            teams = {int(team): index for index, team in enumerate(item["teams"])}
+            for prior in self.episode.items():
+                indices = np.asarray([teams.get(int(team), -1) for team in prior["teams"]])
+                present = indices >= 0
+                prior["value_target"] += prior["return_factor"] * item["reward"][indices] * present
+                prior["return_factor"] *= self.gamma * present * (prior["winner_mask"] == item["next_winner_mask"][indices])
+            self.episode.push(dict(
+                item, value_target=item["reward"].copy(),
+                return_factor=item["discount"] * (item["winner_mask"] == item["next_winner_mask"]),
+            ))
+        self.transitions += len(fresh)
+        out = self._train_fresh(fresh) if self.policy_arm != "terminal_win" else None
         if out is not None:
             out["attributed_groups"] = len(fresh)
             out["attributed_rows"] = int(sum(
@@ -458,40 +453,47 @@ class OnlineLearner:
             ))
         return out
 
+    def end_episode(self, winning_team=None):
+        items = list(self.episode.items())
+        metrics = {"outcome": winning_team, "retained_states": 0, "unlabelled_states": 0}
+        steps = 0
+        if winning_team is None:
+            self.truncated_episodes += 1
+            metrics["unlabelled_states"] = len(items)
+        else:
+            self.completed_episodes += 1
+            if self.policy_arm == "terminal_win":
+                for item in items:
+                    item["value_target"] = ((winning_team > 0) & (item["teams"] == winning_team - 1)).astype(np.float32)
+                    item["reward"] = item["value_target"].copy()
+                    item["discount"] = np.zeros_like(item["discount"])
+                for _ in range(max(1, self.replay_steps)):
+                    batch = self.episode.sample(self.replay_batch, self.rng)
+                    if batch:
+                        metrics.update(self.learn(batch, self.replay.sample(self.replay_batch, self.rng)))
+                        steps += 1
+            metrics["retained_states"] = self.replay.retain(items)
+        self.episode.clear()
+        metrics.update(gradient_steps=steps, completed_episodes=self.completed_episodes, truncated_episodes=self.truncated_episodes, replay_size=len(self.replay), replay=self.replay.report(), updates=self.updates)
+        return metrics
+
     def _train_fresh(self, fresh):
         if not fresh:
             self.replay.release_unreferenced()
             return None
-        self.transitions += len(fresh)
         self.replay.release_unreferenced()
-        metrics = [self.learn(fresh)]
-        ages = [0.0]
-        for _ in range(self.replay_steps):
-            batch = self.replay.sample(self.replay_batch, self.rng)
-            if not batch:
-                break
-            ages.append(self.replay.mean_age(batch))
-            metrics.append(self.learn(batch))
-        metrics = [m for m in metrics if m]
-        if not metrics:
-            return None
-        out = {}
-        for key in sorted(set().union(*(row.keys() for row in metrics))):
-            values = [row[key] for row in metrics if key in row]
-            out[key] = values[-1] if key in ("updates", "batch") else float(np.mean(values))
-            if len(values) != len(metrics):
-                out[key + "_sample_mass"] = len(values)
+        out = self.learn(fresh, self.replay.sample(self.replay_batch, self.rng))
         report = self.replay.report()
         out.update(
             credited_steps=len(fresh),
-            gradient_steps=len(metrics),
+            gradient_steps=1,
             replay_size=len(self.replay),
             replay_capacity=self.replay.capacity,
             replay_mb=round(self.replay.nbytes / (1 << 20), 3),
             replay_bytes_per_state=report["bytes_per_transition"],
             replay_frames=report["frames"],
             replay_precision=self.replay_precision,
-            replay_mean_age=round(float(np.mean(ages)), 2),
+            replay_mean_age=round(self.replay.mean_age(self.replay.items()), 2) if len(self.replay) else 0.0,
             steps_per_transition=round(self.gradient_steps / max(1, self.transitions), 3),
             feature_rebuild_ms=round(1000.0 * self.rebuild_seconds / max(1, self.rebuild_calls), 3),
             importance_ratio=self.ratio_report(),
@@ -513,32 +515,31 @@ class OnlineLearner:
             "quantiles": [round(float(q), 5) for q in quantiles],
         }
 
-    @staticmethod
-    def _cart_signature(snapshot):
-        return tuple(np.floor(np.clip(snapshot.pos, 0, 1) * snapshot.levels).astype(np.int64)), tuple(snapshot.control.astype(np.int64))
-
     def save(self, path=None):
         target = path or self.checkpoint
         if target is None:
             return
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
         temporary = target + ".new.npz"
-        payload = {name: np.asarray(value) for name, value in tree_flatten(self.bundle.parameters())}
+        payload = {name: np.asarray(value) for name, value in tree_flatten(self.wally.parameters())}
         for name, value in tree_flatten(self.optimizer.state):
             payload["__opt__" + name] = np.asarray(value)
         payload["__updates__"] = np.asarray(self.updates)
         payload["__transitions__"] = np.asarray(self.transitions)
         payload["__gradient_steps__"] = np.asarray(self.gradient_steps)
+        payload["__completed_episodes__"] = np.asarray(self.completed_episodes)
+        payload["__truncated_episodes__"] = np.asarray(self.truncated_episodes)
+        payload["__training_contract__"] = np.asarray(json.dumps({"gamma": self.gamma, "replay_weight": self.replay_weight, "replay_batch": self.replay_batch, "terminal_gradient_steps": self.replay_steps, "historical_target": "observed_behavior_return", "actor_source": "own_fresh_behavior"}, sort_keys=True))
         payload[ARCH_KEY] = np.asarray(self.architecture)
         payload[ARCH_SPEC_KEY] = np.asarray(
-            json.dumps(architecture_spec(self.bundle), separators=(",", ":"))
+            json.dumps(architecture_spec(self.wally), separators=(",", ":"))
         )
         payload[RNG_KEY] = np.asarray(
             json.dumps(self.rng.bit_generator.state, separators=(",", ":"))
         )
         payload[POLICY_KEY] = np.asarray(self.policy_arm)
         payload[POLICY_VERSION_KEY] = np.asarray(POLICY_VERSIONS.get(self.policy_arm, POLICY_VERSIONS["linear"]))
-        payload[REWARD_CONTRACT_KEY] = np.asarray(SPARSE_REWARD_FINGERPRINT)
+        payload[REWARD_CONTRACT_KEY] = np.asarray(self.reward_fingerprint)
         if self.initial_checkpoint_sha256:
             payload[LINEAGE_INITIAL_KEY] = np.asarray(self.initial_checkpoint_sha256)
         payload.update(self.replay.export_payload())

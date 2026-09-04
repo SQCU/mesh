@@ -4,7 +4,6 @@ import mlx.core as mx
 
 TILE_EDGE = 16
 SIMD_WIDTH = 32
-INNER_TILE_EDGE = 16
 FRAGMENT_EDGE = 8
 MPP_OPERATION_ROWS = 16
 MPP_TILE_ROWS = 32
@@ -49,276 +48,43 @@ _KERNEL = mx.fast.metal_kernel(
     """,
 )
 
+_MPP_HEADER = """
+    #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+    template<int TileRows, int TileColumns, int Inner, bool TransposeLeft, bool TransposeRight>
+    inline void mesh_matrix_tile(
+        device const float *left, device const float *right, device float *output,
+        int rows, int columns, int first_row, int first_column
+    ) {
+        auto lhs = metal::tensor(const_cast<device float *>(left),
+            metal::dextents<int, 2>{TransposeLeft ? rows : Inner, TransposeLeft ? Inner : rows},
+            metal::array<int, 2>{1, TransposeLeft ? rows : Inner});
+        auto rhs = metal::tensor(const_cast<device float *>(right),
+            metal::dextents<int, 2>{TransposeRight ? Inner : columns, TransposeRight ? columns : Inner},
+            metal::array<int, 2>{1, TransposeRight ? Inner : columns});
+        auto result = metal::tensor(output, metal::dextents<int, 2>{columns, rows},
+            metal::array<int, 2>{1, columns});
+        constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
+            TileRows, TileColumns, static_cast<int>(metal::dynamic_extent), TransposeLeft, TransposeRight, true
+        );
+        mpp::tensor_ops::matmul2d<descriptor, metal::execution_simdgroup> operation;
+        auto a = lhs.slice(TransposeLeft ? first_row : 0, TransposeLeft ? 0 : first_row);
+        auto b = rhs.slice(TransposeRight ? 0 : first_column, TransposeRight ? first_column : 0);
+        auto c = result.slice(first_column, first_row);
+        operation.run(a, b, c);
+    }
+"""
+
 _MPP_KERNEL = mx.fast.metal_kernel(
     name="mesh_mpp_matrix_product",
     input_names=["lhs", "rhs"],
     output_names=["product"],
-    header="""
-        #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-    """,
+    header=_MPP_HEADER,
     source="""
-        uint lane = thread_index_in_simdgroup;
-        uint tile_column = threadgroup_position_in_grid.x * TILE_COLUMNS;
-        uint tile_row = threadgroup_position_in_grid.y * TILE_ROWS;
-        uint quad = lane >> 2;
-        uint fragment_row = ((quad & 4) | ((lane >> 1) & 3));
-        uint fragment_column = ((quad & 2) | (lane & 1)) * 4;
-        metal::vec<float, 8> accumulated_row0_column0(0.0f);
-        metal::vec<float, 8> accumulated_row0_column1(0.0f);
-        metal::vec<float, 8> accumulated_row1_column0(0.0f);
-        metal::vec<float, 8> accumulated_row1_column1(0.0f);
-        constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
-            OPERATION_ROWS,
-            TILE_COLUMNS,
-            INNER_TILE,
-            false,
-            false,
-            true,
-            mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate
+        mesh_matrix_tile<TILE_ROWS, TILE_COLUMNS, INNER, TRANSPOSE_LHS, TRANSPOSE_RHS>(
+            lhs, rhs, product, ROWS, COLUMNS,
+            threadgroup_position_in_grid.y * TILE_ROWS,
+            threadgroup_position_in_grid.x * TILE_COLUMNS
         );
-        mpp::tensor_ops::matmul2d<descriptor, metal::execution_simdgroup> operation;
-        auto cooperative_left = operation.template get_left_input_cooperative_tensor<float, float, float>();
-        auto cooperative_right = operation.template get_right_input_cooperative_tensor<float, float, float>();
-        auto cooperative_output = operation.template get_destination_cooperative_tensor<
-            metal::remove_addrspace_t<decltype(cooperative_left)>,
-            metal::remove_addrspace_t<decltype(cooperative_right)>,
-            float
-        >();
-        #pragma clang loop unroll(disable)
-        for (uint base = 0; base < INNER; base += INNER_TILE) {
-            metal::vec<float, 8> left_values;
-            metal::vec<float, 8> left_values_second;
-            metal::vec<float, 8> right_first;
-            metal::vec<float, 8> right_second;
-            #pragma clang loop unroll(full)
-            for (uint i = 0; i < 2; ++i) {
-                #pragma clang loop unroll(full)
-                for (uint j = 0; j < 4; ++j) {
-                    uint slot = i * 4 + j;
-                    uint left_row = tile_row + fragment_row + i * 8;
-                    uint left_row_second = left_row + OPERATION_ROWS;
-                    uint left_inner = base + fragment_column + j;
-                    uint left_index = TRANSPOSE_LHS
-                        ? left_inner * ROWS + left_row
-                        : left_row * INNER + left_inner;
-                    if constexpr (ALIGNED_ROWS && ALIGNED_INNER)
-                        left_values[slot] = float(lhs[left_index]);
-                    else
-                        left_values[slot] = left_row < ROWS && left_inner < INNER
-                            ? float(lhs[left_index])
-                            : 0.0f;
-                    uint left_index_second = TRANSPOSE_LHS
-                        ? left_inner * ROWS + left_row_second
-                        : left_row_second * INNER + left_inner;
-                    if constexpr (ALIGNED_ROWS && ALIGNED_INNER)
-                        left_values_second[slot] = float(lhs[left_index_second]);
-                    else
-                        left_values_second[slot] = left_row_second < ROWS && left_inner < INNER
-                            ? float(lhs[left_index_second])
-                            : 0.0f;
-                    uint right_inner = base + fragment_row + i * 8;
-                    uint right_column_first = tile_column + fragment_column + j;
-                    uint right_column_second = right_column_first + INNER_TILE;
-                    uint right_index_first = TRANSPOSE_RHS
-                        ? right_column_first * INNER + right_inner
-                        : right_inner * COLUMNS + right_column_first;
-                    uint right_index_second = TRANSPOSE_RHS
-                        ? right_column_second * INNER + right_inner
-                        : right_inner * COLUMNS + right_column_second;
-                    if constexpr (ALIGNED_INNER && ALIGNED_COLUMNS) {
-                        right_first[slot] = float(rhs[right_index_first]);
-                        right_second[slot] = float(rhs[right_index_second]);
-                    } else {
-                        right_first[slot] = right_inner < INNER && right_column_first < COLUMNS
-                            ? float(rhs[right_index_first])
-                            : 0.0f;
-                        right_second[slot] = right_inner < INNER && right_column_second < COLUMNS
-                            ? float(rhs[right_index_second])
-                            : 0.0f;
-                    }
-                }
-            }
-            #pragma clang loop unroll(full)
-            for (uint slot = 0; slot < 8; ++slot) {
-                cooperative_left[slot] = left_values[slot];
-                cooperative_right[slot] = right_first[slot];
-                cooperative_right[8 + slot] = right_second[slot];
-                cooperative_output[slot] = accumulated_row0_column0[slot];
-                cooperative_output[8 + slot] = accumulated_row0_column1[slot];
-            }
-            operation.run(cooperative_left, cooperative_right, cooperative_output);
-            #pragma clang loop unroll(full)
-            for (uint slot = 0; slot < 8; ++slot) {
-                accumulated_row0_column0[slot] = cooperative_output[slot];
-                accumulated_row0_column1[slot] = cooperative_output[8 + slot];
-                cooperative_left[slot] = left_values_second[slot];
-                cooperative_output[slot] = accumulated_row1_column0[slot];
-                cooperative_output[8 + slot] = accumulated_row1_column1[slot];
-            }
-            operation.run(cooperative_left, cooperative_right, cooperative_output);
-            #pragma clang loop unroll(full)
-            for (uint slot = 0; slot < 8; ++slot) {
-                accumulated_row1_column0[slot] = cooperative_output[slot];
-                accumulated_row1_column1[slot] = cooperative_output[8 + slot];
-            }
-        }
-        #pragma clang loop unroll(full)
-        for (uint i = 0; i < 2; ++i) {
-            #pragma clang loop unroll(full)
-            for (uint j = 0; j < 4; ++j) {
-                uint slot = i * 4 + j;
-                uint row = tile_row + fragment_row + i * 8;
-                uint row_second = row + OPERATION_ROWS;
-                uint column_first = tile_column + fragment_column + j;
-                uint column_second = column_first + INNER_TILE;
-                if constexpr (ALIGNED_ROWS && ALIGNED_COLUMNS) {
-                    product[row * COLUMNS + column_first] = accumulated_row0_column0[slot];
-                    product[row * COLUMNS + column_second] = accumulated_row0_column1[slot];
-                    product[row_second * COLUMNS + column_first] = accumulated_row1_column0[slot];
-                    product[row_second * COLUMNS + column_second] = accumulated_row1_column1[slot];
-                } else {
-                    if (row < ROWS && column_first < COLUMNS)
-                        product[row * COLUMNS + column_first] = accumulated_row0_column0[slot];
-                    if (row < ROWS && column_second < COLUMNS)
-                        product[row * COLUMNS + column_second] = accumulated_row0_column1[slot];
-                    if (row_second < ROWS && column_first < COLUMNS)
-                        product[row_second * COLUMNS + column_first] = accumulated_row1_column0[slot];
-                    if (row_second < ROWS && column_second < COLUMNS)
-                        product[row_second * COLUMNS + column_second] = accumulated_row1_column1[slot];
-                }
-            }
-        }
-    """,
-)
-
-_WIDE_MPP_KERNEL = mx.fast.metal_kernel(
-    name="mesh_wide_mpp_matrix_product",
-    input_names=["lhs", "rhs"],
-    output_names=["product"],
-    header="""
-        #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-    """,
-    source="""
-        uint lane = thread_index_in_simdgroup;
-        uint tile_column = threadgroup_position_in_grid.x * TILE_COLUMNS;
-        uint tile_row = threadgroup_position_in_grid.y * TILE_ROWS;
-        uint quad = lane >> 2;
-        uint fragment_row = ((quad & 4) | ((lane >> 1) & 3));
-        uint fragment_column = ((quad & 2) | (lane & 1)) * 4;
-        metal::vec<float, 8> accumulated_first[ROW_BLOCKS];
-        metal::vec<float, 8> accumulated_second[ROW_BLOCKS];
-        #pragma clang loop unroll(full)
-        for (uint row_block = 0; row_block < ROW_BLOCKS; ++row_block) {
-            accumulated_first[row_block] = metal::vec<float, 8>(0.0f);
-            accumulated_second[row_block] = metal::vec<float, 8>(0.0f);
-        }
-        constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
-            OPERATION_ROWS,
-            TILE_COLUMNS,
-            INNER_TILE,
-            false,
-            false,
-            true,
-            mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate
-        );
-        mpp::tensor_ops::matmul2d<descriptor, metal::execution_simdgroup> operation;
-        auto cooperative_left = operation.template get_left_input_cooperative_tensor<float, float, float>();
-        auto cooperative_right = operation.template get_right_input_cooperative_tensor<float, float, float>();
-        auto cooperative_output = operation.template get_destination_cooperative_tensor<
-            metal::remove_addrspace_t<decltype(cooperative_left)>,
-            metal::remove_addrspace_t<decltype(cooperative_right)>,
-            float
-        >();
-        #pragma clang loop unroll(disable)
-        for (uint base = 0; base < INNER; base += INNER_TILE) {
-            metal::vec<float, 8> right_first;
-            metal::vec<float, 8> right_second;
-            #pragma clang loop unroll(full)
-            for (uint i = 0; i < 2; ++i) {
-                #pragma clang loop unroll(full)
-                for (uint j = 0; j < 4; ++j) {
-                    uint slot = i * 4 + j;
-                    uint right_inner = base + fragment_row + i * 8;
-                    uint right_column_first = tile_column + fragment_column + j;
-                    uint right_column_second = right_column_first + INNER_TILE;
-                    uint right_index_first = TRANSPOSE_RHS
-                        ? right_column_first * INNER + right_inner
-                        : right_inner * COLUMNS + right_column_first;
-                    uint right_index_second = TRANSPOSE_RHS
-                        ? right_column_second * INNER + right_inner
-                        : right_inner * COLUMNS + right_column_second;
-                    if constexpr (ALIGNED_INNER && ALIGNED_COLUMNS) {
-                        right_first[slot] = float(rhs[right_index_first]);
-                        right_second[slot] = float(rhs[right_index_second]);
-                    } else {
-                        right_first[slot] = right_inner < INNER && right_column_first < COLUMNS
-                            ? float(rhs[right_index_first])
-                            : 0.0f;
-                        right_second[slot] = right_inner < INNER && right_column_second < COLUMNS
-                            ? float(rhs[right_index_second])
-                            : 0.0f;
-                    }
-                }
-            }
-            #pragma clang loop unroll(full)
-            for (uint row_block = 0; row_block < ROW_BLOCKS; ++row_block) {
-                metal::vec<float, 8> left_values;
-                #pragma clang loop unroll(full)
-                for (uint i = 0; i < 2; ++i) {
-                    #pragma clang loop unroll(full)
-                    for (uint j = 0; j < 4; ++j) {
-                        uint slot = i * 4 + j;
-                        uint left_row = tile_row + row_block * OPERATION_ROWS + fragment_row + i * 8;
-                        uint left_inner = base + fragment_column + j;
-                        uint left_index = TRANSPOSE_LHS
-                            ? left_inner * ROWS + left_row
-                            : left_row * INNER + left_inner;
-                        if constexpr (ALIGNED_ROWS && ALIGNED_INNER)
-                            left_values[slot] = float(lhs[left_index]);
-                        else
-                            left_values[slot] = left_row < ROWS && left_inner < INNER
-                                ? float(lhs[left_index])
-                                : 0.0f;
-                    }
-                }
-                #pragma clang loop unroll(full)
-                for (uint slot = 0; slot < 8; ++slot) {
-                    cooperative_left[slot] = left_values[slot];
-                    cooperative_right[slot] = right_first[slot];
-                    cooperative_right[8 + slot] = right_second[slot];
-                    cooperative_output[slot] = accumulated_first[row_block][slot];
-                    cooperative_output[8 + slot] = accumulated_second[row_block][slot];
-                }
-                operation.run(cooperative_left, cooperative_right, cooperative_output);
-                #pragma clang loop unroll(full)
-                for (uint slot = 0; slot < 8; ++slot) {
-                    accumulated_first[row_block][slot] = cooperative_output[slot];
-                    accumulated_second[row_block][slot] = cooperative_output[8 + slot];
-                }
-            }
-        }
-        #pragma clang loop unroll(full)
-        for (uint row_block = 0; row_block < ROW_BLOCKS; ++row_block) {
-            #pragma clang loop unroll(full)
-            for (uint i = 0; i < 2; ++i) {
-                #pragma clang loop unroll(full)
-                for (uint j = 0; j < 4; ++j) {
-                    uint slot = i * 4 + j;
-                    uint row = tile_row + row_block * OPERATION_ROWS + fragment_row + i * 8;
-                    uint column_first = tile_column + fragment_column + j;
-                    uint column_second = column_first + INNER_TILE;
-                    if constexpr (ALIGNED_ROWS && ALIGNED_COLUMNS) {
-                        product[row * COLUMNS + column_first] = accumulated_first[row_block][slot];
-                        product[row * COLUMNS + column_second] = accumulated_second[row_block][slot];
-                    } else {
-                        if (row < ROWS && column_first < COLUMNS)
-                            product[row * COLUMNS + column_first] = accumulated_first[row_block][slot];
-                        if (row < ROWS && column_second < COLUMNS)
-                            product[row * COLUMNS + column_second] = accumulated_second[row_block][slot];
-                    }
-                }
-            }
-        }
     """,
 )
 
@@ -326,9 +92,7 @@ _EXPERT_KERNEL = mx.fast.metal_kernel(
     name="mesh_expert_matrix_product",
     input_names=["rows", "weights", "experts"],
     output_names=["product"],
-    header="""
-        #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-    """,
+    header=_MPP_HEADER,
     source="""
         uint lane = thread_index_in_simdgroup;
         uint tile_column = threadgroup_position_in_grid.x * TILE_COLUMNS;
@@ -337,82 +101,10 @@ _EXPERT_KERNEL = mx.fast.metal_kernel(
         uint first_expert = uint(experts[tile_row]);
         uint following_expert = uint(experts[row_stop - 1]);
         if (first_expert == following_expert) {
-            uint quad = lane >> 2;
-            uint fragment_row = ((quad & 4) | ((lane >> 1) & 3));
-            uint fragment_column = ((quad & 2) | (lane & 1)) * 4;
-            metal::vec<float, 8> accumulated_first(0.0f);
-            metal::vec<float, 8> accumulated_second(0.0f);
-            constexpr auto descriptor = mpp::tensor_ops::matmul2d_descriptor(
-                TILE_ROWS,
-                TILE_COLUMNS,
-                INNER_TILE,
-                false,
-                false,
-                true,
-                mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate
+            mesh_matrix_tile<TILE_ROWS, TILE_COLUMNS, INNER, false, TRANSPOSE_WEIGHT>(
+                rows, weights + first_expert * INNER * COLUMNS, product,
+                ROWS, COLUMNS, tile_row, tile_column
             );
-            mpp::tensor_ops::matmul2d<descriptor, metal::execution_simdgroup> operation;
-            auto cooperative_left = operation.template get_left_input_cooperative_tensor<float, float, float>();
-            auto cooperative_right = operation.template get_right_input_cooperative_tensor<float, float, float>();
-            auto cooperative_output = operation.template get_destination_cooperative_tensor<
-                metal::remove_addrspace_t<decltype(cooperative_left)>,
-                metal::remove_addrspace_t<decltype(cooperative_right)>,
-                float
-            >();
-            for (uint base = 0; base < INNER; base += INNER_TILE) {
-                metal::vec<float, 8> left_values;
-                metal::vec<float, 8> right_first;
-                metal::vec<float, 8> right_second;
-                for (uint i = 0; i < 2; ++i) {
-                    for (uint j = 0; j < 4; ++j) {
-                        uint slot = i * 4 + j;
-                        uint row = tile_row + fragment_row + i * 8;
-                        uint left_inner = base + fragment_column + j;
-                        left_values[slot] = row < ROWS && left_inner < INNER
-                            ? float(rows[row * INNER + left_inner])
-                            : 0.0f;
-                        uint right_inner = base + fragment_row + i * 8;
-                        uint column_first = tile_column + fragment_column + j;
-                        uint column_second = column_first + INNER_TILE;
-                        uint index_first = TRANSPOSE_WEIGHT
-                            ? (first_expert * COLUMNS + column_first) * INNER + right_inner
-                            : (first_expert * INNER + right_inner) * COLUMNS + column_first;
-                        uint index_second = TRANSPOSE_WEIGHT
-                            ? (first_expert * COLUMNS + column_second) * INNER + right_inner
-                            : (first_expert * INNER + right_inner) * COLUMNS + column_second;
-                        right_first[slot] = right_inner < INNER && column_first < COLUMNS
-                            ? float(weights[index_first])
-                            : 0.0f;
-                        right_second[slot] = right_inner < INNER && column_second < COLUMNS
-                            ? float(weights[index_second])
-                            : 0.0f;
-                    }
-                }
-                for (uint slot = 0; slot < 8; ++slot) {
-                    cooperative_left[slot] = left_values[slot];
-                    cooperative_right[slot] = right_first[slot];
-                    cooperative_right[8 + slot] = right_second[slot];
-                    cooperative_output[slot] = accumulated_first[slot];
-                    cooperative_output[8 + slot] = accumulated_second[slot];
-                }
-                operation.run(cooperative_left, cooperative_right, cooperative_output);
-                for (uint slot = 0; slot < 8; ++slot) {
-                    accumulated_first[slot] = cooperative_output[slot];
-                    accumulated_second[slot] = cooperative_output[8 + slot];
-                }
-            }
-            for (uint i = 0; i < 2; ++i) {
-                for (uint j = 0; j < 4; ++j) {
-                    uint slot = i * 4 + j;
-                    uint row = tile_row + fragment_row + i * 8;
-                    uint column_first = tile_column + fragment_column + j;
-                    uint column_second = column_first + INNER_TILE;
-                    if (row < ROWS && column_first < COLUMNS)
-                        product[row * COLUMNS + column_first] = accumulated_first[slot];
-                    if (row < ROWS && column_second < COLUMNS)
-                        product[row * COLUMNS + column_second] = accumulated_second[slot];
-                }
-            }
         } else {
             uint column = tile_column + lane;
             if (column < COLUMNS) {
@@ -516,7 +208,7 @@ def _dispatch(lhs, rhs, transpose_lhs, transpose_rhs):
         ((rows + row_edge - 1) // row_edge) * row_edge,
         1,
     )
-    kernel = _WIDE_MPP_KERNEL if use_wide_mpp else _MPP_KERNEL if use_mpp else _KERNEL
+    kernel = _MPP_KERNEL if use_mpp else _KERNEL
     template = [
         ("ROWS", rows),
         ("INNER", inner),
@@ -528,14 +220,7 @@ def _dispatch(lhs, rhs, transpose_lhs, transpose_rhs):
         template.extend([
             ("TILE_ROWS", row_edge),
             ("TILE_COLUMNS", MPP_TILE_COLUMNS),
-            ("OPERATION_ROWS", MPP_OPERATION_ROWS),
-            ("INNER_TILE", INNER_TILE_EDGE),
-            ("ALIGNED_ROWS", rows % row_edge == 0),
-            ("ALIGNED_COLUMNS", columns % MPP_TILE_COLUMNS == 0),
-            ("ALIGNED_INNER", inner % INNER_TILE_EDGE == 0),
         ])
-        if use_wide_mpp:
-            template.append(("ROW_BLOCKS", MPP_WIDE_ROW_BLOCKS))
     else:
         template.append(("TILE", TILE_EDGE))
     return kernel(
@@ -591,6 +276,14 @@ def linear(layer, rows):
         product = product + layer.bias
     return product.reshape(*shape[:-1], product.shape[-1])
 
+def gram_context(rows, probe):
+    gram = matrix_multiply_transpose_left(rows, rows) / rows.shape[0]
+    context = matrix_multiply(mx.tanh(gram), probe[:, None])[:, 0]
+    statistics = mx.stop_gradient(mx.stack([
+        mx.min(gram), mx.max(gram), mx.sum(mx.isfinite(gram)).astype(gram.dtype),
+    ]))
+    return context, statistics
+
 def batched_matrix_vector(matrices, vectors):
     if matrices.shape[-1] != vectors.shape[-1]:
         raise ValueError(
@@ -628,7 +321,6 @@ def _expert_dispatch(rows, weights, experts, transpose_weight):
             ("COLUMNS", columns),
             ("TILE_ROWS", MPP_OPERATION_ROWS),
             ("TILE_COLUMNS", MPP_TILE_COLUMNS),
-            ("INNER_TILE", INNER_TILE_EDGE),
             ("TRANSPOSE_WEIGHT", bool(transpose_weight)),
         ],
         grid=grid,
@@ -677,6 +369,7 @@ __all__ = [
     "TILE_EDGE",
     "batched_matrix_vector",
     "expert_matrix_multiply",
+    "gram_context",
     "linear",
     "matrix_execution_schedule",
     "matrix_multiply",

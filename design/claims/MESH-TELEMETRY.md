@@ -11,7 +11,7 @@ Implementation surfaces:
   page-table visualization feed.
 - `rdma/workload.py` owns workload-independent operation envelopes and measures.
 - `xonotic/solver/strat/roofline.py` owns measured operating-point search.
-- `xonotic/solver/strat/expert_worker.py` and `strat_responder.py` own distributed-scale
+- `xonotic/solver/strat/matrix_worker.py` and `strat_responder.py` own distributed Gram
   placement and counterfactual measures.
 
 The claims are substantiated only when active aggregates have the same support as the
@@ -62,3 +62,12 @@ The Xonotic operating profile is indexed by the literal player, team, and cart c
 reported by the workload. Runtime bot changes trace a player-count slice at fixed team
 and cart coordinates. Match realization moves between those slices. Aggregation never
 merges observations whose three coordinates differ.
+
+Interactive observer polling requests the node's labelled scalar/array-length measure
+projection; the complete latest node record remains available without that query.
+Historical samples retain phase and workload envelopes, not repeated copies of large
+covariance objects. Namespaced updates merge into the current producer measure, and
+their delivery timestamp is distinct from the producer heartbeat. Objective-labelled
+learning, replay and outcome measures use this generic channel. The J measurement
+thread retains full numerical reports in per-responder/episode match artifacts.
+These retention and display domains are described in [`../joracle-viewer.md`](../joracle-viewer.md).

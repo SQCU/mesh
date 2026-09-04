@@ -1,9 +1,6 @@
-import errno, os, re, socket, struct, sys, time
+import errno, os, re, socket, struct, time
 
 import numpy as np
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "rdma"))
-from mesh import Mesh
 
 WIRE_DEFINITION = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "rdma", "xonwire.def")
 with open(WIRE_DEFINITION) as stream:
@@ -14,24 +11,16 @@ with open(WIRE_DEFINITION) as stream:
 MAGIC, VERSION = WIRE["MAGIC"], WIRE["VERSION"]
 OBSERVATION_KIND, CART_KIND = WIRE["OBSERVATION"], WIRE["CART"]
 EVENT_KIND, STRATEGY_KIND = WIRE["EVENT"], WIRE["STRATEGY"]
-EXPERT_REQ, EXPERT_RESP, EXPERT_META_KIND = WIRE["EXPERT_REQ"], WIRE["EXPERT_RESP"], WIRE["EXPERT_META"]
-EXPERT_TRAIN_REQ, EXPERT_GRAD_REQ = WIRE["EXPERT_TRAIN_REQ"], WIRE["EXPERT_GRAD_REQ"]
-EXPERT_GRAD_RESP, EXPERT_GRAD_META_KIND = WIRE["EXPERT_GRAD_RESP"], WIRE["EXPERT_GRAD_META"]
-EXPERT_BATCH_BEGIN = WIRE["EXPERT_BATCH_BEGIN"]
-EXPERT_BATCH_COMMIT, EXPERT_BATCH_RESP = WIRE["EXPERT_BATCH_COMMIT"], WIRE["EXPERT_BATCH_RESP"]
-EXPERT_META = dict(
+GRAM_REQ, GRAM_RESP, GRAM_META_KIND = WIRE["GRAM_REQ"], WIRE["GRAM_RESP"], WIRE["GRAM_META"]
+GRAM_GRAD_REQ, GRAM_GRAD_RESP = WIRE["GRAM_GRAD_REQ"], WIRE["GRAM_GRAD_RESP"]
+GRAM_META = dict(
     MATRIX_MIN=0, MATRIX_MAX=1, MATRIX_FINITE_MASS=2, ROWS=3, ELAPSED=4,
 )
-EXPERT_META_VALUE_WIDTH = max(EXPERT_META.values()) + 1
-EXPERT_GRAD_META = dict(ROWS=0, ELAPSED=1, GRADIENT_NORM=2, UPDATES=3)
-EXPERT_GRAD_META_WIDTH = max(EXPERT_GRAD_META.values()) + 1
+GRAM_META_WIDTH = max(GRAM_META.values()) + 1
 HDR = struct.Struct("<IHHQQIIIIII")
 HDRSZ = HDR.size
 assert HDRSZ == WIRE["HDRBYTES"]
 LOCAL_HDR = struct.Struct("<iII")
-
-def expert_meta_width(experts):
-    return EXPERT_META_VALUE_WIDTH + int(experts)
 
 def values_per_slot(usable):
     return (usable - HDRSZ) // 4

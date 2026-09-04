@@ -40,6 +40,20 @@ SPARSE_REWARD_FINGERPRINT = hashlib.sha256(
         SPARSE_REWARD_CONTRACT, sort_keys=True, separators=(",", ":")
     ).encode()
 ).hexdigest()[:16]
+TERMINAL_REWARD_CONTRACT = {
+    "source": "server_round_outcome",
+    "terminal_reward": "one_for_winning_team_zero_otherwise",
+    "otherwise": 0.0,
+    "role_changes_terminate": False,
+    "draw_reward": 0.0,
+    "truncation": "unlabelled",
+}
+
+def reward_contract(arm):
+    return TERMINAL_REWARD_CONTRACT if arm == "terminal_win" else SPARSE_REWARD_CONTRACT
+
+def reward_fingerprint(arm):
+    return hashlib.sha256(json.dumps(reward_contract(arm), sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 @dataclass(frozen=True)
 class GameContext:

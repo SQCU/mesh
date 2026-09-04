@@ -292,7 +292,6 @@ def arm_metrics(record, rows):
     for arm in sorted(set(players) | set(values) | set(causal) | {
         key[0] for key in spawn_events
     }):
-        n = len(players[arm])
         player_seconds = exposure[arm]
         rows_n = causal[arm]["rows"]
         applied_rows_n = causal[arm]["applied_source_rows"]
@@ -1348,6 +1347,9 @@ def fabric_space_measures(rows):
         ),
         "remote_output_row_fraction_measure": scalar_measure(
             node.get("remote_output_row_fraction") for _, _, _, node in nodes
+        ),
+        "remote_processed_row_fraction_measure": scalar_measure(
+            node.get("remote_processed_row_fraction") for _, _, _, node in nodes
         ),
         "producer_operation_scale_measure": atom_measure(
             {

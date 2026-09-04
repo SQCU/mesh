@@ -8,9 +8,8 @@ import mlx.nn as nn
 
 from .matmul import (
     expert_matrix_multiply,
+    gram_context,
     linear,
-    matrix_multiply,
-    matrix_multiply_transpose_left,
     matrix_multiply_transpose_right,
 )
 
@@ -19,7 +18,7 @@ __all__ = [
     "phil", "quinn", "kay", "val",
     "ir_query", "ir_value", "dina_state", "dina_action", "dina_readout", "dee",
     "team_gram_matrix", "rival_gram_matrix", "participant_gram_matrix",
-    "scale_project", "scale_route", "scale_moe", "scale_back", "scale_probe", "scale_fuse",
+    "scale_route", "scale_moe", "scale_fuse",
     "gia_uma_dov", "actuator",
     "winnie", "lou", "vera_winnie", "vera_lou",
     "dina_drift", "dina_matrix",
@@ -147,15 +146,12 @@ def participant_gram_matrix(wally: Wally, rows: mx.array, team_ids: mx.array) ->
     return rival_gram_matrix(wally, rows) + same_team * team_gram_matrix(wally, rows)
 
 def gia_uma_dov(wally: Wally, ir: mx.array) -> mx.array:
-    normed = ir * mx.rsqrt(mx.mean(ir * ir, axis=-1, keepdims=True) + 1e-6)
+    normed = norm(ir)
     gated = nn.silu(linear(wally.gia, normed)) * linear(wally.uma, normed)
     return linear(wally.dov, gated)[..., 0]
 
 def actuator(wally: Wally, ir: mx.array) -> mx.array:
     return linear(wally.actuator, ir)
-
-def scale_project(wally: Wally, rows: mx.array) -> mx.array:
-    return linear(wally.scale_in, rows)
 
 def scale_route(wally: Wally, rows: mx.array) -> tuple[mx.array, mx.array]:
     scores = linear(wally.scale_router, rows)
@@ -176,38 +172,21 @@ def scale_moe(wally: Wally, rows: mx.array, experts: mx.array, gates: mx.array) 
     weights = mx.take(gates.reshape(-1), order)
     return mx.zeros_like(rows).at[tokens].add(values * weights[:, None])
 
-def scale_back(wally: Wally, rows: mx.array) -> mx.array:
-    return linear(wally.scale_out, rows)
-
-def scale_probe(wally: Wally) -> mx.array:
-    return wally.scale_probe
-
 def scale_fuse(wally: Wally, ir: mx.array, execute_remote=True,
                residual_fusion_scale=None) -> tuple[mx.array, mx.array, mx.array]:
     residual_fusion_scale = float(
         getattr(wally, "residual_fusion_scale", 1.0)
         if residual_fusion_scale is None else residual_fusion_scale
     )
-    executor = getattr(wally, "scale_executor", None) if execute_remote else None
-    if executor is not None:
-        remote = executor(ir, residual_fusion_scale)
-        if remote is not None:
-            return remote[0] * residual_fusion_scale, remote[1], remote[2]
+    executor = getattr(wally, "gram_executor", gram_context) if execute_remote else gram_context
     shape = ir.shape
     flat = ir.reshape(-1, wally.w.d_ir)
-    physical = int(flat.shape[0])
-    rows = norm(scale_project(wally, flat))
+    rows = norm(linear(wally.scale_in, flat))
     experts, gates = scale_route(wally, rows)
     residual = norm(rows + scale_moe(wally, rows, experts, gates))
-    gram = matrix_multiply_transpose_left(residual, residual) / physical
-    context = matrix_multiply(mx.tanh(gram), scale_probe(wally)[:, None])[:, 0]
-    delta = scale_back(wally, norm(residual * context[None, :])).reshape(shape)
+    context, stats = executor(residual, wally.scale_probe)
+    delta = linear(wally.scale_out, norm(residual * context[None, :])).reshape(shape)
     delta = delta * residual_fusion_scale
-    stats = mx.stack([
-        mx.min(gram),
-        mx.max(gram),
-        mx.sum(mx.isfinite(gram)).astype(gram.dtype),
-    ])
     load = mx.zeros((wally.w.scale_experts,), dtype=ir.dtype).at[
         experts.reshape(-1)
     ].add(mx.ones(experts.shape, dtype=ir.dtype).reshape(-1))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 
@@ -1180,7 +1182,8 @@ class LiteralJWindow:
         }
 
 class LiteralJReporter:
-    def __init__(self, max_rows=4000, interval=20.0):
+    def __init__(self, max_rows=4000, interval=20.0, artifact_path=None):
+        self.artifact_path = artifact_path
         self.max_rows = max(1, int(max_rows))
         self.interval = max(0.1, float(interval))
         self.lock = threading.Lock()
@@ -1304,6 +1307,11 @@ class LiteralJReporter:
                     if generation == self.generation:
                         self.report = report
                         self.revision += 1
+                if frames and self.artifact_path:
+                    path = f"{self.artifact_path}.{generation}.json"
+                    with open(path + ".new", "w") as handle:
+                        json.dump({"sampled_at": time.time(), "generation": generation, **report}, handle, separators=(",", ":"))
+                    os.replace(path + ".new", path)
             except Exception as error:
                 with self.lock:
                     self.errors += 1

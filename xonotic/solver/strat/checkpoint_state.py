@@ -8,7 +8,7 @@ import mlx.core as mx
 import numpy as np
 from mlx.utils import tree_flatten, tree_unflatten
 
-from .policy_contract import PARAMETERIZED_ARMS
+from .policy_contract import PARAMETERIZED_ARMS, is_matrix_fusion_arm
 
 ARCH_KEY = "__arch__"
 ARCH_SPEC_KEY = "__arch_spec__"
@@ -17,7 +17,7 @@ POLICY_KEY = "__policy_arm__"
 POLICY_VERSION_KEY = "__policy_version__"
 REWARD_CONTRACT_KEY = "__reward_contract__"
 LINEAGE_INITIAL_KEY = "__initial_checkpoint_sha256__"
-POLICY_VERSIONS = {arm: 10 for arm in PARAMETERIZED_ARMS}
+POLICY_VERSIONS = {arm: 12 if is_matrix_fusion_arm(arm) else 10 for arm in PARAMETERIZED_ARMS}
 ARCHITECTURE_VERSION = 5
 
 def architecture_spec(module):
@@ -40,7 +40,7 @@ def _attach(module, measurement):
 
 def tensor_tree_measurement(live_items, source_items):
     live = dict(live_items)
-    source = {name: np.asarray(value).copy() for name, value in source_items}
+    source = {name: np.asarray(value) for name, value in source_items}
     source_names = set(source)
     live_names = set(live)
     shared = source_names & live_names
@@ -67,7 +67,7 @@ def tensor_tree_measurement(live_items, source_items):
 
 def whole_tensor_tree(live_items, source_items):
     live = dict(live_items)
-    source = {name: np.asarray(value).copy() for name, value in source_items}
+    source = {name: np.asarray(value) for name, value in source_items}
     measurement = tensor_tree_measurement(live.items(), source.items())
     if not measurement["whole_tree_name_mass"]:
         raise ValueError("checkpoint tensor names differ from the live tensor tree")
@@ -106,7 +106,7 @@ def load_module_checkpoint(module, path, live_arm, live_reward_contract):
         return _attach(module, measurement)
     with np.load(path, allow_pickle=False) as saved:
         source = {
-            name: np.asarray(saved[name]).copy()
+            name: np.asarray(saved[name])
             for name in saved.files if not name.startswith("__")
         }
         tree_measurement = tensor_tree_measurement(live.items(), source.items())
@@ -123,14 +123,11 @@ def load_module_checkpoint(module, path, live_arm, live_reward_contract):
             "source_reward_contract": _scalar(saved, REWARD_CONTRACT_KEY),
             "lineage_initial_sha256": _scalar(saved, LINEAGE_INITIAL_KEY),
         })
-    tree_measurement = tensor_tree_measurement(live.items(), source.items())
     measurement["composable_weight_mass"] = tree_measurement["composable_mass"]
     before = [(name, value) for name, value in live.items()]
     try:
-        whole_tensor_tree(live.items(), source.items())
-        module.load_weights(
-            [(name, mx.array(value)) for name, value in source.items()], strict=True,
-        )
+        parameters, _ = whole_tensor_tree(live.items(), source.items())
+        module.load_weights(tree_flatten(parameters), strict=True)
         measurement["loaded_weight_mass"] = tree_measurement["source_mass"]
     except Exception as error:
         module.load_weights(before, strict=True)

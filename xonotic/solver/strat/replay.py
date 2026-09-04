@@ -22,6 +22,8 @@ class Replay:
         self._bytes = 0
         self._serial = 0
         self._frame_serial = 0
+        self.rng = np.random.default_rng(0)
+        self.evictions = 0
 
     def intern(self, chorus) -> Frame:
         n = sum(int(np.asarray(a).nbytes) for a in chorus)
@@ -65,7 +67,12 @@ class Replay:
             (self.capacity and len(self._items) > self.capacity)
             or self._bytes > self.max_bytes
         ):
-            self._items.pop(0)
+            groups = {}
+            for index, item in enumerate(self._items):
+                groups.setdefault(item.get("configuration", "legacy"), []).append(index)
+            group = max(groups.values(), key=len)
+            self._items.pop(int(self.rng.choice(group)))
+            self.evictions += 1
             self._recount()
 
     def materialize(self, item: dict) -> dict:
@@ -77,11 +84,30 @@ class Replay:
     def sample(self, batch: int, rng: np.random.Generator) -> list[dict]:
         if not self._items:
             return []
-        picks = rng.integers(0, len(self._items), size=min(batch, len(self._items)))
+        groups = {}
+        for item in self._items:
+            groups.setdefault(item.get("configuration", "legacy"), {}).setdefault(item.get("match_id", "legacy"), []).append(item)
         out = []
-        for p in picks:
-            out.append(dict(self._items[int(p)]))
+        configurations = list(groups.values())
+        for _ in range(min(batch, len(self._items))):
+            matches = list(configurations[int(rng.integers(len(configurations)))].values())
+            states = matches[int(rng.integers(len(matches)))]
+            out.append(dict(states[int(rng.integers(len(states)))]))
         return out
+
+    def retain(self, items, fraction=0.05):
+        items = list(items)
+        count = min(len(items), max(1, round((self.capacity or 1024) * fraction)))
+        for index in self.rng.choice(len(items), size=count, replace=False):
+            self.push(items[int(index)])
+        return count
+
+    def items(self):
+        return tuple(self._items)
+
+    def clear(self):
+        self._items.clear()
+        self._recount()
 
     def mean_age(self, items) -> float:
         return float(np.mean([self._serial - int(item["_serial"]) for item in items]))
@@ -98,6 +124,8 @@ class Replay:
             "frame_serial": self._frame_serial,
             "frames": [],
             "items": [],
+            "rng": self.rng.bit_generator.state,
+            "evictions": self.evictions,
         }
         for index, frame in enumerate(frames):
             keys = []
@@ -146,6 +174,8 @@ class Replay:
             self._items.append(item)
         self._serial = int(metadata["serial"])
         self._frame_serial = int(metadata["frame_serial"])
+        self.rng.bit_generator.state = metadata.get("rng", self.rng.bit_generator.state)
+        self.evictions = int(metadata.get("evictions", 0))
         self._evict()
         return True
 
@@ -153,6 +183,9 @@ class Replay:
         return {
             "bytes_per_transition": round(self._bytes / max(1, len(self._items)), 3),
             "frames": len(self._frames()),
+            "configurations": len({item.get("configuration", "legacy") for item in self._items}),
+            "matches": len({item.get("match_id", "legacy") for item in self._items}),
+            "evictions": self.evictions,
         }
 
     def __len__(self) -> int:
