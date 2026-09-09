@@ -20,6 +20,13 @@ size_t mesh_pages_header(const mesh_pages *p);
 size_t mesh_pages_payload(const mesh_pages *p);
 const uint32_t *mesh_pages_entries(const mesh_pages *p, uint32_t slot);
 const uint64_t *mesh_pages_stamps(const mesh_pages *p, uint32_t slot);
+static inline uint64_t mesh_pages_stamp(const uint64_t *stamps, uint32_t page){ return __atomic_load_n(stamps+page,__ATOMIC_ACQUIRE); }
+static inline uint32_t mesh_pages_entry(const uint32_t *entries, uint32_t page){ return __atomic_load_n(entries+page,__ATOMIC_ACQUIRE); }
+static inline void mesh_pages_store(uint64_t *word, uint64_t value){ __atomic_store_n(word,value,__ATOMIC_RELEASE); }
+static inline uint64_t mesh_pages_load(const uint64_t *word){ return __atomic_load_n(word,__ATOMIC_ACQUIRE); }
+void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
+size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count,
+  uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
 uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation);
 uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot);
 
