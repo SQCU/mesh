@@ -266,7 +266,7 @@ int main(int argc,char**argv){
     links[i].probe_page=UINT32_MAX;
     snprintf(ports[i].device,sizeof ports[i].device,"%s",links[i].device?links[i].device:"automatic");
     ports[i].peer=(uint16_t)links[i].peer_node;
-    int error=pthread_create(&links[i].thread,NULL,bridge_link_worker,&links[i]);
+    int error=pthread_create(&links[i].thread,NULL,link_worker_for(&links[i]),&links[i]);
     if(error){ errno=error; perror("link worker"); atomic_store(&links[i].stopped,1); stop=1; }
   }
   fprintf(stderr,"%s %.2f GB = %.1f%% of node, pool %d, links %d\n",name,span/1e9,100.0*span/(double)ram,pool,link_count);

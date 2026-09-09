@@ -1,5 +1,10 @@
 #ifndef MESH_LINKS_H
 #define MESH_LINKS_H
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <sys/sysctl.h>
 #define LINK_QUEUE 16384
 #define LINK_LIMIT 16
 enum { L_RECV=1, L_SEND, L_UP, L_RETIRED, L_FAULT, L_READY };
@@ -105,7 +110,74 @@ static void *link_worker(void *argument){
   flight_heartbeat(MESH_STOPPED); atomic_store(&link->phase,MESH_STOPPED); atomic_store(&link->stopped,1);
   return NULL;
 }
+static int udp_socket(const char *local,const char *peer){
+  char host[256]; const char *colon=strrchr(local,':'); if(!colon) return -1;
+  snprintf(host,sizeof host,"%.*s",(int)(colon-local),local);
+  struct addrinfo hint={.ai_socktype=SOCK_DGRAM,.ai_family=AF_UNSPEC,.ai_flags=AI_PASSIVE},*mine,*theirs;
+  if(getaddrinfo(host,colon+1,&hint,&mine)) return -1;
+  int sock=socket(mine->ai_family,SOCK_DGRAM,0);
+  uint64_t cap=8<<20; size_t length=sizeof cap; sysctlbyname("kern.ipc.maxsockbuf",&cap,&length,NULL,0);
+  int bytes=(int)(cap-cap/16); setsockopt(sock,SOL_SOCKET,SO_RCVBUF,&bytes,sizeof bytes); setsockopt(sock,SOL_SOCKET,SO_SNDBUF,&bytes,sizeof bytes);
+  int bound=sock>=0 && !bind(sock,mine->ai_addr,mine->ai_addrlen); freeaddrinfo(mine);
+  colon=strrchr(peer,':'); if(!bound || !colon){ if(sock>=0) close(sock); return -1; }
+  snprintf(host,sizeof host,"%.*s",(int)(colon-peer),peer); hint.ai_flags=0;
+  if(getaddrinfo(host,colon+1,&hint,&theirs)){ close(sock); return -1; }
+  int connected=!connect(sock,theirs->ai_addr,theirs->ai_addrlen); freeaddrinfo(theirs);
+  if(!connected){ close(sock); return -1; }
+  fcntl(sock,F_SETFL,O_NONBLOCK); return sock;
+}
+static void *udp_link_worker(void *argument){
+  struct mesh_link *link=argument;
+  char label[128]; snprintf(label,sizeof label,"%s-udp",link->name);
+  flight_open(label,link->node,link->span);
+  uint32_t *posted=malloc(LINK_QUEUE*sizeof *posted); uint64_t phead=0,ptail=0,generation=0;
+  while(!stop){
+    atomic_store(&link->heartbeat,flight_time()); atomic_store(&link->phase,MESH_PAIRING);
+    int sock=udp_socket(link->local,link->peer);
+    if(sock<0){ usleep(100000); continue; }
+    generation++; atomic_store(&link->phase,MESH_PAIRED);
+    link_emit(link,(struct link_event){.kind=L_UP,.generation=generation});
+    double awake_until=0; int alive=1;
+    while(alive && !stop && !atomic_load(&link->reset)){
+      atomic_store(&link->heartbeat,flight_time());
+      uint64_t backlog=atomic_load(&link->completion.cursor.head)-atomic_load(&link->completion.cursor.tail);
+      if(backlog>LINK_QUEUE-128){ usleep(IDLE_POLL_US); continue; }
+      int activity=0; struct link_event command;
+      for(int budget=0;alive && budget<64 && !link_pop(&link->command,&command);budget++){
+        if(command.generation!=generation) continue;
+        activity=1;
+        if(command.kind==L_RECV){ posted[phead++%LINK_QUEUE]=command.page; continue; }
+        const char *data=link->memory+(size_t)command.page*4096; ssize_t n; int tries=0;
+        while((n=send(sock,data,command.bytes,0))<0 && (errno==ENOBUFS||errno==EAGAIN) && tries++<2000) usleep(50);
+        if(n<0 && errno!=ENOBUFS && errno!=EAGAIN && errno!=ECONNREFUSED && errno!=EHOSTUNREACH){
+          alive=0; link_emit(link,(struct link_event){.kind=L_FAULT,.error=(uint32_t)errno,.generation=generation}); break; }
+        link_emit(link,(struct link_event){.kind=L_SEND,.page=command.page,.bytes=command.bytes,.generation=generation});
+      }
+      for(int budget=0;alive && budget<4096 && phead!=ptail;budget++){
+        uint32_t page=posted[ptail%LINK_QUEUE];
+        ssize_t n=recv(sock,link->memory+(size_t)page*4096,4096,0);
+        if(n<0){
+          if(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR||errno==ECONNREFUSED) break;
+          alive=0; link_emit(link,(struct link_event){.kind=L_FAULT,.error=(uint32_t)errno,.generation=generation}); break; }
+        ptail++; activity=1;
+        link_emit(link,(struct link_event){.kind=L_RECV,.page=page,.bytes=(uint32_t)n,.generation=generation});
+      }
+      idle_poll(activity,&awake_until);
+    }
+    close(sock);
+    atomic_store(&link->phase,stop?MESH_STOPPING:MESH_RETIRING); atomic_store(&link->reset,0);
+    struct link_event discarded; while(!link_pop(&link->command,&discarded)){}
+    phead=ptail=0;
+    link_emit(link,(struct link_event){.kind=L_RETIRED,.generation=generation});
+  }
+  free(posted);
+  atomic_store(&link->phase,MESH_STOPPED); atomic_store(&link->stopped,1);
+  return NULL;
+}
 static void *(*bridge_link_worker)(void *)=link_worker;
+static void *(*link_worker_for(const struct mesh_link *link))(void *){
+  return link->device && !strcmp(link->device,"udp")?udp_link_worker:bridge_link_worker;
+}
 struct mesh_route { uint16_t mask,first; };
 static int route_link(const struct mesh_link *links,int count,const struct mesh_route *routes,uint16_t target,int incoming){
   struct mesh_route route=routes[target];

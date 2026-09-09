@@ -770,3 +770,17 @@ The bridge marks delivered pages in a bitmap and, on the once-a-second census ti
 them if the client is gone. The historical capped-pool measurement observed `held=4055` at
 the moment of death and `held=0` with `244140/244140` pages one tick later. Current pool mass
 is derived from the configured region rather than capped at that historical value.
+
+## Loopback simulation without a second machine
+
+`mesh-flow` links are verbs by default. A link descriptor whose device is `udp`
+— `--link udp,<peer-node>,<local host:port>,<peer host:port>` — runs the same
+command and completion rings over a connected UDP socket instead, so two bridges
+on one machine exchange pages over `lo0`. `bin/mesh-loopback.sh start|stop|status`
+runs a pair as `/loop0` (node 0) and `/loop1` (node 1); a client attaches with
+`MESH_NAME=/loop0` or `/loop1`. Datagrams are dropped when the kernel socket
+buffer (`kern.ipc.maxsockbuf`, 8 MB by default) overflows under a page burst, and
+the bridge never retransmits: a family whose exchange lost a page stops
+concluding, the others continue, and the consumer's clock ends the run with a
+failure value. That is the transport's contract stated by the simulation, not a
+defect of it; Thunderbolt RDMA makes such loss rare, `lo0` at 8 MB does not.

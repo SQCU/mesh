@@ -203,7 +203,7 @@ int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, s
       int listed=0; for(uint8_t d=0;d<out->spec.depends;d++) listed|=out->spec.dependency[d]==x->input[i];
       if(!listed) goto invalid;
     }
-    list[r].spec=*x; list[r].groups=pages/x->group; list[r].generation=1;
+    list[r].spec=*x; list[r].groups=pages/x->group;
     list[r].consumed=zeroed(list[r].groups*sizeof *list[r].consumed); list[r].indices=zeroed(list[r].groups*sizeof *list[r].indices);
     if(!list[r].consumed || !list[r].indices){ for(size_t q=0;q<=r;q++){ free(list[q].consumed); free(list[q].indices); } free(list); return ENOMEM; }
   }
@@ -463,8 +463,9 @@ int mesh_pages_progress(mesh_pages *p){
 }
 static void reduce_step(mesh_pages *p, struct reduce *r){
   const struct mesh_pages_reduce *x=&r->spec;
+  if(!r->generation) r->generation=atomic_load_explicit(&p->slots[x->input[0]].highest,memory_order_acquire);
   uint64_t g=r->generation;
-  if(atomic_load_explicit(&p->slots[x->output].producible,memory_order_acquire)<g) return;
+  if(!g || atomic_load_explicit(&p->slots[x->output].producible,memory_order_acquire)<g) return;
   size_t selected=mesh_pages_select(p,x->input,x->inputs,x->group,g,r->consumed,r->indices);
   if(!selected) return;
   size_t elements=x->bytes/2, factor=x->kind==MESH_REDUCE_PARTIAL?2:1;
@@ -490,7 +491,7 @@ static void reduce_step(mesh_pages *p, struct reduce *r){
     mesh_pages_publish(p,x->output,group*x->group*(uint32_t)factor,x->group*(uint32_t)factor,g);
   }
   r->done+=(uint32_t)selected;
-  if(r->done==r->groups){ r->done=0; r->generation++; }
+  if(r->done==r->groups){ r->done=0; r->generation+=p->versions; }
 }
 static void *run(void *argument){
   mesh_pages *p=argument;
@@ -532,7 +533,7 @@ int mesh_pages_recover(mesh_pages *p){
     memset(s->uses,0,s->spec.pages);
     for(size_t i=0;i<DIGESTS;i++){ struct digest *d=&s->digest[i]; d->pending=0; d->count=0; atomic_store(&d->hash,0); atomic_store(&d->generation,0); }
   }
-  for(size_t r=0;r<p->reduce_count;r++){ struct reduce *x=&p->reduces[r]; x->generation=1; x->done=0; memset(x->consumed,0,x->groups*sizeof *x->consumed); }
+  for(size_t r=0;r<p->reduce_count;r++){ struct reduce *x=&p->reduces[r]; x->generation=0; x->done=0; memset(x->consumed,0,x->groups*sizeof *x->consumed); }
   flush_later(p);
   p->flying=0; p->incarnation++;
   atomic_store_explicit(&p->status,0,memory_order_release);
