@@ -133,6 +133,19 @@ wait is the task's, on its input channels, yielding between polls; the GPU
 receives only runnable work. Pre-issuing a pass as a chain of event-gated
 buffers is not admissible on this platform, whatever its data-flow appeal.
 
+## What the runtime owns
+
+Every received row carries a count of its dependents and is released at zero.
+A released page is zeroed on the runtime thread before it returns to the
+bridge. The digest is the runtime's: received rows are hashed when released
+(after consumption), sent rows when acknowledged (after transmission), the sent
+hash travels in one control frame per (sid, generation), the receiver compares,
+and a mismatch sets the status word. A reduce is a runtime node
+(`mesh_pages_reduces`): a materialized reduce sums its input slots row by row
+as their pages land, in FP32, into an FP16 page-wise output slot; a partial
+reduce publishes the FP32 sums as page pairs for a further reduce. Callers bind
+functions to page views and publish; they do not hash, compare, or reduce.
+
 ## Failure of a participant
 
 A participant may vanish at any moment. Rendezvous happens once per
