@@ -75,9 +75,17 @@ not attribute seconds of end-to-end time to RDMA.
 
 ## Remaining replacement
 
-The caller still contains Job/stage control, parity-based storage lifetimes,
-embedding/head completion words, digest gates and foreign dense operands.
-Their removal requires explicit value rows and canonical lifetime mappings;
-these citations provide no exemption. Do not mark transport and asynchronous
+The caller's Job/stage control, consumed masks and embedding/head completion
+words have been removed in committed revisions of metal-microbench. Distinct
+configured functions now have distinct value rows and share the NFE stamp.
+Native FFN input, MPS FFN intermediates, MPS attention input and vocabulary
+input/output now address sendable payloads. This is not all operand storage:
+attention intermediates, other backend inputs and weights still require work.
+
+Physical local-page recycling, complete read-lifetime proofs, accumulator/index
+page reduction, independent admission without digest gates, and link-error
+recovery/repetition remain unfinished. The runtime still allocates each local
+slot separately for the entire program. These citations provide no exemption.
+Do not mark transport and asynchronous
 map/reduce complete until both flows use that representation and actual RDMA
 measurements establish correctness and performance on the supported workloads.

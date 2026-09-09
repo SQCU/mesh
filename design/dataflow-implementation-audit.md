@@ -366,3 +366,32 @@ page table, including callbacks already issued before a link error.
 The remaining dense Metal intermediates, embedding/head words, job and stage
 state, and consumed masks are still divergences. This change supplies no
 exception for them and does not finish the caller rewrite.
+
+### Current source disposition, September 9
+
+The spec's data flow requires numerical operands in literal sendable pages, and
+its execution flow requires firing and reuse to follow those pages' presence
+and completed numerical reads. Papadopoulos and Culler's operand-store work,
+Rabenseifner and Patarasuk–Yuan's collective algorithms, and Saltzer–Reed–Clark's
+endpoint argument supply the mechanisms and limits documented in
+[algorithm-sources.md](algorithm-sources.md), without making this implementation
+compliant by citation. Metal-microbench has now deleted Job/stage advancement,
+consumed masks, prediction tasks and embedding/head completion words, but its
+dense remaining operands, materialized FP16 reduction and unrecycled local
+storage still violate the required data flow. Caller `c1ab3cb` corrects received
+partial lifetime edges to the preceding numerical function and uses complete
+output spans as consumption evidence, while the first-function edge still
+relies on the unresolved endpoint-admission dependency. Continue by proving
+each numerical input/output and read lifetime against actual source, removing
+the corresponding divergent storage or control, and validating committed main
+on RDMA before making a matched performance claim.
+
+The operational record is
+`metal-microbench/docs/data/dataflow_lifetime_edges_rdma_2026-09-09.json`:
+two-layer logits match the previous revision byte for byte, and standalone FFN
+errors are unchanged. It does not validate the full graph or establish reduced
+transport latency. The physical allocator still sums every local slot's pages
+in `mesh_pages_compile`; `release_dependencies` retires received inputs only.
+The caller's `stamped` helper still checks generation without checking whether
+the entry remains present. Those are concrete remaining lifetime obligations,
+not permission to add a scheduler or duplicate the operands.
