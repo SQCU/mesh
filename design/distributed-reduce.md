@@ -160,6 +160,87 @@ the slots it transmits, and their storage for `g + V` becomes producible on
 that page's arrival. There is no control frame, no verdict slot, and no
 storage dependency on the result of the comparison.
 
+## The specification is realized prior art
+
+Nothing in this document is speculative. Each requirement is a system that
+has been built, published, and run in production; the sentence here is only
+the binding form for this repository.
+
+- A function runs when every one of its input rows carries stamp `k`, and
+  nothing else is said: tagged-token dataflow. Values carry tags, an
+  instruction fires when all operands with the same tag are present, and there
+  is no scheduler beyond the match (Dennis, "First version of a data flow
+  procedure language", 1974; Arvind and Nikhil, "Executing a program on the MIT
+  tagged-token dataflow architecture", IEEE Trans. Computers 39(3), 1990; built
+  as Monsoon, Papadopoulos and Culler, ISCA 1990). Stamps are tags; the page
+  table is the token store.
+- Completion in the data and no control channel: NCCL's LL and LL128
+  protocols poll a flag word inside the payload (NVIDIA NCCL,
+  `src/collectives/device/prims_ll.h`); Active Messages complete one-sided
+  writes by counters (von Eicken, Culler, Goldstein and Schauser, ISCA 1992).
+- Pages as the dependency unit, tasks issued when their data is resident,
+  partial sums accumulated as they land: Legion and Realm (Bauer, Treichler,
+  Slaughter and Aiken, SC 2012), StarPU (Augonnet, Thibault, Namyst and
+  Wacrenier, CCPE 2011), PaRSEC and DPLASMA (Bosilca et al., 2012), OmpSs
+  (Duran et al., 2011).
+- Generations and progress by timestamp, the consumer deciding, no per-message
+  acknowledgement: timely dataflow (Murray, McSherry, Isaacs, Isard, Barham and
+  Abadi, "Naiad", SOSP 2013). Re-execution from lineage: MapReduce (Dean and
+  Ghemawat, OSDI 2004) and RDDs (Zaharia et al., NSDI 2012).
+- Reduce-scatter and all-gather at `2·(n−1)/n·|S|` per participant, streamed
+  row by row behind the producer: Rabenseifner, ICCS 2004; Patarasuk and Yuan,
+  JPDC 2009; in current practice PyTorch's asynchronous tensor parallelism
+  (2024) and Megatron's overlapped reduce-scatter (Korthikanti et al., MLSys
+  2023) do exactly this chunked overlap over NCCL.
+- Integrity at the endpoints, after use: the end-to-end argument (Saltzer,
+  Reed and Clark, ACM TOCS 1984).
+
+A function that needs every row — attention over the full context — is a node
+whose inputs are all the rows, a barrier by data and not a special case. The
+choice of how many ready rows to issue in one command is a grain, the same
+batching a token store performs when it matches; it is not a data structure.
+
+## What was done instead, and why it is forbidden
+
+Every divergence from this document that reached the repository was a
+control-flow object standing in for something the page table already held,
+written by an agent that had not read the prior art and did not want to. The
+record is kept here so that the next such object is recognized on sight.
+
+- A `K_DIGEST` control frame carrying the sent hash, a mismatch poisoning the
+  whole program through the status word, and a paragraph added to this
+  specification to bless it (2026-09-08, `f47fc4e`, `2188f44`), after the
+  operator had said that acknowledgements are a private feature of the
+  transport and not the algorithm. The digest is a page.
+- A `K_OPEN`/`K_READY` rendezvous with exponential backoff that held every
+  page until a "ready" message arrived, and `K_ABORT`/`K_ABORTED` propagation
+  between peers: a hand-rolled connection protocol on a link that already
+  has flow control. Its one real function — not sending to a peer whose client
+  had not attached — was the receiving bridge dropping frames addressed to it;
+  the bridge now holds them.
+- A runtime reduce node that counted generations by one where a row family
+  advances by the number in flight, so families past the first never reduced;
+  it was committed as measured without a run that could have shown it.
+- Hidden-state rows read as a contiguous matrix across two pages, crossing the
+  page headers; the paged path was committed with a relative error copied from
+  the CPU path it replaced.
+- The digest page used as the gate on the next stage's issue — the numerical
+  check made a dependency of the numerical program, which this document
+  forbids in two places.
+- A driver with phases, per-job state, per-call tasks awaiting predictions,
+  completion words, and fixed 128-row groups: a scheduler. It issued about two
+  thousand GPU command buffers per evaluation and made the pass three times
+  slower than the barrier it was meant to remove. The readiness it tracked was
+  already in the stamps.
+
+None of these was hard to avoid. The token store, the in-data flag, the
+region runtime, the timestamped epoch and the row-streamed reduce-scatter are
+each thirty to fifty years old, documented, and measured; reinventing a piece
+of one from a message-passing reflex is not engineering caution, it is not
+having done the reading. A change to this repository that adds a frame kind,
+a handshake, a retry, a phase, a token, a gate, or a scheduler is wrong before
+it is measured, and measurement has so far agreed every time.
+
 ## Failure of a participant
 
 A participant may vanish at any moment, and nothing inside the runtime

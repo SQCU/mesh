@@ -210,3 +210,12 @@ the only signal. The GPU is handed only functions whose rows are stamped. The
 NFE concludes on a status word, never on a message inside the data. With that
 rule a Mini's latency and utilization are the same whether it has one
 neighbour or an infinite mesh behind it. Without it they are not.
+
+## What this is called elsewhere
+
+Every step above is an old, built, measured thing: a tagged-token dataflow
+machine (rows with stamps are tokens with tags), completion flags inside the
+data, a region runtime that issues work when its pages are resident, epochs
+that the consumer decides about, and a reduce-scatter streamed behind the
+producer. The citations are in `distributed-reduce.md`, with the record of
+what was built instead and why it is forbidden.
