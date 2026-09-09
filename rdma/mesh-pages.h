@@ -33,8 +33,6 @@ static inline uint32_t mesh_pages_entry(const uint32_t *entries, uint32_t page){
 static inline void mesh_pages_store(uint64_t *word, uint64_t value){ __atomic_store_n(word,value,__ATOMIC_RELEASE); }
 static inline uint64_t mesh_pages_load(const uint64_t *word){ return __atomic_load_n(word,__ATOMIC_ACQUIRE); }
 void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
-size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count,
-  uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
 mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec);
 size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32_t **indices);
 int mesh_pages_complete(mesh_pages_function *f, uint32_t row, uint64_t generation);
