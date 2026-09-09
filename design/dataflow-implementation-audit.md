@@ -311,3 +311,30 @@ using the same client/configuration path, and returns failure when either
 participant fails. Previously the launcher returned success after printing
 `rc=133` for both crashed participants. Recorded command success must reflect
 the participant outcomes.
+
+### RDMA validation and the next deletion
+
+The destination-stamp reduction and direct Metal table mapping have now run on
+the actual M5 Max/M4 Pro RDMA pair. The caller's normalization kernel gathers
+local/received reduction operands and scatters its result through the literal
+mesh table; its private address-table copy and per-issue geometry allocation
+are removed. The existing FFN evaluator completed 24 evaluations per peer
+with no disagreements and unchanged reference error. Three 48-layer runs
+completed six evaluations each per peer, with 576 digest agreements, settled
+exits and final logits identical to the historical streaming implementation.
+Full configurations, commits and results are committed in
+`metal-microbench/docs/data/dataflow_literal_table_rdma_2026-09-09.json`.
+
+This does not complete either flow. `normalized[f]`, embedding and head
+readiness still use storage or words outside the table; `Job.stage`,
+`exchanged`, consumed masks and tasks awaiting predictions still advance
+execution. Their deletion requires configured value rows and storage
+lifetimes that preserve the existing MPS/ANE operands and permit reuse across
+48 layers and multiple evaluations. A callback that merely advances the same
+stage counter would retain the execution-flow defect. A table-shaped copy of
+those counters would retain the data-flow defect.
+
+The acceptance order is source correspondence to both flows, actual RDMA
+numerical results, then matched performance against the fastest validated
+local functions. Published prior art establishes implementability; it cannot
+substitute for any of these implementation obligations.
