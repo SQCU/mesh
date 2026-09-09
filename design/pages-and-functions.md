@@ -213,9 +213,11 @@ neighbour or an infinite mesh behind it. Without it they are not.
 
 ## What this is called elsewhere
 
-Every step above is an old, built, measured thing: a tagged-token dataflow
-machine (rows with stamps are tokens with tags), completion flags inside the
-data, a region runtime that issues work when its pages are resident, epochs
-that the consumer decides about, and a reduce-scatter streamed behind the
-producer. The citations are in `distributed-reduce.md`, with the record of
-what was built instead and why it is forbidden.
+The firing principle is tagged-token dataflow; operand slots and presence
+bits have hardware prior art in Monsoon. In-data flags, dependency-driven
+execution and pipelined reductions also have published implementations.
+The [citation audit](dataflow-implementation-audit.md) distinguishes those
+mechanisms from the exact caller required here, which remains an implementation
+obligation. It also records the divergent code and corrects the unmeasured
+claim of strict performance superiority. The binding reduce description and
+historical incident record are in [distributed-reduce.md](distributed-reduce.md).

@@ -1,8 +1,10 @@
 # Distributed reduce over page tables
 
 This is the specification for the next reduce runtime in `rdma/`. Every
-requirement below instantiates published prior art; the citation is the
-authority, the sentence here is the binding form for this repository.
+requirement below draws on published prior art; the operator's specification
+is binding for this repository. The
+[implementation audit](dataflow-implementation-audit.md) scopes the citations,
+records source divergences and states the performance evidence still required.
 
 ## Standard of correctness
 
@@ -39,10 +41,11 @@ Each participant owns, per slot, a table of physical page indices sized to the
 slot's compiled width. Arrival writes the entry for the page's index. The
 reduce of a page fires when every operand table holds that page. The slot is
 complete when its table is full. No message says so; the count of filled
-entries is the only signal. This is the in-data completion flag of NCCL's LL and
-LL128 protocols (NVIDIA NCCL, `src/collectives/device/prims_ll.h`), where the
-receiver polls the payload's own flag word, and the counter-completion of
-one-sided RDMA writes (Active Messages, von Eicken et al., ISCA 1992). There is
+entries is the only signal. NCCL's LL and LL128 protocols provide related
+in-data flag mechanisms (`src/device/prims_ll.h` and `prims_ll128.h`), but
+also maintain transport protocol state. Active Messages (von Eicken et al.,
+ISCA 1992) is prior art for low-overhead arrival handling, not a literal
+implementation of this RDMA page-table contract. There is
 no control channel: no open, close, fin, request, ready or acknowledgement
 frame between participants during a reduction.
 
@@ -162,50 +165,33 @@ storage dependency on the result of the comparison.
 
 ## The specification is realized prior art
 
-Nothing in this document is speculative. Each requirement is a system that
-has been built, published, and run in production; the sentence here is only
-the binding form for this repository.
+The firing principle is established tagged-token dataflow. Monsoon realizes
+compiler-addressed operand matching with presence bits; NCCL demonstrates
+in-data completion flags; region runtimes demonstrate dependency-driven
+execution; collective algorithms establish communication-volume bounds.
+These mechanisms make the design implementable. They do not establish that
+any cited system is literally this caller or that the caller is already built.
 
-- A function runs when every one of its input rows carries stamp `k`, and
-  nothing else is said: tagged-token dataflow. Values carry tags, an
-  instruction fires when all operands with the same tag are present, and there
-  is no scheduler beyond the match (Dennis, "First version of a data flow
-  procedure language", 1974; Arvind and Nikhil, "Executing a program on the MIT
-  tagged-token dataflow architecture", IEEE Trans. Computers 39(3), 1990; built
-  as Monsoon, Papadopoulos and Culler, ISCA 1990). Stamps are tags; the page
-  table is the token store.
-- Completion in the data and no control channel: NCCL's LL and LL128
-  protocols poll a flag word inside the payload (NVIDIA NCCL,
-  `src/collectives/device/prims_ll.h`); Active Messages complete one-sided
-  writes by counters (von Eicken, Culler, Goldstein and Schauser, ISCA 1992).
-- Pages as the dependency unit, tasks issued when their data is resident,
-  partial sums accumulated as they land: Legion and Realm (Bauer, Treichler,
-  Slaughter and Aiken, SC 2012), StarPU (Augonnet, Thibault, Namyst and
-  Wacrenier, CCPE 2011), PaRSEC and DPLASMA (Bosilca et al., 2012), OmpSs
-  (Duran et al., 2011).
-- Generations and progress by timestamp, the consumer deciding, no per-message
-  acknowledgement: timely dataflow (Murray, McSherry, Isaacs, Isard, Barham and
-  Abadi, "Naiad", SOSP 2013). Re-execution from lineage: MapReduce (Dean and
-  Ghemawat, OSDI 2004) and RDDs (Zaharia et al., NSDI 2012).
-- Reduce-scatter and all-gather at `2·(n−1)/n·|S|` per participant, streamed
-  row by row behind the producer: Rabenseifner, ICCS 2004; Patarasuk and Yuan,
-  JPDC 2009; in current practice PyTorch's asynchronous tensor parallelism
-  (2024) and Megatron's overlapped reduce-scatter (Korthikanti et al., MLSys
-  2023) do exactly this chunked overlap over NCCL.
-- Integrity at the endpoints, after use: the end-to-end argument (Saltzer,
-  Reed and Clark, ACM TOCS 1984).
+The [primary-source comparison](dataflow-implementation-audit.md#what-is-mature-and-what-the-citations-actually-establish)
+replaces the original unqualified bibliography. It records where Monsoon,
+Active Messages, Legion, Naiad, NCCL, PyTorch async-TP and the end-to-end
+argument agree with this design and where their claims or implementations
+differ. In particular, their internal schedulers and protocol state do not
+authorize a second readiness representation in this repository's caller.
 
-A function that needs every row — attention over the full context — is a node
-whose inputs are all the rows, a barrier by data and not a special case. The
-choice of how many ready rows to issue in one command is a grain, the same
-batching a token store performs when it matches; it is not a data structure.
+A configured function that needs every row is issued only when those rows
+are ready. A function with independent outputs may select their ready input
+sets. Batching those outputs into one command buffer per scan is the caller
+contract; its cost and its preservation of local kernel efficiency require
+measurement. Monsoon is not a measurement of that Metal implementation.
 
 ## What was done instead, and why it is forbidden
 
-Every divergence from this document that reached the repository was a
-control-flow object standing in for something the page table already held,
-written by an agent that had not read the prior art and did not want to. The
-record is kept here so that the next such object is recognized on sight.
+The recorded divergences include duplicated readiness state, incorrect
+addressing and generation arithmetic, and unsupported claims of validation.
+The record is kept here so that they can be recognized and corrected. The
+[audit table](dataflow-implementation-audit.md#record-of-divergence-and-the-ordinary-engineering-it-failed)
+adds historical evidence and dispositions without attributing motives.
 
 - A `K_DIGEST` control frame carrying the sent hash, a mismatch poisoning the
   whole program through the status word, and a paragraph added to this
@@ -229,17 +215,23 @@ record is kept here so that the next such object is recognized on sight.
   forbids in two places.
 - A driver with phases, per-job state, per-call tasks awaiting predictions,
   completion words, and fixed 128-row groups: a scheduler. It issued about two
-  thousand GPU command buffers per evaluation and made the pass three times
-  slower than the barrier it was meant to remove. The readiness it tracked was
-  already in the stamps.
+  thousand GPU command buffers per evaluation. The reported 1,443 ms is
+  3.16 times the 457 ms local reference and 1.57 times the quoted 917 ms
+  barrier latency; the latter used different concurrency. This does not
+  isolate command-buffer overhead. The readiness it tracked was already in
+  the stamps.
 
-None of these was hard to avoid. The token store, the in-data flag, the
-region runtime, the timestamped epoch and the row-streamed reduce-scatter are
-each thirty to fifty years old, documented, and measured; reinventing a piece
-of one from a message-passing reflex is not engineering caution, it is not
-having done the reading. A change to this repository that adds a frame kind,
-a handshake, a retry, a phase, a token, a gate, or a scheduler is wrong before
-it is measured, and measurement has so far agreed every time.
+These are failures of ordinary engineering obligations, not evidence that
+page-table dataflow is an immature algorithm. Changing the specification to
+bless a forbidden implementation and claiming measurements from another path
+are especially serious: they invalidate the review evidence itself.
+
+A new application frame, handshake, phase, token, gate or scheduler that
+restates readiness violates this repository's contract before measurement.
+That architectural rejection does not prove a universal timing theorem.
+The [performance obligations](dataflow-implementation-audit.md#minimum-expectations-of-performance)
+require matched baselines, measured local functions, physical-link traffic,
+launch and scan costs, and separate latency and throughput results.
 
 ## Failure of a participant
 
