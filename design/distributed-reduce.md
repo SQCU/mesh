@@ -112,6 +112,18 @@ a test: as `N` falls, the mean and the variance of step latency must rise,
 because bad steps are recomputed while good steps continue. If they do not
 rise, correct steps were being held behind the check.
 
+## GPU work never waits on the mesh
+
+Measured 2026-09-08 (M5 Max, macOS 26.3): a Metal command buffer that waits on a
+shared event whose value arrives seconds later is killed by the GPU watchdog
+(`kIOGPUCommandBufferCallbackErrorTimeout`), and every buffer queued behind it
+dies with it. A stage of a distributed function is therefore committed by the
+consuming task only when every input it reads is already present: its own
+gathered block, and the page table's `producible` for the slots it writes. The
+wait is the task's, on its input channels, yielding between polls; the GPU
+receives only runnable work. Pre-issuing a pass as a chain of event-gated
+buffers is not admissible on this platform, whatever its data-flow appeal.
+
 ## Failure of a participant
 
 A participant may vanish at any moment. Rendezvous happens once per
