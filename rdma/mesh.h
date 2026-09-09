@@ -71,7 +71,7 @@ static inline int pop(struct hdr *m, int k, struct desc *d){
   *d=*slot(m,k,t); atomic_store_explicit(&q->tail,t+1,memory_order_release); return 0; }
 struct shdr { uint64_t off; uint32_t sid, k; };
 enum { K_DATA, K_FIN, K_REQ, K_OK, K_CLOSE, K_CLOSED, K_OPEN, K_READY,
-       K_ABORT_RX, K_ABORT_TX, K_ABORTED_RX, K_ABORTED_TX };
+       K_ABORT_RX, K_ABORT_TX, K_ABORTED_RX, K_ABORTED_TX, K_DIGEST };
 struct mesh_epoch { uint64_t high, low; };
 struct mesh_scope { struct mesh_epoch epoch; unsigned char plan[32]; };
 enum { MS_RUN, MS_DONE, MS_FAIL };
