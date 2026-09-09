@@ -395,3 +395,23 @@ in `mesh_pages_compile`; `release_dependencies` retires received inputs only.
 The caller's `stamped` helper still checks generation without checking whether
 the entry remains present. Those are concrete remaining lifetime obligations,
 not permission to add a scheduler or duplicate the operands.
+
+### Canonical numerical selection
+
+Metal-microbench `83eb3fe` binds GPU calls, native predictions, normalization
+and vocabulary input/output spans with `mesh_pages_bind` before invocation.
+Their execution scans use `mesh_pages_scan`, replacing the separate Swift
+operand-matching predicates and duplicate claims. Canonical mesh `8cf373b`
+checks already-issued destinations before matching inputs. The endpoint's
+remaining stamp query also checks that the page-table entry is present, closing
+the released-entry issue described above. Papadopoulos and Culler provide the
+operand-matching citation through the canonical bibliography; this is no claim
+that Monsoon implements this runtime verbatim.
+
+`metal-microbench/docs/data/dataflow_canonical_calls_rdma_2026-09-09.json`
+records exact two-layer logits and eight rejected/repeated FFN evaluations
+under fault injection. The caller still admits the next embedding after digest
+acceptance and still gives vocabulary an overly broad all-hidden-rows input.
+These remaining execution dependencies must be removed alongside correct page
+lifetimes. Local-page recycling, foreign numerical storage and accumulator/index
+page reduction remain open; canonical selection alone does not satisfy them.
