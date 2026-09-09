@@ -19,6 +19,13 @@ destinations; completion publishes them after device visibility. No Job, stage,
 parity cursor, completion token or caller-owned consumed mask may authorize work.
 Monsoon's activation frames and token queues do not authorize equivalents here.
 
+`mesh_pages_scan` checks destination stamps before matching input presence and
+stamps, then claims the selected destinations. The ordering avoids repeatedly
+reading operands for outputs already issued; it does not add state or change
+the conjunction defining eligibility. The caller binds normalization's two
+ownership spans to this same mechanism before invocation. Matching and claim
+still rely on one scanner for overlapping destinations.
+
 Every numerical intermediate, accumulator and index value occupies actual
 sendable page payloads. Views gather/scatter through those pages. Lifetimes must
 include residual reads, asynchronous device reads and hashing. Reuse follows

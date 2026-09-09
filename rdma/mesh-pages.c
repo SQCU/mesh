@@ -216,6 +216,7 @@ static mesh_pages_function *bind_function(mesh_pages *p, struct mesh_pages_funct
 
 mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec){ return bind_function(p,spec,0); }
 
+// ../design/algorithm-sources.md#operand-matching-and-storage
 size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32_t **indices){
   mesh_pages *p=f->owner; *indices=f->indices;
   if(!generation || generation>=WRITING || mesh_pages_status(p)<0) return 0;
@@ -226,6 +227,11 @@ size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32
   size_t selected=0;
   for(uint32_t row=0;row<f->rows;row++){
     unsigned ready=1;
+    for(uint32_t i=0;i<f->outputs;i++){
+      const struct mesh_pages_map *m=&f->maps[f->inputs+i]; const struct slot *s=&p->slots[m->slot];
+      for(uint32_t j=0;j<m->count;j++) ready&=__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)<generation;
+    }
+    if(!ready) continue;
     for(uint32_t i=0;i<f->inputs;i++){
       const struct mesh_pages_map *m=&f->maps[i]; const struct slot *s=&p->slots[m->slot];
       if(generation<=m->lag){ ready=0; break; }
@@ -234,11 +240,6 @@ size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32
         ready&=__atomic_load_n(s->stamp+at,__ATOMIC_ACQUIRE)==generation-m->lag;
         ready&=__atomic_load_n(s->table+at,__ATOMIC_ACQUIRE)!=ABSENT;
       }
-    }
-    if(!ready) continue;
-    for(uint32_t i=0;i<f->outputs;i++){
-      const struct mesh_pages_map *m=&f->maps[f->inputs+i]; const struct slot *s=&p->slots[m->slot];
-      for(uint32_t j=0;j<m->count;j++) ready&=__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)<generation;
     }
     if(!ready) continue;
     for(uint32_t i=0;i<f->outputs;i++){
