@@ -257,26 +257,16 @@ a caller that recomputes them per invocation is defective.
 
 ## Indexed consumption of resident pages
 
-`mesh_pages_select(p, slots, count, group, generation, consumed, indices)`
-compacts the ready group indices into caller-owned storage. The caller binds
-valid slot indices with equal page counts, a nonzero group width dividing that
-count, and masks/index storage sized to the number of groups. A single consumer
-owns each mask. No allocation or waiting occurs in selection.
+Configured input/output maps name the numerical rows. Selection checks input
+stamps and physical presence, verifies destination lifetime, and claims the
+actual destination stamps. Completion publishes those destinations after their
+writes are visible. The caller-owned consumed-mask selection API was deleted;
+it duplicated readiness and could mark work consumed before an output existed.
+The replacement must not reintroduce that authority under another name.
 
-For a group `i`, let `J_i` be its page indices and `S` its input slots:
-
-```
-ready_i = (consumed_i != g) & AND[s in S, j in J_i](stamp_sj == g & table_sj != ABSENT)
-indices = compact(i, ready_i)
-consumed_i = select(ready_i, g, consumed_i)
-```
-
-Readiness uses acquire loads. Receive publication stores the physical address
-before releasing the generation stamp, so observing a new generation cannot
-expose the previous address. `mesh_pages_data` resolves an existing selected
-entry into the registered payload. Dependency ownership must remain held while
-that payload is consumed. Recovery resets the consumer masks when generations
-restart. The producer/consumer arithmetic and the meaning of a group remain
-outside mesh.
+The required author/publication list and mechanism-specific implementation
+obligations are in [algorithm sources](algorithm-sources.md). In particular,
+Papadopoulos and Culler establish storage-associated operand matching; they do
+not establish this exact RDMA/Metal binding or its measured performance.
 
 Plain-language statements of the algorithm, on two peers and on infinitely many Minis, with the addendum on waiting for messages instead of data: `pages-and-functions.md`.
