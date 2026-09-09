@@ -253,6 +253,29 @@ previous file is saved at `~/.zshrc.bak-meshguard`.
 the hook travels with the repo instead of living on one machine. The hook script
 lives in `bin/` for the same reason.
 
+## Distributed functions: the page table is the program
+
+The reduce runtime in `rdma/mesh-pages.c` and every caller of it are bound by
+`design/pages-and-functions.md` (the plain statement) and
+`design/distributed-reduce.md` (the citation form). Both say the same thing:
+a function runs when all of its input rows carry the stamp; it writes its
+output pages; pages are released when their dependents' rows carry the stamp;
+the digest is a page; the status word is for the link. There is no other
+state. The design is tagged-token dataflow over one-sided writes with
+completion in the data — thirty to fifty years of built, measured systems,
+cited in `distributed-reduce.md`.
+
+The following are therefore wrong before they are measured, and the record in
+`distributed-reduce.md` shows measurement agreeing every time: a frame kind, a
+handshake, a rendezvous, a retry with backoff, an acknowledgement the
+algorithm waits on, a check used as a gate, a phase, a token, a lane, a
+scheduler, a task that awaits a message about data, or any counter that
+restates what a stamp already says. A caller is a scan of the page table over
+a static list of functions with input and output rows. If you find yourself
+adding one of the objects above, you have found a bug in your reading, not a
+feature; read the citations, then ask the operator with the question tool
+before changing the specification.
+
 ## Tests and specification
 
 The operator instructed on September 6, 2026: "delete all tests. tests aren't
