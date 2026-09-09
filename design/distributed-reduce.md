@@ -48,24 +48,40 @@ frame between participants during a reduction.
 
 ## Reuse is proved by downstream pages, races are values
 
-If buffer B depends on buffer A, then a page of B stamped `g` from every
-participant that produces B is proof that A(g) was consumed everywhere it was
-needed. That is the whole rule for freeing and reusing storage:
+A dependency edge carries an input slot and a generation lag `L`. Publishing
+B(g) proves consumption of A(g − L). A zero lag describes an ordinary edge;
+a lag of `V` describes a dependency on the preceding use of the same storage.
+The compiler records each reverse edge with the same lag. A producer's next
+writable generation is derived from its consumers' progress:
 
-- A transmitted or local buffer may be written for generation `g + V` once
-  every buffer that depends on it holds some page stamped `≥ g`. The runtime
-  keeps one word per buffer, the highest stamp present, and takes the minimum
-  over dependents. Nothing is sent to establish this; with peers that DMA-read
-  each other there is no local completion at all, and this rule still holds.
-- A received buffer's pages for `g` are returned to the bridge when the local
-  function that depended on them publishes its first output page stamped `g`.
+```
+consumed_A = min[B depends A](max(0, progress_B - lag_BA))
+producible_A = consumed_A + V
+```
 
-`V` versions per buffer is a launch-time constant on every participant; a
-version is a separate page set, so two live generations `g` and `g + V` never
-share an entry. Every table entry carries the generation that wrote it. A
-gather that finds a stamp it did not expect has gathered a wrong operand; the
-value is wrong and the check in the next section finds it. No state machine
-guards the entry, no acknowledgement is exchanged, no node is numbered.
+Progress is the first downstream page only when that page proves consumption
+of the whole input. A pagewise consumer of local storage uses completed output
+progress instead. Received input pages retire on the corresponding output
+publication: all input pages for a whole-input dependency, matching page indices
+for a pagewise dependency.
+
+`V` is the generation stride across separately bound version slots. Generations
+`g` and `g + V` reuse the same slot and page addresses; their lifetimes must not
+overlap. Stamps identify the value stored at an address; they do not create a
+second copy of it.
+
+A terminal consumer uses `mesh_pages_consume(p, slot, first, count, g)` after its
+last read of received pages. This queues retirement in the receive slot's
+existing indexed bitmaps. Mesh returns the pages through the bridge's local
+release queue. There is no additional peer message, page allocation, or blocking
+call. An intermediate consumer may use the same operation after a gather;
+its next numerical publication still supplies the peer's storage reuse proof.
+
+In the two-peer model graph, partial(g + V) depends on reduced(g). Receipt of
+that next partial proves that the peer has used the previous reduced result.
+Before transmitting the next partial, mesh retires that producer's received
+reduced pages. A new reduced value therefore cannot race its predecessor's
+consumer. The last parameter group retires its gathered input explicitly.
 
 ## Streaming reductions are page-wise dependencies
 
@@ -85,32 +101,25 @@ the combiner of MapReduce and the pipelined chunking of the ring all-reduce
 (Patarasuk and Yuan 2009), expressed as a dependency kind rather than a
 schedule.
 
-## Integrity is checked after the fact and repaired by recomputation
+## Numerical checking is a consumer policy
 
 The end-to-end argument (Saltzer, Reed and Clark, "End-to-end arguments in
-system design", ACM TOCS 1984): integrity belongs to the endpoints that use the
-data, not to the transport. Each participant computes, asynchronously and
-after the reduce has consumed its operands, a hash of the operands it sent and
-the operands it received for generation `g`, and publishes that hash as one
-page of an ordinary one-page slot. The peer's hash page arrives into a one-page
-receive slot. A compare node fires when its two-entry table is full. If the
-words differ, the caller re-queues that step as a new generation. This is
-re-execution from lineage (Dean and Ghemawat, "MapReduce", OSDI 2004; Zaharia
-et al., "Resilient Distributed Datasets", NSDI 2012): the transport is not asked
-to be lossless, the computation is cheap to repeat, and no correct step waits
-for the check of any other step.
+system design", ACM TOCS 1984) places numerical validation at the endpoints.
+Mesh does not require a checksum exchange to authorize reuse or finish an
+operation. Those facts already follow from numerical dependency edges.
 
-## Faults are injected on purpose
+The configured model measures final logits against a single-node calculation
+and compares the two peers' outputs after timing. Other callers can retain
+asynchronous checks and recomputation, provided check results do not become
+storage dependencies of the numerical program. The former model binding did
+exactly that: a later hash replaced an unchecked hash in a one-entry table,
+and the checker then held numerical storage forever. Removing that exchange
+removes both the redundant messages and the false dependency.
 
-A shared seed and a period `N` select `1/N` of `(slot, generation)` attempts.
-For a selected attempt, a chosen pair of received pages is XORed into each
-other before the reduce reads them. The compare node then disagrees and the
-step is redone. If one page of the chosen pair was already released by a
-page-wise consumer, the remaining page alone is corrupted; the injector never
-dereferences a released entry. The proof that the check is non-blocking is a measurement, not
-a test: as `N` falls, the mean and the variance of step latency must rise,
-because bad steps are recomputed while good steps continue. If they do not
-rise, correct steps were being held behind the check.
+Fault injection remains an optional measurement input. A shared seed and period
+select received page pairs for corruption. A caller using it must choose its
+own numerical check and recomputation policy. Successful transport completion
+alone says nothing about numerical agreement.
 
 ## GPU work never waits on the mesh
 
@@ -162,3 +171,5 @@ entry into the registered payload. Dependency ownership must remain held while
 that payload is consumed. Recovery resets the consumer masks when generations
 restart. The producer/consumer arithmetic and the meaning of a group remain
 outside mesh.
+
+Plain-language statements of the algorithm, on two peers and on infinitely many Minis, with the addendum on waiting for messages instead of data: `pages-and-functions.md`.
