@@ -34,7 +34,7 @@ struct slot {
   unsigned char *uses;
   struct digest { uint64_t pending; _Atomic uint64_t hash, generation; uint32_t count; } digest[DIGESTS];
 };
-struct reduce { struct mesh_pages_reduce spec; uint64_t *consumed; uint32_t *indices; uint64_t generation; uint32_t groups, done; };
+struct reduce { struct mesh_pages_reduce spec; uint64_t *consumed; uint32_t *indices; uint64_t generation; uint32_t groups, done; struct mesh_pages *owner; pthread_t thread; };
 struct mesh_pages {
   struct mesh_ctx *context; struct hdr *M;
   struct mesh_epoch epoch; unsigned char plan[32];
@@ -205,7 +205,7 @@ int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, s
       int listed=0; for(uint8_t d=0;d<out->spec.depends;d++) listed|=out->spec.dependency[d]==x->input[i];
       if(!listed) goto invalid;
     }
-    list[r].spec=*x; list[r].groups=pages/x->group;
+    list[r].spec=*x; list[r].groups=pages/x->group; list[r].owner=p;
     list[r].consumed=zeroed(list[r].groups*sizeof *list[r].consumed); list[r].indices=zeroed(list[r].groups*sizeof *list[r].indices);
     if(!list[r].consumed || !list[r].indices){ for(size_t q=0;q<=r;q++){ free(list[q].consumed); free(list[q].indices); } free(list); return ENOMEM; }
   }
@@ -459,7 +459,6 @@ int mesh_pages_progress(mesh_pages *p){
   }
   if(status<0) return status;
   for(size_t i=0;i<p->count;i++) transmit(p,i);
-  for(size_t r=0;r<p->reduce_count;r++) reduce_step(p,&p->reduces[r]);
   for(size_t i=0;i<p->count;i++) offer(p,i);
   return atomic_load_explicit(&p->status,memory_order_acquire);
 }
@@ -495,6 +494,18 @@ static void reduce_step(mesh_pages *p, struct reduce *r){
   r->done+=(uint32_t)selected;
   if(r->done==r->groups){ r->done=0; r->generation+=p->versions; }
 }
+static void *reduce_run(void *argument){
+  struct reduce *r=argument; mesh_pages *p=r->owner;
+  pthread_setname_np("mesh-reduce");
+  unsigned idle=0;
+  while(atomic_load_explicit(&p->running,memory_order_relaxed)){
+    uint32_t done=r->done; uint64_t generation=r->generation;
+    reduce_step(p,r);
+    idle=done==r->done && generation==r->generation?idle+1:0;
+    if(idle>4096){ sched_yield(); idle=4096; }
+  }
+  return NULL;
+}
 static void *run(void *argument){
   mesh_pages *p=argument;
   pthread_setname_np("mesh-pages");
@@ -512,10 +523,18 @@ static void *run(void *argument){
 int mesh_pages_start(mesh_pages *p){
   if(atomic_exchange(&p->running,1)) return 0;
   int error=pthread_create(&p->thread,NULL,run,p);
-  if(error) atomic_store(&p->running,0);
-  return error;
+  if(error){ atomic_store(&p->running,0); return error; }
+  for(size_t r=0;r<p->reduce_count;r++){
+    error=pthread_create(&p->reduces[r].thread,NULL,reduce_run,&p->reduces[r]);
+    if(error){ p->reduces[r].thread=0; mesh_pages_stop(p); return error; }
+  }
+  return 0;
 }
-void mesh_pages_stop(mesh_pages *p){ if(atomic_exchange(&p->running,0)) pthread_join(p->thread,NULL); }
+void mesh_pages_stop(mesh_pages *p){
+  if(!atomic_exchange(&p->running,0)) return;
+  pthread_join(p->thread,NULL);
+  for(size_t r=0;r<p->reduce_count;r++) if(p->reduces[r].thread) pthread_join(p->reduces[r].thread,NULL);
+}
 
 int mesh_pages_recover(mesh_pages *p){
   if(atomic_load_explicit(&p->running,memory_order_acquire)) return EBUSY;

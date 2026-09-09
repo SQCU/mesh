@@ -338,14 +338,13 @@ int main(int argc,char**argv){
           goto accepted;
         }
         if(!client){
-          int next=route_link(links,link_count,routes,wire->src,-1);
-          if(next<0 || !link_space(&links[next],L_SEND)){ wire->hops--; continue; }
           size_t reply=mesh_resident_reply(wire,event.bytes,(uint16_t)me);
           if(reply){
-            bridge_account(link_submit(&links[next],L_SEND,page,(uint32_t)reply));
+            int next=route_link(links,link_count,routes,wire->src,-1);
+            if(next<0 || link_submit(&links[next],L_SEND,page,(uint32_t)reply)){ wire->hops--; continue; }
             MOVE(page,SEND); pool_link[page]=(unsigned char)next; COUNT(sent);
-          } else RELEASE(page);
-          goto accepted;
+            goto accepted;
+          }
         }
         size_t frame_bytes=event.bytes-sizeof *wire;
         struct desc receive={.page=page,.bytes=(uint32_t)frame_bytes,.node=wire->src};
