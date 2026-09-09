@@ -285,3 +285,12 @@ Repository-owned tests and verification harnesses have been removed. Do not
 reintroduce them under another name. Review the complete data and execution flow
 against the user instructions and explicit algebra. Compilation and operational
 measurements provide evidence about implementation, not authority over the specification.
+
+## Source workflow
+
+Operator instruction, September 9, 2026: use commits and checkouts, and use
+`main` when it suffices. Preserve overwritten source only in commit history;
+no resets, cleans, stashes, backup copies, or uncommitted source transfers.
+Record the commits used for measurements and run distributed measurements on
+the available RDMA substrate. This governs development synchronization; the
+bootstrap continues to follow the latest named branch.

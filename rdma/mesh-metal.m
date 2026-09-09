@@ -26,6 +26,12 @@ static id<MTLBuffer> mesh_metal_pool(id<MTLDevice> device, struct mesh_ctx *cont
   *layout=(struct mesh_metal_layout){begin-(uintptr_t)base,(uint32_t)stride,0,(uint32_t)stride};
   return mesh_metal_memory(device,(void*)begin,end-begin);
 }
+id<MTLBuffer> mesh_metal_page_table(id<MTLDevice> device, const mesh_pages *pages){
+  size_t bytes;
+  const uint32_t *table=mesh_pages_table(pages,&bytes);
+  if(bytes>device.maxBufferLength){ errno=EOVERFLOW; return nil; }
+  return mesh_metal_memory(device,table,bytes);
+}
 id<MTLBuffer> mesh_metal_receive_pool(id<MTLDevice> device, struct mesh_ctx *context, struct mesh_metal_layout *layout){
   return mesh_metal_pool(device,context,0,context->M->pool,layout);
 }

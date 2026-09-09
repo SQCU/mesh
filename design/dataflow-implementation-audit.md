@@ -227,3 +227,87 @@ the static caller; caller-owned selection masks versus table-only authority.
 The runtime has not proved these tensions resolved merely by compiling.
 This document records them without granting an exception to the operator's
 static-scan requirement or changing the specification to fit existing code.
+
+## Refactoring trace: destination ownership (implementation in progress)
+
+The first replacement removes the reduce node's private consumed mask,
+generation cursor and completed-group counter. Its static input/output maps
+name actual page-table spans. A scan checks input stamps and writable output
+storage, claims the destination stamps, and returns compacted numerical indices.
+The reduce gathers those operands, adds in FP32 and scatters to the destinations;
+publication completes the destination stamps. No reduction cursor advances a
+family independently of its input values.
+
+A destination stamp's high bit denotes exclusive write ownership; its remaining
+bits identify the generation being written. A completed stamp has no high bit.
+Thus a claimed row is neither ready input nor selectable output. Only successful
+completion may replace a claimed stamp with its completed generation. This is
+canonical page-table ownership, not an independent completion token or array.
+Generations are positive and below that reserved bit. Reuse still requires the
+compiled downstream lifetime proof; claiming does not shorten an input lifetime.
+
+Static maps and reusable compacted indices are realized before execution. One
+scanner owns a configured function, and mapped output spans within it do not
+overlap. Multiple asynchronous issues may use different output spans, but may
+not reuse the selection buffer until their backend has captured the indices it
+needs. The Metal caller's immutable pre-bound row operations can be encoded
+immediately; an indexed GPU load needs separately lifetime-bound index storage.
+The caller conversion and measurements remain outstanding until recorded here.
+
+### Caller trace and deletion map
+
+The present data path is `embed_paged -> hiddenSlot -> rms_norm_paged ->
+normalized[f] -> configured Metal/Core ML function -> partialLocal/partialOut ->
+partialIn -> runtime reduce -> reducedOut/reducedIn -> copied tables[f] ->
+rms_norm_add_scale_paged -> hiddenSlot`, repeated through the parameter list,
+then vocabulary projection. `normalized[f]`, head inputs and logits are real
+values whose readiness currently exists outside the page table. The residual
+hidden rows also remain live through normalization; recording only the reduced
+input does not describe that read.
+
+The present execution path is `queued -> jobs[f] -> Job.stage -> scanFunction /
+scanNorm -> embedded/prenormed/headed words or Task completion -> exchanged ->
+Job.stage`. That is the path to remove, not an implementation to rename.
+
+| Existing authority/storage | Required replacement |
+|---|---|
+| `Job.stage`, `previous`, `exchanged`, speculative next-stage issue | Static configured function/input/output maps; generation identity from canonical input stamps. |
+| First-free assignment from `queued` to `jobs` | Stable input identity and configured family placement. Both peers must address the same evaluation, independent of completion order. |
+| `consumedCalls`, `consumedNorm`, rollback of masks when storage is unavailable | Canonical destination-stamp claims after input readiness and lifetime checks. |
+| `embedded`, `prenormed`, `headed`, `producing: [Int: Task]` | Publish the actual embedding, normalized operand and vocabulary result rows; scan their stamps to enable their consumers. |
+| Backend branch in `issue` | Bind the backend launch/completion function once during realization. |
+| Copied address table and normalization geometry allocated per issue | Direct Metal mapping of mesh's page table; bound geometry and numerical index storage. |
+| Contiguous-run normalization command buffers | One command buffer for the configured function's selected indices per scan. |
+| Job failure/check counters used to finish or advance numerical stages | Integrity results as endpoint evaluation values; checks cannot authorize intermediate numerical work. |
+
+Core ML has a native completion-handler entry point in the installed SDK:
+`MLModel.__prediction(fromFeatures:options:completionHandler:)`. Its spelling
+was verified by compiler typechecking. Backend completion can publish actual
+result rows without creating a caller task that awaits a prediction. The
+backend binding still must retain input/output storage until that completion;
+using a callback alone does not establish page-table conformance.
+
+### Operational findings during the first replacement
+
+The first FFN client run trapped in `reduce_scatter.swift` when the one-stage
+configuration subtracted a stride from the unused odd lane. Checking whether
+that lane has emitted any generation corrects the arithmetic without changing
+the numerical calculation. The next run completed 12 evaluations per peer,
+with 12 agreements, no disagreements, and relative RMS 0.00037467291602926686
+against the same unsharded reference.
+
+A longer run then stopped at 23 of 24 evaluations. The page dumps show peer 0
+publishing its next local partial in family 1 at generation 51, while peer 1
+publishes its next local partial in family 3 at generation 47. Each has the
+other family's received partial and no matching local operand. The dumps report no
+outstanding destination claims, transport-integrity errors, or overwrites.
+The caller's first-free job assignment produced different final family counts.
+The repair assigns request `i` to family `(i-1) mod V`; it adds no peer message
+or synchronization. This is an input-identity repair pending deletion of the
+job machinery, not acceptance of that machinery as the final caller.
+
+The existing loopback launcher now accepts `MESH_FORWARD_BIN` for comparisons
+using the same client/configuration path, and returns failure when either
+participant fails. Previously the launcher returned success after printing
+`rc=133` for both crashed participants. Recorded command success must reflect
+the participant outcomes.

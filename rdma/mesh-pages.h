@@ -10,6 +10,9 @@ struct mesh_pages_policy { uint64_t fault_seed; uint32_t fault_period; };
 #define MESH_REDUCE_PARTIAL 1
 struct mesh_pages_reduce { uint32_t output; uint32_t input[MESH_PAGES_DEPENDENCIES]; uint8_t inputs, kind; uint32_t group, offset, bytes; };
 typedef struct mesh_pages mesh_pages;
+typedef struct mesh_pages_function mesh_pages_function;
+struct mesh_pages_map { uint32_t slot, first, count, stride; uint64_t lag; };
+struct mesh_pages_function_spec { const struct mesh_pages_map *input, *output; uint32_t inputs, outputs, rows; };
 typedef void (*mesh_pages_hook)(void *capture, uint32_t slot, uint64_t generation);
 
 mesh_pages *mesh_pages_compile(struct mesh_ctx *context, struct mesh_epoch epoch, const unsigned char plan[32],
@@ -23,6 +26,7 @@ int mesh_pages_free(mesh_pages *p);
 size_t mesh_pages_header(const mesh_pages *p);
 size_t mesh_pages_payload(const mesh_pages *p);
 const uint32_t *mesh_pages_entries(const mesh_pages *p, uint32_t slot);
+const uint32_t *mesh_pages_table(const mesh_pages *p, size_t *bytes);
 const uint64_t *mesh_pages_stamps(const mesh_pages *p, uint32_t slot);
 static inline uint64_t mesh_pages_stamp(const uint64_t *stamps, uint32_t page){ return __atomic_load_n(stamps+page,__ATOMIC_ACQUIRE); }
 static inline uint32_t mesh_pages_entry(const uint32_t *entries, uint32_t page){ return __atomic_load_n(entries+page,__ATOMIC_ACQUIRE); }
@@ -31,6 +35,9 @@ static inline uint64_t mesh_pages_load(const uint64_t *word){ return __atomic_lo
 void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
 size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count,
   uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
+mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec);
+size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32_t **indices);
+int mesh_pages_complete(mesh_pages_function *f, uint32_t row, uint64_t generation);
 uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation);
 uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot);
 

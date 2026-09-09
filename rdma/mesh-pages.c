@@ -17,6 +17,7 @@
 #define MIX 0xff51afd7ed558ccdULL
 #define MIX2 0xc4ceb9fe1a85ec53ULL
 #define DIGESTS 8
+#define WRITING (UINT64_C(1)<<63)
 typedef _Float16 half8 __attribute__((ext_vector_type(8)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 
@@ -36,7 +37,13 @@ struct slot {
 };
 struct work { uint32_t page, slot, index; uint64_t generation; unsigned char kind; };
 enum { W_ZERO, W_RELEASE, W_SENT };
-struct reduce { struct mesh_pages_reduce spec; uint64_t *consumed; uint32_t *indices; uint64_t generation; uint32_t groups, done; struct mesh_pages *owner; pthread_t thread; };
+struct mesh_pages_function {
+  struct mesh_pages *owner;
+  struct mesh_pages_map *maps;
+  uint32_t inputs, outputs, rows, *indices;
+  struct mesh_pages_function *next;
+};
+struct reduce { struct mesh_pages_reduce spec; mesh_pages_function *function; struct mesh_pages *owner; pthread_t thread; };
 struct mesh_pages {
   struct mesh_ctx *context; struct hdr *M;
   struct mesh_epoch epoch; unsigned char plan[32];
@@ -51,6 +58,7 @@ struct mesh_pages {
   uint64_t incarnation, foreign_epoch;
   mesh_pages_hook hook; void *capture;
   struct reduce *reduces; size_t reduce_count;
+  mesh_pages_function *functions;
   uint64_t now, refreshed, integrity, stale, duplicates, overwrites, faults;
 };
 
@@ -142,7 +150,7 @@ int mesh_pages_free(mesh_pages *p){
   if(!p) return 0;
   mesh_pages_stop(p);
   for(size_t i=0;i<p->count;i++){ struct slot *s=&p->slots[i]; free(s->inflight); free(s->uses); free((void*)s->publish[0]); free((void*)s->publish[1]); free(s->pending); }
-  for(size_t r=0;r<p->reduce_count;r++){ free(p->reduces[r].consumed); free(p->reduces[r].indices); }
+  while(p->functions){ mesh_pages_function *f=p->functions; p->functions=f->next; free(f->maps); free(f->indices); free(f); }
   free(p->reduces);
   if(p->table) munmap(p->table,p->table_bytes);
   free(p->stamps); free(p->slots); free(p->owner); free(p->later); free(p->work); free(p);
@@ -152,6 +160,7 @@ int mesh_pages_free(mesh_pages *p){
 size_t mesh_pages_header(const mesh_pages *p){ (void)p; return header_bytes(); }
 size_t mesh_pages_payload(const mesh_pages *p){ return p->M->pgsz-header_bytes(); }
 const uint32_t *mesh_pages_entries(const mesh_pages *p, uint32_t slot){ return slot<p->count?p->slots[slot].table:NULL; }
+const uint32_t *mesh_pages_table(const mesh_pages *p, size_t *bytes){ *bytes=p->table_bytes; return p->table; }
 const uint64_t *mesh_pages_stamps(const mesh_pages *p, uint32_t slot){ return slot<p->count?p->slots[slot].stamp:NULL; }
 void *mesh_pages_data(const mesh_pages *p,uint32_t slot,uint32_t page){
   return payload_at(p,__atomic_load_n(&p->slots[slot].table[page],__ATOMIC_ACQUIRE)); }
@@ -177,6 +186,99 @@ uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generati
   return (uint32_t)atomic_load_explicit(&s->fill_count[k],memory_order_acquire);
 }
 uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot){ return slot<p->count?atomic_load_explicit(&p->slots[slot].highest,memory_order_acquire):0; }
+
+static int maps_overlap(const struct mesh_pages_map *a,uint32_t rows_a,const struct mesh_pages_map *b,uint32_t rows_b){
+  if(a->slot!=b->slot) return 0;
+  uint32_t r=0,q=0;
+  while(r<rows_a && q<rows_b){
+    uint64_t x=(uint64_t)a->first+(uint64_t)r*a->stride, y=(uint64_t)b->first+(uint64_t)q*b->stride;
+    if(x<y+b->count && y<x+a->count) return 1;
+    if(x<y) r++; else q++;
+  }
+  return 0;
+}
+static mesh_pages_function *bind_function(mesh_pages *p, struct mesh_pages_function_spec spec, int replacing_reduces){
+  if(atomic_load_explicit(&p->running,memory_order_acquire) || !spec.rows || !spec.inputs || !spec.outputs || !spec.input || !spec.output){ errno=EINVAL; return NULL; }
+  for(uint32_t side=0;side<2;side++){
+    const struct mesh_pages_map *maps=side?spec.output:spec.input;
+    uint32_t count=side?spec.outputs:spec.inputs;
+    for(uint32_t i=0;i<count;i++){
+      const struct mesh_pages_map *m=&maps[i];
+      if(m->slot>=p->count || !m->count || m->lag>=WRITING){ errno=EINVAL; return NULL; }
+      uint64_t end=(uint64_t)m->first+(uint64_t)(spec.rows-1)*m->stride+m->count;
+      if(end>p->slots[m->slot].spec.pages || (side && (p->slots[m->slot].spec.receive || m->lag || (spec.rows>1 && m->stride<m->count)))){ errno=EINVAL; return NULL; }
+      if(side){
+        for(uint32_t j=0;j<i;j++) if(maps_overlap(m,spec.rows,&maps[j],spec.rows)){ errno=EINVAL; return NULL; }
+        for(mesh_pages_function *f=p->functions;f;f=f->next){
+          int replaced=0;
+          if(replacing_reduces) for(size_t r=0;r<p->reduce_count;r++) replaced|=f==p->reduces[r].function;
+          if(replaced) continue;
+          for(uint32_t j=0;j<f->outputs;j++) if(maps_overlap(m,spec.rows,&f->maps[f->inputs+j],f->rows)){ errno=EINVAL; return NULL; }
+        }
+      }
+    }
+  }
+  mesh_pages_function *f=zeroed(sizeof *f); if(!f) return NULL;
+  size_t count=(size_t)spec.inputs+spec.outputs;
+  f->maps=zeroed(count*sizeof *f->maps); f->indices=zeroed((size_t)spec.rows*sizeof *f->indices);
+  if(!f->maps || !f->indices){ free(f->maps); free(f->indices); free(f); return NULL; }
+  memcpy(f->maps,spec.input,(size_t)spec.inputs*sizeof *f->maps);
+  memcpy(f->maps+spec.inputs,spec.output,(size_t)spec.outputs*sizeof *f->maps);
+  f->owner=p; f->inputs=spec.inputs; f->outputs=spec.outputs; f->rows=spec.rows;
+  f->next=p->functions; p->functions=f;
+  return f;
+}
+
+mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec){ return bind_function(p,spec,0); }
+
+size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32_t **indices){
+  mesh_pages *p=f->owner; *indices=f->indices;
+  if(!generation || generation>=WRITING || mesh_pages_status(p)<0) return 0;
+  for(uint32_t i=0;i<f->outputs;i++){
+    const struct mesh_pages_map *m=&f->maps[f->inputs+i];
+    if(mesh_pages_producible(p,m->slot)<generation) return 0;
+  }
+  size_t selected=0;
+  for(uint32_t row=0;row<f->rows;row++){
+    unsigned ready=1;
+    for(uint32_t i=0;i<f->inputs;i++){
+      const struct mesh_pages_map *m=&f->maps[i]; const struct slot *s=&p->slots[m->slot];
+      if(generation<=m->lag){ ready=0; break; }
+      for(uint32_t j=0;j<m->count;j++){
+        uint32_t at=m->first+row*m->stride+j;
+        ready&=__atomic_load_n(s->stamp+at,__ATOMIC_ACQUIRE)==generation-m->lag;
+        ready&=__atomic_load_n(s->table+at,__ATOMIC_ACQUIRE)!=ABSENT;
+      }
+    }
+    if(!ready) continue;
+    for(uint32_t i=0;i<f->outputs;i++){
+      const struct mesh_pages_map *m=&f->maps[f->inputs+i]; const struct slot *s=&p->slots[m->slot];
+      for(uint32_t j=0;j<m->count;j++) ready&=__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)<generation;
+    }
+    if(!ready) continue;
+    for(uint32_t i=0;i<f->outputs;i++){
+      const struct mesh_pages_map *m=&f->maps[f->inputs+i]; struct slot *s=&p->slots[m->slot];
+      for(uint32_t j=0;j<m->count;j++) __atomic_store_n(s->stamp+m->first+row*m->stride+j,WRITING|generation,__ATOMIC_RELEASE);
+    }
+    f->indices[selected++]=row;
+  }
+  return selected;
+}
+
+int mesh_pages_complete(mesh_pages_function *f, uint32_t row, uint64_t generation){
+  if(row>=f->rows || !generation || generation>=WRITING) return -EINVAL;
+  for(uint32_t i=0;i<f->outputs;i++){
+    const struct mesh_pages_map *m=&f->maps[f->inputs+i];
+    const struct slot *s=&f->owner->slots[m->slot];
+    for(uint32_t j=0;j<m->count;j++) if(__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)!=(WRITING|generation)) return -EINVAL;
+  }
+  for(uint32_t i=0;i<f->outputs;i++){
+    const struct mesh_pages_map *m=&f->maps[f->inputs+i];
+    int result=mesh_pages_publish(f->owner,m->slot,m->first+row*m->stride,m->count,generation);
+    if(result) return result;
+  }
+  return 0;
+}
 void mesh_pages_produce_hook(mesh_pages *p, mesh_pages_hook hook, void *capture){ p->hook=hook; p->capture=capture; }
 uint64_t mesh_pages_producible(const mesh_pages *p, uint32_t slot){
   return slot<p->count?atomic_load_explicit(&p->slots[slot].producible,memory_order_acquire):0; }
@@ -194,31 +296,42 @@ int mesh_pages_digest(const mesh_pages *p, uint32_t slot, uint64_t generation, u
   }
   return 0;
 }
+static void function_free(mesh_pages_function *f){
+  if(!f) return;
+  mesh_pages_function **at=&f->owner->functions;
+  while(*at && *at!=f) at=&(*at)->next;
+  if(*at) *at=f->next;
+  free(f->maps); free(f->indices); free(f);
+}
 int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, size_t count){
   if(atomic_load_explicit(&p->running,memory_order_acquire)) return EBUSY;
   struct reduce *list=zeroed(count*sizeof *list); if(!list) return ENOMEM;
+  int error=EINVAL;
   for(size_t r=0;r<count;r++){
     const struct mesh_pages_reduce *x=&reduces[r];
     if(x->output>=p->count || !x->inputs || x->inputs>MESH_PAGES_DEPENDENCIES || !x->group || x->kind>MESH_REDUCE_PARTIAL) goto invalid;
+    if(x->input[0]>=p->count) goto invalid;
     const struct slot *out=&p->slots[x->output];
     uint32_t pages=p->slots[x->input[0]].spec.pages, factor=x->kind==MESH_REDUCE_PARTIAL?2:1;
-    if(out->spec.receive || pages%x->group || out->spec.pages!=pages*factor || !out->spec.pagewise) goto invalid;
-    if(x->bytes%16 || !x->bytes || (size_t)x->offset+x->bytes>mesh_pages_payload(p)) goto invalid;
+    if(out->spec.receive || pages%x->group || (uint64_t)out->spec.pages!=(uint64_t)pages*factor || !out->spec.pagewise) goto invalid;
+    if(x->bytes%16 || !x->bytes || (size_t)x->offset+x->bytes>mesh_pages_payload(p) || (factor==2 && x->bytes%32)) goto invalid;
+    struct mesh_pages_map inputs[MESH_PAGES_DEPENDENCIES], output={x->output,0,x->group*factor,x->group*factor,0};
     for(uint8_t i=0;i<x->inputs;i++){
       if(x->input[i]>=p->count || p->slots[x->input[i]].spec.pages!=pages) goto invalid;
       int listed=0; for(uint8_t d=0;d<out->spec.depends;d++) listed|=out->spec.dependency[d]==x->input[i];
       if(!listed) goto invalid;
+      inputs[i]=(struct mesh_pages_map){x->input[i],0,x->group,x->group,0};
     }
-    list[r].spec=*x; list[r].groups=pages/x->group; list[r].owner=p;
-    list[r].consumed=zeroed(list[r].groups*sizeof *list[r].consumed); list[r].indices=zeroed(list[r].groups*sizeof *list[r].indices);
-    if(!list[r].consumed || !list[r].indices){ for(size_t q=0;q<=r;q++){ free(list[q].consumed); free(list[q].indices); } free(list); return ENOMEM; }
+    list[r].spec=*x; list[r].owner=p;
+    list[r].function=bind_function(p,(struct mesh_pages_function_spec){inputs,&output,x->inputs,1,pages/x->group},1);
+    if(!list[r].function){ error=errno; goto invalid; }
   }
-  for(size_t r=0;r<p->reduce_count;r++){ free(p->reduces[r].consumed); free(p->reduces[r].indices); }
+  for(size_t r=0;r<p->reduce_count;r++) function_free(p->reduces[r].function);
   free(p->reduces); p->reduces=list; p->reduce_count=count;
   return 0;
 invalid:
-  for(size_t q=0;q<count;q++){ free(list[q].consumed); free(list[q].indices); }
-  free(list); return EINVAL;
+  for(size_t q=0;q<count;q++) function_free(list[q].function);
+  free(list); return error;
 }
 int mesh_pages_status(const mesh_pages *p){ return atomic_load_explicit(&p->status,memory_order_acquire); }
 uint64_t mesh_pages_incarnation(const mesh_pages *p){ return p->incarnation; }
@@ -227,7 +340,7 @@ void mesh_pages_fail(mesh_pages *p, int error){
 }
 
 static int mark(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation, int receive){
-  if(slot>=p->count || (p->slots[slot].spec.receive!=0)!=receive || !generation) return -EINVAL;
+  if(slot>=p->count || (p->slots[slot].spec.receive!=0)!=receive || !generation || generation>=WRITING) return -EINVAL;
   struct slot *s=&p->slots[slot];
   if(first>s->spec.pages || count>s->spec.pages-first) return -EINVAL;
   if(!receive && atomic_load_explicit(&s->producible,memory_order_acquire)<generation) return -EBUSY;
@@ -444,7 +557,8 @@ static void transmit(mesh_pages *p, size_t i){
       for(;bits;bits&=bits-1){
         uint32_t page=(uint32_t)(w*64+(size_t)__builtin_ctzll(bits));
         if(s->spec.receive){ release_entry(p,s,page,generation); continue; }
-        if(s->stamp[page]>=generation) continue;
+        uint64_t stamp=__atomic_load_n(s->stamp+page,__ATOMIC_ACQUIRE);
+        if(stamp!=(WRITING|generation) && stamp>=generation) continue;
         __atomic_store_n(&s->stamp[page],generation,__ATOMIC_RELEASE);
         release_dependencies(p,s,page,generation);
         if(s->transported) s->pending[w]|=UINT64_C(1)<<(page%64);
@@ -475,7 +589,6 @@ static void refresh(mesh_pages *p){
   if(!linked(p)) mesh_pages_fail(p,ENOTCONN);
 }
 
-static void reduce_step(mesh_pages *p, struct reduce *r);
 int mesh_pages_progress(mesh_pages *p){
   p->now=clock_ns();
   int status=atomic_load_explicit(&p->status,memory_order_acquire);
@@ -491,46 +604,40 @@ int mesh_pages_progress(mesh_pages *p){
   for(size_t i=0;i<p->count;i++) offer(p,i);
   return atomic_load_explicit(&p->status,memory_order_acquire);
 }
-static void reduce_step(mesh_pages *p, struct reduce *r){
+static size_t reduce_step(mesh_pages *p, struct reduce *r){
   const struct mesh_pages_reduce *x=&r->spec;
-  if(!r->generation) r->generation=atomic_load_explicit(&p->slots[x->input[0]].highest,memory_order_acquire);
-  uint64_t g=r->generation;
-  if(!g || atomic_load_explicit(&p->slots[x->output].producible,memory_order_acquire)<g) return;
-  size_t selected=mesh_pages_select(p,x->input,x->inputs,x->group,g,r->consumed,r->indices);
-  if(!selected) return;
+  uint64_t g=mesh_pages_highest(p,x->input[0]);
+  const uint32_t *indices;
+  size_t selected=mesh_pages_scan(r->function,g,&indices);
   size_t vectors=x->bytes/16, factor=x->kind==MESH_REDUCE_PARTIAL?2:1;
   for(size_t n=0;n<selected;n++){
-    uint32_t group=r->indices[n];
+    uint32_t row=indices[n];
     for(uint32_t k=0;k<x->group;k++){
-      uint32_t page=group*x->group+k;
-      float8 sum[256];
-      for(size_t v=0;v<vectors;v++) sum[v]=0;
-      for(uint8_t i=0;i<x->inputs;i++){
-        const half8 *h=(const half8*)(payload_at(p,__atomic_load_n(&p->slots[x->input[i]].table[page],__ATOMIC_ACQUIRE))+x->offset);
-        for(size_t v=0;v<vectors;v++) sum[v]+=__builtin_convertvector(h[v],float8);
-      }
+      uint32_t page=row*x->group+k;
+      const half8 *inputs[MESH_PAGES_DEPENDENCIES];
+      for(uint8_t i=0;i<x->inputs;i++) inputs[i]=(const half8*)(mesh_pages_data(p,x->input[i],page)+x->offset);
       unsigned char *out=payload_at(p,p->slots[x->output].table[page*factor])+x->offset;
-      if(x->kind==MESH_REDUCE_MATERIALIZED){ half8 *o=(half8*)out; for(size_t v=0;v<vectors;v++) o[v]=__builtin_convertvector(sum[v],half8); }
-      else {
-        float8 *o=(float8*)out, *o2=(float8*)(payload_at(p,p->slots[x->output].table[page*factor+1])+x->offset);
-        size_t half=vectors/2;
-        for(size_t v=0;v<half;v++) o[v]=sum[v];
-        for(size_t v=half;v<vectors;v++) o2[v-half]=sum[v];
+      for(size_t v=0;v<vectors;v++){
+        float8 sum=0;
+        for(uint8_t i=0;i<x->inputs;i++) sum+=__builtin_convertvector(inputs[i][v],float8);
+        if(x->kind==MESH_REDUCE_MATERIALIZED) ((half8*)out)[v]=__builtin_convertvector(sum,half8);
+        else {
+          size_t half=vectors/2;
+          float8 *destination=v<half?(float8*)out:(float8*)(payload_at(p,p->slots[x->output].table[page*factor+1])+x->offset);
+          destination[v%half]=sum;
+        }
       }
     }
-    mesh_pages_publish(p,x->output,group*x->group*(uint32_t)factor,x->group*(uint32_t)factor,g);
+    if(mesh_pages_complete(r->function,row,g)) mesh_pages_fail(p,EINVAL);
   }
-  r->done+=(uint32_t)selected;
-  if(r->done==r->groups){ r->done=0; r->generation+=p->versions; }
+  return selected;
 }
 static void *reduce_run(void *argument){
   struct reduce *r=argument; mesh_pages *p=r->owner;
   pthread_setname_np("mesh-reduce");
   unsigned idle=0;
   while(atomic_load_explicit(&p->running,memory_order_relaxed)){
-    uint32_t done=r->done; uint64_t generation=r->generation;
-    reduce_step(p,r);
-    idle=done==r->done && generation==r->generation?idle+1:0;
+    idle=reduce_step(p,r)?0:idle+1;
     if(idle>4096){ sched_yield(); idle=4096; }
   }
   return NULL;
@@ -586,7 +693,6 @@ int mesh_pages_recover(mesh_pages *p){
     memset(s->uses,0,s->spec.pages);
     for(size_t i=0;i<DIGESTS;i++){ struct digest *d=&s->digest[i]; d->pending=0; d->count=0; atomic_store(&d->hash,0); atomic_store(&d->generation,0); }
   }
-  for(size_t r=0;r<p->reduce_count;r++){ struct reduce *x=&p->reduces[r]; x->generation=0; x->done=0; memset(x->consumed,0,x->groups*sizeof *x->consumed); }
   flush_later(p);
   atomic_store(&p->work_tail,atomic_load(&p->work_head));
   p->flying=0; p->incarnation++;
@@ -595,9 +701,10 @@ int mesh_pages_recover(mesh_pages *p){
 }
 
 int mesh_pages_settled(const mesh_pages *p){
-  if(p->flying || p->later_count) return 0;
+  if(p->flying || p->later_count || atomic_load_explicit(&p->work_head,memory_order_acquire)!=atomic_load_explicit(&p->work_tail,memory_order_acquire)) return 0;
   for(size_t i=0;i<p->count;i++){
     const struct slot *s=&p->slots[i];
+    for(uint32_t j=0;j<s->spec.pages;j++) if(__atomic_load_n(s->stamp+j,__ATOMIC_ACQUIRE)&WRITING) return 0;
     for(size_t w=0;w<s->words;w++)
       if(s->pending[w] || atomic_load_explicit(&s->publish[0][w],memory_order_acquire) || atomic_load_explicit(&s->publish[1][w],memory_order_acquire)) return 0;
   }
@@ -609,11 +716,11 @@ size_t mesh_pages_describe(const mesh_pages *p, char *out, size_t bytes){
     (unsigned long long)p->duplicates,(unsigned long long)p->overwrites,(unsigned long long)p->faults,(unsigned long long)p->foreign_epoch);
   for(size_t i=0;i<p->count && n<bytes;i++){
     const struct slot *s=&p->slots[i];
-    uint32_t present=0;
-    for(uint32_t j=0;j<s->spec.pages;j++) present+=s->table[j]!=ABSENT;
-    n+=(size_t)snprintf(out+n,bytes-n,"slot %zu sid=%u %s peer=%u pages=%u producible=%llu highest=%llu complete=%llu present=%u flying=%u released=%llu fills=[%llu:%llu %llu:%llu]\n",
+    uint32_t present=0, writing=0;
+    for(uint32_t j=0;j<s->spec.pages;j++){ present+=s->table[j]!=ABSENT; writing+=(__atomic_load_n(s->stamp+j,__ATOMIC_ACQUIRE)&WRITING)!=0; }
+    n+=(size_t)snprintf(out+n,bytes-n,"slot %zu sid=%u %s peer=%u pages=%u producible=%llu highest=%llu complete=%llu present=%u writing=%u flying=%u released=%llu fills=[%llu:%llu %llu:%llu]\n",
       i,s->spec.sid,s->spec.receive?"rx":s->transported?"tx":"local",s->spec.peer,s->spec.pages,
-      (unsigned long long)atomic_load(&s->producible),(unsigned long long)atomic_load(&s->highest),(unsigned long long)atomic_load(&s->complete),present,s->flying,
+      (unsigned long long)atomic_load(&s->producible),(unsigned long long)atomic_load(&s->highest),(unsigned long long)atomic_load(&s->complete),present,writing,s->flying,
       (unsigned long long)s->released,(unsigned long long)atomic_load(&s->fill_generation[0]),(unsigned long long)atomic_load(&s->fill_count[0]),
       (unsigned long long)atomic_load(&s->fill_generation[1]),(unsigned long long)atomic_load(&s->fill_count[1]));
   }
