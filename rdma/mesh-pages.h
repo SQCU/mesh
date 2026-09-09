@@ -4,7 +4,7 @@
 
 #define MESH_PAGES_LOCAL UINT16_MAX
 #define MESH_PAGES_DEPENDENCIES 8
-struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends, pagewise; uint32_t dependency[MESH_PAGES_DEPENDENCIES]; };
+struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends, pagewise; uint32_t dependency[MESH_PAGES_DEPENDENCIES], lag[MESH_PAGES_DEPENDENCIES]; };
 struct mesh_pages_policy { uint64_t open_retry_ns, fault_seed; uint32_t fault_period, control_pages; };
 typedef struct mesh_pages mesh_pages;
 typedef void (*mesh_pages_hook)(void *capture, uint32_t slot, uint64_t generation);
@@ -27,14 +27,13 @@ static inline uint64_t mesh_pages_load(const uint64_t *word){ return __atomic_lo
 void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
 size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count,
   uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
-void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
-size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count, uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
 uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation);
 uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot);
 
 void mesh_pages_produce_hook(mesh_pages *p, mesh_pages_hook hook, void *capture);
 uint64_t mesh_pages_producible(const mesh_pages *p, uint32_t slot);
 int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation);
+int mesh_pages_consume(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation);
 int mesh_pages_faulted(const mesh_pages *p, uint32_t slot, uint64_t generation, uint32_t *first, uint32_t *second);
 uint64_t mesh_pages_hash(const void *data, size_t bytes, uint64_t seed);
 int mesh_pages_agreed(const mesh_pages *p, uint32_t slot);

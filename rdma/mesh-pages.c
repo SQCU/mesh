@@ -27,7 +27,7 @@ struct slot {
   uint32_t flying;
   _Atomic uint64_t fill_generation[2], fill_count[2], highest, complete, producible;
   uint64_t released;
-  uint32_t dependent[MESH_PAGES_DEPENDENCIES], dependents;
+  uint32_t dependent[MESH_PAGES_DEPENDENCIES], dependent_lag[MESH_PAGES_DEPENDENCIES], dependents;
   uint64_t fault_generation; uint32_t fault_first, fault_second, fault_have;
   int agreed, open_due, abort_due, transported;
   uint64_t open_ns, open_retry, peer_nonce;
@@ -129,6 +129,7 @@ mesh_pages *mesh_pages_compile(struct mesh_ctx *context, struct mesh_epoch epoch
     for(uint8_t d=0;d<s->spec.depends;d++){
       struct slot *a=&p->slots[s->spec.dependency[d]];
       if(a->dependents==MESH_PAGES_DEPENDENCIES){ mesh_pages_free(p); errno=E2BIG; return NULL; }
+      a->dependent_lag[a->dependents]=s->spec.lag[d];
       a->dependent[a->dependents++]=(uint32_t)i;
     }
   }
@@ -186,11 +187,11 @@ void mesh_pages_fail(mesh_pages *p, int error){
   int expected=0; atomic_compare_exchange_strong(&p->status,&expected,-(error>0?error:ECANCELED));
 }
 
-int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
-  if(slot>=p->count || p->slots[slot].spec.receive || !generation) return -EINVAL;
+static int mark(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation, int receive){
+  if(slot>=p->count || (p->slots[slot].spec.receive!=0)!=receive || !generation) return -EINVAL;
   struct slot *s=&p->slots[slot];
   if(first>s->spec.pages || count>s->spec.pages-first) return -EINVAL;
-  if(atomic_load_explicit(&s->producible,memory_order_acquire)<generation) return -EBUSY;
+  if(!receive && atomic_load_explicit(&s->producible,memory_order_acquire)<generation) return -EBUSY;
   uint32_t k=parity(p,generation);
   atomic_store_explicit(&s->publishing[k],generation,memory_order_release);
   for(size_t at=first,end=first+count;at<end;){
@@ -199,6 +200,13 @@ int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t co
     at+=bits;
   }
   return 0;
+}
+
+int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
+  return mark(p,slot,first,count,generation,0);
+}
+int mesh_pages_consume(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
+  return mark(p,slot,first,count,generation,1);
 }
 
 static uint32_t take_control(mesh_pages *p){ return p->control_free?p->control[--p->control_free]:CONTROL; }
@@ -251,7 +259,7 @@ static void release_dependencies(mesh_pages *p, struct slot *s, uint32_t page, u
   if(s->spec.pagewise){
     for(uint8_t d=0;d<s->spec.depends;d++){
       struct slot *a=&p->slots[s->spec.dependency[d]];
-      if(a->spec.receive && page<a->spec.pages) release_entry(p,a,page,generation);
+      if(a->spec.receive && page<a->spec.pages && generation>s->spec.lag[d]) release_entry(p,a,page,generation-s->spec.lag[d]);
     }
     return;
   }
@@ -259,8 +267,8 @@ static void release_dependencies(mesh_pages *p, struct slot *s, uint32_t page, u
   s->released=generation;
   for(uint8_t d=0;d<s->spec.depends;d++){
     struct slot *a=&p->slots[s->spec.dependency[d]];
-    if(!a->spec.receive) continue;
-    for(uint32_t j=0;j<a->spec.pages;j++) release_entry(p,a,j,generation);
+    if(!a->spec.receive || generation<=s->spec.lag[d]) continue;
+    for(uint32_t j=0;j<a->spec.pages;j++) release_entry(p,a,j,generation-s->spec.lag[d]);
   }
 }
 static void arrive(mesh_pages *p, struct slot *s, uint32_t page, uint32_t physical, uint64_t generation){
@@ -296,6 +304,7 @@ static void offer(mesh_pages *p, size_t i){
     for(uint32_t d=0;d<s->dependents;d++){
       const struct slot *b=&p->slots[s->dependent[d]];
       uint64_t shown=b->spec.pagewise && !s->transported?atomic_load_explicit(&b->complete,memory_order_acquire):atomic_load_explicit(&b->highest,memory_order_acquire);
+      shown=shown>s->dependent_lag[d]?shown-s->dependent_lag[d]:0;
       if(shown<limit) limit=shown;
     }
     limit+=p->versions;
@@ -366,7 +375,6 @@ static void acknowledge(mesh_pages *p){
 }
 static void transmit(mesh_pages *p, size_t i){
   struct slot *s=&p->slots[i];
-  if(s->spec.receive) return;
   for(uint32_t k=0;k<2;k++){
     for(size_t w=0;w<s->words;w++){
       uint64_t bits=atomic_exchange_explicit(&s->publish[k][w],0,memory_order_acquire);
@@ -374,6 +382,7 @@ static void transmit(mesh_pages *p, size_t i){
       uint64_t generation=atomic_load_explicit(&s->publishing[k],memory_order_acquire);
       for(;bits;bits&=bits-1){
         uint32_t page=(uint32_t)(w*64+(size_t)__builtin_ctzll(bits));
+        if(s->spec.receive){ release_entry(p,s,page,generation); continue; }
         if(s->stamp[page]>=generation) continue;
         __atomic_store_n(&s->stamp[page],generation,__ATOMIC_RELEASE);
         release_dependencies(p,s,page,generation);
@@ -492,10 +501,9 @@ int mesh_pages_recover(mesh_pages *p){
 }
 
 int mesh_pages_settled(const mesh_pages *p){
-  if(p->flying) return 0;
+  if(p->flying || p->later_count) return 0;
   for(size_t i=0;i<p->count;i++){
     const struct slot *s=&p->slots[i];
-    if(s->spec.receive) continue;
     for(size_t w=0;w<s->words;w++)
       if(s->pending[w] || atomic_load_explicit(&s->publish[0][w],memory_order_acquire) || atomic_load_explicit(&s->publish[1][w],memory_order_acquire)) return 0;
   }
