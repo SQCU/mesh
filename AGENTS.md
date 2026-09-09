@@ -294,3 +294,8 @@ no resets, cleans, stashes, backup copies, or uncommitted source transfers.
 Record the commits used for measurements and run distributed measurements on
 the available RDMA substrate. This governs development synchronization; the
 bootstrap continues to follow the latest named branch.
+
+Shared-memory operands have no privacy classification. Their storage must be
+the actual RDMA-sendable pages named by the canonical page table; do not create
+a separate dense, hidden, copied or specially local operand store. Metadata
+describing a foreign buffer does not satisfy this requirement.
