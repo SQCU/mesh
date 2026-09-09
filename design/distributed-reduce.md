@@ -162,11 +162,18 @@ storage dependency on the result of the comparison.
 
 ## Failure of a participant
 
-A participant may vanish at any moment. Rendezvous happens once per
-incarnation with a nonce; a nonce that changes means the peer restarted. The
-bridge's port phase reports a lost link. Either poisons the program; between
-function evaluations the tables are cleared, a new nonce drawn, and the
-schedule resumes from the last consumed step (lineage again).
+A participant may vanish at any moment, and nothing inside the runtime
+reconciles it. There is no rendezvous, no nonce, no abort frame and no retry:
+the only words exchanged are pages. The bridge's port phase reports a lost
+link and the status word goes negative. A peer that restarts numbers its
+generations from the start; its pages are counted stale, and a page that
+carries another program's epoch is recorded as the foreign-epoch word for the
+consumer to read. Either way the evaluations in flight stop concluding, and
+the consumer decides, at its own discretion and by its own clock, that the
+job has failed: it returns a failure value, and whoever launched the job
+relaunches it on both participants under a fresh epoch. What the old
+rendezvous carried — plan, page count, stride, incarnation — is metadata that
+rides in the digest page's a-priori words and is compared there.
 
 ## Ownership
 

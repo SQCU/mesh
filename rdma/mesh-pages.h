@@ -5,7 +5,7 @@
 #define MESH_PAGES_LOCAL UINT16_MAX
 #define MESH_PAGES_DEPENDENCIES 8
 struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends, pagewise; uint32_t dependency[MESH_PAGES_DEPENDENCIES], lag[MESH_PAGES_DEPENDENCIES]; };
-struct mesh_pages_policy { uint64_t open_retry_ns, fault_seed; uint32_t fault_period, control_pages; };
+struct mesh_pages_policy { uint64_t fault_seed; uint32_t fault_period; };
 #define MESH_REDUCE_MATERIALIZED 0
 #define MESH_REDUCE_PARTIAL 1
 struct mesh_pages_reduce { uint32_t output; uint32_t input[MESH_PAGES_DEPENDENCIES]; uint8_t inputs, kind; uint32_t group, offset, bytes; };
@@ -40,7 +40,7 @@ int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t co
 int mesh_pages_consume(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation);
 int mesh_pages_faulted(const mesh_pages *p, uint32_t slot, uint64_t generation, uint32_t *first, uint32_t *second);
 uint64_t mesh_pages_hash(const void *data, size_t bytes, uint64_t seed);
-int mesh_pages_agreed(const mesh_pages *p, uint32_t slot);
+uint64_t mesh_pages_foreign_epoch(const mesh_pages *p);
 int mesh_pages_digest(const mesh_pages *p, uint32_t slot, uint64_t generation, uint64_t *hash);
 int mesh_pages_status(const mesh_pages *p);
 int mesh_pages_settled(const mesh_pages *p);
