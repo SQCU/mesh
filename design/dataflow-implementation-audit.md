@@ -338,3 +338,31 @@ The acceptance order is source correspondence to both flows, actual RDMA
 numerical results, then matched performance against the fastest validated
 local functions. Published prior art establishes implementability; it cannot
 substitute for any of these implementation obligations.
+
+### Sendable operand pages, September 9 operator correction
+
+Shared-memory operands have no privacy classification and no exemption from
+the RDMA page representation. A dense allocation outside the page table does
+not become compliant through stamps, a lifetime descriptor, or registration
+as a special local buffer. Numerical views must address the actual sendable
+page payloads. The attempted dense-storage approach was withdrawn before
+implementation.
+
+The next implementation moves ANE normalization results into ordinary mesh
+slots. Each native input channel occupies one page payload; Core ML's strided
+input view points at those payloads directly. There is no staging copy. This
+layout is deliberately recorded as an intermediate, potentially expensive
+packing: a 128-row channel occupies 256 bytes of a page, and no performance
+advantage is presumed. The model's output views already point at partial pages.
+
+Native normalization completion publishes its destination rows. The caller
+scans those stamps, claims the partial output rows, and invokes Core ML through
+its native callback API. Prediction tasks and separate prenorm completion words
+are removed. Claims and cancellation are operations on destination stamps;
+they require a single scanner for overlapping destination spans, as in the
+static caller. Failure cleanup waits for outstanding writes represented in the
+page table, including callbacks already issued before a link error.
+
+The remaining dense Metal intermediates, embedding/head words, job and stage
+state, and consumed masks are still divergences. This change supplies no
+exception for them and does not finish the caller rewrite.

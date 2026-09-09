@@ -265,6 +265,27 @@ size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32
   return selected;
 }
 
+int mesh_pages_claim(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
+  if(slot>=p->count || !generation || generation>=WRITING || !count || mesh_pages_status(p)<0) return 0;
+  struct slot *s=&p->slots[slot];
+  if(s->spec.receive || first>s->spec.pages || count>s->spec.pages-first || mesh_pages_producible(p,slot)<generation) return 0;
+  for(uint32_t j=first;j<first+count;j++) if(__atomic_load_n(s->stamp+j,__ATOMIC_ACQUIRE)>=generation) return 0;
+  for(uint32_t j=first;j<first+count;j++) __atomic_store_n(s->stamp+j,WRITING|generation,__ATOMIC_RELEASE);
+  return 1;
+}
+void mesh_pages_cancel(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
+  if(slot>=p->count || first>p->slots[slot].spec.pages || count>p->slots[slot].spec.pages-first) return;
+  for(uint32_t j=first;j<first+count;j++){
+    uint64_t expected=WRITING|generation;
+    __atomic_compare_exchange_n(p->slots[slot].stamp+j,&expected,0,0,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
+  }
+}
+size_t mesh_pages_writing(const mesh_pages *p){
+  size_t count=0;
+  for(size_t i=0;i<p->count;i++) for(uint32_t j=0;j<p->slots[i].spec.pages;j++)
+    count+=(__atomic_load_n(p->slots[i].stamp+j,__ATOMIC_ACQUIRE)&WRITING)!=0;
+  return count;
+}
 int mesh_pages_complete(mesh_pages_function *f, uint32_t row, uint64_t generation){
   if(row>=f->rows || !generation || generation>=WRITING) return -EINVAL;
   for(uint32_t i=0;i<f->outputs;i++){
@@ -343,6 +364,7 @@ static int mark(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, ui
   if(slot>=p->count || (p->slots[slot].spec.receive!=0)!=receive || !generation || generation>=WRITING) return -EINVAL;
   struct slot *s=&p->slots[slot];
   if(first>s->spec.pages || count>s->spec.pages-first) return -EINVAL;
+  if(!receive && mesh_pages_status(p)<0){ mesh_pages_cancel(p,slot,first,count,generation); return mesh_pages_status(p); }
   if(!receive && atomic_load_explicit(&s->producible,memory_order_acquire)<generation) return -EBUSY;
   uint32_t k=parity(p,generation);
   atomic_store_explicit(&s->publishing[k],generation,memory_order_release);
@@ -566,7 +588,7 @@ static void transmit(mesh_pages *p, size_t i){
       }
     }
   }
-  if(!s->transported) return;
+  if(!s->transported || mesh_pages_status(p)<0) return;
   for(size_t w=0;w<s->words && p->flying<WINDOW;w++){
     uint64_t bits=s->pending[w];
     for(;bits && p->flying<WINDOW;bits&=bits-1){
@@ -599,8 +621,8 @@ int mesh_pages_progress(mesh_pages *p){
     if(d.page>=p->M->pool){ p->integrity++; continue; }
     receive(p,d.page,d.bytes,d.node);
   }
-  if(status<0) return status;
   for(size_t i=0;i<p->count;i++) transmit(p,i);
+  if(status<0) return status;
   for(size_t i=0;i<p->count;i++) offer(p,i);
   return atomic_load_explicit(&p->status,memory_order_acquire);
 }

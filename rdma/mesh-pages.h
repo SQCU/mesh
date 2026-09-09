@@ -38,6 +38,9 @@ size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t coun
 mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec);
 size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32_t **indices);
 int mesh_pages_complete(mesh_pages_function *f, uint32_t row, uint64_t generation);
+int mesh_pages_claim(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation);
+void mesh_pages_cancel(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation);
+size_t mesh_pages_writing(const mesh_pages *p);
 uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation);
 uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot);
 
