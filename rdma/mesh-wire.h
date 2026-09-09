@@ -24,7 +24,7 @@ static inline size_t mesh_frame_encode(void *data,const struct mesh_frame *frame
   memcpy(data,&out,sizeof out); return sizeof out+payload;
 }
 static inline int mesh_frame_receive(uint32_t kind){
-  return kind==K_DATA || kind==K_FIN || kind==K_CLOSE || kind==K_OPEN || kind==K_ABORT_RX || kind==K_ABORTED_RX || kind==K_DIGEST;
+  return kind==K_DATA || kind==K_FIN || kind==K_CLOSE || kind==K_OPEN || kind==K_ABORT_RX || kind==K_ABORTED_RX;
 }
 static inline int mesh_frame_reply(uint32_t kind){
   return kind==K_CLOSE?K_CLOSED:kind==K_ABORT_RX?K_ABORTED_TX:kind==K_ABORT_TX?K_ABORTED_RX:-1;

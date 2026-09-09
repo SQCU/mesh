@@ -60,8 +60,8 @@ producible_A = consumed_A + V
 ```
 
 Progress is the first downstream page only when that page proves consumption
-of the whole input. A pagewise consumer of local storage uses completed output
-progress instead. Received input pages retire on the corresponding output
+of the whole input. A pagewise consumer's progress is its completed output,
+whether the input it consumed is local or a copy received from a peer. Received input pages retire on the corresponding output
 publication: all input pages for a whole-input dependency, matching page indices
 for a pagewise dependency.
 
@@ -95,8 +95,11 @@ higher-precision state itself: FP32 row accumulators and squared sums for the
 block, and its own index of which pages it has reduced. It scans the stamps,
 reduces any page whose operands are present, normalizes a row the moment both
 of its pages are in, and publishes that row at once, so the all-gather streams
-row by row behind the reduce instead of after a dense block. Transmitted pages
-are copies at the peer, so their reuse keeps the whole-buffer proof. This is
+row by row behind the reduce instead of after a dense block. A transmitted
+buffer's copy at the peer is rewritten whole by the next generation, so its
+reuse is proved only by a page the peer publishes after consuming all of it:
+the completed pagewise output, or the peer's digest page, whose received
+hashes are counted at release. This is
 the combiner of MapReduce and the pipelined chunking of the ring all-reduce
 (Patarasuk and Yuan 2009), expressed as a dependency kind rather than a
 schedule.
@@ -137,14 +140,25 @@ buffers is not admissible on this platform, whatever its data-flow appeal.
 
 Every received row carries a count of its dependents and is released at zero.
 A released page is zeroed on the runtime thread before it returns to the
-bridge. The digest is the runtime's: received rows are hashed when released
-(after consumption), sent rows when acknowledged (after transmission), the sent
-hash travels in one control frame per (sid, generation), the receiver compares,
-and a mismatch sets the status word. A reduce is a runtime node
-(`mesh_pages_reduces`): a materialized reduce sums its input slots row by row
-as their pages land, in FP32, into an FP16 page-wise output slot; a partial
-reduce publishes the FP32 sums as page pairs for a further reduce. Callers bind
-functions to page views and publish; they do not hash, compare, or reduce.
+bridge. The runtime keeps, per slot and generation, the hash of the pages it
+handed to the NIC and the hash of the received pages it released after
+consumption; `mesh_pages_digest(p, slot, g, &hash)` reads it once every page
+of the slot has been counted. Nothing is sent for it. A reduce is a runtime
+node (`mesh_pages_reduces`): a materialized reduce sums its input slots row by
+row as their pages land, in FP32, into an FP16 page-wise output slot; a partial
+reduce publishes the FP32 sums as page pairs for a further reduce.
+
+The digest is a page like any other. A caller that checks binds a digest slot
+pair, writes its sent and received hashes for `g` into its page, publishes it,
+and compares when the peer's digest row carries stamp `g`. A disagreement
+concludes that function evaluation with a failure value and the caller
+repeats it; the status word is for the link, not for numbers. Because a
+received hash is counted only when its pages have been released, the peer's
+digest page for `g` is also the proof that the peer has consumed everything
+sent to it for `g`: a caller declares its digest receive slot as depending on
+the slots it transmits, and their storage for `g + V` becomes producible on
+that page's arrival. There is no control frame, no verdict slot, and no
+storage dependency on the result of the comparison.
 
 ## Failure of a participant
 

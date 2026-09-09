@@ -41,8 +41,7 @@ int mesh_pages_consume(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t co
 int mesh_pages_faulted(const mesh_pages *p, uint32_t slot, uint64_t generation, uint32_t *first, uint32_t *second);
 uint64_t mesh_pages_hash(const void *data, size_t bytes, uint64_t seed);
 int mesh_pages_agreed(const mesh_pages *p, uint32_t slot);
-uint64_t mesh_pages_agreements(const mesh_pages *p);
-uint64_t mesh_pages_disagreements(const mesh_pages *p);
+int mesh_pages_digest(const mesh_pages *p, uint32_t slot, uint64_t generation, uint64_t *hash);
 int mesh_pages_status(const mesh_pages *p);
 int mesh_pages_settled(const mesh_pages *p);
 int mesh_pages_recover(mesh_pages *p);

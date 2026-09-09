@@ -33,8 +33,7 @@ struct slot {
   int agreed, open_due, abort_due, transported;
   uint64_t open_ns, open_retry, peer_nonce;
   unsigned char *uses;
-  uint64_t digest[DIGESTS], digest_generation[DIGESTS], peer_digest[DIGESTS], peer_digest_generation[DIGESTS];
-  uint32_t digest_count[DIGESTS]; unsigned char digest_due[DIGESTS];
+  struct digest { uint64_t pending; _Atomic uint64_t hash, generation; uint32_t count; } digest[DIGESTS];
 };
 struct reduce { struct mesh_pages_reduce spec; uint64_t *consumed; uint32_t *indices; uint64_t generation; uint32_t groups, done; };
 struct mesh_pages {
@@ -50,7 +49,7 @@ struct mesh_pages {
   uint64_t nonce, incarnation;
   mesh_pages_hook hook; void *capture;
   struct reduce *reduces; size_t reduce_count;
-  uint64_t now, refreshed, integrity, stale, duplicates, overwrites, faults, agreements, disagreements;
+  uint64_t now, refreshed, integrity, stale, duplicates, overwrites, faults;
 };
 
 static uint64_t clock_ns(void){
@@ -189,8 +188,17 @@ uint64_t mesh_pages_producible(const mesh_pages *p, uint32_t slot){
 int mesh_pages_faulted(const mesh_pages *p, uint32_t slot, uint64_t generation, uint32_t *first, uint32_t *second){
   return slot<p->count && p->slots[slot].spec.receive && faulted(p,&p->slots[slot],generation,first,second); }
 int mesh_pages_agreed(const mesh_pages *p, uint32_t slot){ return slot<p->count && __atomic_load_n(&p->slots[slot].agreed,__ATOMIC_ACQUIRE); }
-uint64_t mesh_pages_agreements(const mesh_pages *p){ return p->agreements; }
-uint64_t mesh_pages_disagreements(const mesh_pages *p){ return p->disagreements; }
+int mesh_pages_digest(const mesh_pages *p, uint32_t slot, uint64_t generation, uint64_t *hash){
+  if(slot>=p->count) return 0;
+  for(size_t i=0;i<DIGESTS;i++){
+    const struct digest *d=&p->slots[slot].digest[i];
+    if(atomic_load_explicit(&d->generation,memory_order_acquire)!=generation) continue;
+    *hash=atomic_load_explicit(&d->hash,memory_order_relaxed);
+    atomic_thread_fence(memory_order_acquire);
+    return atomic_load_explicit(&d->generation,memory_order_relaxed)==generation;
+  }
+  return 0;
+}
 int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, size_t count){
   if(atomic_load_explicit(&p->running,memory_order_acquire)) return EBUSY;
   struct reduce *list=zeroed(count*sizeof *list); if(!list) return ENOMEM;
@@ -290,29 +298,24 @@ static void filled(mesh_pages *p, struct slot *s, uint64_t generation){
   if(generation>atomic_load_explicit(&s->highest,memory_order_relaxed)) atomic_store_explicit(&s->highest,generation,memory_order_release);
   if(count==s->spec.pages && generation>atomic_load_explicit(&s->complete,memory_order_relaxed)) atomic_store_explicit(&s->complete,generation,memory_order_release);
 }
-static size_t digest_index(struct slot *s, uint64_t generation){
-  size_t oldest=0;
+static struct digest *digest_entry(struct slot *s, uint64_t generation){
+  struct digest *oldest=s->digest;
   for(size_t i=0;i<DIGESTS;i++){
-    if(s->digest_generation[i]==generation) return i;
-    if(s->digest_generation[i]<s->digest_generation[oldest]) oldest=i;
+    struct digest *d=&s->digest[i];
+    if(d->pending==generation) return d;
+    if(d->pending<oldest->pending) oldest=d;
   }
-  s->digest_generation[oldest]=generation; s->digest[oldest]=0; s->digest_count[oldest]=0; s->digest_due[oldest]=0;
+  atomic_store_explicit(&oldest->generation,0,memory_order_relaxed);
+  atomic_thread_fence(memory_order_release);
+  oldest->pending=generation; oldest->count=0;
+  atomic_store_explicit(&oldest->hash,0,memory_order_relaxed);
   return oldest;
 }
-static void digest_compare(mesh_pages *p, struct slot *s, size_t i){
-  if(s->digest_count[i]!=s->spec.pages) return;
-  for(size_t k=0;k<DIGESTS;k++){
-    if(s->peer_digest_generation[k]!=s->digest_generation[i]) continue;
-    if(s->peer_digest[k]==s->digest[i]) p->agreements++; else { p->disagreements++; mesh_pages_fail(p,EBADMSG); }
-    s->peer_digest_generation[k]=0; s->digest_generation[i]=0; s->digest_count[i]=0;
-    return;
-  }
-}
 static void digest_add(mesh_pages *p, struct slot *s, uint64_t generation, uint32_t page, const void *payload){
-  size_t i=digest_index(s,generation);
-  s->digest[i]+=mesh_pages_hash(payload,mesh_pages_payload(p),(uint64_t)page+1);
-  if(++s->digest_count[i]<s->spec.pages) return;
-  if(s->spec.receive) digest_compare(p,s,i); else s->digest_due[i]=1;
+  struct digest *d=digest_entry(s,generation);
+  uint64_t hash=atomic_load_explicit(&d->hash,memory_order_relaxed)+mesh_pages_hash(payload,mesh_pages_payload(p),(uint64_t)page+1);
+  atomic_store_explicit(&d->hash,hash,memory_order_relaxed);
+  if(++d->count==s->spec.pages) atomic_store_explicit(&d->generation,generation,memory_order_release);
 }
 static void release_entry(mesh_pages *p, struct slot *a, uint32_t j, uint64_t generation){
   if(a->stamp[j]!=generation || a->table[j]==ABSENT) return;
@@ -369,7 +372,7 @@ static void offer(mesh_pages *p, size_t i){
     limit=UINT64_MAX;
     for(uint32_t d=0;d<s->dependents;d++){
       const struct slot *b=&p->slots[s->dependent[d]];
-      uint64_t shown=b->spec.pagewise && !s->transported?atomic_load_explicit(&b->complete,memory_order_acquire):atomic_load_explicit(&b->highest,memory_order_acquire);
+      uint64_t shown=b->spec.pagewise?atomic_load_explicit(&b->complete,memory_order_acquire):atomic_load_explicit(&b->highest,memory_order_acquire);
       shown=shown>s->dependent_lag[d]?shown-s->dependent_lag[d]:0;
       if(shown<limit) limit=shown;
     }
@@ -417,14 +420,6 @@ static void receive(mesh_pages *p, uint32_t page, size_t bytes, int from){
     if(g<=s->stamp[at]){ if(g==s->stamp[at]) p->duplicates++; else p->stale++; break; }
     if(s->table[at]!=ABSENT){ p->overwrites++; release_page(p,s->table[at]); }
     keep=1; arrive(p,s,at,page,g);
-    break; }
-  case K_DIGEST: {
-    uint64_t hash=0; if(bytes!=header+8){ p->integrity++; break; }
-    memcpy(&hash,q+header,8);
-    size_t oldest=0;
-    for(size_t k=0;k<DIGESTS;k++) if(s->peer_digest_generation[k]<s->peer_digest_generation[oldest]) oldest=k;
-    s->peer_digest[oldest]=hash; s->peer_digest_generation[oldest]=g;
-    for(size_t i=0;i<DIGESTS;i++) if(s->digest_generation[i]==g) digest_compare(p,s,i);
     break; }
   case K_ABORT_RX: case K_ABORT_TX:
     mesh_pages_fail(p,frame.h.off>0&&frame.h.off<=INT32_MAX?(int)frame.h.off:ECANCELED);
@@ -476,8 +471,6 @@ static void transmit(mesh_pages *p, size_t i){
     }
     return;
   }
-  for(size_t i=0;i<DIGESTS;i++)
-    if(s->digest_due[i] && !control(p,s,K_DIGEST,0,s->digest_generation[i],&s->digest[i],8)){ s->digest_due[i]=0; s->digest_generation[i]=0; s->digest_count[i]=0; }
   for(size_t w=0;w<s->words && p->flying<WINDOW;w++){
     uint64_t bits=s->pending[w];
     for(;bits && p->flying<WINDOW;bits&=bits-1){
@@ -601,8 +594,7 @@ int mesh_pages_recover(mesh_pages *p){
     atomic_store(&s->highest,0); atomic_store(&s->complete,0); atomic_store(&s->producible,0);
     s->flying=0; s->released=0; s->fault_generation=0; s->fault_have=0;
     memset(s->uses,0,s->spec.pages);
-    memset(s->digest,0,sizeof s->digest); memset(s->digest_generation,0,sizeof s->digest_generation); memset(s->digest_count,0,sizeof s->digest_count);
-    memset(s->peer_digest,0,sizeof s->peer_digest); memset(s->peer_digest_generation,0,sizeof s->peer_digest_generation); memset(s->digest_due,0,sizeof s->digest_due);
+    for(size_t i=0;i<DIGESTS;i++){ struct digest *d=&s->digest[i]; d->pending=0; d->count=0; atomic_store(&d->hash,0); atomic_store(&d->generation,0); }
     s->agreed=!s->transported; s->open_due=s->abort_due=0; s->open_ns=s->open_retry=0; s->peer_nonce=0;
   }
   for(size_t r=0;r<p->reduce_count;r++){ struct reduce *x=&p->reduces[r]; x->generation=1; x->done=0; memset(x->consumed,0,x->groups*sizeof *x->consumed); }
@@ -623,9 +615,9 @@ int mesh_pages_settled(const mesh_pages *p){
   return 1;
 }
 size_t mesh_pages_describe(const mesh_pages *p, char *out, size_t bytes){
-  size_t n=(size_t)snprintf(out,bytes,"status=%d incarnation=%llu flying=%zu integrity=%llu stale=%llu duplicates=%llu overwrites=%llu faults=%llu agreements=%llu disagreements=%llu control_free=%zu/%zu\n",
+  size_t n=(size_t)snprintf(out,bytes,"status=%d incarnation=%llu flying=%zu integrity=%llu stale=%llu duplicates=%llu overwrites=%llu faults=%llu control_free=%zu/%zu\n",
     atomic_load(&p->status),(unsigned long long)p->incarnation,p->flying,(unsigned long long)p->integrity,(unsigned long long)p->stale,
-    (unsigned long long)p->duplicates,(unsigned long long)p->overwrites,(unsigned long long)p->faults,(unsigned long long)p->agreements,(unsigned long long)p->disagreements,p->control_free,p->control_count);
+    (unsigned long long)p->duplicates,(unsigned long long)p->overwrites,(unsigned long long)p->faults,p->control_free,p->control_count);
   for(size_t i=0;i<p->count && n<bytes;i++){
     const struct slot *s=&p->slots[i];
     uint32_t present=0;
