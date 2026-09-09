@@ -18,7 +18,7 @@
 #define WINDOW (MESH_RING/2)
 #define MIX 0xff51afd7ed558ccdULL
 #define MIX2 0xc4ceb9fe1a85ec53ULL
-#define DIGESTS 4
+#define DIGESTS 8
 
 struct slot {
   struct mesh_pages_slot spec;
@@ -256,6 +256,7 @@ static int control(mesh_pages *p, const struct slot *s, uint32_t kind, uint64_t 
   if(push(p->M,SUB,&d)){ p->control[p->control_free++]=page; return -1; }
   p->flying++; return 0;
 }
+static void digest_add(mesh_pages *p, struct slot *s, uint64_t generation, uint32_t page, const void *payload);
 static int push_page(mesh_pages *p, struct slot *s, uint32_t page){
   if(s->inflight[page] || p->flying>=WINDOW) return 0;
   unsigned char *q=mesh_at(p->M,s->table[page])+sizeof(struct wire);
@@ -264,6 +265,7 @@ static int push_page(mesh_pages *p, struct slot *s, uint32_t page){
   struct desc d={.page=s->table[page],.bytes=(uint32_t)n,.node=s->spec.peer};
   if(push(p->M,SUB,&d)) return 0;
   s->inflight[page]=1; s->flying++; p->flying++;
+  digest_add(p,s,s->stamp[page],page,payload_at(p,s->table[page]));
   return 1;
 }
 static void flush_later(mesh_pages *p){
@@ -442,7 +444,7 @@ static void acknowledge(mesh_pages *p){
     if(p->flying) p->flying--;
     if(owner==CONTROL){ p->control[p->control_free++]=index; continue; }
     struct slot *s=&p->slots[owner]; size_t page=index-s->base;
-    if(s->inflight[page]){ s->inflight[page]=0; s->flying--; digest_add(p,s,s->stamp[page],(uint32_t)page,payload_at(p,s->table[page])); }
+    if(s->inflight[page]){ s->inflight[page]=0; s->flying--; }
   }
 }
 static void transmit(mesh_pages *p, size_t i){
