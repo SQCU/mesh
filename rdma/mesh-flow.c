@@ -242,8 +242,7 @@ int main(int argc,char**argv){
   if(wanted<NOWN) wanted=NOWN;
   if(wanted>INT32_MAX) die("page index capacity");
   int np=(int)wanted,pool=np/NOWN;
-  int receive_limit=(pool-link_count)/link_count;
-  if(receive_limit>QD) receive_limit=QD;
+  int receive_share=(pool-link_count)/link_count;
   size_t d0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+LINK_LIMIT*sizeof(struct mesh_port_info)+65535)/65536*65536;
   size_t span=(size_t)pg*np;
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
@@ -264,6 +263,7 @@ int main(int argc,char**argv){
   for(int i=0;i<link_count;i++){
     links[i].node=me; links[i].name=name; links[i].memory=(char*)M+d0; links[i].span=span;
     links[i].probe_page=UINT32_MAX;
+    links[i].depth=links[i].device && (!strcmp(links[i].device,"udp")||!strcmp(links[i].device,"tcp"))?LINK_QUEUE/2:QD;
     snprintf(ports[i].device,sizeof ports[i].device,"%s",links[i].device?links[i].device:"automatic");
     ports[i].peer=(uint16_t)links[i].peer_node;
     int error=pthread_create(&links[i].thread,NULL,link_worker_for(&links[i]),&links[i]);
@@ -288,7 +288,7 @@ int main(int argc,char**argv){
     for(int index=0;index<link_count;index++){
       struct mesh_link *link=&links[index]; uint64_t position;
       if(atomic_exchange(&ports[index].reset_request,0)){ link->up=0; atomic_store(&link->reset,1); }
-      for(int budget=0;budget<64 && ring_select(&link->completion.cursor,&link->cursor,&position);budget++){
+      for(int budget=0;budget<1024 && ring_select(&link->completion.cursor,&link->cursor,&position);budget++){
         struct link_event event=link->completion.entries[position%LINK_QUEUE];
         uint32_t page=event.page;
         if(event.kind==L_UP){ link->accepted=event.generation; link->up=1; link->peer_seen=monotime(); goto accepted; }
@@ -360,8 +360,9 @@ accepted:
       if(!stop && link->up){
         if(monotime()-link->peer_seen>4){ link->up=0; atomic_store(&link->reset,1); }
         uint64_t queued=atomic_load(&link->completion.cursor.head)-atomic_load(&link->completion.cursor.tail);
-        for(int budget=0;budget<128 && counts[FREE]>link_count && link->up && link->receives<receive_limit &&
-          queued+(uint64_t)link->receives<LINK_QUEUE-QD-128;budget++){
+        int receive_limit=receive_share<link->depth?receive_share:link->depth;
+        for(int budget=0;budget<512 && counts[FREE]>link_count && link->up && link->receives<receive_limit &&
+          queued+(uint64_t)link->receives<LINK_QUEUE-(uint64_t)link->depth-128;budget++){
           int page=free_pages[counts[FREE]-1];
           if(link_submit(link,L_RECV,(uint32_t)page,pg)) break;
           MOVE(page,RECV); pool_link[page]=(unsigned char)index; activity=1;

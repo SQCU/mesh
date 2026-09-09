@@ -17,6 +17,8 @@
 #define MIX 0xff51afd7ed558ccdULL
 #define MIX2 0xc4ceb9fe1a85ec53ULL
 #define DIGESTS 8
+typedef _Float16 half8 __attribute__((ext_vector_type(8)));
+typedef float float8 __attribute__((ext_vector_type(8)));
 
 struct slot {
   struct mesh_pages_slot spec;
@@ -197,7 +199,7 @@ int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, s
     const struct slot *out=&p->slots[x->output];
     uint32_t pages=p->slots[x->input[0]].spec.pages, factor=x->kind==MESH_REDUCE_PARTIAL?2:1;
     if(out->spec.receive || pages%x->group || out->spec.pages!=pages*factor || !out->spec.pagewise) goto invalid;
-    if(x->bytes%4 || !x->bytes || (size_t)x->offset+x->bytes>mesh_pages_payload(p)) goto invalid;
+    if(x->bytes%16 || !x->bytes || (size_t)x->offset+x->bytes>mesh_pages_payload(p)) goto invalid;
     for(uint8_t i=0;i<x->inputs;i++){
       if(x->input[i]>=p->count || p->slots[x->input[i]].spec.pages!=pages) goto invalid;
       int listed=0; for(uint8_t d=0;d<out->spec.depends;d++) listed|=out->spec.dependency[d]==x->input[i];
@@ -468,24 +470,24 @@ static void reduce_step(mesh_pages *p, struct reduce *r){
   if(!g || atomic_load_explicit(&p->slots[x->output].producible,memory_order_acquire)<g) return;
   size_t selected=mesh_pages_select(p,x->input,x->inputs,x->group,g,r->consumed,r->indices);
   if(!selected) return;
-  size_t elements=x->bytes/2, factor=x->kind==MESH_REDUCE_PARTIAL?2:1;
+  size_t vectors=x->bytes/16, factor=x->kind==MESH_REDUCE_PARTIAL?2:1;
   for(size_t n=0;n<selected;n++){
     uint32_t group=r->indices[n];
     for(uint32_t k=0;k<x->group;k++){
       uint32_t page=group*x->group+k;
-      float sum[2048];
-      for(size_t e=0;e<elements;e++) sum[e]=0;
+      float8 sum[256];
+      for(size_t v=0;v<vectors;v++) sum[v]=0;
       for(uint8_t i=0;i<x->inputs;i++){
-        const _Float16 *v=(const _Float16*)(payload_at(p,__atomic_load_n(&p->slots[x->input[i]].table[page],__ATOMIC_ACQUIRE))+x->offset);
-        for(size_t e=0;e<elements;e++) sum[e]+=(float)v[e];
+        const half8 *h=(const half8*)(payload_at(p,__atomic_load_n(&p->slots[x->input[i]].table[page],__ATOMIC_ACQUIRE))+x->offset);
+        for(size_t v=0;v<vectors;v++) sum[v]+=__builtin_convertvector(h[v],float8);
       }
       unsigned char *out=payload_at(p,p->slots[x->output].table[page*factor])+x->offset;
-      if(x->kind==MESH_REDUCE_MATERIALIZED){ _Float16 *o=(_Float16*)out; for(size_t e=0;e<elements;e++) o[e]=(_Float16)sum[e]; }
+      if(x->kind==MESH_REDUCE_MATERIALIZED){ half8 *o=(half8*)out; for(size_t v=0;v<vectors;v++) o[v]=__builtin_convertvector(sum[v],half8); }
       else {
-        float *o=(float*)out, *o2=(float*)(payload_at(p,p->slots[x->output].table[page*factor+1])+x->offset);
-        size_t half=elements/2;
-        for(size_t e=0;e<half;e++) o[e]=sum[e];
-        for(size_t e=half;e<elements;e++) o2[e-half]=sum[e];
+        float8 *o=(float8*)out, *o2=(float8*)(payload_at(p,p->slots[x->output].table[page*factor+1])+x->offset);
+        size_t half=vectors/2;
+        for(size_t v=0;v<half;v++) o[v]=sum[v];
+        for(size_t v=half;v<vectors;v++) o2[v-half]=sum[v];
       }
     }
     mesh_pages_publish(p,x->output,group*x->group*(uint32_t)factor,x->group*(uint32_t)factor,g);

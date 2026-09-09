@@ -773,14 +773,16 @@ is derived from the configured region rather than capped at that historical valu
 
 ## Loopback simulation without a second machine
 
-`mesh-flow` links are verbs by default. A link descriptor whose device is `udp`
-— `--link udp,<peer-node>,<local host:port>,<peer host:port>` — runs the same
-command and completion rings over a connected UDP socket instead, so two bridges
-on one machine exchange pages over `lo0`. `bin/mesh-loopback.sh start|stop|status`
-runs a pair as `/loop0` (node 0) and `/loop1` (node 1); a client attaches with
-`MESH_NAME=/loop0` or `/loop1`. Datagrams are dropped when the kernel socket
-buffer (`kern.ipc.maxsockbuf`, 8 MB by default) overflows under a page burst, and
-the bridge never retransmits: a family whose exchange lost a page stops
-concluding, the others continue, and the consumer's clock ends the run with a
-failure value. That is the transport's contract stated by the simulation, not a
-defect of it; Thunderbolt RDMA makes such loss rare, `lo0` at 8 MB does not.
+`mesh-flow` links are verbs by default. A link descriptor whose device is `tcp`
+or `udp` — `--link tcp,<peer-node>,<local host:port>,<peer host:port>` — runs the
+same command and completion rings over a socket instead, so two bridges on one
+machine exchange pages over `lo0`. `bin/mesh-loopback.sh start|stop|status` runs
+a pair as `/loop0` (node 0) and `/loop1` (node 1); a client attaches with
+`MESH_NAME=/loop0` or `/loop1`. The `tcp` form is what the real link is like:
+the kernel refuses a sender that outruns the receiver (`EAGAIN`, held until the
+buffer drains), nothing is lost and nothing is retransmitted by the bridge. The
+`udp` form is a lossy transport: datagrams are dropped when the kernel socket
+buffer (`kern.ipc.maxsockbuf`, 8 MB by default) overflows under a page burst, a
+family whose exchange lost a page stops concluding, the others continue, and the
+consumer's clock ends the run with a failure value — the contract, stated by
+the simulation.
