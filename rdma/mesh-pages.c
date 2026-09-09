@@ -43,7 +43,7 @@ struct mesh_pages_function {
   uint32_t inputs, outputs, rows, *indices;
   struct mesh_pages_function *next;
 };
-struct reduce { struct mesh_pages_reduce spec; mesh_pages_function *function; struct mesh_pages *owner; pthread_t thread; };
+struct reduce { struct mesh_pages_reduce spec; mesh_pages_function *function; };
 struct mesh_pages {
   struct mesh_ctx *context; struct hdr *M;
   struct mesh_epoch epoch; unsigned char plan[32];
@@ -54,7 +54,7 @@ struct mesh_pages {
   uint32_t *later; size_t later_count;
   struct work *work; _Atomic uint64_t work_head, work_tail;
   size_t flying;
-  pthread_t thread, helper; _Atomic int running, status;
+  pthread_t thread, helper, reducer; _Atomic int running, status;
   uint64_t incarnation, foreign_epoch;
   mesh_pages_hook hook; void *capture;
   struct reduce *reduces; size_t reduce_count;
@@ -309,6 +309,7 @@ static void function_free(mesh_pages_function *f){
   if(*at) *at=f->next;
   free(f->maps); free(f->indices); free(f);
 }
+// ../design/algorithm-sources.md#collective-arithmetic-and-asynchronous-reduction
 int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, size_t count){
   if(atomic_load_explicit(&p->running,memory_order_acquire)) return EBUSY;
   struct reduce *list=zeroed(count*sizeof *list); if(!list) return ENOMEM;
@@ -328,7 +329,7 @@ int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, s
       if(!listed) goto invalid;
       inputs[i]=(struct mesh_pages_map){x->input[i],0,x->group,x->group,0};
     }
-    list[r].spec=*x; list[r].owner=p;
+    list[r].spec=*x;
     list[r].function=bind_function(p,(struct mesh_pages_function_spec){inputs,&output,x->inputs,1,pages/x->group},1);
     if(!list[r].function){ error=errno; goto invalid; }
   }
@@ -611,6 +612,7 @@ int mesh_pages_progress(mesh_pages *p){
   for(size_t i=0;i<p->count;i++) offer(p,i);
   return atomic_load_explicit(&p->status,memory_order_acquire);
 }
+// ../design/algorithm-sources.md#collective-arithmetic-and-asynchronous-reduction
 static size_t reduce_step(mesh_pages *p, struct reduce *r){
   const struct mesh_pages_reduce *x=&r->spec;
   uint64_t g=mesh_pages_highest(p,x->input[0]);
@@ -639,12 +641,15 @@ static size_t reduce_step(mesh_pages *p, struct reduce *r){
   }
   return selected;
 }
+// ../design/algorithm-sources.md#collective-arithmetic-and-asynchronous-reduction
 static void *reduce_run(void *argument){
-  struct reduce *r=argument; mesh_pages *p=r->owner;
+  mesh_pages *p=argument;
   pthread_setname_np("mesh-reduce");
   unsigned idle=0;
   while(atomic_load_explicit(&p->running,memory_order_relaxed)){
-    idle=reduce_step(p,r)?0:idle+1;
+    size_t selected=0;
+    for(size_t r=0;r<p->reduce_count;r++) selected+=reduce_step(p,&p->reduces[r]);
+    idle=selected?0:idle+1;
     if(idle>4096){ sched_yield(); idle=4096; }
   }
   return NULL;
@@ -663,22 +668,22 @@ static void *run(void *argument){
   }
   return NULL;
 }
+// ../design/algorithm-sources.md#collective-arithmetic-and-asynchronous-reduction
 int mesh_pages_start(mesh_pages *p){
   if(atomic_exchange(&p->running,1)) return 0;
   int error=pthread_create(&p->helper,NULL,helper_run,p);
   if(error){ atomic_store(&p->running,0); return error; }
   error=pthread_create(&p->thread,NULL,run,p);
   if(error){ atomic_store(&p->running,0); pthread_join(p->helper,NULL); return error; }
-  for(size_t r=0;r<p->reduce_count;r++){
-    error=pthread_create(&p->reduces[r].thread,NULL,reduce_run,&p->reduces[r]);
-    if(error){ p->reduces[r].thread=0; mesh_pages_stop(p); return error; }
-  }
+  error=pthread_create(&p->reducer,NULL,reduce_run,p);
+  if(error){ atomic_store(&p->running,0); pthread_join(p->thread,NULL); pthread_join(p->helper,NULL); return error; }
   return 0;
 }
+// ../design/algorithm-sources.md#collective-arithmetic-and-asynchronous-reduction
 void mesh_pages_stop(mesh_pages *p){
   if(!atomic_exchange(&p->running,0)) return;
   pthread_join(p->thread,NULL);
-  for(size_t r=0;r<p->reduce_count;r++) if(p->reduces[r].thread) pthread_join(p->reduces[r].thread,NULL);
+  pthread_join(p->reducer,NULL);
   pthread_join(p->helper,NULL);
 }
 

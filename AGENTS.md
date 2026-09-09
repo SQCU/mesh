@@ -299,3 +299,9 @@ Shared-memory operands have no privacy classification. Their storage must be
 the actual RDMA-sendable pages named by the canonical page table; do not create
 a separate dense, hidden, copied or specially local operand store. Metadata
 describing a foreign buffer does not satisfy this requirement.
+
+## Function citations
+
+Every new function must cite an author/publication in
+[design/algorithm-sources.md](design/algorithm-sources.md). Source may contain
+a documentation citation; describe the mechanism and its limits in that document.
