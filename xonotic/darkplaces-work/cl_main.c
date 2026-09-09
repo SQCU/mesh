@@ -15,6 +15,9 @@ cvar_t csqc_progsize = {CVAR_READONLY, "csqc_progsize","-1","file size of csprog
 cvar_t csqc_usedemoprogs = {0, "csqc_usedemoprogs","1","use csprogs stored in demos"};
 
 cvar_t cl_shownet = {0, "cl_shownet","0","1 = print packet size, 2 = print packet message list"};
+cvar_t cl_autoreconnect = {CVAR_SAVE, "cl_autoreconnect", "1", "retry the requested server after connection loss; disconnect cancels the request"};
+static char cl_connect_host[MAX_INPUTLINE];
+static double cl_connect_retry_at;
 cvar_t cl_nolerp = {0, "cl_nolerp", "0","network update smoothing"};
 cvar_t cl_lerpexcess = {0, "cl_lerpexcess", "0","maximum allowed lerp excess (hides, not fixes, some packet loss)"};
 cvar_t cl_lerpanim_maxdelta_server = {0, "cl_lerpanim_maxdelta_server", "0.1","maximum frame delta for smoothing between server-controlled animation frames (when 0, one network frame)"};
@@ -354,6 +357,8 @@ void CL_Disconnect(void)
 
 void CL_Disconnect_f(void)
 {
+	cl_connect_host[0] = 0;
+	cls.connect_trying = false;
 	CL_Disconnect ();
 	if (sv.active)
 		Host_ShutdownServer ();
@@ -366,6 +371,9 @@ void CL_EstablishConnection(const char *host, int firstarg)
 
 	if (COM_CheckParm("-benchmark"))
 		return;
+	if (host != cl_connect_host)
+		strlcpy(cl_connect_host, host, sizeof(cl_connect_host));
+	cl_connect_retry_at = realtime + 3;
 
 #ifdef CONFIG_MENU
 	M_Update_Return_Reason("");
@@ -379,24 +387,27 @@ void CL_EstablishConnection(const char *host, int firstarg)
 
 	NetConn_UpdateSockets();
 
+	if(firstarg >= 0)
+	{
+		int i;
+		*cls.connect_userinfo = 0;
+		for(i = firstarg; i+2 <= Cmd_Argc(); i += 2)
+			InfoString_SetValue(cls.connect_userinfo, sizeof(cls.connect_userinfo), Cmd_Argv(i), Cmd_Argv(i+1));
+	}
+	else if(firstarg < -1)
+	{
+
+		*cls.connect_userinfo = 0;
+	}
+
 	if (LHNETADDRESS_FromString(&cls.connect_address, host, 26000) && (cls.connect_mysocket = NetConn_ChooseClientSocketForAddress(&cls.connect_address)))
 	{
+		if (LHNETADDRESS_GetAddressType(&cls.connect_address) == LHNETADDRESSTYPE_LOOP)
+			cl_connect_host[0] = 0;
 		cls.connect_trying = true;
 		cls.connect_remainingtries = 3;
 		cls.connect_nextsendtime = 0;
 
-		if(firstarg >= 0)
-		{
-			int i;
-			*cls.connect_userinfo = 0;
-			for(i = firstarg; i+2 <= Cmd_Argc(); i += 2)
-				InfoString_SetValue(cls.connect_userinfo, sizeof(cls.connect_userinfo), Cmd_Argv(i), Cmd_Argv(i+1));
-		}
-		else if(firstarg < -1)
-		{
-
-			*cls.connect_userinfo = 0;
-		}
 
 #ifdef CONFIG_MENU
 		M_Update_Return_Reason("Trying to connect...");
@@ -408,6 +419,17 @@ void CL_EstablishConnection(const char *host, int firstarg)
 #ifdef CONFIG_MENU
 		M_Update_Return_Reason("No network");
 #endif
+	}
+}
+
+void CL_ReconnectFrame(void)
+{
+	if (cl_autoreconnect.integer && cl_connect_host[0] &&
+		!cls.netcon && !cls.connect_trying && !cls.demoplayback &&
+		!sv.active && realtime >= cl_connect_retry_at)
+	{
+		Con_Printf("Retrying connection to %s\n", cl_connect_host);
+		CL_EstablishConnection(cl_connect_host, -1);
 	}
 }
 
@@ -2419,6 +2441,7 @@ void CL_Shutdown (void)
 
 void CL_Init (void)
 {
+	Cvar_RegisterVariable(&cl_autoreconnect);
 
 	cls.levelmempool = Mem_AllocPool("client (per-level memory)", 0, NULL);
 	cls.permanentmempool = Mem_AllocPool("client (long term memory)", 0, NULL);

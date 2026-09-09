@@ -1,24 +1,13 @@
-from .instruments import DESCRIPTOR_WIDTH, KINDS
-from .baselines import BASELINE_OUTPUT_WIDTH
 from .policy_contract import is_matrix_fusion_arm
 
 def mm(a, b, c):
     return 2 * int(a) * int(b) * int(c)
 
-def dpp_work(instruments, rank):
-    rows = int(instruments)
-    width = int(rank)
-    covariance = mm(width, rows, width)
-    conjugate_gradient = width * mm(width, width, rows)
-    marginal = 2 * rows * width
-    return {
-        "forward_flops": covariance + conjugate_gradient + marginal,
-        "covariance_flops": covariance,
-        "conjugate_gradient_flops": conjugate_gradient,
-        "conjugate_gradient_steps": width,
-        "marginal_flops": marginal,
-        "intermediate_words": width * width + 6 * rows * width,
-    }
+def cross_work(left_rank, right_rank, rows, gradient_steps=0, gradient_batch=0):
+    left, right, count = int(left_rank), int(right_rank), int(rows)
+    return {**_envelope(mm(left, count, right), 0, count * (left + right), 0, left * right,
+                        gradient_steps, gradient_batch),
+            'left_rank': left, 'right_rank': right, 'rows': count}
 
 def _envelope(forward, parameter_words, inputs, intermediates, outputs,
               gradient_steps=0, gradient_batch=0):
@@ -38,150 +27,76 @@ def _envelope(forward, parameter_words, inputs, intermediates, outputs,
     }
 
 def scale_work(widths, rows, gradient_steps=0, gradient_batch=0):
-    physical = int(rows)
-    topk = widths.scale_topk
-    forward = (
-        mm(physical, widths.d_ir, widths.d_scale)
-        + mm(physical, widths.d_scale, widths.scale_experts)
-        + topk * mm(physical, widths.d_scale, widths.scale_h)
-        + topk * mm(physical, widths.scale_h, widths.d_scale)
-        + mm(widths.d_scale, physical, widths.d_scale)
-        + mm(widths.d_scale, widths.d_scale, 1)
-        + mm(physical, widths.d_scale, widths.d_ir)
-    )
-    parameter_words = (
-        2 * widths.d_ir * widths.d_scale
-        + widths.d_scale * widths.scale_experts
-        + 2 * widths.scale_experts * widths.d_scale * widths.scale_h
-        + widths.d_scale
-    )
-    inputs = physical * widths.d_ir
-    outputs = physical * widths.d_ir + widths.scale_experts + 5
-    intermediates = (
-        physical * (2 * widths.d_scale + topk * widths.scale_h)
-        + widths.d_scale * widths.d_scale + widths.scale_experts
-    )
-    out = _envelope(forward, parameter_words, inputs, intermediates, outputs,
-                    gradient_steps, gradient_batch)
-    out.update({
-        "residual_rows": physical,
-        "residual_rank": widths.d_scale,
-        "experts": widths.scale_experts,
-        "topk": topk,
-        "local": _envelope(
-            forward - mm(widths.d_scale, physical, widths.d_scale) - mm(widths.d_scale, widths.d_scale, 1),
-            parameter_words, inputs + widths.d_scale,
-            intermediates - widths.d_scale * widths.d_scale,
-            outputs + (physical + 1) * widths.d_scale,
-            gradient_steps, gradient_batch,
-        ),
-    })
-    return out
+    n, w = int(rows), widths
+    forward = (mm(n, w.d_ir, w.d_scale) + mm(n, w.d_scale, w.scale_experts)
+        + 2 * w.scale_topk * mm(n, w.d_scale, w.scale_h)
+        + w.scale_topk * mm(n, w.scale_h, w.d_scale) + mm(n, w.d_scale, w.d_ir))
+    parameters = 2 * w.d_ir * w.d_scale + w.d_scale * w.scale_experts + 3 * w.scale_experts * w.d_scale * w.scale_h
+    return {**_envelope(forward, parameters, n * w.d_ir,
+        n * (2 * w.d_scale + 2 * w.scale_topk * w.scale_h + w.scale_experts),
+        n * w.d_ir + w.scale_experts + 4, gradient_steps, gradient_batch),
+        "residual_rows": n, "residual_rank": w.d_scale,
+        "experts": w.scale_experts, "topk": w.scale_topk}
 
-def gram_work(rank, rows, gradient_steps=0, gradient_batch=0):
-    return _envelope(
-        mm(rank, rows, rank) + mm(rank, rank, 1), 0,
-        (int(rows) + 1) * int(rank), int(rank) ** 2, int(rank) + 5,
-        gradient_steps, gradient_batch,
-    )
 
-def strategy_work(arm, widths, players, instruments, cells, baseline_hidden=256,
-                  gradient_steps=0, gradient_batch=0):
-    l, m, c = int(players), int(instruments), int(cells)
-    if is_matrix_fusion_arm(arm):
-        w = widths
-        n = l * m
-        scale = scale_work(w, n, gradient_steps, gradient_batch)
-        dpp = dpp_work(m, w.d)
-        forward = (
-            mm(c, w.d_c, w.d_beta)
-            + mm(l, c, w.d_beta)
-            + mm(l, w.d_x + w.d_beta + w.d_sem, w.d)
-            + mm(m, w.d_z, w.d)
-            + mm(m, w.d_z, w.d_v)
-            + mm(l, m, w.d)
-            + mm(l, w.d, w.r + w.r_e)
-            + mm(l, l, w.r + w.r_e)
-            + mm(l, w.d, w.d_ir)
-            + mm(l, l, w.d_ir)
-            + mm(m, w.d_v, w.d_ir)
-            + mm(l * m, w.d_ir, 2 * w.h)
-            + mm(l * m, w.h, 1)
-            + mm(l * m, w.d_ir, 6)
-            + mm(l, w.d, w.d_y)
-            + mm(l * m, w.d_ir, w.d_u)
-            + 2 * mm(l, w.d_y, w.d_y)
-            + 2 * mm(l, w.d_y, w.d_y * w.d_u)
-            + 2 * mm(l * m, w.d_u, w.d_y)
-            + mm(l * m, w.d_y, w.d)
-            + dpp["forward_flops"]
-        )
-        parameter_words = (
-            w.d_c * w.d_beta
-            + (w.d_x + w.d_beta + w.d_sem) * w.d
-            + w.d_z * (w.d + w.d_v)
-            + w.d * w.d_ir + w.d_v * w.d_ir
-            + w.d * (w.r + w.r_e)
-            + 2 * w.d_ir * w.h + w.h
-            + 8 * w.d_ir + 2 * w.d
-            + w.d * w.d_y + w.d_ir * w.d_u + w.d_y * w.d
-            + 2 * w.d_y * w.d_y + 2 * w.d_y * w.d_y * w.d_u
-        )
-        inputs = l * w.d_x + m * w.d_z + c * w.d_c + l * c + l * w.d_sem + 2 * l * m
-        intermediates = (
-            c * w.d_beta + l * (w.d_beta + 2 * w.d + w.d_y)
-            + m * (w.d + w.d_v) + 3 * l * m + 2 * l * l
-            + l * m * (w.d_ir + 2 * w.d_y + 6) + l * w.d_y * w.d_u
-            + dpp["intermediate_words"]
-        )
-        local = _envelope(forward, parameter_words, inputs, intermediates, l * 4,
-                          gradient_steps, gradient_batch)
-        combined = {
-            key: local[key] + scale[key]
-            for key in ("lower_flops", "upper_flops", "lower_bytes", "upper_bytes",
-                        "forward_flops", "parameter_bytes")
-        }
-        remote = gram_work(w.d_scale, n, gradient_steps, gradient_batch)
-        local.update({key: local[key] + scale["local"][key] for key in combined})
+def strategy_work(arm, widths, players, events, baseline_hidden=256,
+                  gradient_steps=0, gradient_batch=0, remote_scale_operation="gram", state_pages=1,
+                  observations=None, carts=0, teams=0, navigation_nodes=0, navigation_edges=0,
+                  navigation_cells=0, neighbors=0):
+    n, e, w = int(players), int(events), widths
+    o = n if observations is None else int(observations)
+    p, j, k = n * int(state_pages), int(carts), int(teams)
+    vn, ve, vc, slots = map(int, (navigation_nodes, navigation_edges, navigation_cells, neighbors))
+    tokens, sources, groups = o + p + j + k, e + vn + ve + vc, o + n + j + k
+    common_rows = n + p
+    main = is_matrix_fusion_arm(arm)
+    hidden, d = (w.d_ir, w.d) if main else (int(baseline_hidden), int(baseline_hidden))
+    page_features = 6 * w.d_x + 20
+    terms = {"raw_projections": mm(o, w.d_obs + 2, d) + mm(p, page_features, d)
+        + mm(j, 18, d) + mm(k, 7, d) + mm(e, w.d_c, d)
+        + mm(vn, 4, d) + mm(ve, 3, d) + mm(vc, 2, d),
+        "local_values_output": mm(sources + 1, d, d) + mm(o, d, d),
+        "local_value_contraction": mm(o, slots, d),
+        "common_heads": mm(common_rows, hidden, 2 * w.d_x + 2),
+        "rate_owner_contribution": 2 * p * w.d_x,
+        "value_scalar_readout": 2 * p}
+    neighborhood_parameters = 9 * d + (3 if main else 2) * d * d + 1
+    raw_parameters = (w.d_obs + 2 + page_features + 18 + 7 + w.d_c) * d
+    readout_parameters = hidden * (2 * w.d_x + 2)
+    parameters = raw_parameters + neighborhood_parameters + readout_parameters
+    scale = scale_work(w, tokens, gradient_steps, gradient_batch) if main else _envelope(0, 0, 0, 0, 0)
+    cross = cross_work(w.r_e, w.d_ir, tokens, gradient_steps, gradient_batch) if main else _envelope(0, 0, 0, 0, 0)
+    if main:
+        terms.update({"local_metric": mm(sources + 1, d, d) + mm(o, d, d),
+            "local_gram_contraction": mm(o, slots, d),
+            "input_swiglu": 3 * mm(tokens, d, w.h),
+            "ir_projection": mm(tokens, d, w.d_ir),
+            "gram_projections": mm(tokens, d, w.r + w.r_e),
+            "global_cross": cross["forward_flops"],
+            "global_apply": mm(tokens, w.r_e, w.d_ir),
+            "team_page_cross": mm(p, w.r, w.d_ir),
+            "team_outer_products": (o + j + k) * w.r * w.d_ir,
+            "team_membership": 2 * mm(k, groups, w.r * w.d_ir),
+            "team_apply": mm(tokens, w.r, w.d_ir),
+            "output_swiglu": 3 * mm(tokens, w.d_ir, w.h)})
+        parameters += 3 * d * w.h + d * (w.r + w.r_e + w.d_ir) + 3 * w.d_ir * w.h
     else:
-        input_width = widths.d_x + widths.d_sem + widths.d_c
-        kind_width = len(KINDS)
-        output_width = BASELINE_OUTPUT_WIDTH
-        belief = mm(l, c, widths.d_c)
-        network = mm(l, input_width, baseline_hidden) + mm(l, baseline_hidden, output_width) if arm == "ffn" else mm(l, input_width, output_width) if arm != "default" else 0
-        scores = mm(l, kind_width, m) + mm(l, DESCRIPTOR_WIDTH, m) if arm != "default" else 0
-        forward = belief + network + scores
-        parameter_words = (
-            input_width * baseline_hidden + baseline_hidden * output_width
-            if arm == "ffn" else input_width * output_width
-            if arm != "default" else 0
-        )
-        inputs = l * widths.d_x + m * widths.d_z + c * widths.d_c + l * c + l * widths.d_sem + 2 * l * m
-        intermediates = l * (widths.d_c + input_width + output_width) + 3 * l * m
-        local = _envelope(forward, parameter_words, inputs, intermediates, l * 4,
-                          gradient_steps, gradient_batch)
-        scale = {key: 0 for key in local}
-        dpp = {
-            "forward_flops": 0,
-            "covariance_flops": 0,
-            "conjugate_gradient_flops": 0,
-            "conjugate_gradient_steps": 0,
-            "marginal_flops": 0,
-            "intermediate_words": 0,
-        }
-        combined = dict(local)
-        remote = dict(scale)
-    return {
-        **combined,
-        "training_forwards": local["training_forwards"],
-        "residual_rows": l * m if is_matrix_fusion_arm(arm) else 0,
-        "residual_rank": widths.d_scale if is_matrix_fusion_arm(arm) else 0,
-        "experts": widths.scale_experts if is_matrix_fusion_arm(arm) else 0,
-        "topk": widths.scale_topk if is_matrix_fusion_arm(arm) else 0,
-        "local": local,
-        "scale": scale,
-        "remote": remote,
-        "dpp": dpp,
-    }
-
-__all__ = ["dpp_work", "gram_work", "scale_work", "strategy_work"]
+        terms.update({"baseline_global_sum": max(tokens - 1, 0) * hidden})
+        parameters += 5 * hidden
+    if arm == "default":
+        terms, parameters = {}, 0
+    forward = sum(terms.values())
+    inputs = p * page_features + o * (w.d_obs + 2) + j * 18 + k * 7 + e * w.d_c + vn * 4 + ve * 3 + vc * 2 + o * slots * 3
+    base = _envelope(forward, parameters, inputs,
+        common_rows * (2 * w.d_x + 2) + tokens * 6 * hidden + (sources + 1) * 3 * d + o * slots * d,
+        3 * p * w.d_x + common_rows * hidden + n * d + 3 * n
+        + (common_rows * (w.r + w.r_e) if main else 0), gradient_steps, gradient_batch)
+    keys = ("lower_flops", "upper_flops", "lower_bytes", "upper_bytes", "forward_flops", "parameter_bytes")
+    combined = {key: base[key] + scale[key] for key in keys}
+    remote = scale if main and remote_scale_operation == "block" else cross
+    local = {key: combined[key] - remote[key] for key in keys}
+    return {**combined, "representation": "raw_rows_state_rate", "estimate": "logical_contractions_with_training_envelope",
+        "state_width": w.d_x * int(state_pages), "page_width": w.d_x, "state_pages": int(state_pages),
+        "residual_rows": tokens, "common_head_rows": common_rows, "common_head_width": 2 * w.d_x + 2,
+        "page_feature_width": page_features, "local_source_rows": sources, "observation_rows": o,
+        "event_rows": e, "neighbor_slots": slots, "terms": terms, "local": local, "scale": scale, "remote": remote}

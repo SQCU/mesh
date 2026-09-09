@@ -14,7 +14,6 @@ void generic_plat_blocked(entity this, entity blocker);
 .float height;
 
 #define autocvar_g_payload_point_limit cvar("g_payload_point_limit")
-int autocvar_g_payload_point_leadlimit;
 
 IntrusiveList g_payload_nodes;
 IntrusiveList g_payload_links;
@@ -32,16 +31,16 @@ REGISTER_MUTATOR(plc, false)
 	MUTATOR_ONADD
 	{
 		GameRules_teams(true);
-		GameRules_limit_score(autocvar_g_payload_point_limit);
-		GameRules_limit_lead(autocvar_g_payload_point_leadlimit);
+		GameRules_limit_score(0);
+		GameRules_limit_lead(0);
+		GameRules_limit_time(0);
 
 		payload_Initialize();
 	}
 	return 0;
 }
 
-const float ST_PAYLOAD_CAPS = 1;
-const float ST_PAYLOAD_POINTS = 2;
+const float ST_PAYLOAD_POINTS = 1;
 
 const int PLC_CART_TURN = BIT(0);
 const int PLC_CHECKPOINT = BIT(0);
@@ -59,6 +58,8 @@ const float PLC_CURVE_STEPS = 16;
 .int plc_bank_team;
 .float plc_s;
 .float plc_length;
+.int plc_checkpoint_depth;
+.int plc_checkpoint_count;
 .entity plc_state;
 .int plc_lead;
 .int plc_second;
@@ -73,7 +74,12 @@ const float PLC_CURVE_STEPS = 16;
 
 float payload_w[NUM_TEAMS + 1];
 float payload_n[NUM_TEAMS + 1];
-float payload_round_banks[NUM_TEAMS + 1];
+float payload_checkpoints_held[NUM_TEAMS + 1];
+float payload_score[NUM_TEAMS + 1];
+float payload_score_time;
+int payload_score_winner;
+bool payload_score_finished;
+int payload_episode;
 bool g_payload;
 int payload_teams;
 IntrusiveList g_payload_carts;

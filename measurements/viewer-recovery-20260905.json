@@ -1,0 +1,123 @@
+{
+  "observed_at": "2026-09-05T19:32:28.429291+00:00",
+  "old_source": {
+    "sequence": 29643,
+    "sampled_at": 1788636366.167125,
+    "frame_seen_at": null,
+    "producer_state": "awaiting_first_frame",
+    "frame_written_at": 1788596292.7039356,
+    "directory": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/checkpoint-control-live-20260904/00050-joint-00025-00000",
+    "environment": null,
+    "teams": null,
+    "carts": null,
+    "players": null,
+    "response": null,
+    "game_contract": null,
+    "errors": 0,
+    "last_error": null
+  },
+  "active_source": {
+    "sequence": 82,
+    "sampled_at": 1788636748.223239,
+    "frame_seen_at": 1788636748.222514,
+    "producer_state": "advancing",
+    "frame_written_at": 1788636747.0815854,
+    "host": "Ms-Mac-mini",
+    "run_directory": "/Users/mdot/mesh-workloads/cartlane/runs/mini-learner-20260905",
+    "pending_directory": null,
+    "directory": "/Users/mdot/mesh-workloads/cartlane/runs/mini-learner-20260905/00001-joint-00001-00000",
+    "environment": "joint-00001-00000",
+    "teams": 4,
+    "carts": 4,
+    "players": 8,
+    "response": 964,
+    "game_contract": "checkpoint-control-integral-v1",
+    "errors": 0,
+    "last_error": null
+  },
+  "ports": [
+    8795,
+    8796
+  ],
+  "policy_updates": {
+    "matrix_fusion": 5494,
+    "terminal_win": 5494
+  },
+  "work": {
+    "lower_flops": 4752051040,
+    "upper_flops": 4752051040,
+    "lower_bytes": 45399832,
+    "upper_bytes": 38084594072,
+    "elapsed_s": 0.16424725000001672,
+    "deadline_s": 0.4,
+    "deadline_slack_s": 0.2357527499999833,
+    "lower_gflops_s": 28.932302002009266,
+    "upper_gflops_s": 28.932302002009266,
+    "lower_gbs": 0.27641151982754886,
+    "upper_gbs": 231.8735569210207,
+    "arms": [
+      "terminal_win",
+      "matrix_fusion"
+    ],
+    "distributed_arms": [],
+    "parameter_bytes": 41585320,
+    "residual_rows": 3568,
+    "residual_rank": 128,
+    "experts": 8,
+    "topk": 2,
+    "optimization": {
+      "lower_flops": 0,
+      "upper_flops": 57024612480,
+      "lower_bytes": 0,
+      "upper_bytes": 456196899840,
+      "elapsed_s": 1.1679673329999787,
+      "lower_gflops_s": 0.0,
+      "upper_gflops_s": 48.823807711753055,
+      "lower_gbs": 0.0,
+      "upper_gbs": 390.59046169402444,
+      "gradient_steps": 2,
+      "gradient_batch": 4,
+      "after_response": true
+    }
+  },
+  "j": {
+    "strata": [
+      {
+        "policy": "matrix_fusion",
+        "rows": 394,
+        "rank": 128,
+        "width": 128
+      },
+      {
+        "policy": "terminal_win",
+        "rows": 395,
+        "rank": 128,
+        "width": 128
+      }
+    ],
+    "joins": {
+      "delivery_mass": 768,
+      "delivery_joined_mass": 768,
+      "applied_mass": 708,
+      "applied_joined_mass": 708,
+      "event_mass": 492,
+      "event_joined_mass": 492
+    }
+  },
+  "rounds_in_current_run": 0,
+  "tests": {
+    "viewer_ingestion_laptop": 2,
+    "viewer_ingestion_mini": 2,
+    "javascript_syntax": "passed",
+    "browser_pages": [
+      "8795/j",
+      "8795/policy"
+    ],
+    "browser_errors": 0
+  },
+  "changes": [
+    "One SSH tunnel forwards both viewer ports to the active Mini service.",
+    "Empty and partial new match journals preserve the last measured frame with explicit source and pending-match status.",
+    "Policy display exposes current update trajectories, loss components, gradient norms, rollout statistics, and compute timings."
+  ]
+}

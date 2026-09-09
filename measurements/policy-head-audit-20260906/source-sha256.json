@@ -1,0 +1,15 @@
+{
+  "recorded_at_utc": "2026-09-07T03:47:39.584451+00:00",
+  "scope": "Identifies the audited source; no deployment or version-control pin.",
+  "sha256": {
+    "xonotic/solver/strat/strategy.py": "fcea33897e3a77ecfc4c921484b51869027527b0660c2b2acfb699b26c700d18",
+    "xonotic/solver/strat/state_steering.py": "71f5546737d9effea1e18552333d8a04df192cfec4b83c72226e45bcbbd2e32f",
+    "xonotic/solver/strat/cast_header.py": "e4012bdbb173486ba3de55fe298a2b1acd0aaaf5d824ec40144a5a92e941b14a",
+    "xonotic/solver/strat/online.py": "9b42cdbe54d57bfe5d39a94170a47751eb7489368e32ab9a11c944f8bef2d23e",
+    "xonotic/solver/strat/policy_contract.py": "366978a22ae27e8531e7770755ff5d4aeb981b21172b163d47b06d61874fa701",
+    "xonotic/solver/strat/baselines.py": "4fd27dc33ae046b7bc012324f797b84170e03d95f1a1fec9f6242f8473c407f2",
+    "xonotic/solver/strat/test_representation.py": "1ba758ebcf183554494800ba464d7f849f4f248df5929c29bea7f7f1c7f2f4cc",
+    "xonotic/solver/strat/test_state_steering.py": "214db3176581ef255be1d7bd841aa9d9e33e78b075b419bd0e45bd54f2eb2648",
+    "xonotic/solver/strat/checkpoint_state.py": "28914391824c7c9a567b9a924b7cd2b5122a281c8c5a65ebbad0a77d2e7150be"
+  }
+}

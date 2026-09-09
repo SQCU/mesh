@@ -1,0 +1,175 @@
+{
+  "date": "2026-09-05",
+  "scope": "authorized five-pass policy prerequisite cleanup",
+  "local_platform": "macOS-26.3.2-arm64-arm-64bit",
+  "portable_platform": "Linux x86_64, ws-2-wire",
+  "source_sha256": {
+    "xonotic/solver/strat/policy_math.py": "5de78158faa9a3e9e52eb85807498312dcc30077413003062516b774d7471881",
+    "xonotic/solver/strat/strategy.py": "0e27dfb478c3f231606431a3a5a4ef707c874045a85aa15bf5488fbd7e847a63",
+    "xonotic/solver/strat/baselines.py": "8d283f42f3c52094b20f79e6a74f1cb28e7535c5cd2ffc2506c6a1a446ad34ce",
+    "xonotic/solver/strat/cast_header.py": "e1abd50736cf567474ea073385c394d9ccaf81d3477559ab92d87acf93f9dbdf",
+    "xonotic/solver/strat/dpp.py": "df944f6b1c7b5c0a4b13be411dbd73a2afc59d5b1235a9fbc08752fdbc547754",
+    "xonotic/solver/strat/checkpoint_state.py": "2a05d7321a23e10b1ee44204e0156d0f891fb9990b43d23411c6c812ca451f6a",
+    "xonotic/solver/strat/policy_contract.py": "c7643d9e907e2e35d780dfa4e92634c217c2b73179899a69e75a0fedd957c00a",
+    "xonotic/solver/strat/online.py": "8b26bb9fe09aa070e880b3e99ce5c31d942ddb9e180a90c3f0ae1cff0008a79e",
+    "xonotic/solver/strat/action_history.py": "c4916290f16c1108fe2949b26981c84bca11989335295691f74dfeb8464ffd02",
+    "xonotic/solver/strat/game_value.py": "8976c169f45a146d4875d2dcbe3f2aac05f537417fcd349fd9bbdafcb85671d3",
+    "xonotic/solver/strat/runtime.py": "ec79ccaa83923c5640dced1bd1c44549844355e6cc36e8151ffdf8a95ba14908",
+    "xonotic/solver/strat/strat_responder.py": "e8bba5b007760c2600915c7a242d0cf5728373c1a856e83204437908b8cf39d1",
+    "xonotic/solver/strat/curriculum.py": "92335ef3e876a5a70ba3773f88ef55d9bf399bbe7e4b82211a2de8b5bc91d2bd",
+    "xonotic/solver/strat/map_assets.py": "c31a76c345cf764eb26b676c45c0667558381cac654f7994bf3a8a232f563a73",
+    "xonotic/solver/strat/study.py": "db7c4d3d7a678b64913aa63f83a968c89b72c6e2dbaca4d067c0d3e8e146b31c",
+    "xonotic/solver/strat/live_belief.py": "b5138ea3dfb1a37745bc6a74be639575ee6dbd3f3e4861bbf7e557dca626d339",
+    "xonotic/solver/strat/instruments.py": "0959ff6303b5d49b96f0d9297852b18da86b5d200a41e6255e8d63e7e3e043f9",
+    "xonotic/solver/strat/measure.py": "893267f91c9673ec261763e237e56ee85927aef48636441ae15999c7af18e1ae",
+    "xonotic/solver/strat/verify_numerics.py": "b0314e88ffa4ca4cf30d25df0a478400adae393b672f09ff8a4531d80bfabb04",
+    "xonotic/solver/strat/verify_game.py": "c00aa310155b3968ba3bef32ebcac15d8e2d54490c484a00df6943040925fdc8",
+    "xonotic/payload/tools/strategy_io_schema.py": "58ac86cfadda2829e797112b82478161dbb1d044690a69a7dee58c00906e18ad",
+    "xonotic/payload/tools/navmesh.py": "89e2b11c0973de70de858b03eb8da4e120227d45d810eca711afec8bee647c3e",
+    "xonotic/payload/tools/mkentfile.py": "e6e0603941245666661a19eef8ac545d69d9f3eeadf4fec384e18b1845ba4dea",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qc": "f053df6b98ad0acf5ec193c791e3a25eda75ffa9ca9d5febe0a3315ff9b752c5",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qh": "910b7857e47d88687e2c8ed3d27c4d225bc4841b01b24adaff9796e867a0176c",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload.qc": "836fea5939942b925e014650c7a91d92d797ce599feb6c9b494683480b93d73e"
+  },
+  "orchestration_lines": {
+    "strat_responder": {
+      "before": 1835,
+      "after": 1525
+    },
+    "curriculum": {
+      "before": 1504,
+      "after": 1274
+    },
+    "study": {
+      "before": 1695,
+      "after": 1676
+    }
+  },
+  "numerical_reproductions": [
+    {
+      "operation": "PPO clipped positive advantage, log_ratio=100",
+      "before": {
+        "loss": 1.2,
+        "gradient": "NaN"
+      },
+      "after": {
+        "loss": 1.2,
+        "gradient": 0
+      }
+    },
+    {
+      "operation": "global clipping [1e30,-1e30] at norm 1",
+      "before": {
+        "norm": "infinity",
+        "gradient": [
+          0,
+          0
+        ]
+      },
+      "after": {
+        "norm": "finite",
+        "gradient_direction_preserved": true
+      }
+    },
+    {
+      "operation": "Gaussian raw scale 100",
+      "before": "exp(100) is infinite in float32",
+      "after": "exp(asinh(100)) and sampled likelihood gradients finite"
+    }
+  ],
+  "numerical_exercise": {
+    "source": "xonotic/solver/strat/runs/checkpoint-control-live-20260904/00005-joint-00002-00001/checkpoint.terminal_win.npz",
+    "source_transitions": 204,
+    "policies": {
+      "matrix_fusion": {
+        "finite_updates": 128,
+        "resume_cycles": 4,
+        "loss_range": [
+          -1.3355268239974976,
+          3.364117383956909
+        ],
+        "gradient_norm_range": [
+          2.056365966796875,
+          677.8778686523438
+        ]
+      },
+      "terminal_win": {
+        "finite_updates": 128,
+        "resume_cycles": 4,
+        "loss_range": [
+          -1.3355268239974976,
+          3.364117383956909
+        ],
+        "gradient_norm_range": [
+          2.056365966796875,
+          677.8778686523438
+        ]
+      }
+    }
+  },
+  "versions": {
+    "matrix_policy": 13,
+    "baseline_policy": 11,
+    "navigation_realization": 3,
+    "map_measurements": 14,
+    "training_schedule": "first-execution-v3",
+    "evaluation": "observed-execution-history-v1"
+  },
+  "checks": {
+    "macos_unittests": {
+      "passed": 31
+    },
+    "linux_unittests": {
+      "passed": 15
+    },
+    "compiled_qc_fixtures": {
+      "event": "qc_python_game_verified",
+      "cases": 39,
+      "team_counts": [
+        2,
+        4,
+        8,
+        12
+      ],
+      "ownership_transitions": 6,
+      "stacked_floor_resolution": true,
+      "target_identity": true
+    },
+    "full_server_qc_build": {
+      "passed": true,
+      "output_bytes": 7068769,
+      "sha256": "7cf09f739878e58a0bd74a16758e28270985da1e4a9ec2cadbb81bd3cce0919e"
+    },
+    "generated_map": {
+      "map": "dance",
+      "carts": 4,
+      "registered_targets": 8,
+      "target_marker_positions_match": true,
+      "navigation_realization_id": "c2bd73c1fc16686e680542b370565c01d3ae1da19d1f2328d7c6e416ba371c38"
+    },
+    "online_contract": {
+      "passed": true,
+      "includes": "zero reward update, terminal event, replay value targets, truncation and full resume"
+    },
+    "curriculum_dry_run": {
+      "passed": true,
+      "configuration": "dance, 2 teams, 2 carts, 2 players per team"
+    },
+    "existing_telemetry_ingestion": {
+      "passed": true,
+      "rows": 123,
+      "terminal_rounds": 1
+    },
+    "git_diff_check": {
+      "passed": true
+    }
+  },
+  "limits": [
+    "Exact first invalid operation in the historical run is not captured in saved artifacts.",
+    "Saved-observation optimizer verification exercises common arithmetic, not live gameplay or comparative policy strength.",
+    "QCVM runs extracted actual game/target functions with fixture engine builtins and lists; full engine match behavior was not exercised.",
+    "Executed version exposure is measured at observation endpoints; source-changing intervals are reported separately.",
+    "No live process was manually restarted or new match launched."
+  ],
+  "logs": "/tmp/mesh-slate-20260905"
+}

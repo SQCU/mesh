@@ -1,0 +1,80 @@
+{
+  "status": "policy_side_implemented_native_boundary_pending",
+  "nodes": [
+    {
+      "at": "2026-09-05T23:26:16.743691+00:00",
+      "host": "Ms-MacBook-Pro.local",
+      "cpu": "Apple M5 Max",
+      "machine": "arm64",
+      "mlx": "0.32.2",
+      "tests": 30,
+      "failures": 0,
+      "errors": 0,
+      "elapsed_seconds": 0.6978233329718933,
+      "modules": [
+        "solver.strat.test_state_steering",
+        "solver.strat.test_learning",
+        "solver.strat.test_state",
+        "solver.strat.test_action_history",
+        "solver.strat.test_policy_reports"
+      ],
+      "integrator_jacobian_max_absolute_error": 4.231578143443215e-09,
+      "integrator_jacobian_rank": 3,
+      "integrator_jacobian_condition_number": 1.0,
+      "parameter_and_input_directional_difference_tolerance": 0.0002,
+      "transport_vector_width": 6145,
+      "native_writeback_implemented": false,
+      "live_bot_execution_tested": false,
+      "log": "test_complete_vectors_cross_transport_pages (solver.strat.test_state_steering.StateSteeringTests.test_complete_vectors_cross_transport_pages) ... ok\ntest_exact_solution_and_subdivision (solver.strat.test_state_steering.StateSteeringTests.test_exact_solution_and_subdivision) ... ok\ntest_integrator_gradients (solver.strat.test_state_steering.StateSteeringTests.test_integrator_gradients) ... ok\ntest_policy_gradient_reaches_state_readout_and_gram (solver.strat.test_state_steering.StateSteeringTests.test_policy_gradient_reaches_state_readout_and_gram) ... ok\ntest_published_trajectory_matches_integrated_endpoint (solver.strat.test_state_steering.StateSteeringTests.test_published_trajectory_matches_integrated_endpoint) ... ok\ntest_readout_parameter_and_input_gradients (solver.strat.test_state_steering.StateSteeringTests.test_readout_parameter_and_input_gradients) ... ok\ntest_zero_velocity_and_compensation (solver.strat.test_state_steering.StateSteeringTests.test_zero_velocity_and_compensation) ... ok\ntest_bootstrap_evaluates_the_complete_successor_roster (solver.strat.test_learning.LearningTests.test_bootstrap_evaluates_the_complete_successor_roster) ... ok\ntest_cg_solve_and_implicit_derivative (solver.strat.test_learning.LearningTests.test_cg_solve_and_implicit_derivative) ... ok\ntest_checkpoint_continuation_is_whole_state (solver.strat.test_learning.LearningTests.test_checkpoint_continuation_is_whole_state) ... ok\ntest_delayed_actor_group_does_not_duplicate_observed_returns (solver.strat.test_learning.LearningTests.test_delayed_actor_group_does_not_duplicate_observed_returns) ... ok\ntest_inference_load_preserves_distribution_version_identity (solver.strat.test_learning.LearningTests.test_inference_load_preserves_distribution_version_identity) ... ok\ntest_old_update_schedule_resumes_at_explicit_objective_boundary (solver.strat.test_learning.LearningTests.test_old_update_schedule_resumes_at_explicit_objective_boundary) ... ok\ntest_scaled_normalization_and_zero_rms_gradient (solver.strat.test_learning.LearningTests.test_scaled_normalization_and_zero_rms_gradient) ... ok\ntest_stale_rollout_updates_and_saved_optimizer_remain_finite (solver.strat.test_learning.LearningTests.test_stale_rollout_updates_and_saved_optimizer_remain_finite) ... ok\ntest_audit_traces_replay_inputs (solver.strat.test_state.StateTests.test_audit_traces_replay_inputs) ... ok\ntest_game_is_equivariant_under_team_relabeling (solver.strat.test_state.StateTests.test_game_is_equivariant_under_team_relabeling) ... ok\ntest_game_ties_and_zero_control (solver.strat.test_state.StateTests.test_game_ties_and_zero_control) ... ok\ntest_participant_successors (solver.strat.test_state.StateTests.test_participant_successors) ... ok\ntest_replay_shared_frame_serials (solver.strat.test_state.StateTests.test_replay_shared_frame_serials) ... ok\ntest_stacked_floors_keep_distinct_belief_cells (solver.strat.test_state.StateTests.test_stacked_floors_keep_distinct_belief_cells) ... ok\ntest_assignment_and_measurement_share_execution_provenance (solver.strat.test_action_history.ActionHistoryTests.test_assignment_and_measurement_share_execution_provenance) ... ok\ntest_delayed_application_keeps_source_and_is_credited_once (solver.strat.test_action_history.ActionHistoryTests.test_delayed_application_keeps_source_and_is_credited_once) ... ok\ntest_delayed_return_accumulates_observed_role_changes (solver.strat.test_action_history.ActionHistoryTests.test_delayed_return_accumulates_observed_role_changes) ... ok\ntest_mixed_round_keeps_executed_versions_and_unlabelled_exposure (solver.strat.test_action_history.ActionHistoryTests.test_mixed_round_keeps_executed_versions_and_unlabelled_exposure) ... ok\ntest_roster_change_and_episode_reset (solver.strat.test_action_history.ActionHistoryTests.test_roster_change_and_episode_reset) ... ok\ntest_unknown_application_cannot_credit_a_different_player (solver.strat.test_action_history.ActionHistoryTests.test_unknown_application_cannot_credit_a_different_player) ... ok\ntest_exact_distribution_divergence_and_counterfactual_identity (solver.strat.test_policy_reports.PolicyReportTests.test_exact_distribution_divergence_and_counterfactual_identity) ... ok\ntest_identical_policies_and_unsampled_vectors (solver.strat.test_policy_reports.PolicyReportTests.test_identical_policies_and_unsampled_vectors) ... ok\ntest_state_application_reaches_j_report (solver.strat.test_policy_reports.PolicyReportTests.test_state_application_reaches_j_report) ... ok\n\n----------------------------------------------------------------------\nRan 30 tests in 0.683s\n\nOK\n"
+    },
+    {
+      "at": "2026-09-05T23:26:17.784494+00:00",
+      "host": "Ms-Mac-mini",
+      "cpu": "Apple M4 Pro",
+      "machine": "arm64",
+      "mlx": "0.32.2",
+      "tests": 30,
+      "failures": 0,
+      "errors": 0,
+      "elapsed_seconds": 0.47246070799974405,
+      "modules": [
+        "solver.strat.test_state_steering",
+        "solver.strat.test_learning",
+        "solver.strat.test_state",
+        "solver.strat.test_action_history",
+        "solver.strat.test_policy_reports"
+      ],
+      "integrator_jacobian_max_absolute_error": 4.231578143443215e-09,
+      "integrator_jacobian_rank": 3,
+      "integrator_jacobian_condition_number": 1.0,
+      "parameter_and_input_directional_difference_tolerance": 0.0002,
+      "transport_vector_width": 6145,
+      "native_writeback_implemented": false,
+      "live_bot_execution_tested": false,
+      "log": "test_complete_vectors_cross_transport_pages (solver.strat.test_state_steering.StateSteeringTests.test_complete_vectors_cross_transport_pages) ... ok\ntest_exact_solution_and_subdivision (solver.strat.test_state_steering.StateSteeringTests.test_exact_solution_and_subdivision) ... ok\ntest_integrator_gradients (solver.strat.test_state_steering.StateSteeringTests.test_integrator_gradients) ... ok\ntest_policy_gradient_reaches_state_readout_and_gram (solver.strat.test_state_steering.StateSteeringTests.test_policy_gradient_reaches_state_readout_and_gram) ... ok\ntest_published_trajectory_matches_integrated_endpoint (solver.strat.test_state_steering.StateSteeringTests.test_published_trajectory_matches_integrated_endpoint) ... ok\ntest_readout_parameter_and_input_gradients (solver.strat.test_state_steering.StateSteeringTests.test_readout_parameter_and_input_gradients) ... ok\ntest_zero_velocity_and_compensation (solver.strat.test_state_steering.StateSteeringTests.test_zero_velocity_and_compensation) ... ok\ntest_bootstrap_evaluates_the_complete_successor_roster (solver.strat.test_learning.LearningTests.test_bootstrap_evaluates_the_complete_successor_roster) ... ok\ntest_cg_solve_and_implicit_derivative (solver.strat.test_learning.LearningTests.test_cg_solve_and_implicit_derivative) ... ok\ntest_checkpoint_continuation_is_whole_state (solver.strat.test_learning.LearningTests.test_checkpoint_continuation_is_whole_state) ... ok\ntest_delayed_actor_group_does_not_duplicate_observed_returns (solver.strat.test_learning.LearningTests.test_delayed_actor_group_does_not_duplicate_observed_returns) ... ok\ntest_inference_load_preserves_distribution_version_identity (solver.strat.test_learning.LearningTests.test_inference_load_preserves_distribution_version_identity) ... ok\ntest_old_update_schedule_resumes_at_explicit_objective_boundary (solver.strat.test_learning.LearningTests.test_old_update_schedule_resumes_at_explicit_objective_boundary) ... ok\ntest_scaled_normalization_and_zero_rms_gradient (solver.strat.test_learning.LearningTests.test_scaled_normalization_and_zero_rms_gradient) ... ok\ntest_stale_rollout_updates_and_saved_optimizer_remain_finite (solver.strat.test_learning.LearningTests.test_stale_rollout_updates_and_saved_optimizer_remain_finite) ... ok\ntest_audit_traces_replay_inputs (solver.strat.test_state.StateTests.test_audit_traces_replay_inputs) ... ok\ntest_game_is_equivariant_under_team_relabeling (solver.strat.test_state.StateTests.test_game_is_equivariant_under_team_relabeling) ... ok\ntest_game_ties_and_zero_control (solver.strat.test_state.StateTests.test_game_ties_and_zero_control) ... ok\ntest_participant_successors (solver.strat.test_state.StateTests.test_participant_successors) ... ok\ntest_replay_shared_frame_serials (solver.strat.test_state.StateTests.test_replay_shared_frame_serials) ... ok\ntest_stacked_floors_keep_distinct_belief_cells (solver.strat.test_state.StateTests.test_stacked_floors_keep_distinct_belief_cells) ... ok\ntest_assignment_and_measurement_share_execution_provenance (solver.strat.test_action_history.ActionHistoryTests.test_assignment_and_measurement_share_execution_provenance) ... ok\ntest_delayed_application_keeps_source_and_is_credited_once (solver.strat.test_action_history.ActionHistoryTests.test_delayed_application_keeps_source_and_is_credited_once) ... ok\ntest_delayed_return_accumulates_observed_role_changes (solver.strat.test_action_history.ActionHistoryTests.test_delayed_return_accumulates_observed_role_changes) ... ok\ntest_mixed_round_keeps_executed_versions_and_unlabelled_exposure (solver.strat.test_action_history.ActionHistoryTests.test_mixed_round_keeps_executed_versions_and_unlabelled_exposure) ... ok\ntest_roster_change_and_episode_reset (solver.strat.test_action_history.ActionHistoryTests.test_roster_change_and_episode_reset) ... ok\ntest_unknown_application_cannot_credit_a_different_player (solver.strat.test_action_history.ActionHistoryTests.test_unknown_application_cannot_credit_a_different_player) ... ok\ntest_exact_distribution_divergence_and_counterfactual_identity (solver.strat.test_policy_reports.PolicyReportTests.test_exact_distribution_divergence_and_counterfactual_identity) ... ok\ntest_identical_policies_and_unsampled_vectors (solver.strat.test_policy_reports.PolicyReportTests.test_identical_policies_and_unsampled_vectors) ... ok\ntest_state_application_reaches_j_report (solver.strat.test_policy_reports.PolicyReportTests.test_state_application_reaches_j_report) ... ok\n\n----------------------------------------------------------------------\nRan 30 tests in 0.434s\n\nOK\n"
+    }
+  ],
+  "additional_local_checks": {
+    "reporting_and_viewer": 9,
+    "matrix_paging_and_rpc": 11,
+    "failures": 0,
+    "javascript_syntax": "passed"
+  },
+  "source_sha256": {
+    "xonotic/solver/strat/state_steering.py": "8c0e9331f4441770fcb6959d81f250540afacc4c2a112f474f016ff362e9a424",
+    "xonotic/solver/strat/strategy.py": "ec95df92acc0dccd65831c7875f03bbf1052d95b0740d4e1fb785e38f0fc7543",
+    "xonotic/solver/strat/cast_header.py": "6a99875ff3fbf6a50f03db223e75710b899d8c1d2b1aec0b103fc93822c9feae",
+    "xonotic/solver/strat/inputs.py": "7b5815b4d82c0fd684a342f605f0716fda3bca2791d748f8e390d570945be032",
+    "xonotic/solver/strat/online.py": "f6dc88851c0bfaca8bdec4d84fcdcf49d96d190d2f26f89275fb4604042a90fd",
+    "xonotic/solver/strat/test_state_steering.py": "038e184cab616b187b1d3cda3275bbb253a46717fb753daa7f8f1b2b3f69895e"
+  },
+  "native_state_capture_implemented": false,
+  "native_state_writeback_implemented": false,
+  "game_workload_restarted": false,
+  "engine_question": "Havocbot computation overlay or permanent mutation of underlying shared game entities?",
+  "limits": [
+    "Numeric tensor fixtures and code paths were validated; no game was re-simulated.",
+    "The 6145-component transport fixture does not establish the full transitive Havocbot state schema.",
+    "No live bot execution or reward-learning success is claimed."
+  ]
+}

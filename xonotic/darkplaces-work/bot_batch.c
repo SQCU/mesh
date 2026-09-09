@@ -91,7 +91,7 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 	uint32_t first, count, row, active, padded, wave_start;
 	int pending, destination, randomfield, isbot, wavefield, csfield, movement, button5, keyboardtime, moveskill;
 	int keyboardskill, ducktime, keyboard, period, raw_wave, color_span, cell_rank;
-	float now, dt, skill, maxspeed, trigger, distance, motion, causal_distance;
+	float dt, maxspeed, motion, causal_distance;
 	float *data;
 	vcellplan_t plan;
 	vcellplanrow_t *kernelrows;
@@ -112,12 +112,8 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 	botbatchstats.causal_cells = 0;
 	first = 1;
 	count = (uint32_t)svs.maxclients;
-	now = PRVM_G_FLOAT(OFS_PARM0);
-	dt = PRVM_G_FLOAT(OFS_PARM1);
-	skill = PRVM_G_FLOAT(OFS_PARM2);
-	maxspeed = PRVM_G_FLOAT(OFS_PARM3);
-	trigger = PRVM_G_FLOAT(OFS_PARM4);
-	distance = PRVM_G_FLOAT(OFS_PARM5);
+	dt = PRVM_G_READFLOAT(OFS_PARM1);
+	maxspeed = PRVM_G_READFLOAT(OFS_PARM3);
 	if (count > (uint32_t)prog->max_edicts - first)
 	{
 		VM_Warning(prog, "bot_controller_batch: edicts %u+%u out of range in %s\n", first, count, prog->name);
@@ -215,11 +211,14 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 		prvm_edict_t *actor = plan.rows[row].actor;
 		uint32_t csnum;
 		prvm_edict_t *client;
+		prvm_view_t *previous;
 		if (!PRVM_EDICTFIELDFLOAT(actor, pending))
 			continue;
-		csnum = (uint32_t)PRVM_EDICTFIELDEDICT(actor, csfield);
+		previous = PRVM_ViewBegin(prog, PRVM_NUM_FOR_EDICT(actor));
+		csnum = (uint32_t)PRVM_EDICTREADINT(actor, csfield, ev_entity);
 		if (!csnum || csnum >= (uint32_t)prog->max_edicts)
 		{
+			PRVM_ViewEnd(prog, previous);
 			VM_Warning(prog, "bot_controller_batch: pending edict %u has invalid client state %u in %s; scalar fallback remains pending\n", first + plan.rows[row].stable, csnum, prog->name);
 			continue;
 		}
@@ -227,23 +226,30 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 		kernelrows[active] = plan.rows[row];
 		kernelrows[active].client = client;
 		kernelrows[active].packed = active;
-		data[BOT_BATCH_MOVE_X * padded + active] = PRVM_EDICTFIELDVECTOR(client, movement)[0];
-		data[BOT_BATCH_MOVE_Y * padded + active] = PRVM_EDICTFIELDVECTOR(client, movement)[1];
-		data[BOT_BATCH_MOVE_Z * padded + active] = PRVM_EDICTFIELDVECTOR(client, movement)[2];
-		data[BOT_BATCH_ORIGIN_X * padded + active] = PRVM_serveredictvector(actor, origin)[0];
-		data[BOT_BATCH_ORIGIN_Y * padded + active] = PRVM_serveredictvector(actor, origin)[1];
-		data[BOT_BATCH_ORIGIN_Z * padded + active] = PRVM_serveredictvector(actor, origin)[2];
-		data[BOT_BATCH_DEST_X * padded + active] = PRVM_EDICTFIELDVECTOR(actor, destination)[0];
-		data[BOT_BATCH_DEST_Y * padded + active] = PRVM_EDICTFIELDVECTOR(actor, destination)[1];
-		data[BOT_BATCH_DEST_Z * padded + active] = PRVM_EDICTFIELDVECTOR(actor, destination)[2];
-		data[BOT_BATCH_KEYBOARD_TIME * padded + active] = PRVM_EDICTFIELDFLOAT(actor, keyboardtime);
-		data[BOT_BATCH_MOVE_SKILL * padded + active] = PRVM_EDICTFIELDFLOAT(actor, moveskill);
-		data[BOT_BATCH_KEYBOARD_SKILL * padded + active] = PRVM_EDICTFIELDFLOAT(actor, keyboardskill);
-		data[BOT_BATCH_DUCK_TIME * padded + active] = PRVM_EDICTFIELDFLOAT(actor, ducktime);
-		data[BOT_BATCH_RANDOM * padded + active] = PRVM_EDICTFIELDFLOAT(actor, randomfield);
+		data[BOT_BATCH_MOVE_X * padded + active] = PRVM_EDICTREADFLOAT(client, movement + 0);
+		data[BOT_BATCH_MOVE_Y * padded + active] = PRVM_EDICTREADFLOAT(client, movement + 1);
+		data[BOT_BATCH_MOVE_Z * padded + active] = PRVM_EDICTREADFLOAT(client, movement + 2);
+		data[BOT_BATCH_ORIGIN_X * padded + active] = PRVM_EDICTREADFLOAT(actor, prog->fieldoffsets.origin + 0);
+		data[BOT_BATCH_ORIGIN_Y * padded + active] = PRVM_EDICTREADFLOAT(actor, prog->fieldoffsets.origin + 1);
+		data[BOT_BATCH_ORIGIN_Z * padded + active] = PRVM_EDICTREADFLOAT(actor, prog->fieldoffsets.origin + 2);
+		data[BOT_BATCH_DEST_X * padded + active] = PRVM_EDICTREADFLOAT(actor, destination + 0);
+		data[BOT_BATCH_DEST_Y * padded + active] = PRVM_EDICTREADFLOAT(actor, destination + 1);
+		data[BOT_BATCH_DEST_Z * padded + active] = PRVM_EDICTREADFLOAT(actor, destination + 2);
+		data[BOT_BATCH_KEYBOARD_TIME * padded + active] = PRVM_EDICTREADFLOAT(actor, keyboardtime);
+		data[BOT_BATCH_MOVE_SKILL * padded + active] = PRVM_EDICTREADFLOAT(actor, moveskill);
+		data[BOT_BATCH_KEYBOARD_SKILL * padded + active] = PRVM_EDICTREADFLOAT(actor, keyboardskill);
+		data[BOT_BATCH_DUCK_TIME * padded + active] = PRVM_EDICTREADFLOAT(actor, ducktime);
+		data[BOT_BATCH_RANDOM * padded + active] = PRVM_EDICTREADFLOAT(actor, randomfield);
+		data[BOT_BATCH_NOW * padded + active] = PRVM_G_READFLOAT(OFS_PARM0);
+		prog->view->global_readonly[OFS_PARM2] = 1;
+		data[BOT_BATCH_SKILL * padded + active] = PRVM_G_READFLOAT(OFS_PARM2);
+		data[BOT_BATCH_MAXSPEED * padded + active] = PRVM_G_READFLOAT(OFS_PARM3);
+		data[BOT_BATCH_TRIGGER * padded + active] = PRVM_G_READFLOAT(OFS_PARM4);
+		data[BOT_BATCH_DISTANCE * padded + active] = PRVM_G_READFLOAT(OFS_PARM5);
+		PRVM_ViewEnd(prog, previous);
 		active++;
 	}
-	botbatchstats.input_coordinates = (uint64_t)active * 14;
+	botbatchstats.input_coordinates = (uint64_t)active * 19;
 	botbatchstats.output_coordinates = (uint64_t)active * 9;
 	botbatchstats.buffer_bytes = (uint64_t)BOT_BATCH_FIELDS * padded * sizeof(float);
 	wave_start = 0;
@@ -254,7 +260,7 @@ void VM_bot_controller_batch(prvm_prog_t *prog)
 		while (wave_end < active && kernelrows[wave_end].wave == kernelrows[wave_start].wave)
 			wave_end++;
 		wave_rows = wave_end - wave_start;
-		BotBatchKernel(data + wave_start, padded, wave_rows, now, skill, maxspeed, trigger, distance);
+		BotBatchKernel(data + wave_start, padded, wave_rows);
 		qsort(kernelrows + wave_start, wave_rows, sizeof(*kernelrows), BotBatchStableCompare);
 		for (row = wave_start; row < wave_end; row++)
 		{
@@ -309,7 +315,7 @@ void VM_bot_controller_stat(prvm_prog_t *prog)
 {
 	int selector;
 	VM_SAFEPARMCOUNT(1, VM_bot_controller_stat);
-	selector = (int)PRVM_G_FLOAT(OFS_PARM0);
+	selector = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	switch (selector)
 	{
 	case 0: PRVM_G_FLOAT(OFS_RETURN) = botbatchstats.rows; break;

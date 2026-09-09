@@ -1,0 +1,172 @@
+{
+  "scope": "Read-only numerical probes of current architecture; small host-only tensors, no game simulation, service or RDMA operation.",
+  "source_model": {
+    "matrix_policy_version": 19,
+    "baseline_version": 17,
+    "architecture_version": 10
+  },
+  "frozen_ir_counterexamples": {
+    "state_after_frozen_ir": {
+      "rate_mean_max_change": 0.0017654974944889545,
+      "rate_log_scale_max_change": 0.051012516021728516,
+      "main_value_max_change": 0.0
+    },
+    "residual_after_frozen_ir": {
+      "rate_mean_max_change": 0.002839131746441126,
+      "rate_log_scale_max_change": 0.10121774673461914,
+      "main_value_max_change": 0.0
+    },
+    "page_ir_only": {
+      "rate_mean_max_change": 0.002279179636389017,
+      "rate_log_scale_max_change": 0.13978099822998047,
+      "main_value_max_change": 0.0
+    },
+    "observation_ir_only": {
+      "rate_mean_max_change": 0.0,
+      "rate_log_scale_max_change": 0.0,
+      "main_value_max_change": 0.19585755467414856
+    }
+  },
+  "loss_parameter_gradient_norms": {
+    "actor": {
+      "phil.weight": 6.286348793244064,
+      "quinn.weight": 43.11561769910469,
+      "participant.weight": 72.84658622506586,
+      "cart.weight": 0.0,
+      "team.weight": 6.7139523517067845,
+      "neighborhood.node_projection.weight": 0.0,
+      "neighborhood.edge_projection.weight": 0.0,
+      "neighborhood.cell_projection.weight": 0.0,
+      "neighborhood.metric.weight": 4.050719295283824,
+      "neighborhood.value.weight": 9.71323596167623,
+      "neighborhood.output.weight": 8.181738268016922,
+      "neighborhood.log_decay": 0.6229801774024963,
+      "input_gate.weight": 6.6451349898263725,
+      "input_value.weight": 4.760921093033376,
+      "input_out.weight": 7.461219126133988,
+      "ir_query.weight": 51.89867455027273,
+      "team_metric.weight": 3.5708409085225874,
+      "rival_metric.weight": 7.345263054613788,
+      "gia.weight": 2.7516734420604134,
+      "uma.weight": 1.7237929524951434,
+      "dov.weight": 2.4107228409960797,
+      "state_readout.state_projection.weight": 16.65321699149854,
+      "state_readout.residual_projection.weight": 1.8723789310582455,
+      "state_readout.policy.weight": 45.285662249074335,
+      "state_readout.policy.bias": 8.436736199326674,
+      "state_readout.scale.weight": 27.121333598920856,
+      "state_readout.scale.bias": 3.5548297430687144,
+      "winnie.weight": 0.0,
+      "lou.weight": 0.0,
+      "vera_winnie.weight": 0.0,
+      "vera_lou.weight": 0.0,
+      "scale_in.weight": 15.176192905805792,
+      "scale_router.weight": 0.8141323594228689,
+      "scale_w1": 3.269599248226556,
+      "scale_w3": 3.395029311860834,
+      "scale_w2": 3.9514704277361683,
+      "scale_out.weight": 17.067750428565567
+    },
+    "main_critics": {
+      "phil.weight": 2.2110480037070874,
+      "quinn.weight": 15.87770004252528,
+      "participant.weight": 48.65512355503956,
+      "cart.weight": 0.0,
+      "team.weight": 4.470779028328584,
+      "neighborhood.node_projection.weight": 0.0,
+      "neighborhood.edge_projection.weight": 0.0,
+      "neighborhood.cell_projection.weight": 0.0,
+      "neighborhood.metric.weight": 2.776299719794312,
+      "neighborhood.value.weight": 2.7171487481417103,
+      "neighborhood.output.weight": 2.7057388781604894,
+      "neighborhood.log_decay": 0.34334176778793335,
+      "input_gate.weight": 5.674726080403639,
+      "input_value.weight": 4.594500236710936,
+      "input_out.weight": 4.935163606662301,
+      "ir_query.weight": 19.710996676665875,
+      "team_metric.weight": 0.0,
+      "rival_metric.weight": 19.284649256500387,
+      "gia.weight": 0.0,
+      "uma.weight": 0.0,
+      "dov.weight": 0.0,
+      "state_readout.state_projection.weight": 0.0,
+      "state_readout.residual_projection.weight": 0.0,
+      "state_readout.policy.weight": 0.0,
+      "state_readout.policy.bias": 0.0,
+      "state_readout.scale.weight": 0.0,
+      "state_readout.scale.bias": 0.0,
+      "winnie.weight": 0.8975256495240892,
+      "lou.weight": 18.649217784467808,
+      "vera_winnie.weight": 0.0,
+      "vera_lou.weight": 0.0,
+      "scale_in.weight": 8.08574984085768,
+      "scale_router.weight": 0.38612464592299994,
+      "scale_w1": 2.4079375369755875,
+      "scale_w3": 1.493402578310599,
+      "scale_w2": 1.8270896718627088,
+      "scale_out.weight": 7.66719808760169
+    }
+  },
+  "actor_path_without_main_critic_gradients": {
+    "gia.weight": {
+      "actor": 2.7516734420604134,
+      "main_critics": 0.0
+    },
+    "uma.weight": {
+      "actor": 1.7237929524951434,
+      "main_critics": 0.0
+    },
+    "dov.weight": {
+      "actor": 2.4107228409960797,
+      "main_critics": 0.0
+    },
+    "state_readout.state_projection.weight": {
+      "actor": 16.65321699149854,
+      "main_critics": 0.0
+    },
+    "state_readout.residual_projection.weight": {
+      "actor": 1.8723789310582455,
+      "main_critics": 0.0
+    },
+    "state_readout.policy.weight": {
+      "actor": 45.285662249074335,
+      "main_critics": 0.0
+    },
+    "state_readout.policy.bias": {
+      "actor": 8.436736199326674,
+      "main_critics": 0.0
+    },
+    "state_readout.scale.weight": {
+      "actor": 27.121333598920856,
+      "main_critics": 0.0
+    },
+    "state_readout.scale.bias": {
+      "actor": 3.5548297430687144,
+      "main_critics": 0.0
+    }
+  },
+  "default_page_mean_ir_jacobian": {
+    "shape": [
+      256,
+      128
+    ],
+    "rank": 128,
+    "scope": "Conditional mean versus its readout IR, with native state/residual and parameters fixed. Not the parameter Jacobian or Gaussian sample support."
+  },
+  "entropy_floor": {
+    "target_nats_per_word": 1.0,
+    "loss_coefficient": 0.01,
+    "sigma_at_zero_floor_penalty": 0.657744623479457,
+    "initial_scale_coordinate_zero_sigma": 0.01,
+    "ratio_to_initial_sigma": 65.77446234794569,
+    "weighted_penalty_log_sigma_derivative_at_initial": -0.08372463305566835,
+    "scope": "Soft differential-entropy penalty in native rate units; not a hard minimum scale or prediction of trained equilibrium."
+  },
+  "contract_violations_reproduced": {
+    "changing_state_after_frozen_ir_changes_policy": true,
+    "changing_residual_after_frozen_ir_changes_policy": true,
+    "main_critics_ignore_page_ir_at_readout": true,
+    "actor_ignores_observation_ir_at_readout": true,
+    "actor_specific_parameters_have_zero_main_critic_gradient": true
+  }
+}

@@ -1,0 +1,6 @@
+xonotic/darkplaces-work/darkplaces-dedicated: replacing existing signature
+.................................
+----------------------------------------------------------------------
+Ran 33 tests in 0.675s
+
+OK

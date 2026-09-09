@@ -242,7 +242,7 @@ static void VM_SV_setorigin(prvm_prog_t *prog)
 		VM_Warning(prog, "setorigin: can not modify free entity\n");
 		return;
 	}
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), PRVM_serveredictvector(e, origin));
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), PRVM_serveredictvector(e, origin));
 	if(e->priv.required->mark == PRVM_EDICT_MARK_WAIT_FOR_SETORIGIN)
 		e->priv.required->mark = PRVM_EDICT_MARK_SETORIGIN_CAUGHT;
 	SV_LinkEdict(e);
@@ -281,8 +281,8 @@ static void VM_SV_setsize(prvm_prog_t *prog)
 		VM_Warning(prog, "setsize: can not modify free entity\n");
 		return;
 	}
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), mins);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), maxs);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), mins);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), maxs);
 	SetMinMaxSize(prog, e, mins, maxs, false);
 }
 
@@ -388,10 +388,10 @@ static void VM_SV_particle(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(4, VM_SV_particle);
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), org);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), dir);
-	color = (int)PRVM_G_FLOAT(OFS_PARM2);
-	count = (int)PRVM_G_FLOAT(OFS_PARM3);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), org);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), dir);
+	color = (int)PRVM_G_READFLOAT(OFS_PARM2);
+	count = (int)PRVM_G_READFLOAT(OFS_PARM3);
 	SV_StartParticle (org, dir, color, count);
 }
 
@@ -404,10 +404,10 @@ static void VM_SV_ambientsound(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(4, VM_SV_ambientsound);
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), pos);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), pos);
 	samp = PRVM_G_STRING(OFS_PARM1);
-	vol = PRVM_G_FLOAT(OFS_PARM2);
-	attenuation = PRVM_G_FLOAT(OFS_PARM3);
+	vol = PRVM_G_READFLOAT(OFS_PARM2);
+	attenuation = PRVM_G_READFLOAT(OFS_PARM3);
 
 	soundnum = SV_SoundIndex(samp, 1);
 	if (!soundnum)
@@ -447,20 +447,20 @@ static void VM_SV_sound(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(4, 7, VM_SV_sound);
 
 	entity = PRVM_G_EDICT(OFS_PARM0);
-	channel = (int)PRVM_G_FLOAT(OFS_PARM1);
+	channel = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	sample = PRVM_G_STRING(OFS_PARM2);
-	nvolume = (int)(PRVM_G_FLOAT(OFS_PARM3) * 255);
+	nvolume = (int)(PRVM_G_READFLOAT(OFS_PARM3) * 255);
 	if (prog->argc < 5)
 	{
 		Con_DPrintf("VM_SV_sound: given only 4 parameters, expected 5, assuming attenuation = ATTN_NORMAL\n");
 		attenuation = 1;
 	}
 	else
-		attenuation = PRVM_G_FLOAT(OFS_PARM4);
+		attenuation = PRVM_G_READFLOAT(OFS_PARM4);
 	if (prog->argc < 6)
 		pitchchange = 0;
 	else
-		pitchchange = PRVM_G_FLOAT(OFS_PARM5) * 0.01f;
+		pitchchange = PRVM_G_READFLOAT(OFS_PARM5) * 0.01f;
 
 	if (prog->argc < 7)
 	{
@@ -474,7 +474,7 @@ static void VM_SV_sound(prvm_prog_t *prog)
 	else
 	{
 
-		flags = (int)PRVM_G_FLOAT(OFS_PARM6) & (CHANNELFLAG_RELIABLE | CHANNELFLAG_FORCELOOP | CHANNELFLAG_PAUSED | CHANNELFLAG_FULLVOLUME);
+		flags = (int)PRVM_G_READFLOAT(OFS_PARM6) & (CHANNELFLAG_RELIABLE | CHANNELFLAG_FORCELOOP | CHANNELFLAG_PAUSED | CHANNELFLAG_FULLVOLUME);
 	}
 
 	if (nvolume < 0 || nvolume > 255)
@@ -510,11 +510,11 @@ static void VM_SV_pointsound(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNTRANGE(4, 5, VM_SV_pointsound);
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), org);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), org);
 	sample = PRVM_G_STRING(OFS_PARM1);
-	nvolume = (int)(PRVM_G_FLOAT(OFS_PARM2) * 255);
-	attenuation = PRVM_G_FLOAT(OFS_PARM3);
-	pitchchange = prog->argc < 5 ? 0 : PRVM_G_FLOAT(OFS_PARM4) * 0.01f;
+	nvolume = (int)(PRVM_G_READFLOAT(OFS_PARM2) * 255);
+	attenuation = PRVM_G_READFLOAT(OFS_PARM3);
+	pitchchange = prog->argc < 5 ? 0 : PRVM_G_READFLOAT(OFS_PARM4) * 0.01f;
 
 	if (nvolume < 0 || nvolume > 255)
 	{
@@ -542,9 +542,9 @@ static void VM_SV_traceline(prvm_prog_t *prog)
 
 	prog->xfunction->builtinsprofile += 30;
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), v1);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), v2);
-	move = (int)PRVM_G_FLOAT(OFS_PARM2);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), v1);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), v2);
+	move = (int)PRVM_G_READFLOAT(OFS_PARM2);
 	ent = PRVM_G_EDICT(OFS_PARM3);
 
 	if (VEC_IS_NAN(v1[0]) || VEC_IS_NAN(v1[1]) || VEC_IS_NAN(v1[2]) || VEC_IS_NAN(v2[0]) || VEC_IS_NAN(v2[1]) || VEC_IS_NAN(v2[2]))
@@ -566,11 +566,11 @@ static void VM_SV_tracebox(prvm_prog_t *prog)
 
 	prog->xfunction->builtinsprofile += 30;
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), v1);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), m1);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), m2);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM3), v2);
-	move = (int)PRVM_G_FLOAT(OFS_PARM4);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), v1);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), m1);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), m2);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM3), v2);
+	move = (int)PRVM_G_READFLOAT(OFS_PARM4);
 	ent = PRVM_G_EDICT(OFS_PARM5);
 
 	if (VEC_IS_NAN(v1[0]) || VEC_IS_NAN(v1[1]) || VEC_IS_NAN(v1[2]) || VEC_IS_NAN(v2[0]) || VEC_IS_NAN(v2[1]) || VEC_IS_NAN(v2[2]))
@@ -583,48 +583,36 @@ static void VM_SV_tracebox(prvm_prog_t *prog)
 
 static trace_t SV_Trace_Toss(prvm_prog_t *prog, prvm_edict_t *tossent, prvm_edict_t *ignore)
 {
-	int i;
-	float gravity;
-	vec3_t move, end, tossentorigin, tossentmins, tossentmaxs;
-	vec3_t original_origin;
-	vec3_t original_velocity;
-	vec3_t original_angles;
-	vec3_t original_avelocity;
+	vec3_t origin, velocity, mins, maxs, end;
+	float gravity, speed;
 	trace_t trace;
-
-	VectorCopy(PRVM_serveredictvector(tossent, origin)   , original_origin   );
-	VectorCopy(PRVM_serveredictvector(tossent, velocity) , original_velocity );
-	VectorCopy(PRVM_serveredictvector(tossent, angles)   , original_angles   );
-	VectorCopy(PRVM_serveredictvector(tossent, avelocity), original_avelocity);
-
-	gravity = PRVM_serveredictfloat(tossent, gravity);
-	if (!gravity)
-		gravity = 1.0f;
-	gravity *= sv_gravity.value * 0.025;
-
-	for (i = 0;i < 200;i++)
+	VectorCopy(PRVM_EDICTREADVECTOR(tossent, prog->fieldoffsets.origin), origin);
+	VectorCopy(PRVM_EDICTREADVECTOR(tossent, prog->fieldoffsets.velocity), velocity);
+	VectorCopy(PRVM_EDICTREADVECTOR(tossent, prog->fieldoffsets.mins), mins);
+	VectorCopy(PRVM_EDICTREADVECTOR(tossent, prog->fieldoffsets.maxs), maxs);
+	gravity = PRVM_EDICTREADFLOAT(tossent, prog->fieldoffsets.gravity);
+	gravity = (gravity ? gravity : 1.0f) * sv_gravity.value * 0.025;
+	for (int i = 0; i < 200; ++i)
 	{
-		SV_CheckVelocity (tossent);
-		PRVM_serveredictvector(tossent, velocity)[2] -= gravity;
-		VectorMA (PRVM_serveredictvector(tossent, angles), 0.05, PRVM_serveredictvector(tossent, avelocity), PRVM_serveredictvector(tossent, angles));
-		VectorScale (PRVM_serveredictvector(tossent, velocity), 0.05, move);
-		VectorAdd (PRVM_serveredictvector(tossent, origin), move, end);
-		VectorCopy(PRVM_serveredictvector(tossent, origin), tossentorigin);
-		VectorCopy(PRVM_serveredictvector(tossent, mins), tossentmins);
-		VectorCopy(PRVM_serveredictvector(tossent, maxs), tossentmaxs);
-		trace = SV_TraceBox(tossentorigin, tossentmins, tossentmaxs, end, MOVE_NORMAL, tossent, SV_GenericHitSuperContentsMask(tossent), 0, 0, collision_extendmovelength.value);
-		VectorCopy (trace.endpos, PRVM_serveredictvector(tossent, origin));
-		PRVM_serveredictvector(tossent, velocity)[2] -= gravity;
-
-		if (trace.fraction < 1)
-			break;
+		for (int j = 0; j < 3; ++j)
+		{
+			if (PRVM_IS_NAN(velocity[j])) velocity[j] = 0;
+			if (PRVM_IS_NAN(origin[j])) origin[j] = 0;
+		}
+		if (VectorLength2(velocity) < 0.0000001) VectorClear(velocity);
+		speed = DotProduct(velocity, velocity);
+		if (speed > sv_maxvelocity.value * sv_maxvelocity.value)
+		{
+			speed = sv_maxvelocity.value / sqrt(speed);
+			VectorScale(velocity, speed, velocity);
+		}
+		velocity[2] -= gravity;
+		VectorMA(origin, 0.05, velocity, end);
+		trace = SV_TraceBox(origin, mins, maxs, end, MOVE_NORMAL, tossent, SV_GenericHitSuperContentsMask(tossent), 0, 0, collision_extendmovelength.value);
+		VectorCopy(trace.endpos, origin);
+		velocity[2] -= gravity;
+		if (trace.fraction < 1) break;
 	}
-
-	VectorCopy(original_origin   , PRVM_serveredictvector(tossent, origin)   );
-	VectorCopy(original_velocity , PRVM_serveredictvector(tossent, velocity) );
-	VectorCopy(original_angles   , PRVM_serveredictvector(tossent, angles)   );
-	VectorCopy(original_avelocity, PRVM_serveredictvector(tossent, avelocity));
-
 	return trace;
 }
 
@@ -736,7 +724,7 @@ static void VM_SV_checkpvs(prvm_prog_t *prog)
 #endif
 
 	VM_SAFEPARMCOUNT(2, VM_SV_checkpvs);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), viewpos);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), viewpos);
 	viewee = PRVM_G_EDICT(OFS_PARM1);
 
 	if(viewee->priv.server->free)
@@ -760,8 +748,8 @@ static void VM_SV_checkpvs(prvm_prog_t *prog)
 		PRVM_G_FLOAT(OFS_RETURN) = 2;
 		return;
 	}
-	VectorCopy(PRVM_serveredictvector(viewee, absmin), absmin);
-	VectorCopy(PRVM_serveredictvector(viewee, absmax), absmax);
+	for (int i = 0; i < 3; ++i) absmin[i] = PRVM_EDICTREADFLOAT(viewee, prog->fieldoffsets.absmin + i);
+	for (int i = 0; i < 3; ++i) absmax[i] = PRVM_EDICTREADFLOAT(viewee, prog->fieldoffsets.absmax + i);
 	PRVM_G_FLOAT(OFS_RETURN) = sv.worldmodel->brush.BoxTouchingPVS(sv.worldmodel, pvs, absmin, absmax);
 #else
 
@@ -778,8 +766,8 @@ static void VM_SV_checkpvs(prvm_prog_t *prog)
 		PRVM_G_FLOAT(OFS_RETURN) = 2;
 		return;
 	}
-	VectorCopy(PRVM_serveredictvector(viewee, absmin), absmin);
-	VectorCopy(PRVM_serveredictvector(viewee, absmax), absmax);
+	for (int i = 0; i < 3; ++i) absmin[i] = PRVM_EDICTREADFLOAT(viewee, prog->fieldoffsets.absmin + i);
+	for (int i = 0; i < 3; ++i) absmax[i] = PRVM_EDICTREADFLOAT(viewee, prog->fieldoffsets.absmax + i);
 	PRVM_G_FLOAT(OFS_RETURN) = sv.worldmodel->brush.BoxTouchingPVS(sv.worldmodel, fatpvs, absmin, absmax);
 #endif
 }
@@ -820,7 +808,7 @@ static void VM_SV_findradius(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_SV_findradius);
 
 	if(prog->argc == 3)
-		chainfield = PRVM_G_INT(OFS_PARM2);
+		chainfield = PRVM_G_READINT(OFS_PARM2);
 	else
 		chainfield = prog->fieldoffsets.chain;
 	if (chainfield < 0)
@@ -828,8 +816,8 @@ static void VM_SV_findradius(prvm_prog_t *prog)
 
 	chain = (prvm_edict_t *)prog->edicts;
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), org);
-	radius = PRVM_G_FLOAT(OFS_PARM1);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), org);
+	radius = PRVM_G_READFLOAT(OFS_PARM1);
 	radius2 = radius * radius;
 
 	mins[0] = org[0] - (radius + 1);
@@ -845,23 +833,36 @@ static void VM_SV_findradius(prvm_prog_t *prog)
 		Con_Printf("SV_EntitiesInBox returned %i edicts, max was %i\n", numtouchedicts, MAX_EDICTS);
 		numtouchedicts = MAX_EDICTS;
 	}
+	if (prog->view)
+	{
+		static uint64_t marks[MAX_EDICTS], epoch;
+		++epoch;
+		for (i = 0; i < numtouchedicts; ++i) marks[PRVM_NUM_FOR_EDICT(touchedicts[i])] = epoch;
+		for (prvm_view_page_t *page = prog->view->pages; page; page = page->next)
+			if (page->entity > 0 && page->forcing && marks[page->entity] != epoch &&
+				!prog->edicts[page->entity].priv.required->free)
+			{
+				marks[page->entity] = epoch;
+				touchedicts[numtouchedicts++] = PRVM_EDICT_NUM(page->entity);
+			}
+	}
 	for (i = 0;i < numtouchedicts;i++)
 	{
 		ent = touchedicts[i];
 		prog->xfunction->builtinsprofile++;
 
-		if (PRVM_serveredictfloat(ent, solid) == SOLID_NOT && !sv_gameplayfix_blowupfallenzombies.integer)
+		if (PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.solid) == SOLID_NOT && !sv_gameplayfix_blowupfallenzombies.integer)
 			continue;
 
-		VectorSubtract(org, PRVM_serveredictvector(ent, origin), eorg);
+		VectorSubtract(org, PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.origin), eorg);
 		if (sv_gameplayfix_findradiusdistancetobox.integer)
 		{
-			eorg[0] -= bound(PRVM_serveredictvector(ent, mins)[0], eorg[0], PRVM_serveredictvector(ent, maxs)[0]);
-			eorg[1] -= bound(PRVM_serveredictvector(ent, mins)[1], eorg[1], PRVM_serveredictvector(ent, maxs)[1]);
-			eorg[2] -= bound(PRVM_serveredictvector(ent, mins)[2], eorg[2], PRVM_serveredictvector(ent, maxs)[2]);
+			eorg[0] -= bound(PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.mins)[0], eorg[0], PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.maxs)[0]);
+			eorg[1] -= bound(PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.mins)[1], eorg[1], PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.maxs)[1]);
+			eorg[2] -= bound(PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.mins)[2], eorg[2], PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.maxs)[2]);
 		}
 		else
-			VectorMAMAM(1, eorg, -0.5f, PRVM_serveredictvector(ent, mins), -0.5f, PRVM_serveredictvector(ent, maxs), eorg);
+			VectorMAMAM(1, eorg, -0.5f, PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.mins), -0.5f, PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.maxs), eorg);
 		if (DotProduct(eorg, eorg) < radius2)
 		{
 			PRVM_EDICTFIELDEDICT(ent,chainfield) = PRVM_EDICT_TO_PROG(chain);
@@ -882,7 +883,7 @@ static void VM_SV_precache_model(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1, VM_SV_precache_model);
 	SV_ModelIndex(PRVM_G_STRING(OFS_PARM0), 2);
-	PRVM_G_INT(OFS_RETURN) = PRVM_G_INT(OFS_PARM0);
+	PRVM_G_INT(OFS_RETURN) = PRVM_G_READINT(OFS_PARM0);
 }
 
 static void VM_SV_walkmove(prvm_prog_t *prog)
@@ -909,9 +910,9 @@ static void VM_SV_walkmove(prvm_prog_t *prog)
 		VM_Warning(prog, "walkmove: can not modify free entity\n");
 		return;
 	}
-	yaw = PRVM_G_FLOAT(OFS_PARM0);
-	dist = PRVM_G_FLOAT(OFS_PARM1);
-	settrace = prog->argc >= 3 && PRVM_G_FLOAT(OFS_PARM2);
+	yaw = PRVM_G_READFLOAT(OFS_PARM0);
+	dist = PRVM_G_READFLOAT(OFS_PARM1);
+	settrace = prog->argc >= 3 && PRVM_G_READFLOAT(OFS_PARM2);
 
 	if ( !( (int)PRVM_serveredictfloat(ent, flags) & (FL_ONGROUND|FL_FLY|FL_SWIM) ) )
 		return;
@@ -1016,7 +1017,7 @@ static void VM_SV_lightstyle(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(2, VM_SV_lightstyle);
 
-	style = (int)PRVM_G_FLOAT(OFS_PARM0);
+	style = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	val = PRVM_G_STRING(OFS_PARM1);
 
 	if( (unsigned) style >= MAX_LIGHTSTYLES ) {
@@ -1049,7 +1050,7 @@ static void VM_SV_pointcontents(prvm_prog_t *prog)
 {
 	vec3_t point;
 	VM_SAFEPARMCOUNT(1, VM_SV_pointcontents);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), point);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), point);
 	PRVM_G_FLOAT(OFS_RETURN) = Mod_Q1BSP_NativeContentsFromSuperContents(SV_PointSuperContents(point));
 }
 
@@ -1080,14 +1081,14 @@ static void VM_SV_aim(prvm_prog_t *prog)
 		return;
 	}
 
-	VectorCopy (PRVM_serveredictvector(ent, origin), start);
+	VectorCopy (PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.origin), start);
 	start[2] += 20;
 
 	VectorCopy (PRVM_serverglobalvector(v_forward), dir);
 	VectorMA (start, 2048, dir, end);
 	tr = SV_TraceLine(start, end, MOVE_NORMAL, ent, SUPERCONTENTS_SOLID | SUPERCONTENTS_BODY, 0, 0, collision_extendmovelength.value);
-	if (tr.ent && PRVM_serveredictfloat(((prvm_edict_t *)tr.ent), takedamage) == DAMAGE_AIM
-	&& (!teamplay.integer || PRVM_serveredictfloat(ent, team) <=0 || PRVM_serveredictfloat(ent, team) != PRVM_serveredictfloat(((prvm_edict_t *)tr.ent), team)) )
+	if (tr.ent && PRVM_EDICTREADFLOAT(((prvm_edict_t *)tr.ent), prog->fieldoffsets.takedamage) == DAMAGE_AIM
+	&& (!teamplay.integer || PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.team) <=0 || PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.team) != PRVM_EDICTREADFLOAT(((prvm_edict_t *)tr.ent), prog->fieldoffsets.team)) )
 	{
 		VectorCopy (PRVM_serverglobalvector(v_forward), PRVM_G_VECTOR(OFS_RETURN));
 		return;
@@ -1101,15 +1102,15 @@ static void VM_SV_aim(prvm_prog_t *prog)
 	for (i=1 ; i<prog->num_edicts ; i++, check = PRVM_NEXT_EDICT(check) )
 	{
 		prog->xfunction->builtinsprofile++;
-		if (PRVM_serveredictfloat(check, takedamage) != DAMAGE_AIM)
+		if (PRVM_EDICTREADFLOAT(check, prog->fieldoffsets.takedamage) != DAMAGE_AIM)
 			continue;
 		if (check == ent)
 			continue;
-		if (teamplay.integer && PRVM_serveredictfloat(ent, team) > 0 && PRVM_serveredictfloat(ent, team) == PRVM_serveredictfloat(check, team))
+		if (teamplay.integer && PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.team) > 0 && PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.team) == PRVM_EDICTREADFLOAT(check, prog->fieldoffsets.team))
 			continue;
 		for (j=0 ; j<3 ; j++)
-			end[j] = PRVM_serveredictvector(check, origin)[j]
-			+ 0.5*(PRVM_serveredictvector(check, mins)[j] + PRVM_serveredictvector(check, maxs)[j]);
+			end[j] = PRVM_EDICTREADVECTOR(check, prog->fieldoffsets.origin)[j]
+			+ 0.5*(PRVM_EDICTREADVECTOR(check, prog->fieldoffsets.mins)[j] + PRVM_EDICTREADVECTOR(check, prog->fieldoffsets.maxs)[j]);
 		VectorSubtract (end, start, dir);
 		VectorNormalize (dir);
 		dist = DotProduct (dir, PRVM_serverglobalvector(v_forward));
@@ -1125,7 +1126,7 @@ static void VM_SV_aim(prvm_prog_t *prog)
 
 	if (bestent)
 	{
-		VectorSubtract (PRVM_serveredictvector(bestent, origin), PRVM_serveredictvector(ent, origin), dir);
+		VectorSubtract (PRVM_EDICTREADVECTOR(bestent, prog->fieldoffsets.origin), PRVM_EDICTREADVECTOR(ent, prog->fieldoffsets.origin), dir);
 		dist = DotProduct (dir, PRVM_serverglobalvector(v_forward));
 		VectorScale (PRVM_serverglobalvector(v_forward), dist, end);
 		end[2] = dir[2];
@@ -1150,7 +1151,7 @@ static sizebuf_t *WriteDest(prvm_prog_t *prog)
 	int		dest;
 	prvm_edict_t	*ent;
 
-	dest = (int)PRVM_G_FLOAT(OFS_PARM0);
+	dest = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	switch (dest)
 	{
 	case MSG_BROADCAST:
@@ -1190,37 +1191,37 @@ static void VM_SV_flushbroadcast(prvm_prog_t *prog)
 static void VM_SV_WriteByte(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2, VM_SV_WriteByte);
-	MSG_WriteByte (WriteDest(prog), (int)PRVM_G_FLOAT(OFS_PARM1));
+	MSG_WriteByte (WriteDest(prog), (int)PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 static void VM_SV_WriteChar(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2, VM_SV_WriteChar);
-	MSG_WriteChar (WriteDest(prog), (int)PRVM_G_FLOAT(OFS_PARM1));
+	MSG_WriteChar (WriteDest(prog), (int)PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 static void VM_SV_WriteShort(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2, VM_SV_WriteShort);
-	MSG_WriteShort (WriteDest(prog), (int)PRVM_G_FLOAT(OFS_PARM1));
+	MSG_WriteShort (WriteDest(prog), (int)PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 static void VM_SV_WriteLong(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2, VM_SV_WriteLong);
-	MSG_WriteLong (WriteDest(prog), (int)PRVM_G_FLOAT(OFS_PARM1));
+	MSG_WriteLong (WriteDest(prog), (int)PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 static void VM_SV_WriteAngle(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2, VM_SV_WriteAngle);
-	MSG_WriteAngle (WriteDest(prog), PRVM_G_FLOAT(OFS_PARM1), sv.protocol);
+	MSG_WriteAngle (WriteDest(prog), PRVM_G_READFLOAT(OFS_PARM1), sv.protocol);
 }
 
 static void VM_SV_WriteCoord(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2, VM_SV_WriteCoord);
-	MSG_WriteCoord (WriteDest(prog), PRVM_G_FLOAT(OFS_PARM1), sv.protocol);
+	MSG_WriteCoord (WriteDest(prog), PRVM_G_READFLOAT(OFS_PARM1), sv.protocol);
 }
 
 static void VM_SV_WriteString(prvm_prog_t *prog)
@@ -1250,7 +1251,7 @@ static void VM_SV_WritePicture(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3, VM_SV_WritePicture);
 
 	imgname = PRVM_G_STRING(OFS_PARM1);
-	size = (size_t) PRVM_G_FLOAT(OFS_PARM2);
+	size = (size_t) PRVM_G_READFLOAT(OFS_PARM2);
 	if(size > 65535)
 		size = 65535;
 
@@ -1350,7 +1351,7 @@ static void VM_SV_getlight(prvm_prog_t *prog)
 	vec3_t ambientcolor, diffusecolor, diffusenormal;
 	vec3_t p;
 	VM_SAFEPARMCOUNT(1, VM_SV_getlight);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), p);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), p);
 	VectorClear(ambientcolor);
 	VectorClear(diffusecolor);
 	VectorClear(diffusenormal);
@@ -1438,8 +1439,8 @@ static void VM_SV_AddStat(prvm_prog_t *prog)
 			return;
 		}
 	}
-	i		= (int)PRVM_G_FLOAT(OFS_PARM0);
-	type	= (int)PRVM_G_FLOAT(OFS_PARM1);
+	i		= (int)PRVM_G_READFLOAT(OFS_PARM0);
+	type	= (int)PRVM_G_READFLOAT(OFS_PARM1);
 	off		= PRVM_G_INT  (OFS_PARM2);
 	i -= 32;
 
@@ -1503,7 +1504,7 @@ static void VM_SV_setcolor(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(2, VM_SV_setcolor);
 	entnum = PRVM_G_EDICTNUM(OFS_PARM0);
-	i = (int)PRVM_G_FLOAT(OFS_PARM1);
+	i = (int)PRVM_G_READFLOAT(OFS_PARM1);
 
 	if (entnum < 1 || entnum > svs.maxclients || !svs.clients[entnum-1].active)
 	{
@@ -1548,61 +1549,61 @@ static void VM_SV_effect(prvm_prog_t *prog)
 		return;
 	}
 
-	if (PRVM_G_FLOAT(OFS_PARM3) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM3) < 1)
 	{
 		VM_Warning(prog, "effect: framecount < 1\n");
 		return;
 	}
 
-	if (PRVM_G_FLOAT(OFS_PARM4) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM4) < 1)
 	{
 		VM_Warning(prog, "effect: framerate < 1\n");
 		return;
 	}
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), org);
-	SV_StartEffect(org, i, (int)PRVM_G_FLOAT(OFS_PARM2), (int)PRVM_G_FLOAT(OFS_PARM3), (int)PRVM_G_FLOAT(OFS_PARM4));
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), org);
+	SV_StartEffect(org, i, (int)PRVM_G_READFLOAT(OFS_PARM2), (int)PRVM_G_READFLOAT(OFS_PARM3), (int)PRVM_G_READFLOAT(OFS_PARM4));
 }
 
 static void VM_SV_te_blood(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(3, VM_SV_te_blood);
-	if (PRVM_G_FLOAT(OFS_PARM2) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM2) < 1)
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_BLOOD);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_VECTOR(OFS_PARM1)[0], 127));
-	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_VECTOR(OFS_PARM1)[1], 127));
-	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_VECTOR(OFS_PARM1)[2], 127));
+	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_READVECTOR(OFS_PARM1)[0], 127));
+	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_READVECTOR(OFS_PARM1)[1], 127));
+	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_READVECTOR(OFS_PARM1)[2], 127));
 
-	MSG_WriteByte(&sv.datagram, bound(0, (int) PRVM_G_FLOAT(OFS_PARM2), 255));
+	MSG_WriteByte(&sv.datagram, bound(0, (int) PRVM_G_READFLOAT(OFS_PARM2), 255));
 	SV_FlushBroadcastMessages();
 }
 
 static void VM_SV_te_bloodshower(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(4, VM_SV_te_bloodshower);
-	if (PRVM_G_FLOAT(OFS_PARM3) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM3) < 1)
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_BLOODSHOWER);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_FLOAT(OFS_PARM2), sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READFLOAT(OFS_PARM2), sv.protocol);
 
-	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_FLOAT(OFS_PARM3), 65535));
+	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_READFLOAT(OFS_PARM3), 65535));
 	SV_FlushBroadcastMessages();
 }
 
@@ -1612,115 +1613,115 @@ static void VM_SV_te_explosionrgb(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_EXPLOSIONRGB);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteByte(&sv.datagram, bound(0, (int) (PRVM_G_VECTOR(OFS_PARM1)[0] * 255), 255));
-	MSG_WriteByte(&sv.datagram, bound(0, (int) (PRVM_G_VECTOR(OFS_PARM1)[1] * 255), 255));
-	MSG_WriteByte(&sv.datagram, bound(0, (int) (PRVM_G_VECTOR(OFS_PARM1)[2] * 255), 255));
+	MSG_WriteByte(&sv.datagram, bound(0, (int) (PRVM_G_READVECTOR(OFS_PARM1)[0] * 255), 255));
+	MSG_WriteByte(&sv.datagram, bound(0, (int) (PRVM_G_READVECTOR(OFS_PARM1)[1] * 255), 255));
+	MSG_WriteByte(&sv.datagram, bound(0, (int) (PRVM_G_READVECTOR(OFS_PARM1)[2] * 255), 255));
 	SV_FlushBroadcastMessages();
 }
 
 static void VM_SV_te_particlecube(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(7, VM_SV_te_particlecube);
-	if (PRVM_G_FLOAT(OFS_PARM3) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM3) < 1)
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_PARTICLECUBE);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 
-	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_FLOAT(OFS_PARM3), 65535));
+	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_READFLOAT(OFS_PARM3), 65535));
 
-	MSG_WriteByte(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM4));
+	MSG_WriteByte(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM4));
 
-	MSG_WriteByte(&sv.datagram, ((int) PRVM_G_FLOAT(OFS_PARM5)) != 0);
+	MSG_WriteByte(&sv.datagram, ((int) PRVM_G_READFLOAT(OFS_PARM5)) != 0);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_FLOAT(OFS_PARM6), sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READFLOAT(OFS_PARM6), sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
 static void VM_SV_te_particlerain(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(5, VM_SV_te_particlerain);
-	if (PRVM_G_FLOAT(OFS_PARM3) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM3) < 1)
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_PARTICLERAIN);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 
-	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_FLOAT(OFS_PARM3), 65535));
+	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_READFLOAT(OFS_PARM3), 65535));
 
-	MSG_WriteByte(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM4));
+	MSG_WriteByte(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM4));
 	SV_FlushBroadcastMessages();
 }
 
 static void VM_SV_te_particlesnow(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(5, VM_SV_te_particlesnow);
-	if (PRVM_G_FLOAT(OFS_PARM3) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM3) < 1)
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_PARTICLESNOW);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 
-	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_FLOAT(OFS_PARM3), 65535));
+	MSG_WriteShort(&sv.datagram, (int)bound(0, PRVM_G_READFLOAT(OFS_PARM3), 65535));
 
-	MSG_WriteByte(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM4));
+	MSG_WriteByte(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM4));
 	SV_FlushBroadcastMessages();
 }
 
 static void VM_SV_te_spark(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(3, VM_SV_te_spark);
-	if (PRVM_G_FLOAT(OFS_PARM2) < 1)
+	if (PRVM_G_READFLOAT(OFS_PARM2) < 1)
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_SPARK);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_VECTOR(OFS_PARM1)[0], 127));
-	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_VECTOR(OFS_PARM1)[1], 127));
-	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_VECTOR(OFS_PARM1)[2], 127));
+	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_READVECTOR(OFS_PARM1)[0], 127));
+	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_READVECTOR(OFS_PARM1)[1], 127));
+	MSG_WriteChar(&sv.datagram, bound(-128, (int) PRVM_G_READVECTOR(OFS_PARM1)[2], 127));
 
-	MSG_WriteByte(&sv.datagram, bound(0, (int) PRVM_G_FLOAT(OFS_PARM2), 255));
+	MSG_WriteByte(&sv.datagram, bound(0, (int) PRVM_G_READFLOAT(OFS_PARM2), 255));
 	SV_FlushBroadcastMessages();
 }
 
@@ -1730,9 +1731,9 @@ static void VM_SV_te_gunshotquad(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_GUNSHOTQUAD);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1742,9 +1743,9 @@ static void VM_SV_te_spikequad(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_SPIKEQUAD);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1754,9 +1755,9 @@ static void VM_SV_te_superspikequad(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_SUPERSPIKEQUAD);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1766,9 +1767,9 @@ static void VM_SV_te_explosionquad(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_EXPLOSIONQUAD);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1778,31 +1779,31 @@ static void VM_SV_te_smallflash(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_SMALLFLASH);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
 static void VM_SV_te_customflash(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(4, VM_SV_te_customflash);
-	if (PRVM_G_FLOAT(OFS_PARM1) < 8 || PRVM_G_FLOAT(OFS_PARM2) < (1.0 / 256.0))
+	if (PRVM_G_READFLOAT(OFS_PARM1) < 8 || PRVM_G_READFLOAT(OFS_PARM2) < (1.0 / 256.0))
 		return;
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_CUSTOMFLASH);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_FLOAT(OFS_PARM1) / 8 - 1, 255));
+	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_READFLOAT(OFS_PARM1) / 8 - 1, 255));
 
-	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_FLOAT(OFS_PARM2) * 256 - 1, 255));
+	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_READFLOAT(OFS_PARM2) * 256 - 1, 255));
 
-	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_VECTOR(OFS_PARM3)[0] * 255, 255));
-	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_VECTOR(OFS_PARM3)[1] * 255, 255));
-	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_VECTOR(OFS_PARM3)[2] * 255, 255));
+	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_READVECTOR(OFS_PARM3)[0] * 255, 255));
+	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_READVECTOR(OFS_PARM3)[1] * 255, 255));
+	MSG_WriteByte(&sv.datagram, (int)bound(0, PRVM_G_READVECTOR(OFS_PARM3)[2] * 255, 255));
 	SV_FlushBroadcastMessages();
 }
 
@@ -1812,9 +1813,9 @@ static void VM_SV_te_gunshot(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_GUNSHOT);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1824,9 +1825,9 @@ static void VM_SV_te_spike(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_SPIKE);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1836,9 +1837,9 @@ static void VM_SV_te_superspike(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_SUPERSPIKE);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1848,9 +1849,9 @@ static void VM_SV_te_explosion(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_EXPLOSION);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1860,9 +1861,9 @@ static void VM_SV_te_tarexplosion(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_TAREXPLOSION);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1872,9 +1873,9 @@ static void VM_SV_te_wizspike(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_WIZSPIKE);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1884,9 +1885,9 @@ static void VM_SV_te_knightspike(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_KNIGHTSPIKE);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1896,9 +1897,9 @@ static void VM_SV_te_lavasplash(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_LAVASPLASH);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1908,9 +1909,9 @@ static void VM_SV_te_teleport(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_TELEPORT);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1920,12 +1921,12 @@ static void VM_SV_te_explosion2(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_EXPLOSION2);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteByte(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM1));
-	MSG_WriteByte(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM2));
+	MSG_WriteByte(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM1));
+	MSG_WriteByte(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM2));
 	SV_FlushBroadcastMessages();
 }
 
@@ -1937,13 +1938,13 @@ static void VM_SV_te_lightning1(prvm_prog_t *prog)
 
 	MSG_WriteShort(&sv.datagram, PRVM_G_EDICTNUM(OFS_PARM0));
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1955,13 +1956,13 @@ static void VM_SV_te_lightning2(prvm_prog_t *prog)
 
 	MSG_WriteShort(&sv.datagram, PRVM_G_EDICTNUM(OFS_PARM0));
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1973,13 +1974,13 @@ static void VM_SV_te_lightning3(prvm_prog_t *prog)
 
 	MSG_WriteShort(&sv.datagram, PRVM_G_EDICTNUM(OFS_PARM0));
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -1991,13 +1992,13 @@ static void VM_SV_te_beam(prvm_prog_t *prog)
 
 	MSG_WriteShort(&sv.datagram, PRVM_G_EDICTNUM(OFS_PARM0));
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM2)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM2)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -2006,9 +2007,9 @@ static void VM_SV_te_plasmaburn(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(1, VM_SV_te_plasmaburn);
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_PLASMABURN);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 	SV_FlushBroadcastMessages();
 }
 
@@ -2018,15 +2019,15 @@ static void VM_SV_te_flamejet(prvm_prog_t *prog)
 	MSG_WriteByte(&sv.datagram, svc_temp_entity);
 	MSG_WriteByte(&sv.datagram, TE_FLAMEJET);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM0)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM0)[2], sv.protocol);
 
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[0], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[1], sv.protocol);
-	MSG_WriteCoord(&sv.datagram, PRVM_G_VECTOR(OFS_PARM1)[2], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[0], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[1], sv.protocol);
+	MSG_WriteCoord(&sv.datagram, PRVM_G_READVECTOR(OFS_PARM1)[2], sv.protocol);
 
-	MSG_WriteByte(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM2));
+	MSG_WriteByte(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM2));
 	SV_FlushBroadcastMessages();
 }
 
@@ -2270,7 +2271,7 @@ static void VM_SV_gettaginfo(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(2, VM_SV_gettaginfo);
 
 	e = PRVM_G_EDICT(OFS_PARM0);
-	tagindex = (int)PRVM_G_FLOAT(OFS_PARM1);
+	tagindex = (int)PRVM_G_READFLOAT(OFS_PARM1);
 
 	returncode = SV_GetTagMatrix(prog, &tag_matrix, e, tagindex);
 	Matrix4x4_ToVectors(&tag_matrix, forward, left, up, origin);
@@ -2397,7 +2398,7 @@ static void VM_SV_setmodelindex(prvm_prog_t *prog)
 		VM_Warning(prog, "setmodelindex: can not modify free entity\n");
 		return;
 	}
-	i = (int)PRVM_G_FLOAT(OFS_PARM1);
+	i = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	if (i <= 0 || i >= MAX_MODELS)
 	{
 		VM_Warning(prog, "setmodelindex: invalid modelindex\n");
@@ -2432,7 +2433,7 @@ static void VM_SV_modelnameforindex(prvm_prog_t *prog)
 
 	PRVM_G_INT(OFS_RETURN) = OFS_NULL;
 
-	i = (int)PRVM_G_FLOAT(OFS_PARM0);
+	i = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (i <= 0 || i >= MAX_MODELS)
 	{
 		VM_Warning(prog, "modelnameforindex: invalid modelindex\n");
@@ -2462,14 +2463,14 @@ static void VM_SV_trailparticles(prvm_prog_t *prog)
 	vec3_t start, end;
 	VM_SAFEPARMCOUNT(4, VM_SV_trailparticles);
 
-	if ((int)PRVM_G_FLOAT(OFS_PARM0) < 0)
+	if ((int)PRVM_G_READFLOAT(OFS_PARM0) < 0)
 		return;
 
 	MSG_WriteByte(&sv.datagram, svc_trailparticles);
 	MSG_WriteShort(&sv.datagram, PRVM_G_EDICTNUM(OFS_PARM0));
-	MSG_WriteShort(&sv.datagram, (int)PRVM_G_FLOAT(OFS_PARM1));
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), start);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM3), end);
+	MSG_WriteShort(&sv.datagram, (int)PRVM_G_READFLOAT(OFS_PARM1));
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), start);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM3), end);
 	MSG_WriteVector(&sv.datagram, start, sv.protocol);
 	MSG_WriteVector(&sv.datagram, end, sv.protocol);
 	SV_FlushBroadcastMessages();
@@ -2481,13 +2482,13 @@ static void VM_SV_pointparticles(prvm_prog_t *prog)
 	vec3_t org, vel;
 	VM_SAFEPARMCOUNTRANGE(4, 8, VM_SV_pointparticles);
 
-	if ((int)PRVM_G_FLOAT(OFS_PARM0) < 0)
+	if ((int)PRVM_G_READFLOAT(OFS_PARM0) < 0)
 		return;
 
-	effectnum = (int)PRVM_G_FLOAT(OFS_PARM0);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), org);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), vel);
-	count = bound(0, (int)PRVM_G_FLOAT(OFS_PARM3), 65535);
+	effectnum = (int)PRVM_G_READFLOAT(OFS_PARM0);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), org);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), vel);
+	count = bound(0, (int)PRVM_G_READFLOAT(OFS_PARM3), 65535);
 	if (count == 1 && !VectorLength2(vel))
 	{
 
@@ -2510,7 +2511,7 @@ static void VM_SV_pointparticles(prvm_prog_t *prog)
 
 static void VM_SV_setpause(prvm_prog_t *prog) {
 	int pauseValue;
-	pauseValue = (int)PRVM_G_FLOAT(OFS_PARM0);
+	pauseValue = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (pauseValue != 0) {
 		sv.paused = 1;
 		sv.pausedstart = realtime;
@@ -2527,7 +2528,7 @@ static void VM_SV_setpause(prvm_prog_t *prog) {
 
 static void VM_SV_skel_create(prvm_prog_t *prog)
 {
-	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int modelindex = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	dp_model_t *model = SV_GetModelByIndex(modelindex);
 	skeleton_t *skeleton;
 	int i;
@@ -2550,13 +2551,13 @@ static void VM_SV_skel_create(prvm_prog_t *prog)
 
 static void VM_SV_skel_build(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
 	skeleton_t *skeleton;
 	prvm_edict_t *ed = PRVM_G_EDICT(OFS_PARM1);
-	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM2);
-	float retainfrac = PRVM_G_FLOAT(OFS_PARM3);
-	int firstbone = PRVM_G_FLOAT(OFS_PARM4) - 1;
-	int lastbone = PRVM_G_FLOAT(OFS_PARM5) - 1;
+	int modelindex = (int)PRVM_G_READFLOAT(OFS_PARM2);
+	float retainfrac = PRVM_G_READFLOAT(OFS_PARM3);
+	int firstbone = PRVM_G_READFLOAT(OFS_PARM4) - 1;
+	int lastbone = PRVM_G_READFLOAT(OFS_PARM5) - 1;
 	dp_model_t *model = SV_GetModelByIndex(modelindex);
 	int numblends;
 	int bonenum;
@@ -2591,7 +2592,7 @@ static void VM_SV_skel_build(prvm_prog_t *prog)
 
 static void VM_SV_skel_get_numbones(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
 	skeleton_t *skeleton;
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 	if (skeletonindex < 0 || skeletonindex >= MAX_EDICTS || !(skeleton = prog->skeletons[skeletonindex]))
@@ -2601,8 +2602,8 @@ static void VM_SV_skel_get_numbones(prvm_prog_t *prog)
 
 static void VM_SV_skel_get_bonename(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int bonenum = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int bonenum = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
 	skeleton_t *skeleton;
 	PRVM_G_INT(OFS_RETURN) = 0;
 	if (skeletonindex < 0 || skeletonindex >= MAX_EDICTS || !(skeleton = prog->skeletons[skeletonindex]))
@@ -2614,8 +2615,8 @@ static void VM_SV_skel_get_bonename(prvm_prog_t *prog)
 
 static void VM_SV_skel_get_boneparent(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int bonenum = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int bonenum = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
 	skeleton_t *skeleton;
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 	if (skeletonindex < 0 || skeletonindex >= MAX_EDICTS || !(skeleton = prog->skeletons[skeletonindex]))
@@ -2627,7 +2628,7 @@ static void VM_SV_skel_get_boneparent(prvm_prog_t *prog)
 
 static void VM_SV_skel_find_bone(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
 	const char *tagname = PRVM_G_STRING(OFS_PARM1);
 	skeleton_t *skeleton;
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
@@ -2638,8 +2639,8 @@ static void VM_SV_skel_find_bone(prvm_prog_t *prog)
 
 static void VM_SV_skel_get_bonerel(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int bonenum = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int bonenum = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
 	skeleton_t *skeleton;
 	matrix4x4_t matrix;
 	vec3_t forward, left, up, origin;
@@ -2661,8 +2662,8 @@ static void VM_SV_skel_get_bonerel(prvm_prog_t *prog)
 
 static void VM_SV_skel_get_boneabs(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int bonenum = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int bonenum = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
 	skeleton_t *skeleton;
 	matrix4x4_t matrix;
 	matrix4x4_t temp;
@@ -2691,8 +2692,8 @@ static void VM_SV_skel_get_boneabs(prvm_prog_t *prog)
 
 static void VM_SV_skel_set_bone(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int bonenum = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int bonenum = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
 	vec3_t forward, left, up, origin;
 	skeleton_t *skeleton;
 	matrix4x4_t matrix;
@@ -2703,15 +2704,15 @@ static void VM_SV_skel_set_bone(prvm_prog_t *prog)
 	VectorCopy(PRVM_clientglobalvector(v_forward), forward);
 	VectorNegate(PRVM_clientglobalvector(v_right), left);
 	VectorCopy(PRVM_clientglobalvector(v_up), up);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), origin);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), origin);
 	Matrix4x4_FromVectors(&matrix, forward, left, up, origin);
 	skeleton->relativetransforms[bonenum] = matrix;
 }
 
 static void VM_SV_skel_mul_bone(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int bonenum = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int bonenum = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
 	vec3_t forward, left, up, origin;
 	skeleton_t *skeleton;
 	matrix4x4_t matrix;
@@ -2720,7 +2721,7 @@ static void VM_SV_skel_mul_bone(prvm_prog_t *prog)
 		return;
 	if (bonenum < 0 || bonenum >= skeleton->model->num_bones)
 		return;
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), origin);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), origin);
 	VectorCopy(PRVM_clientglobalvector(v_forward), forward);
 	VectorNegate(PRVM_clientglobalvector(v_right), left);
 	VectorCopy(PRVM_clientglobalvector(v_up), up);
@@ -2731,9 +2732,9 @@ static void VM_SV_skel_mul_bone(prvm_prog_t *prog)
 
 static void VM_SV_skel_mul_bones(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int firstbone = PRVM_G_FLOAT(OFS_PARM1) - 1;
-	int lastbone = PRVM_G_FLOAT(OFS_PARM2) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int firstbone = PRVM_G_READFLOAT(OFS_PARM1) - 1;
+	int lastbone = PRVM_G_READFLOAT(OFS_PARM2) - 1;
 	int bonenum;
 	vec3_t forward, left, up, origin;
 	skeleton_t *skeleton;
@@ -2741,7 +2742,7 @@ static void VM_SV_skel_mul_bones(prvm_prog_t *prog)
 	matrix4x4_t temp;
 	if (skeletonindex < 0 || skeletonindex >= MAX_EDICTS || !(skeleton = prog->skeletons[skeletonindex]))
 		return;
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM3), origin);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM3), origin);
 	VectorCopy(PRVM_clientglobalvector(v_forward), forward);
 	VectorNegate(PRVM_clientglobalvector(v_right), left);
 	VectorCopy(PRVM_clientglobalvector(v_up), up);
@@ -2757,10 +2758,10 @@ static void VM_SV_skel_mul_bones(prvm_prog_t *prog)
 
 static void VM_SV_skel_copybones(prvm_prog_t *prog)
 {
-	int skeletonindexdst = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
-	int skeletonindexsrc = (int)PRVM_G_FLOAT(OFS_PARM1) - 1;
-	int firstbone = PRVM_G_FLOAT(OFS_PARM2) - 1;
-	int lastbone = PRVM_G_FLOAT(OFS_PARM3) - 1;
+	int skeletonindexdst = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
+	int skeletonindexsrc = (int)PRVM_G_READFLOAT(OFS_PARM1) - 1;
+	int firstbone = PRVM_G_READFLOAT(OFS_PARM2) - 1;
+	int lastbone = PRVM_G_READFLOAT(OFS_PARM3) - 1;
 	int bonenum;
 	skeleton_t *skeletondst;
 	skeleton_t *skeletonsrc;
@@ -2777,7 +2778,7 @@ static void VM_SV_skel_copybones(prvm_prog_t *prog)
 
 static void VM_SV_skel_delete(prvm_prog_t *prog)
 {
-	int skeletonindex = (int)PRVM_G_FLOAT(OFS_PARM0) - 1;
+	int skeletonindex = (int)PRVM_G_READFLOAT(OFS_PARM0) - 1;
 	skeleton_t *skeleton;
 	if (skeletonindex < 0 || skeletonindex >= MAX_EDICTS || !(skeleton = prog->skeletons[skeletonindex]))
 		return;
@@ -2787,7 +2788,7 @@ static void VM_SV_skel_delete(prvm_prog_t *prog)
 
 static void VM_SV_frameforname(prvm_prog_t *prog)
 {
-	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int modelindex = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	dp_model_t *model = SV_GetModelByIndex(modelindex);
 	const char *name = PRVM_G_STRING(OFS_PARM1);
 	int i;
@@ -2806,9 +2807,9 @@ static void VM_SV_frameforname(prvm_prog_t *prog)
 
 static void VM_SV_frameduration(prvm_prog_t *prog)
 {
-	int modelindex = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int modelindex = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	dp_model_t *model = SV_GetModelByIndex(modelindex);
-	int framenum = (int)PRVM_G_FLOAT(OFS_PARM1);
+	int framenum = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 	if (!model || !model->animscenes || framenum < 0 || framenum >= model->numframes)
 		return;
@@ -3480,6 +3481,11 @@ VM_mesh_scatter_rows,
 VM_bot_controller_batch,
 VM_bot_controller_stat,
 VM_mesh_gather_list,
+VM_mesh_view_run,
+VM_mesh_view_set,
+VM_mesh_view_stat,
+VM_mesh_view_publish,
+VM_mesh_round_outcome,
 };
 
 const int vm_sv_numbuiltins = sizeof(vm_sv_builtins) / sizeof(prvm_builtin_t);

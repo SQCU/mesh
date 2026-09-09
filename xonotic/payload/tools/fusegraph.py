@@ -3,12 +3,12 @@ import os, sys, json, math, heapq, argparse
 from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import mkentfile as M
+import navmesh as NAV
 
 def load(mapdir):
     J = json.load(open(os.path.join(mapdir, 'fused.joins.json')))
     cache = os.path.join(mapdir, 'fused.waypoints.cache')
-    nodes, adj = M.parse_cache(open(cache, encoding='latin-1').read())
+    nodes, adj = NAV.parse_cache(open(cache, encoding='latin-1').read())
     dadj = [set(a.keys()) for a in adj]
     key = lambda p: tuple(round(x, 1) for x in p)
     idx = {key(nodes[i]): i for i in range(len(nodes))}

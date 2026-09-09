@@ -1,4 +1,4 @@
-import errno, os, re, socket, struct, time
+import json, os, re, socket, struct, time
 
 import numpy as np
 
@@ -11,16 +11,15 @@ with open(WIRE_DEFINITION) as stream:
 MAGIC, VERSION = WIRE["MAGIC"], WIRE["VERSION"]
 OBSERVATION_KIND, CART_KIND = WIRE["OBSERVATION"], WIRE["CART"]
 EVENT_KIND, STRATEGY_KIND = WIRE["EVENT"], WIRE["STRATEGY"]
-GRAM_REQ, GRAM_RESP, GRAM_META_KIND = WIRE["GRAM_REQ"], WIRE["GRAM_RESP"], WIRE["GRAM_META"]
-GRAM_GRAD_REQ, GRAM_GRAD_RESP = WIRE["GRAM_GRAD_REQ"], WIRE["GRAM_GRAD_RESP"]
-GRAM_META = dict(
-    MATRIX_MIN=0, MATRIX_MAX=1, MATRIX_FINITE_MASS=2, ROWS=3, ELAPSED=4,
-)
-GRAM_META_WIDTH = max(GRAM_META.values()) + 1
+TEAM_KIND = WIRE["TEAM"]
+STATE_KIND = WIRE["STATE"]
+OUTCOME_KIND = WIRE["OUTCOME"]
 HDR = struct.Struct("<IHHQQIIIIII")
 HDRSZ = HDR.size
 assert HDRSZ == WIRE["HDRBYTES"]
 LOCAL_HDR = struct.Struct("<iII")
+LOCAL_STATUS = struct.Struct("<QQQQQ")
+REQUEST_TIMEOUT_S = 5.0
 
 def values_per_slot(usable):
     return (usable - HDRSZ) // 4
@@ -86,36 +85,17 @@ def frame_waves(kind, req_id, tick, rows, usable, wave_slots, session=0):
         yield frames
         first += wave
 
-def send_datagram_rows(service, address, node, usable, kind, req_id, tick, rows, session=0, cancel=None):
-    rows = np.ascontiguousarray(rows, dtype=np.float32)
-    frame_mass = frame_count(rows, usable)
-    socket_slots = max(1, service.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) // usable)
-    for frames in frame_waves(kind, req_id, tick, rows, usable, socket_slots, session):
-        first = 0
-        measured_slots = len(frames)
-        while first < len(frames):
-            if cancel is not None and cancel():
-                raise InterruptedError("datagram transmission stopped by owner")
-            count = min(len(frames) - first, measured_slots)
-            header = LOCAL_HDR.pack(int(node), usable, count)
-            try:
-                service.sendmsg((header, frames[first:first + count]), (), socket.MSG_DONTWAIT, address)
-                first += count
-            except OSError as exc:
-                if exc.errno == errno.EMSGSIZE and count > 1:
-                    measured_slots = (count + 1) // 2
-                    continue
-                if exc.errno not in (errno.ENOBUFS, errno.EAGAIN):
-                    raise
-                time.sleep(0.0005)
-    return frame_mass
-
 def recv_datagram_frames(service, flags=0):
     header, address = service.recvfrom(LOCAL_HDR.size, socket.MSG_PEEK | flags)
     if len(header) != LOCAL_HDR.size:
         service.recvfrom(LOCAL_HDR.size, flags)
         return None
     node, framebytes, count = LOCAL_HDR.unpack(header)
+    if not framebytes:
+        service.recvfrom(LOCAL_HDR.size, flags)
+        if count != WIRE['LOCAL_VERSION']:
+            raise ValueError(f"local mesh protocol {count}, expected {WIRE['LOCAL_VERSION']}")
+        return node, address, None
     bytes_total = framebytes * count
     envelope = bytearray(LOCAL_HDR.size)
     slot = bytearray(bytes_total)
@@ -128,16 +108,27 @@ class Reassembler:
     def __init__(self, kind, width, usable):
         self.kind, self.width = kind, width
         self.vps = values_per_slot(usable)
-        self.stage = np.empty((0, width), np.float32)
+        self.storage = np.empty((0, width), np.float32)
+        self.stage = self.storage
         self.id, self.tick = 0, 0
         self.session = 0
         self.want, self.have, self.seen = 0, 0, bytearray()
         self.dropped, self.resync = 0, 0
 
+    def reserve(self, rows):
+        if rows > len(self.storage):
+            self.storage = np.empty((rows, self.width), np.float32)
+        self.stage = self.storage[:rows]
+
     def feed(self, buf):
         header = parse_hdr(buf)
         if header is None or header["kind"] != self.kind or header["width"] != self.width:
             return None
+        vps = values_per_slot(buf.size)
+        if vps != self.vps:
+            self.vps = vps
+            self.want = self.have = 0
+            self.resync += 1
         offset = header["offset"]
         total = header["values_total"]
         if total == 0:
@@ -146,8 +137,8 @@ class Reassembler:
             self.session = header["session"]
             self.want = self.have = 1
             self.seen = bytearray((1,))
-            self.stage = np.empty((0, self.width), np.float32)
-            return dict(req_id=self.id, tick=self.tick, rows=0, frame_mass=1)
+            self.reserve(0)
+            return dict(req_id=self.id, tick=self.tick, session=self.session, rows=0, frame_mass=1)
         if total % self.width or offset % self.vps:
             self.dropped += 1
             return None
@@ -157,7 +148,7 @@ class Reassembler:
         if header["values"] != expected or index >= want:
             self.dropped += 1
             return None
-        if (header["session"], header["req_id"], header["tick"]) != (self.session, self.id, self.tick):
+        if not self.want or (header["session"], header["req_id"], header["tick"]) != (self.session, self.id, self.tick):
             if self.id and self.have != self.want and offset:
                 self.dropped += 1
                 return None
@@ -171,7 +162,7 @@ class Reassembler:
             self.want = want
             self.have = 0
             self.seen = bytearray((want + 7) // 8)
-            self.stage = np.empty((total // self.width, self.width), np.float32)
+            self.reserve(total // self.width)
         if want != self.want or total != self.stage.size:
             self.dropped += 1
             return None
@@ -181,16 +172,147 @@ class Reassembler:
             self.have += 1
         self.stage.reshape(-1)[offset:offset + expected] = payload(buf, header)
         if self.have == self.want:
-            return dict(req_id=self.id, tick=self.tick, rows=len(self.stage),
+            return dict(req_id=self.id, tick=self.tick, session=self.session, rows=len(self.stage),
                         frame_mass=self.want)
         return None
+
+class RuntimeFrames:
+    def __init__(self, usable, capacity=8):
+        self.usable, self.capacity = usable, capacity
+        self.receivers, self.pending, self.events, self.outcomes = {}, {}, {}, {}
+        self.event_seen = set()
+        self.watermarks = {}
+        self.active_session = None
+        self.retired_sessions = set()
+        self.dropped = self.duplicates = 0
+
+    def feed(self, buffer):
+        header = parse_hdr(buffer)
+        if header is None or header["kind"] not in (OBSERVATION_KIND, CART_KIND, TEAM_KIND, STATE_KIND, EVENT_KIND, OUTCOME_KIND):
+            return
+        kind, session, tick = (header[key] for key in ("kind", "session", "tick"))
+        if kind not in (OUTCOME_KIND, EVENT_KIND) and session in self.retired_sessions:
+            self.duplicates += 1
+            return
+        if kind not in (OUTCOME_KIND, EVENT_KIND) and tick <= self.watermarks.get(session, -1):
+            self.duplicates += 1
+            return
+        event_key = (session, tick, header['req_id'])
+        if kind == EVENT_KIND and event_key in self.event_seen:
+            self.duplicates += 1
+            return
+        assembly = (kind, header["width"], *event_key) if kind == EVENT_KIND else (kind, header["width"])
+        if assembly not in self.receivers:
+            self.receivers[assembly] = Reassembler(kind, header["width"], self.usable)
+        receiver = self.receivers[assembly]
+        complete = receiver.feed(buffer)
+        if complete is None:
+            return
+        if kind == OUTCOME_KIND:
+            for row in receiver.stage:
+                identity = ":".join(str(int(value)) for value in row[:3])
+                self.outcomes[identity] = {"kind": "score_win" if row[3] > 0 else "tie", "actor_team": int(row[3]),
+                    "time": float(row[4]), "episode_id": identity, "source": "engine_durable_journal"}
+            return
+        key = (session, tick)
+        if kind == EVENT_KIND:
+            self.events[event_key] = receiver.stage.copy()
+            self.event_seen.add(event_key)
+            self.receivers.pop(assembly)
+        else:
+            self.pending.setdefault(key, {})[kind] = (complete, receiver.stage.copy())
+        if len(self.pending) > self.capacity:
+            terminals = {}
+            for key, records in self.pending.items():
+                terminals.setdefault(self.terminal_identity(key, records), key)
+            retained = {key for identity, key in terminals.items() if identity is not None}
+            disposable = [key for key in self.pending if key not in retained]
+            for key in disposable[:len(self.pending) - self.capacity]:
+                self.pending.pop(key)
+                self.dropped += 1
+
+    @staticmethod
+    def terminal_identity(key, records):
+        from payload.tools.strategy_io_schema import TS
+        if len(records) == 4 and records[TEAM_KIND][1][0, TS['FINISHED']]:
+            session, _ = key
+            return f"{session >> 24}:{session & 0xffffff}:{int(records[TEAM_KIND][1][0, TS['EPISODE']])}"
+
+    def take(self):
+        ready = [key for key, records in self.pending.items() if len(records) == 4]
+        if not ready:
+            return None
+        key = next((key for key in ready if self.terminal_identity(key, self.pending[key]) is not None), ready[-1])
+        records = self.pending[key]
+        terminal = self.terminal_identity(key, records)
+        if terminal is not None and terminal not in self.outcomes:
+            return None
+        self.accept_snapshot(key)
+        session, tick = key
+        events = {entry: self.events.pop(entry) for entry in tuple(self.events)
+                  if (entry[0] == session and entry[1] <= tick) or entry[0] in self.retired_sessions}
+        return key, records, events
+
+    def accept_snapshot(self, key):
+        session, tick = key
+        if self.active_session is not None and self.active_session != session:
+            self.retired_sessions.add(self.active_session)
+        self.active_session = session
+        for entry in tuple(self.pending):
+            owner, stamp = entry
+            if (owner == session and stamp <= tick) or owner in self.retired_sessions:
+                self.pending.pop(entry)
+        self.watermarks[session] = tick
+
+    def replay_snapshot(self, key, event_frames, outcomes):
+        self.accept_snapshot(key)
+        self.outcomes.update(outcomes)
+        self.event_seen.update(event_frames)
+        for key in event_frames:
+            self.events.pop(key, None)
+        for assembly in tuple(self.receivers):
+            if assembly[0] == EVENT_KIND and assembly[2:] in event_frames:
+                self.receivers.pop(assembly)
+
+    def export_state(self):
+        return {**vars(self), 'receivers': {key: {**vars(receiver),
+            'seen': np.frombuffer(receiver.seen, dtype=np.uint8)}
+            for key, receiver in self.receivers.items()}}
+
+    def restore_state(self, saved):
+        if 'transport' in saved:
+            state = dict(saved['transport'])
+            receivers = state.pop('receivers')
+            self.__dict__.update(state)
+            self.receivers = {}
+            for key, fields in receivers.items():
+                receiver = Reassembler(fields['kind'], fields['width'], self.usable)
+                receiver.__dict__.update(fields, seen=bytearray(fields['seen']))
+                self.receivers[key] = receiver
+        else:
+            self.watermarks, self.outcomes = saved['watermarks'], saved['outcomes']
+            self.events, self.event_seen = saved.get('pending_events', {}), saved.get('event_seen', set())
+            self.active_session = saved.get('active_session')
+            self.retired_sessions = saved.get('retired_sessions', set())
+
+    def report(self):
+        return {"pending_snapshots": len(self.pending), "dropped_frames": self.dropped,
+                "pending_event_frames": len(self.events), "pending_event_rows": sum(len(rows) for rows in self.events.values()),
+                "retained_event_identities": len(self.event_seen),
+                "duplicate_fragments": self.duplicates, "durable_outcomes": len(self.outcomes),
+                "pending_by_kind": {str(kind): sum(kind in records for records in self.pending.values())
+                                    for kind in (OBSERVATION_KIND, CART_KIND, TEAM_KIND, STATE_KIND)},
+                "assemblies": [{"kind": receiver.kind, "request": receiver.id, "session": receiver.session, "tick": receiver.tick,
+                    "frames_received": receiver.have, "frames_expected": receiver.want,
+                    "dropped_frames": receiver.dropped, "resynchronizations": receiver.resync}
+                    for receiver in self.receivers.values()]}
 
 class FrameStream:
     def __init__(self, mesh):
         self.mesh = mesh
         self.session = int.from_bytes(os.urandom(8), "little")
 
-    def exchange(self, kind, req_id, tick, rows, node, receivers, *, cancel, backlog, retry_s):
+    def exchange(self, kind, req_id, tick, rows, node, receivers, *, cancel, backlog, retry_s, timeout_s):
         rows = np.ascontiguousarray(rows, dtype=np.float32)
         received = {}
         wave = None
@@ -198,8 +320,15 @@ class FrameStream:
         retry_at = 0.0
         offers = 0
         retries = 0
-        while not cancel():
+        started = time.monotonic()
+        usable = self.mesh.usable
+        while not cancel() and time.monotonic() - started < timeout_s:
+            self.mesh.pump()
             now = time.monotonic()
+            if usable != self.mesh.usable:
+                usable = self.mesh.usable
+                wave = pending = None
+                retry_at = 0
             if pending is None and now >= retry_at:
                 pending = iter(frame_waves(
                     kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session,
@@ -219,7 +348,7 @@ class FrameStream:
                     if offset == len(wave):
                         wave = None
             activity = False
-            for buf, source in self.mesh.read(np.uint8):
+            for buf, source in self.mesh.read(np.uint8, max_batches=1):
                 activity = True
                 header = parse_hdr(buf)
                 if header is not None and source == node and header["kind"] in receivers:
@@ -234,28 +363,39 @@ class FrameStream:
                 else:
                     backlog.append((buf.copy(), source))
             if len(received) == len(receivers):
-                return received, {"request_frame_offers": offers, "request_replays": retries}
+                return received, {"request_frame_offers": offers, "request_replays": retries, "timed_out": False}
             if not activity:
                 time.sleep(0.0005)
-        return None, {"request_frame_offers": offers, "request_replays": retries}
+        return None, {"request_frame_offers": offers, "request_replays": retries,
+                      "timed_out": not cancel(), "transaction_budget_s": timeout_s,
+                      "response_parts": {str(kind): {"request": r.id, "tick": r.tick, "session": r.session,
+                                                       "have": r.have, "want": r.want} for kind, r in receivers.items()}}
 
     def send(self, kind, req_id, tick, rows, node, cancel=None):
         rows = np.ascontiguousarray(rows, dtype=np.float32)
-        if rows.ndim != 2 or not rows.size:
-            return 0, 0
-        frame_mass = frame_count(rows, self.mesh.usable)
+        if rows.ndim != 2: raise ValueError('framed rows must be a matrix')
+        started = time.monotonic()
+        usable, pending, frames = None, None, None
+        error = None
         sent = 0
-        for frames in frame_waves(
-            kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session,
-        ):
-            took = 0
-            while took < len(frames):
+        while time.monotonic() - started < REQUEST_TIMEOUT_S and not (cancel is not None and cancel()):
+            try:
+                self.mesh.pump()
+                if usable != self.mesh.usable:
+                    usable = self.mesh.usable
+                    pending = iter(frame_waves(kind, req_id, tick, rows, usable, self.mesh.slots, self.session))
+                    frames = None
+                if frames is None:
+                    frames = next(pending, None)
+                    took = 0
+                if frames is None: return sent, frame_count(rows, usable)
                 written = self.mesh.send(frames[took:], node)
-                if written:
-                    took += written
-                    sent += written
-                    continue
-                if cancel is not None and cancel():
-                    return sent, frame_mass
-                time.sleep(0.0005)
-        return sent, frame_mass
+                took += written
+                sent += written
+                if took == len(frames): frames = None
+            except OSError as exception:
+                error = f'{type(exception).__name__}: {exception}'
+            time.sleep(0.0005)
+        print(json.dumps({'event': 'frame_publication_incomplete', 'kind': kind, 'request': req_id,
+            'session': self.session, 'offers': sent, 'elapsed_s': time.monotonic() - started, 'error': error}), flush=True)
+        return sent, frame_count(rows, self.mesh.usable)

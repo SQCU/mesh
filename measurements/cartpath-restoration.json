@@ -1,0 +1,533 @@
+{
+  "algorithm": "pruned_stock_network_spans_signed_counterflow",
+  "archive": "xonotic-20230620-maps.pk3",
+  "date": "2026-09-04",
+  "density_check": {
+    "direction_search": "coordinate_descent",
+    "flow_alignment": -0.6,
+    "map": "dance",
+    "overlap_max": 1.0,
+    "realized_lanes": 16,
+    "requested_lanes": 16
+  },
+  "lane_count": 116,
+  "lanes_per_map": 4,
+  "map_count": 29,
+  "maps": [
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        2299.8928206294454,
+        1952.54061415271,
+        1701.0380894000764,
+        1552.9069218278028
+      ],
+      "map": "afterslime",
+      "motion_gaps": 0,
+      "network_nodes": 78,
+      "overlap": 0.0,
+      "seconds": 3.9695090829918627,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        2484.782587357321,
+        2066.573227399368,
+        1818.4219063381051,
+        1377.8385383147522
+      ],
+      "map": "atelier",
+      "motion_gaps": 0,
+      "network_nodes": 77,
+      "overlap": 0.0,
+      "seconds": 1.023073749995092,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        609.1053767616897,
+        591.5020393733238,
+        441.9609637428334,
+        433.01651938651395
+      ],
+      "map": "boil",
+      "motion_gaps": 0,
+      "network_nodes": 20,
+      "overlap": 0.0,
+      "seconds": 0.4518591249943711,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        1372.9102437415063,
+        1179.4115870523854,
+        1123.3513388181702,
+        995.6112902757777
+      ],
+      "map": "bromine",
+      "motion_gaps": 0,
+      "network_nodes": 75,
+      "overlap": 0.0,
+      "seconds": 2.4844344169832766,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        1760.955154418901,
+        1760.9551544189023,
+        1704.2597608141118,
+        1704.2597145038571
+      ],
+      "map": "catharsis",
+      "motion_gaps": 0,
+      "network_nodes": 135,
+      "overlap": 0.0,
+      "seconds": 5.943789042008575,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        7178.5565946610495,
+        5540.845091919254,
+        3177.012574626977,
+        3177.0125746269764
+      ],
+      "map": "courtfun",
+      "motion_gaps": 0,
+      "network_nodes": 154,
+      "overlap": 0.0,
+      "seconds": 3.8903555830183905,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        8520.554822428801,
+        3314.6276853971776,
+        3314.6276853971776,
+        2177.397240560191
+      ],
+      "map": "dance",
+      "motion_gaps": 0,
+      "network_nodes": 101,
+      "overlap": 0.0,
+      "seconds": 2.3153926249942742,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.996,
+      "lanes": 4,
+      "lengths": [
+        2086.105074792755,
+        1888.1349780638584,
+        1080.990562137593,
+        868.0800708372124
+      ],
+      "map": "darkzone",
+      "motion_gaps": 0,
+      "network_nodes": 32,
+      "overlap": 0.0,
+      "seconds": 0.571953458013013,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.728,
+      "lanes": 4,
+      "lengths": [
+        1458.9177421774236,
+        1342.042084296815,
+        902.1573873929043,
+        864.878049372985
+      ],
+      "map": "erbium",
+      "motion_gaps": 0,
+      "network_nodes": 52,
+      "overlap": 0.0,
+      "seconds": 2.3954966249875724,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        1263.6126457899736,
+        935.3648379108549,
+        590.5116875379501,
+        388.2865565532755
+      ],
+      "map": "finalrage",
+      "motion_gaps": 0,
+      "network_nodes": 34,
+      "overlap": 0.0,
+      "seconds": 1.7933178340026643,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.143,
+      "lanes": 4,
+      "lengths": [
+        1775.617494720612,
+        1176.4891736518746,
+        1222.7372441797283,
+        1007.184351580263
+      ],
+      "map": "fuse",
+      "motion_gaps": 0,
+      "network_nodes": 50,
+      "overlap": 0.0,
+      "seconds": 2.4590540830104146,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.762,
+      "lanes": 4,
+      "lengths": [
+        5327.528876730557,
+        2834.7356259415956,
+        2834.7356259415947,
+        2176.0
+      ],
+      "map": "geoplanetary",
+      "motion_gaps": 0,
+      "network_nodes": 172,
+      "overlap": 0.0,
+      "seconds": 3.9705505410092883,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        2695.2980087352266,
+        1874.364906846376,
+        1455.3018346500203,
+        1504.1743567667777
+      ],
+      "map": "glowplant",
+      "motion_gaps": 0,
+      "network_nodes": 78,
+      "overlap": 0.0,
+      "seconds": 2.8867204999842215,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        3310.539705326015,
+        3310.5397053316706,
+        2805.883454639165,
+        2805.883454639164
+      ],
+      "map": "go",
+      "motion_gaps": 0,
+      "network_nodes": 125,
+      "overlap": 0.0,
+      "seconds": 2.638540792017011,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        4433.465195858286,
+        4433.465195858285,
+        3737.0829712464656,
+        3733.3642443903627
+      ],
+      "map": "implosion",
+      "motion_gaps": 0,
+      "network_nodes": 196,
+      "overlap": 0.0,
+      "seconds": 3.080769333988428,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        1517.2938646261584,
+        736.8218577105324,
+        679.4617354936184,
+        661.4708193205366
+      ],
+      "map": "leave_em_behind",
+      "motion_gaps": 0,
+      "network_nodes": 16,
+      "overlap": 0.0,
+      "seconds": 2.859061124996515,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.33,
+      "lanes": 4,
+      "lengths": [
+        1432.388301014366,
+        1431.4934376731528,
+        727.6926068059232,
+        330.1616876622725
+      ],
+      "map": "nexballarena",
+      "motion_gaps": 0,
+      "network_nodes": 25,
+      "overlap": 0.0,
+      "seconds": 2.745699249993777,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        2397.8488924294097,
+        870.3417148573212,
+        765.0437832313211,
+        719.7154608235087
+      ],
+      "map": "opium",
+      "motion_gaps": 0,
+      "network_nodes": 43,
+      "overlap": 0.0,
+      "seconds": 2.09915079199709,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.999,
+      "lanes": 4,
+      "lengths": [
+        1711.3095416095746,
+        1337.5748855358402,
+        1225.804886869918,
+        922.9853916057536
+      ],
+      "map": "runningman",
+      "motion_gaps": 0,
+      "network_nodes": 57,
+      "overlap": 0.0,
+      "seconds": 3.20390520899673,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        5423.821402640271,
+        2855.191465725272,
+        2293.7550060113886,
+        2293.7549999466287
+      ],
+      "map": "runningmanctf",
+      "motion_gaps": 0,
+      "network_nodes": 137,
+      "overlap": 0.0,
+      "seconds": 0.7502181669988204,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.367,
+      "lanes": 4,
+      "lengths": [
+        1933.963523187399,
+        1665.1230350219032,
+        1054.2365452379056,
+        1048.7886016676894
+      ],
+      "map": "silentsiege",
+      "motion_gaps": 0,
+      "network_nodes": 46,
+      "overlap": 0.0,
+      "seconds": 1.851090167008806,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        3169.716916943741,
+        2289.3321158127924,
+        1832.5461357731976,
+        1573.6006354644767
+      ],
+      "map": "solarium",
+      "motion_gaps": 0,
+      "network_nodes": 78,
+      "overlap": 0.0,
+      "seconds": 2.033256541006267,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.99,
+      "lanes": 4,
+      "lengths": [
+        2147.3505475462757,
+        1932.298009913536,
+        1822.8779663278615,
+        1119.8474805826968
+      ],
+      "map": "space-elevator",
+      "motion_gaps": 0,
+      "network_nodes": 129,
+      "overlap": 0.0,
+      "seconds": 2.5890665839833673,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        1011.0708375779325,
+        1079.9304921342828,
+        1055.292403656564,
+        715.0707198281738
+      ],
+      "map": "stormkeep",
+      "motion_gaps": 0,
+      "network_nodes": 54,
+      "overlap": 0.0,
+      "seconds": 2.404763541999273,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.227,
+      "lanes": 4,
+      "lengths": [
+        5413.5988404650425,
+        3936.5139389322385,
+        3932.3538615278862,
+        3002.8343500273777
+      ],
+      "map": "techassault",
+      "motion_gaps": 0,
+      "network_nodes": 195,
+      "overlap": 0.0,
+      "seconds": 1.7805052079784218,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.127,
+      "lanes": 4,
+      "lengths": [
+        2449.590754366001,
+        1526.04432195885,
+        921.8026831866129,
+        362.97009518691755
+      ],
+      "map": "trident",
+      "motion_gaps": 0,
+      "network_nodes": 28,
+      "overlap": 0.0,
+      "seconds": 2.345688874978805,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": 0.0,
+      "lanes": 4,
+      "lengths": [
+        13655.143866159726,
+        1460.7661387895437,
+        1460.7661387895437,
+        1420.2943045968407
+      ],
+      "map": "vorix",
+      "motion_gaps": 0,
+      "network_nodes": 156,
+      "overlap": 0.0,
+      "seconds": 5.90440500000841,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.034,
+      "lanes": 4,
+      "lengths": [
+        1921.621981240417,
+        1927.6560278167187,
+        1412.8901225163113,
+        1370.2329792616035
+      ],
+      "map": "warfare",
+      "motion_gaps": 0,
+      "network_nodes": 48,
+      "overlap": 0.0,
+      "seconds": 3.1227086249855347,
+      "unresolved": 0
+    },
+    {
+      "advanceable_pairs": 20,
+      "flow_alignment": -0.995,
+      "lanes": 4,
+      "lengths": [
+        1396.959832517444,
+        1315.2864719876911,
+        1061.9509279329372,
+        799.4243491413056
+      ],
+      "map": "xoylent",
+      "motion_gaps": 0,
+      "network_nodes": 33,
+      "overlap": 0.0,
+      "seconds": 3.2950039169809315,
+      "unresolved": 0
+    }
+  ],
+  "measurement_schema": 13,
+  "motion_gap_count": 0,
+  "regression_tests": {
+    "platforms": [
+      {
+        "architecture": "arm64",
+        "numpy": "2.5.2",
+        "os": "macOS",
+        "result": "passed"
+      },
+      {
+        "architecture": "x86_64",
+        "numpy": "2.3.5",
+        "os": "Linux",
+        "result": "passed"
+      }
+    ],
+    "test_count": 10
+  },
+  "schema": 1,
+  "team_cart_advanceable_pairs": 580,
+  "teams": 5
+}

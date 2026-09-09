@@ -82,26 +82,33 @@ population. No relationship between client count and hardware saturation is pres
 
 ## Policy compute placed on the fabric
 
-The matrix-fusion policy contains three exact Gram matrices:
+The matrix-fusion policy projects complete native observation, cart, team, event,
+state/residual and navigation rows before applying learned conditioning or spatial
+integration. Each source event is embedded once. Sparse navigable V-cell neighborhoods
+mix those projected observations and geometry into the relevant observer/page rows;
+event contributions contract with age after embedding.
 
-1. The participant Gram matrix is the inner-product matrix of the direct-sum rival and
-   same-team feature construction.
-2. The residual-feature Gram matrix is `residual.T residual / physical_rows`.
-3. The DPP feature Gram matrix is the RMS-normalized instrument-row inner-product
-   matrix.
+The interacting observation/page/cart/team rows then receive learned global and
+same-team Gram actions. Their exact factorization, such as `R (Rᵀ V)`, retains
+destination-specific outputs. A later row-local routed block uses top-k sigmoid
+affinities, selected-route normalization and SwiGLU experts with an ordinary
+load-balancing auxiliary loss. It has no shared expert. There is no residual
+feature-Gram/probe broadcast or DPP instrument allocation on this live path.
 
-The policy also performs participant/instrument products, SwiGLU, action-linear dynamics,
-and routed expert products. Repository-owned Metal kernels implement `AB`, `AᵀB`, and
-`ABᵀ`, including reverse products. Shapes determine dispatch extent. DPP marginal
-inclusion uses feature-side covariance and dimension-counted conjugate gradients; it
-does not build an instrument-sized inverse.
+Repository-owned paged Metal kernels implement `AB`, `AᵀB`, `ABᵀ` and their reverse
+products. Prepared physical capacities determine dispatch extent; active row counts,
+addresses, masks and expert assignments are tensor data. New capacities still require
+preparation, and persistent allocation-free intermediate storage remains an explicit
+execution obligation rather than a consequence of fixed kernel templates.
 
-The responder owns participant fusion, DPP, policy/value/dynamics heads, action
-sampling, and local parameter updates. The expert host owns residual projection,
-routing, expert products, residual-feature Gram mixing, reverse input products,
-scale-parameter gradient accumulation, and one scale optimizer update per learner
-batch. Forward, cotangent, accumulated-gradient, update, checkpoint, FLOP, byte, and
-deadline measures identify both hosts for the same batch.
+Each learned policy has one parameter/optimizer/checkpoint lineage. The complete
+learner can run on the Mini, with native state and responses crossing RDMA. Optional
+split execution places the genuine row-Gram cross-contraction or routed FFN on another
+node and returns all required operand and parameter cotangents. Workers do not own
+separate policy optimizers. Forward, cotangent, update, checkpoint, FLOP, byte and
+deadline measures must identify the actual placement for the same batch. Historical
+two-host runs are evidence for their recorded architecture, not automatic validation
+of a subsequently changed tensor program.
 
 The RDMA and local relay layers transduce literal float tensor rows plus structural
 framing. A 64-bit value extent determines page count. Shared page credit and socket
@@ -113,13 +120,16 @@ tensor extent or later workload size.
 The reference game supplies a live, controllable state machine with many teams, many
 carts, runtime joins and departures, and exact successor state. Stock maps plus a
 generated bridge are fused into one connected world. Cart curves are constructed inside
-continuous swept-volume and rider-support feasibility, and player belief, commitment
-distance, cart planning, and V-cell structure share the stock-navigation/Voronoi
+continuous swept-volume and rider-support feasibility, and player observation
+integration, cart planning and V-cell structure share the stock-navigation/Voronoi
 realization.
 
-The strategy actuator preserves push, suppress, contest, rival, cell, spawn, and idle
-instrument identities through the server. Policy optimization receives only sparse W/L
-transition rewards. Aggression, robustness, competition pressure, survival, objective
+The policy emits a rate mean and Gaussian scale for every witnessed Havocbot state
+word. Sampled rates drive exact exponential relaxation of residuals on the bot's
+private view of game state; they do not mutate shared engine state or select a
+hand-written vocabulary of interventions. Policy optimization receives sparse W/L
+transition rewards and the explicitly defined regularizers and balancing loss.
+Aggression, robustness, competition pressure, survival, objective
 conversion, and perturbation response are separate realized behavior measures. A study
 compares mirrored interventions with their observation and missing masses; it does not
 label a self-play policy “improved.”

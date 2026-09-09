@@ -1,0 +1,96 @@
+{
+  "date": "2026-09-05",
+  "selection": {
+    "actor_objective": "AReaL decoupled PPO",
+    "proximal_policy": "AReaL REUSE_TRAIN_LOGP, one optimizer update per execution group",
+    "rollout_correction": "verl decoupled_token_is translated to per-game-action MLX tensors",
+    "importance_threshold": 2.0,
+    "numerical_log_bound": 20.0,
+    "ppo_epsilon": 0.2,
+    "batch_renormalization": false,
+    "rejection_sampling": false
+  },
+  "before": {
+    "log_ratio": 100,
+    "advantage": -1,
+    "finite_inputs": true,
+    "finite_source_logp": true,
+    "loss": "inf",
+    "gradient_norm": "nan",
+    "nonfinite_parameter_tensors": 30,
+    "updates_after": 1,
+    "saved_nonfinite_arrays": 90
+  },
+  "after": {
+    "log_ratio": 100,
+    "advantage": -1,
+    "finite_inputs": true,
+    "finite_source_logp": true,
+    "loss": "8.719247817993164",
+    "gradient_norm": "210.4341278076172",
+    "nonfinite_parameter_tensors": 0,
+    "updates_after": 1,
+    "saved_nonfinite_arrays": 0
+  },
+  "verification": {
+    "command": "PYTHONPATH=xonotic bin/mesh-python -m unittest solver.strat.test_state solver.strat.test_action_history solver.strat.test_learning solver.strat.test_policy_math solver.strat.test_map_assets -q",
+    "tests": 29,
+    "result": "passed",
+    "reference_equation_cases": 75,
+    "detached_proximal_gradient_cases": 6,
+    "full_stale_updates_per_policy": 4,
+    "policies": [
+      "matrix_fusion",
+      "terminal_win"
+    ],
+    "raw_log_gaps": [
+      -100.0,
+      100.0
+    ],
+    "advantage_signs": [
+      -1,
+      1
+    ],
+    "checkpoint_checks": [
+      "all numeric arrays finite",
+      "model and optimizer resume",
+      "v3-to-v4 objective boundary"
+    ],
+    "test_log": "----------------------------------------------------------------------\nRan 29 tests in 6.170s\n\nOK\n",
+    "live_engine_run": false
+  },
+  "upstream_sources": [
+    {
+      "url": "https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/rollout_corr_helper.py",
+      "sha256": "763158342551bc4077805a8a009d959a7a2043c4d43b772fe6045f4a40932f3e"
+    },
+    {
+      "url": "https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/core_algos.py",
+      "sha256": "a54b6d812db4441e8b0989ae69d2c46b0a0a7b584296f73d8316f264462c37cb"
+    },
+    {
+      "url": "https://github.com/verl-project/verl/blob/main/verl/trainer/config/algorithm.py",
+      "sha256": "aee0d7531597b6a2bee461aa6c04d4fbd8a288ccca76ba27c3804208c70cfd2d"
+    },
+    {
+      "url": "https://github.com/areal-project/AReaL/blob/main/areal/trainer/ppo/actor.py",
+      "sha256": "da231a68b48be107b043e6cb1ae539b7de88f358da6d80c21fdf7f6feaf93e57"
+    },
+    {
+      "url": "https://github.com/areal-project/AReaL/blob/main/areal/utils/functional/functional.py",
+      "sha256": "126aae263175d49930473bfa74d3c032a84b8a15c9f3ff68536b631332290bb4"
+    }
+  ],
+  "source_sha256": {
+    "xonotic/solver/strat/policy_math.py": "4be4e21a510c3d041feb4122b037d259762c0dba479b43492679543a7c10b788",
+    "xonotic/solver/strat/policy_contract.py": "321aea7a27ad0ea1b1b5977a6927f4970ee800813c8a3c1c962969f805042023",
+    "xonotic/solver/strat/online.py": "60f4e0f0a862d49254a4ca91a97a93e431c2c59f51ab49a2a909e98780371dce",
+    "xonotic/solver/strat/test_policy_math.py": "f1f384862a0e990267a3d9a5d607aec24145b51cfc3e2c81e8f3353face9f688",
+    "xonotic/solver/strat/test_learning.py": "cdcbdbbae10fe13a8509ada362f7cd74c090875de8f78d05f6a35b5e90c407f5"
+  },
+  "remaining_prelaunch_findings": [
+    "pending episode and request-history resume",
+    "durable terminal outcomes",
+    "spawn execution attribution and human advisory semantics"
+  ]
+}

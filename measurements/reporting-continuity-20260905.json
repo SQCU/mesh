@@ -1,0 +1,51 @@
+{
+  "date": "2026-09-05",
+  "report": "design/REPORTING-CONTINUITY-RCA.md",
+  "live_source": "/Users/mdot/mesh-workloads/cartlane/runs/mini-learner-20260905",
+  "frame": 1602,
+  "recorded_at": 1788639924.627042,
+  "comparison_seconds": 0.001855999999861524,
+  "policy_player_rows": 32,
+  "pair_rows": 16,
+  "controlled_rows": 15,
+  "sampled_action_matches": 15,
+  "max_transmitted_coordinate_delta": 0.0,
+  "new_goal_rating_acknowledgements": 9,
+  "acknowledgements_with_selected_goal_match": 4,
+  "window_responder_seconds": [
+    105.901,
+    438.679
+  ],
+  "optimizer_coverage": {
+    "matrix_fusion": {
+      "optimizer_samples": 300,
+      "samples_with_actor_rows": 116,
+      "actor_rows_sum": 116,
+      "value_rows_sum": 7948,
+      "latest_updates": 8323
+    },
+    "terminal_win": {
+      "optimizer_samples": 300,
+      "samples_with_actor_rows": 216,
+      "actor_rows_sum": 1173,
+      "value_rows_sum": 7948,
+      "latest_updates": 8323
+    }
+  },
+  "verification": {
+    "unit_tests": 5,
+    "laptop": "passed",
+    "mini": "passed",
+    "api": "live measured comparison and optimization records",
+    "browser": "incomplete; background browser fetch remained pending",
+    "bridges_signalled": false
+  },
+  "unresolved": [
+    "human spawn adjustment is not advisory",
+    "spawn and commitment lack separate actuator acknowledgements",
+    "seeded bot and controller composition rating estimator absent",
+    "lineage-wide outcome and roster ledger incomplete",
+    "cross-host viewer discovery and durable replica absent",
+    "browser fetch completion budget absent"
+  ]
+}

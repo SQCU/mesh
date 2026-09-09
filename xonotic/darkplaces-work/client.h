@@ -1314,6 +1314,7 @@ void CL_Shutdown (void);
 void CL_Init (void);
 
 void CL_EstablishConnection(const char *host, int firstarg);
+void CL_ReconnectFrame(void);
 
 void CL_Disconnect (void);
 void CL_Disconnect_f (void);

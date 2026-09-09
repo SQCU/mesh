@@ -53,6 +53,7 @@ typedef struct edict_engineprivate_s
 	qboolean free;
 
 	float freetime;
+	unsigned int generation;
 
 	int mark;
 

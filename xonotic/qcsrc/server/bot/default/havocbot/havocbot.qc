@@ -346,6 +346,12 @@ void havocbot_keyboard_movement(entity this, vector destorg)
 	bot_batch_staged_total += 1;
 }
 
+void bot_controller_batch_fallback(entity this)
+{
+	havocbot_keyboard_apply(this, this.bot_batch_destination, this.bot_batch_random);
+	this.bot_batch_pending = false;
+}
+
 float bot_controller_batch_run()
 {
 	bot_batch_active = true;
@@ -358,8 +364,7 @@ float bot_controller_batch_run()
 	IL_EACH(g_players, IS_BOT_CLIENT(it) && it.bot_batch_pending,
 	{
 		bot_batch_fallback_total += 1;
-		havocbot_keyboard_apply(it, it.bot_batch_destination, it.bot_batch_random);
-		it.bot_batch_pending = false;
+		mesh_view_run(it, bot_controller_batch_fallback);
 	});
 	if (!waves)
 	{

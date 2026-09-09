@@ -1,6 +1,7 @@
 import sys, os, math, random, subprocess, tempfile, time, zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mkentfile as M
+import navmesh as NAV
 from placement import fnum, vstr, check_bsp, vadd, vscale, vnorm, vcross
 
 Q3MAP2 = os.environ.get('Q3MAP2', os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'bin', 'mesh-q3map2')))
@@ -393,7 +394,7 @@ if __name__ == '__main__':
     import negspace as _NS
     _d = open(bsp, 'rb').read()
     gns = _NS.NegSpace(_d, mask=_NS.MASK_PLAYERSOLID)
-    tb = M.trigger_boxes(_d)
+    tb = NAV.trigger_boxes(_d)
     intrig = lambda q: any(all(lo[k] - 1 <= q[k] <= hi[k] + 1 for k in range(3)) for lo, hi in tb)
     viol = sum(1 for p in g.wps
                if not intrig((p[0], p[1], p[2] + 24))

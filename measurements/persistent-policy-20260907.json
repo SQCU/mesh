@@ -1,0 +1,100 @@
+{
+  "date": "2026-09-07",
+  "scope": "local source compilation and bounded numerical calculations; no game, bridge, SSH workload or live native mesh invocation",
+  "backend": "persistent_metal",
+  "source_contract": "design/POLICY-PROGRAM.md",
+  "model": "Wally default widths, native page width 256, observation width 84, event width 18",
+  "compilation": [
+    "libmesh-tensor.dylib",
+    "complete learner graph",
+    "worker region manifest",
+    "linear and FFN comparison arms",
+    "stock arm",
+    "native copy and commit shaders",
+    "application entrypoint imports"
+  ],
+  "nonzero_forward_comparison": {
+    "reference": "same model expressed in MLX",
+    "readonly_skill_tag_present": true,
+    "mean_max_abs": 3.911554813e-08,
+    "value_max_abs": 2.384185791e-06
+  },
+  "actor_value_derivatives": {
+    "seed": 781,
+    "all_finite": true,
+    "gradient_l2_relative_difference": 0.0001821157272,
+    "native_loss": -7.6413011551,
+    "reference_loss": -7.6377563477,
+    "native_gradient_norm": 2762123.5,
+    "optimizer_step": 1
+  },
+  "capacity_growth": {
+    "seed": 912,
+    "before": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "after": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "kernel_variants_before": 270,
+    "kernel_variants_after": 270,
+    "graph_nodes": 3541,
+    "arena_bytes_before": 40491264,
+    "arena_bytes_after": 40521728,
+    "retained_parameter_moment_accumulator_max_abs": 0.0,
+    "occupied_mean_max_abs": 0.0,
+    "occupied_value_max_abs": 0.0,
+    "loss": 2.845175266265869,
+    "gradient_norm": 606.6699829101562,
+    "all_gradients_finite": true,
+    "readonly_mean": 0.0,
+    "optimizer_step": 1
+  },
+  "routed_products": {
+    "seed": 813,
+    "experts": 8,
+    "input_width": 97,
+    "output_width": 77,
+    "reference": "NumPy float32 products",
+    "observations": [
+      {
+        "rows": 193,
+        "forward_max_abs": 0.0,
+        "input_vjp_max_abs": 1.043081283569336e-07,
+        "weight_vjp_max_abs": 5.960464477539063e-08,
+        "kernel_variants": 6
+      },
+      {
+        "rows": 257,
+        "forward_max_abs": 0.0,
+        "input_vjp_max_abs": 1.4901161193847656e-07,
+        "weight_vjp_max_abs": 7.450580596923828e-08,
+        "kernel_variants": 6
+      }
+    ]
+  },
+  "limits": [
+    "No bitwise equivalence claim across floating-point reduction orders",
+    "No live RDMA execution or remote throughput measurement",
+    "No match-level learning-quality claim",
+    "No repository-owned test suite or verification harness added"
+  ]
+}

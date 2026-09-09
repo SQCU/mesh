@@ -69,5 +69,13 @@ Historical samples retain phase and workload envelopes, not repeated copies of l
 covariance objects. Namespaced updates merge into the current producer measure, and
 their delivery timestamp is distinct from the producer heartbeat. Objective-labelled
 learning, replay and outcome measures use this generic channel. The J measurement
-thread retains full numerical reports in per-responder/episode match artifacts.
+thread retains full numerical reports in per-responder/episode binary NPZ artifacts
+and publishes scalar/array-shape summaries with artifact descriptors. The generic
+node artifact endpoint streams registered files without parsing their numerical
+contents. Full and projected ring records cache their JSON encoding under a
+per-record lock; history requests reuse those bytes. Historical full JSON measure
+publications remain supported. The reporter reuses its result until new frames
+arrive rather than repeating an unchanged covariance computation.
+The infrastructure HUD links to the separate J-space and policy-learning pages on
+8795; those pages share an incremental application reader, not another J computation.
 These retention and display domains are described in [`../joracle-viewer.md`](../joracle-viewer.md).

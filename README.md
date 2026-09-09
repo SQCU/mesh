@@ -1,5 +1,11 @@
 # mesh
 
+[Compiled indexed communication functions](design/compiled-functions.md) expose
+canonical stream views to numerical callers through reusable native closures.
+[Compiled reductions](design/compiled-reductions.md) add ordered contribution
+coverage and local readiness. The [requirement ledger](design/distributed-requirements.md)
+records the remaining topology, recovery and hardware work.
+
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
 talking RDMA. The invariant: **a node may never become unreachable, and may never
 decide on its own to stop executing.**
@@ -217,7 +223,9 @@ LINKS
   redundant: 2 of 2
 ```
 
-`mesh-nodeinfo` carries `planes=N lan=<iface> fabric=<0|1>`, and the keeper logs
+`mesh-nodeinfo` carries `planes=N lan=<iface> fabric=<0|1> fabric_source=ifconfig`.
+Its fabric value measures IP carrier on the RDMA-capable interfaces; it does not
+assert that the RDMA bridge is paired. The keeper logs
 `DEGRADED` every pass while only one remains. Do not run anything that can disrupt the
 remaining link while degraded.
 
@@ -441,11 +449,14 @@ cables directly, point to point.
   Ms-Mac-mini        Mac16,11     12    24G    enabled   fd6d:6573:68:3af8:1a3c:9700:3034:715d  self
 ```
 
-That comes from `io.mesh.nodeinfo`, a launchd socket-activated service on port 8099.
-There is no resident daemon and no language runtime: launchd accepts the connection
-and hands the socket to a shell script as stdin/stdout. Each node reports its name,
-hardware, macOS, RDMA and SDK state, every fabric port with its state, GID and the
-peer seen on it, and every route it knows.
+That comes from `io.mesh.nodeinfo`, a Python service on port 8099 (8100 for the user
+service). One sampler runs `mesh-nodeinfo.sh` independently of incoming requests.
+Clients receive its current output with `sample_status` and `sample_updated`, even
+while sampling is incomplete. Requests never start or kill device probes.
+Each node reports its name, hardware, macOS, RDMA enablement and SDK state, every
+fabric port's IP carrier, link-local address and observed neighbor, and its routes.
+Discovery uses `ifconfig` and `ndp` rather than opening verbs devices. Per-port
+`rdma_state=unmeasured` distinguishes that observation from a verbs port measurement.
 
 That last part is what makes the topology discoverable. Ask each node what it can see
 and you can reconstruct the whole graph — no central registry, no multicast, no
@@ -658,6 +669,12 @@ pressure, memory-bandwidth intervals, and bridge state without inspecting applic
 node whose sampler or stream is unavailable remains in inventory with that source state explicit.
 Files are reserved for static fleet and capacity configuration, release artifacts, checkpoints,
 and deliberately exported study results; they are not the live telemetry bus.
+Large numerical exports travel as binary artifacts, not repeated JSON tensor trees.
+Producer measures carry scalar summaries and registered artifact descriptors; the node's
+`/v1/artifact` streams those bytes on demand. Node-ring JSON records are encoded once per
+projection and reused across polling clients. See
+[application telemetry](design/APPLICATION-TELEMETRY.md#numerical-artifacts-and-polling-cost)
+for the J report's NPZ format and verification command.
 
 The observer also reads AGX device, renderer, tiler, and GPU-memory counters from I/O Registry.
 Those counters need no privilege, so live GPU utilization remains visible while a node is being
@@ -706,9 +723,19 @@ every node. Add fleet members to `etc/mesh-nodes.json`; live discovery can add m
 from the network never deletes a rostered node.
 
 Every Python service and executable tool enters through `mesh-python`. `install.sh` realizes the
-locked Python 3.12 runtime at `/usr/local/mesh/.venv`; the rootless installer realizes the same
-lock under `~/.local/mesh/.venv`. `mesh-runtime-id.py` reports that lock and is embedded in
-curriculum match records. There is no system-Python or ambient interpreter fallback.
+locked Python 3.12 runtime in an immutable generation under `/usr/local/mesh/runtimes`;
+the rootless installer uses `~/.local/mesh/runtimes`. `runtime-current` selects the available
+environment. Installed packages are checked against the lock before an environment is reused.
+
+Cartlane Python applications deploy through `bin/mesh-application.py launch`. The launcher
+stages the complete application, builds its native client from the staged sources, realizes
+its locked Python environment, and imports its entrypoints before atomically publishing it.
+The demo and curriculum invoke this automatically; both node installers also realize the
+application. Solver, client, wire definitions, payload resources, and viewers travel together.
+Running processes retain their complete generation, and a failed update leaves the last
+complete generation available. `mesh-runtime-id.py`, policy telemetry, and viewer status
+report the application identity as well as Python provenance.
+See [application deployment and its failure contract](design/APPLICATION-DEPLOYMENT.md).
 
 ### What runs today
 

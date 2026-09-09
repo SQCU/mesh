@@ -136,6 +136,7 @@ void PRVM_ED_ClearEdict(prvm_prog_t *prog, prvm_edict_t *e)
 {
 	memset(e->fields.fp, 0, prog->entityfields * sizeof(prvm_vec_t));
 	e->priv.required->free = false;
+	++e->priv.required->generation;
 	e->priv.required->freetime = realtime;
 	if(e->priv.required->allocation_origin)
 		Mem_Free((char *)e->priv.required->allocation_origin);

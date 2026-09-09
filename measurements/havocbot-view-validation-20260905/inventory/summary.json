@@ -1,0 +1,140 @@
+{
+  "file": ".build/view-payload/progs.dat",
+  "sha256": "b8d743d9207be0d666a0fdd5c97210136a32ec4c56b8533f1e6b8d88336cee33",
+  "version": 6,
+  "entity_words": 5886,
+  "global_words": 53137,
+  "string_bytes": 1156855,
+  "entity_numeric_types": {
+    "float": 4954,
+    "integer": 932
+  },
+  "entity_reference_types": {
+    "string": 195,
+    "function": 152,
+    "entity": 579,
+    "field": 6
+  },
+  "bot_declared_fields": 253,
+  "bot_declared_coordinates": 289,
+  "bot_declared_numeric_types": {
+    "integer": 111,
+    "float": 178
+  },
+  "bot_direct_field_coordinates": 383,
+  "bot_function_count": 193,
+  "bot_function_local_storage_union": 37,
+  "bot_function_max_local_words": 37,
+  "bot_declared_global_coordinates": 206,
+  "bot_declared_global_numeric_types": {
+    "float": 167,
+    "integer": 39
+  },
+  "engine_added_entity_coordinates": 229,
+  "engine_added_entity_numeric_types": {
+    "integer": 43,
+    "float": 186
+  },
+  "runtime_entity_words": 6115,
+  "runtime_entity_numeric_types": {
+    "float": 5140,
+    "integer": 975
+  },
+  "engine_added_global_coordinates": 75,
+  "runtime_global_words": 53212,
+  "groups": {
+    "server/bot/default/waypoints.qh": {
+      "fields": 83,
+      "coordinates": 85,
+      "numeric_types": {
+        "integer": 44,
+        "float": 41
+      }
+    },
+    "server/bot/default/bot.qh": {
+      "fields": 33,
+      "coordinates": 33,
+      "numeric_types": {
+        "float": 26,
+        "integer": 7
+      }
+    },
+    "server/bot/default/havocbot/havocbot.qh": {
+      "fields": 26,
+      "coordinates": 32,
+      "numeric_types": {
+        "float": 28,
+        "integer": 4
+      }
+    },
+    "server/bot/api.qh": {
+      "fields": 2,
+      "coordinates": 2,
+      "numeric_types": {
+        "float": 2
+      }
+    },
+    "server/bot/default/havocbot/roles.qh": {
+      "fields": 5,
+      "coordinates": 5,
+      "numeric_types": {
+        "float": 3,
+        "integer": 2
+      }
+    },
+    "server/bot/default/navigation.qh": {
+      "fields": 51,
+      "coordinates": 55,
+      "numeric_types": {
+        "float": 16,
+        "integer": 39
+      }
+    },
+    "server/bot/default/navigation.qc": {
+      "fields": 3,
+      "coordinates": 5,
+      "numeric_types": {
+        "float": 5
+      }
+    },
+    "server/bot/default/scripting.qc": {
+      "fields": 23,
+      "coordinates": 27,
+      "numeric_types": {
+        "float": 18,
+        "integer": 9
+      }
+    },
+    "server/bot/default/aim.qh": {
+      "fields": 14,
+      "coordinates": 30,
+      "numeric_types": {
+        "float": 30
+      }
+    },
+    "server/bot/default/waypoints.qc": {
+      "fields": 3,
+      "coordinates": 3,
+      "numeric_types": {
+        "float": 1,
+        "integer": 2
+      }
+    },
+    "server/bot/default/scripting.qh": {
+      "fields": 10,
+      "coordinates": 12,
+      "numeric_types": {
+        "integer": 4,
+        "float": 8
+      }
+    }
+  },
+  "limitations": [
+    "Full entity layout includes fields belonging to other entity classes and game modes.",
+    "Source-declared bot fields also include waypoint, weapon and scripting entities.",
+    "Source lexical references are a lower bound: macros, dynamic field selectors and external callees add accesses.",
+    "Function locals overlap in this optimized program and must not be summed.",
+    "Whole-program globals include constants, field/function addresses and reusable temporaries.",
+    "String/reference payloads, external entity populations, native engine state and call stacks are separate storage."
+  ]
+}

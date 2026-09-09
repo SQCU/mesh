@@ -31,6 +31,9 @@ typedef union prvm_eval_s
 	prvm_int_t		edict;
 } prvm_eval_t;
 
+struct prvm_prog_s;
+#include "prvm_view.h"
+
 typedef struct prvm_required_field_s
 {
 	int type;
@@ -41,6 +44,7 @@ typedef struct prvm_edict_private_s
 {
 	qboolean free;
 	float freetime;
+	unsigned int generation;
 	int mark;
 #define PRVM_EDICT_MARK_WAIT_FOR_SETORIGIN -1
 #define PRVM_EDICT_MARK_SETORIGIN_CAUGHT -2
@@ -208,6 +212,10 @@ extern prvm_eval_t prvm_badvalue;
 #endif
 
 #define PRVM_OP_STATE		1
+
+#define PRVM_EDICTREADFLOAT(ed, offset) (prog->view ? PRVM_ViewRead(prog, PRVM_NUM_FOR_EDICT(ed), offset, ev_float)._float : PRVM_EDICTFIELDFLOAT(ed, offset))
+#define PRVM_EDICTREADVECTOR(ed, offset) (prog->view ? PRVM_ViewRead(prog, PRVM_NUM_FOR_EDICT(ed), offset, ev_vector).vector : PRVM_EDICTFIELDVECTOR(ed, offset))
+#define PRVM_EDICTREADINT(ed, offset, type) (prog->view ? PRVM_ViewRead(prog, PRVM_NUM_FOR_EDICT(ed), offset, type)._int : PRVM_EDICTFIELDVALUE(ed, offset)->_int)
 
 #ifdef DP_SMALLMEMORY
 #define	PRVM_MAX_STACK_DEPTH		128
@@ -556,6 +564,8 @@ typedef struct prvm_prog_s
 	int					depth;
 
 	prvm_int_t			localstack[PRVM_LOCALSTACK_SIZE];
+	unsigned char view_localstack_types[PRVM_LOCALSTACK_SIZE];
+	unsigned char view_localstack_readonly[PRVM_LOCALSTACK_SIZE];
 	int					localstack_used;
 
 	unsigned short		filecrc;
@@ -580,6 +590,10 @@ typedef struct prvm_prog_s
 
 	prvm_edict_t		*edicts;
 	prvm_vec_t		*edictsfields;
+	prvm_view_t *view, *views;
+	uint64_t view_session;
+	int view_state_handle, view_response_handle;
+	unsigned int view_response_sequence;
 	void				*edictprivate;
 
 	int					edictprivate_size;
@@ -742,12 +756,23 @@ unsigned int PRVM_EDICT_NUM_ERROR(prvm_prog_t *prog, unsigned int n, const char 
 
 #define PRVM_PROG_TO_EDICT(n) (PRVM_EDICT_NUM(n))
 
-#define	PRVM_G_FLOAT(o) (prog->globals.fp[o])
-#define	PRVM_G_INT(o) (prog->globals.ip[o])
-#define	PRVM_G_EDICT(o) (PRVM_PROG_TO_EDICT(prog->globals.ip[o]))
+static inline prvm_vec_t *PRVM_GlobalWritePointer(prvm_prog_t *prog, int offset, int type, int count)
+{
+	if (prog->view)
+		for (int i = offset; i < offset + count; ++i)
+			prog->view->global_types[i] = type;
+	return prog->globals.fp + offset;
+}
+
+#define PRVM_G_READFLOAT(o) (prog->view ? PRVM_ViewGlobalRead(prog, o, ev_float)->_float : prog->globals.fp[o])
+#define PRVM_G_READINT(o) (prog->view ? PRVM_ViewGlobalRead(prog, o, ev_pointer)->_int : prog->globals.ip[o])
+#define PRVM_G_READVECTOR(o) (prog->view ? PRVM_ViewGlobalRead(prog, o, ev_vector)->vector : prog->globals.fp + (o))
+#define	PRVM_G_FLOAT(o) (*PRVM_GlobalWritePointer(prog, o, ev_float, 1))
+#define	PRVM_G_INT(o) (*(prvm_int_t *)PRVM_GlobalWritePointer(prog, o, ev_pointer, 1))
+#define	PRVM_G_EDICT(o) (PRVM_PROG_TO_EDICT(PRVM_G_READINT(o)))
 #define PRVM_G_EDICTNUM(o) PRVM_NUM_FOR_EDICT(PRVM_G_EDICT(o))
-#define	PRVM_G_VECTOR(o) (&prog->globals.fp[o])
-#define	PRVM_G_STRING(o) (PRVM_GetString(prog, prog->globals.ip[o]))
+#define	PRVM_G_VECTOR(o) (PRVM_GlobalWritePointer(prog, o, ev_float, 3))
+#define	PRVM_G_STRING(o) (PRVM_GetString(prog, PRVM_G_READINT(o)))
 
 #define	PRVM_E_FLOAT(e,o) (e->fields.fp[o])
 #define	PRVM_E_INT(e,o) (e->fields.ip[o])

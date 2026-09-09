@@ -1,0 +1,67 @@
+{
+  "date": "2026-09-05",
+  "scope": "Isolated MLX and QCVM reproductions; no live server launch or restart",
+  "findings": {
+    "mid_round_resume": {
+      "mode": "resumed",
+      "updates_before": 1,
+      "updates_after": 1,
+      "pending_before": 1,
+      "pending_after": 0,
+      "truncations_before": 0,
+      "truncations_after": 0
+    },
+    "finished_without_outcome_event": {
+      "finished": true,
+      "scores": [
+        100.0,
+        0.0
+      ],
+      "reward": [
+        0.0,
+        0.0
+      ],
+      "discount": [
+        1.0,
+        1.0
+      ]
+    },
+    "finite_stale_probability_update": {
+      "log_ratio": 100,
+      "advantage": -1,
+      "finite_inputs": true,
+      "finite_source_logp": true,
+      "loss": "inf",
+      "gradient_norm": "nan",
+      "nonfinite_parameter_tensors": 30,
+      "updates_after": 1,
+      "saved_nonfinite_arrays": 90
+    },
+    "human_spawn_without_route_ack": {
+      "engine_hook": "PlayerPreThink",
+      "fixture": "Actual extracted hook with identity Spawn_SwizzleTime stub",
+      "human": true,
+      "respawn_before": 10,
+      "respawn_after": 15,
+      "spawn_applied": 5,
+      "route_seq_before": 1,
+      "route_seq_after": 1,
+      "qcvm_stdout": "human 15 5 1"
+    }
+  },
+  "reproduction_scripts": {
+    "reproduce.py": "import contextlib\nimport io\nimport json\nfrom pathlib import Path\nimport tempfile\n\nimport mlx.core as mx\nimport numpy as np\nfrom mlx.utils import tree_flatten\nfrom solver.strat.test_learning import model, chorus\nfrom solver.strat.test_action_history import snapshot\nfrom solver.strat.game_value import GameContext\nfrom solver.strat.online import OnlineLearner\nfrom solver.strat.checkpoint_audit import audit_checkpoint\nfrom solver.strat.strategy import strategy, logp_of\n\nreport = {}\nlearner = OnlineLearner(model(), policy_arm='terminal_win')\nframe = learner.replay.intern(chorus(learner.wally, 2))\nstate = snapshot()\nrecord = dict(context=GameContext((0, 1), (0, 1)), frame=frame, next_frame=frame,\n              snapshot=state, next_snapshot=state, actions=np.zeros(2, dtype=np.int32),\n              controls=np.zeros((2, 3), dtype=np.float32), behavior_logp=np.zeros(2),\n              actor_mask=np.zeros(2, dtype=bool), request_seq=2, value_weight=1.0)\nlearner.observe_attributed([record])\nwith tempfile.TemporaryDirectory(prefix='mesh-launch-review-') as folder:\n path = str(Path(folder) / 'state.npz')\n learner.save(path)\n with contextlib.redirect_stdout(io.StringIO()):\n  restored = OnlineLearner(model(), policy_arm='terminal_win', load_checkpoint=path)\n report['mid_round_resume'] = {'mode':restored.continuation['mode'], 'updates_before':learner.updates,\n   'updates_after':restored.updates, 'pending_before':len(learner.episode),'pending_after':len(restored.episode),\n   'truncations_before':learner.truncated_episodes,'truncations_after':restored.truncated_episodes}\nended = snapshot()\nended.finished = True\nended.scores[:] = [100,0]\nfinished = learner.transition(**dict(record, next_snapshot=ended))\nreport['finished_without_outcome_event'] = {'finished':ended.finished,'scores':ended.scores.tolist(),\n   'reward':finished['reward'].tolist(),'discount':finished['discount'].tolist()}\n\nlearner = OnlineLearner(model(), policy_arm='matrix_fusion')\ninputs = chorus(learner.wally, 2)\nframe = learner.replay.intern(inputs)\nprediction = strategy(learner.wally, *(mx.array(a) for a in inputs))\nactions = mx.zeros(2, dtype=mx.int32)\ncontrols = mx.zeros((2,3))\nsource_logp = np.asarray(logp_of(prediction,actions,controls))-100\nrecord = {'frame_in':frame,'frame_out':frame,'actions':np.asarray(actions),'controls':np.asarray(controls),\n          'behavior_logp':source_logp,'reward':np.asarray(prediction.value_lou)-1,\n          'discount':np.zeros(2,dtype=np.float32),'winner_mask':np.zeros(2,dtype=bool),\n          'next_winner_mask':np.zeros(2,dtype=bool),'train_mask':np.ones(2,dtype=bool),\n          'actor_mask':np.ones(2,dtype=bool),'dynamics_mask':np.zeros(2,dtype=bool)}\nmetrics=learner.learn([record])\nreport['finite_stale_probability_update']={'log_ratio':100,'advantage':-1,\n 'finite_inputs':all(np.isfinite(a).all() for a in inputs),\n 'finite_source_logp':bool(np.isfinite(source_logp).all()),\n 'loss':str(metrics['loss']),'gradient_norm':str(metrics['gradient_norm']),\n 'nonfinite_parameter_tensors':sum(not np.isfinite(np.asarray(a)).all() for _,a in tree_flatten(learner.wally.parameters())),\n 'updates_after':learner.updates}\nwith tempfile.TemporaryDirectory(prefix='mesh-launch-review-') as folder:\n path=str(Path(folder)/'bad.npz')\n learner.save(path)\n with np.load(path) as data:\n  report['finite_stale_probability_update']['saved_nonfinite_arrays']=audit_checkpoint(data)['nonfinite_arrays']\nPath('/tmp/mesh-prelaunch-review-20260905/reproductions.json').write_text(json.dumps(report,indent=2)+'\\n')\nprint(json.dumps(report,indent=2))\n",
+    "spawn_repro.py": "from pathlib import Path\nimport tempfile\nfrom solver.strat.verify_game import run_qc\nroot=Path('/Users/mdot/dox/mesh')\ntext=(root/'xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload.qc').read_text()\nstart=text.index('MUTATOR_HOOKFUNCTION(plc, PlayerPreThink)')\nstart=text.index('{',start)\nend=start+1\ndepth=1\nwhile depth:\n depth+=(text[end]=='{')-(text[end]=='}')\n end+=1\nbody=text[start:end]\nprefix='''\n#define M_ARGV(index,type) actor\n#define max(a,b) ((a)>(b)?(a):(b))\nvoid print(string text, ...) = #1;\nstring ftos(float number) = #2;\nentity spawn() = #3;\nentity actor;\nfloat time;\n.float plc_str_death_stamp, plc_str_spawn, plc_str_spawn_applied, respawn_time, respawn_time_max, plc_str_route_seq, is_bot;\nfloat Spawn_SwizzleTime(entity player, float stamp) { return stamp; }\nvoid apply_spawn()\n'''\nmain='''\nvoid main() {\n actor=spawn(); actor.is_bot=0; time=1;\n actor.plc_str_death_stamp=.5; actor.plc_str_spawn=5; actor.plc_str_spawn_applied=0;\n actor.respawn_time=10; actor.respawn_time_max=10; actor.plc_str_route_seq=1;\n apply_spawn();\n print(\"human \",ftos(actor.respawn_time),\" \",ftos(actor.plc_str_spawn_applied),\" \",ftos(actor.plc_str_route_seq),\"\\\\n\");\n}\n'''\nwith tempfile.TemporaryDirectory(prefix='mesh-spawn-review-') as folder:\n output=run_qc(prefix+body+main,root,Path(folder)).strip()\nassert output=='human 15 5 1',output\nprint(output)\n"
+  },
+  "execution": "PYTHONPATH=xonotic bin/mesh-python SCRIPT_PATH from the repository root; the MLX script writes into /tmp/mesh-prelaunch-review-20260905",
+  "source_sha256": {
+    "xonotic/solver/strat/policy_math.py": "5de78158faa9a3e9e52eb85807498312dcc30077413003062516b774d7471881",
+    "xonotic/solver/strat/online.py": "8b26bb9fe09aa070e880b3e99ce5c31d942ddb9e180a90c3f0ae1cff0008a79e",
+    "xonotic/solver/strat/strat_responder.py": "e8bba5b007760c2600915c7a242d0cf5728373c1a856e83204437908b8cf39d1",
+    "xonotic/solver/strat/action_history.py": "c4916290f16c1108fe2949b26981c84bca11989335295691f74dfeb8464ffd02",
+    "xonotic/solver/strat/curriculum.py": "92335ef3e876a5a70ba3773f88ef55d9bf399bbe7e4b82211a2de8b5bc91d2bd",
+    "xonotic/solver/strat/verify_numerics.py": "b0314e88ffa4ca4cf30d25df0a478400adae393b672f09ff8a4531d80bfabb04",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload.qc": "836fea5939942b925e014650c7a91d92d797ce599feb6c9b494683480b93d73e",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qc": "f053df6b98ad0acf5ec193c791e3a25eda75ffa9ca9d5febe0a3315ff9b752c5"
+  }
+}

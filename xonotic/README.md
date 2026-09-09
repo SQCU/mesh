@@ -1,10 +1,10 @@
 # xonotic on the sealed mesh
 
-A Xonotic payload-mode dedicated server publishes 83-column participant rows,
-16-column cart rows, and 17-column perception events across the RDMA fabric. The mesh
-responder returns a 7-column strategy assignment for every client row. Bot rows enact
-it as additive havocbot navigation ratings; human rows retain the assignment as an
-advisory signal.
+A Xonotic payload-mode dedicated server publishes native observations, cart/team
+state, events and addressed Havocbot view pages. The responder returns continuous
+rates for those view pages. The [policy program](../design/POLICY-PROGRAM.md) is the
+canonical description of source layouts, shared representation, learned outputs,
+exact exponential integration, training and execution boundaries.
 
 ## Online policy training
 
@@ -29,14 +29,12 @@ The responder is a service and runs until `SIGINT`, `SIGTERM`, or `SIGHUP`, then
 the pending transition and writes its checkpoint and runstate before exiting. The
 curriculum owns match duration and sends `SIGTERM` at the match boundary.
 
-Each server transition updates the asymmetric winner/loser critics, the shared policy,
-and the local dynamics ensemble before the next response is emitted. The off-policy
-count may be any value from zero through the number of active participants; those rows
-receive uniform exploratory assignments and carry their behavior log-probabilities in
-telemetry. Bot and human rows are both represented. Bots enact the assignment through
-the havocbot rater; a human row is an advisory assignment until a player-facing channel
-or realized-action classifier is added. There is no simulator or bootstrap trainer in
-the strategy path; evidence comes from live server transitions.
+Training consumes live server transitions through the common policy and W/L value
+program. Native application acknowledgments determine actor credit; human observations
+can contribute value-learning data. The [policy program](../design/POLICY-PROGRAM.md)
+defines the complete loss and continuous view interface, and
+[joint policy learning](../design/JOINT-POLICY-LEARNING.md) defines controller ownership
+and exploratory rows.
 
 The match curriculum is a distribution over actual server launches: map, team count,
 players per team, controller mixture, cart-bearing entity overlay, skill, seed,
@@ -92,16 +90,10 @@ the requested controller mixture as evidence. Generated schedules can vary human
 counts with `--human-counts`; `--human-client-command` launches one command per such
 participant and expands `{port}`, `{map}`, `{seed}`, `{match}`, and `{client}` tokens.
 
-Study cycles atomically replace `study.json` with the cumulative release measure. It
-contains the mirrored outcome measure, assignment-level and checkpoint-realization Elo
-coordinates, every behavior coordinate overall and by perturbation, baseline-centered
-perturbation displacements, per-arm spawn-wave timing, the independent participant-fusion
-and residual-fusion intervention tensors
-intervention, checkpoint/update realization, map advanceability, and whole-fabric
-operating coordinates. The fabric section retains the identities of responder and matrix
-nodes and hosts, rank/hidden/expert/top-k coordinates, remote request and output row mass,
-FLOP/s and byte/s intervals, distributed deadline load, and the measured local-only
-deadline interval. Missing telemetry remains `null`; it is not converted to zero.
+Study cycles atomically replace `study.json` with cumulative match outcomes,
+checkpoint-realization Elo estimates, observed application and native game measures,
+optimization records, and fabric measurements. Missing telemetry remains `null`;
+retained historical fields do not establish coverage for the current policy.
 
 Summarize one or more realized telemetry streams with:
 
@@ -109,9 +101,9 @@ Summarize one or more realized telemetry streams with:
 mesh-python -m solver.strat.joracle.metrics solver/strat/runs/curriculum-20260830/*/telemetry.jsonl
 ```
 
-The summary separates winner-retention and loser-acquisition trials and aggregates
-importance weights, W/L losses, dynamics error, ensemble disagreement, local-control
-singular values, credited horizon, controller class, and behavior-policy class.
+The summary records available application acknowledgments, native outcomes, cart and
+resource measurements. The policy viewer reports the current optimization measures
+described in the [policy program](../design/POLICY-PROGRAM.md).
 
 ## Live mesh measurements
 
@@ -121,24 +113,26 @@ them in memory on port 8788. The existing whole-mesh observer on port 8787 combi
 laptop and Mini without importing a Xonotic schema. `joracle/demo.sh` checks or
 kickstarts that observer; it does not launch another HTTP service or browser pane.
 
-Open `http://127.0.0.1:8787`. The phase-space page displays both nodes and the top-level
-scalar coordinates of every producer measure. `http://127.0.0.1:8787/latest.json`
-exposes the complete nested `workload.producers[].measures` objects. The J-lens measures
-the exact composer features and authoritative server coordinates against the selected
-participant-instrument J row. A separately named minimum-norm empirical L2 projection
-publishes its per-coordinate residual square measure. The J-oracle joins the exact
-source features, authoritative source state,
-policy intervention, delivered response, active route, goal, touch, subsequent state,
-and realized counters by each server-owned response sequence. There is no simulated input
-path in either computation.
+Open `http://127.0.0.1:8787` for both nodes' infrastructure activity.
+`http://127.0.0.1:8787/latest.json` exposes scalar/array-length projections of nested
+`workload.producers[].measures` objects, not the full numerical arrays. Start the two
+application views from this directory with:
 
-Shape, numeric range, finiteness, and W/L values are recorded on every response. The
-in-memory J measure consumes the exact selected J rows and all eleven composer arrays
-on every response. JSONL records those large arrays every fifty responses by default;
-`--model-sample-every` changes only that serialization cadence. Runtime process
-multiplicity, host identity, bridge state, telemetry
-age, reconnect epochs, and producer mass are published as factual coordinates rather
-than collapsed into a service label.
+```
+../bin/mesh-python -m solver.strat.joracle.server --run-dir solver/strat/runs/joint-live-20260904
+```
+
+Open `http://127.0.0.1:8795/j` for J-space and `http://127.0.0.1:8795/policy` for
+policy optimization. Both use one cached reader, following new match directories.
+The J views consume the complete source feature vector and actual intermediate/output
+arrays from the [policy program](../design/POLICY-PROGRAM.md). Native response identities
+connect issued view rates with later application acknowledgments and observed game
+outcomes. Array serialization cadence is controlled by `--model-sample-every`.
+Runtime process multiplicity, host identity, bridge state, telemetry age and reconnect
+epochs remain separately reported coordinates.
+
+The following August 30 observations describe an earlier model and transport revision;
+they are historical evidence, not current architecture or training claims.
 
 The live run on 2026-08-30 used the already configured `mesh-mini` SSH alias without a
 repository checkout change on that node: Xonotic node 0 ran 12 bots across four teams
@@ -215,12 +209,9 @@ with full team indices. The team dialog exposes a numeric selector alongside the
 color shortcuts; numeric selection and best-team balance compare the direct team arrays,
 so team indices 25–256 do not fall through the legacy 24-bit team mask.
 
-The external strategy tick consumes the full player/instrument state and returns one
-typed response row per participant. It is a global matrix-fusion/MoE policy computation, not a
-causally independent per-player computation, so it does not pretend that reordering
-response rows creates parallel game simulation. The decoder validates the complete row
-set and the game commits target kind, target identity, gain, commitment, and spawn delay
-together.
+The external strategy tick consumes the native source families and returns one typed
+response row per addressed state page. The [policy program](../design/POLICY-PROGRAM.md)
+defines the global interaction, common output projection and private-view integration.
 
 The bot-controller frame has a separate native `VCellPlan`. `StartFrame` opens one
 controller batch and advances `bot_think` exactly once for every bot before DarkPlaces
@@ -248,13 +239,13 @@ Static geometry measurements exist for all 30 selectable maps. The fused map's
 four origins separated by 4,371 units, zero head-on flow, and 240 spawn-to-track
 distances of at least 560 units.
 
-The live 26042 process now covers gameplay scale: 255 bots plus one observer, 256
+An earlier run on port 26042 recorded gameplay scale: 255 bots plus one observer, 256
 configured teams, 32 supported carts, every team index exercised, and four completed
-matches won by teams 220, 99, 97, and 145. Its current process has no engine/object/
-network-buffer error over nearly three hours. Eight map windows contain at least 9,017
+matches won by teams 220, 99, 97, and 145. That process recorded no engine/object/
+network-buffer error over nearly three hours. Eight map windows contained at least 9,017
 simulated seconds over 10,656 wall seconds (84.6%) at approximately 97% of one host
-core. This is a real functional run, not compile evidence. It is not a strategy-policy
-run: no responder is attached and no `[PLCBARRIER]` commit appears, so it cannot support
+core. This historical run had no strategy responder attached and no `[PLCBARRIER]`
+commit, so it cannot support
 the matrix-fusion/Elo or two-host planning claims.
 
 Post-training release evaluation can run the release-rank matrix-fusion/MoE operator across both hosts without replacing the game or reporter services:
@@ -263,25 +254,17 @@ Post-training release evaluation can run the release-rank matrix-fusion/MoE oper
 xonotic/solver/strat/joracle/evaluate-distributed.sh
 ```
 
-The command resolves the live Mini address and uses the curriculum's single lifecycle
-owner. The game host remains the bridge client and relays tensor frames to its local
-matrix worker. The worker imports the canonical Gram contraction and its pullback; it
-does not construct a policy, freeze parameters, train independently or save a checkpoint.
-The responder owns the complete policy and optimizer.
-
-The [single-policy source manifest](../design/POLICY-STATE-CONTRACT.md) defines the
-parameter/optimizer boundary, wire tensors, checkpoint lineage and exact-input local
-counterfactual. The new application kinds require the matching engine relay, worker and
-responder. The previous running demo is not changed by this source refactor. Current
-whole-game deadlines, resume continuity and behavioral benefit remain measurements,
-not consequences inferred from source reduction.
+The command resolves the Mini address and uses the curriculum's single lifecycle
+owner. The [policy program](../design/POLICY-PROGRAM.md) defines the shared local/remote
+mathematics, tensor exchange and parameter ownership. Whole-game deadlines, resume
+continuity and behavioral benefit require actual operational measurements.
 
 The [joint-learning runtime](../design/JOINT-POLICY-LEARNING.md) now runs both objective-defined
 policies and honors `--human-counts` / `--human-client-command` in joint schedules.
 Client templates substitute `{port}`, `{map}`, `{seed}`, `{match}`, `{directory}` and
 `{client}`; use the game host's reachable address with `{port}` to follow each match.
 Server-observed human rows remain value-learning data but are excluded from direct
-PPO actor credit. The shared dashboard at `http://127.0.0.1:8787/` exposes expandable
+PPO actor credit. The policy dashboard at `http://127.0.0.1:8795/policy` exposes
 per-policy learning and observed-outcome measures. Full J matrices remain in the node's
 latest record and the match's `j-measures.PID.GENERATION.json` artifacts; they are not
 repeated in the interactive polling payload.

@@ -46,17 +46,17 @@ void VM_CheckEmptyString(prvm_prog_t *prog, const char *s)
 void VM_GenerateFrameGroupBlend(prvm_prog_t *prog, framegroupblend_t *framegroupblend, const prvm_edict_t *ed)
 {
 
-	framegroupblend[0].frame = (int) PRVM_gameedictfloat(ed, frame     );
-	framegroupblend[1].frame = (int) PRVM_gameedictfloat(ed, frame2    );
-	framegroupblend[2].frame = (int) PRVM_gameedictfloat(ed, frame3    );
-	framegroupblend[3].frame = (int) PRVM_gameedictfloat(ed, frame4    );
-	framegroupblend[0].start =       PRVM_gameedictfloat(ed, frame1time);
-	framegroupblend[1].start =       PRVM_gameedictfloat(ed, frame2time);
-	framegroupblend[2].start =       PRVM_gameedictfloat(ed, frame3time);
-	framegroupblend[3].start =       PRVM_gameedictfloat(ed, frame4time);
-	framegroupblend[1].lerp  =       PRVM_gameedictfloat(ed, lerpfrac  );
-	framegroupblend[2].lerp  =       PRVM_gameedictfloat(ed, lerpfrac3 );
-	framegroupblend[3].lerp  =       PRVM_gameedictfloat(ed, lerpfrac4 );
+	framegroupblend[0].frame = (int) PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame);
+	framegroupblend[1].frame = (int) PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame2);
+	framegroupblend[2].frame = (int) PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame3);
+	framegroupblend[3].frame = (int) PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame4);
+	framegroupblend[0].start =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame1time);
+	framegroupblend[1].start =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame2time);
+	framegroupblend[2].start =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame3time);
+	framegroupblend[3].start =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.frame4time);
+	framegroupblend[1].lerp  =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.lerpfrac);
+	framegroupblend[2].lerp  =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.lerpfrac3);
+	framegroupblend[3].lerp  =       PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.lerpfrac4);
 
 	framegroupblend[0].lerp = 1 - framegroupblend[1].lerp - framegroupblend[2].lerp - framegroupblend[3].lerp;
 }
@@ -177,7 +177,7 @@ void VM_UpdateEdictSkeleton(prvm_prog_t *prog, prvm_edict_t *ed, const dp_model_
 	{
 		int skeletonindex = -1;
 		skeleton_t *skeleton;
-		skeletonindex = (int)PRVM_gameedictfloat(ed, skeletonindex) - 1;
+		skeletonindex = (int)PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.skeletonindex) - 1;
 		if (skeletonindex >= 0 && skeletonindex < MAX_EDICTS && (skeleton = prog->skeletons[skeletonindex]) && skeleton->model->num_bones == ed->priv.server->skeleton.model->num_bones)
 		{
 
@@ -324,7 +324,7 @@ void VM_sprint(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNTRANGE(1, 8, VM_sprint);
 
-	clientnum = (int)PRVM_G_FLOAT(OFS_PARM0);
+	clientnum = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (!sv.active  || clientnum < 0 || clientnum >= svs.maxclients || !svs.clients[clientnum].active)
 	{
 		VM_Warning(prog, "VM_sprint: %s: invalid client or server is not active !\n", prog->name);
@@ -357,7 +357,7 @@ void VM_normalize(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_normalize);
 
-	value1 = PRVM_G_VECTOR(OFS_PARM0);
+	value1 = PRVM_G_READVECTOR(OFS_PARM0);
 
 	f = VectorLength2(value1);
 	if (f)
@@ -374,7 +374,7 @@ void VM_normalize(prvm_prog_t *prog)
 void VM_vlen(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_vlen);
-	PRVM_G_FLOAT(OFS_RETURN) = VectorLength(PRVM_G_VECTOR(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = VectorLength(PRVM_G_READVECTOR(OFS_PARM0));
 }
 
 void VM_vectoyaw(prvm_prog_t *prog)
@@ -384,7 +384,7 @@ void VM_vectoyaw(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_vectoyaw);
 
-	value1 = PRVM_G_VECTOR(OFS_PARM0);
+	value1 = PRVM_G_READVECTOR(OFS_PARM0);
 
 	if (value1[1] == 0 && value1[0] == 0)
 		yaw = 0;
@@ -403,10 +403,10 @@ void VM_vectoangles(prvm_prog_t *prog)
 	vec3_t result, forward, up;
 	VM_SAFEPARMCOUNTRANGE(1, 2,VM_vectoangles);
 
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), forward);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), forward);
 	if (prog->argc >= 2)
 	{
-		VectorCopy(PRVM_G_VECTOR(OFS_PARM1), up);
+		VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), up);
 		AnglesFromVectors(result, forward, up, true);
 	}
 	else
@@ -557,7 +557,7 @@ void VM_ftos(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1, VM_ftos);
 
-	v = PRVM_G_FLOAT(OFS_PARM0);
+	v = PRVM_G_READFLOAT(OFS_PARM0);
 
 	if ((prvm_vec_t)((prvm_int_t)v) == v)
 		dpsnprintf(s, sizeof(s), "%.0f", v);
@@ -572,7 +572,7 @@ void VM_fabs(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_fabs);
 
-	v = PRVM_G_FLOAT(OFS_PARM0);
+	v = PRVM_G_READFLOAT(OFS_PARM0);
 	PRVM_G_FLOAT(OFS_RETURN) = fabs(v);
 }
 
@@ -582,7 +582,7 @@ void VM_vtos(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_vtos);
 
-	dpsnprintf (s, sizeof(s), "'%5.1f %5.1f %5.1f'", PRVM_G_VECTOR(OFS_PARM0)[0], PRVM_G_VECTOR(OFS_PARM0)[1], PRVM_G_VECTOR(OFS_PARM0)[2]);
+	dpsnprintf (s, sizeof(s), "'%5.1f %5.1f %5.1f'", PRVM_G_READVECTOR(OFS_PARM0)[0], PRVM_G_READVECTOR(OFS_PARM0)[1], PRVM_G_READVECTOR(OFS_PARM0)[2]);
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, s);
 }
 
@@ -607,7 +607,7 @@ void VM_stof(prvm_prog_t *prog)
 void VM_itof(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1, VM_itof);
-	PRVM_G_FLOAT(OFS_RETURN) = PRVM_G_INT(OFS_PARM0);
+	PRVM_G_FLOAT(OFS_RETURN) = PRVM_G_READINT(OFS_PARM0);
 }
 
 void VM_ftoe(prvm_prog_t *prog)
@@ -615,7 +615,7 @@ void VM_ftoe(prvm_prog_t *prog)
 	prvm_int_t ent;
 	VM_SAFEPARMCOUNT(1, VM_ftoe);
 
-	ent = (prvm_int_t)PRVM_G_FLOAT(OFS_PARM0);
+	ent = (prvm_int_t)PRVM_G_READFLOAT(OFS_PARM0);
 	if (ent < 0 || ent >= prog->max_edicts || PRVM_PROG_TO_EDICT(ent)->priv.required->free)
 		ent = 0;
 
@@ -643,13 +643,13 @@ void VM_strftime(prvm_prog_t *prog)
 	VM_VarString(prog, 1, fmt, sizeof(fmt));
 	t = time(NULL);
 #if _MSC_VER >= 1400
-	if (PRVM_G_FLOAT(OFS_PARM0))
+	if (PRVM_G_READFLOAT(OFS_PARM0))
 		tmresult = localtime_s(&tm, &t);
 	else
 		tmresult = gmtime_s(&tm, &t);
 	if (!tmresult)
 #else
-	if (PRVM_G_FLOAT(OFS_PARM0))
+	if (PRVM_G_READFLOAT(OFS_PARM0))
 		tm = localtime(&t);
 	else
 		tm = gmtime(&t);
@@ -708,7 +708,7 @@ void VM_find(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3,VM_find);
 
 	e = PRVM_G_EDICTNUM(OFS_PARM0);
-	f = PRVM_G_INT(OFS_PARM1);
+	f = PRVM_G_READINT(OFS_PARM1);
 	s = PRVM_G_STRING(OFS_PARM2);
 
 	for (e++ ; e < prog->num_edicts ; e++)
@@ -717,7 +717,7 @@ void VM_find(prvm_prog_t *prog)
 		ed = PRVM_EDICT_NUM(e);
 		if (ed->priv.required->free)
 			continue;
-		t = PRVM_E_STRING(ed,f);
+		t = PRVM_GetString(prog, PRVM_EDICTREADINT(ed,f,ev_string));
 		if (!t)
 			t = "";
 		if (!strcmp(t,s))
@@ -740,8 +740,8 @@ void VM_findfloat(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3,VM_findfloat);
 
 	e = PRVM_G_EDICTNUM(OFS_PARM0);
-	f = PRVM_G_INT(OFS_PARM1);
-	s = PRVM_G_FLOAT(OFS_PARM2);
+	f = PRVM_G_READINT(OFS_PARM1);
+	s = PRVM_G_READFLOAT(OFS_PARM2);
 
 	for (e++ ; e < prog->num_edicts ; e++)
 	{
@@ -749,7 +749,7 @@ void VM_findfloat(prvm_prog_t *prog)
 		ed = PRVM_EDICT_NUM(e);
 		if (ed->priv.required->free)
 			continue;
-		if (PRVM_E_FLOAT(ed,f) == s)
+		if (PRVM_EDICTREADFLOAT(ed,f) == s)
 		{
 			VM_RETURN_EDICT(ed);
 			return;
@@ -770,7 +770,7 @@ void VM_findchain(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(2,3,VM_findchain);
 
 	if(prog->argc == 3)
-		chainfield = PRVM_G_INT(OFS_PARM2);
+		chainfield = PRVM_G_READINT(OFS_PARM2);
 	else
 		chainfield = prog->fieldoffsets.chain;
 	if (chainfield < 0)
@@ -778,7 +778,7 @@ void VM_findchain(prvm_prog_t *prog)
 
 	chain = prog->edicts;
 
-	f = PRVM_G_INT(OFS_PARM0);
+	f = PRVM_G_READINT(OFS_PARM0);
 	s = PRVM_G_STRING(OFS_PARM1);
 
 	ent = PRVM_NEXT_EDICT(prog->edicts);
@@ -787,7 +787,7 @@ void VM_findchain(prvm_prog_t *prog)
 		prog->xfunction->builtinsprofile++;
 		if (ent->priv.required->free)
 			continue;
-		t = PRVM_E_STRING(ent,f);
+		t = PRVM_GetString(prog, PRVM_EDICTREADINT(ent,f,ev_string));
 		if (!t)
 			t = "";
 		if (strcmp(t,s))
@@ -811,7 +811,7 @@ void VM_findchainfloat(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_findchainfloat);
 
 	if(prog->argc == 3)
-		chainfield = PRVM_G_INT(OFS_PARM2);
+		chainfield = PRVM_G_READINT(OFS_PARM2);
 	else
 		chainfield = prog->fieldoffsets.chain;
 	if (chainfield < 0)
@@ -819,8 +819,8 @@ void VM_findchainfloat(prvm_prog_t *prog)
 
 	chain = (prvm_edict_t *)prog->edicts;
 
-	f = PRVM_G_INT(OFS_PARM0);
-	s = PRVM_G_FLOAT(OFS_PARM1);
+	f = PRVM_G_READINT(OFS_PARM0);
+	s = PRVM_G_READFLOAT(OFS_PARM1);
 
 	ent = PRVM_NEXT_EDICT(prog->edicts);
 	for (i = 1;i < prog->num_edicts;i++, ent = PRVM_NEXT_EDICT(ent))
@@ -828,7 +828,7 @@ void VM_findchainfloat(prvm_prog_t *prog)
 		prog->xfunction->builtinsprofile++;
 		if (ent->priv.required->free)
 			continue;
-		if (PRVM_E_FLOAT(ent,f) != s)
+		if (PRVM_EDICTREADFLOAT(ent,f) != s)
 			continue;
 
 		PRVM_EDICTFIELDEDICT(ent,chainfield) = PRVM_EDICT_TO_PROG(chain);
@@ -848,8 +848,8 @@ void VM_findflags(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3, VM_findflags);
 
 	e = PRVM_G_EDICTNUM(OFS_PARM0);
-	f = PRVM_G_INT(OFS_PARM1);
-	s = (prvm_int_t)PRVM_G_FLOAT(OFS_PARM2);
+	f = PRVM_G_READINT(OFS_PARM1);
+	s = (prvm_int_t)PRVM_G_READFLOAT(OFS_PARM2);
 
 	for (e++ ; e < prog->num_edicts ; e++)
 	{
@@ -857,9 +857,9 @@ void VM_findflags(prvm_prog_t *prog)
 		ed = PRVM_EDICT_NUM(e);
 		if (ed->priv.required->free)
 			continue;
-		if (!PRVM_E_FLOAT(ed,f))
+		if (!PRVM_EDICTREADFLOAT(ed,f))
 			continue;
-		if ((prvm_int_t)PRVM_E_FLOAT(ed,f) & s)
+		if ((prvm_int_t)PRVM_EDICTREADFLOAT(ed,f) & s)
 		{
 			VM_RETURN_EDICT(ed);
 			return;
@@ -880,7 +880,7 @@ void VM_findchainflags(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_findchainflags);
 
 	if(prog->argc == 3)
-		chainfield = PRVM_G_INT(OFS_PARM2);
+		chainfield = PRVM_G_READINT(OFS_PARM2);
 	else
 		chainfield = prog->fieldoffsets.chain;
 	if (chainfield < 0)
@@ -888,8 +888,8 @@ void VM_findchainflags(prvm_prog_t *prog)
 
 	chain = (prvm_edict_t *)prog->edicts;
 
-	f = PRVM_G_INT(OFS_PARM0);
-	s = (prvm_int_t)PRVM_G_FLOAT(OFS_PARM1);
+	f = PRVM_G_READINT(OFS_PARM0);
+	s = (prvm_int_t)PRVM_G_READFLOAT(OFS_PARM1);
 
 	ent = PRVM_NEXT_EDICT(prog->edicts);
 	for (i = 1;i < prog->num_edicts;i++, ent = PRVM_NEXT_EDICT(ent))
@@ -897,9 +897,9 @@ void VM_findchainflags(prvm_prog_t *prog)
 		prog->xfunction->builtinsprofile++;
 		if (ent->priv.required->free)
 			continue;
-		if (!PRVM_E_FLOAT(ent,f))
+		if (!PRVM_EDICTREADFLOAT(ent,f))
 			continue;
-		if (!((prvm_int_t)PRVM_E_FLOAT(ent,f) & s))
+		if (!((prvm_int_t)PRVM_EDICTREADFLOAT(ent,f) & s))
 			continue;
 
 		PRVM_EDICTFIELDEDICT(ent,chainfield) = PRVM_EDICT_TO_PROG(chain);
@@ -916,7 +916,7 @@ void VM_precache_sound(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(1, VM_precache_sound);
 
 	s = PRVM_G_STRING(OFS_PARM0);
-	PRVM_G_INT(OFS_RETURN) = PRVM_G_INT(OFS_PARM0);
+	PRVM_G_INT(OFS_RETURN) = PRVM_G_READINT(OFS_PARM0);
 
 	if(snd_initialized.integer && !S_PrecacheSound(s, true, true))
 	{
@@ -929,7 +929,7 @@ void VM_precache_file(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_precache_file);
 
-	PRVM_G_INT(OFS_RETURN) = PRVM_G_INT(OFS_PARM0);
+	PRVM_G_INT(OFS_RETURN) = PRVM_G_READINT(OFS_PARM0);
 }
 
 void VM_coredump(prvm_prog_t *prog)
@@ -981,7 +981,7 @@ void VM_rint(prvm_prog_t *prog)
 	prvm_vec_t f;
 	VM_SAFEPARMCOUNT(1,VM_rint);
 
-	f = PRVM_G_FLOAT(OFS_PARM0);
+	f = PRVM_G_READFLOAT(OFS_PARM0);
 	if (f > 0)
 		PRVM_G_FLOAT(OFS_RETURN) = floor(f + 0.5);
 	else
@@ -992,14 +992,14 @@ void VM_floor(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_floor);
 
-	PRVM_G_FLOAT(OFS_RETURN) = floor(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = floor(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_ceil(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_ceil);
 
-	PRVM_G_FLOAT(OFS_RETURN) = ceil(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = ceil(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_nextent(prvm_prog_t *prog)
@@ -1049,49 +1049,49 @@ void VM_changelevel(prvm_prog_t *prog)
 void VM_sin(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_sin);
-	PRVM_G_FLOAT(OFS_RETURN) = sin(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = sin(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_cos(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_cos);
-	PRVM_G_FLOAT(OFS_RETURN) = cos(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = cos(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_sqrt(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_sqrt);
-	PRVM_G_FLOAT(OFS_RETURN) = sqrt(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = sqrt(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_asin(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_asin);
-	PRVM_G_FLOAT(OFS_RETURN) = asin(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = asin(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_acos(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_acos);
-	PRVM_G_FLOAT(OFS_RETURN) = acos(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = acos(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_atan(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_atan);
-	PRVM_G_FLOAT(OFS_RETURN) = atan(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = atan(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_atan2(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2,VM_atan2);
-	PRVM_G_FLOAT(OFS_RETURN) = atan2(PRVM_G_FLOAT(OFS_PARM0), PRVM_G_FLOAT(OFS_PARM1));
+	PRVM_G_FLOAT(OFS_RETURN) = atan2(PRVM_G_READFLOAT(OFS_PARM0), PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 void VM_tan(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_tan);
-	PRVM_G_FLOAT(OFS_RETURN) = tan(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = tan(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_randomvec(prvm_prog_t *prog)
@@ -1111,7 +1111,7 @@ void VM_registercvar(prvm_prog_t *prog)
 
 	name = PRVM_G_STRING(OFS_PARM0);
 	value = PRVM_G_STRING(OFS_PARM1);
-	flags = prog->argc >= 3 ? (int)PRVM_G_FLOAT(OFS_PARM2) : 0;
+	flags = prog->argc >= 3 ? (int)PRVM_G_READFLOAT(OFS_PARM2) : 0;
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
 
 	if(flags > CVAR_MAXFLAGSVAL)
@@ -1138,14 +1138,14 @@ void VM_min(prvm_prog_t *prog)
 	if (prog->argc >= 3)
 	{
 		int i;
-		float f = PRVM_G_FLOAT(OFS_PARM0);
+		float f = PRVM_G_READFLOAT(OFS_PARM0);
 		for (i = 1;i < prog->argc;i++)
 			if (f > PRVM_G_FLOAT((OFS_PARM0+i*3)))
 				f = PRVM_G_FLOAT((OFS_PARM0+i*3));
 		PRVM_G_FLOAT(OFS_RETURN) = f;
 	}
 	else
-		PRVM_G_FLOAT(OFS_RETURN) = min(PRVM_G_FLOAT(OFS_PARM0), PRVM_G_FLOAT(OFS_PARM1));
+		PRVM_G_FLOAT(OFS_RETURN) = min(PRVM_G_READFLOAT(OFS_PARM0), PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 void VM_max(prvm_prog_t *prog)
@@ -1155,32 +1155,32 @@ void VM_max(prvm_prog_t *prog)
 	if (prog->argc >= 3)
 	{
 		int i;
-		float f = PRVM_G_FLOAT(OFS_PARM0);
+		float f = PRVM_G_READFLOAT(OFS_PARM0);
 		for (i = 1;i < prog->argc;i++)
 			if (f < PRVM_G_FLOAT((OFS_PARM0+i*3)))
 				f = PRVM_G_FLOAT((OFS_PARM0+i*3));
 		PRVM_G_FLOAT(OFS_RETURN) = f;
 	}
 	else
-		PRVM_G_FLOAT(OFS_RETURN) = max(PRVM_G_FLOAT(OFS_PARM0), PRVM_G_FLOAT(OFS_PARM1));
+		PRVM_G_FLOAT(OFS_RETURN) = max(PRVM_G_READFLOAT(OFS_PARM0), PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 void VM_bound(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(3,VM_bound);
-	PRVM_G_FLOAT(OFS_RETURN) = bound(PRVM_G_FLOAT(OFS_PARM0), PRVM_G_FLOAT(OFS_PARM1), PRVM_G_FLOAT(OFS_PARM2));
+	PRVM_G_FLOAT(OFS_RETURN) = bound(PRVM_G_READFLOAT(OFS_PARM0), PRVM_G_READFLOAT(OFS_PARM1), PRVM_G_READFLOAT(OFS_PARM2));
 }
 
 void VM_pow(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(2,VM_pow);
-	PRVM_G_FLOAT(OFS_RETURN) = pow(PRVM_G_FLOAT(OFS_PARM0), PRVM_G_FLOAT(OFS_PARM1));
+	PRVM_G_FLOAT(OFS_RETURN) = pow(PRVM_G_READFLOAT(OFS_PARM0), PRVM_G_READFLOAT(OFS_PARM1));
 }
 
 void VM_log(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_log);
-	PRVM_G_FLOAT(OFS_RETURN) = log(PRVM_G_FLOAT(OFS_PARM0));
+	PRVM_G_FLOAT(OFS_RETURN) = log(PRVM_G_READFLOAT(OFS_PARM0));
 }
 
 void VM_Files_Init(prvm_prog_t *prog)
@@ -1234,7 +1234,7 @@ void VM_fopen(prvm_prog_t *prog)
 		return;
 	}
 	filename = PRVM_G_STRING(OFS_PARM0);
-	mode = (int)PRVM_G_FLOAT(OFS_PARM1);
+	mode = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	switch(mode)
 	{
 	case 0:
@@ -1278,7 +1278,7 @@ void VM_fclose(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_fclose);
 
-	filenum = (int)PRVM_G_FLOAT(OFS_PARM0);
+	filenum = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (filenum < 0 || filenum >= PRVM_MAX_OPENFILES)
 	{
 		VM_Warning(prog, "VM_fclose: invalid file handle %i used in %s\n", filenum, prog->name);
@@ -1307,7 +1307,7 @@ void VM_fgets(prvm_prog_t *prog)
 
 	PRVM_G_INT(OFS_RETURN) = OFS_NULL;
 
-	filenum = (int)PRVM_G_FLOAT(OFS_PARM0);
+	filenum = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (filenum < 0 || filenum >= PRVM_MAX_OPENFILES)
 	{
 		VM_Warning(prog, "VM_fgets: invalid file handle %i used in %s\n", filenum, prog->name);
@@ -1349,7 +1349,7 @@ void VM_fputs(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(2,VM_fputs);
 
-	filenum = (int)PRVM_G_FLOAT(OFS_PARM0);
+	filenum = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (filenum < 0 || filenum >= PRVM_MAX_OPENFILES)
 	{
 		VM_Warning(prog, "VM_fputs: invalid file handle %i used in %s\n", filenum, prog->name);
@@ -1374,7 +1374,7 @@ void VM_writetofile(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(2, VM_writetofile);
 
-	file = VM_GetFileHandle(prog, (int)PRVM_G_FLOAT(OFS_PARM0));
+	file = VM_GetFileHandle(prog, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if( !file )
 	{
 		VM_Warning(prog, "VM_writetofile: invalid or closed file handle\n");
@@ -1399,7 +1399,7 @@ void VM_numentityfields(prvm_prog_t *prog)
 void VM_entityfieldname(prvm_prog_t *prog)
 {
 	ddef_t *d;
-	int i = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int i = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if (i < 0 || i >= prog->numfielddefs)
 	{
@@ -1415,7 +1415,7 @@ void VM_entityfieldname(prvm_prog_t *prog)
 void VM_entityfieldtype(prvm_prog_t *prog)
 {
 	ddef_t *d;
-	int i = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int i = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if (i < 0 || i >= prog->numfielddefs)
 	{
@@ -1433,9 +1433,9 @@ void VM_getentityfieldstring(prvm_prog_t *prog)
 
 	ddef_t *d;
 	int type, j;
-	prvm_eval_t *val;
+	prvm_eval_t *val, view_value;
 	prvm_edict_t * ent;
-	int i = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int i = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	char valuebuf[MAX_INPUTLINE];
 
 	if (i < 0 || i >= prog->numfielddefs)
@@ -1457,6 +1457,11 @@ void VM_getentityfieldstring(prvm_prog_t *prog)
 	val = (prvm_eval_t *)(ent->fields.fp + d->ofs);
 
 	type = d->type & ~DEF_SAVEGLOBAL;
+	if (prog->view)
+	{
+		view_value = PRVM_ViewRead(prog, PRVM_NUM_FOR_EDICT(ent), d->ofs, type);
+		val = &view_value;
+	}
 	for (j=0 ; j<prvm_type_size[type] ; j++)
 		if (val->ivector[j])
 			break;
@@ -1473,7 +1478,7 @@ void VM_putentityfieldstring(prvm_prog_t *prog)
 {
 	ddef_t *d;
 	prvm_edict_t * ent;
-	int i = (int)PRVM_G_FLOAT(OFS_PARM0);
+	int i = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if (i < 0 || i >= prog->numfielddefs)
 	{
@@ -1573,8 +1578,8 @@ void VM_substring(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3,VM_substring);
 
 	s = PRVM_G_STRING(OFS_PARM0);
-	start = (int)PRVM_G_FLOAT(OFS_PARM1);
-	length = (int)PRVM_G_FLOAT(OFS_PARM2);
+	start = (int)PRVM_G_READFLOAT(OFS_PARM1);
+	length = (int)PRVM_G_READFLOAT(OFS_PARM2);
 
 	if (start < 0)
 	{
@@ -1742,7 +1747,7 @@ void VM_strzone(prvm_prog_t *prog)
 void VM_strunzone(prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1,VM_strunzone);
-	PRVM_FreeString(prog, PRVM_G_INT(OFS_PARM0));
+	PRVM_FreeString(prog, PRVM_G_READINT(OFS_PARM0));
 }
 
 void VM_clcommand (prvm_prog_t *prog)
@@ -1752,7 +1757,7 @@ void VM_clcommand (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(2,VM_clcommand);
 
-	i = (int)PRVM_G_FLOAT(OFS_PARM0);
+	i = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (!sv.active  || i < 0 || i >= svs.maxclients || !svs.clients[i].active)
 	{
 		VM_Warning(prog, "VM_clientcommand: %s: invalid client/server is not active !\n", prog->name);
@@ -1898,7 +1903,7 @@ void VM_argv (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_argv);
 
-	token_num = (int)PRVM_G_FLOAT(OFS_PARM0);
+	token_num = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if(token_num < 0)
 		token_num += num_tokens;
@@ -1915,7 +1920,7 @@ void VM_argv_start_index (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_argv);
 
-	token_num = (int)PRVM_G_FLOAT(OFS_PARM0);
+	token_num = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if(token_num < 0)
 		token_num += num_tokens;
@@ -1932,7 +1937,7 @@ void VM_argv_end_index (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(1,VM_argv);
 
-	token_num = (int)PRVM_G_FLOAT(OFS_PARM0);
+	token_num = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if(token_num < 0)
 		token_num += num_tokens;
@@ -2006,7 +2011,7 @@ void VM_gettime(prvm_prog_t *prog)
 	}
 	else
 	{
-		timer_index = (int) PRVM_G_FLOAT(OFS_PARM0);
+		timer_index = (int) PRVM_G_READFLOAT(OFS_PARM0);
 		switch(timer_index)
 		{
 			case 0:
@@ -2049,7 +2054,7 @@ void VM_getsoundtime (prvm_prog_t *prog)
 		PRVM_G_FLOAT(OFS_RETURN) = -1;
 		return;
 	}
-	entchannel = (int)PRVM_G_FLOAT(OFS_PARM1);
+	entchannel = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	entchannel = CHAN_USER2ENGINE(entchannel);
 	if (!IS_CHAN(entchannel))
 		VM_Warning(prog, "VM_getsoundtime: %s: bad channel %i\n", prog->name, entchannel);
@@ -2122,8 +2127,8 @@ void VM_modulo(prvm_prog_t *prog)
 	prvm_int_t val, m;
 	VM_SAFEPARMCOUNT(2,VM_module);
 
-	val = (prvm_int_t) PRVM_G_FLOAT(OFS_PARM0);
-	m	= (prvm_int_t) PRVM_G_FLOAT(OFS_PARM1);
+	val = (prvm_int_t) PRVM_G_READFLOAT(OFS_PARM0);
+	m	= (prvm_int_t) PRVM_G_READFLOAT(OFS_PARM1);
 
 	PRVM_G_FLOAT(OFS_RETURN) = (prvm_vec_t) (val % m);
 }
@@ -2159,8 +2164,8 @@ void VM_search_begin(prvm_prog_t *prog)
 
 	VM_CheckEmptyString(prog, pattern);
 
-	caseinsens = (int)PRVM_G_FLOAT(OFS_PARM1);
-	quiet = (int)PRVM_G_FLOAT(OFS_PARM2);
+	caseinsens = (int)PRVM_G_READFLOAT(OFS_PARM1);
+	quiet = (int)PRVM_G_READFLOAT(OFS_PARM2);
 
 	for(handle = 0; handle < PRVM_MAX_OPENSEARCHES; handle++)
 		if(!prog->opensearches[handle])
@@ -2187,7 +2192,7 @@ void VM_search_end(prvm_prog_t *prog)
 	int handle;
 	VM_SAFEPARMCOUNT(1, VM_search_end);
 
-	handle = (int)PRVM_G_FLOAT(OFS_PARM0);
+	handle = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if(handle < 0 || handle >= PRVM_MAX_OPENSEARCHES)
 	{
@@ -2211,7 +2216,7 @@ void VM_search_getsize(prvm_prog_t *prog)
 	int handle;
 	VM_SAFEPARMCOUNT(1, VM_M_search_getsize);
 
-	handle = (int)PRVM_G_FLOAT(OFS_PARM0);
+	handle = (int)PRVM_G_READFLOAT(OFS_PARM0);
 
 	if(handle < 0 || handle >= PRVM_MAX_OPENSEARCHES)
 	{
@@ -2232,8 +2237,8 @@ void VM_search_getfilename(prvm_prog_t *prog)
 	int handle, filenum;
 	VM_SAFEPARMCOUNT(2, VM_search_getfilename);
 
-	handle = (int)PRVM_G_FLOAT(OFS_PARM0);
-	filenum = (int)PRVM_G_FLOAT(OFS_PARM1);
+	handle = (int)PRVM_G_READFLOAT(OFS_PARM0);
+	filenum = (int)PRVM_G_READFLOAT(OFS_PARM1);
 
 	if(handle < 0 || handle >= PRVM_MAX_OPENSEARCHES)
 	{
@@ -2261,7 +2266,7 @@ void VM_chr(prvm_prog_t *prog)
 	int len;
 	VM_SAFEPARMCOUNT(1, VM_chr);
 
-	len = u8_fromchar((Uchar)PRVM_G_FLOAT(OFS_PARM0), tmp, sizeof(tmp));
+	len = u8_fromchar((Uchar)PRVM_G_READFLOAT(OFS_PARM0), tmp, sizeof(tmp));
 	tmp[len] = 0;
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, tmp);
 }
@@ -2285,12 +2290,12 @@ void VM_precache_pic(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(1, 2, VM_precache_pic);
 
 	s = PRVM_G_STRING(OFS_PARM0);
-	PRVM_G_INT(OFS_RETURN) = PRVM_G_INT(OFS_PARM0);
+	PRVM_G_INT(OFS_RETURN) = PRVM_G_READINT(OFS_PARM0);
 	VM_CheckEmptyString(prog, s);
 
 	if(prog->argc >= 2)
 	{
-		int f = PRVM_G_FLOAT(OFS_PARM1);
+		int f = PRVM_G_READFLOAT(OFS_PARM1);
 		if(f & PRECACHE_PIC_NOTPERSISTENT)
 			flags |= CACHEPICFLAG_NOTPERSISTENT;
 
@@ -2342,7 +2347,7 @@ void VM_drawcharacter(prvm_prog_t *prog)
 	float sx, sy;
 	VM_SAFEPARMCOUNT(6,VM_drawcharacter);
 
-	character = (char) PRVM_G_FLOAT(OFS_PARM1);
+	character = (char) PRVM_G_READFLOAT(OFS_PARM1);
 	if(character == 0)
 	{
 		PRVM_G_FLOAT(OFS_RETURN) = -1;
@@ -2350,10 +2355,10 @@ void VM_drawcharacter(prvm_prog_t *prog)
 		return;
 	}
 
-	pos = PRVM_G_VECTOR(OFS_PARM0);
-	scale = PRVM_G_VECTOR(OFS_PARM2);
-	rgb = PRVM_G_VECTOR(OFS_PARM3);
-	flag = (int)PRVM_G_FLOAT(OFS_PARM5);
+	pos = PRVM_G_READVECTOR(OFS_PARM0);
+	scale = PRVM_G_READVECTOR(OFS_PARM2);
+	rgb = PRVM_G_READVECTOR(OFS_PARM3);
+	flag = (int)PRVM_G_READFLOAT(OFS_PARM5);
 
 	if(flag < DRAWFLAG_NORMAL || flag >=DRAWFLAG_NUMFLAGS)
 	{
@@ -2373,7 +2378,7 @@ void VM_drawcharacter(prvm_prog_t *prog)
 	}
 
 	getdrawfontscale(prog, &sx, &sy);
-	DrawQ_String_Scale(pos[0], pos[1], &character, 1, scale[0], scale[1], sx, sy, rgb[0], rgb[1], rgb[2], PRVM_G_FLOAT(OFS_PARM4), flag, NULL, true, getdrawfont(prog));
+	DrawQ_String_Scale(pos[0], pos[1], &character, 1, scale[0], scale[1], sx, sy, rgb[0], rgb[1], rgb[2], PRVM_G_READFLOAT(OFS_PARM4), flag, NULL, true, getdrawfont(prog));
 	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
@@ -2386,11 +2391,11 @@ void VM_drawstring(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(5,6,VM_drawstring);
 
 	string = PRVM_G_STRING(OFS_PARM1);
-	pos = PRVM_G_VECTOR(OFS_PARM0);
-	scale = PRVM_G_VECTOR(OFS_PARM2);
-	rgb = PRVM_G_VECTOR(OFS_PARM3);
+	pos = PRVM_G_READVECTOR(OFS_PARM0);
+	scale = PRVM_G_READVECTOR(OFS_PARM2);
+	rgb = PRVM_G_READVECTOR(OFS_PARM3);
 	if (prog->argc >= 6)
-		flag = (int)PRVM_G_FLOAT(OFS_PARM5);
+		flag = (int)PRVM_G_READFLOAT(OFS_PARM5);
 
 	if(flag < DRAWFLAG_NORMAL || flag >=DRAWFLAG_NUMFLAGS)
 	{
@@ -2410,7 +2415,7 @@ void VM_drawstring(prvm_prog_t *prog)
 		VM_Warning(prog, "VM_drawstring: z value%s from %s discarded\n",(pos[2] && scale[2]) ? "s" : " ",((pos[2] && scale[2]) ? "pos and scale" : (pos[2] ? "pos" : "scale")));
 
 	getdrawfontscale(prog, &sx, &sy);
-	DrawQ_String_Scale(pos[0], pos[1], string, 0, scale[0], scale[1], sx, sy, rgb[0], rgb[1], rgb[2], PRVM_G_FLOAT(OFS_PARM4), flag, NULL, true, getdrawfont(prog));
+	DrawQ_String_Scale(pos[0], pos[1], string, 0, scale[0], scale[1], sx, sy, rgb[0], rgb[1], rgb[2], PRVM_G_READFLOAT(OFS_PARM4), flag, NULL, true, getdrawfont(prog));
 
 	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
@@ -2427,23 +2432,23 @@ void VM_drawcolorcodedstring(prvm_prog_t *prog)
 
 	if (prog->argc == 6)
 	{
-		pos = PRVM_G_VECTOR(OFS_PARM0);
+		pos = PRVM_G_READVECTOR(OFS_PARM0);
 		string = PRVM_G_STRING(OFS_PARM1);
-		scale = PRVM_G_VECTOR(OFS_PARM2);
-		VectorCopy(PRVM_G_VECTOR(OFS_PARM3), rgb);
-		alpha = PRVM_G_FLOAT(OFS_PARM4);
-		flag = (int)PRVM_G_FLOAT(OFS_PARM5);
+		scale = PRVM_G_READVECTOR(OFS_PARM2);
+		VectorCopy(PRVM_G_READVECTOR(OFS_PARM3), rgb);
+		alpha = PRVM_G_READFLOAT(OFS_PARM4);
+		flag = (int)PRVM_G_READFLOAT(OFS_PARM5);
 	}
 	else
 	{
-		pos = PRVM_G_VECTOR(OFS_PARM0);
+		pos = PRVM_G_READVECTOR(OFS_PARM0);
 		string = PRVM_G_STRING(OFS_PARM1);
-		scale = PRVM_G_VECTOR(OFS_PARM2);
+		scale = PRVM_G_READVECTOR(OFS_PARM2);
 		rgb[0] = 1.0;
 		rgb[1] = 1.0;
 		rgb[2] = 1.0;
-		alpha = PRVM_G_FLOAT(OFS_PARM3);
-		flag = (int)PRVM_G_FLOAT(OFS_PARM4);
+		alpha = PRVM_G_READFLOAT(OFS_PARM3);
+		flag = (int)PRVM_G_READFLOAT(OFS_PARM4);
 	}
 
 	if(flag < DRAWFLAG_NORMAL || flag >= DRAWFLAG_NUMFLAGS)
@@ -2484,7 +2489,7 @@ void VM_stringwidth(prvm_prog_t *prog)
 	getdrawfontscale(prog, &sx, &sy);
 	if(prog->argc == 3)
 	{
-		Vector2Copy(PRVM_G_VECTOR(OFS_PARM2), szv);
+		Vector2Copy(PRVM_G_READVECTOR(OFS_PARM2), szv);
 		mult = 1;
 	}
 	else
@@ -2502,7 +2507,7 @@ void VM_stringwidth(prvm_prog_t *prog)
 	}
 
 	string = PRVM_G_STRING(OFS_PARM0);
-	colors = (int)PRVM_G_FLOAT(OFS_PARM1);
+	colors = (int)PRVM_G_READFLOAT(OFS_PARM1);
 
 	PRVM_G_FLOAT(OFS_RETURN) = DrawQ_TextWidth_UntilWidth_TrackColors_Scale(string, &maxlen, szv[0], szv[1], sx, sy, NULL, !colors, getdrawfont(prog), 1000000000) * mult;
 
@@ -2549,7 +2554,7 @@ void VM_loadfont(prvm_prog_t *prog)
 	f = NULL;
 	if (prog->argc >= 4)
 	{
-		i = PRVM_G_FLOAT(OFS_PARM3);
+		i = PRVM_G_READFLOAT(OFS_PARM3);
 		if (i >= 0 && i < dp_fonts.maxsize)
 		{
 			f = &dp_fonts.f[i];
@@ -2639,12 +2644,12 @@ void VM_loadfont(prvm_prog_t *prog)
 	voffset = 0;
 	if (prog->argc >= 5)
 	{
-		scale = PRVM_G_FLOAT(OFS_PARM4);
+		scale = PRVM_G_READFLOAT(OFS_PARM4);
 		if (scale <= 0)
 			scale = 1;
 	}
 	if (prog->argc >= 6)
-		voffset = PRVM_G_FLOAT(OFS_PARM5);
+		voffset = PRVM_G_READFLOAT(OFS_PARM5);
 
 	LoadFont(true, mainfont, f, scale, voffset);
 
@@ -2669,11 +2674,11 @@ void VM_drawpic(prvm_prog_t *prog)
 		return;
 	}
 
-	pos = PRVM_G_VECTOR(OFS_PARM0);
-	size = PRVM_G_VECTOR(OFS_PARM2);
-	rgb = PRVM_G_VECTOR(OFS_PARM3);
+	pos = PRVM_G_READVECTOR(OFS_PARM0);
+	size = PRVM_G_READVECTOR(OFS_PARM2);
+	rgb = PRVM_G_READVECTOR(OFS_PARM3);
 	if (prog->argc >= 6)
-		flag = (int) PRVM_G_FLOAT(OFS_PARM5);
+		flag = (int) PRVM_G_READFLOAT(OFS_PARM5);
 
 	if(flag < DRAWFLAG_NORMAL || flag >=DRAWFLAG_NUMFLAGS)
 	{
@@ -2685,7 +2690,7 @@ void VM_drawpic(prvm_prog_t *prog)
 	if(pos[2] || size[2])
 		VM_Warning(prog, "VM_drawpic: z value%s from %s discarded\n",(pos[2] && size[2]) ? "s" : " ",((pos[2] && size[2]) ? "pos and size" : (pos[2] ? "pos" : "size")));
 
-	DrawQ_Pic(pos[0], pos[1], Draw_CachePic_Flags (picname, CACHEPICFLAG_NOTPERSISTENT), size[0], size[1], rgb[0], rgb[1], rgb[2], PRVM_G_FLOAT(OFS_PARM4), flag);
+	DrawQ_Pic(pos[0], pos[1], Draw_CachePic_Flags (picname, CACHEPICFLAG_NOTPERSISTENT), size[0], size[1], rgb[0], rgb[1], rgb[2], PRVM_G_READFLOAT(OFS_PARM4), flag);
 	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
@@ -2707,11 +2712,11 @@ void VM_drawrotpic(prvm_prog_t *prog)
 		return;
 	}
 
-	pos = PRVM_G_VECTOR(OFS_PARM0);
-	size = PRVM_G_VECTOR(OFS_PARM2);
-	org = PRVM_G_VECTOR(OFS_PARM3);
-	rgb = PRVM_G_VECTOR(OFS_PARM5);
-	flag = (int) PRVM_G_FLOAT(OFS_PARM7);
+	pos = PRVM_G_READVECTOR(OFS_PARM0);
+	size = PRVM_G_READVECTOR(OFS_PARM2);
+	org = PRVM_G_READVECTOR(OFS_PARM3);
+	rgb = PRVM_G_READVECTOR(OFS_PARM5);
+	flag = (int) PRVM_G_READFLOAT(OFS_PARM7);
 
 	if(flag < DRAWFLAG_NORMAL || flag >=DRAWFLAG_NUMFLAGS)
 	{
@@ -2723,7 +2728,7 @@ void VM_drawrotpic(prvm_prog_t *prog)
 	if(pos[2] || size[2] || org[2])
 		VM_Warning(prog, "VM_drawrotpic: z value from pos/size/org discarded\n");
 
-	DrawQ_RotPic(pos[0], pos[1], Draw_CachePic_Flags(picname, CACHEPICFLAG_NOTPERSISTENT), size[0], size[1], org[0], org[1], PRVM_G_FLOAT(OFS_PARM4), rgb[0], rgb[1], rgb[2], PRVM_G_FLOAT(OFS_PARM6), flag);
+	DrawQ_RotPic(pos[0], pos[1], Draw_CachePic_Flags(picname, CACHEPICFLAG_NOTPERSISTENT), size[0], size[1], org[0], org[1], PRVM_G_READFLOAT(OFS_PARM4), rgb[0], rgb[1], rgb[2], PRVM_G_READFLOAT(OFS_PARM6), flag);
 	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
@@ -2745,13 +2750,13 @@ void VM_drawsubpic(prvm_prog_t *prog)
 		return;
 	}
 
-	pos = PRVM_G_VECTOR(OFS_PARM0);
-	size = PRVM_G_VECTOR(OFS_PARM1);
-	srcPos = PRVM_G_VECTOR(OFS_PARM3);
-	srcSize = PRVM_G_VECTOR(OFS_PARM4);
-	rgb = PRVM_G_VECTOR(OFS_PARM5);
-	alpha = PRVM_G_FLOAT(OFS_PARM6);
-	flag = (int) PRVM_G_FLOAT(OFS_PARM7);
+	pos = PRVM_G_READVECTOR(OFS_PARM0);
+	size = PRVM_G_READVECTOR(OFS_PARM1);
+	srcPos = PRVM_G_READVECTOR(OFS_PARM3);
+	srcSize = PRVM_G_READVECTOR(OFS_PARM4);
+	rgb = PRVM_G_READVECTOR(OFS_PARM5);
+	alpha = PRVM_G_READFLOAT(OFS_PARM6);
+	flag = (int) PRVM_G_READFLOAT(OFS_PARM7);
 
 	if(flag < DRAWFLAG_NORMAL || flag >=DRAWFLAG_NUMFLAGS)
 	{
@@ -2780,10 +2785,10 @@ void VM_drawfill(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(5,VM_drawfill);
 
-	pos = PRVM_G_VECTOR(OFS_PARM0);
-	size = PRVM_G_VECTOR(OFS_PARM1);
-	rgb = PRVM_G_VECTOR(OFS_PARM2);
-	flag = (int) PRVM_G_FLOAT(OFS_PARM4);
+	pos = PRVM_G_READVECTOR(OFS_PARM0);
+	size = PRVM_G_READVECTOR(OFS_PARM1);
+	rgb = PRVM_G_READVECTOR(OFS_PARM2);
+	flag = (int) PRVM_G_READFLOAT(OFS_PARM4);
 
 	if(flag < DRAWFLAG_NORMAL || flag >=DRAWFLAG_NUMFLAGS)
 	{
@@ -2795,7 +2800,7 @@ void VM_drawfill(prvm_prog_t *prog)
 	if(pos[2] || size[2])
 		VM_Warning(prog, "VM_drawfill: z value%s from %s discarded\n",(pos[2] && size[2]) ? "s" : " ",((pos[2] && size[2]) ? "pos and size" : (pos[2] ? "pos" : "size")));
 
-	DrawQ_Fill(pos[0], pos[1], size[0], size[1], rgb[0], rgb[1], rgb[2], PRVM_G_FLOAT(OFS_PARM3), flag);
+	DrawQ_Fill(pos[0], pos[1], size[0], size[1], rgb[0], rgb[1], rgb[2], PRVM_G_READFLOAT(OFS_PARM3), flag);
 	PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
@@ -2804,10 +2809,10 @@ void VM_drawsetcliparea(prvm_prog_t *prog)
 	float x,y,w,h;
 	VM_SAFEPARMCOUNT(4,VM_drawsetcliparea);
 
-	x = bound(0, PRVM_G_FLOAT(OFS_PARM0), vid_conwidth.integer);
-	y = bound(0, PRVM_G_FLOAT(OFS_PARM1), vid_conheight.integer);
-	w = bound(0, PRVM_G_FLOAT(OFS_PARM2) + PRVM_G_FLOAT(OFS_PARM0) - x, (vid_conwidth.integer  - x));
-	h = bound(0, PRVM_G_FLOAT(OFS_PARM3) + PRVM_G_FLOAT(OFS_PARM1) - y, (vid_conheight.integer - y));
+	x = bound(0, PRVM_G_READFLOAT(OFS_PARM0), vid_conwidth.integer);
+	y = bound(0, PRVM_G_READFLOAT(OFS_PARM1), vid_conheight.integer);
+	w = bound(0, PRVM_G_READFLOAT(OFS_PARM2) + PRVM_G_READFLOAT(OFS_PARM0) - x, (vid_conwidth.integer  - x));
+	h = bound(0, PRVM_G_READFLOAT(OFS_PARM3) + PRVM_G_READFLOAT(OFS_PARM1) - y, (vid_conheight.integer - y));
 
 	DrawQ_SetClipArea(x, y, w, h);
 }
@@ -2848,7 +2853,7 @@ void VM_keynumtostring (prvm_prog_t *prog)
 	char tinystr[2];
 	VM_SAFEPARMCOUNT(1, VM_keynumtostring);
 
-	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, Key_KeynumToString((int)PRVM_G_FLOAT(OFS_PARM0), tinystr, sizeof(tinystr)));
+	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, Key_KeynumToString((int)PRVM_G_READFLOAT(OFS_PARM0), tinystr, sizeof(tinystr)));
 }
 
 #define FKFC_NUMKEYS 5
@@ -2866,7 +2871,7 @@ void VM_findkeysforcommand(prvm_prog_t *prog)
 
 	cmd = PRVM_G_STRING(OFS_PARM0);
 	if(prog->argc == 2)
-		bindmap = bound(-1, PRVM_G_FLOAT(OFS_PARM1), MAX_BINDMAPS-1);
+		bindmap = bound(-1, PRVM_G_READFLOAT(OFS_PARM1), MAX_BINDMAPS-1);
 	else
 		bindmap = 0;
 
@@ -2893,11 +2898,11 @@ void VM_getkeybind (prvm_prog_t *prog)
 	int bindmap;
 	VM_SAFEPARMCOUNTRANGE(1, 2, VM_CL_getkeybind);
 	if(prog->argc == 2)
-		bindmap = bound(-1, PRVM_G_FLOAT(OFS_PARM1), MAX_BINDMAPS-1);
+		bindmap = bound(-1, PRVM_G_READFLOAT(OFS_PARM1), MAX_BINDMAPS-1);
 	else
 		bindmap = 0;
 
-	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, Key_GetBind((int)PRVM_G_FLOAT(OFS_PARM0), bindmap));
+	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, Key_GetBind((int)PRVM_G_READFLOAT(OFS_PARM0), bindmap));
 }
 
 void VM_setkeybind (prvm_prog_t *prog)
@@ -2905,12 +2910,12 @@ void VM_setkeybind (prvm_prog_t *prog)
 	int bindmap;
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_CL_setkeybind);
 	if(prog->argc == 3)
-		bindmap = bound(-1, PRVM_G_FLOAT(OFS_PARM2), MAX_BINDMAPS-1);
+		bindmap = bound(-1, PRVM_G_READFLOAT(OFS_PARM2), MAX_BINDMAPS-1);
 	else
 		bindmap = 0;
 
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
-	if(Key_SetBinding((int)PRVM_G_FLOAT(OFS_PARM0), bindmap, PRVM_G_STRING(OFS_PARM1)))
+	if(Key_SetBinding((int)PRVM_G_READFLOAT(OFS_PARM0), bindmap, PRVM_G_STRING(OFS_PARM1)))
 		PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
@@ -2928,8 +2933,8 @@ void VM_setbindmaps (prvm_prog_t *prog)
 {
 	VM_SAFEPARMCOUNT(1, VM_CL_setbindmap);
 	PRVM_G_FLOAT(OFS_RETURN) = 0;
-	if(PRVM_G_VECTOR(OFS_PARM0)[2] == 0)
-		if(Key_SetBindMap((int)PRVM_G_VECTOR(OFS_PARM0)[0], (int)PRVM_G_VECTOR(OFS_PARM0)[1]))
+	if(PRVM_G_READVECTOR(OFS_PARM0)[2] == 0)
+		if(Key_SetBindMap((int)PRVM_G_READVECTOR(OFS_PARM0)[0], (int)PRVM_G_READVECTOR(OFS_PARM0)[1]))
 			PRVM_G_FLOAT(OFS_RETURN) = 1;
 }
 
@@ -3050,7 +3055,7 @@ void VM_makevectors (prvm_prog_t *prog)
 {
 	vec3_t angles, forward, right, up;
 	VM_SAFEPARMCOUNT(1, VM_makevectors);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM0), angles);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM0), angles);
 	AngleVectors(angles, forward, right, up);
 	VectorCopy(forward, PRVM_gameglobalvector(v_forward));
 	VectorCopy(right, PRVM_gameglobalvector(v_right));
@@ -3061,7 +3066,7 @@ void VM_vectorvectors (prvm_prog_t *prog)
 {
 	vec3_t forward, right, up;
 	VM_SAFEPARMCOUNT(1, VM_vectorvectors);
-	VectorNormalize2(PRVM_G_VECTOR(OFS_PARM0), forward);
+	VectorNormalize2(PRVM_G_READVECTOR(OFS_PARM0), forward);
 	VectorVectors(forward, right, up);
 	VectorCopy(forward, PRVM_gameglobalvector(v_forward));
 	VectorCopy(right, PRVM_gameglobalvector(v_right));
@@ -3075,12 +3080,12 @@ void VM_drawline (prvm_prog_t *prog)
 	unsigned char	flags;
 
 	VM_SAFEPARMCOUNT(6, VM_drawline);
-	width	= PRVM_G_FLOAT(OFS_PARM0);
-	c1		= PRVM_G_VECTOR(OFS_PARM1);
-	c2		= PRVM_G_VECTOR(OFS_PARM2);
-	rgb		= PRVM_G_VECTOR(OFS_PARM3);
-	alpha	= PRVM_G_FLOAT(OFS_PARM4);
-	flags	= (int)PRVM_G_FLOAT(OFS_PARM5);
+	width	= PRVM_G_READFLOAT(OFS_PARM0);
+	c1		= PRVM_G_READVECTOR(OFS_PARM1);
+	c2		= PRVM_G_READVECTOR(OFS_PARM2);
+	rgb		= PRVM_G_READVECTOR(OFS_PARM3);
+	alpha	= PRVM_G_READFLOAT(OFS_PARM4);
+	flags	= (int)PRVM_G_READFLOAT(OFS_PARM5);
 	DrawQ_Line(width, c1[0], c1[1], c2[0], c2[1], rgb[0], rgb[1], rgb[2], alpha, flags);
 }
 
@@ -3089,8 +3094,8 @@ void VM_bitshift (prvm_prog_t *prog)
 	prvm_int_t n1, n2;
 	VM_SAFEPARMCOUNT(2, VM_bitshift);
 
-	n1 = (prvm_int_t)fabs((prvm_vec_t)((prvm_int_t)PRVM_G_FLOAT(OFS_PARM0)));
-	n2 = (prvm_int_t)PRVM_G_FLOAT(OFS_PARM1);
+	n1 = (prvm_int_t)fabs((prvm_vec_t)((prvm_int_t)PRVM_G_READFLOAT(OFS_PARM0)));
+	n2 = (prvm_int_t)PRVM_G_READFLOAT(OFS_PARM1);
 	if(!n1)
 		PRVM_G_FLOAT(OFS_RETURN) = n1;
 	else
@@ -3412,7 +3417,7 @@ void VM_buf_create (prvm_prog_t *prog)
 	stringbuffer->origin = PRVM_AllocationOrigin(prog);
 
 	if (prog->argc >= 2)
-		stringbuffer->flags = (int)PRVM_G_FLOAT(OFS_PARM1) & STRINGBUFFER_QCFLAGS;
+		stringbuffer->flags = (int)PRVM_G_READFLOAT(OFS_PARM1) & STRINGBUFFER_QCFLAGS;
 	PRVM_G_FLOAT(OFS_RETURN) = i;
 }
 
@@ -3420,12 +3425,12 @@ void VM_buf_del (prvm_prog_t *prog)
 {
 	prvm_stringbuffer_t *stringbuffer;
 	VM_SAFEPARMCOUNT(1, VM_buf_del);
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if (stringbuffer)
 		BufStr_Del(prog, stringbuffer);
 	else
 	{
-		VM_Warning(prog, "VM_buf_del: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_buf_del: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 }
@@ -3435,11 +3440,11 @@ void VM_buf_getsize (prvm_prog_t *prog)
 	prvm_stringbuffer_t *stringbuffer;
 	VM_SAFEPARMCOUNT(1, VM_buf_getsize);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
 		PRVM_G_FLOAT(OFS_RETURN) = -1;
-		VM_Warning(prog, "VM_buf_getsize: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_buf_getsize: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 	else
@@ -3452,22 +3457,22 @@ void VM_buf_copy (prvm_prog_t *prog)
 	int i;
 	VM_SAFEPARMCOUNT(2, VM_buf_copy);
 
-	srcstringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	srcstringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!srcstringbuffer)
 	{
-		VM_Warning(prog, "VM_buf_copy: invalid source buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_buf_copy: invalid source buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
-	i = (int)PRVM_G_FLOAT(OFS_PARM1);
-	if(i == (int)PRVM_G_FLOAT(OFS_PARM0))
+	i = (int)PRVM_G_READFLOAT(OFS_PARM1);
+	if(i == (int)PRVM_G_READFLOAT(OFS_PARM0))
 	{
 		VM_Warning(prog, "VM_buf_copy: source == destination (%i) in %s\n", i, prog->name);
 		return;
 	}
-	dststringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	dststringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!dststringbuffer)
 	{
-		VM_Warning(prog, "VM_buf_copy: invalid destination buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM1), prog->name);
+		VM_Warning(prog, "VM_buf_copy: invalid destination buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM1), prog->name);
 		return;
 	}
 
@@ -3497,22 +3502,22 @@ void VM_buf_sort (prvm_prog_t *prog)
 	prvm_stringbuffer_t *stringbuffer;
 	VM_SAFEPARMCOUNT(3, VM_buf_sort);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_buf_sort: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_buf_sort: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 	if(stringbuffer->num_strings <= 0)
 	{
-		VM_Warning(prog, "VM_buf_sort: tried to sort empty buffer %i in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_buf_sort: tried to sort empty buffer %i in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
-	stringbuffers_sortlength = (int)PRVM_G_FLOAT(OFS_PARM1);
+	stringbuffers_sortlength = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	if(stringbuffers_sortlength <= 0)
 		stringbuffers_sortlength = 0x7FFFFFFF;
 
-	if(!PRVM_G_FLOAT(OFS_PARM2))
+	if(!PRVM_G_READFLOAT(OFS_PARM2))
 		qsort(stringbuffer->strings, stringbuffer->num_strings, sizeof(char*), BufStr_SortStringsUP);
 	else
 		qsort(stringbuffer->strings, stringbuffer->num_strings, sizeof(char*), BufStr_SortStringsDOWN);
@@ -3529,11 +3534,11 @@ void VM_buf_implode (prvm_prog_t *prog)
 	size_t			l;
 	VM_SAFEPARMCOUNT(2, VM_buf_implode);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	PRVM_G_INT(OFS_RETURN) = OFS_NULL;
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_buf_implode: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_buf_implode: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 	if(!stringbuffer->num_strings)
@@ -3561,13 +3566,13 @@ void VM_bufstr_get (prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(2, VM_bufstr_get);
 
 	PRVM_G_INT(OFS_RETURN) = OFS_NULL;
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_bufstr_get: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_get: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
-	strindex = (int)PRVM_G_FLOAT(OFS_PARM1);
+	strindex = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	if (strindex < 0)
 	{
 
@@ -3585,13 +3590,13 @@ void VM_bufstr_set (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(3, VM_bufstr_set);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_bufstr_set: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_set: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
-	strindex = (int)PRVM_G_FLOAT(OFS_PARM1);
+	strindex = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	if(strindex < 0 || strindex >= 1000000)
 	{
 		VM_Warning(prog, "VM_bufstr_set: invalid string index %i used in %s\n", strindex, prog->name);
@@ -3611,20 +3616,20 @@ void VM_bufstr_add (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNT(3, VM_bufstr_add);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	PRVM_G_FLOAT(OFS_RETURN) = -1;
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_bufstr_add: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_add: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
-	if(!PRVM_G_INT(OFS_PARM1))
+	if(!PRVM_G_READINT(OFS_PARM1))
 	{
-		VM_Warning(prog, "VM_bufstr_add: can not add an empty string to buffer %i in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_add: can not add an empty string to buffer %i in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 	string = PRVM_G_STRING(OFS_PARM1);
-	order = (int)PRVM_G_FLOAT(OFS_PARM2);
+	order = (int)PRVM_G_READFLOAT(OFS_PARM2);
 	if(order)
 		strindex = stringbuffer->num_strings;
 	else
@@ -3648,13 +3653,13 @@ void VM_bufstr_free (prvm_prog_t *prog)
 	prvm_stringbuffer_t	*stringbuffer;
 	VM_SAFEPARMCOUNT(2, VM_bufstr_free);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_bufstr_free: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_free: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
-	i = (int)PRVM_G_FLOAT(OFS_PARM1);
+	i = (int)PRVM_G_READFLOAT(OFS_PARM1);
 	if(i < 0)
 	{
 		VM_Warning(prog, "VM_bufstr_free: invalid string index %i used in %s\n", i, prog->name);
@@ -3695,10 +3700,10 @@ void VM_buf_loadfile(prvm_prog_t *prog)
 		return;
 	}
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM1));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM1));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_buf_loadfile: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM1), prog->name);
+		VM_Warning(prog, "VM_buf_loadfile: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM1), prog->name);
 		PRVM_G_FLOAT(OFS_RETURN) = 0;
 		return;
 	}
@@ -3749,7 +3754,7 @@ void VM_buf_writefile(prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNTRANGE(2, 4, VM_buf_writefile);
 
-	filenum = (int)PRVM_G_FLOAT(OFS_PARM0);
+	filenum = (int)PRVM_G_READFLOAT(OFS_PARM0);
 	if (filenum < 0 || filenum >= PRVM_MAX_OPENFILES)
 	{
 		VM_Warning(prog, "VM_buf_writefile: invalid file handle %i used in %s\n", filenum, prog->name);
@@ -3761,22 +3766,22 @@ void VM_buf_writefile(prvm_prog_t *prog)
 		return;
 	}
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM1));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM1));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_buf_writefile: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM1), prog->name);
+		VM_Warning(prog, "VM_buf_writefile: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM1), prog->name);
 		PRVM_G_FLOAT(OFS_RETURN) = 0;
 		return;
 	}
 
 	if (prog->argc > 3)
 	{
-		strindex = (int)PRVM_G_FLOAT(OFS_PARM2);
-		strnum = (int)PRVM_G_FLOAT(OFS_PARM3);
+		strindex = (int)PRVM_G_READFLOAT(OFS_PARM2);
+		strnum = (int)PRVM_G_READFLOAT(OFS_PARM3);
 	}
 	else if (prog->argc > 2)
 	{
-		strindex = (int)PRVM_G_FLOAT(OFS_PARM2);
+		strindex = (int)PRVM_G_READFLOAT(OFS_PARM2);
 		strnum = stringbuffer->num_strings - strindex;
 	}
 	else
@@ -3903,14 +3908,14 @@ void VM_bufstr_find(prvm_prog_t *prog)
 
 	PRVM_G_FLOAT(OFS_RETURN) = -1;
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_bufstr_find: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_find: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 
-	matchrule = (int)PRVM_G_FLOAT(OFS_PARM2);
+	matchrule = (int)PRVM_G_READFLOAT(OFS_PARM2);
 	if (matchrule < 0 || matchrule > 5)
 	{
 		VM_Warning(prog, "VM_bufstr_find: invalid match rule %i in %s\n", matchrule, prog->name);
@@ -3925,8 +3930,8 @@ void VM_bufstr_find(prvm_prog_t *prog)
 	}
 	matchlen = (int)strlen(match);
 
-	i = (prog->argc > 3) ? (int)PRVM_G_FLOAT(OFS_PARM3) : 0;
-	step = (prog->argc > 4) ? (int)PRVM_G_FLOAT(OFS_PARM4) : 1;
+	i = (prog->argc > 3) ? (int)PRVM_G_READFLOAT(OFS_PARM3) : 0;
+	step = (prog->argc > 4) ? (int)PRVM_G_READFLOAT(OFS_PARM4) : 1;
 	while(i < stringbuffer->num_strings)
 	{
 		if (stringbuffer->strings[i] && match_rule(stringbuffer->strings[i], VM_STRINGTEMP_LENGTH, match, matchlen, matchrule))
@@ -3948,7 +3953,7 @@ void VM_matchpattern(prvm_prog_t *prog)
 
 	s = PRVM_G_STRING(OFS_PARM0);
 
-	matchrule = (int)PRVM_G_FLOAT(OFS_PARM2);
+	matchrule = (int)PRVM_G_READFLOAT(OFS_PARM2);
 	if (matchrule < 0 || matchrule > 5)
 	{
 		VM_Warning(prog, "VM_bufstr_find: invalid match rule %i in %s\n", matchrule, prog->name);
@@ -3964,7 +3969,7 @@ void VM_matchpattern(prvm_prog_t *prog)
 
 	l = (int)strlen(match);
 	if (prog->argc > 3)
-		s += max(0, min((unsigned int)PRVM_G_FLOAT(OFS_PARM3), strlen(s)-1));
+		s += max(0, min((unsigned int)PRVM_G_READFLOAT(OFS_PARM3), strlen(s)-1));
 
 	PRVM_G_FLOAT(OFS_RETURN) = match_rule(s, VM_STRINGTEMP_LENGTH, match, l, matchrule);
 }
@@ -3980,10 +3985,10 @@ void VM_buf_cvarlist(prvm_prog_t *prog)
 	prvm_stringbuffer_t	*stringbuffer;
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_buf_cvarlist);
 
-	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_FLOAT(OFS_PARM0));
+	stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, (int)PRVM_G_READFLOAT(OFS_PARM0));
 	if(!stringbuffer)
 	{
-		VM_Warning(prog, "VM_bufstr_free: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+		VM_Warning(prog, "VM_bufstr_free: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 		return;
 	}
 
@@ -4050,7 +4055,7 @@ void VM_changeyaw (prvm_prog_t *prog)
 	prvm_edict_t		*ent;
 	float		ideal, current, move, speed;
 
-	ent = PRVM_PROG_TO_EDICT(PRVM_gameglobaledict(self));
+	ent = PRVM_PROG_TO_EDICT(PRVM_G_READINT(prog->globaloffsets.self));
 	if (ent == prog->edicts)
 	{
 		VM_Warning(prog, "changeyaw: can not modify world entity\n");
@@ -4061,10 +4066,10 @@ void VM_changeyaw (prvm_prog_t *prog)
 		VM_Warning(prog, "changeyaw: can not modify free entity\n");
 		return;
 	}
-	current = PRVM_gameedictvector(ent, angles)[1];
+	current = PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.angles + 1);
 	current = ANGLEMOD(current);
-	ideal = PRVM_gameedictfloat(ent, ideal_yaw);
-	speed = PRVM_gameedictfloat(ent, yaw_speed);
+	ideal = PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.ideal_yaw);
+	speed = PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.yaw_speed);
 
 	if (current == ideal)
 		return;
@@ -4112,10 +4117,10 @@ void VM_changepitch (prvm_prog_t *prog)
 		VM_Warning(prog, "changepitch: can not modify free entity\n");
 		return;
 	}
-	current = PRVM_gameedictvector(ent, angles)[0];
+	current = PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.angles);
 	current = ANGLEMOD(current);
-	ideal = PRVM_gameedictfloat(ent, idealpitch);
-	speed = PRVM_gameedictfloat(ent, pitch_speed);
+	ideal = PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.idealpitch);
+	speed = PRVM_EDICTREADFLOAT(ent, prog->fieldoffsets.pitch_speed);
 
 	if (current == ideal)
 		return;
@@ -4164,7 +4169,7 @@ void VM_strstrofs (prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(2, 3, VM_strstrofs);
 	instr = PRVM_G_STRING(OFS_PARM0);
 	match = PRVM_G_STRING(OFS_PARM1);
-	firstofs = (prog->argc > 2)?(int)PRVM_G_FLOAT(OFS_PARM2):0;
+	firstofs = (prog->argc > 2)?(int)PRVM_G_READFLOAT(OFS_PARM2):0;
 	firstofs = (int)u8_bytelen(instr, firstofs);
 
 	if (firstofs && (firstofs < 0 || firstofs > (int)strlen(instr)))
@@ -4187,7 +4192,7 @@ void VM_str2chr (prvm_prog_t *prog)
 	int index;
 	VM_SAFEPARMCOUNT(2, VM_str2chr);
 	s = PRVM_G_STRING(OFS_PARM0);
-	index = (int)u8_bytelen(s, (int)PRVM_G_FLOAT(OFS_PARM1));
+	index = (int)u8_bytelen(s, (int)PRVM_G_READFLOAT(OFS_PARM1));
 
 	if((unsigned)index < strlen(s))
 	{
@@ -4209,7 +4214,7 @@ void VM_chr2str (prvm_prog_t *prog)
 	size_t len = 0;
 	VM_SAFEPARMCOUNTRANGE(0, 8, VM_chr2str);
 	for(i = 0; i < prog->argc && len < sizeof(t)-1; ++i)
-		len += u8_fromchar((Uchar)PRVM_G_FLOAT(OFS_PARM0+i*3), t + len, sizeof(t)-1);
+		len += u8_fromchar((Uchar)PRVM_G_READFLOAT(OFS_PARM0+i*3), t + len, sizeof(t)-1);
 	t[len] = 0;
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, t);
 }
@@ -4302,9 +4307,9 @@ void VM_strconv (prvm_prog_t *prog)
 
 	VM_SAFEPARMCOUNTRANGE(3, 8, VM_strconv);
 
-	ccase = (int) PRVM_G_FLOAT(OFS_PARM0);
-	redalpha = (int) PRVM_G_FLOAT(OFS_PARM1);
-	rednum = (int) PRVM_G_FLOAT(OFS_PARM2);
+	ccase = (int) PRVM_G_READFLOAT(OFS_PARM0);
+	redalpha = (int) PRVM_G_READFLOAT(OFS_PARM1);
+	rednum = (int) PRVM_G_READFLOAT(OFS_PARM2);
 	VM_VarString(prog, 3, (char *) resbuf, sizeof(resbuf));
 	len = (int)strlen((char *) resbuf);
 
@@ -4346,7 +4351,7 @@ void VM_strpad (prvm_prog_t *prog)
 	char destbuf[VM_STRINGTEMP_LENGTH];
 	int pad;
 	VM_SAFEPARMCOUNTRANGE(1, 8, VM_strpad);
-	pad = (int) PRVM_G_FLOAT(OFS_PARM0);
+	pad = (int) PRVM_G_READFLOAT(OFS_PARM0);
 	VM_VarString(prog, 1, src, sizeof(src));
 
 	dpsnprintf(destbuf, sizeof(destbuf), "%*s", -pad, src);
@@ -4395,7 +4400,7 @@ void VM_strncmp (prvm_prog_t *prog)
 	s2 = PRVM_G_STRING(OFS_PARM1);
 	if (prog->argc > 2)
 	{
-		PRVM_G_FLOAT(OFS_RETURN) = strncmp(s1, s2, (size_t)PRVM_G_FLOAT(OFS_PARM2));
+		PRVM_G_FLOAT(OFS_RETURN) = strncmp(s1, s2, (size_t)PRVM_G_READFLOAT(OFS_PARM2));
 	}
 	else
 	{
@@ -4411,7 +4416,7 @@ void VM_strncasecmp (prvm_prog_t *prog)
 	s2 = PRVM_G_STRING(OFS_PARM1);
 	if (prog->argc > 2)
 	{
-		PRVM_G_FLOAT(OFS_RETURN) = strncasecmp(s1, s2, (size_t)PRVM_G_FLOAT(OFS_PARM2));
+		PRVM_G_FLOAT(OFS_RETURN) = strncasecmp(s1, s2, (size_t)PRVM_G_READFLOAT(OFS_PARM2));
 	}
 	else
 	{
@@ -4424,7 +4429,7 @@ void VM_crc16(prvm_prog_t *prog)
 	float insensitive;
 	char s[VM_STRINGTEMP_LENGTH];
 	VM_SAFEPARMCOUNTRANGE(2, 8, VM_crc16);
-	insensitive = PRVM_G_FLOAT(OFS_PARM0);
+	insensitive = PRVM_G_READFLOAT(OFS_PARM0);
 	VM_VarString(prog, 1, s, sizeof(s));
 	PRVM_G_FLOAT(OFS_RETURN) = (unsigned short) ((insensitive ? CRC_Block_CaseInsensitive : CRC_Block) ((unsigned char *) s, strlen(s)));
 }
@@ -4690,15 +4695,15 @@ void VM_uri_get (prvm_prog_t *prog)
 	VM_SAFEPARMCOUNTRANGE(2, 6, VM_uri_get);
 
 	url = PRVM_G_STRING(OFS_PARM0);
-	id = PRVM_G_FLOAT(OFS_PARM1);
+	id = PRVM_G_READFLOAT(OFS_PARM1);
 	if(prog->argc >= 3)
 		posttype = PRVM_G_STRING(OFS_PARM2);
 	if(prog->argc >= 4)
 		postseparator = PRVM_G_STRING(OFS_PARM3);
 	if(prog->argc >= 5)
-		poststringbuffer = PRVM_G_FLOAT(OFS_PARM4);
+		poststringbuffer = PRVM_G_READFLOAT(OFS_PARM4);
 	if(prog->argc >= 6)
-		postkeyid = PRVM_G_FLOAT(OFS_PARM5);
+		postkeyid = PRVM_G_READFLOAT(OFS_PARM5);
 	handle = (uri_to_prog_t *) Z_Malloc(sizeof(*handle));
 
 	query_string = strchr(url, '?');
@@ -4721,7 +4726,7 @@ void VM_uri_get (prvm_prog_t *prog)
 			stringbuffer = (prvm_stringbuffer_t *)Mem_ExpandableArray_RecordAtIndex(&prog->stringbuffersarray, poststringbuffer);
 			if(!stringbuffer)
 			{
-				VM_Warning(prog, "uri_get: invalid buffer %i used in %s\n", (int)PRVM_G_FLOAT(OFS_PARM0), prog->name);
+				VM_Warning(prog, "uri_get: invalid buffer %i used in %s\n", (int)PRVM_G_READFLOAT(OFS_PARM0), prog->name);
 				return;
 			}
 			ltotal = 0;
@@ -4846,7 +4851,7 @@ void VM_netaddress_resolve (prvm_prog_t *prog)
 	ip = PRVM_G_STRING(OFS_PARM0);
 	port = 0;
 	if(prog->argc > 1)
-		port = (int) PRVM_G_FLOAT(OFS_PARM1);
+		port = (int) PRVM_G_READFLOAT(OFS_PARM1);
 
 	if(LHNETADDRESS_FromString(&addr, ip, port) && LHNETADDRESS_ToString(&addr, normalized, sizeof(normalized), prog->argc > 1))
 		PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, normalized);
@@ -5328,7 +5333,7 @@ static void animatemodel(prvm_prog_t *prog, dp_model_t *model, prvm_edict_t *ed)
 	VM_GenerateFrameGroupBlend(prog, ed->priv.server->framegroupblend, ed);
 	VM_FrameBlendFromFrameGroupBlend(ed->priv.server->frameblend, ed->priv.server->framegroupblend, model, PRVM_serverglobalfloat(time));
 	need |= (memcmp(&animatemodel_cache->frameblend, &ed->priv.server->frameblend, sizeof(ed->priv.server->frameblend))) != 0;
-	skeletonindex = (int)PRVM_gameedictfloat(ed, skeletonindex) - 1;
+	skeletonindex = (int)PRVM_EDICTREADFLOAT(ed, prog->fieldoffsets.skeletonindex) - 1;
 	if (!(skeletonindex >= 0 && skeletonindex < MAX_EDICTS && (skeleton = prog->skeletons[skeletonindex]) && skeleton->model->num_bones == ed->priv.server->skeleton.model->num_bones))
 		skeleton = NULL;
 	need |= (animatemodel_cache->skeleton_p != skeleton);
@@ -5451,7 +5456,7 @@ void VM_getsurfacenumpoints(prvm_prog_t *prog)
 	msurface_t *surface;
 	VM_SAFEPARMCOUNT(2, VM_getsurfacenumpoints);
 
-	if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+	if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
 	{
 		PRVM_G_FLOAT(OFS_RETURN) = 0;
 		return;
@@ -5470,10 +5475,10 @@ void VM_getsurfacepoint(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3, VM_getsurfacepoint);
 	VectorClear(PRVM_G_VECTOR(OFS_RETURN));
 	ed = PRVM_G_EDICT(OFS_PARM0);
-	if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+	if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
 		return;
 
-	pointnum = (int)PRVM_G_FLOAT(OFS_PARM2);
+	pointnum = (int)PRVM_G_READFLOAT(OFS_PARM2);
 	if (pointnum < 0 || pointnum >= surface->num_vertices)
 		return;
 	animatemodel(prog, model, ed);
@@ -5493,12 +5498,12 @@ void VM_getsurfacepointattribute(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(4, VM_getsurfacepoint);
 	VectorClear(PRVM_G_VECTOR(OFS_RETURN));
 	ed = PRVM_G_EDICT(OFS_PARM0);
-	if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+	if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
 		return;
-	pointnum = (int)PRVM_G_FLOAT(OFS_PARM2);
+	pointnum = (int)PRVM_G_READFLOAT(OFS_PARM2);
 	if (pointnum < 0 || pointnum >= surface->num_vertices)
 		return;
-	attributetype = (int) PRVM_G_FLOAT(OFS_PARM3);
+	attributetype = (int) PRVM_G_READFLOAT(OFS_PARM3);
 
 	animatemodel(prog, model, ed);
 
@@ -5560,7 +5565,7 @@ void VM_getsurfacenormal(prvm_prog_t *prog)
 	vec3_t result;
 	VM_SAFEPARMCOUNT(2, VM_getsurfacenormal);
 	VectorClear(PRVM_G_VECTOR(OFS_RETURN));
-	if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+	if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
 		return;
 
 	animatemodel(prog, model, PRVM_G_EDICT(OFS_PARM0));
@@ -5576,7 +5581,7 @@ void VM_getsurfacetexture(prvm_prog_t *prog)
 	msurface_t *surface;
 	VM_SAFEPARMCOUNT(2, VM_getsurfacetexture);
 	PRVM_G_INT(OFS_RETURN) = OFS_NULL;
-	if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+	if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
 		return;
 	PRVM_G_INT(OFS_RETURN) = PRVM_SetTempString(prog, surface->texture->name);
 }
@@ -5593,7 +5598,7 @@ void VM_getsurfacenearpoint(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(2, VM_getsurfacenearpoint);
 	PRVM_G_FLOAT(OFS_RETURN) = -1;
 	ed = PRVM_G_EDICT(OFS_PARM0);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), point);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), point);
 
 	if (!ed || ed->priv.server->free)
 		return;
@@ -5640,13 +5645,13 @@ void VM_getsurfaceclippedpoint(prvm_prog_t *prog)
 	VM_SAFEPARMCOUNT(3, VM_te_getsurfaceclippedpoint);
 	VectorClear(PRVM_G_VECTOR(OFS_RETURN));
 	ed = PRVM_G_EDICT(OFS_PARM0);
-	if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+	if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
 		return;
 	animatemodel(prog, model, ed);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), inp);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), inp);
 	applytransform_inverted(prog, inp, ed, p);
 	clippointtosurface(prog, ed, model, surface, p, out);
-	VectorAdd(out, PRVM_serveredictvector(ed, origin), PRVM_G_VECTOR(OFS_RETURN));
+	VectorAdd(out, PRVM_EDICTREADVECTOR(ed, prog->fieldoffsets.origin), PRVM_G_VECTOR(OFS_RETURN));
 }
 
 void VM_getsurfacenumtriangles(prvm_prog_t *prog)
@@ -5655,7 +5660,7 @@ void VM_getsurfacenumtriangles(prvm_prog_t *prog)
        msurface_t *surface;
        VM_SAFEPARMCOUNT(2, VM_SV_getsurfacenumtriangles);
 
-       if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+       if (!(model = getmodel(prog, PRVM_G_EDICT(OFS_PARM0))) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
        {
                PRVM_G_FLOAT(OFS_RETURN) = 0;
                return;
@@ -5674,9 +5679,9 @@ void VM_getsurfacetriangle(prvm_prog_t *prog)
        VM_SAFEPARMCOUNT(3, VM_SV_getsurfacetriangle);
        VectorClear(PRVM_G_VECTOR(OFS_RETURN));
        ed = PRVM_G_EDICT(OFS_PARM0);
-       if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_FLOAT(OFS_PARM1))))
+       if (!(model = getmodel(prog, ed)) || !(surface = getsurface(model, (int)PRVM_G_READFLOAT(OFS_PARM1))))
                return;
-       trinum = (int)PRVM_G_FLOAT(OFS_PARM2);
+       trinum = (int)PRVM_G_READFLOAT(OFS_PARM2);
        if (trinum < 0 || trinum >= surface->num_triangles)
                return;
 
@@ -5721,7 +5726,7 @@ void VM_physics_enable(prvm_prog_t *prog)
 		VM_Warning(prog, "VM_physics_enable: entity is not MOVETYPE_PHYSICS!\n");
 		return;
 	}
-	f.type = PRVM_G_FLOAT(OFS_PARM1) == 0 ? ODEFUNC_DISABLE : ODEFUNC_ENABLE;
+	f.type = PRVM_G_READFLOAT(OFS_PARM1) == 0 ? ODEFUNC_DISABLE : ODEFUNC_ENABLE;
 	VM_physics_ApplyCmd(ed, &f);
 }
 
@@ -5745,8 +5750,8 @@ void VM_physics_addforce(prvm_prog_t *prog)
 		return;
 	}
 	f.type = ODEFUNC_FORCE;
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), f.v1);
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM2), f.v2);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), f.v1);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM2), f.v2);
 	VM_physics_ApplyCmd(ed, &f);
 }
 
@@ -5770,7 +5775,7 @@ void VM_physics_addtorque(prvm_prog_t *prog)
 		return;
 	}
 	f.type = ODEFUNC_TORQUE;
-	VectorCopy(PRVM_G_VECTOR(OFS_PARM1), f.v1);
+	VectorCopy(PRVM_G_READVECTOR(OFS_PARM1), f.v1);
 	VM_physics_ApplyCmd(ed, &f);
 }
 

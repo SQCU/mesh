@@ -1,0 +1,14 @@
+{
+  "at": "2026-09-07T01:17:57.902410+00:00",
+  "scope": "Read-only existing bridge status; no device contexts opened or bridge lifecycle changes.",
+  "laptop": {
+    "exit_code": 0,
+    "stdout": "{\"up\":true,\"region\":\"/mesh0\",\"node\":0,\"pgsz\":4096,\"pool\":2097152,\"arena\":6291456,\"client\":0,\"client_alive\":false,\"sent\":4236,\"recvd\":4236,\"bad\":0,\"up_ms\":680072,\"bridge_pid\":70792,\"bridge_alive\":true,\"phase\":\"paired\",\"heartbeat_age_ms\":177,\"responsive\":true,\"paired\":true,\"operation\":0,\"operation_age_ms\":0,\"sub_head\":4236,\"sub_tail\":4236,\"sub_depth\":0,\"cmp_head\":4236,\"cmp_tail\":4236,\"cmp_depth\":0,\"rel_head\":4236,\"rel_tail\":4236,\"rel_depth\":0,\"ack_head\":4236,\"ack_tail\":4236,\"ack_depth\":0,\"free\":2093057,\"sd_free\":0,\"recv\":4095,\"sd_recv\":0,\"send\":0,\"sd_send\":0,\"app\":0,\"sd_app\":0,\"ports\":[{\"device\":\"automatic\",\"peer\":65535,\"generation\":1,\"phase\":\"paired\",\"heartbeat_us\":1788743877904631,\"operation\":0}]}",
+    "stderr": ""
+  },
+  "mini": {
+    "exit_code": 0,
+    "stdout": "{\"up\":true,\"region\":\"/mesh0\",\"node\":1,\"pgsz\":4096,\"pool\":393216,\"arena\":1179648,\"client\":0,\"client_alive\":false,\"sent\":4236,\"recvd\":4236,\"bad\":0,\"up_ms\":679891,\"bridge_pid\":84193,\"bridge_alive\":true,\"phase\":\"paired\",\"heartbeat_age_ms\":186,\"responsive\":true,\"paired\":true,\"operation\":0,\"operation_age_ms\":0,\"sub_head\":4236,\"sub_tail\":4236,\"sub_depth\":0,\"cmp_head\":4236,\"cmp_tail\":4236,\"cmp_depth\":0,\"rel_head\":4236,\"rel_tail\":4236,\"rel_depth\":0,\"ack_head\":4236,\"ack_tail\":4236,\"ack_depth\":0,\"free\":389121,\"sd_free\":0,\"recv\":4095,\"sd_recv\":0,\"send\":0,\"sd_send\":0,\"app\":0,\"sd_app\":0,\"ports\":[{\"device\":\"automatic\",\"peer\":65535,\"generation\":1,\"phase\":\"paired\",\"heartbeat_us\":1788743877957432,\"operation\":21}]}",
+    "stderr": ""
+  }
+}

@@ -40,11 +40,23 @@ static void emit_delta(CFDictionaryRef deltaRef,int ms,NSString *group){
     NSArray *wanted=@[@"AMCC RD",@"AMCC WR",@"AMCC RD+WR",@"AGX RD",@"AGX WR",@"AGX RD+WR"];
     NSMutableDictionary *found=[NSMutableDictionary dictionary];
     for(NSDictionary *channel in delta[@"IOReportChannels"]){
-      NSString *name=channel[@"LegendChannel"][2];
-      if([wanted containsObject:name]) found[name]=channel;
+      NSString *name=(__bridge NSString *)IOReportChannelGetChannelName((__bridge CFDictionaryRef)channel);
+      if(name&&[wanted containsObject:name]) found[name]=channel;
     }
     printf("{\"up\":true,\"sample_ms\":%d,\"source\":\"IOReport/%s/DCS BW\"",ms,group.UTF8String);
     for(NSString *name in wanted){ printf(",\"%s\":",name.UTF8String); emit(found[name]); }
+    NSMutableDictionary *states=[NSMutableDictionary dictionary];
+    for(NSDictionary *channel in delta[@"IOReportChannels"]){
+      CFDictionaryRef c=(__bridge CFDictionaryRef)channel;
+      NSString *subgroup=(__bridge NSString *)IOReportChannelGetSubGroup(c);
+      if(![subgroup isEqualToString:@"GPU Performance States"]) continue;
+      for(int i=0;i<IOReportStateGetCount(c);i++){
+        NSString *name=(__bridge NSString *)IOReportStateGetNameForIndex(c,i);
+        states[name?:[NSString stringWithFormat:@"%d",i]]=@(IOReportStateGetResidency(c,i));
+      }
+    }
+    NSData *encoded=[NSJSONSerialization dataWithJSONObject:states options:0 error:nil];
+    printf(",\"gpu_state_residency\":"); fwrite(encoded.bytes,1,encoded.length,stdout);
     printf("}\n"); fflush(stdout);
   }
 }
@@ -83,6 +95,10 @@ int main(int argc,char **argv){
       if(group) channels=[(__bridge NSDictionary *)IOReportCopyChannelsInGroup((__bridge CFStringRef)group,CFSTR("DCS BW"),0,0,0) mutableCopy];
     }
     if(!channels){ printf("{\"up\":false}\n"); return 0; }
+    NSDictionary *gpu=CFBridgingRelease(IOReportCopyChannelsInGroup(CFSTR("GPU Stats"),CFSTR("GPU Performance States"),0,0,0));
+    NSMutableArray *combined=[channels[@"IOReportChannels"] mutableCopy];
+    if(gpu[@"IOReportChannels"]) [combined addObjectsFromArray:gpu[@"IOReportChannels"]];
+    channels[@"IOReportChannels"]=combined;
     CFMutableDictionaryRef subscribed=0;
     CFTypeRef subscription=IOReportCreateSubscription(0,(__bridge CFMutableDictionaryRef)channels,&subscribed,0,0);
     CFDictionaryRef a=IOReportCreateSamples(subscription,subscribed,0);

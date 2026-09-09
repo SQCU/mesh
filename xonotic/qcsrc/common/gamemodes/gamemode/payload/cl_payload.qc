@@ -57,6 +57,30 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 {
 	mod_active = 1;
 	Payload_Ribbon_Setup();
+	float titleh = max(14, mySize.y * 0.22);
+	vector titlepos = myPos + vec2(0, mySize.y + 8);
+	titlepos.y = min(titlepos.y, vid_conheight - titleh * 2.2 - 8);
+	drawfill(titlepos - vec2(6, 4), vec2(mySize.x + 12, titleh * 2.2 + 8), '0 0 0', panel_fg_alpha * 0.85, DRAWFLAG_NORMAL);
+	string title = _("No team on track to win");
+	if(plc_game_ties > 1)
+		title = _("Tied projected leaders");
+	if(plc_game_finished)
+		title = _("Round tied");
+	vector leadercolor = PLC_GREY;
+	if(plc_game_leader)
+	{
+		int leaderteam = Team_IndexToTeam(plc_game_leader);
+		leadercolor = Team_ColorRGB(leaderteam);
+		float progress = bound(0, plc_game_score / plc_game_limit, 1);
+		title = sprintf("%s %s — %.1f%% to victory", Team_ColorName_Upper(leaderteam), (plc_game_finished ? _("wins") : _("on track")), progress * 100);
+		drawfill(titlepos + vec2(0, titleh * 1.9), vec2(mySize.x, 3), PLC_GREY, panel_fg_alpha * 0.4, DRAWFLAG_NORMAL);
+		drawfill(titlepos + vec2(0, titleh * 1.9), vec2(mySize.x * progress, 3), leadercolor, panel_fg_alpha, DRAWFLAG_NORMAL);
+		string detail = sprintf("%.1f / %.0f score", plc_game_score, plc_game_limit);
+		if(!plc_game_finished)
+			detail = strcat(detail, sprintf(" · %.0fs at current control", ceil(plc_game_eta)));
+		drawstring_aspect(titlepos + vec2(0, titleh), detail, vec2(mySize.x, titleh * 0.8), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+	}
+	drawstring_aspect(titlepos, title, vec2(mySize.x, titleh), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 
 	int n = 0;
 	for(int c = 0; c < PLC_MAX_CARTS; ++c)
@@ -127,7 +151,7 @@ void HUD_Mod_Payload(vector myPos, vector mySize)
 	if(autocvar_hud_panel_modicons_payload_layout)
 	{
 		payload_cart_read(0);
-		drawstring_aspect(myPos, strcat(ftos(floor(plc_r_frac * 100 + 0.5)), "%"),
-			vec2(mySize.x * 0.22, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
+		drawstring_aspect(myPos, _("Cart paths / checkpoint control"),
+			vec2(mySize.x, pipband), '1 1 1', panel_fg_alpha, DRAWFLAG_NORMAL);
 	}
 }

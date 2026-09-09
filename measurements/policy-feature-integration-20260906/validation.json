@@ -1,0 +1,120 @@
+{
+  "recorded_at_utc": "2026-09-07T01:57:42.500654+00:00",
+  "host": "Mac.localdomain",
+  "policy_versions": {
+    "matrix_family": 19,
+    "baseline": 17,
+    "architecture": 10
+  },
+  "scope": "Final algorithm and representation validation on the host; earlier remote evidence is explicitly identified. No deployment or bridge operation.",
+  "local_suite": {
+    "command": "PYTHONPATH=xonotic bin/mesh-python -m unittest discover -s xonotic/solver/strat -t xonotic",
+    "tests": 129,
+    "seconds": 4.924,
+    "passed": true,
+    "log": "tests-local.log"
+  },
+  "earlier_mini_suite": {
+    "tests": 126,
+    "seconds": 3.195,
+    "passed": true,
+    "log": "mini-final-tests.log",
+    "scope": "Before final input-FFN prenormalization; not a final full-suite run."
+  },
+  "focused_prenorm_tests": {
+    "command": "-m unittest solver.strat.test_raw_inputs solver.strat.test_representation solver.strat.test_learning solver.strat.test_neighborhood solver.strat.test_moe solver.strat.test_scale_rpc solver.strat.test_state_steering",
+    "local": {
+      "count": 70,
+      "passed": true,
+      "seconds": 2.801
+    },
+    "mini": {
+      "count": 70,
+      "passed": true,
+      "seconds": 2.641,
+      "scope": "Already-running standalone tests completed before host-only work preference; no RDMA."
+    }
+  },
+  "focused_receive_tests": {
+    "tests": 25,
+    "local_passed": true,
+    "mini_passed": true,
+    "scope": "Completed before host-only steering, no RDMA test traffic. See receive-fairness-rca.md."
+  },
+  "native_runtime": {
+    "artifact": "native-runtime.json",
+    "passed": true,
+    "checks": 20,
+    "transport": "isolated_shared_memory_and_unix_datagrams_no_verbs",
+    "updates": 15,
+    "actor_rows": 20,
+    "unmatched_rows": 0,
+    "view_faults": 0,
+    "retained_events": 1336,
+    "changed_neighborhood_parameter_groups": [
+      "neighborhood.node_projection.weight",
+      "neighborhood.edge_projection.weight",
+      "neighborhood.cell_projection.weight",
+      "neighborhood.metric.weight",
+      "neighborhood.value.weight",
+      "neighborhood.output.weight",
+      "neighborhood.log_decay"
+    ]
+  },
+  "earlier_rdma_cross": {
+    "artifact": "rdma-cross.json",
+    "passed": true,
+    "actual_remote_calls": 8,
+    "parameter_gradient_max_error": 3.725290298461914e-09,
+    "scope": "Before final prenormalization. Actual rectangular remote cross factor and both VJPs passed; final version 19 was not rerun over RDMA."
+  },
+  "large_native_rdma": {
+    "artifacts": [
+      "rdma-runtime-before-receive-fix.json",
+      "rdma-runtime.json"
+    ],
+    "passed": false,
+    "final_backend_root_cause": "inconclusive",
+    "reason": "Both runs missed update thresholds. User confirmed concurrent distributed-backend R&D; bridge PIDs changed during the later run. Native view faults and source-level receive loss mechanisms remain separately recorded.",
+    "further_work": "Large RDMA validation deferred during the other session; final validation used isolated host transport."
+  },
+  "current_local_execution": {
+    "command": "PYTHONPATH=xonotic bin/mesh-python -m solver.strat.verify_representation --probe .build/kernel-allocation-probe.dylib --output measurements/policy-feature-integration-20260906/execution-local.json",
+    "artifact": "execution-local.json",
+    "exit_code": 1,
+    "measured_solves_per_mode": 8,
+    "graph_reuse_passed": true,
+    "allocation_reuse_passed": false,
+    "allocation_calls": {
+      "forward_and_emission": 0,
+      "gradient_and_optimizer": 33
+    },
+    "optimizer_allocation_calls_per_solve": [
+      3,
+      0,
+      0,
+      0,
+      30,
+      0,
+      0,
+      0
+    ],
+    "scope": "Prepared MLX numerical programs; excludes input packing, report construction, transport and capacity realization"
+  },
+  "earlier_mini_execution": {
+    "artifact": "execution-mini.json",
+    "graph_reuse_passed": true,
+    "allocation_calls": {
+      "forward_and_emission": 0,
+      "gradient_and_optimizer": 0
+    },
+    "scope": "Pre-prenormalization bounded sample, not a persistent allocation guarantee."
+  },
+  "remaining_limits": [
+    "Persistent allocation-free optimizer execution is unmet; current local probe observed 33 allocations after warmup.",
+    "Capacity growth still realizes new extents and buffers outside prepared numerical programs.",
+    "Serialized navigation measure is metric-graph length, not walkable floor area; unattainable per-cell support bands are reported.",
+    "Unconstrained policy exploration can still reach invalid native state views; final bounded native run had zero faults, not a universal guarantee.",
+    "Validation establishes representations, gradients and continuation, not playing strength or sustained many-team performance."
+  ]
+}

@@ -1,18 +1,17 @@
 # J-space field measurement
 
-The controlling contracts are [`SPECIFICATION.md`](SPECIFICATION.md),
-[`rl-training-spec.md`](rl-training-spec.md),
-[`ALGORITHM-CONTRACTS.md`](ALGORITHM-CONTRACTS.md), and
-[`joracle-viewer.md`](joracle-viewer.md). Implementation claims are indexed by
-[`claims/POLICY.md`](claims/POLICY.md).
+User requirements are in [`SPECIFICATION.md`](SPECIFICATION.md). The complete
+current source, representation and output contract is
+[`POLICY-PROGRAM.md`](POLICY-PROGRAM.md); viewer behavior is described in
+[`joracle-viewer.md`](joracle-viewer.md).
 
 ## Purpose
 
 The measurement describes how the strategy representation carries authoritative game
 state and how policy actions alter later server state. It does not rank a checkpoint,
-declare a policy acceptable, or reduce behavior to an improvement label. Aggression,
-robustness, competitive pressure, survival, objective conversion, and their missing
-coordinate masses remain separate measures.
+declare a policy acceptable, or classify behavior into invented action categories.
+Native damage, kill, pickup and cart measurements retain their actual source and
+attribution coverage.
 
 The J-lens measures decodability from the exact representation emitted by the live
 policy composition. The J-oracle uses the controlled server state machine to join each
@@ -24,7 +23,7 @@ successors, or substitutes CartSim state.
 
 `xonotic/solver/strat/strat_responder.py` produces one response record from the literal
 participant, cart, event, navigation, policy, action, and formal-value tensors used by
-the strategy step. Stable participant and instrument identities accompany every tensor.
+the strategy step. Participant and native view-address identities accompany the tensors.
 The record carries the representation, the complete source state, the complete
 authoritative successor state once observed, the action density, selected and active
 source arms, engine time, frame identity, and provenance.
@@ -38,7 +37,7 @@ Participant succession is an identity join, not a shape comparison. Each transit
 publishes `joined_row_mass`, `successor_source_row_mass`,
 `successor_present_row_mass`, and `departed_row_mass`. A newly joined identity has no
 fictional predecessor. A departed source identity retains its realized sparse reward
-and has zero successor bootstrap and dynamics mass.
+and has zero successor bootstrap mass.
 
 ## Consumer interface
 

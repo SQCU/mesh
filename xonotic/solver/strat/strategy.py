@@ -1,227 +1,143 @@
 from __future__ import annotations
 
-import math
 from typing import NamedTuple
 
-import mlx.core as mx
+from . import tensor as mx
 
-from .cast_header import (
-    Wally,
-    actuator,
-    dee,
-    dina_action,
-    dina_drift,
-    dina_matrix,
-    dina_readout,
-    dina_state,
-    gia_uma_dov,
-    participant_gram_matrix,
-    ir_query,
-    ir_value,
-    kay,
-    lou,
-    norm,
-    phil,
-    quinn,
-    scale_fuse,
-    tau,
-    val,
-    vera_lou,
-    vera_winnie,
-    winnie,
-)
-from .matmul import batched_matrix_vector, matrix_multiply, matrix_multiply_transpose_right
-__all__ = [
-    "Dynamics", "Strategy", "strategy", "dynamics", "log_probs", "logp_of",
-    "control_logp_of", "sample_controls", "act", "integrate", "measure_log_density",
-]
+from . import paged_matrix
+from .cast_header import Wally, encode_rows, gia_uma_dov, ir_query, norm, scale_fuse
+from .inputs import ChorusArrays
+from .matmul import matrix_multiply, matrix_multiply_transpose_left, linear
+from .state_steering import StateRate, rate_distribution, logp_of as rate_logp, sample, policy_inputs
 
-class Dynamics(NamedTuple):
-    mean: mx.array
-    first: mx.array
-    second: mx.array
-    matrix: mx.array
-    disagreement: mx.array
 
 class Strategy(NamedTuple):
-    dw_dt: mx.array
-    logits: mx.array
+    rate: StateRate
     ir: mx.array
-    query: mx.array
     value_winnie: mx.array
     value_lou: mx.array
-    aux_winnie: mx.array
-    aux_lou: mx.array
     coupling: mx.array
-    belief: mx.array
-    pooled: mx.array
-    weights: mx.array
-    dee: mx.array
-    guidance: mx.array
-    uncertainty: mx.array
-    scale_matrix_stats: mx.array
+    local_neighborhood: mx.array
+    scale_residual_stats: mx.array
     scale_expert_load: mx.array
-    controls: mx.array
-    control_log_scale: mx.array
-    control_density: mx.array
+    scale_balance: mx.array
 
-def measure_log_density(scores, action_mass):
-    return scores + mx.log(action_mass)
 
-def normalized_log_probs(logits):
-    return logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+class Encoded(NamedTuple):
+    ir: mx.array
+    coupling: mx.array
+    valid: mx.array
+    own_rows: mx.array
+    page_rows: mx.array
+    local: mx.array
 
-def strategy(
-    wally: Wally,
-    xan: mx.array,
-    zed: mx.array,
-    cell_slots: mx.array,
-    gigi: mx.array,
-    semantics: mx.array,
-    team_ids: mx.array,
-    weights: mx.array,
-    action_mass: mx.array,
-    delta: mx.array,
-    control_weight: mx.array,
-    exploration_weight: mx.array,
-    *,
-    participant_fusion_scale=None,
-    residual_fusion_scale=None,
-    execute_remote_scale=True,
-) -> Strategy:
-    bea = norm(matrix_multiply(gigi, phil(wally, cell_slots)))
 
-    q = norm(quinn(wally, xan, bea, semantics))
+def embedded_rows(model, frame, width, nonlinear=True):
+    pages, observations, present = policy_inputs(frame, width)
+    valid = mx.concatenate((frame.observation_present,
+        (mx.any(present, axis=-1) & frame.participant_present[:, None]).reshape(-1),
+        frame.cart_present, frame.team_present))
+    rows = mx.concatenate((linear(model.participant, observations), linear(model.quinn, pages).reshape(-1, model.participant.weight.shape[0]),
+        linear(model.cart, frame.carts), linear(model.team, frame.teams)))
+    source_valid = mx.concatenate((frame.context_present, frame.navigation_node_present,
+        frame.navigation_edge_present, frame.navigation_cell_present))
+    sources = mx.concatenate((linear(model.phil, frame.context),
+        model.neighborhood.encode(frame.navigation_nodes, frame.navigation_edges, frame.navigation_cells)))
+    sources = mx.where(source_valid[:, None], mx.arcsinh(sources) if nonlinear else sources, 0)
+    rows = mx.where(valid[:, None], mx.arcsinh(rows) if nonlinear else rows, 0)
+    owner_context = mx.broadcast_to(rows[frame.participant_rows, None, :], (*pages.shape[:2], rows.shape[-1])).reshape(-1, rows.shape[-1])
+    rows = rows + mx.concatenate((mx.zeros_like(rows[:observations.shape[0]]), owner_context,
+        mx.zeros((frame.carts.shape[0] + frame.teams.shape[0], rows.shape[-1]), dtype=rows.dtype)))
+    local = model.neighborhood(rows[:observations.shape[0]], sources, frame.neighborhood_indices,
+        frame.neighborhood_distances, frame.neighborhood_present & source_valid[frame.neighborhood_indices], frame.neighborhood_radius,
+        source_times=mx.concatenate((frame.context[:, 1], mx.zeros((sources.shape[0] - frame.context.shape[0],), dtype=rows.dtype))),
+        observer_times=frame.observations[:, 21], source_temporal=mx.arange(sources.shape[0]) < frame.context.shape[0], gram=nonlinear)
+    local = mx.where(frame.observation_present[:, None], local, 0)
+    row_local = mx.concatenate((local, mx.broadcast_to(local[frame.participant_rows, None, :],
+        (*pages.shape[:2], local.shape[-1])).reshape(-1, local.shape[-1]),
+        mx.zeros((frame.carts.shape[0] + frame.teams.shape[0], local.shape[-1]), dtype=rows.dtype)))
+    return mx.where(valid[:, None], rows + (mx.arcsinh(row_local) if nonlinear else row_local), 0), valid, local
 
-    k = norm(kay(wally, zed))
-    v = norm(val(wally, zed))
 
-    score = matrix_multiply_transpose_right(q, k) / (wally.w.d ** 0.5)
+def row_gram_context(model, teams, rivals, values, frame, global_context):
+    n, count = frame.layout.shape[:2]
+    global_values = matrix_multiply(rivals, global_context) / model.w.r_e ** .5
+    o, p, c = frame.observations.shape[0], n * count, frame.carts.shape[0]
+    spans = (slice(0, o), slice(o, o + p), slice(o + p, o + p + c), slice(o + p + c, None))
+    observation, pages, carts, team_rows = (teams[span] for span in spans)
+    observation_values, page_values, cart_values, team_values = (values[span] for span in spans)
+    grouped = mx.concatenate((observation[:, :, None] * observation_values[:, None, :],
+        paged_matrix.batched_cross(pages.reshape(n, count, model.w.r), page_values.reshape(n, count, model.w.d_ir)),
+        carts[:, :, None] * cart_values[:, None, :], team_rows[:, :, None] * team_values[:, None, :]))
+    labels = mx.concatenate((frame.observations[:, 1], frame.team_ids, frame.carts[:, 3], frame.teams[:, 0]))
+    membership = (labels[:, None] == frame.teams[None, :, 0]) & frame.team_present[None, :]
+    team_context = matrix_multiply(membership.astype(values.dtype).T, grouped.reshape(grouped.shape[0], -1))
+    contexts = matrix_multiply(membership.astype(values.dtype), team_context).reshape(grouped.shape)
+    outputs = mx.concatenate((mx.sum(observation[:, :, None] * contexts[:o], axis=1),
+        paged_matrix.batched_multiply(pages.reshape(n, count, model.w.r), contexts[o:o + n]).reshape(p, model.w.d_ir),
+        mx.sum(carts[:, :, None] * contexts[o + n:o + n + c], axis=1),
+        mx.sum(team_rows[:, :, None] * contexts[o + n + c:], axis=1)))
+    return global_values + outputs / model.w.r ** .5, mx.concatenate((teams, rivals), axis=-1)
 
-    participant_fusion_scale = float(
-        getattr(wally, "participant_fusion_scale", 1.0)
-        if participant_fusion_scale is None else participant_fusion_scale
-    )
-    same_team = team_ids[:, None] == team_ids[None, :]
-    coupling = participant_gram_matrix(wally, q, team_ids) * participant_fusion_scale
 
-    quality = mx.mean(mx.logaddexp(score, 0), axis=0)
-    inclusion = dee(quality, k)
-    projected = ir_query(wally, q)
-    same_count = mx.sum(same_team, axis=1, keepdims=True)
-    rival_count = q.shape[0] - same_count
-    normalizer = mx.where(
-        same_team, same_count, mx.maximum(rival_count, 1),
-    )
-    mixed = matrix_multiply(coupling / normalizer, projected)
-    ir = (
-        mixed[:, None, :]
-        + (score * inclusion[None, :])[:, :, None]
-        * ir_value(wally, v)[None, :, :]
-    )
-    scale_delta, scale_matrix_stats, scale_expert_load = scale_fuse(
-        wally, ir, execute_remote=execute_remote_scale,
-        residual_fusion_scale=residual_fusion_scale,
-    )
-    ir = norm(ir + scale_delta)
+def encode_source(wally, *values):
+    frame = ChorusArrays(*values)
+    rows, valid, local = embedded_rows(wally, frame, wally.w.d_x)
+    query = mx.where(valid[:, None], encode_rows(wally, rows), 0)
+    projected = ir_query(wally, query)
+    normalized = norm(query)
+    return projected, local, valid, linear(wally.team_metric, normalized), linear(wally.rival_metric, normalized), norm(projected)
 
-    dw_dt = gia_uma_dov(wally, ir)
 
-    weights_next = integrate(weights, dw_dt, delta)
-    control = dynamics(wally, q[:, None, :], ir)
-    future_query = norm(q[:, None, :] + dina_readout(wally, control.mean))
-    winner_guidance = vera_winnie(wally, future_query) - vera_winnie(wally, q)[:, None]
-    loser_guidance = vera_lou(wally, future_query) - vera_lou(wally, q)[:, None]
-    guidance = mx.where(semantics[:, 5:6] >= 0.5, winner_guidance, loser_guidance)
-    uncertainty = mx.tanh(mx.sqrt(mx.maximum(control.disagreement, 0)))
-    anticipated = (
-        weights_next
-        + control_weight * guidance
-        + exploration_weight * uncertainty
-    )
-    logits = measure_log_density(anticipated / tau(wally), action_mass)
+def encode_finish(wally, source, values, strength, global_context):
+    frame = ChorusArrays(*values)
+    projected, local, valid, teams, rivals, payload = source
+    fused, coupling = row_gram_context(wally, teams, rivals, payload, frame, global_context)
+    ir = mx.where(valid[:, None], projected + norm(fused) * strength, 0)
+    pages = mx.arange(frame.observations.shape[0], frame.observations.shape[0] + frame.layout.shape[0] * frame.layout.shape[1]).reshape(frame.layout.shape[:2])
+    return Encoded(ir, coupling, valid, frame.participant_rows, pages, local[frame.participant_rows])
 
-    allocation = mx.exp(normalized_log_probs(logits))
-    pooled = norm(mx.sum(ir * allocation[:, :, None], axis=1))
-    actuator_parameters = actuator(wally, ir)
-    return Strategy(
-        dw_dt=dw_dt,
-        logits=logits,
-        ir=ir,
-        query=q,
-        value_winnie=winnie(wally, pooled),
-        value_lou=lou(wally, pooled),
-        aux_winnie=vera_winnie(wally, q),
-        aux_lou=vera_lou(wally, q),
-        coupling=coupling,
-        belief=bea,
-        pooled=pooled,
-        weights=weights_next,
-        dee=inclusion,
-        guidance=guidance,
-        uncertainty=uncertainty,
-        scale_matrix_stats=scale_matrix_stats,
-        scale_expert_load=scale_expert_load,
-        controls=actuator_parameters[..., :3],
-        control_log_scale=actuator_parameters[..., 3:],
-        control_density=mx.ones((xan.shape[0],), dtype=xan.dtype),
-    )
 
-def dynamics(wally: Wally, y: mx.array, u: mx.array) -> Dynamics:
-    state = norm(dina_state(wally, y))
-    action = norm(dina_action(wally, u))
-    drift_first, drift_second = dina_drift(wally, state)
-    matrix_first, matrix_second = dina_matrix(wally, state)
-    first = drift_first + batched_matrix_vector(
-        matrix_first, action,
-    ) / (wally.w.d_u ** 0.5)
-    second = drift_second + batched_matrix_vector(
-        matrix_second, action,
-    ) / (wally.w.d_u ** 0.5)
-    matrix = 0.5 * (matrix_first + matrix_second)
-    return Dynamics(
-        mean=0.5 * (first + second),
-        first=first,
-        second=second,
-        matrix=matrix,
-        disagreement=mx.mean(mx.square(first - second), axis=-1),
-    )
+def encode(wally, *values):
+    source = encode_source(wally, *values[:-1])
+    cross = getattr(wally, 'cross_executor', matrix_multiply_transpose_left)
+    return encode_finish(wally, source, values[:-1], values[-1], cross(*source[-2:]))
 
-def log_probs(out: Strategy) -> mx.array:
-    return normalized_log_probs(out.logits)
 
-def control_logp_of(out: Strategy, actions: mx.array, controls: mx.array) -> mx.array:
-    mean = mx.take_along_axis(
-        out.controls, actions[:, None, None], axis=1,
-    )[:, 0, :]
-    log_scale = mx.take_along_axis(
-        out.control_log_scale, actions[:, None, None], axis=1,
-    )[:, 0, :]
-    standardized = (controls - mean) * mx.exp(-log_scale)
-    density_logp = -0.5 * mx.sum(
-        mx.square(standardized) + 2 * log_scale + math.log(2 * math.pi), axis=-1,
-    )
-    return density_logp * out.control_density
+def read_heads(model, encoded, rows, frame, statistics, load, balance):
+    own = mx.concatenate((encoded.own_rows[:, None], encoded.page_rows), axis=1)
+    valid = encoded.valid[own] & frame.participant_present[:, None]
+    ir = mx.where(valid[..., None], rows[own], 0)
+    projected = linear(model.heads, ir)
+    coordinates = projected[:, 1:, :-2] + projected[:, :1, :-2]
+    values = mx.sum(projected[..., -2:], axis=1)
+    rate = rate_distribution(coordinates, frame.layout, frame.participant_present)
+    return Strategy(rate, ir.reshape(frame.state.shape[0], -1), values[:, 0], values[:, 1],
+        mx.where(valid[..., None], encoded.coupling[own], 0),
+        encoded.local * frame.participant_present[:, None], statistics, load, balance)
 
-def sample_controls(out: Strategy, actions: mx.array, key: mx.array):
-    mean = mx.take_along_axis(
-        out.controls, actions[:, None, None], axis=1,
-    )[:, 0, :]
-    log_scale = mx.take_along_axis(
-        out.control_log_scale, actions[:, None, None], axis=1,
-    )[:, 0, :]
-    controls = mean + out.control_density[:, None] * mx.exp(log_scale) * mx.random.normal(mean.shape, key=key)
-    return controls, control_logp_of(out, actions, controls)
 
-def logp_of(out: Strategy, actions: mx.array, controls=None) -> mx.array:
-    discrete = mx.take_along_axis(log_probs(out), actions[:, None], axis=-1)[:, 0]
-    return discrete if controls is None else discrete + control_logp_of(out, actions, controls)
+def decode(wally, encoded, scale_delta, statistics, load, balance, frame):
+    mixed = mx.where(encoded.valid[:, None], encoded.ir + scale_delta, 0)
+    rows = mixed + gia_uma_dov(wally, mixed)
+    return read_heads(wally, encoded, rows, frame, statistics, load, balance)
 
-def act(out: Strategy, key: mx.array):
-    action_key, control_key = mx.random.split(key)
-    actions = mx.random.categorical(out.logits, key=action_key)
-    controls, control_logp = sample_controls(out, actions, control_key)
-    return actions, controls, logp_of(out, actions) + control_logp
 
-def integrate(w: mx.array, dw_dt: mx.array, delta: float) -> mx.array:
-    return mx.tanh(w + dw_dt * delta)
+def strategy(wally: Wally, *values, participant_fusion_scale=None, residual_fusion_scale=None, execute_remote_scale=True):
+    frame = ChorusArrays(*values)
+    strength = mx.array(getattr(wally, 'participant_fusion_scale', 1.0)
+        if participant_fusion_scale is None else participant_fusion_scale, dtype=frame.state.dtype)
+    row_encode = getattr(wally, 'row_encode', lambda *args: encode(wally, *args))
+    row_decode = getattr(wally, 'row_decode', lambda *args: decode(wally, *args))
+    encoded = row_encode(*values, strength)
+    scale_delta, statistics, load, balance = scale_fuse(wally, encoded.ir, execute_remote=execute_remote_scale,
+        residual_fusion_scale=residual_fusion_scale, valid=encoded.valid)
+    return row_decode(encoded, scale_delta, statistics, load, balance, frame)
+
+
+def logp_of(out, velocity, row_mask=None):
+    return rate_logp(out.rate, velocity, row_mask)
+
+
+def act(out, key):
+    return sample(out.rate, key)

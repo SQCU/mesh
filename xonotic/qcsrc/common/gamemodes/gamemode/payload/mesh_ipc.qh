@@ -33,3 +33,11 @@ float(float h, .float firstfield, entity first, .entity nextfield, float numedic
 #define MESH_KIND_CART 2
 #define MESH_KIND_EVENT 3
 #define MESH_KIND_STRATEGY 4
+#define MESH_KIND_TEAM 5
+
+void(entity bot, void(entity) callback) mesh_view_run = #659;
+void(entity bot, float target, float offset, float residual, float velocity, float source_time, float duration, float tau) mesh_view_set = #660;
+float(entity bot, float selector) mesh_view_stat = #661;
+float(float node, float tick) mesh_view_publish = #662;
+void(float episode, float winner) mesh_round_outcome = #663;
+#define MESH_KIND_STATE 6

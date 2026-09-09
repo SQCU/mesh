@@ -1,4 +1,5 @@
 #include "bot.qh"
+#include <common/gamemodes/gamemode/payload/mesh_ipc.qh>
 
 #include <common/constants.qh>
 #include <common/mapinfo.qh>
@@ -55,7 +56,7 @@ entity bot_spawn()
 	return bot;
 }
 
-void bot_think(entity this)
+void bot_think_stock(entity this)
 {
 	if (this.bot_nextthink > time)
 		return;
@@ -144,6 +145,11 @@ void bot_think(entity this)
 	}
 
 	this.bot_ai(this);
+}
+
+void bot_think(entity this)
+{
+	mesh_view_run(this, bot_think_stock);
 }
 
 void bot_setnameandstuff(entity this)

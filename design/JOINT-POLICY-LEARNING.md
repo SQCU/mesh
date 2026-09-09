@@ -1,5 +1,13 @@
 # Two objectives, one learning implementation
 
+The current input/IR/head/loss program is defined in
+[POLICY-PROGRAM.md](POLICY-PROGRAM.md). This page retains the objective distinction,
+experience-retention design and dated operational evidence. Historical launches
+below do not describe a currently running or verified deployment.
+
+The [September 4 prerequisite review](POLICY-SEMANTICS-REVIEW.md) records the recovered
+session, continuation and spatial repairs, executable coverage and remaining defects.
+
 September 4, 2026. This is the operator-requested mixed-team training intervention,
 not a claim that either objective has already demonstrated strategic superiority.
 
@@ -28,9 +36,9 @@ remaining slots with the second policy and shuffles the assignment. Every team g
 one behavior policy for that match. Both policies evaluate the same observed state;
 only the assigned policy's sampled output is sent for each participant.
 
-Per-policy actor masks select its own freshly generated behavior actions, excluding
-explicit uniform exploration and human controllers, and require the next observation's actual route sequence
-to identify that action. Value masks include all observed teams. The other
+Per-policy actor masks select its own behavior actions at their first observed
+application, excluding native-default and human controllers. The actual
+applied state sequence identifies the source request, including an older delayed request. Value masks include all observed teams. The other
 policy's actions are not treated as supervised demonstrations or as on-policy samples.
 The shared-backbone value gradient nevertheless changes counterfactual action outputs.
 Off-policy actor improvement from the other policy's actions is not implemented by
@@ -40,25 +48,20 @@ The initial runtime exposed a queued-observation defect: response 146 was being
 optimized while the observed players still used response 58. The responder now acts
 on the newest complete synchronized observation, counts coalesced older observations,
 and preserves all intervening perception and outcome events. PPO eligibility requires
-the server's applied route sequence to match the source action; an emitted response is
-not by itself evidence of application. The initial `joint-20260904` artifacts remain
-available but their optimization lineage is not reused by `joint-live-20260904`.
+the server's applied state sequence to match the source action; an emitted response is
+not by itself evidence of application. All pre-restoration policy resumables have
+been permanently deleted; their diagnostic logs are not a valid rating history for
+the checkpoint-control objective. That historical lineage was `checkpoint-control-live-20260904`.
 This checks application at the observed endpoint, not an exact causal decomposition
 of every intervening engine tick or multi-agent outcome.
 
 ## Loss and targets
 
-```text
-for policy in policies:
-    fresh = objective_defined_training_records(policy)
-    history = sample_configuration_then_match_then_state(policy.replay)
-    loss = mean(actor_loss(fresh))
-         + (1 - replay_weight) * mean(value_loss(fresh))
-         + replay_weight * mean(value_loss(history))
-         + existing_fresh_regularizers_and_dynamics_loss
-    gradient = globally_clip(derivative(loss, policy.parameters))
-    AdamW.update(policy.parameters, gradient)
-```
+Both policies use the single loss and optimizer implementation described in
+[POLICY-PROGRAM.md](POLICY-PROGRAM.md#optimization-and-execution). The former
+dynamics-ensemble, auxiliary query-imitation, entropy-floor and rate-penalty losses
+are absent. Actor, W/L value and ordinary MoE balancing losses train the same
+parameter tree.
 
 When history is empty its weight is zero and fresh value weight is one. The initial
 mixture gives historical and fresh value losses equal weight, independently of their
@@ -71,17 +74,35 @@ zero. Fresh strategy updates retain the existing role-specific TD objective. Ret
 strategy targets accumulate observed discounted rewards until a role change or actual
 round end. They are not old model predictions.
 
-Terminal-win targets are one for participants on the server-reported winning team and
-zero otherwise; an actual server-declared draw gives zero to every team. They are
-undiscounted terminal outcomes, span changes of leader, and do not inherit the strategy
-critic's role-change termination rule. Terminal policy optimization begins only after
-an outcome arrives, using retained current-round observations/actions. Both existing
-value heads fit that same terminal target on their respective role rows.
+Terminal-win rewards are zero on nonterminal transitions, one for participants on the
+server-reported winning team at termination, and zero for the other teams; a real draw
+gives zero to every team. On every fresh transition, including before the first observed
+win, its critic target is `r + continuation * V(next_state)` and its PPO advantage is
+that target minus `V(state)`. Both existing value heads estimate the same undiscounted
+terminal outcome on their respective role rows. The next state's role selects the next
+head even when leadership changes. The unit bootstrap discount preserves the specified
+eventual-win objective; strategy retains its discounted, role-terminated return.
+
+Both arms take exactly one AdamW step per attributed observation group, with the same
+fresh-state grouping, historical batch size, fresh/history loss weights, actor/value/
+balancing coefficients, clipping and learning rate. Every observed row participates in
+value learning; only each arm's own applied fresh behavior participates in its PPO loss.
+There is no sparse-reward warmup gate, outcome-only optimizer or terminal-only epoch
+budget. Uncalibrated values can produce unhelpful early advantages; that is measured,
+not used to postpone this arm's optimization.
+
+At a real outcome, retained terminal observations receive the actual winning-team label
+for later historical value learning. They are not reused for actor learning, and ending
+an episode takes zero additional optimizer steps in either arm. A terminal event known
+with a fresh transition supplies its reward and stops bootstrapping in that same shared
+update. A delayed label still annotates history without reclassifying old actions as
+fresh. Missing outcomes do not manufacture terminal zero targets.
 
 A shutdown, missing outcome or observation-context discontinuity is unlabelled, not a
 loss or draw. The joint supervisor waits for a published real outcome instead of
-assuming a wall-clock process lifetime is a completed game. The engine's own round
-timer may declare a winner or draw; that is an actual game outcome.
+assuming a wall-clock process lifetime is a completed game. The literal terminal
+condition is a held-checkpoint score threshold, including simultaneous-crossing draws.
+No round timer or delivered cart supplies a terminal label.
 
 Historical value targets describe the observed behavior-policy mixture, not exact
 current-policy counterfactual returns. They are an explicit predictive auxiliary bias
@@ -115,7 +136,7 @@ behavior age in optimizer updates is distinct from insertion age in the replay p
 ## Evidence and limitations
 
 Each running match publishes `learning.json`, detailed `telemetry.jsonl`, and an
-`outcome.json` after outcome-labelled optimization. `policy_updates` and `learning`
+`outcome.json` after outcome labelling and retention. `policy_updates` and `learning`
 are keyed by policy; losses, gradient norms, actor/value row masses, target variance,
 update counts, historical configurations/matches and pending-state counts remain
 separate. `matches.jsonl` retains both policy checkpoint artifacts and realized game
@@ -123,36 +144,51 @@ configurations. The server and worker logs remain part of the same match directo
 
 The first rollout uses matched residual width 128, hidden width 341, eight routed FFN
 banks and top-k two. This is an integration-scale comparison, not the default-width
-capacity result. Strategy updates happen online; terminal updates happen after round
-outcomes. Update counts and compute budgets consequently differ and are not yet a
-budget-matched algorithm comparison.
+capacity result. An implementation defect initially skipped all fresh terminal updates
+and took four sampled actor steps at each outcome. The old 4 → 4 → 8 → 8 → 12 history
+therefore documents an unmatched training schedule, not evidence about sparse terminal
+PPO's relative strength. The `fresh-attributed-v2` correction established matched observation cadence.
+The September 5 `first-execution-v3` schedule retains one combined step per observation
+while joining delayed actor sources and counting each critic interval once. See
+[POLICY-EXECUTION-CONTRACT.md](POLICY-EXECUTION-CONTRACT.md). Checkpoints retain their real cumulative counts and record
+`schedule_start_updates`; `schedule_updates` counts updates since this correction.
+Continuation preserves the already-unequal optimization history. Matched cadence from
+this boundary does not retroactively establish equal-budget initialization or Elo.
 
-Random policy-team counts change each policy's opportunity to win. Training outcomes
-are not automatically a two-player Elo dataset. Evaluation must rotate team slots,
-account for policy team exposure, use stable unseen configurations and retain actual
-matchup outcomes and uncertainty. Leader suppression alone is insufficient: recovery
+The retired `--replay-steps` responder argument is accepted with an explicit diagnostic
+while an already-running supervisor can still send it. It no longer creates a second
+optimizer schedule; newly started supervisors do not pass it.
+
+Random policy-team counts change each policy's opportunity to win. Mixed-policy
+matches already supply the evaluation stream: retain actual outcomes, policy/version
+history, team-slot assignments, exposure and uncertainty. This is not automatically a
+two-player Elo dataset, and it does not require a separate checkpoint tournament.
+Leader suppression alone is insufficient: recovery
 into contention and the controlled team's eventual success are the relevant outcomes.
 No claim of generalization, equal-budget superiority or learned coalition behavior
 follows from nonzero gradients or a declining loss.
 
 ## Live monitor and userspace participation
 
-The September 4 continuation of `joint-live-20260904` runs three-minute rounds and
-requests one native userspace client per match through `--human-counts 1` and
-`--human-client-command`. Joint schedules now honor those existing options. Client
-commands substitute the actual `{port}` for every launch; clients join the match and
-retire through the same curriculum lifecycle as their server. `{directory}` also
-resolves to the match artifact directory. A requested client is not counted as joined
-until the server observations contain its human-controller row.
+The September 4 restoration samples 4/8 teams and 2/3/4 lanes independently, with two
+participants per team, four checkpoints per lane, score limit 1,200 and rate one.
+One persistent native client is requested through `--human-counts 1` and
+`--human-client-command`. The endpoint, server process and client process persist
+across `changelevel`; match artifacts and learner contexts change. Client startup
+uses `cl_hook_gamestart_plc` to join after game initialization, not a guessed connection
+delay. `{directory}` resolves to a match artifact directory, so persistent client
+storage should instead use a run-level directory. A requested client is not counted
+as joined until server observations contain its human-controller row.
 
-The first verified client match had 32 teams, six carts and 33 participants, including
-one human-controlled player. The next had eight teams, twelve carts and nine players.
-The terminal policy checkpoint after the second launch retained 21 human-state rows
+Before game restoration, a verified client match had 32 teams, six carts and 33 participants,
+including one human-controlled player. Another had eight teams, twelve carts and nine players.
+The now-deleted terminal policy checkpoint after the second launch retained 21 human-state rows
 and zero human actor-eligible rows. Both value learners retain those observed states;
 solver suggestions and their probabilities are not represented as human behavior
-probabilities. The server sends suggestions to humans without applying the bot route.
+probabilities. This is a historical record of the retired suggestion interface;
+the current native state-rate output addresses captured bot views.
 
-The existing whole-mesh dashboard at `http://127.0.0.1:8787/` receives `match`,
+The generic whole-mesh telemetry channel receives `match`,
 `outcomes`, `learning.matrix_fusion`, and `learning.terminal_win` through the generic
 workload-measure publisher, alongside the literal J reports. Update counters, replay
 configuration/match coverage, target variance, actor/value row counts, loss components
@@ -161,6 +197,10 @@ outcomes with their own sample time. Row counts describe the last optimizer step
 gradient-step counts describe that response. Outcome wins and team-round exposures
 are responder-session counts attributed to the assigned team arm, not causal credit
 or Elo, especially when a team includes a human controller.
+The application dashboards are separate: `http://127.0.0.1:8795/j` for representation
+and server relationships, and `http://127.0.0.1:8795/policy` for learning, replay,
+checkpoint history and outcomes. They share one incremental reader and cached HTTP
+responses. The mesh page on 8787 retains its infrastructure responsibility.
 
 The node ring and mesh observer retain full measures only in their newest sample;
 older samples preserve lightweight workload/phase history and explicitly identify
@@ -168,11 +208,17 @@ that retention domain. Interactive polling requests `measures=scalars`, preservi
 scalar coordinates and array lengths without transmitting every covariance matrix.
 `http://127.0.0.1:8788/v1/latest` still provides the complete node record; append
 `?measures=scalars` for its compact projection. The mesh dashboard and its JSON
-endpoints use the compact projection. Expandable measure groups preserve their open
-state across refreshes; background tabs keep a low-cadence scalar heartbeat.
+endpoints use the compact projection. Application pages retain selector state across
+refreshes; background tabs poll at a lower cadence. Missing optimizer steps are gaps,
+not zeros. Historical rating requirements and known coverage limits are described in
+[APPLICATION-TELEMETRY.md](APPLICATION-TELEMETRY.md).
 The existing J measurement thread atomically retains the complete latest report per
-responder/episode as `j-measures.PID.GENERATION.json` in the match directory, so compact
+responder/episode as `j-measures.PID.GENERATION.npz` in the match directory, so compact
 interactive transport does not discard the literal numerical artifact.
+The full report is binary NumPy arrays plus a JSON metadata manifest. Telemetry
+carries scalar/array-shape summaries and an artifact descriptor; it no longer
+parses and republishes a second copy of the J covariance tensors. The application
+download and generic node artifact route stream the existing bytes.
 
 This corrects an observed monitoring failure: the old MacBook telemetry process grew
 to approximately 32 GB RSS, and a full node record measured 174,883,949 bytes. A compact
@@ -189,6 +235,14 @@ failure; absent updates are now represented without calling methods on `None`.
 These integration observations do not establish strategic improvement.
 
 ## Source ownership and control flow
+
+Continuation restores the complete parameter/optimizer/replay/random/counter state.
+A damaged or semantically incompatible source starts a complete fresh learner and
+reports its source counter separately; it does not continue the old update history.
+`checkpoint_audit.py` supplies the same compact numerical audit for offline inspection.
+Next observations retain their complete roster; `successor_rows` selects participant
+outputs after policy evaluation. Replay frame identity is independent of owner-local
+frame counters.
 
 `policy_contract.py` identifies objectives and architecture equivalence; `runtime.py`
 owns reward contracts; `online.py` owns both losses and the one optimizer application;

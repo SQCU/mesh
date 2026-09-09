@@ -1,0 +1,21 @@
+{
+  "run": ".build/representation-20260906/rdma-1788737418134255000",
+  "remote_run": "/Users/mdot/mesh-workloads/cartlane/runs/representation-20260906/rdma-1788737418134255000",
+  "both_policies_reached_updates": 8,
+  "failure": "Graceful responder shutdown exceeded 60 seconds while a J report expanded repeated labels; finally cleanup then saw an already exited PID and raised before writing the normal report.",
+  "observed_artifact_bytes": {
+    "manifest_npy": 3006398524
+  },
+  "observed_artifact_sizes_ls": {
+    "complete_npz": "4.3G",
+    "partial_npz": "6.0G",
+    "view_json": "384M"
+  },
+  "checkpoint_saved": true,
+  "learner_eventual_exit_observed": true,
+  "bridge_pid_after": {
+    "laptop": 83920,
+    "mini": 353
+  },
+  "interpretation": "Application reporting/verification failure; no evidence here of a kernel deadlock. The normal report was not written, so missing checks are not inferred."
+}

@@ -88,6 +88,8 @@ cvar_t cl_demo_mousegrab = {0, "cl_demo_mousegrab", "0", "Allows reading the mou
 cvar_t timedemo_screenshotframelist = {0, "timedemo_screenshotframelist", "", "when performing a timedemo, take screenshots of each frame in this space-separated list - example: 1 201 401"};
 cvar_t vid_touchscreen_outlinealpha = {0, "vid_touchscreen_outlinealpha", "0", "opacity of touchscreen area outlines"};
 cvar_t vid_touchscreen_overlayalpha = {0, "vid_touchscreen_overlayalpha", "0.25", "opacity of touchscreen area icons"};
+cvar_t cl_frame_report = {0, "cl_frame_report", "0", "batch passive frame interval, screen submission, swap and particle measurements to the console"};
+static int cl_frame_particles, cl_frame_draws;
 cvar_t r_speeds_graph = {CVAR_SAVE, "r_speeds_graph", "0", "display a graph of renderer statistics "};
 cvar_t r_speeds_graph_filter[8] =
 {
@@ -1174,6 +1176,8 @@ static void R_TimeReport_EndFrame(void)
 		r_draw2d_force = false;
 	}
 
+	cl_frame_particles += r_refdef.stats[r_stat_particles];
+	cl_frame_draws += r_refdef.stats[r_stat_draws];
 	memset(&r_refdef.stats, 0, sizeof(r_refdef.stats));
 }
 
@@ -1200,6 +1204,7 @@ void CL_Screen_Shutdown(void)
 void CL_Screen_Init(void)
 {
 	int i;
+	Cvar_RegisterVariable (&cl_frame_report);
 	Cvar_RegisterVariable (&scr_fov);
 	Cvar_RegisterVariable (&scr_viewsize);
 	Cvar_RegisterVariable (&scr_conalpha);
@@ -2475,6 +2480,8 @@ qboolean R_Stereo_Active(void)
 }
 
 extern cvar_t cl_minfps;
+extern cvar_t cl_maxfps;
+extern cvar_t cl_maxidlefps;
 extern cvar_t cl_minfps_fade;
 extern cvar_t cl_minfps_qualitymax;
 extern cvar_t cl_minfps_qualitymin;
@@ -2483,22 +2490,49 @@ extern cvar_t cl_minfps_qualityhysteresis;
 extern cvar_t cl_minfps_qualitystepmax;
 extern cvar_t cl_minfps_force;
 static double cl_updatescreen_quality = 1;
+static void CL_FrameReport(double start, double swapstart, double end)
+{
+	static double previous, began;
+	static unsigned int count;
+	static char rows[MAX_INPUTLINE / 2];
+	static size_t used;
+	if (previous)
+	{
+		used += dpsnprintf(rows + used, sizeof(rows) - used, "%s[%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.3f]",
+			count ? "," : "", cl.time, (end - previous) * 1000, (swapstart - start) * 1000, (end - swapstart) * 1000,
+			cl_frame_particles, cl_frame_draws, vid_activewindow, vid_hidden, cl_updatescreen_quality);
+		count++;
+	}
+	else
+		began = end;
+	previous = end;
+	if (end - began >= 1 || used > sizeof(rows) - 256)
+	{
+		Con_Printf("{\"kind\":\"client_frames\",\"schema\":1,\"end\":%.6f,\"vsync\":%d,\"width\":%d,\"height\":%d,\"fields\":[\"game_t\",\"interval_ms\",\"screen_ms\",\"swap_ms\",\"particles\",\"draws\",\"active\",\"hidden\",\"quality\"],\"rows\":[%s]}\n",
+			end, vid_vsync.integer, vid.width, vid.height, rows);
+		began = end;
+		count = used = 0;
+		rows[0] = 0;
+	}
+}
+
 void CL_UpdateScreen(void)
 {
 	vec3_t vieworigin;
-	static double drawscreenstart = 0.0;
-	double drawscreendelta;
+	static double drawscreenstart = 0.0, drawscreenend = 0.0;
+	double drawscreendelta, swapstart;
 	float conwidth, conheight;
 	r_viewport_t viewport;
 
 	if(drawscreenstart)
 	{
-		drawscreendelta = Sys_DirtyTime() - drawscreenstart;
+		drawscreendelta = drawscreenend - drawscreenstart;
 		if (cl_minfps.value > 0 && (cl_minfps_force.integer || !(cls.timedemo || (cls.capturevideo.active && !cls.capturevideo.realtime))) && drawscreendelta >= 0 && drawscreendelta < 60)
 		{
 
 			double actualframetime;
 			double targetframetime;
+			double maxfps = (vid_activewindow ? cl_maxfps : cl_maxidlefps).value;
 			double adjust;
 			double f;
 			double h;
@@ -2506,7 +2540,7 @@ void CL_UpdateScreen(void)
 			r_refdef.lastdrawscreentime += (drawscreendelta - r_refdef.lastdrawscreentime) * cl_minfps_fade.value;
 
 			actualframetime = r_refdef.lastdrawscreentime;
-			targetframetime = (1.0 / cl_minfps.value);
+			targetframetime = 1.0 / (maxfps >= 1 && !cls.timedemo && !cls.capturevideo.active ? min(cl_minfps.value, maxfps) : cl_minfps.value);
 
 			h = cl_updatescreen_quality * cl_minfps_qualityhysteresis.value;
 
@@ -2529,6 +2563,7 @@ void CL_UpdateScreen(void)
 	}
 
 	drawscreenstart = Sys_DirtyTime();
+	cl_frame_particles = cl_frame_draws = 0;
 
 	Sbar_ShowFPS_Update();
 
@@ -2714,7 +2749,11 @@ void CL_UpdateScreen(void)
 	else
 		VID_SetMouse(vid.fullscreen, vid_mouse.integer && !cl.csqc_wantsmousemove && cl_prydoncursor.integer <= 0 && (!cls.demoplayback || cl_demo_mousegrab.integer) && !vid_touchscreen.integer, !vid_touchscreen.integer);
 
+	swapstart = cl_frame_report.integer ? Sys_DirtyTime() : 0;
 	VID_Finish();
+	drawscreenend = Sys_DirtyTime();
+	if (cl_frame_report.integer)
+		CL_FrameReport(drawscreenstart, swapstart, drawscreenend);
 }
 
 void CL_Screen_NewMap(void)

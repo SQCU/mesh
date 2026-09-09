@@ -36,14 +36,10 @@ int autocvar_g_payload_push_cap = 3;
 float autocvar_g_payload_push_falloff = 1;
 float autocvar_g_payload_contest_speed = 24;
 float autocvar_g_payload_reverse_speed = 14;
-float autocvar_g_payload_idle_time = 8;
-float autocvar_g_payload_rollback_speed = 20;
 float autocvar_g_payload_score_rate = 0.01;
 float autocvar_g_payload_block_rate = 1;
 float autocvar_g_payload_stall_eps = 1;
-float autocvar_g_payload_point_score = 1;
-float autocvar_g_payload_capture_radius = 64;
-float autocvar_g_payload_round_timelimit = 300;
+float autocvar_g_payload_checkpoint_rate = 1;
 float autocvar_g_payload_warmup = 5;
 float autocvar_g_payload_node_fade_dist = 1100;
 int autocvar_g_payload_pathlinks = 1;
@@ -52,8 +48,6 @@ int autocvar_g_payload_node_sprites = 0;
 
 .float plc_in;
 .float plc_block_accum;
-.float plc_rollback_target;
-.bool plc_rollback_active;
 
 void payload_EventLog(string mode, float t)
 {
@@ -176,6 +170,33 @@ bool payload_link_send(entity this, entity to, int sendflags)
 	return true;
 }
 
+float payload_projected_time;
+int payload_projected_ties;
+
+int payload_projected_winner()
+{
+	int leader = 0;
+	payload_projected_time = 0;
+	payload_projected_ties = 0;
+	for(int j = 1; j <= payload_teams; ++j)
+	{
+		float rate = payload_checkpoints_held[j] * autocvar_g_payload_checkpoint_rate;
+		if(rate > 0 || payload_score[j] >= autocvar_g_payload_point_limit)
+		{
+			float remaining = payload_score[j] >= autocvar_g_payload_point_limit ? 0 : (autocvar_g_payload_point_limit - payload_score[j]) / rate;
+			if(!payload_projected_ties || remaining < payload_projected_time)
+			{
+				payload_projected_time = remaining;
+				leader = j;
+				payload_projected_ties = 1;
+			}
+			else if(remaining == payload_projected_time)
+				++payload_projected_ties;
+		}
+	}
+	return payload_projected_ties == 1 ? leader : 0;
+}
+
 bool payload_cart_state_send(entity this, entity to, int sendflags)
 {
 	entity cart = this.owner;
@@ -190,6 +211,18 @@ bool payload_cart_state_send(entity this, entity to, int sendflags)
 	WriteShort(MSG_ENTITY, cart.plc_home);
 	WriteByte(MSG_ENTITY, bound(0, cart.plc_contest * 255, 255));
 	WriteByte(MSG_ENTITY, boolean(cart.plc_speed_now < -autocvar_g_payload_stall_eps) | (boolean(fabs(cart.plc_speed_now) <= autocvar_g_payload_stall_eps) << 1));
+	if(cart.plc_cart_id == 0)
+	{
+		int leader = payload_projected_winner();
+		if(payload_score_finished)
+			leader = payload_score_winner;
+		WriteShort(MSG_ENTITY, leader);
+		WriteShort(MSG_ENTITY, payload_projected_ties);
+		WriteByte(MSG_ENTITY, payload_score_finished);
+		WriteFloat(MSG_ENTITY, payload_score[leader]);
+		WriteFloat(MSG_ENTITY, autocvar_g_payload_point_limit);
+		WriteFloat(MSG_ENTITY, payload_projected_time);
+	}
 	return true;
 }
 
@@ -223,44 +256,45 @@ void payload_update_links(entity cart)
 	});
 }
 
-void payload_bank_points(entity this, int ctrl, float s_prev, float s_new)
+void payload_integrate_score()
 {
-	int t = Team_IndexToTeam(ctrl);
-	IL_EACH(g_payload_nodes, it.plc_cart == this && it.plc_dist > s_prev && it.plc_dist <= s_new,
+	float dt = max(0, time - payload_score_time);
+	payload_score_time = time;
+	if(game_stopped || !round_handler_IsRoundStarted() || payload_score_finished)
+		return;
+	int winner = payload_projected_winner();
+	if(payload_projected_ties && payload_projected_time <= dt)
 	{
-		if(it.plc_bank_team == ctrl)
-			continue;
-		it.plc_banked = 1;
-		it.plc_bank_team = ctrl;
-		payload_round_banks[ctrl] += 1;
-		TeamScore_AddToTeam(t, ST_PAYLOAD_POINTS, autocvar_g_payload_point_score);
-		LOG_INFO(strcat("payload: bank cart ", ftos(this.plc_cart_id), " team ", ftos(t),
-			" point ", ftos(it.plc_idx), " s ", ftos(it.plc_dist)));
-		payload_EventLog(strcat("bank:", ftos(this.plc_cart_id), ":", ftos(it.plc_idx)), t);
-		if(it.sprite)
-			WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, Team_ColorRGB(t));
-	});
+		dt = payload_projected_time;
+		payload_score_finished = true;
+		payload_score_winner = winner;
+	}
+	for(int j = 1; j <= payload_teams; ++j)
+	{
+		float before = payload_score[j];
+		payload_score[j] += dt * payload_checkpoints_held[j] * autocvar_g_payload_checkpoint_rate;
+		TeamScore_AddToTeam(Team_IndexToTeam(j), ST_PAYLOAD_POINTS, floor(payload_score[j]) - floor(before));
+	}
 }
 
-void payload_unbank_points(entity this, float s_prev, float s_new)
+void payload_checkpoint_control(entity this, int ctrl, float s)
 {
-
-	IL_EACH(g_payload_nodes, it.plc_cart == this && it.plc_dist <= s_prev && it.plc_dist > s_new,
+	this.plc_checkpoint_depth = 0;
+	IL_EACH(g_payload_nodes, it.plc_cart == this && (it.spawnflags & PLC_CHECKPOINT),
 	{
-		if(!it.plc_banked)
-			continue;
-		int ct = it.plc_bank_team;
-		int t = Team_IndexToTeam(ct);
-		it.plc_banked = 0;
-		it.plc_bank_team = 0;
-		if(payload_round_banks[ct] > 0)
-			payload_round_banks[ct] -= 1;
-		TeamScore_AddToTeam(t, ST_PAYLOAD_POINTS, -autocvar_g_payload_point_score);
-		LOG_INFO(strcat("payload: unbank cart ", ftos(this.plc_cart_id), " team ", ftos(t),
-			" point ", ftos(it.plc_idx), " s ", ftos(it.plc_dist)));
-		payload_EventLog(strcat("unbank:", ftos(this.plc_cart_id), ":", ftos(it.plc_idx)), t);
-		if(it.sprite)
-			WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT, '0.5 0.5 0.5');
+		int owner = it.plc_dist <= s ? ctrl : 0;
+		this.plc_checkpoint_depth += owner > 0;
+		if(owner != it.plc_bank_team)
+		{
+			payload_checkpoints_held[it.plc_bank_team] -= it.plc_bank_team > 0;
+			payload_checkpoints_held[owner] += owner > 0;
+			it.plc_bank_team = owner;
+			it.plc_banked = owner > 0;
+			LOG_INFO(sprintf("payload: checkpoint cart %d node %d owner %d", this.plc_cart_id, it.plc_idx, owner));
+			if(it.sprite)
+				WaypointSprite_UpdateTeamRadar(it.sprite, RADARICON_WAYPOINT,
+					owner ? Team_ColorRGB(Team_IndexToTeam(owner)) : '0.5 0.5 0.5');
+		}
 	});
 }
 
@@ -278,8 +312,9 @@ void payload_clear_progress(entity this)
 void payload_think(entity this)
 {
 	this.nextthink = this.ltime + PLC_TICK;
+	payload_integrate_score();
 
-	bool live = !game_stopped && time >= game_starttime
+	bool live = !game_stopped && !payload_score_finished && time >= game_starttime
 		&& (!round_handler_IsActive() || round_handler_IsRoundStarted());
 
 	payload_occupancy(this);
@@ -331,10 +366,7 @@ void payload_think(entity this)
 	if(total <= 0)
 		this.plc_idle += PLC_TICK;
 	else
-	{
 		this.plc_idle = 0;
-		this.plc_rollback_active = false;
-	}
 
 	float v;
 	if(color && wA > 0)
@@ -349,22 +381,6 @@ void payload_think(entity this)
 		v = -autocvar_g_payload_reverse_speed * oppw;
 		v = bound(-autocvar_g_payload_max_speed, v, 0);
 	}
-	else if(this.plc_s > 0 && this.plc_idle >= autocvar_g_payload_idle_time)
-	{
-		if(!this.plc_rollback_active)
-		{
-			this.plc_rollback_target = 0;
-			IL_EACH(g_payload_nodes,
-				it.plc_cart == this && (it.spawnflags & PLC_CHECKPOINT)
-				&& it.plc_dist < this.plc_s - autocvar_g_payload_stall_eps,
-			{
-				this.plc_rollback_target = max(this.plc_rollback_target, it.plc_dist);
-			});
-			this.plc_rollback_active = true;
-		}
-		v = this.plc_s > this.plc_rollback_target
-			? -autocvar_g_payload_rollback_speed : 0;
-	}
 	else
 	{
 
@@ -373,8 +389,7 @@ void payload_think(entity this)
 
 	v = live ? v : 0;
 	float s_prev = this.plc_s;
-	float s_floor = this.plc_rollback_active ? this.plc_rollback_target : 0;
-	float s_new = bound(s_floor, this.plc_s + v * PLC_TICK, this.plc_length);
+	float s_new = bound(0, this.plc_s + v * PLC_TICK, this.plc_length);
 	this.plc_s = s_new;
 	this.plc_speed_now = (s_new - s_prev) / PLC_TICK;
 
@@ -388,10 +403,7 @@ void payload_think(entity this)
 			this.angles = vectoangles(ahead);
 	}
 
-	if(color && s_new > s_prev)
-		payload_bank_points(this, color, s_prev, s_new);
-	if(s_new < s_prev)
-		payload_unbank_points(this, s_prev, s_new);
+	payload_checkpoint_control(this, color, s_new);
 	if(s_new <= 0 && s_prev > 0)
 	{
 		payload_clear_progress(this);
@@ -442,10 +454,9 @@ void payload_cart_reset(entity this)
 	this.plc_s = 0;
 	this.plc_idle = 0;
 	this.plc_ctrl = 0;
+	this.plc_checkpoint_depth = 0;
 	this.velocity = '0 0 0';
 	this.plc_speed_now = 0;
-	this.plc_rollback_target = 0;
-	this.plc_rollback_active = false;
 	payload_clear_progress(this);
 	setorigin(this, payload_pos(this, 0) - this.view_ofs);
 }
@@ -476,6 +487,7 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 		LOG_INFO("payload: func_plc_cart has no reachable plc_path, using a single node at its own origin");
 	}
 	this.plc_first = first;
+	this.plc_checkpoint_count = 0;
 
 	entity prev = NULL;
 	entity node = first;
@@ -493,6 +505,7 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 		node.plc_prev = prev;
 		node.plc_cart = this;
 		node.plc_idx = guard;
+		this.plc_checkpoint_count += (node.spawnflags & PLC_CHECKPOINT) != 0;
 		++guard;
 		if(node.curvetarget != "")
 			node.plc_curve = find(NULL, targetname, node.curvetarget);
@@ -507,6 +520,7 @@ void payload_path_configure(entity this, entity first, bool register_cart)
 			nxt = find(NULL, targetname, node.target);
 		if(nxt == first || (nxt && nxt.plc_prev))
 			nxt = NULL;
+		node.plc_next = nxt;
 		prev = node;
 		node = nxt;
 	}
@@ -601,27 +615,13 @@ bool payload_cart_supports_player(entity cart)
 	return !trace_startsolid && trace_ent == cart && fabs(trace_endpos.z - stand.z) <= 1;
 }
 
-int payload_leading_team()
-{
-	int bestj = 0;
-	float bestb = 0;
-	int ties = 0;
-	for(int j = 1; j <= NUM_TEAMS; ++j)
-	{
-		if(payload_round_banks[j] > bestb)
-		{
-			bestb = payload_round_banks[j];
-			bestj = j;
-			ties = 1;
-		}
-		else if(payload_round_banks[j] == bestb && bestb > 0)
-			++ties;
-	}
-	return (bestj && ties == 1) ? Team_IndexToTeam(bestj) : 0;
-}
-
 void payload_RoundEnd(int winner_team)
 {
+	mesh_round_outcome(payload_episode, payload_score_winner);
+	string outcome = sprintf("{\"event\":\"server_outcome\",\"contract\":\"checkpoint-control-integral-v1\",\"map\":\"%s\",\"episode\":%d,\"time\":%.9g,\"actor_team\":%d,\"score_limit\":%.9g,\"scores\":[", mapname, payload_episode, time, payload_score_winner, autocvar_g_payload_point_limit);
+	for(int j = 1; j <= payload_teams; ++j)
+		outcome = strcat(outcome, (j > 1 ? "," : ""), sprintf("%.9g", payload_score[j]));
+	print("MESH_OUTCOME ", outcome, "]}\n");
 	payload_str_round(winner_team > 0 ? Team_TeamToIndex(winner_team) : 0);
 	if(winner_team > 0)
 	{
@@ -636,8 +636,7 @@ void payload_RoundEnd(int winner_team)
 			FOREACH_CLIENT(true, { centerprint(it, result); });
 			bprint(result, "\n");
 		}
-		TeamScore_AddToTeam(winner_team, ST_PAYLOAD_CAPS, +1);
-		payload_EventLog("capture", winner_team);
+		payload_EventLog("score_win", winner_team);
 	}
 	else
 	{
@@ -647,28 +646,17 @@ void payload_RoundEnd(int winner_team)
 	}
 
 	game_stopped = true;
-	round_handler_Init(5, autocvar_g_payload_warmup, autocvar_g_payload_round_timelimit);
+	round_handler_Init(5, autocvar_g_payload_warmup, 0);
 }
 
 bool Payload_CheckWinner()
 {
-	if(round_handler_GetEndTime() > 0 && round_handler_GetEndTime() - time <= 0)
+	payload_integrate_score();
+	if(payload_score_finished)
 	{
-		payload_RoundEnd(payload_leading_team());
+		payload_RoundEnd(payload_score_winner ? Team_IndexToTeam(payload_score_winner) : 0);
 		return true;
 	}
-
-	IL_EACH(g_payload_carts, true,
-	{
-		if(it.plc_ctrl && it.plc_length > 0
-			&& it.plc_s >= it.plc_length - autocvar_g_payload_capture_radius)
-		{
-			int t = Team_IndexToTeam(it.plc_ctrl);
-			LOG_INFO(strcat("payload: cart ", ftos(it.plc_cart_id), " delivered by team ", ftos(t)));
-			payload_RoundEnd(t);
-			return true;
-		}
-	});
 	return false;
 }
 
@@ -684,51 +672,18 @@ void Payload_RoundStart()
 		it.player_blocked = false;
 		payload_strategy_reset_player(it);
 	});
-	for(int j = 0; j <= NUM_TEAMS; ++j)
-		payload_round_banks[j] = 0;
-	IL_EACH(g_payload_carts, true, { payload_cart_reset(it); });
-}
-
-void havocbot_goalrating_payload(entity this, float ratingscale)
-{
-
-	IL_EACH(g_payload_carts, true,
+	for(int j = 0; j <= payload_teams; ++j)
 	{
-		navigation_routerating(this, it, ratingscale, 5000);
-	});
-
-	havocbot_goalrating_strategy(this, ratingscale);
-}
-
-void havocbot_role_payload(entity this)
-{
-	if(IS_DEAD(this))
-		return;
-
-	if(navigation_goalrating_timeout(this))
-	{
-		navigation_goalrating_start(this);
-		havocbot_goalrating_payload(this, 20000);
-		havocbot_goalrating_items(this, 10000, this.origin, 8000);
-		havocbot_goalrating_waypoints(this, 1, this.origin, 3000);
-		navigation_goalrating_end(this);
-		this.plc_str_goal_entity = navigation_bestgoal;
-		payload_strategy_entity_target(this, navigation_bestgoal);
-		this.plc_str_goal_seq = this.plc_str_response_seq;
-		this.plc_str_goal_latency = max(0, time - this.plc_str_response_time);
-		navigation_goalrating_timeout_set(this);
-		if(this.plc_str_commit > 0)
-			navigation_goalrating_timeout_extend_if_needed(this, this.plc_str_commit);
+		if(j > 0)
+			TeamScore_AddToTeam(Team_IndexToTeam(j), ST_PAYLOAD_POINTS, -floor(payload_score[j]));
+		payload_checkpoints_held[j] = 0;
+		payload_score[j] = 0;
 	}
-}
-
-MUTATOR_HOOKFUNCTION(plc, HavocBot_ChooseRole)
-{
-	entity bot = M_ARGV(0, entity);
-
-	bot.havocbot_role = havocbot_role_payload;
-	navigation_goalrating_timeout_extend_if_needed(bot, min(1.5, 0.05 * etof(bot)));
-	return true;
+	payload_score_time = time;
+	payload_score_winner = 0;
+	payload_score_finished = false;
+	++payload_episode;
+	IL_EACH(g_payload_carts, true, { payload_cart_reset(it); });
 }
 
 MUTATOR_HOOKFUNCTION(plc, TeamBalance_CheckAllowedTeams)
@@ -757,7 +712,6 @@ MUTATOR_HOOKFUNCTION(plc, PlayerSpawn)
 	player.player_blocked = !round_handler_IsRoundStarted();
 	player.plc_str_spawn_stamp2 = time;
 	player.plc_str_death_stamp = 0;
-	player.plc_str_spawn_applied = 0;
 }
 
 MUTATOR_HOOKFUNCTION(plc, PlayerDies)
@@ -765,7 +719,6 @@ MUTATOR_HOOKFUNCTION(plc, PlayerDies)
 	entity attacker = M_ARGV(1, entity);
 	entity player = M_ARGV(2, entity);
 	player.plc_str_death_stamp = time;
-	player.plc_str_spawn_applied = 0;
 	player.plc_str_deaths += 1;
 	payload_str_measure(player, PLC_OUTCOME_DEATHS, 1);
 	if (IS_PLAYER(attacker) && attacker != player && DIFF_TEAM(attacker, player))
@@ -803,18 +756,6 @@ MUTATOR_HOOKFUNCTION(plc, ItemTouched)
 	}
 }
 
-MUTATOR_HOOKFUNCTION(plc, PlayerPreThink)
-{
-	entity player = M_ARGV(0, entity);
-	if(player.plc_str_death_stamp > 0 && player.plc_str_spawn != player.plc_str_spawn_applied)
-	{
-		float delta = player.plc_str_spawn - player.plc_str_spawn_applied;
-		player.respawn_time = Spawn_SwizzleTime(player, max(time, player.respawn_time + delta));
-		player.respawn_time_max = max(player.respawn_time, player.respawn_time_max + delta);
-		player.plc_str_spawn_applied = player.plc_str_spawn;
-	}
-}
-
 MUTATOR_HOOKFUNCTION(plc, ClientConnect)
 {
 	entity player = M_ARGV(0, entity);
@@ -844,17 +785,6 @@ spawnfunc(plc_path)
 	this.spawnfunc_checked = true;
 }
 
-spawnfunc(plc_goal)
-{
-	if(!g_payload)
-	{
-		delete(this);
-		return;
-	}
-	this.spawnfunc_checked = true;
-	this.team = Team_IndexToTeam(this.cnt + 1);
-}
-
 spawnfunc(plc_team)
 {
 	if(!g_payload || autocvar_g_payload_teams_override >= 2)
@@ -869,8 +799,7 @@ spawnfunc(plc_team)
 void ScoreRules_payload(int teams)
 {
 	GameRules_scoring(teams, SFL_SORT_PRIO_PRIMARY, 0, {
-		field_team(ST_PAYLOAD_CAPS, "caps", SFL_SORT_PRIO_PRIMARY);
-		field_team(ST_PAYLOAD_POINTS, "points", 0);
+		field_team(ST_PAYLOAD_POINTS, "points", SFL_SORT_PRIO_PRIMARY);
 		field(SP_PAYLOAD_PUSH, "push", 0);
 		field(SP_PAYLOAD_BLOCK, "block", 0);
 	});
@@ -885,11 +814,9 @@ void payload_SpawnTeam(int teamcolor)
 	e.spawnfunc_checked = true;
 }
 
-int payload_goal_team_count()
+int payload_team_count()
 {
 	int teams = 0;
-	for(entity g = findchain(classname, "plc_goal"); g; g = g.chain)
-		teams = max(teams, Team_TeamToIndex(g.team));
 	for(entity t = findchain(classname, "plc_team"); t; t = t.chain)
 		teams = max(teams, Team_TeamToIndex(t.team));
 	return teams;
@@ -897,7 +824,7 @@ int payload_goal_team_count()
 
 void payload_DelayedInit(entity this)
 {
-	payload_teams = payload_goal_team_count();
+	payload_teams = payload_team_count();
 
 	if(find(NULL, classname, "plc_team") == NULL || autocvar_g_payload_teams_override >= 2)
 	{
@@ -911,7 +838,7 @@ void payload_DelayedInit(entity this)
 	else
 	{
 		entity balance = TeamBalance_CheckAllowedTeams(NULL);
-		payload_teams = payload_goal_team_count();
+		payload_teams = payload_team_count();
 		TeamBalance_Destroy(balance);
 	}
 
@@ -919,7 +846,7 @@ void payload_DelayedInit(entity this)
 	LOG_INFO(strcat("payload: teams ", ftos(payload_teams), ", carts ", ftos(payload_cart_count)));
 
 	round_handler_Spawn(Payload_CheckPlayers, Payload_CheckWinner, Payload_RoundStart);
-	round_handler_Init(5, autocvar_g_payload_warmup, autocvar_g_payload_round_timelimit);
+	round_handler_Init(5, autocvar_g_payload_warmup, 0);
 }
 
 void payload_Initialize()

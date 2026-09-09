@@ -55,8 +55,6 @@ def summarize(rows):
     resources = defaultdict(list)
     resource_change = defaultdict(list)
     outcomes = defaultdict(float)
-    latencies = defaultdict(list)
-    focus = None
     damage_focus = None
     kill_focus = None
     previous = None
@@ -65,22 +63,15 @@ def summarize(rows):
             behavior[assignment.get("behavior", "unknown")] += 1
             controllers[assignment.get("controller", "unknown")] += 1
             counts["assignments"] += 1
-            counts["response_observed"] += int(assignment.get("observed_response_seq", 0) > 0)
-            for key in ("target_resolved", "goal_match", "target_touch", "routed_current", "goal_current", "touch_current"):
-                counts[key] += int(bool(assignment.get(key)))
-            for key in ("response_age", "route_latency", "goal_latency", "touch_latency"):
-                value = assignment.get(key)
-                if isinstance(value, (int, float)) and np.isfinite(value) and value >= 0:
-                    latencies[key].append(float(value))
+            counts["response_observed"] += int(assignment.get("applied_response_seq", 0) > 0)
+            counts["source_matched"] += int(bool(assignment.get("applied_state_current")))
+            counts["first_execution"] += int(bool(assignment.get("first_execution")))
             for routed in assignment.get("routed_outcomes") or ():
                 counts["routed_outcome_intervals"] += 1
                 for key, value in (routed.get("outcomes") or {}).items():
                     if isinstance(value, (int, float)) and np.isfinite(value):
                         outcomes[key] += float(value)
         k = int(row.get("k") or 0)
-        if k > 0 and (damage_focus is None or damage_focus.shape != (k, k)):
-            damage_focus = np.zeros((k, k), dtype=np.float64)
-            kill_focus = np.zeros((k, k), dtype=np.float64)
         for event in row.get("realized_events") or []:
             kind = event.get("kind")
             counts[f"event_{kind}"] += 1
@@ -92,15 +83,19 @@ def summarize(rows):
             counts["event_value_numeric"] += int(numeric)
             finite = bool(numeric and np.isfinite(source_value))
             counts["event_value_finite"] += int(finite)
+            if kind == "damage" and finite:
+                outcomes["realized_damage"] += float(source_value)
             if kind == "damage" and finite and 0 < actor <= k and 0 < subject <= k:
+                if damage_focus is None or damage_focus.shape != (k, k):
+                    damage_focus = np.zeros((k, k), dtype=np.float64)
                 value = float(source_value)
                 damage_focus[actor - 1, subject - 1] += value
-                outcomes["aligned_damage"] += value * int(bool(event.get("aligned_target")))
             if kind == "kill" and 0 < actor <= k and 0 < subject <= k:
+                if kill_focus is None or kill_focus.shape != (k, k):
+                    kill_focus = np.zeros((k, k), dtype=np.float64)
                 kill_focus[actor - 1, subject - 1] += 1
-                outcomes["aligned_kills"] += int(bool(event.get("aligned_target")))
-            if kind == "capture":
-                outcomes[f"capture_team_{actor}"] += 1
+            if kind == "score_win":
+                outcomes[f"score_win_team_{actor}"] += 1
             if kind == "tie":
                 outcomes["ties"] += 1
         for key, value in (row.get("update") or {}).items():
@@ -109,9 +104,6 @@ def summarize(rows):
         for team in row.get("resources") or []:
             for key, value in resource_fields(team).items():
                 resources[key].append(value)
-        current_focus = np.asarray(row.get("strategy_focus") or [], dtype=np.int64)
-        if current_focus.ndim == 2 and current_focus.size:
-            focus = current_focus.copy() if focus is None or focus.shape != current_focus.shape else focus + current_focus
         shape = (row.get("k"), row.get("j"), row.get("l"))
         previous_shape = None if previous is None else (previous.get("k"), previous.get("j"), previous.get("l"))
         if previous is not None and shape == previous_shape:
@@ -138,12 +130,6 @@ def summarize(rows):
                     for key in before_values.keys() & after_values.keys():
                         resource_change[key].append(abs(after_values[key] - before_values[key]))
         previous = row
-    latency_summary = {
-        key: {"count": len(value), "p50": float(np.quantile(value, 0.5)),
-              "p95": float(np.quantile(value, 0.95)), "max": float(np.max(value))}
-        for key, value in latencies.items() if value
-    }
-    assignments = counts["assignments"]
     return {
         "ticks": len(rows), "transitions": counts["transitions"],
         "cart_changes": counts["cart_changes"], "winner_flips": counts["winner_flips"],
@@ -153,16 +139,11 @@ def summarize(rows):
         "loser_acquisition": quotient(counts["acquired"], counts["acquisition_trials"]),
         "loser_acquisition_trials": counts["acquisition_trials"],
         "behavior_rows": dict(behavior), "controller_rows": dict(controllers),
-        "causal": {
+        "application": {
             "assignments": counts["assignments"],
             "response_observed": counts["response_observed"],
-            "route_rate": quotient(counts["routed_current"], assignments),
-            "target_resolution_fraction": quotient(counts["target_resolved"], assignments),
-            "goal_current_rate": quotient(counts["goal_current"], assignments),
-            "goal_match_rate": quotient(counts["goal_match"], assignments),
-            "touch_rate": quotient(counts["target_touch"], assignments),
-            "touch_current_rate": quotient(counts["touch_current"], assignments),
-            "latency": latency_summary,
+            "source_matched": counts["source_matched"],
+            "first_executions": counts["first_execution"],
         },
         "realized": {
             "outcome_deltas": dict(outcomes),
@@ -177,7 +158,6 @@ def summarize(rows):
         },
         "resource_means_per_team_tick": {key: float(np.mean(value)) for key, value in resources.items() if value},
         "resource_mean_absolute_change": {key: float(np.mean(value)) for key, value in resource_change.items() if value},
-        "strategy_focus": [] if focus is None else focus.tolist(),
         "update_means": {key: float(np.mean(value)) for key, value in updates.items() if value},
     }
 

@@ -59,6 +59,15 @@ NET_HANDLE(ENT_CLIENT_PAYLOAD_CART, bool isnew)
 	plc_cart_net_home[c] = ReadShort();
 	plc_cart_net_contest[c] = ReadByte() / 255.0;
 	plc_cart_net_flags[c] = ReadByte();
+	if(c == 0)
+	{
+		plc_game_leader = ReadShort();
+		plc_game_ties = ReadShort();
+		plc_game_finished = ReadByte();
+		plc_game_score = ReadFloat();
+		plc_game_limit = ReadFloat();
+		plc_game_eta = ReadFloat();
+	}
 	this.entremove = payload_cart_remove;
 	return = true;
 }

@@ -1,0 +1,37 @@
+{
+  "/api/j": {
+    "status": 200,
+    "bytes": 1236175,
+    "updates": 14,
+    "completed_episodes": 1,
+    "outcome": 0,
+    "producer_state": "stale",
+    "j_mass": 8,
+    "application_joins": {
+      "state_application_mass": 4,
+      "state_application_joined_mass": 4,
+      "delivery_mass": 0,
+      "delivery_joined_mass": 0,
+      "applied_mass": 0,
+      "applied_joined_mass": 0,
+      "event_mass": 0,
+      "event_joined_mass": 0
+    }
+  },
+  "/api/policy": {
+    "status": 200,
+    "bytes": 14851,
+    "updates": 14,
+    "completed_episodes": 1,
+    "outcome": 0,
+    "producer_state": "stale"
+  },
+  "/j": {
+    "status": 200,
+    "bytes": 2534
+  },
+  "/policy": {
+    "status": 200,
+    "bytes": 4132
+  }
+}

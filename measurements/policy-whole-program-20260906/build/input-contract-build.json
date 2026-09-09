@@ -1,0 +1,54 @@
+{
+  "contract": {
+    "state_width": 1551,
+    "state_header_width": 15,
+    "state_page_width": 256,
+    "state_array_families": 6,
+    "first_page_projection_input": 1556,
+    "response_width": 524,
+    "event_width": 18,
+    "event_episode_column": 17,
+    "observation_presence_column": 29
+  },
+  "source_sha256": {
+    "xonotic/darkplaces-work/prvm_view.h": "1cbdbda5d259e741d08a92e07cd3a5edd85f66e6773cf827e1c60deb76788182",
+    "xonotic/darkplaces-work/prvm_view.c": "c8fcda5886332c34d8e1742bbd9b58100289980a6d702a3b04b9dcfd546138fe",
+    "xonotic/darkplaces-work/mesh_ipc.c": "f1cfc0b5aa24b4dd49ee8f4b52f0d24aa8e8a99c031146b144e7cd106566d830",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qc": "57cb2ee600b3583d45077dd6da906c8485d7bbad359c9a79d04804355cbb573c",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qh": "96ba4dfd614f85821d944bd60b01ed8c34b9dcb91ae985f63e9641a4fd0efb2e",
+    "xonotic/payload/tools/strategy_io_schema.py": "f3a2bec568a570aa941a64c43a3ad5b4a71e73351e2716304c35f48ba57e220e",
+    "xonotic/solver/strat/inputs.py": "56fa7b306b5bb6972b5b286a17248fba3891e903d636505372d8c779370ce9e4",
+    "xonotic/solver/strat/state_steering.py": "19cbc5720215a509937985017670a6756d4e5cb1bdfd5c8a8f90b5f9a0ed7e0f"
+  },
+  "builds": {
+    "xonotic/darkplaces-work/darkplaces-dedicated": {
+      "bytes": 3084744,
+      "sha256": "ec1334997bbe9cfaed807ce1822b59fd79090151825b8d5b4d5e5177d45acb9c"
+    },
+    "measurements/policy-whole-program-20260906/build/qc/progs.dat": {
+      "bytes": 7059704,
+      "sha256": "81008fb723a1f5c41cec8e32f68cf31b2c2ee2c1b7c002bb9e4d2bbc981e034c"
+    },
+    "measurements/policy-whole-program-20260906/build/qc/csprogs.dat": {
+      "bytes": 4351214,
+      "sha256": "283e59fd3157576ebd1c8d36368692c6112fe399148f80d32b88576fdbaebcf0"
+    },
+    "measurements/policy-whole-program-20260906/build/qc/menu.dat": {
+      "bytes": 1748319,
+      "sha256": "c01626fb056a2f12443d29e22093477767962275269aa5b4706b2b1ab71a4f78"
+    }
+  },
+  "validation": {
+    "native_release_compile_exit": 0,
+    "qc_compile_exit": 0,
+    "python_ast_parsed": [
+      "xonotic/payload/tools/strategy_io_schema.py",
+      "xonotic/solver/strat/inputs.py",
+      "xonotic/solver/strat/state_steering.py"
+    ],
+    "tests_run": false,
+    "runtime_started": false,
+    "deployed": false,
+    "remote_workload": false
+  }
+}

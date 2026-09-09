@@ -25,20 +25,28 @@ the hardware response. It then varies team and cart counts around that measured 
 It never chooses a desired client count first and bends the algorithm until the numbers
 coincide.
 
-The strategy policy contains three different inner-product matrices, each with an exact
-feature construction: one mixes participants, one mixes residual feature coordinates,
-and one supplies DPP instrument diversity. They are all genuine Gram matrices. Other
-score tables, checkpoints, and adjusted solve matrices are not called Gram matrices.
+The policy first projects the game's complete numeric rows. It integrates nearby
+observations along navigable map paths after that projection, preserving each
+observer's location and reducing the influence of old events. Learned inner-product
+relationships then mix the observation, state-page, cart and team rows globally and
+within teams while preserving a separate output for each row.
 
-Part of the policy runs on the responder node and the residual expert part runs on
-another node. Training follows the same placement as inference: backward rows and scale
-parameter updates execute on the expert host instead of returning to a hidden local
-implementation. The transport copies the literal tensor rows and does not normalize,
-sum, interpret, or cap them.
+A routed feed-forward block applies selected SwiGLU experts to each row. Sigmoid
+scores select and weight those experts, and a conventional auxiliary loss balances
+their load. There is no shared expert or single feature-summary vector broadcast
+over all rows. Each bot state page receives its own full-width velocity output.
+
+The complete learner can run on the Mini. Optional split execution places row
+contractions or routed feed-forward work on another node and returns the corresponding
+gradients to the same complete policy optimizer. Actual placement and current
+validation must be measured; earlier two-host demonstrations do not certify later
+code changes. The transport copies literal tensor rows without normalizing, summing,
+interpreting or capping them.
 
 Xonotic makes the result visible. Teams push and suppress many carts through a fused
 stock-map world. Carts have continuous collision-free and standable paths. The server
-records exact actions and exact successor state, so the J-lens and J-oracle can measure
+records sampled full-state rates, their application to each bot's private view, and
+exact successor state, so the J-lens and J-oracle can measure
 how the learned representation relates to later behavior. Sparse win/loss transitions
 train the policy; damage, kills, pressure, survival, cart movement, and robustness under
 perturbations remain separate observations.

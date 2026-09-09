@@ -1,0 +1,80 @@
+{
+  "date": "2026-09-05",
+  "scope": "operator-requested pause and representation/gradient audit; no policy redesign deployed",
+  "workload_pause": {
+    "service": "system/io.mesh.cartlane.learner",
+    "host": "mesh-mini-local",
+    "disabled": true,
+    "unloaded": true,
+    "supervisor_stop_utc": "2026-09-05T20:49:06.455594+00:00",
+    "stop_signal": "SIGTERM",
+    "dedicated_server_remaining": false,
+    "udp_26400_listener": false,
+    "saved_policy_updates": {
+      "matrix_fusion": 9049,
+      "terminal_win": 9049
+    },
+    "saved_checkpoint_numeric_arrays_finite": true,
+    "bridges": {
+      "mini_pid": 361,
+      "laptop_pid": 60237,
+      "signalled": false
+    }
+  },
+  "cart_ownership_collision": {
+    "operation": "algebraic input-collision check, not a game rollout",
+    "before_cart_owners": [
+      0,
+      1
+    ],
+    "after_cart_owners": [
+      1,
+      0
+    ],
+    "model_input_components_equal": {
+      "semantics": true,
+      "weights": true,
+      "descriptors": true,
+      "action_mass": true
+    },
+    "unchanged_inputs": [
+      "player rows",
+      "cell observations and spatial mask",
+      "participant team IDs",
+      "control/exploration weights and delta"
+    ],
+    "result": "all policy inputs can remain identical when ownership of equal-depth carts is exchanged"
+  },
+  "gradient_connectivity": {
+    "scope": "automatic differentiation of canonical forward at an initialized model; no optimizer update or game rollout",
+    "losses": {
+      "value_only": {
+        "loss": 1.1084518432617188,
+        "gradient_l2": {
+          "quinn.weight": 35.918069269609425,
+          "kay.weight": 0.48015566625650824,
+          "val.weight": 0.410493559260757,
+          "gia.weight": 0.0012621574564092518,
+          "dov.weight": 0.0019815150216376228,
+          "actuator.weight": 0.0,
+          "winnie.weight": 22.327625505875563,
+          "lou.weight": 7.912222603295505
+        }
+      },
+      "action_log_likelihood": {
+        "loss": 4.837155342102051,
+        "gradient_l2": {
+          "quinn.weight": 18.62433989227672,
+          "kay.weight": 0.044740961280408054,
+          "val.weight": 0.4103085201245222,
+          "gia.weight": 0.02335216548574274,
+          "dov.weight": 0.038588374165920196,
+          "actuator.weight": 13.144078901718967,
+          "winnie.weight": 0.0,
+          "lou.weight": 0.0
+        }
+      }
+    }
+  },
+  "report": "design/POLICY-ACTION-BOTTLENECKS.md"
+}

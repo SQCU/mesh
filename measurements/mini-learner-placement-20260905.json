@@ -1,0 +1,221 @@
+{
+  "observed_at": "2026-09-05T19:19:43.730874+00:00",
+  "placement": {
+    "learner_command": [
+      "/Users/mdot/mesh-workloads/cartlane/runtime/bin/mesh-python",
+      "-m",
+      "solver.strat.curriculum",
+      "--joint-training",
+      "--generate",
+      "2",
+      "--seed",
+      "20260905",
+      "--maps",
+      "runningmanctf,dance",
+      "--team-counts",
+      "4,8",
+      "--cart-counts",
+      "2,3,4",
+      "--players-per-team",
+      "2",
+      "--checkpoints-per-lane",
+      "4",
+      "--score-limit",
+      "1200",
+      "--checkpoint-score-rate",
+      "1",
+      "--skills",
+      "5",
+      "--perturbations",
+      "baseline",
+      "--run-dir",
+      "/Users/mdot/mesh-workloads/cartlane/runs/mini-learner-20260905",
+      "--server-host",
+      "Ms-MacBook-Pro.local",
+      "--ssh-command",
+      "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=3",
+      "--remote-run-root",
+      "/Users/mdot/dox/mesh/.build/mini-game-20260905",
+      "--remote-basedir",
+      "/Users/mdot/dox/mesh/.build/mini-game-20260905/Xonotic",
+      "--engine",
+      "/Users/mdot/mesh-workloads/cartlane/runtime/darkplaces-dedicated",
+      "--basedir",
+      "/Users/mdot/mesh-workloads/cartlane/Xonotic",
+      "--build-command",
+      "/Users/mdot/mesh-workloads/cartlane/runtime/xonotic/payload/build.sh",
+      "--progs",
+      "/Users/mdot/mesh-workloads/cartlane/runtime/xonotic/payload-build/progs.dat",
+      "--csprogs",
+      "/Users/mdot/mesh-workloads/cartlane/runtime/xonotic/payload-build/csprogs.dat",
+      "--scale-rank",
+      "128",
+      "--scale-hidden",
+      "341",
+      "--scale-experts",
+      "8",
+      "--scale-topk",
+      "2",
+      "--replay-batch",
+      "1",
+      "--port-base",
+      "26400",
+      "--human-counts",
+      "1",
+      "--quit-grace",
+      "90",
+      "--python",
+      "/Users/mdot/mesh-workloads/cartlane/runtime/bin/mesh-python",
+      "--strategy-node",
+      "1",
+      "--peer-node",
+      "0",
+      "--arm-checkpoint",
+      "matrix_fusion=/Users/mdot/mesh-workloads/cartlane/resume/checkpoint.matrix_fusion.npz",
+      "--arm-checkpoint",
+      "terminal_win=/Users/mdot/mesh-workloads/cartlane/resume/checkpoint.terminal_win.npz"
+    ],
+    "run_dir": "/Users/mdot/mesh-workloads/cartlane/runs/mini-learner-20260905",
+    "runtime": "/Users/mdot/mesh-workloads/cartlane/runtime",
+    "source_run": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/async-live-20260905",
+    "client_command": [
+      "/Users/mdot/dox/mesh/xonotic/darkplaces-work/darkplaces-sdl",
+      "-xonotic",
+      "-condebug",
+      "-sessionid",
+      "mini-learner-20260905",
+      "-basedir",
+      "/Users/mdot/dox/xonotic/Xonotic",
+      "-userdir",
+      "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/async-live-20260905/client-userdir",
+      "+vid_fullscreen",
+      "0",
+      "+vid_width",
+      "1280",
+      "+vid_height",
+      "720",
+      "+vid_vsync",
+      "1",
+      "+_cl_name",
+      "mdot",
+      "+_termsofservice_accepted",
+      "1",
+      "+alias",
+      "cl_hook_gamestart_plc",
+      "cmd join",
+      "+connect",
+      "127.0.0.1:26400"
+    ]
+  },
+  "checkpoint_transfer": {
+    "matrix_fusion": {
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/async-live-20260905/00026-joint-00014-00001/checkpoint.matrix_fusion.npz",
+      "updates": 4149,
+      "sha256": "b3c5856dc77aed029e50dcb887b471db706488f876171f426d86c8e2ec736d30",
+      "nonfinite_arrays": 0
+    },
+    "terminal_win": {
+      "path": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/async-live-20260905/00026-joint-00014-00001/checkpoint.terminal_win.npz",
+      "updates": 4149,
+      "sha256": "2d319fb8e203835c0aee9a267f2f2b531996bd457f33e8003f3099c82a463796",
+      "nonfinite_arrays": 0
+    }
+  },
+  "paired_window": {
+    "127.0.0.1": {
+      "samples": 34,
+      "start": 1788635728.610998,
+      "end": 1788635893.9765801,
+      "gpu_active_mean_pct": 8.764705882352942,
+      "gpu_active_median_pct": 7.5
+    },
+    "ms-mac-mini.local": {
+      "samples": 34,
+      "start": 1788635728.6177018,
+      "end": 1788635893.980504,
+      "gpu_active_mean_pct": 54.970588235294116,
+      "gpu_active_median_pct": 56.0,
+      "gpu_power_mean_w": 2.311470588235294
+    }
+  },
+  "restart": {
+    "supervisor_before": 1625,
+    "supervisor_after": 6906,
+    "checkpoint_updates": {
+      "matrix_fusion": 4532,
+      "terminal_win": 4532
+    },
+    "bridge_pids_unchanged_during_test": {
+      "laptop": 60237,
+      "mini": 361
+    },
+    "client_pid_unchanged": 64267,
+    "learner_updates_after": {
+      "terminal_win": 4670,
+      "matrix_fusion": 4670
+    },
+    "viewer_status": {
+      "sequence": 170,
+      "sampled_at": 1788635983.730874,
+      "frame_seen_at": 1788635983.7278981,
+      "producer_state": "advancing",
+      "frame_written_at": 1788635983.7216427,
+      "directory": "/Users/mdot/mesh-workloads/cartlane/runs/mini-learner-20260905/00001-joint-00001-00000",
+      "environment": "joint-00001-00000",
+      "teams": 4,
+      "carts": 4,
+      "players": 8,
+      "response": 140,
+      "game_contract": "checkpoint-control-integral-v1",
+      "errors": 0,
+      "last_error": null
+    },
+    "human_rows": 1
+  },
+  "tests": {
+    "laptop": {
+      "passed": 5,
+      "modules": [
+        "test_curriculum_recovery",
+        "test_client_lifecycle",
+        "test_map_assets"
+      ]
+    },
+    "mini": {
+      "passed": 7,
+      "modules": [
+        "test_curriculum_recovery",
+        "test_paged_matrix",
+        "test_matmul"
+      ]
+    },
+    "mini_gamecode_build": 0,
+    "git_diff_check": 0
+  },
+  "limitations": [
+    "Live utilization window is not a controlled throughput or temperature comparison.",
+    "Apple Thunderbolt provider and kernel faults remain unresolved."
+  ],
+  "driver_fault_evidence": [
+    {
+      "path": ".build/mini-learner-20260905/mesh-flow-2026-09-05-121323.ips",
+      "sha256": "838beb47b63475baf8bc057fe1ba7e35e2ab04ff8421dfb8d51a4f487348d377",
+      "bytes": 8237
+    },
+    {
+      "path": ".build/mini-learner-20260905/mesh0-1788604208600067-81146.flight",
+      "sha256": "185b875cbfcb4dea425c7a40e61c594f9ac14847d944f6890ae6152b4e177368",
+      "bytes": 58440
+    },
+    {
+      "path": ".build/mini-learner-20260905/mesh0-1788633828465423-355.flight",
+      "sha256": "327da1536b652a401e0b9666212afdb6000b6e22e750016cd408d8004c1003fd",
+      "bytes": 58440
+    },
+    {
+      "path": ".build/mini-learner-20260905/panic-full-2026-09-05-121328.0002.panic",
+      "sha256": "2a82016bd87ea2f574b95a434226af7900fc3fef97cdb1f815ab8fd687878027",
+      "bytes": 625231
+    }
+  ]
+}

@@ -1,116 +1,15 @@
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>j-oracle</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230a0d11'/%3E%3Ctext x='8' y='12' font-size='11' text-anchor='middle' fill='%234fd1c5' font-family='monospace'%3Ej%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css">
-</head>
-<body>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><title>J-space observatory</title></head>
+<body><header><h1>J-space observatory</h1><nav><a href="/j">J-space</a><a href="/policy">Policy learning</a><a href="http://127.0.0.1:8787/">Mesh infrastructure</a></nav><span id="status">Waiting for producer</span><p id="source"></p><p id="notice" role="status"></p></header><main id="j">
 
-<header>
-  <h1>j&#8209;<span>oracle</span></h1>
-  <span class="pill" id="tap"><i class="dot"></i><b>—</b></span>
-  <span class="pill" id="match">—</span>
-  <span class="pill" id="connect">—</span>
-  <span class="spacer"></span>
-  <span class="pill" id="clock">—</span>
-</header>
+<section><h2>Live game</h2><p id="game"></p><label>Depth trajectory <select id="cart-choice"></select></label><canvas id="carts"></canvas></section>
+<section><h2>Participant coupling</h2><p>Sampled team/rival Gram factors, in the selected coordinate window.</p><canvas id="focus"></canvas></section>
+<section class="wide"><h2>Representation stratum</h2><label>Native policy / shape <select id="stratum"></select></label><label>Coordinate offset <input id="coordinate-offset" type="number" min="0" step="200" value="0"></label><label>Coordinates per page <input id="coordinate-width" type="number" min="1" value="200"></label><p id="stratum-info"></p><canvas id="variance"></canvas><p>Per-coordinate J variance over the selected retained stratum. This is not a singular-value spectrum.</p></section>
+<section><h2>Selected J rows</h2><label>Sampled policy / native width <select id="sample-arm"></select></label><p id="sample-info"></p><canvas id="selected-j"></canvas><p>Rows are sampled participant rows; columns are native J coordinates. Teal positive, orange negative. The coordinate window is an exact slice; the complete artifact retains every coordinate.</p></section>
+<section><h2>Retained J geometry</h2><p id="rank"></p><canvas id="spectrum"></canvas><p>Producer-owned singular values of the centered finite J rows used in the empirical affine projection. No additional fit runs in this viewer.</p></section>
+<section class="wide"><h2>Feature ↔ J relationships</h2><label>Find coordinate <input id="feature-filter" type="search"></label><div class="scroll"><table id="features"></table></div></section>
+<section class="wide"><h2>Server outcome relationships</h2><label>Policy <select id="outcome-arm"></select></label><p id="joins"></p><div class="scroll"><table id="outcomes"></table></div><a href="/api/j/full" download>Complete numerical artifact</a></section>
+<section class="wide"><h2>Actual controller and state application</h2><div class="scroll"><table id="assignments"></table></div></section>
+<section class="wide"><h2>Execution and learning recovery</h2><div class="scroll"><table id="continuation"></table></div></section>
 
-<main>
-
-  <section class="w8">
-    <h2>cart depth &amp; control <em>— the cart subgame over time</em></h2>
-    <canvas id="depth" height="220"></canvas>
-    <canvas id="pw" height="46"></canvas>
-    <div class="muted" id="pwlegend" style="margin-top:6px"></div>
-  </section>
-
-  <section class="w4">
-    <h2>hierarchy <em>— per team, this tick</em></h2>
-    <div class="scroll"><table id="hier"><thead><tr>
-      <th>team</th><th>alive</th><th>hp</th><th>armor</th><th>ammo pools</th>
-      <th>weapon words</th><th>carts</th><th>SUCC</th><th>PW</th>
-    </tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section class="w4">
-    <h2>cross-team focus <em>— row hunts / suppresses column</em></h2>
-    <canvas id="focus" height="220"></canvas>
-    <div class="muted" id="focusnote" style="margin-top:6px"></div>
-  </section>
-
-  <section class="w8">
-    <h2>per-player assignments <em>— request · applied target · actual goal · contact</em></h2>
-    <div class="scroll"><table id="assign"><thead><tr>
-      <th>edict</th><th>team</th><th>ctl</th><th>behavior</th><th>instrument</th>
-      <th>subject</th><th>request</th><th>gain</th><th>commit</th><th>spawn</th>
-      <th>W</th><th>rank</th><th>nimber</th><th>denial</th><th>applied</th>
-      <th>target resolved mass</th><th>stock goal</th><th>goal match mass</th><th>distance</th><th>contact mass</th>
-      <th>log&#960;</th><th>diag(K)</th>
-    </tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section class="w6">
-    <h2>J-lens <em id="jlensmeta">— literal source-feature/J joint measure</em></h2>
-    <div class="scroll"><table id="jlens"><thead><tr>
-      <th>ground-truth coordinate</th><th>variance</th><th>‖cov(coordinate,J)‖₂</th><th>derived affine residual² / mass</th>
-    </tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section class="w6">
-    <h2>J-oracle <em id="joraclemeta">— joined server outcomes</em></h2>
-    <div class="scroll"><table id="joracle"><thead><tr>
-      <th>outcome</th><th>mass</th><th>integral</th><th>mean</th><th>variance</th><th>‖cov(J,outcome)‖₂</th><th>derived affine residual² / mass</th>
-    </tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section class="w6">
-    <h2>Matrix-fusion intervention <em id="matrixfusionmeta">— identical server state</em></h2>
-    <div class="scroll"><table id="matrixfusionintervention"><thead><tr>
-      <th>coordinate</th><th>mass</th><th>integral</th><th>mean</th><th>variance</th>
-    </tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section class="w4">
-    <h2>J geometry <em>— width, rank, spectrum</em></h2>
-    <div class="kv" id="geom"></div>
-    <canvas id="spectrum" height="120" style="margin-top:10px"></canvas>
-    <div class="dimmed" style="margin-top:4px">singular values of the centred selected J rows for this tick, normalised to &#963;&#8321;</div>
-  </section>
-
-  <section class="w4">
-    <h2>selected J <em>— rows = players, columns = J dims, this tick</em></h2>
-    <canvas id="irmap" height="260"></canvas>
-  </section>
-
-  <section class="w4">
-    <h2>Coupling &amp; value heads <em>— the coupling and W / L</em></h2>
-    <canvas id="coupling" height="200"></canvas>
-    <div class="kv" id="values" style="margin-top:10px"></div>
-  </section>
-
-  <section class="w7">
-    <h2>field measures <em>— direct mass over emitted coordinates</em></h2>
-    <div class="scroll"><table id="fieldmeasures"><thead><tr>
-      <th>field</th><th>value/key mass</th><th>shape</th><th>finite/coordinate mass</th><th>nonzero/coordinate mass</th><th>producer</th>
-    </tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section class="w5">
-    <h2>engine input x <em>— did the per-player state enter the matmul? (SPEC &#167;3 / E9)</em></h2>
-    <div class="blocks" id="xblocks"></div>
-    <div class="dimmed" style="margin-top:8px" id="xnote"></div>
-  </section>
-
-  <footer>
-    read-only tap. this page never writes to the game, the responder, the mesh, or a checkpoint.
-    J measures are literal empirical pushforwards of the controlled server state machine.
-  </footer>
-
-</main>
-
-<script src="app.js"></script>
-</body>
-</html>
+</main><footer>Read-only application views · measurements retain source identity, missing values, and sampling scope.</footer><script src="/app.js"></script></body></html>

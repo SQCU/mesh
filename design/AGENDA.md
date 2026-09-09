@@ -10,6 +10,27 @@ Form: `~/sm120-chudlets/AGENDA_FORM.md`. Reading rule carried verbatim:
 > artifacts.** The SPEC cannot move a checkmark; the AGENDA cannot amend
 > the SPEC; the RECORD is the only bridge between them.
 
+## Current state representation and execution status — September 6
+
+- [x] Delete fixed page averaging, broadcast-only page control and the hand-built
+  observation-slot/temporal summary. Retain complete addressed state/residual pages,
+  native event rows and integration timing through learned row computation.
+- [x] Compile local forward, emission and the combined loss/backward/accumulation/
+  optimizer update. Use tensor masks with fixed Metal page/tile schedules at each
+  prepared capacity. Validate representation distinctions and grouped gradients.
+- [x] Share lossless checkpoint/report array and label storage; serve exact viewer
+  coordinate pages while retaining the complete artifact and legacy readers.
+- [ ] Allocate persistent input/intermediate arenas and qualify allocation-free
+  execution. The expanded laptop probe still observes allocations with fixed traces.
+- [ ] Fully stage the optional split-RPC backward schedule; its loss orchestration
+  remains eager and is reported as such.
+- [ ] Establish useful game-reward convergence and competitive playing strength.
+
+Evidence and failure analysis: [STATE-REDUCTION-RCA.md](STATE-REDUCTION-RCA.md) and
+[measurements](../measurements/state-representation-20260906/README.md). Earlier
+observation-slot/temporal-contraction milestones below describe the deleted design;
+they do not authorize restoring an observation summary before learned encoding.
+
 ## Charter
 
 > instead of makign a timestamped or historically versioned document, it's
@@ -46,7 +67,9 @@ Project-scoped exclusion, from SPEC §13:
 Therefore **`CartSim` and every number derived from it are INADMISSIBLE.**
 Admissible: real Xonotic server runs and their artifacts, quoted code/algebra,
 written proofs, engine build outputs, and measurements over real-run data.
-No unit tests (SPEC §13 + the standing no-tests directive).
+The later explicit requests for gradient numerics and related validation authorize
+focused arithmetic and recovery checks. Gameplay claims still require the actual
+engine; no replacement game simulator supplies that evidence (R49).
 
 ## Notation
 
@@ -74,30 +97,30 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] A7 Reusable sealed mesh API incorporated into real high-teamcount game projects, with sustained integration experience distinct from solver completeness (R41)
 
 ### B. The cart subgame (Game 1 — the tractable shadow)
-- [x] B1 Explicit multicart: k carts, j teams (R2)
-- [x] B2 Golden path = arclength carrier of a heap's magnitude (NOT a bot route) (R12)
-- [x] B3 Two-regime velocity law: contested-local vs abandoned-linear-reversal (R2)
-- [x] B4 Monotone score — position reverses, score does not (R3)
+- [x] B1 Explicit multicart: independently configured k teams, j cart lanes (R44)
+- [~] B2 Golden path = winning-region transitions, not geometric track or heap magnitude; old reinterpretation removed (R44)
+- [x] B3 Carts retain captured progress without an opposing player; the old abandoned-reversal claim is superseded (R49)
+- [x] B4 Monotone score is the time integral of held checkpoint depth across lanes; no terminal delivery (R44)
 - [x] B5 Relative deny/acquire objective, not race/entry/level (R3, R8, R32)
 - [x] B6 Continuous & differentiable cart force field (soft membership/vitality/gate) (R2)
 - [x] B7 Cylinder occupancy is the law; no LOS gate; no unstick hack (R2)
-- [x] B8 Closed-form `PW`/`SUCC`/`N_i` — nim-sum now DERIVED by backward induction, not asserted (R6, R25)
-- [x] B9 Backward induction explicit, not allusive/optional (R6)
-- [x] B10 Partizan honesty — impartial ⇒ exact nim-sum; else explicitly unresolved (R6)
-- [x] B11 The CGT evaluator RESOLVES on real server states — 0/228 → 228/228 (R25)
+- [~] B8 Literal first-passage `PW` and checkpoint-denial `SUCC` implemented; old nim-sum claims do not prove winning regions for this game (R44)
+- [~] B9 Denial induction explicit; full winning-region characterization is not established by arithmetic consistency (R44)
+- [x] B10 No unsupported SG/XOR theorem claimed for this multiplayer score-integration game (R44)
+- [~] B11 Projection/checkpoint accounting agree on real server states; old surrogate-graph resolution counts are invalid evidence (R44)
 
 ### C. The strategy operator (the linear algebra)
 - [x] C1 **Gram-matrix fusion + SwiGLU, NOT softmax attention** (R24)
 - [x] C2 **Wide IR ≥128d** (R24)
 - [x] C3 Irreducibly all-to-all O(n²) learned coupling landing IN the IR (R24)
 - [x] C4 DPP `diag(K)` marginal-inclusion signal, differentiable (custom vjp) (R10)
-- [x] C5 Velocity on an integrated weight state (replicator), not instantaneous decisions (R7)
-- [x] C6 Anticipatory (predictive) update, not a plain integrator (R10)
+- [x] C5 Full-state policy rates integrated by exact exponential relaxation of each bot view (R49)
+- [x] C6 Exact held-rate integration and subsequent decay; historical replicator integration removed (R49)
 - [x] C7 Count-invariance — no parameter shape depends on k/j/l (R10)
-- [~] C8 Categorical sampling + L2-toward-logit-0 (not MAP) (R7)
+- [x] C8 Gaussian rates for every represented state word; historical candidate sampling removed (R49)
 - [x] C9 Query = learned projection of [engine state ; belief] (R10)
-- [x] C10 Per-instrument learned behavioral value `v_m` wired into the mix (R10)
-- [~] C11 **j-space** — trained IR now beats random-init/random-projection, but collapses with training; data-bound (R24)
+- [x] C10 Full-state readout from the policy representation; historical instrument vocabulary removed (R49)
+- [~] C11 **j-space** — live representation reports exist; pre-restoration trained-policy comparisons are not evidence for the literal objective (R44)
 - [x] C12 Value heads are LINEAR probes on the IR (R24)
 
 ### D. Reward / value / advantage / training
@@ -109,7 +132,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] D6 Training IS the Xonotic server process (real Game-2 transitions) (R9)
 - [x] D7 **CartSim deleted** — no fake re-simulation anywhere (R24)
 - [x] D8 Curriculum over maps / team counts / player counts / cart counts (R25)
-- [x] D9 Interruptible & resumable — handled stop restores weights, optimizer, counters, and replay (R9, R32)
+- [x] D9 Durable continuation includes pending episodes, issued vectors, execution attribution and optimizer journal (R49)
 - [ ] D10 Server transition measure matrix: retention under perturbation, recovery time, acquisition, terminal, held-out (—, [BUILD-DATA])
 - [x] D11 Learned local action-linear dynamics ensemble `Δy=b(y)+A(y)u` (R10)
 - [x] D12 Checkpoint/architecture integrity — fingerprint + strict load, mismatch loudly reinitializes a complete model (R24)
@@ -125,16 +148,16 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 - [x] E7 Belief is per-bot; there is no "team belief" (R4)
 - [x] E8 Enemy positions featurized ONLY through observation (R5)
 - [x] E9 **Full per-player resource state ENTERS the matmul** — input rank 4 → 33 (R24)
-- [x] E10 Per-player rows, `z` descriptors, hierarchy, eligibility and integrated weights are LOGGED on real runs (R25)
+- [x] E10 Per-player state pages, rates, applied sequences and source policy versions logged on real runs (R49)
 - [x] E11 The canonical `featurize.py` belief pipeline exists and is the one that runs (R24)
 
-### F. Playerbot interface (the WHAT/HOW boundary)
-- [x] F1 matmul decides WHAT; stock navmesh decides HOW (R12)
-- [x] F2 Skill-orthogonal — never touches aim/dodge (R12)
-- [~] F3 Objective vocabulary → stock target entities (explore, gather, crush-weak, duel-strong, push/suppress, hunt) (R12)
-- [x] F4 Spawn-timing and travel-commitment as real instruments — commit nonzero 0.03% → 96.79% (R25)
-- [x] F5 No policy in QC; no second navigation definition (R12)
-- [ ] F6 Affordance QUALITY — does the policy actually aim `hunt` at the winningest rival? (—)
+### F. Playerbot state interface
+- [x] F1 Policy rates perturb the full state view consumed by stock Havocbot (R49)
+- [x] F2 No semantic state exclusions; aim and movement reads are steerable (R49)
+- [x] F3 Candidate vocabulary and objective decoder deleted; per-word rate interface replaces them (R49)
+- [x] F4 Residuals belong to bot views; no separate spawn or travel intervention wrapper (R49)
+- [x] F5 No second handwritten strategy in QC; native typed reads mediate the existing bot program (R49)
+- [ ] F6 Learned behavior quality and sustained multi-team outcomes after the interface replacement (R49)
 
 ### G. World / maps
 - [x] G1 Procedural multi-map fusion produces megamaps — bots CROSS tiles; 12-bot boot, OBJECT ERROR 0 (R35)
@@ -165,7 +188,7 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 ### I. Method / process laws
 - [x] I1 SPEC is a verbatim user-quote index under the provenance law (R17)
 - [x] I2 AGENDA checklist + append-only Record (this file) (R17)
-- [x] I3 No unit tests; evidence is artifacts/proofs/real runs (R13)
+- [x] I3 Arithmetic validation follows the explicit later request; gameplay evidence uses real engine runs (R49)
 - [~] I10 **uv manages every Python environment** — both installed node runtimes now report UV/Python 3.12.14 and matching locks; every future workload's launcher still requires runtime evidence (R29, R41)
 - [x] I4 No stubs, no pseudodocumentation claiming false completeness (R10, R12)
 - [~] I5 No repeated inlining — one canonical definition per algorithm (R10, R11)
@@ -178,7 +201,12 @@ No unit tests (SPEC §13 + the standing no-tests directive).
 
 ## Current work order
 
-R41 and [RELEASE-CLOSURE.md](RELEASE-CLOSURE.md) govern current work: availability
+R49 establishes native state steering and durable learning continuation on both machines.
+Next measure learned behavior quality, sustained throughput and multi-team outcomes.
+
+R44 restores the game and objective before further learning claims. Measure recovery,
+retention and outcomes on the fresh lineage; do not inherit delivery-variant ratings.
+R41 and [RELEASE-CLOSURE.md](RELEASE-CLOSURE.md) retain the release work: availability
 repairs, reconstructible branches/dependencies, and reconciled closure first; then
 define the next learning-transaction and behavioral measurements. Mesh integration is
 already demonstrated. C2 is no longer an unimplemented prerequisite, and the old
@@ -1629,3 +1657,221 @@ Per-match learning.json and outcome.json, full telemetry, matches.jsonl and both
 checkpoint artifacts remain available in the run directory. The run is integration
 scale, uses different optimization cadences, and is not a budget-matched held-out Elo
 or generalization result. Source changes remain uncommitted and unpublished.
+
+
+### R44 — 2026-09-04 — restore literal checkpoint-score game; erase old policy lineage
+
+E:code · E:build · E:run. Governing quotes: `SPECIFICATION.md` §16. Algebra and
+control-flow justification: `CART-GAME-CONTRACT.md`.
+
+> `dS_i/dt = alpha * H_i`
+> `tau_i = (Q - S_i) / (alpha * H_i)`
+> `rW = -q * (1 - q')`
+> `rL = (1 - q) * 1[rho' > rho]`
+
+Removed delivery wins, rollback deductions, discrete point banking, cap-count and
+timeout terminals, and the unrelated empirical/heap-graph/XOR evaluator. The latter
+shrank from 535 to 56 lines. The old payload implementation plan was replaced by an
+index into the canonical game, wire and learning definitions. Teams and cart lanes
+are independent axes; requested population is no longer rewritten by capacity search.
+The synchronized team ledger and actual lane checkpoint counts now supply PW, loser
+rank, denial succession, hierarchy features and role-selected value targets. Historical
+rows still train values through the shared backbone. Actor regularization now obeys
+the same applied on-policy mask as PPO; role-specific auxiliary value probes obey the
+source value's role mask. No checkpoint gain or cart-motion surrogate became a reward.
+
+Permanently deleted 277 old policy-state files (22,524,790,908 bytes) across MBP/Mini.
+A first verification run exposed a supervisor variable collision that substituted a
+worker cleanup command for the map transition. Its additional 10 resumables
+(442,590,521 bytes) were also permanently deleted. No recovery/resume archive remains.
+Old diagnostic logs are retained but are not this objective's rating history.
+
+Fresh run: `xonotic/solver/strat/runs/checkpoint-control-live-20260904`.
+First completed match: four teams, four lanes, eight participants, four checkpoints
+per lane, Q=1200, alpha=1. Team four won at engine time 290.46649 after carts had
+already reached endpoints without terminating play. Outcome report: strategy 162
+updates; terminal-win four updates, five actor rows/eight value rows on the last
+terminal step. This is integration evidence, not a compute-matched policy comparison.
+
+The next live match realized eight teams, three lanes, sixteen participants.
+Client PID 77352 and Mini dedicated-server PID 38045 persisted across the level reload;
+the native human-controlled row remained present. Joining uses the game-start hook,
+not a timer that can fire before signon. Both application pages on 8795 now follow
+only the fresh run. The infrastructure viewer remains separate.
+
+`measure.py cgt` compared 164 first-match frames and 26 second-match frames with zero
+semantic/checkpoint residuals and no score decreases in 840 within-episode team-score
+comparisons. Python compilation and QC client/menu/server builds pass with warnings
+as errors; latest build set 780610792 includes corrected standalone menu/time defaults
+and is staged by the supervisor at the next natural match transition. The live command
+already runs the same Q=1200, alpha=1, timelimit=0 semantics. Both bridges retained their
+original PIDs, remained up and reported bad=0; no bridge or accessibility policy changed.
+Source is uncommitted. Winning-region proofs, strategic improvement, generalization
+and fair exposure/compute-adjusted ratings remain to be established on this lineage.
+
+### R45 — 2026-09-04 — tie closure, reporting recovery and native victory progress
+
+E:code · E:build · E:run. See `CART-GAME-CONTRACT.md` and
+`TELEMETRY-LOSS-20260904.md` for algebra, causal evidence and branch justification.
+
+Rank tiers now include exact ties, and checkpoint-denial succession proceeds through
+co-leading groups without assigning a team-ID winner. All previously losing teams
+that rise retain their positive sparse reward atom; W remains resistance to losing
+control. No reward magnitude, head-crossing bootstrap or frozen parameter semantics
+were invented. All 273 earlier recorded frame ranks are unchanged.
+
+The 18:28 provider crash exposed an inode-zero shared-memory replacement check and
+an unbounded remote custom-operation wait. Userspace object identity, bounded
+equivalent-operation completion, independent engine outcome journaling, append-only
+process/telemetry logs and current-checkpoint restart selection are corrected. The
+underlying provider mapping disappearance remains an open driver-level incident;
+recovery is not proof of its repair. No bridge was restarted during this work.
+
+The post-recovery three-lane match ended with team 4 at exactly Q=1200. Its engine
+outcome was recorded before the learner acknowledged it. Strategy reached 407
+updates and terminal-win 8; this is not an exposure- or compute-matched comparison.
+The following two-lane `dance` match retained client 68295 and server 21176. Both
+application viewers advance; duplicated console/wire representations of one outcome
+join by float32 event identity. The native HUD visibly shows projected team, score/Q,
+percentage to victory and fixed-control ETA, with explicit tie/no-leader states.
+One controlled userspace deployment was required, not a client restart per match.
+Latest compiled HUD set is 734403882. Source remains uncommitted.
+
+### R46 — 2026-09-04 — terminal reward is not terminal-only optimization
+
+E:code · E:run. `JOINT-POLICY-LEARNING.md` records the correction. The terminal arm
+skipped all fresh-state updates and took four sampled actor steps per completed round.
+This accidentally confounded reward semantics with update cadence, actor staleness and
+batch size. Both arms now use the same attributed-transition optimizer call, fresh/
+historical value mixture, batch configuration, clipping and loss coefficients. Terminal
+TD targets bootstrap across leader changes, including before the first win; actual
+outcomes annotate historical value targets without additional or stale-actor PPO steps.
+No parameters are frozen and no checkpoint history is erased or relabelled as matched.
+
+The then-current algebra/optimizer reproduction used saved real
+observation inputs and newly initialized full Wally policies. It checked zero-reward
+updates, head-crossing bootstrap, terminal wins/draws, historical value-only gradients,
+truncation and optimizer/replay checkpoint continuation. It passed on both MacBook and
+Mini. That subsequently removed harness provided historical loss-level observations,
+not simulated gameplay, a learning-success evaluation or a current specification.
+
+Live rollout began naturally at launch `00006-joint-00003-00000`, without restarting
+the native client or dedicated server. Each arm accumulated 19 corrected-schedule
+steps: strategy 716 → 735 and terminal 16 → 35. Fresh/history batch sizes were 1/1,
+with independently normalized actor rows selected by actual team assignment. Lifetime
+counts and the correction boundary remain explicit in checkpoints and the policy UI.
+
+Verification also exposed another runtime failure: NaN model outputs preceded a
+NaN server spawn-swizzle generation, whose telemetry-only integer conversion repeatedly
+terminated the responder. Reporting the literal floating-point observation removes
+that conversion failure without substituting a fabricated generation. The source of
+the earlier nonfinite policy computation still requires diagnosis. The Mini provider
+also crashed again at 20:02:11 and launchd replaced it; no bridge was restarted by this
+work. These failures are not evidence that sparse terminal PPO cannot learn.
+After the telemetry cast correction, the existing supervisor's normal learner recovery
+resumed advancing frames. At response 289 both arms had 24 corrected-schedule updates,
+one fresh plus one historical record per step, and finite measured gradient norms.
+The native client 68295 and dedicated server 21176 remained unchanged. Recovery of
+reporting and training does not resolve the earlier source of nonfinite policy outputs.
+
+
+### R47: recovered numerical, continuation and spatial prerequisites (2026-09-04)
+
+[POLICY-SEMANTICS-REVIEW.md](POLICY-SEMANTICS-REVIEW.md) reconstructs the previous
+session beyond R46, including the operator correction that mixed-policy matches
+already provide the evaluation stream. Read it before interpreting further learning
+curves or proposing a periodic checkpoint tournament.
+
+Read-only audits of launch 00043 found both parameter trees and optimizer moments
+nonfinite, plus 710 of 1,009 replay transitions referencing damaged arrays. Complete
+continuation now restores parameters, optimizer, replay, random state and counters
+together, or initializes a complete fresh learner with explicit source provenance.
+The source counter is never presented as successful continuation after that recovery.
+
+Further repairs preserve the complete successor roster before policy evaluation,
+keep independent replay frame identities, retain 3-D navigation/observation positions
+and correct the double node-to-cell mapping in static navigation. Unknown graph routes
+retain their distance evidence and receive a finite, explicitly estimated commitment.
+Ten local tests, six Linux x86-64 data/geometry tests and the existing online-contract
+check passed. Isolated recovery completed 32 finite updates per objective on one saved
+observation; no live process was manually restarted. The original first-NaN operation,
+2-D engine exploration target resolution and delayed-action learning attribution remain
+explicit follow-up issues, not completed policy optimization.
+
+### R48: policy arithmetic, execution identity and data ownership (2026-09-05)
+
+[POLICY-EXECUTION-CONTRACT.md](POLICY-EXECUTION-CONTRACT.md) defines the completed slate.
+`policy_math.py` owns normalization, Gaussian scale/density/sampling, PPO clipping in
+log space and scaled global gradient clipping. Direct fixtures reproduce and repair
+finite-loss/NaN-gradient PPO overflow, global-norm overflow and exponential raw-scale
+overflow. The smooth scale reparameterization is versioned: matrix family 13, baselines
+11. Inference and full continuation both report incompatible source versions while
+supplying a fresh model; full continuation preserves whole-state recovery semantics.
+
+Map realization schema 3 emits registered 3-D navigation targets in measurement schema
+14. QC resolves their IDs through markers and nearest 3-D stock waypoints. Legacy grid
+targets retain explicit negative wire IDs and distinct coordinate identities internally.
+Compiled QC fixtures distinguish stacked floors and compare 39 float32 scoring cases
+and six checkpoint ownership transitions with the shared Python game definitions.
+
+`ActionHistory` owns issued requests, first observed applications, delayed actor groups,
+one critic interval per observed transition, measurement joins and source provenance.
+Curriculum and study summaries consume executed-version exposure and real mixed-match
+outcomes, including uncertain source-change intervals and unlabelled exposure.
+`MapAssets` owns source discovery, extraction, generation and entity/measurement cache
+identity. Approximately 560 lines left the three orchestration files; these changes
+establish data ownership rather than a new policy wrapper hierarchy.
+
+Verification: 31 macOS arm64 tests, 15 Linux x86-64 tests, the full QC server build,
+compiled QC/Python fixtures, generated dance target/marker agreement, curriculum dry-run,
+old telemetry ingestion and the online update/resume contract. Each policy also passed
+128 finite optimizer updates over saved observations with four save/resume cycles.
+[policy-cleanup-slate.json](../measurements/policy-cleanup-slate.json) records the evidence.
+No live match was started or manually restarted for these checks. The old run's exact
+first invalid intermediate and policy-strength inference remain unestablished; these
+repairs do not turn missing observations into evidence or require a checkpoint tournament.
+
+
+### R49: full-state steering and durable learning continuation (2026-09-06)
+
+E:run, E:artifact, E:proof. The current user specification supersedes the former
+candidate decoder and its claimed aim/spawn restrictions:
+
+> only ever a residual upon the views of gamestate teh havocbot has
+
+> exact exponential relaxation sounds fine
+
+> do basic gradient numerics validation
+
+The algebra and native ownership are in [POLICY-STATE-STEERING.md](POLICY-STATE-STEERING.md).
+[TRAINING-CONTINUATION.md](TRAINING-CONTINUATION.md) records coherent checkpoints,
+write-ahead steps, durable outcomes, delayed execution retention, transport staging,
+numerical conditioning and VM fault recovery. The engine continues stock Havocbot
+through reported view faults. Carts keep captured progress without an opposing
+player, as specified in [CART-GAME-CONTRACT.md](CART-GAME-CONTRACT.md).
+
+[The evidence](../measurements/training-continuation-20260906/README.md) includes
+actual engine/MLX matches, graceful and abrupt responder interruptions, loss of all
+transient events, and disk outcome replay after engine restart. Terminal ties are
+controlled engine outcomes, not evidence of learned playing strength. The old
+record remains historical evidence of what ran, not authority for resurrecting
+the deleted vocabulary. Sustained policy quality and fleet saturation remain open.
+
+## Record — September 6 state reduction and execution repair
+
+The pre-repair [numerical witness](../measurements/state-representation-audit-20260906.json)
+showed fixed-address value swaps losing their distinction, page-uniform policy
+increments and zero rate response to residual changes. The replacements retain
+rows and expose residual/timing. Both-machine numerical suites now pass, including
+a learned opposite-page response and fused-group versus accumulated-gradient
+comparison. Actual RDMA match reports and the failed label-checkpoint save are
+retained together in the representation evidence directory.
+
+The expanded laptop execution report includes:
+
+> `"graph_reuse_passed": true, "allocation_reuse_passed": false`
+
+This keeps allocation-free execution unchecked. Stable templates, fixed graph
+traces and occasional allocation-free probe windows do not establish persistent
+buffer ownership. The combined update removes a host gradient boundary; it does
+not supply the missing backend arena.

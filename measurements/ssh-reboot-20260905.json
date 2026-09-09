@@ -1,0 +1,118 @@
+{
+  "requested_by_user": true,
+  "started_at": "2026-09-05T09:34:13.066215+00:00",
+  "before_boot_uuid": "753BD0B6-A834-4289-BEB3-5C584843F2F8",
+  "before_boot_epoch": 1788584162,
+  "before_bridge_pid": 94759,
+  "before_bridge_state": "Us",
+  "status": "returned_after_remote_reboot",
+  "method": "sudo -n /sbin/shutdown -r now",
+  "observations": [
+    {
+      "at": "2026-09-05T09:35:39.606129+00:00",
+      "elapsed_s": 45.9,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Connection refused"
+    },
+    {
+      "at": "2026-09-05T09:35:55.108381+00:00",
+      "elapsed_s": 61.4,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Connection refused"
+    },
+    {
+      "at": "2026-09-05T09:36:10.732558+00:00",
+      "elapsed_s": 77.0,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Connection refused"
+    },
+    {
+      "at": "2026-09-05T09:36:26.289472+00:00",
+      "elapsed_s": 92.6,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Connection refused"
+    },
+    {
+      "at": "2026-09-05T09:36:51.311105+00:00",
+      "elapsed_s": 117.6,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Operation timed out"
+    },
+    {
+      "at": "2026-09-05T09:37:16.336570+00:00",
+      "elapsed_s": 142.6,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Operation timed out"
+    },
+    {
+      "at": "2026-09-05T09:37:36.355667+00:00",
+      "elapsed_s": 162.6,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Host is down"
+    },
+    {
+      "at": "2026-09-05T09:38:01.378250+00:00",
+      "elapsed_s": 187.7,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Operation timed out"
+    },
+    {
+      "at": "2026-09-05T09:38:26.400558+00:00",
+      "elapsed_s": 212.7,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Operation timed out"
+    },
+    {
+      "at": "2026-09-05T09:38:51.422294+00:00",
+      "elapsed_s": 237.7,
+      "returncode": 255,
+      "stdout": "",
+      "stderr": "ssh: connect to host ms-mac-mini.local port 22: Operation timed out"
+    },
+    {
+      "at": "2026-09-05T09:39:06.679939+00:00",
+      "elapsed_s": 253.0,
+      "returncode": 0,
+      "stdout": "9707F1C5-92FC-495E-A4C9-40F04BEF20C3\nkern.boottime: { sec = 1788601124, usec = 726135 } Sat Sep  5 02:38:44 2026\n 2:39  up 21 secs, 0 users, load averages: 4.91 1.26 0.46",
+      "stderr": "",
+      "new_boot": true
+    }
+  ],
+  "issued_at": "2026-09-05T09:34:53.708939+00:00",
+  "issued_epoch": 1788600893.7090409,
+  "game_session_stopped_cleanly": true,
+  "checkpoint_directory": "/Users/mdot/dox/mesh/xonotic/solver/strat/runs/async-live-20260905/00002-joint-00001-00000",
+  "command_result": {
+    "returncode": 255,
+    "stdout": "Shutdown NOW!\n\nSystem shutdown time has arrived\u0007\u0007\n",
+    "stderr": "",
+    "finished_at": "2026-09-05T09:34:53.939172+00:00"
+  },
+  "after_boot_uuid": "9707F1C5-92FC-495E-A4C9-40F04BEF20C3",
+  "after_boot_epoch": 1788601124,
+  "ssh_recovery_s": 253.0,
+  "post_boot_uninterruptible_processes": 0,
+  "post_boot_bridge_pid": 362,
+  "bridges_paired_automatically": true,
+  "physical_intervention": false,
+  "forced_reboot": false,
+  "configured_region_fractions": {
+    "laptop": 25,
+    "mini": 25
+  },
+  "clean_shutdown": false,
+  "hardware_watchdog_reset": true,
+  "watchdog_no_checkins_seconds": 218,
+  "reset_faults": "wdog,reset_in_1",
+  "game_session_resumed_at": "2026-09-05T09:43:02.061780+00:00",
+  "game_observations_and_optimizer_updates_resumed": true
+}

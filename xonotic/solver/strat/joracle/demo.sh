@@ -31,12 +31,9 @@ TELEMETRY="$MINI_RUN/output/live.jsonl"
 MANIFEST="$RUNDIR/dev.manifest"
 SERVER_SESSION=${JORACLE_SERVER_SESSION:-joracle-server}
 CLIENT_SESSION=${JORACLE_CLIENT_SESSION:-joracle-client}
-MINI_REACHABLE=0
 
 say() { printf '[demo] %s\n' "$*" >&2; }
 ssh_node() { ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$MINI" "$@"; }
-ssh_node_bg() { ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -f "$MINI" "$@"; }
-SSH_TRANSPORT="ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 file_id() {
   cksum "$1" | awk '{print $1 ":" $2}'
@@ -128,12 +125,7 @@ preflight() {
   [ -x "$ENGINE" ] || say "engine not found or not executable: $ENGINE"
   [ -d "$ASSETROOT/data" ] || say "asset root has no data/: $ASSETROOT"
   "$REPO/bin/mesh-bridge.sh" status >/dev/null 2>&1 || "$REPO/bin/mesh-bridge.sh" start || true
-  if ssh_node true 2>/dev/null; then
-    MINI_REACHABLE=1
-  else
-    MINI_REACHABLE=0
-    say "mesh responder host $MINI is currently unreachable; local server and client still start"
-  fi
+  ssh_node true 2>/dev/null || say "mesh responder host $MINI is currently unreachable; local server and client still start"
   client=$(bridge_client)
   if [ -n "${client:-}" ] && [ "$client" != 0 ]; then
     if kill -0 "$client" 2>/dev/null; then
@@ -198,20 +190,6 @@ EOF
   say "staged $RUNDIR/userdir"
 }
 
-push_runtime() {
-  [ "$MINI_REACHABLE" = 1 ] || return 1
-  ssh_node "mkdir -p $MINI_RUN/runtime $MINI_RUN/output" || return 1
-  rsync -e "$SSH_TRANSPORT" -a --delete \
-    --exclude '__pycache__' --exclude 'runs/curriculum' --exclude '*.npz' \
-    "$REPO/rdma/" "$MINI:$MINI_RUN/runtime/rdma/" || return 1
-  rsync -e "$SSH_TRANSPORT" -a --delete \
-    --exclude '__pycache__' --exclude 'runs/curriculum' \
-    "$XONOTIC/solver/" "$MINI:$MINI_RUN/runtime/xonotic/solver/" || return 1
-  rsync -e "$SSH_TRANSPORT" -a --delete --exclude '__pycache__' \
-    "$XONOTIC/payload/tools/" "$MINI:$MINI_RUN/runtime/xonotic/payload/tools/" || return 1
-  say "runtime pushed to $MINI:$MINI_RUN/runtime"
-}
-
 start_server() {
   maps=$(cat "$RUNDIR/maps.list")
   first_map=${maps%% *}
@@ -253,17 +231,13 @@ start_client() {
 }
 
 start_responder() {
-  ssh_node_bg \
-    "cd $MINI_RUN/runtime/xonotic && \
-     PYTHONPATH=$MINI_RUN/runtime/xonotic:$MINI_RUN/runtime/xonotic/payload/tools \
-     nohup $MINI_PY -m solver.strat.strat_responder \
-       --train --peer-node $PEER_NODE \
-       --off-policy-players $OFF_POLICY \
-       --online-checkpoint $MINI_RUN/output/live.npz \
-       --telemetry $TELEMETRY --append-telemetry \
-       --environment joracle_demo --save-every 10 --save-secs 15 \
-       --model-sample-every ${JORACLE_MODEL_SAMPLE_EVERY:-50} \
-       > $MINI_RUN/output/responder.log 2>&1 &"
+  "$MESH_PY" "$REPO/bin/mesh-application.py" launch \
+    --host "$MINI" --python "$MINI_PY" --target "$MINI_RUN/application" \
+    --log "$MINI_RUN/output/responder.log" -- solver.strat.strat_responder \
+    --train --peer-node "$PEER_NODE" --off-policy-players "$OFF_POLICY" \
+    --online-checkpoint "$MINI_RUN/output/live.npz" --telemetry "$TELEMETRY" \
+    --append-telemetry --environment joracle_demo --save-every 10 --save-secs 15 \
+    --model-sample-every "${JORACLE_MODEL_SAMPLE_EVERY:-50}" || return
   say "responder launched on $MINI -> $MINI_RUN/output/responder.log"
 }
 
@@ -304,7 +278,6 @@ case "${1:-up}" in
   up)
     preflight
     stage || say "staging did not complete; continuing with every independently available component"
-    push_runtime || say "runtime push did not complete; continuing locally"
     start_server || say "server did not start; continuing with client, responder, and viewer"
     start_client || say "client did not start; continuing with responder and viewer"
     sleep 3
@@ -323,7 +296,6 @@ case "${1:-up}" in
       && say "attaching to the cartserver already holding the bridge: pid $holder" \
       || say "warning: no process currently holds the bridge client slot; the server may be between mesh_open retries"
     mkdir -p "$RUNDIR/logs"
-    push_runtime || say "runtime push did not complete"
     start_responder || say "responder did not start"
     start_viewer || say "viewer did not start"
     banner
@@ -334,7 +306,6 @@ case "${1:-up}" in
     banner
     ;;
   responder)
-    push_runtime || say "runtime push did not complete"
     start_responder || say "responder did not start"
     ;;
   client)

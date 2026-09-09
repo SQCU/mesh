@@ -116,6 +116,7 @@ cat > "$A/io.mesh.update.user.plist" <<PL
 </dict></plist>
 PL
 load io.mesh.update.user
+try "complete cartlane application realized" "$PY" "$R/bin/mesh-application.py" deploy --source "$R" --target "$D/applications/cartlane"
 ok "mesh-peers: $D/bin/mesh-peers.sh"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$D/branch"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"

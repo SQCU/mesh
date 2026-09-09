@@ -10,7 +10,7 @@
  td.k{color:var(--dim);width:84px}td.v{color:var(--fg)}.down{color:var(--warn)}
  .title{flex-basis:100%}.node{flex:1 1 0;min-width:280px;max-width:700px;padding:6px 8px;background:#07080bd9;border:1px solid #1b2430}.name{color:var(--hi);letter-spacing:.1em;font-size:10px}
  td.v.exact{color:#9effa0}td.v.capacity{color:#c4a6ff}td.v.na{color:var(--dim)}
- details{margin:4px 0}summary{cursor:pointer;color:var(--hi)}.measure{overflow-wrap:anywhere}.coordinate{padding:2px 0;border-bottom:1px solid #1b2430}
+ a{color:var(--hi)}
  #foot{position:fixed;bottom:0;left:0;right:0;padding:12px 16px;color:var(--dim);pointer-events:none;background:linear-gradient(transparent,#07080bea)}
  @media(max-width:700px){#hud{max-height:52vh}.node{min-width:100%}#foot{font-size:9px;line-height:1.35}}
 </style></head><body>
@@ -149,28 +149,8 @@ const fmt=n=>Number.isFinite(n)?n>=1e9?(n/1e9).toFixed(2)+'G':n>=1e6?(n/1e6).toF
 const num=(n,d=2)=>Number.isFinite(n)?n.toFixed(d):'—';
 const rate=n=>num(n,n>0&&n<.01?3:2);
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const scalarLeaves=(value,path=[],out=[])=>{
-  if(!value||typeof value!=='object'||Array.isArray(value)) return out;
-  for(const [key,child] of Object.entries(value)){
-    const next=[...path,key];
-    if(child===null||['number','string','boolean'].includes(typeof child)) out.push([next.join('.'),child]);
-    else if(child&&typeof child==='object'&&!Array.isArray(child)) scalarLeaves(child,next,out);
-  }
-  return out;
-};
-const openedMeasures=new Set();
-const coordinateValue=value=>value===null?'unavailable':typeof value==='number'?fmt(value):esc(value);
-document.getElementById('hud').addEventListener('click',event=>{
-  const summary=event.target.closest('summary[data-measure]');
-  if(summary){
-    const key=summary.dataset.measure;
-    if(openedMeasures.has(key)) openedMeasures.delete(key); else openedMeasures.add(key);
-    event.preventDefault();
-    hud();
-  }
-});
 function hud(){
-  let h=`<h1 class="title">mesh page-table phase space / whole-fabric observatory / phase lens ×${num(S.zoom||1,1)}</h1>`;
+  let h=`<h1 class="title">mesh page-table phase space / whole-fabric observatory / phase lens ×${num(S.zoom||1,1)}</h1><nav class="title">Application views: <a href="http://127.0.0.1:8795/j">J-space</a> · <a href="http://127.0.0.1:8795/policy">Policy learning</a></nav>`;
   const f=S.fabric||{}, fe=f.estimates||{}, ff=fe.fp32||{}, fm=fe.memory||{}, fwm=fe.workload_memory||{}, fw=f.workload||{}, fd=fw.deadlines||{};
   h+=`<div class="node"><div class="name">ENTIRE MESH / ${f.connected?.length||0} connected / ${f.nodes||0} inventoried</div><table>`;
   if(S.connectionError) h+=`<tr><td class="k">observer</td><td class="v down">${esc(S.connectionError)}</td></tr>`;
@@ -196,12 +176,6 @@ function hud(){
       const fp=s.estimates?.fp32||{}, fm=fp.upper_moments||{}, mm=s.estimates?.memory||{}, wm=s.estimates?.workload_memory||{}, dl=s.estimates?.deadlines||{};
       const producerRows=s.workload?.producers||[];
       const producers=producerRows.map(p=>`${esc(p.name||'workload')}#${p.pid??'?'} ${fmt(p.rows)} rows`).join('; ');
-      const measures=producerRows.flatMap(p=>Object.entries(p.measures||{}).map(([name,measure])=>{
-        const key=JSON.stringify([s.name,p.name,name]), opened=openedMeasures.has(key);
-        const scalars=opened?scalarLeaves(measure):Object.entries(measure||{}).filter(([,value])=>value===null||typeof value!=='object');
-        const coordinates=scalars.map(([key,value])=>`<div class="coordinate">${esc(key)} ${coordinateValue(value)}</div>`).join('');
-        return `<div class="measure"><details ${opened?'open':''}><summary data-measure="${esc(key)}">${esc(p.name||'workload')}.${esc(name)} / producer #${p.pid??'?'} / measure ${p.measures_sampled_at?num((Date.now()/1000)-p.measures_sampled_at,1)+'s ago':'age unavailable'}</summary>${opened?coordinates:''}</details>${opened?'':coordinates}</div>`;
-      })).join('');
       const clusters=Object.entries(m.cpu_clusters||{}).map(([k,v])=>`${k} ${num(v.active_pct,0)}% @ ${num(v.frequency_mhz,0)}MHz`).join('; ');
       const rows=[];
       const census=(s.free||0)+(s.recv||0)+(s.send||0)+(s.app||0);
@@ -223,7 +197,6 @@ function hud(){
         ['memory envelope',Number.isFinite(mm.upper_gbs)?`${num(mm.lower_gbs,1)}–${num(mm.upper_gbs,1)} GB/s  ${mm.source==='hardware_histogram'?'hardware':'capacity'}`:'counter unavailable','capacity'],
         ['workload bytes',Number.isFinite(wm.upper_gbs)?`${num(wm.lower_gbs,1)}–${num(wm.upper_gbs,1)} GB/s`:'no producer','capacity'],
         ['producers',producers||'none','capacity'],
-        ['application measures',measures||'none','capacity'],
         ['work deadline',dl.observations?`${dl.observations} observations  min slack ${fmt(dl.minimum_slack_s)}s  mean slack ${fmt(dl.mean_slack_s)}s  rows ${fmt(s.estimates?.rows)}  producers ${s.estimates?.producers??'—'}`:'no producer','capacity'],
         ['memory upper μ/σ',Number.isFinite(mm.upper_moments?.mean)?`${num(mm.upper_moments.mean,1)} / ${num(mm.upper_moments.sd,1)} GB/s  n=${mm.upper_moments.samples}`:'unavailable','capacity']);
       for(const [k,v,c] of rows) h+=`<tr><td class="k">${k}</td><td class="v ${c}">${v}</td></tr>`;

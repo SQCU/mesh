@@ -45,6 +45,12 @@ vector plc_r_inkcolor;
 float  plc_r_glow;
 bool   plc_r_haveorigin;
 vector plc_r_origin;
+int plc_game_leader;
+int plc_game_ties;
+bool plc_game_finished;
+float plc_game_score;
+float plc_game_limit;
+float plc_game_eta;
 
 vector payload_link_color(int team_index);
 void payload_cart_read(int c);
@@ -52,7 +58,7 @@ void payload_cart_read(int c);
 CLASS(Payload, Gametype)
     INIT(Payload)
     {
-        this.gametype_init(this, _("Payload"),"plc","g_payload",GAMETYPE_FLAG_TEAMPLAY | GAMETYPE_FLAG_USEPOINTS,"","timelimit=20 pointlimit=10 teams=3 leadlimit=0",_("Push the cart to your team's goal"));
+        this.gametype_init(this, _("Payload"),"plc","g_payload",GAMETYPE_FLAG_TEAMPLAY | GAMETYPE_FLAG_USEPOINTS,"","timelimit=0 pointlimit=1200 teams=3 leadlimit=0",_("Control cart checkpoint chains to accumulate the winning score"));
     }
     METHOD(Payload, m_parse_mapinfo, bool(string k, string v))
     {
@@ -78,13 +84,13 @@ CLASS(Payload, Gametype)
     METHOD(Payload, m_configuremenu, void(Gametype this, entity menu, void(entity me, string pLabel, float pMin, float pMax, float pStep, string pCvar, string tCvar, string pTooltip) returns))
     {
         TC(Gametype, this);
-        returns(menu, _("Capture limit:"), 1, 20, 1, "g_payload_point_limit", "g_payload_teams_override", _("The amount of captures needed before the match will end"));
+        returns(menu, _("Checkpoint score:"), 100, 10000, 100, "g_payload_point_limit", "g_payload_teams_override", _("Accumulated score from held checkpoints required to win"));
     }
 #ifdef CSQC
     ATTRIB(Payload, m_modicons, void(vector pos, vector mySize), HUD_Mod_Payload);
     ATTRIB(Payload, m_modicons_export, void(int fh), HUD_Mod_Payload_Export);
 #endif
-    ATTRIB(Payload, m_legacydefaults, string, "10 20 0");
+    ATTRIB(Payload, m_legacydefaults, string, "1200 0 0");
 ENDCLASS(Payload)
 REGISTER_GAMETYPE(PAYLOAD, NEW(Payload));
 

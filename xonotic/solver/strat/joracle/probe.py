@@ -3,14 +3,18 @@ from __future__ import annotations
 import json
 import os
 import threading
+import tempfile
 import time
+from collections import deque
 
 import numpy as np
 
 from payload.tools.strategy_io_schema import (
-    WEAPON_WORD_BITS, XAN_SCALAR_COLUMNS, XAN_WEAPON_SLICES, state_coordinate_kind,
+    WEAPON_WORD_BITS, state_coordinate_kind,
 )
 from solver.strat.row_window import RowWindow
+from solver.strat.joracle.display import compact_j_report
+from solver.strat.joracle.artifact import scalar_report, write_report, matrix_factor
 
 def _finite(array):
     return np.asarray(array, dtype=np.float64)
@@ -83,47 +87,15 @@ def literal_state_lens_coordinates(state, labels):
 def literal_source_coordinates(model, server_state_labels=()):
     x = _finite(model["x"])
     n = x.shape[0]
-    parts = [x]
-    names = [f"x.{name.lower()}" for name in XAN_SCALAR_COLUMNS]
-    names.extend(
-        f"x.{word.lower()}.bit.{bit}"
-        for word in XAN_WEAPON_SLICES
-        for bit in range(WEAPON_WORD_BITS)
-    )
-    for key, prefix in (("beta", "beta"), ("hierarchy", "semantics")):
-        value = _finite(model[key]) if model.get(key) is not None else None
-        if value is not None and value.ndim == 2 and value.shape[0] == n:
-            parts.append(value)
-            names.extend(f"{prefix}.{index}" for index in range(value.shape[1]))
-    team_ids = _finite(model.get("team_ids")) if model.get("team_ids") is not None else None
-    if team_ids is not None and team_ids.reshape(-1).shape[0] == n:
-        team_ids = team_ids.reshape(-1)
-        team_categories = np.unique(team_ids)
-        parts.append((team_ids[:, None] == team_categories[None, :]).astype(np.float64))
-        names.extend(f"team_id={int(value)}" for value in team_categories)
-    selected_z = _finite(model.get("selected_z")) if model.get("selected_z") is not None else None
-    if selected_z is not None and selected_z.ndim == 2 and selected_z.shape[0] == n:
-        parts.append(selected_z)
-        names.extend(f"selected_z.{index}" for index in range(selected_z.shape[1]))
-    selected_w = _finite(model.get("selected_w")) if model.get("selected_w") is not None else None
-    if selected_w is not None and selected_w.reshape(-1).shape[0] == n:
-        parts.append(selected_w.reshape(n, 1))
-        names.append("selected_w")
-    selected_action_mass = _finite(model.get("selected_action_mass")) if model.get("selected_action_mass") is not None else None
-    if selected_action_mass is not None and selected_action_mass.reshape(-1).shape[0] == n:
-        parts.append(selected_action_mass.reshape(n, 1))
-        names.append("selected_action_mass")
-    for key in ("delta", "control_weight", "exploration_weight"):
-        value = _finite(model[key]) if model.get(key) is not None else None
-        if value is not None and value.size == 1:
-            parts.append(np.full((n, 1), float(value.reshape(-1)[0]), dtype=np.float64))
-            names.append(key)
+    features = model.get("source_features")
+    source = x if features is None else np.broadcast_to(_finite(features), (n, np.size(features)))
+    names = list(model.get("x_labels") or (f"state.{index}" for index in range(x.shape[1]))) if features is None else list(model["source_labels"])
     state = _finite(model.get("server_state")) if model.get("server_state") is not None else None
     state_names = list(server_state_labels)
     if state is None or state.ndim != 2 or state.shape[0] != n:
         state = np.empty((n, 0), dtype=np.float64)
         state_names = []
-    return np.concatenate(parts, axis=1), names, state, state_names
+    return source, names, state, state_names
 
 def rows_from_frame(frame):
     model = frame.get("model") or {}
@@ -152,7 +124,6 @@ def rows_from_frame(frame):
             f"j.{index}" for index in range(j.shape[1])
         )),
         "x": x,
-        "beta": _finite(model.get("beta")) if model.get("beta") is not None else None,
         "lens_input": lens_input,
         "lens_names": lens_names,
         "server_state": server_state,
@@ -206,7 +177,7 @@ def transition_from_frame(frame):
                 "edict": int(item.get("edict") or 0),
                 "response_seq": int(sequence or 0),
                 "relation": relation,
-                "applied_target_resolution": int(bool(item.get("target_resolved"))),
+                "applied_state_observation": int(bool(item.get("applied_state_current"))),
                 "successor_state": item.get("successor_state"),
                 "successor_state_labels": item.get("successor_state_labels") or (),
                 "source": sources.get((
@@ -216,10 +187,7 @@ def transition_from_frame(frame):
             }
             for item in assignments
             for relation, sequence in (
-                ("delivery", item.get("delivered_response_seq")),
-                ("route", item.get("route_seq")),
-                ("goal", item.get("goal_seq")),
-                ("touch", item.get("touch_seq")),
+                ("state_application", item.get("applied_response_seq")),
             )
             if int(sequence or 0) > 0
         ],
@@ -264,7 +232,7 @@ def transition_from_frame(frame):
                 )),
             }
             for event in frame.get("realized_events") or ()
-            if int(event.get("response_seq") or 0) > 0
+            if int(event.get("response_seq") or 0) > 0 and event.get('episode_id') == frame.get('episode_id')
         ],
         "state_labels": list(frame.get("server_state_labels") or ()),
         "source_window": dict(frame.get("source_window") or {}),
@@ -277,29 +245,6 @@ def _transition_mass(item):
         1, len(item["sources"]),
         len(item["state_references"]) + len(item["applied"]) + len(item["events"]),
     )
-
-def _spectral_measure(matrix):
-    if matrix is None or matrix.size == 0 or matrix.ndim != 2 or not np.isfinite(matrix).all():
-        return None
-    centered = matrix - matrix.mean(axis=0, keepdims=True)
-    try:
-        values = np.linalg.svd(centered, compute_uv=False)
-    except np.linalg.LinAlgError:
-        return None
-    total = values.sum()
-    square_integral = np.square(values).sum()
-    if total > 0:
-        probabilities = values[values > 0] / total
-        effective = float(np.exp(-(probabilities * np.log(probabilities)).sum()))
-    else:
-        effective = 0.0
-    return {
-        "mass": len(values),
-        "integral": float(total),
-        "square_integral": float(square_integral),
-        "effective_rank": effective,
-        "singular_values": values.tolist(),
-    }
 
 def _scalar_measure(values, j=None, controls=None):
     values = np.asarray(values, dtype=np.float64).reshape(-1)
@@ -329,11 +274,11 @@ def _scalar_measure(values, j=None, controls=None):
             joint_j = j[joint]
             measure["j_cross_moment"] = np.mean(
                 joint_j * joint_values[:, None], axis=0,
-            ).tolist()
+            )
             measure["j_covariance"] = np.mean(
                 (joint_j - joint_j.mean(axis=0, keepdims=True))
                 * (joint_values - joint_values.mean())[:, None], axis=0,
-            ).tolist()
+            )
         else:
             measure["j_cross_moment"] = None
             measure["j_covariance"] = None
@@ -350,11 +295,11 @@ def _scalar_measure(values, j=None, controls=None):
             joint_controls = controls[joint]
             measure["control_cross_moment"] = np.mean(
                 joint_controls * joint_values[:, None], axis=0,
-            ).tolist()
+            )
             measure["control_covariance"] = np.mean(
                 (joint_controls - joint_controls.mean(axis=0, keepdims=True))
                 * (joint_values - joint_values.mean())[:, None], axis=0,
-            ).tolist()
+            )
         else:
             measure["control_cross_moment"] = None
             measure["control_covariance"] = None
@@ -442,11 +387,11 @@ def authoritative_state_strata(rows, state_key, labels_key, projection_name):
             "policy_arm": policy_arm,
             "channel": channel,
             "state_labels": state_labels,
-            "state_integral": finite_state.sum(axis=0).tolist(),
-            "state_mean": None if len(finite_state) == 0 else finite_state.mean(axis=0).tolist(),
-            "state_variance": None if len(finite_state) == 0 else np.mean(centered_state * centered_state, axis=0).tolist(),
-            "state_j_cross_moment": None if len(finite_state) == 0 else (finite_state.T @ finite_j / len(finite_state)).tolist(),
-            "state_j_covariance": None if len(finite_state) == 0 else (centered_state.T @ centered_j / len(finite_state)).tolist(),
+            "state_integral": finite_state.sum(axis=0),
+            "state_mean": None if len(finite_state) == 0 else finite_state.mean(axis=0),
+            "state_variance": None if len(finite_state) == 0 else np.mean(centered_state * centered_state, axis=0),
+            "state_j_cross_moment": None if len(finite_state) == 0 else matrix_factor(finite_state, finite_j, len(finite_state)),
+            "state_j_covariance": None if len(finite_state) == 0 else matrix_factor(centered_state, centered_j, len(finite_state)),
             projection_name: empirical_affine_projection(
                 j, state, j_labels, state_labels,
             ),
@@ -501,12 +446,14 @@ def empirical_affine_projection(domain, codomain, domain_labels=(), codomain_lab
     centered_source = source - source_mean
     centered_target = target - target_mean
     try:
-        operator, _, rank, singular_values = np.linalg.lstsq(
-            centered_source, centered_target, rcond=None,
-        )
+        u, singular_values, vt = np.linalg.svd(centered_source, full_matrices=False)
+        threshold = np.finfo(centered_source.dtype).eps * max(centered_source.shape) * (singular_values[0] if len(singular_values) else 0)
+        keep = singular_values > threshold
+        rank = np.count_nonzero(keep)
+        inverse_transpose = (u[:, keep] / singular_values[keep]) @ vt[keep]
     except np.linalg.LinAlgError:
         return {**base, **empty, "decomposition_residual_mass": 1}
-    image = centered_source @ operator
+    image = (centered_source @ inverse_transpose.T) @ centered_target
     residual = centered_target - image
     target_square = np.sum(centered_target * centered_target, axis=0)
     image_square = np.sum(image * image, axis=0)
@@ -516,13 +463,13 @@ def empirical_affine_projection(domain, codomain, domain_labels=(), codomain_lab
         "decomposition_mass": 1,
         "decomposition_residual_mass": 0,
         "domain_numerical_rank": int(rank),
-        "domain_singular_values": singular_values.tolist(),
-        "operator": operator.T.tolist(),
-        "offset": (target_mean - source_mean @ operator).tolist(),
-        "target_centered_square_integral": target_square.tolist(),
-        "image_centered_square_integral": image_square.tolist(),
-        "residual_square_integral": residual_square.tolist(),
-        "residual_mean_square": (residual_square / finite_mass).tolist(),
+        "domain_singular_values": singular_values,
+        "operator": matrix_factor(centered_target, inverse_transpose),
+        "offset": (target_mean - (source_mean @ inverse_transpose.T) @ centered_target),
+        "target_centered_square_integral": target_square,
+        "image_centered_square_integral": image_square,
+        "residual_square_integral": residual_square,
+        "residual_mean_square": (residual_square / finite_mass),
     }
 
 def matrix_fusion_intervention_measures(frames):
@@ -623,7 +570,7 @@ def literal_j_measures(buffer, transitions):
         centered_j = finite_j_rows - finite_j_rows.mean(axis=0, keepdims=True) if len(finite_j_rows) else finite_j_rows
         input_variance = np.mean(centered_features * centered_features, axis=0) if len(finite_features) else None
         j_variance = np.mean(centered_j * centered_j, axis=0) if len(finite_j_rows) else None
-        cross_covariance = centered_features.T @ centered_j / len(finite_features) if len(finite_features) else None
+        cross_covariance = matrix_factor(centered_features, centered_j, len(finite_features)) if len(finite_features) else None
         coordinate_strata.append({
             "mass": len(rows),
             "finite_atom_mass": int(finite.sum()),
@@ -632,11 +579,11 @@ def literal_j_measures(buffer, transitions):
             "j_coordinates": j_shape[0],
             "j_labels": list(j_labels),
             "input_labels": list(labels),
-            "input_integral": finite_features.sum(axis=0).tolist(),
-            "j_integral": finite_j_rows.sum(axis=0).tolist(),
-            "input_variance": None if input_variance is None else input_variance.tolist(),
-            "j_variance": None if j_variance is None else j_variance.tolist(),
-            "cross_covariance": None if cross_covariance is None else cross_covariance.tolist(),
+            "input_integral": finite_features.sum(axis=0),
+            "j_integral": finite_j_rows.sum(axis=0),
+            "input_variance": input_variance,
+            "j_variance": j_variance,
+            "cross_covariance": cross_covariance,
             "j_to_source_feature_affine_projection": empirical_affine_projection(
                 stratum_j, stratum_features,
                 j_labels, labels,
@@ -700,7 +647,7 @@ def literal_j_measures(buffer, transitions):
                 target, reference, relation,
                 {
                     "mass": 1.0,
-                    "applied_target_resolution": float(reference["applied_target_resolution"]),
+                    "applied_state_observation": float(reference["applied_state_observation"]),
                 },
                 successor_state=reference.get("successor_state"),
                 successor_state_labels=reference.get("successor_state_labels") or (),
@@ -726,35 +673,39 @@ def literal_j_measures(buffer, transitions):
             ]
             values = np.asarray([item["outcomes"][field] for item in selected], dtype=np.float64)
             j_rows = [item["j"] for item in selected]
-            controls = np.asarray([item["action"]["controls"] for item in selected], dtype=np.float64)
+            controls = np.asarray([item["action"]["velocity"] for item in selected], dtype=np.float64)
             measures[name] = _joint_scalar_measure(
                 values, j_rows, [item["j_labels"] for item in selected], controls,
             )
         return measures
 
     def state_measure_map(rows):
-        measures = {}
-        state_rows = [
-            item for item in rows
-            if item["channel"] in state_reference_mass and item["state_delta"] is not None
-            and len(item["state_delta"]) == len(item["state_labels"])
-        ]
-        for channel, name in sorted({
-            (item["channel"], name)
-            for item in state_rows for name in item["state_labels"]
-        }):
-            selected = [
-                item for item in state_rows
-                if item["channel"] == channel and name in item["state_labels"]
-            ]
-            values = np.asarray([
-                item["state_delta"][item["state_labels"].index(name)] for item in selected
-            ], dtype=np.float64)
-            j_rows = [item["j"] for item in selected]
-            controls = np.asarray([item["action"]["controls"] for item in selected], dtype=np.float64)
-            measures[f"{channel}.{name}"] = _joint_scalar_measure(
-                values, j_rows, [item["j_labels"] for item in selected], controls,
-            )
+        groups = {}
+        for item in rows:
+            if item["channel"] in state_reference_mass and item["state_delta"] is not None:
+                key = (item["channel"], item["policy_arm"], tuple(item["state_labels"]), tuple(item["j_labels"]), len(item["action"]["velocity"]))
+                groups.setdefault(key, []).append(item)
+        measures = []
+        for (channel, arm, labels, j_labels, width), items in groups.items():
+            values = np.asarray([item["state_delta"] for item in items], dtype=np.float64)
+            controls = np.asarray([item["action"]["velocity"] for item in items], dtype=np.float64)
+            j = np.asarray([item["j"] for item in items], dtype=np.float64)
+            finite = np.isfinite(values)
+            mass = finite.sum(axis=0)
+            total = np.where(finite, values, 0).sum(axis=0)
+            mean = total / np.maximum(mass, 1)
+            centered = np.where(finite, values - mean, 0)
+            joint = finite.all(axis=1) & np.isfinite(controls).all(axis=1) & np.isfinite(j).all(axis=1)
+            source, target, latent = values[joint], controls[joint], j[joint]
+            count = len(source)
+            left = source - source.mean(axis=0) if count else source
+            right = target - target.mean(axis=0) if count else target
+            measures.append({"channel": channel, "policy_arm": arm, "state_labels": labels, "j_labels": j_labels,
+                "mass": len(items), "finite_mass": mass, "integral": total, "mean": mean,
+                "variance": np.sum(centered * centered, axis=0) / np.maximum(mass, 1),
+                "joint_finite_mass": count, "j_covariance": matrix_factor(left, latent, count),
+                "control_covariance": {"representation": "left_transpose_times_right_over_mass",
+                    "left": left, "right": right, "mass": count, "shape": [len(labels), width]}})
         return measures
 
     def categorical_transition_measure_map(rows):
@@ -763,7 +714,7 @@ def literal_j_measures(buffer, transitions):
             if item["channel"] not in state_reference_mass:
                 continue
             j_row = np.asarray(item["j"], dtype=np.float64)
-            controls = np.asarray(item["action"]["controls"], dtype=np.float64)
+            controls = np.asarray(item["action"]["velocity"], dtype=np.float64)
             for transition in item["state_categorical_transitions"]:
                 key = (
                     item["channel"],
@@ -802,16 +753,16 @@ def literal_j_measures(buffer, transitions):
                 "mass": measure["mass"],
                 "j_finite_mass": measure["j_finite_mass"],
                 "j_nonfinite_mass": measure["mass"] - measure["j_finite_mass"],
-                "j_integral": measure["j_integral"].tolist(),
+                "j_integral": measure["j_integral"],
                 "j_mean": (
-                    (measure["j_integral"] / measure["j_finite_mass"]).tolist()
+                    (measure["j_integral"] / measure["j_finite_mass"])
                     if measure["j_finite_mass"] else None
                 ),
                 "control_finite_mass": measure["control_finite_mass"],
                 "control_nonfinite_mass": measure["mass"] - measure["control_finite_mass"],
-                "control_integral": measure["control_integral"].tolist(),
+                "control_integral": measure["control_integral"],
                 "control_mean": (
-                    (measure["control_integral"] / measure["control_finite_mass"]).tolist()
+                    (measure["control_integral"] / measure["control_finite_mass"])
                     if measure["control_finite_mass"] else None
                 ),
             }
@@ -880,41 +831,20 @@ def literal_j_measures(buffer, transitions):
 
     outcome_measures = outcome_measure_map(joined)
     action_measures = []
-    action_keys = sorted({
-        (
-            item["channel"], item["policy_arm"], item["behavior"], item["action"]["kind"],
-            item["action"]["target_kind"], item["action"]["target_id"],
-            tuple(item["action"].get("target_cell") or (0, 0)),
-        )
-        for item in joined
-    })
-    for channel, policy_arm, behavior, kind, target_kind, target_id, target_cell in action_keys:
-        selected = [
-            item for item in joined
-            if (
-                item["channel"], item["policy_arm"], item["behavior"], item["action"]["kind"],
-                item["action"]["target_kind"], item["action"]["target_id"],
-                tuple(item["action"].get("target_cell") or (0, 0)),
-            ) == (channel, policy_arm, behavior, kind, target_kind, target_id, target_cell)
-        ]
+    action_keys = sorted({(item["channel"], item["policy_arm"], item["behavior"],
+                           len(item["action"]["velocity"])) for item in joined})
+    for channel, policy_arm, behavior, width in action_keys:
+        selected = [item for item in joined if
+                    (item["channel"], item["policy_arm"], item["behavior"], len(item["action"]["velocity"]))
+                    == (channel, policy_arm, behavior, width)]
         names = sorted({name for item in selected for name in item["outcomes"]})
-        controls = np.asarray([item["action"]["controls"] for item in selected], dtype=np.float64)
+        velocities = np.asarray([item["action"]["velocity"] for item in selected], dtype=np.float64)
         action_measures.append({
-            "channel": channel,
-            "policy_arm": policy_arm,
-            "behavior": behavior,
-            "kind": kind,
-            "target_kind": target_kind,
-            "target_id": target_id,
-            "target_cell": list(target_cell),
-            "mass": len(selected),
-            "control_integral": controls.sum(axis=0).tolist(),
-            "control_mean": controls.mean(axis=0).tolist(),
-            "outcomes": {
-                name: _scalar_measure(values)
-                for name in names
-                if (values := [item["outcomes"][name] for item in selected if name in item["outcomes"]])
-            },
+            "channel": channel, "policy_arm": policy_arm, "behavior": behavior,
+            "state_width": width, "mass": len(selected),
+            "rate_integral": velocities.sum(axis=0), "rate_mean": velocities.mean(axis=0),
+            "outcomes": {name: _scalar_measure(values) for name in names
+                         if (values := [item["outcomes"][name] for item in selected if name in item["outcomes"]])},
         })
     state_delta_measures = state_measure_map(joined)
     state_categorical_transition_measures = categorical_transition_measure_map(joined)
@@ -988,7 +918,7 @@ def literal_j_measures(buffer, transitions):
     input_variance = np.mean(lens_centered * lens_centered, axis=0) if finite_mass else None
     j_variance = np.mean(j_centered * j_centered, axis=0) if finite_mass else None
     cross_covariance = (
-        lens_centered.T @ j_centered / finite_mass
+        matrix_factor(lens_centered, j_centered, finite_mass)
         if finite_mass else None
     )
     state_rows, exact_state_sources, source_state_strata, newest_state_key = (
@@ -1019,8 +949,8 @@ def literal_j_measures(buffer, transitions):
         source_state_centered = finite_source_states - source_state_mean[None, :] if len(finite_source_states) else finite_source_states
         source_j_centered = finite_source_j - finite_source_j.mean(axis=0, keepdims=True) if len(finite_source_j) else finite_source_j
         source_state_variance = np.mean(source_state_centered * source_state_centered, axis=0) if len(finite_source_states) else None
-        source_state_cross_moment = finite_source_states.T @ finite_source_j / len(finite_source_states) if len(finite_source_states) else None
-        source_state_covariance = source_state_centered.T @ source_j_centered / len(finite_source_states) if len(finite_source_states) else None
+        source_state_cross_moment = matrix_factor(finite_source_states, finite_source_j, len(finite_source_states)) if len(finite_source_states) else None
+        source_state_covariance = matrix_factor(source_state_centered, source_j_centered, len(finite_source_states)) if len(finite_source_states) else None
     else:
         source_states = np.empty((0, 0), dtype=np.float64)
         source_j = np.empty((0, j.shape[1]), dtype=np.float64)
@@ -1031,17 +961,17 @@ def literal_j_measures(buffer, transitions):
         source_state_cross_moment = None
         source_state_covariance = None
     outcome_covariance = [
-        value for measure in outcome_measures.values() for value in measure.get("j_covariance") or ()
+        value for measure in outcome_measures.values() if measure.get("j_covariance") is not None for value in measure["j_covariance"]
     ]
     state_covariance = [
-        value for measure in state_delta_measures.values() for value in measure.get("j_covariance") or ()
+        measure['j_covariance']['frobenius_norm'] for measure in state_delta_measures if measure.get('j_covariance') is not None
     ]
     return {
         "j_lens": {
             "mass": mass,
             "finite_atom_mass": finite_mass,
             "nonfinite_atom_mass": mass - finite_mass,
-            "definition": "empirical joint measure of exact composer features and selected participant-instrument J rows",
+            "definition": "empirical joint measure of full state inputs and policy intermediate rows",
             "source_atom_mass": len(exact_sources),
             "coordinate_atom_mass": len(coordinate_rows),
             "all_coordinate_atom_mass": len(lens_rows),
@@ -1052,19 +982,19 @@ def literal_j_measures(buffer, transitions):
             "composer_families": len(composer_measures),
             "input_variance_integral": None if input_variance is None else float(input_variance.sum()),
             "j_variance_integral": None if j_variance is None else float(j_variance.sum()),
-            "cross_covariance_frobenius": None if cross_covariance is None else float(np.linalg.norm(cross_covariance)),
+            "cross_covariance_frobenius": None if cross_covariance is None else cross_covariance['frobenius_norm'],
             "input_labels": coordinate_rows[-1].get("feature_labels") or [] if coordinate_rows else [],
             "j_labels": coordinate_rows[-1].get("j_labels") or [] if coordinate_rows else [],
-            "input_integral": finite_lens.sum(axis=0).tolist(),
-            "j_integral": finite_j.sum(axis=0).tolist(),
-            "input_variance": None if input_variance is None else input_variance.tolist(),
-            "j_variance": None if j_variance is None else j_variance.tolist(),
-            "cross_covariance": None if cross_covariance is None else cross_covariance.tolist(),
+            "input_integral": finite_lens.sum(axis=0),
+            "j_integral": finite_j.sum(axis=0),
+            "input_variance": input_variance,
+            "j_variance": j_variance,
+            "cross_covariance": cross_covariance,
             "composer_measures": composer_measures,
             "matrix_fusion_intervention": matrix_fusion_intervention,
         },
         "j_oracle": {
-            "definition": "exact response-sequence pushforward measure from authoritative source state, selected J, literal intervention and controls to subsequent server state and route-owned outcomes",
+            "definition": "exact response-sequence pushforward measure from authoritative source state, J and full state-rate vector to subsequent server state and state-application outcomes",
             "source_window": source_window,
             "source_coordinate_mass": mass,
             "source_atom_mass": len(exact_sources),
@@ -1080,15 +1010,15 @@ def literal_j_measures(buffer, transitions):
             "source_state_coordinates": source_states.shape[1],
             "source_state_labels": source_state_labels,
             "source_state_integral": (
-                source_states[source_state_finite].sum(axis=0).tolist()
+                source_states[source_state_finite].sum(axis=0)
                 if len(source_states) else []
             ),
-            "source_state_mean": None if source_state_mean is None else source_state_mean.tolist(),
-            "source_state_variance": None if source_state_variance is None else source_state_variance.tolist(),
-            "source_state_j_cross_moment": None if source_state_cross_moment is None else source_state_cross_moment.tolist(),
-            "source_state_j_covariance": None if source_state_covariance is None else source_state_covariance.tolist(),
+            "source_state_mean": source_state_mean,
+            "source_state_variance": source_state_variance,
+            "source_state_j_cross_moment": source_state_cross_moment,
+            "source_state_j_covariance": source_state_covariance,
             "source_state_variance_integral": None if source_state_variance is None else float(source_state_variance.sum()),
-            "source_state_j_covariance_frobenius": None if source_state_covariance is None else float(np.linalg.norm(source_state_covariance)),
+            "source_state_j_covariance_frobenius": None if source_state_covariance is None else source_state_covariance['frobenius_norm'],
             "successor_state_atom_mass": len(successor_state_rows),
             "successor_state_coordinate_mass": len(exact_successor_states),
             "successor_state_strata_mass": len(successor_state_strata),
@@ -1104,6 +1034,8 @@ def literal_j_measures(buffer, transitions):
                 }
                 for relation, relation_mass in state_reference_mass.items()
             },
+            "state_application_mass": state_reference_mass.get("state_application", 0),
+            "state_application_joined_mass": sum(item["channel"] == "state_application" for item in joined),
             "delivery_mass": state_reference_mass.get("delivery", 0),
             "delivery_exact_source_mass": state_reference_exact_source_mass.get("delivery", 0),
             "delivery_joined_mass": sum(item["channel"] == "delivery" for item in joined),
@@ -1117,16 +1049,17 @@ def literal_j_measures(buffer, transitions):
             "unjoined_applied_mass": applied_mass - sum(item["channel"] == "behavior" for item in joined),
             "unjoined_event_mass": event_mass - sum(item["channel"] == "event" for item in joined),
             "outcome_coordinates": len(outcome_measures),
-            "state_delta_coordinates": len(state_delta_measures),
+            "state_delta_coordinates": sum(len(group['state_labels']) for group in state_delta_measures),
             "state_categorical_transition_coordinates": len(state_categorical_transition_measures),
             "state_categorical_transition_atom_mass": sum(
                 measure["mass"] for measure in state_categorical_transition_measures
             ),
             "outcome_variance_integral": float(sum(float(value.get("variance") or 0) for value in outcome_measures.values())),
-            "state_delta_variance_integral": float(sum(float(value.get("variance") or 0) for value in state_delta_measures.values())),
+            "state_delta_variance_integral": float(sum(np.sum(value["variance"]) for value in state_delta_measures)),
             "outcome_j_covariance_frobenius": float(np.linalg.norm(outcome_covariance)),
             "state_delta_j_covariance_frobenius": float(np.linalg.norm(state_covariance)),
-            "control_labels": ["gain", "commit_residual", "spawn"],
+            "rate_labels": [f"rate.{index}" for index in range(max(
+                (len(source["action"]["velocity"]) for source in exact_sources.values()), default=0))],
             "outcome_measures": outcome_measures,
             "state_delta_measures": state_delta_measures,
             "state_categorical_transition_measures": state_categorical_transition_measures,
@@ -1183,11 +1116,11 @@ class LiteralJWindow:
 
 class LiteralJReporter:
     def __init__(self, max_rows=4000, interval=20.0, artifact_path=None):
-        self.artifact_path = artifact_path
+        self.artifact_path = os.path.abspath(artifact_path or os.path.join(tempfile.mkdtemp(prefix="mesh-j-"), "j-measures"))
         self.max_rows = max(1, int(max_rows))
         self.interval = max(0.1, float(interval))
         self.lock = threading.Lock()
-        self.pending = []
+        self.pending = deque()
         self.generation = 0
         self.report = {}
         self.revision = 0
@@ -1245,7 +1178,7 @@ class LiteralJReporter:
                 self.pending_coordinate_row_mass > self.max_rows
                 or self.pending_transition_row_mass > self.max_rows
             ):
-                _, removed_coordinates, removed_transitions = self.pending.pop(0)
+                _, removed_coordinates, removed_transitions = self.pending.popleft()
                 self.pending_coordinate_row_mass -= removed_coordinates
                 self.pending_transition_row_mass -= removed_transitions
                 self.evicted_pending_coordinate_row_mass += removed_coordinates
@@ -1276,7 +1209,7 @@ class LiteralJReporter:
             with self.lock:
                 current_generation = self.generation
                 frames = self.pending
-                self.pending = []
+                self.pending = deque()
                 self.pending_coordinate_row_mass = 0
                 self.pending_transition_row_mass = 0
                 reporter_window = {
@@ -1288,6 +1221,10 @@ class LiteralJReporter:
             if current_generation != generation:
                 window = LiteralJWindow(self.max_rows)
                 generation = current_generation
+            if not frames:
+                if self.stop_event.is_set():
+                    break
+                continue
             try:
                 for frame, _, _ in frames:
                     window.ingest(frame)
@@ -1303,152 +1240,30 @@ class LiteralJReporter:
                         + window.transition_window.evicted_row_mass
                     ),
                 })
+                published = {"measure_projection": "section_scalars_and_structure_sizes", **scalar_report(report)}
+                path = f"{self.artifact_path}.{generation}.npz"
+                sampled_at = time.time()
+                write_report(path, {"sampled_at": sampled_at, "generation": generation, **report})
+                published["artifacts"] = {"j": {"path": path, "content_type": "application/octet-stream", "format": "numpy-npz-tree-v2", "sampled_at": sampled_at, "generation": generation}}
+                newest = frames[-1][0]
+                model = {"response": newest["resp_id"], "t": newest.get("t"), "row_identity": "edict",
+                         "row_outputs": [{"row": source["edict"], "arm": source["policy_arm"], "j": source["j"]}
+                                         for source in newest.get("measure_sources", []) if source["response_seq"] == newest["request_seq"]]}
+                write_report(path + '.view.npz', {'sampled_at': sampled_at, 'generation': generation,
+                    'full_artifact': path, 'artifact_format': 'numpy-npz-tree-v2', 'model': model, **compact_j_report(report)})
                 with self.lock:
                     if generation == self.generation:
-                        self.report = report
+                        self.report = published
                         self.revision += 1
-                if frames and self.artifact_path:
-                    path = f"{self.artifact_path}.{generation}.json"
-                    with open(path + ".new", "w") as handle:
-                        json.dump({"sampled_at": time.time(), "generation": generation, **report}, handle, separators=(",", ":"))
-                    os.replace(path + ".new", path)
             except Exception as error:
                 with self.lock:
                     self.errors += 1
                     self.last_error = f"{type(error).__name__}: {error}"
                     self.revision += 1
-            if self.stop_event.is_set():
-                break
 
-class RollingProbe:
-    def __init__(self, *, max_rows=4000, interval=4.0):
-        self.max_rows = int(max_rows)
-        self.interval = float(interval)
-        self.lock = threading.Lock()
-        self.window = LiteralJWindow(max_rows)
-        self.report = {"row_mass": 0, "finite_coordinate_row_mass": 0}
-        self.computed_at = None
-        self.compute_ms = None
-        self.errors = 0
-        self.last_error = None
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, name="joracle-probe", daemon=True)
-
-    def start(self):
-        self._thread.start()
-        return self
-
-    def stop(self):
-        self._stop.set()
-
-    def ingest(self, frame):
-        with self.lock:
-            self.window.ingest(frame)
-            self.max_rows = self.window.max_rows
-
-    def _loop(self):
-        while not self._stop.is_set():
-            start = time.time()
-            try:
-                report = self.compute()
-                with self.lock:
-                    self.report = report
-                    self.computed_at = time.time()
-                    self.compute_ms = round((time.time() - start) * 1000, 1)
-            except Exception as exc:
-                self.errors += 1
-                self.last_error = f"{type(exc).__name__}: {exc}"
-            deadline = time.time() + self.interval
-            while time.time() < deadline and not self._stop.is_set():
-                time.sleep(0.1)
-
-    def compute(self):
-        with self.lock:
-            buffer, transitions, observation_window = self.window.snapshot()
-        if not buffer:
-            return {
-                "row_mass": 0,
-                "finite_coordinate_row_mass": 0,
-                "shape_strata": [],
-                "geometry": {"rows": 0, "ticks": 0},
-                "observation_window": observation_window,
-                **literal_j_measures([], transitions),
-            }
-
-        measures = literal_j_measures(buffer, transitions)
-        shape_groups = {}
-        for item in buffer:
-            key = (item["j"].shape[1], item["x"].shape[1], item["lens_input"].shape[1])
-            shape_groups.setdefault(key, []).append(item)
-        shape_strata = [
-            {"j_width": key[0], "x_width": key[1], "lens_width": key[2],
-             "frame_mass": len(items), "row_mass": sum(len(item["j"]) for item in items)}
-            for key, items in shape_groups.items()
-        ]
-        newest = (buffer[-1]["j"].shape[1], buffer[-1]["x"].shape[1], buffer[-1]["lens_input"].shape[1])
-        buffer = [
-            item for item in buffer
-            if (item["j"].shape[1], item["x"].shape[1], item["lens_input"].shape[1]) == newest
-        ]
-
-        j = np.concatenate([item["j"] for item in buffer], axis=0)
-        x = np.concatenate([item["x"] for item in buffer], axis=0)
-        betas = [item["beta"] for item in buffer if item["beta"] is not None and item["beta"].ndim == 2]
-        beta = np.concatenate(betas, axis=0) if betas and len({b.shape[1] for b in betas}) == 1 else None
-        ticks = np.concatenate([
-            np.full(item["j"].shape[0], item["tick"] + 1_000_000 * item["epoch"]) for item in buffer
-        ])
-        n_rows = j.shape[0]
-        coordinate_finite = np.isfinite(j).all(axis=1) & np.isfinite(x).all(axis=1)
-        unique_ticks = np.unique(ticks[coordinate_finite])
-
-        j_spectrum = _spectral_measure(j[coordinate_finite])
-        x_spectrum = _spectral_measure(x[coordinate_finite])
-        beta_spectrum = _spectral_measure(beta)
-        x_nonzero_cols = int((np.where(np.isfinite(x), np.abs(x), 0).sum(axis=0) > 0).sum())
-
-        geometry = {
-            "rows": int(n_rows),
-            "finite_coordinate_rows": int(coordinate_finite.sum()),
-            "rows_per_feature": round(n_rows / j.shape[1], 2) if j.shape[1] else None,
-            "ticks": int(len(unique_ticks)),
-            "j_width": int(j.shape[1]),
-            "j_spectral_measure": j_spectrum,
-            "x_width": int(x.shape[1]),
-            "x_spectral_measure": x_spectrum,
-            "x_nonzero_columns": x_nonzero_cols,
-            "beta_width": None if beta is None else int(beta.shape[1]),
-            "beta_spectral_measure": beta_spectrum,
-            "j_finite": int(np.isfinite(j).sum()), "j_size": int(j.size),
-            "x_finite": int(np.isfinite(x).sum()), "x_size": int(x.size),
-            "beta_finite": None if beta is None else int(np.isfinite(beta).sum()),
-            "beta_size": None if beta is None else int(beta.size),
-        }
-
-        return {
-            "row_mass": int(n_rows),
-            "finite_coordinate_row_mass": int(coordinate_finite.sum()),
-            "shape_strata": shape_strata,
-            "geometry": geometry,
-            "observation_window": observation_window,
-            **measures,
-        }
-
-    def status(self):
-        with self.lock:
-            report = self.report
-            computed_at = self.computed_at
-        return {
-            "computed_at": computed_at,
-            "age": None if computed_at is None else round(time.time() - computed_at, 1),
-            "compute_ms": self.compute_ms,
-            "errors": self.errors,
-            "last_error": self.last_error,
-            "report": report,
-        }
 
 __all__ = [
-    "LiteralJReporter", "LiteralJWindow", "RollingProbe", "literal_j_measures",
+    "LiteralJReporter", "LiteralJWindow", "literal_j_measures",
     "rows_from_frame", "transition_from_frame", "matrix_fusion_intervention_measures",
     "sum_measures", "empirical_affine_projection", "literal_coordinate_delta",
     "literal_source_coordinates", "literal_state_lens_coordinates",

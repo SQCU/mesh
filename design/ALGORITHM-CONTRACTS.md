@@ -6,36 +6,30 @@ This document joins requirements already established in `SPECIFICATION.md`,
 
 ## Policy data flow
 
-The engine emits literal participant, cart, event, cell, and outcome rows. The responder
-constructs count-independent participant and instrument rows. Learned projections form
-one embedding per participant and one embedding per instrument. A single joint
-participant embedding produces a positive-semidefinite Gram matrix. That matrix mixes
-the participant IR. Instrument allocation, a residual-feature Gram matrix, SwiGLU,
-policy controls, W/L value probes, and dynamics probes consume the mixed IR.
+[POLICY-PROGRAM.md](POLICY-PROGRAM.md) is the single current policy program:
+complete native source rows, learned projections and mixing, one common final
+representation for policy and value outputs, sampled rates, private-view
+integration and the optimization objective. The detailed policy manifests formerly
+repeated here are superseded by that page. Primary requirements remain in
+[SPECIFICATION.md](SPECIFICATION.md).
 
-Every policy matrix product crosses the owned matrix-execution boundary. The DPP
-allocator composes its feature covariance, dimension-counted conjugate-gradient
-products, and marginal contraction from that boundary. A mathematical library symbol is
-not an execution contract.
-
-The reward stream contains only two positive measures: loss of the previously projected
-winner for W rows, and upward rank flips among nonwinning teams for L rows. Damage,
+The strategy reward stream contains minus one for loss of the previously projected
+winner on W rows, and plus one for upward rank flips among nonwinning teams on L rows. Damage,
 kills, pickups, contesting, and cart motion are behavioral outcome measures and never
 enter reward targets.
 
-The cart-game object separates its global formal value from its role projection. A
-global nimber exists only when every reachable role has the same complete acyclic
-options. Controlled partizan or cyclic positions retain a null global nimber. Each
-team's controlled-cart portfolio is independently an impartial heap sum, so its exact
-portfolio nimber, the unique projected role, denial succession, and loser ranks remain
-defined projection coordinates. Runtime roles and reward events consume this same
-object; no second XOR implementation exists beside the formal evaluator.
+The [literal cart game](CART-GAME-CONTRACT.md) integrates held checkpoints into
+monotone score. The unique earliest score-threshold crossing under frozen cart control
+defines the projected winner. Explicit checkpoint denial recomputes its succession;
+first-passage ordering defines loser ranks. Runtime roles and reward events consume
+this same object. No portfolio-XOR, terminal delivery or reversible-score substitute
+defines another game underneath those labels.
 
-One selected assignment yields its literal instrument identity, target identity or
-cell, gain, spawn control, and a travel commitment derived from actor-to-destination
-walking distance on the canonical navigation object. Commitment is stock walking time
-plus a learned nonnegative extension and has no map-size ceiling. QC consumes identity
-without reconstructing strategy semantics.
+Each response carries source identity, full per-word forcing, residual,
+integration duration and relaxation time. The engine applies the response to
+that bot's private native state view. Shared game state is not mutated by the
+residual adapter. Applied response sequences attribute observed outcomes to the
+actual sampled forcing and behavior-policy density.
 
 Participant succession is keyed by stable participant identity. A join introduces a
 new row. A departure has no successor and zero bootstrap only for that row. Neither event
@@ -43,16 +37,11 @@ terminates another participant's trajectory.
 
 ## Distributed scale control flow
 
-Forward residual-scale work may execute on any mesh node. Training retains the same
-placement: backward information and parameter updates cross the same interface or are
-owned by the node executing the parameters. The RDMA link transports literal tensor
-rows and structural framing only. Workload size is determined by current rows and
-available mesh memory, not an application constant.
-
-Placement does not freeze policy parameters or create another optimizer/checkpoint.
-The current [single-policy implementation manifest](POLICY-STATE-CONTRACT.md) places
-the pure residual-feature Gram contraction and its full operand pullback on the peer;
-the responder owns the complete parameter tree and performs one globally clipped update.
+Policy tensor placement, full operand derivatives and one owning optimization
+state are described in [POLICY-PROGRAM.md](POLICY-PROGRAM.md). The matrix execution
+boundary is documented in [MATRIX-EXECUTION-SPEC.md](MATRIX-EXECUTION-SPEC.md).
+Placement transports literal tensors and structural framing; it does not create
+another learned policy or freeze parameters by host.
 
 ## Geometry data flow
 
@@ -63,8 +52,10 @@ feeds cart-path planning, belief integration, and causal working-set constructio
 compiled solid-brush half-spaces define the separate continuous feasibility domain in
 which cart curves are realized.
 
-The reusable reconciliation kernel and its output measures are specified by
-`GEOMETRY-RECONCILIATION.md`. Geometry identities are never discarded to manufacture
+The collision numerics and standalone reconciliation kernel are specified by
+`GEOMETRY-RECONCILIATION.md`. The restored cart network/span planner and its simpler
+bending-energy curve fit are documented in
+[`CARTPATHS.md`](../xonotic/payload/CARTPATHS.md). Geometry identities are never discarded to manufacture
 feasibility. Source coordinates are projected, incidence is transduced through the same
 map, and displacement moments remain observable.
 
@@ -87,7 +78,7 @@ Every frame executes each world-aware QuakeC bot decision exactly once, depositi
 due player-controller row rather than applying its pure keyboard transform inline.
 Spatial causal horizons derived from live actor hulls and frame motion partition those
 deposited rows into independent working sets.
-The native structure-of-arrays kernel gathers fourteen input coordinates per row and
+The native structure-of-arrays kernel gathers nineteen input coordinates per row through that bot's state view and
 stable-gathers nine output coordinates per row at the working-set barriers before shared
 physics and combat advance. RNG, trace, entity allocation, and world-link effects remain
 in the ordered QuakeC stage and are never mislabeled as a byte-copy transaction.
@@ -108,7 +99,8 @@ SSH-forwarded HTTP consume the identical sequenced ring protocol. Successful sam
 node lease independently of discovery address lifetime, so a LAN or fabric partition changes the
 transport but does not invent a new node or erase its prior sequence.
 
-Operating-point search samples player, team, and cart populations. It minimizes distance
+Operating-point search for capacity experiments samples player, team, and cart populations. It minimizes distance
 over the coordinates present in each observation and records missing-coordinate support.
 It separately schedules missing measurements. Missing data never becomes an infinite
-distance or a command to increase population.
+distance or a command to increase population. Policy learning instead retains its requested
+independent team/cart/player axes and fixed per-match roster; monitoring does not rewrite them.

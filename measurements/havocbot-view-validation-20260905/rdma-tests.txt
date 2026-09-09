@@ -1,0 +1,13 @@
+flight recording /var/folders/dn/2cbps55n701df4cs24c7zszc0000gn/T/mesh-flow-test-gnkqc2hx/fixture-1788669860452118-56801.flight
+rtr rc 16 dlid 0 dqpn 13 dgid 0000..0000 mygid 0000
+rts rc 16, retrying
+pair up: rdma_enfixture node 0
+pair up: rdma_enfixture node 0
+pair up: rdma_enfixture node 0
+PASS: stream duplicate integrity, terminal replay, bounded receive progress; 1573049 polls, 3 submitted frames in 0.100 s
+PASS: ABI, one-call teardown steps, five cleanup failures, INIT/RTR/RTS failures, device scan, registration reuse, full span, bounded backoff/exchange, retained lifecycle and pending-call evidence
+..
+----------------------------------------------------------------------
+Ran 2 tests in 1.418s
+
+OK

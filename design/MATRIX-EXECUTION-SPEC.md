@@ -35,7 +35,7 @@ working on the MacBook. The MPP interface accepts mutable tensor-view element ty
 its source views are read-only operands and the destination is a separately allocated
 output. No source operand is written through those views.
 
-The fused `gram_context(R, p)` operation and its remote pullback are specified in the
+The rectangular `matrix_multiply_transpose_left(R, V)` cross factor and its remote pullback are specified in the
 [single-policy manifest](POLICY-STATE-CONTRACT.md). Its local and remote callers import
 the same implementation. There is no remote model or independently trained "expert".
 
@@ -55,30 +55,21 @@ the reverse weight product finds each expert's complete contiguous assignment in
 and reduces every outer product in that interval. Expert identities schedule products
 but never enter or alter tensor payload values.
 
-## DPP composition
+## Policy composition and measures
 
-The policy producer supplies one nonnegative quality coordinate and one feature row per
-instrument. The DPP operator RMS-normalizes feature rows, constructs
-`B = diag(quality) features`, forms the feature-side covariance `S = I + BᵀB`, and
-applies dimension-counted conjugate-gradient iterations to `S X = Bᵀ`. It emits
-`p_i = b_iᵀ x_i`, clipped to the probability interval, one coordinate per instrument.
-Each denominator carries a dtype-epsilon multiple of the initial residual measure and
-the covariance diagonal scale. Once relaxed FP32 products reach their representable
-floor, subsequent dimension-counted updates therefore tend continuously to zero instead
-of forming an underflowing `0/0` direction.
+The live policy uses learned global and team row-Gram actions and a sparse local
+neighborhood Gram. The global action is reassociated exactly as `R(RᵀV)`.
+The cross factor `RᵀV` may execute remotely with both operand derivatives.
+The live policy has no DPP allocator, instrument list, feature-Gram probe or
+one-vector broadcast gate. The standalone `dpp.py` numerical utility is not in
+the policy call graph.
 
-The feature dimension determines the iteration count. There is no method selector,
-host fallback, eigendecomposition, instrument-by-instrument inverse, convergence
-rejection, or fixed instrument-count envelope. `strategy.py` consumes every emitted
-coordinate by multiplying the corresponding instrument contribution to the mixed IR.
-
-## Measures
-
-`work_estimate.py` counts covariance products, every conjugate-gradient product, and the
-final marginal contraction from realized instrument and feature dimensions. Runtime
-measurements must retain those dimensions, elapsed GPU time, finite output mass, and
-forward/backward finiteness. Numerical comparison is a measure against an FP64 dense
-reference, never a runtime acceptance gate.
+`work_estimate.py` counts actual raw projections, neighborhood contractions,
+global/team Gram products, routed SwiGLU products and state-rate/value readouts.
+The row dimensions distinguish all observations, per-owner state pages, carts,
+teams and unique event/navigation sources. Routed SwiGLU uses three expert
+matrices. These are logical operation estimates, not hardware counter readings;
+training and byte envelopes do not establish measured utilization.
 
 `measure.py matrix` receives unrestricted row, inner, column, and sample coordinates. It
 reports the selected threadgroup, MPP, or wide-MPP schedule for each forward and reverse

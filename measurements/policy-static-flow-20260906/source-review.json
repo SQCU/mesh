@@ -1,0 +1,79 @@
+{
+  "record_type": "source_review",
+  "date": "2026-09-06",
+  "scope": "Local policy execution-flow refactor; no model evaluation, tests, native build, service operations, or RDMA execution.",
+  "checks": [
+    {
+      "name": "responder_import",
+      "command": "PYTHONPATH=xonotic bin/mesh-python -m solver.strat.strat_responder --help",
+      "exit_code": 0,
+      "output": "usage: strat_responder.py [-h] [--peer-node PEER_NODE] [--train]\n                          [--train-arms TRAIN_ARMS]\n                          [--match-metadata MATCH_METADATA]\n                          [--policy-arm POLICY_ARM]\n                          [--baseline-hidden BASELINE_HIDDEN]\n                          [--scale-rank SCALE_RANK]\n                          [--scale-hidden SCALE_HIDDEN]\n                          [--scale-experts SCALE_EXPERTS]\n                          [--scale-topk SCALE_TOPK] [--distributed-scale]\n                          [--distributed-scale-operation {block,gram}]\n                          [--team-policy-arms TEAM_POLICY_ARMS]\n                          [--arm-checkpoint ARM_CHECKPOINT]\n                          [--off-policy-players OFF_POLICY_PLAYERS]\n                          [--learning-rate LEARNING_RATE]\n                          [--gradient-clip GRADIENT_CLIP]\n                          [--save-every SAVE_EVERY] [--save-secs SAVE_SECS]\n                          [--checkpoint CHECKPOINT]\n                          [--online-checkpoint ONLINE_CHECKPOINT]\n                          [--initial-checkpoint INITIAL_CHECKPOINT]\n                          [--resume-checkpoint RESUME_CHECKPOINT]\n                          [--telemetry TELEMETRY] [--environment ENVIRONMENT]\n                          [--navigation-realization NAVIGATION_REALIZATION]\n                          [--append-telemetry]\n                          [--model-sample-every MODEL_SAMPLE_EVERY]\n                          [--measure-rows MEASURE_ROWS]\n                          [--measure-interval MEASURE_INTERVAL] [--seed SEED]\n                          [--control-weight CONTROL_WEIGHT]\n                          [--exploration-weight EXPLORATION_WEIGHT]\n                          [--replay-capacity REPLAY_CAPACITY]\n                          [--replay-precision REPLAY_PRECISION]\n                          [--replay-memory-mb REPLAY_MEMORY_MB]\n                          [--replay-batch REPLAY_BATCH]\n                          [--replay-weight REPLAY_WEIGHT]\n                          [--replay-steps REPLAY_STEPS]\n                          [--relaxation-time RELAXATION_TIME]\n                          [--integration-interval INTEGRATION_INTERVAL]\n\noptions:\n  -h, --help            show this help message and exit\n  --peer-node PEER_NODE\n  --train\n  --train-arms TRAIN_ARMS\n  --match-metadata MATCH_METADATA\n  --policy-arm POLICY_ARM\n  --baseline-hidden BASELINE_HIDDEN\n  --scale-rank SCALE_RANK\n  --scale-hidden SCALE_HIDDEN\n  --scale-experts SCALE_EXPERTS\n  --scale-topk SCALE_TOPK\n  --distributed-scale\n  --distributed-scale-operation {block,gram}\n  --team-policy-arms TEAM_POLICY_ARMS\n  --arm-checkpoint ARM_CHECKPOINT\n  --off-policy-players OFF_POLICY_PLAYERS\n  --learning-rate LEARNING_RATE\n  --gradient-clip GRADIENT_CLIP\n  --save-every SAVE_EVERY\n  --save-secs SAVE_SECS\n  --checkpoint CHECKPOINT\n  --online-checkpoint ONLINE_CHECKPOINT\n  --initial-checkpoint INITIAL_CHECKPOINT\n  --resume-checkpoint RESUME_CHECKPOINT\n  --telemetry TELEMETRY\n  --environment ENVIRONMENT\n  --navigation-realization NAVIGATION_REALIZATION\n  --append-telemetry\n  --model-sample-every MODEL_SAMPLE_EVERY\n  --measure-rows MEASURE_ROWS\n  --measure-interval MEASURE_INTERVAL\n  --seed SEED\n  --control-weight CONTROL_WEIGHT\n  --exploration-weight EXPLORATION_WEIGHT\n  --replay-capacity REPLAY_CAPACITY\n                        optional transition-count bound; zero leaves retention\n                        to the memory budget\n  --replay-precision REPLAY_PRECISION\n                        storage precision label recorded with the replay run\n  --replay-memory-mb REPLAY_MEMORY_MB\n                        byte budget for each retained-history and current-\n                        episode pool\n  --replay-batch REPLAY_BATCH\n                        historical value examples mixed into each shared\n                        fresh-state update\n  --replay-weight REPLAY_WEIGHT\n  --replay-steps REPLAY_STEPS\n                        deprecated; both policies take one step per fresh\n                        attributed group\n  --relaxation-time RELAXATION_TIME\n  --integration-interval INTEGRATION_INTERVAL\n"
+    },
+    {
+      "name": "worker_import",
+      "command": "PYTHONPATH=xonotic bin/mesh-python -m solver.strat.matrix_worker --help",
+      "exit_code": 0,
+      "output": "usage: matrix_worker.py [-h] [--socket SOCKET] [--environment ENVIRONMENT]\n                        [--deadline DEADLINE]\n\noptions:\n  -h, --help            show this help message and exit\n  --socket SOCKET\n  --environment ENVIRONMENT\n  --deadline DEADLINE\n"
+    },
+    {
+      "name": "curriculum_import",
+      "command": "PYTHONPATH=xonotic bin/mesh-python -m solver.strat.curriculum --help",
+      "exit_code": 0,
+      "output": "usage: curriculum.py [-h] [--manifest MANIFEST] [--entity-file ENTITY_FILE]\n                     [--generate GENERATE] [--seed SEED] [--maps MAPS]\n                     [--team-counts TEAM_COUNTS]\n                     [--players-per-team PLAYERS_PER_TEAM]\n                     [--cart-counts CART_COUNTS]\n                     [--checkpoints-per-lane CHECKPOINTS_PER_LANE]\n                     [--score-limit SCORE_LIMIT]\n                     [--checkpoint-score-rate CHECKPOINT_SCORE_RATE]\n                     [--skills SKILLS] [--perturbations PERTURBATIONS]\n                     [--off-policy-counts OFF_POLICY_COUNTS]\n                     [--policy-arms POLICY_ARMS]\n                     [--study-repetitions STUDY_REPETITIONS]\n                     [--joint-training] [--replay-batch REPLAY_BATCH]\n                     [--replay-weight REPLAY_WEIGHT] [--cycles CYCLES]\n                     [--human-counts HUMAN_COUNTS]\n                     [--human-client-command HUMAN_CLIENT_COMMAND]\n                     [--heldout-fraction HELDOUT_FRACTION]\n                     [--duration DURATION] [--observer OBSERVER]\n                     [--memory-target-fraction MEMORY_TARGET_FRACTION]\n                     [--bandwidth-node BANDWIDTH_NODE]\n                     [--bandwidth-role BANDWIDTH_ROLE] [--run-dir RUN_DIR]\n                     [--dry-run] [--engine ENGINE] [--basedir BASEDIR]\n                     [--server-command SERVER_COMMAND]\n                     [--server-host SERVER_HOST] [--ssh-command SSH_COMMAND]\n                     [--remote-engine REMOTE_ENGINE]\n                     [--remote-basedir REMOTE_BASEDIR]\n                     [--remote-run-root REMOTE_RUN_ROOT]\n                     [--responder-command RESPONDER_COMMAND]\n                     [--expert-command EXPERT_COMMAND]\n                     [--server-cwd SERVER_CWD] [--responder-cwd RESPONDER_CWD]\n                     [--expert-cwd EXPERT_CWD] [--expert-socket EXPERT_SOCKET]\n                     [--remote-python REMOTE_PYTHON]\n                     [--server-mesh-region SERVER_MESH_REGION]\n                     [--responder-mesh-region RESPONDER_MESH_REGION]\n                     [--python PYTHON] [--entity-tool ENTITY_TOOL]\n                     [--build-command BUILD_COMMAND] [--progs PROGS]\n                     [--csprogs CSPROGS] [--checkpoint CHECKPOINT]\n                     [--arm-checkpoint ARM_CHECKPOINT]\n                     [--learning-rate LEARNING_RATE]\n                     [--gradient-clip GRADIENT_CLIP]\n                     [--baseline-hidden BASELINE_HIDDEN]\n                     [--scale-rank SCALE_RANK] [--scale-hidden SCALE_HIDDEN]\n                     [--scale-experts SCALE_EXPERTS] [--scale-topk SCALE_TOPK]\n                     [--save-every SAVE_EVERY] [--peer-node PEER_NODE]\n                     [--strategy-node STRATEGY_NODE] [--distributed-scale]\n                     [--distributed-scale-operation {block,gram}]\n                     [--port-base PORT_BASE] [--startup-secs STARTUP_SECS]\n                     [--quit-grace QUIT_GRACE] [--round-grace ROUND_GRACE]\n\noptions:\n  -h, --help            show this help message and exit\n  --manifest MANIFEST\n  --entity-file ENTITY_FILE\n  --generate GENERATE\n  --seed SEED\n  --maps MAPS\n  --team-counts TEAM_COUNTS\n  --players-per-team PLAYERS_PER_TEAM\n  --cart-counts CART_COUNTS\n  --checkpoints-per-lane CHECKPOINTS_PER_LANE\n  --score-limit SCORE_LIMIT\n  --checkpoint-score-rate CHECKPOINT_SCORE_RATE\n  --skills SKILLS\n  --perturbations PERTURBATIONS\n  --off-policy-counts OFF_POLICY_COUNTS\n  --policy-arms POLICY_ARMS\n  --study-repetitions STUDY_REPETITIONS\n  --joint-training\n  --replay-batch REPLAY_BATCH\n  --replay-weight REPLAY_WEIGHT\n  --cycles CYCLES\n  --human-counts HUMAN_COUNTS\n  --human-client-command HUMAN_CLIENT_COMMAND\n  --heldout-fraction HELDOUT_FRACTION\n  --duration DURATION   Legacy manifest metadata; matches end only on an\n                        observed score outcome\n  --observer OBSERVER\n  --memory-target-fraction MEMORY_TARGET_FRACTION\n  --bandwidth-node BANDWIDTH_NODE\n  --bandwidth-role BANDWIDTH_ROLE\n  --run-dir RUN_DIR\n  --dry-run\n  --engine ENGINE\n  --basedir BASEDIR\n  --server-command SERVER_COMMAND\n  --server-host SERVER_HOST\n  --ssh-command SSH_COMMAND\n  --remote-engine REMOTE_ENGINE\n  --remote-basedir REMOTE_BASEDIR\n  --remote-run-root REMOTE_RUN_ROOT\n  --responder-command RESPONDER_COMMAND\n  --expert-command EXPERT_COMMAND\n  --server-cwd SERVER_CWD\n  --responder-cwd RESPONDER_CWD\n  --expert-cwd EXPERT_CWD\n  --expert-socket EXPERT_SOCKET\n  --remote-python REMOTE_PYTHON\n  --server-mesh-region SERVER_MESH_REGION\n  --responder-mesh-region RESPONDER_MESH_REGION\n  --python PYTHON\n  --entity-tool ENTITY_TOOL\n  --build-command BUILD_COMMAND\n  --progs PROGS\n  --csprogs CSPROGS\n  --checkpoint CHECKPOINT\n  --arm-checkpoint ARM_CHECKPOINT\n  --learning-rate LEARNING_RATE\n  --gradient-clip GRADIENT_CLIP\n  --baseline-hidden BASELINE_HIDDEN\n  --scale-rank SCALE_RANK\n  --scale-hidden SCALE_HIDDEN\n  --scale-experts SCALE_EXPERTS\n  --scale-topk SCALE_TOPK\n  --save-every SAVE_EVERY\n  --peer-node PEER_NODE\n  --strategy-node STRATEGY_NODE\n  --distributed-scale\n  --distributed-scale-operation {block,gram}\n  --port-base PORT_BASE\n  --startup-secs STARTUP_SECS\n  --quit-grace QUIT_GRACE\n  --round-grace ROUND_GRACE\n"
+    },
+    {
+      "name": "python_syntax",
+      "command": "bin/mesh-python - <<'PY'\nimport ast\nfrom pathlib import Path\npaths = sorted(Path('xonotic/solver').rglob('*.py')) + sorted(Path('xonotic/payload/tools').glob('*.py'))\nfor path in paths:\n    ast.parse(path.read_text(), filename=str(path))\nprint(f'Parsed {len(paths)} production Python sources')\nPY",
+      "exit_code": 0,
+      "output": "Parsed 65 production Python sources\n"
+    },
+    {
+      "name": "diff_whitespace",
+      "command": "git diff --check",
+      "exit_code": 0,
+      "output": ""
+    }
+  ],
+  "source_files": {
+    "xonotic/solver/strat/strat_responder.py": {
+      "sha256": "0b900d4d4a425ec7153ceb2a3845813ee088be73546f93524c612feb805241ba",
+      "lines": 566
+    },
+    "xonotic/solver/strat/inputs.py": {
+      "sha256": "541f6701e4b6f7b056f1fcb6520b533d3a0914a078942145e4eb0fa1730d5716",
+      "lines": 123
+    },
+    "xonotic/solver/strat/execution.py": {
+      "sha256": "bb14dfc5a2ee52e031b1cca7212c6449bca18e2cb9a405a9c98167f84ee91957",
+      "lines": 152
+    },
+    "xonotic/solver/strat/online.py": {
+      "sha256": "d371eada94188df89201b00378d794b0b2d6a3e9819b9200655c797b93019dd1",
+      "lines": 649
+    },
+    "xonotic/solver/strat/replay.py": {
+      "sha256": "8f2136d2c9793dc6c5baca4f824118ea01bedced63df699e1bf564db43109d36",
+      "lines": 190
+    },
+    "xonotic/solver/strat/checkpoint_state.py": {
+      "sha256": "2cb7c52c8d129af2c34dab4fcf64050a6a6df8cd5e654542386c2c7ff7c868db",
+      "lines": 221
+    },
+    "xonotic/solver/strat/action_history.py": {
+      "sha256": "d1ceb432613b58ff5352a393ac8771bf98be2be56c902dc745794420f3bbf93e",
+      "lines": 379
+    },
+    "xonotic/solver/strat/runtime.py": {
+      "sha256": "1688c8f200aa0d89e74d66e034d75a7d0340cd0586cbcee5847169ba33a2379c",
+      "lines": 48
+    },
+    "xonotic/solver/strat/scale_rpc.py": {
+      "sha256": "682673cd873500c61b19f8a1b61eb7b113b6b8c8e2816a0b0c8941321093d6a2",
+      "lines": 204
+    },
+    "xonotic/solver/xonwire.py": {
+      "sha256": "a14c05e1c5d5e64674344aaa1e817a1bd1f6215339fd40ab6a8545b49f02ebd1",
+      "lines": 383
+    }
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "date": "2026-09-06",
+  "transport": "isolated shared memory and Unix datagrams, no verbs",
+  "checks_per_machine": 38,
+  "native_checks_per_machine": 31,
+  "game_checks": {
+    "event": "qc_python_game_verified",
+    "cases": 39,
+    "team_counts": [
+      2,
+      4,
+      8,
+      12
+    ],
+    "ownership_transitions": 6,
+    "stacked_floor_resolution": true,
+    "player_driven_motion_cases": 6,
+    "unattended_ticks": 3000,
+    "unattended_score_accrual": true
+  },
+  "source_sha256": {
+    "xonotic/darkplaces-work/mesh_ipc.c": "bc3f559788dae9720cfbcc7e434c025386a5befa46dbc45269d4366a559849f7",
+    "xonotic/darkplaces-work/prvm_view.c": "9465874d0f77f1c820b86e4de9f6ca4aff405394c16e7b5cd5c18566d070a011",
+    "xonotic/darkplaces-work/prvm_view.h": "2548f4bd50ed483f209cb65df2d7d6c9a9e826899bdcd35537f477c7191d13b5",
+    "xonotic/darkplaces-work/prvm_exec.c": "62d81a6defa0be42733aa72b3236c9039f915951fb3b643cc1f79e8d579f49e6",
+    "xonotic/darkplaces-work/prvm_execprogram.h": "cb8326fb9e8a041cc7d9c58034d603fa127033634c94808a8c088b5f81a88e2b",
+    "xonotic/solver/xonwire.py": "164d58566fc14a46a433c74089538ec3ce0788276e667560a17e637ab085b074",
+    "xonotic/solver/strat/action_history.py": "623ac059b05e52a138dff34eb07e7b904c7a97469b2cb0b40c47341a13381b0f",
+    "xonotic/solver/strat/checkpoint_state.py": "2898d2afa29fcbc870dafc9af2df3c97a39492fbb6916d0d19649b06f06eba3f",
+    "xonotic/solver/strat/journal.py": "5709080091948db77baa8c95cc6765be1045d3aac5e2f807e1b75614efe01f8a",
+    "xonotic/solver/strat/online.py": "0b0e843e7aac7cebbcf8a9b71fe26ba0aa407d75011fb6f9ab66239e613ae828",
+    "xonotic/solver/strat/strat_responder.py": "a3d74bfd3cfd0a0061cabdf7c92750464b8b18b590f1bdf99fa72a2b2462e389",
+    "xonotic/solver/strat/state_steering.py": "bff5bfb812ce06725be19e087592d8da25a6cdba440074c8a1e3cdd472e6a9bc",
+    "xonotic/solver/strat/baselines.py": "7e6405392f7584c70820a830eada875362371a450b069eedf56a5505e77101c1",
+    "xonotic/solver/strat/strategy.py": "bc0fac844820ac7d49e541b2146771bd9f6b7163b5da7702be7ef5b62c22ce76",
+    "xonotic/solver/strat/game_value.py": "ccf6aec6fa2ebbe11ce707ef666f46767f4fce99780b4040208552c9359bf7b6",
+    "xonotic/solver/strat/curriculum.py": "b3a03b788de7329c1ec991f30a4d93d42e9137026f35d4e558349a8b4fad7173",
+    "xonotic/solver/strat/joracle/probe.py": "a1c8a97199d2abc979ed931cdcc8ca0972f326f662a0858dd103ba60d31a1c99",
+    "xonotic/solver/strat/joracle/server.py": "3a62b742f1c3d00ac5aee82d94a77013087dbd622cd9251bf35f5ac293b59a37",
+    "xonotic/solver/strat/web/app.js": "79a80ffb0dc4fa6b67cd4fdf686face37d5bec195ef15bbf796c69dbc0b1b62d",
+    "xonotic/solver/strat/web/index.html": "eb94845747d1b3e55d5f294ab46171874456718e71aae2d5b5cbd9e2ea3c32bb",
+    "xonotic/solver/strat/web/policy.html": "f9c1a899d319616d46968a5d124ea13af097e0f1b296e4caee552b38579cf92e",
+    "xonotic/solver/strat/test_continuation.py": "d00adaf09b129a2d076e7746e6365f9b967b987bba27deb67334a96f136ee6c5",
+    "xonotic/solver/strat/test_action_history.py": "6a13fe40cd88fbe823329e0f9fb25e9b8d2bb3117bb2f32ac77cc9c244b23060",
+    "xonotic/solver/strat/test_policy_reports.py": "584002fe9155cb02e6dcb4a2164ccbad24881a0b18f5450b88dc829af08ce6c7",
+    "xonotic/solver/strat/test_native_frames.c": "c34a293efc6b820a28aaa82b18d1a53f72a3926808b3022175808c493bb34514",
+    "xonotic/solver/strat/verify_native_view.py": "5da4faf56c32142aad0dca51ed6b1edd29e20c0dff09a4bd95c153c7764044b2",
+    "xonotic/solver/strat/verify_training_runtime.py": "0a8242b0a4a61da15211c30d479d9dcf2c31b8e66cabccf26fdb8f3e1bffc797",
+    "xonotic/solver/strat/native_view_transport.c": "fae0b9f18068b1a4f3c7433fd62f4c46322ad03bde1567e205d7e0f25d757a0a",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload.qc": "ab4187d10b71f5bc14a10f06e625644f93540187e0e0c9769bc36695825e3886",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qc": "5b1dc161663c497ffde062cd708e52d0af3aaa2c5da30784d5d34c325db99a86",
+    "xonotic/qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.qh": "75a6b62a6d6e0f80436c0503b071de3d962090b27316caa8c21f4c94b68dd419",
+    "xonotic/payload/tools/strategy_io_schema.py": "d07f2fb387e5900da8c7ab7b3d257cd2cb2da31a0e39bd249c8ce175bbbcc367",
+    "rdma/xonwire.def": "c9ea4038ec149c8f0a89e88c4b5ec2de6d89747f9f7b54e674ab449d97774340"
+  },
+  "build_sha256": {
+    "xonotic/darkplaces-work/darkplaces-dedicated": "ec089393de998135fab848311514dc5aea9063670f4e936f24257a1e701e80cf",
+    ".build/continuation-payload/progs.dat": "a5c07cb42cdff4dc60794286a39ca19f504fdc43df439f7611f6b230215be0a1",
+    ".build/continuation-payload/zzzzzz-mesh-runtime.pk3": "46d6192d462fe6de2a3cc10bd3338b550de28ddadfcf09e92f65a2b08e26e194"
+  },
+  "laptop": {
+    "checks": {
+      "initial_updates": true,
+      "graceful_restart_updates": true,
+      "crash_after_durable_action": true,
+      "journal_replay_updates": true,
+      "engine_outcome_checkpointed": true,
+      "terminal_restart": true,
+      "outcome_exactly_once": true,
+      "outcome_without_transient_events": true,
+      "every_observed_execution_has_source": true,
+      "engine_restart_replays_disk_outcome": true
+    },
+    "updates": 14,
+    "actor_rows": 23,
+    "unmatched_rows": 0,
+    "snapshots_superseded": 19,
+    "view_faults": 0,
+    "max_state_words": 509696,
+    "checkpoint_bytes": 4262014,
+    "bundle_bytes": 4859569,
+    "j_revisions": 5,
+    "native_engine_sha256": "ec089393de998135fab848311514dc5aea9063670f4e936f24257a1e701e80cf",
+    "native_finite_difference": 0.003296000000005961,
+    "replayed_outcomes": [
+      "22161:6259929:1",
+      "22161:6259929:2",
+      "22188:9378597:1"
+    ],
+    "completed_episodes": 1,
+    "truncated_episodes": 0,
+    "hardware": {
+      "chip": "Apple M5 Max",
+      "model": "Mac17,6",
+      "macos": "26.3.2"
+    }
+  },
+  "mini": {
+    "checks": {
+      "initial_updates": true,
+      "graceful_restart_updates": true,
+      "crash_after_durable_action": true,
+      "journal_replay_updates": true,
+      "engine_outcome_checkpointed": true,
+      "terminal_restart": true,
+      "outcome_exactly_once": true,
+      "outcome_without_transient_events": true,
+      "every_observed_execution_has_source": true,
+      "engine_restart_replays_disk_outcome": true
+    },
+    "updates": 14,
+    "actor_rows": 19,
+    "unmatched_rows": 0,
+    "snapshots_superseded": 36,
+    "view_faults": 0,
+    "max_state_words": 509696,
+    "checkpoint_bytes": 4371777,
+    "bundle_bytes": 5074251,
+    "j_revisions": 6,
+    "native_engine_sha256": "e2ef135d80d878344068fe33b070f18ac6f82041ec820bbd2cc25fa4fd8ccc17",
+    "native_finite_difference": 0.003296000000005961,
+    "replayed_outcomes": [
+      "22161:6259929:1",
+      "22161:6259929:2",
+      "280:2360053:1"
+    ],
+    "completed_episodes": 1,
+    "truncated_episodes": 0,
+    "hardware": {
+      "chip": "Apple M4 Pro",
+      "model": "Mac16,11",
+      "macos": "26.5.1"
+    }
+  }
+}

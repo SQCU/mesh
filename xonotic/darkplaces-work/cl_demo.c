@@ -321,8 +321,7 @@ void CL_PlayDemo_f (void)
 
 	cls.demostarting = true;
 
-	CL_Disconnect ();
-	Host_ShutdownServer ();
+	CL_Disconnect_f ();
 
 	NetConn_UpdateSockets();
 

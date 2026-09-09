@@ -142,7 +142,7 @@ def main(outdir):
 
     carts = {}
     for b in blocks:
-        cn = re.search(r'"classname"\s+"(plc_path|plc_goal|plc_start)"', b)
+        cn = re.search(r'"classname"\s+"(plc_path|plc_team)"', b)
         tn = re.search(r'"targetname"\s+"([^"]+)"', b)
         mo = re.search(r'"origin"\s+"([-\d.eE+ ]+)"', b)
         if not cn or not mo or not tn:

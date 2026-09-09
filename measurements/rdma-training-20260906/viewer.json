@@ -1,0 +1,49 @@
+{
+  "status": {
+    "http": 200,
+    "status": {
+      "producer_state": "stale",
+      "directory": "/Users/mdot/mesh-workloads/cartlane/runs/rdma-training-20260906/rdma-1788724494687376000",
+      "errors": 0,
+      "last_error": null,
+      "report_errors": {}
+    },
+    "learning": {},
+    "j_strata": 0
+  },
+  "policy": {
+    "http": 200,
+    "status": {
+      "producer_state": "stale",
+      "directory": "/Users/mdot/mesh-workloads/cartlane/runs/rdma-training-20260906/rdma-1788724494687376000",
+      "errors": 0,
+      "last_error": null,
+      "report_errors": {}
+    },
+    "learning": {
+      "matrix_fusion": {
+        "updates": 16,
+        "completed_episodes": 1,
+        "truncated_episodes": 0
+      },
+      "terminal_win": {
+        "updates": 16,
+        "completed_episodes": 1,
+        "truncated_episodes": 0
+      }
+    },
+    "j_strata": 0
+  },
+  "j": {
+    "http": 200,
+    "status": {
+      "producer_state": "stale",
+      "directory": "/Users/mdot/mesh-workloads/cartlane/runs/rdma-training-20260906/rdma-1788724494687376000",
+      "errors": 0,
+      "last_error": null,
+      "report_errors": {}
+    },
+    "learning": {},
+    "j_strata": 9
+  }
+}

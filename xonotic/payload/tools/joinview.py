@@ -1,6 +1,6 @@
 import struct, sys, os, math, json, heapq
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import mkentfile as M
+import navmesh as NAV
 
 PLAYERCLIP, BOTCLIP, MONSTERCLIP = 0x10000, 0x400000, 0x20000
 
@@ -170,7 +170,7 @@ def svg_floorplan(path, maps, nodes, adj, joins, lights):
 def analyze(outdir):
     d = open(os.path.join(outdir, 'fused.bsp'), 'rb').read()
     joins = json.load(open(os.path.join(outdir, 'fused.joins.json')))
-    nodes, adj = M.parse_cache(open(os.path.join(outdir, 'fused.waypoints.cache')).read())
+    nodes, adj = NAV.parse_cache(open(os.path.join(outdir, 'fused.waypoints.cache')).read())
     import negspace as NS
     nspath = os.path.join(outdir, 'fused.negspace.npz')
     if os.path.exists(nspath):

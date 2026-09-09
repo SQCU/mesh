@@ -1,0 +1,98 @@
+{
+  "directory": "/Users/mdot/dox/mesh/measurements/policy-feature-integration-20260906/runtime-1788743205875487000",
+  "transport": "isolated_shared_memory_and_unix_datagrams_no_verbs",
+  "checks": {
+    "initial_updates": true,
+    "graceful_restart_updates": true,
+    "graceful_event_memory_exact": true,
+    "crash_after_durable_action": true,
+    "journal_replay_updates": true,
+    "journal_event_memory_exact": true,
+    "engine_outcome_checkpointed": true,
+    "terminal_restart": true,
+    "outcome_exactly_once": true,
+    "durable_outcome_with_events_enabled": true,
+    "every_observed_execution_has_source": true,
+    "raw_native_features_preserved": true,
+    "events_and_navigation_reach_local_featurizer": true,
+    "aged_observations_retained": true,
+    "neighborhood_parameters_optimized": true,
+    "finite_online_balance_updates": true,
+    "retained_observations_not_reemitted": true
+  },
+  "passed": false,
+  "outcome": {
+    "episode_id": "25264:6458775:1",
+    "event": {
+      "kind": "tie",
+      "actor_team": 0,
+      "time": 61.166709899902344,
+      "episode_id": "25264:6458775:1",
+      "source": "engine_durable_journal"
+    },
+    "learning_outcomes": {
+      "terminal_win": 0
+    },
+    "checkpoint": "/Users/mdot/dox/mesh/measurements/policy-feature-integration-20260906/runtime-1788743205875487000/policy.npz.runstate.npz",
+    "responses": 16
+  },
+  "updates": 15,
+  "pending_episode_state": {
+    "current": "25264:6458775:1",
+    "awaiting": [],
+    "outcomes": {
+      "25264:6458775:1": 0
+    }
+  },
+  "completed_episodes": 1,
+  "truncated_episodes": 0,
+  "actor_rows": 21,
+  "unmatched_rows": 0,
+  "snapshots_superseded": 110,
+  "view_faults": 0,
+  "max_state_words": 509952,
+  "checkpoint_bytes": 10301067,
+  "bundle_bytes": 20730763,
+  "j_revisions": 5,
+  "features": {
+    "memory_row_counts": [
+      20,
+      43,
+      74,
+      133,
+      178,
+      224,
+      287,
+      309,
+      366,
+      441,
+      521,
+      564,
+      617,
+      659,
+      703,
+      743
+    ],
+    "fresh_event_rows": 743,
+    "event_neighbor_edges": 4346,
+    "navigation_neighbor_edges": 71129,
+    "aged_event_neighbor_edges": 1992,
+    "raw_widths": [
+      83,
+      18,
+      7,
+      17
+    ],
+    "persisted_replay_frames": 2,
+    "changed_neighborhood_parameters": [
+      "neighborhood.node_projection.weight",
+      "neighborhood.edge_projection.weight",
+      "neighborhood.cell_projection.weight",
+      "neighborhood.metric.weight",
+      "neighborhood.value.weight",
+      "neighborhood.output.weight",
+      "neighborhood.log_decay"
+    ]
+  },
+  "failure": "AssertionError: worker exited:  1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 6, \"request\": 20, \"frames_received\": 1057, \"frames_expected\": 6109, \"dropped_frames\": 1, \"resynchronizations\": 2}, {\"kind\": 2, \"request\": 20, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 5, \"request\": 20, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 1, \"request\": 20, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 3, \"request\": 20, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 7, \"request\": 20, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_status\", \"responses\": 14, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 6, \"request\": 21, \"frames_received\": 5629, \"frames_expected\": 6109, \"dropped_frames\": 1, \"resynchronizations\": 3}, {\"kind\": 2, \"request\": 21, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 5, \"request\": 21, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 1, \"request\": 21, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 3, \"request\": 21, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 7, \"request\": 21, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_status\", \"responses\": 16, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 1, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 6, \"request\": 23, \"frames_received\": 1056, \"frames_expected\": 6109, \"dropped_frames\": 1, \"resynchronizations\": 5}, {\"kind\": 2, \"request\": 23, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 4}, {\"kind\": 5, \"request\": 23, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 4}, {\"kind\": 1, \"request\": 23, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 4}, {\"kind\": 3, \"request\": 23, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 4}, {\"kind\": 7, \"request\": 23, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_stop\", \"signal\": 15}\n{\"event\": \"measurement_shutdown\", \"state\": \"checkpoint_saved_measurement_still_finishing\", \"artifact\": \"/Users/mdot/dox/mesh/measurements/policy-feature-integration-20260906/runtime-1788743205875487000/j-measures.74782\"}\n\ntion\", \"rollout_is_batch_normalize\": false, \"rollout_is_threshold\": 2.0, \"rollout_rs\": null, \"update_schedule\": \"state-rate-application-v1\"}}\n{\"event\": \"state_schema_realized\", \"state_width\": 256, \"state_schema\": [446416], \"policies\": [\"terminal_win\", \"default\"]}\n{\"event\": \"training_continuation\", \"mode\": \"resumed\", \"responses\": 6, \"history\": {\"row_capacity\": 16, \"ingested_row_mass\": 21, \"retained_row_mass\": 12, \"evicted_row_mass\": 9, \"sequence_mass\": 3, \"executed_source_groups\": 1, \"first_execution_rows\": 4, \"repeated_execution_rows\": 0, \"unmatched_execution_rows\": 0, \"delayed_execution_rows\": 4, \"value_intervals\": 1, \"interval_seconds\": 3.9999961853027344, \"bytes\": 150046157, \"byte_capacity\": 268435456, \"spilled_requests\": 0, \"retained_over_capacity_bytes\": 0}, \"replayed_steps\": 0}\n{\"event\": \"responder_status\", \"responses\": 7, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 6, \"request\": 12, \"frames_received\": 3574, \"frames_expected\": 6109, \"dropped_frames\": 1, \"resynchronizations\": 2}, {\"kind\": 2, \"request\": 12, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 5, \"request\": 12, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 1, \"request\": 12, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 3, \"request\": 12, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 7, \"request\": 12, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_status\", \"responses\": 8, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 6, \"request\": 13, \"frames_received\": 4903, \"frames_expected\": 6109, \"dropped_frames\": 1, \"resynchronizations\": 3}, {\"kind\": 2, \"request\": 13, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 5, \"request\": 13, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 1, \"request\": 13, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 3, \"request\": 13, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 2}, {\"kind\": 7, \"request\": 13, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_stop\", \"signal\": 15}\n{\"event\": \"measurement_shutdown\", \"state\": \"checkpoint_saved_measurement_still_finishing\", \"artifact\": \"/Users/mdot/dox/mesh/measurements/policy-feature-integration-20260906/runtime-1788743205875487000/j-measures.72748\"}\n\n\"state-rate-application-v1\", \"gradient_steps_per_group\": 1, \"outcome_gradient_steps\": 0, \"gamma\": 0.95, \"replay_weight\": 0.5, \"replay_batch\": 1, \"learning_rate\": 0.0003, \"gradient_clip\": 1.0, \"loss_weights\": {\"actor\": 4.0, \"entropy\": 0.01, \"winnie\": 0.5, \"lou\": 0.5, \"vera\": 0.25, \"elle\": 0.001, \"moe_balance\": 0.01}, \"action_representation\": \"full_state_rate\", \"integrator\": \"exact_exponential_relaxation\", \"historical_target\": \"observed_behavior_return\", \"actor_source\": \"own_first_observed_state_application\", \"historical_actor_weight\": 0.0, \"actor_objective\": \"decoupled_ppo\", \"proximal_policy\": \"reuse_train_logp\", \"rollout_is\": \"per_action\", \"rollout_is_threshold\": 2.0, \"rollout_is_batch_normalize\": false, \"rollout_rs\": null, \"log_ratio_bound\": 20.0}, \"schedule_start_updates\": 0, \"continuation\": {\"mode\": \"resumed\", \"source\": \"/Users/mdot/dox/mesh/measurements/policy-feature-integration-20260906/runtime-1788743205875487000/policy.npz.runstate.npz\", \"source_updates\": 15, \"exception\": null, \"audit\": {\"groups\": {\"parameters\": {\"arrays\": 37, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}, \"optimizer\": {\"arrays\": 76, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}, \"replay\": {\"arrays\": 46, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}, \"metadata\": {\"arrays\": 7, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}}, \"nonfinite_arrays\": 0, \"replay_frames\": 2, \"nonfinite_replay_frames\": 0, \"replay_transitions\": 1, \"affected_replay_transitions\": 0, \"source_updates\": 15}}, \"source_training_contract\": {\"action_representation\": \"full_state_rate\", \"actor_objective\": \"decoupled_ppo\", \"actor_source\": \"own_first_observed_state_application\", \"gamma\": 0.95, \"gradient_clip\": 1.0, \"gradient_steps_per_group\": 1, \"historical_actor_weight\": 0.0, \"historical_target\": \"observed_behavior_return\", \"integrator\": \"exact_exponential_relaxation\", \"learning_rate\": 0.0003, \"log_ratio_bound\": 20.0, \"loss_weights\": {\"actor\": 4.0, \"elle\": 0.001, \"entropy\": 0.01, \"lou\": 0.5, \"moe_balance\": 0.01, \"vera\": 0.25, \"winnie\": 0.5}, \"outcome_gradient_steps\": 0, \"proximal_policy\": \"reuse_train_logp\", \"replay_batch\": 1, \"replay_weight\": 0.5, \"rollout_is\": \"per_action\", \"rollout_is_batch_normalize\": false, \"rollout_is_threshold\": 2.0, \"rollout_rs\": null, \"update_schedule\": \"state-rate-application-v1\"}}\n{\"event\": \"state_schema_realized\", \"state_width\": 256, \"state_schema\": [446416], \"policies\": [\"terminal_win\", \"default\"]}\n{\"event\": \"training_continuation\", \"mode\": \"resumed\", \"responses\": 16, \"history\": {\"row_capacity\": 16, \"ingested_row_mass\": 61, \"retained_row_mass\": 12, \"evicted_row_mass\": 49, \"sequence_mass\": 3, \"executed_source_groups\": 1, \"first_execution_rows\": 4, \"repeated_execution_rows\": 0, \"unmatched_execution_rows\": 0, \"delayed_execution_rows\": 4, \"value_intervals\": 1, \"interval_seconds\": 2.3999977111816406, \"bytes\": 151033687, \"byte_capacity\": 268435456, \"spilled_requests\": 0, \"retained_over_capacity_bytes\": 0}, \"replayed_steps\": 0}\n{\"event\": \"responder_stop\", \"signal\": 15}\n\nema\": [446416], \"policies\": [\"terminal_win\", \"default\"]}\n{\"event\": \"responder_status\", \"responses\": 2, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 2, \"request\": 6, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 5}, {\"kind\": 5, \"request\": 6, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 5}, {\"kind\": 1, \"request\": 6, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 5}, {\"kind\": 3, \"request\": 6, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 5}, {\"kind\": 7, \"request\": 6, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}, {\"kind\": 6, \"request\": 6, \"frames_received\": 1057, \"frames_expected\": 6104, \"dropped_frames\": 0, \"resynchronizations\": 3}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_status\", \"responses\": 4, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 2, \"request\": 8, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 7}, {\"kind\": 5, \"request\": 8, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 7}, {\"kind\": 1, \"request\": 8, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 7}, {\"kind\": 3, \"request\": 8, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 7}, {\"kind\": 7, \"request\": 8, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}, {\"kind\": 6, \"request\": 8, \"frames_received\": 1057, \"frames_expected\": 6109, \"dropped_frames\": 0, \"resynchronizations\": 5}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_status\", \"responses\": 6, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 2, \"request\": 10, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 9}, {\"kind\": 5, \"request\": 10, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 9}, {\"kind\": 1, \"request\": 10, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 9}, {\"kind\": 3, \"request\": 10, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 9}, {\"kind\": 7, \"request\": 10, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}, {\"kind\": 6, \"request\": 10, \"frames_received\": 1521, \"frames_expected\": 6109, \"dropped_frames\": 0, \"resynchronizations\": 7}]}, \"state_schema\": [256, [446416]]}\n{\"event\": \"responder_stop\", \"signal\": 15}\n\n487000/policy.npz.runstate.npz\", \"source_updates\": 9, \"exception\": null, \"audit\": {\"groups\": {\"parameters\": {\"arrays\": 37, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}, \"optimizer\": {\"arrays\": 76, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}, \"replay\": {\"arrays\": 0, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}, \"metadata\": {\"arrays\": 253, \"nonfinite_arrays\": 0, \"nonfinite_coordinates\": 0}}, \"nonfinite_arrays\": 0, \"replay_frames\": 0, \"nonfinite_replay_frames\": 0, \"replay_transitions\": 0, \"affected_replay_transitions\": 0, \"source_updates\": 9}}, \"source_training_contract\": {\"action_representation\": \"full_state_rate\", \"actor_objective\": \"decoupled_ppo\", \"actor_source\": \"own_first_observed_state_application\", \"gamma\": 0.95, \"gradient_clip\": 1.0, \"gradient_steps_per_group\": 1, \"historical_actor_weight\": 0.0, \"historical_target\": \"observed_behavior_return\", \"integrator\": \"exact_exponential_relaxation\", \"learning_rate\": 0.0003, \"log_ratio_bound\": 20.0, \"loss_weights\": {\"actor\": 4.0, \"elle\": 0.001, \"entropy\": 0.01, \"lou\": 0.5, \"moe_balance\": 0.01, \"vera\": 0.25, \"winnie\": 0.5}, \"outcome_gradient_steps\": 0, \"proximal_policy\": \"reuse_train_logp\", \"replay_batch\": 1, \"replay_weight\": 0.5, \"rollout_is\": \"per_action\", \"rollout_is_batch_normalize\": false, \"rollout_is_threshold\": 2.0, \"rollout_rs\": null, \"update_schedule\": \"state-rate-application-v1\"}}\n{\"event\": \"state_schema_realized\", \"state_width\": 256, \"state_schema\": [446416], \"policies\": [\"terminal_win\", \"default\"]}\n{\"event\": \"training_continuation\", \"mode\": \"resumed\", \"responses\": 10, \"history\": {\"row_capacity\": 16, \"ingested_row_mass\": 37, \"retained_row_mass\": 8, \"evicted_row_mass\": 29, \"sequence_mass\": 2, \"executed_source_groups\": 1, \"first_execution_rows\": 4, \"repeated_execution_rows\": 0, \"unmatched_execution_rows\": 0, \"delayed_execution_rows\": 0, \"value_intervals\": 1, \"interval_seconds\": 5.866662979125977, \"bytes\": 100314031, \"byte_capacity\": 268435456, \"spilled_requests\": 0, \"retained_over_capacity_bytes\": 0}, \"replayed_steps\": 0}\n{\"event\": \"responder_status\", \"responses\": 11, \"transport\": {\"pending_snapshots\": 1, \"dropped_frames\": 0, \"duplicate_fragments\": 0, \"durable_outcomes\": 0, \"pending_by_kind\": {\"1\": 1, \"2\": 1, \"5\": 1, \"6\": 0}, \"assemblies\": [{\"kind\": 6, \"request\": 17, \"frames_received\": 3540, \"frames_expected\": 6109, \"dropped_frames\": 1, \"resynchronizations\": 2}, {\"kind\": 2, \"request\": 17, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 5, \"request\": 17, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 1, \"request\": 17, \"frames_received\": 2, \"frames_expected\": 2, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 3, \"request\": 17, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 1}, {\"kind\": 7, \"request\": 17, \"frames_received\": 1, \"frames_expected\": 1, \"dropped_frames\": 0, \"resynchronizations\": 0}]}, \"state_schema\": [256, [446416]]}\n"
+}

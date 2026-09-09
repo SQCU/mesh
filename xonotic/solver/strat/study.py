@@ -10,13 +10,11 @@ import numpy as np
 
 from .joracle.probe import matrix_fusion_intervention_measures
 from .runtime import BEHAVIOR_MEASURE_NAMES
+from .game_value import GAME_CONTRACT
+from .action_history import execution_evaluation, observation_clock, observed_interval, round_results
 from .policy_contract import STUDY_ARMS
 
 ARMS = STUDY_ARMS
-PRESSURE_KINDS = ("hunt_rival", "suppress_cart", "contest_post")
-ATTACK_KINDS = PRESSURE_KINDS + ("push_cart",)
-CART_ACTION_KINDS = ("push_cart", "suppress_cart")
-OBJECTIVE_KINDS = CART_ACTION_KINDS + ("idle",)
 REALIZATION_FIELDS = (
     "mode", "source_weight_mass", "live_weight_mass", "loaded_weight_mass", "composable_weight_mass",
     "source_only_weight_mass", "live_only_weight_mass", "shape_difference_mass",
@@ -82,22 +80,6 @@ def strategy_measure_records(execution):
                 })
     return out
 
-def round_results(rows):
-    seen = set()
-    out = []
-    for row in rows:
-        for event in row.get("realized_events") or []:
-            if event.get("kind") not in ("capture", "tie"):
-                continue
-            actor = integer_coordinate(event.get("actor_team"))
-            event_time = event.get("time")
-            event_time = float(event_time) if isinstance(event_time, (int, float)) and np.isfinite(event_time) else None
-            key = (event.get("kind"), actor, event_time)
-            if key not in seen:
-                seen.add(key)
-                out.append(key)
-    return out
-
 def arm_metrics(record, rows):
     cfg = record.get("configuration") or {}
     team_arms = cfg.get("team_policy_arms") or []
@@ -105,14 +87,13 @@ def arm_metrics(record, rows):
     players = defaultdict(set)
     values = defaultdict(lambda: defaultdict(float))
     value_mass = defaultdict(lambda: defaultdict(int))
-    kinds = defaultdict(lambda: defaultdict(int))
     causal = defaultdict(lambda: defaultdict(float))
     exposure = defaultdict(float)
     selected_exposure = defaultdict(float)
     routed_mass = defaultdict(lambda: defaultdict(int))
     event_mass = defaultdict(lambda: defaultdict(int))
     unattributed_player_seconds = 0.0
-    previous_engine_time = None
+    previous_clock = None
     engine_time_frame_mass = 0
     engine_time_coordinate_mass = 0
     engine_time_finite_coordinate_mass = 0
@@ -160,17 +141,12 @@ def arm_metrics(record, rows):
             and np.isfinite(assignment["engine_time"])
         ]
         engine_time_finite_coordinate_mass += len(engine_times)
-        engine_time = float(np.median(engine_times)) if engine_times else None
+        current_clock = observation_clock(row)
         engine_time_nonmonotone_frame_mass += int(
-            engine_time is not None and previous_engine_time is not None
-            and engine_time < previous_engine_time
-        )
-        interval = (
-            max(0.0, engine_time - previous_engine_time)
-            if engine_time is not None and previous_engine_time is not None else 0.0
-        )
-        if engine_time is not None:
-            previous_engine_time = engine_time
+            current_clock[1] is not None and previous_clock is not None
+            and previous_clock[1] is not None and current_clock[1] < previous_clock[1])
+        interval = observed_interval(previous_clock, current_clock)
+        previous_clock = current_clock
         for assignment in assignments:
             team = integer_coordinate(assignment.get("team"))
             arm = assignment.get("policy_arm") or (
@@ -178,9 +154,7 @@ def arm_metrics(record, rows):
                 if team is not None and 0 < team <= len(team_arms) else fallback
             )
             player = integer_coordinate(assignment.get("edict"))
-            kind = str(assignment.get("kind") or "unknown")
-            applied_current = bool(assignment.get("applied_action_current"))
-            applied_action = assignment.get("applied_action")
+            applied_current = bool(assignment.get("applied_state_current"))
             applied_source = assignment.get("applied_policy_arm")
             applied_arm = None if applied_source is None else str(applied_source)
             arm = str(arm)
@@ -189,7 +163,7 @@ def arm_metrics(record, rows):
                     arm, player, integer_coordinate(assignment.get("spawn_swizzle_epoch")),
                 )] = assignment
             selected_exposure[arm] += interval
-            if applied_arm is None:
+            if applied_arm is None or not applied_current:
                 unattributed_player_seconds += interval
             else:
                 exposure[applied_arm] += interval
@@ -199,36 +173,9 @@ def arm_metrics(record, rows):
                 if player is not None:
                     players[applied_arm].add(player)
                 causal[applied_arm]["applied_source_rows"] += 1
-            kinds[arm][kind] += 1
             causal[arm]["rows"] += 1
-            if kind in ATTACK_KINDS:
-                causal[arm]["attack"] += 1
-            if kind == "idle":
-                causal[arm]["selected_stock"] += 1
-            if kind in CART_ACTION_KINDS:
-                causal[arm]["selected_cart"] += 1
-            if kind in OBJECTIVE_KINDS:
-                causal[arm]["selected_objective"] += 1
             if applied_current and applied_arm is not None:
                 causal[applied_arm]["applied_rows"] += 1
-                for key in ("routed_current", "goal_current", "goal_match", "target_touch", "touch_current"):
-                    causal[applied_arm][key] += int(bool(assignment.get(key)))
-                if applied_action == "idle":
-                    causal[applied_arm]["applied_stock"] += 1
-                    causal[applied_arm]["stock_cart_goal"] += int(assignment.get("goal_kind") == "cart")
-                if applied_action in CART_ACTION_KINDS:
-                    causal[applied_arm]["applied_cart"] += 1
-                    causal[applied_arm]["cart_routed"] += int(bool(assignment.get("routed_current")))
-                    causal[applied_arm]["cart_goal"] += int(bool(assignment.get("goal_current")))
-                    causal[applied_arm]["cart_touch"] += int(bool(assignment.get("touch_current")))
-                if applied_action in OBJECTIVE_KINDS:
-                    causal[applied_arm]["applied_objective"] += 1
-                    causal[applied_arm]["objective_cart_goal"] += int(assignment.get("goal_kind") == "cart")
-            if applied_current and applied_arm is not None and applied_action in ATTACK_KINDS:
-                causal[applied_arm]["applied_attack"] += 1
-                causal[applied_arm]["attack_routed"] += int(bool(assignment.get("routed_current")))
-                causal[applied_arm]["attack_goal"] += int(bool(assignment.get("goal_current")))
-                causal[applied_arm]["attack_touch"] += int(bool(assignment.get("touch_current")))
             for routed in assignment.get("routed_outcomes") or ():
                 routed_outcome_row_mass += 1
                 outcome_coordinates = routed.get("outcomes") or {}
@@ -279,15 +226,9 @@ def arm_metrics(record, rows):
             if kind == "damage":
                 values[arm]["realized_damage"] += value
                 value_mass[arm]["realized_damage"] += 1
-                if isinstance(event.get("aligned_target"), (bool, int)):
-                    values[arm]["aligned_damage"] += value * int(bool(event["aligned_target"]))
-                    value_mass[arm]["aligned_damage"] += 1
             elif kind == "kill":
                 values[arm]["realized_kills"] += 1
                 value_mass[arm]["realized_kills"] += 1
-                if isinstance(event.get("aligned_target"), (bool, int)):
-                    values[arm]["aligned_kills"] += int(bool(event["aligned_target"]))
-                    value_mass[arm]["aligned_kills"] += 1
     out = {}
     for arm in sorted(set(players) | set(values) | set(causal) | {
         key[0] for key in spawn_events
@@ -311,12 +252,6 @@ def arm_metrics(record, rows):
             if isinstance(event.get("spawn_swizzle_scheduled_time"), (int, float))
             and np.isfinite(event["spawn_swizzle_scheduled_time"])
         ]
-        total_kinds = sum(kinds[arm].values())
-        probabilities = (
-            np.asarray(list(kinds[arm].values()), dtype=np.float64) / total_kinds
-            if total_kinds else np.empty(0, dtype=np.float64)
-        )
-        aggressive = quotient(sum(kinds[arm][key] for key in PRESSURE_KINDS), total_kinds)
         behavior_observation_mass = sum(
             bool(value_mass[arm][name]) for name in BEHAVIOR_MEASURE_NAMES
         )
@@ -364,6 +299,7 @@ def arm_metrics(record, rows):
             "outcome_coordinate_observation_measure": {
                 name: value_mass[arm][name] for name in sorted(value_mass[arm])
             },
+            "outcome_counter_source": "historical_routed_outcomes",
             "damage_per_player_second": observed_quotient(
                 values[arm]["enemy_damage_dealt"], player_seconds,
                 value_mass[arm]["enemy_damage_dealt"],
@@ -388,32 +324,11 @@ def arm_metrics(record, rows):
             "behavior_coordinate_missing_mass": (
                 len(BEHAVIOR_MEASURE_NAMES) - behavior_observation_mass
             ),
-            "aggressive_assignment_rate": aggressive,
             "selected_row_mass": rows_n,
             "applied_source_row_mass": applied_rows_n,
             "applied_current_row_mass": causal[arm]["applied_rows"],
-            "objective_attack_assignment_rate": quotient(causal[arm]["attack"], rows_n),
-            "selected_stock_preservation_rate": quotient(causal[arm]["selected_stock"], rows_n),
-            "selected_cart_action_rate": quotient(causal[arm]["selected_cart"], rows_n),
-            "selected_objective_duty_rate": quotient(causal[arm]["selected_objective"], rows_n),
             "source_matched_application_fraction": quotient(causal[arm]["applied_rows"], applied_rows_n),
             "routed_outcome_rows_per_selected_row": quotient(causal[arm]["applied_policy_rows"], rows_n),
-            "applied_stock_preservation_rate": quotient(causal[arm]["applied_stock"], applied_rows_n),
-            "applied_cart_action_rate": quotient(causal[arm]["applied_cart"], applied_rows_n),
-            "applied_objective_duty_rate": quotient(causal[arm]["applied_objective"], applied_rows_n),
-            "stock_cart_goal_fraction": quotient(causal[arm]["stock_cart_goal"], causal[arm]["applied_stock"]),
-            "cart_action_route_fraction": quotient(causal[arm]["cart_routed"], causal[arm]["applied_cart"]),
-            "cart_action_goal_fraction": quotient(causal[arm]["cart_goal"], causal[arm]["applied_cart"]),
-            "cart_action_touch_fraction": quotient(causal[arm]["cart_touch"], causal[arm]["applied_cart"]),
-            "objective_cart_goal_fraction": quotient(causal[arm]["objective_cart_goal"], causal[arm]["applied_objective"]),
-            "cart_push_per_applied_objective_row": observed_quotient(
-                values[arm]["cart_push"], causal[arm]["applied_objective"],
-                value_mass[arm]["cart_push"],
-            ),
-            "cart_push_per_applied_cart_row": observed_quotient(
-                values[arm]["cart_push"], causal[arm]["applied_cart"],
-                value_mass[arm]["cart_push"],
-            ),
             "controlled_cart_fraction": quotient(causal[arm]["controlled_cart_ticks"], causal[arm]["cart_ticks"]),
             "controlled_cart_depth_observation_mass": causal[arm]["controlled_cart_depth_mass"],
             "controlled_cart_speed_observation_mass": causal[arm]["controlled_cart_speed_mass"],
@@ -458,32 +373,14 @@ def arm_metrics(record, rows):
             "spawn_schedule_slot_count_measure": scalar_measure(
                 event.get("spawn_swizzle_slot_count") for event in arm_spawn_events
             ),
-            "applied_attack_rate": quotient(causal[arm]["applied_attack"], applied_rows_n),
-            "executed_attack_rate": quotient(causal[arm]["attack_routed"], applied_rows_n),
-            "executed_attack_fraction": quotient(causal[arm]["attack_routed"], causal[arm]["applied_attack"]),
-            "attack_goal_rate": quotient(causal[arm]["attack_goal"], applied_rows_n),
-            "attack_touch_rate": quotient(causal[arm]["attack_touch"], applied_rows_n),
             "realized_damage_per_player_second": observed_quotient(
                 values[arm]["realized_damage"], player_seconds,
                 value_mass[arm]["realized_damage"],
-            ),
-            "aligned_damage_per_player_second": observed_quotient(
-                values[arm]["aligned_damage"], player_seconds,
-                value_mass[arm]["aligned_damage"],
             ),
             "realized_kills_per_player_minute": observed_quotient(
                 60 * values[arm]["realized_kills"], player_seconds,
                 value_mass[arm]["realized_kills"],
             ),
-            "aligned_kills_per_player_minute": observed_quotient(
-                60 * values[arm]["aligned_kills"], player_seconds,
-                value_mass[arm]["aligned_kills"],
-            ),
-            "action_entropy_nats": (
-                float(-np.sum(probabilities * np.log(np.maximum(probabilities, 1e-12))))
-                if total_kinds else None
-            ),
-            "causal": {key: quotient(causal[arm][key], applied_rows_n) for key in ("routed_current", "goal_current", "goal_match", "target_touch", "touch_current")},
         }
     return out
 
@@ -1137,10 +1034,10 @@ def map_space_measures(named_maps, rows):
         ),
         "team_atom_mass": len(teams),
         "team_cart_objective_incidence_measure": scalar_measure(
-            team.get("capture_cart_count") for team in teams
+            team.get("controllable_cart_count") for team in teams
         ),
-        "team_cart_capture_pair_measure": scalar_measure(
-            row["measurements"].get("team_cart_capture_pair_mass") for row in rows
+        "team_cart_control_pair_measure": scalar_measure(
+            row["measurements"].get("team_cart_control_pair_mass") for row in rows
         ),
         "team_cart_advanceable_pair_measure": scalar_measure(
             row["measurements"].get("team_cart_advanceable_pair_mass") for row in rows
@@ -1191,10 +1088,10 @@ def map_space_measures(named_maps, rows):
         "nominal_end_to_end_time_ratio_measure": scalar_measure(
             row["measurements"].get("nominal_end_to_end_time_ratio") for row in rows
         ),
-        "goals_minus_teams_measure": scalar_measure(
-            int(row["measurements"]["goals"]) - int(row["measurements"]["teams"])
+        "declarations_minus_teams_measure": scalar_measure(
+            int(row["measurements"]["team_declarations"]) - int(row["measurements"]["teams"])
             for row in rows
-            if isinstance(row["measurements"].get("goals"), (int, float))
+            if isinstance(row["measurements"].get("team_declarations"), (int, float))
             and isinstance(row["measurements"].get("teams"), (int, float))
         ),
         "measurement_schema_measure": scalar_measure(
@@ -1472,7 +1369,10 @@ def summarize(run_dir):
         record_observations.append({
             "id": record.get("id"),
             "telemetry_rows": len(rows),
+            "game_contract": GAME_CONTRACT,
+            "obsolete_game_rows": sum((row.get("game_value") or {}).get("contract") != GAME_CONTRACT for row in rows),
             "round_outcomes": rounds,
+            "execution_history": execution_evaluation(rows),
             "team_policy_arms": team_arms,
             "measured_policy_arms": sorted(metrics),
             "strategy_widths": cfg.get("strategy_widths"),

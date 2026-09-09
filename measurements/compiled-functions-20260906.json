@@ -1,0 +1,83 @@
+{
+  "date": "2026-09-06",
+  "contract": "design/compiled-functions.md",
+  "kind": "indexed_cpu_numerics_over_rdma",
+  "cohorts": {
+    "validated": {
+      "root": {
+        "kind": "compiled_functions",
+        "source": true,
+        "tiles": 128,
+        "stages": 4,
+        "tile_bytes": 65536,
+        "completed_tiles": 512,
+        "published_inputs": 128,
+        "wall_ms": 67.465,
+        "first_result_ms": 6.203,
+        "last_input_ms": 19.688,
+        "max_absolute_error": 0,
+        "error": 0
+      },
+      "peer": {
+        "kind": "compiled_functions",
+        "source": false,
+        "tiles": 128,
+        "stages": 4,
+        "tile_bytes": 65536,
+        "completed_tiles": 512,
+        "published_inputs": 0,
+        "wall_ms": 1097.143,
+        "first_result_ms": 0.0,
+        "last_input_ms": 0.0,
+        "max_absolute_error": 0,
+        "error": 0
+      }
+    },
+    "ragged": {
+      "root": {
+        "kind": "compiled_functions",
+        "source": true,
+        "tiles": 17,
+        "stages": 7,
+        "tile_bytes": 65540,
+        "completed_tiles": 119,
+        "published_inputs": 17,
+        "wall_ms": 12.233,
+        "first_result_ms": 10.822,
+        "last_input_ms": 1.51,
+        "max_absolute_error": 0,
+        "error": 0
+      },
+      "peer": {
+        "kind": "compiled_functions",
+        "source": false,
+        "tiles": 17,
+        "stages": 7,
+        "tile_bytes": 65540,
+        "completed_tiles": 119,
+        "published_inputs": 0,
+        "wall_ms": 1010.913,
+        "first_result_ms": 0.0,
+        "last_input_ms": 0.0,
+        "max_absolute_error": 0,
+        "error": 0
+      }
+    }
+  },
+  "sanitizers": [
+    "address",
+    "undefined",
+    "thread"
+  ],
+  "bridge_restarts": 0,
+  "machine_restarts": 0,
+  "scope": "Native indexed closures and dependent scalar/SIMD-style tensor streams; no model, matmul roofline, multi-hop or multi-port performance claim. Peer wall time includes waiting for source startup; compare local source timings.",
+  "sources": {
+    "rdma/mesh-functions.c": "0d01b32ef69ab207c9eadcc7475e5b6aa9b96f485a9ff64ec8fec62293668958",
+    "rdma/mesh-functions.h": "86d30d1a06ada82a6df56d2ae4dc1e201d5022e0aa71f1d9836d882d1156736f",
+    "rdma/mesh-client.c": "3acfb04701f0320ad7348cf9226d6aa4f5b2044b97c1643e1569a2ae63116581",
+    "rdma/mesh.h": "b025b1eac3c003e5709729c96d7a11dc554d099de432530f4f146c2dd03e0405",
+    "rdma/mesh-stream.c": "17a48ad4c47338027612c21f9a7dc8599a7041ee28e8e607f88eac7adeedcf98",
+    "rdma/test_flow.c": "e07bdd9e5113b5105b8088466a85cd969a699eb5a6794cdaac24fed994c65985"
+  }
+}

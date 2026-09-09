@@ -2,34 +2,20 @@ from __future__ import annotations
 
 import numpy as np
 
-from payload.tools.strategy_io_schema import XAN_BLOCKS
 
 COORDINATES = (
-    ("PW", "projected winner", "strat_responder.winner()"),
-    ("SUCC", "succession / denial budget", "strat_responder.succession()"),
-    ("carts", "cart depth / control / speed", "strat_responder cart rows"),
-    ("resources", "per-team resource pools", "strat_responder.team_resources()"),
-    ("strategy_focus", "cross-team focus matrix", "strat_responder.strategy_focus"),
-    ("assignments", "per-player assignment rows", "strat_responder assignments"),
-    ("belief", "belief coordinates", "live_belief.chorus()"),
-    ("instrument_counts", "instrument counts", "instruments.build_instruments()"),
-    ("update", "online update coordinates", "online.OnlineLearner.update()"),
-    ("model.x", "engine input x", "inputs.player_features()"),
-    ("model.beta", "per-player belief beta", "strategy.strategy()"),
-    ("model.z", "instrument descriptors z", "instrument batch descriptors"),
-    ("model.hierarchy", "per-team hierarchy rows", "runtime.hierarchy_rows()"),
-    ("model.w", "integrated weight state", "instruments.weights_from_table()"),
-    ("model.j", "selected J", "strategy.strategy()"),
-    ("model.pooled", "pooled value row", "strategy.strategy()"),
-    ("model.coupling", "coupling matrix", "strategy.strategy()"),
-    ("model.score", "action logits", "strategy.strategy()"),
-    ("model.winner_value", "value head W", "cast_header.winnie"),
-    ("model.loser_value", "value head L", "cast_header.lou"),
-    ("model.diag_k", "DPP diag(K)", "dpp.dpp_marginals()"),
-    ("model.action_mass", "observed action-support measure", "instruments.build_instruments()"),
-    ("model.dw_dt", "weight velocity", "cast_header.gia_uma_dov"),
-    ("update.advantage", "advantage", "online.OnlineLearner.update()"),
-    ("game_value", "CGT game value", "game_value.py"),
+    ("assignments", "per-player state applications", "action_history.assignments"),
+    ("learning", "optimizer updates", "online.OnlineLearner.learn"),
+    ("model.x", "full engine state", "state_steering.unpack_pages"),
+    ("model.local_neighborhood", "per-player local neighborhood message", "neighborhood.LocalNeighborhood"),
+    ("model.source_features", "literal policy inputs and structural masks", "action_history.source_features"),
+    ("model.hierarchy", "game hierarchy", "runtime.build_runtime_frame"),
+    ("model.j", "shared action and value representation", "strategy.strategy"),
+    ("model.rate", "full state-update rate", "strategy.read_heads / state_steering.rate_distribution"),
+    ("model.residual", "integrated residual", "state_steering.integrate"),
+    ("policy_comparison", "full-vector policy divergence", "policy_reports.compare_policies"),
+    ("moe", "expert routing and balancing", "cast_header.scale_operator"),
+    ("game_value", "CGT game value", "game_value.formal_game_value"),
 )
 
 def _dig(frame, path):
@@ -99,7 +85,8 @@ def field_measures(frame, model_frame=None):
     blocks = []
     x = (model_frame.get("model") or {}).get("x")
     matrix = np.asarray(x, dtype=np.float64) if x is not None else np.empty((0, 0))
-    for label, lo, hi in XAN_BLOCKS:
+    width = matrix.shape[1] if matrix.ndim == 2 else 0
+    for label, lo, hi in (("full state vector", 0, width),):
         observed_hi = min(hi, matrix.shape[1]) if matrix.ndim == 2 else lo
         chunk = matrix[:, lo:observed_hi] if matrix.ndim == 2 and observed_hi > lo else np.empty((0, 0))
         finite = np.isfinite(chunk)

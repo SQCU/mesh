@@ -1,0 +1,118 @@
+{
+  "directory": "measurements/policy-feature-integration-20260906/runtime-1788745748787450000",
+  "transport": "isolated_shared_memory_and_unix_datagrams_no_verbs",
+  "checks": {
+    "initial_updates": true,
+    "graceful_restart_updates": true,
+    "graceful_event_memory_exact": true,
+    "crash_after_durable_action": true,
+    "journal_replay_updates": true,
+    "journal_event_memory_exact": true,
+    "engine_outcome_checkpointed": true,
+    "terminal_restart": true,
+    "outcome_exactly_once": true,
+    "durable_outcome_with_events_enabled": true,
+    "every_observed_execution_has_source": true,
+    "raw_native_features_preserved": true,
+    "events_and_navigation_reach_local_featurizer": true,
+    "aged_observations_retained": true,
+    "neighborhood_parameters_optimized": true,
+    "finite_online_balance_updates": true,
+    "retained_observations_not_reemitted": true,
+    "late_event_frame_retained": true,
+    "ownerless_events_retained": true,
+    "engine_restart_replays_disk_outcome": true
+  },
+  "passed": true,
+  "outcome": {
+    "episode_id": "25415:16044373:1",
+    "event": {
+      "kind": "tie",
+      "actor_team": 0,
+      "time": 74.23336029052734,
+      "episode_id": "25415:16044373:1",
+      "source": "engine_durable_journal"
+    },
+    "learning_outcomes": {
+      "terminal_win": 0
+    },
+    "checkpoint": "/Users/mdot/dox/mesh/measurements/policy-feature-integration-20260906/runtime-1788745748787450000/policy.npz.runstate.npz",
+    "responses": 16
+  },
+  "updates": 15,
+  "pending_episode_state": {
+    "current": "25415:16044373:1",
+    "awaiting": [],
+    "outcomes": {
+      "25415:16044373:1": 0
+    }
+  },
+  "completed_episodes": 1,
+  "truncated_episodes": 0,
+  "actor_rows": 20,
+  "unmatched_rows": 0,
+  "snapshots_superseded": 137,
+  "view_faults": 0,
+  "max_state_words": 520960,
+  "checkpoint_bytes": 10372796,
+  "bundle_bytes": 20625928,
+  "j_revisions": 5,
+  "features": {
+    "memory_row_counts": [
+      23,
+      81,
+      140,
+      221,
+      264,
+      345,
+      509,
+      563,
+      638,
+      782,
+      1012,
+      1065,
+      1133,
+      1181,
+      1278,
+      1336
+    ],
+    "fresh_event_rows": 1309,
+    "event_neighbor_edges": 8562,
+    "navigation_neighbor_edges": 71591,
+    "aged_event_neighbor_edges": 4617,
+    "raw_widths": [
+      83,
+      18,
+      7,
+      17
+    ],
+    "persisted_replay_frames": 2,
+    "changed_neighborhood_parameters": [
+      "neighborhood.node_projection.weight",
+      "neighborhood.edge_projection.weight",
+      "neighborhood.cell_projection.weight",
+      "neighborhood.metric.weight",
+      "neighborhood.value.weight",
+      "neighborhood.output.weight",
+      "neighborhood.log_decay"
+    ],
+    "late_event_delivery": {
+      "frame": [
+        426408989013,
+        1,
+        1
+      ],
+      "consumed_tick": 2
+    },
+    "ownerless_prefix": {
+      "prefix_rows": 47
+    },
+    "ownerless_event_rows": 24
+  },
+  "replayed_outcomes": [
+    "25415:16044373:1",
+    "25415:16044373:2",
+    "25415:16044373:3",
+    "25415:16044373:4"
+  ]
+}

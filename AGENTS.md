@@ -137,6 +137,18 @@ State them as facts, never as refusals, and never let one block the rest of a ru
   headlessly. Use `launchctl bootstrap`, which needs only root. Never let a TCC gate
   become the reason a node has no SSH.
 
+## Idle-node restart authorization
+
+Operator instruction, 2026-09-05:
+
+> a priori you're allowed to restart any mesh machine without a userspace or active service running without any consideration
+
+Verify actual user sessions and workloads, then perform the ordinary restart
+without another approval request when the node is idle. Preserve intentionally
+suspended workloads across reboot and verify the new boot and recovered service.
+This authorization applies to every mesh machine. It does not authorize
+uncatchable signals to verbs owners; retain the teardown procedure below.
+
 ## The kill guard
 
 `pkill` in this repository does not mean what it means everywhere else, so it is
@@ -240,3 +252,13 @@ previous file is saved at `~/.zshrc.bak-meshguard`.
 `.gitignore` un-ignores `.claude/settings.json` (`.claude/*` plus a negation) so
 the hook travels with the repo instead of living on one machine. The hook script
 lives in `bin/` for the same reason.
+
+## Tests and specification
+
+The operator instructed on September 6, 2026: "delete all tests. tests aren't
+specification". The complete instruction is preserved in
+[design/SPECIFICATION.md §24](design/SPECIFICATION.md#24-whole-program-review-and-deletion-of-tests-september-6-2026).
+Repository-owned tests and verification harnesses have been removed. Do not
+reintroduce them under another name. Review the complete data and execution flow
+against the user instructions and explicit algebra. Compilation and operational
+measurements provide evidence about implementation, not authority over the specification.

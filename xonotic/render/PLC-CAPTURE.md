@@ -13,10 +13,11 @@ vis, not the renderer.
     plc-home/data/maps/dance.{ent,mapinfo}    tools/mkentfile.py output + gametype plc
     plc-home/data/autoexec.cfg                bots, no map end, sv_public -1
 
-The `.ent` is generated with `tools/mkentfile.py <bsp> <out.ent> <teams> <carts>`. Note
-that mkentfile currently emits `plc_goal "cnt"` values from a k>4 palette (32, 25); the
-mode reads `cnt` with the `dom_team` convention (4 red / 13 blue / 12 yellow / 9 pink),
-so the generated values were remapped in the `.ent` before use.
+The `.ent` is generated with `tools/mkentfile.py <bsp> <out.ent> <teams> <carts>`.
+The original capture required a manual team-colour correction. Current construction
+emits independent `plc_team` declarations and scoring checkpoint chains; regenerate
+old entity files instead of carrying forward that capture's goal-entity workaround.
+The historical rendering timings below are not policy or game-objective evidence.
 
 ## Frames — `plc-run.sh <label> <seconds> <steps.cfg>`
 

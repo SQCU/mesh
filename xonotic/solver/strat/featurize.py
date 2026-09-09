@@ -32,7 +32,8 @@ class VCellMap:
         self.areas = np.asarray(areas, dtype=np.float64)
         self.map_area = float(map_area)
         self.graph_dist = np.asarray(graph_dist, dtype=np.float64)
-        self.support_radius = float(support_radius)
+        self.support_radii = np.broadcast_to(np.asarray(support_radius, dtype=np.float64), (len(self.centroids),)).copy()
+        self.support_radius = float(self.support_radii.max(initial=0))
         self.node_positions = np.asarray(node_positions, dtype=np.float64)
         self.node_cell = np.asarray(node_cell, dtype=np.int64)
         self.node_edges = tuple(tuple(row) for row in node_edges)
@@ -83,12 +84,12 @@ class VCellMap:
         return float(source_offset + distances[target] + target_offset)
 
     def receptive_fraction(self, cell_idx: int) -> float:
-        within = self.graph_dist[cell_idx] <= self.support_radius + 1e-9
+        within = self.graph_dist[cell_idx] <= self.support_radii[cell_idx] + 1e-9
         return float(self.areas[within].sum() / self.map_area)
 
     def spatial_mask(self, cell_idx: int) -> np.ndarray:
         d = self.graph_dist[cell_idx]
-        R = self.support_radius
+        R = self.support_radii[cell_idx]
         with np.errstate(over="ignore", invalid="ignore"):
             g = np.exp(-4.0 * (d / R) ** 2) if R > 0 else (d == 0).astype(np.float64)
         g = np.where(d <= R + 1e-9, g, 0.0)
@@ -170,8 +171,9 @@ def segment_vcells(
         node_cell = np.array([root_to_cell[find(i)] for i in range(n)], dtype=np.int64)
     else:
         supplied = np.asarray(node_cell, dtype=np.int64)
-        if supplied.shape != (n,) or np.any(supplied < 0):
+        if supplied.shape != (n,):
             raise ValueError("node_cell must assign every navigation node")
+        supplied = np.where(supplied < 0, np.arange(n) + supplied.max(initial=-1) + 1, supplied)
         identities = sorted(set(int(value) for value in supplied))
         remap = {identity: cell for cell, identity in enumerate(identities)}
         node_cell = np.asarray([remap[int(value)] for value in supplied], dtype=np.int64)
@@ -213,25 +215,13 @@ def segment_vcells(
         edges[cj].append((ci, w))
     graph_dist = _dijkstra_all_pairs(C, edges)
 
-    candidates = np.unique(graph_dist[np.isfinite(graph_dist)])
-    if candidates.size == 0:
-        support_radius = 0.0
-    else:
-        def _median_frac(R):
-            within = graph_dist <= R + 1e-9
-            return float(np.median((within * areas[None, :]).sum(axis=1) / map_area))
-
-        if _median_frac(float(candidates[-1])) < lo:
-            support_radius = float(candidates[-1])
-        else:
-            low, high = 0, candidates.size - 1
-            while low < high:
-                mid = (low + high) // 2
-                if _median_frac(float(candidates[mid])) >= lo:
-                    high = mid
-                else:
-                    low = mid + 1
-            support_radius = float(candidates[low])
+    support_radius = np.zeros(C, dtype=np.float64)
+    for cell, distances in enumerate(graph_dist):
+        order = np.argsort(distances)
+        order = order[np.isfinite(distances[order])]
+        cumulative = np.cumsum(areas[order])
+        boundary = min(int(np.searchsorted(cumulative, lo * map_area)), len(order) - 1)
+        support_radius[cell] = distances[order[boundary]]
 
     node_edges = [list() for _ in range(n)]
     for i in range(n):
@@ -247,7 +237,7 @@ def segment_vcells(
 def vcell_from_navigation(realization, band=(_BAND_LO, _BAND_HI)):
     payload = realization.get("navigation_realization", realization)
     nodes = np.asarray(payload["nodes"], dtype=np.float64)
-    positions = nodes[:, :2]
+    positions = nodes[:, :3]
     adjacency = [set() for _ in nodes]
     lengths = {}
     for left, right, length in payload.get("edges", ()):
@@ -266,75 +256,6 @@ def vcell_from_navigation(realization, band=(_BAND_LO, _BAND_HI)):
         node_cell=(payload.get("voronoi") or {}).get("owner"),
     )
 
-SLOT_FIELDS = (
-    "item_gone", "item_here", "enemy_here", "rival_here",
-    "position_x", "position_y", "position_z", "respawn_time",
-    "health", "link_length", "amount",
-)
-SLOT_DIM = len(SLOT_FIELDS)
-_SLOT_INDEX = {name: i for i, name in enumerate(SLOT_FIELDS)}
-
-def build_observation_slots(rows: Iterable, vcmap: VCellMap, now: float):
-    slots = []
-    times = []
-    cells = []
-
-    def _get(row, key, default=None):
-        if isinstance(row, Mapping):
-            return row.get(key, default)
-        return getattr(row, key, default)
-
-    for row in rows:
-        cell = _get(row, "cell")
-        if cell is None:
-            posn = _get(row, "position")
-            if posn is None:
-                raise ValueError("observation row needs 'cell' or 'position'")
-            cell = vcmap.assign_cell(posn)
-        cells.append(int(cell))
-        times.append(float(_get(row, "time", now)))
-        slot = _get(row, "slot")
-        if slot is not None:
-            v = np.asarray(slot, dtype=np.float64).reshape(-1)
-            if v.shape[0] != SLOT_DIM:
-                raise ValueError(f"slot must be length {SLOT_DIM}")
-        else:
-            v = np.zeros(SLOT_DIM, dtype=np.float64)
-            for name, idx in _SLOT_INDEX.items():
-                if name == "seen":
-                    continue
-                val = _get(row, name)
-                if val is not None:
-                    v[idx] = float(val)
-        slots.append(v)
-    return (
-        np.asarray(slots, dtype=np.float64).reshape(-1, SLOT_DIM),
-        np.asarray(times, dtype=np.float64),
-        np.ones(len(slots), dtype=bool),
-        np.asarray(cells, dtype=np.int64),
-    )
-
-def temporal_contraction(f_obs, obs_time, now: float, T: float,
-                         f_prior=None, seen=None) -> np.ndarray:
-    f_obs = np.asarray(f_obs, dtype=np.float64)
-    E, F = f_obs.shape
-    if T <= 0:
-        raise ValueError("T (forgetting time-constant) must be > 0")
-    dt = float(now) - np.asarray(obs_time, dtype=np.float64)
-    dt = np.maximum(dt, 0.0)
-    rho = np.exp(-dt / float(T))
-    if seen is not None:
-        rho = np.where(np.asarray(seen, dtype=bool), rho, 0.0)
-    if f_prior is None:
-        prior = np.zeros((E, F), dtype=np.float64)
-    else:
-        prior = np.asarray(f_prior, dtype=np.float64)
-        if prior.ndim == 1:
-            prior = np.broadcast_to(prior, (E, F))
-    return rho[:, None] * f_obs + (1.0 - rho[:, None]) * prior
-
-UNINFORMATIVE_PRIOR = np.zeros(SLOT_DIM, dtype=np.float64)
-
 def receptive_report(vcmap: VCellMap, cells=None) -> dict:
     idx = range(vcmap.n_cells) if cells is None else [int(c) for c in cells]
     fr = np.asarray([vcmap.receptive_fraction(int(c)) for c in idx], dtype=np.float64)
@@ -350,13 +271,16 @@ def receptive_report(vcmap: VCellMap, cells=None) -> dict:
         "min": round(float(fr.min()), 6),
         "max": round(float(fr.max()), 6),
         "band": [float(lo), float(hi)],
-        "in_band": bool(lo - 1e-9 <= med <= hi + 1e-9),
+        "in_band": bool(np.all((fr >= lo - 1e-9) & (fr <= hi + 1e-9))),
+        "below_band_cells": int(np.sum(fr < lo - 1e-9)),
+        "above_band_cells": int(np.sum(fr > hi + 1e-9)),
+        "fractions": fr.tolist(),
+        "support_radii": vcmap.support_radii.tolist(),
         "support_radius": round(float(vcmap.support_radius), 6),
         "n_cells": int(vcmap.n_cells),
     }
 
 __all__ = [
-    "SLOT_FIELDS", "SLOT_DIM", "UNINFORMATIVE_PRIOR",
-    "VCellMap", "segment_vcells", "vcell_from_navigation", "build_observation_slots", "temporal_contraction",
+    "VCellMap", "segment_vcells", "vcell_from_navigation",
     "receptive_report",
 ]

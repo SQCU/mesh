@@ -1,0 +1,26 @@
+{
+  "run": "rdma-1788738256142488000",
+  "observed_files": [
+    {
+      "file": "j-measures.84145.1.npz",
+      "bytes": 390065527,
+      "manifest_bytes": 34184511
+    },
+    {
+      "file": "j-measures.84145.1.npz.view.npz",
+      "bytes": 20517218,
+      "manifest_bytes": 26224854
+    },
+    {
+      "file": "j-measures.85053.0.npz",
+      "bytes": 207994676,
+      "manifest_bytes": 34073968
+    },
+    {
+      "file": "j-measures.85053.0.npz.view.npz",
+      "bytes": 17355176,
+      "manifest_bytes": 26746510
+    }
+  ],
+  "comparison_limit": "Different observation windows from the earlier expansion failure; not a controlled compression benchmark."
+}

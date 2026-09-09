@@ -1,0 +1,347 @@
+{
+  "scope": "Actual two-bot RDMA match; packaging and execution observation, not a learning-quality claim",
+  "producer_application": {
+    "id": "52163540f4b9a12d3646d6c56b906faf50accc09d2eabb71ec0ca674d0bb68d5",
+    "root": "/Users/mdot/mesh-workloads/cartlane/application/generations/1788763858617162000-52163540f4b9",
+    "python_root": "/Users/mdot/mesh-workloads/cartlane/application/python/runtimes/runtime.YfX5rD",
+    "native_client": "51ce8445a0e9e8c7f7a6df99cb9bffc4f8c351fcb659a7ee1ff864bc2ee42e78",
+    "wire": "c9ea4038ec149c8f0a89e88c4b5ec2de6d89747f9f7b54e674ab449d97774340"
+  },
+  "viewer_application": {
+    "id": "52163540f4b9a12d3646d6c56b906faf50accc09d2eabb71ec0ca674d0bb68d5",
+    "root": "/Users/mdot/dox/mesh/.build/policy-tranches-20260906/application/generations/1788763918455387000-52163540f4b9",
+    "python_root": "/Users/mdot/dox/mesh/.build/policy-tranches-20260906/application/python/runtimes/runtime.ZRpFAX",
+    "native_client": "51ce8445a0e9e8c7f7a6df99cb9bffc4f8c351fcb659a7ee1ff864bc2ee42e78",
+    "wire": "c9ea4038ec149c8f0a89e88c4b5ec2de6d89747f9f7b54e674ab449d97774340"
+  },
+  "response": 320,
+  "reports": [
+    {
+      "id": "optimization",
+      "report": "Optimizer steps",
+      "state": "measured",
+      "observations": 2,
+      "source": "learning + policy_updates"
+    },
+    {
+      "id": "j",
+      "report": "J geometry and source joins",
+      "state": "measured",
+      "observations": 32,
+      "source": "producer J artifact"
+    },
+    {
+      "id": "counterfactual",
+      "report": "Same-input policy divergence",
+      "state": "measured",
+      "observations": 2,
+      "source": "policy_comparison.pairs"
+    },
+    {
+      "id": "counterfactual_outputs",
+      "report": "Counterfactual output vectors",
+      "state": "measured",
+      "observations": 4,
+      "source": "policy_comparison.rows"
+    },
+    {
+      "id": "paired_ratings",
+      "report": "Paired-study Elo",
+      "state": "awaiting_observations",
+      "observations": 0,
+      "source": "study.json; mirrored comparison legs"
+    },
+    {
+      "id": "composition_ratings",
+      "report": "Seeded team / bot / controller ratings",
+      "state": "not_implemented",
+      "observations": 0,
+      "source": "Missing realized bot-configuration identities, persistent exposure ledger, and conditional rating estimator"
+    }
+  ],
+  "replication": {
+    "source": "mesh-mini-local:/Users/mdot/mesh-workloads/cartlane/policy-tranches-20260906/run",
+    "resolved_source": "/Users/mdot/mesh-workloads/cartlane/policy-tranches-20260906/run",
+    "state": "replicated",
+    "last_success": 1788764101.366862,
+    "directory": "/Users/mdot/dox/mesh/.build/policy-tranches-20260906/viewer-replica/3e5ea393548fd81673df",
+    "last_error": null
+  },
+  "learning": {
+    "matrix_fusion": {
+      "updates": 318,
+      "loss_pg": 2.382713581994267e-09,
+      "gradient_steps": 1,
+      "actor_rows": 1,
+      "historical_actor_rows": 0,
+      "replay_batch": 0,
+      "importance_ratio": {
+        "semantics": "proximal_over_behavior_truncated",
+        "n": 256,
+        "mean": 0.000633198069408536,
+        "clipped_fraction": 0.0,
+        "numerical_floor_fraction": 0.94141,
+        "effective_sample_fraction": 0.005285981724986112,
+        "log_ratio_quantiles": [
+          -50396.36328125,
+          -5796.59619140625,
+          -688.11572265625,
+          -229.76986694335938,
+          -85.11029815673828,
+          -19.22821044921875,
+          -1.986358642578125
+        ],
+        "quantiles": [
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          4.975940437468296e-09,
+          0.13719409704208374
+        ]
+      },
+      "execution": {
+        "capacity": {
+          "participants": 2,
+          "state_pages": 32,
+          "events": 16384,
+          "observations": 16,
+          "carts": 4,
+          "teams": 2,
+          "navigation_nodes": 1,
+          "navigation_edges": 1,
+          "navigation_cells": 1,
+          "neighbors": 16384
+        },
+        "forward_traces": 7,
+        "preparations": 7,
+        "emission_traces": 2,
+        "preparation_seconds": 21.114120083031594,
+        "input_storage": {
+          "slots": 1,
+          "allocations": 7,
+          "loads": 320,
+          "bytes": 4221111
+        },
+        "mode": "compiled_local",
+        "region_traces": {
+          "source": 0,
+          "finish": 0,
+          "decode": 0
+        },
+        "loss_traces": 6,
+        "staged_loss_builds": 0,
+        "optimizer_traces": 6,
+        "accumulation_traces": 6,
+        "update_program_traces": 6,
+        "source_group_capacity": 1,
+        "training_input_storage": {
+          "slots": 2,
+          "allocations": 12,
+          "loads": 636,
+          "bytes": 8442222
+        },
+        "transition_storage": {
+          "slots": 1,
+          "allocations": 6,
+          "bytes": 65665
+        }
+      }
+    },
+    "terminal_win": {
+      "updates": 318,
+      "loss_pg": 1.3430710987805128e-09,
+      "gradient_steps": 1,
+      "actor_rows": 1,
+      "historical_actor_rows": 0,
+      "replay_batch": 0,
+      "importance_ratio": {
+        "semantics": "proximal_over_behavior_truncated",
+        "n": 256,
+        "mean": 2.102652615576517e-06,
+        "clipped_fraction": 0.0,
+        "numerical_floor_fraction": 0.98047,
+        "effective_sample_fraction": 0.004817670446160624,
+        "log_ratio_quantiles": [
+          -71855.15625,
+          -7829.28466796875,
+          -2003.3320922851562,
+          -705.3838500976562,
+          -264.86058807373047,
+          -49.39967727661133,
+          -7.637786865234375
+        ],
+        "quantiles": [
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          2.06115369216775e-09,
+          0.0004818938032258302
+        ]
+      },
+      "execution": {
+        "capacity": {
+          "participants": 2,
+          "state_pages": 32,
+          "events": 16384,
+          "observations": 16,
+          "carts": 4,
+          "teams": 2,
+          "navigation_nodes": 1,
+          "navigation_edges": 1,
+          "navigation_cells": 1,
+          "neighbors": 16384
+        },
+        "forward_traces": 7,
+        "preparations": 7,
+        "emission_traces": 2,
+        "preparation_seconds": 0.5712812080018921,
+        "input_storage": {
+          "slots": 0,
+          "allocations": 0,
+          "loads": 0,
+          "bytes": 0
+        },
+        "mode": "compiled_local",
+        "region_traces": {
+          "source": 0,
+          "finish": 0,
+          "decode": 0
+        },
+        "loss_traces": 6,
+        "staged_loss_builds": 0,
+        "optimizer_traces": 6,
+        "accumulation_traces": 6,
+        "update_program_traces": 6,
+        "source_group_capacity": 1,
+        "training_input_storage": {
+          "slots": 2,
+          "allocations": 12,
+          "loads": 636,
+          "bytes": 8442222
+        },
+        "transition_storage": {
+          "slots": 1,
+          "allocations": 6,
+          "bytes": 65665
+        }
+      }
+    }
+  },
+  "bridges": {
+    "laptop": {
+      "up": true,
+      "region": "/mesh0",
+      "node": 0,
+      "pgsz": 4096,
+      "pool": 2097152,
+      "arena": 6291456,
+      "client": 49191,
+      "client_alive": true,
+      "sent": 13844795,
+      "recvd": 2325961,
+      "bad": 0,
+      "up_ms": 16990279,
+      "bridge_pid": 55709,
+      "bridge_alive": true,
+      "phase": "paired",
+      "heartbeat_age_ms": 143,
+      "responsive": true,
+      "paired": true,
+      "operation": 0,
+      "operation_age_ms": 0,
+      "sub_head": 18541138,
+      "sub_tail": 18541138,
+      "sub_depth": 0,
+      "cmp_head": 2325961,
+      "cmp_tail": 2325961,
+      "cmp_depth": 0,
+      "rel_head": 2325961,
+      "rel_tail": 2325961,
+      "rel_depth": 0,
+      "ack_head": 18541138,
+      "ack_tail": 18541138,
+      "ack_depth": 0,
+      "free": 2093057,
+      "sd_free": 0,
+      "recv": 4095,
+      "sd_recv": 0,
+      "send": 0,
+      "sd_send": 0,
+      "app": 0,
+      "sd_app": 0,
+      "ports": [
+        {
+          "device": "automatic",
+          "peer": 65535,
+          "generation": 5,
+          "phase": "paired",
+          "heartbeat_us": 1788764112137887,
+          "operation": 0
+        }
+      ]
+    },
+    "mini": {
+      "up": true,
+      "region": "/mesh0",
+      "node": 1,
+      "pgsz": 4096,
+      "pool": 393216,
+      "arena": 1179648,
+      "client": 55635,
+      "client_alive": true,
+      "sent": 2327703,
+      "recvd": 2852923,
+      "bad": 0,
+      "up_ms": 16989915,
+      "bridge_pid": 93690,
+      "bridge_alive": true,
+      "phase": "paired",
+      "heartbeat_age_ms": 170,
+      "responsive": true,
+      "paired": true,
+      "operation": 0,
+      "operation_age_ms": 0,
+      "sub_head": 2327703,
+      "sub_tail": 2327703,
+      "sub_depth": 0,
+      "cmp_head": 2852923,
+      "cmp_tail": 2852728,
+      "cmp_depth": 195,
+      "rel_head": 2788210,
+      "rel_tail": 2788210,
+      "rel_depth": 0,
+      "ack_head": 2327703,
+      "ack_tail": 2327683,
+      "ack_depth": 20,
+      "free": 388991,
+      "sd_free": 0,
+      "recv": 4095,
+      "sd_recv": 0,
+      "send": 0,
+      "sd_send": 0,
+      "app": 130,
+      "sd_app": 0,
+      "ports": [
+        {
+          "device": "automatic",
+          "peer": 65535,
+          "generation": 5,
+          "phase": "paired",
+          "heartbeat_us": 1788764112141985,
+          "operation": 0
+        }
+      ]
+    }
+  },
+  "open_findings": [
+    "Long-lived-map STATE assembly starvation; map transition restored complete snapshots",
+    "Near-zero actor importance weights despite advancing optimizer steps",
+    "This run omitted navigation realization",
+    "No completed-match historical replay evidence in sampled records",
+    "Native distributed reduction integration and composition ratings remain unfinished"
+  ]
+}

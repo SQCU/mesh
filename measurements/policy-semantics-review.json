@@ -1,0 +1,103 @@
+{
+  "source": "read-only saved artifacts",
+  "checkpoints": [
+    {
+      "path": "xonotic/solver/strat/runs/checkpoint-control-live-20260904/00043-joint-00021-00001/checkpoint.matrix_fusion.npz",
+      "groups": {
+        "parameters": {
+          "arrays": 30,
+          "nonfinite_arrays": 30,
+          "nonfinite_coordinates": 5198166
+        },
+        "optimizer": {
+          "arrays": 62,
+          "nonfinite_arrays": 60,
+          "nonfinite_coordinates": 10396332
+        },
+        "replay": {
+          "arrays": 30270,
+          "nonfinite_arrays": 2819,
+          "nonfinite_coordinates": 997571
+        },
+        "metadata": {
+          "arrays": 7,
+          "nonfinite_arrays": 0,
+          "nonfinite_coordinates": 0
+        }
+      },
+      "nonfinite_arrays": 2909,
+      "replay_frames": 2018,
+      "nonfinite_replay_frames": 1399,
+      "replay_transitions": 1009,
+      "affected_replay_transitions": 710,
+      "source_updates": 1797
+    },
+    {
+      "path": "xonotic/solver/strat/runs/checkpoint-control-live-20260904/00043-joint-00021-00001/checkpoint.terminal_win.npz",
+      "groups": {
+        "parameters": {
+          "arrays": 30,
+          "nonfinite_arrays": 30,
+          "nonfinite_coordinates": 5198166
+        },
+        "optimizer": {
+          "arrays": 62,
+          "nonfinite_arrays": 60,
+          "nonfinite_coordinates": 10396332
+        },
+        "replay": {
+          "arrays": 30270,
+          "nonfinite_arrays": 2819,
+          "nonfinite_coordinates": 997571
+        },
+        "metadata": {
+          "arrays": 7,
+          "nonfinite_arrays": 0,
+          "nonfinite_coordinates": 0
+        }
+      },
+      "nonfinite_arrays": 2909,
+      "replay_frames": 2018,
+      "nonfinite_replay_frames": 1399,
+      "replay_transitions": 1009,
+      "affected_replay_transitions": 710,
+      "source_updates": 1097
+    }
+  ],
+  "schema": 1,
+  "review": "design/POLICY-SEMANTICS-REVIEW.md",
+  "recovery_exercise": [
+    {
+      "arm": "matrix_fusion",
+      "updates": 32,
+      "replay": 0,
+      "finite_steps": 32,
+      "loss_range": [
+        -1.0923240184783936,
+        1.749493956565857
+      ],
+      "source_updates": 1797
+    },
+    {
+      "arm": "terminal_win",
+      "updates": 32,
+      "replay": 0,
+      "finite_steps": 32,
+      "loss_range": [
+        -1.0923240184783936,
+        1.749493956565857
+      ],
+      "source_updates": 1097
+    }
+  ],
+  "verification": {
+    "macos_arm64": {
+      "regression_tests": 10,
+      "online_contract": "passed, both objectives"
+    },
+    "linux_x86_64": {
+      "data_geometry_tests": 6
+    },
+    "recovery_scope": "isolated, repeated saved observation with newly sampled behavior; no live match claim"
+  }
+}

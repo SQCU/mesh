@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shlex
 import subprocess
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from ..journal import Journal
 
 def split_source(source: str):
     if source.startswith("/") or source.startswith("."):
@@ -16,6 +21,80 @@ def split_source(source: str):
         if path.startswith("/") or path.startswith("~"):
             return host, path
     return None, source
+
+
+class RunReplica:
+    def __init__(self, source, directory, source_file=None):
+        self.source, self.source_file = source, source_file
+        self.directory = Path(directory).absolute()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.stopped = threading.Event()
+        self.status = {'source': source, 'state': 'starting', 'last_success': None}
+        self.thread = threading.Thread(target=self.run, name='joracle-replica', daemon=True)
+
+    def discover_source(self):
+        from peers import discover
+        probe = "import json,time;from pathlib import Path;p=Path.home()/'.local/share/mesh/xonotic-active.json';v=json.loads(p.read_text());v['age']=max(0,time.time()-Path(v['telemetry']).stat().st_mtime);print(json.dumps(v))"
+        hosts = [None] + [node.name + '.local' for node in discover(timeout=1) if not node.is_self]
+        def read(host):
+            command = ['python3', '-c', probe] if host is None else ['ssh', '-o', 'BatchMode=yes', '-o',
+                'ConnectTimeout=5', '-o', 'ServerAliveInterval=3', '-o', 'ServerAliveCountMax=2', host, 'python3 -c ' + shlex.quote(probe)]
+            try:
+                result = json.loads(subprocess.run(command, capture_output=True, text=True, timeout=12, check=True).stdout)
+                result['source'] = (host + ':' if host else '') + result['root']
+                return result, None
+            except Exception as error:
+                return None, {'host': host or 'local', 'error': f'{type(error).__name__}: {error}'}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(read, hosts))
+        candidates = [value for value, error in results if value is not None]
+        self.discovery = {'candidates': candidates, 'errors': [error for value, error in results if error is not None]}
+        current = next((value for value in candidates if value['source'] == self.status.get('source') and value['age'] < 15), None)
+        selected = current or min(candidates, key=lambda value: value['age'], default=None)
+        if selected is None: raise LookupError('no published Xonotic application is reachable; retaining the last replica')
+        return selected['source']
+
+    def refresh(self):
+        source = Path(self.source_file).read_text().strip() if self.source_file else self.source
+        if source in ('mesh', 'mesh:xonotic'):
+            source = self.discover_source()
+        host, path = split_source(source)
+        ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8',
+            '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2']
+        remote = subprocess.run(ssh + [host, 'cd ' + shlex.quote(path) + ' && pwd -P'],
+            capture_output=True, text=True, timeout=15, check=True).stdout.strip() if host else str(Path(path).resolve())
+        identity = hashlib.sha256((str(host) + ':' + remote).encode()).hexdigest()[:20]
+        destination = self.directory / identity
+        destination.mkdir(exist_ok=True)
+        command = ['rsync', '-a', '--delay-updates', '--partial-dir=.partial', '--timeout=10', '-e', shlex.join(ssh),
+                   '--exclude', '*.new', '--exclude', '*.tmp', '--exclude', '.partial/']
+        for pattern in ('*/', 'telemetry.jsonl', 'matches.jsonl', 'server-outcomes.jsonl',
+                'bot-configurations.jsonl', 'exposure.jsonl', 'study.json', 'j-measures.*', 'features-*.npz'):
+            command += ['--include', pattern]
+        location = host + ':' + shlex.quote(remote + '/') if host else remote + '/'
+        command += ['--exclude', '*', location, str(destination) + '/']
+        subprocess.run(command, capture_output=True, text=True, timeout=45, check=True)
+        ready = any(next(Journal().read(path), None) is not None for path in destination.glob('*/telemetry.jsonl'))
+        if ready:
+            temporary = self.directory / ('.active-' + str(time.time_ns()))
+            temporary.symlink_to(destination)
+            os.replace(temporary, self.directory / 'active')
+        self.status = {'source': source, 'resolved_source': remote, 'state': 'replicated' if ready else 'awaiting_observations',
+            'last_success': time.time(), 'directory': str(destination), 'last_error': None,
+            'discovery': getattr(self, 'discovery', None)}
+
+    def run(self):
+        while not self.stopped.is_set():
+            try:
+                self.refresh()
+            except Exception as error:
+                detail = f'{type(error).__name__}: {error}'
+                if isinstance(error, subprocess.CalledProcessError):
+                    detail += ': ' + error.stderr.strip()
+                self.status = {**self.status, 'state': 'retaining_last_replica', 'last_error': detail,
+                    'discovery': getattr(self, 'discovery', None)}
+                print(json.dumps({'event': 'report_replication', **self.status}), flush=True)
+            self.stopped.wait(5)
 
 def follow_argv(source: str, host_key_alias=None, lines=900):
     host, path = split_source(source)

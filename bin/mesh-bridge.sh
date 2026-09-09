@@ -19,6 +19,8 @@ if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
 fi
 if [ "$(id -u)" = 0 ]; then DOM="system"; PLIST=/Library/LaunchDaemons/$LABEL.plist
 else DOM="gui/$(id -u)"; PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"; fi
+if [ "$(id -u)" = 0 ]; then LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}"
+else LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}"; fi
 
 wire_check() {
   ram=$(sysctl -n hw.memsize)
@@ -30,7 +32,7 @@ wire_check() {
 }
 
 write_plist() {
-  mkdir -p "$(dirname "$PLIST")"
+  mkdir -p "$(dirname "$PLIST")" "$LOGDIR"
   cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,8 +46,9 @@ $( [ -n "$peer" ] && printf '<string>%s</string>' "$peer" )
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 <key>ExitTimeOut</key><integer>0</integer>
-<key>StandardOutPath</key><string>/tmp/$LABEL.log</string>
-<key>StandardErrorPath</key><string>/tmp/$LABEL.log</string>
+<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string></dict>
+<key>StandardOutPath</key><string>$LOGDIR/$LABEL.log</string>
+<key>StandardErrorPath</key><string>$LOGDIR/$LABEL.log</string>
 </dict></plist>
 PL
 }
@@ -54,10 +57,16 @@ pid_of() { launchctl print "$DOM/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3
 
 do_stop() {
   p=$(pid_of)
-  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1
-  [ -z "$p" ] && { echo "mesh-bridge: stopped"; return 0; }
-  for _ in $(seq 1 300); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
-  kill -0 "$p" 2>/dev/null && { echo "mesh-bridge: $LABEL still running as $p after 30s; not escalating" >&2; return 1; }
+  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1 & request=$!
+  for _ in $(seq 1 300); do
+    if ! kill -0 "$request" 2>/dev/null && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then break; fi
+    sleep 0.1
+  done
+  if kill -0 "$request" 2>/dev/null || { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; then
+    echo "mesh-bridge: stop pending after 30s (bridge=${p:-none}, request=$request); not escalating or replacing its region" >&2
+    return 1
+  fi
+  wait "$request" 2>/dev/null
   echo "mesh-bridge: stopped"
 }
 
@@ -68,7 +77,7 @@ do_start() {
   launchctl bootstrap "$DOM" "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null
   for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
   p=$(pid_of)
-  [ -z "$p" ] && { echo "mesh-bridge: failed to start; see /tmp/$LABEL.log" >&2; return 1; }
+  [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
   echo "mesh-bridge: running as $p, mesh ${mesh_pct}% app ${app_pct}%"
 }
 
@@ -81,7 +90,7 @@ do_status() {
 case "${1:-status}" in
   start)   do_start ;;
   stop)    do_stop ;;
-  restart) do_stop; do_start ;;
+  restart) launchctl kill SIGTERM "$DOM/$LABEL" || do_start ;;
   status)  do_status ;;
   *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 64 ;;
 esac

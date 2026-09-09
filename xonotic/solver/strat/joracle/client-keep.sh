@@ -121,10 +121,11 @@ while :; do
     terminate "$pid"
     launch
     degraded=
-  elif disconnected; then
-    log_evt "client_disconnected pid=$pid log=$(active_log) -> reconnect"
-    terminate "$pid"
-    launch
+  elif disconnected && [ "$degraded" != connection ]; then
+    log_evt "client_reconnecting pid=$pid log=$(active_log) engine_retry=1"
+    degraded=connection
+  elif connected && [ "$degraded" = connection ]; then
+    log_evt "client_connected pid=$pid log=$(active_log)"
     degraded=
   elif renderer_bad && [ -z "$degraded" ]; then
     log_evt "client_renderer_degraded pid=$pid log=$(active_log)"

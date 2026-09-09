@@ -1,0 +1,1 @@
+{"event": "qc_python_game_verified", "cases": 39, "team_counts": [2, 4, 8, 12], "ownership_transitions": 6, "stacked_floor_resolution": true, "player_driven_motion_cases": 6, "unattended_ticks": 3000, "unattended_score_accrual": true}

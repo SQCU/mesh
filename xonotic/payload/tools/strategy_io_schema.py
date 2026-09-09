@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-MAP_MEASUREMENT_SCHEMA = 11
-RESP_WIDTH = 8
-OBS_WIDTH = 83
-CART_WIDTH = 16
-EVT_WIDTH = 17
+MAP_MEASUREMENT_SCHEMA = 15
+OBS_WIDTH = 84
+CART_WIDTH = 18
+TEAM_WIDTH = 7
+EVT_WIDTH = 18
+EVENT_PUBLIC_TEAM = 0
 STRATEGY_DEADLINE_S = 0.4
 WEAPON_WORD_BITS = 24
 CELL_EXTENT = 256
@@ -17,13 +18,24 @@ OBS = dict(
     WEAPONS_X=16, WEAPONS_Y=17, WEAPONS_Z=18,
     STRENGTH_FINISHED=19, SPAWN_TIME=20, ENGINE_TIME=21,
     CELL_X=22, CELL_Y=23, ALIVE=24, CONTROL=25,
-    APPLIED_TARGET_KIND=26, APPLIED_TARGET_ID=27,
-    APPLIED_TARGET_CELL_X=28, APPLIED_TARGET_CELL_Y=29, TARGET_RESOLVED=30,
-    GOAL_TARGET_KIND=31, GOAL_TARGET_ID=32,
-    GOAL_TARGET_CELL_X=33, GOAL_TARGET_CELL_Y=34, GOAL_PRESENT=35,
-    GOAL_POS_X=36, GOAL_POS_Y=37, GOAL_POS_Z=38,
-    RESPONSE_SEQ=39, RESPONSE_TIME=40, ROUTE_SEQ=41, ROUTE_LATENCY=42,
-    GOAL_SEQ=43, GOAL_LATENCY=44, TOUCH_SEQ=45, TOUCH_LATENCY=46,
+    VIEW_FAULTS=26,
+    VIEW_FAULT_SEQUENCE=27,
+    SNAPSHOTS_SUPERSEDED=28,
+    PRESENT=29,
+    HAVOCBOT_KEYBOARDSKILL=30,
+    BOT_MOVESKILL=31,
+    BOT_DODGESKILL=32,
+    BOT_PINGSKILL=33,
+    BOT_WEAPONSKILL=34,
+    BOT_AGGRESSKILL=35,
+    BOT_RANGEPREFERENCE=36,
+    BOT_AIMSKILL=37,
+    BOT_OFFSETSKILL=38,
+    RESPONSE_SEQ=39, RESPONSE_TIME=40, APPLIED_SEQUENCE=41, APPLICATION_LATENCY=42,
+    BOT_MOUSESKILL=43,
+    BOT_THINKSKILL=44,
+    BOT_AISKILL=45,
+    BOT_GLOBAL_SKILL=46,
     ENEMY_DAMAGE_DEALT=47, ENEMY_DAMAGE_TAKEN=48, ENEMY_KILLS=49,
     DEATHS=50, PICKUPS=51, CART_PUSH=52, CART_CONTEST=53,
     OUTCOME_A_SEQ=54,
@@ -38,7 +50,7 @@ OBS = dict(
     SWIZZLE_SPOT_COUNT=73, SWIZZLE_SLOT_COUNT=74, SWIZZLE_TICKET=75,
     SWIZZLE_COHORT=76, SWIZZLE_COHORT_COUNT=77, SWIZZLE_GENERATION=78,
     SWIZZLE_SCHEDULED_TIME=79, SWIZZLE_ACTUAL_TIME=80,
-    SWIZZLE_LANE=81, SWIZZLE_SPOT=82,
+    SWIZZLE_LANE=81, SWIZZLE_SPOT=82, BOT_CONFIG_SCHEMA=83,
 )
 CS = dict(
     ID=0, PATH_POSITION=1, PATH_LENGTH=2, CONTROL_TEAM=3, SPEED=4,
@@ -48,30 +60,19 @@ CS = dict(
     TEAM_COUNT=13,
     ROLLBACK_ACTIVE=14,
     ROLLBACK_TARGET=15,
+    CHECKPOINT_DEPTH=16, CHECKPOINT_COUNT=17,
 )
+TS = dict(ID=0, SCORE=1, CHECKPOINTS_HELD=2, CHECKPOINT_RATE=3, SCORE_LIMIT=4, EPISODE=5, FINISHED=6)
 EVT = dict(
     KIND=0, TIME=1, OBSERVER=2, TEAM=3, SUBJECT=4,
     CELL_X=5, CELL_Y=6, TARGET_CELL_X=7, TARGET_CELL_Y=8,
     POS_X=9, POS_Y=10, POS_Z=11, RESPAWN_TIME=12, HEALTH=13,
-    LINK_LENGTH=14, AMOUNT=15, RESPONSE_SEQ=16,
+    LINK_LENGTH=14, AMOUNT=15, RESPONSE_SEQ=16, EPISODE=17,
 )
 EVT_KIND = dict(
     ITEM_GONE=0, ITEM_HERE=1, ENEMY_HERE=2, RIVAL_HERE=3,
     CELL_LINK=4, DAMAGE=5, KILL=6, PICKUP=7, ROUND=8,
 )
-SC = dict(
-    INSTRUMENT_KIND=0,
-    TARGET_KIND=1, TARGET_ID=2, TARGET_CELL_X=3, TARGET_CELL_Y=4,
-    GAIN=5, COMMIT=6, SPAWN=7,
-)
-INSTRUMENT_KIND = dict(
-    NONE=0, PUSH_CART=1, SUPPRESS_CART=2, CONTEST_POST=3,
-    HUNT_RIVAL=4, EXPLORE_CELL=5, SPAWN_TIMING=6, IDLE=7,
-)
-TARGET_KIND = dict(NONE=0, CART=1, ITEM=2, RIVAL=3, CELL=4)
-TARGET_KIND_NAME = {value: name.lower() for name, value in TARGET_KIND.items()}
-CONTROL_FIELDS = ("GAIN", "COMMIT_RESIDUAL", "SPAWN")
-CONTROL_WIDTH = len(CONTROL_FIELDS)
 OUTCOME_NAMES = (
     "enemy_damage_dealt", "enemy_damage_taken", "enemy_kills", "deaths",
     "pickups", "cart_push", "cart_contest",
@@ -85,6 +86,8 @@ OBS_ROUTED_OUTCOME_GROUPS = tuple(
     for bank in ("A", "B")
 )
 
+BOT_CONFIGURATION_COLUMNS = ('HAVOCBOT_KEYBOARDSKILL', 'BOT_MOVESKILL', 'BOT_DODGESKILL', 'BOT_PINGSKILL', 'BOT_WEAPONSKILL', 'BOT_AGGRESSKILL', 'BOT_RANGEPREFERENCE', 'BOT_AIMSKILL', 'BOT_OFFSETSKILL', 'BOT_MOUSESKILL', 'BOT_THINKSKILL', 'BOT_AISKILL', 'BOT_GLOBAL_SKILL')
+
 OBS_AMMO_COLUMNS = (
     "AMMO_SHELLS", "AMMO_BULLETS", "AMMO_ROCKETS",
     "AMMO_CELLS", "AMMO_PLASMA", "AMMO_FUEL",
@@ -92,11 +95,7 @@ OBS_AMMO_COLUMNS = (
 OBS_WEAPON_COLUMNS = ("WEAPONS_X", "WEAPONS_Y", "WEAPONS_Z")
 OBS_CATEGORICAL_COLUMNS = (
     "ID", "TEAM", "CELL_X", "CELL_Y",
-    "APPLIED_TARGET_KIND", "APPLIED_TARGET_ID",
-    "APPLIED_TARGET_CELL_X", "APPLIED_TARGET_CELL_Y",
-    "GOAL_TARGET_KIND", "GOAL_TARGET_ID",
-    "GOAL_TARGET_CELL_X", "GOAL_TARGET_CELL_Y",
-    "RESPONSE_SEQ", "ROUTE_SEQ", "GOAL_SEQ", "TOUCH_SEQ",
+    "RESPONSE_SEQ", "APPLIED_SEQUENCE",
     "OUTCOME_A_SEQ", "OUTCOME_B_SEQ",
     "SWIZZLE_EPOCH", "SWIZZLE_TICKET", "SWIZZLE_COHORT",
     "SWIZZLE_GENERATION", "SWIZZLE_LANE", "SWIZZLE_SPOT",
@@ -104,31 +103,6 @@ OBS_CATEGORICAL_COLUMNS = (
 CART_CATEGORICAL_COLUMNS = (
     "ID", "CONTROL_TEAM", "LEAD_TEAM", "SECOND_TEAM", "HOME_TEAM",
 )
-XAN_SCALAR_COLUMNS = (
-    "HEALTH", "ARMOR", *OBS_AMMO_COLUMNS,
-    "POS_X", "POS_Y", "POS_Z", "VEL_X", "VEL_Y", "VEL_Z",
-    "STRENGTH_FINISHED", "SPAWN_TIME", "ENGINE_TIME", "ALIVE",
-)
-XAN = {name: index for index, name in enumerate(XAN_SCALAR_COLUMNS)}
-XAN_WEAPON_SLICES = {
-    name: (
-        len(XAN_SCALAR_COLUMNS) + word * WEAPON_WORD_BITS,
-        len(XAN_SCALAR_COLUMNS) + (word + 1) * WEAPON_WORD_BITS,
-    )
-    for word, name in enumerate(OBS_WEAPON_COLUMNS)
-}
-XAN_BLOCKS = (
-    ("health armor", XAN["HEALTH"], XAN["ARMOR"] + 1),
-    ("ammo resources", XAN["AMMO_SHELLS"], XAN["AMMO_FUEL"] + 1),
-    ("position", XAN["POS_X"], XAN["POS_Z"] + 1),
-    ("velocity", XAN["VEL_X"], XAN["VEL_Z"] + 1),
-    ("strength and timestamps", XAN["STRENGTH_FINISHED"], XAN["ENGINE_TIME"] + 1),
-    ("alive", XAN["ALIVE"], XAN["ALIVE"] + 1),
-    ("weapon words expanded to bits", XAN_WEAPON_SLICES["WEAPONS_X"][0],
-     XAN_WEAPON_SLICES["WEAPONS_Z"][1]),
-)
-XAN_WIDTH = XAN_WEAPON_SLICES["WEAPONS_Z"][1]
-
 def state_coordinate_kind(label):
     prefix, _, name = label.rpartition(".")
     column = name.upper()
@@ -140,8 +114,15 @@ def state_coordinate_kind(label):
         return "categorical"
     return "real"
 
-def decode_target(kind, subject, cell_x=0, cell_y=0):
-    name = TARGET_KIND_NAME.get(int(kind), "none")
-    if name == "none":
-        return None, None
-    return (name, (int(cell_x), int(cell_y))) if name == "cell" else (name, int(subject))
+def navigation_targets(realization):
+    if "targets" in realization:
+        return realization["targets"]
+    voronoi = realization.get("voronoi", {})
+    representatives = {}
+    for node, cell in enumerate(voronoi.get("owner", range(len(realization["nodes"])))):
+        if cell >= 0:
+            representatives.setdefault(int(cell), node)
+    sites = voronoi.get("site_nodes")
+    return [{"id": cell, "node": int(sites[cell] if sites is not None else node),
+             "position": list(realization["nodes"][sites[cell] if sites is not None else node][:3])}
+            for cell, node in sorted(representatives.items())]

@@ -9,11 +9,15 @@ Implementation surfaces:
 
 - `xonotic/payload/tools/navmesh.py` constructs the canonical navigation/Voronoi object
   and the feasible cart-curve representation.
-- `xonotic/payload/tools/mkentfile.py` assigns cart spans and emits only represented
-  feasible curves.
+- `xonotic/payload/tools/mkentfile.py` emits the spans and curves assigned by
+  `navmesh.py`, along with shared spawns and checkpoint/team entities. The current
+  data flow and historical review are in
+  [`CARTPATHS.md`](../../xonotic/payload/CARTPATHS.md).
 - `xonotic/payload/tools/mapfuse.py` realizes requested stock/bridge tiles and computes
   graph-derived join properties.
-- `xonotic/solver/strat/live_belief.py` consumes the canonical Voronoi object.
+- Policy inputs retain complete native event rows and addressed state pages.
+  The former `live_belief.py` spatial summary was deleted; see
+  [STATE-REDUCTION-RCA.md](../STATE-REDUCTION-RCA.md).
 
 The negative-space source index unions player-solid brushes from the BSP world model with
 the brush models whose QuakeC spawn functions realize server-side `SOLID_BSP`. Spawn,
@@ -54,7 +58,8 @@ the responder. Belief cells, receptive support, explore instruments, cart routes
 actor-to-instrument walking distances therefore derive from one stock-navigation graph
 and one Voronoi measure rather than a second observed-position lattice. Compiled
 solid-brush half-spaces separately represent
-the continuous swept-volume and floor-support domain of the cart body and rider.
+the continuous swept-volume and nearby-ground domain of the cart body. Rider
+overhead clearance is reported separately.
 When the static realization is not yet present, streamed waypoint links and literal
 participant transitions remain separately named topology sources. No nearest-neighbor
 relation is synthesized from coordinate proximity.
@@ -62,12 +67,11 @@ relation is synthesized from coordinate proximity.
 Candidate generation may sample endpoints, curves, or policy actions. Such samples search
 the represented feasible domain; they do not define feasibility. Segment membership is
 the union of exact half-space intervals for both swept-body clearance and continuous floor
-support. No candidate with incomplete interval coverage enters an emitted path population.
-Each supporting face is shrunk by the complete horizontal cart hull before its
-path-parameter interval is formed; bottom-center contact cannot admit a ledge overhang.
-On a 128-unit square floor, the full 64-unit-wide cart hull produced one complete
-support interval at the center and zero intervals when its center was shifted to leave
-a sixteen-unit ledge overhang.
+support within the restored 96-unit ground envelope. No candidate with incomplete
+cart-body or nearby-ground interval coverage enters an emitted path population.
+The earlier full-footprint, one-unit floor-contact relation remains available as a
+geometry measurement; it no longer defines cartpath eligibility. Riders stand on the
+cart, and the operator permits wider activation areas when needed for side pushing.
 Portal realization groups opposing half-spaces by their exact plane identity, reuses each
 cell cross-section only within that plane-pair group, and releases the group before the next
 plane. Its memory extent therefore follows the currently intersecting plane relation rather
@@ -242,15 +246,12 @@ computing extents or offsets, and no unused map-classification routine supplies 
 fictional topology label.
 Generated connector waypoints and stock waypoints without serialized flag rows remain in
 the same navigation graph. Missing flag incidence is reported; it is not an edge rejection.
-Cart-path components are admitted only when an exact weighted shortest-path horizon in
-the component reaches the physical minimum, rather than by node count, bounding-box
-extent, relative component size, or short-dangle deletion. Their traversal curves remain
-constrained by swept-body clearance, floor support, and cart-incompatible semantics.
-Cart-origin k-centering and the serialized Voronoi object use the ordinary stock-playerbot
-walking graph across those physically feasible origin candidates; thus player walking
-distance may pass through jumps and teleporters that a cart path itself cannot traverse.
-Track orientation maximizes the minimum start-to-start walking distance after the
-counterflow and direction-coupling measures, and emitted start points attach to that metric
-with their literal point-to-waypoint distances rather than being replaced by waypoint IDs.
-The artifact reports candidate-component, candidate-node, selected-component, metric-pool,
-and disconnected-candidate masses.
+Cart-path networks restore short-dangle pruning at forks, geodesic endpoint combinations,
+overlap-aware span routing and signed-tangent counterflow minimization. Viability follows
+the resulting network's two-sweep geodesic extent and the minimum lane length. Swept-body
+clearance, nearby-ground coverage and stock transition semantics constrain every curve.
+Origin separation and the serialized Voronoi object use the ordinary stock-playerbot
+graph, retaining jumps and teleporters for player distance. The artifact records the
+network, candidate endpoints/counts, selected paths and curves, overlap, direction search,
+origin attachment distances and any unresolved lane count. It makes no exact k-center
+optimality claim.

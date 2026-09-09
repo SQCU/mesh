@@ -1,8 +1,13 @@
-import ctypes, os, numpy as np
+import ctypes, errno, os, numpy as np
+from collections import deque
 
-_lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libmesh.dylib"))
+_lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libmesh.dylib"), use_errno=True)
 _lib.mesh_open.restype = ctypes.c_void_p
 _lib.mesh_open.argtypes = [ctypes.POINTER(ctypes.c_size_t)]*3
+_lib.mesh_try_open.restype = ctypes.c_void_p
+_lib.mesh_try_open.argtypes = _lib.mesh_open.argtypes
+_lib.mesh_close.restype = ctypes.c_int
+_lib.mesh_close.argtypes = []
 _lib.mesh_write.restype = ctypes.c_size_t
 _lib.mesh_write.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
 _lib.mesh_write_copy.restype = ctypes.c_size_t
@@ -20,21 +25,55 @@ _lib.mesh_readv.restype = ctypes.c_size_t
 _lib.mesh_readv.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                             ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_int),
                             ctypes.c_size_t]
+_receiver_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+_lib.mesh_context.restype = ctypes.c_void_p
+_lib.mesh_context.argtypes = []
+_lib.mesh_receiver.restype = None
+_lib.mesh_receiver.argtypes = [ctypes.c_void_p, _receiver_type, ctypes.c_void_p]
 
 READ_DEPTH = 1024
 
 class Mesh:
-    def __init__(self, nbytes=None):
-        ns, stride, usable = (ctypes.c_size_t() for _ in range(3))
-        p = _lib.mesh_open(ctypes.byref(ns), ctypes.byref(stride), ctypes.byref(usable))
-        if not p:
-            raise RuntimeError("no bridge")
+    def __init__(self, nbytes=None, *, wait=True):
         self.region = os.environ.get("MESH_REGION", "/mesh0")
+        self._nbytes = nbytes
+        self.usable = 0
+        self.native = None
+        self._received = deque()
+        self._layout(wait)
+
+    def receive_with(self, native, prefix):
+        self.native = native
+        def receive(capture, pointer, count, node):
+            if count >= len(prefix) and ctypes.string_at(pointer, len(prefix)) == prefix:
+                self._received.append((ctypes.string_at(pointer, count), node))
+                return 1
+            return 0
+        self._receiver = _receiver_type(receive)
+        _lib.mesh_receiver(_lib.mesh_context(), self._receiver, None)
+
+    def _layout(self, wait=False):
+        ns, stride, usable = (ctypes.c_size_t() for _ in range(3))
+        attach = _lib.mesh_open if wait else _lib.mesh_try_open
+        p = attach(ctypes.byref(ns), ctypes.byref(stride), ctypes.byref(usable))
+        if not p:
+            error = ctypes.get_errno() or errno.ENOTCONN
+            raise OSError(error, os.strerror(error))
+        changed = self.usable != usable.value
         self.base, self.stride, self.usable = p, stride.value, usable.value
-        self.slots = ns.value if nbytes is None else min(ns.value, int(nbytes) // usable.value)
-        self._read_data = np.empty((READ_DEPTH, self.usable), np.uint8)
-        self._read_sizes = np.empty(READ_DEPTH, np.uint32)
-        self._read_sources = np.empty(READ_DEPTH, np.int32)
+        self.slots = ns.value if self._nbytes is None else min(ns.value, int(self._nbytes) // usable.value)
+        if changed:
+            self._read_data = np.empty((READ_DEPTH, self.usable), np.uint8)
+            self._read_sizes = np.empty(READ_DEPTH, np.uint32)
+            self._read_sources = np.empty(READ_DEPTH, np.int32)
+
+    def close(self):
+        if self.native is not None:
+            status = self.native.close()
+            if status: return status
+            self.native = None
+            _lib.mesh_receiver(_lib.mesh_context(), _receiver_type(), None)
+        return _lib.mesh_close()
 
     def _view(self, first, n, dtype):
         return np.ctypeslib.as_array(
@@ -72,7 +111,16 @@ class Mesh:
         )
 
     def pump(self):
-        return _lib.mesh_pump()
+        pending = _lib.mesh_pump()
+        try:
+            self._layout()
+        except OSError:
+            status = self.close()
+            if status: raise
+            self._layout()
+        if self.native is not None:
+            self.native.progress()
+        return pending
 
     def queued(self):
         return _lib.mesh_queued()
@@ -80,17 +128,36 @@ class Mesh:
     def inflight(self):
         return _lib.mesh_inflight()
 
-    def read(self, dtype=np.float32):
-        while True:
+    def read(self, dtype=np.float32, max_batches=None):
+        if self.native is not None:
+            self.native.progress()
+            count = len(self._received) if max_batches is None else min(len(self._received), READ_DEPTH * max_batches)
+            for _ in range(count):
+                data, node = self._received.popleft()
+                yield np.frombuffer(data, dtype), node
+            return
+        batches = 0
+        while max_batches is None or batches < max_batches:
+            ctypes.set_errno(0)
             count = _lib.mesh_readv(
                 ctypes.c_void_p(self._read_data.ctypes.data), self.usable,
                 self._read_sizes.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
                 self._read_sources.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
                 READ_DEPTH,
             )
+            error = ctypes.get_errno()
+            resized = error == errno.EMSGSIZE
+            if error and not resized:
+                raise OSError(error, os.strerror(error))
             if not count:
+                if resized:
+                    self._layout()
+                    continue
                 return
+            batches += 1
             itemsize = np.dtype(dtype).itemsize
             for i in range(count):
                 n = int(self._read_sizes[i])
                 yield np.frombuffer(self._read_data[i], dtype, n // itemsize), int(self._read_sources[i])
+            if resized:
+                self._layout()

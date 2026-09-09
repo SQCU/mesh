@@ -27,9 +27,9 @@ def direct():
 
 try:
     if len(sys.argv) > 2 and sys.argv[1] == "--since":
-        print(json.dumps(fetch("/v1/history?since=" + str(int(sys.argv[2]))), separators=(",", ":")))
+        print(json.dumps(fetch("/v1/history?since=" + str(int(sys.argv[2])) + "&measures=scalars"), separators=(",", ":")))
     else:
-        envelope = fetch("/v1/latest")
+        envelope = fetch("/v1/latest?measures=scalars")
         record = envelope.get("record") or {}
         print(json.dumps(record.get("sample") or direct(), separators=(",", ":")))
 except Exception:

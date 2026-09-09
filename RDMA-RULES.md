@@ -31,15 +31,16 @@ The device has `max_qp: 11` and `max_mr: 100`. It does not take many leaks.
 ## Rules
 
 - **Never `SIGKILL` a process that has opened a verbs device.** It may be
-  unkillable, and the leak is permanent until the machine is power-cycled.
-- **Every verbs program installs a signal handler** that runs `ibv_destroy_qp`,
-  `ibv_dereg_mr`, `ibv_dealloc_pd`, `ibv_close_device`, then exits.
+  unkillable, and leaked kernel ownership can persist until the machine resets.
+- **Every verbs program installs a signal handler** that requests teardown by
+  its verbs owner. That owner destroys QP/CQ, deregisters MRs, deallocates PD and
+  closes the device before exit; the signal handler does not call verbs itself.
 - **Never poll a completion queue unbounded.** `while(ibv_poll_cq(...)<1);` with a
-  peer that never sends is how a process gets stuck where signals cannot reach it.
-  Always bound the wait and exit through the cleanup path.
-- **Check the port before allocating anything.** `ibv_query_port` and refuse on
-  anything but `IBV_PORT_ACTIVE`. A clear "the port is down" beats failing later at
-  `alloc_pd` and blaming your own code, which is what happened here.
+  peer that never sends prevents ordinary progress. A userspace polling loop can
+  still receive signals; an uninterruptible driver call is a different failure.
+  Bound application waits and return through the cleanup owner.
+- **Check the port before allocating anything.** Report inactive ports and keep
+  retrying the requested capability at its configured capacity.
 - **Bound every blocking call, not just the one you remembered.** The first hardened
   version of `mesh-hop` had a deadline on `ibv_poll_cq` and still hung forever, because
   `accept()`, `connect()` and the out-of-band `read()` in front of it had none. A
@@ -68,15 +69,34 @@ the other side of every abstraction you have.
 
 ```
 ps -o pid,stat,command -p <pid>     # STAT U   = wedged, unkillable
-ibv_devinfo -d <dev>                # hanging  = itself a symptom
-ibv_uc_pingpong -d <dev>            # if Apple's tool also fails, it is the device
-mesh-status                         # PORT_ACTIVE per device, check this first
+rdma/mesh-stat /mesh0             # fresh bridge phase, heartbeat and operation
+mesh-status                       # passive IP link observations
 ```
+
+Do not launch a fresh `ibv_devinfo` or pingpong process to inspect an existing
+driver stall. Those tools open the same driver and can join the deadlock. Use
+the persistent flight file and system reports described in
+[the kernel RCA](design/RDMA-KERNEL-RECOVERY.md). A userspace deadline cannot unwind
+an Apple verbs call already blocked in uninterruptible kernel sleep.
 
 ## Recovery
 
-There is no software recovery. A clean reboot may hang on the wedged processes. The
-ladder is: stop launching new verbs processes, then power-cycle the machine.
+Stop launching new verbs processes. A normal reboot can recover some incidents;
+it can also hang, as in the earlier failure above. Physical power cycling is the
+fallback when remote recovery does not return the node, not a proven requirement
+merely because a process is in `U`.
+
+On 2026-09-05 the Mini had a bridge in `Us` and 478 device probes in `U`, while SSH
+still worked. After saving the application session, the operator authorized
+`sudo -n /sbin/shutdown -r now` over SSH. SSH returned after 253 seconds with a new
+boot UUID; no uninterruptible processes remained, and both bridges paired
+automatically at their full configured region sizes. Later reports establish that
+shutdown stalled and the watchdog reset the host after 218 seconds without
+check-ins. No physical intervention or forced-reboot command was needed; the
+kernel did not shut down cleanly. See [the kernel RCA](design/RDMA-KERNEL-RECOVERY.md)
+and [the restart experiment](design/SSH-REBOOT-20260905.md)
+and its timestamped measurements. This result corrects the former absolute claim
+that software recovery was impossible.
 
 Which is precisely the physical visit this repo exists to avoid, so treat these
 rules as protecting the node's reachability, not as style.

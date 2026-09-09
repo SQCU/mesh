@@ -14,6 +14,12 @@ The reusable curve kernel is declared by
 transport semantics. The Python binding in `curve_reconcile.py` passes contiguous
 double-precision coordinate rows through that ABI.
 
+The kernel is now a standalone numerical component. Cart placement uses the recovered
+network/span and squared-second-difference implementation documented in
+[`CARTPATHS.md`](../xonotic/payload/CARTPATHS.md), while continuing to consume the compiled
+collision domain described here. The cart-plus-rider support timings below describe
+the preceding implementation, not the restored lane criterion.
+
 ## Discrete energy coordinates
 
 For current vertices (p_i\in\mathbb R^3), reference vertices (q_i), edge vectors
@@ -220,11 +226,12 @@ footprint rays and about 0.78 million plane evaluations. The complete 256-team,
 while preserving 32 realized carts, 32 continuous rider paths, and zero construction,
 spawn-occupancy, or team-cart reachability residual mass.
 
-A cart motion plan is a polyline or spline embedding with cart-and-rider swept hulls.
-Its endpoints and declared semantic nodes may be pinned while the remaining vertices
-minimize the energy coordinates. Floor activation and obstacle projection are domain
-operations. Bending or tangent-point energy cannot substitute for floor support, and a
-floor probe cannot substitute for a continuous swept-volume relation.
+The restored cart motion plan is a polyline with cart-body swept clearance and nearby
+walkable ground, using continuous half-space intervals. Its endpoints remain pinned
+while the interior minimizes squared second differences. Rider overhead clearance is
+reported separately. The preceding implementation used combined cart-and-rider floor
+support and the six-coordinate kernel; those are no longer the cartpath construction
+criterion or objective.
 
 Map-to-map connectors use the same construction with portal rims as pinned boundary
 curves. Strain retains aperture correspondence, bending removes accidental cusps, and
@@ -265,8 +272,9 @@ where path density, curvature, or strand separation changed.
 
 ## Relation to project specifications
 
-This numerical layer realizes the continuous cart-curve obligations in
-`NAV-SPEC.md`, the compiled collision domain in `FUSION-SPEC.md`, and the geometry data
-flow in `ALGORITHM-CONTRACTS.md`. It does not redefine the stock navigation graph or add
+The compiled collision portion supplies the continuous cart-curve domain in
+`NAV-SPEC.md`, the collision domain in `FUSION-SPEC.md`, and the geometry data
+flow in `ALGORITHM-CONTRACTS.md`. Cartpath selection and curve optimization live in
+`navmesh.py`, as described in `CARTPATHS.md`. This numerical layer does not redefine the stock navigation graph or add
 policy semantics. Those layers supply identities, incidence, and constraints; this layer
 transduces their coordinates.

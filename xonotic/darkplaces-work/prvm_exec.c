@@ -2,6 +2,8 @@
 
 #include "quakedef.h"
 #include "progsvm.h"
+#include "prvm_cmds.h"
+#include "prvm_view.c"
 
 const char *prvm_opnames[] =
 {
@@ -512,6 +514,10 @@ static int PRVM_EnterFunction (prvm_prog_t *prog, mfunction_t *f)
 
 	if (!f)
 		prog->error_cmd("PRVM_EnterFunction: NULL function in %s", prog->name);
+	if (prog->depth + 1 >= PRVM_MAX_STACK_DEPTH)
+		prog->error_cmd("stack overflow");
+	if (prog->localstack_used + f->locals > PRVM_LOCALSTACK_SIZE)
+		prog->error_cmd("PRVM_ExecuteProgram: locals stack overflow in %s", prog->name);
 
 	prog->stack[prog->depth].s = prog->xstatement;
 	prog->stack[prog->depth].f = prog->xfunction;
@@ -519,15 +525,18 @@ static int PRVM_EnterFunction (prvm_prog_t *prog, mfunction_t *f)
 	prog->stack[prog->depth].tprofile_acc = -f->tprofile + -f->tbprofile;
 	prog->stack[prog->depth].builtinsprofile_acc = -f->builtinsprofile;
 	prog->depth++;
-	if (prog->depth >=PRVM_MAX_STACK_DEPTH)
-		prog->error_cmd("stack overflow");
 
 	c = f->locals;
-	if (prog->localstack_used + c > PRVM_LOCALSTACK_SIZE)
-		prog->error_cmd("PRVM_ExecuteProgram: locals stack overflow in %s", prog->name);
 
 	for (i=0 ; i < c ; i++)
+	{
 		prog->localstack[prog->localstack_used+i] = prog->globals.ip[f->parm_start + i];
+		if (prog->view)
+		{
+			prog->view_localstack_types[prog->localstack_used+i] = prog->view->global_types[f->parm_start + i];
+			prog->view_localstack_readonly[prog->localstack_used+i] = prog->view->global_readonly[f->parm_start + i];
+		}
+	}
 	prog->localstack_used += c;
 
 	o = f->parm_start;
@@ -536,6 +545,11 @@ static int PRVM_EnterFunction (prvm_prog_t *prog, mfunction_t *f)
 		for (j=0 ; j<f->parm_size[i] ; j++)
 		{
 			prog->globals.ip[o] = prog->globals.ip[OFS_PARM0+i*3+j];
+			if (prog->view)
+			{
+				prog->view->global_types[o] = prog->view->global_types[OFS_PARM0+i*3+j];
+				prog->view->global_readonly[o] = prog->view->global_invariant[o] || prog->view->global_readonly[OFS_PARM0+i*3+j];
+			}
 			o++;
 		}
 	}
@@ -562,7 +576,14 @@ static int PRVM_LeaveFunction (prvm_prog_t *prog)
 		prog->error_cmd("PRVM_ExecuteProgram: locals stack underflow in %s", prog->name);
 
 	for (i=0 ; i < c ; i++)
+	{
 		prog->globals.ip[prog->xfunction->parm_start + i] = prog->localstack[prog->localstack_used+i];
+		if (prog->view)
+		{
+			prog->view->global_types[prog->xfunction->parm_start + i] = prog->view_localstack_types[prog->localstack_used+i];
+			prog->view->global_readonly[prog->xfunction->parm_start + i] = prog->view_localstack_readonly[prog->localstack_used+i];
+		}
+	}
 
 	prog->depth--;
 	f = prog->xfunction;
@@ -892,7 +913,14 @@ void PRVM_ExecuteProgram (prvm_prog_t *prog, func_t fnum, const char *errormessa
 
 chooseexecprogram:
 	cachedpr_trace = prog->trace;
-	if (prog->trace || prog->watch_global_type != ev_void || prog->watch_field_type != ev_void || prog->break_statement >= 0)
+	if (prog->view)
+	{
+		prvm_eval_t *view_a, *view_b, view_field;
+#define PRVM_VIEWINTERPRETER 1
+#include "prvm_execprogram.h"
+#undef PRVM_VIEWINTERPRETER
+	}
+	else if (prog->trace || prog->watch_global_type != ev_void || prog->watch_field_type != ev_void || prog->break_statement >= 0)
 	{
 #define PRVMSLOWINTERPRETER 1
 		if (prvm_timeprofiling.integer)

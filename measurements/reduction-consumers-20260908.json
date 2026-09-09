@@ -1,0 +1,20 @@
+{
+  "date": "2026-09-08",
+  "change": "Explicit per-participant reduction output requirements",
+  "source_sha256": {
+    "mesh-reduce.c": "991cd690d3113a481211d1bdcd6bb58af0edb87a8e81b4d4f30ff60a421e85b6",
+    "mesh-reduce.h": "3353498b8bc85aa52874c3afb38d171a500b5cfb77b1597f7425d8f1475dd721",
+    "mesh-stream.c": "40e8dccf6c535de22504604801a56cbbbb1714dfd2515d47e7fb853a483b0e04"
+  },
+  "builds": {
+    "cpu_workload": "cc -O2 -o /tmp/mesh-consumer-domain-20260908/mesh-stream rdma/mesh-stream.c rdma/mesh-client.c rdma/mesh-functions.c rdma/mesh-reduce.c",
+    "metal_workload": "cc -O2 -fobjc-arc -framework Foundation -framework Metal -o /tmp/mesh-consumer-domain-20260908/mesh-stream-metal rdma/mesh-stream-metal.m rdma/mesh-metal.m rdma/mesh-client.c rdma/mesh-functions.c rdma/mesh-reduce.c"
+  },
+  "build_exit_codes": {
+    "cpu_workload": 0,
+    "metal_workload": 0
+  },
+  "contract": "N_p = owned(p) union inputs(owned(p)) union explicit_outputs(p)",
+  "evidence_scope": "Source and algebra review, C syntax check, native CPU and Metal workload compilation/linking. No numerical run or performance claim for this metadata-only change.",
+  "remaining": "Automatic transfer edge derivation from consumers minus valid holders; whole-model consumption of indexed FFN output rows."
+}

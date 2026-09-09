@@ -1,9 +1,12 @@
 # Xonotic payload mode (`plc`)
 
-A k-team, k-cart payload gamemode. Each cart is a `MOVETYPE_PUSH` brush driven along
+A k-team, j-cart checkpoint-control gamemode. Each cart is a `MOVETYPE_PUSH` brush driven along
 its own waypoint path by contested occupancy. Up to 256 carts coexist;
 every cart is pushed forward by the team that controls it and backward by everyone
-else, and teams bank score for every control point a cart crosses while they hold it.
+else. Team score increases continuously at a rate proportional to held checkpoints.
+Teams and lanes are independently configurable; arriving at a path endpoint never
+ends the game. The literal algebra and policy contract are in
+[CART-GAME-CONTRACT.md](../../design/CART-GAME-CONTRACT.md).
 
 The authoritative game source is `../qcsrc/`. Payload mode and its registry
 entries are implemented directly there. `cfg/gamemodes-payload.cfg` is runtime
@@ -13,15 +16,14 @@ configuration.
 
 Every `PLC_TICK` (0.1 s) each cart recomputes, for each team index `j`:
 
-- `n_j` — live players of team `j` inside `cart.radius` horizontally, inside
-  `cart.height` vertically, with line of sight to the cart centre.
+- `n_j` — live players of team `j` inside `cart.radius` horizontally and
+  `cart.height` vertically.
 - `w_j = Σ_{i=1..min(n_j, push_cap)} push_falloff^(i-1)`.
   `falloff = 1` is Xonotic-native capped-linear; `0.5` is TF2 diminishing returns.
 
-**Control**: the team with the strict maximum `w_j` controls the cart. A tie for the
-maximum, or an empty radius, leaves the cart uncontrolled. This is the old occupancy
-law with the per-team goal-direction rule deleted: direction is now a property of
-control, not of goals.
+**Control**: a neutral cart is claimed by the team with the strict maximum `w_j`.
+A claimed cart retains its controller when empty or contested. Opponents must push
+it back to the origin to neutralize it before another team can claim it.
 
 **Direction**: every cart path has one origin (`s = 0`, the first `plc_path` node) and
 one end (`s = L`). The cart's sticky controller is established at the origin. With
@@ -33,21 +35,21 @@ w_c > 0:       v = clamp(cart.speed · (w_c − w_opp) / (1 + w_opp²),
 w_c = 0, w_opp > 0:
                v = clamp(−g_payload_reverse_speed · max_j(w_j),
                          −g_payload_max_speed, 0)
-empty past g_payload_idle_time:
-               v = −g_payload_rollback_speed until the preceding checkpoint
+empty:         v = 0
 ```
 
 The local contest regime keeps a defended cart near the fight. Once its controller
 leaves, the strongest opposing team walks it backward without the contest damping.
-With nobody present, the separate idle clock rolls it to the nearest preceding
-checkpoint and stops there.
+With nobody present, position, controller and captured checkpoints stay fixed.
+Held checkpoints continue accumulating score. Stopping partway through a return
+also leaves the cart at that exact position until players intervene again.
 
-The per-team `plc_goal` entities no longer carry direction or round targets. They
-survive as team declarations only: their team bits drive the team count exactly as
-before, and their `target`/`radius` keys are inert.
+Per-team `plc_team` entities declare participating teams independently of cart lanes.
+There are no delivery-goal entities.
 
-Rollback state and target arclength are emitted literally in every cart row, so a
-perturbation of idle time or rollback speed is visible in the same stream as motion.
+Idle time remains an occupancy measurement. The two former rollback wire columns
+are reserved zeros so retained telemetry and clients keep the same row layout;
+there is no rollback state or idle-motion configuration.
 
 Cart motion is direct velocity (`velocity = (pos(s') − pos(s)) / PLC_TICK`), not
 `SUB_CalcMove`, because `SUB_CalcMove` commits to a destination and a traveltime at
@@ -55,52 +57,33 @@ issue time and cannot change speed mid-segment.
 
 ## Scoring
 
-### Control-point banking (the accrual rule, exactly as implemented)
+### Held-checkpoint score integration
 
-Control points are the `plc_path` nodes. Per cart, per node, the mode keeps a bitmask
-of teams that have banked that node since the cart last touched its origin.
+Only `plc_path` nodes flagged `PLC_CHECKPOINT` are scoring checkpoints; additional
+vertices shape the path. Advancing across a checkpoint captures it for the sticky
+controller. Retreating behind it removes that control, not previously earned score.
+The origin is not a scoring checkpoint. The constructor places four checkpoints per
+lane by default, preserving the underlying path geometry.
 
-- When a cart moves forward across a node's arclength (`s_prev < node.s ≤ s_new`)
-  during a tick in which team `T` controls it, and `T`'s bit is not set on that node:
-  `T` banks the node — `TeamScore_AddToTeam(T, ST_PAYLOAD_POINTS,
-  g_payload_point_score)`, the bit is set, and the node's sprite recolours to `T`.
-- A node whose bit is already set for `T` re-banks nothing, however many times the
-  cart shuttles across it while `T` controls. A *different* team crossing it under
-  their own control banks it independently (their bit is separate).
-- Crossing a node with no controller banks nothing, and control acquired while
-  parked past a node banks nothing — banking happens only at a forward crossing.
-- When a cart regresses to `s = 0`, every node's mask on that path is cleared and the
-  sprites reset: full accrual potential is restored for whoever takes the cart next.
-- The origin node itself (`s = 0`) is never bankable.
+For team `i`, `H_i` is its total held checkpoints across all lanes. The server maintains
+`dS_i/dt = g_payload_checkpoint_rate * H_i`. It integrates the old held state before
+changing ownership and clips the last integration interval to the earliest threshold
+crossing. Checkpoint changes log `payload: checkpoint cart … node … owner …`.
 
-So a team's banked total is proportional to the number of control points the cart
-crossed from origin while under their control, per origin-to-origin excursion.
+Victory occurs at `g_payload_point_limit`, initially 1,200. At the default rate of
+one point per checkpoint per second, holding all eight checkpoints on two lanes
+requires 150 seconds of accrual. Acquisition and contention add time. There is no
+delivery condition, point subtraction, cap-count terminal condition, or timeout winner.
+A simultaneous threshold crossing is a draw. Only a new episode clears earned scores.
 
-Every banking prints to the server log
-(`payload: bank cart <id> team <team> point <idx> s <arclength>`) and to the event
-log (`:plc:bank:<cartid>:<nodeidx>:<team>`); a wipe prints
-`payload: cart <id> regressed to origin, progress cleared` and `:plc:origin:<id>`.
-These lines are the demo's evidence stream.
-
-`ST_PAYLOAD_POINTS` is a non-primary team field. An earlier revision fed a team score
-field continuously every tick and the match ended after one or two rounds even with
-`fraglimit 10` (measured both directions on a live server); discrete bankings are a
-different shape, but if early match end reappears, `g_payload_point_score` is the
-lever.
-
-### Rounds and the rest
-
-- Team: `ST_PAYLOAD_CAPS` ("caps"), primary, +1 per round won.
-- Team: `ST_PAYLOAD_POINTS` ("points"), the bankings above.
+- Team: `ST_PAYLOAD_POINTS` ("points"), primary, integer display of the score ledger.
 - Player: `SP_PAYLOAD_PUSH` — `(s' − s) · g_payload_score_rate` split over the
   controlling team's in-radius players while their cart advances.
 - Player: `SP_PAYLOAD_BLOCK` — accrued while a cart is occupied and stalled.
 
-Round end: a cart whose controller has pushed it to within `g_payload_capture_radius`
-of its path end (`s ≥ L − r`) is delivered — the controlling team wins the round. An
-uncontrolled cart parked at the end delivers the moment someone controls it. On round
-timeout the team with strictly the most bankings this round wins; otherwise
-`CENTER_ROUND_TIED`. Round start resets every cart to its origin and wipes all masks.
+The solver receives the full float ledger, held-checkpoint count, threshold, rate,
+episode identity and terminal flag as a synchronized team table. Scoreboard rounding
+does not enter the projected winner or the W/L policy rewards.
 
 ## Map entity format
 
@@ -131,17 +114,11 @@ control point, same key `path_corner` uses), `spawnflags 1` = `PLC_CHECKPOINT`.
 Chains must be disjoint between carts; a `target` pointing at the first or an
 already-visited node terminates the chain.
 
-### `plc_goal` (point, one per participating team)
-
-`cnt` = team colour index (`4` red, `13` blue, `12` yellow, `9` pink — same convention
-as `dom_team`; the mode adds 1 to get the server team id). **The set of `plc_goal`
-teams drives the team count** exactly as before; `target` and `radius` are ignored by
-the control law.
-
 ### `plc_team` (point, optional)
 
 Mirrors `dom_team`: `netname`, `cnt`. If absent, teams are spawned from
-`g_payload_default_teams` / `g_payload_teams_override` unioned with the goal teams.
+`g_payload_default_teams` / `g_payload_teams_override`. `cnt` is the team colour index,
+using the `dom_team` convention. Team declarations do not assign carts or destinations.
 
 ## Diegetic communication layer
 
@@ -158,7 +135,7 @@ route on the radar/minimap, which is exactly the "watch four theatres at once" v
 the owner wants. Colour is a single byte per link (`start_idx | end_idx<<4`,
 palette-index `Team-1` like Onslaught):
 
-- **banked segment** → the owning team's colour, so captured track visibly advances
+- **controlled checkpoint segment** → the owning team's colour, so captured track visibly advances
   from the origin as a coloured front;
 - **the segment the cart is on** → the controlling team's colour (white if
   uncontested) — the contested front is the brightest thing on the path;
@@ -182,7 +159,7 @@ ribbon reads as one continuous coloured line.
 
 ### Waypoint overlays — visibility rule
 
-All nodes still exist as sprites (banking and the mesh objective marker both hang off
+All nodes still exist as sprites (checkpoint control and the mesh objective marker both hang off
 `node.sprite`), but the **rule is set once at spawn, no per-tick churn**:
 
 - **checkpoint nodes** (`PLC_CHECKPOINT`) → unlimited range: the meaningful control
@@ -191,8 +168,8 @@ All nodes still exist as sprites (banking and the mesh objective marker both han
   fade out at range so a distant path is a clean ribbon, not a picket fence, but resolve
   into individual markers when you are actually working that stretch.
 
-On top of the fixed rule, the existing dynamic colouring stands: a banked node wears
-the banking team's colour, the mesh-chosen objective node per team gets
+On top of the fixed rule, the existing dynamic colouring stands: a held checkpoint wears
+its controller's colour, the mesh-chosen objective node per team gets
 `RADARICON_OBJECTIVE` in that team's colour, everything else stays neutral cyan. The
 "which point is contested right now" answer is carried by the ribbon's active-segment
 colour rather than by re-colouring a node every tick.
@@ -364,12 +341,17 @@ own Makefile passes `-Wl,--gc-sections`, which Apple `ld` rejects; relink with
 
 ## Running it without a payload map
 
+Map parsing, the recovered network/span algorithm, its history, data structures and
+validation are documented in [CARTPATHS.md](CARTPATHS.md). `tools/navmesh.py` owns
+navigation and lane placement; `tools/mkentfile.py` emits the checkpoint entities.
+
 `tools/mkentfile.py <bsp> <out.ent> [teams] [carts]` reads a stock BSP's entity lump
 and appends the requested number of negative-space-constrained `plc_path` tracks. It
 replaces team-labeled spawns with a shared spawn set, configures every cart through the
 same procedural pusher body, and emits one team declaration per team. The adjacent
 measurement artifact reports nondegenerate-path, stock-navigation spawn reachability,
-rider-volume continuity, their cart-advanceability conjunction, and spawn/cart
+cart-motion clearance and nearby-ground coverage, their cart-advanceability conjunction,
+separate rider-volume clearance, and spawn/cart
 clearance and origin-occupancy masses. Drop the result in
 `<userdir>/data/maps/<name>.ent` with a `<name>.mapinfo` carrying `gametype plc`.
 `+sv_autopause 0` is required or an empty dedicated server freezes `sv.time` after

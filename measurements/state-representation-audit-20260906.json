@@ -1,0 +1,53 @@
+{
+  "purpose": "Audit representation expressivity separately from transport, integration, and nonzero-gradient validation",
+  "configuration": {
+    "bots": 3,
+    "pages_per_bot": 2,
+    "page_width": 256,
+    "policy_width": 128,
+    "transport": "none; local MLX forward passes"
+  },
+  "cases": [
+    {
+      "seed": 5,
+      "fixed_address_page_value_swap_query_max_difference": 5.960464477539062e-07,
+      "fixed_address_page_value_swap_ir_max_difference": 1.430511474609375e-06,
+      "fixed_address_page_value_swap_value_max_difference": 1.341104507446289e-07,
+      "ordinary_state_change_query_max_difference": 1.4912569522857666,
+      "policy_change_mean_increment_max_difference_between_pages": 1.4901161193847656e-08,
+      "policy_change_mean_increment_max_magnitude": 0.01892324537038803,
+      "residual_change_rate_mean_max_difference": 0.0,
+      "residual_change_rate_log_scale_max_difference": 0.0,
+      "residual_change_integrated_residual_max_difference": 0.6703200340270996
+    },
+    {
+      "seed": 17,
+      "fixed_address_page_value_swap_query_max_difference": 3.5762786865234375e-07,
+      "fixed_address_page_value_swap_ir_max_difference": 8.344650268554688e-07,
+      "fixed_address_page_value_swap_value_max_difference": 3.5762786865234375e-07,
+      "ordinary_state_change_query_max_difference": 1.3106334209442139,
+      "policy_change_mean_increment_max_difference_between_pages": 1.6763806343078613e-08,
+      "policy_change_mean_increment_max_magnitude": 0.020584987476468086,
+      "residual_change_rate_mean_max_difference": 0.0,
+      "residual_change_rate_log_scale_max_difference": 0.0,
+      "residual_change_integrated_residual_max_difference": 0.6703200340270996
+    },
+    {
+      "seed": 29,
+      "fixed_address_page_value_swap_query_max_difference": 4.76837158203125e-07,
+      "fixed_address_page_value_swap_ir_max_difference": 1.430511474609375e-06,
+      "fixed_address_page_value_swap_value_max_difference": 5.960464477539062e-07,
+      "ordinary_state_change_query_max_difference": 0.9022009968757629,
+      "policy_change_mean_increment_max_difference_between_pages": 1.6763806343078613e-08,
+      "policy_change_mean_increment_max_magnitude": 0.017308218404650688,
+      "residual_change_rate_mean_max_difference": 0.0,
+      "residual_change_rate_log_scale_max_difference": 0.0,
+      "residual_change_integrated_residual_max_difference": 0.6703200340270996
+    }
+  ],
+  "source_sha256": {
+    "xonotic/solver/strat/strategy.py": "bc0fac844820ac7d49e541b2146771bd9f6b7163b5da7702be7ef5b62c22ce76",
+    "xonotic/solver/strat/state_steering.py": "bff5bfb812ce06725be19e087592d8da25a6cdba440074c8a1e3cdd472e6a9bc",
+    "xonotic/solver/strat/cast_header.py": "b3464167b9b57bf9280299c46730548be86975d4273e9d386f2a1014e2e193cd"
+  }
+}

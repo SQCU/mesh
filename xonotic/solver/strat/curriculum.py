@@ -1,8 +1,12 @@
-import argparse, copy, datetime, glob, hashlib, itertools, json, math, os, random, re, shlex, shutil, signal, subprocess, sys, time, zipfile
+import argparse, copy, datetime, glob, itertools, json, math, os, random, shlex, shutil, signal, subprocess, sys, time
 
 from solver.strat.scale_config import SCALE_EXPERTS, SCALE_HIDDEN, SCALE_RANK, SCALE_TOPK
 from solver.strat.policy_contract import MATRIX_FUSION_INTERVENTION_ARMS, OPTIMIZATION_ARMS, JOINT_TRAINING_ARMS, is_matrix_fusion_arm, checkpoint_path
 from solver.strat.capacity import cart_capacity, engine_player_capacity, team_capacity
+from solver.strat.journal import Journal
+from solver.strat.action_history import ExecutionEvaluation
+from solver.strat.map_assets import MapAssets, artifact, discover_maps, resolve_maps
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,8 +34,6 @@ PERTURBATIONS = {
     "volatile": {
         "g_payload_contest_speed": 36,
         "g_payload_reverse_speed": 24,
-        "g_payload_idle_time": 4,
-        "g_payload_rollback_speed": 35,
         "g_payload_push_falloff": 0.75,
     },
 }
@@ -40,76 +42,6 @@ RESPAWN_PERTURBATIONS = {
     "slow": (2.0, 1.0, 2.0, 3.0),
     "volatile": (1.0, 0.5, 2.0, 4.0),
 }
-
-MEGAMAP_MARKERS = ("mapfuse", "procedurally fused")
-
-def _mapinfo_is_megamap(text):
-    lowered = text.lower()
-    return any(marker in lowered for marker in MEGAMAP_MARKERS)
-
-def discover_maps(basedir):
-    maps, megamaps, joins = {}, set(), set()
-    loose = os.path.join(basedir, "data", "maps")
-    sources = []
-    if os.path.isdir(loose):
-        for name in sorted(os.listdir(loose)):
-            sources.append(("file", os.path.join(loose, name), name))
-    for archive in sorted(glob.glob(os.path.join(basedir, "data", "*.pk3")), reverse=True):
-        try:
-            with zipfile.ZipFile(archive) as bundle:
-                for member in bundle.namelist():
-                    if member.startswith("maps/") and member.count("/") == 1:
-                        sources.append(("zip", (archive, member), os.path.basename(member)))
-        except (zipfile.BadZipFile, OSError):
-            continue
-    texts = {}
-    for kind, where, name in sources:
-        stem, ext = os.path.splitext(name)
-        if ext == ".bsp":
-            maps.setdefault(stem, (kind, where))
-        elif ext == ".json" and stem.endswith(".joins"):
-            joins.add(stem[: -len(".joins")])
-        elif ext == ".mapinfo" and stem not in texts:
-            try:
-                if kind == "file":
-                    with open(where, errors="replace") as handle:
-                        texts[stem] = handle.read()
-                else:
-                    with zipfile.ZipFile(where[0]) as bundle:
-                        texts[stem] = bundle.read(where[1]).decode("utf-8", "replace")
-            except (zipfile.BadZipFile, OSError, KeyError):
-                continue
-    for stem in maps:
-        if stem in joins or _mapinfo_is_megamap(texts.get(stem, "")):
-            megamaps.add(stem)
-    names = set(maps)
-    megamaps &= names
-    return {
-        "maps": sorted(names),
-        "megamaps": sorted(megamaps),
-        "stock": sorted(names - megamaps),
-        "non_game": [],
-    }
-
-def resolve_maps(spec, basedir):
-    requested = csv(spec)
-    if not any(token in ("auto", "megamaps") for token in requested):
-        return requested
-    found = discover_maps(basedir)
-    out = []
-    for token in requested:
-        if token == "megamaps":
-            out.extend(found["megamaps"])
-        elif token == "auto":
-            out.extend(found["megamaps"])
-            out.extend(name for name in found["maps"] if name not in found["megamaps"])
-        elif token not in out:
-            out.append(token)
-    deduped = []
-    for name in out:
-        if name not in deduped:
-            deduped.append(name)
-    return deduped
 
 def utcnow():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -260,15 +192,6 @@ def study_schedule(repetitions, seed, maps, teams, players, carts, skills, pertu
                     ordinal += 1
     return out
 
-def allocate_population(schedule, total_players):
-    for row in schedule:
-        team_count = int(row["teams"])
-        total = max(team_count, int(total_players))
-        base, remainder = divmod(total, team_count)
-        row["players_per_team"] = [base + int(team < remainder) for team in range(team_count)]
-        row["controllers"] = {"bot": total}
-    return schedule
-
 def normalize(item, index, defaults):
     cfg = merge(defaults, item)
     cfg["id"] = str(cfg.get("id", f"match-{index:05d}"))
@@ -306,25 +229,6 @@ def remote_scale_arm_mass(cfg):
     arms = cfg.get("team_policy_arms") or [cfg.get("policy_arm")]
     return sum(is_matrix_fusion_arm(str(arm)) for arm in arms)
 
-def sha256(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-def artifact(path, cache=None):
-    if not os.path.exists(path):
-        return {"path": path, "exists": False}
-    stat = os.stat(path)
-    key = (os.path.realpath(path), stat.st_size, stat.st_mtime_ns)
-    if cache is not None and key in cache:
-        return dict(cache[key])
-    row = {"path": path, "exists": True, "bytes": stat.st_size, "sha256": sha256(path)}
-    if cache is not None:
-        cache[key] = dict(row)
-    return row
-
 def cvar_args(values):
     out = []
     for key in sorted(values):
@@ -339,6 +243,7 @@ def client_command(value, context, index):
     return out
 
 def telemetry_summary(path):
+    evaluation = ExecutionEvaluation()
     configurations, controllers, arms, first, last, last_config, lines = {}, {}, {}, None, None, None, 0
     if not os.path.exists(path):
         return {"lines": 0, "configurations": [], "controllers": {}}
@@ -348,6 +253,7 @@ def telemetry_summary(path):
                 row = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            evaluation.ingest(row)
             lines += 1
             arm = str(row.get("policy_arm", "unknown"))
             arms[arm] = arms.get(arm, 0) + 1
@@ -381,6 +287,7 @@ def telemetry_summary(path):
     )
     return {
         "lines": lines,
+        "execution_history": evaluation.report(),
         "first_tick": first.get("req_tick") if first else None,
         "last_tick": last.get("req_tick") if last else None,
         "responses": last.get("resp_id") if last else 0,
@@ -407,26 +314,15 @@ def runtime_log_measure(path):
         error = f"{type(exc).__name__}: {exc}"
     return {"path": path, "bytes": size, "lines": lines, "read_error": error}
 
-def entity_class_measure(path):
-    masses = {}
-    error = None
-    try:
-        with open(path, errors="replace") as stream:
-            text = stream.read()
-        for match in re.finditer(r'"classname"\s+"([^"]+)"', text):
-            name = match.group(1)
-            masses[name] = masses.get(name, 0) + 1
-    except OSError as exc:
-        error = f"{type(exc).__name__}: {exc}"
-    return masses, error
-
 class Curriculum:
     def __init__(self, args):
         self.args = args
         self.run_dir = os.path.abspath(os.path.expanduser(args.run_dir))
         self.server_prefix = command(args.server_command) or [os.path.abspath(os.path.expanduser(args.engine))]
-        self.responder_prefix = command(args.responder_command) or [args.python, "-m", "solver.strat.strat_responder"]
-        self.expert_prefix = command(args.expert_command) or [args.python, "-m", "solver.strat.matrix_worker"]
+        application = [args.python, os.path.join(os.path.dirname(ROOT), "bin", "mesh-application.py"),
+                       "launch", "--target", os.path.join(self.run_dir, "application"), "--"]
+        self.responder_prefix = command(args.responder_command) or application + ["solver.strat.strat_responder"]
+        self.expert_prefix = command(args.expert_command) or application + ["solver.strat.matrix_worker"]
         self.ssh_prefix = command(args.ssh_command) or ["ssh"]
         self.basedir = os.path.abspath(os.path.expanduser(args.basedir))
         self.entity_tool = os.path.abspath(os.path.expanduser(args.entity_tool))
@@ -442,16 +338,15 @@ class Curriculum:
         self.initial_checkpoints = {}
         self.capacity_observations = []
         self.artifact_cache = {}
-        program_files = sorted(glob.glob(os.path.join(os.path.dirname(self.entity_tool), "*.py")))
-        program_files.append(os.path.join(ROOT, "payload", "cfg", "gamemodes-payload.cfg"))
-        self.entity_program_id = hashlib.sha256(json.dumps({
-            os.path.relpath(path, ROOT): artifact(path, self.artifact_cache)
-            for path in program_files
-        }, sort_keys=True).encode()).hexdigest()
-        self.entity_realizations = {}
+        self.map_assets = MapAssets(self.basedir, self.entity_tool, args.python, self.progs,
+                                    self.csprogs, args.checkpoints_per_lane, args.dry_run, self.artifact_cache)
         self.next_ordinal = 0
         self.next_cycle = 0
         self.stopping = 0
+        self.server = None
+        self.expert = None
+        self.expert_stop = []
+        self.clients = []
         if args.checkpoint:
             self.previous_checkpoints["matrix_fusion"] = os.path.abspath(os.path.expanduser(args.checkpoint))
             self.initial_checkpoints["matrix_fusion"] = self.previous_checkpoints["matrix_fusion"]
@@ -484,17 +379,28 @@ class Curriculum:
                         rows.append(row)
         except OSError as error:
             print(json.dumps({"event":"history_read_error","path":self.index_path,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr)
+        active = os.path.join(self.run_dir, "active-match.json")
+        try:
+            with open(active) as stream:
+                pending = json.load(stream)
+            if pending["ordinal"] > max((row.get("ordinal", -1) for row in rows), default=-1):
+                rows.append(pending)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError) as error:
+            print(json.dumps({"event":"history_read_error","path":active,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr)
         self.next_ordinal = max((int(row.get("ordinal", -1)) for row in rows), default=-1) + 1
         self.next_cycle = max((int(row.get("cycle", row.get("configuration", {}).get("cycle", -1))) for row in rows), default=-1) + 1
+        recovered = {}
         for record in reversed(rows):
             cfg = record.get("configuration") or {}
             checkpoint = ((record.get("artifacts") or {}).get("checkpoint_out") or {}).get("path")
             if cfg.get("split") != "heldout" and checkpoint and os.path.isfile(checkpoint):
-                self.previous_checkpoints.setdefault(str(cfg.get("policy_arm", "matrix_fusion")), checkpoint)
+                recovered.setdefault(str(cfg.get("policy_arm", "matrix_fusion")), checkpoint)
             for arm, saved in (record.get("artifacts", {}).get("policy_checkpoints") or {}).items():
                 path = saved.get("path")
                 if cfg.get("split") != "heldout" and path and os.path.isfile(path):
-                    self.previous_checkpoints.setdefault(arm, path)
+                    recovered.setdefault(arm, path)
             profile = (record.get("execution") or {}).get("operating_profile") or {}
             point = profile.get("target_center_observation")
             if point:
@@ -504,6 +410,7 @@ class Curriculum:
                     "players": point.get("players"), "point": point,
                     "environment": profile.get("environment"),
                 })
+        self.previous_checkpoints.update(recovered)
         for record in rows:
             cfg = record.get("configuration") or {}
             initial = ((record.get("artifacts") or {}).get("checkpoint_initial") or {}).get("path")
@@ -524,30 +431,6 @@ class Curriculum:
         self.capacity_observations.append(row)
         self.event("capacity_observation", **row)
 
-    def center_capacity_observation(self):
-        return min(
-            self.capacity_observations,
-            key=lambda row: float(row["point"].get("target_squared_distance"))
-            if row["point"].get("target_squared_distance") is not None else math.inf,
-        )
-
-    def adaptive_axes(self, teams, players, carts):
-        if not self.capacity_observations:
-            return teams, players, carts
-        center = self.center_capacity_observation()
-        center_teams = int(center["teams"])
-        center_carts = int(center["carts"])
-        center_players = max(1, math.ceil(int(center.get("players") or center_teams) / center_teams))
-        teams_limit = team_capacity(max([center_teams, *teams]))
-        carts_limit = cart_capacity(max([center_carts, *carts]))
-        team_axis = list(dict.fromkeys((
-            center_teams, max(2, center_teams // 2), min(teams_limit, center_teams * 2),
-        )))
-        cart_axis = list(dict.fromkeys((
-            center_carts, max(1, center_carts // 2), min(carts_limit, center_carts * 2),
-        )))
-        return team_axis, [center_players], cart_axis
-
     def build_gamecode(self):
         record = {"command": self.build_command}
         if self.args.dry_run:
@@ -564,133 +447,6 @@ class Curriculum:
     def match_dir(self, cfg):
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in cfg["id"])
         return os.path.join(self.run_dir, f"{cfg['ordinal']:05d}-{safe}")
-
-    def archives(self):
-        return sorted(glob.glob(os.path.join(self.basedir, "data", "*.pk3")), reverse=True)
-
-    def asset_identity(self, found):
-        if found[0] == "file":
-            return {"kind": "file", "source": artifact(found[1], self.artifact_cache)}
-        stat = os.stat(found[1])
-        source = {"path": os.path.realpath(found[1]), "bytes": stat.st_size,
-                  "mtime_ns": stat.st_mtime_ns}
-        with zipfile.ZipFile(found[1]) as bundle:
-            member = bundle.getinfo(found[2])
-        return {"kind": "zip", "source": source, "member": found[2],
-                "member_bytes": member.file_size, "member_crc32": member.CRC}
-
-    def locate_asset(self, mapname, suffix):
-        loose = os.path.join(self.basedir, "data", "maps", mapname + suffix)
-        if os.path.exists(loose):
-            return ("file", loose)
-        member = "maps/" + mapname + suffix
-        for archive in self.archives():
-            try:
-                with zipfile.ZipFile(archive) as bundle:
-                    if member in bundle.namelist():
-                        return ("zip", archive, member)
-            except (zipfile.BadZipFile, OSError):
-                continue
-        return None
-
-    def extract_asset(self, found, destination):
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        if found[0] == "file":
-            shutil.copyfile(found[1], destination)
-        else:
-            with zipfile.ZipFile(found[1]) as bundle, open(destination, "wb") as target:
-                target.write(bundle.read(found[2]))
-
-    def prepare_entity(self, cfg, directory):
-        userdir = os.path.join(directory, "userdir")
-        maps_dir = os.path.join(userdir, "data", "maps")
-        os.makedirs(maps_dir, exist_ok=True)
-        data_dir = os.path.join(userdir, "data")
-        ent = os.path.join(maps_dir, cfg["map"] + ".ent")
-        measurements_path = ent + ".measurements.json"
-        mapinfo = os.path.join(maps_dir, cfg["map"] + ".mapinfo")
-        record = {"userdir": userdir, "entity": ent, "measurements_path": measurements_path, "mapinfo": mapinfo}
-        if self.args.dry_run:
-            record["dry_run"] = True
-            record["command"] = [self.args.python, self.entity_tool, "<resolved-bsp>", ent, str(cfg["teams"]), str(cfg["carts"]), "<resolved-archive>"]
-            record["gamecode"] = {"progs": self.progs, "csprogs": self.csprogs,
-                                  "effectinfo": os.path.join(os.path.dirname(self.progs), "effectinfo.txt")}
-            return record
-        try:
-            shutil.copyfile(self.progs, os.path.join(data_dir, "progs.dat"))
-            shutil.copyfile(self.csprogs, os.path.join(data_dir, "csprogs.dat"))
-            shutil.copyfile(os.path.join(os.path.dirname(self.progs), "effectinfo.txt"),
-                            os.path.join(data_dir, "effectinfo.txt"))
-            record["gamecode"] = {
-                "progs": artifact(os.path.join(data_dir, "progs.dat"), self.artifact_cache),
-                "csprogs": artifact(os.path.join(data_dir, "csprogs.dat"), self.artifact_cache),
-                "effectinfo": artifact(os.path.join(data_dir, "effectinfo.txt"), self.artifact_cache),
-            }
-            source_ent = cfg.get("entity_file")
-            if source_ent:
-                source_ent = os.path.abspath(os.path.expanduser(source_ent))
-                shutil.copyfile(source_ent, ent)
-                if os.path.exists(source_ent + ".measurements.json"):
-                    shutil.copyfile(source_ent + ".measurements.json", measurements_path)
-                record["source"] = source_ent
-                record["returncode"] = 0
-            else:
-                source_dir = os.path.join(directory, "source")
-                bsp = os.path.join(source_dir, cfg["map"] + ".bsp")
-                found = ("file", os.path.abspath(os.path.expanduser(cfg["bsp"]))) if cfg.get("bsp") else self.locate_asset(cfg["map"], ".bsp")
-                if found:
-                    realization_id = hashlib.sha256(json.dumps({
-                        "map": cfg["map"], "teams": cfg["teams"], "carts": cfg["carts"],
-                        "program": self.entity_program_id, "source": self.asset_identity(found),
-                    }, sort_keys=True).encode()).hexdigest()
-                    cached = self.entity_realizations.get(realization_id)
-                    reusable = cached and os.path.isfile(cached["entity"]) and os.path.isfile(cached["measurements"])
-                    record.update(source=found, realization_id=realization_id,
-                                  realization_reuse_mass=int(bool(reusable)))
-                    if reusable:
-                        shutil.copyfile(cached["entity"], ent)
-                        shutil.copyfile(cached["measurements"], measurements_path)
-                        record.update(returncode=0, realization_source=cached["entity"])
-                    else:
-                        self.extract_asset(found, bsp)
-                        source_bsp = found[1] if found[0] == "file" else bsp
-                        source_archive = found[1] if found[0] == "zip" else ""
-                        cmd = [self.args.python, self.entity_tool, source_bsp, ent, str(cfg["teams"]), str(cfg["carts"]), source_archive]
-                        record["started"] = utcnow()
-                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                        record.update(command=cmd, output=result.stdout, returncode=result.returncode, ended=utcnow())
-                        if result.returncode == 0 and os.path.isfile(ent) and os.path.isfile(measurements_path):
-                            self.entity_realizations[realization_id] = {
-                                "entity": ent, "measurements": measurements_path,
-                            }
-                else:
-                    record.update(returncode=None, error="map BSP was not found")
-            source_mapinfo = cfg.get("mapinfo_file")
-            found_mapinfo = ("file", os.path.abspath(os.path.expanduser(source_mapinfo))) if source_mapinfo else self.locate_asset(cfg["map"], ".mapinfo")
-            text = ""
-            if found_mapinfo:
-                temp = os.path.join(directory, "source", cfg["map"] + ".mapinfo")
-                self.extract_asset(found_mapinfo, temp)
-                with open(temp) as handle:
-                    text = handle.read()
-            if "gametype plc" not in text:
-                text = text.rstrip() + "\ngametype plc\n"
-            with open(mapinfo, "w") as handle:
-                handle.write(text)
-            if os.path.exists(measurements_path):
-                with open(measurements_path) as handle:
-                    record["measurements"] = json.load(handle)
-            else:
-                record["measurements"] = None
-        except Exception as exc:
-            record.update(returncode=None, error=f"{type(exc).__name__}: {exc}")
-        record.update(
-            entity_exists=int(os.path.exists(ent)),
-            measurements_exist=int(os.path.exists(measurements_path)),
-            mapinfo_exists=int(os.path.exists(mapinfo)),
-        )
-        record["entity_class_mass"], record["entity_class_measure_error"] = entity_class_measure(ent)
-        return record
 
     def perturbation(self, cfg, entity):
         value = cfg.get("perturbation", "baseline")
@@ -727,10 +483,10 @@ class Curriculum:
         return name, values
 
     def commands(self, cfg, directory, entity):
-        port = int(cfg.get("port", self.args.port_base + int(cfg.get("ordinal", 0))))
+        port = int(cfg.get("port", self.args.port_base))
         players = max(sum(cfg["players_per_team"]), sum(cfg["controllers"].values()))
         maxplayers = int(cfg.get("maxplayers") or engine_player_capacity(players))
-        initial_bots = cfg["teams"] if cfg.get("operating_profile") else cfg["controllers"]["bot"]
+        initial_bots = cfg["controllers"]["bot"]
         server_region = str(cfg.get("server_mesh_region", self.args.server_mesh_region))
         responder_region = str(cfg.get("responder_mesh_region", self.args.responder_mesh_region))
         perturbation, cvars = self.perturbation(cfg, entity)
@@ -756,9 +512,10 @@ class Curriculum:
             f"MESH_EXPERT_SOCKET={self.args.expert_socket}",
         ] + self.server_prefix
         basedir = self.basedir
-        userdir = entity["userdir"]
+        userdir = os.path.join(self.run_dir, "userdir")
+        stage.append(["rsync", "-a", entity["userdir"] + "/", userdir + "/"])
         if self.server_host:
-            remote_directory = os.path.join(self.remote_run_root, os.path.basename(self.run_dir), os.path.basename(directory))
+            remote_directory = os.path.join(self.remote_run_root, os.path.basename(self.run_dir))
             userdir = os.path.join(remote_directory, "userdir")
             basedir = self.remote_basedir
             server_prefix = self.ssh_prefix + [
@@ -775,18 +532,22 @@ class Curriculum:
                 ["rsync", "-aL", "-e", shlex.join(self.ssh_prefix), os.path.join(self.basedir, "data") + "/", f"{self.server_host}:{remote_data}/"],
                 ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), entity["userdir"], f"{self.server_host}:{remote_directory}/"],
             ]
+        server_values = {
+            "developer": 0, "sv_public": 0, "port": port,
+            "sv_random_seed": cfg["seed"], "sv_autopause": 0,
+            "timelimit": 0, "maxplayers": maxplayers, "bot_join_empty": 1,
+            "bot_number": initial_bots, "skill": cfg["skill"], "g_warmup": 0,
+            "g_maplist": cfg["map"], "g_maplist_shuffle": 0, "g_maplist_selectrandom": 0,
+            **PAYLOAD_DEFAULTS, **cvars, "g_payload": 1,
+            "g_payload_point_limit": cfg.get("score_limit", self.args.score_limit),
+            "g_payload_checkpoint_rate": cfg.get("checkpoint_score_rate", self.args.checkpoint_score_rate),
+        }
         server = server_prefix + [
             "-norunaway", "-xonotic", "-basedir", basedir, "-userdir", userdir,
-            "+developer", "0", "+sv_public", "0", "+port", str(port),
-            "+sv_random_seed", str(cfg["seed"]),
-            "+sv_autopause", "0", "+g_payload", "1",
-            "+g_payload_round_timelimit", str(cfg["duration"]),
-            "+timelimit", str(max(1, math.ceil((cfg["duration"] + self.args.round_grace) / 60))),
-            "+maxplayers", str(maxplayers), "+bot_join_empty", "1",
-            "+bot_number", str(initial_bots), "+skill", str(cfg["skill"]),
-            "+g_warmup", "0", "+g_maplist", cfg["map"],
-            "+g_maplist_shuffle", "0", "+g_maplist_selectrandom", "0",
-        ] + cvar_args(cvars) + command(cfg.get("server_args")) + ["+map", cfg["map"]]
+            "+exec", "gamemodes-payload.cfg",
+        ] + cvar_args(server_values) + command(cfg.get("server_args")) + ["+map", cfg["map"]]
+        map_transition = "".join(f"{name} {json.dumps(str(value))}\n" for name, value in server_values.items()
+                             if name not in ("port", "maxplayers")) + f"changelevel {cfg['map']}\n"
         telemetry = os.path.join(directory, "telemetry.jsonl")
         checkpoint_out = os.path.join(directory, "checkpoint.npz")
         checkpoint_initial = os.path.join(directory, "checkpoint.initial.npz")
@@ -806,9 +567,8 @@ class Curriculum:
             "--seed", str(cfg["seed"]),
             "--environment", str(cfg.get("environment", cfg["id"])),
             "--navigation-realization", entity["measurements_path"],
-            "--match-metadata", json.dumps({"match_id": cfg["id"], "configuration": {key: cfg.get(key) for key in ("map", "teams", "carts", "perturbation")}, "seed": cfg["seed"], "team_policy_arms": cfg["team_policy_arms"]}),
+            "--match-metadata", json.dumps({"match_id": cfg["id"], "configuration": {key: cfg.get(key) for key in ("map", "teams", "carts", "players_per_team", "checkpoints_per_lane", "score_limit", "checkpoint_score_rate", "perturbation")}, "seed": cfg["seed"], "team_policy_arms": cfg["team_policy_arms"]}),
             "--replay-batch", str(self.args.replay_batch),
-            "--replay-steps", str(self.args.replay_steps),
             "--replay-weight", str(self.args.replay_weight),
         ]
         training_arms = cfg.get("train_arms", [])
@@ -870,49 +630,44 @@ class Curriculum:
                 if cfg["split"] != "heldout":
                     responder += ["--resume-checkpoint", checkpoint_in]
         if distributed_scale and remote_scale_arm_mass(cfg):
-            responder += ["--distributed-scale"]
-            expert_prefix = ["env", f"MESH_REGION={server_region}"] + self.expert_prefix
-            expert_pid = os.path.join(self.run_dir, "expert.pid")
-            if self.server_host:
-                remote_runtime = os.path.join(self.remote_run_root, "runtime")
-                remote_xonotic = os.path.join(remote_runtime, "xonotic")
-                stage.extend([
-                    self.ssh_prefix + [self.server_host, "--", "mkdir", "-p", remote_xonotic, os.path.join(remote_xonotic, "payload"), os.path.join(remote_runtime, "rdma")],
-                    ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), "--exclude", "__pycache__", "--exclude", "strat/runs", os.path.join(ROOT, "solver"), f"{self.server_host}:{remote_xonotic}/"],
-                    ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), "--exclude", "__pycache__", os.path.join(ROOT, "payload", "tools"), f"{self.server_host}:{os.path.join(remote_xonotic, 'payload')}/"],
-                    ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), "--exclude", "__pycache__", os.path.abspath(os.path.join(ROOT, "..", "rdma")) + "/", f"{self.server_host}:{os.path.join(remote_runtime, 'rdma')}/"],
-                ])
-                expert_prefix = [
-                    "env",
-                    f"MESH_REGION={server_region}",
-                    f"PYTHONPATH={remote_xonotic}:{os.path.join(remote_xonotic, 'payload', 'tools')}",
-                    self.args.remote_python, "-m", "solver.strat.matrix_worker",
-                ]
-                expert_pid = os.path.join(self.remote_run_root, "runtime", "expert.pid")
-            expert = expert_prefix + [
-                "--socket", self.args.expert_socket,
-                "--environment", str(cfg.get("environment", cfg["id"])),
+            responder += ["--distributed-scale", "--distributed-scale-operation", self.args.distributed_scale_operation]
+        expert_prefix = ["env", f"MESH_REGION={server_region}"] + self.expert_prefix
+        expert_pid = os.path.join(self.run_dir, "expert.pid")
+        if self.server_host:
+            remote_application = os.path.join(self.remote_run_root, "application")
+            stage.append([
+                self.args.python, os.path.join(os.path.dirname(ROOT), "bin", "mesh-application.py"),
+                "deploy", "--host", self.server_host, "--python", self.args.remote_python,
+                "--ssh-command", shlex.join(self.ssh_prefix),
+                "--target", remote_application,
+            ])
+            expert_prefix = [
+                "env", f"MESH_REGION={server_region}", self.args.remote_python,
+                os.path.join(remote_application, "current", "bin", "mesh-application.py"),
+                "run", "--target", remote_application, "--", "solver.strat.matrix_worker",
             ]
-            if expert_pid:
-                transition = f"p={shlex.quote(expert_pid)}; if [ -f \"$p\" ]; then n=$(sed -n '1p' \"$p\"); case $(ps -p \"$n\" -o command= 2>/dev/null) in *solver.strat.expert_worker*|*solver.strat.matrix_worker*) kill -TERM \"$n\"; i=0; while kill -0 \"$n\" 2>/dev/null && [ \"$i\" -lt 30 ]; do sleep 1; i=$((i + 1)); done; if kill -0 \"$n\" 2>/dev/null; then exit 1; fi;; esac; fi"
-                wrapped = f"echo $$ > {shlex.quote(expert_pid)}; exec {shlex.join(expert)}"
-                if self.server_host:
-                    expert = self.ssh_prefix + [self.server_host, "--", "sh", "-c", shlex.quote(wrapped)]
-                    expert_stop = self.ssh_prefix + [self.server_host, "--", "sh", "-c", shlex.quote(transition)]
-                else:
-                    expert = ["sh", "-c", wrapped]
-                    expert_stop = ["sh", "-c", transition]
-                stage.insert(0, expert_stop)
+            expert_pid = os.path.join(remote_directory, "expert.pid")
+        expert = expert_prefix + [
+            "--socket", self.args.expert_socket,
+            "--environment", str(cfg.get("environment", cfg["id"])),
+        ]
+        if expert_pid:
+            transition = f"p={shlex.quote(expert_pid)}; if [ -f \"$p\" ]; then n=$(sed -n '1p' \"$p\"); case $(ps -p \"$n\" -o command= 2>/dev/null) in *solver.strat.expert_worker*|*solver.strat.matrix_worker*) kill -TERM \"$n\"; i=0; while kill -0 \"$n\" 2>/dev/null && [ \"$i\" -lt 30 ]; do sleep 1; i=$((i + 1)); done; if kill -0 \"$n\" 2>/dev/null; then exit 1; fi;; esac; fi"
+            wrapped = f"echo $$ > {shlex.quote(expert_pid)}; exec {shlex.join(expert)}"
+            if self.server_host:
+                expert = self.ssh_prefix + [self.server_host, "--", "sh", "-c", shlex.quote(wrapped)]
+                expert_stop = self.ssh_prefix + [self.server_host, "--", "sh", "-c", shlex.quote(transition)]
             else:
-                expert_stop = []
+                expert = ["sh", "-c", wrapped]
+                expert_stop = ["sh", "-c", transition]
         else:
-            expert = []
             expert_stop = []
         responder += command(cfg.get("responder_args"))
         context = {"port": port, "map": cfg["map"], "seed": cfg["seed"], "match": cfg["id"], "directory": directory}
         clients = [client_command(item, context, index) for index, item in enumerate(cfg.get("client_commands", []))]
         return {
             "server": server,
+            "transition": map_transition,
             "stage": stage,
             "responder": responder,
             "expert": expert,
@@ -932,7 +687,7 @@ class Curriculum:
         }
 
     def launch(self, name, cmd, log_path, cwd):
-        handle = open(log_path, "w")
+        handle = open(log_path, "a")
         try:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=handle, stderr=subprocess.STDOUT, text=True)
             return {"name": name, "command": cmd, "process": proc, "log": log_path, "handle": handle, "launched": True, "started": utcnow()}
@@ -950,6 +705,38 @@ class Curriculum:
                 launched["quit_sent"] = True
             except Exception as exc:
                 launched["quit_error"] = f"{type(exc).__name__}: {exc}"
+
+    def reconcile_clients(self, commands):
+        now = time.monotonic()
+        for index, cmd in enumerate(commands):
+            previous = self.clients[index] if index < len(self.clients) else {}
+            proc = previous.get("process")
+            if proc is not None and proc.poll() is None:
+                old = previous["command"]
+                target = cmd[cmd.index("+connect") + 1] if "+connect" in cmd else None
+                old_target = old[old.index("+connect") + 1] if "+connect" in old else None
+                if target and target != old_target:
+                    try:
+                        proc.stdin.write("connect " + json.dumps(target) + "\n")
+                        proc.stdin.flush()
+                        previous["command"] = cmd
+                        self.event("client_connect", client=index, pid=proc.pid, target=target)
+                    except (OSError, ValueError) as exc:
+                        self.event("client_connect_pending", client=index, error=str(exc))
+                continue
+            if now < previous.get("next_start", 0):
+                continue
+            if previous:
+                self.finish(previous, now)
+            current = self.launch(f"client-{index}", cmd, os.path.join(self.run_dir, f"client-{index}.log"), ROOT)
+            current["next_start"] = now + 3
+            if index < len(self.clients):
+                self.clients[index] = current
+            else:
+                self.clients.append(current)
+            self.event("client_start", client=index, launched=current["launched"],
+                       pid=current["process"].pid if current["process"] is not None else None,
+                       reason="process replacement" if previous else "session start")
 
     def terminate(self, launched):
         proc = launched.get("process")
@@ -1001,8 +788,20 @@ class Curriculum:
             except Exception as exc:
                 stage.append({"command": cmd, "returncode": None, "error": f"{type(exc).__name__}: {exc}",
                               "started": started, "ended": utcnow()})
-        expert = self.launch("expert", commands["expert"], os.path.join(directory, "expert.log"), self.args.expert_cwd or ROOT) if commands["expert"] else {"name": "expert", "command": [], "launched": False}
-        server = self.launch("server", commands["server"], os.path.join(directory, "server.log"), self.args.server_cwd or ROOT)
+        if self.expert is None or self.expert.get('process') is None or self.expert['process'].poll() is not None:
+            self.expert = self.launch('expert', commands['expert'], os.path.join(self.run_dir, 'expert.log'), self.args.expert_cwd or ROOT)
+            self.expert_stop = commands['expert_stop']
+        expert = self.expert
+        server_log = os.path.join(self.run_dir, "server.log")
+        server_log_start = os.path.getsize(server_log) if os.path.isfile(server_log) else 0
+        outcome_journal = Journal()
+        if self.server is None or self.server["process"] is None or self.server["process"].poll() is not None:
+            self.server = self.launch("server", commands["server"], server_log, self.args.server_cwd or ROOT)
+        else:
+            self.server["process"].stdin.write(commands["transition"])
+            self.server["process"].stdin.flush()
+        server = self.server
+        outcome_journal.seek(Path(server_log), server_log_start)
         if self.args.startup_secs > 0:
             time.sleep(self.args.startup_secs)
         responder = self.launch("responder", commands["responder"], os.path.join(directory, "responder.log"), self.args.responder_cwd or ROOT)
@@ -1010,12 +809,13 @@ class Curriculum:
                    reason="match start", launched=responder.get("launched"),
                    log=responder.get("log"), checkpoint_in=commands["checkpoint_in"],
                    checkpoint_out=commands["checkpoint_out"])
-        clients = [self.launch(f"client-{i}", cmd, os.path.join(directory, f"client-{i}.log"), ROOT) for i, cmd in enumerate(commands["clients"])]
+        self.reconcile_clients(commands["clients"])
+        clients = self.clients
         profile = None
         if cfg.get("operating_profile"):
             from solver.strat.roofline import LiveOperatingProfile
             profile = LiveOperatingProfile(
-                cfg["operating_profile"], cfg["teams"], cfg["carts"],
+                {**cfg["operating_profile"], "fixed_population": True}, cfg["teams"], cfg["carts"],
                 commands["maxplayers"],
                 commands["initial_bots"],
                 cfg.get("environment", cfg["id"]),
@@ -1026,10 +826,26 @@ class Curriculum:
         retired = []
         expert_restarts = []
         expert_retired = []
-        deadline = time.monotonic() + cfg["duration"] + self.args.round_grace
         outcome_path = os.path.join(directory, "outcome.json")
-        while not self.stopping and (time.monotonic() < deadline or (cfg.get("train_arms") and not os.path.isfile(outcome_path))):
+        server_outcome_at = None
+        while not self.stopping:
             time.sleep(0.5)
+            for event in outcome_journal.read(Path(server_log), "MESH_OUTCOME "):
+                record = {"directory": os.path.basename(directory), "event": event,
+                          "team_policy_arms": cfg.get("team_policy_arms", []), "observed_at": utcnow(),
+                          "source": "engine_console_independent_of_optimizer"}
+                with open(os.path.join(self.run_dir, "server-outcomes.jsonl"), "a") as handle:
+                    handle.write(json.dumps(record) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                self.event("server_outcome", directory=record["directory"], server_event=event)
+                server_outcome_at = server_outcome_at or time.monotonic()
+            if os.path.isfile(outcome_path):
+                break
+            if server_outcome_at and time.monotonic() - server_outcome_at > self.args.quit_grace:
+                self.event("learner_outcome_missing", match=cfg["id"], grace_s=self.args.quit_grace,
+                           reason="engine outcome retained; learner did not acknowledge it")
+                break
             if profile is not None:
                 profile.poll(server)
             if self.stopping:
@@ -1038,31 +854,23 @@ class Curriculum:
             if server_proc is None or server_proc.poll() is not None:
                 self.event("server_exit", match=cfg["id"], returncode=None if server_proc is None else server_proc.poll())
                 break
+            self.reconcile_clients(commands["clients"])
             expert_proc = expert.get("process")
             if commands["expert"] and (expert_proc is None or expert_proc.poll() is not None):
                 reason = f"expert exited with returncode {None if expert_proc is None else expert_proc.poll()}"
                 self.event("expert_restart", match=cfg["id"], ordinal=cfg["ordinal"],
                            reason=reason, log=expert.get("log"))
                 expert_retired.append(self.finish(expert, time.monotonic()))
-                transition = None
-                if commands["expert_stop"]:
-                    started = utcnow()
-                    try:
-                        result = subprocess.run(commands["expert_stop"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                        transition = {"command": commands["expert_stop"], "returncode": result.returncode,
-                                      "output": result.stdout, "started": started, "ended": utcnow()}
-                    except Exception as exc:
-                        transition = {"command": commands["expert_stop"], "returncode": None,
-                                      "error": f"{type(exc).__name__}: {exc}", "started": started, "ended": utcnow()}
                 index = len(expert_restarts)
                 expert = self.launch(
                     "expert", commands["expert"],
                     os.path.join(directory, f"expert.restart{index}.log"),
                     self.args.expert_cwd or ROOT,
                 )
+                self.expert = expert
                 expert_restarts.append({"reason": reason, "at": utcnow(),
                                         "launched": expert.get("launched"),
-                                        "log": expert.get("log"), "transition": transition})
+                                        "log": expert.get("log")})
             proc = responder.get("process")
             if proc is None or proc.poll() is None:
                 continue
@@ -1080,45 +888,33 @@ class Curriculum:
                              "launched": responder.get("launched"),
                              "log": responder.get("log")})
         self.event("learner_stop", match=cfg["id"], ordinal=cfg["ordinal"],
-                   reason="supervisor stopping" if self.stopping else "match duration reached",
+                   reason=("supervisor stopping" if self.stopping else "learner acknowledged score outcome" if os.path.isfile(outcome_path)
+                           else "engine outcome without learner acknowledgement" if server_outcome_at else "server exited"),
                    signal="SIGTERM",
                    checkpoint_out=commands["checkpoint_out"])
         self.terminate(responder)
         responder_result = self.finish(
             responder, time.monotonic() + self.args.quit_grace,
         )
-        expert_stop = None
-        if commands["expert_stop"]:
-            started = utcnow()
-            try:
-                result = subprocess.run(commands["expert_stop"], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                expert_stop = {"command": commands["expert_stop"], "returncode": result.returncode,
-                               "output": result.stdout, "started": started, "ended": utcnow()}
-            except Exception as exc:
-                expert_stop = {"command": commands["expert_stop"], "returncode": None,
-                               "error": f"{type(exc).__name__}: {exc}", "started": started, "ended": utcnow()}
-        self.terminate(expert)
-        expert_result = self.finish(
-            expert, time.monotonic() + self.args.quit_grace,
-        )
-        for client in clients:
-            self.stop(client)
-        self.stop(server)
-        server_result = self.finish(
-            server, time.monotonic() + self.args.quit_grace,
-        )
-        grace = time.monotonic() + self.args.quit_grace
+        with open(server_log, "rb") as source, open(os.path.join(directory, "server.log"), "wb") as target:
+            source.seek(server_log_start)
+            shutil.copyfileobj(source, target)
+        def session_record(item):
+            proc = item.get("process")
+            return {**{key: value for key, value in item.items() if key not in ("process", "handle")},
+                    "pid": None if proc is None else proc.pid,
+                    "returncode": None if proc is None else proc.poll(), "persistent": True}
         results = {
             "stage": stage,
-            "server": server_result,
+            "server": session_record(server),
             "responder": responder_result,
-            "expert": expert_result,
+            "expert": session_record(expert),
             "responder_restarts": restarts,
             "responder_retired": retired,
             "expert_restarts": expert_restarts,
             "expert_retired": expert_retired,
-            "expert_stop": expert_stop,
-            "clients": [self.finish(client, grace) for client in clients],
+            "expert_stop": None,
+            "clients": [session_record(client) for client in clients],
         }
         if profile is not None:
             results["operating_profile"] = profile.finish()
@@ -1134,8 +930,14 @@ class Curriculum:
         directory = self.match_dir(cfg)
         os.makedirs(directory, exist_ok=True)
         started = utcnow()
-        entity = self.prepare_entity(cfg, directory)
+        entity = self.map_assets.prepare(cfg, directory)
         commands = self.commands(cfg, directory, entity)
+        active = os.path.join(self.run_dir, "active-match.json")
+        with open(active + ".tmp", "w") as handle:
+            json.dump({"ordinal": cfg["ordinal"], "configuration": cfg,
+                       "artifacts": {"checkpoint_out": {"path": commands["checkpoint_out"]},
+                                     "policy_checkpoints": {arm: {"path": path} for arm, path in commands["policy_checkpoints"].items()}}}, handle)
+        os.replace(active + ".tmp", active)
         execution = self.execute(cfg, commands, directory)
         self.observe_capacity(cfg, execution)
         realized = telemetry_summary(commands["telemetry"])
@@ -1213,7 +1015,7 @@ class Curriculum:
             "started": started, "ended": utcnow(),
             "configuration": cfg, "build": self.build, "entity": entity,
             "runtime": self.runtime,
-            "commands": {key: commands[key] for key in ("stage", "server", "responder", "expert", "expert_stop", "clients")},
+            "commands": {key: commands[key] for key in ("stage", "server", "transition", "responder", "expert", "expert_stop", "clients")},
             "execution": execution,
             "realized": realized, "runtime_logs": runtime_logs,
             "realization_measures": realization_measures,
@@ -1317,6 +1119,21 @@ class Curriculum:
                     self.event("study_measurement_error", cycle=cycle,
                                error=f"{type(exc).__name__}: {exc}")
             cycle += 1
+        for process in self.clients + ([self.server] if self.server else []):
+            self.stop(process)
+            self.finish(process, time.monotonic() + self.args.quit_grace)
+        server_proc = None if self.server is None else self.server.get('process')
+        if self.expert is not None and (server_proc is None or server_proc.poll() is not None):
+            if self.expert_stop:
+                try:
+                    result = subprocess.run(self.expert_stop, cwd=ROOT, capture_output=True, text=True, timeout=35)
+                    self.event('runtime_stop', returncode=result.returncode, output=result.stdout + result.stderr)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    self.event('runtime_stop_pending', error=str(error))
+            self.terminate(self.expert)
+            self.finish(self.expert, time.monotonic() + self.args.quit_grace)
+        elif self.expert is not None:
+            self.event('runtime_retained', reason='game server is still running', log=self.expert.get('log'))
         self.event("supervisor_stop", signal=self.stopping, cycles=cycle, next_ordinal=ordinal)
 
     def plan(self, schedule):
@@ -1340,6 +1157,9 @@ def parser():
     ap.add_argument("--team-counts", default="4,8,16")
     ap.add_argument("--players-per-team", default="8,16,32")
     ap.add_argument("--cart-counts", default="2,4,8")
+    ap.add_argument("--checkpoints-per-lane", type=int, default=4)
+    ap.add_argument("--score-limit", type=float, default=1200)
+    ap.add_argument("--checkpoint-score-rate", type=float, default=1)
     ap.add_argument("--skills", default="2,5,8")
     ap.add_argument("--perturbations", default="baseline,fast,slow,volatile")
     ap.add_argument("--off-policy-counts", default="0,1,2")
@@ -1347,13 +1167,12 @@ def parser():
     ap.add_argument("--study-repetitions", type=int, default=0)
     ap.add_argument("--joint-training", action="store_true")
     ap.add_argument("--replay-batch", type=int, default=8)
-    ap.add_argument("--replay-steps", type=int, default=4)
     ap.add_argument("--replay-weight", type=float, default=0.5)
     ap.add_argument("--cycles", type=int, default=0)
     ap.add_argument("--human-counts", default="0")
     ap.add_argument("--human-client-command")
     ap.add_argument("--heldout-fraction", type=float, default=0.2)
-    ap.add_argument("--duration", type=float, default=600)
+    ap.add_argument("--duration", type=float, default=600, help="Legacy manifest metadata; matches end only on an observed score outcome")
     ap.add_argument("--observer", default="http://127.0.0.1:8787/latest.json")
     ap.add_argument("--memory-target-fraction", type=float, default=0.5)
     ap.add_argument("--bandwidth-node")
@@ -1395,6 +1214,7 @@ def parser():
     ap.add_argument("--peer-node", type=int)
     ap.add_argument("--strategy-node", type=int)
     ap.add_argument("--distributed-scale", action="store_true")
+    ap.add_argument("--distributed-scale-operation", choices=("block", "gram"), default="gram")
     ap.add_argument("--port-base", type=int, default=26100)
     ap.add_argument("--startup-secs", type=float, default=2)
     ap.add_argument("--quit-grace", type=float, default=10)
@@ -1421,6 +1241,9 @@ def main(argv=None):
             for row in rows:
                 row.setdefault("entity_file", source)
         for row in rows:
+            row.setdefault("checkpoints_per_lane", args.checkpoints_per_lane)
+            row.setdefault("score_limit", args.score_limit)
+            row.setdefault("checkpoint_score_rate", args.checkpoint_score_rate)
             required_roles = (
                 ["matrix", "responder"]
                 if args.distributed_scale and row.get("distributed_scale", True)
@@ -1436,7 +1259,7 @@ def main(argv=None):
     def make_schedule(cycle):
         if args.manifest:
             return schedule_defaults(load_manifest(args.manifest))
-        teams, players, carts = supervisor.adaptive_axes(
+        teams, players, carts = (
             csv(args.team_counts, int), csv(args.players_per_team, int),
             csv(args.cart_counts, int),
         )
@@ -1457,24 +1280,6 @@ def main(argv=None):
         if args.study_repetitions > 0:
             policy_arms = csv(args.policy_arms)
             perturbations = csv(args.perturbations)
-            if not supervisor.capacity_observations:
-                team_count = teams[cycle % len(teams)]
-                cart_count = carts[(cycle // len(teams)) % len(carts)]
-                players_per_team = players[(cycle // max(1, len(teams) * len(carts))) % len(players)]
-                return schedule_defaults([{
-                    "id": f"capacity-calibration-{cycle:05d}",
-                    "map": (maps or ["runningmanctf"])[cycle % len(maps or ["runningmanctf"])],
-                    "teams": team_count,
-                    "players_per_team": players_per_team,
-                    "controllers": {"bot": team_count * players_per_team},
-                    "carts": cart_count,
-                    "skill": max(csv(args.skills, float)),
-                    "perturbation": "baseline",
-                    "off_policy_players": 0,
-                    "split": "heldout",
-                    "seed": args.seed + cycle,
-                    "policy_arm": "matrix_fusion",
-                }])
             training = generated_schedule(
                 args.generate or 1, args.seed + cycle, maps,
                 teams, players, carts, csv(args.skills, float),
@@ -1483,15 +1288,12 @@ def main(argv=None):
                 0.0, csv(args.human_counts, int), args.human_client_command,
                 include_comparisons=False,
             )
-            measured_players = int(supervisor.center_capacity_observation()["point"].get("players") or 0)
-            allocate_population(training, measured_players)
             studies = study_schedule(
                 args.study_repetitions, args.seed + cycle, maps,
                 teams, players, carts, csv(args.skills, float),
                 perturbations, policy_arms, {},
                 map_offset=cycle * args.study_repetitions * len(perturbations),
             )
-            allocate_population(studies, measured_players)
             return schedule_defaults(training + studies)
 
         return schedule_defaults(generated_schedule(

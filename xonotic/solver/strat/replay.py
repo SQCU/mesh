@@ -14,6 +14,10 @@ class Frame:
     chorus: Any
     nbytes: int
 
+    @classmethod
+    def capture(cls, identity, chorus):
+        return cls(identity, chorus, sum(int(np.asarray(value).nbytes) for value in chorus))
+
 class Replay:
     def __init__(self, capacity: int = 0, max_bytes: int = 1 << 30):
         self.capacity = max(0, int(capacity))
@@ -21,18 +25,8 @@ class Replay:
         self._items: list[dict] = []
         self._bytes = 0
         self._serial = 0
-        self._frame_serial = 0
         self.rng = np.random.default_rng(0)
         self.evictions = 0
-
-    def intern(self, chorus) -> Frame:
-        n = sum(int(np.asarray(a).nbytes) for a in chorus)
-        frame = Frame(self._frame_serial, chorus, n)
-        self._frame_serial += 1
-        return frame
-
-    def frame(self, frame: Frame):
-        return frame.chorus
 
     def push(self, item: dict):
         stored = dict(item, _serial=self._serial)
@@ -54,7 +48,7 @@ class Replay:
         for item in self._items:
             for name in ("frame_in", "frame_out"):
                 frame = item[name]
-                frames[frame.id] = frame
+                frames[frame] = frame
         return frames
 
     def _recount(self):
@@ -117,11 +111,10 @@ class Replay:
 
     def export_payload(self, prefix="__replay__"):
         frames = sorted(self._frames().values(), key=lambda frame: frame.id)
-        frame_index = {frame.id: index for index, frame in enumerate(frames)}
+        frame_index = {frame: index for index, frame in enumerate(frames)}
         payload = {}
         metadata = {
             "serial": self._serial,
-            "frame_serial": self._frame_serial,
             "frames": [],
             "items": [],
             "rng": self.rng.bit_generator.state,
@@ -138,7 +131,7 @@ class Replay:
             encoded = {}
             for name, value in item.items():
                 if isinstance(value, Frame):
-                    encoded[name] = {"frame": frame_index[value.id]}
+                    encoded[name] = {"frame": frame_index[value]}
                 elif isinstance(value, (np.ndarray, np.generic)):
                     key = f"{prefix}item_{index}_{name}"
                     payload[key] = np.asarray(value)
@@ -159,8 +152,7 @@ class Replay:
         frames = []
         for record in metadata["frames"]:
             chorus = ChorusArrays(*(np.asarray(data[name]) for name in record["keys"]))
-            frames.append(Frame(int(record["id"]), chorus,
-                                sum(int(value.nbytes) for value in chorus)))
+            frames.append(Frame.capture(int(record['id']), chorus))
         self._items = []
         for record in metadata["items"]:
             item = {}
@@ -173,7 +165,6 @@ class Replay:
                     item[name] = encoded["value"]
             self._items.append(item)
         self._serial = int(metadata["serial"])
-        self._frame_serial = int(metadata["frame_serial"])
         self.rng.bit_generator.state = metadata.get("rng", self.rng.bit_generator.state)
         self.evictions = int(metadata.get("evictions", 0))
         self._evict()

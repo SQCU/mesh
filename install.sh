@@ -207,6 +207,8 @@ for spec in io.mesh.telemetry:8788:/v1/latest io.mesh.observer:8787:/latest.json
   fi
 done
 
+try "complete cartlane application realized" "$MESH_ROOT/bin/mesh-python" "$REPO/bin/mesh-application.py" deploy --source "$REPO" --target "$MESH_ROOT/applications/cartlane"
+
 sec "9. Status"
 printf '  waiting for resident daemons'
 for _ in $(seq 1 20); do pgrep -qf "dns-sd -R" && break; printf '.'; sleep 1; done

@@ -1,0 +1,219 @@
+{
+  "sources": [
+    {
+      "path": ".build/client-connect-20260905/live_test.py",
+      "lines": 55
+    },
+    {
+      "path": ".build/continuation-validation/check-viewer.py",
+      "lines": 38
+    },
+    {
+      "path": ".build/continuation-validation/run.py",
+      "lines": 37
+    },
+    {
+      "path": ".build/continuation-validation/socket_responder.py",
+      "lines": 45
+    },
+    {
+      "path": ".build/foundations-20260906/test_flow.c",
+      "lines": 442
+    },
+    {
+      "path": ".build/reductions-20260906/test_flow.c",
+      "lines": 313
+    },
+    {
+      "path": ".build/representation-20260906/probe-before-fused.py",
+      "lines": 112
+    },
+    {
+      "path": ".build/representation-20260906/probe-before-synchronize.py",
+      "lines": 104
+    },
+    {
+      "path": ".build/scale-placement-20260905/benchmark_pages.py",
+      "lines": 46
+    },
+    {
+      "path": ".build/scale-placement-20260905/benchmark_shapes.py",
+      "lines": 35
+    },
+    {
+      "path": ".build/state-interface/validate.py",
+      "lines": 43
+    },
+    {
+      "path": ".build/transport-boundary-20260906/before/test_flow.c",
+      "lines": 735
+    },
+    {
+      "path": "measurements/policy-head-audit-20260906/verify.py",
+      "lines": 97
+    },
+    {
+      "path": "rdma/test_flow.c",
+      "lines": 732
+    },
+    {
+      "path": "rdma/test_flow.py",
+      "lines": 72
+    },
+    {
+      "path": "user/test_nodeinfo.py",
+      "lines": 108
+    },
+    {
+      "path": "xonotic/payload/tools/test_navmesh.py",
+      "lines": 161
+    },
+    {
+      "path": "xonotic/render/test_client_connection.py",
+      "lines": 98
+    },
+    {
+      "path": "xonotic/solver/strat/joracle/test_server.py",
+      "lines": 133
+    },
+    {
+      "path": "xonotic/solver/strat/kernel_allocation_probe.m",
+      "lines": 46
+    },
+    {
+      "path": "xonotic/solver/strat/native_view_transport.c",
+      "lines": 80
+    },
+    {
+      "path": "xonotic/solver/strat/test_action_history.py",
+      "lines": 165
+    },
+    {
+      "path": "xonotic/solver/strat/test_client_lifecycle.py",
+      "lines": 53
+    },
+    {
+      "path": "xonotic/solver/strat/test_continuation.py",
+      "lines": 140
+    },
+    {
+      "path": "xonotic/solver/strat/test_curriculum_recovery.py",
+      "lines": 44
+    },
+    {
+      "path": "xonotic/solver/strat/test_learning.py",
+      "lines": 220
+    },
+    {
+      "path": "xonotic/solver/strat/test_map_assets.py",
+      "lines": 54
+    },
+    {
+      "path": "xonotic/solver/strat/test_matmul.py",
+      "lines": 50
+    },
+    {
+      "path": "xonotic/solver/strat/test_moe.py",
+      "lines": 148
+    },
+    {
+      "path": "xonotic/solver/strat/test_native_frames.c",
+      "lines": 48
+    },
+    {
+      "path": "xonotic/solver/strat/test_neighborhood.py",
+      "lines": 213
+    },
+    {
+      "path": "xonotic/solver/strat/test_observation_memory.py",
+      "lines": 146
+    },
+    {
+      "path": "xonotic/solver/strat/test_paged_matrix.py",
+      "lines": 103
+    },
+    {
+      "path": "xonotic/solver/strat/test_policy_math.py",
+      "lines": 77
+    },
+    {
+      "path": "xonotic/solver/strat/test_policy_reports.py",
+      "lines": 92
+    },
+    {
+      "path": "xonotic/solver/strat/test_raw_inputs.py",
+      "lines": 203
+    },
+    {
+      "path": "xonotic/solver/strat/test_receive_lifetime.py",
+      "lines": 126
+    },
+    {
+      "path": "xonotic/solver/strat/test_representation.py",
+      "lines": 227
+    },
+    {
+      "path": "xonotic/solver/strat/test_scale_rpc.py",
+      "lines": 201
+    },
+    {
+      "path": "xonotic/solver/strat/test_state.py",
+      "lines": 85
+    },
+    {
+      "path": "xonotic/solver/strat/test_state_steering.py",
+      "lines": 187
+    },
+    {
+      "path": "xonotic/solver/strat/test_work_estimate.py",
+      "lines": 50
+    },
+    {
+      "path": "xonotic/solver/strat/verify_game.py",
+      "lines": 266
+    },
+    {
+      "path": "xonotic/solver/strat/verify_native_bot.py",
+      "lines": 83
+    },
+    {
+      "path": "xonotic/solver/strat/verify_native_view.py",
+      "lines": 375
+    },
+    {
+      "path": "xonotic/solver/strat/verify_numerics.py",
+      "lines": 68
+    },
+    {
+      "path": "xonotic/solver/strat/verify_online.py",
+      "lines": 110
+    },
+    {
+      "path": "xonotic/solver/strat/verify_policy_axes.py",
+      "lines": 167
+    },
+    {
+      "path": "xonotic/solver/strat/verify_rdma_cross.py",
+      "lines": 231
+    },
+    {
+      "path": "xonotic/solver/strat/verify_rdma_training.py",
+      "lines": 184
+    },
+    {
+      "path": "xonotic/solver/strat/verify_representation.py",
+      "lines": 112
+    },
+    {
+      "path": "xonotic/solver/strat/verify_telemetry.py",
+      "lines": 179
+    },
+    {
+      "path": "xonotic/solver/strat/verify_training_runtime.py",
+      "lines": 386
+    }
+  ],
+  "source_count": 53,
+  "source_lines": 8325,
+  "caches_removed": 43
+}

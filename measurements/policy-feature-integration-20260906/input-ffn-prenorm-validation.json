@@ -1,0 +1,32 @@
+{
+  "scope": "Input-FFN branch prenorm; unnormalized learned-embedding residual remains. No kernel, bridge, field-vocabulary, rate-limit or native-game-state changes.",
+  "policy_versions": {
+    "matrix_family": 19,
+    "baseline": 17,
+    "architecture": 10
+  },
+  "tests": {
+    "command": "-m unittest solver.strat.test_raw_inputs solver.strat.test_representation solver.strat.test_learning solver.strat.test_neighborhood solver.strat.test_moe solver.strat.test_scale_rpc solver.strat.test_state_steering",
+    "local": {
+      "count": 70,
+      "passed": true,
+      "seconds": 2.801
+    },
+    "mini": {
+      "count": 70,
+      "passed": true,
+      "seconds": 2.641,
+      "scope": "Already-running standalone tests completed before host-only work preference; no RDMA."
+    }
+  },
+  "source_sha256": {
+    "cast_header.py": "e4012bdbb173486ba3de55fe298a2b1acd0aaaf5d824ec40144a5a92e941b14a",
+    "checkpoint_state.py": "28914391824c7c9a567b9a924b7cd2b5122a281c8c5a65ebbad0a77d2e7150be",
+    "strategy.py": "fcea33897e3a77ecfc4c921484b51869027527b0660c2b2acfb699b26c700d18",
+    "state_steering.py": "71f5546737d9effea1e18552333d8a04df192cfec4b83c72226e45bcbbd2e32f",
+    "test_raw_inputs.py": "ffaa263eca2c5a3484cfc0e112eb075aeb18e1810e8fb50ac2383ca8d8c777af",
+    "verify_policy_axes.py": "01d0e93b74f6cfd3fdc5762b24adafa1d033abc60fd796b16d1d989216349dcc"
+  },
+  "counterfactual": "input-ffn-prenorm-counterfactual.json",
+  "current_axis_audit": "policy-axis-audit.json"
+}

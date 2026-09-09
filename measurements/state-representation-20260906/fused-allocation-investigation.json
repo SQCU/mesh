@@ -1,0 +1,56 @@
+{
+  "host": "Mac.localdomain",
+  "machine": "arm64",
+  "configuration": {
+    "capacity": {
+      "participants": 4,
+      "state_pages": 4,
+      "events": 4
+    },
+    "forward_traces": 1,
+    "preparations": 1,
+    "emission_traces": 1,
+    "preparation_seconds": 0.1376719999825582,
+    "mode": "compiled_local",
+    "region_traces": {
+      "encode": 0,
+      "decode": 0
+    }
+  },
+  "probe_calibration_allocation_calls": 1,
+  "measured_solves_per_mode": 8,
+  "trace_counts_before": {
+    "forward": 1,
+    "emission": 1,
+    "gradient": 2,
+    "optimizer": 2
+  },
+  "trace_counts_after": {
+    "forward": 1,
+    "emission": 1,
+    "gradient": 2,
+    "optimizer": 2
+  },
+  "metal_device_buffer_or_heap_allocation_calls": {
+    "forward_and_emission": 0,
+    "gradient_and_optimizer": 0
+  },
+  "median_seconds": {
+    "forward_and_emission": 0.001519374520285055,
+    "gradient_and_optimizer": 0.004360958468168974
+  },
+  "peak_device_memory_bytes": 67108868,
+  "gradient_allocation_calls_per_solve": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "gradient_allocation_lengths": [],
+  "scope": "Prepared MLX numerical programs; excludes input packing, report construction, transport and capacity realization",
+  "passed": true
+}

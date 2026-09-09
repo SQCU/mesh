@@ -1,0 +1,53 @@
+{
+  "whole_bot_think_microseconds": [
+    [
+      4.35,
+      14.75
+    ],
+    [
+      4.3,
+      14.8
+    ],
+    [
+      4.25,
+      14.85
+    ],
+    [
+      4.3,
+      14.75
+    ],
+    [
+      4.3,
+      14.75
+    ],
+    [
+      4.3,
+      14.8
+    ],
+    [
+      11.35,
+      15.25
+    ],
+    [
+      4.45,
+      14.95
+    ],
+    [
+      4.35,
+      14.9
+    ],
+    [
+      4.4,
+      14.8
+    ]
+  ],
+  "median_microseconds": [
+    4.324999999999999,
+    14.8
+  ],
+  "median_added_microseconds": 10.475,
+  "calls_per_sample": 20,
+  "warmup_samples_excluded": 2,
+  "scope": "same running bot, paired repeated stock/view thinks at fixed engine time; zero residual; ordinary writes retained",
+  "engine_sha256": "2007b036390f63b99aa737ffaa1e11841c62636a45d58a8402dc8facffca0e69"
+}

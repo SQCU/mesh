@@ -1,0 +1,65 @@
+{
+  "observed_at": "2026-09-05T09:18:27.958283+00:00",
+  "game_connection": "connected",
+  "policy_observations": 0,
+  "policy_new_updates": 0,
+  "mini_bridge": {
+    "pid": 94759,
+    "state": "Us",
+    "last_log_local": "2026-09-05 00:40:30 PDT",
+    "running_binary": "older bridge; still blocked",
+    "next_start_binary_sha256": "6448967d49f805a6624e3f9912485bb557a89b434ac973b79340ce9831f72719"
+  },
+  "mini_stuck_device_probes": 478,
+  "probe_count_stable_after_fix": true,
+  "original_wedge_cause": "not established",
+  "nodeinfo": {
+    "127.0.0.1": {
+      "framing_valid": true,
+      "body": "name=Ms-MacBook-Pro\nula=fd6d:6573:68:b5d5:b9dc:d628:b4e3:3141\nmodel=Mac17,6\ncores=18\nmemgb=128\nmacos=26.3.2\nplanes=1 lan=en0 fabric=0 fabric_source=ifconfig\nrdma=enabled\nsdk=yes\nbranch=unknown\nconverged=unknown\nuptime=3days,5:52\nport=en1 link=inactive address=fe80::3494:9dff:fee4:fd80%en1 peer=none rdma_state=unmeasured\nport=en6 link=inactive address=fe80::3494:9dff:fee4:fd84%en6 peer=none rdma_state=unmeasured\nsample_status=sampling sample_updated=1788599633.232\nend\n"
+    },
+    "ms-mac-mini.local": {
+      "framing_valid": true,
+      "body": "name=Ms-Mac-mini\nula=fd6d:6573:68:3af8:1a3c:9700:3034:715d\nmodel=Mac16,11\ncores=12\nmemgb=24\nmacos=26.5.1\nplanes=2 lan=en1 fabric=1 fabric_source=ifconfig\nrdma=enabled\nsdk=yes\nbranch=main\nconverged=2026-09-05T05:11:26Z\nuptime=4:18\nport=en2 link=inactive address=fe80::34b5:96ff:feb2:55c0%en2 peer=none rdma_state=unmeasured\nport=en3 link=active address=fe80::34b5:96ff:feb2:55c4%en3 peer=none rdma_state=unmeasured\nport=en4 link=inactive address=fe80::34b5:96ff:feb2:55c8%en4 peer=none rdma_state=unmeasured\nsample_status=complete sample_updated=1788599633.213\nend\n"
+    }
+  },
+  "nodeinfo_blocked_sampler_regression": {
+    "laptop": "passed",
+    "mini": "passed",
+    "requests_while_sampling": 20,
+    "samplers_started": 1
+  },
+  "shared_memory_recovery": {
+    "reattached": true,
+    "pending_frames_preserved": 2,
+    "submitted_frames_not_replayed": 8,
+    "new_frame_delivered_to_new_region": true
+  },
+  "shared_memory_recovery_mini": "same assertions passed",
+  "cart": {
+    "event": "qc_python_game_verified",
+    "cases": 39,
+    "team_counts": [
+      2,
+      4,
+      8,
+      12
+    ],
+    "ownership_transitions": 6,
+    "stacked_floor_resolution": true,
+    "target_identity": true,
+    "player_driven_motion_cases": 6,
+    "unattended_ticks": 3000,
+    "unattended_score_accrual": true
+  },
+  "cart_gamecode": {
+    "progs_sha256": "b882ef293d53ff6d5b58dc09e0c4ecdacfff83e0f8d0397d9ec31521b5ae6efd",
+    "remote_staged": true,
+    "active_map_reloaded": false
+  },
+  "full_configured_capacity_preserved": true,
+  "remaining_runtime_dependency": "Normal SSH reboot recovered the Mini. Training session restoration is in progress.",
+  "remote_host_reboot_attempted": true,
+  "remote_host_reboot_evidence": "measurements/ssh-reboot-20260905.json",
+  "remote_host_reboot_result": "success; SSH returned with a new boot UUID after 253 seconds, zero U processes and automatically paired RDMA bridges"
+}

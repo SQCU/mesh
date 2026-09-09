@@ -1,0 +1,516 @@
+{
+  "ffn_other_rows_max_change": 0.0,
+  "ffn_other_rows_max_input_derivative": 0.0,
+  "changed_token_experts_before": [
+    0,
+    2
+  ],
+  "changed_token_experts_after": [
+    3,
+    1
+  ],
+  "moe_other_rows_max_change": 0.0,
+  "participant_permutation_rate_error": 2.7939677238464355e-09,
+  "participant_permutation_value_error": 2.384185791015625e-07,
+  "event_permutation_rate_error": 2.3283064365386963e-09,
+  "padding_rate_error": 0.0,
+  "padding_value_error": 0.0,
+  "team_label_only_rate_change": 0.010328474454581738,
+  "duplicate_event_rate_change": 0.004026838578283787,
+  "native_input_shapes_example": {
+    "pages": [
+      3,
+      2,
+      782
+    ],
+    "events": [
+      3,
+      5,
+      29
+    ],
+    "marker": [
+      3,
+      11
+    ],
+    "valid": [
+      3,
+      8
+    ]
+  },
+  "cart_geometry_summary_change": 0.0,
+  "unrepresented_team_score_summary_change": 0.0,
+  "forward_logical_contractions": [
+    {
+      "operation": "matrix",
+      "lhs": [
+        3,
+        11
+      ],
+      "rhs": [
+        16,
+        11
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        6,
+        35
+      ],
+      "rhs": [
+        16,
+        35
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        9,
+        16
+      ],
+      "rhs": [
+        16,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        24,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        24,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        24
+      ],
+      "rhs": [
+        16,
+        24
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        16,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        8,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        8,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        8
+      ],
+      "rhs": [
+        18,
+        16
+      ],
+      "transpose_lhs": true,
+      "transpose_rhs": false,
+      "caller": "participant_gram_context"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        8
+      ],
+      "rhs": [
+        8,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": false,
+      "caller": "participant_gram_context"
+    },
+    {
+      "operation": "batched_cross",
+      "shapes": [
+        [
+          3,
+          6,
+          8
+        ],
+        [
+          3,
+          6,
+          16
+        ]
+      ]
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        3,
+        3
+      ],
+      "rhs": [
+        3,
+        128
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": false,
+      "caller": "participant_gram_context"
+    },
+    {
+      "operation": "batched_multiply",
+      "shapes": [
+        [
+          3,
+          6,
+          8
+        ],
+        [
+          3,
+          8,
+          16
+        ]
+      ]
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        16,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "scale_operator"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        2,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "scale_route"
+    },
+    {
+      "operation": "expert_projection",
+      "shapes": [
+        [
+          2,
+          64,
+          32
+        ],
+        [
+          2,
+          32,
+          32
+        ],
+        [
+          2,
+          4
+        ]
+      ]
+    },
+    {
+      "operation": "expert_projection",
+      "shapes": [
+        [
+          2,
+          64,
+          32
+        ],
+        [
+          2,
+          32,
+          32
+        ],
+        [
+          2,
+          4
+        ]
+      ]
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        18,
+        16
+      ],
+      "transpose_lhs": true,
+      "transpose_rhs": false,
+      "caller": "gram_context"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        16,
+        16
+      ],
+      "rhs": [
+        16,
+        1
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": false,
+      "caller": "gram_context"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        16,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "scale_operator"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        24,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        24,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        24
+      ],
+      "rhs": [
+        16,
+        24
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        6,
+        7
+      ],
+      "rhs": [
+        7,
+        7
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        6,
+        7
+      ],
+      "rhs": [
+        7,
+        7
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        6,
+        16
+      ],
+      "rhs": [
+        7,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        6,
+        30
+      ],
+      "rhs": [
+        7,
+        30
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        1,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        1,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        1,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    },
+    {
+      "operation": "matrix",
+      "lhs": [
+        18,
+        16
+      ],
+      "rhs": [
+        1,
+        16
+      ],
+      "transpose_lhs": false,
+      "transpose_rhs": true,
+      "caller": "linear"
+    }
+  ],
+  "forward_logical_contraction_count": 32,
+  "forward_explicit_reduction_calls": {
+    "any": 1,
+    "max": 8,
+    "mean": 7,
+    "softmax": 1,
+    "cumsum": 2,
+    "min": 1,
+    "sum": 5
+  },
+  "parameter_array_count": 28,
+  "tensor_loss_direct_sum_calls": 30
+}

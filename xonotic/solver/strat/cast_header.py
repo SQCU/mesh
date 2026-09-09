@@ -1,29 +1,23 @@
 from __future__ import annotations
 
+from payload.tools.strategy_io_schema import OBS_WIDTH
+
 import hashlib
 from dataclasses import dataclass
 
-import mlx.core as mx
+from . import tensor as mx
 import mlx.nn as nn
 
+from .policy_math import norm
+
+from . import paged_matrix
+
 from .matmul import (
-    expert_matrix_multiply,
-    gram_context,
     linear,
+    expert_matrix_multiply,
+    matrix_multiply,
     matrix_multiply_transpose_right,
 )
-
-__all__ = [
-    "Widths", "Wally", "parameter_seed",
-    "phil", "quinn", "kay", "val",
-    "ir_query", "ir_value", "dina_state", "dina_action", "dina_readout", "dee",
-    "team_gram_matrix", "rival_gram_matrix", "participant_gram_matrix",
-    "scale_route", "scale_moe", "scale_fuse",
-    "gia_uma_dov", "actuator",
-    "winnie", "lou", "vera_winnie", "vera_lou",
-    "dina_drift", "dina_matrix",
-    "tau", "elle",
-]
 
 def parameter_seed(seed, namespace):
     return int.from_bytes(
@@ -33,19 +27,14 @@ def parameter_seed(seed, namespace):
 @dataclass(frozen=True)
 class Widths:
     d_x: int
-    d_z: int
     d_c: int
-    d_sem: int = 8
+    d_obs: int = OBS_WIDTH
 
-    d_beta: int = 128
     d: int = 128
-    d_v: int = 128
     d_ir: int = 128
     h: int = 341
     r: int = 128
     r_e: int = 128
-    d_y: int = 128
-    d_u: int = 128
     d_scale: int = 128
     scale_h: int = 341
     scale_experts: int = 8
@@ -56,18 +45,19 @@ class Wally(nn.Module):
         super().__init__()
         self.w = w
 
-        self.phil = nn.Linear(w.d_c, w.d_beta, bias=False)
+        self.phil = nn.Linear(w.d_c, w.d, bias=False)
 
-        self.quinn = nn.Linear(w.d_x + w.d_beta + w.d_sem, w.d, bias=False)
+        self.quinn = nn.Linear(6 * w.d_x + 20, w.d, bias=False)
+        self.participant = nn.Linear(w.d_obs + 2, w.d, bias=False)
+        self.cart = nn.Linear(18, w.d, bias=False)
+        self.team = nn.Linear(7, w.d, bias=False)
+        from .neighborhood import LocalNeighborhood
+        self.neighborhood = LocalNeighborhood(w.d)
+        self.input_gate = nn.Linear(w.d, w.h, bias=False)
+        self.input_value = nn.Linear(w.d, w.h, bias=False)
+        self.input_out = nn.Linear(w.h, w.d, bias=False)
 
-        self.kay = nn.Linear(w.d_z, w.d, bias=False)
-
-        self.val = nn.Linear(w.d_z, w.d_v, bias=False)
         self.ir_query = nn.Linear(w.d, w.d_ir, bias=False)
-        self.ir_value = nn.Linear(w.d_v, w.d_ir, bias=False)
-        self.dina_state = nn.Linear(w.d, w.d_y, bias=False)
-        self.dina_action = nn.Linear(w.d_ir, w.d_u, bias=False)
-        self.dina_readout = nn.Linear(w.d_y, w.d, bias=False)
 
         self.team_metric = nn.Linear(w.d, w.r, bias=False)
 
@@ -75,147 +65,84 @@ class Wally(nn.Module):
 
         self.gia = nn.Linear(w.d_ir, w.h, bias=False)
         self.uma = nn.Linear(w.d_ir, w.h, bias=False)
-        self.dov = nn.Linear(w.h, 1, bias=False)
-        self.actuator = nn.Linear(w.d_ir, 6, bias=False)
+        self.dov = nn.Linear(w.h, w.d_ir, bias=False)
+        self.heads = nn.Linear(w.d_ir, 2 * w.d_x + 2, bias=False)
 
-        self.winnie = nn.Linear(w.d_ir, 1, bias=False)
-
-        self.lou = nn.Linear(w.d_ir, 1, bias=False)
-
-        self.vera_winnie = nn.Linear(w.d, 1, bias=False)
-        self.vera_lou = nn.Linear(w.d, 1, bias=False)
-
-        self.dina_drift_first = nn.Linear(w.d_y, w.d_y, bias=False)
-        self.dina_matrix_first = nn.Linear(w.d_y, w.d_y * w.d_u, bias=False)
-        self.dina_drift_second = nn.Linear(w.d_y, w.d_y, bias=False)
-        self.dina_matrix_second = nn.Linear(w.d_y, w.d_y * w.d_u, bias=False)
         self.scale_in = nn.Linear(w.d_ir, w.d_scale, bias=False)
         self.scale_router = nn.Linear(w.d_scale, w.scale_experts, bias=False)
         self.scale_w1 = mx.random.normal((w.scale_experts, w.d_scale, w.scale_h)) / (w.d_scale ** 0.5)
+        self.scale_w3 = mx.random.normal((w.scale_experts, w.d_scale, w.scale_h)) / (w.d_scale ** 0.5)
         self.scale_w2 = mx.random.normal((w.scale_experts, w.scale_h, w.d_scale)) / (w.scale_h ** 0.5)
         self.scale_out = nn.Linear(w.d_scale, w.d_ir, bias=False)
-        self.scale_probe = mx.random.normal((w.d_scale,)) / (w.d_scale ** 0.5)
 
-        self.tau_raw = mx.zeros(())
 
-def phil(wally: Wally, cell_slots: mx.array) -> mx.array:
-    return linear(wally.phil, cell_slots)
-
-def norm(rows: mx.array) -> mx.array:
-    return rows * mx.rsqrt(mx.mean(mx.square(rows), axis=-1, keepdims=True) + 1e-6)
-
-def quinn(wally: Wally, xan: mx.array, bea: mx.array, semantics: mx.array) -> mx.array:
-    return linear(wally.quinn, mx.concatenate([xan, bea, semantics], axis=-1))
-
-def kay(wally: Wally, zed: mx.array) -> mx.array:
-    return linear(wally.kay, zed)
-
-def val(wally: Wally, zed: mx.array) -> mx.array:
-    return linear(wally.val, zed)
+def encode_rows(wally: Wally, rows: mx.array) -> mx.array:
+    normalized = norm(rows)
+    return rows + linear(wally.input_out, silu(linear(wally.input_gate, normalized)) * linear(wally.input_value, normalized))
 
 def ir_query(wally: Wally, query: mx.array) -> mx.array:
     return linear(wally.ir_query, query)
 
-def ir_value(wally: Wally, value: mx.array) -> mx.array:
-    return linear(wally.ir_value, value)
-
-def dina_state(wally: Wally, query: mx.array) -> mx.array:
-    return linear(wally.dina_state, query)
-
-def dina_action(wally: Wally, ir: mx.array) -> mx.array:
-    return linear(wally.dina_action, ir)
-
-def dina_readout(wally: Wally, state: mx.array) -> mx.array:
-    return linear(wally.dina_readout, state)
-
-def dee(quality: mx.array, keys: mx.array) -> mx.array:
-    from .dpp import dpp_marginals
-
-    return dpp_marginals(quality, keys)
-
-def team_gram_matrix(wally: Wally, rows: mx.array) -> mx.array:
-    projected = linear(wally.team_metric, rows)
-    return matrix_multiply_transpose_right(projected, projected) / (wally.w.r ** 0.5)
-
-def rival_gram_matrix(wally: Wally, rows: mx.array) -> mx.array:
-    projected = linear(wally.rival_metric, rows)
-    return matrix_multiply_transpose_right(projected, projected) / (wally.w.r_e ** 0.5)
-
-def participant_gram_matrix(wally: Wally, rows: mx.array, team_ids: mx.array) -> mx.array:
-    same_team = team_ids[:, None] == team_ids[None, :]
-    return rival_gram_matrix(wally, rows) + same_team * team_gram_matrix(wally, rows)
-
 def gia_uma_dov(wally: Wally, ir: mx.array) -> mx.array:
     normed = norm(ir)
-    gated = nn.silu(linear(wally.gia, normed)) * linear(wally.uma, normed)
-    return linear(wally.dov, gated)[..., 0]
+    gated = silu(linear(wally.gia, normed)) * linear(wally.uma, normed)
+    return linear(wally.dov, gated)
 
-def actuator(wally: Wally, ir: mx.array) -> mx.array:
-    return linear(wally.actuator, ir)
-
-def scale_route(wally: Wally, rows: mx.array) -> tuple[mx.array, mx.array]:
-    scores = linear(wally.scale_router, rows)
-    topk = wally.w.scale_topk
+def scale_route(rows, router, topk):
+    scores = matrix_multiply_transpose_right(rows, router)
     experts = mx.stop_gradient(mx.argpartition(-scores, topk - 1, axis=-1)[:, :topk])
-    gates = mx.take_along_axis(mx.softmax(scores, axis=-1), experts, axis=-1)
-    return experts, gates / mx.sum(gates, axis=-1, keepdims=True)
+    log_affinity = -mx.logaddexp(mx.zeros_like(scores), -scores)
+    affinities = mx.exp(log_affinity - mx.max(log_affinity, axis=-1, keepdims=True))
+    probabilities = affinities / mx.sum(affinities, axis=-1, keepdims=True)
+    selected = mx.take_along_axis(affinities, experts, axis=-1)
+    return experts, selected / mx.sum(selected, axis=-1, keepdims=True), probabilities
 
-def scale_moe(wally: Wally, rows: mx.array, experts: mx.array, gates: mx.array) -> mx.array:
+def scale_balance(experts, probabilities, valid):
+    present = valid.reshape(-1).astype(probabilities.dtype)
+    count = mx.maximum(mx.sum(present), 1.0)
+    load = mx.zeros((probabilities.shape[-1],), dtype=probabilities.dtype).at[
+        experts.reshape(-1)
+    ].add(mx.broadcast_to(present[:, None], experts.shape).reshape(-1))
+    importance = mx.sum(probabilities * present[:, None], axis=0) / count
+    balance = probabilities.shape[-1] * mx.sum(mx.stop_gradient(load) * importance) / (experts.shape[-1] * count)
+    return mx.stop_gradient(load), balance
+
+def silu(value):
+    return value * mx.sigmoid(value)
+
+
+def scale_moe(rows, weight1, weight2, weight3, experts, gates):
     topk = experts.shape[-1]
-    flat_experts = experts.reshape(-1)
-    order = mx.argsort(flat_experts)
-    selected = mx.take(flat_experts, order)
-    tokens = order // topk
-    routed = mx.take(rows, tokens, axis=0)
-    hidden = nn.silu(expert_matrix_multiply(routed, wally.scale_w1, selected))
-    values = expert_matrix_multiply(hidden, wally.scale_w2, selected)
-    weights = mx.take(gates.reshape(-1), order)
-    return mx.zeros_like(rows).at[tokens].add(values * weights[:, None])
+    selected = experts.reshape(-1)
+    tokens = mx.arange(experts.size) // topk
+    repeated = rows[tokens]
+    hidden = silu(expert_matrix_multiply(repeated, weight1, selected)) * expert_matrix_multiply(repeated, weight3, selected)
+    values = expert_matrix_multiply(hidden, weight2, selected).reshape(rows.shape[0], topk, rows.shape[1])
+    return mx.sum(values * gates[..., None], axis=1)
+
+
+def scale_operator(ir, weight_in, router, weight1, weight2, weight3, weight_out, valid, *, topk):
+    shape = ir.shape
+    valid = mx.stop_gradient(valid)
+    flat = ir.reshape(-1, weight_in.shape[1])
+    rows = mx.where(valid.reshape(-1, 1), norm(matrix_multiply_transpose_right(flat, weight_in)), 0)
+    experts, gates, probabilities = scale_route(rows, router, topk)
+    residual = norm(rows + scale_moe(rows, weight1, weight2, weight3, experts, gates))
+    delta = matrix_multiply_transpose_right(residual, weight_out).reshape(shape)
+    stats = mx.stop_gradient(mx.stack((mx.min(residual), mx.max(residual), mx.sum(mx.isfinite(residual)).astype(ir.dtype))))
+    load, balance = scale_balance(experts, probabilities, valid)
+    return delta, stats, load, balance
 
 def scale_fuse(wally: Wally, ir: mx.array, execute_remote=True,
-               residual_fusion_scale=None) -> tuple[mx.array, mx.array, mx.array]:
-    residual_fusion_scale = float(
-        getattr(wally, "residual_fusion_scale", 1.0)
-        if residual_fusion_scale is None else residual_fusion_scale
-    )
-    executor = getattr(wally, "gram_executor", gram_context) if execute_remote else gram_context
-    shape = ir.shape
-    flat = ir.reshape(-1, wally.w.d_ir)
-    rows = norm(linear(wally.scale_in, flat))
-    experts, gates = scale_route(wally, rows)
-    residual = norm(rows + scale_moe(wally, rows, experts, gates))
-    context, stats = executor(residual, wally.scale_probe)
-    delta = linear(wally.scale_out, norm(residual * context[None, :])).reshape(shape)
-    delta = delta * residual_fusion_scale
-    load = mx.zeros((wally.w.scale_experts,), dtype=ir.dtype).at[
-        experts.reshape(-1)
-    ].add(mx.ones(experts.shape, dtype=ir.dtype).reshape(-1))
-    return delta, stats, load
-
-def winnie(wally: Wally, ir: mx.array) -> mx.array:
-    return linear(wally.winnie, ir)[..., 0]
-
-def lou(wally: Wally, ir: mx.array) -> mx.array:
-    return linear(wally.lou, ir)[..., 0]
-
-def vera_winnie(wally: Wally, query: mx.array) -> mx.array:
-    return linear(wally.vera_winnie, query)[..., 0]
-
-def vera_lou(wally: Wally, query: mx.array) -> mx.array:
-    return linear(wally.vera_lou, query)[..., 0]
-
-def dina_drift(wally: Wally, y: mx.array) -> mx.array:
-    return linear(wally.dina_drift_first, y), linear(wally.dina_drift_second, y)
-
-def dina_matrix(wally: Wally, y: mx.array) -> mx.array:
-    first = linear(wally.dina_matrix_first, y)
-    second = linear(wally.dina_matrix_second, y)
-    shape = (*first.shape[:-1], wally.w.d_y, wally.w.d_u)
-    return first.reshape(*shape), second.reshape(*shape)
-
-def tau(wally: Wally) -> mx.array:
-    return mx.exp(mx.clip(wally.tau_raw, -3.0, 3.0))
-
-def elle(logits: mx.array, measure: mx.array) -> mx.array:
-    finite = mx.where(measure > 0, logits, 0)
-    return mx.sum(finite * finite * measure) / mx.maximum(mx.sum(measure), 1)
+               residual_fusion_scale=None, valid=None) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    strength = float(getattr(wally, "residual_fusion_scale", 1.0)
+                     if residual_fusion_scale is None else residual_fusion_scale)
+    executor = getattr(wally, "scale_executor", None) if execute_remote else None
+    valid = mx.ones(ir.shape[:-1], dtype=mx.bool_) if valid is None else valid
+    tensors = (ir, wally.scale_in.weight, wally.scale_router.weight, wally.scale_w1,
+               wally.scale_w2, wally.scale_w3, wally.scale_out.weight, valid.astype(ir.dtype))
+    if executor is not None:
+        delta, stats, load, balance = executor(*tensors, topk=wally.w.scale_topk)
+    else:
+        delta, stats, load, balance = scale_operator(*tensors, topk=wally.w.scale_topk)
+    return delta * strength, stats, load, balance

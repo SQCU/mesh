@@ -1,0 +1,287 @@
+{
+  "date": "2026-09-05",
+  "interface": "read_only_havocbot_state_views",
+  "persistent_workloads_restarted": false,
+  "laptop": {
+    "cpu": "Apple M5 Max",
+    "unit_tests": 47,
+    "native_checks": 28,
+    "whole_bot": {
+      "whole_bot_think_microseconds": [
+        [
+          4.35,
+          14.75
+        ],
+        [
+          4.3,
+          14.8
+        ],
+        [
+          4.25,
+          14.85
+        ],
+        [
+          4.3,
+          14.75
+        ],
+        [
+          4.3,
+          14.75
+        ],
+        [
+          4.3,
+          14.8
+        ],
+        [
+          11.35,
+          15.25
+        ],
+        [
+          4.45,
+          14.95
+        ],
+        [
+          4.35,
+          14.9
+        ],
+        [
+          4.4,
+          14.8
+        ]
+      ],
+      "median_microseconds": [
+        4.324999999999999,
+        14.8
+      ],
+      "median_added_microseconds": 10.475,
+      "calls_per_sample": 20,
+      "warmup_samples_excluded": 2,
+      "scope": "same running bot, paired repeated stock/view thinks at fixed engine time; zero residual; ordinary writes retained",
+      "engine_sha256": "2007b036390f63b99aa737ffaa1e11841c62636a45d58a8402dc8facffca0e69"
+    }
+  },
+  "mini": {
+    "cpu": "Apple M4 Pro",
+    "unit_tests": 33,
+    "native_checks": 28,
+    "whole_bot": {
+      "whole_bot_think_microseconds": [
+        [
+          36.95,
+          100.55000000000001
+        ],
+        [
+          27.2,
+          92.75
+        ],
+        [
+          26.95,
+          72.5
+        ],
+        [
+          20.95,
+          72.8
+        ],
+        [
+          21.25,
+          74.7
+        ],
+        [
+          19.1,
+          62.25
+        ],
+        [
+          18.05,
+          61.8
+        ],
+        [
+          17.5,
+          55.1
+        ],
+        [
+          15.95,
+          55.25
+        ],
+        [
+          15.95,
+          55.1
+        ]
+      ],
+      "median_microseconds": [
+        20.025,
+        67.375
+      ],
+      "median_added_microseconds": 44.65,
+      "calls_per_sample": 20,
+      "warmup_samples_excluded": 2,
+      "scope": "same running bot, paired repeated stock/view thinks at fixed engine time; zero residual; ordinary writes retained",
+      "engine_sha256": "914d45a5cfb9eb08aa0c54a59e855afa5b877f32b98414c65752cc0312139327"
+    }
+  },
+  "game": {
+    "cases": 39,
+    "ownership_transitions": 6,
+    "player_driven_motion_cases": 6,
+    "unattended_ticks": 3000
+  },
+  "bridge_tests": 2,
+  "gradient": {
+    "laptop": {
+      "responses": [
+        {
+          "phase": 1,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 2,
+          "rows": 21,
+          "theta": 2.01,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.009999990463257
+        },
+        {
+          "phase": 3,
+          "rows": 21,
+          "theta": 1.99,
+          "owner": 17,
+          "target": 18,
+          "rate": 1.9900000095367432
+        },
+        {
+          "phase": 4,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 5,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 6,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 7,
+          "rows": 22,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 8,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        }
+      ],
+      "errors": [],
+      "analytic_gradient": 0.3296809196472168,
+      "missing_bridge_seconds": 9e-06,
+      "native_finite_difference": 0.3296000000005961
+    },
+    "mini": {
+      "responses": [
+        {
+          "phase": 1,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 2,
+          "rows": 21,
+          "theta": 2.01,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.009999990463257
+        },
+        {
+          "phase": 3,
+          "rows": 21,
+          "theta": 1.99,
+          "owner": 17,
+          "target": 18,
+          "rate": 1.9900000095367432
+        },
+        {
+          "phase": 4,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 5,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 6,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 7,
+          "rows": 22,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        },
+        {
+          "phase": 8,
+          "rows": 21,
+          "theta": 2,
+          "owner": 17,
+          "target": 18,
+          "rate": 2.0
+        }
+      ],
+      "errors": [],
+      "analytic_gradient": 0.3296809196472168,
+      "missing_bridge_seconds": 1.6e-05,
+      "native_finite_difference": 0.3296000000005961
+    }
+  },
+  "runtime_entity_words": 6115,
+  "runtime_global_words": 53212,
+  "limitations": [
+    "Whole-bot timing is warmed repeated execution at fixed engine time, not worst-case navigation or live training.",
+    "No online learning quality claim follows from gradient arithmetic checks.",
+    "Native integer/float transport validated for PRVM32; PRVM64 precision and execution not validated.",
+    "Arbitrary reference-valued rates can reach ordinary VM invalid-reference errors."
+  ],
+  "staging_recovery": [
+    "Mini mDNS and configured SSH IP were temporarily unreachable; retries later succeeded.",
+    "Mini learner checkout contained no game assets. Fixtures received a temporary copy of server data and selected map assets.",
+    "Mini engine copied from laptop; JPEG load path changed to the adjacent dylib and binary signed ad hoc."
+  ]
+}

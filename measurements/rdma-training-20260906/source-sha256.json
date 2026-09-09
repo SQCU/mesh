@@ -1,0 +1,10 @@
+{
+  "xonotic/solver/strat/strat_responder.py": "29ac535963ed2625c1386c26dfee0797cda1fa31d7a47ff0012a6dd348ff81ea",
+  "xonotic/solver/xonwire.py": "cfc784b561f9fa378f827f018fc9eb0afdc9248db70a9e1d1b4cdf3d07ba6b44",
+  "rdma/mesh.py": "b553ece11e612fff6aa0af74b72453a5c0e5ccbbbd86792ec889779d33ecef8f",
+  "rdma/libmesh.dylib": "d8f15d85beda1146a6729828834082036bcae826c2345a79b666c71d3bffba2d",
+  "xonotic/solver/strat/verify_rdma_training.py": "0f62072f4b633987f785ffa717814443140dc96b54a7372e4759daef4eaf0670",
+  "xonotic/solver/strat/test_receive_lifetime.py": "583a5fcf52d298ebd9614f534bf5035a75d6989c48de6c134acb5e8dd3e76f2c",
+  "xonotic/darkplaces-work/darkplaces-dedicated": "ec089393de998135fab848311514dc5aea9063670f4e936f24257a1e701e80cf",
+  ".build/continuation-payload/zzzzzz-mesh-runtime.pk3": "46d6192d462fe6de2a3cc10bd3338b550de28ddadfcf09e92f65a2b08e26e194"
+}

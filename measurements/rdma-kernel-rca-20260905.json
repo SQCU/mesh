@@ -1,0 +1,320 @@
+{
+  "as_of": "2026-09-05T10:28:58.260212+00:00",
+  "host": "Ms-Mac-mini",
+  "macos": "26.5.1",
+  "kernel": "25.5.0 xnu-12377.121.6",
+  "provider": "libthunderboltrdma.dylib 40.120.7",
+  "kernel_deadlock_confirmed": true,
+  "deadlock": {
+    "bridge_pid": 94759,
+    "bridge_thread": "0x5cd3e",
+    "bridge_call": "ibv_dealloc_pd -> AppleThunderboltRDMAInterface::deallocPD -> IOService::scheduleTerminatePhase2",
+    "worker_thread": "0x70",
+    "worker_wait": "IOWorkLoop::closeGate waits for bridge-owned gate",
+    "samples": 101,
+    "blocked_tasks": 480,
+    "probe_processes": 478
+  },
+  "initial_dma_fault_cause": "unknown",
+  "kernel_memory_corruption_established": false,
+  "provider_fault": "tbt_post_recv+512 doorbell store at offset 8",
+  "reboot": {
+    "method": "normal shutdown -r request over SSH followed by watchdog panic/reset",
+    "ssh_return_seconds": 253,
+    "clean_shutdown": false,
+    "watchdog_no_checkins_seconds": 218,
+    "physical_intervention": false
+  },
+  "post_reboot_recurrence": {
+    "at": "2026-09-05T10:08:31.6127+00:00",
+    "fault": "tbt_post_recv+512",
+    "launchd_restarted_bridge": true
+  },
+  "apple_driver_patched": false,
+  "evidence": [
+    {
+      "path": ".build/rdma-rca-20260905/mesh-shutdown-stall.txt",
+      "bytes": 8464226,
+      "sha256": "5220c5c3ce83f7720bfbb792214cc961e6ed856b87da1b68a54836639f91ac0c"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/mesh-kernel-rdma-20260905.log",
+      "bytes": 11421870,
+      "sha256": "2b09d417ee404b4804102b95c841bfd9f1ed81efdbc3af6e56e9d219a76a53dc"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/mesh-provider-disassembly.txt",
+      "bytes": 171817,
+      "sha256": "ef2e39c8c372b0f5143bb77f0939174a0458bfdfb063c5c49a34418a770837c1"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/mesh-flow.previous",
+      "bytes": 53624,
+      "sha256": "619cbe54b7bc2837201558486c57b9cf6012614a8bf78a76208204cda171ec86"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/ResetCounter-2026-09-05-023851.diag",
+      "bytes": 464,
+      "sha256": "438182ab71d33e1c272e790e549b29ef82807f112bd80b5372fdf91bb8d5c9ab"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-27-221334.ips",
+      "bytes": 7821,
+      "sha256": "be3b7335b0171d08bf2d58c5ff025543c9cf4efc715d228ae0f8210932b7a0ae"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-154156.ips",
+      "bytes": 7618,
+      "sha256": "817e2debe3d073571c13e6fc6afb25c9a0633f24191c0400484b039b1b973009"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-160648.ips",
+      "bytes": 7609,
+      "sha256": "e6653a6cba4b9e832740a4f0d55cf088de41d47862a0ed8ddeffa21591da7df9"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-160738.ips",
+      "bytes": 7470,
+      "sha256": "d55821f7561ba01343f1590ac9931e7bb66937c40a2b5149ec4503a097be73a1"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-160839.ips",
+      "bytes": 7609,
+      "sha256": "5c6416c1058eb8f80805b7bc1c52621b71ce729c94ba030af5509a6c6ea26a19"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-165156.ips",
+      "bytes": 7832,
+      "sha256": "c59ab890915de6b8f2f3b5a24dc27e63479738765f5a5bc31e8979013d251a60"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-220008.ips",
+      "bytes": 7823,
+      "sha256": "b6709b558600798efe3746b37f731442ba9dbeb5ff71ff1da9670ef2654d4f0b"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-28-234243.ips",
+      "bytes": 7891,
+      "sha256": "48ae3c20cd27bb51f40f88b880489a5b62e115a4a7c4e3a634251007de1a8048"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-29-121921.ips",
+      "bytes": 7778,
+      "sha256": "a8c617b2b4eb0ef18e3d6489aed50f6d59ce1813abffb92ea4a66ecf262f9368"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-08-31-202444.ips",
+      "bytes": 8011,
+      "sha256": "1ea8bf568388ceabaf3e1be39c8ec9281f37f2db2b8c87342b2f83341fe82260"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-01-151235.ips",
+      "bytes": 7841,
+      "sha256": "568e37bdb7d5049aac5c4b0c6905f64c51a7a2563e25b88903a0ba70eb242fd4"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-01-194929.ips",
+      "bytes": 7885,
+      "sha256": "b38af07b666a194eae9939b99047c7d2b79fccb48b28e3a321749f9040d3aee4"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-02-203151.ips",
+      "bytes": 7879,
+      "sha256": "f93eabba2fef68c1156b065e681a954b56cf71c580ba4cc857d20c281bccbf5a"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-03-181137.ips",
+      "bytes": 7883,
+      "sha256": "fc76dc1fcad7c071d6dd9b8c89d39440ae0cef1baa057e8f3c8ee205050c0dec"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-182828.ips",
+      "bytes": 7840,
+      "sha256": "793496ce987a79b27d106b4e761ffb5b1e0de1001e4bad1d338808e40b3914d9"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-200212.ips",
+      "bytes": 7896,
+      "sha256": "bbb65d4b9c2ce94cbb8ee508ffd67ac4b49797fd1b9b69a93a302ac329796dca"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-202758.ips",
+      "bytes": 7897,
+      "sha256": "646fc3b8ac2ff11833b20887030cea2d96b046a6eed08671bc51249ebd721141"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-213109.ips",
+      "bytes": 7825,
+      "sha256": "c769378dc996e420f69b67967f69cfc7b38c817ebfa5a50b4fe5cd4cda31b7e3"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-222505.ips",
+      "bytes": 7823,
+      "sha256": "95878564b2e2b2e540877387ac4dbab0b8327032d126c66b58146aeb1a6be53f"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-225716.ips",
+      "bytes": 7833,
+      "sha256": "31d8386e6116180f96760052cce2a72a851f8b7674b7c59993bafa7c1a09a614"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-232152.ips",
+      "bytes": 7704,
+      "sha256": "056faa1664b511f34e0d432ddca1f45a891e486bacd1452de0c5cc4b710fd8e3"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-233655.ips",
+      "bytes": 7834,
+      "sha256": "0b9d454158e142f0eaf20954376fb24424ade8d8aeaf4829cf0ce5a39a7eaaa6"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-234659.ips",
+      "bytes": 7833,
+      "sha256": "4d609144bc30ec3af1ca358ada7dbe5241c4ba897268a01c79ef799f01fc1fd1"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-04-235136.ips",
+      "bytes": 7777,
+      "sha256": "2c6f0e695c834022979f2b852954c4d9a5cf2782bdb9521a79f59f2ae1160647"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-05-000457.ips",
+      "bytes": 7933,
+      "sha256": "5c89449d645fd751ed2fdb440dc115bdfeb27aca6e8a67683a9f3ef097adddea"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/mesh-flow-2026-09-05-030832.ips",
+      "bytes": 7891,
+      "sha256": "6f61634221c63b2d912200b50476f66f5de0defe161bf32ca8dbe8b4c43e348b"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/panic-full-2026-09-05-023849.0002.panic",
+      "bytes": 840043,
+      "sha256": "13ce2949394af561984336126be2bf9bd69f618c290320766f853b0a46184d99"
+    },
+    {
+      "path": ".build/rdma-rca-20260905/diagnostics/shutdown_stall_2026-09-05-023512_Ms-Mac-mini.shutdownStall",
+      "bytes": 1846595,
+      "sha256": "b1d1ae08ff992451e90192ae1c122881b586357de91174103006e6f5e127bb78"
+    }
+  ],
+  "deployment": {
+    "verified_at": "2026-09-05T10:35:36.787375+00:00",
+    "laptop": {
+      "up": true,
+      "region": "/mesh0",
+      "node": 0,
+      "pgsz": 4096,
+      "pool": 2097152,
+      "arena": 6291456,
+      "client": 83954,
+      "client_alive": true,
+      "sent": 240703,
+      "recvd": 217596,
+      "bad": 0,
+      "up_ms": 327801,
+      "bridge_pid": 81146,
+      "bridge_alive": true,
+      "phase": "paired",
+      "heartbeat_age_ms": 363,
+      "responsive": true,
+      "paired": true,
+      "operation": 0,
+      "operation_age_ms": 0,
+      "sub_head": 240703,
+      "sub_tail": 240703,
+      "sub_depth": 0,
+      "cmp_head": 217596,
+      "cmp_tail": 217596,
+      "cmp_depth": 0,
+      "rel_head": 217596,
+      "rel_tail": 217389,
+      "rel_depth": 207,
+      "ack_head": 240703,
+      "ack_tail": 240703,
+      "ack_depth": 0,
+      "free": 2093032,
+      "sd_free": 65,
+      "recv": 4094,
+      "sd_recv": 0,
+      "send": 0,
+      "sd_send": 0,
+      "app": 24,
+      "sd_app": 65
+    },
+    "mini": {
+      "up": true,
+      "region": "/mesh0",
+      "node": 1,
+      "pgsz": 4096,
+      "pool": 393216,
+      "arena": 1179648,
+      "client": 71407,
+      "client_alive": true,
+      "sent": 217696,
+      "recvd": 240703,
+      "bad": 0,
+      "up_ms": 322642,
+      "bridge_pid": 70658,
+      "bridge_alive": true,
+      "phase": "paired",
+      "heartbeat_age_ms": 518,
+      "responsive": true,
+      "paired": true,
+      "operation": 0,
+      "operation_age_ms": 0,
+      "sub_head": 217696,
+      "sub_tail": 217696,
+      "sub_depth": 0,
+      "cmp_head": 240703,
+      "cmp_tail": 240703,
+      "cmp_depth": 0,
+      "rel_head": 240703,
+      "rel_tail": 240703,
+      "rel_depth": 0,
+      "ack_head": 217696,
+      "ack_tail": 217696,
+      "ack_depth": 0,
+      "free": 389033,
+      "sd_free": 121,
+      "recv": 4094,
+      "sd_recv": 0,
+      "send": 0,
+      "sd_send": 0,
+      "app": 88,
+      "sd_app": 121
+    },
+    "configured_region_percent": 25,
+    "full_registered_bytes": {
+      "laptop": 34359738368,
+      "mini": 6442450944
+    },
+    "supervisor_pid": 83421,
+    "resumed_at": "2026-09-05T10:30:42.899102+00:00",
+    "seed_updates_total": 1318,
+    "observed_learning": {
+      "slots": 65693,
+      "obs": 275,
+      "cart": 519,
+      "evt": 524,
+      "resp": 47,
+      "updates": 1408
+    },
+    "human_client_connected": true,
+    "mini_uninterruptible_processes": 0,
+    "old_bridges_stopped_normally": true,
+    "tests": [
+      "native ASan/UBSan lifecycle/ABI/flight tests passed on both Macs",
+      "blocked launchctl + pending owner restart tests passed on both Macs",
+      "node-info pending sampler test passed",
+      "warning-free native bridge and status builds",
+      "git diff --check passed"
+    ],
+    "source_sha256": {
+      "rdma/mesh-flow.c": "ae1cb590b2699d386ec7751a96ace496dd2050c7af9a5c2bdd1c6d629c1b6b9d",
+      "rdma/mesh-flight.h": "e32420da1dd6e364dad156f4184868203536c58be1598334d6f8ee879edc41d4",
+      "rdma/mesh.h": "821cacc87bee1abb514bb544a9f7ad88cc5b280472be5b49b6a7efa20e0656dd",
+      "bin/mesh-bridge.sh": "fe3e78d1ef2f224771977a4020922c55886e1105f23640ef59533cc7b920e871"
+    }
+  }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import collections, ctypes, json, math, os, platform, plistlib, re, signal, socket, subprocess, sys, threading, time, urllib.parse
+import collections, ctypes, json, math, os, platform, plistlib, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -130,6 +130,24 @@ def bridge():
         except Exception as error: return {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
     return {"up": False, "error": "mesh-stat unavailable"}
 
+class TelemetryRecord(dict):
+    def __init__(self, value):
+        super().__init__(value)
+        self.wire = {}
+        self.wire_lock = threading.Lock()
+
+    def encode(self, projected=False):
+        def scalars(value):
+            return {key: scalars(child) for key, child in value.items()} if isinstance(value, dict) else {"array_length": len(value)} if isinstance(value, list) else value
+        with self.wire_lock:
+            if projected not in self.wire:
+                sample = self["sample"]
+                workload = sample.get("workload", {})
+                value = {**self, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}} if projected else self
+                self.wire[projected] = json.dumps(value, separators=(",", ":")).encode()
+            return self.wire[projected]
+
+
 class TelemetryRing:
     def __init__(self, size=RING, lease=LEASE):
         self.records = collections.deque(maxlen=size)
@@ -204,6 +222,14 @@ class TelemetryRing:
             active = [dict(row) for row in self.producers.values()]
             unkeyed = [dict(row) for row in self.unkeyed_producers]
             expired_total = self.expired_producers
+        for row in active:
+            measures = row.get("measures", {})
+            artifacts = measures.get("artifacts", {}) if isinstance(measures, dict) else {}
+            if isinstance(artifacts, dict) and artifacts:
+                identity = {key: row[key] for key in ("pid", "started_at", "name")}
+                row["measures"] = {**measures, "artifacts": {name: {**artifact, "href": "/v1/artifact?" + urllib.parse.urlencode({**identity, "artifact": name})}
+                    if isinstance(artifact, dict) else {"error": "artifact metadata is not an object", "received": artifact}
+                    for name, artifact in artifacts.items()}}
         deadline_slack = [
             float(row["deadline_s"]) - float(row["elapsed_s"])
             for row in active if row.get("deadline_s") is not None
@@ -238,18 +264,18 @@ class TelemetryRing:
                 previous = self.records[-1]
                 workload = previous["sample"].get("workload", {})
                 compact = {**workload, "measures_retention": "latest_sample", "producers": [{**row, "measures": {}} for row in workload.get("producers", [])]}
-                self.records[-1] = {**previous, "sample": {**previous["sample"], "workload": compact}}
+                self.records[-1] = TelemetryRecord({**previous, "sample": {**previous["sample"], "workload": compact}})
             self.sequence += 1
             sample = dict(sample)
             sample["stream"] = {"schema": 1, "sequence": self.sequence, "sampled_at": time.time(), "monotonic_ns": time.monotonic_ns()}
-            record = dict(sample["stream"])
+            record = TelemetryRecord(sample["stream"])
             record["sample"] = sample
             self.records.append(record)
             return record
 
     def latest(self):
         with self.lock:
-            record = dict(self.records[-1]) if self.records else None
+            record = self.records[-1] if self.records else None
             oldest = self.records[0]["sequence"] if self.records else None
             latest = self.records[-1]["sequence"] if self.records else None
             return {"schema": 1, "capacity": self.records.maxlen, "oldest_sequence": oldest, "latest_sequence": latest, "record": record}
@@ -259,7 +285,7 @@ class TelemetryRing:
         with self.lock:
             oldest = self.records[0]["sequence"] if self.records else None
             latest = self.records[-1]["sequence"] if self.records else None
-            records = [dict(record) for record in self.records if record["sequence"] > since]
+            records = [record for record in self.records if record["sequence"] > since]
             gap = oldest is not None and since > 0 and since < oldest - 1
             reset = latest is not None and since > latest
             return {"schema": 1, "capacity": self.records.maxlen, "since": since, "oldest_sequence": oldest, "latest_sequence": latest, "gap": gap, "reset": reset, "records": records}
@@ -385,7 +411,11 @@ def sample_loop(store):
     period = RATE / 1000
     while not STOP.is_set():
         started = time.monotonic()
-        store.append(snapshot(store, facts))
+        try:
+            store.append(snapshot(store, facts))
+        except Exception as error:
+            store.publish_protocol({"event": "sample_error", "error": f"{type(error).__name__}: {error}", "at": time.time()})
+            print(f"telemetry sample: {type(error).__name__}: {error}", flush=True)
         STOP.wait(max(0.01, period - (time.monotonic() - started)))
 
 def ingest_loop(store):
@@ -409,15 +439,14 @@ class TelemetryHandler(BaseHTTPRequestHandler):
 
     def send_json(self, payload, status=200):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-        if query.get("measures") == ["scalars"]:
-            def scalars(value):
-                return {key: scalars(child) for key, child in value.items()} if isinstance(value, dict) else {"array_length": len(value)} if isinstance(value, list) else value
-            def project(record):
-                sample = record["sample"]
-                workload = sample.get("workload", {})
-                return {**record, "sample": {**sample, "workload": {**workload, "measure_projection": "scalars_and_array_lengths", "producers": [{**row, "measures": scalars(row.get("measures", {}))} for row in workload.get("producers", [])]}}}
-            payload = {**payload, **({"record": project(payload["record"])} if payload.get("record") else {}), **({"records": [project(record) for record in payload["records"]]} if "records" in payload else {})}
-        body = json.dumps(payload, separators=(",", ":")).encode()
+        field = "records" if "records" in payload else "record" if "record" in payload else None
+        if field:
+            records = payload[field] if field == "records" else [payload[field]]
+            encoded = [b"null" if record is None else record.encode(query.get("measures") == ["scalars"]) for record in records]
+            value = b"[" + b",".join(encoded) + b"]" if field == "records" else encoded[0]
+            body = json.dumps({key: value for key, value in payload.items() if key != field}, separators=(",", ":")).encode()[:-1] + b',"' + field.encode() + b'":' + value + b"}"
+        else:
+            body = json.dumps(payload, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
@@ -427,6 +456,24 @@ class TelemetryHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         target = urllib.parse.urlsplit(self.path)
+        if target.path == "/v1/artifact":
+            query = urllib.parse.parse_qs(target.query)
+            try:
+                key = (int(query["pid"][0]), float(query["started_at"][0]), query["name"][0])
+                with self.server.store.lock:
+                    artifact = self.server.store.producers[key]["measures"]["artifacts"][query["artifact"][0]]
+                handle = open(artifact["path"], "rb")
+            except Exception as error:
+                self.send_json({"error": f"{type(error).__name__}: {error}"}, 404)
+                return
+            with handle:
+                self.send_response(200)
+                self.send_header("Content-Type", artifact.get("content_type", "application/octet-stream"))
+                self.send_header("Content-Disposition", "attachment")
+                self.send_header("Content-Length", str(os.fstat(handle.fileno()).st_size))
+                self.end_headers()
+                shutil.copyfileobj(handle, self.wfile)
+            return
         if target.path in ("/", "/v1/latest"):
             self.send_json(self.server.store.latest())
             return

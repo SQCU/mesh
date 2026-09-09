@@ -1,5 +1,10 @@
 # Megamap and observation measures
 
+This is a historical observation-pipeline review. Its `LiveBelief`, observation
+slot and temporal-contraction path has been deleted. The current complete native
+row interface and the reason for removing those reductions are documented in
+[STATE-REDUCTION-RCA.md](STATE-REDUCTION-RCA.md).
+
 This document records the current interfaces connecting fused maps, live server
 perception, the strategy composer, and the J measures. It contains no release decision.
 

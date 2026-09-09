@@ -1,3 +1,15 @@
+#ifdef PRVM_VIEWINTERPRETER
+#undef OPA
+#undef OPB
+#define OPA view_a
+#define OPB view_b
+#endif
+#ifdef PRVM_VIEWINTERPRETER
+#define VIEW_GLOBAL_WRITE(offset, count) PRVM_ViewWriteTyped(prog, st, offset, count)
+#else
+#define VIEW_GLOBAL_WRITE(offset, count) ((void)0)
+#endif
+#define OPB_WRITE ((prvm_eval_t *)&prog->globals.fp[st->operand[1]])
 
 #define ADVANCE_PROFILE_BEFORE_JUMP() \
 	prog->xfunction->profile += (st - startst); \
@@ -31,87 +43,94 @@
 #endif
 
 #if USE_COMPUTED_GOTOS
-
+#ifdef PRVM_VIEWINTERPRETER
+#define HANDLE_OPCODE(opcode) handle_view_##opcode
+#else
+#define HANDLE_OPCODE(opcode) handle_##opcode
+#endif
     const static void *dispatchtable[] = {
-	&&handle_OP_DONE,
-	&&handle_OP_MUL_F,
-	&&handle_OP_MUL_V,
-	&&handle_OP_MUL_FV,
-	&&handle_OP_MUL_VF,
-	&&handle_OP_DIV_F,
-	&&handle_OP_ADD_F,
-	&&handle_OP_ADD_V,
-	&&handle_OP_SUB_F,
-	&&handle_OP_SUB_V,
+	&&HANDLE_OPCODE(OP_DONE),
+	&&HANDLE_OPCODE(OP_MUL_F),
+	&&HANDLE_OPCODE(OP_MUL_V),
+	&&HANDLE_OPCODE(OP_MUL_FV),
+	&&HANDLE_OPCODE(OP_MUL_VF),
+	&&HANDLE_OPCODE(OP_DIV_F),
+	&&HANDLE_OPCODE(OP_ADD_F),
+	&&HANDLE_OPCODE(OP_ADD_V),
+	&&HANDLE_OPCODE(OP_SUB_F),
+	&&HANDLE_OPCODE(OP_SUB_V),
 
-	&&handle_OP_EQ_F,
-	&&handle_OP_EQ_V,
-	&&handle_OP_EQ_S,
-	&&handle_OP_EQ_E,
-	&&handle_OP_EQ_FNC,
+	&&HANDLE_OPCODE(OP_EQ_F),
+	&&HANDLE_OPCODE(OP_EQ_V),
+	&&HANDLE_OPCODE(OP_EQ_S),
+	&&HANDLE_OPCODE(OP_EQ_E),
+	&&HANDLE_OPCODE(OP_EQ_FNC),
 
-	&&handle_OP_NE_F,
-	&&handle_OP_NE_V,
-	&&handle_OP_NE_S,
-	&&handle_OP_NE_E,
-	&&handle_OP_NE_FNC,
+	&&HANDLE_OPCODE(OP_NE_F),
+	&&HANDLE_OPCODE(OP_NE_V),
+	&&HANDLE_OPCODE(OP_NE_S),
+	&&HANDLE_OPCODE(OP_NE_E),
+	&&HANDLE_OPCODE(OP_NE_FNC),
 
-	&&handle_OP_LE,
-	&&handle_OP_GE,
-	&&handle_OP_LT,
-	&&handle_OP_GT,
+	&&HANDLE_OPCODE(OP_LE),
+	&&HANDLE_OPCODE(OP_GE),
+	&&HANDLE_OPCODE(OP_LT),
+	&&HANDLE_OPCODE(OP_GT),
 
-	&&handle_OP_LOAD_F,
-	&&handle_OP_LOAD_V,
-	&&handle_OP_LOAD_S,
-	&&handle_OP_LOAD_ENT,
-	&&handle_OP_LOAD_FLD,
-	&&handle_OP_LOAD_FNC,
+	&&HANDLE_OPCODE(OP_LOAD_F),
+	&&HANDLE_OPCODE(OP_LOAD_V),
+	&&HANDLE_OPCODE(OP_LOAD_S),
+	&&HANDLE_OPCODE(OP_LOAD_ENT),
+	&&HANDLE_OPCODE(OP_LOAD_FLD),
+	&&HANDLE_OPCODE(OP_LOAD_FNC),
 
-	&&handle_OP_ADDRESS,
+	&&HANDLE_OPCODE(OP_ADDRESS),
 
-	&&handle_OP_STORE_F,
-	&&handle_OP_STORE_V,
-	&&handle_OP_STORE_S,
-	&&handle_OP_STORE_ENT,
-	&&handle_OP_STORE_FLD,
-	&&handle_OP_STORE_FNC,
+	&&HANDLE_OPCODE(OP_STORE_F),
+	&&HANDLE_OPCODE(OP_STORE_V),
+	&&HANDLE_OPCODE(OP_STORE_S),
+	&&HANDLE_OPCODE(OP_STORE_ENT),
+	&&HANDLE_OPCODE(OP_STORE_FLD),
+	&&HANDLE_OPCODE(OP_STORE_FNC),
 
-	&&handle_OP_STOREP_F,
-	&&handle_OP_STOREP_V,
-	&&handle_OP_STOREP_S,
-	&&handle_OP_STOREP_ENT,
-	&&handle_OP_STOREP_FLD,
-	&&handle_OP_STOREP_FNC,
+	&&HANDLE_OPCODE(OP_STOREP_F),
+	&&HANDLE_OPCODE(OP_STOREP_V),
+	&&HANDLE_OPCODE(OP_STOREP_S),
+	&&HANDLE_OPCODE(OP_STOREP_ENT),
+	&&HANDLE_OPCODE(OP_STOREP_FLD),
+	&&HANDLE_OPCODE(OP_STOREP_FNC),
 
-	&&handle_OP_RETURN,
-	&&handle_OP_NOT_F,
-	&&handle_OP_NOT_V,
-	&&handle_OP_NOT_S,
-	&&handle_OP_NOT_ENT,
-	&&handle_OP_NOT_FNC,
-	&&handle_OP_IF,
-	&&handle_OP_IFNOT,
-	&&handle_OP_CALL0,
-	&&handle_OP_CALL1,
-	&&handle_OP_CALL2,
-	&&handle_OP_CALL3,
-	&&handle_OP_CALL4,
-	&&handle_OP_CALL5,
-	&&handle_OP_CALL6,
-	&&handle_OP_CALL7,
-	&&handle_OP_CALL8,
-	&&handle_OP_STATE,
-	&&handle_OP_GOTO,
-	&&handle_OP_AND,
-	&&handle_OP_OR,
+	&&HANDLE_OPCODE(OP_RETURN),
+	&&HANDLE_OPCODE(OP_NOT_F),
+	&&HANDLE_OPCODE(OP_NOT_V),
+	&&HANDLE_OPCODE(OP_NOT_S),
+	&&HANDLE_OPCODE(OP_NOT_ENT),
+	&&HANDLE_OPCODE(OP_NOT_FNC),
+	&&HANDLE_OPCODE(OP_IF),
+	&&HANDLE_OPCODE(OP_IFNOT),
+	&&HANDLE_OPCODE(OP_CALL0),
+	&&HANDLE_OPCODE(OP_CALL1),
+	&&HANDLE_OPCODE(OP_CALL2),
+	&&HANDLE_OPCODE(OP_CALL3),
+	&&HANDLE_OPCODE(OP_CALL4),
+	&&HANDLE_OPCODE(OP_CALL5),
+	&&HANDLE_OPCODE(OP_CALL6),
+	&&HANDLE_OPCODE(OP_CALL7),
+	&&HANDLE_OPCODE(OP_CALL8),
+	&&HANDLE_OPCODE(OP_STATE),
+	&&HANDLE_OPCODE(OP_GOTO),
+	&&HANDLE_OPCODE(OP_AND),
+	&&HANDLE_OPCODE(OP_OR),
 
-	&&handle_OP_BITAND,
-	&&handle_OP_BITOR
+	&&HANDLE_OPCODE(OP_BITAND),
+	&&HANDLE_OPCODE(OP_BITOR)
 	    };
+#ifdef PRVM_VIEWINTERPRETER
+#define DISPATCH_OPCODE() do { ++st; PRVM_ViewOperands(prog, st, &view_a, &view_b); goto *dispatchtable[st->op]; } while (0)
+#else
 #define DISPATCH_OPCODE() \
     goto *dispatchtable[(++st)->op]
-#define HANDLE_OPCODE(opcode) handle_##opcode
+#endif
 
     DISPATCH_OPCODE();
 #else
@@ -138,6 +157,9 @@
 		while (1)
 		{
 			st++;
+#ifdef PRVM_VIEWINTERPRETER
+			PRVM_ViewOperands(prog, st, &view_a, &view_b);
+#endif
 #endif
 
 #if !USE_COMPUTED_GOTOS
@@ -157,37 +179,45 @@
 #endif
 			HANDLE_OPCODE(OP_ADD_F):
 				OPC->_float = OPA->_float + OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_ADD_V):
 				OPC->vector[0] = OPA->vector[0] + OPB->vector[0];
 				OPC->vector[1] = OPA->vector[1] + OPB->vector[1];
 				OPC->vector[2] = OPA->vector[2] + OPB->vector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 3);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_SUB_F):
 				OPC->_float = OPA->_float - OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_SUB_V):
 				OPC->vector[0] = OPA->vector[0] - OPB->vector[0];
 				OPC->vector[1] = OPA->vector[1] - OPB->vector[1];
 				OPC->vector[2] = OPA->vector[2] - OPB->vector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 3);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_MUL_F):
 				OPC->_float = OPA->_float * OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_MUL_V):
 				OPC->_float = OPA->vector[0]*OPB->vector[0] + OPA->vector[1]*OPB->vector[1] + OPA->vector[2]*OPB->vector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_MUL_FV):
 				tempfloat = OPA->_float;
 				OPC->vector[0] = tempfloat * OPB->vector[0];
 				OPC->vector[1] = tempfloat * OPB->vector[1];
 				OPC->vector[2] = tempfloat * OPB->vector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 3);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_MUL_VF):
 				tempfloat = OPB->_float;
 				OPC->vector[0] = tempfloat * OPA->vector[0];
 				OPC->vector[1] = tempfloat * OPA->vector[1];
 				OPC->vector[2] = tempfloat * OPA->vector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 3);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_DIV_F):
 				if( OPB->_float != 0.0f )
@@ -203,75 +233,99 @@
 					}
 					OPC->_float = 0.0f;
 				}
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_BITAND):
 				OPC->_float = (prvm_int_t)OPA->_float & (prvm_int_t)OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_BITOR):
 				OPC->_float = (prvm_int_t)OPA->_float | (prvm_int_t)OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_GE):
 				OPC->_float = OPA->_float >= OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_LE):
 				OPC->_float = OPA->_float <= OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_GT):
 				OPC->_float = OPA->_float > OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_LT):
 				OPC->_float = OPA->_float < OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_AND):
 				OPC->_float = FLOAT_IS_TRUE_FOR_INT(OPA->_int) && FLOAT_IS_TRUE_FOR_INT(OPB->_int);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_OR):
 				OPC->_float = FLOAT_IS_TRUE_FOR_INT(OPA->_int) || FLOAT_IS_TRUE_FOR_INT(OPB->_int);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NOT_F):
 				OPC->_float = !FLOAT_IS_TRUE_FOR_INT(OPA->_int);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NOT_V):
 				OPC->_float = !OPA->vector[0] && !OPA->vector[1] && !OPA->vector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NOT_S):
 				OPC->_float = !OPA->string || !*PRVM_GetString(prog, OPA->string);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NOT_FNC):
 				OPC->_float = !OPA->function;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NOT_ENT):
 				OPC->_float = (OPA->edict == 0);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_EQ_F):
 				OPC->_float = OPA->_float == OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_EQ_V):
 				OPC->_float = (OPA->vector[0] == OPB->vector[0]) && (OPA->vector[1] == OPB->vector[1]) && (OPA->vector[2] == OPB->vector[2]);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_EQ_S):
 				OPC->_float = !strcmp(PRVM_GetString(prog, OPA->string),PRVM_GetString(prog, OPB->string));
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_EQ_E):
 				OPC->_float = OPA->_int == OPB->_int;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_EQ_FNC):
 				OPC->_float = OPA->function == OPB->function;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NE_F):
 				OPC->_float = OPA->_float != OPB->_float;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NE_V):
 				OPC->_float = (OPA->vector[0] != OPB->vector[0]) || (OPA->vector[1] != OPB->vector[1]) || (OPA->vector[2] != OPB->vector[2]);
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NE_S):
 				OPC->_float = strcmp(PRVM_GetString(prog, OPA->string),PRVM_GetString(prog, OPB->string));
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NE_E):
 				OPC->_float = OPA->_int != OPB->_int;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_NE_FNC):
 				OPC->_float = OPA->function != OPB->function;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 
 			HANDLE_OPCODE(OP_STORE_F):
@@ -279,12 +333,14 @@
 			HANDLE_OPCODE(OP_STORE_FLD):
 			HANDLE_OPCODE(OP_STORE_S):
 			HANDLE_OPCODE(OP_STORE_FNC):
-				OPB->_int = OPA->_int;
+				OPB_WRITE->_int = OPA->_int;
+				VIEW_GLOBAL_WRITE(st->operand[1], 1);
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_STORE_V):
-				OPB->ivector[0] = OPA->ivector[0];
-				OPB->ivector[1] = OPA->ivector[1];
-				OPB->ivector[2] = OPA->ivector[2];
+				OPB_WRITE->ivector[0] = OPA->ivector[0];
+				OPB_WRITE->ivector[1] = OPA->ivector[1];
+				OPB_WRITE->ivector[2] = OPA->ivector[2];
+				VIEW_GLOBAL_WRITE(st->operand[1], 3);
 				DISPATCH_OPCODE();
 
 			HANDLE_OPCODE(OP_STOREP_F):
@@ -307,7 +363,11 @@
 					}
 				}
 				ptr = (prvm_eval_t *)(cached_edictsfields + OPB->_int);
+#ifdef PRVM_VIEWINTERPRETER
+				PRVM_ViewStore(prog, OPB->_int, &OPA->_int, 1);
+#else
 				ptr->_int = OPA->_int;
+#endif
 				DISPATCH_OPCODE();
 			HANDLE_OPCODE(OP_STOREP_V):
 				if ((prvm_uint_t)OPB->_int - cached_entityfields > (prvm_uint_t)cached_entityfieldsarea_entityfields_3)
@@ -325,9 +385,13 @@
 					}
 				}
 				ptr = (prvm_eval_t *)(cached_edictsfields + OPB->_int);
+#ifdef PRVM_VIEWINTERPRETER
+				PRVM_ViewStore(prog, OPB->_int, OPA->ivector, 3);
+#else
 				ptr->ivector[0] = OPA->ivector[0];
 				ptr->ivector[1] = OPA->ivector[1];
 				ptr->ivector[2] = OPA->ivector[2];
+#endif
 				DISPATCH_OPCODE();
 
 			HANDLE_OPCODE(OP_ADDRESS):
@@ -352,6 +416,7 @@
 				}
 #endif
 				OPC->_int = OPA->edict * cached_entityfields + OPB->_int;
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 
 			HANDLE_OPCODE(OP_LOAD_F):
@@ -372,7 +437,15 @@
 					goto cleanup;
 				}
 				ed = PRVM_PROG_TO_EDICT(OPA->edict);
+				#ifdef PRVM_VIEWINTERPRETER
+				view_field = PRVM_ViewReadFast(prog, OPA->edict, OPB->_int,
+					st->op == OP_LOAD_F ? ev_float : st->op == OP_LOAD_S ? ev_string :
+					st->op == OP_LOAD_ENT ? ev_entity : st->op == OP_LOAD_FLD ? ev_field : ev_function);
+				OPC->_int = view_field._int;
+#else
 				OPC->_int = ((prvm_eval_t *)(ed->fields.ip + OPB->_int))->_int;
+#endif
+				VIEW_GLOBAL_WRITE(st->operand[2], 1);
 				DISPATCH_OPCODE();
 
 			HANDLE_OPCODE(OP_LOAD_V):
@@ -389,10 +462,16 @@
 					goto cleanup;
 				}
 				ed = PRVM_PROG_TO_EDICT(OPA->edict);
+				#ifdef PRVM_VIEWINTERPRETER
+				view_field = PRVM_ViewReadFast(prog, OPA->edict, OPB->_int, ev_vector);
+				ptr = &view_field;
+#else
 				ptr = (prvm_eval_t *)(ed->fields.ip + OPB->_int);
+#endif
 				OPC->ivector[0] = ptr->ivector[0];
 				OPC->ivector[1] = ptr->ivector[1];
 				OPC->ivector[2] = ptr->ivector[2];
+				VIEW_GLOBAL_WRITE(st->operand[2], 3);
 				DISPATCH_OPCODE();
 
 			HANDLE_OPCODE(OP_IFNOT):
@@ -403,7 +482,7 @@
 					st = cached_statements + st->jumpabsolute - 1;
 					startst = st;
 
-					if (++jumpcount == 10000000 && prvm_runawaycheck)
+					if (++jumpcount == 10000000 && (prvm_view_recovery || prvm_runawaycheck))
 					{
 						prog->xstatement = st - cached_statements;
 						PRVM_Profile(prog, 1<<30, 1000000, 0);
@@ -420,7 +499,7 @@
 					st = cached_statements + st->jumpabsolute - 1;
 					startst = st;
 
-					if (++jumpcount == 10000000 && prvm_runawaycheck)
+					if (++jumpcount == 10000000 && (prvm_view_recovery || prvm_runawaycheck))
 					{
 						prog->xstatement = st - cached_statements;
 						PRVM_Profile(prog, 1<<30, 0.01, 0);
@@ -434,7 +513,7 @@
 				st = cached_statements + st->jumpabsolute - 1;
 				startst = st;
 
-				if (++jumpcount == 10000000 && prvm_runawaycheck)
+				if (++jumpcount == 10000000 && (prvm_view_recovery || prvm_runawaycheck))
 				{
 					prog->xstatement = st - cached_statements;
 					PRVM_Profile(prog, 1<<30, 0.01, 0);
@@ -521,10 +600,19 @@
 				ADVANCE_PROFILE_BEFORE_JUMP();
 				prog->xstatement = st - cached_statements;
 
+#ifdef PRVM_VIEWINTERPRETER
+				for (int i = 0; i < 3; ++i)
+				{
+					view_field = *PRVM_ViewOperand(prog, st->operand[0] + i, ev_void);
+					prog->globals.ip[OFS_RETURN + i] = view_field._int;
+				}
+#else
 				prog->globals.ip[OFS_RETURN  ] = prog->globals.ip[st->operand[0]  ];
 				prog->globals.ip[OFS_RETURN+1] = prog->globals.ip[st->operand[0]+1];
 				prog->globals.ip[OFS_RETURN+2] = prog->globals.ip[st->operand[0]+2];
+#endif
 
+				VIEW_GLOBAL_WRITE(OFS_RETURN, 3);
 				st = cached_statements + PRVM_LeaveFunction(prog);
 				startst = st;
 				if (prog->depth <= exitdepth)
@@ -577,3 +665,13 @@
 #undef USE_COMPUTED_GOTOS
 #undef PRE_ERROR
 #undef ADVANCE_PROFILE_BEFORE_JUMP
+
+#undef OPB_WRITE
+#ifdef PRVM_VIEWINTERPRETER
+#undef OPA
+#undef OPB
+#define OPA ((prvm_eval_t *)&prog->globals.fp[st->operand[0]])
+#define OPB ((prvm_eval_t *)&prog->globals.fp[st->operand[1]])
+#endif
+
+#undef VIEW_GLOBAL_WRITE

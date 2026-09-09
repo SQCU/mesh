@@ -13,18 +13,18 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", ".."))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "payload", "tools"))
 
-from payload.tools.strategy_io_schema import CS, EVT, OBS
+from payload.tools.strategy_io_schema import CS, EVT, OBS, TS
 
 OBS_LOG_COLUMNS = tuple(OBS)
 CART_LOG_COLUMNS = tuple(CS)
 EVT_LOG_COLUMNS = tuple(EVT)
-L_LEVELS = 8
+TEAM_LOG_COLUMNS = tuple(TS)
 
 def _floats(parts):
     return [float(value) for value in parts]
 
 def parse_server_log(path):
-    from payload.tools.strategy_io_schema import CART_WIDTH, EVT_WIDTH, OBS_WIDTH
+    from payload.tools.strategy_io_schema import CART_WIDTH, EVT_WIDTH, OBS_WIDTH, TEAM_WIDTH
 
     ticks = collections.OrderedDict()
     pool = None
@@ -38,17 +38,17 @@ def parse_server_log(path):
                 continue
             parts = line[index:].split()
             tag = parts[0]
-            if tag not in ("[PLCOBS]", "[PLCCART]", "[PLCEVT]", "[PLCPUB]"):
+            if tag not in ("[PLCOBS]", "[PLCCART]", "[PLCTEAM]", "[PLCEVT]", "[PLCPUB]"):
                 continue
             if tag == "[PLCPUB]":
                 continue
             try:
                 seq = int(float(parts[1]))
                 key = int(float(parts[2]))
-                values = _floats(parts[3:])
+                values = _floats(parts[2:] if tag == "[PLCTEAM]" else parts[3:])
             except ValueError:
                 continue
-            tick = ticks.setdefault(seq, {"seq": seq, "obs": [], "cart": [], "evt": [], "edicts": []})
+            tick = ticks.setdefault(seq, {"seq": seq, "obs": [], "cart": [], "team": [], "evt": [], "edicts": []})
             if tag == "[PLCOBS]" and len(values) == len(OBS_LOG_COLUMNS):
                 row = np.zeros(OBS_WIDTH, dtype=np.float32)
                 for name, value in zip(OBS_LOG_COLUMNS, values):
@@ -60,6 +60,8 @@ def parse_server_log(path):
                 for name, value in zip(CART_LOG_COLUMNS, values):
                     row[CS[name]] = value
                 tick["cart"].append((key, row))
+            elif tag == "[PLCTEAM]" and len(values) == len(TEAM_LOG_COLUMNS):
+                tick["team"].append((key, np.asarray(values, dtype=np.float32)))
             elif tag == "[PLCEVT]" and len(values) == len(EVT_LOG_COLUMNS):
                 row = np.zeros(EVT_WIDTH, dtype=np.float32)
                 for name, value in zip(EVT_LOG_COLUMNS, values):
@@ -68,73 +70,26 @@ def parse_server_log(path):
     out = []
     for seq, tick in ticks.items():
         carts = [row for _, row in sorted(tick["cart"], key=lambda item: item[0])]
+        teams = [row for _, row in sorted(tick["team"], key=lambda item: item[0])]
         out.append({
             "seq": seq,
             "obs": np.stack(tick["obs"]) if tick["obs"] else np.zeros((0, OBS_WIDTH), dtype=np.float32),
             "cart": np.stack(carts) if carts else np.zeros((0, CART_WIDTH), dtype=np.float32),
+            "team": np.stack(teams) if teams else np.zeros((0, TEAM_WIDTH), dtype=np.float32),
             "evt": np.stack(tick["evt"]) if tick["evt"] else np.zeros((0, EVT_WIDTH), dtype=np.float32),
             "edicts": tick["edicts"],
         })
     return out, (pool or [])
 
-def _batch_for(tick, belief=None):
-    from solver.strat.instruments import CartTarget, Participant, build_instruments
-    from solver.strat.live_belief import LiveBelief
-
-    rows = tick["obs"]
-    active = np.flatnonzero(np.asarray(rows[:, OBS["TEAM"]], dtype=np.int64) >= 1)
-    rows = rows[active]
-    if not len(rows):
-        return None, rows
-    participants = [
-        Participant(
-            int(rows[p, OBS["ID"]]), int(rows[p, OBS["TEAM"]]),
-            (int(rows[p, OBS["CELL_X"]]), int(rows[p, OBS["CELL_Y"]])),
-            tuple(float(v) for v in rows[p, OBS["POS_X"]:OBS["POS_Z"] + 1]),
-            float(rows[p, OBS["ALIVE"]]),
-            float(rows[p, OBS["HEALTH"]]), float(rows[p, OBS["ARMOR"]]),
-            tuple(float(rows[p, OBS[name]]) for name in (
-                "AMMO_SHELLS", "AMMO_BULLETS", "AMMO_ROCKETS",
-                "AMMO_CELLS", "AMMO_PLASMA", "AMMO_FUEL",
-            )),
-            float(rows[p, OBS["SPAWN_TIME"]]), float(rows[p, OBS["ENGINE_TIME"]]),
-        )
-        for p in range(len(rows))
-    ]
-    carts = [
-        CartTarget(
-            int(row[CS["ID"]]), int(row[CS["CONTROL_TEAM"]]),
-            float(row[CS["PATH_POSITION"]]), float(row[CS["PATH_LENGTH"]]),
-            float(row[CS["SPEED"]]),
-            (float(row[CS["POS_X"]]), float(row[CS["POS_Y"]]), float(row[CS["POS_Z"]])),
-        )
-        for row in tick["cart"]
-    ]
-    if belief is None:
-        belief = LiveBelief()
-    if len(tick["evt"]):
-        belief.ingest(tick["evt"], EVT)
-    belief.chorus(rows, OBS)
-    items, rivals, cells = belief.instrument_targets(rows, OBS)
-    return build_instruments(
-        participants, carts, items, rivals, cells,
-        navigation=belief.navigation_vcmap,
-    ), rows
-
 def cmd_rows(args):
-    from solver.strat.live_belief import LiveBelief
-
     ticks, pool = parse_server_log(args.log)
-    belief = LiveBelief()
     written = 0
     nonzero = collections.Counter()
     with open(args.out, "w") as handle:
         for tick in ticks:
             if not len(tick["obs"]) or not len(tick["cart"]):
                 continue
-            batch, rows = _batch_for(tick, belief)
-            if batch is None:
-                continue
+            rows = tick["obs"]
             for name in OBS_LOG_COLUMNS:
                 if np.any(np.abs(rows[:, OBS[name]]) > 0):
                     nonzero[name] += 1
@@ -144,11 +99,9 @@ def cmd_rows(args):
                 "obs": rows[:, [OBS[name] for name in OBS_LOG_COLUMNS]].tolist(),
                 "cart_columns": list(CART_LOG_COLUMNS),
                 "cart": tick["cart"][:, [CS[name] for name in CART_LOG_COLUMNS]].tolist(),
+                "team_columns": list(TEAM_LOG_COLUMNS),
+                "team": tick["team"].tolist(),
                 "evt": tick["evt"].tolist(),
-                "instrument_kinds": [inst.kind.value for inst in batch.instruments],
-                "instrument_subjects": [inst.subject for inst in batch.instruments],
-                "z": batch.descriptors.tolist(),
-                "action_mass": batch.action_mass.tolist(),
             }) + "\n")
             written += 1
     summary = {
@@ -163,76 +116,46 @@ def cmd_rows(args):
     print(json.dumps(summary, indent=2))
 
 def cmd_cgt(args):
-    from solver.strat.game_value import evaluate_cartstate
-    from solver.strat.runtime import formal_projection_record, formal_value_record
+    from solver.strat.game_value import GAME_CONTRACT
+    from solver.strat.game_value import cart_snapshot_record, formal_game_value, formal_projection_record, formal_value_record, GameContext
 
-    source_measures = collections.Counter()
-    closed_measures = collections.Counter()
-    nimbers = collections.Counter()
     residuals = collections.Counter()
-    missing = collections.Counter()
     compared = collections.Counter()
-    total = 0
+    obsolete = total = 0
+    previous = None
     with open(args.telemetry) as handle:
         for raw in handle:
-            try:
-                line = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+            line = json.loads(raw)
             value = line.get("game_value")
             if not value:
                 continue
-            total += 1
-            for name in (
-                "reachable_state_mass", "reachable_role_state_mass",
-                "enumerated_role_state_mass",
-                "role_option_symmetric_difference_mass", "cycle_state_mass",
-            ):
-                if isinstance(value.get(name), (int, float)):
-                    source_measures[name] += value[name]
-            _, _, k, depths, controls = value["state"]
-            levels = value.get("levels", args.levels if args.levels is not None else L_LEVELS)
-            result = evaluate_cartstate(depths, controls, list(range(int(k))), int(levels))
-            closed_measures["reachable_state_mass"] += result.reachable_state_mass
-            closed_measures["reachable_role_state_mass"] += result.reachable_role_state_mass
-            closed_measures["enumerated_role_state_mass"] += result.enumerated_role_state_mass
-            closed_measures["role_option_symmetric_difference_mass"] += result.role_option_symmetric_difference_mass
-            closed_measures["cycle_state_mass"] += result.cycle_state_mass
-            if result.nimber is not None:
-                nimbers[result.nimber] += 1
-            expected = formal_value_record(result, value["state"], levels)
-            expected.pop("state")
-            expected.pop("levels")
+            if value.get("contract") != GAME_CONTRACT:
+                obsolete += 1
+                continue
+            snapshot = cart_snapshot_record(value["state"])
+            teams = tuple(range(len(snapshot.scores)))
+            result = formal_game_value(GameContext(teams, ()), snapshot)
+            expected = formal_value_record(result, snapshot)
             for name, target in expected.items():
-                if name not in value:
-                    missing[name] += 1
-                else:
-                    compared[name] += 1
-                    residuals[name] += int(value[name] != target)
-            wire = formal_projection_record(result, range(int(k)))
-            for name, target in wire.items():
-                if name not in line:
-                    missing[name] += 1
-                else:
-                    compared[name] += 1
-                    residuals[name] += int(line[name] != target)
-            if "levels" not in value:
-                missing["levels"] += 1
-            else:
-                compared["levels"] += 1
-                residuals["levels"] += int(int(value["levels"]) != int(levels))
+                compared[name] += 1
+                residuals[name] += int(value.get(name) != target)
+            for name, target in formal_projection_record(result, teams).items():
+                compared[name] += 1
+                residuals[name] += int(line.get(name) != target)
+            residuals["checkpoint_accounting"] += sum(abs(int(v)) for v in expected["held_checkpoint_residual"])
+            if previous is not None and previous.episode == snapshot.episode:
+                residuals["score_decrease"] += int(np.sum(snapshot.scores < previous.scores))
+                compared["score_decrease"] += len(teams)
+            previous = snapshot
+            total += 1
     print(json.dumps({
         "telemetry": os.path.abspath(args.telemetry),
+        "game_contract": GAME_CONTRACT,
         "lines_with_a_cart_game_value": total,
-        "source_measure_integrals": dict(source_measures),
-        "closed_form_measure_integrals": dict(closed_measures),
-        "closed_form_nimber_measure": {str(key): value for key, value in nimbers.items()},
-        "closed_form_nimber_atom_mass": sum(nimbers.values()),
+        "obsolete_game_records": obsolete,
         "semantic_coordinate_measure": dict(compared),
         "semantic_residual_measure": dict(residuals),
         "semantic_residual_mass": sum(residuals.values()),
-        "missing_semantic_coordinate_measure": dict(missing),
-        "missing_semantic_coordinate_mass": sum(missing.values()),
     }, indent=2))
 
 def _tensor_measure(observed, reference):
@@ -268,8 +191,8 @@ def cmd_matrix(args):
     import mlx.core as mx
 
     from solver.strat.dpp import dpp_marginals
+    from solver.strat.paged_matrix import PAGE_ROWS, TILE
     from solver.strat.matmul import (
-        matrix_execution_schedule,
         matrix_multiply,
         matrix_multiply_transpose_left,
         matrix_multiply_transpose_right,
@@ -341,9 +264,9 @@ def cmd_matrix(args):
             },
             "flops_per_sample": int(2 * rows * inner * columns),
             "execution": {
-                "forward": matrix_execution_schedule(*reference.shape),
-                "reverse_left": matrix_execution_schedule(*reverse_reference[0].shape),
-                "reverse_right": matrix_execution_schedule(*reverse_reference[1].shape),
+                "forward": f"paged_{PAGE_ROWS}x{TILE}",
+                "reverse_left": f"paged_{PAGE_ROWS}x{TILE}",
+                "reverse_right": f"paged_{PAGE_ROWS}x{TILE}",
             },
         }
     quality = np.log1p(np.exp(rng.standard_normal(rows, dtype=np.float32))).astype(np.float32)
@@ -391,7 +314,6 @@ def main(argv=None):
 
     cgt = sub.add_parser("cgt", help="cart-subgame resolve rate over real telemetry")
     cgt.add_argument("telemetry")
-    cgt.add_argument("--levels", type=int)
     cgt.set_defaults(func=cmd_cgt)
 
     matrix = sub.add_parser("matrix", help="owned matrix and DPP numerical measures")

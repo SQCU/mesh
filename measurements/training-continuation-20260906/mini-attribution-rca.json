@@ -1,0 +1,45 @@
+{
+  "directory": "/tmp/mesh-continuation-validation/measurements/runtime-1788689526249039000",
+  "transport": "isolated_shared_memory_and_unix_datagrams_no_verbs",
+  "checks": {
+    "initial_updates": true,
+    "graceful_restart_updates": true,
+    "crash_after_durable_action": true,
+    "journal_replay_updates": true,
+    "engine_outcome_checkpointed": true,
+    "terminal_restart": true,
+    "outcome_exactly_once": true,
+    "outcome_without_transient_events": true,
+    "engine_restart_replays_disk_outcome": true
+  },
+  "outcome": {
+    "episode_id": "162:2075049:1",
+    "event": {
+      "kind": "tie",
+      "actor_team": 0,
+      "time": 22.7000789642334,
+      "episode_id": "162:2075049:1",
+      "source": "engine_durable_journal"
+    },
+    "learning_outcomes": {
+      "terminal_win": 0
+    },
+    "checkpoint": "/tmp/mesh-continuation-validation/measurements/runtime-1788689526249039000/policy.npz.runstate.npz",
+    "responses": 43
+  },
+  "updates": 42,
+  "pending_episode_state": {
+    "current": "162:2075049:1",
+    "awaiting": [],
+    "outcomes": {
+      "162:2075049:1": 0
+    }
+  },
+  "actor_rows": 9,
+  "unmatched_rows": 124,
+  "view_faults": 0,
+  "max_state_words": 509696,
+  "checkpoint_bytes": 4377579,
+  "bundle_bytes": 5771183,
+  "j_revisions": 10
+}

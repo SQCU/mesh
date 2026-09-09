@@ -2291,6 +2291,7 @@ void NetConn_ClientFrame(void)
 	lhnetaddress_t peeraddress;
 	unsigned char readbuffer[NET_HEADERSIZE+NET_MAXMESSAGE];
 	NetConn_UpdateSockets();
+	CL_ReconnectFrame();
 	if (cls.connect_trying && cls.connect_nextsendtime < realtime)
 	{
 #ifdef CONFIG_MENU

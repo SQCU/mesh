@@ -392,6 +392,7 @@ def summarize_points(samples, target_memory_fraction, bandwidth_node=None,
 class LiveOperatingProfile:
     def __init__(self, specification, teams, carts, ceiling, initial, environment, output):
         self.specification = dict(specification or {})
+        self.fixed_population = bool(self.specification.get("fixed_population"))
         self.environment = str(environment)
         self.output = output
         self.teams = max(1, int(teams))
@@ -541,7 +542,12 @@ class LiveOperatingProfile:
     def poll(self, server, now=None):
         now = time.monotonic() if now is None else float(now)
         if self.current is None:
-            self._advance(server, now, self.initial)
+            if self.fixed_population:
+                self.current = self.initial
+                self.targets.append(self.current)
+                self.level_started = now
+            else:
+                self._advance(server, now, self.initial)
             return
         if self.search_exhausted_mass or now < self.next_sample:
             return
@@ -563,7 +569,7 @@ class LiveOperatingProfile:
         except Exception as exc:
             self.events.append({"at": time.time(), "target_bots": self.current, "sample_error": f"{type(exc).__name__}: {exc}"})
         self.next_sample = now + self.period
-        if self.level_samples >= self.samples_per_level:
+        if not self.fixed_population and self.level_samples >= self.samples_per_level:
             self._choose_next(server, now)
 
     def finish(self):
@@ -573,6 +579,7 @@ class LiveOperatingProfile:
         )
         result = {
             "schema": 2,
+            "fixed_population": self.fixed_population,
             "environment": self.environment,
             "targets": self.targets,
             "teams": self.teams,

@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import mapsrc as MS
 import mapgen as G
 import mkentfile as M
+import navmesh as NAV
 import negspace as NS
 import placement as P
 from rdma.workload import WorkloadMeter
@@ -25,10 +26,10 @@ from rdma.workload import WorkloadMeter
 BSP_COORDINATE_EXTENT = 65536.0
 
 def transfer_site(source):
-    component = [index for index in M.largest_component(source.navadj)
+    component = [index for index in max(NAV.components(source.navadj), key=len, default=[])
                  if tuple(round(value, 1) for value in source.navnodes[index]) in source.wpset]
     if not component:
-        component = M.largest_component(source.navadj)
+        component = max(NAV.components(source.navadj), key=len, default=[])
     choices = []
     for index in component:
         point = [float(value) for value in source.navnodes[index]]

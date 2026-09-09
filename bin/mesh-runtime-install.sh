@@ -12,6 +12,7 @@ mesh_current="$mesh_target/runtime-current"
 if cmp -s "$mesh_source/uv.lock" "$mesh_current/uv.lock" \
     && cmp -s "$mesh_source/pyproject.toml" "$mesh_current/pyproject.toml" \
     && cmp -s "$mesh_source/.python-version" "$mesh_current/.python-version" \
+    && UV_PROJECT_ENVIRONMENT="$mesh_current/.venv" "$mesh_target/bin/uv" sync --project "$mesh_current" --frozen --no-dev --check \
     && "$mesh_current/.venv/bin/python" -c 'import mlx.core,numpy'; then
   echo "mesh runtime retained: $mesh_current"
 else

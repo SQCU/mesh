@@ -1,7 +1,7 @@
 import struct, sys, os, math, subprocess, time
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import mkentfile as M
+import navmesh as NAV
 import negspace as NS
 from negspace import box_H
 
@@ -249,9 +249,9 @@ class Src:
         for name, value in measures.items():
             setattr(self, name, value)
         closed_cache = '\n'.join(vstr(a) + '*' + vstr(b) for a, b in self.cachelinks)
-        self.navnodes, self.navadj = M.parse_cache(closed_cache)
+        self.navnodes, self.navadj = NAV.parse_cache(closed_cache)
         self.wpset = {tuple(round(x, 1) for x in m1) for m1, m2, fl in self.wptriples
-                      if m1 == m2 and not fl & M.WPF_BAD}
+                      if m1 == m2 and not fl & NAV.WPF_CART_TRANSITION}
 
         self.solidtex = [t[2] & 1 == 1 for t in self.textures]
         self.cliptex = [bool(t[2] & 0x430000) for t in self.textures]
@@ -331,10 +331,10 @@ def map_sites(src, maxsites=12, minsep=1024.0):
     if got is not None:
         return got
     ns = src.ns
-    comp = [i for i in M.largest_component(src.navadj)
+    comp = [i for i in max(NAV.components(src.navadj), key=len, default=[])
             if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
     if not comp:
-        comp = M.largest_component(src.navadj)
+        comp = max(NAV.components(src.navadj), key=len, default=[])
     cand = []
     for d in SITE_DIRS:
         axis = 0 if abs(d[0]) > 0.5 else 1
@@ -419,10 +419,10 @@ def walk_nodes(src):
     got = getattr(src, '_walk', None)
     if got is not None:
         return got
-    comp = [i for i in M.largest_component(src.navadj)
+    comp = [i for i in max(NAV.components(src.navadj), key=len, default=[])
             if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
     if not comp:
-        comp = M.largest_component(src.navadj)
+        comp = max(NAV.components(src.navadj), key=len, default=[])
     if not comp:
         comp = list(range(len(src.navnodes)))
     P = [list(src.navnodes[i]) for i in comp]
@@ -567,7 +567,7 @@ def load_src(n, outdir, pk3, with_ns=True, quiet=False):
     else:
         data = pk3_read(pk3, 'maps/%s.bsp' % n)
         wp = pk3_read(pk3, 'maps/%s.waypoints' % n).decode('latin-1')
-        cache = M.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
+        cache = NAV.load_cache(n, os.path.join(outdir, n + '.bsp'), pk3)[0]
     src = Src(n, data, wp, cache, with_ns=with_ns)
     if not quiet:
         print('src %s: bounds %s %s models=%d faces=%d brushes=%d wp=%d links=%d' %

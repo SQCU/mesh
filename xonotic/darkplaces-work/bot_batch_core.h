@@ -24,11 +24,15 @@ enum
 	BOT_BATCH_KEYBOARD_Y,
 	BOT_BATCH_KEYBOARD_Z,
 	BOT_BATCH_CROUCH,
+	BOT_BATCH_NOW,
+	BOT_BATCH_SKILL,
+	BOT_BATCH_MAXSPEED,
+	BOT_BATCH_TRIGGER,
+	BOT_BATCH_DISTANCE,
 	BOT_BATCH_FIELDS
 };
 
-static void BotBatchKernel(float *data, size_t stride, size_t rows, float now,
-	float skill, float maxspeed, float trigger, float distance)
+static void BotBatchKernel(float *data, size_t stride, size_t rows)
 {
 	float *mx = data + BOT_BATCH_MOVE_X * stride;
 	float *my = data + BOT_BATCH_MOVE_Y * stride;
@@ -55,6 +59,9 @@ static void BotBatchKernel(float *data, size_t stride, size_t rows, float now,
 #endif
 	for (i = 0; i < rows; i++)
 	{
+		float now = data[BOT_BATCH_NOW * stride + i], skill = data[BOT_BATCH_SKILL * stride + i];
+		float maxspeed = data[BOT_BATCH_MAXSPEED * stride + i], trigger = data[BOT_BATCH_TRIGGER * stride + i];
+		float distance = data[BOT_BATCH_DISTANCE * stride + i];
 		float sk = skill + ms[i];
 		float x = mx[i] / maxspeed;
 		float y = my[i] / maxspeed;

@@ -1,5 +1,9 @@
 # Xonotic client release contract
 
+Live frame-interval measurements and the scheduling/quality-feedback correction are
+recorded in [FRAME-PACING.md](FRAME-PACING.md). Throughput captures below are not
+evidence of live 30/60 Hz frame pacing under particle bursts.
+
 ## Provenance
 
 The PBR and ink assignment first landed on `main` in a change whose title discussed
@@ -69,10 +73,12 @@ library beside the remote executable as part of the same runtime generation.
 `client-keep.sh` gives the client a stable session identity and one append-only log
 per generation. It adopts only an exact matching process, reconciles lock owners,
 uses TERM for executable replacement, detects executable generation changes by
-inode, and separates process, connection, and renderer health. An explicit timeout,
-disconnect, or host error replaces that generation once so the configured connection is
-re-established. Each generation's connectivity state is read only from its own log, so a
-prior disconnect cannot create a polling-period restart loop. A renderer failure is
+inode, and separates process, connection, and renderer health. The engine retains the requested endpoint and retries after DNS failure, exhausted
+handshakes, connection timeout, or host error. The retry re-resolves the hostname and
+keeps the same window. An explicit user `disconnect` cancels that request.
+`cl_autoreconnect` defaults to one; demo playback and local games retain their own
+connection ownership. The keeper reports connection recovery without replacing the
+process. Each generation's connectivity state is read only from its own log. A renderer failure is
 reported as degraded instead of hidden by a restart loop. Launchers address `mesh-mini` by its stable SSH name;
 address discovery is reporter data and does not replace SSH configuration.
 Shutdown waits for the engine's orderly TERM path to retire and writes process-absent
@@ -119,3 +125,17 @@ faithful, materially legible view of their consequences. The manifest-bound buil
 set prevents an observer from attributing stale client behavior to current strategy
 code. If paint later becomes an optimizer input, it must enter `STRATEGY-IO.md` as
 explicit measured state rather than being inferred from pixels.
+
+## Runtime connection recovery, September 5, 2026
+
+`cl_main.c` owns the remembered endpoint and retry schedule; `netconn.c` calls it
+every client frame. `Curriculum.reconcile_clients` owns process liveness and sends
+endpoint changes through the existing client stdin. A failed launch is reported and
+retried after three seconds. These owners separate network reconnection from process
+replacement without requiring a viewer or shell keeper to reconnect the engine.
+
+A live UDP proxy withheld game packets for eight seconds while the real Mini server
+and training continued. The client timed out, retried, and reconnected in the same
+process after traffic resumed, then connected directly to the Mini. Evidence is in
+`.build/client-connect-20260905/live-test.json` and `client-live.log`. The runtime
+supervisor was subsequently reloaded to own and reconcile the live client process.

@@ -1,0 +1,54 @@
+{
+  "directory": ".build/representation-20260906/runtime-1788738437785960000",
+  "transport": "isolated_shared_memory_and_unix_datagrams_no_verbs",
+  "checks": {
+    "initial_updates": true,
+    "graceful_restart_updates": true,
+    "crash_after_durable_action": true,
+    "journal_replay_updates": true,
+    "engine_outcome_checkpointed": true,
+    "terminal_restart": true,
+    "outcome_exactly_once": true,
+    "outcome_without_transient_events": true,
+    "every_observed_execution_has_source": true,
+    "engine_restart_replays_disk_outcome": true
+  },
+  "outcome": {
+    "episode_id": "24980:3190525:1",
+    "event": {
+      "kind": "tie",
+      "actor_team": 0,
+      "time": 51.00005340576172,
+      "episode_id": "24980:3190525:1",
+      "source": "engine_durable_journal"
+    },
+    "learning_outcomes": {
+      "terminal_win": 0
+    },
+    "checkpoint": "/Users/mdot/dox/mesh/.build/representation-20260906/runtime-1788738437785960000/policy.npz.runstate.npz",
+    "responses": 16
+  },
+  "updates": 15,
+  "pending_episode_state": {
+    "current": "24980:3190525:1",
+    "awaiting": [],
+    "outcomes": {
+      "24980:3190525:1": 0
+    }
+  },
+  "completed_episodes": 1,
+  "truncated_episodes": 0,
+  "actor_rows": 17,
+  "unmatched_rows": 0,
+  "snapshots_superseded": 89,
+  "view_faults": 0,
+  "max_state_words": 509952,
+  "checkpoint_bytes": 8345483,
+  "bundle_bytes": 19266388,
+  "j_revisions": 5,
+  "replayed_outcomes": [
+    "24980:3190525:1",
+    "24980:3190525:2",
+    "24980:3190525:3"
+  ]
+}
