@@ -126,3 +126,27 @@ Only the two endpoints of a compiled edge exchange pages for it. The bridge
 routes bytes and holds no schedule. A participant that merely forwards
 (`hops`) has no authority over the edge. Constants are computed once at launch;
 a caller that recomputes them per invocation is defective.
+
+## Indexed consumption of resident pages
+
+`mesh_pages_select(p, slots, count, group, generation, consumed, indices)`
+compacts the ready group indices into caller-owned storage. The caller binds
+valid slot indices with equal page counts, a nonzero group width dividing that
+count, and masks/index storage sized to the number of groups. A single consumer
+owns each mask. No allocation or waiting occurs in selection.
+
+For a group `i`, let `J_i` be its page indices and `S` its input slots:
+
+```
+ready_i = (consumed_i != g) & AND[s in S, j in J_i](stamp_sj == g & table_sj != ABSENT)
+indices = compact(i, ready_i)
+consumed_i = select(ready_i, g, consumed_i)
+```
+
+Readiness uses acquire loads. Receive publication stores the physical address
+before releasing the generation stamp, so observing a new generation cannot
+expose the previous address. `mesh_pages_data` resolves an existing selected
+entry into the registered payload. Dependency ownership must remain held while
+that payload is consumed. Recovery resets the consumer masks when generations
+restart. The producer/consumer arithmetic and the meaning of a group remain
+outside mesh.

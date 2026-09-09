@@ -150,6 +150,23 @@ size_t mesh_pages_header(const mesh_pages *p){ (void)p; return header_bytes(); }
 size_t mesh_pages_payload(const mesh_pages *p){ return p->M->pgsz-header_bytes(); }
 const uint32_t *mesh_pages_entries(const mesh_pages *p, uint32_t slot){ return slot<p->count?p->slots[slot].table:NULL; }
 const uint64_t *mesh_pages_stamps(const mesh_pages *p, uint32_t slot){ return slot<p->count?p->slots[slot].stamp:NULL; }
+void *mesh_pages_data(const mesh_pages *p,uint32_t slot,uint32_t page){
+  return payload_at(p,__atomic_load_n(&p->slots[slot].table[page],__ATOMIC_ACQUIRE)); }
+size_t mesh_pages_select(const mesh_pages *p,const uint32_t *slots,size_t count,
+    uint32_t group,uint64_t generation,uint64_t *consumed,uint32_t *indices){
+  size_t selected=0, groups=p->slots[slots[0]].spec.pages/group;
+  for(size_t i=0;i<groups;i++){
+    unsigned ready=consumed[i]!=generation;
+    for(size_t j=0;j<count;j++) for(uint32_t k=0;k<group;k++){
+      const struct slot *s=&p->slots[slots[j]]; size_t page=i*group+k;
+      ready&=__atomic_load_n(&s->stamp[page],__ATOMIC_ACQUIRE)==generation;
+      ready&=__atomic_load_n(&s->table[page],__ATOMIC_ACQUIRE)!=ABSENT;
+    }
+    indices[selected]=(uint32_t)i; selected+=ready;
+    consumed[i]=ready?generation:consumed[i];
+  }
+  return selected;
+}
 uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation){
   if(slot>=p->count || !generation) return 0;
   const struct slot *s=&p->slots[slot]; uint32_t k=parity(p,generation);
@@ -247,7 +264,6 @@ static void release_dependencies(mesh_pages *p, struct slot *s, uint32_t page, u
   }
 }
 static void arrive(mesh_pages *p, struct slot *s, uint32_t page, uint32_t physical, uint64_t generation){
-  __atomic_store_n(&s->stamp[page],generation,__ATOMIC_RELEASE);
   __atomic_store_n(&s->table[page],physical,__ATOMIC_RELEASE);
   if(s->fault_generation!=generation){
     s->fault_generation=generation; s->fault_have=0;
@@ -268,6 +284,7 @@ static void arrive(mesh_pages *p, struct slot *s, uint32_t page, uint32_t physic
       p->faults++; s->fault_have=4;
     }
   }
+  __atomic_store_n(&s->stamp[page],generation,__ATOMIC_RELEASE);
   filled(p,s,generation);
 }
 static void offer(mesh_pages *p, size_t i){
@@ -358,7 +375,7 @@ static void transmit(mesh_pages *p, size_t i){
       for(;bits;bits&=bits-1){
         uint32_t page=(uint32_t)(w*64+(size_t)__builtin_ctzll(bits));
         if(s->stamp[page]>=generation) continue;
-        s->stamp[page]=generation;
+        __atomic_store_n(&s->stamp[page],generation,__ATOMIC_RELEASE);
         release_dependencies(p,s,page,generation);
         if(s->transported) s->pending[w]|=UINT64_C(1)<<(page%64);
         filled(p,s,generation);

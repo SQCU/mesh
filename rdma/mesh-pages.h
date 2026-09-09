@@ -27,6 +27,8 @@ static inline uint64_t mesh_pages_load(const uint64_t *word){ return __atomic_lo
 void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
 size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count,
   uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
+void *mesh_pages_data(const mesh_pages *p, uint32_t slot, uint32_t page);
+size_t mesh_pages_select(const mesh_pages *p, const uint32_t *slots, size_t count, uint32_t group, uint64_t generation, uint64_t *consumed, uint32_t *indices);
 uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation);
 uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot);
 
