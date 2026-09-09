@@ -415,3 +415,24 @@ acceptance and still gives vocabulary an overly broad all-hidden-rows input.
 These remaining execution dependencies must be removed alongside correct page
 lifetimes. Local-page recycling, foreign numerical storage and accumulator/index
 page reduction remain open; canonical selection alone does not satisfy them.
+
+### Tensor input representation failure and correction
+
+Metal-microbench `352481c` attempted a column-major page-backed attention input
+by accepting non-unit innermost tensor stride. Its two peers agreed but produced
+logits with relative RMS difference 0.345177 from the previous validated source.
+This is a recorded implementation failure, not an acceptable approximation.
+`a50294e` and `be8ec34` then failed Metal compilation while realizing the required
+transpose specialization. These failures and source revisions are retained in
+`metal-microbench/docs/data/dataflow_tensor_attention_oriented_rdma_2026-09-09.json`.
+
+`a70a02a` gives the physical tensor unit innermost stride and specializes the
+left-transpose descriptor, extents and slices before invocation. The M4 input
+now reads actual sendable page payloads with the tensor backend retained. All
+262144 logits match the previous validated revision byte for byte on both
+participants; each completed 24 two-layer evaluations with 96 agreements.
+This corrects the input representation only. Q/K/V, attended values and weights
+remain outstanding operand-storage obligations. The mechanism follows indexed
+operand views scoped by Papadopoulos and Culler in the canonical bibliography;
+backend validity and peer agreement each remain insufficient without numerical
+comparison.
