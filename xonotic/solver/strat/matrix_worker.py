@@ -81,10 +81,9 @@ def main():
                 report('runtime_progress', received_frames=transport.received, sent_frames=transport.sent,
                        game_clients=len(transport.clients), queued_network_frames=transport.queued(), **worker.report())
                 status_at = now + 5
-            if not activity: time.sleep(.0005)
     finally:
         worker.close()
-        transport.close(time.monotonic() + 30)
+        transport.close()
         service.close()
         try:
             os.unlink(args.socket)
