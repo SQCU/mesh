@@ -311,3 +311,7 @@ PPO actor credit. The policy dashboard at `http://127.0.0.1:8795/policy` exposes
 per-policy learning and observed-outcome measures. Full J matrices remain in the node's
 latest record and the match's `j-measures.PID.GENERATION.json` artifacts; they are not
 repeated in the interactive polling payload.
+
+An explicit `--remote-basedir` names existing game data on the peer and is used
+in place without retransmitting the local archive collection. The realized
+match userdir still supplies its selected BSP, entity data and payload configuration.

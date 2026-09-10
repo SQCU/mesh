@@ -556,7 +556,7 @@ class Curriculum:
                 self.ssh_prefix + [self.server_host, "--", "mkdir", "-p", remote_directory, remote_data, os.path.dirname(self.remote_engine)],
                 ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), engine_source, f"{self.server_host}:{self.remote_engine}"],
                 ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), engine_library, f"{self.server_host}:{os.path.dirname(self.remote_engine)}/"],
-                ["rsync", "-aL", "-e", shlex.join(self.ssh_prefix), os.path.join(self.basedir, "data") + "/", f"{self.server_host}:{remote_data}/"],
+                *([] if self.args.remote_basedir else [["rsync", "-aL", "-e", shlex.join(self.ssh_prefix), os.path.join(self.basedir, "data") + "/", f"{self.server_host}:{remote_data}/"]]),
                 ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), entity["userdir"], f"{self.server_host}:{remote_directory}/"],
             ]
         server_values = {
