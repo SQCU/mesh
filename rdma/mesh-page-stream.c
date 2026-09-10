@@ -43,18 +43,23 @@ int main(int argc,char **argv){
   if(!receive) for(uint32_t i=0;i<n;i++){
     uint64_t *data=(void*)mesh_at(memory,physical+i);
     for(uint32_t j=0;j<pages->bytes/sizeof *data;j++) data[j]=((uint64_t)i<<32)^j^UINT64_C(0x6d65736870616765);
-    mesh_rows_map(pages,i,physical+i,1,source.uses[i],0);
   }
+  uint32_t *indices=receive?NULL:malloc((size_t)n*sizeof *indices);
   printf("page_stream_ready role=%s bytes=%llu pages=%u page_bytes=%u arena_pages=%zu\n",
     argv[1],(unsigned long long)bytes,n,pages->bytes,context->allocation); fflush(stdout);
   uint64_t bad=atomic_load_explicit(&memory->bad,memory_order_relaxed);
   double begin=seconds(),deadline=begin+timeout,first=0,low=0,high=0,end=0;
-  if(!receive) for(uint32_t i=0;i<n;i++) mesh_rows_publish(pages,&function,i,1);
-  double publication_end=seconds();
+  if(!receive){
+    size_t count=mesh_rows_issue(pages,&function,1,indices,n);
+    if(count!=n) status=1;
+    for(size_t i=0;i<count/2;i++){ uint32_t x=indices[i]; indices[i]=indices[count-i-1]; indices[count-i-1]=x; }
+    mesh_rows_complete(pages,&function,1,indices,count);
+  }
+  double submission_end=seconds();
   uint32_t completed=0,first_count=0,low_count=0,high_count=0;
   uint64_t polls=0;
   while(completed<n && !stopped && seconds()<deadline){
-    mesh_rows_poll(context); polls++;
+    polls++;
     uint32_t previous=completed;
     while(completed<n && (receive?
       __atomic_load_n(&pages->table[completed].stamp,__ATOMIC_ACQUIRE)==1:
@@ -72,10 +77,10 @@ int main(int argc,char **argv){
       mismatches+=data[j]!=(((uint64_t)i<<32)^j^UINT64_C(0x6d65736870616765));
   }
   printf("page_stream_result role=%s bytes=%llu completed_pages=%u mismatched_words=%llu polls=%llu "
-    "publication_seconds=%.9f first_to_last_seconds=%.9f first_to_last_bytes=%llu "
+    "submission_seconds=%.9f first_to_last_seconds=%.9f first_to_last_bytes=%llu "
     "interior_seconds=%.9f interior_bytes=%llu interior_bytes_per_second=%.3f\n",
     argv[1],(unsigned long long)bytes,completed,(unsigned long long)mismatches,(unsigned long long)polls,
-    receive?0:publication_end-begin,end-first,(unsigned long long)(completed-first_count)*pages->bytes,
+    receive?0:submission_end-begin,end-first,(unsigned long long)(completed-first_count)*pages->bytes,
     high-low,(unsigned long long)(high_count-low_count)*pages->bytes,
     high>low?(double)(high_count-low_count)*pages->bytes/(high-low):0); fflush(stdout);
   status=completed!=n || mismatches || stopped || atomic_load_explicit(&memory->bad,memory_order_relaxed)!=bad;
@@ -83,9 +88,8 @@ int main(int argc,char **argv){
     struct mesh_row_metadata meta=mesh_link_metadata(context,i);
     if(meta.code){ fprintf(stderr,"port=%zu domain=%u code=%lld\n",i,meta.domain,(long long)meta.code); status=1; }
   }
-  int detached=EBUSY;
-  deadline=seconds()+timeout;
-  while(detached==EBUSY && !stopped && seconds()<deadline) detached=mesh_detach(context);
+  free(indices);
+  int detached=mesh_detach(context);
   printf("page_stream_close status=%d detached=%d\n",status,detached);
   return status || detached;
 }

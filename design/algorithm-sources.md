@@ -1490,72 +1490,22 @@ return leases until all actual device owners in the context have ended.
 
 ## Context lifetime
 
-Papadopoulos–Culler operand identities and actual read counts also govern outer
-lifecycle operations. `mesh_rows_invalidate(&owner, held, count)` consumes the
-caller capability and transfers its still-held return leases to the context.
-Returned ranges are configured disjoint, with one caller lease per logical row;
-multiple application references share that lease. Invalidation copies the held
-subset into the existing canonical return-map storage and orders its intervals.
-The caller must supply that subset, not infer ownership from aggregate use counts.
+The operator's current scope replaces the former invalidation, cancellation,
+EBUSY, polling and deferred-destruction implementation. Papadopoulos and Culler's
+configured operand slots supply the dataflow representation; they do not justify
+an additional lifetime protocol.
 
-For each input occurrence, unequal nonzero input and consumer-output stamps
-identify a configured read that has not issued for that value. Invalidation
-cancels that multiplicity, unsent NIC reads and unrealized remote-read proofs.
-Issued selection pages retain actual device ownership and original completion
-records retain NIC ownership. Terminal callbacks publish the actual old pages;
-metadata reporting only writes its already-claimed output bytes, so it cannot
-restore canceled uses. The numerical invocation gains no cancellation guard.
-Nested function and binding maps are copied into canonical configuration pages;
-retirement does not borrow their caller's heap lifetime.
+`mesh_rows_retire` removes the configured table index and clears its allocation
+block mask directly. It does not wait, count table references, cancel functions,
+exchange receipts, or reinterpret error metadata. Configuration allocation uses
+the complement of allocated blocks and the actual transport-request projection.
+The transport projection includes the local row-metadata address that its
+configured dataflow completion writes. The numerical caller captures its
+configured function arrays and command-specific address slices directly.
 
-`mesh_context_metadata` exposes the original registered header of a failed or
-unbound physical receive, without guessing a numerical destination.
-`mesh_context_consume` transfers that page to asynchronous REL. Its canonical
-physical row occupies an entry in a contiguous physical row table outside the
-numerical payload. Receive headers exist only for landing pages; arena pages
-have no unused receive-header allocation. The 96-byte send record contains its
-64-byte wire header and the existing local fields, without padding reserves.
-Neither receiving nor zeroing payload bytes can erase the physical row table.
-This reduces physical metadata from 128 bytes per page to 112 bytes per landing
-page and zero bytes per arena page; outbound records fall from 128 to 96 bytes.
-Shared ABI version 10 identifies this layout. This does not close A1/A2: their
-remaining linked records, rings and separate transfers still exist.
+The connected rewrite remains subject to complete source review and real-driver
+validation; these source changes are not runtime acceptance evidence.
 
-`mesh_detach` is a nonblocking outer lifecycle operation. EBUSY reports pending
-physical ownership or an unconsumed context metadata lease; it is not a graph
-admission result or a retry of computation. The caller invalidates every owner
-first and drives physical polling/metadata consumption outside numerical calls.
-After actual selections and NIC reads end, held received pages transfer once
-to context-owned physical rows. Dataflow clears a retired logical row's backing
-assignment itself. Arena retirement is local; receiving backing indices enter
-the existing free-index FIFO. The bridge drains indices before progress and
-does not clear their bytes or access logical rows or stamps. Physical context
-rows exist only for receive backing. All reused logical tables, configuration
-maps, send records and numerical output storage have explicit configuration
-initialization; zeroed retirement payload is not a validity mechanism.
-
-Canonical Metal support resolves byte offsets into registered backing.
-`mesh_add` and numerical conversion belong to the numerical caller alongside
-normalization and embedding. The canonical address helper still translates the
-existing page-sized logical ranges; this separation does not yet implement
-arbitrary independently sized logical extents or eliminate per-scalar lookup.
-Papadopoulos and Culler supply the operand-matching distinction; Apple TN3205
-supplies the registered-span access and completion mechanism. Neither makes
-backing-page boundaries tensor dimensions or requires a header in every page.
-
-Per-table interior arena reuse is not implemented. A hung uncancelled device
-keeps its physical ownership; logical invalidation cannot revoke hardware memory
-access. A new process/context in the demo uses an explicit physical bridge/QP
-restart at configuration boundaries, so old table identity zero cannot address
-new table identity zero. No numerical handshake or recovery protocol is added.
-This lifecycle source has not yet been executed or measured.
-
-Explicit ranges supplied from foreign configuration memory are copied into
-canonical pages during realization; already canonical ranges remain views of the
-same storage. Invalidation matches held ranges to the existing canonical return
-descriptors and retains those descriptors, never the argument's pointers. Invalid
-or duplicated held ranges return EINVAL to the outer lifecycle consumer before
-any ownership changes. Successful invalidation returns zero.
 
 ## Link port metadata
 
@@ -1628,6 +1578,41 @@ currently available work and obey their actual frame credits. The per-outer-pass
 clock read used by telemetry remains a CPU cost.
 
 ## Configuration storage layout
+
+The application compiler in `xonotic/solver/strat/tensor_metal.py` now emits
+concrete Metal command encoders alongside its concrete numerical kernels during
+configuration. Each generated entrypoint has fixed kernel bindings and dispatch
+geometry; it calls canonical operand completion directly. There is no generic
+mesh tensor command interpreter, command descriptor ABI, or tensor dylib.
+Papadopoulos and Culler, *Monsoon: An Explicit Token-Store Architecture* (1990),
+provide the configured operand-store precedent; the Metal encoding is an
+application implementation of those already-realized functions, not a transport
+scheduler. Compilation and metadata allocation happen before invocation.
+The issuing encoder resolves GPU addresses from local backing assignments before
+dispatch. A page-spanning tensor still needs an indexed address gather because
+received backing need not be contiguous; this does not interpret pages as tensor
+dimensions. Returned NumPy and MLX arrays retain the canonical zero-copy virtual
+alias where their API requires a contiguous address range.
+
+Generated native graphs capture the Python-owned configuration arrays once at
+configuration. Their ordinary Objective-C lifetime extends through Metal
+completion blocks, and final destruction releases that captured configuration.
+There is no canonical retain/drop API, deferred destruction protocol, Python
+callback per dispatch, ownership token, or pending list. Closing one application
+executable invalidates only its table index and releases its native
+configuration; it does not destroy the shared transport context or another
+executable's tables. Returned aliases are literal virtual-memory views of their
+backing, with the ordinary mapping lifetime supplied by the operating system.
+
+`rdma/mesh-abi.py` derives Python structure fields and function declarations from
+Clang's AST of the canonical headers at build time. Python exposes only the
+ordinary geometry prefix of the over-aligned region header; it does not mirror
+the transport rings or driver status layout. This is configuration realization,
+not an additional wire format. Python clients no longer invoke a completion pump;
+they use the actual locally available operands. The flight-file Python mirror
+and unused vendored DLPack declaration are removed. Peer discovery, application
+telemetry, and the Xonotic application wire definitions have live consumers and
+are not copies of the mesh transport ABI.
 
 `mesh_storage_pages`, `mesh_region_table_pages`, `row_storage`, `row_ranges`,
 `row_layout`, and `mesh_rows_configuration_pages` implement the configuration
@@ -1818,3 +1803,46 @@ proceeds through QP, CQ, MRs, PD and device without falsely reporting pending
 work after each successful resource release. Actual provider failures retain
 their existing reporting and retry behavior; no new transport exchange is
 introduced by these deletions.
+
+### Transport active request indices
+
+Apple, *TN3205: Low-latency communication with RDMA over Thunderbolt*, supplies
+the work-request and completion semantics represented by these request indices.
+The receive bitmap names posted pool indices. The send bitmap names configured
+request records, packed whole within registered arena pages; each record already
+contains its source page. Distinct requests referencing the same source retain
+distinct bits. Submission initiates the claim, and the corresponding payload
+completion ends it. No consumer acknowledgement or reference counter represents
+transport activity.
+
+`mesh_hot_blocks` projects active request indices to their existing payload and
+request-header backing pages only when the caller needs an allocation mask; the
+bridge does not scan this projection in its service loop. The complement supplies
+transport-free indices, distinct from the caller's allocation ownership. Fixed
+receive-header storage precedes the operand arena and is never allocatable as an
+operand. Successful QP teardown ends every remaining device claim before the
+bitmaps are cleared and the region is unmapped.
+
+## Local submission FIFO
+
+The local submission queue transfers registered-memory descriptors from configured
+functions to the process owning the verbs QP. Apple TN3205's SEND/RECV requests
+remain the transport operations. Concurrent local completion callbacks reserve
+FIFO entries atomically and store their existing descriptor identity after its
+fields. The sole bridge reader consumes that entry directly; there is no ACK,
+receipt, response queue, or client completion pump. A missing FIFO entry does not
+block the bridge's CQ processing. This local queue is not a network protocol or
+a claim that SEND completion means peer consumption.
+
+## Local completion bindings
+
+Papadopoulos and Culler, *Monsoon: An Explicit Token-Store Architecture* (1990),
+provide the operand-association precedent. Configured SEND records name local
+source rows and remote bindings. Numerical completion submits those records
+directly. A terminal receive completion invokes the dataflow binding operation;
+the verbs code does not interpret numerical stamps. An already-completed receive
+can be bound by configuration's initial scan of its actual receive index. The
+index compare-and-exchange assigns that one receive to one operand slot when
+configuration and completion access the index concurrently; it introduces no
+wait, retry loop, separate notification, or peer receipt. Received error metadata
+does not suppress operand availability.

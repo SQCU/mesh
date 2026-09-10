@@ -95,8 +95,8 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   c->M=memory; c->len=(size_t)info.st_size;
   c->arena=mesh_at(memory,memory->pool);
-  for(uint32_t i=0;i<memory->pool;i++)
-    *mesh_context_row(memory,i)=(struct mesh_row){.page=MESH_ROW_ABSENT};
+  size_t words=((size_t)memory->pool+memory->arena+63)/64;
+  c->blocks=calloc(words,sizeof(uint64_t)); c->hot=calloc(words,sizeof(uint64_t));
   return 0;
 }
 
@@ -108,13 +108,7 @@ int mesh_detach(struct mesh_ctx *c){
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   if(status) return errno;
+  free(c->blocks); free(c->hot);
   *c=(struct mesh_ctx){0};
-  return 0;
-}
-
-// ../design/algorithm-sources.md#complete-page-ownership
-int mesh_link_reset(struct mesh_ctx *c,size_t port){
-  if(!c->M || port>=atomic_load_explicit(&c->M->port_count,memory_order_acquire)) return EINVAL;
-  atomic_store_explicit(&mesh_ports(c->M)[port].reset_request,1,memory_order_release);
   return 0;
 }

@@ -12,7 +12,6 @@ int main(int argc,char **argv){
   selected_device=argc>3?argv[3]:NULL;
   signal(SIGTERM,onsig); signal(SIGINT,onsig); signal(SIGPIPE,SIG_IGN);
   struct mesh_verbs verbs={0}; provider=&verbs;
-  mynonce=((uint64_t)arc4random()<<32)|arc4random();
   size_t bytes=(size_t)STREAM_PAGES*STREAM_BYTES;
   char *memory=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANON,-1,0);
   if(memory==MAP_FAILED){ perror("mmap"); return 1; }
@@ -38,13 +37,8 @@ int main(int argc,char **argv){
       .sg_list=&sges[i],.num_sge=1};
   }
   double deadline=monotime()+timeout;
-  while(!stop && monotime()<deadline &&
-        ((lsock<0 && listener_up()) || verbs_up(sending?NULL:argv[2],memory,bytes,sending?0:1,
-          STREAM_BYTES,0,sending?NULL:receives))){
-    while(!down_pair()){}
-    if(retire_device){ while(!down_verbs()){} retire_device=0; }
-    usleep(100000);
-  }
+  if(listener_up() || verbs_up(sending?NULL:argv[2],memory,bytes,sending?0:1,
+    STREAM_BYTES,0,sending?NULL:receives)){ status=1; goto storage; }
   if(stop || !provider->pair || monotime()>=deadline){ status=1; goto storage; }
   uint32_t actual=(uint32_t)(sending?provider->send_capacity:provider->receive_capacity);
   if(actual<capacity) capacity=actual;

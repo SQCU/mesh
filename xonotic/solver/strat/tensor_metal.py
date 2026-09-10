@@ -1,5 +1,9 @@
 import hashlib
 import re
+import ctypes as c
+import json
+from pathlib import Path
+import subprocess
 
 from .tensor import Dimension
 
@@ -11,7 +15,6 @@ struct View {
     ulong offset, size, shape[8], stride[8];
     uint dtype, rank, first, page_bytes;
 };
-struct Row { uint page, uses; ulong stamp; };
 ulong coordinate(ulong index, device const View& view, uint axis) {
     return index / view.stride[axis] % view.shape[axis];
 }
@@ -22,15 +25,15 @@ ulong broadcast_index(ulong index, device const View& source, device const View&
     return result;
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
- device uchar* page_address(device const MeshRegion* regions, device const Row* rows, device const View& view, ulong byte) {
-    return mesh_page_address(regions, rows[view.first + byte / view.page_bytes].page, view.page_bytes, byte % view.page_bytes);
+ device uchar* page_address(device const ulong* regions, device const View& view, ulong byte) {
+    return (device uchar*)regions[view.first + byte / view.page_bytes] + byte % view.page_bytes;
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
- template<typename T> T read_value(device const MeshRegion* regions, device const Row* rows, device const View& view, ulong index) {
+ template<typename T> T read_value(device const ulong* regions, device const View& view, ulong index) {
     return *(device const T*)page_address(regions, rows, view, view.offset + index * sizeof(T));
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
- template<typename T> void write_value(device const MeshRegion* regions, device const Row* rows, device const View& view, ulong index, T value) {
+ template<typename T> void write_value(device const ulong* regions, device const View& view, ulong index, T value) {
     *(device T*)page_address(regions, rows, view, view.offset + index * sizeof(T)) = value;
 }
 float tensor_log1p(float x) {
@@ -57,8 +60,8 @@ uint4 philox(uint4 counter, uint2 key) {
     return counter;
 }
 '''
-ARGUMENTS = '''device const MeshRegion* regions [[buffer(0)]], device const View* v [[buffer(1)]],
-    constant ulong* dimensions [[buffer(2)]], device const Row* rows [[buffer(3)]],
+ARGUMENTS = '''device const ulong* regions [[buffer(0)]], device const View* v [[buffer(1)]],
+    constant ulong* dimensions [[buffer(2)]],
     uint3 position [[thread_position_in_grid]], uint3 group [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
     uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(4)]]'''
@@ -74,15 +77,15 @@ def expr(value):
 
 
 def read(value, index='t'):
-    return f'read_value<{TYPES[value.dtype]}>(regions,rows,v[{value.index}],{index})'
+    return f'read_value<{TYPES[value.dtype]}>(regions,v[{value.index}],{index})'
 
 
 def write(value, result, index='t'):
-    return f'write_value<{TYPES[value.dtype]}>(regions,rows,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
+    return f'write_value<{TYPES[value.dtype]}>(regions,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
 
 
 def atomic(value, result, index):
-    return f'atomic_fetch_add_explicit((device atomic_float*)page_address(regions,rows,v[{value.index}],v[{value.index}].offset+({index})*sizeof(float)),float({result}),memory_order_relaxed);'
+    return f'atomic_fetch_add_explicit((device atomic_float*)page_address(regions,v[{value.index}],v[{value.index}].offset+({index})*sizeof(float)),float({result}),memory_order_relaxed);'
 
 
 def coordinate_code(shape, flat='t', prefix='c'):
@@ -228,7 +231,7 @@ def kernel(node):
         selected = values[0]
         body = [f'ulong t=position.x; if(t>=v[{selected.index}].size) return;',
                 f'ulong expert=ulong({read(selected)}),stride=v[{output.index}].shape[1];',
-                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)page_address(regions,rows,v[{output.index}],v[{output.index}].offset+expert*stride*sizeof(uint)),1u,memory_order_relaxed);',
+                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)page_address(regions,v[{output.index}],v[{output.index}].offset+expert*stride*sizeof(uint)),1u,memory_order_relaxed);',
                 write(output, 't', 'expert*stride+1+slot')]
         mode, clear = ('gradient', selected.index), True
     elif op in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
@@ -358,5 +361,140 @@ def source(graph):
         name = 'mesh_tensor_' + hashlib.sha256(text.encode()).hexdigest()[:16]
         sources[name] = '// ../../../design/algorithm-sources.md#literal-row-functions\n' + text.replace('FUNCTION', name)
         item.update(name=name, arguments=nodes)
-    sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,rows,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
+    sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
     return PREFIX + '\n'.join(sources.values()), kernels
+
+
+_retain_owner = c.pythonapi.Py_IncRef
+_retain_owner.argtypes, _retain_owner.restype = [c.py_object], None
+_drop_owner = c.pythonapi.Py_DecRef
+_drop_owner.argtypes, _drop_owner.restype = [c.py_object], None
+
+
+# ../../../design/algorithm-sources.md#complete-page-ownership
+@c.CFUNCTYPE(None, c.py_object)
+def release_owner(owner):
+    _drop_owner(owner)
+
+
+# ../../../design/algorithm-sources.md#configuration-storage-layout
+def native_encoder(plan):
+    executable = plan.executable
+    commands = {index: executable.commands(plan, root) for index, root in plan.calls if root is not None}
+    kernels = list(dict.fromkeys(command[0] for sequence in commands.values() for command in sequence))
+    fields = '\n'.join(f'id<MTLComputePipelineState> kernel_{index};' for index in range(len(kernels)))
+    initialization = '\n'.join(f'g->kernel_{index}=[g->device newComputePipelineStateWithFunction:[library newFunctionWithName:@{json.dumps(name)}] error:&error]; if(!g->kernel_{index}) {{ NSLog(@"%@",error); return NULL; }}' for index, name in enumerate(kernels))
+    views = bytes(plan.views)
+    dimensions = bytes((c.c_uint64 * len(executable.capacity))(*executable.capacity))
+    arguments = bytes(executable.arguments)
+    constants = '\n'.join(f'static const unsigned char {name}[]={{' + ','.join(map(str, value or b'\0')) + '};'
+        for name, value in [('views', views), ('dimensions', dimensions), ('arguments', arguments)])
+    functions = []
+    for index, root in plan.calls:
+        if root is None: continue
+        maps = [plan.maps[executable.roots[value.index]] for value in executable.graph.nodes[root][2]] + [plan.maps[root]]
+        maps = list({mapping.first: mapping for mapping in maps}.values())
+        addresses = '\n'.join(f'for(uint32_t row={mapping.first};row<{mapping.first + mapping.count};row++) {{ uint64_t offset=(uint64_t)g->pages->table[row].page*g->pages->memory->pgsz; size_t slot=offset/g->span; id<MTLBuffer> region=g->memory[slot]; address[row]=region.gpuAddress+offset%g->span; if(!resident[slot]) {{ resident[slot]=1; [encoder useResource:region usage:MTLResourceUsageRead|MTLResourceUsageWrite]; }} }}' for mapping in maps)
+        dispatch = '\n'.join(f'[encoder setComputePipelineState:g->kernel_{kernels.index(name)}]; [encoder setBuffer:g->arguments offset:{offset * 4} atIndex:4]; [encoder dispatchThreadgroups:MTLSizeMake({",".join(map(str, grid))}) threadsPerThreadgroup:MTLSizeMake({",".join(map(str, group))})];' for name, offset, grid, group in commands[index])
+        metadata = plan.function_maps[index][1][1]
+        functions.append(f'''
+// ../../../design/algorithm-sources.md#literal-row-functions
+void encode_{index}(void *handle,uint64_t stamp) {{
+    Graph *g=(__bridge Graph*)handle;
+    id<MTLCommandBuffer> command=[g->queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+    uint64_t *address=g->addresses.contents;
+    uint8_t resident[g->memory.count]; memset(resident,0,sizeof resident);
+    {addresses}
+    [encoder setBuffer:g->addresses offset:0 atIndex:0];
+    [encoder setBuffer:g->views offset:0 atIndex:1];
+    [encoder setBuffer:g->dimensions offset:0 atIndex:2];
+    {dispatch}
+    [encoder endEncoding];
+    [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {{
+        struct mesh_row_metadata metadata={{.stamp=stamp,.when=stamp,.function={root},.index=0,.peer=g->pages->memory->node,.code=completed.error.code,.domain=completed.error?4:0}};
+        struct mesh_row_map output={{.first={metadata.first},.count={metadata.count},.stride={metadata.stride},.physical={metadata.physical},.physical_stride={metadata.physical_stride},.uses={metadata.uses}}};
+        mesh_rows_report(g->pages,output,0,metadata);
+        uint32_t occurrence=0;
+        mesh_rows_complete(g->pages,&g->functions[{index}],stamp,&occurrence,1);
+    }}];
+    [command commit];
+}}
+''')
+    native = f'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include "mesh-dataflow.h"
+#include "mesh-metal.h"
+@interface Graph : NSObject {{ @public
+    id<MTLDevice> device;
+    id<MTLCommandQueue> queue;
+    NSArray<id<MTLBuffer>> *memory;
+    id<MTLBuffer> views,dimensions,arguments,addresses;
+    size_t span;
+    struct mesh_rows *pages;
+    const struct mesh_row_function *functions;
+    void *owner;
+    void (*release_owner)(void*);
+    {fields}
+}}
+@end
+@implementation Graph
+// ../../../design/algorithm-sources.md#complete-page-ownership
+-(void)dealloc {{ if(release_owner) release_owner(owner); }}
+@end
+{constants}
+// ../../../design/algorithm-sources.md#configuration-storage-layout
+void *graph_create(struct mesh_rows *pages,const struct mesh_row_function *functions,void *memory,void *owner,void (*release_owner)(void*)) {{
+    Graph *g=[Graph new]; g->pages=pages; g->functions=functions;
+    g->owner=owner; g->release_owner=release_owner;
+    g->device=MTLCreateSystemDefaultDevice();
+    g->queue=[g->device newCommandQueue];
+    g->memory=memory?(__bridge NSArray*)memory:mesh_metal_memory(g->device,pages->context);
+    if(!g->memory) return NULL;
+    g->span=g->device.maxBufferLength/pages->memory->pgsz*pages->memory->pgsz;
+    g->views=[g->device newBufferWithBytes:views length:sizeof views options:MTLResourceStorageModeShared];
+    g->dimensions=[g->device newBufferWithBytes:dimensions length:sizeof dimensions options:MTLResourceStorageModeShared];
+    g->arguments=[g->device newBufferWithBytes:arguments length:sizeof arguments options:MTLResourceStorageModeShared];
+    g->addresses=[g->device newBufferWithLength:pages->count*sizeof(uint64_t) options:MTLResourceStorageModeShared];
+    if(!g->queue || !g->views || !g->dimensions || !g->arguments || !g->addresses) return NULL;
+    MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe;
+    NSError *error=nil;
+    id<MTLLibrary> library=[g->device newLibraryWithSource:@{json.dumps(executable.text)} options:options error:&error];
+    if(!library) {{ NSLog(@"%@",error); return NULL; }}
+    {initialization}
+    return (__bridge_retained void*)g;
+}}
+// ../../../design/algorithm-sources.md#complete-page-ownership
+void graph_free(void *handle) {{ (void)CFBridgingRelease(handle); }}
+// ../../../design/algorithm-sources.md#configuration-storage-layout
+void *graph_memory(void *handle) {{ return (__bridge void*)((__bridge Graph*)handle)->memory; }}
+{''.join(functions)}
+'''
+    native = native.replace('Graph', 'Graph_' + hashlib.sha256(native.encode()).hexdigest()[:20])
+    root = Path(__file__).resolve().parents[3]
+    folder = root / '.build' / 'tensor'
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (hashlib.sha256(native.encode()).hexdigest() + '.m')
+    path.write_text(native)
+    library = path.with_suffix('.dylib')
+    subprocess.run(['cc', '-O2', '-fobjc-arc', '-dynamiclib', '-framework', 'Foundation',
+        '-framework', 'Metal', '-I', str(root / 'rdma'), str(path), str(root / 'rdma/mesh-metal.m'),
+        '-L', str(root / 'rdma'), '-lmesh', '-Wl,-rpath,' + str(root / 'rdma'), '-o', str(library)], check=True)
+    result = c.CDLL(str(library))
+    result.graph_create.restype = c.c_void_p
+    result.graph_create.argtypes = [c.c_void_p, c.c_void_p, c.c_void_p, c.py_object, type(release_owner)]
+    result.graph_memory.argtypes, result.graph_memory.restype = [c.c_void_p], c.c_void_p
+    result.graph_free.argtypes = [c.c_void_p]
+    result.graph_free.restype = None
+    owner = (plan.pages, plan.functions, plan.function_maps, plan.configuration, plan.indices)
+    _retain_owner(owner)
+    handle = result.graph_create(plan.pages, plan.functions, getattr(executable, 'native_memory', None), owner, release_owner)
+    if not handle: raise RuntimeError('configured application Metal graph allocation or compilation failed')
+    executable.native_memory = result.graph_memory(handle)
+    encoders = {}
+    for index in commands:
+        encoder = getattr(result, f'encode_{index}')
+        encoder.argtypes, encoder.restype = [c.c_void_p, c.c_uint64], None
+        encoders[index] = encoder
+    return result, handle, encoders

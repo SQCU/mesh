@@ -1,7 +1,6 @@
 import errno
 import json
 import socket
-import time
 import uuid
 from collections import defaultdict, deque
 
@@ -25,8 +24,6 @@ class RuntimeTransport:
         self.service, self.numerical = service, numerical
         self.mesh = Mesh()
         self.instance = uuid.uuid4().int & ((1 << 64) - 1)
-        self.attach_at = 0
-        self.network = deque()
         self.messages = deque()
         self.local = defaultdict(deque)
         self.clients = set()
@@ -37,17 +34,17 @@ class RuntimeTransport:
         self.service.setblocking(False)
 
     def status(self, address):
-        if self.mesh is None:
-            return
         data = LOCAL_STATUS.pack(self.mesh.slots, self.mesh.stride, self.mesh.usable,
-            self.instance, self.queued() + self.mesh.inflight())
+            self.instance, self.queued())
         self.local[address].append((LOCAL_HDR.pack(0, 0, WIRE['LOCAL_VERSION']), data))
 
     def transmit(self, node, frames):
-        self.network.append((node, frames, 0))
+        sent = self.mesh.send(frames, node)
+        self.sent += sent
+        return sent
 
     def queued(self):
-        return sum(len(frames) - first for _, frames, first in self.network) + sum(count for _, _, count in self.messages)
+        return sum(count for _, _, count in self.messages)
 
     def rows(self, node, header, parts):
         counts = []
@@ -59,13 +56,8 @@ class RuntimeTransport:
             counts.append(count)
         return counts
 
-    # ../../../design/algorithm-sources.md#complete-page-ownership
-    def outgoing(self, node, address, frames):
-        self.transmit(node, frames)
-
     def progress(self, accepting=True):
         activity = 0
-        now = time.monotonic()
         for _ in range(256 if accepting else 0):
             try:
                 packet = recv_datagram_frames(self.service, self.mesh, socket.MSG_DONTWAIT)
@@ -83,52 +75,29 @@ class RuntimeTransport:
             if frames is None:
                 self.status(address)
             else:
-                try:
-                    self.outgoing(node, address, frames)
-                except ValueError as error:
-                    self.error('local_payload', error)
-        self.mesh.pump()
-        if self.mesh is not None:
-            try:
-                for frame, node in self.mesh.read(np.uint8, max_batches=1):
-                    activity += 1
-                    self.received += 1
-                    header = parse_hdr(frame)
-                    if header is not None and header['kind'] in NUMERICAL_REQUESTS:
-                        self.numerical(node, header, frame)
-                    else:
-                        self.unrouted.append((node, frame.copy().reshape(1, -1)))
-            except (OSError, ValueError) as error:
-                self.error('receive', error)
-            while self.unrouted and self.clients:
-                node, frames = self.unrouted.popleft()
-                envelope = LOCAL_HDR.pack(node, frames.shape[1], len(frames))
-                for address in self.clients:
-                    self.local[address].append((envelope, frames))
-            for _ in range(8):
-                if not self.messages or len(self.network) >= 256:
-                    break
-                node, waves, count = self.messages[0]
-                frames = next(waves, None)
-                if frames is None:
-                    self.messages.popleft()
-                elif len(frames):
-                    self.transmit(node, frames)
-                    self.messages[0] = node, waves, count - len(frames)
-            for _ in range(256):
-                if not self.network:
-                    break
-                node, frames, first = self.network[0]
-                sent = self.mesh.send(frames[first:first + 64], node)
-                if not sent:
-                    break
-                activity += sent
-                self.sent += sent
-                first += sent
-                if first == len(frames):
-                    self.network.popleft()
+                self.transmit(node, frames)
+        try:
+            for frame, node in self.mesh.read(np.uint8, max_batches=1):
+                activity += 1
+                self.received += 1
+                header = parse_hdr(frame)
+                if header is not None and header['kind'] in NUMERICAL_REQUESTS:
+                    self.numerical(node, header, frame)
                 else:
-                    self.network[0] = node, frames, first
+                    self.unrouted.append((node, frame.copy().reshape(1, -1)))
+        except (OSError, ValueError) as error:
+            self.error('receive', error)
+        while self.unrouted and self.clients:
+            node, frames = self.unrouted.popleft()
+            envelope = LOCAL_HDR.pack(node, frames.shape[1], len(frames))
+            for address in self.clients:
+                self.local[address].append((envelope, frames))
+        for _ in range(len(self.messages)):
+            node, waves, count = self.messages.popleft()
+            frames = next(waves, None)
+            if frames is not None:
+                activity += self.transmit(node, frames) if len(frames) else 0
+                self.messages.append((node, waves, count - len(frames)))
         for address, pending in list(self.local.items()):
             for _ in range(256):
                 if not pending:
@@ -156,18 +125,11 @@ class RuntimeTransport:
             report('runtime_transport_error', operation=operation, error=message)
             self.errors[operation] = message
 
-    def close(self, deadline):
-        while self.mesh is not None and time.monotonic() < deadline:
-            if self.network or self.messages:
-                self.progress(accepting=False)
-            if not self.network and not self.messages:
-                error = self.mesh.close()
-                if not error:
-                    self.mesh = None
-                    return True
-                if error != errno.EBUSY:
-                    report('runtime_detach_error', errno=error)
-            time.sleep(0.001)
-        report('runtime_detach_pending', queued_frames=self.queued(),
-               inflight=0 if self.mesh is None else self.mesh.inflight())
-        return self.mesh is None
+    # ../../../design/algorithm-sources.md#context-lifetime
+    def close(self):
+        self.messages.clear()
+        self.local.clear()
+        self.unrouted.clear()
+        status = self.mesh.close()
+        self.mesh = None
+        return status == 0

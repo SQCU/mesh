@@ -52,7 +52,7 @@ def snapshot(source, stage):
             shutil.copytree(origin, destination, ignore=ignored)
         else:
             shutil.copy2(origin, destination)
-    command(["make", "-B", "-C", stage / "rdma", "libmesh.dylib", "libmesh-tensor.dylib"], stdout=sys.stderr)
+    command(["make", "-B", "-C", stage / "rdma", "libmesh.dylib", ".build/mesh_abi.py"], stdout=sys.stderr)
     files = inventory(stage)
     identity = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
     manifest = {"schema": 1, "id": identity, "created_at": time.time(),

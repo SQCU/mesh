@@ -4,43 +4,14 @@ from pathlib import Path
 
 import numpy as np
 
-from mesh import ABSENT, WRITING, Metadata, RowMap, RowFunction, RowBinding, Rows, _lib
+from mesh import ABSENT, WRITING, Metadata, RowMap, RowFunction, RowBinding, Rows, MemorySpan, _lib
 from .tensor import Dimension, Tensor
-from .tensor_metal import source
+from .tensor_metal import source, native_encoder
 
 
 class View(c.Structure):
     _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
         ('stride', c.c_uint64 * 8)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first', 'page_bytes')]
-
-
-class Command(c.Structure):
-    _fields_ = [('kernel', c.c_uint32), ('argument_offset', c.c_uint32), ('grid', c.c_uint32 * 3), ('group', c.c_uint32 * 3)]
-
-
-class Resource(c.Structure):
-    _fields_ = [('region', c.c_uint32), ('usage', c.c_uint32)]
-
-
-_LIBRARY = None
-
-
-# ../../../design/algorithm-sources.md#complete-page-ownership
-def library():
-    global _LIBRARY
-    if _LIBRARY is None:
-        _LIBRARY = c.CDLL(str(Path(__file__).resolve().parents[3] / 'rdma' / 'libmesh-tensor.dylib'), use_errno=True)
-        for name, result, arguments in (
-            ('create', c.c_void_p, [c.c_char_p, c.c_size_t]), ('error', c.c_char_p, [c.c_void_p]),
-            ('kernel', c.c_int, [c.c_void_p, c.c_char_p]),
-            ('reserve', c.c_int, [c.c_void_p, c.POINTER(Rows), c.POINTER(View), c.c_size_t, c.POINTER(c.c_uint64), c.c_size_t, c.POINTER(c.c_uint32), c.c_size_t]),
-            ('function', c.c_int, [c.c_void_p, c.c_uint32, c.c_uint32, c.POINTER(RowFunction), RowMap, c.POINTER(Command), c.c_size_t, c.POINTER(Resource), c.c_size_t]),
-            ('submit', None, [c.c_void_p, c.c_uint32, c.c_uint64, c.c_uint32]),
-            ('free', None, [c.c_void_p]),
-        ):
-            function = getattr(_LIBRARY, 'mesh_tensor_' + name)
-            function.restype, function.argtypes = result, arguments
-    return _LIBRARY
 
 
 # ../../../design/algorithm-sources.md#literal-row-functions
@@ -62,20 +33,11 @@ def map_leaves(function, value):
     return value
 
 
-class MemorySpan(c.Structure):
-    _fields_ = [('address', c.c_void_p), ('bytes', c.c_size_t)]
-
-
-_lib.mesh_memory_view.restype = c.c_int
-_lib.mesh_memory_view.argtypes = [c.POINTER(MemorySpan), c.c_size_t, c.POINTER(c.c_void_p), c.POINTER(c.c_size_t)]
-_lib.mesh_memory_release.restype = c.c_int
-_lib.mesh_memory_release.argtypes = [c.c_void_p, c.c_size_t]
-
-
 class PageLease:
     # ../../../design/algorithm-sources.md#contiguous-backing-page-views
     def __init__(self, pages, mapping):
-        self.pages, self.mapping = pages, mapping
+        self.pages = pages
+        self.mapping = mapping
         self.physical = tuple(pages.contents.table[mapping.first + index].page for index in range(mapping.count))
         spans = (MemorySpan * mapping.count)(*(MemorySpan(_lib.mesh_row_data(pages, mapping.first + index), pages.contents.bytes) for index in range(mapping.count)))
         address, length = c.c_void_p(), c.c_size_t()
@@ -100,7 +62,7 @@ class Realization:
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def __init__(self, executable, name, ordinal, owner_nodes):
         self.executable, self.name, self.ordinal = executable, name, ordinal
-        self.context, self.lib = executable.context, executable.lib
+        self.context = executable.context
         memory = self.context.contents.M.contents
         self.node, self.page_bytes = memory.node, memory.pgsz
         self.owner_nodes = owner_nodes
@@ -121,13 +83,6 @@ class Realization:
         self.used = local | {root for root in self.used if self.node in consumers[root]}
         counts = {root: max(1, (math.prod(executable.shapes[root]) * np.dtype(executable.graph.nodes[root][0].dtype).itemsize + self.page_bytes - 1) // self.page_bytes) for root in self.used}
         local_functions = [root for root in sorted(local) if root in executable.by_node or root in self.inputs]
-        self.handle = self.lib.mesh_tensor_create(executable.text.encode(), sum(root in executable.by_node for root in local_functions))
-        executable.check(self.handle, 0 if self.handle else -1)
-        self.kernel_ids = {}
-        for kernel in dict.fromkeys(['mesh_tensor_zero'] + [item['name'] for item in executable.kernels]):
-            index = self.lib.mesh_tensor_kernel(self.handle, kernel.encode())
-            executable.check(self.handle, min(index, 0))
-            self.kernel_ids[kernel] = index
         numerical = [index for index in needed if index in executable.by_node]
         metadata_transfers = [(len(executable.graph.nodes) + index, executable.owner(index), owner_nodes[0])
             for index in numerical if executable.owner(index) != owner_nodes[0]]
@@ -139,10 +94,11 @@ class Realization:
         for root in sorted(self.used):
             shared = executable.storage.get(root) if root in executable.shared else None
             physical = shared[0][0] if shared is not None else self.allocate(counts[root]) if root in local else 0
-            self.maps[root] = RowMap(first, counts[root], 0, physical, 0, int(root in self.inputs and root in local), None)
+            self.maps[root] = RowMap(first, counts[root], 0, physical, 0, 0, None)
             if root in local:
                 address = c.addressof(memory) + memory.data_off + physical * self.page_bytes
                 storage = (c.c_uint8 * (counts[root] * self.page_bytes)).from_address(address)
+                storage.owner = self.pages
                 self.arrays[root] = np.ndarray(executable.shapes[root], dtype=executable.graph.nodes[root][0].dtype, buffer=storage)
                 if root in executable.shared: executable.storage[root] = tuple(range(physical, physical + counts[root])), self.arrays[root]
             first += counts[root]
@@ -176,18 +132,15 @@ class Realization:
         for index, root in enumerate(local_functions):
             node = executable.graph.nodes[root]
             inputs = (RowMap * len(node[2]))(*(self.maps[roots[value.index]] for value in node[2]))
-            for mapping in inputs: mapping.immutable = 0
             metadata = None if root in self.inputs else RowMap(first, 1, 0, self.allocate(1), 0, 0, None)
             first += int(metadata is not None)
-            indices = RowMap(first, 1, 0, self.allocate(1), 0, 0, None)
-            first += 1
             mapping = self.maps[root]
             if root in self.inputs:
-                outputs = (RowMap * mapping.count)(*(RowMap(mapping.first + page, 1, 0, mapping.physical + page, 0, 1, None) for page in range(mapping.count)))
+                outputs = (RowMap * mapping.count)(*(RowMap(mapping.first + page, 1, 0, mapping.physical + page, 0, 0, None) for page in range(mapping.count)))
             else:
                 outputs = (RowMap * 2)(mapping, metadata)
             self.function_maps.append((inputs, outputs))
-            self.functions[index] = RowFunction(inputs, outputs, len(inputs), len(outputs), 1, indices)
+            self.functions[index] = RowFunction(inputs, outputs, len(inputs), len(outputs), 1)
             if root in self.inputs:
                 self.retained_inputs.append(mapping)
                 self.returns.append(mapping)
@@ -204,10 +157,11 @@ class Realization:
         executable.next_row = first
         self.bindings = None
         self.stamp = 0
+        self.indices = [(c.c_uint32 * 1)() for _ in self.calls]
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def __del__(self):
-        if getattr(self, 'handle', None): self.lib.mesh_tensor_free(self.handle)
+        if getattr(self, 'native', None): self.native.graph_free(self.handle)
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def allocate(self, count):
@@ -224,32 +178,22 @@ class Realization:
             receive = int(self.node == destination)
             peer = source_node if receive else destination
             remote = offsets[peer][self.name][self.ordinal] + [item for item in self.transfers if peer in item[1:]].index((root, source_node, destination))
-            bindings.append(RowBinding(mapping.first, mapping.count, remote, 0, None, peer, receive, tables[peer][self.name][self.ordinal], None, 0))
+            bindings.append(RowBinding(mapping.first, mapping.count, remote, 0, peer, receive, tables[peer][self.name][self.ordinal]))
         self.bindings = (RowBinding * len(bindings))(*bindings)
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def configure(self):
-        dimensions = (c.c_uint64 * len(self.executable.capacity))(*self.executable.capacity)
-        self.executable.check(self.handle, self.lib.mesh_tensor_reserve(self.handle, self.pages, self.views, len(self.views), dimensions, len(dimensions), self.executable.arguments, len(self.executable.arguments)))
-        native = 0
-        for index, root in self.calls:
-            if root is None: continue
-            commands = self.executable.commands(self, root)
-            resources = self.executable.resources(root)
-            outputs = self.function_maps[index][1]
-            self.executable.check(self.handle, self.lib.mesh_tensor_function(self.handle, native, root, c.byref(self.functions[index]), outputs[1], commands, len(commands), resources, len(resources)))
-            self.calls[index] = index, native
-            native += 1
+        self.native, self.handle, self.encoders = native_encoder(self)
 
     # ../../../design/algorithm-sources.md#literal-row-functions
     def scan(self):
         for index, native in self.calls:
             if native is None: continue
             function = self.functions[index]
-            stamp = self.stamp if self.node == self.owner_nodes[0] else self.pages.contents.table[function.input[0].ranges[0].first].stamp
-            selected = _lib.mesh_rows_issue(self.pages, c.byref(function), stamp)
-            if selected != ABSENT:
-                self.lib.mesh_tensor_submit(self.handle, native, stamp, selected)
+            stamp = self.stamp if self.node == self.owner_nodes[0] else self.pages.contents.table[function.input[0].first].stamp
+            selected = _lib.mesh_rows_issue(self.pages, c.byref(function), stamp, self.indices[index], 1)
+            if selected:
+                self.encoders[index](self.handle, stamp)
 
     # ../../../design/algorithm-sources.md#literal-row-functions
     def present(self):
@@ -276,7 +220,7 @@ class Realization:
 class Executable:
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def __init__(self, graph, exports, owner_nodes=None):
-        self.graph, self.exports, self.lib = graph, exports, library()
+        self.graph, self.exports = graph, exports
         self.context = _lib.mesh_context()
         status = _lib.mesh_attach(self.context, None)
         if status: raise OSError(status, 'tensor mesh attachment')
@@ -302,12 +246,6 @@ class Executable:
         self.progress = None
         self.cancel = None
         self.remote = None
-
-    # ../../../design/algorithm-sources.md#complete-page-ownership
-    def check(self, handle, status):
-        if status:
-            message = self.lib.mesh_tensor_error(handle)
-            raise RuntimeError(message.decode() if message else f'tensor configuration: {status}')
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def owner(self, index):
@@ -336,6 +274,7 @@ class Executable:
         if not self.pages: raise OSError(c.get_errno(), 'complete tensor graph page table')
         self.next_row = 0
         self.realizations = {}
+        self.native_memory = None
         for name, outputs in self.exports.items():
             self.realizations[name] = [Realization(self, name, index, self.owner_nodes) for index in range(2)]
         self.arrays = {}
@@ -367,7 +306,6 @@ class Executable:
                     offsets[peer][name].append(offset)
                     offset += sum(peer in transfer[1:] for transfer in plan.transfers)
         plans = [plan for values in self.realizations.values() for plan in values]
-        self.resource_domains(plans)
         for plan in plans: plan.bind(tables, offsets)
         self.functions = (RowFunction * sum(len(plan.functions) for plan in plans))(*(function for plan in plans for function in plan.functions))
         self.bindings = (RowBinding * sum(len(plan.bindings) for plan in plans))(*(binding for plan in plans for binding in plan.bindings))
@@ -378,34 +316,13 @@ class Executable:
         for plan in plans:
             plan.return_maps = tuple(self.returns[offset:offset + len(plan.return_maps)])
             offset += len(plan.return_maps)
+            for index, root in plan.sources:
+                if self.graph.nodes[root][1] == 'constant':
+                    mapping = plan.maps[root]
+                    _lib.mesh_rows_map(plan.pages, mapping.first, mapping.physical, mapping.count, mapping.uses, WRITING)
+                    _lib.mesh_rows_constant(plan.pages, mapping.first, mapping.count)
+            plan.configuration = self.functions, self.bindings, self.returns
             plan.configure()
-
-    # ../../../design/algorithm-sources.md#configured-tensor-residency
-    def resource_domains(self, plans):
-        memory = self.context.contents.M.contents
-        self.domains = {root: set() for root in self.roots.values()}
-        for plan in plans:
-            for root, mapping in plan.maps.items():
-                if root not in self.domains: continue
-                first, count = (mapping.physical, mapping.count) if self.owner(root) == memory.node else (0, memory.pool)
-                if count:
-                    self.domains[root].update(range(first * memory.pgsz >> 30, ((first + count) * memory.pgsz - 1 >> 30) + 1))
-        assignments = [(self.roots[inputs[1].index], self.roots[value.index])
-            for value, operation, inputs, _, _ in self.graph.nodes if operation == 'assign']
-        changed = True
-        while changed:
-            changed = False
-            for target, value in assignments:
-                before = len(self.domains[target])
-                self.domains[target].update(self.domains[value])
-                changed |= before != len(self.domains[target])
-
-    # ../../../design/algorithm-sources.md#configured-tensor-residency
-    def resources(self, index):
-        usage = {region: 3 for region in self.domains[self.roots[index]]}
-        for value in self.graph.nodes[index][2]:
-            for region in self.domains[self.roots[value.index]]: usage[region] = usage.get(region, 0) | 1
-        return (Resource * len(usage))(*(Resource(region, flags) for region, flags in sorted(usage.items())))
 
     # ../../../design/algorithm-sources.md#literal-row-functions
     def commands(self, plan, index):
@@ -413,7 +330,7 @@ class Executable:
         view = plan.views[index]
         commands = []
         if item['clear']:
-            commands.append(Command(plan.kernel_ids['mesh_tensor_zero'], item['zero_offset'], (c.c_uint32 * 3)(max(1, (view.size * view.dtype + 255) // 256), 1, 1), (c.c_uint32 * 3)(256, 1, 1)))
+            commands.append(('mesh_tensor_zero', item['zero_offset'], (max(1, (view.size * view.dtype + 255) // 256), 1, 1), (256, 1, 1)))
         mode, threads = item['mode'], 256
         shape = self.shapes[index]
         if mode == 'matmul': grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, math.prod(shape[:-2]))
@@ -423,12 +340,11 @@ class Executable:
             threads = 32
             grid = (self.shapes[mode[1]][0] if mode[0] == 'neighborhood' else plan.views[mode[1]].size, 1, 1)
         else: grid = (((plan.views[mode[1]].size if isinstance(mode, tuple) else view.size) + 255) // 256, 1, 1)
-        commands.append(Command(plan.kernel_ids[item['name']], item['argument_offset'], (c.c_uint32 * 3)(*(max(1, value) for value in grid)), (c.c_uint32 * 3)(threads, 1, 1)))
-        return (Command * len(commands))(*commands)
+        commands.append((item['name'], item['argument_offset'], tuple(max(1, value) for value in grid), (threads, 1, 1)))
+        return commands
 
     # ../../../design/algorithm-sources.md#literal-row-functions
     def scan(self):
-        _lib.mesh_rows_poll(self.context)
         for plans in self.realizations.values():
             for plan in plans: plan.scan()
 
@@ -441,19 +357,20 @@ class Executable:
         return plan, plan.metadata
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
-    def publish(self, plan, values):
+    def write_inputs(self, plan, values):
         for index, root in plan.sources:
+            if self.graph.nodes[root][1] == 'constant': continue
             function = plan.functions[index]
-            selected = _lib.mesh_rows_issue(plan.pages, c.byref(function), plan.stamp)
-            if selected == ABSENT: continue
+            selected = _lib.mesh_rows_issue(plan.pages, c.byref(function), plan.stamp, plan.indices[index], 1)
+            if not selected: continue
             for page, mapping in enumerate(plan.function_maps[index][1]):
                 physical = self.storage[root][0][page] if root in self.storage else mapping.physical
-                _lib.mesh_rows_map(plan.pages, mapping.first, physical, 1, mapping.uses[0], WRITING | plan.stamp)
+                _lib.mesh_rows_map(plan.pages, mapping.first, physical, 1, mapping.uses, WRITING | plan.stamp)
             name = self.input_names.get(root)
             if name in values:
                 array = self.storage[root][1] if root in self.storage else plan.arrays[root]
                 np.copyto(array, np.asarray(values[name]))
-            _lib.mesh_rows_complete(plan.pages, c.byref(function), plan.stamp, selected)
+            _lib.mesh_rows_complete(plan.pages, c.byref(function), plan.stamp, plan.indices[index], selected)
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def adopt(self, target, value, plan, array):
@@ -469,14 +386,11 @@ class Executable:
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def close(self):
         if not self.pages: return
-        first = {mapping.first for plans in self.realizations.values() for plan in plans for mapping in plan.retained_inputs}
-        maps = {mapping.first: mapping for mapping in self.returns if mapping.first in first}
-        held = (RowMap * len(maps))(*maps.values())
-        handle = c.cast(self.pages, c.POINTER(Rows))
-        status = _lib.mesh_rows_invalidate(c.byref(handle), held, len(held))
-        if status: raise OSError(status, 'mesh_rows_invalidate')
-        self.pages = handle
+        _lib.mesh_rows_retire(self.pages)
+        self.pages = None
         self.realizations.clear()
+        self.arrays.clear()
+        self.storage.clear()
 
     # ../../../design/algorithm-sources.md#asynchronous-metadata-publication
     def report(self):

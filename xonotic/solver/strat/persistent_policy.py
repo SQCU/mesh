@@ -132,7 +132,7 @@ class PersistentPolicy:
         plan, _ = executable.submit(name)
         values = dict(values)
         while not plan.present():
-            executable.publish(plan, values)
+            executable.write_inputs(plan, values)
             self.advance()
         output, metadata = plan.values()
         for record in metadata:

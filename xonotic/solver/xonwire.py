@@ -319,7 +319,6 @@ class FrameStream:
         offers = 0
         started = time.monotonic()
         while not cancel() and time.monotonic() - started < timeout_s:
-            self.mesh.pump()
             if not exhausted:
                 frames = next(pending, None)
                 exhausted = frames is None
@@ -351,7 +350,6 @@ class FrameStream:
         sent = 0
         while time.monotonic() - started < REQUEST_TIMEOUT_S and not (cancel is not None and cancel()):
             try:
-                self.mesh.pump()
                 if usable != self.mesh.usable:
                     usable = self.mesh.usable
                     pending = iter(frame_waves(kind, req_id, tick, rows, usable, self.mesh.slots, self.session, self.mesh, node))

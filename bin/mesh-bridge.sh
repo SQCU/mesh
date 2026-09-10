@@ -78,14 +78,22 @@ do_stop() {
 }
 
 do_start() {
-  wire_check || return $?
   [ -n "$(pid_of)" ] && { echo "mesh-bridge: already running as $(pid_of)"; return 0; }
+  wire_check || return $?
   write_plist
   launchctl bootstrap "$DOM" "$PLIST"
   for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
   p=$(pid_of)
   [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
-  echo "mesh-bridge: running as $p, registered $want bytes"
+  for _ in $(seq 1 1200); do
+    if "$STAT" --ready "$region" >/dev/null 2>&1; then
+      echo "mesh-bridge: running as $p, registered $want bytes"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "mesh-bridge: setup incomplete; see $LOGDIR/$LABEL.log" >&2
+  return 1
 }
 
 do_status() {
