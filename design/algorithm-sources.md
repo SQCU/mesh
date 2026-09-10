@@ -686,3 +686,32 @@ POSIX errno values cannot be silently treated as the same code domain. No new
 inference, negative-status execution gate or internal recovery follows from
 this reporting requirement. This bridge binding remains unfinished; neither
 successful compilation nor removing receive validation provides it.
+
+### Explicit FFN weight views
+
+`MatrixOperations.bindFFN` owns the existing gate/up, activation and down-projection
+composition over explicit `MatrixView` operands. The earlier implementation in
+`DenseFFNWeights.bindActivation` is removed, and the dense normalized binding
+now delegates to the same composition. `realizeMetalParameter` can receive
+configured gate/up/down views instead of loading dense weight buffers. Supplied
+views are in contraction orientation: hidden-by-width for gate/up and
+width-by-hidden for down. They may describe actual page payloads within the
+backend's supported layout; the binding does not copy them or select a backend
+from their storage. Existing callers without supplied views keep their configured
+weight loading and numerical behavior.
+
+Papadopoulos–Culler (ISCA 1990), cited above, provide the explicit operand-storage
+and configured-function precedent. Rabenseifner (ICCS 2004) and Patarasuk–Yuan
+(JPDC 2009) provide the collective composition for the resulting partial values.
+Those publications do not prescribe the FFN activation or its rounding. This
+change preserves the existing fused and unfused expressions and selected
+matrix backends, resolves their choices at binding time, and adds no invocation
+allocation or synchronization.
+
+The page-backed caller must supply activation/scratch storage as well as weight
+views, and must include all of them in its complete graph allocation. The general
+binding still supports allocation during realization when ordinary callers omit
+scratch views. Full paged-K MPS interoperability still requires independent
+payload-contained contractions and FP32 partial reduction; passing a spanning
+paged view to MPS is not enabled by this refactoring. Attention/CoreML weight
+interop and the mesh caller migration remain unfinished.
