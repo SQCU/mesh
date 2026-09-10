@@ -257,6 +257,7 @@ class Realization:
             root = self.executable.roots[value.index]
             if root not in values:
                 lease = PageLease(self.pages, self.maps[root])
+                if root in self.inputs and root in self.executable.storage: lease.backing = self.executable.storage[root][1]
                 values[root] = lease.array(self.executable.shapes[root], self.executable.graph.nodes[root][0].dtype)
         metadata = []
         for mapping in self.metadata:
