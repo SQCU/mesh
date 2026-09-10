@@ -206,6 +206,21 @@ preserving the validated backend; the loader alone does not satisfy that work.
 The existing caller still uses its prior loaders until the required bindings and
 caller migration are complete.
 
+`MatrixView` now describes page breaks along either matrix axis, with transpose
+exchanging those axes and slices preserving aligned page origins. This is an
+immutable numerical address map, using the same compiler-assigned operand
+placement principle. `MatrixOperations` specializes the existing vector and
+tensor kernels for weight-page width and physical stride during binding.
+Vector loads gather each weight vector from its payload. The tensor kernel
+rebases its operand tensor views at each weight-page boundary, with equal
+contraction extents on both operands, and retains its FP32 cooperative
+accumulator across those reads within one dispatch. Fixed reduction tiles must
+divide the payload width. Final conversion remains after the full contraction.
+No partial-sum command buffers, dense weight copies, or readiness state are
+introduced. These are repository lowerings of indexed gathers and arithmetic;
+Monsoon does not describe these Metal APIs. MPS page-break support and measured
+numerical/performance validation remain outstanding.
+
 ### Literal page reduction
 
 Rabenseifner (2004) and Patarasuk–Yuan (2009), cited above, supply the
