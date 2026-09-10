@@ -480,6 +480,11 @@ int main(int argc,char**argv){
       flight_heartbeat(stop?MESH_STOPPING:live?MESH_PAIRED:MESH_PAIRING);
       for(int i=0;i<NOWN;i++) atomic_store(&M->mean[i],counts[i]);
       atomic_store(&M->up_ms,(uint64_t)((stamp-began)*1000)); telemetry=stamp;
+#ifdef MESH_TRANSPORT_TIMING
+      fprintf(stderr,"{\"transport_timing\":{\"passes\":%llu,\"pass_seconds\":%.9f,\"polls\":%llu,\"poll_seconds\":%.9f}}\n",
+        (unsigned long long)measured_passes,measured_pass_seconds,
+        (unsigned long long)measured_polls,measured_poll_seconds);
+#endif
     }
 #ifdef MESH_TRANSPORT_TIMING
     measured_pass_seconds+=monotime()-pass_begin; measured_passes++;
