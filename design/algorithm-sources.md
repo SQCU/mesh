@@ -757,3 +757,27 @@ The exact configurations, output hashes, timing samples and comparisons are in
 `metal-microbench/docs/data/parameter_fp32_outputs_2026-09-09.json`. These are
 small-shape dense numerical evaluations, not page-backed-weight or K-partial
 validation, performance superiority, RDMA integration, or a full-NFE bound.
+
+### Configured contraction ranges
+
+`realizeMetalParameter` accepts an explicit reduction-coordinate range for a
+projection or vocabulary function. It binds `MatrixOperations.contract` over
+that range and the requested output coordinates, producing independent FP32
+partial outputs. The range and all slices are resolved during realization;
+numerical invocation performs the already-bound operation. There is no partial
+accumulation loop, backend substitution or allocation inside invocation.
+
+Papadopoulos–Culler (ISCA 1990), cited above, provide the configured operand and
+function representation. Rabenseifner (ICCS 2004) and Patarasuk–Yuan (JPDC 2009)
+provide the reduction/scatter/gather composition to which disjoint contraction
+partials contribute. For a partition of K into disjoint ranges R, the exact
+algebra is `C = sum_R A[:, R] B[R, :]`; floating-point association differences
+must be measured rather than called bitwise equivalence.
+
+The existing parameter evaluator accepts `LM_BENCH_REDUCTION_RANGE=first:end`
+with FP32 output for those function kinds and records the resolved range. Its
+FLOP count reflects the selected range; the weight-byte field remains allocated
+weight storage. The evaluator uses the existing projection and dump paths, not
+a second implementation. These local dense evaluations do not establish actual
+page-backed operands, concurrent partial issue, transport integration or a
+performance gain from splitting K.
