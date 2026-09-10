@@ -1348,3 +1348,19 @@ same storage. Invalidation matches held ranges to the existing canonical return
 descriptors and retains those descriptors, never the argument's pointers. Invalid
 or duplicated held ranges return EINVAL to the outer lifecycle consumer before
 any ownership changes. Successful invalidation returns zero.
+
+## Link port metadata
+
+`mesh_link_metadata(context, index)` exposes the existing physical port's literal
+`when`, `code`, `domain` and `peer` fields through the outer metadata channel.
+Its index is the configured port index, function is `UINT32_MAX`, and stamp is
+zero because a port observation has no numerical function or generation.
+`mesh_peers(context, NULL, 0)` returns the number of configured ports, including
+multiple ports to the same peer; the calling context uses that bound.
+
+This follows Saltzer–Reed–Clark's separation of endpoint interpretation from
+transport mechanisms, already cited above. The accessor allocates no storage,
+clears no status and makes no error or readiness decision. The outer consumer
+may interpret the returned values; the numerical call graph does not read them.
+These are observations of existing port fields, not a new atomic event record,
+acknowledgement, progress counter or coherent multi-field snapshot protocol.

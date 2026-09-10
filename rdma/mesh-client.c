@@ -66,6 +66,13 @@ size_t mesh_peers(struct mesh_ctx *context,uint16_t *peers,size_t capacity){
   return count;
 }
 
+// ../design/algorithm-sources.md#link-port-metadata
+struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *context,size_t index){
+  const struct mesh_port_info *port=&mesh_ports(context->M)[index];
+  return (struct mesh_row_metadata){.stamp=0,.when=port->when,.function=UINT32_MAX,
+    .index=(uint32_t)index,.peer=port->peer,.code=port->code,.domain=port->domain};
+}
+
 // ../design/algorithm-sources.md#complete-page-ownership
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;

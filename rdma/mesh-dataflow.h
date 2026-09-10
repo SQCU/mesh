@@ -35,6 +35,8 @@ struct mesh_row_metadata {
   uint32_t domain, reserved;
 };
 
+struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *context, size_t index);
+
 struct mesh_rows *mesh_rows_create(struct mesh_ctx *context, size_t rows, uint64_t identity);
 uint32_t mesh_rows_allocate(struct mesh_rows *pages, size_t count, size_t alignment);
 void mesh_rows_map(struct mesh_rows *pages, uint32_t first, uint32_t physical,

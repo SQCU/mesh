@@ -59,6 +59,7 @@ for name, result, arguments in (
     ("mesh_context", c.POINTER(Context), []),
     ("mesh_region", c.POINTER(Region), [c.POINTER(Context)]),
     ("mesh_peers", c.c_size_t, [c.POINTER(Context), c.POINTER(c.c_uint16), c.c_size_t]),
+    ("mesh_link_metadata", Metadata, [c.POINTER(Context), c.c_size_t]),
     ("mesh_attach", c.c_int, [c.POINTER(Context), c.c_char_p]),
     ("mesh_detach", c.c_int, [c.POINTER(Context)]),
     ("mesh_rows_create", c.POINTER(Rows), [c.POINTER(Context), c.c_size_t, c.c_uint64]),
