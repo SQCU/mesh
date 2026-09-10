@@ -145,3 +145,41 @@ Repeat the full transfer without restarting the bridges to retain the explicit
 first-use/repeat distinction. After collecting successful detach statuses,
 stop both bridges through the existing managed lifecycle. No verbs owners or
 their registered allocations were left running after this measurement.
+
+## Backing-memory separation measurement
+
+Canonical `4d1892c58a025604c6e35bc9bd89896f02cfe49a` and caller
+`cc3a4ae91be1da085aa622c81e1c2c6f8f6f3494` were synchronized and built on both
+machines. ABI 10 removes arena context rows, release-time zeroing, retirement
+stamp mutation in the bridge, and arena retirement FIFO traffic. The existing
+separate metadata/operand transfers remain. Three full 1 GiB transfers used
+the same configured capacities as the earlier comparison:
+
+| Transfer | Receiver first-to-last | Interior bytes | Interior seconds | GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| First after bridge start | 114.985 ms | 859,422,720 | 0.092065 | 9.334956 |
+| Repeat 1 | 114.956 ms | 858,963,968 | 0.091955 | 9.341134 |
+| Repeat 2 | 114.896 ms | 859,111,424 | 0.091949 | 9.343347 |
+
+Every transfer delivered all 65,536 backing extents and every payload word
+matched. Both endpoints returned status 0 and detach 0. Registered sizes were
+1,189,068,800 bytes on M5 and 1,179,910,144 bytes on M4. Sender realization used
+66,085 arena pages rather than 66,213 because outbound records are smaller.
+Bridges stopped normally afterward. No direct-verbs rerun was made; the previous
+direct measurement is historical context, not a new matched comparison.
+First-use slowdown was absent in these three samples, without establishing
+causality or a general latency guarantee.
+
+The interrupted ABI-9 attempt is excluded: its receiver timed out before the
+sender started, so sender completions did not establish consumed receiver data.
+
+The existing real-input FFN evaluator then ran with canonical `4d1892c` and
+caller configuration commit `c1954f9`, 4,096 rows, six measured samples and one
+and two invocations in flight. Both peers completed ten invocations per case,
+reported no errors/nonfinite values, and destroyed their contexts. Relative RMS
+against the local baseline was 0.0003935084 (limit 0.002), with exact peer
+agreement in both cases. M5/M4 medians were 34.5306/34.5999 ms for one in flight
+and 54.6755/54.0809 ms for two. The local MPS baseline was 32.37475 ms, so the
+required TP latency improvement is still absent. The M5 two-in-flight maximum
+was 111.4771 ms; medians must not conceal that sample. Native internal storage
+remains unverified. Both bridges were stopped after evaluation.
