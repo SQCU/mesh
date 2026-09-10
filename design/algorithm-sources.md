@@ -221,6 +221,28 @@ introduced. These are repository lowerings of indexed gathers and arithmetic;
 Monsoon does not describe these Metal APIs. MPS page-break support and measured
 numerical/performance validation remain outstanding.
 
+`MatrixOperations.contract` binds one explicit contraction-index interval to
+the existing multiplication implementation, writing an FP32 result into supplied
+storage. A `MatrixView` slice entirely within one payload becomes an ordinary
+strided view of the same bytes; a slice spanning payloads retains its page map.
+This lets the configured MPS function address an individual weight payload
+without a copy or a backend substitution. The indexed algebra is
+`P_j = A[:, K_j] B[K_j, :]`, `C = sum_j P_j`, the local contraction counterpart
+of the partial-sum reduction described by Rabenseifner and Patarasuk–Yuan.
+Each `P_j` must have its own configured actual FP32 pages and input/output maps.
+The binding encodes no sequence of partial contractions and inserts no waits;
+each numerical function is independently issuable from its input stamps.
+Canonical FP32 page reduction and final conversion remain caller integration
+obligations. Splitting a contraction may change rounding and dispatch cost;
+neither agreement nor speed follows from compilation.
+
+Apple's [MPSMatrix documentation](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrix)
+specifies row-major storage; its
+[multiplication documentation](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication)
+specifies the optional transposes and scalar accumulation algebra. These API
+references support the view mapping, not a claim that every input/result type
+combination or this decomposition has been operationally validated here.
+
 ### Literal page reduction
 
 Rabenseifner (2004) and Patarasuk–Yuan (2009), cited above, supply the
