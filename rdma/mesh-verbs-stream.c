@@ -10,7 +10,7 @@ int main(int argc,char **argv){
   if(!sending && strcmp(argv[1],"receive")) return 2;
   double timeout=argc>4?strtod(argv[4],NULL):60;
   selected_device=argc>3?argv[3]:NULL;
-  signal(SIGTERM,onsig); signal(SIGINT,onsig);
+  signal(SIGTERM,onsig); signal(SIGINT,onsig); signal(SIGPIPE,SIG_IGN);
   struct mesh_verbs verbs={0}; provider=&verbs;
   mynonce=((uint64_t)arc4random()<<32)|arc4random();
   size_t bytes=(size_t)STREAM_PAGES*STREAM_BYTES;

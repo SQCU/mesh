@@ -149,6 +149,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   if(provider->context && (TRACE(QUERY_PORT,provider->context,1,0,ibv_query_port(provider->context,1,&pa)) || pa.state!=IBV_PORT_ACTIVE)){
     retire_device=1; return -1; }
   int f=oob(peer); if(f<0) return -1;
+  fprintf(stderr,"pair setup node=%d connected=%.6f\n",me,monotime());
   if(!provider->context){
   struct ibv_device **dl=ibv_get_device_list(NULL);
   for(int i=0;dl&&dl[i];i++){
@@ -206,6 +207,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.nonce=mynonce,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=page_bytes,.header_bytes=header_bytes,.node=(uint16_t)me},you;
   memcpy(mine.gid,&gid,16);
+  fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
   if(exchange(f,&mine,&you,monotime()+10)){ close(f); fprintf(stderr,"xchg retry\n"); return -1; }
   close(f);
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.header_bytes!=mine.header_bytes || (expected_peer>=0 && you.node!=expected_peer)){
@@ -225,4 +227,3 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   if(rc){ fprintf(stderr,"rts rc %d, retrying\n",rc); return -1; }
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);
   return 0; }
-
