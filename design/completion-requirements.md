@@ -6,6 +6,12 @@ inputs, and review source and execution until complete. User instructions govern
 this document does not authorize exceptions. It supersedes completion implications
 in the chronological helper/evaluation notes. Those notes remain historical evidence.
 
+The operator subsequently deleted CRC/digest checking as a superfluous feature.
+There is no payload hashing, digest exchange, comparison kernel, checksum-based
+retention or digest acceptance wait in the required implementation. Device and
+transport error metadata remains required. References to removed digest gates
+and old hashed measurements below are historical, not retained features.
+
 Initial source review: mesh `97d87e4`, metal-microbench `d177586`, both on `main`.
 At that review `runReduceScatter` called `mesh_pages_*`; compiling `mesh_rows_*`
 alongside it did not constitute migration. The current connected source rewrite
@@ -47,7 +53,7 @@ Every pending action must remain discoverable from its configured rows.
 `out, meta = meshfunction(x)` returns configured row references without waiting.
 Metadata carries literal error codes, their domain, and where/when they arose.
 Composition carries metadata alongside numerical values without inspecting errors
-to control execution. Only the outer calling context interprets errors, digests,
+to control execution. Only the outer calling context interprets errors,
 missing results and deadlines and may repeat the entire NFE. A stamp states
 availability, not numerical correctness. A terminal device callback publishes
 the configured output pages' actual contents and separately records any literal
@@ -200,7 +206,6 @@ of output row ownership. The following is the single connected graph to realize:
 | Owner epilogue | Complete FP32 accumulated hidden row, gamma, X_l residual and scale | X_(l+1) restricted to O_r | All contributions to that hidden row; RMS then residual/scale in model order |
 | Gather | Owner epilogue pages | Received X_(l+1) restricted to O_peer | Each completed owner output page independently |
 | Final normalization and head | Last X pages, output normalization and tied embedding weights | Caller logit pages | Actual head input rows and contraction dependencies |
-| Digest/compare | Retained partial/output pages and received digest values | Digest and error-metadata pages | Its own value dependencies; no edge back into numerical admission |
 
 This is Rabenseifner/Patarasuk–Yuan's partition, reduce and gather applied to the
 existing model algebra; Papadopoulos–Culler's named-value firing supplies execution

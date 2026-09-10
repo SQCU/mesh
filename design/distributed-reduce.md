@@ -5,6 +5,11 @@ current implementation and evidence inventory. The incident record below is
 historical; none of its citations establishes that the replacement caller has
 been implemented or that a measured latency bound has been met.
 
+The September 9, 2026 instruction deletes CRC/digest checking entirely. Mesh
+does not hash payloads, exchange or compare digests, or retain pages for checks.
+Device and transport error metadata remains. Digest mechanisms in the incident
+record are historical excluded implementations, not required replacements.
+
 The operator's [asynchronous error metadata contract](pages-and-functions.md#asynchronous-error-metadata)
 supersedes failure-value and status-driven termination wording below. The
 interface is `out, meta = meshfunction(x)`: literal error codes and where/when
@@ -114,8 +119,7 @@ of its pages are in, and publishes that row at once, so the all-gather streams
 row by row behind the reduce instead of after a dense block. A transmitted
 buffer's copy at the peer is rewritten whole by the next generation, so its
 reuse is proved only by a page the peer publishes after consuming all of it:
-the completed pagewise output, or the peer's digest page, whose received
-hashes are counted at release. This is
+the completed numerical output. This is
 the combiner of MapReduce and the pipelined chunking of the ring all-reduce
 (Patarasuk and Yuan 2009), expressed as a dependency kind rather than a
 schedule.
@@ -124,8 +128,8 @@ schedule.
 
 The end-to-end argument (Saltzer, Reed and Clark, "End-to-end arguments in
 system design", ACM TOCS 1984) places numerical validation at the endpoints.
-Mesh does not require a checksum exchange to authorize reuse or finish an
-operation. Those facts already follow from numerical dependency edges.
+Mesh has no checksum exchange. Reuse and completion follow from numerical
+dependency edges and physical device ownership.
 
 The configured model measures final logits against a single-node calculation
 and compares the two peers' outputs after timing. Other callers can retain
@@ -156,25 +160,10 @@ buffers is not admissible on this platform, whatever its data-flow appeal.
 
 Every received row carries a count of its dependents and is released at zero.
 A released page is zeroed on the runtime thread before it returns to the
-bridge. The runtime keeps, per slot and generation, the hash of the pages it
-handed to the NIC and the hash of the received pages it released after
-consumption; `mesh_pages_digest(p, slot, g, &hash)` reads it once every page
-of the slot has been counted. Nothing is sent for it. A reduce is a runtime
-node (`mesh_pages_reduces`): a materialized reduce sums its input slots row by
-row as their pages land, in FP32, into an FP16 page-wise output slot; a partial
-reduce publishes the FP32 sums as page pairs for a further reduce.
-
-The digest is a page like any other. A caller that checks binds a digest slot
-pair, writes its sent and received hashes for `g` into its page, publishes it,
-and compares when the peer's digest row carries stamp `g`. A disagreement
-concludes that function evaluation with a failure value and the caller
-repeats it; the status word is for the link, not for numbers. Because a
-received hash is counted only when its pages have been released, the peer's
-digest page for `g` is also the proof that the peer has consumed everything
-sent to it for `g`: a caller declares its digest receive slot as depending on
-the slots it transmits, and their storage for `g + V` becomes producible on
-that page's arrival. There is no control frame, no verdict slot, and no
-storage dependency on the result of the comparison.
+bridge. A reduce is a configured function: it sums available input pages in
+FP32 and publishes its configured output pages. Further reduction or numerical
+consumption depends on those pages. Raw device and transport errors are carried
+separately as asynchronous metadata. No hash state or digest dependency exists.
 
 ## The specification is realized prior art
 
@@ -259,7 +248,8 @@ the consumer decides, at its own discretion and by its own clock, that the
 job has failed: it returns a failure value, and whoever launched the job
 relaunches it on both participants under a fresh epoch. What the old
 rendezvous carried — plan, page count, stride, incarnation — is metadata that
-rides in the digest page's a-priori words and is compared there.
+belongs to configuration before numerical invocation; it is not exchanged in
+an added correctness protocol.
 
 ## Ownership
 
