@@ -178,14 +178,35 @@ No readiness cache, transport framing or recovery mechanism is added. Existing
 excluded control mechanisms still require the complete caller migration and
 deletion prescribed by the requirements matrix.
 
-Bridge deployment at `0f6e18a` exposed a separate build/lifecycle issue: M4
+Bridge deployment at `0f6e18a` exposed a separate launch-policy issue: M4
 launchd recorded `OS_REASON_CODESIGNING` during reload before returning to a
-paired process. The build previously wrote directly to the live executable
-path. Its recipe now links and ad-hoc signs a new build artifact, then renames
+paired process. Kernel logs identify AMFI launch-constraint rejection of new
+PIDs 43984 and 46259 before bridge execution, at 21:58:14 and 21:59:51 on
+September 9. The atomic build change did not eliminate that rejection; it
+must not be described as fixing AMFI. Subsequent launchd starts succeeded.
+
+The build previously wrote directly to the live executable path. Its recipe
+now links and ad-hoc signs a new build artifact, then renames
 it atomically into place. This preserves the inode mapped by the running
 process until ordinary SIGTERM teardown. It is build publication, not a
 computation recovery or synchronization protocol. No source backup or alternate
 source version is created; source changes remain in commits on main.
+
+At `6595130`, both bridges and both numerical callers built from synchronized
+main sources. Before reload, lsof confirmed that the existing bridge processes
+still mapped their old executable inodes while the new files had different
+inodes. After ordinary SIGTERM restart, the running M5 PID 37048 mapped inode
+89289704 and M4 PID 46539 mapped inode 1588004, each matching its current file;
+both files passed strict code-signature verification. Their executable hashes
+are preserved in metal-microbench
+`docs/data/transport_page_addressing_2026-09-09.json`.
+
+The six-layer, 1024-row, two-in-flight RDMA regression completed six NFEs per
+participant with 72 agreements, zero disagreements/nonfinite outputs/retries,
+and the prior exact logit hash. Both bridge PIDs remained alive and paired,
+with zero bad completions and empty application rings afterward. This proves
+the updated addressing at the currently deployed 4096-byte geometry, not
+alternate geometry, native page-layout integration or full runtime replacement.
 
 ## Contiguous backing-page views
 
