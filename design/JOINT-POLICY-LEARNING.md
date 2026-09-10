@@ -213,7 +213,7 @@ refreshes; background tabs poll at a lower cadence. Missing optimizer steps are 
 not zeros. Historical rating requirements and known coverage limits are described in
 [APPLICATION-TELEMETRY.md](APPLICATION-TELEMETRY.md).
 The existing J measurement thread atomically retains the complete latest report per
-responder/episode as `j-measures.PID.GENERATION.npz` in the match directory, so compact
+configured telemetry producer as one atomically replaced `j-measures.<telemetry-basename>.npz` in the match directory, so compact
 interactive transport does not discard the literal numerical artifact.
 The full report is binary NumPy arrays plus a JSON metadata manifest. Telemetry
 carries scalar/array-shape summaries and an artifact descriptor; it no longer

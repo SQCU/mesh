@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import tempfile
 import time
 from collections import deque
 
@@ -1115,8 +1114,9 @@ class LiteralJWindow:
         }
 
 class LiteralJReporter:
+    # ../../../../../design/algorithm-sources.md#bounded-observation-artifacts
     def __init__(self, max_rows=4000, interval=20.0, artifact_path=None):
-        self.artifact_path = os.path.abspath(artifact_path or os.path.join(tempfile.mkdtemp(prefix="mesh-j-"), "j-measures"))
+        self.artifact_path = os.path.abspath(artifact_path or "j-measures")
         self.max_rows = max(1, int(max_rows))
         self.interval = max(0.1, float(interval))
         self.lock = threading.Lock()
@@ -1200,6 +1200,7 @@ class LiteralJReporter:
                 },
             }
 
+    # ../../../../../design/algorithm-sources.md#bounded-observation-artifacts
     def run(self):
         window = LiteralJWindow(self.max_rows)
         generation = 0
@@ -1241,16 +1242,16 @@ class LiteralJReporter:
                     ),
                 })
                 published = {"measure_projection": "section_scalars_and_structure_sizes", **scalar_report(report)}
-                path = f"{self.artifact_path}.{generation}.npz"
+                path = f"{self.artifact_path}.npz"
                 sampled_at = time.time()
-                write_report(path, {"sampled_at": sampled_at, "generation": generation, **report})
                 published["artifacts"] = {"j": {"path": path, "content_type": "application/octet-stream", "format": "numpy-npz-tree-v2", "sampled_at": sampled_at, "generation": generation}}
                 newest = frames[-1][0]
                 model = {"response": newest["resp_id"], "t": newest.get("t"), "row_identity": "edict",
                          "row_outputs": [{"row": source["edict"], "arm": source["policy_arm"], "j": source["j"]}
                                          for source in newest.get("measure_sources", []) if source["response_seq"] == newest["request_seq"]]}
-                write_report(path + '.view.npz', {'sampled_at': sampled_at, 'generation': generation,
-                    'full_artifact': path, 'artifact_format': 'numpy-npz-tree-v2', 'model': model, **compact_j_report(report)})
+                view = {'sampled_at': sampled_at, 'generation': generation, 'full_artifact': path,
+                        'artifact_format': 'numpy-npz-tree-v2', 'model': model, **compact_j_report(report)}
+                write_report(path, {'sampled_at': sampled_at, 'generation': generation, **report, 'view': view})
                 with self.lock:
                     if generation == self.generation:
                         self.report = published

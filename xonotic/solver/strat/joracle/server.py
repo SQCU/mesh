@@ -175,18 +175,18 @@ class Viewer:
             for frame in self.journal.read(path):
                 self.ingest(frame)
             views = list(self.directory.glob("j-measures.*.view.json")) + list(self.directory.glob("j-measures.*.view.npz"))
-            reports = views or list(self.directory.glob("j-measures.*.json"))
+            reports = views + list(self.directory.glob("j-measures.*.npz")) + list(self.directory.glob("j-measures.*.json"))
             if reports:
                 report = max(reports, key=lambda p: p.stat().st_mtime_ns)
                 identity = (str(report), report.stat().st_mtime_ns)
                 if identity != self.j_identity:
                     try:
                         if report.suffix == '.npz':
-                            data = read_report(report)
+                            data = read_report(report, view=True)
                         else:
                             with report.open() as handle:
                                 data = json.load(handle)
-                        self.j = data if views else {"sampled_at": data.get("sampled_at"), "generation": data.get("generation"), "full_artifact": str(report), **compact_j_report(data)}
+                        self.j = data if report.suffix == ".npz" or report in views else {"sampled_at": data.get("sampled_at"), "generation": data.get("generation"), "full_artifact": str(report), **compact_j_report(data)}
                         self.j['source_directory'] = str(self.directory)
                         if self.j.get('full_artifact'):
                             self.j['full_artifact'] = str(report.parent / Path(self.j['full_artifact']).name)

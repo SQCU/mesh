@@ -31,10 +31,16 @@ def write_report(path, report):
     atomic_save(path, pack_state(report, '__report__'))
 
 
-def read_report(path):
+# ../../../../../design/algorithm-sources.md#bounded-observation-artifacts
+def read_report(path, view=False):
     with np.load(path, allow_pickle=False) as archive:
         if '__report__meta' in archive:
-            return unpack_state(archive, '__report__')
+            report = unpack_state(archive, '__report__', root_key='view' if view else None)
+            if view and 'j_lens' in report:
+                from .display import compact_j_report
+                return {'sampled_at': report.get('sampled_at'), 'generation': report.get('generation'),
+                        'full_artifact': str(path), **compact_j_report(report)}
+            return report
         arrays = {}
         def resolve(value):
             if isinstance(value, dict):

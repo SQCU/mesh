@@ -13,13 +13,19 @@ def write_payload(target, payload):
             with archive.open(name + ".npy", "w", force_zip64=True) as member:
                 np.lib.format.write_array(member, np.asarray(value), allow_pickle=False)
 
+# ../../../../design/algorithm-sources.md#bounded-observation-artifacts
 def atomic_save(path, payload):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path + ".new", "wb") as target:
-        write_payload(target, payload)
-        target.flush()
-        os.fsync(target.fileno())
-    os.replace(path + ".new", path)
+    temporary = path + ".new"
+    try:
+        with open(temporary, "wb") as target:
+            write_payload(target, payload)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 def pack_state(state, prefix="__runtime__"):
     payload, objects, references = {}, [], {}
@@ -64,7 +70,8 @@ def pack_state(state, prefix="__runtime__"):
     payload[prefix + 'meta'] = np.frombuffer(metadata, dtype=np.uint8)
     return payload
 
-def unpack_state(payload, prefix="__runtime__", types=None):
+# ../../../../design/algorithm-sources.md#bounded-observation-artifacts
+def unpack_state(payload, prefix="__runtime__", types=None, root_key=None):
     types = {value.__name__: value for value in (tuple, list, set)} | dict(types or {})
     encoded = np.asarray(payload[prefix + 'meta'])
     metadata = json.loads(encoded.tobytes().decode() if encoded.dtype == np.uint8 else str(encoded))
@@ -94,5 +101,10 @@ def unpack_state(payload, prefix="__runtime__", types=None):
                 value = kind(*items) if hasattr(kind, "_fields") else kind(items)
             restored[index] = value
         return restored[index]
+    if root_key is not None:
+        root = metadata["objects"][metadata["root"]["ref"]]
+        for key, value in root.get("dict", ()):
+            if decode(key) == root_key:
+                return decode(value)
     return decode(metadata["root"])
 

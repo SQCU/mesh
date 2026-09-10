@@ -309,9 +309,27 @@ Client templates substitute `{port}`, `{map}`, `{seed}`, `{match}`, `{directory}
 Server-observed human rows remain value-learning data but are excluded from direct
 PPO actor credit. The policy dashboard at `http://127.0.0.1:8795/policy` exposes
 per-policy learning and observed-outcome measures. Full J matrices remain in the node's
-latest record and the match's `j-measures.PID.GENERATION.json` artifacts; they are not
+latest record and the match's current `j-measures.<telemetry-basename>.npz` artifact; they are not
 repeated in the interactive polling payload.
 
-An explicit `--remote-basedir` names existing game data on the peer and is used
-in place without retransmitting the local archive collection. The realized
-match userdir still supplies its selected BSP, entity data and payload configuration.
+The remote game base defaults to `/Users/mdot/mesh-workloads/cartlane/Xonotic`;
+`--remote-basedir` selects another existing installation. The remote engine comes
+from `--remote-mesh-root`'s `xonotic/darkplaces-work/darkplaces-dedicated`, or
+`--remote-engine`. Each participant builds its own committed checkout. Curriculum
+never copies engine binaries, source trees, Python environments or base archives.
+Only the selected map, generated entity data and payload configuration enter the
+replaceable match userdir; synchronizing it removes obsolete prior match assets.
+
+After recording result hashes and metrics, curriculum removes per-match BSP and
+gamecode copies. It retains small logs, metadata, entities and measurements, plus
+initial and current generated checkpoints per policy arm; superseded checkpoint
+payloads are deleted after their successor is recorded. Externally supplied
+checkpoints remain owned by their source. The live userdir is deleted after the
+game process exits. Interrupted runs may retain their final artifacts for the
+operator to inspect; no cleanup touches the configured base installation.
+
+`bin/mesh-application.py` activates a canonical Git checkout through a lightweight
+`current` symlink. Remote deployment transfers committed Git objects, verifies
+the revision, and builds both checkouts concurrently. It creates no snapshot
+source generations or per-application Python runtime. The canonical checkout uses
+the installed shared Python runtime through `bin/mesh-python`.

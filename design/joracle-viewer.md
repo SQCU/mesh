@@ -52,8 +52,9 @@ and durable outcome identity are described in
 
 ## Storage, pagination and continuity
 
-The producer atomically writes `j-measures.PID.GENERATION.npz` and a smaller
-`*.npz.view.npz` sidecar. Both use the shared array/tree codec, with coordinate label
+The producer atomically replaces `j-measures.<telemetry-basename>.npz`. Its
+viewer projection is a subtree of that same archive, decoded independently,
+without a sidecar or copies of shared arrays. The shared array/tree codec uses coordinate label
 sequences stored as integer indices into a string table. Shared arrays and labels
 are preserved without repeatedly expanding them into JSON. Legacy NPZ trees and
 `*.view.json` documents remain readable.

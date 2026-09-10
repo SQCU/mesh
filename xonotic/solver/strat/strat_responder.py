@@ -196,7 +196,7 @@ def main():
     telemetry_path = os.path.abspath(args.telemetry)
     os.makedirs(os.path.dirname(telemetry_path), exist_ok=True)
     reporter = LiteralJReporter(args.measure_rows, args.measure_interval,
-                               os.path.join(os.path.dirname(telemetry_path), f"j-measures.{os.getpid()}")).start()
+                               os.path.join(os.path.dirname(telemetry_path), "j-measures." + os.path.basename(telemetry_path))).start()
     published = False
     telemetry = open(telemetry_path, 'a')
     producer_id = uuid.uuid4().hex
