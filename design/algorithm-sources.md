@@ -1755,3 +1755,23 @@ Uncompleted-page inspection is diagnostic evidence at the time of the read, not
 a substitute for completion or permission to reuse the still-registered backing.
 A saturated and a smaller window therefore measure the same 1 GiB input and
 primitive while exposing any depth-dependent correctness or service limitation.
+
+The raw receiver's initial receive spans are now posted during provider
+configuration, after QP INIT and before publishing its connection information
+through the existing QPI exchange. Their memory and descriptors are allocated
+before configuration; registration supplies their lkeys. The provider clips the
+initial chain to the actual receive capacity and the stream starts its posted
+count at that realized extent. The sender therefore cannot learn the receiver's
+QP through this exchange before its initial destinations have been submitted.
+This adds no ready packet, timing rendezvous, or transfer-path wait. The existing
+bridge passes no initial chain and retains its existing pre-client receive setup.
+Descriptor and registered-memory storage remain allocated through provider
+teardown. The raw backing uses an anonymous shared mapping.
+
+The need for this correction was demonstrated by inspection of a retained failed
+raw receiver: its first physical page contained source page 2048, and its page
+2048 contained source page 4096. The first 2048 source pages were absent; the
+received payload was shifted, rather than merely missing completion accounting.
+That failed raw measurement cannot serve as a bandwidth acceptance baseline.
+Preposting is the correction to the yardstick's configuration lifecycle; whether
+it resolves the observed loss requires the complete receiver-side measurement.

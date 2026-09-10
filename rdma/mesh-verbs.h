@@ -145,7 +145,7 @@ static int oob(const char *peer){
 
 static _Thread_local struct ibv_port_attr pa;
 // ../design/algorithm-sources.md#transport-page-addressing
-static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t page_bytes, uint32_t header_bytes){
+static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t page_bytes, uint32_t header_bytes, struct ibv_recv_wr *initial_receives){
   if(provider->context && (TRACE(QUERY_PORT,provider->context,1,0,ibv_query_port(provider->context,1,&pa)) || pa.state!=IBV_PORT_ACTIVE)){
     retire_device=1; return -1; }
   int f=oob(peer); if(f<0) return -1;
@@ -203,6 +203,22 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   if(!provider->send_capacity || !provider->receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   if(TRACE(INIT,provider->pair,provider->pair->qp_num,0,ibv_modify_qp(provider->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))){ close(f); return -1; }
+  if(initial_receives){
+    struct ibv_recv_wr *last=initial_receives,*unposted=NULL;
+    int count=1;
+    for(;;){
+      for(int i=0;i<last->num_sge;i++){
+        struct ibv_sge *span=&last->sg_list[i];
+        span->lkey=region_sge(mem,(size_t)(span->addr-(uintptr_t)mem),span->length).lkey;
+      }
+      if(!last->next || count==provider->receive_capacity) break;
+      last=last->next; count++;
+    }
+    struct ibv_recv_wr *next=last->next; last->next=NULL;
+    int error=ibv_post_recv(provider->pair,initial_receives,&unposted);
+    last->next=next;
+    if(error){ fprintf(stderr,"initial receive post=%d\n",error); close(f); errno=error; return -1; }
+  }
   union ibv_gid gid; if(TRACE(QUERY_GID,provider->context,1,0,ibv_query_gid(provider->context,1,0,&gid))){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.nonce=mynonce,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=page_bytes,.header_bytes=header_bytes,.node=(uint16_t)me},you;

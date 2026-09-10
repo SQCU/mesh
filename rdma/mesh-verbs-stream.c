@@ -14,7 +14,7 @@ int main(int argc,char **argv){
   struct mesh_verbs verbs={0}; provider=&verbs;
   mynonce=((uint64_t)arc4random()<<32)|arc4random();
   size_t bytes=(size_t)STREAM_PAGES*STREAM_BYTES;
-  char *memory=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+  char *memory=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANON,-1,0);
   if(memory==MAP_FAILED){ perror("mmap"); return 1; }
   memset(memory,0,bytes);
   if(sending) for(uint32_t page=0;page<STREAM_PAGES;page++){
@@ -22,15 +22,7 @@ int main(int argc,char **argv){
     for(uint32_t word=0;word<STREAM_BYTES/sizeof *words;word++)
       words[word]=((uint64_t)page<<32)^word^UINT64_C(0x6d65736870616765);
   }
-  double deadline=monotime()+timeout;
-  while(!stop && monotime()<deadline &&
-        ((lsock<0 && listener_up()) || verbs_up(sending?NULL:argv[2],memory,bytes,sending?0:1,STREAM_BYTES,0))){
-    while(!down_pair()){}
-    if(retire_device){ while(!down_verbs()){} retire_device=0; }
-    usleep(100000);
-  }
-  if(stop || !provider->pair || monotime()>=deadline){ status=1; goto finish; }
-  uint32_t capacity=(uint32_t)(sending?provider->send_capacity:provider->receive_capacity);
+  uint32_t capacity=QD/(STREAM_BYTES/4096);
   uint32_t requested=argc>5?(uint32_t)strtoul(argv[5],NULL,10):capacity;
   if(requested && requested<capacity) capacity=requested;
   uint64_t *completion_ids=calloc(STREAM_PAGES,sizeof *completion_ids);
@@ -40,9 +32,25 @@ int main(int argc,char **argv){
   struct ibv_recv_wr *receives=calloc(capacity,sizeof *receives);
   struct ibv_wc *completions=calloc(capacity,sizeof *completions);
   if(!completion_ids || !valid_pages || !sges || !sends || !receives || !completions){ status=1; goto storage; }
+  if(!sending) for(uint32_t i=0;i<capacity;i++){
+    sges[i]=(struct ibv_sge){.addr=(uintptr_t)memory+(size_t)i*STREAM_BYTES,.length=STREAM_BYTES};
+    receives[i]=(struct ibv_recv_wr){.wr_id=i,.next=i+1<capacity?&receives[i+1]:NULL,
+      .sg_list=&sges[i],.num_sge=1};
+  }
+  double deadline=monotime()+timeout;
+  while(!stop && monotime()<deadline &&
+        ((lsock<0 && listener_up()) || verbs_up(sending?NULL:argv[2],memory,bytes,sending?0:1,
+          STREAM_BYTES,0,sending?NULL:receives))){
+    while(!down_pair()){}
+    if(retire_device){ while(!down_verbs()){} retire_device=0; }
+    usleep(100000);
+  }
+  if(stop || !provider->pair || monotime()>=deadline){ status=1; goto storage; }
+  uint32_t actual=(uint32_t)(sending?provider->send_capacity:provider->receive_capacity);
+  if(actual<capacity) capacity=actual;
   printf("provider_stream_ready role=%s bytes=%zu page_bytes=%u capacity=%u active_width=%u active_speed=%u pid=%d\n",
     argv[1],bytes,STREAM_BYTES,capacity,pa.active_width,pa.active_speed,getpid()); fflush(stdout);
-  uint32_t posted=0,completed=0,first_count=0,low_count=0,high_count=0;
+  uint32_t posted=sending?0:capacity,completed=0,first_count=0,low_count=0,high_count=0;
   uint64_t polls=0,posts=0,empty_polls=0,mismatches=0;
   double begin=monotime(),first=0,last=0,low_time=0,high_time=0,poll_seconds=0,post_seconds=0;
   deadline=begin+timeout;
@@ -131,9 +139,8 @@ int main(int argc,char **argv){
   while(!stop) sigsuspend(&previous);
   sigprocmask(SIG_SETMASK,&previous,NULL);
  storage:
-  free(valid_pages); free(completion_ids); free(sges); free(sends); free(receives); free(completions);
- finish:
   while(!down_verbs()){}
+  free(valid_pages); free(completion_ids); free(sges); free(sends); free(receives); free(completions);
   if(lsock>=0) close(lsock);
   munmap(memory,bytes);
   return status;
