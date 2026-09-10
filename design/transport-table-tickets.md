@@ -26,6 +26,31 @@ logical rows. Metadata occupies configured byte extents; physical pages have no
 numerical semantics. These tickets retain their historical prescriptions below
 so that they are not mistaken for completed implementations.
 
+## September 10 connected rewrite status
+
+[Committed source and operational evidence](transport-deletions-2026-09-10.md)
+records the current implementation and exact measured revisions. This section
+supersedes the historical open/half-done labels below.
+
+- A4–A6 and B1–B7: the named excluded implementations are deleted; matching
+  builds, three full one-GiB streams, and both real-input FFN configurations pass.
+- B8: the cancellation/sort/EBUSY implementations are deleted. The operator's
+  later index-mask instruction supersedes the ticket's QP-error/detach prescription.
+  Table invalidation is local and does not tear down the link.
+- C1–C2: the numerical caller uses cached registered-region buffers and resolved,
+  command-specific extent addresses. Genuine scatter-to-contiguous result aliases
+  remain for NumPy/MLX APIs; the operator explicitly permits these zero-copy views.
+- C3: the generic tensor runtime is deleted and its live consumers migrated.
+  Their application execution evidence remains outstanding.
+- D1: canonical ctypes mirrors are replaced by header-generated declarations.
+  `peers.py`, `workload.py`, and `xonwire.def` implement live application data,
+  rather than redundant canonical ABI mirrors; their deletion prescription was
+  incorrect and is withdrawn.
+- D2: repeated stop/layout/start/ready cycles between numerical cases are removed.
+  Configuration registers once for the batch's maximum declared storage.
+- A1/A2 remain superseded as described above. The registered metadata/payload
+  transfer pair remains explicit; no claim of one WR per payload is made.
+
 ## Corrections carried into these tickets
 
 - Under TN3205 SEND/RECV on one QP, receives are matched to sends in posting
