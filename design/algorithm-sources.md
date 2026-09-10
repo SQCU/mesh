@@ -3,8 +3,9 @@
 The [complete replacement requirements](completion-requirements.md) consolidate
 the current obligations, source disposition and acceptance evidence. They take
 precedence over completion implications in the chronological notes below. The
-active caller still uses `mesh_pages_*`; local kernel measurements and unused
-`mesh_rows_*` functions do not establish a completed replacement.
+active source callers now use the configured `mesh_rows_*` runtime; the excluded
+`mesh_pages_*` and scheduler implementations have been deleted. The connected
+source refactor still requires a fleet build and real-input execution evidence.
 
 ## ANE backing identity and registration
 
@@ -1340,3 +1341,10 @@ access. A new process/context in the demo uses an explicit physical bridge/QP
 restart at configuration boundaries, so old table identity zero cannot address
 new table identity zero. No numerical handshake or recovery protocol is added.
 This lifecycle source has not yet been executed or measured.
+
+Explicit ranges supplied from foreign configuration memory are copied into
+canonical pages during realization; already canonical ranges remain views of the
+same storage. Invalidation matches held ranges to the existing canonical return
+descriptors and retains those descriptors, never the argument's pointers. Invalid
+or duplicated held ranges return EINVAL to the outer lifecycle consumer before
+any ownership changes. Successful invalidation returns zero.

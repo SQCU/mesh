@@ -75,7 +75,7 @@ for name, result, arguments in (
     ("mesh_rows_present", c.c_int, [c.POINTER(Rows), RowMap, c.c_uint32, c.c_uint64]),
     ("mesh_context_metadata", c.POINTER(PageHeader), [c.POINTER(Context), c.c_uint32]),
     ("mesh_context_consume", c.c_int, [c.POINTER(Context), c.c_uint32]),
-    ("mesh_rows_invalidate", None, [c.POINTER(c.POINTER(Rows)), c.POINTER(RowMap), c.c_size_t]),
+    ("mesh_rows_invalidate", c.c_int, [c.POINTER(c.POINTER(Rows)), c.POINTER(RowMap), c.c_size_t]),
 ):
     function = getattr(_lib, name)
     function.restype, function.argtypes = result, arguments
@@ -194,5 +194,6 @@ class Mesh:
     # design/algorithm-sources.md#complete-page-ownership
     def close(self):
         if self.pages:
-            _lib.mesh_rows_invalidate(c.byref(self.pages), self.returns, len(self.returns))
+            status = _lib.mesh_rows_invalidate(c.byref(self.pages), self.returns, len(self.returns))
+            if status: return status
         return _lib.mesh_detach(self.context)

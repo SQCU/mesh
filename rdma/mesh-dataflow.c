@@ -42,8 +42,19 @@ void mesh_rows_map(struct mesh_rows *p,uint32_t first,uint32_t physical,
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
-void mesh_rows_invalidate(struct mesh_rows **pages,const struct mesh_row_map *held,size_t count){
+int mesh_rows_invalidate(struct mesh_rows **pages,const struct mesh_row_map *held,size_t count){
   struct mesh_rows *p=*pages;
+  if(count>p->return_count) return EINVAL;
+  for(size_t i=0;i<count;i++){
+    struct mesh_row_range value=held[i].ranges?held[i].ranges[0]:(struct mesh_row_range){held[i].first,held[i].count};
+    int found=0;
+    for(size_t j=0;j<p->return_count;j++) found|=p->returns[j].ranges[0].first==value.first && p->returns[j].ranges[0].count==value.count;
+    if(!found) return EINVAL;
+    for(size_t j=0;j<i;j++){
+      struct mesh_row_range previous=held[j].ranges?held[j].ranges[0]:(struct mesh_row_range){held[j].first,held[j].count};
+      if(value.first==previous.first) return EINVAL;
+    }
+  }
   *pages=NULL;
   for(size_t i=0;i<p->function_count;i++){
     const struct mesh_row_function *f=&p->functions[i];
@@ -86,24 +97,34 @@ void mesh_rows_invalidate(struct mesh_rows **pages,const struct mesh_row_map *he
     }
     if(b->receive) b->inputs=0; else b->count=0;
   }
-  if(count) memmove((struct mesh_row_map*)p->returns,held,count*sizeof *held);
-  p->return_count=count;
   struct mesh_row_map *owned=(struct mesh_row_map*)p->returns;
+  // held=owned+d => touched_before(i)={k,d+k | 0<=k<i} < d+i
+  for(size_t i=0;i<count;i++){
+    struct mesh_row_range value=held[i].ranges?held[i].ranges[0]:(struct mesh_row_range){held[i].first,held[i].count};
+    size_t j=i;
+    while(owned[j].ranges[0].first!=value.first || owned[j].ranges[0].count!=value.count) j++;
+    struct mesh_row_map previous=owned[i]; owned[i]=owned[j]; owned[j]=previous;
+  }
+  p->return_count=count;
   for(size_t i=1;i<count;i++){
     struct mesh_row_map value=owned[i]; size_t j=i;
     while(j && owned[j-1].ranges[0].first>value.ranges[0].first){ owned[j]=owned[j-1]; j--; }
     owned[j]=value;
   }
+  return 0;
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
 static int row_ranges(const struct mesh_rows *p,struct mesh_row_map *map,uint32_t rows){
-  if(map->ranges) return 0;
   size_t bytes=(size_t)rows*sizeof(struct mesh_row_range);
+  uintptr_t first=(uintptr_t)mesh_at(p->memory,p->memory->pool),address=(uintptr_t)map->ranges;
+  size_t allocated=p->context->allocation*p->bytes;
+  if(map->ranges && address>=first && address-first<=allocated && bytes<=allocated-(address-first)) return 0;
   uint32_t page=mesh_rows_allocate((struct mesh_rows*)p,(bytes+p->bytes-1)/p->bytes,p->bytes);
   if(page==MESH_ROW_ABSENT) return errno;
   struct mesh_row_range *ranges=(void*)mesh_at(p->memory,page);
-  for(uint32_t i=0;i<rows;i++){
+  if(map->ranges) memcpy(ranges,map->ranges,bytes);
+  else for(uint32_t i=0;i<rows;i++){
     uint64_t first=(uint64_t)map->first+(uint64_t)i*map->stride;
     if(first+map->count>p->count) return EINVAL;
     ranges[i]=(struct mesh_row_range){(uint32_t)first,map->count};
