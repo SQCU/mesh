@@ -4,6 +4,7 @@ from solver.strat.scale_config import SCALE_EXPERTS, SCALE_HIDDEN, SCALE_RANK, S
 from solver.strat.policy_contract import MATRIX_FUSION_INTERVENTION_ARMS, OPTIMIZATION_ARMS, JOINT_TRAINING_ARMS, is_matrix_fusion_arm, checkpoint_path
 from solver.strat.capacity import cart_capacity, engine_player_capacity, team_capacity
 from solver.strat.journal import Journal
+from solver.strat.checkpoint_state import checkpoint_source
 from solver.strat.action_history import ExecutionEvaluation
 from solver.strat.map_assets import MapAssets, artifact, discover_maps, resolve_maps
 from pathlib import Path
@@ -347,8 +348,8 @@ class Curriculum:
         self.server_host = args.server_host
         self.remote_run_root = os.path.expanduser(args.remote_run_root)
         self.remote_mesh_root = args.remote_mesh_root
-        self.remote_engine = os.path.expanduser(args.remote_engine) if args.remote_engine else os.path.join(self.remote_run_root, "runtime", "darkplaces-dedicated")
-        self.remote_basedir = os.path.expanduser(args.remote_basedir) if args.remote_basedir else os.path.join(self.remote_run_root, "runtime", "Xonotic")
+        self.remote_engine = os.path.expanduser(args.remote_engine) if args.remote_engine else os.path.join(self.remote_mesh_root, "xonotic", "darkplaces-work", "darkplaces-dedicated")
+        self.remote_basedir = os.path.expanduser(args.remote_basedir) if args.remote_basedir else "/Users/mdot/mesh-workloads/cartlane/Xonotic"
         self.progs = os.path.abspath(os.path.expanduser(args.progs))
         self.csprogs = os.path.abspath(os.path.expanduser(args.csprogs))
         self.build_command = command(args.build_command)
@@ -361,6 +362,8 @@ class Curriculum:
                 if remote != revision:
                     raise RuntimeError(f'application revisions differ: local={revision}, {self.server_host}={remote}; synchronize committed main before evaluation')
                 self.runtime['remote_application_revision'] = remote
+        self.generated_checkpoints = set()
+        self.generated_bundles = set()
         self.previous_checkpoints = {}
         self.initial_checkpoints = {}
         self.capacity_observations = []
@@ -540,7 +543,7 @@ class Curriculum:
         ] + self.server_prefix
         basedir = self.basedir
         userdir = os.path.join(self.run_dir, "userdir")
-        stage.append(["rsync", "-a", entity["userdir"] + "/", userdir + "/"])
+        stage.append(["rsync", "-a", "--delete", entity["userdir"] + "/", userdir + "/"])
         if self.server_host:
             remote_directory = os.path.join(self.remote_run_root, os.path.basename(self.run_dir))
             userdir = os.path.join(remote_directory, "userdir")
@@ -549,15 +552,9 @@ class Curriculum:
                 self.server_host, "--", "env", f"MESH_REGION={server_region}",
                 f"MESH_EXPERT_SOCKET={self.args.expert_socket}", self.remote_engine,
             ]
-            remote_data = os.path.join(self.remote_basedir, "data")
-            engine_source = os.path.abspath(os.path.expanduser(self.args.engine))
-            engine_library = os.path.join(os.path.dirname(engine_source), "libjpeg.8.dylib")
             stage = [
-                self.ssh_prefix + [self.server_host, "--", "mkdir", "-p", remote_directory, remote_data, os.path.dirname(self.remote_engine)],
-                ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), engine_source, f"{self.server_host}:{self.remote_engine}"],
-                ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), engine_library, f"{self.server_host}:{os.path.dirname(self.remote_engine)}/"],
-                *([] if self.args.remote_basedir else [["rsync", "-aL", "-e", shlex.join(self.ssh_prefix), os.path.join(self.basedir, "data") + "/", f"{self.server_host}:{remote_data}/"]]),
-                ["rsync", "-a", "-e", shlex.join(self.ssh_prefix), entity["userdir"], f"{self.server_host}:{remote_directory}/"],
+                self.ssh_prefix + [self.server_host, "--", "mkdir", "-p", userdir],
+                ["rsync", "-a", "--delete", "-e", shlex.join(self.ssh_prefix), entity["userdir"] + "/", f"{self.server_host}:{userdir}/"],
             ]
         server_values = {
             "developer": 0, "sv_public": 0, "port": port,
@@ -1066,6 +1063,29 @@ class Curriculum:
             if os.path.exists(path):
                 self.previous_checkpoints[arm] = path
                 self.initial_checkpoints.setdefault(arm, checkpoint_path(commands["checkpoint_initial"], arm))
+        if not self.args.dry_run:
+            self.generated_checkpoints.update([
+                commands["checkpoint_out"], commands["checkpoint_initial"],
+                *commands["policy_checkpoints"].values(),
+                *(checkpoint_path(commands["checkpoint_initial"], arm) for arm in commands["policy_checkpoints"]),
+            ])
+            retained = set(self.previous_checkpoints.values()) | set(self.initial_checkpoints.values())
+            self.generated_bundles.add(commands["checkpoint_out"] + ".runstate.npz")
+            retained_bundles = {checkpoint_source(path) for path in retained if os.path.isfile(path)}
+            for bundle in self.generated_bundles - retained_bundles:
+                Path(bundle).unlink(missing_ok=True)
+                for path in Path(bundle).parent.glob(Path(bundle).name + ".steps.*"):
+                    path.unlink(missing_ok=True)
+                actions = Path(bundle.removesuffix(".runstate.npz") + ".actions")
+                if actions.is_dir():
+                    shutil.rmtree(actions)
+            self.generated_bundles.intersection_update(retained_bundles)
+            for path in self.generated_checkpoints - retained:
+                Path(path).unlink(missing_ok=True)
+            self.generated_checkpoints.intersection_update(retained)
+            data = Path(entity["userdir"]) / "data"
+            for path in [*data.glob("maps/*.bsp"), data / "progs.dat", data / "csprogs.dat"]:
+                path.unlink(missing_ok=True)
         print(json.dumps({"id": cfg["id"], "record": record_path}), flush=True)
         return record
 
@@ -1151,6 +1171,16 @@ class Curriculum:
             self.finish(self.expert, time.monotonic() + self.args.quit_grace)
         elif self.expert is not None:
             self.event('runtime_retained', reason='game server is still running', log=self.expert.get('log'))
+        if not self.args.dry_run and (server_proc is None or server_proc.poll() is not None):
+            userdir = os.path.join(self.run_dir, "userdir")
+            if os.path.isdir(userdir):
+                shutil.rmtree(userdir)
+            if self.server_host:
+                remote_userdir = os.path.join(self.remote_run_root, os.path.basename(self.run_dir), "userdir")
+                result = subprocess.run(self.ssh_prefix + [self.server_host, shlex.join(["rm", "-rf", "--", remote_userdir])],
+                                        capture_output=True, text=True)
+                self.event("artifact_release", path=remote_userdir, returncode=result.returncode,
+                           output=result.stdout + result.stderr)
         self.event("supervisor_stop", signal=self.stopping, cycles=cycle, next_ordinal=ordinal)
 
     def plan(self, schedule):

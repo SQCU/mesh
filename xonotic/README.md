@@ -322,8 +322,9 @@ replaceable match userdir; synchronizing it removes obsolete prior match assets.
 
 After recording result hashes and metrics, curriculum removes per-match BSP and
 gamecode copies. It retains small logs, metadata, entities and measurements, plus
-initial and current generated checkpoints per policy arm; superseded checkpoint
-payloads are deleted after their successor is recorded. Externally supplied
+initial and current generated checkpoints per policy arm and the continuation
+bundles they reference. Superseded checkpoint payloads, continuation bundles,
+action archives and journals are deleted after their successor is recorded. Externally supplied
 checkpoints remain owned by their source. The live userdir is deleted after the
 game process exits. Interrupted runs may retain their final artifacts for the
 operator to inspect; no cleanup touches the configured base installation.

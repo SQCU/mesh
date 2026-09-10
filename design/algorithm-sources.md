@@ -1846,3 +1846,43 @@ index compare-and-exchange assigns that one receive to one operand slot when
 configuration and completion access the index concurrently; it introduces no
 wait, retry loop, separate notification, or peer receipt. Received error metadata
 does not suppress operand availability.
+
+
+### Application artifact ownership
+
+`bin/mesh-application.py` realizes applications from committed Git checkouts on
+main and builds local and remote sources concurrently. Its command, checkout,
+activate, deploy, run and main functions select that configured source and the
+existing installed Python runtime. They do not copy source trees into snapshots
+or provision a Python environment for each run. This applies the configuration
+and lifetime separation described above; Git revision identity implements the
+operator's reproducible-source requirement, not a distributed numerical protocol.
+Saltzer, Reed and Clark, *End-to-End Arguments in System Design* (1984), locate
+application source selection and result retention at the application endpoint.
+
+The curriculum owner uses an existing peer game installation and a replaceable
+userdir for generated assets. It retains checkpoint payloads for the current
+policy and initial comparison, removes superseded generated payloads after
+recording their hashes, and preserves externally supplied checkpoints. The
+retained pointers keep their authoritative continuation bundles, action archives
+and journals; superseded generated bundles and their dependent files are removed
+together. It removes
+per-match map/gamecode copies after collecting results and removes the live
+userdir after the game process exits. This is endpoint artifact ownership; it
+adds no transport readiness condition or numerical-callgraph lifetime protocol.
+
+### Bounded observation artifacts
+
+Jim Gray and Andreas Reuter, *Transaction Processing: Concepts and Techniques*
+(1993), supply the distinction between replacing current durable state and
+retaining a history. The observation producer maintains current state: one
+stable archive per configured telemetry producer, replaced atomically. Episode
+and sample identity remain values inside the archive rather than new filenames.
+A failed write removes its temporary file; it does not leave a second full copy.
+
+The complete report and its viewer projection share one array/tree object graph
+and one archive. Existing identity references store shared arrays once. The
+reader can decode only the view subtree, so obtaining the projection does not
+materialize the full numerical report or require a second archive. Historical
+archives remain readable; new reporting does not accumulate per-process or
+per-generation payloads.
