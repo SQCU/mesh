@@ -1133,3 +1133,155 @@ The exact records and comparison method are committed in
 was measurement analysis outside the callgraph, not a replacement mesh reducer.
 Actual page operands, concurrent issue and canonical page reduction remain
 separate integration obligations; separate-run timings do not prove overlap.
+
+### Complete page ownership
+
+The connected replacement uses Papadopoulos and Culler's Monsoon operand
+presence and use accounting, Rabenseifner and Patarasuk–Yuan's partitioned
+page exchange, and Saltzer–Reed–Clark's endpoint interpretation of error values.
+The API mechanisms below are this repository's realization of those principles,
+not a claim that any paper specifies the C ABI.
+
+The transport layout separates each page's address/error metadata from its
+entire OS-page-aligned numerical payload. Both regions belong to the registered
+shared mapping. A provider request gathers its header and payload directly;
+receive scatters directly to the corresponding canonical header and payload.
+Consequently consecutive payload pages form a contiguous native view without
+removing embedded headers, padding copies, or a second numerical allocation.
+The provider's two-SGE capability still requires validation on both actual
+participants after the complete source change; no execution accompanied this
+source pass.
+
+`mesh_rows_create` installs a stable table identity during configuration and
+allocates the row table from canonical pages. `mesh_rows_allocate` reserves
+contiguous physical pages before invocation; `mesh_rows_map` binds exact-stamp
+source values. The context's configured table registry preserves original
+ownership for late physical completions. Identities are positional within each
+participant. Every exchange binding explicitly names the remote table; its
+immutable transmit record separately names the original local owner. The wire target is the literal remote binding array index; its index addresses
+the page within that receiver binding, rather than assuming
+that heterogeneous participants assign identical logical row numbers. Neither
+local nor remote identities are reused while their original tables remain live. `mesh_rows_invalidate` removes the outer
+caller's handle without changing the retained table or redirecting device
+access. This protects replacement allocations from old accesses; it does not
+claim device cancellation or immediate reclamation of a hung device's backing.
+The present allocator is monotonic within its configured context; physical
+lifetime reuse and final retirement remain obligations of the connected owner.
+
+`mesh_rows_issue` stores the complete selected-index set in one or more
+contiguous canonical pages. The first uint32 value is the count; the remaining
+values are the selected function indices. Each configured reservation is sized
+for all function rows, and worst-case concurrent reservations cover one issue
+per row. `mesh_rows_complete` reads that same retained value, publishes exactly
+its outputs, releases their configured input reads, then releases and zeros
+that reservation. A later scan never overwrites the indices held by an earlier
+completion. Configuration must provide the entire reservation; there is no
+runtime allocation or smaller dispatch-capacity substitute.
+
+Immutable source output maps explicitly permit shared physical backing. Such a
+source has no numerical inputs and performs no write to its parameter values;
+it publishes the invocation's stamp into a distinct logical row. Each logical
+alias retains one caller use for the configured context's lifetime. Once its
+numerical uses end, the same logical row can be stamped for a later invocation
+without zeroing the immutable backing. Mutable output maps continue to require
+distinct physical spans. Removing that restriction requires a complete static
+lifetime proof and corresponding retirement ownership, not a boolean exception.
+
+`mesh_rows_poll` consumes literal provider completion descriptors. Addressed
+receives publish the original addressed table's rows and consume the configured
+remote reads. NIC completion releases its source use regardless of the literal
+error code; errors are preserved separately in registered metadata. A failed
+receive has no trustworthy graph address, so its provenance names the physical
+receive page and port rather than guessing a table from unwritten payload.
+Only the outer calling context interprets these metadata values. The provider
+completion rings describe physical work ownership; they do not contain another
+queue of numerical functions, retry protocol, or recovery decision.
+
+The final configured maps carry immutable `mesh_row_range` index values and
+per-output read multiplicities in canonical pages. Realization generates affine
+ranges or accepts already realized input ranges for padded native packs. The
+numerical scan always gathers the configured range; it does not infer a layout
+from an operand or allocate another index representation. Configuration derives
+read multiplicities by interval differences and a prefix sum, including every
+input occurrence, NIC read, remote read proof and caller return. Remaining uses
+still occupy only the original three-field row. These index/count values are
+static function configuration, not a mutable copy of readiness.
+
+Each transmit occurrence has its own 128-byte record in canonical pages, with
+an immutable 64-byte wire/address/error header and physical provider ownership
+fields. Concurrent destinations never overwrite a header still read by the NIC.
+The physical request's descriptor names that record directly; completion uses
+the original local owner stored there. This permits fanout of the same payload
+without duplicating its numerical storage or serializing sends behind one mutable
+header. Separate records and the physical page itself remain retained until
+actual NIC completion.
+
+Retirement scans only configured mutable output ranges and receive bindings.
+The existing physical REL operation names the released page and its original
+canonical row offset. The bridge zeros the payload asynchronously, removes the
+page from that row, and clears the retirement bit while retaining the old stamp.
+It handles one such release alongside its normal physical completions and
+submissions, rather than draining a bulk erase before communication. Receive
+pages return to the receive pool; arena pages retain their configured address.
+There is no extra acknowledgement or numerical readiness object. Small selected
+index reservations are erased by their already asynchronous device completion
+owner. These are source semantics; their elapsed costs have not been measured.
+
+`mesh_metal_rows_source` is the single GPU page-reduction implementation. It
+gathers each participant's configured padded contraction layout and writes FP32
+accumulator pages. Model-specific embedding and normalization remain numerical
+functions in the caller. The former independent CPU add/normalize/index-query
+implementation and unused count-query public APIs were removed with their callers.
+
+The generic Python/game ingress binding now reserves canonical input pages,
+encodes application records into those pages, and receives local socket payloads
+directly into their registered destination views. It publishes those page values
+through the same row transport. Application game-record decoding and retention
+are outside the numerical graph; their historical event/snapshot semantics are
+not erased to claim a numerical runtime reduction. The transport no longer
+allocates copied send queues, reattaches itself, or substitutes another page
+packing after a binding changes. Application configuration supplies the actual
+peer set and matching ingress capacity before publication.
+
+Remaining source obligations are explicit: the monotonic physical allocator does
+not yet realize static lifetime reuse or final owner destruction; invalidation
+retains old storage rather than revoking a hung device; an unaddressable failed
+receive retains physical error provenance without guessing a graph destination.
+The caller must expose that metadata and its ownership. Complete native parameter
+and intermediate binding, final endpoint digest integration, and all runtime
+validation belong to the connected acceptance review, not these source edits.
+
+Configuration classifies each input map's explicit ranges once: input `stride`
+is zero exactly when every occurrence reads the same range, and one otherwise.
+Runtime addressing uses only the realized ranges. Dennis's operand matching
+therefore checks a shared range once per scan; Papadopoulos–Culler's read
+accounting subtracts the completed occurrence count once per shared input page.
+No readiness cache is introduced. Index values are released by completion and
+retired through the same asynchronous physical REL operation by the scan owner.
+
+## Endpoint page digests
+
+`mesh_digest` and `mesh_compare` implement the endpoint check separation of
+Saltzer–Reed–Clark, using the CRC polynomial mechanisms already cited for
+`mesh_rows_digest`. Each digest occurrence packs one uint64 per input page into
+a literal digest page, zeroing unused words. CRC32C and CRC32 use the existing
+CPU digest's initial seeds, byte order, and final concatenation. Comparison
+writes only literal metadata; it neither gates numerical outputs nor retries.
+The implementation uses ordinary asynchronous GPU functions and configured
+page maps. [Mark Adler's zlib CRC implementation](https://github.com/madler/zlib/blob/develop/crc32.c)
+provides the polynomial combination mechanism: each SIMD lane hashes one
+contiguous 1/32-page section using a byte table, applies its configured suffix
+zero-byte linear operator, then XORs the residues. For the raw recurrence R,
+`R(A || B, s) = Z_len(B)(R(A,s)) XOR R(B,0)`; only the first section receives
+the initial seed. The configuration generator computes Z on each of 32 basis
+bits for each section and each polynomial, with no invocation allocation.
+This establishes equivalence to the prior byte recurrence for a complete page;
+actual Metal execution and digest vectors remain unvalidated in this source-only
+pass. Comparison distributes digest words over 256 threads, reduces within SIMD
+groups and then over eight group residues, writing metadata only.
+
+`mesh_metal_regions` realizes bounded 1 GiB views and a canonical page containing
+their GPU addresses; `mesh_metal_page_span` provides the exact bounded operand
+view used consistently within each composed numerical function. Numerical views
+retain Metal hazard tracking. Indirect region views belong only to single-encoder
+page functions; their inter-function dependencies are literal completion stamps.

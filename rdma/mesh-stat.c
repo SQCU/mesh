@@ -18,7 +18,7 @@ int main(int argc,char**argv){
   if(h==MAP_FAILED||h->magic!=MESH_MAGIC){ printf("{\"up\":false}\n"); return 0; }
   #define A(x) (unsigned long long)atomic_load_explicit(&h->x,memory_order_relaxed)
   uint64_t client=atomic_load_explicit(&h->client,memory_order_relaxed);
-  int alive=client && client!=MESH_CLIENT_DRAIN && client!=MESH_CLIENT_DETACH && (!kill((pid_t)client,0)||errno==EPERM);
+  int alive=client && (!kill((pid_t)client,0)||errno==EPERM);
   uint64_t bridge=A(bridge_pid),beat=A(heartbeat_ms),phase=A(phase),op=A(operation);
   int bridge_alive=bridge && (!kill((pid_t)bridge,0)||errno==EPERM);
   struct timeval tv; gettimeofday(&tv,0);

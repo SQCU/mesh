@@ -6,64 +6,53 @@
 #define MESH_ROW_WRITING (UINT64_C(1)<<63)
 
 struct mesh_row { uint32_t page, uses; uint64_t stamp; };
-struct mesh_rows { struct hdr *memory; struct mesh_row *table; size_t count; uint32_t offset, bytes; };
-struct mesh_row_map { uint32_t first, count, stride, physical, physical_stride, uses; };
+struct mesh_rows {
+  struct hdr *memory; struct mesh_row *table; size_t count; uint32_t offset, bytes;
+  struct mesh_ctx *context; uint64_t identity;
+  const struct mesh_row_binding *bindings; size_t binding_count;
+  const struct mesh_row_function *functions; size_t function_count;
+};
+struct mesh_row_range { uint32_t first, count; };
+struct mesh_row_map { uint32_t first, count, stride, physical, physical_stride, immutable; const uint32_t *uses; const struct mesh_row_range *ranges; };
 struct mesh_row_function {
-  const struct mesh_row_map *input, *output;
+  struct mesh_row_map *input, *output;
   uint32_t inputs, outputs, rows;
 };
 struct mesh_row_binding {
-  uint32_t first, count, remote, uses;
+  uint32_t first, count, remote, headers;
+  const uint32_t *uses;
   uint16_t peer, receive;
-  const struct mesh_row_map *input;
+  uint64_t remote_table;
+  struct mesh_row_map *input;
   uint32_t inputs;
 };
-struct mesh_row_address { uint64_t epoch, stamp; uint32_t source, target; };
 struct mesh_row_metadata {
   uint64_t stamp, when;
   uint32_t function, index, peer;
-  int32_t code;
+  int64_t code;
+  uint32_t domain, reserved;
 };
 
-int mesh_rows_validate(const struct mesh_rows *pages, const struct mesh_row_function *function);
-uint64_t mesh_rows_uses(const struct mesh_row_function *functions, size_t count,
-  const struct mesh_row_binding *bindings, size_t binding_count,
-  const struct mesh_row_map *returns, size_t return_count, uint32_t row);
+struct mesh_rows *mesh_rows_create(struct mesh_ctx *context, size_t rows, uint64_t identity);
+uint32_t mesh_rows_allocate(struct mesh_rows *pages, size_t count, size_t alignment);
+void mesh_rows_map(struct mesh_rows *pages, uint32_t first, uint32_t physical,
+  uint32_t count, uint32_t uses, uint64_t stamp);
+void mesh_rows_invalidate(struct mesh_rows **pages);
+size_t mesh_rows_poll(struct mesh_ctx *context);
+
+uint32_t mesh_rows_issue(const struct mesh_rows *pages, const struct mesh_row_function *function,
+  uint64_t stamp, struct mesh_row_map indices);
+void mesh_rows_complete(const struct mesh_rows *pages, const struct mesh_row_function *function,
+  uint64_t stamp, uint32_t indices);
+
 int mesh_rows_realize(const struct mesh_rows *pages, const struct mesh_row_function *functions,
-  size_t count, const struct mesh_row_binding *bindings, size_t binding_count,
-  const struct mesh_row_map *returns, size_t return_count);
+  size_t count, struct mesh_row_binding *bindings, size_t binding_count,
+  struct mesh_row_map *returns, size_t return_count);
 void *mesh_row_data(const struct mesh_rows *pages, uint32_t row);
 int mesh_rows_present(const struct mesh_rows *pages, struct mesh_row_map map, uint32_t index, uint64_t stamp);
-size_t mesh_rows_select(const struct mesh_rows *pages, const struct mesh_row_function *function,
-  uint64_t stamp, uint32_t *indices, size_t capacity);
 void mesh_rows_publish(const struct mesh_rows *pages, const struct mesh_row_function *function,
   uint32_t index, uint64_t stamp);
 void mesh_rows_report(const struct mesh_rows *pages, struct mesh_row_map output,
   uint32_t occurrence, struct mesh_row_metadata metadata);
 void mesh_row_release(const struct mesh_rows *pages, uint32_t row);
-int mesh_row_zero(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
-int mesh_rows_validate_add(const struct mesh_rows *pages, const struct mesh_row_function *function,
-  size_t elements, size_t input_bytes);
-void mesh_rows_add_f16(const struct mesh_rows *pages, const struct mesh_row_function *function,
-  uint32_t index, size_t elements, uint64_t stamp);
-void mesh_rows_add_f32(const struct mesh_rows *pages, const struct mesh_row_function *function,
-  uint32_t index, size_t elements, uint64_t stamp);
-int mesh_rows_indexed(const struct mesh_rows *pages, uint32_t index_row, uint32_t first,
-  uint32_t count, uint64_t stamp);
-void mesh_rows_normalize_f32(const struct mesh_rows *pages, const uint32_t *accumulators,
-  const uint32_t *gamma, const uint32_t *residual, const uint32_t *outputs,
-  size_t elements, float epsilon, float scale);
-size_t mesh_rows_send(const struct mesh_rows *pages, uint64_t epoch,
-  const struct mesh_row_binding *bindings, size_t count);
-size_t mesh_rows_receive(const struct mesh_rows *pages,
-  const struct mesh_row_binding *bindings, size_t count);
-size_t mesh_rows_acknowledge(const struct mesh_rows *pages);
-int mesh_rows_return(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
-size_t mesh_rows_retire(const struct mesh_rows *pages);
-size_t mesh_rows_progress(const struct mesh_rows *pages, uint64_t epoch,
-  const struct mesh_row_binding *bindings, size_t count);
-int mesh_rows_digest(const struct mesh_rows *pages, uint32_t input, uint32_t output,
-  uint32_t index, uint64_t seed);
-int mesh_rows_equal(const struct mesh_rows *pages, uint32_t first, uint32_t second,
-  uint64_t stamp);
 #endif

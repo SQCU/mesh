@@ -23,7 +23,7 @@ def report(event, **values):
 class RuntimeTransport:
     def __init__(self, service, numerical):
         self.service, self.numerical = service, numerical
-        self.mesh = None
+        self.mesh = Mesh()
         self.instance = uuid.uuid4().int & ((1 << 64) - 1)
         self.attach_at = 0
         self.network = deque()
@@ -54,48 +54,21 @@ class RuntimeTransport:
         for kind, rows in parts:
             count = frame_count(rows, self.mesh.usable)
             frames = frame_waves(kind, header['req_id'], header['tick'], rows,
-                                self.mesh.usable, 64, header['session'])
+                                self.mesh.usable, 64, header['session'], self.mesh, node)
             self.messages.append((node, frames, count))
             counts.append(count)
         return counts
 
+    # ../../../design/algorithm-sources.md#complete-page-ownership
     def outgoing(self, node, address, frames):
-        if self.mesh is None or frames.shape[1] == self.mesh.usable:
-            self.transmit(node, frames)
-            return
-        for frame in frames:
-            header = parse_hdr(frame)
-            if header is None:
-                raise ValueError('cannot reframe an unrecognized game packet')
-            if not header['values_total']:
-                empty = np.zeros((1, self.mesh.usable), np.uint8)
-                empty[0, :HDRSZ] = frame[:HDRSZ]
-                self.transmit(node, empty)
-                continue
-            key = (address, node, header['kind'], header['session'], header['width'], len(frame))
-            if key not in self.reframing:
-                self.reframing[key] = Reassembler(header['kind'], header['width'], len(frame))
-            receiver = self.reframing[key]
-            record = receiver.feed(frame)
-            if record is not None:
-                self.rows(node, header, ((header['kind'], receiver.stage[:record['rows']].copy()),))
+        self.transmit(node, frames)
 
     def progress(self, accepting=True):
         activity = 0
         now = time.monotonic()
-        if self.mesh is None and now >= self.attach_at:
-            self.attach_at = now + 1
-            try:
-                self.mesh = Mesh(wait=False)
-                report('runtime_transport_attached', region=self.mesh.region, slots=self.mesh.slots,
-                       usable=self.mesh.usable, instance=self.instance)
-                for address in self.clients:
-                    self.status(address)
-            except OSError as error:
-                self.error('attach', error)
         for _ in range(256 if accepting else 0):
             try:
-                packet = recv_datagram_frames(self.service, socket.MSG_DONTWAIT)
+                packet = recv_datagram_frames(self.service, self.mesh, socket.MSG_DONTWAIT)
             except BlockingIOError:
                 break
             except (OSError, ValueError) as error:
@@ -114,13 +87,7 @@ class RuntimeTransport:
                     self.outgoing(node, address, frames)
                 except ValueError as error:
                     self.error('local_payload', error)
-        if self.mesh is not None:
-            try:
-                self.mesh.pump()
-            except OSError as error:
-                self.error('reattach', error)
-                if not self.mesh.close():
-                    self.mesh = None
+        self.mesh.pump()
         if self.mesh is not None:
             try:
                 for frame, node in self.mesh.read(np.uint8, max_batches=1):
@@ -145,17 +112,13 @@ class RuntimeTransport:
                 frames = next(waves, None)
                 if frames is None:
                     self.messages.popleft()
-                else:
+                elif len(frames):
                     self.transmit(node, frames)
                     self.messages[0] = node, waves, count - len(frames)
             for _ in range(256):
                 if not self.network:
                     break
                 node, frames, first = self.network[0]
-                if frames.shape[1] != self.mesh.usable:
-                    self.network.popleft()
-                    self.outgoing(node, '', frames[first:])
-                    continue
                 sent = self.mesh.send(frames[first:first + 64], node)
                 if not sent:
                     break

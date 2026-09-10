@@ -59,33 +59,29 @@ def frame_count(rows, usable):
     vps = values_per_slot(usable)
     return (values + vps - 1) // vps
 
-def frame_waves(kind, req_id, tick, rows, usable, wave_slots, session=0):
-    rows = np.ascontiguousarray(rows, dtype=np.float32)
-    if rows.ndim != 2 or not rows.size:
-        return
+# ../../design/algorithm-sources.md#complete-page-ownership
+def frame_waves(kind, req_id, tick, rows, usable, wave_slots, session, mesh, node):
+    rows = np.asarray(rows, dtype=np.float32)
     width = rows.shape[1]
     flat = rows.reshape(-1)
     vps = values_per_slot(usable)
     frame_mass = (flat.size + vps - 1) // vps
-    first = 0
-    while first < frame_mass:
-        wave = min(frame_mass - first, wave_slots)
-        frames = np.zeros((wave, usable), np.uint8)
-        base = first * vps
-        count = min(wave * vps, flat.size - base)
-        values = np.zeros(wave * vps, np.float32)
-        values[:count] = flat[base:base + count]
-        frames[:, HDRSZ:HDRSZ + vps * 4] = values.reshape(wave, vps).view(np.uint8)
-        for local in range(wave):
+    for first in range(0, frame_mass, wave_slots):
+        count = min(frame_mass - first, wave_slots)
+        frames = mesh.reserve(node, count)
+        while frames is None:
+            yield ()
+            frames = mesh.reserve(node, count)
+        for local in range(count):
             offset = (first + local) * vps
             nvalues = min(vps, flat.size - offset)
-            frames[local, :HDRSZ] = pack_hdr(
-                kind, req_id, tick, width, nvalues, offset, flat.size, session,
-            )
+            frames[local, :HDRSZ] = pack_hdr(kind, req_id, tick, width, nvalues, offset, flat.size, session)
+            frames[local, HDRSZ:HDRSZ + nvalues * 4].view(np.float32)[:] = flat[offset:offset + nvalues]
         yield frames
-        first += wave
 
-def recv_datagram_frames(service, flags=0):
+
+# ../../design/algorithm-sources.md#complete-page-ownership
+def recv_datagram_frames(service, mesh, flags=0):
     header, address = service.recvfrom(LOCAL_HDR.size, socket.MSG_PEEK | flags)
     if len(header) != LOCAL_HDR.size:
         service.recvfrom(LOCAL_HDR.size, flags)
@@ -96,13 +92,16 @@ def recv_datagram_frames(service, flags=0):
         if count != WIRE['LOCAL_VERSION']:
             raise ValueError(f"local mesh protocol {count}, expected {WIRE['LOCAL_VERSION']}")
         return node, address, None
-    bytes_total = framebytes * count
+    if framebytes != mesh.usable:
+        raise ValueError('game ingress must use the configured mesh page size')
+    frames = mesh.reserve(node, count)
+    if frames is None:
+        raise BlockingIOError('literal receive pages are occupied')
     envelope = bytearray(LOCAL_HDR.size)
-    slot = bytearray(bytes_total)
-    received, _, _, address = service.recvmsg_into((envelope, slot), 0, flags)
-    if received != LOCAL_HDR.size + bytes_total or LOCAL_HDR.unpack(envelope) != (node, framebytes, count):
-        return None
-    return node, address, np.frombuffer(slot, np.uint8).reshape(count, framebytes)
+    received, _, _, address = service.recvmsg_into((envelope, frames), 0, flags)
+    if received != LOCAL_HDR.size + frames.nbytes or LOCAL_HDR.unpack(envelope) != (node, framebytes, count):
+        raise ValueError('incomplete game ingress page values')
+    return node, address, frames
 
 class Reassembler:
     def __init__(self, kind, width, usable):
@@ -312,64 +311,36 @@ class FrameStream:
         self.mesh = mesh
         self.session = int.from_bytes(os.urandom(8), "little")
 
+    # ../../design/algorithm-sources.md#complete-page-ownership
     def exchange(self, kind, req_id, tick, rows, node, receivers, *, cancel, backlog, retry_s, timeout_s):
-        rows = np.ascontiguousarray(rows, dtype=np.float32)
         received = {}
-        wave = None
-        pending = None
-        retry_at = 0.0
+        pending = iter(frame_waves(kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session, self.mesh, node))
+        exhausted = False
         offers = 0
-        retries = 0
         started = time.monotonic()
-        usable = self.mesh.usable
         while not cancel() and time.monotonic() - started < timeout_s:
             self.mesh.pump()
-            now = time.monotonic()
-            if usable != self.mesh.usable:
-                usable = self.mesh.usable
-                wave = pending = None
-                retry_at = 0
-            if pending is None and now >= retry_at:
-                pending = iter(frame_waves(
-                    kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session,
-                ))
-                retries += int(offers > 0)
-            if pending is not None:
-                if wave is None:
-                    wave = next(pending, None)
-                    offset = 0
-                if wave is None:
-                    pending = None
-                    retry_at = now + retry_s
-                else:
-                    count = self.mesh.send(wave[offset:], node)
-                    offset += count
-                    offers += count
-                    if offset == len(wave):
-                        wave = None
-            activity = False
+            if not exhausted:
+                frames = next(pending, None)
+                exhausted = frames is None
+                if frames is not None and len(frames):
+                    offers += self.mesh.send(frames, node)
             for buf, source in self.mesh.read(np.uint8, max_batches=1):
-                activity = True
                 header = parse_hdr(buf)
                 if header is not None and source == node and header["kind"] in receivers:
-                    if (header["session"] not in (0, self.session)
-                            or header["req_id"] != req_id or header["tick"] != tick):
+                    if header["session"] not in (0, self.session) or header["req_id"] != req_id or header["tick"] != tick:
                         continue
-                    reassembler = receivers[header["kind"]]
-                    record = reassembler.feed(buf)
+                    receiver = receivers[header["kind"]]
+                    record = receiver.feed(buf)
                     if record is not None:
-                        received[header["kind"]] = (record, reassembler.stage[:record["rows"]].copy())
-                    retry_at = time.monotonic() + retry_s
+                        received[header["kind"]] = (record, receiver.stage[:record["rows"]].copy())
                 else:
                     backlog.append((buf.copy(), source))
             if len(received) == len(receivers):
-                return received, {"request_frame_offers": offers, "request_replays": retries, "timed_out": False}
-            if not activity:
-                time.sleep(0.0005)
-        return None, {"request_frame_offers": offers, "request_replays": retries,
-                      "timed_out": not cancel(), "transaction_budget_s": timeout_s,
-                      "response_parts": {str(kind): {"request": r.id, "tick": r.tick, "session": r.session,
-                                                       "have": r.have, "want": r.want} for kind, r in receivers.items()}}
+                return received, {"request_frame_offers": offers, "request_replays": 0, "timed_out": False}
+        return None, {"request_frame_offers": offers, "request_replays": 0, "timed_out": not cancel(), "transaction_budget_s": timeout_s,
+                      "response_parts": {str(kind): {"request": value.id, "tick": value.tick, "session": value.session,
+                                                       "have": value.have, "want": value.want} for kind, value in receivers.items()}}
 
     def send(self, kind, req_id, tick, rows, node, cancel=None):
         rows = np.ascontiguousarray(rows, dtype=np.float32)
@@ -383,12 +354,15 @@ class FrameStream:
                 self.mesh.pump()
                 if usable != self.mesh.usable:
                     usable = self.mesh.usable
-                    pending = iter(frame_waves(kind, req_id, tick, rows, usable, self.mesh.slots, self.session))
+                    pending = iter(frame_waves(kind, req_id, tick, rows, usable, self.mesh.slots, self.session, self.mesh, node))
                     frames = None
                 if frames is None:
                     frames = next(pending, None)
                     took = 0
                 if frames is None: return sent, frame_count(rows, usable)
+                if not len(frames):
+                    frames = None
+                    continue
                 written = self.mesh.send(frames[took:], node)
                 took += written
                 sent += written
