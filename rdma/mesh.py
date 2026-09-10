@@ -37,6 +37,13 @@ class Rows(c.Structure):
     pass
 
 
+class PageHeader(c.Structure):
+    _fields_ = [(name, c.c_uint16) for name in ("source_node", "destination_node", "hops", "padding")] + [
+        ("table", c.c_uint64), ("stamp", c.c_uint64), ("source", c.c_uint32), ("target", c.c_uint32),
+        ("when", c.c_uint64), ("code", c.c_int64), ("domain", c.c_uint32), ("function", c.c_uint32),
+        ("index", c.c_uint32), ("peer", c.c_uint32)]
+
+
 class Context(c.Structure):
     _fields_ = [("M", c.POINTER(Region)), ("arena", c.c_void_p), ("len", c.c_size_t), ("tables", c.POINTER(c.POINTER(Rows))), ("table_count", c.c_size_t), ("allocation", c.c_size_t), ("mapping_pinned", c.c_int)]
 
@@ -66,7 +73,9 @@ for name, result, arguments in (
     ("mesh_row_release", None, [c.POINTER(Rows), c.c_uint32]),
     ("mesh_row_data", c.c_void_p, [c.POINTER(Rows), c.c_uint32]),
     ("mesh_rows_present", c.c_int, [c.POINTER(Rows), RowMap, c.c_uint32, c.c_uint64]),
-    ("mesh_rows_invalidate", None, [c.POINTER(c.POINTER(Rows))]),
+    ("mesh_context_metadata", c.POINTER(PageHeader), [c.POINTER(Context), c.c_uint32]),
+    ("mesh_context_consume", c.c_int, [c.POINTER(Context), c.c_uint32]),
+    ("mesh_rows_invalidate", None, [c.POINTER(c.POINTER(Rows)), c.POINTER(RowMap), c.c_size_t]),
 ):
     function = getattr(_lib, name)
     function.restype, function.argtypes = result, arguments
@@ -184,4 +193,6 @@ class Mesh:
 
     # design/algorithm-sources.md#complete-page-ownership
     def close(self):
+        if self.pages:
+            _lib.mesh_rows_invalidate(c.byref(self.pages), self.returns, len(self.returns))
         return _lib.mesh_detach(self.context)

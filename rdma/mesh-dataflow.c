@@ -42,8 +42,58 @@ void mesh_rows_map(struct mesh_rows *p,uint32_t first,uint32_t physical,
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
-void mesh_rows_invalidate(struct mesh_rows **pages){
+void mesh_rows_invalidate(struct mesh_rows **pages,const struct mesh_row_map *held,size_t count){
+  struct mesh_rows *p=*pages;
   *pages=NULL;
+  for(size_t i=0;i<p->function_count;i++){
+    const struct mesh_row_function *f=&p->functions[i];
+    for(uint32_t index=0;index<f->rows;index++){
+      const struct mesh_row_map *out=f->output;
+      uint64_t consumed=__atomic_load_n(&p->table[out->first+index*out->stride].stamp,__ATOMIC_ACQUIRE)&~MESH_ROW_WRITING;
+      for(uint32_t j=0;j<f->inputs;j++){
+        struct mesh_row_range range=f->input[j].ranges[index];
+        for(uint32_t k=0;k<range.count;k++){
+          struct mesh_row *row=&p->table[range.first+k];
+          uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE)&~MESH_ROW_WRITING;
+          if(stamp && stamp!=consumed &&
+            __atomic_load_n(&row->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT) mesh_row_release(p,range.first+k);
+        }
+      }
+    }
+  }
+  for(size_t i=0;i<p->binding_count;i++){
+    struct mesh_row_binding *b=(struct mesh_row_binding*)&p->bindings[i];
+    for(uint32_t index=0;index<b->count;index++){
+      struct mesh_row *row=&p->table[b->first+index];
+      if(b->receive){
+        uint64_t consumed=__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE)&~MESH_ROW_WRITING;
+        for(uint32_t j=0;j<b->inputs;j++){
+            struct mesh_row_range range=b->input[j].ranges[index];
+            for(uint32_t k=0;k<range.count;k++){
+              struct mesh_row *input=&p->table[range.first+k];
+              uint64_t stamp=__atomic_load_n(&input->stamp,__ATOMIC_ACQUIRE)&~MESH_ROW_WRITING;
+              if(stamp && stamp!=consumed &&
+                __atomic_load_n(&input->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT) mesh_row_release(p,range.first+k);
+            }
+          }
+        ((uint32_t*)b->uses)[index]=0;
+      }else{
+        const struct mesh_send *record=(struct mesh_send*)mesh_at(p->memory,b->headers)+index;
+        uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE)&~MESH_ROW_WRITING;
+        if(stamp && record->header.stamp!=stamp &&
+          __atomic_load_n(&row->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT) mesh_row_release(p,b->first+index);
+      }
+    }
+    if(b->receive) b->inputs=0; else b->count=0;
+  }
+  if(count) memmove((struct mesh_row_map*)p->returns,held,count*sizeof *held);
+  p->return_count=count;
+  struct mesh_row_map *owned=(struct mesh_row_map*)p->returns;
+  for(size_t i=1;i<count;i++){
+    struct mesh_row_map value=owned[i]; size_t j=i;
+    while(j && owned[j-1].ranges[0].first>value.ranges[0].first){ owned[j]=owned[j-1]; j--; }
+    owned[j]=value;
+  }
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
@@ -174,6 +224,8 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   }
   for(size_t i=0;i<return_count;i++) if(!returns[i].ranges[0].count ||
     (uint64_t)returns[i].ranges[0].first+returns[i].ranges[0].count>p->count) return EINVAL;
+  for(size_t i=0;i<return_count;i++) for(size_t j=0;j<i;j++)
+    if(row_maps_overlap(returns[i],1,returns[j],1,0)) return EINVAL;
   uint32_t counts_page=mesh_rows_allocate((struct mesh_rows*)p,
     ((p->count+1)*sizeof(uint64_t)+p->bytes-1)/p->bytes,p->bytes);
   if(counts_page==MESH_ROW_ABSENT) return errno;
@@ -273,6 +325,27 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
     for(uint32_t k=1;k<functions[i].rows;k++)
       map->stride|=(map->ranges[k].first!=map->ranges[0].first || map->ranges[k].count!=map->ranges[0].count);
   }
+  for(size_t i=0;i<count;i++) for(uint32_t side=0;side<2;side++){
+    size_t n=side?configured[i].outputs:configured[i].inputs;
+    if(!n) continue;
+    uint32_t page=mesh_rows_allocate((struct mesh_rows*)p,(n*sizeof(struct mesh_row_map)+p->bytes-1)/p->bytes,p->bytes);
+    if(page==MESH_ROW_ABSENT) return errno;
+    struct mesh_row_map *copy=(void*)mesh_at(p->memory,page);
+    memcpy(copy,side?functions[i].output:functions[i].input,n*sizeof *copy);
+    if(side) configured[i].output=copy; else configured[i].input=copy;
+  }
+  uint32_t binding_page=binding_count?mesh_rows_allocate((struct mesh_rows*)p,
+    (binding_count*sizeof(struct mesh_row_binding)+p->bytes-1)/p->bytes,p->bytes):0;
+  if(binding_count && binding_page==MESH_ROW_ABSENT) return errno;
+  struct mesh_row_binding *configured_bindings=binding_count?(void*)mesh_at(p->memory,binding_page):NULL;
+  if(binding_count) memcpy(configured_bindings,bindings,binding_count*sizeof *bindings);
+  for(size_t i=0;i<binding_count;i++) if(bindings[i].inputs){
+    size_t n=bindings[i].inputs;
+    uint32_t page=mesh_rows_allocate((struct mesh_rows*)p,(n*sizeof(struct mesh_row_map)+p->bytes-1)/p->bytes,p->bytes);
+    if(page==MESH_ROW_ABSENT) return errno;
+    configured_bindings[i].input=(void*)mesh_at(p->memory,page);
+    memcpy(configured_bindings[i].input,bindings[i].input,n*sizeof(struct mesh_row_map));
+  }
   uint32_t return_page=return_count?mesh_rows_allocate((struct mesh_rows*)p,
     (return_count*sizeof(struct mesh_row_map)+p->bytes-1)/p->bytes,p->bytes):0;
   if(return_count && return_page==MESH_ROW_ABSENT) return errno;
@@ -280,7 +353,7 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   if(return_count) memcpy(configured_returns,returns,return_count*sizeof *returns);
   ((struct mesh_rows*)p)->returns=configured_returns;
   ((struct mesh_rows*)p)->return_count=return_count;
-  ((struct mesh_rows*)p)->bindings=bindings;
+  ((struct mesh_rows*)p)->bindings=configured_bindings;
   ((struct mesh_rows*)p)->binding_count=binding_count;
   return 0;
 }
@@ -417,11 +490,7 @@ void mesh_rows_complete(const struct mesh_rows *p,const struct mesh_row_function
 void mesh_rows_report(const struct mesh_rows *p, struct mesh_row_map output,
   uint32_t occurrence, struct mesh_row_metadata metadata){
   uint32_t page=output.physical+occurrence*output.physical_stride;
-  struct mesh_row *row=&p->table[output.first+occurrence*output.stride];
   memcpy(mesh_at(p->memory,page)+p->offset,&metadata,sizeof metadata);
-  __atomic_store_n(&row->uses,output.uses[(size_t)occurrence*output.count],__ATOMIC_RELAXED);
-  __atomic_store_n(&row->page,page,__ATOMIC_RELEASE);
-  __atomic_store_n(&row->stamp,metadata.stamp,__ATOMIC_RELEASE);
 }
 
 // ../design/algorithm-sources.md#literal-row-functions
@@ -457,13 +526,26 @@ static size_t mesh_rows_send(const struct mesh_rows *p,
   return sent;
 }
 
+// ../design/algorithm-sources.md#context-lifetime
+static int mesh_release_page(struct hdr *memory,struct mesh_row *value,uint32_t page,uint32_t bytes,uint64_t stamp){
+  struct ring *ring=&memory->r[REL];
+  uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
+  if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)>=MESH_RING) return -1;
+  uint64_t expected=stamp;
+  if(!__atomic_compare_exchange_n(&value->stamp,&expected,MESH_ROW_WRITING|stamp,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) return 0;
+  *slot(memory,REL,head)=(struct desc){.page=page,.bytes=bytes,
+    .header=(uint64_t)((unsigned char*)value-(unsigned char*)memory)};
+  atomic_store_explicit(&ring->head,head+1,memory_order_release);
+  return 1;
+}
+
 // ../design/algorithm-sources.md#complete-page-ownership
 static int mesh_rows_return(const struct mesh_rows *p,uint32_t row,uint64_t stamp){
   struct mesh_row *value=&p->table[row];
   uint32_t page=__atomic_load_n(&value->page,__ATOMIC_ACQUIRE);
   if(page==MESH_ROW_ABSENT || !stamp || stamp>=MESH_ROW_WRITING ||
     __atomic_load_n(&value->uses,__ATOMIC_ACQUIRE)) return 0;
-  if(page<p->memory->pool){
+  if(page<p->memory->pool && p->bindings){
     const struct mesh_page_header *header=mesh_header(p->memory,page);
     const struct mesh_row_binding *binding=&p->bindings[header->target];
     for(uint32_t i=0;i<binding->inputs;i++){
@@ -474,15 +556,7 @@ static int mesh_rows_return(const struct mesh_rows *p,uint32_t row,uint64_t stam
       }
     }
   }
-  struct ring *ring=&p->memory->r[REL];
-  uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
-  if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)>=MESH_RING) return -1;
-  uint64_t expected=stamp;
-  if(!__atomic_compare_exchange_n(&value->stamp,&expected,MESH_ROW_WRITING|stamp,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) return 0;
-  *slot(p->memory,REL,head)=(struct desc){.page=page,.bytes=p->bytes,
-    .header=(uint64_t)((unsigned char*)value-(unsigned char*)p->memory)};
-  atomic_store_explicit(&ring->head,head+1,memory_order_release);
-  return 1;
+  return mesh_release_page(p->memory,value,page,p->bytes,stamp);
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
@@ -557,9 +631,11 @@ size_t mesh_rows_poll(struct mesh_ctx *context){
   uint64_t head=atomic_load_explicit(&ring->head,memory_order_acquire);
   for(uint64_t at=tail;at<head;at++){
     completion=*slot(memory,CMP,at);
-    if(completion.error){
+    if(completion.error || !context->table_count){
       struct mesh_page_header *header=mesh_header(memory,completion.page);
-      header->code=completion.error; header->domain=completion.domain;
+      if(completion.error){ header->code=completion.error; header->domain=completion.domain; }
+      struct mesh_row *error=mesh_context_row(memory,completion.page);
+      *error=(struct mesh_row){completion.page,1,1};
       ring_erase(ring,slot(memory,CMP,0),sizeof(struct desc),MESH_RING,at);
       changed++;
       continue;
@@ -568,6 +644,12 @@ size_t mesh_rows_poll(struct mesh_ctx *context){
     const struct mesh_rows *p=context->tables[header->table];
     const struct mesh_row_binding *binding=&p->bindings[header->target];
     uint32_t index=header->index;
+    if(!binding->uses[index]){
+      *mesh_context_row(memory,completion.page)=(struct mesh_row){completion.page,1,1};
+      ring_erase(ring,slot(memory,CMP,0),sizeof(struct desc),MESH_RING,at);
+      changed++;
+      continue;
+    }
     struct mesh_row *row=&p->table[binding->first+index];
     if(__atomic_load_n(&row->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT ||
       __atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE)>=MESH_ROW_WRITING) continue;
@@ -588,4 +670,94 @@ size_t mesh_rows_poll(struct mesh_ctx *context){
     mesh_rows_retire(p);
   }
   return changed;
+}
+
+// ../design/algorithm-sources.md#context-lifetime
+const struct mesh_page_header *mesh_context_metadata(struct mesh_ctx *c,uint32_t page){
+  return __atomic_load_n(&mesh_context_row(c->M,page)->uses,__ATOMIC_ACQUIRE)?mesh_header(c->M,page):NULL;
+}
+
+// ../design/algorithm-sources.md#context-lifetime
+int mesh_context_consume(struct mesh_ctx *c,uint32_t page){
+  struct mesh_row *row=mesh_context_row(c->M,page);
+  __atomic_fetch_sub(&row->uses,1,__ATOMIC_ACQ_REL);
+  if(mesh_release_page(c->M,row,page,c->M->pgsz,1)<0){
+    __atomic_fetch_add(&row->uses,1,__ATOMIC_RELEASE);
+    return EBUSY;
+  }
+  return 0;
+}
+
+// ../design/algorithm-sources.md#context-lifetime
+static uint32_t mesh_rows_held(const struct mesh_rows *p,uint32_t row){
+  size_t first=0,last=p->return_count;
+  while(first<last){
+    size_t middle=first+(last-first)/2;
+    if(p->returns[middle].ranges[0].first<=row) first=middle+1; else last=middle;
+  }
+  if(!first) return 0;
+  struct mesh_row_range range=p->returns[first-1].ranges[0];
+  return row-range.first<range.count;
+}
+
+// ../design/algorithm-sources.md#context-lifetime
+int mesh_rows_close(struct mesh_ctx *c){
+  mesh_rows_poll(c);
+  for(size_t i=0;i<c->table_count;i++){
+    const struct mesh_rows *p=c->tables[i];
+    for(size_t j=0;j<p->function_count;j++){
+      const struct mesh_row_function *f=&p->functions[j];
+      for(uint32_t k=0;k<f->indices.count;k++)
+        if(__atomic_load_n(&p->table[f->indices.first+k].uses,__ATOMIC_ACQUIRE)) return EBUSY;
+      for(uint32_t k=0;k<f->outputs;k++) for(uint32_t index=0;index<f->rows;index++)
+        for(uint32_t n=0;n<f->output[k].count;n++){
+          uint32_t logical=f->output[k].first+index*f->output[k].stride+n,held=0;
+          const struct mesh_row *row=&p->table[logical];
+          held=mesh_rows_held(p,logical);
+          if(__atomic_load_n(&row->uses,__ATOMIC_ACQUIRE)>held ||
+            (__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE)>=MESH_ROW_WRITING &&
+             __atomic_load_n(&row->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT)) return EBUSY;
+        }
+    }
+  }
+  for(size_t i=0;i<c->table_count;i++){
+    const struct mesh_rows *p=c->tables[i];
+    for(size_t j=0;j<p->binding_count;j++) if(p->bindings[j].receive)
+      for(uint32_t k=0;k<p->bindings[j].count;k++){
+        uint32_t logical=p->bindings[j].first+k,held=0;
+        held=mesh_rows_held(p,logical);
+        if(__atomic_load_n(&p->table[logical].uses,__ATOMIC_ACQUIRE)>held) return EBUSY;
+      }
+  }
+  for(uint32_t i=0;i<c->M->pool;i++)
+    if(__atomic_load_n(&mesh_context_row(c->M,i)->uses,__ATOMIC_ACQUIRE)) return EBUSY;
+  for(unsigned i=0;i<NRING;i++) if(
+    atomic_load_explicit(&c->M->r[i].head,memory_order_acquire)!=
+    atomic_load_explicit(&c->M->r[i].tail,memory_order_acquire)) return EBUSY;
+  if(c->table_count){
+    for(size_t i=0;i<c->table_count;i++){
+      const struct mesh_rows *p=c->tables[i];
+      for(size_t j=0;j<p->count;j++){
+        uint32_t page=__atomic_load_n(&p->table[j].page,__ATOMIC_ACQUIRE);
+        if(page<c->M->pool) *mesh_context_row(c->M,page)=(struct mesh_row){page,0,1};
+      }
+    }
+    for(size_t i=0;i<c->allocation;i++){
+      uint32_t page=c->M->pool+(uint32_t)i;
+      *mesh_context_row(c->M,page)=(struct mesh_row){page,0,1};
+    }
+    for(size_t i=0;i<c->table_count;i++) free(c->tables[i]);
+    free(c->tables); c->tables=NULL; c->table_count=0;
+  }
+  int pending=0;
+  for(uint32_t i=0;i<c->M->pool+c->allocation;i++){
+    struct mesh_row *row=mesh_context_row(c->M,i);
+    uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE);
+    uint32_t page=__atomic_load_n(&row->page,__ATOMIC_ACQUIRE);
+    if(stamp && page!=MESH_ROW_ABSENT){
+      pending=1;
+      if(stamp<MESH_ROW_WRITING && mesh_release_page(c->M,row,page,c->M->pgsz,stamp)<0) break;
+    }
+  }
+  return pending?EBUSY:0;
 }

@@ -1,5 +1,5 @@
 
-#include "mesh.h"
+#include "mesh-dataflow.h"
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -88,13 +88,16 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   c->M=memory; c->len=(size_t)info.st_size;
   c->arena=mesh_at(memory,memory->pool);
+  for(uint32_t i=0;i<memory->pool+memory->arena;i++)
+    *mesh_context_row(memory,i)=(struct mesh_row){.page=MESH_ROW_ABSENT};
   return 0;
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  if(c->table_count) return EBUSY;
+  int pending=mesh_rows_close(c);
+  if(pending) return pending;
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   if(status) return errno;

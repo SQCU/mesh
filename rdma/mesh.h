@@ -57,6 +57,10 @@ static inline unsigned char *mesh_at(struct hdr *m, uint32_t i){
 // ../design/algorithm-sources.md#contiguous-backing-page-views
 static inline struct mesh_page_header *mesh_header(struct hdr *m, uint32_t i){
   return (struct mesh_page_header*)((unsigned char*)m+m->headers_off+(size_t)i*MESH_HEADER_STRIDE); }
+// ../design/algorithm-sources.md#context-lifetime
+static inline struct mesh_row *mesh_context_row(struct hdr *memory,uint32_t page){
+  return (struct mesh_row*)((struct mesh_send*)mesh_header(memory,page))->padding;
+}
 static inline unsigned char *mesh_data(struct hdr *m, uint32_t i){
   return mesh_at(m,i); }
 static inline uint32_t mesh_pay(struct hdr *m){
@@ -92,5 +96,7 @@ int mesh_memory_release(void *address, size_t bytes);
 #endif
 int mesh_attach(struct mesh_ctx *context,const char *name);
 int mesh_detach(struct mesh_ctx *context);
+const struct mesh_page_header *mesh_context_metadata(struct mesh_ctx *context,uint32_t page);
+int mesh_context_consume(struct mesh_ctx *context,uint32_t page);
 int mesh_link_reset(struct mesh_ctx *context,size_t port);
 #endif

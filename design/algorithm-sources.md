@@ -1295,3 +1295,48 @@ CQ until their ownership release is submitted. Returned numerical and raw
 metadata maps are copied into configuration pages and are the only endpoint
 ranges polled for caller consumption. No full mutable-output or receive-table
 retirement sweep remains. This source change has not been executed or measured.
+
+## Context lifetime
+
+Papadopoulos–Culler operand identities and actual read counts also govern outer
+lifecycle operations. `mesh_rows_invalidate(&owner, held, count)` consumes the
+caller capability and transfers its still-held return leases to the context.
+Returned ranges are configured disjoint, with one caller lease per logical row;
+multiple application references share that lease. Invalidation copies the held
+subset into the existing canonical return-map storage and orders its intervals.
+The caller must supply that subset, not infer ownership from aggregate use counts.
+
+For each input occurrence, unequal nonzero input and consumer-output stamps
+identify a configured read that has not issued for that value. Invalidation
+cancels that multiplicity, unsent NIC reads and unrealized remote-read proofs.
+Issued selection pages retain actual device ownership and original completion
+records retain NIC ownership. Terminal callbacks publish the actual old pages;
+metadata reporting only writes its already-claimed output bytes, so it cannot
+restore canceled uses. The numerical invocation gains no cancellation guard.
+Nested function and binding maps are copied into canonical configuration pages;
+retirement does not borrow their caller's heap lifetime.
+
+`mesh_context_metadata` exposes the original registered header of a failed or
+unbound physical receive, without guessing a numerical destination.
+`mesh_context_consume` transfers that page to asynchronous REL. Its canonical
+physical row occupies 16 bytes of the default registered header record's unused
+padding, outside the numerical payload; neither receiving nor zeroing payload
+bytes can erase that ownership record.
+
+`mesh_detach` is a nonblocking outer lifecycle operation. EBUSY reports pending
+physical ownership or an unconsumed context metadata lease; it is not a graph
+admission result or a retry of computation. The caller invalidates every owner
+first and drives physical polling/metadata consumption outside numerical calls.
+After actual selections and NIC reads end, held received pages and each allocated
+arena page transfer exactly once to context-owned physical rows. Asynchronous
+REL zeroes those payloads, including the old logical tables and configuration
+maps, before detach clears the shared client claim and unmaps. Shared parameters
+and region-address pages remain reserved until that whole-context transition.
+Binary interval lookup avoids checking every held map for every output page.
+
+Per-table interior arena reuse is not implemented. A hung uncancelled device
+keeps its physical ownership; logical invalidation cannot revoke hardware memory
+access. A new process/context in the demo uses an explicit physical bridge/QP
+restart at configuration boundaries, so old table identity zero cannot address
+new table identity zero. No numerical handshake or recovery protocol is added.
+This lifecycle source has not yet been executed or measured.

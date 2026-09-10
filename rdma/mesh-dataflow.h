@@ -39,7 +39,8 @@ struct mesh_rows *mesh_rows_create(struct mesh_ctx *context, size_t rows, uint64
 uint32_t mesh_rows_allocate(struct mesh_rows *pages, size_t count, size_t alignment);
 void mesh_rows_map(struct mesh_rows *pages, uint32_t first, uint32_t physical,
   uint32_t count, uint32_t uses, uint64_t stamp);
-void mesh_rows_invalidate(struct mesh_rows **pages);
+void mesh_rows_invalidate(struct mesh_rows **pages, const struct mesh_row_map *held, size_t count);
+int mesh_rows_close(struct mesh_ctx *context);
 size_t mesh_rows_poll(struct mesh_ctx *context);
 
 uint32_t mesh_rows_issue(const struct mesh_rows *pages, const struct mesh_row_function *function,
