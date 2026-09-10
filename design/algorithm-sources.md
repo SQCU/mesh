@@ -1248,7 +1248,7 @@ not yet realize static lifetime reuse or final owner destruction; invalidation
 retains old storage rather than revoking a hung device; an unaddressable failed
 receive retains physical error provenance without guessing a graph destination.
 The caller must expose that metadata and its ownership. Complete native parameter
-and intermediate binding, final endpoint digest integration, and all runtime
+and intermediate binding, all runtime
 validation belong to the connected acceptance review, not these source edits.
 
 Configuration classifies each input map's explicit ranges once: input `stride`
@@ -1259,29 +1259,20 @@ accounting subtracts the completed occurrence count once per shared input page.
 No readiness cache is introduced. Index values are released by completion and
 retired through the same asynchronous physical REL operation by the scan owner.
 
-## Endpoint page digests
-
-`mesh_digest` and `mesh_compare` implement the endpoint check separation of
-Saltzer–Reed–Clark, using the CRC polynomial mechanisms already cited for
-`mesh_rows_digest`. Each digest occurrence packs one uint64 per input page into
-a literal digest page, zeroing unused words. CRC32C and CRC32 use the existing
-CPU digest's initial seeds, byte order, and final concatenation. Comparison
-writes only literal metadata; it neither gates numerical outputs nor retries.
-The implementation uses ordinary asynchronous GPU functions and configured
-page maps. [Mark Adler's zlib CRC implementation](https://github.com/madler/zlib/blob/develop/crc32.c)
-provides the polynomial combination mechanism: each SIMD lane hashes one
-contiguous 1/32-page section using a byte table, applies its configured suffix
-zero-byte linear operator, then XORs the residues. For the raw recurrence R,
-`R(A || B, s) = Z_len(B)(R(A,s)) XOR R(B,0)`; only the first section receives
-the initial seed. The configuration generator computes Z on each of 32 basis
-bits for each section and each polynomial, with no invocation allocation.
-This establishes equivalence to the prior byte recurrence for a complete page;
-actual Metal execution and digest vectors remain unvalidated in this source-only
-pass. Comparison distributes digest words over 256 threads, reduces within SIMD
-groups and then over eight group residues, writing metadata only.
-
 `mesh_metal_regions` realizes bounded 1 GiB views and a canonical page containing
 their GPU addresses; `mesh_metal_page_span` provides the exact bounded operand
 view used consistently within each composed numerical function. Numerical views
 retain Metal hazard tracking. Indirect region views belong only to single-encoder
 page functions; their inter-function dependencies are literal completion stamps.
+
+`mesh_metal_address_source` supplies the shared GPU physical-page address
+arithmetic to both page functions and configured external tensor functions;
+there is one region ABI and no parallel address decoder in generated models.
+
+## Removed endpoint CRC feature
+
+The operator explicitly removed endpoint CRC/digest comparison from the active
+algorithm set. Earlier CRC/checking entries in this document are historical
+implementation records, not current requirements. No digest kernels, CRC tables,
+comparison functions, digest transport bindings, or CRC-generated metadata remain
+in the canonical numerical path. Literal device/transport status metadata remains.
