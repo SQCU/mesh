@@ -773,16 +773,41 @@ This binder is not yet connected to the active caller, and shader compilation
 alone does not demonstrate RDMA visibility or invalidation correctness.
 
 Rabenseifner (2004) and Patarasuk–Yuan (2009), cited above, supply the
-reduce-scatter/all-gather algebra. `mesh_rows_add_f16` adds one matching set of
-actual partial pages into claimed FP32 accumulator pages and publishes that
-addition's stamp in an actual index page. `mesh_rows_indexed` reads those index
-page contents. One arithmetic owner handles each overlapping accumulator/index
-span. The accumulator output rows must already have been selected/claimed, and
-the index page must have a live configured lifetime. No operation crosses a
-payload boundary into an RDMA header. Addition releases each input use after
-publishing its accumulator/index values. It does not inspect the index entry to
-decide whether to execute again; the configured graph owns exactly one execution
-of that addition. Configuration counts hashing and transport uses too.
+reduce-scatter/all-gather algebra. Papadopoulos–Culler supply the configured
+operand maps and publication precedent. The addition entrypoints now consume
+the existing `mesh_row_function` maps directly, without a second array of input
+or accumulator row identities. Each input map describes one contributor's
+ordered payload pages; output map zero describes the FP32 accumulator pages;
+output map one describes one index page for each configured function index.
+The index page's first uint64 value is the invocation stamp. Configuration gives
+each such output one writer; it does not share a partially published index page.
+
+`mesh_rows_validate_add` runs before invocation, after ordinary map validation.
+For positive element count E, payload bytes B, and input element bytes s in
+{2,4}, each input has exactly ceil(E/(B/s)) pages and the accumulator has exactly
+ceil(E/(B/4)) pages. Output map one has exactly one page. No allocation or shape
+validation occurs in addition. The selected f16/f32 entrypoint must match s.
+Input and output map uses remain validated by `mesh_rows_realize` for the whole
+graph. This validates storage extent, not the model's reduction partition.
+
+For accumulator page q, first element a=q*(B/4), input reads use page
+floor(a/(B/s)) and byte offset (a mod (B/s))*s. Each arithmetic span contains at
+most B/4 elements. Since B is divisible by eight and s is two or four, every
+span ends within its input payload, including tails and FP16-to-FP32 expansion.
+The previous implementation instead offset a single input page by a*s; that
+crossed headers or unrelated storage for sufficiently large operands.
+
+Addition writes accumulator and index values only. After it returns, the same
+`mesh_rows_publish` operation used by other configured functions publishes all
+output row stamps and releases each configured input use exactly once. Addition
+never releases inputs or publishes accumulator stamps itself. `mesh_rows_indexed`
+requires the index page's published stamp before reading its literal values.
+This removes the former competing publication/release ownership. No operation
+uses the index contents to suppress or repeat an addition.
+
+This ABI is still unused by the active numerical caller. Its page extent and
+publication corrections do not establish caller migration, incremental reduction
+on real RDMA inputs, or end-to-end performance; those remain integration work.
 
 The addition entrypoints and `mesh_rows_normalize_f32` return no runtime status.
 Their arithmetic contains no readiness scans, issued-stamp validation, duplicate
@@ -797,7 +822,7 @@ and integration under the operator's no-added-control-flow instruction.
 the independent contraction partials above. Both entrypoints specialize the
 inlined `row_add` at compilation for their source element width; invocation
 does not choose an input format from a buffer. The FP32 variant adds directly
-into FP32 accumulator pages and publishes the same literal index value, without
+into FP32 accumulator pages and writes the same literal index value, without
 an intervening FP16 materialization. Both use the configured input order and
 require the same claimed destinations, index-page lifetime and single writer.
 The shared implementation avoids duplicating the arithmetic/publication algorithm.

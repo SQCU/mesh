@@ -42,12 +42,12 @@ void mesh_rows_report(const struct mesh_rows *pages, struct mesh_row_map output,
   uint32_t occurrence, struct mesh_row_metadata metadata);
 void mesh_row_release(const struct mesh_rows *pages, uint32_t row);
 int mesh_row_zero(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
-void mesh_rows_add_f16(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
-  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index,
-  uint64_t stamp);
-void mesh_rows_add_f32(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
-  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index,
-  uint64_t stamp);
+int mesh_rows_validate_add(const struct mesh_rows *pages, const struct mesh_row_function *function,
+  size_t elements, size_t input_bytes);
+void mesh_rows_add_f16(const struct mesh_rows *pages, const struct mesh_row_function *function,
+  uint32_t index, size_t elements, uint64_t stamp);
+void mesh_rows_add_f32(const struct mesh_rows *pages, const struct mesh_row_function *function,
+  uint32_t index, size_t elements, uint64_t stamp);
 int mesh_rows_indexed(const struct mesh_rows *pages, uint32_t index_row, uint32_t first,
   uint32_t count, uint64_t stamp);
 void mesh_rows_normalize_f32(const struct mesh_rows *pages, const uint32_t *accumulators,

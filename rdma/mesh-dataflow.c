@@ -240,16 +240,34 @@ int mesh_row_zero(const struct mesh_rows *p, uint32_t row, uint64_t stamp){
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-static __attribute__((always_inline)) inline void row_add(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
-  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp, size_t bytes){
-  uint64_t *indices=mesh_row_data(p,index_row);
-  size_t width=p->bytes/sizeof(float), pages=(elements+width-1)/width;
+int mesh_rows_validate_add(const struct mesh_rows *p, const struct mesh_row_function *f,
+  size_t elements, size_t input_bytes){
+  int error=mesh_rows_validate(p,f);
+  if(error) return error;
+  if(!elements || (input_bytes!=sizeof(_Float16) && input_bytes!=sizeof(float)) ||
+     !f->inputs || f->outputs!=2) return EINVAL;
+  size_t input_width=p->bytes/input_bytes, output_width=p->bytes/sizeof(float);
+  size_t input_pages=1+(elements-1)/input_width, output_pages=1+(elements-1)/output_width;
+  for(uint32_t i=0;i<f->inputs;i++) if(f->input[i].count!=input_pages) return EINVAL;
+  if(f->output[0].count!=output_pages || f->output[1].count!=1) return EINVAL;
+  return 0;
+}
+
+// ../design/algorithm-sources.md#literal-page-reduction
+static __attribute__((always_inline)) inline void row_add(const struct mesh_rows *p,
+  const struct mesh_row_function *f, uint32_t index, size_t elements, uint64_t stamp, size_t bytes){
+  size_t width=p->bytes/sizeof(float), input_width=p->bytes/bytes;
+  size_t pages=1+(elements-1)/width;
+  uint32_t accumulator=f->output[0].first+index*f->output[0].stride;
+  uint32_t index_row=f->output[1].first+index*f->output[1].stride;
   for(size_t page=0;page<pages;page++){
     size_t first=page*width, n=elements-first;
     if(n>width) n=width;
-    float *output=mesh_row_data(p,accumulators[page]);
-    for(size_t input=0;input<count;input++){
-      const unsigned char *source=(const unsigned char*)mesh_row_data(p,inputs[input])+first*bytes;
+    float *output=mesh_row_data(p,accumulator+(uint32_t)page);
+    for(uint32_t input=0;input<f->inputs;input++){
+      const struct mesh_row_map *map=&f->input[input];
+      uint32_t row=map->first+index*map->stride+(uint32_t)(first/input_width);
+      const unsigned char *source=(const unsigned char*)mesh_row_data(p,row)+(first%input_width)*bytes;
       size_t i=0;
       for(;i+8<=n;i+=8){
         mesh_float8 sum;
@@ -265,28 +283,26 @@ static __attribute__((always_inline)) inline void row_add(const struct mesh_rows
         (bytes==sizeof(_Float16)?(float)((const _Float16*)source)[i]:((const float*)source)[i]);
     }
   }
-  for(size_t i=0;i<pages;i++) __atomic_store_n(&p->table[accumulators[i]].stamp,stamp,__ATOMIC_RELEASE);
-  __atomic_store_n(indices+index,stamp,__ATOMIC_RELEASE);
-  for(size_t i=0;i<count;i++) mesh_row_release(p,inputs[i]);
+  *(uint64_t*)mesh_row_data(p,index_row)=stamp;
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-void mesh_rows_add_f16(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
-  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
-  row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(_Float16));
+void mesh_rows_add_f16(const struct mesh_rows *p, const struct mesh_row_function *f,
+  uint32_t index, size_t elements, uint64_t stamp){
+  row_add(p,f,index,elements,stamp,sizeof(_Float16));
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-void mesh_rows_add_f32(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
-  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
-  row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(float));
+void mesh_rows_add_f32(const struct mesh_rows *p, const struct mesh_row_function *f,
+  uint32_t index, size_t elements, uint64_t stamp){
+  row_add(p,f,index,elements,stamp,sizeof(float));
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
 int mesh_rows_indexed(const struct mesh_rows *p, uint32_t index_row, uint32_t first, uint32_t count, uint64_t stamp){
   if(first>p->bytes/sizeof(uint64_t) || count>p->bytes/sizeof(uint64_t)-first) return 0;
+  if(!mesh_rows_present(p,(struct mesh_row_map){.first=index_row,.count=1},0,stamp)) return 0;
   const uint64_t *indices=mesh_row_data(p,index_row);
-  if(!indices) return 0;
   for(uint32_t i=0;i<count;i++) if(__atomic_load_n(indices+first+i,__ATOMIC_ACQUIRE)!=stamp) return 0;
   return 1;
 }
