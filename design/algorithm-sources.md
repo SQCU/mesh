@@ -1904,3 +1904,10 @@ from that already loaded subtree once, rather than first loading an independent
 checkpoint and then immediately loading the authoritative copy again. Checkpoint
 source attribution resolves the bundle. Current and initial checkpoint references
 keep their referenced bundles live during generated-result pruning.
+
+The curriculum endpoint keeps the latest completed full observation archive from
+its own invocation. Once a successor archive exists and results are recorded,
+it deletes the preceding full archive and its incomplete-write file. Scalar
+telemetry and result metadata remain. No new report means no retirement of the
+last available report. This bounds the per-match multiplication of the same
+observation storage without affecting transport or numerical execution.

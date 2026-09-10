@@ -364,6 +364,7 @@ class Curriculum:
                 self.runtime['remote_application_revision'] = remote
         self.generated_checkpoints = set()
         self.generated_bundles = set()
+        self.observation_archive = None
         self.previous_checkpoints = {}
         self.initial_checkpoints = {}
         self.capacity_observations = []
@@ -1083,6 +1084,12 @@ class Curriculum:
             for path in self.generated_checkpoints - retained:
                 Path(path).unlink(missing_ok=True)
             self.generated_checkpoints.intersection_update(retained)
+            observation = Path(commands["telemetry"]).with_name("j-measures." + Path(commands["telemetry"]).name + ".npz")
+            if observation.is_file():
+                if self.observation_archive is not None and self.observation_archive != observation:
+                    self.observation_archive.unlink(missing_ok=True)
+                    Path(str(self.observation_archive) + ".new").unlink(missing_ok=True)
+                self.observation_archive = observation
             data = Path(entity["userdir"]) / "data"
             for path in [*data.glob("maps/*.bsp"), data / "progs.dat", data / "csprogs.dat"]:
                 path.unlink(missing_ok=True)

@@ -334,3 +334,9 @@ operator to inspect; no cleanup touches the configured base installation.
 the revision, and builds both checkouts concurrently. It creates no snapshot
 source generations or per-application Python runtime. The canonical checkout uses
 the installed shared Python runtime through `bin/mesh-python`.
+
+Curriculum retains the latest completed full J observation archive from its own
+matches and removes its superseded full archive after the successor exists and
+match results are recorded. Scalar telemetry, logs and match metrics remain.
+A match that produces no new observation leaves the last usable archive intact;
+archives belonging to another run or an externally configured viewer are untouched.
