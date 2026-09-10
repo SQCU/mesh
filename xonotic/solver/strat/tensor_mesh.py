@@ -140,7 +140,9 @@ class Worker:
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def close(self):
+        for executable in self.programs.values(): executable.close()
         self.programs.clear()
+        self.configurations.clear()
 
     # ../../../design/algorithm-sources.md#asynchronous-metadata-publication
     def report(self):

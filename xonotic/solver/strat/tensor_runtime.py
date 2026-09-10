@@ -432,6 +432,17 @@ class Executable:
         for index, alias in self.roots.items():
             if alias == root: self.arrays[index] = array.reshape(self.shapes[index])
 
+    # ../../../design/algorithm-sources.md#complete-page-ownership
+    def close(self):
+        if not self.pages: return
+        first = {mapping.first for plans in self.realizations.values() for plan in plans for mapping in plan.retained_inputs}
+        maps = {mapping.first: mapping for mapping in self.returns if mapping.first in first}
+        held = (RowMap * len(maps))(*maps.values())
+        handle = c.cast(self.pages, c.POINTER(Rows))
+        _lib.mesh_rows_invalidate(c.byref(handle), held, len(held))
+        self.pages = handle
+        self.realizations.clear()
+
     # ../../../design/algorithm-sources.md#asynchronous-metadata-publication
     def report(self):
         return {'backend': 'mesh_page_metal', 'graph_nodes': len(self.graph.nodes), 'kernel_variants': len(self.kernels), 'submissions': self.submissions,
