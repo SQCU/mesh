@@ -66,6 +66,10 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double now(void){ struct timeval t; gettimeofday(&t,NULL); return t.tv_sec+t.tv_usec/1e6; }
 // ../design/algorithm-sources.md#transport-page-addressing
 static double monotime(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
+#ifdef MESH_TRANSPORT_TIMING
+static uint64_t measured_passes, measured_polls;
+static double measured_pass_seconds, measured_poll_seconds;
+#endif
 // ../design/algorithm-sources.md#transport-page-addressing
 static void onsig(int s){ (void)s; stop=1; }
 
@@ -272,7 +276,13 @@ static int mesh_progress(struct hdr *M,struct mesh_link *links,int link_count,
       }
     }
     if(link->up && v->completed<2*(v->send_capacity+v->receive_capacity)){
+#ifdef MESH_TRANSPORT_TIMING
+      double poll_begin=monotime();
+#endif
       int count=mesh_transport_complete(v->completion_queue,2*(v->send_capacity+v->receive_capacity)-v->completed,v->completions+v->completed);
+#ifdef MESH_TRANSPORT_TIMING
+      measured_poll_seconds+=monotime()-poll_begin; measured_polls++;
+#endif
       if(count<0){
         ports[index].when=flight_time(); ports[index].code=count; ports[index].domain=3;
         COUNT(bad); link->up=0; link->faulted=1; atomic_store(&link->phase,MESH_RETIRING);
@@ -436,6 +446,9 @@ int main(int argc,char**argv){
   double began=now(),telemetry=began; int arena_pending=0;
   uint64_t submit_cursor=0;
   for(;;){
+#ifdef MESH_TRANSPORT_TIMING
+    double pass_begin=monotime();
+#endif
     uint64_t release_tail=atomic_load_explicit(&M->r[REL].tail,memory_order_relaxed);
     uint64_t released=atomic_load_explicit(&M->r[REL].head,memory_order_acquire)-release_tail;
     int stopped;
@@ -468,11 +481,19 @@ int main(int argc,char**argv){
       for(int i=0;i<NOWN;i++) atomic_store(&M->mean[i],counts[i]);
       atomic_store(&M->up_ms,(uint64_t)((stamp-began)*1000)); telemetry=stamp;
     }
+#ifdef MESH_TRANSPORT_TIMING
+    measured_pass_seconds+=monotime()-pass_begin; measured_passes++;
+#endif
     if(stop && stopped==link_count &&
       atomic_load_explicit(&M->r[REL].head,memory_order_acquire)==
       atomic_load_explicit(&M->r[REL].tail,memory_order_relaxed)) break;
   }
   for(int i=0;i<link_count;i++) pthread_join(links[i].thread,NULL);
+#ifdef MESH_TRANSPORT_TIMING
+  fprintf(stderr,"{\"transport_timing\":{\"passes\":%llu,\"pass_seconds\":%.9f,\"polls\":%llu,\"poll_seconds\":%.9f}}\n",
+    (unsigned long long)measured_passes,measured_pass_seconds,
+    (unsigned long long)measured_polls,measured_poll_seconds);
+#endif
   flight_heartbeat(MESH_STOPPED);
   for(int i=0;i<link_count;i++) free((void*)links[i].device);
   free(links); free(routes); free(free_pages); free(owner); free(pool_link);

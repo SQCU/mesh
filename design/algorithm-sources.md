@@ -1127,6 +1127,27 @@ separate integration obligations; separate-run timings do not prove overlap.
 
 ### Literal transport primitives
 
+#### Page echo measurement
+
+`mesh-page-echo` is the A7 measurement caller in
+`transport-table-tickets.md`. It exercises the existing page bindings and
+SUB/bridge/QP/receive-table path without numerical kernels. A received row can
+be an outbound binding source: configuration counts its NIC read just as it
+counts a locally produced row's NIC read. Forwarding therefore needs neither
+an operand copy nor a numerical identity kernel. Apple TN3205 supplies the
+registered-memory transfer and completion semantics; Papadopoulos–Culler
+supplies the assigned row's presence and read lifetime.
+
+RTT is measured on the initiating host's clock. RTT/2 is a symmetry estimate,
+not a synchronized one-way measurement. The benchmark retains endpoint values
+for checking outside the timed exchange. Its rates describe the actual mesh
+path, including client publication/polling, rather than bare hardware latency.
+`MESH_TRANSPORT_TIMING` enables aggregate bridge pass and CQ-poll timing printed
+on ordinary shutdown. That build adds clock reads and reports instrumented
+costs; the default build contains none of those reads or counters. Startup,
+idle and teardown intervals contribute to the aggregate pass measurement and
+must be distinguished from the client's timed exchange.
+
 `rdma/mesh-transport.h` and `mesh-transport.c` implement the registered-span
 operations from Apple's TN3205: prepare one one-SGE SEND or RECV descriptor,
 submit an existing linked descriptor list, and poll once into caller-provided

@@ -301,6 +301,9 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
           produced=1;
         }
       }
+      for(size_t j=0;j<binding_count && !produced;j++)
+        produced=bindings[j].receive && row>=bindings[j].first &&
+          (uint64_t)row<(uint64_t)bindings[j].first+bindings[j].count;
       if(!produced) return EINVAL;
     }
   }
