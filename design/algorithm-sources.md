@@ -62,6 +62,46 @@ ownership of memory still accessible to a device rather than assigning that
 same physical memory to a replacement computation. C07–C11, C21 and C28–C30
 remain open until this is integrated and measured on both real participants.
 
+## Contiguous backing-page views
+
+Operator clarification, September 9, 2026:
+
+> mesh can be rewritten to allow zero copy views of contiguous backing pages for the sake of apis which want that
+
+Papadopoulos and Culler (Monsoon, 1990) supply the named-operand model;
+Bryngelson (2026), cited above, describes distinct addresses referring to the
+same physical backing. Neither source supplies this macOS C ABI or proves its
+RDMA performance. The implementation uses Mach's existing virtual-memory remap
+operation with copying explicitly disabled.
+
+`mesh_memory_view` realizes one contiguous CPU virtual range from an ordered
+list of backing spans. `mesh_memory_span` is an address/length view description,
+not operand storage, readiness, an invocation record or transport framing.
+Every span starts and ends at an OS-page boundary. Mesh pages smaller than an
+OS page retain their placement within that OS page; this operation cannot
+remove in-page headers or independently rearrange subpages. Configuration must
+choose a tensor layout compatible with those literal bytes.
+
+The function reserves a virtual range, aliases each span into that range with
+`mach_vm_remap(..., FALSE, ...)`, and returns the address and total length.
+It does not copy operand bytes, register new physical storage, publish stamps,
+or add work to numerical invocation. Configuration receives the literal Mach
+error code. An incomplete mapping is released before returning that error.
+`mesh_memory_release` releases only the alias; it neither frees canonical rows
+nor cancels device accesses. The owner retains every view until its actual
+readers/writers have finished, including across caller-selected invalidation.
+
+The existing `mesh_metal_memory` now calls this canonical API before creating
+its no-copy MTLBuffer and releases the alias through the matching API. Existing
+receive/transmit pool and row-table Metal bindings therefore use this path;
+there is no second Metal remapping implementation. Other APIs can use the CPU
+view directly without requiring a Metal buffer as their storage owner.
+
+This is configuration-time address interoperability. It does not yet import
+IOSurfaces into the bridge, bind ANE internal allocations, replace the numerical
+caller, or prove multi-span execution on the RDMA substrate. Those obligations
+remain in the completion matrix.
+
 ## Explicit attention and projection weights
 
 Papadopoulos and Culler (Monsoon, 1990), cited under operand matching below,

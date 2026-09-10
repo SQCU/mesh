@@ -107,6 +107,12 @@ struct mesh_ctx { struct hdr *M; unsigned char *arena; size_t len;
                   struct mstream **streams; size_t stream_count, stream_cursor;
                   mesh_receive_fn receiver; void *receiver_capture; };
 struct mesh_ctx *mesh_context(void);
+#ifdef __APPLE__
+struct mesh_memory_span { const void *address; size_t bytes; };
+int mesh_memory_view(const struct mesh_memory_span *spans, size_t count,
+                     void **address, size_t *bytes);
+int mesh_memory_release(void *address, size_t bytes);
+#endif
 void mesh_receiver(struct mesh_ctx *context, mesh_receive_fn receiver, void *capture);
 int    mesh_try_attach(struct mesh_ctx *c, const char *name);
 int    mesh_attach(struct mesh_ctx *c, const char *name);

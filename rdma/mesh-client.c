@@ -14,6 +14,45 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+
+// ../design/algorithm-sources.md#contiguous-backing-page-views
+int mesh_memory_view(const struct mesh_memory_span *spans,size_t count,
+                     void **address,size_t *bytes){
+  if(!address || !bytes) return KERN_INVALID_ARGUMENT;
+  *address=NULL; *bytes=0;
+  if(!spans || !count) return KERN_INVALID_ARGUMENT;
+  size_t alignment=(size_t)getpagesize(), length=0;
+  for(size_t i=0;i<count;i++){
+    uintptr_t source=(uintptr_t)spans[i].address;
+    size_t n=spans[i].bytes;
+    if(!n || source%alignment || n%alignment || n>SIZE_MAX-length ||
+       source>UINTPTR_MAX-n) return KERN_INVALID_ARGUMENT;
+    length+=n;
+  }
+  mach_vm_address_t base=0;
+  kern_return_t status=mach_vm_allocate(mach_task_self(),&base,length,VM_FLAGS_ANYWHERE);
+  if(status!=KERN_SUCCESS) return status;
+  size_t offset=0;
+  for(size_t i=0;i<count;i++){
+    mach_vm_address_t target=base+offset;
+    vm_prot_t current,maximum;
+    status=mach_vm_remap(mach_task_self(),&target,spans[i].bytes,0,
+      VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,mach_task_self(),
+      (mach_vm_address_t)spans[i].address,FALSE,&current,&maximum,VM_INHERIT_NONE);
+    if(status!=KERN_SUCCESS){
+      mach_vm_deallocate(mach_task_self(),base,length);
+      return status;
+    }
+    offset+=spans[i].bytes;
+  }
+  *address=(void*)base; *bytes=length;
+  return KERN_SUCCESS;
+}
+
+// ../design/algorithm-sources.md#contiguous-backing-page-views
+int mesh_memory_release(void *address,size_t bytes){
+  return mach_vm_deallocate(mach_task_self(),(mach_vm_address_t)address,bytes);
+}
 #endif
 
 #ifndef MESH_ATTACH_ATTEMPTS

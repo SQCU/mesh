@@ -1,19 +1,18 @@
 #import "mesh-metal.h"
 #include "mesh-wire.h"
 #include <errno.h>
-#include <mach/mach_vm.h>
 #include <time.h>
 #include <unistd.h>
 
+// ../design/algorithm-sources.md#contiguous-backing-page-views
 static id<MTLBuffer> mesh_metal_memory(id<MTLDevice> device,const void *source,size_t bytes){
-  mach_vm_address_t address=0;
-  vm_prot_t current,maximum;
-  kern_return_t status=mach_vm_remap(mach_task_self(),&address,bytes,0,VM_FLAGS_ANYWHERE,
-    mach_task_self(),(mach_vm_address_t)source,FALSE,&current,&maximum,VM_INHERIT_NONE);
-  if(status!=KERN_SUCCESS){ errno=ENOMEM; return nil; }
-  id<MTLBuffer> buffer=[device newBufferWithBytesNoCopy:(void*)address length:bytes options:MTLResourceStorageModeShared
-    deallocator:^(void *pointer,NSUInteger length){ mach_vm_deallocate(mach_task_self(),(mach_vm_address_t)pointer,length); }];
-  if(!buffer){ mach_vm_deallocate(mach_task_self(),address,bytes); errno=ENOMEM; }
+  const struct mesh_memory_span span={source,bytes};
+  void *address=NULL;
+  size_t length=0;
+  if(mesh_memory_view(&span,1,&address,&length)){ errno=ENOMEM; return nil; }
+  id<MTLBuffer> buffer=[device newBufferWithBytesNoCopy:address length:length options:MTLResourceStorageModeShared
+    deallocator:^(void *pointer,NSUInteger count){ mesh_memory_release(pointer,count); }];
+  if(!buffer){ mesh_memory_release(address,length); errno=ENOMEM; }
   return buffer;
 }
 static id<MTLBuffer> mesh_metal_pool(id<MTLDevice> device, struct mesh_ctx *context, uint32_t first, uint32_t count, struct mesh_metal_layout *layout){
