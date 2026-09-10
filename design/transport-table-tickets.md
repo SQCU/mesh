@@ -147,15 +147,14 @@ log becomes an opt-in build, not a per-call cost.
 Done when: a pass with no completions executes only a CQ poll and a FIFO
 check; A7 pass period is recorded before and after.
 
-### A8. `mesh-transport.c/.h` (758766b) — open
+### A8. `mesh-transport.c/.h` (758766b) — done
 
-Current state: five one-line pass-throughs to `ibv_post_send`,
+Deleted: five one-line pass-throughs to `ibv_post_send`,
 `ibv_post_recv`, `ibv_poll_cq`, plus two constructors that copy an SGE's
 fields back into the same SGE; a third dylib and a Makefile target. Mechanism
 unchanged.
-Disposition: either delete it, or make it the home of A1/A2 — `post_page`
-and `complete → {page, status, bytes}` — so that it is a page transport
-rather than a renamed verbs API. Do not keep it as a pass-through.
+Resolution: existing owners construct descriptors and call verbs directly;
+the wrapper sources, dylib target and linkage are removed.
 
 ## B. Table
 

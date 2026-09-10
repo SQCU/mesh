@@ -1177,15 +1177,11 @@ Apple TN3205 supplies the SEND/RECV, frame-capacity and completion semantics.
 The measured direct path is an achievable comparator, not a proof of the
 physical link's irreducible minimum overhead.
 
-`rdma/mesh-transport.h` and `mesh-transport.c` implement the registered-span
-operations from Apple's TN3205: prepare one one-SGE SEND or RECV descriptor,
-submit an existing linked descriptor list, and poll once into caller-provided
-completion storage. The descriptor's index is a local completion identity;
-the implementation neither reads it as an address nor transmits it as payload.
-Addresses, registration keys, lengths, descriptors, QPs and CQs are realized
-outside submission. The transport allocates nothing, interprets no payload,
-performs no retry, and waits for no completion. There are no stamps, headers,
-table identities, numerical functions, timers or recovery policies in this API.
+The existing bridge constructs its one-SGE descriptors in `mesh-links.h` and
+calls the nonblocking verbs documented by Apple TN3205 directly. The redundant
+`mesh-transport.c/.h` pass-throughs and their dylib were deleted: they rebuilt
+already initialized SGEs and added no transport operation. Configuration still
+owns registration, descriptor storage, QPs and CQs.
 
 The data layer owns the association from completion indices to physical spans
 and its transport-active index set. Posting grants the NIC access to those
@@ -1203,12 +1199,9 @@ the data layer to expose to its outer caller. The primitive does not promise
 atomic visibility of an entire page or remote hardware atomic RMW operations;
 TN3205 provides neither guarantee. Data consumers use actual receive completion.
 
-The existing bridge now uses these primitives for all send/receive posting and
-CQ polling. Its existing header/payload encoding is still a data-layer caller
-of the transport; extracting these operations does not remove that encoding or
-establish its compliance. Connection realization and device destruction retain
-their existing owner. `libmesh-transport.dylib` exposes the same primitive source
-to other configured data-layer callers without copying its implementation.
+The bridge retains its header/payload encoding. Direct verbs calls do not
+establish compliance of that encoding or remove its extra wire transfer.
+Connection realization and device destruction retain their existing owner.
 
 ### Complete page ownership
 
@@ -1518,9 +1511,15 @@ retirement does not borrow their caller's heap lifetime.
 `mesh_context_metadata` exposes the original registered header of a failed or
 unbound physical receive, without guessing a numerical destination.
 `mesh_context_consume` transfers that page to asynchronous REL. Its canonical
-physical row occupies 16 bytes of the default registered header record's unused
-padding, outside the numerical payload; neither receiving nor zeroing payload
-bytes can erase that ownership record.
+physical row occupies an entry in a contiguous physical row table outside the
+numerical payload. Receive headers exist only for landing pages; arena pages
+have no unused receive-header allocation. The 96-byte send record contains its
+64-byte wire header and the existing local fields, without padding reserves.
+Neither receiving nor zeroing payload bytes can erase the physical row table.
+This reduces physical metadata from 128 bytes per page to 112 bytes per landing
+page and 16 bytes per arena page; outbound records fall from 128 to 96 bytes.
+Shared ABI version 9 identifies this layout. This does not close A1/A2: their
+remaining linked records, rings and separate transfers still exist.
 
 `mesh_detach` is a nonblocking outer lifecycle operation. EBUSY reports pending
 physical ownership or an unconsumed context metadata lease; it is not a graph

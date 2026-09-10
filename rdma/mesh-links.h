@@ -71,8 +71,8 @@ static int link_submit(struct mesh_link *link,uint32_t kind,uint32_t page,uint64
   if(kind==L_SEND){
     for(int part=0;part<2;part++){
       struct ibv_sge *span=&v->sges[index][part];
-      mesh_transport_send_span(&v->sends[v->sending],span,header|(part?0:UINT64_C(1)<<62),
-        (void*)(uintptr_t)span->addr,span->length,span->lkey,NULL);
+      v->sends[v->sending]=(struct ibv_send_wr){.wr_id=header|(part?0:UINT64_C(1)<<62),
+        .sg_list=span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
       if(v->sending) v->sends[v->sending-1].next=&v->sends[v->sending];
       v->sending++;
     }
@@ -82,8 +82,8 @@ static int link_submit(struct mesh_link *link,uint32_t kind,uint32_t page,uint64
   } else {
     for(int part=0;part<2;part++){
       struct ibv_sge *span=&v->sges[index][part];
-      mesh_transport_receive_span(&v->receives[v->receiving],span,(UINT64_C(1)<<63)|(part?0:UINT64_C(1)<<62)|page,
-        (void*)(uintptr_t)span->addr,span->length,span->lkey,NULL);
+      v->receives[v->receiving]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|(part?0:UINT64_C(1)<<62)|page,
+        .sg_list=span,.num_sge=1};
       if(v->receiving) v->receives[v->receiving-1].next=&v->receives[v->receiving];
       v->receiving++;
     }
@@ -97,14 +97,14 @@ static void link_flush(struct mesh_link *link){
   if(!link->up) return;
   if(v->receiving){
     struct ibv_recv_wr *bad=NULL;
-    int error=mesh_transport_receive(v->pair,v->receives,&bad);
+    int error=ibv_post_recv(v->pair,v->receives,&bad);
     if(!error && atomic_load(&link->phase)==MESH_PAIRING) atomic_store(&link->phase,MESH_PAIRED);
     if(error){ link->status->when=flight_time(); link->status->code=error; link->status->domain=1; }
     v->receiving=0;
   }
   if(v->sending){
     struct ibv_send_wr *bad=NULL;
-    int error=mesh_transport_send(v->pair,v->sends,&bad);
+    int error=ibv_post_send(v->pair,v->sends,&bad);
     if(error){ link->status->when=flight_time(); link->status->code=error; link->status->domain=1; }
     v->sending=0;
   }

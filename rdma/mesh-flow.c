@@ -53,7 +53,7 @@ static int mesh_progress(struct hdr *M,struct mesh_link *links,int link_count,
 #ifdef MESH_TRANSPORT_TIMING
       double poll_begin=monotime();
 #endif
-      int count=mesh_transport_complete(v->completion_queue,2*(v->send_capacity+v->receive_capacity)-v->completed,v->completions+v->completed);
+      int count=ibv_poll_cq(v->completion_queue,2*(v->send_capacity+v->receive_capacity)-v->completed,v->completions+v->completed);
 #ifdef MESH_TRANSPORT_TIMING
       measured_poll_seconds+=monotime()-poll_begin; measured_polls++;
 #endif
@@ -67,7 +67,7 @@ static int mesh_progress(struct hdr *M,struct mesh_link *links,int link_count,
     for(int position=0;accessible && position<v->completed;position++){
       struct ibv_wc *wc=&v->completions[position];
       int receive=(int)(wc->wr_id>>63),header_completion=(int)((wc->wr_id>>62)&1);
-      uint64_t offset=receive?M->headers_off+(size_t)(uint32_t)wc->wr_id*MESH_HEADER_STRIDE:wc->wr_id&~(UINT64_C(1)<<62);
+      uint64_t offset=receive?M->headers_off+(size_t)(uint32_t)wc->wr_id*sizeof(struct mesh_send):wc->wr_id&~(UINT64_C(1)<<62);
       struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
       uint32_t page=receive?(uint32_t)wc->wr_id:record->page;
       uint32_t error=wc->status,domain=error?2:0;
@@ -139,7 +139,7 @@ accepted:
     while(!stop && counts[FREE] && link->receives<receive_limit &&
       atomic_load_explicit(&M->r[CMP].head,memory_order_relaxed)-atomic_load_explicit(&M->r[CMP].tail,memory_order_acquire)+(uint64_t)counts[RECV]+(uint64_t)counts[SEND]<MESH_RING){
       int page=free_pages[counts[FREE]-1];
-      if(link_submit(link,L_RECV,(uint32_t)page,M->headers_off+(size_t)page*MESH_HEADER_STRIDE)) break;
+      if(link_submit(link,L_RECV,(uint32_t)page,M->headers_off+(size_t)page*sizeof(struct mesh_send))) break;
       MOVE(page,RECV); pool_link[page]=(unsigned char)index;
     }
     link_flush(link);
@@ -193,7 +193,7 @@ int main(int argc,char**argv){
   uint64_t wanted=arena_pages+receive_pages;
   if(wanted>INT32_MAX) die("page index capacity");
   int np=(int)wanted,pool=(int)receive_pages;
-  size_t d0=(h0+(size_t)np*MESH_HEADER_STRIDE+pg-1)/pg*pg,span=(size_t)pg*np;
+  size_t d0=(h0+(size_t)pool*sizeof(struct mesh_send)+(size_t)np*sizeof(struct mesh_row)+pg-1)/pg*pg,span=(size_t)pg*np;
   if(pct && d0+span>(uint64_t)(pct/100*(double)ram)) die("configured graph exceeds page capacity");
   if(layout){ printf("%zu\n",d0+span); return 0; }
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");

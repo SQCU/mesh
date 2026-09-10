@@ -1,8 +1,8 @@
-BINS = mesh-flow mesh-stat libmesh.dylib libmesh-tensor.dylib libmesh-transport.dylib
+BINS = mesh-flow mesh-stat libmesh.dylib libmesh-tensor.dylib
 all: $(BINS)
-mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-flight.h mesh-links.h mesh-transport.c mesh-transport.h Makefile
+mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-flight.h mesh-links.h Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) -O2 -o .build/$@ mesh-flow.c mesh-transport.c -lrdma
+	cc $(CPPFLAGS) -O2 -o .build/$@ mesh-flow.c -lrdma
 	codesign --force --sign - .build/$@
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h
@@ -10,12 +10,10 @@ mesh-stat: mesh-stat.c mesh.h
 mesh-page-stream: mesh-page-stream.c mesh-client.c mesh-dataflow.c mesh-dataflow.h mesh.h
 	mkdir -p .build
 	cc -O2 -o .build/$@ mesh-page-stream.c mesh-client.c mesh-dataflow.c
-mesh-verbs-stream: mesh-verbs-stream.c mesh-verbs.h mesh.h mesh-flight.h mesh-transport.h Makefile
+mesh-verbs-stream: mesh-verbs-stream.c mesh-verbs.h mesh.h mesh-flight.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -O2 -o .build/$@ mesh-verbs-stream.c -lrdma
 	codesign --force --sign - .build/$@
-libmesh-transport.dylib: mesh-transport.c mesh-transport.h
-	cc -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh-transport.dylib -o $@ mesh-transport.c -lrdma
 libmesh.dylib: mesh-client.c mesh-dataflow.c mesh-dataflow.h mesh.h
 	cc -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-client.c mesh-dataflow.c
 libmesh-tensor.dylib: mesh-tensor.m mesh-tensor.h mesh-metal.m mesh-metal.h libmesh.dylib

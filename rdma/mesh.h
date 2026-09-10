@@ -9,9 +9,8 @@
 #define MESH_NAME    "/mesh0"
 #define MESH_PORT    "18519"
 #define MESH_MODE    0666
-#define MESH_VERSION 8u
+#define MESH_VERSION 9u
 #define MESH_HEADER_BYTES 64u
-#define MESH_HEADER_STRIDE 128u
 #define MESH_CL      128
 #define MESH_RING    65536
 #define MESH_OFF     16
@@ -22,7 +21,8 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_RETIRING, MESH_STOPPING, ME
 struct wire { uint16_t src, dst, hops; };
 struct desc { uint32_t page, bytes; uint16_t node; uint16_t reserved; uint32_t error, domain; uint64_t header; };
 struct mesh_page_header { struct wire wire; uint16_t padding; uint64_t table, stamp; uint32_t source, target; uint64_t when; int64_t code; uint32_t domain, function, index, peer; };
-struct mesh_send { struct mesh_page_header header; uint32_t page, reserved; uint64_t next, previous, owner, padding[4]; };
+struct mesh_row { uint32_t page, uses; uint64_t stamp; };
+struct mesh_send { struct mesh_page_header header; uint32_t page, reserved; uint64_t next, previous, owner; };
 struct ring { _Alignas(MESH_CL) _Atomic uint64_t head, tail; };
 static inline int ring_select(const struct ring *q, uint64_t *cursor, uint64_t *index){
   uint64_t tail=atomic_load_explicit(&q->tail,memory_order_relaxed);
@@ -56,10 +56,11 @@ static inline unsigned char *mesh_at(struct hdr *m, uint32_t i){
   return (unsigned char*)m + m->data_off + (size_t)i * m->pgsz; }
 // ../design/algorithm-sources.md#contiguous-backing-page-views
 static inline struct mesh_page_header *mesh_header(struct hdr *m, uint32_t i){
-  return (struct mesh_page_header*)((unsigned char*)m+m->headers_off+(size_t)i*MESH_HEADER_STRIDE); }
+  return (struct mesh_page_header*)((unsigned char*)m+m->headers_off+(size_t)i*sizeof(struct mesh_send)); }
 // ../design/algorithm-sources.md#context-lifetime
 static inline struct mesh_row *mesh_context_row(struct hdr *memory,uint32_t page){
-  return (struct mesh_row*)((struct mesh_send*)mesh_header(memory,page))->padding;
+  return (struct mesh_row*)((unsigned char*)memory+memory->headers_off+
+    (size_t)memory->pool*sizeof(struct mesh_send))+page;
 }
 static inline unsigned char *mesh_data(struct hdr *m, uint32_t i){
   return mesh_at(m,i); }

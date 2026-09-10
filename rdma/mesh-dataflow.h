@@ -5,7 +5,6 @@
 #define MESH_ROW_ABSENT UINT32_MAX
 #define MESH_ROW_WRITING (UINT64_C(1)<<63)
 
-struct mesh_row { uint32_t page, uses; uint64_t stamp; };
 struct mesh_rows {
   struct hdr *memory; struct mesh_row *table; size_t count; uint32_t offset, bytes;
   struct mesh_ctx *context; uint64_t identity;
