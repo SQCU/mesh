@@ -436,3 +436,23 @@ remain outstanding operand-storage obligations. The mechanism follows indexed
 operand views scoped by Papadopoulos and Culler in the canonical bibliography;
 backend validity and peer agreement each remain insufficient without numerical
 comparison.
+
+### Attention intermediates and indexed stores
+
+Metal-microbench `b1973b7` supplies Q/K/V and attended-result views from ordinary
+mesh slots to the existing MPS/tensor attention functions. Canonical maps claim
+and publish these numerical values; their dependencies name the normalized input,
+Q/K/V operands and output projection. Tensor output uses cooperative numerical
+indices to scatter directly into payloads. The input/output maps and storage
+presence follow the Papadopoulos–Culler mechanism scoped by the bibliography.
+
+An earlier transpose-destination attempt produced incorrect logits despite
+agreement between peers. An MPS diagnostic isolated that failure to the tensor
+projection's output representation; it was corrected without retaining a
+backend substitution. The configured backend combination then matched all
+262144 logits exactly on both peers and completed 24 two-layer evaluations with
+96 agreements each. The failed and corrected records are respectively
+`metal-microbench/docs/data/dataflow_attention_intermediates_rdma_2026-09-09.json`
+and `dataflow_attention_scatter_rdma_2026-09-09.json` in that same directory.
+Full-model capacity/performance, weights, physical page recycling,
+accumulator/index reduction and admission coupling remain unfinished.

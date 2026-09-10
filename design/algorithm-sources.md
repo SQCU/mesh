@@ -87,7 +87,9 @@ words have been removed in committed revisions of metal-microbench. Distinct
 configured functions now have distinct value rows and share the NFE stamp.
 Native FFN input, MPS FFN intermediates, MPS attention input and vocabulary
 input/output now address sendable payloads. This is not all operand storage:
-attention intermediates, other backend inputs and weights still require work.
+other backend inputs and weights still require work. MPS/tensor attention Q/K/V
+and attended intermediates now also occupy ordinary sendable page payloads;
+the corrected indexed output stores were checked against the preceding logits.
 
 Physical local-page recycling, complete read-lifetime proofs, accumulator/index
 page reduction, independent admission without digest gates, and link-error
