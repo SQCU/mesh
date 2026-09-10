@@ -28,7 +28,7 @@ static void *link_worker(void *argument){
   while(!stop){
     atomic_store(&link->phase,MESH_PAIRING);
     const char *peer=expected_peer>=0 && link->node<expected_peer?NULL:link->peer;
-    while(!stop && ((lsock<0 && listener_up()) || verbs_up(peer,memory,span,link->node))){
+    while(!stop && ((lsock<0 && listener_up()) || verbs_up(peer,memory,span,link->node,((struct hdr*)memory)->pgsz,MESH_HEADER_BYTES))){
       while(!(retire_device?down_verbs():down_pair())) usleep(20000);
       retire_device=0;
       atomic_store(&link->heartbeat,flight_time()); usleep(100000);

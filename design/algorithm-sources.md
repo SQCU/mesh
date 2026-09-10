@@ -1148,6 +1148,35 @@ costs; the default build contains none of those reads or counters. Startup,
 idle and teardown intervals contribute to the aggregate pass measurement and
 must be distinguished from the client's timed exchange.
 
+#### One GiB stream measurement
+
+The operator replaced the short echo yardstick with a one-direction 1 GiB
+transfer. `mesh-page-stream` replaces `mesh-page-echo`; it does not maintain a
+second data-layer evaluator. Its complete 1,073,741,824-byte input and receiving
+capacity are realized before publication. The receiver observes row presence
+with a monotonically advancing cursor, without repeatedly scanning completed
+rows, allocating, copying, or timing each page. Actual row-table polling and
+retirement costs in canonical mesh remain in the measured path.
+
+Both first-to-last and interior approximately 10–90 percent intervals use the
+actual observed page counts, accounting for completion batches crossing those
+thresholds. The receiver's clock measures its own delivery intervals; no
+cross-machine clock comparison, echo division, or setup interval enters the
+reported interior rate. Verification reads all delivered payload words after
+timing. The source's NIC-completion interval is separately labeled and cannot
+be substituted for receiver delivery. Each run transfers the full GiB, even
+though its interior-rate numerator excludes fill and drain.
+
+`mesh-verbs-stream` uses the same provider realization extracted into
+`mesh-verbs.h`, and sends the same page-sized operands with one WR per page.
+The provider setup/registration implementation has one source owner. The
+direct stream continuously refills its bounded provider descriptor window.
+After reporting completion, endpoints remain available until ordinary outer
+termination requests teardown; no acknowledgement or echo enters the stream.
+Apple TN3205 supplies the SEND/RECV, frame-capacity and completion semantics.
+The measured direct path is an achievable comparator, not a proof of the
+physical link's irreducible minimum overhead.
+
 `rdma/mesh-transport.h` and `mesh-transport.c` implement the registered-span
 operations from Apple's TN3205: prepare one one-SGE SEND or RECV descriptor,
 submit an existing linked descriptor list, and poll once into caller-provided
@@ -1680,3 +1709,37 @@ return order is unchanged. Explicit invalidation still selects and sorts its
 transferred subset for cancellation. This uses the same Papadopoulos–Culler read
 ownership and asynchronous physical retirement, with no new handshake or
 numerical completion signal.
+
+## One gibibyte provider stream
+
+`mesh-verbs-stream.c` measures the asynchronous registered-buffer SEND/RECV
+mechanism documented by Apple in [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt).
+It uses the same `mesh-verbs.h` provider configuration, registration and teardown
+as the bridge. The bridge retains its existing page-plus-header frame geometry;
+the direct yardstick specifies a single 16 KiB span per request. It allocates and
+initializes 65,536 pages before transfer and registers that 1 GiB backing once.
+Each page is submitted once. Actual CQ completions make provider queue capacity
+available for further posts; no application acknowledgement or echo is sent.
+The raw yardstick's counters describe provider work and measurement, not a
+second numerical page-table execution model.
+
+The receiver records local monotonic timestamps and actual completed-page counts
+at the first completion observation, the first observation at or beyond 10%, the
+first observation at or beyond 90%, and the last observation. The interior rate
+uses the actual count difference, including batch overshoot. Allocation, page
+faulting, registration, pairing, full byte verification and teardown are outside
+that interval. The full transfer is 1,073,741,824 bytes, not 1,000,000,000 bytes.
+The source writes a page-and-word-index pattern; the receiver verifies every word
+after completion. Sender completion timing is reported independently and is not
+presented as remote delivery latency. No clock synchronization is assumed.
+
+After printing its result each endpoint remains idle with its provider resources
+intact until the outer measurement caller has collected both results and sends
+ordinary SIGTERM. Signal masking prevents losing the termination signal between
+checking it and sleeping. Provider teardown therefore follows observation of
+both endpoints' completion without a benchmark-specific wire acknowledgement,
+a fixed grace interval, or a termination dependency inside the stream.
+`MESH_TRANSPORT_TIMING` optionally measures each post and CQ poll; measurements
+without that build flag avoid those per-call clock reads. Even the direct
+provider yardstick includes descriptor construction, CQ polling and host service
+cost, so its observed time is not an asserted physical lower bound.
