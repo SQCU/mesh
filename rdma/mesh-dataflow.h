@@ -55,12 +55,12 @@ void mesh_rows_normalize_f32(const struct mesh_rows *pages, const uint32_t *accu
   size_t elements, float epsilon, float scale);
 size_t mesh_rows_send(const struct mesh_rows *pages, uint64_t epoch,
   const struct mesh_row_binding *bindings, size_t count);
-int mesh_rows_receive(const struct mesh_rows *pages, uint64_t epoch,
+size_t mesh_rows_receive(const struct mesh_rows *pages,
   const struct mesh_row_binding *bindings, size_t count);
-size_t mesh_rows_acknowledge(const struct mesh_rows *pages, uint64_t epoch);
+size_t mesh_rows_acknowledge(const struct mesh_rows *pages);
 int mesh_rows_return(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
 size_t mesh_rows_retire(const struct mesh_rows *pages);
-int mesh_rows_progress(const struct mesh_rows *pages, uint64_t epoch,
+size_t mesh_rows_progress(const struct mesh_rows *pages, uint64_t epoch,
   const struct mesh_row_binding *bindings, size_t count);
 int mesh_rows_digest(const struct mesh_rows *pages, uint32_t input, uint32_t output,
   uint32_t index, uint64_t seed);

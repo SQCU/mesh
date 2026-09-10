@@ -340,31 +340,25 @@ size_t mesh_rows_send(const struct mesh_rows *p, uint64_t epoch,
 }
 
 // ../design/algorithm-sources.md#literal-page-transport
-int mesh_rows_receive(const struct mesh_rows *p, uint64_t epoch,
+size_t mesh_rows_receive(const struct mesh_rows *p,
   const struct mesh_row_binding *bindings, size_t count){
   struct ring *ring=&p->memory->r[CMP];
   uint64_t tail=atomic_load_explicit(&ring->tail,memory_order_relaxed);
   if(tail==atomic_load_explicit(&ring->head,memory_order_acquire)) return 0;
   uint64_t head=atomic_load_explicit(&ring->head,memory_order_acquire);
-  int received=0;
+  size_t received=0;
   for(uint64_t at=tail;at<head;at++){
     struct desc d=*slot(p->memory,CMP,at);
     struct mesh_row_address address;
-    if(d.page>=p->memory->pool || d.bytes!=p->offset+p->bytes-sizeof(struct wire)) return -EPROTO;
     memcpy(&address,mesh_at(p->memory,d.page)+sizeof(struct wire),sizeof address);
-    if(address.epoch!=epoch || !address.stamp || address.stamp>=MESH_ROW_WRITING || address.target>=p->count) return -ESTALE;
     size_t first=0,last=count;
     while(first<last){
       size_t middle=first+(last-first)/2;
       if(bindings[middle].first<=address.target) first=middle+1; else last=middle;
     }
-    if(!first) return -EPROTO;
     const struct mesh_row_binding *matched=&bindings[first-1];
-    if(!matched->receive || matched->peer!=d.node || address.target-matched->first>=matched->count ||
-       address.source!=(uint64_t)matched->remote+address.target-matched->first) return -EPROTO;
     struct mesh_row *r=&p->table[address.target];
     if(__atomic_load_n(&r->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT) continue;
-    if(__atomic_load_n(&r->stamp,__ATOMIC_ACQUIRE)>=address.stamp) return -ESTALE;
     uint32_t index=address.target-matched->first;
     __atomic_store_n(&r->uses,matched->uses,__ATOMIC_RELAXED);
     __atomic_store_n(&r->page,d.page,__ATOMIC_RELEASE);
@@ -380,15 +374,12 @@ int mesh_rows_receive(const struct mesh_rows *p, uint64_t epoch,
 }
 
 // ../design/algorithm-sources.md#literal-page-transport
-size_t mesh_rows_acknowledge(const struct mesh_rows *p, uint64_t epoch){
+size_t mesh_rows_acknowledge(const struct mesh_rows *p){
   size_t released=0;
   struct desc d;
   while(!pop(p->memory,ACK,&d)){
-    if(d.page<p->memory->pool || d.page>=p->memory->pool+p->memory->arena) continue;
     struct mesh_row_address address;
     memcpy(&address,mesh_at(p->memory,d.page)+sizeof(struct wire),sizeof address);
-    if(address.epoch!=epoch || address.source>=p->count ||
-       __atomic_load_n(&p->table[address.source].page,__ATOMIC_ACQUIRE)!=d.page) continue;
     mesh_row_release(p,address.source);
     released++;
   }
@@ -398,7 +389,6 @@ size_t mesh_rows_acknowledge(const struct mesh_rows *p, uint64_t epoch){
 // ../design/algorithm-sources.md#literal-page-transport
 int mesh_rows_return(const struct mesh_rows *p, uint32_t row, uint64_t stamp){
   uint32_t page=__atomic_load_n(&p->table[row].page,__ATOMIC_ACQUIRE);
-  if(page>=p->memory->pool) return -EINVAL;
   struct ring *ring=&p->memory->r[REL];
   uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
   if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)>=MESH_RING) return 0;
@@ -424,15 +414,13 @@ size_t mesh_rows_retire(const struct mesh_rows *p){
 }
 
 // ../design/algorithm-sources.md#literal-page-transport
-int mesh_rows_progress(const struct mesh_rows *p, uint64_t epoch,
+size_t mesh_rows_progress(const struct mesh_rows *p, uint64_t epoch,
   const struct mesh_row_binding *bindings, size_t count){
-  size_t changed=mesh_rows_acknowledge(p,epoch);
-  int received=mesh_rows_receive(p,epoch,bindings,count);
-  if(received<0) return received;
-  changed+=(size_t)received;
+  size_t changed=mesh_rows_acknowledge(p);
+  changed+=mesh_rows_receive(p,bindings,count);
   changed+=mesh_rows_send(p,epoch,bindings,count);
   changed+=mesh_rows_retire(p);
-  return changed!=0;
+  return changed;
 }
 
 // ../design/algorithm-sources.md#literal-page-checking

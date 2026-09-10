@@ -30,6 +30,39 @@ Current source disposition:
   itself implement the required metadata channel. Add the configured return
   binding, migrate the single caller, then delete excluded implementations.
 
+### Direct configured receive and NIC-completion consumption
+
+The replacement `mesh_rows_receive` now performs the configured address gather,
+page publication and dependent-input releases without descriptor validation,
+epoch interpretation, duplicate-stamp suppression or synchronous error returns.
+`mesh_rows_acknowledge` consumes each NIC-read completion and releases the source
+named by the submitted page's immutable address. `mesh_rows_return` is called
+only for received pages; it no longer rechecks that classification. Existing
+page availability and ring capacity still determine whether the corresponding
+page operation is currently possible.
+
+`mesh_rows_progress` always visits NIC completion, receive, send and retirement;
+its unsigned return is the number of page operations performed, not a status or
+an operand. There is no error-dependent early exit. Removing these returns does
+not implement hardware-error reporting: asynchronous metadata publication is
+provided separately by `mesh_rows_report`, and the bridge/device binding to it
+remains unfinished. The error-channel audit above describes the earlier source,
+not the revised return types.
+
+These functions require a realized, exclusively owned descriptor stream and
+valid configured source/destination addresses. The transport binding must retain
+the actual page mapping for every outstanding GPU/NIC access; invalidation cannot
+rebind that memory or route its late completions into a replacement table. The
+replacement is still unused, and its mapping-invalidation integration is still
+missing. Removing epoch checks is not evidence that invalidation works. The old
+active caller and its transport remain until the complete replacement is bound.
+
+Papadopoulos–Culler (ISCA 1990) supply the assigned-storage/publication mechanism;
+Rabenseifner (ICCS 2004) and Patarasuk–Yuan (JPDC 2009) supply the collective
+exchange algebra; Saltzer–Reed–Clark (TOCS 1984) place acceptance at the endpoint.
+All are cited below. These references do not certify this implementation's
+mapping lifetime, error propagation or latency.
+
 ### Configuration owns receive input lifetimes
 
 `mesh_rows_realize` now accounts for every logical row, including holes that
