@@ -250,6 +250,17 @@ backend comparison. These runs use dense storage and do not establish C07 or C34
 The received/local-page normalization shader compiled into a compute pipeline on
 both GPUs; it was not numerically executed in these runs.
 
+The same artifact records a six-layer, 1024-row, two-in-flight RDMA regression
+of the existing caller at metal `aadc851`, mesh `667aa41`. Both participants
+completed six NFEs with 72 agreements, zero disagreements/nonfinite values/retries,
+and settled exits. Their final logits hashes match. Measured invocation durations
+were 149.834–150.613 ms on M5 and 148.196–148.395 ms on M4. The much smaller
+7.732/11.657 ms completion gaps in `period_ms` are not NFE latency. This preserves
+the existing numerical path through the weight-view change; it does not validate
+the replacement transport, normalization binder, full 48-layer graph or latency
+target. Full model-file SHA256 matched independently on both machines:
+`5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d`.
+
 Future evidence belongs in this matrix/ledger with exact source and input identity,
 observed result and explicit limitations. Update current disposition rather than
 append another narrative that leaves the active implementation ambiguous.
