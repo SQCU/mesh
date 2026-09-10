@@ -1,7 +1,6 @@
 #include "mesh-dataflow.h"
 #include <errno.h>
 #include <math.h>
-#include <sched.h>
 
 typedef _Float16 mesh_half8 __attribute__((ext_vector_type(8)));
 typedef float mesh_float8 __attribute__((ext_vector_type(8)));
@@ -343,10 +342,28 @@ size_t mesh_rows_acknowledge(const struct mesh_rows *p, uint64_t epoch){
 int mesh_rows_return(const struct mesh_rows *p, uint32_t row, uint64_t stamp){
   uint32_t page=__atomic_load_n(&p->table[row].page,__ATOMIC_ACQUIRE);
   if(page>=p->memory->pool) return -EINVAL;
+  struct ring *ring=&p->memory->r[REL];
+  uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
+  if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)>=MESH_RING) return 0;
   if(!mesh_row_zero(p,row,stamp)) return 0;
-  struct desc d={.page=page};
-  while(push(p->memory,REL,&d)) sched_yield();
+  *slot(p->memory,REL,head)=(struct desc){.page=page};
+  atomic_store_explicit(&ring->head,head+1,memory_order_release);
   return 1;
+}
+
+// ../design/algorithm-sources.md#literal-page-transport
+size_t mesh_rows_retire(const struct mesh_rows *p){
+  size_t released=0;
+  for(size_t row=0;row<p->count;row++){
+    const struct mesh_row *r=&p->table[row];
+    uint64_t stamp=__atomic_load_n(&r->stamp,__ATOMIC_ACQUIRE);
+    if(!stamp || stamp>=MESH_ROW_WRITING || __atomic_load_n(&r->uses,__ATOMIC_ACQUIRE)) continue;
+    uint32_t page=__atomic_load_n(&r->page,__ATOMIC_ACQUIRE);
+    if(page==MESH_ROW_ABSENT) continue;
+    int result=page<p->memory->pool?mesh_rows_return(p,(uint32_t)row,stamp):mesh_row_zero(p,(uint32_t)row,stamp);
+    released+=result>0;
+  }
+  return released;
 }
 
 // ../design/algorithm-sources.md#literal-page-checking

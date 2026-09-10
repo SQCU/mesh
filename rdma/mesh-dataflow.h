@@ -40,6 +40,7 @@ int mesh_rows_receive(const struct mesh_rows *pages, uint64_t epoch,
   const struct mesh_row_binding *bindings, size_t count);
 size_t mesh_rows_acknowledge(const struct mesh_rows *pages, uint64_t epoch);
 int mesh_rows_return(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
+size_t mesh_rows_retire(const struct mesh_rows *pages);
 int mesh_rows_digest(const struct mesh_rows *pages, uint32_t input, uint32_t output,
   uint32_t index, uint64_t seed);
 int mesh_rows_equal(const struct mesh_rows *pages, uint32_t first, uint32_t second,

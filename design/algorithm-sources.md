@@ -233,10 +233,20 @@ Delivery installs the received physical page and configured binding's use count,
 then stamps the actual destination. It never overwrites a live destination.
 Each arrival restores the configured receive-use count; incoming data cannot
 allocate or infer a numerical graph.
-`mesh_rows_return` is for received pages and runs on the asynchronous zeroing
-owner. It returns zeroed pages to the existing bridge REL ring. Local-page
-zeroing retains its physical address in the configured release owner until that
-address is returned to the canonical free-page representation.
+`mesh_rows_retire` implements the storage retirement part of Papadopoulos and
+Culler’s operand-storage discipline through this specification’s literal use
+count. An asynchronous owner scans the existing rows, skips unpublished values
+and remaining uses, and zeroes completed values. It owns REL exclusively.
+`mesh_rows_return` checks capacity in that existing ring before clearing a
+received row. When capacity is absent, the actual page remains in the row;
+the scan continues over other rows. When capacity exists, zeroing precedes
+publishing the descriptor to REL. The bridge only advances the tail, so capacity
+cannot disappear between the check and publication by the sole producer.
+No blocking retry, pending list, or separate completion state is involved.
+Local pages become absent only after zeroing; their fixed physical addresses
+remain in the configured output maps for reuse. This does not yet provide
+physical sharing between distinct configured outputs, remote dependent-read
+proofs, or the worker integration needed by the caller.
 
 Delivery scans the existing CMP ring for a page whose destination is available
 and removes that descriptor using the existing ring operation. A busy destination
