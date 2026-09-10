@@ -1,5 +1,6 @@
 
 #include "mesh.h"
+#include "mesh-dataflow.h"
 #include <infiniband/verbs.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -27,7 +28,7 @@ static _Thread_local struct ibv_pd *pd;
 static _Thread_local struct ibv_cq *cq;
 static _Thread_local struct ibv_qp *qp;
 static _Thread_local struct ibv_mr **mr;
-static _Thread_local int nmr;
+static _Thread_local int nmr, send_capacity, receive_capacity;
 // ../design/algorithm-sources.md#transport-page-addressing
 static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
   uintptr_t address=(uintptr_t)base+offset;
@@ -154,7 +155,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   }
   struct ibv_device_attr capabilities;
   if(ibv_query_device(ctx,&capabilities)){ close(f); return -1; }
-  if(capabilities.max_sge<2 || capabilities.max_cqe<2*QD){ close(f); errno=EOPNOTSUPP; return -1; }
+  if(capabilities.max_sge<2){ close(f); errno=EOPNOTSUPP; return -1; }
   if(!pd) pd=TRACE(ALLOC_PD,ctx,0,0,ibv_alloc_pd(ctx));
   if(!pd){ close(f); return -1; }
   size_t head=(uintptr_t)mem%CHUNK, regions=(head+span+CHUNK-1)/CHUNK;
@@ -170,10 +171,19 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
              strncmp(dn,"rdma_",5)?dn:dn+5);
     system(c); }
-  cq=TRACE(CREATE_CQ,ctx,2*QD,0,ibv_create_cq(ctx,2*QD,NULL,NULL,0)); if(!cq){ close(f); return -1; }
+  size_t frames=(((struct hdr*)mem)->pgsz+MESH_HEADER_BYTES+4095)/4096;
+  int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
+  int completions=2*(frame_capacity/(int)frames);
+  if(!completions || capabilities.max_cqe<completions){ close(f); errno=EOPNOTSUPP; return -1; }
+  cq=TRACE(CREATE_CQ,ctx,completions,0,ibv_create_cq(ctx,completions,NULL,NULL,0)); if(!cq){ close(f); return -1; }
   struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
-    .cap={.max_send_wr=QD,.max_recv_wr=QD,.max_send_sge=2,.max_recv_sge=2}};
+    .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=2,.max_recv_sge=2}};
   qp=TRACE(CREATE_QP,pd,QD,0,ibv_create_qp(pd,&qi)); if(!qp){ close(f); return -1; }
+  struct ibv_qp_attr queried; struct ibv_qp_init_attr actual;
+  if(ibv_query_qp(qp,&queried,IBV_QP_CAP,&actual)){ close(f); return -1; }
+  send_capacity=(int)((actual.cap.max_send_wr<(uint32_t)frame_capacity?actual.cap.max_send_wr:(uint32_t)frame_capacity)/frames);
+  receive_capacity=(int)((actual.cap.max_recv_wr<(uint32_t)frame_capacity?actual.cap.max_recv_wr:(uint32_t)frame_capacity)/frames);
+  if(!send_capacity || !receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   if(TRACE(INIT,qp,qp->qp_num,0,ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))){ close(f); return -1; }
   union ibv_gid gid; if(TRACE(QUERY_GID,ctx,1,0,ibv_query_gid(ctx,1,0,&gid))){ close(f); return -1; }
@@ -268,11 +278,19 @@ int main(int argc,char**argv){
   #define RELEASE(page) do{ MOVE(page,FREE); free_pages[counts[FREE]-1]=(page); }while(0)
   for(;;){
     int live=0,stopped=0; struct desc descriptor;
-    for(int budget=0;budget<256 && !pop(M,REL,&descriptor);budget++) RELEASE(descriptor.page);
+    if(!pop(M,REL,&descriptor)){
+      memset(mesh_at(M,descriptor.page),0,pg);
+      struct mesh_row *row=(struct mesh_row*)((char*)M+descriptor.header);
+      uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_RELAXED);
+      __atomic_store_n(&row->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
+      __atomic_store_n(&row->stamp,stamp&~MESH_ROW_WRITING,__ATOMIC_RELEASE);
+      if(descriptor.page<(uint32_t)pool) RELEASE(descriptor.page);
+    }
     for(int index=0;index<link_count;index++){
       struct mesh_link *link=&links[index]; uint64_t position;
       if(atomic_exchange(&ports[index].reset_request,0)){ link->up=0; atomic_store(&link->reset,1); }
-      for(int budget=0;budget<1024 && ring_select(&link->completion.cursor,&completion_cursor[index],&position);budget++){
+      uint64_t available=atomic_load_explicit(&link->completion.cursor.head,memory_order_acquire)-atomic_load_explicit(&link->completion.cursor.tail,memory_order_relaxed);
+      for(uint64_t budget=0;budget<available && ring_select(&link->completion.cursor,&completion_cursor[index],&position);budget++){
         struct link_event event=link->completion.entries[position%LINK_QUEUE]; uint32_t page=event.page;
         if(event.kind==L_UP){ link->up=1; ports[index].peer=(uint16_t)link->peer_node; goto accepted; }
         if(event.kind==L_FAULT){
@@ -329,8 +347,8 @@ accepted:
         ring_erase(&link->completion.cursor,link->completion.entries,sizeof event,LINK_QUEUE,position);
       }
       live+=link->up; stopped+=atomic_load(&link->stopped);
-      int receive_limit=receive_share<QD?receive_share:QD;
-      for(int budget=0;budget<512 && !stop && counts[FREE] && link->receives<receive_limit;budget++){
+      int receive_limit=receive_share<link->receive_capacity?receive_share:link->receive_capacity;
+      while(!stop && counts[FREE] && link->receives<receive_limit){
         int page=free_pages[counts[FREE]-1];
         if(link_submit(link,L_RECV,(uint32_t)page,M->headers_off+(size_t)page*MESH_HEADER_STRIDE)) break;
         MOVE(page,RECV); pool_link[page]=(unsigned char)index;
@@ -341,7 +359,8 @@ accepted:
       atomic_store(&ports[index].generation,link->generation);
     }
     uint64_t position;
-    for(int budget=0;budget<256 && !stop &&
+    uint64_t available=atomic_load_explicit(&M->r[SUB].head,memory_order_acquire)-atomic_load_explicit(&M->r[SUB].tail,memory_order_relaxed);
+    for(uint64_t budget=0;budget<available && !stop &&
       atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)+(uint64_t)arena_pending<MESH_RING &&
       ring_select(&M->r[SUB],&submit_cursor,&position);budget++){
       descriptor=*slot(M,SUB,position); uint32_t page=descriptor.page;

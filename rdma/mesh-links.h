@@ -14,7 +14,7 @@ struct mesh_link {
   _Atomic int reset, stopped;
   _Atomic uint64_t heartbeat, operation, phase;
   _Atomic uint64_t generation;
-  int up, receives, sends;
+  int up, receives, sends, send_capacity, receive_capacity;
   uint64_t pending;
 };
 // ../design/algorithm-sources.md#transport-page-addressing
@@ -48,14 +48,19 @@ static void *link_worker(void *argument){
       atomic_store(&link->heartbeat,flight_time()); usleep(100000);
     }
     if(stop) break;
-    link->peer_node=expected_peer; link->generation++;
+    size_t capacity=(size_t)send_capacity+receive_capacity;
+    struct ibv_wc *completions=calloc(capacity,sizeof *completions);
+    struct ibv_sge (*sges)[2]=calloc(capacity,sizeof *sges);
+    struct ibv_recv_wr *receives=calloc(receive_capacity,sizeof *receives);
+    struct ibv_send_wr *sends=calloc(send_capacity,sizeof *sends);
+    if(!completions || !sges || !receives || !sends) die("provider descriptors");
+    link->peer_node=expected_peer; link->send_capacity=send_capacity; link->receive_capacity=receive_capacity; link->generation++;
     link_push(&link->completion,(struct link_event){.kind=L_UP,.generation=link->generation});
     atomic_store(&link->phase,MESH_PAIRED);
     while(!stop && !atomic_load(&link->reset)){
-      if(atomic_load(&link->completion.cursor.head)-atomic_load(&link->completion.cursor.tail)>LINK_QUEUE-128) continue;
-      struct ibv_wc completions[32];
+      if(atomic_load(&link->completion.cursor.head)-atomic_load(&link->completion.cursor.tail)>LINK_QUEUE-2*capacity-2) continue;
       atomic_store(&link->operation,F_POLL_CQ);
-      int count=ibv_poll_cq(cq,32,completions);
+      int count=ibv_poll_cq(cq,(int)capacity,completions);
       atomic_store(&link->operation,0);
       if(count<0){
         link_push(&link->completion,(struct link_event){.kind=L_FAULT,.error=(uint32_t)count,.domain=3});
@@ -71,24 +76,47 @@ static void *link_worker(void *argument){
           .page=receive?(uint32_t)wc->wr_id:record->page,.header=offset,
           .bytes=wc->byte_len,.error=wc->status,.domain=wc->status?2:0});
       }
-      struct link_event command;
-      for(int budget=0;budget<64 && !link_pop(&link->command,&command);budget++){
-        struct ibv_sge sge[2]={
-          region_sge(memory,command.header,MESH_HEADER_BYTES),
-          region_sge(memory,(size_t)((char*)mesh_at(pages,command.page)-memory),pages->pgsz)};
-        int error;
-        if(command.kind==L_RECV){
-          struct ibv_recv_wr wr={.wr_id=(UINT64_C(1)<<63)|command.page,.sg_list=sge,.num_sge=2},*bad;
-          error=ibv_post_recv(qp,&wr,&bad);
+      size_t count_send=0,count_receive=0,count_command=0;
+      struct link_event value;
+      while(count_command<capacity && !link_pop(&link->command,&value)){
+        struct link_event *command=&value;
+        sges[count_command][0]=region_sge(memory,command->header,MESH_HEADER_BYTES);
+        sges[count_command][1]=region_sge(memory,(size_t)((char*)mesh_at(pages,command->page)-memory),pages->pgsz);
+        if(command->kind==L_RECV){
+          receives[count_receive]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|command->page,
+            .sg_list=sges[count_command],.num_sge=2};
+          if(count_receive) receives[count_receive-1].next=&receives[count_receive];
+          count_receive++;
         } else {
-          struct ibv_send_wr wr={.wr_id=command.header,.sg_list=sge,.num_sge=2,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-          error=ibv_post_send(qp,&wr,&bad);
+          sends[count_send]=(struct ibv_send_wr){.wr_id=command->header,.sg_list=sges[count_command],
+            .num_sge=2,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+          if(count_send) sends[count_send-1].next=&sends[count_send];
+          count_send++;
         }
-        if(error){ command.error=(uint32_t)error; command.domain=1; link_push(&link->completion,command); }
+        count_command++;
+      }
+      if(count_receive){
+        struct ibv_recv_wr *bad=NULL;
+        int error=ibv_post_recv(qp,receives,&bad);
+        for(struct ibv_recv_wr *wr=error?bad:NULL;wr;wr=wr->next){
+          uint32_t page=(uint32_t)wr->wr_id;
+          link_push(&link->completion,(struct link_event){.kind=L_RECV,.page=page,
+            .header=pages->headers_off+(size_t)page*MESH_HEADER_STRIDE,.error=(uint32_t)error,.domain=1});
+        }
+      }
+      if(count_send){
+        struct ibv_send_wr *bad=NULL;
+        int error=ibv_post_send(qp,sends,&bad);
+        for(struct ibv_send_wr *wr=error?bad:NULL;wr;wr=wr->next){
+          struct mesh_send *record=(struct mesh_send*)(memory+wr->wr_id);
+          link_push(&link->completion,(struct link_event){.kind=L_SEND,.page=record->page,
+            .header=wr->wr_id,.error=(uint32_t)error,.domain=1});
+        }
       }
     }
     atomic_store(&link->phase,MESH_RETIRING);
     while(!down_verbs()){ atomic_store(&link->heartbeat,flight_time()); usleep(20000); }
+    free(completions); free(sges); free(receives); free(sends);
     struct link_event discarded; while(!link_pop(&link->command,&discarded)){}
     link_push(&link->completion,(struct link_event){.kind=L_RETIRED});
     atomic_store(&link->reset,0);
@@ -101,7 +129,7 @@ static void *link_worker(void *argument){
 struct mesh_route { uint16_t link; };
 // ../design/algorithm-sources.md#transport-page-addressing
 static int link_submit(struct mesh_link *link,uint32_t kind,uint32_t page,uint64_t header){
-  if(!link->up || (kind==L_SEND?link->sends:link->receives)>=QD) return -1;
+  if(!link->up || (kind==L_SEND?link->sends>=link->send_capacity:link->receives>=link->receive_capacity)) return -1;
   struct mesh_send *record=(struct mesh_send*)((char*)link->pages+header);
   record->page=page;
   if(link_push(&link->command,(struct link_event){.kind=kind,.page=page,.header=header})) return -1;
