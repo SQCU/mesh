@@ -33,7 +33,9 @@ id<MTLBuffer> mesh_metal_regions(id<MTLDevice> device,struct mesh_rows *pages,NS
   const size_t span=UINT64_C(1)<<30;
   size_t bytes=((size_t)pages->memory->pool+pages->memory->arena)*pages->bytes;
   size_t count=(bytes+span-1)/span;
-  uint32_t physical=mesh_rows_allocate(pages,(count*sizeof(uint64_t)+pages->bytes-1)/pages->bytes,pages->bytes);
+  size_t allocation=mesh_region_table_pages((size_t)pages->memory->pool+pages->memory->arena,pages->bytes);
+  if(allocation==SIZE_MAX) return nil;
+  uint32_t physical=mesh_rows_allocate(pages,allocation,pages->bytes);
   if(physical==MESH_ROW_ABSENT) return nil;
   uint64_t *addresses=(void*)mesh_at(pages->memory,physical);
   NSMutableArray *buffers=[NSMutableArray new];
@@ -46,7 +48,7 @@ id<MTLBuffer> mesh_metal_regions(id<MTLDevice> device,struct mesh_rows *pages,NS
     [buffers addObject:buffer];
   }
   *resources=buffers;
-  return mesh_metal_page_span(device,pages->context,physical,(uint32_t)((count*sizeof(uint64_t)+pages->bytes-1)/pages->bytes));
+  return mesh_metal_page_span(device,pages->context,physical,(uint32_t)allocation);
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership

@@ -74,8 +74,18 @@ runtime evidence. Passing another row is not a substitute.
 
 The M4 Mini reports `hw.memsize = 25769803776`: 24 GiB of unified memory.
 The operator instructed that allocation below 80% should be treated as available
-for planning. Use **19.2 GiB** for its complete allocation plan, rather than
+for planning. Use **19.2 GiB** as the capacity ceiling for its allocation plan, rather than
 mistaking the existing bridge allocation for the machine's capacity.
+
+The September 10 operator correction makes the scope explicit: this allowance
+belongs to the Mini, not the MacBook Pro or a global bridge default. It is a
+capacity ceiling, not a requirement to allocate the ceiling. Each participant
+registers the pages required by its realized graph, including receive storage
+and metadata. The caller and bridge must use the same allocation layout;
+neither a percentage of global RAM nor a separate estimate substitutes for it.
+The MacBook Pro's erroneous approximately 102.4 GiB registration was released
+through an ordinary managed bridge stop; system wired memory fell from roughly
+110 GiB to 8.1 GiB. The stale generated launch entry was removed as well.
 
 The observed bridge runs with `-M 25`, allocating 6 GiB: 393216 receive pages
 and 1179648 transmit pages, each 4096 bytes. Its 4.5 GiB transmit arena is a

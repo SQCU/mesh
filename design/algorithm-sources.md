@@ -1189,7 +1189,8 @@ configuration reached registration but the M5's 101st 1-GiB region failed with
 literal error -12, before any numerical invocation. The provider advertises
 100 MRs and its `tbt_reg_mr` checks returned MR indices against 100
 (`0x27F6DAF98`–`0x27F6DAFA0`). This is an actual registration-count constraint,
-not a reason to reduce the authorized 80% backing allocation.
+an explanation of that failed configuration. The later allocation policy below
+replaces the blanket 80% reservation; the registration-count constraint remains.
 
 The bridge now realizes one power-of-two registration extent per configured
 provider. Starting at 1 GiB, it increases the extent until the exact number of
@@ -1341,15 +1342,30 @@ selection pages independently of new numerical readiness, retires precisely thei
 selected input/output ranges, consumes the list count, then releases its backing
 pages from last to first. The first page remains the literal list owner until
 all tail pages have entered asynchronous REL, even when REL is full.
+Issuance chooses the first available reservation. Retirement retains its nonzero
+generation stamp after erasure, so the first reservation with stamp zero proves
+that all later reservations have never been issued. The retirement scan stops
+there without introducing a cursor or a second readiness representation.
 
 A received page retains its original immutable address header. Before retiring
 that page, its configured remote-read input ranges are retired; this follows the
 feedforward page dependencies and retains the received page when physical REL
-capacity is unavailable. Original NIC completion entries remain in the physical
-CQ until their ownership release is submitted. Returned numerical and raw
+capacity is unavailable. An actual NIC completion immediately consumes its read
+ownership regardless of REL capacity. The original source row retains its
+physical page until asynchronous retirement; the existing outbound binding scan
+submits that retirement without performing recursive erasure work while consuming
+the ACK snapshot. A completed NIC read is never
+restored to represent pending erasure. Returned numerical and raw
 metadata maps are copied into configuration pages and are the only endpoint
 ranges polled for caller consumption. No full mutable-output or receive-table
 retirement sweep remains. This source change has not been executed or measured.
+
+The matching scan examines varying inputs and output ownership before examining
+common input ranges. Common ranges are checked once only after an occurrence can
+otherwise issue; a missing activation does not cause repeated coefficient-page
+scans. Configuration-owned coefficients of a specialized function are retained
+canonical page values outside its invocation input maps, with immutable outer
+return leases until all actual device owners in the context have ended.
 
 ## Context lifetime
 
@@ -1418,3 +1434,89 @@ clears no status and makes no error or readiness decision. The outer consumer
 may interpret the returned values; the numerical call graph does not read them.
 These are observations of existing port fields, not a new atomic event record,
 acknowledgement, progress counter or coherent multi-field snapshot protocol.
+
+### Graph-sized bridge configuration
+
+Configuration supplies exact arena and receive-pool page counts through
+`mesh-flow -A <arena-pages> -R <receive-pages>`. The arena inventory includes
+numerical operands, parameters, row tables, function/index/range maps, immutable
+send headers, metadata, and device address tables; receive storage includes all
+simultaneously retained received pages required by that realized graph. These
+are physical capacity inputs, not counts inferred from numerical values.
+The bridge adds its canonical ring/header layout once. `--layout` computes and
+prints that exact total byte count without creating shared memory or opening a
+transport device, so the launcher uses the same geometry for its wire limit.
+
+`bin/mesh-bridge.sh` accepts `MESH_ARENA_PAGES` and `MESH_RECEIVE_PAGES`, or their
+lowercase configuration-file equivalents, and records those literal counts in
+the managed process arguments. Neither the bridge nor the default/M5 configs
+reserve a percentage of system memory by default. The Mini's committed config
+alone explicitly retains `mesh_pct=80` as a capacity ceiling: the complete
+requested mapping, including headers and rings, must fit that allowance. It
+never expands either participant's allocation to fill the percentage. Both
+participants register exactly the graph's arena and receive-pool requirements,
+without the former arbitrary quarter-of-all-memory receive pool.
+
+This is the established separation between graph/storage realization and
+invocation described by Papadopoulos–Culler and the canonical configuration
+contract, with Apple TN3205 registration applied to those literal pages. It
+introduces no allocation during numerical invocation and no smaller-memory
+fallback or copied operand store.
+
+The transport now stops scanning submissions when its existing aggregate SQ
+page credits are exhausted and flushes each full SQ batch immediately. Each
+QP's receive/forwarding batch is also posted before servicing the next QP.
+`mesh_submit` is the single implementation of the existing credit-aware
+submission scan; `mesh_progress` invokes it both before and after CQ service.
+Already-ready outbound pages therefore need not wait behind an entire CQ batch.
+The pre-service invocation retains the existing stop condition and does not
+admit work after a stop request. No per-completion tiny-post strategy is added.
+Repeated per-port telemetry copies moved to the existing telemetry publication
+interval. These remove demonstrable CPU work before posting; they do not assert
+a measured latency improvement. `mesh_progress` factors the existing sole-owner
+CQ/RQ/SUB service and provider batching; it adds no transport queue or cursor.
+The REL consumer drains its captured descriptor set and calls that service
+before zeroing each literal physical page. No more than one page of zeroing
+separates transport service opportunities, instead of a possible 26-MiB
+uninterrupted burst. The consumer retains each REL slot until zeroing, row
+publication, and physical release finish, preserving the existing close proof.
+New producer descriptors beyond the captured head are consumed on the next
+outer pass. There is no one-page-per-pass retirement limit.
+
+The additional service opportunities can poll an empty CQ once per retired
+page. That is an explicit throughput tradeoff requiring measurement, not a
+claim of universally faster execution. Provider submissions still batch the
+currently available work and obey their actual frame credits. The per-outer-pass
+clock read used by telemetry remains a CPU cost.
+
+## Configuration storage layout
+
+`mesh_storage_pages`, `mesh_region_table_pages`, `row_storage`, `row_ranges`,
+`row_layout`, and `mesh_rows_configuration_pages` implement the configuration
+storage assignment for the Dennis function/operand maps and Papadopoulos–Culler
+storage identities cited above. They introduce no numerical scheduling algorithm.
+The same `row_layout` traversal accounts for allocation sizes during planning and
+allocates the actual canonical storage during realization. Planning reads only
+configured shapes and descriptors, performs no operand allocation or backend
+binding, and leaves the supplied descriptors unchanged.
+
+The layout includes function/binding/return range arrays, the realization count
+workspace, configured output and receive multiplicities, immutable send records,
+function descriptors, and owned nested map arrays. Supplied range descriptions
+are copied once into their final canonical storage; declaration callers supply
+ordinary configuration arrays instead of allocating an earlier canonical copy.
+The actual input maps receive their finalized common/varying classification after
+validation and count realization. Planning is sizing, not a replacement for
+realization's physical bounds, overlap, provenance, and multiplicity validation.
+
+The caller adds the canonical row-table allocation, its declared operand and
+index/metadata values, and one context-wide GPU region-address table. Table
+creation uses `mesh_storage_pages`; the Metal region factory uses
+`mesh_region_table_pages`. The region table counts the final receive pool and
+transmit arena, including itself, so its size is resolved as a configuration
+fixed point before the bridge creates the mapping. Context error/retirement rows
+already occupy the physical header region and consume no additional arena pages.
+All configuration metadata allocations use one physical-page alignment; larger
+operand alignment must be included at the corresponding allocation declaration.
+The APIs return `SIZE_MAX` and a literal configuration error for invalid sizing
+or overflow. None is called from a numerical function or its completion.

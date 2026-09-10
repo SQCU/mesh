@@ -23,7 +23,7 @@ struct mesh_rows *mesh_rows_create(struct mesh_ctx *c, size_t rows, uint64_t ide
   struct mesh_rows *p=calloc(1,sizeof *p);
   if(!p) return NULL;
   *p=(struct mesh_rows){.memory=c->M,.count=rows,.bytes=c->M->pgsz,.context=c,.identity=identity};
-  size_t count=(rows*sizeof(struct mesh_row)+p->bytes-1)/p->bytes;
+  size_t count=mesh_storage_pages(rows*sizeof(struct mesh_row),p->bytes);
   uint32_t physical=mesh_rows_allocate(p,count,(size_t)getpagesize());
   if(physical==MESH_ROW_ABSENT){ free(p); return NULL; }
   p->table=(void*)mesh_at(c->M,physical);
@@ -114,23 +114,120 @@ int mesh_rows_invalidate(struct mesh_rows **pages,const struct mesh_row_map *hel
   return 0;
 }
 
-// ../design/algorithm-sources.md#complete-page-ownership
-static int row_ranges(const struct mesh_rows *p,struct mesh_row_map *map,uint32_t rows){
-  size_t bytes=(size_t)rows*sizeof(struct mesh_row_range);
-  uintptr_t first=(uintptr_t)mesh_at(p->memory,p->memory->pool),address=(uintptr_t)map->ranges;
-  size_t allocated=p->context->allocation*p->bytes;
-  if(map->ranges && address>=first && address-first<=allocated && bytes<=allocated-(address-first)) return 0;
-  uint32_t page=mesh_rows_allocate((struct mesh_rows*)p,(bytes+p->bytes-1)/p->bytes,p->bytes);
-  if(page==MESH_ROW_ABSENT) return errno;
-  struct mesh_row_range *ranges=(void*)mesh_at(p->memory,page);
-  if(map->ranges) memcpy(ranges,map->ranges,bytes);
+// ../design/algorithm-sources.md#configuration-storage-layout
+size_t mesh_storage_pages(size_t bytes,uint32_t page_bytes){
+  if(!page_bytes || bytes>SIZE_MAX-(page_bytes-1)){ errno=EOVERFLOW; return SIZE_MAX; }
+  return (bytes+page_bytes-1)/page_bytes;
+}
+
+// ../design/algorithm-sources.md#configuration-storage-layout
+size_t mesh_region_table_pages(size_t pages,uint32_t page_bytes){
+  if(!page_bytes || pages>SIZE_MAX/page_bytes){ errno=EOVERFLOW; return SIZE_MAX; }
+  size_t regions=mesh_storage_pages(pages*page_bytes,UINT32_C(1)<<30);
+  if(regions==SIZE_MAX || regions>SIZE_MAX/sizeof(uint64_t)){ errno=EOVERFLOW; return SIZE_MAX; }
+  return mesh_storage_pages(regions*sizeof(uint64_t),page_bytes);
+}
+
+// ../design/algorithm-sources.md#configuration-storage-layout
+static void *row_storage(const struct mesh_rows *p,uint32_t page_bytes,size_t *total,size_t count,size_t width){
+  if(*total==SIZE_MAX) return NULL;
+  if(count && width>SIZE_MAX/count){ *total=SIZE_MAX; errno=EOVERFLOW; return NULL; }
+  size_t pages=mesh_storage_pages(count*width,page_bytes);
+  if(pages==SIZE_MAX || *total>SIZE_MAX-pages){ *total=SIZE_MAX; errno=EOVERFLOW; return NULL; }
+  *total+=pages;
+  if(!p || !pages) return NULL;
+  uint32_t physical=mesh_rows_allocate((struct mesh_rows*)p,pages,page_bytes);
+  if(physical==MESH_ROW_ABSENT){ *total=SIZE_MAX; return NULL; }
+  return mesh_at(p->memory,physical);
+}
+
+// ../design/algorithm-sources.md#configuration-storage-layout
+static void row_ranges(const struct mesh_rows *p,uint32_t page_bytes,size_t *total,
+  struct mesh_row_map *map,uint32_t rows){
+  struct mesh_row_range *ranges=row_storage(p,page_bytes,total,rows,sizeof *ranges);
+  if(!p || !ranges) return;
+  if(map->ranges) memcpy(ranges,map->ranges,(size_t)rows*sizeof *ranges);
   else for(uint32_t i=0;i<rows;i++){
     uint64_t first=(uint64_t)map->first+(uint64_t)i*map->stride;
-    if(first+map->count>p->count) return EINVAL;
+    if(first+map->count>p->count){ *total=SIZE_MAX; errno=EINVAL; return; }
     ranges[i]=(struct mesh_row_range){(uint32_t)first,map->count};
   }
   map->ranges=ranges;
-  return 0;
+}
+
+// ../design/algorithm-sources.md#configuration-storage-layout
+static size_t row_layout(const struct mesh_rows *p,uint32_t page_bytes,size_t rows,
+  const struct mesh_row_function *functions,size_t count,struct mesh_row_binding *bindings,
+  size_t binding_count,struct mesh_row_map *returns,size_t return_count,uint64_t **delta){
+  if(!page_bytes || (page_bytes&(page_bytes-1)) || !rows || rows>UINT32_MAX || !count || !functions ||
+    (binding_count && !bindings) || (return_count && !returns)){ errno=EINVAL; return SIZE_MAX; }
+  size_t total=0;
+  for(size_t i=0;i<count;i++){
+    if(!functions[i].rows || !functions[i].outputs || !functions[i].output ||
+      (functions[i].inputs && !functions[i].input)){ errno=EINVAL; return SIZE_MAX; }
+    for(uint32_t side=0;side<2;side++){
+      struct mesh_row_map *maps=side?functions[i].output:functions[i].input;
+      uint32_t n=side?functions[i].outputs:functions[i].inputs;
+      for(uint32_t j=0;j<n;j++) row_ranges(p,page_bytes,&total,&maps[j],functions[i].rows);
+    }
+  }
+  for(size_t i=0;i<binding_count;i++){
+    if(bindings[i].inputs && !bindings[i].input){ errno=EINVAL; return SIZE_MAX; }
+    if(bindings[i].count) for(uint32_t j=0;j<bindings[i].inputs;j++)
+      row_ranges(p,page_bytes,&total,&bindings[i].input[j],bindings[i].count);
+  }
+  for(size_t i=0;i<return_count;i++) row_ranges(p,page_bytes,&total,&returns[i],1);
+  void *counts=row_storage(p,page_bytes,&total,rows+1,sizeof(uint64_t));
+  if(p) *delta=counts;
+  for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].outputs;j++){
+    struct mesh_row_map *map=&functions[i].output[j];
+    void *uses=row_storage(p,page_bytes,&total,(size_t)functions[i].rows*map->count,sizeof(uint32_t));
+    if(p) map->uses=uses;
+  }
+  for(size_t i=0;i<binding_count;i++){
+    struct mesh_row_binding *b=&bindings[i];
+    if(!b->count) continue;
+    void *uses=row_storage(p,page_bytes,&total,b->count,sizeof(uint32_t));
+    if(p) b->uses=uses;
+    if(!b->receive){
+      void *records=row_storage(p,page_bytes,&total,b->count,sizeof(struct mesh_send));
+      if(p && records) b->headers=(uint32_t)(((unsigned char*)records-mesh_at(p->memory,0))/page_bytes);
+    }
+  }
+  struct mesh_row_function *configured=row_storage(p,page_bytes,&total,count,sizeof *configured);
+  if(p && configured) memcpy(configured,functions,count*sizeof *configured);
+  for(size_t i=0;i<count;i++) for(uint32_t side=0;side<2;side++){
+    size_t n=side?functions[i].outputs:functions[i].inputs;
+    struct mesh_row_map *copy=row_storage(p,page_bytes,&total,n,sizeof *copy);
+    if(p && copy && configured){
+      memcpy(copy,side?functions[i].output:functions[i].input,n*sizeof *copy);
+      if(side) configured[i].output=copy; else configured[i].input=copy;
+    }
+  }
+  struct mesh_row_binding *links=row_storage(p,page_bytes,&total,binding_count,sizeof *links);
+  if(p && links) memcpy(links,bindings,binding_count*sizeof *links);
+  for(size_t i=0;i<binding_count;i++){
+    size_t n=bindings[i].inputs;
+    struct mesh_row_map *copy=row_storage(p,page_bytes,&total,n,sizeof *copy);
+    if(p && copy && links){ memcpy(copy,bindings[i].input,n*sizeof *copy); links[i].input=copy; }
+  }
+  struct mesh_row_map *out=row_storage(p,page_bytes,&total,return_count,sizeof *out);
+  if(p && out) memcpy(out,returns,return_count*sizeof *out);
+  if(p && total!=SIZE_MAX){
+    struct mesh_rows *owned=(struct mesh_rows*)p;
+    owned->functions=configured; owned->function_count=count;
+    owned->bindings=links; owned->binding_count=binding_count;
+    owned->returns=out; owned->return_count=return_count;
+  }
+  return total;
+}
+
+// ../design/algorithm-sources.md#configuration-storage-layout
+size_t mesh_rows_configuration_pages(uint32_t page_bytes,size_t rows,
+  const struct mesh_row_function *functions,size_t count,const struct mesh_row_binding *bindings,
+  size_t binding_count,const struct mesh_row_map *returns,size_t return_count){
+  return row_layout(NULL,page_bytes,rows,functions,count,(struct mesh_row_binding*)bindings,
+    binding_count,(struct mesh_row_map*)returns,return_count,NULL);
 }
 
 // ../design/algorithm-sources.md#literal-row-functions
@@ -193,18 +290,8 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   size_t count, struct mesh_row_binding *bindings, size_t binding_count,
   struct mesh_row_map *returns, size_t return_count){
   if(!p || p->count>UINT32_MAX || !count || !functions || (binding_count && !bindings) || (return_count && !returns)) return EINVAL;
-  for(size_t i=0;i<count;i++) if(!functions[i].rows || !functions[i].outputs || !functions[i].output ||
-    (functions[i].inputs && !functions[i].input)) return EINVAL;
-  for(size_t i=0;i<binding_count;i++) if(bindings[i].inputs && !bindings[i].input) return EINVAL;
-  for(size_t i=0;i<count;i++) for(uint32_t side=0;side<2;side++){
-    struct mesh_row_map *maps=side?functions[i].output:functions[i].input;
-    uint32_t n=side?functions[i].outputs:functions[i].inputs;
-    for(uint32_t j=0;j<n;j++){ int error=row_ranges(p,&maps[j],functions[i].rows); if(error) return error; }
-  }
-  for(size_t i=0;i<binding_count;i++) if(bindings[i].count) for(uint32_t j=0;j<bindings[i].inputs;j++){
-    int error=row_ranges(p,&bindings[i].input[j],bindings[i].count); if(error) return error;
-  }
-  for(size_t i=0;i<return_count;i++){ int error=row_ranges(p,&returns[i],1); if(error) return error; }
+  uint64_t *delta=NULL;
+  if(row_layout(p,p->bytes,p->count,functions,count,bindings,binding_count,returns,return_count,&delta)==SIZE_MAX) return errno;
   for(size_t i=0;i<count;i++){
     const struct mesh_row_function *f=&functions[i];
     int error=mesh_rows_validate(p,f);
@@ -247,10 +334,6 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
     (uint64_t)returns[i].ranges[0].first+returns[i].ranges[0].count>p->count) return EINVAL;
   for(size_t i=0;i<return_count;i++) for(size_t j=0;j<i;j++)
     if(row_maps_overlap(returns[i],1,returns[j],1,0)) return EINVAL;
-  uint32_t counts_page=mesh_rows_allocate((struct mesh_rows*)p,
-    ((p->count+1)*sizeof(uint64_t)+p->bytes-1)/p->bytes,p->bytes);
-  if(counts_page==MESH_ROW_ABSENT) return errno;
-  uint64_t *delta=(void*)mesh_at(p->memory,counts_page);
   memset(delta,0,(p->count+1)*sizeof(uint64_t));
   for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].inputs;j++)
     for(uint32_t row=0;row<functions[i].rows;row++) row_count_delta(delta,functions[i].input[j].ranges[row]);
@@ -280,11 +363,7 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   }
   for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].outputs;j++){
     struct mesh_row_map *m=&functions[i].output[j];
-    size_t entries=(size_t)functions[i].rows*m->count;
-    uint32_t physical=mesh_rows_allocate((struct mesh_rows*)p,
-      (entries*sizeof(uint32_t)+p->bytes-1)/p->bytes,p->bytes);
-    if(physical==MESH_ROW_ABSENT) return errno;
-    uint32_t *uses=(void*)mesh_at(p->memory,physical);
+    uint32_t *uses=(uint32_t*)m->uses;
     for(uint32_t row=0;row<functions[i].rows;row++) for(uint32_t k=0;k<m->count;k++){
       uses[(size_t)row*m->count+k]=p->table[m->first+row*m->stride+k].uses;
       if(m->immutable && !uses[(size_t)row*m->count+k]) return EINVAL;
@@ -294,10 +373,7 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   for(size_t i=0;i<binding_count;i++){
     struct mesh_row_binding *b=&bindings[i];
     if(!b->count) continue;
-    uint32_t physical=mesh_rows_allocate((struct mesh_rows*)p,
-      ((size_t)b->count*sizeof(uint32_t)+p->bytes-1)/p->bytes,p->bytes);
-    if(physical==MESH_ROW_ABSENT) return errno;
-    uint32_t *uses=(void*)mesh_at(p->memory,physical);
+    uint32_t *uses=(uint32_t*)b->uses;
     for(uint32_t j=0;j<b->count;j++) uses[j]=p->table[b->first+j].uses;
     b->uses=uses;
   }
@@ -318,9 +394,6 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   for(size_t i=0;i<binding_count;i++){
     struct mesh_row_binding *b=&bindings[i];
     if(b->receive || !b->count) continue;
-    size_t bytes=(size_t)b->count*sizeof(struct mesh_send);
-    b->headers=mesh_rows_allocate((struct mesh_rows*)p,(bytes+p->bytes-1)/p->bytes,p->bytes);
-    if(b->headers==MESH_ROW_ABSENT) return errno;
     struct mesh_send *records=(void*)mesh_at(p->memory,b->headers);
     for(uint32_t j=0;j<b->count;j++) records[j]=(struct mesh_send){
       .header={.table=b->remote_table,.source=b->first+j,.target=b->remote,.index=j,.peer=b->peer},
@@ -333,49 +406,14 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
       p->table[indices->first+j]=(struct mesh_row){.page=MESH_ROW_ABSENT};
     }
   }
-  uint32_t function_page=mesh_rows_allocate((struct mesh_rows*)p,
-    (count*sizeof(struct mesh_row_function)+p->bytes-1)/p->bytes,p->bytes);
-  if(function_page==MESH_ROW_ABSENT) return errno;
-  struct mesh_row_function *configured=(void*)mesh_at(p->memory,function_page);
-  memcpy(configured,functions,count*sizeof *configured);
-  ((struct mesh_rows*)p)->functions=configured;
-  ((struct mesh_rows*)p)->function_count=count;
   for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].inputs;j++){
     struct mesh_row_map *map=&functions[i].input[j];
     map->stride=0;
     for(uint32_t k=1;k<functions[i].rows;k++)
       map->stride|=(map->ranges[k].first!=map->ranges[0].first || map->ranges[k].count!=map->ranges[0].count);
   }
-  for(size_t i=0;i<count;i++) for(uint32_t side=0;side<2;side++){
-    size_t n=side?configured[i].outputs:configured[i].inputs;
-    if(!n) continue;
-    uint32_t page=mesh_rows_allocate((struct mesh_rows*)p,(n*sizeof(struct mesh_row_map)+p->bytes-1)/p->bytes,p->bytes);
-    if(page==MESH_ROW_ABSENT) return errno;
-    struct mesh_row_map *copy=(void*)mesh_at(p->memory,page);
-    memcpy(copy,side?functions[i].output:functions[i].input,n*sizeof *copy);
-    if(side) configured[i].output=copy; else configured[i].input=copy;
-  }
-  uint32_t binding_page=binding_count?mesh_rows_allocate((struct mesh_rows*)p,
-    (binding_count*sizeof(struct mesh_row_binding)+p->bytes-1)/p->bytes,p->bytes):0;
-  if(binding_count && binding_page==MESH_ROW_ABSENT) return errno;
-  struct mesh_row_binding *configured_bindings=binding_count?(void*)mesh_at(p->memory,binding_page):NULL;
-  if(binding_count) memcpy(configured_bindings,bindings,binding_count*sizeof *bindings);
-  for(size_t i=0;i<binding_count;i++) if(bindings[i].inputs){
-    size_t n=bindings[i].inputs;
-    uint32_t page=mesh_rows_allocate((struct mesh_rows*)p,(n*sizeof(struct mesh_row_map)+p->bytes-1)/p->bytes,p->bytes);
-    if(page==MESH_ROW_ABSENT) return errno;
-    configured_bindings[i].input=(void*)mesh_at(p->memory,page);
-    memcpy(configured_bindings[i].input,bindings[i].input,n*sizeof(struct mesh_row_map));
-  }
-  uint32_t return_page=return_count?mesh_rows_allocate((struct mesh_rows*)p,
-    (return_count*sizeof(struct mesh_row_map)+p->bytes-1)/p->bytes,p->bytes):0;
-  if(return_count && return_page==MESH_ROW_ABSENT) return errno;
-  struct mesh_row_map *configured_returns=return_count?(void*)mesh_at(p->memory,return_page):NULL;
-  if(return_count) memcpy(configured_returns,returns,return_count*sizeof *returns);
-  ((struct mesh_rows*)p)->returns=configured_returns;
-  ((struct mesh_rows*)p)->return_count=return_count;
-  ((struct mesh_rows*)p)->bindings=configured_bindings;
-  ((struct mesh_rows*)p)->binding_count=binding_count;
+  for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].inputs;j++)
+    ((struct mesh_row_function*)p->functions)[i].input[j].stride=functions[i].input[j].stride;
   return 0;
 }
 
@@ -405,11 +443,6 @@ static size_t mesh_rows_select(const struct mesh_rows *p, const struct mesh_row_
   for(uint32_t index=0;index<f->rows && selected<capacity;index++){
     const struct mesh_row_map *first=f->output;
     if(__atomic_load_n(&p->table[first->first+index*first->stride].stamp,__ATOMIC_ACQUIRE)>=stamp) continue;
-    if(!common_checked){
-      for(uint32_t i=0;i<f->inputs;i++)
-        if(!f->input[i].stride && !mesh_rows_present(p,f->input[i],0,stamp)) return 0;
-      common_checked=1;
-    }
     int ready=1;
     for(uint32_t i=0;i<f->inputs && ready;i++)
       if(f->input[i].stride) ready=mesh_rows_present(p,f->input[i],index,stamp);
@@ -425,6 +458,11 @@ static size_t mesh_rows_select(const struct mesh_rows *p, const struct mesh_row_
       }
     }
     if(!ready) continue;
+    if(!common_checked){
+      for(uint32_t i=0;i<f->inputs;i++)
+        if(!f->input[i].stride && !mesh_rows_present(p,f->input[i],0,stamp)) return 0;
+      common_checked=1;
+    }
     for(uint32_t i=0;i<f->outputs;i++){
       const struct mesh_row_map *m=&f->output[i];
       for(uint32_t j=0;j<m->count;j++){
@@ -533,7 +571,10 @@ static size_t mesh_rows_send(const struct mesh_rows *p,
       if(!stamp || stamp>=MESH_ROW_WRITING || page==MESH_ROW_ABSENT) continue;
       struct mesh_send *record=(struct mesh_send*)mesh_at(p->memory,b->headers)+j;
       struct mesh_page_header *header=&record->header;
-      if(header->stamp==stamp) continue;
+      if(header->stamp==stamp){
+        mesh_rows_return(p,b->first+j,stamp);
+        continue;
+      }
       struct ring *ring=&p->memory->r[SUB];
       uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
       if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)==MESH_RING) return sent;
@@ -599,6 +640,8 @@ static void mesh_rows_retire(const struct mesh_rows *p){
       uint32_t logical=f->indices.first+first;
       const struct mesh_row *row=&p->table[logical];
       uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE);
+      // first_fit(i) => issued(j>i) => stamp(i)!=0
+      if(!stamp) break;
       if(__atomic_load_n(&row->uses,__ATOMIC_ACQUIRE) ||
         __atomic_load_n(&row->page,__ATOMIC_ACQUIRE)==MESH_ROW_ABSENT || stamp>=MESH_ROW_WRITING) continue;
       uint32_t *indices=mesh_row_data(p,logical);
@@ -640,10 +683,6 @@ size_t mesh_rows_poll(struct mesh_ctx *context){
     const struct mesh_rows *p=context->tables[record->owner];
     header->code=completion.error; header->domain=completion.domain;
     mesh_row_release(p,header->source);
-    if(mesh_rows_return(p,header->source,header->stamp)<0){
-      __atomic_fetch_add(&p->table[header->source].uses,1,__ATOMIC_RELEASE);
-      break;
-    }
     atomic_store_explicit(&ack->tail,++acknowledged,memory_order_release);
     changed++;
   }

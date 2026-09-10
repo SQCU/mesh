@@ -36,6 +36,12 @@ struct mesh_row_metadata {
 };
 
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *context, size_t index);
+size_t mesh_storage_pages(size_t bytes, uint32_t page_bytes);
+size_t mesh_region_table_pages(size_t physical_pages, uint32_t page_bytes);
+size_t mesh_rows_configuration_pages(uint32_t page_bytes, size_t rows,
+  const struct mesh_row_function *functions, size_t count,
+  const struct mesh_row_binding *bindings, size_t binding_count,
+  const struct mesh_row_map *returns, size_t return_count);
 
 struct mesh_rows *mesh_rows_create(struct mesh_ctx *context, size_t rows, uint64_t identity);
 uint32_t mesh_rows_allocate(struct mesh_rows *pages, size_t count, size_t alignment);

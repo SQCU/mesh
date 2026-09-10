@@ -9,14 +9,18 @@ LABEL=io.mesh.bridge
 BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
-scope=gui; mesh_pct=80; node=0; peer=""; region=/mesh0
+scope=gui; mesh_pct=; node=0; peer=""; region=/mesh0
+mesh_arena_pages=; mesh_receive_pages=
 
-if [ -f "$CONF" ]; then . "$CONF"; echo "mesh-bridge: conf $CONF node=$node mesh=$mesh_pct% peer=${peer:-listen}"
-else echo "mesh-bridge: NO CONF FOUND, defaults node=$node mesh=$mesh_pct% peer=${peer:-listen}" >&2; fi
+if [ -f "$CONF" ]; then . "$CONF"; fi
+mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
+mesh_receive_pages="${MESH_RECEIVE_PAGES:-$mesh_receive_pages}"
+geometry=(-A "$mesh_arena_pages" -R "$mesh_receive_pages")
+[ -n "$mesh_pct" ] && geometry+=(-M "$mesh_pct")
 
 case "$scope" in
 system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" "$0" "$@"; fi
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_RECEIVE_PAGES="$mesh_receive_pages" "$0" "$@"; fi
   DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
   LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
 gui)
@@ -26,8 +30,7 @@ gui)
 esac
 
 wire_check() {
-  ram=$(sysctl -n hw.memsize)
-  want=$(awk -v r="$ram" -v w="$mesh_pct" 'BEGIN{printf "%.0f", r*w/100}')
+  want=$("$BIN" --layout "${geometry[@]}") || return $?
   if [ "$want" -gt "$(sysctl -n vm.global_user_wire_limit)" ]; then
     if [ "$(id -u)" = 0 ]; then sysctl -w vm.global_user_wire_limit="$want"
     else sudo -n sysctl -w vm.global_user_wire_limit="$want"; fi
@@ -43,7 +46,8 @@ write_plist() {
 <key>Label</key><string>$LABEL</string>
 <key>ProgramArguments</key><array>
 <string>$BIN</string><string>-I</string><string>$node</string>
-<string>-M</string><string>$mesh_pct</string><string>-s</string><string>$region</string>
+$( printf '<string>%s</string>' "${geometry[@]}" )
+<string>-s</string><string>$region</string>
 $( [ -n "$peer" ] && printf '<string>%s</string>' "$peer" )
 </array>
 <key>RunAtLoad</key><true/>
@@ -81,7 +85,7 @@ do_start() {
   for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
   p=$(pid_of)
   [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
-  echo "mesh-bridge: running as $p, mesh ${mesh_pct}%"
+  echo "mesh-bridge: running as $p, registered $want bytes"
 }
 
 do_status() {
