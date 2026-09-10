@@ -17,7 +17,7 @@ from .checkpoint_state import (
     ARCH_KEY, ARCH_SPEC_KEY, POLICY_KEY, POLICY_VERSION_KEY, RNG_KEY,
     REWARD_CONTRACT_KEY, LINEAGE_INITIAL_KEY, POLICY_VERSIONS, architecture_fingerprint,
     architecture_spec, tensor_tree_measurement, whole_tensor_tree,
-    Payload, atomic_save, checkpoint_metadata, checkpoint_parameters,
+    Payload, atomic_save, checkpoint_metadata, checkpoint_parameters, open_checkpoint,
 )
 from .game_value import reward_fingerprint, winner
 from .policy_contract import POLICY_ACTOR_WEIGHT, POLICY_MOE_BALANCE_WEIGHT, POLICY_RATIO_CLIP, POLICY_ROLLOUT_IS_THRESHOLD, POLICY_LOG_RATIO_BOUND
@@ -124,7 +124,7 @@ class OnlineLearner:
         source_metadata = {}
         error = None
         try:
-            with (np.load(source, allow_pickle=False) if payload is None else nullcontext(Payload(payload))) as data:
+            with (open_checkpoint(source) if payload is None else nullcontext(Payload(payload))) as data:
                 source_metadata = checkpoint_metadata(data)
                 source_weights = [(key, data[key]) for key in data.files if not key.startswith("__")]
                 weights = tensor_tree_measurement(initial_parameters, source_weights)

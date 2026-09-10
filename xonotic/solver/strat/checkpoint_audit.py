@@ -3,6 +3,8 @@ import json
 
 import numpy as np
 
+from .checkpoint_state import open_checkpoint
+
 
 def audit_checkpoint(data):
     groups = {name: {"arrays": 0, "nonfinite_arrays": 0, "nonfinite_coordinates": 0}
@@ -35,5 +37,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint", nargs="+")
     for path in parser.parse_args().checkpoint:
-        with np.load(path, allow_pickle=False) as data:
+        with open_checkpoint(path) as data:
             print(json.dumps({"path": path, **audit_checkpoint(data)}, sort_keys=True))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 
 import mlx.core as mx
 import numpy as np
@@ -26,6 +27,38 @@ class Payload(dict):
     @property
     def files(self):
         return list(self)
+
+class CheckpointView:
+    # ../../../../design/algorithm-sources.md#canonical-continuation-subtrees
+    def __init__(self, archive, prefix):
+        self.archive, self.prefix = archive, prefix
+        self.files = [name[len(prefix):] for name in archive.files if name.startswith(prefix)]
+
+    # ../../../../design/algorithm-sources.md#canonical-continuation-subtrees
+    def __getitem__(self, name):
+        return self.archive[self.prefix + name]
+
+# ../../../../design/algorithm-sources.md#canonical-continuation-subtrees
+def checkpoint_source(path):
+    path = os.path.abspath(os.fspath(path))
+    with np.load(path, allow_pickle=False) as archive:
+        return os.path.normpath(os.path.join(os.path.dirname(path), str(archive['__bundle__']))) if '__bundle__' in archive.files else path
+
+# ../../../../design/algorithm-sources.md#canonical-continuation-subtrees
+@contextmanager
+def open_checkpoint(path):
+    with np.load(path, allow_pickle=False) as archive:
+        if '__bundle__' in archive.files:
+            bundle = os.path.join(os.path.dirname(os.path.abspath(path)), str(archive['__bundle__']))
+            with np.load(bundle, allow_pickle=False) as source:
+                yield CheckpointView(source, str(archive['__prefix__']))
+        else:
+            yield archive
+
+# ../../../../design/algorithm-sources.md#canonical-continuation-subtrees
+def checkpoint_reference(path, bundle, prefix):
+    atomic_save(path, {'__bundle__': np.asarray(os.path.relpath(bundle, os.path.dirname(os.path.abspath(path)))),
+                       '__prefix__': np.asarray(prefix)})
 
 def unpack_state(payload, prefix="__runtime__"):
     from .replay import Frame
@@ -141,7 +174,7 @@ def load_module_checkpoint(module, path, live_arm, live_reward_contract):
         return _attach(module, measurement)
     before = list(live.items())
     try:
-        with np.load(path, allow_pickle=False) as saved:
+        with open_checkpoint(path) as saved:
             source = [(name, saved[name]) for name in saved.files if not name.startswith('__')]
             tree_measurement = tensor_tree_measurement(live.items(), source)
             metadata = checkpoint_metadata(saved)
@@ -179,7 +212,7 @@ def policy_source(arm, model, checkpoint, mode):
         "arm": arm,
         "mode": mode,
         "checkpoint": checkpoint,
-        "checkpoint_bytes": os.path.getsize(checkpoint) if checkpoint and os.path.exists(checkpoint) else 0,
+        "checkpoint_bytes": os.path.getsize(checkpoint_source(checkpoint)) if checkpoint and os.path.exists(checkpoint) else 0,
         "checkpoint_sha256": checkpoint_sha256(checkpoint),
         "source_weight_mass": 0 if model is None else int(getattr(model, "checkpoint_source_weight_mass", 0)),
         "live_weight_mass": 0 if model is None else int(getattr(model, "checkpoint_live_weight_mass", 0)),
@@ -208,7 +241,7 @@ def checkpoint_sha256(path):
     if not path or not os.path.isfile(path):
         return None
     digest = hashlib.sha256()
-    with open(path, "rb") as source:
+    with open(checkpoint_source(path), "rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()

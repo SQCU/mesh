@@ -19,8 +19,12 @@ first applied are separate quantities in both viewers.
 
 The authoritative file is `<online-checkpoint>.runstate.npz`. It embeds every
 trained learner plus runtime history, complete source frames, schema, RNG, cursors, episode identity
-and journal position. Individual policy NPZ files are derived snapshots, written
-after the authoritative bundle. `--append-telemetry` resumes that bundle.
+and journal position. Individual policy NPZ paths contain small relative-path
+and learner-namespace references to that authoritative bundle, rather than
+duplicated optimizer and replay arrays. All policy readers resolve the reference;
+inference reads only its required arrays and continuation reads the complete
+learner subtree. `--append-telemetry` restores the runtime bundle and loads each
+learner once from its already loaded state. Standalone checkpoints remain readable.
 
 Before publishing an action, the responder appends and fsyncs the complete step,
 including its sampled vector and behavior likelihood. Recovery replays complete

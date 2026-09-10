@@ -5,13 +5,26 @@ import json
 import os
 import shutil
 
+import numpy as np
+
+from .checkpoint_state import checkpoint_reference
+
 def export_checkpoint(source, target):
     source = os.path.abspath(os.path.expanduser(source))
     target = os.path.abspath(os.path.expanduser(target))
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-    temporary = target + ".new"
-    shutil.copyfile(source, temporary)
-    os.replace(temporary, target)
+    with np.load(source, allow_pickle=False) as archive:
+        if '__bundle__' in archive.files:
+            bundle = os.path.join(os.path.dirname(source), str(archive['__bundle__']))
+            checkpoint_reference(target, bundle, str(archive['__prefix__']))
+        else:
+            temporary = target + ".new"
+            try:
+                shutil.copyfile(source, temporary)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
     size = os.path.getsize(target)
     return {
         "source": source,

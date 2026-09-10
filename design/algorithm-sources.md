@@ -1886,3 +1886,21 @@ reader can decode only the view subtree, so obtaining the projection does not
 materialize the full numerical report or require a second archive. Historical
 archives remain readable; new reporting does not accumulate per-process or
 per-generation payloads.
+
+### Canonical continuation subtrees
+
+Gray and Reuter, *Transaction Processing: Concepts and Techniques* (1993), locate
+continuation at the committed state rather than redundant independently written
+copies. The responder's existing runstate archive contains runtime state and each
+learner's parameters, optimizer, replay, RNG and episode state. Per-arm checkpoint
+paths now contain only a relative bundle path and the learner namespace. They do
+not serialize a second copy of those arrays. The checkpoint reader projects that
+namespace lazily; inference loads required parameter arrays, while continuation
+and auditing retain access to the complete learner state. Explicit standalone
+checkpoints remain readable. Exporting a reference rebases its relative path.
+
+A responder restoring the authoritative runtime bundle initializes each learner
+from that already loaded subtree once, rather than first loading an independent
+checkpoint and then immediately loading the authoritative copy again. Checkpoint
+source attribution resolves the bundle. Current and initial checkpoint references
+keep their referenced bundles live during generated-result pruning.

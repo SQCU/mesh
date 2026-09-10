@@ -18,7 +18,7 @@ from solver.strat.execution import PolicyProgram, prepare_policies, emit_policie
 from solver.strat.action_history import ActionHistory, source_features, view_observation
 from solver.strat.buffers import ObservationMemory
 from solver.strat.replay import Frame
-from solver.strat.checkpoint_state import Payload, atomic_save, pack_state, unpack_state, load_policy, policy_source
+from solver.strat.checkpoint_state import Payload, atomic_save, pack_state, unpack_state, load_policy, policy_source, checkpoint_reference
 from solver.strat.journal import TrainingJournal
 from solver.strat.strategy import strategy
 from solver.strat.state_steering import PAGE_WIDTH, STATE_HEADER, state_labels, latent_labels, advance_key
@@ -224,8 +224,9 @@ def main():
         journal_offset = state['journal_offset']
         if previous_journal.path != journal.path and os.path.isfile(previous_journal.path):
             os.unlink(previous_journal.path)
-        for learning in learners.values():
-            learning.save()
+        for arm, learning in learners.items():
+            if learning.checkpoint is not None:
+                checkpoint_reference(learning.checkpoint, runstate_path, f'__learner_{arm}__/')
         acknowledgements = {arm: learning.outcomes[episode_key] for arm, learning in learners.items() if episode_key in learning.outcomes}
         if acknowledgements:
             outcome_path = os.path.join(os.path.dirname(telemetry_path), 'outcome.json')
@@ -263,18 +264,20 @@ def main():
                     setattr(model, 'scale_executor' if isinstance(remote, RemoteScale) else 'cross_executor', remote)
             if arm in train_arms:
                 target = checkpoint_path(args.online_checkpoint, arm) if len(train_arms) > 1 else args.online_checkpoint
+                prefix = f'__learner_{arm}__/'
+                resumed = {name[len(prefix):]: value for name, value in (saved_payload or {}).items() if name.startswith(prefix)}
                 learning = OnlineLearner(
                     model, learning_rate=args.learning_rate, gradient_clip=args.gradient_clip,
-                    checkpoint=target, load_checkpoint=source or target,
+                    checkpoint=None if resumed else target, load_checkpoint=None if resumed else source or target,
                     replay_capacity=args.replay_capacity, replay_memory_mb=args.replay_memory_mb,
                     replay_precision=args.replay_precision, replay_batch=args.replay_batch,
                     seed=seed, policy_forward=forward, policy_arm=arm,
                     match_metadata=json.loads(args.match_metadata), replay_weight=args.replay_weight,
                 )
+                learning.checkpoint = target
                 learners[arm] = learning
-                prefix = f'__learner_{arm}__/'
-                if saved_payload is not None and any(name.startswith(prefix) for name in saved_payload):
-                    learning._load_full(runstate_path, {name[len(prefix):]: value for name, value in saved_payload.items() if name.startswith(prefix)})
+                if resumed:
+                    learning._load_full(runstate_path, resumed)
                 if args.initial_checkpoint:
                     learning.save(checkpoint_path(args.initial_checkpoint, arm) if len(train_arms) > 1 else args.initial_checkpoint)
             elif model is not None and source:
