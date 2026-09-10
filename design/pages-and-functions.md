@@ -21,6 +21,23 @@ Every function has a known number of output pages. Every function input is
 the output pages of some function, on this node or on a peer. All of this is
 known before the NFE starts.
 
+All page-table allocations needed by the complete compute graph are determined
+before launch, including parameters, intermediates, accumulators, indices and
+outputs. Numerical execution does not discover allocations or introduce
+data-dependent control flow to repair missing storage.
+
+The calling process may invalidate the page table whenever it chooses, including
+when a kernel is hung. The mesh API must expose that operation directly. Pages
+may be consumed, freed and invalidated; these operations do not start recovery,
+retry, parity, or waiting protocols inside computation, transport or reduction.
+The caller decides whether to rerun the complete feed-forward NFE.
+
+Every node has NVMe storage or is transitively RDMA-connected to a node that
+does. This is a deployment invariant, not a capability to infer during an NFE.
+Deleted or invalidated DNN parameter pages can be loaded again from local NVMe
+or retransmitted from such a peer. Parameter residency is not a reason to retain
+an invalidated graph or add a recovery protocol to its numerical functions.
+
 ### The NFE, number k
 
 1. A function runs on the GPU. It writes its output straight into pages. When

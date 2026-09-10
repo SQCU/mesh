@@ -2,6 +2,28 @@
 
 ## Operator clarification: caller-owned repetition
 
+### Complete allocation and unconditional invalidation
+
+The operator further requires every page-table allocation for the complete
+compute graph to be known before launch. The API must allow the caller to
+invalidate its page table at any time, including for pages used by a hung
+kernel. Consumption, freeing and explicit invalidation are permitted operations;
+data-dependent branching, error recovery and related control flow are not
+introduced into numerical functions, transport or reduction.
+
+Every deployed node has NVMe storage or transitive RDMA access to a node with
+NVMe. Missing or destroyed parameter pages are reproducible from that storage
+and can be retransmitted. This invariant is supplied by the operator; the
+numerical layer does not probe, infer or negotiate it.
+
+Papadopoulos–Culler provide the configured operand-storage precedent, and the
+caller-owned decision to reject and repeat remains an endpoint responsibility
+under Saltzer–Reed–Clark. Neither citation authorizes the excluded control flow.
+The implementation still owes a complete invalidation binding: clearing an
+entry alone does not revoke an already-issued GPU or NIC memory access, and
+late completion must not republish invalidated rows. A helper that only clears
+entries would not establish the requested hung-kernel behavior.
+
 Operator instruction, September 9, 2026:
 
 > recovery is something which is only sanctioned through the mechanism of a totally feed forward nfe computation callgraph being re-run by the calling process because they don't like the results they got. there are to be no parity mechanisms or syncs, guards, waits, checks, or inferences in the mesh computation transport and reduction layer, and functions which use this layer are not to introduce data dependent control flow attempting to add overhead of this sort or any sort.
