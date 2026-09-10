@@ -275,6 +275,47 @@ Bryngelson's mapped-surface account and the existing native references in
 `algorithm-sources.md` motivate this binding; they do not prove these private
 selectors' semantics on the installed systems.
 
+### Installed native call path: disassembly evidence
+
+The September 9 source pass continued through the installed binaries using
+`xcrun dyld_info -uuid` and `xcrun dyld_info -disassemble`, without loading a
+model, issuing a device request or running a numerical evaluation. Framework
+identities are:
+
+| Participant | AppleNeuralEngine UUID | ANEServices UUID |
+|---|---|---|
+| M5 | A1E0513F-FE82-39D0-BFE7-F844F7FD70A1 | 8335EA71-E51F-3222-A426-50C5D6474614 |
+| M4 | 7FB3D6E4-0FB7-3516-B62F-4ACD1DF155B2 | AFB2E1E5-465C-37EA-A8C8-4CC2DB06DE29 |
+
+On M5, `prepareANEMemoryMappingParams:request:` writes 24-byte entries
+containing the input/output IOSurface reference, symbol index and direction.
+Its weights branch obtains `weightsBuffer.ioSurface` and writes direction 8.
+That is evidence of an actual surface mapping path, beyond selector presence;
+it does not prove that this field substitutes for all embedded constant weights.
+The method does not map intermediate storage through this request field.
+
+`_ANEProgramForEvaluation.processRequest:model:qos:qIndex:modelStringID:options:returnValue:error:`
+contains a `dispatch_semaphore_wait` call on both installed systems (preferred
+addresses M5 0x19F24A1D0, M4 0x19F914D08). Its initialization creates the
+semaphore from queue depth on M5. The wrapper therefore cannot be presumed to
+provide a wait-free submission contract. This is static code evidence, not proof
+that any measured MLE5 invocation took that path or waited for a particular time.
+
+The M5 ANEServices export `ANEServicesProgramProcessRequestDirect` also contains
+request-allocation and statistics-buffer allocation paths. Its name is not a
+no-allocation guarantee. The lower `ANE::ANEServicesDevice::ANE_ProgramSendRequest`
+reaches `IOConnectCallAsyncMethod` with selector 2 and a 0x948-byte request;
+`ANE_ProgramMemoryMapRequest` reaches `IOConnectCallMethod` with selector 5 and a
+0x820-byte mapping. These are observed ABI facts for the identified M5 image,
+not portable public declarations or authorization to guess request fields.
+
+Consequently the full native binding must account for the actual model's constants
+and intermediate mapping and a pre-realized request/completion path. Adopting the
+high-level private wrapper unchanged would import a known semaphore and optional
+invocation allocation. The lower interface must be traced completely before use;
+no driver requests with inferred struct layouts were issued during this review.
+This refines C02/C10/C15, without declaring them satisfied or changing their scope.
+
 ### Contained acceptance run
 
 After the connected source is written and excluded callers/definitions removed,
