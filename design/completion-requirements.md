@@ -100,7 +100,7 @@ and neither build result establishes replacement-runtime execution.
 | C06 | Safe reuse follows actual dependent reads | Open: represent reuse through page ownership/use counts and graph lifetimes, including NIC source reads and callbacks. No separate reuse gate or admission verdict. |
 | C07 | No dense/private operand exceptions | Open: replace active dense weights, norm/gamma/scale, embeddings, tokens, attention and FFN intermediates with actual page payloads. Report backend-owned storage as unresolved until its binding is demonstrated. |
 | C08 | Load parameters into their final pages | Partial: `ModelFile.loadRows` exists but is unused by the caller. Exercise actual model tensors, tails, transposition, BF16/F16/F32 conversion and reloading after invalidation. |
-| C09 | Preserve winning SoC numerical functions | Open: explicit page bindings for FFN, attention and vocabulary on each configured backend. Existing dense FP32 results prove arithmetic only. Do not silently replace ANE/MPS with a slower convenience backend. |
+| C09 | Preserve winning SoC numerical functions | Partial: explicit weight views now reach FFN, attention and vocabulary Metal bindings; head normalization honors weight byte offsets. Existing dense results prove arithmetic only. Complete actual page-layout binding on each configured backend; do not silently replace ANE/MPS with a slower convenience backend. |
 | C10 | CoreML storage contract covers the whole operation | Open: `outputBackings` and page-backed input are insufficient evidence about embedded weights and intermediate storage. Establish supported binding of those values or record the concrete API limitation. Do not relabel opaque storage as page-backed. |
 | C11 | All tensor views respect payload boundaries | Partial: `MatrixView` supports paged axes; validate actual page-table-backed views, receive-page gathers, MPS subviews, tensor tiles and nonaligned contraction tails without reading headers as numbers. |
 | C12 | Readiness lives only in the table | Open: replace old bitmaps, changed/runnable queues, status gates and caller admission state. Review select/claim/complete behavior for arbitrary ready subsets and repeated invocations. |
@@ -239,6 +239,16 @@ not canonical mesh reduction. `parameter_fp32_outputs_2026-09-09.json` records
 12 dense FFN output-precision cases, not page-backed parameter execution.
 The earlier RDMA artifacts exercise the old caller. None closes replacement
 requirements C01, C07, C18, C21, C25 or C28–C38.
+
+`attention_weight_views_2026-09-09.json` records eight existing local parameter
+evaluations at metal `22bbedf`, mesh `0261f16`: layers 0 and 5, 64 input rows,
+heads 14–15, MPS and TensorOps on both SoCs. All outputs were finite. M5 backend
+outputs matched exactly; M4 TensorOps-versus-MPS relative RMS was 0.000190541 and
+0.000260375, respectively, with maximum absolute difference 0.001953125.
+The inputs are normalized model embedding rows, with identical input hashes per
+backend comparison. These runs use dense storage and do not establish C07 or C34.
+The received/local-page normalization shader compiled into a compute pipeline on
+both GPUs; it was not numerically executed in these runs.
 
 Future evidence belongs in this matrix/ledger with exact source and input identity,
 observed result and explicit limitations. Update current disposition rather than
