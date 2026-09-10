@@ -8,7 +8,7 @@ from . import tensor as mx
 from .inputs import ChorusArrays, frame_shapes
 from .policy_math import clip_grad_norm
 from .state_steering import sample, integrate
-from .tensor_runtime import Executable
+from .tensor_runtime import Executable, leaves
 
 
 class PersistentPolicy:
@@ -35,7 +35,7 @@ class PersistentPolicy:
                                current.delta, current.relaxation_time), 0)
             imposed = graph.input('imposed_velocity', current.state.shape)
             integrated = integrate(current.residual, imposed, current.delta, current.relaxation_time)
-            phases = {'infer': output, 'emit': (output, velocity, likelihood, residual), 'integrate': integrated}
+            exports = {'infer': output, 'emit': (output, velocity, likelihood, residual), 'integrate': integrated}
             if self.learner is not None:
                 successor = ChorusArrays(*(graph.input('successor.' + name, shape, value.dtype)
                     for name, shape, value in zip(template._fields, shapes, template)))
@@ -61,7 +61,7 @@ class PersistentPolicy:
                 for name, value in (('loss', loss), ('metrics', reports[0] * metric_weights)):
                     target = graph.input('accumulator.' + name, value.shape)
                     updates.append(graph.assign(target, mx.where(reset, value, target + value)))
-                phases['contribute'] = (reports[1:], tuple(updates))
+                exports['contribute'] = (reports[1:], tuple(updates))
                 for name, value in tree_flatten(learner.optimizer.state):
                     self.initial_optimizer[name] = np.asarray(value).copy()
                     self.optimizer_inputs[name] = graph.input('optimizer.' + name, value.shape, value.dtype)
@@ -87,9 +87,9 @@ class PersistentPolicy:
                     optimizer_updates.extend((graph.assign(m, next_m), graph.assign(v, next_v), graph.assign(parameter, updated)))
                 graph.owner = 0
                 optimizer_updates.append(graph.assign(self.optimizer_inputs['step'], step))
-                phases['update'] = (magnitude, tuple(optimizer_updates))
+                exports['update'] = (magnitude, tuple(optimizer_updates))
         self.graph = graph
-        self.executable = Executable(graph, phases)
+        self.executable = Executable(graph, exports)
 
     def item_shape(self, name, value, dimensions):
         if name == 'velocity': return dimensions[0], dimensions[1] * self.model.w.d_x if hasattr(self.model, 'w') else dimensions[1] * self.model.state_width
@@ -118,24 +118,58 @@ class PersistentPolicy:
     def frame(self, prefix, values):
         return {prefix + name: value for name, value in zip(ChorusArrays._fields, values)}
 
+    # ../../../design/algorithm-sources.md#complete-page-ownership
+    def consume(self, name, values=()):
+        executable = self.executable
+        plan = executable.realizations[name][executable.generations[name] % 2]
+        arguments = tuple(executable.storage.values())
+        for key, value in dict(values).items():
+            np.copyto(plan.arrays[executable.graph.inputs[key].index], np.asarray(value))
+        plan, _ = executable.submit(name)
+        while not plan.present():
+            executable.scan()
+            if executable.progress is not None: executable.progress()
+            if executable.cancel is not None and executable.cancel(): raise InterruptedError('caller stopped consuming tensor values')
+        output, metadata = plan.values()
+        for record in metadata:
+            if record.code: raise RuntimeError(f'tensor metadata: domain={record.domain} code={record.code} function={record.function} occurrence={record.index} stamp={record.stamp}')
+        arrays = []
+        # ../../../design/algorithm-sources.md#literal-row-functions
+        def collect(value, result):
+            if isinstance(value, mx.Tensor): arrays.append(result)
+            elif isinstance(value, dict):
+                for key, part in value.items(): collect(part, result[key])
+            elif isinstance(value, (tuple, list)):
+                for part, item in zip(value, result): collect(part, item)
+        collect(executable.exports[name], output)
+        for value, array in zip(leaves(executable.exports[name]), arrays):
+            _, operation, inputs, _, _ = self.graph.nodes[value.index]
+            if operation == 'assign': executable.adopt(inputs[1].index, value.index, plan, array)
+        if name == 'update':
+            if self.model is not None:
+                self.model.update(tree_unflatten([(key, mlx.from_dlpack(executable.arrays[value.index], copy=False)) for key, (value, _) in self.graph.parameters.items()]))
+            state = tree_unflatten([(key, mlx.from_dlpack(executable.arrays[value.index], copy=False)) for key, value in self.optimizer_inputs.items()])
+            self.learner.optimizer.state.clear(); self.learner.optimizer.state.update(state)
+        return output
+
     def infer(self, values):
-        return self.executable.run('infer', self.frame('current.', values))
+        return self.consume('infer', self.frame('current.', values))
 
     def emit(self, values, key):
-        return self.executable.run('emit', self.frame('current.', values) | {'sampling_key': key})
+        return self.consume('emit', self.frame('current.', values) | {'sampling_key': key})
 
     def integrate(self, values, velocity):
-        return self.executable.run('integrate', self.frame('current.', values) | {'imposed_velocity': velocity})
+        return self.consume('integrate', self.frame('current.', values) | {'imposed_velocity': velocity})
 
     def contribute(self, before, after, item, weights, reset):
         arguments = self.frame('current.', before) | self.frame('successor.', after)
         arguments.update({'transition.' + name: value for name, value in item.items()})
         arguments.update(metric_weights=weights, accumulator_reset=np.asarray(reset))
-        reports, _ = self.executable.run('contribute', arguments)
+        reports, _ = self.consume('contribute', arguments)
         return reports
 
     def update(self):
-        magnitude, _ = self.executable.run('update')
+        magnitude, _ = self.consume('update')
         total, parts = (self.executable.arrays[self.graph.inputs['accumulator.' + name].index] for name in ('loss', 'metrics'))
         return total, parts, magnitude
 

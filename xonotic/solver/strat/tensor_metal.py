@@ -9,10 +9,10 @@ PREFIX = r'''
 using namespace metal;
 struct View {
     ulong offset, size, shape[8], stride[8];
-    uint dtype, rank, pool, reserved;
-    ulong page_start, origin;
-    uint page_stride, payload;
+    uint dtype, rank, first, physical, pages, page_bytes;
 };
+struct Row { uint page, uses; ulong stamp; };
+struct Region { device uchar* bytes; };
 ulong coordinate(ulong index, device const View& view, uint axis) {
     return index / view.stride[axis] % view.shape[axis];
 }
@@ -22,25 +22,18 @@ ulong broadcast_index(ulong index, device const View& source, device const View&
         result += (source.shape[axis] == 1 ? 0 : coordinate(index, destination, destination.rank - source.rank + axis)) * source.stride[axis];
     return result;
 }
-ulong page_address(device const View& view, device const uint* pages, ulong byte) {
-    ulong capacity = view.page_stride - view.payload;
-    return ulong(pages[view.page_start + byte / capacity]) * view.page_stride + view.payload + byte % capacity - view.origin;
+// ../../../design/algorithm-sources.md#literal-row-functions
+ device uchar* page_address(device const Region* regions, device const Row* rows, device const View& view, ulong byte) {
+    ulong offset = ulong(rows[view.first + byte / view.page_bytes].page) * view.page_bytes + byte % view.page_bytes;
+    return regions[offset >> 30].bytes + (offset & ((1ul << 30) - 1));
 }
-template<typename T> T read_value(device uchar* local, device uchar* receive, device uchar* transmit,
-                                  device const uint* pages, device const View& view, ulong index) {
-    if (!view.pool) return ((device T*)(local + view.offset))[index];
-    device uchar* source = view.pool == 1 ? receive : transmit;
-    T value;
-    thread uchar* bytes = (thread uchar*)&value;
-    for (uint i = 0; i < sizeof(T); ++i) bytes[i] = source[page_address(view, pages, view.offset + index * sizeof(T) + i)];
-    return value;
+// ../../../design/algorithm-sources.md#literal-row-functions
+ template<typename T> T read_value(device const Region* regions, device const Row* rows, device const View& view, ulong index) {
+    return *(device const T*)page_address(regions, rows, view, view.offset + index * sizeof(T));
 }
-template<typename T> void write_value(device uchar* local, device uchar* receive, device uchar* transmit,
-                                      device const uint* pages, device const View& view, ulong index, T value) {
-    if (!view.pool) { ((device T*)(local + view.offset))[index] = value; return; }
-    device uchar* target = view.pool == 1 ? receive : transmit;
-    thread uchar* bytes = (thread uchar*)&value;
-    for (uint i = 0; i < sizeof(T); ++i) target[page_address(view, pages, view.offset + index * sizeof(T) + i)] = bytes[i];
+// ../../../design/algorithm-sources.md#literal-row-functions
+ template<typename T> void write_value(device const Region* regions, device const Row* rows, device const View& view, ulong index, T value) {
+    *(device T*)page_address(regions, rows, view, view.offset + index * sizeof(T)) = value;
 }
 float tensor_log1p(float x) {
     float u = 1.0f + x;
@@ -66,12 +59,11 @@ uint4 philox(uint4 counter, uint2 key) {
     return counter;
 }
 '''
-ARGUMENTS = '''device uchar* arena [[buffer(0)]], device const View* v [[buffer(1)]],
-    constant ulong* dimensions [[buffer(2)]], device uchar* receive [[buffer(3)]],
-    device uchar* transmit [[buffer(4)]], device const uint* pages [[buffer(5)]],
+ARGUMENTS = '''device const Region* regions [[buffer(0)]], device const View* v [[buffer(1)]],
+    constant ulong* dimensions [[buffer(2)]], device const Row* rows [[buffer(3)]],
     uint3 position [[thread_position_in_grid]], uint3 group [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
-    uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(6)]]'''
+    uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(4)]]'''
 
 
 def expr(value):
@@ -84,15 +76,15 @@ def expr(value):
 
 
 def read(value, index='t'):
-    return f'read_value<{TYPES[value.dtype]}>(arena,receive,transmit,pages,v[{value.index}],{index})'
+    return f'read_value<{TYPES[value.dtype]}>(regions,rows,v[{value.index}],{index})'
 
 
 def write(value, result, index='t'):
-    return f'write_value<{TYPES[value.dtype]}>(arena,receive,transmit,pages,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
+    return f'write_value<{TYPES[value.dtype]}>(regions,rows,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
 
 
 def atomic(value, result, index):
-    return f'atomic_fetch_add_explicit((device atomic_float*)(arena+v[{value.index}].offset)+({index}),float({result}),memory_order_relaxed);'
+    return f'atomic_fetch_add_explicit((device atomic_float*)page_address(regions,rows,v[{value.index}],v[{value.index}].offset+({index})*sizeof(float)),float({result}),memory_order_relaxed);'
 
 
 def coordinate_code(shape, flat='t', prefix='c'):
@@ -238,7 +230,7 @@ def kernel(node):
         selected = values[0]
         body = [f'ulong t=position.x; if(t>=v[{selected.index}].size) return;',
                 f'ulong expert=ulong({read(selected)}),stride=v[{output.index}].shape[1];',
-                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)(arena+v[{output.index}].offset)+expert*stride,1u,memory_order_relaxed);',
+                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)page_address(regions,rows,v[{output.index}],v[{output.index}].offset+expert*stride*sizeof(uint)),1u,memory_order_relaxed);',
                 write(output, 't', 'expert*stride+1+slot')]
         mode, clear = ('gradient', selected.index), True
     elif op in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
@@ -366,7 +358,7 @@ def source(graph):
         text = re.sub(r'v\[(\d+)\]', lambda match: f'v[arguments[{nodes.index(int(match[1]))}]]', item['source'])
         text = text.replace(item['name'], 'FUNCTION')
         name = 'mesh_tensor_' + hashlib.sha256(text.encode()).hexdigest()[:16]
-        sources[name] = text.replace('FUNCTION', name)
+        sources[name] = '// ../../../design/algorithm-sources.md#literal-row-functions\n' + text.replace('FUNCTION', name)
         item.update(name=name, arguments=nodes)
-    sources['mesh_tensor_zero'] = f'kernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size) ((device float*)(arena+v[arguments[0]].offset))[t]=0; }}'
+    sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,rows,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
     return PREFIX + '\n'.join(sources.values()), kernels
