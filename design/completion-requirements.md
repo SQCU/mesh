@@ -54,6 +54,42 @@ must not fabricate successful numerical output stamps.
 Each row requires source review of its entire dependency path and the stated
 runtime evidence. Passing another row is not a substitute.
 
+### Memory budget established by the operator
+
+The M4 Mini reports `hw.memsize = 25769803776`: 24 GiB of unified memory.
+The operator instructed that allocation below 80% should be treated as available
+for planning. Use **19.2 GiB** for its complete allocation plan, rather than
+mistaking the existing bridge allocation for the machine's capacity.
+
+The observed bridge runs with `-M 25`, allocating 6 GiB: 393216 receive pages
+and 1179648 transmit pages, each 4096 bytes. Its 4.5 GiB transmit arena is a
+configuration choice. With the current one-quarter receive/three-quarter transmit
+split, an 80% bridge allocation would provide approximately 4.8 GiB receive and
+14.4 GiB transmit storage. Physical-page rounding and header/descriptor/table
+storage must be included in the final budget; 19.2 GiB is not a claim that all
+of that space is numerical payload.
+
+For the existing M4 ownership, the 48 FFNs require
+`48 × 3 × 3456 × 3840 × 2 = 3822059520` bytes of FP16 weights.
+The tied embedding/head requires
+`262144 × 3840 × 2 = 2013265920` bytes, counted once.
+Their combined 5.4345703125 GiB excludes attention weights, all intermediate
+values, indices, metadata and page padding. This exceeds the old arena but fits
+within the operator's revised planning budget; it is not a hardware-capacity
+blocker. Finish C05 with the complete graph and actual backend layouts.
+
+Do not preserve the old separate dense/native allocations while also allocating
+page-backed copies. Configure the complete storage ownership first, then realize
+the corresponding bridge allocation and numerical bindings. The existing
+`mesh_pct + app_pct` wire-limit calculation also needs to follow that ownership;
+it must not count the same shared numerical pages twice.
+
+The bridge remained paired and responsive with no attached computation when
+these values were read. No bridge restart or allocation change was made by this
+budget update. The last source synchronization built both callers successfully
+at mesh `97229a1` and metal `e988499`; those were documentation-only changes,
+and neither build result establishes replacement-runtime execution.
+
 | ID | Required result | Current disposition and acceptance evidence |
 |---|---|---|
 | C01 | One configured graph and one mesh numerical caller | Open: migrate `runReduceScatter`; trace serving and benchmark entry points to that implementation. No parallel replacement evaluator/caller. |
@@ -73,7 +109,7 @@ runtime evidence. Passing another row is not a substitute.
 | C15 | Independent computation, reduction and transport can proceed | Open: no queue-wide waits, dependency-free serialization, or awaiting predictions. Measure ready-to-submit intervals and overlapping device/transport spans under real inputs. |
 | C16 | Attention dependencies are literal | Open: expose Q/K/V, attention and output contraction values with their real full-context or mask dependencies. No hidden scratch or invented partial-attention readiness. |
 | C17 | Distributed arithmetic matches the model algebra | Open: partition contraction ownership, scatter partials to owners, reduce in FP32, gather the reduced values and apply RMS/residual/scale in the specified order. No early FP16 materialization of an FP32 accumulator. |
-| C18 | Reduction is incrementally usable and race-free | Open: `row_add` starts from input zero on every call and overwrites its accumulator; it is not an accumulating implementation across arrivals. Define one writer per accumulator value and the static contribution/index dependencies before wiring it in. |
+| C18 | Reduction is incrementally usable and race-free | Partial: `row_add` adds a matching set of partial pages into its output. This agrees with the spec's pairwise operation; overwriting that output is not a defect. Incrementality is across ready page pairs, not repeated updates to the same accumulator page. Integrate one writer per accumulator value and static contribution/index dependencies. |
 | C19 | Every reduction input stays within its page | Open: `row_add` offsets one input pointer by `first * bytes`; its public signature does not constrain `elements` to that input payload. Realization must define page-sized inputs and exact tails rather than rely on an undocumented caller limit. |
 | C20 | Publication has one owner | Open: `row_add` publishes and releases inputs itself while generic `mesh_rows_publish` also releases. Use one function ABI with exactly one publication/release path per operation; document CPU, GPU and native completion semantics together. |
 | C21 | Actual RDMA pages carry the graph | Open: replacement send/receive functions lack an integrated owner in the active caller. Exercise real M5/M4 SEND/RECV, returned receive pages and transmit source lifetimes without copies or loopback. |
@@ -130,7 +166,7 @@ sequence of independently declared successes:
 | `rdma/mesh-pages.c`, `rdma/mesh-pages.h` | Delete after all caller references migrate; no compatibility facade that preserves the excluded scheduler. |
 | `rdma/mesh.h`, `rdma/mesh-client.c` | Audit every `mstream`, protocol frame, stream bitmap, retry/abort/close dependency; remove migrated computation mechanisms. Keep required page addressing and actual transport ownership only. |
 | `rdma/mesh-functions.*`, `mesh-reduce.*`, `mesh-metal-executor.*`, `mesh-tensor.*`, `mesh-stream.c` | Trace remaining users before deletion. These are part of the dependency audit, not an unmeasured place to move the excluded implementation. |
-| `rdma/mesh-dataflow.c`, `.h` | Finish the complete ABI and lifecycle above; unused replacements receive the same review as old code. Resolve accumulator overwrite, input boundaries, publication ownership and table identity. |
+| `rdma/mesh-dataflow.c`, `.h` | Finish the complete ABI and lifecycle above; unused replacements receive the same review as old code. Preserve the specified pairwise accumulator arithmetic; resolve input boundaries, publication ownership and table identity. |
 | `rdma/mesh-flow.c`, `mesh-links.h` | Bind literal pages to supported verbs, preserve literal metadata, remove computation recovery and blocking issue paths. Review fleet accessibility separately from numerical execution. |
 | `rdma/mesh-metal.m`, `.h` | Preserve aliases of actual registered storage; remove old page-runtime dependency after migration. Make row table, transmit and receive views usable by configured kernels. |
 | `parameter_operations.swift`, `compute_backends.swift` | Explicit page views for all supported numerical operations; native callbacks publish values/metadata without a second control protocol. No dense fallback on the mesh path. |
