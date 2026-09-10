@@ -504,6 +504,18 @@ combination or this decomposition has been operationally validated here.
 
 ### Literal page reduction
 
+The GPU `row_payload` address function follows Papadopoulos–Culler operand slots
+and the page addressing required here: the table's physical page selects the
+receive or transmit alias, with each alias's configured origin. It performs no
+copy, residency repair or error-dependent scheduling. `bindRowNormalization`
+binds both aliases before invocation, allowing its FP32 accumulator, gamma,
+residual and scale reads to consume actual received pages as well as local pages.
+Output rows are configured local producer pages. The accumulation and
+normalization algebra remains the Rabenseifner/Patarasuk–Yuan partial-sum
+composition described below; the papers do not specify this Metal address ABI.
+This binder is not yet connected to the active caller, and shader compilation
+alone does not demonstrate RDMA visibility or invalidation correctness.
+
 Rabenseifner (2004) and Patarasuk–Yuan (2009), cited above, supply the
 reduce-scatter/all-gather algebra. `mesh_rows_add_f16` adds one matching set of
 actual partial pages into claimed FP32 accumulator pages and publishes that
