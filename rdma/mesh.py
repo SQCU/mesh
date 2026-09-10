@@ -104,6 +104,5 @@ class Mesh:
 
     # design/algorithm-sources.md#complete-page-ownership
     def close(self):
-        if self.pages: _lib.mesh_rows_retire(self.pages)
         self.pages = None
-        return 0
+        return _lib.mesh_detach(self.context)
