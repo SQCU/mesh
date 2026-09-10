@@ -1,5 +1,26 @@
 # Algorithm sources and implementation obligations
 
+## Operator clarification: caller-owned repetition
+
+Operator instruction, September 9, 2026:
+
+> recovery is something which is only sanctioned through the mechanism of a totally feed forward nfe computation callgraph being re-run by the calling process because they don't like the results they got. there are to be no parity mechanisms or syncs, guards, waits, checks, or inferences in the mesh computation transport and reduction layer, and functions which use this layer are not to introduce data dependent control flow attempting to add overhead of this sort or any sort.
+
+This governs the implementation and supersedes recovery obligations inferred
+from older text below. The calling process evaluates the returned result and
+may rerun the complete feed-forward NFE. Mesh computation, transport and reduction
+do not recover or replay an invocation. Functions using them must not reintroduce
+the excluded control flow. Feed-forward numerical dependencies and configured
+page addressing do not authorize an additional runtime recovery protocol.
+
+The proposed cancellation/drain/recovery functions were not implemented and are
+withdrawn. `mesh_pages_recover` and the old caller's digest admission gate remain
+implementation divergences, not required mechanisms. Existing defensive branches
+in `mesh_rows_receive`, publication and release likewise do not acquire approval
+merely because earlier additions compiled. The replacement must be reviewed
+against this instruction before the single caller is migrated; excluded code is
+deleted after that migration, in the operator's required order.
+
 The operator requires a citation to one of the authors/publications below for
 every new function. Source citations may point to this document; prose stays in
 documentation. A citation identifies the mechanism being implemented, not a

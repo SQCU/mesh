@@ -63,7 +63,9 @@ known before the NFE starts.
 ### Link error
 
 10. The runtime's status word goes negative. Every NFE in flight concludes
-    with a failure value. The caller recovers the program and repeats the NFE.
+    with a failure value. The calling process may reject that result and rerun
+    the complete feed-forward NFE. The mesh computation, transport and reduction
+    layer does not perform recovery or replay.
 
 ## The same NFE on infinitely many Mac Minis
 
@@ -139,7 +141,9 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
 ### Link error
 
 11. The runtime's status word goes negative. Every NFE in flight concludes
-    with a failure value. The caller recovers the program and repeats the NFE.
+    with a failure value. The calling process may reject that result and rerun
+    the complete feed-forward NFE. The mesh computation, transport and reduction
+    layer does not perform recovery or replay.
 
 ### Why two Minis are the same as infinitely many
 
