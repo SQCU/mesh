@@ -33,6 +33,13 @@ page and dominated the sampled numerical thread during full-graph execution.
 Short-circuit evaluation changes no persistent state and requires no readiness
 cache or scheduler; later scans observe newly published values normally.
 
+The first destination stamp provides a cheap rejection for already-issued
+rows. Candidates surviving that check match their inputs before scanning the
+complete output spans and physical ownership. The first stamp never authorizes
+a claim: every destination still passes the full validation. This avoids
+reading thousands of free destination pages for a future function whose first
+operand is absent, while preserving the same matching predicate.
+
 Every numerical intermediate, accumulator and index value occupies actual
 sendable page payloads. Views gather/scatter through those pages. Lifetimes must
 include residual reads, asynchronous device reads and hashing. Reuse follows
