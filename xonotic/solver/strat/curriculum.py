@@ -314,26 +314,53 @@ def runtime_log_measure(path):
         error = f"{type(exc).__name__}: {exc}"
     return {"path": path, "bytes": size, "lines": lines, "read_error": error}
 
+# ../../../design/algorithm-sources.md#configuration-storage-layout
+def application_command(root, python, module):
+    paths = [os.path.join(root, suffix) for suffix in ('xonotic', 'rdma', 'xonotic/payload/tools')]
+    return ['env', 'PYTHONPATH=' + os.pathsep.join(paths), python, '-m', module]
+
+
+# ../../../design/algorithm-sources.md#configuration-storage-layout
+def application_revision(root, ssh=(), host=None):
+    # ../../../design/algorithm-sources.md#configuration-storage-layout
+    def git(*arguments):
+        values = ['git', '-C', root, *arguments]
+        values = [*ssh, host, shlex.join(values)] if host else values
+        return subprocess.check_output(values, text=True).strip()
+    if git('status', '--porcelain'):
+        raise RuntimeError(f'{host or "local"}:{root}: source must be committed before evaluation')
+    git('checkout', 'main')
+    return git('rev-parse', 'HEAD')
+
+
 class Curriculum:
     def __init__(self, args):
         self.args = args
         self.run_dir = os.path.abspath(os.path.expanduser(args.run_dir))
         self.server_prefix = command(args.server_command) or [os.path.abspath(os.path.expanduser(args.engine))]
-        application = [args.python, os.path.join(os.path.dirname(ROOT), "bin", "mesh-application.py"),
-                       "launch", "--target", os.path.join(self.run_dir, "application"), "--"]
-        self.responder_prefix = command(args.responder_command) or application + ["solver.strat.strat_responder"]
-        self.expert_prefix = command(args.expert_command) or application + ["solver.strat.matrix_worker"]
+        application_root = os.path.dirname(ROOT)
+        self.responder_prefix = command(args.responder_command) or application_command(application_root, args.python, 'solver.strat.strat_responder')
+        self.expert_prefix = command(args.expert_command) or application_command(application_root, args.python, 'solver.strat.matrix_worker')
         self.ssh_prefix = command(args.ssh_command) or ["ssh"]
         self.basedir = os.path.abspath(os.path.expanduser(args.basedir))
         self.entity_tool = os.path.abspath(os.path.expanduser(args.entity_tool))
         self.server_host = args.server_host
         self.remote_run_root = os.path.expanduser(args.remote_run_root)
+        self.remote_mesh_root = args.remote_mesh_root
         self.remote_engine = os.path.expanduser(args.remote_engine) if args.remote_engine else os.path.join(self.remote_run_root, "runtime", "darkplaces-dedicated")
         self.remote_basedir = os.path.expanduser(args.remote_basedir) if args.remote_basedir else os.path.join(self.remote_run_root, "runtime", "Xonotic")
         self.progs = os.path.abspath(os.path.expanduser(args.progs))
         self.csprogs = os.path.abspath(os.path.expanduser(args.csprogs))
         self.build_command = command(args.build_command)
         self.runtime = runtime_identity(args.python)
+        if not args.dry_run:
+            revision = application_revision(application_root)
+            self.runtime['application_revision'] = revision
+            if self.server_host:
+                remote = application_revision(self.remote_mesh_root, self.ssh_prefix, self.server_host)
+                if remote != revision:
+                    raise RuntimeError(f'application revisions differ: local={revision}, {self.server_host}={remote}; synchronize committed main before evaluation')
+                self.runtime['remote_application_revision'] = remote
         self.previous_checkpoints = {}
         self.initial_checkpoints = {}
         self.capacity_observations = []
@@ -634,19 +661,9 @@ class Curriculum:
         expert_prefix = ["env", f"MESH_REGION={server_region}"] + self.expert_prefix
         expert_pid = os.path.join(self.run_dir, "expert.pid")
         if self.server_host:
-            remote_application = os.path.join(self.remote_run_root, "application")
-            stage.append([
-                self.args.python, os.path.join(os.path.dirname(ROOT), "bin", "mesh-application.py"),
-                "deploy", "--host", self.server_host, "--python", self.args.remote_python,
-                "--ssh-command", shlex.join(self.ssh_prefix),
-                "--target", remote_application,
-            ])
-            expert_prefix = [
-                "env", f"MESH_REGION={server_region}", self.args.remote_python,
-                os.path.join(remote_application, "current", "bin", "mesh-application.py"),
-                "run", "--target", remote_application, "--", "solver.strat.matrix_worker",
-            ]
-            expert_pid = os.path.join(remote_directory, "expert.pid")
+            native = command(self.args.expert_command) or application_command(self.remote_mesh_root, self.args.remote_python, 'solver.strat.matrix_worker')
+            expert_prefix = ['env', f'MESH_REGION={server_region}'] + native
+            expert_pid = os.path.join(remote_directory, 'expert.pid')
         expert = expert_prefix + [
             "--socket", self.args.expert_socket,
             "--environment", str(cfg.get("environment", cfg["id"])),
@@ -1187,6 +1204,7 @@ def parser():
     ap.add_argument("--remote-engine")
     ap.add_argument("--remote-basedir")
     ap.add_argument("--remote-run-root", default="/tmp/mesh-xonotic-curriculum")
+    ap.add_argument("--remote-mesh-root", default="/Users/mdot/mesh")
     ap.add_argument("--responder-command")
     ap.add_argument("--expert-command")
     ap.add_argument("--server-cwd")

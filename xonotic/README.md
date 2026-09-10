@@ -254,6 +254,45 @@ Post-training release evaluation can run the release-rank matrix-fusion/MoE oper
 xonotic/solver/strat/joracle/evaluate-distributed.sh
 ```
 
+For one real match at the previously exercised 128/341/8/top-2 shape, launch
+the existing curriculum from the M5 checkout after synchronizing and building
+committed `main` on both participants:
+
+```sh
+cd /Users/mdot/dox/mesh/xonotic
+../bin/mesh-python -m solver.strat.curriculum \
+  --server-host ms-mac-mini.local \
+  --ssh-command 'ssh -o BatchMode=yes -o ConnectTimeout=8' \
+  --remote-mesh-root /Users/mdot/mesh \
+  --remote-python /Users/mdot/mesh/bin/mesh-python \
+  --run-dir solver/strat/runs/encoder-migration-20260910 \
+  --remote-run-root /tmp/mesh-encoder-migration-20260910 \
+  --generate 1 --cycles 1 --study-repetitions 0 --heldout-fraction 0 \
+  --maps dance --team-counts 2 --players-per-team 2 --cart-counts 1 \
+  --skills 5 --perturbations baseline --off-policy-counts 0 --human-counts 0 \
+  --policy-arms matrix_fusion --scale-rank 128 --scale-hidden 341 \
+  --scale-experts 8 --scale-topk 2 --replay-batch 1 \
+  --score-limit 30 --checkpoint-score-rate 1 \
+  --peer-node 1 --strategy-node 0 \
+  --distributed-scale --distributed-scale-operation block
+```
+
+The responder and its navigation/telemetry paths remain local to the M5;
+the dedicated server and matrix worker run on the M4. Application modules load
+directly from the respective committed checkouts, with matching revisions
+recorded in the run metadata. Explicit `--responder-command` and
+`--expert-command` override those local and remote commands respectively;
+neither invokes an application snapshot deployment. Transfers performed by
+this curriculum contain engine binaries, map assets, generated entity files,
+and result artifacts, not application source.
+
+The launcher needs the existing Python environment, the `dance` map assets,
+the dedicated engine and payload build tools, and both existing RDMA bridges.
+It runs one match, ending on its observed score outcome; `--duration` does not
+impose a wall-clock timeout. This exercises actual policy inputs and generated
+encoders. `measure.py matrix` measures a different numerical path and is not a
+substitute for this application run.
+
 The command resolves the Mini address and uses the curriculum's single lifecycle
 owner. The [policy program](../design/POLICY-PROGRAM.md) defines the shared local/remote
 mathematics, tensor exchange and parameter ownership. Whole-game deadlines, resume
