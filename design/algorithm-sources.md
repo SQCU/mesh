@@ -724,3 +724,20 @@ values, and logits byte-identical to the prior regression. Explicit page-backed
 weight arguments and FP32 partial contractions were not exercised. The manifest
 and metrics are committed in
 `metal-microbench/docs/data/ffn_weight_views_rdma_2026-09-09.json`.
+
+### Parameter output precision evaluation
+
+The existing `runParameterBench` accepts `LM_BENCH_OUTPUT_ELEMENT=float32` for
+local Metal, tensor and MPS parameter functions without the FP16 post-FFN
+normalization. The default remains FP16. Selection, output allocation, matrix
+views and binding occur before numerical invocation. The existing output dump,
+finite-value scan and outside-timing FFN reference comparison interpret the
+selected type. `scanNumericBuf` replaces the FP16-only scan under one shared
+implementation; existing callers keep their default FP16 interpretation.
+
+Saltzer–Reed–Clark (TOCS 1984), cited above, supply the endpoint verification
+principle. This is an extension to the existing client evaluation, not a second
+evaluator or a numerical dependency. The reference remains the existing MPS FFN
+with FP16 output, so differences include output rounding; it is not an FP64
+oracle. This option does not change the active RDMA caller's FP16 return layout,
+exercise page-backed weights, or establish complete transport integration.
