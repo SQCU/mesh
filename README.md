@@ -759,11 +759,11 @@ completion work and has no send in flight. Active work therefore runs continuous
 idle bridge does not reserve a complete CPU core from the game, audio, renderer, or policy
 runtime.
 
-`rdma/mesh_coproc.py` holds a weight matrix resident on one node and applies it to rows
-streamed from the other, using `rdma/mesh.py` so MLX computes on pages the NIC wrote without a
-copy. 54,337 rows were verified exactly, `wrong=0`, at 0.12 Gbit/s — bounded by a Python loop
-touching one slot at a time. **That measurement predates the transport rewrite and has not
-been repeated since**; the API it uses is unchanged, but treat the number as historical.
+The deprecated `mesh_coproc.py` demonstration and its copied NumPy/MLX operand
+path have been deleted. Its historical 54,337-row result at 0.12 Gbit/s does not
+validate the replacement. Numerical callers now use configured canonical page
+functions; the connected tensor-parallel demo is in
+`~/metal-microbench/tools/mesh/nfe.sh`.
 
 The census closes exactly on both nodes, including after an application dies holding pages.
 The bridge marks delivered pages in a bitmap and, on the once-a-second census tick, reclaims
@@ -771,18 +771,10 @@ them if the client is gone. The historical capped-pool measurement observed `hel
 the moment of death and `held=0` with `244140/244140` pages one tick later. Current pool mass
 is derived from the configured region rather than capped at that historical value.
 
-## Loopback simulation without a second machine
+## Current numerical transport
 
-`mesh-flow` links are verbs by default. A link descriptor whose device is `tcp`
-or `udp` — `--link tcp,<peer-node>,<local host:port>,<peer host:port>` — runs the
-same command and completion rings over a socket instead, so two bridges on one
-machine exchange pages over `lo0`. `bin/mesh-loopback.sh start|stop|status` runs
-a pair as `/loop0` (node 0) and `/loop1` (node 1); a client attaches with
-`MESH_NAME=/loop0` or `/loop1`. The `tcp` form is what the real link is like:
-the kernel refuses a sender that outruns the receiver (`EAGAIN`, held until the
-buffer drains), nothing is lost and nothing is retransmitted by the bridge. The
-`udp` form is a lossy transport: datagrams are dropped when the kernel socket
-buffer (`kern.ipc.maxsockbuf`, 8 MB by default) overflows under a page burst, a
-family whose exchange lost a page stops concluding, the others continue, and the
-consumer's clock ends the run with a failure value — the contract, stated by
-the simulation.
+The numerical path uses RDMA SEND/RECV of literal registered pages. TCP/UDP
+payload alternatives and `bin/mesh-loopback.sh` have been deleted. Configuration
+establishes the links before numerical invocation; timing and result acceptance
+belong to the calling context. The current rewrite and outstanding evidence are
+recorded in [the completion requirements](design/completion-requirements.md).
