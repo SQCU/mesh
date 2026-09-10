@@ -715,3 +715,12 @@ scratch views. Full paged-K MPS interoperability still requires independent
 payload-contained contractions and FP32 partial reduction; passing a spanning
 paged view to MPS is not enabled by this refactoring. Attention/CoreML weight
 interop and the mesh caller migration remain unfinished.
+
+At caller commit `9c108d9` and mesh commit `fff31f3`, full builds passed on both
+machines. The existing two-layer RDMA evaluation exercised the shared FFN
+composition on M5 with ordinary dense weights; M4 retained its configured CoreML
+FFN. Both peers reported 24 agreements, zero disagreements/retries/nonfinite
+values, and logits byte-identical to the prior regression. Explicit page-backed
+weight arguments and FP32 partial contractions were not exercised. The manifest
+and metrics are committed in
+`metal-microbench/docs/data/ffn_weight_views_rdma_2026-09-09.json`.
