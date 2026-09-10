@@ -126,6 +126,41 @@ the successful surface calls alone must not be reported as stability evidence.
 The new bridge process was paired and responsive with no attached numerical
 client. Direct synchronization and both caller builds succeeded afterward.
 
+## Native binding observation
+
+The actual M4 FFN artifact loads as `MLDelegateModel` with `MLE5Engine`.
+Installing Espresso's surface class is not evidence that this model uses that
+class. The existing numerical evaluator now observes the retained E5 ports'
+direct-binding flags after computation, without making them numerical control
+dependencies. `coreMLStorageReport`, its `stored` accessor and
+`MatrixView.coreMLArray` cite the Bryngelson/Kumaresan backing account and the
+Saltzer–Reed–Clark endpoint principle through metal-microbench
+`docs/parameter_groups.md#native-binding-observation` and `#native-iosurface-views`.
+The private observation ABI comes from the installed runtime, not those papers.
+
+Apple's installed `MLMultiArray.h` explicitly documents
+`initWithPixelBuffer:shape:` for IOSurface-backed multiarrays that can avoid a
+buffer copy. The implementation wraps compatible existing addresses with
+IOSurface, then CVPixelBuffer, then MLMultiArray. It does not allocate another
+numerical tensor. The native evaluator's previously ignored channels-first
+configuration is now realized directly by the existing RMSNorm output-stride
+specialization and native result views.
+
+At metal source `6dca474`, a real 128-row M4 FFN reported direct binding for
+input `x` and outputs `y`, `y_1920`; the earlier strided wrappers at `89c8507`
+reported false while still satisfying wrapper identity. Exported inputs and
+outputs are byte-identical. Local median latency changed from 2.822333 to
+0.937292 ms in three measured calls after four warmups, with unchanged MPS
+reference relative RMS error 0.0002229233. This is a local-shape result, not a
+full NFE or TP performance claim. Full records and the separate old-caller
+RDMA regression are in metal-microbench
+`docs/data/native_iosurface_binding_2026-09-09.json`.
+
+Internal weights/intermediates remain explicitly unverified. The existing mesh
+page-gap layouts still require complete configuration and caller migration;
+one successful local IOSurface binding does not justify hidden storage or
+permit claiming C10 complete.
+
 ## Contiguous backing-page views
 
 Operator clarification, September 9, 2026:
