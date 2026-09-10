@@ -2,6 +2,8 @@
 *.log
 networks.conf
 rdma/mesh-flow
+rdma/mesh-stat
+rdma/*.dylib
 rdma/mesh-hop
 rdma/qcaps
 rdma/qfill
