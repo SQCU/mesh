@@ -1,190 +1,130 @@
 #include "mesh-verbs.h"
-
 #include "mesh-dataflow.h"
-enum { L_RECV=1, L_SEND };
-struct mesh_link {
-  struct hdr *pages;
-  struct mesh_port_info *status;
-  struct mesh_verbs provider;
-  int receives, sends;
-};
-// ../design/algorithm-sources.md#transport-page-addressing
-static int link_submit(struct mesh_link *link,uint32_t kind,uint32_t page,uint64_t header){
+/* design/pages-and-functions.md#what-the-page-table-is
+   The bridge owns the queue pair. It posts landing blocks from the free index, posts outbound blocks
+   from the submission index, and on completion writes the page table: arrival stores page[] and ORs
+   PRESENT; send completion ORs the NIC's read bit. Nothing else. */
+struct mesh_link { struct hdr *M; struct mesh_verbs provider; int receives,sends; };
+
+static void link_post(struct mesh_link *link,int send,uint64_t id,uint32_t page){
   struct mesh_verbs *v=&link->provider;
-  provider=v;
-  int index=kind==L_SEND?v->receive_capacity+v->sending/2:v->receiving/2;
-  v->sges[index][0]=region_sge((char*)link->pages,header,sizeof(struct mesh_page_header));
-  v->sges[index][1]=region_sge((char*)link->pages,link->pages->data_off+(size_t)page*link->pages->pgsz,link->pages->pgsz);
-  struct mesh_send *record=(struct mesh_send*)((char*)link->pages+header);
-  record->page=page; record->header.code=0; record->header.domain=0;
-  if(kind==L_RECV){
-    __atomic_store_n(&record->row,0,__ATOMIC_RELEASE);
-    __atomic_fetch_or(mesh_hot_rx(link->pages)+page/64,UINT64_C(1)<<(page%64),__ATOMIC_RELEASE);
-  }
-  if(kind==L_SEND){
-    for(int part=0;part<2;part++){
-      struct ibv_sge *span=&v->sges[index][part];
-      v->sends[v->sending]=(struct ibv_send_wr){.wr_id=header|(part?0:UINT64_C(1)<<62),
-        .sg_list=span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
-      if(v->sending) v->sends[v->sending-1].next=&v->sends[v->sending];
-      v->sending++;
-    }
-    link->sends++;
+  size_t bytes=(size_t)link->M->block*link->M->pgsz;
+  int index=send?v->receive_capacity+v->sending:v->receiving;
+  v->sges[index][0]=region_sge((char*)link->M,link->M->data_off+(size_t)page*link->M->pgsz,(uint32_t)bytes);
+  if(send){
+    v->sends[v->sending]=(struct ibv_send_wr){.wr_id=id,.sg_list=&v->sges[index][0],.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+    if(v->sending) v->sends[v->sending-1].next=&v->sends[v->sending];
+    v->sending++; link->sends++;
   } else {
-    for(int part=0;part<2;part++){
-      struct ibv_sge *span=&v->sges[index][part];
-      v->receives[v->receiving]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|(part?0:UINT64_C(1)<<62)|page,
-        .sg_list=span,.num_sge=1};
-      if(v->receiving) v->receives[v->receiving-1].next=&v->receives[v->receiving];
-      v->receiving++;
-    }
-    link->receives++;
+    v->receives[v->receiving]=(struct ibv_recv_wr){.wr_id=id,.sg_list=&v->sges[index][0],.num_sge=1};
+    if(v->receiving) v->receives[v->receiving-1].next=&v->receives[v->receiving];
+    v->receiving++; link->receives++;
   }
-  return 0;
 }
-// ../design/algorithm-sources.md#transport-page-addressing
+
 static void link_flush(struct mesh_link *link){
   struct mesh_verbs *v=&link->provider;
-  if(v->receiving){
-    struct ibv_recv_wr *bad=NULL;
-    int error=ibv_post_recv(v->pair,v->receives,&bad);
-    if(error){ link->status->code=error; link->status->domain=1; stop=1; }
-    v->receiving=0;
-  }
-  if(v->sending){
-    struct ibv_send_wr *bad=NULL;
-    int error=ibv_post_send(v->pair,v->sends,&bad);
-    if(error){ link->status->code=error; link->status->domain=1; stop=1; }
-    v->sending=0;
-  }
+  if(v->receiving){ struct ibv_recv_wr *bad=NULL; int e=ibv_post_recv(v->pair,v->receives,&bad); if(e){ link->M->port.code=e; link->M->port.domain=1; stop=1; } v->receiving=0; }
+  if(v->sending){ struct ibv_send_wr *bad=NULL; int e=ibv_post_send(v->pair,v->sends,&bad); if(e){ link->M->port.code=e; link->M->port.domain=1; stop=1; } v->sending=0; }
 }
-#define COUNT(field) atomic_fetch_add_explicit(&M->field,1,memory_order_relaxed)
-// ../design/algorithm-sources.md#transport-page-addressing
-static void mesh_progress(struct hdr *M,struct mesh_link *link,int *free_pages,int *available){
-  struct mesh_verbs *v=&link->provider;
-  struct desc descriptor;
-  while(*available && link->receives<v->receive_capacity){
-    uint32_t page=(uint32_t)free_pages[--*available];
-    link_submit(link,L_RECV,page,(uint64_t)((char*)mesh_header(M,page)-(char*)M));
-  }
-  while(link->sends<v->send_capacity && !pop(M,SUB,&descriptor)){
-    link_submit(link,L_SEND,descriptor.page,descriptor.header);
-    COUNT(sent);
+
+static void mesh_progress(struct mesh_link *link){
+  struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
+  uint64_t entry;
+  while(link->receives<v->receive_capacity && !mesh_pop(M,FREE,&entry)) link_post(link,0,(UINT64_C(1)<<63)|entry,(uint32_t)entry);
+  while(link->sends<v->send_capacity && !mesh_pop(M,SUB,&entry)){
+    uint32_t row=(uint32_t)(entry>>8);
+    link_post(link,1,entry,atomic_load_explicit(&mesh_page(M)[row],memory_order_acquire));
+    atomic_fetch_add_explicit(&M->sent,1,memory_order_relaxed);
   }
   link_flush(link);
-  int count=ibv_poll_cq(v->completion_queue,2*(v->send_capacity+v->receive_capacity),v->completions);
-  if(count<0){ link->status->code=count; link->status->domain=3; stop=1; return; }
+  int count=ibv_poll_cq(v->completion_queue,v->send_capacity+v->receive_capacity,v->completions);
+  if(count<0){ M->port.code=count; M->port.domain=3; stop=1; return; }
   for(int i=0;i<count;i++){
     struct ibv_wc *wc=&v->completions[i];
-    int receive=(int)(wc->wr_id>>63),header_completion=(int)((wc->wr_id>>62)&1);
-    uint64_t offset=receive?(uint64_t)((char*)mesh_header(M,(uint32_t)wc->wr_id)-(char*)M):wc->wr_id&~(UINT64_C(1)<<62);
-    struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
-    if(wc->status){
-      record->header.code=wc->status; record->header.domain=2;
-      link->status->code=wc->status; link->status->domain=2; COUNT(bad); stop=1;
-    }
-    if(header_completion) continue;
-    if(receive){
+    if(wc->status){ M->port.code=wc->status; M->port.domain=2; M->port.when=(uint64_t)monotime(); atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed); stop=1; }
+    if(wc->wr_id>>63){
       uint32_t page=(uint32_t)wc->wr_id;
-      __atomic_fetch_and(mesh_hot_rx(M)+page/64,~(UINT64_C(1)<<(page%64)),__ATOMIC_RELEASE);
-      mesh_rows_received(M,(uint32_t)wc->wr_id); link->receives--; COUNT(recvd);
+      link->receives--;
+      const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(M,page+M->block-1);
+      if(wc->status) continue;
+      if(tag->magic!=MESH_TAG || tag->binding>=MESH_BINDINGS){ M->port.code=EBADMSG; M->port.domain=2; stop=1; continue; }
+      uint32_t row=mesh_base(M)[tag->binding]+tag->index*M->block;
+      if(row+M->block>mesh_rows(M)){ M->port.code=ERANGE; M->port.domain=2; stop=1; continue; }
+      _Atomic uint32_t *table=mesh_page(M);
+      for(uint32_t k=0;k<M->block;k++) atomic_store_explicit(&table[row+k],page+k,memory_order_release);
+      mesh_bits_set(M,MESH_PRESENT,row,M->block);
+      atomic_fetch_add_explicit(&M->recvd,1,memory_order_relaxed);
     } else {
-      size_t request=mesh_hot_send_index(M,offset);
-      __atomic_fetch_and(mesh_hot_tx(M)+request/64,~(UINT64_C(1)<<(request%64)),__ATOMIC_RELEASE);
-      mesh_rows_sent(M,record); link->sends--;
+      link->sends--;
+      mesh_bits_set(M,MESH_READ+(int)(wc->wr_id&7),(uint32_t)(wc->wr_id>>8),M->block);
     }
   }
 }
-// ../design/algorithm-sources.md#transport-page-addressing
+
 int main(int argc,char**argv){
   const char *peer=NULL,*name=MESH_NAME; int me=0,layout=0; double pct=0;
-  uint64_t arena_pages=0,receive_pages=0;
-  struct mesh_link link={0};
+  uint64_t arena_pages=0,receive_pages=0,block_pages=0;
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-I") && i+1<argc) me=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M") && i+1<argc) pct=atof(argv[++i]);
-    else if((!strcmp(argv[i],"-A") || !strcmp(argv[i],"-R")) && i+1<argc){
-      int arena=!strcmp(argv[i],"-A"); char *end;
+    else if((!strcmp(argv[i],"-A") || !strcmp(argv[i],"-R") || !strcmp(argv[i],"-B")) && i+1<argc){
+      char kind=argv[i][1],*end;
       uint64_t pages=strtoull(argv[++i],&end,10);
       if(*end || !pages || pages>INT32_MAX) die("configured page count");
-      if(arena) arena_pages=pages; else receive_pages=pages;
+      if(kind=='A') arena_pages=pages; else if(kind=='R') receive_pages=pages; else block_pages=pages;
     }
     else if(!strcmp(argv[i],"--layout")) layout=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc) name=argv[++i];
     else if(argv[i][0]=='-') die("unknown bridge option");
     else peer=argv[i];
   }
-  if(me<0 || me>=65535 || !isfinite(pct) || pct<0 || pct>100 || !arena_pages || !receive_pages) die("bridge geometry");
+  if(me<0 || me>=65535 || !isfinite(pct) || pct<0 || pct>100 || !arena_pages || !receive_pages || !block_pages || receive_pages%block_pages) die("bridge geometry");
+  const uint32_t pg=(uint32_t)getpagesize();
+  if((uint64_t)block_pages*pg>16773120 || (uint64_t)block_pages*pg%4096) die("block exceeds one message");
+  struct hdr geometry={0};
+  uint64_t length=mesh_layout(&geometry,pg,(uint32_t)block_pages,(uint32_t)receive_pages,(uint32_t)arena_pages);
+  uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
+  if(pct && length>(uint64_t)(pct/100*(double)ram)) die("configured graph exceeds page capacity");
+  if(layout){ printf("%llu\n",(unsigned long long)length); return 0; }
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL); signal(SIGPIPE,SIG_IGN);
-  uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
-  const uint32_t pg=(uint32_t)getpagesize();
-  size_t h0=(mesh_hot_prefix((uint32_t)receive_pages,(uint32_t)arena_pages,pg)+pg-1)/pg*pg;
-  uint64_t wanted=arena_pages+receive_pages;
-  if(wanted>INT32_MAX) die("page index capacity");
-  int np=(int)wanted,pool=(int)receive_pages;
-  size_t d0=h0+mesh_send_storage_pages((size_t)pool,pg)*pg,span=(size_t)pg*np;
-  if(pct && d0+span>(uint64_t)(pct/100*(double)ram)) die("configured graph exceeds page capacity");
-  if(layout){ printf("%zu\n",d0+span); return 0; }
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
-  if(ftruncate(fd,(off_t)(d0+span))) die("ftruncate"); fchmod(fd,MESH_MODE);
-  struct hdr *M=mmap(NULL,d0+span,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); close(fd);
+  if(ftruncate(fd,(off_t)length)) die("ftruncate"); fchmod(fd,MESH_MODE);
+  struct hdr *M=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); close(fd);
   if(M==MAP_FAILED) die("mmap"); shm=name;
-  M->pgsz=pg; M->pool=(uint32_t)pool; M->arena=(uint32_t)(np-pool); M->node=(uint32_t)me;
-  M->version=MESH_VERSION; M->headers_off=h0; M->data_off=d0; atomic_store(&M->port_count,1);
-  __sync_synchronize(); M->magic=MESH_MAGIC;
-  int *free_pages=malloc((size_t)pool*sizeof *free_pages);
-  if(!free_pages) die("receive indices");
-  int available=pool;
-  for(int i=0;i<pool;i++) free_pages[i]=i;
-  struct mesh_port_info *port=mesh_ports(M);
-  link.pages=M; link.status=port; provider=&link.provider;
+  *M=geometry; M->node=(uint32_t)me; M->version=MESH_VERSION;
+  for(uint32_t r=0;r<mesh_rows(M);r++) atomic_store_explicit(&mesh_page(M)[r],MESH_ABSENT,memory_order_relaxed);
+  for(uint32_t page=0;page<M->pool;page+=M->block) mesh_push(M,FREE,page);
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
-  size_t maximum=QD/((pg+sizeof(struct mesh_page_header)+4095)/4096);
-  provider->completions=calloc(4*maximum,sizeof *provider->completions);
+  __sync_synchronize(); M->magic=MESH_MAGIC;
+  struct mesh_link link={.M=M}; provider=&link.provider;
+  size_t maximum=QD/(block_pages*pg/4096);
+  provider->completions=calloc(2*maximum,sizeof *provider->completions);
   provider->sges=calloc(2*maximum,sizeof *provider->sges);
-  provider->receives=calloc(2*maximum,sizeof *provider->receives);
-  provider->sends=calloc(2*maximum,sizeof *provider->sends);
+  provider->receives=calloc(maximum,sizeof *provider->receives);
+  provider->sends=calloc(maximum,sizeof *provider->sends);
   int status=0;
   if(!provider->completions || !provider->sges || !provider->receives || !provider->sends){ status=ENOMEM; goto teardown; }
-  size_t initial=(size_t)pool<maximum?(size_t)pool:maximum;
-  for(size_t i=0;i<initial;i++){
-    uint32_t page=(uint32_t)free_pages[pool-1-(int)i];
-    struct mesh_send *record=(struct mesh_send*)mesh_header(M,page);
-    record->page=page; __atomic_store_n(&record->row,0,__ATOMIC_RELEASE);
-    __atomic_fetch_or(mesh_hot_rx(M)+page/64,UINT64_C(1)<<(page%64),__ATOMIC_RELEASE);
-    provider->sges[i][0]=(struct ibv_sge){.addr=(uintptr_t)&record->header,.length=sizeof record->header};
-    provider->sges[i][1]=(struct ibv_sge){.addr=(uintptr_t)mesh_at(M,page),.length=pg};
-    for(size_t part=0;part<2;part++){
-      size_t at=2*i+part;
-      provider->receives[at]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|(part?0:UINT64_C(1)<<62)|page,
-        .sg_list=&provider->sges[i][part],.num_sge=1,.next=at+1<2*initial?&provider->receives[at+1]:NULL};
-    }
+  uint64_t entry;
+  for(size_t i=0;i<maximum && !mesh_pop(M,FREE,&entry);i++){
+    provider->sges[i][0]=(struct ibv_sge){.addr=(uintptr_t)mesh_at(M,(uint32_t)entry),.length=(uint32_t)(block_pages*pg)};
+    provider->receives[i]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|entry,.sg_list=&provider->sges[i][0],.num_sge=1,.next=i+1<maximum?&provider->receives[i+1]:NULL};
+    link.receives++;
   }
-  status=listener_up() || verbs_up(peer,(char*)M,d0+span,me,pg,sizeof(struct mesh_page_header),provider->receives);
-  if(status){ port->code=errno?errno:EIO; port->domain=1; goto teardown; }
-  link.receives=provider->receiving/2; available-=link.receives; provider->receiving=0;
-  for(size_t i=(size_t)link.receives;i<initial;i++){
-    uint32_t page=(uint32_t)free_pages[pool-1-(int)i];
-    __atomic_fetch_and(mesh_hot_rx(M)+page/64,~(UINT64_C(1)<<(page%64)),__ATOMIC_RELEASE);
-  }
-  snprintf(port->device,sizeof port->device,"%s",ibv_get_device_name(provider->context->device));
-  port->peer=(uint16_t)expected_peer;
-  atomic_store(&port->phase,MESH_PAIRED);
-  while(!stop){
-    struct desc released;
-    while(!pop(M,REL,&released)) free_pages[available++]=(int)released.page;
-    mesh_progress(M,&link,free_pages,&available);
-  }
-  status=port->code!=0;
+  if(link.receives<(int)maximum) provider->receives[link.receives?link.receives-1:0].next=NULL;
+  status=listener_up() || verbs_up(peer,(char*)M,length,me,(uint32_t)(block_pages*pg),link.receives?provider->receives:NULL);
+  if(status){ M->port.code=errno?errno:EIO; M->port.domain=1; goto teardown; }
+  provider->receiving=0;
+  snprintf(M->port.device,sizeof M->port.device,"%s",ibv_get_device_name(provider->context->device));
+  M->port.peer=(uint16_t)expected_peer;
+  atomic_store(&M->port.phase,MESH_PAIRED);
+  while(!stop) mesh_progress(&link);
+  status=M->port.code!=0;
 teardown:
-  atomic_store(&port->phase,MESH_STOPPED);
+  atomic_store(&M->port.phase,MESH_STOPPED);
   if(!down_verbs()){ fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno)); return 1; }
-  size_t receive_words=((size_t)M->pool+63)/64;
-  size_t send_words=((size_t)M->arena*(M->pgsz/sizeof(struct mesh_send))+63)/64;
-  for(size_t i=0;i<receive_words;i++) __atomic_store_n(mesh_hot_rx(M)+i,0,__ATOMIC_RELEASE);
-  for(size_t i=0;i<send_words;i++) __atomic_store_n(mesh_hot_tx(M)+i,0,__ATOMIC_RELEASE);
   if(lsock>=0) close(lsock);
   free(provider->completions); free(provider->sges); free(provider->receives); free(provider->sends);
-  free(free_pages); munmap(M,d0+span); return status;
+  munmap(M,length); return status;
 }

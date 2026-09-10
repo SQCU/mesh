@@ -5,12 +5,10 @@ import subprocess
 import sys
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
 def generate(header, output):
     tree = json.loads(subprocess.check_output(['clang', '-Xclang', '-ast-dump=json',
         '-fsyntax-only', '-x', 'c', str(header)], text=True))
-    names = {'hdr': 'Region', 'mesh_ctx': 'Context', 'mesh_rows': 'Rows',
-        'mesh_row': 'Row', 'mesh_row_range': 'RowRange', 'mesh_row_map': 'RowMap',
+    names = {'hdr': 'Region', 'mesh_ctx': 'Context', 'mesh_row_range': 'RowRange', 'mesh_row_map': 'RowMap',
         'mesh_row_function': 'RowFunction', 'mesh_row_binding': 'RowBinding',
         'mesh_row_metadata': 'Metadata', 'mesh_memory_span': 'MemorySpan'}
     records = {node['name']: node for node in tree['inner']
@@ -20,8 +18,7 @@ def generate(header, output):
         'uint16_t': 'c.c_uint16', 'uint32_t': 'c.c_uint32', 'uint64_t': 'c.c_uint64',
         'int64_t': 'c.c_int64'}
 
-    # ../design/algorithm-sources.md#configuration-storage-layout
-    def kind(value):
+        def kind(value):
         value = re.sub(r'\b(const|restrict|volatile)\b', '', value).strip()
         array = re.fullmatch(r'(.+)\[(\d+)\]', value)
         if array: return f'({kind(array[1])} * {array[2]})'

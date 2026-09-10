@@ -10,17 +10,18 @@ BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
 scope=gui; mesh_pct=; node=0; peer=""; region=/mesh0
-mesh_arena_pages=; mesh_receive_pages=
+mesh_arena_pages=; mesh_receive_pages=; mesh_block_pages=
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
 mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_receive_pages="${MESH_RECEIVE_PAGES:-$mesh_receive_pages}"
-geometry=(-A "$mesh_arena_pages" -R "$mesh_receive_pages")
+mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
+geometry=(-A "$mesh_arena_pages" -R "$mesh_receive_pages" -B "$mesh_block_pages")
 [ -n "$mesh_pct" ] && geometry+=(-M "$mesh_pct")
 
 case "$scope" in
 system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_RECEIVE_PAGES="$mesh_receive_pages" "$0" "$@"; fi
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_RECEIVE_PAGES="$mesh_receive_pages" MESH_BLOCK_PAGES="$mesh_block_pages" "$0" "$@"; fi
   DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
   LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
 gui)

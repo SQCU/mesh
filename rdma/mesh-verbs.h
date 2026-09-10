@@ -31,7 +31,6 @@ struct mesh_verbs {
   int receiving, sending;
 };
 static struct mesh_verbs *provider;
-// ../design/algorithm-sources.md#transport-page-addressing
 static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
   uintptr_t address=(uintptr_t)base+offset;
   return (struct ibv_sge){address,bytes,provider->regions[(address>>provider->region_shift)-((uintptr_t)base>>provider->region_shift)]->lkey}; }
@@ -39,12 +38,10 @@ static const char *shm; static _Atomic sig_atomic_t stop;
 static int lsock=-1;
 static int expected_peer=-1;
 static const char *listen_address, *selected_device;
-// ../design/algorithm-sources.md#transport-page-addressing
 static int down_pair(void){
   if(provider->pair){ if(ibv_destroy_qp(provider->pair)) return 0; provider->pair=0; }
   if(provider->completion_queue){ if(ibv_destroy_cq(provider->completion_queue)) return 0; provider->completion_queue=0; }
   return 1; }
-// ../design/algorithm-sources.md#transport-page-addressing
 static int down_verbs(void){
   if(!down_pair()) return 0;
   while(provider->region_count){ struct ibv_mr *r=provider->regions[provider->region_count-1];
@@ -54,19 +51,14 @@ static int down_verbs(void){
   if(provider->domain){ if(ibv_dealloc_pd(provider->domain)) return 0; provider->domain=0; }
   if(provider->context){ if(ibv_close_device(provider->context)) return 0; provider->context=0; }
   return 1; }
-// ../design/algorithm-sources.md#transport-page-addressing
 static void down(void){ if(shm)shm_unlink(shm); }
-// ../design/algorithm-sources.md#transport-page-addressing
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
-// ../design/algorithm-sources.md#transport-page-addressing
 static double monotime(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
-// ../design/algorithm-sources.md#transport-page-addressing
 static void onsig(int s){ (void)s; stop=1; }
 
 struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz,header_bytes; uint16_t lid; uint8_t gid[16]; uint16_t node; };
 #define XMAGIC 0x4d585047u
 
-// ../design/algorithm-sources.md#transport-page-addressing
 static int dial(struct addrinfo *a){
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
   fcntl(f,F_SETFL,O_NONBLOCK);
@@ -80,7 +72,6 @@ static int dial(struct addrinfo *a){
   setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
   return f; }
 
-// ../design/algorithm-sources.md#transport-page-addressing
 static int listener_up(void){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_INET6,.ai_flags=AI_PASSIVE},*r;
   if(getaddrinfo(listen_address,MESH_PORT,&hint,&r)) return -1;
@@ -93,7 +84,6 @@ static int listener_up(void){
   if(error){ close(lsock); lsock=-1; return -1; }
   fcntl(lsock,F_SETFL,O_NONBLOCK); return 0; }
 
-// ../design/algorithm-sources.md#transport-page-addressing
 static int exchange(int f, const struct qpi *mine, struct qpi *you, double deadline){
   size_t sent=0,got=0,send_bytes=mine?sizeof *mine:0,receive_bytes=you?sizeof *you:0;
   fcntl(f,F_SETFL,O_NONBLOCK);
@@ -117,7 +107,6 @@ static int exchange(int f, const struct qpi *mine, struct qpi *you, double deadl
   }
   return stop?-1:0; }
 
-// ../design/algorithm-sources.md#transport-page-addressing
 static int oob(const char *peer){
   if(!peer){
     fd_set reads; FD_ZERO(&reads); FD_SET(lsock,&reads);
@@ -138,7 +127,6 @@ static int oob(const char *peer){
   freeaddrinfo(r); return -1; }
 
 static struct ibv_port_attr pa;
-// ../design/algorithm-sources.md#transport-page-addressing
 static int initial_receive_post(char *mem,struct ibv_recv_wr *initial_receives,int parts){
     struct ibv_recv_wr *last=initial_receives,*unposted=NULL;
     int count=1;
@@ -157,8 +145,7 @@ static int initial_receive_post(char *mem,struct ibv_recv_wr *initial_receives,i
     if(error){ fprintf(stderr,"initial receive post=%d\n",error); errno=error; return -1; }
   return 0;
 }
-// ../design/algorithm-sources.md#transport-page-addressing
-static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t page_bytes, uint32_t header_bytes, struct ibv_recv_wr *initial_receives){
+static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t message_bytes, struct ibv_recv_wr *initial_receives){
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
   int f=oob(peer); if(f<0) return -1;
@@ -197,7 +184,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
     provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
   if(ibv_query_port(provider->context,1,&pa)){ close(f); return -1; }
-  size_t frames=(page_bytes+header_bytes+4095)/4096;
+  size_t frames=(message_bytes+4095)/4096;
   int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   int completions=4*(frame_capacity/(int)frames);
   if(!completions || capabilities.max_cqe<completions){ close(f); errno=EOPNOTSUPP; return -1; }
@@ -214,7 +201,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   if(ibv_modify_qp(provider->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=page_bytes,.header_bytes=header_bytes,.node=(uint16_t)me},you;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.header_bytes=0,.node=(uint16_t)me},you;
   memcpy(mine.gid,&gid,16);
   fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
   double exchange_deadline=monotime()+10;
@@ -233,7 +220,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   rc=ibv_modify_qp(provider->pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
   if(rc){ fprintf(stderr,"rts rc %d, failed\n",rc); close(f); return -1; }
-  if(initial_receives && initial_receive_post(mem,initial_receives,header_bytes?2:1)){ close(f); return -1; }
+  if(initial_receives && initial_receive_post(mem,initial_receives,1)){ close(f); return -1; }
   if(peer && exchange(f,&mine,NULL,exchange_deadline)){ close(f); return -1; }
   close(f);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);

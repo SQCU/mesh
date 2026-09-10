@@ -3,7 +3,6 @@
 #define STREAM_PAGES 65536u
 #define STREAM_BYTES 16384u
 
-// ../design/algorithm-sources.md#one-gibibyte-provider-stream
 int main(int argc,char **argv){
   if(argc<3){ fprintf(stderr,"usage: %s send|receive peer [device] [timeout_seconds] [window_pages]\n",argv[0]); return 2; }
   int sending=!strcmp(argv[1],"send"),status=0;
@@ -38,7 +37,7 @@ int main(int argc,char **argv){
   }
   double deadline=monotime()+timeout;
   if(listener_up() || verbs_up(sending?NULL:argv[2],memory,bytes,sending?0:1,
-    STREAM_BYTES,0,sending?NULL:receives)){ status=1; goto storage; }
+    STREAM_BYTES,sending?NULL:receives)){ status=1; goto storage; }
   if(stop || !provider->pair || monotime()>=deadline){ status=1; goto storage; }
   uint32_t actual=(uint32_t)(sending?provider->send_capacity:provider->receive_capacity);
   if(actual<capacity) capacity=actual;

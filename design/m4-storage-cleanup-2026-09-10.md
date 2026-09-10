@@ -21,7 +21,7 @@ assets, a latest release checkpoint, and small measurement records were retained
 The final release and cartlane directories measured 17 GiB and 19 GiB.
 
 The corrected ownership is documented in
-[algorithm-sources.md](algorithm-sources.md#configuration-storage-layout):
+the page table (pages-and-functions.md):
 canonical Git checkouts and shared installed dependencies replace deployment
 snapshots; the game uses its existing assets; transient generated files and
 superseded generated continuation artifacts are removed by their application

@@ -1,10 +1,5 @@
 # Distributed reduce over page tables
 
-Use the [complete replacement requirements](completion-requirements.md) for the
-current implementation and evidence inventory. The incident record below is
-historical; none of its citations establishes that the replacement caller has
-been implemented or that a measured latency bound has been met.
-
 The September 9, 2026 instruction deletes CRC/digest checking entirely. Mesh
 does not hash payloads, exchange or compare digests, or retain pages for checks.
 Device and transport error metadata remains. Digest mechanisms in the incident
@@ -16,12 +11,12 @@ interface is `out, meta = meshfunction(x)`: literal error codes and where/when
 they occurred propagate asynchronously through metadata pages, separately from
 numerical outputs. The callgraph never consumes them to control execution;
 only the calling context interprets and handles them. See the
-[current source disposition](algorithm-sources.md#operator-clarification-asynchronous-error-metadata).
+[page table](pages-and-functions.md#what-the-page-table-is).
 
 This is the specification for the next reduce runtime in `rdma/`. Every
 requirement below draws on published prior art; the operator's specification
 is binding for this repository. The
-[implementation audit](dataflow-implementation-audit.md) scopes the citations,
+implementation record scopes the citations,
 records source divergences and states the performance evidence still required.
 
 ## Standard of correctness
@@ -174,7 +169,7 @@ execution; collective algorithms establish communication-volume bounds.
 These mechanisms make the design implementable. They do not establish that
 any cited system is literally this caller or that the caller is already built.
 
-The [primary-source comparison](dataflow-implementation-audit.md#what-is-mature-and-what-the-citations-actually-establish)
+The primary-source comparison
 replaces the original unqualified bibliography. It records where Monsoon,
 Active Messages, Legion, Naiad, NCCL, PyTorch async-TP and the end-to-end
 argument agree with this design and where their claims or implementations
@@ -192,7 +187,7 @@ measurement. Monsoon is not a measurement of that Metal implementation.
 The recorded divergences include duplicated readiness state, incorrect
 addressing and generation arithmetic, and unsupported claims of validation.
 The record is kept here so that they can be recognized and corrected. The
-[audit table](dataflow-implementation-audit.md#record-of-divergence-and-the-ordinary-engineering-it-failed)
+record
 adds historical evidence and dispositions without attributing motives.
 
 - A `K_DIGEST` control frame carrying the sent hash, a mismatch poisoning the
@@ -231,7 +226,7 @@ are especially serious: they invalidate the review evidence itself.
 A new application frame, handshake, phase, token, gate or scheduler that
 restates readiness violates this repository's contract before measurement.
 That architectural rejection does not prove a universal timing theorem.
-The [performance obligations](dataflow-implementation-audit.md#minimum-expectations-of-performance)
+The performance obligations
 require matched baselines, measured local functions, physical-link traffic,
 launch and scan costs, and separate latency and throughput results.
 
@@ -268,7 +263,7 @@ it duplicated readiness and could mark work consumed before an output existed.
 The replacement must not reintroduce that authority under another name.
 
 The required author/publication list and mechanism-specific implementation
-obligations are in [algorithm sources](algorithm-sources.md). In particular,
+obligations are in [pages and functions](pages-and-functions.md). In particular,
 Papadopoulos and Culler establish storage-associated operand matching; they do
 not establish this exact RDMA/Metal binding or its measured performance.
 

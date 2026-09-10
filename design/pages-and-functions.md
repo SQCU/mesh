@@ -1,20 +1,16 @@
 # Pages and functions
 
-The [complete replacement requirements](completion-requirements.md) track the
-whole implementation and its acceptance evidence. On the actual Thunderbolt
-substrate, literal pages use SEND/RECV, as documented by Apple TN3205; software
-publication of a received page does not require hardware remote-write support.
-Statements below about instant execution and topology-independent utilization
-express the desired absence of added control dependencies, not a zero-latency
-theorem or a measured performance guarantee.
+Plain statements of the algorithm, in the operator's words: mesh, peers, pages,
+page table, rows, stamps, use count, buffers as function returns, functions,
+release, reduce, index page, NFE, metadata. Every other word that has appeared
+in code ("stage", "chunk", "version", "gate", "token", "group", "consumer",
+"scheduler", "header", "record", "claim") named a control-flow object standing
+in for something the page table already holds, and is not part of the algorithm.
 
-Plain statements of the algorithm. Only the words used in the operator's own
-turns: mesh, peers, pages, page table, rows, stamps, use count, buffers as
-function returns, functions, release, reduce, accumulator page, index page,
-NFE, status word, metadata. Every other word that has appeared in code
-("stage", "chunk", "version", "gate", "token", "group", "consumer",
-"scheduler") named a control-flow object standing in for something the page
-table already holds, and is not part of the algorithm.
+On the Thunderbolt substrate, pages travel by SEND/RECV as documented by Apple
+TN3205: a receive lands in whichever posted buffer is next, the hardware holds a
+send until the peer has posted a receive, and completion of a send means the
+NIC has finished reading the source. Nothing below requires more than that.
 
 ## Backing memory and logical values
 
@@ -28,258 +24,122 @@ indices and strides; memory binding owns physical translation. Dataflow owns
 logical presence and use counts. Transport completes registered memory accesses;
 it neither interprets numerical stamps nor changes them on storage retirement.
 
-The older references below to output pages describe the backing for output
-values, not a requirement that every logical value or struct consume a page.
-This clarification supersedes the mandatory in-page header and transport-owned
-row-publication prescriptions in transport-table tickets A1/A2.
+## What the page table is
+
+A row is memory. Nothing describing a page is stored in the page or beside it;
+anything per page is a bit in a page-indexed bitmap inside the page table
+struct. The table's operations are OR a bit, AND-compare a range against a
+static mask, push and pop the free index. No other operation exists, no
+per-page struct exists, and no state is created after configuration.
+
+Concretely, one region of registered memory per node holds, in this order:
+
+- the free index and the submission index: two fixed rings of page numbers;
+- bit planes over logical rows: PRESENT, CONSTANT, FREED, and one READ plane
+  per reader ordinal. A plane is one bit per row, sixty-four rows per word;
+- `page[row]`: which backing page a logical row currently names;
+- `mask[row]`: which READ planes must be set before the row's value is done;
+- `base[binding]`: the first logical row of each receive binding;
+- the pages.
+
+The table gives every actor — bridge, client threads, GPU, peer — enough
+information to know what it may touch. A page in the free index may be written
+by the NIC. A row with PRESENT set and a READ bit clear holds a value some
+reader still needs. A row whose READ bits cover its mask is finished. Nothing
+in the table prevents a write; an actor that acts on stale information is a
+configuration error, found by the numerical comparison, not a runtime
+condition to be handled.
+
+Every transition is an atomic OR, so it is idempotent: a duplicate sets a bit
+that is already set and nothing happens. There is nothing to claim, count,
+lock, retry, sweep, or acknowledge. A function is issued when its inputs' rows
+are PRESENT (or CONSTANT) and unread by it, and its outputs' rows are either
+never produced or read by every reader in their mask; issue clears the outputs'
+bits. Completion ORs PRESENT on the outputs and the reader's bit on the inputs.
+A landing block whose rows are all read is pushed on the free index by whichever
+reader observed that first — decided by one OR whose old value it inspects.
+
+## Blocks
+
+Producers on this substrate write contiguous multi-page matrices, and a SEND
+lands anonymously, so the identity of a transfer cannot ride in a per-page
+prefix. The transfer unit is therefore a block: the pages of one packing group
+of a transmitted value, followed by one page holding a tag (binding, index).
+One block is one work request and one completion. The tag pages are written
+once, at configuration; they are never read by a numerical function. On
+arrival the bridge reads the tag, stores `page[]` for the block's rows and ORs
+PRESENT. On send completion it ORs the NIC's READ bit. That is the whole
+transport-to-table interface.
 
 ## One NFE on two peers
 
-### Setup
-
-One page table holds every page the runtime will use. Each function output
-is a range of rows in that table. A row holds three things: which page, its
-stamp, and its use count. The use count is the use-checker. The page table is
-the only state.
-
-Every function has a known number of output pages. Every function input is
-the output pages of some function, on this node or on a peer. All of this is
-known before the NFE starts.
-
-All page-table allocations needed by the complete compute graph are determined
-before launch, including parameters, intermediates, accumulators, indices and
-outputs. Numerical execution does not discover allocations or introduce
-data-dependent control flow to repair missing storage.
-
-The calling process may invalidate the page table whenever it chooses, including
-when a kernel is hung. The mesh API must expose that operation directly. Pages
-may be consumed, freed and invalidated; these operations do not start recovery,
-retry, parity, or waiting protocols inside computation, transport or reduction.
-The caller decides whether to rerun the complete feed-forward NFE.
-
-Every node has NVMe storage or is transitively RDMA-connected to a node that
-does. This is a deployment invariant, not a capability to infer during an NFE.
-Deleted or invalidated DNN parameter pages can be loaded again from local NVMe
-or retransmitted from such a peer. Parameter residency is not a reason to retain
-an invalidated graph or add a recovery protocol to its numerical functions.
-
-### Asynchronous error metadata
-
-The calling interface is `out, meta = meshfunction(x)`. `out` contains numerical
-values; `meta` contains literal error codes and their callgraph location and
-occurrence (where and when). Error status returns are permitted only through
-this asynchronous metadata channel. Returning the pair does not synchronously
-wait for execution or for a final error verdict.
-
-Composition carries metadata monadically alongside values. A function in the
-callgraph does not consume error metadata to branch, short-circuit, suppress
-arithmetic, synchronize, wait, retry or recover. Only the calling context
-interprets and handles it, including deciding whether to repeat the complete
-feed-forward NFE. Here monadic propagation does not mean exception-style
-short-circuiting on an error.
-
-Metadata storage is also configured before launch and occupies literal
-page-table pages. It is a distinct return channel, not a private allocation,
-completion token or readiness gate. Error codes never replace numerical output
-values. A terminal device completion publishes the actual configured output
-pages independently of any error metadata. Their stamp certifies availability,
-not correctness: the calling context may reject their contents using `meta`.
-Without a terminal completion the output remains unavailable. Publishing
-metadata alone neither invents a numerical value nor certifies that outstanding
-work has completed. An error-dependent publication gate would consume metadata
-inside the callgraph and is excluded by the operator's instruction.
-
-### The NFE, number k
-
 1. A function runs on the GPU. It writes its output straight into pages. When
-   a page is written, its row gets stamp k. Nothing else is said.
-2. Pages the peer needs go over the mesh. On the peer they land in free pages.
-   The peer's rows for that output get the page and stamp k.
-3. A reduce is a function. Its inputs are two buffers: my partial and the
-   peer's partial. It looks at the rows of both. When row p carries stamp k in
-   both, it reads page p from each, adds them in high precision into an
-   accumulator page, and marks p in its index page. When every page of a row
-   of the result is in, it writes the normalized row into its output pages and
-   stamps them k. It does this page by page as pages arrive. Its output pages
-   go to the peer.
-4. The next function has two inputs: my reduce output and the peer's reduce
-   output. When all their rows carry stamp k, it runs. It reads those pages
-   directly. There is no copy.
-5. The GPU is given a function only after all its input rows carry stamp k.
-   So the GPU never waits.
-
-### Freeing
-
-6. When function g's output rows carry stamp k on every node that needed
-   function f's output, f's output pages of NFE k are done. The runtime calls
-   release on those rows. The use count goes down. At zero the page goes back
-   to the free list and its contents are zeroed, asynchronously. A page that
-   came from the peer goes back to the bridge. No node tells another node
-   anything.
-7. A page is written again only after release. Two NFEs can be in flight
-   because rows for NFE k+1 point at other pages until the rows for NFE k are
-   released.
-
-### Link error
-
-8. A negative link status is reported with its location and occurrence in
-    asynchronous metadata for the affected invocation. The callgraph does not
-    consume that status. The calling context may reject the result and rerun
-    the complete feed-forward NFE; mesh does not perform recovery or replay.
+   it completes, its output rows get PRESENT. Nothing else is said.
+2. Rows the peer needs go over the mesh as blocks. On the peer they land in
+   free pages; the peer's rows for that output get `page[]` and PRESENT.
+3. A reduce is a function. Its inputs are my partial rows and the peer's
+   landed partial rows. When both are PRESENT and unread by it, it runs: it
+   adds in high precision, normalizes, and writes the result into its output
+   rows, which are then PRESENT. Its output rows go to the peer.
+4. The next function reads my reduce output and the peer's. When all its
+   input rows are PRESENT, it runs, reading the pages where they are. There
+   is no copy.
+5. The GPU is given a function only after its inputs are present, so it never
+   waits.
+6. When every reader in a row's mask has ORed its bit, the row is done. An
+   arena row is rewritten by its producer's next issue. A landing block goes
+   back to the free index, and the bridge posts it as the next receive.
+7. Two NFEs can be in flight because their rows are different rows.
+8. A link or device error is written to the port record or the function's
+   metadata record. No function reads it. The calling context decides whether
+   to rerun the whole NFE.
 
 ## The same NFE on infinitely many Mac Minis
 
-(After `metal-microbench/docs/mesh_distributed_reduction_analysis.md`:
-install the program once; keep weights where they live; keep each
-intermediate at its next consumer; a finished piece enables its local
-continuation with no host decision; every Mini has at most three links; a
-result at depth D comes back in D hops; infinite workers do not remove the
-per-link ceiling; consume a partition as soon as it has arrived.)
+Each Mini holds its share of the weights, one page table, and links to at most
+three neighbours. A function's input rows all PRESENT means it runs. Output
+rows a neighbour needs go one hop as blocks and land in that neighbour's rows.
+Partials are combined as they pass, so the load on any link is bounded no
+matter how many Minis lie beyond it. Latency is hops times hop time plus the
+service time on the longest dependency chain; utilization is the roofline
+fraction reached while inputs are present. Neither number changes with the
+number of Minis. A presentation that changes them — a stage, a chunk, a gate, a
+group, a copy into a hidden buffer, a wait on anything but bits — is not this
+algorithm.
 
-### The mesh
+## Waiting for messages about data
 
-There are infinitely many Mac Minis. Each one has at most three links. Each
-link joins two adjacent Minis. We look at one link and the two Minis on its
-ends. Everything below is what one Mini does. Every Mini does the same thing.
-Nothing a Mini does depends on how many Minis there are.
+Suppose a Mini waits for a message that says the data is coming, or is done,
+or may be used — a token, a gate, a ready flag, a scheduler's decision, a
+completion callback standing in for the pages — and acts on the message.
 
-### What a Mini holds
+1. The message is a second thing on the link; every dependency now costs a hop
+   for the pages and a hop for the message, and on a deep chain the extra wait
+   is unbounded.
+2. The message can be true and the data absent; making that safe needs
+   acknowledgements, retries, and ordering — a protocol on top of delivery.
+3. The message can be false and the data present; the Mini sits idle with
+   everything it needs.
+4. The wait binds this Mini to another's control flow; there is always a
+   slowest scheduler somewhere.
+5. Work handed to the GPU while it waits for a message is killed by the
+   watchdog, and every buffer behind it dies with it (measured 2026-09-08).
+6. Messages need their own storage and their own freeing, unbounded on an
+   unbounded mesh; bits are bounded by the rows, which were needed anyway.
+7. A speculative message lets a function run before its data and write a wrong
+   output with a good bit.
+8. Fan-in multiplies all of the above; the bits give one check for all inputs.
 
-A Mini holds its share of the program's weights. They never move. It holds
-one page table. The table has a row for every page the Mini will ever use. A
-row holds a page, a stamp, and a use count. That table is the Mini's whole
-state. Every function output is a range of rows in the table. Every function
-input is some function's output rows, on this Mini or on an adjacent Mini.
+A Mini acts on data, and only on data, the moment it is present. The bit is the
+only signal.
 
-### One NFE, number k
+## Where this comes from
 
-1. A function's input rows all carry stamp k. Now the function runs. It is
-   given to the GPU only now. The GPU never waits.
-2. The function writes its output into pages. When a page is written, its row
-   gets stamp k. Nothing else is said.
-3. An output page that an adjacent Mini needs goes over the link to that Mini.
-   It travels one hop. It lands in a free page there. The row for it on that
-   Mini gets the page and stamp k. A result at depth D from here arrives after
-   D hops. That is the whole latency of transport.
-4. A reduce is a function. Its inputs are my partial and the partial that
-   arrived from the adjacent Mini. When row p of both carries stamp k, the
-   reduce adds page p of each in high precision into an accumulator page, and
-   marks p in its index page. It does this page by page as pages land. It does
-   not wait for the rest. When a row of the result is complete, it writes that
-   row into its output pages and stamps them k. Those pages go one hop to the
-   adjacent Mini.
-5. The next function reads my reduce output pages and the pages that came
-   back from the adjacent Mini. When all those rows carry stamp k, it runs. It
-   reads the pages where they are. There is no copy.
-6. Partials are combined as they pass. A Mini that has two partials for the
-   same rows adds them before the pages go on. So the pages crossing any link
-   are bounded no matter how many Minis lie beyond it. Infinite Minis do not
-   raise the load on this link.
-
-### Freeing
-
-7. When the rows of function g's output carry stamp k on every Mini that
-   needed function f's output, f's output pages of NFE k are done. The runtime
-   calls release on those rows. The use count goes down. At zero the page
-   returns to the free list, and it is zeroed asynchronously. A page that came
-   over the link goes back to the bridge. No Mini tells any Mini anything. The
-   proof that the page may be freed is the stamp on the dependent's rows, and
-   that stamp already had to arrive for the next function to run.
-8. A page is written again only after release. Two NFEs can be in flight
-   because the rows for NFE k+1 point at other pages until the rows for NFE k
-   are released.
-
-### Link error
-
-9. A negative link status is reported with its location and occurrence in
-    asynchronous metadata for the affected invocation. The callgraph does not
-    consume that status. The calling context may reject the result and rerun
-    the complete feed-forward NFE; mesh does not perform recovery or replay.
-
-### Why two Minis are the same as infinitely many
-
-Each Mini waits only on its own input rows. Each link carries only the pages
-its two ends exchange, already combined. So the latency of an NFE is the
-number of hops on its longest dependency chain times the hop time, plus the
-service time of the functions on that chain. The FLOPs utilization of a Mini
-is the fraction of its roofline its functions reach while their inputs are
-present. Neither number changes if you draw the mesh as two Minis or as an
-infinite tree of rings. A presentation that changes them — a stage index, a
-chunk, a gate, a group, a copy into a hidden buffer, a wait on anything but
-stamped rows — is not describing this algorithm.
-
-## Addendum: waiting for messages about data, on infinitely many Minis
-
-Suppose a Mini does not wait on its input rows. Suppose it waits for a
-message that says the data is coming, or is done, or may be used: a token, a
-gate value, a "ready" flag, a scheduler's decision, a completion callback that
-stands in for the pages. Then it acts on the message. This is what goes wrong.
-
-1. **The message is a second thing on the same link.** The pages take one
-   hop. The message about them takes a hop too. Every dependency on the chain
-   now costs a hop for the pages and a hop for the message. On a chain of
-   depth D the NFE waits for D messages it did not need. On an infinite mesh
-   D is not bounded, so the extra wait is not bounded either. Waiting on the
-   rows costs nothing extra: the row is stamped when the page lands.
-2. **The message can be true and the data still absent.** A message says
-   something about the sender's state. The pages may still be in flight, or
-   lost, or land out of order, or be corrupt. Acting on the message is acting
-   on a claim. To make the claim safe, the sender and receiver need
-   acknowledgements, retries, and ordering. That is a protocol on top of page
-   delivery. The calling context determines whether the numerical results are
-   acceptable; mesh adds no correctness exchange.
-3. **The message can be false and the data present.** The pages landed and
-   the rows are stamped, but the message is late, or the sender concluded
-   early, or the link that carried the message broke while the link that
-   carried the pages did not. The Mini sits with everything it needs and does
-   nothing. Waiting on the rows would have run the function at once.
-4. **The wait binds this Mini to another Mini's control flow.** A message
-   comes from a sender's scheduler, not from data. If that scheduler is slow,
-   this Mini is slow, and every Mini downstream is slow, even though their
-   pages have all arrived. On an infinite mesh there is always a slowest
-   scheduler somewhere, and the chain of "waiting for whose message" has no
-   end. Waiting on rows binds a Mini only to the pages in front of it.
-5. **Work handed to the GPU while it waits for a message is killed or idles.**
-   We measured this: a command buffer that waits on a signal for seconds is
-   ended by the watchdog, and every buffer behind it dies with it. A GPU given
-   only functions whose rows are stamped runs at its roofline fraction. Its
-   utilization then does not depend on the mesh at all.
-6. **Messages need their own storage and their own freeing.** Every message in
-   flight is state: a queue entry, a counter, an event value, a callback. On an
-   infinite mesh the number of messages in flight is not bounded, so this
-   state is not bounded, and it is freed by other messages. Pages are freed by
-   release when the dependent's rows are stamped. That state is bounded by the
-   pages, and the pages were needed anyway.
-7. **A speculative message lets a function run before its data.** "The pages
-   will arrive" is not "the pages have arrived". A function that runs on the
-   promise reads stale pages and writes a wrong output with a good stamp. The
-   calling context may reject the result, but the work was wasted and the
-   wrong output already travelled a hop.
-8. **Fan-in multiplies all of the above.** A function whose inputs come from
-   many Minis would need a message from each, each a hop, each a race with its
-   pages. The rows give one check for all of them: are they all stamped k.
-
-The rule that follows is the one already in the spec. A Mini acts on data,
-and only on data, and acts the moment the data is present. The row's stamp is
-the only signal. The GPU is handed only functions whose rows are stamped. The
-calling context receives errors through asynchronous metadata, never through
-numerical values or a status gate inside the callgraph. With that
-rule a Mini's latency and utilization are the same whether it has one
-neighbour or an infinite mesh behind it. Without it they are not.
-
-## What this is called elsewhere
-
-On September 9, 2026, the operator removed the CRC/digest feature as superfluous.
-Mesh does not hash payloads, exchange digests, compare them, or retain pages for
-those operations. Earlier checking clauses are superseded. Literal device and
-transport errors still travel through asynchronous metadata; the calling context
-owns numerical acceptance and whole-NFE repetition.
-
-The firing principle is tagged-token dataflow; operand slots and presence
-bits have hardware prior art in Monsoon. In-data flags, dependency-driven
-execution and pipelined reductions also have published implementations.
-The [citation audit](dataflow-implementation-audit.md) distinguishes those
-mechanisms from the exact caller required here, which remains an implementation
-obligation. It also records the divergent code and corrects the unmeasured
-claim of strict performance superiority. The binding reduce description and
-historical incident record are in [distributed-reduce.md](distributed-reduce.md).
+The firing principle is tagged-token dataflow; operand slots and presence bits
+have hardware prior art in Papadopoulos and Culler's Monsoon (ISCA 1990), where
+presence bits are a small structure beside the data words, not a header on
+them. Reduce-scatter followed by all-gather is Rabenseifner (ICCS 2004) and
+Patarasuk–Yuan (JPDC 2009). Numerical acceptance at the endpoints is Saltzer,
+Reed and Clark (TOCS 1984). None of these certifies this implementation's
+latency; that is what `transport-one-gib-2026-09-10.md` and the numerical
+comparison in `metal-microbench` are for.
