@@ -18,7 +18,7 @@ def generate(header, output):
         'uint16_t': 'c.c_uint16', 'uint32_t': 'c.c_uint32', 'uint64_t': 'c.c_uint64',
         'int64_t': 'c.c_int64'}
 
-        def kind(value):
+    def kind(value):
         value = re.sub(r'\b(const|restrict|volatile)\b', '', value).strip()
         array = re.fullmatch(r'(.+)\[(\d+)\]', value)
         if array: return f'({kind(array[1])} * {array[2]})'
