@@ -1184,7 +1184,28 @@ existing port metadata; it does not manufacture completions for an inferred
 unposted prefix or tail. Actual completions or outer-requested QP destruction
 retain responsibility for physical release. This follows Saltzer–Reed–Clark's
 endpoint interpretation and the existing canonical page ownership contract.
-The connected one-SGE binding has not yet been built or executed.
+The connected one-SGE binding subsequently built on both participants. Its
+configuration reached registration but the M5's 101st 1-GiB region failed with
+literal error -12, before any numerical invocation. The provider advertises
+100 MRs and its `tbt_reg_mr` checks returned MR indices against 100
+(`0x27F6DAF98`–`0x27F6DAFA0`). This is an actual registration-count constraint,
+not a reason to reduce the authorized 80% backing allocation.
+
+The bridge now realizes one power-of-two registration extent per configured
+provider. Starting at 1 GiB, it increases the extent until the exact number of
+aligned intervals intersecting the entire mapping fits `max_mr`; partial first
+and last intervals count too. The 102.4-GiB M5 mapping therefore needs 2-GiB
+extents. The numerical lookup uses the configured address shift and MR array;
+it does not divide, choose a strategy, or register memory during invocation.
+Metal's independent 1-GiB aliases continue to view the same physical pages.
+`tbt_reg_mr` retains the length in a 64-bit register, passes it unchanged to
+`ibv_cmd_reg_mr` (`0x27F6DAE94`, `0x27F6DAF54`) and stores the full base/length
+pair (`0x27F6DB00C`). Thus 2 GiB is representable by the inspected provider
+binding; actual registration success remains to be checked in the integrated
+run. The advertised `max_mr_size=0xfa0000` was already exceeded by the observed
+successful 1-GiB registrations and is not treated as an additional inferred
+limit. This is configuration realization of the same registered page mapping,
+not a second storage path or a smaller-memory fallback.
 
 `mesh_rows_create` installs a stable table identity during configuration and
 allocates the row table from canonical pages. `mesh_rows_allocate` reserves

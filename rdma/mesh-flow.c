@@ -21,12 +21,12 @@
 #include <pthread.h>
 #include "mesh-flight.h"
 
-#define CHUNK (1ull<<30)
 #define QD 4095
 struct mesh_verbs {
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
   struct ibv_qp *pair; struct ibv_mr **regions;
   int region_count, send_capacity, receive_capacity;
+  unsigned region_shift;
   struct ibv_wc *completions; int completed;
   struct ibv_sge (*sges)[2];
   struct ibv_recv_wr *receives; struct ibv_send_wr *sends;
@@ -36,7 +36,7 @@ static _Thread_local struct mesh_verbs *provider;
 // ../design/algorithm-sources.md#transport-page-addressing
 static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
   uintptr_t address=(uintptr_t)base+offset;
-  return (struct ibv_sge){address,bytes,provider->regions[address/CHUNK-(uintptr_t)base/CHUNK]->lkey}; }
+  return (struct ibv_sge){address,bytes,provider->regions[(address>>provider->region_shift)-((uintptr_t)base>>provider->region_shift)]->lkey}; }
 static _Thread_local const char *shm; static _Atomic sig_atomic_t stop;
 static _Thread_local int lsock=-1;
 static _Thread_local uint64_t mynonce, peernonce;
@@ -161,11 +161,19 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   if(ibv_query_device(provider->context,&capabilities)){ close(f); return -1; }
   if(!provider->domain) provider->domain=TRACE(ALLOC_PD,provider->context,0,0,ibv_alloc_pd(provider->context));
   if(!provider->domain){ close(f); return -1; }
-  size_t head=(uintptr_t)mem%CHUNK, regions=(head+span+CHUNK-1)/CHUNK;
+  if(capabilities.max_mr<1){ close(f); errno=EOPNOTSUPP; return -1; }
+  if(!provider->regions){
+    provider->region_shift=30;
+    while((((uintptr_t)mem+span-1)>>provider->region_shift)-((uintptr_t)mem>>provider->region_shift)+1>(size_t)capabilities.max_mr)
+      provider->region_shift++;
+  }
+  size_t extent=(size_t)1<<provider->region_shift;
+  size_t head=(uintptr_t)mem&(extent-1), regions=(head+span+extent-1)>>provider->region_shift;
   if(!provider->regions) provider->regions=calloc(regions,sizeof *provider->regions);
   if(!provider->regions){ close(f); fprintf(stderr,"alloc regions: retrying\n"); return -1; }
   while((size_t)provider->region_count<regions){
-    size_t o=provider->region_count?(size_t)provider->region_count*CHUNK-head:0, end=((size_t)provider->region_count+1)*CHUNK-head;
+    size_t o=provider->region_count?((size_t)provider->region_count<<provider->region_shift)-head:0;
+    size_t end=((size_t)provider->region_count+1)*extent-head;
     size_t n=(end<span?end:span)-o;
     provider->regions[provider->region_count]=TRACE(REG_MR,mem+o,o,n,ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE));
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
