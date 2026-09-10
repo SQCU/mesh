@@ -181,7 +181,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    1 | #ifndef MESH_PAGES_H
    2 | #define MESH_PAGES_H
    3 | #include "mesh.h"
-   4 | 
+   4 |
    5 | #define MESH_PAGES_LOCAL UINT16_MAX
    6 | #define MESH_PAGES_DEPENDENCIES 8
 ```
@@ -204,7 +204,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 17–59.** Retain configuration, literal row/page access, direct completion, release, status/recovery concepts. Remove filled/highest/producible/hook and heap-digest APIs with their state. Claim/cancel must operate solely on real row state. Diagnostics are O, not dependency APIs.
 
 ```text
-  17 | 
+  17 |
   18 | mesh_pages *mesh_pages_compile(struct mesh_ctx *context, struct mesh_epoch epoch, const unsigned char plan[32],
   19 |   const struct mesh_pages_slot *slots, size_t count, uint32_t versions, struct mesh_pages_policy policy);
   20 | int mesh_pages_reduces(mesh_pages *p, const struct mesh_pages_reduce *reduces, size_t count);
@@ -212,7 +212,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   22 | void mesh_pages_stop(mesh_pages *p);
   23 | int mesh_pages_progress(mesh_pages *p);
   24 | int mesh_pages_free(mesh_pages *p);
-  25 | 
+  25 |
   26 | size_t mesh_pages_header(const mesh_pages *p);
   27 | size_t mesh_pages_payload(const mesh_pages *p);
   28 | const uint32_t *mesh_pages_entries(const mesh_pages *p, uint32_t slot);
@@ -231,7 +231,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   41 | size_t mesh_pages_writing(const mesh_pages *p);
   42 | uint32_t mesh_pages_filled(const mesh_pages *p, uint32_t slot, uint64_t generation);
   43 | uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot);
-  44 | 
+  44 |
   45 | void mesh_pages_produce_hook(mesh_pages *p, mesh_pages_hook hook, void *capture);
   46 | uint64_t mesh_pages_producible(const mesh_pages *p, uint32_t slot);
   47 | int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation);
@@ -266,7 +266,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   10 | #include <sys/mman.h>
   11 | #include <time.h>
   12 | #include <unistd.h>
-  13 | 
+  13 |
   14 | #define UNUSED (UINT32_MAX-1)
   15 | #define ABSENT UINT32_MAX
   16 | #define WINDOW (MESH_RING/2)
@@ -276,7 +276,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   20 | #define WRITING (UINT64_C(1)<<63)
   21 | typedef _Float16 half8 __attribute__((ext_vector_type(8)));
   22 | typedef float float8 __attribute__((ext_vector_type(8)));
-  23 | 
+  23 |
 ```
 
 **M, lines 24–63.** R: table, stamp, uses. A: immutable spec/maps/function list. X/D: publish/publishing/pending, fill_generation/fill_count/highest/complete/producible/released, heap digest ring, owner array and algorithm work queue. Transport handles and hardware completion ownership are B; counters may not authorize numerical work. Fault/diagnostic fields are O.
@@ -327,7 +327,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 64–93.** Page address calculation and hash arithmetic are A. parity is D with rotating publication/digest storage. Clock/fault injection is O, not readiness.
 
 ```text
-  64 | 
+  64 |
   65 | static uint64_t clock_ns(void){
   66 |   struct timespec clock; clock_gettime(CLOCK_MONOTONIC,&clock);
   67 |   return (uint64_t)clock.tv_sec*1000000000u+clock.tv_nsec; }
@@ -344,7 +344,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   78 |   if(b>=a) b++;
   79 |   *first=(uint32_t)a; *second=(uint32_t)b; return 1;
   80 | }
-  81 | 
+  81 |
   82 | __attribute__((target("crc")))
   83 | uint64_t mesh_pages_hash(const void *data, size_t bytes, uint64_t seed){
   84 |   const unsigned char *d=data; size_t n=bytes/32;
@@ -356,7 +356,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   90 |   for(size_t i=n*32;i<bytes;i++) a=__builtin_arm_crc32cb(a,d[i]);
   91 |   return mix(((uint64_t)a<<32|b)^mix((uint64_t)c<<32|e));
   92 | }
-  93 | 
+  93 |
 ```
 
 **M, lines 94–158.** A: pre-invocation allocation, range/layout checks, static maps and reverse edges. X/D: allocations for separate ownership/publication/pending arrays. Only storage-root spans initialize use counts on claim and recycle; other local allocations do not implement the general freeing contract. The table may use arrays for its three fields, but must remain one authority.
@@ -426,7 +426,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  155 |   }
  156 |   return p;
  157 | }
- 158 | 
+ 158 |
 ```
 
 **M, lines 159–184.** Resource disposal and actual page/table access are A/B. filled/highest queries are D. Disposing forbidden state is deleted with that state, not retained as an API.
@@ -442,7 +442,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  166 |   free(p->stamps); free(p->slots); free(p->owner); free(p->later); free(p->work); free(p);
  167 |   return 0;
  168 | }
- 169 | 
+ 169 |
  170 | size_t mesh_pages_header(const mesh_pages *p){ (void)p; return header_bytes(); }
  171 | size_t mesh_pages_payload(const mesh_pages *p){ return p->M->pgsz-header_bytes(); }
  172 | const uint32_t *mesh_pages_entries(const mesh_pages *p, uint32_t slot){ return slot<p->count?p->slots[slot].table:NULL; }
@@ -457,7 +457,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  181 |   return (uint32_t)atomic_load_explicit(&s->fill_count[k],memory_order_acquire);
  182 | }
  183 | uint64_t mesh_pages_highest(const mesh_pages *p, uint32_t slot){ return slot<p->count?atomic_load_explicit(&p->slots[slot].highest,memory_order_acquire):0; }
- 184 | 
+ 184 |
 ```
 
 **A, lines 185–228.** Configuration-time input/output maps and overlap checks implement known functions. The indices array is scan scratch, not a persistent consumed mask. Logical overlap checks alone do not prove physical-alias single-writer safety.
@@ -504,9 +504,9 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  223 |   f->next=p->functions; p->functions=f;
  224 |   return f;
  225 | }
- 226 | 
+ 226 |
  227 | mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec){ return bind_function(p,spec,0); }
- 228 | 
+ 228 |
 ```
 
 **M, lines 229–247.** X: storage_ready consults independent owner array. R/A: claim actual destination stamp and row page/use count. Delete separate physical owner mutation. WRITING is allowed only as an uncompleted destination-stamp encoding, with single-writer/visibility proof.
@@ -518,7 +518,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  232 |   for(uint32_t j=first;j<first+count;j++) if(__atomic_load_n(p->owner+s->base+j,__ATOMIC_ACQUIRE)!=UNUSED) return 0;
  233 |   return 1;
  234 | }
- 235 | 
+ 235 |
  236 | // ../design/algorithm-sources.md#operand-matching-and-storage
  237 | static void claim_rows(mesh_pages *p, struct slot *s, uint32_t first, uint32_t count, uint64_t generation){
  238 |   for(uint32_t j=first;j<first+count;j++){
@@ -530,7 +530,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  244 |     }
  245 |   }
  246 | }
- 247 | 
+ 247 |
 ```
 
 **M, lines 248–284.** R: input stamp/presence conjunction and actual destination claims. D: producible precondition. X: owner-array storage predicate. Short-circuit traversal is A, but optimizing this mixed predicate did not make it conformant.
@@ -578,7 +578,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 285–321.** Claim/cancel/complete have allowed row-transition purposes. D: producible condition and indirect publication path. Cancel resets the stamp but does not restore aliased physical ownership; this cannot be treated as complete recovery.
 
 ```text
- 285 | 
+ 285 |
  286 | int mesh_pages_claim(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
  287 |   if(slot>=p->count || !generation || generation>=WRITING || !count || mesh_pages_status(p)<0) return 0;
  288 |   struct slot *s=&p->slots[slot];
@@ -690,7 +690,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  379 | void mesh_pages_fail(mesh_pages *p, int error){
  380 |   int expected=0; atomic_compare_exchange_strong(&p->status,&expected,-(error>0?error:ECANCELED));
  381 | }
- 382 | 
+ 382 |
 ```
 
 **X, lines 383–405.** mark/publish/consume queue bitmap completion instead of directly publishing/releasing rows. publishing[parity] is a second generation authority. Delete this indirection and its APIs implementation, retaining only the required literal row operations.
@@ -711,14 +711,14 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  395 |   }
  396 |   return 0;
  397 | }
- 398 | 
+ 398 |
  399 | int mesh_pages_publish(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
  400 |   return mark(p,slot,first,count,generation,0);
  401 | }
  402 | int mesh_pages_consume(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
  403 |   return mark(p,slot,first,count,generation,1);
  404 | }
- 405 | 
+ 405 |
 ```
 
 **M, lines 406–439.** R/B: submit actual page descriptors, preserve NIC access lifetime, asynchronously zero and return pages. X/D: algorithm inflight/window state, W_SENT/W_RELEASE queue and later list duplicating the binding. Do not remove actual transport completion safety; it belongs to the substrate/page lifetime.
@@ -901,7 +901,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **X, lines 553–575.** retire_storage depends on complete counters and heap digest readiness, rewrites whole-slot use counts and frees through owner/work state. Required release/zeroing purpose survives; this representation does not.
 
 ```text
- 553 | 
+ 553 |
  554 | // ../design/algorithm-sources.md#operand-matching-and-storage
  555 | static void retire_storage(mesh_pages *p, struct slot *s){
  556 |   if(!s->spec.storage || __atomic_load_n(s->table,__ATOMIC_ACQUIRE)==ABSENT) return;
@@ -929,7 +929,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 576–605.** A/B: configured destination lookup and actual receive delivery. X: application frame-kind dispatcher and overwriting a present previous page without proof of all reads. Connection identity/bounds validation is not a second numerical completion protocol.
 
 ```text
- 576 | 
+ 576 |
  577 | static struct slot *lookup(mesh_pages *p, uint32_t sid, int receive, int from){
  578 |   for(size_t i=0;i<p->count;i++){
  579 |     struct slot *s=&p->slots[i];
@@ -964,7 +964,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 606–645.** B: transport completion needed before hardware may lose ownership. X/D: owner-to-slot lookup and algorithm inflight state; publication bitmap drain and pending bitmap. Direct output stamping is R but currently delayed behind this drain.
 
 ```text
- 606 | 
+ 606 |
  607 | static void acknowledge(mesh_pages *p){
  608 |   struct desc d;
  609 |   while(!pop(p->M,ACK,&d)){
@@ -1022,7 +1022,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  656 |   if(pid && kill((pid_t)pid,0)<0 && errno==ESRCH){ mesh_pages_fail(p,ESTALE); return; }
  657 |   if(!linked(p)) mesh_pages_fail(p,ENOTCONN);
  658 | }
- 659 | 
+ 659 |
  660 | int mesh_pages_progress(mesh_pages *p){
  661 |   p->now=clock_ns();
  662 |   int status=atomic_load_explicit(&p->status,memory_order_acquire);
@@ -1128,7 +1128,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 750–779.** R: recover after link failure. X: restoration of duplicated algorithm state. The two-second ACK wait can expire while flying remains, after which storage/state are cleared; safety requires proven cessation of device access, not elapsed time. This caller never invokes recovery on its failed-NFE path.
 
 ```text
- 750 | 
+ 750 |
  751 | int mesh_pages_recover(mesh_pages *p){
  752 |   if(atomic_load_explicit(&p->running,memory_order_acquire)) return EBUSY;
  753 |   if(atomic_load_explicit(&p->status,memory_order_acquire)==-ESTALE) return ESTALE;
@@ -1157,7 +1157,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  776 |   atomic_store_explicit(&p->status,0,memory_order_release);
  777 |   return 0;
  778 | }
- 779 | 
+ 779 |
 ```
 
 **O, lines 780–805.** Shutdown/description observations are not computation dependencies. Remove diagnostics for deleted state with that state. A settled predicate must not restore a second readiness authority.
@@ -1197,12 +1197,12 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 
 ```text
    1 | // docs/amdahl_superiority.md
-   2 | 
+   2 |
    3 | import Foundation
    4 | import CoreML
    5 | import Metal
    6 | import MetalPerformanceShaders
-   7 | 
+   7 |
    8 | #if MMB_MESH
    9 | func slotSpec(_ sid: UInt32, _ pages: Int, _ peer: UInt16, _ receive: Bool, _ depends: [Int], pagewise: Bool = false, lags: [UInt32] = []) -> mesh_pages_slot {
   10 |     var spec = mesh_pages_slot()
@@ -1217,7 +1217,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   19 |     }
   20 |     return spec
   21 | }
-  22 | 
+  22 |
   23 | func pagedPipeline(_ source: String, _ name: String, pages: Bool = false) -> MTLComputePipelineState {
   24 |     let constants = MTLFunctionConstantValues()
   25 |     var value = pages
@@ -1289,7 +1289,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   86 |     }
   87 | }
   88 | """
-  89 | 
+  89 |
   90 | struct ConfiguredNumericalFunction {
   91 |     let configuration: ParameterConfiguration
 ```
@@ -1299,7 +1299,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 ```text
   92 |     let norm, gamma, scale: MTLBuffer
   93 | }
-  94 | 
+  94 |
   95 | // ../dox/mesh/design/algorithm-sources.md#operand-matching-and-storage
   96 | func runReduceScatter(deployment: NumericalConfiguration, file: ModelFile) async {
   97 |     let env = ProcessInfo.processInfo.environment
@@ -1333,7 +1333,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  125 |     let embedding = try! file.makeMatrixBuffer("token_embd.weight", device: device)
  126 |     let outputNorm = head == nil ? nil : try! file.loadHalf("output_norm.weight", device: device)
  127 |     let tokens = (0..<rows).map { UInt32((2 + $0 * 7919) % vocabulary) }
- 128 | 
+ 128 |
  129 |     let mesh = mesh_context()!
  130 |     if mesh_attach(mesh, env["MESH_NAME"] ?? "/mesh0") != 0 { fail("mesh attach: \(String(cString: strerror(errno))) (\(errno))") }
  131 |     var scope = mesh_scope()
@@ -1523,7 +1523,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  285 |         encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
  286 |         encoder.endEncoding()
  287 |     }
- 288 | 
+ 288 |
 ```
 
 **M, lines 289–295.** X: dense normalized fallback. A: Publication is a static output row range, Call/Prediction/BoundFunction are immutable configured numerical functions. Their names alone do not prove per-job state, but duplicated maps and publication lists must describe one canonical relation.
@@ -1664,7 +1664,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  411 |         }
  412 |     } ?? []
  413 |     print("configured mesh participant \(deployment.participant): \(functions.count) functions, \(rows) rows, \(inflight) in flight, page-stamp normalization, bound in \(Int(Date().timeIntervalSince(loadStart))) s")
- 414 | 
+ 414 |
  415 |     let normPipeline = pagedPipeline(pagedNormSource, "rms_norm_add_scale_paged")
  416 |     let pageTable = mesh_metal_page_table(device, program)!
  417 |     var pageTableBytes = 0
@@ -1740,7 +1740,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  477 |     let spans = UnsafeMutablePointer<UInt64>.allocate(capacity: inflight * 2); spans.initialize(repeating: 0, count: inflight * 2)
  478 |     defer { spans.deallocate() }
  479 |     precondition(mesh_pages_start(program) == 0)
- 480 | 
+ 480 |
  481 |     func publish(_ ranges: [Publication], _ g: UInt64) { for r in ranges { _ = mesh_pages_publish(program, UInt32(r.slot), r.first, r.count, g) } }
  482 |     func issue(_ s: Int, _ f: Int, _ indices: [Int], _ g: UInt64) {
  483 |         let function = bound[s][f]
@@ -1841,7 +1841,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  563 |         precondition(mesh_pages_publish(program, UInt32(slot(f, index, .digestOut)), UInt32(page), 1, g) == 0)
  564 |         return true
  565 |     }
- 566 | 
+ 566 |
 ```
 
 **M, lines 567–594.** O: records/timing outside numerical flow. A: scanning configured functions and coalescing selected indices. D: duplicate ready arrays are temporary overhead, not persistent authority; do not turn them into queues/masks. Records become forbidden when used for admission below.
@@ -2004,7 +2004,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **O, lines 699–724.** Existing local reference arithmetic is outside the distributed numerical call graph. It does not prove the changed reduction/normalization algebra matches the specification. No new evaluator is required.
 
 ```text
- 699 | 
+ 699 |
  700 |     let scan = scanHalfBuf(head == nil ? output : logits[lastFamily], count: head == nil ? rows * columns : vocabulary)
  701 |     var numericalError: [String: Double] = [:]
  702 |     if env["LM_BENCH_REFERENCE"] == "1" && functions.count == 1 && functions[0].kind == .ffn {
@@ -2095,7 +2095,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    4 | #include <mach/mach_vm.h>
    5 | #include <time.h>
    6 | #include <unistd.h>
-   7 | 
+   7 |
    8 | static id<MTLBuffer> mesh_metal_memory(id<MTLDevice> device,const void *source,size_t bytes){
    9 |   mach_vm_address_t address=0;
   10 |   vm_prot_t current,maximum;
@@ -2156,7 +2156,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    2 | #define MESH_WIRE_H
    3 | #include "mesh.h"
    4 | #include <string.h>
-   5 | 
+   5 |
    6 | #define MESH_SCOPED UINT32_C(0x4d590000)
    7 | struct mesh_frame { struct shdr h; struct mesh_epoch epoch; uint16_t source, target; };
    8 | static inline int mesh_epoch_equal(struct mesh_epoch a,struct mesh_epoch b){ return a.high==b.high && a.low==b.low; }
@@ -2205,7 +2205,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    1 | #ifndef MESH_FUNCTIONS_H
    2 | #define MESH_FUNCTIONS_H
    3 | #include "mesh.h"
-   4 | 
+   4 |
    5 | struct mesh_extent { size_t offset, bytes; uint32_t channel; int peer, receive; uint32_t chunk; };
    6 | struct mesh_view {
    7 |   unsigned char *base;
@@ -2218,7 +2218,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   14 | typedef struct mesh_function mesh_function;
   15 | typedef struct mesh_executor mesh_executor;
   16 | typedef struct mesh_call mesh_call;
-  17 | 
+  17 |
   18 | mesh_function *mesh_compile(size_t count, mesh_index_fn index, void *capture);
   19 | const struct mesh_extent *mesh_function_extent(const mesh_function *f, size_t index);
   20 | size_t mesh_function_count(const mesh_function *f);
@@ -2275,7 +2275,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    7 | #include <string.h>
    8 | #include <sys/mman.h>
    9 | #include <unistd.h>
-  10 | 
+  10 |
   11 | enum { WAITING, AVAILABLE, BORROWED, COMPLETING, COMMITTED, SETTLED, INVALID };
   12 | struct mesh_function { _Atomic size_t refs; size_t count; uint64_t *channels; struct mesh_extent extents[]; };
   13 | struct mesh_argument {
@@ -2308,7 +2308,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   40 |   size_t capacity, window, received;
   41 |   struct mesh_executor_policy policy;
   42 | };
-  43 | 
+  43 |
   44 | static void *allocation(size_t bytes){
   45 |   void *p=calloc(1,bytes); if(!p) errno=ENOMEM; return p; }
   46 | static int channel_order(const void *a,const void *b){
@@ -2328,7 +2328,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   60 |   c->arguments[i].stream.runnable=c->runnable+i/64;
   61 |   c->arguments[i].stream.changed_bit=UINT64_C(1)<<(i%64);
   62 | }
-  63 | 
+  63 |
 ```
 
 **M, lines 64–201.** Configuration shape validation is A in purpose, but this implementation constructs the forbidden call/stream state machine, duplicate arrivals table and synchronization owner. Remove as an algorithm implementation with its callers.
@@ -2357,7 +2357,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   84 | const struct mesh_extent *mesh_function_extent(const mesh_function *f, size_t i){ return i<f->count?&f->extents[i]:NULL; }
   85 | size_t mesh_function_count(const mesh_function *f){ return f->count; }
   86 | void mesh_function_free(mesh_function *f){ if(f&&atomic_fetch_sub(&f->refs,1)==1){ free(f->channels); free(f); } }
-  87 | 
+  87 |
   88 | static int channel_overlap(const mesh_function *a,uint32_t abase,const mesh_function *b,uint32_t bbase){
   89 |   if(!a->count || !b->count) return 0;
   90 |   uint64_t x=(uint64_t)abase<<17, y=(uint64_t)bbase<<17;
@@ -2370,7 +2370,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   97 |   }
   98 |   return 0;
   99 | }
- 100 | 
+ 100 |
  101 | mesh_executor *mesh_executor_create(struct mesh_ctx *context, size_t window_pages){
  102 |   return mesh_executor_create_with(context,window_pages,(struct mesh_executor_policy){0});
  103 | }
@@ -2387,7 +2387,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  114 |   e->context=context; e->window=window_pages; e->policy=policy; context->mapping_pinned=1;
  115 |   return e;
  116 | }
- 117 | 
+ 117 |
  118 | static mesh_call *bind_function(mesh_executor *e, mesh_function *f, uint32_t base, struct mesh_scope scope){
  119 |   mesh_call *c=allocation(sizeof *c+f->count*sizeof(struct mesh_argument)+2*mesh_page_words(f->count)*sizeof(uint64_t)); if(!c) return NULL;
  120 |   c->executor=e; c->function=f; c->channel_base=base; c->scope=scope;
@@ -2471,7 +2471,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  198 |   if(!mesh_epoch_set(scope.epoch)){ errno=EINVAL; return NULL; }
  199 |   return bind_function(e,f,base,scope);
  200 | }
- 201 | 
+ 201 |
 ```
 
 **X, lines 202–385.** Cycle/rearm/reset, argument state transitions, stream scheduling and mutex-protected progress are the alternative execution flow. These are not the static function scan required by the spec.
@@ -2492,7 +2492,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  214 |   }
  215 |   return 0;
  216 | }
- 217 | 
+ 217 |
  218 | static void reset_argument(mesh_call *c,size_t i,struct mesh_epoch epoch,int borrowed){
  219 |   struct mesh_argument *a=&c->arguments[i]; const struct mesh_extent *x=&c->function->extents[i];
  220 |   struct mstream *s=&a->stream;
@@ -2507,7 +2507,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  229 |   atomic_store_explicit(&a->state,retained?(borrowed?BORROWED:AVAILABLE):WAITING,memory_order_release);
  230 |   change_argument(c,i);
  231 | }
- 232 | 
+ 232 |
  233 | int mesh_call_rearm(mesh_call *c, struct mesh_epoch epoch){
  234 |   if(!mesh_epoch_set(c->scope.epoch) || epoch.high!=c->scope.epoch.high || epoch.low<=c->scope.epoch.low) return EINVAL;
  235 |   mesh_executor *e=c->executor;
@@ -2530,10 +2530,10 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  252 |   }
  253 |   pthread_mutex_unlock(&e->lock); return error;
  254 | }
- 255 | 
+ 255 |
  256 | const struct mesh_view *mesh_call_view(const mesh_call *c, size_t i){ return i<c->function->count?&c->arguments[i].view:NULL; }
  257 | const uint32_t *mesh_call_indices(const mesh_call *c, size_t *bytes){ *bytes=c->indices_bytes; return c->indices; }
- 258 | 
+ 258 |
  259 | static void argument_fail(mesh_call *c, struct mesh_argument *a, int error){
  260 |   int status=atomic_load(&c->status);
  261 |   while(status>=0&&!atomic_compare_exchange_weak(&c->status,&status,-error)){}
@@ -2547,7 +2547,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  269 |   while(state!=BORROWED && state!=COMPLETING && state!=INVALID && state!=SETTLED &&
  270 |         !atomic_compare_exchange_weak(&a->state,&state,INVALID)){}
  271 | }
- 272 | 
+ 272 |
  273 | static int advance_argument(mesh_call *c,size_t i){
  274 |   mesh_executor *e=c->executor; struct mesh_ctx *ctx=e->context;
  275 |   struct mesh_argument *a=&c->arguments[i]; const struct mesh_extent *x=&c->function->extents[i];
@@ -2586,7 +2586,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  308 |   }
  309 |   return state;
  310 | }
- 311 | 
+ 311 |
  312 | static void progress_arguments(mesh_executor *e){
  313 |   struct mesh_ctx *ctx=e->context;
  314 |   for(size_t j=0;j<e->count;j++){
@@ -2624,7 +2624,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  346 |     }
  347 |   }
  348 | }
- 349 | 
+ 349 |
  350 | static void progress_streams(mesh_executor *e,uint64_t now_ns){
  351 |   size_t turn=e->context->stream_cursor++;
  352 |   for(size_t j=0;j<e->count;j++){
@@ -2644,7 +2644,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  366 |     }
  367 |   }
  368 | }
- 369 | 
+ 369 |
  370 | int mesh_progress(mesh_executor *e){
  371 |   if(pthread_mutex_trylock(&e->lock)) return 0;
  372 |   struct mesh_ctx *ctx=e->context;
@@ -2660,7 +2660,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  382 |   pthread_mutex_unlock(&e->lock);
  383 |   return completed;
  384 | }
- 385 | 
+ 385 |
 ```
 
 **X, lines 386–519.** Request/acquire states, heap join coverage, publication masks, arrival rearrangement/consumption cursors and completing/committed transitions substitute for actual stamped rows. Plain page address reads are reusable arithmetic, not a reason to retain this API.
@@ -2688,7 +2688,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  405 |   }
  406 |   return n;
  407 | }
- 408 | 
+ 408 |
  409 | static void publish_word(struct mesh_argument *a,size_t index,uint64_t mask){
  410 |   struct mesh_page_bits *word=&a->stream.work[index];
  411 |   uint64_t added=mask&~__atomic_fetch_or(&word->published,mask,__ATOMIC_RELEASE);
@@ -2824,7 +2824,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  536 |   while(status>=0&&!atomic_compare_exchange_weak(&c->status,&status,-(error>0?error:ECANCELED))){}
  537 |   if(status>=0) change_call(c);
  538 | }
- 539 | 
+ 539 |
  540 | static int retire_call(mesh_call *c, int abandon){
  541 |   if(abandon && (!mesh_epoch_set(c->scope.epoch) || mesh_call_status(c)>=0)) return EINVAL;
  542 |   mesh_executor *e=c->executor;
@@ -2861,7 +2861,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  573 |   mesh_stream_register(e->context,NULL,0);
  574 |   pthread_mutex_destroy(&e->lock); free(e->calls); free(e->streams); free(e); return 0;
  575 | }
- 576 | 
+ 576 |
 ```
 
 **M, lines 577–587.** A: literal page/offset calculation. X for numerical flow: copy to/from a foreign data buffer. Direct gather/scatter arithmetic must address the pages where they are.
@@ -2889,13 +2889,13 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    2 | #define MESH_REDUCE_H
    3 | #include <stddef.h>
    4 | #include <stdint.h>
-   5 | 
+   5 |
    6 | struct mesh_reduce_node { uint64_t owner, contributor; size_t input[2]; };
    7 | struct mesh_reduce_token { uint64_t program, invocation, node; };
    8 | typedef int (*mesh_reduce_index_fn)(void *, size_t, struct mesh_reduce_node *);
    9 | typedef struct mesh_reduce_function mesh_reduce_function;
   10 | typedef struct mesh_reduction mesh_reduction;
-  11 | 
+  11 |
   12 | mesh_reduce_function *mesh_reduce_compile(size_t contributors, mesh_reduce_index_fn index, void *capture);
   13 | size_t mesh_reduce_count(const mesh_reduce_function *f);
   14 | const struct mesh_reduce_node *mesh_reduce_node(const mesh_reduce_function *f, size_t index);
@@ -2922,7 +2922,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    3 | #include <limits.h>
    4 | #include <stdatomic.h>
    5 | #include <stdlib.h>
-   6 | 
+   6 |
    7 | enum { R_WAITING, R_BORROWED, R_READY, R_COMPLETING };
    8 | struct mesh_reduce_function {
    9 |   _Atomic size_t refs;
@@ -2938,7 +2938,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   19 | };
   20 | static int contributor_order(const void *a,const void *b){
   21 |   uint64_t x=*(const uint64_t*)a,y=*(const uint64_t*)b; return (x>y)-(x<y); }
-  22 | 
+  22 |
   23 | mesh_reduce_function *mesh_reduce_compile(size_t contributors, mesh_reduce_index_fn index, void *capture){
   24 |   if(!contributors || contributors>(size_t)INT_MAX/2 || !index){ errno=EINVAL; return NULL; }
   25 |   size_t count=contributors*2-1;
@@ -3064,7 +3064,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   14 | ptrdiff_t mesh_metal_advance(id<MTLSharedEvent> event, mesh_call *call, uint64_t base,
   15 |   const struct mesh_metal_dependency *dependencies, size_t count);
   16 | int mesh_metal_acquire(id<MTLSharedEvent> event, mesh_call *call, size_t argument, uint64_t value);
-  17 | 
+  17 |
   18 | struct mesh_metal_reduction {
   19 |   mesh_call *call;
   20 |   size_t argument, source, elements, padding;
@@ -3092,7 +3092,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    2 | #include "mesh-wire.h"
    3 | #include <errno.h>
    4 | #include <unistd.h>
-   5 | 
+   5 |
    6 | id<MTLBuffer> mesh_metal_indices(id<MTLDevice> device, const mesh_call *call){
    7 |   size_t bytes; const uint32_t *indices=mesh_call_indices(call,&bytes);
    8 |   if(!bytes || bytes>device.maxBufferLength){ errno=EINVAL; return nil; }
@@ -3163,7 +3163,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   63 |   if(status==1) event.signaledValue=value;
   64 |   return status;
   65 | }
-  66 | 
+  66 |
   67 | NSString *mesh_metal_source(void){
   68 |   return @"#include <metal_stdlib>\nusing namespace metal;\n"
   69 |     "struct MeshMetalLayout { ulong origin; uint stride,payload,capacity; };\n"
@@ -3186,7 +3186,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   81 |     "template<typename T> T mesh_metal_load(device const uchar* memory,device const uint* pages,constant MeshMetalLayout& layout,ulong i){ if constexpr(sizeof(T)==2) return *(device const T*)(memory+mesh_metal_address(layout,pages,i*2)); T value; thread uchar* out=(thread uchar*)&value; for(uint b=0;b<sizeof(T);b++) out[b]=memory[mesh_metal_address(layout,pages,i*sizeof(T)+b)]; return value; }\n"
   82 |     "template<typename T> void mesh_metal_store(device uchar* memory,device const uint* pages,constant MeshMetalLayout& layout,ulong i,T value){ if constexpr(sizeof(T)==2){ *(device T*)(memory+mesh_metal_address(layout,pages,i*2))=value; return; } thread uchar* in=(thread uchar*)&value; for(uint b=0;b<sizeof(T);b++) memory[mesh_metal_address(layout,pages,i*sizeof(T)+b)]=in[b]; }\n";
   83 | }
-  84 | 
+  84 |
   85 | #define MESH_ADD_PAGES(T,A) \
   86 |   for(size_t k=0;k<count;k++){ \
   87 |     size_t page=indices[k]; \
@@ -3317,7 +3317,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
    2 | #import <Metal/Metal.h>
    3 | #include "mesh-tensor.h"
    4 | #include <errno.h>
-   5 | 
+   5 |
    6 | @interface MeshTensorProgram : NSObject
    7 | @property id<MTLDevice> device;
    8 | @property id<MTLCommandQueue> queue;
@@ -3338,9 +3338,9 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   23 | @end
   24 | @implementation MeshTensorProgram
   25 | @end
-  26 | 
+  26 |
   27 | static NSString *mesh_tensor_creation_error;
-  28 | 
+  28 |
   29 | void *mesh_tensor_create(const char *source){
   30 |   @autoreleasepool {
   31 |     MeshTensorProgram *program=[MeshTensorProgram new];
@@ -3358,12 +3358,12 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   43 |     return (__bridge_retained void*)program;
   44 |   }
   45 | }
-  46 | 
+  46 |
   47 | const char *mesh_tensor_error(void *handle){
   48 |   MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
   49 |   return (program?program.error:mesh_tensor_creation_error).UTF8String;
   50 | }
-  51 | 
+  51 |
   52 | int mesh_tensor_kernel(void *handle,const char *name){
   53 |   MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
   54 |   MTLComputePipelineDescriptor *descriptor=[MTLComputePipelineDescriptor new];
@@ -3376,7 +3376,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   61 |   [program.kernels addObject:kernel];
   62 |   return index;
   63 | }
-  64 | 
+  64 |
 ```
 
 **X, lines 65–91.** Foreign tensor arena growth/copy and separate metadata buffers, including mutable allocation, violate actual page storage.
@@ -3388,7 +3388,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   68 |   if(buffer && previous) memcpy(buffer.contents,previous.contents,previous.length);
   69 |   return buffer;
   70 | }
-  71 | 
+  71 |
   72 | int mesh_tensor_reserve(void *handle,size_t bytes,const struct mesh_tensor_view *views,size_t count,
   73 |                         const uint64_t *dimensions,size_t rank,const uint32_t *arguments,size_t argument_count){
   74 |   MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
@@ -3404,11 +3404,11 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   84 |   memcpy(program.arguments.contents,arguments,argument_count*sizeof(*arguments));
   85 |   return 0;
   86 | }
-  87 | 
+  87 |
   88 | void *mesh_tensor_data(void *handle){ return ((__bridge MeshTensorProgram*)handle).arena.contents; }
   89 | void *mesh_tensor_memory(void *handle){ return (__bridge_retained void*)((__bridge MeshTensorProgram*)handle).arena; }
   90 | void mesh_tensor_memory_free(void *handle){ (void)CFBridgingRelease(handle); }
-  91 | 
+  91 |
 ```
 
 **X, lines 92–160.** Phase recording/submission, whole-program pending command authority and status form an alternative execution flow.
@@ -3446,7 +3446,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  121 |   program.specifications[phase]=[NSData dataWithBytes:commands length:count*sizeof(*commands)];
  122 |   return 0;
  123 | }
- 124 | 
+ 124 |
  125 | int mesh_tensor_submit(void *handle,uint32_t phase){
  126 |   @autoreleasepool {
  127 |     MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
@@ -3467,21 +3467,21 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  142 |     return 0;
  143 |   }
  144 | }
- 145 | 
+ 145 |
  146 | int mesh_tensor_status(void *handle){
  147 |   MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
  148 |   if(!program.pending || program.pending.status==MTLCommandBufferStatusCompleted) return 1;
  149 |   if(program.pending.status==MTLCommandBufferStatusError){ program.error=program.pending.error.localizedDescription; return -EIO; }
  150 |   return 0;
  151 | }
- 152 | 
+ 152 |
  153 | void mesh_tensor_free(void *handle){
  154 |   (void)CFBridgingRelease(handle);
  155 | }
- 156 | 
+ 156 |
  157 | #import "mesh-metal-executor.h"
  158 | #include "mesh-wire.h"
- 159 | 
+ 159 |
  160 | @class MeshTensorChannel;
 ```
 
@@ -3503,7 +3503,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  173 | @end
  174 | @implementation MeshTensorTransport
  175 | @end
- 176 | 
+ 176 |
  177 | struct mesh_tensor_transfer_parameters { uint64_t offset, bytes, extent, origin; uint32_t stride, payload, receive, spans; };
  178 | @interface MeshTensorChannel : NSObject
  179 | @property MeshTensorTransport *transport;
@@ -3528,7 +3528,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  198 | @end
  199 | @implementation MeshTensorChannel
  200 | @end
- 201 | 
+ 201 |
  202 | void *mesh_tensor_transport(void *context){
  203 |   @autoreleasepool {
  204 |     MeshTensorTransport *transport=[MeshTensorTransport new];
@@ -3570,13 +3570,13 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  240 |     return (__bridge_retained void*)transport;
  241 |   }
  242 | }
- 243 | 
+ 243 |
  244 | size_t mesh_tensor_transport_bytes(void *handle){ return ((__bridge MeshTensorTransport*)handle).bytes; }
- 245 | 
+ 245 |
  246 | static int mesh_tensor_extent(void *capture,size_t index,struct mesh_extent *extent){
  247 |   *extent=*(struct mesh_extent*)capture; return 0;
  248 | }
- 249 | 
+ 249 |
 ```
 
 **X, lines 250–369.** Channel binding, transfer plan, binding mutation, release/commit phases and dynamic transfer command creation maintain the alternative storage/execution flow.
@@ -3617,7 +3617,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  282 |   [transport.channels addObject:binding];
  283 |   return (__bridge_retained void*)binding;
  284 | }
- 285 | 
+ 285 |
  286 | int mesh_tensor_transfer_plan(void *handle,const struct mesh_tensor_span *spans,size_t count,const struct mesh_tensor_binding *bindings,size_t binding_count){
  287 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  288 |   if(channel.error) return channel.error;
@@ -3629,7 +3629,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  294 |   channel.streamBytes=count?spans[count-1].stream+spans[count-1].bytes:0;
  295 |   return 0;
  296 | }
- 297 | 
+ 297 |
  298 | int mesh_tensor_transfer_release(void *handle){
  299 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  300 |   if(channel.state!=4) return 0;
@@ -3643,7 +3643,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  308 |   channel.state=3;
  309 |   return status;
  310 | }
- 311 | 
+ 311 |
  312 | static void mesh_tensor_transfer_record(MeshTensorChannel *channel){
  313 |   MTLIndirectCommandBufferDescriptor *descriptor=[MTLIndirectCommandBufferDescriptor new];
  314 |   descriptor.commandTypes=MTLIndirectCommandTypeConcurrentDispatch;
@@ -3667,7 +3667,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  332 |   [command setKernelBuffer:channel.spans offset:0 atIndex:2];
  333 |   [command concurrentDispatchThreadgroups:MTLSizeMake(256,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
  334 | }
- 335 | 
+ 335 |
  336 | int mesh_tensor_transfer_commit(void *handle){
  337 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  338 |   if(mesh_call_status(channel.call)!=1 || channel.program.pending.status<MTLCommandBufferStatusCompleted) return EBUSY;
@@ -3682,7 +3682,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  347 |   [encoder endEncoding]; [command commit]; channel.program.pending=command;
  348 |   return 0;
  349 | }
- 350 | 
+ 350 |
  351 | int mesh_tensor_transfer(void *handle,uint64_t epoch,uint64_t offset,uint64_t bytes){
  352 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  353 |   if(channel.state && mesh_call_status(channel.call)!=1) return EBUSY;
@@ -3701,7 +3701,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  366 |   mesh_request(channel.call,0);
  367 |   return 0;
  368 | }
- 369 | 
+ 369 |
 ```
 
 **X, lines 370–452.** Channel states 1/2/3/4 drive transfer and completion; page-table copying and runtime view rebinding duplicate storage authority. Teardown users disappear with this algorithm; preserve substrate lifetime obligations.
@@ -3742,7 +3742,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  402 |   }
  403 |   if(channel.state==4 && channel.error) mesh_tensor_transfer_release((__bridge void*)channel);
  404 | }
- 405 | 
+ 405 |
  406 | int mesh_tensor_transport_progress(void *handle){
  407 |   @autoreleasepool {
  408 |     MeshTensorTransport *transport=(__bridge MeshTensorTransport*)handle;
@@ -3751,18 +3751,18 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  411 |     return activity;
  412 |   }
  413 | }
- 414 | 
+ 414 |
  415 | int mesh_tensor_transfer_status(void *handle){
  416 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  417 |   int status=mesh_call_status(channel.call);
  418 |   return channel.error?-channel.error:channel.state==4?2:status;
  419 | }
- 420 | 
+ 420 |
  421 | void mesh_tensor_transfer_cancel(void *handle,int error){
  422 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  423 |   channel.error=error; mesh_call_cancel(channel.call,error);
  424 | }
- 425 | 
+ 425 |
  426 | int mesh_tensor_channel_free(void *handle){
  427 |   MeshTensorChannel *channel=(__bridge MeshTensorChannel*)handle;
  428 |   if(channel.program.pending && channel.program.pending.status<MTLCommandBufferStatusCompleted) return EBUSY;
@@ -3782,7 +3782,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  442 |   channel.transport=nil; channel.program=nil;
  443 |   (void)CFBridgingRelease(handle); return 0;
  444 | }
- 445 | 
+ 445 |
  446 | int mesh_tensor_transport_free(void *handle){
  447 |   MeshTensorTransport *transport=(__bridge MeshTensorTransport*)handle;
  448 |   if(transport.channels.count) return EBUSY;
@@ -3797,7 +3797,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **B, lines 1–71.** Actual RDMA shared region, page addressing, descriptor rings and bridge lifecycle. These are substrate mechanics, not a permitted second numerical readiness system. Ring head/tail atomics preserve the real SPSC binding.
 
 ```text
-   1 | 
+   1 |
    2 | #ifndef MESH_H
    3 | #define MESH_H
    4 | #include <stdint.h>
@@ -3961,7 +3961,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **B, lines 1–80.** Shared region attachment and explicit link reset. No per-NFE rendezvous is required here. The busy array is another physical ownership representation: canonical ownership must not diverge from literal rows. Startup retry is distinct from a reduction handshake.
 
 ```text
-   1 | 
+   1 |
    2 | #include "mesh.h"
    3 | #include "mesh-wire.h"
    4 | #include <errno.h>
@@ -3978,21 +3978,21 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   15 | #include <mach/mach.h>
   16 | #include <mach/mach_vm.h>
   17 | #endif
-  18 | 
+  18 |
   19 | #ifndef MESH_ATTACH_ATTEMPTS
   20 | #define MESH_ATTACH_ATTEMPTS 3000
   21 | #endif
-  22 | 
+  22 |
   23 | static struct mesh_ctx CTX0={.last=-1};
   24 | struct mesh_ctx *mesh_context(void){ return &CTX0; }
   25 | void mesh_receiver(struct mesh_ctx *context,mesh_receive_fn receiver,void *capture){
   26 |   context->receiver=receiver; context->receiver_capture=capture;
   27 | }
-  28 | 
+  28 |
   29 | static const char *rname(const char *name){
   30 |   if(!name) name=getenv("MESH_REGION");
   31 |   return name?name:MESH_NAME; }
-  32 | 
+  32 |
   33 | static uint64_t identity(void *p, struct stat *s){
   34 | #ifdef __APPLE__
   35 |   (void)s;
@@ -4007,7 +4007,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   44 |   (void)p; return (uint64_t)s->st_ino;
   45 | #endif
   46 | }
-  47 | 
+  47 |
   48 | static int mesh_attach_attempts(struct mesh_ctx *c, const char *name, int attempts){
   49 |   if(c->M){ if(c->mapping_pinned<0 || c->detaching){ errno=ESTALE; return -1; } return 0; }
   50 |   name=name?name:(c->name?c->name:rname(0));
@@ -4033,14 +4033,14 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   70 |   if(!c->busy){ atomic_store(&c->M->client,0); munmap(c->M,c->len); c->M=0; c->arena=0; c->len=0; return -1; }
   71 |   c->cursor=0; c->inflight=0; c->last=-1; c->sub=c->ack=0; c->idle=0;
   72 |   return 0; }
-  73 | 
+  73 |
   74 | int mesh_attach(struct mesh_ctx *c, const char *name){ return mesh_attach_attempts(c,name,MESH_ATTACH_ATTEMPTS); }
   75 | int mesh_try_attach(struct mesh_ctx *c, const char *name){ return mesh_attach_attempts(c,name,1); }
   76 | int mesh_link_reset(struct mesh_ctx *c,size_t port){
   77 |   if(!c->M || port>=atomic_load_explicit(&c->M->port_count,memory_order_acquire)) return EINVAL;
   78 |   atomic_store_explicit(&mesh_ports(c->M)[port].reset_request,1,memory_order_release); return 0;
   79 | }
-  80 | 
+  80 |
 ```
 
 **M, lines 81–123.** B: stale connection detection and remapping/lifecycle. D: propagating stream states and changed masks belongs to the alternative algorithm, not the required negative link status/value recovery contract.
@@ -4062,17 +4062,17 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
   94 |       if(!gone && current) c->ino=current;
   95 |       munmap(p,sizeof(struct hdr)); } }
   96 |   close(f); return gone; }
-  97 | 
+  97 |
   98 | static void mesh_retire(struct mesh_ctx *c, struct mstream **v, int k){
   99 |   for(int i=0;i<k;i++){ struct mstream *s=v[i];
  100 |     if(s->st==MS_RUN) s->st=MS_FAIL;
  101 |     if(!s->retain_seen){ free(s->seen); s->seen=0; } }
  102 |   free(c->busy); c->busy=0; munmap(c->M,c->len); c->M=0; c->arena=0; }
- 103 | 
+ 103 |
  104 | static void reattach(struct mesh_ctx *c, struct mstream **v, int k){
  105 |   mesh_retire(c,v,k);
  106 |   if(!mesh_try_attach(c,0)) fprintf(stderr,"mesh reattached %s object %llu\n",c->name,(unsigned long long)c->ino); }
- 107 | 
+ 107 |
  108 | static int refresh(struct mesh_ctx *c, struct mstream **v, int k){
  109 |   if(c->mapping_pinned && atomic_load(&c->M->bridge_pid) && atomic_load(&c->M->phase)>=MESH_STOPPING) c->mapping_pinned=-1;
  110 |   if(c->mapping_pinned<0){
@@ -4088,7 +4088,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  120 |     errno=ESTALE;
  121 |     return 1; }
  122 |   reattach(c,v,k); return 1; }
- 123 | 
+ 123 |
 ```
 
 **B, lines 124–161.** Submit/receive actual pages and preserve NIC ownership through the binding. Receive auto-release on next read is not valid for asynchronous numerical readers; use canonical table lifetimes instead. The active page runtime consumes descriptor rings directly.
@@ -4105,7 +4105,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  132 |     if(c->busy){ c->busy[s]|=1; c->inflight++; }
  133 |     done+=d.bytes; s++; }
  134 |   return done; }
- 135 | 
+ 135 |
  136 | static size_t cread(struct mesh_ctx *c, void **p, int *from){
  137 |   struct hdr *M=c->M;
  138 |   if(c->last>=0){ struct desc r={.page=(uint32_t)c->last};
@@ -4116,14 +4116,14 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  143 |   if(p) *p=mesh_data(M,d.page);
  144 |   if(from) *from=d.node;
  145 |   return d.bytes; }
- 146 | 
+ 146 |
  147 | static void reclaim(struct mesh_ctx *c){
  148 |   struct desc d;
  149 |   while(!pop(c->M,ACK,&d)){
  150 |     if(c->busy && d.page>=c->M->pool && d.page<c->M->pool+c->M->arena && (c->busy[d.page-c->M->pool]&1)){
  151 |       c->busy[d.page-c->M->pool]&=2; c->inflight--; }
  152 |     c->ack++; } }
- 153 | 
+ 153 |
  154 | static unsigned char *credit(struct mesh_ctx *c){
  155 |   if(c->inflight>=c->M->arena) return 0;
  156 |   for(size_t i=0;i<c->M->arena;i++){
@@ -4131,7 +4131,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  158 |     if(!c->busy || !c->busy[s]){ c->cursor=(s+1)%c->M->arena;
  159 |       return c->arena+s*c->M->pgsz; } }
  160 |   return 0; }
- 161 | 
+ 161 |
 ```
 
 **X, lines 162–206.** pending_grow/pending_push/pending_flush allocate a foreign payload store and copy into RDMA pages. Delete as numerical transport representation.
@@ -4153,7 +4153,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  175 |   uint32_t *bytes=realloc(c->pending_bytes,cap*sizeof *bytes);
  176 |   if(!bytes) return -1;
  177 |   c->pending_bytes=bytes; c->pending_capacity=cap; return 0; }
- 178 | 
+ 178 |
  179 | static size_t pending_flush(struct mesh_ctx *c){
  180 |   reclaim(c); size_t before=c->pending_count;
  181 |   while(c->pending_count){
@@ -4164,7 +4164,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  186 |     c->sub++; c->pending_head++; c->pending_count--; }
  187 |   if(!c->pending_count) c->pending_head=0;
  188 |   return before-c->pending_count; }
- 189 | 
+ 189 |
  190 | static size_t pending_push(struct mesh_ctx *c, const void *p, size_t stride,
  191 |                            size_t bytes, size_t nslots, int node){
  192 |   size_t u=mesh_pay(c->M);
@@ -4181,7 +4181,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  203 |     memset(c->pending+at*u,0,u); memcpy(c->pending+at*u,(const char*)p+i*stride,bytes);
  204 |     c->pending_nodes[at]=node; c->pending_bytes[at]=(uint32_t)bytes; }
  205 |   c->pending_count+=nslots; pending_flush(c); return nslots; }
- 206 | 
+ 206 |
 ```
 
 **X, lines 207–252.** Application control frames, exponential retry, stream agreement predicate, published/pending bitmap and transmission cursor are the forbidden protocol above page delivery.
@@ -4232,7 +4232,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  249 |   size_t bytes=s->off-before, payload=mesh_stream_payload(c->M,s);
  250 |   return (ptrdiff_t)(bytes/payload+(bytes%payload!=0));
  251 | }
- 252 | 
+ 252 |
 ```
 
 **M, lines 253–326.** A/B: actual page addresses and local bridge release. X: stream lease/receive wrappers with non-table ownership, seen masks and dense-copy fallback. Release must follow canonical read proofs and zeroing, not stream settlement.
@@ -4241,7 +4241,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  253 | void mesh_yell_start(struct mesh_ctx *c, struct mstream *s,
  254 |                      const void *p, size_t n, int node, uint32_t sid){
  255 |   *s=(struct mstream){.src=p,.n=n,.node=node,.sid=sid,.st=n?MS_RUN:MS_DONE,.available=n}; (void)c; }
- 256 | 
+ 256 |
  257 | int mesh_stream_receive(struct mesh_ctx *c, struct mstream *s, uint32_t *pages){
  258 |   if(mesh_attach(c,0)) return -1;
  259 |   size_t u=mesh_stream_payload(c->M,s);
@@ -4276,7 +4276,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  288 | void *mesh_yell_view(struct mesh_ctx *c, struct mstream *s, size_t n, int node, uint32_t sid){
  289 |   mesh_yell_start(c,s,NULL,n,node,sid); return mesh_stream_lease(c,s);
  290 | }
- 291 | 
+ 291 |
  292 | int mesh_stream_idle(struct mesh_ctx *c, const struct mstream *s){
  293 |   reclaim(c);
  294 |   if(!c->inflight || !s->stride) return 1;
@@ -4288,7 +4288,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  300 |   *s=(struct mstream){.n=n,.sid=sid,.rx=1,.st=n?MS_RUN:MS_DONE,.node=-1};
  301 |   return mesh_stream_receive(c,s,pages);
  302 | }
- 303 | 
+ 303 |
  304 | size_t mesh_release_view(struct mesh_ctx *c, struct mstream *s){
  305 |   size_t pending=0;
  306 |   if(s->stride){
@@ -4311,7 +4311,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  323 |   }
  324 |   if(!pending) s->pages=NULL;
  325 |   return pending; }
- 326 | 
+ 326 |
 ```
 
 **X, lines 327–369.** Separate stream registry and conflict/epoch machinery support the alternate execution protocol. Configured row routing may be immutable configuration without a mutable stream scheduler.
@@ -4330,7 +4330,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  337 |     c->stream_index[bucket]=(uint32_t)i+1;
  338 |   }
  339 | }
- 340 | 
+ 340 |
  341 | int mesh_stream_reserve(struct mesh_ctx *c, size_t count){
  342 |   if(count>SIZE_MAX/4/sizeof(uint32_t)) return EOVERFLOW;
  343 |   size_t capacity=1;
@@ -4461,7 +4461,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  463 |   }
  464 |   return 1;
  465 | }
- 466 | 
+ 466 |
  467 | int mesh_progress_stream(struct mesh_ctx *c, struct mstream *s, size_t window, uint64_t now_ns){
  468 |   if(s->parked) return 0;
  469 |   size_t header=mesh_stream_header(s), u=mesh_stream_payload(c->M,s);
@@ -4496,7 +4496,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  498 |   }
  499 |   return s->off==s->n || s->off<atomic_load_explicit(&s->available,memory_order_acquire);
  500 | }
- 501 | 
+ 501 |
 ```
 
 **X, lines 502–518.** Round-robin stream progress and whole-stream done count are an alternate scheduler.
@@ -4515,10 +4515,10 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  512 |   c->stream_cursor=start+1;
  513 |   return ndone;
  514 | }
- 515 | 
+ 515 |
  516 | int mesh_turn(struct mesh_ctx *c, struct mstream **v, int k){
  517 |   return mesh_turn_window(c,v,k,SIZE_MAX); }
- 518 | 
+ 518 |
 ```
 
 **B, lines 519–543.** Actual client detach and resource lifetime must remain correct. Remove stream/copy-store cleanup only with removed owners; do not erase bridge/verbs lifetime requirements.
@@ -4548,7 +4548,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  540 |   if(c->name_owned) free(c->name);
  541 |   *c=(struct mesh_ctx){.last=-1}; return 0;
  542 | }
- 543 | 
+ 543 |
 ```
 
 **X, lines 544–557.** mesh_scatter/mesh_gather split a dense buffer among stream objects; this is not indexed gather/scatter directly over the canonical pages.
@@ -4560,14 +4560,14 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  547 |   for(int i=0;i<k;i++){ size_t o=(size_t)i*sh, l=o<n?(n-o<sh?n-o:sh):0;
  548 |     mesh_yell_start(c,&ss[i],(const char*)p+o,l,nodes[i],sid0+i); }
  549 |   return k; }
- 550 | 
+ 550 |
  551 | int mesh_gather(struct mesh_ctx *c, struct mstream *ss, void *p, size_t n,
  552 |                 int k, uint32_t sid0){
  553 |   size_t sh=(n+k-1)/k;
  554 |   for(int i=0;i<k;i++){ size_t o=(size_t)i*sh, l=o<n?(n-o<sh?n-o:sh):0;
  555 |     if(mesh_lissen_start(c,&ss[i],(char*)p+o,l,sid0+i)) return -1; }
  556 |   return k; }
- 557 | 
+ 557 |
 ```
 
 **B, lines 558–574.** Attach and direct page-write access can be retained in the substrate, with canonical ownership and no separate numerical completion channel.
@@ -4576,20 +4576,20 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  558 | void *mesh_open(size_t *ns, size_t *sp, size_t *up){
  559 |   if(mesh_attach(&CTX0,0)) return NULL;
  560 |   return mesh_try_open(ns,sp,up); }
- 561 | 
+ 561 |
  562 | void *mesh_try_open(size_t *ns, size_t *sp, size_t *up){
  563 |   if(mesh_try_attach(&CTX0,0)) return NULL;
  564 |   if(ns) *ns=CTX0.M->arena;
  565 |   if(sp) *sp=CTX0.M->pgsz; if(up) *up=mesh_pay(CTX0.M);
  566 |   return CTX0.arena; }
- 567 | 
+ 567 |
  568 | int mesh_close(void){ return mesh_detach(&CTX0); }
- 569 | 
+ 569 |
  570 | size_t mesh_write(const void *p, size_t nbytes, int node){
  571 |   if(mesh_try_attach(&CTX0,0)) return 0;
  572 |   reclaim(&CTX0);
  573 |   return cwrite(&CTX0,p,nbytes,node); }
- 574 | 
+ 574 |
 ```
 
 **X, lines 575–595.** Copy and pending-pump API maintains foreign payload copies and counters.
@@ -4604,16 +4604,16 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  581 |     if(cwrite(&CTX0,q,bytes,node)!=bytes) break;
  582 |     CTX0.sub++; done++; }
  583 |   return done; }
- 584 | 
+ 584 |
  585 | size_t mesh_queue_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node){
  586 |   if(mesh_try_attach(&CTX0,0) || !bytes || bytes>mesh_pay(CTX0.M)) return 0;
  587 |   return pending_push(&CTX0,p,stride,bytes,nslots,node); }
- 588 | 
+ 588 |
  589 | size_t mesh_pump(void){
  590 |   if(mesh_try_attach(&CTX0,0)) return 0;
  591 |   if(refresh(&CTX0,0,0)) return CTX0.pending_count;
  592 |   pending_flush(&CTX0); return CTX0.pending_count+CTX0.inflight; }
- 593 | 
+ 593 |
  594 | size_t mesh_queued(void){ return CTX0.pending_count; }
  595 | size_t mesh_inflight(void){ return CTX0.inflight; }
 ```
@@ -4621,13 +4621,13 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
 **M, lines 596–617.** B: direct receive-page access. X: readv copies into foreign contiguous buffers and automatic next-read release does not prove asynchronous numerical consumption.
 
 ```text
- 596 | 
+ 596 |
  597 | size_t mesh_read(void **p, int *from){
  598 |   if(mesh_try_attach(&CTX0,0)) return 0;
  599 |   if(refresh(&CTX0,0,0)) return 0;
  600 |   pending_flush(&CTX0);
  601 |   return cread(&CTX0,p,from); }
- 602 | 
+ 602 |
  603 | size_t mesh_readv(void *p, size_t stride, uint32_t *sizes, int *from, size_t count){
  604 |   if(mesh_try_attach(&CTX0,0)) return 0;
  605 |   if(refresh(&CTX0,0,0)) return 0;
@@ -4642,7 +4642,7 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  614 |     memcpy((char*)p+got*stride,q,b);
  615 |     sizes[got]=(uint32_t)b; from[got]=src; got++; }
  616 |   return got; }
- 617 | 
+ 617 |
 ```
 
 **X, lines 618–627.** Blocking yell/lissen loops wait for stream state and retain seen masks; replace callers with the canonical configured page functions.
@@ -4652,11 +4652,10 @@ Corpus: **16 complete files, 3,970 source lines**. Every line belongs to an anno
  619 |   struct mstream s, *v=&s; mesh_yell_start(&CTX0,&s,p,n,node,0);
  620 |   while(s.st==MS_RUN) mesh_turn(&CTX0,&v,1);
  621 |   return s.st==MS_DONE?n:0; }
- 622 | 
+ 622 |
  623 | size_t mesh_lissen(void *p, size_t n){
  624 |   struct mstream s, *v=&s;
  625 |   if(mesh_lissen_start(&CTX0,&s,p,n,0)) return 0;
  626 |   while(s.st==MS_RUN) mesh_turn(&CTX0,&v,1);
  627 |   size_t g=s.done; free(s.seen); return g; }
 ```
-
