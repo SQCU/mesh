@@ -414,6 +414,12 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   }
   for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].inputs;j++)
     ((struct mesh_row_function*)p->functions)[i].input[j].stride=functions[i].input[j].stride;
+  struct mesh_row_map *held=(struct mesh_row_map*)p->returns;
+  for(size_t i=1;i<p->return_count;i++){
+    struct mesh_row_map value=held[i]; size_t j=i;
+    while(j && held[j-1].ranges[0].first>value.ranges[0].first){ held[j]=held[j-1]; j--; }
+    held[j]=value;
+  }
   return 0;
 }
 

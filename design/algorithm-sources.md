@@ -1555,3 +1555,29 @@ configured occurrence and one selection reservation; input publication functions
 use no Metal command buffer. A source-only realization creates no compute queue.
 This removes dependence on the implicit queue capacity; it does not assert that
 command-buffer creation or device dispatch has zero measured cost.
+
+## Independent participant reduction layouts
+
+The Dennis indexed operands and gathers described above apply independently to
+both participants' literal page layouts. `mesh_add` retains its FP32 pairwise
+addition and output scatter while accepting independent affine source views.
+Geometry word 15 is the local column-region extent; word 22 is the remote extent.
+Words 20 and 21 are the local and remote row strides in scalar elements. Existing
+words 13/14 select packed row counts, 16/17 column strides, and 18/19 region strides.
+Thus contiguous row-major MPS outputs and padded channels-major native outputs
+use the same gather/add/scatter function without layout branches or copies.
+The caller realizes all strides and extents before invocation.
+
+## Successful context closure
+
+Normal completion retains the declared outer return leases and allows the
+existing context poll to submit every published outbound page and consume its
+actual NIC completion. It does not invoke cancellation. An output's remaining
+NIC read keeps its use count above the outer lease count until physical
+completion, so context closure cannot destroy the last unsent gather result.
+Canonical owned return descriptors are sorted by logical range during
+realization for the existing binary ownership lookup; the caller's original
+return order is unchanged. Explicit invalidation still selects and sorts its
+transferred subset for cancellation. This uses the same Papadopoulos–Culler read
+ownership and asynchronous physical retirement, with no new handshake or
+numerical completion signal.
