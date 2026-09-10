@@ -26,6 +26,13 @@ the conjunction defining eligibility. The caller binds normalization's two
 ownership spans to this same mechanism before invocation. Matching and claim
 still rely on one scanner for overlapping destinations.
 
+Each matching conjunction stops at its first failed condition. Reading the
+remaining pages after a missing operand or already-issued destination cannot
+make that candidate eligible. The prior eager loops nevertheless read every
+page and dominated the sampled numerical thread during full-graph execution.
+Short-circuit evaluation changes no persistent state and requires no readiness
+cache or scheduler; later scans observe newly published values normally.
+
 Every numerical intermediate, accumulator and index value occupies actual
 sendable page payloads. Views gather/scatter through those pages. Lifetimes must
 include residual reads, asynchronous device reads and hashing. Reuse follows

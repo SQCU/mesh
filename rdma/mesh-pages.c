@@ -256,19 +256,19 @@ size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32
   size_t selected=0;
   for(uint32_t row=0;row<f->rows;row++){
     unsigned ready=1;
-    for(uint32_t i=0;i<f->outputs;i++){
+    for(uint32_t i=0;i<f->outputs && ready;i++){
       const struct mesh_pages_map *m=&f->maps[f->inputs+i]; const struct slot *s=&p->slots[m->slot];
-      for(uint32_t j=0;j<m->count;j++) ready&=__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)<generation;
-      ready&=storage_ready(p,s,m->first+row*m->stride,m->count);
+      for(uint32_t j=0;j<m->count && ready;j++) ready=__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)<generation;
+      if(ready) ready=storage_ready(p,s,m->first+row*m->stride,m->count);
     }
     if(!ready) continue;
-    for(uint32_t i=0;i<f->inputs;i++){
+    for(uint32_t i=0;i<f->inputs && ready;i++){
       const struct mesh_pages_map *m=&f->maps[i]; const struct slot *s=&p->slots[m->slot];
       if(generation<=m->lag){ ready=0; break; }
-      for(uint32_t j=0;j<m->count;j++){
+      for(uint32_t j=0;j<m->count && ready;j++){
         uint32_t at=m->first+row*m->stride+j;
-        ready&=__atomic_load_n(s->stamp+at,__ATOMIC_ACQUIRE)==generation-m->lag;
-        ready&=__atomic_load_n(s->table+at,__ATOMIC_ACQUIRE)!=ABSENT;
+        ready=__atomic_load_n(s->stamp+at,__ATOMIC_ACQUIRE)==generation-m->lag
+          && __atomic_load_n(s->table+at,__ATOMIC_ACQUIRE)!=ABSENT;
       }
     }
     if(!ready) continue;
