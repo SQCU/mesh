@@ -440,7 +440,8 @@ class Executable:
         maps = {mapping.first: mapping for mapping in self.returns if mapping.first in first}
         held = (RowMap * len(maps))(*maps.values())
         handle = c.cast(self.pages, c.POINTER(Rows))
-        _lib.mesh_rows_invalidate(c.byref(handle), held, len(held))
+        status = _lib.mesh_rows_invalidate(c.byref(handle), held, len(held))
+        if status: raise OSError(status, 'mesh_rows_invalidate')
         self.pages = handle
         self.realizations.clear()
 

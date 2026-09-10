@@ -392,15 +392,18 @@ accepted:
       link_flush(&links[index]);
       if(links[index].up) capacity+=(size_t)links[index].provider.send_capacity+links[index].provider.receive_capacity;
     }
-    uint64_t released=atomic_load_explicit(&M->r[REL].head,memory_order_acquire)-atomic_load_explicit(&M->r[REL].tail,memory_order_relaxed);
+    uint64_t release_tail=atomic_load_explicit(&M->r[REL].tail,memory_order_relaxed);
+    uint64_t released=atomic_load_explicit(&M->r[REL].head,memory_order_acquire)-release_tail;
     size_t retire=capacity?capacity:1;
-    for(size_t index=0;index<released && index<retire && !pop(M,REL,&descriptor);index++){
+    for(size_t index=0;index<released && index<retire;index++){
+      descriptor=*slot(M,REL,release_tail);
       memset(mesh_at(M,descriptor.page),0,pg);
       struct mesh_row *row=(struct mesh_row*)((char*)M+descriptor.header);
       uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_RELAXED);
       __atomic_store_n(&row->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
       __atomic_store_n(&row->stamp,stamp&~MESH_ROW_WRITING,__ATOMIC_RELEASE);
       if(descriptor.page<(uint32_t)pool) RELEASE(descriptor.page);
+      atomic_store_explicit(&M->r[REL].tail,++release_tail,memory_order_release);
     }
     double stamp=now();
     if(stamp-telemetry>=0.25){
