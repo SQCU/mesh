@@ -249,10 +249,12 @@ int main(int argc,char**argv){
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL); signal(SIGPIPE,SIG_IGN);
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   const uint32_t pg=(uint32_t)getpagesize();
-  uint64_t wanted=(uint64_t)(pct/100*(double)ram/(pg+MESH_HEADER_STRIDE));
+  size_t h0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+LINK_LIMIT*sizeof(struct mesh_port_info)+pg-1)/pg*pg;
+  uint64_t budget=(uint64_t)(pct/100*(double)ram);
+  if(budget<=h0+pg) die("page mapping budget");
+  uint64_t wanted=(budget-h0-pg)/(pg+MESH_HEADER_STRIDE);
   if(wanted<NOWN || wanted>INT32_MAX) die("page index capacity");
   int np=(int)wanted,pool=np/NOWN,receive_share=pool/link_count;
-  size_t h0=(RINGS+NRING*MESH_RING*sizeof(struct desc)+LINK_LIMIT*sizeof(struct mesh_port_info)+pg-1)/pg*pg;
   size_t d0=(h0+(size_t)np*MESH_HEADER_STRIDE+pg-1)/pg*pg,span=(size_t)pg*np;
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
   if(ftruncate(fd,(off_t)(d0+span))) die("ftruncate"); fchmod(fd,MESH_MODE);
@@ -298,7 +300,7 @@ int main(int argc,char**argv){
         int count=ibv_poll_cq(v->completion_queue,v->send_capacity+v->receive_capacity-v->completed,v->completions+v->completed);
         if(count<0){
           ports[index].when=flight_time(); ports[index].code=count; ports[index].domain=3;
-          COUNT(bad); link->up=0; link->faulted=1;
+          COUNT(bad); link->up=0; link->faulted=1; atomic_store(&link->phase,MESH_RETIRING);
         } else v->completed+=count;
       }
       int accessible=ownership==LINK_ACTIVE || ownership==LINK_RELEASED || ownership==LINK_RETIRED;

@@ -1,6 +1,6 @@
 BINS = mesh-flow mesh-stat libmesh.dylib libmesh-tensor.dylib
 all: $(BINS)
-mesh-flow: mesh-flow.c mesh.h mesh-flight.h mesh-links.h Makefile
+mesh-flow: mesh-flow.c mesh.h mesh-dataflow.h mesh-flight.h mesh-links.h Makefile
 	mkdir -p .build
 	cc -O2 -o .build/$@ mesh-flow.c -lrdma
 	codesign --force --sign - .build/$@

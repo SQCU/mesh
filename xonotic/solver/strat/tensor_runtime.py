@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mesh import ABSENT, Metadata, RowMap, RowFunction, RowBinding, Rows, _lib
+from mesh import ABSENT, WRITING, Metadata, RowMap, RowFunction, RowBinding, Rows, _lib
 from .tensor import Dimension, Tensor
 from .tensor_metal import source
 
@@ -195,7 +195,7 @@ class Realization:
                     key = len(executable.graph.nodes) + root
                     self.maps[key] = metadata
                 self.calls.append((index, root))
-        self.sources = [(index, page, root) for index, root in enumerate(local_functions) if root in self.inputs for page in range(self.maps[root].count)]
+        self.sources = [(index, root) for index, root in enumerate(local_functions) if root in self.inputs]
         self.return_maps = (RowMap * len(self.returns))(*self.returns)
         executable.next_row = first
         self.bindings = None
@@ -287,6 +287,7 @@ class Executable:
         self.owner_nodes = owner_nodes or {0: self.context.contents.M.contents.node, **{region['owner']: region['peer'] for region in graph.regions.values()}}
         self.shared = {self.roots[value.index] for name, value in graph.inputs.items() if name.startswith(('parameter.', 'optimizer.', 'accumulator.'))}
         self.shared.update(self.roots[value.index] for value, _ in graph.constants.values())
+        self.input_names = {value.index: name for name, value in graph.inputs.items()}
         self.storage = {}
         self.capacity = None
         self.realizations, self.arrays = {}, {}
@@ -401,14 +402,24 @@ class Executable:
     def submit(self, name):
         plan = self.realizations[name][self.generations[name] % 2]
         plan.stamp += 1
-        for index, page, root in plan.sources:
-            mapping = plan.function_maps[index][1][page]
-            physical = self.storage[root][0][page] if root in self.storage else mapping.physical
-            _lib.mesh_rows_map(plan.pages, mapping.first, physical, 1, mapping.uses[0], plan.stamp)
         self.generations[name] += 1
         self.submissions += 1
-        self.scan()
         return plan, plan.metadata
+
+    # ../../../design/algorithm-sources.md#complete-page-ownership
+    def publish(self, plan, values):
+        for index, root in plan.sources:
+            function = plan.functions[index]
+            selected = _lib.mesh_rows_issue(plan.pages, c.byref(function), plan.stamp)
+            if selected == ABSENT: continue
+            for page, mapping in enumerate(plan.function_maps[index][1]):
+                physical = self.storage[root][0][page] if root in self.storage else mapping.physical
+                _lib.mesh_rows_map(plan.pages, mapping.first, physical, 1, mapping.uses[0], WRITING | plan.stamp)
+            name = self.input_names.get(root)
+            if name in values:
+                array = self.storage[root][1] if root in self.storage else plan.arrays[root]
+                np.copyto(array, np.asarray(values[name]))
+            _lib.mesh_rows_complete(plan.pages, c.byref(function), plan.stamp, selected)
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def adopt(self, target, value, plan, array):

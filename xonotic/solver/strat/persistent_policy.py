@@ -119,17 +119,21 @@ class PersistentPolicy:
         return {prefix + name: value for name, value in zip(ChorusArrays._fields, values)}
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
+    def advance(self):
+        self.executable.scan()
+        if self.executable.progress is not None: self.executable.progress()
+        if self.executable.cancel is not None and self.executable.cancel(): raise InterruptedError('caller stopped consuming tensor values')
+
+    # ../../../design/algorithm-sources.md#complete-page-ownership
     def consume(self, name, values=()):
         executable = self.executable
         plan = executable.realizations[name][executable.generations[name] % 2]
         arguments = tuple(executable.storage.values())
-        for key, value in dict(values).items():
-            np.copyto(plan.arrays[executable.graph.inputs[key].index], np.asarray(value))
         plan, _ = executable.submit(name)
+        values = dict(values)
         while not plan.present():
-            executable.scan()
-            if executable.progress is not None: executable.progress()
-            if executable.cancel is not None and executable.cancel(): raise InterruptedError('caller stopped consuming tensor values')
+            executable.publish(plan, values)
+            self.advance()
         output, metadata = plan.values()
         for record in metadata:
             if record.code: raise RuntimeError(f'tensor metadata: domain={record.domain} code={record.code} function={record.function} occurrence={record.index} stamp={record.stamp}')

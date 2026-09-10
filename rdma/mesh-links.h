@@ -40,7 +40,6 @@ static void *link_worker(void *argument){
     provider->sends=calloc(provider->send_capacity,sizeof *provider->sends);
     if(!provider->completions || !provider->sges || !provider->receives || !provider->sends) die("provider descriptors");
     link->peer_node=expected_peer; link->generation++;
-    atomic_store(&link->phase,MESH_PAIRED);
     atomic_store_explicit(&link->ownership,LINK_ACTIVE,memory_order_release);
     while(atomic_load_explicit(&link->ownership,memory_order_acquire)!=LINK_RELEASED) usleep(1000);
     atomic_store(&link->phase,MESH_RETIRING);
@@ -89,6 +88,7 @@ static void link_flush(struct mesh_link *link){
   if(v->receiving){
     struct ibv_recv_wr *bad=NULL;
     int error=ibv_post_recv(v->pair,v->receives,&bad);
+    if(!error && atomic_load(&link->phase)==MESH_PAIRING) atomic_store(&link->phase,MESH_PAIRED);
     for(struct ibv_recv_wr *wr=error?bad:NULL;wr;wr=wr->next)
       v->completions[v->completed++]=(struct ibv_wc){.wr_id=wr->wr_id,.opcode=(enum ibv_wc_opcode)-1,.vendor_err=(uint32_t)error};
     v->receiving=0;

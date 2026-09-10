@@ -9,7 +9,7 @@ LABEL=io.mesh.bridge
 BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
-mesh_pct=25; app_pct=25; node=0; peer=""; region=/mesh0
+mesh_pct=80; node=0; peer=""; region=/mesh0
 
 if [ -f "$CONF" ]; then . "$CONF"; echo "mesh-bridge: conf $CONF node=$node mesh=$mesh_pct% peer=${peer:-listen}"
 else echo "mesh-bridge: NO CONF FOUND, defaults node=$node mesh=$mesh_pct% peer=${peer:-listen}" >&2; fi
@@ -24,8 +24,7 @@ else LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}"; fi
 
 wire_check() {
   ram=$(sysctl -n hw.memsize)
-  want_pct=$(awk -v a="$mesh_pct" -v b="$app_pct" 'BEGIN{print a+b}')
-  want=$(awk -v r="$ram" -v w="$want_pct" 'BEGIN{printf "%.0f", r*w/100}')
+  want=$(awk -v r="$ram" -v w="$mesh_pct" 'BEGIN{printf "%.0f", r*w/100}')
   [ "$want" -gt "$(sysctl -n vm.global_user_wire_limit)" ] &&
     sysctl -w vm.global_user_wire_limit="$want" >/dev/null 2>&1
   return 0
@@ -74,11 +73,11 @@ do_start() {
   wire_check
   [ -n "$(pid_of)" ] && { echo "mesh-bridge: already running as $(pid_of)"; return 0; }
   write_plist
-  launchctl bootstrap "$DOM" "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null
+  launchctl bootstrap "$DOM" "$PLIST"
   for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
   p=$(pid_of)
   [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
-  echo "mesh-bridge: running as $p, mesh ${mesh_pct}% app ${app_pct}%"
+  echo "mesh-bridge: running as $p, mesh ${mesh_pct}%"
 }
 
 do_status() {
@@ -90,7 +89,8 @@ do_status() {
 case "${1:-status}" in
   start)   do_start ;;
   stop)    do_stop ;;
-  restart) launchctl kill SIGTERM "$DOM/$LABEL" || do_start ;;
+  restart) do_stop && do_start ;;
   status)  do_status ;;
-  *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 64 ;;
+  ready)   "$STAT" --ready "$region" ;;
+  *) echo "usage: $0 {start|stop|restart|status|ready}" >&2; exit 64 ;;
 esac
