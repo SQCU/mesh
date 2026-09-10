@@ -64,8 +64,13 @@ short-circuiting on an error.
 Metadata storage is also configured before launch and occupies literal
 page-table pages. It is a distinct return channel, not a private allocation,
 completion token or readiness gate. Error codes never replace numerical output
-values. A missing numerical output remains missing; publishing metadata neither
-fabricates an output nor certifies that outstanding work has completed.
+values. A terminal device completion publishes the actual configured output
+pages independently of any error metadata. Their stamp certifies availability,
+not correctness: the calling context may reject their contents using `meta`.
+Without a terminal completion the output remains unavailable. Publishing
+metadata alone neither invents a numerical value nor certifies that outstanding
+work has completed. An error-dependent publication gate would consume metadata
+inside the callgraph and is excluded by the operator's instruction.
 
 ### The NFE, number k
 

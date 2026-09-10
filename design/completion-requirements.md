@@ -7,9 +7,12 @@ this document does not authorize exceptions. It supersedes completion implicatio
 in the chronological helper/evaluation notes. Those notes remain historical evidence.
 
 Initial source review: mesh `97d87e4`, metal-microbench `d177586`, both on `main`.
-The active numerical caller is `runReduceScatter` in `reduce_scatter.swift`.
-It calls `mesh_pages_*`. The `mesh_rows_*` replacement is not used by that caller.
-Compiling both runtimes into one executable does not constitute migration.
+At that review `runReduceScatter` called `mesh_pages_*`; compiling `mesh_rows_*`
+alongside it did not constitute migration. The current connected source rewrite
+replaces that caller and removes `mesh-pages.c/.h`. No build or execution of the
+rewrite has occurred: the operator prohibited interim execution. Historical
+dispositions below remain open until the complete source/evidence review updates
+them; a deleted symbol alone does not close its obligation.
 
 ## Allowed representation and execution
 
@@ -45,8 +48,15 @@ Every pending action must remain discoverable from its configured rows.
 Metadata carries literal error codes, their domain, and where/when they arose.
 Composition carries metadata alongside numerical values without inspecting errors
 to control execution. Only the outer calling context interprets errors, digests,
-missing results and deadlines and may repeat the entire NFE. A failed operation
-must not fabricate successful numerical output stamps.
+missing results and deadlines and may repeat the entire NFE. A stamp states
+availability, not numerical correctness. A terminal device callback publishes
+the configured output pages' actual contents and separately records any literal
+error. It does not inspect the error to suppress downstream computation. Those
+contents may be invalid or incomplete; only the calling context interprets the
+metadata and accepts or rejects the result. No terminal completion means no
+publication. Do not synthesize replacement numerical values or put error codes
+in the numerical channel. A failed receive with no trustworthy destination
+cannot invent a graph address from unwritten header bytes.
 
 ## Requirements matrix
 
@@ -118,7 +128,7 @@ and neither build result establishes replacement-runtime execution.
 | C24 | No recovery in computation/transport/reduction | Open: old stream retries, abort/recovery protocols and numerical status cancellation remain. Separate fleet provisioning/reachability from NFE execution; do not remove the operational protections against wedging the verbs driver. |
 | C25 | Nonblocking metadata preserves original provenance | Open: `mesh_rows_report` exists; bridge `L_FAULT` collapses original errors into `bad`/link-down, and Metal/CoreML map errors to EIO. Preserve source domain, literal code, operation, row/function, participant and occurrence. |
 | C26 | Metadata capacity and composition are configured | Open: allocate occurrences and graph return maps before launch, including submission and completion errors. Define global link errors without falsely assigning them to a successful numerical operation. No numerical dependence on metadata stamps. |
-| C27 | Native failures do not gate the graph | Open: CoreML callback error returns and `backingUsed` assertion, Metal status checks and `mesh_pages_cancel` remain. Successful physical completion publishes outputs; errors publish metadata. Missing output remains absent without an error-consumption branch in downstream functions. |
+| C27 | Native failures do not gate the graph | Open: terminal device completion publishes actual configured output contents independently of error metadata. No terminal completion means no publication. Remove error-dependent short-circuiting, `backingUsed` admission assertions and numerical cancellation. Outer callers alone interpret invalid output and error metadata. |
 | C28 | Invalidation is exposed directly to the outer caller | Open: no replacement invalidation API exists. Detach the old table from new invocation use without a synchronous drain/recovery operation. |
 | C29 | Late accesses cannot corrupt a replacement table | Open: current receive ignores the address epoch; ACK uses the submitted page's mutable address. Establish transport/table identity and GPU/NIC memory ownership across invalidation before reuse. Merely clearing stamps is insufficient. |
 | C30 | Hung work cannot require a computation-layer wait | Open: identify the backend/OS mechanism that ends access, or retain its old physical ownership outside the new graph until access ends. Do not promise immediate physical reuse while an uncancelled device can still write the address. |
@@ -235,8 +245,9 @@ Swift `publications` capture or task record is not the required index-page lifet
 No arbitrary index-storage limit may silently reduce which ready rows one scan
 can encode; capacity and ownership must be established for the configured graph.
 
-Successful physical completion publishes numerical output stamps and consumes
-the configured input uses once. Literal error provenance is written separately
+Terminal physical completion publishes numerical output stamps and consumes
+the configured input uses once. A stamp does not certify numerical correctness.
+Literal error provenance is written separately
 to configured metadata pages. A numerical function does not read link/global
 error status, cancel downstream values or certify output by inspecting metadata.
 The caller may reject a result or invalidate its table and submit a fresh complete
