@@ -17,11 +17,11 @@ implementation is claimed by this clarification.
 
 Current source disposition:
 
-- `mesh_rows_receive` returns negative codes synchronously and exits its receive
-  pass on those paths. It does not yet publish the required metadata values.
-- `mesh_rows_progress` consumes the negative receive return and exits before
-  transmission and retirement. This is error-dependent transport control, not
-  monadic propagation, even when called by an asynchronous owner.
+- `mesh_rows_receive` and `mesh_rows_progress` formerly propagated negative
+  synchronous returns that stopped delivery or skipped transmission/retirement.
+  Commit `af350bd` removes those paths from the unused replacement. It does not
+  yet publish hardware-error metadata; removing the gates is only one part of
+  the required replacement.
 - `runReduceScatter` reads `mesh_pages_status` in numerical launch/completion
   paths and uses it to suppress work or cancel outputs. Those uses remain
   excluded. Reporting status in the final caller-facing metrics does not cure
@@ -82,9 +82,9 @@ uses alone does not establish acyclicity or protect against an invalidated
 mapping receiving a late device write. Those remain distinct integration
 obligations, not permission to add per-input runtime guards.
 
-The other receive descriptor/address checks and negative return paths remain
-unconverted. This change does not establish asynchronous error propagation or
-complete caller migration.
+The subsequent direct-transport change removes receive descriptor/address
+checks and negative return paths. Neither change establishes asynchronous error
+propagation or complete caller migration.
 
 ### Asynchronous metadata publication
 
@@ -587,9 +587,9 @@ obligations. These primitives are not yet used by the NFE.
 publication-driven transmission and use-count retirement for the asynchronous
 transport owner. Its arguments are the existing page table, fixed epoch and
 immutable bindings. It owns no additional persistent state and invokes no model
-kernels. Its return value reports activity or the negative receive error; it is
-not an operand-readiness signal. This synchronous error path remains noncompliant with the asynchronous metadata
-contract above; it must not conclude NFEs inside the callgraph. Papadopoulos–Culler supply the operand
+kernels. Its unsigned return now counts completed page operations; it is not an
+operand-readiness signal or an error return. Hardware errors require the separate
+asynchronous metadata binding described above. Papadopoulos–Culler supply the operand
 presence/lifetime principle; Rabenseifner/Patarasuk–Yuan supply the page-exchange
 algebra. These references do not prove a latency bound for this implementation.
 
@@ -668,3 +668,21 @@ byte-identical peer logits matching the earlier committed regression. These are
 FP16 regression and FP32 compilation evidence, not numerical validation of the
 FP32 partial path. The exact manifest and results are committed in
 `metal-microbench/docs/data/fp32_output_rdma_2026-09-09.json`.
+
+### Hardware error provenance still lost at the bridge boundary
+
+At mesh commit `af350bd`, `rdma/mesh-links.h` puts literal failure codes into
+`link_event.error`, including verbs completion status, post-operation returns
+and socket errors. `rdma/mesh-flow.c` handles `L_FAULT` by incrementing `bad` and
+clearing `link->up`; it does not preserve that literal code in a caller-visible
+metadata page. The old `mesh-pages.c` subsequently infers failure from link and
+bridge state. Such inference cannot recover the original code or its precise
+operation provenance.
+
+The required binding must preserve the error's code domain and operation
+location/occurrence when reported by the device or bridge, then publish those
+literal values into the configured metadata return. Verbs completion codes and
+POSIX errno values cannot be silently treated as the same code domain. No new
+inference, negative-status execution gate or internal recovery follows from
+this reporting requirement. This bridge binding remains unfinished; neither
+successful compilation nor removing receive validation provides it.
