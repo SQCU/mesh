@@ -180,6 +180,32 @@ free list/bridge. Reinstallation occurs in selection while the row carries its
 issued stamp. Hardware reads and hashing count toward the lifetime. A row whose
 page is already absent is not zeroed or released a second time.
 
+### Literal weight pages
+
+`ModelFile.loadRows` in `metal-microbench/model_file.swift` realizes the
+compiler-assigned operand placement described by Papadopoulos and Culler,
+*Monsoon* (1990), sections 2–3, under the operator's stricter requirement that
+every shared-memory operand occupy actual RDMA-sendable pages. Configuration
+supplies a claimed output map, selected tensor coordinates and destination
+precision. The loader decodes BF16, FP16 or FP32 directly from the model's file
+mapping into those pages. It creates no intermediate dense operand buffer.
+The source format and destination precision are configuration choices.
+
+One numerical weight row occupies `ceil(columns / payloadElements)` consecutive
+logical rows. The output-map stride selects the next numerical row. Each write
+stops at the payload boundary; trailing payload elements remain as zeroed by
+realization. Vector weights and scalar weights use the same mapping. The caller
+owns the claimed pages throughout loading and publishes after loading finishes.
+This is configuration-time initialization, not a function invoked during NFE
+execution, and the cited paper does not specify model-file conversion.
+
+The bridge currently uses 4096-byte physical pages. A 3840-element FP16 matrix
+row exceeds one payload, so merely rebinding its previous dense buffer cannot
+realize these maps. Matrix contraction bindings must consume this layout while
+preserving the validated backend; the loader alone does not satisfy that work.
+The existing caller still uses its prior loaders until the required bindings and
+caller migration are complete.
+
 ### Literal page reduction
 
 Rabenseifner (2004) and Patarasuk–Yuan (2009), cited above, supply the
