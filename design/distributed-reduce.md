@@ -1,5 +1,13 @@
 # Distributed reduce over page tables
 
+The operator's [asynchronous error metadata contract](pages-and-functions.md#asynchronous-error-metadata)
+supersedes failure-value and status-driven termination wording below. The
+interface is `out, meta = meshfunction(x)`: literal error codes and where/when
+they occurred propagate asynchronously through metadata pages, separately from
+numerical outputs. The callgraph never consumes them to control execution;
+only the calling context interprets and handles them. See the
+[current source disposition](algorithm-sources.md#operator-clarification-asynchronous-error-metadata).
+
 This is the specification for the next reduce runtime in `rdma/`. Every
 requirement below draws on published prior art; the operator's specification
 is binding for this repository. The

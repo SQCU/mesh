@@ -1,5 +1,35 @@
 # Algorithm sources and implementation obligations
 
+## Operator clarification: asynchronous error metadata
+
+Operator instruction, September 9, 2026:
+
+> error status returns are allowed by the specifications we use... but it can never be synchronous or blocking or consumed by a callgraph itself... it can only be passed monadically through a metadata channel... s.t. calling contexts can call `out, meta = meshfunction(x)`, with literal values corresponding to error codes and where/when they happened in a callgraph reported in the meta channel, not the output channel, for calling consumers to interpret and handle...
+
+This supersedes blanket claims that error returns themselves are forbidden and
+older requirements to terminate numerical execution on a negative status.
+The [return-channel contract](pages-and-functions.md#asynchronous-error-metadata)
+requires asynchronous propagation without error-dependent callgraph control.
+Configured metadata pages carry the code and callgraph provenance; numerical
+outputs remain numerical. Only the calling context interprets metadata. An
+error report is not an execution-completion certificate. No new runtime
+implementation is claimed by this clarification.
+
+Current source disposition:
+
+- `mesh_rows_receive` returns negative codes synchronously and exits its receive
+  pass on those paths. It does not yet publish the required metadata values.
+- `mesh_rows_progress` consumes the negative receive return and exits before
+  transmission and retirement. This is error-dependent transport control, not
+  monadic propagation, even when called by an asynchronous owner.
+- `runReduceScatter` reads `mesh_pages_status` in numerical launch/completion
+  paths and uses it to suppress work or cancel outputs. Those uses remain
+  excluded. Reporting status in the final caller-facing metrics does not cure
+  the internal control dependencies or provide per-occurrence provenance.
+- Removing all status returns or converting functions to `void` does not by
+  itself implement the required metadata channel. Add the configured return
+  binding, migrate the single caller, then delete excluded implementations.
+
 ## Operator clarification: caller-owned repetition
 
 ### Complete allocation and unconditional invalidation
@@ -466,8 +496,8 @@ publication-driven transmission and use-count retirement for the asynchronous
 transport owner. Its arguments are the existing page table, fixed epoch and
 immutable bindings. It owns no additional persistent state and invokes no model
 kernels. Its return value reports activity or the negative receive error; it is
-not an operand-readiness signal. The caller must propagate errors to the link
-status and conclude affected NFEs. Papadopoulos–Culler supply the operand
+not an operand-readiness signal. This synchronous error path remains noncompliant with the asynchronous metadata
+contract above; it must not conclude NFEs inside the callgraph. Papadopoulos–Culler supply the operand
 presence/lifetime principle; Rabenseifner/Patarasuk–Yuan supply the page-exchange
 algebra. These references do not prove a latency bound for this implementation.
 

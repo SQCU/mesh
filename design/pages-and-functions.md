@@ -3,7 +3,7 @@
 Plain statements of the algorithm. Only the words used in the operator's own
 turns: mesh, peers, pages, page table, rows, stamps, use count, buffers as
 function returns, functions, release, reduce, accumulator page, index page,
-NFE, status word, digest. Every other word that has appeared in code
+NFE, status word, digest, metadata. Every other word that has appeared in code
 ("stage", "chunk", "version", "gate", "token", "group", "consumer",
 "scheduler") named a control-flow object standing in for something the page
 table already holds, and is not part of the algorithm.
@@ -37,6 +37,27 @@ does. This is a deployment invariant, not a capability to infer during an NFE.
 Deleted or invalidated DNN parameter pages can be loaded again from local NVMe
 or retransmitted from such a peer. Parameter residency is not a reason to retain
 an invalidated graph or add a recovery protocol to its numerical functions.
+
+### Asynchronous error metadata
+
+The calling interface is `out, meta = meshfunction(x)`. `out` contains numerical
+values; `meta` contains literal error codes and their callgraph location and
+occurrence (where and when). Error status returns are permitted only through
+this asynchronous metadata channel. Returning the pair does not synchronously
+wait for execution or for a final error verdict.
+
+Composition carries metadata monadically alongside values. A function in the
+callgraph does not consume error metadata to branch, short-circuit, suppress
+arithmetic, synchronize, wait, retry or recover. Only the calling context
+interprets and handles it, including deciding whether to repeat the complete
+feed-forward NFE. Here monadic propagation does not mean exception-style
+short-circuiting on an error.
+
+Metadata storage is also configured before launch and occupies literal
+page-table pages. It is a distinct return channel, not a private allocation,
+completion token or readiness gate. Error codes never replace numerical output
+values. A missing numerical output remains missing; publishing metadata neither
+fabricates an output nor certifies that outstanding work has completed.
 
 ### The NFE, number k
 
@@ -74,15 +95,15 @@ an invalidated graph or add a recovery protocol to its numerical functions.
 8. After a reduce has read its inputs, the node hashes the pages it sent and
    the pages it received. It writes the numbers into a page. That page goes to
    the peer. When both digest pages are present, the node compares them.
-9. If they differ, the NFE concludes with a failure value. The caller repeats
-   the NFE.
+9. A difference is reported in asynchronous error metadata. Only the calling
+   context interprets it and decides whether to repeat the complete NFE.
 
 ### Link error
 
-10. The runtime's status word goes negative. Every NFE in flight concludes
-    with a failure value. The calling process may reject that result and rerun
-    the complete feed-forward NFE. The mesh computation, transport and reduction
-    layer does not perform recovery or replay.
+10. A negative link status is reported with its location and occurrence in
+    asynchronous metadata for the affected invocation. The callgraph does not
+    consume that status. The calling context may reject the result and rerun
+    the complete feed-forward NFE; mesh does not perform recovery or replay.
 
 ## The same NFE on infinitely many Mac Minis
 
@@ -152,15 +173,15 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
    the link and the pages it received over it. It writes both numbers into a
    page. That page goes one hop. When the adjacent Mini's digest page has
    arrived and mine is written, the Mini compares them.
-10. If they differ, the NFE concludes with a failure value. The caller repeats
-    the NFE.
+10. A difference is reported in asynchronous error metadata. Only the calling
+    context interprets it and decides whether to repeat the complete NFE.
 
 ### Link error
 
-11. The runtime's status word goes negative. Every NFE in flight concludes
-    with a failure value. The calling process may reject that result and rerun
-    the complete feed-forward NFE. The mesh computation, transport and reduction
-    layer does not perform recovery or replay.
+11. A negative link status is reported with its location and occurrence in
+    asynchronous metadata for the affected invocation. The callgraph does not
+    consume that status. The calling context may reject the result and rerun
+    the complete feed-forward NFE; mesh does not perform recovery or replay.
 
 ### Why two Minis are the same as infinitely many
 
@@ -228,7 +249,8 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
 The rule that follows is the one already in the spec. A Mini acts on data,
 and only on data, and acts the moment the data is present. The row's stamp is
 the only signal. The GPU is handed only functions whose rows are stamped. The
-NFE concludes on a status word, never on a message inside the data. With that
+calling context receives errors through asynchronous metadata, never through
+numerical values or a status gate inside the callgraph. With that
 rule a Mini's latency and utilization are the same whether it has one
 neighbour or an infinite mesh behind it. Without it they are not.
 
