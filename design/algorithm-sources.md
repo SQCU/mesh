@@ -600,3 +600,28 @@ provide no exemption.
 Do not mark transport and asynchronous
 map/reduce complete until both flows use that representation and actual RDMA
 measurements establish correctness and performance on the supported workloads.
+
+### FP32 contraction output specialization
+
+`MatrixOperations.contract` requires FP32 destinations, but the initial vector
+and tensor bindings rejected that type and their shaders always stored FP16.
+That implementation gap is corrected by specializing the output element type
+when the numerical binding is realized. The pipeline cache key includes the
+output-type specialization. The invocation does not inspect output types or
+choose a backend.
+
+The existing vector and tensor kernels now write their FP32 contraction
+accumulators directly into FP32 destinations. Ungated contractions do not round
+the partial result through FP16. The existing fused gate/up expression retains
+its specified FP16 rounding of the two projections before activation; changing
+the destination type does not change that nonlinear expression. Ordinary FP16
+outputs retain their previous conversion. This adds no scratch allocation,
+host accumulation chain, or alternate kernel implementation.
+
+Papadopoulos–Culler (ISCA 1990), cited above, provide configured functions over
+assigned output storage. Rabenseifner (ICCS 2004) and Patarasuk–Yuan (JPDC 2009),
+also cited above, provide the collective composition into which independent
+contraction partials feed. The output precision and Metal specialization are
+implementation choices here, not claims made by those publications. This change
+does not prove that partitioning every contraction is faster than a full local
+contraction, nor validate mixed-precision MPS multiplication or caller migration.
