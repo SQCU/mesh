@@ -123,10 +123,12 @@ other backend inputs and weights still require work. MPS/tensor attention Q/K/V
 and attended intermediates now also occupy ordinary sendable page payloads;
 the corrected indexed output stores were checked against the preceding logits.
 
-Physical local-page recycling, complete read-lifetime proofs, accumulator/index
+Broader local-page recycling, complete read-lifetime proofs, accumulator/index
 page reduction, independent admission without digest gates, and link-error
-recovery/repetition remain unfinished. The runtime still allocates each local
-slot separately for the entire program. These citations provide no exemption.
+recovery/repetition remain unfinished. Normalized-input slots now share and
+recycle configured physical spans after completed dependent reads and
+asynchronous zeroing. Other local slots retain separate spans. These citations
+provide no exemption.
 Do not mark transport and asynchronous
 map/reduce complete until both flows use that representation and actual RDMA
 measurements establish correctness and performance on the supported workloads.

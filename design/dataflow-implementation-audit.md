@@ -456,3 +456,27 @@ backend substitution. The configured backend combination then matched all
 and `dataflow_attention_scatter_rdma_2026-09-09.json` in that same directory.
 Full-model capacity/performance, weights, physical page recycling,
 accumulator/index reduction and admission coupling remain unfinished.
+
+### Physical reuse and the full graph
+
+Canonical mesh `ad4467c` reuses configured physical spans through its existing
+owner table, page entries, stamps and use counts. Retirement waits for complete
+dependent outputs, clears the logical entries, and zeroes payloads on the
+existing helper before physical ownership becomes free. Metal-microbench
+`ecbd36e` assigns normalized input rows to these spans; the configured views
+continue to address the literal sendable pages. The cited basis and the
+single-scanner requirement are in `algorithm-sources.md`.
+
+With caller `1b1f384`, both machines ran the full 48-layer, 1024-row,
+two-in-flight graph: eight evaluations each, 768 agreements, exact agreement
+with the earlier full-graph logits, and settled exits. Normalized physical
+storage savings are 2850 MiB on M5 and 2178 MiB on M4. A separate two-layer
+fault run completed eight successful evaluations after 28 rejected evaluations
+and repeats with exact final logits. These results are recorded in
+`metal-microbench/docs/data/dataflow_normalized_reuse_full_rdma_2026-09-09.json`.
+
+Full-graph median latency remains approximately 1.845 seconds. That is an
+unresolved performance failure, not evidence that the time is RDMA service.
+Weights, other storage reuse, accumulator/index reduction, independent
+admission and verified link recovery remain unfinished. Full-graph capacity
+and numerical agreement do not imply full conformance or performance acceptance.
