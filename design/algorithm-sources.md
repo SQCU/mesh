@@ -368,7 +368,7 @@ does not choose an input format from a buffer. The FP32 variant adds directly
 into FP32 accumulator pages and publishes the same literal index value, without
 an intervening FP16 materialization. Both use the configured input order and
 require the same claimed destinations, index-page lifetime and single writer.
-The shared implementation avoids duplicating the matching/publication algorithm.
+The shared implementation avoids duplicating the arithmetic/publication algorithm.
 Rabenseifner and Patarasuk–Yuan are the cited partial-sum algebra; they do not
 establish numerical equivalence to an unsplit floating-point matrix product.
 
