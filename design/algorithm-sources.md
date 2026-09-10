@@ -117,6 +117,15 @@ surface ownership, tensor properties and completion to the configured rows;
 the presence of an external-storage method alone does not locate every internal
 weight or intermediate surface.
 
+After these inspections the normal `mesh-mini` SSH route failed through its
+configured `ws-2` jump host. Direct SSH to `ms-mac-mini.local` succeeded and
+reported a reboot at 21:26 on September 9, with approximately one minute of
+uptime. No restart had been issued by this work, and no diagnostic-report file
+from the preceding 15 minutes was found. The reboot cause is unestablished;
+the successful surface calls alone must not be reported as stability evidence.
+The new bridge process was paired and responsive with no attached numerical
+client. Direct synchronization and both caller builds succeeded afterward.
+
 ## Contiguous backing-page views
 
 Operator clarification, September 9, 2026:
