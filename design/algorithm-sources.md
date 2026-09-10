@@ -203,6 +203,28 @@ configured GPU implementation must preserve the same page algebra and be
 measured against the validated local function. The published collective papers
 do not specify this model's normalization formula.
 
+`metal-microbench/reduce_scatter.swift` supplies `bindRowNormalization` and
+`rms_norm_accumulator_rows` for the GPU part of that same page algebra. The
+configured maps gather FP32 accumulator elements, FP16 gamma/residual elements
+and an FP32 scale from actual local sendable pages through `mesh_row.page`.
+The kernel reduces squared FP32 values over the numerical row and scatters the
+normalized residual result to FP16 output pages. No materialized FP16 reduced
+input lies between addition and normalization. The within-threadgroup barrier
+combines the eight SIMD partial sums; it is an arithmetic dependency, not a
+transport wait. Papadopoulos–Culler supply the presence/matching principle;
+Rabenseifner and Patarasuk–Yuan supply the surrounding collective algebra.
+The model supplies RMS normalization, epsilon, gamma and scale.
+
+The binding compiles its pipeline and fixes all operand maps before invocation.
+Invocation encodes a supplied ready row range into the caller's command buffer;
+it allocates no operand storage and performs no readiness polling or publication.
+All four input maps and the output must name local arena pages covered by the
+transmit alias. The caller proves full-row accumulator presence and all operand
+lifetimes, then publishes on completion. Immutable geometry is encoder argument
+data, not a separately allocated shared-memory operand buffer. This binding is
+added before caller migration; compilation alone does not establish numerical
+agreement or performance, and it has not yet been used in an RDMA evaluation.
+
 These additions precede the caller migration. They do not constitute completed
 transport integration, read-proof integration, recovery or RDMA validation.
 The operator requires the existing caller to migrate before excluded
