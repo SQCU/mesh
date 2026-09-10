@@ -9,25 +9,29 @@ LABEL=io.mesh.bridge
 BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
-mesh_pct=80; node=0; peer=""; region=/mesh0
+scope=gui; mesh_pct=80; node=0; peer=""; region=/mesh0
 
 if [ -f "$CONF" ]; then . "$CONF"; echo "mesh-bridge: conf $CONF node=$node mesh=$mesh_pct% peer=${peer:-listen}"
 else echo "mesh-bridge: NO CONF FOUND, defaults node=$node mesh=$mesh_pct% peer=${peer:-listen}" >&2; fi
 
-if [ "$(id -u)" != 0 ] && sudo -n true 2>/dev/null; then
-  exec sudo -n MESH_CONF="$CONF" "$0" "$@"
-fi
-if [ "$(id -u)" = 0 ]; then DOM="system"; PLIST=/Library/LaunchDaemons/$LABEL.plist
-else DOM="gui/$(id -u)"; PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"; fi
-if [ "$(id -u)" = 0 ]; then LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}"
-else LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}"; fi
+case "$scope" in
+system)
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" "$0" "$@"; fi
+  DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
+  LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
+gui)
+  DOM="gui/$(id -u)"; PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+  LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}" ;;
+*) echo "mesh-bridge: invalid configured scope $scope" >&2; exit 64 ;;
+esac
 
 wire_check() {
   ram=$(sysctl -n hw.memsize)
   want=$(awk -v r="$ram" -v w="$mesh_pct" 'BEGIN{printf "%.0f", r*w/100}')
-  [ "$want" -gt "$(sysctl -n vm.global_user_wire_limit)" ] &&
-    sysctl -w vm.global_user_wire_limit="$want" >/dev/null 2>&1
-  return 0
+  if [ "$want" -gt "$(sysctl -n vm.global_user_wire_limit)" ]; then
+    if [ "$(id -u)" = 0 ]; then sysctl -w vm.global_user_wire_limit="$want"
+    else sudo -n sysctl -w vm.global_user_wire_limit="$want"; fi
+  fi
 }
 
 write_plist() {
@@ -70,7 +74,7 @@ do_stop() {
 }
 
 do_start() {
-  wire_check
+  wire_check || return $?
   [ -n "$(pid_of)" ] && { echo "mesh-bridge: already running as $(pid_of)"; return 0; }
   write_plist
   launchctl bootstrap "$DOM" "$PLIST"
