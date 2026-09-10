@@ -217,19 +217,10 @@ int mesh_row_zero(const struct mesh_rows *p, uint32_t row, uint64_t stamp){
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-static __attribute__((always_inline)) inline int row_add(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
+static __attribute__((always_inline)) inline void row_add(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
   const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp, size_t bytes){
-  if(!count || !elements || elements>p->bytes/bytes || index>=p->bytes/sizeof(uint64_t) ||
-     !stamp || stamp>=MESH_ROW_WRITING) return -EINVAL;
   uint64_t *indices=mesh_row_data(p,index_row);
-  if(!indices) return 0;
-  if(__atomic_load_n(indices+index,__ATOMIC_ACQUIRE)==stamp) return 0;
-  for(size_t i=0;i<count;i++)
-    if(!mesh_rows_present(p,(struct mesh_row_map){.first=inputs[i],.count=1},0,stamp)) return 0;
   size_t width=p->bytes/sizeof(float), pages=(elements+width-1)/width;
-  for(size_t i=0;i<pages;i++)
-    if(!mesh_row_data(p,accumulators[i]) ||
-       __atomic_load_n(&p->table[accumulators[i]].stamp,__ATOMIC_ACQUIRE)!=(MESH_ROW_WRITING|stamp)) return 0;
   for(size_t page=0;page<pages;page++){
     size_t first=page*width, n=elements-first;
     if(n>width) n=width;
@@ -254,19 +245,18 @@ static __attribute__((always_inline)) inline int row_add(const struct mesh_rows 
   for(size_t i=0;i<pages;i++) __atomic_store_n(&p->table[accumulators[i]].stamp,stamp,__ATOMIC_RELEASE);
   __atomic_store_n(indices+index,stamp,__ATOMIC_RELEASE);
   for(size_t i=0;i<count;i++) mesh_row_release(p,inputs[i]);
-  return 1;
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-int mesh_rows_add_f16(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
+void mesh_rows_add_f16(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
   const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
-  return row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(_Float16));
+  row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(_Float16));
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-int mesh_rows_add_f32(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
+void mesh_rows_add_f32(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
   const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
-  return row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(float));
+  row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(float));
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
@@ -279,14 +269,10 @@ int mesh_rows_indexed(const struct mesh_rows *p, uint32_t index_row, uint32_t fi
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-int mesh_rows_normalize_f32(const struct mesh_rows *p, const uint32_t *accumulators,
+void mesh_rows_normalize_f32(const struct mesh_rows *p, const uint32_t *accumulators,
   const uint32_t *gamma, const uint32_t *residual, const uint32_t *outputs,
   size_t elements, float epsilon, float scale){
-  if(!elements || !(epsilon>0)) return EINVAL;
   size_t floats=p->bytes/sizeof(float), halves=p->bytes/sizeof(_Float16);
-  for(size_t i=0;i<(elements+floats-1)/floats;i++) if(!mesh_row_data(p,accumulators[i])) return EINVAL;
-  for(size_t i=0;i<(elements+halves-1)/halves;i++)
-    if(!mesh_row_data(p,gamma[i]) || !mesh_row_data(p,residual[i]) || !mesh_row_data(p,outputs[i])) return EINVAL;
   float squared=0;
   for(size_t i=0;i<elements;i++){
     float value=((const float*)mesh_row_data(p,accumulators[i/floats]))[i%floats];
@@ -299,7 +285,6 @@ int mesh_rows_normalize_f32(const struct mesh_rows *p, const uint32_t *accumulat
     float add=(float)((const _Float16*)mesh_row_data(p,residual[i/halves]))[i%halves];
     ((_Float16*)mesh_row_data(p,outputs[i/halves]))[i%halves]=(_Float16)((value*norm*weight+add)*scale);
   }
-  return 0;
 }
 
 // ../design/algorithm-sources.md#literal-page-transport

@@ -347,9 +347,19 @@ addition's stamp in an actual index page. `mesh_rows_indexed` reads those index
 page contents. One arithmetic owner handles each overlapping accumulator/index
 span. The accumulator output rows must already have been selected/claimed, and
 the index page must have a live configured lifetime. No operation crosses a
-payload boundary into an RDMA header. A successful addition releases each input
-use after publishing its accumulator/index values; the index entry prevents
-repeating that addition. Configuration counts hashing and transport uses too.
+payload boundary into an RDMA header. Addition releases each input use after
+publishing its accumulator/index values. It does not inspect the index entry to
+decide whether to execute again; the configured graph owns exactly one execution
+of that addition. Configuration counts hashing and transport uses too.
+
+The addition entrypoints and `mesh_rows_normalize_f32` return no runtime status.
+Their arithmetic contains no readiness scans, issued-stamp validation, duplicate
+execution suppression or error-return branches. Counts, payload extents, index
+locations, positive epsilon, claimed outputs and live inputs are configuration
+and call-graph contracts. Arithmetic loops follow those fixed dimensions and
+the fixed input order. This does not make the remaining selection, transport,
+invalidation or caller implementations compliant; those still require replacement
+and integration under the operator's no-added-control-flow instruction.
 
 `mesh_rows_add_f32` applies the same operation to FP32 partial pages, including
 the independent contraction partials above. Both entrypoints specialize the

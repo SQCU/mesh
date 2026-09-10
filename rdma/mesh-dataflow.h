@@ -35,15 +35,15 @@ void mesh_rows_publish(const struct mesh_rows *pages, const struct mesh_row_func
   uint32_t index, uint64_t stamp);
 void mesh_row_release(const struct mesh_rows *pages, uint32_t row);
 int mesh_row_zero(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
-int mesh_rows_add_f16(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
+void mesh_rows_add_f16(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
   const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index,
   uint64_t stamp);
-int mesh_rows_add_f32(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
+void mesh_rows_add_f32(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
   const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index,
   uint64_t stamp);
 int mesh_rows_indexed(const struct mesh_rows *pages, uint32_t index_row, uint32_t first,
   uint32_t count, uint64_t stamp);
-int mesh_rows_normalize_f32(const struct mesh_rows *pages, const uint32_t *accumulators,
+void mesh_rows_normalize_f32(const struct mesh_rows *pages, const uint32_t *accumulators,
   const uint32_t *gamma, const uint32_t *residual, const uint32_t *outputs,
   size_t elements, float epsilon, float scale);
 size_t mesh_rows_send(const struct mesh_rows *pages, uint64_t epoch,
