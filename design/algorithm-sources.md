@@ -1137,6 +1137,59 @@ separate integration obligations; separate-run timings do not prove overlap.
 
 ### Complete page ownership
 
+The September 10 operator correction supersedes the necessity claim in the
+historical two-request implementation description below. A page does not require
+a separate header transfer. `max_sge=1` establishes a limit on each work request,
+not a requirement for two work requests. The current split is an implementation
+choice awaiting replacement, not part of the algorithm contract.
+
+#### Configured placement and transport-active indices
+
+Realization assigns and registers the physical backing needed over the complete
+bounded function lifecycle, including contiguous views required by its backend.
+Invocation does not allocate input/output buffers or negotiate their placement.
+The transport-active index set describes physical ranges currently accessible to
+outstanding NIC operations. SEND reads its source and RECV writes its destination;
+both accesses retain their physical assignment until completion. This set is not
+a queue of future work, an operand-readiness cache, or a global execution gate.
+Its complement describes transport-inactive indices. Function operand lifetimes
+remain properties of the page table: transport inactivity alone does not make a
+live numerical operand disposable. Explicit table invalidation removes logical
+assignments without pretending an outstanding device access has disappeared.
+
+Disjoint physical ranges admit concurrent transport and numerical operations.
+Different virtual addresses or logical indices are insufficient if they alias
+the same writable physical range. Completion publishes only the affected rows;
+it does not stop unrelated functions or require a peer acknowledgement. Errors
+are asynchronous metadata for the outer caller.
+
+Papadopoulos and Culler supply assigned operand storage, presence transitions,
+and lifetime discipline. Apple TN3205 supplies nonblocking submission directly
+against registered memory, with one page-sized SEND and one preposted page-sized
+RECV in its example. Neither source requires the header/payload pair below.
+
+The remaining address-binding obligation is concrete: TN3205 SEND has no remote
+address argument and supports only `IBV_WR_SEND`. The receive descriptor names
+the destination physical range; `wr_id` is local completion identification and
+is not transmitted to the peer. Therefore replacing the anonymous receive pool
+requires an actual configured association between a transfer and its receive
+placement. Assuming arbitrary sends on one QP select receive slots by the
+sender's local `wr_id` would be incorrect. A fixed submission order that waits
+for an earlier unavailable page would violate the operator's streaming rule.
+The replacement must establish this association without either assumption.
+
+Source disposition from the September 10 review:
+
+| Current source | Competing mechanism | Required replacement |
+| --- | --- | --- |
+| `mesh-links.h:link_submit` | Two WRs and two completion identities per page | Literal page transfer with configured placement identity |
+| `mesh-flow.c:mesh_progress` receive posting | Anonymous free-pool placement followed by header interpretation | Realized receive backing and physical transport-active indices |
+| `mesh-flow.c:mesh_progress` completion handling | Header/payload completion pairing | Completion of the affected physical page access |
+| `mesh-dataflow.c:mesh_rows_poll` | Arrival header selects table, binding, index and stamp; occupied rows retain arrivals | Configured operand placement and publication into its literal page-table row |
+
+This is a source audit and replacement contract, not a claim that the replacement
+has been implemented or that transport overhead has been measured away.
+
 The connected replacement uses Papadopoulos and Culler's Monsoon operand
 presence and use accounting, Rabenseifner and Patarasuk–Yuan's partitioned
 page exchange, and Saltzer–Reed–Clark's endpoint interpretation of error values.
