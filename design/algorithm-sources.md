@@ -6,6 +6,42 @@ precedence over completion implications in the chronological notes below. The
 active caller still uses `mesh_pages_*`; local kernel measurements and unused
 `mesh_rows_*` functions do not establish a completed replacement.
 
+## Explicit attention and projection weights
+
+Papadopoulos and Culler (Monsoon, 1990), cited under operand matching below,
+provide the operand-slot principle: a configured function consumes its named
+values rather than allocating another representation of them. Rabenseifner
+(2004) and Patarasuk–Yuan (2009), cited under collective arithmetic, supply the
+partitioned-contraction/reduction context. Neither publication specifies Apple's
+matrix-view ABI or proves this implementation's performance.
+
+`AttentionWeightViews` names the Q, K, optional V, output projection and two
+head-normalization weight values. Matrices have contraction orientation
+`[input channels, output channels]`; normalization weights are `[1, head dimension]`.
+`AttentionWeights.init` realizes head ownership and validates these shapes before
+invocation. Explicit views bypass dense parameter loading. An absent V retains
+the model's existing shared-K/V algebra; it is not a missing-operand fallback.
+
+`realizeMetalAttentionRows` and the attention case of `realizeMetalParameter`
+carry these views through the existing projections and attention launch path.
+The bound `norm` operation uses the normalization view's buffer and byte offset,
+so a weight contained in a mesh payload need not be copied to buffer offset zero.
+That vector must be contiguous within its payload; configuration validates the
+view before binding the kernel.
+
+`realizeMetalParameter` also accepts an explicit projection/vocabulary weight
+view, including the existing independent FP32 contraction ranges. This permits
+the embedding and tied vocabulary projection to refer to the same parameter
+storage. The numerical function does not load or select weights during execution.
+The ordinary local/default binding retains its existing loader and arithmetic.
+
+These bindings do not make arbitrary paged matrices acceptable to MPS. The
+configured contraction must still expose valid payload-contained MPS subviews
+or use the already selected backend's paged arithmetic. They do not supply
+CoreML internal weight/intermediate bindings or replace the active mesh caller.
+Completion requirements C07–C11 and C17 remain open until actual page-backed
+execution through that caller is measured.
+
 ## Operator clarification: asynchronous error metadata
 
 Operator instruction, September 9, 2026:
