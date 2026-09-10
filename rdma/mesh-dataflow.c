@@ -43,9 +43,37 @@ int mesh_rows_validate(const struct mesh_rows *p, const struct mesh_row_function
 }
 
 // ../design/algorithm-sources.md#literal-row-functions
+static uint64_t row_map_uses(struct mesh_row_map map, uint32_t rows, uint32_t row){
+  if(!rows || row<map.first) return 0;
+  uint64_t offset=(uint64_t)row-map.first;
+  if(!map.stride) return offset<map.count?rows:0;
+  uint64_t first=offset<map.count?0:(offset-map.count)/map.stride+1;
+  uint64_t last=offset/map.stride;
+  if(last>=rows) last=rows-1;
+  return first<=last?last-first+1:0;
+}
+
+// ../design/algorithm-sources.md#literal-row-functions
+uint64_t mesh_rows_uses(const struct mesh_row_function *functions, size_t count,
+  const struct mesh_row_binding *bindings, size_t binding_count,
+  const struct mesh_row_map *returns, size_t return_count, uint32_t row){
+  uint64_t uses=0;
+  for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].inputs;j++)
+    uses+=row_map_uses(functions[i].input[j],functions[i].rows,row);
+  for(size_t i=0;i<binding_count;i++){
+    const struct mesh_row_binding *b=&bindings[i];
+    if(!b->receive) uses+=(row>=b->first && (uint64_t)row<b->first+(uint64_t)b->count);
+    for(uint32_t j=0;j<b->inputs;j++) uses+=row_map_uses(b->input[j],b->count,row);
+  }
+  for(size_t i=0;i<return_count;i++) uses+=row_map_uses(returns[i],1,row);
+  return uses;
+}
+
+// ../design/algorithm-sources.md#literal-row-functions
 int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function *functions,
-  size_t count, const struct mesh_row_binding *bindings, size_t binding_count){
-  if(!count || !functions || (binding_count && !bindings)) return EINVAL;
+  size_t count, const struct mesh_row_binding *bindings, size_t binding_count,
+  const struct mesh_row_map *returns, size_t return_count){
+  if(!count || !functions || (binding_count && !bindings) || (return_count && !returns)) return EINVAL;
   for(size_t i=0;i<count;i++){
     const struct mesh_row_function *f=&functions[i];
     int error=mesh_rows_validate(p,f);
@@ -81,6 +109,17 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
       if(!produced) return EINVAL;
     }
   }
+  for(size_t i=0;i<return_count;i++)
+    if(!returns[i].count || (uint64_t)returns[i].first+returns[i].count>p->count ||
+       (uint64_t)returns[i].first+returns[i].count>UINT32_MAX) return EINVAL;
+  for(size_t i=0;i<count;i++) for(uint32_t j=0;j<functions[i].outputs;j++){
+    const struct mesh_row_map *m=&functions[i].output[j];
+    for(uint32_t r=0;r<functions[i].rows;r++) for(uint32_t k=0;k<m->count;k++)
+      if(mesh_rows_uses(functions,count,bindings,binding_count,returns,return_count,m->first+r*m->stride+k)!=m->uses) return EINVAL;
+  }
+  for(size_t i=0;i<binding_count;i++) if(bindings[i].receive)
+    for(uint32_t j=0;j<bindings[i].count;j++)
+      if(mesh_rows_uses(functions,count,bindings,binding_count,returns,return_count,bindings[i].first+j)!=bindings[i].uses) return EINVAL;
   for(size_t i=0;i<p->count;i++) p->table[i]=(struct mesh_row){.page=MESH_ROW_ABSENT};
   for(size_t i=0;i<count;i++){
     const struct mesh_row_function *f=&functions[i];

@@ -21,8 +21,12 @@ struct mesh_row_binding {
 struct mesh_row_address { uint64_t epoch, stamp; uint32_t source, target; };
 
 int mesh_rows_validate(const struct mesh_rows *pages, const struct mesh_row_function *function);
+uint64_t mesh_rows_uses(const struct mesh_row_function *functions, size_t count,
+  const struct mesh_row_binding *bindings, size_t binding_count,
+  const struct mesh_row_map *returns, size_t return_count, uint32_t row);
 int mesh_rows_realize(const struct mesh_rows *pages, const struct mesh_row_function *functions,
-  size_t count, const struct mesh_row_binding *bindings, size_t binding_count);
+  size_t count, const struct mesh_row_binding *bindings, size_t binding_count,
+  const struct mesh_row_map *returns, size_t return_count);
 void *mesh_row_data(const struct mesh_rows *pages, uint32_t row);
 int mesh_rows_present(const struct mesh_rows *pages, struct mesh_row_map map, uint32_t index, uint64_t stamp);
 size_t mesh_rows_select(const struct mesh_rows *pages, const struct mesh_row_function *function,

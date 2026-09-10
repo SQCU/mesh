@@ -204,6 +204,30 @@ the configured physical page and use count. Clearing the stamp to zero on reuse
 would incorrectly enable the old generation again, so that is not done.
 The initial row state is likewise absent, zero uses and stamp zero.
 
+`mesh_rows_uses` derives each row's use count during configuration from all
+function-input occurrences, remote-read input maps, one NIC use per transmit
+binding, and the graph's returned-page maps. Returned maps describe one caller
+read of each row in their range; they are function-return storage, not a runtime
+completion mechanism. Hashing must appear as a function input like every other
+read. Neither the query nor use-count validation runs during an invocation.
+
+The configuration helper `row_map_uses` counts the indices `i` satisfying
+`0 <= i < rows` and `first + i*stride <= row < first + i*stride + count`.
+For nonzero stride these form an integer interval, intersected with the configured
+index range; zero stride contributes either all indices or none. Thus overlapping
+input ranges and broadcast operands count every consuming function occurrence.
+This realizes the compiler-known operand/lifetime relationships attributed to
+Papadopoulos–Culler above without a mutable ownership mirror.
+
+`mesh_rows_realize` compares every configured local-output and receive-row count
+with that derived count before initializing the table. A map with nonuniform
+uses must be split into the corresponding configured output maps. Counts that
+exceed the row's 32-bit representation also fail this configuration comparison.
+The only additional arguments are the immutable graph-return maps. Invocation
+continues to decrement the literal use count directly; it neither recomputes
+the graph nor validates a decrement. The caller still has to supply the complete
+graph, including arithmetic, hashing, remote reads and returned values.
+
 `mesh_metal_row_table` aliases this same array of physical-page/use-count/stamp
 rows for the GPU using the existing no-copy mapping function. The configuration
 owner supplies a page-aligned, page-rounded mapping whose lifetime covers the
