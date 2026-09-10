@@ -782,3 +782,19 @@ the range's weight operands. The evaluator uses the existing projection and dump
 a second implementation. These local dense evaluations do not establish actual
 page-backed operands, concurrent partial issue, transport integration or a
 performance gain from splitting K.
+
+At caller commit `8a01256` and mesh commit `72e8f26`, both full builds passed.
+The existing client completed 30 finite projection evaluations across MPS,
+tensor and vector backends on both SoCs. Each used 32 rows, 128 outputs and
+K=3840, with a full contraction and partitions at K=1920 and K=1800. Input
+hashes matched across cases on each device. Adding each pair of partial dumps
+with FP32 rounding reconstructed the corresponding full backend output with
+relative RMS error below `1e-6` in all twelve comparisons; the largest was
+approximately `9.61e-7` for M4 tensor at K=1800. The latter partition exercises
+partial reduction tiles. This is floating-point agreement, not exact equality.
+
+The exact records and comparison method are committed in
+`metal-microbench/docs/data/contraction_ranges_2026-09-09.json`. The summation
+was measurement analysis outside the callgraph, not a replacement mesh reducer.
+Actual page operands, concurrent issue and canonical page reduction remain
+separate integration obligations; separate-run timings do not prove overlap.
