@@ -30,6 +30,42 @@ Current source disposition:
   itself implement the required metadata channel. Add the configured return
   binding, migrate the single caller, then delete excluded implementations.
 
+### Asynchronous metadata publication
+
+`mesh_rows_report` implements publication into a configured metadata output
+page. Papadopoulos and Culler, *Monsoon: An Explicit Token-Store Architecture*
+(ISCA 1990), supply the assigned-storage and presence-publication precedent;
+Saltzer, Reed and Clark, *End-to-End Arguments in System Design* (TOCS 1984),
+supply the endpoint responsibility for interpretation. Both publications are
+listed below. Neither specifies this record layout or this API; the operator's
+return-channel contract determines those choices.
+
+The record contains the invocation stamp, occurrence time, configured function
+identity, numerical index, peer identity and literal signed error code. The
+producer supplies these values; publication neither samples a clock nor branches
+on the code. `when` is a producer-local occurrence time in the clock domain and
+units established by configuration. It does not imply synchronized peer clocks.
+Zero and nonzero codes take the same publication path.
+
+Before launch, realize an ordinary output map with one page per occurrence,
+sufficient payload for `sizeof(struct mesh_row_metadata)`, one writer per row,
+and return/transmit use counts. Include those outputs in the complete graph's
+allocation and lifetime accounting. The `occurrence` argument selects that
+configured output row; the record's `index` identifies the numerical operation
+being reported. Different reporting sites and overlapping invocations require
+distinct live destinations. There is no append counter, metadata queue, overwrite
+of an unread event, or allocation during publication. Reuse obeys the same page
+lifetime contract as every other output.
+
+An asynchronous producer writes the record directly into the actual sendable
+page payload, installs its configured page/use count and publishes the row stamp.
+The function returns without waiting for execution, transport or a consumer.
+The metadata output has no numerical dependents and publication releases no
+numerical inputs. Only the calling context interprets it. Ordinary page transport
+can carry it without inspecting its error code. This primitive is not yet bound
+to the receive path or the single numerical caller, and does not establish full
+error propagation, invalidation or a measured latency bound.
+
 ## Operator clarification: caller-owned repetition
 
 ### Complete allocation and unconditional invalidation

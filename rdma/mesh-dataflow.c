@@ -196,6 +196,17 @@ void mesh_rows_publish(const struct mesh_rows *p, const struct mesh_row_function
   }
 }
 
+// ../design/algorithm-sources.md#asynchronous-metadata-publication
+void mesh_rows_report(const struct mesh_rows *p, struct mesh_row_map output,
+  uint32_t occurrence, struct mesh_row_metadata metadata){
+  uint32_t page=output.physical+occurrence*output.physical_stride;
+  struct mesh_row *row=&p->table[output.first+occurrence*output.stride];
+  memcpy(mesh_at(p->memory,page)+p->offset,&metadata,sizeof metadata);
+  __atomic_store_n(&row->uses,output.uses,__ATOMIC_RELAXED);
+  __atomic_store_n(&row->page,page,__ATOMIC_RELEASE);
+  __atomic_store_n(&row->stamp,metadata.stamp,__ATOMIC_RELEASE);
+}
+
 // ../design/algorithm-sources.md#literal-row-functions
 void mesh_row_release(const struct mesh_rows *p, uint32_t row){
   __atomic_fetch_sub(&p->table[row].uses,1,__ATOMIC_ACQ_REL);

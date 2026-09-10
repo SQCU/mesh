@@ -19,6 +19,11 @@ struct mesh_row_binding {
   uint32_t inputs;
 };
 struct mesh_row_address { uint64_t epoch, stamp; uint32_t source, target; };
+struct mesh_row_metadata {
+  uint64_t stamp, when;
+  uint32_t function, index, peer;
+  int32_t code;
+};
 
 int mesh_rows_validate(const struct mesh_rows *pages, const struct mesh_row_function *function);
 uint64_t mesh_rows_uses(const struct mesh_row_function *functions, size_t count,
@@ -33,6 +38,8 @@ size_t mesh_rows_select(const struct mesh_rows *pages, const struct mesh_row_fun
   uint64_t stamp, uint32_t *indices, size_t capacity);
 void mesh_rows_publish(const struct mesh_rows *pages, const struct mesh_row_function *function,
   uint32_t index, uint64_t stamp);
+void mesh_rows_report(const struct mesh_rows *pages, struct mesh_row_map output,
+  uint32_t occurrence, struct mesh_row_metadata metadata);
 void mesh_row_release(const struct mesh_rows *pages, uint32_t row);
 int mesh_row_zero(const struct mesh_rows *pages, uint32_t row, uint64_t stamp);
 void mesh_rows_add_f16(const struct mesh_rows *pages, const uint32_t *inputs, size_t count,
