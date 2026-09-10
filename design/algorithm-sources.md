@@ -178,6 +178,15 @@ No readiness cache, transport framing or recovery mechanism is added. Existing
 excluded control mechanisms still require the complete caller migration and
 deletion prescribed by the requirements matrix.
 
+Bridge deployment at `0f6e18a` exposed a separate build/lifecycle issue: M4
+launchd recorded `OS_REASON_CODESIGNING` during reload before returning to a
+paired process. The build previously wrote directly to the live executable
+path. Its recipe now links and ad-hoc signs a new build artifact, then renames
+it atomically into place. This preserves the inode mapped by the running
+process until ordinary SIGTERM teardown. It is build publication, not a
+computation recovery or synchronization protocol. No source backup or alternate
+source version is created; source changes remain in commits on main.
+
 ## Contiguous backing-page views
 
 Operator clarification, September 9, 2026:
