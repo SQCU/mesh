@@ -1743,3 +1743,15 @@ a fixed grace interval, or a termination dependency inside the stream.
 without that build flag avoid those per-call clock reads. Even the direct
 provider yardstick includes descriptor construction, CQ polling and host service
 cost, so its observed time is not an asserted physical lower bound.
+
+The provider yardstick accepts an optional realized outstanding-page window,
+clamped to provider capacity. The default retains the full provider capacity.
+It records each completion's local `wr_id` in preallocated host storage; after
+timing it compares that sequence to the ordered single-QP submissions. Receiver
+byte verification examines every physical page even after timeout and separately
+reports correct pages corresponding to observed completion identities. This
+separates missing completion observations from missing or misplaced payloads.
+Uncompleted-page inspection is diagnostic evidence at the time of the read, not
+a substitute for completion or permission to reuse the still-registered backing.
+A saturated and a smaller window therefore measure the same 1 GiB input and
+primitive while exposing any depth-dependent correctness or service limitation.
