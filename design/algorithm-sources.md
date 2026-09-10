@@ -6,6 +6,62 @@ precedence over completion implications in the chronological notes below. The
 active caller still uses `mesh_pages_*`; local kernel measurements and unused
 `mesh_rows_*` functions do not establish a completed replacement.
 
+## ANE backing identity and registration
+
+The operator supplied these additional implementation references on September 9,
+2026:
+
+- Ramchand Kumaresan, *Orion: Characterizing and Programming Apple's Neural
+  Engine for LLM Training and Inference* (2026),
+  https://arxiv.org/html/2603.06728v1, sections 2.2 and 4.2: IOSurface tensor I/O
+  and the private runtime interface. This is not evidence that our CoreML
+  wrapper exposes every allocation.
+- Spencer H. Bryngelson, *Apple Neural Engine: Architecture, Programming, and
+  Performance* (2026), https://arxiv.org/pdf/2606.22283, sections 27.6 and 28.6,
+  tables 27.6 and 28.6: submission includes input/output/intermediate surface
+  identities; the inspected loaded program maps weights, constants and working
+  storage as well. Distinct device addresses can refer to one physical page.
+  These observations make backing registration a concrete investigation;
+  they do not demonstrate Thunderbolt registration of those allocations.
+- Apple Machine Learning Research, *Deploying Transformers on the Apple Neural
+  Engine* (2022), contributors Atila Orhon, Aseem Wadhwa, Youchang Kim,
+  Francesco Rossi and Vignesh Jagadeesh,
+  https://machinelearning.apple.com/research/neural-engine-transformers:
+  channels-first layout, contiguous 64-byte-aligned last axis, and avoidance of
+  transpose/reshape copies. Alignment and padding belong to configuration.
+
+The operand identity remains the Papadopoulos–Culler operand-slot contract
+documented below. Allocation order does not determine compliance: a surface
+allocated by the numerical backend can supply the actual canonical mesh pages.
+Different CPU/device virtual addresses do not imply different physical storage.
+Neither a second copied arena nor a descriptor for unregistered memory suffices.
+
+Source inspection at mesh `a22fe8e` and metal-microbench `5d4de29` identifies the
+actual integration boundaries:
+
+- `mesh_at` in `rdma/mesh.h` computes addresses from a single base and page
+  stride. `region_sge` and registration in `rdma/mesh-flow.c` assume that same
+  arena. Those assumptions must accommodate the actual surface-backed pages;
+  adding an IOSurface wrapper alone does not connect transport.
+- `mesh_metal_memory` already uses `mach_vm_remap` with copying disabled and
+  `newBufferWithBytesNoCopy`. This establishes an existing alias mechanism,
+  not ANE or NIC registration evidence.
+- The installed macOS SDK's `IOSurfaceRef.h` exposes `IOSurfaceGetBaseAddress`,
+  `IOSurfaceGetAllocSize`, `IOSurfaceCreateMachPort` and
+  `IOSurfaceLookupFromMachPort`. A Mach right can carry the same surface into
+  the separate bridge process during configuration; a raw pointer cannot.
+- `CoreMLFunction.backingUsed` compares returned and supplied MLMultiArray
+  object identities. It does not inspect internal weights or intermediates,
+  establish physical backing identity, or demonstrate registration.
+
+The connected implementation must realize surface ownership, mappings,
+registration, literal page addresses, tensor geometry and lifetimes before
+invocation. ANE completion publishes the configured output rows and error
+metadata; it does not add a prediction-waiting scheduler. Invalidation retains
+ownership of memory still accessible to a device rather than assigning that
+same physical memory to a replacement computation. C07–C11, C21 and C28–C30
+remain open until this is integrated and measured on both real participants.
+
 ## Explicit attention and projection weights
 
 Papadopoulos and Culler (Monsoon, 1990), cited under operand matching below,
