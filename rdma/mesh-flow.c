@@ -261,7 +261,7 @@ int main(int argc,char**argv){
   struct mesh_port_info *ports=mesh_ports(M);
   flight_status=M; atomic_store(&M->bridge_pid,(uint64_t)getpid());
   for(int i=0;i<link_count;i++){
-    links[i].node=me; links[i].name=name; links[i].memory=(char*)M+d0; links[i].span=span;
+    links[i].node=me; links[i].name=name; links[i].pages=M;
     links[i].probe_page=UINT32_MAX;
     links[i].depth=links[i].device && (!strcmp(links[i].device,"udp")||!strcmp(links[i].device,"tcp"))?LINK_QUEUE/2:QD;
     snprintf(ports[i].device,sizeof ports[i].device,"%s",links[i].device?links[i].device:"automatic");

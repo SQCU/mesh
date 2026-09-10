@@ -15,7 +15,7 @@ struct link_queue { struct ring cursor; struct link_event entries[LINK_QUEUE]; }
 struct mesh_link {
   const char *device, *local, *peer, *name;
   int node, peer_node;
-  char *memory; size_t span;
+  struct hdr *pages;
   pthread_t thread;
   struct link_queue command, completion;
   _Atomic int reset, stopped;
@@ -40,19 +40,22 @@ static int link_pop(struct link_queue *q,struct link_event *event){
 static void link_emit(struct mesh_link *link,struct link_event event){
   while(link_push(&link->completion,event)){ atomic_store(&link->heartbeat,flight_time()); usleep(100); }
 }
+// ../design/algorithm-sources.md#transport-page-addressing
 static void *link_worker(void *argument){
   struct mesh_link *link=argument;
+  char *memory=(char*)mesh_at(link->pages,0);
+  size_t span=(size_t)link->pages->pgsz*((size_t)link->pages->pool+link->pages->arena);
   selected_device=link->device; listen_address=link->local; expected_peer=link->peer_node;
   arc4random_buf(&mynonce,sizeof mynonce); if(!mynonce) mynonce=1;
   char label[128]; snprintf(label,sizeof label,"%s-%s",link->name,link->device?link->device:"automatic");
-  flight_open(label,link->node,link->span);
+  flight_open(label,link->node,span);
   double retry_at=0; uint64_t generation=0;
   while(!stop){
     atomic_store(&link->heartbeat,flight_time()); atomic_store(&link->phase,MESH_PAIRING);
     if(monotime()<retry_at){ usleep(100000); continue; }
     if(lsock<0 && listener_up()){ retry_at=monotime()+retry_delay(); continue; }
     const char *peer=expected_peer>=0 && link->node<expected_peer?NULL:link->peer;
-    int ready=!verbs_up(peer,link->memory,link->span,link->node);
+    int ready=!verbs_up(peer,memory,span,link->node);
     if(ready && !stop){
       backoff_n=0; generation++; atomic_store(&link->phase,MESH_PAIRED);
       link_emit(link,(struct link_event){.kind=L_UP,.generation=generation});
@@ -78,7 +81,7 @@ static void *link_worker(void *argument){
         for(int budget=0;alive && budget<64 && !link_pop(&link->command,&command);budget++){
           if(command.generation!=generation) continue;
           activity=1;
-          struct ibv_sge sge=region_sge(link->memory,(size_t)command.page*4096,command.bytes);
+          struct ibv_sge sge=region_sge(memory,(size_t)command.page*link->pages->pgsz,command.bytes);
           int error;
           if(command.kind==L_RECV){
             struct ibv_recv_wr wr={.wr_id=command.page,.sg_list=&sge,.num_sge=1},*bad;
@@ -128,10 +131,11 @@ static int udp_socket(const char *local,const char *peer){
   if(!connected){ close(sock); return -1; }
   fcntl(sock,F_SETFL,O_NONBLOCK); return sock;
 }
+// ../design/algorithm-sources.md#transport-page-addressing
 static void *udp_link_worker(void *argument){
   struct mesh_link *link=argument;
   char label[128]; snprintf(label,sizeof label,"%s-udp",link->name);
-  flight_open(label,link->node,link->span);
+  flight_open(label,link->node,(size_t)link->pages->pgsz*((size_t)link->pages->pool+link->pages->arena));
   uint32_t *posted=malloc(LINK_QUEUE*sizeof *posted); uint64_t phead=0,ptail=0,generation=0;
   while(!stop){
     atomic_store(&link->heartbeat,flight_time()); atomic_store(&link->phase,MESH_PAIRING);
@@ -151,7 +155,7 @@ static void *udp_link_worker(void *argument){
         holding=0; activity=1;
         if(command.kind==L_RECV){ posted[phead++%LINK_QUEUE]=command.page; continue; }
         sends++;
-        ssize_t n=send(sock,link->memory+(size_t)command.page*4096,command.bytes,0);
+        ssize_t n=send(sock,mesh_at(link->pages,command.page),command.bytes,0);
         if(n<0 && (errno==ENOBUFS||errno==EAGAIN)){ held=command; holding=1; activity=0; break; }
         if(n<0 && errno!=ECONNREFUSED && errno!=EHOSTUNREACH){
           alive=0; link_emit(link,(struct link_event){.kind=L_FAULT,.error=(uint32_t)errno,.generation=generation}); break; }
@@ -159,7 +163,7 @@ static void *udp_link_worker(void *argument){
       }
       for(int budget=0;alive && budget<4096 && phead!=ptail;budget++){
         uint32_t page=posted[ptail%LINK_QUEUE];
-        ssize_t n=recv(sock,link->memory+(size_t)page*4096,4096,0);
+        ssize_t n=recv(sock,mesh_at(link->pages,page),link->pages->pgsz,0);
         if(n<0){
           if(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR||errno==ECONNREFUSED) break;
           alive=0; link_emit(link,(struct link_event){.kind=L_FAULT,.error=(uint32_t)errno,.generation=generation}); break; }
@@ -203,10 +207,11 @@ static int stream_dial(const char *peer){
   int connected=sock>=0 && !connect(sock,theirs->ai_addr,theirs->ai_addrlen); freeaddrinfo(theirs);
   if(!connected){ if(sock>=0) close(sock); return -1; }
   stream_tune(sock); return sock; }
+// ../design/algorithm-sources.md#transport-page-addressing
 static void *stream_link_worker(void *argument){
   struct mesh_link *link=argument;
   char label[128]; snprintf(label,sizeof label,"%s-tcp",link->name);
-  flight_open(label,link->node,link->span);
+  flight_open(label,link->node,(size_t)link->pages->pgsz*((size_t)link->pages->pool+link->pages->arena));
   uint32_t *posted=malloc(LINK_QUEUE*sizeof *posted); uint64_t phead=0,ptail=0,generation=0;
   int listener=-1;
   while(!stop){
@@ -233,7 +238,7 @@ static void *stream_link_worker(void *argument){
         if(command.kind==L_RECV){ posted[phead++%LINK_QUEUE]=command.page; continue; }
         sends++;
         unsigned char frame[4]; memcpy(frame,&command.bytes,4);
-        const char *data=link->memory+(size_t)command.page*4096; size_t total=4+command.bytes;
+        const char *data=(const char*)mesh_at(link->pages,command.page); size_t total=4+command.bytes;
         while(sent<total){
           struct iovec io[2]; int count=0;
           if(sent<4){ io[count++]=(struct iovec){frame+sent,4-sent}; io[count++]=(struct iovec){(void*)data,command.bytes}; }
@@ -250,9 +255,9 @@ static void *stream_link_worker(void *argument){
         uint32_t page=posted[ptail%LINK_QUEUE]; ssize_t n;
         if(header_have<4){
           n=read(in,header+header_have,4-header_have);
-          if(n>0){ header_have+=(size_t)n; if(header_have==4){ memcpy(&length,header,4); body_have=0; if(!length||length>4096){ n=-1; errno=EBADMSG; } } }
+          if(n>0){ header_have+=(size_t)n; if(header_have==4){ memcpy(&length,header,4); body_have=0; if(!length||length>link->pages->pgsz){ n=-1; errno=EBADMSG; } } }
         } else {
-          n=read(in,link->memory+(size_t)page*4096+body_have,length-body_have);
+          n=read(in,mesh_at(link->pages,page)+body_have,length-body_have);
           if(n>0) body_have+=(size_t)n;
         }
         if(n<0 && (errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)) break;

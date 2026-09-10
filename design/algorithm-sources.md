@@ -161,6 +161,23 @@ page-gap layouts still require complete configuration and caller migration;
 one successful local IOSurface binding does not justify hidden storage or
 permit claiming C10 complete.
 
+## Transport page addressing
+
+Papadopoulos–Culler operand identity and the literal registered-buffer binding
+documented by Apple TN3205 require transport to address the configured pages.
+`link_worker`, `udp_link_worker` and `stream_link_worker` now retain the actual
+mapping header and derive addresses through its page geometry. They no longer
+carry a separately supplied base/span or multiply page indices by a private
+4096-byte assumption. Receive capacity likewise follows `hdr.pgsz`.
+
+This removes an implementation obstacle to changing configured page geometry;
+the current allocator still chooses 4096 bytes. It does not claim alternate
+geometry has been deployed or that headers can be removed from within an OS
+page. CQ depth, MTU and loop budgets are distinct quantities and remain as such.
+No readiness cache, transport framing or recovery mechanism is added. Existing
+excluded control mechanisms still require the complete caller migration and
+deletion prescribed by the requirements matrix.
+
 ## Contiguous backing-page views
 
 Operator clarification, September 9, 2026:
