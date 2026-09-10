@@ -124,7 +124,7 @@ and neither build result establishes replacement-runtime execution.
 | C30 | Hung work cannot require a computation-layer wait | Open: identify the backend/OS mechanism that ends access, or retain its old physical ownership outside the new graph until access ends. Do not promise immediate physical reuse while an uncancelled device can still write the address. |
 | C31 | Caller alone restores parameters and repeats NFE | Open: honor the NVMe/transitive-NVMe deployment invariant; exercise caller-owned whole-graph repetition and reload, never parity, partial retry or residency probing inside the graph. |
 | C32 | Diagnostics do not enter the numerical dependency path | Open: remove inline logging, clock sampling, status inference and benchmark rendezvous from numerical functions. Collect timing as asynchronous metadata or external observation with overhead reported. |
-| C33 | Real input reaches the same caller used for serving | Open: current NFE runner constructs tokens arithmetically in `runReduceScatter`. Bind caller-supplied recorded token inputs before invocation; use existing client input/evaluation paths, not a new evaluator. |
+| C33 | Real input reaches the same caller used for serving | Partial at numerical main `8f02bf4`: `runReduceScatter` accepts explicit token IDs, both entry modes use its one call site, and the existing runner records the supplied IDs. Both builds passed. Replacement/serving integration and complete real-input execution remain open. |
 | C34 | Numerical evidence covers the complete NFE | Open for replacement: real model and input identity, all 48 layers, both peers, one/two simultaneous NFEs, finite output and appropriate reference/logit metrics. Old-caller agreement does not establish this. |
 | C35 | Errors and invalidation are externally reviewable | Open: exercise the existing operational/client path through an actual error and caller-selected rerun; show literal metadata, unchanged numerical-channel semantics and no stale writes into new outputs. No mock control-flow suite. |
 | C36 | Performance uses the fastest validated local baseline | Open: record the same model/shape/input/backend baseline for each SoC, local improvement separately, extra TP gain, and compounded end-to-end gain. No comparison against a binding-induced slow baseline. |
@@ -157,6 +157,139 @@ sequence of independently declared successes:
    sources on both machines. Run the existing client evaluation on real inputs,
    full graph and actual RDMA. Review every requirement against the actual binary
    and trace, fix the remaining gaps together, and rerun affected measurements.
+
+## Whole-change source review, September 9 continuation
+
+Operator correction: isolated helper patches followed by builds and old-runtime
+regressions are not the requested workflow. The complete implementation is the
+unit of revision and evaluation. The completed build at numerical `8f02bf4` and
+mesh `952ae2f` is a build result only. Do not start another partial NFE regression
+as a substitute for the connected replacement described above. Source may be
+preserved in main commits while the connected edit is unfinished; that does not
+make such a revision an accepted implementation or a performance baseline.
+
+### Complete numerical value graph
+
+For each attention or FFN function l, let X_l be the full hidden input, P_l^r
+the contraction partial computed by participant r, and O_r the configured output
+row ownership. For the current two-participant realization, O_0 and O_1 partition
+the input rows. Weight ownership partitions the contracted dimension, independently
+of output row ownership. The following is the single connected graph to realize:
+
+| Numerical function | Literal inputs | Literal outputs | Execution dependency |
+|---|---|---|---|
+| Embedding | Caller token pages, tied embedding parameter pages | X_0 pages | Actual token and parameter rows |
+| Pre-normalization | X_l pages, pre-normalization parameters | Normalized input pages in the chosen local backend layout | Complete hidden dimension of each numerical row |
+| Attention projections | Normalized input, Q/K/V and normalization/rotary parameters | Q/K/V pages | Configured projection rows |
+| Attention | Q/K/V pages, configured mask/position values | Attended pages | Actual context/mask inputs of the existing winning function |
+| Attention output contraction | Attended pages and owned output weights | P_l^r pages | Existing contraction's numerical inputs |
+| FFN gate/up and activation | Normalized input and owned gate/up weights | Up and activation pages | Existing fused or unfused numerical composition |
+| FFN down contraction | Activation and owned down weights | P_l^r pages | Existing down contraction's numerical inputs |
+| Scatter | P_l^r restricted to O_peer | Received partial pages at the owner | Each produced partial page independently |
+| Pairwise reduction | Local and received partial pages restricted to O_r | FP32 accumulator pages and index values | Matching partials for the same elements; one writer per output |
+| Owner epilogue | Complete FP32 accumulated hidden row, gamma, X_l residual and scale | X_(l+1) restricted to O_r | All contributions to that hidden row; RMS then residual/scale in model order |
+| Gather | Owner epilogue pages | Received X_(l+1) restricted to O_peer | Each completed owner output page independently |
+| Final normalization and head | Last X pages, output normalization and tied embedding weights | Caller logit pages | Actual head input rows and contraction dependencies |
+| Digest/compare | Retained partial/output pages and received digest values | Digest and error-metadata pages | Its own value dependencies; no edge back into numerical admission |
+
+This is Rabenseifner/Patarasuk–Yuan's partition, reduce and gather applied to the
+existing model algebra; Papadopoulos–Culler's named-value firing supplies execution
+readiness. It is not a new collective or a second implementation of a local kernel.
+For more than two peers, the configured reduction/exchange graph supplies the
+additional pairwise functions; the numerical caller must not interpret topology.
+
+The owner epilogue consumes FP32 accumulator values directly. The current active
+path's materialized half-precision reduction followed by normalization on both
+participants is not this value graph. The replacement must not preserve that
+intermediate FP16 rounding or duplicate the owner epilogue for binding convenience.
+Attention and FFN remain distinct numerical compositions with their actual
+storage/dependencies; neither becomes a hidden monolithic scheduling callback.
+
+Native-contiguous input storage need not be the receive landing layout. The
+required pre-normalization computes directly from local/received X pages into
+its final native input pages. This is required arithmetic, not a packing copy.
+The native output, weights and internal intermediates must also have literal
+page ownership; fixing just the native input does not satisfy C07/C10.
+
+### Complete ownership and completion contract
+
+One allocation ledger must cover every value above, all 48 layers, each supported
+in-flight invocation, backend padding, aliases, receive capacity, issued-index
+pages, metadata occurrences and retained storage after invalidation. It must
+identify which addresses refer to the same physical pages. Native/Metal wrappers
+and registered spans are views of that ledger, not additional operands.
+
+Immutable parameter values may have distinct invocation row identities pointing
+to the same physical backing. Realization must account for every such read and
+retain physical ownership until all corresponding uses end; stamping a shared
+logical row with a second invocation's stamp is incorrect. Mutable values may
+share physical storage only with a demonstrated lifetime ordering. The current
+replacement's blanket rejection of physical overlaps is not a realization of
+these lifetimes and cannot be copied into the final allocator as its contract.
+
+Every submission's selected indices are themselves retained page values. The
+completion publishes exactly those rows, even if a later scan has issued more
+rows for the same function and stamp. Scanning all WRITING rows at completion
+would publish another submission's unfinished values. A reusable heap array,
+Swift `publications` capture or task record is not the required index-page lifetime.
+No arbitrary index-storage limit may silently reduce which ready rows one scan
+can encode; capacity and ownership must be established for the configured graph.
+
+Successful physical completion publishes numerical output stamps and consumes
+the configured input uses once. Literal error provenance is written separately
+to configured metadata pages. A numerical function does not read link/global
+error status, cancel downstream values or certify output by inspecting metadata.
+The caller may reject a result or invalidate its table and submit a fresh complete
+graph. Old callbacks, receive addresses and NIC-read completions must retain the
+old table and physical storage; they cannot be redirected into the new table.
+
+The current global CMP/ACK stream and mutable page-address lookup do not provide
+that lifetime identity. Removing their epoch checks did not implement it. The
+transport replacement must address the original table ownership directly, with
+all routing/binding established before invocation; no recovery handshake or
+numerical drain is allowed. Fleet reachability and ordinary verbs teardown remain
+operational responsibilities outside numerical composition.
+
+### Native interface evidence for the full storage binding
+
+Read-only Objective-C runtime inspection of the installed M5 framework found:
+
+| Class | Installed selector relevant to the required binding |
+|---|---|
+| `_ANEIOSurfaceObject` | `initWithIOSurface:startOffset:shouldRetain:`; `ioSurface`; `startOffset` |
+| `_ANERequest` | `initWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:sharedEvents:transactionHandle:`; `weightsBuffer`; `completionHandler` |
+| `_ANEModel` | `mapper`; `intermediateBufferHandle`; `setIntermediateBufferHandle:` |
+| `_ANEProgramIOSurfacesMapper` | `prepareANEMemoryMappingParams:request:`; `mapIOSurfacesWithModel:request:cacheInference:error:` |
+| `_ANEBuffer` | `initWithIOSurfaceObject:symbolIndex:source:`; `ioSurfaceObject`; `symbolIndex` |
+
+These observed selectors refine the interface investigation; they do not establish
+ownership, accepted argument types, asynchronous behavior, or equivalence to the
+winning MLE5Engine computation. In particular, a numeric intermediate-buffer
+handle is not a CPU pointer or an IOSurface ID by inference. The current
+`CoreMLParameter` passes input/output bindings only, and `CoreMLFunction.call`
+retains its prediction wrapper, post-prediction identity assertion and completion
+event. That path is not the required full-storage/native-completion binding.
+Resolve the actual mapped storage and its lifetime in the connected replacement;
+do not invent a private-buffer exception or replace ANE with a slower backend.
+Bryngelson's mapped-surface account and the existing native references in
+`algorithm-sources.md` motivate this binding; they do not prove these private
+selectors' semantics on the installed systems.
+
+### Contained acceptance run
+
+After the connected source is written and excluded callers/definitions removed,
+commit the complete source on main, synchronize both repositories on both machines,
+and build every changed executable/library on both machines concurrently. Preserve
+and identify the running bridge binary when transport changes require deployment.
+Use the existing numerical/client runner, with its recorded real token array,
+model/configuration identity, all 48 layers and one/two simultaneous invocations.
+The run must include caller-owned invalidation and whole-NFE repetition evidence,
+not transport recovery or a fault-dependent numerical branch. Compare against the
+fastest validated local functions and collect the C34–C38 numerical, lifetime,
+traffic and timing evidence in that same review. Review the entire resulting
+source and trace against C01–C44 together; revise all uncovered issues before the
+next acceptance run. No separate evaluator or old-runtime baseline result can
+stand in for replacement execution.
 
 ## Source disposition for the connected change
 
