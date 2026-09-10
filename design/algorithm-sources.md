@@ -625,3 +625,13 @@ contraction partials feed. The output precision and Metal specialization are
 implementation choices here, not claims made by those publications. This change
 does not prove that partitioning every contraction is faster than a full local
 contraction, nor validate mixed-precision MPS multiplication or caller migration.
+
+At caller commit `3f6f8e1` and mesh commit `2d91772`, both full client builds
+passed. Direct Metal compilation passed for 20 variants per SoC (M5 Max and M4
+Pro), including both output types and fused modes, plus fixed/dynamic tensor
+reduction and both tensor orientations. The existing two-layer FP16 RDMA caller
+reported 24 agreements per peer, no disagreements/retries/nonfinite values, and
+byte-identical peer logits matching the earlier committed regression. These are
+FP16 regression and FP32 compilation evidence, not numerical validation of the
+FP32 partial path. The exact manifest and results are committed in
+`metal-microbench/docs/data/fp32_output_rdma_2026-09-09.json`.
