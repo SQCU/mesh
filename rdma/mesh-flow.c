@@ -1,6 +1,7 @@
 
 #include "mesh.h"
 #include "mesh-dataflow.h"
+#include "mesh-transport.h"
 #include <infiniband/verbs.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -271,7 +272,7 @@ static int mesh_progress(struct hdr *M,struct mesh_link *links,int link_count,
       }
     }
     if(link->up && v->completed<2*(v->send_capacity+v->receive_capacity)){
-      int count=ibv_poll_cq(v->completion_queue,2*(v->send_capacity+v->receive_capacity)-v->completed,v->completions+v->completed);
+      int count=mesh_transport_complete(v->completion_queue,2*(v->send_capacity+v->receive_capacity)-v->completed,v->completions+v->completed);
       if(count<0){
         ports[index].when=flight_time(); ports[index].code=count; ports[index].domain=3;
         COUNT(bad); link->up=0; link->faulted=1; atomic_store(&link->phase,MESH_RETIRING);

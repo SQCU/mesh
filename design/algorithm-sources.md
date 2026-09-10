@@ -1135,6 +1135,41 @@ was measurement analysis outside the callgraph, not a replacement mesh reducer.
 Actual page operands, concurrent issue and canonical page reduction remain
 separate integration obligations; separate-run timings do not prove overlap.
 
+### Literal transport primitives
+
+`rdma/mesh-transport.h` and `mesh-transport.c` implement the registered-span
+operations from Apple's TN3205: prepare one one-SGE SEND or RECV descriptor,
+submit an existing linked descriptor list, and poll once into caller-provided
+completion storage. The descriptor's index is a local completion identity;
+the implementation neither reads it as an address nor transmits it as payload.
+Addresses, registration keys, lengths, descriptors, QPs and CQs are realized
+outside submission. The transport allocates nothing, interprets no payload,
+performs no retry, and waits for no completion. There are no stamps, headers,
+table identities, numerical functions, timers or recovery policies in this API.
+
+The data layer owns the association from completion indices to physical spans
+and its transport-active index set. Posting grants the NIC access to those
+spans; successful completion ends the corresponding access. SEND reads and RECV
+writes. Posted receive spans must have matching frame lengths, as TN3205
+requires. Source and destination need not have the same virtual address.
+Independent spans require no software ordering between their operations.
+Descriptors can be linked to submit many independent spans in one provider call.
+
+Submission returns the literal provider result and its `bad_wr` output without
+interpreting either as a completion. In particular, the inspected Thunderbolt
+provider may leave `bad_wr` unset on an error; no unposted subset is invented.
+Completion status and byte counts remain the provider's literal metadata for
+the data layer to expose to its outer caller. The primitive does not promise
+atomic visibility of an entire page or remote hardware atomic RMW operations;
+TN3205 provides neither guarantee. Data consumers use actual receive completion.
+
+The existing bridge now uses these primitives for all send/receive posting and
+CQ polling. Its existing header/payload encoding is still a data-layer caller
+of the transport; extracting these operations does not remove that encoding or
+establish its compliance. Connection realization and device destruction retain
+their existing owner. `libmesh-transport.dylib` exposes the same primitive source
+to other configured data-layer callers without copying its implementation.
+
 ### Complete page ownership
 
 The September 10 operator correction supersedes the necessity claim in the
