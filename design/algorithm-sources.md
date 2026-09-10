@@ -1520,3 +1520,38 @@ All configuration metadata allocations use one physical-page alignment; larger
 operand alignment must be included at the corresponding allocation declaration.
 The APIs return `SIZE_MAX` and a literal configuration error for invalid sizing
 or overflow. None is called from a numerical function or its completion.
+
+## Configured tensor residency
+
+The generic tensor binder applies the Dennis configured operand maps and
+Papadopoulos–Culler storage identities to Metal indirect-resource residency.
+`Executable.resource_domains` enumerates physical backing regions from every
+configured export/slot. Local values contribute their allocated page spans;
+received values contribute the configured receive pool. Declared `assign`
+operations extend a target's domain with the backing domain of the returned
+assignment value. This configuration closure covers persistent adoption without
+reading current numerical page addresses or guessing readiness during submission.
+Outer adoption follows the assignment edges declared by the graph.
+
+`Executable.resources` supplies a fixed region/usage array to
+`mesh_tensor_function`, which retains the corresponding Metal resources for that
+function. Input-only regions are read-only; output regions are read/write to
+cover atomic reductions. `mesh_tensor_submit` declares only these configured
+resources instead of declaring every program region read/write. Configuration
+and address-table buffers remain bound normally. The region aliases remain
+untracked: narrowing removes API/residency work, not an asserted automatic
+hazard-tracking barrier.
+
+The existing serial compute encoder retains the required zero-then-arithmetic
+order for scatter/atomic kernels. This uses Metal's documented default serial
+dispatch semantics, not a new fence or synchronization protocol; see Apple's
+[default compute encoder](https://developer.apple.com/documentation/metal/mtlcommandbuffer/makecomputecommandencoder%28%29?changes=__11)
+and [indirect resource declarations](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/useresource(_:usage:)).
+No numerical invocation allocates or infers a residency domain.
+
+Each generic tensor realization creates its command queue at configuration with
+capacity equal to its local numerical function count. Each such function has one
+configured occurrence and one selection reservation; input publication functions
+use no Metal command buffer. A source-only realization creates no compute queue.
+This removes dependence on the implicit queue capacity; it does not assert that
+command-buffer creation or device dispatch has zero measured cost.

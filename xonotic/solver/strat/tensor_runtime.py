@@ -18,6 +18,10 @@ class Command(c.Structure):
     _fields_ = [('kernel', c.c_uint32), ('argument_offset', c.c_uint32), ('grid', c.c_uint32 * 3), ('group', c.c_uint32 * 3)]
 
 
+class Resource(c.Structure):
+    _fields_ = [('region', c.c_uint32), ('usage', c.c_uint32)]
+
+
 _LIBRARY = None
 
 
@@ -27,10 +31,10 @@ def library():
     if _LIBRARY is None:
         _LIBRARY = c.CDLL(str(Path(__file__).resolve().parents[3] / 'rdma' / 'libmesh-tensor.dylib'), use_errno=True)
         for name, result, arguments in (
-            ('create', c.c_void_p, [c.c_char_p]), ('error', c.c_char_p, [c.c_void_p]),
+            ('create', c.c_void_p, [c.c_char_p, c.c_size_t]), ('error', c.c_char_p, [c.c_void_p]),
             ('kernel', c.c_int, [c.c_void_p, c.c_char_p]),
             ('reserve', c.c_int, [c.c_void_p, c.POINTER(Rows), c.POINTER(View), c.c_size_t, c.POINTER(c.c_uint64), c.c_size_t, c.POINTER(c.c_uint32), c.c_size_t]),
-            ('function', c.c_int, [c.c_void_p, c.c_uint32, c.c_uint32, c.POINTER(RowFunction), RowMap, c.POINTER(Command), c.c_size_t]),
+            ('function', c.c_int, [c.c_void_p, c.c_uint32, c.c_uint32, c.POINTER(RowFunction), RowMap, c.POINTER(Command), c.c_size_t, c.POINTER(Resource), c.c_size_t]),
             ('submit', None, [c.c_void_p, c.c_uint32, c.c_uint64, c.c_uint32]),
             ('free', None, [c.c_void_p]),
         ):
@@ -100,13 +104,6 @@ class Realization:
         memory = self.context.contents.M.contents
         self.node, self.page_bytes = memory.node, memory.pgsz
         self.owner_nodes = owner_nodes
-        self.handle = self.lib.mesh_tensor_create(executable.text.encode())
-        executable.check(self.handle, 0 if self.handle else -1)
-        self.kernel_ids = {}
-        for kernel in dict.fromkeys(['mesh_tensor_zero'] + [item['name'] for item in executable.kernels]):
-            index = self.lib.mesh_tensor_kernel(self.handle, kernel.encode())
-            executable.check(self.handle, min(index, 0))
-            self.kernel_ids[kernel] = index
         needed = executable.dependencies(executable.exports[name])
         roots = executable.roots
         self.used = {roots[index] for index in needed}
@@ -124,6 +121,13 @@ class Realization:
         self.used = local | {root for root in self.used if self.node in consumers[root]}
         counts = {root: max(1, (math.prod(executable.shapes[root]) * np.dtype(executable.graph.nodes[root][0].dtype).itemsize + self.page_bytes - 1) // self.page_bytes) for root in self.used}
         local_functions = [root for root in sorted(local) if root in executable.by_node or root in self.inputs]
+        self.handle = self.lib.mesh_tensor_create(executable.text.encode(), sum(root in executable.by_node for root in local_functions))
+        executable.check(self.handle, 0 if self.handle else -1)
+        self.kernel_ids = {}
+        for kernel in dict.fromkeys(['mesh_tensor_zero'] + [item['name'] for item in executable.kernels]):
+            index = self.lib.mesh_tensor_kernel(self.handle, kernel.encode())
+            executable.check(self.handle, min(index, 0))
+            self.kernel_ids[kernel] = index
         numerical = [index for index in needed if index in executable.by_node]
         metadata_transfers = [(len(executable.graph.nodes) + index, executable.owner(index), owner_nodes[0])
             for index in numerical if executable.owner(index) != owner_nodes[0]]
@@ -231,8 +235,9 @@ class Realization:
         for index, root in self.calls:
             if root is None: continue
             commands = self.executable.commands(self, root)
+            resources = self.executable.resources(root)
             outputs = self.function_maps[index][1]
-            self.executable.check(self.handle, self.lib.mesh_tensor_function(self.handle, native, root, c.byref(self.functions[index]), outputs[1], commands, len(commands)))
+            self.executable.check(self.handle, self.lib.mesh_tensor_function(self.handle, native, root, c.byref(self.functions[index]), outputs[1], commands, len(commands), resources, len(resources)))
             self.calls[index] = index, native
             native += 1
 
@@ -362,6 +367,7 @@ class Executable:
                     offsets[peer][name].append(offset)
                     offset += sum(peer in transfer[1:] for transfer in plan.transfers)
         plans = [plan for values in self.realizations.values() for plan in values]
+        self.resource_domains(plans)
         for plan in plans: plan.bind(tables, offsets)
         self.functions = (RowFunction * sum(len(plan.functions) for plan in plans))(*(function for plan in plans for function in plan.functions))
         self.bindings = (RowBinding * sum(len(plan.bindings) for plan in plans))(*(binding for plan in plans for binding in plan.bindings))
@@ -373,6 +379,33 @@ class Executable:
             plan.return_maps = tuple(self.returns[offset:offset + len(plan.return_maps)])
             offset += len(plan.return_maps)
             plan.configure()
+
+    # ../../../design/algorithm-sources.md#configured-tensor-residency
+    def resource_domains(self, plans):
+        memory = self.context.contents.M.contents
+        self.domains = {root: set() for root in self.roots.values()}
+        for plan in plans:
+            for root, mapping in plan.maps.items():
+                if root not in self.domains: continue
+                first, count = (mapping.physical, mapping.count) if self.owner(root) == memory.node else (0, memory.pool)
+                if count:
+                    self.domains[root].update(range(first * memory.pgsz >> 30, ((first + count) * memory.pgsz - 1 >> 30) + 1))
+        assignments = [(self.roots[inputs[1].index], self.roots[value.index])
+            for value, operation, inputs, _, _ in self.graph.nodes if operation == 'assign']
+        changed = True
+        while changed:
+            changed = False
+            for target, value in assignments:
+                before = len(self.domains[target])
+                self.domains[target].update(self.domains[value])
+                changed |= before != len(self.domains[target])
+
+    # ../../../design/algorithm-sources.md#configured-tensor-residency
+    def resources(self, index):
+        usage = {region: 3 for region in self.domains[self.roots[index]]}
+        for value in self.graph.nodes[index][2]:
+            for region in self.domains[self.roots[value.index]]: usage[region] = usage.get(region, 0) | 1
+        return (Resource * len(usage))(*(Resource(region, flags) for region, flags in sorted(usage.items())))
 
     # ../../../design/algorithm-sources.md#literal-row-functions
     def commands(self, plan, index):

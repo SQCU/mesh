@@ -11,6 +11,9 @@
 @property NSData *commands;
 @property id<MTLBuffer> inputs;
 @property id<MTLBuffer> outputs;
+@property NSArray<id<MTLBuffer>> *reads;
+@property NSArray<id<MTLBuffer>> *writes;
+@property NSArray<id<MTLBuffer>> *readWrites;
 @end
 @implementation MeshTensorFunction
 @end
@@ -36,10 +39,10 @@
 static NSString *mesh_tensor_creation_error;
 
 // ../design/algorithm-sources.md#complete-page-ownership
-void *mesh_tensor_create(const char *source){
+void *mesh_tensor_create(const char *source,size_t functions){
   MeshTensorProgram *program=[MeshTensorProgram new];
   program.device=MTLCreateSystemDefaultDevice();
-  program.queue=[program.device newCommandQueue];
+  program.queue=functions?[program.device newCommandQueueWithMaxCommandBufferCount:functions]:nil;
   program.kernels=[NSMutableArray new]; program.functions=[NSMutableArray new];
   MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe;
   NSError *error=nil;
@@ -94,7 +97,8 @@ int mesh_tensor_reserve(void *handle,struct mesh_rows *pages,
 
 // ../design/algorithm-sources.md#literal-row-functions
 int mesh_tensor_function(void *handle,uint32_t index,uint32_t identifier,const struct mesh_row_function *function,
-  struct mesh_row_map metadata,const struct mesh_tensor_command *commands,size_t count){
+  struct mesh_row_map metadata,const struct mesh_tensor_command *commands,size_t count,
+  const struct mesh_tensor_resource *resources,size_t resource_count){
   MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
   if(index!=program.functions.count || !count) return EINVAL;
   MeshTensorFunction *binding=[MeshTensorFunction new];
@@ -105,6 +109,14 @@ int mesh_tensor_function(void *handle,uint32_t index,uint32_t identifier,const s
   realized.input=binding.inputs.contents; realized.output=binding.outputs.contents;
   binding.function=realized; binding.metadata=metadata; binding.identifier=identifier;
   binding.commands=[NSData dataWithBytes:commands length:count*sizeof(*commands)];
+  NSMutableArray *reads=[NSMutableArray new],*writes=[NSMutableArray new],*readWrites=[NSMutableArray new];
+  for(size_t i=0;i<resource_count;i++){
+    id<MTLBuffer> region=program.regions[resources[i].region];
+    if(resources[i].usage==(MTLResourceUsageRead|MTLResourceUsageWrite)) [readWrites addObject:region];
+    else if(resources[i].usage==MTLResourceUsageRead) [reads addObject:region];
+    else [writes addObject:region];
+  }
+  binding.reads=reads; binding.writes=writes; binding.readWrites=readWrites;
   [program.functions addObject:binding]; return 0;
 }
 
@@ -118,7 +130,9 @@ void mesh_tensor_submit(void *handle,uint32_t function,uint64_t stamp,uint32_t i
   [encoder setBuffer:program.views offset:0 atIndex:1];
   [encoder setBuffer:program.dimensions offset:0 atIndex:2];
   [encoder setBuffer:program.table offset:0 atIndex:3];
-  for(id<MTLBuffer> region in program.regions) [encoder useResource:region usage:MTLResourceUsageRead|MTLResourceUsageWrite];
+  for(id<MTLBuffer> region in binding.reads) [encoder useResource:region usage:MTLResourceUsageRead];
+  for(id<MTLBuffer> region in binding.writes) [encoder useResource:region usage:MTLResourceUsageWrite];
+  for(id<MTLBuffer> region in binding.readWrites) [encoder useResource:region usage:MTLResourceUsageRead|MTLResourceUsageWrite];
   const struct mesh_tensor_command *commands=binding.commands.bytes;
   for(size_t i=0;i<binding.commands.length/sizeof(*commands);i++){
     const struct mesh_tensor_command *c=&commands[i];
