@@ -318,14 +318,13 @@ int main(int argc,char**argv){
         if(!receive){
           struct desc ack={.page=page,.header=offset,.error=error,.domain=domain};
           if(offset>=M->data_off){
-            if(atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)>=MESH_RING){ position++; continue; }
             link_release(link,offset); arena_pending--; push(M,ACK,&ack);
           } else { RELEASE(page); link_release(link,offset); }
           goto accepted;
         }
         if(error){
           struct desc failure={.page=page,.header=offset,.error=error,.domain=domain};
-          if(push(M,CMP,&failure)){ position++; continue; }
+          push(M,CMP,&failure);
           MOVE(page,APP); goto accepted;
         }
         struct mesh_page_header *header=mesh_header(M,page);
@@ -337,7 +336,7 @@ int main(int argc,char**argv){
           MOVE(page,SEND); pool_link[page]=(unsigned char)next; COUNT(sent);
         } else {
           struct desc receive={.page=page,.header=offset,.bytes=bytes,.node=header->wire.src};
-          if(push(M,CMP,&receive)){ position++; continue; }
+          push(M,CMP,&receive);
           MOVE(page,APP); COUNT(recvd);
         }
 accepted:
@@ -351,7 +350,6 @@ accepted:
           struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
           if(offset>=M->data_off){
             struct desc ack={.page=record->page,.header=offset,.error=ECANCELED,.domain=1};
-            if(atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)>=MESH_RING) break;
             record->header.when=flight_time(); record->header.code=ECANCELED; record->header.domain=1;
             link_release(link,offset); arena_pending--; push(M,ACK,&ack);
           } else { RELEASE(record->page); link_release(link,offset); }
@@ -363,7 +361,8 @@ accepted:
       }
       live+=link->up; stopped+=atomic_load(&link->stopped);
       int receive_limit=link->up?(receive_share<v->receive_capacity?receive_share:v->receive_capacity):0;
-      while(!stop && counts[FREE] && link->receives<receive_limit){
+      while(!stop && counts[FREE] && link->receives<receive_limit &&
+        atomic_load_explicit(&M->r[CMP].head,memory_order_relaxed)-atomic_load_explicit(&M->r[CMP].tail,memory_order_acquire)+(uint64_t)counts[RECV]<MESH_RING){
         int page=free_pages[counts[FREE]-1];
         if(link_submit(link,L_RECV,(uint32_t)page,M->headers_off+(size_t)page*MESH_HEADER_STRIDE)) break;
         MOVE(page,RECV); pool_link[page]=(unsigned char)index;

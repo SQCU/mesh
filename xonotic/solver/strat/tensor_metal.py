@@ -9,7 +9,7 @@ PREFIX = r'''
 using namespace metal;
 struct View {
     ulong offset, size, shape[8], stride[8];
-    uint dtype, rank, first, physical, pages, page_bytes;
+    uint dtype, rank, first, page_bytes;
 };
 struct Row { uint page, uses; ulong stamp; };
 ulong coordinate(ulong index, device const View& view, uint axis) {

@@ -92,13 +92,6 @@ int mesh_tensor_reserve(void *handle,struct mesh_rows *pages,
   return program.views && program.dimensions && program.arguments && program.table && program.addresses?0:ENOMEM;
 }
 
-// ../design/algorithm-sources.md#complete-page-ownership
-void *mesh_tensor_data(void *handle,uint32_t tensor){
-  MeshTensorProgram *program=(__bridge MeshTensorProgram*)handle;
-  const struct mesh_tensor_view *views=program.views.contents;
-  return mesh_at(program.pages->memory,views[tensor].physical)+views[tensor].offset;
-}
-
 // ../design/algorithm-sources.md#literal-row-functions
 int mesh_tensor_function(void *handle,uint32_t index,uint32_t identifier,const struct mesh_row_function *function,
   struct mesh_row_map metadata,const struct mesh_tensor_command *commands,size_t count){

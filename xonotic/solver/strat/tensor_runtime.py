@@ -4,14 +4,14 @@ from pathlib import Path
 
 import numpy as np
 
-from mesh import ABSENT, Context, Metadata, Region, RowMap, RowFunction, RowBinding, Rows, _lib
+from mesh import ABSENT, Metadata, RowMap, RowFunction, RowBinding, Rows, _lib
 from .tensor import Dimension, Tensor
 from .tensor_metal import source
 
 
 class View(c.Structure):
     _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
-        ('stride', c.c_uint64 * 8)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first', 'physical', 'pages', 'page_bytes')]
+        ('stride', c.c_uint64 * 8)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first', 'page_bytes')]
 
 
 class Command(c.Structure):
@@ -30,7 +30,6 @@ def library():
             ('create', c.c_void_p, [c.c_char_p]), ('error', c.c_char_p, [c.c_void_p]),
             ('kernel', c.c_int, [c.c_void_p, c.c_char_p]),
             ('reserve', c.c_int, [c.c_void_p, c.POINTER(Rows), c.POINTER(View), c.c_size_t, c.POINTER(c.c_uint64), c.c_size_t, c.POINTER(c.c_uint32), c.c_size_t]),
-            ('data', c.c_void_p, [c.c_void_p, c.c_uint32]),
             ('function', c.c_int, [c.c_void_p, c.c_uint32, c.c_uint32, c.POINTER(RowFunction), RowMap, c.POINTER(Command), c.c_size_t]),
             ('submit', None, [c.c_void_p, c.c_uint32, c.c_uint64, c.c_uint32]),
             ('free', None, [c.c_void_p]),
@@ -130,7 +129,6 @@ class Realization:
             for index in numerical if executable.owner(index) != owner_nodes[0]]
         self.transfers.extend(metadata_transfers)
         remote_metadata = [index for index in numerical if executable.owner(index) != self.node] if self.node == owner_nodes[0] else []
-        total = sum(counts.values()) + len(local_functions) + sum(root not in self.inputs for root in local_functions) + len(remote_metadata)
         self.pages = executable.pages
         self.maps, self.arrays = {}, {}
         first = executable.next_row
@@ -151,7 +149,7 @@ class Realization:
             root = roots[value.index]
             if root in self.maps:
                 mapping = self.maps[root]
-                view.first, view.physical, view.pages = mapping.first, mapping.physical, mapping.count
+                view.first = mapping.first
             stride = 1
             for axis in reversed(range(len(shape))):
                 view.shape[axis], view.stride[axis] = shape[axis], stride
@@ -160,7 +158,7 @@ class Realization:
             if root in self.arrays: self.arrays[value.index] = self.arrays[root].reshape(shape)
         self.views = (View * len(views))(*views)
         self.functions = (RowFunction * len(local_functions))()
-        self.function_maps, self.indices, self.metadata, self.calls = [], [], [], []
+        self.function_maps, self.metadata, self.calls = [], [], []
         for index in remote_metadata:
             key = len(executable.graph.nodes) + index
             mapping = RowMap(first, 1, 0, 0, 0, 0, None)
@@ -174,6 +172,7 @@ class Realization:
         for index, root in enumerate(local_functions):
             node = executable.graph.nodes[root]
             inputs = (RowMap * len(node[2]))(*(self.maps[roots[value.index]] for value in node[2]))
+            for mapping in inputs: mapping.immutable = 0
             metadata = None if root in self.inputs else RowMap(first, 1, 0, self.allocate(1), 0, 0, None)
             first += int(metadata is not None)
             indices = RowMap(first, 1, 0, self.allocate(1), 0, 0, None)
@@ -185,7 +184,6 @@ class Realization:
                 outputs = (RowMap * 2)(mapping, metadata)
             self.function_maps.append((inputs, outputs))
             self.functions[index] = RowFunction(inputs, outputs, len(inputs), len(outputs), 1, indices)
-            self.indices.append(indices)
             if root in self.inputs:
                 self.retained_inputs.append(mapping)
                 self.returns.append(mapping)
@@ -202,6 +200,10 @@ class Realization:
         executable.next_row = first
         self.bindings = None
         self.stamp = 0
+
+    # ../../../design/algorithm-sources.md#complete-page-ownership
+    def __del__(self):
+        if getattr(self, 'handle', None): self.lib.mesh_tensor_free(self.handle)
 
     # ../../../design/algorithm-sources.md#complete-page-ownership
     def allocate(self, count):
@@ -289,7 +291,7 @@ class Executable:
         self.capacity = None
         self.realizations, self.arrays = {}, {}
         self.generations = {name: 0 for name in exports}
-        self.submissions = self.bytes = 0
+        self.submissions = 0
         self.progress = None
         self.cancel = None
         self.remote = None
