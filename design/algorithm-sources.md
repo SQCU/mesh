@@ -741,3 +741,19 @@ evaluator or a numerical dependency. The reference remains the existing MPS FFN
 with FP16 output, so differences include output rounding; it is not an FP64
 oracle. This option does not change the active RDMA caller's FP16 return layout,
 exercise page-backed weights, or establish complete transport integration.
+
+At caller commit `9463f05` and mesh commit `52bc871`, both full builds passed.
+The existing evaluator ran twelve local FFN cases: MPS/vector/tensor, FP16/FP32
+output, on M5 Max and M4 Pro, with 32 rows and 128 owned neurons. All completed
+with finite output. Mixed FP16-operand/FP32-output MPS executed successfully on
+both devices for this shape, resolving the earlier compilation-only uncertainty.
+M5 tensor FP32 output exactly matched MPS FP32 output; M4 tensor relative RMS
+error against MPS FP32 was approximately `3.17e-5`. Vector FP32 relative RMS was
+approximately `2.59e-5` on M5 and `1.03e-5` on M4. Each FP32 result retained more
+than 122,800 values not representable in FP16, out of 122,880 values, confirming
+that the result is not merely FP16 output widened afterward.
+
+The exact configurations, output hashes, timing samples and comparisons are in
+`metal-microbench/docs/data/parameter_fp32_outputs_2026-09-09.json`. These are
+small-shape dense numerical evaluations, not page-backed-weight or K-partial
+validation, performance superiority, RDMA integration, or a full-NFE bound.
