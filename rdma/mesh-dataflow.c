@@ -57,6 +57,12 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
   for(size_t i=0;i<binding_count;i++){
     const struct mesh_row_binding *b=&bindings[i];
     if(!b->count || (uint64_t)b->first+b->count>p->count || (uint64_t)b->remote+b->count>UINT32_MAX || b->receive>1) return EINVAL;
+    if(b->inputs && (!b->receive || !b->input)) return EINVAL;
+    for(uint32_t j=0;j<b->inputs;j++){
+      const struct mesh_row_map *m=&b->input[j];
+      uint64_t end=(uint64_t)m->first+(uint64_t)(b->count-1)*m->stride+m->count;
+      if(!m->count || end>p->count || end>UINT32_MAX) return EINVAL;
+    }
     if(i && (uint64_t)bindings[i-1].first+bindings[i-1].count>b->first) return EINVAL;
     if(b->receive) for(size_t j=0;j<count;j++) for(uint32_t k=0;k<functions[j].outputs;k++)
       if(row_maps_overlap((struct mesh_row_map){.first=b->first,.count=b->count},1,
@@ -331,9 +337,20 @@ int mesh_rows_receive(const struct mesh_rows *p, uint64_t epoch,
     struct mesh_row *r=&p->table[address.target];
     if(__atomic_load_n(&r->page,__ATOMIC_ACQUIRE)!=MESH_ROW_ABSENT) continue;
     if(__atomic_load_n(&r->stamp,__ATOMIC_ACQUIRE)>=address.stamp) return -ESTALE;
+    uint32_t index=address.target-matched->first;
+    for(uint32_t i=0;i<matched->inputs;i++){
+      const struct mesh_row_map *m=&matched->input[i];
+      if(!mesh_rows_present(p,*m,index,address.stamp)) return -EINVAL;
+      for(uint32_t j=0;j<m->count;j++)
+        if(!__atomic_load_n(&p->table[m->first+index*m->stride+j].uses,__ATOMIC_ACQUIRE)) return -EINVAL;
+    }
     __atomic_store_n(&r->uses,matched->uses,__ATOMIC_RELAXED);
     __atomic_store_n(&r->page,d.page,__ATOMIC_RELEASE);
     __atomic_store_n(&r->stamp,address.stamp,__ATOMIC_RELEASE);
+    for(uint32_t i=0;i<matched->inputs;i++){
+      const struct mesh_row_map *m=&matched->input[i];
+      for(uint32_t j=0;j<m->count;j++) mesh_row_release(p,m->first+index*m->stride+j,address.stamp);
+    }
     ring_erase(ring,slot(p->memory,CMP,0),sizeof(struct desc),MESH_RING,at);
     received++;
   }

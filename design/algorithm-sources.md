@@ -180,6 +180,27 @@ free list/bridge. Reinstallation occurs in selection while the row carries its
 issued stamp. Hardware reads and hashing count toward the lifetime. A row whose
 page is already absent is not zeroed or released a second time.
 
+Receive bindings now carry the immutable input-row maps of the remote numerical
+function whose output arrives in those rows. For received output index `j`, the
+input map names `first + j * stride ..< first + j * stride + count`. Arrival of
+that output with stamp `k` proves those configured remote reads have finished.
+`mesh_rows_receive` validates the still-live input rows, publishes the arriving
+output and releases one use for each mapped input occurrence. The destination's
+existing stamp prevents a repeated arrival from releasing those uses again.
+There is no acknowledgement page, consumed bitmap or per-function completion
+counter. This is the dependent-output lifetime rule of the plain specification,
+with Papadopoulos–Culler supplying the storage-associated presence principle.
+
+For two-peer reduce-scatter, an arriving normalized output page can release the
+corresponding sent partial page's remote-read use. The source also retains its
+independent NIC-completion and hashing uses. Configuration must assign exactly
+one output occurrence to each proven read, including when one numerical row has
+several output pages. A proof for all inputs can attach to one returned output
+only when that output's stamp proves all those reads finished. A digest verdict
+is not substituted for the numerical output. The caller still has to realize
+these input maps and counts; their existence is not evidence that the old
+caller's lifetime logic has been replaced.
+
 ### Literal weight pages
 
 `ModelFile.loadRows` in `metal-microbench/model_file.swift` realizes the

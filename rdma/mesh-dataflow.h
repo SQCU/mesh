@@ -12,7 +12,12 @@ struct mesh_row_function {
   const struct mesh_row_map *input, *output;
   uint32_t inputs, outputs, rows;
 };
-struct mesh_row_binding { uint32_t first, count, remote, uses; uint16_t peer, receive; };
+struct mesh_row_binding {
+  uint32_t first, count, remote, uses;
+  uint16_t peer, receive;
+  const struct mesh_row_map *input;
+  uint32_t inputs;
+};
 struct mesh_row_address { uint64_t epoch, stamp; uint32_t source, target; };
 
 int mesh_rows_validate(const struct mesh_rows *pages, const struct mesh_row_function *function);
