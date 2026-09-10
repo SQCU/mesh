@@ -102,6 +102,20 @@ IOSurfaces into the bridge, bind ANE internal allocations, replace the numerical
 caller, or prove multi-span execution on the RDMA substrate. Those obligations
 remain in the completion matrix.
 
+Validation at source commit `0c15ee0` (measurement main `fda07b5`, numerical
+caller `5d4de29`): both machines built the mesh libraries, bridge and numerical
+caller. The existing six-layer RDMA runner, 1024 rows and two simultaneous
+NFEs, completed six NFEs per participant with 72 agreements, zero disagreements,
+nonfinite outputs and retries. Both final logit files have SHA-256
+`2d890d398bd52555b1ded1d0508e62225f6f41e504abb578835b05d4e45b4a9d`.
+The single-span path is exercised by this run. Multiple discontiguous spans
+remain unmeasured. Details and exact configuration are in metal-microbench
+`docs/data/contiguous_backing_views_2026-09-09.json`. Invocation times were
+135.953–137.277 ms; completion gaps are not invocation latency. This is not
+evidence of a replacement-runtime speedup or the 10-microsecond requirement.
+The implementation adds 44 net source lines and 40 initial documentation lines;
+no new evaluator was added.
+
 ## Explicit attention and projection weights
 
 Papadopoulos and Culler (Monsoon, 1990), cited under operand matching below,
