@@ -22,7 +22,7 @@ class RowMap(c.Structure):
 
 
 class RowFunction(c.Structure):
-    _fields_ = [("input", c.POINTER(RowMap)), ("output", c.POINTER(RowMap)), ("inputs", c.c_uint32), ("outputs", c.c_uint32), ("rows", c.c_uint32)]
+    _fields_ = [("input", c.POINTER(RowMap)), ("output", c.POINTER(RowMap)), ("inputs", c.c_uint32), ("outputs", c.c_uint32), ("rows", c.c_uint32), ("indices", RowMap)]
 
 
 class RowBinding(c.Structure):
@@ -41,7 +41,7 @@ class Context(c.Structure):
     _fields_ = [("M", c.POINTER(Region)), ("arena", c.c_void_p), ("len", c.c_size_t), ("tables", c.POINTER(c.POINTER(Rows))), ("table_count", c.c_size_t), ("allocation", c.c_size_t), ("mapping_pinned", c.c_int)]
 
 
-Rows._fields_ = [("memory", c.POINTER(Region)), ("table", c.POINTER(Row)), ("count", c.c_size_t), ("offset", c.c_uint32), ("bytes", c.c_uint32), ("context", c.POINTER(Context)), ("identity", c.c_uint64), ("bindings", c.POINTER(RowBinding)), ("binding_count", c.c_size_t), ("functions", c.POINTER(RowFunction)), ("function_count", c.c_size_t)]
+Rows._fields_ = [("memory", c.POINTER(Region)), ("table", c.POINTER(Row)), ("count", c.c_size_t), ("offset", c.c_uint32), ("bytes", c.c_uint32), ("context", c.POINTER(Context)), ("identity", c.c_uint64), ("bindings", c.POINTER(RowBinding)), ("binding_count", c.c_size_t), ("functions", c.POINTER(RowFunction)), ("function_count", c.c_size_t), ("returns", c.POINTER(RowMap)), ("return_count", c.c_size_t)]
 
 
 class Metadata(c.Structure):
@@ -59,7 +59,7 @@ for name, result, arguments in (
     ("mesh_rows_realize", c.c_int, [c.POINTER(Rows), c.POINTER(RowFunction), c.c_size_t, c.POINTER(RowBinding), c.c_size_t, c.POINTER(RowMap), c.c_size_t]),
     ("mesh_rows_map", None, [c.POINTER(Rows), c.c_uint32, c.c_uint32, c.c_uint32, c.c_uint32, c.c_uint64]),
     ("mesh_rows_poll", c.c_size_t, [c.POINTER(Context)]),
-    ("mesh_rows_issue", c.c_uint32, [c.POINTER(Rows), c.POINTER(RowFunction), c.c_uint64, RowMap]),
+    ("mesh_rows_issue", c.c_uint32, [c.POINTER(Rows), c.POINTER(RowFunction), c.c_uint64]),
     ("mesh_rows_complete", None, [c.POINTER(Rows), c.POINTER(RowFunction), c.c_uint64, c.c_uint32]),
     ("mesh_rows_publish", None, [c.POINTER(Rows), c.POINTER(RowFunction), c.c_uint32, c.c_uint64]),
     ("mesh_rows_report", None, [c.POINTER(Rows), RowMap, c.c_uint32, Metadata]),

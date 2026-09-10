@@ -1216,16 +1216,16 @@ without duplicating its numerical storage or serializing sends behind one mutabl
 header. Separate records and the physical page itself remain retained until
 actual NIC completion.
 
-Retirement scans only configured mutable output ranges and receive bindings.
+Retirement follows completed selection lists, original physical completions,
+and configured returned-page maps as detailed below.
 The existing physical REL operation names the released page and its original
 canonical row offset. The bridge zeros the payload asynchronously, removes the
 page from that row, and clears the retirement bit while retaining the old stamp.
 It handles one such release alongside its normal physical completions and
 submissions, rather than draining a bulk erase before communication. Receive
 pages return to the receive pool; arena pages retain their configured address.
-There is no extra acknowledgement or numerical readiness object. Small selected
-index reservations are erased by their already asynchronous device completion
-owner. These are source semantics; their elapsed costs have not been measured.
+There is no extra acknowledgement or numerical readiness object. Selected index reservations are consumed by the scan owner and erased by the
+same asynchronous physical REL operation. These are source semantics; their elapsed costs have not been measured.
 
 `mesh_metal_rows_source` is the single GPU page-reduction implementation. It
 gathers each participant's configured padded contraction layout and writes FP32
@@ -1276,3 +1276,22 @@ algorithm set. Earlier CRC/checking entries in this document are historical
 implementation records, not current requirements. No digest kernels, CRC tables,
 comparison functions, digest transport bindings, or CRC-generated metadata remain
 in the canonical numerical path. Literal device/transport status metadata remains.
+
+## Exact-range physical retirement
+
+Papadopoulos–Culler read counts and the configured Dennis input/output maps
+identify retirement without a second completion queue. Each static function
+contains its already allocated selection-index map. Polling visits all completed
+selection pages independently of new numerical readiness, retires precisely their
+selected input/output ranges, consumes the list count, then releases its backing
+pages from last to first. The first page remains the literal list owner until
+all tail pages have entered asynchronous REL, even when REL is full.
+
+A received page retains its original immutable address header. Before retiring
+that page, its configured remote-read input ranges are retired; this follows the
+feedforward page dependencies and retains the received page when physical REL
+capacity is unavailable. Original NIC completion entries remain in the physical
+CQ until their ownership release is submitted. Returned numerical and raw
+metadata maps are copied into configuration pages and are the only endpoint
+ranges polled for caller consumption. No full mutable-output or receive-table
+retirement sweep remains. This source change has not been executed or measured.

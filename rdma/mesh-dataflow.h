@@ -11,12 +11,14 @@ struct mesh_rows {
   struct mesh_ctx *context; uint64_t identity;
   const struct mesh_row_binding *bindings; size_t binding_count;
   const struct mesh_row_function *functions; size_t function_count;
+  const struct mesh_row_map *returns; size_t return_count;
 };
 struct mesh_row_range { uint32_t first, count; };
 struct mesh_row_map { uint32_t first, count, stride, physical, physical_stride, immutable; const uint32_t *uses; const struct mesh_row_range *ranges; };
 struct mesh_row_function {
   struct mesh_row_map *input, *output;
   uint32_t inputs, outputs, rows;
+  struct mesh_row_map indices;
 };
 struct mesh_row_binding {
   uint32_t first, count, remote, headers;
@@ -41,7 +43,7 @@ void mesh_rows_invalidate(struct mesh_rows **pages);
 size_t mesh_rows_poll(struct mesh_ctx *context);
 
 uint32_t mesh_rows_issue(const struct mesh_rows *pages, const struct mesh_row_function *function,
-  uint64_t stamp, struct mesh_row_map indices);
+  uint64_t stamp);
 void mesh_rows_complete(const struct mesh_rows *pages, const struct mesh_row_function *function,
   uint64_t stamp, uint32_t indices);
 
