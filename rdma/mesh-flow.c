@@ -6,7 +6,7 @@
 #define RELEASE(page) do{ MOVE(page,FREE); free_pages[counts[FREE]-1]=(page); }while(0)
 // ../design/algorithm-sources.md#transport-page-addressing
 static void mesh_submit(struct hdr *M,struct mesh_link *links,int link_count,
-  const struct mesh_route *routes,uint64_t *submit_cursor,int *arena_pending){
+  const struct mesh_route *routes,uint64_t *submit_cursor){
   int me=(int)M->node; struct desc descriptor;
   size_t credits=0;
   for(int index=0;index<link_count;index++) if(links[index].up)
@@ -14,14 +14,13 @@ static void mesh_submit(struct hdr *M,struct mesh_link *links,int link_count,
   uint64_t position;
   uint64_t available=atomic_load_explicit(&M->r[SUB].head,memory_order_acquire)-atomic_load_explicit(&M->r[SUB].tail,memory_order_relaxed);
   for(uint64_t budget=0;budget<available && credits && !stop &&
-    atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)+(uint64_t)(*arena_pending)<MESH_RING &&
     ring_select(&M->r[SUB],submit_cursor,&position);budget++){
     descriptor=*slot(M,SUB,position); uint32_t page=descriptor.page;
     struct mesh_page_header *header=(struct mesh_page_header*)((char*)M+descriptor.header);
     header->wire=(struct wire){.src=(uint16_t)me,.dst=descriptor.node};
     int next=routes[descriptor.node].link;
     if(link_submit(&links[next],L_SEND,page,descriptor.header)) continue;
-    (*arena_pending)++; credits--; COUNT(sent);
+    credits--; COUNT(sent);
     if(links[next].sends==links[next].provider.send_capacity) link_flush(&links[next]);
     ring_erase(&M->r[SUB],slot(M,SUB,0),sizeof descriptor,MESH_RING,position);
   }
@@ -32,9 +31,9 @@ static void mesh_submit(struct hdr *M,struct mesh_link *links,int link_count,
 // ../design/algorithm-sources.md#transport-page-addressing
 static int mesh_progress(struct hdr *M,struct mesh_link *links,int link_count,
   const struct mesh_route *routes,int *free_pages,unsigned char *owner,
-  unsigned char *pool_link,int *counts,uint64_t *submit_cursor,int *arena_pending){
+  unsigned char *pool_link,int *counts,uint64_t *submit_cursor){
   int stopped=0;
-  mesh_submit(M,links,link_count,routes,submit_cursor,arena_pending);
+  mesh_submit(M,links,link_count,routes,submit_cursor);
   int me=(int)M->node,pool=(int)M->pool,receive_share=pool/link_count;
   struct mesh_port_info *ports=mesh_ports(M);
   for(int index=0;index<link_count;index++){
@@ -80,12 +79,12 @@ static int mesh_progress(struct hdr *M,struct mesh_link *links,int link_count,
       if(header_completion) goto accepted;
       error=(uint32_t)record->header.code; domain=record->header.domain;
       if(!receive){
-        struct desc ack={.page=page,.header=offset,.error=error,.domain=domain};
+        struct desc completion={.page=page,.header=offset,.error=error,.domain=domain};
         if(offset>=M->data_off){
-          link_release(link,offset); (*arena_pending)--; push(M,ACK,&ack);
+          link_release(link,offset); mesh_rows_sent(M,record);
         } else {
           link_release(link,offset);
-          if(error){ push(M,CMP,&ack); MOVE(page,APP); }else RELEASE(page);
+          if(error){ push(M,CMP,&completion); MOVE(page,APP); }else RELEASE(page);
         }
         goto accepted;
       }
@@ -126,7 +125,7 @@ accepted:
         }
         struct desc completion={.page=record->page,.header=offset,.error=(uint32_t)record->header.code,.domain=record->header.domain};
         link_release(link,offset);
-        if(offset>=M->data_off){ (*arena_pending)--; push(M,ACK,&completion); }
+        if(offset>=M->data_off) mesh_rows_sent(M,record);
         else { push(M,CMP,&completion); MOVE(completion.page,APP); }
       }
       if(!link->pending){
@@ -144,7 +143,7 @@ accepted:
     }
     link_flush(link);
   }
-  mesh_submit(M,links,link_count,routes,submit_cursor,arena_pending);
+  mesh_submit(M,links,link_count,routes,submit_cursor);
   return stopped;
 }
 // ../design/algorithm-sources.md#transport-page-addressing
@@ -217,7 +216,7 @@ int main(int argc,char**argv){
     int error=pthread_create(&links[i].thread,NULL,link_worker,&links[i]);
     if(error){ errno=error; perror("link worker"); atomic_store(&links[i].stopped,1); stop=1; }
   }
-  double began=now(),telemetry=began; int arena_pending=0;
+  double began=now(),telemetry=began;
   uint64_t submit_cursor=0;
   for(;;){
 #ifdef MESH_TRANSPORT_TIMING
@@ -230,7 +229,7 @@ int main(int argc,char**argv){
       RELEASE(page);
     }
     if(released) atomic_store_explicit(&M->r[REL].tail,release_tail+released,memory_order_release);
-    int stopped=mesh_progress(M,links,link_count,routes,free_pages,owner,pool_link,counts,&submit_cursor,&arena_pending);
+    int stopped=mesh_progress(M,links,link_count,routes,free_pages,owner,pool_link,counts,&submit_cursor);
     double stamp=now();
     if(stamp-telemetry>=0.25){
       int live=0;

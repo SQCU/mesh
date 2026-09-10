@@ -13,7 +13,7 @@
 // ../design/algorithm-sources.md#transport-page-addressing
 int main(int argc,char**argv){
   static const char *N[NOWN]={"free","recv","send","app"};
-  static const char *Q[NRING]={"sub","cmp","rel","ack"};
+  static const char *Q[NRING]={"sub","cmp","rel"};
   int readiness=argc>1 && !strcmp(argv[1],"--ready");
   const char *name=argc>1+readiness?argv[1+readiness]:getenv("MESH_REGION");
   if(!name) name=MESH_NAME;

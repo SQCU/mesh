@@ -9,13 +9,13 @@
 #define MESH_NAME    "/mesh0"
 #define MESH_PORT    "18519"
 #define MESH_MODE    0666
-#define MESH_VERSION 10u
+#define MESH_VERSION 11u
 #define MESH_CL      128
 #define MESH_RING    65536
 #define MESH_OFF     16
 #define RINGS        ((sizeof(struct hdr)+MESH_CL-1)/MESH_CL*MESH_CL)
 enum { FREE, RECV, SEND, APP, NOWN };
-enum { SUB, CMP, REL, ACK, NRING };
+enum { SUB, CMP, REL, NRING };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_RETIRING, MESH_STOPPING, MESH_STOPPED };
 struct wire { uint16_t src, dst, hops; };
 struct desc { uint32_t page, bytes; uint16_t node; uint16_t reserved; uint32_t error, domain; uint64_t header; };

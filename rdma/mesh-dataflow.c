@@ -372,7 +372,7 @@ int mesh_rows_realize(const struct mesh_rows *p, const struct mesh_row_function 
     struct mesh_send *records=(void*)mesh_at(p->memory,b->headers);
     for(uint32_t j=0;j<b->count;j++) records[j]=(struct mesh_send){
       .header={.table=b->remote_table,.source=b->first+j,.target=b->remote,.index=j,.peer=b->peer},
-      .owner=p->identity};
+      .row=(uint64_t)((unsigned char*)&p->table[b->first+j]-(unsigned char*)p->memory)};
   }
   for(size_t i=0;i<count;i++){
     const struct mesh_row_map *indices=&functions[i].indices;
@@ -643,19 +643,6 @@ size_t mesh_rows_poll(struct mesh_ctx *context){
   struct hdr *memory=context->M;
   size_t changed=0;
   struct desc completion;
-  struct ring *ack=&memory->r[ACK];
-  uint64_t acknowledged=atomic_load_explicit(&ack->tail,memory_order_relaxed);
-  uint64_t completed=atomic_load_explicit(&ack->head,memory_order_acquire);
-  while(acknowledged<completed){
-    completion=*slot(memory,ACK,acknowledged);
-    struct mesh_send *record=(void*)((unsigned char*)memory+completion.header);
-    struct mesh_page_header *header=&record->header;
-    const struct mesh_rows *p=context->tables[record->owner];
-    header->code=completion.error; header->domain=completion.domain;
-    mesh_row_release(p,header->source);
-    atomic_store_explicit(&ack->tail,++acknowledged,memory_order_release);
-    changed++;
-  }
   struct ring *ring=&memory->r[CMP];
   uint64_t tail=atomic_load_explicit(&ring->tail,memory_order_relaxed);
   uint64_t head=atomic_load_explicit(&ring->head,memory_order_acquire);

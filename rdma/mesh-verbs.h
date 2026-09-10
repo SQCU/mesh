@@ -43,18 +43,18 @@ static _Thread_local int retire_device, expected_peer=-1;
 static _Thread_local const char *listen_address, *selected_device;
 // ../design/algorithm-sources.md#transport-page-addressing
 static int down_pair(void){
-  if(provider->pair){ if(TRACE(DESTROY_QP,provider->pair,provider->pair->qp_num,0,ibv_destroy_qp(provider->pair))) return 0; provider->pair=0; return 0; }
-  if(provider->completion_queue){ if(TRACE(DESTROY_CQ,provider->completion_queue,0,0,ibv_destroy_cq(provider->completion_queue))) return 0; provider->completion_queue=0; return 0; }
+  if(provider->pair){ if(TRACE(DESTROY_QP,provider->pair,provider->pair->qp_num,0,ibv_destroy_qp(provider->pair))) return 0; provider->pair=0; }
+  if(provider->completion_queue){ if(TRACE(DESTROY_CQ,provider->completion_queue,0,0,ibv_destroy_cq(provider->completion_queue))) return 0; provider->completion_queue=0; }
   return 1; }
 // ../design/algorithm-sources.md#transport-page-addressing
 static int down_verbs(void){
   if(!down_pair()) return 0;
-  if(provider->region_count){ struct ibv_mr *r=provider->regions[provider->region_count-1];
-    if(!TRACE(DEREG_MR,r,r->lkey,r->length,ibv_dereg_mr(r))) provider->region_count--;
-    return 0; }
+  while(provider->region_count){ struct ibv_mr *r=provider->regions[provider->region_count-1];
+    if(TRACE(DEREG_MR,r,r->lkey,r->length,ibv_dereg_mr(r))) return 0;
+    provider->region_count--; }
   free(provider->regions); provider->regions=0;
-  if(provider->domain){ if(TRACE(DEALLOC_PD,provider->domain,0,0,ibv_dealloc_pd(provider->domain))) return 0; provider->domain=0; return 0; }
-  if(provider->context){ if(TRACE(CLOSE_DEVICE,provider->context,0,0,ibv_close_device(provider->context))) return 0; provider->context=0; return 0; }
+  if(provider->domain){ if(TRACE(DEALLOC_PD,provider->domain,0,0,ibv_dealloc_pd(provider->domain))) return 0; provider->domain=0; }
+  if(provider->context){ if(TRACE(CLOSE_DEVICE,provider->context,0,0,ibv_close_device(provider->context))) return 0; provider->context=0; }
   return 1; }
 // ../design/algorithm-sources.md#transport-page-addressing
 static void down(void){ if(shm)shm_unlink(shm); }
@@ -182,10 +182,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
     provider->regions[provider->region_count]=TRACE(REG_MR,mem+o,o,n,ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE));
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
   if(TRACE(QUERY_PORT,provider->context,1,0,ibv_query_port(provider->context,1,&pa))){ close(f); return -1; }
-  { char c[96]; const char *dn=ibv_get_device_name(provider->context->device);
-    snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
-             strncmp(dn,"rdma_",5)?dn:dn+5);
-    system(c); }
   size_t frames=(page_bytes+header_bytes+4095)/4096;
   int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   int completions=4*(frame_capacity/(int)frames);

@@ -1795,3 +1795,26 @@ The final setup ordering completes both RTR and RTS before posting receives,
 so no later QP transition can discard their provider bookkeeping. That ordering
 requires a complete measurement of both byte correctness and completion
 identities before the raw rate becomes acceptance evidence.
+
+### Source access completion
+
+Apple TN3205 supplies the local SEND completion that ends the NIC source
+access; it is not a peer-consumption acknowledgement. Papadopoulos and Culler,
+*Monsoon: An Explicit Token-Store Architecture* (ISCA 1990), supply the
+association of operand identity with assigned storage, not an ACK protocol.
+
+Each outbound binding stores its source row's region-relative byte offset at
+configuration. After unlinking the completed transfer, the dataflow operation
+`mesh_rows_sent` decrements that row's NIC use directly in shared memory. The
+bridge invokes this dataflow operation after device completion or completed
+QP teardown; the verbs layer interprets neither rows nor stamps. Error metadata
+is written before the release. The release is the last access to the send
+record, allowing the client to reuse it after observing zero remaining uses.
+The dataflow client no longer drains an ACK ring or supplies ACK capacity to
+submission. Shared ABI 11 removes the ring and its descriptors altogether.
+
+Provider setup no longer sends multicast ping probes. Successful teardown
+proceeds through QP, CQ, MRs, PD and device without falsely reporting pending
+work after each successful resource release. Actual provider failures retain
+their existing reporting and retry behavior; no new transport exchange is
+introduced by these deletions.

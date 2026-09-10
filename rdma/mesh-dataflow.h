@@ -4,7 +4,13 @@
 
 struct mesh_page_header { struct wire wire; uint16_t padding; uint64_t table, stamp; uint32_t source, target; uint64_t when; int64_t code; uint32_t domain, function, index, peer; };
 struct mesh_row { uint32_t page, uses; uint64_t stamp; };
-struct mesh_send { struct mesh_page_header header; uint32_t page, reserved; uint64_t next, previous, owner; };
+struct mesh_send { struct mesh_page_header header; uint32_t page, reserved; uint64_t next, previous, row; };
+
+// ../design/algorithm-sources.md#source-access-completion
+static inline void mesh_rows_sent(struct hdr *memory,const struct mesh_send *record){
+  struct mesh_row *row=(struct mesh_row*)((unsigned char*)memory+record->row);
+  __atomic_fetch_sub(&row->uses,1,__ATOMIC_ACQ_REL);
+}
 
 // ../design/algorithm-sources.md#contiguous-backing-page-views
 static inline struct mesh_page_header *mesh_header(struct hdr *m, uint32_t i){
