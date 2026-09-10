@@ -183,3 +183,32 @@ and 54.6755/54.0809 ms for two. The local MPS baseline was 32.37475 ms, so the
 required TP latency improvement is still absent. The M5 two-in-flight maximum
 was 111.4771 ms; medians must not conceal that sample. Native internal storage
 remains unverified. Both bridges were stopped after evaluation.
+
+## Removal of the local SEND acknowledgement
+
+Canonical `d4d8d72c6a4bea2d26a8978d2a353ebf94037f4f`, built on both machines,
+removes the ACK ring, client ACK drain, ACK submission-capacity gate and
+`arena_pending` counter. Configuration stores a region-relative source-row
+offset in the existing outbound record. The dataflow completion operation
+releases the source NIC use directly after unlinking the completed transfer.
+Each region loses 2,097,152 bytes of ring storage. The same change removes
+setup ping probes and artificial pending returns after successful teardown.
+
+Three complete 1 GiB streams on ABI 11 each delivered all 65,536 extents with
+zero payload mismatches, status 0 and detach 0 at both endpoints:
+
+| Transfer | Receiver first-to-last | Interior bytes | Interior seconds | GB/s |
+| --- | ---: | ---: | ---: | ---: |
+| First | 114.961 ms | 858,996,736 | 0.091956 | 9.341389 |
+| Repeat 1 | 114.954 ms | 858,963,968 | 0.091918 | 9.344894 |
+| Repeat 2 | 114.903 ms | 859,095,040 | 0.091921 | 9.346015 |
+
+The existing 4,096-row FFN evaluator used numerical configuration commit
+`8b49749fab8ca758a831b5c85036e83388c12a41`. One and two invocations in flight
+each completed ten invocations on both peers, with no reported errors or
+nonfinite values and successful context destruction. Both peers agreed exactly;
+relative RMS against the local output was 0.0003935084, within the 0.002 limit.
+These checks cover actual source reuse after deletion of the client ACK drain.
+Both bridges were stopped normally after measurement. Receive CMP publication
+and the existing worker lifecycle remain; this result does not establish their
+removal or compliance.
