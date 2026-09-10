@@ -1,5 +1,6 @@
 #ifndef MESH_LINKS_H
 #define MESH_LINKS_H
+#include "mesh-dataflow.h"
 #define LINK_LIMIT 16
 enum { L_RECV=1, L_SEND };
 enum { LINK_SETUP, LINK_ACTIVE, LINK_RELEASED, LINK_RETIRED, LINK_ACKNOWLEDGED };
@@ -28,7 +29,7 @@ static void *link_worker(void *argument){
   while(!stop){
     atomic_store(&link->phase,MESH_PAIRING);
     const char *peer=expected_peer>=0 && link->node<expected_peer?NULL:link->peer;
-    while(!stop && ((lsock<0 && listener_up()) || verbs_up(peer,memory,span,link->node,((struct hdr*)memory)->pgsz,MESH_HEADER_BYTES,NULL))){
+    while(!stop && ((lsock<0 && listener_up()) || verbs_up(peer,memory,span,link->node,((struct hdr*)memory)->pgsz,sizeof(struct mesh_page_header),NULL))){
       while(!(retire_device?down_verbs():down_pair())) usleep(20000);
       retire_device=0;
       atomic_store(&link->heartbeat,flight_time()); usleep(100000);
@@ -64,7 +65,7 @@ static int link_submit(struct mesh_link *link,uint32_t kind,uint32_t page,uint64
   if(!link->up || (kind==L_SEND?link->sends>=v->send_capacity:link->receives>=v->receive_capacity)) return -1;
   provider=v;
   int index=kind==L_SEND?v->receive_capacity+v->sending/2:v->receiving/2;
-  v->sges[index][0]=region_sge((char*)link->pages,header,MESH_HEADER_BYTES);
+  v->sges[index][0]=region_sge((char*)link->pages,header,sizeof(struct mesh_page_header));
   v->sges[index][1]=region_sge((char*)link->pages,link->pages->data_off+(size_t)page*link->pages->pgsz,link->pages->pgsz);
   struct mesh_send *record=(struct mesh_send*)((char*)link->pages+header);
   record->page=page; record->header.code=0; record->header.domain=0;

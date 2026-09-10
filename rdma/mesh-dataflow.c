@@ -570,15 +570,15 @@ static size_t mesh_rows_send(const struct mesh_rows *p,
 }
 
 // ../design/algorithm-sources.md#context-lifetime
-static int mesh_release_page(struct hdr *memory,struct mesh_row *value,uint32_t page,uint32_t bytes,uint64_t stamp){
-  struct ring *ring=&memory->r[REL];
-  uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
-  if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)>=MESH_RING) return -1;
-  uint64_t expected=stamp;
-  if(!__atomic_compare_exchange_n(&value->stamp,&expected,MESH_ROW_WRITING|stamp,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) return 0;
-  *slot(memory,REL,head)=(struct desc){.page=page,.bytes=bytes,
-    .header=(uint64_t)((unsigned char*)value-(unsigned char*)memory)};
-  atomic_store_explicit(&ring->head,head+1,memory_order_release);
+static int mesh_release_page(struct hdr *memory,struct mesh_row *value,uint32_t page){
+  if(page<memory->pool){
+    struct ring *ring=&memory->r[REL];
+    uint64_t head=atomic_load_explicit(&ring->head,memory_order_relaxed);
+    if(head-atomic_load_explicit(&ring->tail,memory_order_acquire)>=MESH_RING) return -1;
+    __atomic_store_n(&value->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
+    *slot(memory,REL,head)=(struct desc){.page=page};
+    atomic_store_explicit(&ring->head,head+1,memory_order_release);
+  }else __atomic_store_n(&value->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
   return 1;
 }
 
@@ -588,7 +588,7 @@ static int mesh_rows_return(const struct mesh_rows *p,uint32_t row,uint64_t stam
   uint32_t page=__atomic_load_n(&value->page,__ATOMIC_ACQUIRE);
   if(page==MESH_ROW_ABSENT || !stamp || stamp>=MESH_ROW_WRITING ||
     __atomic_load_n(&value->uses,__ATOMIC_ACQUIRE)) return 0;
-  return mesh_release_page(p->memory,value,page,p->bytes,stamp);
+  return mesh_release_page(p->memory,value,page);
 }
 
 // ../design/algorithm-sources.md#complete-page-ownership
@@ -706,7 +706,7 @@ const struct mesh_page_header *mesh_context_metadata(struct mesh_ctx *c,uint32_t
 int mesh_context_consume(struct mesh_ctx *c,uint32_t page){
   struct mesh_row *row=mesh_context_row(c->M,page);
   __atomic_fetch_sub(&row->uses,1,__ATOMIC_ACQ_REL);
-  if(mesh_release_page(c->M,row,page,c->M->pgsz,1)<0){
+  if(mesh_release_page(c->M,row,page)<0){
     __atomic_fetch_add(&row->uses,1,__ATOMIC_RELEASE);
     return EBUSY;
   }
@@ -767,21 +767,16 @@ int mesh_rows_close(struct mesh_ctx *c){
         if(page<c->M->pool) *mesh_context_row(c->M,page)=(struct mesh_row){page,0,1};
       }
     }
-    for(size_t i=0;i<c->allocation;i++){
-      uint32_t page=c->M->pool+(uint32_t)i;
-      *mesh_context_row(c->M,page)=(struct mesh_row){page,0,1};
-    }
     for(size_t i=0;i<c->table_count;i++) free(c->tables[i]);
     free(c->tables); c->tables=NULL; c->table_count=0;
   }
   int pending=0;
-  for(uint32_t i=0;i<c->M->pool+c->allocation;i++){
+  for(uint32_t i=0;i<c->M->pool;i++){
     struct mesh_row *row=mesh_context_row(c->M,i);
     uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_ACQUIRE);
     uint32_t page=__atomic_load_n(&row->page,__ATOMIC_ACQUIRE);
     if(stamp && page!=MESH_ROW_ABSENT){
-      pending=1;
-      if(stamp<MESH_ROW_WRITING && mesh_release_page(c->M,row,page,c->M->pgsz,stamp)<0) break;
+      if(mesh_release_page(c->M,row,page)<0){ pending=1; break; }
     }
   }
   return pending?EBUSY:0;

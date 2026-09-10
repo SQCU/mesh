@@ -59,28 +59,10 @@ NSString *mesh_metal_address_source(void){
     "  ulong byte=page*pagebytes+within; return regions[byte>>30].bytes+(byte&((1ul<<30)-1));\n}\n";
 }
 
-// ../design/algorithm-sources.md#literal-page-reduction
+// ../design/algorithm-sources.md#transport-page-addressing
 NSString *mesh_metal_rows_source(void){
-  return [mesh_metal_address_source() stringByAppendingString:@"constant bool mesh_input_float32 [[function_constant(34)]];\n"
-    "// ../design/algorithm-sources.md#literal-page-reduction\n"
-    "static inline device uchar *payload(uint logical,device const uint4 *table,device const MeshRegion *regions,constant ulong *g){\n"
-    "  ulong page=table[logical].x;\n"
-    "  return mesh_page_address(regions,page,g[0],0);\n}\n"
-    "// ../design/algorithm-sources.md#literal-page-reduction\n"
-    "static inline float number(uint logical,ulong element,bool fp32,device const uint4 *table,device const MeshRegion *regions,constant ulong *g){\n"
-    "  ulong byte=element*(fp32?4:2);\n"
-    "  device uchar *p=payload(logical+byte/g[0],table,regions,g)+byte%g[0];\n"
-    "  return fp32?*(device float*)p:float(*(device half*)p);\n}\n"
-    "// ../design/algorithm-sources.md#literal-page-reduction\n"
-    "kernel void mesh_add(device const uint4 *table [[buffer(0)]],device const MeshRegion *regions [[buffer(1)]],\n"
-    "  constant ulong *g [[buffer(3)]],device const uint *selected [[buffer(4)]],uint2 group [[threadgroup_position_in_grid]],uint t [[thread_index_in_threadgroup]]){\n"
-    "  uint index=selected[group.x+1],row=index*g[12]+group.y;\n"
-    "  for(uint c=t;c<g[4];c+=256){\n"
-    "    ulong local=(row/g[13])*(g[4]/g[15])*g[18]+(c/g[15])*g[18]+(c%g[15])*g[16]+(row%g[13])*g[20];\n"
-    "    ulong remote=(row/g[14])*(g[4]/g[22])*g[19]+(c/g[22])*g[19]+(c%g[22])*g[17]+(row%g[14])*g[21];\n"
-    "    float a=number(g[2],local,mesh_input_float32,table,regions,g),b=number(g[6],remote,mesh_input_float32,table,regions,g);\n"
-    "    ulong byte=((row/g[12])*g[11]*(g[0]/4)+(row%g[12])*g[4]+c)*4;\n"
-    "    *(device float*)(payload(g[7]+byte/g[0],table,regions,g)+byte%g[0])=a+b;\n"
-    "  }\n}\n"
+  return [mesh_metal_address_source() stringByAppendingString:@"// ../design/algorithm-sources.md#transport-page-addressing\n"
+    "static inline device uchar *mesh_row_address(device const uint4 *table,device const MeshRegion *regions,ulong first,ulong pagebytes,ulong byte){\n"
+    "  return mesh_page_address(regions,table[first+byte/pagebytes].x,pagebytes,byte%pagebytes);\n}\n"
     ];
 }

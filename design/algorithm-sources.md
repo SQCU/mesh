@@ -1517,20 +1517,31 @@ have no unused receive-header allocation. The 96-byte send record contains its
 64-byte wire header and the existing local fields, without padding reserves.
 Neither receiving nor zeroing payload bytes can erase the physical row table.
 This reduces physical metadata from 128 bytes per page to 112 bytes per landing
-page and 16 bytes per arena page; outbound records fall from 128 to 96 bytes.
-Shared ABI version 9 identifies this layout. This does not close A1/A2: their
+page and zero bytes per arena page; outbound records fall from 128 to 96 bytes.
+Shared ABI version 10 identifies this layout. This does not close A1/A2: their
 remaining linked records, rings and separate transfers still exist.
 
 `mesh_detach` is a nonblocking outer lifecycle operation. EBUSY reports pending
 physical ownership or an unconsumed context metadata lease; it is not a graph
 admission result or a retry of computation. The caller invalidates every owner
 first and drives physical polling/metadata consumption outside numerical calls.
-After actual selections and NIC reads end, held received pages and each allocated
-arena page transfer exactly once to context-owned physical rows. Asynchronous
-REL zeroes those payloads, including the old logical tables and configuration
-maps, before detach clears the shared client claim and unmaps. Shared parameters
-and region-address pages remain reserved until that whole-context transition.
-Binary interval lookup avoids checking every held map for every output page.
+After actual selections and NIC reads end, held received pages transfer once
+to context-owned physical rows. Dataflow clears a retired logical row's backing
+assignment itself. Arena retirement is local; receiving backing indices enter
+the existing free-index FIFO. The bridge drains indices before progress and
+does not clear their bytes or access logical rows or stamps. Physical context
+rows exist only for receive backing. All reused logical tables, configuration
+maps, send records and numerical output storage have explicit configuration
+initialization; zeroed retirement payload is not a validity mechanism.
+
+Canonical Metal support resolves byte offsets into registered backing.
+`mesh_add` and numerical conversion belong to the numerical caller alongside
+normalization and embedding. The canonical address helper still translates the
+existing page-sized logical ranges; this separation does not yet implement
+arbitrary independently sized logical extents or eliminate per-scalar lookup.
+Papadopoulos and Culler supply the operand-matching distinction; Apple TN3205
+supplies the registered-span access and completion mechanism. Neither makes
+backing-page boundaries tensor dimensions or requires a header in every page.
 
 Per-table interior arena reuse is not implemented. A hung uncancelled device
 keeps its physical ownership; logical invalidation cannot revoke hardware memory

@@ -193,7 +193,7 @@ int main(int argc,char**argv){
   uint64_t wanted=arena_pages+receive_pages;
   if(wanted>INT32_MAX) die("page index capacity");
   int np=(int)wanted,pool=(int)receive_pages;
-  size_t d0=(h0+(size_t)pool*sizeof(struct mesh_send)+(size_t)np*sizeof(struct mesh_row)+pg-1)/pg*pg,span=(size_t)pg*np;
+  size_t d0=(h0+(size_t)pool*(sizeof(struct mesh_send)+sizeof(struct mesh_row))+pg-1)/pg*pg,span=(size_t)pg*np;
   if(pct && d0+span>(uint64_t)(pct/100*(double)ram)) die("configured graph exceeds page capacity");
   if(layout){ printf("%zu\n",d0+span); return 0; }
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
@@ -225,21 +225,12 @@ int main(int argc,char**argv){
 #endif
     uint64_t release_tail=atomic_load_explicit(&M->r[REL].tail,memory_order_relaxed);
     uint64_t released=atomic_load_explicit(&M->r[REL].head,memory_order_acquire)-release_tail;
-    int stopped;
-    do{
-      stopped=mesh_progress(M,links,link_count,routes,free_pages,owner,pool_link,counts,&submit_cursor,&arena_pending);
-      if(released){
-        struct desc descriptor=*slot(M,REL,release_tail);
-        memset(mesh_at(M,descriptor.page),0,pg);
-        struct mesh_row *row=(struct mesh_row*)((char*)M+descriptor.header);
-        uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_RELAXED);
-        __atomic_store_n(&row->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
-        __atomic_store_n(&row->stamp,stamp&~MESH_ROW_WRITING,__ATOMIC_RELEASE);
-        if(descriptor.page<(uint32_t)pool) RELEASE(descriptor.page);
-        atomic_store_explicit(&M->r[REL].tail,++release_tail,memory_order_release);
-        released--;
-      }
-    }while(released);
+    for(uint64_t i=0;i<released;i++){
+      uint32_t page=slot(M,REL,release_tail+i)->page;
+      RELEASE(page);
+    }
+    if(released) atomic_store_explicit(&M->r[REL].tail,release_tail+released,memory_order_release);
+    int stopped=mesh_progress(M,links,link_count,routes,free_pages,owner,pool_link,counts,&submit_cursor,&arena_pending);
     double stamp=now();
     if(stamp-telemetry>=0.25){
       int live=0;

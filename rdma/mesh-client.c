@@ -95,7 +95,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   c->M=memory; c->len=(size_t)info.st_size;
   c->arena=mesh_at(memory,memory->pool);
-  for(uint32_t i=0;i<memory->pool+memory->arena;i++)
+  for(uint32_t i=0;i<memory->pool;i++)
     *mesh_context_row(memory,i)=(struct mesh_row){.page=MESH_ROW_ABSENT};
   return 0;
 }

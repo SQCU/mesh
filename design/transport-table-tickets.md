@@ -19,6 +19,13 @@ Order: A7 first, so every later deletion is measured against a transport
 yardstick that exists. Then A1+A2 as one change. Then A4–A6. Then B, C, D.
 Tickets marked *done* or *withdrawn* stay for the record.
 
+The operator's subsequent clarification in
+[pages-and-functions.md](pages-and-functions.md#backing-memory-and-logical-values)
+supersedes A1's compulsory page prefixes and A2's transport interpretation of
+logical rows. Metadata occupies configured byte extents; physical pages have no
+numerical semantics. These tickets retain their historical prescriptions below
+so that they are not mistaken for completed implementations.
+
 ## Corrections carried into these tickets
 
 - Under TN3205 SEND/RECV on one QP, receives are matched to sends in posting
@@ -63,7 +70,7 @@ Every other ticket's effect is otherwise unattributable.
 Done when: `design/` holds the record with commits on both machines, and the
 bench is the acceptance yardstick cited by A1–A6.
 
-### A1 (+A3). Header inside the page; one work request per page — open
+### A1 (+A3). Header inside the page — superseded
 
 Delete: the separate header region (`hdr.headers_off`, `MESH_HEADER_STRIDE`,
 `mesh_header`), `struct mesh_send` records with their `next/previous/owner`
@@ -88,7 +95,7 @@ Nothing in the algorithm requires a page to spend a frame on a struct.
 Done when: one `ibv_post_send` and one completion per page; A7 shows the
 per-page cost change; the FFN comparison still passes at exact peer agreement.
 
-### A2. Bridge writes rows directly; delete the CMP and ACK rings — open
+### A2. Bridge writes rows directly — superseded
 
 Delete: `CMP` and `ACK` rings, `ring_select`/`ring_erase` swap-removal and
 its cursor, the `continue`-and-rescan path in `mesh_rows_poll`, the whole top

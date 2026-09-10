@@ -16,6 +16,23 @@ NFE, status word, metadata. Every other word that has appeared in code
 "scheduler") named a control-flow object standing in for something the page
 table already holds, and is not part of the algorithm.
 
+## Backing memory and logical values
+
+Operator clarification, September 10, 2026: a page is a memory backing and
+indirection unit, not a semantic object for numerical functions. Mapping makes
+literal byte extents available to views; it does not give those extents tensor
+shape, validity or dataflow identity. A metadata struct can occupy any configured
+extent within registered backing, just as operand data can. Headers are not
+mandatory prefixes on every backing page. Numerical functions operate on values,
+indices and strides; memory binding owns physical translation. Dataflow owns
+logical presence and use counts. Transport completes registered memory accesses;
+it neither interprets numerical stamps nor changes them on storage retirement.
+
+The older references below to output pages describe the backing for output
+values, not a requirement that every logical value or struct consume a page.
+This clarification supersedes the mandatory in-page header and transport-owned
+row-publication prescriptions in transport-table tickets A1/A2.
+
 ## One NFE on two peers
 
 ### Setup

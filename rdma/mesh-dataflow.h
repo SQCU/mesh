@@ -2,6 +2,22 @@
 #define MESH_DATAFLOW_H
 #include "mesh.h"
 
+struct mesh_page_header { struct wire wire; uint16_t padding; uint64_t table, stamp; uint32_t source, target; uint64_t when; int64_t code; uint32_t domain, function, index, peer; };
+struct mesh_row { uint32_t page, uses; uint64_t stamp; };
+struct mesh_send { struct mesh_page_header header; uint32_t page, reserved; uint64_t next, previous, owner; };
+
+// ../design/algorithm-sources.md#contiguous-backing-page-views
+static inline struct mesh_page_header *mesh_header(struct hdr *m, uint32_t i){
+  return (struct mesh_page_header*)((unsigned char*)m+m->headers_off+(size_t)i*sizeof(struct mesh_send)); }
+// ../design/algorithm-sources.md#context-lifetime
+static inline struct mesh_row *mesh_context_row(struct hdr *memory,uint32_t page){
+  return (struct mesh_row*)((unsigned char*)memory+memory->headers_off+
+    (size_t)memory->pool*sizeof(struct mesh_send))+page;
+}
+
+const struct mesh_page_header *mesh_context_metadata(struct mesh_ctx *context,uint32_t page);
+int mesh_context_consume(struct mesh_ctx *context,uint32_t page);
+
 #define MESH_ROW_ABSENT UINT32_MAX
 #define MESH_ROW_WRITING (UINT64_C(1)<<63)
 
