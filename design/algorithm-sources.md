@@ -30,6 +30,29 @@ Current source disposition:
   itself implement the required metadata channel. Add the configured return
   binding, migrate the single caller, then delete excluded implementations.
 
+### Configuration owns receive input lifetimes
+
+`mesh_rows_realize` now accounts for every logical row, including holes that
+previously escaped validation because only produced outputs were examined.
+Every row read by a configured function, a remote dependent-read binding or the
+calling context's return maps must have a local producer or receive binding.
+Its configured use count must equal those reads and its transmit uses. Unused
+holes remain legal. This is configuration work before launch and allocates no
+auxiliary ownership structure. It uses the existing maps and row-use algebra.
+
+The receive path no longer rereads dependent input stamps or use counts to
+validate a remote completion. A configured received output is the dependent-read
+proof; the path performs the configured releases directly. Papadopoulos–Culler
+(ISCA 1990) provide assigned operand storage and data-dependent firing, as cited
+below; the repository's fixed maps supply the specific lifetime proof. Counting
+uses alone does not establish acyclicity or protect against an invalidated
+mapping receiving a late device write. Those remain distinct integration
+obligations, not permission to add per-input runtime guards.
+
+The other receive descriptor/address checks and negative return paths remain
+unconverted. This change does not establish asynchronous error propagation or
+complete caller migration.
+
 ### Asynchronous metadata publication
 
 `mesh_rows_report` implements publication into a configured metadata output
