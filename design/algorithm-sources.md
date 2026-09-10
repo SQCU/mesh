@@ -1145,13 +1145,46 @@ not a claim that any paper specifies the C ABI.
 
 The transport layout separates each page's address/error metadata from its
 entire OS-page-aligned numerical payload. Both regions belong to the registered
-shared mapping. A provider request gathers its header and payload directly;
-receive scatters directly to the corresponding canonical header and payload.
-Consequently consecutive payload pages form a contiguous native view without
+shared mapping. Two adjacent one-SGE provider work requests address the literal
+64-byte header and full payload respectively; receivers post the same pair.
+Consecutive payload pages therefore form a contiguous native view without
 removing embedded headers, padding copies, or a second numerical allocation.
-The provider's two-SGE capability still requires validation on both actual
-participants after the complete source change; no execution accompanied this
-source pass.
+The pair is a physical provider binding, with no additional wire discriminator,
+acknowledgement, round trip, numerical readiness state, or operand copy.
+
+Apple's [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+documents linked work requests and matching frame counts. Read-only capability
+queries on the actual M5 `rdma_en6` and M4 `rdma_en3` reported `max_sge=1`.
+Inspection on 2026-09-10 with
+`dyld_info -disassemble /usr/lib/rdma/libthunderboltrdma.dylib` establishes why
+simply bypassing that advertised limit is incorrect: `tbt_post_send` loops over
+SGEs but marks the final frame of *each SGE* as a message end
+(`0x27F6DCCCC`–`0x27F6DCD18`). `tbt_poll_qp_send` stops at that end and emits
+one completion with the supplied WR ID (`0x27F6DCE78`–`0x27F6DCEF0`).
+`tbt_post_recv` similarly marks each SGE's final frame
+(`0x27F6DCA28`–`0x27F6DCA70`); receive polling emits its completion there.
+Thus two SGEs with a shared WR ID would prematurely publish and release a page.
+These addresses identify the inspected local provider binary, not a portable ABI.
+
+Both polling functions walk their physical ring in order and stop at an
+unfinished frame. Distinct header/payload WR IDs let the bridge discard a
+successful header completion and release ownership only at the following
+payload completion. Stable in-place filtering preserves that completion order.
+For 16-KiB payloads, each pair consumes five 4-KiB frame credits: one for the
+header and four for the payload. A 4095-frame SQ/RQ permits 819 page pairs;
+two raw completions per pair on each direction require capacity 3276. The
+transmitted byte count remains 16448, not five padded pages.
+
+Header errors remain in the original registered metadata until payload
+completion or physical QP destruction; neither releases ownership early.
+Forwarded-page errors are exposed through the same context metadata path.
+`tbt_post_send` and `tbt_post_recv` return a ring-allocation error without
+populating `bad_wr`. A post error therefore records its literal result in the
+existing port metadata; it does not manufacture completions for an inferred
+unposted prefix or tail. Actual completions or outer-requested QP destruction
+retain responsibility for physical release. This follows Saltzer–Reed–Clark's
+endpoint interpretation and the existing canonical page ownership contract.
+The connected one-SGE binding has not yet been built or executed.
 
 `mesh_rows_create` installs a stable table identity during configuration and
 allocates the row table from canonical pages. `mesh_rows_allocate` reserves

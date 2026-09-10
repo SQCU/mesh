@@ -159,7 +159,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   }
   struct ibv_device_attr capabilities;
   if(ibv_query_device(provider->context,&capabilities)){ close(f); return -1; }
-  if(capabilities.max_sge<2){ close(f); errno=EOPNOTSUPP; return -1; }
   if(!provider->domain) provider->domain=TRACE(ALLOC_PD,provider->context,0,0,ibv_alloc_pd(provider->context));
   if(!provider->domain){ close(f); return -1; }
   size_t head=(uintptr_t)mem%CHUNK, regions=(head+span+CHUNK-1)/CHUNK;
@@ -177,11 +176,11 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     system(c); }
   size_t frames=(((struct hdr*)mem)->pgsz+MESH_HEADER_BYTES+4095)/4096;
   int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
-  int completions=2*(frame_capacity/(int)frames);
+  int completions=4*(frame_capacity/(int)frames);
   if(!completions || capabilities.max_cqe<completions){ close(f); errno=EOPNOTSUPP; return -1; }
   provider->completion_queue=TRACE(CREATE_CQ,provider->context,completions,0,ibv_create_cq(provider->context,completions,NULL,NULL,0)); if(!provider->completion_queue){ close(f); return -1; }
   struct ibv_qp_init_attr qi={.send_cq=provider->completion_queue,.recv_cq=provider->completion_queue,.qp_type=IBV_QPT_UC,
-    .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=2,.max_recv_sge=2}};
+    .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
   provider->pair=TRACE(CREATE_QP,provider->domain,QD,0,ibv_create_qp(provider->domain,&qi)); if(!provider->pair){ close(f); return -1; }
   struct ibv_qp_attr queried; struct ibv_qp_init_attr actual;
   if(ibv_query_qp(provider->pair,&queried,IBV_QP_CAP,&actual)){ close(f); return -1; }
@@ -271,7 +270,7 @@ int main(int argc,char**argv){
   struct mesh_port_info *ports=mesh_ports(M);
   flight_status=M; atomic_store(&M->bridge_pid,(uint64_t)getpid());
   for(int i=0;i<link_count;i++){
-    links[i].node=me; links[i].name=name; links[i].pages=M;
+    links[i].node=me; links[i].name=name; links[i].pages=M; links[i].status=&ports[i];
     snprintf(ports[i].device,sizeof ports[i].device,"%s",links[i].device?links[i].device:"automatic");
     ports[i].peer=(uint16_t)links[i].peer_node;
     int error=pthread_create(&links[i].thread,NULL,link_worker,&links[i]);
@@ -296,32 +295,38 @@ int main(int argc,char**argv){
           link->up=1; ports[index].peer=(uint16_t)link->peer_node;
         }
       }
-      if(link->up && v->completed<v->send_capacity+v->receive_capacity){
-        int count=ibv_poll_cq(v->completion_queue,v->send_capacity+v->receive_capacity-v->completed,v->completions+v->completed);
+      if(link->up && v->completed<2*(v->send_capacity+v->receive_capacity)){
+        int count=ibv_poll_cq(v->completion_queue,2*(v->send_capacity+v->receive_capacity)-v->completed,v->completions+v->completed);
         if(count<0){
           ports[index].when=flight_time(); ports[index].code=count; ports[index].domain=3;
           COUNT(bad); link->up=0; link->faulted=1; atomic_store(&link->phase,MESH_RETIRING);
         } else v->completed+=count;
       }
       int accessible=ownership==LINK_ACTIVE || ownership==LINK_RELEASED || ownership==LINK_RETIRED;
-      for(int position=0;accessible && position<v->completed;){
+      int retained=0;
+      for(int position=0;accessible && position<v->completed;position++){
         struct ibv_wc *wc=&v->completions[position];
-        int receive=(int)(wc->wr_id>>63),post=wc->opcode==(enum ibv_wc_opcode)-1;
-        uint64_t offset=receive?M->headers_off+(size_t)(uint32_t)wc->wr_id*MESH_HEADER_STRIDE:wc->wr_id;
+        int receive=(int)(wc->wr_id>>63),header_completion=(int)((wc->wr_id>>62)&1);
+        uint64_t offset=receive?M->headers_off+(size_t)(uint32_t)wc->wr_id*MESH_HEADER_STRIDE:wc->wr_id&~(UINT64_C(1)<<62);
         struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
         uint32_t page=receive?(uint32_t)wc->wr_id:record->page;
-        uint32_t error=post?wc->vendor_err:wc->status,domain=post?1:wc->status?2:0;
-        if(error){
+        uint32_t error=wc->status,domain=error?2:0;
+        if(error && !record->header.code){
           struct mesh_page_header *header=(struct mesh_page_header*)((char*)M+offset);
           header->when=flight_time(); header->code=error; header->domain=domain;
           header->index=page; header->peer=(uint32_t)link->peer_node;
           if(receive) header->function=UINT32_MAX;
         }
+        if(header_completion) goto accepted;
+        error=(uint32_t)record->header.code; domain=record->header.domain;
         if(!receive){
           struct desc ack={.page=page,.header=offset,.error=error,.domain=domain};
           if(offset>=M->data_off){
             link_release(link,offset); arena_pending--; push(M,ACK,&ack);
-          } else { RELEASE(page); link_release(link,offset); }
+          } else {
+            link_release(link,offset);
+            if(error){ push(M,CMP,&ack); MOVE(page,APP); }else RELEASE(page);
+          }
           goto accepted;
         }
         if(error){
@@ -330,11 +335,11 @@ int main(int argc,char**argv){
           MOVE(page,APP); goto accepted;
         }
         struct mesh_page_header *header=mesh_header(M,page);
-        uint32_t bytes=wc->byte_len-MESH_HEADER_BYTES;
+        uint32_t bytes=wc->byte_len;
         if(header->wire.dst!=(uint16_t)me){
           if(stop){ header->when=flight_time(); header->code=ECANCELED; header->domain=1; RELEASE(page); goto accepted; }
           int next=routes[header->wire.dst].link;
-          if(link_submit(&links[next],L_SEND,page,offset)){ position++; continue; }
+          if(link_submit(&links[next],L_SEND,page,offset)){ v->completions[retained++]=*wc; continue; }
           MOVE(page,SEND); pool_link[page]=(unsigned char)next; COUNT(sent);
         } else {
           struct desc receive={.page=page,.header=offset,.bytes=bytes,.node=header->wire.src};
@@ -342,19 +347,27 @@ int main(int argc,char**argv){
           MOVE(page,APP); COUNT(recvd);
         }
 accepted:
-        if(receive) link->receives--;
-        v->completions[position]=v->completions[--v->completed];
+        if(receive && !header_completion) link->receives--;
       }
+      if(accessible) v->completed=retained;
       if(ownership==LINK_RETIRED && !v->completed){
-        for(int i=0;i<pool;i++) if(pool_link[i]==index && owner[i]==RECV) RELEASE(i);
+        for(int i=0;i<pool;i++) if(pool_link[i]==index && owner[i]==RECV){
+          struct mesh_page_header *header=mesh_header(M,(uint32_t)i);
+          if(header->code){
+            struct desc failure={.page=(uint32_t)i,.error=(uint32_t)header->code,.domain=header->domain};
+            push(M,CMP,&failure); MOVE(i,APP);
+          }else RELEASE(i);
+        }
         while(link->pending){
           uint64_t offset=link->pending;
           struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
-          if(offset>=M->data_off){
-            struct desc ack={.page=record->page,.header=offset,.error=ECANCELED,.domain=1};
+          if(!record->header.code){
             record->header.when=flight_time(); record->header.code=ECANCELED; record->header.domain=1;
-            link_release(link,offset); arena_pending--; push(M,ACK,&ack);
-          } else { RELEASE(record->page); link_release(link,offset); }
+          }
+          struct desc completion={.page=record->page,.header=offset,.error=(uint32_t)record->header.code,.domain=record->header.domain};
+          link_release(link,offset);
+          if(offset>=M->data_off){ arena_pending--; push(M,ACK,&completion); }
+          else { push(M,CMP,&completion); MOVE(completion.page,APP); }
         }
         if(!link->pending){
           link->receives=0; link->faulted=0;
@@ -364,7 +377,7 @@ accepted:
       live+=link->up; stopped+=atomic_load(&link->stopped);
       int receive_limit=link->up?(receive_share<v->receive_capacity?receive_share:v->receive_capacity):0;
       while(!stop && counts[FREE] && link->receives<receive_limit &&
-        atomic_load_explicit(&M->r[CMP].head,memory_order_relaxed)-atomic_load_explicit(&M->r[CMP].tail,memory_order_acquire)+(uint64_t)counts[RECV]<MESH_RING){
+        atomic_load_explicit(&M->r[CMP].head,memory_order_relaxed)-atomic_load_explicit(&M->r[CMP].tail,memory_order_acquire)+(uint64_t)counts[RECV]+(uint64_t)counts[SEND]<MESH_RING){
         int page=free_pages[counts[FREE]-1];
         if(link_submit(link,L_RECV,(uint32_t)page,M->headers_off+(size_t)page*MESH_HEADER_STRIDE)) break;
         MOVE(page,RECV); pool_link[page]=(unsigned char)index;

@@ -7,6 +7,7 @@ struct mesh_link {
   const char *device, *local, *peer, *name;
   int node, peer_node;
   struct hdr *pages;
+  struct mesh_port_info *status;
   struct mesh_verbs provider;
   pthread_t thread;
   _Atomic int ownership, reset, stopped;
@@ -34,10 +35,10 @@ static void *link_worker(void *argument){
     }
     if(stop) break;
     size_t capacity=(size_t)provider->send_capacity+provider->receive_capacity;
-    provider->completions=calloc(capacity,sizeof *provider->completions);
+    provider->completions=calloc(2*capacity,sizeof *provider->completions);
     provider->sges=calloc(capacity,sizeof *provider->sges);
-    provider->receives=calloc(provider->receive_capacity,sizeof *provider->receives);
-    provider->sends=calloc(provider->send_capacity,sizeof *provider->sends);
+    provider->receives=calloc(2*provider->receive_capacity,sizeof *provider->receives);
+    provider->sends=calloc(2*provider->send_capacity,sizeof *provider->sends);
     if(!provider->completions || !provider->sges || !provider->receives || !provider->sends) die("provider descriptors");
     link->peer_node=expected_peer; link->generation++;
     atomic_store_explicit(&link->ownership,LINK_ACTIVE,memory_order_release);
@@ -62,22 +63,27 @@ static int link_submit(struct mesh_link *link,uint32_t kind,uint32_t page,uint64
   struct mesh_verbs *v=&link->provider;
   if(!link->up || (kind==L_SEND?link->sends>=v->send_capacity:link->receives>=v->receive_capacity)) return -1;
   provider=v;
-  int index=kind==L_SEND?v->receive_capacity+v->sending:v->receiving;
+  int index=kind==L_SEND?v->receive_capacity+v->sending/2:v->receiving/2;
   v->sges[index][0]=region_sge((char*)link->pages,header,MESH_HEADER_BYTES);
   v->sges[index][1]=region_sge((char*)link->pages,link->pages->data_off+(size_t)page*link->pages->pgsz,link->pages->pgsz);
   struct mesh_send *record=(struct mesh_send*)((char*)link->pages+header);
-  record->page=page;
+  record->page=page; record->header.code=0; record->header.domain=0;
   if(kind==L_SEND){
-    v->sends[v->sending]=(struct ibv_send_wr){.wr_id=header,.sg_list=v->sges[index],.num_sge=2,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
-    if(v->sending) v->sends[v->sending-1].next=&v->sends[v->sending];
-    v->sending++;
+    for(int part=0;part<2;part++){
+      v->sends[v->sending]=(struct ibv_send_wr){.wr_id=header|(part?0:UINT64_C(1)<<62),.sg_list=&v->sges[index][part],.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+      if(v->sending) v->sends[v->sending-1].next=&v->sends[v->sending];
+      v->sending++;
+    }
     record->previous=0; record->next=link->pending;
     if(link->pending) ((struct mesh_send*)((char*)link->pages+link->pending))->previous=header;
     link->pending=header; link->sends++;
   } else {
-    v->receives[v->receiving]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|page,.sg_list=v->sges[index],.num_sge=2};
-    if(v->receiving) v->receives[v->receiving-1].next=&v->receives[v->receiving];
-    v->receiving++; link->receives++;
+    for(int part=0;part<2;part++){
+      v->receives[v->receiving]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|(part?0:UINT64_C(1)<<62)|page,.sg_list=&v->sges[index][part],.num_sge=1};
+      if(v->receiving) v->receives[v->receiving-1].next=&v->receives[v->receiving];
+      v->receiving++;
+    }
+    link->receives++;
   }
   return 0;
 }
@@ -89,15 +95,13 @@ static void link_flush(struct mesh_link *link){
     struct ibv_recv_wr *bad=NULL;
     int error=ibv_post_recv(v->pair,v->receives,&bad);
     if(!error && atomic_load(&link->phase)==MESH_PAIRING) atomic_store(&link->phase,MESH_PAIRED);
-    for(struct ibv_recv_wr *wr=error?bad:NULL;wr;wr=wr->next)
-      v->completions[v->completed++]=(struct ibv_wc){.wr_id=wr->wr_id,.opcode=(enum ibv_wc_opcode)-1,.vendor_err=(uint32_t)error};
+    if(error){ link->status->when=flight_time(); link->status->code=error; link->status->domain=1; }
     v->receiving=0;
   }
   if(v->sending){
     struct ibv_send_wr *bad=NULL;
     int error=ibv_post_send(v->pair,v->sends,&bad);
-    for(struct ibv_send_wr *wr=error?bad:NULL;wr;wr=wr->next)
-      v->completions[v->completed++]=(struct ibv_wc){.wr_id=wr->wr_id,.opcode=(enum ibv_wc_opcode)-1,.vendor_err=(uint32_t)error};
+    if(error){ link->status->when=flight_time(); link->status->code=error; link->status->domain=1; }
     v->sending=0;
   }
 }
