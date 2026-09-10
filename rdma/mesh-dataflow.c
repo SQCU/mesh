@@ -192,9 +192,9 @@ int mesh_row_zero(const struct mesh_rows *p, uint32_t row, uint64_t stamp){
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction
-int mesh_rows_add_f16(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
-  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
-  if(!count || !elements || elements>p->bytes/sizeof(_Float16) || index>=p->bytes/sizeof(uint64_t) ||
+static __attribute__((always_inline)) inline int row_add(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
+  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp, size_t bytes){
+  if(!count || !elements || elements>p->bytes/bytes || index>=p->bytes/sizeof(uint64_t) ||
      !stamp || stamp>=MESH_ROW_WRITING) return -EINVAL;
   uint64_t *indices=mesh_row_data(p,index_row);
   if(!indices) return 0;
@@ -210,23 +210,38 @@ int mesh_rows_add_f16(const struct mesh_rows *p, const uint32_t *inputs, size_t 
     if(n>width) n=width;
     float *output=mesh_row_data(p,accumulators[page]);
     for(size_t input=0;input<count;input++){
-      const _Float16 *source=(const _Float16*)mesh_row_data(p,inputs[input])+first;
+      const unsigned char *source=(const unsigned char*)mesh_row_data(p,inputs[input])+first*bytes;
       size_t i=0;
       for(;i+8<=n;i+=8){
-        mesh_half8 half;
         mesh_float8 sum;
-        memcpy(&half,source+i,sizeof half);
-        sum=__builtin_convertvector(half,mesh_float8);
+        if(bytes==sizeof(_Float16)){
+          mesh_half8 half;
+          memcpy(&half,source+i*bytes,sizeof half);
+          sum=__builtin_convertvector(half,mesh_float8);
+        } else memcpy(&sum,source+i*bytes,sizeof sum);
         if(input){ mesh_float8 prior; memcpy(&prior,output+i,sizeof prior); sum+=prior; }
         memcpy(output+i,&sum,sizeof sum);
       }
-      for(;i<n;i++) output[i]=(input?output[i]:0)+(float)source[i];
+      for(;i<n;i++) output[i]=(input?output[i]:0)+
+        (bytes==sizeof(_Float16)?(float)((const _Float16*)source)[i]:((const float*)source)[i]);
     }
   }
   for(size_t i=0;i<pages;i++) __atomic_store_n(&p->table[accumulators[i]].stamp,stamp,__ATOMIC_RELEASE);
   __atomic_store_n(indices+index,stamp,__ATOMIC_RELEASE);
   for(size_t i=0;i<count;i++) mesh_row_release(p,inputs[i],stamp);
   return 1;
+}
+
+// ../design/algorithm-sources.md#literal-page-reduction
+int mesh_rows_add_f16(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
+  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
+  return row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(_Float16));
+}
+
+// ../design/algorithm-sources.md#literal-page-reduction
+int mesh_rows_add_f32(const struct mesh_rows *p, const uint32_t *inputs, size_t count,
+  const uint32_t *accumulators, size_t elements, uint32_t index_row, uint32_t index, uint64_t stamp){
+  return row_add(p,inputs,count,accumulators,elements,index_row,index,stamp,sizeof(float));
 }
 
 // ../design/algorithm-sources.md#literal-page-reduction

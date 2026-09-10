@@ -256,6 +256,17 @@ payload boundary into an RDMA header. A successful addition releases each input
 use after publishing its accumulator/index values; the index entry prevents
 repeating that addition. Configuration counts hashing and transport uses too.
 
+`mesh_rows_add_f32` applies the same operation to FP32 partial pages, including
+the independent contraction partials above. Both entrypoints specialize the
+inlined `row_add` at compilation for their source element width; invocation
+does not choose an input format from a buffer. The FP32 variant adds directly
+into FP32 accumulator pages and publishes the same literal index value, without
+an intervening FP16 materialization. Both use the configured input order and
+require the same claimed destinations, index-page lifetime and single writer.
+The shared implementation avoids duplicating the matching/publication algorithm.
+Rabenseifner and Patarasuk–Yuan are the cited partial-sum algebra; they do not
+establish numerical equivalence to an unsplit floating-point matrix product.
+
 `mesh_rows_normalize_f32` performs the plain specification's normalization and
 residual addition from accumulator, gamma and residual pages into output pages.
 Its caller supplies the numerical parameters, proves the full-row inputs from
