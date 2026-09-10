@@ -62,6 +62,61 @@ ownership of memory still accessible to a device rather than assigning that
 same physical memory to a replacement computation. C07–C11, C21 and C28–C30
 remain open until this is integrated and measured on both real participants.
 
+### Installed IOSurface and Espresso evidence
+
+Inspection on September 9, 2026, at mesh `e05804d` and caller `568e311`:
+
+| Participant | OS | IOSurface wraps existing mesh address | Returned size |
+|---|---|---|---|
+| M5 Max | macOS 26.3.2, 25D2150 | Yes, exact same base address | 16384 bytes |
+| M4 Pro | macOS 26.5.1, 25F80 | Yes, exact same base address | 16384 bytes |
+
+The inspection opened the existing `/mesh0` shared mapping, read `hdr.data_off`,
+rounded it upward to the 16384-byte OS-page boundary, and mapped 16384 bytes at
+file offset 3211264. `IOSurfaceCreate` received two CFNumber properties:
+`IOSurfaceAddress` was that mapping's base address and `IOSurfaceAllocSize` was
+16384. On both machines creation succeeded, `IOSurfaceGetBaseAddress` returned
+the supplied address exactly, and `IOSurfaceGetAllocSize` returned 16384.
+No numerical values were written and no ANE execution was submitted. This
+establishes wrapping that registered shared-memory range without a second
+CPU-address allocation; it does not establish an ANE tensor layout, internal
+parameter binding, coherence after device writes, or arbitrary-size surfaces.
+
+`IOSurfaceAddress` is not declared in the installed public header. A primary
+implementation using it is the `create_surface_with_address` function in
+https://github.com/SolutionsExcite/darksword/blob/main/src/main.m. Only its
+ordinary IOSurface property construction is relevant here; none of that
+repository's exploit operations was executed or imported. The ANE backing
+interpretation remains grounded in Bryngelson and Kumaresan above.
+
+Read-only Objective-C runtime inspection of the installed Espresso framework
+found these identical instance-method encodings on both machines:
+
+| Selector | Encoding |
+|---|---|
+| `setExternalStorage:ioSurface:` | `v32@0:8Q16^{__IOSurface=}24` |
+| `ioSurfaceForMultiBufferFrame:` | `^{__IOSurface=}24@0:8Q16` |
+| `ane_io_surfaceForMultiBufferFrame:` | `@24@0:8Q16` |
+| `metalBufferWithDevice:multiBufferFrame:` | `@32@0:8@16Q24` |
+| `createIOSurfaceWithExtraProperties:` | `^{__IOSurface=}24@0:8@16` |
+| `initWithIOSurfaceProperties:andPixelFormats:` | `@32@0:8@16@24` |
+
+The class is `EspressoANEIOSurface`. Its `params_dict`, `width`, `height` and
+`rowBytes` instance variables are present. The abbreviated selectors
+`ioSurfaceForFrame:`, `IOSurfaceForFrame:`, `metalBufferWithDevice:`,
+`setAliasingMem:`, `bytesPerFrame` and `totalBytes` are absent. Do not infer an
+installed callable signature from a wrapper's method name. The source reference
+https://github.com/mdaiter/ane at `e13f45818cbc8edeb6627d86a547f6e10d3883a6`
+lists the external-storage mechanism; the actual encodings above were obtained
+from the local runtime, not assumed from that list.
+
+This makes wrapping already-registered mesh views an immediate implementation
+route alongside reverse registration. Neither route requires copied operand
+storage. Before changing the native numerical path, connect the actual model's
+surface ownership, tensor properties and completion to the configured rows;
+the presence of an external-storage method alone does not locate every internal
+weight or intermediate surface.
+
 ## Contiguous backing-page views
 
 Operator clarification, September 9, 2026:
