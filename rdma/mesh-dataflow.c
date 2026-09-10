@@ -145,19 +145,7 @@ size_t mesh_rows_select(const struct mesh_rows *p, const struct mesh_row_functio
 }
 
 // ../design/algorithm-sources.md#literal-row-functions
-int mesh_rows_publish(const struct mesh_rows *p, const struct mesh_row_function *f, uint32_t index, uint64_t stamp){
-  if(index>=f->rows || !stamp || stamp>=MESH_ROW_WRITING) return EINVAL;
-  for(uint32_t i=0;i<f->inputs;i++){
-    const struct mesh_row_map *m=&f->input[i];
-    if(!mesh_rows_present(p,*m,index,stamp)) return EINVAL;
-    for(uint32_t j=0;j<m->count;j++)
-      if(!__atomic_load_n(&p->table[m->first+index*m->stride+j].uses,__ATOMIC_ACQUIRE)) return EINVAL;
-  }
-  for(uint32_t i=0;i<f->outputs;i++){
-    const struct mesh_row_map *m=&f->output[i];
-    for(uint32_t j=0;j<m->count;j++)
-      if(__atomic_load_n(&p->table[m->first+index*m->stride+j].stamp,__ATOMIC_ACQUIRE)!=(MESH_ROW_WRITING|stamp)) return EINVAL;
-  }
+void mesh_rows_publish(const struct mesh_rows *p, const struct mesh_row_function *f, uint32_t index, uint64_t stamp){
   for(uint32_t i=0;i<f->outputs;i++){
     const struct mesh_row_map *m=&f->output[i];
     for(uint32_t j=0;j<m->count;j++)
@@ -165,20 +153,13 @@ int mesh_rows_publish(const struct mesh_rows *p, const struct mesh_row_function 
   }
   for(uint32_t i=0;i<f->inputs;i++){
     const struct mesh_row_map *m=&f->input[i];
-    for(uint32_t j=0;j<m->count;j++) mesh_row_release(p,m->first+index*m->stride+j,stamp);
+    for(uint32_t j=0;j<m->count;j++) mesh_row_release(p,m->first+index*m->stride+j);
   }
-  return 0;
 }
 
 // ../design/algorithm-sources.md#literal-row-functions
-int mesh_row_release(const struct mesh_rows *p, uint32_t row, uint64_t stamp){
-  struct mesh_row *r=&p->table[row];
-  if(__atomic_load_n(&r->stamp,__ATOMIC_ACQUIRE)!=stamp) return -EINVAL;
-  uint32_t uses=__atomic_load_n(&r->uses,__ATOMIC_RELAXED);
-  while(uses){
-    if(__atomic_compare_exchange_n(&r->uses,&uses,uses-1,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) return uses==1;
-  }
-  return -EINVAL;
+void mesh_row_release(const struct mesh_rows *p, uint32_t row){
+  __atomic_fetch_sub(&p->table[row].uses,1,__ATOMIC_ACQ_REL);
 }
 
 // ../design/algorithm-sources.md#literal-row-functions
@@ -233,7 +214,7 @@ static __attribute__((always_inline)) inline int row_add(const struct mesh_rows 
   }
   for(size_t i=0;i<pages;i++) __atomic_store_n(&p->table[accumulators[i]].stamp,stamp,__ATOMIC_RELEASE);
   __atomic_store_n(indices+index,stamp,__ATOMIC_RELEASE);
-  for(size_t i=0;i<count;i++) mesh_row_release(p,inputs[i],stamp);
+  for(size_t i=0;i<count;i++) mesh_row_release(p,inputs[i]);
   return 1;
 }
 
@@ -349,7 +330,7 @@ int mesh_rows_receive(const struct mesh_rows *p, uint64_t epoch,
     __atomic_store_n(&r->stamp,address.stamp,__ATOMIC_RELEASE);
     for(uint32_t i=0;i<matched->inputs;i++){
       const struct mesh_row_map *m=&matched->input[i];
-      for(uint32_t j=0;j<m->count;j++) mesh_row_release(p,m->first+index*m->stride+j,address.stamp);
+      for(uint32_t j=0;j<m->count;j++) mesh_row_release(p,m->first+index*m->stride+j);
     }
     ring_erase(ring,slot(p->memory,CMP,0),sizeof(struct desc),MESH_RING,at);
     received++;
@@ -367,7 +348,8 @@ size_t mesh_rows_acknowledge(const struct mesh_rows *p, uint64_t epoch){
     memcpy(&address,mesh_at(p->memory,d.page)+sizeof(struct wire),sizeof address);
     if(address.epoch!=epoch || address.source>=p->count ||
        __atomic_load_n(&p->table[address.source].page,__ATOMIC_ACQUIRE)!=d.page) continue;
-    released+=mesh_row_release(p,address.source,address.stamp)>=0;
+    mesh_row_release(p,address.source);
+    released++;
   }
   return released;
 }

@@ -209,11 +209,18 @@ rows for the GPU using the existing no-copy mapping function. The configuration
 owner supplies a page-aligned, page-rounded mapping whose lifetime covers the
 alias. There is no GPU copy of the row table and no separate indices array.
 
-`mesh_rows_publish` releases the configured input uses after publishing all
-output rows. Its single completion owner and requirement that every output
-still carry the issued stamp prevent a second successful publication/release.
-`mesh_row_release` decrements the actual row use count after a proven completed
-read; calling this lower-level operation twice for the same use is incorrect.
+`mesh_rows_publish` writes the configured output stamps and releases the
+configured input uses. It performs no runtime operand validation, issued-stamp
+test, or error return. Its loops traverse fixed configured maps. Configuration
+and the numerical call graph must establish exactly one publication after each
+writer completes; repeated publication is not intercepted by this primitive.
+`mesh_row_release` directly decrements the actual row use count. It has no stamp
+argument, validation branch, source-level compare/exchange retry loop or result
+to interpret as permission. Each call consumes one use already accounted for
+before launch. Atomic access applies to the literal row contents, not a separate
+synchronization object. Papadopoulos–Culler remain the operand-storage citation.
+The caller's complete use accounting and invalidation binding are still required;
+removing guards alone does not establish those contracts.
 Arrival integration must likewise provide exactly one release per configured
 remote read proof. `mesh_row_zero`, called asynchronously after all
 uses end, excludes writers through the row stamp, zeros the payload and removes
