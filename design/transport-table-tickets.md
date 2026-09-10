@@ -44,6 +44,13 @@ Implementation and initial measurements are in
 Exact echo and lifecycle checks pass. Stable repeated latency/rate measurement
 and attribution of the instrumented-run variation remain open.
 
+The operator superseded the short echo with full 1 GiB one-way streams.
+[The matched direct-versus-mesh record](transport-one-gib-2026-09-10.md)
+contains the accepted bandwidth yardstick, exact payload/completion validation,
+and the fixed receive-preposting bug. Repeat mesh throughput is within 0.53%
+of the direct path; first-use overhead remains open. A1–A6 must preserve that
+repeat rate and distinguish first-use cost from link serialization.
+
 Delete: nothing. Add: one program (~100 lines) that sends N pages one way
 through the actual path (`SUB` ring → bridge → QP → peer bridge → row table)
 and has the peer echo them, with no numerical function. Report one-way page
