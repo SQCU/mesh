@@ -128,6 +128,117 @@ not attribute seconds of end-to-end time to RDMA.
 
 ## Remaining replacement
 
+### Literal row functions
+
+`rdma/mesh-dataflow.c` adds the required operations independently of the old
+runtime. Papadopoulos and Culler, *Monsoon* (1990), sections 2–3, are the cited
+source for storage-associated matching; the repository supplies the stricter
+one-page-table representation. `mesh_row` contains exactly physical page, use
+count and stamp. `mesh_rows` and `mesh_row_function` are immutable configuration
+views, not per-evaluation state. They do not allocate an owner array, publication
+bitmap, progress counter, task, token or queue.
+
+`mesh_rows_validate` checks configuration, `mesh_rows_present` reads actual
+rows, `mesh_rows_select` claims destinations in those same rows, and
+`mesh_rows_publish` stamps completed visible output writes directly.
+`mesh_row_data` resolves a row to its literal page payload. Selection requires
+one scan owner for overlapping destinations; publication has one completion
+owner per issued function. Selection output is transient numerical indices,
+not a persistent consumed mask. Physical aliasing must be excluded by the
+configuration that installs the rows; this validator checks logical output
+overlap, not the whole configuration's physical ownership.
+
+`mesh_rows_publish` releases the configured input uses after publishing all
+output rows. Its single completion owner and requirement that every output
+still carry the issued stamp prevent a second successful publication/release.
+`mesh_row_release` decrements the actual row use count after a proven completed
+read; calling this lower-level operation twice for the same use is incorrect.
+Arrival integration must likewise provide exactly one release per configured
+remote read proof. `mesh_row_zero`, called asynchronously after all
+uses end, excludes writers through the row stamp, zeros the payload and removes
+the physical page while retaining the completed stamp. The release owner retains
+the physical page number through this operation and returns it to the appropriate
+free list/bridge. Reinstallation must initialize page/use count before clearing
+the stamp. Hardware reads and hashing count toward the lifetime.
+
+### Literal page reduction
+
+Rabenseifner (2004) and Patarasuk–Yuan (2009), cited above, supply the
+reduce-scatter/all-gather algebra. `mesh_rows_add_f16` adds one matching set of
+actual partial pages into claimed FP32 accumulator pages and publishes that
+addition's stamp in an actual index page. `mesh_rows_indexed` reads those index
+page contents. One arithmetic owner handles each overlapping accumulator/index
+span. The accumulator output rows must already have been selected/claimed, and
+the index page must have a live configured lifetime. No operation crosses a
+payload boundary into an RDMA header. A successful addition releases each input
+use after publishing its accumulator/index values; the index entry prevents
+repeating that addition. Configuration counts hashing and transport uses too.
+
+`mesh_rows_normalize_f32` performs the plain specification's normalization and
+residual addition from accumulator, gamma and residual pages into output pages.
+Its caller supplies the numerical parameters, proves the full-row inputs from
+the index/table, claims outputs and publishes only after the arithmetic finishes.
+This is a numerical function, not a model-graph interpreter. The initial C
+arithmetic is not a claim that CPU normalization is the fastest backend; the
+configured GPU implementation must preserve the same page algebra and be
+measured against the validated local function. The published collective papers
+do not specify this model's normalization formula.
+
+These additions precede the caller migration. They do not constitute completed
+transport integration, read-proof integration, recovery or RDMA validation.
+The operator requires the existing caller to migrate before excluded
+implementations and their interfaces are deleted.
+
+### Literal page transport
+
+Papadopoulos–Culler provide the storage-presence mechanism, and
+Rabenseifner/Patarasuk–Yuan the page-exchange algebra cited above.
+`mesh_rows_send`, `mesh_rows_receive`, `mesh_rows_acknowledge` and
+`mesh_rows_return` bind actual pages to the existing SUB/CMP/ACK/REL rings.
+`mesh_row_binding` is immutable correspondence between local and peer rows.
+`mesh_row_address` is the page's literal address/epoch/stamp header, not an
+application frame-kind or handshake protocol. The transport worker owns those
+rings. Each transmitted row has one configured transport use, released by its
+actual NIC completion; local computation/checking uses are separate counts in
+the same row. No flight array or additional descriptor queue is allocated.
+
+Submission checks the existing page header to avoid sending the same row value
+twice. On a full SUB ring it restores the prior header and retries on a later
+scan; it does not publish an extra pending flag. The header and payload remain
+unchanged through NIC completion. Each transmitted row has one bound adjacent
+destination; configurations needing multiple copies must realize their
+collective ownership/edges explicitly rather than overwrite an in-flight header.
+Generation stamps must not be reused for another value under the same epoch.
+
+Delivery installs the received physical page and stamps the actual destination.
+It never overwrites a live destination. Received use counts must be installed
+before delivery; incoming data cannot allocate or infer a numerical graph.
+`mesh_rows_return` is for received pages and runs on the asynchronous zeroing
+owner. It returns zeroed pages to the existing bridge REL ring. Local-page
+zeroing retains its physical address in the configured release owner until that
+address is returned to the canonical free-page representation.
+
+Delivery scans the existing CMP ring for a page whose destination is available
+and removes that descriptor using the existing ring operation. A busy destination
+does not prevent delivery to other available rows. No page or descriptor is moved
+to a second pending queue. The single receive owner is required by that ring
+operation. Error propagation, remote read proofs and recovery remain integration
+obligations. These primitives are not yet used by the NFE.
+
+### Literal page checking
+
+Saltzer, Reed and Clark (1984), cited above, motivate endpoint checking.
+`mesh_rows_digest` writes the digest of a live page directly into a configured
+digest page; it retains no heap hash ring, count or generation cache. The two
+hardware CRC polynomials are an implementation choice for error detection, not
+a cryptographic claim or an algorithm attributed to those authors. Corresponding
+peers must use the same configured seed and numerical payload extent.
+`mesh_rows_equal` compares two present, equally stamped pages as a value. The
+numerical graph must not depend on its result. A configured post-consumption
+function owns the hash read, its output publication and input-use release;
+comparison is an endpoint function whose disagreement concludes the NFE with
+failure. These primitives alone do not implement replay or link recovery.
+
 The caller's Job/stage control, consumed masks and embedding/head completion
 words have been removed in committed revisions of metal-microbench. Distinct
 configured functions now have distinct value rows and share the NFE stamp.
