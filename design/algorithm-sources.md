@@ -776,8 +776,9 @@ must be measured rather than called bitwise equivalence.
 
 The existing parameter evaluator accepts `LM_BENCH_REDUCTION_RANGE=first:end`
 with FP32 output for those function kinds and records the resolved range. Its
-FLOP count reflects the selected range; the weight-byte field remains allocated
-weight storage. The evaluator uses the existing projection and dump paths, not
+FLOP count and estimated weight-read bandwidth reflect the selected range;
+`weight_bytes` remains allocated weight storage and `weight_read_bytes` records
+the range's weight operands. The evaluator uses the existing projection and dump paths, not
 a second implementation. These local dense evaluations do not establish actual
 page-backed operands, concurrent partial issue, transport integration or a
 performance gain from splitting K.
