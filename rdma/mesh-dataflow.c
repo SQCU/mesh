@@ -82,38 +82,51 @@ static int mesh_is(struct hdr *m,int plane,uint32_t row){
   return (atomic_load_explicit(&mesh_plane(m,plane)[row/64],memory_order_acquire)>>(row%64))&1;
 }
 
-/* Reader ordinals per row, assigned in configuration order; masks record the readers each row must see. */
-static int mesh_assign(struct mesh_ctx *c,uint8_t *next,uint32_t first,uint32_t count,int *plane,int advance){
+/* Reader planes: each reader of a range takes the lowest plane free on every row of the range;
+   masks record the planes each row must see. Readers of overlapping sub-ranges therefore never collide. */
+static int mesh_survey(struct mesh_ctx *c,const uint8_t *used,uint32_t first,uint32_t count,uint8_t *busy){
   if(!count || (uint64_t)first+count>mesh_rows(c->M)) return EINVAL;
-  for(uint32_t r=first;r<first+count;r++){
-    if(mesh_is(c->M,MESH_CONSTANT,r)) continue;
-    if(*plane<0) *plane=next[r]; else if(next[r]!=*plane) return EINVAL;
-  }
-  if(advance) for(uint32_t r=first;r<first+count;r++) if(!mesh_is(c->M,MESH_CONSTANT,r)){ if(next[r]>=MESH_READERS) return ENOSPC; next[r]++; }
+  for(uint32_t r=first;r<first+count;r++) if(!mesh_is(c->M,MESH_CONSTANT,r)) *busy|=used[r];
   return 0;
+}
+static int mesh_free_plane(uint8_t busy,int *plane){
+  for(int p=0;p<MESH_READERS;p++) if(!(busy&(1u<<p))){ *plane=p; return 0; }
+  return ENOSPC;
+}
+static void mesh_take(struct mesh_ctx *c,uint8_t *used,uint32_t first,uint32_t count,int plane){
+  for(uint32_t r=first;r<first+count;r++) if(!mesh_is(c->M,MESH_CONSTANT,r)) used[r]|=(uint8_t)(1u<<plane);
 }
 
 int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t count,
   struct mesh_row_binding *bindings,size_t binding_count,struct mesh_row_map *returns,size_t return_count){
   struct hdr *m=c->M;
   uint32_t rows=mesh_rows(m),block=m->block;
-  uint8_t *next=calloc(rows,1);
-  if(!next) return ENOMEM;
+  uint8_t *used=calloc(rows,1);
+  if(!used) return ENOMEM;
   int error=0;
   for(size_t i=0;i<count && !error;i++){
     struct mesh_row_function *f=&functions[i];
     if(!f->rows || !f->outputs || !f->output || (f->inputs && !f->input)){ error=EINVAL; break; }
     for(uint32_t j=0;j<f->inputs && !error;j++){
-      int plane=-1;
-      for(uint32_t k=0;k<f->rows && !error;k++){ struct mesh_row_range r=mesh_range(f->input[j],k); error=mesh_assign(c,next,r.first,r.count,&plane,0); }
-      for(uint32_t k=0;k<f->rows && !error;k++){ struct mesh_row_range r=mesh_range(f->input[j],k); error=mesh_assign(c,next,r.first,r.count,&plane,1); }
-      f->input[j].plane=plane<0?0:(uint32_t)plane;
+      uint8_t busy=0; int plane=0;
+      for(uint32_t k=0;k<f->rows && !error;k++){ struct mesh_row_range r=mesh_range(f->input[j],k); error=mesh_survey(c,used,r.first,r.count,&busy); }
+      if(!error) error=mesh_free_plane(busy,&plane);
+      for(uint32_t k=0;k<f->rows && !error;k++){ struct mesh_row_range r=mesh_range(f->input[j],k); mesh_take(c,used,r.first,r.count,plane); }
+      f->input[j].plane=(uint32_t)plane;
     }
     for(uint32_t j=0;j<f->outputs && !error;j++) for(uint32_t k=0;k<f->rows && !error;k++){
       struct mesh_row_range r=mesh_range(f->output[j],k);
       if(!r.count || (uint64_t)r.first+r.count>rows){ error=EINVAL; break; }
       for(uint32_t x=0;x<r.count;x++) if(mesh_is(m,MESH_CONSTANT,r.first+x)) error=EINVAL;
     }
+  }
+  for(size_t i=0;i<return_count && !error;i++){
+    uint8_t busy=0; int plane=0;
+    struct mesh_row_range r=mesh_range(returns[i],0);
+    error=mesh_survey(c,used,r.first,r.count,&busy);
+    if(!error) error=mesh_free_plane(busy,&plane);
+    if(!error) mesh_take(c,used,r.first,r.count,plane);
+    returns[i].plane=(uint32_t)plane;
   }
   for(size_t i=0;i<binding_count && !error;i++){
     struct mesh_row_binding *b=&bindings[i];
@@ -123,9 +136,11 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       for(uint32_t k=0;k<b->count;k+=block) mesh_send(m)[b->first+k]|=0x80;
       continue;
     }
-    int plane=-1;
-    error=mesh_assign(c,next,b->first,b->count,&plane,1);
+    uint8_t busy=0; int plane=0;
+    error=mesh_survey(c,used,b->first,b->count,&busy);
+    if(!error) error=mesh_free_plane(busy,&plane);
     if(error) break;
+    mesh_take(c,used,b->first,b->count,plane);
     b->plane=(uint32_t)plane;
     for(uint32_t k=0;k<b->count/block;k++){
       uint32_t row=b->first+k*block;
@@ -135,14 +150,8 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       *(struct mesh_tag*)mesh_at(m,page)=(struct mesh_tag){MESH_TAG,b->binding,k,0};
     }
   }
-  for(size_t i=0;i<return_count && !error;i++){
-    int plane=-1;
-    struct mesh_row_range r=mesh_range(returns[i],0);
-    error=mesh_assign(c,next,r.first,r.count,&plane,1);
-    returns[i].plane=plane<0?0:(uint32_t)plane;
-  }
-  if(!error) for(uint32_t r=0;r<rows;r++) mesh_mask(m)[r]=(uint8_t)((1u<<next[r])-1);
-  free(next);
+  if(!error) for(uint32_t r=0;r<rows;r++) mesh_mask(m)[r]=used[r];
+  free(used);
   return error;
 }
 
