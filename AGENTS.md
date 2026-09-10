@@ -255,12 +255,13 @@ lives in `bin/` for the same reason.
 
 ## Distributed functions: the page table is the program
 
-The reduce runtime in `rdma/mesh-pages.c` and every caller of it are bound by
+The canonical runtime in `rdma/mesh-dataflow.c` and every caller of it are bound by
 `design/pages-and-functions.md` (the plain statement) and
 `design/distributed-reduce.md` (the citation form). Both say the same thing:
 a function runs when all of its input rows carry the stamp; it writes its
 output pages; pages are released when their dependents' rows carry the stamp;
-the digest is a page; the status word is for the link. There is no other
+errors travel as metadata; the status word is for the link. The operator removed
+CRC and digest computation and exchange. There is no other
 state. The firing principle has tagged-token dataflow prior art. The actual
 Thunderbolt binding uses two-sided SEND/RECV into registered pages, as documented
 by Apple TN3205; it does not support hardware-initiated remote writes. See
