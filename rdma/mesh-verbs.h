@@ -105,23 +105,23 @@ static int listener_up(void){
 
 // ../design/algorithm-sources.md#transport-page-addressing
 static int exchange(int f, const struct qpi *mine, struct qpi *you, double deadline){
-  size_t sent=0,got=0;
+  size_t sent=0,got=0,send_bytes=mine?sizeof *mine:0,receive_bytes=you?sizeof *you:0;
   fcntl(f,F_SETFL,O_NONBLOCK);
-  while(!stop && (sent<sizeof *mine || got<sizeof *you)){
+  while(!stop && (sent<send_bytes || got<receive_bytes)){
     double left=deadline-monotime(); if(left<=0) return -1;
     fd_set r,w; FD_ZERO(&r); FD_ZERO(&w);
-    if(got<sizeof *you) FD_SET(f,&r);
-    if(sent<sizeof *mine) FD_SET(f,&w);
+    if(got<receive_bytes) FD_SET(f,&r);
+    if(sent<send_bytes) FD_SET(f,&w);
     struct timeval tv={.tv_sec=(int)left,.tv_usec=(int)((left-(int)left)*1e6)};
     int ready=select(f+1,&r,&w,0,&tv);
     if(ready<0 && errno==EINTR) continue;
     if(ready<=0) return -1;
     if(FD_ISSET(f,&w)){
-      ssize_t n=write(f,(const char*)mine+sent,sizeof *mine-sent);
+      ssize_t n=write(f,(const char*)mine+sent,send_bytes-sent);
       if(n>0) sent+=(size_t)n;
       else if(!n || (errno!=EAGAIN && errno!=EINTR)) return -1; }
     if(FD_ISSET(f,&r)){
-      ssize_t n=read(f,(char*)you+got,sizeof *you-got);
+      ssize_t n=read(f,(char*)you+got,receive_bytes-got);
       if(n>0) got+=(size_t)n;
       else if(!n || (errno!=EAGAIN && errno!=EINTR)) return -1; }
   }
@@ -203,6 +203,28 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
   if(!provider->send_capacity || !provider->receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   if(TRACE(INIT,provider->pair,provider->pair->qp_num,0,ibv_modify_qp(provider->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))){ close(f); return -1; }
+  union ibv_gid gid; if(TRACE(QUERY_GID,provider->context,1,0,ibv_query_gid(provider->context,1,0,&gid))){ close(f); return -1; }
+  uint32_t psn=arc4random()&0xffffff;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.nonce=mynonce,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=page_bytes,.header_bytes=header_bytes,.node=(uint16_t)me},you;
+  memcpy(mine.gid,&gid,16);
+  fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
+  double exchange_deadline=monotime()+10;
+  if(exchange(f,initial_receives?NULL:&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"xchg retry\n"); return -1; }
+  if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.header_bytes!=mine.header_bytes || (expected_peer>=0 && you.node!=expected_peer)){
+    fprintf(stderr,"peer speaks a different exchange, retrying\n"); close(f); return -1; }
+  if(you.nonce==mynonce){ fprintf(stderr,"self nonce, retry\n"); close(f); return -1; }
+  peernonce=you.nonce; expected_peer=you.node;
+  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
+    .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
+    .grh={.hop_limit=1,.sgid_index=0}}};
+  memcpy(&r.ah_attr.grh.dgid,you.gid,16);
+  int rc=TRACE(RTR,provider->pair,you.qpn,you.psn,ibv_modify_qp(provider->pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN));
+  if(rc){ fprintf(stderr,"rtr rc %d dlid %u dqpn %u dgid %02x%02x..%02x%02x mygid %02x%02x\n",
+      rc, you.lid, you.qpn, you.gid[0],you.gid[1],you.gid[14],you.gid[15],
+      mine.gid[0],mine.gid[15]); close(f); return -1; }
+  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
+  rc=TRACE(RTS,provider->pair,provider->pair->qp_num,psn,ibv_modify_qp(provider->pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN));
+  if(rc){ fprintf(stderr,"rts rc %d, retrying\n",rc); close(f); return -1; }
   if(initial_receives){
     struct ibv_recv_wr *last=initial_receives,*unposted=NULL;
     int count=1;
@@ -219,27 +241,9 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t p
     last->next=next;
     if(error){ fprintf(stderr,"initial receive post=%d\n",error); close(f); errno=error; return -1; }
   }
-  union ibv_gid gid; if(TRACE(QUERY_GID,provider->context,1,0,ibv_query_gid(provider->context,1,0,&gid))){ close(f); return -1; }
-  uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.nonce=mynonce,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=page_bytes,.header_bytes=header_bytes,.node=(uint16_t)me},you;
-  memcpy(mine.gid,&gid,16);
-  fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
-  if(exchange(f,&mine,&you,monotime()+10)){ close(f); fprintf(stderr,"xchg retry\n"); return -1; }
+  if(initial_receives && exchange(f,&mine,NULL,exchange_deadline)){
+    close(f); fprintf(stderr,"xchg retry\n"); return -1;
+  }
   close(f);
-  if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.header_bytes!=mine.header_bytes || (expected_peer>=0 && you.node!=expected_peer)){
-    fprintf(stderr,"peer speaks a different exchange, retrying\n"); return -1; }
-  if(you.nonce==mynonce){ fprintf(stderr,"self nonce, retry\n"); return -1; }
-  peernonce=you.nonce; expected_peer=you.node;
-  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psn,
-    .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
-    .grh={.hop_limit=1,.sgid_index=0}}};
-  memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-  int rc=TRACE(RTR,provider->pair,you.qpn,you.psn,ibv_modify_qp(provider->pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN));
-  if(rc){ fprintf(stderr,"rtr rc %d dlid %u dqpn %u dgid %02x%02x..%02x%02x mygid %02x%02x\n",
-      rc, you.lid, you.qpn, you.gid[0],you.gid[1],you.gid[14],you.gid[15],
-      mine.gid[0],mine.gid[15]); return -1; }
-  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
-  rc=TRACE(RTS,provider->pair,provider->pair->qp_num,psn,ibv_modify_qp(provider->pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN));
-  if(rc){ fprintf(stderr,"rts rc %d, retrying\n",rc); return -1; }
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);
   return 0; }
