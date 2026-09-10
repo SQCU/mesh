@@ -1,5 +1,13 @@
 # Pages and functions
 
+The [complete replacement requirements](completion-requirements.md) track the
+whole implementation and its acceptance evidence. On the actual Thunderbolt
+substrate, literal pages use SEND/RECV, as documented by Apple TN3205; software
+publication of a received page does not require hardware remote-write support.
+Statements below about instant execution and topology-independent utilization
+express the desired absence of added control dependencies, not a zero-latency
+theorem or a measured performance guarantee.
+
 Plain statements of the algorithm. Only the words used in the operator's own
 turns: mesh, peers, pages, page table, rows, stamps, use count, buffers as
 function returns, functions, release, reduce, accumulator page, index page,

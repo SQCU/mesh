@@ -261,9 +261,11 @@ The reduce runtime in `rdma/mesh-pages.c` and every caller of it are bound by
 a function runs when all of its input rows carry the stamp; it writes its
 output pages; pages are released when their dependents' rows carry the stamp;
 the digest is a page; the status word is for the link. There is no other
-state. The design is tagged-token dataflow over one-sided writes with
-completion in the data — thirty to fifty years of built, measured systems,
-cited in `distributed-reduce.md`.
+state. The firing principle has tagged-token dataflow prior art. The actual
+Thunderbolt binding uses two-sided SEND/RECV into registered pages, as documented
+by Apple TN3205; it does not support hardware-initiated remote writes. See
+`design/completion-requirements.md` for the complete implementation obligations
+and the limits of the literature and performance claims.
 
 The following are therefore wrong before they are measured, and the record in
 `distributed-reduce.md` shows measurement agreeing every time: a frame kind, a

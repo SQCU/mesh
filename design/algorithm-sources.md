@@ -1,5 +1,11 @@
 # Algorithm sources and implementation obligations
 
+The [complete replacement requirements](completion-requirements.md) consolidate
+the current obligations, source disposition and acceptance evidence. They take
+precedence over completion implications in the chronological notes below. The
+active caller still uses `mesh_pages_*`; local kernel measurements and unused
+`mesh_rows_*` functions do not establish a completed replacement.
+
 ## Operator clarification: asynchronous error metadata
 
 Operator instruction, September 9, 2026:

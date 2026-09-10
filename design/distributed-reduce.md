@@ -1,5 +1,10 @@
 # Distributed reduce over page tables
 
+Use the [complete replacement requirements](completion-requirements.md) for the
+current implementation and evidence inventory. The incident record below is
+historical; none of its citations establishes that the replacement caller has
+been implemented or that a measured latency bound has been met.
+
 The operator's [asynchronous error metadata contract](pages-and-functions.md#asynchronous-error-metadata)
 supersedes failure-value and status-driven termination wording below. The
 interface is `out, meta = meshfunction(x)`: literal error codes and where/when
