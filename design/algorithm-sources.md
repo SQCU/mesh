@@ -144,9 +144,27 @@ rows, `mesh_rows_select` claims destinations in those same rows, and
 `mesh_row_data` resolves a row to its literal page payload. Selection requires
 one scan owner for overlapping destinations; publication has one completion
 owner per issued function. Selection output is transient numerical indices,
-not a persistent consumed mask. Physical aliasing must be excluded by the
-configuration that installs the rows; this validator checks logical output
-overlap, not the whole configuration's physical ownership.
+not a persistent consumed mask. `row_maps_overlap` checks the configured logical
+and physical spans. `mesh_rows_realize` validates the complete configured
+function list and bindings before initializing the canonical rows and zeroing
+their assigned local pages. It excludes overlapping writers and overlapping
+receive/output destinations. Its current realization assigns distinct physical
+output spans to distinct functions; shared physical spans across functions are
+not yet realized.
+
+Output maps contain their fixed physical span and configured use count, in
+addition to the logical row geometry. These are immutable allocation/lifetime
+configuration, not a mutable ownership mirror. Selection accepts a newer NFE
+only when the previous value's actual row has no page and zero uses. It retains
+the previous completed stamp until claiming the newer value, then reinstalls
+the configured physical page and use count. Clearing the stamp to zero on reuse
+would incorrectly enable the old generation again, so that is not done.
+The initial row state is likewise absent, zero uses and stamp zero.
+
+`mesh_metal_row_table` aliases this same array of physical-page/use-count/stamp
+rows for the GPU using the existing no-copy mapping function. The configuration
+owner supplies a page-aligned, page-rounded mapping whose lifetime covers the
+alias. There is no GPU copy of the row table and no separate indices array.
 
 `mesh_rows_publish` releases the configured input uses after publishing all
 output rows. Its single completion owner and requirement that every output
@@ -158,8 +176,9 @@ remote read proof. `mesh_row_zero`, called asynchronously after all
 uses end, excludes writers through the row stamp, zeros the payload and removes
 the physical page while retaining the completed stamp. The release owner retains
 the physical page number through this operation and returns it to the appropriate
-free list/bridge. Reinstallation must initialize page/use count before clearing
-the stamp. Hardware reads and hashing count toward the lifetime.
+free list/bridge. Reinstallation occurs in selection while the row carries its
+issued stamp. Hardware reads and hashing count toward the lifetime. A row whose
+page is already absent is not zeroed or released a second time.
 
 ### Literal page reduction
 
@@ -210,9 +229,10 @@ destination; configurations needing multiple copies must realize their
 collective ownership/edges explicitly rather than overwrite an in-flight header.
 Generation stamps must not be reused for another value under the same epoch.
 
-Delivery installs the received physical page and stamps the actual destination.
-It never overwrites a live destination. Received use counts must be installed
-before delivery; incoming data cannot allocate or infer a numerical graph.
+Delivery installs the received physical page and configured binding's use count,
+then stamps the actual destination. It never overwrites a live destination.
+Each arrival restores the configured receive-use count; incoming data cannot
+allocate or infer a numerical graph.
 `mesh_rows_return` is for received pages and runs on the asynchronous zeroing
 owner. It returns zeroed pages to the existing bridge REL ring. Local-page
 zeroing retains its physical address in the configured release owner until that

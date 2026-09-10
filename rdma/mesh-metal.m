@@ -32,6 +32,14 @@ id<MTLBuffer> mesh_metal_page_table(id<MTLDevice> device, const mesh_pages *page
   if(bytes>device.maxBufferLength){ errno=EOVERFLOW; return nil; }
   return mesh_metal_memory(device,table,bytes);
 }
+// ../design/algorithm-sources.md#literal-row-functions
+id<MTLBuffer> mesh_metal_row_table(id<MTLDevice> device, const struct mesh_rows *pages){
+  size_t alignment=(size_t)getpagesize();
+  if(!pages || !pages->count || pages->count>(SIZE_MAX-alignment+1)/sizeof(struct mesh_row)){ errno=EINVAL; return nil; }
+  size_t bytes=(pages->count*sizeof(struct mesh_row)+alignment-1)/alignment*alignment;
+  if((uintptr_t)pages->table%alignment || bytes>device.maxBufferLength){ errno=EINVAL; return nil; }
+  return mesh_metal_memory(device,pages->table,bytes);
+}
 id<MTLBuffer> mesh_metal_receive_pool(id<MTLDevice> device, struct mesh_ctx *context, struct mesh_metal_layout *layout){
   return mesh_metal_pool(device,context,0,context->M->pool,layout);
 }

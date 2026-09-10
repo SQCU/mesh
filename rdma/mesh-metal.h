@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 #include "mesh.h"
 #include "mesh-pages.h"
+#include "mesh-dataflow.h"
 struct mesh_metal_layout { uint64_t origin; uint32_t stride, payload, capacity; };
 struct mesh_metal_rows { uint64_t offset; uint32_t stride, payload, padding, rows_per_page; };
 int mesh_metal_row_layout(struct mesh_ctx *context, struct mesh_scope scope, size_t rows,
@@ -10,4 +11,5 @@ int mesh_metal_row_layout(struct mesh_ctx *context, struct mesh_scope scope, siz
 id<MTLBuffer> mesh_metal_receive_pool(id<MTLDevice> device, struct mesh_ctx *context, struct mesh_metal_layout *layout);
 id<MTLBuffer> mesh_metal_transmit_pool(id<MTLDevice> device, struct mesh_ctx *context, struct mesh_metal_layout *layout);
 id<MTLBuffer> mesh_metal_page_table(id<MTLDevice> device, const mesh_pages *pages);
+id<MTLBuffer> mesh_metal_row_table(id<MTLDevice> device, const struct mesh_rows *pages);
 #endif

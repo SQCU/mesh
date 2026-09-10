@@ -7,15 +7,17 @@
 
 struct mesh_row { uint32_t page, uses; uint64_t stamp; };
 struct mesh_rows { struct hdr *memory; struct mesh_row *table; size_t count; uint32_t offset, bytes; };
-struct mesh_row_map { uint32_t first, count, stride; };
+struct mesh_row_map { uint32_t first, count, stride, physical, physical_stride, uses; };
 struct mesh_row_function {
   const struct mesh_row_map *input, *output;
   uint32_t inputs, outputs, rows;
 };
-struct mesh_row_binding { uint32_t first, count, remote; uint16_t peer, receive; };
+struct mesh_row_binding { uint32_t first, count, remote, uses; uint16_t peer, receive; };
 struct mesh_row_address { uint64_t epoch, stamp; uint32_t source, target; };
 
 int mesh_rows_validate(const struct mesh_rows *pages, const struct mesh_row_function *function);
+int mesh_rows_realize(const struct mesh_rows *pages, const struct mesh_row_function *functions,
+  size_t count, const struct mesh_row_binding *bindings, size_t binding_count);
 void *mesh_row_data(const struct mesh_rows *pages, uint32_t row);
 int mesh_rows_present(const struct mesh_rows *pages, struct mesh_row_map map, uint32_t index, uint64_t stamp);
 size_t mesh_rows_select(const struct mesh_rows *pages, const struct mesh_row_function *function,
