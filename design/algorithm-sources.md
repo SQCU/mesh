@@ -32,6 +32,38 @@ include residual reads, asynchronous device reads and hashing. Reuse follows
 completed dependent reads; allocating every intermediate forever or renaming a
 stage counter as a page index does not implement that lifetime rule.
 
+### Reusing configured physical spans
+
+`mesh_pages_slot.storage` names a one-based root slot for a shared physical
+span; zero retains a separately allocated span. Roots name themselves and
+cover the widest participating slot. Logical rows remain distinct. The
+compiler allocates the physical span once and initializes its payloads.
+This is configuration of ordinary sendable pages, not a storage privacy class.
+
+`storage_ready` reads the existing physical-owner table; `claim_rows` writes
+the destination stamp, restores its literal entry and records its physical
+owner. As with the existing non-atomic multi-destination claim, one scanner
+must own overlapping destinations, including physically overlapping spans.
+The current caller assigns only normalization destinations to these spans;
+all their claims occur on its single numerical scan thread.
+
+`retire_storage` requires full publication and completion of every configured
+dependent output at the corresponding generation. Whole-span completion is a
+conservative read-lifetime proof; first-page publication is insufficient.
+The existing use counts reflect outstanding dependents. Transported values
+also retain storage through NIC completion and local hashing, without waiting
+for a peer digest comparison. Retirement clears actual entries and submits
+zeroing to the existing progress-to-helper queue. The helper makes the existing
+physical-owner entry free only after zeroing the payload. It does not return
+local arena pages to the receive bridge's free list.
+
+This implements the storage lifetime obligation scoped by Papadopoulos and
+Culler above. It does not infer lifetimes from numerical graph names, call
+application kernels, or add caller phases. Correct dependency specifications
+remain required. Broader storage reuse and link-recovery acceptance are still
+unfinished; configuration-time zeroing during recovery does not establish
+that all recovery paths are correct.
+
 ## Collective arithmetic and asynchronous reduction
 
 Rolf Rabenseifner, *Optimization of Collective Reduction Operations*, ICCS 2004.

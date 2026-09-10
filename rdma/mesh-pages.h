@@ -4,7 +4,7 @@
 
 #define MESH_PAGES_LOCAL UINT16_MAX
 #define MESH_PAGES_DEPENDENCIES 8
-struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends, pagewise; uint32_t dependency[MESH_PAGES_DEPENDENCIES], lag[MESH_PAGES_DEPENDENCIES]; };
+struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends, pagewise; uint32_t dependency[MESH_PAGES_DEPENDENCIES], lag[MESH_PAGES_DEPENDENCIES]; uint32_t storage; };
 struct mesh_pages_policy { uint64_t fault_seed; uint32_t fault_period; };
 #define MESH_REDUCE_MATERIALIZED 0
 #define MESH_REDUCE_PARTIAL 1

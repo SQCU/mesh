@@ -36,7 +36,7 @@ struct slot {
   struct digest { uint64_t pending; _Atomic uint64_t hash, generation; uint32_t count; } digest[DIGESTS];
 };
 struct work { uint32_t page, slot, index; uint64_t generation; unsigned char kind; };
-enum { W_ZERO, W_RELEASE, W_SENT };
+enum { W_ZERO, W_RELEASE, W_SENT, W_RECYCLE };
 struct mesh_pages_function {
   struct mesh_pages *owner;
   struct mesh_pages_map *maps;
@@ -110,8 +110,9 @@ mesh_pages *mesh_pages_compile(struct mesh_ctx *context, struct mesh_epoch epoch
     const struct mesh_pages_slot *x=&slots[i];
     if(!x->pages || x->pages>M->pool || x->depends>MESH_PAGES_DEPENDENCIES){ mesh_pages_free(p); errno=EINVAL; return NULL; }
     for(uint8_t d=0;d<x->depends;d++) if(x->dependency[d]>=count){ mesh_pages_free(p); errno=EINVAL; return NULL; }
+    if(x->storage && (x->receive || x->storage>count || slots[x->storage-1].receive || slots[x->storage-1].storage!=x->storage || x->pages>slots[x->storage-1].pages)){ mesh_pages_free(p); errno=EINVAL; return NULL; }
     entries+=x->pages;
-    if(!x->receive) arena+=x->pages;
+    if(!x->receive && (!x->storage || x->storage==i+1)) arena+=x->pages;
   }
   if(arena>M->arena){ mesh_pages_free(p); errno=ENOMEM; return NULL; }
   size_t alignment=(size_t)getpagesize();
@@ -131,9 +132,9 @@ mesh_pages *mesh_pages_compile(struct mesh_ctx *context, struct mesh_epoch epoch
     s->pending=zeroed(s->words*sizeof *s->pending);
     if(!s->inflight || !s->uses || !s->publish[0] || !s->publish[1] || !s->pending){ mesh_pages_free(p); return NULL; }
     s->transported=!s->spec.receive && s->spec.peer!=MESH_PAGES_LOCAL;
-    if(!s->spec.receive){
+    if(!s->spec.receive && (!s->spec.storage || s->spec.storage==i+1)){
       s->base=arena;
-      for(uint32_t j=0;j<s->spec.pages;j++){ s->table[j]=M->pool+(uint32_t)(arena+j); p->owner[arena+j]=(uint32_t)i; }
+      for(uint32_t j=0;j<s->spec.pages;j++){ s->table[j]=M->pool+(uint32_t)(arena+j); p->owner[arena+j]=s->spec.storage?UNUSED:(uint32_t)i; }
       arena+=s->spec.pages;
     }
     for(uint8_t d=0;d<s->spec.depends;d++){
@@ -141,6 +142,15 @@ mesh_pages *mesh_pages_compile(struct mesh_ctx *context, struct mesh_epoch epoch
       if(a->dependents==MESH_PAGES_DEPENDENCIES){ mesh_pages_free(p); errno=E2BIG; return NULL; }
       a->dependent_lag[a->dependents]=s->spec.lag[d];
       a->dependent[a->dependents++]=(uint32_t)i;
+    }
+  }
+  for(size_t i=0;i<count;i++){
+    struct slot *s=&p->slots[i];
+    if(!s->spec.storage) continue;
+    s->base=p->slots[s->spec.storage-1].base;
+    for(uint32_t j=0;j<s->spec.pages;j++){
+      s->table[j]=M->pool+(uint32_t)(s->base+j);
+      if(s->spec.storage==i+1) memset(payload_at(p,s->table[j]),0,mesh_pages_payload(p));
     }
   }
   return p;
@@ -217,6 +227,25 @@ static mesh_pages_function *bind_function(mesh_pages *p, struct mesh_pages_funct
 mesh_pages_function *mesh_pages_bind(mesh_pages *p, struct mesh_pages_function_spec spec){ return bind_function(p,spec,0); }
 
 // ../design/algorithm-sources.md#operand-matching-and-storage
+static int storage_ready(const mesh_pages *p, const struct slot *s, uint32_t first, uint32_t count){
+  if(!s->spec.storage) return 1;
+  for(uint32_t j=first;j<first+count;j++) if(__atomic_load_n(p->owner+s->base+j,__ATOMIC_ACQUIRE)!=UNUSED) return 0;
+  return 1;
+}
+
+// ../design/algorithm-sources.md#operand-matching-and-storage
+static void claim_rows(mesh_pages *p, struct slot *s, uint32_t first, uint32_t count, uint64_t generation){
+  for(uint32_t j=first;j<first+count;j++){
+    __atomic_store_n(s->stamp+j,WRITING|generation,__ATOMIC_RELEASE);
+    if(s->spec.storage){
+      s->uses[j]=(unsigned char)s->dependents;
+      __atomic_store_n(s->table+j,p->M->pool+(uint32_t)(s->base+j),__ATOMIC_RELEASE);
+      __atomic_store_n(p->owner+s->base+j,(uint32_t)(s-p->slots),__ATOMIC_RELEASE);
+    }
+  }
+}
+
+// ../design/algorithm-sources.md#operand-matching-and-storage
 size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32_t **indices){
   mesh_pages *p=f->owner; *indices=f->indices;
   if(!generation || generation>=WRITING || mesh_pages_status(p)<0) return 0;
@@ -230,6 +259,7 @@ size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32
     for(uint32_t i=0;i<f->outputs;i++){
       const struct mesh_pages_map *m=&f->maps[f->inputs+i]; const struct slot *s=&p->slots[m->slot];
       for(uint32_t j=0;j<m->count;j++) ready&=__atomic_load_n(s->stamp+m->first+row*m->stride+j,__ATOMIC_ACQUIRE)<generation;
+      ready&=storage_ready(p,s,m->first+row*m->stride,m->count);
     }
     if(!ready) continue;
     for(uint32_t i=0;i<f->inputs;i++){
@@ -244,7 +274,7 @@ size_t mesh_pages_scan(mesh_pages_function *f, uint64_t generation, const uint32
     if(!ready) continue;
     for(uint32_t i=0;i<f->outputs;i++){
       const struct mesh_pages_map *m=&f->maps[f->inputs+i]; struct slot *s=&p->slots[m->slot];
-      for(uint32_t j=0;j<m->count;j++) __atomic_store_n(s->stamp+m->first+row*m->stride+j,WRITING|generation,__ATOMIC_RELEASE);
+      claim_rows(p,s,m->first+row*m->stride,m->count,generation);
     }
     f->indices[selected++]=row;
   }
@@ -256,7 +286,8 @@ int mesh_pages_claim(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t coun
   struct slot *s=&p->slots[slot];
   if(s->spec.receive || first>s->spec.pages || count>s->spec.pages-first || mesh_pages_producible(p,slot)<generation) return 0;
   for(uint32_t j=first;j<first+count;j++) if(__atomic_load_n(s->stamp+j,__ATOMIC_ACQUIRE)>=generation) return 0;
-  for(uint32_t j=first;j<first+count;j++) __atomic_store_n(s->stamp+j,WRITING|generation,__ATOMIC_RELEASE);
+  if(!storage_ready(p,s,first,count)) return 0;
+  claim_rows(p,s,first,count,generation);
   return 1;
 }
 void mesh_pages_cancel(mesh_pages *p, uint32_t slot, uint32_t first, uint32_t count, uint64_t generation){
@@ -449,8 +480,11 @@ static void *helper_run(void *argument){
     if(tail==atomic_load_explicit(&p->work_head,memory_order_acquire)){ if(++idle>4096){ sched_yield(); idle=4096; } continue; }
     idle=0;
     struct work w=p->work[tail%MESH_RING];
-    if(w.kind!=W_ZERO) digest_add(p,&p->slots[w.slot],w.generation,w.index,payload_at(p,w.page));
-    if(w.kind!=W_SENT) release_page(p,w.page);
+    if(w.kind==W_RELEASE || w.kind==W_SENT) digest_add(p,&p->slots[w.slot],w.generation,w.index,payload_at(p,w.page));
+    if(w.kind==W_RECYCLE){
+      memset(payload_at(p,w.page),0,mesh_pages_payload(p));
+      __atomic_store_n(p->owner+w.page-p->M->pool,UNUSED,__ATOMIC_RELEASE);
+    } else if(w.kind!=W_SENT) release_page(p,w.page);
     atomic_store_explicit(&p->work_tail,tail+1,memory_order_release);
   }
   return NULL;
@@ -515,6 +549,29 @@ static void offer(mesh_pages *p, size_t i){
   if(p->hook) p->hook(p->capture,(uint32_t)i,limit);
 }
 
+// ../design/algorithm-sources.md#operand-matching-and-storage
+static void retire_storage(mesh_pages *p, struct slot *s){
+  if(!s->spec.storage || __atomic_load_n(s->table,__ATOMIC_ACQUIRE)==ABSENT) return;
+  uint64_t g=__atomic_load_n(s->stamp,__ATOMIC_ACQUIRE);
+  if(!g || g>=WRITING || atomic_load_explicit(&s->complete,memory_order_acquire)!=g) return;
+  unsigned uses=0;
+  for(uint32_t d=0;d<s->dependents;d++){
+    uint64_t complete=atomic_load_explicit(&p->slots[s->dependent[d]].complete,memory_order_acquire);
+    uses+=complete<g+s->dependent_lag[d];
+  }
+  for(uint32_t j=0;j<s->spec.pages;j++) s->uses[j]=(unsigned char)uses;
+  if(uses) return;
+  if(s->transported){
+    uint64_t hash;
+    if(s->flying || !mesh_pages_digest(p,(uint32_t)(s-p->slots),g,&hash)) return;
+    for(size_t w=0;w<s->words;w++) if(s->pending[w]) return;
+  }
+  for(uint32_t j=0;j<s->spec.pages;j++){
+    uint32_t page=__atomic_exchange_n(s->table+j,ABSENT,__ATOMIC_ACQ_REL);
+    if(page!=ABSENT) enqueue(p,(struct work){.page=page,.kind=W_RECYCLE});
+  }
+}
+
 static struct slot *lookup(mesh_pages *p, uint32_t sid, int receive, int from){
   for(size_t i=0;i<p->count;i++){
     struct slot *s=&p->slots[i];
@@ -549,7 +606,7 @@ static void acknowledge(mesh_pages *p){
   struct desc d;
   while(!pop(p->M,ACK,&d)){
     if(d.page<p->M->pool || d.page>=p->M->pool+p->M->arena) continue;
-    uint32_t index=d.page-p->M->pool, owner=p->owner[index];
+    uint32_t index=d.page-p->M->pool, owner=__atomic_load_n(p->owner+index,__ATOMIC_ACQUIRE);
     if(owner>=p->count) continue;
     if(p->flying) p->flying--;
     struct slot *s=&p->slots[owner]; size_t page=index-s->base;
@@ -610,6 +667,7 @@ int mesh_pages_progress(mesh_pages *p){
   }
   for(size_t i=0;i<p->count;i++) transmit(p,i);
   if(status<0) return status;
+  for(size_t i=0;i<p->count;i++) retire_storage(p,&p->slots[i]);
   for(size_t i=0;i<p->count;i++) offer(p,i);
   return atomic_load_explicit(&p->status,memory_order_acquire);
 }
@@ -696,6 +754,10 @@ int mesh_pages_recover(mesh_pages *p){
   for(size_t i=0;i<p->count;i++){
     struct slot *s=&p->slots[i];
     if(s->spec.receive) for(uint32_t j=0;j<s->spec.pages;j++) if(s->table[j]!=ABSENT){ release_page(p,s->table[j]); s->table[j]=ABSENT; }
+    if(s->spec.storage) for(uint32_t j=0;j<s->spec.pages;j++){
+      s->table[j]=p->M->pool+(uint32_t)(s->base+j);
+      if(s->spec.storage==i+1){ memset(payload_at(p,s->table[j]),0,mesh_pages_payload(p)); p->owner[s->base+j]=UNUSED; }
+    }
     memset(s->stamp,0,s->spec.pages*sizeof *s->stamp);
     memset(s->inflight,0,s->spec.pages);
     for(size_t w=0;w<s->words;w++){ atomic_store(&s->publish[0][w],0); atomic_store(&s->publish[1][w],0); s->pending[w]=0; }
