@@ -311,6 +311,10 @@ Rabenseifner/Patarasuk–Yuan the page-exchange algebra cited above.
 `mesh_rows_send`, `mesh_rows_receive`, `mesh_rows_acknowledge` and
 `mesh_rows_return` bind actual pages to the existing SUB/CMP/ACK/REL rings.
 `mesh_row_binding` is immutable correspondence between local and peer rows.
+Realization requires bindings in increasing local-row order with disjoint
+ranges. Receive lookup searches this same configured array by destination row;
+it does not allocate a second lookup table. The selected binding still has to
+match direction, peer, range and source-row correspondence.
 `mesh_row_address` is the page's literal address/epoch/stamp header, not an
 application frame-kind or handshake protocol. The transport worker owns those
 rings. Each transmitted row has one configured transport use, released by its
@@ -344,12 +348,31 @@ remain in the configured output maps for reuse. This does not yet provide
 physical sharing between distinct configured outputs, remote dependent-read
 proofs, or the worker integration needed by the caller.
 
-Delivery scans the existing CMP ring for a page whose destination is available
-and removes that descriptor using the existing ring operation. A busy destination
+Delivery scans one snapshot of the existing CMP ring and publishes every page
+whose destination is available, returning the number published. It removes each
+descriptor using the existing ring operation. A busy destination
 does not prevent delivery to other available rows. No page or descriptor is moved
 to a second pending queue. The single receive owner is required by that ring
 operation. Error propagation, remote read proofs and recovery remain integration
 obligations. These primitives are not yet used by the NFE.
+
+`mesh_rows_progress` combines NIC-completion release, the receive snapshot,
+publication-driven transmission and use-count retirement for the asynchronous
+transport owner. Its arguments are the existing page table, fixed epoch and
+immutable bindings. It owns no additional persistent state and invokes no model
+kernels. Its return value reports activity or the negative receive error; it is
+not an operand-readiness signal. The caller must propagate errors to the link
+status and conclude affected NFEs. Papadopoulos–Culler supply the operand
+presence/lifetime principle; Rabenseifner/Patarasuk–Yuan supply the page-exchange
+algebra. These references do not prove a latency bound for this implementation.
+
+Snapshot erasure is safe with the existing single-consumer ring operation:
+removing position `at` moves the old tail descriptor to `at` and advances the
+tail. That moved descriptor was already examined in this pass. Every position
+after `at` through the captured head remains unexamined and unchanged by erasure.
+The producer may reuse released positions, but those lie outside the remaining
+snapshot. Busy descriptors remain in the same ring for the next pass. No
+persistent cursor, pending list, or caller-owned arrival bitmap is required.
 
 ### Literal page checking
 
