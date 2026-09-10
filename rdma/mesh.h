@@ -87,6 +87,8 @@ struct mesh_ctx {
 };
 // ../design/algorithm-sources.md#context-lifetime
 static inline uint32_t mesh_received_pages(const struct mesh_ctx *context){ return context->M->pool; }
+// ../design/algorithm-sources.md#configuration-storage-layout
+static inline uint32_t mesh_arena_pages(const struct mesh_ctx *context){ return context->M->arena; }
 struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *context);
 size_t mesh_peers(struct mesh_ctx *context,uint16_t *peers,size_t capacity);
