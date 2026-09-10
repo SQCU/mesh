@@ -12,7 +12,6 @@ struct View {
     uint dtype, rank, first, physical, pages, page_bytes;
 };
 struct Row { uint page, uses; ulong stamp; };
-struct Region { device uchar* bytes; };
 ulong coordinate(ulong index, device const View& view, uint axis) {
     return index / view.stride[axis] % view.shape[axis];
 }
@@ -23,16 +22,15 @@ ulong broadcast_index(ulong index, device const View& source, device const View&
     return result;
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
- device uchar* page_address(device const Region* regions, device const Row* rows, device const View& view, ulong byte) {
-    ulong offset = ulong(rows[view.first + byte / view.page_bytes].page) * view.page_bytes + byte % view.page_bytes;
-    return regions[offset >> 30].bytes + (offset & ((1ul << 30) - 1));
+ device uchar* page_address(device const MeshRegion* regions, device const Row* rows, device const View& view, ulong byte) {
+    return mesh_page_address(regions, rows[view.first + byte / view.page_bytes].page, view.page_bytes, byte % view.page_bytes);
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
- template<typename T> T read_value(device const Region* regions, device const Row* rows, device const View& view, ulong index) {
+ template<typename T> T read_value(device const MeshRegion* regions, device const Row* rows, device const View& view, ulong index) {
     return *(device const T*)page_address(regions, rows, view, view.offset + index * sizeof(T));
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
- template<typename T> void write_value(device const Region* regions, device const Row* rows, device const View& view, ulong index, T value) {
+ template<typename T> void write_value(device const MeshRegion* regions, device const Row* rows, device const View& view, ulong index, T value) {
     *(device T*)page_address(regions, rows, view, view.offset + index * sizeof(T)) = value;
 }
 float tensor_log1p(float x) {
@@ -59,7 +57,7 @@ uint4 philox(uint4 counter, uint2 key) {
     return counter;
 }
 '''
-ARGUMENTS = '''device const Region* regions [[buffer(0)]], device const View* v [[buffer(1)]],
+ARGUMENTS = '''device const MeshRegion* regions [[buffer(0)]], device const View* v [[buffer(1)]],
     constant ulong* dimensions [[buffer(2)]], device const Row* rows [[buffer(3)]],
     uint3 position [[thread_position_in_grid]], uint3 group [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],

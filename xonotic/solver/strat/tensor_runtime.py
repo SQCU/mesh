@@ -184,7 +184,7 @@ class Realization:
             else:
                 outputs = (RowMap * 2)(mapping, metadata)
             self.function_maps.append((inputs, outputs))
-            self.functions[index] = RowFunction(inputs, outputs, len(inputs), len(outputs), 1)
+            self.functions[index] = RowFunction(inputs, outputs, len(inputs), len(outputs), 1, indices)
             self.indices.append(indices)
             if root in self.inputs:
                 self.retained_inputs.append(mapping)
@@ -240,7 +240,7 @@ class Realization:
             if native is None: continue
             function = self.functions[index]
             stamp = self.stamp if self.node == self.owner_nodes[0] else self.pages.contents.table[function.input[0].ranges[0].first].stamp
-            selected = _lib.mesh_rows_issue(self.pages, c.byref(function), stamp, self.indices[index])
+            selected = _lib.mesh_rows_issue(self.pages, c.byref(function), stamp)
             if selected != ABSENT:
                 self.lib.mesh_tensor_submit(self.handle, native, stamp, selected)
 

@@ -23,16 +23,20 @@
 
 #define CHUNK (1ull<<30)
 #define QD 4095
-static _Thread_local struct ibv_context *ctx;
-static _Thread_local struct ibv_pd *pd;
-static _Thread_local struct ibv_cq *cq;
-static _Thread_local struct ibv_qp *qp;
-static _Thread_local struct ibv_mr **mr;
-static _Thread_local int nmr, send_capacity, receive_capacity;
+struct mesh_verbs {
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
+  struct ibv_qp *pair; struct ibv_mr **regions;
+  int region_count, send_capacity, receive_capacity;
+  struct ibv_wc *completions; int completed;
+  struct ibv_sge (*sges)[2];
+  struct ibv_recv_wr *receives; struct ibv_send_wr *sends;
+  int receiving, sending;
+};
+static _Thread_local struct mesh_verbs *provider;
 // ../design/algorithm-sources.md#transport-page-addressing
 static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
   uintptr_t address=(uintptr_t)base+offset;
-  return (struct ibv_sge){address,bytes,mr[address/CHUNK-(uintptr_t)base/CHUNK]->lkey}; }
+  return (struct ibv_sge){address,bytes,provider->regions[address/CHUNK-(uintptr_t)base/CHUNK]->lkey}; }
 static _Thread_local const char *shm; static _Atomic sig_atomic_t stop;
 static _Thread_local int lsock=-1;
 static _Thread_local uint64_t mynonce, peernonce;
@@ -40,18 +44,18 @@ static _Thread_local int retire_device, expected_peer=-1;
 static _Thread_local const char *listen_address, *selected_device;
 // ../design/algorithm-sources.md#transport-page-addressing
 static int down_pair(void){
-  if(qp){ if(TRACE(DESTROY_QP,qp,qp->qp_num,0,ibv_destroy_qp(qp))) return 0; qp=0; return 0; }
-  if(cq){ if(TRACE(DESTROY_CQ,cq,0,0,ibv_destroy_cq(cq))) return 0; cq=0; return 0; }
+  if(provider->pair){ if(TRACE(DESTROY_QP,provider->pair,provider->pair->qp_num,0,ibv_destroy_qp(provider->pair))) return 0; provider->pair=0; return 0; }
+  if(provider->completion_queue){ if(TRACE(DESTROY_CQ,provider->completion_queue,0,0,ibv_destroy_cq(provider->completion_queue))) return 0; provider->completion_queue=0; return 0; }
   return 1; }
 // ../design/algorithm-sources.md#transport-page-addressing
 static int down_verbs(void){
   if(!down_pair()) return 0;
-  if(nmr){ struct ibv_mr *r=mr[nmr-1];
-    if(!TRACE(DEREG_MR,r,r->lkey,r->length,ibv_dereg_mr(r))) nmr--;
+  if(provider->region_count){ struct ibv_mr *r=provider->regions[provider->region_count-1];
+    if(!TRACE(DEREG_MR,r,r->lkey,r->length,ibv_dereg_mr(r))) provider->region_count--;
     return 0; }
-  free(mr); mr=0;
-  if(pd){ if(TRACE(DEALLOC_PD,pd,0,0,ibv_dealloc_pd(pd))) return 0; pd=0; return 0; }
-  if(ctx){ if(TRACE(CLOSE_DEVICE,ctx,0,0,ibv_close_device(ctx))) return 0; ctx=0; return 0; }
+  free(provider->regions); provider->regions=0;
+  if(provider->domain){ if(TRACE(DEALLOC_PD,provider->domain,0,0,ibv_dealloc_pd(provider->domain))) return 0; provider->domain=0; return 0; }
+  if(provider->context){ if(TRACE(CLOSE_DEVICE,provider->context,0,0,ibv_close_device(provider->context))) return 0; provider->context=0; return 0; }
   return 1; }
 // ../design/algorithm-sources.md#transport-page-addressing
 static void down(void){ if(shm)shm_unlink(shm); }
@@ -137,37 +141,37 @@ static int oob(const char *peer){
 static _Thread_local struct ibv_port_attr pa;
 // ../design/algorithm-sources.md#transport-page-addressing
 static int verbs_up(const char *peer, char *mem, size_t span, int me){
-  if(ctx && (TRACE(QUERY_PORT,ctx,1,0,ibv_query_port(ctx,1,&pa)) || pa.state!=IBV_PORT_ACTIVE)){
+  if(provider->context && (TRACE(QUERY_PORT,provider->context,1,0,ibv_query_port(provider->context,1,&pa)) || pa.state!=IBV_PORT_ACTIVE)){
     retire_device=1; return -1; }
   int f=oob(peer); if(f<0) return -1;
-  if(!ctx){
+  if(!provider->context){
   struct ibv_device **dl=ibv_get_device_list(NULL);
   for(int i=0;dl&&dl[i];i++){
     if(selected_device && strcmp(selected_device,ibv_get_device_name(dl[i]))) continue;
-    ctx=TRACE(OPEN_DEVICE,dl[i],i,0,ibv_open_device(dl[i]));
-    if(ctx && !TRACE(QUERY_PORT,ctx,1,0,ibv_query_port(ctx,1,&pa)) && pa.state==IBV_PORT_ACTIVE) break;
-    if(ctx){
-      if(TRACE(CLOSE_DEVICE,ctx,0,0,ibv_close_device(ctx))){
+    provider->context=TRACE(OPEN_DEVICE,dl[i],i,0,ibv_open_device(dl[i]));
+    if(provider->context && !TRACE(QUERY_PORT,provider->context,1,0,ibv_query_port(provider->context,1,&pa)) && pa.state==IBV_PORT_ACTIVE) break;
+    if(provider->context){
+      if(TRACE(CLOSE_DEVICE,provider->context,0,0,ibv_close_device(provider->context))){
         retire_device=1; ibv_free_device_list(dl); close(f); return -1; }
-      ctx=0; } }
+      provider->context=0; } }
   if(dl) ibv_free_device_list(dl);
-  if(!ctx){ close(f); return -1; }
+  if(!provider->context){ close(f); return -1; }
   }
   struct ibv_device_attr capabilities;
-  if(ibv_query_device(ctx,&capabilities)){ close(f); return -1; }
+  if(ibv_query_device(provider->context,&capabilities)){ close(f); return -1; }
   if(capabilities.max_sge<2){ close(f); errno=EOPNOTSUPP; return -1; }
-  if(!pd) pd=TRACE(ALLOC_PD,ctx,0,0,ibv_alloc_pd(ctx));
-  if(!pd){ close(f); return -1; }
+  if(!provider->domain) provider->domain=TRACE(ALLOC_PD,provider->context,0,0,ibv_alloc_pd(provider->context));
+  if(!provider->domain){ close(f); return -1; }
   size_t head=(uintptr_t)mem%CHUNK, regions=(head+span+CHUNK-1)/CHUNK;
-  if(!mr) mr=calloc(regions,sizeof *mr);
-  if(!mr){ close(f); fprintf(stderr,"alloc regions: retrying\n"); return -1; }
-  while((size_t)nmr<regions){
-    size_t o=nmr?(size_t)nmr*CHUNK-head:0, end=((size_t)nmr+1)*CHUNK-head;
+  if(!provider->regions) provider->regions=calloc(regions,sizeof *provider->regions);
+  if(!provider->regions){ close(f); fprintf(stderr,"alloc regions: retrying\n"); return -1; }
+  while((size_t)provider->region_count<regions){
+    size_t o=provider->region_count?(size_t)provider->region_count*CHUNK-head:0, end=((size_t)provider->region_count+1)*CHUNK-head;
     size_t n=(end<span?end:span)-o;
-    mr[nmr]=TRACE(REG_MR,mem+o,o,n,ibv_reg_mr(pd,mem+o,n,IBV_ACCESS_LOCAL_WRITE));
-    if(!mr[nmr]){ close(f); return -1; } nmr++; }
-  if(TRACE(QUERY_PORT,ctx,1,0,ibv_query_port(ctx,1,&pa))){ close(f); return -1; }
-  { char c[96]; const char *dn=ibv_get_device_name(ctx->device);
+    provider->regions[provider->region_count]=TRACE(REG_MR,mem+o,o,n,ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE));
+    if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
+  if(TRACE(QUERY_PORT,provider->context,1,0,ibv_query_port(provider->context,1,&pa))){ close(f); return -1; }
+  { char c[96]; const char *dn=ibv_get_device_name(provider->context->device);
     snprintf(c,sizeof c,"ping6 -c 2 -i 0.2 ff02::1%%%s >/dev/null 2>&1",
              strncmp(dn,"rdma_",5)?dn:dn+5);
     system(c); }
@@ -175,20 +179,20 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
   int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   int completions=2*(frame_capacity/(int)frames);
   if(!completions || capabilities.max_cqe<completions){ close(f); errno=EOPNOTSUPP; return -1; }
-  cq=TRACE(CREATE_CQ,ctx,completions,0,ibv_create_cq(ctx,completions,NULL,NULL,0)); if(!cq){ close(f); return -1; }
-  struct ibv_qp_init_attr qi={.send_cq=cq,.recv_cq=cq,.qp_type=IBV_QPT_UC,
+  provider->completion_queue=TRACE(CREATE_CQ,provider->context,completions,0,ibv_create_cq(provider->context,completions,NULL,NULL,0)); if(!provider->completion_queue){ close(f); return -1; }
+  struct ibv_qp_init_attr qi={.send_cq=provider->completion_queue,.recv_cq=provider->completion_queue,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=2,.max_recv_sge=2}};
-  qp=TRACE(CREATE_QP,pd,QD,0,ibv_create_qp(pd,&qi)); if(!qp){ close(f); return -1; }
+  provider->pair=TRACE(CREATE_QP,provider->domain,QD,0,ibv_create_qp(provider->domain,&qi)); if(!provider->pair){ close(f); return -1; }
   struct ibv_qp_attr queried; struct ibv_qp_init_attr actual;
-  if(ibv_query_qp(qp,&queried,IBV_QP_CAP,&actual)){ close(f); return -1; }
-  send_capacity=(int)((actual.cap.max_send_wr<(uint32_t)frame_capacity?actual.cap.max_send_wr:(uint32_t)frame_capacity)/frames);
-  receive_capacity=(int)((actual.cap.max_recv_wr<(uint32_t)frame_capacity?actual.cap.max_recv_wr:(uint32_t)frame_capacity)/frames);
-  if(!send_capacity || !receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
+  if(ibv_query_qp(provider->pair,&queried,IBV_QP_CAP,&actual)){ close(f); return -1; }
+  provider->send_capacity=(int)((actual.cap.max_send_wr<(uint32_t)frame_capacity?actual.cap.max_send_wr:(uint32_t)frame_capacity)/frames);
+  provider->receive_capacity=(int)((actual.cap.max_recv_wr<(uint32_t)frame_capacity?actual.cap.max_recv_wr:(uint32_t)frame_capacity)/frames);
+  if(!provider->send_capacity || !provider->receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  if(TRACE(INIT,qp,qp->qp_num,0,ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))){ close(f); return -1; }
-  union ibv_gid gid; if(TRACE(QUERY_GID,ctx,1,0,ibv_query_gid(ctx,1,0,&gid))){ close(f); return -1; }
+  if(TRACE(INIT,provider->pair,provider->pair->qp_num,0,ibv_modify_qp(provider->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))){ close(f); return -1; }
+  union ibv_gid gid; if(TRACE(QUERY_GID,provider->context,1,0,ibv_query_gid(provider->context,1,0,&gid))){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.nonce=mynonce,.qpn=qp->qp_num,.psn=psn,.lid=pa.lid,.pgsz=((struct hdr*)mem)->pgsz,.header_bytes=MESH_HEADER_BYTES,.node=(uint16_t)me},you;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.nonce=mynonce,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=((struct hdr*)mem)->pgsz,.header_bytes=MESH_HEADER_BYTES,.node=(uint16_t)me},you;
   memcpy(mine.gid,&gid,16);
   if(exchange(f,&mine,&you,monotime()+10)){ close(f); fprintf(stderr,"xchg retry\n"); return -1; }
   close(f);
@@ -200,14 +204,14 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me){
     .dest_qp_num=you.qpn,.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
     .grh={.hop_limit=1,.sgid_index=0}}};
   memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-  int rc=TRACE(RTR,qp,you.qpn,you.psn,ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN));
+  int rc=TRACE(RTR,provider->pair,you.qpn,you.psn,ibv_modify_qp(provider->pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN));
   if(rc){ fprintf(stderr,"rtr rc %d dlid %u dqpn %u dgid %02x%02x..%02x%02x mygid %02x%02x\n",
       rc, you.lid, you.qpn, you.gid[0],you.gid[1],you.gid[14],you.gid[15],
       mine.gid[0],mine.gid[15]); return -1; }
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
-  rc=TRACE(RTS,qp,qp->qp_num,psn,ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN));
+  rc=TRACE(RTS,provider->pair,provider->pair->qp_num,psn,ibv_modify_qp(provider->pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN));
   if(rc){ fprintf(stderr,"rts rc %d, retrying\n",rc); return -1; }
-  fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(ctx->device),me);
+  fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);
   return 0; }
 
 #include "mesh-links.h"
@@ -260,7 +264,7 @@ int main(int argc,char**argv){
   int *free_pages=malloc((size_t)pool*sizeof *free_pages);
   unsigned char *owner=calloc((size_t)pool,1),*pool_link=calloc((size_t)pool,1);
   if(!free_pages||!owner||!pool_link) die("page ownership metadata");
-  enum { READY=NOWN }; int counts[NOWN+1]={0}; counts[FREE]=pool;
+  int counts[NOWN]={0}; counts[FREE]=pool;
   for(int i=0;i<pool;i++) free_pages[i]=i;
   struct mesh_port_info *ports=mesh_ports(M);
   flight_status=M; atomic_store(&M->bridge_pid,(uint64_t)getpid());
@@ -272,82 +276,93 @@ int main(int argc,char**argv){
     if(error){ errno=error; perror("link worker"); atomic_store(&links[i].stopped,1); stop=1; }
   }
   double began=now(),telemetry=began; int arena_pending=0;
-  uint64_t submit_cursor=0,completion_cursor[LINK_LIMIT]={0};
+  uint64_t submit_cursor=0;
   #define COUNT(field) atomic_fetch_add_explicit(&M->field,1,memory_order_relaxed)
   #define MOVE(page,to) do{ counts[owner[page]]--; owner[page]=(to); counts[to]++; }while(0)
   #define RELEASE(page) do{ MOVE(page,FREE); free_pages[counts[FREE]-1]=(page); }while(0)
   for(;;){
     int live=0,stopped=0; struct desc descriptor;
-    if(!pop(M,REL,&descriptor)){
-      memset(mesh_at(M,descriptor.page),0,pg);
-      struct mesh_row *row=(struct mesh_row*)((char*)M+descriptor.header);
-      uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_RELAXED);
-      __atomic_store_n(&row->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
-      __atomic_store_n(&row->stamp,stamp&~MESH_ROW_WRITING,__ATOMIC_RELEASE);
-      if(descriptor.page<(uint32_t)pool) RELEASE(descriptor.page);
-    }
     for(int index=0;index<link_count;index++){
-      struct mesh_link *link=&links[index]; uint64_t position;
-      if(atomic_exchange(&ports[index].reset_request,0)){ link->up=0; atomic_store(&link->reset,1); }
-      uint64_t available=atomic_load_explicit(&link->completion.cursor.head,memory_order_acquire)-atomic_load_explicit(&link->completion.cursor.tail,memory_order_relaxed);
-      for(uint64_t budget=0;budget<available && ring_select(&link->completion.cursor,&completion_cursor[index],&position);budget++){
-        struct link_event event=link->completion.entries[position%LINK_QUEUE]; uint32_t page=event.page;
-        if(event.kind==L_UP){ link->up=1; ports[index].peer=(uint16_t)link->peer_node; goto accepted; }
-        if(event.kind==L_FAULT){
-          ports[index].when=flight_time(); ports[index].code=(int32_t)event.error; ports[index].domain=event.domain;
-          COUNT(bad); link->up=0; goto accepted;
+      struct mesh_link *link=&links[index]; struct mesh_verbs *v=&link->provider;
+      if(atomic_exchange(&ports[index].reset_request,0)) atomic_store(&link->reset,1);
+      int ownership=atomic_load_explicit(&link->ownership,memory_order_acquire);
+      if(ownership==LINK_ACTIVE){
+        if(stop || atomic_load(&link->reset)){
+          link->up=0; ownership=LINK_RELEASED;
+          atomic_store_explicit(&link->ownership,ownership,memory_order_release);
+        } else if(!link->faulted){
+          link->up=1; ports[index].peer=(uint16_t)link->peer_node;
         }
-        if(event.kind==L_RETIRED){
-          for(int i=0;i<pool;i++) if(pool_link[i]==index && owner[i]==RECV) RELEASE(i);
-          while(link->pending){
-            uint64_t offset=link->pending;
-            struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
-            if(offset>=M->data_off){
-              struct desc ack={.page=record->page,.header=offset,.error=ECANCELED,.domain=1};
-              if(atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)>=MESH_RING) break;
-              record->header.when=flight_time(); record->header.code=ECANCELED; record->header.domain=1;
-              link_release(link,offset); arena_pending--; push(M,ACK,&ack);
-            } else { RELEASE(record->page); link_release(link,offset); }
-          }
-          if(link->pending) continue;
-          link->receives=0; goto accepted;
-        }
-        if(event.error && (event.kind==L_SEND || event.kind==L_RECV)){
-          struct mesh_page_header *header=(struct mesh_page_header*)((char*)M+event.header);
-          header->when=flight_time(); header->code=event.error; header->domain=event.domain;
+      }
+      if(link->up && v->completed<v->send_capacity+v->receive_capacity){
+        int count=ibv_poll_cq(v->completion_queue,v->send_capacity+v->receive_capacity-v->completed,v->completions+v->completed);
+        if(count<0){
+          ports[index].when=flight_time(); ports[index].code=count; ports[index].domain=3;
+          COUNT(bad); link->up=0; link->faulted=1;
+        } else v->completed+=count;
+      }
+      int accessible=ownership==LINK_ACTIVE || ownership==LINK_RELEASED || ownership==LINK_RETIRED;
+      for(int position=0;accessible && position<v->completed;){
+        struct ibv_wc *wc=&v->completions[position];
+        int receive=(int)(wc->wr_id>>63),post=wc->opcode==(enum ibv_wc_opcode)-1;
+        uint64_t offset=receive?M->headers_off+(size_t)(uint32_t)wc->wr_id*MESH_HEADER_STRIDE:wc->wr_id;
+        struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
+        uint32_t page=receive?(uint32_t)wc->wr_id:record->page;
+        uint32_t error=post?wc->vendor_err:wc->status,domain=post?1:wc->status?2:0;
+        if(error){
+          struct mesh_page_header *header=(struct mesh_page_header*)((char*)M+offset);
+          header->when=flight_time(); header->code=error; header->domain=domain;
           header->index=page; header->peer=(uint32_t)link->peer_node;
-          if(event.kind==L_RECV) header->function=UINT32_MAX;
+          if(receive) header->function=UINT32_MAX;
         }
-        if(event.kind==L_SEND){
-          struct desc ack={.page=page,.header=event.header,.error=event.error,.domain=event.domain};
-          if(event.header>=M->data_off){
-            if(atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)>=MESH_RING) continue;
-            link_release(link,event.header); arena_pending--; push(M,ACK,&ack);
-          } else { RELEASE(page); link_release(link,event.header); }
+        if(!receive){
+          struct desc ack={.page=page,.header=offset,.error=error,.domain=domain};
+          if(offset>=M->data_off){
+            if(atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)>=MESH_RING){ position++; continue; }
+            link_release(link,offset); arena_pending--; push(M,ACK,&ack);
+          } else { RELEASE(page); link_release(link,offset); }
           goto accepted;
         }
-        if(owner[page]==RECV){ link->receives--; MOVE(page,READY); }
-        if(event.error){
-          struct desc failure={.page=page,.header=event.header,.error=event.error,.domain=event.domain};
-          if(push(M,CMP,&failure)) continue;
+        if(error){
+          struct desc failure={.page=page,.header=offset,.error=error,.domain=domain};
+          if(push(M,CMP,&failure)){ position++; continue; }
           MOVE(page,APP); goto accepted;
         }
         struct mesh_page_header *header=mesh_header(M,page);
-        uint32_t bytes=event.bytes-MESH_HEADER_BYTES;
+        uint32_t bytes=wc->byte_len-MESH_HEADER_BYTES;
         if(header->wire.dst!=(uint16_t)me){
+          if(stop){ header->when=flight_time(); header->code=ECANCELED; header->domain=1; RELEASE(page); goto accepted; }
           int next=routes[header->wire.dst].link;
-          if(link_submit(&links[next],L_SEND,page,event.header)) continue;
+          if(link_submit(&links[next],L_SEND,page,offset)){ position++; continue; }
           MOVE(page,SEND); pool_link[page]=(unsigned char)next; COUNT(sent);
         } else {
-          struct desc receive={.page=page,.header=event.header,.bytes=bytes,.node=header->wire.src};
-          if(push(M,CMP,&receive)) continue;
+          struct desc receive={.page=page,.header=offset,.bytes=bytes,.node=header->wire.src};
+          if(push(M,CMP,&receive)){ position++; continue; }
           MOVE(page,APP); COUNT(recvd);
         }
 accepted:
-        ring_erase(&link->completion.cursor,link->completion.entries,sizeof event,LINK_QUEUE,position);
+        if(receive) link->receives--;
+        v->completions[position]=v->completions[--v->completed];
+      }
+      if(ownership==LINK_RETIRED && !v->completed){
+        for(int i=0;i<pool;i++) if(pool_link[i]==index && owner[i]==RECV) RELEASE(i);
+        while(link->pending){
+          uint64_t offset=link->pending;
+          struct mesh_send *record=(struct mesh_send*)((char*)M+offset);
+          if(offset>=M->data_off){
+            struct desc ack={.page=record->page,.header=offset,.error=ECANCELED,.domain=1};
+            if(atomic_load(&M->r[ACK].head)-atomic_load(&M->r[ACK].tail)>=MESH_RING) break;
+            record->header.when=flight_time(); record->header.code=ECANCELED; record->header.domain=1;
+            link_release(link,offset); arena_pending--; push(M,ACK,&ack);
+          } else { RELEASE(record->page); link_release(link,offset); }
+        }
+        if(!link->pending){
+          link->receives=0; link->faulted=0;
+          atomic_store_explicit(&link->ownership,LINK_ACKNOWLEDGED,memory_order_release);
+        }
       }
       live+=link->up; stopped+=atomic_load(&link->stopped);
-      int receive_limit=receive_share<link->receive_capacity?receive_share:link->receive_capacity;
+      int receive_limit=link->up?(receive_share<v->receive_capacity?receive_share:v->receive_capacity):0;
       while(!stop && counts[FREE] && link->receives<receive_limit){
         int page=free_pages[counts[FREE]-1];
         if(link_submit(link,L_RECV,(uint32_t)page,M->headers_off+(size_t)page*MESH_HEADER_STRIDE)) break;
@@ -371,10 +386,25 @@ accepted:
       arena_pending++; COUNT(sent);
       ring_erase(&M->r[SUB],slot(M,SUB,0),sizeof descriptor,MESH_RING,position);
     }
+    size_t capacity=0;
+    for(int index=0;index<link_count;index++){
+      link_flush(&links[index]);
+      if(links[index].up) capacity+=(size_t)links[index].provider.send_capacity+links[index].provider.receive_capacity;
+    }
+    uint64_t released=atomic_load_explicit(&M->r[REL].head,memory_order_acquire)-atomic_load_explicit(&M->r[REL].tail,memory_order_relaxed);
+    size_t retire=capacity?capacity:1;
+    for(size_t index=0;index<released && index<retire && !pop(M,REL,&descriptor);index++){
+      memset(mesh_at(M,descriptor.page),0,pg);
+      struct mesh_row *row=(struct mesh_row*)((char*)M+descriptor.header);
+      uint64_t stamp=__atomic_load_n(&row->stamp,__ATOMIC_RELAXED);
+      __atomic_store_n(&row->page,MESH_ROW_ABSENT,__ATOMIC_RELEASE);
+      __atomic_store_n(&row->stamp,stamp&~MESH_ROW_WRITING,__ATOMIC_RELEASE);
+      if(descriptor.page<(uint32_t)pool) RELEASE(descriptor.page);
+    }
     double stamp=now();
     if(stamp-telemetry>=0.25){
       flight_heartbeat(stop?MESH_STOPPING:live?MESH_PAIRED:MESH_PAIRING);
-      for(int i=0;i<NOWN;i++) atomic_store(&M->mean[i],counts[i]+(i==APP?counts[READY]:0));
+      for(int i=0;i<NOWN;i++) atomic_store(&M->mean[i],counts[i]);
       atomic_store(&M->up_ms,(uint64_t)((stamp-began)*1000)); telemetry=stamp;
     }
     if(stop && stopped==link_count) break;

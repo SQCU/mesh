@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "mesh-tensor.h"
+#include "mesh-metal.h"
 #include <errno.h>
 
 @interface MeshTensorFunction : NSObject
@@ -42,7 +43,7 @@ void *mesh_tensor_create(const char *source){
   program.kernels=[NSMutableArray new]; program.functions=[NSMutableArray new];
   MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe;
   NSError *error=nil;
-  program.library=[program.device newLibraryWithSource:[NSString stringWithUTF8String:source] options:options error:&error];
+  program.library=[program.device newLibraryWithSource:[mesh_metal_address_source() stringByAppendingString:[NSString stringWithUTF8String:source]] options:options error:&error];
   if(!program.library){ mesh_tensor_creation_error=error.localizedDescription; return NULL; }
   return (__bridge_retained void*)program;
 }
@@ -85,19 +86,9 @@ int mesh_tensor_reserve(void *handle,struct mesh_rows *pages,
   program.arguments=mesh_tensor_values(program,arguments,argument_count*sizeof(*arguments));
   size_t bytes=(pages->count*sizeof(struct mesh_row)+pages->bytes-1)/pages->bytes*pages->bytes;
   program.table=[program.device newBufferWithBytesNoCopy:pages->table length:bytes options:MTLResourceStorageModeShared deallocator:nil];
-  size_t extent=((size_t)pages->memory->pool+pages->memory->arena)*pages->bytes;
-  const size_t span=UINT64_C(1)<<30;
-  if(program.device.maxBufferLength<span) return EOVERFLOW;
-  NSMutableArray *regions=[NSMutableArray new];
-  NSMutableData *addresses=[NSMutableData dataWithLength:((extent+span-1)/span)*sizeof(uint64_t)];
-  for(size_t offset=0;offset<extent;offset+=span){
-    id<MTLBuffer> buffer=[program.device newBufferWithBytesNoCopy:mesh_at(pages->memory,0)+offset
-      length:MIN(extent-offset,span) options:MTLResourceStorageModeShared deallocator:nil];
-    if(!buffer) return ENOMEM;
-    ((uint64_t*)addresses.mutableBytes)[offset/span]=buffer.gpuAddress;
-    [regions addObject:buffer];
-  }
-  program.regions=regions; program.addresses=mesh_tensor_values(program,addresses.bytes,addresses.length);
+  NSArray<id<MTLBuffer>> *resources=nil;
+  program.addresses=mesh_metal_regions(program.device,pages,&resources);
+  program.regions=resources;
   return program.views && program.dimensions && program.arguments && program.table && program.addresses?0:ENOMEM;
 }
 
