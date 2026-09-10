@@ -175,18 +175,22 @@ class MapAssets:
         os.makedirs(maps_dir, exist_ok=True)
         data_dir = os.path.join(userdir, "data")
         ent = os.path.join(maps_dir, cfg["map"] + ".ent")
+        bsp = os.path.join(maps_dir, cfg["map"] + ".bsp")
+        payload_cfg = os.path.join(ROOT, "payload", "cfg", "gamemodes-payload.cfg")
         measurements_path = ent + ".measurements.json"
         mapinfo = os.path.join(maps_dir, cfg["map"] + ".mapinfo")
-        record = {"userdir": userdir, "entity": ent, "measurements_path": measurements_path, "mapinfo": mapinfo}
+        record = {"userdir": userdir, "entity": ent, "measurements_path": measurements_path, "mapinfo": mapinfo, "bsp_path": bsp}
         if self.dry_run:
             record["dry_run"] = True
             record["command"] = [self.python, self.entity_tool, "<resolved-bsp>", ent, str(cfg["teams"]), str(cfg["carts"]), "<resolved-archive>"]
             record["gamecode"] = {"progs": self.progs, "csprogs": self.csprogs,
-                                  "effectinfo": os.path.join(os.path.dirname(self.progs), "effectinfo.txt")}
+                                  "effectinfo": os.path.join(os.path.dirname(self.progs), "effectinfo.txt"),
+                                  "payload_cfg": payload_cfg}
             return record
         record["gamecode"] = {}
         for name, source, filename in (("progs", self.progs, "progs.dat"), ("csprogs", self.csprogs, "csprogs.dat"),
-                                       ("effectinfo", os.path.join(os.path.dirname(self.progs), "effectinfo.txt"), "effectinfo.txt")):
+                                       ("effectinfo", os.path.join(os.path.dirname(self.progs), "effectinfo.txt"), "effectinfo.txt"),
+                                       ("payload_cfg", payload_cfg, "gamemodes-payload.cfg")):
             destination = os.path.join(data_dir, filename)
             try:
                 shutil.copyfile(source, destination)
@@ -194,6 +198,11 @@ class MapAssets:
             except OSError as exc:
                 record["gamecode"][name] = {"path": destination, "source": source, "error": f"{type(exc).__name__}: {exc}"}
         try:
+            found = ("file", os.path.abspath(os.path.expanduser(cfg["bsp"]))) if cfg.get("bsp") else self.locate_asset(cfg["map"], ".bsp")
+            if not found:
+                raise FileNotFoundError(f'map BSP was not found: {cfg["map"]}')
+            self.extract_asset(found, bsp)
+            record["bsp"] = artifact(bsp, self.artifact_cache)
             source_ent = cfg.get("entity_file")
             if source_ent:
                 source_ent = os.path.abspath(os.path.expanduser(source_ent))
@@ -203,37 +212,29 @@ class MapAssets:
                 record["source"] = source_ent
                 record["returncode"] = 0
             else:
-                source_dir = os.path.join(directory, "source")
-                bsp = os.path.join(source_dir, cfg["map"] + ".bsp")
-                found = ("file", os.path.abspath(os.path.expanduser(cfg["bsp"]))) if cfg.get("bsp") else self.locate_asset(cfg["map"], ".bsp")
-                if found:
-                    realization_id = hashlib.sha256(json.dumps({
-                        "map": cfg["map"], "teams": cfg["teams"], "carts": cfg["carts"],
-                        "checkpoints_per_lane": cfg.get("checkpoints_per_lane", self.checkpoints_per_lane),
-                        "program": self.entity_program_id, "source": self.asset_identity(found),
-                    }, sort_keys=True).encode()).hexdigest()
-                    cached = self.entity_realizations.get(realization_id)
-                    reusable = cached and os.path.isfile(cached["entity"]) and os.path.isfile(cached["measurements"])
-                    record.update(source=found, realization_id=realization_id,
-                                  realization_reuse_mass=int(bool(reusable)))
-                    if reusable:
-                        shutil.copyfile(cached["entity"], ent)
-                        shutil.copyfile(cached["measurements"], measurements_path)
-                        record.update(returncode=0, realization_source=cached["entity"])
-                    else:
-                        self.extract_asset(found, bsp)
-                        source_bsp = found[1] if found[0] == "file" else bsp
-                        source_archive = found[1] if found[0] == "zip" else ""
-                        cmd = [self.python, self.entity_tool, source_bsp, ent, str(cfg["teams"]), str(cfg["carts"]), source_archive, str(cfg.get("checkpoints_per_lane", self.checkpoints_per_lane))]
-                        record["started"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                        record.update(command=cmd, output=result.stdout, returncode=result.returncode, ended=datetime.datetime.now(datetime.timezone.utc).isoformat())
-                        if result.returncode == 0 and os.path.isfile(ent) and os.path.isfile(measurements_path):
-                            self.entity_realizations[realization_id] = {
-                                "entity": ent, "measurements": measurements_path,
-                            }
+                realization_id = hashlib.sha256(json.dumps({
+                    "map": cfg["map"], "teams": cfg["teams"], "carts": cfg["carts"],
+                    "checkpoints_per_lane": cfg.get("checkpoints_per_lane", self.checkpoints_per_lane),
+                    "program": self.entity_program_id, "source": self.asset_identity(found),
+                }, sort_keys=True).encode()).hexdigest()
+                cached = self.entity_realizations.get(realization_id)
+                reusable = cached and os.path.isfile(cached["entity"]) and os.path.isfile(cached["measurements"])
+                record.update(source=found, realization_id=realization_id,
+                              realization_reuse_mass=int(bool(reusable)))
+                if reusable:
+                    shutil.copyfile(cached["entity"], ent)
+                    shutil.copyfile(cached["measurements"], measurements_path)
+                    record.update(returncode=0, realization_source=cached["entity"])
                 else:
-                    record.update(returncode=None, error="map BSP was not found")
+                    source_archive = found[1] if found[0] == "zip" else ""
+                    cmd = [self.python, self.entity_tool, bsp, ent, str(cfg["teams"]), str(cfg["carts"]), source_archive, str(cfg.get("checkpoints_per_lane", self.checkpoints_per_lane))]
+                    record["started"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    record.update(command=cmd, output=result.stdout, returncode=result.returncode, ended=datetime.datetime.now(datetime.timezone.utc).isoformat())
+                    if result.returncode == 0 and os.path.isfile(ent) and os.path.isfile(measurements_path):
+                        self.entity_realizations[realization_id] = {
+                            "entity": ent, "measurements": measurements_path,
+                        }
             source_mapinfo = cfg.get("mapinfo_file")
             found_mapinfo = ("file", os.path.abspath(os.path.expanduser(source_mapinfo))) if source_mapinfo else self.locate_asset(cfg["map"], ".mapinfo")
             text = ""

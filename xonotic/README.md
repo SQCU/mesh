@@ -288,6 +288,10 @@ and result artifacts, not application source.
 
 The launcher needs the existing Python environment, the `dance` map assets,
 the dedicated engine and payload build tools, and both existing RDMA bridges.
+Each realized match's user directory contains its actual map BSP and
+`gamemodes-payload.cfg`, including when entity measurements are reused or an
+entity overlay was supplied. The existing artifact transfer therefore supplies
+the peer with the exact map used for entity generation.
 It runs one match, ending on its observed score outcome; `--duration` does not
 impose a wall-clock timeout. This exercises actual policy inputs and generated
 encoders. `measure.py matrix` measures a different numerical path and is not a
