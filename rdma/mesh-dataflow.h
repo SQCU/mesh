@@ -25,8 +25,6 @@ struct mesh_row_binding {
   const uint32_t *uses;
   uint16_t peer, receive;
   uint64_t remote_table;
-  struct mesh_row_map *input;
-  uint32_t inputs;
 };
 struct mesh_row_metadata {
   uint64_t stamp, when;

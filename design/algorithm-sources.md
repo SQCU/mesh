@@ -362,21 +362,26 @@ exchange algebra; Saltzer–Reed–Clark (TOCS 1984) place acceptance at the end
 All are cited below. These references do not certify this implementation's
 mapping lifetime, error propagation or latency.
 
-### Configuration owns receive input lifetimes
+### Configuration owns physical read lifetimes
 
 `mesh_rows_realize` now accounts for every logical row, including holes that
 previously escaped validation because only produced outputs were examined.
-Every row read by a configured function, a remote dependent-read binding or the
+Every row read by a configured function or the
 calling context's return maps must have a local producer or receive binding.
 Its configured use count must equal those reads and its transmit uses. Unused
 holes remain legal. This is configuration work before launch and allocates no
 auxiliary ownership structure. It uses the existing maps and row-use algebra.
 
-The receive path no longer rereads dependent input stamps or use counts to
-validate a remote completion. A configured received output is the dependent-read
-proof; the path performs the configured releases directly. Papadopoulos–Culler
-(ISCA 1990) provide assigned operand storage and data-dependent firing, as cited
-below; the repository's fixed maps supply the specific lifetime proof. Counting
+Receive bindings do not contain input maps. Under TN3205 SEND/RECV, the remote
+numerical function reads its receiving node's backing. Its eventual result
+does not retain a read of the sender's backing after SEND completion. The former
+`mesh_row_binding.input/inputs` mechanism counted that fictitious read and
+released it on a later result arrival. It has been removed from realization,
+invalidation, receive publication and retirement, together with its Python ABI.
+Local numerical uses, the NIC source read and caller-held results still count
+against their actual local rows. Papadopoulos–Culler supply storage-associated
+operand presence; Apple TN3205 supplies the distinction between a source-buffer
+access and a receiving-buffer access. Counting
 uses alone does not establish acyclicity or protect against an invalidated
 mapping receiving a late device write. Those remain distinct integration
 obligations, not permission to add per-input runtime guards.
@@ -666,8 +671,7 @@ before launch. Atomic access applies to the literal row contents, not a separate
 synchronization object. Papadopoulos–Culler remain the operand-storage citation.
 The caller's complete use accounting and invalidation binding are still required;
 removing guards alone does not establish those contracts.
-Arrival integration must likewise provide exactly one release per configured
-remote read proof. `mesh_row_zero`, called asynchronously after all
+Arrival integration publishes the receiver’s own operand storage. `mesh_row_zero`, called asynchronously after all
 uses end, excludes writers through the row stamp, zeros the payload and removes
 the physical page while retaining the completed stamp. The release owner retains
 the physical page number through this operation and returns it to the appropriate
@@ -675,26 +679,12 @@ free list/bridge. Reinstallation occurs in selection while the row carries its
 issued stamp. Hardware reads and hashing count toward the lifetime. A row whose
 page is already absent is not zeroed or released a second time.
 
-Receive bindings now carry the immutable input-row maps of the remote numerical
-function whose output arrives in those rows. For received output index `j`, the
-input map names `first + j * stride ..< first + j * stride + count`. Arrival of
-that output with stamp `k` proves those configured remote reads have finished.
-`mesh_rows_receive` validates the still-live input rows, publishes the arriving
-output and releases one use for each mapped input occurrence. The destination's
-existing stamp prevents a repeated arrival from releasing those uses again.
-There is no acknowledgement page, consumed bitmap or per-function completion
-counter. This is the dependent-output lifetime rule of the plain specification,
-with Papadopoulos–Culler supplying the storage-associated presence principle.
-
-For two-peer reduce-scatter, an arriving normalized output page can release the
-corresponding sent partial page's remote-read use. The source also retains its
-independent NIC-completion and hashing uses. Configuration must assign exactly
-one output occurrence to each proven read, including when one numerical row has
-several output pages. A proof for all inputs can attach to one returned output
-only when that output's stamp proves all those reads finished. A digest verdict
-is not substituted for the numerical output. The caller still has to realize
-these input maps and counts; their existence is not evidence that the old
-caller's lifetime logic has been replaced.
+Receive publication installs the received physical page and its configured local
+uses. It does not release sender-side numerical inputs. Retirement examines only
+the row's own uses and physical assignment; it no longer parses receive headers
+or recursively traverses a remote-input dependency graph. The corresponding
+configuration fields and storage allocations have been deleted, rather than
+retained as an unused alternate lifetime strategy.
 
 ### Literal weight pages
 

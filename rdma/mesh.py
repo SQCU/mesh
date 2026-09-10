@@ -26,7 +26,7 @@ class RowFunction(c.Structure):
 
 
 class RowBinding(c.Structure):
-    _fields_ = [(name, c.c_uint32) for name in ("first", "count", "remote", "headers")] + [("uses", c.POINTER(c.c_uint32)), ("peer", c.c_uint16), ("receive", c.c_uint16), ("remote_table", c.c_uint64), ("input", c.POINTER(RowMap)), ("inputs", c.c_uint32)]
+    _fields_ = [(name, c.c_uint32) for name in ("first", "count", "remote", "headers")] + [("uses", c.POINTER(c.c_uint32)), ("peer", c.c_uint16), ("receive", c.c_uint16), ("remote_table", c.c_uint64)]
 
 
 class Region(c.Structure):
@@ -118,8 +118,8 @@ class Mesh:
             self.source[peer] = first
             self.outputs[index] = RowMap(first, 1, 1, self.first + first, 1, 0, None)
             self.functions[index] = RowFunction(None, c.pointer(self.outputs[index]), 0, 1, self.slots)
-            self.bindings[2 * peer] = RowBinding(first, self.slots, 2 * self.memory.contents.node + 1, 0, None, peer, 0, remote_table, None, 0)
-            self.bindings[2 * peer + 1] = RowBinding(received, self.slots, 0, 0, None, peer, 1, remote_table, None, 0)
+            self.bindings[2 * peer] = RowBinding(first, self.slots, 2 * self.memory.contents.node + 1, 0, None, peer, 0, remote_table)
+            self.bindings[2 * peer + 1] = RowBinding(received, self.slots, 0, 0, None, peer, 1, remote_table)
             self.returns[index] = RowMap(received, self.slots, 0, 0, 0, 0, None)
         status = _lib.mesh_rows_realize(self.pages, self.functions, len(self.functions), self.bindings, len(self.bindings), self.returns, len(self.returns))
         if status:
