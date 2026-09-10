@@ -39,6 +39,11 @@ Tickets marked *done* or *withdrawn* stay for the record.
 
 ### A7. Page-echo transport measurement — open, first
 
+Implementation and initial measurements are in
+[transport-page-echo-2026-09-10.md](transport-page-echo-2026-09-10.md).
+Exact echo and lifecycle checks pass. Stable repeated latency/rate measurement
+and attribution of the instrumented-run variation remain open.
+
 Delete: nothing. Add: one program (~100 lines) that sends N pages one way
 through the actual path (`SUB` ring → bridge → QP → peer bridge → row table)
 and has the peer echo them, with no numerical function. Report one-way page
