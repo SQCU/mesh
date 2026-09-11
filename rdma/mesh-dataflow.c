@@ -56,7 +56,7 @@ static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,u
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
     uint32_t next=first;
     for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
-      uint64_t occupied=(atomic_load_explicit(&mesh_plane(c->M,own)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,hot)[w],memory_order_acquire)|(own==MESH_ROW_OWN?atomic_load_explicit(&mesh_plane(c->M,MESH_ROW_LANDED)[w],memory_order_acquire):0))&mesh_word_mask(first,count,w);
+      uint64_t occupied=(atomic_load_explicit(&mesh_plane(c->M,own)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,hot)[w],memory_order_acquire)|(own==MESH_ROW_OWN?(atomic_load_explicit(&mesh_plane(c->M,MESH_ROW_LANDED)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,MESH_ROW_BOUND)[w],memory_order_acquire)):0))&mesh_word_mask(first,count,w);
       if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
     }
     if(next==first){ mesh_bits_set(c->M,own,first,count); return first; }
@@ -155,7 +155,6 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
     struct mesh_row_binding *b=&bindings[i];
     if(!b->count || b->count%block || (uint64_t)b->first+b->count>rows || b->binding>=MESH_BINDINGS){ error=EINVAL; break; }
     if(b->receive){
-      mesh_base(m)[b->binding]=b->first;
       for(uint32_t k=0;k<b->count;k+=block) mesh_send(m)[b->first+k]|=0x80;
       continue;
     }
@@ -173,7 +172,14 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       *(struct mesh_tag*)mesh_at(m,page)=(struct mesh_tag){MESH_TAG,b->binding,k,0};
     }
   }
-  if(!error) for(uint32_t r=0;r<rows;r++) mesh_mask(m)[r]=used[r];
+  if(!error){
+    for(uint32_t r=0;r<rows;r++) if(mesh_is(m,MESH_ROW_OWN,r)) mesh_mask(m)[r]=used[r];
+    for(size_t i=0;i<binding_count;i++) if(bindings[i].receive){
+      struct mesh_row_binding *b=&bindings[i];
+      mesh_bits_set(m,MESH_ROW_BOUND,b->first,b->count);
+      atomic_store_explicit(&mesh_base(m)[b->binding],b->first,memory_order_release);
+    }
+  }
   free(used);
   return error;
 }

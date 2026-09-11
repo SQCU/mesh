@@ -15,7 +15,7 @@
 #define MESH_ABSENT UINT32_MAX
 enum { SUB, FREE, NRING };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
-enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_ROW_LANDED, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+5 };
+enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_ROW_LANDED, MESH_ROW_BOUND, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+5 };
 #define MESH_READERS 5
 struct ring { _Alignas(128) _Atomic uint64_t head; _Alignas(128) _Atomic uint64_t tail; };
 struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; uint64_t when; int64_t code; uint32_t domain,reserved; };
@@ -115,6 +115,14 @@ static inline void mesh_reclaim_consumed(struct hdr *m){
       atomic_fetch_and_explicit(&mesh_landed(m)[w],~(UINT64_C(1)<<(b%64)),memory_order_acq_rel);
       mesh_push(m,FREE,page);
     }
+  }
+}
+/* design/algorithm-sources.md#nonblocking-table-ownership */
+static inline void mesh_reclaim_bindings(struct hdr *m){
+  for(uint32_t w=0;w<mesh_words(m);w++){
+    uint64_t bound=atomic_load_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],memory_order_acquire);
+    uint64_t owned=atomic_load_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],memory_order_acquire);
+    atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],~(bound&~owned),memory_order_acq_rel);
   }
 }
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pool,uint32_t arena){
