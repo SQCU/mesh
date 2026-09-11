@@ -25,16 +25,17 @@ struct mesh_verbs {
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
   struct ibv_qp *pair,*pairs[MESH_QPS]; int qp_count; struct ibv_mr **regions;
   int region_count, send_capacity, receive_capacity;
-  unsigned region_shift;
+  size_t region_origin, region_extent;
   struct ibv_wc *completions; int completed;
   struct ibv_sge (*sges)[2];
   struct ibv_recv_wr *receives; struct ibv_send_wr *sends;
   int receiving, sending;
 };
 static struct mesh_verbs *provider;
+/* design/algorithm-sources.md#regions-follow-blocks */
 static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
-  uintptr_t address=(uintptr_t)base+offset;
-  return (struct ibv_sge){address,bytes,provider->regions[(address>>provider->region_shift)-((uintptr_t)base>>provider->region_shift)]->lkey}; }
+  size_t index=offset<provider->region_origin?0:(provider->region_origin?1:0)+(offset-provider->region_origin)/provider->region_extent;
+  return (struct ibv_sge){(uintptr_t)base+offset,bytes,provider->regions[index]->lkey}; }
 static const char *shm; static _Atomic sig_atomic_t stop;
 static int lsock=-1;
 static int expected_peer=-1;
@@ -146,7 +147,7 @@ static int initial_receive_post(char *mem,struct ibv_recv_wr *initial_receives,i
     if(error){ fprintf(stderr,"initial receive post=%d\n",error); errno=error; return -1; }
   return 0;
 }
-static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t message_bytes, struct ibv_recv_wr *initial_receives, int qps){
+static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, struct ibv_recv_wr *initial_receives, int qps){
   if(qps<1 || qps>MESH_QPS){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
@@ -171,17 +172,17 @@ static int verbs_up(const char *peer, char *mem, size_t span, int me, uint32_t m
   if(!provider->domain){ close(f); return -1; }
   if(capabilities.max_mr<1){ close(f); errno=EOPNOTSUPP; return -1; }
   if(!provider->regions){
-    provider->region_shift=30;
-    while((((uintptr_t)mem+span-1)>>provider->region_shift)-((uintptr_t)mem>>provider->region_shift)+1>(size_t)capabilities.max_mr)
-      provider->region_shift++;
+    size_t extent=((size_t)1<<30)/message_bytes*message_bytes;
+    while((origin?1:0)+(span-origin+extent-1)/extent>(size_t)capabilities.max_mr) extent+=((size_t)1<<30)/message_bytes*message_bytes;
+    provider->region_origin=origin; provider->region_extent=extent;
   }
-  size_t extent=(size_t)1<<provider->region_shift;
-  size_t head=(uintptr_t)mem&(extent-1), regions=(head+span+extent-1)>>provider->region_shift;
+  size_t regions=(origin?1:0)+(span-origin+provider->region_extent-1)/provider->region_extent;
   if(!provider->regions) provider->regions=calloc(regions,sizeof *provider->regions);
   if(!provider->regions){ close(f); fprintf(stderr,"alloc regions: failed\n"); return -1; }
   while((size_t)provider->region_count<regions){
-    size_t o=provider->region_count?((size_t)provider->region_count<<provider->region_shift)-head:0;
-    size_t end=((size_t)provider->region_count+1)*extent-head;
+    int data=provider->region_count>=(origin?1:0);
+    size_t o=data?origin+((size_t)provider->region_count-(origin?1:0))*provider->region_extent:0;
+    size_t end=data?o+provider->region_extent:origin;
     size_t n=(end<span?end:span)-o;
     provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }

@@ -36,7 +36,7 @@ int main(int argc,char **argv){
       .sg_list=&sges[i],.num_sge=1};
   }
   double deadline=monotime()+timeout;
-  if(listener_up() || verbs_up(sending?NULL:argv[2],memory,bytes,sending?0:1,
+  if(listener_up() || verbs_up(sending?NULL:argv[2],memory,bytes,0,sending?0:1,
     STREAM_BYTES,sending?NULL:receives,1)){ status=1; goto storage; }
   if(stop || !provider->pair || monotime()>=deadline){ status=1; goto storage; }
   uint32_t actual=(uint32_t)(sending?provider->send_capacity:provider->receive_capacity);

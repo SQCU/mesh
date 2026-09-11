@@ -56,8 +56,8 @@ static void mesh_progress(struct mesh_link *link){
       const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(M,page+M->block-1);
       uint32_t row=tag->binding<MESH_BINDINGS?atomic_load_explicit(&mesh_base(M)[tag->binding],memory_order_acquire):MESH_ABSENT;
       if(wc->status || tag->magic!=MESH_TAG || row==MESH_ABSENT || (uint64_t)row+(uint64_t)tag->index*M->block+M->block>mesh_rows(M)){
-
         if(!wc->status) atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed);
+        fprintf(stderr,"landing rejected: page=%u status=%d bytes=%u magic=%08x binding=%u index=%u base=%u rows=%u\n",page,wc->status,wc->byte_len,tag->magic,tag->binding,tag->index,row,mesh_rows(M));
         mesh_push(M,FREE,page); continue;
       }
       row+=tag->index*M->block;
@@ -125,7 +125,7 @@ int main(int argc,char**argv){
   provider->completions=calloc(2*entries,sizeof *provider->completions);
   int status=0;
   if(!provider->completions){ status=ENOMEM; goto teardown; }
-  status=listener_up() || verbs_up(peer,(char*)M,length,me,(uint32_t)(block_pages*pg),NULL,link.qps);
+  status=listener_up() || verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),NULL,link.qps);
   if(status){ M->port.code=errno?errno:EIO; M->port.domain=1; goto teardown; }
   snprintf(M->port.device,sizeof M->port.device,"%s",ibv_get_device_name(provider->context->device));
   M->port.peer=(uint16_t)expected_peer;
