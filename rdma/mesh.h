@@ -22,7 +22,7 @@ struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; 
 struct mesh_tag { uint32_t magic,binding,index,reserved; };
 struct hdr {
   uint32_t magic,version,pgsz,block,pool,arena,node,reserved;
-  uint64_t rings_off,planes_off,page_off,mask_off,send_off,base_off,landed_off,landing_row_off,data_off,length;
+  uint64_t rings_off,planes_off,page_off,mask_off,send_off,base_off,landed_off,landing_row_off,changed_off,data_off,length;
   _Atomic uint64_t client,bridge_pid,sent,recvd,bad,sending;
   struct mesh_port_info port;
   struct ring r[NRING];
@@ -38,6 +38,8 @@ static inline _Atomic uint32_t *mesh_base(struct hdr *m){ return (_Atomic uint32
 static inline _Atomic uint64_t *mesh_landed(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->landed_off); }
 /* design/algorithm-sources.md#nonblocking-table-ownership */
 static inline _Atomic uint32_t *mesh_landing_row(struct hdr *m){ return (_Atomic uint32_t*)((unsigned char*)m+m->landing_row_off); }
+/* design/algorithm-sources.md#nonblocking-table-ownership */
+static inline _Atomic uint64_t *mesh_changed(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->changed_off); }
 static inline uint32_t mesh_window_blocks(const struct hdr *m){ return 4095u/(m->block*m->pgsz/4096u); }
 
 static inline uint64_t mesh_submission(uint32_t page,uint32_t row,uint32_t plane){ return ((uint64_t)page<<36)|((uint64_t)row<<8)|(plane&7); }
@@ -119,11 +121,22 @@ static inline void mesh_reclaim_consumed(struct hdr *m){
 }
 /* design/algorithm-sources.md#nonblocking-table-ownership */
 static inline void mesh_reclaim_bindings(struct hdr *m){
+  for(uint32_t index=0;index<(mesh_words(m)+63)/64;index++){
+    uint64_t changed=atomic_exchange_explicit(&mesh_changed(m)[index],0,memory_order_acq_rel);
+    while(changed){
+      uint32_t w=index*64+(uint32_t)__builtin_ctzll(changed); changed&=changed-1;
+      uint64_t bound=atomic_load_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],memory_order_acquire);
+      uint64_t owned=atomic_load_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],memory_order_acquire);
+      atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],~(bound&~owned),memory_order_acq_rel);
+    }
+  }
+}
+/* design/algorithm-sources.md#nonblocking-table-ownership */
+static inline void mesh_retire_rows(struct hdr *m){
   for(uint32_t w=0;w<mesh_words(m);w++){
+    uint64_t owned=atomic_exchange_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],0,memory_order_acq_rel);
     uint64_t bound=atomic_load_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],memory_order_acquire);
-    uint64_t owned=atomic_load_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],memory_order_acquire);
-    uint64_t retired=bound&~owned;
-    if(retired) atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],~retired,memory_order_acq_rel);
+    if(bound&owned) atomic_fetch_or_explicit(&mesh_changed(m)[w/64],UINT64_C(1)<<(w%64),memory_order_release);
   }
 }
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pool,uint32_t arena){
@@ -137,6 +150,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->base_off=at; at+=(uint64_t)MESH_BINDINGS*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->landed_off=at; at+=((uint64_t)pool/block+63)/64*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->landing_row_off=at; at+=(uint64_t)pool/block*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->changed_off=at; at+=(words+63)/64*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=rows*pgsz;
   h->length=at; return at;

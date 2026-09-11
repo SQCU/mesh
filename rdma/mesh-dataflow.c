@@ -31,7 +31,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     if(!vacant || !kill((pid_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); return EBUSY; }
     if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)) continue;
     for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(memory)[b],MESH_ABSENT,memory_order_release);
-    mesh_bits_clear(memory,MESH_ROW_OWN,0,mesh_rows(memory));
+    mesh_retire_rows(memory);
     mesh_bits_clear(memory,MESH_PAGE_OWN,0,mesh_rows(memory));
     break;
   }
@@ -42,7 +42,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(c->M)[b],MESH_ABSENT,memory_order_release);
-  mesh_bits_clear(c->M,MESH_ROW_OWN,0,mesh_rows(c->M));
+  mesh_retire_rows(c->M);
   mesh_bits_clear(c->M,MESH_PAGE_OWN,0,mesh_rows(c->M));
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
