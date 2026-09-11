@@ -25,8 +25,8 @@ int main(int argc,char **argv){
   uint64_t pid=atomic_load(&h->bridge_pid);
   int alive=pid && (!kill((pid_t)pid,0) || errno==EPERM);
   int paired=alive && atomic_load(&h->port.phase)==MESH_PAIRED;
-  printf("{\"up\":%s,\"ready\":%s,\"bridge_pid\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"pool\":%u,\"arena\":%u,\"sent\":%llu,\"recvd\":%llu,\"bad\":%llu,\"code\":%lld,\"domain\":%u}\n",
-    alive?"true":"false",paired?"true":"false",(unsigned long long)pid,h->version,h->node,h->pgsz,h->block,h->pool,h->arena,
+  printf("{\"up\":%s,\"ready\":%s,\"bridge_pid\":%llu,\"client\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"pool\":%u,\"arena\":%u,\"sent\":%llu,\"recvd\":%llu,\"bad\":%llu,\"code\":%lld,\"domain\":%u}\n",
+    alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)atomic_load(&h->client),h->version,h->node,h->pgsz,h->block,h->pool,h->arena,
     (unsigned long long)atomic_load(&h->sent),(unsigned long long)atomic_load(&h->recvd),(unsigned long long)atomic_load(&h->bad),
     (long long)h->port.code,h->port.domain);
   munmap(h,bytes); close(f); return readiness && !paired;

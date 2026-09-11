@@ -85,6 +85,9 @@ do_start() {
     if echo "$have" | grep -q "pool:$mesh_receive_pages" && echo "$have" | grep -q "arena:$mesh_arena_pages" && echo "$have" | grep -q "block:$mesh_block_pages"; then
       echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
     fi
+    if "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; then
+      echo "mesh-bridge: running with other geometry ($have) and a client attached; not restarting" >&2; return 1
+    fi
     echo "mesh-bridge: running with other geometry ($have); restarting for $want"
     do_stop || return $?
   fi

@@ -71,6 +71,38 @@ arrival the bridge reads the tag, stores `page[]` for the block's rows and ORs
 PRESENT. On send completion it ORs the NIC's READ bit. That is the whole
 transport-to-table interface.
 
+## Streaming tiles
+
+A value exchanged with a peer is streamed in tiles. The **peer's streaming
+tile** is the number of rows of that value one transfer block carries:
+`tile = floor((block − 1)·pgsz / (columns·elembytes))`, rounded down to a
+multiple of the granularity at which the peer's consuming function reads. It
+is a property of the link geometry, the value's shape, and the peer's consumer
+— never of the host's kernel call. A host call produces whole tiles: a call is
+`call_tiles` consecutive tiles, and an ownership boundary is a call boundary.
+
+A tile is contiguous memory: a block's pages are consecutive in the arena and
+in a landing block. A function therefore addresses a tile by one base and the
+rows inside it by offset. No per-element lookup exists.
+
+**Tile ordering.** Each node produces every tile of a partial and owns the
+reduction of a subset. The order in which a node produces its calls is the
+order the tiles arrive at the peer and the earliest order the peer can consume
+them. That order is chosen by a model of the stream, not by the caller. The
+model (`rdma/mesh-stream.h`) is an event simulation of the two-node
+dependency graph: a call on node n completes `produce_ns` after it starts and
+its tiles are present; a tile not owned by n is a block on the link for
+`transfer_ns` and lands on the peer when the peer has a posted receive (at
+most `window` blocks landed and unconsumed per direction); the owner's reduce
+of a tile starts when its own and the peer's partial are present and takes
+`reduce_ns`; the reduced tile returns to the peer as a block under the same
+credit. Candidate orders are: peer-owned calls first, own calls first, and
+interleavings of period k. The plan is the candidate of least makespan whose
+peak of landed-unconsumed blocks fits the window; it also reports each node's
+predicted idle fraction. The prediction is a reportable: every run prints
+predicted and measured stall; a disagreement is a defect in the model or the
+code, found by the comparison, never by tuning.
+
 ## One NFE on two peers
 
 1. A function runs on the GPU. It writes its output straight into pages. When

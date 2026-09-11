@@ -34,7 +34,7 @@ static inline _Atomic uint32_t *mesh_page(struct hdr *m){ return (_Atomic uint32
 static inline uint8_t *mesh_mask(struct hdr *m){ return (uint8_t*)m+m->mask_off; }
 static inline uint8_t *mesh_send(struct hdr *m){ return (uint8_t*)m+m->send_off; }
 static inline uint32_t *mesh_base(struct hdr *m){ return (uint32_t*)((unsigned char*)m+m->base_off); }
-/* One bit per landing block: delivered to the table and not yet returned to the free index. Bridge-owned. */
+/* One bit per landing block: set by the bridge on delivery, cleared by whoever returns the block to the free index. */
 static inline _Atomic uint64_t *mesh_landed(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->landed_off); }
 static inline uint32_t mesh_window_blocks(const struct hdr *m){ return 4095u/(m->block*m->pgsz/4096u); }
 /* Submission entries are self-contained: the bridge needs nothing else after the push. */

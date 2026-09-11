@@ -55,7 +55,7 @@ static int down_verbs(void){
 static void down(void){ if(shm)shm_unlink(shm); }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double monotime(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
-static void onsig(int s){ (void)s; stop=1; }
+static void onsig(int s){ (void)s; stop++; }
 
 struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz,header_bytes; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; };
 #define XMAGIC 0x4d585047u

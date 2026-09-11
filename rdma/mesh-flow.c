@@ -50,12 +50,12 @@ static void mesh_progress(struct mesh_link *link){
   uint64_t entry; int posted=0;
   if(v->receiving||v->sending) link_flush(link,link->retry);
   /* Landing blocks: fill the device's receive budget from the free index, spread across queue pairs. */
-  while(!v->receiving && link->receive_frames+link->frames<=4095 && !mesh_pop(M,FREE,&entry)){
+  while(!v->receiving && !v->sending && link->receive_frames+link->frames<=4095 && !mesh_pop(M,FREE,&entry)){
     int q=link->next_receive++%link->qps;
     link_post(link,q,0,(UINT64_C(1)<<63)|entry,(uint32_t)entry); link_flush(link,q); posted=1;
   }
   /* Committed blocks: fill the device's send budget from the submission index. */
-  while(!v->sending && link->send_frames+link->frames<=4095 && !mesh_pop(M,SUB,&entry)){
+  while(!v->receiving && !v->sending && link->send_frames+link->frames<=4095 && !mesh_pop(M,SUB,&entry)){
     int q=link->next_send++%link->qps;
     uint32_t page=mesh_submission_page(entry);
     if((uint64_t)page+M->block>mesh_rows(M)){ M->port.code=EFAULT; M->port.domain=2; atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed); continue; }
@@ -132,6 +132,7 @@ int main(int argc,char**argv){
   uint64_t length=mesh_layout(&geometry,pg,(uint32_t)block_pages,(uint32_t)receive_pages,(uint32_t)arena_pages);
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   if(pct && length>(uint64_t)(pct/100*(double)ram)) die("configured graph exceeds page capacity");
+  if(mesh_rows(&geometry)/geometry.block>MESH_RING) die("configured blocks exceed the submission index");
   if(layout){ printf("%llu\n",(unsigned long long)length); return 0; }
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL); signal(SIGPIPE,SIG_IGN);
@@ -156,20 +157,14 @@ int main(int argc,char**argv){
   provider->sends=calloc(entries,sizeof *provider->sends);
   int status=0;
   if(!provider->completions || !provider->sges || !provider->receives || !provider->sends){ status=ENOMEM; goto teardown; }
-  uint64_t entry; int initial=0;
-  for(;initial<link.budget && !mesh_pop(M,FREE,&entry);initial++){
-    provider->sges[initial][0]=(struct ibv_sge){.addr=(uintptr_t)mesh_at(M,(uint32_t)entry),.length=(uint32_t)(block_pages*pg)};
-    provider->receives[initial]=(struct ibv_recv_wr){.wr_id=(UINT64_C(1)<<63)|entry,.sg_list=&provider->sges[initial][0],.num_sge=1,.next=initial+1<link.budget?&provider->receives[initial+1]:NULL};
-  }
-  if(initial) provider->receives[initial-1].next=NULL;
-  status=listener_up() || verbs_up(peer,(char*)M,length,me,(uint32_t)(block_pages*pg),initial?provider->receives:NULL,link.qps);
+  status=listener_up() || verbs_up(peer,(char*)M,length,me,(uint32_t)(block_pages*pg),NULL,link.qps);
   if(status){ M->port.code=errno?errno:EIO; M->port.domain=1; goto teardown; }
-  link.receives[0]=initial; link.receive_frames=initial*link.frames; provider->receiving=0;
   snprintf(M->port.device,sizeof M->port.device,"%s",ibv_get_device_name(provider->context->device));
   M->port.peer=(uint16_t)expected_peer;
   atomic_store(&M->port.phase,MESH_PAIRED);
   fprintf(stderr,"bridge node %d: %d queue pair(s), %d frames per block, %d blocks per direction\n",me,link.qps,link.frames,link.budget);
-  while(!stop) mesh_progress(&link);
+  /* A committed block is sent before the bridge honours a signal; a second signal ends it regardless. */
+  while(stop<2 && (!stop || atomic_load_explicit(&M->r[SUB].head,memory_order_acquire)!=atomic_load_explicit(&M->r[SUB].tail,memory_order_acquire) || atomic_load_explicit(&M->sending,memory_order_acquire))) mesh_progress(&link);
 teardown:
   fprintf(stderr,"bridge node %d stopping: code=%lld domain=%u errno=%d sent=%llu recvd=%llu bad=%llu\n",me,(long long)M->port.code,M->port.domain,errno,
     (unsigned long long)atomic_load(&M->sent),(unsigned long long)atomic_load(&M->recvd),(unsigned long long)atomic_load(&M->bad));

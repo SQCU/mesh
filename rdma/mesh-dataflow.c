@@ -179,10 +179,6 @@ void *mesh_row_data(struct mesh_ctx *c,uint32_t row){
   return page==MESH_ABSENT?NULL:mesh_at(c->M,page);
 }
 
-int mesh_present(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
-  struct mesh_row_range r=mesh_range(map,index);
-  return mesh_bits_all(c->M,MESH_PRESENT,r.first,r.count);
-}
 
 /* An input range is ready when every row is present and this reader has not yet read it. */
 static int mesh_ready(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane){
@@ -194,6 +190,17 @@ static int mesh_ready(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
     if(atomic_load_explicit(&read[w],memory_order_acquire)&k&~c) return 0;
   }
   return 1;
+}
+
+int mesh_present(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
+  struct mesh_row_range r=mesh_range(map,index);
+  return mesh_bits_all(c->M,MESH_PRESENT,r.first,r.count);
+}
+
+/* Present and not yet read by this map's reader: what a return of the calling context waits on. */
+int mesh_available(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
+  struct mesh_row_range r=mesh_range(map,index);
+  return mesh_ready(c->M,r.first,r.count,map.plane);
 }
 
 /* An output range may be rewritten when it was never produced or every configured reader has read it. */
@@ -214,6 +221,14 @@ static void mesh_reset(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_clear(m,MESH_PRESENT,first,count);
   mesh_bits_clear(m,MESH_FREED,first,count);
   for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,first,count);
+}
+
+/* The calling context publishes a source range once per invocation: it is the invocation's token. */
+int mesh_republish(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  if(!mesh_claimable(c->M,first,count)) return 0;
+  mesh_reset(c->M,first,count);
+  mesh_bits_set(c->M,MESH_PRESENT,first,count);
+  return 1;
 }
 
 size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t *indices,size_t capacity){
@@ -247,7 +262,10 @@ static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
   }
   uint8_t *send=mesh_send(m),*mask=mesh_mask(m);
   uint32_t block=m->block;
-  for(uint32_t r=first;r<first+count;r++){
+  /* Every landing block holding a row of the range is examined, including one that starts before the range. */
+  uint32_t r=first>block?first-block+1:0;
+  while(r<first && !(send[r]&0x80)) r++;
+  for(;r<first+count;r++){
     if(!(send[r]&0x80)) continue;
     int done=1;
     for(uint32_t x=0;x<block && done;x++){
@@ -259,7 +277,10 @@ static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
     if(atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREED)[r/64],bit,memory_order_acq_rel)&bit) continue;
     uint32_t page=atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire);
     mesh_reset(m,r,block);
+    /* Returned: the landed bit is cleared before the push so the block is in exactly one place. */
+    atomic_fetch_and_explicit(&mesh_landed(m)[(page/block)/64],~(UINT64_C(1)<<((page/block)%64)),memory_order_acq_rel);
     if(mesh_push(m,FREE,page)){ m->port.code=ENOBUFS; m->port.domain=1; }
+    r+=block-1;
   }
 }
 
