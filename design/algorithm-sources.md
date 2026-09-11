@@ -83,3 +83,27 @@ contiguous spans before running the replacement API. Registering the whole arena
 would discard the previously observed four-GiB bank constraint. The nonblocking
 ownership changes do not resolve this geometry defect and do not establish the
 performance acceptance target.
+
+## Regions follow blocks
+
+A block is posted as one scatter-gather element whose key comes from its first
+byte. Memory regions are therefore cut at block-aligned offsets from the data
+origin — region 0 is the header, every data region spans a multiple of the
+block — so a block is inside one region by construction. Regions cut at
+absolute address boundaries put the tail of a straddling block outside its
+key's region; the tail is where the tag lives, so the landing arrived with a
+clean completion and no tag, and the bridge rejected it. Measured 2026-09-10
+on the M5 (two regions: every landing from the M4 rejected) against the M4 (one
+region: every landing accepted); with block-aligned regions both directions
+carry every block (160 sent, 160 received, 0 bad on each side). A rejected
+landing prints page, status, bytes, tag and base to the bridge log.
+
+## Attach takes over a dead holder
+
+The client word names the process that owns the region. A process that died
+without detaching left its pid there and every later attach was refused: a
+node that looked provisioned and was not. Attach now takes the word from a
+holder that `kill(pid, 0)` reports gone and performs the release the dead
+client never did — bases absent, row and page ownership cleared. A live holder
+is still refused; the check prevents a demotion and never is one.
+
