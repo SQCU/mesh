@@ -59,48 +59,32 @@ bits. Completion ORs PRESENT on the outputs and the reader's bit on the inputs.
 A landing block whose rows are all read is pushed on the free index by whichever
 reader observed that first — decided by one OR whose old value it inspects.
 
-## Blocks
+## Page transfers and numerical extents
 
-Producers on this substrate write contiguous multi-page matrices, and a SEND
-lands anonymously, so the identity of a transfer cannot ride in a per-page
-prefix. The transfer unit is therefore a block: the pages of one packing group
-of a transmitted value, followed by one page holding a tag (binding, index).
-One block is one work request and one completion. The tag pages are written
-once, at configuration; they are never read by a numerical function. On
-arrival the bridge reads the tag, stores `page[]` for the block's rows and ORs
-PRESENT. On send completion it ORs the NIC's READ bit. That is the whole
-transport-to-table interface.
+Transport enumerates registered memory pages. Its configured message length
+and the provider's frame limits do not define a tensor shape, a numerical call
+shape, or a consumer's partial problem. A numerical value is described by its
+own indices and strides. A function's call and output extents belong to dataflow.
+Peers may implement the same algebra with different local numerical extents.
 
-## Streaming tiles
+The current SEND binding includes configured tag storage beside its payload
+pages so an anonymous receive can be associated with the dataflow binding.
+This is dataflow metadata, not a numerical header on every memory page.
+Dense producer views may alias payload pages across several such transfers;
+receiving numerical functions gather the pages named by the table. Neither
+requires copying a tensor into a separate transport buffer.
 
-A value exchanged with a peer is streamed in tiles. The **peer's streaming
-tile** is the number of rows of that value one transfer block carries:
-`tile = floor((block − 1)·pgsz / (columns·elembytes))`, rounded down to a
-multiple of the granularity at which the peer's consuming function reads. It
-is a property of the link geometry, the value's shape, and the peer's consumer
-— never of the host's kernel call. A host call produces whole tiles: a call is
-`call_tiles` consecutive tiles, and an ownership boundary is a call boundary.
+The provider on these machines advertises one SGE per WR. Canonical shared-page
+aliases allow a producer to use dense views without changing the registered
+addresses or inserting transport metadata into its numerical view. Message
+capacity remains a configured transport property. Function boundaries describe
+actual arithmetic dependencies: a completed projection extent is available
+independently of unrelated projections, and a reduction names the corresponding
+local and remote result extents.
 
-A tile is contiguous memory: a block's pages are consecutive in the arena and
-in a landing block. A function therefore addresses a tile by one base and the
-rows inside it by offset. No per-element lookup exists.
-
-**Function boundaries.** Configuration chooses the numerical backend's call
-shapes and the row extents consumed and produced by each function. Those
-boundaries describe actual arithmetic dependencies. A projection reads its
-activation rows; it does not depend on other projections having completed.
-Reduction reads the matching local and remote partials; it does not depend on
-completion of every partial in the tensor. A completed output extent becomes
-available to transport and arithmetic independently of unrelated output extents.
-
-A command containing several dependent numerical operations exposes only its
-final completion. When that hides an intermediate needed by independently
-executable functions, the configured graph must expose that intermediate as an
-output and give its consumers their own functions. This does not require changing
-the selected numerical kernels or replacing their measured call shapes.
-
-Timing models and utilization measurements belong to the calling context, not
-to this specification. They do not authorize additional data dependencies.
+Timing models and utilization measurements belong to the calling context.
+They do not authorize additional data dependencies or a shared tensor tiler in
+transport.
 
 ## One NFE on two peers
 

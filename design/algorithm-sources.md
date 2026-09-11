@@ -110,3 +110,18 @@ holder that `kill(pid, 0)` reports gone and performs the release the dead
 client never did — bases absent, row and page ownership cleared. A live holder
 is still refused; the check prevents a demotion and never is one.
 
+
+## Registered memory views
+
+Apple's mmap MAP_SHARED mapping mechanism permits multiple virtual views of the
+same shared-memory file pages. mesh_view_create reserves virtual address space
+and maps configured physical-page runs from the existing mesh shared-memory fd
+into it; mesh_view_destroy releases that view. No payload is copied and no new
+registered memory is allocated. This is configuration-only address realization,
+not a receiving-side remapping operation or an invocation-time allocator.
+
+The two installed Thunderbolt providers report max_sge=1 through ibv_devinfo.
+The view therefore joins numerical payload pages in virtual memory while the
+bridge continues to submit their original registered addresses. Logical indices,
+dense tensor offsets, and registered addresses remain separate representations
+of the same underlying bytes.
