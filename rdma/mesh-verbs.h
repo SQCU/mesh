@@ -171,9 +171,15 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   if(!provider->domain) provider->domain=ibv_alloc_pd(provider->context);
   if(!provider->domain){ close(f); return -1; }
   if(capabilities.max_mr<1){ close(f); errno=EOPNOTSUPP; return -1; }
+  /* design/algorithm-sources.md#regions-follow-blocks */
   if(!provider->regions){
-    size_t extent=((size_t)1<<30)/message_bytes*message_bytes;
-    while((origin?1:0)+(span-origin+extent-1)/extent>(size_t)capabilities.max_mr) extent+=((size_t)1<<30)/message_bytes*message_bytes;
+    size_t bank=(size_t)1<<32, extent;
+    if(!(message_bytes&(message_bytes-1))){ origin=0; extent=(size_t)1<<30; }
+    else {
+      extent=((size_t)1<<30)/message_bytes*message_bytes;
+      if(((uintptr_t)mem&(bank-1)) || span>bank){ fprintf(stderr,"a %u-byte block is not a power of two: the mapping must be bank-aligned and within one 4 GiB bank\n",message_bytes); errno=EINVAL; close(f); return -1; }
+    }
+    while((origin?1:0)+(span-origin+extent-1)/extent>(size_t)capabilities.max_mr){ errno=ENOMEM; close(f); return -1; }
     provider->region_origin=origin; provider->region_extent=extent;
   }
   size_t regions=(origin?1:0)+(span-origin+provider->region_extent-1)/provider->region_extent;

@@ -109,7 +109,12 @@ int main(int argc,char**argv){
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL); signal(SIGPIPE,SIG_IGN);
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
   if(ftruncate(fd,(off_t)length)) die("ftruncate"); fchmod(fd,MESH_MODE);
-  struct hdr *M=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); close(fd);
+  size_t bank=(size_t)1<<32;
+  unsigned char *reserved=mmap(NULL,length+bank,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0); if(reserved==MAP_FAILED) die("reserve");
+  unsigned char *aligned=(unsigned char*)(((uintptr_t)reserved+bank-1)&~(uintptr_t)(bank-1));
+  if(aligned>reserved) munmap(reserved,(size_t)(aligned-reserved));
+  munmap(aligned+length,(size_t)(reserved+length+bank-(aligned+length)));
+  struct hdr *M=mmap(aligned,length,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,fd,0); close(fd);
   if(M==MAP_FAILED) die("mmap"); shm=name;
   *M=geometry; M->node=(uint32_t)me; M->version=MESH_VERSION;
   for(uint32_t r=0;r<mesh_rows(M);r++) atomic_store_explicit(&mesh_page(M)[r],MESH_ABSENT,memory_order_relaxed);

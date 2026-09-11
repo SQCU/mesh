@@ -137,6 +137,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->base_off=at; at+=(uint64_t)MESH_BINDINGS*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->landed_off=at; at+=((uint64_t)pool/block+63)/64*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->landing_row_off=at; at+=(uint64_t)pool/block*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
+  uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=rows*pgsz;
   h->length=at; return at;
 }

@@ -73,16 +73,19 @@ another allocation halfway through that pass. These are bounded page-table masks
 no callback waits, reference-count drain, acknowledgement, or generation check is
 needed. Binding addresses become visible only after their reader masks are set.
 
-## Outstanding registered-span defect
+## Registered-span defect, closed
 
-The current provider registers aligned one-GiB address extents, but a multi-page
-block selects its key only from its first byte. A block can cross a registration
-boundary. The registration-bank constraint documented in
-[RDMA-KERNEL-RECOVERY.md](RDMA-KERNEL-RECOVERY.md) must be reflected in configured
-contiguous spans before running the replacement API. Registering the whole arena
-would discard the previously observed four-GiB bank constraint. The nonblocking
-ownership changes do not resolve this geometry defect and do not establish the
-performance acceptance target.
+The provider registered aligned one-GiB address extents while a multi-page
+block selected its key from its first byte, so a block could cross a
+registration boundary; and a registration must not cross a 4 GiB
+virtual-address boundary, the bank alias recorded in
+[RDMA-KERNEL-RECOVERY.md](RDMA-KERNEL-RECOVERY.md). Both hold now by
+construction: the bridge maps the region at a 4 GiB-aligned base and the data
+origin is a multiple of the block; a power-of-two block gets 1 GiB regions from
+the base, which divide the bank and which no block straddles; any other block
+gets block-aligned regions from the data origin and the bridge refuses, saying
+why, a mapping that reaches a bank boundary. The resolution is measured in the
+next section.
 
 ## Regions follow blocks
 
