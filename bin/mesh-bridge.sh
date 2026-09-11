@@ -79,10 +79,10 @@ do_stop() {
 }
 
 do_start() {
-  if [ -n "$(pid_of)" ]; then
+  if launchctl print "$DOM/$LABEL" >/dev/null 2>&1; then
     have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(pool|arena|block)"' | tr -d '" ' | tr '\n' ' ')
     want="arena:$mesh_arena_pages block:$mesh_block_pages pool:$mesh_receive_pages"
-    if echo "$have" | grep -q "pool:$mesh_receive_pages" && echo "$have" | grep -q "arena:$mesh_arena_pages" && echo "$have" | grep -q "block:$mesh_block_pages"; then
+    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "pool:$mesh_receive_pages" && echo "$have" | grep -q "arena:$mesh_arena_pages" && echo "$have" | grep -q "block:$mesh_block_pages"; then
       echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
     fi
     if "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; then
@@ -93,7 +93,7 @@ do_start() {
   fi
   wire_check || return $?
   write_plist
-  launchctl bootstrap "$DOM" "$PLIST"
+  launchctl bootstrap "$DOM" "$PLIST" || return $?
   for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
   p=$(pid_of)
   [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
