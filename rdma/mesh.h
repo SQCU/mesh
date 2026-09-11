@@ -122,7 +122,8 @@ static inline void mesh_reclaim_bindings(struct hdr *m){
   for(uint32_t w=0;w<mesh_words(m);w++){
     uint64_t bound=atomic_load_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],memory_order_acquire);
     uint64_t owned=atomic_load_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],memory_order_acquire);
-    atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],~(bound&~owned),memory_order_acq_rel);
+    uint64_t retired=bound&~owned;
+    if(retired) atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],~retired,memory_order_acq_rel);
   }
 }
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pool,uint32_t arena){
