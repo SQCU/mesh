@@ -1,3 +1,4 @@
+#include <signal.h>
 #include "mesh-dataflow.h"
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -26,8 +27,13 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     munmap(memory,(size_t)info.st_size); return EINVAL;
   }
   uint64_t vacant=0;
-  if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
-    munmap(memory,(size_t)info.st_size); return EBUSY;
+  while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
+    if(!vacant || !kill((pid_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); return EBUSY; }
+    if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)) continue;
+    for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(memory)[b],MESH_ABSENT,memory_order_release);
+    mesh_bits_clear(memory,MESH_ROW_OWN,0,mesh_rows(memory));
+    mesh_bits_clear(memory,MESH_PAGE_OWN,0,mesh_rows(memory));
+    break;
   }
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size};
   return 0;
