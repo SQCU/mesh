@@ -4,7 +4,7 @@
    The bridge owns the queue pairs. It posts landing blocks from the free index and outbound blocks
    from the submission index across all queue pairs, and on completion writes the page table:
    arrival stores page[] and ORs PRESENT; send completion ORs the NIC's read bit. Nothing else. */
-struct mesh_link { struct hdr *M; struct mesh_verbs provider; int qps,capacity; int receives[MESH_QPS],sends[MESH_QPS]; };
+struct mesh_link { struct hdr *M; struct mesh_verbs provider; int qps,capacity,next_receive,next_send; int receives[MESH_QPS],sends[MESH_QPS]; };
 
 static void link_post(struct mesh_link *link,int q,int send,uint64_t id,uint32_t page){
   struct mesh_verbs *v=&link->provider;
@@ -32,22 +32,29 @@ static void link_flush(struct mesh_link *link,int q){
 static void mesh_progress(struct mesh_link *link){
   struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
   uint64_t entry;
-  for(int q=0;q<link->qps;q++){
-    while(link->receives[q]<v->receive_capacity && !mesh_pop(M,FREE,&entry)) link_post(link,q,0,(UINT64_C(1)<<63)|entry,(uint32_t)entry);
-    while(link->sends[q]<v->send_capacity && !mesh_pop(M,SUB,&entry)){
-      uint32_t row=(uint32_t)(entry>>8);
-      link_post(link,q,1,entry,atomic_load_explicit(&mesh_page(M)[row],memory_order_acquire));
-      atomic_fetch_add_explicit(&M->sent,1,memory_order_relaxed);
-    }
-    link_flush(link,q);
+  for(int n=0;n<link->qps;n++){
+    int q=(link->next_receive+n)%link->qps;
+    while(link->receives[q]<v->receive_capacity && !mesh_pop(M,FREE,&entry)){ link_post(link,q,0,(UINT64_C(1)<<63)|entry,(uint32_t)entry); link->next_receive=q+1; break; }
   }
+  for(int n=0;n<link->qps;n++){
+    int q=(link->next_send+n)%link->qps;
+    while(link->sends[q]<v->send_capacity && !mesh_pop(M,SUB,&entry)){
+      uint32_t row=(uint32_t)(entry>>8),page=atomic_load_explicit(&mesh_page(M)[row],memory_order_acquire);
+      if(page==MESH_ABSENT || (uint64_t)page+M->block>mesh_rows(M)){ M->port.code=EFAULT; M->port.domain=2; stop=1; break; }
+      link_post(link,q,1,entry,page);
+      atomic_fetch_add_explicit(&M->sent,1,memory_order_relaxed);
+      link->next_send=q+1; break;
+    }
+  }
+  for(int q=0;q<link->qps;q++) link_flush(link,q);
   int count=ibv_poll_cq(v->completion_queue,(v->send_capacity+v->receive_capacity)*link->qps,v->completions);
   if(count<0){ M->port.code=count; M->port.domain=3; stop=1; return; }
   for(int i=0;i<count;i++){
     struct ibv_wc *wc=&v->completions[i];
     int q=0; while(q<link->qps && v->pairs[q]->qp_num!=wc->qp_num) q++;
     if(q==link->qps) q=0;
-    if(wc->status){ M->port.code=wc->status; M->port.domain=2; M->port.when=(uint64_t)monotime(); atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed); stop=1; }
+    if(wc->status){ M->port.code=wc->status; M->port.domain=2; M->port.when=(uint64_t)monotime(); atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed); stop=1;
+      fprintf(stderr,"completion error: status=%d vendor=%u opcode=%d qp=%u wr_id=%llx receive=%d\n",wc->status,wc->vendor_err,wc->opcode,wc->qp_num,(unsigned long long)wc->wr_id,(int)(wc->wr_id>>63)); }
     if(wc->wr_id>>63){
       uint32_t page=(uint32_t)wc->wr_id;
       link->receives[q]--;
@@ -132,6 +139,8 @@ int main(int argc,char**argv){
   while(!stop) mesh_progress(&link);
   status=M->port.code!=0;
 teardown:
+  fprintf(stderr,"bridge node %d stopping: code=%lld domain=%u errno=%d sent=%llu recvd=%llu\n",me,(long long)M->port.code,M->port.domain,errno,
+    (unsigned long long)atomic_load(&M->sent),(unsigned long long)atomic_load(&M->recvd));
   atomic_store(&M->port.phase,MESH_STOPPED);
   if(!down_verbs()){ fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno)); return 1; }
   if(lsock>=0) close(lsock);
