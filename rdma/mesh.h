@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 16u
+#define MESH_VERSION 17u
 #define MESH_RING 65536
 #define MESH_BINDINGS 4096
 #define MESH_ABSENT UINT32_MAX
@@ -100,8 +100,26 @@ static inline void mesh_reclaim_consumed(struct hdr *m){
     while(landed){
       uint32_t b=w*64+(uint32_t)__builtin_ctzll(landed); landed&=landed-1;
       uint32_t row=atomic_load_explicit(&mesh_landing_row(m)[b],memory_order_acquire),page=b*m->block;
+      int owned=mesh_bits_all(m,MESH_PAGE_OWN,page,m->block);
+      if(row==MESH_ABSENT && owned){
+        const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(m,page+m->block-1);
+        uint32_t base=atomic_load_explicit(&mesh_base(m)[tag->binding],memory_order_acquire);
+        if(base==MESH_ABSENT) continue;
+        if((uint64_t)base+(uint64_t)tag->index*m->block+m->block>mesh_rows(m)){
+          atomic_fetch_add_explicit(&m->bad,1,memory_order_relaxed);
+          owned=0;
+        } else {
+          row=base+tag->index*m->block;
+          mesh_bits_set(m,MESH_ROW_LANDED,row,m->block);
+          for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,row,m->block);
+          for(uint32_t k=0;k<m->block;k++) atomic_store_explicit(&mesh_page(m)[row+k],page+k,memory_order_release);
+          atomic_store_explicit(&mesh_landing_row(m)[b],row,memory_order_release);
+          mesh_bits_set(m,MESH_PRESENT,row,m->block);
+          continue;
+        }
+      }
       int consumed=1;
-      for(uint32_t r=row;r<row+m->block && consumed;r++){
+      for(uint32_t r=row;owned && r<row+m->block && consumed;r++){
         uint64_t bit=UINT64_C(1)<<(r%64);
         if(!(atomic_load_explicit(&mesh_plane(m,MESH_ROW_OWN)[r/64],memory_order_acquire)&bit)) continue;
         uint64_t need=mesh_mask(m)[r];
@@ -111,9 +129,12 @@ static inline void mesh_reclaim_consumed(struct hdr *m){
       for(uint32_t x=page/64;x<=(page+m->block-1)/64 && consumed;x++)
         if(atomic_load_explicit(&mesh_plane(m,MESH_PAGE_HOT)[x],memory_order_acquire)&mesh_word_mask(page,m->block,x)) consumed=0;
       if(!consumed) continue;
-      mesh_bits_clear(m,MESH_PRESENT,row,m->block);
-      for(uint32_t r=row;r<row+m->block;r++) atomic_store_explicit(&mesh_page(m)[r],MESH_ABSENT,memory_order_release);
-      mesh_bits_clear(m,MESH_ROW_LANDED,row,m->block);
+      if(row!=MESH_ABSENT){
+        mesh_bits_clear(m,MESH_PRESENT,row,m->block);
+        for(uint32_t r=row;r<row+m->block;r++) atomic_store_explicit(&mesh_page(m)[r],MESH_ABSENT,memory_order_release);
+        mesh_bits_clear(m,MESH_ROW_LANDED,row,m->block);
+      }
+      mesh_bits_clear(m,MESH_PAGE_OWN,page,m->block);
       atomic_fetch_and_explicit(&mesh_landed(m)[w],~(UINT64_C(1)<<(b%64)),memory_order_acq_rel);
       mesh_push(m,FREE,page);
     }

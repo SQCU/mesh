@@ -22,6 +22,7 @@ struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
+void mesh_receive_invalidate(struct mesh_ctx *);
 void *mesh_view_create(struct mesh_ctx *,const uint32_t *pages,size_t count);
 int mesh_view_destroy(void *address,size_t length);
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *,size_t);

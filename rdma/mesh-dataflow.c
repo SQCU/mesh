@@ -31,7 +31,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)) continue;
     for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(memory)[b],MESH_ABSENT,memory_order_release);
     mesh_retire_rows(memory);
-    mesh_bits_clear(memory,MESH_PAGE_OWN,0,mesh_rows(memory));
+    mesh_bits_clear(memory,MESH_PAGE_OWN,memory->pool,memory->arena);
     break;
   }
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.fd=file};
@@ -42,13 +42,18 @@ int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(c->M)[b],MESH_ABSENT,memory_order_release);
   mesh_retire_rows(c->M);
-  mesh_bits_clear(c->M,MESH_PAGE_OWN,0,mesh_rows(c->M));
+  mesh_bits_clear(c->M,MESH_PAGE_OWN,c->M->pool,c->M->arena);
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   int error=status?errno:0;
   if(close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};
   return error;
+}
+
+/* design/algorithm-sources.md#receive-storage-before-consumer-binding */
+void mesh_receive_invalidate(struct mesh_ctx *c){
+  mesh_bits_clear(c->M,MESH_PAGE_OWN,0,c->M->pool);
 }
 
 /* design/algorithm-sources.md#registered-memory-views */

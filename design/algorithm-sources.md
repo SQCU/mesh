@@ -38,6 +38,36 @@ Clusters of Workstations*, JPDC 2009, supply the reduction decomposition. They
 do not require independently completed partials to wait for a host-side batch
 receipt before becoming inputs to reduction.
 
+## Receive storage before consumer binding
+
+Apple TN3205 defines receive completion as completion of access to the posted
+registered memory. Papadopoulos and Culler's indexed operand storage supplies
+the separate local association of that memory with a numerical input. A missing
+consumer binding cannot undo an already completed receive.
+
+The receive pool uses the existing physical PAGE_OWN and PAGE_HOT planes.
+Posting establishes both bits; completion clears HOT, records the physical
+landed bit and initializes its inverse logical row to ABSENT. The bridge's
+existing landed-block pass associates that block when its local binding exists.
+Until then it retains the original pages, without a payload copy, extra queue,
+sender message or readiness handshake. Once associated, normal reader masks
+govern consumption. Association precedes release of retired ROW_BOUND bits so
+a binding captured during consumer detach cannot address reallocated rows.
+
+`mesh_receive_invalidate` clears receive-pool PAGE_OWN bits. It takes effect through subsequent bridge progress, not synchronous cancellation.
+It neither waits nor modifies FREE, landed bits or inverse mappings. The bridge alone recycles an
+invalidated block after its receive completes; completion does not restore its
+ownership. Invalidation of associated blocks also removes their logical mapping.
+Ordinary detach and dead-client takeover retire numerical rows and arena ownership,
+preserving unassociated physical arrivals. Associated abandoned rows still follow
+normal reclamation. No new table allocation or per-arrival structure is needed.
+
+Invalidation covers current physical ownership intervals, including posted
+receives, not arbitrarily future traffic using the same binding and index.
+It is not remote-call cancellation. The calling context owns configured storage
+and explicit destruction; replacing the bridge region destroys the whole receive
+table through normal driver teardown. This API adds no transport recovery.
+
 ## Performance evidence
 
 The acceptance target is less than five percent pipeline stall during the

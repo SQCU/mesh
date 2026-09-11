@@ -18,8 +18,14 @@ static int link_post(struct mesh_link *link,int q,int send,uint64_t id,uint32_t 
     if(!error){ link->sends[q]++; link->send_frames+=link->frames; }
   } else {
     struct ibv_recv_wr request={.wr_id=id,.sg_list=&span,.num_sge=1},*bad=NULL;
+    mesh_bits_set(link->M,MESH_PAGE_OWN,page,link->M->block);
+    mesh_bits_set(link->M,MESH_PAGE_HOT,page,link->M->block);
     error=ibv_post_recv(v->pairs[q],&request,&bad);
     if(!error){ link->receives[q]++; link->receive_frames+=link->frames; }
+    else {
+      mesh_bits_clear(link->M,MESH_PAGE_HOT,page,link->M->block);
+      mesh_bits_clear(link->M,MESH_PAGE_OWN,page,link->M->block);
+    }
   }
   if(error){ link->M->port.code=error; link->M->port.domain=1; link->M->port.when=(uint64_t)monotime(); }
   return error;
@@ -53,21 +59,16 @@ static void mesh_progress(struct mesh_link *link){
     if(wc->wr_id>>63){
       uint32_t page=(uint32_t)wc->wr_id;
       link->receives[q]--; link->receive_frames-=link->frames;
+      mesh_bits_clear(M,MESH_PAGE_HOT,page,M->block);
       const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(M,page+M->block-1);
-      uint32_t row=tag->binding<MESH_BINDINGS?atomic_load_explicit(&mesh_base(M)[tag->binding],memory_order_acquire):MESH_ABSENT;
-      if(wc->status || tag->magic!=MESH_TAG || row==MESH_ABSENT || (uint64_t)row+(uint64_t)tag->index*M->block+M->block>mesh_rows(M)){
+      if(wc->status || tag->magic!=MESH_TAG || tag->binding>=MESH_BINDINGS){
         if(!wc->status) atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed);
-        fprintf(stderr,"landing rejected: page=%u status=%d bytes=%u magic=%08x binding=%u index=%u base=%u rows=%u\n",page,wc->status,wc->byte_len,tag->magic,tag->binding,tag->index,row,mesh_rows(M));
+        fprintf(stderr,"landing rejected: page=%u status=%d bytes=%u magic=%08x binding=%u index=%u\n",page,wc->status,wc->byte_len,tag->magic,tag->binding,tag->index);
+        mesh_bits_clear(M,MESH_PAGE_OWN,page,M->block);
         mesh_push(M,FREE,page); continue;
       }
-      row+=tag->index*M->block;
-      mesh_bits_set(M,MESH_ROW_LANDED,row,M->block);
-      for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(M,MESH_READ+p,row,M->block);
-      _Atomic uint32_t *table=mesh_page(M);
-      for(uint32_t k=0;k<M->block;k++) atomic_store_explicit(&table[row+k],page+k,memory_order_release);
-      atomic_store_explicit(&mesh_landing_row(M)[page/M->block],row,memory_order_release);
+      atomic_store_explicit(&mesh_landing_row(M)[page/M->block],MESH_ABSENT,memory_order_release);
       atomic_fetch_or_explicit(&mesh_landed(M)[(page/M->block)/64],UINT64_C(1)<<((page/M->block)%64),memory_order_acq_rel);
-      mesh_bits_set(M,MESH_PRESENT,row,M->block);
       atomic_fetch_add_explicit(&M->recvd,1,memory_order_relaxed);
     } else {
       link->sends[q]--; link->send_frames-=link->frames;
