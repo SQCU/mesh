@@ -1,0 +1,85 @@
+# Algorithm sources
+
+## Independent verbs progress
+
+Apple's [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+defines nonblocking `ibv_post_send`, `ibv_post_recv`, and polling of their
+completion queue. The controller supplies receive credits; application receipts
+are not required to submit another independent operation. Work-completion status
+reports transport errors to the calling context's metadata.
+
+`mesh-flow.c` gives each direction its own queue-capacity accounting. Each
+submission is one literal WR. A failed receive post returns its unowned backing
+to the free index; a failed send post releases the source's table occupancy and
+records the error. Neither direction retains a pending batch that gates the other.
+Every progress pass services both directions and completions with bounded work.
+Normal termination enters verbs teardown without a software loop waiting for a
+peer to consume committed sends. Driver destruction remains the operation that
+releases the device resources.
+
+The removed implementation confused a prepared host descriptor with an occupied
+hardware queue and shared that condition across both directions. Its retry flag
+could consequently stop receives behind a failed send, or stop sends behind a
+failed receive. The descriptor is needed only during the literal post; accepted
+work is represented by the device queue and its page-table indices.
+
+## Operand matching and storage
+
+Gregory Papadopoulos and David Culler, *Monsoon: an Explicit Token-Store
+Architecture*, ISCA 1990, describe operand matching using indexed storage and
+presence state. This is prior art for the function scan, not evidence of this
+implementation's measured utilization. Logical row occupancy and physical page
+occupancy describe different indexed resources. Reattachment cannot erase
+physical ownership held by an outstanding device access.
+
+Rolf Rabenseifner, *Optimization of Collective Reduction Operations*, ICCS 2004,
+and Pitch Patarasuk and Xin Yuan, *Bandwidth Optimal All-reduce Algorithms for
+Clusters of Workstations*, JPDC 2009, supply the reduction decomposition. They
+do not require independently completed partials to wait for a host-side batch
+receipt before becoming inputs to reduction.
+
+## Performance evidence
+
+The acceptance target is less than five percent pipeline stall during the
+linear-algebra-intensive interval on real inputs. Timing belongs to the calling
+measurement context. A host interval with an outstanding command does not prove
+that an accelerator was executing arithmetic. Metal execution timestamps and
+host pending intervals must be reported separately; Core ML's opaque execution
+must not be counted as measured hardware occupancy. Neither a timing simulation
+nor command occupancy alone demonstrates mathematical FLOP utilization.
+
+## Nonblocking table ownership
+
+The indexed operand storage of Papadopoulos and Culler and the literal access
+completion defined by TN3205 have different indices: logical rows belong to
+functions, whereas backing pages belong to memory accesses. Configuration allocates
+from the complement of assigned and outstanding indices. Submission occupies
+both the physical source and its logical completion target; completion releases
+those indices. Attach does not drain another caller's sends or erase its targets.
+
+Issuing a function marks its output rows as being produced. Presence becomes true
+at completion, and reader bits become consumed then. Clearing presence alone was
+insufficient: the next scan could otherwise issue the unfinished operation again.
+
+Only the bridge returns landed blocks to its free index. Numerical completion
+sets reader bits; the bridge checks the configured reader mask through the inverse
+landing-page index. This removes the competing return operations and the FREED
+bit that was cleared before another reader had finished examining it.
+
+Receive bindings retain their logical indices through ROW_BOUND. Detach removes
+the binding and its assigned indices, but the bridge releases ROW_BOUND after its
+current completion pass. Thus a previously captured binding address cannot become
+another allocation halfway through that pass. These are bounded page-table masks;
+no callback waits, reference-count drain, acknowledgement, or generation check is
+needed. Binding addresses become visible only after their reader masks are set.
+
+## Outstanding registered-span defect
+
+The current provider registers aligned one-GiB address extents, but a multi-page
+block selects its key only from its first byte. A block can cross a registration
+boundary. The registration-bank constraint documented in
+[RDMA-KERNEL-RECOVERY.md](RDMA-KERNEL-RECOVERY.md) must be reflected in configured
+contiguous spans before running the replacement API. Registering the whole arena
+would discard the previously observed four-GiB bank constraint. The nonblocking
+ownership changes do not resolve this geometry defect and do not establish the
+performance acceptance target.
