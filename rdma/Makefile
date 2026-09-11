@@ -14,11 +14,8 @@ mesh-verbs-stream: mesh-verbs-stream.c mesh-verbs.h mesh.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -O2 -o .build/$@ mesh-verbs-stream.c -lrdma
 	codesign --force --sign - .build/$@
-libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-stream.c mesh-stream.h mesh.h
-	cc -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-stream.c
-mesh-stream-profile: mesh-stream-profile.c mesh-stream.c mesh-stream.h
-	mkdir -p .build
-	cc -O2 -o .build/$@ mesh-stream-profile.c mesh-stream.c && .build/$@
+libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh.h
+	cc -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c
 clean:
 	rm -f $(BINS)
-.PHONY: all clean mesh-page-stream mesh-verbs-stream mesh-stream-profile
+.PHONY: all clean mesh-page-stream mesh-verbs-stream
