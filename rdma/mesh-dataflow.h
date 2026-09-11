@@ -23,7 +23,7 @@ struct hdr *mesh_region(struct mesh_ctx *);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *,size_t);
-/* Configuration: logical rows, backing pages, the page[] index, constants, bindings. */
+
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_landing_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
@@ -31,7 +31,7 @@ void mesh_map(struct mesh_ctx *,uint32_t first,uint32_t count,uint32_t page);
 void mesh_constant(struct mesh_ctx *,uint32_t first,uint32_t count);
 int mesh_realize(struct mesh_ctx *,struct mesh_row_function *functions,size_t count,
   struct mesh_row_binding *bindings,size_t binding_count,struct mesh_row_map *returns,size_t return_count);
-/* Invocation: readiness is bits, claiming clears bits, publication and consumption set bits. */
+
 void *mesh_row_data(struct mesh_ctx *,uint32_t row);
 int mesh_present(struct mesh_ctx *,struct mesh_row_map,uint32_t index);
 int mesh_available(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index);

@@ -10,19 +10,6 @@ static struct mesh_ctx CTX0;
 struct mesh_ctx *mesh_context(void){ return &CTX0; }
 struct hdr *mesh_region(struct mesh_ctx *c){ return c->M; }
 
-/* A client's table state lives only while it is attached. Attach and detach both leave the table as the
-   bridge expects it: no rows mapped, no bits set, no bindings, every delivered landing block back on the
-   free index. The bridge itself never changes across clients. */
-static void mesh_clear(struct hdr *m){
-  uint32_t rows=mesh_rows(m),words=mesh_words(m);
-  for(int plane=0;plane<MESH_PLANES;plane++) for(uint32_t w=0;w<words;w++) atomic_store_explicit(&mesh_plane(m,plane)[w],0,memory_order_relaxed);
-  for(uint32_t r=0;r<rows;r++) atomic_store_explicit(&mesh_page(m)[r],MESH_ABSENT,memory_order_relaxed);
-  for(uint32_t r=0;r<rows;r++){ mesh_mask(m)[r]=0; mesh_send(m)[r]=0; }
-  for(uint32_t b=0;b<MESH_BINDINGS;b++) mesh_base(m)[b]=MESH_ABSENT;
-  mesh_reclaim_landed(m);
-  atomic_thread_fence(memory_order_release);
-}
-
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
   if(!name) name=getenv("MESH_REGION");
@@ -42,18 +29,15 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
     munmap(memory,(size_t)info.st_size); return EBUSY;
   }
-  /* The previous client's committed sends clear the link before this client may touch the arena. */
-  while(atomic_load_explicit(&memory->r[SUB].head,memory_order_acquire)!=atomic_load_explicit(&memory->r[SUB].tail,memory_order_acquire) ||
-        atomic_load_explicit(&memory->sending,memory_order_acquire)) usleep(100);
-  atomic_fetch_add_explicit(&memory->generation,1,memory_order_acq_rel);
-  mesh_clear(memory);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size};
   return 0;
 }
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  mesh_clear(c->M);
+  for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(c->M)[b],MESH_ABSENT,memory_order_release);
+  mesh_bits_clear(c->M,MESH_ROW_OWN,0,mesh_rows(c->M));
+  mesh_bits_clear(c->M,MESH_PAGE_OWN,0,mesh_rows(c->M));
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   if(status) return errno;
@@ -67,9 +51,32 @@ struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *c,size_t index){
     .peer=port->peer,.code=port->code,.domain=port->domain};
 }
 
+/* design/algorithm-sources.md#nonblocking-table-ownership */
+static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,int own,int hot){
+  for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
+    uint32_t next=first;
+    for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
+      uint64_t occupied=(atomic_load_explicit(&mesh_plane(c->M,own)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,hot)[w],memory_order_acquire)|(own==MESH_ROW_OWN?atomic_load_explicit(&mesh_plane(c->M,MESH_ROW_LANDED)[w],memory_order_acquire):0))&mesh_word_mask(first,count,w);
+      if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
+    }
+    if(next==first){ mesh_bits_set(c->M,own,first,count); return first; }
+    first=(next+align-1)/align*align;
+  }
+  errno=ENOMEM; return MESH_ABSENT;
+}
+
 uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
-  if(!count || c->rows+count>mesh_rows(c->M)){ errno=ENOMEM; return MESH_ABSENT; }
-  uint32_t first=c->rows; c->rows+=count; return first;
+  if(!count){ errno=EINVAL; return MESH_ABSENT; }
+  uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),MESH_ROW_OWN,MESH_ROW_HOT);
+  if(first==MESH_ABSENT) return first;
+  for(int plane=0;plane<MESH_ROW_OWN;plane++) mesh_bits_clear(c->M,plane,first,count);
+  for(int plane=MESH_READ;plane<MESH_PLANES;plane++) mesh_bits_clear(c->M,plane,first,count);
+  for(uint32_t r=first;r<first+count;r++){
+    atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
+    mesh_mask(c->M)[r]=0; mesh_send(c->M)[r]=0;
+  }
+  c->rows+=count;
+  return first;
 }
 
 uint32_t mesh_landing_alloc(struct mesh_ctx *c,uint32_t count){
@@ -81,10 +88,9 @@ uint32_t mesh_landing_alloc(struct mesh_ctx *c,uint32_t count){
 
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align || (align&(align-1))){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=(c->arena+align-1)/align*align;
-  if(first>c->M->arena || pages>c->M->arena-first){ errno=ENOMEM; return MESH_ABSENT; }
-  c->arena=first+pages;
-  return c->M->pool+first;
+  uint32_t first=mesh_allocate(c,pages,align,c->M->pool,mesh_rows(c->M),MESH_PAGE_OWN,MESH_PAGE_HOT);
+  if(first!=MESH_ABSENT) c->arena+=pages;
+  return first;
 }
 
 void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
@@ -101,8 +107,6 @@ static int mesh_is(struct hdr *m,int plane,uint32_t row){
   return (atomic_load_explicit(&mesh_plane(m,plane)[row/64],memory_order_acquire)>>(row%64))&1;
 }
 
-/* Reader planes: each reader of a range takes the lowest plane free on every row of the range;
-   masks record the planes each row must see. Readers of overlapping sub-ranges therefore never collide. */
 static int mesh_survey(struct mesh_ctx *c,const uint8_t *used,uint32_t first,uint32_t count,uint8_t *busy){
   if(!count || (uint64_t)first+count>mesh_rows(c->M)) return EINVAL;
   for(uint32_t r=first;r<first+count;r++) if(!mesh_is(c->M,MESH_CONSTANT,r)) *busy|=used[r];
@@ -179,8 +183,6 @@ void *mesh_row_data(struct mesh_ctx *c,uint32_t row){
   return page==MESH_ABSENT?NULL:mesh_at(c->M,page);
 }
 
-
-/* An input range is ready when every row is present and this reader has not yet read it. */
 static int mesh_ready(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane){
   _Atomic uint64_t *present=mesh_plane(m,MESH_PRESENT),*constant=mesh_plane(m,MESH_CONSTANT),*read=mesh_plane(m,MESH_READ+plane);
   for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
@@ -197,17 +199,17 @@ int mesh_present(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
   return mesh_bits_all(c->M,MESH_PRESENT,r.first,r.count);
 }
 
-/* Present and not yet read by this map's reader: what a return of the calling context waits on. */
 int mesh_available(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
   struct mesh_row_range r=mesh_range(map,index);
   return mesh_ready(c->M,r.first,r.count,map.plane);
 }
 
-/* An output range may be rewritten when it was never produced or every configured reader has read it. */
 static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
   _Atomic uint64_t *present=mesh_plane(m,MESH_PRESENT);
   for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
-    uint64_t pending=atomic_load_explicit(&present[w],memory_order_acquire)&mesh_word_mask(first,count,w);
+    uint64_t bits=mesh_word_mask(first,count,w);
+    if(atomic_load_explicit(&mesh_plane(m,MESH_PRODUCING)[w],memory_order_acquire)&bits) return 0;
+    uint64_t pending=atomic_load_explicit(&present[w],memory_order_acquire)&bits;
     while(pending){
       uint32_t row=w*64+(uint32_t)__builtin_ctzll(pending); pending&=pending-1;
       uint8_t need=mesh_mask(m)[row];
@@ -219,11 +221,9 @@ static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
 
 static void mesh_reset(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_clear(m,MESH_PRESENT,first,count);
-  mesh_bits_clear(m,MESH_FREED,first,count);
   for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,first,count);
 }
 
-/* The calling context publishes a source range once per invocation: it is the invocation's token. */
 int mesh_republish(struct mesh_ctx *c,uint32_t first,uint32_t count){
   if(!mesh_claimable(c->M,first,count)) return 0;
   mesh_reset(c->M,first,count);
@@ -239,7 +239,7 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
     for(uint32_t j=0;j<f->inputs && ready;j++){ struct mesh_row_range r=mesh_range(f->input[j],i); ready=mesh_ready(m,r.first,r.count,f->input[j].plane); }
     for(uint32_t j=0;j<f->outputs && ready;j++){ struct mesh_row_range r=mesh_range(f->output[j],i); ready=mesh_claimable(m,r.first,r.count); }
     if(!ready) continue;
-    for(uint32_t j=0;j<f->outputs;j++){ struct mesh_row_range r=mesh_range(f->output[j],i); mesh_reset(m,r.first,r.count); }
+    for(uint32_t j=0;j<f->outputs;j++){ struct mesh_row_range r=mesh_range(f->output[j],i); mesh_reset(m,r.first,r.count); mesh_bits_set(m,MESH_PRODUCING,r.first,r.count); }
     indices[selected++]=i;
   }
   return selected;
@@ -248,39 +248,21 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
 static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_set(m,MESH_PRESENT,first,count);
   uint8_t *send=mesh_send(m);
-  uint64_t generation=atomic_load_explicit(&m->generation,memory_order_relaxed);
-  for(uint32_t r=first;r<first+count;r++) if(send[r]&0x40)
-    if(mesh_push(m,SUB,mesh_submission(atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire),r,generation,send[r]&7))){ m->port.code=ENOBUFS; m->port.domain=1; }
+  for(uint32_t r=first;r<first+count;r++) if(send[r]&0x40){
+    uint32_t page=atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire);
+    mesh_bits_set(m,MESH_PAGE_HOT,page,m->block);
+    mesh_bits_set(m,MESH_ROW_HOT,r,m->block);
+    uint64_t entry=mesh_submission(page,r,send[r]&7);
+    mesh_push(m,SUB,entry);
+  }
+  mesh_bits_clear(m,MESH_PRODUCING,first,count);
 }
 
-/* Reading is an OR. A landing block whose every reader has read it returns its pages to the free index. */
 static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane){
   _Atomic uint64_t *read=mesh_plane(m,MESH_READ+plane),*constant=mesh_plane(m,MESH_CONSTANT);
   for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
     uint64_t k=mesh_word_mask(first,count,w)&~atomic_load_explicit(&constant[w],memory_order_acquire);
     if(k) atomic_fetch_or_explicit(&read[w],k,memory_order_acq_rel);
-  }
-  uint8_t *send=mesh_send(m),*mask=mesh_mask(m);
-  uint32_t block=m->block;
-  /* Every landing block holding a row of the range is examined, including one that starts before the range. */
-  uint32_t r=first>block?first-block+1:0;
-  while(r<first && !(send[r]&0x80)) r++;
-  for(;r<first+count;r++){
-    if(!(send[r]&0x80)) continue;
-    int done=1;
-    for(uint32_t x=0;x<block && done;x++){
-      uint8_t need=mask[r+x];
-      for(int p=0;need && done;p++,need>>=1) if((need&1) && !mesh_is(m,MESH_READ+p,r+x)) done=0;
-    }
-    if(!done) continue;
-    uint64_t bit=UINT64_C(1)<<(r%64);
-    if(atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREED)[r/64],bit,memory_order_acq_rel)&bit) continue;
-    uint32_t page=atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire);
-    mesh_reset(m,r,block);
-    /* Returned: the landed bit is cleared before the push so the block is in exactly one place. */
-    atomic_fetch_and_explicit(&mesh_landed(m)[(page/block)/64],~(UINT64_C(1)<<((page/block)%64)),memory_order_acq_rel);
-    if(mesh_push(m,FREE,page)){ m->port.code=ENOBUFS; m->port.domain=1; }
-    r+=block-1;
   }
 }
 
