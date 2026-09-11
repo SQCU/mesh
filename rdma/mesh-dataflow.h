@@ -3,7 +3,7 @@
 #include "mesh.h"
 #include <errno.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
-struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,landing,arena; };
+struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,landing,arena; int fd; };
 struct mesh_row_range { uint32_t first,count; };
 struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; };
 struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; };
@@ -22,6 +22,8 @@ struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
+void *mesh_view_create(struct mesh_ctx *,const uint32_t *pages,size_t count);
+int mesh_view_destroy(void *address,size_t length);
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *,size_t);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);

@@ -21,21 +21,20 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   if(fstat(file,&info)){ int error=errno; close(file); return error; }
   struct hdr *memory=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
   int error=errno;
-  close(file);
-  if(memory==MAP_FAILED) return error;
+  if(memory==MAP_FAILED){ close(file); return error; }
   if((size_t)info.st_size<sizeof *memory || memory->magic!=MESH_MAGIC || memory->version!=MESH_VERSION || memory->length>(uint64_t)info.st_size){
-    munmap(memory,(size_t)info.st_size); return EINVAL;
+    munmap(memory,(size_t)info.st_size); close(file); return EINVAL;
   }
   uint64_t vacant=0;
   while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
-    if(!vacant || !kill((pid_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); return EBUSY; }
+    if(!vacant || !kill((pid_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EBUSY; }
     if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)) continue;
     for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(memory)[b],MESH_ABSENT,memory_order_release);
     mesh_retire_rows(memory);
     mesh_bits_clear(memory,MESH_PAGE_OWN,0,mesh_rows(memory));
     break;
   }
-  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size};
+  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.fd=file};
   return 0;
 }
 
@@ -46,10 +45,34 @@ int mesh_detach(struct mesh_ctx *c){
   mesh_bits_clear(c->M,MESH_PAGE_OWN,0,mesh_rows(c->M));
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
-  if(status) return errno;
+  int error=status?errno:0;
+  if(close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};
-  return 0;
+  return error;
 }
+
+/* design/algorithm-sources.md#registered-memory-views */
+void *mesh_view_create(struct mesh_ctx *c,const uint32_t *pages,size_t count){
+  size_t page_bytes=c->M->pgsz;
+  if(!count || count>SIZE_MAX/page_bytes){ errno=EINVAL; return NULL; }
+  for(size_t i=0;i<count;i++) if(pages[i]>=mesh_rows(c->M)){ errno=EINVAL; return NULL; }
+  size_t length=count*page_bytes;
+  unsigned char *address=mmap(NULL,length,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+  if(address==MAP_FAILED) return NULL;
+  for(size_t first=0;first<count;){
+    size_t end=first+1;
+    while(end<count && pages[end]==pages[end-1]+1) end++;
+    off_t offset=(off_t)(c->M->data_off+(uint64_t)pages[first]*page_bytes);
+    if(mmap(address+first*page_bytes,(end-first)*page_bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,c->fd,offset)==MAP_FAILED){
+      int error=errno; munmap(address,length); errno=error; return NULL;
+    }
+    first=end;
+  }
+  return address;
+}
+
+/* design/algorithm-sources.md#registered-memory-views */
+int mesh_view_destroy(void *address,size_t length){ return munmap(address,length)?errno:0; }
 
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *c,size_t index){
   const struct mesh_port_info *port=&c->M->port;
