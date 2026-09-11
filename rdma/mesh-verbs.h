@@ -218,7 +218,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   double exchange_deadline=monotime()+10;
   if(exchange(f,peer?NULL:&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.header_bytes!=mine.header_bytes || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
-    fprintf(stderr,"peer speaks a different exchange, failed\n"); close(f); return -1; }
+    fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.header_bytes,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.header_bytes,you.count,you.node,expected_peer); close(f); return -1; }
   expected_peer=you.node;
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psns[q],
