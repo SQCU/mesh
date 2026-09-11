@@ -116,7 +116,7 @@ uint32_t mesh_landing_alloc(struct mesh_ctx *c,uint32_t count){
 }
 
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
-  if(!pages || !align || (align&(align-1))){ errno=EINVAL; return MESH_ABSENT; }
+  if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   uint32_t first=mesh_allocate(c,pages,align,c->M->pool,mesh_rows(c->M),MESH_PAGE_OWN,MESH_PAGE_HOT);
   if(first!=MESH_ABSENT) c->arena+=pages;
   return first;
