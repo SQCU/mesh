@@ -85,23 +85,22 @@ A tile is contiguous memory: a block's pages are consecutive in the arena and
 in a landing block. A function therefore addresses a tile by one base and the
 rows inside it by offset. No per-element lookup exists.
 
-**Tile ordering.** Each node produces every tile of a partial and owns the
-reduction of a subset. The order in which a node produces its calls is the
-order the tiles arrive at the peer and the earliest order the peer can consume
-them. That order is chosen by a model of the stream, not by the caller. The
-model (`rdma/mesh-stream.h`) is an event simulation of the two-node
-dependency graph: a call on node n completes `produce_ns` after it starts and
-its tiles are present; a tile not owned by n is a block on the link for
-`transfer_ns` and lands on the peer when the peer has a posted receive (at
-most `window` blocks landed and unconsumed per direction); the owner's reduce
-of a tile starts when its own and the peer's partial are present and takes
-`reduce_ns`; the reduced tile returns to the peer as a block under the same
-credit. Candidate orders are: peer-owned calls first, own calls first, and
-interleavings of period k. The plan is the candidate of least makespan whose
-peak of landed-unconsumed blocks fits the window; it also reports each node's
-predicted idle fraction. The prediction is a reportable: every run prints
-predicted and measured stall; a disagreement is a defect in the model or the
-code, found by the comparison, never by tuning.
+**Function boundaries.** Configuration chooses the numerical backend's call
+shapes and the row extents consumed and produced by each function. Those
+boundaries describe actual arithmetic dependencies. A projection reads its
+activation rows; it does not depend on other projections having completed.
+Reduction reads the matching local and remote partials; it does not depend on
+completion of every partial in the tensor. A completed output extent becomes
+available to transport and arithmetic independently of unrelated output extents.
+
+A command containing several dependent numerical operations exposes only its
+final completion. When that hides an intermediate needed by independently
+executable functions, the configured graph must expose that intermediate as an
+output and give its consumers their own functions. This does not require changing
+the selected numerical kernels or replacing their measured call shapes.
+
+Timing models and utilization measurements belong to the calling context, not
+to this specification. They do not authorize additional data dependencies.
 
 ## One NFE on two peers
 
