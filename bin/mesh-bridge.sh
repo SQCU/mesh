@@ -79,7 +79,15 @@ do_stop() {
 }
 
 do_start() {
-  [ -n "$(pid_of)" ] && { echo "mesh-bridge: already running as $(pid_of)"; return 0; }
+  if [ -n "$(pid_of)" ]; then
+    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(pool|arena|block)"' | tr -d '" ' | tr '\n' ' ')
+    want="arena:$mesh_arena_pages block:$mesh_block_pages pool:$mesh_receive_pages"
+    if echo "$have" | grep -q "pool:$mesh_receive_pages" && echo "$have" | grep -q "arena:$mesh_arena_pages" && echo "$have" | grep -q "block:$mesh_block_pages"; then
+      echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
+    fi
+    echo "mesh-bridge: running with other geometry ($have); restarting for $want"
+    do_stop || return $?
+  fi
   wire_check || return $?
   write_plist
   launchctl bootstrap "$DOM" "$PLIST"

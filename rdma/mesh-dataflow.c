@@ -10,6 +10,19 @@ static struct mesh_ctx CTX0;
 struct mesh_ctx *mesh_context(void){ return &CTX0; }
 struct hdr *mesh_region(struct mesh_ctx *c){ return c->M; }
 
+/* A client's table state lives only while it is attached. Attach and detach both leave the table as the
+   bridge expects it: no rows mapped, no bits set, no bindings, every delivered landing block back on the
+   free index. The bridge itself never changes across clients. */
+static void mesh_clear(struct hdr *m){
+  uint32_t rows=mesh_rows(m),words=mesh_words(m);
+  for(int plane=0;plane<MESH_PLANES;plane++) for(uint32_t w=0;w<words;w++) atomic_store_explicit(&mesh_plane(m,plane)[w],0,memory_order_relaxed);
+  for(uint32_t r=0;r<rows;r++) atomic_store_explicit(&mesh_page(m)[r],MESH_ABSENT,memory_order_relaxed);
+  for(uint32_t r=0;r<rows;r++){ mesh_mask(m)[r]=0; mesh_send(m)[r]=0; }
+  for(uint32_t b=0;b<MESH_BINDINGS;b++) mesh_base(m)[b]=MESH_ABSENT;
+  mesh_reclaim_landed(m);
+  atomic_thread_fence(memory_order_release);
+}
+
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
   if(!name) name=getenv("MESH_REGION");
@@ -29,12 +42,18 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
     munmap(memory,(size_t)info.st_size); return EBUSY;
   }
+  /* The previous client's committed sends clear the link before this client may touch the arena. */
+  while(atomic_load_explicit(&memory->r[SUB].head,memory_order_acquire)!=atomic_load_explicit(&memory->r[SUB].tail,memory_order_acquire) ||
+        atomic_load_explicit(&memory->sending,memory_order_acquire)) usleep(100);
+  atomic_fetch_add_explicit(&memory->generation,1,memory_order_acq_rel);
+  mesh_clear(memory);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size};
   return 0;
 }
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
+  mesh_clear(c->M);
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   if(status) return errno;
@@ -214,8 +233,9 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
 static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_set(m,MESH_PRESENT,first,count);
   uint8_t *send=mesh_send(m);
+  uint64_t generation=atomic_load_explicit(&m->generation,memory_order_relaxed);
   for(uint32_t r=first;r<first+count;r++) if(send[r]&0x40)
-    if(mesh_push(m,SUB,((uint64_t)r<<8)|(send[r]&7))){ m->port.code=ENOBUFS; m->port.domain=1; }
+    if(mesh_push(m,SUB,mesh_submission(atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire),r,generation,send[r]&7))){ m->port.code=ENOBUFS; m->port.domain=1; }
 }
 
 /* Reading is an OR. A landing block whose every reader has read it returns its pages to the free index. */
