@@ -61,7 +61,7 @@ static void mesh_progress(struct mesh_link *link){
       link->receives[q]--; link->receive_frames-=link->frames;
       mesh_bits_clear(M,MESH_PAGE_HOT,page,M->block);
       const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(M,page+M->block-1);
-      if(wc->status || tag->magic!=MESH_TAG || tag->binding>=MESH_BINDINGS){
+      if(wc->status || tag->magic!=MESH_TAG || tag->binding==MESH_ABSENT){
         if(!wc->status) atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed);
         fprintf(stderr,"landing rejected: page=%u status=%d bytes=%u magic=%08x binding=%u index=%u\n",page,wc->status,wc->byte_len,tag->magic,tag->binding,tag->index);
         mesh_bits_clear(M,MESH_PAGE_OWN,page,M->block);
@@ -119,7 +119,7 @@ int main(int argc,char**argv){
   if(M==MAP_FAILED) die("mmap"); shm=name;
   *M=geometry; M->node=(uint32_t)me; M->version=MESH_VERSION;
   for(uint32_t r=0;r<mesh_rows(M);r++) atomic_store_explicit(&mesh_page(M)[r],MESH_ABSENT,memory_order_relaxed);
-  for(uint32_t b=0;b<MESH_BINDINGS;b++) mesh_base(M)[b]=MESH_ABSENT;
+  for(uint32_t b=0;b<MESH_BINDINGS;b++) mesh_base(M)[b]=UINT64_MAX;
   for(uint32_t page=0;page<M->pool;page+=M->block) mesh_push(M,FREE,page);
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize(); M->magic=MESH_MAGIC;

@@ -32,6 +32,7 @@ uint32_t mesh_landing_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_arena_release(struct mesh_ctx *,uint32_t first,uint32_t count);
+uint32_t mesh_bindings_reserve(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_bindings_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_map(struct mesh_ctx *,uint32_t first,uint32_t count,uint32_t page);
 void mesh_constant(struct mesh_ctx *,uint32_t first,uint32_t count);

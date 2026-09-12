@@ -39,7 +39,7 @@ Concretely, one region of registered memory per node holds, in this order:
   per reader ordinal. A plane is one bit per row, sixty-four rows per word;
 - `page[row]`: which backing page a logical row currently names;
 - `mask[row]`: which READ planes must be set before the row's value is done;
-- `base[binding]`: the first logical row of each receive binding;
+- `base[binding % 4096]`: the configured identity and first logical row of each receive binding, atomically addressed together;
 - the pages.
 
 The table gives every actor — bridge, client threads, GPU, peer — enough

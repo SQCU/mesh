@@ -183,14 +183,9 @@ programs. Numerical callbacks retain their graph, so graph-owned values cannot
 be retired before their final callback completes. This is storage ownership,
 not a new execution readiness condition or a polling mechanism.
 
-Binding ranges are reserved monotonically during sequential configuration from
-the actual fixed table capacity, with no per-operation stride assumption.
-Both participants compile the same ordered program configuration to obtain the
-same ranges. Retired binding numbers are not recycled while that region storage
-instance remains alive; exhaustion is a compile metadata error. The last owner
-releases the instance and its namespace. Supporting independently ordered
-compilations would require an explicitly shared configuration identity; the
-implementation does not invent a runtime handshake to infer one.
+Binding ranges use the configured identity mapping described below. Slot reuse
+retains the identity in the existing receive table, so local storage retirement
+cannot cause an earlier transfer to address another program.
 
 ## Literal weight pages
 
@@ -205,10 +200,45 @@ contiguous virtual tensor views over those same backing pages; it does not creat
 a second payload store. This citation identifies the storage and execution
 separation, not a claim that Monsoon specifies today's tensor ABI or weight format.
 
-The caller's current binding counter is scoped to the region storage object,
-not the surviving bridge connection. Destroying that final object and attaching
-a new one resets the counter and can reuse an old identity on the same connection.
-Consequently this implementation does not establish isolation across that
-transition. The configured identity must ultimately be scoped to the connection
-or preserved distinctly in transfer lookup; local row retirement is not proof
-that a peer has no old sends. This remains open implementation work.
+## Configured binding identities
+
+Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture*, ISCA
+1990, supply the indexed operand-store principle. The configured binding identity
+names an address interpretation in that store; it is not an arithmetic readiness
+stamp, receipt, or peer progress counter. Apple TN3205 still supplies the same
+literal SEND/RECV operations and completion semantics.
+
+ABI 18 keeps the existing 16-byte transfer tag and its 32-bit binding field.
+That field now names the complete configured identity. The fixed receive table
+slot is `identity % 4096`; one atomic 64-bit table entry holds the identity and
+logical base together. A reserved entry has no base until configuration realizes
+its reader masks and receive mapping. Retirement removes that base while retaining
+the identity. Reusing a slot requires a strictly greater identity and an unowned
+slot. These are configuration address allocations, not per-invocation checks or
+transport messages.
+
+A receive whose identity equals the slot's active identity maps to its logical
+base. A newer identity, an untouched slot, or the matching reservation retains
+the existing early-arrival behavior until configuration supplies the base. An
+older identity, or the matching retired identity, has no destination and its
+landing pages return through the existing free index. Thus a late transfer cannot
+become an operand of a new program that happens to reuse the same table slot.
+The incoming payload is never copied or interpreted by this address resolution.
+
+`mesh_bindings_reserve` accepts an explicit first identity, or `UINT32_MAX` for
+the existing ordered-configuration allocator. Explicit identities allow different
+handles in different table slots to compile in different orders on the peers;
+the caller supplies the same identity and operation/version ordering to both.
+Colliding live slots and non-increasing reuse are reported as compile errors.
+Implicit allocation uses a high-water value in the shared region header, which
+survives client detach/reattach and only resets when the bridge constructs a new
+region and connection. Implicit callers must have matching configuration history
+on both participants; independently ordered callers use explicit identities.
+
+The 4096-entry table limits simultaneous occupied slots, not cumulative handle
+creation. Retired slots are reusable with newer identities. The 32-bit identity
+space never wraps: exhaustion reports compile metadata and requires a new
+configured connection. An explicit identity range must not include UINT32_MAX.
+Unused reserved slots and failed configuration reservations are retired. No
+transport acknowledgement, handshake, wait, recovery message or payload side
+channel was introduced.

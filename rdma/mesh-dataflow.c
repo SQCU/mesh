@@ -30,7 +30,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
     if(!vacant || !kill((pid_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EBUSY; }
     if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)) continue;
-    for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(memory)[b],MESH_ABSENT,memory_order_release);
+    for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_fetch_or_explicit(&mesh_base(memory)[b],UINT32_MAX,memory_order_acq_rel);
     mesh_retire_rows(memory);
     mesh_bits_clear(memory,MESH_PAGE_OWN,memory->pool,memory->arena);
     break;
@@ -41,7 +41,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_store_explicit(&mesh_base(c->M)[b],MESH_ABSENT,memory_order_release);
+  for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_fetch_or_explicit(&mesh_base(c->M)[b],UINT32_MAX,memory_order_acq_rel);
   mesh_retire_rows(c->M);
   mesh_bits_clear(c->M,MESH_PAGE_OWN,c->M->pool,c->M->arena);
   atomic_store_explicit(&c->M->client,0,memory_order_release);
@@ -144,9 +144,37 @@ void mesh_arena_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(c->M,MESH_PAGE_OWN,first,count);
 }
 
-/* design/algorithm-sources.md#independent-configured-programs */
+/* design/algorithm-sources.md#configured-binding-identities */
+uint32_t mesh_bindings_reserve(struct mesh_ctx *c,uint32_t requested,uint32_t count){
+  struct hdr *m=c->M;
+  if(!count || count>MESH_BINDINGS){ errno=EINVAL; return MESH_ABSENT; }
+  uint64_t first=requested==MESH_ABSENT?atomic_load_explicit(&m->binding_next,memory_order_acquire):requested;
+  for(uint32_t attempt=0;attempt<MESH_BINDINGS;attempt++){
+    if(first+count>UINT32_MAX){ errno=ENOSPC; return MESH_ABSENT; }
+    uint32_t blocked=count;
+    for(uint32_t i=0;i<count;i++){
+      uint64_t entry=atomic_load_explicit(&mesh_base(m)[(first+i)%MESH_BINDINGS],memory_order_acquire);
+      if(entry!=UINT64_MAX && ((uint32_t)entry!=MESH_ABSENT || first+i<=(uint32_t)(entry>>32))){ blocked=i; break; }
+    }
+    if(blocked==count){
+      for(uint32_t i=0;i<count;i++) atomic_store_explicit(&mesh_base(m)[(first+i)%MESH_BINDINGS],((first+i)<<32)|MESH_RESERVED,memory_order_release);
+      uint64_t next=atomic_load_explicit(&m->binding_next,memory_order_acquire);
+      if(first+count>next) atomic_store_explicit(&m->binding_next,first+count,memory_order_release);
+      return (uint32_t)first;
+    }
+    if(requested!=MESH_ABSENT){ errno=EEXIST; return MESH_ABSENT; }
+    first+=blocked+1;
+  }
+  errno=ENOSPC; return MESH_ABSENT;
+}
+
+/* design/algorithm-sources.md#configured-binding-identities */
 void mesh_bindings_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  for(uint32_t b=first;b<first+count;b++) atomic_store_explicit(&mesh_base(c->M)[b],MESH_ABSENT,memory_order_release);
+  for(uint32_t b=first;b<first+count;b++){
+    _Atomic uint64_t *slot=&mesh_base(c->M)[b%MESH_BINDINGS];
+    uint64_t entry=atomic_load_explicit(slot,memory_order_acquire);
+    if((uint32_t)(entry>>32)==b) atomic_store_explicit(slot,((uint64_t)b<<32)|MESH_ABSENT,memory_order_release);
+  }
 }
 
 void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
@@ -210,7 +238,9 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
   }
   for(size_t i=0;i<binding_count && !error;i++){
     struct mesh_row_binding *b=&bindings[i];
-    if(!b->count || b->count%block || (uint64_t)b->first+b->count>rows || b->binding>=MESH_BINDINGS){ error=EINVAL; break; }
+    if(!b->count || b->count%block || (uint64_t)b->first+b->count>rows || b->binding==MESH_ABSENT){ error=EINVAL; break; }
+    uint64_t reservation=atomic_load_explicit(&mesh_base(m)[b->binding%MESH_BINDINGS],memory_order_acquire);
+    if(reservation!=(((uint64_t)b->binding<<32)|MESH_RESERVED)){ error=EINVAL; break; }
     if(b->receive){
       for(uint32_t k=0;k<b->count;k+=block) mesh_send(m)[b->first+k]|=0x80;
       continue;
@@ -234,7 +264,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
     for(size_t i=0;i<binding_count;i++) if(bindings[i].receive){
       struct mesh_row_binding *b=&bindings[i];
       mesh_bits_set(m,MESH_ROW_BOUND,b->first,b->count);
-      atomic_store_explicit(&mesh_base(m)[b->binding],b->first,memory_order_release);
+      atomic_store_explicit(&mesh_base(m)[b->binding%MESH_BINDINGS],((uint64_t)b->binding<<32)|b->first,memory_order_release);
     }
   }
   free(used);

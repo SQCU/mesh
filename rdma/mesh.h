@@ -9,10 +9,11 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 17u
+#define MESH_VERSION 18u
 #define MESH_RING 65536
 #define MESH_BINDINGS 4096
 #define MESH_ABSENT UINT32_MAX
+#define MESH_RESERVED (UINT32_MAX-1u)
 enum { SUB, FREE, NRING };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_ROW_LANDED, MESH_ROW_BOUND, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+64 };
@@ -23,7 +24,7 @@ struct mesh_tag { uint32_t magic,binding,index,reserved; };
 struct hdr {
   uint32_t magic,version,pgsz,block,pool,arena,node,reserved;
   uint64_t rings_off,planes_off,page_off,mask_off,send_off,base_off,landed_off,landing_row_off,changed_off,data_off,length;
-  _Atomic uint64_t client,bridge_pid,sent,recvd,bad,sending;
+  _Atomic uint64_t client,bridge_pid,sent,recvd,bad,sending,binding_next;
   struct mesh_port_info port;
   struct ring r[NRING];
 };
@@ -33,7 +34,8 @@ static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_At
 static inline _Atomic uint32_t *mesh_page(struct hdr *m){ return (_Atomic uint32_t*)((unsigned char*)m+m->page_off); }
 static inline uint64_t *mesh_mask(struct hdr *m){ return (uint64_t*)((unsigned char*)m+m->mask_off); }
 static inline uint8_t *mesh_send(struct hdr *m){ return (uint8_t*)m+m->send_off; }
-static inline _Atomic uint32_t *mesh_base(struct hdr *m){ return (_Atomic uint32_t*)((unsigned char*)m+m->base_off); }
+/* design/algorithm-sources.md#configured-binding-identities */
+static inline _Atomic uint64_t *mesh_base(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->base_off); }
 
 static inline _Atomic uint64_t *mesh_landed(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->landed_off); }
 /* design/algorithm-sources.md#nonblocking-table-ownership */
@@ -103,9 +105,12 @@ static inline void mesh_reclaim_consumed(struct hdr *m){
       int owned=mesh_bits_all(m,MESH_PAGE_OWN,page,m->block);
       if(row==MESH_ABSENT && owned){
         const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(m,page+m->block-1);
-        uint32_t base=atomic_load_explicit(&mesh_base(m)[tag->binding],memory_order_acquire);
-        if(base==MESH_ABSENT) continue;
-        if((uint64_t)base+(uint64_t)tag->index*m->block+m->block>mesh_rows(m)){
+        uint64_t entry=atomic_load_explicit(&mesh_base(m)[tag->binding%MESH_BINDINGS],memory_order_acquire);
+        uint32_t identity=(uint32_t)(entry>>32),base=(uint32_t)entry;
+        if(entry==UINT64_MAX || tag->binding>identity || (tag->binding==identity && base==MESH_RESERVED)) continue;
+        if(tag->binding!=identity || base==MESH_ABSENT){
+          owned=0;
+        } else if((uint64_t)base+(uint64_t)tag->index*m->block+m->block>mesh_rows(m)){
           atomic_fetch_add_explicit(&m->bad,1,memory_order_relaxed);
           owned=0;
         } else {
@@ -168,7 +173,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->page_off=at; at+=rows*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->mask_off=at; at+=rows*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->send_off=at; at+=rows; at=(at+pgsz-1)/pgsz*pgsz;
-  h->base_off=at; at+=(uint64_t)MESH_BINDINGS*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->base_off=at; at+=(uint64_t)MESH_BINDINGS*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->landed_off=at; at+=((uint64_t)pool/block+63)/64*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->landing_row_off=at; at+=(uint64_t)pool/block*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->changed_off=at; at+=(words+63)/64*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;

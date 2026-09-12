@@ -29,7 +29,9 @@ int main(int argc,char **argv){
   if(first==MESH_ABSENT || (!receive && page==MESH_ABSENT)){ fprintf(stderr,"allocate=%d\n",errno); return 1; }
   struct mesh_row_map map={.first=first,.count=n,.stride=n};
   struct mesh_row_function function={.output=&map,.outputs=1,.rows=1};
-  struct mesh_row_binding binding={.first=first,.count=n,.binding=1,.peer=peer,.receive=(uint16_t)receive};
+  uint32_t identity=mesh_bindings_reserve(context,MESH_ABSENT,1);
+  if(identity==MESH_ABSENT){ fprintf(stderr,"binding=%d\n",errno); return 1; }
+  struct mesh_row_binding binding={.first=first,.count=n,.binding=identity,.peer=peer,.receive=(uint16_t)receive};
   struct mesh_row_map held={.first=first,.count=n};
   status=mesh_realize(context,&function,receive?0:1,&binding,1,&held,receive?1:0);
   if(status){ fprintf(stderr,"realize=%d\n",status); return 1; }
