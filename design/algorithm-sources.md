@@ -204,3 +204,11 @@ Apple's shared mapping mechanism described under registered memory views supplie
 contiguous virtual tensor views over those same backing pages; it does not create
 a second payload store. This citation identifies the storage and execution
 separation, not a claim that Monsoon specifies today's tensor ABI or weight format.
+
+The caller's current binding counter is scoped to the region storage object,
+not the surviving bridge connection. Destroying that final object and attaching
+a new one resets the counter and can reuse an old identity on the same connection.
+Consequently this implementation does not establish isolation across that
+transition. The configured identity must ultimately be scoped to the connection
+or preserved distinctly in transfer lookup; local row retirement is not proof
+that a peer has no old sends. This remains open implementation work.
