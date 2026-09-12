@@ -262,3 +262,18 @@ over actual mesh pages, with one dependency extent per configured output extent.
 This supports FP32 input/output representation; it does not claim an FP32 model
 or replace the configured backend precision. No shadow copy or runtime backend
 selection realizes the conversion.
+
+## Online percentage moments
+
+B. P. Welford, [“Note on a Method for Calculating Corrected Sums of Squares and
+Products”](https://www.tandfonline.com/doi/abs/10.1080/00401706.1962.10490022),
+*Technometrics* 4(3), 419–420 (1962), supplies the constant-storage update:
+`n += 1; delta = x - mean; mean += delta/n; M2 += delta*(x-mean)`.
+Calling-context percentage reports carry count, mean and sample variance
+`M2/(n-1)`. Mean is null for an empty stream; variance is null until two samples
+exist. Percentage inputs use the 0–100 scale, so variance has squared
+percentage-point units. Warmup observations remain excluded.
+
+These accumulators belong to reporting, outside numerical functions and mesh
+transport. Updating moments neither changes a percentage's numerator/denominator
+nor adds any readiness condition, traffic or device synchronization.
