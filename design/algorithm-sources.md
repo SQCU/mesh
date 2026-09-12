@@ -242,3 +242,23 @@ configured connection. An explicit identity range must not include UINT32_MAX.
 Unused reserved slots and failed configuration reservations are retired. No
 transport acknowledgement, handshake, wait, recovery message or payload side
 channel was introduced.
+
+## Column and row tensor composition
+
+Shoeybi, Patwary, Puri, LeGresley, Casper and Catanzaro,
+[Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053)
+(2019), describe intra-layer tensor parallelism. The port uses its complementary
+matrix partitions: participant p computes `Z_p = X A_p` from its output-column
+slice of A, then `Y_p = Z_p B_p` from the matching input-row slice of B.
+Only `sum_p Y_p` requires distributed reduction. A column result is a local
+numerical value; no all-gather is inserted between these matching contractions.
+Papadopoulos and Culler's indexed operand matching supplies the execution rule
+for these configured matrix functions. The existing local MatrixOperations
+implementation and specialization remain the arithmetic owner.
+
+FP32 interface values are explicitly converted at numerical boundaries when the
+configured model uses FP16 operands. Conversion is an indexed elementwise function
+over actual mesh pages, with one dependency extent per configured output extent.
+This supports FP32 input/output representation; it does not claim an FP32 model
+or replace the configured backend precision. No shadow copy or runtime backend
+selection realizes the conversion.
