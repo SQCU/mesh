@@ -155,3 +155,52 @@ The view therefore joins numerical payload pages in virtual memory while the
 bridge continues to submit their original registered addresses. Logical indices,
 dense tensor offsets, and registered addresses remain separate representations
 of the same underlying bytes.
+
+
+## Independent configured programs
+
+Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture*, ISCA
+1990, separate indexed operand ownership from the functions that use the
+operands. Each configured program here owns disjoint logical rows, backing
+allocations and receive-binding indices in the existing table. Realizing a
+second program begins with the table's existing reader masks, preserving the
+readers already assigned to the first program. Newly allocated rows have zero
+reader masks through the existing allocator.
+
+`mesh_rows_release` clears only its logical ownership range and marks changed
+receive-bound words for the bridge's existing retirement pass.
+`mesh_arena_release` clears only its physical ownership range; transport HOT
+indices remain occupied until intrinsic completion. `mesh_bindings_release`
+removes only the configured binding indices. None detaches another program,
+waits for a peer, or clears another program's reader registration.
+
+The Swift caller shares one region storage object per configured region name.
+Its weak registry does not retain unused regions. Configured values and graph
+completion closures retain that object through their existing lexical owners;
+only its final destruction detaches and unmaps the client region. Closing a
+calling context drops that context's cached values, without detaching surviving
+programs. Numerical callbacks retain their graph, so graph-owned values cannot
+be retired before their final callback completes. This is storage ownership,
+not a new execution readiness condition or a polling mechanism.
+
+Binding ranges are reserved monotonically during sequential configuration from
+the actual fixed table capacity, with no per-operation stride assumption.
+Both participants compile the same ordered program configuration to obtain the
+same ranges. Retired binding numbers are not recycled while that region storage
+instance remains alive; exhaustion is a compile metadata error. The last owner
+releases the instance and its namespace. Supporting independently ordered
+compilations would require an explicitly shared configuration identity; the
+implementation does not invent a runtime handshake to infer one.
+
+## Literal weight pages
+
+Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture* (1990),
+provide the indexed operand-store model used here. Configuration resolves the
+parameter values and their ownership before numerical invocation. The port's
+strided f16/f32 parameter reader materializes each declared shard into its actual
+registered operand pages during configuration. Invocation neither consults the
+original descriptor nor substitutes a file-backed parameter for a supplied one.
+Apple's shared mapping mechanism described under registered memory views supplies
+contiguous virtual tensor views over those same backing pages; it does not create
+a second payload store. This citation identifies the storage and execution
+separation, not a claim that Monsoon specifies today's tensor ABI or weight format.

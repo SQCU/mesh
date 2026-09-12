@@ -30,6 +30,9 @@ struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *,size_t);
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_landing_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
+void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
+void mesh_arena_release(struct mesh_ctx *,uint32_t first,uint32_t count);
+void mesh_bindings_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_map(struct mesh_ctx *,uint32_t first,uint32_t count,uint32_t page);
 void mesh_constant(struct mesh_ctx *,uint32_t first,uint32_t count);
 int mesh_realize(struct mesh_ctx *,struct mesh_row_function *functions,size_t count,

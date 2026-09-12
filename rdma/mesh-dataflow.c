@@ -1,6 +1,7 @@
 #include <signal.h>
 #include "mesh-dataflow.h"
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -127,6 +128,27 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   return first;
 }
 
+/* design/algorithm-sources.md#independent-configured-programs */
+void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  struct hdr *m=c->M;
+  for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++){
+    uint64_t bits=mesh_word_mask(first,count,w);
+    uint64_t owned=atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],~bits,memory_order_acq_rel)&bits;
+    uint64_t bound=atomic_load_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],memory_order_acquire);
+    if(bound&owned) atomic_fetch_or_explicit(&mesh_changed(m)[w/64],UINT64_C(1)<<(w%64),memory_order_release);
+  }
+}
+
+/* design/algorithm-sources.md#independent-configured-programs */
+void mesh_arena_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  mesh_bits_clear(c->M,MESH_PAGE_OWN,first,count);
+}
+
+/* design/algorithm-sources.md#independent-configured-programs */
+void mesh_bindings_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  for(uint32_t b=first;b<first+count;b++) atomic_store_explicit(&mesh_base(c->M)[b],MESH_ABSENT,memory_order_release);
+}
+
 void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
   _Atomic uint32_t *table=mesh_page(c->M);
   for(uint32_t i=0;i<count;i++) atomic_store_explicit(&table[first+i],page+i,memory_order_release);
@@ -158,8 +180,9 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
   struct mesh_row_binding *bindings,size_t binding_count,struct mesh_row_map *returns,size_t return_count){
   struct hdr *m=c->M;
   uint32_t rows=mesh_rows(m),block=m->block;
-  uint64_t *used=calloc(rows,sizeof *used);
+  uint64_t *used=malloc(rows*sizeof *used);
   if(!used) return ENOMEM;
+  memcpy(used,mesh_mask(m),rows*sizeof *used);
   int error=0;
   for(size_t i=0;i<count && !error;i++){
     struct mesh_row_function *f=&functions[i];
