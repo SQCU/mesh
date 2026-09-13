@@ -123,7 +123,7 @@ an independent numerical expectation after completion and checks every output,
 its peer-owned gathered replica, finiteness and row sums.
 
 After four warmups, ordinary and withheld-input runs alternate. Withholding
-extent zero must leave its producer output absent while group one finishes.
+extent zero must leave its producer output unavailable for a new read while group one finishes.
 Only after observing that completed group does the caller supply extent zero.
 This is an input-dependency experiment, not clock-coordinated device launch.
 The 30-second limit is solely the acceptance process's failure deadline.

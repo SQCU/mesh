@@ -63,6 +63,7 @@ int main(int argc,char **argv) {
   check(mesh_algebra_transfer(a,gathered,(uint32_t)(1-rank),100+(uint32_t)(1-rank),(uint16_t)(1-rank),1));
   check(mesh_algebra_return(a,gathered,(uint32_t)(1-rank)));
   for(uint32_t group=0;group<2;group++)check(mesh_algebra_return(a,statistics,group));
+  check(mesh_algebra_return(a,p,0));
   check(mesh_algebra_realize(a));
   double means[2]={0},m2[2]={0},earlyMean=0,earlyM2=0,maxError=0;
   size_t independent=0;double start=now();
@@ -75,7 +76,7 @@ int main(int argc,char **argv) {
         mesh_algebra_scan(a);
         if(now()-began>30){fprintf(stderr,"independent extent did not complete while extent zero was absent\n");return 3;}
       }
-      if(mesh_present(&context,mesh_tensor_rows(p,0),0) || mesh_algebra_available(a,0)){fprintf(stderr,"premature publication\n");return 4;}
+      if(mesh_algebra_available(a,5) || mesh_algebra_available(a,0)){fprintf(stderr,"premature publication\n");return 4;}
       independent++;
       moment(independent,(now()-began)*1e3,&earlyMean,&earlyM2);
       check(mesh_tensor_publish(x,0)?0:EBUSY);
@@ -86,7 +87,7 @@ int main(int argc,char **argv) {
       check((int)report.code);
       struct mesh_row_metadata link=mesh_link_metadata(&context,0);check((int)link.code);
       int ready=report.submitted==report.completed;
-      for(size_t i=0;i<5;i++)ready=ready && mesh_algebra_available(a,i);
+      for(size_t i=0;i<6;i++)ready=ready && mesh_algebra_available(a,i);
       if(ready)break;
       if(now()-began>30){fprintf(stderr,"completion timeout trial %zu\n",trial);return 5;}
     }
@@ -111,7 +112,7 @@ int main(int argc,char **argv) {
         if(!isfinite(stat[r]) || fabs(stat[r]-total)>2e-4){fprintf(stderr,"row reduction mismatch\n");return 7;}
       }
     }
-    for(size_t i=0;i<5;i++)mesh_algebra_consume(a,i);
+    for(size_t i=0;i<6;i++)mesh_algebra_consume(a,i);
   }
   struct mesh_algebra_report report=mesh_algebra_report(a);
   printf("{\"rank\":%d,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"independent_completions\":%zu,\"max_absolute_error\":%.9g,\"normal_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%.9g},\"delayed_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%.9g},\"early_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%.9g},\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,rows,2*k,n,independent,maxError,repetitions,means[0],repetitions>1?m2[0]/(repetitions-1):0,repetitions,means[1],repetitions>1?m2[1]/(repetitions-1):0,independent,earlyMean,independent>1?earlyM2/(independent-1):0,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
