@@ -58,6 +58,12 @@ class Ref:
             raise ValueError('Incompatible broadcast shape')
         return Ref(self.program, view, self.dtype)
 
+    @property
+    # design/algorithm-sources.md#streaming-overlap-measurement
+    def present(self):
+        self.whole()
+        return bool(self.program.native.tensor_present(self.view.tensor, self.view.extent))
+
     # design/algorithm-sources.md#indexed-library-functions
     def on(self, peer):
         return (self, peer)

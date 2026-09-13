@@ -49,6 +49,7 @@ class Native:
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
             'mesh_view_transpose': (View, [View]),
             'mesh_view_broadcast': (View, [View, Z, Z]),
+            'mesh_tensor_present': (C.c_int, [P, U]),
             'mesh_tensor_constant': (C.c_int, [P, U]),
             'mesh_tensor_issue': (C.c_int, [P, U]),
             'mesh_tensor_complete': (None, [P, U]),

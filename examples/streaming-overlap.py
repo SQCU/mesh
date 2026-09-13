@@ -27,7 +27,7 @@ def main():
     parser.add_argument('mode', choices=('whole', 'streamed'))
     parser.add_argument('--rows', type=int, default=2048)
     parser.add_argument('--tile', type=int, default=64)
-    parser.add_argument('--trials', type=int, default=30)
+    parser.add_argument('--trials', type=int, default=3000)
     parser.add_argument('--depth', type=int, default=3)
     args = parser.parse_args()
     running = True
@@ -52,7 +52,6 @@ def main():
         early = calls = 0
         count = (rows + tile - 1) // tile
         grid = (count,) if args.mode == 'streamed' else (1,)
-        observers = []
 
         # design/algorithm-sources.md#streaming-overlap-measurement
         def region(ref, i):
@@ -72,10 +71,7 @@ def main():
             program.copy(p.on(0), received.on(1), queue=0)
             program.copy(y.on(1), returned.on(0), queue=1)
             result = program.export(returned[0, 0]) if args.rank == 0 else None
-            whole_input = program.export(received[0, 0]) if args.rank == 1 else None
-            observed = [0]
-            if whole_input is not None:
-                observers.append((whole_input, observed))
+            whole_input = received[0, 0] if args.rank == 1 else None
 
             # design/algorithm-sources.md#streaming-overlap-measurement
             def prepare(coordinate, inputs, outputs):
@@ -86,11 +82,10 @@ def main():
                 def submit(binding, complete, context):
                     nonlocal early, calls
                     if whole_input is not None:
-                        early += int(not whole_input.ready)
+                        early += int(not whole_input.present)
                     for a, out in operands:
                         np.matmul(a, right, out=out)
                     calls += 1
-                    observed[0] += 1
                     complete(context, 0)
                 return Submission(submit), None
 
@@ -105,9 +100,6 @@ def main():
         if args.rank == 1:
             while running:
                 program.scan()
-                for whole_input, observed in observers:
-                    if whole_input.ready and observed[0] % grid[0] == 0:
-                        whole_input.consume()
             print(json.dumps(dict(rank=1, mode=args.mode, calls=calls,
                 consumers_before_full_receive=early)), flush=True)
             return

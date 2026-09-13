@@ -32,6 +32,7 @@ struct mesh_view mesh_view_transpose(struct mesh_view);
 struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns);
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
 struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
+int mesh_tensor_present(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
 void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);

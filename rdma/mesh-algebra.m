@@ -214,6 +214,10 @@ struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return (struct mesh_row_map){0};
   return (struct mesh_row_map){.first=t->extents[i].first,.count=t->extents[i].pages};
 }
+/* design/algorithm-sources.md#streaming-overlap-measurement */
+int mesh_tensor_present(struct mesh_tensor *t,uint32_t extent) {
+  return t && extent<t->count && mesh_present(t->context,mesh_tensor_rows(t,extent),0);
+}
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;
