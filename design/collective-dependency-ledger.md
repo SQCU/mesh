@@ -259,3 +259,18 @@ softcap, and reduces every 1024-row tile to the sampler's (max, argmax) partial 
 peer's tiles cross the link (b × tiles instead of b × v); greedy selection over the concatenated tiles equals
 selection over the full row. Caller: metal-microbench `mesh_decode.swift`.
 Not licensed: an all-gather of logits.
+
+## D16. Fixed connection setup before numerical execution
+
+Operator authorization, September 13, 2026: “sure throw any fixed costs you want
+into an initial setup”. This authorizes completing receive-queue configuration
+on both peers before enabling initial sends. The existing bounded out-of-band
+setup exchanges QP metadata symmetrically, transitions every QP to RTR, exchanges
+a single setup-complete byte, then transitions to RTS. This happens once per
+client connection. D8 page stamps alone still determine numerical firing; D12
+still forbids acknowledgements in the per-message progress path.
+
+The QPI magic changes to distinguish this setup protocol from previous bridges;
+the shared-memory version and existing mesh-dataflow client ABI remain unchanged.
+TN3205's RTR/RTS state transitions and JACCL's setup metadata exchange are the
+mechanism citations; the operator instruction authorizes the added setup boundary.

@@ -56,7 +56,7 @@ static void onsig(int s){ (void)s; stop++; }
 
 /* ledger D13: the out-of-band connection record, exchanged once per pairing */
 struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; };
-#define XMAGIC 0x4d585047u
+#define XMAGIC 0x4d595047u
 
 static int dial(struct addrinfo *a){
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
@@ -83,8 +83,8 @@ static int listener_up(void){
   if(error){ close(lsock); lsock=-1; return -1; }
   fcntl(lsock,F_SETFL,O_NONBLOCK); return 0; }
 
-static int exchange(int f, const struct qpi *mine, struct qpi *you, double deadline){
-  size_t sent=0,got=0,send_bytes=mine?sizeof *mine:0,receive_bytes=you?sizeof *you:0;
+static int exchange(int f, const void *mine, void *you, size_t bytes, double deadline){
+  size_t sent=0,got=0,send_bytes=mine?bytes:0,receive_bytes=you?bytes:0;
   fcntl(f,F_SETFL,O_NONBLOCK);
   while(!stop && (sent<send_bytes || got<receive_bytes)){
     double left=deadline-monotime(); if(left<=0) return -1;
@@ -200,7 +200,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   memcpy(mine.gid,&gid,16);
   fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
   double exchange_deadline=monotime()+10;
-  if(exchange(f,peer?NULL:&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
+  if(exchange(f,&mine,&you,sizeof mine,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
   /* ledger D6: both ends must post messages of the same frame count; D5: the same queue-pair count */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,expected_peer); close(f); return -1; }
@@ -212,11 +212,14 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     memcpy(&r.ah_attr.grh.dgid,you.gid,16);
     int rc=ibv_modify_qp(provider->pairs[q],&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
     if(rc){ fprintf(stderr,"rtr %d rc %d dlid %u dqpn %u\n",q,rc,you.lid,you.qpns[q]); close(f); return -1; }
+  }
+  unsigned char ready=1,remote_ready=0;
+  if(exchange(f,&ready,&remote_ready,sizeof ready,exchange_deadline)){ close(f); return -1; }
+  for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=mine.psns[q]};
-    rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
+    int rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
-  if(peer && exchange(f,&mine,NULL,exchange_deadline)){ close(f); return -1; }
   close(f);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);
   return 0; }
