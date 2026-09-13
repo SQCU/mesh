@@ -162,7 +162,7 @@ int main(int argc,char **argv) {
         double expected=0;
         for(size_t j=0;j<k;j++)expected+=(double)tanhf((0.5f*(input(0,2,r,j)+(float)trial/256)+0.125f)+(0.5f*(input(1,2,r,j)+(float)trial/256)+0.125f))*weight(1,j,c);
         double error=fabs(early[r*n+c]-expected);if(error>maxError)maxError=error;
-        if(!isfinite(early[r*n+c]) || error>2e-4){fprintf(stderr,"early K contribution mismatch\n");return 14;}
+        if(!isfinite(early[r*n+c]) || error>2e-4){fprintf(stderr,"early K contribution mismatch row %zu column %zu actual %.9g expected %.9g error %.9g\n",r,c,early[r*n+c],expected,error);return 14;}
       }
       early_k++;
       if(rows>prefix_rows) {

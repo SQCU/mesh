@@ -31,7 +31,7 @@ def compile_part(request, destination):
         function.set_outputs([output])
     program.add_function('main', function)
     model = ct.convert(program, minimum_deployment_target=ct.target.macOS15,
-                       compute_precision=ct.precision.FLOAT16)
+                       compute_precision=ct.precision.FLOAT16 if all(r[3] for r in specification['rectangles']) else ct.precision.FLOAT32)
     destination = Path(destination).with_suffix('.mlmodelc')
     if destination.exists():
         shutil.rmtree(destination)
