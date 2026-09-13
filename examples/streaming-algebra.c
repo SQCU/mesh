@@ -116,6 +116,7 @@ int main(int argc,char **argv) {
   struct mesh_ctx context={0};check(mesh_attach(&context,NULL));
   if(context.M->qps<3){fprintf(stderr,"acceptance requires three independent configured transport queues\n");mesh_detach(&context);return 2;}
   struct mesh_algebra *a=mesh_algebra_create(&context);if(!a)check(errno);
+  if(argc>6)check(mesh_algebra_coreml(a,argv[6],argc>7?argv[7]:"rdma/mesh_coreml.py",argc>8?argv[8]:"rdma/.build/coreml-parts"));
   struct program *programs=calloc(depth,sizeof *programs);if(!programs)check(ENOMEM);
   struct mesh_tensor *weights=tensor(a,2,n,k,0);
   for(size_t part=0;part<2;part++) {
@@ -205,6 +206,6 @@ int main(int argc,char **argv) {
   struct mesh_algebra_report report=mesh_algebra_report(a);
   while(report.completed!=report.submitted){mesh_algebra_scan(a);report=mesh_algebra_report(a);check((int)report.code);}
   char variance[32];snprintf(variance,sizeof variance,windows>1?"%.9g":"null",windows>1?earlyM2/(windows-1):0);
-  printf("{\"rank\":%d,\"symbolic\":%d,\"invocations\":%zu,\"depth\":%zu,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"delayed_windows\":%zu,\"later_invocation_completions\":%zu,\"received_prefixes_before_tail\":%zu,\"received_k_contributions_before_panel\":%zu,\"max_absolute_error\":%.9g,\"early_window_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"allocated_pages\":%u,\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,symbolic,invocations,depth,rows,2*k,n,windows,later,prefixes,early_k,maxError,windows,earlyMean,variance,context.arena,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
+  printf("{\"rank\":%d,\"symbolic\":%d,\"invocations\":%zu,\"depth\":%zu,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"delayed_windows\":%zu,\"later_invocation_completions\":%zu,\"received_prefixes_before_tail\":%zu,\"received_k_contributions_before_panel\":%zu,\"max_absolute_error\":%.9g,\"early_window_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"allocated_pages\":%u,\"commands\":%llu,\"native_submissions\":%llu,\"native_output_backings\":%llu,\"ne_planned_operations\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,symbolic,invocations,depth,rows,2*k,n,windows,later,prefixes,early_k,maxError,windows,earlyMean,variance,context.arena,(unsigned long long)report.completed,(unsigned long long)report.native_submitted,(unsigned long long)report.native_backings,(unsigned long long)report.ne_planned_operations,report.gpu_seconds,now()-start);
   free(programs);mesh_algebra_destroy(a);check(mesh_detach(&context));return 0;
 }

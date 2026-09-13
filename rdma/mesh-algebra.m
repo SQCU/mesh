@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <CoreML/CoreML.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #include "mesh-algebra.h"
 #include <limits.h>
@@ -51,6 +52,7 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 @property NSArray<MeshExtent *> *operands;
 @property NSMutableData *dependencies;
 @property(copy) void (^encode)(id<MTLCommandBuffer>);
+@property(copy) void (^execute)(void (^)(int64_t,uint64_t));
 @end
 @implementation MeshFunction
 @end
@@ -58,9 +60,9 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 @interface MeshAlgebra : NSObject {
 @public
   struct mesh_ctx *context;
-  uint64_t submitted;
+  uint64_t submitted,nativeSubmitted,nePlannedOperations;
   uint32_t copies;
-  _Atomic uint64_t completed,gpuNanoseconds;
+  _Atomic uint64_t completed,gpuNanoseconds,nativeBackings;
   _Atomic int64_t code;
 }
 @property BOOL realized;
@@ -73,6 +75,8 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 @property NSMutableData *tensors;
 @property NSMutableData *bindings;
 @property NSMutableData *returns;
+@property NSString *coremlPython,*coremlGenerator,*coremlCache;
+@property NSMutableDictionary<NSString *,MLModel *> *models;
 @end
 @implementation MeshAlgebra
 /* design/algorithm-sources.md#streaming-algebra */
@@ -106,6 +110,13 @@ struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *context) {
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
   return (__bridge_retained struct mesh_algebra *)a;
+}
+/* design/algorithm-sources.md#coreml-partial-execution */
+int mesh_algebra_coreml(struct mesh_algebra *handle,const char *python,const char *generator,const char *cache) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || a.functions.count)return EBUSY;
+  if(!python || !generator || !cache)return EINVAL;
+  a.coremlPython=@(python);a.coremlGenerator=@(generator);a.coremlCache=@(cache);a.models=[NSMutableDictionary new];return 0;
 }
 /* design/algorithm-sources.md#streaming-algebra */
 void mesh_algebra_destroy(struct mesh_algebra *a) { if(a)CFBridgingRelease(a); }
@@ -241,6 +252,59 @@ static int compare_maps(const void *a,const void *b) {
   uint32_t x=((const struct mesh_row_map *)a)->first,y=((const struct mesh_row_map *)b)->first;
   return (x>y)-(x<y);
 }
+/* design/algorithm-sources.md#coreml-partial-execution */
+static MLMultiArray *native_array(struct mesh_view v,NSError **error) {
+  struct mesh_extent *e=&v.tensor->extents[v.extent];size_t bytes=e->shape.scalar==MESH_F16?2:4;
+  return [[MLMultiArray alloc]initWithDataPointer:(char *)e->address+v.offset*bytes shape:@[@(v.rows),@(v.columns)] dataType:bytes==2?MLMultiArrayDataTypeFloat16:MLMultiArrayDataTypeFloat32 strides:@[@(v.row_stride),@(v.column_stride)] deallocator:nil error:error];
+}
+/* design/algorithm-sources.md#coreml-partial-execution */
+static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDictionary *features,struct mesh_view z,size_t first,size_t count,float alpha) {
+  NSError *error=nil;
+  NSDictionary *spec=@{@"rectangles":rectangles,@"alpha":@(alpha),@"output_half":@(z.tensor->extents[z.extent].shape.scalar==MESH_F16)};
+  NSData *json=[NSJSONSerialization dataWithJSONObject:spec options:NSJSONWritingSortedKeys error:&error];
+  NSString *key=[[NSString alloc]initWithData:json encoding:NSUTF8StringEncoding];
+  MLModel *model=a.models[key];
+  if(!model) {
+    NSString *stem=[a.coremlCache stringByAppendingPathComponent:[NSString stringWithFormat:@"part-%lu",(unsigned long)a.models.count]];
+    [[NSFileManager defaultManager]createDirectoryAtPath:a.coremlCache withIntermediateDirectories:YES attributes:nil error:&error];
+    NSString *request=[stem stringByAppendingPathExtension:@"json"];
+    if(![json writeToFile:request options:NSDataWritingAtomic error:&error])return (int)error.code;
+    NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:a.coremlPython];
+    task.arguments=@[a.coremlGenerator,request,stem];
+    if(![task launchAndReturnError:&error])return (int)error.code;
+    [task waitUntilExit];if(task.terminationStatus)return EIO;
+    NSURL *compiled=[NSURL fileURLWithPath:[stem stringByAppendingPathExtension:@"mlmodelc"]];
+    MLModelConfiguration *configuration=[MLModelConfiguration new];configuration.computeUnits=MLComputeUnitsCPUAndNeuralEngine;
+    model=[MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
+    if(!model){fprintf(stderr,"mesh CoreML binding: %s\n",error.description.UTF8String);return (int)error.code;}
+    a.models[key]=model;
+    dispatch_semaphore_t ready=dispatch_semaphore_create(0);
+    [MLComputePlan loadContentsOfURL:compiled configuration:configuration completionHandler:^(MLComputePlan *plan,NSError *failure){
+      for(MLModelStructureProgramFunction *function in plan.modelStructure.program.functions.allValues)for(MLModelStructureProgramOperation *operation in function.block.operations) {
+        id<MLComputeDeviceProtocol> device=[plan computeDeviceUsageForMLProgramOperation:operation].preferredComputeDevice;
+        if([device isKindOfClass:MLNeuralEngineComputeDevice.class])a->nePlannedOperations++;
+      }
+      if(failure)fprintf(stderr,"mesh CoreML plan: %s\n",failure.description.UTF8String);
+      dispatch_semaphore_signal(ready);
+    }];
+    dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
+  }
+  struct mesh_extent *out=&z.tensor->extents[z.extent];size_t bytes=out->shape.scalar==MESH_F16?2:4;
+  MLMultiArray *output=[[MLMultiArray alloc]initWithDataPointer:(char *)out->address+first*bytes shape:@[@(count)] dataType:bytes==2?MLMultiArrayDataTypeFloat16:MLMultiArrayDataTypeFloat32 strides:@[@1] deallocator:nil error:&error];
+  MLDictionaryFeatureProvider *inputs=[[MLDictionaryFeatureProvider alloc]initWithDictionary:features error:&error];
+  if(!output || !inputs)return (int)error.code;
+  MLPredictionOptions *options=[MLPredictionOptions new];options.outputBackings=@{@"z":output};
+  __unsafe_unretained MeshAlgebra *context=a;
+  f.execute=^(void (^complete)(int64_t,uint64_t)) {
+    context->nativeSubmitted++;
+    [model predictionFromFeatures:inputs options:options completionHandler:^(id<MLFeatureProvider> prediction,NSError *failure){
+      BOOL backing=[prediction featureValueForName:@"z"].multiArrayValue==output;
+      if(backing)atomic_fetch_add(&context->nativeBackings,1);
+      complete(failure?failure.code:backing?0:EPROTO,0);
+    }];
+  };
+  return 0;
+}
 /* design/algorithm-sources.md#mandatory-partial-publication */
 static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
   MeshFunction *f=[MeshFunction new];f.dependencies=[NSMutableData new];
@@ -253,6 +317,7 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
   size_t columns=dense?z.columns:z.rows;
   NSMutableArray<MPSMatrixMultiplication *> *products=[NSMutableArray new];
   NSMutableArray<NSArray<MPSMatrix *> *> *matrices=[NSMutableArray new];
+  NSMutableArray *rectangles=[NSMutableArray new];NSMutableDictionary *features=[NSMutableDictionary new];
   for(size_t at=first,left=count;left;) {
     size_t row=at/columns,column=at%columns,nr=1,nc=MIN(left,columns-column);
     if(!column && left>=columns){nr=left/columns;nc=columns;}
@@ -260,7 +325,14 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
     struct mesh_view xv=mesh_view_slice(x,zr,op==MESH_CONTRACT || op==MESH_SUM?0:zc,rr,op==MESH_CONTRACT || op==MESH_SUM?x.columns:cc);
     struct mesh_view yv=op==MESH_CONTRACT?mesh_view_slice(y,0,zc,y.rows,cc):mesh_view_slice(y,zr,zc,rr,cc);
     dependencies(f.dependencies,xv);if(binary)dependencies(f.dependencies,yv);
-    if(op==MESH_CONTRACT) {
+    if(op==MESH_CONTRACT && a.coremlPython) {
+      NSError *error=nil;MLMultiArray *left=native_array(xv,&error),*right=native_array(yv,&error);
+      if(!left || !right)return (int)error.code;
+      NSUInteger i=rectangles.count;
+      features[[NSString stringWithFormat:@"x%lu",(unsigned long)i]]=left;
+      features[[NSString stringWithFormat:@"w%lu",(unsigned long)i]]=right;
+      [rectangles addObject:@[@(rr),@(cc),@(x.columns),@(xv.tensor->extents[xv.extent].shape.scalar==MESH_F16)]];
+    } else if(op==MESH_CONTRACT) {
       BOOL tx=xv.column_stride!=1,ty=yv.column_stride!=1;
       struct mesh_view zv=mesh_view_slice(z,zr,zc,rr,cc);
       [matrices addObject:@[matrix(f.operands[0],xv,tx),matrix(f.operands[1],yv,ty),matrix(f.operands[2],zv,NO)]];
@@ -275,7 +347,9 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
     else maps[used++]=maps[i];
   }
   f->function=(struct mesh_row_function){maps,&f->output,(uint32_t)used,1,1};
-  if(op==MESH_CONTRACT) {
+  if(op==MESH_CONTRACT && a.coremlPython) {
+    int error=native_part(a,f,rectangles,features,z,first,count,alpha);if(error)return error;
+  } else if(op==MESH_CONTRACT) {
     f.encode=^(id<MTLCommandBuffer> command){for(NSUInteger i=0;i<products.count;i++)[products[i] encodeToCommandBuffer:command leftMatrix:matrices[i][0] rightMatrix:matrices[i][1] resultMatrix:matrices[i][2]];};
   } else {
     MTLFunctionConstantValues *values=[MTLFunctionConstantValues new];uint32_t operation=(uint32_t)op;
@@ -291,6 +365,14 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
       [e setBytes:&g length:sizeof g atIndex:3];
       [e dispatchThreads:MTLSizeMake(g.count,1,1) threadsPerThreadgroup:MTLSizeMake(MIN(256,pipeline.maxTotalThreadsPerThreadgroup),1,1)];
       [e endEncoding];
+    };
+  }
+  if(!f.execute) {
+    void (^encode)(id<MTLCommandBuffer>)=f.encode;id<MTLCommandQueue> queue=a.queue;
+    f.execute=^(void (^complete)(int64_t,uint64_t)) {
+      id<MTLCommandBuffer> command=[queue commandBuffer];encode(command);
+      [command addCompletedHandler:^(id<MTLCommandBuffer> done){complete(done.error.code,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));}];
+      [command commit];
     };
   }
   [a.functions addObject:f];return 0;
@@ -422,14 +504,12 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
 
 /* design/algorithm-sources.md#mandatory-partial-publication */
 static void emit_part(MeshAlgebra *a,MeshFunction *f) {
-  id<MTLCommandBuffer> command=[a.queue commandBuffer];f.encode(command);a->submitted++;
-  [command addCompletedHandler:^(id<MTLCommandBuffer> done){
-    if(done.error)atomic_store(&a->code,done.error.code);
-    atomic_fetch_add(&a->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
-    uint32_t zero=0;mesh_complete(a->context,&f->function,&zero,1);
-    atomic_fetch_add(&a->completed,1);
-  }];
-  [command commit];
+  a->submitted++;
+  f.execute(^(int64_t error,uint64_t nanoseconds){
+    if(error)atomic_store(&a->code,error);
+    else {uint32_t zero=0;mesh_complete(a->context,&f->function,&zero,1);}
+    atomic_fetch_add(&a->gpuNanoseconds,nanoseconds);atomic_fetch_add(&a->completed,1);
+  });
 }
 /* design/algorithm-sources.md#mandatory-partial-publication */
 void mesh_algebra_scan(struct mesh_algebra *handle) { @autoreleasepool {
@@ -447,5 +527,5 @@ void mesh_algebra_consume(struct mesh_algebra *handle,size_t index) {
 }
 /* design/algorithm-sources.md#streaming-algebra */
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *handle) {
-  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){a->submitted,atomic_load(&a->completed),atomic_load(&a->code),atomic_load(&a->gpuNanoseconds)/1e9};
+  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=a->submitted,.completed=atomic_load(&a->completed),.native_submitted=a->nativeSubmitted,.native_backings=atomic_load(&a->nativeBackings),.ne_planned_operations=a->nePlannedOperations,.code=atomic_load(&a->code),.gpu_seconds=atomic_load(&a->gpuNanoseconds)/1e9};
 }

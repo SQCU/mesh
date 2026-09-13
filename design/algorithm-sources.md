@@ -328,3 +328,26 @@ bindings. Contraction operands are corresponding indexed K partitions, and the
 shared contraction lowering owns contribution allocation and reduction. The
 current frontend supports pointwise operations feeding a matrix contraction;
 it does not interpret a graph during numerical invocation.
+
+## CoreML partial execution
+
+Dongarra et al.'s indexed BLAS decomposition and the partial-publication contract
+above define the numerical regions used by `native_array`, `native_part`,
+`mesh_algebra_coreml`, and `mesh_coreml.compile_part`. Each compiled Core ML
+program performs only the rectangular contractions belonging to one publication
+part, flattening and concatenating their outputs directly into that part's supplied
+MLMultiArray backing. Inputs, including weights, are named views over registered
+operand storage. The generator compiles shape specializations during setup;
+no compilation, feature binding or operand allocation is performed by mesh during
+invocation. Core ML is configured for CPU and Neural Engine execution.
+
+Apple's [prediction and compiled-model documentation](https://apple.github.io/coremltools/docs-guides/source/model-prediction.html)
+and [outputBackings contract](https://developer.apple.com/documentation/coreml/mlpredictionoptions/outputbackings)
+provide the API mechanism. Core ML may decline a proposed output backing; an
+identity mismatch is reported as a numerical execution error and does not publish
+success for unwritten canonical pages. No copied-output fallback is introduced.
+The common execution completion now owns successful publication for both Metal
+command buffers and asynchronous Core ML predictions. Setup-time compute-plan
+inspection reports preferred Neural Engine operations; it is not an execution
+trace. Output object identity establishes the public backing endpoint, not the
+absence of internal Core ML copies or the device placement of every operation.
