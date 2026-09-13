@@ -18,7 +18,7 @@ static NSString *const source = @
 " if(op==0)y=g.alpha*x+g.beta;\n"
 " if(op==1)y=g.alpha*x+g.beta*get(b,g.b,r,c,b16);\n"
 " if(op==2)y=x*get(b,g.b,r,c,b16);\n"
-" if(op==3)y=tanh(x); if(op==4)y=exp(x);\n"
+" if(op==3)y=tanh(x); if(op==4)y=exp(x); if(op==7)y=rsqrt(x);\n"
 " if(op==5){y=0; for(ulong k=0;k<g.a.columns;k++)y+=get(a,g.a,r,k,a16);}\n"
 " ulong j=g.o.offset+r*g.o.row_stride+c*g.o.column_stride; if(o16)((device half*)o)[j]=half(y);else ((device float*)o)[j]=y;\n"
 "}\n";
@@ -165,6 +165,13 @@ struct mesh_view mesh_view_transpose(struct mesh_view v) {
   size_t n=v.rows;v.rows=v.columns;v.columns=n;n=v.row_stride;v.row_stride=v.column_stride;v.column_stride=n;return v;
 }
 /* design/algorithm-sources.md#streaming-algebra */
+struct mesh_view mesh_view_broadcast(struct mesh_view v,size_t rows,size_t columns) {
+  if((v.rows!=rows && v.rows!=1) || (v.columns!=columns && v.columns!=1))return (struct mesh_view){0};
+  if(v.rows!=rows)v.row_stride=0;
+  if(v.columns!=columns)v.column_stride=0;
+  v.rows=rows;v.columns=columns;return v;
+}
+/* design/algorithm-sources.md#streaming-algebra */
 void *mesh_tensor_data(struct mesh_tensor *t,uint32_t i) { return t && i<t->count?t->extents[i].address:NULL; }
 /* design/algorithm-sources.md#streaming-algebra */
 struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *t,uint32_t i) {
@@ -184,11 +191,11 @@ int mesh_tensor_publish(struct mesh_tensor *t,uint32_t i) {
 
 /* design/algorithm-sources.md#streaming-algebra */
 static int valid_view(MeshAlgebra *a,struct mesh_view v) {
-  if(!v.tensor || v.extent>=v.tensor->count || !v.rows || !v.columns || !v.row_stride || !v.column_stride || v.tensor->context!=a->context)return 0;
+  if(!v.tensor || v.extent>=v.tensor->count || !v.rows || !v.columns || v.tensor->context!=a->context)return 0;
   size_t elements=v.tensor->extents[v.extent].shape.rows*v.tensor->extents[v.extent].shape.columns;
-  if(v.offset>=elements || v.rows-1>(elements-1-v.offset)/v.row_stride)return 0;
+  if(v.offset>=elements || (v.row_stride && v.rows-1>(elements-1-v.offset)/v.row_stride))return 0;
   size_t last=v.offset+(v.rows-1)*v.row_stride;
-  return v.columns-1<=(elements-1-last)/v.column_stride;
+  return !v.column_stride || v.columns-1<=(elements-1-last)/v.column_stride;
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static struct geometry_view geometry(struct mesh_view v) {
@@ -206,14 +213,14 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
   BOOL binary=op==MESH_ADD || op==MESH_MULTIPLY || op==MESH_CONTRACT;
-  if(op>MESH_CONTRACT || !valid_view(a,x) || !valid_view(a,z) || (binary && !valid_view(a,y)))return EINVAL;
+  if(op>MESH_RSQRT || !valid_view(a,x) || !valid_view(a,z) || (binary && !valid_view(a,y)))return EINVAL;
   size_t extentElements=z.tensor->extents[z.extent].shape.rows*z.tensor->extents[z.extent].shape.columns;
   if(z.offset || z.rows>SIZE_MAX/z.columns || z.rows*z.columns!=extentElements ||
      !((z.column_stride==1 && z.row_stride==z.columns) || (z.row_stride==1 && z.column_stride==z.rows)))return EINVAL;
   for(MeshFunction *existing in a.functions)if(existing->output.first==z.tensor->extents[z.extent].first)return EINVAL;
   if(!binary)y=x;
   if(op==MESH_CONTRACT) {
-    if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || z.column_stride!=1 || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
+    if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || z.column_stride!=1 || !x.row_stride || !x.column_stride || !y.row_stride || !y.column_stride || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
     if(x.tensor->extents[x.extent].shape.scalar!=y.tensor->extents[y.extent].shape.scalar)return EINVAL;
   } else {
     if(z.rows!=x.rows || z.columns!=(op==MESH_SUM?1:x.columns) || (binary && (x.rows!=y.rows || x.columns!=y.columns)))return EINVAL;
@@ -266,7 +273,7 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
 }
 
 /* design/algorithm-sources.md#streaming-algebra */
-void mesh_algebra_scan(struct mesh_algebra *handle) {
+void mesh_algebra_scan(struct mesh_algebra *handle) { @autoreleasepool {
   MeshAlgebra *a=owner(handle);
   if(!a.realized)return;
   for(MeshFunction *f in a.functions) {
@@ -290,6 +297,7 @@ void mesh_algebra_scan(struct mesh_algebra *handle) {
     }];
     [command commit];
   }
+}
 }
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_available(struct mesh_algebra *handle,size_t index) {

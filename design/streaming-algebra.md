@@ -33,7 +33,7 @@ MPS internal tiles remain distinct units.
 
 `mesh_algebra_bind` binds the arithmetic and dependencies before realization.
 The built-ins are affine, weighted addition, multiplication, tanh, exponential,
-row sum, and matrix contraction. Affine computes alpha*A+beta; addition computes
+row sum, reciprocal square root, and matrix contraction. Affine computes alpha*A+beta; addition computes
 alpha*A+beta*B; contraction computes alpha*A@B into a fresh output. The remaining
 operations ignore alpha/beta. An output view must cover its complete extent
 with a non-overlapping dense or transposed layout. Each extent has one producer.
@@ -118,7 +118,9 @@ Each GPU produces `P=0.5*X+0.125` directly in transferable pages. Each participa
 adds the two peer contributions, applies tanh, and contracts each panel with
 its corresponding constant weight view. Two partial contractions add into each
 final row group. Each participant owns one group for the final all-gather.
-Row sums exercise a further streaming reduction consumer. The host computes
+Transposed weight views exercise contraction layout binding. Row sums exercise
+a further streaming reduction consumer. Square, sum, affine, reciprocal square
+root and broadcast multiplication compose row normalization, which is also checked. The host computes
 an independent numerical expectation after completion and checks every output,
 its peer-owned gathered replica, finiteness and row sums.
 
