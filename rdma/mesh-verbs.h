@@ -213,7 +213,10 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   provider->send_capacity=(int)((actual.cap.max_send_wr<(uint32_t)frame_capacity?actual.cap.max_send_wr:(uint32_t)frame_capacity)/frames);
   provider->receive_capacity=(int)((actual.cap.max_recv_wr<(uint32_t)frame_capacity?actual.cap.max_recv_wr:(uint32_t)frame_capacity)/frames);
   if(!provider->send_capacity || !provider->receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+  // The responder QP must itself permit remote writes for one-sided IBV_WR_RDMA_WRITE to land (the MR
+  // permission alone is not enough); without it the peer silently drops the write (no NAK on UC), so the
+  // receiver never sees the pushed page. SEND/RECV never needed this, which is why it was absent.
+  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1,.qp_access_flags=IBV_ACCESS_REMOTE_WRITE};
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
