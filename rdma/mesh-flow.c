@@ -172,7 +172,7 @@ int main(int argc,char**argv){
       /* D13 */
       if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps,link_receive,&link)){
         link_error(M,errno?errno:EIO,1);
-        down_pair();
+        link_down(&link);
         continue;
       }
       link.client=client;
