@@ -30,6 +30,7 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh
   if(error){ link_error(M,error,1); return error; }
   struct mesh_queue *queue=link_queue(link,q,direction);
   queue->posted[queue->tail++%QD]=entry;
+  fprintf(stderr,"post q=%u d=%d row=%u page=%u head=%u tail=%u next=%u mask=%llu\n",q,direction,entry.row,entry.page,queue->head,queue->tail,queue->next,(unsigned long long)mesh_mask(M)[entry.row]);
   return 0;
 }
 
@@ -78,6 +79,7 @@ static void mesh_progress(struct mesh_link *link){
     if(queue->head==queue->tail || queue->posted[queue->head%QD].row!=row){ link_error(M,EPROTO,4); continue; }
     struct mesh_posted entry=queue->posted[queue->head%QD];
     queue->head++;
+    fprintf(stderr,"complete q=%u d=%d row=%u status=%d head=%u tail=%u\n",q,direction,row,wc->status,queue->head,queue->tail);
     if(direction==MESH_RECEIVE) mesh_receive_complete(M,entry.row,entry.page,!wc->status);
     else mesh_send_complete(M,entry.row,entry.page,entry.plane);
   }
