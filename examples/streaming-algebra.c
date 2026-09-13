@@ -1,4 +1,5 @@
 #include "mesh-algebra.h"
+#include "streaming-expression.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,14 +34,14 @@ static void moment(size_t n,double x,double *mean,double *m2) { double d=x-*mean
 struct program { struct mesh_tensor *x,*p,*result,*gathered,*statistics,*normalized,*partial,*peer_partial; struct mesh_row_map prefix,tail; struct mesh_row_function prefix_function,tail_function; };
 
 /* design/algorithm-sources.md#pallas-indexed-destinations */
-static struct program configure(struct mesh_algebra *a,int rank,size_t rows,size_t k,size_t n,struct mesh_tensor *weights) {
+static struct program configure(struct mesh_algebra *a,int rank,size_t rows,size_t k,size_t n,struct mesh_tensor *weights,int symbolic) {
   struct mesh_tensor *x=tensor(a,4,rows,k,0),*p=tensor(a,4,rows,k,1),*remote=tensor(a,4,rows,k,1);
-  struct mesh_tensor *sum=tensor(a,4,rows,k,0),*activated=tensor(a,4,rows,k,0);
+  struct mesh_tensor *sum=symbolic?NULL:tensor(a,4,rows,k,0),*activated=symbolic?NULL:tensor(a,4,rows,k,0);
   struct mesh_tensor *partial=NULL,*result=tensor(a,2,rows,n,1),*gathered=tensor(a,2,rows,n,1);
   struct mesh_tensor *statistics=tensor(a,2,rows,1,0);
   struct mesh_tensor *squared=tensor(a,2,rows,n,0),*sumsq=tensor(a,2,rows,1,0);
   struct mesh_tensor *meansq=tensor(a,2,rows,1,0),*inverse=tensor(a,2,rows,1,0),*normalized=tensor(a,2,rows,n,0);
-  for(size_t i=0;i<4;i++) {
+  for(size_t i=0;!symbolic && i<4;i++) {
     struct mesh_view xv=mesh_tensor_view(x,(uint32_t)i),pv=mesh_tensor_view(p,(uint32_t)i),rv=mesh_tensor_view(remote,(uint32_t)i);
     struct mesh_view sv=mesh_tensor_view(sum,(uint32_t)i),av=mesh_tensor_view(activated,(uint32_t)i);
     check(mesh_algebra_bind(a,MESH_AFFINE,xv,(struct mesh_view){0},pv,0.5f,0.125f));
@@ -52,9 +53,14 @@ static struct program configure(struct mesh_algebra *a,int rank,size_t rows,size
       uint32_t i=group+2*(1-q);
       check(mesh_algebra_copy(a,(struct mesh_endpoint){p,peer,i,1},(struct mesh_endpoint){remote,1-peer,i,1},1,(uint16_t)group));
     }
-    struct mesh_view av[2],wv[2];
-    for(uint32_t q=0;q<2;q++){av[q]=mesh_tensor_view(activated,group+2*(1-q));wv[q]=mesh_view_transpose(mesh_tensor_view(weights,1-q));}
-    struct mesh_tensor *contributions=mesh_algebra_contract(a,av,wv,2,mesh_tensor_view(result,group),1);
+    struct mesh_view av[2],wv[2],xv[2],rv[2],pv[2];
+    for(uint32_t q=0;q<2;q++) {
+      uint32_t i=group+2*(1-q);
+      xv[q]=mesh_tensor_view(x,i);rv[q]=mesh_tensor_view(remote,i);pv[q]=mesh_tensor_view(p,i);
+      if(!symbolic)av[q]=mesh_tensor_view(activated,i);
+      wv[q]=mesh_view_transpose(mesh_tensor_view(weights,1-q));
+    }
+    struct mesh_tensor *contributions=symbolic?symbolic_contract(a,2,xv,rv,wv,pv,mesh_tensor_view(result,group)):mesh_algebra_contract(a,av,wv,2,mesh_tensor_view(result,group),1);
     if(!contributions)check(errno);if(!group)partial=contributions;
     check(mesh_algebra_bind(a,MESH_SUM,mesh_tensor_view(result,group),(struct mesh_view){0},mesh_tensor_view(statistics,group),0,0));
     struct mesh_view v=mesh_tensor_view(result,group);
@@ -102,7 +108,7 @@ static int verify(struct program p,int rank,size_t rows,size_t k,size_t n,size_t
 
 /* design/algorithm-sources.md#pallas-indexed-destinations */
 int main(int argc,char **argv) {
-  int rank=argc>1?atoi(argv[1]):0;
+  int rank=argc>1?atoi(argv[1]):0,symbolic=argc>5?atoi(argv[5]):0;
   size_t invocations=argc>2?(size_t)atoi(argv[2]):32;
   size_t rows=argc>3?(size_t)atoi(argv[3]):257,depth=argc>4?(size_t)atoi(argv[4]):8,k=128,n=64;
   if((rank!=0 && rank!=1) || !invocations || !rows || !depth)return 2;
@@ -117,7 +123,7 @@ int main(int argc,char **argv) {
     for(size_t r=0;r<k;r++)for(size_t c=0;c<n;c++)data[c*k+r]=weight(part,r,c);
     check(mesh_tensor_constant(weights,(uint32_t)part));
   }
-  for(size_t slot=0;slot<depth;slot++)programs[slot]=configure(a,rank,rows,k,n,weights);
+  for(size_t slot=0;slot<depth;slot++)programs[slot]=configure(a,rank,rows,k,n,weights,symbolic);
   size_t prefix_rows=(size_t)context.M->block*context.M->pgsz/(n*sizeof(float));
   for(size_t slot=0;slot<depth;slot++) {
     struct program *p=&programs[slot];
@@ -199,6 +205,6 @@ int main(int argc,char **argv) {
   struct mesh_algebra_report report=mesh_algebra_report(a);
   while(report.completed!=report.submitted){mesh_algebra_scan(a);report=mesh_algebra_report(a);check((int)report.code);}
   char variance[32];snprintf(variance,sizeof variance,windows>1?"%.9g":"null",windows>1?earlyM2/(windows-1):0);
-  printf("{\"rank\":%d,\"invocations\":%zu,\"depth\":%zu,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"delayed_windows\":%zu,\"later_invocation_completions\":%zu,\"received_prefixes_before_tail\":%zu,\"received_k_contributions_before_panel\":%zu,\"max_absolute_error\":%.9g,\"early_window_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"allocated_pages\":%u,\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,invocations,depth,rows,2*k,n,windows,later,prefixes,early_k,maxError,windows,earlyMean,variance,context.arena,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
+  printf("{\"rank\":%d,\"symbolic\":%d,\"invocations\":%zu,\"depth\":%zu,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"delayed_windows\":%zu,\"later_invocation_completions\":%zu,\"received_prefixes_before_tail\":%zu,\"received_k_contributions_before_panel\":%zu,\"max_absolute_error\":%.9g,\"early_window_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"allocated_pages\":%u,\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,symbolic,invocations,depth,rows,2*k,n,windows,later,prefixes,early_k,maxError,windows,earlyMean,variance,context.arena,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
   free(programs);mesh_algebra_destroy(a);check(mesh_detach(&context));return 0;
 }

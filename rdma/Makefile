@@ -16,6 +16,10 @@ clean:
 libmesh-algebra.dylib: mesh-algebra.m mesh-algebra.h mesh-dataflow.h libmesh.dylib
 	clang -O2 -fobjc-arc -dynamiclib -Wl,-install_name,@rpath/libmesh-algebra.dylib -Wl,-rpath,@loader_path -o $@ mesh-algebra.m -L. -lmesh -framework Foundation -framework Metal -framework MetalPerformanceShaders
 
-.build/streaming-algebra: ../examples/streaming-algebra.c mesh-algebra.h libmesh-algebra.dylib
+.build/streaming-expression.h: ../examples/streaming-expression.py mesh_numpy.py
 	mkdir -p .build
-	clang -O2 -I. -o $@ $< -L. -lmesh-algebra -lmesh -Wl,-rpath,@loader_path/..
+	PYTHONPATH=. python3 $< > $@
+
+.build/streaming-algebra: ../examples/streaming-algebra.c mesh-algebra.h libmesh-algebra.dylib .build/streaming-expression.h
+	mkdir -p .build
+	clang -O2 -I. -I.build -o $@ $< -L. -lmesh-algebra -lmesh -Wl,-rpath,@loader_path/..

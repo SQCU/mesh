@@ -319,3 +319,12 @@ contribution tensor permits ordinary mesh transfers and consumers to name those
 values; the caller no longer constructs intermediate contractions and additions.
 The existing acceptance orders the available K-panel's transfers before the
 intentionally absent panel and observes its complete contribution at the peer.
+
+`mesh_numpy.Array`, its NumPy dispatch hooks, the elementwise constructors,
+`einsum`, and `emit_c` implement setup-time symbolic expression capture and
+postorder lowering to existing mesh algebra calls. Scalar scale/shift composition
+becomes one affine operation. Named intermediate outputs preserve their mesh send
+bindings. Contraction operands are corresponding indexed K partitions, and the
+shared contraction lowering owns contribution allocation and reduction. The
+current frontend supports pointwise operations feeding a matrix contraction;
+it does not interpret a graph during numerical invocation.
