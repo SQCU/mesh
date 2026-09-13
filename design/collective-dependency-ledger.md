@@ -105,7 +105,7 @@ Cuts: the receive pool, FREE ring, landed bitmap, landing-row inverse index, in-
 
 Analogue: [JACCL] posts chunk receives and sends in chunk order per peer connection and consumes them in order ("Process the received chunks in order."). [Pathways]: "(iii) communicating with the scheduler to determine a consistent order of function executions across all programs running on the island … Our current implementation simply enqueues work in FIFO order".
 
-Licenses: a compiled, identical-on-both-nodes sequence of (binding, block) per queue pair; the sender bridge is the single writer of each queue pair and posts that queue's sends in sequence order; the receiver posts that queue's receives in the same order. The binding-to-queue-pair map is a function of the compiled program, not round-robin at post time.
+Licenses: a compiled, identical-on-both-nodes sequence of (binding, block) per queue pair; the sender bridge is the single writer of each queue pair and posts that queue's sends in sequence order; the receiver posts that queue's receives in the same order. The binding-to-queue-pair map is a function of the compiled program and the connection's agreed queue-pair count (both nodes exchange and compare it, D13), not round-robin at post time. Programs whose queues coincide modulo that count share one order: they advance in lockstep, which is correct and slower. Because processing is ordered per work queue, the bridge matches each completion to the head of that queue's posted order; a mismatch is recorded status (D12).
 
 ## D6. Every message on a queue is the same number of frames
 
@@ -158,6 +158,8 @@ Cuts: in-page tag magic polling (`mesh_poll_landings`), a remotely written arriv
 Analogue: [JACCL] reposts a chunk receive only after consuming the previous one: "Check if we need to post another receive".
 
 Licenses: the bridge reposts the next step's receive on a row block when its configured reader mask is satisfied. Queue credit (D2) then applies backpressure to the sender's transport, never to its producer (D7).
+
+Relation to D2: D2 keeps receives posted ahead of arrivals; D9 bounds "ahead" to blocks whose previous value is consumed. Under D5's FIFO order, a block whose reader is still working holds the receives behind it on the same queue. Only that queue's transport waits (Kahn's bounded channel); no producer or other queue waits.
 
 ## D10. Collectives stream by chunk
 
@@ -212,7 +214,9 @@ Licenses: the bridge pairs when a client attaches and destroys its queue pairs
 when that client leaves, then clears the occupancy of the work requests those
 queue pairs held. Receives posted in one program's order (D5) therefore never
 capture another program's sends. Pairing is retried inside the bridge process;
-a verbs error is recorded (D12), never an exit.
+a verbs or listener error is recorded (D12), never an exit. Waits during pairing
+are bounded, so a client that leaves while its connection is being made is seen
+on the next pass.
 
 ## Open: citations not yet collected
 

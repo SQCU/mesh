@@ -70,17 +70,13 @@ static void mesh_progress(struct mesh_link *link){
     uint32_t q=0; while(q<(uint32_t)link->qps && v->pairs[q]->qp_num!=wc->qp_num) q++;
     int direction=(wc->wr_id>>63)?MESH_RECEIVE:MESH_SEND;
     uint32_t row=(uint32_t)wc->wr_id;
-    if(wc->status){
-      link_error(M,wc->status,2);
-      fprintf(stderr,"completion error: status=%d vendor=%u opcode=%d qp=%u wr_id=%llx\n",wc->status,wc->vendor_err,wc->opcode,wc->qp_num,(unsigned long long)wc->wr_id);
-    }
+    if(wc->status) link_error(M,wc->status,2);
     if(q==(uint32_t)link->qps){ link_error(M,EPROTO,4); continue; }
+    /* ledger D5: "The order of processing a Work Request is guaranteed per Work Queue according to the order
+       the Work Requests were added to it." A completion is therefore the head of its queue's posted order. */
     struct mesh_queue *queue=link_queue(link,q,direction);
-    uint32_t at=queue->head;
-    while(at!=queue->tail && queue->posted[at%QD].row!=row) at++;
-    if(at==queue->tail){ link_error(M,EPROTO,4); continue; }
-    struct mesh_posted entry=queue->posted[at%QD];
-    queue->posted[at%QD]=queue->posted[queue->head%QD];
+    if(queue->head==queue->tail || queue->posted[queue->head%QD].row!=row){ link_error(M,EPROTO,4); continue; }
+    struct mesh_posted entry=queue->posted[queue->head%QD];
     queue->head++;
     if(direction==MESH_RECEIVE) mesh_receive_complete(M,entry.row,entry.page,!wc->status);
     else mesh_send_complete(M,entry.row,entry.page,entry.plane);
@@ -154,17 +150,19 @@ int main(int argc,char**argv){
   provider->completions=calloc((size_t)2*(size_t)link.budget*(size_t)link.qps,sizeof *provider->completions);
   int status=0;
   if(!link.queues || !provider->completions){ status=ENOMEM; goto teardown; }
-  if(listener_up()){ status=errno?errno:EIO; link_error(M,status,1); goto teardown; }
   atomic_store(&M->port.phase,MESH_PAIRING);
   fprintf(stderr,"bridge node %d: %d queue pair(s), %d frames per block, %d blocks per direction\n",me,link.qps,link.frames,link.budget);
 
   while(!stop){
+    struct timespec idle={0,1000000};
+    /* D14: a listener failure is recorded and retried in process, never an exit */
+    if(lsock<0 && listener_up()){ link_error(M,errno?errno:EIO,1); nanosleep(&idle,NULL); continue; }
     uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
     /* D14: the connection follows the attached client */
     if(link.client && client!=link.client && link_down(&link)) continue;
     if(!link.client && client){
       /* D13 */
-      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),NULL,link.qps)){
+      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps)){
         link_error(M,errno?errno:EIO,1);
         down_pair();
         continue;
@@ -176,7 +174,7 @@ int main(int argc,char**argv){
       fprintf(stderr,"bridge node %d paired for client %llu\n",me,(unsigned long long)client);
     }
     if(link.client) mesh_progress(&link);
-    else { struct timespec idle={0,1000000}; nanosleep(&idle,NULL); }
+    else nanosleep(&idle,NULL);
   }
 teardown:
   fprintf(stderr,"bridge node %d stopping: code=%lld domain=%u errno=%d\n",me,(long long)M->port.code,M->port.domain,errno);
