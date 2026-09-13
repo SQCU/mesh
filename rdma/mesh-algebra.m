@@ -298,6 +298,23 @@ static int full_output(MeshAlgebra *a,struct mesh_view v) {
   return !v.offset && v.rows<=SIZE_MAX/v.columns && v.rows*v.columns==e->shape.rows*e->shape.columns &&
     ((v.column_stride==1 && v.row_stride==v.columns) || (v.row_stride==1 && v.column_stride==v.rows));
 }
+/* design/algorithm-sources.md#region-streaming-review */
+static int output_region(MeshAlgebra *a,struct mesh_view v,struct mesh_row_map *m) {
+  if(!valid_view(a,v))return EINVAL;
+  struct mesh_extent *e=&v.tensor->extents[v.extent];
+  size_t scalar=e->shape.scalar==MESH_F16?2:4,unit=a->context->M->pgsz/scalar;
+  size_t quantum=(size_t)e->quantum*unit,elements=e->shape.rows*e->shape.columns;
+  if(!((v.column_stride==1 && v.row_stride==v.columns) || (v.row_stride==1 && v.column_stride==v.rows)))return EINVAL;
+  if(v.rows>SIZE_MAX/v.columns)return EOVERFLOW;
+  size_t count=v.rows*v.columns,end=v.offset+count;
+  if(v.offset%quantum || (end!=elements && end%quantum))return EINVAL;
+  *m=(struct mesh_row_map){.first=e->first+(uint32_t)(v.offset/unit),.count=(uint32_t)(((count+quantum-1)/quantum)*e->quantum)};
+  return 0;
+}
+/* design/algorithm-sources.md#region-streaming-review */
+static int overlaps(struct mesh_row_map a,struct mesh_row_map b) {
+  return a.first<b.first+b.count && b.first<a.first+a.count;
+}
 /* design/algorithm-sources.md#indexed-library-functions */
 int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,mesh_submission submit,void *binding) {
   MeshAlgebra *a=owner(handle);
@@ -306,10 +323,11 @@ int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *in
   MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];f.results=[NSMutableData new];
   for(size_t i=0;i<input_count;i++){if(!valid_view(a,inputs[i]))return EINVAL;dependencies(f.dependencies,inputs[i]);}
   for(size_t i=0;i<output_count;i++) {
-    struct mesh_view v=outputs[i];if(!full_output(a,v))return EINVAL;
-    struct mesh_row_map m=mesh_tensor_rows(v.tensor,v.extent);if(output_used(a,m))return EINVAL;
-    for(size_t j=0;j<i;j++)if(outputs[j].tensor==v.tensor && outputs[j].extent==v.extent)return EINVAL;
-    for(size_t j=0;j<input_count;j++)if(inputs[j].tensor==v.tensor && inputs[j].extent==v.extent)return EINVAL;
+    struct mesh_row_map m;int error=output_region(a,outputs[i],&m);if(error)return error;
+    if(output_used(a,m))return EINVAL;
+    struct mesh_row_map *results=f.results.mutableBytes,*reads=f.dependencies.mutableBytes;
+    for(size_t j=0;j<i;j++)if(overlaps(results[j],m))return EINVAL;
+    for(size_t j=0;j<f.dependencies.length/sizeof *reads;j++)if(overlaps(reads[j],m))return EINVAL;
     [f.results appendBytes:&m length:sizeof m];
   }
   f->function=(struct mesh_row_function){.output=f.results.mutableBytes,.outputs=(uint32_t)output_count,.rows=1};bind_dependencies(f);

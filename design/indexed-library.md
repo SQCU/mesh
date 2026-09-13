@@ -126,10 +126,10 @@ must be assigned appropriate queues/order at setup, not inferred from arrivals.
 
 ## Lifetimes and granularity
 
-Generic function outputs are whole allocated blocks. Input references may be
-sliced, transposed, or broadcast. Whole-block output ownership ensures publication
-cannot mark unwritten bytes in a shared page usable. Choose smaller independently
-allocated blocks when finer output progress is needed. `copy` transfers matching
+Generic function outputs may be disjoint compact subregions of an allocated block,
+aligned to its publication quantum. `BlockSpec.region_map(ref, *coordinate)`
+selects such regions during setup. Inputs may be sliced, transposed, or broadcast.
+Output regions own complete publication quanta so no unwritten payload becomes usable. `copy` transfers matching
 whole blocks; indexed gather/scatter is composition of copies or numerical grid
 functions whose index maps choose the source and destination blocks.
 
@@ -146,3 +146,6 @@ its lifetime. Close after asynchronous submissions physically finish. Callback
 errors are reported without publishing incomplete output; they are diagnostics,
 not another readiness protocol. The callback and native function remain retained
 for the configured program lifetime.
+
+The [source and literature review](region-streaming-review.md) records remaining
+whole-K dependencies and the missing arrival-selected masked reduction.

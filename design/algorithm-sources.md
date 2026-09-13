@@ -427,3 +427,15 @@ output parts, reading source pages and writing destination pages directly. It
 preserves bytes, including integer indices and floating-point bit patterns, and
 publishes each destination part through `complete_part`. This is the copy
 operation's payload write, not a hidden transport staging copy.
+
+## Region streaming review
+
+The JAX authors' Pallas software pipelining and indexed reference mechanisms,
+and Papadopoulos and Culler's Monsoon presence/read ownership, cited above,
+supply the mechanism for `output_region`, `overlaps`, and `BlockSpec.region_map`.
+Configuration maps disjoint writable numerical regions onto existing publication
+quanta; physical completion publishes only the selected rows. Input/output
+intersections are checked during setup to prevent publication of unwritten or
+concurrently overwritten data. No new execution state is introduced. See the
+[source and literature review](region-streaming-review.md) for the exact scope
+and the remaining reduction and contraction dependencies.

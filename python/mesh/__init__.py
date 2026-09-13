@@ -174,10 +174,12 @@ class Tensor:
 class BlockSpec:
     tensor: Tensor
     index_map: object
+    region_map: object = None
 
     # design/algorithm-sources.md#indexed-library-functions
     def resolve(self, coordinate):
-        return self.tensor[tuple(self.index_map(*coordinate))]
+        ref = self.tensor[tuple(self.index_map(*coordinate))]
+        return self.region_map(ref, *coordinate) if self.region_map is not None else ref
 
 
 class Result:
