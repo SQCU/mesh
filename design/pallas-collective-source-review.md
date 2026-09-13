@@ -1,5 +1,10 @@
 # Pallas collective port: source review
 
+This review records the state at `8ec1b96`. The paired endpoint declarations and
+explicit invocation-slot allocations identified below are now implemented;
+[streaming algebra](streaming-algebra.md) gives their source mapping and reuse
+contract. Inner numerical pipeline integration remains separate work.
+
 September 13, 2026. Operator correction: implement the Pallas async tensor-parallel
 collective structure, use the available shared memory for different outputs in
 different destination buffers, and establish correctness from source rather than

@@ -1,211 +1,127 @@
-# Streaming algebra over mesh
+# Streaming algebra with indexed destinations
 
-[Subsequent Pallas source review](pallas-collective-source-review.md) identifies
-the remaining paired endpoint maps, invocation buffering and inner numerical
-pipeline integration. The acceptance below covers extent-level composition; it
-does not establish a completed Pallas async TP collective port.
+The substrate represents values as independently usable extents in canonical
+registered shared memory. Numerical coordinates, readiness extents and transport
+blocks are separate. DNN modules compose the algebra operations; the transport
+and algebra headers contain no model definition.
 
-Operator scope, September 13, 2026: extend canonical mesh with generalized
-linear algebra, scatters, all-gathers and reductions over independently
-consumable tensor extents. DNN modules are compositions written by a separate
-library. The first acceptance program is a streamed producer, peer sum,
-elementwise transform and contraction, with an unrelated extent deliberately
-withheld. This explicitly authorizes the executable example in `examples/`;
-it is an observable numerical acceptance program, not another specification.
+## Paired transfers
 
-## The five implementation topics
+`mesh_algebra_copy` takes a source endpoint, destination endpoint, occurrence
+count and transport queue. Each endpoint supplies a tensor, peer ID, first extent
+and extent stride. Both endpoints are declared together on every participant.
+The endpoint tensor is the locally realized instance of the corresponding
+distributed tensor; its peer ID selects which participant owns this occurrence.
+The destination peer receives into its actual registered tensor pages.
 
-| Topic | Implemented boundary |
-|---|---|
-| Coordinates, readiness and storage | Strided tensor views, independently published extents, canonical registered pages |
-| Indexed dependencies | Static numerical functions naming only their input/output extents; mesh_issue and mesh_complete |
-| Streaming producers and consumers | External issue/complete and GPU command completion publish extents; consumers issue as those extents become available |
-| Complete values and partial contractions | Explicit K-panel partial extents combined by configured additions with fixed association |
-| Compute and transport granularity | Optimized MPS contractions per numerical extent; transport independently splits/pads these into blocks |
+For occurrence i, the endpoints are
+`source.tensor[source.first + i * source.stride]` and
+`destination.tensor[destination.first + i * destination.stride]`. Shape and
+scalar type must agree; a remote transfer also has equal padded extent lengths.
+Every participant numbers every occurrence before projecting its local work.
+The source peer contributes a SEND binding and the destination peer contributes
+a RECV binding with the same occurrence identity. A same-peer transfer becomes
+a local affine copy. No tensor payload is packed into another transport store.
 
-The implementation is a first composition substrate. Readiness finer than an
-allocated extent, dynamic gather indices within one extent, and publication
-inside an opaque MPS dispatch are not implemented by the view API.
+All participants execute the same ordered copy declarations with the same global
+parameters. Local numerical graphs and physical addresses need not be identical.
+The old mesh_algebra_transfer entry point remains available for manually managed
+bindings; a paired program uses mesh_algebra_copy throughout so its occurrence
+identities have one owner. It does not mix independent manual identities into
+that same transfer schedule.
 
-## Interface and ownership
+## Storage and execution
 
-`rdma/mesh-algebra.h` is a C interface; `libmesh-algebra.dylib` implements it
-using Metal elementwise operations and MPS matrix multiplication. It builds
-against `libmesh.dylib`, without the model loader, Engine module, checkpoint,
-model dimensions, Python or environment-selected numerical configuration.
-The `mesh-dataflow.h` source API remains compatible. Shared-memory version 20
-publishes completed configuration before the bridge pairs; existing clients and
-bridges must be rebuilt together. The startup exchange also has a new magic.
+Create tensors and bind numerical functions before mesh_algebra_realize. Configuration
+allocates the registered pages, zero-copy Metal aliases, layouts, specializations
+and matrix bindings. Numerical invocation scans the configured functions with
+mesh_issue, submits their GPU commands, and publishes with mesh_complete.
+No allocation of operand storage or choice of backend occurs during invocation.
 
-Create an algebra context on an already attached mesh context. Create tensors
-as arrays of explicitly shaped extents. Configuration allocates every extent
-in the canonical registered arena, maps its logical rows to those pages, and
-creates a zero-copy Metal view of those same file pages. A transferable extent
-is padded to the bridge's transfer block. No metadata gaps, transport copy,
-separate dense payload or allocation during numerical invocation is introduced.
+Affine, weighted addition, multiplication, tanh, exp, row sum, reciprocal square
+root and MPS contraction are available. Views can slice, transpose and broadcast.
+Every output covers its complete independently allocated extent. An input slice
+retains its containing extent's readiness. Partial contractions have separate
+outputs and explicit additions fix their association.
 
-`mesh_tensor_view`, `mesh_view_slice` and `mesh_view_transpose` describe numerical
-coordinates and strides. They never select a kernel. Readiness belongs to the
-explicitly allocated extent; slicing a view does not invent finer readiness.
-Every extent has its own pages, so independent subpage-sized numerical extents
-are padded separately. This first implementation trades padding for preserving
-readiness in the existing page table. Transport blocks, numerical shapes and
-MPS internal tiles remain distinct units.
+Mutable external producers call mesh_tensor_issue before writing and
+mesh_tensor_complete afterward. mesh_tensor_publish publishes preinitialized
+bytes; mesh_tensor_constant declares immutable values before realization.
+Registered returns remain readable until mesh_algebra_consume. NIC reads and
+numerical readers retain source storage through their existing completion bits.
 
-`mesh_algebra_bind` binds the arithmetic and dependencies before realization.
-The built-ins are affine, weighted addition, multiplication, tanh, exponential,
-row sum, reciprocal square root, and matrix contraction. Affine computes alpha*A+beta; addition computes
-alpha*A+beta*B; contraction computes alpha*A@B into a fresh output. The remaining
-operations ignore alpha/beta. An output view must cover its complete extent
-with a non-overlapping dense or transposed layout. Each extent has one producer.
-A partial contraction is a separate output extent; combine partials with explicit
-addition functions. Thus neither concurrent accumulator mutation nor publication
-of unfinished reductions is implicit in the interface.
+The implementation follows Pallas's larger-buffer approach: distinct live value
+instances receive distinct pages. The example realizes R copies of the intermediate
+arrays and shares immutable weights. Invocation i uses slot i modulo R. The next
+invocation in that slot is produced after that slot's outputs are consumed;
+other slots' outputs can remain live. No collective-wide release is necessary.
+Within a window, incoming values have separate destinations and no wraparound.
 
-Numerical functions are captured in a static list. Each currently has one
-configured work extent and uses mesh_issue with that work index. The scan emits
-one command buffer for each eligible function; its completion records GPU timing
-and errors, then calls mesh_complete on that same function. No prediction task,
-phase scheduler, whole-tensor join, or GPU wait is added. Missing inputs simply
-do not issue. Readiness and reuse remain the existing present/reader bits.
+## Source proof for the acceptance program
 
-A statically indexed scatter/gather over extents is composition of affine copies with alpha=1,
-beta=0 between indexed extent views. Transfers bind each source/receive extent
-to a numeric identity and queue. On two participants, all-gather exposes each
-locally owned extent together with the peer-owned receive extents. Peer sum
-is a weighted-add function over local and receive views. Larger collectives
-can compose the same numerical operations, but the current bridge connects one
-peer; this change does not implement a multi-peer topology.
+Each slot has independent producer, peer contribution, transform, K-panel partial,
+result, gathered output, statistic and normalization extents. The example calls
+the same configure function for every slot on both participants.
 
-## Producer and consumer boundaries
+Its transfer occurrences are uniquely numbered as follows, with extent
+i = group + 2 * k_panel:
 
-A producer can be a bound numerical function or externally supplied input.
-A mutable external producer calls mesh_tensor_issue before writing an extent,
-then mesh_tensor_complete to publish it. These use the same mesh_issue and
-mesh_complete functions as GPU producers, including transfer publication.
-mesh_tensor_publish is a convenience for bytes initialized before their first use;
-constant parameters use mesh_tensor_constant before realization. Function
-completion supplies all subsequent publications. The caller registers output
-extents with mesh_algebra_return before realization, polls their availability,
-reads them, and consumes each return after use. Different tensor extents are
-independent invocations; there is no mandatory tensor-wide completion.
+| Occurrence | Source | Destination | Queue |
+|---|---|---|---|
+| 10 * slot + 2 * i + peer | peer's producer[slot, i] | other peer's received[slot, i] | group |
+| 10 * slot + 8 + peer | peer's result[slot, peer] | other peer's gathered[slot, peer] | peer |
 
-A consumer names the extent it reads, even if it only reads a slice. To start
-on smaller pieces, define those pieces as independently produced extents.
-The numerical library owns the split, not transport. A matrix contraction's
-K slices produce separate partials; a fixed addition structure determines the
-final association. A row normalization can compose square, row sum, reduction
-of row statistics, and final elementwise operations; final normalization still
-requires that row's complete statistic. No DNN-specific epilogue is embedded.
+Both peers enumerate all ten occurrences per slot. Projection removes only
+occurrences not locally owned. mesh_realize orders each queue's blocks by
+occurrence identity and block index, so each source SEND sequence equals the
+corresponding destination RECV sequence. The local row/page numbers can differ.
+This establishes destination identity from source, not from payload arrival time.
+The live slots use disjoint allocations. Reuse is subject to those pages' actual
+reader lifetimes; the ring of work-request metadata is not the value-buffer ring.
 
-The MPS implementation retains its existing optimized GEMM loop. It binds
-row-major or transposed input views before execution. Every configured output
-extent is an independently submitted MPS call. This establishes streaming at
-call boundaries, not visibility of internal tiles of a single opaque MPS call.
-No faster local baseline is claimed. More aggressive producer publication must
-be implemented in a backend that exposes those completion boundaries and must
-be validated with the actual visibility guarantees of Metal and transport.
+For each window the caller withholds input zero of its first invocation, while
+producing all other inputs into their separate slots. It requires group one's
+contraction to complete in every invocation in the window before supplying the
+withheld input. With depth eight, seven later invocations must produce that output
+while the first invocation still lacks input zero. No outputs have been consumed
+at that observation point. Afterward the host consumes and refills one slot at a
+time, while the same static scan runs all eligible numerical functions.
 
-## Transport ordering
+Queue zero's FIFO can still block later group-zero transfers behind the missing
+first input. Queue one has a separate configured order and carries the independent
+work. More memory removes destination-reuse dependencies; it does not make an
+anonymous SEND randomly address a later slot on the same queue.
 
-D5 remains a physical matching requirement: SEND and RECV have the same FIFO
-order on each queue. An unproduced early binding blocks later transfers on that
-queue. Independent queues continue. The example assigns the two independent
-row groups to separate queues and withholds extent zero, which is first in
-queue zero. Queue one must finish a complete contracted row group first.
-This demonstrates real independence, but does not claim arbitrary ready-order
-transfer within one queue or unbounded independent channels. Choosing more than
-the configured queue count folds streams onto FIFO orders, as before.
+## Build and acceptance
 
-Returns hold their storage until mesh_algebra_consume. Transport readers hold
-send storage through NIC completion. Metal command completions retain the algebra
-owner and its views. Callers must keep the attached mesh context alive through
-completion and destroy the algebra before detaching. Configuration is single
-threaded, scanning has one caller, and completion callbacks use atomic reporting
-counters. Those counters are observational; readiness never reads them.
+Build `make -C rdma .build/streaming-algebra`. Run
+`rdma/.build/streaming-algebra 0 32 128 8` and
+`rdma/.build/streaming-algebra 1 32 128 8` on the two peers. Arguments are rank,
+invocation count, rows and depth. A 4096-page arena with 4-page blocks and two
+queues accommodates this example. Shape 257 also exercises extents spanning
+multiple transport blocks. The existing executable is the acceptance path.
 
-Configuration errors identify invalid geometry, overlapping output ownership,
-unsupported MPS layouts or exhausted storage; they do not alter node availability
-or transport policy. Existing geometry must be honored so a completed extent
-cannot falsely publish unwritten bytes. No runtime repair selects another backend.
+The numerical expectation varies by invocation and is computed independently.
+Every contraction, peer replica, row sum and composed normalization is checked.
+Reports include allocated pages, delayed windows, later-invocation completions,
+numerical error, GPU commands and observed early-window time with online count,
+mean and sample variance. These intervals include host observation and initial
+setup when applicable; they are not throughput gains.
 
-## Acceptance
+The [earlier measurement record](data/streaming-algebra-2026-09-13.json) concerns
+the earlier single-slot implementation. It is not validation of this buffering
+change. The [source review](pallas-collective-source-review.md) records why the
+paired maps and explicit invocation storage were needed.
 
-Build with `make -C rdma .build/streaming-algebra`. Run the same committed main
-on both participants with `rdma/.build/streaming-algebra 0 20 128` and
-`rdma/.build/streaming-algebra 1 20 128`. Both bridges need matching block sizes
-and at least two queues; 4096 arena pages with 4-page blocks cover the default
-shape. MODEL_PATH and the metal-microbench checkout are not dependencies.
+## Boundaries
 
-Four input extents represent two row groups and two contraction-axis panels.
-Each GPU produces `P=0.5*X+0.125` directly in transferable pages. Each participant
-adds the two peer contributions, applies tanh, and contracts each panel with
-its corresponding constant weight view. Two partial contractions add into each
-final row group. Each participant owns one group for the final all-gather.
-Transposed weight views exercise contraction layout binding. Row sums exercise
-a further streaming reduction consumer. Square, sum, affine, reciprocal square
-root and broadcast multiplication compose row normalization, which is also checked. The host computes
-an independent numerical expectation after completion and checks every output,
-its peer-owned gathered replica, finiteness and row sums.
+The current bridge connects one peer using two-sided SEND/RECV. It does not
+implement a general multi-peer topology. Shared-memory version 20 requires
+rebuilt clients. Connection setup waits for realized configuration, posts the
+initial receive windows and completes a bilateral setup boundary before sending.
+That fixed setup cost does not become a numerical firing predicate.
 
-After four warmups, ordinary and withheld-input runs alternate. Withholding
-extent zero must leave its producer output unavailable for a new read while group one finishes.
-Only after observing that completed group does the caller supply extent zero.
-This is an input-dependency experiment, not clock-coordinated device launch.
-The 30-second limit is solely the acceptance process's failure deadline.
-No sleeps, rendezvous messages or second participant scheduler establish work
-readiness. Reports contain count, mean and sample variance for normal, delayed
-and early-completion latency, plus numerical error and GPU command totals.
-These are measured intervals, not a claimed speedup or transport-only cost.
-
-## Registration reuse across clients
-
-Successive acceptance clients exposed a provider lifetime bug: pair teardown retains
-registered memory, but pair setup recomputed the registration count using the
-caller’s data offset instead of the retained registration origin. For power-of-two
-blocks this changed one region into two and wrote past the allocated MR array.
-Setup now uses the realized registration origin for both initial registration and
-reuse. The acceptance program must run across successive client attachments,
-including different tensor extents, without restarting the bridge between them.
-
-The acceptance input changes each trial, so stale transport data cannot pass by
-coinciding with a previous invocation. External producers acquire their extent
-through its configured output rows before overwriting it.
-
-## Measurement status
-
-[Recorded observations](data/streaming-algebra-2026-09-13.json) retain both the
-earlier failures and the successful setup repair. At commit `9762d14`, six
-consecutive client lifetimes passed on both the M5 and M4 without restarting
-either bridge between clients: row counts 128, 37, 128, 1, 128, and 257.
-The final shape spans multiple 64 KiB transport blocks per numerical extent.
-Each client performs four warmups, twenty normal invocations and twenty
-withheld-input invocations, changing input values every time.
-
-That is 120 delayed-input observations per participant, all completing the
-independent contracted row group before the withheld input was supplied. The
-maximum absolute error across these runs is 1.38101313e-7. Gathered peer outputs
-match exactly; row sums and the composed normalization pass their independent
-numerical checks. The JSON records count, mean and sample variance for each
-measured latency. These observations establish this acceptance scope; they do
-not establish a performance gain or validate FP16 and larger peer topologies.
-
-The earlier startup fault manifested as absent initial receive completions and
-numerical mismatches. The previous attribution to later data occupying earlier
-receive slots was an inference, not established payload-provenance evidence. The registration-origin repair fixes
-an independently established out-of-bounds write. A symmetric metadata exchange,
-fixed initial PSN, separate completion queues, and an RTR-only setup boundary
-did not eliminate the startup fault. The retained repair posts each configured
-initial receive window before completing the bilateral setup boundary and enabling
-sends. Setup follows completed mesh_realize, using the configured-owner header
-word. User authorization for fixed setup costs is recorded as ledger D16.
-
-There is one setup-complete byte per peer per connection, on the existing bounded
-TCP setup channel. The tensor progress path carries no acknowledgements, setup
-checks, phases or completion tokens. link_receive is the same receive-posting
-function during setup and ordinary transport progress. Failed setup releases its
-posted occupancy through the existing link teardown.
-
-The single-sample reporting check at `24040d2` also passes on both participants;
-sample variance is JSON null when there is only one observation. C and
-Objective-C warning checks and Swift module import/typechecking pass.
+MPS contractions publish at submitted extent boundaries. This implements indexed
+storage and async extent composition, not Pallas's inner-matmul forwarding callback.
+Intra-dispatch publication needs a numerical backend exposing those boundaries.
+FP16 is supported by the interface but has not been covered by this example.

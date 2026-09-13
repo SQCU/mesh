@@ -60,6 +60,7 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; };
 @public
   struct mesh_ctx *context;
   uint64_t submitted;
+  uint32_t copies;
   _Atomic uint64_t completed,gpuNanoseconds;
   _Atomic int64_t code;
 }
@@ -268,6 +269,31 @@ int mesh_algebra_transfer(struct mesh_algebra *handle,struct mesh_tensor *t,uint
   struct mesh_row_binding b={.first=m.first,.count=m.count,.binding=identity,.queue=queue,.receive=!!receive};
   [a.bindings appendBytes:&b length:sizeof b];return 0;
 }
+/* design/algorithm-sources.md#pallas-indexed-destinations */
+int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized)return EBUSY;
+  if(!source.tensor || !destination.tensor || source.tensor->context!=a->context || destination.tensor->context!=a->context || !count || count>UINT32_MAX-a->copies)return EINVAL;
+  for(size_t i=0;i<count;i++) {
+    uint64_t si=source.first+(uint64_t)i*source.stride,di=destination.first+(uint64_t)i*destination.stride;
+    if(si>=source.tensor->count || di>=destination.tensor->count)return EINVAL;
+    struct mesh_extent *s=&source.tensor->extents[si],*d=&destination.tensor->extents[di];
+    if(s->shape.rows!=d->shape.rows || s->shape.columns!=d->shape.columns || s->shape.scalar!=d->shape.scalar || (source.peer!=destination.peer && s->pages!=d->pages))return EINVAL;
+  }
+  for(size_t i=0;i<count;i++) {
+    uint32_t si=source.first+(uint32_t)i*source.stride,di=destination.first+(uint32_t)i*destination.stride;
+    uint32_t identity=a->copies++;int error=0;
+    if(source.peer==destination.peer) {
+      if(source.peer==a->context->M->node)error=mesh_algebra_bind(handle,MESH_AFFINE,mesh_tensor_view(source.tensor,si),(struct mesh_view){0},mesh_tensor_view(destination.tensor,di),1,0);
+    } else {
+      if(source.peer==a->context->M->node)error=mesh_algebra_transfer(handle,source.tensor,si,identity,queue,0);
+      if(!error && destination.peer==a->context->M->node)error=mesh_algebra_transfer(handle,destination.tensor,di,identity,queue,1);
+    }
+    if(error)return error;
+  }
+  return 0;
+}
+
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_return(struct mesh_algebra *handle,struct mesh_tensor *t,uint32_t i) {
   MeshAlgebra *a=owner(handle);

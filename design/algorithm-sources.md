@@ -245,3 +245,22 @@ RTR/RTS and posted-receive mechanisms; the operator explicitly authorized the
 fixed setup boundary in ledger D16. Initial receive windows are posted after
 configuration and synchronized before enabling sends. This is a connection
 initialization requirement; no extra tensor-firing predicate follows from it.
+
+## Pallas indexed destinations
+
+The JAX authors' [Pallas collective matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
+allocates a distinct scratch slice for each incoming shard and forwards to an
+explicitly indexed remote reference. Its storage choice avoids the backpressure
+that would follow from reusing fewer scratch slices. Their
+[TPU buffering discussion](https://docs.jax.dev/en/latest/pallas/tpu/distributed.html#double-buffering)
+explains how additional slots accommodate additional run-ahead.
+
+mesh_algebra_copy implements a common indexed source/destination declaration.
+Every participant enumerates every occurrence; the local participant projects
+its send, receive or local copy from that same occurrence. The example's configure
+function expands invocation slots into distinct registered tensors and numerical
+functions, with shared immutable weights. Its main function produces ahead into
+those slots, observes independent outputs before supplying a withheld input, and
+reuses each slot after consuming its own outputs. No extra per-message protocol
+or numerical scheduler implements this buffering. The algebra and FIFO lowering
+proof are in [streaming algebra](streaming-algebra.md).

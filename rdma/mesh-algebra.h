@@ -16,6 +16,7 @@ struct mesh_view {
   uint32_t extent;
   size_t offset,rows,columns,row_stride,column_stride;
 };
+struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
 struct mesh_algebra_report { uint64_t submitted,completed; int64_t code; double gpu_seconds; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
@@ -32,6 +33,7 @@ int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
 void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_publish(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
+int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_transfer(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t binding,uint16_t queue,int receive);
 int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_realize(struct mesh_algebra *);
