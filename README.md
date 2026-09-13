@@ -3,8 +3,8 @@
 [Streaming tensor algebra](design/streaming-algebra.md) adds independently
 produced extents, strided views, elementwise operations and MPS contractions
 over canonical registered pages. Its producer → peer sum → transform →
-contraction example records both numerical acceptance and the current transport
-startup limitation.
+contraction example measures partial progress across the RDMA link, including
+delayed inputs, repeated attachments and extents spanning transport blocks.
 
 [Compiled indexed communication functions](design/compiled-functions.md) expose
 canonical stream views to numerical callers through reusable native closures.

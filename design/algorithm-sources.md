@@ -238,3 +238,10 @@ The explicit formulas, shape checks, allocation/view lifetime, deterministic
 fixtures and numerical comparison implement that contract as described in
 [streaming algebra](streaming-algebra.md). They are not algorithms attributed to
 those papers. Welford's update above supplies the example's timing statistics.
+
+The bridge's link_receive factors the existing D2/D4 receive posting into one
+function used both in setup and ongoing progress. Apple's TN3205 supplies the
+RTR/RTS and posted-receive mechanisms; the operator explicitly authorized the
+fixed setup boundary in ledger D16. Initial receive windows are posted after
+configuration and synchronized before enabling sends. This is a connection
+initialization requirement; no extra tensor-firing predicate follows from it.

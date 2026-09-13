@@ -14,7 +14,9 @@ it is an observable numerical acceptance program, not another specification.
 using Metal elementwise operations and MPS matrix multiplication. It builds
 against `libmesh.dylib`, without the model loader, Engine module, checkpoint,
 model dimensions, Python or environment-selected numerical configuration.
-The existing `mesh-dataflow.h` ABI and bridge wire version remain unchanged.
+The `mesh-dataflow.h` source API remains compatible. Shared-memory version 20
+publishes completed configuration before the bridge pairs; existing clients and
+bridges must be rebuilt together. The startup exchange also has a new magic.
 
 Create an algebra context on an already attached mesh context. Create tensors
 as arrays of explicitly shaped extents. Configuration allocates every extent
@@ -153,25 +155,33 @@ through its configured output rows before overwriting it.
 
 ## Measurement status
 
-[Recorded observations](data/streaming-algebra-2026-09-13.json) include passing
-20-normal/20-delayed runs on M5 and M4 with 128-row extents, and a passing
-37-row run. Every delayed run in those successful invocations observed the
-independent contraction before supplying the withheld extent. Those versions
-used identical input values across invocations. The current example varies
-input each invocation and acquires output ownership before the host writes it.
+[Recorded observations](data/streaming-algebra-2026-09-13.json) retain both the
+earlier failures and the successful setup repair. At commit `9762d14`, six
+consecutive client lifetimes passed on both the M5 and M4 without restarting
+either bridge between clients: row counts 128, 37, 128, 1, 128, and 257.
+The final shape spans multiple 64 KiB transport blocks per numerical extent.
+Each client performs four warmups, twenty normal invocations and twenty
+withheld-input invocations, changing input values every time.
 
-Repeated attachment also produced missing initial receive completions, and in
-some runs later payloads occupied earlier receive slots. The registration-origin
-repair fixes an independently established out-of-bounds write but did not eliminate
-this failure. Symmetric connection metadata exchange, JACCL's initial PSN, and
-separate completion queues were diagnostic variations; none eliminated the
-failure and none is retained. Temporary per-request logging was also removed.
-The evidence does not establish packet loss in hardware or a definitive root cause.
+That is 120 delayed-input observations per participant, all completing the
+independent contracted row group before the withheld input was supplied. The
+maximum absolute error across these runs is 1.38101313e-7. Gathered peer outputs
+match exactly; row sums and the composed normalization pass their independent
+numerical checks. The JSON records count, mean and sample variance for each
+measured latency. These observations establish this acceptance scope; they do
+not establish a performance gain or validate FP16 and larger peer topologies.
 
-The next proposed experiment is a single setup barrier after both peers enter
-RTR and before sending, within the existing bounded connection setup. It would
-add no per-extent protocol, but requires operator direction under AGENTS.md before
-changing the connection specification. Until resolved, this is an implemented
-algebra interface with passing numerical observations, not a reliably accepted
-distributed runtime or a performance improvement claim. FP16 and larger peer
-topologies have not been measured by this acceptance program.
+The earlier startup fault manifested as absent initial receive completions and
+later data occupying earlier receive slots. The registration-origin repair fixes
+an independently established out-of-bounds write. A symmetric metadata exchange,
+fixed initial PSN, separate completion queues, and an RTR-only setup boundary
+did not eliminate the startup fault. The retained repair posts each configured
+initial receive window before completing the bilateral setup boundary and enabling
+sends. Setup follows completed mesh_realize, using the configured-owner header
+word. User authorization for fixed setup costs is recorded as ledger D16.
+
+There is one setup-complete byte per peer per connection, on the existing bounded
+TCP setup channel. The tensor progress path carries no acknowledgements, setup
+checks, phases or completion tokens. link_receive is the same receive-posting
+function during setup and ordinary transport progress. Failed setup releases its
+posted occupancy through the existing link teardown.

@@ -33,21 +33,21 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh
   return 0;
 }
 
-/* design/collective-dependency-ledger.md#d16-fixed-connection-setup-before-numerical-execution */
+/* design/algorithm-sources.md#streaming-algebra */
 static void link_receive(void *state,uint32_t q){
   struct mesh_link *link=state;
   struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
   _Atomic uint32_t *table=mesh_page(M);
-    struct mesh_queue *in=link_queue(link,q,MESH_RECEIVE);
-    uint32_t length=atomic_load_explicit(mesh_order_length(M,q,MESH_RECEIVE),memory_order_acquire);
-    while(length && in->tail-in->head<(uint32_t)v->receive_capacity){
-      uint32_t row=mesh_order(M,q,MESH_RECEIVE)[in->next%length];
-      if(!mesh_receive_postable(M,row)) break;
-      struct mesh_posted entry={row,atomic_load_explicit(&table[row],memory_order_acquire),0};
-      mesh_receive_posted(M,entry.row,entry.page);
-      if(link_post(link,q,MESH_RECEIVE,entry)){ mesh_receive_complete(M,entry.row,entry.page,0); break; }
-      in->next++;
-    }
+  struct mesh_queue *in=link_queue(link,q,MESH_RECEIVE);
+  uint32_t length=atomic_load_explicit(mesh_order_length(M,q,MESH_RECEIVE),memory_order_acquire);
+  while(length && in->tail-in->head<(uint32_t)v->receive_capacity){
+    uint32_t row=mesh_order(M,q,MESH_RECEIVE)[in->next%length];
+    if(!mesh_receive_postable(M,row)) break;
+    struct mesh_posted entry={row,atomic_load_explicit(&table[row],memory_order_acquire),0};
+    mesh_receive_posted(M,entry.row,entry.page);
+    if(link_post(link,q,MESH_RECEIVE,entry)){ mesh_receive_complete(M,entry.row,entry.page,0); break; }
+    in->next++;
+  }
 }
 
 /* ledger D2, D3, D5, D7, D8, D9 */
@@ -56,10 +56,9 @@ static void mesh_progress(struct mesh_link *link){
   _Atomic uint32_t *table=mesh_page(M);
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     link_receive(link,q);
-    uint32_t length;
     /* D5, D7: send produced blocks in this queue's order; producers never wait on this */
     struct mesh_queue *out=link_queue(link,q,MESH_SEND);
-    length=atomic_load_explicit(mesh_order_length(M,q,MESH_SEND),memory_order_acquire);
+    uint32_t length=atomic_load_explicit(mesh_order_length(M,q,MESH_SEND),memory_order_acquire);
     while(length && out->tail-out->head<(uint32_t)v->send_capacity){
       uint32_t row=mesh_order(M,q,MESH_SEND)[out->next%length];
       struct mesh_posted entry={row,atomic_load_explicit(&table[row],memory_order_acquire),mesh_send(M)[row]};

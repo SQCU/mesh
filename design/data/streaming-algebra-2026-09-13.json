@@ -5,7 +5,7 @@
   "arena_pages": 4096,
   "block_pages": 4,
   "queue_pairs": 2,
-  "status": "Passing individual runs do not establish reliable startup. Diagnostic transport variations were removed after failures recurred.",
+  "status": "Six consecutive client lifetimes passed on both peers with configured initial receive windows posted and synchronized during setup. Inputs change every invocation.",
   "runs": [
     {
       "experiment": "original",
@@ -200,6 +200,380 @@
       "result": {
         "failure": "numerical mismatch 1 0 0 -0.00272014551 -0.0696848271"
       }
+    },
+    {
+      "experiment": "preposted_setup_normal",
+      "commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 3.36495,
+          "sample_variance": 0.204731835
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 4.1214,
+          "sample_variance": 0.266181946
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 2.78075002,
+          "sample_variance": 0.21606769
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.006811517,
+        "wall_seconds": 0.686328
+      }
+    },
+    {
+      "experiment": "preposted_setup_normal",
+      "commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.7698,
+          "sample_variance": 0.041772485
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.78204999,
+          "sample_variance": 0.111914157
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.1681,
+          "sample_variance": 0.0507165157
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.031799799,
+        "wall_seconds": 0.735114
+      }
+    },
+    {
+      "experiment": "preposted_setup_ragged",
+      "commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 37,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 2.12064998,
+          "sample_variance": 0.0374748726
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.64315001,
+          "sample_variance": 0.0916964488
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.51005001,
+          "sample_variance": 0.118724375
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.005855205,
+        "wall_seconds": 0.285702
+      }
+    },
+    {
+      "experiment": "preposted_setup_ragged",
+      "commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 37,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.6175,
+          "sample_variance": 0.0199068955
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.3428,
+          "sample_variance": 0.00898195736
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 0.957899998,
+          "sample_variance": 0.00139756853
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.023635903,
+        "wall_seconds": 0.298862
+      }
+    },
+    {
+      "experiment": "preposted_setup_repeat",
+      "commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 3.35689999,
+          "sample_variance": 0.325284516
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 3.84734998,
+          "sample_variance": 0.188890792
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 2.4563,
+          "sample_variance": 0.133529808
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.006229985,
+        "wall_seconds": 0.667114
+      }
+    },
+    {
+      "experiment": "preposted_setup_repeat",
+      "commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.7919,
+          "sample_variance": 0.0279616739
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.90455,
+          "sample_variance": 0.25295752
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.1999,
+          "sample_variance": 0.0651175688
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.031863846,
+        "wall_seconds": 0.706684
+      }
+    },
+    {
+      "experiment": "preposted_setup_small",
+      "commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 1,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 4.52837412e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.4344,
+          "sample_variance": 0.0515533092
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.03114999,
+          "sample_variance": 0.159623919
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 0.871199992,
+          "sample_variance": 0.0731684725
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.005975027,
+        "wall_seconds": 0.305169
+      }
+    },
+    {
+      "experiment": "preposted_setup_small",
+      "commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 1,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 4.52837412e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.3826,
+          "sample_variance": 0.0488583551
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.07785,
+          "sample_variance": 0.0919152907
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 0.714050001,
+          "sample_variance": 0.0290388913
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.016961461,
+        "wall_seconds": 0.407837
+      }
+    },
+    {
+      "experiment": "preposted_setup_repeat2",
+      "commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 2.6061,
+          "sample_variance": 0.592910644
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 3.38510001,
+          "sample_variance": 0.435893783
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.7785,
+          "sample_variance": 0.542877184
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.006687664,
+        "wall_seconds": 0.745584
+      }
+    },
+    {
+      "experiment": "preposted_setup_repeat2",
+      "commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 2.4541,
+          "sample_variance": 2.41493041
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 3.8646,
+          "sample_variance": 4.05840858
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 2.07745,
+          "sample_variance": 3.37373921
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.032067189,
+        "wall_seconds": 0.866859
+      }
+    },
+    {
+      "experiment": "preposted_setup_multiblock",
+      "commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 5.11854999,
+          "sample_variance": 0.51035364
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 5.88999998,
+          "sample_variance": 0.643996527
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 4.3566,
+          "sample_variance": 0.606562361
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.007711921,
+        "wall_seconds": 1.193075
+      }
+    },
+    {
+      "experiment": "preposted_setup_multiblock",
+      "commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 1.38101313e-07,
+        "normal_ms": {
+          "count": 20,
+          "mean": 2.16615,
+          "sample_variance": 0.0422981348
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 3.54725,
+          "sample_variance": 0.319553458
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.45075,
+          "sample_variance": 0.0541337772
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.050999567,
+        "wall_seconds": 1.261741
+      }
     }
-  ]
+  ],
+  "validated_commit": "9762d14",
+  "shared_memory_version": 20
 }

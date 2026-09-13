@@ -137,6 +137,8 @@ int main(int argc,char **argv) {
     for(size_t i=0;i<8;i++)mesh_algebra_consume(a,i);
   }
   struct mesh_algebra_report report=mesh_algebra_report(a);
-  printf("{\"rank\":%d,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"independent_completions\":%zu,\"max_absolute_error\":%.9g,\"normal_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%.9g},\"delayed_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%.9g},\"early_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%.9g},\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,rows,2*k,n,independent,maxError,repetitions,means[0],repetitions>1?m2[0]/(repetitions-1):0,repetitions,means[1],repetitions>1?m2[1]/(repetitions-1):0,independent,earlyMean,independent>1?earlyM2/(independent-1):0,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
+  char variance[3][32];double moments[]={m2[0],m2[1],earlyM2};
+  for(size_t i=0;i<3;i++)snprintf(variance[i],sizeof variance[i],repetitions>1?"%.9g":"null",repetitions>1?moments[i]/(repetitions-1):0);
+  printf("{\"rank\":%d,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"independent_completions\":%zu,\"max_absolute_error\":%.9g,\"normal_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"delayed_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"early_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,rows,2*k,n,independent,maxError,repetitions,means[0],variance[0],repetitions,means[1],variance[1],independent,earlyMean,variance[2],(unsigned long long)report.completed,report.gpu_seconds,now()-start);
   mesh_algebra_destroy(a);check(mesh_detach(&context));return 0;
 }
