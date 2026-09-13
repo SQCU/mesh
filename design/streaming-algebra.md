@@ -8,6 +8,20 @@ elementwise transform and contraction, with an unrelated extent deliberately
 withheld. This explicitly authorizes the executable example in `examples/`;
 it is an observable numerical acceptance program, not another specification.
 
+## The five implementation topics
+
+| Topic | Implemented boundary |
+|---|---|
+| Coordinates, readiness and storage | Strided tensor views, independently published extents, canonical registered pages |
+| Indexed dependencies | Static numerical functions naming only their input/output extents; mesh_issue and mesh_complete |
+| Streaming producers and consumers | External issue/complete and GPU command completion publish extents; consumers issue as those extents become available |
+| Complete values and partial contractions | Explicit K-panel partial extents combined by configured additions with fixed association |
+| Compute and transport granularity | Optimized MPS contractions per numerical extent; transport independently splits/pads these into blocks |
+
+The implementation is a first composition substrate. Readiness finer than an
+allocated extent, dynamic gather indices within one extent, and publication
+inside an opaque MPS dispatch are not implemented by the view API.
+
 ## Interface and ownership
 
 `rdma/mesh-algebra.h` is a C interface; `libmesh-algebra.dylib` implements it
@@ -185,3 +199,7 @@ TCP setup channel. The tensor progress path carries no acknowledgements, setup
 checks, phases or completion tokens. link_receive is the same receive-posting
 function during setup and ordinary transport progress. Failed setup releases its
 posted occupancy through the existing link teardown.
+
+The single-sample reporting check at `24040d2` also passes on both participants;
+sample variance is JSON null when there is only one observation. C and
+Objective-C warning checks and Swift module import/typechecking pass.

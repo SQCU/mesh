@@ -572,6 +572,70 @@
         "gpu_seconds": 0.050999567,
         "wall_seconds": 1.261741
       }
+    },
+    {
+      "experiment": "single_sample_reporting",
+      "commit": "24040d2",
+      "bridge_commit": "9762d14",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 37,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 1,
+        "max_absolute_error": 1.24634425e-07,
+        "normal_ms": {
+          "count": 1,
+          "mean": 2.51400005,
+          "sample_variance": null
+        },
+        "delayed_ms": {
+          "count": 1,
+          "mean": 2.69999995,
+          "sample_variance": null
+        },
+        "early_ms": {
+          "count": 1,
+          "mean": 1.46499998,
+          "sample_variance": null
+        },
+        "commands": 180,
+        "gpu_seconds": 0.000886826,
+        "wall_seconds": 0.088869
+      }
+    },
+    {
+      "experiment": "single_sample_reporting",
+      "commit": "24040d2",
+      "bridge_commit": "9762d14",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 37,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 1,
+        "max_absolute_error": 1.24634425e-07,
+        "normal_ms": {
+          "count": 1,
+          "mean": 1.68700001,
+          "sample_variance": null
+        },
+        "delayed_ms": {
+          "count": 1,
+          "mean": 2.53999999,
+          "sample_variance": null
+        },
+        "early_ms": {
+          "count": 1,
+          "mean": 1.01699997,
+          "sample_variance": null
+        },
+        "commands": 180,
+        "gpu_seconds": 0.003271205,
+        "wall_seconds": 0.079013
+      }
     }
   ],
   "validated_commit": "9762d14",

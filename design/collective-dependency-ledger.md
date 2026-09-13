@@ -210,7 +210,8 @@ Licenses: the TCP qpi exchange in `verbs_up` (QPNs, PSNs, GID, LID, node, geomet
 Analogue: [JACCL] a `Connection` owns its queue pair and destroys it with itself:
 `Connection::~Connection() { if (queue_pair != nullptr) { ibv().destroy_qp(queue_pair); }` (`rdma.cpp`).
 
-Licenses: the bridge pairs when a client attaches and destroys its queue pairs
+Licenses: the bridge pairs for an attached client (after configuration under D16)
+and destroys its queue pairs
 when that client leaves, then clears the occupancy of the work requests those
 queue pairs held. Receives posted in one program's order (D5) therefore never
 capture another program's sends. Pairing is retried inside the bridge process;
