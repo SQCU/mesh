@@ -119,6 +119,7 @@ def main():
         total = warmups + args.trials
         submitted = completed = 0
         outstanding = {}
+        terminal = []
         measurement_start = None
         measurement_end = None
         while completed < total:
@@ -135,16 +136,21 @@ def main():
                     continue
                 trial, began = outstanding.pop(slot)
                 ended = time.perf_counter()
-                maximum_error = max(maximum_error, float(np.max(np.abs(result.array - reference))))
-                if not np.allclose(result.array, reference, rtol=2e-4, atol=2e-4):
-                    raise ArithmeticError('Distributed contraction differs from the reference')
-                result.consume()
+                if submitted < total:
+                    result.consume()
+                else:
+                    terminal.append(result)
                 completed += 1
                 if completed == warmups:
                     measurement_start = ended
                 if completed > warmups:
                     latencies.append(ended - began)
                     measurement_end = ended
+        for result in terminal:
+            maximum_error = max(maximum_error, float(np.max(np.abs(result.array - reference))))
+            if not np.allclose(result.array, reference, rtol=2e-4, atol=2e-4):
+                raise ArithmeticError('Distributed contraction differs from the reference')
+            result.consume()
         samples = latencies
         print(json.dumps(dict(rank=0, mode=args.mode, rows=rows, tile=tile,
             depth=args.depth, seconds=samples, statistics=moments(samples),
