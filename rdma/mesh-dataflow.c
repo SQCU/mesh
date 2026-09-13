@@ -12,6 +12,25 @@ static struct mesh_ctx CTX0;
 struct mesh_ctx *mesh_context(void){ return &CTX0; }
 struct hdr *mesh_region(struct mesh_ctx *c){ return c->M; }
 
+static int mesh_is(struct hdr *m,int plane,uint32_t row){
+  return (atomic_load_explicit(&mesh_plane(m,plane)[row/64],memory_order_acquire)>>(row%64))&1;
+}
+
+/* ledger D14: a leaving client's queue orders, unsent productions and ownership end with it. Work requests
+   the bridge already posted keep their occupancy until the bridge destroys their queue pairs. */
+static void mesh_retire(struct hdr *m){
+  for(uint32_t i=0;i<2*MESH_QPS;i++) atomic_store_explicit(&m->order_length[i],0,memory_order_release);
+  uint8_t *send=mesh_send(m);
+  for(uint32_t r=0;r<mesh_rows(m);r++){
+    if(!send[r]) continue;
+    uint32_t page=atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire);
+    if(page==MESH_ABSENT || !mesh_is(m,MESH_PAGE_HOT,page)) mesh_bits_clear(m,MESH_ROW_HOT,r,m->block);
+    send[r]=0;
+  }
+  for(uint32_t w=0;w<mesh_words(m);w++) atomic_store_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],0,memory_order_release);
+  mesh_bits_clear(m,MESH_PAGE_OWN,0,mesh_rows(m));
+}
+
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
   if(!name) name=getenv("MESH_REGION");
@@ -30,9 +49,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)){
     if(!vacant || !kill((pid_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EBUSY; }
     if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,(uint64_t)getpid(),memory_order_acq_rel,memory_order_acquire)) continue;
-    for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_fetch_or_explicit(&mesh_base(memory)[b],UINT32_MAX,memory_order_acq_rel);
-    mesh_retire_rows(memory);
-    mesh_bits_clear(memory,MESH_PAGE_OWN,memory->pool,memory->arena);
+    mesh_retire(memory);
     break;
   }
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.fd=file};
@@ -41,20 +58,13 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  for(uint32_t b=0;b<MESH_BINDINGS;b++) atomic_fetch_or_explicit(&mesh_base(c->M)[b],UINT32_MAX,memory_order_acq_rel);
-  mesh_retire_rows(c->M);
-  mesh_bits_clear(c->M,MESH_PAGE_OWN,c->M->pool,c->M->arena);
+  mesh_retire(c->M);
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   int error=status?errno:0;
   if(close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};
   return error;
-}
-
-/* design/algorithm-sources.md#receive-storage-before-consumer-binding */
-void mesh_receive_invalidate(struct mesh_ctx *c){
-  mesh_bits_clear(c->M,MESH_PAGE_OWN,0,c->M->pool);
 }
 
 /* design/algorithm-sources.md#registered-memory-views */
@@ -80,6 +90,7 @@ void *mesh_view_create(struct mesh_ctx *c,const uint32_t *pages,size_t count){
 /* design/algorithm-sources.md#registered-memory-views */
 int mesh_view_destroy(void *address,size_t length){ return munmap(address,length)?errno:0; }
 
+/* ledger D12: work-completion status is read out of band */
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *c,size_t index){
   const struct mesh_port_info *port=&c->M->port;
   return (struct mesh_row_metadata){.when=port->when,.function=UINT32_MAX,.index=(uint32_t)index,
@@ -91,7 +102,7 @@ static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,u
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
     uint32_t next=first;
     for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
-      uint64_t occupied=(atomic_load_explicit(&mesh_plane(c->M,own)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,hot)[w],memory_order_acquire)|(own==MESH_ROW_OWN?(atomic_load_explicit(&mesh_plane(c->M,MESH_ROW_LANDED)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,MESH_ROW_BOUND)[w],memory_order_acquire)):0))&mesh_word_mask(first,count,w);
+      uint64_t occupied=(atomic_load_explicit(&mesh_plane(c->M,own)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,hot)[w],memory_order_acquire))&mesh_word_mask(first,count,w);
       if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
     }
     if(next==first){ mesh_bits_set(c->M,own,first,count); return first; }
@@ -114,67 +125,21 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   return first;
 }
 
-uint32_t mesh_landing_alloc(struct mesh_ctx *c,uint32_t count){
-  if(!count || count%c->M->block || c->landing+count>c->M->pool){ errno=ENOMEM; return MESH_ABSENT; }
-  uint32_t first=mesh_rows_alloc(c,count);
-  if(first!=MESH_ABSENT) c->landing+=count;
-  return first;
-}
-
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(c,pages,align,c->M->pool,mesh_rows(c->M),MESH_PAGE_OWN,MESH_PAGE_HOT);
+  uint32_t first=mesh_allocate(c,pages,align,0,mesh_rows(c->M),MESH_PAGE_OWN,MESH_PAGE_HOT);
   if(first!=MESH_ABSENT) c->arena+=pages;
   return first;
 }
 
 /* design/algorithm-sources.md#independent-configured-programs */
 void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  struct hdr *m=c->M;
-  for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++){
-    uint64_t bits=mesh_word_mask(first,count,w);
-    uint64_t owned=atomic_fetch_and_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],~bits,memory_order_acq_rel)&bits;
-    uint64_t bound=atomic_load_explicit(&mesh_plane(m,MESH_ROW_BOUND)[w],memory_order_acquire);
-    if(bound&owned) atomic_fetch_or_explicit(&mesh_changed(m)[w/64],UINT64_C(1)<<(w%64),memory_order_release);
-  }
+  mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
 }
 
 /* design/algorithm-sources.md#independent-configured-programs */
 void mesh_arena_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(c->M,MESH_PAGE_OWN,first,count);
-}
-
-/* design/algorithm-sources.md#configured-binding-identities */
-uint32_t mesh_bindings_reserve(struct mesh_ctx *c,uint32_t requested,uint32_t count){
-  struct hdr *m=c->M;
-  if(!count || count>MESH_BINDINGS){ errno=EINVAL; return MESH_ABSENT; }
-  uint64_t first=requested==MESH_ABSENT?atomic_load_explicit(&m->binding_next,memory_order_acquire):requested;
-  for(uint32_t attempt=0;attempt<MESH_BINDINGS;attempt++){
-    if(first+count>UINT32_MAX){ errno=ENOSPC; return MESH_ABSENT; }
-    uint32_t blocked=count;
-    for(uint32_t i=0;i<count;i++){
-      uint64_t entry=atomic_load_explicit(&mesh_base(m)[(first+i)%MESH_BINDINGS],memory_order_acquire);
-      if(entry!=UINT64_MAX && ((uint32_t)entry!=MESH_ABSENT || first+i<=(uint32_t)(entry>>32))){ blocked=i; break; }
-    }
-    if(blocked==count){
-      for(uint32_t i=0;i<count;i++) atomic_store_explicit(&mesh_base(m)[(first+i)%MESH_BINDINGS],((first+i)<<32)|MESH_RESERVED,memory_order_release);
-      uint64_t next=atomic_load_explicit(&m->binding_next,memory_order_acquire);
-      if(first+count>next) atomic_store_explicit(&m->binding_next,first+count,memory_order_release);
-      return (uint32_t)first;
-    }
-    if(requested!=MESH_ABSENT){ errno=EEXIST; return MESH_ABSENT; }
-    first+=blocked+1;
-  }
-  errno=ENOSPC; return MESH_ABSENT;
-}
-
-/* design/algorithm-sources.md#configured-binding-identities */
-void mesh_bindings_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  for(uint32_t b=first;b<first+count;b++){
-    _Atomic uint64_t *slot=&mesh_base(c->M)[b%MESH_BINDINGS];
-    uint64_t entry=atomic_load_explicit(slot,memory_order_acquire);
-    if((uint32_t)(entry>>32)==b) atomic_store_explicit(slot,((uint64_t)b<<32)|MESH_ABSENT,memory_order_release);
-  }
 }
 
 void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
@@ -185,10 +150,6 @@ void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
 void mesh_constant(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_set(c->M,MESH_CONSTANT,first,count);
   mesh_bits_set(c->M,MESH_PRESENT,first,count);
-}
-
-static int mesh_is(struct hdr *m,int plane,uint32_t row){
-  return (atomic_load_explicit(&mesh_plane(m,plane)[row/64],memory_order_acquire)>>(row%64))&1;
 }
 
 static int mesh_survey(struct mesh_ctx *c,const uint64_t *used,uint32_t first,uint32_t count,uint64_t *busy){
@@ -209,7 +170,8 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
   struct hdr *m=c->M;
   uint32_t rows=mesh_rows(m),block=m->block;
   uint64_t *used=malloc(rows*sizeof *used);
-  if(!used) return ENOMEM;
+  size_t *order=malloc((binding_count?binding_count:1)*sizeof *order);
+  if(!used || !order){ free(used); free(order); return ENOMEM; }
   memcpy(used,mesh_mask(m),rows*sizeof *used);
   int error=0;
   for(size_t i=0;i<count && !error;i++){
@@ -236,38 +198,48 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
     if(!error) mesh_take(c,used,r.first,r.count,plane);
     returns[i].plane=(uint32_t)plane;
   }
+  _Atomic uint32_t *table=mesh_page(m);
   for(size_t i=0;i<binding_count && !error;i++){
     struct mesh_row_binding *b=&bindings[i];
-    if(!b->count || b->count%block || (uint64_t)b->first+b->count>rows || b->binding==MESH_ABSENT){ error=EINVAL; break; }
-    uint64_t reservation=atomic_load_explicit(&mesh_base(m)[b->binding%MESH_BINDINGS],memory_order_acquire);
-    if(reservation!=(((uint64_t)b->binding<<32)|MESH_RESERVED)){ error=EINVAL; break; }
-    if(b->receive){
-      for(uint32_t k=0;k<b->count;k+=block) mesh_send(m)[b->first+k]|=0x80;
-      continue;
+    if(!m->qps || !b->count || b->count%block || (uint64_t)b->first+b->count>rows){ error=EINVAL; break; }
+    /* ledger D4, D6: each block is one message on one contiguous, block-aligned page run inside one region */
+    for(uint32_t k=0;k<b->count && !error;k+=block){
+      uint32_t page=atomic_load_explicit(&table[b->first+k],memory_order_acquire);
+      if(page==MESH_ABSENT || page%block || (uint64_t)page+block>rows){ error=EINVAL; break; }
+      for(uint32_t x=1;x<block;x++) if(atomic_load_explicit(&table[b->first+k+x],memory_order_acquire)!=page+x){ error=EINVAL; break; }
     }
+    if(error || b->receive) continue;
     uint64_t busy=0; int plane=0;
     error=mesh_survey(c,used,b->first,b->count,&busy);
     if(!error) error=mesh_free_plane(busy,&plane);
     if(error) break;
     mesh_take(c,used,b->first,b->count,plane);
     b->plane=(uint32_t)plane;
-    for(uint32_t k=0;k<b->count/block;k++){
-      uint32_t row=b->first+k*block;
-      uint32_t page=atomic_load_explicit(&mesh_page(m)[row+block-1],memory_order_acquire);
-      if(page==MESH_ABSENT){ error=EINVAL; break; }
-      mesh_send(m)[row]=(uint8_t)(0x40|plane);
-      *(struct mesh_tag*)mesh_at(m,page)=(struct mesh_tag){MESH_TAG,b->binding,k,0};
-    }
   }
   if(!error){
     for(uint32_t r=0;r<rows;r++) if(mesh_is(m,MESH_ROW_OWN,r)) mesh_mask(m)[r]=used[r];
-    for(size_t i=0;i<binding_count;i++) if(bindings[i].receive){
-      struct mesh_row_binding *b=&bindings[i];
-      mesh_bits_set(m,MESH_ROW_BOUND,b->first,b->count);
-      atomic_store_explicit(&mesh_base(m)[b->binding%MESH_BINDINGS],((uint64_t)b->binding<<32)|b->first,memory_order_release);
+    /* ledger D5: both participants append each queue's blocks in (identity, block index) order */
+    for(size_t i=0;i<binding_count;i++){
+      size_t j=i;
+      while(j && (bindings[order[j-1]].queue>bindings[i].queue ||
+                  (bindings[order[j-1]].queue==bindings[i].queue && bindings[order[j-1]].binding>bindings[i].binding))){ order[j]=order[j-1]; j--; }
+      order[j]=i;
+    }
+    for(size_t i=0;i<binding_count && !error;i++){
+      struct mesh_row_binding *b=&bindings[order[i]];
+      uint32_t queue=b->queue%m->qps;
+      int direction=b->receive?MESH_RECEIVE:MESH_SEND;
+      _Atomic uint32_t *length=mesh_order_length(m,queue,direction);
+      for(uint32_t k=0;k<b->count;k+=block){
+        uint32_t at=atomic_load_explicit(length,memory_order_acquire);
+        if(at>=mesh_blocks(m)){ error=ENOSPC; break; }
+        if(!b->receive) mesh_send(m)[b->first+k]=(uint8_t)(b->plane+1);
+        mesh_order(m,queue,direction)[at]=b->first+k;
+        atomic_store_explicit(length,at+1,memory_order_release);
+      }
     }
   }
-  free(used);
+  free(order); free(used);
   return error;
 }
 
@@ -338,16 +310,11 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
   return selected;
 }
 
+/* ledger D7: publication marks produced send blocks for the bridge and returns */
 static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_set(m,MESH_PRESENT,first,count);
   uint8_t *send=mesh_send(m);
-  for(uint32_t r=first;r<first+count;r++) if(send[r]&0x40){
-    uint32_t page=atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire);
-    mesh_bits_set(m,MESH_PAGE_HOT,page,m->block);
-    mesh_bits_set(m,MESH_ROW_HOT,r,m->block);
-    uint64_t entry=mesh_submission(page,r,send[r]&63);
-    mesh_push(m,SUB,entry);
-  }
+  for(uint32_t r=first;r<first+count;r++) if(send[r]) mesh_bits_set(m,MESH_ROW_HOT,r,m->block);
   mesh_bits_clear(m,MESH_PRODUCING,first,count);
 }
 

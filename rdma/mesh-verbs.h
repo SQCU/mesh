@@ -20,7 +20,6 @@
 #include <limits.h>
 
 #define QD 4095
-#define MESH_QPS 8
 struct mesh_verbs {
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
   struct ibv_qp *pair,*pairs[MESH_QPS]; int qp_count; struct ibv_mr **regions;
@@ -30,11 +29,6 @@ struct mesh_verbs {
   struct ibv_sge (*sges)[2];
   struct ibv_recv_wr *receives; struct ibv_send_wr *sends;
   int receiving, sending;
-  // One-sided RDMA_WRITE: the peer's arena base virtual address and the rkey of its whole-arena MR,
-  // exchanged once at connection. A produced page P lands at the peer at peer_base + data_off + P*pgsz
-  // (data_off and the page layout are identical on both nodes -- the compiled program is joint), written
-  // directly with no receiver RECV/CQ/ack. `data_off` is captured so the flow can form the remote address.
-  uint64_t peer_base, data_off; uint32_t peer_rkey;
 };
 static struct mesh_verbs *provider;
 /* design/algorithm-sources.md#regions-follow-blocks */
@@ -63,7 +57,7 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static double monotime(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
 static void onsig(int s){ (void)s; stop++; }
 
-struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz,header_bytes; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; uint64_t base; uint32_t rkey; };
+struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz,header_bytes; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; };
 #define XMAGIC 0x4d585047u
 
 static int dial(struct addrinfo *a){
@@ -153,7 +147,6 @@ static int initial_receive_post(char *mem,struct ibv_recv_wr *initial_receives,i
   return 0;
 }
 static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, struct ibv_recv_wr *initial_receives, int qps){
-  size_t data_off=origin;   // page P is at mem+data_off+P*pgsz; the whole span is one remote-writable MR
   if(qps<1 || qps>MESH_QPS){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
@@ -196,7 +189,8 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     size_t o=data?origin+((size_t)provider->region_count-(origin?1:0))*provider->region_extent:0;
     size_t end=data?o+provider->region_extent:origin;
     size_t n=(end<span?end:span)-o;
-    provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE);
+    /* ledger D1: "applications should only register memory as IBV_ACCESS_LOCAL_WRITE" */
+    provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
   if(ibv_query_port(provider->context,1,&pa)){ close(f); return -1; }
   size_t frames=(message_bytes+4095)/4096;
@@ -213,14 +207,11 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   provider->send_capacity=(int)((actual.cap.max_send_wr<(uint32_t)frame_capacity?actual.cap.max_send_wr:(uint32_t)frame_capacity)/frames);
   provider->receive_capacity=(int)((actual.cap.max_recv_wr<(uint32_t)frame_capacity?actual.cap.max_recv_wr:(uint32_t)frame_capacity)/frames);
   if(!provider->send_capacity || !provider->receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
-  // The responder QP must itself permit remote writes for one-sided IBV_WR_RDMA_WRITE to land (the MR
-  // permission alone is not enough); without it the peer silently drops the write (no NAK on UC), so the
-  // receiver never sees the pushed page. SEND/RECV never needed this, which is why it was absent.
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1,.qp_access_flags=IBV_ACCESS_REMOTE_WRITE};
+  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.header_bytes=0,.node=(uint16_t)me,.count=(uint32_t)qps,.base=(uint64_t)(uintptr_t)(mem+data_off),.rkey=provider->regions[0]->rkey},you;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.header_bytes=0,.node=(uint16_t)me,.count=(uint32_t)qps},you;
   for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
   fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
@@ -229,7 +220,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.header_bytes!=mine.header_bytes || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.header_bytes,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.header_bytes,you.count,you.node,expected_peer); close(f); return -1; }
   expected_peer=you.node;
-  provider->peer_base=you.base; provider->peer_rkey=you.rkey; provider->data_off=data_off;
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psns[q],
       .dest_qp_num=you.qpns[q],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,

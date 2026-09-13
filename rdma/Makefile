@@ -7,9 +7,6 @@ mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-dataflow.c Makef
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h
 	cc -O2 -o $@ mesh-stat.c
-mesh-page-stream: mesh-page-stream.c mesh-dataflow.c mesh-dataflow.h mesh.h
-	mkdir -p .build
-	cc -O2 -o .build/$@ mesh-page-stream.c mesh-dataflow.c
 mesh-verbs-stream: mesh-verbs-stream.c mesh-verbs.h mesh.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -O2 -o .build/$@ mesh-verbs-stream.c -lrdma
@@ -18,4 +15,4 @@ libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh.h
 	cc -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c
 clean:
 	rm -f $(BINS)
-.PHONY: all clean mesh-page-stream mesh-verbs-stream
+.PHONY: all clean mesh-verbs-stream

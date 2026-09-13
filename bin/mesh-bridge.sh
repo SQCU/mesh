@@ -10,18 +10,17 @@ BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
 scope=gui; mesh_pct=; node=0; peer=""; region=/mesh0
-mesh_arena_pages=; mesh_receive_pages=; mesh_block_pages=
+mesh_arena_pages=; mesh_block_pages=
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
 mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
-mesh_receive_pages="${MESH_RECEIVE_PAGES:-$mesh_receive_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
-geometry=(-A "$mesh_arena_pages" -R "$mesh_receive_pages" -B "$mesh_block_pages")
+geometry=(-A "$mesh_arena_pages" -B "$mesh_block_pages")
 [ -n "$mesh_pct" ] && geometry+=(-M "$mesh_pct")
 
 case "$scope" in
 system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_RECEIVE_PAGES="$mesh_receive_pages" MESH_BLOCK_PAGES="$mesh_block_pages" "$0" "$@"; fi
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" "$0" "$@"; fi
   DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
   LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
 gui)
@@ -80,9 +79,9 @@ do_stop() {
 
 do_start() {
   if launchctl print "$DOM/$LABEL" >/dev/null 2>&1; then
-    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(pool|arena|block)"' | tr -d '" ' | tr '\n' ' ')
-    want="arena:$mesh_arena_pages block:$mesh_block_pages pool:$mesh_receive_pages"
-    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "pool:$mesh_receive_pages" && echo "$have" | grep -q "arena:$mesh_arena_pages" && echo "$have" | grep -q "block:$mesh_block_pages"; then
+    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(rows|block)"' | tr -d '" ' | tr '\n' ' ')
+    want="rows:$mesh_arena_pages block:$mesh_block_pages"
+    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "rows:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages "; then
       echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
     fi
     if "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; then
