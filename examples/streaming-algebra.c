@@ -44,12 +44,12 @@ static struct program configure(struct mesh_algebra *a,int rank,size_t rows,size
     struct mesh_view xv=mesh_tensor_view(x,(uint32_t)i),pv=mesh_tensor_view(p,(uint32_t)i),rv=mesh_tensor_view(remote,(uint32_t)i);
     struct mesh_view sv=mesh_tensor_view(sum,(uint32_t)i),av=mesh_tensor_view(activated,(uint32_t)i),cv=mesh_tensor_view(partial,(uint32_t)i);
     check(mesh_algebra_bind(a,MESH_AFFINE,xv,(struct mesh_view){0},pv,0.5f,0.125f));
-    for(uint32_t peer=0;peer<2;peer++)check(mesh_algebra_copy(a,(struct mesh_endpoint){p,peer,(uint32_t)i,1},(struct mesh_endpoint){remote,1-peer,(uint32_t)i,1},1,(uint16_t)(i%2)));
     check(mesh_algebra_bind(a,MESH_ADD,pv,rv,sv,1,1));
     check(mesh_algebra_bind(a,MESH_TANH,sv,(struct mesh_view){0},av,0,0));
     check(mesh_algebra_bind(a,MESH_CONTRACT,av,mesh_view_transpose(mesh_tensor_view(weights,(uint32_t)(i/2))),cv,1,0));
   }
   for(uint32_t group=0;group<2;group++) {
+    for(uint32_t peer=0;peer<2;peer++)check(mesh_algebra_copy(a,(struct mesh_endpoint){p,peer,group,2},(struct mesh_endpoint){remote,1-peer,group,2},2,(uint16_t)group));
     check(mesh_algebra_bind(a,MESH_ADD,mesh_tensor_view(partial,group),mesh_tensor_view(partial,group+2),mesh_tensor_view(result,group),1,1));
     check(mesh_algebra_bind(a,MESH_SUM,mesh_tensor_view(result,group),(struct mesh_view){0},mesh_tensor_view(statistics,group),0,0));
     struct mesh_view v=mesh_tensor_view(result,group);

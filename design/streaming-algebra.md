@@ -68,7 +68,7 @@ i = group + 2 * k_panel:
 
 | Occurrence | Source | Destination | Queue |
 |---|---|---|---|
-| 10 * slot + 2 * i + peer | peer's producer[slot, i] | other peer's received[slot, i] | group |
+| 10 * slot + 4 * group + 2 * peer + k_panel | peer's producer[slot, i] | other peer's received[slot, i] | group |
 | 10 * slot + 8 + peer | peer's result[slot, peer] | other peer's gathered[slot, peer] | peer |
 
 Both peers enumerate all ten occurrences per slot. Projection removes only
