@@ -89,7 +89,14 @@ int main(int argc,char **argv) {
       int ready=report.submitted==report.completed;
       for(size_t i=0;i<6;i++)ready=ready && mesh_algebra_available(a,i);
       if(ready)break;
-      if(now()-began>30){fprintf(stderr,"completion timeout trial %zu\n",trial);return 5;}
+      if(now()-began>30){
+        fprintf(stderr,"completion timeout trial %zu commands %llu/%llu returns",trial,(unsigned long long)report.completed,(unsigned long long)report.submitted);
+        for(size_t i=0;i<6;i++)fprintf(stderr," %d",mesh_algebra_available(a,i));
+        fprintf(stderr,"\n");
+        struct mesh_tensor *tensors[]={x,p,remote,sum,activated,partial};
+        for(size_t t=0;t<6;t++){for(uint32_t i=0;i<4;i++)fprintf(stderr," %d",mesh_present(&context,mesh_tensor_rows(tensors[t],i),0));fprintf(stderr,"\n");}
+        return 5;
+      }
     }
     if(trial>=4)moment((trial-4)/2+1,(now()-began)*1e3,&means[delayed],&m2[delayed]);
     for(size_t group=0;group<2;group++) {
