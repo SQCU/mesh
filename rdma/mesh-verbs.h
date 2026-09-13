@@ -194,7 +194,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
-  uint32_t psn=arc4random()&0xffffff;
+  uint32_t psn=7;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.node=(uint16_t)me,.count=(uint32_t)qps},you;
   for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
