@@ -87,6 +87,28 @@ static inline int mesh_bits_all(struct hdr *m,int plane,uint32_t first,uint32_t 
   return 1;
 }
 
+/* design/algorithm-sources.md#nonblocking-table-ownership
+   Push-only landing: a peer wrote a produced block directly into our identical arena page; the trailing
+   tag page is the in-data ready flag (written last, delivery-ordered after the data). Poll each
+   receive-bound block (mesh_send[row]&0x80) whose rows are not yet present and whose backing tag now
+   carries MESH_TAG, and publish it PRESENT so the waiting consumer fires. Consuming the block clears the
+   tag (mesh_consume) so the next step's write re-arms it -- no ack, no receiver RECV, no completion. */
+static inline void mesh_poll_landings(struct hdr *m){
+  uint8_t *send=mesh_send(m);
+  uint32_t rows=mesh_rows(m),block=m->block;
+  for(uint32_t r=0;r+block<=rows;r+=block){
+    if(!(send[r]&0x80) || mesh_bits_all(m,MESH_PRESENT,r,block)) continue;
+    uint32_t page=atomic_load_explicit(&mesh_page(m)[r+block-1],memory_order_acquire);
+    if(page==MESH_ABSENT) continue;
+    // The peer wrote this block's data then its trailing tag (delivery-ordered last). Its presence is
+    // the whole signal there is -- publish the rows and the waiting consumer fires. No read tracking,
+    // no reclaim, no ack: write-once operands in a compiled program need none of it.
+    if(((const struct mesh_tag*)mesh_at(m,page))->magic==MESH_TAG){
+      mesh_bits_set(m,MESH_PRESENT,r,block);
+      atomic_fetch_add_explicit(&m->recvd,1,memory_order_relaxed);
+    }
+  }
+}
 /* design/algorithm-sources.md#nonblocking-table-ownership */
 static inline void mesh_send_complete(struct hdr *m,uint64_t entry){
   uint32_t row=mesh_submission_row(entry),page=mesh_submission_page(entry);

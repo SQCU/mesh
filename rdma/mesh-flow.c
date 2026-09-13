@@ -7,39 +7,31 @@ struct mesh_link {
 };
 
 
-/* design/algorithm-sources.md#independent-verbs-progress */
+/* design/algorithm-sources.md#independent-verbs-progress
+   One-sided push: a produced page P is written straight into the peer's identical page P
+   (global layout: peer_base already points at the peer's data region, so P's remote address is
+   peer_base + P*pgsz). No receiver RECV, no ack, no tag routing -- the trailing tag page of the
+   block is the in-data ready flag the consumer polls. Write-once operands make this guardless. */
 static int link_post(struct mesh_link *link,int q,int send,uint64_t id,uint32_t page){
   struct mesh_verbs *v=&link->provider;
   struct ibv_sge span=region_sge((char*)link->M,link->M->data_off+(size_t)page*link->M->pgsz,link->M->block*link->M->pgsz);
-  int error;
-  if(send){
-    struct ibv_send_wr request={.wr_id=id,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad=NULL;
-    error=ibv_post_send(v->pairs[q],&request,&bad);
-    if(!error){ link->sends[q]++; link->send_frames+=link->frames; }
-  } else {
-    struct ibv_recv_wr request={.wr_id=id,.sg_list=&span,.num_sge=1},*bad=NULL;
-    mesh_bits_set(link->M,MESH_PAGE_OWN,page,link->M->block);
-    mesh_bits_set(link->M,MESH_PAGE_HOT,page,link->M->block);
-    error=ibv_post_recv(v->pairs[q],&request,&bad);
-    if(!error){ link->receives[q]++; link->receive_frames+=link->frames; }
-    else {
-      mesh_bits_clear(link->M,MESH_PAGE_HOT,page,link->M->block);
-      mesh_bits_clear(link->M,MESH_PAGE_OWN,page,link->M->block);
-    }
-  }
-  if(error){ link->M->port.code=error; link->M->port.domain=1; link->M->port.when=(uint64_t)monotime(); }
+  struct ibv_send_wr request={.wr_id=id,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_RDMA_WRITE,.send_flags=IBV_SEND_SIGNALED,
+    .wr={.rdma={.remote_addr=v->peer_base+(uint64_t)page*link->M->pgsz,.rkey=v->peer_rkey}}},*bad=NULL;
+  int error=ibv_post_send(v->pairs[q],&request,&bad);
+  if(!error){ link->sends[q]++; link->send_frames+=link->frames; }
+  else { link->M->port.code=error; link->M->port.domain=1; link->M->port.when=(uint64_t)monotime(); }
   return error;
 }
 
-/* design/algorithm-sources.md#independent-verbs-progress */
+/* design/algorithm-sources.md#independent-verbs-progress
+   Push-only progress: poll for landed pushes (peers wrote directly into our arena; the trailing tag
+   is the ready flag), post any produced pages as one-sided RDMA_WRITEs into the peer's identical page,
+   and drain send completions to reclaim. No receives are ever posted; there is no receive pool. */
 static void mesh_progress(struct mesh_link *link){
   struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
   uint64_t entry;
+  mesh_poll_landings(M);
   mesh_reclaim_consumed(M);
-  for(int n=0;n<link->budget && link->receive_frames+link->frames<=4095 && !mesh_pop(M,FREE,&entry);n++){
-    int q=link->next_receive++%link->qps;
-    if(link_post(link,q,0,(UINT64_C(1)<<63)|entry,(uint32_t)entry)) mesh_push(M,FREE,entry);
-  }
   for(int n=0;n<link->budget && link->send_frames+link->frames<=4095 && !mesh_pop(M,SUB,&entry);n++){
     int q=link->next_send++%link->qps;
     uint32_t page=mesh_submission_page(entry);
@@ -56,25 +48,8 @@ static void mesh_progress(struct mesh_link *link){
       M->port.code=wc->status; M->port.domain=2; M->port.when=(uint64_t)monotime(); atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed);
       fprintf(stderr,"completion error: status=%d vendor=%u opcode=%d qp=%u wr_id=%llx\n",wc->status,wc->vendor_err,wc->opcode,wc->qp_num,(unsigned long long)wc->wr_id);
     }
-    if(wc->wr_id>>63){
-      uint32_t page=(uint32_t)wc->wr_id;
-      link->receives[q]--; link->receive_frames-=link->frames;
-      mesh_bits_clear(M,MESH_PAGE_HOT,page,M->block);
-      const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(M,page+M->block-1);
-      if(wc->status || tag->magic!=MESH_TAG || tag->binding==MESH_ABSENT){
-        if(!wc->status) atomic_fetch_add_explicit(&M->bad,1,memory_order_relaxed);
-        fprintf(stderr,"landing rejected: page=%u status=%d bytes=%u magic=%08x binding=%u index=%u\n",page,wc->status,wc->byte_len,tag->magic,tag->binding,tag->index);
-        mesh_bits_clear(M,MESH_PAGE_OWN,page,M->block);
-        mesh_push(M,FREE,page); continue;
-      }
-      atomic_store_explicit(&mesh_landing_row(M)[page/M->block],MESH_ABSENT,memory_order_release);
-      atomic_fetch_or_explicit(&mesh_landed(M)[(page/M->block)/64],UINT64_C(1)<<((page/M->block)%64),memory_order_acq_rel);
-      atomic_fetch_add_explicit(&M->recvd,1,memory_order_relaxed);
-    } else {
-      link->sends[q]--; link->send_frames-=link->frames;
-
-      mesh_send_complete(M,wc->wr_id);
-    }
+    link->sends[q]--; link->send_frames-=link->frames;
+    mesh_send_complete(M,wc->wr_id);
   }
   mesh_reclaim_consumed(M);
   mesh_reclaim_bindings(M);
