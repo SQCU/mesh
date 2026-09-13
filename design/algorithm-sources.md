@@ -9,9 +9,9 @@ are not required to submit another independent operation. Work-completion status
 reports transport errors to the calling context's metadata.
 
 `mesh-flow.c` gives each direction its own queue-capacity accounting. Each
-submission is one literal WR. A failed receive post returns its unowned backing
-to the free index; a failed send post releases the source's table occupancy and
-records the error. Neither direction retains a pending batch that gates the other.
+submission is one literal WR (collective-dependency-ledger.md D1, D3). A failed
+post releases the block's occupancy and records the error (D12). Neither
+direction retains a pending batch that gates the other.
 Every progress pass services both directions and completions with bounded work.
 Normal termination enters verbs teardown without a software loop waiting for a
 peer to consume committed sends. Driver destruction remains the operation that
@@ -38,35 +38,12 @@ Clusters of Workstations*, JPDC 2009, supply the reduction decomposition. They
 do not require independently completed partials to wait for a host-side batch
 receipt before becoming inputs to reduction.
 
-## Receive storage before consumer binding
+## Receive storage
 
-Apple TN3205 defines receive completion as completion of access to the posted
-registered memory. Papadopoulos and Culler's indexed operand storage supplies
-the separate local association of that memory with a numerical input. A missing
-consumer binding cannot undo an already completed receive.
-
-The receive pool uses the existing physical PAGE_OWN and PAGE_HOT planes.
-Posting establishes both bits; completion clears HOT, records the physical
-landed bit and initializes its inverse logical row to ABSENT. The bridge's
-existing landed-block pass associates that block when its local binding exists.
-Until then it retains the original pages, without a payload copy, extra queue,
-sender message or readiness handshake. Once associated, normal reader masks
-govern consumption. Association precedes release of retired ROW_BOUND bits so
-a binding captured during consumer detach cannot address reallocated rows.
-
-`mesh_receive_invalidate` clears receive-pool PAGE_OWN bits. It takes effect through subsequent bridge progress, not synchronous cancellation.
-It neither waits nor modifies FREE, landed bits or inverse mappings. The bridge alone recycles an
-invalidated block after its receive completes; completion does not restore its
-ownership. Invalidation of associated blocks also removes their logical mapping.
-Ordinary detach and dead-client takeover retire numerical rows and arena ownership,
-preserving unassociated physical arrivals. Associated abandoned rows still follow
-normal reclamation. No new table allocation or per-arrival structure is needed.
-
-Invalidation covers current physical ownership intervals, including posted
-receives, not arbitrarily future traffic using the same binding and index.
-It is not remote-call cancellation. The calling context owns configured storage
-and explicit destruction; replacing the bridge region destroys the whole receive
-table through normal driver teardown. This API adds no transport recovery.
+Superseded 2026-09-12. A receive is posted on the consumer's own pages (ledger
+D4), paired by per-queue order (D5), and its completion is presence (D8). The
+receive pool, landed bits, inverse landing index and receive invalidation were
+removed with that change; see `collective-dependency-ledger.md`.
 
 ## Performance evidence
 
@@ -91,17 +68,11 @@ Issuing a function marks its output rows as being produced. Presence becomes tru
 at completion, and reader bits become consumed then. Clearing presence alone was
 insufficient: the next scan could otherwise issue the unfinished operation again.
 
-Only the bridge returns landed blocks to its free index. Numerical completion
-sets reader bits; the bridge checks the configured reader mask through the inverse
-landing-page index. This removes the competing return operations and the FREED
-bit that was cleared before another reader had finished examining it.
-
-Receive bindings retain their logical indices through ROW_BOUND. Detach removes
-the binding and its assigned indices, but the bridge releases ROW_BOUND after its
-current completion pass. Thus a previously captured binding address cannot become
-another allocation halfway through that pass. These are bounded page-table masks;
-no callback waits, reference-count drain, acknowledgement, or generation check is
-needed. Binding addresses become visible only after their reader masks are set.
+Numerical completion sets reader bits; the bridge reposts a receive on a block
+only after its configured reader mask is satisfied (ledger D9). An outstanding
+work request keeps its rows and pages occupied until its completion, or until the
+bridge destroys the queue pair that held it (D14). No callback waits,
+reference-count drain, acknowledgement, or generation check is needed.
 
 ## Registered-span defect, closed
 
@@ -162,17 +133,15 @@ of the same underlying bytes.
 Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture*, ISCA
 1990, separate indexed operand ownership from the functions that use the
 operands. Each configured program here owns disjoint logical rows, backing
-allocations and receive-binding indices in the existing table. Realizing a
+allocations and its own queue pair order (ledger D5). Realizing a
 second program begins with the table's existing reader masks, preserving the
 readers already assigned to the first program. Newly allocated rows have zero
 reader masks through the existing allocator.
 
-`mesh_rows_release` clears only its logical ownership range and marks changed
-receive-bound words for the bridge's existing retirement pass.
+`mesh_rows_release` clears only its logical ownership range.
 `mesh_arena_release` clears only its physical ownership range; transport HOT
-indices remain occupied until intrinsic completion. `mesh_bindings_release`
-removes only the configured binding indices. None detaches another program,
-waits for a peer, or clears another program's reader registration.
+indices remain occupied until intrinsic completion. Neither detaches another
+program, waits for a peer, or clears another program's reader registration.
 
 The Swift caller shares one region storage object per configured region name.
 Its weak registry does not retain unused regions. Configured values and graph
@@ -182,10 +151,6 @@ calling context drops that context's cached values, without detaching surviving
 programs. Numerical callbacks retain their graph, so graph-owned values cannot
 be retired before their final callback completes. This is storage ownership,
 not a new execution readiness condition or a polling mechanism.
-
-Binding ranges use the configured identity mapping described below. Slot reuse
-retains the identity in the existing receive table, so local storage retirement
-cannot cause an earlier transfer to address another program.
 
 ## Literal weight pages
 
@@ -202,46 +167,9 @@ separation, not a claim that Monsoon specifies today's tensor ABI or weight form
 
 ## Configured binding identities
 
-Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture*, ISCA
-1990, supply the indexed operand-store principle. The configured binding identity
-names an address interpretation in that store; it is not an arithmetic readiness
-stamp, receipt, or peer progress counter. Apple TN3205 still supplies the same
-literal SEND/RECV operations and completion semantics.
-
-ABI 18 keeps the existing 16-byte transfer tag and its 32-bit binding field.
-That field now names the complete configured identity. The fixed receive table
-slot is `identity % 4096`; one atomic 64-bit table entry holds the identity and
-logical base together. A reserved entry has no base until configuration realizes
-its reader masks and receive mapping. Retirement removes that base while retaining
-the identity. Reusing a slot requires a strictly greater identity and an unowned
-slot. These are configuration address allocations, not per-invocation checks or
-transport messages.
-
-A receive whose identity equals the slot's active identity maps to its logical
-base. A newer identity, an untouched slot, or the matching reservation retains
-the existing early-arrival behavior until configuration supplies the base. An
-older identity, or the matching retired identity, has no destination and its
-landing pages return through the existing free index. Thus a late transfer cannot
-become an operand of a new program that happens to reuse the same table slot.
-The incoming payload is never copied or interpreted by this address resolution.
-
-`mesh_bindings_reserve` accepts an explicit first identity, or `UINT32_MAX` for
-the existing ordered-configuration allocator. Explicit identities allow different
-handles in different table slots to compile in different orders on the peers;
-the caller supplies the same identity and operation/version ordering to both.
-Colliding live slots and non-increasing reuse are reported as compile errors.
-Implicit allocation uses a high-water value in the shared region header, which
-survives client detach/reattach and only resets when the bridge constructs a new
-region and connection. Implicit callers must have matching configuration history
-on both participants; independently ordered callers use explicit identities.
-
-The 4096-entry table limits simultaneous occupied slots, not cumulative handle
-creation. Retired slots are reusable with newer identities. The 32-bit identity
-space never wraps: exhaustion reports compile metadata and requires a new
-configured connection. An explicit identity range must not include UINT32_MAX.
-Unused reserved slots and failed configuration reservations are retired. No
-transport acknowledgement, handshake, wait, recovery message or payload side
-channel was introduced.
+Superseded 2026-09-12. Binding identities now only order blocks within a
+program's queue pair (ledger D5); the receive table, transfer tag, slot reuse
+and identity reservation were removed with the receive pool (D4, D14).
 
 ## Column and row tensor composition
 
