@@ -24,11 +24,11 @@ static void mesh_memory_warning(uint64_t bytes,int creating){
   int available=host_page_size(host,&page)==KERN_SUCCESS && host_statistics64(host,HOST_VM_INFO64,(host_info64_t)&vm,&count)==KERN_SUCCESS;
   mach_port_deallocate(mach_task_self(),host);
   uint64_t headroom=((uint64_t)vm.free_count+vm.inactive_count)*page;
-  if(known && bytes<=ram/5*4 && (!creating || (available && bytes<=headroom))) return;
+  if(known && bytes<=ram/5*4 && (!creating || (available && headroom>=ram/5 && bytes<=headroom-ram/5))) return;
   printf("WARNING: mesh %s %.3f GiB of shared memory; RAM %.3f GiB; 80%% threshold %.3f GiB; free + inactive estimate %.3f GiB.\n",
     creating?"is about to allocate":"is attaching to",bytes/1073741824.,ram/1073741824.,ram*.8/1073741824.,headroom/1073741824.);
   printf("WARNING: %s %s Available memory is an estimate, not a reservation.\n",
-    known?"Above 80% of RAM or estimated headroom.":"RAM accounting unavailable.",available?"":"Available-memory accounting unavailable.");
+    known?"Arena or projected usage exceeds 80% of RAM.":"RAM accounting unavailable.",available?"":"Available-memory accounting unavailable.");
   fflush(stdout);
   int capacity=proc_listpids(PROC_ALL_PIDS,0,NULL,0);
   pid_t *pids=capacity>0?calloc(1,(size_t)capacity):NULL;
@@ -37,20 +37,20 @@ static void mesh_memory_warning(uint64_t bytes,int creating){
   int length=proc_listpids(PROC_ALL_PIDS,0,pids,capacity),n=0,missing=0;
   uint64_t total=0,shown=0;
   for(int i=0;i<(length<capacity?length:capacity)/(int)sizeof(pid_t);i++){
-    if(pids[i]<=0) continue;
+    if(pids[i]<=0 || pids[i]==getpid()) continue;
     struct rusage_info_v2 usage={0};
     if(proc_pid_rusage(pids[i],RUSAGE_INFO_V2,(rusage_info_t *)&usage)){ missing++; continue; }
     processes[n++]=(struct mesh_process_memory){pids[i],usage.ri_phys_footprint}; total+=usage.ri_phys_footprint;
   }
   qsort(processes,(size_t)n,sizeof *processes,mesh_memory_order);
-  printf("Processes covering 80%% of measured physical footprint (includes this process): PID  GiB  executable\n");
+  printf("Other processes covering 80%% of measured physical footprint: PID  GiB  executable\n");
   for(int i=0;i<n && (double)shown<(double)total*.8;i++){
     char path[PROC_PIDPATHINFO_MAXSIZE]="<unavailable>";
     proc_pidpath(processes[i].pid,path,sizeof path);
     printf("%d  %.3f  %s\n",processes[i].pid,processes[i].bytes/1073741824.,path);
     shown+=processes[i].bytes;
   }
-  printf("Measured process footprint %.3f GiB; %d unreadable processes. Shared accounting is not additive headroom.\n",total/1073741824.,missing);
+  printf("Measured other-process footprint %.3f GiB; %d unreadable processes. Shared accounting is not additive headroom.\n",total/1073741824.,missing);
   if(length<=0) printf("WARNING: process enumeration unavailable.\n");
   free(processes); free(pids); fflush(stdout);
 }

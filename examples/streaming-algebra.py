@@ -58,8 +58,10 @@ def main():
         for tensor, value in zip(inputs, data):
             with program.write(tensor[0, 0]) as target:
                 target[...] = value
-        while not result.ready:
+        while running and not result.ready:
             program.scan()
+        if not running:
+            return
         expected = np.zeros((rows, output), np.float64)
         for group, projection in zip(up, down):
             value = sum(x.astype(np.float64) @ w for x, w in zip(data, group))

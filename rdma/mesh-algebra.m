@@ -129,6 +129,10 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *context) {return create_algebra(context,NO);}
 /* design/algorithm-sources.md#cpu-indexed-execution */
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *context) {return create_algebra(context,YES);}
+/* design/algorithm-sources.md#publication-layout */
+size_t mesh_algebra_publication_bytes(struct mesh_algebra *handle) {
+  struct hdr *m=owner(handle)->context->M; return (size_t)m->block*m->pgsz;
+}
 /* design/algorithm-sources.md#coreml-partial-execution */
 int mesh_algebra_coreml(struct mesh_algebra *handle,const char *python,const char *generator,const char *cache) {
   MeshAlgebra *a=owner(handle);

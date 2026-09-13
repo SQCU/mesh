@@ -516,14 +516,15 @@ Source: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resourc
 and https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/vm_statistics.h.
 
 Before allocating the shared arena, mesh prints and flushes stdout when its full
-layout exceeds 80% of physical RAM or the free-plus-inactive memory estimate.
+layout exceeds 80% of physical RAM or would leave less than 20% of RAM in the
+free-plus-inactive memory estimate.
 Attaching clients repeat the above-80%-RAM warning without counting the existing
 arena as new physical storage. Views alias that arena and are not new allocations.
 The warning precedes truncation, mapping, and registration. It does not deny the
 requested allocation. Unknown accounting emits a warning as well.
 
 The process list is sorted by physical footprint, including compressed charges,
-and continues through 80% of the sum of readable process footprints. It includes
+and continues through 80% of the sum of readable other-process footprints. It excludes
 the caller and reports unreadable processes. Process sums can overlap shared
 accounting and omit kernel charges; neither they nor reclaimable inactive pages
 guarantee allocation headroom. These are setup diagnostics, never numerical
@@ -533,3 +534,14 @@ application allocations such as the stopped metal-microbench decode process.
 `mesh-flow --memory-check` takes the ordinary arena geometry and reports without
 allocating or opening verbs. The bridge launcher runs it before starting launchd,
 so warnings are visible at the launching terminal as well as the daemon log.
+
+## Publication layout
+
+The JAX authors' Pallas block ownership and pipelining decomposition (cited above)
+requires independent output regions to have independent publication ownership.
+`mesh_algebra_publication_bytes` exposes the realized transport block size during
+setup. `kernel_call` retains contiguous backing for aligned complete row stripes;
+it allocates separate padded canonical extents for column tiles and short or
+unaligned row stripes. A small `row_sum` output can therefore publish independently
+without sharing a publication quantum with its neighbor. No copy is introduced,
+and no layout choice occurs during a numerical invocation.

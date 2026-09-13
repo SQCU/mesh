@@ -99,3 +99,10 @@ client remains `examples/streaming-overlap.py`; its archived measurements are in
 
 See [caller migration status](caller-migration.md) for the remaining Xonotic
 application ports. They are part of the requested all-callers migration.
+
+FFN operational follow-up on September 13, 2026 used two K partitions, two hidden
+sections and two row sections over the M5 Max/M4 Pro RDMA pair. The CPU run had
+maximum absolute error 1.038887142285061e-7; Metal/MPS had
+1.0853451537506942e-7 against the float64 reference. The measured package source
+was branch main at 760dd5e. These are numerical checks, not new throughput claims.
+Both bridges used 4096 pages of 16384 bytes, with four-page messages and two QPs.

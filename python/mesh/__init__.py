@@ -205,7 +205,8 @@ class Program:
             if len(operands) != len(inputs):
                 raise ValueError('Each input requires one BlockSpec')
             outputs = tuple(self.tensor(shape.shape,
-                block_shape=spec.block_shape if spec.block_shape[1] != shape.shape[1] else None,
+                block_shape=spec.block_shape if (spec.block_shape[1] != shape.shape[1] or
+                    np.prod(spec.block_shape) * np.dtype(shape.dtype).itemsize % self.native.algebra_publication_bytes(self.handle)) else None,
                 dtype=shape.dtype) for shape, spec in zip(shapes, specs))
             self._call(kernel, grid=grid,
                 inputs=tuple(spec._bind(tensor) for spec, tensor in zip(inputs, operands)),

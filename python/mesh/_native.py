@@ -42,6 +42,7 @@ class Native:
             'mesh_algebra_create': (P, [P]),
             'mesh_algebra_create_cpu': (P, [P]),
             'mesh_algebra_destroy': (None, [P]),
+            'mesh_algebra_publication_bytes': (Z, [P]),
             'mesh_algebra_coreml': (C.c_int, [P, C.c_char_p, C.c_char_p, C.c_char_p]),
             'mesh_tensor_create': (P, [P, C.POINTER(Shape), Z, C.c_int]),
             'mesh_tensor_view': (View, [P, U]),
