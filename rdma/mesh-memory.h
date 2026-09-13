@@ -1,6 +1,7 @@
 #ifndef MESH_MEMORY_H
 #define MESH_MEMORY_H
 #include <libproc.h>
+#include <unistd.h>
 #include <mach/mach.h>
 #include <stdio.h>
 #include <stdlib.h>
