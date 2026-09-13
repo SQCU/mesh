@@ -205,3 +205,36 @@ percentage-point units. Warmup observations remain excluded.
 These accumulators belong to reporting, outside numerical functions and mesh
 transport. Updating moments neither changes a percentage's numerator/denominator
 nor adds any readiness condition, traffic or device synchronization.
+
+## Streaming algebra
+
+Gregory Papadopoulos and David Culler, *Monsoon: an Explicit Token-Store
+Architecture* (ISCA 1990), provide the indexed storage and presence mechanism
+used by the algebra header's extent views, static functions and completion
+publication. Rolf Rabenseifner (ICCS 2004) and Patarasuk–Yuan (JPDC 2009), cited
+above, provide the reduction/all-gather composition. Jack Dongarra, Jeremy Du
+Croz, Sven Hammarling and Iain Duff, *A Set of Level 3 Basic Linear Algebra
+Subprograms* (ACM TOMS 1990), supply the matrix contraction interface precedent.
+MPS performs the contraction; mesh does not implement a replacement GEMM.
+
+Size Zheng et al., [TileLink: Generating Efficient Compute-Communication
+Overlapping Kernels using Tile-Centric Primitives](https://arxiv.org/abs/2503.20313)
+(2025), and [FLUX](https://arxiv.org/abs/2406.06858) (2024), motivate exposing
+independently usable numerical tiles while retaining efficient compute loops.
+The JAX authors' [Pallas collective matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
+illustrates pipeline callbacks and source-lifetime extension; their
+[nested pipelines](https://docs.jax.dev/en/latest/pallas/tpu/distributed.html#nested-remote-and-local-dma-pipelines)
+separate transfer blocks from local compute tiles. These CUDA/TPU mechanisms
+are prior art, not proof of equivalent Metal intrakernel visibility.
+Apple's [Metal synchronization events](https://developer.apple.com/documentation/metal/about-synchronization-events)
+order completion after preceding GPU commands. The first algebra implementation
+publishes at command completion and uses the existing canonical present/read
+bits. It makes no claim of intra-dispatch publication.
+
+Saltzer, Reed and Clark, *End-to-End Arguments in System Design* (ACM TOCS 1984),
+provide the endpoint acceptance precedent: the example checks the complete
+numerical composition and observes early output with an unrelated input absent.
+The explicit formulas, shape checks, allocation/view lifetime, deterministic
+fixtures and numerical comparison implement that contract as described in
+[streaming algebra](streaming-algebra.md). They are not algorithms attributed to
+those papers. Welford's update above supplies the example's timing statistics.

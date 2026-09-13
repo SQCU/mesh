@@ -225,3 +225,18 @@ on the next pass.
   ("Receive storage before consumer binding", "Nonblocking table ownership"
   landed-block paragraphs, "Configured binding identities" tag routing) are
   superseded by D4, D5 and D8, pending removal with that code.
+
+## D15. Independently produced algebraic extents
+
+Operator authorization, September 13, 2026: generalized linear algebra over
+streaming tensor extents, with the producer → peer sum → elementwise transform
+→ contraction acceptance program and an intentionally delayed unrelated extent.
+The scope and implementation contract are in `streaming-algebra.md`.
+
+The existing quoted D8 firing rule and D10 chunk reduction license independently
+published extents and numerical functions whose input maps name only those
+extents. D4 licenses their registered backing. D5 continues to govern FIFO
+matching. The public analogues are TileLink's tile-centric primitives and
+Pallas's pipeline callback into its optimized matmul (algorithm-sources.md).
+The header adds no model operation, transfer opcode, readiness message or
+alternative transport progress loop. MPS remains the contraction implementation.
