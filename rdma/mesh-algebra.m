@@ -28,6 +28,8 @@ struct mesh_extent {
   size_t bytes;
   void *address;
   struct mesh_shape shape;
+  struct mesh_row_map output;
+  struct mesh_row_function producer;
 };
 struct mesh_tensor { struct mesh_ctx *context; size_t count; struct mesh_extent *extents; };
 struct geometry_view { uint64_t offset,rows,columns,row_stride,column_stride; };
@@ -136,6 +138,8 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
     e->page=mesh_arena_alloc(a->context,e->pages,(uint32_t)align);
     if(e->first==MESH_ABSENT || e->page==MESH_ABSENT)return NULL;
     mesh_map(a->context,e->first,e->pages,e->page);
+    e->output=(struct mesh_row_map){.first=e->first,.count=e->pages};
+    e->producer=(struct mesh_row_function){.output=&e->output,.outputs=1,.rows=1};
     uint32_t *indices=malloc(pages*sizeof *indices);
     if(!indices){errno=ENOMEM;return NULL;}
     for(size_t j=0;j<pages;j++)indices[j]=e->page+(uint32_t)j;
@@ -184,9 +188,18 @@ int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   struct mesh_row_map m=mesh_tensor_rows(t,i);mesh_constant(t->context,m.first,m.count);return 0;
 }
 /* design/algorithm-sources.md#streaming-algebra */
-int mesh_tensor_publish(struct mesh_tensor *t,uint32_t i) {
+int mesh_tensor_issue(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return 0;
-  struct mesh_row_map m=mesh_tensor_rows(t,i);return mesh_republish(t->context,m.first,m.count);
+  uint32_t index=0;return mesh_issue(t->context,&t->extents[i].producer,&index,1)!=0;
+}
+/* design/algorithm-sources.md#streaming-algebra */
+void mesh_tensor_complete(struct mesh_tensor *t,uint32_t i) {
+  uint32_t index=0;mesh_complete(t->context,&t->extents[i].producer,&index,1);
+}
+/* design/algorithm-sources.md#streaming-algebra */
+int mesh_tensor_publish(struct mesh_tensor *t,uint32_t i) {
+  if(!mesh_tensor_issue(t,i))return 0;
+  mesh_tensor_complete(t,i);return 1;
 }
 
 /* design/algorithm-sources.md#streaming-algebra */

@@ -1,0 +1,205 @@
+{
+  "date": "2026-09-13",
+  "transport": "Thunderbolt SEND/RECV",
+  "page_bytes": 16384,
+  "arena_pages": 4096,
+  "block_pages": 4,
+  "queue_pairs": 2,
+  "status": "Passing individual runs do not establish reliable startup. Diagnostic transport variations were removed after failures recurred.",
+  "runs": [
+    {
+      "experiment": "original",
+      "commit": "5d60e48",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 8.35316314e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 2.53854999,
+          "sample_variance": 0.207100459
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 3.32065,
+          "sample_variance": 0.286982226
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.99004998,
+          "sample_variance": 0.280863111
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.006763585,
+        "wall_seconds": 0.549351
+      }
+    },
+    {
+      "experiment": "original",
+      "commit": "5d60e48",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 8.35316314e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.988,
+          "sample_variance": 0.306021578
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.66595,
+          "sample_variance": 0.115680893
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.11055,
+          "sample_variance": 0.032752892
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.032160648,
+        "wall_seconds": 0.525825
+      }
+    },
+    {
+      "experiment": "separate_cqs",
+      "commit": "b956575",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 8.35316314e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.91969999,
+          "sample_variance": 0.41742284
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.65310002,
+          "sample_variance": 0.142666213
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.23945001,
+          "sample_variance": 0.098289009
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.006200526,
+        "wall_seconds": 0.514305
+      }
+    },
+    {
+      "experiment": "separate_cqs",
+      "commit": "b956575",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 8.35316314e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.85805,
+          "sample_variance": 0.0674679456
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.65085,
+          "sample_variance": 0.153108766
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.15605,
+          "sample_variance": 0.0519101549
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.031783462,
+        "wall_seconds": 0.59781
+      }
+    },
+    {
+      "experiment": "separate_cqs",
+      "commit": "b956575",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "rows": 37,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 8.35316314e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.78769999,
+          "sample_variance": 0.096224223
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.14835,
+          "sample_variance": 0.102639498
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 0.983399991,
+          "sample_variance": 0.0959685571
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.005716568,
+        "wall_seconds": 0.213075
+      }
+    },
+    {
+      "experiment": "separate_cqs",
+      "commit": "b956575",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "rows": 37,
+        "k": 256,
+        "n": 64,
+        "independent_completions": 20,
+        "max_absolute_error": 8.35316314e-08,
+        "normal_ms": {
+          "count": 20,
+          "mean": 1.5677,
+          "sample_variance": 0.0337521139
+        },
+        "delayed_ms": {
+          "count": 20,
+          "mean": 2.37085,
+          "sample_variance": 0.0544998169
+        },
+        "early_ms": {
+          "count": 20,
+          "mean": 1.01735,
+          "sample_variance": 0.0462988703
+        },
+        "commands": 1320,
+        "gpu_seconds": 0.02375373,
+        "wall_seconds": 0.227485
+      }
+    },
+    {
+      "experiment": "separate_cqs",
+      "commit": "b956575",
+      "host": "M5",
+      "result": {
+        "failure": "numerical mismatch 1 0 0 -0.00272014551 -0.0696848271"
+      }
+    }
+  ]
+}

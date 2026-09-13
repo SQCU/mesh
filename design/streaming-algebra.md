@@ -48,7 +48,7 @@ and errors, then calls mesh_complete on that same function. No prediction task,
 phase scheduler, whole-tensor join, or GPU wait is added. Missing inputs simply
 do not issue. Readiness and reuse remain the existing present/reader bits.
 
-An arbitrary scatter/gather is composition of affine copies with alpha=1,
+A statically indexed scatter/gather over extents is composition of affine copies with alpha=1,
 beta=0 between indexed extent views. Transfers bind each source/receive extent
 to a numeric identity and queue. On two participants, all-gather exposes each
 locally owned extent together with the peer-owned receive extents. Peer sum
@@ -59,7 +59,10 @@ peer; this change does not implement a multi-peer topology.
 ## Producer and consumer boundaries
 
 A producer can be a bound numerical function or externally supplied input.
-The caller initializes input bytes and publishes them with mesh_tensor_publish;
+A mutable external producer calls mesh_tensor_issue before writing an extent,
+then mesh_tensor_complete to publish it. These use the same mesh_issue and
+mesh_complete functions as GPU producers, including transfer publication.
+mesh_tensor_publish is a convenience for bytes initialized before their first use;
 constant parameters use mesh_tensor_constant before realization. Function
 completion supplies all subsequent publications. The caller registers output
 extents with mesh_algebra_return before realization, polls their availability,
@@ -143,3 +146,32 @@ blocks this changed one region into two and wrote past the allocated MR array.
 Setup now uses the realized registration origin for both initial registration and
 reuse. The acceptance program must run across successive client attachments,
 including different tensor extents, without restarting the bridge between them.
+
+The acceptance input changes each trial, so stale transport data cannot pass by
+coinciding with a previous invocation. External producers acquire their extent
+through its configured output rows before overwriting it.
+
+## Measurement status
+
+[Recorded observations](data/streaming-algebra-2026-09-13.json) include passing
+20-normal/20-delayed runs on M5 and M4 with 128-row extents, and a passing
+37-row run. Every delayed run in those successful invocations observed the
+independent contraction before supplying the withheld extent. Those versions
+used identical input values across invocations. The current example varies
+input each invocation and acquires output ownership before the host writes it.
+
+Repeated attachment also produced missing initial receive completions, and in
+some runs later payloads occupied earlier receive slots. The registration-origin
+repair fixes an independently established out-of-bounds write but did not eliminate
+this failure. Symmetric connection metadata exchange, JACCL's initial PSN, and
+separate completion queues were diagnostic variations; none eliminated the
+failure and none is retained. Temporary per-request logging was also removed.
+The evidence does not establish packet loss in hardware or a definitive root cause.
+
+The next proposed experiment is a single setup barrier after both peers enter
+RTR and before sending, within the existing bounded connection setup. It would
+add no per-extent protocol, but requires operator direction under AGENTS.md before
+changing the connection specification. Until resolved, this is an implemented
+algebra interface with passing numerical observations, not a reliably accepted
+distributed runtime or a performance improvement claim. FP16 and larger peer
+topologies have not been measured by this acceptance program.

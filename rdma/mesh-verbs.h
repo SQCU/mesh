@@ -21,7 +21,7 @@
 
 #define QD 4095
 struct mesh_verbs {
-  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue,*completion_queues[MESH_QPS];
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
   struct ibv_qp *pair,*pairs[MESH_QPS]; int qp_count; struct ibv_mr **regions;
   int region_count, send_capacity, receive_capacity;
   size_t region_origin, region_extent;
@@ -38,8 +38,7 @@ static int expected_peer=-1;
 static const char *listen_address, *selected_device;
 static int down_pair(void){
   while(provider->qp_count){ struct ibv_qp *q=provider->pairs[provider->qp_count-1]; if(q && ibv_destroy_qp(q)) return 0; provider->pairs[--provider->qp_count]=0; provider->pair=0; }
-  for(int q=0;q<MESH_QPS;q++) if(provider->completion_queues[q]){ if(ibv_destroy_cq(provider->completion_queues[q])) return 0; provider->completion_queues[q]=0; }
-  provider->completion_queue=0;
+  if(provider->completion_queue){ if(ibv_destroy_cq(provider->completion_queue)) return 0; provider->completion_queue=0; }
   return 1; }
 static int down_verbs(void){
   if(!down_pair()) return 0;
@@ -180,15 +179,12 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   if(ibv_query_port(provider->context,1,&pa)){ close(f); return -1; }
   size_t frames=(message_bytes+4095)/4096;
   int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
-  int completions=4*(frame_capacity/(int)frames);
+  int completions=4*(frame_capacity/(int)frames)*qps;
   if(!completions || capabilities.max_cqe<completions){ close(f); errno=EOPNOTSUPP; return -1; }
+  provider->completion_queue=ibv_create_cq(provider->context,completions,NULL,NULL,0); if(!provider->completion_queue){ close(f); return -1; }
   struct ibv_qp_init_attr qi={.send_cq=provider->completion_queue,.recv_cq=provider->completion_queue,.qp_type=IBV_QPT_UC,
     .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-  for(int q=0;q<qps;q++){
-    provider->completion_queues[q]=ibv_create_cq(provider->context,completions,NULL,NULL,0);
-    if(!provider->completion_queues[q]){ close(f); return -1; }
-    qi.send_cq=qi.recv_cq=provider->completion_queues[q];
-    provider->pairs[q]=ibv_create_qp(provider->domain,&qi); if(!provider->pairs[q]){ close(f); return -1; } provider->qp_count=q+1; }
+  for(int q=0;q<qps;q++){ provider->pairs[q]=ibv_create_qp(provider->domain,&qi); if(!provider->pairs[q]){ close(f); return -1; } provider->qp_count=q+1; }
   provider->pair=provider->pairs[0];
   struct ibv_qp_attr queried; struct ibv_qp_init_attr actual;
   if(ibv_query_qp(provider->pair,&queried,IBV_QP_CAP,&actual)){ close(f); return -1; }
@@ -204,7 +200,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   memcpy(mine.gid,&gid,16);
   fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
   double exchange_deadline=monotime()+10;
-  if(exchange(f,&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
+  if(exchange(f,peer?NULL:&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
   /* ledger D6: both ends must post messages of the same frame count; D5: the same queue-pair count */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,expected_peer); close(f); return -1; }
@@ -220,6 +216,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
+  if(peer && exchange(f,&mine,NULL,exchange_deadline)){ close(f); return -1; }
   close(f);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);
   return 0; }

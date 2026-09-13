@@ -28,6 +28,8 @@ struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
 struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
+int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
+void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_publish(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 int mesh_algebra_transfer(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t binding,uint16_t queue,int receive);
