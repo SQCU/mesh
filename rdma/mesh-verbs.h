@@ -194,13 +194,13 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
-  uint32_t psn=7;
+  uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.node=(uint16_t)me,.count=(uint32_t)qps},you;
   for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
   fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
   double exchange_deadline=monotime()+10;
-  if(exchange(f,peer?NULL:&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
+  if(exchange(f,&mine,&you,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
   /* ledger D6: both ends must post messages of the same frame count; D5: the same queue-pair count */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,expected_peer); close(f); return -1; }
@@ -216,7 +216,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
-  if(peer && exchange(f,&mine,NULL,exchange_deadline)){ close(f); return -1; }
   close(f);
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->context->device),me);
   return 0; }
