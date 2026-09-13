@@ -64,8 +64,12 @@ static void mesh_progress(struct mesh_link *link){
     }
   }
   /* D3 */
-  int count=ibv_poll_cq(v->completion_queue,2*link->budget*link->qps,v->completions);
-  if(count<0){ link_error(M,count,3); return; }
+  int count=0;
+  for(int q=0;q<link->qps;q++){
+    int n=ibv_poll_cq(v->completion_queues[q],2*link->budget,v->completions+count);
+    if(n<0){ link_error(M,n,3); return; }
+    count+=n;
+  }
   for(int i=0;i<count;i++){
     struct ibv_wc *wc=&v->completions[i];
     uint32_t q=0; while(q<(uint32_t)link->qps && v->pairs[q]->qp_num!=wc->qp_num) q++;
