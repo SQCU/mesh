@@ -106,9 +106,8 @@ static inline void mesh_reclaim_consumed(struct hdr *m){
       if(row==MESH_ABSENT && owned){
         const struct mesh_tag *tag=(const struct mesh_tag*)mesh_at(m,page+m->block-1);
         uint64_t entry=atomic_load_explicit(&mesh_base(m)[tag->binding%MESH_BINDINGS],memory_order_acquire);
-        uint32_t identity=(uint32_t)(entry>>32),base=(uint32_t)entry;
-        if(entry==UINT64_MAX || tag->binding>identity || (tag->binding==identity && base==MESH_RESERVED)) continue;
-        if(tag->binding!=identity || base==MESH_ABSENT){
+        uint32_t base=(uint32_t)entry;
+        if(base==MESH_ABSENT || base==MESH_RESERVED){
           owned=0;
         } else if((uint64_t)base+(uint64_t)tag->index*m->block+m->block>mesh_rows(m)){
           atomic_fetch_add_explicit(&m->bad,1,memory_order_relaxed);
