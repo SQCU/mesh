@@ -102,7 +102,7 @@ static int verify(struct program p,int rank,size_t rows,size_t k,size_t n,size_t
             expected+=(double)activation(v,half)*weight(part,j,c);
           }
           double error=fabs(actual[r*n+c]-expected);if(error>*maxError)*maxError=error;
-          if(!isfinite(actual[r*n+c]) || error>(half?1e-3:2e-4) || peer[r*n+c]!=actual[r*n+c]){fprintf(stderr,"numerical mismatch %zu %zu %zu %.9g %.9g\n",group,r,c,actual[r*n+c],expected);return 6;}
+          if(!isfinite(actual[r*n+c]) || error>(half?1e-3:2e-4) || (!isfinite(peer[r*n+c]) || (half?fabs(peer[r*n+c]-expected)>1e-3:peer[r*n+c]!=actual[r*n+c]))){fprintf(stderr,"numerical mismatch %zu %zu %zu %.9g %.9g\n",group,r,c,actual[r*n+c],expected);return 6;}
           total+=actual[r*n+c];square+=(double)actual[r*n+c]*actual[r*n+c];
         }
         for(size_t c=0;c<n;c++)if(!isfinite(normal[r*n+c]) || fabs(normal[r*n+c]-actual[r*n+c]/sqrt(square/n+1e-5))>2e-5){fprintf(stderr,"normalization composition mismatch\n");return 8;}
@@ -203,7 +203,7 @@ int main(int argc,char **argv) {
     }
     check(verify(programs[slot],rank,rows,k,n,trial,&maxError,half));
     float *sent=mesh_tensor_data(programs[slot].partial,1),*received=mesh_tensor_data(programs[slot].peer_partial,1);
-    for(size_t i=0;i<rows*n;i++)if(!isfinite(received[i]) || fabs(received[i]-sent[i])>2e-4){fprintf(stderr,"contraction peer copy mismatch\n");return 12;}
+    for(size_t i=0;i<rows*n;i++)if(!isfinite(received[i]) || fabs(received[i]-sent[i])>(half?2e-3:2e-4)){fprintf(stderr,"contraction peer copy mismatch\n");return 12;}
     for(size_t j=0;j<8;j++)mesh_algebra_consume(a,base+j);
     mesh_algebra_consume(a,8*depth+3*slot);mesh_algebra_consume(a,8*depth+3*slot+1);mesh_algebra_consume(a,8*depth+3*slot+2);
     size_t next=trial+depth;

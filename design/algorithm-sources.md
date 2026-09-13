@@ -369,3 +369,10 @@ part; the user-visible K contributions and their registered storage remain owned
 by `mesh_algebra_contract`. The 32-term choice is an accuracy specialization,
 not a measured throughput optimum. The initial unsplit FP16 native dot product
 failed the existing FP16 acceptance threshold; the threshold is unchanged.
+
+
+The explicit FP16 case compares each participant's result independently to the
+quantized-input numerical reference: heterogeneous native kernels may round
+differently. It does not require their locally computed answers to be bitwise
+identical. Its additional peer-contribution comparison permits the sum of the
+two per-result error bounds. FP32 retains the existing exact peer-replica check.
