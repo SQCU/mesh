@@ -1,5 +1,10 @@
 # Streaming algebra over mesh
 
+[Subsequent Pallas source review](pallas-collective-source-review.md) identifies
+the remaining paired endpoint maps, invocation buffering and inner numerical
+pipeline integration. The acceptance below covers extent-level composition; it
+does not establish a completed Pallas async TP collective port.
+
 Operator scope, September 13, 2026: extend canonical mesh with generalized
 linear algebra, scatters, all-gathers and reductions over independently
 consumable tensor extents. DNN modules are compositions written by a separate
@@ -186,7 +191,8 @@ measured latency. These observations establish this acceptance scope; they do
 not establish a performance gain or validate FP16 and larger peer topologies.
 
 The earlier startup fault manifested as absent initial receive completions and
-later data occupying earlier receive slots. The registration-origin repair fixes
+numerical mismatches. The previous attribution to later data occupying earlier
+receive slots was an inference, not established payload-provenance evidence. The registration-origin repair fixes
 an independently established out-of-bounds write. A symmetric metadata exchange,
 fixed initial PSN, separate completion queues, and an RTR-only setup boundary
 did not eliminate the startup fault. The retained repair posts each configured
