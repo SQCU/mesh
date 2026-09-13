@@ -96,7 +96,9 @@ static inline int mesh_bits_all(struct hdr *m,int plane,uint32_t first,uint32_t 
 static inline void mesh_poll_landings(struct hdr *m){
   uint8_t *send=mesh_send(m);
   uint32_t rows=mesh_rows(m),block=m->block;
-  for(uint32_t r=0;r+block<=rows;r+=block){
+  // Landing-block starts are flagged 0x80 at binding-relative offsets (first + k*block); `first` is not
+  // block-aligned, so scan every row for the flag rather than stepping block-aligned from zero.
+  for(uint32_t r=0;r+block<=rows;r++){
     if(!(send[r]&0x80) || mesh_bits_all(m,MESH_PRESENT,r,block)) continue;
     uint32_t page=atomic_load_explicit(&mesh_page(m)[r+block-1],memory_order_acquire);
     if(page==MESH_ABSENT) continue;
