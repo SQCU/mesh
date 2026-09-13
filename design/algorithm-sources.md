@@ -446,3 +446,18 @@ addresses and publication rows include the view offset. Disjoint destination
 sections have independent producers and completion. The region streaming review's
 follow-up records the operator's explicit partial-kernel composition and its
 section-local reduction dependencies.
+
+## Streaming overlap measurement
+
+The JAX authors' Pallas pipelining (cited in the region streaming review) motivates
+the comparison in `examples/streaming-overlap.py`. Amdahl's AFIPS 1967 analysis
+of serial fractions motivates reporting end-to-end improvement, rather than
+calling pending work device utilization. The client uses `BlockSpec.region_map`
+and `call_native` to run the same tiled NumPy matmuls for `(X W) V`: whole-operand
+publication versus independent section publication. The first contraction runs
+on participant zero, the second on participant one, with results returned over
+canonical mesh. Configuration, oracle computation, and numerical comparison are
+outside the timed interval. Five warmups precede samples. Welford's online
+moments (cited above) summarize timings. The whole-input observer is a canonical
+reader used only to report whether a consumer launches before full reception;
+it does not gate the numerical functions.
