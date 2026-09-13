@@ -401,7 +401,7 @@ supplies the partitioned contraction equation; adjacent-pair addition implements
 its explicit reduction. These are mechanism citations, not claims of API identity
 or measured performance equivalence.
 
-`mesh_algebra_function`, `bind_dependencies`, `output_used`, `full_output`,
+`mesh_algebra_function`, `bind_dependencies`, `output_used`,
 `complete_function`, `complete_part`, and `mesh_algebra_export` bind application
 functions to canonical input/output rows and complete them through the existing
 publication owner. A submission's completion context is its configured function,
@@ -439,3 +439,10 @@ intersections are checked during setup to prevent publication of unwritten or
 concurrently overwritten data. No new execution state is introduced. See the
 [source and literature review](region-streaming-review.md) for the exact scope
 and the remaining reduction and contraction dependencies.
+
+The same region mechanism applies to built-in `mesh_algebra_bind` and its backend
+lowerings: numerical indices remain relative to the selected view, while output
+addresses and publication rows include the view offset. Disjoint destination
+sections have independent producers and completion. The region streaming review's
+follow-up records the operator's explicit partial-kernel composition and its
+section-local reduction dependencies.

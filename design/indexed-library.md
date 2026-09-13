@@ -149,3 +149,51 @@ for the configured program lifetime.
 
 The [source and literature review](region-streaming-review.md) records remaining
 whole-K dependencies and the missing arrival-selected masked reduction.
+
+## Independent launches into one full-sized output
+
+Built-in numerical bindings accept the same compact, publication-aligned output
+regions as custom functions. An allocation therefore need not be split into
+separate tensor objects to obtain independent launches and publications.
+For example, with FP32 storage and a 64 KiB publication quantum, each `(128,128)`
+section below owns one quantum:
+
+```python
+local = program.tensor((512, 128))
+received = program.tensor((512, 128))
+output = program.tensor((512, 128))
+for i in range(4):
+    left = local[0, 0].slice(i * 128, 0, 128, 128)
+    right = received[0, 0].slice(i * 128, 0, 128, 128)
+    destination = output[0, 0].slice(i * 128, 0, 128, 128)
+    program.bind('add', left, destination, right)
+```
+
+Each addition depends only on its two input sections. All four write into the
+same output allocation, with disjoint write ownership. Configured transfers of
+that allocation observe each completed section independently. Transmitted input
+sections can therefore be consumed before the rest of the allocation arrives,
+and those consumers immediately become streaming producers themselves.
+
+`Program.contract(left_partitions, right_partitions, destination)` and
+`Program.reduce_sum(contributions, destination)` likewise accept a destination
+section. A contraction computes its partial contributions into separate registered
+storage, then combines the contributions for each output section. A completed
+section may be sent or consumed while another section's contributions are absent.
+The remaining receive dependency for a function is its declared operand region,
+not the containing allocation. Split the contracted dimension into the actual
+partial operands at setup; different partials may finish independently.
+
+Several launches must not perform uncoordinated read-modify-write on the same
+output elements. Independent contributions have independent backing, and the
+combining function owns the destination section. Its completion dependency is
+legitimate: it needs those contributions. No whole-allocation completion is
+required. This uses existing region functions and reader masks rather than an
+additional arrival-selected accumulation scheduler.
+
+Source addressing is consistent across backends: the CPU store uses
+`z.offset + first + i`; Metal uses the output view's offset and strides; MPS uses
+the sliced output matrix's offset; Core ML's supplied output pointer uses
+`z.offset + first`. Publication starts at the corresponding output page offset.
+All return through `complete_part`, which publishes and makes configured sends
+eligible before unrelated launches finish.

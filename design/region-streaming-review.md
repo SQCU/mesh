@@ -91,3 +91,24 @@ broad.
 
 Compilation and source review validate the region API change. No synthetic
 numerical client or timing result is used as proof of overlap.
+
+## Follow-up: independent linear-algebra output sections
+
+The operator clarified that explicit partial kernels with independently completing
+output sections are a suitable implementation, with completion dependencies where
+a later operation genuinely needs unfinished contributions. An arrival-selected
+mutable accumulator is not required to obtain that dataflow.
+
+Built-in `mesh_algebra_bind` now accepts the same publication-aligned subregions
+as `mesh_algebra_function`. It checks only the destination region for competing
+writers and input overlap. CPU and Core ML output addresses and publication maps
+include the region's offset; Metal and MPS already address through the view.
+The numerical loop covers the destination view's elements, not its allocation.
+Consequently, `reduce_sum` and partitioned `contract` can scatter completed sums
+into disjoint sections of one full-sized output allocation. Their section-local
+completion dependencies remain, while no allocation-wide join is introduced.
+See the [public composition example](indexed-library.md#independent-launches-into-one-full-sized-output).
+
+Automatic subdivision of an unspecified whole-K input and an arrival-selected
+masked accumulator are still not implemented. Explicit region and K-partition
+bindings express the clarified partial-kernel implementation directly.
