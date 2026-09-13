@@ -189,3 +189,9 @@ calls per participant. FP32 maximum error is 1.38101313e-7. Explicit FP16 maximu
 error is 4.16398048e-4, against its separate 1e-3 numerical bound; the FP32 checks
 are unchanged. Preferred Neural Engine operation count is zero in these runs.
 No throughput gain or ANE execution claim follows from them.
+
+The final 4c6fbd0 run pairs explicit C setup on M5 with symbolic setup on M4.
+Both complete all 19 invocations and both delayed-input observations through the
+shared execution path, with maximum error 1.38101313e-7. Warning checks pass for
+C and Objective-C; real NumPy ufunc/einsum dispatch generates the same bindings
+as the mesh symbolic namespace for the acceptance expression.

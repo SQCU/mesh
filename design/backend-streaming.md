@@ -192,7 +192,9 @@ z = y * scale + bias
 partitioned matrix contraction, including explicit FP16/FP32 casts. It supports
 NumPy ufunc/einsum dispatch as well as its own array namespace. The post-contraction
 scale/bias in this full design is expressed through ordinary subsequent algebra
-bindings today; arbitrary nested symbolic contractions are not yet supported.
+bindings today; arbitrary nested symbolic contractions are not yet supported. Pointwise
+intermediates use FP32 unless an explicit cast specifies FP16; this is not a
+drop-in implementation of all NumPy dtype-promotion rules.
 The [NumPy einsum notation](https://numpy.org/doc/stable/reference/generated/numpy.einsum.html)
 provides the index equation; incremental execution is supplied by mesh lowering.
 
