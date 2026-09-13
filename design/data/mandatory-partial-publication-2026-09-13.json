@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-13",
+  "commit": "f280de749a7f95dbb1fcfa41f6943f346c0ce279",
+  "transport": "Thunderbolt SEND/RECV",
+  "shared_memory_version": 20,
+  "page_bytes": 16384,
+  "block_pages": 4,
+  "arena_pages": 4096,
+  "queue_pairs": 3,
+  "acceptance": "Existing streaming-algebra: first 256 contraction rows received and numerically checked before final input row is written, once per invocation window; independent group-one outputs complete throughout each live window.",
+  "runs": [
+    {
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 65.6103334,
+          "sample_variance": 9750.87133
+        },
+        "allocated_pages": 2436,
+        "commands": 2356,
+        "gpu_seconds": 0.016716471,
+        "wall_seconds": 0.651112
+      }
+    },
+    {
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 143.250667,
+          "sample_variance": 59913.4278
+        },
+        "allocated_pages": 2436,
+        "commands": 2356,
+        "gpu_seconds": 0.053485072,
+        "wall_seconds": 0.912632
+      }
+    }
+  ]
+}

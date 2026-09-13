@@ -160,3 +160,16 @@ All numerical comparisons pass; maximum contraction absolute error is
 which destination owns each occurrence; these runs check numerical composition
 and observable progress, not a transport-loss theory or a claimed speedup.
 C/Objective-C warning checks and Swift import/typechecking pass.
+
+### Mandatory publication acceptance
+
+[Recorded results](data/mandatory-partial-publication-2026-09-13.json) for
+f280de7 use three queues, 19 invocations, eight storage slots and 257 rows.
+Both M5 and M4 received and numerically checked the first 256 contraction rows
+before the last input row was written in all three delayed windows. The full
+receive remained unavailable at each observation. Sixteen later independent
+outputs completed per participant before input zero was supplied. All complete
+contractions, received copies, statistics and normalization outputs also passed.
+Maximum absolute error was 1.38101313e-7. Each participant used 2436 registered
+pages and completed 2356 GPU commands. This establishes partial publication and
+composition; it is not a throughput comparison against the earlier implementation.
