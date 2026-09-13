@@ -784,3 +784,5 @@ payload alternatives and `bin/mesh-loopback.sh` have been deleted. Configuration
 establishes the links before numerical invocation; timing and result acceptance
 belong to the calling context. The current rewrite and outstanding evidence are
 recorded in [the completion requirements](design/completion-requirements.md).
+
+The importable [streaming numerical library](design/indexed-library.md) composes indexed tensor functions, partial contractions, and peer transfers over canonical mesh pages.

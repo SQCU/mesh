@@ -6,8 +6,10 @@ extern "C" {
 #endif
 
 /* design/streaming-algebra.md */
-enum mesh_scalar { MESH_F16, MESH_F32 };
+enum mesh_scalar { MESH_F16, MESH_F32, MESH_I32, MESH_U32 };
 enum mesh_algebra_op { MESH_AFFINE, MESH_ADD, MESH_MULTIPLY, MESH_TANH, MESH_EXP, MESH_SUM, MESH_CONTRACT, MESH_RSQRT };
+typedef void (*mesh_completion)(void *context,int64_t error);
+typedef void (*mesh_submission)(void *binding,mesh_completion complete,void *context);
 struct mesh_algebra;
 struct mesh_tensor;
 struct mesh_shape { size_t rows,columns; enum mesh_scalar scalar; };
@@ -34,10 +36,12 @@ int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
 void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_publish(struct mesh_tensor *,uint32_t extent);
+int mesh_algebra_function(struct mesh_algebra *,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,mesh_submission,void *binding);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 struct mesh_tensor *mesh_algebra_contract(struct mesh_algebra *,const struct mesh_view *a,const struct mesh_view *b,size_t partitions,struct mesh_view output,float alpha);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_transfer(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t binding,uint16_t queue,int receive);
+int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);
 int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_return_part(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t part);
 int mesh_algebra_realize(struct mesh_algebra *);

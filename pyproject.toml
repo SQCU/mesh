@@ -1,11 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "mesh-runtime"
-version = "0.1.0"
-requires-python = ">=3.12,<3.13"
-dependencies = [
-  "mlx==0.32.2",
-  "numpy==2.5.2",
-]
+version = "0.2.0"
+description = "Indexed numerical functions over canonical mesh shared memory"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24"]
+
+[dependency-groups]
+mlx = ["mlx==0.32.2; python_version >= '3.12'", "numpy==2.5.2; python_version >= '3.12'"]
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+packages = ["mesh"]
 
 [tool.uv]
-package = false
+default-groups = ["mlx"]

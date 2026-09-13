@@ -390,3 +390,40 @@ The [CPU streaming and copy audit](cpu-streaming-and-copy-audit.md) gives the
 address equation, lifetime argument and exact scope of the no-staging proof.
 The acceptance's CPU option uses the existing endpoint numerical comparison
 (Saltzer, Reed and Clark, 1984), not a separate evaluator or copy-detection experiment.
+
+## Indexed library functions
+
+Papadopoulos and Culler's Monsoon (ISCA 1990), cited above, supplies the
+presence-bit firing and last-reader release mechanism. The JAX authors' Pallas
+indexed block references supply the configuration-time mapping from grid indices
+to numerical regions. Dongarra, Du Croz, Hammarling and Duff's Level 3 BLAS (1990)
+supplies the partitioned contraction equation; adjacent-pair addition implements
+its explicit reduction. These are mechanism citations, not claims of API identity
+or measured performance equivalence.
+
+`mesh_algebra_function`, `bind_dependencies`, `output_used`, `full_output`,
+`complete_function`, `complete_part`, and `mesh_algebra_export` bind application
+functions to canonical input/output rows and complete them through the existing
+publication owner. A submission's completion context is its configured function,
+not a newly allocated job or a separately scheduled readiness object. Physical
+completion publishes that function's output regions and retires its input reads.
+
+The `mesh` Python package's `Program`, `Tensor`, `Ref`, `BlockSpec`, and `Result`
+methods configure this same mechanism. Tensor arithmetic enumerates independent
+indexed block functions during setup. Contraction enumerates `(i, j, q)`
+contributions before reducing `q`; reductions similarly expose their contributions.
+Transpose and slicing construct strided views of the same mapped pages. Grid
+calls bind user numerical functions with exactly their declared input regions.
+Native grid preparation realizes submission bindings before invocation, while
+synchronous NumPy calls bind their borrowed arrays before invocation. The ctypes
+ABI declarations, error translation, and setuptools build methods are the host
+language and packaging adapters for that mechanism, with no independent scheduler.
+
+The [library contract and source trace](indexed-library.md) specifies ownership,
+publication granularity, asynchronous completion, and the limits of overlap claims.
+
+`bind_copy` implements an explicitly requested same-participant copy by disjoint
+output parts, reading source pages and writing destination pages directly. It
+preserves bytes, including integer indices and floating-point bit patterns, and
+publishes each destination part through `complete_part`. This is the copy
+operation's payload write, not a hidden transport staging copy.

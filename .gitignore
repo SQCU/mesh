@@ -31,3 +31,5 @@ xonotic/darkplaces-work/libfreetype*.dylib
 xonotic/qcbench/id1/
 xonotic/.tmp/
 xonotic/solver/strat/runs/
+build/
+*.egg-info/
