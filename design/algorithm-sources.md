@@ -358,3 +358,14 @@ activation reference declare FP16 rounding before contraction for the native
 half-input case. FP32 retains its original 2e-4 contraction error threshold;
 the separate FP16 case uses a 1e-3 threshold and reports its scalar mode and
 observed maximum error. This does not authorize silently narrowing FP32 programs.
+
+
+For explicitly FP16 contraction operands, the Core ML numerical specialization
+uses at most 32 terms per native dot product, casts each result to FP32, and adds
+those results in a fixed tree. This bounds the length of half-precision accumulation
+before promotion and prevents the native compiler from narrowing the FP32
+combination. These are local numerical subexpressions of an already-ready mesh
+part; the user-visible K contributions and their registered storage remain owned
+by `mesh_algebra_contract`. The 32-term choice is an accuracy specialization,
+not a measured throughput optimum. The initial unsplit FP16 native dot product
+failed the existing FP16 acceptance threshold; the threshold is unchanged.
