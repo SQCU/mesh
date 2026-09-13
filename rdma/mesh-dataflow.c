@@ -19,6 +19,7 @@ static int mesh_is(struct hdr *m,int plane,uint32_t row){
 /* ledger D14: a leaving client's queue orders, unsent productions and ownership end with it. Work requests
    the bridge already posted keep their occupancy until the bridge destroys their queue pairs. */
 static void mesh_retire(struct hdr *m){
+  atomic_store_explicit(&m->configured,0,memory_order_release);
   for(uint32_t i=0;i<2*MESH_QPS;i++) atomic_store_explicit(&m->order_length[i],0,memory_order_release);
   uint8_t *send=mesh_send(m);
   for(uint32_t r=0;r<mesh_rows(m);r++){
@@ -240,6 +241,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
     }
   }
   free(order); free(used);
+  if(!error)atomic_store_explicit(&m->configured,(uint32_t)getpid(),memory_order_release);
   return error;
 }
 

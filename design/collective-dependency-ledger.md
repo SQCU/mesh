@@ -265,12 +265,17 @@ Not licensed: an all-gather of logits.
 Operator authorization, September 13, 2026: “sure throw any fixed costs you want
 into an initial setup”. This authorizes completing receive-queue configuration
 on both peers before enabling initial sends. The existing bounded out-of-band
-setup exchanges QP metadata symmetrically, transitions every QP to RTR, exchanges
-a single setup-complete byte, then transitions to RTS. This happens once per
+setup exchanges QP metadata symmetrically, transitions every QP to RTR, posts the configured initial receive window,
+exchanges a single setup-complete byte, then transitions to RTS. This happens once per
 client connection. D8 page stamps alone still determine numerical firing; D12
 still forbids acknowledgements in the per-message progress path.
 
 The QPI magic changes to distinguish this setup protocol from previous bridges;
-the shared-memory version and existing mesh-dataflow client ABI remain unchanged.
+the shared-memory version becomes 20. A configured-owner field occupies the
+previously reserved header word and publishes completion of mesh_realize. The
+bridge starts pairing when the attached owner has realized its rows. Existing
+mesh-dataflow source calls and structure layout remain compatible; binaries must
+be rebuilt to use the new setup-publication contract. This field is read only
+during connection setup, never to decide whether a numerical extent can run.
 TN3205's RTR/RTS state transitions and JACCL's setup metadata exchange are the
 mechanism citations; the operator instruction authorizes the added setup boundary.

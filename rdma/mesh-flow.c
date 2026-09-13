@@ -33,12 +33,11 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh
   return 0;
 }
 
-/* ledger D2, D3, D5, D7, D8, D9 */
-static void mesh_progress(struct mesh_link *link){
+/* design/collective-dependency-ledger.md#d16-fixed-connection-setup-before-numerical-execution */
+static void link_receive(void *state,uint32_t q){
+  struct mesh_link *link=state;
   struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
   _Atomic uint32_t *table=mesh_page(M);
-  for(uint32_t q=0;q<(uint32_t)link->qps;q++){
-    /* D2, D9: keep this queue's receives posted ahead, in its order, on blocks whose readers are done */
     struct mesh_queue *in=link_queue(link,q,MESH_RECEIVE);
     uint32_t length=atomic_load_explicit(mesh_order_length(M,q,MESH_RECEIVE),memory_order_acquire);
     while(length && in->tail-in->head<(uint32_t)v->receive_capacity){
@@ -49,6 +48,15 @@ static void mesh_progress(struct mesh_link *link){
       if(link_post(link,q,MESH_RECEIVE,entry)){ mesh_receive_complete(M,entry.row,entry.page,0); break; }
       in->next++;
     }
+}
+
+/* ledger D2, D3, D5, D7, D8, D9 */
+static void mesh_progress(struct mesh_link *link){
+  struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
+  _Atomic uint32_t *table=mesh_page(M);
+  for(uint32_t q=0;q<(uint32_t)link->qps;q++){
+    link_receive(link,q);
+    uint32_t length;
     /* D5, D7: send produced blocks in this queue's order; producers never wait on this */
     struct mesh_queue *out=link_queue(link,q,MESH_SEND);
     length=atomic_load_explicit(mesh_order_length(M,q,MESH_SEND),memory_order_acquire);
@@ -160,9 +168,9 @@ int main(int argc,char**argv){
     uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
     /* D14: the connection follows the attached client */
     if(link.client && client!=link.client && link_down(&link)) continue;
-    if(!link.client && client){
+    if(!link.client && client && atomic_load_explicit(&M->configured,memory_order_acquire)==client){
       /* D13 */
-      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps)){
+      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps,link_receive,&link)){
         link_error(M,errno?errno:EIO,1);
         down_pair();
         continue;
