@@ -106,3 +106,10 @@ maximum absolute error 1.038887142285061e-7; Metal/MPS had
 1.0853451537506942e-7 against the float64 reference. The measured package source
 was branch main at 760dd5e. These are numerical checks, not new throughput claims.
 Both bridges used 4096 pages of 16384 bytes, with four-page messages and two QPs.
+
+A CPU `row_sum` follow-up at main 31e59ed used an 8×16 input with two
+4×16 input blocks and 4×1 output blocks. Publishing only the first input block
+made the first output ready with four values of 32 while the second output
+remained absent. Publishing the second block then produced four values of 48.
+The 16-byte output sections occupied separate canonical publication extents;
+no complete-operand readiness dependency was needed.
