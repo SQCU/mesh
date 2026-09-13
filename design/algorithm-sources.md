@@ -463,3 +463,22 @@ without consuming a reader or gating numerical functions. They report whether a
 consumer launches before full reception. Inputs vary by invocation; terminal
 results are checked outside steady-state timing. Multiple configured input slots
 keep both variants pipelined.
+
+## Pallas call ergonomics
+
+The JAX authors' [Grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+and [pallas_call reference](https://docs.jax.dev/en/latest/_autosummary/jax.experimental.pallas.pallas_call.html)
+supply the user-facing decomposition into kernel, grid, operand-independent block
+specifications, and output shape/dtype declarations. `ShapeDtypeStruct`,
+`BlockSpec.bind/resolve`, `Tensor.region`, and `Program.kernel_call` realize this
+configuration through the existing region submission path. An index map produces
+block indices, multiplied by block shape to obtain element offsets. Binding and
+output allocation happen before execution. Kernel return uses the existing
+completion owner to publish the region. The overlap example's ordinary kernel
+and index maps now use this interface instead of manual ctypes submissions.
+
+This is a two-dimensional host NumPy kernel interface with mesh publication,
+not a JAX tracing backend or full Pallas compatibility. Boundary regions are
+clipped instead of padded with masked lanes. A region must fit one configured
+backing block, and writes still own complete publication quanta. No hidden
+operand gather/copy is introduced when a requested region crosses allocations.

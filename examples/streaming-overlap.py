@@ -1,12 +1,11 @@
 import argparse
-import ctypes as C
 import json
 import os
 import signal
 import time
 
 import numpy as np
-from mesh import BlockSpec, Program, Submission
+from mesh import BlockSpec, Program, ShapeDtypeStruct
 
 
 # design/algorithm-sources.md#streaming-overlap-measurement
@@ -53,46 +52,43 @@ def main():
         count = (rows + tile - 1) // tile
         grid = (count,) if args.mode == 'streamed' else (1,)
 
-        # design/algorithm-sources.md#streaming-overlap-measurement
-        def region(ref, i):
-            return ref.slice(i * tile, 0, min(tile, rows - i * tile), ref.shape[1]) if args.mode == 'streamed' else ref
-
-        # design/algorithm-sources.md#streaming-overlap-measurement
-        def index(i):
-            return (0, 0)
-
-        # design/algorithm-sources.md#streaming-overlap-measurement
+        # design/algorithm-sources.md#pallas-call-ergonomics
         def configure():
             x = program.tensor((rows, k))
-            p = program.tensor((rows, n))
+            whole_input = None
+
+            # design/algorithm-sources.md#pallas-call-ergonomics
+            def kernel(left, right, destination):
+                nonlocal early, calls
+                if whole_input is not None:
+                    early += int(not whole_input.present)
+                for i in range(0, len(left), tile):
+                    np.matmul(left[i:i+tile], right, out=destination[i:i+tile])
+                calls += 1
+
+            # design/algorithm-sources.md#pallas-call-ergonomics
+            def row_index(i):
+                return (i, 0)
+
+            # design/algorithm-sources.md#pallas-call-ergonomics
+            def weight_index(i):
+                return (0, 0)
+
+            block_rows = tile if args.mode == 'streamed' else rows
+            matmul = program.kernel_call(kernel, grid=grid,
+                in_specs=(BlockSpec((block_rows, k), row_index),
+                          BlockSpec((k, n), weight_index)),
+                out_specs=BlockSpec((block_rows, n), row_index),
+                out_shape=ShapeDtypeStruct((rows, n), np.float32))
+            p = matmul(x, w) if args.rank == 0 else program.tensor((rows, n))
             received = program.tensor((rows, n))
-            y = program.tensor((rows, m))
+            if args.rank == 1:
+                whole_input = received[0, 0]
+            y = matmul(received, v) if args.rank == 1 else program.tensor((rows, m))
             returned = program.tensor((rows, m))
             program.copy(p.on(0), received.on(1), queue=0)
             program.copy(y.on(1), returned.on(0), queue=1)
             result = program.export(returned[0, 0]) if args.rank == 0 else None
-            whole_input = received[0, 0] if args.rank == 1 else None
-
-            # design/algorithm-sources.md#streaming-overlap-measurement
-            def prepare(coordinate, inputs, outputs):
-                left, right, destination = inputs[0].array, inputs[1].array, outputs[0].array
-                operands = tuple((left[i:i+tile], destination[i:i+tile]) for i in range(0, len(left), tile))
-
-                # design/algorithm-sources.md#streaming-overlap-measurement
-                def submit(binding, complete, context):
-                    nonlocal early, calls
-                    if whole_input is not None:
-                        early += int(not whole_input.present)
-                    for a, out in operands:
-                        np.matmul(a, right, out=out)
-                    calls += 1
-                    complete(context, 0)
-                return Submission(submit), None
-
-            source, weight, output = (x, w, p) if args.rank == 0 else (received, v, y)
-            program.call_native(prepare, grid=grid,
-                inputs=[BlockSpec(source, index, region), BlockSpec(weight, index)],
-                outputs=[BlockSpec(output, index, region)])
             return x[0, 0], result
 
         slots = [configure() for _ in range(args.depth)]

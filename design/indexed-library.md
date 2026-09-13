@@ -197,3 +197,53 @@ the sliced output matrix's offset; Core ML's supplied output pointer uses
 `z.offset + first`. Publication starts at the corresponding output page offset.
 All return through `complete_part`, which publishes and makes configured sends
 eligible before unrelated launches finish.
+
+## Pallas-style calls
+
+Use operand-independent block specifications and a curried kernel call:
+
+```python
+import numpy as np
+from mesh import BlockSpec, ShapeDtypeStruct
+
+
+def matmul_kernel(x_ref, w_ref, y_ref):
+    np.matmul(x_ref, w_ref, out=y_ref)
+
+
+matmul = program.kernel_call(
+    matmul_kernel,
+    grid=(64,),
+    in_specs=(BlockSpec((64, 256), lambda i: (i, 0)),
+              BlockSpec((256, 256), lambda i: (0, 0))),
+    out_specs=BlockSpec((64, 256), lambda i: (i, 0)),
+    out_shape=ShapeDtypeStruct((4096, 256), np.float32),
+)
+y = matmul(x, w)
+z = matmul(y, v)
+```
+
+The call configures storage and functions; it does not execute them eagerly.
+`realize()` finishes configuration and `scan()` issues ready regions. The second
+call depends on corresponding regions of `y`, not all of `y`. Numerical functions
+receive borrowed arrays and return normally. No ctypes callback, manual completion,
+or explicit publish is required. Inputs are read-only and outputs writable.
+Use NumPy's `out=` operations to write the provided storage directly.
+
+A BlockSpec index map returns block indices, as in Pallas. Shapes and index maps
+can be reused with different operands. `spec.bind(tensor)` also works with the
+lower-level `Program.call`. Existing `BlockSpec(tensor, index_map, region_map)`
+clients remain supported. Multiple outputs use matching tuples of shape/dtype
+objects and output specs; the configured call returns a tuple of tensors.
+
+Current differences are explicit: tensors and specs are two-dimensional; boundary
+blocks are clipped, not automatically padded; outputs must own publication-aligned
+regions; and kernels are host NumPy functions rather than JAX-traced device code.
+Asynchronous device implementations continue to use `call_native`. `kernel_call`
+does not add a second execution engine or reinterpret an asynchronous function's
+return as physical completion.
+
+The existing [overlap demonstration](../examples/streaming-overlap.py) uses this
+API for both producer and consumer. Its archived measurements record the source
+revision used at the time; changing the call spelling does not retroactively
+constitute a new measurement.

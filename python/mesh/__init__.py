@@ -3,13 +3,13 @@ import errno
 import itertools
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from ._native import Native, Shape, View, Endpoint, Submission, Completion
 
-__all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'Result', 'Submission', 'Completion']
+__all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result', 'Submission', 'Completion']
 _DTYPES = tuple(map(np.dtype, ('float16', 'float32', 'int32', 'uint32')))
 
 
@@ -85,6 +85,17 @@ class Tensor:
             check(C.get_errno() or errno.ENOMEM)
         self.blocks = {coord: Ref(program, program.native.tensor_view(self.handle, i), self.dtype)
                        for i, coord in enumerate(coordinates)}
+
+    # design/algorithm-sources.md#pallas-call-ergonomics
+    def region(self, row, column, rows, columns):
+        if min(row, column) < 0 or min(rows, columns) <= 0 or row + rows > self.shape[0] or column + columns > self.shape[1]:
+            raise ValueError('Region is outside the tensor')
+        i, j = row // self.block_shape[0], column // self.block_shape[1]
+        ref = self[i, j]
+        r, c = row % self.block_shape[0], column % self.block_shape[1]
+        if r + rows > ref.shape[0] or c + columns > ref.shape[1]:
+            raise ValueError('Region crosses backing blocks; realize storage with blocks containing the requested region')
+        return ref.slice(r, c, rows, columns)
 
     # design/algorithm-sources.md#indexed-library-functions
     def __getitem__(self, coordinate):
@@ -177,14 +188,37 @@ class Tensor:
 
 
 @dataclass(frozen=True)
+class ShapeDtypeStruct:
+    shape: tuple
+    dtype: object = np.float32
+
+
+@dataclass(frozen=True)
 class BlockSpec:
-    tensor: Tensor
+    block_shape: object
     index_map: object
     region_map: object = None
+    _tensor: object = None
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#pallas-call-ergonomics
+    def bind(self, tensor):
+        return replace(self, _tensor=tensor)
+
+    # design/algorithm-sources.md#pallas-call-ergonomics
     def resolve(self, coordinate):
-        ref = self.tensor[tuple(self.index_map(*coordinate))]
+        index = tuple(self.index_map(*coordinate))
+        if isinstance(self.block_shape, Tensor):
+            ref = self.block_shape[index]
+        else:
+            shape = tuple(self.block_shape)
+            if len(shape) != 2 or len(index) != 2 or min(shape) <= 0:
+                raise ValueError('BlockSpec requires two positive block dimensions and two indices')
+            if self._tensor is None:
+                raise ValueError('Bind BlockSpec to an operand through kernel_call or spec.bind(tensor)')
+            row, column = (i * b for i, b in zip(index, shape))
+            ref = self._tensor.region(row, column,
+                min(shape[0], self._tensor.shape[0] - row),
+                min(shape[1], self._tensor.shape[1] - column))
         return self.region_map(ref, *coordinate) if self.region_map is not None else ref
 
 
@@ -234,6 +268,26 @@ class Program:
     # design/algorithm-sources.md#indexed-library-functions
     def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True):
         return Tensor(self, shape, block_shape or shape, dtype, transferable)
+
+    # design/algorithm-sources.md#pallas-call-ergonomics
+    def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs):
+        single = isinstance(out_shape, ShapeDtypeStruct)
+        shapes = (out_shape,) if single else tuple(out_shape)
+        specs = (out_specs,) if single else tuple(out_specs)
+        inputs = tuple(in_specs)
+        if not shapes or len(shapes) != len(specs):
+            raise ValueError('Each output requires one shape and one BlockSpec')
+
+        # design/algorithm-sources.md#pallas-call-ergonomics
+        def configure(*operands):
+            if len(operands) != len(inputs):
+                raise ValueError('Each input requires one BlockSpec')
+            outputs = tuple(self.tensor(shape.shape, dtype=shape.dtype) for shape in shapes)
+            self.call(kernel, grid=grid,
+                inputs=tuple(spec.bind(tensor) for spec, tensor in zip(inputs, operands)),
+                outputs=tuple(spec.bind(tensor) for spec, tensor in zip(specs, outputs)))
+            return outputs[0] if single else outputs
+        return configure
 
     # design/algorithm-sources.md#indexed-library-functions
     def bind_native(self, submission, inputs, outputs, binding=None):
