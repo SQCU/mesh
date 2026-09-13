@@ -17,9 +17,10 @@ struct mesh_view {
   size_t offset,rows,columns,row_stride,column_stride;
 };
 struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
-struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings,ne_planned_operations; int64_t code; double gpu_seconds; };
+struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings,ne_planned_operations; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
+struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *);
 int mesh_algebra_coreml(struct mesh_algebra *,const char *python,const char *generator,const char *cache);
 void mesh_algebra_destroy(struct mesh_algebra *);
 struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *,const struct mesh_shape *,size_t extents,int transferable);

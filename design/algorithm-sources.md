@@ -376,3 +376,17 @@ quantized-input numerical reference: heterogeneous native kernels may round
 differently. It does not require their locally computed answers to be bitwise
 identical. Its additional peer-contribution comparison permits the sum of the
 two per-result error bounds. FP32 retains the existing exact peer-replica check.
+
+## CPU indexed execution
+
+Papadopoulos and Culler's Monsoon (1990), cited above, supplies the indexed
+presence/completion mechanism. Dongarra, Du Croz, Hammarling and Duff's Level 3
+BLAS (1990) supplies the contraction equation. `create_algebra`,
+`mesh_algebra_create_cpu`, `cpu_operand`, `cpu_get`, the typed CPU loads/stores,
+and `cpu_part` lower those indexed functions to direct scalar-addressed CPU
+arithmetic. Scalar type and numerical operation are resolved during configuration.
+All writes complete through the same mesh publication owner as the other backends.
+The [CPU streaming and copy audit](cpu-streaming-and-copy-audit.md) gives the
+address equation, lifetime argument and exact scope of the no-staging proof.
+The acceptance's CPU option uses the existing endpoint numerical comparison
+(Saltzer, Reed and Clark, 1984), not a separate evaluator or copy-detection experiment.
