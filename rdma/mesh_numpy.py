@@ -43,6 +43,7 @@ class Array:
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
         if method != '__call__' or kwargs:
             return NotImplemented
+        inputs = tuple(x if isinstance(x, Array) else float(x) for x in inputs)
         operations = {'tanh': tanh, 'exp': exp, 'add': lambda a, b: a + b, 'multiply': lambda a, b: a * b}
         return operations[ufunc.__name__](*inputs) if ufunc.__name__ in operations else NotImplemented
 
@@ -102,6 +103,8 @@ def emit_c(expression, name, inputs):
         index = len(values)
         output = node.target or f'v{index}'
         if node.op == 'contract':
+            if node is not expression:
+                raise ValueError('Nested contractions require separately realized expressions')
             lines.append(f'  struct mesh_tensor *partial{index}=mesh_algebra_contract(a,{x},{y},count,z,1);')
             values[node] = f'partial{index}'
             return values[node]

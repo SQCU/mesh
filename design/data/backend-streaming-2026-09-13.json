@@ -1,0 +1,254 @@
+{
+  "date": "2026-09-13",
+  "transport": "Thunderbolt SEND/RECV",
+  "shared_memory_version": 20,
+  "page_bytes": 16384,
+  "block_pages": 4,
+  "arena_pages": 4096,
+  "queue_pairs": 3,
+  "acceptance": "Existing streaming-algebra, extended with independent numerical verification of a received K contribution before missing-panel production and a received contraction prefix before input-tail production.",
+  "coremltools": "9.0",
+  "limits": [
+    "Core ML output identity verifies the supplied public backing, not absence of internal copies.",
+    "Compute plans prefer CPU in recorded Core ML runs. Actual ANE execution is unverified.",
+    "No throughput comparison or speedup claim."
+  ],
+  "runs": [
+    {
+      "mode": "explicit-c",
+      "commit": "3b33c90b30c1d1c0bd48ff9b2a139ab62784c95e",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 151.148,
+          "sample_variance": 63657.2167
+        },
+        "allocated_pages": 2500,
+        "commands": 2356,
+        "gpu_seconds": 0.015634147,
+        "wall_seconds": 0.922829
+      }
+    },
+    {
+      "mode": "explicit-c",
+      "commit": "3b33c90b30c1d1c0bd48ff9b2a139ab62784c95e",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 23.4833333,
+          "sample_variance": 1409.01962
+        },
+        "allocated_pages": 2500,
+        "commands": 2356,
+        "gpu_seconds": 0.051326966,
+        "wall_seconds": 0.559535
+      }
+    },
+    {
+      "mode": "symbolic",
+      "commit": "1a1d83abb76acca7a151c9c222cc0f74277cffff",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "symbolic": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 70.49,
+          "sample_variance": 11406.274
+        },
+        "allocated_pages": 2500,
+        "commands": 2356,
+        "gpu_seconds": 0.014791272,
+        "wall_seconds": 0.672329
+      }
+    },
+    {
+      "mode": "symbolic",
+      "commit": "1a1d83abb76acca7a151c9c222cc0f74277cffff",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "symbolic": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 26.8266667,
+          "sample_variance": 1916.57355
+        },
+        "allocated_pages": 2500,
+        "commands": 2356,
+        "gpu_seconds": 0.043057202,
+        "wall_seconds": 0.567523
+      }
+    },
+    {
+      "mode": "coreml-f32",
+      "commit": "b43a4824c7cfca9564829ed17ed3814294fabe26",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "symbolic": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 33.1986667,
+          "sample_variance": 1643.30727
+        },
+        "allocated_pages": 2500,
+        "commands": 2356,
+        "native_submissions": 152,
+        "native_output_backings": 152,
+        "ne_planned_operations": 0,
+        "gpu_seconds": 0.016212582,
+        "wall_seconds": 0.565517
+      }
+    },
+    {
+      "mode": "coreml-f32",
+      "commit": "b43a4824c7cfca9564829ed17ed3814294fabe26",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "symbolic": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 157.534667,
+          "sample_variance": 73134.1057
+        },
+        "allocated_pages": 2500,
+        "commands": 2356,
+        "native_submissions": 152,
+        "native_output_backings": 152,
+        "ne_planned_operations": 0,
+        "gpu_seconds": 0.051352421,
+        "wall_seconds": 0.964214
+      }
+    },
+    {
+      "mode": "coreml-f16",
+      "commit": "52558d4d79f9be0a0c965ba494e7a58cdc225870",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "symbolic": 1,
+        "half_contraction_inputs": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 0.000416398048,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 62.8733333,
+          "sample_variance": 5974.74828
+        },
+        "allocated_pages": 2658,
+        "commands": 2736,
+        "native_submissions": 152,
+        "native_output_backings": 152,
+        "ne_planned_operations": 0,
+        "gpu_seconds": 0.017989989,
+        "wall_seconds": 0.685856
+      }
+    },
+    {
+      "mode": "coreml-f16",
+      "commit": "52558d4d79f9be0a0c965ba494e7a58cdc225870",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "symbolic": 1,
+        "half_contraction_inputs": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "received_prefixes_before_tail": 3,
+        "received_k_contributions_before_panel": 3,
+        "max_absolute_error": 0.000416398048,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 25.56,
+          "sample_variance": 1644.02788
+        },
+        "allocated_pages": 2658,
+        "commands": 2736,
+        "native_submissions": 152,
+        "native_output_backings": 152,
+        "ne_planned_operations": 0,
+        "gpu_seconds": 0.060806831,
+        "wall_seconds": 0.619698
+      }
+    }
+  ]
+}

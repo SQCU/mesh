@@ -82,12 +82,13 @@ Each slot has independent producer, peer contribution, transform, K-panel partia
 result, gathered output, statistic and normalization extents. The example calls
 the same configure function for every slot on both participants.
 
-For each slot, producer copies enumerate groups, peers, transport blocks, and
-then the two strided K-panel extents. Result copies follow. After those slot
-configurations, direct copies of contraction partial zero use queue two. Each
+For each slot, producer copies enumerate groups, K panels, peers and transport
+blocks. The available K panel is declared before the deliberately withheld panel.
+Result copies follow. After those slot configurations, copies of both contraction
+contributions use queue two in the same available-before-withheld order. Each
 transport block receives a unique identity before either participant projects
-its local SEND or RECV. The corresponding FIFO sequences therefore name the
-same value and destination regardless of local row/page numbers.
+its local SEND or RECV. Corresponding FIFO sequences therefore name the same
+value and destination regardless of local row/page numbers.
 The live slots use disjoint allocations. Reuse is subject to those pages' actual
 reader lifetimes; the ring of work-request metadata is not the value-buffer ring.
 
@@ -96,7 +97,9 @@ producing all other inputs into their separate slots. It requires group one's
 contraction to complete in every invocation in the window before supplying the
 withheld input. With depth eight, seven later invocations must produce that output
 while the first invocation still lacks input zero. No outputs have been consumed
-at that observation point. For a 257-row input, it next writes and publishes only
+at that observation point. It also requires the complete available K-panel
+contribution to arrive at the peer and match its numerical reference before
+input zero is written. For a 257-row input, it next writes and publishes only
 rows 0 through 255 of input zero. The first contraction output block must arrive
 at the peer and match the independent formula while row 256 remains unwritten.
 The full contraction receive must remain unavailable. Only then is the input tail
@@ -141,10 +144,10 @@ MPS and Metal bindings automatically publish parts inside the logical algebra
 operation. Each underlying command buffer supplies an actual device completion
 boundary; mesh does not pretend to call a host sender from inside an opaque MPS
 shader. This backend implements output-part publication, whereas the cited Pallas
-callback forwards input shards during its matmul pipeline. No ANE adapter is
-implemented here; an adapter must preserve the same mandatory partial-publication
-contract.
-FP16 is supported by the interface but has not been covered by this example.
+callback forwards input shards during its matmul pipeline. The Core ML adapter now uses the same completion path. The [backend examples](backend-streaming.md#implemented-entry-points-and-running-the-examples)
+cover symbolic lowering, native binding and explicitly FP16 contraction operands.
+The recorded Core ML compute plans selected CPU, so these runs do not establish
+ANE execution or internal Core ML zero-copy behavior.
 
 ## Recorded acceptance
 
@@ -175,3 +178,14 @@ contractions, received copies, statistics and normalization outputs also passed.
 Maximum absolute error was 1.38101313e-7. Each participant used 2436 registered
 pages and completed 2356 GPU commands. This establishes partial publication and
 composition; it is not a throughput comparison against the earlier implementation.
+
+### Indexed lowering and backend acceptance
+
+[Backend results](data/backend-streaming-2026-09-13.json) record the explicit C,
+symbolic, Core ML FP32 and Core ML FP16 paths. Each participant observes three
+K contributions before the missing panel and three output prefixes before the
+input tail. Core ML uses its supplied output backing on every one of 152 native
+calls per participant. FP32 maximum error is 1.38101313e-7. Explicit FP16 maximum
+error is 4.16398048e-4, against its separate 1e-3 numerical bound; the FP32 checks
+are unchanged. Preferred Neural Engine operation count is zero in these runs.
+No throughput gain or ANE execution claim follows from them.

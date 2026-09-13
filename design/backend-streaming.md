@@ -7,8 +7,10 @@ This contract applies to MPS, ANE, generated Metal, and a symbolic NumPy-style
 frontend targeting Metal alike.
 
 The three worked examples below specify execution and observable progress. The
-MPS/Metal primitives exist in mesh today. The ANE adapter and symbolic frontend
-are implementation designs, not claims of shipped backend integrations.
+MPS/Metal path, symbolic expression compiler, and asynchronous Core ML adapter
+are implemented. The Core ML adapter permits CPU and Neural Engine execution;
+the recorded compute plans prefer CPU. ANE placement and absence of internal
+Core ML operand copies are still unverified. Neither is a streaming exemption.
 
 ## One contract
 
@@ -109,14 +111,16 @@ lowering. The splitting and publication contract is mesh's design.
 
 Today `mesh_algebra_bind(MESH_CONTRACT, ...)` can express each P using input
 slices and distinct output tensors. The binder automatically splits its output
-into publication parts. Automatically deriving the Q decomposition from one
-large contraction remains compiler work; the current binder uses all K columns
-of each view passed to it.
+into publication parts. `mesh_algebra_contract` now accepts the corresponding indexed operand views,
+allocates their contributions, and realizes their fixed adjacent-pair reduction
+tree. The symbolic frontend supplies these partitioned operands automatically.
+The primitive binder still computes the full K domain of its individual view;
+there is no implicit transport-sized K split of a dense unpartitioned operand.
 
 Acceptance: withhold Q1, require P0 to be numerically correct at the peer, then
 release Q1 and require Y and Z to match the declared expression. Repeat with an
-unrelated output row withheld. The existing acceptance already checks the latter
-form on hardware; it does not yet independently check the delayed-Q case.
+unrelated output row withheld. The existing acceptance now checks both delayed-Q and delayed-row cases on
+both participants, including invocation-slot reuse.
 
 ## Example 2: ANE consumes completed neuron regions and streams down-projection contributions
 
@@ -158,9 +162,10 @@ whole-token-batch or whole-hidden-tensor dependencies.
 
 The ANE implementation obligation includes proving that device input/output
 bindings name the actual canonical registered operand storage, with no hidden
-copied operand store, and that completion establishes visibility there. That
-interop remains unimplemented in mesh. An unsupported binding path is an adapter
-implementation gap; it is not an alternative whole-tensor streaming contract.
+copied operand store, and that completion establishes visibility there. The Core ML adapter now binds inputs and outputs to canonical addresses and
+checks the returned output backing identity on every completion. The public
+backing checks pass; internal direct binding and actual ANE execution remain
+unverified. An unsupported binding path is an adapter implementation gap; it is not an alternative whole-tensor streaming contract.
 Apple's [compute-unit configuration](https://developer.apple.com/documentation/coreml/mlcomputeunits)
 permits CPU and Neural Engine execution together. Setting it alone does not
 establish that this example ran on ANE; backend validation must establish actual
@@ -183,8 +188,11 @@ y = np.einsum("ik,kj->ij", a, w)
 z = y * scale + bias
 ```
 
-This is proposed frontend notation. `np` denotes symbolic operations with
-NumPy-style semantics, not eager execution by the installed NumPy package.
+`rdma/mesh_numpy.py` implements symbolic pointwise operations feeding a
+partitioned matrix contraction, including explicit FP16/FP32 casts. It supports
+NumPy ufunc/einsum dispatch as well as its own array namespace. The post-contraction
+scale/bias in this full design is expressed through ordinary subsequent algebra
+bindings today; arbitrary nested symbolic contractions are not yet supported.
 The [NumPy einsum notation](https://numpy.org/doc/stable/reference/generated/numpy.einsum.html)
 provides the index equation; incremental execution is supplied by mesh lowering.
 
@@ -247,17 +255,55 @@ It derives readiness from pages covering those sliced operands. `emit_part`
 provides mandatory completion publication. Both mechanisms should remain shared
 owners rather than being independently rewritten in each backend.
 
-The next implementation step is a setup-time indexed lowering that represents
-I/J/Q explicitly, emits separate contraction contributions and their reductions,
-and binds them through the existing algebra functions. It must preserve output
+The setup-time indexed contraction lowering now emits separate K contributions
+and their reductions through the existing algebra functions. It must preserve output
 regions requested by downstream consumers instead of universally selecting them
-from page or transport-block size. The symbolic frontend should emit that same
-representation. The ANE adapter should supply realized numerical functions and
-canonical storage interop to it. None needs its own transport, readiness state,
+from page or transport-block size. The symbolic frontend emits that representation. Core ML supplies realized
+numerical functions through the shared execution completion. Actual ANE placement
+and internal storage interoperability still need to be established. None needs its own transport, readiness state,
 model interpreter, or participant scheduler.
 
-Extend the existing numerical acceptance with the delayed-Q observation first.
-Then run its same indexed program through each implemented adapter. Report
+The existing numerical acceptance now includes the delayed-Q observation and
+runs the same program through each implemented path. Report
 backend placement, early producer output, early consumer output, final numerical
 agreement, and storage interoperability separately. The current MPS/Metal
 row-prefix measurement remains evidence for that implementation only.
+
+## Implemented entry points and running the examples
+
+- `mesh_algebra_contract(a, x, w, count, output, alpha)` consumes corresponding
+  arrays of indexed views, returns their contribution tensor, and binds the final
+  reduction. Its reduction tree is fixed at setup; intermediate sums use FP32.
+- `examples/streaming-expression.py` captures the producer, peer sum, tanh and
+  contraction expression. `mesh_numpy.emit_c` generates setup bindings into the
+  existing executable. Python is absent from numerical invocation.
+- `mesh_algebra_coreml(a, python, generator, cache)` selects the Core ML contraction
+  encoder before any numerical functions are bound. `rdma/mesh_coreml.py` compiles
+  per-part matrix programs during setup. Metal and Core ML then share `emit_part`
+  and successful mesh publication. Device failure never publishes success.
+
+Build with `make -C rdma .build/streaming-algebra`. With the existing two bridges
+configured for three queues, run corresponding ranks on the two participants:
+
+```sh
+rdma/.build/streaming-algebra RANK 19 257 8 0
+rdma/.build/streaming-algebra RANK 19 257 8 1
+rdma/.build/streaming-algebra RANK 19 257 8 1 PYTHON GENERATOR CACHE
+rdma/.build/streaming-algebra RANK 19 257 8 1 PYTHON GENERATOR CACHE 1
+```
+
+The first is explicit C setup; the second uses generated symbolic setup. The
+third uses Core ML with FP32 operands. The fourth explicitly rounds contraction
+inputs to FP16. PYTHON is an absolute path to a Python environment with compatible
+coremltools native wheels; GENERATOR is the absolute `rdma/mesh_coreml.py` path;
+CACHE is a dedicated compiled-artifact directory. The recorded local environment
+uses Python 3.12/coremltools 9.0 and the peer uses Python 3.9/coremltools 9.0.
+Rebuild clients against the extended algebra report structure.
+
+Each run has 19 invocations, three delayed windows and a final window with three
+live slots. Both early K contributions and early output prefixes must be received
+and checked before the missing input is supplied. Core ML additionally reports
+native submission count, output-backing identity count, and preferred NE operation
+count from its compute plan. These are distinct evidence: public output identity
+does not establish internal zero-copy execution, and a supported device does not
+establish selected device placement.
