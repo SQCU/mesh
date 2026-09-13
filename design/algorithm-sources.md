@@ -298,3 +298,15 @@ queue can legitimately still lack the input tail. A returned first output part
 must arrive and match the numerical formula before the missing input tail is
 written. This check detects whole-operand publication stalls that completed
 whole-program numerical comparisons alone would miss.
+
+## Backend-independent producer and consumer streaming
+
+[Three worked backend examples](backend-streaming.md) apply the indexed dataflow
+and BLAS decomposition sources above to MPS, an ANE adapter design, and a symbolic
+NumPy-style Metal frontend design. The symbolic frontend uses NumPy's documented
+einsum index notation; it is not a claim that eager NumPy streams device values.
+The distinction between final indexed regions and reduction contributions makes
+both early consumption and valid publication explicit. The examples are mesh
+lowering designs derived from that algebra, not claims that Apple or NumPy ships
+these mesh integrations. Their implementation and validation status is stated
+individually in the document.

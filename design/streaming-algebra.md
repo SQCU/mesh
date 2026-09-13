@@ -3,7 +3,9 @@
 The substrate represents values as independently usable extents in canonical
 registered shared memory. Numerical coordinates, readiness extents and transport
 blocks are separate. DNN modules compose the algebra operations; the transport
-and algebra headers contain no model definition.
+and algebra headers contain no model definition. The [backend streaming contract](backend-streaming.md)
+works through MPS, ANE and symbolic NumPy-style Metal examples, with mandatory
+producer and consumer progress in each.
 
 ## Paired transfers
 
