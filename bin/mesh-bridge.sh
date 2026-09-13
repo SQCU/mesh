@@ -10,9 +10,10 @@ BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
 scope=gui; mesh_pct=; node=0; peer=""; region=/mesh0
-mesh_arena_pages=; mesh_block_pages=
+mesh_arena_pages=; mesh_block_pages=; mesh_qps=1
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
+mesh_qps="${MESH_QPS:-$mesh_qps}"
 mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
 geometry=(-A "$mesh_arena_pages" -B "$mesh_block_pages")
@@ -20,7 +21,7 @@ geometry=(-A "$mesh_arena_pages" -B "$mesh_block_pages")
 
 case "$scope" in
 system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" "$0" "$@"; fi
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" MESH_QPS="$mesh_qps" "$0" "$@"; fi
   DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
   LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
 gui)
@@ -53,7 +54,7 @@ $( [ -n "$peer" ] && printf '<string>%s</string>' "$peer" )
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
 <key>ExitTimeOut</key><integer>0</integer>
-<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string></dict>
+<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string><key>MESH_QPS</key><string>$mesh_qps</string></dict>
 <key>StandardOutPath</key><string>$LOGDIR/$LABEL.log</string>
 <key>StandardErrorPath</key><string>$LOGDIR/$LABEL.log</string>
 </dict></plist>
@@ -79,9 +80,9 @@ do_stop() {
 
 do_start() {
   if launchctl print "$DOM/$LABEL" >/dev/null 2>&1; then
-    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(rows|block)"' | tr -d '" ' | tr '\n' ' ')
-    want="rows:$mesh_arena_pages block:$mesh_block_pages"
-    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "rows:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages "; then
+    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(rows|block|qps)"' | tr -d '" ' | tr '\n' ' ')
+    want="rows:$mesh_arena_pages block:$mesh_block_pages qps:$mesh_qps"
+    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "rows:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages " && echo "$have" | grep -q "qps:$mesh_qps "; then
       echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
     fi
     if "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; then
