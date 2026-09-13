@@ -118,7 +118,7 @@ def main():
             for slot, (input_ref, result) in enumerate(slots):
                 if slot not in outstanding and submitted < total:
                     with program.write(input_ref) as buffer:
-                        buffer[...] = data
+                        np.multiply(data, 1 + (submitted % 17) / 32, out=buffer)
                         began = time.perf_counter()
                     outstanding[slot] = (submitted, began)
                     submitted += 1
@@ -131,16 +131,17 @@ def main():
                 if submitted < total:
                     result.consume()
                 else:
-                    terminal.append(result)
+                    terminal.append((result, trial))
                 completed += 1
                 if completed == warmups:
                     measurement_start = ended
                 if completed > warmups:
                     latencies.append(ended - began)
                     measurement_end = ended
-        for result in terminal:
-            maximum_error = max(maximum_error, float(np.max(np.abs(result.array - reference))))
-            if not np.allclose(result.array, reference, rtol=2e-4, atol=2e-4):
+        for result, trial in terminal:
+            expected = reference * (1 + (trial % 17) / 32)
+            maximum_error = max(maximum_error, float(np.max(np.abs(result.array - expected))))
+            if not np.allclose(result.array, expected, rtol=2e-4, atol=2e-4):
                 raise ArithmeticError('Distributed contraction differs from the reference')
             result.consume()
         samples = latencies

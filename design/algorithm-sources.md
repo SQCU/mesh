@@ -457,7 +457,9 @@ and `call_native` to run the same tiled NumPy matmuls for `(X W) V`: whole-opera
 publication versus independent section publication. The first contraction runs
 on participant zero, the second on participant one, with results returned over
 canonical mesh. Configuration, oracle computation, and numerical comparison are
-outside the timed interval. Five warmups precede samples. Welford's online
-moments (cited above) summarize timings. The whole-input observer is a canonical
-reader used only to report whether a consumer launches before full reception;
-it does not gate the numerical functions.
+outside the timed interval. Five window traversals warm up the pipeline before samples. Welford's online
+moments (cited above) summarize timings. `mesh_tensor_present` and `Ref.present` observe canonical physical presence
+without consuming a reader or gating numerical functions. They report whether a
+consumer launches before full reception. Inputs vary by invocation; terminal
+results are checked outside steady-state timing. Multiple configured input slots
+keep both variants pipelined.
