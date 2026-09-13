@@ -5,6 +5,7 @@ import shutil
 import sys
 
 import coremltools as ct
+import numpy as np
 from coremltools.converters.mil import Builder as mb, Function, Program
 from coremltools.converters.mil.mil import types
 
@@ -22,7 +23,8 @@ def compile_part(request, destination):
         parts = []
         for i in range(len(specification['rectangles'])):
             product = mb.matmul(x=function.inputs[f'x{i}'], y=function.inputs[f'w{i}'])
-            scaled = mb.mul(x=product, y=specification['alpha'])
+            scalar = np.float16 if specification['rectangles'][i][3] else np.float32
+            scaled = mb.mul(x=product, y=scalar(specification['alpha']))
             parts.append(mb.reshape(x=scaled, shape=(-1,)))
         joined = parts[0] if len(parts) == 1 else mb.concat(values=parts, axis=0)
         output = mb.cast(x=joined, dtype='fp16' if specification['output_half'] else 'fp32', name='z')
