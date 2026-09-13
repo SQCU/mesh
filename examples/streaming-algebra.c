@@ -30,13 +30,13 @@ static void produce(struct mesh_tensor *t,int rank,uint32_t extent,size_t rows,s
 /* design/algorithm-sources.md#online-percentage-moments */
 static void moment(size_t n,double x,double *mean,double *m2) { double d=x-*mean;*mean+=d/n;*m2+=d*(x-*mean); }
 
-struct program { struct mesh_tensor *x,*p,*result,*gathered,*statistics,*normalized; };
+struct program { struct mesh_tensor *x,*p,*result,*gathered,*statistics,*normalized,*partial,*peer_partial; struct mesh_row_map prefix,tail; struct mesh_row_function prefix_function,tail_function; };
 
 /* design/algorithm-sources.md#pallas-indexed-destinations */
 static struct program configure(struct mesh_algebra *a,int rank,size_t rows,size_t k,size_t n,struct mesh_tensor *weights) {
   struct mesh_tensor *x=tensor(a,4,rows,k,0),*p=tensor(a,4,rows,k,1),*remote=tensor(a,4,rows,k,1);
   struct mesh_tensor *sum=tensor(a,4,rows,k,0),*activated=tensor(a,4,rows,k,0);
-  struct mesh_tensor *partial=tensor(a,4,rows,n,0),*result=tensor(a,2,rows,n,1),*gathered=tensor(a,2,rows,n,1);
+  struct mesh_tensor *partial=tensor(a,4,rows,n,1),*result=tensor(a,2,rows,n,1),*gathered=tensor(a,2,rows,n,1);
   struct mesh_tensor *statistics=tensor(a,2,rows,1,0);
   struct mesh_tensor *squared=tensor(a,2,rows,n,0),*sumsq=tensor(a,2,rows,1,0);
   struct mesh_tensor *meansq=tensor(a,2,rows,1,0),*inverse=tensor(a,2,rows,1,0),*normalized=tensor(a,2,rows,n,0);
@@ -65,7 +65,7 @@ static struct program configure(struct mesh_algebra *a,int rank,size_t rows,size
   for(uint32_t group=0;group<2;group++)check(mesh_algebra_return(a,statistics,group));
   check(mesh_algebra_return(a,p,0));
   for(uint32_t group=0;group<2;group++)check(mesh_algebra_return(a,normalized,group));
-  return (struct program){x,p,result,gathered,statistics,normalized};
+  return (struct program){.x=x,.p=p,.result=result,.gathered=gathered,.statistics=statistics,.normalized=normalized,.partial=partial,.peer_partial=tensor(a,1,rows,n,1)};
 }
 
 /* design/algorithm-sources.md#streaming-algebra */
@@ -99,11 +99,11 @@ static int verify(struct program p,int rank,size_t rows,size_t k,size_t n,size_t
 int main(int argc,char **argv) {
   int rank=argc>1?atoi(argv[1]):0;
   size_t invocations=argc>2?(size_t)atoi(argv[2]):32;
-  size_t rows=argc>3?(size_t)atoi(argv[3]):128,depth=argc>4?(size_t)atoi(argv[4]):8,k=128,n=64;
+  size_t rows=argc>3?(size_t)atoi(argv[3]):257,depth=argc>4?(size_t)atoi(argv[4]):8,k=128,n=64;
   if((rank!=0 && rank!=1) || !invocations || !rows || !depth)return 2;
   if(depth>invocations)depth=invocations;
   struct mesh_ctx context={0};check(mesh_attach(&context,NULL));
-  if(context.M->qps<2){fprintf(stderr,"acceptance requires two independent configured transport queues\n");mesh_detach(&context);return 2;}
+  if(context.M->qps<3){fprintf(stderr,"acceptance requires three independent configured transport queues\n");mesh_detach(&context);return 2;}
   struct mesh_algebra *a=mesh_algebra_create(&context);if(!a)check(errno);
   struct program *programs=calloc(depth,sizeof *programs);if(!programs)check(ENOMEM);
   struct mesh_tensor *weights=tensor(a,2,n,k,0);
@@ -113,9 +113,21 @@ int main(int argc,char **argv) {
     check(mesh_tensor_constant(weights,(uint32_t)part));
   }
   for(size_t slot=0;slot<depth;slot++)programs[slot]=configure(a,rank,rows,k,n,weights);
+  size_t prefix_rows=(size_t)context.M->block*context.M->pgsz/(n*sizeof(float));
+  for(size_t slot=0;slot<depth;slot++) {
+    struct program *p=&programs[slot];
+    for(uint32_t peer=0;peer<2;peer++)check(mesh_algebra_copy(a,(struct mesh_endpoint){p->partial,peer,0,1},(struct mesh_endpoint){p->peer_partial,1-peer,0,1},1,2));
+    check(mesh_algebra_return(a,p->peer_partial,0));check(mesh_algebra_return_part(a,p->peer_partial,0,0));
+    p->prefix=mesh_tensor_rows(p->x,0);p->tail=p->prefix;
+    uint32_t prefix_pages=(uint32_t)(prefix_rows*k*sizeof(float)/context.M->pgsz);
+    if(prefix_pages<p->prefix.count)p->prefix.count=prefix_pages;
+    p->tail.first+=p->prefix.count;p->tail.count-=p->prefix.count;
+    p->prefix_function=(struct mesh_row_function){.output=&p->prefix,.outputs=1,.rows=1};
+    p->tail_function=(struct mesh_row_function){.output=&p->tail,.outputs=1,.rows=1};
+  }
   check(mesh_algebra_realize(a));
   for(size_t slot=0;slot<depth;slot++)for(uint32_t i=slot?0:1;i<4;i++)produce(programs[slot].x,rank,i,rows,k,slot);
-  double maxError=0,earlyMean=0,earlyM2=0,start=now();size_t windows=0,later=0;
+  double maxError=0,earlyMean=0,earlyM2=0,start=now();size_t windows=0,later=0,prefixes=0;
   for(size_t trial=0;trial<invocations;trial++) {
     size_t slot=trial%depth,base=8*slot;double began=now();
     if(!slot) {
@@ -129,23 +141,47 @@ int main(int argc,char **argv) {
       }
       if(mesh_algebra_available(a,5) || mesh_algebra_available(a,0)){fprintf(stderr,"premature publication\n");return 4;}
       moment(++windows,(now()-began)*1e3,&earlyMean,&earlyM2);later+=width-1;
-      produce(programs[slot].x,rank,0,rows,k,trial);
+      if(rows>prefix_rows) {
+        struct program *p=&programs[slot];uint32_t zero=0;
+        check(mesh_tensor_issue(p->x,0)?0:EBUSY);float *data=mesh_tensor_data(p->x,0);
+        for(size_t r=0;r<prefix_rows;r++)for(size_t c=0;c<k;c++)data[r*k+c]=input(rank,0,r,c)+(float)trial/256;
+        mesh_complete(&context,&p->prefix_function,&zero,1);
+        while(!mesh_algebra_available(a,8*depth+1)) {
+          mesh_algebra_scan(a);check((int)mesh_algebra_report(a).code);check((int)mesh_link_metadata(&context,0).code);
+          if(now()-began>30){fprintf(stderr,"contraction prefix did not reach peer before input tail\n");return 9;}
+        }
+        if(mesh_algebra_available(a,8*depth)){fprintf(stderr,"contraction tail published without input\n");return 10;}
+        float *received=mesh_tensor_data(p->peer_partial,0);
+        for(size_t r=0;r<prefix_rows;r++)for(size_t c=0;c<n;c++) {
+          double expected=0;
+          for(size_t j=0;j<k;j++)expected+=(double)tanhf((0.5f*(input(0,0,r,j)+(float)trial/256)+0.125f)+(0.5f*(input(1,0,r,j)+(float)trial/256)+0.125f))*weight(0,j,c);
+          double error=fabs(received[r*n+c]-expected);if(error>maxError)maxError=error;
+          if(!isfinite(received[r*n+c]) || error>2e-4){fprintf(stderr,"received contraction prefix mismatch\n");return 11;}
+        }
+        prefixes++;
+        for(size_t r=prefix_rows;r<rows;r++)for(size_t c=0;c<k;c++)data[r*k+c]=input(rank,0,r,c)+(float)trial/256;
+        mesh_complete(&context,&p->tail_function,&zero,1);
+      } else produce(programs[slot].x,rank,0,rows,k,trial);
     }
     for(;;) {
       mesh_algebra_scan(a);int ready=1;
       for(size_t j=0;j<8;j++)ready=ready && mesh_algebra_available(a,base+j);
+      ready=ready && mesh_algebra_available(a,8*depth+2*slot);
       check((int)mesh_algebra_report(a).code);check((int)mesh_link_metadata(&context,0).code);
       if(ready)break;
       if(now()-began>30){fprintf(stderr,"completion timeout invocation %zu\n",trial);return 5;}
     }
     check(verify(programs[slot],rank,rows,k,n,trial,&maxError));
+    float *sent=mesh_tensor_data(programs[slot].partial,0),*received=mesh_tensor_data(programs[slot].peer_partial,0);
+    for(size_t i=0;i<rows*n;i++)if(!isfinite(received[i]) || fabs(received[i]-sent[i])>2e-4){fprintf(stderr,"contraction peer copy mismatch\n");return 12;}
     for(size_t j=0;j<8;j++)mesh_algebra_consume(a,base+j);
+    mesh_algebra_consume(a,8*depth+2*slot);mesh_algebra_consume(a,8*depth+2*slot+1);
     size_t next=trial+depth;
     if(next<invocations)for(uint32_t i=slot?0:1;i<4;i++)produce(programs[slot].x,rank,i,rows,k,next);
   }
   struct mesh_algebra_report report=mesh_algebra_report(a);
   while(report.completed!=report.submitted){mesh_algebra_scan(a);report=mesh_algebra_report(a);check((int)report.code);}
   char variance[32];snprintf(variance,sizeof variance,windows>1?"%.9g":"null",windows>1?earlyM2/(windows-1):0);
-  printf("{\"rank\":%d,\"invocations\":%zu,\"depth\":%zu,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"delayed_windows\":%zu,\"later_invocation_completions\":%zu,\"max_absolute_error\":%.9g,\"early_window_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"allocated_pages\":%u,\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,invocations,depth,rows,2*k,n,windows,later,maxError,windows,earlyMean,variance,context.arena,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
+  printf("{\"rank\":%d,\"invocations\":%zu,\"depth\":%zu,\"rows\":%zu,\"k\":%zu,\"n\":%zu,\"delayed_windows\":%zu,\"later_invocation_completions\":%zu,\"received_prefixes_before_tail\":%zu,\"max_absolute_error\":%.9g,\"early_window_ms\":{\"count\":%zu,\"mean\":%.9g,\"sample_variance\":%s},\"allocated_pages\":%u,\"commands\":%llu,\"gpu_seconds\":%.9g,\"wall_seconds\":%.9g}\n",rank,invocations,depth,rows,2*k,n,windows,later,prefixes,maxError,windows,earlyMean,variance,context.arena,(unsigned long long)report.completed,report.gpu_seconds,now()-start);
   free(programs);mesh_algebra_destroy(a);check(mesh_detach(&context));return 0;
 }

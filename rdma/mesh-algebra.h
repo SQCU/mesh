@@ -36,6 +36,7 @@ int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_vie
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_transfer(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t binding,uint16_t queue,int receive);
 int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent);
+int mesh_algebra_return_part(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t part);
 int mesh_algebra_realize(struct mesh_algebra *);
 void mesh_algebra_scan(struct mesh_algebra *);
 int mesh_algebra_available(struct mesh_algebra *,size_t output);

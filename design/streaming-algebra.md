@@ -18,9 +18,10 @@ For occurrence i, the endpoints are
 `source.tensor[source.first + i * source.stride]` and
 `destination.tensor[destination.first + i * destination.stride]`. Shape and
 scalar type must agree; a remote transfer also has equal padded extent lengths.
-Every participant numbers every occurrence before projecting its local work.
+Every participant numbers transport blocks in block-major, then occurrence order
+before projecting its local work.
 The source peer contributes a SEND binding and the destination peer contributes
-a RECV binding with the same occurrence identity. A same-peer transfer becomes
+a RECV binding with the same block identity. A same-peer transfer becomes
 a local affine copy. No tensor payload is packed into another transport store.
 
 All participants execute the same ordered copy declarations with the same global
@@ -43,9 +44,22 @@ No allocation of operand storage or choice of backend occurs during invocation.
 
 Affine, weighted addition, multiplication, tanh, exp, row sum, reciprocal square
 root and MPS contraction are available. Views can slice, transpose and broadcast.
-Every output covers its complete independently allocated extent. An input slice
-retains its containing extent's readiness. Partial contractions have separate
-outputs and explicit additions fix their association.
+A bound output covers its complete independently allocated extent, and binding
+mandatorily decomposes it into independently issued and published parts. Local
+parts occupy one page; transferable parts occupy one configured SEND block.
+Input dependencies cover only the pages touched by each part's indexed arithmetic.
+MPS receives rectangular subproblems covering that part; a part crossing matrix
+rows may use multiple rectangular calls in its command buffer. K-panel partials
+have separate outputs and explicit additions fix their association.
+
+The pre-realized numerical encoder runs inside emit_part, whose completion
+unconditionally calls mesh_complete. That publishes PRESENT and the canonical
+send work for the part. Neither the caller nor a collective implementation can
+omit this publication through the algebra API. Later parts need not be ready.
+mesh_algebra_return_part registers a reader for one such publication part;
+whole-extent returns remain available for callers consuming the complete value.
+Page granularity cannot expose independently ready elements within one page.
+A row reduction still needs the columns it actually reduces.
 
 Mutable external producers call mesh_tensor_issue before writing and
 mesh_tensor_complete afterward. mesh_tensor_publish publishes preinitialized
@@ -66,19 +80,12 @@ Each slot has independent producer, peer contribution, transform, K-panel partia
 result, gathered output, statistic and normalization extents. The example calls
 the same configure function for every slot on both participants.
 
-Its transfer occurrences are uniquely numbered as follows, with extent
-i = group + 2 * k_panel:
-
-| Occurrence | Source | Destination | Queue |
-|---|---|---|---|
-| 10 * slot + 4 * group + 2 * peer + k_panel | peer's producer[slot, i] | other peer's received[slot, i] | group |
-| 10 * slot + 8 + peer | peer's result[slot, peer] | other peer's gathered[slot, peer] | peer |
-
-Both peers enumerate all ten occurrences per slot. Projection removes only
-occurrences not locally owned. mesh_realize orders each queue's blocks by
-occurrence identity and block index, so each source SEND sequence equals the
-corresponding destination RECV sequence. The local row/page numbers can differ.
-This establishes destination identity from source, not from payload arrival time.
+For each slot, producer copies enumerate groups, peers, transport blocks, and
+then the two strided K-panel extents. Result copies follow. After those slot
+configurations, direct copies of contraction partial zero use queue two. Each
+transport block receives a unique identity before either participant projects
+its local SEND or RECV. The corresponding FIFO sequences therefore name the
+same value and destination regardless of local row/page numbers.
 The live slots use disjoint allocations. Reuse is subject to those pages' actual
 reader lifetimes; the ring of work-request metadata is not the value-buffer ring.
 
@@ -87,7 +94,11 @@ producing all other inputs into their separate slots. It requires group one's
 contraction to complete in every invocation in the window before supplying the
 withheld input. With depth eight, seven later invocations must produce that output
 while the first invocation still lacks input zero. No outputs have been consumed
-at that observation point. Afterward the host consumes and refills one slot at a
+at that observation point. For a 257-row input, it next writes and publishes only
+rows 0 through 255 of input zero. The first contraction output block must arrive
+at the peer and match the independent formula while row 256 remains unwritten.
+The full contraction receive must remain unavailable. Only then is the input tail
+written and published. Afterward the host consumes and refills one slot at a
 time, while the same static scan runs all eligible numerical functions.
 
 Queue zero's FIFO can still block later group-zero transfers behind the missing
@@ -98,11 +109,11 @@ anonymous SEND randomly address a later slot on the same queue.
 ## Build and acceptance
 
 Build `make -C rdma .build/streaming-algebra`. Run
-`rdma/.build/streaming-algebra 0 32 128 8` and
-`rdma/.build/streaming-algebra 1 32 128 8` on the two peers. Arguments are rank,
-invocation count, rows and depth. A 4096-page arena with 4-page blocks and two
-queues accommodates this example. Shape 257 also exercises extents spanning
-multiple transport blocks. The existing executable is the acceptance path.
+`rdma/.build/streaming-algebra 0 19 257 8` and
+`rdma/.build/streaming-algebra 1 19 257 8` on the two peers. Arguments are rank,
+invocation count, rows and depth. A 4096-page arena with 4-page blocks and three
+queues accommodates this example. Shape 257 exercises extents spanning
+multiple transport blocks and partial publication inside a logical contraction. The existing executable is the acceptance path.
 
 The numerical expectation varies by invocation and is computed independently.
 Every contraction, peer replica, row sum and composed normalization is checked.
@@ -124,9 +135,13 @@ rebuilt clients. Connection setup waits for realized configuration, posts the
 initial receive windows and completes a bilateral setup boundary before sending.
 That fixed setup cost does not become a numerical firing predicate.
 
-MPS contractions publish at submitted extent boundaries. This implements indexed
-storage and async extent composition, not Pallas's inner-matmul forwarding callback.
-Intra-dispatch publication needs a numerical backend exposing those boundaries.
+MPS and Metal bindings automatically publish parts inside the logical algebra
+operation. Each underlying command buffer supplies an actual device completion
+boundary; mesh does not pretend to call a host sender from inside an opaque MPS
+shader. This backend implements output-part publication, whereas the cited Pallas
+callback forwards input shards during its matmul pipeline. No ANE adapter is
+implemented here; an adapter must preserve the same mandatory partial-publication
+contract.
 FP16 is supported by the interface but has not been covered by this example.
 
 ## Recorded acceptance
@@ -141,7 +156,7 @@ FP16 is supported by the interface but has not been covered by this example.
 The second run uses paired strided maps for both K panels, crosses transport-block
 boundaries, wraps invocation slots, and ends with a partial window of three slots.
 All numerical comparisons pass; maximum contraction absolute error is
-1.38101313e-7. Peer replicas agree exactly. The source mapping above establishes
+1.38101313e-7. Peer replicas agree exactly. The paired source mapping establishes
 which destination owns each occurrence; these runs check numerical composition
 and observable progress, not a transport-loss theory or a claimed speedup.
 C/Objective-C warning checks and Swift import/typechecking pass.

@@ -264,3 +264,37 @@ those slots, observes independent outputs before supplying a withheld input, and
 reuses each slot after consuming its own outputs. No extra per-message protocol
 or numerical scheduler implements this buffering. The algebra and FIFO lowering
 proof are in [streaming algebra](streaming-algebra.md).
+
+## Mandatory partial publication
+
+The JAX authors' [Pallas collective matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
+places communication in the numerical pipeline callback. Zheng et al.'s TileLink
+and FLUX, cited above, describe tile-level producer/consumer composition.
+Dongarra et al.'s Level 3 BLAS supplies the contraction decomposition:
+C[I,J] = alpha A[I,:] B[:,J]. Monsoon supplies indexed input presence and
+completion publication. These are the sources for dependencies, compare_maps,
+bind_part, emit_part, automatic mesh_algebra_bind decomposition, and
+mesh_algebra_return_part. The sort merges intersecting page dependencies; it
+creates no runtime ordering or scheduler.
+
+Binding now decomposes a logical output into independently published parts.
+Local output parts occupy one page; transferable parts occupy one configured
+SEND block. Rectangular subviews cover each part, including row-boundary tails.
+Only input pages addressed by those subviews are dependencies. MPS descriptors,
+Metal specializations and encoding closures are realized before invocation.
+Each issued part unconditionally completes through mesh_complete, which publishes
+its output and marks configured sends hot. There is no caller-supplied optional
+send hook. A completed part can be transferred and consumed while another part
+of the same logical operation still lacks input. Metal completion is the actual
+visibility boundary; this does not inspect the internal tiles of an MPS dispatch.
+
+Paired copy declarations enumerate block index before indexed extent occurrence.
+Both participants derive identical SEND/RECV sequences. This prevents a missing
+tail of one indexed operand from preceding every block of the next operand in
+that declaration. Independent algebra edges may use independent configured
+queues; no claim is made that a FIFO can bypass an earlier missing message.
+The acceptance uses a third queue for contraction output, since its producer
+queue can legitimately still lack the input tail. A returned first output part
+must arrive and match the numerical formula before the missing input tail is
+written. This check detects whole-operand publication stalls that completed
+whole-program numerical comparisons alone would miss.
