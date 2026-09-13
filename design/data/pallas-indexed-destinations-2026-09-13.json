@@ -1,0 +1,108 @@
+{
+  "date": "2026-09-13",
+  "transport": "Thunderbolt SEND/RECV",
+  "shared_memory_version": 20,
+  "page_bytes": 16384,
+  "block_pages": 4,
+  "arena_pages": 4096,
+  "queue_pairs": 2,
+  "validation": "Existing numerical acceptance after source-level endpoint and lifetime review; no transport changes between these runs.",
+  "runs": [
+    {
+      "commit": "f17e615",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "invocations": 32,
+        "depth": 8,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 4,
+        "later_invocation_completions": 28,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 4,
+          "mean": 24.651,
+          "sample_variance": 1559.31776
+        },
+        "allocated_pages": 964,
+        "commands": 960,
+        "gpu_seconds": 0.004987559,
+        "wall_seconds": 0.460799
+      }
+    },
+    {
+      "commit": "f17e615",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "invocations": 32,
+        "depth": 8,
+        "rows": 128,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 4,
+        "later_invocation_completions": 28,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 4,
+          "mean": 31.01625,
+          "sample_variance": 3524.1654
+        },
+        "allocated_pages": 964,
+        "commands": 960,
+        "gpu_seconds": 0.022936533,
+        "wall_seconds": 0.502437
+      }
+    },
+    {
+      "commit": "2cf2fb9",
+      "host": "M5",
+      "result": {
+        "rank": 0,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 66.6586666,
+          "sample_variance": 9484.86158
+        },
+        "allocated_pages": 2276,
+        "commands": 570,
+        "gpu_seconds": 0.003272488,
+        "wall_seconds": 0.59841
+      }
+    },
+    {
+      "commit": "2cf2fb9",
+      "host": "M4",
+      "result": {
+        "rank": 1,
+        "invocations": 19,
+        "depth": 8,
+        "rows": 257,
+        "k": 256,
+        "n": 64,
+        "delayed_windows": 3,
+        "later_invocation_completions": 16,
+        "max_absolute_error": 1.38101313e-07,
+        "early_window_ms": {
+          "count": 3,
+          "mean": 26.8003333,
+          "sample_variance": 2031.83271
+        },
+        "allocated_pages": 2276,
+        "commands": 570,
+        "gpu_seconds": 0.0229972,
+        "wall_seconds": 0.511049
+      }
+    }
+  ]
+}

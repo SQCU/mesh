@@ -28,7 +28,10 @@ parameters. Local numerical graphs and physical addresses need not be identical.
 The old mesh_algebra_transfer entry point remains available for manually managed
 bindings; a paired program uses mesh_algebra_copy throughout so its occurrence
 identities have one owner. It does not mix independent manual identities into
-that same transfer schedule.
+that same transfer schedule. The current low-level send binding holds one send
+reader per source extent: these maps give each remote occurrence its own source
+and destination extent. Repeated transmission of one source extent to several
+destinations is not implemented by this interface.
 
 ## Storage and execution
 
@@ -125,3 +128,20 @@ MPS contractions publish at submitted extent boundaries. This implements indexed
 storage and async extent composition, not Pallas's inner-matmul forwarding callback.
 Intra-dispatch publication needs a numerical backend exposing those boundaries.
 FP16 is supported by the interface but has not been covered by this example.
+
+## Recorded acceptance
+
+[Results](data/pallas-indexed-destinations-2026-09-13.json) cover both participants:
+
+| Commit | Invocations | Depth | Rows | Delayed windows | Later independent outputs per participant | Allocated pages per participant |
+|---|---:|---:|---:|---:|---:|---:|
+| f17e615 | 32 | 8 | 128 | 4 | 28 | 964 |
+| 2cf2fb9 | 19 | 8 | 257 | 3 | 16 | 2276 |
+
+The second run uses paired strided maps for both K panels, crosses transport-block
+boundaries, wraps invocation slots, and ends with a partial window of three slots.
+All numerical comparisons pass; maximum contraction absolute error is
+1.38101313e-7. Peer replicas agree exactly. The source mapping above establishes
+which destination owns each occurrence; these runs check numerical composition
+and observable progress, not a transport-loss theory or a claimed speedup.
+C/Objective-C warning checks and Swift import/typechecking pass.
