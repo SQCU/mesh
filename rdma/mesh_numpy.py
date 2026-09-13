@@ -29,6 +29,12 @@ class Array:
         return einsum('ik,kj->ij', self, other)
 
     # design/algorithm-sources.md#backend-independent-producer-and-consumer-streaming
+    def astype(self, dtype):
+        if dtype not in ('float16', 'float32'):
+            raise ValueError('Supported types: float16, float32')
+        return Array('cast', (self,), target='', scalar=16 if dtype == 'float16' else 32)
+
+    # design/algorithm-sources.md#backend-independent-producer-and-consumer-streaming
     def into(self, target):
         self.target = target
         return self
@@ -102,11 +108,11 @@ def emit_c(expression, name, inputs):
         if not node.target:
             lines.extend([f'  struct mesh_view {output}[count];',
                           '  for(size_t q=0;q<count;q++) {',
-                          f'    struct mesh_shape shape={{{x}[q].rows,{x}[q].columns,MESH_F32}};',
+                          f'    struct mesh_shape shape={{{x}[q].rows,{x}[q].columns,{"MESH_F16" if node.op == "cast" and node.scalar == 16 else "MESH_F32"}}};',
                           '    struct mesh_tensor *t=mesh_tensor_create(a,&shape,1,0);',
                           '    if(!t)return NULL;',
                           f'    {output}[q]=mesh_tensor_view(t,0);', '  }'])
-        operations = {'scale': 'MESH_AFFINE', 'shift': 'MESH_AFFINE', 'add': 'MESH_ADD', 'multiply': 'MESH_MULTIPLY', 'tanh': 'MESH_TANH', 'exp': 'MESH_EXP'}
+        operations = {'cast': 'MESH_AFFINE', 'scale': 'MESH_AFFINE', 'shift': 'MESH_AFFINE', 'add': 'MESH_ADD', 'multiply': 'MESH_MULTIPLY', 'tanh': 'MESH_TANH', 'exp': 'MESH_EXP'}
         if node.op == 'add':
             beta = 1.0
         second = f'{y}[q]' if y else '(struct mesh_view){0}'

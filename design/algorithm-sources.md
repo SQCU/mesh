@@ -351,3 +351,10 @@ command buffers and asynchronous Core ML predictions. Setup-time compute-plan
 inspection reports preferred Neural Engine operations; it is not an execution
 trace. Output object identity establishes the public backing endpoint, not the
 absence of internal Core ML copies or the device placement of every operation.
+
+The `astype` symbolic operation lowers to the existing affine kernel with an
+explicit destination scalar type. The acceptance's typed tensor construction and
+activation reference declare FP16 rounding before contraction for the native
+half-input case. FP32 retains its original 2e-4 contraction error threshold;
+the separate FP16 case uses a 1e-3 threshold and reports its scalar mode and
+observed maximum error. This does not authorize silently narrowing FP32 programs.
