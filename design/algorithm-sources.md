@@ -482,3 +482,27 @@ not a JAX tracing backend or full Pallas compatibility. Boundary regions are
 clipped instead of padded with masked lanes. A region must fit one configured
 backing block, and writes still own complete publication quanta. No hidden
 operand gather/copy is introduced when a requested region crosses allocations.
+
+## Single kernel interface
+
+The JAX authors' Pallas call/BlockSpec decomposition, cited above, is the single
+public numerical submission interface. `mesh.kernels` supplies backend-realized
+numerical kernel descriptors for that call, preserving the existing CPU, Metal,
+MPS, and configured Core ML implementations. `affine` supplies scalar constants
+at configuration. These descriptors do not introduce another graph or invocation
+interface. Tensor arithmetic overloads and public per-operation bind/contract
+methods are removed; ctypes submission remains private runtime machinery.
+
+## Streaming FFN
+
+Dongarra et al.'s Level 3 BLAS partitioned product, Blelloch's associative
+reduction, and the JAX authors' Pallas region pipelining are cited above.
+Ramachandran, Zoph and Le, *Searching for Activation Functions* (2017), define
+swish `x * sigmoid(x)` (https://arxiv.org/abs/1710.05941).
+`mesh.nn.ffn`, `_linear`, `_sum`, `_pointwise`, and their index maps compose
+only `kernel_call` operations. They form first-linear contributions along K,
+combine them per hidden section, apply swish to that completed section, form
+second-linear contributions, then combine each output section. Optional exchange
+is a setup-time binding function over the activated tensor. Swish is not
+distributed across addition. Independent sections retain independent completion;
+no numerical function polls readiness or waits for another launch.

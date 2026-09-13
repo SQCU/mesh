@@ -7,9 +7,9 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, Endpoint, Submission, Completion
+from ._native import Native, Shape, View, Endpoint, Submission
 
-__all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result', 'Submission', 'Completion']
+__all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _DTYPES = tuple(map(np.dtype, ('float16', 'float32', 'int32', 'uint32')))
 
 
@@ -114,79 +114,6 @@ class Tensor:
         result.blocks = {(j, i): ref.T for (i, j), ref in self.blocks.items()}
         return result
 
-    # design/algorithm-sources.md#indexed-library-functions
-    def elementwise(self, operation, other=None, *, alpha=1, beta=0, dtype=None):
-        if other is not None and (other.program is not self.program or other.grid != self.grid or other.shape != self.shape or other.block_shape != self.block_shape):
-            raise ValueError('Elementwise operands must share an indexed partition')
-        result = self.program.tensor(self.shape, self.block_shape, dtype or self.dtype)
-        for coordinate, ref in self.blocks.items():
-            self.program.bind(operation, ref, result[coordinate],
-                other[coordinate] if other is not None else None, alpha=alpha, beta=beta)
-        return result
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def __add__(self, other):
-        return self.elementwise('add', other, beta=1) if isinstance(other, Tensor) else self.elementwise('affine', beta=other)
-
-    __radd__ = __add__
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def __mul__(self, other):
-        return self.elementwise('multiply', other) if isinstance(other, Tensor) else self.elementwise('affine', alpha=other)
-
-    __rmul__ = __mul__
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def __matmul__(self, other):
-        if other.program is not self.program or self.shape[1] != other.shape[0] or self.block_shape[1] != other.block_shape[0]:
-            raise ValueError('Contraction operands must share the contracted partition')
-        result = self.program.tensor((self.shape[0], other.shape[1]),
-            (self.block_shape[0], other.block_shape[1]), np.float32)
-        result.contributions = {}
-        for i, j in result.blocks:
-            result.contributions[i, j] = self.program.contract(
-                (self[i, q] for q in range(self.grid[1])),
-                (other[q, j] for q in range(other.grid[0])), result[i, j])
-        return result
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def astype(self, dtype):
-        return self.elementwise('affine', dtype=dtype)
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        if method != '__call__' or kwargs:
-            return NotImplemented
-        unary = {np.tanh: 'tanh', np.exp: 'exp'}
-        if ufunc in unary and len(inputs) == 1:
-            return self.elementwise(unary[ufunc])
-        if ufunc is np.add:
-            return self + (inputs[1] if inputs[0] is self else inputs[0])
-        if ufunc is np.multiply:
-            return self * (inputs[1] if inputs[0] is self else inputs[0])
-        if ufunc is np.matmul:
-            return inputs[0] @ inputs[1]
-        return NotImplemented
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def sum(self, axis=1):
-        if axis == 0:
-            return self.T.sum(1).T
-        if axis != 1:
-            raise ValueError('Use axis 0 or 1 for a tensor reduction')
-        result = self.program.tensor((self.shape[0], 1), (self.block_shape[0], 1), np.float32)
-        result.contributions = {}
-        for i in range(self.grid[0]):
-            terms = []
-            for q in range(self.grid[1]):
-                term = self.program.tensor(result[i, 0].shape, dtype=np.float32)[0, 0]
-                self.program.bind('sum', self[i, q], term)
-                terms.append(term)
-            result.contributions[i, 0] = tuple(terms)
-            self.program.reduce_sum(terms, result[i, 0])
-        return result
-
-
 @dataclass(frozen=True)
 class ShapeDtypeStruct:
     shape: tuple
@@ -197,29 +124,24 @@ class ShapeDtypeStruct:
 class BlockSpec:
     block_shape: object
     index_map: object
-    region_map: object = None
     _tensor: object = None
 
     # design/algorithm-sources.md#pallas-call-ergonomics
-    def bind(self, tensor):
+    def _bind(self, tensor):
         return replace(self, _tensor=tensor)
 
     # design/algorithm-sources.md#pallas-call-ergonomics
     def resolve(self, coordinate):
         index = tuple(self.index_map(*coordinate))
-        if isinstance(self.block_shape, Tensor):
-            ref = self.block_shape[index]
-        else:
-            shape = tuple(self.block_shape)
-            if len(shape) != 2 or len(index) != 2 or min(shape) <= 0:
-                raise ValueError('BlockSpec requires two positive block dimensions and two indices')
-            if self._tensor is None:
-                raise ValueError('Bind BlockSpec to an operand through kernel_call or spec.bind(tensor)')
-            row, column = (i * b for i, b in zip(index, shape))
-            ref = self._tensor.region(row, column,
-                min(shape[0], self._tensor.shape[0] - row),
-                min(shape[1], self._tensor.shape[1] - column))
-        return self.region_map(ref, *coordinate) if self.region_map is not None else ref
+        shape = tuple(self.block_shape)
+        if len(shape) != 2 or len(index) != 2 or min(shape) <= 0:
+            raise ValueError('BlockSpec requires two positive block dimensions and two indices')
+        if self._tensor is None:
+            raise ValueError('BlockSpec is bound by kernel_call')
+        row, column = (i * b for i, b in zip(index, shape))
+        return self._tensor.region(row, column,
+            min(shape[0], self._tensor.shape[0] - row),
+            min(shape[1], self._tensor.shape[1] - column))
 
 
 class Result:
@@ -282,15 +204,17 @@ class Program:
         def configure(*operands):
             if len(operands) != len(inputs):
                 raise ValueError('Each input requires one BlockSpec')
-            outputs = tuple(self.tensor(shape.shape, dtype=shape.dtype) for shape in shapes)
-            self.call(kernel, grid=grid,
-                inputs=tuple(spec.bind(tensor) for spec, tensor in zip(inputs, operands)),
-                outputs=tuple(spec.bind(tensor) for spec, tensor in zip(specs, outputs)))
+            outputs = tuple(self.tensor(shape.shape,
+                block_shape=spec.block_shape if spec.block_shape[1] != shape.shape[1] else None,
+                dtype=shape.dtype) for shape, spec in zip(shapes, specs))
+            self._call(kernel, grid=grid,
+                inputs=tuple(spec._bind(tensor) for spec, tensor in zip(inputs, operands)),
+                outputs=tuple(spec._bind(tensor) for spec, tensor in zip(specs, outputs)))
             return outputs[0] if single else outputs
         return configure
 
     # design/algorithm-sources.md#indexed-library-functions
-    def bind_native(self, submission, inputs, outputs, binding=None):
+    def _bind_native(self, submission, inputs, outputs, binding=None):
         inputs, outputs = tuple(inputs), tuple(outputs)
         if any(r.program is not self for r in inputs + outputs):
             raise ValueError('References belong to another program')
@@ -301,10 +225,18 @@ class Program:
         self.callbacks.append((submit, inputs, outputs, binding))
 
     # design/algorithm-sources.md#indexed-library-functions
-    def call(self, kernel, *, grid, inputs=(), outputs=()):
+    def _call(self, kernel, *, grid, inputs=(), outputs=()):
         for coordinate in itertools.product(*(range(n) for n in grid)):
             reads = tuple(spec.resolve(coordinate) for spec in inputs)
             writes = tuple(spec.resolve(coordinate) for spec in outputs)
+            from .kernels import _Operation
+            if isinstance(kernel, _Operation):
+                if len(reads) != kernel.arity or len(writes) != 1:
+                    raise ValueError('Kernel operand count does not match its specifications')
+                check(self.native.algebra_bind(self.handle, kernel.op, reads[0].view,
+                    reads[1].view if len(reads) == 2 else View(), writes[0].view,
+                    kernel.alpha, kernel.beta))
+                continue
             arrays = tuple(r.array.view() for r in reads) + tuple(r.array for r in writes)
             for array in arrays[:len(reads)]:
                 array.flags.writeable = False
@@ -318,54 +250,7 @@ class Program:
                     complete(context, errno.EIO)
                 else:
                     complete(context, 0)
-            self.bind_native(submit, reads, writes)
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def call_native(self, prepare, *, grid, inputs=(), outputs=()):
-        for coordinate in itertools.product(*(range(n) for n in grid)):
-            reads = tuple(spec.resolve(coordinate) for spec in inputs)
-            writes = tuple(spec.resolve(coordinate) for spec in outputs)
-            submission, binding = prepare(coordinate, reads, writes)
-            self.bind_native(submission, reads, writes, binding)
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def bind(self, operation, a, out, b=None, *, alpha=1, beta=None):
-        beta = (1 if operation == 'add' else 0) if beta is None else beta
-        ops = ('affine', 'add', 'multiply', 'tanh', 'exp', 'sum', 'contract', 'rsqrt')
-        check(self.native.algebra_bind(self.handle, ops.index(operation), a.view,
-              b.view if b else View(), out.view, alpha, beta))
-        return out
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def contract(self, left, right, out, *, alpha=1):
-        left, right = tuple(left), tuple(right)
-        if len(left) != len(right) or not left:
-            raise ValueError('Contraction requires paired nonempty partitions')
-        handle = self.native.algebra_contract(self.handle,
-            (View * len(left))(*(r.view for r in left)),
-            (View * len(right))(*(r.view for r in right)), len(left), out.view, alpha)
-        if not handle:
-            check(C.get_errno() or errno.EINVAL)
-        return tuple(Ref(self, self.native.tensor_view(handle, i), np.float32) for i in range(len(left)))
-
-    # design/algorithm-sources.md#indexed-library-functions
-    def reduce_sum(self, refs, out):
-        level = tuple(refs)
-        if not level:
-            raise ValueError('Reduction requires at least one region')
-        while len(level) > 1:
-            following = []
-            for i in range(0, len(level), 2):
-                if i + 1 == len(level):
-                    following.append(level[i])
-                else:
-                    target = out if len(level) == 2 else self.tensor(out.shape, dtype=out.dtype)[0, 0]
-                    self.bind('add', level[i], target, level[i + 1], beta=1)
-                    following.append(target)
-            level = tuple(following)
-        if level[0] is not out:
-            self.bind('affine', level[0], out)
-        return out
+            self._bind_native(submit, reads, writes)
 
     # design/algorithm-sources.md#indexed-library-functions
     def copy(self, source, destination, *, queue=0):

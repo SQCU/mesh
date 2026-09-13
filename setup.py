@@ -21,10 +21,7 @@ class Build(build_py):
         target.mkdir(parents=True, exist_ok=True)
         for name in ('libmesh.dylib', 'libmesh-algebra.dylib'):
             shutil.copy2(Path('rdma') / name, target / name)
-        headers = Path(self.build_lib) / 'mesh' / 'include'
-        headers.mkdir(parents=True, exist_ok=True)
-        for name in ('mesh.h', 'mesh-dataflow.h', 'mesh-algebra.h', 'module.modulemap'):
-            shutil.copy2(Path('rdma') / name, headers / name)
+
 
 
 setup(cmdclass={'build_py': Build}, distclass=NativeDistribution)

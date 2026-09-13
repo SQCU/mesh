@@ -20,7 +20,7 @@ static NSString *const source = @
 " if(op==0)y=g.alpha*x+g.beta;\n"
 " if(op==1)y=g.alpha*x+g.beta*get(b,g.b,r,c,b16);\n"
 " if(op==2)y=x*get(b,g.b,r,c,b16);\n"
-" if(op==3)y=tanh(x); if(op==4)y=exp(x); if(op==7)y=rsqrt(x);\n"
+" if(op==3)y=tanh(x); if(op==4)y=exp(x); if(op==7)y=rsqrt(x); if(op==8)y=x/(1.0f+exp(-x));\n"
 " if(op==5){y=0; for(ulong k=0;k<g.a.columns;k++)y+=get(a,g.a,r,k,a16);}\n"
 " ulong j=g.o.offset+r*g.o.row_stride+c*g.o.column_stride; if(o16)((device half*)o)[j]=half(y);else ((device float*)o)[j]=y;\n"
 "}\n";
@@ -233,12 +233,6 @@ void mesh_tensor_complete(struct mesh_tensor *t,uint32_t i) {
   uint32_t index=0;mesh_complete(t->context,&t->extents[i].producer,&index,1);
 }
 /* design/algorithm-sources.md#streaming-algebra */
-int mesh_tensor_publish(struct mesh_tensor *t,uint32_t i) {
-  if(!mesh_tensor_issue(t,i))return 0;
-  mesh_tensor_complete(t,i);return 1;
-}
-
-/* design/algorithm-sources.md#streaming-algebra */
 static int valid_view(MeshAlgebra *a,struct mesh_view v) {
   if(!v.tensor || v.extent>=v.tensor->count || !v.rows || !v.columns || v.tensor->context!=a->context)return 0;
   size_t elements=v.tensor->extents[v.extent].shape.rows*v.tensor->extents[v.extent].shape.columns;
@@ -359,6 +353,7 @@ static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,
     case MESH_TANH:value=^float(size_t r,size_t c){return tanhf(cpu_get(a,r,c));};break;
     case MESH_EXP:value=^float(size_t r,size_t c){return expf(cpu_get(a,r,c));};break;
     case MESH_RSQRT:value=^float(size_t r,size_t c){return 1.0f/sqrtf(cpu_get(a,r,c));};break;
+    case MESH_SWISH:value=^float(size_t r,size_t c){float x=cpu_get(a,r,c);return x/(1.0f+expf(-x));};break;
     case MESH_SUM:value=^float(size_t r,size_t c){(void)c;float sum=0;for(size_t k=0;k<a.view.columns;k++)sum+=cpu_get(a,r,k);return sum;};break;
     case MESH_CONTRACT:value=^float(size_t r,size_t c){float sum=0;for(size_t k=0;k<a.view.columns;k++)sum+=cpu_get(a,r,k)*cpu_get(b,k,c);return alpha*sum;};break;
   }
@@ -496,7 +491,7 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
 int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta) {
   MeshAlgebra *a=owner(handle);if(a.realized)return EBUSY;
   BOOL binary=op==MESH_ADD || op==MESH_MULTIPLY || op==MESH_CONTRACT;
-  if(op>MESH_RSQRT || !valid_view(a,x) || !valid_view(a,z) || (binary && !valid_view(a,y)))return EINVAL;
+  if(op>MESH_SWISH || !valid_view(a,x) || !valid_view(a,z) || (binary && !valid_view(a,y)))return EINVAL;
   struct mesh_extent *out=&z.tensor->extents[z.extent];size_t elements=z.rows*z.columns;
   struct mesh_row_map output;int region_error=output_region(a,z,&output);if(region_error)return region_error;
   if(output_used(a,output))return EINVAL;
@@ -514,50 +509,6 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   return 0;
 }
 
-/* design/algorithm-sources.md#backend-independent-producer-and-consumer-streaming */
-struct mesh_tensor *mesh_algebra_contract(struct mesh_algebra *handle,const struct mesh_view *x,const struct mesh_view *y,size_t count,struct mesh_view z,float alpha) {
-  MeshAlgebra *a=owner(handle);
-  if(a.realized){errno=EBUSY;return NULL;}
-  if(!count || count>UINT32_MAX || !x || !y || !valid_view(a,z)){errno=EINVAL;return NULL;}
-  for(size_t i=0;i<count;i++)if(!valid_view(a,x[i]) || !valid_view(a,y[i]) || x[i].columns!=y[i].rows || x[i].rows!=z.rows || y[i].columns!=z.columns){errno=EINVAL;return NULL;}
-  struct mesh_shape shape={z.rows,z.columns,MESH_F32};
-  struct mesh_shape *shapes=malloc(count*sizeof *shapes);
-  struct mesh_view *level=malloc(count*sizeof *level);
-  if(!shapes || !level){free(shapes);free(level);errno=ENOMEM;return NULL;}
-  for(size_t i=0;i<count;i++)shapes[i]=shape;
-  struct mesh_tensor *partial=mesh_tensor_create(handle,shapes,count,1);free(shapes);
-  int error=partial?0:errno;
-  for(size_t i=0;i<count && !error;i++) {
-    level[i]=mesh_tensor_view(partial,(uint32_t)i);
-    error=mesh_algebra_bind(handle,MESH_CONTRACT,x[i],y[i],level[i],alpha,0);
-  }
-  size_t width=count;
-  while(width>1 && !error) {
-    size_t next=0;
-    for(size_t i=0;i<width && !error;i+=2) {
-      if(i+1==width){level[next++]=level[i];continue;}
-      struct mesh_view out=z;
-      if(width>2) {
-        struct mesh_tensor *sum=mesh_tensor_create(handle,&shape,1,0);
-        if(!sum){error=errno;break;}out=mesh_tensor_view(sum,0);
-      }
-      error=mesh_algebra_bind(handle,MESH_ADD,level[i],level[i+1],out,1,1);level[next++]=out;
-    }
-    width=next;
-  }
-  if(count==1 && !error)error=mesh_algebra_bind(handle,MESH_AFFINE,level[0],(struct mesh_view){0},z,1,0);
-  free(level);if(error){errno=error;return NULL;}return partial;
-}
-
-/* design/algorithm-sources.md#streaming-algebra */
-int mesh_algebra_transfer(struct mesh_algebra *handle,struct mesh_tensor *t,uint32_t i,uint32_t identity,uint16_t queue,int receive) {
-  MeshAlgebra *a=owner(handle);
-  if(a.realized)return EBUSY;
-  if(!t || i>=t->count || t->context!=a->context)return EINVAL;
-  struct mesh_row_map m=mesh_tensor_rows(t,i);
-  struct mesh_row_binding b={.first=m.first,.count=m.count,.binding=identity,.queue=queue,.receive=!!receive};
-  [a.bindings appendBytes:&b length:sizeof b];return 0;
-}
 /* design/algorithm-sources.md#indexed-library-functions */
 static int bind_copy(MeshAlgebra *a,struct mesh_extent *s,struct mesh_extent *d) {
   struct mesh_row_map output={.first=d->first,.count=d->pages};
@@ -623,16 +574,6 @@ int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_tensor *t,uint32
   if(!index)return EINVAL;
   size_t next=owner(handle).returns.length/sizeof(struct mesh_row_map);
   int error=mesh_algebra_return(handle,t,extent);if(!error)*index=next;return error;
-}
-/* design/algorithm-sources.md#mandatory-partial-publication */
-int mesh_algebra_return_part(struct mesh_algebra *handle,struct mesh_tensor *t,uint32_t i,uint32_t part) {
-  MeshAlgebra *a=owner(handle);
-  if(a.realized)return EBUSY;
-  if(!t || i>=t->count || t->context!=a->context)return EINVAL;
-  struct mesh_extent *e=&t->extents[i];
-  if(part>=e->pages/e->quantum)return EINVAL;
-  struct mesh_row_map m={.first=e->first+part*e->quantum,.count=e->quantum};
-  [a.returns appendBytes:&m length:sizeof m];return 0;
 }
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_realize(struct mesh_algebra *handle) {
