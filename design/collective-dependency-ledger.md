@@ -240,3 +240,22 @@ matching. The public analogues are TileLink's tile-centric primitives and
 Pallas's pipeline callback into its optimized matmul (algorithm-sources.md).
 The header adds no model operation, transfer opcode, readiness message or
 alternative transport progress loop. MPS remains the contraction implementation.
+
+## D16. A vocabulary-parallel head is reduced before it is communicated
+
+> We parallelize the input embedding weight matrix EH×v along the vocabulary dimension E = [E1 , E2 ] (column-wise).
+> — [Megatron] §3
+
+> However, for this case, the all-gather will communicate b × s × v elements (b is the batch-size and s is the sequence length) which is huge due to vocabulary size being large. To reduce the communication size, we fuse the output of the parallel GEMM [Y1 , Y2 ] with the cross entropy loss which reduces the dimension to b × s.
+> — [Megatron] §3
+
+Quotes checked against `pdftotext` of arXiv 1909.08053 with line-break hyphens joined.
+
+Analogue: [Pallas] collective matmul and nested pipelines (algorithm-sources.md#streaming-algebra) expose
+independently usable tiles of a partitioned contraction; D15 licenses those extents here.
+
+Licenses: each participant projects its own vocabulary rows of the tied embedding, applies the elementwise
+softcap, and reduces every 1024-row tile to the sampler's (max, argmax) partial before any transfer. Only the
+peer's tiles cross the link (b × tiles instead of b × v); greedy selection over the concatenated tiles equals
+selection over the full row. Caller: metal-microbench `mesh_decode.swift`.
+Not licensed: an all-gather of logits.
