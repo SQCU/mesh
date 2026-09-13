@@ -133,3 +133,13 @@ No sleeps, rendezvous messages or second participant scheduler establish work
 readiness. Reports contain count, mean and sample variance for normal, delayed
 and early-completion latency, plus numerical error and GPU command totals.
 These are measured intervals, not a claimed speedup or transport-only cost.
+
+## Registration reuse across clients
+
+Successive acceptance clients exposed a provider lifetime bug: pair teardown retains
+registered memory, but pair setup recomputed the registration count using the
+caller’s data offset instead of the retained registration origin. For power-of-two
+blocks this changed one region into two and wrote past the allocated MR array.
+Setup now uses the realized registration origin for both initial registration and
+reuse. The acceptance program must run across successive client attachments,
+including different tensor extents, without restarting the bridge between them.

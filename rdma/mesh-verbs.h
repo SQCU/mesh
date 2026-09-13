@@ -164,6 +164,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     while((origin?1:0)+(span-origin+extent-1)/extent>(size_t)capabilities.max_mr){ errno=ENOMEM; close(f); return -1; }
     provider->region_origin=origin; provider->region_extent=extent;
   }
+  origin=provider->region_origin;
   size_t regions=(origin?1:0)+(span-origin+provider->region_extent-1)/provider->region_extent;
   if(!provider->regions) provider->regions=calloc(regions,sizeof *provider->regions);
   if(!provider->regions){ close(f); fprintf(stderr,"alloc regions: failed\n"); return -1; }
