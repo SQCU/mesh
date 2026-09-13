@@ -314,6 +314,41 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   return 0;
 }
 
+/* design/algorithm-sources.md#backend-independent-producer-and-consumer-streaming */
+struct mesh_tensor *mesh_algebra_contract(struct mesh_algebra *handle,const struct mesh_view *x,const struct mesh_view *y,size_t count,struct mesh_view z,float alpha) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized){errno=EBUSY;return NULL;}
+  if(!count || count>UINT32_MAX || !x || !y || !valid_view(a,z)){errno=EINVAL;return NULL;}
+  for(size_t i=0;i<count;i++)if(!valid_view(a,x[i]) || !valid_view(a,y[i]) || x[i].columns!=y[i].rows || x[i].rows!=z.rows || y[i].columns!=z.columns){errno=EINVAL;return NULL;}
+  struct mesh_shape shape={z.rows,z.columns,MESH_F32};
+  struct mesh_shape *shapes=malloc(count*sizeof *shapes);
+  struct mesh_view *level=malloc(count*sizeof *level);
+  if(!shapes || !level){free(shapes);free(level);errno=ENOMEM;return NULL;}
+  for(size_t i=0;i<count;i++)shapes[i]=shape;
+  struct mesh_tensor *partial=mesh_tensor_create(handle,shapes,count,1);free(shapes);
+  int error=partial?0:errno;
+  for(size_t i=0;i<count && !error;i++) {
+    level[i]=mesh_tensor_view(partial,(uint32_t)i);
+    error=mesh_algebra_bind(handle,MESH_CONTRACT,x[i],y[i],level[i],alpha,0);
+  }
+  size_t width=count;
+  while(width>1 && !error) {
+    size_t next=0;
+    for(size_t i=0;i<width && !error;i+=2) {
+      if(i+1==width){level[next++]=level[i];continue;}
+      struct mesh_view out=z;
+      if(width>2) {
+        struct mesh_tensor *sum=mesh_tensor_create(handle,&shape,1,0);
+        if(!sum){error=errno;break;}out=mesh_tensor_view(sum,0);
+      }
+      error=mesh_algebra_bind(handle,MESH_ADD,level[i],level[i+1],out,1,1);level[next++]=out;
+    }
+    width=next;
+  }
+  if(count==1 && !error)error=mesh_algebra_bind(handle,MESH_AFFINE,level[0],(struct mesh_view){0},z,1,0);
+  free(level);if(error){errno=error;return NULL;}return partial;
+}
+
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_transfer(struct mesh_algebra *handle,struct mesh_tensor *t,uint32_t i,uint32_t identity,uint16_t queue,int receive) {
   MeshAlgebra *a=owner(handle);

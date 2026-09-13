@@ -33,6 +33,7 @@ int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
 void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_publish(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
+struct mesh_tensor *mesh_algebra_contract(struct mesh_algebra *,const struct mesh_view *a,const struct mesh_view *b,size_t partitions,struct mesh_view output,float alpha);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_transfer(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,uint32_t binding,uint16_t queue,int receive);
 int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent);

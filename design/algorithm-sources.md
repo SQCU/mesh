@@ -310,3 +310,12 @@ both early consumption and valid publication explicit. The examples are mesh
 lowering designs derived from that algebra, not claims that Apple or NumPy ships
 these mesh integrations. Their implementation and validation status is stated
 individually in the document.
+
+`mesh_algebra_contract` lowers corresponding indexed operand partitions into
+FP32 contributions and a fixed adjacent-pair reduction tree, using the BLAS
+contraction identity above. Odd tree levels carry their unpaired value forward.
+The tree and all contribution storage are realized before invocation. The returned
+contribution tensor permits ordinary mesh transfers and consumers to name those
+values; the caller no longer constructs intermediate contractions and additions.
+The existing acceptance orders the available K-panel's transfers before the
+intentionally absent panel and observes its complete contribution at the peer.
