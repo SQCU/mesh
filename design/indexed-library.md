@@ -247,3 +247,11 @@ The existing [overlap demonstration](../examples/streaming-overlap.py) uses this
 API for both producer and consumer. Its archived measurements record the source
 revision used at the time; changing the call spelling does not retroactively
 constitute a new measurement.
+
+The migrated overlap client was run on both RDMA peers at revision `df50252`,
+with 100 measured completions per mode, ten warmups, and two inputs in flight.
+Both modes passed terminal numerical checks (maximum absolute error
+`5.622414e-6`). Whole mode observed zero consumers before full reception;
+streamed mode observed 6,935 such launches out of 7,040. This confirms that the
+simplified call site retains regional consumption. It is a functional follow-up,
+not a replacement for the four-pair performance record.
