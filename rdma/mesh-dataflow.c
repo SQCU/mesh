@@ -1,4 +1,5 @@
 #include <signal.h>
+#include "mesh-memory.h"
 #include "mesh-dataflow.h"
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   if(file<0) return errno;
   struct stat info;
   if(fstat(file,&info)){ int error=errno; close(file); return error; }
+  mesh_memory_warning((uint64_t)info.st_size,0);
   struct hdr *memory=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
   int error=errno;
   if(memory==MAP_FAILED){ close(file); return error; }

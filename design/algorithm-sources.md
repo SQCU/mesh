@@ -506,3 +506,30 @@ second-linear contributions, then combine each output section. Optional exchange
 is a setup-time binding function over the activated tensor. Swish is not
 distributed across addition. Independent sections retain independent completion;
 no numerical function polls readiness or waits for another launch.
+
+## Memory warning
+
+Apple's XNU `rusage_info_v2.ri_phys_footprint`, libproc process enumeration,
+and Mach `host_statistics64` provide the accounting used by `mesh_memory_warning`
+and its descending footprint comparator `mesh_memory_order`.
+Source: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h
+and https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/vm_statistics.h.
+
+Before allocating the shared arena, mesh prints and flushes stdout when its full
+layout exceeds 80% of physical RAM or the free-plus-inactive memory estimate.
+Attaching clients repeat the above-80%-RAM warning without counting the existing
+arena as new physical storage. Views alias that arena and are not new allocations.
+The warning precedes truncation, mapping, and registration. It does not deny the
+requested allocation. Unknown accounting emits a warning as well.
+
+The process list is sorted by physical footprint, including compressed charges,
+and continues through 80% of the sum of readable process footprints. It includes
+the caller and reports unreadable processes. Process sums can overlap shared
+accounting and omit kernel charges; neither they nor reclaimable inactive pages
+guarantee allocation headroom. These are setup diagnostics, never numerical
+invocation dependencies. This guard covers canonical mesh arenas, not unrelated
+application allocations such as the stopped metal-microbench decode process.
+
+`mesh-flow --memory-check` takes the ordinary arena geometry and reports without
+allocating or opening verbs. The bridge launcher runs it before starting launchd,
+so warnings are visible at the launching terminal as well as the daemon log.

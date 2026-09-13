@@ -91,6 +91,7 @@ do_start() {
     echo "mesh-bridge: running with other geometry ($have); restarting for $want"
     do_stop || return $?
   fi
+  "$BIN" --memory-check "${geometry[@]}" || return $?
   wire_check || return $?
   write_plist
   launchctl bootstrap "$DOM" "$PLIST" || return $?

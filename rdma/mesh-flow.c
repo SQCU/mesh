@@ -1,5 +1,6 @@
 #include "mesh-verbs.h"
 #include "mesh-dataflow.h"
+#include "mesh-memory.h"
 
 /* A work request this bridge posted whose completion it has not yet polled (ledger D3). */
 struct mesh_posted { uint32_t row,page,plane; };
@@ -109,7 +110,7 @@ static int link_down(struct mesh_link *link){
 }
 
 int main(int argc,char**argv){
-  const char *peer=NULL,*name=MESH_NAME; int me=0,layout=0; double pct=0;
+  const char *peer=NULL,*name=MESH_NAME; int me=0,layout=0,memory_check=0; double pct=0;
   uint64_t arena_pages=0,block_pages=0;
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-I") && i+1<argc) me=atoi(argv[++i]);
@@ -121,6 +122,7 @@ int main(int argc,char**argv){
       if(kind=='A') arena_pages=pages; else block_pages=pages;
     }
     else if(!strcmp(argv[i],"--layout")) layout=1;
+    else if(!strcmp(argv[i],"--memory-check")) memory_check=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc) name=argv[++i];
     else if(argv[i][0]=='-') die("unknown bridge option");
     else peer=argv[i];
@@ -133,9 +135,11 @@ int main(int argc,char**argv){
   uint64_t length=mesh_layout(&geometry,pg,(uint32_t)block_pages,(uint32_t)arena_pages);
   uint64_t ram=0; size_t rl=sizeof ram; sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   if(pct && length>(uint64_t)(pct/100*(double)ram)) die("configured graph exceeds page capacity");
+  if(memory_check){ mesh_memory_warning(length,1); return 0; }
   if(layout){ printf("%llu\n",(unsigned long long)length); return 0; }
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL); signal(SIGPIPE,SIG_IGN);
+  mesh_memory_warning(length,1);
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
   if(ftruncate(fd,(off_t)length)) die("ftruncate"); fchmod(fd,MESH_MODE);
   size_t bank=(size_t)1<<32;
