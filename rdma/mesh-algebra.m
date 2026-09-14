@@ -1,4 +1,6 @@
 #import <Foundation/Foundation.h>
+#define ACCELERATE_NEW_LAPACK
+#define ACCELERATE_LAPACK_ILP64
 #import <Accelerate/Accelerate.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <Metal/Metal.h>
@@ -447,7 +449,7 @@ static float cpu_get(struct cpu_operand p,size_t r,size_t c) {return p.load(p.ad
 /* design/algorithm-sources.md#cpu-indexed-execution */
 static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
   if(op==MESH_CONTRACT && x.tensor->extents[x.extent].shape.scalar==MESH_F32 && y.tensor->extents[y.extent].shape.scalar==MESH_F32 && z.tensor->extents[z.extent].shape.scalar==MESH_F32){
-    struct gemm {const float *a,*b;float *c;int m,n,k,lda,ldb,ldc;enum CBLAS_TRANSPOSE tx,ty;};
+    struct gemm {const float *a,*b;float *c;__LAPACK_int m,n,k,lda,ldb,ldc;enum CBLAS_TRANSPOSE tx,ty;};
     NSMutableData *calls=[NSMutableData new];
     for(size_t at=first,left=count;left;){
       size_t row=at/z.columns,column=at%z.columns,nr=1,nc=MIN(left,z.columns-column);
@@ -456,8 +458,8 @@ static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,
       struct gemm g={.a=(float *)x.tensor->extents[x.extent].address+x.offset+row*x.row_stride,
         .b=(float *)y.tensor->extents[y.extent].address+y.offset+column*y.column_stride,
         .c=(float *)z.tensor->extents[z.extent].address+z.offset+at,
-        .m=(int)nr,.n=(int)nc,.k=(int)x.columns,.lda=(int)(tx?x.column_stride:x.row_stride),
-        .ldb=(int)(ty?y.column_stride:y.row_stride),.ldc=(int)z.row_stride,.tx=tx?CblasTrans:CblasNoTrans,.ty=ty?CblasTrans:CblasNoTrans};
+        .m=(__LAPACK_int)nr,.n=(__LAPACK_int)nc,.k=(__LAPACK_int)x.columns,.lda=(__LAPACK_int)(tx?x.column_stride:x.row_stride),
+        .ldb=(__LAPACK_int)(ty?y.column_stride:y.row_stride),.ldc=(__LAPACK_int)z.row_stride,.tx=tx?CblasTrans:CblasNoTrans,.ty=ty?CblasTrans:CblasNoTrans};
       [calls appendBytes:&g length:sizeof g];at+=nr*nc;left-=nr*nc;
     }
     f.execute=^(MeshFunction *function){

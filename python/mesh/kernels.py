@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class _Operation:
@@ -38,3 +40,9 @@ class Metal:
     source: str
     dispatches: tuple
     constants: tuple = ()
+
+
+# design/algorithm-sources.md#direct-indexed-gather
+def gather(table, indices, output):
+    for row in range(output.shape[0]):
+        np.copyto(output[row], table[int(indices[row, 0])])

@@ -710,3 +710,25 @@ dtype, row partition, and all intermediate storage are realized at setup.
 defines selected-row views; [Pallas grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
 define the indexed-region composition used here. There are no additional
 numerical schedulers, invocation state objects, or operand payload staging areas.
+
+## Direct indexed gather
+
+Harris et al., [Array programming with NumPy](https://doi.org/10.1038/s41586-020-2649-2),
+provide the array programming basis. The embedding gather uses basic integer row
+indexing and [numpy.copyto](https://numpy.org/doc/stable/reference/generated/numpy.copyto.html)
+to write each selected source row into the configured output row. Both row selections
+are views; no advanced-indexed dense gathered array or temporary output tensor is
+constructed. The copy is the requested gather operation's output write. Publication
+and dependencies belong to the enclosing region kernel call, so each row region
+can complete while unrelated input index regions remain absent.
+
+Source review of the CPU contraction confirms its matrix descriptors are built
+at configuration time. Each descriptor retains canonical extent pointers plus
+view offsets, transpose flags and leading dimensions. A transposed input uses
+its retained column stride as the physical leading dimension; a nontransposed
+input uses its row stride. The output pointer names the current publication
+section directly. Execution calls Accelerate SGEMM on these bindings without
+constructing an operand array or staging output. The ILP64 interface retains
+64-bit dimensions instead of silently truncating the configured size to int.
+This source conclusion covers mesh-owned storage and calls, not private packing
+inside the BLAS implementation.
