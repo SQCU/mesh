@@ -132,33 +132,6 @@ def kernel(node):
         body.append(write(output, expr(attrs['expression'])))
     elif op in ('reshape', 'stop_gradient', 'cast', 'assign'):
         body.append(write(output, read(values[0])))
-    elif op.startswith('reduce_'):
-        source = values[0]
-        axes = attrs['axes']
-        reduced = math_product(tuple(source.shape[i] for i in axes))
-        dtype = TYPES[source.dtype] if source.dtype != 'bool' else 'int'
-        low, high = {'float32': ('-INFINITY', 'INFINITY'), 'int32': ('(-2147483647-1)', '2147483647'),
-                     'uint32': ('0u', '0xffffffffu'), 'int64': ('(-9223372036854775807L-1L)', '9223372036854775807L'),
-                     'uint64': ('0ul', '0xfffffffffffffffful'), 'bool': ('0', '1')}[source.dtype]
-        identity = low if op == 'reduce_max' else high if op == 'reduce_min' else '1' if op == 'reduce_all' else '0'
-        body = [f'ulong t=group.x; if(t>=v[{index}].size) return;', f'{dtype} result={identity};']
-        base, target_axis = [], 0
-        for i in range(source.ndim):
-            if i not in axes:
-                base.append(f'coordinate(t,v[{index}],{i if attrs["keepdims"] else target_axis})*v[{source.index}].stride[{i}]')
-                target_axis += 1
-        body.append('ulong base=' + ('+'.join(base) or '0') + ';')
-        body.append(f'for(ulong r=tid;r<{expr(reduced)};r+=256) {{ ulong rest=r,address=base;')
-        for i in reversed(axes):
-            body.append(f'address+=(rest%v[{source.index}].shape[{i}])*v[{source.index}].stride[{i}]; rest/=v[{source.index}].shape[{i}];')
-        combine = 'max(result,value)' if op == 'reduce_max' else 'min(result,value)' if op == 'reduce_min' else 'result||value' if op == 'reduce_any' else 'result&&value' if op == 'reduce_all' else 'result+value'
-        operation = 'simd_max' if op in ('reduce_max', 'reduce_any') else 'simd_min' if op in ('reduce_min', 'reduce_all') else 'simd_sum'
-        body += [f'{dtype} value={dtype}({read(source,"address")}); result={combine}; }}',
-                 f'threadgroup {dtype} partial[8]; result={operation}(result); if(!lane) partial[simd]=result;',
-                 'threadgroup_barrier(mem_flags::mem_threadgroup);',
-                 f'if(!simd) {{ result=lane<8?partial[lane]:{dtype}({identity}); result={operation}(result); if(!lane) {{',
-                 write(output, f'result/float({expr(reduced)})' if op == 'reduce_mean' else 'result'), '}}']
-        mode = 'reduce'
     elif op == 'arange':
         body.append(write(output, f'{expr(attrs["start"])}+t*({expr(attrs["step"])})'))
     elif op == 'argsort':
@@ -743,8 +716,21 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, updates)
             tensors[value.index] = result.T if len(shape) == 1 else result
             continue
-        # ../../../design/algorithm-sources.md#xonotic-ranked-indexed-reductions
-        if operation in ('reduce_sum', 'reduce_mean') and len(shapes[values[0].index]) > 2 and attributes['axes']:
+        # ../../../design/algorithm-sources.md#shared-associative-reductions
+        if operation.startswith('reduce_') and not attributes['axes']:
+            operand = local[values[0].index]
+            if operand.dtype == np.dtype(value.dtype):
+                tensors[value.index] = operand
+            else:
+                argument, = kernels.arguments(1)
+                result = argument.equal(0).equal(False) if operation in ('reduce_any', 'reduce_all') else argument.astype(value.dtype)
+                tensors[value.index] = program.kernel_call(kernels.expression(result),
+                    grid=operand.grid, in_specs=(BlockSpec(operand.block_shape, lambda i, j: (i, j)),),
+                    out_specs=BlockSpec(operand.block_shape, lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct(operand.shape, value.dtype), peer=peer)(operand)
+            continue
+        # ../../../design/algorithm-sources.md#shared-associative-reductions
+        if operation.startswith('reduce_') and len(shapes[values[0].index]) > 2:
             operand_shape = shapes[values[0].index]
             axes = tuple(sorted(set(attributes['axes'])))
             retained = tuple(axis for axis in range(len(operand_shape)) if axis not in axes)
@@ -759,9 +745,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     coordinates[axis] = (ordinal // math.prod(operand_shape[i] for i in domain[position + 1:])) % operand_shape[axis]
             argument, = kernels.arguments(1)
             term = argument.reshape(operand_shape).at(*coordinates)
-            if np.dtype(values[0].dtype).kind in 'iu':
+            if operation in ('reduce_sum', 'reduce_mean') and np.dtype(values[0].dtype).kind in 'iu':
                 term = term & 0xffffffffffffffff
-            result = term.sum().T
+            result = getattr(term, 'sum' if operation == 'reduce_mean' else operation[7:])().T
             if operation == 'reduce_mean' and np.dtype(values[0].dtype).kind == 'f':
                 result = result / count
             reduced = program.kernel_call(kernels.expression(result),
@@ -771,8 +757,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             tensors[value.index] = nn._pointwise(program, kernels.expression(argument / count),
                 (reduced,), 1, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and np.dtype(values[0].dtype).kind != 'f' else reduced
             continue
-        # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
-        if operation in ('reduce_sum', 'reduce_mean') and 1 <= len(shapes[values[0].index]) <= 2 and attributes['axes']:
+        # ../../../design/algorithm-sources.md#shared-associative-reductions
+        if operation.startswith('reduce_') and 1 <= len(shapes[values[0].index]) <= 2:
             operand_shape = shapes[values[0].index]
             operand = matrix_view(local[values[0].index], operand_shape if len(operand_shape) == 2 else (1, math.prod(operand_shape)))
             axes = tuple(sorted(set(attributes['axes']))) if len(operand_shape) == 2 else (1,)
@@ -780,8 +766,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             block = tuple(math.gcd(min(tile, size), operand.block_shape[axis] if operand.grid[axis] > 1 else 0)
                           for axis, (tile, size) in enumerate(zip((tile_rows, tile_rows), reduced_shape)))
             argument, = kernels.arguments(1)
-            term = argument & 0xffffffffffffffff if operand.dtype.kind in 'iu' else argument
-            result = term.sum(axis=axes)
+            term = argument & 0xffffffffffffffff if operation in ('reduce_sum', 'reduce_mean') and operand.dtype.kind in 'iu' else argument
+            result = getattr(term, 'sum' if operation == 'reduce_mean' else operation[7:])(axis=axes)
             divisor = math.prod(operand.shape[axis] for axis in axes)
             if operation == 'reduce_mean' and operand.dtype.kind == 'f':
                 result = result / divisor
@@ -924,8 +910,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         mode, threads = item['mode'], 256
         if mode == 'matmul':
             grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, math.prod(shape[:-2]))
-        elif mode == 'reduce':
-            grid = (size, 1, 1)
         else:
             grid = (((math.prod(shapes[mode[1]]) if isinstance(mode, tuple) else size) + 255) // 256, 1, 1)
         arguments = [positions[index] for index in item['arguments']] + [positions[value.index]]
