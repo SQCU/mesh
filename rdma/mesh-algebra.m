@@ -89,7 +89,6 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   uint32_t occurrence;
   enum mesh_execution_kind executionKind;
 }
-@property NSArray<MeshFunction *> *plans;
 @property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
 @property id<MTLComputePipelineState> metalPipeline;
@@ -1080,58 +1079,6 @@ static int contraction_views(MeshAlgebra *a,struct mesh_view *left,struct mesh_v
   }
   if(!a.cpu && !a.coremlPython && x.tensor->extents[x.extent].shape.scalar!=y.tensor->extents[y.extent].shape.scalar && (x.tensor->extents[x.extent].shape.scalar!=MESH_F32 || zs!=MESH_F32))return EINVAL;
   *left=x;*right=y;*output=z;return 0;
-}
-/* design/algorithm-sources.md#selected-native-contractions */
-static int maps_cover(NSMutableData *available,NSMutableData *required) {
-  const struct mesh_row_map *supplied=available.bytes,*needed=required.bytes;
-  for(size_t i=0;i<required.length/sizeof *needed;i++){
-    uint64_t first=needed[i].first,end=first+needed[i].count;
-    while(first<end){
-      uint64_t next=first;
-      for(size_t j=0;j<available.length/sizeof *supplied;j++)
-        if(supplied[j].first<=first && (uint64_t)supplied[j].first+supplied[j].count>next)next=(uint64_t)supplied[j].first+supplied[j].count;
-      if(next==first)return 0;
-      first=next;
-    }
-  }
-  return 1;
-}
-/* design/algorithm-sources.md#selected-native-contractions */
-int mesh_algebra_contract_select(struct mesh_algebra *handle,struct mesh_view selector,const struct mesh_view *left,const struct mesh_view *right,size_t plan_count,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,float alpha,size_t *function_index) {
-  MeshAlgebra *a=owner(handle);
-  if(a.realized)return EBUSY;
-  if(!left || !right || !plan_count || plan_count>=UINT32_MAX || !inputs || !input_count || input_count>SIZE_MAX/sizeof *inputs-1 || !function_index || !valid_view(a,selector) || selector.rows!=1 || selector.columns!=1 || selector.tensor->extents[selector.extent].shape.scalar!=MESH_U32)return EINVAL;
-  struct mesh_row_map out;int error=output_region(a,output,&out);if(error)return error;
-  if(out.count!=output.tensor->extents[output.extent].quantum || output_used(a,out))return EINVAL;
-  NSMutableData *reads=[NSMutableData new],*views=[NSMutableData dataWithBytes:&selector length:sizeof selector];
-  for(size_t i=0;i<input_count;i++){
-    if(!valid_view(a,inputs[i]))return EINVAL;
-    dependencies(reads,inputs[i]);
-  }
-  [views appendBytes:inputs length:input_count*sizeof *inputs];
-  NSMutableArray<MeshFunction *> *plans=[NSMutableArray new];
-  for(size_t i=0;i<plan_count;i++){
-    struct mesh_view x=left[i],y=right[i],z=output;
-    error=contraction_views(a,&x,&y,&z);if(error)return error;
-    NSMutableData *needed=[NSMutableData new];dependencies(needed,x);dependencies(needed,y);
-    if(!maps_cover(reads,needed))return EINVAL;
-    MeshFunction *plan=[MeshFunction new];
-    error=prepare_part(a,plan,MESH_CONTRACT,x,y,z,alpha,0,0,z.rows*z.columns);if(error)return error;
-    [plans addObject:plan];
-  }
-  dependencies(reads,selector);
-  const struct mesh_row_map *maps=reads.bytes;
-  for(size_t i=0;i<reads.length/sizeof *maps;i++)if(overlaps(maps[i],out))return EINVAL;
-  MeshFunction *f=[MeshFunction new];f.owner=a;f.queue=a.queue;f.dependencies=reads;f.inputViews=views;f.indexedInputs=[NSMutableIndexSet new];
-  f->output=out;f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
-  f.plans=plans;f->executionKind=plans[0]->executionKind;
-  const uint32_t *selection=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
-  f.execute=^(MeshFunction *function){
-    uint32_t selected=*selection;
-    if(selected>=plans.count){complete_part(function,EINVAL,0);return;}
-    plans[selected].execute(function);
-  };
-  *function_index=a.functions.count;[a.functions addObject:f];return 0;
 }
 /* design/algorithm-sources.md#mandatory-partial-publication */
 int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta) {

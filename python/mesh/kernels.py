@@ -4,7 +4,7 @@ import numpy as np
 
 _REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
 _REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'log', 'sqrt')
-_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide')
+_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor')
 _POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%',
     'maximum', 'minimum', *_POINTWISE_FUNCTIONS)
 
@@ -229,9 +229,6 @@ class _Expression:
 
 
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def floor_divide(self, other):
-        return _Expression('floor_divide', (self, _literal(other)))
 
 
     # design/algorithm-sources.md#shared-elementary-functions
@@ -249,8 +246,6 @@ def _literal(value):
 # design/algorithm-sources.md#logical-indexed-views
 def _resolve_logical(node, inputs, evaluate=True):
     import math
-    if node.operation == 'indexed_contract':
-        return node
     active = evaluate and not (node.operation == 'logical_load' and 0 in inputs[node.value[0]].shape)
     children = tuple(_resolve_logical(child, inputs, active) for child in node.operands)
     if node.operation == 'logical_load':
@@ -753,7 +748,6 @@ class _ExpressionKernel:
             return _emit_scalar_expression(node, inputs, metal, resolve)
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
-        lines.append(_scalar_helpers(metal))
         lines.append(_lookup_declarations(expression, metal))
         layouts = {}
         for index, ref in enumerate(inputs):
@@ -1026,7 +1020,7 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
     return _scalar_expression(node, args, metal,
         _expression_dtype(node.operands[0], inputs) if node.operation in ('abs', 'floor', 'isfinite') else
-        _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum', 'floor_divide') else None)
+        _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum') else None)
 
 
 # design/algorithm-sources.md#logical-indexed-views
@@ -1038,7 +1032,7 @@ def _expression_dtype(node, inputs):
     if node.operation == 'dot':
         types = tuple(_expression_dtype(child, inputs) for child in node.operands)
         return np.dtype('bool') if all(dtype.kind == 'b' for dtype in types) else _expression_dtype(_Expression('*', node.operands), inputs)
-    if node.operation == 'indexed_contract' or node.operation in _REAL_FUNCTIONS:
+    if node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
     if node.operation == 'lookup':
         return np.dtype('uint64')
@@ -1077,20 +1071,6 @@ def _reduction_dtype(node, inputs, output):
 
 
 
-# design/algorithm-sources.md#shared-elementary-functions
-def _scalar_helpers(metal):
-    qualifier = 'inline' if metal else 'static inline'
-    suffix = '' if metal else 'f'
-    remainder_function = 'precise::fmod' if metal else 'fmodf'
-    return f"""{qualifier} float mesh_floor_divide(float x,float y) {{
-      float remainder={remainder_function}(x,y);
-      if(y==0.0f)return x/y;
-      float quotient=(x-remainder)/y;
-      if(remainder!=0.0f && ((y<0.0f)!=(remainder<0.0f)))quotient-=1.0f;
-      if(quotient==0.0f)return copysign{suffix}(0.0f,x/y);
-      float result=floor{suffix}(quotient);
-      return result+(quotient-result>0.5f ? 1.0f : 0.0f);
-    }}"""
 
 
 # design/algorithm-sources.md#fused-indexed-update-values
@@ -1106,8 +1086,6 @@ def _scalar_expression(node, args, metal, dtype=None):
         return f'((int{bits}_t)(({args[0]})<0 ? ((uint{bits}_t)0-(uint{bits}_t)({args[0]})) : (uint{bits}_t)({args[0]})))'
     if node.operation == 'floor':
         return f'floor{"" if metal else "f"}((float)({args[0]}))' if dtype.kind == 'f' else args[0]
-    if node.operation == 'floor_divide':
-        return f'mesh_floor_divide((float)({args[0]}),(float)({args[1]}))' if dtype.kind == 'f' else _scalar_expression(_Expression('//'), args, metal, dtype)
     if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
         name = node.operation + ('' if metal else 'f')
         if metal and node.operation in ('log', 'sqrt'):
@@ -1168,7 +1146,6 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None, *, acces
                   'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}
         lines = ['#include <metal_stdlib>\nusing namespace metal;\ntypedef uint uint32_t; typedef ulong uint64_t; typedef long int64_t; typedef int int32_t; typedef uchar uint8_t;' if metal else
                  '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
-        lines.append(_scalar_helpers(metal))
         emitted = body(metal)
         preamble, statements = emitted if isinstance(emitted, tuple) else ('', emitted)
         lines.append(preamble)
@@ -1664,35 +1641,7 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'cast', 'transpose', 'indexed_contract') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
-
-
-# design/algorithm-sources.md#selected-native-contractions
-def _indexed_interval_source(name, entries, first, metal):
-    dtype = entries[0][1].dtype
-    scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t', 'u4': 'uint32_t',
-              'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}[dtype.kind+str(dtype.itemsize)]
-    result = 'float' if dtype.kind == 'f' else scalar
-    address = 'device const ulong *' if metal else 'const uintptr_t *'
-    qualifier, constant = ('inline', 'constant') if metal else ('static inline', 'static const')
-    tables = []
-    for suffix, values in (('begin', (start for start, ref in entries)),
-                           ('end', (start+ref.shape[1] for start, ref in entries)),
-                           ('rs', (ref.view.row_stride for start, ref in entries)),
-                           ('cs', (ref.view.column_stride for start, ref in entries))):
-        tables.append(f'{constant} uint64_t {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
-    load = _indexed_load_expression(entries[0][1], 'key', (scalar, (f'{name}_rs[block]', f'{name}_cs[block]')),
-                                    ('row', f'index-{name}_begin[block]', 'true', '0'), metal)
-    tables.append(f"""// design/algorithm-sources.md#selected-native-contractions
-    {qualifier} {result} {name}({address} buffers,uint64_t row,uint64_t index) {{
-      uint32_t low=0,high={len(entries)-1};
-      while(low<high) {{ uint32_t middle=low+(high-low)/2;
-        if(index>={name}_end[middle])low=middle+1;else high=middle; }}
-      uint32_t block=low;
-      {'device ' if metal else ''}const {scalar} *pkey=({'device ' if metal else ''}const {scalar} *)buffers[{first}+block];
-      return {load};
-    }}""")
-    return '\n'.join(tables)
+    return node.operation in ('dot', 'cast', 'transpose') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
 
 
 
@@ -1701,32 +1650,10 @@ def _indexed_interval_source(name, entries, first, metal):
 
 
 
-# design/algorithm-sources.md#typed-integer-contractions
-def _contraction_merge(left, right, dtype):
-    if dtype.kind == 'b':
-        return (left | right).astype(dtype)
-    if dtype.kind in 'iu':
-        return ((left & 0xffffffffffffffff) + (right & 0xffffffffffffffff)).astype(dtype)
-    return left + right
 
 
-# design/algorithm-sources.md#typed-integer-contractions
-def _integral_contraction(program, left, right, target):
-    # design/algorithm-sources.md#typed-integer-contractions
-    def body(metal):
-        a = f'p0[r*{left.view.row_stride}+k*{left.view.column_stride}]'
-        b = f'p1[k*{right.view.row_stride}+c*{right.view.column_stride}]'
-        scalar = 'uint64_t' if target.dtype.itemsize == 8 else 'uint32_t'
-        term = f'(({a})&&({b}))' if target.dtype.kind == 'b' else f'(({scalar})({a}))*(({scalar})({b}))'
-        operation = '|=' if target.dtype.kind == 'b' else '+='
-        begin, end = ('column_begin', 'column_end') if metal else ('part.column_begin', 'part.column_end')
-        return f"""for(uint64_t c={begin}+lane;c<{end};c+=lanes) {{
-          {scalar} total=0;
-          for(uint64_t k=0;k<{left.shape[1]};k++) total{operation}{term};
-          p2[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
-        }}"""
-    _compiled_region(program, (left, right), target, body, access_axes=(1, 2),
-                     domains=_source_expression_regions(program, target))
+
+
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -1759,8 +1686,6 @@ def _expression_layout(node, sources, whole, layouts):
         result = (1, 1), (False, False), (1, 1)
     elif node.operation == 'domain':
         result = node.value
-    elif node.operation == 'indexed_contract':
-        result = node.value[1]
     elif node.operation == 'cast':
         result = layout(node.operands[0])
     elif node.operation == 'transpose':
@@ -1845,8 +1770,6 @@ class _ExpressionRegions:
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation in _REDUCTIONS:
             return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
-        if node.operation == 'indexed_contract':
-            return self.indexed_contraction_panel(node, origin, shape)
         dtype = _expression_dtype(node, self.sources)
         if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
             return self.panel(node.operands[0], origin, shape)
@@ -1860,27 +1783,6 @@ class _ExpressionRegions:
             self.cache[key] = target
         return self.cache[key]
 
-    # design/algorithm-sources.md#composable-indexed-contractions
-    def indexed_contraction_panel(self, node, origin, shape, direct=None):
-        key = ('indexed_contraction', self.key(node, origin, shape))
-        if key not in self.cache:
-            target = direct if direct is not None and direct.dtype == np.dtype('float32') else self.temporary(shape)
-
-            # design/algorithm-sources.md#composable-indexed-contractions
-            def shift(value):
-                if value.operation == 'index_vector' and value.value[3] == 0 and value.value[0] != 1:
-                    return _Expression('index_vector', value=(*value.value[:2], value.value[2]+origin[0], 0))
-                return _Expression(value.operation, tuple(shift(child) for child in value.operands), value.value)
-
-            product = _Expression('*', tuple(shift(child) for child in node.operands))
-            transposed = _Expression('transpose', (_Expression('sum', (product,)),))
-            original = _resolve_logical(node.value[0], self.sources)
-            if shape[1] != 1:
-                self.emit(original, origin, shape, target)
-            elif not _lower_indexed_product(self, transposed, target.T):
-                target = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target)
-            self.cache[key] = target
-        return self.cache[key]
 
 
     # design/algorithm-sources.md#shared-contraction-lowering
@@ -1923,10 +1825,7 @@ class _ExpressionRegions:
                 destination = self.temporary(shape[::-1]).T
             else:
                 destination = direct if direct is not None and len(ordered) == 2 and direct.dtype == dtype else self.temporary(shape, dtype)
-            if dtype.kind in 'iub':
-                _integral_contraction(self.program, left_panel, right_panel, destination)
-            else:
-                _bind_operation(self.program, 6, (left_panel, right_panel), destination)
+            _bind_operation(self.program, 6, (left_panel, right_panel), destination)
             if len(contributions) > 1:
                 destination.partial = Partial(required, frozenset((contributions[len(parts)],)))
             parts.append(destination)
@@ -1975,8 +1874,6 @@ class _ExpressionRegions:
                         position = min(ref.shape[axis], position + (remaining+stride-1)//stride)
                         result.add(base[axis]+position)
             return result
-        if value.operation == 'indexed_contract':
-            return self.page_cuts(_resolve_logical(value.value[0], self.sources), axis, origin, count)
         if value.operation == 'transpose':
             return self.page_cuts(value.operands[0], 1-axis, origin, count)
         if value.operation == 'dot':
@@ -2047,7 +1944,7 @@ class _ExpressionRegions:
             if len(parts) == 1 and parts[0] is target:
                 return
             terms = arguments(len(parts))
-            value = terms[0] if len(parts) == 1 else _contraction_merge(*terms, dtype)
+            value = terms[0] if len(parts) == 1 else (terms[0] + terms[1])
             _ExpressionKernel((value,)).bind(self.program, parts, (target,), self.coordinate)
             return
         if len(parts) == 2:
@@ -2120,7 +2017,7 @@ class _ExpressionRegions:
             if key not in replacements:
                 terms = tuple(_Expression('input', value=len(inputs) + index) for index in range(len(refs)))
                 inputs.extend(refs)
-                replacements[key] = terms[0] if len(terms) == 1 else _contraction_merge(*terms, refs[0].dtype)
+                replacements[key] = terms[0] if len(terms) == 1 else (terms[0] + terms[1])
             return replacements[key]
 
         # design/algorithm-sources.md#shared-contraction-lowering
@@ -2151,14 +2048,6 @@ class _ExpressionRegions:
                         (shape, (False, False), shape))
                     return _Expression(node.operation, (child,), dtype.str)
                 return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
-            if node.operation == 'indexed_contract':
-                if accumulation.kind != 'f':
-                    return lower(_resolve_logical(node.value[0], self.sources), accumulation)
-                layout = self.layout(node)
-                row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
-                rows = 1 if layout[0][0] == 1 else shape[0]
-                return reference(('indexed_contract', node, row, rows),
-                                 (self.indexed_contraction_panel(node, (row, 0), (rows, 1)),))
             if node.operation == 'dot':
                 layout = self.layout(node)
                 where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
@@ -2197,57 +2086,8 @@ class _ExpressionRegions:
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
 
 
-# design/algorithm-sources.md#selected-native-contractions
-def _panel_affine(node, selected, choice):
-    if node == selected:
-        return choice, 0, 0
-    if node.operation == 'literal' and isinstance(node.value, (int, bool)):
-        return int(node.value), 0, 0
-    if node.operation == 'cast' and node.operands[0].operation == 'literal' and np.dtype(node.value).kind in 'iub':
-        zero = np.zeros(1, dtype=np.int64)
-        value = _static_value(node, (), zero, zero, ())
-        return None if value is None else (int(value[0]), 0, 0)
-    if node.operation == 'index_vector':
-        return node.value[2], int(node.value[3] == 0 and node.value[0] > 1), int(node.value[3] == 1 and node.value[0] > 1)
-    if node.operation not in ('+', '-', '*'):
-        return None
-    left, right = (_panel_affine(child, selected, choice) for child in node.operands)
-    if left is None or right is None:
-        return None
-    if node.operation == '*':
-        if left[1:] == (0, 0):
-            return tuple(left[0] * value for value in right)
-        if right[1:] == (0, 0):
-            return tuple(right[0] * value for value in left)
-        return None
-    return tuple(a + (b if node.operation == '+' else -b) for a, b in zip(left, right))
 
 
-# design/algorithm-sources.md#selected-native-contractions
-def _panel_geometry(source, ordinal, row_step, column_step, rows, columns):
-    row, column = divmod(ordinal, source.shape[1])
-    if min(row, column, row_step, column_step) < 0 or row >= source.shape[0]:
-        return None
-    if hasattr(source, 'blocks'):
-        block_row, block_column = row // source.block_shape[0], column // source.block_shape[1]
-        backing = source[block_row, block_column]
-        row, column = row % source.block_shape[0], column % source.block_shape[1]
-    else:
-        backing = source
-    dr, dc = divmod(row_step, source.shape[1]), divmod(column_step, source.shape[1])
-    remaining = tuple(size - 1 - origin - (columns - 1) * step
-                      for size, origin, step in zip(backing.shape, (row, column), dc))
-    if min(remaining) < 0:
-        return None
-    capacity = min((space // step + 1 for space, step in zip(remaining, dr) if step), default=rows)
-    if capacity < rows:
-        return None
-    strides = tuple(sum(step * stride for step, stride in zip(delta,
-        (backing.view.row_stride, backing.view.column_stride))) or 1 for delta in (dr, dc))
-    if 1 not in strides:
-        return None
-    offset = backing.view.offset + row * backing.view.row_stride + column * backing.view.column_stride
-    return backing, offset, strides, capacity
 
 
 # design/algorithm-sources.md#indexed-contraction-plans
@@ -2275,285 +2115,10 @@ class _ReductionPlan:
         return cls(regions, tuple(merges), parts[0] if parts else -1)
 
 
-# design/algorithm-sources.md#indexed-contraction-plans
-@dataclass(frozen=True)
-class _IndexedProductPlan:
-    segments: tuple
-    storage: tuple
-    operations: tuple
-
-    # design/algorithm-sources.md#indexed-contraction-plans
-    @classmethod
-    def create(cls, segments, target, target_pages, reverse):
-        segments = tuple((first, columns, length, tuple(prepared))
-            for first, columns, length, prepared in segments)
-        storage, operations, groups = [None], [], {}
-
-        # design/algorithm-sources.md#indexed-contraction-plans
-        def temporary(columns, transposed=False):
-            storage.append(((columns, 1) if transposed else (1, columns), transposed))
-            return len(storage)-1
-
-        for index, (first, columns, _, _) in enumerate(segments):
-            output = (0 if len(segments) == 1 and target_pages == 1 and
-                target.dtype == np.dtype('float32') and not reverse else temporary(columns, reverse))
-            operations.append(('contract', (), output, index))
-            groups.setdefault((first, columns), []).append(output)
-        results = []
-        for (first, columns), parts in groups.items():
-            tree = _ReductionPlan.create(parts)
-            slots = dict(enumerate(parts))
-            for left, right, output in tree.merges:
-                destination = (0 if len(groups) == 1 and output == tree.root and
-                    target.dtype == np.dtype('float32') else temporary(columns))
-                operations.append(('add', (slots[left], slots[right]), destination, None))
-                slots[output] = destination
-            result = slots[tree.root]
-            if len(groups) == 1 and result != 0:
-                operations.append(('copy', (result,), 0, None))
-                result = 0
-            results.append((first, result))
-        if len(groups) > 1:
-            operations.append(('assemble', tuple(slot for _, slot in results), 0,
-                tuple(first for first, _ in results)))
-        return cls(segments, tuple(storage), tuple(operations))
 
 
-# design/algorithm-sources.md#selected-native-contractions
-def _lower_indexed_product(lowering, value, target):
-    import ctypes as C
-    from . import Ref, check
-    from ._native import View
-    if value.operation != 'transpose' or value.operands[0].operation != 'sum' or target.shape[0] != 1 or target.dtype.kind != 'f':
-        return False
-    product = value.operands[0].operands[0]
-    if product.operation != '*' or any(node.operation != 'logical_load' for node in product.operands):
-        return False
-    operands = product.operands
-    selected, choices, vectors = None, None, set()
-    for node in operands:
-        source = lowering.sources[node.value[0]]
-        if source.dtype.kind != 'f' or node.operands[-2] != _literal(True) or node.operands[-1] != _literal(0):
-            return False
-        _resolve_logical(node, lowering.sources)
-        if -1 in node.value[1]:
-            return False
-        for coordinate, size in zip(node.operands[:-2], node.value[1]):
-            pending = [coordinate]
-            has_vector = False
-            while pending:
-                part = pending.pop()
-                if part.operation == 'index_vector':
-                    has_vector = True
-                    if part.value[3] == 1:
-                        vectors.add(part.value[:2])
-                pending.extend(part.operands)
-            if _panel_affine(coordinate, None, 0) is None:
-                if has_vector or selected is not None and selected != coordinate:
-                    return False
-                pending = [coordinate]
-                while pending:
-                    part = pending.pop()
-                    if part.operation in ('row', 'column') or part.operation == 'input' and lowering.sources[part.value].shape != (1, 1):
-                        return False
-                    pending.extend(part.operands)
-                selected, choices = coordinate, size if choices is None else min(choices, size)
-    if len(vectors) != 1 or (selected is not None and _expression_dtype(_resolve_logical(selected, lowering.sources), lowering.sources).kind not in 'iub'):
-        return False
-    choices = 1 if selected is None else choices
-    inner, tile = next(iter(vectors))
-    if inner == 0:
-        return False
-    feature = target.shape[1]
-    flattened = []
-    for node in operands:
-        plans = []
-        for choice in range(choices):
-            flat = (0, 0, 0)
-            for coordinate, size in zip(node.operands[:-2], node.value[1]):
-                affine = _panel_affine(coordinate, selected, choice)
-                if affine is None or min(affine) < 0 or affine[0] + affine[1]*(feature-1) + affine[2]*(inner-1) >= size:
-                    return False
-                flat = tuple(value * size + addition for value, addition in zip(flat, affine))
-            plans.append(flat)
-        flattened.append(plans)
-    if any(plan[1] for plan in flattened[0]):
-        operands, flattened = operands[::-1], flattened[::-1]
-    if any(plan[1] for plan in flattened[0]) or len(set(flattened[0])) != 1 or selected in operands[0].operands[:-2]:
-        return False
-    sources = tuple(lowering.sources[node.value[0]] for node in operands)
-    program = lowering.program
-    quantum = program.native.algebra_publication_bytes(program.handle)
-    if target.shape[1] * target.dtype.itemsize > quantum:
-        return False
-    segments, first = [], 0
-    while first < feature:
-        columns = min(feature-first, quantum // 4)
-        for right in flattened[1]:
-            geometry = _panel_geometry(sources[1], right[0]+first*right[1], right[1], 0, 1, 1)
-            if geometry is None:
-                return False
-            columns = min(columns, geometry[3])
-        start = 0
-        while start < inner:
-            length = min(tile, inner-start)
-            prepared = []
-            for left, right in zip(*flattened):
-                a = _panel_geometry(sources[0], left[0]+start*left[2], left[2], 0, 1, 1)
-                b = _panel_geometry(sources[1], right[0]+start*right[2]+first*right[1], right[2], right[1], 1, columns)
-                if a is None or b is None:
-                    return False
-                length = min(length, a[3], b[3])
-                prepared.append((a, b))
-            segments.append((first, columns, length, prepared))
-            start += length
-        first += columns
-    target_pages = C.c_size_t()
-    check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
-    reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
-    native_plan = _IndexedProductPlan.create(segments, target, target_pages.value, reverse)
-    selector = None
-    if selected is not None:
-        selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
-        if selection_key not in lowering.cache:
-            selector = program.tensor((1, 1), dtype=np.uint32)[0, 0]
-            plan = select((selected >= 0) & (selected < choices), selected, choices)
-            lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
-            lowering.cache[selection_key] = selector
-        selector = lowering.cache[selection_key]
-    storage = [target]
-    for shape, transposed in native_plan.storage[1:]:
-        ref = lowering.temporary(shape)
-        storage.append(ref.T if transposed else ref)
-    for operation, inputs, output, detail in native_plan.operations:
-        destination = storage[output]
-        if operation == 'add':
-            _bind_operation(program, 1, tuple(storage[index] for index in inputs), destination, beta=1)
-            continue
-        if operation == 'copy':
-            lowering.publish((storage[inputs[0]],), destination)
-            continue
-        if operation == 'assemble':
-            results = tuple(storage[index] for index in inputs)
-            entries = tuple(zip(detail, results))
-
-            # design/algorithm-sources.md#indexed-contraction-plans
-            def assemble(metal):
-                source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
-                return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
-              p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
-
-            _compiled_region(program, results, destination, assemble, access_axes=(1,) * len(results),
-                             domains=_source_row_regions(program, destination))
-            continue
-        first, columns, length, prepared = native_plan.segments[detail]
-        dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
-
-        # design/algorithm-sources.md#selected-native-contractions
-        def retain(geometry, shape, transpose=False):
-            backing, offset, strides, _ = geometry
-            view = View.from_buffer_copy(backing.view)
-            view.offset, view.rows, view.columns = offset, *shape
-            view.row_stride, view.column_stride = strides
-            if view.rows == 1 and view.column_stride == 1:
-                view.row_stride = view.columns
-            if view.columns == 1 and view.row_stride == 1:
-                view.column_stride = view.rows
-            ref = Ref(program, view, backing.dtype)
-            ref = ref.T if transpose else ref
-            if selected is None:
-                return ref, ()
-            identity = tuple(getattr(ref.view, field) for field in
-                ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
-            if identity not in page_sets:
-                count = C.c_size_t()
-                check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
-                pages = (View * count.value)()
-                check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
-                selected_pages = []
-                for page in pages:
-                    key = page.tensor, page.extent, page.offset
-                    if key not in positions:
-                        positions[key] = len(dependencies)
-                        dependencies.append(Ref(program, page, ref.dtype))
-                    selected_pages.append(positions[key])
-                page_sets[identity] = tuple(selected_pages)
-            return ref, page_sets[identity]
-
-        for a, b in prepared:
-            left, left_position = retain(a, (length, 1), True)
-            right, right_position = retain(b, (length, columns))
-            left_views.append(left)
-            right_views.append(right)
-            selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
-        if selected is None:
-            _bind_operation(program, 6, (left_views[0], right_views[0]), destination)
-            continue
-        zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
-        if zero_key not in lowering.cache:
-            zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
-            program.constant(zero, np.zeros(zero.shape, dtype=zero.dtype))
-            lowering.cache[zero_key] = zero
-        zero = lowering.cache[zero_key]
-        zero, zero_pages = retain((zero, zero.view.offset,
-            (zero.view.row_stride, zero.view.column_stride), length), zero.shape)
-        _, left_pages = retain(prepared[0][0], (length, 1), True)
-        left_views.append(left_views[0])
-        right_views.append(zero)
-        selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
-        function = C.c_size_t()
-        check(program.native.algebra_contract_select(program.handle, selector.view,
-            (View * len(left_views))(*(ref.view for ref in left_views)),
-            (View * len(right_views))(*(ref.view for ref in right_views)), len(left_views),
-            (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies),
-            destination.view, 1, C.byref(function)))
-        slots = max(map(len, selected_dependencies))
-        selected_dependencies = tuple(index for pages in selected_dependencies
-            for index in (*pages, *((0xffffffff,) * (slots-len(pages)))))
-        readiness = program.tensor((1, slots), dtype=np.uint32)[0, 0]
-
-        # design/algorithm-sources.md#selected-native-contractions
-        def readiness_source(metal):
-            array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
-            return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
-
-        _compiled_region(program, (selector,), readiness, readiness_source, access_axes=(0,),
-                                              domains=((0, readiness.shape[0], 0, readiness.shape[1]),))
-        check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
-            (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies),
-            (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies)))
-    return True
 
 
-# design/algorithm-sources.md#composable-indexed-contractions
-def _preserve_indexed_contractions(node, lowering):
-    children = tuple(_preserve_indexed_contractions(child, lowering) for child in node.operands)
-    value = _Expression(node.operation, children, node.value)
-    if node.operation in ('+', '-', '*', '//', '%', 'cast') and all(child.operation == 'literal' or
-            child.operation == 'cast' and child.operands[0].operation == 'literal' for child in children):
-        zero = np.zeros(1, dtype=np.int64)
-        folded = _static_value(value, lowering.sources, zero, zero, lowering.coordinate)
-        if folded is not None:
-            literal = _literal(folded[0])
-            dtype = _expression_dtype(value, lowering.sources)
-            return literal if _expression_dtype(literal, ()) == dtype else literal.astype(dtype)
-    if value.operation != 'sum' or value.operands[0].operation != '*':
-        return value
-    operands = []
-    for child in value.operands[0].operands:
-        while True:
-            if child.operation == '*' and any(term == _literal(1.0) for term in child.operands):
-                child = child.operands[1] if child.operands[0] == _literal(1.0) else child.operands[0]
-            elif child.operation == 'cast' and np.dtype(child.value) == np.dtype('float32'):
-                child = child.operands[0]
-            else:
-                break
-        if child.operation != 'logical_load' or lowering.sources[child.value[0]].dtype.kind != 'f':
-            return value
-        operands.append(child)
-    resolved = _resolve_logical(value, lowering.sources)
-    layout = _expression_layout(resolved, lowering.sources, lowering.whole, {})
-    return _Expression('indexed_contract', tuple(operands), (value, layout))
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -2570,15 +2135,13 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             return _Expression(node.operation, tuple(specialize(child) for child in node.operands), node.value)
 
         for expression, spec in zip(expressions, output_specs):
-            value = _preserve_indexed_contractions(specialize(expression), lowering)
+            value = specialize(expression)
             target = spec.resolve(coordinate)
             value = _resolve_logical(value, lowering.sources)
             origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
             domain_shape = spec._tensor.shape
             if value.operation == 'transpose':
                 value, target, origin, domain_shape = value.operands[0], target.T, origin[::-1], domain_shape[::-1]
-            if value.operation == 'indexed_contract' and target.dtype.kind != 'f':
-                value = _resolve_logical(value.value[0], lowering.sources)
             requests.append((lowering, value, target, origin, domain_shape))
 
             # design/algorithm-sources.md#in-operation-publication
@@ -2598,12 +2161,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
     for lowering, value, target, origin, domain_shape in requests:
         lowering.reduction_uses = uses
         coordinate = lowering.coordinate
-        if value.operation == 'indexed_contract' and target.shape[1] == 1:
-            layout = lowering.layout(value)
-            row = origin[0] if layout[1][0] else 0
-            result = lowering.indexed_contraction_panel(value, (row, 0), target.shape, target)
-            lowering.publish((result,), target)
-        elif value.operation == 'dot':
+        if value.operation == 'dot':
             layout = lowering.layout(value)
             for axis in range(2):
                 expected = domain_shape[axis] if layout[1][axis] else target.shape[axis]
