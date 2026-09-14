@@ -5,7 +5,7 @@ import numpy as np
 _REDUCTIONS = ('sum',)
 _REAL_FUNCTIONS = ('exp', 'rsqrt')
 _POINTWISE_FUNCTIONS = _REAL_FUNCTIONS
-_POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%',
+_POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast',
     *_POINTWISE_FUNCTIONS)
 
 
@@ -62,22 +62,6 @@ class _Expression:
     # design/algorithm-sources.md#kernelsexpression
     def __rtruediv__(self, other):
         return _literal(other) / self
-
-    # design/algorithm-sources.md#kernelsexpression
-    def __floordiv__(self, other):
-        return _Expression('//', (self, _literal(other)))
-
-    # design/algorithm-sources.md#kernelsexpression
-    def __rfloordiv__(self, other):
-        return _literal(other) // self
-
-    # design/algorithm-sources.md#kernelsexpression
-    def __mod__(self, other):
-        return _Expression('%', (self, _literal(other)))
-
-    # design/algorithm-sources.md#kernelsexpression
-    def __rmod__(self, other):
-        return _literal(other) % self
 
     # design/algorithm-sources.md#kernelsexpression
     def __lt__(self, other):
@@ -205,7 +189,7 @@ def _static_value(node, inputs, rows, columns, coordinate):
                     return None
                 result[enabled] = value
         return result
-    if node.operation not in ('cast', '+', '-', '*', '/', '//', '%', '<', '<=', '>', '>=', '==', '&', '|'):
+    if node.operation not in ('cast', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|'):
         return None
     values = tuple(_static_value(child, inputs, rows, columns, coordinate) for child in node.operands)
     if any(value is None for value in values):
@@ -225,13 +209,12 @@ def _static_value(node, inputs, rows, columns, coordinate):
         return None
     left, right = (value.astype(promoted) for value in values)
     with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
-        if node.operation in ('/', '//', '%'):
+        if node.operation == '/':
             if np.any(right == 0) or (promoted.kind == 'i' and np.any((left == np.iinfo(promoted).min) & (right == -1))):
                 return None
             quotient, remainder = np.floor_divide(left, right), np.remainder(left, right)
-            if node.operation == '/':
-                quotient = quotient + (((left < 0) != (right < 0)) & (remainder != 0)).astype(promoted)
-            return (remainder if node.operation == '%' else quotient).astype(dtype)
+            quotient = quotient + (((left < 0) != (right < 0)) & (remainder != 0)).astype(promoted)
+            return quotient.astype(dtype)
         if promoted.kind == 'i' and node.operation in ('+', '-', '*'):
             exact = {'+': np.add, '-': np.subtract, '*': np.multiply}[node.operation](left.astype(object), right.astype(object))
             bounds = np.iinfo(promoted)
@@ -547,33 +530,11 @@ class _ExpressionKernel:
             pointers[index] = tuple(range(len(physical), len(physical) + len(refs)))
             physical.extend(refs)
 
-        # design/algorithm-sources.md#kernelsdot
-        def integral(node):
-            if node.operation == 'input':
-                return inputs[node.value].dtype.kind != 'f'
-            if node.operation == 'load':
-                return inputs[node.value].dtype.kind != 'f' and integral(node.operands[3])
-            if node.operation == 'select':
-                return all(integral(child) for child in node.operands[1:])
-            if node.operation == 'cast':
-                return np.dtype(node.value).kind != 'f'
-            if node.operation == 'literal':
-                return isinstance(node.value, (int, bool))
-            if node.operation in ('<', '<=', '>', '>=', '==', 'row', 'column', 'block_ordinal', 'lookup'):
-                return True
-            if node.operation in _REAL_FUNCTIONS:
-                return False
-            if node.operation in _REDUCTIONS:
-                return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
-            return all(integral(child) for child in node.operands)
-
         # design/algorithm-sources.md#kernelsexpression
         def visit(node):
             if node in widths:
                 return widths[node]
             sizes = tuple(visit(child) for child in node.operands)
-            if node.operation in ('//', '%') and not all(integral(child) for child in node.operands):
-                raise ValueError('Integer quotient and remainder require integral operands')
             if node.operation == 'input':
                 ref = inputs[node.value]
                 if ref.shape[0] not in (1, output.shape[0]):
@@ -611,7 +572,7 @@ class _ExpressionKernel:
                 if part.operation == 'column':
                     return f'((long)({column}))' if metal else f'((int64_t)({column}))'
                 if part.operation in _REDUCTIONS:
-                    return f'(({"long" if metal else "int64_t"}){names[part]})' if part.operation == 'sum' and _reduction_dtype(part, inputs, output.dtype).kind in 'ib' else names[part]
+                    return names[part]
                 ref = inputs[part.value]
                 if part.operation == 'load':
                     return _indexed_load_expression(ref, pointers[part.value][0], layouts.get(part.value), args, metal)
@@ -649,18 +610,12 @@ class _ExpressionKernel:
             lines.append(_CPU_PUBLICATION_LOOP)
         for node in reductions:
             name, child = names[node], node.operands[0]
-            dtype = _reduction_dtype(node, inputs, output.dtype)
-            unsigned = dtype.kind == 'u' or (dtype.kind in 'ib' and integral(child))
-            accumulator = (('ulong' if metal else 'uint64_t') if unsigned else ('long' if metal else 'int64_t')) if dtype.itemsize == 8 else (
-                'float' if dtype.kind == 'f' else ('uint' if metal else 'uint32_t') if dtype.kind in 'ub' else ('int' if metal else 'int32_t'))
-            lines.append(f'{accumulator} {name}=0;')
+            _reduction_dtype(node, inputs)
+            lines.append(f'float {name}=0;')
             operand = emit(child, 'k')
             combine = f'{name}+={operand}'
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {combine};')
-            if metal and dtype.kind in 'iub':
-                lines.append(f'uint {name}_lo=simd_sum(uint(ulong({name})&65535ul)), {name}_mid=simd_sum(uint((ulong({name})>>16)&65535ul)), {name}_hi=simd_sum(uint(ulong({name})>>32));')
-                lines.append(f'{name}_mid+={name}_lo>>16; {name}_hi+={name}_mid>>16; {name}=(ulong({name}_hi)<<32)|(ulong({name}_mid&65535u)<<16)|ulong({name}_lo&65535u);')
-            elif metal:
+            if metal:
                 lines.append(f'{name}=simd_sum({name});')
         destination = _memory_expression(output.dtype, len(physical), f'r*{output.view.row_stride}+c*{output.view.column_stride}', metal)
         lines.append(f'for({"ulong" if metal else "uint64_t"} c={"column_begin+lane" if metal else "part.column_begin"};c<{"column_end" if metal else "part.column_end"};c+={32 if metal else 1}) {destination}={emit(expression, "c")};')
@@ -876,8 +831,7 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         row, column = args
         rows, columns, grid_columns = node.value
         return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
-    return _scalar_expression(node, args, metal,
-        _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
+    return _scalar_expression(node, args, metal)
 
 
 # design/algorithm-sources.md#kernelsexpression
@@ -902,10 +856,7 @@ def _expression_dtype(node, inputs):
     if node.operation == 'literal':
         return np.dtype('int32' if isinstance(node.value, bool) else 'float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
     if node.operation in _REDUCTIONS:
-        if node.value is not None:
-            return np.dtype(node.value)
-        child = _expression_dtype(node.operands[0], inputs)
-        return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
+        return _reduction_dtype(node, inputs)
     if node.operation == 'load':
         types = (inputs[node.value].dtype, _expression_dtype(node.operands[3], inputs))
     else:
@@ -918,10 +869,10 @@ def _expression_dtype(node, inputs):
 
 
 # design/algorithm-sources.md#kernelsadd
-def _reduction_dtype(node, inputs, output):
-    if node.value is not None:
-        return np.dtype(node.value)
-    return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
+def _reduction_dtype(node, inputs):
+    if _expression_dtype(node.operands[0], inputs).kind != 'f':
+        raise TypeError('Tensor sums require floating-point inputs')
+    return np.dtype('float32')
 
 
 
@@ -929,7 +880,7 @@ def _reduction_dtype(node, inputs, output):
 
 
 # design/algorithm-sources.md#kernelsexpression
-def _scalar_expression(node, args, metal, dtype=None):
+def _scalar_expression(node, args, metal):
     if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
         name = node.operation + ('' if metal else 'f')
         return name + '(' + ','.join(f'((float)({value}))' for value in args) + ')'
@@ -953,14 +904,6 @@ def _scalar_expression(node, args, metal, dtype=None):
         return args[0]
     if node.operation == 'select':
         return f'(({args[0]})?({args[1]}):({args[2]}))'
-    if node.operation in ('//', '%'):
-        scalar = ('uint' if dtype.kind == 'u' else 'int') + str(dtype.itemsize*8) + '_t'
-        left, right = (f'(({scalar})({arg}))' for arg in args)
-        if dtype.kind == 'u':
-            return f'(({left}){"/" if node.operation == "//" else "%"}({right}))'
-        remainder = f'(({left})%({right}))'
-        correction = f'(({remainder}!=0)&&((({left})<0)!=(({right})<0)))'
-        return f'((({left})/({right}))-{correction})' if node.operation == '//' else f'({remainder}+({correction}?({right}):0))'
     if node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|'):
         return f'({args[0]}{node.operation}{args[1]})'
     if node.operation == 'rsqrt':
@@ -1259,13 +1202,7 @@ class _ExpressionRegions:
                     continue
                 target = direct if direct is not None and len(parts) == 2 and direct.dtype == dtype else self.temporary((rows, 1), dtype)
                 inputs = (parts[index], parts[index + 1])
-                if dtype.kind == 'f':
-                    add.bind(self.program, inputs, (target,))
-                else:
-                    left, right = arguments(2)
-                    bits = 0xffffffffffffffff
-                    merged = (left & bits)+(right & bits)
-                    _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
+                add.bind(self.program, inputs, (target,))
                 following.append(target)
             parts = following
         self.cache[key] = parts[0]
@@ -1355,19 +1292,19 @@ class _ExpressionRegions:
             return replacements[key]
 
         # design/algorithm-sources.md#kernelsdot
-        def lower(node, accumulation=target.dtype):
+        def lower(node):
             if node.operation == 'domain':
                 if 0 in node.value[0]:
                     raise ValueError('Empty expression domains cannot produce a nonempty region')
-                return lower(node.operands[0], _expression_dtype(node.operands[0], self.sources))
+                return lower(node.operands[0])
             if node.operation == 'cast':
                 child = node.operands[0]
-                return _Expression('cast', (lower(child, _expression_dtype(child, self.sources)),), node.value)
+                return _Expression('cast', (lower(child),), node.value)
             if node.operation in _REDUCTIONS:
                 layout = self.layout(node)
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
                 rows = 1 if layout[0][0] == 1 else shape[0]
-                dtype = _reduction_dtype(node, self.sources, accumulation)
+                dtype = _reduction_dtype(node, self.sources)
                 inline = self.inline_reduction(node, value, origin, shape, dtype, external)
                 if inline is not None:
                     # design/algorithm-sources.md#programkernel_call
@@ -1380,7 +1317,7 @@ class _ExpressionRegions:
 
                     child = _Expression('domain', (substitute(node.operands[0]),),
                         (shape, (False, False), shape))
-                    return _Expression(node.operation, (child,), dtype.str)
+                    return _Expression(node.operation, (child,))
                 return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
             if node.operation == 'dot':
                 layout = self.layout(node)
@@ -1403,13 +1340,13 @@ class _ExpressionRegions:
                 return reference(('transpose', node, where, extent), (self.panel(node, where, extent),))
             if node.operation == 'load':
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
-                return _Expression('load', tuple(lower(child, _expression_dtype(child, self.sources)) for child in node.operands), symbol.value)
+                return _Expression('load', tuple(lower(child) for child in node.operands), symbol.value)
             if node.operation in ('row', 'column') and not external:
                 axis = 0 if node.operation == 'row' else 1
                 return node + origin[axis]
-            return _Expression(node.operation, tuple(lower(child, _expression_dtype(child, self.sources)) for child in node.operands), node.value)
+            return _Expression(node.operation, tuple(lower(child) for child in node.operands), node.value)
 
-        lowered = lower(value, _expression_dtype(value, self.sources) if reduce else target.dtype)
+        lowered = lower(value)
         if reduce:
             lowered = _Expression(reduce, (lowered,))
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
@@ -1442,18 +1379,18 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             requests.append((lowering, value, target, origin, domain_shape))
 
             # design/algorithm-sources.md#programkernel_call
-            def demand(node, accumulation):
+            def demand(node):
                 if node.operation in _REDUCTIONS:
                     layout = lowering.layout(node)
                     row = 0 if layout[0][0] == 1 or not layout[1][0] else origin[0]
                     rows = 1 if layout[0][0] == 1 else target.shape[0]
-                    dtype = _reduction_dtype(node, lowering.sources, accumulation)
+                    dtype = _reduction_dtype(node, lowering.sources)
                     key = ('reduction', lowering.key(node, (row, 0), (rows, 1)), dtype.str)
                     consumers.setdefault(key, set()).add(len(requests)-1)
                 for child in node.operands:
-                    demand(child, _expression_dtype(child, lowering.sources))
+                    demand(child)
 
-            demand(value, target.dtype)
+            demand(value)
     uses = {key: len(requests) for key, requests in consumers.items()}
     for lowering, value, target, origin, domain_shape in requests:
         lowering.reduction_uses = uses
@@ -1469,7 +1406,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
         elif value.operation in _REDUCTIONS and target.shape[1] == 1:
             layout = lowering.layout(value)
             row = origin[0] if layout[1][0] else 0
-            dtype = _reduction_dtype(value, lowering.sources, target.dtype)
+            dtype = _reduction_dtype(value, lowering.sources)
             result = lowering.reduction(value, row, target.shape[0], dtype, target)
             if result is not target:
                 symbol, = arguments(1)

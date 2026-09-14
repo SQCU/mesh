@@ -33,7 +33,7 @@ Papadopoulos and Culler, *Monsoon* (1990): `Result` observes output presence and
 
 ## kernels.expression
 
-The JAX authors, [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs): arithmetic, casts, indices and masks describe functions over Ref regions. `kernels.arguments` names the inputs; the retained scalar operations support the listed neural-network compositions. Indexed loads use the configured pages and their actual dependencies.
+The JAX authors, [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs): arithmetic, casts, indices and masks describe functions over Ref regions. `kernels.arguments` names the inputs; the retained scalar operations support the listed neural-network compositions. Floor-division and remainder expression operators, modular integer reduction trees and the custom multiword integer SIMD sum are removed. Tensor sums accumulate floating-point inputs in FP32 through ordinary addition and Metal’s existing `simd_sum`; integer indices and masks remain available. Reduction lowering no longer carries an enclosing output dtype through its recursive traversal. Indexed loads use the configured pages and their actual dependencies.
 
 ## kernels.dot
 
