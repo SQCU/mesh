@@ -1272,7 +1272,7 @@ def main():
                             if operation in ('arcsinh', 'expm1', 'log1p', 'sqrt', 'floor_divide'):
                                 correct &= np.array_equal(np.signbit(result.array[target == 0]), np.signbit(target[target == 0]))
                             if not correct:
-                                raise ArithmeticError(f'Elementary early consumer differs: {operation}')
+                                raise ArithmeticError(f'Elementary early consumer differs: {operation}, region={(i,j)}, actual={result.array.tolist()}, expected={target.tolist()}')
                         elif result.ready:
                             raise ArithmeticError('Elementary consumer read a withheld row')
                 print(json.dumps(dict(event='xonotic_elementary_early', generation=generation, withheld_row=1-early_row,
@@ -1291,7 +1291,7 @@ def main():
                         if operation in ('arcsinh', 'expm1', 'log1p', 'sqrt', 'floor_divide'):
                             correct &= np.array_equal(np.signbit(result.array[target == 0]), np.signbit(target[target == 0]))
                         if not correct:
-                            raise ArithmeticError(f'Elementary consumer differs after reuse: {operation}')
+                            raise ArithmeticError(f'Elementary consumer differs after reuse: {operation}, region={(i,j)}, actual={result.array.tolist()}, expected={target.tolist()}')
                 print(json.dumps(dict(event='xonotic_elementary_complete', generation=generation,
                     elapsed_ms=(time.monotonic_ns()-started)/1e6,
                     output={operation: [(i,j,result.array.tolist()) for i,j,result in results] for operation,results in zip(operations,observations)})), flush=True)
