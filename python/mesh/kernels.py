@@ -505,6 +505,13 @@ class _ExpressionKernel:
         for output in outputs:
             output.partial = Partial.merge(tuple(ref for source in inputs
                 for ref in (source.blocks.values() if hasattr(source, 'blocks') else (source,))))
+        binding = program._functions.get(self)
+        if binding is not None and binding is not self:
+            if isinstance(binding, _ExpressionKernel):
+                binding.bind(program, inputs, outputs, coordinate)
+            else:
+                binding(program, inputs, outputs)
+            return
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
