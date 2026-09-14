@@ -21,7 +21,7 @@ Apple, [Metal command submission](https://developer.apple.com/documentation/meta
 
 ## Program.copy
 
-Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): SEND/RECV posting, registered operands, finite frame queues and completion handling. Dedicated send and receive threads spin independently of numerical execution, including initial receive posting. Index descriptions identify the configured destination pages for ready-order transfers. `Program.replicate` composes these copies; contiguous materialization uses the existing numerical copy path.
+Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): SEND/RECV posting, registered operands, finite frame queues and completion handling. Dedicated send and receive threads spin independently of numerical execution, including initial receive posting. Index descriptions identify the configured destination pages for ready-order transfers. The send thread reserves hardware queue capacity while selecting ready transfers and posts their payloads directly after the description, without an intermediate announced-payload queue. `Program.replicate` composes these copies; contiguous materialization uses the existing numerical copy path.
 
 ## Program.write
 

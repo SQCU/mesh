@@ -9,7 +9,7 @@ struct mesh_send_edge {uint32_t queue,index,next;};
 struct mesh_ready {uint32_t head,tail;};
 struct mesh_hold { uint32_t rows,pages; };
 struct mesh_queue { struct mesh_posted posted[QD]; uint32_t head,tail,next,frames; };
-struct mesh_pending { struct mesh_transfer entries[QD]; uint32_t head,tail,frames; };
+struct mesh_pending { struct mesh_transfer entries[QD]; uint32_t head,tail; };
 struct mesh_index_frame { uint32_t queue,count; struct mesh_transfer entries[(MESH_INDEX_BYTES-8)/sizeof(struct mesh_transfer)]; };
 struct mesh_worker { struct mesh_link *link; pthread_t thread; uint32_t direction; };
 struct mesh_link {
@@ -18,7 +18,7 @@ struct mesh_link {
   _Atomic int progressing;
   struct hdr *M; struct mesh_verbs provider; int qps,frames,budget; uint64_t client;
   struct mesh_queue *queues;
-  struct mesh_pending *pending,*announced;
+  struct mesh_pending *pending;
   struct mesh_hold *holds;
   uint8_t *active,*queued;
   uint32_t *ready_next,*send_heads;
@@ -166,36 +166,20 @@ static void link_release(struct mesh_link *link,uint32_t q,struct mesh_posted en
   }
   link->active[(size_t)q*mesh_blocks(m)+entry.index]=0;
 }
-/* design/algorithm-sources.md#programcopy */
-static int link_send_announced(struct mesh_link *link,uint32_t q){
-  struct mesh_pending *pending=&link->announced[q];
-  struct mesh_queue *out=link_queue(link,q,MESH_SEND);
-  while(pending->head!=pending->tail){
-    struct mesh_transfer t=pending->entries[pending->head%QD];
-    if(t.bytes/4096>link->provider.capacity[q][MESH_SEND]-out->frames)return 0;
-    struct mesh_posted entry={.row=t.local_row,.page=t.local_page,.plane=t.plane,.index=t.index,.bytes=t.bytes};
-    int error=link_post(link,q,MESH_SEND,entry);
-    if(error)return error;
-    pending->head++;pending->frames-=t.bytes/4096;
-  }
-  return 0;
-}
 /* design/algorithm-sources.md#programkernel_call */
 static void link_send_ready(struct mesh_link *link,uint32_t q){
   struct hdr *M=link->M;struct mesh_verbs *v=&link->provider;
   uint32_t iq=(uint32_t)link->qps;
   struct mesh_queue *indices=link_queue(link,iq,MESH_SEND);
-  if(link_send_announced(link,q))return;
-  struct mesh_pending *announced=&link->announced[q];
   struct mesh_queue *out=link_queue(link,q,MESH_SEND);
   struct mesh_transfer *transfers=mesh_transfers(M,q,MESH_SEND);
   struct mesh_ready *ready=&link->ready[q];
-  while(ready->head!=MESH_ABSENT && out->frames+announced->frames<v->capacity[q][MESH_SEND] &&
+  while(ready->head!=MESH_ABSENT && out->frames<v->capacity[q][MESH_SEND] &&
         indices->frames<v->capacity[iq][MESH_SEND] && indices->tail-indices->head<(uint32_t)link->budget){
     uint32_t slot=indices->tail%(uint32_t)link->budget;
     struct mesh_index_frame *frame=link_indices(link,MESH_SEND,slot);
     frame->queue=q;frame->count=0;
-    uint32_t available=v->capacity[q][MESH_SEND]-out->frames-announced->frames;
+    uint32_t available=v->capacity[q][MESH_SEND]-out->frames;
     uint32_t previous=MESH_ABSENT,index=ready->head;
     while(index!=MESH_ABSENT && frame->count<sizeof frame->entries/sizeof *frame->entries){
       size_t key=(size_t)q*mesh_blocks(M)+index;
@@ -215,9 +199,9 @@ static void link_send_ready(struct mesh_link *link,uint32_t q){
     for(uint32_t i=0;i<frame->count;i++){
       struct mesh_transfer t=frame->entries[i];
       link_hold(link,q,&t);
-      announced->entries[announced->tail++%QD]=t;announced->frames+=t.bytes/4096;
+      struct mesh_posted entry={.row=t.local_row,.page=t.local_page,.plane=t.plane,.index=t.index,.bytes=t.bytes};
+      if(link_post(link,q,MESH_SEND,entry)){link_release(link,q,entry);return;}
     }
-    if(link_send_announced(link,q))break;
   }
 }
 /* design/algorithm-sources.md#programkernel_call */
@@ -315,16 +299,8 @@ static int link_down(struct mesh_link *link){
     }
     queue->head=queue->tail=queue->next=queue->frames=0;
   }
-  for(uint32_t q=0;q<(uint32_t)link->qps;q++){
-    struct mesh_pending *pending=&link->announced[q];
-    while(pending->head!=pending->tail){
-      struct mesh_transfer t=pending->entries[pending->head++%QD];
-      link_release(link,q,(struct mesh_posted){.row=t.local_row,.page=t.local_page,.plane=t.plane,.index=t.index,.bytes=t.bytes});
-    }
-  }
   memset(link->queued,0,(size_t)MESH_QPS*mesh_blocks(M));
   for(uint32_t q=0;q<MESH_QPS;q++)link->ready[q]=(struct mesh_ready){MESH_ABSENT,MESH_ABSENT};
-  memset(link->announced,0,MESH_QPS*sizeof *link->announced);
   memset(link->pending,0,MESH_QPS*sizeof *link->pending);
   link->client=0;
   atomic_store(&M->port.phase,MESH_PAIRING);
@@ -381,7 +357,6 @@ int main(int argc,char**argv){
   __sync_synchronize(); M->magic=MESH_MAGIC;
   link.queues=calloc(2*(MESH_QPS+1),sizeof *link.queues);
   link.pending=calloc(MESH_QPS,sizeof *link.pending);
-  link.announced=calloc(MESH_QPS,sizeof *link.announced);
   link.holds=calloc(mesh_rows(M),sizeof *link.holds);
   link.active=calloc((size_t)MESH_QPS*mesh_blocks(M),sizeof *link.active);
   link.queued=calloc((size_t)MESH_QPS*mesh_blocks(M),1);
@@ -389,7 +364,7 @@ int main(int argc,char**argv){
   link.send_heads=calloc(mesh_rows(M),sizeof *link.send_heads);
   provider->completions=calloc(2*QD,sizeof *provider->completions);
   int status=0;
-  if(!link.queues || !link.pending || !link.announced || !link.holds || !link.active || !link.queued || !link.ready_next || !link.send_heads || !provider->completions){ status=ENOMEM; goto teardown; }
+  if(!link.queues || !link.pending || !link.holds || !link.active || !link.queued || !link.ready_next || !link.send_heads || !provider->completions){ status=ENOMEM; goto teardown; }
   atomic_store(&M->port.phase,MESH_PAIRING);
   fprintf(stderr,"bridge node %d: %d queue pair(s), %d maximum frames per block, %d index slots per direction\n",me,link.qps,link.frames,link.budget);
 
@@ -430,6 +405,6 @@ teardown:
   atomic_store(&M->port.phase,MESH_STOPPED);
   if(!down_verbs()){ fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno)); return 1; }
   if(lsock>=0) close(lsock);
-  free(provider->completions); free(link.queues);free(link.pending);free(link.announced);free(link.holds);free(link.active);free(link.queued);free(link.ready_next);free(link.send_heads);free(link.send_edges);
+  free(provider->completions); free(link.queues);free(link.pending);free(link.holds);free(link.active);free(link.queued);free(link.ready_next);free(link.send_heads);free(link.send_edges);
   munmap(M,length); return status;
 }
