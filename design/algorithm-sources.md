@@ -3277,3 +3277,58 @@ native plans make measured selection inspectable, but do not by themselves
 implement a complete profile key or cost-guided planner. Hardware/software,
 operation semantics, dtype/layout, publication partitions, merges and assembly
 remain part of that complete plan comparison.
+
+
+## Compiled specialization identities
+
+The JAX authors' [persistent compilation cache](https://docs.jax.dev/en/latest/persistent_compilation_cache.html#how-it-works)
+identifies compiled computations together with compiler flags, software version
+and device configuration. This is the relevant principle for matching measured
+costs to realized code. Mesh retains the exact generated source and binding
+specialization at setup; this is not an inference from output values or a
+runtime backend choice. NIST's [Secure Hash Standard](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)
+defines the SHA-256 source identities, implemented through the existing
+CommonCrypto dependency.
+
+The existing CPU source cache retains `MeshCPUCode` entries; the existing Metal
+source cache now retains a code entry containing its library. Each entry owns
+one immutable source string and digest. A paired source can be retained without
+compiling its inactive backend; compilation checks the actual code handle or
+library, not merely entry existence. There is no second source-cache mirror.
+Functions retain their actual code entries and an immutable binding descriptor.
+
+The shared binder already receives both generated sources. Its source-pair
+identity hashes the UTF-8 string `cpu:<CPU SHA256>\nmetal:<Metal SHA256>\n`, with
+fixed-width lowercase hexadecimal digests. A direct Metal binding leaves the
+CPU digest empty and exposes no CPU source. The pair identity belongs to the
+binding: one CPU source may be paired with different Metal sources. It identifies
+identical generated lowering across backends, not equivalent algebra across
+different tilings or a native/compiled alternative. Source and constant hashes
+are setup metadata; tensor payloads are neither hashed nor checked by transport.
+
+The binding descriptor retains actual backend, selected source, ordered dispatch
+names, grids, groups and argument offsets, configured constant lengths/digests,
+exact typed input/output views, and compiler options. Entry-point names are
+copied into immutable metadata while their original input strings are valid.
+Constant bytes remain in their existing configured Metal buffers. The descriptor
+adds no operand storage or numerical copy. CPU descriptors also retain the
+paired Metal dispatch as an alternative lowering; selected source/backend
+identify which implementation actually executes. Compiler executable and flags
+are recorded, but they do not substitute for recording compiler revision and
+device/software provenance in a complete portable cost key.
+
+`Program.code_trace` exports this immutable metadata separately from frequent
+`Program.trace` progress reads. Functions refer to source identities, and each
+raw source is exported once per digest. Source getters return retained cache
+strings. Metadata formatting and hashing do not enter numerical invocation;
+setup owns compilation, descriptor creation and allocation. Existing native
+plan descriptors continue to represent builtin/MPS/SGEMM/NEON operations rather
+than assigning them fictional generated source.
+
+The existing streaming-algebra workflow archives the code snapshot with its
+compute/routes/transfers and verifies source identities, selected backend,
+source-pair references, dispatch metadata and actual output view identities.
+Its compiled functions use the shared generated-source path. Nonempty external
+Metal constants and multiple custom dispatches are supported by the retained
+setup fields but are not numerically exercised by that workflow; source review
+must not be reported as measured coverage of those cases.

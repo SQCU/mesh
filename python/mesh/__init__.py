@@ -445,6 +445,32 @@ class Program:
         return tuple(result)
 
     @property
+    # design/algorithm-sources.md#compiled-specialization-identities
+    def code_trace(self):
+        import json
+        bindings, sources = [], {}
+        backends = ('external', 'cpu_sgemm', 'cpu_neon_contract', 'cpu_builtin', 'cpu_compiled',
+                    'metal_compiled', 'metal_mps', 'metal_builtin', 'coreml', 'selected_mixed')
+        for index in range(self.native.algebra_trace_count(self.handle)):
+            encoded = self.native.algebra_specialization(self.handle, index)
+            if encoded is None:
+                continue
+            binding = dict(json.loads(encoded), function=index)
+            binding['backend'] = backends[binding['backend']]
+            for view in (*binding['inputs'], *binding['outputs']):
+                view['dtype'] = str(_DTYPES[view.pop('scalar')])
+            for language, name in enumerate(('cpu', 'metal')):
+                identity = binding['sources'].get(name)
+                if identity is None:
+                    continue
+                if identity not in sources:
+                    sources[identity] = dict(text=self.native.algebra_source_text(self.handle, index, language).decode(), languages=[])
+                if name not in sources[identity]['languages']:
+                    sources[identity]['languages'].append(name)
+            bindings.append(binding)
+        return dict(bindings=bindings, sources=sources)
+
+    @property
     # design/algorithm-sources.md#shared-sparse-routing-lowering
     def route_trace(self):
         result = []
