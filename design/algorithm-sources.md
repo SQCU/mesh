@@ -11,6 +11,8 @@ The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/de
 
 The JAX authors, [Refs and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html), and Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): tensor blocks name actual registered pages. Ref slices, transposes and broadcasts describe those same operands; they do not create a copied transport store.
 
+The llama.cpp authors, [GGUF format](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md): the engine's existing `ModelFile` loader reads configured weight slices directly into registered `MatrixView`s. `Program.constant(ref)` marks a region initialized by such a setup loader; passing a value also fills the region.
+
 ## Program.kernel_call
 
 Papadopoulos and Culler, [Monsoon: an Explicit Token-Store Architecture](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf), ISCA 1990: operand-associated presence drives function issue. The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html): a grid and index maps bind independently usable regions.

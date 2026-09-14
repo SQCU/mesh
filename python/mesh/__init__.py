@@ -414,9 +414,10 @@ class Program:
             self.native.writer_complete(ref._writer, published)
 
     # design/algorithm-sources.md#program
-    def constant(self, ref, value):
+    def constant(self, ref, value=None):
         ref.whole()
-        ref.array[...] = value
+        if value is not None:
+            ref.array[...] = value
         check(self.native.tensor_constant(ref.view.tensor, ref.view.extent))
         self._constant_extents.add((ref.view.tensor, ref.view.extent))
 

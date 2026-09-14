@@ -182,3 +182,19 @@ including the initial receive fill. Each receive completion immediately attempts
 to replenish its queue, and each send completion immediately attempts further
 posting. These ownership rules do not imply zero hardware latency or remove
 existing dependencies on receive descriptions and reusable destination storage.
+
+## Loading model shards into registered operands
+
+`streaming-chain.py --model weights.gguf --numerics libgemma_metal.dylib`
+interprets its up/down weight arguments as model tensor names. The existing
+`ModelFile` reader supplies shapes during setup, and the caller's `--split`
+selects the hidden partition. The engine loads each partition directly into the
+transposed view of its configured Ref, then `Program.constant(ref)` marks those
+pages constant. No intermediate NumPy weight array or alternate operand backing
+is used by this path. The ordinary `.npy` input path remains available when
+`--model` is absent.
+
+The setup binding currently accepts the existing loader's FP16, BF16 and FP32
+matrix formats. It adds no quantized decoder. The file handle is closed when the
+example leaves its setup/program scope; numerical invocation uses only the
+registered weight pages and previously bound numerical functions.

@@ -1,6 +1,7 @@
 import argparse
 import signal
 import sys
+from contextlib import ExitStack
 
 import numpy as np
 
@@ -23,6 +24,7 @@ def main():
     parser.add_argument('--instances', type=int, default=2)
     parser.add_argument('--region')
     parser.add_argument('--numerics')
+    parser.add_argument('--model')
     parser.add_argument('--normalize', action='store_true')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
@@ -31,10 +33,10 @@ def main():
     args = parser.parse_args()
     if args.instances < 1:
         parser.error('--instances must be positive')
-    if args.normalize and not args.numerics:
-        parser.error('--normalize requires the engine numerical library')
+    if (args.normalize or args.model) and not args.numerics:
+        parser.error('--normalize and --model require the engine numerical library')
     values = np.load(args.input)
-    weights = (np.load(args.up_weight, mmap_mode='r'), np.load(args.down_weight, mmap_mode='r'))
+    weights = None if args.model else (np.load(args.up_weight, mmap_mode='r'), np.load(args.down_weight, mmap_mode='r'))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     functions = {}
     if args.numerics:
@@ -67,18 +69,46 @@ def main():
                 check(normalize_native(program.handle,
                     (View * 3)(*(ref.view for ref in (*inputs, *outputs))), scalar))
 
-    with Program(backend=args.backend, region=args.region, functions=functions) as program:
-        shard = slice(0, args.split) if program.node == args.root else slice(args.split, weights[0].shape[1])
-        weights = (weights[0][:, shard], weights[1][shard, :])
-        up_weight, down_weight = tuple(program.tensor(w.shape, dtype=w.dtype) for w in weights)
-        for tensor, value in zip((up_weight, down_weight), weights):
-            program.constant(tensor[0, 0], value)
+    with ExitStack() as resources, Program(backend=args.backend, region=args.region, functions=functions) as program:
+        if args.model:
+            library.gemma_mesh_model_open.argtypes = [C.c_char_p]
+            library.gemma_mesh_model_open.restype = C.c_void_p
+            library.gemma_mesh_model_close.argtypes = [C.c_void_p]
+            library.gemma_mesh_model_close.restype = None
+            library.gemma_mesh_model_shape.argtypes = [C.c_void_p, C.c_char_p, C.POINTER(C.c_size_t)]
+            library.gemma_mesh_model_shape.restype = C.c_int32
+            library.gemma_mesh_model_load.argtypes = [C.c_void_p, C.c_char_p, C.c_void_p, C.POINTER(View), C.c_int32, C.c_size_t, C.c_size_t]
+            library.gemma_mesh_model_load.restype = C.c_int32
+            model = library.gemma_mesh_model_open(args.model.encode())
+            if not model:
+                raise OSError(f'Could not open model file {args.model}')
+            resources.callback(library.gemma_mesh_model_close, model)
+            shapes = []
+            for name in (args.up_weight, args.down_weight):
+                shape = (C.c_size_t * 2)()
+                check(library.gemma_mesh_model_shape(model, name.encode(), shape))
+                shapes.append(tuple(reversed(shape)))
+            dtypes = (values.dtype, values.dtype)
+        else:
+            shapes, dtypes = tuple(w.shape for w in weights), tuple(w.dtype for w in weights)
+        start, end = (0, args.split) if program.node == args.root else (args.split, shapes[0][1])
+        up_weight = program.tensor((shapes[0][0], end - start), dtype=dtypes[0])
+        down_weight = program.tensor((end - start, shapes[1][1]), dtype=dtypes[1])
+        for index, tensor in enumerate((up_weight, down_weight)):
+            if args.model:
+                ref = tensor[0, 0].T
+                scalar = (np.dtype('float16'), np.dtype('float32')).index(ref.dtype)
+                check(library.gemma_mesh_model_load(model, (args.up_weight, args.down_weight)[index].encode(),
+                    program.handle, C.byref(ref.view), scalar, start if index else 0, 0 if index else start))
+                program.constant(tensor[0, 0])
+            else:
+                program.constant(tensor[0, 0], weights[index][:, start:end] if index == 0 else weights[index][start:end, :])
         if program.node == args.root:
             weight = np.load(args.consumer_weight, mmap_mode='r')
             consumer_weight = program.tensor(weight.shape, dtype=weight.dtype)
             program.constant(consumer_weight[0, 0], weight)
             if args.normalize:
-                gamma = program.tensor((1, weights[1].shape[1]), dtype=np.float16)
+                gamma = program.tensor((1, down_weight.shape[1]), dtype=np.float16)
                 program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
         inputs, outputs = [], {}
         for instance in range(args.instances):
