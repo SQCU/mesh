@@ -2789,3 +2789,15 @@ values, exceptional values, exact integer results, ragged output regions,
 downstream composition, independent withheld rows and storage reuse. These finite
 measurements do not establish a uniform ULP bound, fastest-kernel equivalence,
 or a matched performance result for the removed whole-region emitter.
+
+Metal expm1 uses a degree-nine exponential series for absolute inputs below
+one half and a precise exponential outside that interval. The omitted Taylor
+terms bound approximation error in that small interval below FP32 rounding
+scale; this is not a bound on total backend error. Asinh uses the identity
+below 2^-12 and the large-argument logarithm above 4096. New domain-sensitive
+Metal functions select precise variants explicitly. The SDK's arithmetic
+`mathMode` and default `mathFloatingPointFunctions` are separate settings;
+safe arithmetic alone does not select precise transcendental functions.
+Existing exp/tanh lowering and global compilation settings are unchanged.
+Power retains FP32 evaluation followed by the caller's output cast; exact
+integer exponentiation is not claimed by this migration.
