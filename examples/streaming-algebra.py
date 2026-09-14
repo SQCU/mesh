@@ -252,6 +252,7 @@ def main():
         xonotic_ordering = []
         xonotic_composed_indexed = []
         xonotic_indexed_context = None
+        xonotic_grouped_outer = None
         scatter_bases = {}
         xonotic_take_gradient = None
         xonotic_alias = None
@@ -680,6 +681,37 @@ def main():
             empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
             mean_result = program.export(lowered[integer_mean.index][0, 0])
             xonotic_ranges = range_storage, observations, references, empty_results, mean_result
+            # design/algorithm-sources.md#grouped-segment-reductions
+            outer_x = program.tensor((67, 5), (33, 5), dtype=np.float32)
+            outer_g = program.tensor((67, 7), (33, 7), dtype=np.float32)
+            outer_indices = program.tensor((67, 1), (33, 1), dtype=np.int64)
+            outer_base = program.tensor((5, 35), (1, 7), dtype=np.float32)
+            for ref in outer_base.blocks.values():
+                program.constant(ref, np.zeros(ref.shape, dtype=np.float32))
+            base_arg, selected_arg, x_arg, g_arg = kernels.arguments(4)
+            row, column = kernels.indices()
+            update = x_arg.reshape((67, 5)).at(row, column//7) * g_arg.reshape((67, 7)).at(row, column%7)
+            first_function = program.native.algebra_trace_count(program.handle)
+            grouped = program.kernel_call(kernels.expression(kernels.indexed_add(base_arg, selected_arg, update)),
+                grid=outer_base.grid, in_specs=(BlockSpec(None),)*4,
+                out_specs=BlockSpec((1, 7), lambda i,j: (i,j)), out_shape=ShapeDtypeStruct((5, 35), np.float32), peer=0)(
+                    outer_base, outer_indices, outer_x, outer_g)
+            last_function = program.native.algebra_trace_count(program.handle)
+            observations = tuple((i,j*grouped.block_shape[1],program.export(ref)) for (i,j),ref in sorted(grouped.blocks.items()))
+            generations = []
+            for generation in range(2):
+                x = ((np.arange(335, dtype=np.float32).reshape(67, 5)%23)-11+generation)/32
+                g = ((np.arange(469, dtype=np.float32).reshape(67, 7)%19)-9-generation)/64
+                selected = (np.arange(67, dtype=np.int64)+2*generation)%5
+                selected[::4] -= 5
+                selected[1::11] = 5 if generation == 0 else -6
+                normalized = np.where(selected < 0, selected+5, selected)
+                valid = (normalized >= 0) & (normalized < 5)
+                x[~valid, 0] = np.nan
+                expected = np.zeros((5, 5, 7), dtype=np.float64)
+                np.add.at(expected, normalized[valid], x[valid, :, None].astype(np.float64)*g[valid, None, :].astype(np.float64))
+                generations.append((x, g, selected[:, None], expected.reshape(5, 35)))
+            xonotic_grouped_outer = outer_x, outer_g, outer_indices, observations, first_function, last_function, generations
             # design/algorithm-sources.md#composable-indexed-contractions
             context_left, context_right = kernels.arguments(2)
             context_inner = kernels.arange(2)
@@ -1523,6 +1555,61 @@ def main():
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
+        if xonotic_grouped_outer is not None:
+            x_source, g_source, index_source, observations, first_function, last_function, generations = xonotic_grouped_outer
+            outer_trace = program.trace
+            published_rows = set()
+            for tensor in (x_source, g_source):
+                for chunk in (0, 1):
+                    ref = tensor[chunk, 0]
+                    region = program.native.tensor_rows(ref.view.tensor, ref.view.extent)
+                    published_rows.update(range(region.first, region.first+region.count))
+            readers = tuple(index for index in range(first_function, last_function)
+                if any(row in published_rows for region in outer_trace[index]['inputs']
+                       for row in range(region['first'], region['first']+region['count'])) or
+                   any(entry['role'] == 1 and any(row in published_rows for row in range(entry['first'], entry['first']+entry['count']))
+                       for entry in outer_trace[index]['indexed']))
+            print(json.dumps(dict(event='grouped_outer_setup', first_function=first_function, last_function=last_function,
+                rows=67, chunk_rows=33, experts=5, input_width=5, output_width=7)), flush=True)
+            for generation, (x, g, selected, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in (x_source, g_source, index_source) for ref in tensor.blocks.values()), 'writable')
+                started = time.monotonic_ns()
+                for (i,j),ref in index_source.blocks.items():
+                    row = i*index_source.block_shape[0]
+                    with program.write(ref) as destination:
+                        destination[...] = selected[row:row+ref.shape[0]]
+                for tensor, data in ((x_source, x), (g_source, g)):
+                    for chunk in (0, 1):
+                        ref = tensor[chunk, 0]
+                        row = chunk*tensor.block_shape[0]
+                        with program.write(ref) as destination:
+                            destination[...] = data[row:row+ref.shape[0]]
+                completed_functions = wait_completed(readers, started)
+                if not x_source[2, 0].writable or not g_source[2, 0].writable:
+                    raise ArithmeticError('Grouped outer product consumed an unpublished final source chunk')
+                late_group = int(selected[66, 0])
+                late_group = late_group+5 if late_group < 0 else late_group
+                early = tuple((i,j,result) for i,j,result in observations if i != late_group)
+                wait_for(tuple(result for i,j,result in early))
+                for i,j,result in early:
+                    if not np.allclose(result.array, expected[i:i+result.array.shape[0],j:j+result.array.shape[1]], rtol=2e-5, atol=2e-6):
+                        raise ArithmeticError('Grouped outer product stalled or corrupted an unrelated destination')
+                print(json.dumps(dict(event='grouped_outer_partial', generation=generation,
+                    source_rows=sorted(published_rows), completed_functions=completed_functions, withheld_row=66,
+                    withheld_group=late_group, output=[(i,j,result.array.tolist()) for i,j,result in early],
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                for tensor, data in ((x_source, x), (g_source, g)):
+                    with program.write(tensor[2, 0]) as destination:
+                        destination[...] = data[66:]
+                wait_for(tuple(result for i,j,result in observations))
+                for i,j,result in observations:
+                    if not np.allclose(result.array, expected[i:i+result.array.shape[0],j:j+result.array.shape[1]], rtol=2e-5, atol=2e-6):
+                        raise ArithmeticError('Grouped outer-product reduction differs from its valid contribution domain')
+                print(json.dumps(dict(event='grouped_outer_complete', generation=generation,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                    output=[(i,j,result.array.tolist()) for i,j,result in observations])), flush=True)
+                for i,j,result in observations:
+                    result.consume()
         if xonotic_indexed_context is not None:
             wait_for(xonotic_indexed_context)
             actual = tuple(result.array.item() for result in xonotic_indexed_context)
