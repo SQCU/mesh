@@ -3459,8 +3459,9 @@ remain inside the same FFN composition. Depth one preserves the previous algebra
 slots, including warmup, through existing writes, writable pages and consumed
 outputs. There is no graph construction, allocation or compilation per sample.
 Only final-unit rank-zero outputs are exported. Peer diagnostic export holds are
-removed; canonical trace records still retain its work. Every sample withholds
+removed; canonical trace records still retain its work. Warmup withholds
 one original input row region until another region traverses the entire chain.
+Timed samples publish all available input regions without a synthetic delay.
 Reference results are calculated before timing, and numerical error is checked
 at every sample. First-output, complete-output and batch timings retain count,
 mean and sample variance. Input publication is included; setup/reference time is

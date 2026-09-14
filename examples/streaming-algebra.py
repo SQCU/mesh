@@ -1088,18 +1088,19 @@ def main():
         for stage in warm[2].values():
             for result in stage.values():
                 result.consume()
+        first_results = tuple(result for _, _, probes in invocations for result in probes['rmsnorm2'].values())
         errors, sample_batches, sample_first, completion_observations = [], [], [], []
         for sample in range(args.samples):
             wait_for(tuple(ref for _, inputs, _ in invocations for tensor in inputs for ref in tensor.blocks.values()), 'writable')
             batch_started = time.monotonic_ns()
-            for run, invocation in enumerate(invocations, 1):
-                publish(invocation, range(1 if run == 1 else 0, (rows + tile - 1) // tile))
-            delayed = invocations[0][2]['rmsnorm2']
-            wait_for((delayed[1, 0],))
+            for invocation in invocations:
+                publish(invocation, range((rows + tile - 1) // tile))
+            deadline = time.monotonic_ns() + 60_000_000_000
+            while running and not any(result.ready for result in first_results):
+                if time.monotonic_ns() > deadline:
+                    raise TimeoutError(f'First output stalled: {program.report}')
+                time.sleep(0.0001)
             first_ms = (time.monotonic_ns() - batch_started) / 1e6
-            if any(result.ready for coordinate, result in delayed.items() if coordinate[0] == 0):
-                raise ArithmeticError('An unpublished input section produced an output')
-            publish(invocations[0], (0,))
             completed = {}
             deadline = time.monotonic_ns() + 60_000_000_000
             while running and len(completed) < args.runs:
@@ -2304,7 +2305,7 @@ def main():
             tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
             completion_ms=summary(completion_observations), samples=args.samples,
-            sample_batch_ms=summary(sample_batches), sample_first_section_ms=summary(sample_first), withheld_invocation=1, withheld_section=0,
+            sample_batch_ms=summary(sample_batches), sample_first_section_ms=summary(sample_first), warmup_withheld_section=0,
             max_absolute_error=max(errors), runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)
 
 
