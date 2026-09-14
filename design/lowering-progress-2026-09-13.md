@@ -181,3 +181,26 @@ it must not wrap into destination 2. Both CPU and Metal pass, producing second
 consumer rows [10, 0, 12, 12], rather than the earlier case's [10, 0, 18, 12].
 `scatter-valid-cpu.json.gz` and `scatter-valid-metal.json.gz` retain these runs.
 The earlier reuse artifacts remain evidence for their separately recorded inputs.
+
+
+## Fused pointwise updates
+
+`c4086e5` lowers pointwise update expressions directly inside segmented indexed
+accumulation, using the same scalar emitter as ordinary expressions. Every used
+operand retains its own selected source region and lifetime. Broadcast values
+and mixed half/float sources preserve FP32 arithmetic; declared constants avoid
+unnecessary dynamic lifetime bindings. There is no transformed-update tensor or
+extra pointwise launch. Nested indexed loads and feature reductions inside the
+update expression remain unfinished forms, not an eager-load fallback.
+
+The existing example now uses updates * factors + 1 with separately streamed
+FP32 factor rows. It supplies the final update rows before their factors; the
+final consumer remains unavailable until the factor rows arrive. Independent
+consumers have already completed. Both CPU and Metal pass two occurrences with
+changing routes and factors: consumer rows [20, 0, 32, 18], then [32, 0, 38, 40].
+Each row repeats its value across four features. Gold, cancellation, strided and
+indexed reuse checks also pass. Archived scatter-fusion CPU/Metal observations
+and traces retain exact library/example revisions. Both report 1704 completed
+numerical submissions, the same count as the prior unfused expression case;
+this establishes absence of an added transform launch in the covered program,
+not a matched throughput improvement.
