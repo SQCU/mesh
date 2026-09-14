@@ -390,10 +390,6 @@ struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return (struct mesh_row_map){0};
   return (struct mesh_row_map){.first=t->extents[i].first,.count=t->extents[i].pages};
 }
-/* design/algorithm-sources.md#streaming-overlap-measurement */
-int mesh_tensor_present(struct mesh_tensor *t,uint32_t extent) {
-  return t && extent<t->count && mesh_present(t->context,mesh_tensor_rows(t,extent),0);
-}
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;
@@ -433,7 +429,7 @@ static MPSMatrix *matrix(MeshExtent *e,struct mesh_view v,BOOL transpose) {
 }
 
 /* design/algorithm-sources.md#mandatory-partial-publication */
-static void dependencies(NSMutableData *maps,struct mesh_view v) {
+static int dependencies(NSMutableData *maps,struct mesh_view v) {
   struct mesh_extent *e=&v.tensor->extents[v.extent];
   size_t unit=v.tensor->context->M->pgsz/(scalar_bytes(e->shape.scalar));
   if(v.row_stride<v.column_stride)v=mesh_view_transpose(v);
@@ -443,9 +439,12 @@ static void dependencies(NSMutableData *maps,struct mesh_view v) {
       size_t last=v.column_stride<=unit?v.columns-1:c;
       size_t lo=(first+c*v.column_stride)/unit,hi=(first+last*v.column_stride)/unit;
       struct mesh_row_map m={.first=e->first+(uint32_t)lo,.count=(uint32_t)(hi-lo+1)};
-      [maps appendBytes:&m length:sizeof m];c=last+1;
+      if(maps)[maps appendBytes:&m length:sizeof m];
+      else if(!mesh_present(v.tensor->context,m,0))return 0;
+      c=last+1;
     }
   }
+  return 1;
 }
 /* design/algorithm-sources.md#mandatory-partial-publication */
 static int compare_maps(const void *a,const void *b) {
@@ -1350,18 +1349,18 @@ int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_endpoint source,st
   return 0;
 }
 
-/* design/algorithm-sources.md#streaming-algebra */
-int mesh_algebra_return(struct mesh_algebra *handle,struct mesh_tensor *t,uint32_t i) {
+/* design/algorithm-sources.md#view-scoped-consumption */
+int mesh_algebra_present(struct mesh_algebra *handle,struct mesh_view view) {
+  return valid_view(owner(handle),view) && dependencies(nil,view);
+}
+/* design/algorithm-sources.md#view-scoped-consumption */
+int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_view view,size_t *first,size_t *count) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
-  if(!t || i>=t->count || t->context!=a->context)return EINVAL;
-  struct mesh_row_map m=mesh_tensor_rows(t,i);[a.returns appendBytes:&m length:sizeof m];return 0;
-}
-/* design/algorithm-sources.md#indexed-library-functions */
-int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_tensor *t,uint32_t extent,size_t *index) {
-  if(!index)return EINVAL;
-  size_t next=owner(handle).returns.length/sizeof(struct mesh_row_map);
-  int error=mesh_algebra_return(handle,t,extent);if(!error)*index=next;return error;
+  if(!first || !count || !valid_view(a,view))return EINVAL;
+  struct mesh_index_candidate coverage=indexed_maps(view);if(!coverage.maps)return ENOMEM;
+  *first=a.returns.length/sizeof(struct mesh_row_map);*count=coverage.count;
+  [a.returns appendBytes:coverage.maps length:coverage.count*sizeof *coverage.maps];free(coverage.maps);return 0;
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 static void submit_ready(void *argument,uint32_t occurrence) {

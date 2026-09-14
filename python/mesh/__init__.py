@@ -74,10 +74,9 @@ class Ref:
         return bool(self.program.native.tensor_writable(self.view.tensor, self.view.extent))
 
     @property
-    # design/algorithm-sources.md#streaming-overlap-measurement
+    # design/algorithm-sources.md#view-scoped-consumption
     def present(self):
-        self.whole()
-        return bool(self.program.native.tensor_present(self.view.tensor, self.view.extent))
+        return bool(self.program.native.algebra_present(self.program.handle, self.view))
 
     # design/algorithm-sources.md#indexed-library-functions
     def on(self, peer):
@@ -184,19 +183,19 @@ class BlockSpec:
 
 
 class Result:
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#view-scoped-consumption
     def __init__(self, ref):
-        self.ref = ref.whole()
+        self.ref = ref
         self._array = ref.array.view()
         self._array.flags.writeable = False
-        index = C.c_size_t()
-        check(ref.program.native.algebra_export(ref.program.handle, ref.view.tensor, ref.view.extent, C.byref(index)))
-        self.index = index.value
+        first, count = C.c_size_t(), C.c_size_t()
+        check(ref.program.native.algebra_export(ref.program.handle, ref.view, C.byref(first), C.byref(count)))
+        self.indices = tuple(range(first.value, first.value + count.value))
 
     @property
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#view-scoped-consumption
     def ready(self):
-        return bool(self.ref.program.native.algebra_available(self.ref.program.handle, self.index))
+        return all(self.ref.program.native.algebra_available(self.ref.program.handle, index) for index in self.indices)
 
     @property
     # design/algorithm-sources.md#indexed-library-functions
@@ -205,9 +204,10 @@ class Result:
             raise BlockingIOError(errno.EAGAIN, 'Result region is not published')
         return self._array
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#view-scoped-consumption
     def consume(self):
-        self.ref.program.native.algebra_consume(self.ref.program.handle, self.index)
+        for index in self.indices:
+            self.ref.program.native.algebra_consume(self.ref.program.handle, index)
 
 
 class Program:

@@ -17,10 +17,11 @@ operands. Local register/threadgroup scratch is a numerical implementation detai
 not a second host operand store. Existing page stamps remain readiness; compiler
 representations are setup data and do not become a second participant scheduler.
 
-No-overhead and no-feature-regression are acceptance requirements. They are not
-assumed consequences of adopting Pallas-like syntax. Performance must be evaluated
-against the fastest validated implementation of the same work and precision on
-these machines, including first-result latency and sustained throughput.
+No-overhead and no-feature-regression are requirements. The operator's latest
+[source-review instruction](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session)
+directs current implementation work to source review and compilation without
+numerical or benchmark runs. The measurement procedures retained below describe
+earlier work; they do not gate removal of source-level serialization.
 
 ## Published mechanisms to reuse
 

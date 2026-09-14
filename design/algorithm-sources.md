@@ -3604,3 +3604,46 @@ visibility while preserving concurrent work. Existing command-completion paths
 are not exempt from that requirement. No runtime or performance measurements
 are used for this change, following the operator's latest instruction; validation
 is source review and compilation.
+
+## View-scoped consumption
+
+The operator's [partial consumer contract](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session)
+applies to exported observations as well as numerical regions. Papadopoulos and
+Culler's presence-bit mechanism, cited above, separates availability of a required
+value from unrelated storage; the JAX authors' BlockSpec/view mapping cited under
+indexed library functions supplies the explicit indexing model.
+
+`Result` no longer replaces a requested view with whole-allocation readiness.
+`mesh_algebra_export` takes the actual view and uses the existing `indexed_maps`
+and `bind_dependencies` normalization to retain exactly its touched canonical
+page ranges. Slicing, transpose, broadcast and sparse strides use the same address
+walk as numerical input dependencies. Repeated/overlapping pages within one view
+are deduplicated; distinct exports remain distinct readers. The returned first
+index and count identify a setup-owned vector of return maps. Python retains
+those indices and consumes only those reader memberships. The returned array is
+the original strided view; no operand staging or numerical copy is introduced.
+
+`Ref.present` likewise uses the actual view. `mesh_algebra_present` reuses the
+dependency address walk in read-only mode: it observes PRESENT on the touched
+page ranges without building temporary map arrays or allocating during polling.
+These calling-context observations do not issue numerical functions and do not
+block publishers. The old extent-only presence and return APIs are removed.
+
+For example, exporting the first published region of a larger generated CPU
+output now depends on that region's pages, not on the unpublished remainder of
+the same allocation. Its source storage still cannot be reused until the producer
+finishes and its readers retire. A view intersecting an as-yet unwritten page
+does not gain fictional availability; independently written subpage ownership
+remains a further representation requirement.
+
+Source review also identified a separate numerical consumer defect:
+`_ExpressionKernel.bind` registers complete flattened input views, whereas native
+`prepare_part` retains only input rectangles needed by each physical output part.
+Automatically publishing CPU output sections does not narrow those input
+dependencies. Replacing native add with the current expression binder would
+widen its dependencies, so that substitution is not made. The shared lowering
+must retain the existing exact part/rectangle geometry, logical origins and
+input projections for compiled consumers. This is outstanding source work, not
+permission to leave consumers waiting or to introduce an alternative scheduler.
+
+This change is reviewed and compiled without numerical or benchmark runs.

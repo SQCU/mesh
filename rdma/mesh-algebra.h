@@ -43,7 +43,6 @@ struct mesh_view mesh_view_transpose(struct mesh_view);
 struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns);
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
 struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
-int mesh_tensor_present(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_writable(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
@@ -63,8 +62,8 @@ int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_vie
 int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
 int mesh_algebra_contract_select(struct mesh_algebra *,struct mesh_view selector,const struct mesh_view *left,const struct mesh_view *right,size_t plan_count,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,float alpha,size_t *function_index);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
-int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);
-int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent);
+int mesh_algebra_present(struct mesh_algebra *,struct mesh_view);
+int mesh_algebra_export(struct mesh_algebra *,struct mesh_view,size_t *first,size_t *count);
 int mesh_algebra_realize(struct mesh_algebra *);
 int mesh_algebra_available(struct mesh_algebra *,size_t output);
 void mesh_algebra_consume(struct mesh_algebra *,size_t output);

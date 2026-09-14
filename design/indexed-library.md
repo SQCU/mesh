@@ -24,8 +24,8 @@ y = matmul(x, w)
 ```
 
 The call allocates output storage and binds independent region functions during
-setup. `realize()` finalizes the program; `scan()` issues functions whose declared
-input regions are present. The current completion path publishes that region to
+setup. `realize()` finalizes the program; the canonical presence owner issues
+functions whose declared input regions are present. The completion path publishes that region to
 consumers and configured sends. This implementation detail does not require
 waiting for an enclosing operation to complete: library-owned in-operation
 publication must expose usable partial outputs asynchronously while computation
@@ -42,6 +42,13 @@ from seeing its operations. Backend registration and completion remain private
 to the library. Removing the callback interface does not by itself supply
 in-operation publication: extending the shared compiled lowering and publication
 owner to deliver that contract remains required work.
+
+`program.export(ref)` retains only the pages touched by `ref`, including sliced,
+strided and transposed views. The resulting observation owns its own reader
+members on those pages; `ready` observes their availability and `consume` releases
+those memberships. `ref.present` also observes only the view's touched pages.
+Neither operation requires the remainder of the allocation to arrive. These are
+calling-context observations; they do not schedule numerical work.
 
 Tensor storage is always canonical shared backing. Transpose, slices, and block
 index maps describe that storage. A region must fit the configured backing block;

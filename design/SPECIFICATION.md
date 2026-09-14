@@ -393,6 +393,18 @@ The separate operator request for an immediately visible allocation warning abov
 publication guards in the numerical call graph. No excerpt above authorizes a
 publication-sync-wait-guard.
 
+The operator subsequently specifies the method of the current implementation work:
+
+> you do not need to measure any code., this is a problem of pure syntax. the code will be faster as soon as you remove all fake syntactic limitations. the idea that you have to measure code to understand what it is doing is the pathology of 'tradeoff' and happens exactly when you know you should not be making the 'tradeoff' at all
+
+The active objective is clarified as:
+
+> it is time to secure the (9-pointed) bag. this means totally syncless totally streaming producers and consumers which never block on each other and always totally consume all available data which is locally available for the calculations they have been assigned, implicitly, by sharding a linear algebraic object across a collective.
+
+Current work therefore uses source review and compilation, without launching
+numerical workloads or benchmarks. Existing measurements are historical evidence,
+not a prerequisite for removing a source-level violation of this contract.
+
 ## Provenance law (carried from the agentfile / vine-polycompiler stratagem)
 
 > here is a heirarchy of epistemic certainty:
