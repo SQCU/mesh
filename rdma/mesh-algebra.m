@@ -497,6 +497,36 @@ struct mesh_view mesh_algebra_route_table(struct mesh_algebra *handle,struct mes
   return mesh_tensor_view(d->table,0);
 }
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
+int mesh_algebra_route_hold(struct mesh_algebra *handle,struct mesh_route *d,const struct mesh_view *views,size_t count){
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || !d || d->authority!=handle || (count && !views))return EINVAL;
+  for(uint32_t i=0;i<d->consumers;i++)if(d->functions[i]!=SIZE_MAX)return EBUSY;
+  MeshFunction *holder=[MeshFunction new];holder.dependencies=[NSMutableData dataWithBytes:d->metadata length:d->metadata_count*sizeof *d->metadata];
+  for(size_t i=0;i<count;i++){if(!valid_view(a,views[i]))return EINVAL;dependencies(holder.dependencies,views[i]);}bind_dependencies(holder);
+  for(uint32_t i=0;i<holder->function.inputs;i++)for(uint32_t j=0;j<d->candidates;j++)for(uint32_t k=0;k<d->candidate[j].count;k++)
+    if(overlaps(holder->function.input[i],d->candidate[j].maps[k]))return EINVAL;
+  size_t bytes=holder->function.inputs*sizeof *d->metadata;struct mesh_row_map *maps=malloc(bytes);if(!maps)return ENOMEM;
+  memcpy(maps,holder->function.input,bytes);free(d->metadata);d->metadata=maps;d->metadata_count=holder->function.inputs;return 0;
+}
+/* design/algorithm-sources.md#shared-sparse-routing-lowering */
+static void route_dependencies(MeshFunction *f){
+  NSData *source=[f.dependencies copy];const struct mesh_row_map *maps=source.bytes;
+  f.dependencies=[NSMutableData new];
+  for(size_t i=0;i<source.length/sizeof *maps;i++){
+    uint32_t first=maps[i].first,end=first+maps[i].count;
+    while(first<end){
+      uint32_t lo=end,hi=end;
+      for(struct mesh_route_use *u=f->function.routes;u;u=u->next)for(uint32_t j=0;j<=u->domain->metadata_count;j++){
+        struct mesh_row_map held=j<u->domain->metadata_count?u->domain->metadata[j]:mesh_tensor_rows(u->domain->table,0);
+        if(held.first<end && held.first+held.count>first && held.first<lo){lo=held.first;hi=held.first+held.count;}
+      }
+      if(lo>first){struct mesh_row_map kept={.first=first,.count=lo-first};[f.dependencies appendBytes:&kept length:sizeof kept];}
+      first=hi;
+    }
+  }
+  bind_dependencies(f);
+}
+/* design/algorithm-sources.md#shared-sparse-routing-lowering */
 int mesh_algebra_route_attach(struct mesh_algebra *handle,size_t index,struct mesh_route *d,size_t consumer){
   MeshAlgebra *a=owner(handle);
   if(a.realized || !d || d->authority!=handle || index>=a.functions.count || consumer>=d->consumers || d->functions[consumer]!=SIZE_MAX)return EINVAL;
@@ -507,7 +537,7 @@ int mesh_algebra_route_attach(struct mesh_algebra *handle,size_t index,struct me
   }
   struct mesh_route_use *u=calloc(1,sizeof *u);if(!u)return ENOMEM;
   *u=(struct mesh_route_use){.domain=d,.consumer=(uint32_t)consumer,.next=f->function.routes};f->function.routes=u;d->functions[consumer]=index;
-  [f.dependencies appendBytes:d->metadata length:d->metadata_count*sizeof *d->metadata];bind_dependencies(f);
+  route_dependencies(f);
   return 0;
 }
 
@@ -549,8 +579,7 @@ int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct m
   for(size_t i=0;i<input_count;i++)if(![f.indexedInputs containsIndex:i])dependencies(f.dependencies,inputs[i]);
   for(struct mesh_indexed_read *part=f->function.indexed;part;part=part->next)
     [f.dependencies appendBytes:part->selector length:part->selectors*sizeof *part->selector];
-  for(struct mesh_route_use *u=f->function.routes;u;u=u->next)[f.dependencies appendBytes:u->domain->metadata length:u->domain->metadata_count*sizeof *u->domain->metadata];
-  bind_dependencies(f);
+  if(f->function.routes)route_dependencies(f);else bind_dependencies(f);
   return 0;
 }
 
@@ -1191,10 +1220,11 @@ struct mesh_route_event mesh_algebra_trace_route(struct mesh_algebra *handle,siz
   if(!d)return (struct mesh_route_event){0};
   struct mesh_route_event result={.function=UINT64_MAX,.domain=domain,.role=role,.index=index,.first=MESH_ABSENT,.plane=MESH_ABSENT,.retired=d->retired,.completed=d->completed,.prepared=d->prepared,.consumer=MESH_ABSENT};
   if(mesh_bits_all(a->context->M,MESH_PRESENT,d->prepared,1))result.flags|=1;
+  if(mesh_bits_all(a->context->M,MESH_PRESENT,d->retired,d->candidates) && mesh_bits_all(a->context->M,MESH_PRESENT,d->completed,d->consumers))result.flags|=8;
   if(map){result.first=map->first;result.count=map->count;result.plane=map->plane;}
   if(role==1){
     result.retired+=index;if(mesh_bits_all(a->context->M,MESH_PRESENT,result.retired,1))result.flags|=2;
-    if(result.flags&1){struct mesh_route_vector v=d->owners;result.consumer=v.values[(index/v.columns)*v.row_stride+(index%v.columns)*v.column_stride];}
+    if(result.flags&9){struct mesh_route_vector v=d->owners;result.consumer=v.values[(index/v.columns)*v.row_stride+(index%v.columns)*v.column_stride];}
   }else if(role==2){result.consumer=index;result.first=d->completed+index;result.count=1;}
   else if(role==3){struct mesh_row_map table=mesh_tensor_rows(d->table,0);result.first=table.first;result.count=table.count;}
   if(result.consumer<d->consumers){result.function=d->functions[result.consumer];result.completed+=result.consumer;if(mesh_bits_all(a->context->M,MESH_PRESENT,result.completed,1))result.flags|=4;}

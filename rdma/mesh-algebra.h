@@ -51,6 +51,7 @@ int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view 
 int mesh_algebra_indexed_range(struct mesh_algebra *,size_t function,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t candidate_count);
 struct mesh_route *mesh_algebra_route_create(struct mesh_algebra *,struct mesh_view owners,struct mesh_view ordinals,struct mesh_view offsets,const struct mesh_view *candidates,size_t candidate_count,size_t consumer_count);
 struct mesh_view mesh_algebra_route_table(struct mesh_algebra *,struct mesh_route *);
+int mesh_algebra_route_hold(struct mesh_algebra *,struct mesh_route *,const struct mesh_view *,size_t count);
 int mesh_algebra_route_attach(struct mesh_algebra *,size_t function,struct mesh_route *,size_t consumer);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);

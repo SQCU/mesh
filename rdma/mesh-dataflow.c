@@ -685,7 +685,7 @@ static int mesh_route_span(const struct mesh_route *d,uint32_t consumer,uint32_t
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
 static int mesh_route_ready(struct mesh_ctx *c,const struct mesh_route_use *u){
   struct mesh_route *d=u->domain;
-  if(!mesh_is(c->M,MESH_PRESENT,d->prepared) || !mesh_route_active(c,d) || mesh_is(c->M,MESH_PRESENT,d->completed+u->consumer))return 0;
+  if(!mesh_is(c->M,MESH_PRESENT,d->prepared) || mesh_is(c->M,MESH_PRESENT,d->completed+u->consumer))return 0;
   uint32_t first,end;if(!mesh_route_span(d,u->consumer,&first,&end))return 0;
   for(uint32_t i=first;i<end;i++){
     uint32_t index=mesh_route_value(d->ordinals,i);
@@ -714,6 +714,7 @@ static int mesh_route_retire(struct mesh_ctx *c,const struct mesh_route *d,uint3
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
 static void mesh_route_finish(struct mesh_ctx *c,const struct mesh_route *d){
   if(!mesh_bits_all(c->M,MESH_PRESENT,d->retired,d->candidates) || !mesh_bits_all(c->M,MESH_PRESENT,d->completed,d->consumers))return;
+  mesh_bits_clear(c->M,MESH_PRESENT,d->prepared,1);
   for(uint32_t i=0;i<d->metadata_count;i++)mesh_map_read(c,d->metadata[i],0);
 }
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
@@ -722,9 +723,9 @@ static void mesh_route_pending(struct mesh_watch *watch,struct mesh_watch **pend
 }
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
 static void mesh_route_event(struct mesh_ctx *c,struct mesh_route *d,uint32_t index,uint32_t consumer,struct mesh_watch **pending){
-  if(!mesh_route_active(c,d))return;
   int finish=0;
   if(!mesh_is(c->M,MESH_PRESENT,d->prepared)){
+    if(index!=MESH_ABSENT || consumer!=MESH_ABSENT || !mesh_route_active(c,d))return;
     for(uint32_t i=0;i<d->consumers;i++){
       uint32_t first,end;if(!mesh_route_span(d,i,&first,&end))return;
       for(uint32_t j=first;j<end;j++){

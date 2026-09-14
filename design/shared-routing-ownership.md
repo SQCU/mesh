@@ -302,9 +302,9 @@ GPU address plus that same offset. Each table entry retains both row and column
 strides. No candidate payload is copied.
 
 `mesh_algebra_route_attach` attaches the domain and exact consumer ID to an
-existing numerical function. The consumer binds the table once. It retains actual
-ordinary metadata reads, including when another indexed descriptor is added to
-the function later. Every configured consumer must attach exactly once. Consumer
+existing numerical function. The consumer binds the table once. Its exact numerical completion row retains
+its metadata lifetime identity, including when another indexed descriptor is added
+to the function later. Every configured consumer must attach exactly once. Consumer
 output aliases with the domain's source or metadata maps are rejected
 at setup. This API currently requires one function occurrence per consumer; it
 does not infer a consumer from the function's output buffer.
@@ -321,8 +321,7 @@ same source, using canonical reader groups when needed.
 
 `mesh_realize` surveys and binds candidate and domain-metadata lifetime maps once,
 through consumer zero's retained domain reference. It does not clone those maps
-into other consumers. Per-consumer ordinary metadata reads remain real reader
-identities. A domain allocates C retired result rows, D numerical-completed result
+into other consumers. A domain allocates C retired result rows, D numerical-completed result
 rows and one prepared result row, without operand payload allocation for these
 logical results. `mesh_execution_route` installs one candidate-to-domain edge per
 source row, metadata edges, and one completion-result edge per consumer.
@@ -366,8 +365,9 @@ once, using its creation-order numeric ID. Role 0 is a metadata map, role 1 a
 candidate map with its exact ordinal and retirement row, role 2 a configured
 consumer with its function index and completed row, and role 3 the shared table's
 logical rows. Candidate entries expose the current produced owner/function when
-the prepared bit is present. Flags 1, 2 and 4 indicate prepared, candidate retired,
-and named consumer completed. `mesh_algebra_trace_route_reader` exposes ordinary
+the prepared bit is present or all domain results remain resolved. Flags 1, 2, 4
+and 8 indicate prepared, candidate retired, named consumer completed, and all
+domain candidate/consumer results resolved. `mesh_algebra_trace_route_reader` exposes ordinary
 source/group member identity for roles 0 and 1, and absent identities otherwise.
 The trace contains actual candidates rather than making their apparent count
 shrink by omitting the shared table.
@@ -390,3 +390,53 @@ owned by the existing streaming-algebra workflow. Remaining independent work
 includes active-grid ownership, repeated readiness traversal and independently
 published byte extents; sparse domains do not eliminate per-capacity partial
 launches or publication allocation padding.
+
+
+### Shared metadata lifetime without a reader rectangle
+
+The source domain retains each consumer's numerical completion identity once.
+Because the domain holds every owner/ordinal/offset row until all those results
+are present, it also covers any ordinary numerical read of those same metadata
+rows by an attached consumer. `route_dependencies` subtracts exactly those held
+row intersections during setup. It also subtracts the domain's setup-constant
+address table: its Program-owned immutable storage needs neither per-consumer
+page readiness scans nor publication edges. The table remains exposed once in
+the route trace. The subtraction leaves numerical pointer bindings unchanged
+and preserves reads outside the held metadata, including ordinary candidate
+reads. A later indexed attachment repeats the same subtraction after rebuilding
+its dependency maps. Attaching several domains subtracts their held union; every
+domain separately requires that function's numerical completion.
+
+This avoids D times the number of directory pages in grouped member identities
+and adjacency. Without it, even a compact pointer table would still accumulate
+a large source-reader rectangle for multi-page directories. The replacement is
+one domain lifetime map per directory region plus D actual numerical completion
+results. Consumers need no copied directory or extra completion kernel.
+
+`mesh_route_active` scans metadata availability only before preparation.
+Thereafter the prepared result establishes that every required metadata map is
+available and retained. Local numerical producer issue on the existing serial
+owner clears prepared and the owned result rows before any new metadata
+publication. The lifetime hold prevents this issue while an old source or consumer
+remains unresolved. Domain finish clears prepared before releasing any metadata reader, so prepared
+strictly means that the domain still owns its directory. After finish, metadata
+availability rejects the old consumed directory until every new metadata map is
+available. Old consumer-completed and candidate-retired facts remain present until
+new producer issue resets them; traces can identify the resolved relation during
+that interval. Preparation checks every new metadata map before restoring prepared. Thus source
+notifications and consumer readiness do not repeatedly scan the full directory's
+page coverage. This relies on the existing locally produced metadata restriction;
+direct remote writes into these metadata bindings remain rejected at setup.
+
+
+`mesh_algebra_route_hold` accepts explicit additional produced metadata views
+before any consumer attaches. Scatter supplies reverse destination keys as well
+as the ordinal view; a shared backing does not implicitly establish coverage of
+its other pages. The retained map union then covers key-page numerical reads too,
+preventing another D-by-directory-pages reader rectangle when keys and ordinals
+occupy different pages. These extra held views follow the same local-producer
+validation, reset and all-consumers/all-candidates retirement contract.
+Preparation scans are triggered by metadata publication or initial registration;
+unprepared candidate/completion notices cannot repeatedly scan directory pages.
+Partially published multi-page metadata can still cause repeated metadata readiness
+checks, distinct from repeated per-candidate directory scans.
