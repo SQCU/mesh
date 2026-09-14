@@ -1,0 +1,15 @@
+{
+  "library_revision": "7fc905d",
+  "example_revision": "ff3afa3",
+  "backends": [
+    "cpu",
+    "metal"
+  ],
+  "dtype": "float32",
+  "runs": 3,
+  "scatter_rows": 4097,
+  "scatter_tile": 2049,
+  "scatter_destinations": 17,
+  "xonotic": true,
+  "scope": "Before FFN caller migration and mixed-dtype native changes; nested consumers complete with two hidden panels withheld. No matched performance claim."
+}

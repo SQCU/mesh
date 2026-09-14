@@ -353,3 +353,42 @@ normally with SIGTERM after writing their traces. The paired observations,
 both participants' traces and exact provenance are archived alongside the local
 records. Broad expression/rank lowering, remaining caller migrations, storage
 and launch optimization, and matched end-to-end performance remain open.
+
+## Demand-driven computed contraction operands
+
+`2aec0ae` replaces root-reference-only contraction construction with one
+`_ContractionRegions` setup owner. Natural shapes, mapped/local versus whole
+coordinate domains and backing cuts remain distinct metadata. An outer K-panel
+requests only its left M×K and right K×N regions. Pointwise computations and
+nested contractions recursively produce those canonical regions, preserving
+FP32 intermediate values and independently ready native matmul inputs. Shared
+region demands retain expression, source-view and origin identities; specialized
+program IDs participate in those identities. No runtime graph builder or hidden
+whole-intermediate operand is introduced.
+
+The existing example now expresses a linear/swish/linear chain in one numerical
+expression. X is 3×4 in single-row blocks, W1 is 4×6 in two-column blocks, and
+W2 is 6×3 in two-row blocks. Both dots have K tile two. Supplying X row one,
+W1's first feature panel and W2's first contraction panel permits the second
+matmul to finish a contribution before the other two hidden panels exist.
+The observer joins W2's actual canonical row range to its configured numerical
+consumers and records their completion; it does not guess which function ran
+from command order. After the missing weight panels arrive, row one finishes
+while X rows zero and two remain unpublished. Both complete occurrences match
+the independent float64 reference within the unchanged FP32 tolerance.
+
+CPU and Metal local runs pass with installed source `7fc905d` and example
+`ff3afa3`, before the subsequent FFN caller and mixed-dtype changes. Native
+function 42 consumes W2's first canonical block (first row 236, four allocated
+pages) in both early observations. Whole-workflow submissions are 2175, all
+completed. The example initially shadowed its final timing dictionary with the
+new consumer observation tuple; `ff3afa3` fixes that reporting error without
+changing numerical execution. `nested-initial-provenance.json` and the compressed
+`nested-final-{cpu,metal}` records preserve the passing runs. These establish
+partial producer and partial consumer execution for this composition, not
+matched throughput parity, remote nested contractions, or arbitrary-rank lowering.
+
+Computed indexed loads, shape-changing reductions and mismatched non-singleton
+mapped/global operand domains still require broader lowering. Native M/N panels
+still need to fit their actual backing blocks. These limitations remain explicit;
+there is no whole-operand copy or wait fallback for them.
