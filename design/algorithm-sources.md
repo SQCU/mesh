@@ -285,8 +285,10 @@ Metal specializations and encoding closures are realized before invocation.
 Each issued part unconditionally completes through mesh_complete, which publishes
 its output and marks configured sends hot. There is no caller-supplied optional
 send hook. A completed part can be transferred and consumed while another part
-of the same logical operation still lacks input. Metal completion is the actual
-visibility boundary; this does not inspect the internal tiles of an MPS dispatch.
+of the same logical operation still lacks input. This implementation uses Metal
+command completion for visibility and does not inspect internal MPS tiles.
+That is an implementation limitation, not an API rule requiring completion of
+the enclosing computation before asynchronous partial publication.
 
 Paired copy declarations enumerate block index before indexed extent occurrence.
 Both participants derive identical SEND/RECV sequences. This prevents a missing
@@ -1260,8 +1262,9 @@ loads are explicitly converted to float before arithmetic; real segment totals
 and partial storage remain FP32, with the existing final output cast. Mixed
 half/float operands therefore do not introduce an implicit half intermediate.
 No transformed-update operand allocation, publication or kernel launch is added.
-This fusion is lawful because the value expression is internal to the segment;
-separately produced/exported tensors retain their existing publication boundary.
+This fusion preserves the segment's value dependencies. Separately produced or
+exported tensors retain asynchronous availability to their readers; their
+existing kernel boundaries are not a semantic requirement.
 
 Each nonconstant operand gets its own selected-reader attachment over the same
 compact segment range. Empty segments select no candidate pages. Explicitly
@@ -3496,7 +3499,8 @@ by its pointwise consumer in one CPU or Metal function; the region lowering
 removes the nested expression before it reaches that emitter.
 
 The root cause is treating an expression operation boundary as a compulsory
-publication boundary. Commit `70b6511d` introduced this unconditional substitution
+separate producer launch and completion-dependent consumer dispatch. Publication
+itself requires neither. Commit `70b6511d` introduced this unconditional substitution
 while extending streamed row statistics. `_lower_region_expressions` binds each
 output request as it visits it; it does not first retain the complete consumer
 demands needed to distinguish an internal statistic from an independently
@@ -3518,8 +3522,10 @@ extra work, not its fraction of end-to-end latency.
 The required correction is setup-time retention of reduction domains, accumulator
 types and consumer demands, followed by legal composition through the existing
 emitter. Internal single-region statistics need no separate publication. Partial
-statistics with independent consumers or remote readers must still publish;
-fusion must not make a ready producer depend on an unrelated missing operand.
+statistics with independent consumers or remote readers must remain
+asynchronously publishable while the enclosing computation continues. That
+obligation does not require a separate launch or a publisher-side wait. Composition
+must not make a ready producer depend on an unrelated missing consumer operand.
 For multi-region reductions, retain independent partial production and eliminate
 unnecessary internal boundaries where the same dependency proof permits it.
 This is a lowering obligation, not new user syntax or an invocation-time guard.

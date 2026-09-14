@@ -145,11 +145,16 @@ Measured 2026-09-08 (M5 Max, macOS 26.3): a Metal command buffer that waits on a
 shared event whose value arrives seconds later is killed by the GPU watchdog
 (`kIOGPUCommandBufferCallbackErrorTimeout`), and every buffer queued behind it
 dies with it. A stage of a distributed function is therefore committed by the
-consuming task only when every input it reads is already present: its own
-gathered block, and the page table's `producible` for the slots it writes. The
-wait is the task's, on its input channels, yielding between polls; the GPU
-receives only runnable work. Pre-issuing a pass as a chain of event-gated
+canonical execution owner for the independently computable region whose inputs
+are present and whose configured output storage is reusable. An unavailable
+region does not create a waiting task or hold a producer, publication, worker,
+or unrelated ready region. The GPU receives runnable work. Pre-issuing a pass as a chain of event-gated
 buffers is not admissible on this platform, whatever its data-flow appeal.
+
+Publication itself is asynchronous. The requirement above does not require the
+enclosing tensor operation to finish before it publishes partial output, or
+authorize waiting for remote receipt or consumption. See the operator's
+[publication contract](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session).
 
 ## What the runtime owns
 

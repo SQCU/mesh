@@ -88,6 +88,14 @@ transport.
 
 ## One NFE on two peers
 
+In the steps below, completion of the writes needed by a published region does
+not mean completion of its enclosing tensor operation. The operator's
+[asynchronous publication contract](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session)
+requires publication while the rest of that operation can continue. A publisher
+does not wait for delivery, acknowledgement or consumption. Readers of available
+partials proceed independently; only work requiring absent values remains
+unissued. A publication is not a required kernel or command-buffer boundary.
+
 1. A function runs on the GPU. It writes its output straight into pages. When
    it completes, its output rows get PRESENT. Nothing else is said.
 2. Rows the peer needs go over the mesh as blocks. On the peer they land in

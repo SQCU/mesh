@@ -25,9 +25,12 @@ y = matmul(x, w)
 
 The call allocates output storage and binds independent region functions during
 setup. `realize()` finalizes the program; `scan()` issues functions whose declared
-input regions are present. Completion publishes that region to consumers and
-configured sends. No manual publish, completion callback, tensor-wide join, or
-application scheduler is part of a numerical kernel.
+input regions are present. The current completion path publishes that region to
+consumers and configured sends. This implementation detail does not require
+waiting for an enclosing operation to complete: library-owned in-operation
+publication must expose usable partial outputs asynchronously while computation
+continues. The numerical caller needs no separate publication scheduler,
+completion callback, or tensor-wide join.
 
 `kernels.matmul`, `add`, `multiply`, `swish`, `tanh`, `exp`, `row_sum`, `rsqrt`,
 and `affine(alpha, beta)` preserve the configured native backend functions.
@@ -36,7 +39,9 @@ For application arithmetic, pass an ordinary function taking borrowed input
 arrays followed by writable output arrays, e.g. `np.matmul(x, w, out=y)`.
 Input arrays are read-only; returning means that region's physical writes have
 finished. Asynchronous backend implementations belong to the library's backend
-binding path; callers do not manually submit or publish.
+binding path; that path owns automatic nonblocking partial publication, including
+in-operation send submission. This ownership does not prohibit emission from
+inside numerical computation.
 
 Tensor storage is always canonical shared backing. Transpose, slices, and block
 index maps describe that storage. A region must fit the configured backing block;

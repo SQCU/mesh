@@ -32,7 +32,8 @@ transforming a grid and its index maps instead of executing a Python batch loop.
 The [Pallas pipelining derivation](https://docs.jax.dev/en/latest/pallas/pipelining.html)
 explains buffer reuse, independent transfer/compute work and retaining local
 accumulators across reduction iterations. Steps 5–6 apply these mechanisms while
-preserving mesh's explicit region publication boundaries.
+preserving independently usable region publications. Publication does not imply
+a kernel boundary, completion rendezvous or pause in the publishing computation.
 
 The [Pallas collective matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
 reuses an optimized local matmul, overlaps communication with persistent compute,
@@ -137,10 +138,15 @@ fusion. Combine pointwise epilogues and reductions over ready local contribution
 retain FP32 arithmetic and specified casts. Avoid compulsory shared-memory storage
 for every compiler-internal scalar or partial value.
 
-A remotely consumed or otherwise independently observable output is a publication
-boundary. Fusion must preserve it, including fanout. Do not fuse a ready producer
-with a consumer requiring an unrelated missing input. Do not retain a value only
-in inaccessible scratch when another device is entitled to consume it.
+A remotely consumed or otherwise independently observable output must remain
+available to its readers as soon as its required writes are visible. This is an
+asynchronous publication obligation, not a requirement to split kernels, finish
+the enclosing function, or await delivery or consumption. Composition must
+preserve publication and fanout while other work continues. A missing consumer
+operand must not delay the producer's computation or publication. Do not retain
+a published value only in scratch inaccessible to its configured readers.
+The operator's [transcript contract](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session)
+governs this distinction; existing launch boundaries do not define semantics.
 
 Issue already-ready regions efficiently through the existing execution owner.
 Any grouped command submission must preserve the required completion/publication

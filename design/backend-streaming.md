@@ -135,8 +135,12 @@ Y[I,J] = sum(H, D[I,J,H])
 ```
 
 Here H identifies disjoint neuron regions. For each H, the adapter realizes an
-accelerator program that produces G/U and A for that region, or fuses them with
-its D contribution when intermediate A has no external reader. It binds every
+accelerator program that produces G/U and A and composes their D contribution.
+If A has an external reader, the program must publish A asynchronously as soon
+as its writes are visible, allowing that reader and its own D computation to
+proceed independently. If A has no external reader, its storage may remain local
+to the numerical computation. Publication does not require ending that computation.
+The adapter binds every
 input and output region and compiles the needed shapes during setup. The DNN
 module remains a composition supplied by the caller; mesh does not contain it.
 
@@ -147,9 +151,10 @@ The next activation region, `[3,4]` with weights `[[1,1],[2,1]]`, contributes
 
 1. Once X's required coordinates for H0 are present, the H0 program can execute.
    X for unrelated token rows does not participate in that dependency.
-2. Completion publishes A0 if another function reads A0. Its down-projection
-   consumer can start while A1 is absent. A legal fused program instead produces
-   D0 directly and must publish that contribution at its own completion.
+2. A0 becomes available to its readers as soon as its required writes are
+   visible. Its down-projection consumer can start while A1 is absent. The
+   producing program may publish A0 and continue computing D0; publication does
+   not wait for A0's delivery, consumption, or the program's remaining work.
 3. D0 is sent to its configured peer destination immediately upon publication.
    The peer can combine available contributions in the configured reduction tree.
 4. H1 produces D1 later. Their sum completes Y for I/J; the next layer can use
@@ -231,7 +236,8 @@ when the required publication edges survive. It must preserve U's peer send and
 any externally used P output. A frontend-wide final `eval()` cannot be the first
 point at which these intermediate values become executable or publishable.
 Device tiles can differ from symbolic regions; lowering must retain the region's
-input dependency and completion boundaries through that change.
+actual input dependencies and independent partial availability through that
+change, not historical kernel or command-buffer completion boundaries.
 
 Acceptance: withhold X[I,Q1], observe U[I,Q0] at the peer and correct P[I,J,Q0]
 from the consumer, then release Q1 and verify Z. The frontend's generated program
