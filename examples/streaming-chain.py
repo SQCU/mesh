@@ -14,6 +14,7 @@ def main():
     parser.add_argument('input')
     parser.add_argument('up_weight')
     parser.add_argument('down_weight')
+    parser.add_argument('consumer_weight')
     parser.add_argument('--root', type=int, required=True)
     parser.add_argument('--peer', type=int, required=True)
     parser.add_argument('--split', type=int, required=True)
@@ -49,7 +50,15 @@ def main():
             reduced = program.kernel_call(kernels.add,
                 grid=down.grid, in_specs=(spec, spec), out_specs=spec,
                 out_shape=ShapeDtypeStruct(down.shape, down.dtype))(down, received)
-            outputs = {index: program.export(ref) for index, ref in reduced.blocks.items()}
+            activated = program.kernel_call(kernels.swish,
+                grid=reduced.grid, in_specs=(spec,), out_specs=spec,
+                out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced)
+            weight = np.load(args.consumer_weight, mmap_mode='r')
+            consumer_weight = program.tensor(weight.shape, dtype=weight.dtype)
+            program.constant(consumer_weight[0, 0], weight)
+            consumed = linear(program, activated, consumer_weight, tile_rows=args.tile_rows,
+                              tile_k=args.tile_k, tile_columns=args.tile_columns)
+            outputs = {index: program.export(ref) for index, ref in consumed.blocks.items()}
         program.realize()
         for (i, j), ref in x.blocks.items():
             row, column = i * x.block_shape[0], j * x.block_shape[1]
@@ -58,9 +67,16 @@ def main():
         if program.node != args.root:
             signal.pause()
             return
+        observed = False
         while outputs:
             for index, output in tuple(outputs.items()):
                 if output.ready:
+                    if not observed:
+                        local_pending = tuple(index for index, ref in down.blocks.items() if not ref.present)
+                        remote_pending = tuple(index for index, ref in received.blocks.items() if not ref.present)
+                        print('first-consumer-result', index, 'local-producer-pending', local_pending,
+                              'remote-input-pending', remote_pending, flush=True)
+                        observed = True
                     print(index, output.array.tolist(), flush=True)
                     output.consume()
                     del outputs[index]

@@ -829,14 +829,15 @@ int mesh_signal_init(void){
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
+  int queued=0;
   for(uint32_t row=first;row<first+count;row++){
-    mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
+    queued|=mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
     mesh_notice_push(m,MESH_NOTICE_SEND,row);
   }
   struct sockaddr_un address={.sun_family=AF_UNIX};
   memcpy(address.sun_path,m->event_path,sizeof address.sun_path);
   unsigned char wake=0;
-  if(address.sun_path[0])sendto(mesh_signal_socket,&wake,1,MSG_DONTWAIT,(struct sockaddr *)&address,sizeof address);
+  if(queued && address.sun_path[0])sendto(mesh_signal_socket,&wake,1,MSG_DONTWAIT,(struct sockaddr *)&address,sizeof address);
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 static void mesh_fire(struct mesh_execution *e,struct mesh_watch *watch){
@@ -883,7 +884,10 @@ static int mesh_execution_create(struct mesh_ctx *c){
   dispatch_queue_set_specific(e->queue,e,e,NULL);
   e->source=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,(uintptr_t)e->socket,0,e->queue);
   dispatch_source_set_event_handler(e->source,^{mesh_events(e);});
-  c->execution=e;dispatch_resume(e->source);return 0;
+  c->execution=e;dispatch_resume(e->source);
+  unsigned char wake=0;
+  sendto(mesh_signal_socket,&wake,1,MSG_DONTWAIT,(struct sockaddr *)&address,sizeof address);
+  return 0;
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 int mesh_execution_indexed(struct mesh_ctx *c,struct mesh_indexed_read *d,void *owner){

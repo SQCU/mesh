@@ -89,7 +89,8 @@ Participant p owns J_p and computes U_p = X W_up[:, J_p], H_p = swish(U_p),
 and D_p = H_p W_down[J_p, :]. Both participants receive replicated X and can
 start local arithmetic independently. The peer publishes D regions to the root;
 the root computes Y = D_root + D_peer with the existing add kernel. Only the
-local weight shard occupies canonical operand storage.
+local weight shard occupies canonical operand storage. Each reduced region feeds
+swish and a further contraction Z = swish(Y) W_consumer at the root.
 
 All calls and transfer edges are bound before `realize()`. Missing regions
 constrain their own K contributions and matching output sums. Swish consumes
@@ -101,11 +102,13 @@ local mesh storage. For an input (rows, inner), weights (inner, hidden) and
 (hidden, columns), a caller-selected hidden split of 256 is expressed as:
 
 ```sh
-python examples/streaming-chain.py input.npy up.npy down.npy \
+python examples/streaming-chain.py input.npy up.npy down.npy consumer.npy \
   --root 0 --peer 1 --split 256 --tile-rows 128 --tile-k 128 --tile-columns 128
 ```
 
-The root prints reduced regions as they become available. The peer remains
+The consumer weight has shape (columns, consumer_columns). The root prints
+consumed regions as they become available; its first observation also lists any
+still-unpublished local producer or remote input regions. The peer remains
 attached after publishing input, until terminated. File supply and terminal
 observation are application I/O outside numerical functions. This uses the
 [MLX tensor-parallel decomposition](algorithm-sources.md#pallas-panel-composition)

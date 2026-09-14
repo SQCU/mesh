@@ -198,7 +198,11 @@ MLX's sharded-to-all layer, this example places the reduced result only at the
 caller-selected root. There is no hidden-activation gather or stage-to-stage
 handoff. JAX supplies the block-indexed calling syntax; Accelerate BLAS and MPS
 supply the existing local contractions. This is a composition of those mechanisms,
-not a new numerical or distributed algorithm.
+not a new numerical or distributed algorithm. The example feeds each completed
+reduced region through swish and a further BLAS/MPS/BNNS contraction, using an
+explicit consumer-weight operand. Its first terminal observation records any
+still-unpublished local producer and received regions through existing Ref
+presence queries. Those observations do not control intermediate work or inputs.
 
 MLX/JACCL source inspected in the local `~/mlx` checkout at `d142de6`:
 [`JACCLGroup`](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/jaccl.cpp)
@@ -228,6 +232,14 @@ network computations](https://doi.org/10.1145/3315508.3329973)
 - [JAX Pallas BlockSpecs](https://docs.jax.dev/en/latest/pallas/quickstart.html)
 
 ## Publication work lists
+
+Duplicate row notices already queued need no additional socket wake. The queue
+insertion reports whether it added work; publication wakes the handler only if
+it added a compute notice. Installation sends an initial wake for notices queued
+before the socket existed. Clearing `queued` precedes examining a row, so a
+publication during examination can enqueue it and send another wake. A failed
+nonblocking send caused by a full socket leaves an existing wake to drain; the
+handler drains the notice list again for every batch of socket messages.
 
 - [lockless list API](https://raw.githubusercontent.com/torvalds/linux/master/include/linux/llist.h)
 - [implementation](https://raw.githubusercontent.com/torvalds/linux/master/lib/llist.c)

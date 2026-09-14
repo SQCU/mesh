@@ -128,12 +128,13 @@ static inline struct mesh_notice *mesh_notices(struct hdr *m,uint32_t queue){
   return (struct mesh_notice *)((char *)m+m->notice_off)+(size_t)queue*mesh_rows(m);
 }
 /* design/algorithm-sources.md#publication-work-lists */
-static inline void mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
+static inline int mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
   struct mesh_notice *entry=&mesh_notices(m,queue)[index];
-  if(atomic_exchange_explicit(&entry->queued,1,memory_order_acq_rel))return;
+  if(atomic_exchange_explicit(&entry->queued,1,memory_order_acq_rel))return 0;
   uint32_t head=atomic_load_explicit(&m->notice_head[queue],memory_order_relaxed);
   do {entry->next=head;}
   while(!atomic_compare_exchange_weak_explicit(&m->notice_head[queue],&head,index,memory_order_release,memory_order_relaxed));
+  return 1;
 }
 /* design/algorithm-sources.md#publication-work-lists */
 static inline uint32_t mesh_notice_take(struct hdr *m,uint32_t queue){
