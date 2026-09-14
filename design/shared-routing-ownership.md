@@ -267,10 +267,9 @@ mesh-dataflow.c/.h and mesh-algebra.m/.h. Python holds their opaque context and 
 RowRange rather than a ctypes mesh_row_map. Both native libraries require a
 coherent rebuild; shared-header layout is unchanged. Compilation passed. Runtime
 fanout/reuse and matched performance evidence remain necessary, particularly for
-new grouped domains. Shared sparse routing domains, compact binding tables,
-active-grid lowering and finer physical partial storage remain separate work;
-reader groups remove the 64-plane numerical ceiling but do not remove O(D*C)
-candidate metadata in the current scatter lowering.
+new grouped domains. Reader groups alone remove the 64-plane numerical ceiling but do not remove
+O(D*C) candidate metadata. The shared-domain increment below supplies that
+separate lowering; active-grid and finer physical partial storage remain open.
 
 
 ### One owner for member reset
@@ -305,8 +304,8 @@ strides. No candidate payload is copied.
 `mesh_algebra_route_attach` attaches the domain and exact consumer ID to an
 existing numerical function. The consumer binds the table once. It retains actual
 ordinary metadata reads, including when another indexed descriptor is added to
-the function later. Every configured consumer must attach exactly once. Producer
-and consumer output aliases with the domain's source or metadata maps are rejected
+the function later. Every configured consumer must attach exactly once. Consumer
+output aliases with the domain's source or metadata maps are rejected
 at setup. This API currently requires one function occurrence per consumer; it
 does not infer a consumer from the function's output buffer.
 
