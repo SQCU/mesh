@@ -517,6 +517,15 @@ static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuf
 }
 /* design/algorithm-sources.md#realized-numerical-invocation */
 static void submit_metal(MeshFunction *f) {submit_encoded_metal(f,f.encode);}
+/* design/algorithm-sources.md#programkernel_call */
+int mesh_algebra_encode(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (^encode)(id<MTLCommandBuffer>)) {
+  MeshAlgebra *a=owner(handle);
+  if(a.cpu || !encode)return EINVAL;
+  int error=bind_function(handle,inputs,input_count,outputs,output_count,submit_metal);
+  if(error)return error;
+  MeshFunction *f=a.functions.lastObject;f.encode=encode;f->executionKind=MESH_EXECUTION_METAL;
+  return 0;
+}
 /* design/algorithm-sources.md#recorded-metal-commands */
 static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const struct mesh_view *reads,struct mesh_view write) {
   MeshAlgebra *a=owner(handle);
@@ -555,16 +564,14 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,c
   [recorded setKernelBuffer:bounds offset:0 atIndex:1];
   [recorded concurrentDispatchThreadgroups:MTLSizeMake(rows,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
   [resources addObject:addresses];[resources addObject:bounds];
-  int status=bind_function(handle,reads,input_count,&write,1,submit_metal);
-  if(status)return status;
-  MeshFunction *f=a.functions.lastObject;f.metalPipeline=pipeline;f->executionKind=MESH_EXECUTION_METAL;
-  f.encode=^(id<MTLCommandBuffer> command){
+  int status=mesh_algebra_encode(handle,reads,input_count,&write,1,^(id<MTLCommandBuffer> command){
     id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
     for(id<MTLBuffer> buffer in resources)[encoder useResource:buffer usage:MTLResourceUsageRead|MTLResourceUsageWrite];
     [encoder executeCommandsInBuffer:commands withRange:NSMakeRange(0,1)];
     [encoder endEncoding];
-  };
-  return 0;
+  });
+  if(!status)a.functions.lastObject.metalPipeline=pipeline;
+  return status;
 }
 
 /* design/algorithm-sources.md#region-expression-fusion */

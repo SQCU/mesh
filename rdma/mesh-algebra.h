@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 struct mesh_ctx;
+#ifdef __OBJC__
+@protocol MTLCommandBuffer;
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +47,10 @@ int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_write
 int mesh_writer_writable(struct mesh_writer *);
 int mesh_writer_issue(struct mesh_writer *);
 void mesh_writer_complete(struct mesh_writer *,int publish);
+#ifdef __OBJC__
+/* design/algorithm-sources.md#programkernel_call */
+int mesh_algebra_encode(struct mesh_algebra *,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (^encode)(id<MTLCommandBuffer>));
+#endif
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);

@@ -568,3 +568,7 @@ Rabenseifner (2004), *Optimization of Collective Reduction Operations*; Patarasu
 ## Partial
 
 PyTorch DTensor authors, `Partial` placement, and the Legion authors, reduction privileges: setup-only `Partial` marks unresolved K contributions; disjoint contribution sets combine under addition and the marker disappears only when all required terms are included.
+
+## Program.kernel_call
+
+Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture* (ISCA 1990), for operand-driven firing; Apple, *Metal Programming Guide*, command submission and completion handlers, for device-write visibility. `mesh_algebra_encode` binds a caller-supplied encoder to canonical input/output views at setup. Mesh invokes it with a command buffer when those inputs are present, commits the buffer and publishes the output rows on successful completion. The encoder contains numerical work only: it does not commit, wait, publish or manage mesh readers. Each binding describes one independently usable tensor region; callers split larger operations into region bindings. Captured pipelines and operand storage are realized before invocation and retained by the binding. Generated pointwise functions use this same entry point; external numerical functions need no source compiler or operation enum.
