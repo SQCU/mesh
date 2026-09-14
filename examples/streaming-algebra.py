@@ -118,6 +118,22 @@ def main():
             out_shape=(ShapeDtypeStruct((3, 7), np.float32), ShapeDtypeStruct((3, 7), np.float32)),
             peer=0)(composed_input, weight(strided_right).T, composed_bias)
         composed_results = tuple(tuple(program.export(tensor[i, 0]) for i in range(3)) for tensor in composed)
+        nested_inputs = tuple(program.tensor(shape, block, dtype=dtype) for shape, block in
+            (((3, 4), (1, 4)), ((4, 6), (4, 2)), ((6, 3), (2, 3))))
+        nested_x, nested_up, nested_down = kernels.arguments(3)
+        nested_hidden = kernels.dot(nested_x, nested_up, tile_k=2)
+        nested_body = kernels.dot(nested_hidden / (1 + (0 - nested_hidden).exp()), nested_down, tile_k=2)
+        nested = program.kernel_call(kernels.expression(nested_body), grid=(3,),
+            in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec((1, 3), lambda i: (i, 0)),
+            out_shape=ShapeDtypeStruct((3, 3), np.float32), peer=0)(*nested_inputs)
+        nested_results = tuple(program.export(nested[i, 0]) for i in range(3))
+        nested_generations = []
+        for generation in range(2):
+            values = tuple(((np.arange(np.prod(tensor.shape), dtype=np.float32).reshape(tensor.shape)
+                + generation) / 32 - 0.25).astype(dtype) for tensor in nested_inputs)
+            hidden = values[0].astype(np.float64) @ values[1].astype(np.float64)
+            expected = (hidden / (1 + np.exp(-hidden))) @ values[2].astype(np.float64)
+            nested_generations.append((values, expected))
         table_arg, index_arg, deferred_arg = kernels.arguments(3)
         _, column_arg = kernels.indices()
         index_data = np.array([[2], [2**53 + 1]], dtype=np.int64)
@@ -393,6 +409,57 @@ def main():
                     if not np.array_equal(result.array, expected[i:i+1]):
                         raise ArithmeticError('Composed contraction repeated output mismatch')
                     result.consume()
+        nested_projection = nested_inputs[2][0, 0]
+        projection_rows = program.native.tensor_rows(nested_projection.view.tensor, nested_projection.view.extent)
+        nested_consumers = tuple(index for index, entry in enumerate(program.trace)
+            if any(region['first'] < projection_rows.first + projection_rows.count and
+                projection_rows.first < region['first'] + region['count'] for region in entry['inputs']))
+        if not nested_consumers:
+            raise ArithmeticError('Nested contraction omitted its projection operand')
+        for generation, (values, expected) in enumerate(nested_generations):
+            wait_for(tuple(ref for tensor in nested_inputs for ref in tensor.blocks.values()), 'writable')
+            started = time.monotonic_ns()
+            for tensor, coordinate, value in (
+                    (nested_inputs[0], (1, 0), values[0][1:2]),
+                    (nested_inputs[1], (0, 0), values[1][:, :2]),
+                    (nested_inputs[2], (0, 0), values[2][:2])):
+                with program.write(tensor[coordinate]) as target:
+                    target[...] = value
+            deadline = time.monotonic_ns() + 60_000_000_000
+            while running:
+                completed = tuple(index for index in nested_consumers
+                    if program.native.algebra_trace(program.handle, index).complete_ns >= started)
+                if completed:
+                    break
+                if time.monotonic_ns() > deadline:
+                    raise TimeoutError('Nested contraction did not consume an independently produced hidden panel')
+                time.sleep(0.0001)
+            if not running:
+                raise InterruptedError('Nested contraction observation interrupted')
+            if any(result.ready for result in nested_results) or any(
+                    not nested_inputs[1][0, i].writable for i in (1, 2)):
+                raise ArithmeticError('Nested contraction crossed a withheld hidden-panel boundary')
+            print(json.dumps(dict(event='nested_dot_partial', generation=generation,
+                consumer_functions=completed, withheld_hidden_panels=[1, 2],
+                projection_rows=dict(first=projection_rows.first, count=projection_rows.count))), flush=True)
+            for i in (1, 2):
+                with program.write(nested_inputs[1][0, i]) as target:
+                    target[...] = values[1][:, 2*i:2*i+2]
+                with program.write(nested_inputs[2][i, 0]) as target:
+                    target[...] = values[2][2*i:2*i+2]
+            wait_for((nested_results[1],))
+            if any(nested_results[i].ready for i in (0, 2)):
+                raise ArithmeticError('Nested contraction consumed an unpublished input row')
+            print(json.dumps(dict(event='nested_dot_row', generation=generation,
+                withheld_input_rows=[0, 2], output=nested_results[1].array.tolist())), flush=True)
+            for i in (0, 2):
+                with program.write(nested_inputs[0][i, 0]) as target:
+                    target[...] = values[0][i:i+1]
+            wait_for(nested_results)
+            for i, result in enumerate(nested_results):
+                if not np.allclose(result.array, expected[i:i+1], atol=3e-4, rtol=3e-4):
+                    raise ArithmeticError('Nested contraction numerical mismatch')
+                result.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
             raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
