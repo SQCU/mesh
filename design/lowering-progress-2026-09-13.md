@@ -1412,3 +1412,30 @@ syntax checks pass. The integrated Metal run at `8a1a9ae` passes all cases,
 configuring 5566 functions and completing 10954 submissions with runtime code0.
 This enlarged workflow is not a matched performance baseline for the old emitter;
 no speedup or performance parity claim follows from those counts.
+
+Independent source review found a composed typing defect not exposed by the
+individual reductions: `(float_x.sum() > 0).any()` inherited boolean accumulation
+context and truncated fractions. `ebcd5e6` corrects operand type propagation
+through expressions generally. `7da6a30` adds this direct shared expression and
+its all variant to the same workflow. The strengthened Metal workflow fails
+with library `8a1a9ae` at the early numerical comparison and passes with
+`ebcd5e6`. It configures 5590 functions and completes 11002 submissions. The
+paired Metal workflow also passes, with 5526 functions and 10317 submissions;
+peer teardown uses ordinary SIGTERM and exits zero. The 26 reduction cases run
+locally on rank zero; the composed gold and fanout exercise the RDMA link.
+
+The final CPU workflow at `ebcd5e6` also passes all 26 cases, configuring 5590
+functions and completing 11002 submissions with runtime code0. The initial
+24-case CPU run at `8a1a9ae` passed as well; the new composition was needed to
+expose the source-reviewed typing defect. All successful runs, the pre-fix
+failure, source revisions, count/mean/sample variance, and raw compressed logs
+and traces are recorded in
+[associative-provenance.json](../measurements/lowering-2026-09-13/associative-provenance.json).
+The arena remains 65536 pages, four pages per block and one QP per node.
+
+The next smallest caller migration is the shared scalar intrinsic family:
+arcsinh, logaddexp, expm1 and isfinite. Preserve near-zero and large-input
+behavior, infinity/NaN semantics and exact integer predicates with numerical
+primary sources. Generators, sorting, integer contractions, broader indexed
+native contraction recognition and the nine-step performance acceptance remain
+open. The removed reduction emitter does not imply those other paths are gone.
