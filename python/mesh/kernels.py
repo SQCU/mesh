@@ -610,11 +610,14 @@ class _ExpressionKernel:
 
     # design/algorithm-sources.md#region-expression-fusion
     def bind(self, program, inputs, outputs, coordinate=()):
-        from . import check
+        from . import check, Partial
         from ._native import View
         import ctypes as C
         if len(outputs) != len(self.values):
             raise ValueError('Each expression requires an output region')
+        for output in outputs:
+            output.partial = Partial.merge(tuple(ref for source in inputs
+                for ref in (source.blocks.values() if hasattr(source, 'blocks') else (source,))))
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
@@ -1906,10 +1909,11 @@ def _integral_contraction(program, left, right, target):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _bind_operation(program, operation, inputs, target, *, alpha=1, beta=0):
-    from . import check
+    from . import check, Partial
     from ._native import View
     check(program.native.algebra_bind(program.handle, operation, inputs[0].view,
         inputs[1].view if len(inputs) == 2 else View(), target.view, alpha, beta))
+    target.partial = Partial.merge(inputs)
 
 
 # design/algorithm-sources.md#indexed-range-generation
@@ -2115,6 +2119,7 @@ class _ExpressionRegions:
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def parts(self, node, origin, shape, direct=None):
+        from . import Partial
         from math import gcd
         key = ('parts', self.key(node, origin, shape))
         if key in self.cache:
@@ -2140,6 +2145,8 @@ class _ExpressionRegions:
         boundaries.update(cut for cut in self.page_cuts(left, 1, origin[0], shape[0]) if 0 < cut < inner)
         boundaries.update(cut for cut in self.page_cuts(right, 0, origin[1], shape[1]) if 0 < cut < inner)
         ordered = sorted(boundaries)
+        contributions = tuple(object() for _ in range(len(ordered) - 1))
+        required = frozenset(contributions)
         parts = []
         for start, end in zip(ordered, ordered[1:]):
             length = end - start
@@ -2154,6 +2161,8 @@ class _ExpressionRegions:
                 _integral_contraction(self.program, left_panel, right_panel, destination)
             else:
                 _bind_operation(self.program, 6, (left_panel, right_panel), destination)
+            if len(contributions) > 1:
+                destination.partial = Partial(required, frozenset((contributions[len(parts)],)))
             parts.append(destination)
         while len(parts) > 2:
             reduced = []

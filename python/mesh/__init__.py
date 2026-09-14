@@ -20,7 +20,26 @@ def check(code):
         raise OSError(code, os.strerror(code))
 
 
+@dataclass(frozen=True)
+class Partial:
+    required: frozenset
+    terms: frozenset
+
+    @classmethod
+    # design/algorithm-sources.md#partial
+    def merge(cls, refs):
+        values = tuple(ref.partial for ref in refs if ref.partial is not None)
+        if not values:
+            return None
+        required = frozenset.union(*(value.required for value in values))
+        terms = frozenset.union(*(value.terms for value in values))
+        if sum(len(value.terms) for value in values) != len(terms):
+            raise ValueError('A partial contribution occurs twice in the same reduction')
+        return None if required == terms else cls(required, terms)
+
+
 class Ref:
+    partial = None
     # design/algorithm-sources.md#indexed-library-functions
     def __init__(self, program, view, dtype):
         self.program, self.view, self.dtype = program, view, np.dtype(dtype)
@@ -48,7 +67,9 @@ class Ref:
     @property
     # design/algorithm-sources.md#indexed-library-functions
     def T(self):
-        return Ref(self.program, self.program.native.view_transpose(self.view), self.dtype)
+        result = Ref(self.program, self.program.native.view_transpose(self.view), self.dtype)
+        result.partial = self.partial
+        return result
 
     # design/algorithm-sources.md#indexed-library-functions
     def slice(self, row, column, rows, columns):
@@ -56,10 +77,14 @@ class Ref:
             raise ValueError('Slice is outside the reference')
         if rows == 0 or columns == 0:
             return self.program.tensor((rows, columns), dtype=self.dtype)
+        if row == column == 0 and (rows, columns) == self.shape:
+            return self
         view = self.program.native.view_slice(self.view, row, column, rows, columns)
         if not view.tensor:
             raise ValueError('Slice is outside the reference')
-        return Ref(self.program, view, self.dtype)
+        result = Ref(self.program, view, self.dtype)
+        result.partial = self.partial
+        return result
 
     # design/algorithm-sources.md#indexed-library-functions
     def broadcast(self, rows, columns):
@@ -70,7 +95,9 @@ class Ref:
         view = self.program.native.view_broadcast(self.view, rows, columns)
         if not view.tensor:
             raise ValueError('Incompatible broadcast shape')
-        return Ref(self.program, view, self.dtype)
+        result = Ref(self.program, view, self.dtype)
+        result.partial = self.partial
+        return result
 
     @property
     # design/algorithm-sources.md#view-scoped-host-production
@@ -283,8 +310,14 @@ class Program:
 
         # design/algorithm-sources.md#pallas-call-ergonomics
         def configure(*operands):
+            from . import kernels
             if len(operands) != len(inputs):
                 raise ValueError('Each input requires one BlockSpec')
+            partial = next((ref for operand in operands
+                            for ref in (operand.blocks.values() if isinstance(operand, Tensor) else (operand,))
+                            if ref.partial is not None), None)
+            if partial is not None and kernel is not kernels.add:
+                raise TypeError(f'Partial input {partial!r} requires addition or reduce_scatter before this kernel')
             outputs = tuple(self.tensor(shape.shape, block_shape=spec.block_shape,
                 dtype=shape.dtype) for shape, spec in zip(shapes, specs))
             if peer is None or peer == self.node:
@@ -347,6 +380,7 @@ class Program:
             return
         check(self.native.algebra_copy(self.handle,
             src.view, sender, dst.view, receiver, queue))
+        dst.partial = src.partial
 
     # design/algorithm-sources.md#canonical-view-replication
     def replicate(self, source, peer):
