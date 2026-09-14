@@ -175,8 +175,8 @@ class _ExpressionKernel:
                 else:
                     _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
             return
-        if any(_contains_dot(value) for value in self.values):
-            _lower_dot_expressions(program, self.values, grid, input_specs, output_specs)
+        if any(_requires_regions(value) for value in self.values):
+            _lower_region_expressions(program, self.values, grid, input_specs, output_specs)
             return
         for coordinate in itertools.product(*(range(size) for size in grid)):
             self.bind(program, tuple(spec.resolve(coordinate) for spec in input_specs),
@@ -760,8 +760,8 @@ def dot(left, right, *, tile_k=128):
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
-def _contains_dot(node):
-    return node.operation == 'dot' or any(_contains_dot(child) for child in node.operands)
+def _requires_regions(node):
+    return node.operation in ('dot', 'sum') or any(_requires_regions(child) for child in node.operands)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -772,7 +772,7 @@ def _bind_operation(program, operation, inputs, target):
         inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
 
 
-class _ContractionRegions:
+class _ExpressionRegions:
     # design/algorithm-sources.md#shared-contraction-lowering
     def __init__(self, program, specs, coordinate, cache):
         self.program, self.coordinate, self.cache = program, coordinate, cache
@@ -796,7 +796,10 @@ class _ContractionRegions:
             if left[0][1] != right[0][0]:
                 raise ValueError('Contraction inner dimensions differ')
             result = (left[0][0], right[0][1]), (left[1][0], right[1][1]), (left[2][0], right[2][1])
-        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh'):
+        elif node.operation == 'sum':
+            child = self.layout(node.operands[0])
+            result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
+        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'load'):
             children = tuple(map(self.layout, node.operands))
             shape = tuple(max(child[0][axis] for child in children) for axis in range(2))
             if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
@@ -839,14 +842,16 @@ class _ContractionRegions:
         return node, tuple(identities), origin, shape
 
     # design/algorithm-sources.md#shared-contraction-lowering
-    def temporary(self, shape):
-        return self.program.tensor(shape, dtype=np.float32)[0, 0]
+    def temporary(self, shape, dtype=np.float32):
+        return self.program.tensor(shape, dtype=dtype)[0, 0]
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def panel(self, node, origin, shape):
         if node.operation == 'input':
             source = self.sources[node.value]
             return source.region(*origin, *shape) if self.whole[node.value] else source.slice(*origin, *shape)
+        if node.operation == 'sum':
+            return self.reduction(node, origin[0], shape[0], np.dtype('float32'))
         key = ('panel', self.key(node, origin, shape))
         if key not in self.cache:
             target = self.temporary(shape)
@@ -894,6 +899,37 @@ class _ContractionRegions:
         return self.cache[key]
 
     # design/algorithm-sources.md#shared-contraction-lowering
+    def reduction(self, node, row, rows, dtype, direct=None):
+        key = ('sum', self.key(node, (row, 0), (rows, 1)), dtype.str)
+        if key in self.cache:
+            return self.cache[key]
+        child = node.operands[0]
+        layout = self.layout(child)
+        width, tile = layout[0][1], layout[2][1]
+        parts = []
+        for column in range(0, width, tile):
+            length = min(tile, width-column)
+            target = direct if direct is not None and tile >= width and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+            self.emit(child, (row, column), (rows, length), target, reduce=True)
+            parts.append(target)
+        while len(parts) > 1:
+            reduced = []
+            for index in range(0, len(parts), 2):
+                if index + 1 == len(parts):
+                    reduced.append(parts[index])
+                    continue
+                target = direct if direct is not None and len(parts) == 2 and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+                if dtype.kind == 'f':
+                    _bind_operation(self.program, add, parts[index:index+2], target)
+                else:
+                    left, right = arguments(2)
+                    _ExpressionKernel((left+right,)).bind(self.program, parts[index:index+2], (target,), self.coordinate)
+                reduced.append(target)
+            parts = reduced
+        self.cache[key] = parts[0]
+        return parts[0]
+
+    # design/algorithm-sources.md#shared-contraction-lowering
     def publish(self, parts, target):
         if len(parts) == 2:
             destination = target if target.dtype == np.dtype('float32') else self.temporary(target.shape)
@@ -903,7 +939,7 @@ class _ContractionRegions:
             _bind_operation(self.program, affine(), parts, target)
 
     # design/algorithm-sources.md#shared-contraction-lowering
-    def emit(self, value, origin, shape, target, external=False):
+    def emit(self, value, origin, shape, target, external=False, reduce=False):
         inputs, replacements = [], {}
 
         # design/algorithm-sources.md#shared-contraction-lowering
@@ -916,6 +952,12 @@ class _ContractionRegions:
 
         # design/algorithm-sources.md#shared-contraction-lowering
         def lower(node):
+            if node.operation == 'sum':
+                layout = self.layout(node)
+                row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
+                rows = 1 if layout[0][0] == 1 else shape[0]
+                dtype = np.int64 if target.dtype.kind in 'ib' else np.uint64 if target.dtype.kind == 'u' else np.float32
+                return reference(('sum', node, row, rows), (self.reduction(node, row, rows, np.dtype(dtype)),))
             if node.operation == 'dot':
                 layout = self.layout(node)
                 where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
@@ -938,20 +980,20 @@ class _ContractionRegions:
                 return node + origin[axis]
             if node.operation == 'indexed_add':
                 raise ValueError('Indexed addition requires an output root')
-            if node.operation == 'sum' and _contains_dot(node):
-                raise ValueError('Contraction reductions require an explicit region output')
             return _Expression(node.operation, tuple(lower(child) for child in node.operands), node.value)
 
         lowered = lower(value)
+        if reduce:
+            lowered = lowered.sum()
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
-def _lower_dot_expressions(program, expressions, grid, input_specs, output_specs):
+def _lower_region_expressions(program, expressions, grid, input_specs, output_specs):
     import itertools
     cache = {}
     for coordinate in itertools.product(*(range(length) for length in grid)):
-        lowering = _ContractionRegions(program, input_specs, coordinate, cache)
+        lowering = _ExpressionRegions(program, input_specs, coordinate, cache)
 
         # design/algorithm-sources.md#shared-contraction-lowering
         def specialize(node):
@@ -971,5 +1013,13 @@ def _lower_dot_expressions(program, expressions, grid, input_specs, output_specs
                         raise ValueError('Contraction output shape differs from its operand domains')
                 where = tuple(origin[axis] if layout[1][axis] else 0 for axis in range(2))
                 lowering.publish(lowering.parts(value, where, target.shape, target), target)
+            elif value.operation == 'sum' and target.shape[1] == 1:
+                layout = lowering.layout(value)
+                row = origin[0] if layout[1][0] else 0
+                dtype = np.dtype(np.int64 if target.dtype.kind in 'ib' else np.uint64 if target.dtype.kind == 'u' else np.float32)
+                result = lowering.reduction(value, row, target.shape[0], dtype, target)
+                if result is not target:
+                    symbol, = arguments(1)
+                    _ExpressionKernel((symbol,)).bind(program, (result,), (target,), coordinate)
             else:
                 lowering.emit(value, origin, target.shape, target, external=True)

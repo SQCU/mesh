@@ -1278,7 +1278,7 @@ expression through the existing `Program.kernel_call`, with logical whole-input
 BlockSpecs and ordinary output-region maps. Its setup K-tile choice is metadata,
 not a runtime branch in the numerical call graph.
 
-`_ContractionRegions.parts` owns contraction partition and reduction construction. K boundaries
+`_ExpressionRegions.parts` owns contraction partition and reduction construction. K boundaries
 respect the actual left/right backing partitions. Every K panel binds the existing
 native `kernels.matmul` implementation and writes an FP32 partial. The existing
 native `kernels.add` combines them in the same pairwise tree used by `nn.linear`
@@ -1339,7 +1339,7 @@ no public C ABI and reports no speedup.
 
 ### Mapped and whole-reference dot operands
 
-`_ContractionRegions.parts` resolves each non-None input BlockSpec at every configured grid
+`_ExpressionRegions.parts` resolves each non-None input BlockSpec at every configured grid
 coordinate. Its local M/K/N dimensions, transposed strides and offset are the
 actual operand, not a hint discarded in favor of the containing Tensor. K
 panels slice that resolved Ref. A None BlockSpec retains the whole logical
@@ -1357,8 +1357,8 @@ output grid. All forms reuse the same FP32 native panel/reduction bindings.
 
 ### Recursive pointwise dot epilogues
 
-`_contains_dot` identifies contractions within existing expression nodes;
-`_lower_dot_expressions` recursively substitutes each contraction with its
+`_requires_regions` identifies contractions within existing expression nodes;
+`_lower_region_expressions` recursively substitutes each contraction with its
 FP32 region partials. The same Pallas numerical-expression and tiled-accumulation
 sources above motivate this composition. For example, with
 `z = kernels.dot(a, b, tile_k=128)`, both `kernels.expression(z*scale+bias)`
@@ -1384,9 +1384,8 @@ bare FP32 output directly; epilogue readers then hold its canonical lifetime.
 With multiple panels, the bare output uses its native final reduction while an
 epilogue independently fuses those same last partials.
 
-Indexed addition remains an output-root operation. Shape-changing reductions
-of a dot are not generalized here. Computed contraction operands use the region
-demand lowering described below. There is no fallback that materializes a
+Indexed addition remains an output-root operation. Computed contraction operands
+and row reductions use the region-demand lowering described below. There is no fallback that materializes a
 whole operand or waits for unrelated regions. Python compilation checks the
 implementation; the existing streamed gold example supplies runtime evidence.
 
@@ -1396,7 +1395,7 @@ implementation; the existing streamed gold example supplies runtime evidence.
 The JAX authors' [Pallas BlockSpec documentation](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
 defines program-specific operand regions, while the cited Pallas pipelining
 material distinguishes tiled dependencies from full-array sequencing.
-`_ContractionRegions` applies these region and dependency principles to the
+`_ExpressionRegions` applies these region and dependency principles to the
 existing expression representation and native operations. For example:
 
 ```python
@@ -1433,16 +1432,55 @@ output row tiles. `program_id` is specialized to its original coordinate before
 caching, preventing reuse of numerically different programs. Canonical reader
 members retain shared regions until every configured consumer has completed.
 
-Computed operands currently support pointwise expressions and nested dots;
-computed indexed loads and reductions need additional shape/dependency lowering
-and fail explicitly. Existing epilogue indexed loads keep their selected-reader
-path. Non-singleton operand dimensions must match in their resolved domains;
+Computed operands support pointwise expressions, nested dots and row reductions.
+Indexed loads whose coordinate expressions determine their shapes retain the
+existing selected-reader path; index intrinsics alone do not declare a new
+logical tensor shape. Non-singleton operand dimensions must match in their resolved domains;
 a whole four-row value plus a mapped two-row value inside one computed operand
 requires explicit matching maps. Direct inputs whose requested M/N region spans
 multiple backing extents remain outside the native single-ref binding contract;
 there is no dense copy or alternate backend fallback. Python compilation and
 source review validate setup construction; operational evidence comes from the
 existing streamed nested-contraction gold case.
+
+
+### Streamed row reductions in the shared region owner
+
+The JAX authors' [Pallas reductions and accumulation discussion](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation)
+describes tiled accumulation and the lifetime of reduction buffers.
+`_ExpressionRegions.reduction` implements row statistics with separately published
+feature partials and canonical reader lifetimes. The existing `.sum()` expression
+reduces the full resolved child's column domain to one column: whole Tensor inputs
+use their full logical width, while mapped BlockSpecs use the actual resolved Ref
+width. Its row domain and row backing boundaries come from the child expression.
+
+For each demanded row range, setup propagates the child's feature backing cuts,
+emits an independent partial for each feature interval, and combines those
+partials in a balanced tree. The child's pointwise expression is fused directly
+into the partial sum kernel. For example `(x*x).sum()` allocates scalar partials,
+not a squared tensor. Likewise `dot(x,w).sum()` requests corresponding output
+feature panels from the contraction and reduces their completed values. The
+final row statistic necessarily depends on all features of that row; its partial
+producers and unrelated rows remain independently usable.
+
+Real statistics and their combination use FP32. Signed integer and boolean
+outputs select int64 accumulators, unsigned outputs uint64, matching the existing
+scalar emitter's accumulator selection. Integer partials and their tree remain
+integer expressions, avoiding a float conversion that would lose values above
+2**24. Conversion to a declared narrower output occurs after the completed
+statistic. Floating accumulation is reassociated by the feature partial tree;
+this is not a promise of bitwise equality with a serial sum.
+
+The cache includes the child expression, actual used input identities, row origin,
+row count and accumulator dtype; its feature origin is zero and feature extent
+one. Different output feature tiles therefore share the same row statistic.
+Broadcast epilogues and nested contractions consume that scalar through ordinary
+canonical refs, without another scalar copy. A bare statistic can publish directly
+to an output of the accumulator dtype. Expressions such as
+`x*((x*x).sum()/width+eps).rsqrt()*gamma` use this same owner and selected feature
+regions for their output panels. Gamma does not become a dependency of the sum.
+All grid maps, allocation, specialization and bindings are realized before
+numerical invocation; the existing gold examples provide runtime validation.
 
 ## Canonical reader groups
 
