@@ -2731,6 +2731,13 @@ no floating conversion is involved. Any/all normalize before combining boolean
 partials. Existing sum precision and modular integer addition remain unchanged.
 All geometry, storage and generated kernels are realized before invocation.
 
+Nested expressions retain the numerical types of their own operands. In
+particular, comparison or truth output storage must not change an inner floating
+sum into an integer accumulator. Explicit casts remain conversion boundaries;
+root sum bindings retain their existing output-directed accumulation contract.
+This distinction applies to composed arithmetic, masks and selections generally,
+including `(x.sum() > 0).any()` on fractional values.
+
 The existing streaming-algebra Xonotic workflow exercises ranks one through
 three, ragged source regions, exact signed/unsigned 64-bit extrema, floating
 NaN/truth behavior, an independently withheld row, downstream consumers and
