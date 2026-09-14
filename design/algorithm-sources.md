@@ -3066,3 +3066,35 @@ repeated reuse to observe one source extent's consumers completing while the
 other source extent is absent. Local runs exercise alias indexing; paired runs
 exercise actual link transfer. This does not by itself establish transfer
 throughput or optimal storage placement.
+
+## Static indexed access specialization
+
+The JAX authors' [Pallas indexing design](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+expresses gathers through index arrays and reference layouts. Mesh's setup
+specializer evaluates index and mask expressions over the configured output
+domain when they contain no unavailable numerical values. It retains exactly
+the source blocks that those accesses can reach. Unknown indices continue to
+use the existing dynamic indexed-reader mechanism.
+
+For a proven multi-block access, the candidate indices and actual Ref vector
+remain setup metadata used by the shared indexed-load emitter. They must not
+be expanded into one nested numerical conditional per candidate. The source
+pointer/stride mapping selects a retained candidate from the original block
+ordinal; numerical values remain in their canonical pages. The enclosing mask
+still controls whether a load occurs. Static reader bindings already name the
+complete candidate set, so no dynamic selector or runtime dependency discovery
+is needed for that access.
+
+Ordering output assembly uses the same candidate table when a requested region
+crosses sorted backing tiles. Selected-contraction output assembly retains its
+variable-width interval directory and typed result references, using the shared
+interval lookup emitter instead of rebuilding a conditional chain. These output
+assemblies retain their existing dependencies and publication granularity.
+
+This replaces an existing source expansion that exceeded Metal's bracket-depth
+limit on a 128-element key panel over fragmented logical views. Retaining the
+index mapping also avoids linear per-candidate conditional evaluation. It does
+not assume that an arbitrary dynamic gather can be statically resolved, and it
+does not change when its selected physical pages become ready. The existing
+logical-gather, reduction, ordering and fragmented-view workflows exercise the
+shared lowering rather than a separate compiler evaluator.
