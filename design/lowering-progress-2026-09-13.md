@@ -563,3 +563,60 @@ neither matched throughput parity nor physical wire/GPU utilization. General
 logical rank, remaining caller/derivative migrations, direct matmul binding
 unification, launch/storage optimization, collective placement and matched
 performance acceptance remain open.
+
+## Logical rank and index-map caller migration
+
+`560b74e` adds `argument.reshape(logical_shape).at(*coordinates)` to the existing
+expression owner. The logical shape is setup metadata. Its coordinates flatten
+to an ordinal and map onto the actual bound physical Tensor/Ref shape with exact
+integer quotient and remainder. Physical block pointers, offsets and strides
+remain the same. Per-axis validity is applied before flattening, so an invalid
+logical coordinate cannot alias another valid physical position. Single inferred
+axes and scalar logical shapes use the same setup resolution. This does not add
+arbitrary-rank contraction/reduction semantics or general indexed scatter values.
+
+`fac669c` routes forward gather, take_along_axis, transpose and concatenation
+through this map for arbitrary logical rank, deleting their custom forward
+emitters and previous rank/shaped restrictions. These operations no longer call
+`matrix_view` to assemble or reinterpret a whole operand. Requested numerical
+outputs still have canonical storage; this is not a claim that every transpose
+or concatenation has been reduced to a metadata alias. Graph reshape continues
+to retain its input storage. Existing derivatives remain, including the shared
+row-gather derivative; general gather/take derivatives still need migration.
+The take derivative's source-singleton addressing fix has source evidence only.
+
+`ff54af8` fixes take_along_axis's symbolic non-axis broadcast shape and validates
+its rank, integer indices and axis during setup. It extends the existing optional
+Xonotic graph with rank-three takes, a broadcast take, inserted-axis gather,
+transpose, concatenation, and a reshape/gather whose logical last dimension differs
+from the backing tensor's physical width. `2d75409` corrects the integer arithmetic
+observation's BlockSpecs to bind mapped scalar operands. `57e38fe` includes the
+new logical outputs' actual page identities in the existing binding diagnostics.
+
+CPU and Metal float32 local runs pass the complete example, reporting 2160 and
+2162 completed submissions respectively. CPU and Metal paired float16 runs also
+pass, reporting 1524 and 1525 rank-zero completions. Gold maximum absolute errors
+are 1.654e-6 CPU and 1.576e-6 Metal locally, and 0.001953125 on both paired runs.
+For both generations every logical operation publishes its first half with the
+other source/index regions absent, then completes its remaining outputs after
+those operands arrive. The broadcast take retains the same early source region
+for later index consumers without delaying its early output. Signed and unsigned
+quotient/remainder comparisons include values above 2**53, INT64_MIN, UINT64_MAX,
+and negative divisors. Divisor zero and unrepresentable signed quotient cases
+remain outside the documented arithmetic domain. The logical bound observation
+returns `[0,1,-1,-1]`, demonstrating that invalid inner-axis coordinates do not
+read adjacent physical values.
+
+`logical-provenance.json` records exact installed library and example revisions,
+configuration and raw compressed logs/traces. The final paired Metal binding log
+names each new output's actual rows, and native trace descriptors retain its
+index inputs and candidate source identities. Paired gold and fanout exercise
+actual RDMA; all logical-indexing side operations execute on rank zero and use
+float32 data. No distributed logical-indexing or matched throughput claim follows.
+Both peer applications terminate normally after SIGTERM.
+
+Remaining work includes static index-map realization without unnecessary selector
+launches, broader axis/contraction/reduction composition, general indexed scatter
+values and derivatives, remaining caller migration, storage/launch optimization,
+collective placement and matched performance acceptance. No end-to-end performance
+parity is inferred from these finite numerical and progress observations.
