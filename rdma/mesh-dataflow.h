@@ -5,7 +5,8 @@
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,arena; int fd; void *execution,*readers; };
 struct mesh_row_range { uint32_t first,count; };
-struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; const uint32_t *members; const size_t *member_offsets; };
+struct mesh_reader_member { _Atomic uint64_t generation; uint32_t row; };
+struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; struct mesh_reader_member *members; const size_t *member_offsets; };
 struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };

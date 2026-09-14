@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 30u
+#define MESH_VERSION 31u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
@@ -24,11 +24,12 @@ enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_SEND_SOURCE, MESH_ROW_O
 enum { MESH_SEND, MESH_RECEIVE };
 enum { MESH_NOTICE_COMPUTE, MESH_NOTICE_SEND, MESH_NOTICE_QUEUES };
 struct mesh_notice { _Atomic uint32_t queued; uint32_t next; };
+struct mesh_reader_state { _Atomic uint64_t generation; _Atomic uint32_t expected,completed; uint32_t plane; };
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint32_t configured;
-  uint64_t planes_off,page_off,mask_off,order_off,index_off,notice_off,data_off,length;
+  uint64_t planes_off,page_off,mask_off,reader_off,order_off,index_off,notice_off,data_off,length;
   _Atomic uint64_t client,bridge_pid;
   _Atomic uint32_t order_length[2*MESH_QPS];
   _Atomic uint32_t notice_head[MESH_NOTICE_QUEUES];
@@ -41,6 +42,8 @@ static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
 static inline _Atomic uint32_t *mesh_page(struct hdr *m){ return (_Atomic uint32_t*)((unsigned char*)m+m->page_off); }
 static inline uint64_t *mesh_mask(struct hdr *m){ return (uint64_t*)((unsigned char*)m+m->mask_off); }
+/* design/algorithm-sources.md#programkernel_call */
+static inline struct mesh_reader_state *mesh_reader_states(struct hdr *m){ return (struct mesh_reader_state *)((unsigned char *)m+m->reader_off); }
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint32_t queue,int direction){ return &m->order_length[2*queue+(uint32_t)direction]; }
@@ -81,12 +84,6 @@ static inline int mesh_receive_postable(struct hdr *m,uint32_t row){
   }
   return 1;
 }
-/* ledger D4: the posted receive holds the consumer's own pages */
-static inline void mesh_receive_posted(struct hdr *m,uint32_t row,uint32_t page){
-  mesh_bits_set(m,MESH_ROW_HOT,row,m->block);
-  mesh_bits_set(m,MESH_PAGE_HOT,page,m->block);
-  mesh_bits_clear(m,MESH_PRESENT,row,m->block);
-}
 /* design/algorithm-sources.md#programkernel_call */
 static inline void mesh_reads_reset(struct hdr *m,uint32_t first,uint32_t count){
   uint64_t readers=0;
@@ -95,13 +92,25 @@ static inline void mesh_reads_reset(struct hdr *m,uint32_t first,uint32_t count)
     uint32_t plane=(uint32_t)__builtin_ctzll(readers);readers&=readers-1;
     mesh_bits_clear(m,MESH_READ+plane,first,count);
   }
+  for(uint32_t row=first;row<first+count;row++){
+    struct mesh_reader_state *state=&mesh_reader_states(m)[row];
+    atomic_store_explicit(&state->completed,0,memory_order_release);
+    atomic_fetch_add_explicit(&state->generation,1,memory_order_acq_rel);
+    if(state->plane!=MESH_ABSENT && !atomic_load_explicit(&state->expected,memory_order_acquire))mesh_bits_set(m,MESH_READ+(int)state->plane,row,1);
+  }
+}
+/* ledger D4: the posted receive holds the consumer's own pages */
+static inline void mesh_receive_posted(struct hdr *m,uint32_t row,uint32_t page){
+  mesh_bits_set(m,MESH_ROW_HOT,row,m->block);
+  mesh_bits_set(m,MESH_PAGE_HOT,page,m->block);
+  mesh_bits_clear(m,MESH_PRESENT,row,m->block);
+  mesh_reads_reset(m,row,m->block);
 }
 /* ledger D8: presence is the receive completion */
 static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t page,int landed){
   mesh_bits_clear(m,MESH_PAGE_HOT,page,m->block);
   mesh_bits_clear(m,MESH_ROW_HOT,row,m->block);
   if(landed){
-    mesh_reads_reset(m,row,m->block);
     mesh_bits_set(m,MESH_PRESENT,row,m->block);
   }
   mesh_notify(m,row,m->block);
@@ -150,6 +159,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64,blocks=rows/block;
   h->pgsz=pgsz; h->block=block; h->rows=rows;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->reader_off=at; at+=(uint64_t)rows*sizeof(struct mesh_reader_state); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)rows*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->mask_off=at; at+=(uint64_t)rows*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
