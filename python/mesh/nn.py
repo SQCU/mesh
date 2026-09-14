@@ -63,19 +63,15 @@ def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None,
     if inner != w.shape[0]:
         raise ValueError('Contraction dimensions differ')
     mr = _tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0)
-    kr = _tile(min(tile_k, inner), x.block_shape[1] if x.grid[1] > 1 else 0,
-               w.block_shape[0] if w.grid[0] > 1 else 0)
     nr = _tile(min(tile_columns, w.shape[1]), w.block_shape[1] if w.grid[1] > 1 else 0)
-    grid = ((rows + mr - 1) // mr, (w.shape[1] + nr - 1) // nr)
-    parts = []
-    for panel in range((inner + kr - 1) // kr):
-        parts.append(program.kernel_call(kernels.matmul, grid=grid,
-            in_specs=(BlockSpec((mr, kr), lambda i, j, panel=panel: (i, panel)),
-                      BlockSpec((kr, nr), lambda i, j, panel=panel: (panel, j))),
-            out_specs=BlockSpec((mr, nr), _block),
-            out_shape=ShapeDtypeStruct((rows, w.shape[1]), "float32"), peer=peer)(x, w))
-    return _cast(program, _sum(program, parts, mr, peer=peer),
-                 x.dtype if output_dtype is None else output_dtype, mr, peer=peer)
+    left, right = kernels.arguments(2)
+    return program.kernel_call(kernels.expression(kernels.dot(left, right, tile_k=tile_k)),
+        grid=((rows + mr - 1) // mr, (w.shape[1] + nr - 1) // nr),
+        in_specs=(BlockSpec(None), BlockSpec(None)),
+        out_specs=BlockSpec((mr, nr), _block),
+        out_shape=ShapeDtypeStruct((rows, w.shape[1]), x.dtype if output_dtype is None else output_dtype),
+        peer=peer)(x, w)
+
 
 
 # design/algorithm-sources.md#pallas-panel-composition

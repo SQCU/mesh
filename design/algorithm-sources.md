@@ -1267,3 +1267,41 @@ unsupported fused form rather than lowering it eagerly or silently changing its
 dependencies. Existing segmented publication and reverse-directory lifetimes
 are unchanged. Python compilation is evidence for source syntax only; operational
 CPU/Metal validation belongs to the existing gold workflow.
+
+## Shared contraction lowering
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+separates numerical kernel expressions and their backend implementation, while
+[Pallas pipelining and accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation)
+describes tiled reduction dependencies. `dot(left, right, tile_k=...)` is a root
+expression through the existing `Program.kernel_call`, with logical whole-input
+BlockSpecs and ordinary output-region maps. Its setup K-tile choice is metadata,
+not a runtime branch in the numerical call graph.
+
+`_lower_dot` owns contraction partition and reduction construction. K boundaries
+respect the actual left/right backing partitions. Every K panel binds the existing
+native `kernels.matmul` implementation and writes an FP32 partial. The existing
+native `kernels.add` combines them in the same pairwise tree used by `nn.linear`
+previously. The final FP32 result writes the preallocated output directly; a
+non-FP32 declared output uses the existing affine conversion exactly once after
+that completed region's FP32 sum. A single K panel can write an FP32 output
+directly. Its `temporary` and `bind` setup helpers allocate canonical storage and
+bind those existing operations; they do not implement another matmul or select a
+backend. CPU, MPS and configured Core ML handling remain in the native operation
+owner, including their existing operand and accumulation precision paths.
+
+`nn.linear` now supplies the contraction expression, output shape, M/N region
+layout and placement. It does not construct K-panel launches, reduction tensors
+or cast stages. Its M/N gcd choices still ensure each input region fits an actual
+backing. A direct `dot` caller has that same current alignment requirement;
+regions spanning multiple M/N backings require further general lowering, not a
+hidden dense copy or a whole-operand wait. Independently published output regions
+and the true K dependencies remain unchanged.
+
+Scratch allocation belongs to the participant that binds the numerical kernel;
+public output and transport endpoint identities are explicit and do not rely on
+identical private configuration on both peers. All allocation/binding remains
+before realization. This source change preserves the existing FP32 K-panel and
+cast behavior; Python compilation is complete, while the existing gold workflow
+supplies operational CPU/Metal/Core ML validation. Dot epilogue fusion and scratch
+lifetime packing remain distinct lowering work.

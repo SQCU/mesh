@@ -168,10 +168,12 @@ class _ExpressionKernel:
     # design/algorithm-sources.md#dynamic-indexed-expression-lowering
     def bind_grid(self, program, grid, input_specs, output_specs):
         import itertools
-        if any(value.operation == 'indexed_add' for value in self.values):
+        if any(value.operation in ('indexed_add', 'dot') for value in self.values):
             for value, spec in zip(self.values, output_specs):
                 if value.operation == 'indexed_add':
                     _lower_indexed_add(program, value, grid, input_specs, spec)
+                elif value.operation == 'dot':
+                    _lower_dot(program, value, grid, input_specs, spec)
                 else:
                     _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
             return
@@ -676,3 +678,60 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
 
         function = _compiled_region(program, (reverse_keys, reverse_ordinals, bounds, initial, *candidates), target, finish, 4)
         _indexed_range(program, function, reverse_ordinals, bounds, 4, len(candidates))
+
+
+# design/algorithm-sources.md#shared-contraction-lowering
+def dot(left, right, *, tile_k=128):
+    if tile_k < 1:
+        raise ValueError('Contraction K tiles must be positive')
+    return _Expression('dot', tuple(map(_literal, (left, right))), tile_k)
+
+
+# design/algorithm-sources.md#shared-contraction-lowering
+def _lower_dot(program, expression, grid, input_specs, output_spec):
+    import itertools
+    from math import gcd
+    from . import check
+    from ._native import View
+    if any(value.operation != 'input' for value in expression.operands):
+        raise ValueError('Contraction operands require logical input references')
+    left, right = (input_specs[value.value]._tensor for value in expression.operands)
+    if left.shape[1] != right.shape[0] or output_spec._tensor.shape != (left.shape[0], right.shape[1]):
+        raise ValueError('Contraction dimensions differ')
+    inner = left.shape[1]
+    tile = min(expression.value, inner)
+    for boundary in (left.block_shape[1] if left.grid[1] > 1 else 0,
+                     right.block_shape[0] if right.grid[0] > 1 else 0):
+        tile = gcd(tile, boundary)
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def temporary(shape):
+        return program.tensor(shape, dtype=np.float32)[0, 0]
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def bind(operation, inputs, target):
+        check(program.native.algebra_bind(program.handle, operation.op, inputs[0].view,
+            inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
+
+    for coordinate in itertools.product(*(range(length) for length in grid)):
+        target = output_spec.resolve(coordinate)
+        row, column = (index * block for index, block in zip(output_spec.index_map(*coordinate), output_spec.block_shape))
+        parts = []
+        for start in range(0, inner, tile):
+            length = min(tile, inner - start)
+            destination = target if tile == inner and target.dtype == np.dtype('float32') else temporary(target.shape)
+            bind(matmul, (left.region(row, start, target.shape[0], length),
+                          right.region(start, column, length, target.shape[1])), destination)
+            parts.append(destination)
+        while len(parts) > 1:
+            reduced = []
+            for index in range(0, len(parts), 2):
+                if index + 1 == len(parts):
+                    reduced.append(parts[index])
+                    continue
+                destination = target if len(parts) == 2 and target.dtype == np.dtype('float32') else temporary(target.shape)
+                bind(add, parts[index:index + 2], destination)
+                reduced.append(destination)
+            parts = reduced
+        if parts[0] is not target:
+            bind(affine(), parts, target)
