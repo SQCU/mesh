@@ -17,7 +17,7 @@ The llama.cpp authors, [GGUF format](https://github.com/ggml-org/ggml/blob/maste
 
 Papadopoulos and Culler, [Monsoon: an Explicit Token-Store Architecture](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf), ISCA 1990: operand-associated presence drives function issue. The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html): a grid and index maps bind independently usable regions.
 
-Apple, [Metal command submission](https://developer.apple.com/documentation/metal/mtlcommandbuffer/commit()): prebound encoders submit device work; successful completion makes its output visible to mesh consumers. A supplied encoder performs numerical work only. It does not commit, wait, publish or manage readers. `mesh_algebra_buffer` returns the existing registered extent buffer; `Program(functions=...)` binds supplied numerical implementations during setup.
+Apple, [Metal command submission](https://developer.apple.com/documentation/metal/mtlcommandbuffer/commit()): prebound encoders submit device work; successful completion makes its output visible to mesh consumers. Configured function watches own their dependency edges; each edge also records its position in the row index. Removing a function unlinks those edges directly, without scanning all arena rows. Indexed-selection edges retain their explicit owner. All index mutations remain on the existing numerical dispatch queue. A supplied encoder performs numerical work only. It does not commit, wait, publish or manage readers. `mesh_algebra_buffer` returns the existing registered extent buffer; `Program(functions=...)` binds supplied numerical implementations during setup.
 
 ## Program.copy
 

@@ -572,9 +572,10 @@ struct mesh_watch {
   void (*submit)(void *,uint32_t);
   uint32_t index;
   struct mesh_watch *next,*pending_next;
+  struct mesh_edge *edges;
   int pending;
 };
-struct mesh_edge { struct mesh_watch *watch; struct mesh_edge *next; uint32_t row,candidate; struct mesh_indexed_read *indexed; void *owner; };
+struct mesh_edge { struct mesh_watch *watch; struct mesh_edge *next,**previous,*owned_next; uint32_t row,candidate; struct mesh_indexed_read *indexed; void *owner; };
 struct mesh_execution {
   struct mesh_ctx *context;
   dispatch_queue_t queue;
@@ -582,7 +583,22 @@ struct mesh_execution {
   _Atomic int stop;
   struct mesh_edge **readers;
   struct mesh_watch *watches;
+  struct mesh_edge *indexed_edges;
 };
+/* design/algorithm-sources.md#programkernel_call */
+static void mesh_edge_bind(struct mesh_execution *e,struct mesh_edge *edge){
+  edge->previous=&e->readers[edge->row];edge->next=*edge->previous;
+  if(edge->next)edge->next->previous=&edge->next;
+  *edge->previous=edge;
+  struct mesh_edge **owned=edge->indexed?&e->indexed_edges:&edge->watch->edges;
+  edge->owned_next=*owned;*owned=edge;
+}
+/* design/algorithm-sources.md#programkernel_call */
+static void mesh_edge_remove(struct mesh_edge *edge){
+  *edge->previous=edge->next;
+  if(edge->next)edge->next->previous=edge->previous;
+  free(edge);
+}
 /* design/algorithm-sources.md#programkernel_call */
 static int mesh_reader_release_serial(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct mesh_execution *e=c->execution;if(!e || !c->readers || dispatch_get_specific(e)==e)return 0;
@@ -725,7 +741,7 @@ int mesh_execution_indexed(struct mesh_ctx *c,struct mesh_indexed_read *d,void *
       *edge=(struct mesh_edge){.next=edges,.row=r,.candidate=i==d->candidates?MESH_ABSENT:i,.indexed=d,.owner=owner};edges=edge;
     }
   }
-  dispatch_sync(e->queue,^{struct mesh_edge *edge=edges;while(edge){struct mesh_edge *next=edge->next;edge->next=e->readers[edge->row];e->readers[edge->row]=edge;edge=next;}mesh_index_event(c,d,MESH_ABSENT);});
+  dispatch_sync(e->queue,^{struct mesh_edge *edge=edges;while(edge){struct mesh_edge *next=edge->next;mesh_edge_bind(e,edge);edge=next;}mesh_index_event(c,d,MESH_ABSENT);});
   return 0;
 }
 
@@ -765,7 +781,7 @@ int mesh_execution_add(struct mesh_ctx *c,struct mesh_row_function *function,voi
   }
   dispatch_sync(e->queue,^{
     struct mesh_edge *edge=edges;
-    while(edge){struct mesh_edge *next=edge->next;edge->next=e->readers[edge->row];e->readers[edge->row]=edge;edge=next;}
+    while(edge){struct mesh_edge *next=edge->next;mesh_edge_bind(e,edge);edge=next;}
     struct mesh_watch *watch=watches;
     while(watch){struct mesh_watch *next=watch->next;watch->next=e->watches;e->watches=watch;mesh_fire(e,watch);watch=next;}
   });
@@ -775,12 +791,21 @@ int mesh_execution_add(struct mesh_ctx *c,struct mesh_row_function *function,voi
 void mesh_execution_remove(struct mesh_ctx *c,void *owner){
   struct mesh_execution *e=c->execution;if(!e)return;
   dispatch_sync(e->queue,^{
-    for(uint32_t row=0;row<mesh_rows(c->M);row++){
-      struct mesh_edge **at=&e->readers[row];
-      while(*at){struct mesh_edge *edge=*at;if((edge->indexed?edge->owner:edge->watch->owner)==owner){*at=edge->next;free(edge);}else at=&edge->next;}
+    struct mesh_edge **indexed=&e->indexed_edges;
+    while(*indexed){
+      struct mesh_edge *edge=*indexed;
+      if(edge->owner==owner){*indexed=edge->owned_next;mesh_edge_remove(edge);}
+      else indexed=&edge->owned_next;
     }
     struct mesh_watch **at=&e->watches;
-    while(*at){struct mesh_watch *watch=*at;if(watch->owner==owner){*at=watch->next;free(watch);}else at=&watch->next;}
+    while(*at){
+      struct mesh_watch *watch=*at;
+      if(watch->owner==owner){
+        *at=watch->next;
+        while(watch->edges){struct mesh_edge *edge=watch->edges;watch->edges=edge->owned_next;mesh_edge_remove(edge);}
+        free(watch);
+      }else at=&watch->next;
+    }
   });
 }
 /* design/algorithm-sources.md#programkernel_call */
@@ -788,9 +813,11 @@ static void mesh_execution_destroy(struct mesh_ctx *c){
   struct mesh_execution *e=c->execution;if(!e)return;
   atomic_store_explicit(&e->stop,1,memory_order_release);
   pthread_join(e->thread,NULL);
-  for(uint32_t row=0;row<mesh_rows(c->M);row++){
-    struct mesh_edge *edge=e->readers[row];while(edge){struct mesh_edge *next=edge->next;free(edge);edge=next;}
+  while(e->indexed_edges){struct mesh_edge *edge=e->indexed_edges;e->indexed_edges=edge->owned_next;mesh_edge_remove(edge);}
+  while(e->watches){
+    struct mesh_watch *watch=e->watches;e->watches=watch->next;
+    while(watch->edges){struct mesh_edge *edge=watch->edges;watch->edges=edge->owned_next;mesh_edge_remove(edge);}
+    free(watch);
   }
-  struct mesh_watch *watch=e->watches;while(watch){struct mesh_watch *next=watch->next;free(watch);watch=next;}
   dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
 }
