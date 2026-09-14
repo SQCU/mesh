@@ -1439,3 +1439,51 @@ behavior, infinity/NaN semantics and exact integer predicates with numerical
 primary sources. Generators, sorting, integer contractions, broader indexed
 native contraction recognition and the nine-step performance acceptance remain
 open. The removed reduction emitter does not imply those other paths are gone.
+
+## Shared elementary numerical functions
+
+`ad94c97` adds elementary expressions and CPU/Metal scalar lowering to the
+existing region owner. Stable log1p/expm1/asinh/logaddexp, classification, abs,
+log/sqrt/power and corrected floor division share original source-page bindings.
+`af4bc73` selects precise Metal remainder explicitly, alongside precise variants
+for new domain-sensitive functions. Safe arithmetic and the default math-function
+family are independent SDK settings; existing exp/tanh and global compile settings
+remain unchanged. Mechanisms and numerical boundaries are documented in
+algorithm-sources.md under shared-elementary-functions.
+
+`9da0250` migrates the entire remaining public Xonotic elementary family, including
+integer inversion and floor division, through the shared pointwise/logical-index
+owner. The caller's generic element emitter, four numerical helper functions and
+obsolete broadcast/coordinate helpers are deleted. Only dimension/arange/random
+normal, sorting and integer contractions remain in that custom source emitter.
+The migration corrects old log1p(+Inf), logaddexp NaN and truncating integer
+floor-division behavior; it does not claim exact integer exponentiation.
+
+`153c6b7` extends the existing workflow with near-zero and large values, NaNs and
+infinities, signed zeros, integer endpoints, downstream operations, ragged regions,
+independent withheld rows and repeated use. `128ba81` retains actual and expected
+values when a comparison fails. That diagnostic and NumPy source inspection
+identified a reference discrepancy: scalar exponent 0.5 was rewritten to sqrt.
+`6efcb83` uses generic NumPy power instead. The precise Metal implementation was
+already correct for this case and was not replaced with a special-case helper.
+
+Final Metal and paired Metal pass with library `af4bc73` and example `6efcb83`.
+Local Metal configures 5830 functions and completes 11482 submissions; paired
+rank zero configures 5766 and completes 10797. Both report runtime code 0, and the
+peer exits zero after ordinary SIGTERM teardown. New elementary cases run locally
+on rank zero; the gold chain and fanout traverse RDMA. These expanded workflows
+have no matched old-emitter timing baseline, so no speedup or performance parity
+claim is made. Full nine-step performance acceptance remains open.
+
+The final CPU run also passes, with 5830 functions and 11482 completed submissions,
+runtime code 0. All 19 elementary cases pass both generations. Raw logs/traces,
+source revisions, reference-discrepancy evidence and count/mean/sample variance
+are in [elementary-provenance.json](../measurements/lowering-2026-09-13/elementary-provenance.json).
+The registered arena remains unchanged and both bridges return idle and ready.
+
+The next source-reviewed migration is setup-resolved dimensions and indexed range
+production. Existing typed indices and expressions suffice for generated values;
+negative-step lengths and empty-range representation require explicit graph work.
+After that, shared counter-based Philox/Box–Muller, typed stable sorting and integer
+contraction semantics still need implementation. Static folding, fusion, placement
+and matched performance acceptance remain part of the original nine-step goal.

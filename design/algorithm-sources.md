@@ -2801,3 +2801,13 @@ safe arithmetic alone does not select precise transcendental functions.
 Existing exp/tanh lowering and global compilation settings are unchanged.
 Power retains FP32 evaluation followed by the caller's output cast; exact
 integer exponentiation is not claimed by this migration.
+
+Power references must use generic power, not a different optimized operation.
+[C11 draft N1570, F.10.4.4](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)
+requires positive infinity for a negative-infinite base and a positive exponent
+that is not an odd integer. NumPy's
+[scalar-exponent loop specialization](https://github.com/numpy/numpy/blob/main/numpy/_core/src/umath/loops_umath_fp.dispatch.c.src)
+replaces a stride-zero exponent of one half with sqrt, yielding NaN at that
+input instead. The operational example uses an explicit exponent array to
+exercise generic power. This avoids changing a correct library operation to
+match an unrelated reference optimization.
