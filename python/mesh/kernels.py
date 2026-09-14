@@ -1859,7 +1859,7 @@ class _ExpressionRegions:
         if node.operation == 'transpose':
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation in _REDUCTIONS:
-            return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
+            return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))[0]
         if node.operation == 'argsort':
             return self.ordering_panel(node, origin, shape)
         if node.operation == 'indexed_contract':
@@ -1895,10 +1895,17 @@ class _ExpressionRegions:
             plan = _ReductionPlan.create(self.reduction_regions(original))
             if shape[1] != 1:
                 self.emit(original, origin, shape, target)
-            elif not _lower_indexed_product(self, transposed, target.T, plan):
-                target = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target, plan)
-            self.cache[key] = target
-        return self.cache[key]
+                binding = None
+            else:
+                binding = _lower_indexed_product(self, transposed, target.T, plan)
+                if not binding:
+                    target, identity = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target, plan)
+                    binding = self.program._plan_bindings[identity]
+            self.cache[key] = target, binding['id'] if binding is not None else None
+        result, identity = self.cache[key]
+        if identity is not None:
+            self.program._plan_use(identity, result, direct)
+        return result
 
     # design/algorithm-sources.md#stable-indexed-ordering
     def ordering_panel(self, node, origin, shape):
@@ -2012,7 +2019,9 @@ class _ExpressionRegions:
     def reduction(self, node, row, rows, dtype, direct=None, plan=None):
         key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if key in self.cache:
-            return self.cache[key]
+            result, identity = self.cache[key]
+            self.program._plan_use(identity, result, direct)
+            return result, identity
         child = node.operands[0]
         layout = self.layout(child)
         width, tile = layout[0][1], layout[2][1]
@@ -2022,29 +2031,39 @@ class _ExpressionRegions:
                 (0 if node.operation == 'max' else 1) if dtype.kind == 'b' else
                 np.iinfo(dtype).min if node.operation == 'max' else np.iinfo(dtype).max)
             target = direct if direct is not None and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-            _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
-            self.cache[key] = target
-            return target
+            binding = self.program._plan_binding('reduction', (target,), 0)
+            with self.program._plan_operation(binding, 'identity', (), 0, reduction=node.operation):
+                _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
+            self.program._plan_use(binding['id'], target, direct)
+            self.cache[key] = target, binding['id']
+            return self.cache[key]
         plan = plan if plan is not None else _ReductionPlan.create(self.reduction_regions(node))
         parts = {}
+        binding = self.program._plan_binding('reduction', (), plan.root)
         for index, (column, length) in enumerate(plan.regions):
             target = direct if direct is not None and index == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-            self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
+            binding['slots'].append(self.program._plan_view(target))
+            with self.program._plan_operation(binding, 'region', (), index,
+                    origin=(row, column), shape=(rows, length), reduction=node.operation):
+                self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
             parts[index] = target
         for left_index, right_index, output in plan.merges:
             target = direct if direct is not None and output == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             inputs = (parts[left_index], parts[right_index])
-            if node.operation == 'sum' and dtype.kind == 'f':
-                _bind_operation(self.program, add, inputs, target)
-            else:
-                left, right = arguments(2)
-                bits = 0xffffffffffffffff
-                merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
-                    left | right if node.operation == 'any' else left & right if node.operation == 'all' else
-                    _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
-                _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
+            binding['slots'].append(self.program._plan_view(target))
+            with self.program._plan_operation(binding, 'merge', (left_index, right_index), output, reduction=node.operation):
+                if node.operation == 'sum' and dtype.kind == 'f':
+                    _bind_operation(self.program, add, inputs, target)
+                else:
+                    left, right = arguments(2)
+                    bits = 0xffffffffffffffff
+                    merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
+                        left | right if node.operation == 'any' else left & right if node.operation == 'all' else
+                        _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
+                    _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
             parts[output] = target
-        self.cache[key] = parts[plan.root]
+        self.cache[key] = parts[plan.root], binding['id']
+        self.program._plan_use(binding['id'], parts[plan.root], direct)
         return self.cache[key]
 
     # design/algorithm-sources.md#shared-contraction-lowering
@@ -2094,7 +2113,7 @@ class _ExpressionRegions:
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
                 rows = 1 if layout[0][0] == 1 else shape[0]
                 dtype = _reduction_dtype(node, self.sources, accumulation)
-                return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
+                return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype)[0],))
             if node.operation == 'indexed_contract':
                 if accumulation.kind != 'f':
                     return lower(_resolve_logical(node.value[0], self.sources), accumulation)
@@ -2367,113 +2386,135 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
     if selected is None and len(native_plan.operations) > max(1, len(compiled_plan.regions)+len(compiled_plan.merges)):
         return False
     selector = None
+    selector_functions = ()
     if selected is not None:
         selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
         if selection_key not in lowering.cache:
             selector = program.tensor((1, 1), dtype=np.uint32)[0, 0]
             plan = select((selected >= 0) & (selected < choices), selected, choices)
-            lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
+            selector_binding = program._plan_binding('selector', (selector,), 0)
+            with program._plan_operation(selector_binding, 'selector', (), 0) as selector_entry:
+                lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
+            lowering.cache['selector_binding', selection_key] = selector_binding['id']
             lowering.cache[selection_key] = selector
         selector = lowering.cache[selection_key]
+        selector_binding = program._plan_bindings[lowering.cache['selector_binding', selection_key]]
+        selector_functions = selector_binding['operations'][0]['functions']
     storage = [target]
     for shape, transposed in native_plan.storage[1:]:
         ref = lowering.temporary(shape)
         storage.append(ref.T if transposed else ref)
+    binding = program._plan_binding('indexed_contraction', storage, 0)
+    if selector is not None:
+        binding['selector'] = dict(view=program._plan_view(selector), functions=selector_functions,
+            binding=selector_binding['id'])
+        program._plan_use(selector_binding['id'], selector)
     for operation, inputs, output, detail in native_plan.operations:
-        destination = storage[output]
-        if operation == 'add':
-            _bind_operation(program, add, tuple(storage[index] for index in inputs), destination)
-            continue
-        if operation == 'copy':
-            lowering.publish((storage[inputs[0]],), destination)
-            continue
-        if operation == 'assemble':
-            results = tuple(storage[index] for index in inputs)
-            entries = tuple(zip(detail, results))
+        with program._plan_operation(binding, operation, inputs, output) as entry:
+            destination = storage[output]
+            if operation == 'add':
+                _bind_operation(program, add, tuple(storage[index] for index in inputs), destination)
+                continue
+            if operation == 'copy':
+                lowering.publish((storage[inputs[0]],), destination)
+                continue
+            if operation == 'assemble':
+                results = tuple(storage[index] for index in inputs)
+                entries = tuple(zip(detail, results))
+                entry['offsets'] = detail
 
-            # design/algorithm-sources.md#indexed-contraction-plans
-            def assemble(metal):
-                source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
-                return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
+                # design/algorithm-sources.md#indexed-contraction-plans
+                def assemble(metal):
+                    source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
+                    return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
                   p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
 
-            _compiled_region(program, results, destination, assemble)
-            continue
-        first, columns, length, prepared = native_plan.segments[detail]
-        dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
+                _compiled_region(program, results, destination, assemble)
+                continue
+            first, columns, length, prepared = native_plan.segments[detail]
+            entry['segment'] = dict(first=first, columns=columns, inner=length)
+            dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
 
-        # design/algorithm-sources.md#selected-native-contractions
-        def retain(geometry, shape, transpose=False):
-            backing, offset, strides, _ = geometry
-            view = View.from_buffer_copy(backing.view)
-            view.offset, view.rows, view.columns = offset, *shape
-            view.row_stride, view.column_stride = strides
-            if view.rows == 1 and view.column_stride == 1:
-                view.row_stride = view.columns
-            if view.columns == 1 and view.row_stride == 1:
-                view.column_stride = view.rows
-            ref = Ref(program, view, backing.dtype)
-            ref = ref.T if transpose else ref
+            # design/algorithm-sources.md#selected-native-contractions
+            def retain(geometry, shape, transpose=False):
+                backing, offset, strides, _ = geometry
+                view = View.from_buffer_copy(backing.view)
+                view.offset, view.rows, view.columns = offset, *shape
+                view.row_stride, view.column_stride = strides
+                if view.rows == 1 and view.column_stride == 1:
+                    view.row_stride = view.columns
+                if view.columns == 1 and view.row_stride == 1:
+                    view.column_stride = view.rows
+                ref = Ref(program, view, backing.dtype)
+                ref = ref.T if transpose else ref
+                if selected is None:
+                    return ref, ()
+                identity = tuple(getattr(ref.view, field) for field in
+                    ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
+                if identity not in page_sets:
+                    count = C.c_size_t()
+                    check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
+                    pages = (View * count.value)()
+                    check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
+                    selected_pages = []
+                    for page in pages:
+                        key = page.tensor, page.extent, page.offset
+                        if key not in positions:
+                            positions[key] = len(dependencies)
+                            dependencies.append(Ref(program, page, ref.dtype))
+                        selected_pages.append(positions[key])
+                    page_sets[identity] = tuple(selected_pages)
+                return ref, page_sets[identity]
+
+            for a, b in prepared:
+                left, left_position = retain(a, (length, 1), True)
+                right, right_position = retain(b, (length, columns))
+                left_views.append(left)
+                right_views.append(right)
+                selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
+            entry['choices'] = tuple(dict(left=program._plan_view(left), right=program._plan_view(right))
+                for left, right in zip(left_views, right_views))
             if selected is None:
-                return ref, ()
-            identity = tuple(getattr(ref.view, field) for field in
-                ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
-            if identity not in page_sets:
-                count = C.c_size_t()
-                check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
-                pages = (View * count.value)()
-                check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
-                selected_pages = []
-                for page in pages:
-                    key = page.tensor, page.extent, page.offset
-                    if key not in positions:
-                        positions[key] = len(dependencies)
-                        dependencies.append(Ref(program, page, ref.dtype))
-                    selected_pages.append(positions[key])
-                page_sets[identity] = tuple(selected_pages)
-            return ref, page_sets[identity]
+                _bind_operation(program, matmul, (left_views[0], right_views[0]), destination)
+                continue
+            zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
+            if zero_key not in lowering.cache:
+                zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
+                program.constant(zero, np.zeros(zero.shape, dtype=zero.dtype))
+                lowering.cache[zero_key] = zero
+            zero = lowering.cache[zero_key]
+            zero, zero_pages = retain((zero, zero.view.offset,
+                (zero.view.row_stride, zero.view.column_stride), length), zero.shape)
+            _, left_pages = retain(prepared[0][0], (length, 1), True)
+            left_views.append(left_views[0])
+            right_views.append(zero)
+            selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
+            function = C.c_size_t()
+            check(program.native.algebra_contract_select(program.handle, selector.view,
+                (View * len(left_views))(*(ref.view for ref in left_views)),
+                (View * len(right_views))(*(ref.view for ref in right_views)), len(left_views),
+                (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies),
+                destination.view, 1, C.byref(function)))
+            entry['choices'] = tuple(dict(left=program._plan_view(left), right=program._plan_view(right), pages=pages)
+                for left, right, pages in zip(left_views, right_views, selected_dependencies))
+            entry['candidates'] = tuple(program._plan_view(ref) for ref in dependencies)
+            entry['parent'] = function.value
+            entry['invalid_choice'] = choices
+            slots = max(map(len, selected_dependencies))
+            selected_dependencies = tuple(index for pages in selected_dependencies
+                for index in (*pages, *((0xffffffff,) * (slots-len(pages)))))
+            readiness = program.tensor((1, slots), dtype=np.uint32)[0, 0]
 
-        for a, b in prepared:
-            left, left_position = retain(a, (length, 1), True)
-            right, right_position = retain(b, (length, columns))
-            left_views.append(left)
-            right_views.append(right)
-            selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
-        if selected is None:
-            _bind_operation(program, matmul, (left_views[0], right_views[0]), destination)
-            continue
-        zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
-        if zero_key not in lowering.cache:
-            zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
-            program.constant(zero, np.zeros(zero.shape, dtype=zero.dtype))
-            lowering.cache[zero_key] = zero
-        zero = lowering.cache[zero_key]
-        zero, zero_pages = retain((zero, zero.view.offset,
-            (zero.view.row_stride, zero.view.column_stride), length), zero.shape)
-        _, left_pages = retain(prepared[0][0], (length, 1), True)
-        left_views.append(left_views[0])
-        right_views.append(zero)
-        selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
-        function = C.c_size_t()
-        check(program.native.algebra_contract_select(program.handle, selector.view,
-            (View * len(left_views))(*(ref.view for ref in left_views)),
-            (View * len(right_views))(*(ref.view for ref in right_views)), len(left_views),
-            (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies),
-            destination.view, 1, C.byref(function)))
-        slots = max(map(len, selected_dependencies))
-        selected_dependencies = tuple(index for pages in selected_dependencies
-            for index in (*pages, *((0xffffffff,) * (slots-len(pages)))))
-        readiness = program.tensor((1, slots), dtype=np.uint32)[0, 0]
+            # design/algorithm-sources.md#selected-native-contractions
+            def readiness_source(metal):
+                array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
+                return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
 
-        # design/algorithm-sources.md#selected-native-contractions
-        def readiness_source(metal):
-            array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
-            return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
-
-        _compiled_region(program, (selector,), readiness, readiness_source)
-        check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
-            (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies)))
-    return True
+            readiness_function = _compiled_region(program, (selector,), readiness, readiness_source)
+            entry['readiness'] = dict(view=program._plan_view(readiness), function=readiness_function)
+            check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
+                (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies)))
+    return binding
 
 
 # design/algorithm-sources.md#composable-indexed-contractions
@@ -2547,7 +2588,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
                 layout = lowering.layout(value)
                 row = origin[0] if layout[1][0] else 0
                 dtype = _reduction_dtype(value, lowering.sources, target.dtype)
-                result = lowering.reduction(value, row, target.shape[0], dtype, target)
+                result, identity = lowering.reduction(value, row, target.shape[0], dtype, target)
                 if result is not target:
                     symbol, = arguments(1)
                     _ExpressionKernel((symbol,)).bind(program, (result,), (target,), coordinate)

@@ -218,6 +218,7 @@ class Program:
         self.callbacks, self.errors = [], []
         self._constant_extents = set()
         self._replicated_extents = {}
+        self._plan_bindings, self._plan_stack = [], []
         create = {'cpu': self.native.algebra_create_cpu, 'metal': self.native.algebra_create}[backend]
         check(self.native.attach(self.context, os.fsencode(region) if region else None))
         self.handle = create(self.context)
@@ -444,6 +445,48 @@ class Program:
             result.append(item)
         return tuple(result)
 
+    # design/algorithm-sources.md#bound-plan-identities
+    @staticmethod
+    def _plan_view(ref):
+        return dict(dtype=ref.dtype.name, **{field: getattr(ref.view, field) for field, _ in ref.view._fields_})
+
+    # design/algorithm-sources.md#bound-plan-identities
+    def _plan_binding(self, kind, slots, root):
+        binding = dict(id=len(self._plan_bindings), kind=kind, root=root,
+            slots=[self._plan_view(ref) for ref in slots], operations=[], uses=[])
+        self._plan_bindings.append(binding)
+        if self._plan_stack:
+            self._plan_stack[-1]['children'].append(binding['id'])
+        return binding
+
+    # design/algorithm-sources.md#bound-plan-identities
+    @contextmanager
+    def _plan_operation(self, binding, operation, inputs, output, **metadata):
+        entry = dict(operation=operation, inputs=tuple(inputs), output=output,
+            functions_inclusive=True, children=[], **metadata)
+        binding['operations'].append(entry)
+        first = self.native.algebra_trace_count(self.handle)
+        self._plan_stack.append(entry)
+        try:
+            yield entry
+        finally:
+            self._plan_stack.pop()
+            entry['functions'] = tuple(range(first, self.native.algebra_trace_count(self.handle)))
+            entry['children'] = tuple(dict.fromkeys(entry['children']))
+
+    # design/algorithm-sources.md#bound-plan-identities
+    def _plan_use(self, identity, result, requested=None):
+        self._plan_bindings[identity]['uses'].append(dict(result=self._plan_view(result),
+            requested=self._plan_view(requested) if requested is not None else None))
+        if self._plan_stack:
+            self._plan_stack[-1]['children'].append(identity)
+
+    @property
+    # design/algorithm-sources.md#bound-plan-identities
+    def plan_trace(self):
+        import json
+        return json.loads(json.dumps(self._plan_bindings))
+
     @property
     # design/algorithm-sources.md#cost-environment
     def environment(self):
@@ -519,6 +562,8 @@ class Program:
             self.callbacks.clear()
             self._constant_extents.clear()
             self._replicated_extents.clear()
+            self._plan_bindings.clear()
+            self._plan_stack.clear()
             if not _PROGRAMS:
                 check(self.native.detach(self.context))
 
