@@ -1,0 +1,166 @@
+{
+  "runs": [
+    {
+      "prefix": "range-elision-cpu",
+      "library_revision": "64c9246",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "a64eb23",
+      "baseline_revision": "a64eb23",
+      "baseline_prefix": "scatter-base-view-cpu",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "range-elision-cpu.jsonl.gz",
+        "range-elision-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.686416,
+        "invocations_per_second": 640.1480363672366,
+        "first_section_ms": 4.088708,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.468208333333333,
+          "sample_variance": 0.03537408333333328
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 3724,
+          "completed": 3724,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 3724
+        }
+      },
+      "trace_counts": {
+        "configured_before": 2131,
+        "configured_after": 2095,
+        "submissions_before": 3796,
+        "submissions_after": 3724
+      }
+    },
+    {
+      "prefix": "range-elision-metal",
+      "library_revision": "64c9246",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "a64eb23",
+      "baseline_revision": "a64eb23",
+      "baseline_prefix": "scatter-base-view-metal",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "range-elision-metal.jsonl.gz",
+        "range-elision-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.997125,
+        "invocations_per_second": 166.69329128958097,
+        "first_section_ms": 15.347459,
+        "completion_ms": {
+          "count": 3,
+          "mean": 16.465584,
+          "sample_variance": 1.7634525624999973
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 3724,
+          "completed": 3724,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.013470908,
+          "cpu_submitted": 0
+        }
+      },
+      "trace_counts": {
+        "configured_before": 2131,
+        "configured_after": 2095,
+        "submissions_before": 3796,
+        "submissions_after": 3724
+      }
+    },
+    {
+      "prefix": "range-elision-paired-metal",
+      "library_revision": "64c9246",
+      "peer_library_revision": "64c9246",
+      "example_and_xonotic_revision": "a64eb23",
+      "baseline_revision": "a64eb23",
+      "baseline_prefix": "scatter-base-view-paired-metal",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "range-elision-paired-metal.jsonl.gz",
+        "range-elision-paired-metal-trace.json.gz",
+        "range-elision-paired-metal-peer.jsonl.gz",
+        "range-elision-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 14.288542,
+        "invocations_per_second": 209.95844082622287,
+        "first_section_ms": 10.095917,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.126264333333333,
+          "sample_variance": 0.02607570556033348
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 3039,
+          "completed": 3039,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.010443558,
+          "cpu_submitted": 0
+        }
+      },
+      "trace_counts": {
+        "configured_before": 2067,
+        "configured_after": 2031,
+        "submissions_before": 3111,
+        "submissions_after": 3039
+      }
+    }
+  ],
+  "scope": "Same example source/configuration as a64eb23; identity/unused flattened range producers removed by64c9246. Numerical endpoints, withheld-input progress and reuse pass. Trace counts measure configured functions and actual submissions; not matched wall-time speedup evidence. Side cases rank zero; paired gold/fanout traverse RDMA. Peer exited zero after SIGTERM."
+}

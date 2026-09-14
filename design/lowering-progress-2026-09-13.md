@@ -1011,3 +1011,32 @@ and can shrink scatter's numerical output regions. This explicit setup/launch
 cost remains optimization work; these examples do not establish exhaustive layout
 coverage or a matched speedup. The full nine-step performance and operator
 coverage requirements remain open.
+
+## Eliminate identity and unused range producers
+
+`64c9246` removes derived flattened-range allocation/production for scalar panels
+and direct-only update expressions. Width-one flattening is exactly [lo, hi),
+and direct-only expressions have no flattened selector-range consumer. Existing
+directory views and indexed-reader memberships preserve the required lifetime.
+Wider panels containing indexed loads retain their scaled bounds. An independent
+source audit confirmed nested update/mask loads are included in indexed_inputs;
+rewritten direct Ref and ordinal loads cannot introduce untracked Tensor selectors.
+
+The example source and configuration are unchanged from `a64eb23`. CPU and Metal
+float32 traces each fall from 2131 to 2095 configured functions and from 3796 to
+3724 completed submissions. Paired Metal float16 falls from 2067 to 2031 configured
+functions and from 3111 to 3039 rank-zero submissions. All recorded numerical
+comparisons, independently withheld masks/base fragments/updates/cotangents,
+consumer progress and repeated reuse continue to pass. The paired gold/fanout
+work crosses actual RDMA; side cases remain on rank zero. The peer exits zero
+after SIGTERM.
+
+`range-elision-provenance.json` retains exact library/caller/baseline revisions,
+compressed raw logs/traces, function/submission counts and timing count/mean/sample
+variance. This demonstrates 36 removed configured range producers and 72 fewer
+submissions in this workflow, not a matched wall-time speedup. Larger storage and
+launch costs remain: all-constant indexed tables need no flat selector range,
+and equal-width feature panels can sometimes share selectors when expression,
+bounds and referenced layouts all match. Sharing must retain those identities
+and lifetime fanout rather than introducing new synchronization. Broader operator
+coverage and the full nine-step performance acceptance remain open.
