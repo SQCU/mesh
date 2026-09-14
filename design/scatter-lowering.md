@@ -147,9 +147,10 @@ program.kernel_call(body, grid=output_grid,
 ```
 
 The first lowering supports U×1 destination/validity rows, U×F update rows and a
-D×F base/output. The first three operands are references. A pointwise producer can
-supply transformed updates; fusing that producer into segmented accumulation is
-remaining compiler work. Explicit output regions must fit the existing base and
+D×F base/output. The base and destination operands are references. The update operand can be a
+pointwise expression over references broadcasting to U×F, literals and logical
+row/column indices. That expression is emitted directly inside segment
+accumulation, without an intermediate transformed-update tensor. Explicit output regions must fit the existing base and
 update feature backings. ND flattening and axis adaptation must preserve actual
 logical views; this implementation does not hide a dense conversion.
 

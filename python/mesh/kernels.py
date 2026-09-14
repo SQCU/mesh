@@ -341,22 +341,9 @@ class _ExpressionKernel:
                 column_stride = ref.view.column_stride if ref.shape[1] != 1 else 0
                 value = f'p{pointers[node.value][0]}[r*{row_stride}+({column})*{column_stride}]'
                 return f'((float)({value}))' if ref.dtype.kind == 'f' else value
-            if node.operation == 'literal':
-                if isinstance(node.value, bool):
-                    return '1' if node.value else '0'
-                if isinstance(node.value, int):
-                    return str(node.value) + ('ull' if node.value > 2**63 - 1 else 'll')
-                return repr(float(node.value)) + 'f'
             if node.operation == 'sum':
                 return names[node]
-            args = tuple(emit(child, column) for child in node.operands)
-            if node.operation == 'select':
-                return f'(({args[0]})?({args[1]}):({args[2]}))'
-            if node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|'):
-                return f'({args[0]}{node.operation}{args[1]})'
-            if node.operation == 'rsqrt':
-                return f'rsqrt({args[0]})' if metal else f'(1.0f/sqrtf({args[0]}))'
-            return f'{node.operation}{"" if metal else "f"}({args[0]})'
+            return _scalar_expression(node, tuple(emit(child, column) for child in node.operands), metal)
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
         layouts = {}
@@ -401,6 +388,23 @@ class _ExpressionKernel:
         return '\n'.join(lines)
 
 
+# design/algorithm-sources.md#fused-indexed-update-values
+def _scalar_expression(node, args, metal):
+    if node.operation == 'literal':
+        if isinstance(node.value, bool):
+            return '1' if node.value else '0'
+        if isinstance(node.value, int):
+            return str(node.value) + ('ull' if node.value > 2**63 - 1 else 'll')
+        return repr(float(node.value)) + 'f'
+    if node.operation == 'select':
+        return f'(({args[0]})?({args[1]}):({args[2]}))'
+    if node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|'):
+        return f'({args[0]}{node.operation}{args[1]})'
+    if node.operation == 'rsqrt':
+        return f'rsqrt({args[0]})' if metal else f'(1.0f/sqrtf({args[0]}))'
+    return f'{node.operation}{"" if metal else "f"}({args[0]})'
+
+
 # design/algorithm-sources.md#segmented-indexed-add
 def indexed_add(base, destinations, updates, *, mask=True):
     return _Expression('indexed_add', tuple(map(_literal, (base, destinations, updates, mask))))
@@ -416,7 +420,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
         scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
                   'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}
         lines = ['#include <metal_stdlib>\nusing namespace metal;\ntypedef uint uint32_t; typedef ulong uint64_t; typedef long int64_t; typedef int int32_t; typedef uchar uint8_t;' if metal else
-                 '#include <stdint.h>\n#include <stdbool.h>']
+                 '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
         emitted = body(metal)
         preamble, statements = emitted if isinstance(emitted, tuple) else ('', emitted)
         lines.append(preamble)
@@ -519,19 +523,38 @@ def _candidate_load(refs, first, ordinal, row, column, metal):
 def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
     import itertools
     import math
-    if any(value.operation != 'input' for value in expression.operands[:3]):
-        raise ValueError('Indexed addition takes base, destination and update references')
+    if any(value.operation != 'input' for value in expression.operands[:2]):
+        raise ValueError('Indexed addition takes base and destination references')
     operands = tuple(spec._tensor for spec in input_specs)
-    base, destinations, updates = (operands[value.value] for value in expression.operands[:3])
-    mask = expression.operands[3]
+    base, destinations = (operands[value.value] for value in expression.operands[:2])
+    update_value, mask = expression.operands[2:]
     output = output_spec._tensor
-    size, features = updates.shape
-    if base.shape != output.shape or features != base.shape[1] or destinations.shape != (size, 1):
-        raise ValueError('Indexed addition requires U×1 destinations, U×F updates and D×F base/output')
-    if updates.dtype != base.dtype or output.dtype != base.dtype or base.dtype.kind not in 'fiu':
-        raise ValueError('Indexed addition requires matching real or integer value dtypes')
+    size, features = destinations.shape[0], base.shape[1]
+    if base.shape != output.shape or destinations.shape[1] != 1:
+        raise ValueError('Indexed addition requires U×1 destinations and D×F base/output')
+    if output.dtype != base.dtype or base.dtype.kind not in 'fiu':
+        raise ValueError('Indexed addition requires matching real or integer base/output dtypes')
     if destinations.dtype.kind not in 'iu' or max(size, base.shape[0]) >= 0xffffffff:
         raise ValueError('Indexed addition requires integer destinations within the uint32 domain')
+    value_inputs = set()
+
+    # design/algorithm-sources.md#fused-indexed-update-values
+    def value_dependencies(node):
+        if node.operation == 'input':
+            value_inputs.add(node.value)
+        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh'):
+            raise ValueError('Indexed update values require pointwise expressions; reduce or index their producer explicitly')
+        for child in node.operands:
+            value_dependencies(child)
+
+    value_dependencies(update_value)
+    value_inputs = tuple(sorted(value_inputs))
+    for index in value_inputs:
+        tensor = operands[index]
+        if tensor.shape[0] not in (1, size) or tensor.shape[1] not in (1, features):
+            raise ValueError('Indexed update operands must broadcast to U×F')
+        if tensor.dtype.kind not in ('fiu' if base.dtype.kind == 'f' else 'iu'):
+            raise ValueError('Indexed update operand dtype is incompatible with accumulation')
     key_inputs = set()
 
     # design/algorithm-sources.md#segmented-indexed-add
@@ -544,8 +567,10 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
     key_dependencies(expression.operands[1])
     key_dependencies(mask)
     chunk_rows = destinations.block_shape[0]
-    if updates.grid[0] > 1:
-        chunk_rows = math.gcd(chunk_rows, updates.block_shape[0])
+    for index in value_inputs:
+        tensor = operands[index]
+        if tensor.grid[0] > 1:
+            chunk_rows = math.gcd(chunk_rows, tensor.block_shape[0])
     for index in key_inputs:
         tensor = operands[index]
         if tensor.shape not in ((size, 1), (1, 1)):
@@ -563,8 +588,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             length if tensor.shape[0] != 1 else 1, 1) if index in key_inputs else tensor
             for index, tensor in enumerate(operands))
         _ExpressionKernel((key_expression,)).bind(program, reads, (keys,))
-        first_source = begin // updates.block_shape[0]
-        directory, count = _group_ordinals(program, (keys,), updates.block_shape[0], begin, first_source)
+        directory, count = _group_ordinals(program, (keys,), chunk_rows, begin, begin // chunk_rows)
         partials = program.tensor((count, features), (1, output.block_shape[1]),
             dtype=np.float32 if base.dtype.kind == 'f' else base.dtype)
         chunks.append((directory, count, partials))
@@ -572,24 +596,49 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         selector_view = directory.slice(0, 7 * count, 1, count)
         for (segment, panel), partial in partials.blocks.items():
             column = panel * partials.block_shape[1]
-            candidates = tuple(updates.region(row * updates.block_shape[0], column,
-                min(updates.block_shape[0], size - row * updates.block_shape[0]), partial.shape[1])
-                for row in (first_source,))
+            candidates = []
+            for index in value_inputs:
+                tensor = operands[index]
+                source_row = begin // tensor.block_shape[0] * tensor.block_shape[0] if tensor.shape[0] != 1 else 0
+                source_column = column if tensor.shape[1] != 1 else 0
+                source_rows = min(tensor.block_shape[0], tensor.shape[0] - source_row)
+                source_columns = partial.shape[1] if tensor.shape[1] != 1 else 1
+                candidates.append(tensor.region(source_row, source_column, source_rows, source_columns))
+            candidates = tuple(candidates)
             bounds = directory.slice(0, 5 * count + 2 * segment, 1, 2)
 
-            # design/algorithm-sources.md#segmented-indexed-add
-            def reduce_segment(metal, candidates=candidates, partial=partial, first_source=first_source):
-                declarations, load = _candidate_load(candidates, 2,
-                    f'ordinal/{updates.block_shape[0]}-{first_source}', f'ordinal%{updates.block_shape[0]}', 'c', metal)
+            # design/algorithm-sources.md#fused-indexed-update-values
+            def reduce_segment(metal, candidates=candidates, partial=partial, column=column):
+                loads = {}
+                for position, (index, ref) in enumerate(zip(value_inputs, candidates)):
+                    tensor = operands[index]
+                    _, load = _candidate_load((ref,), 2 + position, '0',
+                        f'ordinal%{tensor.block_shape[0]}' if tensor.shape[0] != 1 else '0',
+                        'c' if tensor.shape[1] != 1 else '0', metal)
+                    loads[index] = f'((float)({load}))' if tensor.dtype.kind == 'f' else load
+
+                # design/algorithm-sources.md#fused-indexed-update-values
+                def emit_value(node):
+                    if node.operation == 'input':
+                        return loads[node.value]
+                    if node.operation == 'row':
+                        return '((int64_t)ordinal)'
+                    if node.operation == 'column':
+                        return f'((int64_t)({column}+c))'
+                    return _scalar_expression(node, tuple(emit_value(child) for child in node.operands), metal)
+
+                load = emit_value(update_value)
                 accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
-                return declarations, f'''for(uint32_t c=lane;c<{partial.shape[1]};c+=lanes) {{
+                return f'''for(uint32_t c=lane;c<{partial.shape[1]};c+=lanes) {{
                   {accumulator} total=0;
                   for(uint32_t k=p1[0];k<p1[1];k++) {{ uint32_t ordinal=p0[k]; total+={load}; }}
                   p{2+len(candidates)}[c*{partial.view.column_stride}]=total;
                 }}'''
 
             function = _compiled_region(program, (ordinal_view, bounds, *candidates), partial, reduce_segment, 2)
-            _indexed_range(program, function, selector_view, bounds, 2, len(candidates))
+            for position, ref in enumerate(candidates):
+                if (ref.view.tensor, ref.view.extent) not in program._constant_extents:
+                    _indexed_range(program, function, selector_view, bounds, 2 + position, 1)
     reverse, total = _group_ordinals(program,
         tuple(directory.slice(0, 4 * count, 1, count) for directory, count, _ in chunks), 1)
     reverse_keys = reverse.slice(0, 0, 1, total)

@@ -1227,3 +1227,43 @@ a dense input or guesses ragged strides. These remaining whole-region source
 algorithms are migration backlog; this metadata change preserves access to the
 canonical pages while their numerical lowering is replaced.
 [Source mapping and compilation limits](xonotic-indexed-add.md).
+
+## Fused indexed update values
+
+The JAX authors' [Pallas pipelining](https://docs.jax.dev/en/latest/pallas/pipelining.html)
+retains numerical work inside the kernel that owns its accumulation, and
+Blelloch's segmented reduction above determines the contribution domain.
+`_scalar_expression` is the shared scalar emitter used by ordinary expressions
+and indexed segment updates; it owns literal, arithmetic, comparison, select and
+transcendental syntax for both CPU and Metal. The scatter lowering does not add a
+second implementation of those operators.
+
+The value argument of `indexed_add(base, destinations, value, mask=...)` can be a
+pointwise expression such as `updates * scale + other`. `value_dependencies`
+retains the exact input references and verifies their broadcast domain against
+U×F. Setup aligns routing chunks with every used input's existing row backing.
+Each segment's candidate binding names the actual feature region of each used
+operand, including row and column broadcasts. Logical row expressions evaluate
+to the retained original update ordinal, and logical columns to the feature
+stripe's retained global column plus its local index.
+
+`reduce_segment` uses `_candidate_load` for each exact canonical buffer and emits
+that scalar value expression inside its ordinal accumulation loop. Half/float
+loads are explicitly converted to float before arithmetic; real segment totals
+and partial storage remain FP32, with the existing final output cast. Mixed
+half/float operands therefore do not introduce an implicit half intermediate.
+No transformed-update operand allocation, publication or kernel launch is added.
+This fusion is lawful because the value expression is internal to the segment;
+separately produced/exported tensors retain their existing publication boundary.
+
+Each nonconstant operand gets its own selected-reader attachment over the same
+compact segment range. Empty segments select no candidate pages. Explicitly
+constant extents need no dynamic descriptor; merely present operands still do.
+Normal expression inputs retain their ordinary value dependencies even in a
+`select`; this is distinct from lazy `.at` access selection. Fused update values
+currently cover pointwise input-reference expressions, not nested `.at` loads or
+feature reductions. Those remain explicit producers; the compiler reports the
+unsupported fused form rather than lowering it eagerly or silently changing its
+dependencies. Existing segmented publication and reverse-directory lifetimes
+are unchanged. Python compilation is evidence for source syntax only; operational
+CPU/Metal validation belongs to the existing gold workflow.
