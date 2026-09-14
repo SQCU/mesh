@@ -236,6 +236,7 @@ def main():
         scatter_results = tuple(program.export(scatter_consumed[i, 0]) for i in range(destinations_count))
         xonotic_case = None
         xonotic_gradients = []
+        scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
             import sys
@@ -369,15 +370,24 @@ def main():
                 matrix_indices = program.tensor(index_storage, index_block, dtype=np.int64)
                 matrix_updates = program.tensor((6, 1), (2, 1), dtype=np.float32)
                 matrix_base = np.arange(np.prod(base_shape), dtype=np.float32).reshape(base_shape)
+                supplied = {}
+                if name == 'rank_scatter':
+                    backing = program.tensor((4, 6), (1, 2), dtype=np.float32)
+                    scatter_bases[name] = backing, matrix_base.reshape(4, 6)
                 graph = mx.Graph()
                 with graph:
-                    base_value = graph.constant(matrix_base)
+                    if name == 'rank_scatter':
+                        source_base = graph.input('base', (4, 6))
+                        supplied[source_base.index] = backing
+                        base_value = source_base.reshape(base_shape)
+                    else:
+                        base_value = graph.constant(matrix_base)
                     indices = graph.input('indices', index_shape, 'int64')
                     updates = graph.input('updates', update_shape)
                     scattered = base_value.at[indices].add(updates * 2 + 1)
                     transformed = scattered * 3
                 lowered = kernel_calls(program, graph, (),
-                    {indices.index: matrix_indices, updates.index: matrix_updates},
+                    {**supplied, indices.index: matrix_indices, updates.index: matrix_updates},
                     outputs=(transformed,), root_peer=0, tile_rows=row_tile, tile_columns=base_shape[-1])
                 matrix_results = tuple(program.export(ref) for _, ref in sorted(lowered[transformed.index].blocks.items()))
                 generations = []
@@ -855,6 +865,13 @@ def main():
                     result.consume()
         for name, index_tensors, cotangents, gradient_results, generations in xonotic_gradients:
             for generation, (index_values, cotangent_values, expected) in enumerate(generations):
+                if name in scatter_bases:
+                    backing, base_values = scatter_bases[name]
+                    wait_for(tuple(backing.blocks.values()), 'writable')
+                    for (i, j), ref in backing.blocks.items():
+                        if i != 2:
+                            with program.write(ref) as destination:
+                                destination[...] = base_values[i:i+1, 2*j:2*j+ref.shape[1]]
                 wait_for((*(ref for tensor in index_tensors for ref in tensor.blocks.values()), *cotangents.blocks.values()), 'writable')
                 for tensor, values in zip(index_tensors, index_values):
                     for (i, j), ref in tensor.blocks.items():
@@ -874,7 +891,17 @@ def main():
                         raise ArithmeticError('Early indexed sum consumer differs')
                 print(json.dumps(dict(event='xonotic_indexed_sum_early', case=name, generation=generation,
                     shape_only_primal=not name.endswith('scatter'), withheld_contribution_blocks=delayed,
+                    withheld_base_row=2 if name in scatter_bases else None,
                     output=[gradient_results[i].array.tolist() for i in (0, 1, 3)])), flush=True)
+                if name in scatter_bases:
+                    for (i, j), ref in backing.blocks.items():
+                        if i == 2:
+                            if not ref.writable:
+                                raise ArithmeticError('Scatter consumed an unpublished base fragment')
+                            with program.write(ref) as destination:
+                                destination[...] = base_values[i:i+1, 2*j:2*j+ref.shape[1]]
+                    if gradient_results[2].ready:
+                        raise ArithmeticError('Scatter ignored its delayed updates after base publication')
                 for i in delayed:
                     row = i * cotangents.block_shape[0]
                     with program.write(cotangents[i, 0]) as destination:
