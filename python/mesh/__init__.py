@@ -347,8 +347,14 @@ class Program:
         for index in range(self.native.algebra_trace_count(self.handle)):
             event = self.native.algebra_trace(self.handle, index)
             item = {name: getattr(event, name) for name, _ in event._fields_}
-            inputs = (self.native.algebra_trace_input(self.handle, index, i) for i in range(event.input_maps))
-            item['inputs'] = tuple(dict(first=region.first, count=region.count) for region in inputs)
+            for label, count, read in (('inputs', event.input_maps, self.native.algebra_trace_input),
+                                       ('outputs', event.output_maps, self.native.algebra_trace_output)):
+                regions = (read(self.handle, index, i) for i in range(count))
+                item[label] = tuple(dict(first=region.first, count=region.count) for region in regions)
+            indexed = (self.native.algebra_trace_indexed(self.handle, index, i)
+                for i in range(self.native.algebra_trace_indexed_count(self.handle, index)))
+            item['indexed'] = tuple({name: getattr(entry, name) for name, _ in entry._fields_}
+                for entry in indexed)
             result.append(item)
         return tuple(result)
 

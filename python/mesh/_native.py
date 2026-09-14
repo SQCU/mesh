@@ -29,6 +29,12 @@ class RowRange(C.Structure):
     _fields_ = [("first", U), ("count", U)]
 
 
+class IndexedEvent(C.Structure):
+    _fields_ = [('input', C.c_uint64)] + [(name, U) for name in
+        ('descriptor', 'role', 'candidate', 'first', 'count', 'plane', 'retired',
+         'selected', 'completed', 'mapped', 'flags')]
+
+
 class Event(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in
         ('ready_ns', 'start_ns', 'complete_ns', 'gpu_start_ns', 'gpu_end_ns', 'submissions')]
@@ -99,6 +105,9 @@ class Native:
             'mesh_algebra_trace_count': (Z, [P]),
             'mesh_algebra_trace': (Event, [P, Z]),
             'mesh_algebra_trace_input': (RowRange, [P, Z, Z]),
+            'mesh_algebra_trace_output': (RowRange, [P, Z, Z]),
+            'mesh_algebra_trace_indexed_count': (Z, [P, Z]),
+            'mesh_algebra_trace_indexed': (IndexedEvent, [P, Z, Z]),
             'mesh_algebra_report': (Report, [P]),
             'mesh_transfer_trace_count': (Z, [P]),
             'mesh_transfer_trace': (TransferEvent, [P, Z]),
