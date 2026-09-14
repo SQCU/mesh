@@ -82,11 +82,22 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @property MeshCPUCode *cpuCode;
 @property NSData *cpuArguments;
 @property NSMutableData *dependencies,*results;
+@property NSData *inputViews;
+@property NSMutableIndexSet *indexedInputs;
 @property(nonatomic,assign) MeshAlgebra *owner;
 @property(copy) void (^encode)(id<MTLCommandBuffer>);
 @property(copy) void (^execute)(MeshFunction *);
 @end
 @implementation MeshFunction
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+- (void)dealloc {
+  struct mesh_indexed_read *d=function.indexed;
+  while(d){
+    struct mesh_indexed_read *next=d->next;
+    for(uint32_t i=0;i<d->candidates;i++)free(d->candidate[i].maps);
+    free(d->candidate);free(d->selector);free(d);d=next;
+  }
+}
 @end
 
 @interface MeshAlgebra : NSObject {
@@ -118,6 +129,8 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @implementation MeshAlgebra
 /* design/algorithm-sources.md#streaming-algebra */
 - (void)dealloc {
+  for(MeshFunction *f in self.functions)for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)
+    mesh_rows_release(context,d->retired,2*d->candidates+2);
   self.functions=nil;
   self.lookup=nil;
   self.extents=nil;
@@ -364,6 +377,7 @@ int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *in
   if(a.realized)return EBUSY;
   if(!submit || !output_count || output_count>UINT32_MAX || input_count>UINT32_MAX || !outputs || (input_count && !inputs))return EINVAL;
   MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];f.results=[NSMutableData new];
+  f.inputViews=[NSData dataWithBytes:inputs length:input_count*sizeof *inputs];f.indexedInputs=[NSMutableIndexSet new];
   for(size_t i=0;i<input_count;i++){if(!valid_view(a,inputs[i]))return EINVAL;dependencies(f.dependencies,inputs[i]);}
   for(size_t i=0;i<output_count;i++) {
     struct mesh_row_map m;int error=output_region(a,outputs[i],&m);if(error)return error;
@@ -376,6 +390,46 @@ int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *in
   f->function=(struct mesh_row_function){.output=f.results.mutableBytes,.outputs=(uint32_t)output_count,.rows=1};bind_dependencies(f);
   f.execute=^(MeshFunction *function){submit(binding,complete_function,(__bridge void *)function);};
   [a.functions addObject:f];return 0;
+}
+
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+static struct mesh_index_candidate indexed_maps(struct mesh_view view){
+  MeshFunction *f=[MeshFunction new];f.dependencies=[NSMutableData new];dependencies(f.dependencies,view);bind_dependencies(f);
+  size_t bytes=f->function.inputs*sizeof(struct mesh_row_map);
+  struct mesh_row_map *maps=malloc(bytes);if(maps)memcpy(maps,f->function.input,bytes);
+  return (struct mesh_index_candidate){.maps=maps,.count=f->function.inputs};
+}
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_view selector,const size_t *candidate_inputs,size_t count){
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || index>=a.functions.count || !count || count>(UINT32_MAX-2)/2 || !candidate_inputs || !valid_view(a,selector))return EINVAL;
+  if(selector.tensor->extents[selector.extent].shape.scalar!=MESH_U32)return EINVAL;
+  MeshFunction *f=a.functions[index];const struct mesh_view *inputs=f.inputViews.bytes;size_t input_count=f.inputViews.length/sizeof *inputs;
+  for(size_t i=0;i<count;i++)if(candidate_inputs[i]>=input_count || !valid_view(a,inputs[candidate_inputs[i]]))return EINVAL;
+  struct mesh_indexed_read *d=calloc(1,sizeof *d);if(!d)return ENOMEM;
+  d->candidate=calloc(count,sizeof *d->candidate);if(!d->candidate){free(d);return ENOMEM;}
+  d->candidates=(uint32_t)count;
+  struct mesh_index_candidate selection=indexed_maps(selector);d->selector=selection.maps;d->selectors=selection.count;
+  int error=d->selector?0:ENOMEM;
+  for(size_t i=0;i<count && !error;i++){d->candidate[i]=indexed_maps(inputs[candidate_inputs[i]]);if(!d->candidate[i].maps)error=ENOMEM;}
+  for(size_t i=0;i<count && !error;i++)for(uint32_t j=0;j<d->candidate[i].count;j++){
+    struct mesh_row_map map=d->candidate[i].maps[j];
+    for(uint32_t k=0;k<d->selectors;k++)if(overlaps(map,d->selector[k]))error=EINVAL;
+    for(size_t k=0;k<i;k++)for(uint32_t q=0;q<d->candidate[k].count;q++)if(overlaps(map,d->candidate[k].maps[q]))error=EINVAL;
+  }
+  if(error){for(size_t i=0;i<count;i++)free(d->candidate[i].maps);free(d->candidate);free(d->selector);free(d);return error;}
+  d->retired=mesh_rows_alloc(a->context,2*(uint32_t)count+2);
+  if(d->retired==MESH_ABSENT){for(size_t i=0;i<count;i++)free(d->candidate[i].maps);free(d->candidate);free(d->selector);free(d);return errno;}
+  d->indices=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
+  d->rows=selector.rows;d->columns=selector.columns;d->row_stride=selector.row_stride;d->column_stride=selector.column_stride;
+  d->selected=d->retired+d->candidates;d->completed=d->selected+d->candidates;d->mapped=d->completed+1;
+  for(size_t i=0;i<count;i++)[f.indexedInputs addIndex:candidate_inputs[i]];
+  d->next=f->function.indexed;f->function.indexed=d;f.dependencies=[NSMutableData new];
+  for(size_t i=0;i<input_count;i++)if(![f.indexedInputs containsIndex:i])dependencies(f.dependencies,inputs[i]);
+  for(struct mesh_indexed_read *part=f->function.indexed;part;part=part->next)
+    [f.dependencies appendBytes:part->selector length:part->selectors*sizeof *part->selector];
+  bind_dependencies(f);
+  return 0;
 }
 
 struct cpu_operand {const void *address;struct geometry_view view;float (*load)(const void *,size_t);};
@@ -791,6 +845,14 @@ static void submit_ready(void *argument,uint32_t occurrence) {
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_realize(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);if(a.realized)return 0;size_t count=a.functions.count;
+  for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)
+    for(uint32_t i=0;i<d->selectors;i++){
+      struct mesh_row_map map=d->selector[i];
+      for(uint32_t r=map.first;r<map.first+map.count;r++)if(!output_used(a,(struct mesh_row_map){.first=r,.count=1}))return EINVAL;
+      const struct mesh_row_binding *bindings=a.bindings.bytes;
+      for(size_t j=0;j<a.bindings.length/sizeof *bindings;j++)
+        if(bindings[j].receive && overlaps(map,(struct mesh_row_map){.first=bindings[j].first,.count=bindings[j].count}))return EINVAL;
+    }
   struct mesh_row_function *functions=calloc(count?count:1,sizeof *functions);
   if(!functions)return ENOMEM;
   for(size_t i=0;i<count;i++)functions[i]=a.functions[i]->function;
@@ -798,6 +860,9 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
   free(functions);
   if(!error){
     a.realized=YES;
+    for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d && !error;d=d->next)
+      error=mesh_execution_indexed(a->context,d,handle);
+    if(error)return error;
     for(MeshFunction *f in a.functions){
       error=mesh_execution_add(a->context,&f->function,handle,submit_ready,(__bridge void *)f);
       if(error)break;

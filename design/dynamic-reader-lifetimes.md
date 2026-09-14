@@ -162,3 +162,54 @@ mesh_row_function completion already implements them. If that ownership cannot
 fit the existing logical-row model directly, document the narrowly equivalent
 selector/candidate completion bitmap before adding a new field. Independent
 source progress and occurrence identity are required in either representation.
+
+## Implemented native contract
+
+The native implementation now realizes the proposal through
+`mesh_algebra_indexed(handle, function_index, selector, candidate_input_positions,
+candidate_count)`. Input positions refer to the original numerical binding input
+array. That array and an indexed-position set survive dependency merging, so an
+ordinary alias of a dynamically read buffer retains its genuine ordinary
+requirement. Several descriptors can attach to one function and independently
+reserve source lifetime readers. Within a descriptor, candidate maps must be
+disjoint canonical row domains; duplicate numerical indices share the same
+candidate ordinal instead of duplicating physical candidates.
+
+Selectors are locally produced U32 numerical outputs, containing candidate ordinals
+or UINT32_MAX for masked accesses. Original indices and source values may arrive
+remotely. Direct receives into selector storage and CONSTANT selector storage are
+rejected during setup because their reset ownership differs from the local
+producer contract. A selector source must cover every selector dependency row.
+The compiler is responsible for emitting bounded ordinals and preserving all
+ordinary/indexed access roles.
+
+For C candidates the descriptor allocates 2C+2 canonical logical rows, without
+operand payload pages: C retirement identities, C selected-membership identities,
+one numerical-completion identity and one mapped-selection identity. Selection
+membership is computed once from the retained numerical ordinal vector by the
+existing metadata event owner. Unselected-source membership is then a bitmap
+lookup, not a repeated scan of the vector per candidate. Selected input readiness
+still visits the selected ordinal vector and its actual source maps; repeated
+numerical indices are correct and can repeat those readiness checks.
+
+Numerical completion stamps the completion result and notifies the selector's
+existing adjacency. The serial metadata event owner subsequently retires selected
+sources; unselected late sources use their own existing publication notifications.
+There is no new synchronous dispatch or completion wait. Every retirement bit is
+set before releasing its source READ plane. A selector-wide all-retired comparison
+is needed only when an affected retirement bitmap word becomes complete. Selector
+producer issue clears all its owned result bits before publishing the next selector.
+
+The ordinary numerical selector reader prevents a numerically unfinished empty
+selection from losing its indices even if every unselected source has already
+retired. The separate lifetime reader prevents finished numerical work from reusing
+selector storage while a late source occurrence remains unresolved. Retirement
+identities persist across independent source resets. Output regions remain
+independently publishable; their subsequent reuse obeys ordinary output-reader
+lifetimes.
+
+The native `mesh_row_function` structure gains an indexed-descriptor pointer;
+libmesh and libmesh-algebra must be rebuilt together. The shared region header and
+its version do not change. No bridge restart or workload was performed for this
+source increment. Compilation establishes buildability only; operational evidence
+belongs to the existing example and caller workflows.

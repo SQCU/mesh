@@ -45,6 +45,7 @@ void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_function(struct mesh_algebra *,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,mesh_submission,void *binding);
 int mesh_algebra_metal(struct mesh_algebra *,const char *,const struct mesh_metal_dispatch *,size_t,const struct mesh_metal_constant *,size_t,const struct mesh_view *,size_t,const struct mesh_view *,size_t);
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output);
+int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t candidate_count);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);

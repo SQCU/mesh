@@ -1101,3 +1101,29 @@ require a contiguous full-table region or whole-table arrival. Existing negative
 index normalization is retained. A selector and payload function are two native
 launches in this lowering; fusion of index production into a preceding producer
 is separate optimization work, not an unmeasured zero-overhead claim.
+
+## Dynamic reader lifetimes
+
+Papadopoulos and Culler's [Monsoon: An Explicit Token-Store Architecture](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
+provides explicit operand identity and presence-bit matching. The JAX authors'
+[Pallas bounded dynamic slices](https://github.com/jax-ml/jax/blob/main/docs/pallas/tpu/pipelining.md)
+provide configured maximum regions with numerical runtime indices. Mesh combines
+these mechanisms using produced U32 selector ordinals, exact candidate input
+positions and canonical logical result rows. This is a mesh lifecycle extension,
+not a claim that Pallas itself implements host page-table readers.
+
+`mesh_algebra_indexed` retains original binding input roles, exact candidate maps,
+selector layouts and per-candidate lifetime results. `mesh_index_prepare` retains
+selected-candidate membership once per selector publication. `mesh_index_ready`
+checks selected ranges only. Numerical completion publishes a logical completion
+result; the existing metadata event owner releases selected sources only after
+that result, and unselected sources whenever their own values arrive. A retirement
+result is published before its source READ bit, so source reuse cannot erase the
+selector's history. Selector lifetime ends after all its candidate occurrences
+retire. Selector output preparation resets its owned metadata results.
+
+The [full lifetime trace](dynamic-reader-lifetimes.md#implemented-native-contract)
+specifies local selector production, duplicate-index and fanout semantics, bounded
+repeated occurrences, metadata costs and ABI implications. No source tensor copies,
+additional participant scheduler or per-candidate numerical launches implement
+these transitions.
