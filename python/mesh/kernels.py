@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+_REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
+
 
 @dataclass(frozen=True)
 class _Operation:
@@ -152,18 +154,38 @@ class _Expression:
             raise ValueError('Expression casts require a supported scalar dtype')
         return _Expression('cast', (self,), dtype.str)
 
-    # design/algorithm-sources.md#region-expression-fusion
-    def sum(self, axis=1):
+    # design/algorithm-sources.md#shared-associative-reductions
+    def _reduce(self, operation, axis):
         axes = (0, 1) if axis is None else (axis,) if isinstance(axis, int) else tuple(axis)
         if any(value not in (-2, -1, 0, 1) for value in axes):
             raise ValueError('Expression reduction axes refer to its two-dimensional domain')
         axes = tuple(sorted(set(value % 2 for value in axes)))
         if not axes:
-            return self
+            return self.equal(0).equal(False) if operation in ('any', 'all') else self
         if axes == (0,):
-            return self.T.sum().T
-        reduced = _Expression('sum', (self,))
-        return reduced.T.sum() if axes == (0, 1) else reduced
+            return self.T._reduce(operation, 1).T
+        reduced = _Expression(operation, (self,))
+        return reduced.T._reduce(operation, 1) if axes == (0, 1) else reduced
+
+    # design/algorithm-sources.md#shared-associative-reductions
+    def sum(self, axis=1):
+        return self._reduce('sum', axis)
+
+    # design/algorithm-sources.md#shared-associative-reductions
+    def max(self, axis=1):
+        return self._reduce('max', axis)
+
+    # design/algorithm-sources.md#shared-associative-reductions
+    def min(self, axis=1):
+        return self._reduce('min', axis)
+
+    # design/algorithm-sources.md#shared-associative-reductions
+    def any(self, axis=1):
+        return self._reduce('any', axis)
+
+    # design/algorithm-sources.md#shared-associative-reductions
+    def all(self, axis=1):
+        return self._reduce('all', axis)
 
     @property
     # design/algorithm-sources.md#shared-contraction-lowering
@@ -178,7 +200,7 @@ class _Expression:
             return _Expression('column' if self.operation == 'row' else 'row')
         if self.operation == 'dot':
             return _Expression('dot', tuple(child.T for child in self.operands[::-1]), self.value)
-        if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%'):
+        if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%', 'maximum', 'minimum'):
             return _Expression(self.operation, tuple(child.T for child in self.operands), self.value)
         return _Expression('transpose', (self,))
 
@@ -314,7 +336,7 @@ def _specialize_accesses(expression, inputs, output, coordinate):
                 value = output.shape[1]
             elif node.operation == 'index_vector':
                 value = node.value[0] if node.value[3] == 1 else 1
-            elif node.operation in ('row', 'sum'):
+            elif node.operation == 'row' or node.operation in _REDUCTIONS:
                 value = 1
             else:
                 value = max(children, default=1)
@@ -339,7 +361,7 @@ def _specialize_accesses(expression, inputs, output, coordinate):
             visit(other, path + ((mask, False),), extent)
             if hasattr(inputs[node.value], 'blocks'):
                 domains.setdefault(node, set()).add((selected, extent))
-        elif node.operation == 'sum':
+        elif node.operation in _REDUCTIONS:
             visit(node.operands[0], (), width(node.operands[0]))
         else:
             for child in node.operands:
@@ -545,7 +567,7 @@ class _ExpressionKernel:
                 check(program.native.algebra_indexed(program.handle, function, selected.view,
                     (C.c_size_t * count)(*range(first, first + count)), count))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#shared-associative-reductions
     def source(self, inputs, output, metal, expression):
         widths, reductions = {}, []
         physical, pointers = [], {}
@@ -570,8 +592,8 @@ class _ExpressionKernel:
                 return True
             if node.operation in ('exp', 'rsqrt', 'tanh'):
                 return False
-            if node.operation == 'sum':
-                return output.dtype.kind in 'iub'
+            if node.operation in _REDUCTIONS:
+                return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
             return all(integral(child) for child in node.operands)
 
         # design/algorithm-sources.md#region-expression-fusion
@@ -594,7 +616,7 @@ class _ExpressionKernel:
                 width = node.value[0] if node.value[3] == 1 else 1
             elif node.operation == 'row':
                 width = 1
-            elif node.operation == 'sum':
+            elif node.operation in _REDUCTIONS:
                 reductions.append(node)
                 width = 1
             else:
@@ -619,8 +641,8 @@ class _ExpressionKernel:
                     return f'((long)({column}))' if metal else f'((int64_t)({column}))'
                 if part.operation == 'index_vector':
                     return f'((int64_t)({0 if part.value[0] == 1 else "r" if part.value[3] == 0 else column})+{part.value[2]}ll)'
-                if part.operation == 'sum':
-                    return f'(({"long" if metal else "int64_t"}){names[part]})' if output.dtype.kind in 'ib' else names[part]
+                if part.operation in _REDUCTIONS:
+                    return f'(({"long" if metal else "int64_t"}){names[part]})' if part.operation == 'sum' and output.dtype.kind in 'ib' else names[part]
                 ref = inputs[part.value]
                 if part.operation == 'load':
                     return _indexed_load_expression(ref, pointers[part.value][0], layouts.get(part.value), args, metal)
@@ -664,15 +686,35 @@ class _ExpressionKernel:
             lines.append(f'for(uint64_t r=0;r<{output.shape[0]};r++) {{')
         for node in reductions:
             name, child = names[node], node.operands[0]
-            unsigned = output.dtype.kind == 'u' or (output.dtype.kind in 'ib' and integral(child))
-            accumulator = ('ulong' if metal else 'uint64_t') if unsigned else ('long' if metal else 'int64_t') if output.dtype.kind in 'ib' else 'float'
-            lines.append(f'{accumulator} {name}=0;')
-            lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
-            if metal and output.dtype.kind in 'iub':
+            dtype = _reduction_dtype(node, inputs, output.dtype)
+            unsigned = dtype.kind == 'u' or (node.operation == 'sum' and dtype.kind in 'ib' and integral(child))
+            accumulator = (('ulong' if metal else 'uint64_t') if unsigned else ('long' if metal else 'int64_t')) if dtype.itemsize == 8 else (
+                'float' if dtype.kind == 'f' else ('uint' if metal else 'uint32_t') if dtype.kind in 'ub' else ('int' if metal else 'int32_t'))
+            if node.operation in ('max', 'min'):
+                identity = ('-INFINITY' if node.operation == 'max' else 'INFINITY') if dtype.kind == 'f' else _scalar_expression(_literal(
+                    (0 if node.operation == 'max' else 1) if dtype.kind == 'b' else
+                    (np.iinfo(dtype).min if node.operation == 'max' else np.iinfo(dtype).max)), (), metal)
+            else:
+                identity = '1' if node.operation == 'all' else '0'
+            lines.append(f'{accumulator} {name}={identity};')
+            operand = emit(child, 'k')
+            combine = (f'{name}+={operand}' if node.operation == 'sum' else
+                f'{name}{"|" if node.operation == "any" else "&"}=(({operand})!=0)' if node.operation in ('any', 'all') else
+                f'{name}=' + _scalar_expression(_Expression('maximum' if node.operation == 'max' else 'minimum'), (name, operand), metal, dtype))
+            lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {combine};')
+            if metal and node.operation == 'sum' and dtype.kind in 'iub':
                 lines.append(f'uint {name}_lo=simd_sum(uint(ulong({name})&65535ul)), {name}_mid=simd_sum(uint((ulong({name})>>16)&65535ul)), {name}_hi=simd_sum(uint(ulong({name})>>32));')
                 lines.append(f'{name}_mid+={name}_lo>>16; {name}_hi+={name}_mid>>16; {name}=(ulong({name}_hi)<<32)|(ulong({name}_mid&65535u)<<16)|ulong({name}_lo&65535u);')
+            elif metal and node.operation in ('max', 'min') and dtype.itemsize == 8:
+                high_type = 'int' if dtype.kind == 'i' else 'uint'
+                operation = 'max' if node.operation == 'max' else 'min'
+                low_identity = '0u' if node.operation == 'max' else '0xffffffffu'
+                lines.append(f'{high_type} {name}_hi={high_type}(ulong({name})>>32), {name}_best=simd_{operation}({name}_hi);')
+                lines.append(f'uint {name}_lo=simd_{operation}({name}_hi=={name}_best?uint(ulong({name})):{low_identity});')
+                lines.append(f'{name}={accumulator}((ulong(uint({name}_best))<<32)|ulong({name}_lo));')
             elif metal:
-                lines.append(f'{name}=simd_sum({name});')
+                operation = 'max' if node.operation in ('max', 'any') else 'min' if node.operation in ('min', 'all') else 'sum'
+                lines.append(f'{name}=simd_{operation}({name});')
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')
         return '\n'.join(lines)
@@ -705,7 +747,7 @@ def _indexed_access_paths(expression, inputs, dynamic_inputs):
                     paths.append(selected)
         else:
             for child in node.operands:
-                visit(child, () if node.operation == 'sum' else path)
+                visit(child, () if node.operation in _REDUCTIONS else path)
 
     visit(expression)
     return accesses
@@ -727,7 +769,7 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
 
 # design/algorithm-sources.md#shared-scalar-load-emission
 def _emit_scalar_expression(node, inputs, metal, resolve):
-    if node.operation in ('input', 'row', 'column', 'sum', 'index_vector'):
+    if node.operation in ('input', 'row', 'column', 'index_vector') or node.operation in _REDUCTIONS:
         return resolve(node, ())
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
     if node.operation == 'load':
@@ -737,7 +779,7 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         rows, columns, grid_columns = node.value
         return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
     return _scalar_expression(node, args, metal,
-        _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
+        _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum') else None)
 
 
 # design/algorithm-sources.md#logical-indexed-views
@@ -754,9 +796,9 @@ def _expression_dtype(node, inputs):
         return np.dtype('int64')
     if node.operation == 'literal':
         return np.dtype('int32' if isinstance(node.value, bool) else 'float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
-    if node.operation == 'sum':
+    if node.operation in _REDUCTIONS:
         child = _expression_dtype(node.operands[0], inputs)
-        return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
+        return np.dtype('bool') if node.operation in ('any', 'all') else child if node.operation != 'sum' else np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
     if node.operation == 'load':
         types = (inputs[node.value].dtype, _expression_dtype(node.operands[3], inputs))
     else:
@@ -768,8 +810,19 @@ def _expression_dtype(node, inputs):
     return np.dtype(('uint' if unsigned else 'int') + str(bits))
 
 
+# design/algorithm-sources.md#shared-associative-reductions
+def _reduction_dtype(node, inputs, output):
+    if node.operation != 'sum':
+        return _expression_dtype(node, inputs)
+    return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
+
+
 # design/algorithm-sources.md#fused-indexed-update-values
 def _scalar_expression(node, args, metal, dtype=None):
+    if node.operation in ('maximum', 'minimum'):
+        if dtype.kind == 'f':
+            return f'{"fmax" if node.operation == "maximum" else "fmin"}{"" if metal else "f"}({args[0]},{args[1]})'
+        return f'(({args[0]}){">" if node.operation == "maximum" else "<"}({args[1]})?({args[0]}):({args[1]}))'
     if node.operation == 'cast':
         dtype = np.dtype(node.value)
         scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
@@ -1076,7 +1129,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             value_inputs.add(node.value)
         elif node.operation == 'load':
             indexed_inputs.add(node.value)
-        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%'):
+        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%', 'maximum', 'minimum'):
             raise ValueError('Indexed update values require pointwise expressions; reduce or index their producer explicitly')
         for child in node.operands:
             value_dependencies(child)
@@ -1279,7 +1332,7 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'sum', 'cast', 'transpose') or any(_requires_regions(child) for child in node.operands)
+    return node.operation in ('dot', 'cast', 'transpose') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -1322,10 +1375,10 @@ class _ExpressionRegions:
             if left[0][1] != right[0][0]:
                 raise ValueError('Contraction inner dimensions differ')
             result = (left[0][0], right[0][1]), (left[1][0], right[1][1]), (left[2][0], right[2][1])
-        elif node.operation == 'sum':
+        elif node.operation in _REDUCTIONS:
             child = self.layout(node.operands[0])
             result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
-        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'load', '//', '%'):
+        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'load', '//', '%', 'maximum', 'minimum'):
             children = tuple(map(self.layout, node.operands))
             shape = tuple(max(child[0][axis] for child in children) for axis in range(2))
             if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
@@ -1378,7 +1431,7 @@ class _ExpressionRegions:
             return source.region(*origin, *shape) if self.whole[node.value] else source.slice(*origin, *shape)
         if node.operation == 'transpose':
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
-        if node.operation == 'sum':
+        if node.operation in _REDUCTIONS:
             return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
         dtype = _expression_dtype(node, self.sources)
         if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
@@ -1433,9 +1486,9 @@ class _ExpressionRegions:
         self.cache[key] = tuple(parts)
         return self.cache[key]
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#shared-associative-reductions
     def reduction(self, node, row, rows, dtype, direct=None):
-        key = ('sum', self.key(node, (row, 0), (rows, 1)), dtype.str)
+        key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if key in self.cache:
             return self.cache[key]
         child = node.operands[0]
@@ -1445,7 +1498,7 @@ class _ExpressionRegions:
         for column in range(0, width, tile):
             length = min(tile, width-column)
             target = direct if direct is not None and tile >= width and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-            self.emit(child, (row, column), (rows, length), target, reduce=True)
+            self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
             parts.append(target)
         while len(parts) > 1:
             reduced = []
@@ -1454,12 +1507,15 @@ class _ExpressionRegions:
                     reduced.append(parts[index])
                     continue
                 target = direct if direct is not None and len(parts) == 2 and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-                if dtype.kind == 'f':
+                if node.operation == 'sum' and dtype.kind == 'f':
                     _bind_operation(self.program, add, parts[index:index+2], target)
                 else:
                     left, right = arguments(2)
                     bits = 0xffffffffffffffff
-                    _ExpressionKernel(((left & bits)+(right & bits),)).bind(self.program, parts[index:index+2], (target,), self.coordinate)
+                    merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
+                        left | right if node.operation == 'any' else left & right if node.operation == 'all' else
+                        _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
+                    _ExpressionKernel((merged,)).bind(self.program, parts[index:index+2], (target,), self.coordinate)
                 reduced.append(target)
             parts = reduced
         self.cache[key] = parts[0]
@@ -1491,12 +1547,12 @@ class _ExpressionRegions:
             if node.operation == 'cast':
                 child = node.operands[0]
                 return _Expression('cast', (lower(child, _expression_dtype(child, self.sources)),), node.value)
-            if node.operation == 'sum':
+            if node.operation in _REDUCTIONS:
                 layout = self.layout(node)
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
                 rows = 1 if layout[0][0] == 1 else shape[0]
-                dtype = np.dtype(np.int64 if accumulation.kind in 'ib' else np.uint64 if accumulation.kind == 'u' else np.float32)
-                return reference(('sum', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
+                dtype = _reduction_dtype(node, self.sources, accumulation)
+                return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
             if node.operation == 'dot':
                 layout = self.layout(node)
                 where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
@@ -1529,9 +1585,9 @@ class _ExpressionRegions:
                 raise ValueError('Indexed addition requires an output root')
             return _Expression(node.operation, tuple(lower(child, accumulation) for child in node.operands), node.value)
 
-        lowered = lower(value)
+        lowered = lower(value, _expression_dtype(value, self.sources) if reduce in ('max', 'min', 'any', 'all') else target.dtype)
         if reduce:
-            lowered = lowered.sum()
+            lowered = _Expression(reduce, (lowered,))
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
 
 
@@ -1808,10 +1864,10 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
                         raise ValueError('Contraction output shape differs from its operand domains')
                 where = tuple(origin[axis] if layout[1][axis] else 0 for axis in range(2))
                 lowering.publish(lowering.parts(value, where, target.shape, target), target)
-            elif value.operation == 'sum' and target.shape[1] == 1:
+            elif value.operation in _REDUCTIONS and target.shape[1] == 1:
                 layout = lowering.layout(value)
                 row = origin[0] if layout[1][0] else 0
-                dtype = np.dtype(np.int64 if target.dtype.kind in 'ib' else np.uint64 if target.dtype.kind == 'u' else np.float32)
+                dtype = _reduction_dtype(value, lowering.sources, target.dtype)
                 result = lowering.reduction(value, row, target.shape[0], dtype, target)
                 if result is not target:
                     symbol, = arguments(1)
