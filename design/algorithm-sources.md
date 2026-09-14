@@ -449,20 +449,37 @@ section-local reduction dependencies.
 
 ## Streaming overlap measurement
 
-The JAX authors' Pallas pipelining (cited in the region streaming review) motivates
-the comparison in `examples/streaming-overlap.py`. Amdahl's AFIPS 1967 analysis
-of serial fractions motivates reporting end-to-end improvement, rather than
-calling pending work device utilization. The client uses `BlockSpec.region_map`
-and `call_native` to run the same tiled NumPy matmuls for `(X W) V`: whole-operand
-publication versus independent section publication. The first contraction runs
-on participant zero, the second on participant one, with results returned over
-canonical mesh. Configuration, oracle computation, and numerical comparison are
-outside the timed interval. Five window traversals warm up the pipeline before samples. Welford's online
-moments (cited above) summarize timings. `mesh_tensor_present` and `Ref.present` observe canonical physical presence
-without consuming a reader or gating numerical functions. They report whether a
-consumer launches before full reception. Inputs vary by invocation; terminal
-results are checked outside steady-state timing. Multiple configured input slots
-keep both variants pipelined.
+The JAX authors' [Pallas pipelining](https://docs.jax.dev/en/latest/pallas/pipelining.html)
+motivates `examples/streaming-overlap.py`; Amdahl's AFIPS 1967 analysis of
+serial fractions motivates end-to-end reporting. `configure` uses the existing
+`Program.kernel_call(kernels.matmul)` with matching `BlockSpec` partitions for
+`(X W) V`. Both participants allocate the same tensors and peer placement binds
+only their own numerical functions. The first contraction runs on participant
+zero, the second on participant one, and results return through canonical mesh.
+Both directions use queue zero. CPU and Metal use their existing native matmul
+bindings; no Python numerical callback or observer runs inside a contraction.
+
+`run_batch` is the external input supplier/result observer. A fixed setup-allocated
+slot count bounds concurrent invocations and operand storage. It waits for each
+slot's complete returned result before supplying another invocation there, while
+other slots continue independently. Five window traversals warm up and drain
+before the measured batch. Inputs vary by invocation. Terminal results are
+compared against a precomputed reference after the timed interval; intermediate
+invocations are timed but not numerically checked. Welford's online `moments`
+reports count, mean and sample variance. A timeout reports a stalled observation
+without introducing a dependency into numerical execution.
+
+Whole mode is an explicit whole-region comparison experiment, not a second
+backend interface. Streamed mode publishes each row region independently, including
+a clipped final region. Host-observed first-region and complete-result times are
+upper bounds that include input supply and observer delay. `Program.trace` and
+`Program.transfer_trace` retain native computation and transport timestamps for
+overlap analysis outside the numerical body. Their latest-occurrence retention
+must be respected for repeated slots; host intervals do not prove hardware
+occupancy or globally earliest publication.
+
+See [the source migration](streaming-overlap-native-2026-09-13.md) for exact
+validation limits and the difference from the former NumPy callback comparison.
 
 ## Pallas call ergonomics
 
