@@ -246,6 +246,7 @@ def main():
         xonotic_boolean = None
         xonotic_reductions = None
         xonotic_elementary = None
+        xonotic_ranges = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -637,6 +638,36 @@ def main():
                 generations.append((values, expected))
             xonotic_elementary = elementary_storage, (*operations, 'signed_isfinite', 'unsigned_isfinite',
                 'signed_invert', 'unsigned_invert', 'signed_floor', 'unsigned_floor', 'signed_abs', 'unsigned_abs'), observations, generations
+            # design/algorithm-sources.md#indexed-range-generation
+            graph = mx.Graph()
+            dimension = mx.Dimension('axis', (0,))
+            range_cases = ((-7, 23, 3, 'int64'), (23, -7, -3, 'int64'),
+                           (-2**53-21, -2**53+9, 3, 'int64'),
+                           (2**63+5, 2**63+35, 3, 'uint64'),
+                           (dimension-10, dimension, 1, 'int64'))
+            with graph:
+                range_inputs = tuple(graph.input(f'range_input_{i}', (2, 5), dtype)
+                                     for i, (_, _, _, dtype) in enumerate(range_cases))
+                generated = tuple(mx.arange(start, stop, step, dtype=dtype)
+                                  for start, stop, step, dtype in range_cases)
+                consumers = tuple((value.reshape(2, 5) + source) + graph.constant((dimension*3-1)//2, dtype=value.dtype)
+                                  for value, source in zip(generated, range_inputs))
+                empty_outputs = tuple(mx.arange(start, stop, step, dtype='float32') + np.float32(2)
+                                      for start, stop, step in ((0, 0, 1), (5, 0, 1), (0, 5, -1)))
+                empty_identities = tuple(mx.reduce(operation, value) for value in empty_outputs
+                                         for operation in ('sum', 'any', 'all', 'max', 'min'))
+            range_storage = tuple(program.tensor((2, 5), (1, 3), dtype=value.dtype) for value in range_inputs)
+            lowered = kernel_calls(program, graph, (10,), dict(zip((value.index for value in range_inputs), range_storage)),
+                outputs=(*generated, *consumers, *empty_outputs, *empty_identities), root_peer=0, tile_rows=1, tile_columns=3)
+            observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in (*generated, *consumers))
+            references = tuple(np.array([start.resolve((10,)) + i*step if isinstance(start, mx.Dimension) else start+i*step
+                                        for i in range(10)], dtype=dtype).reshape(2, 5)
+                               for start, stop, step, dtype in range_cases)
+            if any(np.prod(lowered[value.index].shape) or lowered[value.index].blocks for value in empty_outputs):
+                raise ArithmeticError('Empty range composition allocated a numerical output')
+            empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
+            xonotic_ranges = range_storage, observations, references, empty_results
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1248,6 +1279,50 @@ def main():
                 print(json.dumps(dict(event='xonotic_expert_complete', generation=generation,
                     elapsed_ms=(time.monotonic_ns()-started)/1e6,
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
+                for results in observations:
+                    for i, j, result in results:
+                        result.consume()
+        if xonotic_ranges is not None:
+            storage, observations, references, empty_results = xonotic_ranges
+            wait_for(empty_results)
+            empty_expected = (0, False, True, -np.inf, np.inf) * 3
+            if any(result.array.item() != expected for result, expected in zip(empty_results, empty_expected)):
+                raise ArithmeticError('Empty range reduction identity differs')
+            print(json.dumps(dict(event='xonotic_empty_ranges', shapes=[[0]]*3, identities=[result.array.item() for result in empty_results])), flush=True)
+            for result in empty_results:
+                result.consume()
+            generated_results, consumer_results = observations[:len(storage)], observations[len(storage):]
+            for generation in range(2):
+                started = time.monotonic_ns()
+                wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                wait_for(tuple(result for results in generated_results for i, j, result in results))
+                for results, expected in zip(generated_results, references):
+                    expected = expected.reshape(1, 10)
+                    for i, j, result in results:
+                        if not np.array_equal(result.array, expected[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                            raise ArithmeticError('Generated range lost exact index values')
+                if any(result.ready for results in consumer_results for i, j, result in results):
+                    raise ArithmeticError('Range consumer read an unpublished input')
+                values = tuple((np.arange(10).reshape(2, 5) + generation).astype(tensor.dtype) for tensor in storage)
+                expected = tuple(reference + value + np.array(14, dtype=value.dtype) for reference, value in zip(references, values))
+                for row in (generation, 1-generation):
+                    for tensor, value in zip(storage, values):
+                        for (i, j), ref in tensor.blocks.items():
+                            if i == row:
+                                column = j * tensor.block_shape[1]
+                                with program.write(ref) as destination:
+                                    destination[...] = value[i:i+1, column:column+ref.shape[1]]
+                    wait_for(tuple(result for results in consumer_results for i, j, result in results if i == row))
+                    for results, reference in zip(consumer_results, expected):
+                        for i, j, result in results:
+                            if i == row:
+                                if not np.array_equal(result.array, reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                                    raise ArithmeticError('Range consumer differs after symbolic dimension composition')
+                            elif row == generation and result.ready:
+                                raise ArithmeticError('Range consumer lost independent row progress')
+                    print(json.dumps(dict(event='xonotic_range_early' if row == generation else 'xonotic_range_complete',
+                        generation=generation, published_row=row, elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        output=[[(i, j, result.array.tolist()) for i, j, result in results if i == row] for results in consumer_results])), flush=True)
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
