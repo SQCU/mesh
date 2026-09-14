@@ -251,6 +251,7 @@ def main():
         xonotic_integer_dots = []
         xonotic_ordering = []
         xonotic_composed_indexed = []
+        xonotic_indexed_context = None
         scatter_bases = {}
         xonotic_take_gradient = None
         xonotic_alias = None
@@ -680,6 +681,15 @@ def main():
             mean_result = program.export(lowered[integer_mean.index][0, 0])
             xonotic_ranges = range_storage, observations, references, empty_results, mean_result
             # design/algorithm-sources.md#composable-indexed-contractions
+            context_left, context_right = kernels.arguments(2)
+            context_inner = kernels.arange(2)
+            context_sum = (context_left.reshape((1, 2)).at(0, context_inner) *
+                           context_right.reshape((2, 1)).at(context_inner, 0)).sum()
+            context_outputs = program.kernel_call(kernels.expression(context_sum, context_sum+0, context_sum.astype(np.int64)),
+                grid=(1,), in_specs=(BlockSpec(None),)*2, out_specs=(BlockSpec((1, 1), lambda i: (0, 0)),)*3,
+                out_shape=(ShapeDtypeStruct((1, 1), np.int64),)*3, peer=0)(
+                    weight(np.array([[.75, .75]], dtype=np.float32)), weight(np.array([[1], [1]], dtype=np.float32)))
+            xonotic_indexed_context = tuple(program.export(tensor[0, 0]) for tensor in context_outputs)
             for dynamic, weight_dtype in ((True, np.float32), (False, np.float32), (True, np.float16)):
                 source = program.tensor((2, 5), (1, 3), dtype=np.float32)
                 weights = program.tensor((10 if dynamic else 5, 7), (2, 3), dtype=weight_dtype)
@@ -1513,6 +1523,14 @@ def main():
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
+        if xonotic_indexed_context is not None:
+            wait_for(xonotic_indexed_context)
+            actual = tuple(result.array.item() for result in xonotic_indexed_context)
+            if actual != (0, 0, 1) or any(result.array.dtype != np.dtype('int64') for result in xonotic_indexed_context):
+                raise ArithmeticError('Indexed reduction lost implicit accumulator or explicit cast semantics')
+            print(json.dumps(dict(event='composed_indexed_dtype_context', output=actual)), flush=True)
+            for result in xonotic_indexed_context:
+                result.consume()
         for dynamic, weight_dtype, source, selected, bias, observations, first_function, last_function, generations in xonotic_composed_indexed:
             contractions, epilogues = observations
             print(json.dumps(dict(event='composed_indexed_setup', dynamic=dynamic, weight_dtype=weight_dtype,
