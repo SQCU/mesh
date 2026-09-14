@@ -75,3 +75,40 @@ Native function, reader, route and transfer trace reconstruction is removed.
 The private lowering boundary retains the function count needed to attach indexed
 operands. Numerical callers receive tensor references and output observations;
 page maps and row-function layouts remain inside canonical mesh.
+
+## A composed producer and consumer
+
+[The executable chain](../examples/streaming-chain.py) uses this interface for
+
+    U = X W_up
+    H = U / (1 + exp(-U))
+    Y = H W_down
+
+The producer owns U and H. Each completed H region is transferred into the
+consumer's configured tensor, where the second contraction consumes it as an
+independent K contribution. Completed Y regions return to the producer. All
+calls and transfer edges are bound before `realize()`. Intermediate numerical
+work has no caller launch loop, completion tokens or transport waits.
+
+The configured tile rows, K and columns determine the publication and arithmetic
+regions. The first contraction can compute available K contributions before the
+rest of X arrives. Swish reads completed U values; it does not operate on partial
+sums. The second contraction starts contributions for available H regions before
+other H regions arrive. Each output region finishes when its own required terms
+exist, independently of other output rows.
+
+Both participants use the same input and weight files and placement arguments;
+`--region` chooses each participant's configured local mesh region:
+
+```sh
+python examples/streaming-chain.py input.npy up.npy down.npy \
+  --producer 0 --consumer 1 --tile-rows 16 --tile-k 16 --tile-columns 16
+```
+
+`input.npy` has shape (rows, inner), `up.npy` has shape (inner, hidden), and
+`down.npy` has shape (hidden, columns). Their numerical dtype and geometry are
+supplied configuration. The producer prints returned region coordinates and
+values as they become available. The consumer remains attached until terminated.
+The file supply and terminal output are application I/O, outside the numerical
+functions. This is operation-chain use, with no reference evaluator, assertions,
+performance target or acceptance procedure.

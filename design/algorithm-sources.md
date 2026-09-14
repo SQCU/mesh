@@ -173,6 +173,14 @@ The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/de
 - [software-pipelining derivation](https://docs.jax.dev/en/latest/pallas/pipelining.html)
 - [collective matmul example](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
 
+`examples/streaming-chain.py` composes the existing linear kernel calls as
+X W_up → swish → peer transfer → H W_down → return transfer. The JAX authors'
+Pallas matrix-multiplication and collective-matmul examples above supply the
+block-indexed composition and forwarding pattern. Dongarra et al.'s Level 3
+BLAS supplies the local contractions. This caller binds the chain once; native
+presence drives its numerical stages. File input initializes canonical operands;
+terminal output observation does not schedule any intermediate computation.
+
 ## Region expression fusion
 
 - [Triton: an intermediate language and compiler for tiled neural

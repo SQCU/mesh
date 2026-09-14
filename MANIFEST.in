@@ -2,3 +2,4 @@ include rdma/Makefile
 include rdma/*.h rdma/*.c rdma/*.m rdma/module.modulemap
 include design/indexed-library.md design/algorithm-sources.md
 include design/async-collectives.md design/streaming-algebra.md
+include examples/streaming-chain.py
