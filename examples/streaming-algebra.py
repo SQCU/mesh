@@ -350,10 +350,12 @@ def main():
             take_results = tuple(program.export(ref) for _, ref in sorted(lowered[transformed.index].blocks.items()))
             generations = []
             for generation in range(2):
-                index_values = np.array([1, -1, 1, -1] if not generation else [-2, 0, -2, 0], dtype=np.int64).reshape(2, 2, 1)
+                index_values = np.array([1, -1, 1, -1] if not generation else [-2, -5, 4, 0], dtype=np.int64).reshape(2, 2, 1)
                 cotangent_values = np.arange(1 + generation, 5 + generation, dtype=np.float32).reshape(2, 2, 1)
                 expected = np.zeros((2, 4), dtype=np.float64)
-                np.add.at(expected, (np.array([0, 1, 0, 1]), index_values.reshape(-1) % 4), cotangent_values.reshape(-1))
+                normalized = np.where(index_values.reshape(-1) < 0, index_values.reshape(-1) + 4, index_values.reshape(-1))
+                valid = (normalized >= 0) & (normalized < 4)
+                np.add.at(expected, (np.array([0, 1, 0, 1])[valid], normalized[valid]), cotangent_values.reshape(-1)[valid])
                 generations.append((index_values, cotangent_values, expected * 2 + 1))
             xonotic_take_gradient = (take_indices, take_cotangents, take_results, generations)
         invocations = []
