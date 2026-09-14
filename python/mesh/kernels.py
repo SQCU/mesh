@@ -1553,7 +1553,9 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         target = output_spec.resolve(coordinate)
         index = tuple(output_spec.index_map(*coordinate))
         row, column = (i * block for i, block in zip(index, output_spec.block_shape))
-        stripes.setdefault((column, target.shape[1]), []).append((row, target))
+        for first, rows, start, columns in _source_expression_regions(program, target):
+            region = target.slice(first, start, rows, columns)
+            stripes.setdefault((column + start, columns), []).append((row + first, region))
     directories = {}
     for (column, width), regions in stripes.items():
         regions.sort(key=lambda region: region[0])

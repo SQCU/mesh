@@ -1800,6 +1800,29 @@ stripe has one destination owner; overlapping output ownership is not inferred
 from nominal tile sizes. This specialization does not claim unique ownership for
 arbitrary fanout. Routing is numerical work over canonical operands.
 
+Output ownership is configured from `_source_expression_regions` before the
+stripe directories are constructed. Each publication rectangle becomes a Ref
+slice of the original output, with its global row and feature origins preserved.
+Its owner has one attached numerical function, one corresponding initial-value
+slice, and the candidate slice for that feature interval. This removes the former
+caller-block ownership boundary: a delayed candidate assigned to another output
+rectangle no longer appears in this consumer's reverse-directory interval.
+
+This is a setup transformation, not an invocation-time split. The existing route
+reader survey/bind gives each feature-domain occurrence its own source obligation,
+including when feature slices share a physical page. Retirement therefore cannot
+release another domain's outstanding read. The finish kernel still indexes its
+local Ref and sums candidates for its own global row. No extra operand allocation,
+copy, scheduler, or route protocol is introduced. Domain metadata and existing
+per-consumer records grow with the realized publication rectangles.
+
+Source review follows the slices through owner generation, offset generation,
+route attachment, candidate readiness, and reader retirement. Compilation is the
+verification for this change; numerical execution is not performed. Global route
+directory production, waiting for all contributions within one output rectangle,
+and rectangle coarsening for nondivisible layouts remain unresolved streaming
+limitations; this change does not claim full asynchronous reduction.
+
 `_routing_domain` binds each candidate once and retains its address and actual
 strides in a shared table. Each numerical consumer uses its directory interval
 and the same table, rather than binding every possible candidate separately.
