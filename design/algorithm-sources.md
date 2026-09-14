@@ -2148,7 +2148,8 @@ as a numerical update operand remains subject to the existing update dtype
 contract. This distinction is realized during setup.
 
 Only masks composed entirely from declared constants and static coordinates stay
-in routing, where early elimination can avoid allocating active value work. An
+in routing, where early elimination avoids issuing numerical partials for
+eliminated segments. Worst-case partial capacity is still allocated at setup. An
 empty routing domain can finish without runtime masks or values. In contrast,
 valid destination indices with unknown runtime masks do not establish an empty
 domain: their affected destinations must await the relevant mask regions.
