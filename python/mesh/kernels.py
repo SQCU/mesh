@@ -695,14 +695,11 @@ def _lower_dot(program, expression, grid, input_specs, output_spec):
     from ._native import View
     if any(value.operation != 'input' for value in expression.operands):
         raise ValueError('Contraction operands require logical input references')
-    left, right = (input_specs[value.value]._tensor for value in expression.operands)
-    if left.shape[1] != right.shape[0] or output_spec._tensor.shape != (left.shape[0], right.shape[1]):
-        raise ValueError('Contraction dimensions differ')
-    inner = left.shape[1]
-    tile = min(expression.value, inner)
-    for boundary in (left.block_shape[1] if left.grid[1] > 1 else 0,
-                     right.block_shape[0] if right.grid[0] > 1 else 0):
-        tile = gcd(tile, boundary)
+    specs = tuple(input_specs[value.value] for value in expression.operands)
+    if all(spec.block_shape is None for spec in specs):
+        left, right = (spec._tensor for spec in specs)
+        if output_spec._tensor.shape != (left.shape[0], right.shape[1]):
+            raise ValueError('Contraction output shape differs from its logical operands')
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def temporary(shape):
@@ -716,12 +713,21 @@ def _lower_dot(program, expression, grid, input_specs, output_spec):
     for coordinate in itertools.product(*(range(length) for length in grid)):
         target = output_spec.resolve(coordinate)
         row, column = (index * block for index, block in zip(output_spec.index_map(*coordinate), output_spec.block_shape))
+        left, right = (spec.resolve(coordinate) for spec in specs)
+        inner = left.shape[1]
+        if inner != right.shape[0] or (specs[0].block_shape is not None and left.shape[0] != target.shape[0]) or (specs[1].block_shape is not None and right.shape[1] != target.shape[1]):
+            raise ValueError('Mapped contraction dimensions differ')
+        tile = min(expression.value, inner)
+        for spec, operand, axis in zip(specs, (left, right), (1, 0)):
+            if spec.block_shape is None and operand.grid[axis] > 1:
+                tile = gcd(tile, operand.block_shape[axis])
         parts = []
         for start in range(0, inner, tile):
             length = min(tile, inner - start)
             destination = target if tile == inner and target.dtype == np.dtype('float32') else temporary(target.shape)
-            bind(matmul, (left.region(row, start, target.shape[0], length),
-                          right.region(start, column, length, target.shape[1])), destination)
+            left_panel = left.region(row, start, target.shape[0], length) if specs[0].block_shape is None else left.slice(0, start, target.shape[0], length)
+            right_panel = right.region(start, column, length, target.shape[1]) if specs[1].block_shape is None else right.slice(start, 0, length, target.shape[1])
+            bind(matmul, (left_panel, right_panel), destination)
             parts.append(destination)
         while len(parts) > 1:
             reduced = []

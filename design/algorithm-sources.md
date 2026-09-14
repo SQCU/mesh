@@ -1305,3 +1305,20 @@ before realization. This source change preserves the existing FP32 K-panel and
 cast behavior; Python compilation is complete, while the existing gold workflow
 supplies operational CPU/Metal/Core ML validation. Dot epilogue fusion and scratch
 lifetime packing remain distinct lowering work.
+
+### Mapped and whole-reference dot operands
+
+`_lower_dot` resolves each non-None input BlockSpec at every configured grid
+coordinate. Its local M/K/N dimensions, transposed strides and offset are the
+actual operand, not a hint discarded in favor of the containing Tensor. K
+panels slice that resolved Ref. A None BlockSpec retains the whole logical
+operand: its outer M/N region follows the output map, and its K panels respect
+its canonical backing boundaries. Both forms can be mixed without copying.
+
+Mapped operand outer dimensions must equal that output region's dimensions,
+and the two actual K dimensions must match. The lowering does not infer an
+unrequested K offset for a whole operand from another operand's mapped view.
+For example, a mapped M×K row tile with a whole K×N weight tensor preserves the
+row map and selects the output's N region from the weights. Two mapped refs
+can independently permute input row and column tiles while writing the normal
+output grid. All forms reuse the same FP32 native panel/reduction bindings.
