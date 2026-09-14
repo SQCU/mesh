@@ -3809,11 +3809,26 @@ index and count identify a setup-owned vector of return maps. Python retains
 those indices and consumes only those reader memberships. The returned array is
 the original strided view; no operand staging or numerical copy is introduced.
 
-`Ref.present` likewise uses the actual view. `mesh_algebra_present` reuses the
-dependency address walk in read-only mode: it observes PRESENT on the touched
-page ranges without building temporary map arrays or allocating during polling.
-These calling-context observations do not issue numerical functions and do not
-block publishers. The old extent-only presence and return APIs are removed.
+`Ref.present` likewise uses the actual view. Reference construction calls
+`mesh_algebra_observe` during setup to retain normalized dependency page maps in
+the program's observation vector. It stores the returned first index and count.
+`mesh_algebra_present` consumes those indices and reads PRESENT stamps; it no
+longer validates a tensor view or reconstructs coverage from dtype, shape, offset,
+or strides during polling. Reference construction, including slicing and
+transpose, belongs before realization. The dependency address walker now has
+only its setup role; its alternate runtime presence mode is removed.
+
+Observations do not register readers, issue numerical functions, or hold pages.
+They remain distinct from exports, which register consumption obligations.
+The observation vector contains only metadata and lives with the program; operand
+storage remains the original canonical pages. Normalization merges repeated and
+overlapping page ranges within a view. Each reference retains its own coverage,
+so setup metadata grows with configured references and touched page ranges.
+The old extent-only presence and return APIs are removed.
+
+This change was reviewed from source and compiled without numerical execution.
+It removes a specific runtime storage-inference path; it does not establish that
+all streaming or execution requirements are complete.
 
 For example, exporting the first published region of a larger generated CPU
 output now depends on that region's pages, not on the unpublished remainder of

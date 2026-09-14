@@ -25,6 +25,9 @@ class Ref:
     def __init__(self, program, view, dtype):
         self.program, self.view, self.dtype = program, view, np.dtype(dtype)
         self.shape = (view.rows, view.columns)
+        first, count = C.c_size_t(), C.c_size_t()
+        check(program.native.algebra_observe(program.handle, view, C.byref(first), C.byref(count)))
+        self._presence_first, self._presence_count = first.value, count.value
         self._writer = Writer()
         self._writer_error = program.native.algebra_writer(program.handle, view, C.byref(self._writer))
         address = program.native.tensor_data(view.tensor, view.extent)
@@ -78,7 +81,7 @@ class Ref:
     @property
     # design/algorithm-sources.md#view-scoped-consumption
     def present(self):
-        return bool(self.program.native.algebra_present(self.program.handle, self.view))
+        return bool(self.program.native.algebra_present(self.program.handle, self._presence_first, self._presence_count))
 
     # design/algorithm-sources.md#indexed-library-functions
     def on(self, peer):

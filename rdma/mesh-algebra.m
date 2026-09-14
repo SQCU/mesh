@@ -148,7 +148,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSMutableDictionary<NSValue *,MeshExtent *> *lookup;
 @property NSMutableData *tensors;
 @property NSMutableData *bindings;
-@property NSMutableData *returns;
+@property NSMutableData *returns,*observations;
 @property NSString *coremlPython,*coremlGenerator,*coremlCache;
 @property NSString *environment;
 @property NSMutableDictionary<NSString *,MLModel *> *models;
@@ -284,7 +284,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   a.executions=dispatch_group_create();
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
-  a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
+  a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new]; a.observations=[NSMutableData new];
   a.environment=environment_snapshot(a);
   return (__bridge_retained struct mesh_algebra *)a;
 }
@@ -426,7 +426,7 @@ static MPSMatrix *matrix(MeshExtent *e,struct mesh_view v,BOOL transpose) {
 }
 
 /* design/algorithm-sources.md#mandatory-partial-publication */
-static int dependencies(NSMutableData *maps,struct mesh_view v) {
+static void dependencies(NSMutableData *maps,struct mesh_view v) {
   struct mesh_extent *e=&v.tensor->extents[v.extent];
   size_t unit=v.tensor->context->M->pgsz/(scalar_bytes(e->shape.scalar));
   if(v.row_stride<v.column_stride)v=mesh_view_transpose(v);
@@ -436,12 +436,10 @@ static int dependencies(NSMutableData *maps,struct mesh_view v) {
       size_t last=v.column_stride<=unit?v.columns-1:c;
       size_t lo=(first+c*v.column_stride)/unit,hi=(first+last*v.column_stride)/unit;
       struct mesh_row_map m={.first=e->first+(uint32_t)lo,.count=(uint32_t)(hi-lo+1)};
-      if(maps)[maps appendBytes:&m length:sizeof m];
-      else if(!mesh_present(v.tensor->context,m,0))return 0;
+      [maps appendBytes:&m length:sizeof m];
       c=last+1;
     }
   }
-  return 1;
 }
 /* design/algorithm-sources.md#mandatory-partial-publication */
 static int compare_maps(const void *a,const void *b) {
@@ -1422,8 +1420,20 @@ int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_view source,uint32
 }
 
 /* design/algorithm-sources.md#view-scoped-consumption */
-int mesh_algebra_present(struct mesh_algebra *handle,struct mesh_view view) {
-  return valid_view(owner(handle),view) && dependencies(nil,view);
+int mesh_algebra_observe(struct mesh_algebra *handle,struct mesh_view view,size_t *first,size_t *count) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized)return EBUSY;
+  if(!first || !count || !valid_view(a,view))return EINVAL;
+  struct mesh_index_candidate coverage=indexed_maps(view);if(!coverage.maps)return ENOMEM;
+  *first=a.observations.length/sizeof(struct mesh_row_map);*count=coverage.count;
+  [a.observations appendBytes:coverage.maps length:coverage.count*sizeof *coverage.maps];free(coverage.maps);return 0;
+}
+/* design/algorithm-sources.md#view-scoped-consumption */
+int mesh_algebra_present(struct mesh_algebra *handle,size_t first,size_t count) {
+  MeshAlgebra *a=owner(handle);const struct mesh_row_map *maps=a.observations.bytes;
+  size_t length=a.observations.length/sizeof *maps;if(first>length || count>length-first)return 0;
+  for(size_t i=0;i<count;i++)if(!mesh_present(a->context,maps[first+i],0))return 0;
+  return 1;
 }
 /* design/algorithm-sources.md#view-scoped-consumption */
 int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_view view,size_t *first,size_t *count) {
