@@ -14,6 +14,14 @@
 
 static void mesh_execution_destroy(struct mesh_ctx *);
 static void mesh_index_reset(struct mesh_ctx *,uint32_t,uint32_t);
+static int mesh_execution_create(struct mesh_ctx *);
+static void mesh_reader_destroy(struct mesh_ctx *);
+static void mesh_reader_release(struct mesh_ctx *,uint32_t,uint32_t);
+static int mesh_reader_release_serial(struct mesh_ctx *,uint32_t,uint32_t);
+static void mesh_reader_reset(struct mesh_ctx *,uint32_t,uint32_t);
+static void mesh_reader_event(struct mesh_ctx *,uint32_t);
+static int mesh_map_ready(struct mesh_ctx *,struct mesh_row_map,uint32_t);
+static void mesh_map_read(struct mesh_ctx *,struct mesh_row_map,uint32_t);
 static int mesh_index_ready(struct mesh_ctx *,const struct mesh_indexed_read *);
 static void mesh_index_complete(struct mesh_ctx *,const struct mesh_indexed_read *);
 static struct mesh_ctx CTX0;
@@ -63,6 +71,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   mesh_execution_destroy(c);
+  mesh_reader_destroy(c);
   mesh_retire(c->M);
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
@@ -139,6 +148,7 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
 
 /* design/algorithm-sources.md#independent-configured-programs */
 void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  mesh_reader_release(c,first,count);
   mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
 }
 
@@ -158,17 +168,108 @@ void mesh_constant(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_notify(c->M,first,count);
 }
 
-static int mesh_survey(struct mesh_ctx *c,const uint64_t *used,uint32_t first,uint32_t count,uint64_t *busy){
-  if(!count || (uint64_t)first+count>mesh_rows(c->M)) return EINVAL;
-  for(uint32_t r=first;r<first+count;r++) if(!mesh_is(c->M,MESH_CONSTANT,r)) *busy|=used[r];
-  return 0;
-}
 static int mesh_free_plane(uint64_t busy,int *plane){
   for(int p=0;p<MESH_READERS;p++) if(!(busy&(UINT64_C(1)<<p))){ *plane=p; return 0; }
   return ENOSPC;
 }
-static void mesh_take(struct mesh_ctx *c,uint64_t *used,uint32_t first,uint32_t count,int plane){
-  for(uint32_t r=first;r<first+count;r++) if(!mesh_is(c->M,MESH_CONSTANT,r)) used[r]|=UINT64_C(1)<<plane;
+struct mesh_reader_pending {uint32_t *member;struct mesh_reader_pending *next;};
+struct mesh_reader_chunk {uint32_t first,count;struct mesh_reader_chunk *next;};
+struct mesh_reader_group {uint32_t plane,completed,pending_count;struct mesh_reader_pending *pending;struct mesh_reader_chunk *chunks;};
+struct mesh_reader_storage {uint32_t *members;size_t *offsets;struct mesh_reader_storage *next;};
+struct mesh_readers {struct mesh_reader_group **groups;struct mesh_reader_storage *storage;};
+/* design/algorithm-sources.md#canonical-reader-groups */
+static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,const uint32_t *fanout,struct mesh_row_map *map,uint32_t occurrences){
+  uint64_t busy=0;int grouped=0,plane=0;
+  for(uint32_t i=0;i<occurrences;i++){
+    struct mesh_row_range range=mesh_range(*map,i);
+    for(uint32_t row=range.first;row<range.first+range.count;row++)if(!mesh_is(c->M,MESH_CONSTANT,row)){busy|=used[row];grouped|=fanout[row]>MESH_READERS;}
+  }
+  if(!grouped && !mesh_free_plane(busy,&plane)){
+    map->plane=(uint32_t)plane;
+    for(uint32_t i=0;i<occurrences;i++){
+      struct mesh_row_range range=mesh_range(*map,i);
+      for(uint32_t row=range.first;row<range.first+range.count;row++)if(!mesh_is(c->M,MESH_CONSTANT,row))used[row]|=UINT64_C(1)<<plane;
+    }
+    return 0;
+  }
+  struct mesh_readers *readers=c->readers;
+  if(!readers){
+    readers=calloc(1,sizeof *readers);if(!readers)return ENOMEM;
+    readers->groups=calloc(mesh_rows(c->M),sizeof *readers->groups);
+    if(!readers->groups){free(readers);return ENOMEM;}c->readers=readers;
+  }
+  struct mesh_reader_storage *storage=calloc(1,sizeof *storage);if(!storage)return ENOMEM;
+  storage->offsets=calloc(occurrences,sizeof *storage->offsets);
+  if(!storage->offsets){free(storage);return ENOMEM;}
+  size_t total=0;
+  for(uint32_t i=0;i<occurrences;i++){
+    struct mesh_row_range range=mesh_range(*map,i);storage->offsets[i]=total;
+    if(!range.count || (uint64_t)range.first+range.count>mesh_rows(c->M)){free(storage->offsets);free(storage);return EINVAL;}
+    total+=range.count;
+  }
+  storage->members=malloc(total*sizeof *storage->members);
+  if(!storage->members){free(storage->offsets);free(storage);return ENOMEM;}
+  storage->next=readers->storage;readers->storage=storage;
+  map->members=storage->members;map->member_offsets=storage->offsets;map->plane=MESH_ABSENT;
+  for(uint32_t i=0;i<occurrences;i++){
+    struct mesh_row_range range=mesh_range(*map,i);
+    for(uint32_t j=0;j<range.count;j++){
+      uint32_t row=range.first+j,*member=&storage->members[storage->offsets[i]+j];*member=MESH_ABSENT;
+      if(mesh_is(c->M,MESH_CONSTANT,row))continue;
+      struct mesh_reader_group *group=readers->groups[row];
+      if(!group){
+        int plane,error=mesh_free_plane(used[row],&plane);if(error)return error;
+        group=calloc(1,sizeof *group);if(!group)return ENOMEM;group->plane=(uint32_t)plane;
+        group->completed=mesh_rows_alloc(c,1);if(group->completed==MESH_ABSENT){free(group);return errno;}
+        readers->groups[row]=group;used[row]|=UINT64_C(1)<<plane;
+      }
+      struct mesh_reader_pending *pending=malloc(sizeof *pending);if(!pending)return ENOMEM;
+      *pending=(struct mesh_reader_pending){.member=member,.next=group->pending};group->pending=pending;group->pending_count++;
+    }
+  }
+  return 0;
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static int mesh_reader_realize(struct mesh_ctx *c){
+  struct mesh_readers *readers=c->readers;if(!readers)return 0;
+  for(uint32_t row=0;row<mesh_rows(c->M);row++){
+    struct mesh_reader_group *group=readers->groups[row];if(!group || !group->pending_count)continue;
+    struct mesh_reader_chunk *chunk=malloc(sizeof *chunk);if(!chunk)return ENOMEM;
+    chunk->first=mesh_rows_alloc(c,group->pending_count);if(chunk->first==MESH_ABSENT){free(chunk);return errno;}
+    chunk->count=group->pending_count;chunk->next=group->chunks;group->chunks=chunk;
+    uint32_t index=chunk->first;
+    while(group->pending){struct mesh_reader_pending *pending=group->pending;*pending->member=index++;group->pending=pending->next;free(pending);}
+    group->pending_count=0;
+  }
+  return c->execution?0:mesh_execution_create(c);
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static void mesh_reader_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  if(mesh_reader_release_serial(c,first,count))return;
+  struct mesh_readers *readers=c->readers;if(!readers)return;
+  for(uint32_t row=first;row<first+count;row++){
+    struct mesh_reader_group *group=readers->groups[row];if(!group)continue;readers->groups[row]=NULL;
+    while(group->pending){struct mesh_reader_pending *next=group->pending->next;free(group->pending);group->pending=next;}
+    while(group->chunks){struct mesh_reader_chunk *next=group->chunks->next;mesh_rows_release(c,group->chunks->first,group->chunks->count);free(group->chunks);group->chunks=next;}
+    mesh_rows_release(c,group->completed,1);free(group);
+  }
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static void mesh_reader_destroy(struct mesh_ctx *c){
+  struct mesh_readers *readers=c->readers;if(!readers)return;
+  mesh_reader_release(c,0,mesh_rows(c->M));
+  while(readers->storage){struct mesh_reader_storage *next=readers->storage->next;free(readers->storage->members);free(readers->storage->offsets);free(readers->storage);readers->storage=next;}
+  free(readers->groups);free(readers);c->readers=NULL;
+}
+
+/* design/algorithm-sources.md#canonical-reader-groups */
+static int mesh_reader_survey(struct mesh_ctx *c,uint32_t *fanout,struct mesh_row_map map,uint32_t occurrences){
+  for(uint32_t i=0;i<occurrences;i++){
+    struct mesh_row_range range=mesh_range(map,i);
+    if(!range.count || (uint64_t)range.first+range.count>mesh_rows(c->M))return EINVAL;
+    for(uint32_t row=range.first;row<range.first+range.count;row++)if(!mesh_is(c->M,MESH_CONSTANT,row) && fanout[row]<=MESH_READERS)fanout[row]++;
+  }
+  return 0;
 }
 
 int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t count,
@@ -176,29 +277,33 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
   struct hdr *m=c->M;
   uint32_t rows=mesh_rows(m),block=m->block;
   uint64_t *used=malloc(rows*sizeof *used);
+  uint32_t *fanout=calloc(rows,sizeof *fanout);
   size_t *order=malloc((binding_count?binding_count:1)*sizeof *order);
-  if(!used || !order){ free(used); free(order); return ENOMEM; }
+  if(!used || !order || !fanout){ free(used); free(order);free(fanout); return ENOMEM; }
   memcpy(used,mesh_mask(m),rows*sizeof *used);
   int error=0;
+  for(uint32_t row=0;row<rows;row++)fanout[row]=(uint32_t)__builtin_popcountll(used[row]);
+  for(size_t i=0;i<count && !error;i++){
+    struct mesh_row_function *f=&functions[i];
+    if(!f->rows || (f->inputs && !f->input)){error=EINVAL;break;}
+    for(uint32_t j=0;j<f->inputs && !error;j++)error=mesh_reader_survey(c,fanout,f->input[j],f->rows);
+    for(struct mesh_indexed_read *d=f->indexed;d && !error;d=d->next){
+      for(uint32_t j=0;j<d->selectors && !error;j++)error=mesh_reader_survey(c,fanout,d->selector[j],1);
+      for(uint32_t j=0;j<d->candidates && !error;j++)for(uint32_t k=0;k<d->candidate[j].count && !error;k++)error=mesh_reader_survey(c,fanout,d->candidate[j].maps[k],1);
+    }
+  }
+  for(size_t i=0;i<return_count && !error;i++)error=mesh_reader_survey(c,fanout,returns[i],1);
+  for(size_t i=0;i<binding_count && !error;i++)if(!bindings[i].receive)error=mesh_reader_survey(c,fanout,(struct mesh_row_map){.first=bindings[i].first,.count=bindings[i].count},1);
   for(size_t i=0;i<count && !error;i++){
     struct mesh_row_function *f=&functions[i];
     if(!f->rows || !f->outputs || !f->output || (f->inputs && !f->input)){ error=EINVAL; break; }
-    for(uint32_t j=0;j<f->inputs && !error;j++){
-      uint64_t busy=0; int plane=0;
-      for(uint32_t k=0;k<f->rows && !error;k++){ struct mesh_row_range r=mesh_range(f->input[j],k); error=mesh_survey(c,used,r.first,r.count,&busy); }
-      if(!error) error=mesh_free_plane(busy,&plane);
-      for(uint32_t k=0;k<f->rows && !error;k++){ struct mesh_row_range r=mesh_range(f->input[j],k); mesh_take(c,used,r.first,r.count,plane); }
-      f->input[j].plane=(uint32_t)plane;
-    }
+    for(uint32_t j=0;j<f->inputs && !error;j++)error=mesh_reader_bind(c,used,fanout,&f->input[j],f->rows);
     for(struct mesh_indexed_read *d=f->indexed;d && !error;d=d->next){
       for(uint32_t j=0;j<d->selectors;j++)for(uint32_t r=d->selector[j].first;r<d->selector[j].first+d->selector[j].count;r++)if(mesh_is(m,MESH_CONSTANT,r))error=EINVAL;
       for(uint32_t k=0;k<=d->candidates && !error;k++){
         struct mesh_row_map *maps=k==d->candidates?d->selector:d->candidate[k].maps;
         uint32_t n=k==d->candidates?d->selectors:d->candidate[k].count;
-        uint64_t busy=0;int plane=0;
-        for(uint32_t j=0;j<n && !error;j++)error=mesh_survey(c,used,maps[j].first,maps[j].count,&busy);
-        if(!error)error=mesh_free_plane(busy,&plane);
-        for(uint32_t j=0;j<n && !error;j++){mesh_take(c,used,maps[j].first,maps[j].count,plane);maps[j].plane=(uint32_t)plane;}
+        for(uint32_t j=0;j<n && !error;j++)error=mesh_reader_bind(c,used,fanout,&maps[j],1);
       }
     }
     for(uint32_t j=0;j<f->outputs && !error;j++) for(uint32_t k=0;k<f->rows && !error;k++){
@@ -207,14 +312,8 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       for(uint32_t x=0;x<r.count;x++) if(mesh_is(m,MESH_CONSTANT,r.first+x)) error=EINVAL;
     }
   }
-  for(size_t i=0;i<return_count && !error;i++){
-    uint64_t busy=0; int plane=0;
-    struct mesh_row_range r=mesh_range(returns[i],0);
-    error=mesh_survey(c,used,r.first,r.count,&busy);
-    if(!error) error=mesh_free_plane(busy,&plane);
-    if(!error) mesh_take(c,used,r.first,r.count,plane);
-    returns[i].plane=(uint32_t)plane;
-  }
+  for(size_t i=0;i<return_count && !error;i++)error=mesh_reader_bind(c,used,fanout,&returns[i],1);
+  if(!error)error=mesh_reader_realize(c);
   _Atomic uint32_t *table=mesh_page(m);
   for(size_t i=0;i<binding_count && !error;i++){
     struct mesh_row_binding *b=&bindings[i];
@@ -258,7 +357,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       }
     }
   }
-  free(order); free(used);
+  free(order); free(used);free(fanout);
   if(!error && binding_count)atomic_store_explicit(&m->configured,(uint32_t)getpid(),memory_order_release);
   return error;
 }
@@ -285,8 +384,7 @@ int mesh_present(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
 }
 
 int mesh_available(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
-  struct mesh_row_range r=mesh_range(map,index);
-  return mesh_ready(c->M,r.first,r.count,map.plane);
+  return mesh_map_ready(c,map,index);
 }
 
 static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
@@ -311,6 +409,7 @@ static void mesh_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct hdr *m=c->M;
   mesh_bits_clear(m,MESH_PRESENT,first,count);
   for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,first,count);
+  mesh_reader_reset(c,first,count);
   mesh_index_reset(c,first,count);
 }
 
@@ -326,8 +425,7 @@ int mesh_republish(struct mesh_ctx *c,uint32_t first,uint32_t count){
 static int mesh_issue_index(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t index){
   struct hdr *m=c->M;
   for(uint32_t j=0;j<f->inputs;j++){
-    struct mesh_row_range r=mesh_range(f->input[j],index);
-    if(!mesh_ready(m,r.first,r.count,f->input[j].plane))return 0;
+    if(!mesh_map_ready(c,f->input[j],index))return 0;
   }
   for(const struct mesh_indexed_read *d=f->indexed;d;d=d->next)if(!mesh_index_ready(c,d))return 0;
   for(uint32_t j=0;j<f->outputs;j++){
@@ -364,18 +462,61 @@ static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
   mesh_notify(m,first,count);
 }
 
+/* design/algorithm-sources.md#canonical-reader-groups */
+static int mesh_map_ready(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
+  struct mesh_row_range range=mesh_range(map,index);
+  if(!map.members)return mesh_ready(c->M,range.first,range.count,map.plane);
+  if(!mesh_bits_all(c->M,MESH_PRESENT,range.first,range.count))return 0;
+  const uint32_t *members=map.members+map.member_offsets[index];
+  struct mesh_readers *readers=c->readers;
+  for(uint32_t i=0;i<range.count;i++){
+    if(members[i]==MESH_ABSENT)continue;
+    struct mesh_reader_group *group=readers->groups[range.first+i];
+    if(mesh_is(c->M,MESH_PRESENT,group->completed) || mesh_is(c->M,MESH_PRESENT,members[i]))return 0;
+  }
+  return 1;
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static void mesh_map_read(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
+  struct mesh_row_range range=mesh_range(map,index);
+  if(!map.members){mesh_read(c->M,range.first,range.count,map.plane);return;}
+  const uint32_t *members=map.members+map.member_offsets[index];
+  for(uint32_t i=0;i<range.count;i++)if(members[i]!=MESH_ABSENT)mesh_bits_set(c->M,MESH_PRESENT,members[i],1);
+  mesh_notify(c->M,range.first,range.count);
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static void mesh_reader_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  struct mesh_readers *readers=c->readers;if(!readers)return;
+  for(uint32_t row=first;row<first+count;row++){
+    struct mesh_reader_group *group=readers->groups[row];if(!group)continue;
+    for(struct mesh_reader_chunk *chunk=group->chunks;chunk;chunk=chunk->next)mesh_bits_clear(c->M,MESH_PRESENT,chunk->first,chunk->count);
+    mesh_bits_clear(c->M,MESH_PRESENT,group->completed,1);
+  }
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static void mesh_reader_event(struct mesh_ctx *c,uint32_t row){
+  struct mesh_readers *readers=c->readers;if(!readers)return;
+  struct mesh_reader_group *group=readers->groups[row];if(!group || !mesh_is(c->M,MESH_PRESENT,row))return;
+  if(mesh_is(c->M,MESH_PRESENT,group->completed)){
+    if(!mesh_is(c->M,MESH_READ+group->plane,row))mesh_reader_reset(c,row,1);
+    return;
+  }
+  for(struct mesh_reader_chunk *chunk=group->chunks;chunk;chunk=chunk->next)if(!mesh_bits_all(c->M,MESH_PRESENT,chunk->first,chunk->count))return;
+  mesh_bits_set(c->M,MESH_PRESENT,group->completed,1);
+  mesh_read(c->M,row,1,group->plane);
+}
+
 void mesh_complete(struct mesh_ctx *c,const struct mesh_row_function *f,const uint32_t *indices,size_t count){
   for(size_t n=0;n<count;n++){
     uint32_t i=indices[n];
     for(const struct mesh_indexed_read *d=f->indexed;d;d=d->next)mesh_index_complete(c,d);
-    for(uint32_t j=0;j<f->inputs;j++){ struct mesh_row_range r=mesh_range(f->input[j],i); mesh_read(c->M,r.first,r.count,f->input[j].plane); }
+    for(uint32_t j=0;j<f->inputs;j++)mesh_map_read(c,f->input[j],i);
     for(uint32_t j=0;j<f->outputs;j++){ struct mesh_row_range r=mesh_range(f->output[j],i); mesh_publish(c->M,r.first,r.count); }
   }
 }
 
 void mesh_consume(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
-  struct mesh_row_range r=mesh_range(map,index);
-  mesh_read(c->M,r.first,r.count,map.plane);
+  mesh_map_read(c,map,index);
 }
 
 struct mesh_watch {
@@ -395,9 +536,14 @@ struct mesh_execution {
   struct mesh_watch *watches;
   int socket;
 };
+/* design/algorithm-sources.md#canonical-reader-groups */
+static int mesh_reader_release_serial(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  struct mesh_execution *e=c->execution;if(!e || !c->readers || dispatch_get_specific(e)==e)return 0;
+  dispatch_sync(e->queue,^{mesh_reader_release(c,first,count);});return 1;
+}
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static int mesh_index_active(struct mesh_ctx *c,const struct mesh_indexed_read *d){
-  for(uint32_t i=0;i<d->selectors;i++)if(!mesh_ready(c->M,d->selector[i].first,d->selector[i].count,d->selector[i].plane))return 0;
+  for(uint32_t i=0;i<d->selectors;i++)if(!mesh_map_ready(c,d->selector[i],0))return 0;
   return 1;
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
@@ -418,7 +564,7 @@ static void mesh_index_prepare(struct mesh_ctx *c,const struct mesh_indexed_read
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static void mesh_index_finish(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   if(!mesh_bits_all(c->M,MESH_PRESENT,d->retired,d->candidates))return;
-  for(uint32_t i=0;i<d->selectors;i++)mesh_read(c->M,d->selector[i].first,d->selector[i].count,d->selector[i].plane);
+  for(uint32_t i=0;i<d->selectors;i++)mesh_map_read(c,d->selector[i],0);
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static int mesh_index_retire(struct mesh_ctx *c,const struct mesh_indexed_read *d,uint32_t index){
@@ -426,7 +572,7 @@ static int mesh_index_retire(struct mesh_ctx *c,const struct mesh_indexed_read *
   uint64_t before=atomic_fetch_or_explicit(&mesh_plane(c->M,MESH_PRESENT)[word],bit,memory_order_acq_rel);
   if(before&bit)return 0;
   struct mesh_index_candidate candidate=d->candidate[index];
-  for(uint32_t j=0;j<candidate.count;j++)mesh_read(c->M,candidate.maps[j].first,candidate.maps[j].count,candidate.maps[j].plane);
+  for(uint32_t j=0;j<candidate.count;j++)mesh_map_read(c,candidate.maps[j],0);
   uint64_t mask=mesh_word_mask(d->retired,d->candidates,word);return ((before|bit)&mask)==mask;
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
@@ -439,7 +585,7 @@ static void mesh_index_event(struct mesh_ctx *c,const struct mesh_indexed_read *
     if(mesh_is(c->M,MESH_PRESENT,d->retired+i))continue;
     if(mesh_is(c->M,MESH_PRESENT,d->selected+i) && !mesh_is(c->M,MESH_PRESENT,d->completed))continue;
     struct mesh_index_candidate candidate=d->candidate[i];int present=1;
-    for(uint32_t j=0;j<candidate.count;j++)present&=mesh_ready(c->M,candidate.maps[j].first,candidate.maps[j].count,candidate.maps[j].plane);
+    for(uint32_t j=0;j<candidate.count;j++)present&=mesh_map_ready(c,candidate.maps[j],0);
     if(present)finish|=mesh_index_retire(c,d,i);
   }
   if(finish)mesh_index_finish(c,d);
@@ -453,7 +599,7 @@ static int mesh_index_ready(struct mesh_ctx *c,const struct mesh_indexed_read *d
     if(index==MESH_ABSENT)continue;
     if(index>=d->candidates)return 0;
     struct mesh_index_candidate candidate=d->candidate[index];
-    for(uint32_t k=0;k<candidate.count;k++)if(!mesh_ready(c->M,candidate.maps[k].first,candidate.maps[k].count,candidate.maps[k].plane))return 0;
+    for(uint32_t k=0;k<candidate.count;k++)if(!mesh_map_ready(c,candidate.maps[k],0))return 0;
   }
   return 1;
 }
@@ -504,6 +650,7 @@ static void mesh_events(struct mesh_execution *e){
   uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
   while(row!=MESH_ABSENT){
     uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
+    mesh_reader_event(e->context,row);
     for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
       if(edge->indexed){mesh_index_event(e->context,edge->indexed,edge->candidate);continue;}
       struct mesh_watch *watch=edge->watch;
@@ -529,6 +676,7 @@ static int mesh_execution_create(struct mesh_ctx *c){
   if(bind(e->socket,(struct sockaddr *)&address,sizeof address)){int error=errno;close(e->socket);free(e->readers);free(e);return error;}
   memcpy(c->M->event_path,address.sun_path,sizeof address.sun_path);
   e->queue=dispatch_queue_create("mesh.presence",DISPATCH_QUEUE_SERIAL);
+  dispatch_queue_set_specific(e->queue,e,e,NULL);
   e->source=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,(uintptr_t)e->socket,0,e->queue);
   dispatch_source_set_event_handler(e->source,^{mesh_events(e);});
   c->execution=e;dispatch_resume(e->source);return 0;
@@ -636,4 +784,18 @@ struct mesh_transfer_event mesh_transfer_trace(struct mesh_ctx *c,size_t index){
       .ready_ns=atomic_load(&t->ready_ns),.post_ns=atomic_load(&t->post_ns),.cq_ns=atomic_load(&t->cq_ns),.occurrences=atomic_load(&t->occurrences)};
   }
   return (struct mesh_transfer_event){0};
+}
+
+/* design/algorithm-sources.md#canonical-reader-groups */
+struct mesh_reader_event mesh_reader_trace(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index,uint32_t row){
+  struct mesh_row_range range=mesh_range(map,index);
+  if(row>=range.count)return (struct mesh_reader_event){.source=MESH_ABSENT,.member=MESH_ABSENT,.plane=MESH_ABSENT,.completed=MESH_ABSENT};
+  uint32_t source=range.first+row,member=map.members?map.members[map.member_offsets[index]+row]:MESH_ABSENT;
+  struct mesh_readers *readers=c->readers;
+  struct mesh_reader_group *group=member!=MESH_ABSENT && readers?readers->groups[source]:NULL;
+  uint32_t plane=group?group->plane:map.plane,flags=mesh_is(c->M,MESH_PRESENT,source)?1:0;
+  if(member!=MESH_ABSENT && mesh_is(c->M,MESH_PRESENT,member))flags|=2;
+  if(plane<MESH_READERS && mesh_is(c->M,MESH_READ+plane,source))flags|=group?4:6;
+  if(group && mesh_is(c->M,MESH_PRESENT,group->completed))flags|=8;
+  return (struct mesh_reader_event){.source=source,.member=member,.plane=plane,.completed=group?group->completed:MESH_ABSENT,.flags=flags};
 }

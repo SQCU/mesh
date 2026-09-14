@@ -1322,3 +1322,27 @@ For example, a mapped M×K row tile with a whole K×N weight tensor preserves th
 row map and selects the output's N region from the weights. Two mapped refs
 can independently permute input row and column tiles while writing the normal
 output grid. All forms reuse the same FP32 native panel/reduction bindings.
+
+## Canonical reader groups
+
+Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
+provides explicit operand matching and presence-bit storage. Mesh uses those
+mechanisms to represent each actual source-row/reader completion as a canonical
+logical result when direct READ planes cannot represent the configured fanout.
+This grouped ownership is a mesh realization choice, not a Monsoon API claim.
+
+Configuration surveys actual numerical/export readers and transport holds.
+`mesh_reader_bind` preserves direct reader planes where they fit; overflowing
+or uncolorable domains retain member identities and one shared source READ plane.
+`mesh_map_ready` checks a function's own member, and completion publishes that
+member. The existing metadata event owner AND-compares group results before
+releasing the source. No extra numerical function or per-reader dispatch is used.
+
+A group-completed result is published before the aggregate READ bit. It survives
+remote source reuse until the source's next notification resets member results;
+that distinguishes the new source value from the preceding completed group.
+Local producer preparation resets the same results directly. Export readiness and
+consume follow the same member contract. Hardware SEND readers retain their
+existing exact direct planes. [Shared routing ownership](shared-routing-ownership.md#implemented-reader-group-specialization)
+records source disposition, the fast-path boundary, lifetime ordering and remaining
+sparse-routing work.

@@ -1020,3 +1020,23 @@ struct mesh_indexed_event mesh_algebra_trace_indexed(struct mesh_algebra *handle
   }
   return (struct mesh_indexed_event){0};
 }
+
+/* design/algorithm-sources.md#canonical-reader-groups */
+struct mesh_reader_event mesh_algebra_trace_input_reader(struct mesh_algebra *handle,size_t index,size_t input,uint32_t row){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_reader_event){0};
+  MeshFunction *f=a.functions[index];if(input>=f->function.inputs)return (struct mesh_reader_event){0};
+  return mesh_reader_trace(a->context,f->function.input[input],f->occurrence,row);
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+struct mesh_reader_event mesh_algebra_trace_indexed_reader(struct mesh_algebra *handle,size_t index,size_t entry,uint32_t row){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_reader_event){0};
+  for(struct mesh_indexed_read *d=a.functions[index]->function.indexed;d;d=d->next){
+    for(uint32_t i=0;i<=d->candidates;i++){
+      const struct mesh_row_map *maps=i?d->candidate[i-1].maps:d->selector;
+      uint32_t count=i?d->candidate[i-1].count:d->selectors;
+      if(entry>=count){entry-=count;continue;}
+      return mesh_reader_trace(a->context,maps[entry],0,row);
+    }
+  }
+  return (struct mesh_reader_event){0};
+}

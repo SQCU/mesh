@@ -207,3 +207,61 @@ reader completion identities, and operand storage tied to live numerical extents
 rather than a dense destination/update rectangle. Those bounds and source
 invariants can be audited before running a workload. They do not establish
 latency, wire utilization or a no-regression claim without measurements.
+
+## Implemented reader-group specialization
+
+The native realization now surveys numerical inputs, selector/range lifetime
+readers, dynamic candidates, exports and outgoing transport obligations before
+assigning compute readers. A map retains the original direct-plane path when its
+projected source fanout fits MESH_READERS and a common free plane exists. Only
+maps touching overflowing rows or without an available common plane use groups.
+This is a setup specialization; no invocation chooses a backend or rebuilds
+ownership. A small existing gold graph therefore need not allocate group metadata.
+
+A grouped map retains member IDs and per-occurrence offsets. There is one member
+per actual source logical row, not one member for a whole multirow operand. Each
+source group owns one READ plane, a group-completed logical result, and contiguous
+member-result ranges from setup. Constants have absent member identities and
+retain constant-read behavior. Normal numerical readers, dynamic selector/range
+lifetime readers and export consumers all use the same map operations. Hardware
+SEND readers still use their existing explicit direct planes.
+
+Each function requires its own member unsatisfied, so releasing one consumer's
+output cannot reissue it while another source reader remains active. Completion
+sets the member results and notifies the source rows. The existing metadata owner
+releases a source only when all that source's group members are present. Normal
+selector numerical membership remains distinct from selector lifetime membership;
+empty selection cannot release selector storage before the numerical call ends.
+
+Local producer issue resets only the member results owned by its source rows.
+For a remote receive, the bridge resets the source's aggregate READ bit but has
+no process-local member list. The group-completed result retains the preceding
+completion: when the source publication arrives with this result present and its
+aggregate READ bit clear, the existing metadata owner clears the old members and
+then the group-completed result before firing new consumers. The group-completed
+result was published before the preceding aggregate READ, so independent source
+reuse cannot lose this distinction. Export polling returns unavailable during
+this pending metadata transition; it does not clear or guess group state itself.
+
+Group storage is configured once and reused. Source-row release removes its group
+and logical result ranges; teardown synchronizes with the existing metadata queue
+to avoid freeing an in-use group. Map member-index arrays remain owned by the
+attached context and are freed at detach. No allocation, teardown synchronization
+or numerical no-op is added to the invocation path.
+
+`mesh_reader_trace`, `mesh_algebra_trace_input_reader` and
+`mesh_algebra_trace_indexed_reader` expose exact source/member/group-completed rows
+and aggregate plane. Snapshot flags distinguish source presence, own membership
+completion, aggregate source READ and group-completed presence. Direct readers
+have absent member/group IDs. These are current identities and state, not timing
+reconstructions.
+
+The source ABI audit finds mesh_row_map/mesh_ctx consumers only in
+mesh-dataflow.c/.h and mesh-algebra.m/.h. Python holds their opaque context and uses
+RowRange rather than a ctypes mesh_row_map. Both native libraries require a
+coherent rebuild; shared-header layout is unchanged. Compilation passed. Runtime
+fanout/reuse and matched performance evidence remain necessary, particularly for
+new grouped domains. Shared sparse routing domains, compact binding tables,
+active-grid lowering and finer physical partial storage remain separate work;
+reader groups remove the 64-plane numerical ceiling but do not remove O(D*C)
+candidate metadata in the current scatter lowering.

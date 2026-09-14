@@ -61,6 +61,8 @@ struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *,size_t func
 struct mesh_row_range mesh_algebra_trace_output(struct mesh_algebra *,size_t function,size_t output);
 size_t mesh_algebra_trace_indexed_count(struct mesh_algebra *,size_t function);
 struct mesh_indexed_event mesh_algebra_trace_indexed(struct mesh_algebra *,size_t function,size_t entry);
+struct mesh_reader_event mesh_algebra_trace_input_reader(struct mesh_algebra *,size_t function,size_t input,uint32_t row);
+struct mesh_reader_event mesh_algebra_trace_indexed_reader(struct mesh_algebra *,size_t function,size_t entry,uint32_t row);
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *);
 
 #ifdef __cplusplus
