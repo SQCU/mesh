@@ -600,8 +600,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         numerical = value.dtype in ('float16', 'float32')
         matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
         shaped = all(local[v.index].shape == matrix_shapes[v.index] or
-            (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) or
-            local[v.index].grid == (1, 1) for v in values)
+            (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) for v in values)
         if numerical and operation == 'matmul' and len(shape) == 2 and all(len(shapes[v.index]) == 2 and local[v.index].shape == shapes[v.index] for v in values):
             left, right = (local[v.index] for v in values)
             left = left.T if attributes['transpose_left'] else left
