@@ -116,3 +116,24 @@ separately allocated simultaneous instances. This demonstrates source use of
 the simplification, not completion of the remaining receive/reuse refactor.
 The final consumer runs only on the root. The example therefore binds a root
 reduction directly; no completed result is sent back to an unused participant.
+
+## Build and execution record
+
+Mesh `f053612` built its native libraries and Python package on the M5 Max and
+M4 Pro. Both machines also built the existing engine library and `forward_graph`
+targets. Only existing deprecation/compiler warnings were emitted.
+
+The existing streaming chain ran on both participants with Metal, using Apple's
+MPS contraction path, the existing FP32 files in `/tmp/mesh-tp-consumer`,
+`--root 0 --peer 1 --split 256 --tile-rows 128 --tile-k 128 --tile-columns 256`,
+and two configured instances. The root returned 64 distinct output regions,
+32 for each instance, and exited successfully. The peer's example lifetime ended
+with ordinary SIGTERM and exited successfully. Both bridge processes remained up.
+No reference evaluator or timing threshold was added. This run exercises the
+root reduction chain; it does not claim execution coverage of every verb.
+
+Across all changed maintained source files, this commit adds 191 lines and
+removes 230: 39 net source lines removed while extending the collective surface.
+Documentation and repository instructions add 229 lines and remove 35 separately;
+no source comments were migrated into that count. This is not a claim that the
+earlier whole-implementation halving has been achieved.
