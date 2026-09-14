@@ -41,14 +41,6 @@ ulong coordinate(ulong index, device const View& view, uint axis) {
  template<typename T> void write_value(device const ulong* regions, device const Block* blocks, device const View& view, ulong index, T value) {
     *(device T*)page_address(regions, blocks, view, view.offset + index * sizeof(T)) = value;
 }
-uint4 philox(uint4 counter, uint2 key) {
-    for (uint round = 0; round < 10; ++round) {
-        ulong a = ulong(counter.x) * 0xD2511F53u, c = ulong(counter.z) * 0xCD9E8D57u;
-        counter = uint4(uint(c >> 32) ^ counter.y ^ key.x, uint(c), uint(a >> 32) ^ counter.w ^ key.y, uint(a));
-        key += uint2(0x9E3779B9u, 0xBB67AE85u);
-    }
-    return counter;
-}
 '''
 ARGUMENTS = '''device const ulong* regions [[buffer(0)]], device const View* v [[buffer(1)]],
     device const Block* blocks [[buffer(2)]],
@@ -78,15 +70,10 @@ def kernel(node):
         body.append(f'ulong at=coordinate(t,v[{source.index}],{axis}), stride=v[{source.index}].stride[{axis}]; ulong base=t-at*stride;')
         body.append(f'auto value={read(source)}; ulong rank=0; for(ulong i=0;i<v[{source.index}].shape[{axis}];++i) {{ auto other={read(source,"base+i*stride")}; rank+=(other<value || (other==value && i<at)); }}')
         body.append(write(output, 'at', 'base+rank*stride'))
-    elif op == 'random_normal':
-        key = values[0]
-        body.append(f'uint2 key=uint2({read(key,"0")},{read(key,"1")}); uint4 bits=philox(uint4(uint(t/2),uint((t/2)>>32),0,0),key);')
-        body.append('float radius=sqrt(-2.0f*log((float(bits.x>>9)+0.5f)*0x1p-23f)); float angle=6.283185307179586f*(float(bits.y>>9)*0x1p-23f);')
-        body.append(write(output, '(t&1)?radius*sin(angle):radius*cos(angle)'))
     elif op == 'matmul':
         body, mode = matmul_body(output, values, attrs), 'matmul'
     else:
-        raise ValueError(f'No retained generator, ordering or integer contraction for {op}')
+        raise ValueError(f'No retained ordering or integer contraction for {op}')
     return {'name': name, 'source': f'kernel void {name}({ARGUMENTS}) {{\n' + '\n'.join(body) + '\n}\n',
             'node': index, 'mode': mode, 'clear': clear, 'owner': owner,
             'arguments': list(dict.fromkeys(value.index for value in (*values, output)))}
@@ -552,6 +539,24 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tensor = replicas[key]
             local[operand.index] = tensor
         shape = shapes[value.index]
+        # ../../../design/algorithm-sources.md#counter-based-random-generation
+        if operation == 'random_normal':
+            key_size = math.prod(shapes[values[0].index])
+            if key_size < 2:
+                raise ValueError('Counter-based normal generation requires two key words')
+            if np.dtype(values[0].dtype).kind not in 'iu':
+                raise TypeError('Counter-based normal generation requires integer key words')
+            block = (min(tile_rows, storage_shape[0]), min(tile_columns, storage_shape[1]))
+            row, column = kernels.indices()
+            ordinal = (kernels.program_id(0) * block[0] + row) * storage_shape[1] + kernels.program_id(1) * block[1] + column
+            key, = kernels.arguments(1)
+            key = key.reshape((key_size,))
+            result = kernels.random_normal(key.at(0).astype('uint32'), key.at(1).astype('uint32'), ordinal)
+            tensors[value.index] = program.kernel_call(kernels.expression(result),
+                grid=tuple((size + tile - 1) // tile for size, tile in zip(storage_shape, block)),
+                in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(storage_shape, value.dtype), peer=peer)(local[values[0].index])
+            continue
         if operation in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
             tensors[value.index] = expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns)
             continue
