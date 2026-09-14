@@ -145,7 +145,7 @@ class ShapeDtypeStruct:
 @dataclass(frozen=True)
 class BlockSpec:
     block_shape: object
-    index_map: object
+    index_map: object = None
     _tensor: object = None
 
     # design/algorithm-sources.md#pallas-call-ergonomics
@@ -154,12 +154,14 @@ class BlockSpec:
 
     # design/algorithm-sources.md#pallas-call-ergonomics
     def resolve(self, coordinate):
+        if self._tensor is None:
+            raise ValueError('BlockSpec is bound by kernel_call')
+        if self.block_shape is None:
+            return self._tensor
         index = tuple(self.index_map(*coordinate))
         shape = tuple(self.block_shape)
         if len(shape) != 2 or len(index) != 2 or min(shape) <= 0:
             raise ValueError('BlockSpec requires two positive block dimensions and two indices')
-        if self._tensor is None:
-            raise ValueError('BlockSpec is bound by kernel_call')
         row, column = (i * b for i, b in zip(index, shape))
         return self._tensor.region(row, column,
             min(shape[0], self._tensor.shape[0] - row),
@@ -256,7 +258,7 @@ class Program:
             writes = tuple(spec.resolve(coordinate) for spec in outputs)
             from .kernels import _Operation, Metal, _ExpressionKernel
             if isinstance(kernel, _ExpressionKernel):
-                kernel.bind(self, reads, writes)
+                kernel.bind(self, reads, writes, coordinate)
                 continue
             if isinstance(kernel, Metal):
                 dispatches = (MetalDispatch * len(kernel.dispatches))(*(

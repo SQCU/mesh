@@ -1056,3 +1056,48 @@ that the shared FP16 backend could execute, because the custom emitter did not
 support their dtype. Setup now preserves backend choice and emits only code that
 will be used. This does not add unsupported half atomic kernels or claim that
 all remaining custom operations support half precision.
+
+## Dynamic indexed expression lowering
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+and [Grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+separate logical references, program indices, index maps and physical blocks.
+`BlockSpec(None)` retains a whole logical input Tensor's shape, grid, block
+shape and per-block views; explicit output BlockSpecs still determine independently
+publishable regions. `program_id(axis)` is resolved from the configured grid
+coordinate before code generation. It is not a runtime participant identifier.
+
+`_ExpressionKernel.bind` lowers each `.at` access on such an input to a setup-bound
+candidate address range and a numerical U32 selector. The selector computes the
+candidate ordinal from the same row/column/mask expressions used by the payload
+load; masked accesses write `MESH_ABSENT`. It consumes routing inputs, not the
+payload whose readiness it selects. Nested indexed addressing recursively lowers
+its own true dependencies. `accesses_for` retains conditional access paths,
+prunes paths subsumed by an earlier necessary access, and emits lazy conditional
+selector expressions. Reductions already emitted as eager reduction loops retain
+their actual unconditional dependencies. Multiple outputs remain separate native
+functions with their own selectors, so an unrelated operand of another output
+does not become a dependency.
+
+The native indexed attachment receives exact flattened source-input positions,
+not a guessed view set. This preserves an ordinary use of a buffer even when the
+same buffer is also a candidate for an indexed use. Selection and source-reader
+lifetime remain in canonical dataflow. Each logical table's candidates are ordered
+by retained block coordinates; this works for transposed logical grids without
+assuming dictionary insertion order equals physical index order.
+
+Generated payload code indexes the existing native buffer-address vector directly.
+It does not construct a second pointer vector on every invocation or copy table
+payloads. Uniform block strides are literal constants; ragged/transposed stride
+lookups are setup-constant global tables. The private `block_ordinal` operation
+uses nonnegative, valid logical indices and positive block dimensions. It is not
+a public floor-division operation. As with Pallas indexed loads, callers must
+supply valid coordinates or a mask; an invalid unmasked coordinate does not acquire
+valid semantics merely because its quotient names an existing last block.
+
+`embedding` now uses the same indexed expression with a logical whole-table input
+and a program-indexed global feature column. Row-partitioned tables no longer
+require a contiguous full-table region or whole-table arrival. Existing negative
+index normalization is retained. A selector and payload function are two native
+launches in this lowering; fusion of index production into a preceding producer
+is separate optimization work, not an unmeasured zero-overhead claim.

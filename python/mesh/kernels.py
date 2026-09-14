@@ -141,6 +141,11 @@ def indices():
     return _Expression('row'), _Expression('column')
 
 
+# design/algorithm-sources.md#dynamic-indexed-expression-lowering
+def program_id(axis):
+    return _Expression('program_id', value=axis)
+
+
 # design/algorithm-sources.md#indexed-expression-lowering
 def select(mask, yes, no):
     return _Expression('select', tuple(map(_literal, (mask, yes, no))))
@@ -161,9 +166,10 @@ class _ExpressionKernel:
     values: tuple
 
     # design/algorithm-sources.md#region-expression-fusion
-    def bind(self, program, inputs, outputs):
+    def bind(self, program, inputs, outputs, coordinate=()):
         from . import check
         from ._native import View
+        import ctypes as C
         if len(outputs) != len(self.values):
             raise ValueError('Each expression requires an output region')
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
@@ -174,20 +180,92 @@ class _ExpressionKernel:
             # design/algorithm-sources.md#indexed-expression-lowering
             def remap(node):
                 index = node.value
+                if node.operation == 'program_id':
+                    return _literal(coordinate[index])
                 if node.operation in ('input', 'load'):
                     index = used.setdefault(index, len(used))
                 return _Expression(node.operation, tuple(remap(child) for child in node.operands), index)
 
             expression = remap(value)
             reads = tuple(inputs[index] for index in used)
+            dynamic, accesses = {}, {}
+
+            # design/algorithm-sources.md#dynamic-indexed-expression-lowering
+            def accesses_for(node, path=()):
+                if node.operation == 'input' and hasattr(reads[node.value], 'blocks'):
+                    raise ValueError('Whole-tensor inputs require indexed loads')
+                if node.operation == 'select':
+                    condition, yes, no = node.operands
+                    accesses_for(condition, path)
+                    accesses_for(yes, path + ((condition, True),))
+                    accesses_for(no, path + ((condition, False),))
+                elif node.operation == 'load':
+                    row, column, mask, other = node.operands
+                    accesses_for(mask, path)
+                    selected_path = path + ((mask, True),)
+                    accesses_for(row, selected_path)
+                    accesses_for(column, selected_path)
+                    accesses_for(other, path + ((mask, False),))
+                    if hasattr(reads[node.value], 'blocks'):
+                        paths = accesses.setdefault(node, set())
+                        if not any(set(previous) <= set(selected_path) for previous in paths):
+                            paths.difference_update(previous for previous in tuple(paths) if set(selected_path) <= set(previous))
+                            paths.add(selected_path)
+                else:
+                    for child in node.operands:
+                        accesses_for(child, () if node.operation == 'sum' else path)
+
+            accesses_for(expression)
+            for node, paths in accesses.items():
+                table = reads[node.value]
+                row, column, mask, _ = node.operands
+                ordinal = _Expression('block_ordinal', (row, column), (*table.block_shape, table.grid[1]))
+                enabled = _literal(False)
+                for path in paths:
+                    condition = _literal(True)
+                    for predicate, polarity in path:
+                        condition = select(condition, predicate if polarity else predicate.equal(False), False)
+                    enabled = select(enabled, True, condition)
+                selector_value = select(enabled, ordinal, 0xffffffff)
+                selector_width = output.shape[1]
+
+                # design/algorithm-sources.md#dynamic-indexed-expression-lowering
+                def selector_shape(part):
+                    nonlocal selector_width
+                    if part.operation == 'input':
+                        selector_width = max(selector_width, reads[part.value].shape[1])
+                    for child in part.operands:
+                        selector_shape(child)
+
+                selector_shape(selector_value)
+                selected = program.tensor((output.shape[0], selector_width), dtype=np.uint32)[0, 0]
+                _ExpressionKernel((selector_value,)).bind(program, reads, (selected,))
+                dynamic[node] = (selected, node.value)
+
+            flattened = tuple(ref for source in reads for ref in
+                (tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
+            function = program.native.algebra_trace_count(program.handle)
             check(program.native.algebra_source(program.handle,
                 self.source(reads, output, False, expression).encode(),
                 self.source(reads, output, True, expression).encode(),
-                (View * len(reads))(*(ref.view for ref in reads)), len(reads), output.view))
+                (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view))
+            offsets = []
+            for source in reads:
+                offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
+                    len(source.blocks) if hasattr(source, 'blocks') else 1))
+            for selected, index in dynamic.values():
+                first, count = offsets[index]
+                check(program.native.algebra_indexed(program.handle, function, selected.view,
+                    (C.c_size_t * count)(*range(first, first + count)), count))
 
     # design/algorithm-sources.md#region-expression-fusion
     def source(self, inputs, output, metal, expression):
         widths, reductions = {}, []
+        physical, pointers = [], {}
+        for index, ref in enumerate(inputs):
+            refs = tuple(ref for _, ref in sorted(ref.blocks.items())) if hasattr(ref, 'blocks') else (ref,)
+            pointers[index] = tuple(range(len(physical), len(physical) + len(refs)))
+            physical.extend(refs)
 
         # design/algorithm-sources.md#region-expression-fusion
         def visit(node):
@@ -224,17 +302,27 @@ class _ExpressionKernel:
                 return '((long)r)' if metal else '((int64_t)r)'
             if node.operation == 'column':
                 return f'((long)({column}))' if metal else f'((int64_t)({column}))'
+            if node.operation == 'block_ordinal':
+                row, col = (emit(child, column) for child in node.operands)
+                rows, columns, grid_columns = node.value
+                return f'(({row})/{rows}*{grid_columns}+({col})/{columns})'
             if node.operation == 'load':
                 ref = inputs[node.value]
                 row, col, mask, other = (emit(child, column) for child in node.operands)
-                value = f'p{node.value}[({row})*{ref.view.row_stride}+({col})*{ref.view.column_stride}]'
+                if hasattr(ref, 'blocks'):
+                    block = f'(({row})/{ref.block_shape[0]}*{ref.grid[1]}+({col})/{ref.block_shape[1]})'
+                    scalar, strides = layouts[node.value]
+                    address = f'(({"device " if metal else ""}const {scalar} *)buffers[{pointers[node.value][0]}+{block}])'
+                    value = f'{address}[(({row})%{ref.block_shape[0]})*{strides[0]}+(({col})%{ref.block_shape[1]})*{strides[1]}]'.replace('CANDIDATE', block)
+                else:
+                    value = f'p{pointers[node.value][0]}[({row})*{ref.view.row_stride}+({col})*{ref.view.column_stride}]'
                 value = f'((float)({value}))' if ref.dtype.kind == 'f' else value
                 return f'(({mask})?({value}):({other}))'
             if node.operation == 'input':
                 ref = inputs[node.value]
                 row_stride = ref.view.row_stride if ref.shape[0] != 1 else 0
                 column_stride = ref.view.column_stride if ref.shape[1] != 1 else 0
-                value = f'p{node.value}[r*{row_stride}+({column})*{column_stride}]'
+                value = f'p{pointers[node.value][0]}[r*{row_stride}+({column})*{column_stride}]'
                 return f'((float)({value}))' if ref.dtype.kind == 'f' else value
             if node.operation == 'literal':
                 if isinstance(node.value, bool):
@@ -254,12 +342,33 @@ class _ExpressionKernel:
             return f'{node.operation}{"" if metal else "f"}({args[0]})'
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
+        layouts = {}
+        for index, ref in enumerate(inputs):
+            if not hasattr(ref, 'blocks'):
+                continue
+            refs = tuple(ref for _, ref in sorted(ref.blocks.items()))
+            scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float',
+                      'i4': 'int' if metal else 'int32_t', 'u4': 'uint' if metal else 'uint32_t',
+                      'i8': 'long' if metal else 'int64_t', 'u8': 'ulong' if metal else 'uint64_t',
+                      'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[ref.dtype.kind + str(ref.dtype.itemsize)]
+            strides = []
+            for name, attr in (('rs', 'row_stride'), ('cs', 'column_stride')):
+                values = tuple(getattr(r.view, attr) for r in refs)
+                if len(set(values)) == 1:
+                    strides.append(str(values[0]))
+                else:
+                    lines.append(f'{"constant ulong" if metal else "static const uint64_t"} {name}{index}[]={{'+','.join(map(str, values))+'};')
+                    strides.append(f'{name}{index}[CANDIDATE]')
+            layouts[index] = scalar, strides
         lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers) {')
-        for index, ref in enumerate((*inputs, output)):
+        candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') for pointer in pointers[index]}
+        for index, ref in enumerate((*physical, output)):
+            if index in candidates:
+                continue
             scalar = ({'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int' if metal else 'int32_t',
                        'u4': 'uint' if metal else 'uint32_t', 'i8': 'long' if metal else 'int64_t',
                        'u8': 'ulong' if metal else 'uint64_t', 'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[ref.dtype.kind + str(ref.dtype.itemsize)])
-            qualifier = ('device ' if metal else '') + ('const ' if index < len(inputs) else '')
+            qualifier = ('device ' if metal else '') + ('const ' if index < len(physical) else '')
             lines.append(f'{qualifier}{scalar} *p{index}=({qualifier}{scalar} *)buffers[{index}];')
         if not metal:
             lines.append(f'for(uint64_t r=0;r<{output.shape[0]};r++) {{')
@@ -270,6 +379,6 @@ class _ExpressionKernel:
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
             if metal:
                 lines.append(f'{name}=simd_sum({name});')
-        lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(inputs)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
+        lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')
         return '\n'.join(lines)

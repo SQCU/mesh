@@ -89,6 +89,7 @@ class Native:
             'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
                 C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View]),
+            'mesh_algebra_indexed': (C.c_int, [P, Z, View, C.POINTER(Z), Z]),
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
             'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, P, U, C.POINTER(Z)]),

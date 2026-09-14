@@ -124,9 +124,9 @@ def embedding(program, table, indices, *, tile_rows, tile_columns=128):
     table_value, selected = kernels.arguments(2)
     _, column = kernels.indices()
     selected = kernels.select(selected < 0, selected + table.shape[0], selected)
-    return program.kernel_call(kernels.expression(table_value.at(selected, column)),
+    return program.kernel_call(kernels.expression(table_value.at(selected, kernels.program_id(1) * nr + column)),
         grid=((rows + mr - 1) // mr, (width + nr - 1) // nr),
-        in_specs=(BlockSpec((table.shape[0], nr), lambda i, j: (0, j)),
+        in_specs=(BlockSpec(None),
                   BlockSpec((mr, 1), lambda i, j: (i, 0))),
         out_specs=BlockSpec((mr, nr), _block),
         out_shape=ShapeDtypeStruct((rows, width), table.dtype))(table, indices)
