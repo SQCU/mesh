@@ -762,3 +762,25 @@ integration was reviewed with the scatter agent; the bounded-loop and dependency
 requirements are recorded in `scatter-lowering.md`. That integration, broader
 rank/axis operations and derivatives, remaining caller migration, storage/launch
 optimization, collective placement and matched performance acceptance remain open.
+
+## Logical-rank pointwise caller migration
+
+`e61da95` routes supported Xonotic pointwise arithmetic, comparisons, casts,
+selection and unary expressions through shared lowering across logical ranks.
+Already-aligned matrix views retain their existing direct Ref bindings; other
+logical layouts use right-aligned broadcast coordinates over the original tensor
+pages. These operations no longer reach the custom whole-operand Metal emitter.
+`b8bdc6a` shares output coordinate construction with indexed callers. `d895f62`
+removes the assumption that a single backing block alone makes an arbitrary
+logical reshape suitable for direct matrix binding; those reshapes now use the
+same logical access path.
+
+The existing indexed example composes rank-three concatenation, broadcast
+multiplication and scalar addition. CPU and Metal float32 runs complete 2158
+submissions, observe the transformed early half with unrelated source/index
+regions absent, and complete both generations numerically. The paired Metal
+float16 gold workflow also passes; the new rank-three arithmetic remains float32
+on rank zero. The peer exits normally after SIGTERM. Compressed logs/traces and
+exact installed library/caller revisions are in `rank-pointwise-provenance.json`.
+No matched old-emitter timing baseline was collected, and these cases do not
+establish all-operator/rank coverage or a throughput improvement.

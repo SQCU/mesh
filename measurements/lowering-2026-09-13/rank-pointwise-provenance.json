@@ -1,0 +1,142 @@
+{
+  "runs": [
+    {
+      "prefix": "rank-pointwise-cpu",
+      "library_revision": "f361533",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "b8bdc6a",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "rank-pointwise-cpu.jsonl.gz",
+        "rank-pointwise-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.372542,
+        "invocations_per_second": 686.0997561601466,
+        "first_section_ms": 3.770083,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.014333333333333,
+          "sample_variance": 0.09557206472233352
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 2158,
+          "completed": 2158,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 2158
+        }
+      }
+    },
+    {
+      "prefix": "rank-pointwise-metal",
+      "library_revision": "f361533",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "d895f62",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "rank-pointwise-metal.jsonl.gz",
+        "rank-pointwise-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 14.777583,
+        "invocations_per_second": 203.01019456294037,
+        "first_section_ms": 12.345958,
+        "completion_ms": {
+          "count": 3,
+          "mean": 13.288819333333334,
+          "sample_variance": 1.6682480959213317
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 2158,
+          "completed": 2158,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.009617379,
+          "cpu_submitted": 0
+        }
+      }
+    },
+    {
+      "prefix": "rank-pointwise-paired-metal",
+      "library_revision": "f361533",
+      "peer_library_revision": "f361533",
+      "example_and_xonotic_revision": "d895f62",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "rank-pointwise-paired-metal.jsonl.gz",
+        "rank-pointwise-paired-metal-trace.json.gz",
+        "rank-pointwise-paired-metal-peer.jsonl.gz",
+        "rank-pointwise-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 15.19325,
+        "invocations_per_second": 197.45610715284747,
+        "first_section_ms": 10.850458,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.752763999999999,
+          "sample_variance": 0.16305788896299978
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 1473,
+          "completed": 1473,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.006734982,
+          "cpu_submitted": 0
+        }
+      }
+    }
+  ],
+  "scope": "Rank-three broadcast arithmetic is float32 on rank zero. Paired gold and fanout traverse RDMA. No matched old pointwise performance baseline or all-operator/rank coverage claim. Peer exits zero after SIGTERM."
+}
