@@ -464,13 +464,18 @@ def main():
             for generation in range(2):
                 rows_values = (np.arange(12, dtype=np.float32).reshape(4, 3) - 5 + generation) / 8
                 weight_values = (np.arange(45, dtype=np.float32).reshape(3, 3, 5) - 20 - generation) / 16
-                selected_values = np.array([generation, generation - 3, 2, generation], dtype=np.int64)
+                selected_values = np.array([3, generation - 3, 2, generation], dtype=np.int64)
+                rows_values[0, 0] = np.nan
                 cotangent_values = (np.arange(20, dtype=np.float32).reshape(4, 5) + 1 + generation) / 8
                 x, w, g = (value.astype(np.float64) for value in (rows_values, weight_values, cotangent_values))
-                projected = np.einsum('nd,ndh->nh', x, w[selected_values])
-                dx = np.einsum('nh,ndh->nd', g, w[selected_values])
+                normalized = np.where(selected_values < 0, selected_values + w.shape[0], selected_values)
+                valid = (normalized >= 0) & (normalized < w.shape[0])
+                selected_weights = np.zeros((len(x), *w.shape[1:]), dtype=np.float64)
+                selected_weights[valid] = w[normalized[valid]]
+                projected = np.einsum('nd,ndh->nh', x, selected_weights)
+                dx = np.einsum('nh,ndh->nd', g, selected_weights)
                 dw = np.zeros_like(w)
-                np.add.at(dw, selected_values, x[:, :, None] * g[:, None, :])
+                np.add.at(dw, normalized[valid], x[valid, :, None] * g[valid, None, :])
                 generations.append(((rows_values, weight_values.reshape(9, 5), selected_values.reshape(4, 1), cotangent_values),
                                     tuple(value * 2 + 1 for value in (projected, dx, dw.reshape(9, 5)))))
             xonotic_expert = expert_storage, observations, generations
@@ -1101,7 +1106,7 @@ def main():
                 for target, results in enumerate(observations):
                     for i, j, result in results:
                         if (i < 6 if target == 2 else i != 2) and not np.allclose(
-                                result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                                result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5, equal_nan=True):
                             raise ArithmeticError('Expert early consumer differs')
                 if any(result.ready for target, results in enumerate(observations) for i, j, result in results
                        if (i >= 6 if target == 2 else i == 2)):
@@ -1125,7 +1130,7 @@ def main():
                 if any(result.ready for i, j, result in observations[0] if i == 2):
                     raise ArithmeticError('Expert forward result ignored its remaining operand')
                 for i, j, result in observations[independent_target]:
-                    if not np.allclose(result.array, expected[independent_target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                    if not np.allclose(result.array, expected[independent_target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5, equal_nan=True):
                         raise ArithmeticError('Expert derivative retained an unused primal dependency')
                 print(json.dumps(dict(event='xonotic_expert_independent_derivative', generation=generation,
                     target='weights' if independent_target == 2 else 'rows', withheld_operand=pending_operand,
@@ -1139,7 +1144,7 @@ def main():
                 wait_for(tuple(result for results in observations for i, j, result in results))
                 for target, results in enumerate(observations):
                     for i, j, result in results:
-                        if not np.allclose(result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                        if not np.allclose(result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5, equal_nan=True):
                             raise ArithmeticError('Expert forward or derivative differs after reuse')
                 print(json.dumps(dict(event='xonotic_expert_complete', generation=generation,
                     elapsed_ms=(time.monotonic_ns()-started)/1e6,
