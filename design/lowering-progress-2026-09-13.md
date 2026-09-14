@@ -438,3 +438,56 @@ source and both participants where applicable. No matched throughput improvement
 is inferred from the submission reduction or these short timings. General rank,
 indexed/reduction composition, remaining derivatives and callers, storage/launch
 optimization, collective placement and full performance acceptance remain open.
+
+## Shared reductions and caller removal
+
+`70b6511` extends the existing region owner to row reductions and renames it
+`_ExpressionRegions`. A reduction demands the full resolved child feature domain,
+computes each available feature partial independently, combines actual siblings
+in a balanced tree, and caches the resulting row statistic across output tiles.
+A computed dot can consume that cached statistic directly. Square-and-sum is
+fused in each feature partial; there is no squared-tensor intermediate or
+whole-tensor prerequisite. Scalar/intrinsic-only expressions have scalar domains;
+indexed reduction domains must be supplied by explicit index-shaped operands.
+
+`82c1ab3` expresses RMSNorm as one shared expression with the original output
+cuts and dtype. `4841436` migrates the remaining Xonotic vector and matrix-row
+sum/mean callers and deletes `_row_reduce` and its unused row-map helper.
+Real means divide the FP32 sum before final conversion, eliminating intermediate
+half rounding/overflow. Integer means retain their typed sum boundary before
+integer division. These precision choices are documented in the canonical source
+record, rather than hidden in caller-specific partial constructors.
+
+`1aeb6cb` uses unsigned modular addition for integer-valued signed reduction
+accumulators and partial merges, restoring signed interpretation at use. The
+first Metal run then exposed an unsupported `simd_sum(ulong)` overload at
+compilation. `b844daf` uses three supported UInt32 SIMD sums with exact limb
+carry reconstruction; its modular arithmetic proof is in algorithm-sources.md.
+The floating path is unchanged. The compile-failure log is retained alongside
+the successful runs; no numerical fallback implements the correction.
+
+The existing workflow supplies two of three feature panels for one normalization
+row. A reduction consumer completes before the last panel arrives; afterward
+that row normalizes while two unrelated rows remain unpublished. Both repeated
+occurrences pass. The Xonotic graph now also requests matrix row means followed
+by a vector sum, observing the early row means before the unrelated source block
+arrives; the totals are 30 and 158. Integer cases preserve cancellation beyond
+2**53 and signed 64-bit wrap. The final paired case also exercises low/middle
+limb carries across SIMD lanes and overflow between separate feature partials,
+returning 65536, 4294967298, -9223372036854775808 and 9223372036854775807.
+
+Local CPU and Metal float32 workflows pass, including the 4097-update scatter
+case. Both report 2045 completed submissions. Paired CPU and Metal float16 runs
+report 1343 completed submissions on rank zero and gold maximum error
+0.001953125, with remote fanout reuse intact. The paired reduction observer joins
+canonical partial rows 516–523 to consumer function 79 in both occurrences.
+Nested/reduction/indexed side cases remain local to rank zero; paired gold and
+fanout exercise the actual link. Both peer workloads terminate normally.
+
+`reduction-provenance.json` and compressed `reduction-*` observations/traces in
+`measurements/lowering-2026-09-13` retain exact library/example revisions and
+both participants. Before-migration observations use a smaller example scope;
+added integer and Xonotic cases account for additional work, so total counts and
+short timings do not establish a throughput comparison. General logical rank,
+remaining indexed/derivative composition, physical storage/launch optimization,
+collective placement and matched performance acceptance remain unfinished.

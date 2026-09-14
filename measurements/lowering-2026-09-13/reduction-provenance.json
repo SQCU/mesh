@@ -1,0 +1,74 @@
+{
+  "before": {
+    "prefix": "reduction-before",
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "library_revision": "1448f0e",
+    "example_revision": "f9117c3",
+    "dtype": "float32",
+    "scatter_rows": 4097,
+    "scatter_tile": 2049,
+    "scatter_destinations": 17
+  },
+  "local_cpu": {
+    "prefix": "reduction-cpu",
+    "library_revision": "1aeb6cb",
+    "example_revision": "1aeb6cb",
+    "dtype": "float32",
+    "scatter_rows": 4097,
+    "scatter_tile": 2049,
+    "scatter_destinations": 17,
+    "integer_shape": [
+      4,
+      3
+    ],
+    "integer_block": [
+      1,
+      1
+    ]
+  },
+  "local_metal": {
+    "prefix": "reduction-final-metal",
+    "library_revision": "b844daf",
+    "example_revision": "b844daf",
+    "dtype": "float32",
+    "scatter_rows": 4097,
+    "scatter_tile": 2049,
+    "scatter_destinations": 17,
+    "integer_shape": [
+      4,
+      3
+    ],
+    "integer_block": [
+      1,
+      1
+    ]
+  },
+  "paired": {
+    "prefix": "reduction-paired",
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "library_revision": "b844daf",
+    "example_revision": "9ac8837",
+    "dtype": "float16",
+    "scatter_rows": 67,
+    "scatter_tile": 33,
+    "scatter_destinations": 17,
+    "integer_shape": [
+      4,
+      6
+    ],
+    "integer_block": [
+      1,
+      3
+    ],
+    "peer_termination": "SIGTERM, clean exit"
+  },
+  "runs": 3,
+  "xonotic": true,
+  "scope": "Shared reductions and indexed side cases execute on rank zero; gold and fanout use real RDMA in paired runs. Earlier and later example scopes differ; no matched performance claim."
+}
