@@ -8,8 +8,8 @@ struct mesh_row_range { uint32_t first,count; };
 struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; };
 struct mesh_index_candidate { struct mesh_row_map *maps; uint32_t count; size_t input; };
 struct mesh_indexed_read {
-  struct mesh_row_map *selector; uint32_t selectors;
-  const uint32_t *indices; size_t rows,columns,row_stride,column_stride;
+  struct mesh_row_map *selector; uint32_t selectors,vector_maps;
+  const uint32_t *indices,*bounds; size_t rows,columns,row_stride,column_stride,bounds_stride;
   struct mesh_index_candidate *candidate; uint32_t candidates,retired,selected,completed,mapped;
   struct mesh_indexed_read *next;
 };

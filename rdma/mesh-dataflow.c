@@ -401,10 +401,16 @@ static int mesh_index_active(struct mesh_ctx *c,const struct mesh_indexed_read *
   return 1;
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
+static int mesh_index_span(const struct mesh_indexed_read *d,size_t *first,size_t *end){
+  *first=d->bounds?d->bounds[0]:0;*end=d->bounds?d->bounds[d->bounds_stride]:d->rows*d->columns;
+  return *first<=*end && *end<=d->rows*d->columns;
+}
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static void mesh_index_prepare(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   if(mesh_is(c->M,MESH_PRESENT,d->mapped))return;
-  for(size_t r=0;r<d->rows;r++)for(size_t j=0;j<d->columns;j++){
-    uint32_t index=d->indices[r*d->row_stride+j*d->column_stride];
+  size_t first,end;if(!mesh_index_span(d,&first,&end))return;
+  for(size_t i=first;i<end;i++){
+    uint32_t index=d->indices[(i/d->columns)*d->row_stride+(i%d->columns)*d->column_stride];
     if(index<d->candidates)mesh_bits_set(c->M,MESH_PRESENT,d->selected+index,1);
   }
   mesh_bits_set(c->M,MESH_PRESENT,d->mapped,1);
@@ -427,6 +433,7 @@ static int mesh_index_retire(struct mesh_ctx *c,const struct mesh_indexed_read *
 static void mesh_index_event(struct mesh_ctx *c,const struct mesh_indexed_read *d,uint32_t index){
   if(!mesh_index_active(c,d))return;
   mesh_index_prepare(c,d);
+  if(!mesh_is(c->M,MESH_PRESENT,d->mapped))return;
   uint32_t first=index==MESH_ABSENT?0:index,end=index==MESH_ABSENT?d->candidates:index+1;int finish=0;
   for(uint32_t i=first;i<end;i++){
     if(mesh_is(c->M,MESH_PRESENT,d->retired+i))continue;
@@ -440,8 +447,9 @@ static void mesh_index_event(struct mesh_ctx *c,const struct mesh_indexed_read *
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static int mesh_index_ready(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   for(uint32_t i=0;i<d->selectors;i++)if(!mesh_bits_all(c->M,MESH_PRESENT,d->selector[i].first,d->selector[i].count))return 0;
-  for(size_t r=0;r<d->rows;r++)for(size_t j=0;j<d->columns;j++){
-    uint32_t index=d->indices[r*d->row_stride+j*d->column_stride];
+  size_t first,end;if(!mesh_index_span(d,&first,&end))return 0;
+  for(size_t i=first;i<end;i++){
+    uint32_t index=d->indices[(i/d->columns)*d->row_stride+(i%d->columns)*d->column_stride];
     if(index==MESH_ABSENT)continue;
     if(index>=d->candidates)return 0;
     struct mesh_index_candidate candidate=d->candidate[index];

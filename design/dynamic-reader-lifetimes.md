@@ -232,3 +232,30 @@ These are current state reads, not an atomic historical snapshot or a reconstruc
 of previous occurrences. Reading after numerical output completion can precede
 late-source retirement; the retained identities make that distinction observable.
 No numerical launch, clock comparison or source-pointer inference creates them.
+
+### Bounded selector subranges
+
+`mesh_algebra_indexed_range` adds a produced U32 `(begin, end)` view to the same
+binding. The numerical consumer uses only the flattened selector ordinals in
+`[begin, end)`, respecting the retained selector and range physical strides.
+Both bounds must describe a subrange of the configured selector capacity.
+This permits a single compact grouped-ordinal vector with several destination
+ranges; it does not allocate a full ordinal vector for every destination.
+
+Original selector maps and range maps remain separately identified in each
+retained descriptor. Both are ordinary numerical prerequisites and both have
+that descriptor's lifetime reader. Each candidate still owns its own retirement
+identity. A shared selector cannot be overwritten until every attached descriptor
+has discharged its readers. One destination's range may advance independently;
+its old selector reader remains satisfied, so the new range cannot accidentally
+pair with the old selector occurrence. Selector/range producer preparation resets
+the descriptor's owned membership, retirement and completion results. A later
+shared-selector reset is safe because no new descriptor can be active while its
+old shared-selector lifetime reader remains satisfied.
+
+Trace role 2 denotes range maps, alongside role 0 for selector maps and role 1 for
+candidate maps. These are actual retained map identities, not inferred contiguous
+ranges. The whole-selector API delegates to the same implementation with no bounds
+view. Both variants require local selector/range producers and permit remote
+original index/source operands. No bridge layout change or numerical dispatch is
+introduced by the subrange metadata.
