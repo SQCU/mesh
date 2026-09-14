@@ -2865,3 +2865,58 @@ identities and repeated independent consumer progress. General empty bindings fo
 externally supplied native/Metal kernels and empty indexed-add routing are not
 established by this slice. No matched throughput or universal Pallas performance
 claim follows from source migration alone.
+
+## Counter-based random generation
+
+Salmon, Moraes, Dror and Shaw's
+[Parallel Random Numbers: As Easy as 1, 2, 3](https://www.thesalmons.org/john/random123/papers/random123sc11.pdf)
+(SC11) supplies the keyed counter transformation. A value depends on its explicit
+key and counter, not on the completion of earlier generated values. Mesh uses
+Philox4x32 with ten rounds, two 32-bit key words and four 32-bit counter words.
+The [Random123 reference](https://github.com/DEShawResearch/random123/blob/main/include/Random123/philox.h)
+and [published vectors](https://github.com/DEShawResearch/random123/blob/main/tests/kat_vectors)
+identify the constants, word ordering and exact integer results. Integer
+multiplication uses 64-bit products; round words and key increments wrap to
+32 bits. No mutable PRNG state or host-generated operand vector is introduced.
+
+`kernels.philox4x32(counter_words, key0, key1)` returns four ordinary unsigned
+32-bit expressions. `kernels.random_normal(key0, key1, ordinal)` returns a
+floating expression using that same integer owner. Both participate in the
+existing typed scalar emitter, index maps, selections and region bindings.
+A compact generated helper expresses the fixed ten numerical rounds; it does
+not expand the round recurrence into a repeated expression tree or schedule
+mesh work. Independently requested word outputs can repeat the helper computation;
+this is not a claim of cross-output computation fusion.
+
+Box and Muller's
+[A Note on the Generation of Random Normal Deviates](https://doi.org/10.1214/aoms/1177706645)
+(1958) supplies the uniform-to-normal transformation. Random123's
+[Box–Muller discussion](https://github.com/DEShawResearch/random123/blob/main/include/Random123/boxmuller.hpp)
+explains its fixed input/output count, which suits counter-based execution.
+Mesh preserves the prior caller's specific mapping: counter words are the low
+and high halves of ordinal/2 followed by two zeros. The first output word's
+top 23 bits, plus one half, scaled by 2^-23 give the positive radial uniform;
+the second word's top 23 bits scaled by 2^-23 give the angular uniform. The
+radius is sqrt(-2 log(u)); the angle is 2πv. Even ordinals select cosine and
+odd ordinals sine. This preserves mesh's sequence definition, not Random123's
+different uniform mapping or MLX/JAX's default generator sequence.
+
+CPU uses platform FP32 scalar math; Metal selects precise log, square root and
+trigonometric functions. Exact integer generator results are portable; identical
+transcendental result bits across backends are not promised. This discretized
+normal transform also has finite tail resolution and is not a continuous ideal
+normal distribution. The migration preserves its numerical definition.
+
+Xonotic supplies the global flattened ordinal from tile origins and numerical
+row/column indices. Logical loads name the first two key words in canonical
+registered storage. Its private Philox helper and whole-output random emitter
+are removed. Setup realizes kernel functions, layouts, routes and storage;
+invocation uses the same page-stamp readiness/publication as other expressions.
+Tile or row boundaries may cut a pair without restarting its counter. A consumer
+can process a produced region independently of unrelated keys or consumer rows.
+
+The existing streaming-algebra workflow retains known-answer integer vectors,
+normal numerical references, counter high-word cases, ragged pair boundaries,
+withheld producer/consumer inputs and reuse observations. These finite numerical
+checks do not replace a statistical battery or establish matched performance
+parity with the removed whole-output generator.
