@@ -1152,3 +1152,18 @@ setup. Mixed constant/produced tables retain dynamic descriptors. Transposed vie
 share their canonical tensor/extent identity and therefore retain the declaration.
 This removes the extra selector launch for fully declared constant tables without
 turning current availability into a permanent specialization assumption.
+
+## CPU register contraction
+
+Goto and van de Geijn's [Anatomy of High-Performance Matrix Multiplication](https://doi.org/10.1145/1356052.1356053)
+provides register-blocked outer-product accumulation. Arm's
+[Advanced SIMD intrinsic reference](https://arm-software.github.io/acle/neon_intrinsics/advsimd.html)
+specifies half-to-float vector conversion and lane-broadcast FP32 FMA.
+`cpu_contract_tile` uses a 4 by 4 register block with directly addressed canonical
+operands. `cpu_f16x4`, `cpu_f32x4` and their strided variants are setup-selected
+loads, preserving half storage while accumulating in FP32. Ragged lanes are
+masked by numerical extent and never read outside the operand. Output conversion
+follows completion of the bound K region. The implementation does not pack or
+allocate dense converted operands and retains the existing all-FP32 SGEMM path.
+[Source and compilation record](cpu-register-contraction.md) distinguishes this
+mechanism from unmeasured throughput and from BNNS internal-storage guarantees.
