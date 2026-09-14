@@ -173,15 +173,6 @@ def kernel(node):
         body.append(write(output, '(t&1)?radius*sin(angle):radius*cos(angle)'))
     elif op == 'matmul':
         body, mode = matmul_body(output, values, attrs), 'matmul'
-    elif op == 'expert_route':
-        selected = values[0]
-        body = [f'ulong t=position.x; if(t>=v[{selected.index}].size) return;',
-                f'ulong expert=ulong({read(selected)}),stride=v[{output.index}].shape[1];',
-                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)page_address(regions,blocks,v[{output.index}],v[{output.index}].offset+expert*stride*sizeof(uint)),1u,memory_order_relaxed);',
-                write(output, 't', 'expert*stride+1+slot')]
-        mode, clear = ('gradient', selected.index), True
-    elif op in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
-        body, mode, clear = expert_body(output, values, op)
     else:
         for i, value in enumerate(values):
             address = f'broadcast_index(t,v[{value.index}],v[{index}])'
@@ -237,31 +228,6 @@ def batch_address(source, output):
     return '+'.join(pieces) or '0'
 
 
-def expert_body(output, values, op):
-    inputs, weights, selected, routing = values[:4]
-    n, d, h = (expr(value) for value in (inputs.shape[0], weights.shape[1], weights.shape[2]))
-    count = read(routing, f'expert*({n}+1)')
-    def routed(index): return 'ulong(' + read(routing, f'expert*({n}+1)+1+({index})') + ')'
-    prefix = [f'ulong expert=group.z,count=ulong({count});']
-    if op == 'expert_weight_vjp':
-        gradient = values[4]
-        rows, columns, inner = d, h, 'count'
-        left = read(inputs, f'{routed("k")}*{d}+row')
-        right = read(gradient, f'{routed("k")}*{h}+column')
-        address = f'(expert*{d}+row)*{h}+column'
-        mode = 'matmul'
-    else:
-        backward = op == 'expert_input_vjp'
-        rows, columns, inner = 'count', d if backward else h, h if backward else d
-        source = values[4] if backward else inputs
-        left = read(source, f'{routed("row")}*({inner})+k')
-        right = read(weights, f'(expert*{d}+column)*{h}+k' if backward else f'(expert*{d}+k)*{h}+column')
-        address = f'{routed("row")}*({columns})+column'
-        prefix += ['if(group.y*64>=count) return;']
-        mode = ('expert', weights.index)
-    return prefix + tiled_product(output, rows, columns, inner, left, right, address), mode, False
-
-
 # ../../../design/algorithm-sources.md#indexed-expression-lowering
 def source(nodes):
     kernels = [value for node in nodes if (value := kernel(node)) is not None]
@@ -281,6 +247,10 @@ def source(nodes):
 def numerical_operands(operation, values, attributes):
     if operation in ('gather_vjp', 'take_along_axis_vjp'):
         return values[1:]
+    if operation == 'expert_input_vjp':
+        return values[1:]
+    if operation == 'expert_weight_vjp':
+        return (values[0], *values[2:])
     if operation not in ('neighborhood', 'neighborhood_vjp'):
         return values
     gram, target = attributes['gram'], attributes.get('target')
@@ -289,6 +259,54 @@ def numerical_operands(operation, values, attributes):
          2: (0, 1, 3, 4, 5), 4: (0, 1, 2, 3, 5)}[target] if gram else
         {0: (), 1: (), 2: (3, 4, 5), 4: (2, 3, 5)}[target])
     return tuple(values[index] for index in positions)
+
+
+# ../../../design/algorithm-sources.md#xonotic-expert-indexed-contractions
+def expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns):
+    import math
+    from mesh import BlockSpec, ShapeDtypeStruct, kernels
+    rows, inner = shapes[values[0].index]
+    experts, weight_inner, hidden = shapes[values[1].index]
+    if inner != weight_inner or math.prod(shapes[values[2].index]) != rows or (
+            operation != 'expert_matmul' and shapes[values[3].index] != (rows, hidden)):
+        raise ValueError('Expert operands require matching input, output and selected row dimensions')
+    if np.dtype(values[2].dtype).kind not in 'iu':
+        raise TypeError('Expert selection requires integer indices')
+    if operation == 'expert_weight_vjp':
+        block = (1, math.gcd(hidden, min(tile_columns, hidden)))
+        base = program.tensor((experts, inner * hidden), block, value.dtype)
+        if program.node == peer:
+            for ref in base.blocks.values():
+                program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
+        destinations = matrix_view(local[values[2].index], (rows, 1))
+        base_arg, selected_arg, input_arg, gradient_arg = kernels.arguments(4)
+        row, column = kernels.indices()
+        update = input_arg.reshape((rows, inner)).at(row, column // hidden) * gradient_arg.reshape((rows, hidden)).at(row, column % hidden)
+        result = program.kernel_call(kernels.expression(kernels.indexed_add(base_arg, selected_arg, update)),
+            grid=base.grid, in_specs=(BlockSpec(None),) * 4,
+            out_specs=BlockSpec(block, lambda i, j: (i, j)),
+            out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(
+                base, destinations, local[values[0].index], local[values[3].index])
+        return matrix_view(result, (experts * inner, hidden))
+    backward = operation == 'expert_input_vjp'
+    operand = values[3] if backward else values[0]
+    output_width, contraction = (inner, hidden) if backward else (hidden, inner)
+    feature_tile = min(tile_columns, output_width)
+    operand_arg, weight_arg, selected_arg = kernels.arguments(3)
+    row = kernels.program_id(0)
+    selected = selected_arg.reshape((rows,)).at(row)
+    if values[2].dtype.startswith('int'):
+        selected = kernels.select(selected < 0, selected + experts, selected)
+    feature = kernels.arange(feature_tile).T + kernels.program_id(1) * feature_tile
+    k = kernels.arange(contraction, tile=tile_k)
+    weight_at = (selected, feature, k) if backward else (selected, k, feature)
+    product = operand_arg.reshape((rows, contraction)).at(row, k) * weight_arg.reshape((experts, inner, hidden)).at(*weight_at)
+    block = (1, feature_tile)
+    return program.kernel_call(kernels.expression(product.sum().T),
+        grid=(rows, (output_width + feature_tile - 1) // feature_tile),
+        in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec(block, lambda i, j: (i, j)),
+        out_shape=ShapeDtypeStruct((rows, output_width), value.dtype), peer=peer)(
+            local[operand.index], local[values[1].index], local[values[2].index])
 
 
 # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
@@ -543,6 +561,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tensor = replicas[key]
             local[operand.index] = tensor
         shape = shapes[value.index]
+        if operation in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
+            tensors[value.index] = expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns)
+            continue
         if operation in ('neighborhood', 'neighborhood_vjp'):
             tensors[value.index] = neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns, statistics)
             continue
@@ -814,8 +835,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         mode, threads = item['mode'], 256
         if mode == 'matmul':
             grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, math.prod(shape[:-2]))
-        elif isinstance(mode, tuple) and mode[0] == 'expert':
-            grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, shapes[mode[1]][0])
         elif mode == 'reduce':
             grid = (size, 1, 1)
         else:

@@ -441,9 +441,9 @@ def matmul(left, right, transpose_left=False, transpose_right=False):
     return left.graph.node('matmul', (left, right), shape, left.dtype, transpose_left=transpose_left, transpose_right=transpose_right)
 
 
+# ../../../design/algorithm-sources.md#xonotic-expert-indexed-contractions
 def expert_matmul(rows, weights, selected):
-    routing = rows.graph.node('expert_route', (selected,), (weights.shape[0], rows.shape[0] + 1), 'int32')
-    return rows.graph.node('expert_matmul', (rows, weights, selected, routing), (rows.shape[0], weights.shape[2]), rows.dtype)
+    return rows.graph.node('expert_matmul', (rows, weights, selected), (rows.shape[0], weights.shape[2]), rows.dtype)
 
 
 def neighborhood(query, keys, values, indices, weights, gram):
@@ -509,7 +509,7 @@ def derivative(op, values, output, gradient, attrs):
     if op == 'scatter_add': return gradient, None, gradient[y]
     if op == 'expert_matmul':
         return (x.graph.node('expert_input_vjp', (*values, gradient), x.shape),
-                x.graph.node('expert_weight_vjp', (*values, gradient), y.shape), None, None)
+                x.graph.node('expert_weight_vjp', (*values, gradient), y.shape), None)
     if op == 'neighborhood':
         return tuple(None if i == 3 else x.graph.node('neighborhood_vjp', (*values, gradient), value.shape, value.dtype,
                                                      target=i, gram=attrs['gram']) for i, value in enumerate(values))

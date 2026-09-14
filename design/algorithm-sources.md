@@ -2513,3 +2513,46 @@ The existing mapped-contraction and streamed-gather examples exercise matrix
 vector broadcasting, a tiled K reduction with a ragged tail, and selected-reader
 progress. Source compilation and diff checks precede operational validation of
 those existing examples.
+
+## Xonotic expert indexed contractions
+
+The JAX authors' [Pallas indexed Ref design](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+combines broadcast coordinate vectors with indexed operands, and
+[segment_sum](https://docs.jax.dev/en/latest/_autosummary/jax.ops.segment_sum.html)
+accumulates unsorted duplicate destination IDs. Xonotic `expert_matmul` now
+retains only X, W and selected-expert indices as its three graph operands.
+There is no expert_route node, routing array or caller-owned routing atomic.
+The derivative tuple has three entries, and derivative nodes append G at slot
+three. Existing derivative output dtype remains FP32; forward retains X dtype.
+
+`expert_call` expresses Y[n,h]=sum_d X[n,d]*W[selected[n],d,h] and
+dX[n,d]=sum_h G[n,h]*W[selected[n],d,h] with shared indexed products and row
+reduction followed by metadata transpose. A local output-feature column vector
+and a tiled contraction row vector define the two-dimensional index domain.
+The program row identifies n; program column supplies the output-feature tile
+offset. One row and a bounded feature panel publish independently, including
+ragged output and contraction tails. Partial sums accumulate in FP32 on the
+existing shared backend, with final declared output dtype. Original canonical
+operand references and selected-reader lifetimes determine readiness.
+
+The weight derivative uses shared indexed-add with expert destinations and
+feature coordinate d*H+h. Each update directly loads X[n,d]*G[n,h]; no expanded
+update tensor or zero-filled expert GEMM is produced. Its E×(D*H) output
+reframes to (E*D)×H through `matrix_view` metadata. Feature width divides H
+(using gcd with the configured column tile), so each resulting reference is a
+whole original output block and remains publishable/exportable. Duplicate
+expert IDs sum, empty experts produce zero, and signed negative IDs normalize
+once consistently with forward indexed access. Invalid expert IDs contribute
+zero. Setup checks integer selection and matching numerical dimensions.
+
+The existing `numerical_operands` liveness/replication owner omits X from dX
+and W from dW; primal shapes remain setup metadata. Removed implementation
+includes expert_body and its custom emitter and launch mode. The scalar fused
+indexed reductions have not matched a tuned grouped matrix-multiply backend
+and are not a validated fast tensor-parallel baseline. Regaining that grouped
+performance belongs in the shared contraction lowering while preserving these
+indexed dependencies, rather than restoring a separate expert compiler.
+Canonical selector/partial allocation and launch costs remain visible setup
+costs. Existing streaming-algebra examples cover selected experts, all VJPs,
+empty experts, delayed operands, downstream consumers and repeated invocations.
+Source compilation and diff checks precede operational validation there.
