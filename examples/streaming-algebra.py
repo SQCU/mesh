@@ -242,6 +242,7 @@ def main():
         xonotic_gradients = []
         xonotic_neighborhoods = []
         xonotic_expert = None
+        xonotic_batched = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -472,6 +473,33 @@ def main():
                 generations.append(((rows_values, weight_values.reshape(9, 5), selected_values.reshape(4, 1), cotangent_values),
                                     tuple(value * 2 + 1 for value in (projected, dx, dw.reshape(9, 5)))))
             xonotic_expert = expert_storage, observations, generations
+            # design/algorithm-sources.md#xonotic-batched-contractions
+            graph = mx.Graph()
+            with graph:
+                batch_inputs = tuple(graph.input(name, shape, 'float32') for name, shape in (
+                    ('left', (2, 5, 3)), ('right', (1, 7, 5)), ('cotangent', (2, 3, 7))))
+                product = mx.matmul(*batch_inputs[:2], transpose_left=True, transpose_right=True)
+                derivatives = graph.vjp((product,), (batch_inputs[2],), batch_inputs[:2])
+                consumers = tuple(value * 2 + 1 for value in (product, *derivatives))
+            batch_storage = tuple(program.tensor(shape, (1, 2), dtype=np.float32)
+                                  for shape in ((10, 3), (7, 5), (6, 7)))
+            lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in batch_inputs), batch_storage)),
+                outputs=consumers, root_peer=0, tile_rows=1, tile_k=2, tile_columns=2)
+            observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
+            generations = []
+            for generation in range(2):
+                left = (np.arange(30, dtype=np.float32).reshape(2, 5, 3) - 13 + generation) / 8
+                right = (np.arange(35, dtype=np.float32).reshape(1, 7, 5) - 17 - generation) / 16
+                cotangent = (np.arange(42, dtype=np.float32).reshape(2, 3, 7) - 19 + generation) / 8
+                l, r, g = (value.astype(np.float64) for value in (left, right, cotangent))
+                product = np.matmul(l.swapaxes(-1, -2), r.swapaxes(-1, -2))
+                dl = np.matmul(g, r).swapaxes(-1, -2)
+                dr = np.matmul(g.swapaxes(-1, -2), l.swapaxes(-1, -2)).sum(axis=0, keepdims=True)
+                expected = tuple((value * 2 + 1).reshape(shape) for value, shape in
+                                 zip((product, dl, dr), ((6, 7), (10, 3), (7, 5))))
+                generations.append(((left.reshape(10, 3), right.reshape(7, 5), cotangent.reshape(6, 7)), expected))
+            xonotic_batched = batch_storage, observations, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1081,6 +1109,62 @@ def main():
                         if not np.allclose(result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
                             raise ArithmeticError('Expert forward or derivative differs after reuse')
                 print(json.dumps(dict(event='xonotic_expert_complete', generation=generation,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                    output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
+                for results in observations:
+                    for i, j, result in results:
+                        result.consume()
+        if xonotic_batched is not None:
+            storage, observations, generations = xonotic_batched
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                early_batch = generation
+                started = time.monotonic_ns()
+                for operand, (tensor, data) in enumerate(zip(storage, values)):
+                    for (i, j), ref in tensor.blocks.items():
+                        if operand == 1 or i // (5 if operand == 0 else 3) == early_batch:
+                            column = j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                early = tuple(result for target, results in enumerate(observations[:2]) for i, j, result in results
+                              if i // (3 if target == 0 else 5) == early_batch)
+                wait_for(early)
+                for target, results in enumerate(observations):
+                    for i, j, result in results:
+                        if target < 2 and i // (3 if target == 0 else 5) == early_batch:
+                            if not np.allclose(result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                                raise ArithmeticError('Batched contraction early consumer differs')
+                        elif result.ready:
+                            raise ArithmeticError('Batched contraction consumed a withheld batch')
+                print(json.dumps(dict(event='xonotic_batched_early', generation=generation,
+                    withheld_batch=1-early_batch, singleton_right_batch=True,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                tensor, data = storage[2], values[2]
+                for (i, j), ref in tensor.blocks.items():
+                    if i // 3 != early_batch:
+                        column = j * tensor.block_shape[1]
+                        with program.write(ref) as destination:
+                            destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for i, j, result in observations[1]))
+                for i, j, result in observations[1]:
+                    if not np.allclose(result.array, expected[1][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                        raise ArithmeticError('Batched input derivative retained its unused primal')
+                if any(result.ready for i, j, result in observations[0] if i // 3 != early_batch) or any(result.ready for i, j, result in observations[2]):
+                    raise ArithmeticError('Batched forward or weight derivative ignored its missing input')
+                print(json.dumps(dict(event='xonotic_batched_independent_derivative', generation=generation,
+                    withheld_left_batch=1-early_batch, elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                tensor, data = storage[0], values[0]
+                for (i, j), ref in tensor.blocks.items():
+                    if i // 5 != early_batch:
+                        column = j * tensor.block_shape[1]
+                        with program.write(ref) as destination:
+                            destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for results in observations for i, j, result in results))
+                for target, results in enumerate(observations):
+                    for i, j, result in results:
+                        if not np.allclose(result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                            raise ArithmeticError('Batched contraction or broadcast derivative differs after reuse')
+                print(json.dumps(dict(event='xonotic_batched_complete', generation=generation,
                     elapsed_ms=(time.monotonic_ns()-started)/1e6,
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
                 for results in observations:
