@@ -23,19 +23,11 @@ struct mesh_extent {
   uint32_t first,pages,quantum;
   size_t bytes;
   void *address;
+  CFTypeRef buffer;
   struct mesh_shape shape;
 };
 struct mesh_tensor { struct mesh_ctx *context; size_t count; struct mesh_extent *extents; };
 struct mesh_writer { struct mesh_ctx *context; struct mesh_row_map output; struct mesh_row_function function; struct mesh_writer *next; };
-
-@interface MeshExtent : NSObject
-@property struct mesh_extent extent;
-@property id<MTLBuffer> buffer;
-@end
-@implementation MeshExtent
-@end
-
-enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUTION_COREML };
 
 typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publication *);
 @interface MeshCPUCode : NSObject
@@ -53,10 +45,8 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   struct mesh_row_map output;
   struct mesh_row_function function;
   struct mesh_kernel_publication publication;
-  uint32_t occurrence;
-  enum mesh_execution_kind executionKind;
+  void (*submit)(void *,uint32_t);
 }
-@property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
 @property id<MTLComputePipelineState> metalPipeline;
 @property id<MTLCommandQueue> queue;
@@ -84,11 +74,9 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSMutableDictionary<NSString *,id<MTLLibrary>> *libraries;
 @property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
 @property NSMutableArray<MeshFunction *> *functions;
-@property NSMutableArray<MeshExtent *> *extents;
 @property NSArray<id<MTLBuffer>> *banks;
 @property id<MTLBuffer> pageTable,bankAddresses;
 @property size_t bankBytes;
-@property NSMutableDictionary<NSValue *,MeshExtent *> *lookup;
 @property NSMutableData *tensors;
 @property NSMutableData *bindings;
 @property NSMutableData *returns;
@@ -105,13 +93,12 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   struct mesh_row_map *returns=self.returns.mutableBytes;
   for(size_t i=0;i<self.returns.length/sizeof *returns;i++)mesh_reader_unbind(context,&returns[i]);
   self.functions=nil;
-  self.lookup=nil;
-  self.extents=nil;
   struct mesh_tensor **tensors=self.tensors.mutableBytes;
   for(size_t i=0;i<self.tensors.length/sizeof *tensors;i++) {
     struct mesh_tensor *t=tensors[i];
     for(size_t j=0;j<t->count;j++) {
       struct mesh_extent *e=&t->extents[j];
+      if(e->buffer)CFRelease(e->buffer);
       if(e->address)mesh_view_destroy(e->address,e->bytes);
       if(e->first!=MESH_ABSENT){mesh_backing_release(context,e->first,e->pages);mesh_rows_release(context,e->first,e->pages);}
     }
@@ -124,7 +111,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 static void complete_part(MeshFunction *f,int64_t error) {
   MeshAlgebra *a=f.owner;
   if(error)atomic_store(&a->code,error);
-  else mesh_complete(a->context,&f->function,&f->occurrence,1);
+  else {uint32_t index=0;mesh_complete(a->context,&f->function,&index,1);}
   dispatch_group_leave(a.executions);
 }
 /* design/algorithm-sources.md#programkernel_call */
@@ -155,7 +142,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   }
   a.executions=dispatch_group_create();
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
-  a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
+  a.functions=[NSMutableArray new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
   return (__bridge_retained struct mesh_algebra *)a;
 }
@@ -219,12 +206,10 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
     if(error){errno=error;return NULL;}
     e->address=mesh_view_create(a->context,e->first,pages);
     if(!e->address)return NULL;
-    MeshExtent *storage=[MeshExtent new]; storage.extent=*e;
     if(!a.cpu) {
-      storage.buffer=[a.device newBufferWithBytesNoCopy:e->address length:e->bytes options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil];
-      if(!storage.buffer){errno=ENOMEM;return NULL;}
+      e->buffer=CFBridgingRetain([a.device newBufferWithBytesNoCopy:e->address length:e->bytes options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil]);
+      if(!e->buffer){errno=ENOMEM;return NULL;}
     }
-    [a.extents addObject:storage]; a.lookup[[NSValue valueWithPointer:e]]=storage;
   }
   return t;
 }
@@ -289,14 +274,15 @@ static int valid_view(MeshAlgebra *a,struct mesh_view v) {
 id<MTLBuffer> mesh_algebra_buffer(struct mesh_algebra *handle,struct mesh_view view) {
   MeshAlgebra *a=owner(handle);
   if(!valid_view(a,view)){errno=EINVAL;return nil;}
-  return a.lookup[[NSValue valueWithPointer:&view.tensor->extents[view.extent]]].buffer;
+  return (__bridge id<MTLBuffer>)view.tensor->extents[view.extent].buffer;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-static MPSMatrix *matrix(MeshExtent *e,struct mesh_view v,BOOL transpose) {
-  size_t bytes=scalar_bytes(e.extent.shape.scalar);
+static MPSMatrix *matrix(struct mesh_view v,BOOL transpose) {
+  struct mesh_extent *e=&v.tensor->extents[v.extent];
+  size_t bytes=scalar_bytes(e->shape.scalar);
   MPSMatrixDescriptor *d=[MPSMatrixDescriptor matrixDescriptorWithRows:transpose?v.columns:v.rows columns:transpose?v.rows:v.columns rowBytes:(transpose?v.column_stride:v.row_stride)*bytes dataType:bytes==2?MPSDataTypeFloat16:MPSDataTypeFloat32];
-  return [[MPSMatrix alloc]initWithBuffer:e.buffer offset:v.offset*bytes descriptor:d];
+  return [[MPSMatrix alloc]initWithBuffer:(__bridge id<MTLBuffer>)e->buffer offset:v.offset*bytes descriptor:d];
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -369,7 +355,7 @@ static int overlaps(struct mesh_row_map a,struct mesh_row_map b) {
   return a.first<b.first+b.count && b.first<a.first+a.count;
 }
 /* design/algorithm-sources.md#program */
-static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (*submit)(MeshFunction *)) {
+static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (*submit)(void *,uint32_t)) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
   if(!submit || !output_count || output_count>UINT32_MAX || input_count>UINT32_MAX || !outputs || (input_count && !inputs))return EINVAL;
@@ -384,7 +370,7 @@ static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inp
     [f.results appendBytes:&m length:sizeof m];
   }
   f->function=(struct mesh_row_function){.output=f.results.mutableBytes,.outputs=(uint32_t)output_count,.rows=1};f->function.inputs=(uint32_t)merge_maps(f.dependencies,0);f->function.input=f.dependencies.mutableBytes;
-  f.execute=^(MeshFunction *function){submit(function);};
+  f->submit=submit;
   [a.functions addObject:f];return 0;
 }
 
@@ -412,22 +398,37 @@ static MTLCompileOptions *source_options(void) {
   MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;return options;
 }
 /* design/algorithm-sources.md#programkernel_call */
-static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuffer>)) {
-  id<MTLCommandBuffer> command=[f.queue commandBuffer];encode(command);
-  [command addCompletedHandler:^(id<MTLCommandBuffer> done){
-    complete_part(f,done.error.code);
-  }];
-  [command commit];
+static void submit_metal(void *argument,uint32_t index) {
+  (void)index;
+  MeshFunction *f=(__bridge MeshFunction *)argument;
+  dispatch_group_enter(f.owner.executions);
+  @autoreleasepool{
+    id<MTLCommandBuffer> command=[f.queue commandBuffer];f.encode(command);
+    [command addCompletedHandler:^(id<MTLCommandBuffer> done){complete_part(f,done.error.code);}];
+    [command commit];
+  }
 }
 /* design/algorithm-sources.md#programkernel_call */
-static void submit_metal(MeshFunction *f) {submit_encoded_metal(f,f.encode);}
+static void submit_cpu(void *argument,uint32_t index) {
+  (void)index;
+  MeshFunction *f=(__bridge MeshFunction *)argument;
+  dispatch_group_enter(f.owner.executions);
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{f.execute(f);}});
+}
+/* design/algorithm-sources.md#programkernel_call */
+static void submit_coreml(void *argument,uint32_t index) {
+  (void)index;
+  MeshFunction *f=(__bridge MeshFunction *)argument;
+  dispatch_group_enter(f.owner.executions);
+  @autoreleasepool{f.execute(f);}
+}
 /* design/algorithm-sources.md#programkernel_call */
 int mesh_algebra_encode(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (^encode)(id<MTLCommandBuffer>)) {
   MeshAlgebra *a=owner(handle);
   if(a.cpu || !encode)return EINVAL;
   int error=bind_function(handle,inputs,input_count,outputs,output_count,submit_metal);
   if(error)return error;
-  MeshFunction *f=a.functions.lastObject;f.encode=encode;f->executionKind=MESH_EXECUTION_METAL;
+  MeshFunction *f=a.functions.lastObject;f.encode=encode;
   return 0;
 }
 /* design/algorithm-sources.md#programkernel_call */
@@ -487,10 +488,6 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,c
   return status;
 }
 
-/* design/algorithm-sources.md#kernelsexpression */
-static void submit_cpu(MeshFunction *f) {
-  f.cpuCode.kernel(f.cpuArguments.bytes,&f->publication);complete_part(f,0);
-}
 /* design/algorithm-sources.md#programkernel_call */
 static void publish_cpu(void *context,uint32_t first,uint32_t count) {
   mesh_publish_partial(context,first,count);
@@ -571,11 +568,14 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   }
   int status=bind_function(handle,reads,input_count,&region,1,submit_cpu);
   if(status)return status;
-  MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;
+  MeshFunction *f=a.functions.lastObject;
   bind_publication(f,region);
   struct mesh_kernel_section *sections=f.publicationSections.mutableBytes;
   for(size_t i=0;i<f->publication.count;i++){sections[i].row_begin+=row_begin;sections[i].row_end+=row_begin;sections[i].column_begin=column_begin;sections[i].column_end=column_begin+column_count;}
   f.cpuCode=library;f.cpuArguments=addresses;
+  f.execute=^(MeshFunction *function){
+    function.cpuCode.kernel(function.cpuArguments.bytes,&function->publication);complete_part(function,0);
+  };
   return 0;
 }
 
@@ -690,12 +690,11 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
   return 0;
 }
 /* design/algorithm-sources.md#kernelsdot */
-static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,size_t first,size_t count) {
-  f.owner=a;f.queue=a.queue;f.dependencies=[NSMutableData new];
+static int bind_part(MeshAlgebra *a,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,size_t first,size_t count) {
+  MeshFunction *f=[MeshFunction new];f.owner=a;f.queue=a.queue;f.dependencies=[NSMutableData new];
   struct mesh_extent *out=&z.tensor->extents[z.extent];
   size_t scalar=scalar_bytes(out->shape.scalar);
   f->output=(struct mesh_row_map){.first=out->first+(uint32_t)((z.offset+first)*scalar/a->context->M->pgsz),.count=out->quantum};
-  f.operands=@[a.lookup[[NSValue valueWithPointer:&x.tensor->extents[x.extent]]],a.lookup[[NSValue valueWithPointer:&y.tensor->extents[y.extent]]],a.lookup[[NSValue valueWithPointer:out]]];
   BOOL dense=z.column_stride==1;
   size_t columns=dense?z.columns:z.rows;
   NSMutableData *parts=[NSMutableData new];
@@ -721,7 +720,7 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
       [rectangles addObject:@[@(rr),@(cc),@(x.columns),@(xv.tensor->extents[xv.extent].shape.scalar==MESH_F16),@(yv.tensor->extents[yv.extent].shape.scalar==MESH_F16)]];
     } else if(!a.cpu) {
       BOOL tx=xv.column_stride!=1,ty=yv.column_stride!=1;
-      [matrices addObject:@[matrix(f.operands[0],xv,tx),matrix(f.operands[1],yv,ty),matrix(f.operands[2],zv,NO)]];
+      [matrices addObject:@[matrix(xv,tx),matrix(yv,ty),matrix(zv,NO)]];
       [products addObject:[[MPSMatrixMultiplication alloc]initWithDevice:a.device transposeLeft:tx transposeRight:ty resultRows:rr resultColumns:cc interiorColumns:x.columns alpha:alpha beta:0]];
     }
     at+=nr*nc;left-=nr*nc;
@@ -729,26 +728,15 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
   f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};
   f->function.inputs=(uint32_t)merge_maps(f.dependencies,0);f->function.input=f.dependencies.mutableBytes;
   if(a.cpu) {
-    f->executionKind=MESH_EXECUTION_CPU;
+    f->submit=submit_cpu;
     int error=cpu_part(f,parts.bytes,parts.length/sizeof(struct mesh_matrix_part),alpha);if(error)return error;
   } else if(a.coremlPython) {
-    f->executionKind=MESH_EXECUTION_COREML;
+    f->submit=submit_coreml;
     int error=native_part(a,f,rectangles,features,z,first,count,alpha);if(error)return error;
   } else {
-
+    f->submit=submit_metal;
     f.encode=^(id<MTLCommandBuffer> command){for(NSUInteger i=0;i<products.count;i++)[products[i] encodeToCommandBuffer:command leftMatrix:matrices[i][0] rightMatrix:matrices[i][1] resultMatrix:matrices[i][2]];};
   }
-  if(!f.execute) {
-    f->executionKind=MESH_EXECUTION_METAL;
-    void (^encode)(id<MTLCommandBuffer>)=f.encode;
-    f.execute=^(MeshFunction *function){submit_encoded_metal(function,encode);};
-  }
-  return 0;
-}
-/* design/algorithm-sources.md#kernelsdot */
-static int bind_part(MeshAlgebra *a,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,size_t first,size_t count) {
-  MeshFunction *f=[MeshFunction new];
-  int error=prepare_part(a,f,x,y,z,alpha,first,count);if(error)return error;
   [a.functions addObject:f];return 0;
 }
 /* design/algorithm-sources.md#kernelsdot */
@@ -853,6 +841,7 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
     f->output=(struct mesh_row_map){.first=output.first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
     f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};f->function.inputs=(uint32_t)merge_maps(f.dependencies,0);f->function.input=f.dependencies.mutableBytes;
 
+    f->submit=submit_cpu;
     f.execute=^(MeshFunction *function){
       const struct mesh_copy_segment *parts=segments.bytes;
       for(size_t i=0;i<segments.length/sizeof *parts;i++) {
@@ -929,13 +918,6 @@ int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_view view,size_t
   *count=merge_maps(a.returns,*first);return 0;
 }
 /* design/algorithm-sources.md#programkernel_call */
-static void submit_ready(void *argument,uint32_t occurrence) {
-  MeshFunction *f=(__bridge MeshFunction *)argument;MeshAlgebra *a=f.owner;
-  f->occurrence=occurrence;
-  dispatch_group_enter(a.executions);
-  @autoreleasepool{f.execute(f);}
-}
-/* design/algorithm-sources.md#programkernel_call */
 int mesh_algebra_realize(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);if(a.realized)return 0;size_t count=a.functions.count;
   struct mesh_row_function *functions=calloc(count?count:1,sizeof *functions);
@@ -945,17 +927,13 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
   free(functions);
   if(!error){
     size_t arenaBytes=0;
-    for(MeshExtent *extent in a.extents)arenaBytes+=extent.extent.bytes;
+    struct mesh_tensor **tensors=a.tensors.mutableBytes;
+    for(size_t i=0;i<a.tensors.length/sizeof *tensors;i++)
+      for(size_t j=0;j<tensors[i]->count;j++)arenaBytes+=tensors[i]->extents[j].bytes;
     fprintf(stderr,"mesh realize: participant=%u planned_arena_bytes=%zu\n",a->context->M->node,arenaBytes);
     a.realized=YES;
     for(MeshFunction *f in a.functions){
-      if(f->executionKind==MESH_EXECUTION_CPU){
-        void (^execute)(MeshFunction *)=f.execute;
-        f.execute=^(MeshFunction *function){
-          dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{execute(function);}});
-        };
-      }
-      error=mesh_execution_add(a->context,&f->function,handle,submit_ready,(__bridge void *)f);
+      error=mesh_execution_add(a->context,&f->function,handle,f->submit,(__bridge void *)f);
       if(error)break;
     }
   }
