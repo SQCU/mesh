@@ -1278,14 +1278,14 @@ expression through the existing `Program.kernel_call`, with logical whole-input
 BlockSpecs and ordinary output-region maps. Its setup K-tile choice is metadata,
 not a runtime branch in the numerical call graph.
 
-`_lower_dot` owns contraction partition and reduction construction. K boundaries
+`_dot_parts` owns contraction partition and reduction construction. K boundaries
 respect the actual left/right backing partitions. Every K panel binds the existing
 native `kernels.matmul` implementation and writes an FP32 partial. The existing
 native `kernels.add` combines them in the same pairwise tree used by `nn.linear`
 previously. The final FP32 result writes the preallocated output directly; a
 non-FP32 declared output uses the existing affine conversion exactly once after
 that completed region's FP32 sum. A single K panel can write an FP32 output
-directly. Its `temporary` and `bind` setup helpers allocate canonical storage and
+directly. Its `temporary` helper and `_bind_operation` allocate canonical storage and
 bind those existing operations; they do not implement another matmul or select a
 backend. CPU, MPS and configured Core ML handling remain in the native operation
 owner, including their existing operand and accumulation precision paths.
@@ -1303,12 +1303,12 @@ public output and transport endpoint identities are explicit and do not rely on
 identical private configuration on both peers. All allocation/binding remains
 before realization. This source change preserves the existing FP32 K-panel and
 cast behavior; Python compilation is complete, while the existing gold workflow
-supplies operational CPU/Metal/Core ML validation. Dot epilogue fusion and scratch
-lifetime packing remain distinct lowering work.
+supplies operational CPU/Metal/Core ML validation. Scratch lifetime packing
+remains distinct lowering work.
 
 ### Mapped and whole-reference dot operands
 
-`_lower_dot` resolves each non-None input BlockSpec at every configured grid
+`_dot_parts` resolves each non-None input BlockSpec at every configured grid
 coordinate. Its local M/K/N dimensions, transposed strides and offset are the
 actual operand, not a hint discarded in favor of the containing Tensor. K
 panels slice that resolved Ref. A None BlockSpec retains the whole logical
@@ -1322,6 +1322,44 @@ For example, a mapped M×K row tile with a whole K×N weight tensor preserves th
 row map and selects the output's N region from the weights. Two mapped refs
 can independently permute input row and column tiles while writing the normal
 output grid. All forms reuse the same FP32 native panel/reduction bindings.
+
+
+### Recursive pointwise dot epilogues
+
+`_contains_dot` identifies contractions within existing expression nodes;
+`_lower_dot_expressions` recursively substitutes each contraction with its
+FP32 region partials. The same Pallas numerical-expression and tiled-accumulation
+sources above motivate this composition. For example, with
+`z = kernels.dot(a, b, tile_k=128)`, both `kernels.expression(z*scale+bias)`
+and `kernels.expression(z/(1+(-z).exp()))` use the ordinary kernel-call interface.
+Additional numerical inputs retain their explicit BlockSpecs, including mapped
+broadcast regions and indexed loads through the existing expression lowering.
+
+Native matmul panels and intermediate native pairwise sums remain unchanged.
+The epilogue substitutes the last one or two FP32 partials into the existing
+scalar emitter: its final addition, pointwise expression and declared output
+conversion occur in one numerical region function. It allocates no completed
+whole-tensor contraction or separate pointwise intermediate. All setup storage
+is canonical; each output region depends only on its own K panels and actual
+additional expression inputs.
+
+The lowering caches contraction nodes by expression identity, output-region
+origin and shape within each grid coordinate. This shares native contractions
+across expression outputs without combining their dependencies. Per-output
+substitution also reuses exact partial input identities when the same dot appears
+more than once, as in swish. A separately exposed bare dot publishes without
+waiting for another output's bias or scale. A single native panel may write that
+bare FP32 output directly; epilogue readers then hold its canonical lifetime.
+With multiple panels, the bare output uses its native final reduction while an
+epilogue independently fuses those same last partials.
+
+Dot operands currently remain logical input references: computed operands such
+as `dot(a*scale,b)` or nested contractions require further lowering. Indexed
+addition remains an output-root operation. Shape-changing reductions of a dot
+are not generalized here; this increment composes pointwise epilogues over each
+configured contraction output region. There is no fallback that materializes a
+whole operand or waits for unrelated regions. Python compilation checks the
+implementation; the existing streamed gold example supplies runtime evidence.
 
 ## Canonical reader groups
 

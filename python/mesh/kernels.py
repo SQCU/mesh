@@ -168,14 +168,15 @@ class _ExpressionKernel:
     # design/algorithm-sources.md#dynamic-indexed-expression-lowering
     def bind_grid(self, program, grid, input_specs, output_specs):
         import itertools
-        if any(value.operation in ('indexed_add', 'dot') for value in self.values):
+        if any(value.operation == 'indexed_add' for value in self.values):
             for value, spec in zip(self.values, output_specs):
                 if value.operation == 'indexed_add':
                     _lower_indexed_add(program, value, grid, input_specs, spec)
-                elif value.operation == 'dot':
-                    _lower_dot(program, value, grid, input_specs, spec)
                 else:
                     _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
+            return
+        if any(_contains_dot(value) for value in self.values):
+            _lower_dot_expressions(program, self.values, grid, input_specs, output_specs)
             return
         for coordinate in itertools.product(*(range(size) for size in grid)):
             self.bind(program, tuple(spec.resolve(coordinate) for spec in input_specs),
@@ -759,56 +760,101 @@ def dot(left, right, *, tile_k=128):
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
-def _lower_dot(program, expression, grid, input_specs, output_spec):
-    import itertools
-    from math import gcd
+def _contains_dot(node):
+    return node.operation == 'dot' or any(_contains_dot(child) for child in node.operands)
+
+
+# design/algorithm-sources.md#shared-contraction-lowering
+def _bind_operation(program, operation, inputs, target):
     from . import check
     from ._native import View
+    check(program.native.algebra_bind(program.handle, operation.op, inputs[0].view,
+        inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
+
+
+# design/algorithm-sources.md#shared-contraction-lowering
+def _dot_parts(program, expression, input_specs, coordinate, target, row, column, direct):
+    from math import gcd
     if any(value.operation != 'input' for value in expression.operands):
         raise ValueError('Contraction operands require logical input references')
     specs = tuple(input_specs[value.value] for value in expression.operands)
-    if all(spec.block_shape is None for spec in specs):
-        left, right = (spec._tensor for spec in specs)
-        if output_spec._tensor.shape != (left.shape[0], right.shape[1]):
-            raise ValueError('Contraction output shape differs from its logical operands')
+    left, right = (spec.resolve(coordinate) for spec in specs)
+    inner = left.shape[1]
+    if inner != right.shape[0] or (specs[0].block_shape is not None and left.shape[0] != target.shape[0]) or (specs[1].block_shape is not None and right.shape[1] != target.shape[1]):
+        raise ValueError('Mapped contraction dimensions differ')
+    tile = min(expression.value, inner)
+    for spec, operand, axis in zip(specs, (left, right), (1, 0)):
+        if spec.block_shape is None and operand.grid[axis] > 1:
+            tile = gcd(tile, operand.block_shape[axis])
 
     # design/algorithm-sources.md#shared-contraction-lowering
-    def temporary(shape):
-        return program.tensor(shape, dtype=np.float32)[0, 0]
+    def temporary():
+        return program.tensor(target.shape, dtype=np.float32)[0, 0]
 
-    # design/algorithm-sources.md#shared-contraction-lowering
-    def bind(operation, inputs, target):
-        check(program.native.algebra_bind(program.handle, operation.op, inputs[0].view,
-            inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
-
-    for coordinate in itertools.product(*(range(length) for length in grid)):
-        target = output_spec.resolve(coordinate)
-        row, column = (index * block for index, block in zip(output_spec.index_map(*coordinate), output_spec.block_shape))
-        left, right = (spec.resolve(coordinate) for spec in specs)
-        inner = left.shape[1]
-        if inner != right.shape[0] or (specs[0].block_shape is not None and left.shape[0] != target.shape[0]) or (specs[1].block_shape is not None and right.shape[1] != target.shape[1]):
-            raise ValueError('Mapped contraction dimensions differ')
-        tile = min(expression.value, inner)
-        for spec, operand, axis in zip(specs, (left, right), (1, 0)):
-            if spec.block_shape is None and operand.grid[axis] > 1:
-                tile = gcd(tile, operand.block_shape[axis])
-        parts = []
-        for start in range(0, inner, tile):
-            length = min(tile, inner - start)
-            destination = target if tile == inner and target.dtype == np.dtype('float32') else temporary(target.shape)
-            left_panel = left.region(row, start, target.shape[0], length) if specs[0].block_shape is None else left.slice(0, start, target.shape[0], length)
-            right_panel = right.region(start, column, length, target.shape[1]) if specs[1].block_shape is None else right.slice(start, 0, length, target.shape[1])
-            bind(matmul, (left_panel, right_panel), destination)
-            parts.append(destination)
-        while len(parts) > 1:
-            reduced = []
-            for index in range(0, len(parts), 2):
-                if index + 1 == len(parts):
-                    reduced.append(parts[index])
-                    continue
-                destination = target if len(parts) == 2 and target.dtype == np.dtype('float32') else temporary(target.shape)
-                bind(add, parts[index:index + 2], destination)
+    parts = []
+    for start in range(0, inner, tile):
+        length = min(tile, inner - start)
+        destination = target if direct and tile == inner and target.dtype == np.dtype('float32') else temporary()
+        left_panel = left.region(row, start, target.shape[0], length) if specs[0].block_shape is None else left.slice(0, start, target.shape[0], length)
+        right_panel = right.region(start, column, length, target.shape[1]) if specs[1].block_shape is None else right.slice(start, 0, length, target.shape[1])
+        _bind_operation(program, matmul, (left_panel, right_panel), destination)
+        parts.append(destination)
+    while len(parts) > 2:
+        reduced = []
+        for index in range(0, len(parts), 2):
+            if index + 1 == len(parts):
+                reduced.append(parts[index])
+            else:
+                destination = temporary()
+                _bind_operation(program, add, parts[index:index + 2], destination)
                 reduced.append(destination)
-            parts = reduced
-        if parts[0] is not target:
-            bind(affine(), parts, target)
+        parts = reduced
+    return tuple(parts)
+
+
+# design/algorithm-sources.md#shared-contraction-lowering
+def _lower_dot_expressions(program, expressions, grid, input_specs, output_specs):
+    import itertools
+    for coordinate in itertools.product(*(range(length) for length in grid)):
+        contractions = {}
+        for value, spec in zip(expressions, output_specs):
+            target = spec.resolve(coordinate)
+            row, column = (index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
+            inputs = [source.resolve(coordinate) for source in input_specs]
+            replacements = {}
+
+            # design/algorithm-sources.md#shared-contraction-lowering
+            def lower(node):
+                if node.operation == 'indexed_add':
+                    raise ValueError('Indexed addition requires an output root')
+                if node.operation != 'dot':
+                    return _Expression(node.operation, tuple(lower(child) for child in node.operands), node.value)
+                if any(child.operation != 'input' for child in node.operands):
+                    raise ValueError('Contraction operands require logical input references')
+                sources = tuple(input_specs[child.value] for child in node.operands)
+                if all(source.block_shape is None for source in sources) and spec._tensor.shape != (sources[0]._tensor.shape[0], sources[1]._tensor.shape[1]):
+                    raise ValueError('Contraction output shape differs from its logical operands')
+                key = (node, row, column, target.shape)
+                if key not in contractions:
+                    contractions[key] = _dot_parts(program, node, input_specs, coordinate, target, row, column, node is value)
+                if key not in replacements:
+                    parts = contractions[key]
+                    terms = tuple(_Expression('input', value=len(inputs) + index) for index in range(len(parts)))
+                    inputs.extend(parts)
+                    replacements[key] = terms[0] if len(terms) == 1 else terms[0] + terms[1]
+                return replacements[key]
+
+            lowered = lower(value)
+            if value.operation == 'dot':
+                parts = contractions[(value, row, column, target.shape)]
+                if len(parts) == 2:
+                    if target.dtype == np.dtype('float32'):
+                        _bind_operation(program, add, parts, target)
+                        continue
+                    summed = program.tensor(target.shape, dtype=np.float32)[0, 0]
+                    _bind_operation(program, add, parts, summed)
+                    parts = (summed,)
+                if parts[0] is not target:
+                    _bind_operation(program, affine(), parts, target)
+            else:
+                _ExpressionKernel((lowered,)).bind(program, tuple(inputs), (target,), coordinate)
