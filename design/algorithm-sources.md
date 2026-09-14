@@ -618,8 +618,8 @@ owners have drained; it is not a tensor dependency.
 The obsolete Xonotic row-table binding and its generated native encoder are
 removed. Alias/adoption compatibility machinery is also removed. Canonical
 extent resources have one owner, including partially constructed allocations.
-Old application imports and scan callers still require removal or rewriting;
-this checkpoint is not the completed caller migration or gold demonstration.
+The later explicit-metadata audit removed stale scan callers and the obsolete
+persistent policy binding. The composed gold demonstration is recorded below.
 
 ## Async index push contract
 
@@ -663,9 +663,11 @@ cited in ledger D2, and the two-sided SEND mechanics of TN3205. Reuse still
 requires a target's existing readers to finish before it can be overwritten;
 finite pipelines should allocate distinct buffers for independent value instances.
 
-The exact FFN → RMSNorm → summed learned embedding → FFN → RMSNorm distributed
-operational demonstration remains outstanding. Compilation alone does not
-establish overlap or a throughput improvement.
+The FFN → RMSNorm → summed learned embedding → FFN → RMSNorm distributed
+operational demonstration completed on both Macs at source `602f3cd`; see
+[indexed gold observations](indexed-gold-2026-09-13.md). Three invocations
+completed section one before section zero was published on a single data queue.
+This does not establish a throughput improvement or a per-kernel timing claim.
 
 The generator publishes a completed compiled-model directory using an atomic
 rename from a temporary sibling directory. An already published content-key

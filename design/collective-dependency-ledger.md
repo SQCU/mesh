@@ -5,6 +5,17 @@ canonical distributed collective only if a dependency below licenses it, with a
 block-quoted primary source and an analogue in a public collective library.
 Code with no entry is not part of the solution, however correct it looks.
 
+Implementation update, September 13: the operator explicitly replaced static
+send-order inference with retained local/peer page tuples. The current transport
+is specified in [algorithm sources](algorithm-sources.md#async-index-push-contract)
+and [the source audit](transport-audit-2026-09-13.md). D5's compiled-order license
+below describes the removed implementation, not the current target association.
+The index QP carries descriptor vectors; payload QPs carry registered operands.
+D2's hardware receive credits permit payload submission without a software ack.
+D4's direct receive storage is retained. D6 applies separately to 4096-byte
+index messages and configured-size payload messages. D13 setup now retains peer
+receive tuples along with connection metadata. There is no per-payload TCP use.
+
 Sources, as fetched 2026-09-12. Every quote below was checked verbatim (40/40)
 by whitespace/quote-mark-normalized substring search against the fetched text:
 TN3205 from its documentation JSON, PDFs via `pdftotext` in reading order, code

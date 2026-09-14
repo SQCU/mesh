@@ -1,0 +1,163 @@
+{
+  "source_commit": "602f3cd",
+  "program": "examples/streaming-algebra.py",
+  "backend": "cpu",
+  "arena_pages": 8192,
+  "page_bytes": 16384,
+  "block_pages": 4,
+  "data_qps": 1,
+  "index_qps": 1,
+  "registered_bytes_per_peer": 137560064,
+  "local": [
+    {
+      "event": "realized",
+      "pid": 84064,
+      "rank": 0,
+      "runs": 3
+    },
+    {
+      "event": "gold",
+      "run": 0,
+      "first_section_ms": 62.394875,
+      "complete_ms": 63.240208,
+      "observed_stage_ms": {
+        "ffn2": 62.2625
+      },
+      "withheld_section": 0,
+      "progressed_section": 1,
+      "max_absolute_error": 2.3582555690460083e-06,
+      "transport_queue": 0
+    },
+    {
+      "event": "gold",
+      "run": 1,
+      "first_section_ms": 1.043,
+      "complete_ms": 1.863167,
+      "observed_stage_ms": {
+        "ffn2": 0.748834
+      },
+      "withheld_section": 0,
+      "progressed_section": 1,
+      "max_absolute_error": 1.9877478618646194e-06,
+      "transport_queue": 0
+    },
+    {
+      "event": "gold",
+      "run": 2,
+      "first_section_ms": 0.989292,
+      "complete_ms": 1.934042,
+      "observed_stage_ms": {
+        "ffn2": 0.859208
+      },
+      "withheld_section": 0,
+      "progressed_section": 1,
+      "max_absolute_error": 2.7124965829017356e-06,
+      "transport_queue": 0
+    },
+    {
+      "event": "summary",
+      "first_section_ms": {
+        "count": 3,
+        "mean": 21.475722333333334,
+        "sample_variance": 1255.7835123557961
+      },
+      "complete_ms": {
+        "count": 3,
+        "mean": 22.345805666666667,
+        "sample_variance": 1254.2653624668103
+      },
+      "max_absolute_error": 2.7124965829017356e-06,
+      "runtime": {
+        "submitted": 228,
+        "completed": 228,
+        "native_submitted": 0,
+        "native_backings": 0,
+        "ne_planned_operations": 0,
+        "code": 0,
+        "gpu_seconds": 0.0,
+        "cpu_submitted": 228
+      }
+    }
+  ],
+  "peer": [
+    {
+      "event": "realized",
+      "pid": 61810,
+      "rank": 1,
+      "runs": 3
+    },
+    {
+      "event": "section_ready",
+      "run": 0,
+      "stage": "ffn1",
+      "local_monotonic_ns": 628302500,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 0,
+      "stage": "rmsnorm1",
+      "local_monotonic_ns": 628551666,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 0,
+      "stage": "summed_embedding",
+      "local_monotonic_ns": 628730375,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 1,
+      "stage": "ffn1",
+      "local_monotonic_ns": 638596625,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 1,
+      "stage": "rmsnorm1",
+      "local_monotonic_ns": 638617208,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 1,
+      "stage": "summed_embedding",
+      "local_monotonic_ns": 638842875,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 2,
+      "stage": "ffn1",
+      "local_monotonic_ns": 641938958,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 2,
+      "stage": "rmsnorm1",
+      "local_monotonic_ns": 642111083,
+      "section_zero_absent": true
+    },
+    {
+      "event": "section_ready",
+      "run": 2,
+      "stage": "summed_embedding",
+      "local_monotonic_ns": 642404375,
+      "section_zero_absent": true
+    }
+  ],
+  "warm_first_section_ms": {
+    "count": 2,
+    "mean": 1.016146,
+    "sample_variance": 0.0014422746319999987
+  },
+  "warm_complete_ms": {
+    "count": 2,
+    "mean": 1.8986045,
+    "sample_variance": 0.0025116328125000015
+  }
+}
