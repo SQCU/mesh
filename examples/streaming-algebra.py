@@ -512,7 +512,11 @@ def main():
                 conjunction = mx.elementwise('logical_and', expanded, matrix)
                 complement = mx.elementwise('logical_and', mx.elementwise('logical_not', expanded), scalar)
                 mask = mx.elementwise('logical_or', conjunction, complement)
-                consumer = mask.astype('float32') * 3 + 1
+                direct_values = truth_input.reshape(2, 3)
+                direct_scalar = mx.broadcast_to(graph.constant(np.float32(0)), (2, 3))
+                direct = mx.elementwise('logical_or', mx.elementwise('logical_not', direct_values),
+                    mx.elementwise('logical_and', direct_values, direct_scalar))
+                consumer = mask.astype('float32') * 3 + 1 + direct.astype('float32').reshape(2, 1, 3)
             truth_storage = program.tensor((2, 3), (1, 3), dtype=np.float32)
             lowered = kernel_calls(program, graph, (), {truth_input.index: truth_storage},
                 outputs=(consumer,), root_peer=0, tile_rows=1, tile_columns=2)
@@ -525,7 +529,8 @@ def main():
                                 [[0, -3, np.nan], [4, 0, -0.0]], dtype=np.float32)
                 expanded = np.broadcast_to(data[:, None, :], (2, 2, 3))
                 expected = (np.logical_or(np.logical_and(expanded, matrix_values),
-                                         np.logical_and(np.logical_not(expanded), 2)).astype(np.float32) * 3 + 1).reshape(4, 3)
+                                         np.logical_and(np.logical_not(expanded), 2)).astype(np.float32) * 3 + 1
+                            + np.logical_or(np.logical_not(data), np.logical_and(data, 0))[:, None, :]).reshape(4, 3)
                 generations.append((data, expected))
             xonotic_boolean = truth_storage, observations, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
