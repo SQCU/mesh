@@ -675,23 +675,25 @@ static BNNSNDArrayDescriptor bnns_operand(struct mesh_view v) {
     .data=(char *)e->address+v.offset*scalar_bytes(e->shape.scalar),
     .data_type=e->shape.scalar==MESH_F16?BNNSDataTypeFloat16:BNNSDataTypeFloat32};
 }
-/* design/algorithm-sources.md#kernelsexpression */
-static int cpu_part(MeshFunction *f,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,size_t first,size_t count) {
+/* design/algorithm-sources.md#kernelsdot */
+struct mesh_matrix_part { struct mesh_view x,y,z; };
+/* design/algorithm-sources.md#kernelsdot */
+static int cpu_part(MeshFunction *f,const struct mesh_matrix_part *parts,size_t count,float alpha) {
+  struct mesh_view x=parts[0].x,y=parts[0].y,z=parts[0].z;
 
   if(x.tensor->extents[x.extent].shape.scalar==MESH_F32 && y.tensor->extents[y.extent].shape.scalar==MESH_F32 && z.tensor->extents[z.extent].shape.scalar==MESH_F32){
 
     struct gemm {const float *a,*b;float *c;__LAPACK_int m,n,k,lda,ldb,ldc;enum CBLAS_TRANSPOSE tx,ty;};
     NSMutableData *calls=[NSMutableData new];
-    for(size_t at=first,left=count;left;){
-      size_t row=at/z.columns,column=at%z.columns,nr=1,nc=MIN(left,z.columns-column);
-      if(!column && left>=z.columns){nr=left/z.columns;nc=z.columns;}
+    for(size_t i=0;i<count;i++){
+      struct mesh_view x=parts[i].x,y=parts[i].y,z=parts[i].z;
       BOOL tx=x.column_stride!=1,ty=y.column_stride!=1;
-      struct gemm g={.a=(float *)x.tensor->extents[x.extent].address+x.offset+row*x.row_stride,
-        .b=(float *)y.tensor->extents[y.extent].address+y.offset+column*y.column_stride,
-        .c=(float *)z.tensor->extents[z.extent].address+z.offset+at,
-        .m=(__LAPACK_int)nr,.n=(__LAPACK_int)nc,.k=(__LAPACK_int)x.columns,.lda=(__LAPACK_int)(tx?x.column_stride:x.row_stride),
+      struct gemm g={.a=(float *)x.tensor->extents[x.extent].address+x.offset,
+        .b=(float *)y.tensor->extents[y.extent].address+y.offset,
+        .c=(float *)z.tensor->extents[z.extent].address+z.offset,
+        .m=(__LAPACK_int)z.rows,.n=(__LAPACK_int)z.columns,.k=(__LAPACK_int)x.columns,.lda=(__LAPACK_int)(tx?x.column_stride:x.row_stride),
         .ldb=(__LAPACK_int)(ty?y.column_stride:y.row_stride),.ldc=(__LAPACK_int)z.row_stride,.tx=tx?CblasTrans:CblasNoTrans,.ty=ty?CblasTrans:CblasNoTrans};
-      [calls appendBytes:&g length:sizeof g];at+=nr*nc;left-=nr*nc;
+      [calls appendBytes:&g length:sizeof g];
     }
     f.execute=^(MeshFunction *function){
       const struct gemm *g=calls.bytes;
@@ -704,16 +706,12 @@ static int cpu_part(MeshFunction *f,struct mesh_view x,struct mesh_view y,struct
   struct gemm {BNNSNDArrayDescriptor a,b,c;};
   NSMutableData *calls=[NSMutableData new];size_t workspaceSize=1;
   BOOL tx=x.column_stride!=1,ty=y.column_stride!=1;
-  for(size_t at=first,left=count;left;){
-    size_t row=at/z.columns,column=at%z.columns,nr=1,nc=MIN(left,z.columns-column);
-    if(!column && left>=z.columns){nr=left/z.columns;nc=z.columns;}
-    struct gemm g={bnns_operand(mesh_view_slice(x,row,0,nr,x.columns)),
-      bnns_operand(mesh_view_slice(y,0,column,y.rows,nc)),
-      bnns_operand(mesh_view_slice(z,row,column,nr,nc))};
+  for(size_t i=0;i<count;i++){
+    struct gemm g={bnns_operand(parts[i].x),bnns_operand(parts[i].y),bnns_operand(parts[i].z)};
     ssize_t bytes=BNNSMatMulWorkspaceSize(tx,ty,alpha,&g.a,&g.b,&g.c,NULL);
     if(bytes<0)return EINVAL;
     workspaceSize=MAX(workspaceSize,(size_t)bytes);
-    [calls appendBytes:&g length:sizeof g];at+=nr*nc;left-=nr*nc;
+    [calls appendBytes:&g length:sizeof g];
   }
   NSMutableData *workspace=[NSMutableData dataWithLength:workspaceSize];
   if(!workspace)return ENOMEM;
@@ -786,6 +784,7 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
   f.operands=@[a.lookup[[NSValue valueWithPointer:&x.tensor->extents[x.extent]]],a.lookup[[NSValue valueWithPointer:&y.tensor->extents[y.extent]]],a.lookup[[NSValue valueWithPointer:out]]];
   BOOL dense=z.column_stride==1;
   size_t columns=dense?z.columns:z.rows;
+  NSMutableData *parts=[NSMutableData new];
   NSMutableArray<MPSMatrixMultiplication *> *products=[NSMutableArray new];
   NSMutableArray<NSArray<MPSMatrix *> *> *matrices=[NSMutableArray new];
   NSMutableArray *rectangles=[NSMutableArray new];NSMutableDictionary *features=[NSMutableDictionary new];
@@ -795,6 +794,9 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
     size_t zr=dense?row:column,zc=dense?column:row,rr=dense?nr:nc,cc=dense?nc:nr;
     struct mesh_view xv=mesh_view_slice(x,zr,0,rr,x.columns);
     struct mesh_view yv=mesh_view_slice(y,0,zc,y.rows,cc);
+    struct mesh_view zv=mesh_view_slice(z,zr,zc,rr,cc);
+    struct mesh_matrix_part part={xv,yv,zv};
+    [parts appendBytes:&part length:sizeof part];
     dependencies(f.dependencies,xv);dependencies(f.dependencies,yv);
     if(!a.cpu && a.coremlPython) {
       NSError *error=nil;MLMultiArray *left=native_array(xv,&error),*right=native_array(yv,&error);
@@ -805,7 +807,6 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
       [rectangles addObject:@[@(rr),@(cc),@(x.columns),@(xv.tensor->extents[xv.extent].shape.scalar==MESH_F16),@(yv.tensor->extents[yv.extent].shape.scalar==MESH_F16)]];
     } else if(!a.cpu) {
       BOOL tx=xv.column_stride!=1,ty=yv.column_stride!=1;
-      struct mesh_view zv=mesh_view_slice(z,zr,zc,rr,cc);
       [matrices addObject:@[matrix(f.operands[0],xv,tx),matrix(f.operands[1],yv,ty),matrix(f.operands[2],zv,NO)]];
       [products addObject:[[MPSMatrixMultiplication alloc]initWithDevice:a.device transposeLeft:tx transposeRight:ty resultRows:rr resultColumns:cc interiorColumns:x.columns alpha:alpha beta:0]];
     }
@@ -815,7 +816,7 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
   bind_dependencies(f);
   if(a.cpu) {
     f->executionKind=MESH_EXECUTION_CPU;
-    int error=cpu_part(f,x,y,z,alpha,first,count);if(error)return error;
+    int error=cpu_part(f,parts.bytes,parts.length/sizeof(struct mesh_matrix_part),alpha);if(error)return error;
   } else if(a.coremlPython) {
     f->executionKind=MESH_EXECUTION_COREML;
     int error=native_part(a,f,rectangles,features,z,first,count,alpha);if(error)return error;

@@ -37,7 +37,7 @@ The JAX authors, [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/
 
 ## kernels.dot
 
-Dongarra, Du Croz, Hammarling and Duff, *A Set of Level 3 Basic Linear Algebra Subprograms*, ACM TOMS 1990; Apple, MPSMatrixMultiplication, Accelerate/BNNS and Core ML: existing numerical matrix operations compute the configured contraction contributions. The JAX authors, [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation): each K contribution writes separate storage and addition combines contributions.
+Dongarra, Du Croz, Hammarling and Duff, *A Set of Level 3 Basic Linear Algebra Subprograms*, ACM TOMS 1990; Apple, MPSMatrixMultiplication, Accelerate/BNNS and Core ML: existing numerical matrix operations compute the configured contraction contributions. Contraction setup derives each partial’s relative input/output views once, together with its input dependencies. BLAS and BNNS bind those same views instead of separately reconstructing rectangles from output offsets; MPS and Core ML use the same setup traversal. Numerical calls retain their prebound dimensions, strides, storage and workspace. This does not yet change their fixed physical bindings or receive-buffer reuse. The JAX authors, [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation): each K contribution writes separate storage and addition combines contributions.
 
 PyTorch DTensor authors, `Partial` placement, and the Legion authors, reduction privileges: setup-only `Partial` records required and present contribution sets. Duplicate terms are rejected; addition clears the marker only when all required terms are present. Nonlinear public kernel calls reject unfinished sums.
 
