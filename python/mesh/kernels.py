@@ -449,7 +449,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
 # design/algorithm-sources.md#segmented-indexed-add
 def _group_ordinals(program, keys, source_block_rows, ordinal_origin=0, candidate_origin=0):
     size = sum(ref.shape[0] * ref.shape[1] for ref in keys)
-    grouped = program.tensor((1, 8 * size), dtype=np.uint32)[0, 0]
+    grouped = program.tensor((1, 8 * size + 1), dtype=np.uint32)[0, 0]
 
     # design/algorithm-sources.md#segmented-indexed-add
     def body(metal):
@@ -488,7 +488,8 @@ def _group_ordinals(program, keys, source_block_rows, ordinal_origin=0, candidat
           if(key!=0xffffffffu && (i+1=={size} || key!={out}[i+1])){out}[{5*size}+2*(inclusive-1)+1]=i+1;
           if(i<{size}){out}[{7*size}+i]=key==0xffffffffu?0xffffffffu:{out}[{size}+i]/{source_block_rows}-{candidate_origin};
           segments+=total;
-        }}''')
+        }}
+        if(!lane){out}[{8*size}]=segments;''')
         return '\n'.join(lines)
 
     _compiled_region(program, tuple(keys), grouped, body)
@@ -591,7 +592,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             for index, tensor in enumerate(operands))
         _ExpressionKernel((key_expression,)).bind(program, reads, (keys,))
         directory, count = _group_ordinals(program, (keys,), chunk_rows, begin, begin // chunk_rows)
-        partials = program.tensor((count, features), (1, output.block_shape[1]),
+        partials = program.tensor((min(count, base.shape[0]), features), (1, output.block_shape[1]),
             dtype=np.float32 if base.dtype.kind == 'f' else base.dtype)
         chunks.append((directory, count, partials))
         ordinal_view = directory.slice(0, count, 1, count)
@@ -657,7 +658,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             directories[coverage] = _routing_directory(program, chunks, coverage)
         owners, reverse_keys, reverse_ordinals, offsets = directories[coverage]
         candidates = tuple(partials.region(segment, column, 1, width)
-            for _, count, partials in chunks for segment in range(count))
+            for _, _, partials in chunks for segment in range(partials.shape[0]))
         route, table = _routing_domain(program, owners, reverse_keys, reverse_ordinals, offsets, candidates, len(regions))
         for consumer, (row, target) in enumerate(regions):
             initial = base.region(row, column, *target.shape)
@@ -687,9 +688,9 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
 
 # design/algorithm-sources.md#shared-sparse-routing-lowering
 def _routing_directory(program, chunks, coverage):
-    total = sum(count for _, count, _ in chunks)
+    total = sum(partials.shape[0] for _, _, partials in chunks)
     metadata = program.tensor((1, 2 * total), dtype=np.uint32)[0, 0]
-    keys = tuple(directory.slice(0, 4 * count, 1, count) for directory, count, _ in chunks)
+    keys = tuple(directory.slice(0, 4 * count, 1, partials.shape[0]) for directory, count, partials in chunks)
 
     # design/algorithm-sources.md#shared-sparse-routing-lowering
     def owner_source(metal):
