@@ -2418,3 +2418,34 @@ invocation cache lookup is introduced. Sharing does not fuse the E×D product
 with its row reduction; that requires a shared expression representation that
 retains an explicit indexed iteration domain instead of inferring it from scalar
 load coordinates. Operational comparisons use the unchanged neighborhood fixture.
+
+## Explicit index vector domains
+
+The JAX authors' [Pallas vector indexing design](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+constructs index vectors with `arange` and combines them with masks and indexed
+loads. `kernels.arange(length, tile=None)` supplies the same explicit local
+row-vector domain without allocating a tensor: logical shape (1,length), tile
+(1,tile), signed int64 values from zero through length minus one. Setup accepts
+positive integral lengths and tiles, bounds length by int64, and caps the tile
+at length. Ordinary pointwise use requires the vector's length to match the
+local output width; it does not infer a vector from a scalar output.
+
+The `index_vector` expression leaf retains length, tile and offset. Shared
+`_ExpressionRegions.layout` propagates its domain through indexed loads and
+pointwise arithmetic. Row reduction splits that domain by the retained tile,
+lowers each vector to its actual region length and offset, and emits a direct
+indexed partial sum. The final ragged tile therefore retains its exact width.
+The scalar emitter uses the leaf's length to size reduction loops and its offset
+to emit coordinates. Dynamic selector generation uses that same width, while
+static indexed-access specialization evaluates the same integer coordinates.
+Masks and selected original source references retain their normal dependencies.
+
+This permits a sum of indexed products to produce FP32 scalar partials directly,
+without allocating the full product vector as numerical intermediate storage.
+The existing shared reduction owner still combines partials and preserves
+integer accumulation and declared final dtype. Selectors, scalar partials and
+launches remain setup costs; there is no new numerical backend or neighborhood
+specialization. The retained neighborhood workflow's width-three, tile-two
+case exercises multiple partials and a ragged tail using the same caller and
+operational observer. Source compilation and diff checks cover this increment;
+operational validation remains in that existing workflow.

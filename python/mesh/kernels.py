@@ -240,6 +240,8 @@ def _static_value(node, inputs, rows, columns, coordinate):
         return rows
     if node.operation == 'column':
         return columns
+    if node.operation == 'index_vector':
+        return columns + node.value[2]
     if node.operation == 'program_id':
         return np.full(rows.shape, coordinate[node.value], dtype=np.int64)
     if node.operation == 'literal':
@@ -308,6 +310,8 @@ def _specialize_accesses(expression, inputs, output, coordinate):
                 value = inputs[node.value].shape[1]
             elif node.operation == 'column':
                 value = output.shape[1]
+            elif node.operation == 'index_vector':
+                value = node.value[0]
             elif node.operation in ('row', 'sum'):
                 value = 1
             else:
@@ -413,6 +417,16 @@ def indices():
     return _Expression('row'), _Expression('column')
 
 
+# design/algorithm-sources.md#explicit-index-vector-domains
+def arange(length, *, tile=None):
+    import operator
+    length = operator.index(length)
+    tile = length if tile is None else operator.index(tile)
+    if length <= 0 or tile <= 0 or length > np.iinfo(np.int64).max:
+        raise ValueError('Index vector length and tile must be positive within the int64 domain')
+    return _Expression('index_vector', value=(length, min(tile, length), 0))
+
+
 # design/algorithm-sources.md#dynamic-indexed-expression-lowering
 def program_id(axis):
     return _Expression('program_id', value=axis)
@@ -503,6 +517,8 @@ class _ExpressionKernel:
                     nonlocal selector_width
                     if part.operation == 'input':
                         selector_width = max(selector_width, reads[part.value].shape[1])
+                    elif part.operation == 'index_vector':
+                        selector_width = max(selector_width, part.value[0])
                     for child in part.operands:
                         selector_shape(child)
 
@@ -570,6 +586,8 @@ class _ExpressionKernel:
                 width = ref.shape[1]
             elif node.operation == 'column':
                 width = output.shape[1]
+            elif node.operation == 'index_vector':
+                width = node.value[0]
             elif node.operation == 'row':
                 width = 1
             elif node.operation == 'sum':
@@ -595,6 +613,8 @@ class _ExpressionKernel:
                     return '((long)r)' if metal else '((int64_t)r)'
                 if part.operation == 'column':
                     return f'((long)({column}))' if metal else f'((int64_t)({column}))'
+                if part.operation == 'index_vector':
+                    return f'((int64_t)({column})+{part.value[2]}ll)'
                 if part.operation == 'sum':
                     return f'(({"long" if metal else "int64_t"}){names[part]})' if output.dtype.kind in 'ib' else names[part]
                 ref = inputs[part.value]
@@ -703,7 +723,7 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
 
 # design/algorithm-sources.md#shared-scalar-load-emission
 def _emit_scalar_expression(node, inputs, metal, resolve):
-    if node.operation in ('input', 'row', 'column', 'sum'):
+    if node.operation in ('input', 'row', 'column', 'sum', 'index_vector'):
         return resolve(node, ())
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
     if node.operation == 'load':
@@ -726,7 +746,7 @@ def _expression_dtype(node, inputs):
         return np.dtype('float32')
     if node.operation in ('<', '<=', '>', '>=', '=='):
         return np.dtype('bool')
-    if node.operation in ('row', 'column', 'program_id'):
+    if node.operation in ('row', 'column', 'program_id', 'index_vector'):
         return np.dtype('int64')
     if node.operation == 'literal':
         return np.dtype('int32' if isinstance(node.value, bool) else 'float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
@@ -1278,6 +1298,8 @@ class _ExpressionRegions:
             source = self.sources[node.value]
             shape = source.shape
             result = shape, (self.whole[node.value],) * 2, source.block_shape if self.whole[node.value] else shape
+        elif node.operation == 'index_vector':
+            result = (1, node.value[0]), (False, False), (1, node.value[1])
         elif node.operation in ('literal', 'program_id', 'row', 'column'):
             result = (1, 1), (False, False), (1, 1)
         elif node.operation == 'cast':
@@ -1486,6 +1508,8 @@ class _ExpressionRegions:
             if node.operation == 'load':
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
                 return _Expression('load', tuple(lower(child, accumulation) for child in node.operands), symbol.value)
+            if node.operation == 'index_vector':
+                return node if external else _Expression('index_vector', value=(shape[1], shape[1], node.value[2] + origin[1]))
             if node.operation in ('row', 'column') and not external:
                 axis = 0 if node.operation == 'row' else 1
                 return node + origin[axis]
