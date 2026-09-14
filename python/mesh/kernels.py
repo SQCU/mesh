@@ -1087,8 +1087,12 @@ def _requires_regions(node):
 def _bind_operation(program, operation, inputs, target, *, alpha=1, beta=0):
     from . import check, Partial
     from ._native import View
-    check(program.native.algebra_bind(program.handle, operation, inputs[0].view,
-        inputs[1].view if len(inputs) == 2 else View(), target.view, alpha, beta))
+    binding = program._functions.get(dot)
+    if binding is None:
+        check(program.native.algebra_bind(program.handle, operation, inputs[0].view,
+            inputs[1].view if len(inputs) == 2 else View(), target.view, alpha, beta))
+    else:
+        binding(program, inputs, (target,))
     target.partial = Partial.merge(inputs)
 
 

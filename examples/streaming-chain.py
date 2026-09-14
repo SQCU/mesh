@@ -36,19 +36,20 @@ def main():
         from mesh import check
         from mesh._native import View
         library = C.CDLL(args.numerics)
-        native_add = library.gemma_mesh_add
-        native_add.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
-        native_add.restype = C.c_int32
+        for kernel, symbol in ((kernels.add, 'gemma_mesh_add'), (kernels.dot, 'gemma_mesh_mps_dot')):
+            native = getattr(library, symbol)
+            native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
+            native.restype = C.c_int32
 
-        # design/algorithm-sources.md#programkernel_call
-        def bind_add(program, inputs, outputs):
-            refs = (*inputs, *outputs)
-            if len(inputs) != 2 or len(outputs) != 1 or any(ref.dtype != inputs[0].dtype for ref in refs):
-                raise TypeError('The supplied addition requires two inputs and one output of one dtype')
-            scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
-            check(native_add(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
+            # design/algorithm-sources.md#programkernel_call
+            def bind(program, inputs, outputs, native=native):
+                refs = (*inputs, *outputs)
+                if len(inputs) != 2 or len(outputs) != 1 or any(ref.dtype != inputs[0].dtype for ref in refs):
+                    raise TypeError('The supplied numerical function requires two inputs and one output of one dtype')
+                scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
+                check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
 
-        functions[kernels.add] = bind_add
+            functions[kernel] = bind
     with Program(backend=args.backend, region=args.region, functions=functions) as program:
         shard = slice(0, args.split) if program.node == args.root else slice(args.split, weights[0].shape[1])
         weights = (weights[0][:, shard], weights[1][shard, :])
