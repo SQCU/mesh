@@ -20,13 +20,20 @@ Retained examples and the planner no longer invoke the deleted host numerical
 scan. Peer examples sleep for process shutdown signals while native execution
 runs independently; terminal-result observation remains a host concern.
 
-The obsolete tensor runtime's persistent policy, remote graph protocol, and
-worker entry point were deleted. No replacement runtime or compatibility shim
-was introduced. The higher-level strategy execution module still names the
-deleted policy adapter and requires a real composition migration before use.
+The obsolete tensor runtime's persistent policy, remote graph protocol, worker,
+strategy execution, learner, and responder entry points were deleted. No
+replacement runtime or compatibility shim was introduced. Their numerical
+model/compiler source and the canonical planner/Frames callers remain.
 
-Remaining compiler limitations are explicit: kernel_calls still binds one
-whole region per operand and lowers every graph node locally even if its graph
-owner names another peer. General BlockSpec region lowering and preservation
-of that ownership belong to the retained compiler migration, not a second
-remote graph scheduler. The gold distributed chain remains outstanding.
+The compiler preserves graph owner-to-peer mappings. Distributed realization
+passes the same `root_peer` on each participant; root owner zero maps to that
+peer, and named graph regions retain their declared peers. Cross-owner values
+have explicit destination tensors and `Program.copy` edges. Replica reuse is
+keyed by value ID and destination peer. Each declared output is allocated by
+`kernel_call` on every participant, while `peer` selects its numerical executor
+at setup. There is no remote graph scheduler.
+
+General region compiler lowering remains: kernel_calls still binds one whole
+region per operand. The canonical kernel_call retains the declared block
+partition exactly; the earlier implicit contiguous coalescing was removed.
+The gold distributed chain is tracked independently of this source audit.

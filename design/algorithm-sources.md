@@ -732,3 +732,13 @@ constructing an operand array or staging output. The ILP64 interface retains
 64-bit dimensions instead of silently truncating the configured size to int.
 This source conclusion covers mesh-owned storage and calls, not private packing
 inside the BLAS implementation.
+
+The same explicit-operand rule applies to placement. `kernel_calls` resolves
+owner zero from its `root_peer` setup argument and other owners from retained
+graph-region peer declarations. A cross-owner value has an explicitly allocated
+replica indexed by `(value ID, destination peer)` and a canonical copy edge.
+Declared output allocations are identical on each participant; the public
+`kernel_call(peer=...)` parameter configures numerical execution only on its
+owner. Transposed replica views retain the source orientation. No graph protocol
+or second numerical scheduler is involved. Distributed callers pass the same
+root-peer identity and graph to all participants during setup.

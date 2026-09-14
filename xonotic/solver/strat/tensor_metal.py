@@ -380,7 +380,7 @@ def source(graph):
 
 
 # ../../../design/algorithm-sources.md#application-metal-kernels
-def kernel_calls(program, graph, capacity, inputs):
+def kernel_calls(program, graph, capacity, inputs, *, root_peer=None):
     from mesh import BlockSpec, ShapeDtypeStruct
     from mesh.kernels import Metal, MetalDispatch
     import math
@@ -391,20 +391,42 @@ def kernel_calls(program, graph, capacity, inputs):
     constants = {value.index: data for value, data in graph.constants.values()}
     by_node = {item['node']: item for item in operations}
     tensors = dict(inputs)
-    for value, operation, values, _, _ in graph.nodes:
+    peers = {0: program.node if root_peer is None else root_peer}
+    peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
+    owners = {value.index: peers[owner] for value, _, _, _, owner in graph.nodes}
+    replicas = {}
+    for value, operation, values, _, owner in graph.nodes:
+        peer = peers[owner]
         if value.index in tensors:
             continue
         if operation in ('reshape', 'stop_gradient'):
             tensors[value.index] = tensors[values[0].index]
+            owners[value.index] = owners[values[0].index]
             continue
         if operation == 'constant':
             shape = shapes[value.index]
             storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)
             tensor = program.tensor(storage_shape, dtype=value.dtype)
             data = constants[value.index]
-            program.constant(tensor[0, 0], data.reshape(storage_shape))
+            if program.node == peer:
+                program.constant(tensor[0, 0], data.reshape(storage_shape))
             tensors[value.index] = tensor
             continue
+        local = {}
+        for operand in values:
+            tensor = tensors[operand.index]
+            sender = owners[operand.index]
+            if sender != peer:
+                key = (operand.index, peer)
+                if key not in replicas:
+                    transposed = tensor[0, 0].view.row_stride == 1 and tensor[0, 0].view.column_stride != 1
+                    backing = tensor.T if transposed else tensor
+                    replica = program.tensor(backing.shape, block_shape=backing.block_shape, dtype=backing.dtype)
+                    replica = replica.T if transposed else replica
+                    program.copy(tensor.on(sender), replica.on(peer))
+                    replicas[key] = replica
+                tensor = replicas[key]
+            local[operand.index] = tensor
         item = by_node[value.index]
         shape = shapes[value.index]
         size = math.prod(shape)
@@ -419,7 +441,7 @@ def kernel_calls(program, graph, capacity, inputs):
             if operand.index == value.index:
                 physical = None
             else:
-                tensor = tensors[operand.index]
+                tensor = local[operand.index]
                 physical = tensor.region(0, 0, *tensor.shape).array.view()
                 physical.shape = operand_shape
             stride = 1
@@ -448,8 +470,8 @@ def kernel_calls(program, graph, capacity, inputs):
         dispatches.append(MetalDispatch(item['name'], tuple(max(1, v) for v in grid), (threads, 1, 1), argument_buffer=4))
         kernel = Metal(text, tuple(dispatches), (bytes((View * len(views))(*views)),
             bytes((c.c_uint64 * max(1, len(capacity)))(*capacity)), b'\0', bytes((c.c_uint32 * len(arguments))(*arguments))))
-        operands = tuple(tensors[v.index] for v in bound[:-1])
-        tensors[value.index] = program.kernel_call(kernel, grid=(1,),
+        operands = tuple(local[v.index] for v in bound[:-1])
+        tensors[value.index] = program.kernel_call(kernel, grid=(1,), peer=peer,
             in_specs=tuple(BlockSpec(t.shape, lambda i: (0, 0)) for t in operands),
             out_specs=BlockSpec(storage_shape, lambda i: (0, 0)),
             out_shape=ShapeDtypeStruct(storage_shape, value.dtype))(*operands)
