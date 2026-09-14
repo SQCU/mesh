@@ -35,6 +35,16 @@ class Event(C.Structure):
     _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind', 'input_maps')]
 
 
+class Transfer(C.Structure):
+    _fields_ = [(name, U) for name in ('local_row', 'local_page', 'peer_row', 'peer_page',
+        'binding', 'offset', 'plane', 'index', 'bytes', 'peer_index')]
+
+
+class TransferEvent(C.Structure):
+    _fields_ = [('queue', U), ('direction', U), ('transfer', Transfer)]
+    _fields_ += [(name, C.c_uint64) for name in ('ready_ns', 'post_ns', 'cq_ns', 'occurrences')]
+
+
 class Report(C.Structure):
     _fields_ = [(k, C.c_uint64) for k in ('submitted', 'completed',
         'native_submitted', 'native_backings', 'ne_planned_operations')]
@@ -89,9 +99,11 @@ class Native:
             'mesh_algebra_trace': (Event, [P, Z]),
             'mesh_algebra_trace_input': (RowRange, [P, Z, Z]),
             'mesh_algebra_report': (Report, [P]),
+            'mesh_transfer_trace_count': (Z, [P]),
+            'mesh_transfer_trace': (TransferEvent, [P, Z]),
         }
         for name, (result, arguments) in signatures.items():
-            library = self.runtime if name in ('mesh_context', 'mesh_attach', 'mesh_detach') else self.algebra
+            library = self.runtime if name in ('mesh_context', 'mesh_attach', 'mesh_detach', 'mesh_transfer_trace_count', 'mesh_transfer_trace') else self.algebra
             function = getattr(library, name)
             function.restype, function.argtypes = result, arguments
             setattr(self, name.removeprefix('mesh_'), function)

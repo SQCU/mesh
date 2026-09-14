@@ -337,6 +337,29 @@ class Program:
         return self
 
     @property
+    # design/algorithm-sources.md#region-expression-fusion
+    def trace(self):
+        result = []
+        for index in range(self.native.algebra_trace_count(self.handle)):
+            event = self.native.algebra_trace(self.handle, index)
+            item = {name: getattr(event, name) for name, _ in event._fields_}
+            inputs = (self.native.algebra_trace_input(self.handle, index, i) for i in range(event.input_maps))
+            item['inputs'] = tuple(dict(first=region.first, count=region.count) for region in inputs)
+            result.append(item)
+        return tuple(result)
+
+    @property
+    # design/algorithm-sources.md#publication-work-lists
+    def transfer_trace(self):
+        result = []
+        for index in range(self.native.transfer_trace_count(self.context)):
+            event = self.native.transfer_trace(self.context, index)
+            item = {name: getattr(event, name) for name, _ in event._fields_ if name != 'transfer'}
+            item['transfer'] = {name: getattr(event.transfer, name) for name, _ in event.transfer._fields_}
+            result.append(item)
+        return tuple(result)
+
+    @property
     # design/algorithm-sources.md#indexed-library-functions
     def report(self):
         return self.native.algebra_report(self.handle)
