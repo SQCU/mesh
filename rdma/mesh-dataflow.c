@@ -400,7 +400,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
         if(at>=mesh_blocks(m)){ error=ENOSPC; break; }
         uint64_t remaining=b->bytes-(uint64_t)k*m->pgsz,maximum=(uint64_t)block*m->pgsz;
         uint32_t bytes=(uint32_t)(((remaining<maximum?remaining:maximum)+4095)/4096*4096);
-        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.peer_index=MESH_ABSENT,.binding=b->binding,.offset=k,.plane=b->plane,.index=at,.bytes=bytes};
+        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.binding=b->binding,.offset=k,.plane=b->plane,.bytes=bytes};
         atomic_store_explicit(length,at+1,memory_order_release);
       }
     }

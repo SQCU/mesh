@@ -9,8 +9,8 @@ struct mesh_send_edge {uint32_t queue,index,next;};
 struct mesh_ready {uint32_t head,tail;};
 struct mesh_hold { uint32_t rows,pages; };
 struct mesh_queue { struct mesh_posted posted[QD]; uint32_t head,tail,next,frames; };
-struct mesh_pending { struct mesh_transfer entries[QD]; uint32_t head,tail; };
-struct mesh_index_frame { uint32_t queue,count; struct mesh_transfer entries[(MESH_INDEX_BYTES-8)/sizeof(struct mesh_transfer)]; };
+struct mesh_pending { uint32_t entries[QD]; uint32_t head,tail; };
+struct mesh_index_frame { uint32_t queue,count; uint32_t entries[(MESH_INDEX_BYTES-8)/sizeof(uint32_t)]; };
 struct mesh_worker { struct mesh_link *link; pthread_t thread; uint32_t direction; };
 struct mesh_link {
   struct mesh_worker workers[2];
@@ -81,19 +81,18 @@ static int link_configure(void *state,int socket,uint64_t client){
       fprintf(stderr,"transfer count mismatch queue=%u local=%u,%u peer=%u,%u\n",q,sends,receives,peer_counts[MESH_SEND],peer_counts[MESH_RECEIVE]);
       errno=EPROTO;return -1;
     }
-    struct mesh_transfer *destinations=calloc(sends?sends:1,sizeof *destinations);
-    if(!destinations)return -1;
+    struct mesh_transfer *peer_bindings=calloc(sends?sends:1,sizeof *peer_bindings);
+    if(!peer_bindings)return -1;
     struct mesh_transfer *out=mesh_transfers(m,q,MESH_SEND),*in=mesh_transfers(m,q,MESH_RECEIVE);
-    int error=exchange(socket,in,destinations,receives*sizeof *in,sends*sizeof *destinations,m,client);
+    int error=exchange(socket,in,peer_bindings,receives*sizeof *in,sends*sizeof *peer_bindings,m,client);
     for(uint32_t i=0;i<sends && !error;i++){
-      struct mesh_transfer target=destinations[i];
+      struct mesh_transfer target=peer_bindings[i];
       if(out[i].binding!=target.binding || out[i].offset!=target.offset || out[i].bytes!=target.bytes){
         fprintf(stderr,"transfer mismatch queue=%u index=%u local=%u,%u,%u peer=%u,%u,%u\n",q,i,out[i].binding,out[i].offset,out[i].bytes,target.binding,target.offset,target.bytes);
         errno=EPROTO;error=-1;break;
       }
-      out[i].peer_row=target.local_row;out[i].peer_page=target.local_page;out[i].peer_index=target.index;
     }
-    free(destinations);if(error)return error;
+    free(peer_bindings);if(error)return error;
     for(int d=0;d<2;d++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,q,d));i++){
       uint32_t frames=mesh_transfers(m,q,d)[i].bytes/4096;
       if(frames>link->provider.capacity[q][d]){
@@ -134,9 +133,10 @@ static void link_receive(void *state,uint32_t q){
     } else {
       struct mesh_pending *pending=&link->pending[q];
       if(pending->head==pending->tail)return;
-      struct mesh_transfer t=pending->entries[pending->head%QD];
-      if(t.bytes/4096>link->provider.capacity[q][MESH_RECEIVE]-in->frames || !mesh_receive_postable(M,t.peer_row))return;
-      struct mesh_posted entry={.row=t.peer_row,.page=t.peer_page,.index=t.peer_index,.bytes=t.bytes};
+      uint32_t index=pending->entries[pending->head%QD];
+      struct mesh_transfer t=mesh_transfers(M,q,MESH_RECEIVE)[index];
+      if(t.bytes/4096>link->provider.capacity[q][MESH_RECEIVE]-in->frames || !mesh_receive_postable(M,t.local_row))return;
+      struct mesh_posted entry={.row=t.local_row,.page=atomic_load_explicit(&mesh_page(M)[t.local_row],memory_order_acquire),.index=index,.bytes=t.bytes};
       mesh_receive_posted(M,entry.row,entry.page);
       if(link_post(link,q,MESH_RECEIVE,entry)){mesh_receive_complete(M,entry.row,entry.page,0);return;}
       pending->head++;
@@ -144,15 +144,15 @@ static void link_receive(void *state,uint32_t q){
   }
 }
 /* design/algorithm-sources.md#programcopy */
-static void link_hold(struct mesh_link *link,uint32_t q,const struct mesh_transfer *transfer){
+static void link_hold(struct mesh_link *link,uint32_t q,struct mesh_posted entry){
   struct hdr *m=link->M;
-  link->active[(size_t)q*mesh_blocks(m)+transfer->index]=1;
+  link->active[(size_t)q*mesh_blocks(m)+entry.index]=1;
   for(uint32_t i=0;i<m->block;i++){
-    link->holds[transfer->local_row+i].rows++;
-    link->holds[transfer->local_page+i].pages++;
+    link->holds[entry.row+i].rows++;
+    link->holds[entry.page+i].pages++;
   }
-  mesh_bits_set(m,MESH_ROW_HOT,transfer->local_row,m->block);
-  mesh_bits_set(m,MESH_PAGE_HOT,transfer->local_page,m->block);
+  mesh_bits_set(m,MESH_ROW_HOT,entry.row,m->block);
+  mesh_bits_set(m,MESH_PAGE_HOT,entry.page,m->block);
 }
 /* design/algorithm-sources.md#programcopy */
 static void link_release(struct mesh_link *link,uint32_t q,struct mesh_posted entry){
@@ -185,18 +185,19 @@ static void link_send_ready(struct mesh_link *link,uint32_t q){
       if(previous==MESH_ABSENT)ready->head=next;
       else link->ready_next[(size_t)q*mesh_blocks(M)+previous]=next;
       if(ready->tail==index)ready->tail=previous;
-      link->queued[key]=0;frame->entries[frame->count++]=transfers[index];
+      link->queued[key]=0;frame->entries[frame->count++]=index;
       available-=cost;index=next;
     }
     if(!frame->count)break;
     if(link_post(link,iq,MESH_SEND,(struct mesh_posted){.row=slot})){
-      for(uint32_t i=0;i<frame->count;i++)link_ready(link,q,frame->entries[i].index);
+      for(uint32_t i=0;i<frame->count;i++)link_ready(link,q,frame->entries[i]);
       break;
     }
     for(uint32_t i=0;i<frame->count;i++){
-      struct mesh_transfer t=frame->entries[i];
-      link_hold(link,q,&t);
-      struct mesh_posted entry={.row=t.local_row,.page=t.local_page,.plane=t.plane,.index=t.index,.bytes=t.bytes};
+      uint32_t index=frame->entries[i];
+      struct mesh_transfer t=transfers[index];
+      struct mesh_posted entry={.row=t.local_row,.page=atomic_load_explicit(&mesh_page(M)[t.local_row],memory_order_acquire),.plane=t.plane,.index=index,.bytes=t.bytes};
+      link_hold(link,q,entry);
       if(link_post(link,q,MESH_SEND,entry)){link_release(link,q,entry);return;}
     }
   }
@@ -240,8 +241,9 @@ static void mesh_progress(struct mesh_link *link,uint32_t direction){
         struct mesh_pending *pending=&link->pending[frame->queue];
         if(frame->count>QD-(pending->tail-pending->head)){link_error(M,EOVERFLOW,4);continue;}
         for(uint32_t j=0;j<frame->count;j++){
-          struct mesh_transfer t=frame->entries[j];
-          pending->entries[pending->tail++%QD]=t;
+          uint32_t index=frame->entries[j];
+          if(index>=atomic_load(mesh_order_length(M,frame->queue,MESH_RECEIVE))){link_error(M,EPROTO,4);break;}
+          pending->entries[pending->tail++%QD]=index;
         }
         link_receive(link,frame->queue);
       }
