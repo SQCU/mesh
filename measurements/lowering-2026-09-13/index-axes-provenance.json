@@ -1,0 +1,262 @@
+{
+  "runs": [
+    {
+      "prefix": "index-axes-cpu",
+      "source_revision": "8d1be65",
+      "library_revision": "4a31ee6",
+      "caller_revision": "4bce209",
+      "example_revision": "8d1be65",
+      "backend": "cpu",
+      "dtype": "float32",
+      "neighborhood_dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "mapped_feature_tile": 7,
+      "mapped_k_tile": 3,
+      "artifacts": [
+        "index-axes-cpu.jsonl.gz",
+        "index-axes-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.396709,
+        "invocations_per_second": 682.3285325455926,
+        "first_section_ms": 3.156625,
+        "completion_ms": {
+          "count": 3,
+          "mean": 3.814556,
+          "sample_variance": 0.260220553213
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 6712,
+          "completed": 6712,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 6712
+        }
+      },
+      "configured_functions": 3449,
+      "completed_submissions": 6712
+    },
+    {
+      "prefix": "index-axes-metal",
+      "source_revision": "8d1be65",
+      "library_revision": "4a31ee6",
+      "caller_revision": "4bce209",
+      "example_revision": "8d1be65",
+      "backend": "metal",
+      "dtype": "float32",
+      "neighborhood_dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "mapped_feature_tile": 7,
+      "mapped_k_tile": 3,
+      "artifacts": [
+        "index-axes-metal.jsonl.gz",
+        "index-axes-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.155375,
+        "invocations_per_second": 174.87230678431686,
+        "first_section_ms": 14.477583,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.598708666666667,
+          "sample_variance": 1.8208006614583336
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 6712,
+          "completed": 6712,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.023415004,
+          "cpu_submitted": 0
+        }
+      },
+      "configured_functions": 3449,
+      "completed_submissions": 6712
+    },
+    {
+      "prefix": "index-axes-tiled-cpu",
+      "source_revision": "53f5b63",
+      "library_revision": "4a31ee6",
+      "caller_revision": "4bce209",
+      "example_revision": "53f5b63",
+      "backend": "cpu",
+      "dtype": "float32",
+      "neighborhood_dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "mapped_feature_tile": 3,
+      "mapped_k_tile": 3,
+      "artifacts": [
+        "index-axes-tiled-cpu.jsonl.gz",
+        "index-axes-tiled-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.362,
+        "invocations_per_second": 687.7579092159559,
+        "first_section_ms": 3.807459,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.036931,
+          "sample_variance": 0.07860989371300012
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 6760,
+          "completed": 6760,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 6760
+        }
+      },
+      "configured_functions": 3467,
+      "completed_submissions": 6760
+    },
+    {
+      "prefix": "index-axes-tiled-metal",
+      "source_revision": "53f5b63",
+      "library_revision": "4a31ee6",
+      "caller_revision": "4bce209",
+      "example_revision": "53f5b63",
+      "backend": "metal",
+      "dtype": "float32",
+      "neighborhood_dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "mapped_feature_tile": 3,
+      "mapped_k_tile": 3,
+      "artifacts": [
+        "index-axes-tiled-metal.jsonl.gz",
+        "index-axes-tiled-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.668042,
+        "invocations_per_second": 169.79810213265284,
+        "first_section_ms": 14.869042,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.987416666666666,
+          "sample_variance": 2.116069848958332
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 6760,
+          "completed": 6760,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.023363576,
+          "cpu_submitted": 0
+        }
+      },
+      "configured_functions": 3467,
+      "completed_submissions": 6760
+    },
+    {
+      "prefix": "index-axes-tiled-paired-metal",
+      "source_revision": "53f5b63",
+      "library_revision": "4a31ee6",
+      "caller_revision": "4bce209",
+      "example_revision": "53f5b63",
+      "backend": "metal",
+      "dtype": "float16",
+      "neighborhood_dtype": "float32",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "mapped_feature_tile": 3,
+      "mapped_k_tile": 3,
+      "artifacts": [
+        "index-axes-tiled-paired-metal.jsonl.gz",
+        "index-axes-tiled-paired-metal-trace.json.gz",
+        "index-axes-tiled-paired-metal-peer.jsonl.gz",
+        "index-axes-tiled-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.019,
+        "invocations_per_second": 176.27357659086906,
+        "first_section_ms": 13.338667,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.408889333333335,
+          "sample_variance": 1.9482789917963361
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 6075,
+          "completed": 6075,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.02060887,
+          "cpu_submitted": 0
+        }
+      },
+      "configured_functions": 3403,
+      "completed_submissions": 6075
+    }
+  ],
+  "scope": "Allocation-free row/column vector broadcasting, indexed product reduction with K5/tile3 and outputfeatures7/tile3 (final cases), reversed source BlockSpec mapping, streamed nested gather, full U-row vectors across scatterchunks. Existing numerical, withheld-input and reuse checks pass. Mapped expression/gather/scatter rank zero; paired gold/fanout cross RDMA. No optimized matmul replacement or matched speedup claim; expert model nodes remain unmigrated. Peer exited zero after SIGTERM."
+}

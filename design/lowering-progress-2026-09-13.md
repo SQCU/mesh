@@ -1173,3 +1173,37 @@ selectors and launches remain. The public API has a complete indexed-reduction
 example in algorithm-sources.md. Broader vector-axis/shape coverage, expert
 migration, cross-peer neighborhood acceptance and matched end-to-end performance
 remain part of the full nine-step objective.
+
+## Matrix-shaped index domains
+
+Source review of expert contractions identified independent output-feature and
+contraction dimensions as the next representation requirement. `4a31ee6`
+extends the existing index vector with an axis: `.T` flips that metadata without
+allocating a coordinate tensor or a transpose kernel. Shared layout, narrowing,
+static access specialization, selectors and scalar emission retain the axis.
+In scatter updates, column vectors refer to original update ordinals across
+chunks, and row vectors refer to features. Nonsingleton vector masks on either
+axis use contribution masking, not chunk-local scalar routing. Independent
+review confirmed these paths and withdrew an initial incorrect mask concern
+after rereading the current runtime_mask source.
+
+The existing mapped contraction now expresses an indexed product-and-sum with
+broadcast row and column vectors, preserving its reversed source BlockSpec
+mapping. The streamed gather also uses broadcast vectors, and scatter uses a
+full update-row vector. Initial CPU/Metal runs at `8d1be65` pass. `53f5b63`
+then tiles seven output features by three while reducing five contraction
+features by three, covering ragged tails on both axes. Final CPU, Metal and
+paired Metal runs pass numerical comparisons, withheld-input progress and reuse.
+The paired run includes float16 inputs in the indexed matrix expression; its
+neighborhood cases remain float32. Gold/fanout traverse RDMA; the indexed side
+cases run on rank zero.
+
+Raw logs/traces and exact revisions are recorded in
+measurements/lowering-2026-09-13/index-axes-provenance.json, including timing
+count/mean/sample variance. Final local traces configure 3467 functions and
+complete 6760 submissions; paired rank-zero counts are recorded in that artifact.
+These are coverage measurements, not speedup evidence. The indexed matrix
+example is not a replacement for the optimized matmul backend used by serving
+or the gold chain. Expert routing, forward/input/weight derivative caller
+migration and performance acceptance remain open; the matrix-shaped index
+representation needed to express that work is now available and exercised.
