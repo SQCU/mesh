@@ -168,6 +168,13 @@ class _ExpressionKernel:
     # design/algorithm-sources.md#dynamic-indexed-expression-lowering
     def bind_grid(self, program, grid, input_specs, output_specs):
         import itertools
+        if any(value.operation == 'indexed_add' for value in self.values):
+            for value, spec in zip(self.values, output_specs):
+                if value.operation == 'indexed_add':
+                    _lower_indexed_add(program, value, grid, input_specs, spec)
+                else:
+                    _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
+            return
         for coordinate in itertools.product(*(range(size) for size in grid)):
             self.bind(program, tuple(spec.resolve(coordinate) for spec in input_specs),
                 tuple(spec.resolve(coordinate) for spec in output_specs), coordinate)
@@ -392,3 +399,231 @@ class _ExpressionKernel:
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')
         return '\n'.join(lines)
+
+
+# design/algorithm-sources.md#segmented-indexed-add
+def indexed_add(base, destinations, updates, *, mask=True):
+    return _Expression('indexed_add', tuple(map(_literal, (base, destinations, updates, mask))))
+
+
+# design/algorithm-sources.md#segmented-indexed-add
+def _compiled_region(program, inputs, output, body, dynamic_first=None):
+    import ctypes as C
+    from . import check
+    from ._native import View
+    sources = []
+    for metal in (False, True):
+        scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
+                  'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}
+        lines = ['#include <metal_stdlib>\nusing namespace metal;\ntypedef uint uint32_t; typedef ulong uint64_t; typedef long int64_t; typedef int int32_t; typedef uchar uint8_t;' if metal else
+                 '#include <stdint.h>\n#include <stdbool.h>']
+        emitted = body(metal)
+        preamble, statements = emitted if isinstance(emitted, tuple) else ('', emitted)
+        lines.append(preamble)
+        lines.append('#define PREFIX(x) simd_prefix_exclusive_sum(x)\n#define SUM(x) simd_sum(x)\n#define BARRIER threadgroup_barrier(mem_flags::mem_device)' if metal else
+                     '#define PREFIX(x) 0u\n#define SUM(x) (x)\n#define BARRIER ((void)0)')
+        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else
+                     f'void mesh_expression(const uintptr_t *buffers) {{ const uint32_t lane=0; for(uint64_t r=0;r<{output.shape[0]};r++) {{')
+        lines.append(f'const uint32_t lanes={32 if metal else 1};')
+        for index, ref in enumerate((*inputs, output)):
+            if dynamic_first is not None and dynamic_first <= index < len(inputs):
+                continue
+            qualifier = ('device ' if metal else '') + ('const ' if index < len(inputs) else '')
+            dtype = scalar[ref.dtype.kind + str(ref.dtype.itemsize)]
+            lines.append(f'{qualifier}{dtype} *p{index}=({qualifier}{dtype} *)buffers[{index}];')
+        lines.append(statements)
+        lines.append('}' if metal else '}}')
+        sources.append('\n'.join(lines))
+    function = program.native.algebra_trace_count(program.handle)
+    check(program.native.algebra_source(program.handle, *(source.encode() for source in sources),
+        (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), output.view))
+    return function
+
+
+# design/algorithm-sources.md#segmented-indexed-add
+def _group_ordinals(program, keys, source_block_rows, ordinal_origin=0, candidate_origin=0):
+    size = sum(ref.shape[0] * ref.shape[1] for ref in keys)
+    grouped = program.tensor((1, 8 * size), dtype=np.uint32)[0, 0]
+
+    # design/algorithm-sources.md#segmented-indexed-add
+    def body(metal):
+        out = f'p{len(keys)}'
+        lines, origin = [], 0
+        for index, ref in enumerate(keys):
+            count = ref.shape[0] * ref.shape[1]
+            lines.append(f'for(uint32_t i=lane;i<{count};i+=lanes) {{ {out}[{origin}+i]=p{index}[(i/{ref.shape[1]})*{ref.view.row_stride}+(i%{ref.shape[1]})*{ref.view.column_stride}]; {out}[{size+origin}+i]={ordinal_origin+origin}+i; }}')
+            origin += count
+        lines.append('BARRIER;')
+        lines.append(f'for(uint32_t i=lane;i<{size};i+=lanes) {{ {out}[{4*size}+i]=0xffffffffu; {out}[{5*size}+2*i]=0; {out}[{5*size}+2*i+1]=0; }}')
+        lines.append(f'''for(uint32_t shift=0;shift<32;shift+=4) {{
+          uint32_t from=((shift/4)%2)*{2*size},to={2*size}-from;
+          uint32_t counts[16]={{0}},offsets[16],offset=0;
+          for(uint32_t i=lane;i<{size};i+=lanes)counts[({out}[from+i]>>shift)&15]++;
+          for(uint32_t b=0;b<16;b++) {{ offsets[b]=offset; offset+=SUM(counts[b]); }}
+          for(uint32_t tile=0;tile<{size};tile+=lanes) {{
+            uint32_t i=tile+lane,valid=i<{size};
+            uint32_t key=valid?{out}[from+i]:0,ordinal=valid?{out}[from+{size}+i]:0;
+            for(uint32_t b=0;b<16;b++) {{
+              uint32_t match=valid && ((key>>shift)&15)==b;
+              uint32_t rank=PREFIX(match),total=SUM(match);
+              if(match) {{ {out}[to+offsets[b]+rank]=key; {out}[to+{size}+offsets[b]+rank]=ordinal; }}
+              offsets[b]+=total;
+            }}
+          }}
+          BARRIER;
+        }}
+        uint32_t segments=0;
+        for(uint32_t tile=0;tile<{size};tile+=lanes) {{
+          uint32_t i=tile+lane,key=i<{size}?{out}[i]:0xffffffffu;
+          uint32_t head=key!=0xffffffffu && (!i || key!={out}[i-1]);
+          uint32_t slot=segments+PREFIX(head),total=SUM(head);
+          if(head) {{ {out}[{4*size}+slot]=key; {out}[{5*size}+2*slot]=i; }}
+          uint32_t inclusive=slot+head;
+          if(key!=0xffffffffu && (i+1=={size} || key!={out}[i+1])){out}[{5*size}+2*(inclusive-1)+1]=i+1;
+          if(i<{size}){out}[{7*size}+i]=key==0xffffffffu?0xffffffffu:{out}[{size}+i]/{source_block_rows}-{candidate_origin};
+          segments+=total;
+        }}''')
+        return '\n'.join(lines)
+
+    _compiled_region(program, tuple(keys), grouped, body)
+    return grouped, size
+
+
+# design/algorithm-sources.md#segmented-indexed-add
+def _indexed_range(program, function, selector, bounds, first, count):
+    import ctypes as C
+    from . import check
+    check(program.native.algebra_indexed_range(program.handle, function, selector.view, bounds.view,
+        (C.c_size_t * count)(*range(first, first + count)), count))
+
+
+# design/algorithm-sources.md#segmented-indexed-add
+def _candidate_load(refs, first, ordinal, row, column, metal):
+    dtype = refs[0].dtype
+    scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
+              'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t'}[dtype.kind + str(dtype.itemsize)]
+    strides = []
+    declarations = []
+    for name, attribute in (('row_steps', 'row_stride'), ('column_steps', 'column_stride')):
+        values = tuple(getattr(ref.view, attribute) for ref in refs)
+        if len(set(values)) == 1:
+            strides.append(str(values[0]))
+        else:
+            declarations.append(f'{"constant" if metal else "static const"} uint64_t {name}[]={{'+','.join(map(str, values))+'};')
+            strides.append(f'{name}[{ordinal}]')
+    address = f'(({"device " if metal else ""}const {scalar} *)buffers[{first}+({ordinal})])'
+    return '\n'.join(declarations), f'{address}[({row})*{strides[0]}+({column})*{strides[1]}]'
+
+
+# design/algorithm-sources.md#segmented-indexed-add
+def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
+    import itertools
+    import math
+    if any(value.operation != 'input' for value in expression.operands[:3]):
+        raise ValueError('Indexed addition takes base, destination and update references')
+    operands = tuple(spec._tensor for spec in input_specs)
+    base, destinations, updates = (operands[value.value] for value in expression.operands[:3])
+    mask = expression.operands[3]
+    output = output_spec._tensor
+    size, features = updates.shape
+    if base.shape != output.shape or features != base.shape[1] or destinations.shape != (size, 1):
+        raise ValueError('Indexed addition requires U×1 destinations, U×F updates and D×F base/output')
+    if updates.dtype != base.dtype or output.dtype != base.dtype or base.dtype.kind not in 'fiu':
+        raise ValueError('Indexed addition requires matching real or integer value dtypes')
+    if destinations.dtype.kind not in 'iu' or max(size, base.shape[0]) >= 0xffffffff:
+        raise ValueError('Indexed addition requires integer destinations within the uint32 domain')
+    key_inputs = set()
+
+    # design/algorithm-sources.md#segmented-indexed-add
+    def key_dependencies(node):
+        if node.operation == 'input':
+            key_inputs.add(node.value)
+        for child in node.operands:
+            key_dependencies(child)
+
+    key_dependencies(expression.operands[1])
+    key_dependencies(mask)
+    chunk_rows = destinations.block_shape[0]
+    if updates.grid[0] > 1:
+        chunk_rows = math.gcd(chunk_rows, updates.block_shape[0])
+    for index in key_inputs:
+        tensor = operands[index]
+        if tensor.shape not in ((size, 1), (1, 1)):
+            raise ValueError('Destination and validity expressions require scalar routing rows')
+        if tensor.grid[0] > 1:
+            chunk_rows = math.gcd(chunk_rows, tensor.block_shape[0])
+    destination = expression.operands[1]
+    normalized = select(destination < 0, destination + base.shape[0], destination)
+    key_expression = select(mask, normalized, 0xffffffff)
+    chunks = []
+    for begin in range(0, size, chunk_rows):
+        length = min(chunk_rows, size - begin)
+        keys = program.tensor((length, 1), dtype=np.uint32)[0, 0]
+        reads = tuple(tensor.region(begin if tensor.shape[0] != 1 else 0, 0,
+            length if tensor.shape[0] != 1 else 1, 1) if index in key_inputs else tensor
+            for index, tensor in enumerate(operands))
+        _ExpressionKernel((key_expression,)).bind(program, reads, (keys,))
+        first_source = begin // updates.block_shape[0]
+        directory, count = _group_ordinals(program, (keys,), updates.block_shape[0], begin, first_source)
+        partials = program.tensor((count, features), (1, output.block_shape[1]),
+            dtype=np.float32 if base.dtype.kind == 'f' else base.dtype)
+        chunks.append((directory, count, partials))
+        ordinal_view = directory.slice(0, count, 1, count)
+        selector_view = directory.slice(0, 7 * count, 1, count)
+        for (segment, panel), partial in partials.blocks.items():
+            column = panel * partials.block_shape[1]
+            candidates = tuple(updates.region(row * updates.block_shape[0], column,
+                min(updates.block_shape[0], size - row * updates.block_shape[0]), partial.shape[1])
+                for row in (first_source,))
+            bounds = directory.slice(0, 5 * count + 2 * segment, 1, 2)
+
+            # design/algorithm-sources.md#segmented-indexed-add
+            def reduce_segment(metal, candidates=candidates, partial=partial, first_source=first_source):
+                declarations, load = _candidate_load(candidates, 2,
+                    f'ordinal/{updates.block_shape[0]}-{first_source}', f'ordinal%{updates.block_shape[0]}', 'c', metal)
+                accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t' if base.dtype.kind == 'u' else 'int64_t'
+                return declarations, f'''for(uint32_t c=lane;c<{partial.shape[1]};c+=lanes) {{
+                  {accumulator} total=0;
+                  for(uint32_t k=p1[0];k<p1[1];k++) {{ uint32_t ordinal=p0[k]; total+={load}; }}
+                  p{2+len(candidates)}[c*{partial.view.column_stride}]=total;
+                }}'''
+
+            function = _compiled_region(program, (ordinal_view, bounds, *candidates), partial, reduce_segment, 2)
+            _indexed_range(program, function, selector_view, bounds, 2, len(candidates))
+    reverse, total = _group_ordinals(program,
+        tuple(directory.slice(0, 4 * count, 1, count) for directory, count, _ in chunks), 1)
+    reverse_keys = reverse.slice(0, 0, 1, total)
+    reverse_ordinals = reverse.slice(0, total, 1, total)
+    for coordinate in itertools.product(*(range(length) for length in grid)):
+        target = output_spec.resolve(coordinate)
+        index = tuple(output_spec.index_map(*coordinate))
+        row, column = (i * block for i, block in zip(index, output_spec.block_shape))
+        initial = base.region(row, column, *target.shape)
+        bounds = program.tensor((1, 2), dtype=np.uint32)[0, 0]
+
+        # design/algorithm-sources.md#segmented-indexed-add
+        def locate(metal, row=row, height=target.shape[0]):
+            return f'''for(uint32_t c=lane;c<2;c+=lanes) {{
+              uint32_t key={row}+c*{height},lo=0,hi={total};
+              while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
+              p1[c]=lo;
+            }}'''
+
+        _compiled_region(program, (reverse_keys,), bounds, locate)
+        candidates = tuple(partials.region(segment, column, 1, target.shape[1])
+            for _, count, partials in chunks for segment in range(count))
+
+        # design/algorithm-sources.md#segmented-indexed-add
+        def finish(metal, candidates=candidates, target=target, initial=initial, row=row):
+            declarations, load = _candidate_load(candidates, 4, 'ordinal', '0', 'c', metal)
+            accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t' if base.dtype.kind == 'u' else 'int64_t'
+            return declarations, f'''uint32_t lo=p2[0],hi=p2[1],key={row}+r;
+            while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
+            for(uint32_t c=lane;c<{target.shape[1]};c+=lanes) {{
+              {accumulator} total=p3[r*{initial.view.row_stride}+c*{initial.view.column_stride}];
+              for(uint32_t k=lo;k<p2[1] && p0[k]==key;k++) {{ uint32_t ordinal=p1[k]; total+={load}; }}
+              p{4+len(candidates)}[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
+            }}'''
+
+        function = _compiled_region(program, (reverse_keys, reverse_ordinals, bounds, initial, *candidates), target, finish, 4)
+        _indexed_range(program, function, reverse_ordinals, bounds, 4, len(candidates))

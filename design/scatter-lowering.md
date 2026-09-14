@@ -132,3 +132,64 @@ Setup-known routing should be realized once; changing indices use the compiled
 metadata kernels. Fusion can remove an internal partial store only when no
 independent reader or remote publication requires it. Keep that distinction
 through the [Pallas-style fusion and storage plan](pallas-lowering-plan.md#5-fuse-work-without-erasing-observable-progress).
+
+## First executable vector lowering
+
+The expression spelling is:
+
+```python
+base, destination, update, valid = kernels.arguments(4)
+body = kernels.expression(kernels.indexed_add(base, destination, update, mask=valid))
+program.kernel_call(body, grid=output_grid,
+    in_specs=(BlockSpec(None),) * 4,
+    out_specs=output_spec,
+    out_shape=ShapeDtypeStruct(base_shape, dtype))(*operands)
+```
+
+The first lowering supports U×1 destination/validity rows, U×F update rows and a
+D×F base/output. The first three operands are references. A pointwise producer can
+supply transformed updates; fusing that producer into segmented accumulation is
+remaining compiler work. Explicit output regions must fit the existing base and
+update feature backings. ND flattening and axis adaptation must preserve actual
+logical views; this implementation does not hide a dense conversion.
+
+Each independent routing chunk sorts keys and original update ordinals with
+stable radix grouping. Chunk rows align with the source update backing, so a
+partial's candidate list names that backing, rather than repeating every source
+page as a potential reader. Its grouped candidate ordinals and per-segment
+begin/end range are slices of the same canonical metadata output. Every segment
+writes a separately publishable partial. The merged reverse directory contains
+at most U partial ordinals, sorted by destination key. Each final destination
+region has only a two-element range selector into that shared directory, and
+its source dependency is precisely the selected partials, not every partial.
+Metadata comparisons cost O(U) per fixed-width radix pass plus logarithmic
+range searches; numerical value loops visit segment contributions and output
+values, not every destination/update pair.
+
+Sorting moves routing tuples, not update vectors. All grouping scratch is in the
+setup-allocated canonical metadata output. Real inputs use FP32 segment partials
+and final accumulation before casting to the declared output dtype. Integer
+inputs use integer accumulation. Masked updates become absent keys, including
+unused segment slots; empty destinations retain their base. Unmasked indices
+must be valid after one negative-index normalization, matching the documented
+in-bounds contract rather than inventing a clipping policy.
+
+Physical storage is deliberately explicit: reserving up to U segment partials
+with one publication block each can cost U times the canonical allocation
+quantum per feature stripe, even when very few segments are nonempty. Candidate
+binding vectors and indexed-reader metadata for final destination regions also
+retain their worst-case candidate domains; their storage is not certified linear
+in U across arbitrarily many destination regions. Compact shared candidate
+bindings and lifetime/storage planning remain work. There is no dense D×U
+numerical partial array or D×U copied selector array, but that alone does not
+prove acceptable total memory. Empty segment slots also incur launches. This
+initial executable lowering must not be presented as production-capacity or
+zero-overhead evidence; storage/launch packing and measured shape choices are
+remaining steps of the nine-point plan.
+
+Python source compilation passed for this increment. No numerical workload or
+bridge restart was performed by the implementing agent. Parent integration must
+compile the generated CPU/Metal sources and exercise duplicate destinations,
+masked rows, delayed update chunks, repeated changing indices and output
+precision using the existing operational examples before asserting numerical or
+progress results.

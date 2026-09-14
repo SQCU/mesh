@@ -1167,3 +1167,45 @@ follows completion of the bound K region. The implementation does not pack or
 allocate dense converted operands and retains the existing all-FP32 SGEMM path.
 [Source and compilation record](cpu-register-contraction.md) distinguishes this
 mechanism from unmeasured throughput and from BNNS internal-storage guarantees.
+
+## Segmented indexed add
+
+Blelloch's [Prefix Sums and Their Applications, sections 1.3 and 1.5](https://www.cs.cmu.edu/~guyb/papers/Ble93.pdf)
+supplies stable radix partitioning and segmented reduction; the JAX authors'
+[scatter-add contract](https://docs.jax.dev/en/latest/_autosummary/jax.lax.scatter_add.html)
+defines duplicate contribution semantics. `indexed_add` is a root expression
+consumed by `_ExpressionKernel.bind_grid` through the existing `kernel_call`.
+It takes symbolic base, destination and update references plus a validity
+expression. Its initial logical domain is U×1 row destinations, U×F updates,
+and a D×F base/output; valid negative destinations normalize by adding D.
+Unmasked destinations must name valid rows. Dtypes of base/update/output match;
+real partials accumulate and store FP32, and the final region casts once.
+
+`_lower_indexed_add` builds routing once across a configured output grid.
+Routing chunk boundaries respect existing index, mask and update row backing
+boundaries. `_group_ordinals` performs eight stable four-bit radix passes,
+retaining keys and original ordinals in setup-allocated canonical metadata.
+CPU uses scalar prefix operations; Metal uses SIMD prefix sums and sums over
+32 lanes. A device-memory threadgroup barrier separates radix passes in one
+numerical kernel; it is not a host or tensor-wide readiness dependency. Sorted
+segment keys and begin/end pairs are compact arrays bounded by chunk updates.
+Each segment selects only its contributing source backing through
+`_indexed_range`, and `_candidate_load` addresses that canonical backing with
+its retained row/column strides. Unused segment slots have empty ranges and
+select no update source.
+
+`_compiled_region` shares the numerical source body between CPU and Metal,
+changing only scalar/address-space declarations and prefix-operation syntax.
+No Python callback executes a numerical kernel. Transposed/ragged stride
+metadata is setup-constant, and buffer addresses come directly from the native
+binding vector. Per-segment partials are separately published FP32 values; their
+producer does not wait for other routing chunks or the merged directory.
+
+The reverse directory groups segment keys and exact partial ordinals using the
+same radix implementation. `locate` produces a compact range for each destination
+region by binary search. `finish` selects and sums only those named partials,
+starting from the actual base region. Empty destinations read no partial values.
+This stage necessarily consumes all routing chunks when any chunk can name any
+destination, but it never adds all update payloads as ordinary dependencies.
+The structural and performance limits are recorded in
+[scatter-lowering.md](scatter-lowering.md#first-executable-vector-lowering).
