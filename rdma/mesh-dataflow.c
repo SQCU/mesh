@@ -1,4 +1,7 @@
 #include <signal.h>
+#include <dispatch/dispatch.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include "mesh-memory.h"
 #include "mesh-dataflow.h"
 #include <stdlib.h>
@@ -9,6 +12,7 @@
 #include <unistd.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 
+static void mesh_execution_destroy(struct mesh_ctx *);
 static struct mesh_ctx CTX0;
 struct mesh_ctx *mesh_context(void){ return &CTX0; }
 struct hdr *mesh_region(struct mesh_ctx *c){ return c->M; }
@@ -56,11 +60,13 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     break;
   }
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.fd=file};
+  mesh_signal_init();
   return 0;
 }
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
+  mesh_execution_destroy(c);
   mesh_retire(c->M);
   atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
@@ -153,6 +159,7 @@ void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
 void mesh_constant(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_set(c->M,MESH_CONSTANT,first,count);
   mesh_bits_set(c->M,MESH_PRESENT,first,count);
+  mesh_notify(c->M,first,count);
 }
 
 static int mesh_survey(struct mesh_ctx *c,const uint64_t *used,uint32_t first,uint32_t count,uint64_t *busy){
@@ -237,7 +244,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
         uint32_t at=atomic_load_explicit(length,memory_order_acquire);
         if(at>=mesh_blocks(m)){ error=ENOSPC; break; }
         if(!b->receive) mesh_send(m)[b->first+k]=(uint8_t)(b->plane+1);
-        mesh_order(m,queue,direction)[at]=b->first+k;
+        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.binding=b->binding,.offset=k};
         atomic_store_explicit(length,at+1,memory_order_release);
       }
     }
@@ -300,20 +307,32 @@ int mesh_republish(struct mesh_ctx *c,uint32_t first,uint32_t count){
   if(!mesh_claimable(c->M,first,count)) return 0;
   mesh_reset(c->M,first,count);
   mesh_bits_set(c->M,MESH_PRESENT,first,count);
+  mesh_notify(c->M,first,count);
+  return 1;
+}
+
+/* design/algorithm-sources.md#presence-driven-execution */
+static int mesh_issue_index(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t index){
+  struct hdr *m=c->M;
+  for(uint32_t j=0;j<f->inputs;j++){
+    struct mesh_row_range r=mesh_range(f->input[j],index);
+    if(!mesh_ready(m,r.first,r.count,f->input[j].plane))return 0;
+  }
+  for(uint32_t j=0;j<f->outputs;j++){
+    struct mesh_row_range r=mesh_range(f->output[j],index);
+    if(!mesh_claimable(m,r.first,r.count))return 0;
+  }
+  for(uint32_t j=0;j<f->outputs;j++){
+    struct mesh_row_range r=mesh_range(f->output[j],index);
+    mesh_reset(m,r.first,r.count);mesh_bits_set(m,MESH_PRODUCING,r.first,r.count);
+  }
   return 1;
 }
 
 size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t *indices,size_t capacity){
-  struct hdr *m=c->M;
   size_t selected=0;
-  for(uint32_t i=0;i<f->rows && selected<capacity;i++){
-    int ready=1;
-    for(uint32_t j=0;j<f->inputs && ready;j++){ struct mesh_row_range r=mesh_range(f->input[j],i); ready=mesh_ready(m,r.first,r.count,f->input[j].plane); }
-    for(uint32_t j=0;j<f->outputs && ready;j++){ struct mesh_row_range r=mesh_range(f->output[j],i); ready=mesh_claimable(m,r.first,r.count); }
-    if(!ready) continue;
-    for(uint32_t j=0;j<f->outputs;j++){ struct mesh_row_range r=mesh_range(f->output[j],i); mesh_reset(m,r.first,r.count); mesh_bits_set(m,MESH_PRODUCING,r.first,r.count); }
-    indices[selected++]=i;
-  }
+  for(uint32_t i=0;i<f->rows && selected<capacity;i++)
+    if(mesh_issue_index(c,f,i))indices[selected++]=i;
   return selected;
 }
 
@@ -323,6 +342,7 @@ static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   uint8_t *send=mesh_send(m);
   for(uint32_t r=first;r<first+count;r++) if(send[r]) mesh_bits_set(m,MESH_ROW_HOT,r,m->block);
   mesh_bits_clear(m,MESH_PRODUCING,first,count);
+  mesh_notify(m,first,count);
 }
 
 static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane){
@@ -331,6 +351,7 @@ static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
     uint64_t k=mesh_word_mask(first,count,w)&~atomic_load_explicit(&constant[w],memory_order_acquire);
     if(k) atomic_fetch_or_explicit(&read[w],k,memory_order_acq_rel);
   }
+  mesh_notify(m,first,count);
 }
 
 void mesh_complete(struct mesh_ctx *c,const struct mesh_row_function *f,const uint32_t *indices,size_t count){
@@ -344,4 +365,134 @@ void mesh_complete(struct mesh_ctx *c,const struct mesh_row_function *f,const ui
 void mesh_consume(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
   struct mesh_row_range r=mesh_range(map,index);
   mesh_read(c->M,r.first,r.count,map.plane);
+}
+
+struct mesh_watch {
+  struct mesh_row_function *function;
+  void *owner,*argument;
+  void (*submit)(void *,uint32_t);
+  uint32_t index;
+  struct mesh_watch *next;
+};
+struct mesh_edge { struct mesh_watch *watch; struct mesh_edge *next; uint32_t row; };
+struct mesh_execution {
+  struct mesh_ctx *context;
+  dispatch_queue_t queue;
+  dispatch_source_t source;
+  struct mesh_edge **readers;
+  struct mesh_watch *watches;
+  int socket;
+};
+static int mesh_signal_socket=-1;
+
+/* design/algorithm-sources.md#presence-driven-execution */
+int mesh_signal_init(void){
+  if(mesh_signal_socket>=0)return 0;
+  mesh_signal_socket=socket(AF_UNIX,SOCK_DGRAM,0);
+  if(mesh_signal_socket<0)return errno;
+  fcntl(mesh_signal_socket,F_SETFL,O_NONBLOCK);
+  fcntl(mesh_signal_socket,F_SETFD,FD_CLOEXEC);
+  return 0;
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
+  mesh_bits_set(m,MESH_EVENT,first,count);
+  struct sockaddr_un address={.sun_family=AF_UNIX};
+  memcpy(address.sun_path,m->event_path,sizeof address.sun_path);
+  unsigned char wake=0;
+  if(address.sun_path[0])sendto(mesh_signal_socket,&wake,1,MSG_DONTWAIT,(struct sockaddr *)&address,sizeof address);
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+static void mesh_fire(struct mesh_execution *e,struct mesh_watch *watch){
+  if(mesh_issue_index(e->context,watch->function,watch->index))watch->submit(watch->argument,watch->index);
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+static void mesh_events(struct mesh_execution *e){
+  unsigned char bytes[256];
+  while(recv(e->socket,bytes,sizeof bytes,MSG_DONTWAIT)>0){}
+  struct hdr *m=e->context->M;
+  for(uint32_t word=0;word<mesh_words(m);word++){
+    uint64_t bits=atomic_exchange_explicit(&mesh_plane(m,MESH_EVENT)[word],0,memory_order_acq_rel);
+    while(bits){
+      uint32_t row=word*64+(uint32_t)__builtin_ctzll(bits);bits&=bits-1;
+      for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next)mesh_fire(e,edge->watch);
+    }
+  }
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+static int mesh_execution_create(struct mesh_ctx *c){
+  struct mesh_execution *e=calloc(1,sizeof *e);if(!e)return ENOMEM;
+  e->context=c;e->socket=socket(AF_UNIX,SOCK_DGRAM,0);
+  e->readers=calloc(mesh_rows(c->M),sizeof *e->readers);
+  if(e->socket<0 || !e->readers){int error=errno?errno:ENOMEM;if(e->socket>=0)close(e->socket);free(e->readers);free(e);return error;}
+  fcntl(e->socket,F_SETFL,O_NONBLOCK);fcntl(e->socket,F_SETFD,FD_CLOEXEC);
+  struct sockaddr_un address={.sun_family=AF_UNIX};
+  snprintf(address.sun_path,sizeof address.sun_path,"/tmp/mesh-events.%d",getpid());
+  unlink(address.sun_path);
+  if(bind(e->socket,(struct sockaddr *)&address,sizeof address)){int error=errno;close(e->socket);free(e->readers);free(e);return error;}
+  memcpy(c->M->event_path,address.sun_path,sizeof address.sun_path);
+  e->queue=dispatch_queue_create("mesh.presence",DISPATCH_QUEUE_SERIAL);
+  e->source=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,(uintptr_t)e->socket,0,e->queue);
+  dispatch_source_set_event_handler(e->source,^{mesh_events(e);});
+  c->execution=e;dispatch_resume(e->source);return 0;
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+int mesh_execution_add(struct mesh_ctx *c,struct mesh_row_function *function,void *owner,void (*submit)(void *,uint32_t),void *argument){
+  if(!c->execution){int error=mesh_execution_create(c);if(error)return error;}
+  struct mesh_execution *e=c->execution;
+  struct mesh_watch *watches=NULL;
+  struct mesh_edge *edges=NULL;
+  int error=0;
+  for(uint32_t index=0;index<function->rows && !error;index++){
+    struct mesh_watch *watch=calloc(1,sizeof *watch);if(!watch){error=ENOMEM;break;}
+    *watch=(struct mesh_watch){.function=function,.owner=owner,.argument=argument,.submit=submit,.index=index,.next=watches};
+    watches=watch;
+    for(uint32_t i=0;i<function->inputs+function->outputs && !error;i++){
+      struct mesh_row_map map=i<function->inputs?function->input[i]:function->output[i-function->inputs];
+      struct mesh_row_range range=mesh_range(map,index);
+      for(uint32_t row=range.first;row<range.first+range.count;row++){
+        struct mesh_edge *edge=malloc(sizeof *edge);if(!edge){error=ENOMEM;break;}
+        *edge=(struct mesh_edge){.watch=watch,.next=edges,.row=row};edges=edge;
+      }
+    }
+  }
+  if(error){
+    while(edges){struct mesh_edge *next=edges->next;free(edges);edges=next;}
+    while(watches){struct mesh_watch *next=watches->next;free(watches);watches=next;}
+    return error;
+  }
+  dispatch_sync(e->queue,^{
+    struct mesh_edge *edge=edges;
+    while(edge){struct mesh_edge *next=edge->next;edge->next=e->readers[edge->row];e->readers[edge->row]=edge;edge=next;}
+    struct mesh_watch *watch=watches;
+    while(watch){struct mesh_watch *next=watch->next;watch->next=e->watches;e->watches=watch;mesh_fire(e,watch);watch=next;}
+  });
+  return 0;
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+void mesh_execution_remove(struct mesh_ctx *c,void *owner){
+  struct mesh_execution *e=c->execution;if(!e)return;
+  dispatch_sync(e->queue,^{
+    for(uint32_t row=0;row<mesh_rows(c->M);row++){
+      struct mesh_edge **at=&e->readers[row];
+      while(*at){struct mesh_edge *edge=*at;if(edge->watch->owner==owner){*at=edge->next;free(edge);}else at=&edge->next;}
+    }
+    struct mesh_watch **at=&e->watches;
+    while(*at){struct mesh_watch *watch=*at;if(watch->owner==owner){*at=watch->next;free(watch);}else at=&watch->next;}
+  });
+}
+/* design/algorithm-sources.md#presence-driven-execution */
+static void mesh_execution_destroy(struct mesh_ctx *c){
+  struct mesh_execution *e=c->execution;if(!e)return;
+  dispatch_semaphore_t stopped=dispatch_semaphore_create(0);
+  dispatch_source_set_cancel_handler(e->source,^{dispatch_semaphore_signal(stopped);});
+  dispatch_source_cancel(e->source);
+  dispatch_semaphore_wait(stopped,DISPATCH_TIME_FOREVER);
+  dispatch_release(stopped);
+  close(e->socket);unlink(c->M->event_path);c->M->event_path[0]=0;
+  for(uint32_t row=0;row<mesh_rows(c->M);row++){
+    struct mesh_edge *edge=e->readers[row];while(edge){struct mesh_edge *next=edge->next;free(edge);edge=next;}
+  }
+  struct mesh_watch *watch=e->watches;while(watch){struct mesh_watch *next=watch->next;free(watch);watch=next;}
+  dispatch_release(e->source);dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
 }

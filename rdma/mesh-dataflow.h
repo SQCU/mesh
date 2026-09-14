@@ -3,7 +3,7 @@
 #include "mesh.h"
 #include <errno.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
-struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,arena; int fd; };
+struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,arena; int fd; void *execution; };
 struct mesh_row_range { uint32_t first,count; };
 struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; };
 struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; };
@@ -20,6 +20,8 @@ static inline uint32_t mesh_window(const struct mesh_ctx *c){ return mesh_window
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
+int mesh_execution_add(struct mesh_ctx *,struct mesh_row_function *,void *owner,void (*submit)(void *,uint32_t),void *argument);
+void mesh_execution_remove(struct mesh_ctx *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 void *mesh_view_create(struct mesh_ctx *,const uint32_t *pages,size_t count);

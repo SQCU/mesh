@@ -19,13 +19,8 @@ except OSError as error:
     lock_sha256 = None
     lock_error = f"{type(error).__name__}: {error}"
 application_root = os.environ.get("MESH_APPLICATION_ROOT", os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-try:
-    with open(os.path.join(application_root, "application.json")) as handle:
-        application = json.load(handle)
-    application = {key: value for key, value in application.items() if key != "files"}
-    application["root"] = application_root
-except OSError as error:
-    application = {"root": application_root, "state": "unbundled", "error": str(error)}
+application_identity = os.environ.get("MESH_APPLICATION_IDENTITY")
+application = json.loads(application_identity) if application_identity else {"root": application_root, "state": "unbundled"}
 print(json.dumps({
     "schema": 2,
     "launcher": "mesh-python",
