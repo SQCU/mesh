@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1014,7 +1015,7 @@ def main():
                                 local_monotonic_ns=time.monotonic_ns(), section_zero_absent=not results[0, 0].ready)), flush=True)
                 time.sleep(0.0001)
             if args.trace:
-                Path(args.trace).write_text(json.dumps(dict(compute=program.trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+                Path(args.trace).write_text(json.dumps(dict(compute=program.trace, code=program.code_trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
             return
         # design/algorithm-sources.md#streaming-overlap-measurement
         def publish(invocation, sections):
@@ -2207,8 +2208,53 @@ def main():
                 raise ArithmeticError('Function completion profiles differ from the terminal runtime totals')
         print(json.dumps(dict(event='function_profiles', successful=successes, failed=failures,
             backend_successes=backends, stable_snapshot=stable, pending=report.submitted-report.completed)), flush=True)
+        # design/algorithm-sources.md#compiled-specialization-identities
+        code = program.code_trace
+        for identity, source in code['sources'].items():
+            if not source['text'] or hashlib.sha256(source['text'].encode()).hexdigest() != identity:
+                raise ArithmeticError('Compiled source text differs from its retained content identity')
+            if not source['languages'] or any(language not in ('cpu', 'metal') for language in source['languages']):
+                raise ArithmeticError('Compiled source has invalid language metadata')
+        bindings = {binding['function']: binding for binding in code['bindings']}
+        compiled = {index for index,entry in enumerate(compute) if entry['profile']['backend'] in ('cpu_compiled', 'metal_compiled')}
+        if len(bindings) != len(code['bindings']) or set(bindings) != compiled:
+            raise ArithmeticError('Compiled specialization bindings differ from realized function backends')
+        dispatch_count = constant_count = 0
+        for index, binding in bindings.items():
+            backend = compute[index]['profile']['backend']
+            if binding['backend'] != backend:
+                raise ArithmeticError('Compiled specialization backend differs from its execution profile')
+            pair = f"cpu:{binding['sources'].get('cpu', '')}\nmetal:{binding['sources'].get('metal', '')}\n"
+            if hashlib.sha256(pair.encode()).hexdigest() != binding['source_pair']:
+                raise ArithmeticError('Compiled source pair identity differs from its actual sources')
+            language = 'cpu' if backend == 'cpu_compiled' else 'metal'
+            if language not in binding['sources'] or binding['selected_source'] != binding['sources'][language]:
+                raise ArithmeticError('Compiled function selected a source for the wrong backend')
+            for name, identity in binding['sources'].items():
+                if identity not in code['sources'] or name not in code['sources'][identity]['languages'] or name not in binding['compile_options']:
+                    raise ArithmeticError('Compiled source reference or options are missing')
+            if not binding['dispatches'] or not binding['outputs']:
+                raise ArithmeticError('Compiled specialization lost its dispatch or output binding')
+            for dispatch in binding['dispatches']:
+                if not dispatch['name'] or any(len(dispatch[field]) != 3 or any(size <= 0 for size in dispatch[field]) for field in ('grid', 'group')):
+                    raise ArithmeticError('Compiled dispatch geometry is incomplete')
+                if dispatch['argument_buffer'] < 0 or dispatch['argument_offset'] < 0:
+                    raise ArithmeticError('Compiled dispatch argument location is invalid')
+            for constant in binding['constants']:
+                if constant['slot'] < 1 or constant['length'] < 0 or len(constant['sha256']) != 64 or any(character not in '0123456789abcdef' for character in constant['sha256']):
+                    raise ArithmeticError('Compiled constant identity or binding is incomplete')
+            dispatch_count += len(binding['dispatches'])
+            constant_count += len(binding['constants'])
+        representative = cast_result.ref
+        expected_view = {field: getattr(representative.view, field) for field,_ in representative.view._fields_}
+        expected_view['dtype'] = str(representative.dtype)
+        if not any(expected_view in binding['outputs'] for binding in bindings.values()):
+            raise ArithmeticError('Compiled output metadata lost the actual observed view')
+        print(json.dumps(dict(event='compiled_specializations', bindings=len(bindings), sources=len(code['sources']),
+            source_pairs=len({binding['source_pair'] for binding in bindings.values()}), dispatches=dispatch_count,
+            constants=constant_count, observed_output=expected_view)), flush=True)
         if args.trace:
-            Path(args.trace).write_text(json.dumps(dict(compute=compute, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+            Path(args.trace).write_text(json.dumps(dict(compute=compute, code=code, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
             completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,
