@@ -2694,3 +2694,46 @@ dtype within the same setup lowering. No extra lifetime hold is added to plan
 selectors: their actual readers are the numerical function and producers of
 readiness-index vectors; the latter vectors retain their own storage through
 indexed-reader retirement.
+
+## Shared associative reductions
+
+Blelloch's [Prefix Sums and Their Applications](https://www.cs.cmu.edu/~guyb/papers/Ble93.pdf)
+provides the associative tree mechanism. The JAX authors' [Pallas software
+pipelining](https://docs.jax.dev/en/latest/pallas/pipelining.html) separates
+incremental operand movement from local reduction work. Mesh applies these
+mechanisms in its existing expression-region owner: sum, max, min, any and all
+partition the reduction axis at source regions, produce canonical partial pages,
+and combine those pages in a balanced tree. Each function names only its actual
+input pages. A row's final reduction depends on all contributions to that row;
+neither its partial producers nor another row acquire a whole-tensor dependency.
+The existing page stamps own execution and publication.
+
+Expression methods share axis normalization, transpose handling, region geometry,
+indexed access discovery and CPU/Metal emission. Xonotic supplies the operation
+and logical axes through these methods; its former whole-region reduction emitter
+is removed. Empty axes preserve numerical values, while any/all convert values
+to truth. Truth means comparison with zero: NaN and nonzero fractions are true,
+both signed zeros are false.
+
+Floating extrema use numeric fmax/fmin with negative/positive infinity identities.
+This preserves the former Metal caller's initialized reduction: NaNs are ignored,
+and an all-NaN reduction returns its identity. This is not a claim of JAX's
+NaN-propagating max/min semantics. Apple's [Metal Shading Language Specification,
+June 4, 2026, pages 206–207](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+documents the shared max/fmax and min/fmin scalar behavior. No signed-zero sign
+guarantee is added for extrema.
+
+Integer extrema retain integer values throughout local accumulation, stored
+partials and tree merges. Metal's 64-bit SIMD extrema first reduce the high
+32-bit word (signed for int64, unsigned for uint64), then reduce unsigned low
+words only among lanes matching that high word. Reassembly retains all bits;
+no floating conversion is involved. Any/all normalize before combining boolean
+partials. Existing sum precision and modular integer addition remain unchanged.
+All geometry, storage and generated kernels are realized before invocation.
+
+The existing streaming-algebra Xonotic workflow exercises ranks one through
+three, ragged source regions, exact signed/unsigned 64-bit extrema, floating
+NaN/truth behavior, an independently withheld row, downstream consumers and
+repeated storage reuse. Operational evidence measures these contracts; it does
+not establish universal performance parity or eliminate genuine dependencies
+within a reduction domain.
