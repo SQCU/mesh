@@ -172,9 +172,9 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   }
   struct mesh_row_map *returns=self.returns.mutableBytes;
   for(size_t i=0;i<self.returns.length/sizeof *returns;i++)mesh_reader_unbind(context,&returns[i]);
-  self.functions=nil;
   if(self.routeResidency)for(id<MTLCommandQueue> queue in [NSSet setWithArray:[self.functions valueForKey:@"queue"]])
     [queue removeResidencySet:self.routeResidency];
+  self.functions=nil;
   self.routeResidency=nil;
   self.lookup=nil;
   self.extents=nil;
