@@ -2,6 +2,7 @@ from math import gcd
 
 from . import BlockSpec, ShapeDtypeStruct
 from . import kernels
+from .collective import reduce_scatter, all_gather
 
 
 # design/algorithm-sources.md#pallas-panel-composition
@@ -72,7 +73,7 @@ def _expression_sum(terms):
 
 # design/algorithm-sources.md#typed-ffn-expression-composition
 def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
-        tile_columns=128, exchange=None, peer=None):
+        tile_columns=128, peers, owners):
     inputs, up_weights, down_weights = tuple(inputs), tuple(map(tuple, up_weights)), tuple(down_weights)
     if not inputs or not up_weights or len(up_weights) != len(down_weights) or any(len(group) != len(inputs) for group in up_weights):
         raise ValueError('Weights must cover every input partition and hidden section')
@@ -93,17 +94,6 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         projected = _expression_sum(kernels.dot(x, w, tile_k=tile_k) for x, w in zip(arguments, weights))
         hidden.append((projected / (1 + (0 - projected).exp())).astype(inputs[0].dtype))
         layouts.append(((rows, width), block))
-    if exchange is not None:
-        received = tuple(exchange(program.kernel_call(kernels.expression(value),
-            grid=tuple((size + tile - 1) // tile for size, tile in zip(shape, block)),
-            in_specs=(BlockSpec(None),) * len(operands),
-            out_specs=BlockSpec(block, _block),
-            out_shape=ShapeDtypeStruct(shape, inputs[0].dtype), peer=peer)(*operands))
-            for value, (shape, block) in zip(hidden, layouts))
-        operands = (*received, *down_weights)
-        arguments = kernels.arguments(len(operands))
-        hidden = arguments[:len(received)]
-        layouts = tuple((value.shape, value.block_shape) for value in received)
     projections, output_tiles = [], []
     for value, (shape, block), weight, down in zip(hidden, layouts, arguments[-len(down_weights):], down_weights):
         projections.append(kernels.dot(value, weight,
@@ -112,11 +102,14 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
                              _tile(min(tile_columns, columns), down.block_shape[1] if down.grid[1] > 1 else 0)))
     block = (_tile(min(tile_rows, rows), *(tile[0] if tile[0] < rows else 0 for tile in output_tiles)),
              _tile(min(tile[1] for tile in output_tiles), *(tile[1] if tile[1] < columns else 0 for tile in output_tiles)))
-    return program.kernel_call(kernels.expression(_expression_sum(projections).astype(inputs[0].dtype)),
+    partials = program.kernel_call(kernels.expression(_expression_sum(projections).astype(inputs[0].dtype)),
         grid=tuple((size + tile - 1) // tile for size, tile in zip((rows, columns), block)),
         in_specs=(BlockSpec(None),) * len(operands),
         out_specs=BlockSpec(block, _block),
-        out_shape=ShapeDtypeStruct((rows, columns), inputs[0].dtype), peer=peer)(*operands)
+        out_shape=ShapeDtypeStruct((rows, columns), inputs[0].dtype))(*operands)
+
+    return all_gather(program, reduce_scatter(program, partials, peers=peers, owners=owners),
+                      peers=peers, owners=owners)
 
 
 # design/algorithm-sources.md#rmsnorm-shared-expression-composition

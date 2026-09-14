@@ -88,7 +88,9 @@ The caller supplies two participants and a split of the hidden dimension.
 Participant p owns J_p and computes U_p = X W_up[:, J_p], H_p = swish(U_p),
 and D_p = H_p W_down[J_p, :]. Both participants receive replicated X and can
 start local arithmetic independently. The peer publishes D regions to the root;
-the root computes Y = D_root + D_peer with the existing add kernel. Only the
+the block owner computes Y = D_root + D_peer with the existing add kernel.
+`reduce_scatter` places each sum at its configured owner; `all_gather` distributes
+those completed blocks to both participants. Only the
 local weight shard occupies canonical operand storage. Each reduced region feeds
 swish and a further contraction Z = swish(Y) W_consumer at the root.
 
@@ -103,7 +105,7 @@ local mesh storage. For an input (rows, inner), weights (inner, hidden) and
 
 ```sh
 python examples/streaming-chain.py input.npy up.npy down.npy consumer.npy \
-  --root 0 --peer 1 --split 256 --tile-rows 128 --tile-k 128 --tile-columns 128
+  --root 0 --peer 1 --split 256 --output-split 2048 --tile-rows 128 --tile-k 128 --tile-columns 128
 ```
 
 The consumer weight has shape (columns, consumer_columns). The root prints
@@ -113,3 +115,12 @@ attached after publishing input, until terminated. File supply and terminal
 observation are application I/O outside numerical functions. This uses the
 [MLX tensor-parallel decomposition](algorithm-sources.md#pallas-panel-composition)
 with root-owned, region-wise reduction.
+
+`collective.reduce_scatter(program, value, peers=peers, owners=owners)` takes a
+local contribution tensor and an explicit mapping from block coordinates to
+owner ranks. It returns a Tensor view containing this participant's owned sums.
+`collective.all_gather` takes that view and the same placement and returns all
+blocks. `collective.all_reduce` composes the two. `collective.send` is
+`Program.copy`. These are setup compositions, with no runtime launcher or poller.
+`nn.ffn` takes the same `peers` and `owners` configuration and applies these
+collectives to its down-projection contributions.

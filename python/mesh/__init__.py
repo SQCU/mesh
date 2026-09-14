@@ -89,6 +89,12 @@ class Ref:
 
 
 class Tensor:
+    # design/algorithm-sources.md#collective
+    def _with_blocks(self, blocks):
+        result = object.__new__(Tensor)
+        result.__dict__ = self.__dict__ | {'blocks': blocks, 'handle': None, '_span': None}
+        return result
+
     # design/algorithm-sources.md#indexed-range-generation
     def __init__(self, program, shape, block_shape, dtype, transferable, contiguous=False):
         import operator
@@ -191,6 +197,10 @@ class BlockSpec:
         if len(shape) != 2 or len(index) != 2 or min(shape) <= 0:
             raise ValueError('BlockSpec requires two positive block dimensions and two indices')
         row, column = (i * b for i, b in zip(index, shape))
+        if isinstance(self._tensor, Ref):
+            return self._tensor.slice(row, column,
+                min(shape[0], self._tensor.shape[0] - row),
+                min(shape[1], self._tensor.shape[1] - column))
         return self._tensor.region(row, column,
             min(shape[0], self._tensor.shape[0] - row),
             min(shape[1], self._tensor.shape[1] - column))

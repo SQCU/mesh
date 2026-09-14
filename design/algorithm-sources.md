@@ -570,3 +570,7 @@ queue without selecting or allocating one. Different kernel calls therefore have
 no shared command-queue ordering dependency; canonical operand presence controls
 when their regions become issuable. This permits GPU overlap, not a promise that
 the device concurrently executes every ready command. CPU dispatch is unchanged.
+
+## Collective
+
+Rabenseifner (2004), *Optimization of Collective Reduction Operations*; Patarasuk and Yuan (2009), *Bandwidth optimal all-reduce algorithms for clusters of workstations*: `reduce_scatter` reduces each caller-owned block, `all_gather` distributes those blocks, and `all_reduce` composes both using existing copies and additions; Tensor views retain the same registered Refs without copying their operands.

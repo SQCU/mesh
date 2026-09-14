@@ -601,7 +601,7 @@ class _ExpressionKernel:
                 else:
                     _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
             return
-        if any(_requires_regions(value) for value in self.values) or any(not spec._tensor.blocks for spec in input_specs):
+        if any(_requires_regions(value) for value in self.values) or any(hasattr(spec._tensor, 'blocks') and not spec._tensor.blocks for spec in input_specs):
             _lower_region_expressions(program, self.values, grid, input_specs, output_specs)
             return
         for coordinate in itertools.product(*(range(size) for size in grid)):
@@ -1973,7 +1973,7 @@ class _ExpressionRegions:
     def __init__(self, program, specs, coordinate, cache):
         self.program, self.coordinate, self.cache = program, coordinate, cache
         self.sources = tuple(spec.resolve(coordinate) for spec in specs)
-        self.whole = tuple(spec.block_shape is None for spec in specs)
+        self.whole = tuple(spec.block_shape is None and hasattr(source, 'blocks') for spec, source in zip(specs, self.sources))
         self.layouts = {}
         self.reduction_uses = {}
         self.page_bytes = program.native.algebra_page_bytes(program.handle)

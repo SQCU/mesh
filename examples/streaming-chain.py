@@ -6,6 +6,7 @@ import numpy as np
 
 from mesh import BlockSpec, Program, ShapeDtypeStruct, kernels
 from mesh.nn import linear
+from mesh.collective import reduce_scatter, all_gather
 
 
 # design/algorithm-sources.md#pallas-panel-composition
@@ -18,6 +19,7 @@ def main():
     parser.add_argument('--root', type=int, required=True)
     parser.add_argument('--peer', type=int, required=True)
     parser.add_argument('--split', type=int, required=True)
+    parser.add_argument('--output-split', type=int, required=True)
     parser.add_argument('--region')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
@@ -42,14 +44,14 @@ def main():
             out_shape=ShapeDtypeStruct(up.shape, up.dtype))(up)
         down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
                       tile_k=args.tile_k, tile_columns=args.tile_columns)
-        received = program.tensor(down.shape, down.block_shape, dtype=down.dtype) if program.node == args.root else down
-        program.copy(down.on(args.peer), received.on(args.root))
+        peers = (args.root, args.peer)
+        owners = {index: args.root if index[0] * down.block_shape[0] < args.output_split else args.peer
+                  for index in down.blocks}
+        scattered = reduce_scatter(program, down, peers=peers, owners=owners)
+        reduced = all_gather(program, scattered, peers=peers, owners=owners)
         outputs = {}
         if program.node == args.root:
             spec = BlockSpec(down.block_shape, lambda i, j: (i, j))
-            reduced = program.kernel_call(kernels.add,
-                grid=down.grid, in_specs=(spec, spec), out_specs=spec,
-                out_shape=ShapeDtypeStruct(down.shape, down.dtype))(down, received)
             activated = program.kernel_call(kernels.swish,
                 grid=reduced.grid, in_specs=(spec,), out_specs=spec,
                 out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced)
@@ -73,9 +75,9 @@ def main():
                 if output.ready:
                     if not observed:
                         local_pending = tuple(index for index, ref in down.blocks.items() if not ref.present)
-                        remote_pending = tuple(index for index, ref in received.blocks.items() if not ref.present)
+                        remote_pending = tuple(index for index, ref in reduced.blocks.items() if not ref.present)
                         print('first-consumer-result', index, 'local-producer-pending', local_pending,
-                              'remote-input-pending', remote_pending, flush=True)
+                              'collective-input-pending', remote_pending, flush=True)
                         observed = True
                     print(index, output.array.tolist(), flush=True)
                     output.consume()
