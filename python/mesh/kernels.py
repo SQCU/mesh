@@ -658,7 +658,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         owners, reverse_keys, reverse_ordinals, offsets = directories[coverage]
         candidates = tuple(partials.region(segment, column, 1, width)
             for _, count, partials in chunks for segment in range(count))
-        route, table = _routing_domain(program, owners, reverse_ordinals, offsets, candidates, len(regions))
+        route, table = _routing_domain(program, owners, reverse_keys, reverse_ordinals, offsets, candidates, len(regions))
         for consumer, (row, target) in enumerate(regions):
             initial = base.region(row, column, *target.shape)
 
@@ -731,7 +731,7 @@ def _routing_directory(program, chunks, coverage):
 
 
 # design/algorithm-sources.md#shared-sparse-routing-lowering
-def _routing_domain(program, owners, ordinals, offsets, candidates, consumers):
+def _routing_domain(program, owners, keys, ordinals, offsets, candidates, consumers):
     import ctypes as C
     from . import Ref, check
     from ._native import View
@@ -739,6 +739,7 @@ def _routing_domain(program, owners, ordinals, offsets, candidates, consumers):
         (View * len(candidates))(*(ref.view for ref in candidates)), len(candidates), consumers)
     if not route:
         check(C.get_errno() or 12)
+    check(program.native.algebra_route_hold(program.handle, route, (View * 1)(keys.view), 1))
     return route, Ref(program, program.native.algebra_route_table(program.handle, route), np.uint64)
 
 
