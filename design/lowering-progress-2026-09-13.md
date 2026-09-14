@@ -84,3 +84,35 @@ reported 1844; this records removed selector work, not a matched throughput clai
 CPU completion latency has count 3, mean 13.249736333333333 ms and sample variance
 2.097980727796333 ms²; Metal count 3, mean 24.254124666666666 ms and sample variance
 3.5864129249723318 ms². These are local runs, not new distributed scaling evidence.
+
+
+## Direct CPU register accumulation and indexed diagnostics
+
+`dd19ebe` replaces the CPU half contraction's scalar dot path with direct-stride
+4×4 NEON register accumulation in FP32. No full operand conversion storage is
+introduced; configuration retains loader functions and canonical output addresses.
+The existing all-FP32 Accelerate path remains. See
+[cpu-register-contraction](cpu-register-contraction.md) for mechanism and limits.
+
+`b8ab668` and `bf6128d` expose original indexed reader, selector, retirement and
+output map identities in the existing trace. `7bcf4f5` and `a442808` add produced
+selector subranges with retained vector/range lifetimes. This range extension is
+compiled, but its dynamic runtime evidence remains to be supplied by the scatter
+vertical slice. `0184b6a` and `9462daf` give expression lowering its whole configured
+grid once, enabling shared routing preparation without repeated per-output setup.
+
+Archived `neon-strided.json.gz` uses installed library `bf6128d`. CPU passes the
+FP16 gold, exact cancellation, masked indexing, dynamic reuse and transposed
+3×5 by 5×7 tail contraction. CPU batch time is 6.537459 ms; completion count 3,
+mean 5.939403333333334 ms, sample variance 0.2719680602963338 ms². Three subsequent
+Metal runs pass the same numerical cases. This is numerical and operational
+evidence, not a matched speedup or broad kernel performance characterization.
+
+An initial Metal observation failed before the example checked the independent
+tail result's readiness. The example previously assumed main-chain completion
+implied unrelated numerical completion. `a442808` explicitly observes the side
+results after the timed work. Source inspection found the physical MPS descriptors
+and transpose flags correct; no backend fallback or extra numerical dependency
+was introduced. The first failure did not record the result values, so it alone
+cannot distinguish unpublished output from numerical mismatch; the corrected
+observer and three subsequent passing runs are the retained evidence.
