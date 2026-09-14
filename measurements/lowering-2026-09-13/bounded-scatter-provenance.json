@@ -1,0 +1,232 @@
+{
+  "runs": [
+    {
+      "prefix": "bounded-scatter-checked-cpu",
+      "library_revision": "d91b70b",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "d91b70b",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "bounded-scatter-checked-cpu.jsonl.gz",
+        "bounded-scatter-checked-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 5.415667,
+        "invocations_per_second": 553.9483871515733,
+        "first_section_ms": 3.654708,
+        "completion_ms": {
+          "count": 3,
+          "mean": 5.245694333333334,
+          "sample_variance": 0.02994878629633346
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 2730,
+          "completed": 2730,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 2730
+        }
+      },
+      "scatter_generations": [
+        {
+          "generation": 0,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 2118416,
+          "complete_ns": 2505416
+        },
+        {
+          "generation": 1,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 2139125,
+          "complete_ns": 2519417
+        },
+        {
+          "generation": 2,
+          "empty": true,
+          "delayed_destination": null,
+          "first_consumer_ns": 1795625,
+          "complete_ns": 1885208
+        },
+        {
+          "generation": 3,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 2846333,
+          "complete_ns": 3214750
+        }
+      ]
+    },
+    {
+      "prefix": "bounded-scatter-checked-metal",
+      "library_revision": "d91b70b",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "d91b70b",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "bounded-scatter-checked-metal.jsonl.gz",
+        "bounded-scatter-checked-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.828209,
+        "invocations_per_second": 168.27265150414155,
+        "first_section_ms": 14.996584,
+        "completion_ms": {
+          "count": 3,
+          "mean": 16.21475033333333,
+          "sample_variance": 1.950022954597334
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 2730,
+          "completed": 2730,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.010108629,
+          "cpu_submitted": 0
+        }
+      },
+      "scatter_generations": [
+        {
+          "generation": 0,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 4850666,
+          "complete_ns": 5591208
+        },
+        {
+          "generation": 1,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 4034250,
+          "complete_ns": 4746125
+        },
+        {
+          "generation": 2,
+          "empty": true,
+          "delayed_destination": null,
+          "first_consumer_ns": 3536375,
+          "complete_ns": 3634625
+        },
+        {
+          "generation": 3,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 4319291,
+          "complete_ns": 5019458
+        }
+      ]
+    },
+    {
+      "prefix": "bounded-scatter-checked-paired-metal",
+      "library_revision": "d91b70b",
+      "peer_library_revision": "d91b70b",
+      "example_and_xonotic_revision": "d91b70b",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "bounded-scatter-checked-paired-metal.jsonl.gz",
+        "bounded-scatter-checked-paired-metal-trace.json.gz",
+        "bounded-scatter-checked-paired-metal-peer.jsonl.gz",
+        "bounded-scatter-checked-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 15.707,
+        "invocations_per_second": 190.99764436238618,
+        "first_section_ms": 11.253,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.166471999999999,
+          "sample_variance": 1.7763639724630003
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 2045,
+          "completed": 2045,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.007419241,
+          "cpu_submitted": 0
+        }
+      },
+      "scatter_generations": [
+        {
+          "generation": 0,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 4815583,
+          "complete_ns": 5544375
+        },
+        {
+          "generation": 1,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 4133292,
+          "complete_ns": 4822250
+        },
+        {
+          "generation": 2,
+          "empty": true,
+          "delayed_destination": null,
+          "first_consumer_ns": 3658209,
+          "complete_ns": 3738000
+        },
+        {
+          "generation": 3,
+          "empty": false,
+          "delayed_destination": 2,
+          "first_consumer_ns": 4598875,
+          "complete_ns": 5293000
+        }
+      ]
+    }
+  ],
+  "scope": "Nested indexed scatter updates with exact per-segment selector ranges, explicit active-domain lifetimes, delayed source and coefficient pages, empty contributions and subsequent reuse. Side cases execute on rank zero; paired gold/fanout traverse RDMA. Peer exited zero after SIGTERM. No matched performance comparison or load-valued outer routing-mask coverage."
+}

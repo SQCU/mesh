@@ -222,3 +222,12 @@ routing domains. Masked contributions then produce zero in the corresponding
 segment. Selector capacity still needs explicit setup sizing or packing: bounded
 writes alone do not prove bounded aggregate metadata. This is a source-derived
 implementation direction, not completed load-valued scatter support.
+
+The bounded update-load portion is implemented in `77ad99d`, with native derived
+selector lifetime support and complete ordinary metadata ancestry checks through
+`d91b70b`. The existing streaming example now composes nested indexed update
+loads with a direct coefficient and a downstream pointwise consumer. CPU, Metal
+and paired workflow evidence is recorded in
+[the progress log](lowering-progress-2026-09-13.md#bounded-nested-scatter-loads).
+Load-valued outer routing masks and compact aggregate selector storage remain
+separate unfinished parts of the direction above.

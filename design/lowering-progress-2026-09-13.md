@@ -804,3 +804,41 @@ nested/mixed contractions and fanout continue to pass. The peer exits normally
 after SIGTERM. `shared-emitter-provenance.json` records raw compressed logs/traces
 and revisions. Side cases remain rank-zero local and only gold/fanout traverse
 RDMA. No matched performance improvement is claimed.
+
+## Bounded nested scatter loads
+
+`77ad99d` binds load-valued scatter updates through the shared scalar/load
+emitter and predicate-aware access traversal. Each selector and numerical
+partial evaluates only its segment's explicit ordinal range. Nested coordinate
+loads retain those same bounds; direct chunk/panel operands retain their known
+Ref identities. Numerical values remain in their original canonical pages.
+Selectors contain candidate indices, not copied update rows.
+
+The first operational attempt failed during realization because native active
+functions required every selector to share the active-count producer's output.
+`9ca899e` replaces that implicit lifetime coupling with explicit indexed reader
+memberships on the count maps. Derived selectors publish even for empty ranges;
+only numerical partials use active omission. Indexed retirement retains the
+domain's omission disposition across subsequent selector resets. `d91b70b`
+checks every ordinary metadata dependency during setup, rather than accepting
+one rooted path while overlooking another. The shared-memory ABI remains 25;
+neither bridge was restarted.
+
+The final installed revision on both machines is `d91b70b`. Local CPU and Metal
+float32 examples each complete 2730 submissions. Paired Metal float16 completes
+2045 rank-zero submissions. Four scatter generations exercise nested lookup
+indices, duplicate destinations, masked contributions, an independently delayed
+source chunk, a separately delayed coefficient, an empty routing domain, and
+reuse after that empty domain. Unrelated destination consumers finish before the
+delayed values are published. Existing gold, logical indexing, integer reduction,
+contraction and fanout cases also pass. Only gold and fanout cross RDMA in this
+workflow; the scatter side case runs on rank zero. The peer exits zero after
+SIGTERM and both bridges remain ready with zero clients.
+
+`bounded-scatter-provenance.json` records exact revisions, compressed logs/traces,
+per-generation scatter timings and gold timing count/mean/sample variance. No
+matched performance improvement is claimed. Selector capacity remains reserved
+per segment/panel at its configured worst-case range, so storage packing and
+launch reduction remain work. Load-valued outer routing masks, broader scatter
+and derivative caller migration, and the remaining nine-step acceptance criteria
+are not established by these examples.
