@@ -216,8 +216,6 @@ def main():
             for stage in probes.values():
                 for result in stage.values():
                     result.consume()
-        if args.trace:
-            Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
         if not precision.ready or not np.array_equal(precision.array, np.array([[2], [0]], dtype=dtype)):
             raise ArithmeticError('Contraction lost cancellation across K panels')
         print(json.dumps(dict(event='precision', dtype=args.dtype, result=precision.array.tolist())), flush=True)
@@ -256,6 +254,8 @@ def main():
                 result=streamed_result.array.tolist())), flush=True)
             if not generation:
                 streamed_result.consume()
+        if args.trace:
+            Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
         report = program.report
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
