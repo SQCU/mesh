@@ -184,6 +184,11 @@ static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,const uint32_t *fa
     struct mesh_row_range range=mesh_range(*map,i);
     for(uint32_t row=range.first;row<range.first+range.count;row++)if(!mesh_is(c->M,MESH_CONSTANT,row)){busy|=used[row];grouped|=fanout[row]>MESH_READERS;}
   }
+  for(uint32_t i=0;i<occurrences && !grouped;i++)for(uint32_t j=0;j<i && !grouped;j++){
+    struct mesh_row_range a=mesh_range(*map,i),b=mesh_range(*map,j);
+    uint32_t first=a.first>b.first?a.first:b.first,end=a.first+a.count<b.first+b.count?a.first+a.count:b.first+b.count;
+    for(uint32_t row=first;row<end;row++)if(!mesh_is(c->M,MESH_CONSTANT,row)){grouped=1;break;}
+  }
   if(!grouped && !mesh_free_plane(busy,&plane)){
     map->plane=(uint32_t)plane;
     for(uint32_t i=0;i<occurrences;i++){
