@@ -537,14 +537,25 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, updates)
             tensors[value.index] = result.T
             continue
-        if operation in ('reduce_sum', 'reduce_mean') and len(shapes[values[0].index]) == 1 and tuple(attributes['axes']) == (0,):
-            operand = matrix_view(local[values[0].index], (1, math.prod(shapes[values[0].index])))
+        # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
+        if operation in ('reduce_sum', 'reduce_mean') and (
+                (len(shapes[values[0].index]) == 1 and tuple(attributes['axes']) == (0,)) or
+                (len(shapes[values[0].index]) == 2 and tuple(attributes['axes']) == (1,) and value.dtype in ('float16', 'float32'))):
+            operand_shape = shapes[values[0].index]
+            operand = matrix_view(local[values[0].index], operand_shape if len(operand_shape) == 2 else (1, math.prod(operand_shape)))
             argument, = kernels.arguments(1)
             term = argument & 0xffffffffffffffff if operand.dtype.kind in 'iu' else argument
-            reduced = nn._row_reduce(program, kernels.expression(term.sum()), operand,
-                tile_rows=1, peer=peer, output_dtype=value.dtype)
+            result = term.sum()
+            if operation == 'reduce_mean' and operand.dtype.kind == 'f':
+                result = result / operand.shape[1]
+            rows = math.gcd(min(tile_rows, operand.shape[0]), operand.block_shape[0] if operand.grid[0] > 1 else 0)
+            reduced = program.kernel_call(kernels.expression(result),
+                grid=((operand.shape[0] + rows - 1) // rows, 1),
+                in_specs=(BlockSpec(None),),
+                out_specs=BlockSpec((rows, 1), lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct((operand.shape[0], 1), value.dtype), peer=peer)(operand)
             tensors[value.index] = nn._pointwise(program, kernels.expression(argument / operand.shape[1]),
-                (reduced,), 1, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' else reduced
+                (reduced,), rows, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and operand.dtype.kind != 'f' else reduced
             continue
         numerical = value.dtype in ('float16', 'float32')
         matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
@@ -587,12 +598,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             right = right.T if attributes['transpose_right'] else right
             tensors[value.index] = nn.linear(program, left, right, tile_rows=tile_rows,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer)
-            continue
-        if numerical and operation in ('reduce_sum', 'reduce_mean') and tuple(attributes['axes']) == (1,) and len(shapes[values[0].index]) == 2:
-            operand = local[values[0].index]
-            reduced = nn._row_reduce(program, kernels.row_sum, operand, tile_rows=tile_rows, peer=peer)
-            tensors[value.index] = nn._pointwise(program, kernels.affine(1 / operand.shape[1]),
-                (reduced,), tile_rows, peer=peer) if operation == 'reduce_mean' else reduced
             continue
         if shaped and len(shape) <= 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
             args = kernels.arguments(len(values))

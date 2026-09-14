@@ -6,11 +6,6 @@ from . import BlockSpec, ShapeDtypeStruct
 from . import kernels
 
 
-# design/algorithm-sources.md#streaming-ffn
-def _rows(i):
-    return (i, 0)
-
-
 # design/algorithm-sources.md#pallas-panel-composition
 def _tile(size, *boundaries):
     for boundary in boundaries:
@@ -107,20 +102,6 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         outputs.append(linear(program, operand, down, tile_rows=tile_rows, tile_k=tile_k,
                               tile_columns=tile_columns, peer=peer, output_dtype="float32"))
     return _cast(program, _sum(program, outputs, tile_rows, peer=peer), inputs[0].dtype, tile_rows, peer=peer)
-
-
-# design/algorithm-sources.md#pallas-panel-composition
-def _row_reduce(program, kernel, x, *, tile_rows, peer=None, output_dtype=None):
-    rows = x.shape[0]
-    mr = _tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0)
-    nr = x.block_shape[1]
-    parts = tuple(program.kernel_call(kernel,
-        grid=((rows + mr - 1) // mr,),
-        in_specs=(BlockSpec((mr, nr), lambda i, panel=panel: (i, panel)),),
-        out_specs=BlockSpec((mr, 1), _rows),
-        out_shape=ShapeDtypeStruct((rows, 1), x.dtype if output_dtype is None else output_dtype), peer=peer)(x)
-        for panel in range(x.grid[1]))
-    return _sum(program, parts, mr, peer=peer)
 
 
 # design/algorithm-sources.md#rmsnorm-shared-expression-composition

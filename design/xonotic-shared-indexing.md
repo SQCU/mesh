@@ -221,3 +221,34 @@ storage. See [active segment evidence](active-segments.md) for raw archives and
 the native disposition contract. These remain local indexed operations; neither
 paired gold nor remote fanout establishes remote indexed-derivative coverage.
 Matched throughput evidence and the remaining derivative forms are still open.
+
+## Shared vector and row reductions
+
+Xonotic vector sum/mean and real matrix axis-1 sum/mean now lower through the
+existing shared expression `.sum()` with whole-input BlockSpecs. The mechanism
+and primary Pallas/Triton references are in
+[shared region reductions](algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner).
+The caller declares only the formula, output dtype, placement, and row layout;
+shared lowering owns independently available feature partials and their balanced
+reduction. The former `nn._row_reduce` and its row-map helper have no callers
+and are removed.
+
+A matrix reduction retains physical shape `(rows, 1)` and the same row tile
+computed from the requested tile and actual input backing cuts. A vector
+reduction retains physical `(1, 1)` output. Logical rank and keepdims metadata
+remain the existing graph's responsibility; subsequent vector consumers use the
+same direct transpose/reshape metadata as before. No operand is repacked.
+
+Real partials and the balanced statistic accumulate in FP32. Mean divides that
+statistic before casting once to the declared output dtype. This intentionally
+removes the old FP16 per-panel and intermediate-sum rounding; reproducing those
+rounding losses is not a numerical library contract. Integer vector sums retain
+integer arithmetic and the declared modular output cast. Integer means retain
+a typed sum output before integer division, including I32 wrap-before-division
+behavior; no floating-point conversion or caller-built partial tree is inserted.
+
+The existing optional Xonotic streaming-algebra graph is the numerical validation
+path: matrix row means can complete for one source row block while another row
+block remains unpublished, and their vector total depends on both. Source
+compilation passed for this migration; operational results are recorded by the
+parent integration run rather than assumed from compilation.
