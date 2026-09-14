@@ -1,0 +1,142 @@
+{
+  "runs": [
+    {
+      "prefix": "column-reduction-cpu",
+      "library_revision": "604082e",
+      "example_and_xonotic_revision": "a8123ed",
+      "peer_library_revision": null,
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "column-reduction-cpu.jsonl.gz",
+        "column-reduction-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.2745,
+        "invocations_per_second": 701.8364721020002,
+        "first_section_ms": 3.527333,
+        "completion_ms": {
+          "count": 3,
+          "mean": 3.9522356666666667,
+          "sample_variance": 0.08225298581033336
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 2115,
+          "completed": 2115,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 2115
+        }
+      }
+    },
+    {
+      "prefix": "column-reduction-metal",
+      "library_revision": "604082e",
+      "example_and_xonotic_revision": "a8123ed",
+      "peer_library_revision": null,
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "column-reduction-metal.jsonl.gz",
+        "column-reduction-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 18.584958,
+        "invocations_per_second": 161.42086519646693,
+        "first_section_ms": 15.581083,
+        "completion_ms": {
+          "count": 3,
+          "mean": 16.854207666666667,
+          "sample_variance": 2.2610711614583296
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 2115,
+          "completed": 2115,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.009202866,
+          "cpu_submitted": 0
+        }
+      }
+    },
+    {
+      "prefix": "column-reduction-paired-metal",
+      "library_revision": "604082e",
+      "example_and_xonotic_revision": "a8123ed",
+      "peer_library_revision": "604082e",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "column-reduction-paired-metal.jsonl.gz",
+        "column-reduction-paired-metal-trace.json.gz",
+        "column-reduction-paired-metal-peer.jsonl.gz",
+        "column-reduction-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.938333,
+        "invocations_per_second": 177.11306065360742,
+        "first_section_ms": 11.214,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.545347,
+          "sample_variance": 1.4676772292129994
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 1430,
+          "completed": 1430,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.00613728,
+          "cpu_submitted": 0
+        }
+      }
+    }
+  ],
+  "scope": "Axis-zero integer sums and float32 means execute on rank zero. Gold and fanout traverse RDMA in the paired run. No matched old column-reduction performance baseline; no speedup or parity claim. Peer exits zero after SIGTERM."
+}

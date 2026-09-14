@@ -695,3 +695,31 @@ Integer means, boolean matrices and unsigned matrix rows have source-path covera
 only in this increment. No matched pre-migration matrix timing baseline was
 collected, and no latency or throughput improvement is claimed. The remaining
 nine-step plan stays open.
+
+## Matrix column reductions through existing page views
+
+`47ed3e8` routes Xonotic matrix axis-zero sum/mean through the same shared
+reduction as axis one. Setup transposes the operand view, binds the existing row
+reduction, and transposes the output view back. Inspection of `Tensor.T`, `Ref.T`
+and `mesh_view_transpose` establishes that handles, extents and offsets are
+retained, with dimensions and strides exchanged. No transpose kernel or copied
+operand is introduced. The shared region owner partitions the original reduction
+axis at backing boundaries and retains independent output-column dependencies.
+
+The existing integer observation binds its actual pages both as a matrix and as
+a transposed matrix. Direct row sums, Xonotic row sums and axis-zero sums of the
+transposed view all return exactly 65536, 4294967298, INT64_MIN and INT64_MAX, one
+output at a time while later inputs remain absent. `a8123ed` also adds axis-zero
+means over the ordinary row-major source. Those means correctly remain incomplete
+while a contributing source row block is absent; unrelated completed row means
+remain usable. Two generations return column means [6,7,8,9] and [38,39,40,41].
+
+Local CPU and Metal float32 runs pass, as does the paired Metal float16 gold
+workflow. Integer side cases use int64 and column means use float32 on rank zero
+in every run; gold and fanout traverse actual RDMA. The peer exits normally after
+SIGTERM. `column-reduction-provenance.json` records the installed library and
+caller revisions, raw compressed logs/traces and timing summaries. No matched
+pre-migration column-reduction timing baseline was collected; no speedup follows
+from this evidence. Multi-axis and broader logical-rank reductions, other
+reduction families, general scatter composition, remaining callers and the
+nine-step plan's performance acceptance remain open.
