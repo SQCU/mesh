@@ -213,3 +213,22 @@ libmesh and libmesh-algebra must be rebuilt together. The shared region header a
 its version do not change. No bridge restart or workload was performed for this
 source increment. Compilation establishes buildability only; operational evidence
 belongs to the existing example and caller workflows.
+
+### Trace identities
+
+The existing numerical trace now exposes every output row range through
+`mesh_algebra_trace_output`, and each dynamic selector/candidate map through
+`mesh_algebra_trace_indexed_count` and `mesh_algebra_trace_indexed`. Candidate
+records retain their original numerical binding input position, descriptor index,
+ordinal, actual source row range and READ plane. They include the exact selected,
+retired, mapped and numerical-completed logical result row identities. Selector
+records expose the selector lifetime maps; their input/ordinal fields use absent
+sentinels because selector storage is an attached numerical dependency.
+
+`flags` is a current bitmap snapshot: bit 0 selector present, bit 1 candidate
+selected, bit 2 candidate retired, bit 3 numerical work completed, bit 4 selection
+mapped. Descriptor identity follows the retained linked-descriptor enumeration.
+These are current state reads, not an atomic historical snapshot or a reconstruction
+of previous occurrences. Reading after numerical output completion can precede
+late-source retirement; the retained identities make that distinction observable.
+No numerical launch, clock comparison or source-pointer inference creates them.

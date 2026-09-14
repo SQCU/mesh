@@ -411,7 +411,7 @@ int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_vi
   d->candidates=(uint32_t)count;
   struct mesh_index_candidate selection=indexed_maps(selector);d->selector=selection.maps;d->selectors=selection.count;
   int error=d->selector?0:ENOMEM;
-  for(size_t i=0;i<count && !error;i++){d->candidate[i]=indexed_maps(inputs[candidate_inputs[i]]);if(!d->candidate[i].maps)error=ENOMEM;}
+  for(size_t i=0;i<count && !error;i++){d->candidate[i]=indexed_maps(inputs[candidate_inputs[i]]);d->candidate[i].input=candidate_inputs[i];if(!d->candidate[i].maps)error=ENOMEM;}
   for(size_t i=0;i<count && !error;i++)for(uint32_t j=0;j<d->candidate[i].count;j++){
     struct mesh_row_map map=d->candidate[i].maps[j];
     for(uint32_t k=0;k<d->selectors;k++)if(overlaps(map,d->selector[k]))error=EINVAL;
@@ -899,4 +899,38 @@ struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *handle,size_
   MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_row_range){0};
   MeshFunction *f=a.functions[index];if(input>=f->function.inputs)return (struct mesh_row_range){0};
   return mesh_range(f->function.input[input],f->occurrence);
+}
+
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+struct mesh_row_range mesh_algebra_trace_output(struct mesh_algebra *handle,size_t index,size_t output){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_row_range){0};
+  MeshFunction *f=a.functions[index];if(output>=f->function.outputs)return (struct mesh_row_range){0};
+  return mesh_range(f->function.output[output],f->occurrence);
+}
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+size_t mesh_algebra_trace_indexed_count(struct mesh_algebra *handle,size_t index){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return 0;size_t count=0;
+  for(struct mesh_indexed_read *d=a.functions[index]->function.indexed;d;d=d->next){
+    count+=d->selectors;
+    for(uint32_t i=0;i<d->candidates;i++)count+=d->candidate[i].count;
+  }
+  return count;
+}
+/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+struct mesh_indexed_event mesh_algebra_trace_indexed(struct mesh_algebra *handle,size_t index,size_t entry){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_indexed_event){0};uint32_t descriptor=0;
+  for(struct mesh_indexed_read *d=a.functions[index]->function.indexed;d;d=d->next,descriptor++){
+    uint32_t flags=(mesh_bits_all(a->context->M,MESH_PRESENT,d->completed,1)?8:0)|(mesh_bits_all(a->context->M,MESH_PRESENT,d->mapped,1)?16:0);
+    int present=1;for(uint32_t i=0;i<d->selectors;i++)present&=mesh_bits_all(a->context->M,MESH_PRESENT,d->selector[i].first,d->selector[i].count);
+    flags|=present?1:0;
+    for(uint32_t i=0;i<=d->candidates;i++){
+      const struct mesh_row_map *maps=i?d->candidate[i-1].maps:d->selector;
+      uint32_t count=i?d->candidate[i-1].count:d->selectors;
+      if(entry>=count){entry-=count;continue;}
+      struct mesh_row_map map=maps[entry];uint32_t selected=i?d->selected+i-1:d->selected,retired=i?d->retired+i-1:d->retired;
+      if(i)flags|=(mesh_bits_all(a->context->M,MESH_PRESENT,selected,1)?2:0)|(mesh_bits_all(a->context->M,MESH_PRESENT,retired,1)?4:0);
+      return (struct mesh_indexed_event){.input=i?d->candidate[i-1].input:UINT64_MAX,.descriptor=descriptor,.role=i?1:0,.candidate=i?i-1:MESH_ABSENT,.first=map.first,.count=map.count,.plane=map.plane,.retired=retired,.selected=selected,.completed=d->completed,.mapped=d->mapped,.flags=flags};
+    }
+  }
+  return (struct mesh_indexed_event){0};
 }
