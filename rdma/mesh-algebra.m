@@ -868,7 +868,7 @@ int mesh_algebra_contract(struct mesh_algebra *handle,struct mesh_view x,struct 
 }
 
 /* design/algorithm-sources.md#programcopy */
-struct mesh_copy_segment { const char *source; char *destination; size_t elements,stride,bytes; };
+struct mesh_copy_segment { size_t source,destination,elements,stride,bytes; };
 
 /* design/algorithm-sources.md#programcopy */
 int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_region *regions,size_t count,struct mesh_view destination) {
@@ -885,6 +885,7 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
   }
   struct mesh_extent *d=&destination.tensor->extents[destination.extent];
   size_t elements=destination.rows*destination.columns,scalar=scalar_bytes(d->shape.scalar),covered=0;
+  struct mesh_ctx *context=a->context;size_t page=context->M->pgsz;
   if((destination.rows!=1 && destination.row_stride!=destination.columns) || destination.column_stride!=1)return EINVAL;
   struct mesh_row_map output;int error=output_region(a,destination,&output);if(error)return error;
   if(output_used(a,output))return EINVAL;
@@ -917,13 +918,21 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
         if(lo>=hi)continue;
         struct mesh_view source=mesh_view_slice(r.source,row-r.row,lo-base-r.column,1,hi-lo);
         dependencies(f.dependencies,source);
-        struct mesh_copy_segment segment={
-          .source=(const char *)source.tensor->extents[source.extent].address+source.offset*scalar,
-          .destination=(char *)d->address+(destination.offset+lo)*scalar,.elements=hi-lo,.stride=source.column_stride*scalar,.bytes=scalar};
-        if(segment.stride==scalar){segment.bytes*=segment.elements;segment.elements=1;}
-        struct mesh_copy_segment *previous=segments.length?(struct mesh_copy_segment *)segments.mutableBytes+segments.length/sizeof segment-1:NULL;
-        if(previous && previous->elements==1 && segment.elements==1 && previous->source+previous->bytes==segment.source && previous->destination+previous->bytes==segment.destination)previous->bytes+=segment.bytes;
-        else [segments appendBytes:&segment length:sizeof segment];
+        size_t sourceIndex=(size_t)source.tensor->extents[source.extent].first*page+source.offset*scalar;
+        size_t destinationIndex=(size_t)d->first*page+(destination.offset+lo)*scalar;
+        for(size_t copied=0;copied<hi-lo;){
+          struct mesh_copy_segment segment={.source=sourceIndex+copied*source.column_stride*scalar,
+            .destination=destinationIndex+copied*scalar,.stride=source.column_stride*scalar,.bytes=scalar};
+          size_t available=segment.stride?1+(page-segment.source%page-scalar)/segment.stride:hi-lo-copied;
+          segment.elements=MIN(hi-lo-copied,MIN(available,(page-segment.destination%page)/scalar));
+          copied+=segment.elements;
+          if(segment.stride==scalar){segment.bytes*=segment.elements;segment.elements=1;}
+          struct mesh_copy_segment *previous=segments.length?(struct mesh_copy_segment *)segments.mutableBytes+segments.length/sizeof segment-1:NULL;
+          if(previous && previous->elements==1 && segment.elements==1 &&
+             previous->source/page==segment.source/page && previous->destination/page==segment.destination/page &&
+             previous->source+previous->bytes==segment.source && previous->destination+previous->bytes==segment.destination)previous->bytes+=segment.bytes;
+          else [segments appendBytes:&segment length:sizeof segment];
+        }
       }
     }
     f->output=(struct mesh_row_map){.first=output.first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
@@ -933,7 +942,10 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
       const struct mesh_copy_segment *parts=segments.bytes;
       for(size_t i=0;i<segments.length/sizeof *parts;i++) {
         struct mesh_copy_segment p=parts[i];
-        for(size_t j=0;j<p.elements;j++)memcpy(p.destination+j*p.bytes,p.source+j*p.stride,p.bytes);
+        const char *source=mesh_row_data(context,(uint32_t)(p.source/page));
+        char *destination=mesh_row_data(context,(uint32_t)(p.destination/page));
+        source+=p.source%page;destination+=p.destination%page;
+        for(size_t j=0;j<p.elements;j++)memcpy(destination+j*p.bytes,source+j*p.stride,p.bytes);
       }
       complete_part(function,0);
     };
