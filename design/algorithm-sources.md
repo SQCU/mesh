@@ -2672,3 +2672,25 @@ arbitrarily gathered rows to force them through BLAS/MPS. Recovering efficient
 general indexed/grouped contractions remains separate shared backend work.
 Numerical coverage, setup costs, prepared-plan storage, and matched performance
 are measured rather than inferred from this representation.
+
+
+The initial recognizer handles a transposed sum of two logical loads' product,
+with one integral scalar selected coordinate and a selection-independent left
+panel. It refines K and output features at candidate backing boundaries. Shared
+FP32 partial reductions and, where needed, an output assembly expression retain
+the caller's original publication region. Native selected bindings each cover
+one publication quantum; larger root outputs retain the existing streaming sum
+lowering until selected lowering supports that additional output partition.
+Zero-stride nonsingleton contractions and unproved affine forms also retain the
+ordinary expression implementation. This is setup optimization applicability,
+not a different public interface or a runtime refusal to compute.
+
+The native view-pages getter reuses the existing dependency mapper to return
+canonical touched-page references. The compiler deduplicates these by original
+tensor, extent and page offset while retaining full numerical views separately.
+Plan selectors are reused only with matching resolved expressions, actual source
+identities and choice counts. Immutable zero panels are reused by shape and
+dtype within the same setup lowering. No extra lifetime hold is added to plan
+selectors: their actual readers are the numerical function and producers of
+readiness-index vectors; the latter vectors retain their own storage through
+indexed-reader retirement.
