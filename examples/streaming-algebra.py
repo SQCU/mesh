@@ -413,7 +413,7 @@ def main():
                     consumers = tuple(result * 2 + 1 for result in (neighborhood, *derivatives))
                 storage = tuple(program.tensor(value.shape, (1, value.shape[1]), dtype=value.dtype) for value in operands)
                 lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in operands), storage)),
-                    outputs=consumers, root_peer=0, tile_rows=1, tile_columns=3)
+                    outputs=consumers, root_peer=0, tile_rows=1, tile_columns=2)
                 observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
                     for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
                 generations = []
