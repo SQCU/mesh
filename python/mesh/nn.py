@@ -56,3 +56,38 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, exchange=None):
         operand = exchange(activated) if exchange is not None else activated
         outputs.append(_linear(program, operand, down, tile_rows))
     return _sum(program, outputs, tile_rows)
+
+
+# design/algorithm-sources.md#streamed-normalization-and-embedding
+def rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6):
+    rows, width = x.shape
+    squared = _pointwise(program, kernels.multiply, (x, x), tile_rows)
+    total = program.kernel_call(kernels.row_sum,
+        grid=((rows + tile_rows - 1) // tile_rows,),
+        in_specs=(BlockSpec((tile_rows, width), _rows),),
+        out_specs=BlockSpec((tile_rows, 1), _rows),
+        out_shape=ShapeDtypeStruct((rows, 1), x.dtype))(squared)
+    mean = _pointwise(program, kernels.affine(1 / width, epsilon), (total,), tile_rows)
+    factor = _pointwise(program, kernels.rsqrt, (mean,), tile_rows)
+    scaled = _pointwise(program, kernels.multiply, (x, factor.broadcast_to(x.shape)), tile_rows)
+    return _pointwise(program, kernels.multiply, (scaled, gamma.broadcast_to(x.shape)), tile_rows)
+
+
+# design/algorithm-sources.md#streamed-normalization-and-embedding
+def embedding(program, table, indices, *, tile_rows):
+    rows = indices.shape[0]
+    return program.kernel_call(kernels.gather,
+        grid=((rows + tile_rows - 1) // tile_rows,),
+        in_specs=(BlockSpec(table.shape, _weight), BlockSpec((tile_rows, 1), _rows)),
+        out_specs=BlockSpec((tile_rows, table.shape[1]), _rows),
+        out_shape=ShapeDtypeStruct((rows, table.shape[1]), table.dtype))(table, indices)
+
+
+# design/algorithm-sources.md#streamed-normalization-and-embedding
+def summed_embedding(program, x, tables, indices, *, tile_rows):
+    tables, indices = tuple(tables), tuple(indices)
+    if len(tables) != len(indices):
+        raise ValueError('Each embedding table requires its index tensor')
+    values = tuple(embedding(program, table, index, tile_rows=tile_rows)
+                   for table, index in zip(tables, indices))
+    return _sum(program, (x, *values), tile_rows)

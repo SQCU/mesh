@@ -689,3 +689,24 @@ addressing never infers another operand pointer by dividing a byte offset.
 
 Sources: [NumPy ndarray strides](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.strides.html),
 [Pallas BlockSpec](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html).
+
+## Streamed normalization and embedding
+
+Biao Zhang and Rico Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467),
+NeurIPS 2019, define normalization by the root mean square of a vector. `nn.rmsnorm`
+composes square, row reduction, affine epsilon/width scaling, reciprocal square
+root, and two broadcast multiplications. Each configured row region depends on
+its own complete feature reduction; it never depends on another row region.
+Broadcast operands retain their registered pages through zero-stride views.
+
+`nn.embedding` is an indexed gather expressed with Pallas-style BlockSpecs:
+a constant lookup table and one index region produce one independently usable
+output region. The CPU gather writes each selected table row directly into its
+canonical destination row. `nn.summed_embedding` adds those independent gathered
+values to its input using the existing pairwise reduction composition. Shape,
+dtype, row partition, and all intermediate storage are realized at setup.
+
+[NumPy basic indexing](https://numpy.org/doc/stable/user/basics.indexing.html)
+defines selected-row views; [Pallas grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+define the indexed-region composition used here. There are no additional
+numerical schedulers, invocation state objects, or operand payload staging areas.
