@@ -1767,7 +1767,7 @@ sparse-routing work.
 
 The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
 expresses numerical accesses through references and grid-relative index maps.
-`tensor_metal.gather_expression` translates Xonotic's retained slice/fixed/advanced
+`tensor_metal.gather_coordinates` translates Xonotic's retained slice/fixed/advanced
 index mapping into the existing `.at` expression representation. Global output
 coordinates include program_id offsets; singleton index dimensions broadcast,
 negative indices normalize against the source axis, and inserted axes retain
@@ -1951,7 +1951,7 @@ The JAX authors' [Pallas BlockSpec indexing](https://docs.jax.dev/en/latest/pall
 and NumPy authors' [advanced indexing](https://numpy.org/doc/stable/user/basics.indexing.html#advanced-indexing)
 and [take_along_axis](https://numpy.org/doc/stable/reference/generated/numpy.take_along_axis.html)
 define the block-coordinate and logical-index operations composed here. Xonotic
-`gather_expression` supplies the existing graph's slice, inserted-axis and
+`gather_coordinates` supplies the existing graph's slice, inserted-axis and
 broadcast advanced-index mapping through shared `reshape(logical_shape).at(...)`
 expressions. `kernel_calls` uses that same shared view for arbitrary-rank gather,
 take-along-axis, concatenate and transpose. Output physical rows encode prefix
@@ -2193,11 +2193,45 @@ region or copies payloads. Tensor/extent/offset identities and the publication
 partition remain intact. This retains a normal matrix view for downstream native
 contractions and existing host exports.
 
-The custom take-along-axis VJP emitter is removed. General gather transposes
-outside the existing efficient row-gather case, and nonvector scatter_add caller
-semantics, remain separate migration work. Scalar destination routing also
+The custom take-along-axis VJP emitter is removed. General gather transposes now
+reuse this scalar lowering as described below. Nonvector scatter_add caller
+semantics remain separate migration work. Scalar destination routing also
 retains the shared scatter allocator's current worst-case capacity cost; this
 change does not claim compact scratch packing. Python compilation and source
 diff review passed. The existing optional Xonotic graph supplies repeated
 broadcast take gradients, delayed cotangent rows and an absent numerical primal;
 operational evidence is recorded by the parent integration run.
+
+## Xonotic gather transpose
+
+The JAX authors' [gather/scatter transpose implementation](https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py)
+constructs zero output storage and accumulates cotangents at the gather's source
+coordinates. Xonotic now implements general gather transposes through the same
+shared scalar indexed-add block as take-along-axis transposes.
+
+`gather_coordinates` is the single owner of the graph's coordinate mapping for
+forward and backward gather. It retains inserted axes, fixed indices, reversed
+and ordinary slices, adjacent or nonadjacent advanced-index axes, and advanced
+index broadcasting. Symbolic slice metadata resolves at setup; signed dynamic
+indices normalize once. Forward gather loads at these logical coordinates. The
+transpose derives them from each cotangent ordinal, checks every source axis,
+and only then selects a usable flat destination or the absent sentinel. Invalid
+coordinates therefore cannot alias a different flat source cell.
+
+The common transpose block handles key generation, zero storage, bounded direct
+cotangent loads, segmented reduction and metadata-only matrix reframing. It also
+handles gathers without advanced-index operands and scalar logical source shape.
+The existing row-gather specialization stays on shared indexed_add with U×F
+updates, preserving its feature-vector efficiency rather than scalarizing that
+case. These are compositions of the same shared algebra, not separate derivative
+compilers. All gather transposes omit the numerical primal from output-root
+liveness and peer replication; its shape is sufficient.
+
+The obsolete custom gather atomic emitter and its separate gather_address source
+generator are removed. Existing cotangent page identities, output publication
+regions, final dtype and downstream matrix views remain intact. General scalar
+scatter capacity remains a setup storage cost pending shared scratch packing.
+Python compilation and source diff review passed. The existing Xonotic gradient
+workflow adds nonadjacent advanced indices, reversed slices, duplicates, invalid
+indices, delayed cotangent blocks and a downstream numerical consumer without
+allocating a numerical primal or introducing another evaluator.

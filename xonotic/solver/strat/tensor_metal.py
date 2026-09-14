@@ -106,37 +106,6 @@ def coordinate_code(shape, flat='t', prefix='c'):
     return '\n'.join(result)
 
 
-def gather_address(source, indices, output_shape, attributes, flat='t'):
-    mapping, advanced, adjacent = (attributes[key] for key in ('mapping', 'advanced', 'adjacent'))
-    code = [coordinate_code(output_shape, flat)]
-    axis = 0 if adjacent else len(advanced)
-    advanced_axis = 0 if not adjacent else None
-    source_axis, terms = 0, []
-    for item in mapping:
-        if item[0] == 'new':
-            axis += 1
-            continue
-        if item[0] == 'index':
-            if advanced_axis is None:
-                advanced_axis = axis
-                axis += len(advanced)
-            selected = indices[item[1]]
-            terms_index = [f'c{advanced_axis + len(advanced) - selected.ndim + i}*v[{selected.index}].stride[{i}]'
-                           for i, size in enumerate(selected.shape) if size != 1]
-            index = '+'.join(terms_index) or '0'
-            code.append(f'long i{source_axis}=long({read(selected,index)}); if(i{source_axis}<0) i{source_axis}+=v[{source.index}].shape[{source_axis}];')
-            term = f'i{source_axis}'
-        elif item[0] == 'fixed':
-            term = expr(item[1])
-        else:
-            term = f'({expr(item[1])}+c{axis}*({expr(item[2])}))'
-            axis += 1
-        terms.append(f'({term})*v[{source.index}].stride[{source_axis}]')
-        source_axis += 1
-    code.append('ulong address=' + ('+'.join(terms) or '0') + ';')
-    return '\n'.join(code)
-
-
 def element(op, values):
     a = 'a0'
     c = 'a1'
@@ -167,12 +136,6 @@ def kernel(node):
         body.append(write(output, expr(attrs['expression'])))
     elif op in ('reshape', 'stop_gradient', 'cast', 'assign'):
         body.append(write(output, read(values[0])))
-    elif op == 'gather_vjp':
-        source, indices = values[0], values[1:-1]
-        shape = values[-1].shape
-        body = [f'ulong t=position.x; if(t>={expr(math_product(shape))}) return;', gather_address(source, indices, shape, attrs)]
-        body.append(atomic(output, read(values[-1]), 'address'))
-        clear, mode = True, ('gradient', values[-1].index)
     elif op.startswith('reduce_'):
         source = values[0]
         axes = attrs['axes']
@@ -398,9 +361,11 @@ def logical_coordinates(kernels, shape, block):
                  for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
 
 
-# ../../../design/algorithm-sources.md#xonotic-logical-indexing
-def gather_expression(kernels, arguments, values, shapes, attributes, coordinates):
-    mapping, advanced, adjacent = (attributes[key] for key in ('mapping', 'advanced', 'adjacent'))
+# ../../../design/algorithm-sources.md#xonotic-gather-transpose
+def gather_coordinates(kernels, arguments, values, shapes, attributes, coordinates, capacity):
+    mapping = tuple(tuple(part.resolve(capacity) if isinstance(part, Dimension) else part for part in item)
+                    for item in attributes['mapping'])
+    advanced, adjacent = attributes['advanced'], attributes['adjacent']
     axis = 0 if adjacent else len(advanced)
     advanced_axis = None if adjacent else 0
     source_axis, source_coordinates = 0, []
@@ -416,7 +381,7 @@ def gather_expression(kernels, arguments, values, shapes, attributes, coordinate
             selected_shape = shapes[selected.index]
             at = tuple(0 if size == 1 else coordinates[advanced_axis + len(advanced) - len(selected_shape) + i]
                        for i, size in enumerate(selected_shape))
-            selected_value = arguments[1 + item[1]].at(*at)
+            selected_value = arguments[item[1]].at(*at)
             coordinate = kernels.select(selected_value < 0, selected_value + shapes[values[0].index][source_axis], selected_value) if selected.dtype.startswith('int') else selected_value
         elif item[0] == 'fixed':
             coordinate = item[1]
@@ -425,7 +390,7 @@ def gather_expression(kernels, arguments, values, shapes, attributes, coordinate
             axis += 1
         source_coordinates.append(coordinate)
         source_axis += 1
-    return arguments[0].at(*source_coordinates)
+    return tuple(source_coordinates)
 
 
 # ../../../design/algorithm-sources.md#xonotic-take-transpose
@@ -465,7 +430,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         if value.index not in live or value.index in inputs:
             continue
         nodes.append(node)
-        dependencies = values[1:] if operation == 'take_along_axis_vjp' or row_gather_gradient(value, operation, values, attributes, shapes) else values
+        dependencies = values[1:] if operation in ('gather_vjp', 'take_along_axis_vjp') else values
         live.update(operand.index for operand in dependencies)
     nodes.reverse()
     constants = {value.index: data for value, data in graph.constants.values()}
@@ -494,7 +459,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         row_gradient = row_gather_gradient(value, operation, values, attributes, shapes)
         local = {}
         for operand in values:
-            if (row_gradient or operation == 'take_along_axis_vjp') and operand.index == values[0].index:
+            if operation in ('gather_vjp', 'take_along_axis_vjp') and operand.index == values[0].index:
                 continue
             tensor = tensors[operand.index]
             sender = owners[operand.index]
@@ -529,9 +494,10 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_shape=ShapeDtypeStruct(output_shape, value.dtype), peer=peer)(base, destinations, updates)
             tensors[value.index] = result.T if vector else result
             continue
-        # ../../../design/algorithm-sources.md#xonotic-take-transpose
-        if operation == 'take_along_axis_vjp':
-            indices, cotangent = (local[v.index] for v in values[1:])
+        # ../../../design/algorithm-sources.md#xonotic-gather-transpose
+        if operation in ('gather_vjp', 'take_along_axis_vjp'):
+            indices = tuple(local[v.index] for v in values[1:-1])
+            cotangent = local[values[-1].index]
             cotangent_shape = shapes[values[-1].index]
             updates = math.prod(cotangent_shape)
             key_block = (min(tile_rows, updates), 1)
@@ -539,9 +505,11 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             ordinal = kernels.program_id(0) * key_block[0] + row
             coordinates = tuple((ordinal // math.prod(cotangent_shape[i + 1:])) % size
                                 for i, size in enumerate(cotangent_shape))
-            index_value, = kernels.arguments(1)
-            source_at = take_coordinates(kernels, shape, shapes[values[1].index], values[1].dtype,
-                index_value.reshape(shapes[values[1].index]), attributes['axis'], coordinates)
+            index_values = tuple(argument.reshape(shapes[value.index])
+                                 for argument, value in zip(kernels.arguments(len(indices)), values[1:-1]))
+            source_at = (gather_coordinates(kernels, index_values, values, shapes, attributes, coordinates, capacity)
+                if operation == 'gather_vjp' else take_coordinates(kernels, shape, shapes[values[1].index],
+                    values[1].dtype, index_values[0], attributes['axis'], coordinates))
             destination = sum(coordinate * math.prod(shape[i + 1:]) for i, coordinate in enumerate(source_at))
             valid = True
             for coordinate, size in zip(source_at, shape):
@@ -549,9 +517,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             destination = kernels.select(valid, destination, 0xffffffff)
             destinations = program.kernel_call(kernels.expression(destination),
                 grid=((updates + key_block[0] - 1) // key_block[0], 1),
-                in_specs=(BlockSpec(None),), out_specs=BlockSpec(key_block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct((updates, 1), 'int64'), peer=peer)(indices)
-            storage_shape = (math.prod(shape[:-1]), shape[-1])
+                in_specs=(BlockSpec(None),) * len(indices), out_specs=BlockSpec(key_block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct((updates, 1), 'int64'), peer=peer)(*indices)
+            storage_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
             block = (min(tile_rows, storage_shape[0]) * storage_shape[1], 1)
             base = program.tensor((math.prod(shape), 1), block_shape=block, dtype=value.dtype)
             if program.node == peer:
@@ -607,10 +575,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             arguments = tuple(argument.reshape(shapes[value.index])
                               for argument, value in zip(kernels.arguments(len(values)), values))
             if operation == 'gather':
-                resolved = dict(attributes)
-                resolved['mapping'] = tuple(tuple(part.resolve(capacity) if isinstance(part, Dimension) else part for part in item)
-                                            for item in attributes['mapping'])
-                result = gather_expression(kernels, arguments, values, shapes, resolved, coordinates)
+                source_at = gather_coordinates(kernels, arguments[1:], values, shapes, attributes, coordinates, capacity)
+                result = arguments[0].at(*source_at)
             elif operation == 'take_along_axis':
                 source_at = take_coordinates(kernels, shapes[values[0].index], shapes[values[1].index],
                     values[1].dtype, arguments[1], attributes['axis'], coordinates)
