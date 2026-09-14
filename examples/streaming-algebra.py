@@ -244,6 +244,7 @@ def main():
         xonotic_expert = None
         xonotic_batched = None
         xonotic_boolean = None
+        xonotic_reductions = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -538,6 +539,43 @@ def main():
                             + np.logical_or(np.logical_not(data), np.logical_and(data, 0))[:, None, :]).reshape(4, 3)
                 generations.append((data, expected))
             xonotic_boolean = truth_storage, observations, generations
+            # design/algorithm-sources.md#shared-associative-reductions
+            graph = mx.Graph()
+            with graph:
+                reduction_inputs = tuple(graph.input(name, (2, 5), dtype) for name, dtype in
+                                         (('signed', 'int64'), ('unsigned', 'uint64'), ('truth', 'float32'), ('extrema', 'float32')))
+                cases, consumers = [], []
+                for rank, shape, axis in ((1, (10,), 0), (2, (2, 5), 1), (3, (2, 1, 5), 2)):
+                    for operand, operation in ((0, 'max'), (0, 'min'), (1, 'max'), (1, 'min'), (2, 'any'), (2, 'all'), (3, 'max'), (3, 'min')):
+                        reduced = mx.reduce(operation, reduction_inputs[operand].reshape(shape), axis=axis, keepdims=True)
+                        consumers.append(reduced.astype('int32') * 2 + 1 if operand == 2 else reduced + 0)
+                        cases.append((rank, shape, axis, operand, operation))
+            reduction_storage = tuple(program.tensor((2, 5), (1, 2), dtype=value.dtype) for value in reduction_inputs)
+            lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in reduction_inputs), reduction_storage)),
+                outputs=consumers, root_peer=0, tile_rows=1, tile_columns=2)
+            observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
+            generations = []
+            for generation in range(2):
+                signed = np.array([[-2**63, -2**53-1, 0, 2**53+1, 2**63-1],
+                                   [2**63-2, -2**63+1, 2**53+3, -2**53-3, 1]], dtype=np.int64)
+                unsigned = np.array([[0, 2**53+1, 2**63, 2**64-2, 2**64-1],
+                                     [1, 2**53+3, 2**63+1, 2**64-3, 2]], dtype=np.uint64)
+                truth = np.array([[0, -0.0, 0, 0, 0], [.25, -.5, np.nan, 2, -3]] if not generation else
+                                 [[np.nan, 0, -.25, 1, .125], [-0.0, np.nan, 0, 0, 0]], dtype=np.float32)
+                extrema = np.full((2, 5), np.nan, dtype=np.float32)
+                if not generation:
+                    extrema[1] = [np.nan, -.25, 3, -0.0, np.nan]
+                values = (signed[::-1] if generation else signed, unsigned[::-1] if generation else unsigned, truth, extrema)
+                expected = []
+                for rank, shape, axis, operand, operation in cases:
+                    data = values[operand].reshape(shape)
+                    result = ((np.fmax if operation == 'max' else np.fmin).reduce(data, axis=axis, keepdims=True,
+                        initial=-np.inf if operation == 'max' else np.inf) if operand == 3 else
+                        getattr(np, operation)(data, axis=axis, keepdims=True))
+                    expected.append((result.astype(np.int32) * 2 + 1 if operand == 2 else result).reshape(-1, 1))
+                generations.append((values, expected))
+            xonotic_reductions = reduction_storage, cases, observations, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1149,6 +1187,45 @@ def main():
                 print(json.dumps(dict(event='xonotic_expert_complete', generation=generation,
                     elapsed_ms=(time.monotonic_ns()-started)/1e6,
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
+                for results in observations:
+                    for i, j, result in results:
+                        result.consume()
+        if xonotic_reductions is not None:
+            storage, cases, observations, generations = xonotic_reductions
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                early_row = generation
+                for tensor, data in zip(storage, values):
+                    for (i, j), ref in tensor.blocks.items():
+                        if i == early_row:
+                            column = j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for case, results in zip(cases, observations) for i, j, result in results
+                               if case[0] > 1 and i == early_row))
+                for case, results, reference in zip(cases, observations, expected):
+                    for i, j, result in results:
+                        if case[0] > 1 and i == early_row:
+                            if not np.array_equal(result.array, reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                                raise ArithmeticError('Typed reduction early consumer differs')
+                        elif case[0] > 1 and result.ready:
+                            raise ArithmeticError('Typed reduction consumed a withheld row')
+                print(json.dumps(dict(event='xonotic_typed_reductions_early', generation=generation,
+                    withheld_row=1-early_row, ranks=[1,2,3])), flush=True)
+                for tensor, data in zip(storage, values):
+                    for (i, j), ref in tensor.blocks.items():
+                        if i != early_row:
+                            column = j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for results in observations for i, j, result in results))
+                for results, reference in zip(observations, expected):
+                    for i, j, result in results:
+                        if not np.array_equal(result.array, reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                            raise ArithmeticError('Typed reduction consumer differs after reuse')
+                print(json.dumps(dict(event='xonotic_typed_reductions_complete', generation=generation,
+                    output=[dict(rank=case[0], operand=case[3], operation=case[4], values=[result.array.tolist() for i,j,result in results])
+                            for case, results in zip(cases, observations)])), flush=True)
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
