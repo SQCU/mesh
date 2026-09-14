@@ -103,7 +103,9 @@ def main():
         strided = program.export(linear(program, weight(strided_left).T, weight(strided_right).T,
             tile_rows=3, tile_k=5, tile_columns=7, peer=0, output_dtype="float32")[0, 0])
         mapped_left, mapped_right = kernels.arguments(2)
-        mapped = program.kernel_call(kernels.expression(kernels.dot(mapped_left, mapped_right, tile_k=3)),
+        mapped_feature, mapped_inner = kernels.arange(7).T, kernels.arange(5, tile=3)
+        mapped_product = (mapped_left.at(0, mapped_inner) * mapped_right.at(mapped_inner, mapped_feature)).sum().T
+        mapped = program.kernel_call(kernels.expression(mapped_product),
             grid=(3,), in_specs=(BlockSpec((1, 5), lambda i: (2-i, 0)), BlockSpec((5, 7), lambda i: (0, 0))),
             out_specs=BlockSpec((1, 7), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((3, 7), np.float32), peer=0)(weight(strided_left).T, weight(strided_right).T)
