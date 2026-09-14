@@ -248,14 +248,9 @@ static void link_publications(struct mesh_link *link){
 static void mesh_progress(struct mesh_link *link){
   struct hdr *M=link->M;struct mesh_verbs *v=&link->provider;
   uint32_t iq=(uint32_t)link->qps;
-  link_publications(link);
-  for(uint32_t q=0;q<iq;q++){
-    link_receive(link,q);
-    link_send_ready(link,q);
-  }
   for(uint32_t cq=0;cq<2*(iq+1);cq++){
   int count=ibv_poll_cq(v->completion_queues[cq],QD,v->completions);
-  if(count<0){link_error(M,count,3);return;}
+  if(count<0){link_error(M,count,3);continue;}
   for(int i=0;i<count;i++){
     struct ibv_wc *wc=&v->completions[i];
     uint32_t q=cq/2;int direction=(int)(cq%2);
@@ -278,11 +273,16 @@ static void mesh_progress(struct mesh_link *link){
         }
         link_receive(link,frame->queue);
       }
-    } else if(direction==MESH_RECEIVE)mesh_receive_complete(M,entry.row,entry.page,!wc->status);
+    } else if(direction==MESH_RECEIVE){mesh_receive_complete(M,entry.row,entry.page,!wc->status);link_receive(link,q);}
     else {link_release(link,q,entry);mesh_send_complete(M,entry.row,entry.plane);}
   }
   }
   link_receive(link,iq);
+  link_publications(link);
+  for(uint32_t q=0;q<iq;q++){
+    link_receive(link,q);
+    link_send_ready(link,q);
+  }
 }
 
 /* ledger D14: destroying the queue pairs ends their work requests; release what they occupied */

@@ -1005,7 +1005,18 @@ first-fit scan past payloads that do not fit remaining provider capacity. Pendin
 payloads retain announcement order on their QP. No protocol field, memory layout,
 operand copy, acknowledgement, or numerical wait is added. Source review and
 compilation cover this change; bridges are not restarted and numerical programs
-are not executed. CQ polling still occurs in the surrounding progress loop.
+are not executed. CQ polling occurs at the start of the surrounding progress loop,
+before publication traversal and send attempts. Received payloads therefore publish
+before unrelated notice processing, and subsequent posting sees capacity released
+by those completions. A data-receive completion refills its queue immediately after
+retiring the completed entry. Index receive storage is refilled after its completed
+frames have been consumed. A failed CQ poll records its error and continues to
+other queues and ordinary posting; it does not suppress unrelated progress.
+
+Source review checked that the posted entry is copied out and head/frame accounting
+is retired before appending replacements at the tail. This preserves outstanding
+entries in the current CQ batch and retains failed-post retry state. Compilation
+passes; no numerical run or latency/throughput result is claimed.
 
 These lists describe pending notifications/work, not additional tensor readiness.
 Canonical presence and reader masks continue to describe values and ownership.
