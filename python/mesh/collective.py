@@ -1,6 +1,6 @@
-from . import BlockSpec, Program, ShapeDtypeStruct, kernels
+from . import BlockSpec, Program, ShapeDtypeStruct, kernels, check
 
-__all__ = ['send', 'reduce_scatter', 'all_gather', 'all_reduce']
+__all__ = ['send', 'reduce_scatter', 'all_gather', 'all_reduce', 'sync_on_remote_fill']
 
 send = Program.copy
 
@@ -49,3 +49,10 @@ def all_reduce(program, value, *, peers, owners):
     peers = tuple(peers)
     return all_gather(program, reduce_scatter(program, value, peers=peers, owners=owners),
                       peers=peers, owners=owners)
+
+
+# design/algorithm-sources.md#collectivesync_on_remote_fill
+def sync_on_remote_fill(*results):
+    while not all(result.ready for result in results):
+        for result in results:
+            check(result.ref.program.report.code)

@@ -74,3 +74,12 @@ provides operand-associated presence and dataflow firing prior art.
 Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
 defines the actual Thunderbolt SEND/RECV substrate and device ownership obligations.
 These sources supply mechanisms, not additional project objectives.
+
+## Explicit synchronization counterexample
+
+Operator instruction, September 14, 2026: supply an explicit `sync_on_remote_fill`
+call and demonstrate the serialization and permanent deadlock it can introduce.
+This is an opt-in caller operation, never an automatic collective behavior.
+[The counterexample](sync-on-remote-fill.md) documents the call and audits its
+complete dataflow. Its measurements illustrate the unwanted path; they do not
+establish acceptance criteria for the collective implementation.

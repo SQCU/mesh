@@ -145,10 +145,14 @@ The library's public surface is exactly:
 Program.export, Program.write, Program.constant, Program.realize, Program.close,
 Tensor, Ref, BlockSpec, ShapeDtypeStruct, Result, kernels.arguments,
 kernels.expression, kernels.dot, kernels.add, collective.send,
-collective.reduce_scatter, collective.all_gather, collective.all_reduce, nn.linear,
+collective.reduce_scatter, collective.all_gather, collective.all_reduce,
+collective.sync_on_remote_fill, nn.linear,
 nn.ffn, nn.rmsnorm, nn.embedding`
 
-A function not reachable from these symbols and from `examples/streaming-chain.py` is
+The explicitly requested `examples/sync-on-remote-fill.py` is a counterexample,
+not a default execution path or a new acceptance harness.
+
+A function not reachable from these symbols and from these examples is
 not part of the library. MLX's whole distributed surface is eight functions
 (`all_sum, all_max, all_min, all_gather, send, recv, recv_like, sum_scatter`); this is
 the size class.

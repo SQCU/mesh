@@ -62,3 +62,7 @@ Zhang and Sennrich, *Root Mean Square Layer Normalization* (2019): sum squared f
 ## nn.embedding
 
 The JAX authors, [Pallas indexed Refs](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs): indices select table rows and masks delimit valid elements; configured output blocks publish independently.
+
+## collective.sync_on_remote_fill
+
+MPI Forum, [MPI-4.1 communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm): explicit completion waits are separate from nonblocking initiation. This function polls caller-supplied, already-exported Results until every region is present. It neither initiates transfers nor consumes results. Mesh progress remains on its existing threads. The example uses the existing addition kernel and SEND/RECV paths; Welford (1962), *Note on a Method for Calculating Corrected Sums of Squares*, supplies its online timing mean and sample variance. Its caller-order cycle is derived in [the synchronization counterexample](sync-on-remote-fill.md). No default collective calls this function.
