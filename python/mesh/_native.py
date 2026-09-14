@@ -50,6 +50,11 @@ class RouteEvent(C.Structure):
          'completed', 'prepared', 'consumer', 'flags')]
 
 
+class ActiveEvent(C.Structure):
+    _fields_ = [('function', C.c_uint64), ('omissions', C.c_uint64)] + [(name, U) for name in
+        ('slot', 'count_first', 'count_maps', 'disposition', 'omitted', 'retired', 'inputs', 'flags')]
+
+
 class Event(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in
         ('ready_ns', 'start_ns', 'complete_ns', 'gpu_start_ns', 'gpu_end_ns', 'submissions')]
@@ -117,6 +122,12 @@ class Native:
             'mesh_algebra_route_table': (View, [P, P]),
             'mesh_algebra_route_attach': (C.c_int, [P, Z, P, Z]),
             'mesh_algebra_route_hold': (C.c_int, [P, P, C.POINTER(View), Z]),
+            'mesh_algebra_active': (C.c_int, [P, Z, View, Z]),
+            'mesh_algebra_route_producers': (C.c_int, [P, P, C.POINTER(Z), Z]),
+            'mesh_algebra_trace_active': (ActiveEvent, [P, Z]),
+            'mesh_algebra_trace_active_count': (RowRange, [P, Z, Z]),
+            'mesh_algebra_trace_active_reader': (ReaderEvent, [P, Z, Z, U]),
+            'mesh_algebra_trace_route_producer': (ActiveEvent, [P, Z]),
             'mesh_algebra_trace_route_count': (Z, [P]),
             'mesh_algebra_trace_route': (RouteEvent, [P, Z]),
             'mesh_algebra_trace_route_reader': (ReaderEvent, [P, Z, U]),

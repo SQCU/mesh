@@ -347,6 +347,18 @@ class Program:
         for index in range(self.native.algebra_trace_count(self.handle)):
             event = self.native.algebra_trace(self.handle, index)
             item = {name: getattr(event, name) for name, _ in event._fields_}
+            active = self.native.algebra_trace_active(self.handle, index)
+            if active.function != 0xffffffffffffffff:
+                item['active'] = {name: getattr(active, name) for name, _ in active._fields_}
+                item['active']['count_regions'] = []
+                for map_index in range(active.count_maps):
+                    region = self.native.algebra_trace_active_count(self.handle, index, map_index)
+                    members = []
+                    for row in range(region.count):
+                        reader = self.native.algebra_trace_active_reader(self.handle, index, map_index, row)
+                        if reader.member != 0xffffffff:
+                            members.append({name: getattr(reader, name) for name, _ in reader._fields_})
+                    item['active']['count_regions'].append(dict(first=region.first, count=region.count, reader_groups=members))
             for label, count, read in (('inputs', event.input_maps, self.native.algebra_trace_input),
                                        ('outputs', event.output_maps, self.native.algebra_trace_output)):
                 regions = (read(self.handle, index, i) for i in range(count))
@@ -374,6 +386,9 @@ class Program:
         for index in range(self.native.algebra_trace_route_count(self.handle)):
             event = self.native.algebra_trace_route(self.handle, index)
             item = {name: getattr(event, name) for name, _ in event._fields_}
+            producer = self.native.algebra_trace_route_producer(self.handle, index)
+            if producer.function != 0xffffffffffffffff:
+                item['producer'] = {name: getattr(producer, name) for name, _ in producer._fields_}
             item['reader_groups'] = []
             for row in range(event.count):
                 reader = self.native.algebra_trace_route_reader(self.handle, index, row)

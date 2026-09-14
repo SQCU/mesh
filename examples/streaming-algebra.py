@@ -447,14 +447,17 @@ def main():
                 if not generation:
                     for result in gradient_results:
                         result.consume()
-        for generation in range(2):
+        for generation in range(4):
+            empty = generation == 2
             routing = np.resize(np.array([0, 2, 0, 3], dtype=np.int64), updates_count).reshape(-1, 1)
             if destinations_count > 4:
                 routing[4:last_start, 0] = 4 + np.arange(max(0, last_start-4)) % (destinations_count-4)
             routing[last_start:] = 2
-            if generation:
+            if generation == 1:
                 routing = np.where(routing == 0, 3, np.where(routing == 3, 0, routing))
                 routing[1, 0] = 2**32 + 2
+            if empty:
+                routing.fill(2**32 + 2)
             update_values = np.arange(1+generation, updates_count+1+generation, dtype=dtype)[:, None]
             expected = np.zeros((destinations_count, 1), dtype=np.float32)
             selected = scatter_valid[:, 0] & (routing[:, 0] < destinations_count)
@@ -466,31 +469,34 @@ def main():
             for i in range(last_chunk+1):
                 with program.write(scatter_indices[i, 0]) as destination:
                     destination[...] = routing[update_tile*i:update_tile*(i+1)]
-            for i in range(last_chunk):
+            for i in range(0 if empty else last_chunk):
                 with program.write(scatter_factors[i, 0]) as destination:
                     destination[...] = 2 + generation
                 with program.write(scatter_updates[i, 0]) as destination:
                     destination[...] = update_values[update_tile*i:update_tile*(i+1)]
-            wait_for(tuple(scatter_results[i] for i in early_destinations))
-            if scatter_results[2].ready or not scatter_updates[last_chunk, 0].writable:
+            observed = tuple(range(destinations_count)) if empty else early_destinations
+            wait_for(tuple(scatter_results[i] for i in observed))
+            if (not empty and scatter_results[2].ready) or not scatter_updates[last_chunk, 0].writable:
                 raise ArithmeticError('Delayed scatter contribution was not independent')
             first_scatter_ns = time.monotonic_ns() - scatter_start
-            for i in early_destinations:
+            for i in observed:
                 if not np.array_equal(scatter_results[i].array, np.broadcast_to(expected[i], (1, 4))):
                     raise ArithmeticError('Early scattered sum or consumer differs')
-            with program.write(scatter_updates[last_chunk, 0]) as destination:
-                destination[...] = update_values[last_start:]
-            if scatter_results[2].ready or not scatter_factors[last_chunk, 0].writable:
-                raise ArithmeticError('Fused update ignored its missing coefficient operand')
-            with program.write(scatter_factors[last_chunk, 0]) as destination:
-                destination[...] = 2 + generation
+            for i in range(last_chunk+1) if empty else (last_chunk,):
+                with program.write(scatter_updates[i, 0]) as destination:
+                    destination[...] = update_values[update_tile*i:update_tile*(i+1)]
+                if (not empty and scatter_results[2].ready) or not scatter_factors[i, 0].writable:
+                    raise ArithmeticError('Fused update ignored its missing coefficient operand')
+                with program.write(scatter_factors[i, 0]) as destination:
+                    destination[...] = 2 + generation
             wait_for((scatter_results[2],))
             if not np.array_equal(scatter_results[2].array, np.broadcast_to(expected[2], (1, 4))):
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
             print(json.dumps(dict(event='indexed_add', generation=generation, rows=updates_count, tile=update_tile, destinations=destinations_count, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
-                delayed_destination=2, result=[result.array.tolist() for result in scatter_results])), flush=True)
-            if not generation:
+                empty=empty, delayed_destination=None if empty else 2,
+                result=[result.array.tolist() for result in scatter_results])), flush=True)
+            if generation < 3:
                 for result in scatter_results:
                     result.consume()
         for generation in range(2):
