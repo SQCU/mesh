@@ -249,6 +249,7 @@ def main():
         xonotic_ranges = None
         xonotic_random = None
         xonotic_integer_dots = []
+        xonotic_ordering = []
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -675,6 +676,47 @@ def main():
             empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
             mean_result = program.export(lowered[integer_mean.index][0, 0])
             xonotic_ranges = range_storage, observations, references, empty_results, mean_result
+            # design/algorithm-sources.md#stable-indexed-ordering
+            for scalar, length in ((np.float32, 7), (np.float16, 7), (np.bool_, 7), (np.int64, 7), (np.uint64, 7), (np.float32, 131)):
+                graph = mx.Graph()
+                with graph:
+                    ordering_input = graph.input('ordering_input', (2, 1, length), np.dtype(scalar).name)
+                    indices = mx.argsort(ordering_input, axis=2)
+                    ordered = mx.take_along_axis(ordering_input, indices, axis=2)
+                    top_indices = mx.argpartition(ordering_input, 2, axis=-1)[:, :, :3]
+                    top_values = mx.take_along_axis(ordering_input, top_indices, axis=2)
+                    axis_indices = mx.argsort(ordering_input.reshape(2, length).transpose(1, 0), axis=0)
+                    vector_indices = mx.argsort(ordering_input[0, 0, :], axis=0)
+                    ordering_outputs = (indices, ordered, top_indices, top_values, axis_indices, vector_indices)
+                ordering_storage = program.tensor((2, length), (1, 129 if length > 128 else 3), dtype=scalar)
+                first_function = program.native.algebra_trace_count(program.handle)
+                lowered = kernel_calls(program, graph, (), {ordering_input.index: ordering_storage},
+                    outputs=ordering_outputs, root_peer=0, tile_rows=1, tile_k=3, tile_columns=1)
+                last_function = program.native.algebra_trace_count(program.handle)
+                observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                    for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in ordering_outputs)
+                generations = []
+                for generation in range(2):
+                    if np.dtype(scalar).kind == 'f':
+                        values = np.array([[np.nan, 3, -0., 0., 3, np.nan, -np.inf],
+                                           [np.inf, -0., np.nan, 3, 3, 0., -np.inf]], dtype=scalar)
+                    elif scalar == np.bool_:
+                        values = np.array([[True, False, True, True, False, False, True],
+                                           [False, True, False, True, False, True, False]], dtype=scalar)
+                    elif scalar == np.int64:
+                        values = np.array([[2**63-1, 2**53+1, -1, -2**63, 2**53+1, 0, -1],
+                                           [-1, 2**53+3, -2**63, 0, 2**53+3, 2**63-1, 0]], dtype=scalar)
+                    else:
+                        values = np.array([[2**64-1, 2**63+1, 2**53+1, 0, 2**53+1, 1, 2**64-1],
+                                           [2**53+3, 0, 2**64-1, 1, 2**53+3, 2**63+1, 0]], dtype=scalar)
+                    if length != 7:
+                        values = np.stack([np.resize(row, length) for row in values])
+                    if generation:
+                        values = values[::-1, ::-1].copy()
+                    order = np.argsort(values, axis=1, kind='stable').astype(np.uint32)
+                    ordered_values = np.take_along_axis(values, order, axis=1)
+                    generations.append((values, (order, ordered_values, order[:, :3], ordered_values[:, :3], order.T, order[:1])))
+                xonotic_ordering.append((np.dtype(scalar).name, ordering_storage, observations, first_function, last_function, generations))
             # design/algorithm-sources.md#typed-integer-contractions
             for scalar in (np.int32, np.uint32, np.int64, np.uint64, np.bool_):
                 dtype_name = np.dtype(scalar).name
@@ -1409,6 +1451,51 @@ def main():
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
                 for results in observations:
                     for i, j, result in results:
+                        result.consume()
+        for dtype_name, storage, observations, first_function, last_function, generations in xonotic_ordering:
+            ordering_trace = program.trace
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(storage.blocks.values()), 'writable')
+                first_ref = storage[generation, 0]
+                source = program.native.tensor_rows(first_ref.view.tensor, first_ref.view.extent)
+                source_rows = set(range(source.first, source.first+source.count))
+                readers = tuple(index for index in range(first_function, last_function)
+                    if any(row in source_rows for region in ordering_trace[index]['inputs']
+                           for row in range(region['first'], region['first']+region['count'])))
+                started = time.monotonic_ns()
+                with program.write(first_ref) as destination:
+                    destination[...] = values[generation:generation+1, :first_ref.shape[1]]
+                partial = wait_completed(readers, started)
+                if any(result.ready for results in observations for i,j,result in results):
+                    raise ArithmeticError('Ordering finalized before the rest of its axis arrived')
+                print(json.dumps(dict(event='xonotic_ordering_source_partial', dtype=dtype_name, length=storage.shape[1], generation=generation,
+                    source_rows=sorted(source_rows), completed_functions=partial, elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                for row in (generation, 1-generation):
+                    for (i, j), ref in storage.blocks.items():
+                        if i == row and (row != generation or j != 0):
+                            column = j*storage.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = values[i:i+1, column:column+ref.shape[1]]
+                    wait_for(tuple(result for output_index, results in enumerate(observations) for i,j,result in results
+                                   if (0 if output_index == 5 else j if output_index == 4 else i) == row))
+                    for output_index, (results, reference) in enumerate(zip(observations, expected)):
+                        for i,j,result in results:
+                            source_row = 0 if output_index == 5 else j if output_index == 4 else i
+                            if source_row == row:
+                                target = reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]
+                                if result.array.dtype != target.dtype or not np.array_equal(result.array, target, equal_nan=True):
+                                    raise ArithmeticError(f'Stable ordering or gathered values differ: {dtype_name}, output={output_index}')
+                                if result.array.dtype.kind == 'f' and not np.array_equal(np.signbit(result.array[target == 0]), np.signbit(target[target == 0])):
+                                    raise ArithmeticError('Stable ordering changed the identity of a signed zero')
+                            elif row == generation and result.ready:
+                                raise ArithmeticError('Ordering consumed an unpublished independent row')
+                    print(json.dumps(dict(event='xonotic_ordering_early' if row == generation else 'xonotic_ordering_complete',
+                        dtype=dtype_name, length=storage.shape[1], generation=generation, published_row=row, elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        output=[[(i,j,result.array.tolist()) for i,j,result in results
+                                 if (0 if output_index == 5 else j if output_index == 4 else i) == row]
+                                for output_index,results in enumerate(observations)])), flush=True)
+                for results in observations:
+                    for i,j,result in results:
                         result.consume()
         for dtype_name, storage, observations, rows_per_batch, empty_results, mixed_results, generations in xonotic_integer_dots:
             wait_for(empty_results)
