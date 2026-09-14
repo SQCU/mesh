@@ -442,7 +442,7 @@ def main():
                     expected = tuple(data * 2 + 1 for data in (result, dq, dk, dv, dot_v * affinity))
                     generations.append(((query, keys, vectors, indices, weights, cotangent), expected))
                 xonotic_neighborhoods.append((gram, storage, observations, generations))
-            # design/algorithm-sources.md#xonotic-expert-algebra
+            # design/algorithm-sources.md#xonotic-expert-indexed-contractions
             graph = mx.Graph()
             with graph:
                 expert_inputs = tuple(graph.input(name, shape, dtype) for name, shape, dtype in (
