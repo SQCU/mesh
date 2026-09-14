@@ -523,27 +523,26 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             tensors[value.index] = result.T
             continue
         # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
-        if operation in ('reduce_sum', 'reduce_mean') and (
-                (len(shapes[values[0].index]) == 1 and tuple(attributes['axes']) == (0,)) or
-                (len(shapes[values[0].index]) == 2 and tuple(attributes['axes']) in ((0,), (1,)))):
+        if operation in ('reduce_sum', 'reduce_mean') and 1 <= len(shapes[values[0].index]) <= 2 and attributes['axes']:
             operand_shape = shapes[values[0].index]
             operand = matrix_view(local[values[0].index], operand_shape if len(operand_shape) == 2 else (1, math.prod(operand_shape)))
-            transpose = len(operand_shape) == 2 and tuple(attributes['axes']) == (0,)
-            operand = operand.T if transpose else operand
+            axes = tuple(sorted(set(attributes['axes']))) if len(operand_shape) == 2 else (1,)
+            reduced_shape = tuple(1 if axis in axes else size for axis, size in enumerate(operand.shape))
+            block = tuple(math.gcd(min(tile, size), operand.block_shape[axis] if operand.grid[axis] > 1 else 0)
+                          for axis, (tile, size) in enumerate(zip((tile_rows, tile_columns), reduced_shape)))
             argument, = kernels.arguments(1)
             term = argument & 0xffffffffffffffff if operand.dtype.kind in 'iu' else argument
-            result = term.sum()
+            result = term.sum(axis=axes)
+            divisor = math.prod(operand.shape[axis] for axis in axes)
             if operation == 'reduce_mean' and operand.dtype.kind == 'f':
-                result = result / operand.shape[1]
-            rows = math.gcd(min(tile_rows, operand.shape[0]), operand.block_shape[0] if operand.grid[0] > 1 else 0)
+                result = result / divisor
             reduced = program.kernel_call(kernels.expression(result),
-                grid=((operand.shape[0] + rows - 1) // rows, 1),
+                grid=tuple((size + tile - 1) // tile for size, tile in zip(reduced_shape, block)),
                 in_specs=(BlockSpec(None),),
-                out_specs=BlockSpec((rows, 1), lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct((operand.shape[0], 1), value.dtype), peer=peer)(operand)
-            reduced = nn._pointwise(program, kernels.expression(argument / operand.shape[1]),
-                (reduced,), rows, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and operand.dtype.kind != 'f' else reduced
-            tensors[value.index] = reduced.T if transpose else reduced
+                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(reduced_shape, value.dtype), peer=peer)(operand)
+            tensors[value.index] = nn._pointwise(program, kernels.expression(argument / divisor),
+                (reduced,), block[0], peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and operand.dtype.kind != 'f' else reduced
             continue
         # ../../../design/algorithm-sources.md#xonotic-logical-indexing
         if operation in ('gather', 'take_along_axis', 'concatenate', 'transpose'):

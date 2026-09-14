@@ -1446,6 +1446,24 @@ existing streamed nested-contraction gold case.
 
 ### Streamed row reductions in the shared region owner
 
+The shared expression now exposes `.T` and `.sum(axis=...)` over its resolved
+matrix domain. The default remains axis one. Axis zero is the algebra
+`x.T.sum().T`; both axes (`None` or `(0,1)`) are `x.sum().T.sum()`.
+Negative axes normalize during setup and an empty axis tuple is the identity.
+Singleton reduced dimensions remain explicit in the physical two-dimensional
+result. Xonotic supplies logical shape metadata separately and uses these
+expressions for all nonempty vector/matrix sum and mean axis sets.
+
+Transposition exchanges layout dimensions, backing cuts and origin coordinates.
+Input panels retain original pages through transposed Ref views. Computed panels
+use the existing region owner; a transposed output root swaps the destination
+view so its producer writes directly into the requested output pages. Double
+transposition cancels during expression construction. Full sums reduce independent
+row partials before reducing their transposed statistics. Those intermediate
+statistics use the expression's accumulator dtype, preserving FP32 and exact
+integer accumulation across both axes instead of inserting an FP16 or float
+conversion between them. No additional runtime graph or scheduler is introduced.
+
 The JAX authors' [Pallas reductions and accumulation discussion](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation)
 describes tiled accumulation and the lifetime of reduction buffers.
 `_ExpressionRegions.reduction` implements row statistics with separately published

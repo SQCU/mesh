@@ -153,8 +153,22 @@ class _Expression:
         return _Expression('cast', (self,), dtype.str)
 
     # design/algorithm-sources.md#region-expression-fusion
-    def sum(self):
-        return _Expression('sum', (self,))
+    def sum(self, axis=1):
+        axes = (0, 1) if axis is None else (axis,) if isinstance(axis, int) else tuple(axis)
+        if any(value not in (-2, -1, 0, 1) for value in axes):
+            raise ValueError('Expression reduction axes refer to its two-dimensional domain')
+        axes = tuple(sorted(set(value % 2 for value in axes)))
+        if not axes:
+            return self
+        if axes == (0,):
+            return self.T.sum().T
+        reduced = _Expression('sum', (self,))
+        return reduced.T.sum() if axes == (0, 1) else reduced
+
+    @property
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def T(self):
+        return self.operands[0] if self.operation == 'transpose' else _Expression('transpose', (self,))
 
     # design/algorithm-sources.md#region-expression-fusion
     def rsqrt(self):
@@ -1086,7 +1100,7 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'sum', 'cast') or any(_requires_regions(child) for child in node.operands)
+    return node.operation in ('dot', 'sum', 'cast', 'transpose') or any(_requires_regions(child) for child in node.operands)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -1118,6 +1132,8 @@ class _ExpressionRegions:
             result = (1, 1), (False, False), (1, 1)
         elif node.operation == 'cast':
             result = self.layout(node.operands[0])
+        elif node.operation == 'transpose':
+            result = tuple(value[::-1] for value in self.layout(node.operands[0]))
         elif node.operation == 'dot':
             left, right = map(self.layout, node.operands)
             if left[0][1] != right[0][0]:
@@ -1177,8 +1193,10 @@ class _ExpressionRegions:
         if node.operation == 'input':
             source = self.sources[node.value]
             return source.region(*origin, *shape) if self.whole[node.value] else source.slice(*origin, *shape)
+        if node.operation == 'transpose':
+            return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation == 'sum':
-            return self.reduction(node, origin[0], shape[0], np.dtype('float32'))
+            return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
         dtype = np.dtype(node.value) if node.operation == 'cast' else np.dtype('float32')
         if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
             return self.panel(node.operands[0], origin, shape)
@@ -1310,6 +1328,11 @@ class _ExpressionRegions:
                     extent = tuple(1 if source.shape[axis] == 1 else shape[axis] for axis in range(2))
                     ref = self.panel(node, where, extent)
                 return reference(('input', node.value), (ref,))
+            if node.operation == 'transpose':
+                layout = self.layout(node)
+                where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
+                extent = tuple(1 if layout[0][axis] == 1 else shape[axis] for axis in range(2))
+                return reference(('transpose', node, where, extent), (self.panel(node, where, extent),))
             if node.operation == 'load':
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
                 return _Expression('load', tuple(lower(child, accumulation) for child in node.operands), symbol.value)
@@ -1343,10 +1366,13 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             value = _resolve_logical(specialize(expression), lowering.sources)
             target = spec.resolve(coordinate)
             origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
+            domain_shape = spec._tensor.shape
+            if value.operation == 'transpose':
+                value, target, origin, domain_shape = value.operands[0], target.T, origin[::-1], domain_shape[::-1]
             if value.operation == 'dot':
                 layout = lowering.layout(value)
                 for axis in range(2):
-                    expected = spec._tensor.shape[axis] if layout[1][axis] else target.shape[axis]
+                    expected = domain_shape[axis] if layout[1][axis] else target.shape[axis]
                     if layout[0][axis] != expected:
                         raise ValueError('Contraction output shape differs from its operand domains')
                 where = tuple(origin[axis] if layout[1][axis] else 0 for axis in range(2))

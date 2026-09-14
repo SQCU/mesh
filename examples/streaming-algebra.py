@@ -162,6 +162,7 @@ def main():
             in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, 1), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((4, 1), np.int64), peer=0)(integer_input)
         integer_results = tuple(program.export(integer_sum[i, 0]) for i in range(4))
+        integer_total_result = None
         quotient_cases = []
         for scalar, numerators, divisors in (
                 (np.int64, (2**53+1, -7, 7, -7, -(2**63)), (3, 3, -3, -3, 3)),
@@ -243,15 +244,17 @@ def main():
             with integer_graph:
                 integer_source = integer_graph.input('integer_rows', (4, 6), 'int64')
                 integer_rows = mx.sum(integer_source, axis=1)
+                integer_total = mx.sum(integer_source)
                 integer_transposed = integer_graph.input('integer_columns', (6, 4), 'int64')
                 integer_columns = mx.sum(integer_transposed, axis=0, keepdims=True)
             integer_lowered = kernel_calls(program, integer_graph, (),
                 {integer_source.index: integer_input, integer_transposed.index: integer_input.T},
-                outputs=(integer_rows, integer_columns),
+                outputs=(integer_rows, integer_columns, integer_total),
                 root_peer=0, tile_rows=1, tile_columns=3)
             integer_results += tuple(program.export(ref)
                 for value in (integer_rows, integer_columns)
                 for _, ref in sorted(integer_lowered[value.index].blocks.items()))
+            integer_total_result = program.export(integer_lowered[integer_total.index][0, 0])
             graph = mx.Graph()
             with graph:
                 source = graph.input('source', (4, 4))
@@ -260,7 +263,7 @@ def main():
                 selected = source[indices, ::-1]
                 joined = mx.concatenate((selected, tail), axis=0)
                 means = mx.mean(source, axis=1)
-                total_mean = mx.sum(means)
+                total_mean = mx.mean(source) * 4
                 column_means = mx.mean(source, axis=0, keepdims=True)
                 logical_indices = indices.reshape(2, 2, 1)
                 taken = mx.take_along_axis(selected.reshape(2, 2, 4), logical_indices, axis=2)
@@ -643,6 +646,12 @@ def main():
         for result, expected in zip(integer_results, (65536, 2**32+2, -(2**63), 2**63-1) * (len(integer_results)//4)):
             if result.array.item() != expected:
                 raise ArithmeticError('Integer reduction lost exact cancellation beyond floating-point precision')
+        if integer_total_result is not None:
+            wait_for((integer_total_result,))
+            if integer_total_result.array.item() != 4295032833:
+                raise ArithmeticError('Full matrix reduction lost modular integer accumulation')
+            print(json.dumps(dict(event='integer_matrix_total', output=integer_total_result.array.item())), flush=True)
+            integer_total_result.consume()
         print(json.dumps(dict(event='integer_reduction', output=[result.array.tolist() for result in integer_results])), flush=True)
         for result in integer_results:
             result.consume()
