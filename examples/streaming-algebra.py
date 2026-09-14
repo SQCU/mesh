@@ -250,6 +250,7 @@ def main():
         xonotic_random = None
         xonotic_integer_dots = []
         xonotic_ordering = []
+        xonotic_composed_indexed = []
         scatter_bases = {}
         xonotic_take_gradient = None
         xonotic_alias = None
@@ -678,6 +679,44 @@ def main():
             empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
             mean_result = program.export(lowered[integer_mean.index][0, 0])
             xonotic_ranges = range_storage, observations, references, empty_results, mean_result
+            # design/algorithm-sources.md#composable-indexed-contractions
+            for dynamic, weight_dtype in ((True, np.float32), (False, np.float32), (True, np.float16)):
+                source = program.tensor((2, 5), (1, 3), dtype=np.float32)
+                weights = program.tensor((10 if dynamic else 5, 7), (2, 3), dtype=weight_dtype)
+                selected = program.tensor((2, 1), (1, 1), dtype=np.int64)
+                bias = program.tensor((2, 7), (1, 3), dtype=np.float32)
+                weight_values = ((np.arange(np.prod(weights.shape), dtype=np.float32).reshape(weights.shape) % 17)-8)/16
+                weight_values = weight_values.astype(weight_dtype)
+                for (i,j),ref in weights.blocks.items():
+                    row, column = i*weights.block_shape[0], j*weights.block_shape[1]
+                    program.constant(ref, weight_values[row:row+ref.shape[0], column:column+ref.shape[1]])
+                source_arg, weights_arg, selected_arg, bias_arg = kernels.arguments(4)
+                row = kernels.program_id(0)
+                column = kernels.program_id(1)*3 + kernels.arange(3)
+                feature = kernels.program_id(1)*3 + kernels.arange(3).T
+                inner = kernels.arange(5, tile=3)
+                chosen = selected_arg.reshape((2,)).at(row)
+                weight_load = (weights_arg.reshape((2, 5, 7)).at(chosen, inner, feature) if dynamic else
+                               weights_arg.reshape((5, 7)).at(inner, feature))
+                product = source_arg.reshape((2, 5)).at(row, inner) * weight_load
+                contraction = product.sum().T
+                first_function = program.native.algebra_trace_count(program.handle)
+                result = program.kernel_call(kernels.expression(contraction,
+                    contraction*2 + bias_arg.reshape((2, 7)).at(row, column)), grid=(2, 3),
+                    in_specs=(BlockSpec(None),)*4, out_specs=(BlockSpec((1, 3), lambda i,j: (i,j)),)*2,
+                    out_shape=(ShapeDtypeStruct((2, 7), np.float32),)*2, peer=0)(source, weights, selected, bias)
+                last_function = program.native.algebra_trace_count(program.handle)
+                observations = tuple(tuple((i,j*tensor.block_shape[1],program.export(ref))
+                    for (i,j),ref in sorted(tensor.blocks.items())) for tensor in result)
+                generations = []
+                for generation in range(2):
+                    values = (np.array([[1, -2, 3, -4, 5], [-5, 4, -3, 2, -1]], dtype=np.float32)+generation)/8
+                    selections = np.array([[generation], [1-generation]], dtype=np.int64)
+                    bias_values = (np.arange(14, dtype=np.float32).reshape(2, 7)-7+generation)/32
+                    table = weight_values.astype(np.float64).reshape((-1, 5, 7))
+                    projected = np.stack([values[i].astype(np.float64) @ table[int(selections[i,0]) if dynamic else 0] for i in range(2)])
+                    generations.append((values, selections, bias_values, (projected, projected*2+bias_values)))
+                xonotic_composed_indexed.append((dynamic, np.dtype(weight_dtype).name, source, selected, bias, observations, first_function, last_function, generations))
             # design/algorithm-sources.md#stable-indexed-ordering
             for scalar, length in ((np.float32, 7), (np.float16, 7), (np.bool_, 7), (np.int64, 7), (np.uint64, 7), (np.float32, 131)):
                 graph = mx.Graph()
@@ -1473,6 +1512,50 @@ def main():
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
                 for results in observations:
                     for i, j, result in results:
+                        result.consume()
+        for dynamic, weight_dtype, source, selected, bias, observations, first_function, last_function, generations in xonotic_composed_indexed:
+            contractions, epilogues = observations
+            print(json.dumps(dict(event='composed_indexed_setup', dynamic=dynamic, weight_dtype=weight_dtype,
+                first_function=first_function, last_function=last_function)), flush=True)
+            for generation, (values, selections, bias_values, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in (source, selected, bias) for ref in tensor.blocks.values()), 'writable')
+                started = time.monotonic_ns()
+                if dynamic:
+                    for (i,j),ref in selected.blocks.items():
+                        with program.write(ref) as destination:
+                            destination[...] = selections[i:i+1]
+                for row in (generation, 1-generation):
+                    for (i,j),ref in source.blocks.items():
+                        if i == row:
+                            column = j*source.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = values[i:i+1, column:column+ref.shape[1]]
+                    wait_for(tuple(result for i,j,result in contractions if i == row))
+                    for i,j,result in contractions:
+                        if i == row and not np.allclose(result.array, expected[0][i:i+1,j:j+result.array.shape[1]], rtol=2e-5, atol=2e-6):
+                            raise ArithmeticError('Composable indexed contraction differs')
+                        if i != row and row == generation and result.ready:
+                            raise ArithmeticError('Composable indexed contraction consumed an unpublished row')
+                    if any(result.ready for i,j,result in epilogues if i == row):
+                        raise ArithmeticError('Composable indexed epilogue consumed an unpublished bias')
+                    print(json.dumps(dict(event='composed_indexed_contraction', dynamic=dynamic, weight_dtype=weight_dtype,
+                        generation=generation, row=row, bias_absent=True, elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                    for (i,j),ref in bias.blocks.items():
+                        if i == row:
+                            column = j*bias.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = bias_values[i:i+1,column:column+ref.shape[1]]
+                    wait_for(tuple(result for i,j,result in epilogues if i == row))
+                    for i,j,result in epilogues:
+                        if i == row and not np.allclose(result.array, expected[1][i:i+1,j:j+result.array.shape[1]], rtol=2e-5, atol=2e-6):
+                            raise ArithmeticError('Composable indexed contraction epilogue differs')
+                        if i != row and row == generation and result.ready:
+                            raise ArithmeticError('Composable indexed epilogue consumed an unpublished input row')
+                    print(json.dumps(dict(event='composed_indexed_epilogue', dynamic=dynamic, weight_dtype=weight_dtype,
+                        generation=generation, row=row, elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        output=[(i,j,result.array.tolist()) for i,j,result in epilogues if i == row])), flush=True)
+                for results in observations:
+                    for i,j,result in results:
                         result.consume()
         if xonotic_alias is not None:
             storage, observations = xonotic_alias
