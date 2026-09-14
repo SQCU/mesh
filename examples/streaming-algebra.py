@@ -236,6 +236,7 @@ def main():
         scatter_results = tuple(program.export(scatter_consumed[i, 0]) for i in range(destinations_count))
         xonotic_case = None
         xonotic_gradient = None
+        xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
             import sys
             sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'xonotic'))
@@ -333,6 +334,28 @@ def main():
                 np.add.at(expected, index_values % 4, cotangent_values.astype(np.float64))
                 generations.append((index_values, cotangent_values, expected))
             xonotic_gradient = (gradient_indices, cotangents, gradient_results, generations)
+            take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
+            take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
+            graph = mx.Graph()
+            with graph:
+                primal = graph.input('primal', (1, 2, 4))
+                indices = graph.input('indices', (2, 2, 1), 'int64')
+                cotangent = graph.input('cotangent', (2, 2, 1))
+                selected = mx.take_along_axis(primal, indices, axis=2)
+                gradient, = graph.vjp((selected,), (cotangent,), (primal,))
+                transformed = gradient * 2 + 1
+            lowered = kernel_calls(program, graph, (),
+                {indices.index: take_indices, cotangent.index: take_cotangents},
+                outputs=(transformed,), root_peer=0, tile_rows=1, tile_columns=4)
+            take_results = tuple(program.export(ref) for _, ref in sorted(lowered[transformed.index].blocks.items()))
+            generations = []
+            for generation in range(2):
+                index_values = np.array([1, -1, 1, -1] if not generation else [-2, 0, -2, 0], dtype=np.int64).reshape(2, 2, 1)
+                cotangent_values = np.arange(1 + generation, 5 + generation, dtype=np.float32).reshape(2, 2, 1)
+                expected = np.zeros((2, 4), dtype=np.float64)
+                np.add.at(expected, (np.array([0, 1, 0, 1]), index_values.reshape(-1) % 4), cotangent_values.reshape(-1))
+                generations.append((index_values, cotangent_values, expected * 2 + 1))
+            xonotic_take_gradient = (take_indices, take_cotangents, take_results, generations)
         invocations = []
 
         # design/algorithm-sources.md#async-index-push-contract
@@ -801,6 +824,35 @@ def main():
                     output=[result.array.tolist() for result in gradient_results])), flush=True)
                 if not generation:
                     for result in gradient_results:
+                        result.consume()
+        if xonotic_take_gradient is not None:
+            take_indices, take_cotangents, take_results, generations = xonotic_take_gradient
+            for generation, (index_values, cotangent_values, expected) in enumerate(generations):
+                wait_for((*take_indices.blocks.values(), *take_cotangents.blocks.values()), 'writable')
+                for i in range(4):
+                    with program.write(take_indices[i, 0]) as destination:
+                        destination[...] = index_values.reshape(4, 1)[i:i+1]
+                for i in (0, 2):
+                    with program.write(take_cotangents[i, 0]) as destination:
+                        destination[...] = cotangent_values.reshape(4, 1)[i:i+1]
+                wait_for((take_results[0],))
+                if take_results[1].ready or any(not take_cotangents[i, 0].writable for i in (1, 3)):
+                    raise ArithmeticError('Take derivative lost independent cotangent regions')
+                if not np.array_equal(take_results[0].array, expected[:1]):
+                    raise ArithmeticError('Early take derivative consumer differs')
+                print(json.dumps(dict(event='xonotic_take_gradient_early', generation=generation,
+                    primal_operand_allocated=False, withheld_cotangent_blocks=[1, 3],
+                    output=take_results[0].array.tolist())), flush=True)
+                for i in (1, 3):
+                    with program.write(take_cotangents[i, 0]) as destination:
+                        destination[...] = cotangent_values.reshape(4, 1)[i:i+1]
+                wait_for(take_results)
+                if not np.array_equal(take_results[1].array, expected[1:]):
+                    raise ArithmeticError('Broadcast take derivative consumer differs')
+                print(json.dumps(dict(event='xonotic_take_gradient_complete', generation=generation,
+                    output=[result.array.tolist() for result in take_results])), flush=True)
+                if not generation:
+                    for result in take_results:
                         result.consume()
         for generation in range(4):
             empty = generation == 2
