@@ -95,10 +95,6 @@ def write(value, result, index='t'):
     return f'write_value<{TYPES[value.dtype]}>(regions,blocks,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
 
 
-def atomic(value, result, index):
-    return f'atomic_fetch_add_explicit((device atomic_float*)page_address(regions,blocks,v[{value.index}],v[{value.index}].offset+({index})*sizeof(float)),float({result}),memory_order_relaxed);'
-
-
 def coordinate_code(shape, flat='t', prefix='c'):
     result = [f'ulong {prefix}_remaining={flat};']
     for axis in reversed(range(len(shape))):
@@ -186,8 +182,6 @@ def kernel(node):
         mode, clear = ('gradient', selected.index), True
     elif op in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
         body, mode, clear = expert_body(output, values, op)
-    elif op in ('neighborhood', 'neighborhood_vjp'):
-        body, mode, clear = neighborhood_body(output, values, attrs, op)
     else:
         for i, value in enumerate(values):
             address = f'broadcast_index(t,v[{value.index}],v[{index}])'
@@ -268,40 +262,6 @@ def expert_body(output, values, op):
     return prefix + tiled_product(output, rows, columns, inner, left, right, address), mode, False
 
 
-def neighborhood_body(output, values, attrs, op):
-    query, keys, vectors, indices, weights = values[:5]
-    width, neighbors = query.shape[1], weights.shape[1]
-    target, gram = attrs.get('target'), attrs['gram']
-    backward = op.endswith('_vjp')
-    if not backward:
-        body = [f'ulong observer=group.x; if(observer>=v[{query.index}].shape[0]) return;',
-                f'float result[{(width+31)//32}]={{}};',
-                f'for(ulong j=0;j<{expr(neighbors)};++j) {{ ulong at=observer*({expr(neighbors)})+j,source=ulong({read(indices,"at")}); float affinity=1;']
-        if gram:
-            body += ['float dot=0;', f'for(uint d=lane;d<{width};d+=32) dot+=float({read(query,f"observer*{width}+d")})*float({read(keys,f"source*{width}+d")});', f'affinity=simd_sum(dot)*rsqrt(float({width}));']
-        body += [f'float weight=float({read(weights,"at")})*affinity;',
-                 f'for(uint d=lane;d<{width};d+=32) result[d/32]+=weight*float({read(vectors,f"source*{width}+d")}); }}',
-                 f'for(uint d=lane;d<{width};d+=32) {{ {write(output,"result[d/32]",f"observer*{width}+d")} }}']
-        return body, ('neighborhood', query.index), False
-    gradient = values[5]
-    body = [f'ulong at=group.x; if(at>=v[{weights.index}].size) return;',
-            f'ulong observer=at/({expr(neighbors)}),source=ulong({read(indices,"at")}); float dot=0,dot_v=0;']
-    if gram:
-        body += [f'for(uint d=lane;d<{width};d+=32) dot+=float({read(query,f"observer*{width}+d")})*float({read(keys,f"source*{width}+d")});', f'dot=simd_sum(dot)*rsqrt(float({width}));']
-    else: body += ['dot=1;']
-    body += [f'for(uint d=lane;d<{width};d+=32) dot_v+=float({read(gradient,f"observer*{width}+d")})*float({read(vectors,f"source*{width}+d")});',
-             f'dot_v=simd_sum(dot_v); float weight=float({read(weights,"at")});']
-    if target == 4:
-        body += [f'if(!lane) {{ {write(output,"dot_v*dot","at")} }}']
-    elif target == 2:
-        body += [f'for(uint d=lane;d<{width};d+=32) {{ {atomic(output,f"weight*dot*float({read(gradient,f' observer*{width}+d')})",f"source*{width}+d")} }}']
-    elif gram:
-        address = f' observer*{width}+d' if target == 0 else f'source*{width}+d'
-        other = read(keys,f'source*{width}+d') if target == 0 else read(query,f'observer*{width}+d')
-        body += [f'for(uint d=lane;d<{width};d+=32) {{ {atomic(output,f"weight*dot_v*rsqrt(float({width}))*float({other})",address)} }}']
-    return body, ('edges', weights.index), target != 4
-
-
 # ../../../design/algorithm-sources.md#indexed-expression-lowering
 def source(nodes):
     kernels = [value for node in nodes if (value := kernel(node)) is not None]
@@ -315,6 +275,108 @@ def source(nodes):
         item.update(name=name, arguments=nodes)
     sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,blocks,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
     return PREFIX + '\n'.join(sources.values()), kernels
+
+
+# ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+def numerical_operands(operation, values, attributes):
+    if operation in ('gather_vjp', 'take_along_axis_vjp'):
+        return values[1:]
+    if operation not in ('neighborhood', 'neighborhood_vjp'):
+        return values
+    gram, target = attributes['gram'], attributes.get('target')
+    positions = ((0, 1, 2, 3, 4) if gram else (2, 3, 4)) if target is None else (
+        {0: (1, 2, 3, 4, 5), 1: (0, 2, 3, 4, 5),
+         2: (0, 1, 3, 4, 5), 4: (0, 1, 2, 3, 5)}[target] if gram else
+        {0: (), 1: (), 2: (3, 4, 5), 4: (2, 3, 5)}[target])
+    return tuple(values[index] for index in positions)
+
+
+# ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+def neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns):
+    import math
+    from mesh import BlockSpec, ShapeDtypeStruct, kernels
+    gram, target = attributes['gram'], attributes.get('target')
+    observers, width = shapes[values[0].index]
+    neighbors = shapes[values[4].index][1]
+    if np.dtype(values[3].dtype).kind not in 'iu':
+        raise TypeError('Neighborhood indices must have integer dtype')
+    if (shapes[values[3].index] != (observers, neighbors) or
+            shapes[values[4].index] != (observers, neighbors) or
+            shapes[values[1].index] != shapes[values[2].index] or
+            shapes[values[2].index][1] != width or
+            (target is not None and shapes[values[5].index] != (observers, width))):
+        raise ValueError('Neighborhood operands require matching observer, source and feature dimensions')
+    edges, feature_tile = observers * neighbors, min(tile_columns, width)
+    output_shape = shapes[value.index]
+    if target in (0, 1) and not gram:
+        result = program.tensor(output_shape, (1, min(tile_columns, output_shape[1])), value.dtype)
+        if program.node == peer:
+            for ref in result.blocks.values():
+                program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
+        return result
+    operands = numerical_operands(operation, values, attributes)
+    inputs = [local[operand.index] for operand in operands]
+    arguments = dict(zip((operand.index for operand in operands), kernels.arguments(len(inputs))))
+
+    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+    def call(expression, bound, shape, block, dtype):
+        return program.kernel_call(kernels.expression(expression),
+            grid=tuple((size + tile - 1) // tile for size, tile in zip(shape, block)),
+            in_specs=(BlockSpec(None),) * len(bound), out_specs=BlockSpec(block, lambda i, j: (i, j)),
+            out_shape=ShapeDtypeStruct(shape, dtype), peer=peer)(*bound)
+
+    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+    def source(edge):
+        index = arguments[values[3].index].reshape(shapes[values[3].index]).at(edge // neighbors, edge % neighbors)
+        return kernels.select(index < 0, index + shapes[values[2].index][0], index) if values[3].dtype.startswith('int') else index
+
+    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+    def load(position, edge, feature):
+        coordinates = (edge // neighbors, edge % neighbors) if position == 4 else (
+            edge // neighbors if position in (0, 5) else source(edge), feature)
+        return 1.0 * arguments[values[position].index].reshape(shapes[values[position].index]).at(*coordinates)
+
+    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+    def statistic(left, right):
+        row, column = kernels.indices()
+        edge, feature = kernels.program_id(0) + row, kernels.program_id(1) * feature_tile + column
+        product = call(load(left, edge, feature) * load(right, edge, feature), inputs,
+                       (edges, width), (1, feature_tile), np.float32)
+        argument, = kernels.arguments(1)
+        reduced = call(argument.sum(), (product,), (edges, 1), (1, 1), np.float32)
+        argument = kernels.arguments(len(inputs) + 1)[-1]
+        inputs.append(reduced)
+        return argument
+
+    affinity = statistic(0, 1) if gram and target in (None, 2, 4) else None
+    response = statistic(5, 2) if target in (0, 1, 4) else None
+    row, column = kernels.indices()
+    edge = kernels.program_id(0) + row if target == 4 else row
+    selected = source(edge)
+    valid = (selected >= 0) & (selected < shapes[values[2].index][0])
+    coefficient = affinity.at(edge, 0) / math.sqrt(width) if affinity is not None else 1
+    if target == 4:
+        result = call(kernels.select(valid, response.at(edge, 0) * coefficient, 0), inputs,
+                      (edges, 1), (1, 1), value.dtype)
+        return matrix_view(result, output_shape)
+    weight = load(4, edge, column)
+    if target in (0, 1):
+        contribution = weight * response.at(edge, 0) / math.sqrt(width) * load(1 if target == 0 else 0, edge, column)
+    else:
+        contribution = weight * coefficient * load(2 if target is None else 5, edge, column)
+    key_edge = kernels.program_id(0) + row
+    key_source = source(key_edge)
+    destination = key_edge // neighbors if target in (None, 0) else key_source
+    destination = kernels.select((key_source >= 0) & (key_source < shapes[values[2].index][0]), destination, 0xffffffff)
+    destinations = call(destination, inputs, (edges, 1), (1, 1), np.int64)
+    block = (1, min(tile_columns, output_shape[1]))
+    base = program.tensor(output_shape, block, value.dtype)
+    if program.node == peer:
+        for ref in base.blocks.values():
+            program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
+    base_arg, destination_arg = kernels.arguments(len(inputs) + 2)[-2:]
+    return call(kernels.indexed_add(base_arg, destination_arg, contribution), (*inputs, base, destinations),
+                output_shape, block, value.dtype)
 
 
 # ../../../design/algorithm-sources.md#xonotic-partitioned-reshape
@@ -438,7 +500,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         if value.index not in live or value.index in inputs:
             continue
         nodes.append(node)
-        dependencies = values[1:] if operation in ('gather_vjp', 'take_along_axis_vjp') else values
+        dependencies = numerical_operands(operation, values, attributes)
         live.update(operand.index for operand in dependencies)
     nodes.reverse()
     constants = {value.index: data for value, data in graph.constants.values()}
@@ -466,9 +528,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             continue
         row_gradient = row_gather_gradient(value, operation, values, attributes, shapes)
         local = {}
-        for operand in values:
-            if operation in ('gather_vjp', 'take_along_axis_vjp') and operand.index == values[0].index:
-                continue
+        for operand in numerical_operands(operation, values, attributes):
             tensor = tensors[operand.index]
             sender = owners[operand.index]
             if sender != peer:
@@ -483,6 +543,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tensor = replicas[key]
             local[operand.index] = tensor
         shape = shapes[value.index]
+        if operation in ('neighborhood', 'neighborhood_vjp'):
+            tensors[value.index] = neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns)
+            continue
         if row_gradient:
             vector = len(shape) == 1
             output_shape = (shape[0], 1) if vector else shape
@@ -755,9 +818,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, shapes[mode[1]][0])
         elif mode == 'reduce':
             grid = (size, 1, 1)
-        elif isinstance(mode, tuple) and mode[0] in ('neighborhood', 'edges'):
-            threads = 32
-            grid = (shapes[mode[1]][0] if mode[0] == 'neighborhood' else math.prod(shapes[mode[1]]), 1, 1)
         else:
             grid = (((math.prod(shapes[mode[1]]) if isinstance(mode, tuple) else size) + 255) // 256, 1, 1)
         arguments = [positions[index] for index in item['arguments']] + [positions[value.index]]

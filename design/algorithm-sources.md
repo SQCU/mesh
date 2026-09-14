@@ -2351,3 +2351,48 @@ existing higher-rank row-scatter workflow has multiple equal-width feature
 panels with row-only broadcast-update coordinates and can exercise this sharing
 without adding an evaluator. Python compilation and source diff checks passed;
 operational submission and lifetime comparisons belong to that workflow.
+
+## Xonotic neighborhood algebra
+
+The JAX authors' [segment_sum](https://docs.jax.dev/en/latest/_autosummary/jax.ops.segment_sum.html)
+accumulates unsorted contributions by integer destination, including duplicates.
+Their [Pallas grid and index maps](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+express independent kernel regions. Xonotic `neighborhood_call` composes the
+existing shared indexed loads, pointwise products, row sums and indexed-add
+without a neighborhood-specific emitter, atomics or clear dispatch.
+
+For edge e=(observer i, neighbor j), source s=indices[i,j], feature width D,
+let a=dot(Q[i],K[s])/sqrt(D) in gram mode and a=1 otherwise. The output is the
+observer sum of W[e]*a*V[s]. With cotangent G, let b=dot(G[i],V[s]). The edge
+derivatives are W[e]*b*K[s]/sqrt(D) into Q[i], W[e]*b*Q[i]/sqrt(D) into K[s],
+W[e]*a*G[i] into V[s], and b*a into W[e]. Nongram Q/K derivatives are zero.
+The shared indexed-add owner handles repeated destinations and independently
+completed edge contributions. Signed source indices normalize once; invalid
+source coordinates produce absent scatter destinations or zero weight gradients.
+
+`numerical_operands` is shared by output-root liveness and peer replication.
+It keeps only the operands each formula consumes: nongram forward omits Q/K,
+V gradients omit V, W gradients omit W, Q gradients omit Q, and K gradients omit
+K. Nongram Q/K outputs are constant zero pages and have no numerical input
+dependencies. Shape metadata remains available without allocating those primals.
+
+`statistic` computes FP32 pointwise edge products into canonical E×D regions
+(one edge per row, tiled features), then uses shared FP32 row reduction. Half
+inputs therefore do not introduce a half statistic boundary. Final contribution
+expressions gather the original operands and these scalar statistics inside
+bounded indexed-add updates. Final outputs retain their declared dtype. Output
+row tiles are one observer/source and at most tile_columns features; weight
+gradient edge outputs become metadata-only 1×1 fragments of the logical weight
+matrix. Original input publication granularity still bounds when each edge can
+read its selected input; unrelated input rows need not arrive first.
+
+These explicit FP32 edge products cost E×D canonical intermediate storage and
+additional launches per required statistic, compared with the removed fused
+simdgroup loop. Sharing or fusing indexed product reductions belongs in the
+shared expression owner; this migration does not claim a measured speedup or
+completed scratch packing. The obsolete neighborhood_body, neighborhood/edges
+launch modes and now-unused atomic source helper are removed. The existing
+streaming-algebra workflow covers both gram modes, every derivative, duplicates,
+withheld source/cotangent rows, independent zero gradients, downstream consumers
+and repeated invocations. Source compilation and diff checks precede operational
+validation of that same workflow.
