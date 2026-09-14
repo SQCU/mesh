@@ -270,7 +270,8 @@ def main():
                     ('indices', tuple(sorted(x_indices.blocks.items()))),
                     ('tail', tuple(sorted(x_tail.blocks.items()))),
                     ('gathered', tuple(sorted(lowered[selected.index].blocks.items()))),
-                    ('output', tuple(((i, 0), result.ref) for i, result in enumerate(observations)))):
+                    ('output', tuple(((i, 0), result.ref) for i, result in enumerate(observations))),
+                    *((name, tuple(sorted(lowered[value.index].blocks.items()))) for name, value in logical_values.items())):
                 entries = []
                 for coordinate, ref in references:
                     mapping = program.native.tensor_rows(ref.view.tensor, ref.view.extent)
