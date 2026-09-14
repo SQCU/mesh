@@ -480,37 +480,11 @@ class _ExpressionKernel:
 
             expression = remap(value)
             reads = tuple(specialized_inputs[index] for index in used)
-            dynamic, accesses = {}, {}
+            dynamic = {}
             dynamic_inputs = {index for index, source in enumerate(reads)
                 if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
                     in program._constant_extents for ref in source.blocks.values())}
-
-            # design/algorithm-sources.md#dynamic-indexed-expression-lowering
-            def accesses_for(node, path=()):
-                if node.operation == 'input' and hasattr(reads[node.value], 'blocks'):
-                    raise ValueError('Whole-tensor inputs require indexed loads')
-                if node.operation == 'select':
-                    condition, yes, no = node.operands
-                    accesses_for(condition, path)
-                    accesses_for(yes, path + ((condition, True),))
-                    accesses_for(no, path + ((condition, False),))
-                elif node.operation == 'load':
-                    row, column, mask, other = node.operands
-                    accesses_for(mask, path)
-                    selected_path = path + ((mask, True),)
-                    accesses_for(row, selected_path)
-                    accesses_for(column, selected_path)
-                    accesses_for(other, path + ((mask, False),))
-                    if node.value in dynamic_inputs:
-                        paths = accesses.setdefault(node, [])
-                        if not any(set(previous) <= set(selected_path) for previous in paths):
-                            paths[:] = [previous for previous in paths if not set(selected_path) <= set(previous)]
-                            paths.append(selected_path)
-                else:
-                    for child in node.operands:
-                        accesses_for(child, () if node.operation == 'sum' else path)
-
-            accesses_for(expression)
+            accesses = _indexed_access_paths(expression, reads, dynamic_inputs)
             for node, paths in accesses.items():
                 table = reads[node.value]
                 row, column, mask, _ = node.operands
@@ -678,6 +652,39 @@ class _ExpressionKernel:
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')
         return '\n'.join(lines)
+
+
+# design/algorithm-sources.md#bounded-indexed-segment-loads
+def _indexed_access_paths(expression, inputs, dynamic_inputs):
+    accesses = {}
+
+    # design/algorithm-sources.md#bounded-indexed-segment-loads
+    def visit(node, path=()):
+        if node.operation == 'input' and hasattr(inputs[node.value], 'blocks'):
+            raise ValueError('Whole-tensor inputs require indexed loads')
+        if node.operation == 'select':
+            condition, yes, no = node.operands
+            visit(condition, path)
+            visit(yes, path + ((condition, True),))
+            visit(no, path + ((condition, False),))
+        elif node.operation == 'load':
+            row, column, mask, other = node.operands
+            visit(mask, path)
+            selected = path + ((mask, True),)
+            visit(row, selected)
+            visit(column, selected)
+            visit(other, path + ((mask, False),))
+            if node.value in dynamic_inputs:
+                paths = accesses.setdefault(node, [])
+                if not any(set(previous) <= set(selected) for previous in paths):
+                    paths[:] = [previous for previous in paths if not set(selected) <= set(previous)]
+                    paths.append(selected)
+        else:
+            for child in node.operands:
+                visit(child, () if node.operation == 'sum' else path)
+
+    visit(expression)
+    return accesses
 
 
 # design/algorithm-sources.md#shared-scalar-load-emission
@@ -859,30 +866,112 @@ def _group_ordinals(program, keys, source_block_rows, ordinal_origin=0, candidat
     return grouped, size
 
 
-# design/algorithm-sources.md#segmented-indexed-add
-def _indexed_range(program, function, selector, bounds, first, count):
+# design/algorithm-sources.md#bounded-indexed-segment-loads
+def _segment_expression(node, operands, column, direct):
+    row = _Expression('load', (_literal(0), _Expression('row'), _literal(True), _literal(0)), len(operands))
+    feature = _Expression('column') + column
+    if node.operation == 'row':
+        return row
+    if node.operation == 'column':
+        return feature
+    if node.operation == 'input':
+        index, origin, shape = direct[node.value]
+        return _Expression('load', (row - origin[0] if shape[0] != 1 else _literal(0),
+            feature - origin[1] if shape[1] != 1 else _literal(0), _literal(True), _literal(0)), index)
+    return _Expression(node.operation, tuple(_segment_expression(child, operands, column, direct) for child in node.operands), node.value)
+
+
+# design/algorithm-sources.md#bounded-indexed-segment-loads
+def _bind_segment_expression(program, expression, operands, ordinals, bounds, flat_bounds,
+                             count, width, target, active_count, segment, reduction, cache=None):
     import ctypes as C
     from . import check
-    check(program.native.algebra_indexed_range(program.handle, function, selector.view, bounds.view,
-        (C.c_size_t * count)(*range(first, first + count)), count))
+    if count * width > 0xffffffff:
+        raise ValueError('Flattened segment selector bounds exceed the uint32 domain')
+    inputs = (*operands, ordinals)
+    cache = {} if cache is None else cache
+    used = set()
 
+    # design/algorithm-sources.md#bounded-indexed-segment-loads
+    def dependencies(node):
+        if node.operation in ('load', 'input'):
+            used.add(node.value)
+        for child in node.operands:
+            dependencies(child)
 
-# design/algorithm-sources.md#segmented-indexed-add
-def _candidate_load(refs, first, ordinal, row, column, metal):
-    dtype = refs[0].dtype
-    scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
-              'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t'}[dtype.kind + str(dtype.itemsize)]
-    strides = []
-    declarations = []
-    for name, attribute in (('row_steps', 'row_stride'), ('column_steps', 'column_stride')):
-        values = tuple(getattr(ref.view, attribute) for ref in refs)
-        if len(set(values)) == 1:
-            strides.append(str(values[0]))
+    dependencies(expression)
+    dynamic = {index for index in used if hasattr(inputs[index], 'blocks') and
+        not all((ref.view.tensor, ref.view.extent) in program._constant_extents for ref in inputs[index].blocks.values())}
+    selectors = []
+    for node, paths in _indexed_access_paths(expression, inputs, dynamic).items():
+        table = inputs[node.value]
+        ordinal = _Expression('block_ordinal', node.operands[:2], (*table.block_shape, table.grid[1]))
+        enabled = _literal(False)
+        for path in paths:
+            condition = _literal(True)
+            for predicate, polarity in path:
+                condition = select(condition, predicate if polarity else predicate.equal(False), False)
+            enabled = select(enabled, True, condition)
+        selector_value = select(enabled, ordinal, 0xffffffff)
+        if selector_value not in cache:
+            selected = program.tensor((1, count * width), dtype=np.uint32)[0, 0]
+            _bind_segment_expression(program, selector_value, operands,
+                ordinals, bounds, flat_bounds, count, width, selected, active_count, segment, False, cache)
+            cache[selector_value] = selected
+        selectors.append((cache[selector_value], node.value))
+    physical, pointers = [ordinals, bounds], {len(operands): (0,)}
+    for index in sorted(used - {len(operands)}):
+        source = inputs[index]
+        refs = tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)
+        pointers[index] = tuple(range(len(physical), len(physical) + len(refs)))
+        physical.extend(refs)
+
+    # design/algorithm-sources.md#bounded-indexed-segment-loads
+    def body(metal):
+        declarations, locals, layouts = [], [], {}
+        for index in sorted(used - {len(operands)}):
+            source = inputs[index]
+            refs = tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)
+            scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
+                      'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}[source.dtype.kind + str(source.dtype.itemsize)]
+            if not hasattr(source, 'blocks'):
+                locals.append(f'{"device " if metal else ""}const {scalar} *p{pointers[index][0]}=({"device " if metal else ""}const {scalar} *)buffers[{pointers[index][0]}];')
+                continue
+            strides = []
+            for name, attribute in (('rs', 'row_stride'), ('cs', 'column_stride')):
+                values = tuple(getattr(ref.view, attribute) for ref in refs)
+                if len(set(values)) == 1:
+                    strides.append(str(values[0]))
+                else:
+                    declarations.append(f'{"constant" if metal else "static const"} uint64_t {name}{index}[]={{'+','.join(map(str, values))+'};')
+                    strides.append(f'{name}{index}[CANDIDATE]')
+            layouts[index] = scalar, strides
+
+        # design/algorithm-sources.md#bounded-indexed-segment-loads
+        def resolve(node, args):
+            if node.operation == 'row':
+                return '((int64_t)k)'
+            if node.operation == 'column':
+                return '((int64_t)c)'
+            return _indexed_load_expression(inputs[node.value], pointers[node.value][0], layouts.get(node.value), args, metal)
+
+        value = _emit_scalar_expression(expression, inputs, metal, resolve)
+        output = f'p{len(physical)}'
+        low, high = 'p1[0]', f'p1[{bounds.view.column_stride}]'
+        if reduction:
+            accumulator = 'float' if target.dtype.kind == 'f' else 'uint64_t'
+            statements = f'for(uint32_t c=lane;c<{width};c+=lanes) {{ {accumulator} total=0; for(uint32_t k={low};k<{high};k++) total+={value}; {output}[c*{target.view.column_stride}]=total; }}'
         else:
-            declarations.append(f'{"constant" if metal else "static const"} uint64_t {name}[]={{'+','.join(map(str, values))+'};')
-            strides.append(f'{name}[{ordinal}]')
-    address = f'(({"device " if metal else ""}const {scalar} *)buffers[{first}+({ordinal})])'
-    return '\n'.join(declarations), f'{address}[({row})*{strides[0]}+({column})*{strides[1]}]'
+            statements = f'for(uint64_t t=(uint64_t){low}*{width}+lane;t<(uint64_t){high}*{width};t+=lanes) {{ uint64_t k=t/{width},c=t%{width}; {output}[t*{target.view.column_stride}]={value}; }}'
+        return '\n'.join(declarations), '\n'.join((*locals, statements))
+
+    function = _compiled_region(program, tuple(physical), target, body, 2)
+    for selected, index in selectors:
+        positions = pointers[index]
+        check(program.native.algebra_indexed_range(program.handle, function, selected.view, flat_bounds.view,
+            (C.c_size_t * len(positions))(*positions), len(positions)))
+    check(program.native.algebra_active(program.handle, function, active_count.view, segment))
+    return function
 
 
 # design/algorithm-sources.md#segmented-indexed-add
@@ -903,7 +992,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         raise ValueError('Indexed addition requires matching real or integer base/output dtypes')
     if destinations.dtype.kind not in 'iu' or max(size, base.shape[0]) >= 0xffffffff:
         raise ValueError('Indexed addition requires integer destinations within the uint32 domain')
-    value_inputs = set()
+    value_inputs, indexed_inputs = set(), set()
 
     # design/algorithm-sources.md#fused-indexed-update-values
     def value_dependencies(node):
@@ -911,6 +1000,8 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             raise ValueError('Integer quotient and remainder require integral operands')
         if node.operation == 'input':
             value_inputs.add(node.value)
+        elif node.operation == 'load':
+            indexed_inputs.add(node.value)
         elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%'):
             raise ValueError('Indexed update values require pointwise expressions; reduce or index their producer explicitly')
         for child in node.operands:
@@ -924,6 +1015,9 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             raise ValueError('Indexed update operands must broadcast to U×F')
         if tensor.dtype.kind not in ('fiu' if base.dtype.kind == 'f' else 'iu'):
             raise ValueError('Indexed update operand dtype is incompatible with accumulation')
+    for index in indexed_inputs:
+        if operands[index].dtype.kind not in 'fiub':
+            raise ValueError('Indexed update loads require scalar numerical inputs')
     key_inputs = set()
 
     # design/algorithm-sources.md#segmented-indexed-add
@@ -963,50 +1057,30 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             dtype=np.float32 if base.dtype.kind == 'f' else base.dtype)
         chunks.append((directory, count, partials))
         ordinal_view = directory.slice(0, count, 1, count)
-        selector_view = directory.slice(0, 7 * count, 1, count)
         active_count = directory.slice(0, 8 * count, 1, 1)
+        flat_ranges = {}
         for (segment, panel), partial in partials.blocks.items():
             column = panel * partials.block_shape[1]
-            candidates = []
+            bounds = directory.slice(0, 5 * count + 2 * segment, 1, 2)
+            range_key = segment, partial.shape[1]
+            if range_key not in flat_ranges:
+                flat_bounds = program.tensor((1, 2), dtype=np.uint32)[0, 0]
+                bound_value, = arguments(1)
+                _ExpressionKernel((bound_value * partial.shape[1],)).bind(program, (bounds,), (flat_bounds,))
+                flat_ranges[range_key] = flat_bounds
+            bound_operands, direct = list(operands), {}
             for index in value_inputs:
                 tensor = operands[index]
                 source_row = begin // tensor.block_shape[0] * tensor.block_shape[0] if tensor.shape[0] != 1 else 0
                 source_column = column if tensor.shape[1] != 1 else 0
-                source_rows = min(tensor.block_shape[0], tensor.shape[0] - source_row)
-                source_columns = partial.shape[1] if tensor.shape[1] != 1 else 1
-                candidates.append(tensor.region(source_row, source_column, source_rows, source_columns))
-            candidates = tuple(candidates)
-            bounds = directory.slice(0, 5 * count + 2 * segment, 1, 2)
-
-            # design/algorithm-sources.md#fused-indexed-update-values
-            def reduce_segment(metal, candidates=candidates, partial=partial, column=column):
-                loads = {}
-                for position, (index, ref) in enumerate(zip(value_inputs, candidates)):
-                    tensor = operands[index]
-                    _, load = _candidate_load((ref,), 2 + position, '0',
-                        f'ordinal%{tensor.block_shape[0]}' if tensor.shape[0] != 1 else '0',
-                        'c' if tensor.shape[1] != 1 else '0', metal)
-                    loads[index] = f'((float)({load}))' if tensor.dtype.kind == 'f' else load
-
-                # design/algorithm-sources.md#shared-scalar-load-emission
-                def resolve(node, args):
-                    if node.operation == 'input':
-                        return loads[node.value]
-                    return {'row': '((int64_t)ordinal)', 'column': f'((int64_t)({column}+c))'}[node.operation]
-
-                load = _emit_scalar_expression(update_value, operands, metal, resolve)
-                accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
-                return f'''for(uint32_t c=lane;c<{partial.shape[1]};c+=lanes) {{
-                  {accumulator} total=0;
-                  for(uint32_t k=p1[0];k<p1[1];k++) {{ uint32_t ordinal=p0[k]; total+={load}; }}
-                  p{2+len(candidates)}[c*{partial.view.column_stride}]=total;
-                }}'''
-
-            function = _compiled_region(program, (ordinal_view, bounds, *candidates), partial, reduce_segment, 2)
-            for position, ref in enumerate(candidates):
-                if (ref.view.tensor, ref.view.extent) not in program._constant_extents:
-                    _indexed_range(program, function, selector_view, bounds, 2 + position, 1)
-            check(program.native.algebra_active(program.handle, function, active_count.view, segment))
+                ref = tensor.region(source_row, source_column,
+                    min(tensor.block_shape[0], tensor.shape[0] - source_row), partial.shape[1] if tensor.shape[1] != 1 else 1)
+                direct[index] = len(bound_operands), (source_row, source_column), tensor.shape
+                bound_operands.append(ref)
+            bound_operands = tuple(bound_operands)
+            function = _bind_segment_expression(program, _segment_expression(update_value, bound_operands, column, direct),
+                bound_operands, ordinal_view, bounds, flat_ranges[range_key], count, partial.shape[1], partial,
+                active_count, segment, True)
             producers[(partial.view.tensor, partial.view.extent)] = function
     stripes = {}
     for coordinate in itertools.product(*(range(length) for length in grid)):

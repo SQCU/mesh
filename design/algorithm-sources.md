@@ -2009,3 +2009,57 @@ must be evaluated per segment rather than holding unrelated destination routing
 keys. Selector capacity and lifetime packing also remain explicit setup work;
 neither a full-count scan for every segment nor a dense update staging buffer
 is an acceptable substitute for that implementation.
+
+## Bounded indexed segment loads
+
+The JAX authors' [Pallas Ref indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+composes integer-indexed accesses as numerical expressions. NVIDIA's
+[CCCL segmented reduction](https://nvidia.github.io/cccl/unstable/python/compute_api.html)
+uses input iterators and explicit segment beginning/ending offsets. The existing
+indexed-add lowering now combines these mechanisms without staging update values.
+These references motivate the algorithm; mesh's own reader protocol determines
+publication and reuse guarantees.
+
+`_indexed_access_paths` is extracted from the existing expression binder and
+shared with the segment binder. It retains branch polarity, load masks, nested
+coordinate accesses and masked fallback accesses. `_segment_expression` rewrites
+update row coordinates through the existing sorted ordinal view and features
+through the retained panel origin. Plain operands keep their already-known
+chunk/panel Refs and explicit row/column origins; only actual indexed loads keep
+whole source tables. An operand used both ways retains both identities rather
+than discarding the direct binding.
+
+`_bind_segment_expression` binds the existing exact `[lo, hi)` numerical loop
+and recursively creates selectors for dynamic loads. Selector entries use
+ordinal-major flattened positions `k*feature_width+c`. Each selector kernel
+executes only `[lo*feature_width, hi*feature_width)`, including selectors needed
+to evaluate another load's coordinates or predicates. Each numerical or selector
+consumer attaches `algebra_indexed_range` with that exact flattened range, actual
+candidate pointer positions, and retained source-table block strides. Entries
+outside the range are neither initialized nor consumed. The segment activity
+count and slot apply to every generated selector and the numerical partial.
+No whole-chunk coordinate selector becomes an additional readiness barrier.
+
+A setup cache shares identical selector expressions within one segment/panel's
+fixed operand/range context. Existing reader fanout retains the selector until
+its consumers finish. Flattened bounds are shared by segment and feature width.
+Native range endpoints use U32: setup rejects `count*feature_width > UINT32_MAX`
+before creating a selector rather than silently wrapping a valid update-count
+domain into an invalid flattened range. Selector allocation capacity remains
+`count*feature_width` U32 entries per distinct selector in that context, even
+though only the bounded interval executes. This is an explicit setup storage
+cost; compact capacity packing remains unfinished work.
+
+Original pointwise update expressions retain their direct Ref bindings, scalar
+precision, exact segment loops and output partials. Indexed updates can load
+values through nested dynamic indices directly from canonical pages, including
+conditional load predicates and masked fallback values. The outer indexed-add
+validity mask still participates in its existing routing-key expression; this
+increment does not claim per-destination independence for a load-valued outer
+routing mask. That requires moving such numerical validity into the bounded
+segment computation without weakening destination closure.
+
+Source compilation and diff review are complete. Operational validation uses the
+existing streaming-algebra scatter case extended with a lookup tensor, mixed
+routing chunks, a delayed selected source page, an empty occurrence and reuse.
+No separate evaluator or workload was run by this implementation agent.
