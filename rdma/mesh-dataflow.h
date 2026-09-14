@@ -12,6 +12,7 @@ struct mesh_indexed_read {
   struct mesh_row_map *selector; uint32_t selectors,vector_maps;
   const uint32_t *indices,*bounds; size_t rows,columns,row_stride,column_stride,bounds_stride;
   struct mesh_index_candidate *candidate; uint32_t candidates,retired,selected,completed,mapped;
+  struct mesh_active *domain;
   struct mesh_indexed_read *next;
 };
 struct mesh_route_vector { const uint32_t *values; size_t columns,row_stride,column_stride,length; };

@@ -1111,6 +1111,56 @@ static void submit_ready(void *argument,uint32_t occurrence) {
   dispatch_group_enter(a.executions);
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{atomic_store(&f->startNs,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));f.execute(f);}});
 }
+/* design/algorithm-sources.md#derived-selector-active-domains */
+static int metadata_local(MeshAlgebra *a,struct mesh_row_map map) {
+  const struct mesh_row_binding *bindings=a.bindings.bytes;
+  for(size_t i=0;i<a.bindings.length/sizeof *bindings;i++)
+    if(bindings[i].receive && overlaps(map,(struct mesh_row_map){.first=bindings[i].first,.count=bindings[i].count}))return 0;
+  return 1;
+}
+/* design/algorithm-sources.md#derived-selector-active-domains */
+static int metadata_descends(MeshAlgebra *a,MeshFunction *source,struct mesh_row_map root,NSMutableSet<NSValue *> *visiting) {
+  if(source->function.active)return 0;
+  for(uint32_t i=0;i<source->function.outputs;i++)if(!metadata_local(a,source->function.output[i]))return 0;
+  NSValue *identity=[NSValue valueWithPointer:(__bridge const void *)source];
+  if([visiting containsObject:identity])return 0;
+  [visiting addObject:identity];int found=0;
+  for(uint32_t i=0;i<source->function.inputs && !found;i++){
+    struct mesh_row_map input=source->function.input[i];
+    if(overlaps(input,root)){found=1;break;}
+    for(MeshFunction *producer in a.functions){
+      int contributes=0;for(uint32_t j=0;j<producer->function.outputs;j++)contributes|=overlaps(input,producer->function.output[j]);
+      if(contributes && metadata_descends(a,producer,root,visiting)){found=1;break;}
+    }
+  }
+  [visiting removeObject:identity];return found;
+}
+/* design/algorithm-sources.md#derived-selector-active-domains */
+static int indexed_active_domain(MeshAlgebra *a,struct mesh_indexed_read *d,struct mesh_active *active,struct mesh_row_map root) {
+  for(uint32_t i=0;i<d->selectors;i++){
+    struct mesh_row_map map=d->selector[i];
+    if(root.first<=map.first && root.first+root.count>=map.first+map.count)continue;
+    int rooted=0;
+    for(MeshFunction *source in a.functions){
+      int covers=0;for(uint32_t j=0;j<source->function.outputs;j++){
+        struct mesh_row_map out=source->function.output[j];covers|=out.first<=map.first && out.first+out.count>=map.first+map.count;
+      }
+      if(covers && metadata_descends(a,source,root,[NSMutableSet new])){rooted=1;break;}
+    }
+    if(!rooted)return EINVAL;
+  }
+  if(d->domain)return d->domain==active?0:EINVAL;
+  for(uint32_t i=0;i<active->maps;i++)for(uint32_t j=0;j<d->candidates;j++)for(uint32_t k=0;k<d->candidate[j].count;k++)
+    if(overlaps(active->count_maps[i],d->candidate[j].maps[k]))return EINVAL;
+  struct mesh_row_map *maps=realloc(d->selector,(d->selectors+active->maps)*sizeof *maps);if(!maps)return ENOMEM;
+  d->selector=maps;
+  for(uint32_t i=0;i<active->maps;i++){
+    struct mesh_row_map map=active->count_maps[i];int covered=0;
+    for(uint32_t j=0;j<d->selectors;j++)covered|=d->selector[j].first<=map.first && d->selector[j].first+d->selector[j].count>=map.first+map.count;
+    if(!covered)d->selector[d->selectors++]=map;
+  }
+  d->domain=active;return 0;
+}
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_realize(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);if(a.realized)return 0;size_t count=a.functions.count;
@@ -1139,9 +1189,8 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
       for(uint32_t j=0;j<active->maps;j++){struct mesh_row_map map=active->count_maps[j];covers&=out.first<=map.first && out.first+out.count>=map.first+map.count;}
       if(covers)produced=out;
     }
-    if(!produced.count)return EINVAL;
-    for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)for(uint32_t i=0;i<d->selectors;i++)
-      if(d->selector[i].first<produced.first || d->selector[i].first+d->selector[i].count>produced.first+produced.count)return EINVAL;
+    if(!produced.count || !metadata_local(a,produced))return EINVAL;
+    for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next){int error=indexed_active_domain(a,d,active,produced);if(error)return error;}
     if(active->retired!=MESH_ABSENT && active->inputs!=f->function.inputs){mesh_rows_release(a->context,active->retired,active->inputs);active->retired=MESH_ABSENT;}
     active->inputs=f->function.inputs;
     if(active->inputs && active->retired==MESH_ABSENT){active->retired=mesh_rows_alloc(a->context,active->inputs);if(active->retired==MESH_ABSENT)return errno;}

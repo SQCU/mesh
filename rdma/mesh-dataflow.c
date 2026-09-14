@@ -662,7 +662,8 @@ static void mesh_index_event(struct mesh_ctx *c,const struct mesh_indexed_read *
   uint32_t first=index==MESH_ABSENT?0:index,end=index==MESH_ABSENT?d->candidates:index+1;int finish=0;
   for(uint32_t i=first;i<end;i++){
     if(mesh_is(c->M,MESH_PRESENT,d->retired+i))continue;
-    if(mesh_is(c->M,MESH_PRESENT,d->selected+i) && !mesh_is(c->M,MESH_PRESENT,d->completed))continue;
+    if(mesh_is(c->M,MESH_PRESENT,d->selected+i) && !mesh_is(c->M,MESH_PRESENT,d->completed) &&
+       !(d->domain && mesh_is(c->M,MESH_PRESENT,d->domain->disposition) && mesh_is(c->M,MESH_PRESENT,d->domain->omitted)))continue;
     struct mesh_index_candidate candidate=d->candidate[i];int present=1;
     for(uint32_t j=0;j<candidate.count;j++)present&=mesh_map_ready(c,candidate.maps[j],0);
     if(present)finish|=mesh_index_retire(c,d,i);

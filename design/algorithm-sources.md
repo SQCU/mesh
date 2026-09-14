@@ -2037,8 +2037,9 @@ to evaluate another load's coordinates or predicates. Each numerical or selector
 consumer attaches `algebra_indexed_range` with that exact flattened range, actual
 candidate pointer positions, and retained source-table block strides. Entries
 outside the range are neither initialized nor consumed. The segment activity
-count and slot apply to every generated selector and the numerical partial.
-No whole-chunk coordinate selector becomes an additional readiness barrier.
+count and slot apply to the numerical partial. Derived selectors always publish,
+including empty bounded ranges, under the explicit domain lifetime described
+below. No whole-chunk coordinate selector becomes an additional readiness barrier.
 
 A setup cache shares identical selector expressions within one segment/panel's
 fixed operand/range context. Existing reader fanout retains the selector until
@@ -2063,3 +2064,55 @@ Source compilation and diff review are complete. Operational validation uses the
 existing streaming-algebra scatter case extended with a lookup tensor, mixed
 routing chunks, a delayed selected source page, an empty occurrence and reuse.
 No separate evaluator or workload was run by this implementation agent.
+
+## Derived selector active domains
+
+The JAX authors' [Pallas pipelining](https://docs.jax.dev/en/latest/pallas/pipelining.html)
+and NVIDIA's [CCCL segmented reduction](https://nvidia.github.io/cccl/unstable/python/compute_api.html)
+motivate explicit completion lifetimes and bounded input ranges. The following
+mechanism is mesh's own implementation of those lifetimes; those publications do
+not establish the correctness of mesh's occurrence protocol.
+
+Previously, realization required every selector and bound for an active function
+to be inside the same produced output as its active count. This guaranteed that
+omission happened after selector publication, and that selector reader lifetimes
+also pinned the active-count occurrence. Derived bounded selectors broke those
+assumptions. Omitting their producers left selector pages unpublished, while a
+later selector reset could erase an already-recorded omission completion.
+
+Bounded selectors now always execute their exact metadata range and publish.
+An empty range executes no update loads and initializes no unused entries. Direct
+Ref dependencies in these selector functions use the known single-candidate
+directory selector and original segment bounds, so an empty range does not wait
+for a missing direct operand. Numerical partials alone retain active omission.
+
+`metadata_local` verifies local metadata ownership against receive bindings.
+`metadata_descends` follows immutable configured function dependencies to the
+known count-producing output, rejects omittable metadata producers, and excludes
+cycles from the ancestry proof. `indexed_active_domain` requires each derived
+selector/bound producer to have that ancestry before replacing containment. It
+retains an explicit pointer to the existing active domain and adds its count maps
+to indexed lifetime metadata, rejecting candidate overlap. No scheduler or
+execution-time graph interpretation is added.
+
+The appended count maps acquire their own reader memberships and reset/watch
+edges through existing indexed realization. `vector_maps` continues to describe
+only actual selector-vector maps. Existing active readiness already checks count
+maps, and indexed readiness checks the extended metadata; ordinary input copies
+need no additional count binding. Indexed completion retains the count occurrence
+until all selected and unselected candidate memberships have retired, even when
+derived selectors live on separate pages.
+
+Indexed retirement recognizes the current active domain's disposition and
+omission flags as completion. A derived-selector reset may clear its local
+completion bit, but cannot erase that domain fact. Domain count maps remain held
+until retirement, so a new count occurrence cannot replace the omission fact
+while old candidate readers are outstanding. Existing selector maps still gate
+preparation and define the exact flattened span.
+
+The new domain pointer is in the process-local `mesh_indexed_read` structure; it
+is not in the shared mapped header or transport records. Both native libraries
+must be rebuilt together, but bridge ABI 25 and running bridges remain unchanged.
+Native library builds, Python compilation and source diff review passed. The
+existing nested-load scatter workflow supplies subsequent runtime evidence,
+including empty routing, delayed candidate pages and reuse.

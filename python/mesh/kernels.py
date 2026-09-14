@@ -882,7 +882,7 @@ def _segment_expression(node, operands, column, direct):
 
 
 # design/algorithm-sources.md#bounded-indexed-segment-loads
-def _bind_segment_expression(program, expression, operands, ordinals, bounds, flat_bounds,
+def _bind_segment_expression(program, expression, operands, ordinals, bounds, flat_bounds, direct_selector,
                              count, width, target, active_count, segment, reduction, cache=None):
     import ctypes as C
     from . import check
@@ -916,7 +916,7 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
         if selector_value not in cache:
             selected = program.tensor((1, count * width), dtype=np.uint32)[0, 0]
             _bind_segment_expression(program, selector_value, operands,
-                ordinals, bounds, flat_bounds, count, width, selected, active_count, segment, False, cache)
+                ordinals, bounds, flat_bounds, direct_selector, count, width, selected, active_count, segment, False, cache)
             cache[selector_value] = selected
         selectors.append((cache[selector_value], node.value))
     physical, pointers = [ordinals, bounds], {len(operands): (0,)}
@@ -970,7 +970,15 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
         positions = pointers[index]
         check(program.native.algebra_indexed_range(program.handle, function, selected.view, flat_bounds.view,
             (C.c_size_t * len(positions))(*positions), len(positions)))
-    check(program.native.algebra_active(program.handle, function, active_count.view, segment))
+    if reduction:
+        check(program.native.algebra_active(program.handle, function, active_count.view, segment))
+    else:
+        for index in sorted(used - {len(operands)}):
+            ref = inputs[index]
+            if not hasattr(ref, 'blocks') and (ref.view.tensor, ref.view.extent) not in program._constant_extents:
+                positions = pointers[index]
+                check(program.native.algebra_indexed_range(program.handle, function, direct_selector.view, bounds.view,
+                    (C.c_size_t * len(positions))(*positions), len(positions)))
     return function
 
 
@@ -1057,6 +1065,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             dtype=np.float32 if base.dtype.kind == 'f' else base.dtype)
         chunks.append((directory, count, partials))
         ordinal_view = directory.slice(0, count, 1, count)
+        direct_selector = directory.slice(0, 7 * count, 1, count)
         active_count = directory.slice(0, 8 * count, 1, 1)
         flat_ranges = {}
         for (segment, panel), partial in partials.blocks.items():
@@ -1079,7 +1088,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
                 bound_operands.append(ref)
             bound_operands = tuple(bound_operands)
             function = _bind_segment_expression(program, _segment_expression(update_value, bound_operands, column, direct),
-                bound_operands, ordinal_view, bounds, flat_ranges[range_key], count, partial.shape[1], partial,
+                bound_operands, ordinal_view, bounds, flat_ranges[range_key], direct_selector, count, partial.shape[1], partial,
                 active_count, segment, True)
             producers[(partial.view.tensor, partial.view.extent)] = function
     stripes = {}
