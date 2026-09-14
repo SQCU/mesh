@@ -949,9 +949,13 @@ class _ExpressionRegions:
         parts = []
         for start in range(0, inner, tile):
             length = min(tile, inner - start)
-            destination = direct if direct is not None and tile == inner and direct.dtype == np.dtype('float32') else self.temporary(shape)
             left_panel = self.panel(left, (origin[0], start), (shape[0], length))
             right_panel = self.panel(right, (start, origin[1]), (length, shape[1]))
+            reverse = left_panel.dtype == np.dtype('float16') and right_panel.dtype == np.dtype('float32')
+            if reverse:
+                destination = self.temporary(shape[::-1]).T
+            else:
+                destination = direct if direct is not None and tile == inner and direct.dtype == np.dtype('float32') else self.temporary(shape)
             _bind_operation(self.program, matmul, (left_panel, right_panel), destination)
             parts.append(destination)
         while len(parts) > 2:

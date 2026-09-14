@@ -1549,6 +1549,41 @@ accumulator convention remains unchanged. Integer classification for modular
 summation uses the cast target type, and cached reduction substitutions retain
 the accumulator dtype so differently typed statistics cannot alias.
 
+
+### Mixed contraction orientation
+
+The JAX authors' [Pallas matrix multiplication tutorial](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html)
+distinguishes physical layouts and transposed operands. Mesh applies the ordinary
+identity `A B = (B.T A.T).T` at setup to preserve native MPS execution when A is
+FP16 and B is FP32. The installed MPS implementation asserts that mixed products
+have FP32 left and result matrices and an FP16 right matrix; the captured initial
+Metal failure provides evidence of this asymmetric backend constraint.
+
+The region compiler allocates reverse-mixed FP32 partial storage with physical
+shape N×M and retains its transposed M×N Ref. Native contraction binding accepts
+unit-row-stride outputs and normalizes `(x,y,z)` to `(y.T,x.T,z.T)` before building
+geometry, exact dependencies and matrix rectangles. The existing MPS operation
+then sees FP32-left, FP16-right and a row-major FP32 result on the original
+canonical pages. No input conversion, transpose copy, per-row launch scheme or
+scalar fallback is introduced. The same normalization applies to CPU and Core ML
+bindings, so their geometry and input dependencies describe the same identity.
+
+For one-row/one-column cases both strides may be one. The explicit source dtypes
+retain the required reversal in that otherwise ambiguous layout. General rectangular
+cases allocate column-major partials. The existing final reduction or epilogue
+consumes their actual strides and publishes the declared logical output orientation;
+a single-panel bare output uses the existing affine publication operation if its
+public allocation has the other orientation. FP32 K-partial precision remains
+unchanged, and typed half operands remain half on their actual canonical storage.
+
+Direct native row-major FP16×FP32 output bindings still cannot satisfy MPS and now
+fail setup validation instead of aborting during encoding. Column-major mixed
+outputs must likewise normalize to the supported operand order. The shared
+expression owner chooses the appropriate orientation automatically; routing every
+raw `kernels.matmul` caller through that owner remains separate migration work.
+The native dylib builds and Python compiles. Existing multi-row rectangular and
+streamed typed-panel examples provide CPU/Metal operational validation.
+
 ## Canonical reader groups
 
 Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)

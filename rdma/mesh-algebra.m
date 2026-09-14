@@ -1018,7 +1018,13 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   if(x.tensor->extents[x.extent].shape.scalar>MESH_F32 || out->shape.scalar>MESH_F32 || (binary && y.tensor->extents[y.extent].shape.scalar>MESH_F32))return EINVAL;
   if(!binary)y=x;
   if(op==MESH_CONTRACT) {
-    if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || z.column_stride!=1 || !x.row_stride || !x.column_stride || !y.row_stride || !y.column_stride || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
+    if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || (z.column_stride!=1 && z.row_stride!=1) || !x.row_stride || !x.column_stride || !y.row_stride || !y.column_stride || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
+    /* design/algorithm-sources.md#mixed-contraction-orientation */
+    BOOL reverse=x.tensor->extents[x.extent].shape.scalar==MESH_F16 && y.tensor->extents[y.extent].shape.scalar==MESH_F32;
+    if(z.row_stride==1 && (z.column_stride!=1 || reverse)){
+      struct mesh_view left=mesh_view_transpose(y);y=mesh_view_transpose(x);x=left;z=mesh_view_transpose(z);
+    }
+    if(!a.cpu && !a.coremlPython && x.tensor->extents[x.extent].shape.scalar!=y.tensor->extents[y.extent].shape.scalar && (x.tensor->extents[x.extent].shape.scalar!=MESH_F32 || out->shape.scalar!=MESH_F32))return EINVAL;
   } else if(z.rows!=x.rows || z.columns!=(op==MESH_SUM?1:x.columns) || (binary && (x.rows!=y.rows || x.columns!=y.columns)))return EINVAL;
   NSMutableData *reads=[NSMutableData new];dependencies(reads,x);if(binary)dependencies(reads,y);
   struct mesh_row_map *maps=reads.mutableBytes;
