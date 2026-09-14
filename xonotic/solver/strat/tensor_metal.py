@@ -435,8 +435,16 @@ def gather_expression(kernels, arguments, values, shapes, attributes, coordinate
     return arguments[0].at(row, column)
 
 
+# ../../../design/algorithm-sources.md#xonotic-output-liveness
+def row_gather_gradient(value, operation, values, attributes, shapes):
+    return operation == 'gather_vjp' and len(values) == 3 and len(shapes[values[1].index]) == 1 and (
+        (len(shapes[value.index]) == 1 and tuple(attributes['mapping']) == (('index', 0),)) or
+        (len(shapes[value.index]) == 2 and tuple(attributes['mapping']) == (('index', 0), ('slice', 0, 1)) and
+         shapes[values[-1].index] == (shapes[values[1].index][0], shapes[value.index][1])))
+
+
 # ../../../design/algorithm-sources.md#application-metal-kernels
-def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
+def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                  tile_rows=64, tile_k=128, tile_columns=128):
     from mesh import BlockSpec, ShapeDtypeStruct, kernels, nn
     from mesh.kernels import Metal, MetalDispatch
@@ -444,13 +452,26 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
 
     shapes = {value.index: tuple(size.resolve(capacity) if isinstance(size, Dimension) else size for size in value.shape)
               for value, _, _, _, _ in graph.nodes}
+    outputs = tuple(outputs)
+    if any(value.graph is not graph for value in outputs):
+        raise ValueError('Requested outputs must belong to the compiled graph')
+    live = {value.index for value in outputs}
+    nodes = []
+    for node in reversed(graph.nodes):
+        value, operation, values, attributes, owner = node
+        if value.index not in live or value.index in inputs:
+            continue
+        nodes.append(node)
+        dependencies = values[1:] if row_gather_gradient(value, operation, values, attributes, shapes) else values
+        live.update(operand.index for operand in dependencies)
+    nodes.reverse()
     constants = {value.index: data for value, data in graph.constants.values()}
     tensors = dict(inputs)
     peers = {0: program.node if root_peer is None else root_peer}
     peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
     owners = {value.index: peers[owner] for value, _, _, _, owner in graph.nodes}
     replicas = {}
-    for value, operation, values, attributes, owner in graph.nodes:
+    for value, operation, values, attributes, owner in nodes:
         peer = peers[owner]
         if value.index in tensors:
             continue
@@ -467,17 +488,13 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                 program.constant(tensor[0, 0], data.reshape(storage_shape))
             tensors[value.index] = tensor
             continue
-        row_gradient = operation == 'gather_vjp' and len(values) == 3 and len(shapes[values[1].index]) == 1 and (
-            (len(shapes[value.index]) == 1 and tuple(attributes['mapping']) == (('index', 0),)) or
-            (len(shapes[value.index]) == 2 and tuple(attributes['mapping']) == (('index', 0), ('slice', 0, 1)) and
-             shapes[values[-1].index] == (shapes[values[1].index][0], shapes[value.index][1])))
+        row_gradient = row_gather_gradient(value, operation, values, attributes, shapes)
         local = {}
         for operand in values:
+            if row_gradient and operand.index == values[0].index:
+                continue
             tensor = tensors[operand.index]
             sender = owners[operand.index]
-            if row_gradient and operand.index == values[0].index:
-                local[operand.index] = tensor
-                continue
             if sender != peer:
                 key = (operand.index, peer)
                 if key not in replicas:

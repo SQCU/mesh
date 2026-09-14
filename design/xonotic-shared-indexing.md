@@ -173,3 +173,28 @@ Their existing source implementations are preserved. The graph differentiation
 rules themselves are unchanged. Python compilation passes; the existing workflow
 still needs duplicate-index and delayed-cotangent numerical observations for this
 new derivative path. No execution or performance result is claimed here.
+
+## Requested-output liveness
+
+`kernel_calls` now requires `outputs=(...)` on its existing setup call. It walks
+backward from those logical Tensor roots, retaining only numerical dependencies
+and stopping at supplied input bindings. This is ordinary dead-operation
+elimination, consistent with [MLIR's canonicalization rules](https://mlir.llvm.org/docs/Canonicalization/#globally-applied-rules).
+It changes neither the public kernel execution interface nor the runtime owner.
+Unrequested graph nodes receive no operand allocation, transfer edge or reader
+registration. All requested roots and their required intermediates remain in the
+returned tensor mapping. Inputs are already-realized numerical boundaries.
+
+The migrated row-gather VJP's primal operand contributes its configured shape,
+not a numerical dependency. A derivative-only root therefore does not compile an
+unused forward gather, register readers for its indices, or require a supplied
+primal tensor. This matters for repeated invocation: a never-executed forward
+consumer cannot retain an otherwise finished index occurrence. Source shapes
+remain available from the logical graph metadata even when their numerical
+producer is eliminated. Other operations retain their declared dependency edges;
+further shape-only operand analysis is separate work.
+
+The planner declares its `y` output explicitly. The existing Xonotic gold graph
+declares its joined output; a derivative case declares its gradient roots.
+Python source compilation validates the modified compiler and planner. Runtime
+reuse evidence remains the responsibility of the existing gold workflow.

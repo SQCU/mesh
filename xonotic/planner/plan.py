@@ -38,7 +38,7 @@ def solve(program, source, weights):
         hidden = mx.maximum(mx.expert_matmul(x, w1, selected), 0)
         y = mx.matmul(mx.expert_matmul(hidden, w2, selected), o)
     inputs = {value.index: tensor for value, tensor in zip((x, r, w1, w2, o), (source, *weights))}
-    return kernel_calls(program, graph, (), inputs)[y.index]
+    return kernel_calls(program, graph, (), inputs, outputs=(y,))[y.index]
 
 
 # ../../design/algorithm-sources.md#xonotic-planner-migration

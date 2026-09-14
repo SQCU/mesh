@@ -1414,3 +1414,16 @@ is retained, but its values are neither replicated nor read by this derivative.
 Shared segmented reduction and publication remain the sole numerical owner.
 The covered mappings and remaining derivative cases are recorded in
 [xonotic-shared-indexing.md](xonotic-shared-indexing.md#shared-row-gather-transpose).
+
+## Xonotic output liveness
+
+The LLVM/MLIR authors document elimination of unused side-effect-free operations
+in [canonicalization](https://mlir.llvm.org/docs/Canonicalization/#globally-applied-rules).
+Xonotic kernel_calls performs a backward setup traversal from explicitly requested
+output Tensors and stops at supplied numerical inputs. Only live numerical nodes
+are lowered. row_gather_gradient identifies the previously implemented gather
+transpose mapping whose primal supplies shape only; its indices and cotangent
+remain numerical dependencies. The same predicate controls liveness and actual
+binding, so unused forward readers cannot block derivative-only input reuse.
+This is compilation of the existing functional graph, not another runtime
+scheduler. [Contract and caller migration](xonotic-shared-indexing.md#requested-output-liveness).
