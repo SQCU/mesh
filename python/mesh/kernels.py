@@ -613,38 +613,25 @@ class _ExpressionKernel:
             raise ValueError('Expression columns do not match the output')
         names = {node: f's{index}' for index, node in enumerate(reductions)}
 
-        # design/algorithm-sources.md#region-expression-fusion
+        # design/algorithm-sources.md#shared-scalar-load-emission
         def emit(node, column):
-            if node.operation == 'row':
-                return '((long)r)' if metal else '((int64_t)r)'
-            if node.operation == 'column':
-                return f'((long)({column}))' if metal else f'((int64_t)({column}))'
-            if node.operation == 'block_ordinal':
-                row, col = (emit(child, column) for child in node.operands)
-                rows, columns, grid_columns = node.value
-                return f'(({row})/{rows}*{grid_columns}+({col})/{columns})'
-            if node.operation == 'load':
-                ref = inputs[node.value]
-                row, col, mask, other = (emit(child, column) for child in node.operands)
-                if hasattr(ref, 'blocks'):
-                    block = f'(({row})/{ref.block_shape[0]}*{ref.grid[1]}+({col})/{ref.block_shape[1]})'
-                    scalar, strides = layouts[node.value]
-                    address = f'(({"device " if metal else ""}const {scalar} *)buffers[{pointers[node.value][0]}+{block}])'
-                    value = f'{address}[(({row})%{ref.block_shape[0]})*{strides[0]}+(({col})%{ref.block_shape[1]})*{strides[1]}]'.replace('CANDIDATE', block)
-                else:
-                    value = f'p{pointers[node.value][0]}[({row})*{ref.view.row_stride}+({col})*{ref.view.column_stride}]'
-                value = f'((float)({value}))' if ref.dtype.kind == 'f' else value
-                return f'(({mask})?({value}):({other}))'
-            if node.operation == 'input':
-                ref = inputs[node.value]
+            # design/algorithm-sources.md#shared-scalar-load-emission
+            def resolve(part, args):
+                if part.operation == 'row':
+                    return '((long)r)' if metal else '((int64_t)r)'
+                if part.operation == 'column':
+                    return f'((long)({column}))' if metal else f'((int64_t)({column}))'
+                if part.operation == 'sum':
+                    return f'(({"long" if metal else "int64_t"}){names[part]})' if output.dtype.kind in 'ib' else names[part]
+                ref = inputs[part.value]
+                if part.operation == 'load':
+                    return _indexed_load_expression(ref, pointers[part.value][0], layouts.get(part.value), args, metal)
                 row_stride = ref.view.row_stride if ref.shape[0] != 1 else 0
                 column_stride = ref.view.column_stride if ref.shape[1] != 1 else 0
-                value = f'p{pointers[node.value][0]}[r*{row_stride}+({column})*{column_stride}]'
+                value = f'p{pointers[part.value][0]}[r*{row_stride}+({column})*{column_stride}]'
                 return f'((float)({value}))' if ref.dtype.kind == 'f' else value
-            if node.operation == 'sum':
-                return f'(({"long" if metal else "int64_t"}){names[node]})' if output.dtype.kind in 'ib' else names[node]
-            return _scalar_expression(node, tuple(emit(child, column) for child in node.operands), metal,
-                _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
+
+            return _emit_scalar_expression(node, inputs, metal, resolve)
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
         layouts = {}
@@ -691,6 +678,35 @@ class _ExpressionKernel:
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')
         return '\n'.join(lines)
+
+
+# design/algorithm-sources.md#shared-scalar-load-emission
+def _indexed_load_expression(ref, pointer, layout, args, metal):
+    row, column, mask, other = args
+    if hasattr(ref, 'blocks'):
+        block = f'(({row})/{ref.block_shape[0]}*{ref.grid[1]}+({column})/{ref.block_shape[1]})'
+        scalar, strides = layout
+        address = f'(({"device " if metal else ""}const {scalar} *)buffers[{pointer}+{block}])'
+        value = f'{address}[(({row})%{ref.block_shape[0]})*{strides[0]}+(({column})%{ref.block_shape[1]})*{strides[1]}]'.replace('CANDIDATE', block)
+    else:
+        value = f'p{pointer}[({row})*{ref.view.row_stride}+({column})*{ref.view.column_stride}]'
+    value = f'((float)({value}))' if ref.dtype.kind == 'f' else value
+    return f'(({mask})?({value}):({other}))'
+
+
+# design/algorithm-sources.md#shared-scalar-load-emission
+def _emit_scalar_expression(node, inputs, metal, resolve):
+    if node.operation in ('input', 'row', 'column', 'sum'):
+        return resolve(node, ())
+    args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
+    if node.operation == 'load':
+        return resolve(node, args)
+    if node.operation == 'block_ordinal':
+        row, column = args
+        rows, columns, grid_columns = node.value
+        return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
+    return _scalar_expression(node, args, metal,
+        _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
 
 
 # design/algorithm-sources.md#logical-indexed-views
@@ -972,18 +988,13 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
                         'c' if tensor.shape[1] != 1 else '0', metal)
                     loads[index] = f'((float)({load}))' if tensor.dtype.kind == 'f' else load
 
-                # design/algorithm-sources.md#fused-indexed-update-values
-                def emit_value(node):
+                # design/algorithm-sources.md#shared-scalar-load-emission
+                def resolve(node, args):
                     if node.operation == 'input':
                         return loads[node.value]
-                    if node.operation == 'row':
-                        return '((int64_t)ordinal)'
-                    if node.operation == 'column':
-                        return f'((int64_t)({column}+c))'
-                    return _scalar_expression(node, tuple(emit_value(child) for child in node.operands), metal,
-                        _expression_dtype(node, operands) if node.operation in ('//', '%') else None)
+                    return {'row': '((int64_t)ordinal)', 'column': f'((int64_t)({column}+c))'}[node.operation]
 
-                load = emit_value(update_value)
+                load = _emit_scalar_expression(update_value, operands, metal, resolve)
                 accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
                 return f'''for(uint32_t c=lane;c<{partial.shape[1]};c+=lanes) {{
                   {accumulator} total=0;

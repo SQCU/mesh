@@ -1972,3 +1972,40 @@ This caller increment compiles with the shared logical-view implementation. The
 graph broadcast-shape correction and rank-3 delayed-output observations are
 coordinated integration edits committed next by the parent agent; numerical
 coverage is not inferred from source compilation.
+
+## Shared scalar/load emission
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+separates tensor expressions from the implementation of their memory accesses.
+`_emit_scalar_expression` now owns recursive emission for both the ordinary
+expression kernel and the existing bounded indexed-add segment reducer. It takes
+the expression, original input dtype metadata, backend language flag, and a
+resolver for input values, row/column coordinates, completed reductions and
+indexed loads. Indexed-load operands are recursively emitted before resolution;
+completed reduction nodes resolve directly to their existing scalar names.
+Arithmetic, casts, typed quotient/remainder and block ordinals retain the same
+shared emission as before. The resolver describes the existing iteration context;
+it does not construct that context or introduce another numerical execution path.
+
+`_indexed_load_expression` takes the actual Ref or Tensor, its retained pointer
+table offset, its existing scalar/stride layout, the emitted row/column/mask/other
+values, and the backend flag. It preserves direct Ref strides or Tensor block
+lookup and per-block strides, promotes real loads to FP32, and retains the
+conditional masked load. It allocates no storage and discovers no dependencies.
+The ordinary expression source uses this extracted implementation unchanged.
+
+The indexed-add reducer reuses recursive scalar emission with its existing
+ordinal and feature-column substitutions. It still iterates exactly from the
+segment's lower bound to its upper bound, reads the same selected input refs, and
+publishes the same partial. Routing keys, masks, selector generation, reader
+lifetimes and supported update operations are unchanged. Source diff review
+confirms retained address strings, scalar casts, loop bounds and numerical
+expressions; Python compilation passed. No workload was run for this factoring.
+
+Load-valued scatter updates are not enabled by extracting the emitter. Their next
+step needs shared predicate/access binding for the same bounded segment domain,
+including nested coordinate loads and exact selector ranges. Load-valued masks
+must be evaluated per segment rather than holding unrelated destination routing
+keys. Selector capacity and lifetime packing also remain explicit setup work;
+neither a full-count scan for every segment nor a dense update staging buffer
+is an acceptable substitute for that implementation.
