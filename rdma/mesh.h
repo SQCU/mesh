@@ -24,7 +24,7 @@ enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, 
 enum { MESH_SEND, MESH_RECEIVE };
 enum { MESH_NOTICE_COMPUTE, MESH_NOTICE_SEND, MESH_NOTICE_QUEUES };
 struct mesh_notice { _Atomic uint32_t queued; uint32_t next; };
-struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; uint64_t when; int64_t code; uint32_t domain,reserved; };
+struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; _Atomic uint64_t when; _Atomic int64_t code; _Atomic uint32_t domain; uint32_t reserved; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint32_t configured;
@@ -98,12 +98,12 @@ static inline void mesh_reads_reset(struct hdr *m,uint32_t first,uint32_t count)
 }
 /* ledger D8: presence is the receive completion */
 static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t page,int landed){
+  mesh_bits_clear(m,MESH_PAGE_HOT,page,m->block);
+  mesh_bits_clear(m,MESH_ROW_HOT,row,m->block);
   if(landed){
     mesh_reads_reset(m,row,m->block);
     mesh_bits_set(m,MESH_PRESENT,row,m->block);
   }
-  mesh_bits_clear(m,MESH_PAGE_HOT,page,m->block);
-  mesh_bits_clear(m,MESH_ROW_HOT,row,m->block);
   mesh_notify(m,row,m->block);
 }
 /* design/algorithm-sources.md#async-index-push-contract */

@@ -1,6 +1,7 @@
 #include "mesh-verbs.h"
 #include "mesh-dataflow.h"
 #include "mesh-memory.h"
+#include <pthread.h>
 
 /* design/algorithm-sources.md#async-index-push-contract */
 struct mesh_posted { uint32_t row,page,plane,index,bytes,frames; };
@@ -10,7 +11,11 @@ struct mesh_hold { uint32_t rows,pages; };
 struct mesh_queue { struct mesh_posted posted[QD]; uint32_t head,tail,next,frames; };
 struct mesh_pending { struct mesh_transfer entries[QD]; uint32_t head,tail,frames; };
 struct mesh_index_frame { uint32_t queue,count; struct mesh_transfer entries[(MESH_INDEX_BYTES-8)/sizeof(struct mesh_transfer)]; };
+struct mesh_worker { struct mesh_link *link; pthread_t thread; uint32_t direction; };
 struct mesh_link {
+  struct mesh_worker workers[2];
+  uint32_t worker_count;
+  _Atomic int progressing;
   struct hdr *M; struct mesh_verbs provider; int qps,frames,budget; uint64_t client;
   struct mesh_queue *queues;
   struct mesh_pending *pending,*announced;
@@ -230,16 +235,17 @@ static void link_publications(struct mesh_link *link){
   }
 }
 /* design/algorithm-sources.md#actual-frame-capacity */
-static void mesh_progress(struct mesh_link *link){
+static void mesh_progress(struct mesh_link *link,uint32_t direction){
   struct hdr *M=link->M;struct mesh_verbs *v=&link->provider;
   uint32_t iq=(uint32_t)link->qps;
-  link_publications(link);
-  for(uint32_t cq=0;cq<2*(iq+1);cq++){
-  int count=ibv_poll_cq(v->completion_queues[cq],QD,v->completions);
+  if(direction==MESH_SEND)link_publications(link);
+  struct ibv_wc *completions=v->completions+direction*QD;
+  for(uint32_t cq=direction;cq<2*(iq+1);cq+=2){
+  int count=ibv_poll_cq(v->completion_queues[cq],QD,completions);
   if(count<0){link_error(M,count,3);continue;}
   for(int i=0;i<count;i++){
-    struct ibv_wc *wc=&v->completions[i];
-    uint32_t q=cq/2;int direction=(int)(cq%2);
+    struct ibv_wc *wc=&completions[i];
+    uint32_t q=cq/2;
     if(wc->qp_num!=v->pairs[q]->qp_num || ((wc->wr_id>>63)?MESH_RECEIVE:MESH_SEND)!=direction){link_error(M,EPROTO,4);continue;}
     uint32_t row=(uint32_t)wc->wr_id;
     if(wc->status)link_error(M,wc->status,2);
@@ -265,20 +271,36 @@ static void mesh_progress(struct mesh_link *link){
       link_release(link,q,entry);mesh_send_complete(M,entry.row,entry.plane);
       link_send_ready(link,q);
     }
+    if(direction==MESH_SEND)link_publications(link);
+  }
+  }
+  if(direction==MESH_RECEIVE){
+    link_receive(link,iq);
+    for(uint32_t q=0;q<iq;q++)link_receive(link,q);
+  } else {
     link_publications(link);
+    for(uint32_t q=0;q<iq;q++)link_send_ready(link,q);
   }
-  }
-  link_receive(link,iq);
-  link_publications(link);
-  for(uint32_t q=0;q<iq;q++){
-    link_receive(link,q);
-    link_send_ready(link,q);
-  }
+}
+
+/* design/algorithm-sources.md#programkernel_call */
+static void *link_progress(void *argument){
+  struct mesh_worker *worker=argument;
+  pthread_setname_np(worker->direction==MESH_SEND?"mesh.rdma.send":"mesh.rdma.receive");
+  while(atomic_load_explicit(&worker->link->progressing,memory_order_acquire))
+    mesh_progress(worker->link,worker->direction);
+  return NULL;
+}
+/* design/algorithm-sources.md#programkernel_call */
+static void link_stop(struct mesh_link *link){
+  atomic_store_explicit(&link->progressing,0,memory_order_release);
+  while(link->worker_count)pthread_join(link->workers[--link->worker_count].thread,NULL);
 }
 
 /* ledger D14: destroying the queue pairs ends their work requests; release what they occupied */
 static int link_down(struct mesh_link *link){
   struct hdr *M=link->M;
+  link_stop(link);
   if(!down_pair()){ link_error(M,errno?errno:EIO,1); return -1; }
   for(uint32_t q=0;q<MESH_QPS+1;q++) for(int d=0;d<2;d++){
     struct mesh_queue *queue=link_queue(link,q,d);
@@ -363,7 +385,7 @@ int main(int argc,char**argv){
   link.queued=calloc((size_t)MESH_QPS*mesh_blocks(M),1);
   link.ready_next=calloc((size_t)MESH_QPS*mesh_blocks(M),sizeof *link.ready_next);
   link.send_heads=calloc(mesh_rows(M),sizeof *link.send_heads);
-  provider->completions=calloc(QD,sizeof *provider->completions);
+  provider->completions=calloc(2*QD,sizeof *provider->completions);
   int status=0;
   if(!link.queues || !link.pending || !link.announced || !link.holds || !link.active || !link.queued || !link.ready_next || !link.send_heads || !provider->completions){ status=ENOMEM; goto teardown; }
   atomic_store(&M->port.phase,MESH_PAIRING);
@@ -384,15 +406,24 @@ int main(int argc,char**argv){
         continue;
       }
       link.client=client;
+      atomic_store_explicit(&link.progressing,1,memory_order_release);
+      int error=0;
+      for(uint32_t direction=0;direction<2;direction++){
+        link.workers[direction]=(struct mesh_worker){.link=&link,.direction=direction};
+        error=pthread_create(&link.workers[direction].thread,NULL,link_progress,&link.workers[direction]);
+        if(error)break;
+        link.worker_count++;
+      }
+      if(error){link_error(M,error,1);link_down(&link);continue;}
       snprintf(M->port.device,sizeof M->port.device,"%s",ibv_get_device_name(provider->context->device));
       M->port.peer=(uint16_t)expected_peer;
       atomic_store(&M->port.phase,MESH_PAIRED);
       fprintf(stderr,"bridge node %d paired for client %llu\n",me,(unsigned long long)client);
     }
-    if(link.client) mesh_progress(&link);
-    else nanosleep(&idle,NULL);
+    nanosleep(&idle,NULL);
   }
 teardown:
+  link_stop(&link);
   fprintf(stderr,"bridge node %d stopping: code=%lld domain=%u errno=%d\n",me,(long long)M->port.code,M->port.domain,errno);
   atomic_store(&M->port.phase,MESH_STOPPED);
   if(!down_verbs()){ fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno)); return 1; }
