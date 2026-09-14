@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import numpy as np
 
 _REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
-_REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'asinh', 'expm1', 'log1p', 'log', 'sqrt', 'power', 'logaddexp', 'random_normal')
-_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide', 'philox')
+_REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'log', 'sqrt')
+_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide')
 _POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%',
     'maximum', 'minimum', *_POINTWISE_FUNCTIONS)
 
@@ -139,13 +139,6 @@ class _Expression:
             raise ValueError('Expression casts require a supported scalar dtype')
         return _Expression('cast', (self,), dtype.str)
 
-    # design/algorithm-sources.md#stable-indexed-ordering
-    def argsort(self, axis=1):
-        import operator
-        axis = operator.index(axis)
-        if axis not in (-2, -1, 0, 1):
-            raise ValueError('Ordering axis must refer to the two-dimensional expression domain')
-        return _Expression('argsort', (self,)) if axis % 2 else self.T.argsort().T
 
     # design/algorithm-sources.md#shared-associative-reductions
     def _reduce(self, operation, axis):
@@ -211,17 +204,8 @@ class _Expression:
     def tanh(self):
         return _Expression('tanh', (self,))
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def asinh(self):
-        return _Expression('asinh', (self,))
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def expm1(self):
-        return _Expression('expm1', (self,))
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def log1p(self):
-        return _Expression('log1p', (self,))
 
     # design/algorithm-sources.md#shared-elementary-functions
     def log(self):
@@ -243,33 +227,18 @@ class _Expression:
     def floor(self):
         return _Expression('floor', (self,))
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def power(self, other):
-        return _Expression('power', (self, _literal(other)))
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def logaddexp(self, other):
-        return _Expression('logaddexp', (self, _literal(other)))
 
     # design/algorithm-sources.md#shared-elementary-functions
     def floor_divide(self, other):
         return _Expression('floor_divide', (self, _literal(other)))
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def arcsinh(self):
-        return self.asinh()
 
     # design/algorithm-sources.md#shared-elementary-functions
     def __abs__(self):
         return self.abs()
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def __pow__(self, other):
-        return self.power(other)
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def __rpow__(self, other):
-        return _literal(other).power(self)
 
 
 # design/algorithm-sources.md#region-expression-fusion
@@ -542,18 +511,8 @@ def arange(length, *, tile=None):
     return _Expression('index_vector', value=(length, max(1, min(tile, length)), 0, 1))
 
 
-# design/algorithm-sources.md#counter-based-random-generation
-def philox4x32(counter_words, key0, key1):
-    counter_words = tuple(counter_words)
-    if len(counter_words) != 4:
-        raise ValueError('Philox4x32 requires four counter words')
-    operands = tuple(map(_literal, (*counter_words, key0, key1)))
-    return tuple(_Expression('philox', operands, word) for word in range(4))
 
 
-# design/algorithm-sources.md#counter-based-random-generation
-def random_normal(key0, key1, ordinal):
-    return _Expression('random_normal', tuple(map(_literal, (key0, key1, ordinal))))
 
 
 # design/algorithm-sources.md#dynamic-indexed-expression-lowering
@@ -726,7 +685,7 @@ class _ExpressionKernel:
                 return True
             if node.operation in _REAL_FUNCTIONS:
                 return False
-            if node.operation in ('isfinite', 'philox'):
+            if node.operation == 'isfinite':
                 return True
             if node.operation in _REDUCTIONS:
                 return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
@@ -1054,8 +1013,6 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
 
 # design/algorithm-sources.md#shared-scalar-load-emission
 def _emit_scalar_expression(node, inputs, metal, resolve):
-    if node.operation in ('philox', 'random_normal') and any(_expression_dtype(child, inputs).kind not in 'iub' for child in node.operands):
-        raise ValueError('Counter-based random functions require integral keys, counters and ordinals')
     if node.operation in ('input', 'row', 'column', 'index_vector') or node.operation in _REDUCTIONS:
         return resolve(node, ())
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
@@ -1085,8 +1042,6 @@ def _expression_dtype(node, inputs):
         return np.dtype('float32')
     if node.operation == 'lookup':
         return np.dtype('uint64')
-    if node.operation in ('philox', 'argsort'):
-        return np.dtype('uint32')
     if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
         return np.dtype('bool')
     if node.operation in ('abs', 'floor', 'domain'):
@@ -1120,56 +1075,14 @@ def _reduction_dtype(node, inputs, output):
     return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
 
 
-# design/algorithm-sources.md#counter-based-random-generation
-def _random_helpers(metal):
-    qualifier = 'inline' if metal else 'static inline'
-    u32, u64 = ('uint', 'ulong') if metal else ('uint32_t', 'uint64_t')
-    log, sqrt, sin, cos = tuple('precise::'+name if metal else name+'f' for name in ('log', 'sqrt', 'sin', 'cos'))
-    return f"""typedef struct {{ {u32} word[4]; }} mesh_philox_words;
-    {qualifier} mesh_philox_words mesh_philox({u32} c0,{u32} c1,{u32} c2,{u32} c3,{u32} k0,{u32} k1) {{
-      mesh_philox_words result={{{{c0,c1,c2,c3}}}};
-      for({u32} round=0;round<10;round++) {{
-        {u64} a=({u64})result.word[0]*0xD2511F53u,b=({u64})result.word[2]*0xCD9E8D57u;
-        mesh_philox_words next={{{{({u32})(b>>32)^result.word[1]^k0,({u32})b,({u32})(a>>32)^result.word[3]^k1,({u32})a}}}};
-        result=next;k0+=0x9E3779B9u;k1+=0xBB67AE85u;
-      }}
-      return result;
-    }}
-    {qualifier} float mesh_random_normal({u32} k0,{u32} k1,{u64} ordinal) {{
-      {u64} counter=ordinal>>1;
-      mesh_philox_words bits=mesh_philox(({u32})counter,({u32})(counter>>32),0u,0u,k0,k1);
-      float radius={sqrt}(-2.0f*{log}(((float)(bits.word[0]>>9)+0.5f)*0x1p-23f));
-      float angle=6.283185307179586f*((float)(bits.word[1]>>9)*0x1p-23f);
-      return radius*((ordinal&1u)?{sin}(angle):{cos}(angle));
-    }}"""
 
 
 # design/algorithm-sources.md#shared-elementary-functions
 def _scalar_helpers(metal):
     qualifier = 'inline' if metal else 'static inline'
     suffix = '' if metal else 'f'
-    log1p = 'mesh_log1p' if metal else 'log1pf'
-    exponential = 'precise::exp' if metal else 'expf'
     remainder_function = 'precise::fmod' if metal else 'fmodf'
-    helpers = [_random_helpers(metal)]
-    if metal:
-        helpers.append("""inline float mesh_log1p(float x) {
-          float u=1.0f+x;
-          return u==1.0f || x==INFINITY ? x : precise::log(u)*(x/(u-1.0f));
-        }
-        inline float mesh_expm1(float x) {
-          return fabs(x)<0.5f ? x*(1.0f+x*(0.5f+x*(1.0f/6.0f+x*(1.0f/24.0f+x*(1.0f/120.0f+x*(1.0f/720.0f+x*(1.0f/5040.0f+x*(1.0f/40320.0f+x/362880.0f)))))))) : precise::exp(x)-1.0f;
-        }
-        inline float mesh_asinh(float x) {
-          float a=fabs(x);
-          return a<0.000244140625f ? x : copysign(a>4096.0f ? precise::log(a)+0.6931471805599453f : mesh_log1p(a+a*a/(1.0f+precise::sqrt(1.0f+a*a))),x);
-        }""")
-    helpers.append(f"""{qualifier} float mesh_logaddexp(float x,float y) {{
-      if(x==y)return x+0.6931471805599453f;
-      float d=x-y;
-      return d>0.0f ? x+{log1p}({exponential}(-d)) : d<=0.0f ? y+{log1p}({exponential}(d)) : d;
-    }}
-    {qualifier} float mesh_floor_divide(float x,float y) {{
+    return f"""{qualifier} float mesh_floor_divide(float x,float y) {{
       float remainder={remainder_function}(x,y);
       if(y==0.0f)return x/y;
       float quotient=(x-remainder)/y;
@@ -1177,18 +1090,11 @@ def _scalar_helpers(metal):
       if(quotient==0.0f)return copysign{suffix}(0.0f,x/y);
       float result=floor{suffix}(quotient);
       return result+(quotient-result>0.5f ? 1.0f : 0.0f);
-    }}""")
-    return '\n'.join(helpers)
+    }}"""
 
 
 # design/algorithm-sources.md#fused-indexed-update-values
 def _scalar_expression(node, args, metal, dtype=None):
-    if node.operation in ('philox', 'random_normal'):
-        u32, u64 = ('uint', 'ulong') if metal else ('uint32_t', 'uint64_t')
-        types = (u32,)*6 if node.operation == 'philox' else (u32, u32, u64)
-        call = ('mesh_philox' if node.operation == 'philox' else 'mesh_random_normal') + '(' + ','.join(
-            f'(({scalar})({value}))' for scalar, value in zip(types, args)) + ')'
-        return call + f'.word[{node.value}]' if node.operation == 'philox' else call
     if node.operation == 'isfinite':
         return f'isfinite((float)({args[0]}))' if dtype.kind == 'f' else '1'
     if node.operation == 'abs':
@@ -1203,9 +1109,8 @@ def _scalar_expression(node, args, metal, dtype=None):
     if node.operation == 'floor_divide':
         return f'mesh_floor_divide((float)({args[0]}),(float)({args[1]}))' if dtype.kind == 'f' else _scalar_expression(_Expression('//'), args, metal, dtype)
     if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
-        name = ('mesh_' + node.operation if node.operation == 'logaddexp' or metal and node.operation in ('asinh', 'expm1', 'log1p') else
-            ('pow' if node.operation == 'power' else node.operation) + ('' if metal else 'f'))
-        if metal and node.operation in ('power', 'log', 'sqrt'):
+        name = node.operation + ('' if metal else 'f')
+        if metal and node.operation in ('log', 'sqrt'):
             name = 'precise::' + name
         return name + '(' + ','.join(f'((float)({value}))' for value in args) + ')'
     if node.operation in ('maximum', 'minimum'):
@@ -1759,10 +1664,10 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'cast', 'transpose', 'argsort', 'indexed_contract') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
+    return node.operation in ('dot', 'cast', 'transpose', 'indexed_contract') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
 
 
-# design/algorithm-sources.md#stable-indexed-ordering
+# design/algorithm-sources.md#selected-native-contractions
 def _indexed_interval_source(name, entries, first, metal):
     dtype = entries[0][1].dtype
     scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t', 'u4': 'uint32_t',
@@ -1778,7 +1683,7 @@ def _indexed_interval_source(name, entries, first, metal):
         tables.append(f'{constant} uint64_t {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
     load = _indexed_load_expression(entries[0][1], 'key', (scalar, (f'{name}_rs[block]', f'{name}_cs[block]')),
                                     ('row', f'index-{name}_begin[block]', 'true', '0'), metal)
-    tables.append(f"""// design/algorithm-sources.md#stable-indexed-ordering
+    tables.append(f"""// design/algorithm-sources.md#selected-native-contractions
     {qualifier} {result} {name}({address} buffers,uint64_t row,uint64_t index) {{
       uint32_t low=0,high={len(entries)-1};
       while(low<high) {{ uint32_t middle=low+(high-low)/2;
@@ -1790,93 +1695,10 @@ def _indexed_interval_source(name, entries, first, metal):
     return '\n'.join(tables)
 
 
-# design/algorithm-sources.md#stable-indexed-ordering
-def _ordering_comparator(entries, metal):
-    dtype = entries[0][1].dtype
-    scalar = 'float' if dtype.kind == 'f' else 'uint64_t' if dtype.kind in 'ub' else 'int64_t'
-    address = 'device const ulong *' if metal else 'const uintptr_t *'
-    qualifier = 'inline' if metal else 'static inline'
-    nan = 'if(isnan(x)!=isnan(y))return isnan(y);' if dtype.kind == 'f' else ''
-    return _indexed_interval_source('mesh_sort_key', entries, 0, metal)+f"""
-    // design/algorithm-sources.md#stable-indexed-ordering
-    {qualifier} bool mesh_sort_before({address} buffers,uint64_t row,uint32_t a,uint32_t b) {{
-      if(a==0xffffffffu)return false;if(b==0xffffffffu)return true;
-      {scalar} x=mesh_sort_key(buffers,row,a),y=mesh_sort_key(buffers,row,b);
-      {nan}
-      if(x<y)return true;if(y<x)return false;return a<b;
-    }}"""
 
 
-# design/algorithm-sources.md#stable-indexed-ordering
-def _ordering_run(program, source, first, target):
-    width = source.shape[1]
-    padded = 1 << (width-1).bit_length()
-
-    # design/algorithm-sources.md#stable-indexed-ordering
-    def body(metal):
-        barrier = 'threadgroup_barrier(mem_flags::mem_threadgroup);' if metal else ''
-        return _ordering_comparator(((first, source),), metal), f"""
-        {'threadgroup ' if metal else ''}uint32_t work[{padded}];
-        for(uint32_t i=lane;i<{padded};i+=lanes)work[i]=i<{width}?{first}u+i:0xffffffffu;
-        {barrier}
-        for(uint32_t span=2;span<={padded};span*=2) {{
-          for(uint32_t step=span/2;step;step/=2) {{
-            for(uint32_t i=lane;i<{padded};i+=lanes) {{ uint32_t j=i^step;
-              if(j>i) {{ uint32_t a=work[i],b=work[j];
-                if((i&span)?mesh_sort_before(buffers,r,a,b):mesh_sort_before(buffers,r,b,a)) {{work[i]=b;work[j]=a;}}
-              }}
-            }}
-            {barrier}
-          }}
-        }}
-        for(uint32_t i=lane;i<{width};i+=lanes)p1[r*{target.view.row_stride}+i*{target.view.column_stride}]=work[i];
-        """
-    _compiled_region(program, (source,), target, body, access_axes=(1,), domains=_source_row_regions(program, target))
 
 
-# design/algorithm-sources.md#stable-indexed-ordering
-def _ordering_merge(program, keys, left, right, diagonal, target):
-    inputs = tuple(ref for _, ref in (*keys, *left, *right))
-    left_width, right_width = sum(ref.shape[1] for _, ref in left), sum(ref.shape[1] for _, ref in right)
-
-    # design/algorithm-sources.md#stable-indexed-ordering
-    def body(metal):
-        address = 'device const ulong *' if metal else 'const uintptr_t *'
-        qualifier = 'inline' if metal else 'static inline'
-        preamble = _ordering_comparator(keys, metal)+_indexed_interval_source('mesh_sort_left', left, len(keys), metal)+_indexed_interval_source('mesh_sort_right', right, len(keys)+len(left), metal)
-        preamble += f"""
-        // design/algorithm-sources.md#stable-indexed-ordering
-        {qualifier} uint32_t mesh_sort_partition({address} buffers,uint64_t row,uint32_t diagonal,
-            uint32_t alo,uint32_t ahi,uint32_t blo,uint32_t bhi) {{
-          uint32_t low=diagonal>bhi?diagonal-bhi:0,high=diagonal-blo;
-          if(low<alo)low=alo;if(high>ahi)high=ahi;
-          while(low<high) {{ uint32_t a=low+(high-low)/2,b=diagonal-a;
-            if(a<ahi&&b>blo&&mesh_sort_before(buffers,row,mesh_sort_left(buffers,row,a),mesh_sort_right(buffers,row,b-1)))low=a+1;
-            else high=a;
-          }}
-          return low;
-        }}"""
-        barrier = 'threadgroup_barrier(mem_flags::mem_threadgroup);' if metal else ''
-        return preamble, f"""
-        {'threadgroup ' if metal else ''}uint32_t boundary[4];
-        if(lane==0) {{
-          boundary[0]=mesh_sort_partition(buffers,r,{diagonal}u,0,{left_width}u,0,{right_width}u);
-          boundary[1]={diagonal}u-boundary[0];
-          boundary[2]=mesh_sort_partition(buffers,r,{diagonal+target.shape[1]}u,0,{left_width}u,0,{right_width}u);
-          boundary[3]={diagonal+target.shape[1]}u-boundary[2];
-        }}
-        {barrier}
-        uint32_t chunk=({target.shape[1]}u+lanes-1)/lanes,start=lane*chunk,end=start+chunk;
-        if(end>{target.shape[1]}u)end={target.shape[1]}u;
-        if(start<end) {{
-          uint32_t a=mesh_sort_partition(buffers,r,{diagonal}u+start,boundary[0],boundary[2],boundary[1],boundary[3]),b={diagonal}u+start-a;
-          for(uint32_t i=start;i<end;i++) {{
-            bool take_left=b==boundary[3]||(a<boundary[2]&&mesh_sort_before(buffers,r,mesh_sort_left(buffers,r,a),mesh_sort_right(buffers,r,b)));
-            uint32_t value=take_left?mesh_sort_left(buffers,r,a++):mesh_sort_right(buffers,r,b++);
-            p{len(inputs)}[r*{target.view.row_stride}+i*{target.view.column_stride}]=value;
-          }}
-        }}"""
-    _compiled_region(program, inputs, target, body, access_axes=(1,) * len(inputs), domains=_source_row_regions(program, target))
 
 
 # design/algorithm-sources.md#typed-integer-contractions
@@ -1939,7 +1761,7 @@ def _expression_layout(node, sources, whole, layouts):
         result = node.value
     elif node.operation == 'indexed_contract':
         result = node.value[1]
-    elif node.operation in ('cast', 'argsort'):
+    elif node.operation == 'cast':
         result = layout(node.operands[0])
     elif node.operation == 'transpose':
         result = tuple(value[::-1] for value in layout(node.operands[0]))
@@ -2023,8 +1845,6 @@ class _ExpressionRegions:
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation in _REDUCTIONS:
             return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
-        if node.operation == 'argsort':
-            return self.ordering_panel(node, origin, shape)
         if node.operation == 'indexed_contract':
             return self.indexed_contraction_panel(node, origin, shape)
         dtype = _expression_dtype(node, self.sources)
@@ -2062,60 +1882,6 @@ class _ExpressionRegions:
             self.cache[key] = target
         return self.cache[key]
 
-    # design/algorithm-sources.md#stable-indexed-ordering
-    def ordering_panel(self, node, origin, shape):
-        child = node.operands[0]
-        layout = self.layout(child)
-        width = layout[0][1]
-        if width > 0xffffffff:
-            raise ValueError('Ordering axes must fit the uint32 ordinal domain')
-        key = ('ordering', self.key(node, (origin[0], 0), (shape[0], width)))
-        if key not in self.cache:
-            runs = []
-            step = layout[2][1]
-            for backing in range(0, width, step):
-                for first in range(backing, min(width, backing+step), 128):
-                    columns = min(128, width-first, backing+step-first)
-                    source = self.panel(child, (origin[0], first), (shape[0], columns))
-                    target = self.temporary((shape[0], columns), np.uint32)
-                    _ordering_run(self.program, source, first, target)
-                    runs.append((((first, source),), ((0, target),)))
-            while len(runs) > 1:
-                merged = []
-                for index in range(0, len(runs), 2):
-                    if index+1 == len(runs):
-                        merged.append(runs[index])
-                        continue
-                    (left_keys, left), (right_keys, right) = runs[index:index+2]
-                    keys = left_keys+right_keys
-                    count = sum(ref.shape[1] for _, ref in (*left, *right))
-                    outputs = []
-                    for first in range(0, count, 128):
-                        target = self.temporary((shape[0], min(128, count-first)), np.uint32)
-                        _ordering_merge(self.program, keys, left, right, first, target)
-                        outputs.append((first, target))
-                    merged.append((keys, tuple(outputs)))
-                runs = merged
-            self.cache[key] = runs[0][1]
-        refs = self.cache[key]
-        for first, ref in refs:
-            if first <= origin[1] and origin[1]+shape[1] <= first+ref.shape[1]:
-                return ref.slice(0, origin[1]-first, *shape)
-        key = ('ordering_panel', self.key(node, origin, shape))
-        if key not in self.cache:
-            target = self.temporary(shape, np.uint32)
-            import ctypes as C
-            from . import check
-            from ._native import CopyRegion
-            regions = []
-            for first, ref in refs:
-                lo, hi = max(first, origin[1]), min(first+ref.shape[1], origin[1]+shape[1])
-                if lo < hi:
-                    regions.append(CopyRegion(ref.slice(0, lo-first, shape[0], hi-lo).view, 0, lo-origin[1]))
-            check(self.program.native.algebra_materialize(self.program.handle,
-                (CopyRegion * len(regions))(*regions), len(regions), target.view))
-            self.cache[key] = target
-        return self.cache[key]
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def parts(self, node, origin, shape, direct=None):
@@ -2216,7 +1982,7 @@ class _ExpressionRegions:
         if value.operation == 'dot':
             operand = value.operands[1 if axis == 1 else 0]
             return self.page_cuts(operand, axis, 0, self.layout(operand)[0][1-axis])
-        if value.operation in _REDUCTIONS or value.operation == 'argsort':
+        if value.operation in _REDUCTIONS:
             return self.page_cuts(value.operands[0], axis, 0, self.layout(value.operands[0])[0][1-axis]) if axis == 0 else set()
         result = set()
         for operand in value.operands:
@@ -2393,14 +2159,6 @@ class _ExpressionRegions:
                 rows = 1 if layout[0][0] == 1 else shape[0]
                 return reference(('indexed_contract', node, row, rows),
                                  (self.indexed_contraction_panel(node, (row, 0), (rows, 1)),))
-            if node.operation == 'argsort':
-                layout = self.layout(node)
-                row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
-                rows = 1 if layout[0][0] == 1 else shape[0]
-                columns = 1 if layout[0][1] == 1 else shape[1]
-                column = 0 if layout[0][1] == 1 else origin[1]
-                return reference(('argsort', node, row, column, rows, columns),
-                                 (self.ordering_panel(node, (row, column), (rows, columns)),))
             if node.operation == 'dot':
                 layout = self.layout(node)
                 where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))

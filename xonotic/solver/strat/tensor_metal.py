@@ -340,16 +340,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         value, operation, values, attributes, owner = node
         if value.index not in live or value.index in inputs:
             continue
-        # ../../../design/algorithm-sources.md#stable-indexed-ordering
-        if operation == 'argpartition':
-            width = shapes[values[0].index][attributes['axis']]
-            kth = attributes['kth'].resolve(capacity) if isinstance(attributes['kth'], Dimension) else int(attributes['kth'])
-            if not isinstance(kth, (int, np.integer)):
-                raise TypeError('Resolved partition position must be an integer')
-            if not -width <= kth < width:
-                raise ValueError('Partition position is outside the sorted axis')
-            attributes = dict(attributes, kth=kth + width if kth < 0 else kth)
-            node = value, operation, values, attributes, owner
         nodes.append(node)
         dependencies = numerical_operands(operation, values, attributes) if math.prod(shapes[value.index]) else ()
         live.update(operand.index for operand in dependencies)
@@ -414,64 +404,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tensor = program.replicate(tensor.on(sender), peer)
             local[operand.index] = tensor
         shape = shapes[value.index]
-        # ../../../design/algorithm-sources.md#counter-based-random-generation
-        if operation == 'random_normal':
-            key_size = math.prod(shapes[values[0].index])
-            if key_size < 2:
-                raise ValueError('Counter-based normal generation requires two key words')
-            if np.dtype(values[0].dtype).kind not in 'iu':
-                raise TypeError('Counter-based normal generation requires integer key words')
-            block = (min(tile_rows, storage_shape[0]), min(tile_columns, storage_shape[1]))
-            row, column = kernels.indices()
-            ordinal = (kernels.program_id(0) * block[0] + row) * storage_shape[1] + kernels.program_id(1) * block[1] + column
-            key, = kernels.arguments(1)
-            key = key.reshape((key_size,))
-            result = kernels.random_normal(key.at(0).astype('uint32'), key.at(1).astype('uint32'), ordinal)
-            tensors[value.index] = program.kernel_call(kernels.expression(result),
-                grid=tuple((size + tile - 1) // tile for size, tile in zip(storage_shape, block)),
-                in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct(storage_shape, value.dtype), peer=peer)(local[values[0].index])
-            continue
-        # ../../../design/algorithm-sources.md#stable-indexed-ordering
-        if operation in ('argsort', 'argpartition'):
-            axis = attributes['axis']
-            operand = local[values[0].index]
-            argument, = kernels.arguments(1)
-            if len(shape) <= 2 or axis == len(shape) - 1:
-                matrix_shape = (math.prod(shape[:-1]), shape[-1])
-                operand = matrix_view(operand, matrix_shape)
-                sorted_axis = axis if len(shape) == 2 else 1
-                block = tuple(math.gcd(min(tile, size), operand.block_shape[i] if operand.grid[i] > 1 else 0)
-                              for i, (tile, size) in enumerate(zip((tile_rows, tile_columns), matrix_shape)))
-                tensors[value.index] = program.kernel_call(kernels.expression(argument.argsort(axis=sorted_axis)),
-                    grid=tuple((size + tile - 1) // tile for size, tile in zip(matrix_shape, block)),
-                    in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                    out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(operand)
-            else:
-                width = shape[axis]
-                retained = tuple(i for i in range(len(shape)) if i != axis)
-                segments = math.prod(shape[i] for i in retained)
-                segment = kernels.program_id(0)
-                at = [None] * len(shape)
-                for position, i in enumerate(retained):
-                    at[i] = (segment // math.prod(shape[j] for j in retained[position + 1:])) % shape[i]
-                at[axis] = kernels.arange(width, tile=tile_columns)
-                key = argument.reshape(shape).at(*at).astype(values[0].dtype)
-                block = (1, min(tile_columns, width))
-                ordered = program.kernel_call(kernels.expression(key.argsort()),
-                    grid=(segments, (width + block[1] - 1) // block[1]), in_specs=(BlockSpec(None),),
-                    out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                    out_shape=ShapeDtypeStruct((segments, width), value.dtype), peer=peer)(operand)
-                block = (min(tile_rows, storage_shape[0]), min(tile_columns, storage_shape[1]))
-                coordinates = logical_coordinates(kernels, shape, block)
-                segment = sum(coordinates[i] * math.prod(shape[j] for j in retained[position + 1:])
-                              for position, i in enumerate(retained))
-                result = argument.at(segment, coordinates[axis])
-                tensors[value.index] = program.kernel_call(kernels.expression(result),
-                    grid=tuple((size + tile - 1) // tile for size, tile in zip(storage_shape, block)),
-                    in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                    out_shape=ShapeDtypeStruct(storage_shape, value.dtype), peer=peer)(ordered)
-            continue
         if operation in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
             tensors[value.index] = expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns)
             continue
@@ -710,7 +642,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
             continue
         # ../../../design/algorithm-sources.md#shared-elementary-functions
-        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or', 'arcsinh', 'expm1', 'log', 'log1p', 'sqrt', 'abs', 'power', 'logaddexp', 'isfinite', 'floor_divide', 'bitwise_invert'):
+        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or', 'log', 'sqrt', 'abs', 'isfinite', 'floor_divide', 'bitwise_invert'):
             args = kernels.arguments(len(values))
             direct = shaped and len(shape) <= 2
             if not direct:
@@ -730,8 +662,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             elif operation == 'floor_divide':
                 left, right = args
                 result = left.floor_divide(right) if any(np.dtype(operand.dtype).kind == 'f' for operand in values) else left // right
-            elif operation in ('power', 'logaddexp'):
-                result = getattr(args[0], operation)(args[1])
             elif operation == 'bitwise_invert':
                 result = 0xffffffffffffffff - (args[0] & 0xffffffffffffffff)
             elif operation in ('cast', 'assign', 'broadcast'):

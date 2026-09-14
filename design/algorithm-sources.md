@@ -456,14 +456,6 @@ June 4, 2026, pages 206–207](https://developer.apple.com/metal/Metal-Shading-L
 - [prefix sums and their applications](https://www.cs.cmu.edu/~guyb/papers/Ble93.pdf)
 - [mean implementation](https://github.com/ml-explore/mlx/blob/main/mlx/ops.cpp)
 
-## Counter-based random generation
-
-- [Parallel Random Numbers: As Easy as 1, 2, 3](https://www.thesalmons.org/john/random123/papers/random123sc11.pdf)
-- [Random123 reference](https://github.com/DEShawResearch/random123/blob/main/include/Random123/philox.h)
-- [published vectors](https://github.com/DEShawResearch/random123/blob/main/tests/kat_vectors)
-- [A Note on the Generation of Random Normal Deviates](https://doi.org/10.1214/aoms/1177706645)
-- [Box–Muller discussion](https://github.com/DEShawResearch/random123/blob/main/include/Random123/boxmuller.hpp)
-
 ## Typed integer contractions
 
 - [Pallas tiled matmul](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html)
