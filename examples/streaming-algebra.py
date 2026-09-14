@@ -151,6 +151,16 @@ def main():
             program.copy(value.on(sender), received.on(receiver), queue=0)
             return received
 
+        fanout_source = program.tensor((2, 4), dtype=dtype)
+        fanout_received = exchange(fanout_source, 0, 1)
+        fanout_arg, = kernels.arguments(1)
+        fanout_results = []
+        for factor in range(1, 66):
+            branch = program.kernel_call(kernels.expression(fanout_arg * factor), grid=(1,),
+                in_specs=(BlockSpec((2, 4), lambda i: (0, 0)),),
+                out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
+                out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0 if args.local else 1)(fanout_received)
+            fanout_results.append(program.export(exchange(branch, 1, 0)[0, 0]))
         for run in range(args.runs + 1):
             data = tuple((rng.standard_normal((rows, width), dtype=np.float32) / 8).astype(dtype) for _ in range(2))
             inputs = tuple(program.tensor(value.shape, (tile, args.tile_k), dtype=dtype) for value in data)
@@ -349,6 +359,19 @@ def main():
                 delayed_destination=2, result=[result.array.tolist() for result in scatter_results])), flush=True)
             if not generation:
                 for result in scatter_results:
+                    result.consume()
+        for generation in range(2):
+            with program.write(fanout_source[0, 0]) as destination:
+                destination[...] = generation + 2
+            wait_for(tuple(fanout_results))
+            for factor, result in enumerate(fanout_results, 1):
+                if not np.array_equal(result.array, np.full((2, 4), (generation+2)*factor, dtype=dtype)):
+                    raise ArithmeticError('Fanout consumed a stale source occurrence')
+            print(json.dumps(dict(event='fanout', generation=generation, branches=len(fanout_results),
+                remote=not args.local, first=fanout_results[0].array[0, 0].item(),
+                last=fanout_results[-1].array[0, 0].item())), flush=True)
+            if not generation:
+                for result in fanout_results:
                     result.consume()
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
