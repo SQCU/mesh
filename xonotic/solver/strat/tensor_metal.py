@@ -380,8 +380,9 @@ def source(graph):
 
 
 # ../../../design/algorithm-sources.md#application-metal-kernels
-def kernel_calls(program, graph, capacity, inputs, *, root_peer=None):
-    from mesh import BlockSpec, ShapeDtypeStruct
+def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
+                 tile_rows=64, tile_k=128, tile_columns=128):
+    from mesh import BlockSpec, ShapeDtypeStruct, kernels, nn
     from mesh.kernels import Metal, MetalDispatch
     import math
 
@@ -395,7 +396,7 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None):
     peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
     owners = {value.index: peers[owner] for value, _, _, _, owner in graph.nodes}
     replicas = {}
-    for value, operation, values, _, owner in graph.nodes:
+    for value, operation, values, attributes, owner in graph.nodes:
         peer = peers[owner]
         if value.index in tensors:
             continue
@@ -427,6 +428,37 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None):
                     replicas[key] = replica
                 tensor = replicas[key]
             local[operand.index] = tensor
+        shape = shapes[value.index]
+        numerical = value.dtype in ('float16', 'float32')
+        if numerical and operation == 'matmul' and len(shape) == 2 and all(len(shapes[v.index]) == 2 and local[v.index].shape == shapes[v.index] for v in values):
+            left, right = (local[v.index] for v in values)
+            left = left.T if attributes['transpose_left'] else left
+            right = right.T if attributes['transpose_right'] else right
+            tensors[value.index] = nn.linear(program, left, right, tile_rows=tile_rows,
+                tile_k=tile_k, tile_columns=tile_columns, peer=peer)
+            continue
+        if numerical and operation in ('reduce_sum', 'reduce_mean') and tuple(attributes['axes']) == (1,) and len(shapes[values[0].index]) == 2:
+            operand = local[values[0].index]
+            reduced = nn._row_reduce(program, kernels.row_sum, operand, tile_rows=tile_rows, peer=peer)
+            tensors[value.index] = nn._pointwise(program, kernels.affine(1 / operand.shape[1]),
+                (reduced,), tile_rows, peer=peer) if operation == 'reduce_mean' else reduced
+            continue
+        if numerical and len(shape) == 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid'):
+            args = kernels.arguments(len(values))
+            if operation in ('add', 'subtract', 'multiply', 'divide'):
+                left, right = args
+                result = {'add': lambda: left + right, 'subtract': lambda: left - right,
+                          'multiply': lambda: left * right, 'divide': lambda: left / right}[operation]()
+            elif operation == 'negative':
+                result = -1 * args[0]
+            elif operation == 'sigmoid':
+                result = 1 / (1 + (-1 * args[0]).exp())
+            else:
+                result = getattr(args[0], operation)()
+            operands = tuple(local[v.index].broadcast_to(shape) for v in values)
+            tensors[value.index] = nn._pointwise(program, kernels.expression(result),
+                operands, tile_rows, peer=peer)
+            continue
         item = by_node[value.index]
         shape = shapes[value.index]
         size = math.prod(shape)
