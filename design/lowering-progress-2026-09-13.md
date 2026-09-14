@@ -1243,3 +1243,47 @@ speedup. Scalar indexed expert reductions still require comparison with a tuned
 grouped contraction implementation. Batched contractions, higher-rank reductions,
 shared contraction optimization and matched end-to-end performance acceptance
 remain open under the nine-step plan.
+
+
+## Batched native contractions and ranked reductions
+
+`c52c152` maps real batched matmul to the existing shared dot / nn.linear
+lowering. Broadcast-prefix ordinals and transpose views are realized at setup.
+Matrix batch views retain source Ref identities, offsets and strides; combining
+output batches composes their Ref tables without copying or republishing data.
+Output row tiles divide matrix rows so batch boundaries remain regular blocks.
+Independent source review checked broadcast alignment, ragged backing boundaries
+and native allocation lifetime. CPU float32 contractions retain BLAS; Metal
+contractions retain MPS. This is source-level reuse, not a matched speedup claim.
+
+The same increment expresses higher-rank sum/mean through broadcast index
+vectors and shared reductions, retaining logical axes and keepdims. This includes
+the batch sum required by a singleton broadcast weight's gradient. Separate
+output and input-gradient regions do not acquire that all-batch dependency.
+Independent source review checked coordinate mapping, tails, integer narrowing
+and selected region dependencies. Integer matmul remains outside this migration.
+
+`dd82efc` extends the existing operational workflow with both-transpose
+(2,5,3) by (1,7,5) matmul, ragged tiles, both derivatives and pointwise consumers.
+Two generations alternate which batch arrives first. The late input derivative
+can complete from its cotangent and weights while its primal remains absent;
+the forward result and shared weight derivative still require that primal.
+
+Remaining reachable caller work includes boolean pointwise masks and broadcast,
+max/min/any reductions, sorting and unshared scalar/generation operations.
+The nine-step feature and matched performance acceptance remains open.
+
+
+CPU, Metal and paired Metal operational runs at c52c152 pass numerical and
+withheld-input checks, including both generations of the new batched case.
+Rank-zero side cases use float32; paired gold/fanout use float16 over RDMA.
+Local traces configure 5168 functions and complete 10258 submissions. Paired
+rank zero configures 5104 and completes 9573 submissions. The expanded case
+adds work; these totals are not matched performance comparisons. The local
+Metal first generation is visibly slower than its second, and no warmup or
+speedup inference is made from two observations. Raw logs, traces, per-generation
+events and timing count/mean/sample variance are retained in
+measurements/lowering-2026-09-13/batched-provenance.json. The broadcast VJP
+exercises higher-rank sum; other higher-rank sum/mean axes have source review
+rather than operational coverage in this increment. Both bridge arenas retain
+the previously configured 65536-page capacity; peer teardown exits zero.
