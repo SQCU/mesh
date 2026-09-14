@@ -1108,3 +1108,31 @@ metadata/launch expansion remain substantial shared-lowering optimization work.
 This closes the neighborhood caller's whole-region binding gap, not the full
 nine-step performance acceptance. Expert routing/contractions and remaining
 operator coverage still require migration and measurements.
+
+## Share repeated neighborhood statistics
+
+`b12442a` retains one raw FP32 Q·K or G·V edge statistic for matching users
+within one setup realization. The key preserves operand/index graph identities,
+participant and numerical domain/tile dimensions; immutable realized bindings
+and the existing replica map supply their physical identity. Each user's own
+expression slot refers to the shared result. Independent source review confirmed
+alias handling, argument slots, liveness and native reader fanout.
+
+The unchanged neighborhood workflow passes CPU, Metal and paired Metal, including
+both modes, all derivatives, duplicate indices, withheld-row progress and reuse.
+Local configured functions fall from 3129 to 2969 and submissions from 6040 to
+5656. Paired rank-zero functions fall from 3065 to 2905 and submissions from 5355
+to 4971. Each workflow therefore removes 160 configured functions and 384
+submissions. Raw traces/logs and timing count, mean and sample variance are in
+measurements/lowering-2026-09-13/neighborhood-cse-provenance.json. This is evidence
+of removed work, not a matched wall-time speedup. Neighborhood checks remain
+float32 on rank zero; paired gold/fanout traverse RDMA.
+
+The shared expression source still assigns scalar coordinates shape (1,1).
+Indexed loads derive their domain from those coordinate expressions, so scalar
+loads alone cannot specify the width of an indexed reduction. Retaining vector
+index lengths and tile extents explicitly is the next library requirement for
+fusing edge products into reductions without temporary E×D product tensors.
+That fusion, expert migration and full nine-step performance acceptance remain
+open. No application-specific fused kernel was added to bypass the missing
+representation.
