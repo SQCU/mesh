@@ -406,7 +406,12 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
     }
   }
   free(order); free(used);free(fanout);
-  if(!error && binding_count)atomic_store_explicit(&m->configured,(uint32_t)getpid(),memory_order_release);
+  if(!error && binding_count){
+    if(!atomic_load_explicit(&m->configured,memory_order_acquire)){
+      atomic_store(&m->port.code,0);atomic_store(&m->port.domain,0);
+    }
+    atomic_store_explicit(&m->configured,(uint32_t)getpid(),memory_order_release);
+  }
   return error;
 }
 

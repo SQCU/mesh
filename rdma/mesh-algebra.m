@@ -1027,7 +1027,10 @@ void mesh_algebra_consume(struct mesh_algebra *handle,size_t index) {
 }
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *handle) {
-  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.code=atomic_load(&a->code)};
+  MeshAlgebra *a=owner(handle);
+  int64_t code=atomic_load(&a->code);
+  if(!code && a.bindings.length)code=atomic_load(&a->context->M->port.code);
+  return (struct mesh_algebra_report){.code=code};
 }
 
 /* design/algorithm-sources.md#program */
