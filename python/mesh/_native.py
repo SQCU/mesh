@@ -109,6 +109,7 @@ class Native:
             'mesh_context': (P, []),
             'mesh_attach': (C.c_int, [P, C.c_char_p]),
             'mesh_detach': (C.c_int, [P]),
+            'mesh_algebra_environment': (C.c_char_p, [P]),
             'mesh_algebra_create': (P, [P]),
             'mesh_algebra_create_cpu': (P, [P]),
             'mesh_algebra_destroy': (None, [P]),

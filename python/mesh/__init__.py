@@ -445,6 +445,12 @@ class Program:
         return tuple(result)
 
     @property
+    # design/algorithm-sources.md#cost-environment
+    def environment(self):
+        import json
+        return json.loads(self.native.algebra_environment(self.handle))
+
+    @property
     # design/algorithm-sources.md#compiled-specialization-identities
     def code_trace(self):
         import json

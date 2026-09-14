@@ -74,6 +74,7 @@ void mesh_algebra_consume(struct mesh_algebra *,size_t output);
 size_t mesh_algebra_trace_count(struct mesh_algebra *);
 struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *,size_t function);
 struct mesh_algebra_profile mesh_algebra_profile(struct mesh_algebra *,size_t function);
+const char *mesh_algebra_environment(struct mesh_algebra *);
 const char *mesh_algebra_specialization(struct mesh_algebra *,size_t function);
 const char *mesh_algebra_source_text(struct mesh_algebra *,size_t function,uint32_t language);
 size_t mesh_algebra_plan_count(struct mesh_algebra *,size_t function);

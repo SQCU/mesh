@@ -12,6 +12,8 @@
 #include <dlfcn.h>
 #include <time.h>
 #include <arm_neon.h>
+#include <sys/sysctl.h>
+#include <mach-o/loader.h>
 
 /* design/algorithm-sources.md#streaming-algebra */
 static NSString *const source = @
@@ -146,6 +148,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @property NSMutableData *bindings;
 @property NSMutableData *returns;
 @property NSString *coremlPython,*coremlGenerator,*coremlCache;
+@property NSString *environment;
 @property NSMutableDictionary<NSString *,MLModel *> *models;
 @end
 @implementation MeshAlgebra
@@ -225,6 +228,51 @@ static void complete_part(MeshFunction *f,int64_t error,uint64_t nanoseconds) {
 static void complete_function(void *context,int64_t error) {complete_part((__bridge MeshFunction *)context,error,0);}
 /* design/algorithm-sources.md#streaming-algebra */
 static MeshAlgebra *owner(struct mesh_algebra *a) { return (__bridge MeshAlgebra *)a; }
+/* design/algorithm-sources.md#cost-environment */
+static id environment_sysctl(const char *name,BOOL text) {
+  size_t size=0;if(sysctlbyname(name,NULL,&size,NULL,0))return NSNull.null;
+  NSMutableData *data=[NSMutableData dataWithLength:MAX(size,sizeof(uint64_t))];
+  if(sysctlbyname(name,data.mutableBytes,&size,NULL,0))return NSNull.null;
+  if(text)return [[NSString alloc]initWithBytes:data.bytes length:strnlen(data.bytes,size) encoding:NSUTF8StringEncoding]?:NSNull.null;
+  uint64_t value=0;memcpy(&value,data.bytes,MIN(size,sizeof value));return @(value);
+}
+/* design/algorithm-sources.md#cost-environment */
+static id environment_image(const void *symbol) {
+  Dl_info info;if(!dladdr(symbol,&info))return NSNull.null;
+  NSMutableDictionary *result=[NSMutableDictionary dictionaryWithObject:@(info.dli_fname) forKey:@"path"];
+  const struct mach_header_64 *header=info.dli_fbase;
+  if(header->magic==MH_MAGIC_64){
+    const struct load_command *command=(const struct load_command *)(header+1);
+    for(uint32_t i=0;i<header->ncmds;i++){
+      if(command->cmd==LC_UUID)result[@"uuid"]=[[NSUUID alloc]initWithUUIDBytes:((const struct uuid_command *)command)->uuid].UUIDString;
+      command=(const struct load_command *)((const char *)command+command->cmdsize);
+    }
+  }
+  return result;
+}
+/* design/algorithm-sources.md#cost-environment */
+static id environment_compiler(void) {
+  NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/clang"];task.arguments=@[@"--version"];
+  NSPipe *pipe=[NSPipe pipe];task.standardOutput=pipe;task.standardError=pipe;NSError *error=nil;
+  if(![task launchAndReturnError:&error])return @{@"path":@"/usr/bin/clang",@"error":@(error.code)};
+  NSData *output=[pipe.fileHandleForReading readDataToEndOfFile];[task waitUntilExit];
+  return @{@"path":@"/usr/bin/clang",@"version":[[NSString alloc]initWithData:output encoding:NSUTF8StringEncoding]?:@"",@"status":@(task.terminationStatus)};
+}
+/* design/algorithm-sources.md#cost-environment */
+static NSString *environment_snapshot(MeshAlgebra *a) {
+  NSMutableDictionary *hardware=[NSMutableDictionary new];
+  for(NSString *key in @[@"hw.model",@"machdep.cpu.brand_string"])hardware[key]=environment_sysctl(key.UTF8String,YES);
+  for(NSString *key in @[@"hw.cputype",@"hw.cpusubtype",@"hw.physicalcpu",@"hw.logicalcpu",@"hw.memsize"])hardware[key]=environment_sysctl(key.UTF8String,NO);
+  id device=NSNull.null;
+  if(a.device){
+    NSMutableArray *families=[NSMutableArray new];
+    for(NSNumber *family in @[@1001,@1002,@1003,@1004,@1005,@1006,@1007,@1008,@1009,@1010,@2002,@5001,@5002])if([a.device supportsFamily:family.unsignedIntegerValue])[families addObject:family];
+    device=@{@"name":a.device.name,@"architecture":a.device.architecture.name,@"registry_id":@(a.device.registryID),@"unified_memory":@(a.device.hasUnifiedMemory),@"families":families};
+  }
+  NSDictionary *libraries=@{@"mesh_algebra":environment_image((const void *)mesh_algebra_profile),@"mesh":environment_image((const void *)mesh_context),@"accelerate":environment_image((const void *)cblas_sgemm),@"metal":environment_image((const void *)MTLCreateSystemDefaultDevice),@"mps":environment_image((__bridge const void *)[MPSMatrixMultiplication class]),@"coreml":environment_image((__bridge const void *)[MLModel class])};
+  NSDictionary *snapshot=@{@"version":@1,@"complete_cost_key":@NO,@"hardware":hardware,@"os":@{@"build":environment_sysctl("kern.osversion",YES),@"release":environment_sysctl("kern.osrelease",YES)},@"device":device,@"libraries":libraries,@"compiler":a.cpu?environment_compiler():NSNull.null};
+  return [[NSString alloc]initWithData:[NSJSONSerialization dataWithJSONObject:snapshot options:NSJSONWritingSortedKeys error:nil] encoding:NSUTF8StringEncoding];
+}
 /* design/algorithm-sources.md#streaming-algebra */
 static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   if(!context || !context->M){errno=EINVAL;return NULL;}
@@ -238,6 +286,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
+  a.environment=environment_snapshot(a);
   return (__bridge_retained struct mesh_algebra *)a;
 }
 /* design/algorithm-sources.md#cpu-indexed-execution */
@@ -1429,6 +1478,8 @@ struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *handle,size_t 
   MeshFunction *f=a.functions[index];
   return (struct mesh_algebra_event){.ready_ns=atomic_load(&f->readyNs),.start_ns=atomic_load(&f->startNs),.complete_ns=atomic_load(&f->completeNs),.gpu_start_ns=atomic_load(&f->gpuStartNs),.gpu_end_ns=atomic_load(&f->gpuEndNs),.submissions=atomic_load(&f->invocations),.first_output=f->function.output[0].first,.output_maps=f->function.outputs,.kind=f->executionKind,.input_maps=f->function.inputs};
 }
+/* design/algorithm-sources.md#cost-environment */
+const char *mesh_algebra_environment(struct mesh_algebra *handle) {return owner(handle).environment.UTF8String;}
 /* design/algorithm-sources.md#compiled-specialization-identities */
 const char *mesh_algebra_specialization(struct mesh_algebra *handle,size_t index) {
   MeshAlgebra *a=owner(handle);return index<a.functions.count?a.functions[index].specialization.UTF8String:NULL;
