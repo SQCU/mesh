@@ -1593,7 +1593,7 @@ def _requires_regions(node):
 
 
 # design/algorithm-sources.md#stable-indexed-ordering
-def _ordering_vector(name, entries, first, metal):
+def _indexed_interval_source(name, entries, first, metal):
     dtype = entries[0][1].dtype
     scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t', 'u4': 'uint32_t',
               'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}[dtype.kind+str(dtype.itemsize)]
@@ -1609,7 +1609,7 @@ def _ordering_vector(name, entries, first, metal):
     load = _indexed_load_expression(entries[0][1], 'key', (scalar, (f'{name}_rs[block]', f'{name}_cs[block]')),
                                     ('row', f'index-{name}_begin[block]', 'true', '0'), metal)
     tables.append(f"""// design/algorithm-sources.md#stable-indexed-ordering
-    {qualifier} {result} {name}({address} buffers,uint64_t row,uint32_t index) {{
+    {qualifier} {result} {name}({address} buffers,uint64_t row,uint64_t index) {{
       uint32_t low=0,high={len(entries)-1};
       while(low<high) {{ uint32_t middle=low+(high-low)/2;
         if(index>={name}_end[middle])low=middle+1;else high=middle; }}
@@ -1627,7 +1627,7 @@ def _ordering_comparator(entries, metal):
     address = 'device const ulong *' if metal else 'const uintptr_t *'
     qualifier = 'inline' if metal else 'static inline'
     nan = 'if(isnan(x)!=isnan(y))return isnan(y);' if dtype.kind == 'f' else ''
-    return _ordering_vector('mesh_sort_key', entries, 0, metal)+f"""
+    return _indexed_interval_source('mesh_sort_key', entries, 0, metal)+f"""
     // design/algorithm-sources.md#stable-indexed-ordering
     {qualifier} bool mesh_sort_before({address} buffers,uint64_t row,uint32_t a,uint32_t b) {{
       if(a==0xffffffffu)return false;if(b==0xffffffffu)return true;
@@ -1673,7 +1673,7 @@ def _ordering_merge(program, keys, left, right, diagonal, target):
     def body(metal):
         address = 'device const ulong *' if metal else 'const uintptr_t *'
         qualifier = 'inline' if metal else 'static inline'
-        preamble = _ordering_comparator(keys, metal)+_ordering_vector('mesh_sort_left', left, len(keys), metal)+_ordering_vector('mesh_sort_right', right, len(keys)+len(left), metal)
+        preamble = _ordering_comparator(keys, metal)+_indexed_interval_source('mesh_sort_left', left, len(keys), metal)+_indexed_interval_source('mesh_sort_right', right, len(keys)+len(left), metal)
         preamble += f"""
         // design/algorithm-sources.md#stable-indexed-ordering
         {qualifier} uint32_t mesh_sort_partition({address} buffers,uint64_t row,uint32_t diagonal,
@@ -2333,11 +2333,14 @@ def _lower_selected_product(lowering, value, target):
         lowering.publish(parts, destination)
         results.append(destination)
     if len(groups) > 1:
-        _, column = indices()
-        result = _literal(0)
-        for symbol, (first, columns) in reversed(tuple(zip(arguments(len(results)), groups))):
-            result = select(column < first+columns, symbol.at(0, column-first), result)
-        _ExpressionKernel((result,)).bind(program, tuple(results), (target,))
+        entries = tuple((first, ref) for (first, _), ref in zip(groups, results))
+
+        # design/algorithm-sources.md#selected-native-contractions
+        def assemble(metal):
+            source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
+            return source, f"""for(uint64_t column=lane;column<{target.shape[1]};column+=lanes)
+              p{len(results)}[r*{target.view.row_stride}+column*{target.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
+        _compiled_region(program, tuple(results), target, assemble)
     return True
 
 
