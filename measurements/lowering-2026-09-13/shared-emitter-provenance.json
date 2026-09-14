@@ -1,0 +1,142 @@
+{
+  "runs": [
+    {
+      "prefix": "shared-emitter-cpu",
+      "library_revision": "1726082",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "1726082",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "shared-emitter-cpu.jsonl.gz",
+        "shared-emitter-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.423167,
+        "invocations_per_second": 678.2470569164582,
+        "first_section_ms": 3.638708,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.2078750000000005,
+          "sample_variance": 0.03946539688900001
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 2158,
+          "completed": 2158,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 2158
+        }
+      }
+    },
+    {
+      "prefix": "shared-emitter-metal",
+      "library_revision": "1726082",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "1726082",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "shared-emitter-metal.jsonl.gz",
+        "shared-emitter-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 19.480541,
+        "invocations_per_second": 153.99982988152126,
+        "first_section_ms": 16.669958,
+        "completion_ms": {
+          "count": 3,
+          "mean": 17.816624666666666,
+          "sample_variance": 2.077280811097335
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 2158,
+          "completed": 2158,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.008493864,
+          "cpu_submitted": 0
+        }
+      }
+    },
+    {
+      "prefix": "shared-emitter-paired-metal",
+      "library_revision": "1726082",
+      "peer_library_revision": "1726082",
+      "example_and_xonotic_revision": "1726082",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "shared-emitter-paired-metal.jsonl.gz",
+        "shared-emitter-paired-metal-trace.json.gz",
+        "shared-emitter-paired-metal-peer.jsonl.gz",
+        "shared-emitter-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.290708,
+        "invocations_per_second": 184.15405886594985,
+        "first_section_ms": 11.90875,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.325152666666668,
+          "sample_variance": 2.9108850612963346
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 1473,
+          "completed": 1473,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.005479186,
+          "cpu_submitted": 0
+        }
+      }
+    }
+  ],
+  "scope": "Emitter factoring with unchanged segment bounds and dependency binding. Existing side cases execute on rank zero; paired gold/fanout use actual RDMA. Not load-valued scatter support or matched performance evidence. Peer exits zero after SIGTERM."
+}

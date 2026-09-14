@@ -784,3 +784,23 @@ on rank zero. The peer exits normally after SIGTERM. Compressed logs/traces and
 exact installed library/caller revisions are in `rank-pointwise-provenance.json`.
 No matched old-emitter timing baseline was collected, and these cases do not
 establish all-operator/rank coverage or a throughput improvement.
+
+## Shared scalar/load emitter integration
+
+The scatter agent's `1726082` extracts common recursive scalar expression and
+indexed load emission from the ordinary kernel source owner. The existing segment
+reducer now shares that recursion while keeping its exact ordinal bounds,
+prebound inputs, directory, routing and allocations. Root source review confirms
+that pointer arithmetic, dtype casts, numerical masks and reduction references
+retain their prior generated expressions. This refactor establishes shared code
+for subsequent bounded indexed dependency binding; it does not yet enable
+load-valued scatter updates or masks.
+
+Local CPU and Metal float32 workflows pass with 2158 completed submissions each,
+and paired Metal float16 passes with 1473 rank-zero completions, unchanged from
+the preceding example configuration. Duplicate/masked scatter, delayed chunks,
+repeated reuse, logical pointwise/indexed operations, exact integer reductions,
+nested/mixed contractions and fanout continue to pass. The peer exits normally
+after SIGTERM. `shared-emitter-provenance.json` records raw compressed logs/traces
+and revisions. Side cases remain rank-zero local and only gold/fanout traverse
+RDMA. No matched performance improvement is claimed.
