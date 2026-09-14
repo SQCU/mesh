@@ -126,3 +126,33 @@ completion count is 3, mean 6.897945 ms, sample variance 0.000019781713 ms², an
 batch time 6.90275 ms. These unmatched observations do not establish a distributed
 speedup over the improved local baseline. The peer exited normally via SIGTERM
 after the local numerical validation completed.
+
+
+## Executable segmented indexed addition
+
+`ae4183f` implements vector-row indexed addition through the existing expression
+and kernel_call API. It groups retained destination keys/original ordinals,
+computes per-segment partials in FP32 and selects only the partials contributing
+to each final destination region. `25cfbd7` adds defined unsigned modular integer
+accumulation. See [scatter lowering](scatter-lowering.md) for mechanism and limits.
+
+The existing gold example now supplies three routing chunks, withholds the last
+update chunk and observes the pointwise consumers of destinations 0, 1 and 3.
+Destination 2 remains unavailable until its missing payload is supplied. Duplicate
+keys across chunks sum correctly, the masked update is excluded, and the empty
+destination produces zero. The second occurrence changes both routing and values
+using the same storage, giving consumer rows [10, 0, 18, 12] after [8, 0, 14, 8].
+All four rows repeat their scalar value across four features. CPU and Metal both
+pass. This exercises produced selector ranges and their shared-vector lifetimes,
+not just arithmetic over constant indices. Host observations occur after the
+main timed gold and introduce no numerical dependency between independent rows.
+
+Raw `scatter-reuse-cpu.json.gz` and `scatter-reuse-metal.json.gz` retain installed
+library and example revisions, numerical observations and indexed trace maps.
+Their observer times are upper bounds on availability and include host writes;
+they are not physical compute/wire occupancy or matched performance gains.
+Coverage is six updates, four features and four destinations over two occurrences.
+General rank, wider radix tiles, production-scale memory/launch costs, fused
+update expressions and the actual Xonotic migration remain open. Partial storage
+is bounded by maximum segment count, but separately allocated canonical quanta
+and per-reader candidate metadata still require storage/lowering optimization.
