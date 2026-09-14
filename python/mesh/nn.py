@@ -50,11 +50,11 @@ def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None,
 
 
 # design/algorithm-sources.md#nnffn
-def _expression_sum(terms):
+def _sum(program, terms, tile_rows):
     terms = tuple(terms)
     while len(terms) > 1:
-        terms = tuple(terms[i] + terms[i + 1] if i + 1 < len(terms) else terms[i]
-                      for i in range(0, len(terms), 2))
+        terms = tuple(_pointwise(program, kernels.add, terms[i:i + 2], tile_rows)
+                      if i + 1 < len(terms) else terms[i] for i in range(0, len(terms), 2))
     return terms[0]
 
 
@@ -66,36 +66,22 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
     if not inputs or not up_weights or len(up_weights) != len(down_weights) or any(len(group) != len(inputs) for group in up_weights):
         raise ValueError('Weights must cover every input partition and hidden section')
     rows, columns = inputs[0].shape[0], down_weights[0].shape[1]
-    operands = (*inputs, *(w for group in up_weights for w in group), *down_weights)
-    arguments = kernels.arguments(len(operands))
-    row_tiles = tuple(_tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0) for x in inputs)
-    hidden_rows = _tile(min(tile_rows, rows), *(tile if tile < rows else 0 for tile in row_tiles))
-    hidden, layouts = [], []
-    for index, (up, down) in enumerate(zip(up_weights, down_weights)):
+    projections = []
+    for up, down in zip(up_weights, down_weights):
         width = up[0].shape[1]
         if any(x.shape[0] != rows or w.shape[1] != width or x.shape[1] != w.shape[0]
                for x, w in zip(inputs, up)) or down.shape != (width, columns):
             raise ValueError('FFN contractions must share their output domains')
-        column_tiles = tuple(_tile(min(tile_columns, width), w.block_shape[1] if w.grid[1] > 1 else 0) for w in up)
-        block = (hidden_rows, _tile(min(column_tiles), *(tile if tile < width else 0 for tile in column_tiles)))
-        weights = arguments[len(inputs) * (index + 1):len(inputs) * (index + 2)]
-        projected = _expression_sum(kernels.dot(x, w, tile_k=tile_k) for x, w in zip(arguments, weights))
-        hidden.append((projected / (1 + (0 - projected).exp())).astype(inputs[0].dtype))
-        layouts.append(((rows, width), block))
-    projections, output_tiles = [], []
-    for value, (shape, block), weight, down in zip(hidden, layouts, arguments[-len(down_weights):], down_weights):
-        projections.append(kernels.dot(value, weight,
-            tile_k=_tile(min(tile_k, shape[1]), block[1] if block[1] < shape[1] else 0)))
-        output_tiles.append((_tile(min(tile_rows, rows), block[0] if block[0] < rows else 0),
-                             _tile(min(tile_columns, columns), down.block_shape[1] if down.grid[1] > 1 else 0)))
-    block = (_tile(min(tile_rows, rows), *(tile[0] if tile[0] < rows else 0 for tile in output_tiles)),
-             _tile(min(tile[1] for tile in output_tiles), *(tile[1] if tile[1] < columns else 0 for tile in output_tiles)))
-    partials = program.kernel_call(kernels.expression(_expression_sum(projections).astype(inputs[0].dtype)),
-        grid=tuple((size + tile - 1) // tile for size, tile in zip((rows, columns), block)),
-        in_specs=(BlockSpec(None),) * len(operands),
-        out_specs=BlockSpec(block, _block),
-        out_shape=ShapeDtypeStruct((rows, columns), inputs[0].dtype))(*operands)
-
+        projected = _sum(program, (linear(program, x, w, tile_rows=tile_rows,
+            tile_k=tile_k, tile_columns=tile_columns, output_dtype='float32')
+            for x, w in zip(inputs, up)), tile_rows)
+        hidden = _pointwise(program, kernels.swish, (projected,), tile_rows, output_dtype=inputs[0].dtype)
+        projections.append(linear(program, hidden, down, tile_rows=tile_rows,
+            tile_k=tile_k, tile_columns=tile_columns, output_dtype='float32'))
+    partials = _sum(program, projections, tile_rows)
+    value, = kernels.arguments(1)
+    partials = _pointwise(program, kernels.expression(value.astype(inputs[0].dtype)),
+                         (partials,), tile_rows, output_dtype=inputs[0].dtype)
     return all_gather(program, reduce_scatter(program, partials, peers=peers, owners=owners),
                       peers=peers, owners=owners)
 

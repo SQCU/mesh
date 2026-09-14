@@ -431,11 +431,6 @@ static int mesh_ready(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
   return 1;
 }
 
-int mesh_present(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
-  struct mesh_row_range r=mesh_range(map,index);
-  return mesh_bits_all(c->M,MESH_PRESENT,r.first,r.count);
-}
-
 int mesh_available(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
   return mesh_map_ready(c,map,index);
 }
@@ -464,14 +459,6 @@ static void mesh_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(m,MESH_PRESENT,first,count);
   mesh_reads_reset(m,first,count);
   mesh_index_reset(c,first,count);
-}
-
-int mesh_republish(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  if(!mesh_claimable(c->M,first,count)) return 0;
-  mesh_reset(c,first,count);
-  mesh_bits_set(c->M,MESH_PRESENT,first,count);
-  mesh_notify(c->M,first,count);
-  return 1;
 }
 
 /* design/algorithm-sources.md#programkernel_call */

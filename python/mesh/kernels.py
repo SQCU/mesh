@@ -720,17 +720,6 @@ def _source_expression_regions(program, output):
 
 
 # design/algorithm-sources.md#kernelsexpression
-def _source_row_regions(program, output):
-    import math
-    if output._writer_error or output.view.column_stride != 1:
-        return ((0, output.shape[0], 0, output.shape[1]),)
-    page_bytes = program.native.tensor_publication_bytes(output.view.tensor, output.view.extent)
-    row_bytes = output.shape[1] * output.dtype.itemsize
-    rows = page_bytes // math.gcd(page_bytes, row_bytes)
-    return tuple((first, min(rows, output.shape[0]-first), 0, output.shape[1]) for first in range(0, output.shape[0], rows))
-
-
-# design/algorithm-sources.md#kernelsexpression
 _METAL_EXPRESSION_HEAD = 'kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong *domain [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=domain[0]+row, column_begin=domain[1], column_end=domain[2];'
 
 

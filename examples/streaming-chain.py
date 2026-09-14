@@ -6,7 +6,7 @@ from contextlib import ExitStack
 import numpy as np
 
 from mesh import BlockSpec, Program, ShapeDtypeStruct, kernels
-from mesh.nn import linear
+from mesh.nn import linear, ffn
 from mesh.collective import reduce_scatter, all_gather
 
 
@@ -150,26 +150,27 @@ def main():
         for instance in range(args.instances):
             x = program.tensor(values.shape, (args.tile_rows, values.shape[1] if args.residual else args.tile_k), dtype=values.dtype)
             inputs.append(x)
-            up = linear(program, x, up_weight, tile_rows=args.tile_rows,
-                        tile_k=args.tile_k, tile_columns=args.tile_columns)
-            spec = BlockSpec(up.block_shape, lambda i, j: (i, j))
+            peers = (args.root, args.peer)
+            owners = {(i, j): args.root if i * args.tile_rows < args.output_split else args.peer
+                      for i in range(x.grid[0])
+                      for j in range((down_weight.shape[1] + args.tile_columns - 1) // args.tile_columns)}
             if args.gate_weight:
+                up = linear(program, x, up_weight, tile_rows=args.tile_rows,
+                            tile_k=args.tile_k, tile_columns=args.tile_columns)
+                spec = BlockSpec(up.block_shape, lambda i, j: (i, j))
                 gate = linear(program, x, gate_weight, tile_rows=args.tile_rows,
                               tile_k=args.tile_k, tile_columns=args.tile_columns)
                 hidden = program.kernel_call(gated_activation,
                     grid=up.grid, in_specs=(spec, spec), out_specs=spec,
                     out_shape=ShapeDtypeStruct(up.shape, up.dtype))(gate, up)
+                down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
+                              tile_k=args.tile_k, tile_columns=args.tile_columns)
+                scattered = reduce_scatter(program, down, peers=peers, owners=owners)
+                reduced = all_gather(program, scattered, peers=peers, owners=owners)
             else:
-                hidden = program.kernel_call(kernels.swish,
-                    grid=up.grid, in_specs=(spec,), out_specs=spec,
-                    out_shape=ShapeDtypeStruct(up.shape, up.dtype))(up)
-            down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
-                          tile_k=args.tile_k, tile_columns=args.tile_columns)
-            peers = (args.root, args.peer)
-            owners = {index: args.root if index[0] * down.block_shape[0] < args.output_split else args.peer
-                      for index in down.blocks}
-            scattered = reduce_scatter(program, down, peers=peers, owners=owners)
-            reduced = all_gather(program, scattered, peers=peers, owners=owners)
+                reduced = ffn(program, (x,), ((up_weight,),), (down_weight,),
+                              tile_rows=args.tile_rows, tile_k=args.tile_k,
+                              tile_columns=args.tile_columns, peers=peers, owners=owners)
             if program.node == args.root:
                 if args.normalize is not None:
                     if reduced.grid[1] != 1:
@@ -181,7 +182,7 @@ def main():
                         in_specs=(spec, BlockSpec(gamma.shape, lambda i, j: (0, 0))) + ((spec,) if args.residual else ()),
                         out_specs=spec, out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(
                             reduced, gamma, *((x,) if args.residual else ()))
-                spec = BlockSpec(down.block_shape, lambda i, j: (i, j))
+                spec = BlockSpec(reduced.block_shape, lambda i, j: (i, j))
                 activated = program.kernel_call(kernels.swish,
                     grid=reduced.grid, in_specs=(spec,), out_specs=spec,
                     out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced)
