@@ -61,6 +61,22 @@ class Event(C.Structure):
     _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind', 'input_maps')]
 
 
+# design/algorithm-sources.md#function-cost-profiles
+class Profile(C.Structure):
+    _fields_ = [(name, C.c_uint64) for name in ('successful', 'failed', 'gpu_samples')]
+    _fields_ += [(name, C.c_double) for name in ('dispatch_mean_ns', 'dispatch_m2_ns2',
+        'execution_mean_ns', 'execution_m2_ns2', 'gpu_mean_ns', 'gpu_m2_ns2')]
+    _fields_ += [(name, U) for name in ('kind', 'backend')]
+
+
+# design/algorithm-sources.md#function-cost-profiles
+class Plan(C.Structure):
+    _fields_ = [(name, View) for name in ('left', 'right', 'output')]
+    _fields_ += [(name, C.c_uint64) for name in ('first', 'count')]
+    _fields_ += [(name, U) for name in ('backend', 'operation', 'left_scalar', 'right_scalar', 'output_scalar', 'rectangles')]
+    _fields_ += [(name, C.c_float) for name in ('alpha', 'beta')]
+
+
 class Transfer(C.Structure):
     _fields_ = [(name, U) for name in ('local_row', 'local_page', 'peer_row', 'peer_page',
         'binding', 'offset', 'plane', 'index', 'bytes', 'peer_index')]
@@ -141,6 +157,9 @@ class Native:
             'mesh_algebra_consume': (None, [P, Z]),
             'mesh_algebra_trace_count': (Z, [P]),
             'mesh_algebra_trace': (Event, [P, Z]),
+            'mesh_algebra_profile': (Profile, [P, Z]),
+            'mesh_algebra_plan_count': (Z, [P, Z]),
+            'mesh_algebra_plan': (Plan, [P, Z, Z]),
             'mesh_algebra_trace_input': (RowRange, [P, Z, Z]),
             'mesh_algebra_trace_output': (RowRange, [P, Z, Z]),
             'mesh_algebra_trace_indexed_count': (Z, [P, Z]),

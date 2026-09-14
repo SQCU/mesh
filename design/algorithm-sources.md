@@ -3222,3 +3222,58 @@ Table 6.14, specifies the integer `simd_shuffle_xor` operation and a uniform
 XOR mask across the SIMD group. FP32 values are exchanged by bit reinterpretation
 to and from uint32, not by numerical integer conversion. The reduction's mask
 sequence is determined entirely by the realized feature stride.
+
+
+## Function cost profiles
+
+B. P. Welford's [corrected sums of squares](https://www.tandfonline.com/doi/abs/10.1080/00401706.1962.10490022)
+provides constant-storage online count, mean and M2 updates. The JAX authors'
+[manual profile-guided latency estimation](https://docs.jax.dev/en/latest/gpu_performance_tips.html#manual-pgle)
+collects operation timings and supplies them to subsequent compilation. Mesh
+uses those reporting and setup principles through its existing `MeshFunction`,
+completion callback and `Program.trace` owners. No numerical function consumes
+timing data to choose a backend or schedule another function.
+
+Each successful completion updates dispatch-delay and host-execution moments
+before canonical completion permits the next occurrence. Dispatch delay is
+`start-ready`; host execution is `complete-start`. A successful Metal completion
+with available ordered GPU timestamps separately updates GPU service moments.
+Failure counts remain separate, and omitted active-domain entries never call
+the numerical completion callback. Zero observations have null mean; sample
+variance is null until two observations exist. Variance is M2 divided by n-1,
+in squared nanoseconds. Setup and external host observation costs are not folded
+into these timing domains. No warmup exclusion is inferred: the counts cover
+all successful numerical invocations on that realized function.
+
+The existing occurrence lifetime gives one completion writer per function.
+Atomic scalar reporting fields avoid data races with a live trace reader; they
+do not introduce a lock, retry loop or readiness condition. A live trace remains
+an approximate snapshot of independently changing fields, just like its existing
+timestamps. Stable final statistics require a quiescent observation point; live
+reads must not be treated as a coherent completed-run profile. Statistics are
+updated before output publication, so observing downstream completion covers
+that producer's timing update.
+
+Immutable backend labels are assigned at the actual setup branch: external
+callback, CPU SGEMM, CPU NEON contraction, CPU builtin, CPU compiled, Metal
+compiled, Metal MPS, Metal builtin, and CoreML. NEON is not restricted to FP16;
+CoreML configuration does not prove execution on ANE. Selected plans with
+heterogeneous backend implementations have an explicit selected-mixed label,
+rather than changing the aggregate label on each numerical selection.
+
+Native numerical descriptors retain operation, normalized left/right/output
+views, scalar types, alpha/beta, publication first/count and the number of
+output rectangles enumerated during preparation. Selected parents retain each
+actual candidate plan. Their readiness views name selectors and deduplicated
+physical pages; those views cannot reconstruct the numerical matrix plans.
+Tensor/extent identities describe the current realization, not portable
+cross-process profile keys. The rectangle count describes setup geometry, not
+a promise that every backend makes that many library calls.
+
+These descriptors are absent for generic compiled and external callbacks,
+whose source identity and dispatch geometry need their own retained setup data;
+no native algebra opcode is guessed from generated code. Timing statistics and
+native plans make measured selection inspectable, but do not by themselves
+implement a complete profile key or cost-guided planner. Hardware/software,
+operation semantics, dtype/layout, publication partitions, merges and assembly
+remain part of that complete plan comparison.

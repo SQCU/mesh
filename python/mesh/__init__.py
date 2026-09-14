@@ -391,6 +391,27 @@ class Program:
         for index in range(self.native.algebra_trace_count(self.handle)):
             event = self.native.algebra_trace(self.handle, index)
             item = {name: getattr(event, name) for name, _ in event._fields_}
+            # design/algorithm-sources.md#function-cost-profiles
+            profile = self.native.algebra_profile(self.handle, index)
+            backends = ('external', 'cpu_sgemm', 'cpu_neon_contract', 'cpu_builtin', 'cpu_compiled',
+                        'metal_compiled', 'metal_mps', 'metal_builtin', 'coreml', 'selected_mixed')
+            item['profile'] = dict(successful=profile.successful, failed=profile.failed, backend=backends[profile.backend])
+            for domain in ('dispatch', 'execution', 'gpu'):
+                count = profile.gpu_samples if domain == 'gpu' else profile.successful
+                item['profile'][domain + '_ns'] = dict(count=count,
+                    mean=getattr(profile, domain + '_mean_ns') if count else None,
+                    sample_variance=getattr(profile, domain + '_m2_ns2') / (count-1) if count > 1 else None)
+            item['plans'] = []
+            for plan_index in range(self.native.algebra_plan_count(self.handle, index)):
+                plan = self.native.algebra_plan(self.handle, index, plan_index)
+                descriptor = dict(backend=backends[plan.backend],
+                    operation=('affine', 'add', 'multiply', 'tanh', 'exp', 'sum', 'contract', 'rsqrt', 'swish')[plan.operation],
+                    first=plan.first, count=plan.count, alpha=plan.alpha, beta=plan.beta, rectangles=plan.rectangles)
+                for name in ('left', 'right', 'output'):
+                    view = getattr(plan, name)
+                    descriptor[name] = {field: getattr(view, field) for field, _ in view._fields_}
+                    descriptor[name]['dtype'] = ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool')[getattr(plan, name + '_scalar')]
+                item['plans'].append(descriptor)
             active = self.native.algebra_trace_active(self.handle, index)
             if active.function != 0xffffffffffffffff:
                 item['active'] = {name: getattr(active, name) for name, _ in active._fields_}
