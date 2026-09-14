@@ -844,26 +844,27 @@ static void mesh_fire(struct mesh_execution *e,struct mesh_watch *watch){
 /* design/algorithm-sources.md#presence-driven-execution */
 static void mesh_events(struct mesh_execution *e){
   unsigned char bytes[256];
-  while(recv(e->socket,bytes,sizeof bytes,MSG_DONTWAIT)>0){}
   struct hdr *m=e->context->M;
-  struct mesh_watch *pending=NULL;
-  uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
-  while(row!=MESH_ABSENT){
-    uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
-    mesh_reader_event(e->context,row);
-    for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
-      if(edge->active){mesh_active_event(e->context,edge->active);continue;}
-      if(edge->route){mesh_route_event(e->context,edge->route,edge->candidate,edge->consumer,&pending);continue;}
-      if(edge->indexed){mesh_index_event(e->context,edge->indexed,edge->candidate);continue;}
-      struct mesh_watch *watch=edge->watch;
-      if(!watch->pending){watch->pending=1;watch->pending_next=pending;pending=watch;}
+  do {
+    uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
+    while(row!=MESH_ABSENT){
+      uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
+      struct mesh_watch *pending=NULL;
+      mesh_reader_event(e->context,row);
+      for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
+        if(edge->active){mesh_active_event(e->context,edge->active);continue;}
+        if(edge->route){mesh_route_event(e->context,edge->route,edge->candidate,edge->consumer,&pending);continue;}
+        if(edge->indexed){mesh_index_event(e->context,edge->indexed,edge->candidate);continue;}
+        struct mesh_watch *watch=edge->watch;
+        if(!watch->pending){watch->pending=1;watch->pending_next=pending;pending=watch;}
+      }
+      while(pending){
+        struct mesh_watch *watch=pending;pending=watch->pending_next;
+        watch->pending=0;mesh_fire(e,watch);
+      }
+      row=next;
     }
-    row=next;
-  }
-  while(pending){
-    struct mesh_watch *watch=pending;pending=watch->pending_next;
-    watch->pending=0;mesh_fire(e,watch);
-  }
+  } while(recv(e->socket,bytes,sizeof bytes,MSG_DONTWAIT)>0);
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 static int mesh_execution_create(struct mesh_ctx *c){

@@ -685,8 +685,26 @@ on worker contexts, so a numerical callback does not occupy the presence
 handler. CPU float32 contractions use Dongarra et al.'s BLAS SGEMM on existing
 canonical buffer addresses; matrix bindings are constructed during setup.
 
-This implementation checkpoint uses a shared dirty bitmap and a nonblocking
-Unix datagram wake for the consumer handler. It has not yet established its
+Publication uses shared page-index notice lists and a nonblocking Unix datagram
+wake for the consumer handler. `mesh_events` checks notices before each
+nonblocking receive, rather than draining all datagrams first. After traversing
+the edges for one row, it submits that row's pending eligible consumers before
+moving to the next row. An unrelated notice batch therefore does not become an
+extra prerequisite for issuing a ready function. The function's canonical input
+presence and output ownership conditions remain unchanged.
+
+Every consumed wake is followed by another notice-list check. The saved next link
+is read before clearing a row's queued flag, permitting concurrent re-publication
+without corrupting the detached traversal. Per-row pending lists remain owned by
+the serial presence handler, including route notifications. Numerical work is
+submitted to worker contexts, not executed inside the notice traversal. A watcher
+may be checked again for a later row; no new readiness state or configuration
+inference is introduced to suppress those checks. Publication itself still only
+sets presence, enqueues row indices, and sends a nonblocking wake.
+
+Source review checked wake/list ordering, route pending-list ownership and repeated
+issue conditions; native compilation passed. No numerical execution or performance
+claim accompanies this scheduling change. The implementation has not yet established its
 operational wake-loss and teardown behavior through distributed execution.
 The cancellation completion wait is confined to destruction, after numerical
 owners have drained; it is not a tensor dependency.
