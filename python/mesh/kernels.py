@@ -884,11 +884,11 @@ def _source_expression_regions(program, output):
 def _source_row_regions(program, output):
     import math
     if output._writer_error or output.view.column_stride != 1:
-        return ((0, output.shape[0]),)
+        return ((0, output.shape[0], 0, output.shape[1]),)
     page_bytes = program.native.tensor_publication_bytes(output.view.tensor, output.view.extent)
     row_bytes = output.shape[1] * output.dtype.itemsize
     rows = page_bytes // math.gcd(page_bytes, row_bytes)
-    return tuple((first, min(rows, output.shape[0]-first)) for first in range(0, output.shape[0], rows))
+    return tuple((first, min(rows, output.shape[0]-first), 0, output.shape[1]) for first in range(0, output.shape[0], rows))
 
 
 # design/algorithm-sources.md#compiled-column-access-domains
@@ -1172,7 +1172,7 @@ def indexed_add(base, destinations, updates, *, mask=True):
 
 
 # design/algorithm-sources.md#segmented-indexed-add
-def _compiled_region(program, inputs, output, body, dynamic_first=None, *, row_inputs=None):
+def _compiled_region(program, inputs, output, body, dynamic_first=None, *, access_axes, domains):
     import ctypes as C
     from . import check
     from ._native import View
@@ -1201,14 +1201,12 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None, *, row_i
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         sources.append('\n'.join(lines))
     function = program.native.algebra_trace_count(program.handle)
-    domains = ((0, output.shape[0]),) if row_inputs is None else _source_row_regions(program, output)
-    row_inputs = (0,) * len(inputs) if row_inputs is None else tuple(row_inputs)
-    if len(row_inputs) != len(inputs):
-        raise ValueError('Each compiled input requires its row access relation')
-    for begin, rows in domains:
+    if len(access_axes) != len(inputs):
+        raise ValueError('Each compiled input requires its access relation')
+    for begin, rows, column, columns in domains:
         check(program.native.algebra_source(program.handle, *(source.encode() for source in sources),
             (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), output.view,
-            (C.c_uint8 * len(inputs))(*row_inputs), begin, rows, 0, output.shape[1]))
+            (C.c_uint8 * len(inputs))(*access_axes), begin, rows, column, columns))
     return function
 
 
@@ -1258,7 +1256,8 @@ def _group_ordinals(program, keys, source_block_rows, ordinal_origin=0, candidat
         if(!lane){out}[{8*size}]=segments;''')
         return '\n'.join(lines)
 
-    _compiled_region(program, tuple(keys), grouped, body)
+    _compiled_region(program, tuple(keys), grouped, body, access_axes=(0,) * len(keys),
+                     domains=((0, grouped.shape[0], 0, grouped.shape[1]),))
     return grouped, size
 
 
@@ -1401,7 +1400,8 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
             statements = f'for(uint64_t t=(uint64_t){low}*{width}+lane;t<(uint64_t){high}*{width};t+=lanes) {{ uint64_t k=t/{width},c=t%{width}; {output}[t*{target.view.column_stride}]={value}; }}'
         return '\n'.join(declarations), '\n'.join((*locals, statements))
 
-    function = _compiled_region(program, tuple(physical), target, body, 2)
+    function = _compiled_region(program, tuple(physical), target, body, 2, access_axes=(0,) * len(physical),
+                                domains=((0, target.shape[0], 0, target.shape[1]),))
     for selected, index in selectors:
         positions = pointers[index]
         check(program.native.algebra_indexed_range(program.handle, function, selected.view, flat_bounds.view,
@@ -1588,7 +1588,8 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
                   p5[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
                 }}'''
 
-            function = _compiled_region(program, (reverse_keys, reverse_ordinals, offsets, initial, table), target, finish)
+            function = _compiled_region(program, (reverse_keys, reverse_ordinals, offsets, initial, table), target, finish,
+                                        access_axes=(0, 0, 0, 0, 0), domains=((0, target.shape[0], 0, target.shape[1]),))
             check(program.native.algebra_route_attach(program.handle, function, route, consumer))
 
 
@@ -1616,7 +1617,8 @@ def _routing_directory(program, chunks, coverage):
             origin += count
         return arrays, '\n'.join(lines)
 
-    _compiled_region(program, keys, metadata, owner_source)
+    _compiled_region(program, keys, metadata, owner_source, access_axes=(0,) * len(keys),
+                     domains=((0, metadata.shape[0], 0, metadata.shape[1]),))
     owners = metadata.slice(0, 0, 1, total)
     reverse, _ = _group_ordinals(program, (metadata.slice(0, total, 1, total),), 1)
     reverse_keys = reverse.slice(0, 0, 1, total)
@@ -1633,7 +1635,8 @@ def _routing_directory(program, chunks, coverage):
           p1[c]=lo;
         }}'''
 
-    _compiled_region(program, (reverse_keys,), offsets, offset_source)
+    _compiled_region(program, (reverse_keys,), offsets, offset_source, access_axes=(0,),
+                     domains=((0, offsets.shape[0], 0, offsets.shape[1]),))
     return owners, reverse_keys, reverse_ordinals, offsets
 
 
@@ -1733,7 +1736,7 @@ def _ordering_run(program, source, first, target):
         }}
         for(uint32_t i=lane;i<{width};i+=lanes)p1[r*{target.view.row_stride}+i*{target.view.column_stride}]=work[i];
         """
-    _compiled_region(program, (source,), target, body, row_inputs=(1,))
+    _compiled_region(program, (source,), target, body, access_axes=(1,), domains=_source_row_regions(program, target))
 
 
 # design/algorithm-sources.md#stable-indexed-ordering
@@ -1778,7 +1781,7 @@ def _ordering_merge(program, keys, left, right, diagonal, target):
             p{len(inputs)}[r*{target.view.row_stride}+i*{target.view.column_stride}]=value;
           }}
         }}"""
-    _compiled_region(program, inputs, target, body, row_inputs=(1,) * len(inputs))
+    _compiled_region(program, inputs, target, body, access_axes=(1,) * len(inputs), domains=_source_row_regions(program, target))
 
 
 # design/algorithm-sources.md#typed-integer-contractions
@@ -1799,12 +1802,14 @@ def _integral_contraction(program, left, right, target):
         scalar = 'uint64_t' if target.dtype.itemsize == 8 else 'uint32_t'
         term = f'(({a})&&({b}))' if target.dtype.kind == 'b' else f'(({scalar})({a}))*(({scalar})({b}))'
         operation = '|=' if target.dtype.kind == 'b' else '+='
-        return f"""for(uint64_t c=lane;c<{target.shape[1]};c+=lanes) {{
+        begin, end = ('column_begin', 'column_end') if metal else ('part.column_begin', 'part.column_end')
+        return f"""for(uint64_t c={begin}+lane;c<{end};c+=lanes) {{
           {scalar} total=0;
           for(uint64_t k=0;k<{left.shape[1]};k++) total{operation}{term};
           p2[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
         }}"""
-    _compiled_region(program, (left, right), target, body, row_inputs=(1, 0))
+    _compiled_region(program, (left, right), target, body, access_axes=(1, 2),
+                     domains=_source_expression_regions(program, target))
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -2606,7 +2611,8 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
                     return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
                   p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
 
-                _compiled_region(program, results, destination, assemble, row_inputs=(1,) * len(results))
+                _compiled_region(program, results, destination, assemble, access_axes=(1,) * len(results),
+                                 domains=_source_row_regions(program, destination))
                 continue
             first, columns, length, prepared = native_plan.segments[detail]
             entry['segment'] = dict(first=first, columns=columns, inner=length)
@@ -2687,7 +2693,8 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
                 array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
                 return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
 
-            readiness_function = _compiled_region(program, (selector,), readiness, readiness_source)
+            readiness_function = _compiled_region(program, (selector,), readiness, readiness_source, access_axes=(0,),
+                                                  domains=((0, readiness.shape[0], 0, readiness.shape[1]),))
             entry['readiness'] = dict(view=program._plan_view(readiness), function=readiness_function)
             check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
                 (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies)))

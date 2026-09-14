@@ -2937,6 +2937,24 @@ canonical source views, setup cache, output regions and publication mechanism.
 Changing arithmetic does not require another execution interface or a model
 specific contraction emitter.
 
+Integer and Boolean kernels consume the configured column interval as well as
+the configured rows. For output rectangle `(r, rows, c, columns)`, the input
+relations are `left[r:r+rows, :]` and `right[:, c:c+columns]`, within the already
+lowered K panel. CPU uses the publication section bounds; Metal uses the same
+bounds recorded in its domain buffer. Neither computes outside that rectangle.
+Native binding constructs those read footprints during setup and publishes the
+rectangle independently. Thus an unavailable right-operand page outside the
+selected columns is not a dependency unless it shares backing with needed data.
+The existing page-aligned rectangle planner still coarsens nondivisible layouts.
+
+`_compiled_region` now requires explicit access relations and output domains.
+All ten call sites supply them; the helper cannot silently choose a whole operand
+or force full-width output. Ordering calls retain their full-row numerical domains;
+route-attached and directory calls still explicitly name their existing full
+domains and remain work for further streaming decomposition. Shape, dtype, pointer
+and domain realization all precede invocation. Source review and Python/native
+compilation validate this edit; no numerical execution or speedup is reported.
+
 [C11 draft N1570, section 6.2.5 paragraph 9](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)
 defines unsigned arithmetic modulo one more than the maximum representable value.
 Mesh converts integer operands to unsigned before multiplication and addition,
