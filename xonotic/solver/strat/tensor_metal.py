@@ -51,19 +51,10 @@ uint4 philox(uint4 counter, uint2 key) {
 }
 '''
 ARGUMENTS = '''device const ulong* regions [[buffer(0)]], device const View* v [[buffer(1)]],
-    constant ulong* dimensions [[buffer(2)]], device const Block* blocks [[buffer(3)]],
+    device const Block* blocks [[buffer(2)]],
     uint3 position [[thread_position_in_grid]], uint3 group [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
-    uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(4)]]'''
-
-
-def expr(value):
-    if isinstance(value, Dimension):
-        if value.op == 'axis': return f'dimensions[{value.args[0]}]'
-        if value.op == 'poly':
-            return '(' + '+'.join(str(coefficient) + ''.join(f'*dimensions[{axis}]' for axis in monomial) for coefficient, monomial in value.args) + ')'
-        return '(' + expr(value.args[0]) + {'//': '/'}.get(value.op, value.op) + expr(value.args[1]) + ')'
-    return str(value)
+    uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(3)]]'''
 
 
 def read(value, index='t'):
@@ -80,11 +71,8 @@ def kernel(node):
     name = f'mesh_tensor_{index}'
     body = [f'ulong t=position.x; if(t>=v[{index}].size) return;']
     mode, clear = 'linear', False
-    if op in ('input', 'constant', 'dimension', 'reshape', 'stop_gradient'):
-        if op != 'dimension': return None
-        body.append(write(output, expr(attrs['expression'])))
-    elif op == 'arange':
-        body.append(write(output, f'{expr(attrs["start"])}+t*({expr(attrs["step"])})'))
+    if op in ('input', 'constant', 'reshape', 'stop_gradient'):
+        return None
     elif op == 'argsort':
         source, axis = values[0], attrs['axis']
         body.append(f'ulong at=coordinate(t,v[{source.index}],{axis}), stride=v[{source.index}].stride[{axis}]; ulong base=t-at*stride;')
@@ -145,7 +133,7 @@ def batch_address(source, output):
         if source.shape[i] == 1: continue
         axis = output.ndim - source.ndim + i
         trailing = math_product(output.shape[axis+1:-2])
-        pieces.append(f'((batch/({expr(trailing)}))%v[{source.index}].shape[{i}])*v[{source.index}].stride[{i}]')
+        pieces.append(f'((batch/({trailing}))%v[{source.index}].shape[{i}])*v[{source.index}].stride[{i}]')
     return '+'.join(pieces) or '0'
 
 
@@ -381,8 +369,10 @@ def matrix_view(tensor, shape):
     from mesh import Tensor, Ref
     from mesh._native import View as NativeView
     shape = tuple(shape)
-    if len(shape) != 2 or min(shape) <= 0 or math.prod(shape) != math.prod(tensor.shape):
-        raise ValueError('Matrix view must preserve element count with two positive dimensions')
+    if len(shape) != 2 or min(shape) < 0 or math.prod(shape) != math.prod(tensor.shape):
+        raise ValueError('Matrix view must preserve element count with two nonnegative dimensions')
+    if not math.prod(shape):
+        return tensor.program.tensor(shape, dtype=tensor.dtype)
     if tensor.shape == shape:
         return tensor
     if tensor.shape[::-1] == shape and 1 in shape:
@@ -486,6 +476,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
 
     shapes = {value.index: tuple(size.resolve(capacity) if isinstance(size, Dimension) else size for size in value.shape)
               for value, _, _, _, _ in graph.nodes}
+    for value, operation, values, _, _ in graph.nodes:
+        if operation == 'reshape' and math.prod(shapes[value.index]) != math.prod(shapes[values[0].index]):
+            raise ValueError('Reshape must preserve element count')
     outputs = tuple(outputs)
     if any(value.graph is not graph for value in outputs):
         raise ValueError('Requested outputs must belong to the compiled graph')
@@ -496,7 +489,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         if value.index not in live or value.index in inputs:
             continue
         nodes.append(node)
-        dependencies = numerical_operands(operation, values, attributes)
+        dependencies = numerical_operands(operation, values, attributes) if math.prod(shapes[value.index]) else ()
         live.update(operand.index for operand in dependencies)
     nodes.reverse()
     constants = {value.index: data for value, data in graph.constants.values()}
@@ -509,25 +502,45 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         peer = peers[owner]
         if value.index in tensors:
             continue
+        # ../../../design/algorithm-sources.md#indexed-range-generation
+        shape = shapes[value.index]
+        storage_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
+        if not math.prod(shape):
+            tensors[value.index] = program.tensor(storage_shape, dtype=value.dtype)
+            continue
         if operation in ('reshape', 'stop_gradient'):
             tensors[value.index] = tensors[values[0].index]
             owners[value.index] = owners[values[0].index]
             continue
-        if operation == 'constant':
-            shape = shapes[value.index]
-            storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)
+        if operation in ('constant', 'dimension'):
             tensor = program.tensor(storage_shape, dtype=value.dtype)
-            data = constants[value.index]
+            data = constants[value.index] if operation == 'constant' else np.asarray(attributes['expression'].resolve(capacity), dtype=value.dtype)
             if program.node == peer:
                 program.constant(tensor[0, 0], data.reshape(storage_shape))
             tensors[value.index] = tensor
+            continue
+        # ../../../design/algorithm-sources.md#indexed-range-generation
+        if operation == 'arange':
+            start, step = (attributes[name].resolve(capacity) if isinstance(attributes[name], Dimension) else attributes[name] for name in ('start', 'step'))
+            block = (1, min(tile_columns, shape[0]))
+            _, column = kernels.indices()
+            ordinal = kernels.program_id(1) * block[1] + column
+            if np.dtype(value.dtype).kind in 'iu':
+                mask = 0xffffffffffffffff
+                result = (ordinal & mask) * (int(step) & mask) + (int(start) & mask)
+            else:
+                result = float(start) + ordinal * float(step)
+            tensors[value.index] = program.kernel_call(kernels.expression(result),
+                grid=(1, (shape[0] + block[1] - 1) // block[1]), in_specs=(),
+                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct((1, shape[0]), value.dtype), peer=peer)()
             continue
         row_gradient = row_gather_gradient(value, operation, values, attributes, shapes)
         local = {}
         for operand in numerical_operands(operation, values, attributes):
             tensor = tensors[operand.index]
             sender = owners[operand.index]
-            if sender != peer:
+            if sender != peer and tensor.blocks:
                 key = (operand.index, peer)
                 if key not in replicas:
                     transposed = tensor[0, 0].view.row_stride == 1 and tensor[0, 0].view.column_stride != 1
@@ -693,17 +706,20 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     coordinates[axis] = (ordinal // math.prod(operand_shape[i] for i in domain[position + 1:])) % operand_shape[axis]
             argument, = kernels.arguments(1)
             term = argument.reshape(operand_shape).at(*coordinates)
+            if operation in ('reduce_max', 'reduce_min'):
+                term = term.astype(values[0].dtype)
             if operation in ('reduce_sum', 'reduce_mean') and np.dtype(values[0].dtype).kind in 'iu':
                 term = term & 0xffffffffffffffff
             result = getattr(term, 'sum' if operation == 'reduce_mean' else operation[7:])().T
-            if operation == 'reduce_mean' and np.dtype(values[0].dtype).kind == 'f':
-                result = result / count
+            if operation == 'reduce_mean':
+                if np.dtype(values[0].dtype).kind != 'f':
+                    result = result.astype('uint64' if np.dtype(values[0].dtype).kind == 'u' else 'int64').astype('float32')
+                result = result / float(count)
             reduced = program.kernel_call(kernels.expression(result),
                 grid=(matrix_shape[0], (matrix_shape[1] + width - 1) // width),
                 in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, width), lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(local[values[0].index])
-            tensors[value.index] = nn._pointwise(program, kernels.expression(argument / count),
-                (reduced,), 1, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and np.dtype(values[0].dtype).kind != 'f' else reduced
+            tensors[value.index] = reduced
             continue
         # ../../../design/algorithm-sources.md#shared-associative-reductions
         if operation.startswith('reduce_') and 1 <= len(shapes[values[0].index]) <= 2:
@@ -717,15 +733,16 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             term = argument & 0xffffffffffffffff if operation in ('reduce_sum', 'reduce_mean') and operand.dtype.kind in 'iu' else argument
             result = getattr(term, 'sum' if operation == 'reduce_mean' else operation[7:])(axis=axes)
             divisor = math.prod(operand.shape[axis] for axis in axes)
-            if operation == 'reduce_mean' and operand.dtype.kind == 'f':
-                result = result / divisor
+            if operation == 'reduce_mean':
+                if operand.dtype.kind != 'f':
+                    result = result.astype('uint64' if operand.dtype.kind == 'u' else 'int64').astype('float32')
+                result = result / float(divisor)
             reduced = program.kernel_call(kernels.expression(result),
                 grid=tuple((size + tile - 1) // tile for size, tile in zip(reduced_shape, block)),
                 in_specs=(BlockSpec(None),),
                 out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(reduced_shape, value.dtype), peer=peer)(operand)
-            tensors[value.index] = nn._pointwise(program, kernels.expression(argument / divisor),
-                (reduced,), block[0], peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and operand.dtype.kind != 'f' else reduced
+            tensors[value.index] = reduced
             continue
         # ../../../design/algorithm-sources.md#xonotic-logical-indexing
         if operation in ('gather', 'take_along_axis', 'concatenate', 'transpose'):
@@ -833,7 +850,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     out_specs=BlockSpec(block, lambda i, j: (i, j)),
                     out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(*(local[v.index] for v in values))
             continue
-        text, operations = source(((value, operation, values, attributes, owner),))
+        resolved = tuple(type(operand)(operand.graph, operand.index, shapes[operand.index], operand.dtype) for operand in (value, *values))
+        text, operations = source(((resolved[0], operation, resolved[1:], attributes, owner),))
         item = operations[0]
         shape = shapes[value.index]
         size = math.prod(shape)
@@ -871,10 +889,10 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         dispatches = []
         if item['clear']:
             dispatches.append(MetalDispatch('mesh_tensor_zero', (max(1, (size * np.dtype(value.dtype).itemsize + 255) // 256), 1, 1),
-                                           argument_buffer=4, argument_offset=len(item['arguments']) * 4))
-        dispatches.append(MetalDispatch(item['name'], tuple(max(1, v) for v in grid), (threads, 1, 1), argument_buffer=4))
+                                           argument_buffer=3, argument_offset=len(item['arguments']) * 4))
+        dispatches.append(MetalDispatch(item['name'], tuple(max(1, v) for v in grid), (threads, 1, 1), argument_buffer=3))
         kernel = Metal(text, tuple(dispatches), (bytes((View * len(views))(*views)),
-            bytes((c.c_uint64 * max(1, len(capacity)))(*capacity)), bytes((Block * len(blocks))(*blocks)), bytes((c.c_uint32 * len(arguments))(*arguments))))
+            bytes((Block * len(blocks))(*blocks)), bytes((c.c_uint32 * len(arguments))(*arguments))))
         tensors[value.index] = program.kernel_call(kernel, grid=(1,), peer=peer,
             in_specs=tuple(specs),
             out_specs=BlockSpec(storage_shape, lambda i: (0, 0)),

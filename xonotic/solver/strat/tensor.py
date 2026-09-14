@@ -29,6 +29,8 @@ class Dimension:
     def resolve(self, sizes):
         if self.op == 'axis':
             return sizes[self.args[0]]
+        if self.op == 'range':
+            return range_length(*(value.resolve(sizes) if isinstance(value, Dimension) else value for value in self.args))
         if self.op == 'poly':
             return b.sum(coefficient * product(tuple(sizes[axis] for axis in monomial)) for coefficient, monomial in self.args)
         left, right = (value.resolve(sizes) if isinstance(value, Dimension) else value for value in self.args)
@@ -153,9 +155,12 @@ class Tensor:
         dtype = dtype_name(dtype)
         return self if dtype == self.dtype else self.graph.node('cast', (self,), self.shape, dtype)
 
+    # ../../../design/algorithm-sources.md#indexed-range-generation
     def reshape(self, *shape):
         shape = tuple(shape[0]) if len(shape) == 1 and isinstance(shape[0], (list, tuple)) else shape
         known = product(tuple(value for value in shape if value != -1))
+        if shape.count(-1) > 1 or (-1 in shape and known == 0):
+            raise ValueError('Reshape requires at most one unambiguous inferred dimension')
         shape = tuple(self.size // known if value == -1 else value for value in shape)
         return self.graph.node('reshape', (self,), shape, self.dtype)
 
@@ -376,11 +381,12 @@ def stack(values, axis=0):
     return concatenate(tuple(value.reshape(*value.shape[:axis], 1, *value.shape[axis:]) for value in values), axis)
 
 
+# ../../../design/algorithm-sources.md#indexed-range-generation
 def reduce(op, value, axis=None, keepdims=False):
     if not isinstance(value, Tensor): return getattr(mlx, op)(value, axis=axis, keepdims=keepdims)
     axes = tuple(range(value.ndim)) if axis is None else tuple(i % value.ndim for i in ((axis,) if isinstance(axis, int) else axis))
     shape = tuple(1 if i in axes else size for i, size in enumerate(value.shape)) if keepdims else tuple(size for i, size in enumerate(value.shape) if i not in axes)
-    dtype = 'bool' if op in ('any', 'all') else 'int32' if value.dtype == 'bool' and op == 'sum' else value.dtype
+    dtype = 'bool' if op in ('any', 'all') else 'float32' if op == 'mean' and not value.dtype.startswith('float') else 'int32' if value.dtype == 'bool' and op == 'sum' else value.dtype
     return value.graph.node('reduce_' + op, (value,), shape, dtype, axes=axes, keepdims=keepdims)
 
 
@@ -397,10 +403,23 @@ def sum_to(value, shape):
     return sum(value, axis=axes, keepdims=True).reshape(shape) if axes or len(shape) != value.ndim else value
 
 
+# ../../../design/algorithm-sources.md#indexed-range-generation
+def range_length(start, stop, step):
+    if step == 0:
+        raise ValueError('arange step must not be zero')
+    integral = b.all(isinstance(value, (int, np.integer)) for value in (start, stop, step))
+    return b.max(0, -((int(start) - int(stop)) // int(step)) if integral else math.ceil((stop - start) / step))
+
+
+# ../../../design/algorithm-sources.md#indexed-range-generation
 def arange(start, stop=None, step=1, dtype=None):
-    if _ACTIVE.get() is None: return mlx.arange(start, stop, step, dtype=dtype) if stop is not None else mlx.arange(start, dtype=dtype)
     start, stop = (0, start) if stop is None else (start, stop)
-    return _ACTIVE.get().node('arange', (), ((stop - start + step - 1) // step,), dtype or 'int32', start=start, step=step)
+    if not isinstance(step, Dimension) and step == 0:
+        raise ValueError('arange step must not be zero')
+    if _ACTIVE.get() is None:
+        return mlx.arange(start, stop, step, dtype=dtype)
+    size = Dimension('range', (start, stop, step)) if b.any(isinstance(value, Dimension) for value in (start, stop, step)) else range_length(start, stop, step)
+    return _ACTIVE.get().node('arange', (), (size,), dtype or ('float32' if b.any(isinstance(value, (float, np.floating)) for value in (start, stop, step)) else 'int32'), start=start, step=step)
 
 
 def stop_gradient(value):
