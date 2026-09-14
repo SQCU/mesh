@@ -131,6 +131,16 @@ def main():
         norm_gamma = np.ones((1, 6), dtype=dtype)
         norm_output = rmsnorm(program, norm_input, weight(norm_gamma), tile_rows=1) if args.rank == 0 else program.tensor((3, 6), (1, 2), dtype=dtype)
         norm_results = {coordinate: program.export(ref) for coordinate, ref in norm_output.blocks.items()}
+        integer_values = np.array([[2**53, 1, -(2**53)], [2**53, 3, -(2**53)],
+            [2**63-1, 1, 0], [-(2**63), -1, 0]], dtype=np.int64)
+        integer_input = program.tensor(integer_values.shape, (1, 1), dtype=np.int64)
+        for (i, j), ref in integer_input.blocks.items():
+            program.constant(ref, integer_values[i:i+1, j:j+1])
+        integer_arg, = kernels.arguments(1)
+        integer_sum = program.kernel_call(kernels.expression(integer_arg.sum()), grid=(4,),
+            in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, 1), lambda i: (i, 0)),
+            out_shape=ShapeDtypeStruct((4, 1), np.int64), peer=0)(integer_input)
+        integer_results = tuple(program.export(integer_sum[i, 0]) for i in range(4))
         norm_generations = tuple((values, reference_norm(values, norm_gamma)) for values in
             ((np.arange(1, 19, dtype=np.float32).reshape(3, 6) / 16 + generation / 8).astype(dtype)
              for generation in range(2)))
@@ -197,10 +207,14 @@ def main():
                 tail = graph.input('tail', (2, 4))
                 selected = source[indices, ::-1]
                 joined = mx.concatenate((selected, tail), axis=0)
+                means = mx.mean(source, axis=1)
+                total_mean = mx.sum(means)
             lowered = kernel_calls(program, graph, (),
                 {source.index: x_source, indices.index: x_indices, tail.index: x_tail},
-                outputs=(joined,), root_peer=0, tile_rows=2, tile_columns=4)
+                outputs=(joined, means, total_mean), root_peer=0, tile_rows=2, tile_columns=4)
             observations = tuple(program.export(lowered[joined.index][i, 0]) for i in range(3))
+            mean_results = tuple(program.export(lowered[means.index][i, 0]) for i in range(2))
+            total_result = program.export(lowered[total_mean.index][0, 0])
             bindings = {}
             for name, references in (
                     ('source', tuple(sorted(x_source.blocks.items()))),
@@ -517,6 +531,13 @@ def main():
                         atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
                     raise ArithmeticError('Streamed normalization numerical mismatch')
                 result.consume()
+        wait_for(integer_results)
+        for result, expected in zip(integer_results, (1, 3, -(2**63), 2**63-1)):
+            if result.array.item() != expected:
+                raise ArithmeticError('Integer reduction lost exact cancellation beyond floating-point precision')
+        print(json.dumps(dict(event='integer_reduction', output=[result.array.tolist() for result in integer_results])), flush=True)
+        for result in integer_results:
+            result.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
             raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
@@ -558,7 +579,10 @@ def main():
                     destination[...] = index_values[:2]
                 with program.write(x_tail[0, 0]) as destination:
                     destination[...] = tail_values
-                wait_for((observations[0], observations[2]))
+                wait_for((observations[0], observations[2], mean_results[early_source]))
+                mean_expected = source_values.astype(np.float64).mean(axis=1, keepdims=True)
+                if total_result.ready or not np.array_equal(mean_results[early_source].array, mean_expected[2*early_source:2*early_source+2]):
+                    raise ArithmeticError('Xonotic row reduction lost independent source progress')
                 if observations[1].ready:
                     raise ArithmeticError(f'Xonotic output consumed an unpublished occurrence: generation={generation}')
                 if not x_source[1-early_source, 0].writable or not x_indices[0, 1].writable:
@@ -575,13 +599,17 @@ def main():
                     destination[...] = source_values[2*(1-early_source):2*(1-early_source)+2]
                 with program.write(x_indices[0, 1]) as destination:
                     destination[...] = index_values[2:]
-                wait_for(observations)
+                wait_for((*observations, *mean_results, total_result))
+                if not np.array_equal(np.concatenate([result.array for result in mean_results]), mean_expected) or total_result.array.item() != mean_expected.sum():
+                    raise ArithmeticError('Xonotic matrix/vector reduction mismatch')
+                print(json.dumps(dict(event='xonotic_reductions', generation=generation, early_source_block=early_source,
+                    means=[result.array.tolist() for result in mean_results], total=total_result.array.item())), flush=True)
                 for index, result in enumerate(observations):
                     if not np.array_equal(result.array, expected[2*index:2*index+2]):
                         raise ArithmeticError('Xonotic gather/concatenate output differs after reuse')
                 print(json.dumps(dict(event='xonotic_indexed_complete', generation=generation,
                     output=[result.array.tolist() for result in observations])), flush=True)
-                for result in observations:
+                for result in (*observations, *mean_results, total_result):
                     result.consume()
         if xonotic_gradient is not None:
             gradient_indices, cotangents, gradient_results, generations = xonotic_gradient
