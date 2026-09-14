@@ -70,3 +70,13 @@ Selected-load metadata and kernel launch costs remain measurable overhead; the
 migration establishes region dependency structure without claiming zero cost.
 The old custom implementations remain only for still-unmigrated cases, not as a
 second completed public implementation style.
+
+The retained planner command is `bin/mesh-python xonotic/planner/plan.py solve
+<player-node> 2 8 --width 16 --tile-rows 8`, paired with its existing `play`
+role. Its current solve graph contains matmul, expert_matmul, comparisons and
+reductions, but no gather or concatenate. It checks general integration, not
+this migration's numerical results. `solver.strat.measure matrix` uses the MLX
+numerical path and likewise does not validate the shared expression branch.
+Explicit gather/concatenation observations therefore need to be added to the
+existing streaming-algebra workflow or an actual existing application composition;
+there is no retained command whose current coverage alone proves this increment.
