@@ -107,26 +107,11 @@ class _Expression:
     def __or__(self, other):
         return _Expression('|', (self, _literal(other)))
 
-    # design/algorithm-sources.md#logical-indexed-views
-    def reshape(self, shape):
-        import operator
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def at(self, row, column, *, mask=True, other=0):
         if self.operation != 'input':
-            raise ValueError('Logical indexed views require an input reference')
-        shape = tuple(operator.index(dimension) for dimension in shape)
-        if any(dimension < -1 for dimension in shape) or shape.count(-1) > 1:
-            raise ValueError('Logical indexed dimensions must be nonnegative with at most one inferred axis')
-        return _Expression('reshape', (self,), shape)
-
-    # design/algorithm-sources.md#logical-indexed-views
-    def at(self, row=None, column=None, *coordinates, mask=True, other=0):
-        coordinates = (() if row is None else (row,)) + (() if column is None else (column,)) + coordinates
-        if self.operation == 'reshape':
-            if len(coordinates) != len(self.value):
-                raise ValueError('Logical index rank differs from the declared shape')
-            return _Expression('logical_load', tuple(map(_literal, (*coordinates, mask, other))), (self.operands[0].value, self.value))
-        if self.operation != 'input' or len(coordinates) != 2:
-            raise ValueError('Indexed loads require an input reference and two coordinates')
-        return _Expression('load', tuple(map(_literal, (*coordinates, mask, other))), self.value)
+            raise ValueError('Indexed loads require an input reference')
+        return _Expression('load', tuple(map(_literal, (row, column, mask, other))), self.value)
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def astype(self, dtype):
@@ -194,45 +179,6 @@ class _Expression:
 # design/algorithm-sources.md#region-expression-fusion
 def _literal(value):
     return value if isinstance(value, _Expression) else _Expression('literal', value=value.item() if isinstance(value, np.generic) else value)
-
-
-# design/algorithm-sources.md#logical-indexed-views
-def _resolve_logical(node, inputs, evaluate=True):
-    import math
-    active = evaluate and not (node.operation == 'logical_load' and 0 in inputs[node.value[0]].shape)
-    children = tuple(_resolve_logical(child, inputs, active) for child in node.operands)
-    if node.operation == 'logical_load':
-        index, shape = node.value
-        source = inputs[index]
-        volume = math.prod(source.shape)
-        if -1 in shape:
-            known = math.prod(dimension for dimension in shape if dimension != -1)
-            if known == 0 or volume % known:
-                raise ValueError('Logical indexed shape cannot infer an integral dimension')
-            shape = tuple(volume // known if dimension == -1 else dimension for dimension in shape)
-        if math.prod(shape) != volume:
-            raise ValueError('Logical indexed shape volume differs from its bound input')
-        if volume == 0:
-            layout = _expression_layout(_Expression('+', children), inputs, tuple(hasattr(source, 'blocks') for source in inputs), {})
-            dtype = _expression_dtype(_Expression('load', (_literal(0), _literal(0), _literal(False), children[-1]), index), inputs)
-            return _Expression('domain', (children[-1].astype(dtype),), layout)
-        ordinal, enabled = _literal(0), children[-2]
-        for dimension, coordinate in zip(shape, children[:-2]):
-            ordinal = ordinal * dimension + coordinate
-            enabled = select(enabled, (coordinate >= 0) & (coordinate < dimension), False)
-        return _Expression('load', (ordinal // source.shape[1], ordinal % source.shape[1], enabled, children[-1]), index)
-    if node.operation == 'reshape':
-        raise ValueError('Logical reshapes require indexed access')
-    if evaluate and node.operation in ('//', '%') and all(child.operation == 'literal' for child in children):
-        left, right = (child.value for child in children)
-        if not isinstance(left, int) or not isinstance(right, int):
-            raise ValueError('Integer quotient and remainder require integral operands')
-        dtype = _expression_dtype(_Expression(node.operation, children), inputs)
-        if dtype.kind == 'u':
-            left, right = left % (1 << (8*dtype.itemsize)), right % (1 << (8*dtype.itemsize))
-        value = _literal(left // right if node.operation == '//' else left % right)
-        return value.astype(dtype) if dtype.kind == 'u' else value
-    return _Expression(node.operation, children, node.value)
 
 
 # design/algorithm-sources.md#static-indexed-access-specialization
@@ -515,12 +461,11 @@ class _ExpressionKernel:
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
-            resolved = _resolve_logical(value, inputs)
-            original_accesses = _indexed_access_paths(resolved, inputs,
+            original_accesses = _indexed_access_paths(value, inputs,
                 {index for index, source in enumerate(inputs) if hasattr(source, 'blocks')})
             selectors = {}
             for domain in _source_expression_regions(program, output):
-                specialized, specialized_inputs, origins = _specialize_accesses(resolved, inputs, output, coordinate, domain)
+                specialized, specialized_inputs, origins = _specialize_accesses(value, inputs, output, coordinate, domain)
                 used, original_nodes = {}, {}
 
                 # design/algorithm-sources.md#indexed-expression-lowering
@@ -1132,8 +1077,6 @@ class _ExpressionRegions:
         def visit(value):
             if value.operation in ('input', 'load'):
                 used.add(value.value)
-            if value.operation == 'logical_load':
-                used.add(value.value[0])
             for child in value.operands:
                 visit(child)
 
@@ -1518,7 +1461,6 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
         for expression, spec in zip(expressions, output_specs):
             value = specialize(expression)
             target = spec.resolve(coordinate)
-            value = _resolve_logical(value, lowering.sources)
             origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
             domain_shape = spec._tensor.shape
             if value.operation == 'transpose':
