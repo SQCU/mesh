@@ -2967,8 +2967,8 @@ A result still depends on all contributions to its own contraction domain.
 Xonotic's batched and transposed matmul calls now use the same shared owner for
 integer and boolean values. The graph's declared output dtype is preserved.
 Its custom FP32 contraction source and the associated launch geometry are
-removed; ordering remains a separate pending migration. Empty batch operand
-views carry metadata only.
+removed. Shared indexed ordering now owns its ordering operations as well.
+Empty batch operand views carry metadata only.
 
 The existing streaming-algebra workflow supplies exact Python integer/modular
 references, large operands, overflow, boolean truth, ragged K, batch broadcast,

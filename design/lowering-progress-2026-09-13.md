@@ -1658,3 +1658,84 @@ The integer side cases execute on rank zero; paired gold/fanout crosses actual
 RDMA. New integer numerical kernels are not separately measured on rank one.
 These host observation intervals establish the covered progress/correctness
 behavior, not physical wire/GPU overlap duration or a matched speedup.
+
+## Complete shared ordering and preserve indexed view mappings
+
+`4dc6322` introduces shared stable U32 argsort using bounded Batcher ordinal runs
+and tiled two-level Merge Path. Key values retain their original typed canonical
+Refs; every merge retains the actual key readers. Independent source runs can
+complete before the sort axis is fully available. Final ordering depends on its
+own axis, while unrelated rows remain independent. `74725c3` migrates Xonotic
+argsort/argpartition, retaining axis and resolved kth semantics, and removes its
+last private numerical Metal emitter and binding machinery. Full stable sort
+satisfies partition semantics but is not an optimal-selection performance claim.
+The [ordering mechanism](algorithm-sources.md#stable-indexed-ordering) cites its
+primary numerical algorithms and API contracts.
+
+Source review also found that rank-two transpose unnecessarily emitted a gather
+copy. `46510f9` preserves it as actual transposed Ref metadata and retains source
+ownership. `e974482` adds canonical full-extent replication with exact alias
+remapping; `ead87c6` removes the caller's replica cache and first-block layout
+guess. Each distinct original backing extent has one route per peer pair, and
+every destination alias retains its original offset, shape and strides. There
+is no host numerical copy or alternate dense operand store. The
+[replication mechanism](algorithm-sources.md#canonical-view-replication) states
+its physical publication unit and lifetime.
+
+A larger fragmented key panel exposed a prior static-gather source problem:
+the specializer computed its exact candidate set, then expanded it into deeply
+nested conditionals. `59ce724` retains the original candidate ordinal/Ref vector
+and emits indexed loads with static reader bindings. Ordering output assembly
+uses the same representation across backing tiles. `f53538a` similarly preserves
+the variable-width result interval directory in selected-contraction assembly.
+The [static specialization mechanism](algorithm-sources.md#static-indexed-access-specialization)
+describes the retained data, masks and dependency proof. Compiler bracket limits
+are unchanged; the 131-fragment generated CPU sources compile at default limits.
+
+`6326142`, `cc13713`, `90e399e`, `04c2039` and `90e6b92` extend the existing
+streaming-algebra workflow with F32/F16/bool/I64/U64 stable ordering, NaNs, ties,
+signed zeros, exact large integers, rank-one/rank-two/rank-three axes, flattened
+ordering, negative kth, top-k gathers and a 131-element ragged case. Both source
+partial work and full independent-row completion are observed across two reuse
+generations. A fragmented reshape/transpose also feeds arithmetic on the peer
+and returns independently usable output columns, with another source extent
+withheld. The local variant exercises the same numerical views.
+
+Three setup failures are preserved: an excessive one-element fixture tile grid
+exhausted the fixed arena; a static-gather conditional expansion exceeded Metal's
+bracket depth; and the new alias fixture initially bound a plain pointwise input
+as a whole indexed tensor rather than its explicit input region. The fixes use
+source-sized fixture tiles, retained candidate vectors and explicit BlockSpecs.
+The registered arena was not enlarged. These failures occurred before numerical
+invocation and are not omitted from the evidence record.
+
+[`stable-order-provenance.json`](../measurements/lowering-2026-09-13/stable-order-provenance.json)
+records measured source `90e6b92`, installed source `2cbf38b`, library `f53538a`,
+canonical replication `e974482`, caller `ead87c6` and the exact commands. CPU and
+Metal each configured 8046 functions and completed 16027 submissions. The paired
+Metal workflow configured 7978 rank-zero functions and completed 15334 rank-zero
+submissions. Every terminal runtime code and process exit code is zero; the peer
+exited zero after SIGTERM. Both bridges returned to ready, unpaired, zero-client
+state with the unchanged arena geometry.
+
+Each successful run contains 36 ordering observations and four alias observations.
+Stable ordinals and gathered values match their references for every covered
+case and both reuse generations. Source-dependent numerical work completes
+before the late axis extent arrives; the complete ready row and its consumers
+finish with the other row unpublished. In the paired alias case, one source
+extent crosses the link, drives arithmetic on the M4 Pro, and returns its two
+output columns before the other extent is published. The second generation
+reverses the early source extent and also completes correctly.
+
+Alias early-observation intervals have count 2 each: CPU mean 0.1785 ms and sample
+variance 0.000067094528 ms²; Metal mean 0.162125 ms and variance 0.000931651778 ms²;
+paired mean 0.718333 ms and variance 0.014379366528 ms². Per-dtype/length ordering
+statistics, raw logs, full traces and setup failures are archived. These host
+intervals establish the covered progress behavior, not physical overlap duration
+or a matched speedup. Ordering side cases run on rank zero; the new fragmented
+alias arithmetic runs on rank one in the paired workflow.
+
+The last Xonotic private numerical emitter is now removed. General indexed
+native contraction coverage, optimal integer kernels, fusion/storage/placement,
+empty-domain gaps and the nine-step plan's matched performance acceptance remain
+open. This increment does not redefine those requirements as completed.
