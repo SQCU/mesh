@@ -194,7 +194,9 @@ pages constant. No intermediate NumPy weight array or alternate operand backing
 is used by this path. The ordinary `.npy` input path remains available when
 `--model` is absent.
 
-The setup binding currently accepts the existing loader's FP16, BF16 and FP32
-matrix formats. It adds no quantized decoder. The file handle is closed when the
+The setup binding accepts the existing loader's FP16, BF16 and FP32
+vectors and matrices. `--normalize TENSOR_NAME` loads a model normalization
+vector directly into the configured FP16 scale Ref; bare `--normalize` uses
+the example's all-ones scale. It adds no quantized decoder. The file handle is closed when the
 example leaves its setup/program scope; numerical invocation uses only the
 registered weight pages and previously bound numerical functions.

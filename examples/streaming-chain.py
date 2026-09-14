@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--region')
     parser.add_argument('--numerics')
     parser.add_argument('--model')
-    parser.add_argument('--normalize', action='store_true')
+    parser.add_argument('--normalize', nargs='?', const='', metavar='MODEL_TENSOR')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
     parser.add_argument('--tile-k', type=int, default=128)
@@ -33,8 +33,10 @@ def main():
     args = parser.parse_args()
     if args.instances < 1:
         parser.error('--instances must be positive')
-    if (args.normalize or args.model) and not args.numerics:
+    if (args.normalize is not None or args.model) and not args.numerics:
         parser.error('--normalize and --model require the engine numerical library')
+    if args.normalize and not args.model:
+        parser.error('A normalization tensor name requires --model')
     values = np.load(args.input)
     weights = None if args.model else (np.load(args.up_weight, mmap_mode='r'), np.load(args.down_weight, mmap_mode='r'))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -58,7 +60,7 @@ def main():
                 check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
 
             functions[kernel] = bind
-        if args.normalize:
+        if args.normalize is not None:
             normalize_native = library.gemma_mesh_rmsnorm
             normalize_native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
             normalize_native.restype = C.c_int32
@@ -107,9 +109,15 @@ def main():
             weight = np.load(args.consumer_weight, mmap_mode='r')
             consumer_weight = program.tensor(weight.shape, dtype=weight.dtype)
             program.constant(consumer_weight[0, 0], weight)
-            if args.normalize:
+            if args.normalize is not None:
                 gamma = program.tensor((1, down_weight.shape[1]), dtype=np.float16)
-                program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
+                if args.normalize:
+                    ref = gamma[0, 0]
+                    check(library.gemma_mesh_model_load(model, args.normalize.encode(),
+                        program.handle, C.byref(ref.view), 0, 0, 0))
+                    program.constant(ref)
+                else:
+                    program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
         inputs, outputs = [], {}
         for instance in range(args.instances):
             x = program.tensor(values.shape, (args.tile_rows, args.tile_k), dtype=values.dtype)
@@ -128,7 +136,7 @@ def main():
             scattered = reduce_scatter(program, down, peers=peers, owners=owners)
             reduced = all_gather(program, scattered, peers=peers, owners=owners)
             if program.node == args.root:
-                if args.normalize:
+                if args.normalize is not None:
                     if reduced.grid[1] != 1:
                         raise ValueError('--normalize requires --tile-columns to cover the full output width')
                     spec = BlockSpec(reduced.block_shape, lambda i, j: (i, j))
