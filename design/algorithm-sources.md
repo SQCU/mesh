@@ -173,13 +173,37 @@ The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/de
 - [software-pipelining derivation](https://docs.jax.dev/en/latest/pallas/pipelining.html)
 - [collective matmul example](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
 
-`examples/streaming-chain.py` composes the existing linear kernel calls as
-X W_up → swish → peer transfer → H W_down → return transfer. The JAX authors'
-Pallas matrix-multiplication and collective-matmul examples above supply the
-block-indexed composition and forwarding pattern. Dongarra et al.'s Level 3
-BLAS supplies the local contractions. This caller binds the chain once; native
-presence drives its numerical stages. File input initializes canonical operands;
-terminal output observation does not schedule any intermediate computation.
+The MLX authors' [tensor-parallel layers](https://ml-explore.github.io/mlx/build/html/examples/tensor_parallelism.html)
+and [implementation](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py)
+supply the column-sharded up-projection followed by a row-sharded down-projection.
+`examples/streaming-chain.py` uses that decomposition with caller-supplied hidden
+partition J_p: D_p = swish(X W_up[:, J_p]) W_down[J_p, :]. Both peers compute
+independently from replicated X; the root adds their matching D regions. Unlike
+MLX's sharded-to-all layer, this example places the reduced result only at the
+caller-selected root. There is no hidden-activation gather or stage-to-stage
+handoff. JAX supplies the block-indexed calling syntax; Accelerate BLAS and MPS
+supply the existing local contractions. This is a composition of those mechanisms,
+not a new numerical or distributed algorithm.
+
+MLX/JACCL source inspected in the local `~/mlx` checkout at `d142de6`:
+[`JACCLGroup`](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/jaccl.cpp)
+dispatches whole-array collectives through its CPU encoder;
+[`MeshImpl`](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/mesh_impl.h)
+copies into registered send buffers and local staging, polls completions, reduces
+chunks and drains outstanding sends before returning. Its internal pipelining is
+not a region-publication API for surrounding numerical producers and consumers.
+Wrapping that call would retain the staging and whole-call completion boundary.
+Mesh instead binds existing numerical functions to canonical registered regions
+and uses its existing SEND/RECV completion publication.
+
+Apple's [Metal command-buffer submission](https://developer.apple.com/documentation/metal/mtlcommandbuffer/commit())
+and asynchronous CoreML prediction already supply asynchronous execution.
+Realization now binds the worker dispatch only for synchronous CPU functions.
+`submit_ready` invokes that prebound submission function directly. Metal/CoreML
+no longer take an extra global-worker dispatch before their own submission.
+The dispatch group retains in-flight lifetimes for teardown; it is not a barrier
+between numerical regions. This change removes a queue hop, not all device or
+runtime costs.
 
 ## Region expression fusion
 

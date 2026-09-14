@@ -1340,7 +1340,7 @@ static void submit_ready(void *argument,uint32_t occurrence) {
   if(f->executionKind==MESH_EXECUTION_CPU)atomic_fetch_add(&a->cpuSubmitted,1);
   if(f->executionKind==MESH_EXECUTION_COREML)atomic_fetch_add(&a->nativeSubmitted,1);
   dispatch_group_enter(a.executions);
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{f.execute(f);}});
+  @autoreleasepool{f.execute(f);}
 }
 /* design/algorithm-sources.md#derived-selector-active-domains */
 static int metadata_local(MeshAlgebra *a,struct mesh_row_map map) {
@@ -1448,6 +1448,12 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
     for(struct mesh_route *d=a->routes;d && !error;d=d->next)error=mesh_execution_route(a->context,d,handle);
     if(error)return error;
     for(MeshFunction *f in a.functions){
+      if(f->executionKind==MESH_EXECUTION_CPU){
+        void (^execute)(MeshFunction *)=f.execute;
+        f.execute=^(MeshFunction *function){
+          dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{execute(function);}});
+        };
+      }
       error=mesh_execution_add(a->context,&f->function,handle,submit_ready,(__bridge void *)f);
       if(error)break;
     }

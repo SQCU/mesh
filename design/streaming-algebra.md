@@ -76,7 +76,7 @@ configured reduction tree and two-sided SEND/RECV implementation. Sources are
 The argument concerns dependency and control flow; it makes no latency or
 throughput claim and introduces no acceptance or rejection criteria.
 
-## Used operation chain
+## Historical staged execution (superseded)
 
 On September 14, 2026, `examples/streaming-chain.py` at commit `2bc27de`
 executed on the MacBook (producer 0) and Mac mini (consumer 1) through the
@@ -95,7 +95,8 @@ Both contractions bind two K contributions per output region. Each hidden
 region becomes a transfer source after its numerical completion and an operand
 of the consumer's corresponding contraction contribution after arrival. The
 caller's terminal loop only reads returned results; it issues no intermediate
-numerical work. These are the functions traced in the source derivation above.
+numerical work. This staged execution did not split either contraction across participants.
+It does not demonstrate tensor-parallel work sharing.
 
 The terminal received region (1,0) followed by (0,0). Their actual values are
 [recorded here](../measurements/streaming-chain-2026-09-14.txt). The first entries
@@ -107,3 +108,33 @@ bindings establish their partial-input dependencies.
 The producer exited after consuming both regions. The consumer was then closed
 with SIGTERM. No reference evaluator, timing comparison, pass/fail threshold or
 runtime acceptance criterion was introduced.
+
+## What the execution record does not demonstrate
+
+The returned region order is not a demonstration of latency, low overhead,
+absence of synchronization, or a bounded nonblocking operation. It records an
+executed numerical chain. Those stronger properties were previously overstated.
+
+The source exposes these distinct costs and waits:
+
+| Boundary | Current mechanism | Consequence |
+|---|---|---|
+| Output claim | `mesh_issue_index` checks actual inputs and output reader ownership; `mesh_reset` clears presence and all 64 read planes before setting producing | Work proportional to covered words and reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
+| Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes each affected row onto compute/send lists and calls `sendto(MSG_DONTWAIT)` | Publication does not wait for delivery, but incurs atomic contention, list work and a socket call. CAS retries have no stated per-call time bound. |
+| Consumer discovery | `mesh_events` runs on a serial dispatch queue and traverses affected reader edges | Ready work can incur notification and queueing delay; asynchronous submission alone gives no bound on that delay. |
+| Numerical issue | `submit_ready` enters a dispatch group and invokes the prebound submit function; only synchronous CPU work uses a worker queue | CPU arithmetic executes away from the presence handler. Dispatch internals and worker scheduling are not shown to have zero contention or bounded latency. |
+| Transfer | Registered SEND/RECV with index descriptions and finite queue capacity | Capacity shortages defer posting. Reusing a receive destination depends on its actual readers. These are distinct from waiting for an unrelated tensor to finish. |
+| Terminal application | The example supplies every input block before entering a busy-poll output loop; formatting/printing occurs in that loop | Observed output order omits intermediate timing and includes application observation delay. |
+| Setup and destruction | Compiler process waits, synchronous registration/removal on the presence queue, and dispatch-group/semaphore waits during destruction | These boundaries explicitly wait; a claim about numerical publication must not be generalized to the complete program lifecycle. |
+
+For this particular call configuration a 16×16 FP32 tile contains 1,024 useful
+bytes. Its transferable backing block has four 16,384-byte pages. `mesh_realize`
+rounds the useful transfer length up to a 4,096-byte frame; the payload therefore
+uses 4,096 bytes before index traffic and device framing. These are source-derived
+sizes, not measured timings and not a placement policy.
+
+Publication-to-issue latency, enqueue overhead, transport delay, numerical
+execution duration and contention cost have not been separated by the recorded
+run. No numerical latency or overhead claim follows from it. The source shows
+which mathematical dependencies are local to a region; it does not by itself
+establish a wait-free guarantee for the complete implementation.

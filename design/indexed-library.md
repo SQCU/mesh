@@ -84,31 +84,29 @@ page maps and row-function layouts remain inside canonical mesh.
     H = U / (1 + exp(-U))
     Y = H W_down
 
-The producer owns U and H. Each completed H region is transferred into the
-consumer's configured tensor, where the second contraction consumes it as an
-independent K contribution. Completed Y regions return to the producer. All
-calls and transfer edges are bound before `realize()`. Intermediate numerical
-work has no caller launch loop, completion tokens or transport waits.
+The caller supplies two participants and a split of the hidden dimension.
+Participant p owns J_p and computes U_p = X W_up[:, J_p], H_p = swish(U_p),
+and D_p = H_p W_down[J_p, :]. Both participants receive replicated X and can
+start local arithmetic independently. The peer publishes D regions to the root;
+the root computes Y = D_root + D_peer with the existing add kernel. Only the
+local weight shard occupies canonical operand storage.
 
-The configured tile rows, K and columns determine the publication and arithmetic
-regions. The first contraction can compute available K contributions before the
-rest of X arrives. Swish reads completed U values; it does not operate on partial
-sums. The second contraction starts contributions for available H regions before
-other H regions arrive. Each output region finishes when its own required terms
-exist, independently of other output rows.
+All calls and transfer edges are bound before `realize()`. Missing regions
+constrain their own K contributions and matching output sums. Swish consumes
+completed U values, never unfinished contraction sums. No intermediate caller
+launch loop, hidden gather, or stage handoff schedules numerical work.
 
-Both participants use the same input and weight files and placement arguments;
-`--region` chooses each participant's configured local mesh region:
+Both participants use the same files and placement arguments; `--region` selects
+local mesh storage. For an input (rows, inner), weights (inner, hidden) and
+(hidden, columns), a caller-selected hidden split of 256 is expressed as:
 
 ```sh
 python examples/streaming-chain.py input.npy up.npy down.npy \
-  --producer 0 --consumer 1 --tile-rows 16 --tile-k 16 --tile-columns 16
+  --root 0 --peer 1 --split 256 --tile-rows 128 --tile-k 128 --tile-columns 128
 ```
 
-`input.npy` has shape (rows, inner), `up.npy` has shape (inner, hidden), and
-`down.npy` has shape (hidden, columns). Their numerical dtype and geometry are
-supplied configuration. The producer prints returned region coordinates and
-values as they become available. The consumer remains attached until terminated.
-The file supply and terminal output are application I/O, outside the numerical
-functions. This is operation-chain use, with no reference evaluator, assertions,
-performance target or acceptance procedure.
+The root prints reduced regions as they become available. The peer remains
+attached after publishing input, until terminated. File supply and terminal
+observation are application I/O outside numerical functions. This uses the
+[MLX tensor-parallel decomposition](algorithm-sources.md#pallas-panel-composition)
+with root-owned, region-wise reduction.
