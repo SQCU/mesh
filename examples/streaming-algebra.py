@@ -543,7 +543,7 @@ def main():
             graph = mx.Graph()
             with graph:
                 reduction_inputs = tuple(graph.input(name, (2, 5), dtype) for name, dtype in
-                                         (('signed', 'int64'), ('unsigned', 'uint64'), ('truth', 'float32'), ('extrema', 'float32')))
+                                         (('signed', 'int64'), ('unsigned', 'uint64'), ('truth', 'float32'), ('extrema', 'float32'), ('fractional', 'float32')))
                 cases, consumers = [], []
                 for rank, shape, axis in ((1, (10,), 0), (2, (2, 5), 1), (3, (2, 1, 5), 2)):
                     for operand, operation in ((0, 'max'), (0, 'min'), (1, 'max'), (1, 'min'), (2, 'any'), (2, 'all'), (3, 'max'), (3, 'min')):
@@ -555,6 +555,14 @@ def main():
                 outputs=consumers, root_peer=0, tile_rows=1, tile_columns=2)
             observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
                 for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
+            argument, = kernels.arguments(1)
+            for operation in ('any', 'all'):
+                expression = getattr(argument.sum() > 0, operation)()
+                result = program.kernel_call(kernels.expression(expression), grid=(2, 1),
+                    in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, 1), lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct((2, 1), np.bool_), peer=0)(reduction_storage[4])
+                observations += (tuple((i, j, program.export(ref)) for (i, j), ref in sorted(result.blocks.items())),)
+                cases.append((2, (2, 5), 1, 4, 'sum_' + operation))
             generations = []
             for generation in range(2):
                 signed = np.array([[-2**63, -2**53-1, 0, 2**53+1, 2**63-1],
@@ -566,10 +574,15 @@ def main():
                 extrema = np.full((2, 5), np.nan, dtype=np.float32)
                 if not generation:
                     extrema[1] = [np.nan, -.25, 3, -0.0, np.nan]
-                values = (signed[::-1] if generation else signed, unsigned[::-1] if generation else unsigned, truth, extrema)
+                fractional = np.array([[.125, .25, 0, 0, 0], [-.125, -.25, 0, 0, 0]], dtype=np.float32)
+                values = (signed[::-1] if generation else signed, unsigned[::-1] if generation else unsigned, truth, extrema,
+                          fractional[::-1] if generation else fractional)
                 expected = []
                 for rank, shape, axis, operand, operation in cases:
                     data = values[operand].reshape(shape)
+                    if operand == 4:
+                        expected.append(getattr(np, operation[4:])(data.sum(axis=1, keepdims=True) > 0, axis=1, keepdims=True))
+                        continue
                     result = ((np.fmax if operation == 'max' else np.fmin).reduce(data, axis=axis, keepdims=True,
                         initial=-np.inf if operation == 'max' else np.inf) if operand == 3 else
                         getattr(np, operation)(data, axis=axis, keepdims=True))
