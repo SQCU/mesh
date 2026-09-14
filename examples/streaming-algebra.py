@@ -279,29 +279,39 @@ def main():
                 result=streamed_result.array.tolist())), flush=True)
             if not generation:
                 streamed_result.consume()
-        scatter_start = time.monotonic_ns()
-        routing = np.array([[0], [2], [0], [3], [2], [2]], dtype=np.int64)
-        for i in range(3):
-            with program.write(scatter_indices[i, 0]) as destination:
-                destination[...] = routing[2*i:2*i+2]
-        for i in range(2):
-            with program.write(scatter_updates[i, 0]) as destination:
-                destination[...] = np.arange(2*i+1, 2*i+3, dtype=dtype)[:, None]
-        wait_for(tuple(scatter_results[i] for i in (0, 1, 3)))
-        if scatter_results[2].ready or scatter_updates[2, 0].present:
-            raise ArithmeticError('Delayed scatter contribution was not independent')
-        first_scatter_ns = time.monotonic_ns() - scatter_start
-        for i, expected in ((0, 8), (1, 0), (3, 8)):
-            if not np.array_equal(scatter_results[i].array, np.full((1, 4), expected, dtype=dtype)):
-                raise ArithmeticError('Early scattered sum or consumer differs')
-        with program.write(scatter_updates[2, 0]) as destination:
-            destination[...] = np.array([[5], [6]], dtype=dtype)
-        wait_for((scatter_results[2],))
-        if not np.array_equal(scatter_results[2].array, np.full((1, 4), 14, dtype=dtype)):
-            raise ArithmeticError('Duplicate or masked scatter contribution differs')
-        print(json.dumps(dict(event='indexed_add', first_consumer_ns=first_scatter_ns,
-            complete_ns=time.monotonic_ns()-scatter_start,
-            delayed_destination=2, result=[result.array.tolist() for result in scatter_results])), flush=True)
+        for generation in range(2):
+            scatter_start = time.monotonic_ns()
+            routing = np.array([[0], [2], [0], [3], [2], [2]] if not generation else
+                               [[3], [2], [3], [0], [2], [2]], dtype=np.int64)
+            for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values()):
+                while not ref.writable:
+                    if time.monotonic_ns() - scatter_start > 60_000_000_000:
+                        raise TimeoutError('Scatter source lifetime was not retired')
+                    time.sleep(0.0001)
+            for i in range(3):
+                with program.write(scatter_indices[i, 0]) as destination:
+                    destination[...] = routing[2*i:2*i+2]
+            for i in range(2):
+                with program.write(scatter_updates[i, 0]) as destination:
+                    destination[...] = np.arange(2*i+1+generation, 2*i+3+generation, dtype=dtype)[:, None]
+            wait_for(tuple(scatter_results[i] for i in (0, 1, 3)))
+            if scatter_results[2].ready or not scatter_updates[2, 0].writable:
+                raise ArithmeticError('Delayed scatter contribution was not independent')
+            first_scatter_ns = time.monotonic_ns() - scatter_start
+            for i, expected in ((0, 10 if generation else 8), (1, 0), (3, 12 if generation else 8)):
+                if not np.array_equal(scatter_results[i].array, np.full((1, 4), expected, dtype=dtype)):
+                    raise ArithmeticError('Early scattered sum or consumer differs')
+            with program.write(scatter_updates[2, 0]) as destination:
+                destination[...] = np.array([[5+generation], [6+generation]], dtype=dtype)
+            wait_for((scatter_results[2],))
+            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 18 if generation else 14, dtype=dtype)):
+                raise ArithmeticError('Duplicate or masked scatter contribution differs')
+            print(json.dumps(dict(event='indexed_add', generation=generation, first_consumer_ns=first_scatter_ns,
+                complete_ns=time.monotonic_ns()-scatter_start,
+                delayed_destination=2, result=[result.array.tolist() for result in scatter_results])), flush=True)
+            if not generation:
+                for result in scatter_results:
+                    result.consume()
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
         report = program.report
