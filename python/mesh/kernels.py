@@ -1348,7 +1348,7 @@ class _ExpressionRegions:
             target = direct if direct is not None and output == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             inputs = (parts[left_index], parts[right_index])
             if node.operation == 'sum' and dtype.kind == 'f':
-                _bind_operation(self.program, 1, inputs, target, beta=1)
+                add.bind(self.program, inputs, (target,))
             else:
                 left, right = arguments(2)
                 bits = 0xffffffffffffffff
@@ -1372,14 +1372,14 @@ class _ExpressionRegions:
             return
         if len(parts) == 2:
             destination = target if target.dtype == np.dtype('float32') else self.temporary(target.shape)
-            _bind_operation(self.program, 1, parts, destination, beta=1)
+            add.bind(self.program, parts, (destination,))
             parts = (destination,)
         if parts[0] is not target:
             if target.dtype.kind in 'iub':
                 symbol, = arguments(1)
                 _ExpressionKernel((symbol,)).bind(self.program, parts, (target,), self.coordinate)
             else:
-                _bind_operation(self.program, 0, parts, target)
+                expression(arguments(1)[0]).bind(self.program, parts, (target,))
 
     # design/algorithm-sources.md#in-operation-publication
     def inline_reduction(self, node, expression, origin, shape, dtype, external):

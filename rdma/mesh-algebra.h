@@ -12,7 +12,7 @@ extern "C" {
 
 /* design/streaming-algebra.md */
 enum mesh_scalar { MESH_F16, MESH_F32, MESH_I32, MESH_U32, MESH_I64, MESH_U64, MESH_U8, MESH_BOOL };
-enum mesh_algebra_op { MESH_AFFINE, MESH_ADD, MESH_MULTIPLY, MESH_TANH, MESH_EXP, MESH_SUM, MESH_CONTRACT, MESH_RSQRT, MESH_SWISH };
+enum mesh_algebra_op { MESH_CONTRACT = 6 };
 struct mesh_algebra;
 struct mesh_tensor;
 struct mesh_shape { size_t rows,columns; enum mesh_scalar scalar; };
