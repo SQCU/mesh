@@ -303,3 +303,53 @@ arrives, without allocating the primal operand. This is bounded numerical and
 source-lifetime evidence, not a matched throughput gain or complete derivative
 coverage. Finer physical partial storage, repeated readiness traversal, general
 rank/fusion, placement and the plan's final no-regression audit remain open.
+
+## Composed contraction epilogues
+
+`3288be4` replaces root-only dot dispatch with recursive pointwise epilogue
+lowering in the existing expression compiler. Native FP32 K-panel contractions
+and intermediate pairwise reductions are shared by identical contractions in
+one grid coordinate. Repeated occurrences also retain the same expression input
+identities. The last one or two partials feed the existing scalar emitter,
+combining final summation, pointwise work and output conversion in one function.
+A separately requested bare contraction retains independent publication and
+canonical reader lifetime; it does not acquire the epilogue's extra operands.
+Computed contraction operands and shape-changing dot reductions remain open.
+
+The existing streaming-algebra example at `e8ebac1` requests
+`expression(dot(a,b)*2+bias, dot(a,b))` over three independently supplied rows,
+with a ragged two-panel K contraction and transposed weight backing. It supplies
+row 1 without bias, observes the bare contraction while its epilogue remains
+unavailable, then supplies that bias and observes the epilogue while rows 0 and
+2 remain unpublished. It finishes those rows and repeats using the same storage.
+Both CPU and Metal match exact dyadic reference values in both occurrences.
+
+The native trace retains two shared contraction-panel functions, one fused
+epilogue and one bare-result addition per row: twelve configured functions and
+24 numerical submissions over two occurrences. For row 1 in both local traces,
+partials start at canonical rows 196 and 200; epilogue output 168 reads those
+and bias 152, while bare output 180 reads only the two partials. This is direct
+dependency evidence, not a reconstruction from timing. No scalar callback,
+extra host operand store or invocation-time allocation implements this change.
+The remaining K-panel storage and native launch costs have not disappeared.
+
+Local CPU/Metal runs use 4097 scatter updates, 2049-row chunks, 17 destinations,
+three gold invocations and the existing Xonotic forward/derivative cases.
+Both finish 2091 numerical submissions; unchanged gold maximum absolute errors
+are approximately 1.65e-6 and 1.85e-6 respectively. `composed-provenance.json`
+and compressed `composed-{cpu,metal}` observations/traces retain source and
+configuration under `measurements/lowering-2026-09-13`. These observations do
+not establish matched throughput improvement or complete general composition.
+
+The paired CPU and Metal float16 runs also pass at example `88cba6a` with
+67 updates in 33-row chunks and 17 destinations. Installed local library is
+`e8ebac1`; installed peer library is `88cba6a` (identical numerical source).
+The distributed gold maximum errors are 0.001953125 and 0.00390625 under the
+unchanged tolerance, and all 65 remote fanout branches match both occurrences.
+Rank zero finishes 1357 submissions in each backend. Indexed and composed-dot
+side cases execute on rank zero; these runs do not establish remote scatter or
+remote composed-dot candidate lifetime coverage. Both peer processes terminate
+normally with SIGTERM after writing their traces. The paired observations,
+both participants' traces and exact provenance are archived alongside the local
+records. Broad expression/rank lowering, remaining caller migrations, storage
+and launch optimization, and matched end-to-end performance remain open.
