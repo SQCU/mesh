@@ -164,6 +164,19 @@ def main():
             in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, 1), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((4, 1), np.int64), peer=0)(integer_input)
         integer_results = tuple(program.export(integer_sum[i, 0]) for i in range(4))
+        quotient_cases = []
+        for scalar, numerators, divisors in (
+                (np.int64, (2**53+1, -7, 7, -7, -(2**63)), (3, 3, -3, -3, 3)),
+                (np.uint64, (2**64-1, 2**63+1, 2**53+1), (3, 7, 2))):
+            numerator, divisor = kernels.arguments(2)
+            shape = (1, len(numerators))
+            quotient = program.kernel_call(kernels.expression(numerator // divisor, numerator % divisor),
+                grid=(1,), in_specs=(BlockSpec(None),) * 2,
+                out_specs=(BlockSpec(shape, lambda i: (0, 0)),) * 2,
+                out_shape=(ShapeDtypeStruct(shape, scalar),) * 2, peer=0)(
+                    weight(np.array([numerators], dtype=scalar)), weight(np.array([divisors], dtype=scalar)))
+            quotient_cases.append((tuple(program.export(tensor[0, 0]) for tensor in quotient),
+                [[a // b for a, b in zip(numerators, divisors)]], [[a % b for a, b in zip(numerators, divisors)]]))
         norm_generations = tuple((values, reference_norm(values, norm_gamma)) for values in
             ((np.arange(1, 19, dtype=np.float32).reshape(3, 6) / 16 + generation / 8).astype(dtype)
              for generation in range(2)))
@@ -182,13 +195,14 @@ def main():
         table_data = np.arange(12, dtype=dtype).reshape(3, 4)
         indexed_body = 2 * table_arg.at(index_arg, column_arg, mask=(index_arg >= 0) & (index_arg < 3)) + kernels.select(index_arg.equal(2**53 + 1), 1, 0)
         deferred_input = program.tensor((2, 4), dtype=dtype)
-        indexed_outputs = program.kernel_call(kernels.expression(indexed_body, deferred_arg * 3), grid=(1,),
+        logical_bounds = table_arg.reshape((3, 2, 2)).at(0, 0, column_arg, other=-1)
+        indexed_outputs = program.kernel_call(kernels.expression(indexed_body, deferred_arg * 3, logical_bounds), grid=(1,),
             in_specs=(BlockSpec((3, 4), lambda i: (0, 0)), BlockSpec((2, 1), lambda i: (0, 0)),
                       BlockSpec((2, 4), lambda i: (0, 0))),
-            out_specs=(BlockSpec((2, 4), lambda i: (0, 0)), BlockSpec((2, 4), lambda i: (0, 0))),
-            out_shape=(ShapeDtypeStruct((2, 4), dtype), ShapeDtypeStruct((2, 4), dtype)), peer=0)(
+            out_specs=(BlockSpec((2, 4), lambda i: (0, 0)),) * 3,
+            out_shape=(ShapeDtypeStruct((2, 4), dtype),) * 3, peer=0)(
                 weight(table_data), weight(index_data), deferred_input)
-        indexed, deferred_output = (program.export(value[0, 0]) for value in indexed_outputs)
+        indexed, deferred_output, logical_bounds_result = (program.export(value[0, 0]) for value in indexed_outputs)
         streamed_table = program.tensor((4, 4), (2, 4), dtype=dtype)
         streamed_indices = weight(np.array([[2], [3]], dtype=np.int64))
         source_arg, selected_arg = kernels.arguments(2)
@@ -234,12 +248,22 @@ def main():
                 joined = mx.concatenate((selected, tail), axis=0)
                 means = mx.mean(source, axis=1)
                 total_mean = mx.sum(means)
+                logical_indices = indices.reshape(2, 2, 1)
+                taken = mx.take_along_axis(selected.reshape(2, 2, 4), logical_indices, axis=2)
+                broadcast_taken = mx.take_along_axis(selected[:2].reshape(1, 2, 4), logical_indices, axis=2)
+                transposed = selected[:, :, None].transpose(0, 2, 1)
+                rank_joined = mx.concatenate((transposed, transposed), axis=1)
+                reshaped = selected.reshape(2, 4, 2)[:, :, ::-1]
+            logical_values = dict(take=taken, broadcast_take=broadcast_taken,
+                transpose=transposed, concatenate=rank_joined, reshape_gather=reshaped)
             lowered = kernel_calls(program, graph, (),
                 {source.index: x_source, indices.index: x_indices, tail.index: x_tail},
-                outputs=(joined, means, total_mean), root_peer=0, tile_rows=2, tile_columns=4)
+                outputs=(joined, means, total_mean, *logical_values.values()), root_peer=0, tile_rows=2, tile_columns=4)
             observations = tuple(program.export(lowered[joined.index][i, 0]) for i in range(3))
             mean_results = tuple(program.export(lowered[means.index][i, 0]) for i in range(2))
             total_result = program.export(lowered[total_mean.index][0, 0])
+            logical_results = {name: tuple(program.export(ref) for _, ref in sorted(lowered[value.index].blocks.items()))
+                for name, value in logical_values.items()}
             bindings = {}
             for name, references in (
                     ('source', tuple(sorted(x_source.blocks.items()))),
@@ -598,11 +622,24 @@ def main():
         print(json.dumps(dict(event='integer_reduction', output=[result.array.tolist() for result in integer_results])), flush=True)
         for result in integer_results:
             result.consume()
+        for results, quotient, remainder in quotient_cases:
+            wait_for(results)
+            if results[0].array.tolist() != quotient or results[1].array.tolist() != remainder:
+                raise ArithmeticError('Integer index quotient/remainder lost exact value or floor semantics')
+            print(json.dumps(dict(event='integer_index_arithmetic', dtype=str(results[0].array.dtype),
+                quotient=results[0].array.tolist(), remainder=results[1].array.tolist())), flush=True)
+            for result in results:
+                result.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
             raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
         print(json.dumps(dict(event='indexed', result=indexed.array.tolist())), flush=True)
         indexed.consume()
+        wait_for((logical_bounds_result,))
+        if not np.array_equal(logical_bounds_result.array, [[0, 1, -1, -1], [0, 1, -1, -1]]):
+            raise ArithmeticError('Logical axis bounds aliased another valid physical address')
+        print(json.dumps(dict(event='logical_bounds', output=logical_bounds_result.array.tolist())), flush=True)
+        logical_bounds_result.consume()
         if deferred_output.ready:
             raise ArithmeticError('Missing input produced an output')
         with program.write(deferred_input[0, 0]) as destination:
@@ -641,6 +678,22 @@ def main():
                     destination[...] = tail_values
                 wait_for((observations[0], observations[2], mean_results[early_source]))
                 mean_expected = source_values.astype(np.float64).mean(axis=1, keepdims=True)
+                selected_expected = expected[:4]
+                logical_expected = dict(
+                    take=np.take_along_axis(selected_expected.reshape(2, 2, 4), index_values.reshape(2, 2, 1), axis=2).reshape(4, 1),
+                    broadcast_take=np.take_along_axis(selected_expected[:2].reshape(1, 2, 4), index_values.reshape(2, 2, 1), axis=2).reshape(4, 1),
+                    transpose=selected_expected, concatenate=np.repeat(selected_expected, 2, axis=0),
+                    reshape_gather=selected_expected.reshape(2, 4, 2)[:, :, ::-1].reshape(8, 2))
+                logical_early = {name: results[:len(results)//2] for name, results in logical_results.items()}
+                wait_for(tuple(result for results in logical_early.values() for result in results))
+                for name, results in logical_early.items():
+                    if not np.array_equal(np.concatenate([result.array for result in results]), logical_expected[name][:2*len(results)]):
+                        raise ArithmeticError(f'Logical indexed early output differs: {name}')
+                    if any(result.ready for result in logical_results[name][len(results):]):
+                        raise ArithmeticError(f'Logical indexing consumed an unpublished region: {name}')
+                print(json.dumps(dict(event='xonotic_logical_early', generation=generation,
+                    withheld_source_block=1-early_source, withheld_index_block=1,
+                    output={name: [result.array.tolist() for result in results] for name, results in logical_early.items()})), flush=True)
                 if total_result.ready or not np.array_equal(mean_results[early_source].array, mean_expected[2*early_source:2*early_source+2]):
                     raise ArithmeticError('Xonotic row reduction lost independent source progress')
                 if observations[1].ready:
@@ -659,7 +712,7 @@ def main():
                     destination[...] = source_values[2*(1-early_source):2*(1-early_source)+2]
                 with program.write(x_indices[0, 1]) as destination:
                     destination[...] = index_values[2:]
-                wait_for((*observations, *mean_results, total_result))
+                wait_for((*observations, *mean_results, total_result, *(result for results in logical_results.values() for result in results)))
                 if not np.array_equal(np.concatenate([result.array for result in mean_results]), mean_expected) or total_result.array.item() != mean_expected.sum():
                     raise ArithmeticError('Xonotic matrix/vector reduction mismatch')
                 print(json.dumps(dict(event='xonotic_reductions', generation=generation, early_source_block=early_source,
@@ -669,7 +722,12 @@ def main():
                         raise ArithmeticError('Xonotic gather/concatenate output differs after reuse')
                 print(json.dumps(dict(event='xonotic_indexed_complete', generation=generation,
                     output=[result.array.tolist() for result in observations])), flush=True)
-                for result in (*observations, *mean_results, total_result):
+                for name, results in logical_results.items():
+                    if not np.array_equal(np.concatenate([result.array for result in results]), logical_expected[name]):
+                        raise ArithmeticError(f'Logical indexed output differs after reuse: {name}')
+                print(json.dumps(dict(event='xonotic_logical_complete', generation=generation,
+                    output={name: [result.array.tolist() for result in results] for name, results in logical_results.items()})), flush=True)
+                for result in (*observations, *mean_results, total_result, *(result for results in logical_results.values() for result in results)):
                     result.consume()
         if xonotic_gradient is not None:
             gradient_indices, cotangents, gradient_results, generations = xonotic_gradient

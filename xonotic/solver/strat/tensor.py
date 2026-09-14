@@ -414,11 +414,19 @@ def take(value, indices, axis=None):
     return value[(slice(None),) * (axis % value.ndim) + (indices,)]
 
 
+# ../../../design/algorithm-sources.md#xonotic-logical-indexing
 def take_along_axis(value, indices, axis):
     if not isinstance(value, Tensor): return mlx.take_along_axis(value, indices, axis=axis)
-    shape = list(value.shape)
+    indices = value.graph.constant(indices)
+    if indices.ndim != value.ndim or not indices.dtype.startswith(('int', 'uint')):
+        raise ValueError('take_along_axis requires equal ranks and integer indices')
+    if not -value.ndim <= axis < value.ndim:
+        raise ValueError('take_along_axis axis is outside the logical rank')
+    axis %= value.ndim
+    source_shape = tuple(1 if i == axis else size for i, size in enumerate(value.shape))
+    shape = list(broadcast_shape(source_shape, indices.shape))
     shape[axis] = indices.shape[axis]
-    return value.graph.node('take_along_axis', (value, indices), tuple(shape), value.dtype, axis=axis % value.ndim)
+    return value.graph.node('take_along_axis', (value, indices), tuple(shape), value.dtype, axis=axis)
 
 
 def argpartition(value, kth, axis=-1):
