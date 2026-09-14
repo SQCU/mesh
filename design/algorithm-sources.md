@@ -1278,7 +1278,7 @@ expression through the existing `Program.kernel_call`, with logical whole-input
 BlockSpecs and ordinary output-region maps. Its setup K-tile choice is metadata,
 not a runtime branch in the numerical call graph.
 
-`_dot_parts` owns contraction partition and reduction construction. K boundaries
+`_ContractionRegions.parts` owns contraction partition and reduction construction. K boundaries
 respect the actual left/right backing partitions. Every K panel binds the existing
 native `kernels.matmul` implementation and writes an FP32 partial. The existing
 native `kernels.add` combines them in the same pairwise tree used by `nn.linear`
@@ -1308,7 +1308,7 @@ remains distinct lowering work.
 
 ### Mapped and whole-reference dot operands
 
-`_dot_parts` resolves each non-None input BlockSpec at every configured grid
+`_ContractionRegions.parts` resolves each non-None input BlockSpec at every configured grid
 coordinate. Its local M/K/N dimensions, transposed strides and offset are the
 actual operand, not a hint discarded in favor of the containing Tensor. K
 panels slice that resolved Ref. A None BlockSpec retains the whole logical
@@ -1353,13 +1353,65 @@ bare FP32 output directly; epilogue readers then hold its canonical lifetime.
 With multiple panels, the bare output uses its native final reduction while an
 epilogue independently fuses those same last partials.
 
-Dot operands currently remain logical input references: computed operands such
-as `dot(a*scale,b)` or nested contractions require further lowering. Indexed
-addition remains an output-root operation. Shape-changing reductions of a dot
-are not generalized here; this increment composes pointwise epilogues over each
-configured contraction output region. There is no fallback that materializes a
+Indexed addition remains an output-root operation. Shape-changing reductions
+of a dot are not generalized here. Computed contraction operands use the region
+demand lowering described below. There is no fallback that materializes a
 whole operand or waits for unrelated regions. Python compilation checks the
 implementation; the existing streamed gold example supplies runtime evidence.
+
+
+### Region-demand computed contraction operands
+
+The JAX authors' [Pallas BlockSpec documentation](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+defines program-specific operand regions, while the cited Pallas pipelining
+material distinguishes tiled dependencies from full-array sequencing.
+`_ContractionRegions` applies these region and dependency principles to the
+existing expression representation and native operations. For example:
+
+```python
+x, w1, w2 = kernels.arguments(3)
+h = kernels.dot(x, w1, tile_k=2)
+f = kernels.expression(kernels.dot(h / (1 + (0-h).exp()), w2, tile_k=2))
+```
+
+`layout` propagates natural two-dimensional shapes, per-axis local/global domains,
+and actual backing boundaries through broadcast pointwise expressions and nested
+dots. A dot inherits its row domain from its left operand and column domain from
+its right operand. Nonbroadcast mapped participants preserve local pointwise
+axis ownership even when another input uses whole-tensor storage. Mapped refs
+retain their resolved offsets and transposed strides; whole refs retain their
+logical coordinates. K-panel boundaries respect the backing cuts propagated
+from both operand expressions, including hidden columns produced by an inner dot.
+Ragged logical lengths are not treated as additional periodic backing cuts.
+
+`parts` requests each left M×K panel and right K×N panel separately. `panel`
+returns actual input refs directly, or allocates only the requested computed
+region in canonical FP32 storage. `emit` recursively substitutes inner dot
+partials into the shared scalar emitter, fusing their final sum with pointwise
+arithmetic. Thus an outer contraction can consume a completed hidden panel while
+other hidden panels have not arrived. No full hidden tensor or whole-intermediate
+publication exists. `publish` retains the native final-sum/cast path for exposed
+bare contractions. Mixed half/float operand handling stays in the existing native
+matmul owner; computed intermediates are FP32, without intermediate half stores.
+
+`key` retains the expression, demanded origin/shape and actual used input
+identities. Whole tensor identities and mapped ref offsets/strides distinguish
+values; irrelevant grid axes do not. The cache is shared across grid coordinates,
+so a left panel can serve multiple output column tiles and a right panel multiple
+output row tiles. `program_id` is specialized to its original coordinate before
+caching, preventing reuse of numerically different programs. Canonical reader
+members retain shared regions until every configured consumer has completed.
+
+Computed operands currently support pointwise expressions and nested dots;
+computed indexed loads and reductions need additional shape/dependency lowering
+and fail explicitly. Existing epilogue indexed loads keep their selected-reader
+path. Non-singleton operand dimensions must match in their resolved domains;
+a whole four-row value plus a mapped two-row value inside one computed operand
+requires explicit matching maps. Direct inputs whose requested M/N region spans
+multiple backing extents remain outside the native single-ref binding contract;
+there is no dense copy or alternate backend fallback. Python compilation and
+source review validate setup construction; operational evidence comes from the
+existing streamed nested-contraction gold case.
 
 ## Canonical reader groups
 

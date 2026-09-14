@@ -772,89 +772,204 @@ def _bind_operation(program, operation, inputs, target):
         inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
 
 
-# design/algorithm-sources.md#shared-contraction-lowering
-def _dot_parts(program, expression, input_specs, coordinate, target, row, column, direct):
-    from math import gcd
-    if any(value.operation != 'input' for value in expression.operands):
-        raise ValueError('Contraction operands require logical input references')
-    specs = tuple(input_specs[value.value] for value in expression.operands)
-    left, right = (spec.resolve(coordinate) for spec in specs)
-    inner = left.shape[1]
-    if inner != right.shape[0] or (specs[0].block_shape is not None and left.shape[0] != target.shape[0]) or (specs[1].block_shape is not None and right.shape[1] != target.shape[1]):
-        raise ValueError('Mapped contraction dimensions differ')
-    tile = min(expression.value, inner)
-    for spec, operand, axis in zip(specs, (left, right), (1, 0)):
-        if spec.block_shape is None and operand.grid[axis] > 1:
-            tile = gcd(tile, operand.block_shape[axis])
+class _ContractionRegions:
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def __init__(self, program, specs, coordinate, cache):
+        self.program, self.coordinate, self.cache = program, coordinate, cache
+        self.sources = tuple(spec.resolve(coordinate) for spec in specs)
+        self.whole = tuple(spec.block_shape is None for spec in specs)
+        self.layouts = {}
 
     # design/algorithm-sources.md#shared-contraction-lowering
-    def temporary():
-        return program.tensor(target.shape, dtype=np.float32)[0, 0]
+    def layout(self, node):
+        from math import gcd
+        if node in self.layouts:
+            return self.layouts[node]
+        if node.operation == 'input':
+            source = self.sources[node.value]
+            shape = source.shape
+            result = shape, (self.whole[node.value],) * 2, source.block_shape if self.whole[node.value] else shape
+        elif node.operation in ('literal', 'program_id', 'row', 'column'):
+            result = (1, 1), (False, False), (1, 1)
+        elif node.operation == 'dot':
+            left, right = map(self.layout, node.operands)
+            if left[0][1] != right[0][0]:
+                raise ValueError('Contraction inner dimensions differ')
+            result = (left[0][0], right[0][1]), (left[1][0], right[1][1]), (left[2][0], right[2][1])
+        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh'):
+            children = tuple(map(self.layout, node.operands))
+            shape = tuple(max(child[0][axis] for child in children) for axis in range(2))
+            if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
+                raise ValueError('Computed contraction operand shapes must broadcast')
+            global_axes, steps = [], []
+            for axis in range(2):
+                participating = tuple(child for child in children if child[0][axis] == shape[axis])
+                global_axes.append(all(child[1][axis] for child in participating))
+                cuts = tuple(child[2][axis] for child in participating if child[2][axis] < child[0][axis])
+                step = cuts[0] if cuts else shape[axis]
+                for cut in cuts[1:]:
+                    step = gcd(step, cut)
+                steps.append(step)
+            result = shape, tuple(global_axes), tuple(steps)
+        else:
+            raise ValueError('Computed contraction operands require pointwise expressions or contractions')
+        self.layouts[node] = result
+        return result
 
-    parts = []
-    for start in range(0, inner, tile):
-        length = min(tile, inner - start)
-        destination = target if direct and tile == inner and target.dtype == np.dtype('float32') else temporary()
-        left_panel = left.region(row, start, target.shape[0], length) if specs[0].block_shape is None else left.slice(0, start, target.shape[0], length)
-        right_panel = right.region(start, column, length, target.shape[1]) if specs[1].block_shape is None else right.slice(start, 0, length, target.shape[1])
-        _bind_operation(program, matmul, (left_panel, right_panel), destination)
-        parts.append(destination)
-    while len(parts) > 2:
-        reduced = []
-        for index in range(0, len(parts), 2):
-            if index + 1 == len(parts):
-                reduced.append(parts[index])
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def key(self, node, origin, shape):
+        used = set()
+
+        # design/algorithm-sources.md#shared-contraction-lowering
+        def visit(value):
+            if value.operation in ('input', 'load'):
+                used.add(value.value)
+            for child in value.operands:
+                visit(child)
+
+        visit(node)
+        identities = []
+        for index in sorted(used):
+            source = self.sources[index]
+            if self.whole[index]:
+                identities.append((index, id(source)))
             else:
-                destination = temporary()
-                _bind_operation(program, add, parts[index:index + 2], destination)
-                reduced.append(destination)
-        parts = reduced
-    return tuple(parts)
+                view = source.view
+                identities.append((index, view.tensor, view.extent, view.offset, view.rows, view.columns, view.row_stride, view.column_stride))
+        return node, tuple(identities), origin, shape
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def temporary(self, shape):
+        return self.program.tensor(shape, dtype=np.float32)[0, 0]
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def panel(self, node, origin, shape):
+        if node.operation == 'input':
+            source = self.sources[node.value]
+            return source.region(*origin, *shape) if self.whole[node.value] else source.slice(*origin, *shape)
+        key = ('panel', self.key(node, origin, shape))
+        if key not in self.cache:
+            target = self.temporary(shape)
+            if node.operation == 'dot':
+                self.publish(self.parts(node, origin, shape, target), target)
+            else:
+                self.emit(node, origin, shape, target)
+            self.cache[key] = target
+        return self.cache[key]
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def parts(self, node, origin, shape, direct=None):
+        from math import gcd
+        key = ('parts', self.key(node, origin, shape))
+        if key in self.cache:
+            return self.cache[key]
+        left, right = node.operands
+        left_layout, right_layout = self.layout(left), self.layout(right)
+        inner = left_layout[0][1]
+        if inner != right_layout[0][0]:
+            raise ValueError('Contraction inner dimensions differ')
+        tile = min(node.value, inner)
+        for layout, axis in ((left_layout, 1), (right_layout, 0)):
+            if layout[2][axis] < layout[0][axis]:
+                tile = gcd(tile, layout[2][axis])
+        parts = []
+        for start in range(0, inner, tile):
+            length = min(tile, inner - start)
+            destination = direct if direct is not None and tile == inner and direct.dtype == np.dtype('float32') else self.temporary(shape)
+            left_panel = self.panel(left, (origin[0], start), (shape[0], length))
+            right_panel = self.panel(right, (start, origin[1]), (length, shape[1]))
+            _bind_operation(self.program, matmul, (left_panel, right_panel), destination)
+            parts.append(destination)
+        while len(parts) > 2:
+            reduced = []
+            for index in range(0, len(parts), 2):
+                if index + 1 == len(parts):
+                    reduced.append(parts[index])
+                else:
+                    destination = self.temporary(shape)
+                    _bind_operation(self.program, add, parts[index:index + 2], destination)
+                    reduced.append(destination)
+            parts = reduced
+        self.cache[key] = tuple(parts)
+        return self.cache[key]
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def publish(self, parts, target):
+        if len(parts) == 2:
+            destination = target if target.dtype == np.dtype('float32') else self.temporary(target.shape)
+            _bind_operation(self.program, add, parts, destination)
+            parts = (destination,)
+        if parts[0] is not target:
+            _bind_operation(self.program, affine(), parts, target)
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def emit(self, value, origin, shape, target, external=False):
+        inputs, replacements = [], {}
+
+        # design/algorithm-sources.md#shared-contraction-lowering
+        def reference(key, refs):
+            if key not in replacements:
+                terms = tuple(_Expression('input', value=len(inputs) + index) for index in range(len(refs)))
+                inputs.extend(refs)
+                replacements[key] = terms[0] if len(terms) == 1 else terms[0] + terms[1]
+            return replacements[key]
+
+        # design/algorithm-sources.md#shared-contraction-lowering
+        def lower(node):
+            if node.operation == 'dot':
+                layout = self.layout(node)
+                where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
+                extent = tuple(1 if layout[0][axis] == 1 else shape[axis] for axis in range(2))
+                return reference(('dot', node, where, extent), self.parts(node, where, extent))
+            if node.operation == 'input':
+                source = self.sources[node.value]
+                if external and not self.whole[node.value]:
+                    ref = source
+                else:
+                    where = tuple(0 if source.shape[axis] == 1 else origin[axis] for axis in range(2))
+                    extent = tuple(1 if source.shape[axis] == 1 else shape[axis] for axis in range(2))
+                    ref = self.panel(node, where, extent)
+                return reference(('input', node.value), (ref,))
+            if node.operation == 'load':
+                symbol = reference(('load_source', node.value), (self.sources[node.value],))
+                return _Expression('load', tuple(lower(child) for child in node.operands), symbol.value)
+            if node.operation in ('row', 'column') and not external:
+                axis = 0 if node.operation == 'row' else 1
+                return node + origin[axis]
+            if node.operation == 'indexed_add':
+                raise ValueError('Indexed addition requires an output root')
+            if node.operation == 'sum' and _contains_dot(node):
+                raise ValueError('Contraction reductions require an explicit region output')
+            return _Expression(node.operation, tuple(lower(child) for child in node.operands), node.value)
+
+        lowered = lower(value)
+        _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _lower_dot_expressions(program, expressions, grid, input_specs, output_specs):
     import itertools
+    cache = {}
     for coordinate in itertools.product(*(range(length) for length in grid)):
-        contractions = {}
-        for value, spec in zip(expressions, output_specs):
+        lowering = _ContractionRegions(program, input_specs, coordinate, cache)
+
+        # design/algorithm-sources.md#shared-contraction-lowering
+        def specialize(node):
+            if node.operation == 'program_id':
+                return _literal(coordinate[node.value])
+            return _Expression(node.operation, tuple(specialize(child) for child in node.operands), node.value)
+
+        for expression, spec in zip(expressions, output_specs):
+            value = specialize(expression)
             target = spec.resolve(coordinate)
-            row, column = (index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
-            inputs = [source.resolve(coordinate) for source in input_specs]
-            replacements = {}
-
-            # design/algorithm-sources.md#shared-contraction-lowering
-            def lower(node):
-                if node.operation == 'indexed_add':
-                    raise ValueError('Indexed addition requires an output root')
-                if node.operation != 'dot':
-                    return _Expression(node.operation, tuple(lower(child) for child in node.operands), node.value)
-                if any(child.operation != 'input' for child in node.operands):
-                    raise ValueError('Contraction operands require logical input references')
-                sources = tuple(input_specs[child.value] for child in node.operands)
-                if all(source.block_shape is None for source in sources) and spec._tensor.shape != (sources[0]._tensor.shape[0], sources[1]._tensor.shape[1]):
-                    raise ValueError('Contraction output shape differs from its logical operands')
-                key = (node, row, column, target.shape)
-                if key not in contractions:
-                    contractions[key] = _dot_parts(program, node, input_specs, coordinate, target, row, column, node is value)
-                if key not in replacements:
-                    parts = contractions[key]
-                    terms = tuple(_Expression('input', value=len(inputs) + index) for index in range(len(parts)))
-                    inputs.extend(parts)
-                    replacements[key] = terms[0] if len(terms) == 1 else terms[0] + terms[1]
-                return replacements[key]
-
-            lowered = lower(value)
+            origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
             if value.operation == 'dot':
-                parts = contractions[(value, row, column, target.shape)]
-                if len(parts) == 2:
-                    if target.dtype == np.dtype('float32'):
-                        _bind_operation(program, add, parts, target)
-                        continue
-                    summed = program.tensor(target.shape, dtype=np.float32)[0, 0]
-                    _bind_operation(program, add, parts, summed)
-                    parts = (summed,)
-                if parts[0] is not target:
-                    _bind_operation(program, affine(), parts, target)
+                layout = lowering.layout(value)
+                for axis in range(2):
+                    expected = spec._tensor.shape[axis] if layout[1][axis] else target.shape[axis]
+                    if layout[0][axis] != expected:
+                        raise ValueError('Contraction output shape differs from its operand domains')
+                where = tuple(origin[axis] if layout[1][axis] else 0 for axis in range(2))
+                lowering.publish(lowering.parts(value, where, target.shape, target), target)
             else:
-                _ExpressionKernel((lowered,)).bind(program, tuple(inputs), (target,), coordinate)
+                lowering.emit(value, origin, target.shape, target, external=True)
