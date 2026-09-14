@@ -1386,6 +1386,16 @@ Native ownership must retain source occurrences and route lifetimes independentl
 of arrival order. Sparse bindings alone do not eliminate potential empty segment
 launches, page allocation overhead, or the directory-production launches.
 
+Apple's [Metal residency sets](https://developer.apple.com/documentation/metal/simplifying-gpu-resource-management-with-residency-sets)
+provide setup-time membership for indirectly addressed GPU buffers. `route_residency`
+adds canonical candidate buffers to one set per algebra, attaches it to that
+algebra's command queue, and commits membership before numerical execution.
+Metal applies the queue's residency set to its command buffers. Consumers do not
+walk the candidate list to call `useResource` during invocation. Source lifetime
+still comes from mesh's exact row dependencies; residency does not establish
+numerical readiness or authorize overwriting a live source. Program teardown
+waits for its existing executions, removes the set, then releases its buffers.
+
 
 The existing streaming-algebra workflow's optional `--xonotic` case constructs
 an actual Xonotic gather/concatenate graph and observes its canonical result blocks.
