@@ -692,7 +692,7 @@ def main():
                 ordering_storage = program.tensor((2, length), (1, 129 if length > 128 else 3), dtype=scalar)
                 first_function = program.native.algebra_trace_count(program.handle)
                 lowered = kernel_calls(program, graph, (), {ordering_input.index: ordering_storage},
-                    outputs=ordering_outputs, root_peer=0, tile_rows=1, tile_k=3, tile_columns=1)
+                    outputs=ordering_outputs, root_peer=0, tile_rows=1, tile_k=3, tile_columns=ordering_storage.block_shape[1])
                 last_function = program.native.algebra_trace_count(program.handle)
                 observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
                     for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in ordering_outputs)
