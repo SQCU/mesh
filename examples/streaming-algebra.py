@@ -626,7 +626,7 @@ def main():
                 x, y = (value.astype(np.float64) for value in values[:2])
                 with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
                     expected = tuple((np.logaddexp(x, y) if operation == 'logaddexp' else
-                                      np.power(x, .5 if operation == 'power' else 2) if operation in ('power', 'power_square') else np.floor_divide(x, 3) if operation == 'floor_divide' else
+                                      np.power(x, np.full_like(x, .5 if operation == 'power' else 2)) if operation in ('power', 'power_square') else np.floor_divide(x, 3) if operation == 'floor_divide' else
                                       getattr(np, operation)(x))
                                      for operation in operations)
                     expected = tuple(value.astype(np.int32) * 2 + 1 if operation == 'isfinite' else value.astype(np.float32) * np.float32(2)
