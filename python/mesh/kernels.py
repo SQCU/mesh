@@ -501,7 +501,7 @@ def _indexed_range(program, function, selector, bounds, first, count):
 def _candidate_load(refs, first, ordinal, row, column, metal):
     dtype = refs[0].dtype
     scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
-              'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t'}[dtype.kind + str(dtype.itemsize)]
+              'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t'}[dtype.kind + str(dtype.itemsize)]
     strides = []
     declarations = []
     for name, attribute in (('row_steps', 'row_stride'), ('column_steps', 'column_stride')):
@@ -581,7 +581,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             def reduce_segment(metal, candidates=candidates, partial=partial, first_source=first_source):
                 declarations, load = _candidate_load(candidates, 2,
                     f'ordinal/{updates.block_shape[0]}-{first_source}', f'ordinal%{updates.block_shape[0]}', 'c', metal)
-                accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t' if base.dtype.kind == 'u' else 'int64_t'
+                accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
                 return declarations, f'''for(uint32_t c=lane;c<{partial.shape[1]};c+=lanes) {{
                   {accumulator} total=0;
                   for(uint32_t k=p1[0];k<p1[1];k++) {{ uint32_t ordinal=p0[k]; total+={load}; }}
@@ -616,7 +616,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         # design/algorithm-sources.md#segmented-indexed-add
         def finish(metal, candidates=candidates, target=target, initial=initial, row=row):
             declarations, load = _candidate_load(candidates, 4, 'ordinal', '0', 'c', metal)
-            accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t' if base.dtype.kind == 'u' else 'int64_t'
+            accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
             return declarations, f'''uint32_t lo=p2[0],hi=p2[1],key={row}+r;
             while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
             for(uint32_t c=lane;c<{target.shape[1]};c+=lanes) {{
