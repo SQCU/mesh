@@ -2281,7 +2281,11 @@ row-major logical ordinals to existing canonical references at setup. It validat
 positive two-dimensional target shape and unchanged element count.
 
 Existing equal-shape, singleton transpose and aligned flat-column row-reframe
-cases remain metadata-only fast paths. Otherwise the target tile is
+cases remain metadata-only fast paths. A single backing block also remains a
+single target view when row-major flat traversal is affine: either source axis
+is singleton, or row_stride equals source_columns * column_stride. This includes
+uniformly strided storage without treating arbitrary one-block transposes as
+reshape-compatible. Otherwise the target tile is
 (1, gcd(target columns, source columns, source block columns)). Every tile start
 and end aligns with source row and column-block boundaries, so its flat ordinal
 identifies exactly one source row fragment. `Tensor.region` and `Ref.slice`

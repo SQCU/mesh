@@ -333,6 +333,10 @@ def matrix_view(tensor, shape):
         block_shape = (tensor.block_shape[0] // shape[1], shape[1])
         grid = (tensor.grid[0], 1)
         regions = tuple((coordinate, ref, (ref.shape[0] // shape[1], shape[1])) for coordinate, ref in tensor.blocks.items())
+    elif tensor.grid == (1, 1) and (1 in tensor.shape or
+            tensor[0, 0].view.row_stride == tensor.shape[1] * tensor[0, 0].view.column_stride):
+        block_shape, grid = shape, (1, 1)
+        regions = (((0, 0), tensor[0, 0], shape),)
     else:
         width = math.gcd(shape[1], tensor.shape[1], tensor.block_shape[1])
         block_shape, grid = (1, width), (shape[0], shape[1] // width)
