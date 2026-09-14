@@ -247,6 +247,7 @@ def main():
         xonotic_reductions = None
         xonotic_elementary = None
         xonotic_ranges = None
+        xonotic_random = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -673,6 +674,58 @@ def main():
             empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
             mean_result = program.export(lowered[integer_mean.index][0, 0])
             xonotic_ranges = range_storage, observations, references, empty_results, mean_result
+            # design/algorithm-sources.md#counter-based-random-generation
+            known_answers = []
+            for counter, key, expected in (
+                    ((0, 0, 0, 0), (0, 0), (0x6627e8d5, 0xe169c58d, 0xbc57ac4c, 0x9b00dbd8)),
+                    ((0xffffffff,)*4, (0xffffffff,)*2, (0x408f276d, 0x41c83b0e, 0xa20bc7c6, 0x6d5451fd)),
+                    ((0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344), (0xa4093822, 0x299f31d0),
+                     (0xd16cfe09, 0x94fdcceb, 0x5001e420, 0x24126ea1))):
+                outputs = program.kernel_call(kernels.expression(*kernels.philox4x32(counter, *key)), grid=(1,),
+                    in_specs=(), out_specs=(BlockSpec((1, 1), lambda i: (0, 0)),)*4,
+                    out_shape=(ShapeDtypeStruct((1, 1), np.uint32),)*4, peer=0)()
+                known_answers.append((tuple(program.export(value[0, 0]) for value in outputs), expected))
+            graph = mx.Graph()
+            with graph:
+                random_key = graph.input('random_key', (2,), 'uint32')
+                random_input = graph.input('random_consumer', (2, 5))
+                normal = mx.random.normal((2, 5), key=random_key)
+                random_consumer = (normal + random_input) * np.float32(2)
+            key_storage = program.tensor((1, 2), dtype=np.uint32)
+            random_storage = program.tensor((2, 5), (1, 3), dtype=np.float32)
+            lowered = kernel_calls(program, graph, (), {random_key.index: key_storage, random_input.index: random_storage},
+                outputs=(normal, random_consumer), root_peer=0, tile_rows=1, tile_columns=3)
+            random_observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in (normal, random_consumer))
+            high_keys = program.tensor((2, 2), (1, 2), dtype=np.uint32)
+            key_arg, = kernels.arguments(1)
+            high_normal = program.kernel_call(kernels.expression(kernels.random_normal(key_arg.at(0, 0), key_arg.at(0, 1),
+                2**33 + kernels.program_id(0)*4 + kernels.arange(4))), grid=(2,),
+                in_specs=(BlockSpec((1, 2), lambda i: (i, 0)),),
+                out_specs=BlockSpec((1, 4), lambda i: (i, 0)), out_shape=ShapeDtypeStruct((2, 4), np.float32), peer=0)(high_keys)
+            high_arg, = kernels.arguments(1)
+            high_consumer = program.kernel_call(kernels.expression(high_arg*2+1), grid=(2,),
+                in_specs=(BlockSpec((1, 4), lambda i: (i, 0)),),
+                out_specs=BlockSpec((1, 4), lambda i: (i, 0)), out_shape=ShapeDtypeStruct((2, 4), np.float32), peer=0)(high_normal)
+            high_results = tuple(program.export(high_consumer[i, 0]) for i in range(2))
+            generations = []
+            for generation, key in enumerate(((0, 0), (0xa4093822, 0x299f31d0))):
+                reference = []
+                for ordinal in (*range(10), *range(2**33, 2**33+8)):
+                    counter = (ordinal//2 & 0xffffffff, ordinal//2 >> 32, 0, 0)
+                    key0, key1 = key
+                    for round_index in range(10):
+                        first, third = counter[0] * 0xd2511f53, counter[2] * 0xcd9e8d57
+                        counter = ((third >> 32) ^ counter[1] ^ key0, third & 0xffffffff,
+                                   (first >> 32) ^ counter[3] ^ key1, first & 0xffffffff)
+                        key0, key1 = (key0+0x9e3779b9) & 0xffffffff, (key1+0xbb67ae85) & 0xffffffff
+                    radius = np.sqrt(np.float32(-2) * np.log(np.float32((counter[0] >> 9)+.5) * np.float32(2**-23)))
+                    angle = np.float32(2*np.pi) * (np.float32(counter[1] >> 9) * np.float32(2**-23))
+                    reference.append(radius * (np.sin(angle) if ordinal & 1 else np.cos(angle)))
+                values = np.arange(10, dtype=np.float32).reshape(2, 5)/8 + np.float32(generation/4)
+                generations.append((np.array([key], dtype=np.uint32), values,
+                    np.array(reference[:10], dtype=np.float32).reshape(2, 5), np.array(reference[10:], dtype=np.float32).reshape(2, 4)*np.float32(2)+np.float32(1)))
+            xonotic_random = known_answers, key_storage, random_storage, random_observations, high_keys, high_results, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1287,6 +1340,58 @@ def main():
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
+        if xonotic_random is not None:
+            known_answers, key_storage, storage, observations, high_keys, high_results, generations = xonotic_random
+            for results, expected in known_answers:
+                wait_for(results)
+                actual = tuple(result.array.item() for result in results)
+                if actual != expected:
+                    raise ArithmeticError('Philox differs from its published known-answer vector')
+                print(json.dumps(dict(event='philox_known_answer', words=actual)), flush=True)
+                for result in results:
+                    result.consume()
+            generated, consumers = observations
+            for generation, (key, values, reference, high_reference) in enumerate(generations):
+                started = time.monotonic_ns()
+                wait_for((*key_storage.blocks.values(), *storage.blocks.values(), *high_keys.blocks.values()), 'writable')
+                with program.write(key_storage[0, 0]) as destination:
+                    destination[...] = key
+                with program.write(high_keys[generation, 0]) as destination:
+                    destination[...] = key
+                wait_for((high_results[generation], *(result for i, j, result in generated)))
+                if high_results[1-generation].ready:
+                    raise ArithmeticError('Random producer consumed an unpublished key row')
+                for i, j, result in generated:
+                    if not np.allclose(result.array, reference[i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=5e-6, atol=2e-6):
+                        raise ArithmeticError('Normal generator differs across tile or pair boundaries')
+                if any(result.ready for i, j, result in consumers):
+                    raise ArithmeticError('Random consumer read an unpublished input')
+                expected = (reference + values) * np.float32(2)
+                for row in (generation, 1-generation):
+                    if row != generation:
+                        with program.write(high_keys[row, 0]) as destination:
+                            destination[...] = key
+                        wait_for((high_results[row],))
+                    if not np.allclose(high_results[row].array, high_reference[row:row+1], rtol=5e-6, atol=4e-6):
+                        raise ArithmeticError('Normal generator discarded its high counter word')
+                    for (i, j), ref in storage.blocks.items():
+                        if i == row:
+                            column = j * storage.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = values[i:i+1, column:column+ref.shape[1]]
+                    wait_for(tuple(result for i, j, result in consumers if i == row))
+                    for i, j, result in consumers:
+                        if i == row:
+                            if not np.allclose(result.array, expected[i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=5e-6, atol=4e-6):
+                                raise ArithmeticError('Random downstream consumer differs after key reuse')
+                        elif row == generation and result.ready:
+                            raise ArithmeticError('Random consumer lost independent row progress')
+                    print(json.dumps(dict(event='xonotic_random_early' if row == generation else 'xonotic_random_complete',
+                        generation=generation, key=key.tolist(), published_row=row, elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        high_ordinal_output=high_results[row].array.tolist(),
+                        output=[(i,j,result.array.tolist()) for i,j,result in consumers if i == row])), flush=True)
+                for result in (*high_results, *(result for results in observations for i,j,result in results)):
+                    result.consume()
         if xonotic_ranges is not None:
             storage, observations, references, empty_results, mean_result = xonotic_ranges
             wait_for(empty_results)
