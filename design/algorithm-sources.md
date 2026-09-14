@@ -3098,3 +3098,58 @@ not assume that an arbitrary dynamic gather can be statically resolved, and it
 does not change when its selected physical pages become ready. The existing
 logical-gather, reduction, ordering and fragmented-view workflows exercise the
 shared lowering rather than a separate compiler evaluator.
+
+## Composable indexed contractions
+
+The JAX authors' [Pallas tiled matmul](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html)
+retains contraction panels, output regions and accumulators while lowering the
+numerical body. The MLIR authors' [Linalg dialect](https://mlir.llvm.org/docs/Dialects/Linalg/)
+retains iteration domains and operand indexing maps so structured operations
+can lower to library calls as well as scalar/vector loops. Mesh follows this
+representation principle within its existing expression and region owners; it
+does not introduce another execution engine.
+
+An indexed product reduction must retain its original logical access maps until
+backend binding. Flattening those loads before recognizing the contraction loses
+information that is already available at setup. Recognition is independent of
+whether the sum is transposed or wrapped in pointwise arithmetic. Its internal
+representation retains the reduction extent/tile, feature domain and origin,
+actual source identities, typed access semantics and optional scalar selection.
+Transposition changes the result view. Pointwise consumers use the same cached
+contraction region as an explicitly published result.
+
+A native plan proves the affine maps, dtype behavior, physical panel geometry and
+all source boundaries before creating bindings. Selector-free plans use ordinary
+native matrix calls. Selected plans use the existing prepared native selection
+binding and retained candidate dependencies. Invalid selected rows retain the
+original other operand multiplied by numerical zero, preserving NaN-times-zero
+behavior. Static choices need neither a selector kernel nor a fallback row.
+All operands remain actual canonical Refs with their offsets and strides.
+
+The feature coordinate origin is explicit when lowering an untransposed sum's
+row region. Both operands varying independently over the feature domain describe
+paired rowwise dots, not a dense matrix product whose diagonal may be extracted.
+Recognition must preserve casts, masks and rounding boundaries; it may normalize
+value-preserving real identity promotions only when the declared arithmetic is
+retained. Unproved geometry continues through the existing numerical expression
+lowering with the same semantics and region dependencies.
+
+Integer accumulation contexts continue through the original typed reduction
+owner. A bare real sum into an integer reduction destination converts individual
+contributions, while a real sum nested in pointwise arithmetic or explicitly
+cast afterward retains floating accumulation before final conversion. The
+contraction descriptor must preserve this existing distinction.
+
+The existing region cache, K-panel decomposition, FP32 partial merging and output
+publication remain the execution mechanism. A missing epilogue operand does not
+become an input of the contraction producer. Setup owns recognition, geometry,
+allocation and compilation; repeated invocation uses canonical page readiness.
+The neighborhood caller continues to express its Q/K and G/V statistics as
+ordinary indexed product sums and shares them across its existing derivatives.
+
+The existing streaming-algebra workflow covers these neighborhood statistics and
+adds direct static/selected indexed contractions with pointwise composition,
+ragged panels, independently withheld epilogues, output rows and repeated reuse.
+Matched source revisions and measurements distinguish removed duplicate work
+from timing uncertainty. Extending recognition is not by itself proof of the
+fastest backend for every shape or completion of the full performance plan.
