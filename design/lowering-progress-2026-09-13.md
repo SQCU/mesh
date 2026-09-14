@@ -1880,3 +1880,76 @@ Matrix-engine grouped operand reuse and measured selection remain incomplete,
 alongside broader geometry, integer optimization, empty-domain gaps,
 fusion/storage/placement and the full performance acceptance. This increment
 leaves the nine-step goal active.
+
+
+## Function timing profiles and numerical plans — September 14
+
+`246faa5` adds per-function completion statistics to the existing native
+completion owner. Successful dispatch and host-execution durations use Welford
+count/mean/M2; available successful GPU service durations have a separate count.
+Errors increment a separate counter, and omitted work does not reach numerical
+completion. Updates finish before canonical output publication permits reuse.
+Live atomic reads remain approximate; a stable terminal observation supplies
+completed-run statistics. No lock, retry, scheduler or operand allocation is
+introduced. These reporting operations have a cost; zero measurement overhead
+is not asserted.
+
+Backend identities are assigned in setup's actual SGEMM, NEON, builtin,
+compiled, MPS, CoreML or external-callback branches. Selected parents expose
+all retained normalized candidate views and use an explicit mixed label if
+implementations differ. Native plans include opcode, typed left/right/output
+views, coefficients, publication extent and enumerated rectangle count. They
+do not infer matrices from selector dependency pages. Compiled kernels have
+backend labels but no fabricated native opcode.
+
+`c4251b7` exposes moments and plans through existing `Program.trace`.
+`82b1212` adds observations to the existing workflow: count/mean/variance
+contracts, stable terminal completion accounting, and an all-invalid scatter
+occurrence that changes omission counts without adding timing samples.
+Native compilation passed; ctypes and C layouts agree at 80 bytes for the
+profile and 216 bytes for a plan. The existing event structure and bridge ABI
+remain unchanged.
+
+Local Metal configured 8424 functions and completed 16716 numerical submissions.
+The stable trace accounts for 2008 MPS, 1110 Metal-builtin and 13598 compiled-Metal
+successful executions, with zero failed or pending work. All 16716 have GPU
+service observations. It retains 2454 native plans across 180 selected functions;
+35 omitted occurrences added no successful or timing samples. Native plans
+retain current tensor identities for source auditing; those addresses are not
+portable profile keys.
+
+The pre-change gold observation has count 3, mean 13.9329163333 ms and sample
+variance 1.85801853972 ms²; the profile-enabled observation has count 3, mean
+15.906778 ms and variance 1.755746156227 ms². These small, separate observations
+do not establish overhead equivalence or attribute their difference entirely
+to reporting. Raw timings are retained; no no-regression or speedup claim is
+made from them.
+
+[`function-profile-provenance.json`](../measurements/lowering-2026-09-13/function-profile-provenance.json)
+records source/installed `c4251b7`, native `246faa5`, exact commands and raw
+profiles. CPU configured 8424 functions and completed 16716 submissions, all
+accounted for by stable successful profiles: 1922 SGEMM, 86 NEON contractions,
+1110 builtin and 13598 compiled. CPU profiles have zero GPU samples. Paired
+rank zero configured 8356 functions and completed 16023 submissions; rank one
+configured 1189 and completed 762. The peer's profile accounts for 256 MPS,
+80 builtin and 426 compiled Metal executions, all with GPU samples. All process
+exits and runtime codes were zero; both bridges returned to ready, unpaired,
+zero-client state after ordinary peer SIGTERM. Arena geometry was unchanged.
+
+The remaining compiled identity work should extend existing owners: native
+source caches already retain generated source, functions retain CPU code or
+prepared Metal pipelines, and the generic binder has exact input/output views.
+Retain source identity, dispatch names/geometry and configured constants there;
+do not create a second source-cache mirror or repeat entire source strings in
+every function record. `mesh_algebra_source` receives the CPU and Metal source
+pair together, so an ordered length-delimited pair identity can identify the
+same generated lowering across backends without parsing code. That identity
+belongs to the binding, since one CPU source may accompany different Metal
+sources. It does not prove semantic equivalence across different tilings or
+native/compiled alternatives.
+
+Complete profile keys, candidate-specific costs where layouts differ, measured
+plan selection including merges/assembly, and instrumentation-overhead acceptance
+remain work to do. Grouped matrix-engine reuse, broader numerical geometry,
+integer optimization, empty-domain coverage, fusion/storage/placement and the
+nine-step end-to-end acceptance also remain open. The goal is not complete.

@@ -1,0 +1,752 @@
+{
+  "date": "2026-09-14",
+  "source_revision": "c4251b7",
+  "installed_source_revision_both_nodes": "c4251b7",
+  "native_revision": "246faa5",
+  "python_profile_revision": "c4251b7",
+  "numerical_lowering_revision": "5138624",
+  "example_revision": "82b1212",
+  "hardware": {
+    "rank0": "Apple M5 Max, 137438953472 bytes",
+    "rank1": "Apple M4 Pro, 25769803776 bytes"
+  },
+  "arena": {
+    "abi": 25,
+    "page_bytes": 16384,
+    "block": 4,
+    "rows": 65536,
+    "qps": 1,
+    "registered_bytes_per_node": 1097203712,
+    "enlarged": false
+  },
+  "ffi": {
+    "profile_bytes": 80,
+    "plan_bytes": 216,
+    "event_abi_changed": false
+  },
+  "runs": [
+    {
+      "prefix": "function-profile-baseline-metal",
+      "backend": "metal",
+      "paired": false,
+      "installed_source_revision": "6efdb6e",
+      "example_revision": "58dcdd3",
+      "native_revision": "243b947",
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend metal --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/function-profile-baseline-metal-trace.json > .build/function-profile-baseline-metal.jsonl 2>&1",
+      "exit_code": 0,
+      "configured_functions": 8424,
+      "trace_submissions": 16716,
+      "gold_summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 15.508666,
+        "invocations_per_second": 193.44023528522698,
+        "first_section_ms": 13.068708,
+        "completion_ms": {
+          "count": 3,
+          "mean": 13.932916333333333,
+          "sample_variance": 1.8580185397223346
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 16716,
+          "completed": 16716,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.053531141,
+          "cpu_submitted": 0
+        }
+      },
+      "profile_summary": null,
+      "omission_observations": [],
+      "artifacts": [
+        "function-profile-baseline-metal.jsonl.gz",
+        "function-profile-baseline-metal-trace.json.gz"
+      ]
+    },
+    {
+      "prefix": "function-profile-metal",
+      "backend": "metal",
+      "paired": false,
+      "installed_source_revision": "c4251b7",
+      "example_revision": "82b1212",
+      "native_revision": "246faa5",
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend metal --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/function-profile-metal-trace.json > .build/function-profile-metal.jsonl 2>&1",
+      "exit_code": 0,
+      "configured_functions": 8424,
+      "trace_submissions": 16716,
+      "gold_summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.434167,
+        "invocations_per_second": 172.07590130345775,
+        "first_section_ms": 14.799459,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.906778000000001,
+          "sample_variance": 1.755746156227
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 16716,
+          "completed": 16716,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.053441733,
+          "cpu_submitted": 0
+        }
+      },
+      "profile_summary": {
+        "event": "function_profiles",
+        "successful": 16716,
+        "failed": 0,
+        "backend_successes": {
+          "metal_mps": 2008,
+          "metal_builtin": 1110,
+          "metal_compiled": 13598
+        },
+        "stable_snapshot": true,
+        "pending": 0
+      },
+      "omission_observations": [
+        {
+          "event": "function_profile_omissions",
+          "generation": 2,
+          "functions": [
+            [
+              179,
+              1
+            ],
+            [
+              187,
+              1
+            ],
+            [
+              195,
+              1
+            ],
+            [
+              203,
+              1
+            ],
+            [
+              211,
+              1
+            ],
+            [
+              219,
+              1
+            ],
+            [
+              227,
+              1
+            ],
+            [
+              235,
+              1
+            ],
+            [
+              243,
+              1
+            ],
+            [
+              251,
+              1
+            ],
+            [
+              259,
+              1
+            ],
+            [
+              267,
+              1
+            ],
+            [
+              275,
+              1
+            ],
+            [
+              283,
+              1
+            ],
+            [
+              291,
+              1
+            ],
+            [
+              299,
+              1
+            ],
+            [
+              307,
+              1
+            ],
+            [
+              317,
+              1
+            ],
+            [
+              325,
+              1
+            ],
+            [
+              333,
+              1
+            ],
+            [
+              341,
+              1
+            ],
+            [
+              349,
+              1
+            ],
+            [
+              357,
+              1
+            ],
+            [
+              365,
+              1
+            ],
+            [
+              373,
+              1
+            ],
+            [
+              381,
+              1
+            ],
+            [
+              389,
+              1
+            ],
+            [
+              397,
+              1
+            ],
+            [
+              405,
+              1
+            ],
+            [
+              413,
+              1
+            ],
+            [
+              421,
+              1
+            ],
+            [
+              429,
+              1
+            ],
+            [
+              437,
+              1
+            ],
+            [
+              445,
+              1
+            ],
+            [
+              455,
+              1
+            ]
+          ]
+        }
+      ],
+      "artifacts": [
+        "function-profile-metal.jsonl.gz",
+        "function-profile-metal-trace.json.gz"
+      ],
+      "native_plan_count": 2454,
+      "selected_functions": 180,
+      "gpu_samples": 16716,
+      "native_plan_backend_counts": {
+        "metal_mps": 1850,
+        "metal_builtin": 604
+      }
+    },
+    {
+      "prefix": "function-profile-cpu",
+      "backend": "cpu",
+      "paired": false,
+      "installed_source_revision": "c4251b7",
+      "example_revision": "82b1212",
+      "native_revision": "246faa5",
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend cpu --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/function-profile-cpu-trace.json > .build/function-profile-cpu.jsonl 2>&1",
+      "exit_code": 0,
+      "configured_functions": 8424,
+      "trace_submissions": 16716,
+      "gold_summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.845,
+        "invocations_per_second": 619.1950464396285,
+        "first_section_ms": 4.283042,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.627624999999999,
+          "sample_variance": 0.035034953125000066
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 16716,
+          "completed": 16716,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 16716
+        }
+      },
+      "profile_summary": {
+        "event": "function_profiles",
+        "successful": 16716,
+        "failed": 0,
+        "backend_successes": {
+          "cpu_sgemm": 1922,
+          "cpu_builtin": 1110,
+          "cpu_compiled": 13598,
+          "cpu_neon_contract": 86
+        },
+        "stable_snapshot": true,
+        "pending": 0
+      },
+      "omission_observations": [
+        {
+          "event": "function_profile_omissions",
+          "generation": 2,
+          "functions": [
+            [
+              179,
+              1
+            ],
+            [
+              187,
+              1
+            ],
+            [
+              195,
+              1
+            ],
+            [
+              203,
+              1
+            ],
+            [
+              211,
+              1
+            ],
+            [
+              219,
+              1
+            ],
+            [
+              227,
+              1
+            ],
+            [
+              235,
+              1
+            ],
+            [
+              243,
+              1
+            ],
+            [
+              251,
+              1
+            ],
+            [
+              259,
+              1
+            ],
+            [
+              267,
+              1
+            ],
+            [
+              275,
+              1
+            ],
+            [
+              283,
+              1
+            ],
+            [
+              291,
+              1
+            ],
+            [
+              299,
+              1
+            ],
+            [
+              307,
+              1
+            ],
+            [
+              317,
+              1
+            ],
+            [
+              325,
+              1
+            ],
+            [
+              333,
+              1
+            ],
+            [
+              341,
+              1
+            ],
+            [
+              349,
+              1
+            ],
+            [
+              357,
+              1
+            ],
+            [
+              365,
+              1
+            ],
+            [
+              373,
+              1
+            ],
+            [
+              381,
+              1
+            ],
+            [
+              389,
+              1
+            ],
+            [
+              397,
+              1
+            ],
+            [
+              405,
+              1
+            ],
+            [
+              413,
+              1
+            ],
+            [
+              421,
+              1
+            ],
+            [
+              429,
+              1
+            ],
+            [
+              437,
+              1
+            ],
+            [
+              445,
+              1
+            ],
+            [
+              455,
+              1
+            ]
+          ]
+        }
+      ],
+      "artifacts": [
+        "function-profile-cpu.jsonl.gz",
+        "function-profile-cpu-trace.json.gz"
+      ],
+      "native_plan_count": 2454,
+      "selected_functions": 180,
+      "gpu_samples": 0,
+      "native_plan_backend_counts": {
+        "cpu_sgemm": 1747,
+        "cpu_builtin": 604,
+        "cpu_neon_contract": 103
+      }
+    },
+    {
+      "prefix": "function-profile-paired",
+      "backend": "metal",
+      "paired": true,
+      "installed_source_revision": "c4251b7",
+      "example_revision": "82b1212",
+      "native_revision": "246faa5",
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/function-profile-paired-trace.json > .build/function-profile-paired.jsonl 2>&1",
+      "exit_code": 0,
+      "configured_functions": 8356,
+      "trace_submissions": 16023,
+      "gold_summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 14.394458,
+        "invocations_per_second": 208.41354360129432,
+        "first_section_ms": 9.989291,
+        "completion_ms": {
+          "count": 3,
+          "mean": 13.817902333333334,
+          "sample_variance": 0.2552550823103335
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 16023,
+          "completed": 16023,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.055002457,
+          "cpu_submitted": 0
+        }
+      },
+      "profile_summary": {
+        "event": "function_profiles",
+        "successful": 16023,
+        "failed": 0,
+        "backend_successes": {
+          "metal_mps": 1754,
+          "metal_builtin": 1033,
+          "metal_compiled": 13236
+        },
+        "stable_snapshot": true,
+        "pending": 0
+      },
+      "omission_observations": [
+        {
+          "event": "function_profile_omissions",
+          "generation": 2,
+          "functions": [
+            [
+              180,
+              1
+            ],
+            [
+              188,
+              1
+            ],
+            [
+              196,
+              1
+            ],
+            [
+              204,
+              1
+            ],
+            [
+              212,
+              1
+            ],
+            [
+              220,
+              1
+            ],
+            [
+              228,
+              1
+            ],
+            [
+              236,
+              1
+            ],
+            [
+              244,
+              1
+            ],
+            [
+              252,
+              1
+            ],
+            [
+              260,
+              1
+            ],
+            [
+              268,
+              1
+            ],
+            [
+              276,
+              1
+            ],
+            [
+              284,
+              1
+            ],
+            [
+              292,
+              1
+            ],
+            [
+              300,
+              1
+            ],
+            [
+              308,
+              1
+            ],
+            [
+              318,
+              1
+            ],
+            [
+              326,
+              1
+            ],
+            [
+              334,
+              1
+            ],
+            [
+              342,
+              1
+            ],
+            [
+              350,
+              1
+            ],
+            [
+              358,
+              1
+            ],
+            [
+              366,
+              1
+            ],
+            [
+              374,
+              1
+            ],
+            [
+              382,
+              1
+            ],
+            [
+              390,
+              1
+            ],
+            [
+              398,
+              1
+            ],
+            [
+              406,
+              1
+            ],
+            [
+              414,
+              1
+            ],
+            [
+              422,
+              1
+            ],
+            [
+              430,
+              1
+            ],
+            [
+              438,
+              1
+            ],
+            [
+              446,
+              1
+            ],
+            [
+              456,
+              1
+            ]
+          ]
+        }
+      ],
+      "artifacts": [
+        "function-profile-paired.jsonl.gz",
+        "function-profile-paired-trace.json.gz"
+      ],
+      "native_plan_count": 2455,
+      "selected_functions": 180,
+      "gpu_samples": 16023,
+      "native_plan_backend_counts": {
+        "metal_mps": 1850,
+        "metal_builtin": 605
+      }
+    }
+  ],
+  "peer": {
+    "command": "PYTHONPATH=.build/gold-package .build/xonotic-env/bin/python examples/streaming-algebra.py 1 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/function-profile-paired-peer-trace.json > .build/function-profile-paired-peer.jsonl 2>&1",
+    "exit_code": 0,
+    "shutdown": "SIGTERM after rank0 exit zero; original SSH process exited zero",
+    "configured_functions": 1189,
+    "submissions": 762,
+    "successful": 762,
+    "failed": 0,
+    "backend_successes": {
+      "metal_compiled": 426,
+      "metal_mps": 256,
+      "metal_builtin": 80
+    },
+    "gpu_samples": 762,
+    "artifacts": [
+      "function-profile-paired-peer.jsonl.gz",
+      "function-profile-paired-peer-trace.json.gz"
+    ]
+  },
+  "post_run_bridge_state": {
+    "rank0": {
+      "ready": true,
+      "paired": false,
+      "client": 0,
+      "code": 32,
+      "domain": 1
+    },
+    "rank1": {
+      "ready": true,
+      "paired": false,
+      "client": 0,
+      "code": 36,
+      "domain": 1
+    }
+  },
+  "scope": [
+    "Actual native compilation/linking and C/ctypes struct layout agreement; bridge EventABI unchanged.",
+    "All successful numerical occurrences contribute to reporting; no warmup exclusion inferred.",
+    "Perfunction raw traces retain dispatch,hostexecution,GPU count/mean/samplevariance in nanoseconds; live independently read fields approximate, stableterminal snapshots verified in these runs.",
+    "Allinvalidscatter omission deltas leave successful/failed and timing counts unchanged; numerical and streaming output comparisons remain in existingworkflow.",
+    "Baseline predates profileobservations but numericalprogram and function/submission counts are unchanged. Smallgold samples do not prove zero instrumentation overhead; timing uncertainty remains.",
+    "Actual CPU SGEMM/NEON/builtin/compiled and Metal MPS/builtin/compiled paths observed. CoreML, arbitrary external callback failure and heterogeneous selected backend execution were source-reviewed, not measured in these runs.",
+    "Native candidate plans retain actualnormalizedviews; descriptors cannot treat currentpointeridentities as portableprofilekeys.",
+    "New sidecases execute on rank0; peerprofilecoversactual RDMA gold/fanout/aliaswork onM4Pro.",
+    "Compiled source/dispatch/specialization identity, portablekeys, measuredplanselection, fusion/storage/placement, broadergeometry and fullnine-stepacceptance remain incomplete."
+  ]
+}
