@@ -123,14 +123,20 @@ def _row_reduce(program, kernel, x, *, tile_rows, peer=None, output_dtype=None):
     return _sum(program, parts, mr, peer=peer)
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#rmsnorm-shared-expression-composition
 def rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6):
-    value, statistic, weight = kernels.arguments(3)
-    total = _row_reduce(program, kernels.expression((value * value).sum()), x,
-                        tile_rows=tile_rows, output_dtype="float32")
-    normalize = kernels.expression(value * (statistic / x.shape[1] + epsilon).rsqrt() * weight)
-    return _pointwise(program, normalize,
-        (x, total.broadcast_to(x.shape), gamma.broadcast_to(x.shape)), tile_rows)
+    gamma = gamma.broadcast_to(x.shape)
+    value, weight = kernels.arguments(2)
+    normalize = kernels.expression(value * ((value * value).sum() / x.shape[1] + epsilon).rsqrt() * weight)
+    block = (_tile(min(tile_rows, x.shape[0]),
+                   *(operand.block_shape[0] if operand.grid[0] > 1 else 0 for operand in (x, gamma))),
+             _tile(min(x.shape[1], x.block_shape[1], gamma.block_shape[1]),
+                   *(operand.block_shape[1] if operand.grid[1] > 1 else 0 for operand in (x, gamma))))
+    return program.kernel_call(normalize,
+        grid=tuple((size + tile - 1) // tile for size, tile in zip(x.shape, block)),
+        in_specs=(BlockSpec(None), BlockSpec(None)),
+        out_specs=BlockSpec(block, _block),
+        out_shape=ShapeDtypeStruct(x.shape, x.dtype))(x, gamma)
 
 
 # design/algorithm-sources.md#streamed-normalization-and-embedding

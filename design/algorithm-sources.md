@@ -1625,3 +1625,30 @@ operand cannot replace the deliberate FP16 hidden boundary. This migration does
 not make that substitution. Existing `examples/streaming-algebra.py` gold cases
 exercise the two-input-partition FFN and its configured hidden exchange; the
 source retains that validation path rather than adding a second evaluator.
+
+## RMSNorm shared expression composition
+
+Zhang and Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467),
+define normalization using the mean of squared features and learned gain.
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+places numerical composition in the caller and implementation of its block
+dataflow in the lowering. `nn.rmsnorm` expresses that complete formula as
+`x * ((x*x).sum()/width + epsilon).rsqrt() * gamma` through the existing shared
+expression and kernel_call interfaces. It no longer constructs feature partials
+or reduction trees in the DNN library.
+
+Whole-input BlockSpecs give the statistic its complete logical feature domain.
+The shared expression lowering produces a squared-sum partial independently for
+each available input feature region, accumulates real statistics in FP32, and
+shares each row-region statistic across output feature panels. A missing feature
+prevents final normalization of its affected rows but does not prevent other
+feature partials from computing and publishing. Each normalized output panel
+uses its own input and gain regions plus that statistic.
+
+The caller retains the former output row/column cuts, including gain backing
+boundaries and ragged tails. Broadcasting gain creates only existing zero-stride
+view metadata; it does not copy payloads. The declared output dtype remains the
+input dtype, preserving the final FP16 cast when applicable. `_row_reduce` still
+serves Xonotic reduction callers and is not deleted until those callers migrate
+to the same shared reduction lowering. Numerical validation remains the existing
+streaming-algebra gold and its delayed-feature observations.
