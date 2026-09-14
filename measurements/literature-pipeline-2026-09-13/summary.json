@@ -1,0 +1,199 @@
+{
+  "source_commit": "82be91f",
+  "cases": {
+    "local-cpu-1.json.gz": {
+      "batch_ms": 14.330459,
+      "invocations_per_second": 558.2514837801078,
+      "first_section_ms": 13.381042,
+      "max_absolute_error": 1.6514723580884905e-06
+    },
+    "local-cpu-2.json.gz": {
+      "batch_ms": 14.425417,
+      "invocations_per_second": 554.5766891868707,
+      "first_section_ms": 12.714042,
+      "max_absolute_error": 1.6514723580884905e-06
+    },
+    "local-cpu-3.json.gz": {
+      "batch_ms": 16.802333,
+      "invocations_per_second": 476.124357254436,
+      "first_section_ms": 14.711083,
+      "max_absolute_error": 1.6514723580884905e-06
+    },
+    "local-metal-1.json.gz": {
+      "batch_ms": 51.44725,
+      "invocations_per_second": 155.49907915389065,
+      "first_section_ms": 47.824125,
+      "max_absolute_error": 1.845170359171533e-06
+    },
+    "paired-cpu-1.json.gz": {
+      "batch_ms": 11.851792,
+      "invocations_per_second": 675.0034087672143,
+      "first_section_ms": 4.911542,
+      "max_absolute_error": 1.6514723580884905e-06,
+      "trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 130,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 23663.979722222233,
+          "sample_variance": 6146010310.82003
+        },
+        "ready_to_start_us": {
+          "count": 1980,
+          "mean": 156.83021161616173,
+          "sample_variance": 81358.34162279844
+        },
+        "payload_bytes": [
+          16384
+        ]
+      },
+      "peer_trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 130,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 43.08682638888888,
+          "sample_variance": 1527.0065422423756
+        },
+        "ready_to_start_us": {
+          "count": 1404,
+          "mean": 81.30881339031342,
+          "sample_variance": 9824.649486059237
+        },
+        "payload_bytes": [
+          16384
+        ]
+      }
+    },
+    "paired-cpu-2.json.gz": {
+      "batch_ms": 12.711125,
+      "invocations_per_second": 629.3699416849414,
+      "first_section_ms": 5.090917,
+      "max_absolute_error": 1.6514723580884905e-06,
+      "trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 122,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 31223.633666666716,
+          "sample_variance": 10738068155.110218
+        },
+        "ready_to_start_us": {
+          "count": 1980,
+          "mean": 260.56855050505055,
+          "sample_variance": 101172.90708946843
+        },
+        "payload_bytes": [
+          16384
+        ]
+      },
+      "peer_trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 120,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 37.62118055555557,
+          "sample_variance": 2342.8649799252134
+        },
+        "ready_to_start_us": {
+          "count": 1404,
+          "mean": 108.51755698005697,
+          "sample_variance": 23918.822939172078
+        },
+        "payload_bytes": [
+          16384
+        ]
+      }
+    },
+    "paired-cpu-3.json.gz": {
+      "batch_ms": 13.972875,
+      "invocations_per_second": 572.5378635391786,
+      "first_section_ms": 4.764292,
+      "max_absolute_error": 1.6514723580884905e-06,
+      "trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 129,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 22778.372652777798,
+          "sample_variance": 5576897209.958831
+        },
+        "ready_to_start_us": {
+          "count": 1980,
+          "mean": 273.8608393939395,
+          "sample_variance": 123234.17384566487
+        },
+        "payload_bytes": [
+          16384
+        ]
+      },
+      "peer_trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 137,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 59.694131944444464,
+          "sample_variance": 4092.266565402048
+        },
+        "ready_to_start_us": {
+          "count": 1404,
+          "mean": 299.79326709401676,
+          "sample_variance": 89140.01274764277
+        },
+        "payload_bytes": [
+          16384
+        ]
+      }
+    },
+    "paired-metal-1.json.gz": {
+      "batch_ms": 46.353875,
+      "invocations_per_second": 172.58535559324866,
+      "first_section_ms": 36.175167,
+      "max_absolute_error": 1.845170359171533e-06,
+      "trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 130,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 4388.782979166669,
+          "sample_variance": 210650757.30500293
+        },
+        "ready_to_start_us": {
+          "count": 1980,
+          "mean": 1245.6792095959609,
+          "sample_variance": 3393487.024240449
+        },
+        "payload_bytes": [
+          16384
+        ]
+      },
+      "peer_trace": {
+        "single_occurrence_sends": 144,
+        "sends_overlapping_compute_interval": 140,
+        "producer_complete_to_post_us": {
+          "count": 144,
+          "mean": 10.99734722222222,
+          "sample_variance": 52.24874586460762
+        },
+        "ready_to_start_us": {
+          "count": 1404,
+          "mean": 453.1227514245013,
+          "sample_variance": 327916.5987358376
+        },
+        "payload_bytes": [
+          16384
+        ]
+      }
+    }
+  },
+  "cpu_paired_throughput_gain_percent": {
+    "count": 3,
+    "mean": 18.216684869015012,
+    "sample_variance": 16.89093855445455
+  },
+  "paired_gain_samples_percent": [
+    20.913858427485053,
+    13.486548200887016,
+    20.249647978672968
+  ]
+}

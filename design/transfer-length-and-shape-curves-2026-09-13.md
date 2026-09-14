@@ -30,7 +30,7 @@ a source-derived byte count, not a measured latency gain.
 Bindings cannot claim more useful bytes than their storage or include trailing
 ownership blocks with no useful data. The maximum configured block remains the
 MR-boundary unit, so a shorter SGE stays within its already validated region.
-A transfer descriptor is 36 bytes; 113 descriptors fit with the eight-byte header
+A transfer descriptor is 40 bytes; 102 descriptors fit with the eight-byte header
 in a 4096-byte index frame.
 
 ## Queue-depth scope
