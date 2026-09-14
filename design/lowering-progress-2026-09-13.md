@@ -1813,3 +1813,70 @@ provide the relevant representation and grouped-multiplication prior art.
 Measured backend shape selection, broader geometry, integer optimization,
 empty-domain gaps, fusion/storage/placement and the full matched performance
 acceptance remain open; the nine-step goal remains active.
+
+
+## Parallel grouped segment reductions — September 14
+
+`5138624` extends the existing segment emitter's Metal lane mapping. Narrow
+outputs previously assigned one lane per feature and accumulated all group
+ordinals serially in that lane. Setup now divides the SIMD group into feature
+and contribution coordinates; register-local partials combine through a fixed
+shuffle-XOR tree. The static contribution capacity limits unused reduction lanes.
+FP32 shuffles reinterpret bits, and U64 shuffles reconstruct both U32 halves
+before modular addition. All lanes participate in each shuffle; ragged feature
+lanes omit numerical loads and stores. CPU, single-contribution and wide-panel
+source paths retain their prior mapping.
+
+This changes no operand binding, selector, active-domain disposition, launch,
+partial allocation or publication boundary. It uses the retained group ordinal
+vector and source layouts directly. It does not yet provide matrix-engine
+outer-product reuse or a measured backend selector. Mechanism and literature
+are in [grouped segment reductions](algorithm-sources.md#grouped-segment-reductions).
+
+`58dcdd3` extends the existing workflow with a 67-row grouped outer product,
+33-row input chunks, five experts and 5-by-7 outputs. The earlier expert fixture
+had only one row per chunk and could not exercise parallel reduction within a
+group. The new case includes repeated interleaved destinations inside a chunk,
+negative normalization, invalid NaN contributions, a ragged final chunk and two
+reuse generations. Four expert outputs complete while row 66 is absent; its
+corresponding expert completes once the final row arrives. All outputs are
+compared with valid-domain float64 sums.
+
+Matched Metal baseline and replacement use example `58dcdd3`, with installed
+libraries `ad4dd02` and `5138624` respectively. Both configure 8424 functions and
+complete 16716 submissions; the grouped case itself retains exactly 210 functions
+and 420 submissions. Host intervals are mixed at this small shape and do not
+establish a speedup. The source establishes removal of serial contribution work
+from narrow panels, not universal performance superiority.
+
+[`grouped-segment-provenance.json`](../measurements/lowering-2026-09-13/grouped-segment-provenance.json)
+records exact commands and raw evidence. CPU also configured 8424 functions and
+completed 16716 submissions. Paired Metal configured 8356 rank-zero functions and
+completed 16023 submissions; the peer configured 1189 and completed 762. Every
+runtime code and process exit was zero. After SIGTERM and the peer's zero exit,
+both bridges were ready, unpaired and without clients. Arena geometry remained
+unchanged.
+
+Early unrelated-destination observation intervals each have count 2: baseline
+Metal mean 4.809479 ms, sample variance 0.138579012882 ms²; replacement Metal
+mean 4.829854 ms, variance 0.314391194882 ms²; CPU mean 2.3054585 ms, variance
+0.2513993504445 ms²; paired mean 4.7835415 ms, variance 0.0939615585005 ms².
+These are host observations, not physical overlap duration. The grouped side
+case executes on rank zero; no separate M4 Pro grouped-kernel claim is made.
+
+The next measured-selection requirement has a concrete existing owner:
+`MeshFunction` retains setup bindings, `submit_ready` records dispatch timestamps,
+`complete_part` observes each numerical completion, and `Program.trace` exposes
+the record. Today the record keeps only latest timestamps and cumulative
+submissions, which cannot recover per-call variance. Extend those owners with
+immutable operation/shape/dtype/layout/backend descriptors and online timing
+moments; retain CPU SGEMM/NEON/compiled and Metal MPS/compiled identities. Keep
+host delay/execution and GPU service statistics separate and account explicitly
+for errors and omitted functions. Archived profiles can then inform setup
+selection of complete plans including merges/assembly. This does not require
+another evaluator, invocation-time configuration or participant scheduler.
+
+Matrix-engine grouped operand reuse and measured selection remain incomplete,
+alongside broader geometry, integer optimization, empty-domain gaps,
+fusion/storage/placement and the full performance acceptance. This increment
+leaves the nine-step goal active.
