@@ -37,6 +37,7 @@ struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *);
 int mesh_algebra_coreml(struct mesh_algebra *,const char *python,const char *generator,const char *cache);
 void mesh_algebra_destroy(struct mesh_algebra *);
+size_t mesh_algebra_page_bytes(struct mesh_algebra *);
 size_t mesh_algebra_publication_bytes(struct mesh_algebra *);
 uint32_t mesh_algebra_node(struct mesh_algebra *);
 struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *,const struct mesh_shape *,size_t extents,int transferable,int contiguous);

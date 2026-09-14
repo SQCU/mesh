@@ -293,6 +293,8 @@ struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *context) {return creat
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *context) {return create_algebra(context,YES);}
 /* design/algorithm-sources.md#application-metal-kernels */
 uint32_t mesh_algebra_node(struct mesh_algebra *handle) {return owner(handle)->context->M->node;}
+/* design/algorithm-sources.md#page-derived-reduction-leaves */
+size_t mesh_algebra_page_bytes(struct mesh_algebra *handle) {return owner(handle)->context->M->pgsz;}
 /* design/algorithm-sources.md#publication-layout */
 size_t mesh_algebra_publication_bytes(struct mesh_algebra *handle) {
   struct hdr *m=owner(handle)->context->M; return (size_t)m->block*m->pgsz;
@@ -784,9 +786,9 @@ static void specialize_function(MeshFunction *f,MeshCPUCode *cpu,MeshMetalCode *
   NSData *json=[NSJSONSerialization dataWithJSONObject:descriptor options:NSJSONWritingSortedKeys error:nil];
   f.specialization=[[NSString alloc]initWithData:json encoding:NSUTF8StringEncoding];
 }
-/* design/algorithm-sources.md#application-metal-kernels */
-static void submit_metal(MeshFunction *f) {
-  id<MTLCommandBuffer> command=[f.owner.queue commandBuffer];f.encode(command);
+/* design/algorithm-sources.md#realized-numerical-invocation */
+static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuffer>)) {
+  id<MTLCommandBuffer> command=[f.owner.queue commandBuffer];encode(command);
   [command addCompletedHandler:^(id<MTLCommandBuffer> done){
     atomic_store(&f->gpuStartNs,(uint64_t)(done.GPUStartTime*1e9));atomic_store(&f->gpuEndNs,(uint64_t)(done.GPUEndTime*1e9));
     atomic_fetch_add(&f.owner->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
@@ -794,6 +796,8 @@ static void submit_metal(MeshFunction *f) {
   }];
   [command commit];
 }
+/* design/algorithm-sources.md#realized-numerical-invocation */
+static void submit_metal(MeshFunction *f) {submit_encoded_metal(f,f.encode);}
 /* design/algorithm-sources.md#application-metal-kernels */
 static int bind_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,MeshCPUCode *paired,const struct mesh_view *reads,const struct mesh_view *writes) {
   MeshAlgebra *a=owner(handle);
@@ -1197,22 +1201,19 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,s
     id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithFunction:kernel error:&error];
     if(!pipeline){fprintf(stderr,"mesh algebra binding: %s\n",error.description.UTF8String);return EINVAL;}
     NSArray<MeshExtent *> *operands=f.operands;struct geometry g=f->geometry;
+    MTLSize threads=MTLSizeMake(g.count,1,1),group=MTLSizeMake(MIN(256,pipeline.maxTotalThreadsPerThreadgroup),1,1);
     f.encode=^(id<MTLCommandBuffer> command){
       id<MTLComputeCommandEncoder> e=[command computeCommandEncoder];[e setComputePipelineState:pipeline];
       for(NSUInteger i=0;i<3;i++)[e setBuffer:operands[i].buffer offset:0 atIndex:i];
       [e setBytes:&g length:sizeof g atIndex:3];
-      [e dispatchThreads:MTLSizeMake(g.count,1,1) threadsPerThreadgroup:MTLSizeMake(MIN(256,pipeline.maxTotalThreadsPerThreadgroup),1,1)];
+      [e dispatchThreads:threads threadsPerThreadgroup:group];
       [e endEncoding];
     };
   }
   if(!f.execute) {
     f->executionKind=MESH_EXECUTION_METAL;
-    void (^encode)(id<MTLCommandBuffer>)=f.encode;id<MTLCommandQueue> queue=a.queue;
-    f.execute=^(MeshFunction *function) {
-      id<MTLCommandBuffer> command=[queue commandBuffer];encode(command);
-      [command addCompletedHandler:^(id<MTLCommandBuffer> done){atomic_store(&function->gpuStartNs,(uint64_t)(done.GPUStartTime*1e9));atomic_store(&function->gpuEndNs,(uint64_t)(done.GPUEndTime*1e9));complete_part(function,done.error.code,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));}];
-      [command commit];
-    };
+    void (^encode)(id<MTLCommandBuffer>)=f.encode;
+    f.execute=^(MeshFunction *function){submit_encoded_metal(function,encode);};
   }
   f->plan.backend=f->backend;
   return 0;

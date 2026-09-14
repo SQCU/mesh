@@ -1895,6 +1895,7 @@ class _ExpressionRegions:
         self.whole = tuple(spec.block_shape is None for spec in specs)
         self.layouts = {}
         self.reduction_uses = {}
+        self.page_bytes = program.native.algebra_page_bytes(program.handle)
 
     # design/algorithm-sources.md#indexed-range-generation
     def layout(self, node):
@@ -1969,7 +1970,7 @@ class _ExpressionRegions:
             product = _Expression('*', tuple(shift(child) for child in node.operands))
             transposed = _Expression('transpose', (_Expression('sum', (product,)),))
             original = _resolve_logical(node.value[0], self.sources)
-            plan = _ReductionPlan.create(self.reduction_regions(original))
+            plan = _ReductionPlan.create(self.reduction_regions(original, origin[0], shape[0]))
             if shape[1] != 1:
                 self.emit(original, origin, shape, target)
                 binding = None
@@ -2086,11 +2087,63 @@ class _ExpressionRegions:
         self.cache[key] = tuple(parts)
         return self.cache[key]
 
-    # design/algorithm-sources.md#composable-indexed-contractions
-    def reduction_regions(self, node):
-        layout = self.layout(node.operands[0])
+    # design/algorithm-sources.md#page-derived-reduction-leaves
+    def reduction_regions(self, node, row, rows):
+        child = node.operands[0]
+        layout = self.layout(child)
         width, tile = layout[0][1], layout[2][1]
-        return tuple((column, min(tile, width-column)) for column in range(0, width, tile))
+        boundaries = {0, width, *range(0, width, tile)}
+
+        # design/algorithm-sources.md#page-derived-reduction-leaves
+        def cuts(value, axis, origin, count):
+            shape = self.layout(value)[0]
+            if shape[axis] == 1:
+                return set()
+            if shape[1-axis] == 1:
+                origin, count = 0, 1
+            if value.operation == 'input':
+                source = self.sources[value.value]
+                refs = ((tuple(i*b for i, b in zip(coordinate, source.block_shape)), ref)
+                        for coordinate, ref in source.blocks.items()) if self.whole[value.value] else (((0, 0), source),)
+                result = set()
+                for base, ref in refs:
+                    if (ref.view.tensor, ref.view.extent) in self.program._constant_extents:
+                        continue
+                    start = max(origin, base[1-axis])
+                    stop = min(origin+count, base[1-axis]+ref.shape[1-axis])
+                    if start >= stop:
+                        continue
+                    result.update((base[axis], base[axis]+ref.shape[axis]))
+                    strides = ref.view.row_stride, ref.view.column_stride
+                    stride, unit = strides[axis], self.page_bytes // ref.dtype.itemsize
+                    if stride == 0:
+                        continue
+                    for other in range(start-base[1-axis], stop-base[1-axis]):
+                        address = ref.view.offset + other*strides[1-axis]
+                        position = 0
+                        while position < ref.shape[axis]:
+                            remaining = unit - (address+position*stride) % unit
+                            position = min(ref.shape[axis], position + (remaining+stride-1)//stride)
+                            result.add(base[axis]+position)
+                return result
+            if value.operation == 'indexed_contract':
+                return cuts(_resolve_logical(value.value[0], self.sources), axis, origin, count)
+            if value.operation == 'transpose':
+                return cuts(value.operands[0], 1-axis, origin, count)
+            if value.operation == 'dot':
+                operand = value.operands[1 if axis == 1 else 0]
+                return cuts(operand, axis, 0, self.layout(operand)[0][1-axis])
+            if value.operation in _REDUCTIONS or value.operation == 'argsort':
+                return cuts(value.operands[0], axis, 0, self.layout(value.operands[0])[0][1-axis]) if axis == 0 else set()
+            result = set()
+            for operand in value.operands:
+                if self.layout(operand)[0][axis] == shape[axis]:
+                    result.update(cuts(operand, axis, origin, count))
+            return result
+
+        boundaries.update(cut for cut in cuts(child, 1, row, rows) if 0 < cut < width)
+        ordered = sorted(boundaries)
+        return tuple((first, last-first) for first, last in zip(ordered, ordered[1:]))
 
     # design/algorithm-sources.md#shared-associative-reductions
     def reduction(self, node, row, rows, dtype, direct=None, plan=None):
@@ -2114,7 +2167,7 @@ class _ExpressionRegions:
             self.program._plan_use(binding['id'], target, direct)
             self.cache[key] = target, binding['id']
             return self.cache[key]
-        plan = plan if plan is not None else _ReductionPlan.create(self.reduction_regions(node))
+        plan = plan if plan is not None else _ReductionPlan.create(self.reduction_regions(node, row, rows))
         parts = {}
         binding = self.program._plan_binding('reduction', (), plan.root)
         for index, (column, length) in enumerate(plan.regions):
@@ -2174,7 +2227,7 @@ class _ExpressionRegions:
         rows = 1 if layout[0][0] == 1 else shape[0]
         key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if (self.reduction_uses.get(key) != 1 or key in self.cache or
-                layout[0][1] != shape[1] or layout[2][1] < layout[0][1] or rows != shape[0]):
+                layout[0][1] != shape[1] or len(self.reduction_regions(node, row, rows)) != 1 or rows != shape[0]):
             return None
 
         # design/algorithm-sources.md#in-operation-publication

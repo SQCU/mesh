@@ -3905,3 +3905,74 @@ inside a running dispatch. Those remain obligations of the active goal.
 Validation was source review of expression uses, selector domains, both storage
 orders, CPU/Metal source ABI, native compilation and Python syntax compilation.
 No numerical or performance runs were performed.
+
+
+## Page-derived reduction leaves
+
+The JAX authors' indexed operand regions cited under compiled access domains and
+Blelloch's associative reduction trees cited above supply the mechanisms used by
+this change. `_ExpressionRegions.reduction_regions(node, row, rows)` is setup-time
+compiler analysis, called before native function registration. Its explicit row
+domain comes from the caller; it is not inferred during numerical invocation.
+
+The compiler obtains canonical page size once through `mesh_algebra_page_bytes`.
+It unions existing block boundaries with page transitions from each participating
+direct Ref's retained offset, row stride, column stride and dtype. For stride s>0,
+page width U in elements, and address a at feature index c, the next transition is:
+
+```
+c_next = c + ceil((U - ((a + c*s) mod U)) / s)
+```
+
+The traversal intersects the requested rows, maps transpose axes, preserves
+broadcasts and propagates pointwise/cast/domain dependencies. Dot free axes map
+to their corresponding operand without confusing contraction K indices with
+output feature indices. Indexed-contraction descriptors resolve their stored
+logical expression during this analysis; unresolved logical-load nodes are not
+passed to the ordinary layout function.
+
+The resulting intervals feed the existing `_ReductionPlan` and its balanced
+merge graph. Leaf computation still fuses the operand expression with its partial
+reduction and publishes into independently allocated canonical pages. Dtype
+conversion and merge arithmetic are unchanged; floating-point association can
+change because the existing tree now has finer leaves. `inline_reduction` uses
+the same partition and requires one interval before applying its other fusion
+conditions, so a mapped whole-tensor Ref no longer bypasses partial leaves merely
+because its logical block covers the full feature width.
+
+These are page-stamp boundaries, not a claim that every producer publishes each
+page separately. Multirow leaf output ownership, precise indexed-table access
+mapping and opportunistic partial-result consumption remain unfinished. The
+analysis reads metadata only: it does not call numerical kernels, inspect input
+values or allocate computed operand panels. Source review and compilation were
+performed, with no numerical execution.
+
+## Realized numerical invocation
+
+Operator instructions in the current mesh conversation:
+
+> remove abstractions and wrappers where they are not appropriate, required, or introduce problems
+
+> you should never be doing shape or memory or type inference inside of a runtime
+
+The configuration/iteration distinction in the JAX authors' Pallas BlockSpecs
+reference applies here: configuration retains addresses, dtype specializations,
+iteration domains, and backend functions before numerical execution starts.
+Page-stamp traversal and numerical index arithmetic consume those decisions.
+
+Metal builtin dispatch and threadgroup sizes are now constructed beside pipeline
+creation. The encode block captures those values and no longer queries the
+pipeline limit or chooses a threadgroup size during invocation.
+`submit_encoded_metal` centralizes command submission, timing and completion;
+the duplicate builtin completion implementation is removed. `submit_metal` is
+only the adapter for a function's own encoder. Selected contractions retain their
+configured plan encoder separately from the invocation whose pages must complete;
+that distinction is necessary to execute the selected plan and retire the
+correct page readers.
+
+Source audit found CPU operation, scalar reader/writer, transpose and backend
+choices already occur during binding. Materialization retains copy sizes and
+strides during setup; its invocation only executes those copies. CoreML's output
+backing conformance check remains validation of the configured destination, not
+inference selecting a shape, dtype or allocation. This audit does not claim that
+opaque backend libraries expose no internal scheduling or allocation.
