@@ -44,9 +44,7 @@ ulong coordinate(ulong index, device const View& view, uint axis) {
 '''
 ARGUMENTS = '''device const ulong* regions [[buffer(0)]], device const View* v [[buffer(1)]],
     device const Block* blocks [[buffer(2)]],
-    uint3 position [[thread_position_in_grid]], uint3 group [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
-    uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(3)]]'''
+    uint3 position [[thread_position_in_grid]], constant uint* arguments [[buffer(3)]]'''
 
 
 def read(value, index='t'):
@@ -62,7 +60,6 @@ def kernel(node):
     index = output.index
     name = f'mesh_tensor_{index}'
     body = [f'ulong t=position.x; if(t>=v[{index}].size) return;']
-    mode, clear = 'linear', False
     if op in ('input', 'constant', 'reshape', 'stop_gradient'):
         return None
     elif op == 'argsort':
@@ -70,58 +67,11 @@ def kernel(node):
         body.append(f'ulong at=coordinate(t,v[{source.index}],{axis}), stride=v[{source.index}].stride[{axis}]; ulong base=t-at*stride;')
         body.append(f'auto value={read(source)}; ulong rank=0; for(ulong i=0;i<v[{source.index}].shape[{axis}];++i) {{ auto other={read(source,"base+i*stride")}; rank+=(other<value || (other==value && i<at)); }}')
         body.append(write(output, 'at', 'base+rank*stride'))
-    elif op == 'matmul':
-        body, mode = matmul_body(output, values, attrs), 'matmul'
     else:
-        raise ValueError(f'No retained ordering or integer contraction for {op}')
+        raise ValueError(f'No retained ordering operation for {op}')
     return {'name': name, 'source': f'kernel void {name}({ARGUMENTS}) {{\n' + '\n'.join(body) + '\n}\n',
-            'node': index, 'mode': mode, 'clear': clear, 'owner': owner,
+            'node': index, 'owner': owner,
             'arguments': list(dict.fromkeys(value.index for value in (*values, output)))}
-
-
-def math_product(shape):
-    result = 1
-    for value in shape: result *= value
-    return result
-
-
-def matmul_body(output, values, attrs):
-    left, right = values
-    l, r, o = left.index, right.index, output.index
-    transpose_left, transpose_right = attrs['transpose_left'], attrs['transpose_right']
-    rows, columns = f'v[{o}].shape[{output.ndim-2}]', f'v[{o}].shape[{output.ndim-1}]'
-    inner = f'v[{l}].shape[{left.ndim-(2 if transpose_left else 1)}]'
-    batch_left = batch_address(left, output)
-    batch_right = batch_address(right, output)
-    a = f'base_a+({"k*"+rows+"+row" if transpose_left else "row*"+inner+"+k"})'
-    c = f'base_b+({"column*"+inner+"+k" if transpose_right else "k*"+columns+"+column"})'
-    return [f'ulong batch=group.z, base_a={batch_left}, base_b={batch_right};'] + tiled_product(
-        output, rows, columns, inner, read(left, a), read(right, c), f'(batch*{rows}+row)*{columns}+column')
-
-
-def tiled_product(output, rows, columns, inner, left, right, address):
-    return [            'threadgroup float tile_a[64*32], tile_b[32*32], tile_c[64*32];',
-            'simdgroup_float8x8 accum[4]; for(uint i=0;i<4;++i) accum[i]=simdgroup_float8x8(0);',
-            f'for(ulong first=0;first<{inner};first+=32) {{',
-            f'for(uint i=tid;i<64*32;i+=256) {{ ulong row=group.y*64+i/32,k=first+i%32; tile_a[i]=(row<{rows}&&k<{inner})?float({left}):0; }}',
-            f'for(uint i=tid;i<32*32;i+=256) {{ ulong k=first+i/32,column=group.x*32+i%32; tile_b[i]=(column<{columns}&&k<{inner})?float({right}):0; }}',
-            'threadgroup_barrier(mem_flags::mem_threadgroup);',
-            'for(uint part=0;part<4;++part) { uint tile=simd+part*8,row=tile/4*8,column=tile%4*8;',
-            'for(uint k=0;k<32;k+=8) { simdgroup_float8x8 a,b; simdgroup_load(a,tile_a+row*32+k,32); simdgroup_load(b,tile_b+k*32+column,32); simdgroup_multiply_accumulate(accum[part],a,b,accum[part]); }}',
-            'threadgroup_barrier(mem_flags::mem_threadgroup); }',
-            'for(uint part=0;part<4;++part) { uint tile=simd+part*8; simdgroup_store(accum[part],tile_c+(tile/4*8)*32+tile%4*8,32); }',
-            'threadgroup_barrier(mem_flags::mem_threadgroup);',
-            f'for(uint i=tid;i<64*32;i+=256) {{ ulong row=group.y*64+i/32,column=group.x*32+i%32; if(row<{rows}&&column<{columns}) {{ {write(output,"tile_c[i]",address)} }} }}']
-
-
-def batch_address(source, output):
-    pieces = []
-    for i in range(source.ndim - 2):
-        if source.shape[i] == 1: continue
-        axis = output.ndim - source.ndim + i
-        trailing = math_product(output.shape[axis+1:-2])
-        pieces.append(f'((batch/({trailing}))%v[{source.index}].shape[{i}])*v[{source.index}].stride[{i}]')
-    return '+'.join(pieces) or '0'
 
 
 # ../../../design/algorithm-sources.md#indexed-expression-lowering
@@ -135,7 +85,6 @@ def source(nodes):
         name = 'mesh_tensor_' + hashlib.sha256(text.encode()).hexdigest()[:16]
         sources[name] = '// ../../../design/algorithm-sources.md#literal-row-functions\n' + text.replace('FUNCTION', name)
         item.update(name=name, arguments=nodes)
-    sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,blocks,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
     return PREFIX + '\n'.join(sources.values()), kernels
 
 
@@ -300,6 +249,8 @@ def matrix_batch(tensor, shape, batch):
     if tensor.shape == shape and batch == 0:
         return tensor
     rows, columns = shape
+    if not rows or not columns:
+        return tensor.program.tensor(shape, dtype=tensor.dtype)
     block = (math.gcd(rows, tensor.block_shape[0]) if tensor.grid[0] > 1 else rows,
              min(columns, tensor.block_shape[1]))
     result = object.__new__(Tensor)
@@ -312,7 +263,7 @@ def matrix_batch(tensor, shape, batch):
     return result
 
 
-# ../../../design/algorithm-sources.md#xonotic-batched-contractions
+# ../../../design/algorithm-sources.md#typed-integer-contractions
 def batched_matmul(program, left, right, left_shape, right_shape, attributes, *,
                    tile_rows, tile_k, tile_columns, peer, output_dtype):
     import itertools
@@ -785,11 +736,11 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(*operands)
             continue
-        numerical = value.dtype in ('float16', 'float32')
         matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
         shaped = all(local[v.index].shape == matrix_shapes[v.index] or
             (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) for v in values)
-        if numerical and operation == 'matmul' and all(len(shapes[v.index]) >= 2 for v in values):
+        # ../../../design/algorithm-sources.md#typed-integer-contractions
+        if operation == 'matmul' and all(len(shapes[v.index]) >= 2 for v in values):
             tensors[value.index] = batched_matmul(program, *(local[v.index] for v in values),
                 *(shapes[v.index] for v in values), attributes, tile_rows=tile_rows,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
@@ -885,17 +836,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     operands.append(tensor)
                     specs.append(BlockSpec(tensor.block_shape, lambda i, coordinate=coordinate: coordinate))
             views.append(view)
-        mode, threads = item['mode'], 256
-        if mode == 'matmul':
-            grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, math.prod(shape[:-2]))
-        else:
-            grid = (((math.prod(shapes[mode[1]]) if isinstance(mode, tuple) else size) + 255) // 256, 1, 1)
-        arguments = [positions[index] for index in item['arguments']] + [positions[value.index]]
-        dispatches = []
-        if item['clear']:
-            dispatches.append(MetalDispatch('mesh_tensor_zero', (max(1, (size * np.dtype(value.dtype).itemsize + 255) // 256), 1, 1),
-                                           argument_buffer=3, argument_offset=len(item['arguments']) * 4))
-        dispatches.append(MetalDispatch(item['name'], tuple(max(1, v) for v in grid), (threads, 1, 1), argument_buffer=3))
+        arguments = [positions[index] for index in item['arguments']]
+        dispatches = (MetalDispatch(item['name'], ((size + 255) // 256, 1, 1), (256, 1, 1), argument_buffer=3),)
         kernel = Metal(text, tuple(dispatches), (bytes((View * len(views))(*views)),
             bytes((Block * len(blocks))(*blocks)), bytes((c.c_uint32 * len(arguments))(*arguments))))
         tensors[value.index] = program.kernel_call(kernel, grid=(1,), peer=peer,
