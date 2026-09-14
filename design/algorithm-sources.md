@@ -3170,3 +3170,55 @@ separation is relevant to the remaining measured-profile work: mesh can consume
 measured operation/shape/backend costs during realization. The launch-count
 default above is not such a profile, and adopting this measurement principle
 does not require importing XLA's scheduler into mesh's invocation path.
+
+
+## Grouped segment reductions
+
+Mark Harris's [Optimizing Parallel Reduction in CUDA](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf)
+combines register-local accumulation over multiple contributions with a bounded
+parallel reduction tree. The JAX authors' [Megablox transposed grouped multiplication](https://raw.githubusercontent.com/AI-Hypercomputer/maxtext/main/src/maxtext/kernels/megablox/backend.py)
+retains group intervals and output tile identities while computing grouped
+outer-product sums. These are distinct mechanisms: parallelizing the existing
+indirect segment reduction does not itself provide a matrix-engine grouped
+contraction or a tuned backend selector.
+
+Mesh's segment owner already retains the exact group ordinal vector, bounds,
+source layouts and selected physical dependencies. An outer-product update
+`X[n,d] * G[n,h]` remains ordinary indexed arithmetic over those values. The
+existing source refs are the operands; an indirect ordinal list does not justify
+packing them into a hidden dense tensor. The segment's partial output remains
+independently publishable through the existing canonical function, and final
+destination reduction retains its existing contribution domain.
+
+For narrow Metal output panels, the shared segment emitter distributes the
+feature and reduction coordinates across one SIMD group. Setup selects a
+power-of-two feature stride from the output width and bounded contribution
+capacity. Each lane accumulates its assigned group ordinals in registers;
+shuffle-XOR steps exchange partials only between lanes of the same feature.
+Ragged feature lanes contribute zero without loading an operand. All lanes
+participate in the shuffle tree, and one reduction lane stores each feature.
+The CPU emitter retains serial accumulation; single-contribution and wide
+panels retain their existing column mapping. These choices are realized from
+static geometry, not numerical group contents.
+
+FP32 sums retain FP32 partials. Integer accumulators use unsigned 64-bit modular
+addition; each exchanged value is reconstructed from shuffled 32-bit halves
+before addition, preserving carries and avoiding unsupported 64-bit SIMD-sum
+intrinsics. Parallel FP32 association can differ from serial association, so
+numerical agreement is evaluated with the declared tolerance rather than bit
+identity. No partial buffer, numerical launch, selector or lifetime is added.
+
+The existing streaming-algebra workflow's grouped outer product uses 67 input
+rows in 33-row chunks, five experts and a 5-by-7 output per expert. Multiple
+contributions for each group share a chunk; interleaved positive, negative and
+invalid keys exercise the actual ordinal vector. Invalid NaN contributions do
+not enter the sum. Four destinations complete while the final source row is
+absent, and both reuse generations agree with valid-domain float64 references.
+The retained function interval supports comparisons of the same numerical work
+before and after lowering changes.
+
+Apple's [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf),
+Table 6.14, specifies the integer `simd_shuffle_xor` operation and a uniform
+XOR mask across the SIMD group. FP32 values are exchanged by bit reinterpretation
+to and from uint32, not by numerical integer conversion. The reduction's mask
+sequence is determined entirely by the realized feature stride.
