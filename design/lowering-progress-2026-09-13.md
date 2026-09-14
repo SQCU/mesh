@@ -265,5 +265,41 @@ directory/table readers with explicit shared domain holds. Local CPU/Metal pass
 gold with remote fanout reuse. The actual Xonotic gather/concatenate graph now
 demonstrates independent indexed producers and consumers through the shared
 representation. Source, precision, locality, derivative and performance limits
-are recorded with the raw evidence. Active segment execution, physical partial
-storage and the broader plan remain unfinished.
+are recorded with the raw evidence. The bounded active-segment increment follows
+below; physical partial storage and the broader plan remain unfinished.
+
+
+## Bounded active numerical grids
+
+`afd3b7b` retains the static maximum min(chunk updates, destination rows) for
+scatter partial capacity. `b081848` implements native count/slot activation and
+explicit produced/omitted dispositions; `4975a24` binds exact producer identities
+in shared lowering; `dc4c80a` exposes count, omission and disposition reader traces.
+Omission performs no numerical launch and publishes no payload. Routes consume
+its explicit disposition without reading a fictitious payload occurrence.
+
+The implemented indexed contract requires count and all selector/range views to
+belong to one actual produced directory output, with compiler-supplied empty
+inactive ranges. Existing indexed lifetimes retain late unused payloads;
+ordinary unused reads retain separate retirement facts. The count and disposition
+cannot recycle before their actual readers finish. Independent indexed-count
+producers and arbitrary inactive selections remain outside this increment.
+
+[Active-grid source and evidence](active-segments.md#archived-operational-observations)
+now records local CPU/Metal passes for 1025 updates in 513-row chunks and 4097
+updates in 2049-row chunks, both with 17 destinations. Installed library is
+`dc4c80a`; examples are respectively `dc4c80a` and `e0ecb91`. Raw unchanged logs
+and traces are archived with [explicit provenance](../measurements/lowering-2026-09-13/active-omission-provenance.json).
+Four normal/changed/all-invalid/normal occurrences check independent consumers,
+all-empty output before any update/factor payload, subsequent late-unused
+retirement, and reuse. The larger case records the count, bounds and selector
+on distinct directory pages under the same produced output ownership.
+
+Each trace's 34 main scatter partial functions account for 50 numerical launches
+and 86 omissions over 136 slot occurrences. Six Xonotic gradient partial functions
+add 12 launches; whole-workflow submissions/completions are 2067/2067. The same
+records include independent gradient outputs before an unrelated cotangent
+arrives, without allocating the primal operand. This is bounded numerical and
+source-lifetime evidence, not a matched throughput gain or complete derivative
+coverage. Finer physical partial storage, repeated readiness traversal, general
+rank/fusion, placement and the plan's final no-regression audit remain open.

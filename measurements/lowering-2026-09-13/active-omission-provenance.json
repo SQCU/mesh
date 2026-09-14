@@ -1,0 +1,61 @@
+{
+  "runs": [
+    {
+      "library_revision": "dc4c80a",
+      "example_revision": "dc4c80a",
+      "mode": "local",
+      "backend": "cpu",
+      "dtype": "float32",
+      "scatter_rows": 1025,
+      "scatter_tile": 513,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "observations": "active-cpu.jsonl.gz",
+      "trace": "active-cpu-trace.json.gz",
+      "input_values": "increasing positive integers"
+    },
+    {
+      "library_revision": "dc4c80a",
+      "example_revision": "dc4c80a",
+      "mode": "local",
+      "backend": "metal",
+      "dtype": "float32",
+      "scatter_rows": 1025,
+      "scatter_tile": 513,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "observations": "active-metal.jsonl.gz",
+      "trace": "active-metal-trace.json.gz",
+      "input_values": "increasing positive integers"
+    },
+    {
+      "library_revision": "dc4c80a",
+      "example_revision": "e0ecb91",
+      "mode": "local",
+      "backend": "cpu",
+      "dtype": "float32",
+      "scatter_rows": 4097,
+      "scatter_tile": 2049,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "observations": "active-bounded-pages-cpu.jsonl.gz",
+      "trace": "active-bounded-pages-cpu-trace.json.gz",
+      "input_values": "bounded cyclic positive integers"
+    },
+    {
+      "library_revision": "dc4c80a",
+      "example_revision": "e0ecb91",
+      "mode": "local",
+      "backend": "metal",
+      "dtype": "float32",
+      "scatter_rows": 4097,
+      "scatter_tile": 2049,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "observations": "active-bounded-pages-metal.jsonl.gz",
+      "trace": "active-bounded-pages-metal-trace.json.gz",
+      "input_values": "bounded cyclic positive integers"
+    }
+  ],
+  "archive_format": "gzip of the unchanged original log/trace bytes"
+}
