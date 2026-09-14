@@ -2976,3 +2976,54 @@ transposition, composed consumers and reuse with withheld independent regions.
 The typed panel implementation establishes exact arithmetic and streaming;
 these cases do not establish fastest-backend performance or optimal operand
 reuse/vectorization. Those remain requirements of the full lowering plan.
+
+## Stable indexed ordering
+
+K. E. Batcher's [Sorting networks and their applications (1968)](https://www.cs.kent.edu/~batcher/sort.pdf)
+provides the bitonic comparison network used for bounded initial runs. Oded
+Green, Robert McColl and David A. Bader's [GPU Merge Path (ICS 2012)](https://davidbader.net/publication/2012-gm-ba/2012-gm-ba.pdf)
+provides the two-level partition of sorted inputs into disjoint output work.
+These are numerical algorithms within the shared expression lowering; neither
+introduces an application scheduler.
+
+`expression.argsort(axis)` returns U32 original-axis ordinals. The total key order
+is ascending numeric value, NaNs last, then original ordinal for ties, including
+signed zeros and multiple NaNs. Integer comparisons retain their exact declared
+width. This follows the MLX authors' [stable argsort contract](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.argsort.html).
+The caller also retains and resolves `argpartition`'s `kth` during setup, including
+negative positions. Full stable sorting satisfies the [partition contract](https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.argpartition.html),
+but does not establish optimal selection cost. `axis=None` flattens the logical
+input; ordinary axes are validated against its rank.
+
+Setup divides each axis at actual source backing boundaries and into runs of at
+most 128 values. A bounded Batcher network sorts original ordinals in numerical
+threadgroup scratch, padded with a sentinel ordered after every real ordinal.
+A balanced merge tree writes canonical ordinal tiles of at most 128 results.
+Each tile calculates its two Merge Path boundary partitions; each lane partitions
+and sequentially merges its own contiguous subchunk within those bounds. The
+CPU lowering uses the same emitted algorithm with one lane. Local barriers order
+numerical scratch accesses; they do not wait for another invocation or operand.
+
+Every key lookup retains an explicit vector of axis intervals and typed source
+Refs, including actual strides. Keys remain in their original registered pages;
+merge stages read those pages through ordinary canonical reader bindings, keeping
+them live until their last numerical reader completes. Intermediate canonical
+buffers hold ordinals only. Genuinely computed key expressions use the existing
+numerical panel lowering, rather than a hidden copy of input operands. This
+storage choice saves intermediate key arrays but rereads source keys and extends
+their lifetimes; it is not assumed faster than sorted key/value intermediates.
+
+Independent source runs execute as their pages arrive. A final sorted position
+requires the full sort axis, since any missing value can change that position;
+unrelated rows remain independent. Output regions publish through the existing
+page stamps, and gathers consume their ordinal regions through the existing
+indexed-load owner. Axis transposition and higher-rank coordinate maps preserve
+that dependency domain. Setup caches the full axis ordering across output tiles.
+
+Xonotic now describes ordering with shared expressions and logical views. Its
+last private Metal numerical emitter, metadata structs and dispatch binding are
+removed. The existing streaming-algebra workflow covers stable ties, NaNs,
+signed zeros, exact large integers, ragged runs, source-dependent partial work,
+independent rows, gathers and reuse. These finite observations establish only
+the recorded numerical/progress behavior; matched throughput, optimal selection
+and full-plan performance parity remain separate requirements.
