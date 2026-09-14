@@ -78,6 +78,7 @@ class Native:
             'mesh_algebra_report': (Report, [P]),
         }
         for name, (result, arguments) in signatures.items():
+            library = self.runtime if name in ('mesh_context', 'mesh_attach', 'mesh_detach') else self.algebra
             function = getattr(library, name)
             function.restype, function.argtypes = result, arguments
             setattr(self, name.removeprefix('mesh_'), function)
