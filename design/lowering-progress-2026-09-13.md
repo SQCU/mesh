@@ -912,3 +912,35 @@ against flat output addresses, whereas Graph.At.add and its gradient[y] derivati
 express row indexing. Existing named callers use vector bases and do not expose
 that mismatch. General gather and nonvector scatter migration, storage/launch
 optimization and remaining nine-step acceptance work remain open.
+
+## General gather transpose caller migration
+
+`d6f5a05` extracts the forward gather's source-coordinate tuple and shares it
+with its transpose. The scalar destination, per-axis validity, segmented sum,
+original cotangent loads and matrix reframe now use the same lowering block as
+take-along-axis gradients. All gather transposes omit numerical primal liveness
+and replication. The existing row-gather U×F specialization remains on shared
+indexed_add. The separate custom atomic emitter and gather_address generator are
+removed; no replacement derivative runtime is introduced.
+
+`ac74558` extends the existing gather-gradient runner with a rank-three primal,
+nonadjacent advanced indices, reversed middle-axis slice and a pointwise consumer.
+Output regions for source rows 0, 1 and 3 complete while cotangents for source row
+2 remain unpublished. Duplicate/negative indices, one invalid per-axis index and
+repeated storage reuse pass exact endpoint comparisons. Neither gradient example
+supplies a numerical primal binding. Existing row-gather and broadcast-take cases
+continue to pass.
+
+Final installed library/caller revision `d6f5a05` passes CPU and Metal float32
+workflows with 3406 completed submissions each. Paired Metal float16 completes
+2721 rank-zero submissions. Scatter masks, contractions, reductions, gold and
+fanout also pass. The advanced gradient side case remains float32 on rank zero;
+only gold/fanout traverse RDMA. The peer exits zero after SIGTERM.
+`gather-gradient-provenance.json` records compressed logs/traces, revisions,
+configuration and timing count/mean/sample variance. These cases are not an
+exhaustive advanced-index suite or a matched performance improvement claim.
+
+The general transpose path retains scalar scatter's worst-case metadata and
+partial capacity. Nonvector scatter's row-indexing correction is the next caller
+migration. Storage/launch optimization, remaining operator coverage and the full
+nine-step performance acceptance remain open.

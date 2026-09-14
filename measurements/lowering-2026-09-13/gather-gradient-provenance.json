@@ -1,0 +1,1210 @@
+{
+  "runs": [
+    {
+      "prefix": "gather-gradient-cpu",
+      "library_revision": "d6f5a05",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "d6f5a05",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "gather-gradient-cpu.jsonl.gz",
+        "gather-gradient-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.276041,
+        "invocations_per_second": 701.5835442176536,
+        "first_section_ms": 3.731625,
+        "completion_ms": {
+          "count": 3,
+          "mean": 3.952944,
+          "sample_variance": 0.077813940477
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 3406,
+          "completed": 3406,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 3406
+        }
+      },
+      "gather_gradients": [
+        {
+          "event": "xonotic_gradient_early",
+          "case": "row",
+          "generation": 0,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                6.0,
+                8.0,
+                10.0,
+                12.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                22.0,
+                24.0,
+                26.0,
+                28.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "row",
+          "generation": 0,
+          "output": [
+            [
+              [
+                6.0,
+                8.0,
+                10.0,
+                12.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                38.0,
+                40.0,
+                42.0,
+                44.0
+              ]
+            ],
+            [
+              [
+                22.0,
+                24.0,
+                26.0,
+                28.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "row",
+          "generation": 1,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                26.0,
+                28.0,
+                30.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                8.0,
+                10.0,
+                12.0,
+                14.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "row",
+          "generation": 1,
+          "output": [
+            [
+              [
+                24.0,
+                26.0,
+                28.0,
+                30.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                40.0,
+                42.0,
+                44.0,
+                46.0
+              ]
+            ],
+            [
+              [
+                8.0,
+                10.0,
+                12.0,
+                14.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "advanced",
+          "generation": 0,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2,
+            3
+          ],
+          "output": [
+            [
+              [
+                1.0,
+                19.0,
+                1.0
+              ],
+              [
+                1.0,
+                13.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "advanced",
+          "generation": 0,
+          "output": [
+            [
+              [
+                1.0,
+                19.0,
+                1.0
+              ],
+              [
+                1.0,
+                13.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                43.0
+              ],
+              [
+                1.0,
+                1.0,
+                37.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "advanced",
+          "generation": 1,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2,
+            3
+          ],
+          "output": [
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                25.0
+              ],
+              [
+                1.0,
+                1.0,
+                19.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "advanced",
+          "generation": 1,
+          "output": [
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                28.0,
+                1.0,
+                1.0
+              ],
+              [
+                25.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                25.0
+              ],
+              [
+                1.0,
+                1.0,
+                19.0
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "prefix": "gather-gradient-metal",
+      "library_revision": "d6f5a05",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "d6f5a05",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "gather-gradient-metal.jsonl.gz",
+        "gather-gradient-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.395291,
+        "invocations_per_second": 182.97936889317793,
+        "first_section_ms": 13.724208,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.826805,
+          "sample_variance": 1.8494220334629985
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 3406,
+          "completed": 3406,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.012428718,
+          "cpu_submitted": 0
+        }
+      },
+      "gather_gradients": [
+        {
+          "event": "xonotic_gradient_early",
+          "case": "row",
+          "generation": 0,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                6.0,
+                8.0,
+                10.0,
+                12.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                22.0,
+                24.0,
+                26.0,
+                28.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "row",
+          "generation": 0,
+          "output": [
+            [
+              [
+                6.0,
+                8.0,
+                10.0,
+                12.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                38.0,
+                40.0,
+                42.0,
+                44.0
+              ]
+            ],
+            [
+              [
+                22.0,
+                24.0,
+                26.0,
+                28.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "row",
+          "generation": 1,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                26.0,
+                28.0,
+                30.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                8.0,
+                10.0,
+                12.0,
+                14.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "row",
+          "generation": 1,
+          "output": [
+            [
+              [
+                24.0,
+                26.0,
+                28.0,
+                30.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                40.0,
+                42.0,
+                44.0,
+                46.0
+              ]
+            ],
+            [
+              [
+                8.0,
+                10.0,
+                12.0,
+                14.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "advanced",
+          "generation": 0,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2,
+            3
+          ],
+          "output": [
+            [
+              [
+                1.0,
+                19.0,
+                1.0
+              ],
+              [
+                1.0,
+                13.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "advanced",
+          "generation": 0,
+          "output": [
+            [
+              [
+                1.0,
+                19.0,
+                1.0
+              ],
+              [
+                1.0,
+                13.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                43.0
+              ],
+              [
+                1.0,
+                1.0,
+                37.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "advanced",
+          "generation": 1,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2,
+            3
+          ],
+          "output": [
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                25.0
+              ],
+              [
+                1.0,
+                1.0,
+                19.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "advanced",
+          "generation": 1,
+          "output": [
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                28.0,
+                1.0,
+                1.0
+              ],
+              [
+                25.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                25.0
+              ],
+              [
+                1.0,
+                1.0,
+                19.0
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "prefix": "gather-gradient-paired-metal",
+      "library_revision": "d6f5a05",
+      "peer_library_revision": "d6f5a05",
+      "example_and_xonotic_revision": "d6f5a05",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "gather-gradient-paired-metal.jsonl.gz",
+        "gather-gradient-paired-metal-trace.json.gz",
+        "gather-gradient-paired-metal-peer.jsonl.gz",
+        "gather-gradient-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.206792,
+        "invocations_per_second": 174.349756770466,
+        "first_section_ms": 13.302667,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.264764,
+          "sample_variance": 2.833048546213
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 2721,
+          "completed": 2721,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.009235815,
+          "cpu_submitted": 0
+        }
+      },
+      "gather_gradients": [
+        {
+          "event": "xonotic_gradient_early",
+          "case": "row",
+          "generation": 0,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                6.0,
+                8.0,
+                10.0,
+                12.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                22.0,
+                24.0,
+                26.0,
+                28.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "row",
+          "generation": 0,
+          "output": [
+            [
+              [
+                6.0,
+                8.0,
+                10.0,
+                12.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                38.0,
+                40.0,
+                42.0,
+                44.0
+              ]
+            ],
+            [
+              [
+                22.0,
+                24.0,
+                26.0,
+                28.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "row",
+          "generation": 1,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                26.0,
+                28.0,
+                30.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                8.0,
+                10.0,
+                12.0,
+                14.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "row",
+          "generation": 1,
+          "output": [
+            [
+              [
+                24.0,
+                26.0,
+                28.0,
+                30.0
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            [
+              [
+                40.0,
+                42.0,
+                44.0,
+                46.0
+              ]
+            ],
+            [
+              [
+                8.0,
+                10.0,
+                12.0,
+                14.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "advanced",
+          "generation": 0,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2,
+            3
+          ],
+          "output": [
+            [
+              [
+                1.0,
+                19.0,
+                1.0
+              ],
+              [
+                1.0,
+                13.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "advanced",
+          "generation": 0,
+          "output": [
+            [
+              [
+                1.0,
+                19.0,
+                1.0
+              ],
+              [
+                1.0,
+                13.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                43.0
+              ],
+              [
+                1.0,
+                1.0,
+                37.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_early",
+          "case": "advanced",
+          "generation": 1,
+          "primal_operand_allocated": false,
+          "withheld_cotangent_blocks": [
+            2,
+            3
+          ],
+          "output": [
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                25.0
+              ],
+              [
+                1.0,
+                1.0,
+                19.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_gradient_complete",
+          "case": "advanced",
+          "generation": 1,
+          "output": [
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                1.0
+              ],
+              [
+                1.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                28.0,
+                1.0,
+                1.0
+              ],
+              [
+                25.0,
+                1.0,
+                1.0
+              ]
+            ],
+            [
+              [
+                1.0,
+                1.0,
+                25.0
+              ],
+              [
+                1.0,
+                1.0,
+                19.0
+              ]
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "scope": "General gather transpose and pointwise consumer with nonadjacent advanced indices, reversed slice, duplicate and negative indices, invalid per-axis index, independent cotangent withholding and repeated reuse. Existing row transpose retained. No numerical primal binding. Side cases execute on rank zero; paired gold/fanout traverse RDMA. Peer exited zero after SIGTERM. No matched speedup or exhaustive indexing coverage claim."
+}
