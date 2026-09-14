@@ -1529,3 +1529,30 @@ remain numerical dependencies. The same predicate controls liveness and actual
 binding, so unused forward readers cannot block derivative-only input reuse.
 This is compilation of the existing functional graph, not another runtime
 scheduler. [Contract and caller migration](xonotic-shared-indexing.md#requested-output-liveness).
+
+## FFN shared expression composition
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+separates composable numerical expressions from their tiled backend lowering.
+`nn.ffn` now supplies each hidden section as balanced input-partition dot sums
+followed by swish in one ordinary `kernel_call`. The existing shared contraction
+lowering owns K panels, FP32 partials, and contraction reduction storage and uses
+the existing native matmul backend. The FFN supplies its algebra and public
+output layout, without recreating contraction launch scheduling.
+
+The hidden output uses the same row and column cuts as the prior per-projection
+linear calls followed by pointwise pairwise sums: compute each former linear
+tile, then take the pointwise gcd over actual partition boundaries. A whole-axis
+tile contributes no artificial boundary. Input-partition sums retain their
+balanced association. All arithmetic through swish remains FP32; the published
+hidden output casts once to the input dtype, including intentional FP16 rounding.
+`exchange(activated)` still receives that same independently publishable hidden
+layout. Down projections retain their existing FP32 partial/output accumulation
+and final balanced sum and input-dtype cast. No transport edge is fused away.
+
+Full local nesting of the down projection requires a separately explicit typed
+intermediate cast in the expression language. An implicitly FP32 computed
+operand cannot replace the deliberate FP16 hidden boundary. This migration does
+not make that substitution. Existing `examples/streaming-algebra.py` gold cases
+exercise the two-input-partition FFN and its configured hidden exchange; the
+source retains that validation path rather than adding a second evaluator.

@@ -74,7 +74,7 @@ def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None,
 
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#ffn-shared-expression-composition
 def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         tile_columns=128, exchange=None, peer=None):
     inputs, up_weights, down_weights = tuple(inputs), tuple(up_weights), tuple(down_weights)
@@ -82,10 +82,27 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         raise ValueError('Weights must cover every input partition and hidden section')
     outputs = []
     for up, down in zip(up_weights, down_weights):
-        terms = tuple(linear(program, x, w, tile_rows=tile_rows, tile_k=tile_k,
-                             tile_columns=tile_columns, peer=peer, output_dtype="float32") for x, w in zip(inputs, up))
-        hidden = _sum(program, terms, tile_rows, peer=peer)
-        activated = _pointwise(program, kernels.swish, (hidden,), tile_rows, peer=peer, output_dtype=inputs[0].dtype)
+        rows, columns = inputs[0].shape[0], up[0].shape[1]
+        if any(x.shape[0] != rows or w.shape[1] != columns or x.shape[1] != w.shape[0]
+               for x, w in zip(inputs, up)):
+            raise ValueError('Hidden contractions must share their output domain')
+        row_tiles = tuple(_tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0) for x in inputs)
+        column_tiles = tuple(_tile(min(tile_columns, columns), w.block_shape[1] if w.grid[1] > 1 else 0) for w in up)
+        block = (_tile(min(tile_rows, rows), *(tile if tile < rows else 0 for tile in row_tiles)),
+                 _tile(min(column_tiles), *(tile if tile < columns else 0 for tile in column_tiles)))
+        operands = tuple(value for pair in zip(inputs, up) for value in pair)
+        arguments = kernels.arguments(len(operands))
+        terms = tuple(kernels.dot(arguments[i], arguments[i + 1], tile_k=tile_k)
+                      for i in range(0, len(arguments), 2))
+        while len(terms) > 1:
+            terms = tuple(terms[i] + terms[i + 1] if i + 1 < len(terms) else terms[i]
+                          for i in range(0, len(terms), 2))
+        hidden = terms[0]
+        activated = program.kernel_call(kernels.expression(hidden / (1 + (0 - hidden).exp())),
+            grid=((rows + block[0] - 1) // block[0], (columns + block[1] - 1) // block[1]),
+            in_specs=(BlockSpec(None),) * len(operands),
+            out_specs=BlockSpec(block, _block),
+            out_shape=ShapeDtypeStruct((rows, columns), inputs[0].dtype), peer=peer)(*operands)
         operand = exchange(activated) if exchange is not None else activated
         outputs.append(linear(program, operand, down, tile_rows=tile_rows, tile_k=tile_k,
                               tile_columns=tile_columns, peer=peer, output_dtype="float32"))
