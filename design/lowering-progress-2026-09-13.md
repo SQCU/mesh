@@ -1340,3 +1340,49 @@ measurements/lowering-2026-09-13/boolean-provenance.json, alongside full workflo
 timing count/mean/sample variance. No boolean-specific host timing or matched
 speedup claim is made. Both participant processes exit zero and registered arena
 geometry remains unchanged. The nine-step goal remains active.
+
+
+## Prepared selected native contractions
+
+`880e01f` factors backend preparation from ordinary contraction registration and
+adds selected contractions with one canonical output producer per publication
+quantum. Candidate CPU/MPS/Core ML bindings are prepared at setup; numerical
+execution indexes a prepared binding and forwards completion to the parent.
+`243b947` exposes touched-page views through the existing native dependency
+mapper, avoiding a second stride-to-page algorithm in Python.
+
+`e49e292` recognizes affine selected logical product-and-sum expressions before
+logical coordinate flattening. Exact numerical views and disjoint readiness page
+identities remain separate. K/feature boundaries are refined across candidates;
+shared FP32 reductions and required output assembly preserve original publication.
+Selector expressions and constant-zero panels reuse setup bindings. Invalid
+selection contracts the real operand with a zero panel, preserving NaN behavior.
+Root and independent reviews checked native completion ownership, page-map
+coverage, alias deduplication, transpose strides and selector lifetime. The native
+library builds successfully. No bridge/dataflow structure ABI changes were made.
+
+The existing expert example at `8e7d0c7` packs weights so expert0/1 share a
+backing block, includes negative and invalid indices and a NaN input, and retains
+the delayed expert2 and independent derivative checks. Scalar Metal baselines
+are archived in measurements/lowering-2026-09-13/selected-baseline-provenance.json.
+The selected implementation was installed from `80076b1` on both nodes; source
+hashes of the local installed Python implementation match the worktree.
+
+Local Metal passes the same strengthened workflow. It configures 5258 functions
+and completes 10338 submissions, versus scalar baseline 5266 and10442. These
+counts demonstrate removed work, not a statistically established speedup. General
+nonaffine/grouped contractions, larger-than-quantum selected root lowering,
+remaining caller operations and matched performance acceptance remain open.
+Core ML preparation reuse is source-reviewed; this increment does not establish
+ANE placement or internal zero-copy behavior through a Core ML measurement.
+
+
+Final CPU, Metal and paired Metal runs pass at 80076b1. CPU/Metal each configure
+5258 functions and complete 10338 submissions; paired rank zero configures 5194
+and completes 9653. Raw logs, traces, exact implementation revisions and expert
+count/mean/sample variance are in
+measurements/lowering-2026-09-13/selected-native-provenance.json. The installed
+native library and compiler are synchronized to both nodes; all participant
+processes exit zero, with ordinary SIGTERM peer teardown. The registered arena
+remains 65536 pages, four pages per block and one QP per node. This closes the
+selected affine-panel implementation increment, not the full nine-step goal.

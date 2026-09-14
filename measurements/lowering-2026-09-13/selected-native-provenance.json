@@ -1,0 +1,221 @@
+{
+  "runs": [
+    {
+      "prefix": "selected-native-cpu",
+      "source_revision": "80076b1",
+      "library_revision": "e49e292",
+      "native_revision": "243b947",
+      "example_revision": "8e7d0c7",
+      "caller_revision": "edf7d4b",
+      "backend": "cpu",
+      "paired": false,
+      "gold_dtype": "float32",
+      "expert_dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes_per_node": 1097203712,
+      "artifacts": [
+        "selected-native-cpu.jsonl.gz",
+        "selected-native-cpu-trace.json.gz"
+      ],
+      "expert_timings": {
+        "early": {
+          "count": 2,
+          "mean": 4.009208,
+          "sample_variance": 0.01935528125000004
+        },
+        "independent_derivative": {
+          "count": 2,
+          "mean": 5.2610415,
+          "sample_variance": 0.3675819559444999
+        },
+        "complete": {
+          "count": 2,
+          "mean": 6.4492915,
+          "sample_variance": 0.045853912944499906
+        }
+      },
+      "configured_functions": 5258,
+      "completed_submissions": 10338,
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.344667,
+        "invocations_per_second": 690.5017116386595,
+        "first_section_ms": 3.793167,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.1206249999999995,
+          "sample_variance": 0.03725870312499995
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 10338,
+          "completed": 10338,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 10338
+        }
+      }
+    },
+    {
+      "prefix": "selected-native-metal",
+      "source_revision": "80076b1",
+      "library_revision": "e49e292",
+      "native_revision": "243b947",
+      "example_revision": "8e7d0c7",
+      "caller_revision": "edf7d4b",
+      "backend": "metal",
+      "paired": false,
+      "gold_dtype": "float32",
+      "expert_dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes_per_node": 1097203712,
+      "artifacts": [
+        "selected-native-metal.jsonl.gz",
+        "selected-native-metal-trace.json.gz"
+      ],
+      "expert_timings": {
+        "early": {
+          "count": 2,
+          "mean": 5.783666,
+          "sample_variance": 0.09968112500000015
+        },
+        "independent_derivative": {
+          "count": 2,
+          "mean": 7.431583,
+          "sample_variance": 0.42075083377800027
+        },
+        "complete": {
+          "count": 2,
+          "mean": 9.011291499999999,
+          "sample_variance": 0.04830857694450018
+        }
+      },
+      "configured_functions": 5258,
+      "completed_submissions": 10338,
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.157875,
+        "invocations_per_second": 174.84682689435607,
+        "first_section_ms": 14.781792,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.771194666666666,
+          "sample_variance": 1.4395699050603306
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 10338,
+          "completed": 10338,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.035158033,
+          "cpu_submitted": 0
+        }
+      }
+    },
+    {
+      "prefix": "selected-native-paired-metal",
+      "source_revision": "80076b1",
+      "library_revision": "e49e292",
+      "native_revision": "243b947",
+      "example_revision": "8e7d0c7",
+      "caller_revision": "edf7d4b",
+      "backend": "metal",
+      "paired": true,
+      "gold_dtype": "float16",
+      "expert_dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes_per_node": 1097203712,
+      "artifacts": [
+        "selected-native-paired-metal.jsonl.gz",
+        "selected-native-paired-metal-trace.json.gz",
+        "selected-native-paired-metal-peer.jsonl.gz",
+        "selected-native-paired-metal-peer-trace.json.gz"
+      ],
+      "expert_timings": {
+        "early": {
+          "count": 2,
+          "mean": 6.026729,
+          "sample_variance": 0.1575703839379999
+        },
+        "independent_derivative": {
+          "count": 2,
+          "mean": 7.678354000000001,
+          "sample_variance": 0.5484102666319997
+        },
+        "complete": {
+          "count": 2,
+          "mean": 9.245333500000001,
+          "sample_variance": 0.29921532894450026
+        }
+      },
+      "configured_functions": 5194,
+      "completed_submissions": 9653,
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 14.938792,
+        "invocations_per_second": 200.8194504615902,
+        "first_section_ms": 10.42725,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.261111,
+          "sample_variance": 0.3505181082129992
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 9653,
+          "completed": 9653,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.032036278,
+          "cpu_submitted": 0
+        }
+      }
+    }
+  ],
+  "baseline": "selected-baseline-provenance.json",
+  "scope": "Selected affine expert forward/input-derivative contractions use prepared native plans and deduplicated exact page dependencies. Packed weights share expert0/1 backing, selection includes negative and invalid indices with NaN input. Both generations pass numerical, early consumer and independent derivative checks. Cases float32 on rank zero; paired float16 gold/fanout traverse RDMA. Processes exit zero, peer SIGTERM teardown. No statistically established speedup, no general nonaffine/grouped contraction coverage, no CoreML/ANE runtime claim."
+}
