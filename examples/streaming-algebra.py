@@ -122,11 +122,23 @@ def main():
             (((3, 4), (1, 4)), ((4, 6), (4, 2)), ((6, 3), (2, 3))))
         nested_x, nested_up, nested_down = kernels.arguments(3)
         nested_hidden = kernels.dot(nested_x, nested_up, tile_k=2)
-        nested_body = kernels.dot(nested_hidden / (1 + (0 - nested_hidden).exp()), nested_down, tile_k=2)
-        nested = program.kernel_call(kernels.expression(nested_body), grid=(3,),
-            in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec((1, 3), lambda i: (i, 0)),
-            out_shape=ShapeDtypeStruct((3, 3), np.float32), peer=0)(*nested_inputs)
-        nested_results = tuple(program.export(nested[i, 0]) for i in range(3))
+        activation = nested_hidden / (1 + (0 - nested_hidden).exp())
+        nested_bodies = tuple(kernels.dot(value, nested_down, tile_k=2)
+            for value in (activation, activation.astype(np.float16)))
+        nested = program.kernel_call(kernels.expression(*nested_bodies), grid=(3,),
+            in_specs=(BlockSpec(None),) * 3, out_specs=(BlockSpec((1, 3), lambda i: (i, 0)),) * 2,
+            out_shape=(ShapeDtypeStruct((3, 3), np.float32),) * 2, peer=0)(*nested_inputs)
+        nested_results = tuple(tuple(program.export(tensor[i, 0]) for i in range(3)) for tensor in nested)
+        cast_arg, = kernels.arguments(1)
+        cast_boundary = program.kernel_call(kernels.expression((cast_arg + 1).astype(np.float16) - cast_arg),
+            grid=(1,), in_specs=(BlockSpec((1, 3), lambda i: (0, 0)),),
+            out_specs=BlockSpec((1, 3), lambda i: (0, 0)), out_shape=ShapeDtypeStruct((1, 3), np.float32),
+            peer=0)(weight(np.array([[4096, -4096, 1]], dtype=np.float32)))
+        cast_result = program.export(cast_boundary[0, 0])
+        cast_sums = program.kernel_call(kernels.expression(cast_arg.sum().astype(np.int64), cast_arg.astype(np.int64).sum()),
+            grid=(1,), in_specs=(BlockSpec(None),), out_specs=(BlockSpec((1, 1), lambda i: (0, 0)),) * 2,
+            out_shape=(ShapeDtypeStruct((1, 1), np.int64),) * 2, peer=0)(weight(np.array([[0.75, 0.75]], dtype=np.float32)))
+        cast_sum_results = tuple(program.export(tensor[0, 0]) for tensor in cast_sums)
         norm_input = program.tensor((3, 6), (1, 2), dtype=dtype)
         norm_gamma = np.ones((1, 6), dtype=dtype)
         norm_output = rmsnorm(program, norm_input, weight(norm_gamma), tile_rows=1) if args.rank == 0 else program.tensor((3, 6), (1, 2), dtype=dtype)
@@ -150,7 +162,9 @@ def main():
             values = tuple(((np.arange(np.prod(tensor.shape), dtype=np.float32).reshape(tensor.shape)
                 + generation) / 32 - 0.25).astype(dtype) for tensor in nested_inputs)
             hidden = values[0].astype(np.float64) @ values[1].astype(np.float64)
-            expected = (hidden / (1 + np.exp(-hidden))) @ values[2].astype(np.float64)
+            activated = hidden / (1 + np.exp(-hidden))
+            expected = tuple(value @ values[2].astype(np.float64) for value in
+                (activated, activated.astype(np.float16).astype(np.float64)))
             nested_generations.append((values, expected))
         table_arg, index_arg, deferred_arg = kernels.arguments(3)
         _, column_arg = kernels.indices()
@@ -286,11 +300,11 @@ def main():
             data = tuple((rng.standard_normal((rows, width), dtype=np.float32) / 8).astype(dtype) for _ in range(2))
             inputs = tuple(program.tensor(value.shape, (tile, args.tile_k), dtype=dtype) for value in data)
             a = ffn(program, inputs, first_u, first_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
-                    exchange=lambda value: exchange(value, 0, 1))
+                    exchange=None if args.local else lambda value: exchange(value, 0, 1))
             b = rmsnorm(program, a, scale, tile_rows=tile)
             c = summed_embedding(program, b, table_tensors, index_tensors, tile_rows=tile)
             d = ffn(program, (c,), second_u, second_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
-                    exchange=lambda value: exchange(value, 1, 0))
+                    exchange=None if args.local else lambda value: exchange(value, 1, 0))
             e = rmsnorm(program, d, scale, tile_rows=tile)
             stages = {'ffn1': a, 'rmsnorm1': b, 'summed_embedding': c} if args.rank == 1 else {'ffn2': d, 'rmsnorm2': e}
             probes = {name: {coordinate: program.export(ref) for coordinate, ref in value.blocks.items()}
@@ -461,7 +475,7 @@ def main():
                 with program.write(tensor[coordinate]) as target:
                     target[...] = value
             consumer_completed = wait_completed(nested_consumers, started)
-            if any(result.ready for result in nested_results) or any(
+            if any(result.ready for output in nested_results for result in output) or any(
                     not nested_inputs[1][0, i].writable for i in (1, 2)):
                 raise ArithmeticError('Nested contraction crossed a withheld hidden-panel boundary')
             print(json.dumps(dict(event='nested_dot_partial', generation=generation,
@@ -472,19 +486,27 @@ def main():
                     target[...] = values[1][:, 2*i:2*i+2]
                 with program.write(nested_inputs[2][i, 0]) as target:
                     target[...] = values[2][2*i:2*i+2]
-            wait_for((nested_results[1],))
-            if any(nested_results[i].ready for i in (0, 2)):
+            wait_for(tuple(output[1] for output in nested_results))
+            if any(output[i].ready for output in nested_results for i in (0, 2)):
                 raise ArithmeticError('Nested contraction consumed an unpublished input row')
             print(json.dumps(dict(event='nested_dot_row', generation=generation,
-                withheld_input_rows=[0, 2], output=nested_results[1].array.tolist())), flush=True)
+                withheld_input_rows=[0, 2], output=[output[1].array.tolist() for output in nested_results])), flush=True)
             for i in (0, 2):
                 with program.write(nested_inputs[0][i, 0]) as target:
                     target[...] = values[0][i:i+1]
-            wait_for(nested_results)
-            for i, result in enumerate(nested_results):
-                if not np.allclose(result.array, expected[i:i+1], atol=3e-4, rtol=3e-4):
-                    raise ArithmeticError('Nested contraction numerical mismatch')
-                result.consume()
+            wait_for(tuple(result for output in nested_results for result in output))
+            for output, reference in zip(nested_results, expected):
+                for i, result in enumerate(output):
+                    if not np.allclose(result.array, reference[i:i+1], atol=3e-4, rtol=3e-4):
+                        raise ArithmeticError('Nested contraction numerical mismatch')
+                    result.consume()
+        wait_for((cast_result, *cast_sum_results))
+        if not np.array_equal(cast_result.array, [[0, 0, 1]]) or tuple(result.array.item() for result in cast_sum_results) != (1, 0):
+            raise ArithmeticError('Explicit cast moved across an arithmetic or reduction boundary')
+        print(json.dumps(dict(event='cast_boundaries', rounded=cast_result.array.tolist(),
+            sum_then_cast=cast_sum_results[0].array.item(), cast_then_sum=cast_sum_results[1].array.item())), flush=True)
+        for result in (cast_result, *cast_sum_results):
+            result.consume()
         norm_trace = program.trace
         norm_source_rows = set()
         for j in (0, 1):
