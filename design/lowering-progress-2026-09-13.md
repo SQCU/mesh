@@ -1386,3 +1386,29 @@ native library and compiler are synchronized to both nodes; all participant
 processes exit zero, with ordinary SIGTERM peer teardown. The registered arena
 remains 65536 pages, four pages per block and one QP per node. This closes the
 selected affine-panel implementation increment, not the full nine-step goal.
+
+## Shared extrema and truth reductions
+
+`8a1a9ae` extends the existing expression/region reduction owner to max, min,
+any and all, sharing sum's axis handling, indexed dependencies and partial tree.
+`b25b6dd` moves every Xonotic reduction to those expressions and deletes the
+whole-region reduction emitter and dispatch mode. Empty-axis numerical identities
+and boolean truth conversion remain explicit. The compiler retains integer
+extrema without FP32 conversion; Metal's 64-bit extrema use ordered high/low
+32-bit SIMD reductions. Nested non-sum reductions retain the operand's inferred
+accumulation type. Numerical invocation adds no scheduler, allocation or binding.
+
+The numerical contract and literature are in algorithm-sources.md under
+shared-associative-reductions. Floating extrema preserve initialized numeric
+fmax/fmin behavior, including all-NaN infinity identities. This is deliberately
+documented separately from JAX's NaN-propagating extrema semantics.
+
+`9c59636` extends the existing streaming-algebra Xonotic workflow with 24 cases:
+ranks one through three, exact signed/unsigned 64-bit extrema, fractional/NaN/
+signed-zero truth, floating NaN extrema, ragged columns, downstream consumers,
+alternately withheld independent rows and two generations of storage reuse.
+`177d9a2` records consumer timing in the same workflow. Source and generated CPU
+syntax checks pass. The integrated Metal run at `8a1a9ae` passes all cases,
+configuring 5566 functions and completing 10954 submissions with runtime code0.
+This enlarged workflow is not a matched performance baseline for the old emitter;
+no speedup or performance parity claim follows from those counts.
