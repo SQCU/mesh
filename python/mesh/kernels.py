@@ -189,6 +189,9 @@ class _ExpressionKernel:
             expression = remap(value)
             reads = tuple(inputs[index] for index in used)
             dynamic, accesses = {}, {}
+            dynamic_inputs = {index for index, source in enumerate(reads)
+                if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
+                    in program._constant_extents for ref in source.blocks.values())}
 
             # design/algorithm-sources.md#dynamic-indexed-expression-lowering
             def accesses_for(node, path=()):
@@ -206,7 +209,7 @@ class _ExpressionKernel:
                     accesses_for(row, selected_path)
                     accesses_for(column, selected_path)
                     accesses_for(other, path + ((mask, False),))
-                    if hasattr(reads[node.value], 'blocks'):
+                    if node.value in dynamic_inputs:
                         paths = accesses.setdefault(node, set())
                         if not any(set(previous) <= set(selected_path) for previous in paths):
                             paths.difference_update(previous for previous in tuple(paths) if set(selected_path) <= set(previous))

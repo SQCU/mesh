@@ -1134,3 +1134,21 @@ result while the unrelated block remains absent, then republishes the selected
 block before supplying the late unselected block. The next selector occurrence
 must consume the new selected value. This checks both independent readiness and
 retirement identity across reuse; constant table examples cannot establish them.
+
+### Explicit constant candidate specialization
+
+Pallas's setup specialization principle also applies to dependency lowering.
+`Program.constant` retains each successful declaration as the canonical native
+`(tensor, extent)` identity. `_ExpressionKernel.bind` omits numerical selectors
+and dynamic lifetime attachments only when every candidate extent of that logical
+input has an explicit declaration in that Program. Ordinary index and mask inputs
+remain ordinary numerical dependencies, and generated indexed payload loads are
+unchanged. Candidate refs still bind directly to their actual canonical pages.
+
+This uses retained configuration facts, not contents, current presence or a guess
+that an embedding table is usually constant. A produced or received table still
+uses dynamic selection even if all its candidates happen to be present during
+setup. Mixed constant/produced tables retain dynamic descriptors. Transposed views
+share their canonical tensor/extent identity and therefore retain the declaration.
+This removes the extra selector launch for fully declared constant tables without
+turning current availability into a permanent specialization assumption.

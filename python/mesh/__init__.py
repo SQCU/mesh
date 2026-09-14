@@ -201,6 +201,7 @@ class Program:
         self.native = Native()
         self.context = self.native.context()
         self.callbacks, self.errors = [], []
+        self._constant_extents = set()
         create = {'cpu': self.native.algebra_create_cpu, 'metal': self.native.algebra_create}[backend]
         check(self.native.attach(self.context, os.fsencode(region) if region else None))
         self.handle = create(self.context)
@@ -332,6 +333,7 @@ class Program:
         ref.whole()
         ref.array[...] = value
         check(self.native.tensor_constant(ref.view.tensor, ref.view.extent))
+        self._constant_extents.add((ref.view.tensor, ref.view.extent))
 
     # design/algorithm-sources.md#indexed-library-functions
     def realize(self):
@@ -373,6 +375,7 @@ class Program:
             _PROGRAMS.discard(self.handle)
             self.handle = None
             self.callbacks.clear()
+            self._constant_extents.clear()
             if not _PROGRAMS:
                 check(self.native.detach(self.context))
 
