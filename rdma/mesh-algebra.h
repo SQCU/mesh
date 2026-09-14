@@ -21,7 +21,7 @@ struct mesh_view {
   size_t offset,rows,columns,row_stride,column_stride;
 };
 struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
-struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind; };
+struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
 struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings,ne_planned_operations; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
@@ -54,6 +54,7 @@ int mesh_algebra_available(struct mesh_algebra *,size_t output);
 void mesh_algebra_consume(struct mesh_algebra *,size_t output);
 size_t mesh_algebra_trace_count(struct mesh_algebra *);
 struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *,size_t function);
+struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *,size_t function,size_t input);
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *);
 
 #ifdef __cplusplus

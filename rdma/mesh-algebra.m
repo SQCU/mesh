@@ -826,5 +826,12 @@ size_t mesh_algebra_trace_count(struct mesh_algebra *handle) {return owner(handl
 struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *handle,size_t index) {
   MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_algebra_event){0};
   MeshFunction *f=a.functions[index];
-  return (struct mesh_algebra_event){.ready_ns=atomic_load(&f->readyNs),.start_ns=atomic_load(&f->startNs),.complete_ns=atomic_load(&f->completeNs),.gpu_start_ns=atomic_load(&f->gpuStartNs),.gpu_end_ns=atomic_load(&f->gpuEndNs),.submissions=atomic_load(&f->invocations),.first_output=f->function.output[0].first,.output_maps=f->function.outputs,.kind=f->executionKind};
+  return (struct mesh_algebra_event){.ready_ns=atomic_load(&f->readyNs),.start_ns=atomic_load(&f->startNs),.complete_ns=atomic_load(&f->completeNs),.gpu_start_ns=atomic_load(&f->gpuStartNs),.gpu_end_ns=atomic_load(&f->gpuEndNs),.submissions=atomic_load(&f->invocations),.first_output=f->function.output[0].first,.output_maps=f->function.outputs,.kind=f->executionKind,.input_maps=f->function.inputs};
+}
+
+/* design/algorithm-sources.md#region-execution-timing */
+struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *handle,size_t index,size_t input) {
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_row_range){0};
+  MeshFunction *f=a.functions[index];if(input>=f->function.inputs)return (struct mesh_row_range){0};
+  return mesh_range(f->function.input[input],f->occurrence);
 }

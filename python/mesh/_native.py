@@ -25,10 +25,14 @@ class MetalConstant(C.Structure):
     _fields_ = [("bytes", P), ("length", Z)]
 
 
+class RowRange(C.Structure):
+    _fields_ = [("first", U), ("count", U)]
+
+
 class Event(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in
         ('ready_ns', 'start_ns', 'complete_ns', 'gpu_start_ns', 'gpu_end_ns', 'submissions')]
-    _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind')]
+    _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind', 'input_maps')]
 
 
 class Report(C.Structure):
@@ -83,6 +87,7 @@ class Native:
             'mesh_algebra_consume': (None, [P, Z]),
             'mesh_algebra_trace_count': (Z, [P]),
             'mesh_algebra_trace': (Event, [P, Z]),
+            'mesh_algebra_trace_input': (RowRange, [P, Z, Z]),
             'mesh_algebra_report': (Report, [P]),
         }
         for name, (result, arguments) in signatures.items():
