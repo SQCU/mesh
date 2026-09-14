@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--peer', type=int, required=True)
     parser.add_argument('--split', type=int, required=True)
     parser.add_argument('--output-split', type=int, required=True)
+    parser.add_argument('--instances', type=int, default=2)
     parser.add_argument('--region')
     parser.add_argument('--numerics')
     parser.add_argument('--normalize', action='store_true')
@@ -28,6 +29,8 @@ def main():
     parser.add_argument('--tile-k', type=int, default=128)
     parser.add_argument('--tile-columns', type=int, default=128)
     args = parser.parse_args()
+    if args.instances < 1:
+        parser.error('--instances must be positive')
     if args.normalize and not args.numerics:
         parser.error('--normalize requires the engine numerical library')
     values = np.load(args.input)
@@ -67,49 +70,55 @@ def main():
     with Program(backend=args.backend, region=args.region, functions=functions) as program:
         shard = slice(0, args.split) if program.node == args.root else slice(args.split, weights[0].shape[1])
         weights = (weights[0][:, shard], weights[1][shard, :])
-        x = program.tensor(values.shape, (args.tile_rows, args.tile_k), dtype=values.dtype)
         up_weight, down_weight = tuple(program.tensor(w.shape, dtype=w.dtype) for w in weights)
         for tensor, value in zip((up_weight, down_weight), weights):
             program.constant(tensor[0, 0], value)
-        up = linear(program, x, up_weight, tile_rows=args.tile_rows,
-                    tile_k=args.tile_k, tile_columns=args.tile_columns)
-        spec = BlockSpec(up.block_shape, lambda i, j: (i, j))
-        hidden = program.kernel_call(kernels.swish,
-            grid=up.grid, in_specs=(spec,), out_specs=spec,
-            out_shape=ShapeDtypeStruct(up.shape, up.dtype))(up)
-        down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
-                      tile_k=args.tile_k, tile_columns=args.tile_columns)
-        peers = (args.root, args.peer)
-        owners = {index: args.root if index[0] * down.block_shape[0] < args.output_split else args.peer
-                  for index in down.blocks}
-        scattered = reduce_scatter(program, down, peers=peers, owners=owners)
-        reduced = all_gather(program, scattered, peers=peers, owners=owners)
-        outputs = {}
         if program.node == args.root:
-            if args.normalize:
-                if reduced.grid[1] != 1:
-                    raise ValueError('--normalize requires --tile-columns to cover the full output width')
-                gamma = program.tensor((1, reduced.shape[1]), dtype=np.float16)
-                program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
-                spec = BlockSpec(reduced.block_shape, lambda i, j: (i, j))
-                reduced = program.kernel_call(normalize, grid=reduced.grid,
-                    in_specs=(spec, BlockSpec(gamma.shape, lambda i, j: (0, 0))),
-                    out_specs=spec, out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced, gamma)
-            spec = BlockSpec(down.block_shape, lambda i, j: (i, j))
-            activated = program.kernel_call(kernels.swish,
-                grid=reduced.grid, in_specs=(spec,), out_specs=spec,
-                out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced)
             weight = np.load(args.consumer_weight, mmap_mode='r')
             consumer_weight = program.tensor(weight.shape, dtype=weight.dtype)
             program.constant(consumer_weight[0, 0], weight)
-            consumed = linear(program, activated, consumer_weight, tile_rows=args.tile_rows,
-                              tile_k=args.tile_k, tile_columns=args.tile_columns)
-            outputs = {index: program.export(ref) for index, ref in consumed.blocks.items()}
+            if args.normalize:
+                gamma = program.tensor((1, weights[1].shape[1]), dtype=np.float16)
+                program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
+        inputs, outputs = [], {}
+        for instance in range(args.instances):
+            x = program.tensor(values.shape, (args.tile_rows, args.tile_k), dtype=values.dtype)
+            inputs.append(x)
+            up = linear(program, x, up_weight, tile_rows=args.tile_rows,
+                        tile_k=args.tile_k, tile_columns=args.tile_columns)
+            spec = BlockSpec(up.block_shape, lambda i, j: (i, j))
+            hidden = program.kernel_call(kernels.swish,
+                grid=up.grid, in_specs=(spec,), out_specs=spec,
+                out_shape=ShapeDtypeStruct(up.shape, up.dtype))(up)
+            down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
+                          tile_k=args.tile_k, tile_columns=args.tile_columns)
+            peers = (args.root, args.peer)
+            owners = {index: args.root if index[0] * down.block_shape[0] < args.output_split else args.peer
+                      for index in down.blocks}
+            scattered = reduce_scatter(program, down, peers=peers, owners=owners)
+            reduced = all_gather(program, scattered, peers=peers, owners=owners)
+            if program.node == args.root:
+                if args.normalize:
+                    if reduced.grid[1] != 1:
+                        raise ValueError('--normalize requires --tile-columns to cover the full output width')
+                    spec = BlockSpec(reduced.block_shape, lambda i, j: (i, j))
+                    reduced = program.kernel_call(normalize, grid=reduced.grid,
+                        in_specs=(spec, BlockSpec(gamma.shape, lambda i, j: (0, 0))),
+                        out_specs=spec, out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced, gamma)
+                spec = BlockSpec(down.block_shape, lambda i, j: (i, j))
+                activated = program.kernel_call(kernels.swish,
+                    grid=reduced.grid, in_specs=(spec,), out_specs=spec,
+                    out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced)
+                consumed = linear(program, activated, consumer_weight, tile_rows=args.tile_rows,
+                                  tile_k=args.tile_k, tile_columns=args.tile_columns)
+                outputs.update({(instance, *index): program.export(ref) for index, ref in consumed.blocks.items()})
         program.realize()
-        for (i, j), ref in x.blocks.items():
-            row, column = i * x.block_shape[0], j * x.block_shape[1]
-            with program.write(ref) as destination:
-                destination[...] = values[row:row + ref.shape[0], column:column + ref.shape[1]]
+        for i, j in inputs[0].blocks:
+            for x in inputs:
+                ref = x[i, j]
+                row, column = i * x.block_shape[0], j * x.block_shape[1]
+                with program.write(ref) as destination:
+                    destination[...] = values[row:row + ref.shape[0], column:column + ref.shape[1]]
         if program.node != args.root:
             signal.pause()
             return
