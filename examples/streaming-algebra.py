@@ -216,16 +216,18 @@ def main():
         scatter_updates = program.tensor((updates_count, 4), (update_tile, 4), dtype=dtype)
         scatter_factors = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.float32)
         scatter_lookup = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.int64)
+        scatter_masks = program.tensor((updates_count, 1), (update_tile, 1), dtype=bool)
         scatter_valid = np.ones((updates_count, 1), dtype=bool)
         scatter_valid[-1 if updates_count-last_start > 1 else -2, 0] = False
         base_arg, destination_arg, update_arg, mask_arg, factor_arg, lookup_arg = kernels.arguments(6)
         update_row, update_column = kernels.indices()
         scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
-            base_arg, destination_arg, update_arg.at(lookup_arg.at(update_row, 0), update_column) * factor_arg + 1, mask=mask_arg)), grid=(destinations_count,),
+            base_arg, destination_arg, update_arg.at(lookup_arg.at(update_row, 0), update_column) * factor_arg + 1,
+            mask=mask_arg.at(update_row, 0))), grid=(destinations_count,),
             in_specs=(BlockSpec(None),) * 6, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((destinations_count, 4), dtype), peer=0)(
                 weight(np.zeros((destinations_count, 4), dtype=dtype)), scatter_indices, scatter_updates,
-                weight(scatter_valid), scatter_factors, scatter_lookup)
+                scatter_masks, scatter_factors, scatter_lookup)
         consumer_arg, = kernels.arguments(1)
         scatter_consumed = program.kernel_call(kernels.expression(consumer_arg * 2), grid=(destinations_count,),
             in_specs=(BlockSpec((1, 4), lambda i: (i, 0)),),
@@ -818,6 +820,7 @@ def main():
                 lookup_values[start:start+length] = start + (length-1-np.arange(length)+generation) % length
             delayed = routing[:, 0] == 2
             lookup_values[delayed] = last_start + np.arange(np.count_nonzero(delayed)) % (updates_count-last_start)
+            lookup_values[~scatter_valid[:, 0]] = last_start
             lookup_values = lookup_values[:, None]
             expected = np.zeros((destinations_count, 1), dtype=np.float32)
             selected = scatter_valid[:, 0] & (routing[:, 0] < destinations_count)
@@ -825,26 +828,31 @@ def main():
             expected = (expected.astype(dtype)*2).astype(dtype)
             scatter_start = time.monotonic_ns()
             wait_for((*scatter_indices.blocks.values(), *scatter_updates.blocks.values(),
-                      *scatter_factors.blocks.values(), *scatter_lookup.blocks.values()), 'writable')
+                      *scatter_factors.blocks.values(), *scatter_lookup.blocks.values(),
+                      *scatter_masks.blocks.values()), 'writable')
             for i in range(last_chunk+1):
                 with program.write(scatter_indices[i, 0]) as destination:
                     destination[...] = routing[update_tile*i:update_tile*(i+1)]
                 with program.write(scatter_lookup[i, 0]) as destination:
                     destination[...] = lookup_values[update_tile*i:update_tile*(i+1)]
             for i in range(0 if empty else last_chunk):
+                with program.write(scatter_masks[i, 0]) as destination:
+                    destination[...] = scatter_valid[update_tile*i:update_tile*(i+1)]
                 with program.write(scatter_factors[i, 0]) as destination:
                     destination[...] = 2 + generation
                 with program.write(scatter_updates[i, 0]) as destination:
                     destination[...] = update_values[update_tile*i:update_tile*(i+1)]
             observed = tuple(range(destinations_count)) if empty else early_destinations
             wait_for(tuple(scatter_results[i] for i in observed))
-            if (not empty and scatter_results[2].ready) or not scatter_updates[last_chunk, 0].writable:
+            if (not empty and scatter_results[2].ready) or not scatter_updates[last_chunk, 0].writable or not scatter_masks[last_chunk, 0].writable:
                 raise ArithmeticError('Delayed scatter contribution was not independent')
             first_scatter_ns = time.monotonic_ns() - scatter_start
             for i in observed:
                 if not np.array_equal(scatter_results[i].array, np.broadcast_to(expected[i], (1, 4))):
                     raise ArithmeticError('Early scattered sum or consumer differs')
             for i in range(last_chunk+1) if empty else (last_chunk,):
+                with program.write(scatter_masks[i, 0]) as destination:
+                    destination[...] = scatter_valid[update_tile*i:update_tile*(i+1)]
                 with program.write(scatter_updates[i, 0]) as destination:
                     destination[...] = update_values[update_tile*i:update_tile*(i+1)]
                 if (not empty and scatter_results[2].ready) or not scatter_factors[i, 0].writable:
@@ -856,7 +864,7 @@ def main():
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
             print(json.dumps(dict(event='indexed_add', generation=generation, lookup_indices=lookup_values[:, 0].tolist(), rows=updates_count, tile=update_tile, destinations=destinations_count, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
-                empty=empty, delayed_destination=None if empty else 2,
+                empty=empty, delayed_destination=None if empty else 2, withheld_mask_block=last_chunk,
                 result=[result.array.tolist() for result in scatter_results])), flush=True)
             if generation < 3:
                 for result in scatter_results:
