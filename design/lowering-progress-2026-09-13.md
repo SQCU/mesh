@@ -1287,3 +1287,56 @@ measurements/lowering-2026-09-13/batched-provenance.json. The broadcast VJP
 exercises higher-rank sum; other higher-rank sum/mean axes have source review
 rather than operational coverage in this increment. Both bridge arenas retain
 the previously configured 65536-page capacity; peer teardown exits zero.
+
+
+## Boolean masks and explicit broadcasting
+
+`edf7d4b` routes logical not/and/or and broadcast through the existing shared
+pointwise expression lowering and removes their obsolete emitter cases.
+Numerical truth normalizes through equality-to-zero, then boolean combination;
+NaN is true and either signed zero is false. Both numerical operand dependencies
+remain explicit. Rank-two zero-stride views and higher-rank logical coordinates
+retain original registered storage. Explicit result allocation remains visible;
+unobserved broadcast-result fusion is still shared compiler work.
+
+The existing workflow at `f74b265` covers both direct rank-two and higher-rank
+paths, numeric NaN/zero/nonzero values, scalar broadcasts, pointwise consumers,
+an independently withheld source row and changed values across reuse. Independent
+source review found no defect in truth conversion or valid broadcast mapping.
+
+## Next native indexed contraction boundary
+
+Source review at f74b265 identifies a required performance step beyond caller
+migration. Expert forward/dX expressions are indexed product-and-sum contractions,
+but shared panel lowering materializes computed operands and native bind_part
+fixes CPU addresses and MPS matrices at setup. Indexed reader registration tracks
+readiness and lifetime; it does not redirect those fixed numerical bindings.
+Merely rewriting the expression to dot therefore does not recover a native
+selected-panel contraction without introducing operand staging.
+
+The next shared implementation should retain a selector and exact candidate
+matrix views before logical flattening, prepare backend bindings at setup, and
+register one canonical output producer that indexes those retained bindings.
+Numerical-plan identity and readiness identity must remain separate: different
+expert subviews can occupy the same backing page, while indexed readiness
+candidates must not overlap. Retain plan-to-original-page mappings and deduplicate
+only readiness identities. Tile boundaries must keep selected panels representable
+by native strides. General nonaffine row gathers remain an indexed-kernel problem;
+one selected affine panel is the first concrete native contraction case.
+
+This is a source-derived implementation boundary, not a completed optimization.
+Prior art is Pallas scalar-prefetch block indexing and its explicit grouped/ragged
+contractions; see https://docs.jax.dev/en/latest/pallas/tpu/sparse.html and
+https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/gpu/ragged_dot_mgpu.py.
+No additional execution owner or model interpretation belongs in transport.
+
+
+Boolean/broadcast CPU, Metal and paired Metal runs at f74b265 pass both
+generations of the existing numerical/progress workflow. Local traces configure
+5266 functions and complete 10472 submissions; paired rank zero configures 5202
+and completes 9787. Rank-zero boolean cases use float32 numeric inputs, and the
+paired gold/fanout use float16 over RDMA. Raw events and compute traces are in
+measurements/lowering-2026-09-13/logical-provenance.json, alongside full workflow
+timing count/mean/sample variance. No boolean-specific host timing or matched
+speedup claim is made. Both participant processes exit zero and registered arena
+geometry remains unchanged. The nine-step goal remains active.
