@@ -1068,3 +1068,43 @@ These three-invocation measurements establish removed work and preserved progres
 not a matched wall-time speedup. Selector capacity per unique expression and
 fragment-driven launch costs remain; expert/neighborhood caller migration and
 full nine-step performance acceptance are still open.
+
+## Migrate neighborhood forward and all derivatives
+
+`e1682a8` replaces the whole-region neighborhood emitter with shared indexed
+loads, FP32 edge products and row reductions, and bounded indexed-add. The
+forward observer sum and query/key/value/weight derivatives use the same region
+owner. `numerical_operands` supplies one target-specific dependency list to both
+liveness and peer replication; nongram query/key gradients are constant zero
+pages. The old neighborhood emitter, launch modes and unused atomic helper are
+deleted. The algebra and prior art are in algorithm-sources.md under Xonotic
+neighborhood algebra. Independent source review checked operand slots after two
+statistic appends, original-edge ordinals, feature offsets, duplicate sums and
+active-domain lifetimes.
+
+`4fe038b` extends the existing streaming-algebra example with both Gram modes,
+all four derivatives and pointwise consumers. Four observers each have two
+neighbors and three features. Duplicate indices change between two generations.
+Query/key/value/cotangent row2 remains unpublished while rows0/1/3 consumers
+finish. Nongram query/key consumers finish on every row, including row2, without
+payload dependencies. All forward/derivative results agree with float64 reference
+algebra at rtol/atol2e-5, before and after reuse.
+
+CPU and Metal local workflows pass, as does paired Metal with the existing
+float16 FFN gold/fanout crossing RDMA. Neighborhood cases themselves use float32
+on rank zero, so cross-peer neighborhood execution and half-precision neighborhood
+coverage remain unmeasured. The peer exits zero after SIGTERM; both bridges
+remain ready. Compressed logs/traces, revisions and per-mode early/completion
+count, mean and sample variance are in
+measurements/lowering-2026-09-13/neighborhood-provenance.json.
+
+The expanded fixture configures3129 functions and completes6040 submissions
+locally; paired rank zero configures3065 and completes5355. These totals include
+the newly added neighborhood programs and cannot be compared as a speedup with
+the prior smaller fixture. There is no matched timing baseline for the removed
+whole-region neighborhood implementation. Explicit E×D FP32 product storage,
+duplicate statistics across separately requested derivatives, and segmented-sum
+metadata/launch expansion remain substantial shared-lowering optimization work.
+This closes the neighborhood caller's whole-region binding gap, not the full
+nine-step performance acceptance. Expert routing/contractions and remaining
+operator coverage still require migration and measurements.

@@ -1,0 +1,235 @@
+{
+  "runs": [
+    {
+      "prefix": "neighborhood-cpu",
+      "library_revision": "ba94e38",
+      "caller_revision": "e1682a8",
+      "example_revision": "4fe038b",
+      "backend": "cpu",
+      "gold_dtype": "float32",
+      "neighborhood_dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "neighborhood-cpu.jsonl.gz",
+        "neighborhood-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.078625,
+        "invocations_per_second": 735.5420025131019,
+        "first_section_ms": 3.426375,
+        "completion_ms": {
+          "count": 3,
+          "mean": 3.9136806666666666,
+          "sample_variance": 0.027480322796333282
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 6040,
+          "completed": 6040,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 6040
+        }
+      },
+      "neighborhood_timings": [
+        {
+          "gram": false,
+          "early_ms": {
+            "count": 2,
+            "mean": 2.3788125,
+            "sample_variance": 0.03352988184049999
+          },
+          "complete_ms": {
+            "count": 2,
+            "mean": 3.2252704999999997,
+            "sample_variance": 0.023789257812500027
+          }
+        },
+        {
+          "gram": true,
+          "early_ms": {
+            "count": 2,
+            "mean": 5.9277085,
+            "sample_variance": 0.022755484444499905
+          },
+          "complete_ms": {
+            "count": 2,
+            "mean": 7.4867295,
+            "sample_variance": 0.08853253284049978
+          }
+        }
+      ],
+      "configured_functions": 3129,
+      "completed_submissions": 6040
+    },
+    {
+      "prefix": "neighborhood-metal",
+      "library_revision": "ba94e38",
+      "caller_revision": "e1682a8",
+      "example_revision": "4fe038b",
+      "backend": "metal",
+      "gold_dtype": "float32",
+      "neighborhood_dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "neighborhood-metal.jsonl.gz",
+        "neighborhood-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.051041,
+        "invocations_per_second": 175.9423368930964,
+        "first_section_ms": 14.421666,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.516346666666669,
+          "sample_variance": 1.771478504921335
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 6040,
+          "completed": 6040,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.022653939,
+          "cpu_submitted": 0
+        }
+      },
+      "neighborhood_timings": [
+        {
+          "gram": false,
+          "early_ms": {
+            "count": 2,
+            "mean": 5.4521665,
+            "sample_variance": 0.07501342644449997
+          },
+          "complete_ms": {
+            "count": 2,
+            "mean": 7.001125,
+            "sample_variance": 0.08013285511200023
+          }
+        },
+        {
+          "gram": true,
+          "early_ms": {
+            "count": 2,
+            "mean": 10.039417,
+            "sample_variance": 12.917600735777995
+          },
+          "complete_ms": {
+            "count": 2,
+            "mean": 11.895354000000001,
+            "sample_variance": 13.300552977937993
+          }
+        }
+      ],
+      "configured_functions": 3129,
+      "completed_submissions": 6040
+    },
+    {
+      "prefix": "neighborhood-paired-metal",
+      "library_revision": "ba94e38",
+      "caller_revision": "e1682a8",
+      "example_revision": "4fe038b",
+      "backend": "metal",
+      "gold_dtype": "float16",
+      "neighborhood_dtype": "float32",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "neighborhood-paired-metal.jsonl.gz",
+        "neighborhood-paired-metal-trace.json.gz",
+        "neighborhood-paired-metal-peer.jsonl.gz",
+        "neighborhood-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 15.284959,
+        "invocations_per_second": 196.27138025034938,
+        "first_section_ms": 10.600334,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.237083666666665,
+          "sample_variance": 0.822033862722334
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 5355,
+          "completed": 5355,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.020187384,
+          "cpu_submitted": 0
+        }
+      },
+      "neighborhood_timings": [
+        {
+          "gram": false,
+          "early_ms": {
+            "count": 2,
+            "mean": 5.4277295,
+            "sample_variance": 0.05263682134050002
+          },
+          "complete_ms": {
+            "count": 2,
+            "mean": 6.9826255,
+            "sample_variance": 0.08562887594450014
+          }
+        },
+        {
+          "gram": true,
+          "early_ms": {
+            "count": 2,
+            "mean": 12.8712915,
+            "sample_variance": 0.8124925065004999
+          },
+          "complete_ms": {
+            "count": 2,
+            "mean": 15.184270999999999,
+            "sample_variance": 0.899642103938
+          }
+        }
+      ],
+      "configured_functions": 3065,
+      "completed_submissions": 5355
+    }
+  ],
+  "scope": "Neighborhood forward and all four VJPs, both Gram modes, duplicate source indices, changed indices across two generations, pointwise consumers. Q/K/V/G row2 absent until other rows finish; nongram zero Q/K gradients including row2 finish early. Source audit plus operational numerical/progress checks. Neighborhood cases run on rank zero; paired gold/fanout use RDMA. No matched old-neighborhood timing baseline, no speedup claim, no cross-peer neighborhood acceptance yet. Peer exited zero after SIGTERM."
+}
