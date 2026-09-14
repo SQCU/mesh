@@ -321,7 +321,7 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
                 break
         if proven:
             selected[node] = tuple((block, tuple(sorted(pages))) for block, pages in sorted(blocks.items()))
-    bound, replacements, origins = list(inputs), {}, {}
+    bound, replacements = list(inputs), {}
 
     # design/algorithm-sources.md#kernelsexpression
     def rewrite(node):
@@ -331,7 +331,6 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
         if node not in selected:
             result = _Expression(node.operation, children, node.value)
             replacements[node] = result
-            origins[result] = node
             return result
         table = inputs[node.value]
         row, column, mask, other = children
@@ -366,7 +365,7 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
         return result
 
     result = rewrite(expression)
-    return result, tuple(bound), origins
+    return result, tuple(bound)
 
 
 # design/algorithm-sources.md#kernelsexpression
@@ -444,12 +443,9 @@ class _ExpressionKernel:
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
-            original_accesses = _indexed_access_paths(value, inputs,
-                {index for index, source in enumerate(inputs) if hasattr(source, 'blocks')})
-            selectors = {}
             for domain in _source_expression_regions(program, output):
-                specialized, specialized_inputs, origins = _specialize_accesses(value, inputs, output, coordinate, domain)
-                used, original_nodes = {}, {}
+                specialized, specialized_inputs = _specialize_accesses(value, inputs, output, coordinate, domain)
+                used = {}
 
                 # design/algorithm-sources.md#kernelsexpression
                 def remap(node):
@@ -459,67 +455,18 @@ class _ExpressionKernel:
                     if node.operation in ('input', 'load'):
                         index = used.setdefault(index, len(used))
                     result = _Expression(node.operation, tuple(remap(child) for child in node.operands), index)
-                    if node in origins:
-                        original_nodes[result] = origins[node]
                     return result
 
                 expression = remap(specialized)
                 reads = tuple(specialized_inputs[index] for index in used)
-                dynamic = {}
-                access_axes, reduced_accesses = _expression_access_axes(expression, reads)
-                dynamic_inputs = {index for index, source in enumerate(reads)
-                    if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
-                        in program._constant_extents for ref in source.blocks.values())}
-                accesses = _indexed_access_paths(expression, reads, dynamic_inputs)
-                for node in accesses:
-                    original = original_nodes[node]
-                    if original not in selectors:
-                        table = inputs[original.value]
-                        row, column, mask, _ = original.operands
-                        ordinal, candidates = _page_selector(program, table, row, column)
-                        enabled = _literal(False)
-                        for path in original_accesses[original]:
-                            condition = _literal(True)
-                            for predicate, polarity in path:
-                                condition = select(condition, predicate if polarity else predicate.equal(False), False)
-                            enabled = select(enabled, True, condition)
-                        selector_value = select(enabled, ordinal, 0xffffffff)
-                        selector_width = output.shape[1]
-
-                        # design/algorithm-sources.md#kernelsexpression
-                        def selector_shape(part):
-                            nonlocal selector_width
-                            if part.operation == 'input':
-                                selector_width = max(selector_width, inputs[part.value].shape[1])
-                            for child in part.operands:
-                                selector_shape(child)
-
-                        selector_shape(selector_value)
-                        selected = program.tensor((output.shape[0], selector_width), dtype=np.uint32)[0, 0]
-                        _ExpressionKernel((selector_value,)).bind(program, inputs, (selected,), coordinate)
-                        selectors[original] = selected, candidates
-                    selected, candidates = selectors[original]
-                    dynamic[node] = (selected, node.value, candidates)
-
+                access_axes = _expression_access_axes(expression, reads)
                 flattened = tuple(ref for source in reads for ref in
                     (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
                 sources = tuple(self.source(reads, output, metal, expression).encode() for metal in (False, True))
-                offsets = []
-                for source in reads:
-                    offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
-                        len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
                 begin, rows, column, columns = domain
-                function = program.native.algebra_function_count(program.handle)
                 check(program.native.algebra_source(program.handle, *sources,
                     (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view,
                     (C.c_uint8 * len(access_axes))(*access_axes), begin, rows, column, columns))
-                for node, (selected, index, candidates) in dynamic.items():
-                    first, count = offsets[index]
-                    selection = selected.slice(begin, 0 if node in reduced_accesses else column, rows,
-                                               selected.shape[1] if node in reduced_accesses else columns)
-                    check(program.native.algebra_indexed(program.handle, function, selection.view,
-                        (C.c_size_t * count)(*range(first, first + count)), count,
-                        (View * len(candidates))(*candidates), len(candidates)))
 
     # design/algorithm-sources.md#kernelsadd
     def source(self, inputs, output, metal, expression):
@@ -585,7 +532,6 @@ class _ExpressionKernel:
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>\n#include <stdatomic.h>']
         lines.append(_address_source(metal))
-        lines.append(_lookup_declarations(expression, metal))
         layouts = {}
         for index, ref in enumerate(inputs):
             if isinstance(ref, _StaticTable):
@@ -626,23 +572,23 @@ class _ExpressionKernel:
 # design/algorithm-sources.md#kernelsexpression
 def _expression_access_axes(expression, inputs):
     axes = [3] * len(inputs)
-    reduced_accesses = set()
 
     # design/algorithm-sources.md#kernelsexpression
     def visit(node, reduced=False):
         if node.operation == 'load':
             axes[node.value] = 0
+        if node.operation == 'input':
+            if hasattr(inputs[node.value], 'blocks'):
+                raise ValueError('Whole-tensor inputs require indexed loads')
             if reduced:
-                reduced_accesses.add(node)
-        if node.operation == 'input' and reduced:
-            axes[node.value] &= 1
+                axes[node.value] &= 1
         for child in node.operands:
             visit(child, reduced or node.operation in _REDUCTIONS)
 
     visit(expression)
     return tuple(0 if hasattr(source, 'blocks') or isinstance(source, _StaticTable) else axes[index]
                  for index, source in enumerate(inputs)
-                 for _ in (source.refs if isinstance(source, _StaticTable) else source.blocks.values() if hasattr(source, 'blocks') else (source,))), frozenset(reduced_accesses)
+                 for _ in (source.refs if isinstance(source, _StaticTable) else source.blocks.values() if hasattr(source, 'blocks') else (source,)))
 
 
 # design/algorithm-sources.md#kernelsexpression
@@ -670,86 +616,6 @@ _METAL_EXPRESSION_HEAD = 'kernel void mesh_expression(device const ulong *buffer
 # design/algorithm-sources.md#programkernel_call
 _CPU_PUBLICATION_LOOP = 'for(uint64_t section=0;section<publication->count;section++) { const struct mesh_kernel_section part=publication->sections[section]; for(uint64_t r=part.row_begin;r<part.row_end;r++) {'
 _CPU_PUBLICATION_END = '} publication->publish(publication->context,part.first,part.count); }}'
-
-
-# design/algorithm-sources.md#kernelsexpression
-def _indexed_access_paths(expression, inputs, dynamic_inputs):
-    accesses = {}
-
-    # design/algorithm-sources.md#kernelsexpression
-    def visit(node, path=()):
-        if node.operation == 'input' and hasattr(inputs[node.value], 'blocks'):
-            raise ValueError('Whole-tensor inputs require indexed loads')
-        if node.operation == 'select':
-            condition, yes, no = node.operands
-            visit(condition, path)
-            visit(yes, path + ((condition, True),))
-            visit(no, path + ((condition, False),))
-        elif node.operation == 'load':
-            row, column, mask, other = node.operands
-            visit(mask, path)
-            selected = path + ((mask, True),)
-            visit(row, selected)
-            visit(column, selected)
-            visit(other, path + ((mask, False),))
-            if node.value in dynamic_inputs:
-                paths = accesses.setdefault(node, [])
-                if not any(set(previous) <= set(selected) for previous in paths):
-                    paths[:] = [previous for previous in paths if not set(selected) <= set(previous)]
-                    paths.append(selected)
-        else:
-            for child in node.operands:
-                visit(child, () if node.operation in _REDUCTIONS else path)
-
-    visit(expression)
-    return accesses
-
-
-# design/algorithm-sources.md#kernelsexpression
-def _lookup_name(values):
-    import hashlib
-    return 'mesh_lookup_' + hashlib.sha256(repr(values).encode()).hexdigest()
-
-
-# design/algorithm-sources.md#kernelsexpression
-def _lookup_declarations(expression, metal):
-    tables, pending = {}, [expression]
-    while pending:
-        node = pending.pop()
-        if node.operation == 'lookup':
-            tables[_lookup_name(node.value)] = node.value
-        pending.extend(node.operands)
-    return '\n'.join(f'{"constant" if metal else "static const"} uint64_t {name}[]={{' +
-        ','.join(f'{value}ull' for value in values) + '};' for name, values in sorted(tables.items()))
-
-
-# design/algorithm-sources.md#kernelsexpression
-def _page_selector(program, table, row, column):
-    import ctypes as C
-    from . import check
-    from ._native import View
-    unit = program.native.algebra_page_bytes(program.handle) // table.dtype.itemsize
-    candidates, positions, maps, geometry = [], {}, [], []
-    for _, ref in sorted(table.blocks.items()):
-        count = C.c_size_t()
-        check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
-        pages = (View * count.value)()
-        check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
-        first, last = pages[0].offset // unit, pages[-1].offset // unit
-        base = len(maps)
-        maps.extend([0xffffffff] * (last-first+1))
-        for page in pages:
-            key = page.tensor, page.extent, page.offset
-            if key not in positions:
-                positions[key] = len(candidates)
-                candidates.append(page)
-            maps[base+page.offset//unit-first] = positions[key]
-        geometry.append((ref.view.offset-first*unit, ref.view.row_stride, ref.view.column_stride, base))
-    block = _Expression('block_ordinal', (row, column), (*table.block_shape, table.grid[1]))
-    offset, row_stride, column_stride, base = (
-        _Expression('lookup', (block,), tuple(entry[index] for entry in geometry)) for index in range(4))
-    address = offset + row % table.block_shape[0] * row_stride + column % table.block_shape[1] * column_stride
-    return _Expression('lookup', (base + address // unit,), tuple(maps)), tuple(candidates)
 
 
 # design/algorithm-sources.md#programtensor
@@ -825,12 +691,6 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
     if node.operation == 'load':
         return resolve(node, args)
-    if node.operation == 'lookup':
-        return f'{_lookup_name(node.value)}[{args[0]}]'
-    if node.operation == 'block_ordinal':
-        row, column = args
-        rows, columns, grid_columns = node.value
-        return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
     return _scalar_expression(node, args, metal)
 
 
@@ -845,8 +705,6 @@ def _expression_dtype(node, inputs):
         return np.dtype('bool') if all(dtype.kind == 'b' for dtype in types) else _expression_dtype(_Expression('*', node.operands), inputs)
     if node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
-    if node.operation == 'lookup':
-        return np.dtype('uint64')
     if node.operation in ('<', '<=', '>', '>=', '=='):
         return np.dtype('bool')
     if node.operation == 'domain':

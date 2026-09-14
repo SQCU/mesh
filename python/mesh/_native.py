@@ -52,7 +52,6 @@ class Native:
             'mesh_writer_issue': (C.c_int, [P]),
             'mesh_writer_complete': (None, [P, C.c_int]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View, C.POINTER(C.c_uint8), Z, Z, Z, Z]),
-            'mesh_algebra_indexed': (C.c_int, [P, Z, View, C.POINTER(Z), Z, C.POINTER(View), Z]),
             'mesh_algebra_contract': (C.c_int, [P, View, View, View, C.c_float]),
             'mesh_algebra_view_pages': (C.c_int, [P, View, C.POINTER(View), Z, C.POINTER(Z)]),
             'mesh_algebra_copy': (C.c_int, [P, View, U, View, U, C.c_uint16]),
@@ -60,7 +59,6 @@ class Native:
             'mesh_algebra_realize': (C.c_int, [P]),
             'mesh_algebra_available': (C.c_int, [P, Z]),
             'mesh_algebra_consume': (None, [P, Z]),
-            'mesh_algebra_function_count': (Z, [P]),
             'mesh_algebra_report': (Report, [P]),
         }
         for name, (result, arguments) in signatures.items():

@@ -6,14 +6,7 @@
 struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,arena; int fd; void *execution,*readers; };
 struct mesh_row_range { uint32_t first,count; };
 struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; const uint32_t *members; const size_t *member_offsets; };
-struct mesh_index_candidate { struct mesh_row_map *maps; uint32_t count; };
-struct mesh_indexed_read {
-  struct mesh_row_map *selector; uint32_t selectors;
-  const uint32_t *indices; size_t rows,columns,row_stride,column_stride;
-  struct mesh_index_candidate *candidate; uint32_t candidates,retired,selected,completed,mapped;
-  struct mesh_indexed_read *next;
-};
-struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; struct mesh_indexed_read *indexed; };
+struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };
 static inline struct mesh_row_range mesh_range(struct mesh_row_map m,uint32_t index){ return m.ranges?m.ranges[index]:(struct mesh_row_range){m.first+index*m.stride,m.count}; }
@@ -28,7 +21,6 @@ struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
 int mesh_execution_add(struct mesh_ctx *,struct mesh_row_function *,void *owner,void (*submit)(void *,uint32_t),void *argument);
 void mesh_execution_remove(struct mesh_ctx *,void *owner);
-int mesh_execution_indexed(struct mesh_ctx *,struct mesh_indexed_read *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 void *mesh_view_create(struct mesh_ctx *,uint32_t first,size_t count);
