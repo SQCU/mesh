@@ -106,10 +106,10 @@ def element(op, values):
     a = 'a0'
     c = 'a1'
     binary = {'add': '+', 'subtract': '-', 'multiply': '*', 'divide': '/', 'equal': '==', 'not_equal': '!=',
-              'less': '<', 'less_equal': '<=', 'greater': '>', 'greater_equal': '>=', 'logical_and': '&&',
-              'logical_or': '||', 'bitwise_and': '&', 'bitwise_or': '|'}
+              'less': '<', 'less_equal': '<=', 'greater': '>', 'greater_equal': '>=',
+              'bitwise_and': '&', 'bitwise_or': '|'}
     if op in binary: return f'({a}{binary[op]}{c})'
-    unary = {'negative': '-', 'logical_not': '!', 'bitwise_invert': '~'}
+    unary = {'negative': '-', 'bitwise_invert': '~'}
     if op in unary: return unary[op] + a
     functions = {'arcsinh': 'tensor_asinh', 'abs': 'abs', 'minimum': 'min', 'maximum': 'max', 'power': 'pow', 'logaddexp': 'stable_logaddexp', 'expm1': 'tensor_expm1', 'log1p': 'tensor_log1p'}
     if op == 'where': return 'a0?a1:a2'
@@ -177,7 +177,7 @@ def kernel(node):
         for i, value in enumerate(values):
             address = f'broadcast_index(t,v[{value.index}],v[{index}])'
             body.append(f'auto a{i}={read(value,address)};')
-        body.append(write(output, 'a0' if op == 'broadcast' else element(op, values)))
+        body.append(write(output, element(op, values)))
     return {'name': name, 'source': f'kernel void {name}({ARGUMENTS}) {{\n' + '\n'.join(body) + '\n}\n',
             'node': index, 'mode': mode, 'clear': clear, 'owner': owner,
             'arguments': list(dict.fromkeys(value.index for value in (*values, output)))}
@@ -838,7 +838,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 *(shapes[v.index] for v in values), attributes, tile_rows=tile_rows,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
             continue
-        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
+        # ../../../design/algorithm-sources.md#xonotic-logical-pointwise
+        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or'):
             args = kernels.arguments(len(values))
             direct = shaped and len(shape) <= 2
             if not direct:
@@ -855,7 +856,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     left, right = left & 0xffffffffffffffff, right & 0xffffffffffffffff
                 result = {'add': lambda: left + right, 'subtract': lambda: left - right,
                           'multiply': lambda: left * right, 'divide': lambda: left / right}[operation]()
-            elif operation in ('cast', 'assign'):
+            elif operation in ('cast', 'assign', 'broadcast'):
                 result = args[0].astype(value.dtype) if operation == 'cast' else args[0]
             elif operation in ('maximum', 'minimum'):
                 left, right = args
@@ -868,6 +869,11 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                           'less': lambda: left < right, 'less_equal': lambda: left <= right,
                           'greater': lambda: left > right, 'greater_equal': lambda: left >= right,
                           'bitwise_and': lambda: left & right, 'bitwise_or': lambda: left | right}[operation]()
+            elif operation == 'logical_not':
+                result = args[0].equal(0)
+            elif operation in ('logical_and', 'logical_or'):
+                left, right = (argument.equal(0).equal(False) for argument in args)
+                result = left & right if operation == 'logical_and' else left | right
             elif operation == 'negative':
                 result = (0 - (args[0] & 0xffffffffffffffff)) if value.dtype in ('int32', 'uint32', 'int64', 'uint64') else -1 * args[0]
             elif operation == 'sigmoid':

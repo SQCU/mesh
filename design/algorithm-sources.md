@@ -2611,3 +2611,24 @@ broadcast inputs, both derivatives, delayed independent batches, ragged tails
 and repeated invocations through its existing operational observer. This change
 retains the optimized native local contraction rather than substituting scalar
 indexed products for matrix multiplication.
+
+
+## Xonotic logical pointwise
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+expresses array operations over broadcast indices. Xonotic broadcasting and
+logical not/and/or use the existing shared pointwise lowering on CPU and Metal.
+Logical truth is nonzero: equality to zero implements not, and its negation
+normalizes each operand before boolean and/or. This preserves floating nonzero,
+signed zero and NaN truth behavior without mistaking integer bit patterns for
+logical conjunction. Both operands remain numerical inputs; there is no
+short-circuit branch that controls application execution.
+
+Rank-two broadcasts use existing zero-stride reference views. Higher-rank
+broadcasts reuse logical coordinate decoding, replacing coordinates on singleton
+axes with zero and aligning source axes from the right. The shared expression
+writes ordinary independently publishable output regions. Original operands
+remain their registered source pages; there is no host operand staging or
+numerical callback. The explicit broadcast result currently remains a canonical
+output allocation; eliminating unobserved intermediate results belongs to shared
+expression fusion, not an application-specific alternate binding.
