@@ -888,7 +888,7 @@ def main():
             alias = program.replicate(lowered[alias_output.index].on(0), receiver)
             alias_arg, = kernels.arguments(1)
             alias_consumer = program.kernel_call(kernels.expression(alias_arg*2+1), grid=(1, 4),
-                in_specs=(BlockSpec(None),), out_specs=BlockSpec((2, 1), lambda i,j: (i,j)),
+                in_specs=(BlockSpec((2, 1), lambda i,j: (i,j)),), out_specs=BlockSpec((2, 1), lambda i,j: (i,j)),
                 out_shape=ShapeDtypeStruct((2, 4), np.float32), peer=receiver)(alias)
             returned = program.replicate(alias_consumer.on(receiver), 0)
             alias_results = tuple((i*returned.block_shape[0], j*returned.block_shape[1], program.export(ref))
