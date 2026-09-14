@@ -254,3 +254,16 @@ establish covered execution and reuse, not matched throughput improvements or
 physical GPU/wire overlap percentages. Nested dot epilogues, arbitrary-rank
 lowering, sparse routing ownership, production storage/launch optimization, full
 caller/derivative migration and the final performance audit remain unfinished.
+
+## Shared sparse domain follow-up
+
+The [sparse routing source and operational record](sparse-routing-progress-2026-09-13.md)
+documents the shared candidate/directory ownership implementation through
+`5843a8b`. It replaces per-destination candidate descriptors and duplicated
+directory/table readers with explicit shared domain holds. Local CPU/Metal pass
+1025 updates and 17 destinations; paired CPU/Metal pass the existing float16
+gold with remote fanout reuse. The actual Xonotic gather/concatenate graph now
+demonstrates independent indexed producers and consumers through the shared
+representation. Source, precision, locality, derivative and performance limits
+are recorded with the raw evidence. Active segment execution, physical partial
+storage and the broader plan remain unfinished.

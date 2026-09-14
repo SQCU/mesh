@@ -110,6 +110,19 @@ backend code remain unchanged; numerical derivative evidence is still outstandin
 Python compilation passes for this extension. The commands above are instructions
 for operational validation, not a claim that this increment has already run them.
 
+## Subsequent operational evidence
+
+The optional case passes on CPU and Metal with installed mesh source `5843a8b`,
+both locally and on rank zero of the paired gold workload. Two occurrences change
+indices and selected source blocks; early gather and independent concatenated
+tail outputs are exact before the withheld index/source occurrence is supplied.
+The observer checks writability rather than raw PRESENT, which may remain set on
+consumed storage. `xonotic_indexed_bindings` retains actual source, index,
+intermediate and output row identities for trace joins. The
+[sparse routing evidence](sparse-routing-progress-2026-09-13.md#shared-directory-ownership-and-larger-execution)
+links the raw observations and traces. These side computations execute on rank
+zero; they do not establish derivative coverage or distributed Xonotic indexing.
+
 
 The reuse observer checks the withheld inputs' writable state and the dependent
 output's next-occurrence readiness separately. `Ref.present` exposes the raw

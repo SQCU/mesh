@@ -74,3 +74,45 @@ consumer, scaling with directory page count. Removing those readers and repeated
 full-directory presence scans is a subsequent native correction; this initial
 version is not the final sparse metadata bound. Potential segment allocations and
 empty numerical launches remain separate work in both versions.
+
+## Shared directory ownership and larger execution
+
+`465ecfc`, `d864402` and `5843a8b` complete explicit sorted-key ownership and
+subtract domain-held directory and immutable table rows from each consumer's
+ordinary reader maps. Numerical argument pointers remain unchanged. Prepared
+means the domain holds its metadata; it clears before the first metadata reader
+is released. Source arrival and consumer readiness no longer scan the complete
+directory's presence rows. Resolved trace flag 8 preserves the distinction from
+an active prepared domain after every candidate and consumer has finished.
+
+Installed `5843a8b` passes local CPU and Metal with 1025 updates, 513-row input
+tiles and 17 destinations, including both changing scatter occurrences, delayed
+factors, Xonotic indexed composition and reused fanout. Both traces contain one
+1025-candidate domain, 17 consumer identities and a two-page immutable address
+table. Each final consumer retains one ordinary reader map for its base; shared
+metadata and selected candidates are represented by the domain. Each whole
+workflow completes 3915 numerical submissions. These are actual trace identities
+and counts, not inferred physical overlap.
+
+For that shape, the previous final-scatter descriptors alone would allocate
+17 times (2 times 1025 plus 2), or 34884 logical result rows. The configured
+substrate has 32768 rows, so that representation cannot fit even before its
+operand and other lifetime rows are included. The shared domain uses 1025 plus
+17 plus 1, or 1043 result rows for the corresponding ownership facts. This
+comparison follows directly from allocation source; no attempted oversized run
+was required. It does not include the still-separate partial and input-reader
+storage costs or prove arbitrary-size execution.
+
+Paired CPU and Metal at `5843a8b` also pass the 67-update float16 workflow on the
+actual RDMA substrate. Gold maximum errors are respectively 0.001953125 and
+0.00390625 under unchanged tolerances. Both return all 65 remote fanout results
+over two source occurrences. Both peers terminate normally. The same locality
+limit applies: scatter domains and Xonotic side computations are on rank zero;
+remote domain candidates and derivatives still need applicable workload evidence.
+
+`sparse-final-*.json.gz` retains these observations, both peer traces where
+applicable, and exact installed revisions. This completes the shared sparse
+candidate/directory ownership increment, not the nine-step lowering plan.
+Remaining work includes active segment grids, physical partial storage, general
+expression composition/rank coverage, caller derivatives, collective placement,
+and matched performance acceptance. No universal no-overhead claim is made.
