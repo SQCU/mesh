@@ -245,6 +245,7 @@ def main():
         xonotic_batched = None
         xonotic_boolean = None
         xonotic_reductions = None
+        xonotic_elementary = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -589,6 +590,53 @@ def main():
                     expected.append((result.astype(np.int32) * 2 + 1 if operand == 2 else result).reshape(-1, 1))
                 generations.append((values, expected))
             xonotic_reductions = reduction_storage, cases, observations, generations
+            # design/algorithm-sources.md#shared-elementary-functions
+            graph = mx.Graph()
+            with graph:
+                elementary_inputs = tuple(graph.input(name, (2, 8), dtype) for name, dtype in
+                    (('x', 'float32'), ('y', 'float32'), ('signed', 'int64'), ('unsigned', 'uint64')))
+                operations = ('arcsinh', 'expm1', 'log1p', 'logaddexp', 'isfinite', 'abs', 'log', 'sqrt', 'power', 'power_square', 'floor_divide')
+                consumers = []
+                for operation in operations:
+                    result = (mx.logaddexp(*elementary_inputs[:2]) if operation == 'logaddexp' else
+                              mx.power(elementary_inputs[0], np.float32(.5 if operation == 'power' else 2)) if operation in ('power', 'power_square') else
+                              elementary_inputs[0] // np.float32(3) if operation == 'floor_divide' else
+                              getattr(mx, operation)(elementary_inputs[0]))
+                    consumers.append(result.astype('int32') * 2 + 1 if operation == 'isfinite' else result * 2)
+                consumers.extend(mx.where(mx.isfinite(value), value, 0) + 0 for value in elementary_inputs[2:])
+                consumers.extend((~value) + 0 for value in elementary_inputs[2:])
+                consumers.extend(value // np.array(3, dtype=value.dtype) for value in elementary_inputs[2:])
+                consumers.extend(mx.abs(value) + 0 for value in elementary_inputs[2:])
+            elementary_storage = tuple(program.tensor((2, 8), (1, 3), dtype=value.dtype) for value in elementary_inputs)
+            lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in elementary_inputs), elementary_storage)),
+                outputs=consumers, root_peer=0, tile_rows=1, tile_columns=3)
+            observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
+            generations = []
+            for generation in range(2):
+                x = np.array([[-0.0, 1e-7, -1e-7, -.75, 1e-4, 10, 1e30, -1e30],
+                              [np.nan, np.inf, -np.inf, -1, -1.5, 0, 20, -20]], dtype=np.float32)
+                y = np.array([[0, -1e-7, 1e-7, .75, -1e-4, -10, -np.inf, np.inf],
+                              [1, np.inf, -np.inf, np.nan, np.inf, -np.inf, -20, 20]], dtype=np.float32)
+                signed = np.array([[-2**63, 2**63-1, -2**53-1, 2**53+1, 0, -1, 1, 7],
+                                   [2**63-2, -2**63+1, 2**53+3, -2**53-3, 2, -2, 8, -8]], dtype=np.int64)
+                unsigned = np.array([[2**64-1, 2**63, 2**53+1, 0, 1, 2, 3, 4],
+                                     [2**64-2, 2**63+1, 2**53+3, 5, 6, 7, 8, 9]], dtype=np.uint64)
+                values = tuple(value[::-1] if generation else value for value in (x, y, signed, unsigned))
+                x, y = (value.astype(np.float64) for value in values[:2])
+                with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+                    expected = tuple((np.logaddexp(x, y) if operation == 'logaddexp' else
+                                      np.power(x, .5 if operation == 'power' else 2) if operation in ('power', 'power_square') else np.floor_divide(x, 3) if operation == 'floor_divide' else
+                                      getattr(np, operation)(x))
+                                     for operation in operations)
+                    expected = tuple(value.astype(np.int32) * 2 + 1 if operation == 'isfinite' else value.astype(np.float32) * np.float32(2)
+                                     for operation, value in zip(operations, expected)) + values[2:]
+                    expected += tuple(np.bitwise_not(value) for value in values[2:])
+                    expected += tuple(value // np.array(3, dtype=value.dtype) for value in values[2:])
+                    expected += tuple(np.abs(value) for value in values[2:])
+                generations.append((values, expected))
+            xonotic_elementary = elementary_storage, (*operations, 'signed_isfinite', 'unsigned_isfinite',
+                'signed_invert', 'unsigned_invert', 'signed_floor', 'unsigned_floor', 'signed_abs', 'unsigned_abs'), observations, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1200,6 +1248,53 @@ def main():
                 print(json.dumps(dict(event='xonotic_expert_complete', generation=generation,
                     elapsed_ms=(time.monotonic_ns()-started)/1e6,
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
+                for results in observations:
+                    for i, j, result in results:
+                        result.consume()
+        if xonotic_elementary is not None:
+            storage, operations, observations, generations = xonotic_elementary
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                early_row = generation
+                started = time.monotonic_ns()
+                for tensor, data in zip(storage, values):
+                    for (i, j), ref in tensor.blocks.items():
+                        if i == early_row:
+                            column = j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for results in observations for i, j, result in results if i == early_row))
+                for operation, results, reference in zip(operations, observations, expected):
+                    for i, j, result in results:
+                        if i == early_row:
+                            target = reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]
+                            correct = np.array_equal(result.array, target) if result.array.dtype.kind in 'iu' else np.allclose(result.array, target, rtol=2e-5, atol=1e-12, equal_nan=True)
+                            if operation in ('arcsinh', 'expm1', 'log1p', 'sqrt', 'floor_divide'):
+                                correct &= np.array_equal(np.signbit(result.array[target == 0]), np.signbit(target[target == 0]))
+                            if not correct:
+                                raise ArithmeticError(f'Elementary early consumer differs: {operation}')
+                        elif result.ready:
+                            raise ArithmeticError('Elementary consumer read a withheld row')
+                print(json.dumps(dict(event='xonotic_elementary_early', generation=generation, withheld_row=1-early_row,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                for tensor, data in zip(storage, values):
+                    for (i, j), ref in tensor.blocks.items():
+                        if i != early_row:
+                            column = j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for results in observations for i, j, result in results))
+                for operation, results, reference in zip(operations, observations, expected):
+                    for i, j, result in results:
+                        target = reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]
+                        correct = np.array_equal(result.array, target) if result.array.dtype.kind in 'iu' else np.allclose(result.array, target, rtol=2e-5, atol=1e-12, equal_nan=True)
+                        if operation in ('arcsinh', 'expm1', 'log1p', 'sqrt', 'floor_divide'):
+                            correct &= np.array_equal(np.signbit(result.array[target == 0]), np.signbit(target[target == 0]))
+                        if not correct:
+                            raise ArithmeticError(f'Elementary consumer differs after reuse: {operation}')
+                print(json.dumps(dict(event='xonotic_elementary_complete', generation=generation,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                    output={operation: [(i,j,result.array.tolist()) for i,j,result in results] for operation,results in zip(operations,observations)})), flush=True)
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
