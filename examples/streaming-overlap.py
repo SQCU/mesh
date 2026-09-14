@@ -84,7 +84,8 @@ def main():
             if args.trace:
                 Path(args.trace).write_text(json.dumps(dict(compute=program.trace,
                     transfers=program.transfer_trace), indent=2) + '\n')
-            print(json.dumps(dict(rank=1, mode=args.mode, runtime=program.report)), flush=True)
+            report = program.report
+            print(json.dumps(dict(rank=1, mode=args.mode, runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)
             return
         reference = (data @ weights) @ projection
 
@@ -153,9 +154,10 @@ def main():
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(compute=program.trace,
                 transfers=program.transfer_trace), indent=2) + '\n')
+        report = program.report
         print(json.dumps(dict(rank=0, mode=args.mode, rows=rows, tile=tile,
             depth=args.depth, backend=args.backend, **measured,
-            numerical_calls_per_trial=2 * count, runtime=program.report)), flush=True)
+            numerical_calls_per_trial=2 * count, runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)
 
 
 if __name__ == '__main__':
