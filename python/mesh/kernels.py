@@ -308,6 +308,8 @@ def _literal(value):
 # design/algorithm-sources.md#logical-indexed-views
 def _resolve_logical(node, inputs, evaluate=True):
     import math
+    if node.operation == 'indexed_contract':
+        return node
     active = evaluate and not (node.operation == 'logical_load' and 0 in inputs[node.value[0]].shape)
     children = tuple(_resolve_logical(child, inputs, active) for child in node.operands)
     if node.operation == 'logical_load':
@@ -950,7 +952,7 @@ def _expression_dtype(node, inputs):
     if node.operation == 'dot':
         types = tuple(_expression_dtype(child, inputs) for child in node.operands)
         return np.dtype('bool') if all(dtype.kind == 'b' for dtype in types) else _expression_dtype(_Expression('*', node.operands), inputs)
-    if node.operation in _REAL_FUNCTIONS:
+    if node.operation == 'indexed_contract' or node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
     if node.operation in ('philox', 'argsort'):
         return np.dtype('uint32')
@@ -1589,7 +1591,7 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'cast', 'transpose', 'argsort') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
+    return node.operation in ('dot', 'cast', 'transpose', 'argsort', 'indexed_contract') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
 
 
 # design/algorithm-sources.md#stable-indexed-ordering
@@ -1764,6 +1766,8 @@ def _expression_layout(node, sources, whole, layouts):
         result = (1, 1), (False, False), (1, 1)
     elif node.operation == 'domain':
         result = node.value
+    elif node.operation == 'indexed_contract':
+        result = node.value[1]
     elif node.operation in ('cast', 'argsort'):
         result = layout(node.operands[0])
     elif node.operation == 'transpose':
@@ -1817,6 +1821,8 @@ class _ExpressionRegions:
         def visit(value):
             if value.operation in ('input', 'load'):
                 used.add(value.value)
+            if value.operation == 'logical_load':
+                used.add(value.value[0])
             for child in value.operands:
                 visit(child)
 
@@ -1846,6 +1852,8 @@ class _ExpressionRegions:
             return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
         if node.operation == 'argsort':
             return self.ordering_panel(node, origin, shape)
+        if node.operation == 'indexed_contract':
+            return self.indexed_contraction_panel(node, origin, shape)
         dtype = _expression_dtype(node, self.sources)
         if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
             return self.panel(node.operands[0], origin, shape)
@@ -1856,6 +1864,26 @@ class _ExpressionRegions:
                 self.publish(self.parts(node, origin, shape, target), target)
             else:
                 self.emit(node, origin, shape, target)
+            self.cache[key] = target
+        return self.cache[key]
+
+    # design/algorithm-sources.md#composable-indexed-contractions
+    def indexed_contraction_panel(self, node, origin, shape, direct=None):
+        key = ('indexed_contraction', self.key(node, origin, shape))
+        if key not in self.cache:
+            target = direct if direct is not None and direct.dtype == np.dtype('float32') else self.temporary(shape)
+
+            # design/algorithm-sources.md#composable-indexed-contractions
+            def shift(value):
+                if value.operation == 'index_vector' and value.value[3] == 0 and value.value[0] != 1:
+                    return _Expression('index_vector', value=(*value.value[:2], value.value[2]+origin[0], 0))
+                return _Expression(value.operation, tuple(shift(child) for child in value.operands), value.value)
+
+            product = _Expression('*', tuple(shift(child) for child in node.operands))
+            transposed = _Expression('transpose', (_Expression('sum', (product,)),))
+            if shape[1] != 1 or not _lower_indexed_product(self, transposed, target.T):
+                original = _resolve_logical(node.value[0], self.sources)
+                self.emit(original, origin, shape, target)
             self.cache[key] = target
         return self.cache[key]
 
@@ -2053,6 +2081,14 @@ class _ExpressionRegions:
                 rows = 1 if layout[0][0] == 1 else shape[0]
                 dtype = _reduction_dtype(node, self.sources, accumulation)
                 return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
+            if node.operation == 'indexed_contract':
+                if accumulation.kind != 'f':
+                    return lower(_resolve_logical(node.value[0], self.sources), accumulation)
+                layout = self.layout(node)
+                row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
+                rows = 1 if layout[0][0] == 1 else shape[0]
+                return reference(('indexed_contract', node, row, rows),
+                                 (self.indexed_contraction_panel(node, (row, 0), (rows, 1)),))
             if node.operation == 'argsort':
                 layout = self.layout(node)
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
@@ -2105,6 +2141,10 @@ def _panel_affine(node, selected, choice):
         return choice, 0, 0
     if node.operation == 'literal' and isinstance(node.value, (int, bool)):
         return int(node.value), 0, 0
+    if node.operation == 'cast' and node.operands[0].operation == 'literal' and np.dtype(node.value).kind in 'iub':
+        zero = np.zeros(1, dtype=np.int64)
+        value = _static_value(node, (), zero, zero, ())
+        return None if value is None else (int(value[0]), 0, 0)
     if node.operation == 'index_vector':
         return node.value[2], int(node.value[3] == 0 and node.value[0] > 1), int(node.value[3] == 1 and node.value[0] > 1)
     if node.operation not in ('+', '-', '*'):
@@ -2149,7 +2189,7 @@ def _panel_geometry(source, ordinal, row_step, column_step, rows, columns):
 
 
 # design/algorithm-sources.md#selected-native-contractions
-def _lower_selected_product(lowering, value, target):
+def _lower_indexed_product(lowering, value, target):
     import ctypes as C
     from . import Ref, check
     from ._native import View
@@ -2187,9 +2227,12 @@ def _lower_selected_product(lowering, value, target):
                         return False
                     pending.extend(part.operands)
                 selected, choices = coordinate, size if choices is None else min(choices, size)
-    if selected is None or len(vectors) != 1 or _expression_dtype(_resolve_logical(selected, lowering.sources), lowering.sources).kind not in 'iub':
+    if len(vectors) != 1 or (selected is not None and _expression_dtype(_resolve_logical(selected, lowering.sources), lowering.sources).kind not in 'iub'):
         return False
+    choices = 1 if selected is None else choices
     inner, tile = next(iter(vectors))
+    if inner == 0:
+        return False
     feature = target.shape[1]
     flattened = []
     for node in operands:
@@ -2234,13 +2277,15 @@ def _lower_selected_product(lowering, value, target):
             segments.append((first, columns, length, prepared))
             start += length
         first += columns
-    selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
-    if selection_key not in lowering.cache:
-        selector = program.tensor((1, 1), dtype=np.uint32)[0, 0]
-        plan = select((selected >= 0) & (selected < choices), selected, choices)
-        _ExpressionKernel((plan,)).bind(program, lowering.sources, (selector,), lowering.coordinate)
-        lowering.cache[selection_key] = selector
-    selector = lowering.cache[selection_key]
+    selector = None
+    if selected is not None:
+        selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
+        if selection_key not in lowering.cache:
+            selector = program.tensor((1, 1), dtype=np.uint32)[0, 0]
+            plan = select((selected >= 0) & (selected < choices), selected, choices)
+            lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
+            lowering.cache[selection_key] = selector
+        selector = lowering.cache[selection_key]
     target_pages = C.c_size_t()
     check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
     groups = {}
@@ -2259,6 +2304,8 @@ def _lower_selected_product(lowering, value, target):
                 view.column_stride = view.rows
             ref = Ref(program, view, backing.dtype)
             ref = ref.T if transpose else ref
+            if selected is None:
+                return ref, ()
             identity = tuple(getattr(ref.view, field) for field in
                 ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
             if identity not in page_sets:
@@ -2282,6 +2329,13 @@ def _lower_selected_product(lowering, value, target):
             left_views.append(left)
             right_views.append(right)
             selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
+        reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
+        destination = (lowering.temporary((columns, 1)).T if reverse else target
+            if len(segments) == 1 and target_pages.value == 1 and target.dtype == np.dtype('float32') else lowering.temporary((1, columns)))
+        if selected is None:
+            _bind_operation(program, matmul, (left_views[0], right_views[0]), destination)
+            groups.setdefault((first, columns), []).append(destination)
+            continue
         zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
         if zero_key not in lowering.cache:
             zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
@@ -2294,9 +2348,6 @@ def _lower_selected_product(lowering, value, target):
         left_views.append(left_views[0])
         right_views.append(zero)
         selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
-        reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
-        destination = (lowering.temporary((columns, 1)).T if reverse else target
-            if len(segments) == 1 and target_pages.value == 1 and target.dtype == np.dtype('float32') else lowering.temporary((1, columns)))
         function = C.c_size_t()
         check(program.native.algebra_contract_select(program.handle, selector.view,
             (View * len(left_views))(*(ref.view for ref in left_views)),
@@ -2344,6 +2395,37 @@ def _lower_selected_product(lowering, value, target):
     return True
 
 
+# design/algorithm-sources.md#composable-indexed-contractions
+def _preserve_indexed_contractions(node, lowering):
+    children = tuple(_preserve_indexed_contractions(child, lowering) for child in node.operands)
+    value = _Expression(node.operation, children, node.value)
+    if node.operation in ('+', '-', '*', '//', '%', 'cast') and all(child.operation == 'literal' or
+            child.operation == 'cast' and child.operands[0].operation == 'literal' for child in children):
+        zero = np.zeros(1, dtype=np.int64)
+        folded = _static_value(value, lowering.sources, zero, zero, lowering.coordinate)
+        if folded is not None:
+            literal = _literal(folded[0])
+            dtype = _expression_dtype(value, lowering.sources)
+            return literal if _expression_dtype(literal, ()) == dtype else literal.astype(dtype)
+    if value.operation != 'sum' or value.operands[0].operation != '*':
+        return value
+    operands = []
+    for child in value.operands[0].operands:
+        while True:
+            if child.operation == '*' and any(term == _literal(1.0) for term in child.operands):
+                child = child.operands[1] if child.operands[0] == _literal(1.0) else child.operands[0]
+            elif child.operation == 'cast' and np.dtype(child.value) == np.dtype('float32'):
+                child = child.operands[0]
+            else:
+                break
+        if child.operation != 'logical_load' or lowering.sources[child.value[0]].dtype.kind != 'f':
+            return value
+        operands.append(child)
+    resolved = _resolve_logical(value, lowering.sources)
+    layout = _expression_layout(resolved, lowering.sources, lowering.whole, {})
+    return _Expression('indexed_contract', tuple(operands), (value, layout))
+
+
 # design/algorithm-sources.md#shared-contraction-lowering
 def _lower_region_expressions(program, expressions, grid, input_specs, output_specs):
     import itertools
@@ -2358,16 +2440,21 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             return _Expression(node.operation, tuple(specialize(child) for child in node.operands), node.value)
 
         for expression, spec in zip(expressions, output_specs):
-            value = specialize(expression)
+            value = _preserve_indexed_contractions(specialize(expression), lowering)
             target = spec.resolve(coordinate)
-            if _lower_selected_product(lowering, value, target):
-                continue
             value = _resolve_logical(value, lowering.sources)
             origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
             domain_shape = spec._tensor.shape
             if value.operation == 'transpose':
                 value, target, origin, domain_shape = value.operands[0], target.T, origin[::-1], domain_shape[::-1]
-            if value.operation == 'dot':
+            if value.operation == 'indexed_contract' and target.dtype.kind != 'f':
+                value = _resolve_logical(value.value[0], lowering.sources)
+            if value.operation == 'indexed_contract':
+                layout = lowering.layout(value)
+                row = origin[0] if layout[1][0] else 0
+                result = lowering.indexed_contraction_panel(value, (row, 0), target.shape, target)
+                lowering.publish((result,), target)
+            elif value.operation == 'dot':
                 layout = lowering.layout(value)
                 for axis in range(2):
                     expected = domain_shape[axis] if layout[1][axis] else target.shape[axis]
