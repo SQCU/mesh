@@ -2319,3 +2319,35 @@ specialization changes only setup bindings and removes redundant metadata
 producers; it adds no numerical dependency, shared storage reuse constraint or
 runtime scheduling state. The original routing directory already owns the active
 count, and native indexed reader memberships retain its lifetime for these views.
+
+## Segment selector common subexpressions
+
+The LLVM authors' [MLIR common-subexpression elimination pass](https://mlir.llvm.org/docs/Passes/#-cse)
+reuses equivalent computations rather than emitting duplicate operations.
+`_segment_selector_key` applies this setup transformation to bounded indexed
+selectors across feature panels of the same segment and width. It includes the
+selector expression, referenced input slots, actual View fields (tensor, extent,
+offset, shape and strides), dtype and constantness. Tensor operands additionally
+retain logical shape, block shape, grid and their complete coordinate-to-Ref map.
+Only inputs read by the selector expression enter this binding key; unrelated
+numerical feature panels cannot prevent sharing a row-only coordinate selector.
+The ordinal, original and flattened bounds, direct selector and active-count
+identities are also retained. The key uses field values, never struct padding.
+
+`_lower_indexed_add` shares these setup caches across equal-width panels within
+each segment. Reused selector outputs keep ordinary native reader fanout and
+occurrence retirement, including recursive coordinate selectors and masked
+accesses. There is no storage overwrite protocol or runtime scheduling change.
+Different direct Ref layouts, predicates, bounds or widths remain distinct.
+Allocated selector capacity is still count times width for each unique selector;
+this removes duplicate producers and allocations, not the retained capacity of
+an individual selector.
+
+Flattened range production is also omitted when every explicitly indexed input
+is a declared constant, matching the bounded binder's dynamic-table predicate.
+Those expressions have no dynamic selector consuming a scaled range. Original
+bounds still define numerical loops and direct Ref candidate domains. The
+existing higher-rank row-scatter workflow has multiple equal-width feature
+panels with row-only broadcast-update coordinates and can exercise this sharing
+without adding an evaluator. Python compilation and source diff checks passed;
+operational submission and lifetime comparisons belong to that workflow.
