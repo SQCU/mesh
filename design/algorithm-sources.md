@@ -2162,8 +2162,9 @@ this change; operational results are supplied by the parent integration run.
 
 ## Xonotic take transpose
 
-The JAX authors implement [gather transposition as scatter addition](https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py),
-with ScatterDimensionNumbers mirroring the gather dimensions. Xonotic
+The JAX authors describe [scatter dimensions as the mirror of gather dimensions](https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py).
+For an indexed read y[i] = x[d[i]], its transpose is dx[j] = sum(dy[i] for
+i with d[i] = j). Xonotic
 `take_along_axis_vjp` now follows that construction through the existing shared
 indexed_add rather than its former custom atomic/clear kernel.
 

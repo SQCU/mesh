@@ -875,3 +875,40 @@ fixture; the submission counts are not an equal-work speed comparison. Worst-cas
 metadata allocation and launch packing remain unresolved performance work.
 Broader scatter/derivative caller migration, remaining rank/axis operations and
 the full nine-step performance acceptance remain open.
+
+## Take-along-axis transpose caller migration
+
+`0ce49c7` replaces the custom take-along-axis VJP atomic/clear emitter with shared
+indexed addition. Forward and backward calls share source-coordinate construction
+across logical rank, selected axis and singleton broadcasting. Destination metadata
+checks each source axis before flattening, so invalid coordinates cannot alias a
+different valid scalar destination. Cotangents are indexed directly from their
+original pages. The numerical primal is absent from liveness and peer replication.
+Row-aligned scalar output blocks are reframed as matrix views using their original
+Tensor/extent/offset identities, preserving publication and downstream bindings.
+
+The existing optional Xonotic example now composes a rank-three broadcast take
+transpose with multiplication and addition. Its first output row finishes while
+cotangent blocks 1 and 3 remain unpublished. Duplicate valid negative indices,
+positive and overly negative out-of-axis indices, and a second generation pass
+exact numerical comparisons. No primal input binding is supplied. CPU and Metal
+float32 workflows each complete 3238 submissions, and paired Metal float16
+completes 2553 rank-zero submissions. Existing streaming scatter masks, gather
+transposes, contractions, reductions, gold and fanout cases continue to pass.
+The take side case executes in float32 on rank zero; only gold/fanout cross RDMA.
+The peer exits zero after SIGTERM and both bridges remain ready with zero clients.
+
+`take-gradient-provenance.json` records installed library/caller revision
+`0ce49c7`, raw compressed logs/traces and timing count/mean/sample variance.
+These examples establish the recorded broadcast/axis cases, not exhaustive
+rank/axis coverage or a matched speedup. Scalar destination metadata and partial
+storage still use the existing worst-case scatter capacity.
+
+A concurrent source audit identifies the next caller work: general gather
+transposes can share forward gather coordinate construction, per-axis validity,
+scalar destination sums and the same shape-only primal handling. Nonvector
+scatter needs a semantic correction as well: the old emitter compares row indices
+against flat output addresses, whereas Graph.At.add and its gradient[y] derivative
+express row indexing. Existing named callers use vector bases and do not expose
+that mismatch. General gather and nonvector scatter migration, storage/launch
+optimization and remaining nine-step acceptance work remain open.
