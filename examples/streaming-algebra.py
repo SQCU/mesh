@@ -357,13 +357,17 @@ def main():
                 with program.write(x_tail[0, 0]) as destination:
                     destination[...] = tail_values
                 wait_for((observations[0], observations[2]))
-                if observations[1].ready or x_source[1-early_source, 0].present or x_indices[0, 1].present:
-                    raise ArithmeticError('Xonotic indexed composition waited for or published an unrelated region')
+                if observations[1].ready:
+                    raise ArithmeticError(f'Xonotic output consumed an unpublished occurrence: generation={generation}')
+                if not x_source[1-early_source, 0].writable or not x_indices[0, 1].writable:
+                    raise ArithmeticError(f'Xonotic withheld input occurrence was claimed: generation={generation}')
                 for index in (0, 2):
                     if not np.array_equal(observations[index].array, expected[2*index:2*index+2]):
                         raise ArithmeticError('Xonotic early gather/concatenate output differs')
                 print(json.dumps(dict(event='xonotic_indexed_early', generation=generation,
                     withheld_source_block=1-early_source, withheld_index_block=1,
+                    withheld_source_writable=x_source[1-early_source, 0].writable,
+                    withheld_index_writable=x_indices[0, 1].writable,
                     output=[observations[index].array.tolist() for index in (0, 2)])), flush=True)
                 with program.write(x_source[1-early_source, 0]) as destination:
                     destination[...] = source_values[2*(1-early_source):2*(1-early_source)+2]

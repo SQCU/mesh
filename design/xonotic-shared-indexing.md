@@ -109,3 +109,14 @@ This extension does not evaluate derivatives. Existing derivative graph rules an
 backend code remain unchanged; numerical derivative evidence is still outstanding.
 Python compilation passes for this extension. The commands above are instructions
 for operational validation, not a claim that this increment has already run them.
+
+
+The reuse observer checks the withheld inputs' writable state and the dependent
+output's next-occurrence readiness separately. `Ref.present` exposes the raw
+presence plane; consumed storage may retain PRESENT together with READ and still
+be writable for its next occurrence. Raw presence therefore does not establish
+that the next generation was supplied. Each early observation records the two
+withheld writable states; premature dependent output readiness has its own error.
+The first operational CPU attempt completed generation zero exactly, then exposed
+this observer mistake in generation one. The corrected source has not yet been
+rerun in this record.
