@@ -38,17 +38,7 @@ struct mesh_writer { struct mesh_ctx *context; struct mesh_row_map output; struc
 enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUTION_COREML };
 
 typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publication *);
-@interface MeshCode : NSObject
-@property NSString *source;
-@end
-@implementation MeshCode
-@end
-@interface MeshMetalCode : MeshCode
-@property id<MTLLibrary> library;
-@end
-@implementation MeshMetalCode
-@end
-@interface MeshCPUCode : MeshCode
+@interface MeshCPUCode : NSObject
 @property void *handle;
 @property mesh_cpu_kernel kernel;
 @end
@@ -91,7 +81,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property dispatch_group_t executions;
 @property id<MTLDevice> device;
 @property id<MTLCommandQueue> queue;
-@property NSMutableDictionary<NSString *,MeshMetalCode *> *libraries;
+@property NSMutableDictionary<NSString *,id<MTLLibrary>> *libraries;
 @property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
 @property NSMutableArray<MeshFunction *> *functions;
 @property NSMutableArray<MeshExtent *> *extents;
@@ -418,15 +408,6 @@ int mesh_algebra_view_pages(struct mesh_algebra *handle,struct mesh_view view,st
   return 0;
 }
 /* design/algorithm-sources.md#kernelsexpression */
-static MeshCode *source_code(MeshAlgebra *a,const char *text,BOOL cpu) {
-  NSMutableDictionary *cache=cpu?(NSMutableDictionary *)a.cpuCode:(NSMutableDictionary *)a.libraries;NSString *source=@(text);MeshCode *code=cache[source];
-  if(!code){
-    code=cpu?[MeshCPUCode new]:[MeshMetalCode new];code.source=source;
-    cache[source]=code;
-  }
-  return code;
-}
-/* design/algorithm-sources.md#kernelsexpression */
 static MTLCompileOptions *source_options(void) {
   MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;return options;
 }
@@ -453,8 +434,11 @@ int mesh_algebra_encode(struct mesh_algebra *handle,const struct mesh_view *inpu
 static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const struct mesh_view *reads,struct mesh_view write) {
   MeshAlgebra *a=owner(handle);
   NSError *error=nil;MTLCompileOptions *options=source_options();
-  MeshMetalCode *code=(MeshMetalCode *)source_code(a,text,NO);id<MTLLibrary> library=code.library;
-  if(!library){library=[a.device newLibraryWithSource:code.source options:options error:&error];code.library=library;}
+  NSString *source=@(text);id<MTLLibrary> library=a.libraries[source];
+  if(!library){
+    library=[a.device newLibraryWithSource:source options:options error:&error];
+    if(library)a.libraries[source]=library;
+  }
   if(!library){fprintf(stderr,"mesh Metal kernel: %s\n",error.description.UTF8String);return EINVAL;}
   id<MTLFunction> function=[library newFunctionWithName:@"mesh_expression"];
   if(!function)return ENOENT;
@@ -551,10 +535,10 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   }
   uint64_t domain[]={row_begin,column_begin,column_begin+column_count};
   if(!a.cpu)return bind_metal(handle,metal_source,row_count,domain,inputs,input_count,output,reads,region);
-  NSString *cpu_text=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
-  MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_text.UTF8String,YES);
-  NSString *source=library.source;
-  if(!library.handle) {
+  NSString *source=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
+  MeshCPUCode *library=a.cpuCode[source];
+  if(!library) {
+    library=[MeshCPUCode new];
     NSError *error=nil;NSFileManager *files=NSFileManager.defaultManager;
     NSString *directory=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"mesh-cpu-" stringByAppendingString:NSUUID.UUID.UUIDString]];
     if(![files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error])return (int)error.code;
@@ -570,6 +554,7 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
     if(!library.handle){fprintf(stderr,"mesh CPU kernel: %s\n",dlerror());return EIO;}
     library.kernel=(mesh_cpu_kernel)dlsym(library.handle,"mesh_expression");
     if(!library.kernel){fprintf(stderr,"mesh CPU symbol: %s\n",dlerror());dlclose(library.handle);library.handle=NULL;return EIO;}
+    a.cpuCode[source]=library;
   }
   size_t count=input_count+1;
   NSMutableData *addresses=[NSMutableData dataWithLength:(count*6+1)*sizeof(uintptr_t)];
