@@ -23,6 +23,7 @@ struct mesh_view {
 struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
 struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
 struct mesh_indexed_event { uint64_t input; uint32_t descriptor,role,candidate,first,count,plane,retired,selected,completed,mapped,flags; };
+struct mesh_route_event { uint64_t function; uint32_t domain,role,index,first,count,plane,retired,completed,prepared,consumer,flags; };
 struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings,ne_planned_operations; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
@@ -48,6 +49,9 @@ int mesh_algebra_metal(struct mesh_algebra *,const char *,const struct mesh_meta
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t candidate_count);
 int mesh_algebra_indexed_range(struct mesh_algebra *,size_t function,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t candidate_count);
+struct mesh_route *mesh_algebra_route_create(struct mesh_algebra *,struct mesh_view owners,struct mesh_view ordinals,struct mesh_view offsets,const struct mesh_view *candidates,size_t candidate_count,size_t consumer_count);
+struct mesh_view mesh_algebra_route_table(struct mesh_algebra *,struct mesh_route *);
+int mesh_algebra_route_attach(struct mesh_algebra *,size_t function,struct mesh_route *,size_t consumer);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);
@@ -63,6 +67,9 @@ size_t mesh_algebra_trace_indexed_count(struct mesh_algebra *,size_t function);
 struct mesh_indexed_event mesh_algebra_trace_indexed(struct mesh_algebra *,size_t function,size_t entry);
 struct mesh_reader_event mesh_algebra_trace_input_reader(struct mesh_algebra *,size_t function,size_t input,uint32_t row);
 struct mesh_reader_event mesh_algebra_trace_indexed_reader(struct mesh_algebra *,size_t function,size_t entry,uint32_t row);
+size_t mesh_algebra_trace_route_count(struct mesh_algebra *);
+struct mesh_route_event mesh_algebra_trace_route(struct mesh_algebra *,size_t entry);
+struct mesh_reader_event mesh_algebra_trace_route_reader(struct mesh_algebra *,size_t entry,uint32_t row);
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *);
 
 #ifdef __cplusplus

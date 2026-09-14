@@ -13,7 +13,16 @@ struct mesh_indexed_read {
   struct mesh_index_candidate *candidate; uint32_t candidates,retired,selected,completed,mapped;
   struct mesh_indexed_read *next;
 };
-struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; struct mesh_indexed_read *indexed; };
+struct mesh_route_vector { const uint32_t *values; size_t columns,row_stride,column_stride,length; };
+struct mesh_route {
+  struct mesh_route_vector owners,ordinals,offsets;
+  struct mesh_row_map *metadata; uint32_t metadata_count;
+  struct mesh_index_candidate *candidate; uint32_t candidates,consumers,retired,completed,prepared;
+  void **watches; size_t *functions; void *table,*authority;
+  struct mesh_route *next;
+};
+struct mesh_route_use { struct mesh_route *domain; uint32_t consumer; struct mesh_route_use *next; };
+struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; struct mesh_indexed_read *indexed; struct mesh_route_use *routes; };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };
 struct mesh_transfer_event { uint32_t queue,direction; struct mesh_transfer transfer; uint64_t ready_ns,post_ns,cq_ns,occurrences; };
@@ -31,6 +40,7 @@ struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
 int mesh_execution_add(struct mesh_ctx *,struct mesh_row_function *,void *owner,void (*submit)(void *,uint32_t),void *argument);
 void mesh_execution_remove(struct mesh_ctx *,void *owner);
+int mesh_execution_route(struct mesh_ctx *,struct mesh_route *,void *owner);
 int mesh_execution_indexed(struct mesh_ctx *,struct mesh_indexed_read *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
