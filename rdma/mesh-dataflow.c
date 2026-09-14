@@ -538,8 +538,8 @@ static void mesh_reader_event(struct mesh_ctx *c,uint32_t row){
   struct mesh_readers *readers=c->readers;if(!readers)return;
   struct mesh_reader_group *group=readers->groups[row];if(!group || !mesh_is(c->M,MESH_PRESENT,row))return;
   if(mesh_is(c->M,MESH_PRESENT,group->completed)){
-    if(!mesh_is(c->M,MESH_READ+group->plane,row))mesh_reader_reset(c,row,1);
-    return;
+    if(mesh_is(c->M,MESH_READ+group->plane,row))return;
+    mesh_reader_reset(c,row,1);
   }
   for(struct mesh_reader_chunk *chunk=group->chunks;chunk;chunk=chunk->next)if(!mesh_bits_all(c->M,MESH_PRESENT,chunk->first,chunk->count))return;
   mesh_bits_set(c->M,MESH_PRESENT,group->completed,1);
