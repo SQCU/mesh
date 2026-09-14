@@ -330,7 +330,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
             continue
         # ../../../design/algorithm-sources.md#shared-elementary-functions
-        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or', 'log', 'sqrt', 'abs', 'isfinite', 'bitwise_invert'):
+        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or', 'bitwise_invert'):
             args = kernels.arguments(len(values))
             direct = shaped and len(shape) <= 2
             if not direct:

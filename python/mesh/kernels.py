@@ -3,16 +3,12 @@ from dataclasses import dataclass
 import numpy as np
 
 _REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
-_REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'log', 'sqrt')
-_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor')
+_REAL_FUNCTIONS = ('exp', 'rsqrt')
+_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS
 _POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%',
     'maximum', 'minimum', *_POINTWISE_FUNCTIONS)
 
 
-# design/algorithm-sources.md#single-kernel-interface
-def affine(alpha=1, beta=0):
-    value, = arguments(1)
-    return expression(value * alpha + beta)
 
 
 # design/algorithm-sources.md#static-indexed-access-specialization
@@ -198,40 +194,19 @@ class _Expression:
     def exp(self):
         return _Expression('exp', (self,))
 
-    # design/algorithm-sources.md#region-expression-fusion
-    def tanh(self):
-        return _Expression('tanh', (self,))
-
-
-
-
-    # design/algorithm-sources.md#shared-elementary-functions
-    def log(self):
-        return _Expression('log', (self,))
-
-    # design/algorithm-sources.md#shared-elementary-functions
-    def sqrt(self):
-        return _Expression('sqrt', (self,))
-
-    # design/algorithm-sources.md#shared-elementary-functions
-    def abs(self):
-        return _Expression('abs', (self,))
-
-    # design/algorithm-sources.md#shared-elementary-functions
-    def isfinite(self):
-        return _Expression('isfinite', (self,))
-
-    # design/algorithm-sources.md#shared-elementary-functions
-    def floor(self):
-        return _Expression('floor', (self,))
 
 
 
 
 
-    # design/algorithm-sources.md#shared-elementary-functions
-    def __abs__(self):
-        return self.abs()
+
+
+
+
+
+
+
+
 
 
 
@@ -656,8 +631,6 @@ class _ExpressionKernel:
                 return True
             if node.operation in _REAL_FUNCTIONS:
                 return False
-            if node.operation == 'isfinite':
-                return True
             if node.operation in _REDUCTIONS:
                 return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
             return all(integral(child) for child in node.operands)
@@ -989,7 +962,6 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         rows, columns, grid_columns = node.value
         return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
     return _scalar_expression(node, args, metal,
-        _expression_dtype(node.operands[0], inputs) if node.operation in ('abs', 'floor', 'isfinite') else
         _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum') else None)
 
 
@@ -1006,9 +978,9 @@ def _expression_dtype(node, inputs):
         return np.dtype('float32')
     if node.operation == 'lookup':
         return np.dtype('uint64')
-    if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
+    if node.operation in ('<', '<=', '>', '>=', '=='):
         return np.dtype('bool')
-    if node.operation in ('abs', 'floor', 'domain'):
+    if node.operation == 'domain':
         return _expression_dtype(node.operands[0], inputs)
     if node.operation in ('row', 'column', 'program_id'):
         return np.dtype('int64')
@@ -1045,21 +1017,8 @@ def _reduction_dtype(node, inputs, output):
 
 # design/algorithm-sources.md#fused-indexed-update-values
 def _scalar_expression(node, args, metal, dtype=None):
-    if node.operation == 'isfinite':
-        return f'isfinite((float)({args[0]}))' if dtype.kind == 'f' else '1'
-    if node.operation == 'abs':
-        if dtype.kind == 'f':
-            return f'fabs{"" if metal else "f"}((float)({args[0]}))'
-        if dtype.kind in 'ub':
-            return args[0]
-        bits = max(32, dtype.itemsize*8)
-        return f'((int{bits}_t)(({args[0]})<0 ? ((uint{bits}_t)0-(uint{bits}_t)({args[0]})) : (uint{bits}_t)({args[0]})))'
-    if node.operation == 'floor':
-        return f'floor{"" if metal else "f"}((float)({args[0]}))' if dtype.kind == 'f' else args[0]
     if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
         name = node.operation + ('' if metal else 'f')
-        if metal and node.operation in ('log', 'sqrt'):
-            name = 'precise::' + name
         return name + '(' + ','.join(f'((float)({value}))' for value in args) + ')'
     if node.operation in ('maximum', 'minimum'):
         if dtype.kind == 'f':
@@ -1642,12 +1601,6 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
 
 # design/algorithm-sources.md#single-kernel-interface
 _left, _right = arguments(2)
-matmul = expression(dot(_left, _right))
 add = expression(_left + _right)
-multiply = expression(_left * _right)
-tanh = expression(_left.tanh())
-exp = expression(_left.exp())
-row_sum = expression(_left.sum())
-rsqrt = expression(_left.rsqrt())
 swish = expression(_left / (1 + (0 - _left).exp()))
 del _left, _right
