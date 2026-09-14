@@ -1,0 +1,166 @@
+{
+  "runs": [
+    {
+      "prefix": "selector-cse-cpu",
+      "library_revision": "ba94e38",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "a64eb23",
+      "baseline_revision": "64c9246",
+      "baseline_prefix": "range-elision-cpu",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "selector-cse-cpu.jsonl.gz",
+        "selector-cse-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 5.013084,
+        "invocations_per_second": 598.4340178620586,
+        "first_section_ms": 4.305667,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.691514333333333,
+          "sample_variance": 0.07715831106033323
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 3676,
+          "completed": 3676,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 3676
+        }
+      },
+      "trace_counts": {
+        "configured_before": 2095,
+        "configured_after": 2071,
+        "submissions_before": 3724,
+        "submissions_after": 3676
+      }
+    },
+    {
+      "prefix": "selector-cse-metal",
+      "library_revision": "ba94e38",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "a64eb23",
+      "baseline_revision": "64c9246",
+      "baseline_prefix": "range-elision-metal",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "selector-cse-metal.jsonl.gz",
+        "selector-cse-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 18.655541,
+        "invocations_per_second": 160.81013142422404,
+        "first_section_ms": 15.79025,
+        "completion_ms": {
+          "count": 3,
+          "mean": 16.982736000000003,
+          "sample_variance": 2.102334074463002
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 3676,
+          "completed": 3676,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.013372461,
+          "cpu_submitted": 0
+        }
+      },
+      "trace_counts": {
+        "configured_before": 2095,
+        "configured_after": 2071,
+        "submissions_before": 3724,
+        "submissions_after": 3676
+      }
+    },
+    {
+      "prefix": "selector-cse-paired-metal",
+      "library_revision": "ba94e38",
+      "peer_library_revision": "ba94e38",
+      "example_and_xonotic_revision": "a64eb23",
+      "baseline_revision": "64c9246",
+      "baseline_prefix": "range-elision-paired-metal",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "selector-cse-paired-metal.jsonl.gz",
+        "selector-cse-paired-metal-trace.json.gz",
+        "selector-cse-paired-metal-peer.jsonl.gz",
+        "selector-cse-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.561875,
+        "invocations_per_second": 181.1389109022982,
+        "first_section_ms": 12.839917,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.881027666666666,
+          "sample_variance": 2.1418261655603326
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 2991,
+          "completed": 2991,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.010059592,
+          "cpu_submitted": 0
+        }
+      },
+      "trace_counts": {
+        "configured_before": 2031,
+        "configured_after": 2007,
+        "submissions_before": 3039,
+        "submissions_after": 2991
+      }
+    }
+  ],
+  "scope": "Unchanged example/configuration from a64eb23, baseline library64c9246. Same-segment equal-width selector common-subexpression sharing and all-constant unused-range elimination. Numerical, withheld-input progress and repeated reuse checks pass. Paired gold/fanout cross RDMA; side cases run on rank zero. Peer exited zero after SIGTERM. Counts establish removed configured work, not matched wall-time speedup."
+}

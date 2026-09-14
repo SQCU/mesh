@@ -1040,3 +1040,31 @@ and equal-width feature panels can sometimes share selectors when expression,
 bounds and referenced layouts all match. Sharing must retain those identities
 and lifetime fanout rather than introducing new synchronization. Broader operator
 coverage and the full nine-step performance acceptance remain open.
+
+## Share bounded selector common subexpressions across feature panels
+
+`ba94e38` shares identical selectors across equal-width feature panels within one
+scatter segment. The setup key preserves the expression, referenced input layouts
+and page identities, constantness, ordinal and bound views, active count and
+segment width. Only inputs actually used by the selector contribute to its key.
+Row-only selectors therefore share without conflating panel-dependent addresses.
+The native reader fanout preserves every consumer's lifetime; numerical operands
+remain the original registered pages. Constant-only indexed expressions also omit
+unused flattened-range producers. No invocation scheduler or synchronization was
+added.
+
+The unchanged example/configuration from `a64eb23`, compared with library
+`64c9246`, passes CPU and Metal float32 and paired Metal float16 numerical,
+withheld-input progress and repeated-reuse checks. Local traces fall from 2095
+to 2071 configured functions and from 3724 to 3676 completed submissions. Paired
+rank-zero traces fall from 2031 to 2007 functions and from 3039 to 2991 submissions.
+Thus each workflow removes 24 configured functions and 48 submissions. Paired
+gold/fanout cross RDMA; indexed side cases run on rank zero. The peer exits zero
+after SIGTERM, and both bridges remain ready with zero clients.
+
+`measurements/lowering-2026-09-13/selector-cse-provenance.json` records source
+revisions, raw compressed logs/traces and timing count, mean and sample variance.
+These three-invocation measurements establish removed work and preserved progress,
+not a matched wall-time speedup. Selector capacity per unique expression and
+fragment-driven launch costs remain; expert/neighborhood caller migration and
+full nine-step performance acceptance are still open.
