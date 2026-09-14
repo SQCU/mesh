@@ -114,6 +114,13 @@ class _Expression:
             raise ValueError('Indexed loads require an input reference')
         return _Expression('load', tuple(map(_literal, (row, column, mask, other))), self.value)
 
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def astype(self, dtype):
+        dtype = np.dtype(dtype)
+        if dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool'):
+            raise ValueError('Expression casts require a supported scalar dtype')
+        return _Expression('cast', (self,), dtype.str)
+
     # design/algorithm-sources.md#region-expression-fusion
     def sum(self):
         return _Expression('sum', (self,))
@@ -295,6 +302,8 @@ class _ExpressionKernel:
                 return inputs[node.value].dtype.kind != 'f' and integral(node.operands[3])
             if node.operation == 'select':
                 return all(integral(child) for child in node.operands[1:])
+            if node.operation == 'cast':
+                return np.dtype(node.value).kind != 'f'
             if node.operation == 'literal':
                 return isinstance(node.value, (int, bool))
             if node.operation in ('<', '<=', '>', '>=', '==', 'row', 'column', 'block_ordinal'):
@@ -415,6 +424,12 @@ class _ExpressionKernel:
 
 # design/algorithm-sources.md#fused-indexed-update-values
 def _scalar_expression(node, args, metal):
+    if node.operation == 'cast':
+        dtype = np.dtype(node.value)
+        scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
+                  'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}[dtype.kind + str(dtype.itemsize)]
+        value = f'(({scalar})({args[0]}))'
+        return f'((float)({value}))' if dtype.kind == 'f' else value
     if node.operation == 'literal':
         if isinstance(node.value, bool):
             return '1' if node.value else '0'
@@ -569,7 +584,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
     def value_dependencies(node):
         if node.operation == 'input':
             value_inputs.add(node.value)
-        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh'):
+        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast'):
             raise ValueError('Indexed update values require pointwise expressions; reduce or index their producer explicitly')
         for child in node.operands:
             value_dependencies(child)
@@ -783,7 +798,7 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'sum') or any(_requires_regions(child) for child in node.operands)
+    return node.operation in ('dot', 'sum', 'cast') or any(_requires_regions(child) for child in node.operands)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -813,6 +828,8 @@ class _ExpressionRegions:
             result = shape, (self.whole[node.value],) * 2, source.block_shape if self.whole[node.value] else shape
         elif node.operation in ('literal', 'program_id', 'row', 'column'):
             result = (1, 1), (False, False), (1, 1)
+        elif node.operation == 'cast':
+            result = self.layout(node.operands[0])
         elif node.operation == 'dot':
             left, right = map(self.layout, node.operands)
             if left[0][1] != right[0][0]:
@@ -840,6 +857,33 @@ class _ExpressionRegions:
             raise ValueError('Computed contraction operands require pointwise expressions or contractions')
         self.layouts[node] = result
         return result
+
+    # design/algorithm-sources.md#shared-contraction-lowering
+    def dtype(self, node):
+        if node.operation == 'input':
+            return self.sources[node.value].dtype
+        if node.operation == 'cast':
+            return np.dtype(node.value)
+        if node.operation in ('dot', 'exp', 'rsqrt', 'tanh'):
+            return np.dtype('float32')
+        if node.operation in ('<', '<=', '>', '>=', '=='):
+            return np.dtype('bool')
+        if node.operation in ('row', 'column', 'program_id'):
+            return np.dtype('int64')
+        if node.operation == 'literal':
+            return np.dtype('float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
+        if node.operation == 'sum':
+            child = self.dtype(node.operands[0])
+            return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
+        if node.operation == 'load':
+            types = (self.sources[node.value].dtype, self.dtype(node.operands[3]))
+        else:
+            types = tuple(self.dtype(child) for child in (node.operands[1:] if node.operation == 'select' else node.operands))
+        if any(dtype.kind == 'f' for dtype in types):
+            return np.dtype('float32')
+        bits = max(max(32, dtype.itemsize*8) for dtype in types)
+        unsigned = any(dtype.kind == 'u' and dtype.itemsize*8 == bits for dtype in types)
+        return np.dtype(('uint' if unsigned else 'int') + str(bits))
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def key(self, node, origin, shape):
@@ -874,9 +918,12 @@ class _ExpressionRegions:
             return source.region(*origin, *shape) if self.whole[node.value] else source.slice(*origin, *shape)
         if node.operation == 'sum':
             return self.reduction(node, origin[0], shape[0], np.dtype('float32'))
+        dtype = np.dtype(node.value) if node.operation == 'cast' else np.dtype('float32')
+        if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
+            return self.panel(node.operands[0], origin, shape)
         key = ('panel', self.key(node, origin, shape))
         if key not in self.cache:
-            target = self.temporary(shape)
+            target = self.temporary(shape, dtype)
             if node.operation == 'dot':
                 self.publish(self.parts(node, origin, shape, target), target)
             else:
@@ -974,13 +1021,16 @@ class _ExpressionRegions:
             return replacements[key]
 
         # design/algorithm-sources.md#shared-contraction-lowering
-        def lower(node):
+        def lower(node, accumulation=target.dtype):
+            if node.operation == 'cast':
+                child = node.operands[0]
+                return _Expression('cast', (lower(child, self.dtype(child)),), node.value)
             if node.operation == 'sum':
                 layout = self.layout(node)
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
                 rows = 1 if layout[0][0] == 1 else shape[0]
-                dtype = np.int64 if target.dtype.kind in 'ib' else np.uint64 if target.dtype.kind == 'u' else np.float32
-                return reference(('sum', node, row, rows), (self.reduction(node, row, rows, np.dtype(dtype)),))
+                dtype = np.dtype(np.int64 if accumulation.kind in 'ib' else np.uint64 if accumulation.kind == 'u' else np.float32)
+                return reference(('sum', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
             if node.operation == 'dot':
                 layout = self.layout(node)
                 where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
@@ -997,13 +1047,13 @@ class _ExpressionRegions:
                 return reference(('input', node.value), (ref,))
             if node.operation == 'load':
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
-                return _Expression('load', tuple(lower(child) for child in node.operands), symbol.value)
+                return _Expression('load', tuple(lower(child, accumulation) for child in node.operands), symbol.value)
             if node.operation in ('row', 'column') and not external:
                 axis = 0 if node.operation == 'row' else 1
                 return node + origin[axis]
             if node.operation == 'indexed_add':
                 raise ValueError('Indexed addition requires an output root')
-            return _Expression(node.operation, tuple(lower(child) for child in node.operands), node.value)
+            return _Expression(node.operation, tuple(lower(child, accumulation) for child in node.operands), node.value)
 
         lowered = lower(value)
         if reduce:

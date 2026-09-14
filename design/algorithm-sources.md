@@ -1512,6 +1512,43 @@ reconstruction. The shared scalar emitter generates these operations for integer
 reductions; CPU UInt64 accumulation and the canonical partial tree retain their
 existing modular semantics.
 
+
+### Explicit scalar conversion boundaries
+
+`_Expression.astype(dtype)` adds an explicit typed conversion to the existing
+expression representation. It accepts float16, float32, int32, uint32, int64,
+uint64, uint8 and bool. The Pallas numerical-expression separation cited above
+and Apple's Metal scalar conversion rules apply; this is an ordinary numerical
+operation, not a backend or scheduling choice.
+
+The scalar emitter keeps the conversion at its declared position. A real cast
+rounds to the requested type and then promotes back to FP32 for surrounding
+pointwise arithmetic: half conversion emits `float(half(value))` on Metal and
+its `_Float16` equivalent on CPU. Consequently a half boundary cannot disappear
+because a later output is FP32, and subsequent arithmetic does not accidentally
+execute in half precision. Integer casts retain their numerical scalar type;
+finite float-to-integer values must be representable in the target type. No
+universal NumPy equivalence is claimed for NaNs, out-of-range floating conversions
+or implementation-specific signed narrowing.
+
+The region layout inherits the child's shape, domains and backing cuts. A cast
+used as a contraction operand allocates only the demanded canonical panel in the
+cast dtype. Thus `dot(h.astype(np.float16), w)` supplies actual rounded half
+storage to the existing native matmul while retaining FP32 contraction partials.
+An enclosing pointwise expression still uses its ordinary FP32 computed panel.
+A same-type cast of a direct input reuses its actual requested Ref without a copy.
+The normalized cast dtype is part of expression identity and therefore of the
+shared region cache key.
+
+`_ExpressionRegions.dtype` infers value types at conversion boundaries. It keeps
+a nested reduction's pre-cast accumulator type rather than propagating the final
+output dtype backward through the conversion. `x.sum().astype(np.int64)` for
+floating `x=[0.75,0.75]` therefore produces 1, while
+`x.astype(np.int64).sum()` produces 0. The existing no-cast output-directed
+accumulator convention remains unchanged. Integer classification for modular
+summation uses the cast target type, and cached reduction substitutions retain
+the accumulator dtype so differently typed statistics cannot alias.
+
 ## Canonical reader groups
 
 Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
