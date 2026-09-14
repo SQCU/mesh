@@ -1719,3 +1719,38 @@ input dtype, preserving the final FP16 cast when applicable. `_row_reduce` still
 serves Xonotic reduction callers and is not deleted until those callers migrate
 to the same shared reduction lowering. Numerical validation remains the existing
 streaming-algebra gold and its delayed-feature observations.
+
+## Typed FFN expression composition
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+and [pipelining and accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation)
+separate the composed tensor formula from the implementation of partial-result
+dataflow. `nn.ffn` now supplies the same hidden expression and down-projection
+expression for both local execution and explicit hidden exchange. Its
+`_expression_sum` constructs the existing balanced partition association without
+allocating partial tensors or scheduling launches.
+
+Every hidden section is the input-partition dot sum followed by swish and an
+explicit `astype(input_dtype)`. Without an exchange callback, that expression is
+the down dot's operand. Shared lowering produces demanded typed canonical hidden
+panels and their FP32 contraction partials. The final balanced down-projection
+sum casts to the input dtype. Intentional FP16 hidden rounding therefore survives
+removal of the public intermediate tensor. The existing native contraction owner
+still selects its configured accelerated backend; the DNN library introduces no
+matmul implementation, dense conversion buffer, or runtime scheduler.
+
+An exchange callback is a setup decision about publication. It submits each
+already-built hidden expression with its former public shape, dtype and block
+cuts, calls the exchange, then substitutes symbols for the returned tensors in
+the same down-projection formula. The returned tensors' actual block layouts
+determine consumer cuts. Without exchange, the down K tile also respects the
+former hidden feature cuts, so removing a public intermediate does not coarsen
+producer requests. Both layouts preserve final output row/column cuts and
+balanced partition reductions. Unused operands in a hidden submission do not
+create readers: shared expression lowering binds only referenced inputs.
+
+Xonotic's existing cast node likewise supplies explicit `astype(value.dtype)`
+in its expression; assignment remains identity. No separate cast emitter is
+introduced. The unused `nn._cast` launch helper is removed. Source compilation
+passed; existing local/paired gold and the typed nested-expression case supply
+the operational numerical evidence.

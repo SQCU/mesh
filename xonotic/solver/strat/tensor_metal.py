@@ -608,7 +608,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 result = {'add': lambda: left + right, 'subtract': lambda: left - right,
                           'multiply': lambda: left * right, 'divide': lambda: left / right}[operation]()
             elif operation in ('cast', 'assign'):
-                result = args[0]
+                result = args[0].astype(value.dtype) if operation == 'cast' else args[0]
             elif operation in ('maximum', 'minimum'):
                 left, right = args
                 result = kernels.select(left > right if operation == 'maximum' else left < right, left, right)

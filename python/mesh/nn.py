@@ -1,7 +1,5 @@
 from math import gcd
 
-import numpy as np
-
 from . import BlockSpec, ShapeDtypeStruct
 from . import kernels
 
@@ -46,12 +44,6 @@ def _sum(program, values, tile_rows, *, peer=None):
     return values[0]
 
 
-# design/algorithm-sources.md#contraction-accumulation
-def _cast(program, x, dtype, tile_rows, *, peer=None):
-    return x if x.dtype == np.dtype(dtype) else _pointwise(
-        program, kernels.affine(), (x,), tile_rows, peer=peer, output_dtype=dtype)
-
-
 # design/algorithm-sources.md#pallas-panel-composition
 def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None, output_dtype=None):
     rows, inner = x.shape
@@ -69,39 +61,62 @@ def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None,
 
 
 
-# design/algorithm-sources.md#ffn-shared-expression-composition
+# design/algorithm-sources.md#typed-ffn-expression-composition
+def _expression_sum(terms):
+    terms = tuple(terms)
+    while len(terms) > 1:
+        terms = tuple(terms[i] + terms[i + 1] if i + 1 < len(terms) else terms[i]
+                      for i in range(0, len(terms), 2))
+    return terms[0]
+
+
+# design/algorithm-sources.md#typed-ffn-expression-composition
 def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         tile_columns=128, exchange=None, peer=None):
-    inputs, up_weights, down_weights = tuple(inputs), tuple(up_weights), tuple(down_weights)
+    inputs, up_weights, down_weights = tuple(inputs), tuple(map(tuple, up_weights)), tuple(down_weights)
     if not inputs or not up_weights or len(up_weights) != len(down_weights) or any(len(group) != len(inputs) for group in up_weights):
         raise ValueError('Weights must cover every input partition and hidden section')
-    outputs = []
-    for up, down in zip(up_weights, down_weights):
-        rows, columns = inputs[0].shape[0], up[0].shape[1]
-        if any(x.shape[0] != rows or w.shape[1] != columns or x.shape[1] != w.shape[0]
-               for x, w in zip(inputs, up)):
-            raise ValueError('Hidden contractions must share their output domain')
-        row_tiles = tuple(_tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0) for x in inputs)
-        column_tiles = tuple(_tile(min(tile_columns, columns), w.block_shape[1] if w.grid[1] > 1 else 0) for w in up)
-        block = (_tile(min(tile_rows, rows), *(tile if tile < rows else 0 for tile in row_tiles)),
-                 _tile(min(column_tiles), *(tile if tile < columns else 0 for tile in column_tiles)))
-        operands = tuple(value for pair in zip(inputs, up) for value in pair)
-        arguments = kernels.arguments(len(operands))
-        terms = tuple(kernels.dot(arguments[i], arguments[i + 1], tile_k=tile_k)
-                      for i in range(0, len(arguments), 2))
-        while len(terms) > 1:
-            terms = tuple(terms[i] + terms[i + 1] if i + 1 < len(terms) else terms[i]
-                          for i in range(0, len(terms), 2))
-        hidden = terms[0]
-        activated = program.kernel_call(kernels.expression(hidden / (1 + (0 - hidden).exp())),
-            grid=((rows + block[0] - 1) // block[0], (columns + block[1] - 1) // block[1]),
+    rows, columns = inputs[0].shape[0], down_weights[0].shape[1]
+    operands = (*inputs, *(w for group in up_weights for w in group), *down_weights)
+    arguments = kernels.arguments(len(operands))
+    row_tiles = tuple(_tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0) for x in inputs)
+    hidden_rows = _tile(min(tile_rows, rows), *(tile if tile < rows else 0 for tile in row_tiles))
+    hidden, layouts = [], []
+    for index, (up, down) in enumerate(zip(up_weights, down_weights)):
+        width = up[0].shape[1]
+        if any(x.shape[0] != rows or w.shape[1] != width or x.shape[1] != w.shape[0]
+               for x, w in zip(inputs, up)) or down.shape != (width, columns):
+            raise ValueError('FFN contractions must share their output domains')
+        column_tiles = tuple(_tile(min(tile_columns, width), w.block_shape[1] if w.grid[1] > 1 else 0) for w in up)
+        block = (hidden_rows, _tile(min(column_tiles), *(tile if tile < width else 0 for tile in column_tiles)))
+        weights = arguments[len(inputs) * (index + 1):len(inputs) * (index + 2)]
+        projected = _expression_sum(kernels.dot(x, w, tile_k=tile_k) for x, w in zip(arguments, weights))
+        hidden.append((projected / (1 + (0 - projected).exp())).astype(inputs[0].dtype))
+        layouts.append(((rows, width), block))
+    if exchange is not None:
+        received = tuple(exchange(program.kernel_call(kernels.expression(value),
+            grid=tuple((size + tile - 1) // tile for size, tile in zip(shape, block)),
             in_specs=(BlockSpec(None),) * len(operands),
             out_specs=BlockSpec(block, _block),
-            out_shape=ShapeDtypeStruct((rows, columns), inputs[0].dtype), peer=peer)(*operands)
-        operand = exchange(activated) if exchange is not None else activated
-        outputs.append(linear(program, operand, down, tile_rows=tile_rows, tile_k=tile_k,
-                              tile_columns=tile_columns, peer=peer, output_dtype="float32"))
-    return _cast(program, _sum(program, outputs, tile_rows, peer=peer), inputs[0].dtype, tile_rows, peer=peer)
+            out_shape=ShapeDtypeStruct(shape, inputs[0].dtype), peer=peer)(*operands))
+            for value, (shape, block) in zip(hidden, layouts))
+        operands = (*received, *down_weights)
+        arguments = kernels.arguments(len(operands))
+        hidden = arguments[:len(received)]
+        layouts = tuple((value.shape, value.block_shape) for value in received)
+    projections, output_tiles = [], []
+    for value, (shape, block), weight, down in zip(hidden, layouts, arguments[-len(down_weights):], down_weights):
+        projections.append(kernels.dot(value, weight,
+            tile_k=_tile(min(tile_k, shape[1]), block[1] if block[1] < shape[1] else 0)))
+        output_tiles.append((_tile(min(tile_rows, rows), block[0] if block[0] < rows else 0),
+                             _tile(min(tile_columns, columns), down.block_shape[1] if down.grid[1] > 1 else 0)))
+    block = (_tile(min(tile_rows, rows), *(tile[0] if tile[0] < rows else 0 for tile in output_tiles)),
+             _tile(min(tile[1] for tile in output_tiles), *(tile[1] if tile[1] < columns else 0 for tile in output_tiles)))
+    return program.kernel_call(kernels.expression(_expression_sum(projections).astype(inputs[0].dtype)),
+        grid=tuple((size + tile - 1) // tile for size, tile in zip((rows, columns), block)),
+        in_specs=(BlockSpec(None),) * len(operands),
+        out_specs=BlockSpec(block, _block),
+        out_shape=ShapeDtypeStruct((rows, columns), inputs[0].dtype), peer=peer)(*operands)
 
 
 # design/algorithm-sources.md#rmsnorm-shared-expression-composition
