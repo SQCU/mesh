@@ -3153,3 +3153,13 @@ ragged panels, independently withheld epilogues, output rows and repeated reuse.
 Matched source revisions and measurements distinguish removed duplicate work
 from timing uncertainty. Extending recognition is not by itself proof of the
 fastest backend for every shape or completion of the full performance plan.
+
+For newly recognized static contractions, setup compares the retained native
+plan's launch count (partials, merges, assembly and final publication) with the
+existing compiled reduction's retained region plan. Until measured shape profiles
+exist, a native plan that adds launches retains compiled reduction lowering.
+This is a conservative default, not a latency model: equal or fewer launches do
+not establish that a backend is fastest. Previously validated selected plans
+retain their existing binding. The compiled fallback reuses the same region plan
+and publishes directly into the requested output or returns its cached Ref;
+it does not append an identity copy to an already materialized reduction.
