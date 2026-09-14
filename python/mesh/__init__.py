@@ -279,19 +279,6 @@ class Program:
         shape = tuple(shape)
         return Tensor(self, shape, tuple(max(1, size) for size in shape) if block_shape is None else block_shape, dtype, transferable, contiguous)
 
-    # design/algorithm-sources.md#literal-contiguous-materialization
-    def contiguous(self, source, *, transferable=True):
-        if source.program is not self:
-            raise ValueError('Source belongs to another program')
-        result = self.tensor(source.shape, dtype=source.dtype, transferable=transferable, contiguous=True)
-        if not result.blocks:
-            return result
-        regions = [CopyRegion(ref.view, i*source.block_shape[0], j*source.block_shape[1])
-                   for (i, j), ref in source.blocks.items()] if isinstance(source, Tensor) else [CopyRegion(source.view, 0, 0)]
-        check(self.native.algebra_materialize(self.handle, (CopyRegion * len(regions))(*regions),
-                                             len(regions), result[0, 0].view))
-        return result
-
     # design/algorithm-sources.md#pallas-call-ergonomics
     def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs, peer=None):
         single = isinstance(out_shape, ShapeDtypeStruct)
