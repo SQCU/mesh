@@ -86,6 +86,21 @@ Gregory Papadopoulos and David Culler, *Monsoon: an Explicit Token-Store Archite
 
 Jack Dongarra, Jeremy Du Croz, Sven Hammarling and Iain Duff, *A Set of Level 3 Basic Linear Algebra Subprograms*, ACM TOMS 1990.
 
+## CPU library contraction
+
+Apple/MLX authors, [CPU BNNS GEMM implementation](https://github.com/ml-explore/mlx/blob/main/mlx/backend/cpu/gemms/bnns.cpp),
+and Apple, [BNNSMatMul](https://developer.apple.com/documentation/accelerate/bnnsmatmul(_:_:_:_:_:_:_:_:)).
+Mesh replaces its handwritten NEON half/mixed-precision contraction with the
+same Accelerate BNNS numerical implementation used by MLX for half precision.
+`bnns_operand` translates an existing registered view to BNNS dimensions,
+strides, type and data pointer. Setup queries and allocates workspace once for
+the configured calls. Invocation passes that workspace explicitly, avoiding
+BNNS's optional internal workspace allocation. FP32 contractions retain BLAS.
+No operand is copied into a second tensor store. MLX uses the filter interface;
+mesh uses the direct workspace-taking API to realize storage before invocation.
+These Accelerate APIs are deprecated in favor of BNNSGraph, but remain provided
+by the SDK and used by upstream; this change does not introduce a graph compiler.
+
 ## Indexed library functions
 
 The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html) and [software pipelining](https://docs.jax.dev/en/latest/pallas/pipelining.html).

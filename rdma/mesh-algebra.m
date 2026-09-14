@@ -13,7 +13,6 @@
 #include <math.h>
 #include <dlfcn.h>
 #include <time.h>
-#include <arm_neon.h>
 
 /* design/algorithm-sources.md#streaming-algebra */
 static NSString *const source = @
@@ -847,58 +846,18 @@ static struct cpu_operand cpu_operand(struct mesh_view v) {
 }
 /* design/algorithm-sources.md#cpu-indexed-execution */
 static float cpu_get(struct cpu_operand p,size_t r,size_t c) {return p.load(p.address,p.view.offset+r*p.view.row_stride+c*p.view.column_stride);}
-/* design/algorithm-sources.md#cpu-register-contraction */
-static float32x4_t cpu_f16x4(const void *p,size_t i,size_t stride) {
-  (void)stride;return vcvt_f32_f16(vld1_f16((const float16_t *)p+i));
-}
-/* design/algorithm-sources.md#cpu-register-contraction */
-static float32x4_t cpu_f32x4(const void *p,size_t i,size_t stride) {
-  (void)stride;return vld1q_f32((const float *)p+i);
-}
-/* design/algorithm-sources.md#cpu-register-contraction */
-static float32x4_t cpu_f16x4_strided(const void *p,size_t i,size_t stride) {
-  const _Float16 *v=(const _Float16 *)p+i;
-  return (float32x4_t){v[0],v[stride],v[2*stride],v[3*stride]};
-}
-/* design/algorithm-sources.md#cpu-register-contraction */
-static float32x4_t cpu_f32x4_strided(const void *p,size_t i,size_t stride) {
-  const float *v=(const float *)p+i;
-  return (float32x4_t){v[0],v[stride],v[2*stride],v[3*stride]};
-}
-struct cpu_contract {
-  struct cpu_operand a,b;
-  void *output;
-  struct geometry_view z;
-  float32x4_t (*left)(const void *,size_t,size_t),(*right)(const void *,size_t,size_t);
-  void (*write)(void *,size_t,float);
-  size_t row,column,rows,columns;
-  float alpha;
-};
-/* design/algorithm-sources.md#cpu-register-contraction */
-static void cpu_contract_tile(const struct cpu_contract *g) {
-  for(size_t r=g->row;r<g->row+g->rows;r+=4)for(size_t c=g->column;c<g->column+g->columns;c+=4){
-    size_t nr=MIN(4,g->row+g->rows-r),nc=MIN(4,g->column+g->columns-c);
-    float32x4_t s0=vdupq_n_f32(0),s1=s0,s2=s0,s3=s0;
-    for(size_t k=0;k<g->a.view.columns;k++){
-      size_t ai=g->a.view.offset+r*g->a.view.row_stride+k*g->a.view.column_stride;
-      size_t bi=g->b.view.offset+k*g->b.view.row_stride+c*g->b.view.column_stride;
-      float32x4_t av,bv;
-      if(nr==4)av=g->left(g->a.address,ai,g->a.view.row_stride);
-      else {float v[4]={0};for(size_t j=0;j<nr;j++)v[j]=g->a.load(g->a.address,ai+j*g->a.view.row_stride);av=vld1q_f32(v);}
-      if(nc==4)bv=g->right(g->b.address,bi,g->b.view.column_stride);
-      else {float v[4]={0};for(size_t j=0;j<nc;j++)v[j]=g->b.load(g->b.address,bi+j*g->b.view.column_stride);bv=vld1q_f32(v);}
-      s0=vfmaq_laneq_f32(s0,bv,av,0);s1=vfmaq_laneq_f32(s1,bv,av,1);
-      s2=vfmaq_laneq_f32(s2,bv,av,2);s3=vfmaq_laneq_f32(s3,bv,av,3);
-    }
-    float32x4_t sums[4]={s0,s1,s2,s3};
-    for(size_t i=0;i<nr;i++){
-      float values[4];vst1q_f32(values,vmulq_n_f32(sums[i],g->alpha));
-      for(size_t j=0;j<nc;j++)g->write(g->output,g->z.offset+(r+i)*g->z.row_stride+(c+j)*g->z.column_stride,values[j]);
-    }
-  }
+/* design/algorithm-sources.md#cpu-library-contraction */
+static BNNSNDArrayDescriptor bnns_operand(struct mesh_view v) {
+  struct mesh_extent *e=&v.tensor->extents[v.extent];
+  BOOL transpose=v.column_stride!=1;
+  return (BNNSNDArrayDescriptor){.layout=BNNSDataLayoutRowMajorMatrix,
+    .size={transpose?v.rows:v.columns,transpose?v.columns:v.rows},
+    .stride={1,transpose?v.column_stride:v.row_stride},
+    .data=(char *)e->address+v.offset*scalar_bytes(e->shape.scalar),
+    .data_type=e->shape.scalar==MESH_F16?BNNSDataTypeFloat16:BNNSDataTypeFloat32};
 }
 /* design/algorithm-sources.md#cpu-indexed-execution */
-static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
+static int cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
 
   if(op==MESH_CONTRACT && x.tensor->extents[x.extent].shape.scalar==MESH_F32 && y.tensor->extents[y.extent].shape.scalar==MESH_F32 && z.tensor->extents[z.extent].shape.scalar==MESH_F32){
 
@@ -920,32 +879,37 @@ static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,
       for(size_t i=0;i<calls.length/sizeof *g;i++)cblas_sgemm(CblasRowMajor,g[i].tx,g[i].ty,g[i].m,g[i].n,g[i].k,alpha,g[i].a,g[i].lda,g[i].b,g[i].ldb,0,g[i].c,g[i].ldc);
       complete_part(function,0,0);
     };
-    return;
+    return 0;
   }
 
-  struct cpu_operand a=cpu_operand(x),b=cpu_operand(y);
   if(op==MESH_CONTRACT){
-
-    struct mesh_extent *out=&z.tensor->extents[z.extent];
-    struct cpu_contract g={.a=a,.b=b,.output=out->address,.z=geometry(z),.alpha=alpha,
-      .left=a.load==cpu_f16?(x.row_stride==1?cpu_f16x4:cpu_f16x4_strided):(x.row_stride==1?cpu_f32x4:cpu_f32x4_strided),
-      .right=b.load==cpu_f16?(y.column_stride==1?cpu_f16x4:cpu_f16x4_strided):(y.column_stride==1?cpu_f32x4:cpu_f32x4_strided),
-      .write=out->shape.scalar==MESH_F16?cpu_store_f16:cpu_store_f32};
-    NSMutableData *calls=[NSMutableData new];BOOL dense=z.column_stride==1;
-    size_t columns=dense?z.columns:z.rows;
+    struct gemm {BNNSNDArrayDescriptor a,b,c;};
+    NSMutableData *calls=[NSMutableData new];size_t workspaceSize=1;
+    BOOL tx=x.column_stride!=1,ty=y.column_stride!=1;
     for(size_t at=first,left=count;left;){
-      size_t row=at/columns,column=at%columns,nr=1,nc=MIN(left,columns-column);
-      if(!column && left>=columns){nr=left/columns;nc=columns;}
-      g.row=dense?row:column;g.column=dense?column:row;g.rows=dense?nr:nc;g.columns=dense?nc:nr;
+      size_t row=at/z.columns,column=at%z.columns,nr=1,nc=MIN(left,z.columns-column);
+      if(!column && left>=z.columns){nr=left/z.columns;nc=z.columns;}
+      struct gemm g={bnns_operand(mesh_view_slice(x,row,0,nr,x.columns)),
+        bnns_operand(mesh_view_slice(y,0,column,y.rows,nc)),
+        bnns_operand(mesh_view_slice(z,row,column,nr,nc))};
+      ssize_t bytes=BNNSMatMulWorkspaceSize(tx,ty,alpha,&g.a,&g.b,&g.c,NULL);
+      if(bytes<0)return EINVAL;
+      workspaceSize=MAX(workspaceSize,(size_t)bytes);
       [calls appendBytes:&g length:sizeof g];at+=nr*nc;left-=nr*nc;
     }
+    NSMutableData *workspace=[NSMutableData dataWithLength:workspaceSize];
+    if(!workspace)return ENOMEM;
+    f.cpuArguments=workspace;
+    void *scratch=workspace.mutableBytes;
     f.execute=^(MeshFunction *function){
-      const struct cpu_contract *g=calls.bytes;
-      for(size_t i=0;i<calls.length/sizeof *g;i++)cpu_contract_tile(&g[i]);
-      complete_part(function,0,0);
+      const struct gemm *g=calls.bytes;int error=0;
+      for(size_t i=0;i<calls.length/sizeof *g && !error;i++)
+        error=BNNSMatMul(tx,ty,alpha,&g[i].a,&g[i].b,&g[i].c,scratch,NULL);
+      complete_part(function,error,0);
     };
-    return;
+    return 0;
   }
+  struct cpu_operand a=cpu_operand(x),b=cpu_operand(y);
   float (^value)(size_t,size_t)=nil;
   switch(op) {
     case MESH_AFFINE:value=^float(size_t r,size_t c){return alpha*cpu_get(a,r,c)+beta;};break;
@@ -965,6 +929,7 @@ static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,
     for(size_t i=first;i<first+count;i++)write(address,offset+i,value((i/rd)%rows,(i/cd)%columns));
     complete_part(function,0,0);
   };
+  return 0;
 }
 /* design/algorithm-sources.md#coreml-partial-execution */
 static MLMultiArray *native_array(struct mesh_view v,NSError **error) {
@@ -1057,7 +1022,7 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,s
   bind_dependencies(f);
   if(a.cpu) {
     f->executionKind=MESH_EXECUTION_CPU;
-    cpu_part(f,op,x,y,z,alpha,beta,first,count);
+    int error=cpu_part(f,op,x,y,z,alpha,beta,first,count);if(error)return error;
   } else if(op==MESH_CONTRACT && a.coremlPython) {
     f->executionKind=MESH_EXECUTION_COREML;
     int error=native_part(a,f,rectangles,features,z,first,count,alpha);if(error)return error;
