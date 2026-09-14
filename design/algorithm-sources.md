@@ -1667,7 +1667,9 @@ ordinary coordinate selection, retaining the original load mask. Each exact stat
 Ref gets an explicit appended input position. Original whole-table positions
 remain available for dynamic loads of the same table; unused positions disappear
 in the existing remap pass. Native indexed attachment consequently cannot remove
-a static ordinary dependency that aliases one of its dynamic candidates.
+a static ordinary dependency that aliases one of its dynamic candidates. Access
+masks retain source traversal order when redundant predicate sets are removed;
+their emitted expression order must not depend on Python hash randomization.
 
 Purely static indexed accesses bind ordinary Ref inputs through `algebra_source`,
 with no selector numerical function or dynamic reader descriptor. Mixed and dynamic

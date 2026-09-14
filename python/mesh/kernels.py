@@ -478,10 +478,10 @@ class _ExpressionKernel:
                     accesses_for(column, selected_path)
                     accesses_for(other, path + ((mask, False),))
                     if node.value in dynamic_inputs:
-                        paths = accesses.setdefault(node, set())
+                        paths = accesses.setdefault(node, [])
                         if not any(set(previous) <= set(selected_path) for previous in paths):
-                            paths.difference_update(previous for previous in tuple(paths) if set(selected_path) <= set(previous))
-                            paths.add(selected_path)
+                            paths[:] = [previous for previous in paths if not set(selected_path) <= set(previous)]
+                            paths.append(selected_path)
                 else:
                     for child in node.operands:
                         accesses_for(child, () if node.operation == 'sum' else path)
